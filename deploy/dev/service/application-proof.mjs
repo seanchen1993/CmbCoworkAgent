@@ -1,6 +1,12 @@
 import { operationDefinitions, dereference, validateRef } from "../../../tests/bot/schema-support.mjs"
 
 const six = ["createBot", "getBot", "createBotVersion", "createGroup", "getGroup", "updateGroupMembers"]
+export function stableMounts(mounts) {
+  if (!Array.isArray(mounts) || mounts.some(x => !x || typeof x.Destination !== "string") || new Set(mounts.map(x => x.Destination)).size !== mounts.length) throw Error("C1_RESOURCE_PROOF")
+  // Docker inspect returns this set in varying order. Retain every field;
+  // only its order is non-semantic. Never project away security/source values.
+  return [...mounts].sort((a, b) => a.Destination < b.Destination ? -1 : a.Destination > b.Destination ? 1 : 0)
+}
 export function applicationResponses(proof) {
   if (proof.status !== "verified" || !Array.isArray(proof.responses) || proof.responses.length !== six.length) throw Error("C1_SCHEMA_PROOF")
   const seen = new Set()

@@ -1,7 +1,7 @@
 import { test } from "node:test"
 import assert from "node:assert/strict"
 import { applicationMode, startApplicationJava, applicationChildFacts, parseApplicationProof } from "../../../deploy/dev/service/application-java.mjs"
-import { applicationResponses } from "../../../deploy/dev/service/application-proof.mjs"
+import { applicationResponses, stableMounts } from "../../../deploy/dev/service/application-proof.mjs"
 import { operations } from "../../../contracts/bot/v1/fixtures/positive.mjs"
 import { validator } from "../schema-support.mjs"
 
@@ -36,4 +36,12 @@ test("response audit refuses duplicate selector, undeclared status, invalid body
 test("actual frozen Text accepts 16384 Unicode codepoints, NUL and escaped isolated surrogate", () => {
   for (const value of ["🚀".repeat(16384), "x\u0000y", JSON.parse('"\\ud800"'), JSON.parse('"\\udc00"')]) assert.equal(validator("Text")(value), true)
   assert.equal(validator("Text")("🚀".repeat(16385)), false)
+})
+test("dev mount snapshot normalizes inspect set order without hiding changed fields or duplicates", () => {
+  const values = [{ Destination: "/data", Source: "fixed", RW: true }, { Destination: "/secret", Source: "fixed-secret", RW: false }]
+  assert.deepEqual(stableMounts(values), stableMounts([...values].reverse()))
+  assert.notDeepEqual(stableMounts(values), stableMounts([{ ...values[0], RW: false }, values[1]]))
+  assert.notDeepEqual(stableMounts(values), stableMounts([{ ...values[0], Source: "other" }, values[1]]))
+  assert.throws(() => stableMounts([values[0], values[0]]), /C1_RESOURCE_PROOF/)
+  assert.throws(() => stableMounts([{ Source: "unknown" }]), /C1_RESOURCE_PROOF/)
 })

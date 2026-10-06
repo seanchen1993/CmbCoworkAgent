@@ -4,7 +4,7 @@ import { lstat, readFile } from "node:fs/promises"
 import { createTestDatabase, startTestDatabase, cleanupTestDatabase, active } from "./test-database.mjs"
 import { packagedDatabaseRuntime, closeDatabaseRuntime, javaDatabase } from "./database-java.mjs"
 import { applicationJava, startApplicationJava, stopApplicationChildren, applicationChildFacts } from "./application-java.mjs"
-import { applicationResponses } from "./application-proof.mjs"
+import { applicationResponses, stableMounts } from "./application-proof.mjs"
 import { ownedProcess, isolatedEnv } from "../process.mjs"
 import { hostState, daemon, docker, RUNTIME, privateDirectory, privateFile } from "../docker/host.mjs"
 import { composeSpec, INIT_SQL } from "../docker/compose.mjs"
@@ -28,7 +28,7 @@ async function devProof() {
     const service = c.Config.Labels["com.docker.compose.service"], port = validateContainer(c, entry, service)
     check(!services[service] && c.State.Running && c.State.Health?.Status === "healthy"); await verifyListeners(port)
     if (service === "mysql") check(c.Id === "693a1c3fd9c1aefc968a850f6187724b3b89864283a78cf9c44c52a015eeba3c")
-    services[service] = { id: c.Id, port, image: c.Image, mounts: c.Mounts }
+    services[service] = { id: c.Id, port, image: c.Image, mounts: stableMounts(c.Mounts) }
   }
   check(Object.keys(services).sort().join() === "es,mysql,s3")
   const network = JSON.parse(await docker(state, ["network", "inspect", "devclaw-bot-dev-private"], { stdoutOnly: true }))[0]; validateNetwork(network, entry, containers)
