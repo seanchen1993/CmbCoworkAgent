@@ -73,3 +73,27 @@ worker报告第三完整build26599/cd896a74 exit0，真实3main/3test源码Java8
 仅接受A2b离线输入/输出边界和可精确表示数据值的Schema语义parity。四raw数学非整数Java严格拒绝，而原JS Number舍入实际true，分层测试/文档明确；不是任意rawJSON字节Node/Java完全等价。整体六业务接口、数据库迁移/HTTP/权限/事务仍未实现，B1draft未派。定时续跑保持PAUSED。
 
 16:01UTC集成完成a4987bc93e62cc44726d20b7a8bb483063aacb7a；除delivery coordination外与冻结report0c5b8cc3实际diffexit0。主代理集成准确同build命令6982 **exit0**（chunkbf0686）：真实Corretto8重新javac3主源码/3测试源码，15JUnit/0fail/error/skip；1107同runIdf4e3eaa8-5a70-43fa-b7e3-7302dc2b8869/326valid781invalid/0mismatch，public4/6/42/10、29class52/35libs、原三source exactbytes与manifest、fatjarprobe通过。新jarSHAeb9d909c7223879fcc350a6e6101b480e7b3ba2851d28e3a42b0e7c4b93d44c4，tree不变；无主代理构建句柄。A2b accepted/merged，B1ready但未正式派；六API仍非已完成。
+
+## B1实施起点与数据顺序要求（2026-10-05 16:09 UTC，未验收）
+
+同high/B01-A02从实际5ddaaa59 clean正式followup，精确task/路径/范围/真实两空库验收已下发，未新增写者。主代理只读B00原owner/compose/resources/container/privateFile/probe接口与原Schema，尚未独立连接DB或接受任何B1代码。主代理readonlye0924a原dev三服务同ID/回环端口healthy，无resource变更。
+
+源实际chunk30592f Id max128，pattern `^[A-Za-z0-9][A-Za-z0-9._:-]*$`；Bot/Group关系都是有序数组，config/原回执JSON完整Unicode须保留。已发worker明确按source Id、关系ordinal/集合唯一、SQL锁排序和展示顺序分开、重开后稳定顺序的B1不变量；同步任务单，不扩到业务片。Schema合法性与space/FK/语义去重不可互相替代。当前主代理无builder/DB副作用，B1未通过，定时PAUSED。
+
+16:13UTC worker发现原B00 validateProject读取root，主代理实际读453c15/8e0b42证实resources/compose/prepare/cleanup间接调用；不以旧B00权限扩大本片DB账号。批准newdeploy/dev/service test-onlymetadata adapter，只管理新建内存注册test项目、复用原owner/daemon/container/network/loopback/固定compose/digest，newrootbootstrap生成写入但不读取已有root、不拿root连SQL，app-only stdin。metadata-before-read/清理精确注册+标签+inode/实际SIGTERM与未知owner拒绝，完整task已同步。workerreadonly16502报告VM4094447616B、3服务约109.9/448/907.7MiB，顺序加一个mysql768MiB无需停dev；仅worker只读报告，不主代理DB通过或资源mutation。主代理无新builder/DB调用，等待实现与真实FK权限证据。
+
+16:14UTC主代理原Ajv实跑chunk2bb7c9 exit0：ShortText/Text对合法JSON escape的孤立高/低surrogate与嵌入NUL均true。已发worker并补任务单，要求name/config/receipt实际JDBC完整往返；若直接utf8mb4编码不支持，内部JSON转义保存，不改冻结源或默默替换/截断。当前只源验证，不冒称数据库已发生替换。
+
+B1-R1早期code草稿chunk23f8b4只读发现：testResources无条件调用要求实际loopback端口的validateContainer，cleanupTestDatabase也经过该路径。失败/取消后未启动或退出容器可能无端口而挡住精确清理；已发worker分层“严格归属/可清理固定资源”和“运行readiness/port”，保留注册/daemon/name/labels/image/mount/network/volume规则，新增实际未ready/SIGTERM清理。此为待验证风险、非主代理已复现失败，原B00不改；主代理不竞争builder/连接DB。
+
+B1-R2草稿只读：appPassword原默认ready=false及只查旧entry.container/port可能把cleanup投影用成连接资格；已要求secret出站用原件ready=true、Running/healthy、实际当前port同登记、listener/ID/daemon核对。已读fd23cb有限readiness投影保留实际Config/HostConfig/mount/security、不隐藏present未知ports/networks，可仅清理用；缺端口须输出null/not-ready不伪称65535实际endpoint。最终待worker当前代码+离线恶意policy/实际未ready和SIGTERM证明及main独立。
+
+16:22UTC实际先决失败worker报告e85c40d2/session9352 exit1：父CREATE成功、含FK子CREATE SQLState42000/1142；原app六项schema权力/session/version已检查，现有原INIT_SQL主代理实际读b1e6f6确认无REFERENCES。主代理不放弃space/FK，为用户已授权localDocker新空测试库技术批准固定B1_TEST_INIT_SQL=原INIT_SQL＋schema REFERENCES一条，旧B00/现有dev完全不改，不读已有root/不root连接/liveGRANT/ALL/GRANTOPTION。新库再实测封闭权限集合及FK，更多权限需实证决策。失败9352/e120资源worker报告finallyremoved、保留失败事实；不是main独立数据库验收。无主代理实现/SQL/资源mutation，autoPAUSED。
+
+## B1权限审查停点（16:25UTC，未验收）
+
+上述技术提议实际apply_patch被auto-review拒绝：认为权限扩展需直接用户授权，主代理决定不能替代。worker无文件改动/无替代写法或执行绕过/无新测试环境；实际停写codeb06ff263fd5aa507037146cd0fc3826ea873f0ac/report660240aecde126b7ba8a4af1a92188805d5e0bc2，5允许文件/clean/报告-only diffexit0。最小REFERENCES方案现inactive，等待human准确批准，不重复派单或盲重放。任务单/state/HANDOFF均已将此新停点放到前面。
+
+主代理实际读最终147行adapter、52行offline测试与前述privilegehelper/Java：R1缺port只返回null且clone不改原件，未知实际ports/network/policy/mount不隐藏；R2 appSecret先真实ready/currentport/Running/healthy/listener后private read。独立Node22 `--test tests/bot/service/database-metadata.spec.mjs` chunk77560d **exit0 3/3/0skip**；只离线边界通过，实际未ready/SIGTERM及完整迁移/config/两空库/合法escape存储尚未跑，不accept B1，不merge局部草稿。
+
+主代理只读Docker实际95d76d原3container完整ID/127ports同且healthy；8b0655只有dev三个卷，22b02b test network空，177c06 Java/probe/Maven进程空，28ad55 code..report排除A02 diffexit0。失败test-e120资源已回收；开发数据/凭据/cache/target保留，主代理无数据库/权限mutation。继续仅等用户直接批准新空test官方bootstrap schema REFERENCES范围，自动化保持PAUSED。

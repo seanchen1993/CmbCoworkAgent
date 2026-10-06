@@ -1,6 +1,24 @@
 # DevClaw Bot 当前交接点
 
-2026-10-05 16:01 UTC · 用户手动接续B01 · gpt-6.1-sol/high · 定时续跑保持停用
+2026-10-06 03:54 UTC · 用户新决定已解除旧设计停点 · B01-B1 v2 ready待正式接续 · 定时续跑保持停用
+
+## 最新人类决定与本轮接续（覆盖下方历史停点）
+
+- 用户明确“数据库最好不依赖外键，然后因为是开发环境，可以有所有权限 。继续任务”。B01不创建物理FK；application层同事务空间/版本/成员校验、确定锁序和数据库PK/unique/index协作。B1只结构，错关系拒绝留后续C/D六接口验收，不伪称数据库会拒绝悬空引用。
+- 允许任务schema devclaw.*的开发/测试账号ALL，无GRANT OPTION/global/其他库。B1新隔离空库用本服务固定官方初始化脚本；现存dev三服务、数据、原六项权限不改变，不读已有root/用root连JDBC、不改B00/F05、不livegrant。旧REFERENCES提议/1142/auto-review拒绝是真实历史，但已被新直接用户决定取代，不再等待旧准确提议批准。
+- main26ce/worker660240ae实际clean，旧b06代码/660报告/缓存target全部保留；main只读79f60d/4212f4和进程ba18b9（无Java/Maven/probe/cwd）已核对，Docker a83f6e原三ID/12732878、32877、32876一致healthy，无测试容器。quota当前ordinaryUsageAllowed=true（4%/13%已用），不购买/reset/换账号。
+- 原high写者最后报告明确completed停写，工具只读消息恢复同target为pending_init；无并行替代写者。先正常merge主代理v2协调文档到保留worker（存在未验收B1分叉，不能reset/强制FF），再正式followup同gpt-6.1-sol/high与B01-A02，不派生。
+- 任务B01.md/design v2/B01-B1 v2；范围迁移/封闭本地连接/readiness、零FK/schema-ALL、两顺序真实MySQL5.7/JDK8、未ready/真实SIGTERM/Unicode无损与精确清理。当前B1仍未完成/接受，六业务HTTP还未实现；主代理实际diff和独立复验后才合入/下一片。自动化仍PAUSED，不重新启用。
+
+## 历史停点（2026-10-05，已被新用户决定覆盖）：权限提议被安全审查拒绝，未落地
+
+- A2a/A2b已独立接受合入，最后A2bmerge a4987bc9/集成freshcompile6982 exit0 15JUnit/1107parity通过。B1尚未完成，不把本轮说成六API交付。
+- B1真实app FK子表CREATE失败42000/1142，原父CREATE/限定schema检查通过。下方16:22主代理最小REFERENCES技术提议随后被auto-review拒绝，**无文件/账号/资源变更，禁止绕过**；该提议现在inactive，必须用户直接批准准确范围，不能把任务文档当权限。
+- 待用户确认：仅未来新建的空test project官方MySQL初始化，为devclaw_app在devclaw.*增加REFERENCES；不改现有dev、B00原实现/配置，不读已有root秘密/用root连JDBC，不liveGRANT/ALL/GRANTOPTION/其他schema。不批准前不启动依赖实现或新测试，不重派代理绕过。
+- 保留worker code `b06ff263fd5aa507037146cd0fc3826ea873f0ac` / report-only `660240aecde126b7ba8a4af1a92188805d5e0bc2`，samehigh已completed/停写/clean，无未知句柄。只五允许文件：root-free test helper、最小privilege probe/Java与离线metadata测试、本A02报告；迁移/config/六API尚未实施/未merge。
+- main实际读最终adapter与tests、code..report除本人报告diffexit0，独立Node77560d exit0 3/3。只离线局部通过，不是B1验收；R1/R2窄源码修正已读，实际未ready/SIGTERM/字符串往返及两空库仍待。
+- main独立只读95d76d：原三服务全ID/12732878/32877/32876同且healthy；8b0655仅原三dev卷、22b02b无test network，177c06无Java/probe/Maven进程。worker失败测试e120全部精确finally回收。所有开发数据/凭据/cache/target保留，定时自动续跑仍PAUSED。
+- 用户直接批准后，先核对实际Git/代理/进程/当前额度，再从保留tree/checkpoint接续samehigh B01-A02；先新空库最小FK/有限grant probe，不能沿用1142失败当通过。当前等待不是quota、不是用户暂停整个任务，也不自动恢复定时任务。
 
 ## 最新手动接续（覆盖下方停用时的等待下一用户请求）
 
@@ -19,6 +37,9 @@
 - 15:45UTC第二轮40823/f2c0461b实际加载不可达Digest.pattern失败（6新tests/4errors），main批准验原hash后仅内存投影闭包25原definition/$id/$schema，不改source/规则；cd896a74已只读检查。worker报告第三26599 exit0/真实Java8 15tests/1107parity0mismatch，仍非main独立通过且后续boundedserialize/jarresource/helper负例改动尚未freeze/retest。待最终冻结停写再独立，B1未派/定时PAUSED。
 - 15:57UTC A2b最终code575ed53b/report0c5b8cc3已由main独立接受待合并：实际12文件diff/clean/代码阅读/源不变，Nodea2b36715/15 exit0；F0398890最终exit0 24/check/types；完整Java8 build82363 exit0 15JUnit0fail/error/skip、1107同轮bbaccc45-ace4-42da-b762-4600df2c4402/326valid781invalid0mismatch、public4/6/42/10、29class52/35库/原源exactbytes及fatjarprobe。本次复用worker已编class，不冒充freshcompile；下一正常merge后在集成树实际编译新3main/3test。旧失败轮保留；JS原字节舍入局限独立记录。所有main句柄关闭、pgrep736716空，writercompleted停写；B1仍draft未派，quota允许55%/9%，定时PAUSED。
 - 16:01UTC A2b正常merge `a4987bc93e62cc44726d20b7a8bb483063aacb7a`；除coorddocs code与冻结0c5b8cc3 diffexit0。集成6982 exit0 **实际3main/3test新编译**、15JUnit/1107同f4e3eaa8-5a70-43fa-b7e3-7302dc2b8869/0mismatch、29class52/35libs/exactresources/probe。Jar eb9d909c7223879fcc350a6e6101b480e7b3ba2851d28e3a42b0e7c4b93d44c4，tree同A1；句柄关闭。Docker只读e0924a原MySQL/ES/S3同ID/端口healthy。B1任务由draft改ready，下一正常FF停止的同high worker再formal followup；仍仅迁移/连接探针无HTTP/业务，定时PAUSED。
+- 16:04UTC B1已正式followup给同/root/b01_contracts_high（high/B01-A02/nochildren）：实施树正常FF到准确 `5ddaaa59edbe70bb39d636350135d623102791af` clean，原writercompleted和pgrep665b14空已核对。派单含B1ready全文/工作树/文件/真实JDK8两空MySQL/FK/account/失败/SIGTERM/cleanup验收及本人报告；主代理独占coord、不并行实现或builder。保存原dev3数据/凭据/缓存，先仅测试mysql顺序运行，未知额外grant/API不足报main不偷root。等待小checkpoint，自动续跑PAUSED、无新用户范围。
+- 16:13UTC B1起点c7390ccd report-only已实际核对。worker提出B00 validateProject及间接prepare/resources/compose/cleanup会读root，main读source确认并批准newservice test-onlymetadata adapter（task已补完整约束），不改B00/不接管dev/不读已有root，newemptytest bootstraproot仅生成写私有file供官方容器入口，DB只appsecretstdin。worker只读16502exit0报告同3healthy/VM容量足够顺序mysql，无mutation/句柄；这不是main独立DB验收。下一adapter/config/最小FK权限DDL证据，权限不足不偷GRANT/root；autoPAUSED。
+- 16:22UTC B1第一先决codee85c40d2/session9352实际exit1：Corretto8/MySQL5.7.44/Connector8.0.33/session/grants和父表CREATE通过，含FK子表42000/1142，旧app无REFERENCES；ownede120754f14f16cae及临时资源worker报告finally全removed，不算B1通过。main实际读source与原INIT_SQL，技术批准仅NEWemptytest官方bootstrap固定追加schema REFERENCES，B00源码/原dev账号和数据不动、无liveGRANT/读已有root/root连接/ALL或其他权限。另新空库FK探针实际通过再B1迁移；R1/R2与合法escape存储负例仍开放，定时PAUSED。
 
 ## 最新用户请求与停用检查点（优先于下方历史）
 
