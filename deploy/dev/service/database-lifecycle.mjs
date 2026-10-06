@@ -17,7 +17,7 @@ async function childCase(mode) {
     console.log(JSON.stringify({ stage: "registered", project: entry.project }))
     if (mode === "secret-sigterm") {
       runtime = await packagedDatabaseRuntime()
-      await startTestDatabase(entry, controller.signal)
+      console.log(JSON.stringify({ stage: "ready", ...await startTestDatabase(entry, controller.signal) }))
       console.log(JSON.stringify({ stage: "secret-check", project: entry.project }))
       await javaDatabase(runtime, entry, "readiness", { signal: controller.signal })
       throw Error("B1_CANCEL_NOT_OBSERVED")
@@ -68,7 +68,9 @@ export async function lifecycleCheck() {
       if (mode !== "injected") check(sent)
       else check(lines.find(x => x.stage === "pre-ready")?.port === null)
       await absent(project)
-      const proof = { mode, project, signal: sent ? "SIGTERM" : "injected", childExit: result.code, databaseChildStarts: 0, cleanup: "actually-absent" }
+      const resource = lines.find(x => x.stage === (mode === "secret-sigterm" ? "ready" : "pre-ready"))
+      check(resource?.project === project && /^[a-f0-9]{64}$/.test(resource?.container) && (mode === "secret-sigterm" ? Number.isInteger(resource.port) : resource.port === null))
+      const proof = { mode, project, container: resource.container, port: resource.port, signal: sent ? "SIGTERM" : "injected", childExit: result.code, databaseChildStarts: 0, cleanup: "actually-absent" }
       proofs.push(proof); console.log(JSON.stringify({ stage: "lifecycle-proof", ...proof }))
     } finally { clearTimeout(timer); await child.stop() }
   }

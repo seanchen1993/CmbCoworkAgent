@@ -70,3 +70,7 @@ Optional null fields are omitted; required fields remain represented. DTOs are s
 构建helper复制三份冻结源的原始字节和SHA256，并从六operation引用派生允许的request/声明status response/参数映射。`ContractBoundary`仅从固定classpath资源加载、校验摘要；networknt会预编译整份$defs，因此运行时仅投影25个可达原definition节点，不改其字段、关键词或约束。无默认远程/file loader、任意输入路径或全量Task/Run校验入口。严格JSON字节（1MiB、depth64、string65536、number128）先解析，再原Schema校验，最后typed DTO消费；响应先核对selector/status/class再有界序列化并原Schema校验。有限pattern末尾未转义`$`适配Java `\z`，保留字面`\$`，修正Java默认末尾换行差异。
 
 `npm run test:bot-service-contracts`（Node22）实跑生成/比较支持用例及真实Java8完整构建，保存同runId的原Ajv/Java逐例结论至服务target/parity-report.json。Schema数据值parity与严格原字节精度分层：既有Ajv经JS JSON.parse会舍入一些精确非整数（如1.0000000000000001）；Java字节边界不得因此放宽，单独测试拒绝。此处不宣称两侧任意原始JSON字节全链路等价，不修改冻结源。仍无HTTP、身份、DB或业务语义。
+
+## B01-B1 存储消费范围
+
+Java本地迁移及JDBC探针保持这些原契约不变。合法JSON escape中的NUL与孤立surrogate以内部ASCII JSON-escaped name无损保存，config/receipt用有界原UTF8字节保存并经原边界校验，不新增产品字段或排除规则。九业务表无物理FK，space PK/unique/组合关联索引和ordinal支持后续应用事务检查；本片不实现六HTTP接口、鉴权/CAS或业务关联拒绝。测试仅新隔离MySQL5.7库，现存dev和原F03实现不变，完整说明及顺序命令见deploy/dev/README.md的B01-B1段。
