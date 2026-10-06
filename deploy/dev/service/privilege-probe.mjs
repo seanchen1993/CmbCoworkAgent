@@ -33,8 +33,8 @@ try {
     if (proof.status === "failed" && proof.category === "DDL_PRIVILEGE" && /^[0-9A-Z]{5}$/.test(proof.sqlState) && Number.isInteger(proof.errno)) {
       console.log(JSON.stringify({ status: "failed", category: "DDL_PRIVILEGE", sqlState: proof.sqlState, errno: proof.errno }))
       failed = true
-    } else if (proof.status === "verified" && result.code === 0 && proof.foreignKeyDDL === true) {
-      console.log(JSON.stringify({ status: "verified", java: "1.8.0_482", mysql: "5.7.44", jdbc: "8.0.33", foreignKeyDDL: true }))
+    } else if (proof.status === "verified" && result.code === 0 && proof.zeroForeignKeys === true && proof.account === "schema-ALL" && proof.denials === 3) {
+      console.log(JSON.stringify({ status: "verified", java: "1.8.0_482", mysql: "5.7.44", jdbc: "8.0.33", account: "schema-ALL", zeroForeignKeys: true, denials: 3 }))
     } else throw Error("B1_PROBE")
   } finally { clearTimeout(childTimer); controller.signal.removeEventListener("abort", stopChild); await child.stop() }
 } catch (error) {

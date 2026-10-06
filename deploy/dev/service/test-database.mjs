@@ -4,10 +4,12 @@ import { join } from "node:path"
 import { lstat, readFile, writeFile, rm } from "node:fs/promises"
 import { isDeepStrictEqual } from "node:util"
 import { hostState, daemon, docker, privateDirectory, privateFile, RUNTIME } from "../docker/host.mjs"
-import { composeSpec, INIT_SQL, LABEL } from "../docker/compose.mjs"
+import { composeSpec, LABEL } from "../docker/compose.mjs"
 import { image, validateContainer, validateNetwork, verifyListeners } from "../docker/lifecycle.mjs"
 
 const owned = new Map()
+// 2026-10-06 direct human decision: NEW empty test bootstrap only, no live grant.
+export const B1_TEST_INIT_SQL = "REVOKE ALL PRIVILEGES, GRANT OPTION FROM 'devclaw_app'@'%';\nGRANT ALL PRIVILEGES ON `devclaw`.* TO 'devclaw_app'@'%';\n"
 const fail = category => { throw new Error(`B1_${category}`) }
 export function metadata(stat, mode, directory = false) {
   if (stat.isSymbolicLink() || stat.uid !== process.getuid() || (stat.mode & 0o777) !== mode ||
@@ -30,7 +32,7 @@ export async function validateTestMetadata(entry) {
   markerMatches(JSON.parse(await privateFile(join(entry.dir, "owner.json"))), entry)
   const expected = JSON.stringify(composeSpec(entry), null, 2) + "\n"
   if (await privateFile(join(entry.dir, "compose.json")) !== expected ||
-      await readFile(join(entry.dir, "initialize.sql"), "utf8") !== INIT_SQL) fail("CONFIGURATION")
+      await readFile(join(entry.dir, "initialize.sql"), "utf8") !== B1_TEST_INIT_SQL) fail("CONFIGURATION")
 }
 export async function createTestDatabase() {
   const state = await hostState()
@@ -51,7 +53,7 @@ export async function createTestDatabase() {
       ["app-client.cnf", `[client]\nuser=devclaw_app\npassword=${app}\n\n`],
       ["compose.json", JSON.stringify(composeSpec(entry), null, 2) + "\n"]
     ]) await writeFile(join(dir, name), content, { mode: 0o600, flag: "wx" })
-    await writeFile(join(dir, "initialize.sql"), INIT_SQL, { mode: 0o644, flag: "wx" })
+    await writeFile(join(dir, "initialize.sql"), B1_TEST_INIT_SQL, { mode: 0o644, flag: "wx" })
     await validateTestMetadata(entry)
     return entry
   } catch (error) {
