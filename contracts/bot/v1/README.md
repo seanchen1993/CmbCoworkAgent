@@ -74,3 +74,7 @@ Optional null fields are omitted; required fields remain represented. DTOs are s
 ## B01-B1 存储消费范围
 
 Java本地迁移及JDBC探针保持这些原契约不变。合法JSON escape中的NUL与孤立surrogate以内部ASCII JSON-escaped name无损保存，config/receipt用有界原UTF8字节保存并经原边界校验，不新增产品字段或排除规则。九业务表无物理FK，space PK/unique/组合关联索引和ordinal支持后续应用事务检查；本片不实现六HTTP接口、鉴权/CAS或业务关联拒绝。测试仅新隔离MySQL5.7库，现存dev和原F03实现不变，完整说明及顺序命令见deploy/dev/README.md的B01-B1段。
+
+## B01-C1 应用消费（无HTTP）
+
+新离线应用只执行这六操作的原Schema/typed DTO，身份与当前策略来自可信构造器port而非请求。JDBC事务承担无FK关联、权限/CAS、固定版本、四写canonical命令/7天DBUTC receipt与reference-only outbox；历史body/status保持原字节，当前撤权优先。没有HTTP监听、外部调用或outbox投递器，也不修改这些冻结定义。真实探针原响应再由既有Ajv执行六operation声明映射，并保留既有1107数据值parity和精确JSON字节边界的分层，不宣称任意JS raw-number全链路等价。命令与资源边界见deploy/dev/README.md的C1段。
