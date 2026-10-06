@@ -37,3 +37,5 @@
 九源草稿实际增量审查点已纳recovery任务并给同child：operation错误status不能越过原声明；stored number/current指针明确查实际版本事实；严格持久JSON不得DTO强制转换隐藏坏类型/重复键/非法UTF8；历史body与服务端metadata一致、当前授权优先；最大Text emoji/codepoint实际证明后才考虑原parser最小适配，原validation当前不授权修改。不同命令同CAS仍两个不同授权主体/两JVM，新增application harness必须真正取消收尾。
 
 原dev MySQL actualOOM/exited137是等待期间环境变化，不是C1失败或成功。child仅已授权原任务容器归属校验与start-once/健康端口恢复；main未执行restart，不改B00/权限/数据/内存/digest/root，await实证。再OOM停止新资源测试而非循环重启或跳过真库门槛。
+
+11:30:10UTC child32259 exit0/592fe5原container start-once恢复；main55bf21实际独立inspect/listener确认原三容器同ID/image/owner/daemon健康，MySQL现在12732893单listener，原ES/S3端口不变。没有C1业务测试通过。main57af34 actual checkpoint6ec00f21只九保留Java513行＋A02八行，全部读d9ab8d/a641cf/abcb15；实现尚未build/test，原已知status/currentnumber/strictJSON负例仍必须落实，不以checkpoint提交为接受。
