@@ -10,6 +10,7 @@
 - 5fbfa5b6541472ec7d70e9a9fdbcc2714388e285：完整九表V1 SQL、LocalDatabaseConfig、MigrationRunner、DatabaseReadiness、StorageCodec、DatabaseFailure、DatabaseCommand、新PersistenceBoundaryTest、POM与builder/audit实际diff。无FK/空间前缀PKunique和关联索引、stableordinal；name内部ASCII escape、MEDIUMBLOB原JSON字节，不改变原Schema。Hikari固定小池/READ_COMMITTED/连接及锁时间、closed local transport、安全异常无cause/stack、只migrate/readiness、无clean/repair/rootfallback。
 - POM新增main resources且artifact audit读取实际fatjar迁移/log配置字节，旧三契约源/DTO/依赖/15suite保持，新增5suite不掩盖旧计数。Flyway只ignore pending供显式空库migrate，future/missing不忽略；readiness要求精确version1/SUCCESS/script/checksum和十表/零FK。当前builder46585运行中，结果未知，不读取旧target结果冒充本轮通过。
 - 结果更新：report-only b1741a4d实际读回，46585 exit0/ac55b5；实际Java8重编main9/test4，20JUnit零fail/error/skip、同4f3bc703的1107parity/0mismatch、36class52/35库、fatjar原资源和migrationbytes/hash通过。只是该worker快照自测，未main独立复验/真实迁移接受；后续新增probe/编排变更仍须新最终快照验证。
+- 2910e65d78fb5d26b86ec5e570a7da24703a4752：完整211行JDBC probe、database-java/check两helper、adapter/原privilege probe/metadata五测试diff实读；取消在ready、spawn及stdin前检查已abort已落实，真实SIGTERM仍待。实际fatjar classes/libs执行，JDBC裸结构fixture不是六业务API；十表全列/22索引/零FK、公共原Schema接受的1MiB config/receipt与name escape、max ID/Long和ordinal重开、history同Connection未提交fixture回滚、实际querytimeout/错密码/停库拒绝测试。82377 worker报exit0，35236真实两库运行未知，无main独立通过。
 
 ## 已提出的审查点
 

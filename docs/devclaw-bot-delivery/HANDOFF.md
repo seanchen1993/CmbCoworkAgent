@@ -13,6 +13,7 @@
 - worker新起点report59c2/code `b582147cfc371c5c771c3aae666c15a759683cdf`已实际核对，schema-ALL初始化落地、零FK先决代码保存；容量48760 exit0（原dev保留，无需暂停）。唯一probe10513运行中/test a7215a926b95a0ee，总240s/compose170s/Java15s，结果未知不能重放。main实际读adapter/probe，仅代码审查未独立DB验收；已要求取消时在Java启动/secret stdin之前查已abort及迁移fatjar资源真实审计。C1草案6ab3760a仅提前规划、未派发。
 - **该probe结果已确定（覆盖上一行运行中）：** 10513 exit0/chunk3d8459，report-only d3a67241937d7cc02c7d5c02381242cc9021d501已实读；真实Java8/JDBC8.0.33/MySQL5.7.44、schemaALL＋USAGE、零FK、CREATE/ALTER/INDEX/DROP、三个跨库/global拒绝通过。testa721/mysql6e78/12732880已worker精确finally回收，main只读664b99确原三dev同ID/端口healthy，无测试容器。只先决自测通过，九表迁移/config/readiness/两库/取消/合法字符串仍未完成，无B1独立接受或集成。
 - code5fbfa5b6/fullreport b1741a4d已实读，首轮builder46585 exit0：真正Java8编9main/4test、20JUnit/1107同轮parity零失败或skip、36class52/35固定库、fatjar迁移/log/sourcebytes审计通过。main已完整读6persistence类/SQL/新5JUnit/POM/audit，审查B01-B1-v2-review已保存；仍只是worker该快照自测，真实两库/故障/取消和最终main独立未完成。当前未提交的新真实JDBC probe及abort编排修改保留，不能用旧build替代最终验证。
+- 新真实验收code2910e65d已保存/实读完整JDBC及Node helper/adapter/5metadata tests，发secret前已abort检查落实；builder82377 worker报告exit0/20JUnit/1107同e1fda1b7零差异。当前唯一DB35236运行中，test56471ba307355067 iteration1注册，总600s两项目顺序，未启动竞争builder；结果未知勿重放。实际未ready故障/SIGTERM仍下一窄补，主代理独立验收还未开始。
 
 ## 历史停点（2026-10-05，已被新用户决定覆盖）：权限提议被安全审查拒绝，未落地
 
