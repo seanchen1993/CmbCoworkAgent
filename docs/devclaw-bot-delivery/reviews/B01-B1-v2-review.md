@@ -9,6 +9,7 @@
 - b582147cfc371c5c771c3aae666c15a759683cdf：完整root-free registered-test metadata adapter、固定schema-ALL官方初始化、原container/security/network/loopback/currentready检查、完整Java权限探针和Node stdin/ownedProcess/finally。新权限已成功落地，旧1142/拒绝留历史。worker10513确切exit0/清理只先决自测，main664b99只读原三服务同ID健康，不能当main独立DB验收。
 - 5fbfa5b6541472ec7d70e9a9fdbcc2714388e285：完整九表V1 SQL、LocalDatabaseConfig、MigrationRunner、DatabaseReadiness、StorageCodec、DatabaseFailure、DatabaseCommand、新PersistenceBoundaryTest、POM与builder/audit实际diff。无FK/空间前缀PKunique和关联索引、stableordinal；name内部ASCII escape、MEDIUMBLOB原JSON字节，不改变原Schema。Hikari固定小池/READ_COMMITTED/连接及锁时间、closed local transport、安全异常无cause/stack、只migrate/readiness、无clean/repair/rootfallback。
 - POM新增main resources且artifact audit读取实际fatjar迁移/log配置字节，旧三契约源/DTO/依赖/15suite保持，新增5suite不掩盖旧计数。Flyway只ignore pending供显式空库migrate，future/missing不忽略；readiness要求精确version1/SUCCESS/script/checksum和十表/零FK。当前builder46585运行中，结果未知，不读取旧target结果冒充本轮通过。
+- 结果更新：report-only b1741a4d实际读回，46585 exit0/ac55b5；实际Java8重编main9/test4，20JUnit零fail/error/skip、同4f3bc703的1107parity/0mismatch、36class52/35库、fatjar原资源和migrationbytes/hash通过。只是该worker快照自测，未main独立复验/真实迁移接受；后续新增probe/编排变更仍须新最终快照验证。
 
 ## 已提出的审查点
 
