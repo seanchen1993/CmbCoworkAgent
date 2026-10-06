@@ -10,6 +10,7 @@
 - 原high写者最后报告明确completed停写，工具只读消息恢复同target为pending_init；无并行替代写者。先正常merge主代理v2协调文档到保留worker（存在未验收B1分叉，不能reset/强制FF），再正式followup同gpt-6.1-sol/high与B01-A02，不派生。
 - 任务B01.md/design v2/B01-B1 v2；范围迁移/封闭本地连接/readiness、零FK/schema-ALL、两顺序真实MySQL5.7/JDK8、未ready/真实SIGTERM/Unicode无损与精确清理。当前B1仍未完成/接受，六业务HTTP还未实现；主代理实际diff和独立复验后才合入/下一片。自动化仍PAUSED，不重新启用。
 - 新协调文档main `02b558cf`已正常merge至保留worker `4130e85acf77eeb903130aa80bcc574c4c1cfbab`，aca58a/5c8da5实际clean且仅七协调文档变化，无产品实现被覆盖。原 `/root/b01_contracts_high`正式followup成功，list_agents已running；准确新基线/用户决定/ready任务/文件范围/验收/本人A02已提供。没有新代理或第二写者，主代理不并行实施/竞争构建；等待检查点和冻结交回再独立验证。
+- worker新起点report59c2/code `b582147cfc371c5c771c3aae666c15a759683cdf`已实际核对，schema-ALL初始化落地、零FK先决代码保存；容量48760 exit0（原dev保留，无需暂停）。唯一probe10513运行中/test a7215a926b95a0ee，总240s/compose170s/Java15s，结果未知不能重放。main实际读adapter/probe，仅代码审查未独立DB验收；已要求取消时在Java启动/secret stdin之前查已abort及迁移fatjar资源真实审计。C1草案6ab3760a仅提前规划、未派发。
 
 ## 历史停点（2026-10-05，已被新用户决定覆盖）：权限提议被安全审查拒绝，未落地
 

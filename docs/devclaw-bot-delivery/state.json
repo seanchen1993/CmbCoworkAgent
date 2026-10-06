@@ -273,6 +273,8 @@
         },
         "B1": {
           "status": "implementing",
+          "latest_worker_checkpoint": {"code":"b582147cfc371c5c771c3aae666c15a759683cdf","report_start":"59c2d046e2223139ee276581fa71e202a8d2e1cc","probe_session":10513,"probe_result":"running_unknown_do_not_replay","test_project":"devclaw-bot-test-a7215a926b95a0ee","capacity_session":48760,"capacity_exit_code":0,"worker_only":"main read actual code; no independent DB pass yet"},
+          "latest_main_review": "Actual b582 adapter/probe read, fixed newemptytest schemaALL/noFK and sameoriginaldev scope. Review request cancellation must be checked before spawning JDBC and sending secret if abort happened during readiness; child must cover actual SIGTERM. POM original resources onlygenerated dir: narrow mainresources/migration artifact audit reminder delivered.",
           "resumed_baseline": "4130e85acf77eeb903130aa80bcc574c4c1cfbab",
           "resumed_task_version": "v2 2026-10-06 direct human noFK/task-schemaALL",
           "task": "tasks/B01-B1.md",
@@ -348,7 +350,7 @@
       }
     }
   ],
-  "next_action": "Original samegpt6.1-sol/high B01-A02 running B1v2 from preservedworker4130. Read checkpoints/actual scoped diffs, do not duplicate builder or writer. Once frozen reviewpending, main independent real two-project migration/config/zeroFK/schemaALL/escapedtext/SIGTERM verification before acceptance/merge. NoHTTP/nextslice until B1accepted; schedulerPAUSED.",
+  "next_action": "Same original high implementing B1v2; latest b582 real prerequisite probe10513 running_unknown (testa721, own240s). Do not replay or parallel DB/builder. Main read snapshot and sent cancellation-before-child + actualpackaged-migrations review. Wait exact exit/cleanup then remainingmigration/config/tests. Frozen result requires main independent realverification before accept. C1 draft6ab prepared only/notdispatched. NoHTTP/nextslice until B1accepted; schedulerPAUSED.",
   "quota_recovery": {
     "verified_at_utc": "2026-10-05T03:55:26Z",
     "ordinary_usage_allowed": true,
