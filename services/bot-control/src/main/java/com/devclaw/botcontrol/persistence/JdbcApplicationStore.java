@@ -4,8 +4,10 @@ import com.devclaw.botcontrol.contracts.BotContracts.*;
 import com.devclaw.botcontrol.domain.ApplicationFault;
 import com.devclaw.botcontrol.ports.TransactionObserver;
 import com.fasterxml.jackson.core.JsonGenerator;
-import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.devclaw.botcontrol.validation.ContractBoundary;
+import java.io.ByteArrayOutputStream;
+import java.nio.charset.StandardCharsets;
 import java.sql.*;
 import java.time.format.DateTimeFormatter;
 import java.util.*;
@@ -13,8 +15,8 @@ import java.util.*;
 /** Fixed, parameterized SQL, scoped to a single trusted space and transaction.
  * The caller owns transaction/parent lock ordering; no SQL/table selector API. */
 public final class JdbcApplicationStore {
-    private static final ObjectMapper JSON = new ObjectMapper().enable(JsonGenerator.Feature.ESCAPE_NON_ASCII)
-        .enable(DeserializationFeature.FAIL_ON_TRAILING_TOKENS).enable(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES);
+    private static final ObjectMapper JSON = new ObjectMapper().enable(JsonGenerator.Feature.ESCAPE_NON_ASCII);
+    private static final ContractBoundary BOUNDARY = new ContractBoundary();
     private final Connection connection;
     private final String space;
     private final TransactionObserver observer;
@@ -25,9 +27,24 @@ public final class JdbcApplicationStore {
         try { return StorageCodec.boundedBody(JSON.writeValueAsBytes(value)); }
         catch (Exception failure) { throw corrupt(); }
     }
-    private static <T> T read(byte[] bytes, Class<T> type) {
-        try { return JSON.readValue(StorageCodec.boundedBody(bytes), type); }
-        catch (Exception failure) { throw corrupt(); }
+    private static byte[] envelope(String prefix, byte[] stored, String suffix) {
+        try {
+            ByteArrayOutputStream bytes = new ByteArrayOutputStream(); bytes.write(prefix.getBytes(StandardCharsets.US_ASCII));
+            bytes.write(StorageCodec.boundedBody(stored)); bytes.write(suffix.getBytes(StandardCharsets.US_ASCII)); return StorageCodec.boundedBody(bytes.toByteArray());
+        } catch (Exception failure) { throw corrupt(); }
+    }
+    public static BotConfig storedConfig(byte[] stored) {
+        try {
+            // Validate ORIGINAL persisted bytes before conversion; fixed schema envelope,
+            // not a mapper tree/DTO that could discard duplicate keys or coerce types.
+            return BOUNDARY.readRequest("createBot", envelope("{\"commandId\":\"storage\",\"name\":\"storage\",\"config\":", stored, ",\"maintainerIds\":[\"storage\"]}"), CreateBotRequest.class).config;
+        } catch (RuntimeException failure) { throw corrupt(); }
+    }
+    public static GroupLimits storedLimits(byte[] stored) {
+        try {
+            return BOUNDARY.readRequest("createGroup", envelope("{\"commandId\":\"storage\",\"name\":\"storage\",\"limits\":", stored,
+                ",\"members\":[{\"principalId\":\"storage\",\"role\":\"admin\"}],\"bots\":[{\"botId\":\"storage\",\"botVersionId\":\"storage\",\"role\":\"specialist\"}]}"), CreateGroupRequest.class).limits;
+        } catch (RuntimeException failure) { throw corrupt(); }
     }
     public static ApplicationFault corrupt() { return new ApplicationFault(ErrorCode.DEPENDENCY_UNAVAILABLE); }
     private PreparedStatement prepare(String sql, Object... values) throws SQLException {
@@ -93,7 +110,12 @@ public final class JdbcApplicationStore {
     public BotVersion version(String id) throws SQLException {
         try (PreparedStatement p = prepare("SELECT id,bot_id,number,config_bytes,created_at FROM bot_versions WHERE space_id=? AND id=? FOR UPDATE", space, id); ResultSet r = p.executeQuery()) {
             if (!r.next()) return null; BotVersion v = new BotVersion(); v.id = r.getString(1); v.botId = r.getString(2); v.spaceId = space;
-            v.number = r.getLong(3); v.config = read(r.getBytes(4), BotConfig.class); v.createdAt = text(r.getTimestamp(5, utc())); if (r.next()) throw corrupt(); return v;
+            v.number = r.getLong(3); v.config = storedConfig(r.getBytes(4)); v.createdAt = text(r.getTimestamp(5, utc())); if (r.next()) throw corrupt(); return v;
+        }
+    }
+    public long latestVersionNumber(String bot) throws SQLException {
+        try (PreparedStatement p = prepare("SELECT MIN(number),MAX(number) FROM bot_versions WHERE space_id=? AND bot_id=?", space, bot); ResultSet r = p.executeQuery()) {
+            if (!r.next()) throw corrupt(); long min = r.getLong(1), max = r.getLong(2); if (r.wasNull() || min < 1 || max > 9007199254740991L || r.next()) throw corrupt(); return max;
         }
     }
     /** Metadata-only lookup to locate a receipt target; does not authorize or expose content. */
@@ -106,7 +128,7 @@ public final class JdbcApplicationStore {
         Group g;
         try (PreparedStatement p = prepare("SELECT id,version,name_json,limits_bytes,created_at,updated_at FROM groups WHERE space_id=? AND id=? FOR UPDATE", space, id); ResultSet r = p.executeQuery()) {
             if (!r.next()) return null; g = new Group(); g.id = r.getString(1); g.spaceId = space; g.version = r.getLong(2);
-            g.name = StorageCodec.decodeName(r.getString(3)); g.limits = read(r.getBytes(4), GroupLimits.class);
+            g.name = StorageCodec.decodeName(r.getString(3)); g.limits = storedLimits(r.getBytes(4));
             g.createdAt = text(r.getTimestamp(5, utc())); g.updatedAt = text(r.getTimestamp(6, utc())); if (r.next()) throw corrupt();
         }
         g.members = new ArrayList<>(); g.bots = new ArrayList<>();

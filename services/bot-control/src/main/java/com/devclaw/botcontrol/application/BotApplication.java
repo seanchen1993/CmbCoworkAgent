@@ -26,7 +26,7 @@ public final class BotApplication {
     public ApplicationResponse execute(Operation operation, TrustedContext actor, String pathId, byte[] originalBytes) {
         if (operation == null) throw new IllegalArgumentException("APPLICATION_SELECTION");
         try {
-            if (originalBytes != null && originalBytes.length > 1048576) throw new ApplicationFault(ErrorCode.PAYLOAD_TOO_LARGE);
+            if (originalBytes != null && originalBytes.length > 1048576) throw new ApplicationFault(operation.write() ? ErrorCode.PAYLOAD_TOO_LARGE : ErrorCode.INVALID_PAYLOAD);
             if (actor == null || actor.principalId == null) throw new ApplicationFault(ErrorCode.UNAUTHENTICATED);
             boundary.validateParameter(operation.wire, "X-DevClaw-Space", actor.spaceId);
             // Same frozen Id definition, not a new identity syntax.
@@ -124,7 +124,7 @@ public final class BotApplication {
                     db.record(actor.principalId, command(input), op.wire, receiptType, receiptTarget, CanonicalCommand.fingerprint(actor, op, id, input), op.success, body, targetType, targetId, targetVersion, now);
                     observer.reached(TransactionObserver.Stage.BEFORE_COMMIT);
                 }
-                commitAttempted = true; c.commit(); observer.reached(TransactionObserver.Stage.AFTER_COMMIT);
+                commitAttempted = true; c.commit(); if (op.write()) observer.reached(TransactionObserver.Stage.AFTER_COMMIT);
                 return new ApplicationResponse(op.success, body);
             } catch (SQLException | RuntimeException failure) {
                 if (!commitAttempted) { try { c.rollback(); } catch (SQLException ignored) { /* still fail closed */ } }
@@ -160,14 +160,15 @@ public final class BotApplication {
         } catch (ContractBoundary.Failure failure) { throw JdbcApplicationStore.corrupt(); }
     }
     private Bot requireBot(JdbcApplicationStore db, String id, boolean receipt) throws SQLException {
-        Bot b = db.bot(id); if (b == null) throw receipt ? JdbcApplicationStore.corrupt() : new ApplicationFault(ErrorCode.NOT_FOUND); return b;
+        Bot b = db.bot(id); if (b == null) throw receipt ? JdbcApplicationStore.corrupt() : new ApplicationFault(ErrorCode.NOT_FOUND); validVersion(b.version); return b;
     }
     private Group requireGroup(JdbcApplicationStore db, String id, boolean receipt) throws SQLException {
-        Group g = db.group(id); if (g == null) throw receipt ? JdbcApplicationStore.corrupt() : new ApplicationFault(ErrorCode.NOT_FOUND); return g;
+        Group g = db.group(id); if (g == null) throw receipt ? JdbcApplicationStore.corrupt() : new ApplicationFault(ErrorCode.NOT_FOUND); validVersion(g.version); return g;
     }
     private static BotVersion current(JdbcApplicationStore db, Bot b) throws SQLException {
         BotVersion v = db.version(b.currentBotVersionId);
-        if (v == null || !b.id.equals(v.botId) || !b.spaceId.equals(v.spaceId)) throw JdbcApplicationStore.corrupt(); return v;
+        if (v == null || !b.id.equals(v.botId) || !b.spaceId.equals(v.spaceId)) throw JdbcApplicationStore.corrupt();
+        validVersion(v.number); if (!v.number.equals(b.version) || db.latestVersionNumber(b.id) != v.number) throw JdbcApplicationStore.corrupt(); return v;
     }
     private static void authorizeBot(TrustedContext actor, Bot b) { if (!b.maintainerIds.contains(actor.principalId)) throw new ApplicationFault(ErrorCode.FORBIDDEN); }
     private static void authorizeGroup(TrustedContext actor, Group g, boolean admin) {
@@ -201,19 +202,22 @@ public final class BotApplication {
         for (GroupBot b : values) if (ordered.put(b.botId, b) != null) throw new ApplicationFault(ErrorCode.INVALID_PAYLOAD);
         Map<String, Bot> bots = new HashMap<>(); TreeSet<String> versionIds = new TreeSet<>();
         // Group parent -> ALL ordered Bot parents -> ALL ordered BotVersion rows.
-        for (GroupBot b : ordered.values()) { Bot bot = db.bot(b.botId); if (bot == null) throw writing ? new ApplicationFault(ErrorCode.NOT_FOUND) : JdbcApplicationStore.corrupt(); bots.put(b.botId, bot); versionIds.add(bot.currentBotVersionId); versionIds.add(b.botVersionId); }
+        for (GroupBot b : ordered.values()) { Bot bot = db.bot(b.botId); if (bot == null) throw writing ? new ApplicationFault(ErrorCode.INVALID_PAYLOAD) : JdbcApplicationStore.corrupt(); validVersion(bot.version); bots.put(b.botId, bot); versionIds.add(bot.currentBotVersionId); versionIds.add(b.botVersionId); }
         Map<String, BotVersion> versions = new HashMap<>(); for (String id : versionIds) versions.put(id, db.version(id));
         for (GroupBot b : ordered.values()) {
             Bot bot = bots.get(b.botId); BotVersion current = versions.get(bot.currentBotVersionId), selected = versions.get(b.botVersionId);
             if (current == null || !bot.id.equals(current.botId) || !actor.spaceId.equals(current.spaceId)) throw JdbcApplicationStore.corrupt();
+            validVersion(current.number); if (!bot.version.equals(current.number) || db.latestVersionNumber(bot.id) != current.number) throw JdbcApplicationStore.corrupt();
             if (selected == null || !bot.id.equals(selected.botId) || !actor.spaceId.equals(selected.spaceId)) throw writing ? new ApplicationFault(ErrorCode.INVALID_PAYLOAD) : JdbcApplicationStore.corrupt();
+            validVersion(selected.number);
             GroupBot before = old.get(b.botId);
             boolean changed = before == null || !before.botVersionId.equals(b.botVersionId);
             if (writing && changed) { if (bot.status != BotStatus.ACTIVE) throw new ApplicationFault(ErrorCode.FORBIDDEN); authorizeBot(actor, bot); }
         }
     }
     private static void cas(Long actual, Long expected) { if (!actual.equals(expected)) throw new ApplicationFault(ErrorCode.VERSION_CONFLICT, actual); }
-    private static long increment(Long version) { if (version == null || version < 1 || version >= MAX_VERSION) throw new ApplicationFault(ErrorCode.VERSION_CONFLICT, version); return version + 1; }
+    private static void validVersion(Long version) { if (version == null || version < 1 || version > MAX_VERSION) throw JdbcApplicationStore.corrupt(); }
+    private static long increment(Long version) { validVersion(version); if (version == MAX_VERSION) throw new ApplicationFault(ErrorCode.VERSION_CONFLICT, version); return version + 1; }
     private static String newId() { return UUID.randomUUID().toString(); }
     private static BotVersion newVersion(TrustedContext actor, String bot, Long number, BotConfig config, Timestamp time) {
         BotVersion v = new BotVersion(); v.id = newId(); v.botId = bot; v.spaceId = actor.spaceId; v.number = number; v.config = config; v.createdAt = JdbcApplicationStore.text(time); return v;
@@ -221,18 +225,26 @@ public final class BotApplication {
     private static BotResult botResult(Bot b, BotVersion v) { BotResult r = new BotResult(); r.bot = b; r.botVersion = v; return r; }
     private static GroupResult groupResult(Group g) { GroupResult r = new GroupResult(); r.group = g; return r; }
     private ApplicationResponse error(Operation op, ApplicationFault failure) {
+        ErrorCode code = failure.code;
+        Long currentVersion = failure.currentVersion;
         int status;
-        switch (failure.code) {
+        switch (code) {
             case INVALID_PAYLOAD: status = 400; break;
             case UNAUTHENTICATED: status = 401; break;
             case FORBIDDEN: status = 403; break;
             case NOT_FOUND: status = 404; break;
             case VERSION_CONFLICT: case COMMAND_CONFLICT: case COMMAND_EXPIRED: case OUTCOME_UNKNOWN: status = 409; break;
             case PAYLOAD_TOO_LARGE: status = 413; break;
-            default: status = 503;
+            default: status = 503; code = ErrorCode.DEPENDENCY_UNAVAILABLE;
         }
+        // Trusted ports may fail, but cannot manufacture an undeclared selector/status.
+        if ((status == 409 && !op.write()) || (status == 404 && op.create()) ||
+            (currentVersion != null && (currentVersion < 1 || currentVersion > MAX_VERSION))) {
+            status = 503; code = ErrorCode.DEPENDENCY_UNAVAILABLE; currentVersion = null;
+        }
+        if (status == 413 && !op.write()) { status = 400; code = ErrorCode.INVALID_PAYLOAD; }
         ErrorResponse r = new ErrorResponse(); r.requestId = newId(); r.error = new ErrorResponseError();
-        r.error.code = failure.code; r.error.message = failure.code.wire(); r.error.retryable = false; r.error.currentVersion = failure.currentVersion;
+        r.error.code = code; r.error.message = code.wire(); r.error.retryable = false; r.error.currentVersion = currentVersion;
         return new ApplicationResponse(status, boundary.writeResponse(op.wire, status, r));
     }
 }
