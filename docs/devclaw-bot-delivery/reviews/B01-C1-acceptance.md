@@ -52,3 +52,6 @@
 ### 集成真实应用复验已确定
 
 application60137最终307726 exit0（core396cfa）：两库3d129433/7c10b028…/32914与f263a023/b6d08ace…/32915各376断言、52完整事实拒绝、21重放、7回滚、12腐坏回执、6原Ajv响应；重开及双JVM同command201/201同hash、两个不同主体双方scope握手后的CAS201/409与SQL最终事实全通过。16应用JVM闭合。新增故障c260da45/49009fad…/32916/JVM45282与真实SIGTERM787e7453/6f30d838…/32917各child1，实际Java和精确容器/卷/网络/runtime均不存在，原dev完整身份前后相等且健康。完整ID在state。原B1集成数据库及生命周期回归、最终审计仍待；尚不标accepted_merged。
+### 集成原B1数据库回归已确定
+
+database-check53506最终989b28 exit0（首库完整1e89b2）：fdbe4d1f/950bf33f…/32918与b49524ca/41d4b475…/32919各原完整10表/零FK/迁移1-noop0/Unicode字节重开/5history真实拒绝且完整事实不变并准确tear-down/3越权拒绝/坏密码offline-stale拒绝/真实SQLTimeoutException1026及1034ms全通过，两项目精确finally回收。完整ID在state。当前独立集成原三lifecycle63498运行未知，最终审计后才accepted_merged。

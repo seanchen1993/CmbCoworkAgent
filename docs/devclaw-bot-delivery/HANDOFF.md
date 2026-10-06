@@ -4,6 +4,8 @@
 
 ## 最新人类手动继续与恢复事实（优先于下方运行中）
 
+- **集成原B1 database-check53506已确切exit0/989b28：** 两空库fdbe4d1f/950bf33f…/12732918、b49524ca/41d4b475…/12732919各原完整10表/零FK/迁移1-noop0/Unicode字节重开/5history实际拒绝且完整facts不变/准确tear-down/3越权/坏密码offline-stale/SQLTimeoutException1026与1034ms全部通过，均exactfinallyremoved。实际worker82a178/6d3af9仍4019clean/completed停写，无产品更改。
+- 当前唯一main **database-lifecycle63498**，原B1三顺序case，子240s/父每case250s，结果未知；自行poll后最终readonlyaudit，才标accepted_merged。不能因已通过两库跳过真实故障/取消；所有其他main句柄关闭，不启动HTTP/C2或定时任务。
 - **当前唯一main53506集成原B1 database-check**，600s总时限，first registered `devclaw-bot-test-fdbe4d1f1abfc08b`，结果未知；main自己poll，不能并发重复测试或poll已闭合60137。其确定结束后才原B1三lifecycle与最终审计。child仍停写，noHTTP/C2/自动恢复。
 - **集成application60137已确切exit0/307726，覆盖下方运行未知：** fresh产物两库3d129433/7c10b028…/12732914、f263a023/b6d08ace…/12732915各376断言/52九表完整facts拒绝/21重放/7完整回滚/12腐坏回执/6原Ajv；同command JVM44873/44884与45076/45087=201/201同hash，不同主体双方scope握手CAS44901/44915与45107/45118=201/409，重开及SQL最终facts通过。16应用JVM闭合；新增故障c260da45/49009fad…/32916/JVM45282与真实SIGTERM787e7453/6f30d838…/32917各child1/PID和精确项目资源实际absence，原dev完整same healthy。main实际d3c82b pgrep空/13a56a仅原三容器健康，无重复未知命令。
 - 当前无main运行句柄，childcompleted停写。下一仅集成原B1两库与三lifecycle顺序复验、最终readonly审计后记录accepted_merged，不复跑60137或新建写者。仍无C2/HTTP/招乎/Runtime/UI，自动触发PAUSED；下方旧运行状态是历史。
