@@ -1,9 +1,11 @@
 # DevClaw Bot 当前交接点
 
-2026-10-06 · C1原high已正式接续，九源码逐文件保留 · 定时续跑保持停用
+2026-10-06 · C1原high已冻结停写，主代理独立验收中 · 定时续跑保持停用
 
 ## 最新人类手动继续与恢复事实（优先于下方运行中）
 
+- **主代理独立验收已开始：** samehigh实际completed停写；worker code3987a832/report-only4019d088，3a203e actualclean/code..HEAD只本人报告、完整最终freeze报告已读；32859b实际escalated pgrep exit1空，无旧任务Java/Maven/probe。0c8508只读原三完整ID/image/healthy/OOMfalse与当前12732893/32877/32876，owner用了不存在label未据此声称归属（原harness还须实际固定owner验证）。main856b05完整读剩余helper/spec/小类及精确build1行，19允许文件审查完整、冻源/原B1未改。独立Node92056最终abcb2a exit0共26，原F0348065最终92b4f4 exit0原24/check/types；build59123最终716f46 exit0实际25JUnit/1107同536b0d8c零diff/50class52/34库/原资源/fatjar通过，jarf26a8422bfd03e0445886e9fa87351660f344730e6f8b812816adf46b6cdb110。此轮cached class，合入后仍须真实18main/7test重编，不冒充freshcompile。
+- 当前唯一main实际application-check **86591**（1200s，总两库+新增injection/SIGTERM），刚启动结果未知；主代理自行poll，不重放未知资源。通过后再原B1独立database-check/lifecycle、资源/Git审计，才可接受并正常merge和集成新编/复验。worker无新工作，不C2/HTTP或恢复定时。子代理完整最新自测及原B1三lifecycle67845 exit0/df41d8仅历史自测层，不能代替本轮main真正测试。
 - **54763已确切exit0/6269c2，覆盖下方运行未知：** worker最新3987a832完整两库各376断言/52全九表facts拒绝/21重放/7回滚/12腐坏receipt/6实际Ajv通过；不同主体双JVM双方scope握手后的CAS201/409、同command201/201同hash、重开和SQLfacts通过。新故障0650257b/99dd…/32902/JVM41796与OS SIGTERM476e4f9f/7b0…/32903/JVM41919实际absence、原dev完整facts相等；main实际报告2d1f03d7读20e6fa，完整IDs在state/A02。当前唯一原B1database-check65205运行未知，之后原lifecycle/freeze；仍worker-only，main独立和集成待做，不竞争资源。
 - **12:01:59UTC最新手动接续核对：** 同原high仍running且唯一写者，worker实际63baddcb clean、main583d2c30 clean；没有重新派代理或恢复定时。33935已child确切exit0/3cecac，修后两空库961cf008/85e0c2c6全部六操作/重开/两JVM竞争及新增injection/SIGTERM两个生命周期通过、16应用JVM闭合/项目实际absence；完整记录08b8e501/A02。随后3987a832新增receipt四write/type/status/targetID检查（当前授权之后）与4坏metadata503，生命周期父证据加入准确container/port及原dev完整快照。main完整增量4025aa、最终309行Java probe4025aa/c80575、270行application276f52、190行store及其他新类/unit d432d6已读；ad782a实际冻结源/原B1/Boundary/POM/V1等无diff、diffcheck通过。仍非main独立验收。
 - 最新worker Node44642 exit0/03cd38共26、F03 7e37a6 exit0原24/check/types；3987后9485确切exit0/cd8c59真实18main/7test重编、25JUnit/1107同f55bf225零diff/50class52/34库/原资源/probe，jarc860d1e5013080aa928c509b148fda17d783d0ddd75d4c21827c6170b48e8dae。新唯一完整application-check54763仍运行未知（12坏receipt与新生命周期资源证据须实际重跑）；child自己poll有界，再原B1 DB/lifecycle回归及最终code/report freeze停写。main无竞争builder/数据库命令。33935旧代码通过不能担保3987新差异；C1未接受，HTTP/C2禁止、自动续跑PAUSED。
