@@ -7,6 +7,7 @@
 - 30892真实exit1：testfdce9176117ed318/mysqlab4ab2d2/12732883首次migration1、no-op0、store/reload和严格queryTimeout实际通过，history十列fixture核对失败；Flyway7.15确实将原autocommit false改true，原假设不能成立。项目精确finally回收，原dev不动，不计完整B1验收。
 - 同原high已冻结失败reportcfea745e/codeb18ebf37，实际clean停写/无运行句柄；offlineNode21fa5e仅20/20通过，不是新DB结果。没有新增生产table selector、没有新资源。
 - main仅批准test-only固定五种history显式commit、实际runner拒绝后mutated事实不变、预定义准确单V1行快照tear-down、原十列facts完全相等+ready，详见tasks/B01-B1-history-fixtures.md ready/B1 v2.2。不依赖rollback，不开生产selector/repair/drop/reset、不掩盖真实失败，不触原dev或sourceSQL。先主代理实际状态核对/正常docsmerge，再formal同high接续；两新库/全部构建/lifecycle与main独立验收仍待。
+- **正式派单已成功：** 原high completed停写、27931f clean/a575df无进程/d8d7dd原3同IDhealthy核对后，main5c75aa03正常仅6docs merge至worker8c3f91f933f3496c9971a2c3a21a1d55a8e899fb（3913c1/ca51bd/4e6e5a实际clean）。同/root/b01_contracts_high/B01-A02 followup已给准确v2.2任务/树/文件/验收/stop条件，无新写者。等待checkpoint，不重复30892失败资源或竞争builder/DB；此派单仍不是完成。
 
 ## 最新实际停点与技术修正（优先于下方运行中记录）
 
