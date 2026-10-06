@@ -1,9 +1,10 @@
 # DevClaw Bot 当前交接点
 
-2026-10-06 · C1原high额度中断已恢复可用，保留九源码并准备同代理接续 · 定时续跑保持停用
+2026-10-06 · C1原high已正式接续，九源码逐文件保留 · 定时续跑保持停用
 
 ## 最新人类手动继续与恢复事实（优先于下方运行中）
 
+- **11:26:34UTC恢复正式派单已成功：** actual main09e93d0d、worker原cfa仅报告commit/九源未跟踪核对后，normal merge53b038得到worker `49f8e0f12393c5f377403519c928ebd609cd141a`；ef0ba2实际只四coorddocs，九Java SHA与恢复前ae4dd7及state全部一致。最新2985d4 actual无Java/测试进程（0429ad sandbox不可用不冒充无进程）。formal followup给同 `/root/b01_contracts_high`/gpt-6.1-sol-high/B01-A02准确任务/树/文件/验收/报告/stop条件成功，无新代理。先child exact原MySQL归属→start一次→health/current127port，再保存九源小checkpoint继续原C1。main尚无恢复/构建/六操作通过证据，不能称MySQL已在线；不竞争builder或资源操作，不做HTTP/C2，不恢复定时。
 - 用户最新直接“继续任务”，仍仅原B01-C1/noFK/schemaALL/gpt-6.1-sol-high。原child真实quota错误16:46local提示已发生，不掩盖为完成；当前clock11:13:33UTC、工具ordinaryUsageAllowed=true/短窗1%周窗28%，旧时间已过。新reset16:11:48UTC/周窗10月12日11:10:29UTC。无本代理购买/reset/换账号模型；原errored已interrupt确认停，619104实际无Java/测试进程，恢复同原agent而非新建attempt。
 - worker实际cfa73372236f0a85a7e3950b08c97013a156a6f5，tracked diff166aab空，0f98f2/8d5c1d确认9新Java未跟踪源完整保留；每文件actual SHA在state。main已读9源码草稿，**尚无C1构建/测试通过或接受**。既有B1接受70f5/集成结果不变，target/cache/dev数据保留。下一ready `tasks/B01-C1-recovery.md`正常同步后formal同high接续，不reset/清空或并行实现。
 - 等待中外部环境变化：848ffb/54d0c4原MySQL完整ID693a1c...在06:00:25UTC OOMKilled=true/exited137/restartCount0；原owner/project/image/mount/卷一致，daemon7f72b9同75050694。ES/S3同ID/回环端口仍healthy，e500cb容量约913/110MiB。此前“原dev3healthy”只历史，不声称当前MySQL在线。先child再次验证精确归属再启动该原容器一次，有界health/当前127port/listener检查，不改参数/权限/初始化/内存/digest、不读root/删卷/重建；再OOM停测试报main，未知start先inspect不盲重放。

@@ -29,3 +29,11 @@
 主代理实际读 `cfa73372236f0a85a7e3950b08c97013a156a6f5` 全增量：仅A02报告10行，execute/可信Context+Policy/new固定JdbcStore、权限在receipt语义前/receipt在CAS前、Group→排序Bot→排序Version、无Bot→Group反向、immutable bytes/DBUTC/typed canonical和跨JVM/取消测试分组符合任务方向。没有代码、测试或资源结果，不作实现接受。
 
 已核冻结OpenAPI `x-error-status`：OUTCOME_UNKNOWN确为409且retryable=false，不是503；每operation还须声明对应status，GET不可借写409。原bytes超过1MiB用已有PAYLOAD_TOO_LARGE413，其他语法/Schema为400，不改原Boundary或做HTTP。创建历史receipt只先作服务端目标定位、再当前授权，之后expiry/conflict/body；腐坏/悬空服务端receipt不能返回跨空间内容或创建接口未声明404。以上窄澄清已发送同child，整体设计可继续。
+
+## 额度中断后的实际恢复核对
+
+2026-10-06 11:26:34UTC：main actual09e93d0d/worker cfa、tracked diff空与九新Java未跟踪SHA核对ae4dd7；原errored写者已停，fresh2985d4 process为空。当前ordinaryUsageAllowed=true且旧16:46local已过，不购买/reset/换模型账号。正常仅协调文档merge53b038到worker49f8e0f，ef0ba2证明九源码哈希完全不变、只四coorddocs，formal followup同原high/B01-A02成功。尚无C1代码接受/构建/数据库验证，不把source保存与派单当完成。
+
+九源草稿实际增量审查点已纳recovery任务并给同child：operation错误status不能越过原声明；stored number/current指针明确查实际版本事实；严格持久JSON不得DTO强制转换隐藏坏类型/重复键/非法UTF8；历史body与服务端metadata一致、当前授权优先；最大Text emoji/codepoint实际证明后才考虑原parser最小适配，原validation当前不授权修改。不同命令同CAS仍两个不同授权主体/两JVM，新增application harness必须真正取消收尾。
+
+原dev MySQL actualOOM/exited137是等待期间环境变化，不是C1失败或成功。child仅已授权原任务容器归属校验与start-once/健康端口恢复；main未执行restart，不改B00/权限/数据/内存/digest/root，await实证。再OOM停止新资源测试而非循环重启或跳过真库门槛。
