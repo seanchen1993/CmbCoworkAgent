@@ -150,11 +150,12 @@ public final class BotApplication {
                 BotVersion stored = db.version(v.id);
                 if (stored == null || !Arrays.equals(JdbcApplicationStore.json(stored), JdbcApplicationStore.json(v))) throw JdbcApplicationStore.corrupt();
                 Bot currentBot = requireBot(db, b.id, true); current(db, currentBot);
+                if (!b.version.equals(v.number) || !b.name.equals(currentBot.name) || !b.createdAt.equals(currentBot.createdAt)) throw JdbcApplicationStore.corrupt();
             } else {
                 GroupResult result = boundary.readResponse(op.wire, r.status, r.body, GroupResult.class); Group g = result.group;
                 if (!"group".equals(r.type) || !r.target.equals(g.id) || !actor.spaceId.equals(g.spaceId) || (pathId != null && !pathId.equals(g.id))) throw JdbcApplicationStore.corrupt();
                 Group stored = requireGroup(db, g.id, true);
-                if (!g.name.equals(stored.name) || !Arrays.equals(JdbcApplicationStore.json(g.limits), JdbcApplicationStore.json(stored.limits))) throw JdbcApplicationStore.corrupt();
+                if (!g.name.equals(stored.name) || !g.createdAt.equals(stored.createdAt) || !Arrays.equals(JdbcApplicationStore.json(g.limits), JdbcApplicationStore.json(stored.limits))) throw JdbcApplicationStore.corrupt();
                 bindings(db, actor, g.bots, g.bots, false);
             }
         } catch (ContractBoundary.Failure failure) { throw JdbcApplicationStore.corrupt(); }
