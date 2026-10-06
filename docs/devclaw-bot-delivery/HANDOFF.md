@@ -8,6 +8,7 @@
 - 同原high已冻结失败reportcfea745e/codeb18ebf37，实际clean停写/无运行句柄；offlineNode21fa5e仅20/20通过，不是新DB结果。没有新增生产table selector、没有新资源。
 - main仅批准test-only固定五种history显式commit、实际runner拒绝后mutated事实不变、预定义准确单V1行快照tear-down、原十列facts完全相等+ready，详见tasks/B01-B1-history-fixtures.md ready/B1 v2.2。不依赖rollback，不开生产selector/repair/drop/reset、不掩盖真实失败，不触原dev或sourceSQL。先主代理实际状态核对/正常docsmerge，再formal同high接续；两新库/全部构建/lifecycle与main独立验收仍待。
 - **正式派单已成功：** 原high completed停写、27931f clean/a575df无进程/d8d7dd原3同IDhealthy核对后，main5c75aa03正常仅6docs merge至worker8c3f91f933f3496c9971a2c3a21a1d55a8e899fb（3913c1/ca51bd/4e6e5a实际clean）。同/root/b01_contracts_high/B01-A02 followup已给准确v2.2任务/树/文件/验收/stop条件，无新写者。等待checkpoint，不重复30892失败资源或竞争builder/DB；此派单仍不是完成。
+- 最新code4a7708e9测试-only两文件diff已main完整读b2861e，固定fixture显式commit/expected十列事实/真实runner拒绝且不改mutated/准确参数化原单V1行tear-down与ready落实，没有生产seam或SQL变化。worker完整builder72056 exit0/d41d6b（report74b73665），20JUnit/1107同186cf3a9零diff/36class52/34库及原资源/V1exact；当前唯一DB86692运行未知，第一7e4252e75e965127/e9404fc3/12732884全通过已finally回收（真实SQLTimeout1021ms/五history），第二13350ba4eaa6cae1刚登记。整套/实际lifecycle/主代理独立仍待，不把第一库或构建当最终B1验收。
 
 ## 最新实际停点与技术修正（优先于下方运行中记录）
 

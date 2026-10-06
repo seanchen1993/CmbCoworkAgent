@@ -26,6 +26,8 @@ main核对官方7.15.0源码后批准唯一core7.15.0/移除mysql模块与Commun
 
 04:30UTC 30892实际失败：migration1/noop0/store/reload（含严格超时）真正成功，history比较失败捕获Flyway将autocommit true的真实行为；finally全回收，不计B1完成。worker reportcfea/codeb18冻结停写clean/nohandles；无生产selector。main选择v2.2仅test-main固定history commit、runner真正拒绝且mutated facts不变、准确原单V1行tear-down后十列facts/ready；不用半模拟历史副本或新运行时table配置，不隐藏失败/自动repair。详见tasks/B01-B1-history-fixtures.md，后续全套重新验证，main独立尚待。
 
+4a7708e9两文件diff已main完整读b2861e：固定五fixture逐项构建十列expected、实际commit、productionrunner requireCurrent拒绝、mutated事实完全不变后才准确参数化UPDATE/INSERT原单行；restore后十列及ready仍须真正确，拒绝标记最后核对，不能以恢复ready伪造拒绝。Node只固定historyCases/queryTimeout safe proof；原runner/V1/配置未动。worker72056 exit0（20JUnit/1107/36own52/34库），86692第一DB全通过/回收，第二DB未知；main独立尚无通过。
+
 1. SIGTERM若在ready/appPassword期间已触发，必须在ownedProcess启动和秘密stdin发送前检查已abort，不能只事后加abort listener；finally清理不被signal取消。child仍需窄修及真实测试，不认定已解决。
 2. 实际打包迁移与日志资源纳入审计已在5fb落实，仍须真实Java8构建/解析和两库验证，不能只源文本匹配。
 3. 合法Unicode/emoji/NUL/孤立surrogate、最大边界、原JSON/不可变receipt字节和stableordinal必须真实JDBC重开往返；当前离线codec源码/用例不替代数据库证据。
