@@ -1,6 +1,13 @@
 # DevClaw Bot 当前交接点
 
-2026-10-06 · B01-B1 v2.2隔离history测试夹具待接续原high唯一写者 · 定时续跑保持停用
+2026-10-06 · B01-B1 v2.2已冻结交回，主代理独立验收进行中 · 定时续跑保持停用
+
+## 最新主代理独立验收（优先于下方历史运行未知）
+
+- 最终实施code `d15268f66c0308bff7d2f154bb02ab20fa320cfa` / report-only HEAD `1ba0be9172eef2cb8d27ad6196bd181a1d46649a`；原high writer completed/停写/clean（8877b9），code..HEAD仅本人A02（064c00），原src/Schema/TS/生成器/B00/F05/锁不变（396ec2），无Java/Maven/probe进程（6c62a8）。worker最新lifecycle11848已确切exit0/eb1517，三个case均精确清理、JDBC starts0/secret stdin0；771f23只读资源audit原三dev同ID/端口healthy、无测试残留，全部句柄关闭。不是主代理独立验收。
+- 主代理完整读21允许实现文件/最终6生产类412c0c；独立Node e35ca8 exit0 20/20；F03 69528最终219283 exit0 原24/24＋漂移检查＋生成类型消费；Java8 build28320最终4135ef exit0 真正20JUnit零fail/error/skip、1107同轮 `21264c24-e575-435f-bdd5-a442bd1fd67f` 326valid/781invalid/0diff、36自有class52/34实际库与原Schema/manifest/V1/log exact。Jar `6a69e1ec03475b68caebb28497192241c23efaccbd7727d70ec6376e52dbbc0c`，tree `c6eeac9cad3a0209dc4ef80d5b0a1e33ca638dbe4f0e1b49f2018020a38317f6`。本次复用worker已编classes，不冒充freshcompile，合入后集成树须实际编译。
+- 当前唯一主代理真实DB命令 **3051**（总600s，两项目顺序），第一 `devclaw-bot-test-a35000e6d308d005` / MySQL `f87909be800e200fd90ffd25371d8b4a84683a878bf68214e14e783bf3dc425e` / `127.0.0.1:32888`，actual empty-readiness正确拒绝、migration1/noop0通过；其余数据库验收结果仍未知。主代理自己poll，不启动竞争资源测试。确切exit后再独立lifecycle，最后资源/Git审计才接受并正常merge。**六个业务API未实现，C1仍draft未派，自动触发PAUSED。**
+- **3051已确切exit0/a81b6a，覆盖上一行运行未知：** 两个顺序新库a350/f185全部通过，第二MySQL `a756db6dd692db4a4cc2526bef9f0ea6d3e823f306cdb60bef565c688489db8b` / 12732889；九表＋history十表、零FK、迁移1/no-op0、合法escape/bytes/UTC/数组顺序重开往返、每库5种损坏history真实runner拒绝且不变、schemaALL/三个跨库global拒绝、坏密码/停止/过时端口、真实SQLTimeout1033/1027ms全通过，两个exactfinally已removed。现在唯一主代理命令 **75260** 独立lifecycle（注入故障＋两次真实SIGTERM），结果未知；worker仍clean停写。不把两库通过当六接口完成或提前派C1。
 
 ## 04:30UTC最新实际结果与v2.2接续
 
