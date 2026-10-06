@@ -1,6 +1,14 @@
 # DevClaw Bot 当前交接点
 
-2026-10-06 · C1已独立验收、正常合入并完成集成真实复验 · 定时续跑停用
+2026-10-06 · C2 HTTP任务ready待正式派单；C1已验收 · 定时续跑停用
+
+## 最新C2接续（优先于下方C1历史）
+
+- 最新用户再次要求继续任务。本片 `tasks/B01-C2.md` v1ready，仅已有B01六个HTTP接口和可信local身份：沿用固定SpringMVC/Tomcat/JDK8/34库/原C1/B1，不新建UI/Runtime/IM/B02/B03/outboxsender或public新接口。旧C1 noHTTP是上一片，不覆盖本片正式派单后的新技术切片。
+- 原samehigh B01-A02实际completed停写，worker4c7102/0c4d0a在4019clean，main8fdclean；02d902源码除协调docs字节相同，0d3ebe actualpgrep空，d2075e原三完整ID同healthy/12732893-32877-32876且无testcontainer。没有构建/测试/HTTP/新资源或派单进行中。
+- task首次apply自动权限审查超时（不是拒绝/不假定不安全），实际4340bdclean/ba43ae nofile，仅一次允许重试已成功；c94d77真实新任务全文读完，7aff24 diffcheck通过，没有未知write副作用。主代理独占任务/state/HANDOFF，child只本人A02。
+- 当前14:07:39UTC普通调用允许、短窗85%/周窗41%，短窗16:11:48UTC恢复，无实际新quotaerror，不靠百分比判耗尽、不购买/reset/换模型账号或新写者。小检查点先保存，真实quota错误才停下核对恢复。
+- 下一保存协调docs→normal FF保留worker到实际readyHEAD→clean/代理/进程核对→formal followup同 `/root/b01_contracts_high`（gpt-6.1-sol/high）先设计checkpoint，main实际审查认可后才实施。C2尚未派单/实现/测试，不能当HTTP可用。自动触发保持PAUSED，不恢复。
 
 ## 当前交接（优先于以下历史检查点）
 
