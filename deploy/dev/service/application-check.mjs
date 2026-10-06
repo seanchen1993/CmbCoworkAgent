@@ -32,7 +32,7 @@ async function devProof() {
   }
   check(Object.keys(services).sort().join() === "es,mysql,s3")
   const network = JSON.parse(await docker(state, ["network", "inspect", "devclaw-bot-dev-private"], { stdoutOnly: true }))[0]; validateNetwork(network, entry, containers)
-  return { daemon: identity.id, owner: state.owner.id, inode: dir.ino, network: network.Id, services }
+  return { daemon: identity.id, owner: state.owner.id, inode: dir.ino, network: network.Id, services: Object.fromEntries(Object.entries(services).sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0)) }
 }
 async function capacity() {
   await devProof() // no restart/adoption, original three must still be healthy
