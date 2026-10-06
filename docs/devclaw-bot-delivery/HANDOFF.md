@@ -1,9 +1,18 @@
 # DevClaw Bot 当前交接点
 
-2026-10-06 · B01-B1 v2.2已接受合入/集成复验通过；C1 ready待正式派单 · 定时续跑保持停用
+2026-10-06 · C1原high额度中断已恢复可用，保留九源码并准备同代理接续 · 定时续跑保持停用
+
+## 最新人类手动继续与恢复事实（优先于下方运行中）
+
+- 用户最新直接“继续任务”，仍仅原B01-C1/noFK/schemaALL/gpt-6.1-sol-high。原child真实quota错误16:46local提示已发生，不掩盖为完成；当前clock11:13:33UTC、工具ordinaryUsageAllowed=true/短窗1%周窗28%，旧时间已过。新reset16:11:48UTC/周窗10月12日11:10:29UTC。无本代理购买/reset/换账号模型；原errored已interrupt确认停，619104实际无Java/测试进程，恢复同原agent而非新建attempt。
+- worker实际cfa73372236f0a85a7e3950b08c97013a156a6f5，tracked diff166aab空，0f98f2/8d5c1d确认9新Java未跟踪源完整保留；每文件actual SHA在state。main已读9源码草稿，**尚无C1构建/测试通过或接受**。既有B1接受70f5/集成结果不变，target/cache/dev数据保留。下一ready `tasks/B01-C1-recovery.md`正常同步后formal同high接续，不reset/清空或并行实现。
+- 等待中外部环境变化：848ffb/54d0c4原MySQL完整ID693a1c...在06:00:25UTC OOMKilled=true/exited137/restartCount0；原owner/project/image/mount/卷一致，daemon7f72b9同75050694。ES/S3同ID/回环端口仍healthy，e500cb容量约913/110MiB。此前“原dev3healthy”只历史，不声称当前MySQL在线。先child再次验证精确归属再启动该原容器一次，有界health/当前127port/listener检查，不改参数/权限/初始化/内存/digest、不读root/删卷/重建；再OOM停测试报main，未知start先inspect不盲重放。
+- C1草稿仍待落实已确认源映射：GET body400而非未声明413/409，createGroup缺/外空间Bot或错版本400而非未声明404，坏receipt503。其他当前引用/安全错误/严格持久JSON等窄审查点在recovery任务与review；child实施返工，main不改代码。定时续跑持续PAUSED。
 
 ## 当前下一技术切片
 
+- **C1正式派单成功，覆盖下方“待派单”：** 同原high此前completed/停写，worker662699 clean、process0056f2空核对后，实施树正常FF到准确 `9f2c33bf504b382ad609e551bdaa9006e9bbbdfb`（9a59aa），b49c57 clean、6388d2只五协调文档、64ab72 exactHEAD。formal followup已给同 `/root/b01_contracts_high` / B01-A02 准确ready任务/工作树/文件/验收/本人报告/stop条件，唯一gpt-6.1-sol/high、不派生或新写者。等待首个接口/锁序/错误/测试设计checkpoint和后续真实代码；未完成/未接受C1。main独占协调并做实际diff审查，不能竞争worker builder或资源命令。只B01应用六接口，HTTP/C2+不得开始，scheduler仍PAUSED。
+- C1首个设计report `cfa73372236f0a85a7e3950b08c97013a156a6f5`已main实际完整读：仅本人A02十行，无代码/测试/资源实现。总体execute/可信policy/固定JDBC/锁序/canonical/DBUTC/测试分组可继续；main读冻结x-error-status和Boundary后已同child澄清OUTCOME_UNKNOWN409/false、GET声明status、超1MiB413、创建receipt只locator→当前授权→语义且腐坏不返回未声明404。跨JVM同CAS须两个不同共同授权主体，避免scope串行化掩盖锁问题。child已确认无builder/DB句柄，下一代码小checkpoint，仍未接受C1。
 - B1正常merge `70f5aed6a5c19f4cde10e70c8db037d4e8d42a70`，与1ba0报告HEAD除coorddocs字节相同0d9bf0 exit0。集成2232最终908b02 exit0：**实际重新编译9main/5test**，20JUnit/1107同 `0b1cf44e-aa02-4779-98d2-0df3772a737b` 零diff/36own52/34libs/原资源/V1/log exact及probe。Jar `edcf2fe35edbf8131559d5bda4adc2e4a6e660396a4a9207a8a4050d0a930ae4`，tree同c6eeac9c；Node7af37d20/20、F0398324最终c5e18c原24/check/types全exit0。
 - 集成新产物真实DB27253最终44ae19 exit0，两顺序6bd992/3e5b6a（完整ID/port32891/32892在state/review），migration/catalog/zeroFK/bytes/5history/privilege/坏密码/停止/超时1030、1012ms等全通过且finallyexactremoved。555ccb/b9bbc0/d7d31c原三dev同ID/端口healthy、仅原三卷/网络；de92e1 clean。全部句柄关闭，B1 required work完成，不重做。**不代表六API或HTTP已交付。**
 - `tasks/B01-C1.md` v1 ready：六个应用操作、可信身份/策略port、无FK同事务关联验证/锁序、不可变回执/安全outbox、真实权限/幂等/rollback/unknowncommit/两个JVM竞争与取消收尾。准确基线/树/文件/测试已填写；只B01内下一技术片，不含C2/HTTP、产品下一路线或外部调用。当前未派单/未实施。
