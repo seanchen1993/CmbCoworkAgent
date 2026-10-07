@@ -1,6 +1,6 @@
 # B01-C2 验收记录
 
-2026-10-07 · 待最终验收 · 不代表已合入或部署
+2026-10-07 · 候选已独立验收，待正常合入及集成产物复验 · 未部署
 
 ## 范围
 
@@ -9,6 +9,10 @@
 唯一实施者为原 `/root/b01_contracts_high`、gpt-6.1-sol/high、B01-A02。主代理负责实际 diff、独立检查、集成和验收。定时自动续跑保持 PAUSED；本记录不授权下一阶段、推送、部署、真实内网或付费操作。
 
 ## 当前确证与缺口
+
+- **11:31:36 UTC 最新出口优先于下方历史：主代理八个独立入口全部实际 exit0/closed，候选 `8d743627` 独立接受。** 最后数据库生命周期 `61509/e3923b` 三模式：23bac/6f78fe完整ID、dfe5/7402f7完整ID均ready前port null；d0fe/acc396完整ID/32954秘密发送前真实SIGTERM，child均expected1/databaseChildStarts0，精确资源实际absence。完整真实结果见矩阵和state，不由worker结论代替。
+- 中断的 functions431 只读核对已从实际结果恢复：main/worker clean，worker exact8d/stopped；当前 `4a1e71` pgrep exit1/空，daemon75050694，`baeac6/12a02e` 原三个完整ID/owner/digest/mount/12732893-32877-32876健康且OOMfalse，`03965f/529f0e/37ee50` 只原网络/三卷/runtime仅dev/inode68511080/无私有fixture。第一次freeze过滤误用了两个README路径，`c87532` 实际只返回两个允许README，未伪称空；按真实 `contracts/bot/v1/README.md`、`deploy/dev/README.md` 修正后的 `e0c4be` 实际源diff空，`900897` 最终37允许文件/2013新增行，无新产品源码。无未知副作用重放。
+- 现在全部main句柄闭合、唯一worker持续停写；仅候选独立接受。正常merge、集成树真实新编及全部八入口新产物复验尚待，不能称accepted_merged或生产可用。
 
 - 11:14:46 UTC 实际核对：原 high 已 completed/stopped，最终 worker `8d743627528d65466320b9614a1e5eff53b2a7f8` clean；生产实现保持 `204303`，仅两个 README 后续追加。实际最终 diff 共 37 个允许文件，旧 C1/B1/POM/契约/资源无变化。剩余三 worker 报告已完整实读：application `33636/4d67bf`、database `22712/8087a9`、database-lifecycle `12726/35544b` 均 exit0/closed，八个自测入口齐备；不等于主代理验收。
 - 主代理独立 Node `3375bd` 35/35、F03 `13d161` 24/24、build `39591/995169` 32JUnit 零 fail/error/skip、1107 parity 同轮 `dbce15bb-18cf-4b54-9246-49c4af187511` 零差异、69 自有 class major52 / 34 固定依赖均 exit0。Maven 本轮 up-to-date，不冒充新编；jar `9c20661eb6c63200dbe9fd2b5dfa200f0a777e0ad53bc05515b522032192f4fb`。`eabc3e` 已捕获全部 182 非目录 entry 内容哈希，aggregate `2c5fee0a0ed546b101b91e0eb1670d93cda457a6b4f730e369a88ac0591a440b`，供正常合入后的实际重新编译逐项比较。
@@ -31,7 +35,7 @@
 | `node deploy/dev/service/http-lifecycle.mjs` | 28401/c32e5a exit0，三新模式/真实absence；968d12实读报告 | 70240/5de693 exit0，3case/实际PID-listener-project-privatefiles absence，原dev健康 | 待 |
 | `node deploy/dev/service/application-check.mjs` | 33636/4d67bf exit0，两库＋注入/SIGTERM；e5f5db实读报告 | 80206/061ae1 exit0，两库各376/52/21/7/12/6及双JVM竞争，注入/SIGTERM实际清理 | 待 |
 | `node deploy/dev/service/database-check.mjs` | 22712/8087a9 exit0，两库/10表/0FK；d8347d实读报告 | 23594/d62c8f exit0，两库完整证明/0FK/迁移与历史拒绝/实际SQLTimeout/精确清理 | 待 |
-| `node deploy/dev/service/database-lifecycle.mjs` | 12726/35544b exit0，3case/实际cleanup；235ef5实读报告 | 主代理最后一个独立入口运行，实际句柄见state | 待 |
+| `node deploy/dev/service/database-lifecycle.mjs` | 12726/35544b exit0，3case/实际cleanup；235ef5实读报告 | 61509/e3923b exit0，注入与两个SIGTERM/实际absence，JDBC starts0 | 待 |
 
 每项必须有实际代码 SHA、命令、句柄、exit、计数和清理证据；不能由旧结果/参考模型代替。原 Node26 / JUnit25 / F03 24 / 同轮 1107 parity / class major52 / 34 固定库与冻结原字节均需保留回归。记录 actual totals，不推测新总数。
 
@@ -43,4 +47,4 @@ HEAD 安全拒绝的无实体、Coyote 前置 URI closing 400 的精确五字节
 
 ## 最终结论
 
-待最终 clean/所有句柄闭合/唯一写者停止、实际源码全审、独立全验、正常合入及集成 fresh compile/产物复验后填写。当前不得标记 accepted。
+候选 `8d743627528d65466320b9614a1e5eff53b2a7f8` 已完成实际源码全审、主代理八入口独立全验与终末资源审计，clean/所有句柄闭合/唯一写者停止。下一只正常合入和集成真实新编/全部八入口产物复验，通过后才填写最终 accepted_merged；不自动进入后续产品路线。

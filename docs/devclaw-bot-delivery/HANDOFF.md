@@ -4,6 +4,8 @@
 
 ## 最新C2接续（优先于下方C1历史）
 
+- **11:31:36UTC：C2候选8d已主代理独立接受，尚未合入。** 八入口全部真实exit0/closed，最后61509/e3923b三DB lifecycle exactabsence/JDBC0。functions431被用户中断后waitnotfound，但所有底层只读结果已实际从store恢复，不重放测试/副作用；worker8d clean/同原high completed，main5ec8clean、4a1e71 actualpgrep exit1空，原daemon/三完整ID owner healthy127ports、唯一原network三卷/runtimeonlydev/privatefixturesnone。c87532 sourcefreeze误排了两个README路径，仅返回真实允许README；修正e0c4be sourcezero，900897 final37/2013允许行。state保存完整各八入口/资源证据。下一正常exact8d merge到main、实际31main/11test新编/182entry逐项内容比较＋全部八入口集成产物实测及terminalaudit，才accepted_merged。全部句柄当前闭合，自动PAUSED，不新派代码/后续路线。
+
 - **独立数据库23594/d62c8f实际exit0/closed。** 0d0f/5cb02c7d全ID/DB32952与4cac/b6986cd0全ID/32953各migration1/noop0/10表/zeroFK/Unicode和bytes重开、5坏history拒绝且全facts不变/原样restore-ready、schemaALL限定3越界拒绝、SQLTimeoutException1029/1031ms、坏密码/离线和stale拒绝/精确finallyremoved通过。最后一个main独立入口database-lifecycle已顺序启动（唯一实际句柄见state），其后终末源码/进程/任务Docker只读审计；全部通过才候选接受/normal exactmerge及集成真实新编和八入口产物复验。原high8d持续停写/PAUSED，未提前接受或进入下一阶段。
 
 - **主代理旧应用回归80206/061ae1实际exit0/closed。** cb87/47ccb47c完整ID/DB32948及c404/7d379f44完整ID/32949两顺序空库各376断言、52全九表拒绝、21重放、7回滚、12腐坏回执、6原Ajv，samecommand真实2JVM201/201同hash、distinctprincipal双方scope握手CAS201/409和精确finally/originalsamehealthy。新注入f091/3fe859b5完整ID/32950/Java76449、实际SIGTERM5a07/e7342248完整ID/32951/Java76569各child1/Java实际absence/active0/精确资源absence，入口最终0。唯一main数据库23594/ffc6b0/600s已登记首0d0f项目、结果未知；之后3case旧DB生命周期/终末审计/正常合入真实新编及产物测试。child停写/PAUSED，未接受C2。
