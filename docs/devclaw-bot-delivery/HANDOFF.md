@@ -4,6 +4,8 @@
 
 ## 最新C2接续（优先于下方C1历史）
 
+- **93778第一库方法限制真实局部通过，整轮仍unknown。** 原high运行中消息（main04:35:32UTC记录，045256只读9e2/f1clean）：fef8bfd1815895ba/container仅知e4a7828前缀/DB32928/生产93251-54759；42denials/11replays/raw12严格2帧通过，编码固定prefix实际400非空Ajv、HEAD400/close/wire0独立类、OPTIONS path和*、TRACE、CONNECT authority/path、DELETE/PATCH七请求都400/148byteJSON/原Ajv/close/全9facts不变。三前置URIclosing400精确零chunk亦通过；这仅worker首库运行中证据，未读最终报告/不称独立或全通过。慢流/races/第二库/closure、新lifecycle和旧8/main独立/合入新编仍待。主代理不接管93778或竞争资源，不恢复自动化。
+
 - **最新唯一93778；62235已失败收尾，精确测试预期修正。** 09bb3dae/ebd0f6真实report：62235/e5a997 exit1首a103/32927/生产83435-54286，42反例/11重放/raw12严格pipeline和3个URI closing400恰5byte零chunk/UTF8普通Ajv已过，全9facts不变；encoded-fixed-prefix后断言无status输出，不能捏造实际400，HEAD/R4/slow/races/第二库未达。worker6b8606/ecb1c0报告精确absence/originalhealthy。main12e116全RawRoute确认未知固定prefix末尾400，任务本允unknown400/404；仅f1f5a353/ab0e61新transport该条404→精确400和safe label/status长度诊断批准，普通nonempty原Ajv/无alias要求不降，生产不改。原high fe905d纯3/3/syntax/diff0后唯一93778/3e11cc+report9e2a1fd8载新code和原jar，自己poll/结果未知；main不竞争或同步活跃树，八入口/独立/合入freshcompile仍待，PAUSED不变。
 
 - **窄规则已落实，唯一62235全HTTP未知。** code6be16b05/report c1386841 clean，main3f37a4完整实际三文件与18类负例/A02符合精准批准，98ff1d主代理独立纯framing3/3 exit0，不冒充整套验收。main d71183只读专用daemon见原3同ID前缀healthy/127原端口、原网络/3卷，没读secret或改资源。原high唯一HTTP62235/828652载6be+77792 jar16832bcf/1800s，自己poll；主代理不跑竞争DB/build或同步活跃树。此前68637确切失败、59630单诊断通过均保留。只有最终全部句柄闭合、clean停写后才做main完整独立、normalmerge和集成新编；自动仍PAUSED。
