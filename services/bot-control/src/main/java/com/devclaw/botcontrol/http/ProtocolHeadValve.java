@@ -25,6 +25,7 @@ final class ProtocolHeadValve extends ValveBase {
             org.apache.coyote.Request coyote = request.getCoyoteRequest();
             if (!(coyote.getInputBuffer() instanceof Http11InputBuffer) || coyote.getBytesRead() != 0) throw invalid();
             ByteBuffer original = ((Http11InputBuffer)coyote.getInputBuffer()).getByteBuffer();
+            if (!original.hasArray() || original.arrayOffset() != 0) throw invalid();
             int position = original.position(), limit = original.limit();
             String target = coyote.requestURI().toString();
             if (!coyote.queryString().isNull()) target += "?" + coyote.queryString().toString();

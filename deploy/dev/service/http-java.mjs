@@ -8,12 +8,25 @@ const owned = new WeakMap(), children = new Set()
 let starts = 0, secretSends = 0
 export function httpChildFacts() { return { starts, secretSends, active: children.size } }
 export function httpMode(mode) { if (!modes.has(mode)) throw Error("C2_SELECTION"); return mode !== "production" }
-export async function stopHttpChildren() { await Promise.all([...children].map(child => child.stop())) }
+const handles=new Map()
+export async function stopHttpChildren() { await Promise.all([...children].map(child => handles.get(child)?.stop() ?? child.stop())) }
 async function listenerAbsent(port) {
   const child=ownedProcess("/usr/sbin/lsof",["-nP",`-iTCP:${port}`,"-sTCP:LISTEN","-Fpn"],{env:{PATH:"/usr/bin:/bin",LANG:"C",TZ:"UTC"},maxOutput:4096})
   const timer=setTimeout(()=>{void child.stop()},5000);child.child.stdin.end()
   try { const result=await child.done; if(result.code!==1||result.stdout||result.stderr||result.overflow||result.spawnError)throw Error("C2_LISTENER_RESIDUE") }
   finally {clearTimeout(timer);await child.stop()}
+}
+async function ownListenerPorts(pid) {
+  const child=ownedProcess("/usr/sbin/lsof",["-nP","-a","-p",String(pid),"-iTCP","-sTCP:LISTEN","-Fpn"],{env:{PATH:"/usr/bin:/bin",LANG:"C",TZ:"UTC"},maxOutput:4096})
+  const timer=setTimeout(()=>{void child.stop()},5000);child.child.stdin.end()
+  try {
+    const result=await child.done
+    if(result.code===1&&!result.stdout&&!result.stderr)return []
+    if(result.code!==0||result.stderr||result.overflow||result.spawnError)throw Error("C2_ENDPOINT_PROOF")
+    const lines=result.stdout.trim().split("\n"),names=lines.filter(x=>x.startsWith("n"))
+    if(lines.filter(x=>x.startsWith("p")).join()!==`p${pid}`||names.some(x=>!/^n127\.0\.0\.1:[0-9]+$/.test(x)))throw Error("C2_ENDPOINT_PROOF")
+    return names.map(x=>Number(x.slice(x.lastIndexOf(":")+1)))
+  }finally{clearTimeout(timer);await child.stop()}
 }
 export async function currentHttpDatabase(entry, signal) {
   active(signal); const current = await testResources(entry, signal, true); active(signal)
@@ -49,10 +62,10 @@ export async function startHttpJava(runtime, entry, fixture, mode, signal) {
   const handle = {}, owner = { child, entry, fixture, port: null }; owned.set(handle, owner)
   const stop = () => { void child.stop() }
   signal?.addEventListener("abort", stop, { once: true }); if (signal?.aborted) stop()
-  let timedOut = false, released = new Set()
+  let timedOut = false, released = new Set(), closing
   const lifetime = setTimeout(() => { timedOut = true; stop() }, 1200000)
   child.child.stdin.on("error", () => {})
-  const done = child.done.finally(() => { clearTimeout(lifetime); signal?.removeEventListener("abort", stop); children.delete(child) })
+  const done = child.done.finally(() => { clearTimeout(lifetime); signal?.removeEventListener("abort", stop) })
   function records() {
     if (child.output.length > 65536) throw Error("C2_JAVA_BOUNDARY")
     const lines = child.output.split("\n"); lines.pop()
@@ -72,7 +85,18 @@ export async function startHttpJava(runtime, entry, fixture, mode, signal) {
   Object.assign(handle, {
     pid: child.child.pid, done, stage,
     getOutput: () => child.output,
-    async stop() { await child.stop(); const result = await done; if (result.stderr || result.overflow || result.spawnError) throw Error("C2_JAVA_BOUNDARY"); try { process.kill(child.child.pid, 0); throw Error("C2_JAVA_RESIDUE") } catch (error) { if (error.code !== "ESRCH") throw error } if(owner.port)await listenerAbsent(owner.port) },
+    stop() {
+      if(!closing)closing=(async()=>{
+        let ports=[],proofFailed=false
+        try{ports=await ownListenerPorts(child.child.pid)}catch{proofFailed=true}
+        await child.stop();const result=await done
+        try{process.kill(child.child.pid,0);throw Error("C2_JAVA_RESIDUE")}catch(error){if(error.code!=="ESRCH")throw error}
+        for(const port of new Set([...ports,...(owner.port?[owner.port]:[])]))await listenerAbsent(port)
+        children.delete(child);handles.delete(child)
+        if(proofFailed||result.stderr||result.overflow||result.spawnError)throw Error("C2_JAVA_BOUNDARY")
+      })()
+      return closing
+    },
     release(word) {
       active(signal)
       if (!controlled || !["go", "commit-go", "response-go"].includes(word) || released.has(word) || child.exited) throw Error("C2_CONTROL")
@@ -80,6 +104,7 @@ export async function startHttpJava(runtime, entry, fixture, mode, signal) {
     }
   })
   Object.defineProperty(handle, "port", { get: () => owner.port })
+  handles.set(child,handle)
   try {
     // Awaited secret/readiness checks may observe an OS cancellation: never send
     // the config if that happened, even if the abort listener was installed later.
@@ -89,5 +114,11 @@ export async function startHttpJava(runtime, entry, fixture, mode, signal) {
     if (Object.keys(ready).sort().join() !== "port,stage" || !Number.isInteger(ready.port)) throw Error("C2_JAVA_BOUNDARY")
     owner.port = ready.port; await proveHttpEndpoint(handle, signal)
     return handle
-  } catch (error) { await child.stop(); await done; throw error }
+  } catch (error) {
+    // A ready record may precede failure/cancellation of its ownership proof.
+    // Capture only the fixed, bounded port record for absence checking, never
+    // credentials or a self-reported endpoint as authorization to connect.
+    try{if(!owner.port){const ready=records().find(x=>x.stage==="http-ready");if(Number.isInteger(ready?.port)&&ready.port>1024&&ready.port<=65535)owner.port=ready.port}}catch{}
+    await handle.stop();throw error
+  }
 }
