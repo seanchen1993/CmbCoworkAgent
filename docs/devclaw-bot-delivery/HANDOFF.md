@@ -4,6 +4,8 @@
 
 ## 最新C2接续（优先于下方C1历史）
 
+- **19326由原调用方恢复实际exit0；C2全HTTP worker通过，剩余入口继续。** 原high audit-only report51ac9abd已main68e506/dc7c41完整18行读取，479d5c clean/c6373c productdiff空，实际completed/stopped。其自身a1649e读取19326真实exit0/closed/verified两库f0e154e8d17cf399与c0048e03cf722e4f、starts30/secretSends30/active0，覆盖每库13startup/42denials11replays/raw12严格两帧/transport49/两真实JVM握手races/6rollback/commit后真实TCP0byte+原command重启恢复与精确cleanup/originaldevsamehealthy。slowdrip5519/5516ms普通非空400原Ajv，bodyidle4017/4015ms独立分类。主代理Unknownprocessid仅调用方无法读，不覆盖原owner实际结果。截断中段第二container/DBport/首生产PID等未恢复且结束时刻未知，不猜/不重跑补日志；main最终独立将完整保存新证据。28c065正常docs-only42933→5b4b516a/JSONvalid/product空；cc0ea6 main独立5pure通过，非全验。仅同high下一两README追加+余下七入口顺序实跑并停写，全部独立/normalmerge/freshcompile仍待，自动PAUSED。
+
 - 主代理27a9cb22保存恢复记录时88233c JSON校验exit1（额度旧对象尾部残留），c711a5仍提交是协调记录错误，不冒称通过；4d3e59实际定位后本补丁只删残留八行，原数据/产品源码/worker不动。恢复派单前必须重新JSON.parse和diffcheck实测通过，只同步修复后的commit，不同步无效旧记录。
 
 - **额度中断已核实，先恢复19326实际结果，不盲目重跑。** 原high真实报usage-limit/4:29PM，interrupt确认previous errored/stopped；2026-10-07 10:30:05UTC只读ordinaryUsageAllowed=true/短窗2%/周窗16%，既有本地提示时间已过，不买/reset/换模型账号/新attempt。实际worker5e6d4b43/code204303 clean；main389fd9全transport/A02、d64556完整17行body-idle spec符合精准批准，pure5/5仍worker-only。旧19326主代理接管poll返回Unknown process id（无可恢复exit，不能说成功/失败/两库已过）；26e415真实pgrep exit1空，a4bae5/1ead63/dd5e25只原三同IDhealthy/网络/三卷、f3f78f runtime只原dev，无测试残留。c1aa23实际定时仍PAUSED。仅同原high恢复audit-only本人工具输出/项目与清理证据并保存A02，main决定前不启动新测试/DB/build或修改源；源码/产物/缓存/原数据均保留。C2未接受，剩余八入口/独立/normalmerge/freshcompile仍待。
