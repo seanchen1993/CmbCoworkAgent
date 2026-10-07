@@ -4,6 +4,8 @@
 
 ## 第一完整库部分通过与容器空分块判定
 
+93778最终0f7ffe exit1已由525b4dfa/4c6345报告读回；方法/HEAD/alias等局部通过之外，CL与chunked真实1048577bytes都413/150BJSON、headeridle0wire2007ms安全断开/full9facts。body-idle C2_RESPONSE_SCHEMA的真实status/body长度未知，不拿源码推测冒充实测。main3a49ce固定三class字节码与[InputBuffer.realReadBytes/handleReadException](https://raw.githubusercontent.com/apache/tomcat/9.0.83/java/org/apache/catalina/connector/InputBuffer.java)、[OutputBuffer.write](https://raw.githubusercontent.com/apache/tomcat/9.0.83/java/org/apache/catalina/connector/OutputBuffer.java)实际核对：IO读失败容器先sendError400并suspend，后续write直接return。已仅批准同原high安全单库生产HTTP复现/有限metadata/9facts/404恢复/精确cleanup，未批准普通JSON豁免或生产改变。actualdiagnostic/原因与边界复核仍待；整套两库/慢滴/并发/生命周期/八入口/main独立未通过。
+
 93778运行中首fef8/32928/生产93251-54759 worker真实消息已证明encoded固定prefix400原Ajv/full9facts；R4七unknown-method requests400/148bytes非空JSON/close/原Ajv/full9facts，HEAD单独400/close/wire0，未冒充JSON。main045256实际当前9e2/f1clean，尚未读取最终报告或独立完整执行；R4保持open至最终两库与main复验，不拿首库消息提前关闭。slow/races/第二库/新lifecycle/全八入口仍待。
 
 最新62235/e5a997失败闭合，09bb3dae/ebd0f6实读保存失败：前三空分块URI真实400/close/精确5bytes+全9facts、UTF8普通400原Ajv通过，之后encoded固定prefix case未输出status即断言，未到HEAD/R4/慢流/双JVM。main12e116全RawRoute证明固定literal不解码末尾INVALID_PAYLOAD400；任务允许unknown400/404，批准仅该新test404→精确400（ab0e61实际f1f5a353两行diff），不改源/放宽普通JSON或接受alias。safe失败诊断仅固定label/op/status/长度/expected，不打印原bytes。93778唯一重新实跑仍未知，不能据源码把未输出case改写为实测400。
