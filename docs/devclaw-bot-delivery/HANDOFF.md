@@ -1,6 +1,12 @@
 # DevClaw Bot 当前交接点
 
-2026-10-07 · B00＋B01本地里程碑正式完成；C2已验收合入 · 定时续跑停用
+2026-10-07 · B02任务协作最小切片准备接续 · 定时续跑停用
+
+## 最新手动继续（优先于下方已完成里程碑/历史停点）
+
+- 用户最新直接要求“继续任务 不需要过度设计”。已完成 B00/B01 不重做；本轮只做 `tasks/B02.md` v1 的 createTask/getTask/createTaskMessage/getEvents 四个冻结接口，形成团队文本任务/澄清/活动基础。复用 Java 单体、JDK8、MySQL5.7、现有身份/回执/HTTP工具；不做 Run派发/Runtime/UI/招乎/S3产品API或工作流框架。
+- main 实际9b166e1e clean、worker8d743627 clean、同原high completed停写、pgrep无Java/Maven/test进程；6533d7只原三Docker完整ID healthy/回环32893-32877-32876，实际automation PAUSED。没有重跑B01、部署、改原dev账号/数据/读秘密或启动新资源。
+- 主代理已准备简短ready任务；下一正常同步ready main到保留worker，核对准确HEAD/clean后正式followup同 `/root/b01_contracts_high`（gpt-6.1-sol/high，禁止派生），新任务报告 `attempts/B02-A01.md`。目前尚未派发或实现。主代理独占state/HANDOFF/tasks/reviews；自动续跑保持PAUSED。
 
 ## 最新C2接续（优先于下方C1历史）
 
