@@ -21,11 +21,11 @@
 | 固定入口 | Worker | 主代理独立 | 集成复验 |
 | --- | --- | --- | --- |
 | `node --test tests/bot/service/*.spec.mjs` | c5ca19 / exit 0，35/35 | 仅 5 项局部通过 | 待 |
-| `node tests/bot/check-contracts.mjs` | 62353/be43a0 exit0，24/24（报告待读） | 待 | 待 |
-| `node deploy/dev/service/build.mjs` | 唯一78758/fed11a运行中，结果未知 | 待 | 待真实重新编译 |
+| `node tests/bot/check-contracts.mjs` | 62353/be43a0 exit0，24/24；be666b实读报告 | 待 | 待 |
+| `node deploy/dev/service/build.mjs` | 78758/337baa exit0，32JUnit/1107零差异/69class52/34库；up-to-date非fresh | 待 | 待真实重新编译 |
 | `node deploy/dev/service/http-check.mjs` | 19326 / exit 0，两库；元数据缺口见上 | 待两库完整安全输出 | 待产物复验 |
-| `node deploy/dev/service/http-lifecycle.mjs` | 待 | 待 | 待 |
-| `node deploy/dev/service/application-check.mjs` | 待 | 待 | 待 |
+| `node deploy/dev/service/http-lifecycle.mjs` | 28401/c32e5a exit0，三新模式/真实absence；968d12实读报告 | 待 | 待 |
+| `node deploy/dev/service/application-check.mjs` | 唯一33636/bfd42c运行中，结果未知 | 待 | 待 |
 | `node deploy/dev/service/database-check.mjs` | 待 | 待 | 待 |
 | `node deploy/dev/service/database-lifecycle.mjs` | 待 | 待 | 待 |
 
