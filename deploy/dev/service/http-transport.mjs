@@ -16,7 +16,7 @@ export async function httpWire(handle,build,signal,{head=false,parserEmpty=false
       const input=build(wire)
       if(Array.isArray(input)){wire.socket.write(input[0]);if(dripMs)interval=setInterval(()=>{if(!wire.socket.destroyed)wire.socket.write(input[1])},dripMs)}else wire.socket.write(input)
     })
-    try{return {frames:parseHttpFrames(response,{head,parserEmpty}),elapsedMs:Math.round(performance.now()-started),bytes:response.length}}
+    try{return {frames:parseHttpFrames(response,{head,parserEmpty}),elapsedMs:Math.round(performance.now()-started),bytes:response.length,framing:httpFramingSummary(response)}}
     catch(error){console.log(JSON.stringify({stage:"http-framing-failure",...httpFramingSummary(response)}));throw error}
   }finally{clearInterval(interval);wire.socket.destroy()}
 }
