@@ -4,6 +4,8 @@
 
 ## 最新C2接续（优先于下方C1历史）
 
+- **集成HTTP生命周期52076/d8f8ea实际exit0/closed。** 新注入9bab/parent8836/Java9001:52230、afterHTTP真实SIGTERM4528/parent9095/Java9180:52249、秘密前SIGTERM969c/parent9272各PID/listener/project/privatefixture实际absence，第三0starts0sends/originaldevsamehealthy；无容器ID/DBport打印不猜。唯一新集成application22875/9adf0d/1200s已启动，之后仅数据库两入口/terminalaudit。已过freshbuild/Node35/F0324/完整HTTP2库与三新生命周期，仍不得最终接受或下一阶段；同high停写/自动PAUSED。
+
 - **11:52:21UTC：集成新jar全HTTP74345/eeb77f实际exit0/closed。** 两owned新库336f/0063均全13startup/42denials11replays/raw12严格pipeline/49transport/2真实HTTP JVM握手race/6rollback/commit后TCP0bytes原command新JVM恢复/完整九表/reopen撤权offline通过，30starts30secret0active、两exactremoved/originaldevsamehealthy。所有12chunk完整安全fact/PID端口已state与store保存无截断。新唯一集成HTTP-lifecycle已顺序启动（句柄见state），随后仅application/database/database-lifecycle3入口＋terminalaudit才finalaccepted_merged。新产物7c/182内容原样等同main独立9c且真实31/11新编，不重建/竞争builder，不再派写者，自动PAUSED。
 
 - **11:46:07UTC：集成HTTP第一库全套及精确清理已通过，第二库进行中。** 6a6e06完整safe输出第一336f全部13startup/42denials11replays/raw12严格pipeline/49transport、2actualJVM handshake races、6rollback、commit后真实TCP0bytes与原command新JVM恢复/reopen/撤权/offline9facts通过并exactremoved；bodyidle4014ms独立container类别、slowdrip5540ms普通非空原Ajv。第二0063761f/完整3d4a6f88…afab/32956/Java94142:51472已ready/startup13+首2replays通过，仍唯一74345，整套结果未知。完整资源与races/lost-response PID端口在state，后四入口/terminalaudit仍待，自动PAUSED/同high停写。
