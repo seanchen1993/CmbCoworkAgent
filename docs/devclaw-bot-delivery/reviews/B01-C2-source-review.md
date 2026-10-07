@@ -2,6 +2,12 @@
 
 2026-10-07 · implementing；不是最终接受
 
+## 第一完整库部分通过与容器空分块判定
+
+e60a2f/5b07d8完整实际读a5345df/ca212b66三新test文件与A02真实报告。68637/7a9918 exit1，首库13启动负例、42权限反例/11原bytes重放、最大Unicode及12raw（两CL帧各Ajv/无残余/全9facts）通过；首次encodedsolidus触发C2_RAW_FRAMING，R4方法/慢流/并发/第二库未运行。失败不可改称通过，旧finally/1fc624 absence及originalhealthy为worker证据，主代理独立运行仍待。
+
+唯一59630/fc8b22 exit0单例诊断使用新owned空库/生产HTTP，实测400、106bytes、header101、TEchunked/noCL、wirebody恰5byte0CRLFCRLF、HTMLfalse/九表不变及精确cleanup；Connection值未输出。main a76a53独立实际pinned9.0.83 ChunkedOutputFilter.end字节码，无trailer写END_CHUNK_BYTES精确[48,13,10,13,10]，不是API业务body。已批准同原high仅新test framer加入parserEmpty=true、非HEAD、首且唯一400、TEexactchunked/noCL、Connectionexactclose、header后所有字节恰5且equals零chunk的表示判定；要消耗全部wirebytes，body为空、不得声称Ajv。普通模式任何TE仍拒，所有普通错误仍非空原Ajv；408chunk没有证据不扩张，extension/trailer/residual/多帧/缺close/CL+TE等纯负例必须补齐，下一full需真实close。生产/C1/依赖不改。当前这是有证据的精准测试修正批准，不是C2/R1/R4最终关闭。
+
 ## 完整HTTP草稿实际失败与R4装配决定
 
 2dd5ecf3的完整HTTP草稿906c26/acf20b实际范围与transactions/transport已读，69839/eaa6c4 exit1，d6fe3bf9报告第一owned库core六HTTP后business聚合断言失败，第二库/transport/races未进入，旧无子项日志不能捏造准确index。4b5876仅新harness将原合法coordinator错误负例改unknown、增加coordinator正例和固定safe index/status/code/九表全facts诊断，保持原C1/Schema。worker精确清理报告/main正确escalated dce26f只原三同ID/127端口healthy；08c370先前socket sandbox拒绝无变更，不伪称全资源或main全验通过。
