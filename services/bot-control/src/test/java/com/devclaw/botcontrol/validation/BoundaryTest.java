@@ -65,7 +65,7 @@ class BoundaryTest {
     }
     @Test void arbitraryRootsOperationsPathsAndRemoteLoadingAreUnavailable() {
         ContractBoundary boundary = new ContractBoundary();
-        for (String root : new String[]{"Task", "Run", "../schemas.json", "https://sentinel.invalid/schema"})
+        for (String root : new String[]{"Run", "UploadInitRequest", "../schemas.json", "https://sentinel.invalid/schema"})
             rejected(() -> boundary.validateDefinition(root, utf8("{}")), ContractBoundary.Category.SELECTION);
         rejected(() -> boundary.readRequest("../createBot", utf8("{}"), CreateBotRequest.class), ContractBoundary.Category.SELECTION);
         rejected(() -> boundary.readRequest("getBot", utf8("{}"), CreateBotRequest.class), ContractBoundary.Category.SELECTION);
@@ -86,7 +86,7 @@ class BoundaryTest {
         assertEquals("a\\\\\\z", ContractBoundary.strictPatternEnd("a\\\\$"));
         assertEquals("a", ContractBoundary.strictPatternEnd("a"));
     }
-    @Test void publicConsumersCoverFourRequestsSixSuccessesEveryErrorAndParameter() throws Exception {
+    @Test void publicConsumersCoverTenOperationsEveryErrorAndParameter() throws Exception {
         ContractBoundary boundary = new ContractBoundary(); ObjectMapper mapper = new ObjectMapper();
         JsonNode fixtures = mapper.readTree(BoundaryTest.class.getResourceAsStream("/parity-fixtures.json")).get("fixtures");
         int requests = 0, success = 0, errors = 0, parameters = 0;

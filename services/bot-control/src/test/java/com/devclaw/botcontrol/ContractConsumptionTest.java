@@ -51,7 +51,7 @@ class ContractConsumptionTest {
                 assertEquals(value, json.readValue(json.writeValueAsBytes(wire), type));
             }
         }
-        assertEquals(6, enums); // Capability, ErrorCode and four inline enum definitions.
+        assertEquals(11, enums); // Original six plus Task/Stage/Event/Entity wire enums.
         assertThrows(Exception.class, () -> json.readValue("\"REPOSITORY_READ\"", Capability.class));
     }
 
@@ -89,8 +89,8 @@ class ContractConsumptionTest {
         assertEquals(Long.valueOf(4294967296L), json.readValue(json.writeValueAsBytes(update), UpdateGroupMembersRequest.class).expectedVersion);
     }
 
-    @Test void allSixOperationSignaturesUseFrozenTypedInputsAndOutputs() {
-        assertEquals(6, Operations.class.getDeclaredMethods().length);
+    @Test void allTenOperationSignaturesUseFrozenTypedInputsAndOutputs() {
+        assertEquals(10, Operations.class.getDeclaredMethods().length);
     }
 
     // Compile-time consumer of the generated header/path/request/result types for every operation.
@@ -104,5 +104,12 @@ class ContractConsumptionTest {
         GroupResult snapshot = port.getGroup("space1", updated.group.id);
         Long number = appended.botVersion.number;
         GroupMember member = snapshot.group.members.get(0);
+        CreateTaskRequest taskRequest = new CreateTaskRequest();
+        TaskResult task = port.createTask("space1", taskRequest);
+        TaskSnapshotResult taskSnapshot = port.getTask("space1", task.task.id);
+        CreateTaskMessageRequest messageRequest = new CreateTaskMessageRequest();
+        TaskMessageResult message = port.createTaskMessage("space1", task.task.id, messageRequest);
+        EventsResult events = port.getEvents("space1", taskSnapshot.snapshotCursor, 200L);
+        Long taskVersion = message.taskVersion;
     }
 }
