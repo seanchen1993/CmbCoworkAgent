@@ -4,6 +4,10 @@
 
 ## 最新C2接续（优先于下方C1历史）
 
+- 主代理27a9cb22保存恢复记录时88233c JSON校验exit1（额度旧对象尾部残留），c711a5仍提交是协调记录错误，不冒称通过；4d3e59实际定位后本补丁只删残留八行，原数据/产品源码/worker不动。恢复派单前必须重新JSON.parse和diffcheck实测通过，只同步修复后的commit，不同步无效旧记录。
+
+- **额度中断已核实，先恢复19326实际结果，不盲目重跑。** 原high真实报usage-limit/4:29PM，interrupt确认previous errored/stopped；2026-10-07 10:30:05UTC只读ordinaryUsageAllowed=true/短窗2%/周窗16%，既有本地提示时间已过，不买/reset/换模型账号/新attempt。实际worker5e6d4b43/code204303 clean；main389fd9全transport/A02、d64556完整17行body-idle spec符合精准批准，pure5/5仍worker-only。旧19326主代理接管poll返回Unknown process id（无可恢复exit，不能说成功/失败/两库已过）；26e415真实pgrep exit1空，a4bae5/1ead63/dd5e25只原三同IDhealthy/网络/三卷、f3f78f runtime只原dev，无测试残留。c1aa23实际定时仍PAUSED。仅同原high恢复audit-only本人工具输出/项目与清理证据并保存A02，main决定前不启动新测试/DB/build或修改源；源码/产物/缓存/原数据均保留。C2未接受，剩余八入口/独立/normalmerge/freshcompile仍待。
+
 - **主代理单例独立通过，批准严格body-idle输入framing分类，不改生产。** 92083/a03388真实exit0/closed载c61/f7，新31494d70a83f1959/container77c6f7b466c80088d4ce1b0828ca75e964d993ebae6d95d9e87e128a8ce3e390/DB32930/生产5343-55487；实际400/CL0/无TE/body0/wire92/4139ms/close/noHTML、全9facts不变、同server404原Ajv恢复及精确finally/originalsamehealthy。30ea77 ownPID ESRCH且lsof exit1空是absence（不是失败测试），0227a1只读原3healthy/原网络/3卷/127原端口、无test残留。结合3a49ce/官方primary sendError-suspended链，main仅批准新test明确incomplete-body-idle/createBot/恰一400/CLexact0/完全无TE/close/空entity/1200-4500ms/九表不变+同server404恢复的输入framing分类；不得泛化parserEmpty，所有普通/slow-drip仍nonempty原Ajv，生产/C1/库和错误状态不重置。任务C2v1.1记明此界限，原highcompleted/clean/closed后正常docs-only同步再窄修/pure负例/唯一fullHTTP，后续新lifecycle/旧8/README/main完整独立/merge/freshcompile都待，不接受本片或恢复自动化。
 
 - **单例诊断已冻结；主代理唯一92083独立复验中。** c61f0880/f7d81edf实际4ba700全diff/report读，原high completed/stopped/clean/无句柄。worker91006/c59fad exit0新b14f/6333216a完整ID/DB32929/生产4810-55375，body-idle实际400/CL0/无TE/空entity/92wirebytes/4130ms/close/noHTML、九表不变且同server404原Ajv恢复，精确finally/0c5b8a与3f8766 absence/originalhealthy保存；这不是普通JSON通过。main当前唯一e09403/session92083载同冻结诊断，180s/newownedDB/原dev不改，自行poll；worker停写不竞争。实际独立结论未知，尚未批准特例或生产改动。必须等主代理句柄闭合/精确cleanup后再作有证据的窄分类决定，后续full8/独立/merge/freshcompile仍待，自动PAUSED。
