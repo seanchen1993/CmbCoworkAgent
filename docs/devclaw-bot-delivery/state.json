@@ -419,14 +419,6 @@
     "secondary_resets_at_utc": "2026-10-09T23:28:57Z",
     "previous_interruption": "Originalworkeractualusage-limit error after3045checkpoint; resumedsameoriginalafteractualquota recovery. Nocredits/reset/account/modelchange.",
     "last_verified_limits": {"verified_at_utc":"2026-10-07T10:30:05Z","actual_error":"You have hit your usage limit; try again at4:29PM","advertised_timezone":"notreturned; previouslocalAsia/Shanghai inferred","ordinaryUsageAllowed":true,"primary_used_percent":2,"secondary_used_percent":16,"primary_resets_at_utc":"2026-10-07T15:29:46Z","secondary_resets_at_utc":"2026-10-14T03:29:55Z","agent_previous_status":"actualerrored; interruptconfirmedstopped","worker_head":"5e6d4b430cc47c1148a70ed5d7f615ab94aa11b2","worker_clean":"d92e47","next":"sameoriginalhigh sameA02 audit-only afteractualstop/resourcechecks; no credits/reset/account/modelchange/newwriter/automaticresume","policy":"Currentordinaryusageallowed andoldadvertisedtimepassed. Only recover SAME stoppedoriginalhigh, auditlost19326result first; fresh tests wait maindecision. No reset/purchase/modelaccountchange; automaticPAUSED."}
-      "verified_at_utc": "2026-10-06T11:13:33Z",
-      "ordinaryUsageAllowed": true,
-      "primary_used_percent": 1,
-      "primary_resets_at_utc": "2026-10-06T16:11:48Z",
-      "secondary_used_percent": 28,
-      "secondary_resets_at_utc": "2026-10-12T11:10:29Z",
-      "policy": "Originalhigh child actualquotaerrored atC1 partialsource; currentordinaryUsageAllowedtrue and previous16:46localresume timepassed. Preserve/recover SAMEagent with same model/high after stop/process/source/resource audit; no purchase/reset/account/modelchange/newwriter. New actualquotaerror stops again; automatictrigger remainsPAUSED."
-    }
   },
   "recovery_notes": "Original quota interruption and SAMEhigh manual recovery retained; designapprovedbec/sourceformal17d64 no newwriter. Firstsource aea/main complete17-file read, firstbuild12101 workerexit0/0147 with31JUnit+1107parity/fixed34libs; main actualXML/hash confirms report portion, not independentfullacceptance. R1 OWS span normalization and R2 boundedfile reader open, originalsamehigh continues new realHTTP tests; no competition or resources main, C1 accepted_merged and automaticPAUSED unchanged.",
   "current_task_id": "B01"
