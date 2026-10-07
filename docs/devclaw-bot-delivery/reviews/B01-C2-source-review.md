@@ -4,6 +4,8 @@
 
 ## 第一完整库部分通过与容器空分块判定
 
+README code6480495b实际fbb0a2全部31行append及A02读取，旧内容保留，明确local私有EOF/不可变身份/原dev未serve/无新增产品路由、八命令及严格三个非JSON类别，符合允许范围。272ea5读取report5f88d206：c5ca19 worker全Node35/35零fail/skip/cancel，原26保留；实现source仍204303。余下顺序回归/全独立/合入新编仍待，不在运行中同步worker或竞争builder/DB。
+
 恢复51ac9abd实际68e506/dc7c41全18行report及c6373c productdiff空/clean/actualcompleted。原owner19326 a1649e真实exit0/verified两库/starts30-active0；49transport含普通slowdrip5519/5516ms原Ajv、2JVM明确同步races、6rollbackeach、真实commit后TCP0bytes+原command新JVM恢复、九表及finally/devsamehealthy均worker通过。mainUnknownprocessid仅caller不可读，已被ownercompletion覆盖；第二resourceidentity/部分metadata因输出截断未知，completiontime亦未知，不补造或重跑，main最后独立捕获完整。cc0ea6 main5pure独立0fail/skip；剩余七入口/README/finalfreeze及main全验、normalmerge、集成freshcompile仍未完成。R1/R4保持main-final-independent-pending，不将worker结果称整体C2接受。
 
 204303d6实际新transport增量/A02由389fd9完整读取，d64556完整实际http-body-idle.spec17行：仅固定label/op/一400/CL字面0/完全无TE（空值也拒）/close/空Buffer/1200–4500ms，错误类别/操作及六普通empty响应都拒，同server404原Ajv+9facts恢复。纯5/5为worker4e105a，未代替主代理最终实跑。原high随后真实额度错误已停止，10:30:05UTC当前ordinaryUsageAllowed=true；旧19326句柄Unknownprocessid且26e415进程空/任务资源originalonly，结果仍未知不算通过。仅同原highaudit本人保存输出，不盲重放；main最终独立/八入口/merge新编仍待，自动PAUSED。

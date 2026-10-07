@@ -14,15 +14,15 @@
 - 主代理 `cc0ea6` 独立执行两个新增 framing/body-idle spec，5 tests / 5 pass / 0 fail / 0 skip；这不是完整八入口验收。
 - 原子代理自己的 `19326 / a1649e` 确切 exit 0 / closed / verified，顺序两个隔离数据库、30 starts / 30 secret sends / 0 active。其 `51ac9abd` 报告已主代理 `dc7c41` 完整实际读取。每库权限、原字节重放、严格两帧 pipeline、49 transport、两独立 JVM 明确握手的命令/CAS 竞争、六组 rollback、提交后真实 TCP 丢响应与原 command 重启恢复、完整九表事实及精确 finally 通过，仍属于 worker 证据。
 - 旧工具结果中段被输出上限截断，第二库 container 全 ID / DB port / 首生产 PID 等元数据未恢复；结束时刻未知。不得猜测或为补旧日志盲重放。主代理最终独立全验必须完整保存新的两库归属与完成结果。
-- 其余七入口、两 README 追加、最终代码/report SHA 和 clean/停写证明仍待；主代理完整独立全验、正常 merge、集成实际 fresh compile/产物复验均待。C2-R1/R4 等不因 worker 通过自动关闭。
+- 两 README 的追加 code `6480495ba45283218a2c6a306c21fc355fea8eef`（31 行）已由主代理 `fbb0a2` 全 diff 实读，保留旧段落并明确最新本机能力/限制/八入口，生产实现仍 `204303`。`5f88d206 / 272ea5` 实读第 1 入口 `c5ca19` worker 35 tests / 35 pass / 0 fail / 0 skip / 0 cancel，原26 + HTTP9。其余六入口及最终 clean/停写待，完整独立全验、正常 merge、集成 fresh compile/产物复验均待；不把协调文档提交当生产源码变化。
 
 ## 最终验证矩阵（待填真实结果）
 
 | 固定入口 | Worker | 主代理独立 | 集成复验 |
 | --- | --- | --- | --- |
-| `node --test tests/bot/service/*.spec.mjs` | 待 | 仅 5 项局部通过 | 待 |
-| `node tests/bot/check-contracts.mjs` | 待 | 待 | 待 |
-| `node deploy/dev/service/build.mjs` | 待本轮 | 待 | 待真实重新编译 |
+| `node --test tests/bot/service/*.spec.mjs` | c5ca19 / exit 0，35/35 | 仅 5 项局部通过 | 待 |
+| `node tests/bot/check-contracts.mjs` | 62353/be43a0 exit0，24/24（报告待读） | 待 | 待 |
+| `node deploy/dev/service/build.mjs` | 唯一78758/fed11a运行中，结果未知 | 待 | 待真实重新编译 |
 | `node deploy/dev/service/http-check.mjs` | 19326 / exit 0，两库；元数据缺口见上 | 待两库完整安全输出 | 待产物复验 |
 | `node deploy/dev/service/http-lifecycle.mjs` | 待 | 待 | 待 |
 | `node deploy/dev/service/application-check.mjs` | 待 | 待 | 待 |

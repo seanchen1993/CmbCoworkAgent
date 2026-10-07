@@ -4,6 +4,8 @@
 
 ## 最新C2接续（优先于下方C1历史）
 
+- **剩余入口已接续：Node35与F0324通过，唯一build78758未知。** 同high/A02实际正常docs-only39464675→c013c28d，README6480495b只追加31行已mainfbb0a2完整读，production仍204303。c5ca19第1全Node35/35零失败/skip/cancel已272ea5实际report5f88d206读；第2原F03 ce99cc/session62353→be43a0 exit0/closed24/24及类型消费，5ee63ea7为worker消息证据，main报告读待。现在fed11a唯一build78758由原highpoll，600s/前jar16832bcf及182非目录内容hash已6bcc94保存，结果未知；main不竞争build/DB或同步活跃树。其后只新http-lifecycle与旧application/database/database-lifecycle顺序，最终停写、全独立与集成freshcompile待，自动PAUSED。
+
 - **19326由原调用方恢复实际exit0；C2全HTTP worker通过，剩余入口继续。** 原high audit-only report51ac9abd已main68e506/dc7c41完整18行读取，479d5c clean/c6373c productdiff空，实际completed/stopped。其自身a1649e读取19326真实exit0/closed/verified两库f0e154e8d17cf399与c0048e03cf722e4f、starts30/secretSends30/active0，覆盖每库13startup/42denials11replays/raw12严格两帧/transport49/两真实JVM握手races/6rollback/commit后真实TCP0byte+原command重启恢复与精确cleanup/originaldevsamehealthy。slowdrip5519/5516ms普通非空400原Ajv，bodyidle4017/4015ms独立分类。主代理Unknownprocessid仅调用方无法读，不覆盖原owner实际结果。截断中段第二container/DBport/首生产PID等未恢复且结束时刻未知，不猜/不重跑补日志；main最终独立将完整保存新证据。28c065正常docs-only42933→5b4b516a/JSONvalid/product空；cc0ea6 main独立5pure通过，非全验。仅同high下一两README追加+余下七入口顺序实跑并停写，全部独立/normalmerge/freshcompile仍待，自动PAUSED。
 
 - 主代理27a9cb22保存恢复记录时88233c JSON校验exit1（额度旧对象尾部残留），c711a5仍提交是协调记录错误，不冒称通过；4d3e59实际定位后本补丁只删残留八行，原数据/产品源码/worker不动。恢复派单前必须重新JSON.parse和diffcheck实测通过，只同步修复后的commit，不同步无效旧记录。
