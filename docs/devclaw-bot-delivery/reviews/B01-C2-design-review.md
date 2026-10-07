@@ -1,6 +1,6 @@
 # B01-C2 设计审查：本地六接口 HTTP 适配
 
-2026-10-07 · v1 · 设计通过，实施尚未派发；不是代码或测试验收
+2026-10-07 · v1 · 设计通过，实施进行中；不是代码或测试验收
 
 ## 实际证据
 
@@ -22,7 +22,17 @@
 4. **真实信任与收尾。** Node每个secret读取、spawn、stdin发送与bearer出站前检查当前signal/真实owned DB、uid/inode/nlink/文件与own child PID+实际127 listener，ready自报不能替代。既有helper只复用不降低。生产只NONE observer；test构造器观察用于真实TCP重叠/rollback/lost-response。finally先关自己Java并证明PID/listener不存在，再精确owner资源/fixture清理，原dev不改/不迁移/不升权。
 5. **测试不得借位。** 每个普通拒绝原Ajv与完整九表SQLfacts；原body上限、Unicode/NUL/surrogate、回执原bytes、当前授权与CAS均经真实HTTP。双HTTP JVM必须实际barrier证明重叠，unknown commit需真正TCP丢响应+重启原ID对账。startup、idle/slow-drip、容量恢复、secret哨兵和新HTTP fault/SIGTERM不能用旧C1/B1或MockMvc结果代替。
 
+## C2-R1 增量审查：批准窄hook，实际证明待完成
+
+主代理5de3a2实际固定9.0.83 bytecode与[同版本官方源码](https://github.com/apache/tomcat/blob/9.0.83/java/org/apache/coyote/http11/Http11Processor.java)确认：CL与chunked TE并存时，容器在Valve前移除CL并关闭keepalive。后置getHeaders不足以证明原始共存拒绝；这不是已完成的安全测试。f3ef24/33cb63确认public Request.getInputBuffer与Http11InputBuffer.getByteBuffer存在；[官方InputBuffer源码](https://github.com/apache/tomcat/blob/9.0.83/java/org/apache/coyote/http11/Http11InputBuffer.java)同时证明头名/值会原地归一化，因此buffer不是未经修改的wire副本。
+
+同child实际核parseHeaders当前位置即头结束、nextRequest仅compact/reset后，main又独立读pinned源码对应行为，已direct批准窄实现：仅body前只读duplicate的[0,position)当前头窗口，明确≤8192/32，与Coyote method/rawURI/query/protocol核当前requestline/窗口尾完整终止，不改变原position/limit/内容、不扫描limit余下body/pipeline或旧请求。固定新http适配内完成，不反射/复制第三方processor/额外proxy/升级依赖、不放宽或skip。原值折叠可能覆盖CRLF，不能假称物理行扫描证明所有wire obs-fold；实际fold/OWS/case/CL+TE/duplicate、absolute-form与合法encoded Id、body伪头/keepalive/pipeline必须实测。不确定形态fail-closed，源码/API说明不代替真实TCP，R1仍open到main读代码/独立验证通过。
+
 ## 下发与接受门槛
+
+### HEAD拒绝的传输语义澄清
+
+主代理806174独立核固定9.0.83实际javap及[同版本官方prepareResponse源码](https://raw.githubusercontent.com/apache/tomcat/9.0.83/java/org/apache/coyote/http11/Http11Processor.java)842–846：HEAD不论status均使用VOID_FILTER省略实体。准许单列rejected-method/no-body传输验证：HEAD必须实际400/Connection close/wirebody0/无HTML-cookie-CORS/九表完整facts不变；不是自动GET/HEAD成功或新API，不声称ErrorResponse bytes经wire/Ajv。不改原method/processor，也不按HEAD声明Content-Length强算不存在的实体。仅此有依据HEAD特例；六合法方法普通错误仍非空原契约JSON/Ajv，OPTIONS不豁免，parser-framing另列。当前只是设计认可，真实HEAD测试仍待。
 
 保存本审查和main协调记录→对原已停止clean worker正常merge docs→actualHEAD/clean/源码字节核对→formal followup同一high原代理，才能写任务v1允许的新类/新http harness与测试。第一实现检查点先保存装配/身份/raw边界及对应unit/metadata测试和实际构建结果；后续全部HTTP探针、生命周期及原回归仍在同C2授权，不开第二写者。
 
