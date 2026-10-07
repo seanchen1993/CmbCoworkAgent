@@ -25,3 +25,9 @@
 主代理619c41/65ed2f/009a26/4b2481/f7eb8c/9e1818/fb1e20完整12文件增量实际读；234434 diffcheck与f1169f worker clean。R2已有读前实际size<=64KiB、固定有界buffer+EOF哨兵、digest/metadata/signal复验和同inode65537B负例，子代理fa6a0f4Node全部通过，主代理最终独立仍待。R1使用真实数组一致/当前span对齐，arrayOffset显式防线已提醒，真实TCP仍未开始。新testmain/launcher/client/SQL/proof均只测试允许文件，既有公开API/生产NONE不改。
 
 connect close/abort已确定收束、HTTP总deadline10s、响应aborted和正常stop的真实原port lsof absence已落新代码。新增C2-R3：全局stopHttpChildren和startcatch只rawchildstop绕过handle的ESRCH/portabsence；已派同一写者统一异常/取消收尾证明，不动未知listener。第二builder97399/98caab/run296367eb唯一运行结果未知，不能借上一编通过；child自行poll，main不竞争。main4cd4ad/a2e20a只读原三完整ID、sameowner/healthy/OOMfalse/回环端口与无testcontainer；未读取旧秘密、修改原环境或恢复自动化。
+
+## 首真实HTTP先决6da6cd07
+
+主代理7033a4/ff6563完整四文件实际增量、cbe2d9 diffcheck/33c98b clean；统一登记handle在所有异常/取消/globalcleanup保留到ownPID监听观察、ESRCH及精确port absence结束，arrayOffset显式0前提已写，R3代码问题修复但真实新生命周期验收仍待。第二build97399/8904cf及第三build17847/c97dfa确切exit0，后者30main/10test/31JUnit/1107同a6370f77零差异/68class52/34libs；reportb4062caa已实际读4b9623，main7456f2实际jar ebd67ee1完整hash同。
+
+唯一先决HTTP99987运行中，worker消息仅第一隔离项目通过六HTTP/四键序重放/重开/12raw/full九表facts并精确清理，第二项目未结束，不能接受完整两库或全C2。该脚本明确preliminary。主代理指出pipeline不能只首404+body contains第二HTTP状态，完整版本须按CL严格两帧无残余且分别原Ajv；401等普通拒绝不能空body跳过schema，容器framing空400/close需单列。child在当前句柄收束后补，不在实跑中改载入源码。所有full授权/数值canonical/竞争/rollback/lost-response/限流慢流/新lifecycle/secret扫描/原回归及main独立仍待，R1未关闭。
