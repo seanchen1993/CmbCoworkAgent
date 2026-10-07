@@ -19,3 +19,9 @@
 3. **整套HTTP与生命周期尚未运行。** 新test-only main/Node启动器草稿在原worker保留，主代理不竞争builder/DB、不同步协调文件进活跃树。真实两库六操作、各拒绝完整九表facts、双JVM握手并发、未知提交TCP丢响应、取消及实际PID/listener/资源收尾、八入口原回归与原dev不变仍待。
 
 最后代码/报告准确SHA、clean停写且所有句柄确定闭合之后，主代理完整diff、独立实测、正常合入并真正重新编译集成产物复验，才能标记C2接受。未扩Runtime/UI/招乎/B02/B03或新公共API；自动续跑保持PAUSED。
+
+## 第二检查点f1f68d8d
+
+主代理619c41/65ed2f/009a26/4b2481/f7eb8c/9e1818/fb1e20完整12文件增量实际读；234434 diffcheck与f1169f worker clean。R2已有读前实际size<=64KiB、固定有界buffer+EOF哨兵、digest/metadata/signal复验和同inode65537B负例，子代理fa6a0f4Node全部通过，主代理最终独立仍待。R1使用真实数组一致/当前span对齐，arrayOffset显式防线已提醒，真实TCP仍未开始。新testmain/launcher/client/SQL/proof均只测试允许文件，既有公开API/生产NONE不改。
+
+connect close/abort已确定收束、HTTP总deadline10s、响应aborted和正常stop的真实原port lsof absence已落新代码。新增C2-R3：全局stopHttpChildren和startcatch只rawchildstop绕过handle的ESRCH/portabsence；已派同一写者统一异常/取消收尾证明，不动未知listener。第二builder97399/98caab/run296367eb唯一运行结果未知，不能借上一编通过；child自行poll，main不竞争。main4cd4ad/a2e20a只读原三完整ID、sameowner/healthy/OOMfalse/回环端口与无testcontainer；未读取旧秘密、修改原环境或恢复自动化。
