@@ -4,6 +4,8 @@
 
 ## 最新C2接续（优先于下方C1历史）
 
+- **集成数据库78601/0b1b25实际exit0/closed。** f9a8/完整283da77a…9546/32964及dfece/完整e1400bf0…dd44两owned库各10表/zeroFK/migrate1-noop0/Unicode及bytes重开/5坏history拒绝全facts不变与原样restore-ready/3scopeprivilege拒绝/SQLTimeoutException1021/1023ms/坏密码offline-stale/精确finally通过。最后一个集成DB生命周期已顺序启动（唯一句柄见state），通过后终末只读源码/进程/Docker资源/私有目录/自动状态核对，全部真实通过才accepted_merged/B00+B01本轮收口并等用户下一阶段授权；不派B02/Runtime/UI/IM。原high停写，自动PAUSED，jar7c未变。
+
 - **11:56:50UTC：集成旧应用22875/9ddbb4实际exit0/closed。** c375/完整500ff7af…bf9d/32960与a6e2/完整a75c90af…00df/32961各376assert/52全九表拒绝21重放7回滚12腐坏receipt6原Ajv；同command双JVM201/201同bytes、distinctactor双方scope握手CAS201/409及finally/originalhealthy通过。新注入c793/完整b7a7b330…d952/32962/Java10008和SIGTERMd8b1/完整f542ed72…764d/32963/Java10197各expectedchild1/actualPIDabsence/active0/exactcleanup，入口0。唯一新集成DB78601/741976/600s登记f9a8项目，之后last DB3lifecycle与terminalaudit。所有Java7c产物、自动PAUSED，未final接受/派新工作。
 
 - **集成HTTP生命周期52076/d8f8ea实际exit0/closed。** 新注入9bab/parent8836/Java9001:52230、afterHTTP真实SIGTERM4528/parent9095/Java9180:52249、秘密前SIGTERM969c/parent9272各PID/listener/project/privatefixture实际absence，第三0starts0sends/originaldevsamehealthy；无容器ID/DBport打印不猜。唯一新集成application22875/9adf0d/1200s已启动，之后仅数据库两入口/terminalaudit。已过freshbuild/Node35/F0324/完整HTTP2库与三新生命周期，仍不得最终接受或下一阶段；同high停写/自动PAUSED。
