@@ -1,12 +1,19 @@
 import { operations as positives } from "../../../contracts/bot/v1/fixtures/positive.mjs"
+import { validateRef } from "../schema-support.mjs"
+
+export function parityValidator(documents, name) {
+  const files = ["schemas.json", "state-transitions.json"].filter(file => Object.hasOwn(documents[file].$defs, name))
+  if (files.length !== 1) throw new Error("B02_PARITY_DEFINITION")
+  return value => validateRef({ $ref: `./${files[0]}#/$defs/${name}` }, value).valid
+}
 
 export function parityFixtures(documents, closure) {
-  const defs = documents["schemas.json"].$defs, result = []
+  const defs = { ...documents["schemas.json"].$defs, ...documents["state-transitions.json"].$defs }, result = []
   const add = (id, schema, value, raw, consumer) => result.push({ id, schema, json: raw ?? JSON.stringify(value), ...(consumer ? { consumer } : {}) })
   function sample(schema) {
     if (schema.$ref) return sample(defs[schema.$ref.split("/").at(-1)])
     if (schema.enum) return schema.enum[0]
-    if (schema.type === "string") return schema.format ? "2026-10-01T12:00:00Z" : "a"
+    if (schema.type === "string") return schema.format ? "2026-10-01T12:00:00Z" : schema.pattern === "^sha256:[0-9a-f]{64}$" ? `sha256:${"0".repeat(64)}` : "a"
     if (schema.type === "integer") return schema.minimum
     if (schema.type === "boolean") return false
     if (schema.type === "array") return Array.from({ length: schema.minItems ?? 0 }, () => sample(schema.items))
@@ -83,9 +90,9 @@ export function parityFixtures(documents, closure) {
       const code = Object.keys(api["x-error-status"]).find(key => String(api["x-error-status"][key]) === status)
       add(`operation.${operation.id}.response.${status}`, schemaName(deref(ref).content["application/json"].schema), success?.body ?? { requestId: "request1", error: { code, message: "Safe synthetic error", retryable: false } }, undefined, { operation: operation.id, kind: "response", status: Number(status) })
     }
-    for (const ref of api.paths[operation.path].parameters ?? []) {
+    for (const ref of [...(api.paths[operation.path].parameters ?? []), ...(original.parameters ?? [])]) {
       const parameter = deref(ref)
-      add(`operation.${operation.id}.parameter.${parameter.name}`, schemaName(parameter.schema), parameter.in === "path" ? fixture.request.path[parameter.name] : fixture.request.headers[parameter.name], undefined, { operation: operation.id, kind: "parameter", name: parameter.name })
+      add(`operation.${operation.id}.parameter.${parameter.name}`, schemaName(parameter.schema), parameter.in === "path" ? fixture.request.path[parameter.name] : parameter.in === "query" ? sample(parameter.schema) : fixture.request.headers[parameter.name], undefined, { operation: operation.id, kind: "parameter", name: parameter.name })
     }
   }
   for (const end of ["\n", "\r", "\r\n", "\u2028", "\u2029"]) for (const name of ["Id", "UtcDateTime"]) add(`pattern.${name}.suffix.${JSON.stringify(end)}`, name, (name === "Id" ? "id1" : "2026-10-01T12:00:00Z") + end)

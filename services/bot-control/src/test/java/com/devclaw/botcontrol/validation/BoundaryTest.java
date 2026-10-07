@@ -94,7 +94,9 @@ class BoundaryTest {
             JsonNode consumer = fixture.get("consumer"); if (consumer == null) continue;
             String operation = consumer.get("operation").asText(); byte[] bytes = utf8(fixture.get("json").asText());
             if (consumer.get("kind").asText().equals("parameter")) {
-                assertEquals(mapper.readTree(bytes).textValue(), boundary.validateParameter(operation, consumer.get("name").asText(), mapper.readTree(bytes).textValue()));
+                JsonNode parameter = mapper.readTree(bytes);
+                if (parameter.isIntegralNumber()) assertEquals(parameter.longValue(), boundary.validateIntegerParameter(operation, consumer.get("name").asText(), parameter.longValue()));
+                else assertEquals(parameter.textValue(), boundary.validateParameter(operation, consumer.get("name").asText(), parameter.textValue()));
                 parameters++; continue;
             }
             Class<?> type = Class.forName("com.devclaw.botcontrol.contracts.BotContracts$" + fixture.get("schema").asText());
@@ -109,7 +111,7 @@ class BoundaryTest {
                 if (status < 300) success++; else errors++;
             }
         }
-        assertEquals(4, requests); assertEquals(6, success); assertTrue(errors > 20); assertEquals(10, parameters);
+        assertEquals(6, requests); assertEquals(10, success); assertEquals(70, errors); assertEquals(18, parameters);
         System.out.println("B01_A2B_PUBLIC " + requests + " requests / " + success + " successes / " + errors + " declared errors / " + parameters + " parameters");
     }
     @Test void originalSchemaActuallyRunsEverySharedFixtureAndReportsConclusions() throws Exception {

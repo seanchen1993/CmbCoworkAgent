@@ -1,7 +1,7 @@
 // Generated offline by scripts/generate-bot-java-contracts.mjs. DO NOT EDIT.
 // Exact source SHA-256: 0d2a92e78e0299aa09f9c0d8e137a062bc3d0f73405bb617092834e50a16efb3
 // Structural DTOs only; original Schema bounds, required/null and if/then need runtime validation.
-// Reachable definitions: schemas.json#/$defs/Bot, schemas.json#/$defs/BotConfig, schemas.json#/$defs/BotResult, schemas.json#/$defs/BotVersion, schemas.json#/$defs/Capability, schemas.json#/$defs/CapabilityList, schemas.json#/$defs/CreateBotRequest, schemas.json#/$defs/CreateBotVersionRequest, schemas.json#/$defs/CreateGroupRequest, schemas.json#/$defs/ErrorCode, schemas.json#/$defs/ErrorResponse, schemas.json#/$defs/Group, schemas.json#/$defs/GroupBot, schemas.json#/$defs/GroupBots, schemas.json#/$defs/GroupLimits, schemas.json#/$defs/GroupMember, schemas.json#/$defs/GroupMembers, schemas.json#/$defs/GroupResult, schemas.json#/$defs/Id, schemas.json#/$defs/IdList, schemas.json#/$defs/ShortText, schemas.json#/$defs/Text, schemas.json#/$defs/UpdateGroupMembersRequest, schemas.json#/$defs/UtcDateTime, schemas.json#/$defs/Version
+// Reachable definitions: schemas.json#/$defs/ArtifactRefs, schemas.json#/$defs/ArtifactVersionRef, schemas.json#/$defs/Bot, schemas.json#/$defs/BotConfig, schemas.json#/$defs/BotResult, schemas.json#/$defs/BotVersion, schemas.json#/$defs/Capability, schemas.json#/$defs/CapabilityList, schemas.json#/$defs/CreateBotRequest, schemas.json#/$defs/CreateBotVersionRequest, schemas.json#/$defs/CreateGroupRequest, schemas.json#/$defs/CreateTaskMessageRequest, schemas.json#/$defs/CreateTaskRequest, schemas.json#/$defs/Cursor, schemas.json#/$defs/Digest, schemas.json#/$defs/EntityRef, schemas.json#/$defs/ErrorCode, schemas.json#/$defs/ErrorResponse, schemas.json#/$defs/Event, schemas.json#/$defs/EventLimit, schemas.json#/$defs/EventsResult, schemas.json#/$defs/Group, schemas.json#/$defs/GroupBot, schemas.json#/$defs/GroupBots, schemas.json#/$defs/GroupLimits, schemas.json#/$defs/GroupMember, schemas.json#/$defs/GroupMembers, schemas.json#/$defs/GroupResult, schemas.json#/$defs/Id, schemas.json#/$defs/IdList, schemas.json#/$defs/ShortText, schemas.json#/$defs/Stage, schemas.json#/$defs/StageKind, schemas.json#/$defs/Task, schemas.json#/$defs/TaskMessage, schemas.json#/$defs/TaskMessageResult, schemas.json#/$defs/TaskResult, schemas.json#/$defs/TaskSnapshotResult, schemas.json#/$defs/Text, schemas.json#/$defs/UpdateGroupMembersRequest, schemas.json#/$defs/UtcDateTime, schemas.json#/$defs/Version, state-transitions.json#/$defs/StageStatus, state-transitions.json#/$defs/TaskStatus
 package com.devclaw.botcontrol.contracts;
 
 import java.util.List;
@@ -12,6 +12,19 @@ import com.fasterxml.jackson.annotation.JsonValue;
 
 public final class BotContracts {
     private BotContracts() {}
+
+    @JsonInclude(JsonInclude.Include.NON_NULL)
+    public static final class ArtifactVersionRef {
+        @JsonProperty(value = "artifactId", required = true)
+        @JsonInclude(JsonInclude.Include.ALWAYS)
+        public String artifactId;
+        @JsonProperty(value = "versionId", required = true)
+        @JsonInclude(JsonInclude.Include.ALWAYS)
+        public String versionId;
+        @JsonProperty(value = "digest", required = true)
+        @JsonInclude(JsonInclude.Include.ALWAYS)
+        public String digest;
+    }
 
     @JsonInclude(JsonInclude.Include.NON_NULL)
     public static final class Bot {
@@ -191,6 +204,73 @@ public final class BotContracts {
         public GroupLimits limits;
     }
 
+    @JsonInclude(JsonInclude.Include.NON_NULL)
+    public static final class CreateTaskMessageRequest {
+        @JsonProperty(value = "commandId", required = true)
+        @JsonInclude(JsonInclude.Include.ALWAYS)
+        public String commandId;
+        @JsonProperty(value = "expectedVersion", required = true)
+        @JsonInclude(JsonInclude.Include.ALWAYS)
+        public Long expectedVersion;
+        @JsonProperty(value = "text", required = true)
+        @JsonInclude(JsonInclude.Include.ALWAYS)
+        public String text;
+        @JsonProperty(value = "artifactVersions", required = true)
+        @JsonInclude(JsonInclude.Include.ALWAYS)
+        public List<ArtifactVersionRef> artifactVersions;
+        @JsonProperty(value = "targetBotId", required = false)
+        public String targetBotId;
+    }
+
+    @JsonInclude(JsonInclude.Include.NON_NULL)
+    public static final class CreateTaskRequest {
+        @JsonProperty(value = "commandId", required = true)
+        @JsonInclude(JsonInclude.Include.ALWAYS)
+        public String commandId;
+        @JsonProperty(value = "groupId", required = true)
+        @JsonInclude(JsonInclude.Include.ALWAYS)
+        public String groupId;
+        @JsonProperty(value = "title", required = true)
+        @JsonInclude(JsonInclude.Include.ALWAYS)
+        public String title;
+        @JsonProperty(value = "goal", required = true)
+        @JsonInclude(JsonInclude.Include.ALWAYS)
+        public String goal;
+        @JsonProperty(value = "inputArtifactVersions", required = true)
+        @JsonInclude(JsonInclude.Include.ALWAYS)
+        public List<ArtifactVersionRef> inputArtifactVersions;
+    }
+
+    @JsonInclude(JsonInclude.Include.NON_NULL)
+    public static final class EntityRef {
+        @JsonProperty(value = "kind", required = true)
+        @JsonInclude(JsonInclude.Include.ALWAYS)
+        public EntityRefKind kind;
+        @JsonProperty(value = "id", required = true)
+        @JsonInclude(JsonInclude.Include.ALWAYS)
+        public String id;
+        @JsonProperty(value = "version", required = true)
+        @JsonInclude(JsonInclude.Include.ALWAYS)
+        public Long version;
+    }
+
+    public enum EntityRefKind {
+        BOT("bot"),
+        GROUP("group"),
+        TASK("task"),
+        ARTIFACT("artifact"),
+        APPROVAL("approval"),
+        RUN("run"),
+        DELIVERY("delivery");
+        private final String wire;
+        EntityRefKind(String wire) { this.wire = wire; }
+        @JsonValue public String wire() { return wire; }
+        @JsonCreator public static EntityRefKind fromWire(String wire) {
+            for (EntityRefKind value : values()) if (value.wire.equals(wire)) return value;
+            throw new IllegalArgumentException("Unknown EntityRefKind wire value");
+        }
+    }
+
     public enum ErrorCode {
         INVALID_PAYLOAD("INVALID_PAYLOAD"),
         SCHEMA_VERSION_UNSUPPORTED("SCHEMA_VERSION_UNSUPPORTED"),
@@ -244,6 +324,60 @@ public final class BotContracts {
         public Long currentVersion;
         @JsonProperty(value = "retryAfterSeconds", required = false)
         public Long retryAfterSeconds;
+    }
+
+    @JsonInclude(JsonInclude.Include.NON_NULL)
+    public static final class Event {
+        @JsonProperty(value = "eventId", required = true)
+        @JsonInclude(JsonInclude.Include.ALWAYS)
+        public String eventId;
+        @JsonProperty(value = "spaceId", required = true)
+        @JsonInclude(JsonInclude.Include.ALWAYS)
+        public String spaceId;
+        @JsonProperty(value = "seq", required = true)
+        @JsonInclude(JsonInclude.Include.ALWAYS)
+        public Long seq;
+        @JsonProperty(value = "occurredAt", required = true)
+        @JsonInclude(JsonInclude.Include.ALWAYS)
+        public String occurredAt;
+        @JsonProperty(value = "kind", required = true)
+        @JsonInclude(JsonInclude.Include.ALWAYS)
+        public EventKind kind;
+        @JsonProperty(value = "taskId", required = false)
+        public String taskId;
+        @JsonProperty(value = "runId", required = false)
+        public String runId;
+        @JsonProperty(value = "entityRef", required = true)
+        @JsonInclude(JsonInclude.Include.ALWAYS)
+        public EntityRef entityRef;
+    }
+
+    public enum EventKind {
+        TASK_UPDATED("task_updated"),
+        ARTIFACT_COMMITTED("artifact_committed"),
+        APPROVAL_UPDATED("approval_updated"),
+        RUN_UPDATED("run_updated"),
+        DELIVERY_UPDATED("delivery_updated");
+        private final String wire;
+        EventKind(String wire) { this.wire = wire; }
+        @JsonValue public String wire() { return wire; }
+        @JsonCreator public static EventKind fromWire(String wire) {
+            for (EventKind value : values()) if (value.wire.equals(wire)) return value;
+            throw new IllegalArgumentException("Unknown EventKind wire value");
+        }
+    }
+
+    @JsonInclude(JsonInclude.Include.NON_NULL)
+    public static final class EventsResult {
+        @JsonProperty(value = "events", required = true)
+        @JsonInclude(JsonInclude.Include.ALWAYS)
+        public List<Event> events;
+        @JsonProperty(value = "nextCursor", required = true)
+        @JsonInclude(JsonInclude.Include.ALWAYS)
+        public String nextCursor;
+        @JsonProperty(value = "hasMore", required = true)
+        @JsonInclude(JsonInclude.Include.ALWAYS)
+        public Boolean hasMore;
     }
 
     @JsonInclude(JsonInclude.Include.NON_NULL)
@@ -347,6 +481,167 @@ public final class BotContracts {
     }
 
     @JsonInclude(JsonInclude.Include.NON_NULL)
+    public static final class Stage {
+        @JsonProperty(value = "id", required = true)
+        @JsonInclude(JsonInclude.Include.ALWAYS)
+        public String id;
+        @JsonProperty(value = "kind", required = true)
+        @JsonInclude(JsonInclude.Include.ALWAYS)
+        public StageKind kind;
+        @JsonProperty(value = "status", required = true)
+        @JsonInclude(JsonInclude.Include.ALWAYS)
+        public StageStatus status;
+        @JsonProperty(value = "inputArtifactVersions", required = true)
+        @JsonInclude(JsonInclude.Include.ALWAYS)
+        public List<ArtifactVersionRef> inputArtifactVersions;
+        @JsonProperty(value = "outputArtifactVersions", required = true)
+        @JsonInclude(JsonInclude.Include.ALWAYS)
+        public List<ArtifactVersionRef> outputArtifactVersions;
+    }
+
+    public enum StageKind {
+        REQUIREMENT("requirement"),
+        ASSESSMENT("assessment"),
+        PROTOTYPE("prototype"),
+        SCOPE_CONFIRMATION("scope_confirmation"),
+        DEVELOPMENT("development");
+        private final String wire;
+        StageKind(String wire) { this.wire = wire; }
+        @JsonValue public String wire() { return wire; }
+        @JsonCreator public static StageKind fromWire(String wire) {
+            for (StageKind value : values()) if (value.wire.equals(wire)) return value;
+            throw new IllegalArgumentException("Unknown StageKind wire value");
+        }
+    }
+
+    public enum StageStatus {
+        PENDING("pending"),
+        ACTIVE("active"),
+        WAITING_CONFIRMATION("waiting_confirmation"),
+        COMPLETED("completed"),
+        CANCELLED("cancelled");
+        private final String wire;
+        StageStatus(String wire) { this.wire = wire; }
+        @JsonValue public String wire() { return wire; }
+        @JsonCreator public static StageStatus fromWire(String wire) {
+            for (StageStatus value : values()) if (value.wire.equals(wire)) return value;
+            throw new IllegalArgumentException("Unknown StageStatus wire value");
+        }
+    }
+
+    @JsonInclude(JsonInclude.Include.NON_NULL)
+    public static final class Task {
+        @JsonProperty(value = "id", required = true)
+        @JsonInclude(JsonInclude.Include.ALWAYS)
+        public String id;
+        @JsonProperty(value = "spaceId", required = true)
+        @JsonInclude(JsonInclude.Include.ALWAYS)
+        public String spaceId;
+        @JsonProperty(value = "version", required = true)
+        @JsonInclude(JsonInclude.Include.ALWAYS)
+        public Long version;
+        @JsonProperty(value = "createdAt", required = true)
+        @JsonInclude(JsonInclude.Include.ALWAYS)
+        public String createdAt;
+        @JsonProperty(value = "updatedAt", required = true)
+        @JsonInclude(JsonInclude.Include.ALWAYS)
+        public String updatedAt;
+        @JsonProperty(value = "groupId", required = true)
+        @JsonInclude(JsonInclude.Include.ALWAYS)
+        public String groupId;
+        @JsonProperty(value = "taskNumber", required = true)
+        @JsonInclude(JsonInclude.Include.ALWAYS)
+        public String taskNumber;
+        @JsonProperty(value = "title", required = true)
+        @JsonInclude(JsonInclude.Include.ALWAYS)
+        public String title;
+        @JsonProperty(value = "goal", required = true)
+        @JsonInclude(JsonInclude.Include.ALWAYS)
+        public String goal;
+        @JsonProperty(value = "status", required = true)
+        @JsonInclude(JsonInclude.Include.ALWAYS)
+        public TaskStatus status;
+        @JsonProperty(value = "currentStageId", required = true)
+        @JsonInclude(JsonInclude.Include.ALWAYS)
+        public String currentStageId;
+        @JsonProperty(value = "stages", required = true)
+        @JsonInclude(JsonInclude.Include.ALWAYS)
+        public List<Stage> stages;
+        @JsonProperty(value = "inputArtifactVersions", required = true)
+        @JsonInclude(JsonInclude.Include.ALWAYS)
+        public List<ArtifactVersionRef> inputArtifactVersions;
+    }
+
+    @JsonInclude(JsonInclude.Include.NON_NULL)
+    public static final class TaskMessage {
+        @JsonProperty(value = "id", required = true)
+        @JsonInclude(JsonInclude.Include.ALWAYS)
+        public String id;
+        @JsonProperty(value = "spaceId", required = true)
+        @JsonInclude(JsonInclude.Include.ALWAYS)
+        public String spaceId;
+        @JsonProperty(value = "taskId", required = true)
+        @JsonInclude(JsonInclude.Include.ALWAYS)
+        public String taskId;
+        @JsonProperty(value = "authorPrincipalId", required = true)
+        @JsonInclude(JsonInclude.Include.ALWAYS)
+        public String authorPrincipalId;
+        @JsonProperty(value = "text", required = true)
+        @JsonInclude(JsonInclude.Include.ALWAYS)
+        public String text;
+        @JsonProperty(value = "artifactVersions", required = true)
+        @JsonInclude(JsonInclude.Include.ALWAYS)
+        public List<ArtifactVersionRef> artifactVersions;
+        @JsonProperty(value = "createdAt", required = true)
+        @JsonInclude(JsonInclude.Include.ALWAYS)
+        public String createdAt;
+    }
+
+    @JsonInclude(JsonInclude.Include.NON_NULL)
+    public static final class TaskMessageResult {
+        @JsonProperty(value = "message", required = true)
+        @JsonInclude(JsonInclude.Include.ALWAYS)
+        public TaskMessage message;
+        @JsonProperty(value = "taskVersion", required = true)
+        @JsonInclude(JsonInclude.Include.ALWAYS)
+        public Long taskVersion;
+    }
+
+    @JsonInclude(JsonInclude.Include.NON_NULL)
+    public static final class TaskResult {
+        @JsonProperty(value = "task", required = true)
+        @JsonInclude(JsonInclude.Include.ALWAYS)
+        public Task task;
+    }
+
+    @JsonInclude(JsonInclude.Include.NON_NULL)
+    public static final class TaskSnapshotResult {
+        @JsonProperty(value = "task", required = true)
+        @JsonInclude(JsonInclude.Include.ALWAYS)
+        public Task task;
+        @JsonProperty(value = "snapshotCursor", required = true)
+        @JsonInclude(JsonInclude.Include.ALWAYS)
+        public String snapshotCursor;
+    }
+
+    public enum TaskStatus {
+        DRAFT("draft"),
+        ACTIVE("active"),
+        AWAITING_BUSINESS("awaiting_business"),
+        AWAITING_TECHNICAL("awaiting_technical"),
+        HANDED_OFF("handed_off"),
+        COMPLETED("completed"),
+        CANCELLED("cancelled");
+        private final String wire;
+        TaskStatus(String wire) { this.wire = wire; }
+        @JsonValue public String wire() { return wire; }
+        @JsonCreator public static TaskStatus fromWire(String wire) {
+            for (TaskStatus value : values()) if (value.wire.equals(wire)) return value;
+            throw new IllegalArgumentException("Unknown TaskStatus wire value");
+        }
+    }
+
+    @JsonInclude(JsonInclude.Include.NON_NULL)
     public static final class UpdateGroupMembersRequest {
         @JsonProperty(value = "commandId", required = true)
         @JsonInclude(JsonInclude.Include.ALWAYS)
@@ -370,10 +665,18 @@ public final class BotContracts {
         BotResult createBotVersion(String xDevClawSpace, String botId, CreateBotVersionRequest body);
         // POST /api/bot/v1/groups; error: ErrorResponse
         GroupResult createGroup(String xDevClawSpace, CreateGroupRequest body);
+        // POST /api/bot/v1/tasks; error: ErrorResponse
+        TaskResult createTask(String xDevClawSpace, CreateTaskRequest body);
+        // POST /api/bot/v1/tasks/{taskId}/messages; error: ErrorResponse
+        TaskMessageResult createTaskMessage(String xDevClawSpace, String taskId, CreateTaskMessageRequest body);
         // GET /api/bot/v1/bots/{botId}; error: ErrorResponse
         BotResult getBot(String xDevClawSpace, String botId);
+        // GET /api/bot/v1/events; error: ErrorResponse
+        EventsResult getEvents(String xDevClawSpace, String after, Long limit);
         // GET /api/bot/v1/groups/{groupId}; error: ErrorResponse
         GroupResult getGroup(String xDevClawSpace, String groupId);
+        // GET /api/bot/v1/tasks/{taskId}; error: ErrorResponse
+        TaskSnapshotResult getTask(String xDevClawSpace, String taskId);
         // PUT /api/bot/v1/groups/{groupId}/members; error: ErrorResponse
         GroupResult updateGroupMembers(String xDevClawSpace, String groupId, UpdateGroupMembersRequest body);
     }
