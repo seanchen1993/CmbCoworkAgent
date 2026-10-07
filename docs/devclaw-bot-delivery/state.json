@@ -426,8 +426,8 @@
       "formal_followup": "succeeded",
       "dispatched_at_utc": "2026-10-07T12:19:32Z",
       "attempt_report": "/Users/heyirui/.codex/worktrees/devclaw-bot-local/cmbCowork/docs/devclaw-bot-delivery/attempts/B02-A01.md",
-      "latest_checkpoint": "12:34:29UTC main c8aed5/c7bb12 read actual a61 contract diff, 3d3f81b4 test correction and report-only1a97b81d. Child first10658 exited1 (three obsolete six-operation/Task-unselected assertions); corrected preserving original six coverage plus unselected Run/Upload. Child50816 final084e3f exit0/closed:32JUnit and1884 Java/Ajv zero mismatches; main actual six XML confirm32/zero. These are worker-only contract checks, not B02 acceptance or independent full verification. Current V2/Operation/readiness drafts preserved; same high implementing, no DB yet and no reported live handle. TimerPAUSED.",
-      "checkpoint_head": "1a97b81d8b0a677fe07feef52ab657709b6b2f9f",
+      "latest_checkpoint": "12:42:10UTC actual4e8927 checkpoint816da293 (17files/522+39-) now includes Task application/store/HTTP/V2 and four JUnit tests. Main read draft e4e4e1/8afce8/832601/4c478d and immutable816diff: duplicate task_events removed in favor of nullable Outbox columns; ReceiptAccess null Connection fixed to same real transaction. These two review findings resolved in source, not yet real-DB verified. Child only builder66430 is running, child owns polling; V2 upgrade/HTTP task-check/CAS/restart still pending. Same high/no competing writer or DB, timerPAUSED.",
+      "checkpoint_head": "816da293a4be5345c49b34acece79632768a13a9",
       "contract_checkpoint": {
         "code_commit": "a61ba5c213e7c83fd85589cd94f7050f045668c1",
         "test_correction_commit": "3d3f81b477593546cca1edcbcd3068e94d643f5e",
@@ -444,7 +444,7 @@
         "main_xml_chunk": "c7bb12",
         "independent_verification": "pending after stopped final candidate"
       },
-      "live_commands": [],
+      "live_commands": [{"owner":"child /root/b01_contracts_high","session_id":66430,"start_chunk":"3efc34","command":"node deploy/dev/service/build.mjs","worktree":"/Users/heyirui/.codex/worktrees/devclaw-bot-local/cmbCowork","run_id":"629c0213-6c83-4fea-be83-7e515182e26f","status":"running_unknown","polling":"child only; main does not compete"}],
       "wait_reason": null
     }
   ],
