@@ -1,6 +1,6 @@
 import { isDeepStrictEqual } from "node:util"
 import { rawHttpSocket,httpCall,validateHttpResponse } from "./http-client.mjs"
-import { parseHttpFrames } from "./http-framing.mjs"
+import { parseHttpFrames,httpFramingSummary } from "./http-framing.mjs"
 import { httpSql } from "./http-sql.mjs"
 import { assertHttpNoSecret } from "./http-java.mjs"
 
@@ -16,7 +16,8 @@ export async function httpWire(handle,build,signal,{head=false,parserEmpty=false
       const input=build(wire)
       if(Array.isArray(input)){wire.socket.write(input[0]);if(dripMs)interval=setInterval(()=>{if(!wire.socket.destroyed)wire.socket.write(input[1])},dripMs)}else wire.socket.write(input)
     })
-    return {frames:parseHttpFrames(response,{head,parserEmpty}),elapsedMs:Math.round(performance.now()-started),bytes:response.length}
+    try{return {frames:parseHttpFrames(response,{head,parserEmpty}),elapsedMs:Math.round(performance.now()-started),bytes:response.length}}
+    catch(error){console.log(JSON.stringify({stage:"http-framing-failure",...httpFramingSummary(response)}));throw error}
   }finally{clearInterval(interval);wire.socket.destroy()}
 }
 export async function httpTransport(server,runtime,entry,create,signal){

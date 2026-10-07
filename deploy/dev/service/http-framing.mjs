@@ -1,4 +1,9 @@
 // Response parsing for the real TCP probe; no substring success predicates.
+export function httpFramingSummary(bytes){
+  const end=bytes.indexOf("\r\n\r\n"),header=end>=0?bytes.subarray(0,end).toString("latin1"):"",body=end>=0?bytes.subarray(end+4):Buffer.alloc(0)
+  const status=/^HTTP\/1\.[01] ([0-9]{3}) /.exec(header)?.[1],cl=/\r\ncontent-length:\s*([0-9]+)\s*(?:\r\n|$)/i.exec(header)?.[1],te=/\r\ntransfer-encoding:\s*([^\r\n]+)(?:\r\n|$)/i.exec(header)?.[1]
+  return {bytes:bytes.length,status:status?Number(status):null,headerBytes:end<0?null:end+4,contentLength:cl?Number(cl):null,transferEncoding:te?te.toLowerCase().trim()==="chunked"?"chunked":"other":null,wireBodyBytes:body.length,exactZeroChunk:body.equals(Buffer.from("0\r\n\r\n")),containsHTML:body.toString("utf8").toLowerCase().includes("<html")}
+}
 export function parseHttpFrames(bytes,{head=false,parserEmpty=false}={}){
   if(!Buffer.isBuffer(bytes)||bytes.length>1100000)throw Error("C2_RAW_FRAMING")
   if(!bytes.length){if(parserEmpty)return [];throw Error("C2_RAW_FRAMING")}
