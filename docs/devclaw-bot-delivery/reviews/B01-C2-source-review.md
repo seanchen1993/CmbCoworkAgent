@@ -10,6 +10,8 @@ R4证据main618b6d及[固定CoyoteAdapter源码](https://raw.githubusercontent.c
 
 ## 首代码与构建事实
 
+424/0a仅新test history/private-file/allSettled已main7e8daa/669616/e33336全读；29649在main表名提醒前约1秒启动，eee074 exit1九启动负例局部通过但没history-mutated/业务/第二库。worker exactTERM准备时Node71298已退出，ESRCH无副作用；d5828c/6dd4bc报告项目精确absence/原3samehealthy。8972a845/9c44ca实际只新fixture两SQL权威bot_schema_history、stdout完整行/max8192/3和失败报告，原B1/V1不改。35560/2862ee build通过是错fixture快照不证明SQL。77792/5f49a8新11test重新编/32JUnit/1107同3f6cc9a4零差异/69class52/34库，report6cf1627b实际abd9ec已读；现在68637唯一HTTP未知，childpoll/main不竞争，完整startup/fullHTTP/lifecycle/八入口/main独立均待。
+
 最新dac07832已实际b235c5全读公共Adapter/装配/第7JUnit/build窄审计，365dad全读startup/java/client/check/transport/report；wrapper符合R4最小批准，真实TCP仍待。94370/067438实际exit0（worker），31main/10test新编、32JUnit旧25+新7全零、1107同ab3d7a0d零差异、69自身class52/34固定库。main d4234c实际全部六XML=32零失败/跳过与jar85b3edb4993035c0380d880f8a7db321908d11a098df9dde8fa7d3645df61190同；这是子代理材料核对，不是主代理独立执行。
 
 新lifecycle d32675增加实际父PID ESRCH；仍需实际三模式。已提醒同一写者只新helpers：query/semicolon/double-encoding等普通gate错误不可一组parserEmpty跳过Ajv；实际bad-migration/missing/symlink启动拒绝和0Java/0secret；global stop所有登记JVM须全部settled再报错，不能Promise.all早reject后提前回收DB。当前后续窄测试修改未冻结，dac构建不能担保未来Java/test修改；八入口、main独立与新集成产物未通过。main dce26f/14a26c实际原三healthy/原网络/三卷/运行目录无测试，不改或读原秘密。
