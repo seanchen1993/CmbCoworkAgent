@@ -5,6 +5,14 @@ import { httpSql } from "./http-sql.mjs"
 import { assertHttpNoSecret } from "./http-java.mjs"
 
 const check=x=>{if(!x)throw Error("C2_TRANSPORT_ASSERTION")}
+// A single pinned container read-timeout fixture, never an API JSON bypass.
+export function requireContainerBodyIdle(label,operation,result){
+  const frame=result.frames?.[0]
+  check(label==="incomplete-body-idle"&&operation==="createBot"&&result.frames?.length===1&&
+    frame.status===400&&frame.headers["content-length"]==="0"&&
+    !Object.hasOwn(frame.headers,"transfer-encoding")&&frame.headers.connection==="close"&&
+    Buffer.isBuffer(frame.body)&&frame.body.length===0&&result.elapsedMs>=1200&&result.elapsedMs<=4500)
+}
 export async function httpWire(handle,build,signal,{head=false,parserEmpty=false,dripMs=0}={}){
   const wire=await rawHttpSocket(handle,"p1",signal),chunks=[];let bytes=0,interval
   const started=performance.now()
@@ -24,18 +32,19 @@ export async function httpTransport(server,runtime,entry,create,signal){
   const facts=()=>httpSql(runtime,entry,"facts",{},signal),initial=await facts();let cases=0
   const base=x=>`Host: 127.0.0.1:${x.port}\r\nAuthorization: Bearer ${x.token}\r\nX-DevClaw-Space: A\r\nConnection: close\r\n`
   const get=(path,extra="")=>x=>`GET ${path} HTTP/1.1\r\n${base(x)}${extra}\r\n`
-  async function ordinary(label,op,build,expected,{head=false,parserEmpty=false,dripMs=0,window}={}){
+  async function ordinary(label,op,build,expected,{head=false,parserEmpty=false,containerBodyIdle=false,dripMs=0,window}={}){
     const result=await httpWire(server,build,signal,{head,parserEmpty,dripMs})
     if(result.frames.length!==1||![].concat(expected).includes(result.frames[0]?.status))console.log(JSON.stringify({stage:"http-transport-status-failure",label,operation:op,frameCount:result.frames.length,status:result.frames[0]?.status??null,expected:[].concat(expected),bodyBytes:result.frames[0]?.body.length??0,wireBytes:result.bytes,elapsedMs:result.elapsedMs}))
     if(!result.frames.length){check(parserEmpty)}else{
       check(result.frames.length===1);const frame=result.frames[0];check([].concat(expected).includes(frame.status))
-      if(head){check(frame.status===400&&frame.body.length===0&&frame.headers.connection?.toLowerCase()==="close")}
+      if(containerBodyIdle){check(!head&&!parserEmpty&&!dripMs);requireContainerBodyIdle(label,op,result)}
+      else if(head){check(frame.status===400&&frame.body.length===0&&frame.headers.connection?.toLowerCase()==="close")}
       else if(parserEmpty&&frame.body.length===0){check(frame.status===400||frame.status===408);if(frame.parserZeroChunk)check(frame.status===400&&frame.headers.connection.toLowerCase()==="close"&&frame.wireBodyBytes===5)}
       else{validateHttpResponse(op,frame.status,frame.body);assertHttpNoSecret(server,frame.body)}
     }
     if(window)check(result.elapsedMs>=window[0]&&result.elapsedMs<=window[1])
     check(isDeepStrictEqual(initial,await facts()));cases++
-    console.log(JSON.stringify({stage:"http-transport-case",label,status:result.frames[0]?.status??null,category:head?"rejected-method/no-body":result.frames[0]?.parserZeroChunk?"parser-framing/exact-zero-chunk":parserEmpty&&(!result.frames.length||!result.frames[0].body.length)?"parser-framing":"ordinary-api-json",actualAjv:!head&&!!result.frames[0]?.body.length,connectionClose:result.frames[0]?.headers.connection?.toLowerCase()==="close",parserZeroChunk:result.frames[0]?.parserZeroChunk===true,wireBodyBytes:result.frames[0]?.wireBodyBytes??result.frames[0]?.body.length??0,elapsedMs:result.elapsedMs,allNineFactsUnchanged:true}))
+    console.log(JSON.stringify({stage:"http-transport-case",label,status:result.frames[0]?.status??null,category:containerBodyIdle?"container-input-body-timeout/no-entity":head?"rejected-method/no-body":result.frames[0]?.parserZeroChunk?"parser-framing/exact-zero-chunk":parserEmpty&&(!result.frames.length||!result.frames[0].body.length)?"parser-framing":"ordinary-api-json",actualAjv:!head&&!containerBodyIdle&&!!result.frames[0]?.body.length,connectionClose:result.frames[0]?.headers.connection?.toLowerCase()==="close",parserZeroChunk:result.frames[0]?.parserZeroChunk===true,wireBodyBytes:result.frames[0]?.wireBodyBytes??result.frames[0]?.body.length??0,elapsedMs:result.elapsedMs,allNineFactsUnchanged:true}))
   }
   for(const path of ["/api/bot/v1/bots/versions","/api/bot/v1/groups/members"]){const method=path.includes("bots")?"POST":"PUT";await ordinary("missing-id","getBot",x=>`${method} ${path} HTTP/1.1\r\n${base(x)}\r\n`,400)}
   for(const path of ["/api/bot/v1/bots/%6dissing","/api/bot/v1/bots/missing%3Aid","/api/bot/v1/bots/missing%2Eid"] )await ordinary("legal-single-encoded-id","getBot",get(path),404)
@@ -67,7 +76,9 @@ export async function httpTransport(server,runtime,entry,create,signal){
   await ordinary("actual-chunked-body-cap","createBot",x=>Buffer.concat([Buffer.from(`POST /api/bot/v1/bots HTTP/1.1\r\n${base(x)}Content-Type: application/json\r\nTransfer-Encoding: chunked\r\n\r\n${large.length.toString(16)}\r\n`),large,Buffer.from("\r\n0\r\n\r\n")]),413)
   await ordinary("incomplete-header-idle","getBot",x=>`GET /api/bot/v1/bots/missing HTTP/1.1\r\nHost: 127.0.0.1:${x.port}\r\n`,[400,408],{parserEmpty:true,window:[1200,4500]})
   const slow=x=>`POST /api/bot/v1/bots HTTP/1.1\r\n${base(x)}Content-Type: application/json\r\nContent-Length: 100\r\n\r\n`
-  await ordinary("incomplete-body-idle","createBot",slow,400,{window:[1200,4500]})
+  await ordinary("incomplete-body-idle","createBot",slow,400,{containerBodyIdle:true,window:[1200,4500]})
+  const idleRecovered=await httpCall(server,"getBot","GET","/api/bot/v1/bots/missing",{signal});check(idleRecovered.status===404&&isDeepStrictEqual(initial,await facts()))
+  console.log(JSON.stringify({stage:"http-body-idle-recovery",status:404,actualAjv:true,allNineFactsUnchanged:true}))
   await ordinary("slow-drip-body-absolute","createBot",x=>[slow(x)," "],400,{dripMs:500,window:[4500,7500]})
   const held=await Promise.all(Array.from({length:4},()=>rawHttpSocket(server,"p1",signal)));let drip
   try{
@@ -90,6 +101,6 @@ export async function httpTransport(server,runtime,entry,create,signal){
   const payload=Buffer.from(JSON.stringify(create("legal-chunked"))),chunked=await httpWire(server,x=>Buffer.concat([Buffer.from(`POST /api/bot/v1/bots HTTP/1.1\r\n${base(x)}Content-Type: application/json; charset=UTF-8\r\nTransfer-Encoding: chunked\r\n\r\n${payload.length.toString(16)}\r\n`),payload,Buffer.from("\r\n0\r\n\r\n")]),signal)
   check(chunked.frames.length===1&&chunked.frames[0].status===201);validateHttpResponse("createBot",201,chunked.frames[0].body)
   const recovered=await httpCall(server,"getBot","GET","/api/bot/v1/bots/missing",{signal});check(recovered.status===404)
-  console.log(JSON.stringify({stage:"http-transport-proof",cases,ordinaryErrorsNonemptyActualAjv:true,headOnlyVoidException:true,legalChunkedActual:true,slowBodyBoundAndRecovery:true,pressureSockets:pressure.length,workers:8,queue:16,connections:32,viewNotWireCopy:true}))
+  console.log(JSON.stringify({stage:"http-transport-proof",cases,ordinaryApiErrorsNonemptyActualAjv:true,headOnlyVoidException:true,containerBodyIdleNoEntitySeparate:true,legalChunkedActual:true,slowBodyBoundAndRecovery:true,pressureSockets:pressure.length,workers:8,queue:16,connections:32,viewNotWireCopy:true}))
   return {transportCases:cases,legalChunked:true}
 }
