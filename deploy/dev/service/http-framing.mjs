@@ -16,15 +16,22 @@ export function parseHttpFrames(bytes,{head=false,parserEmpty=false}={}){
     const headers={}
     for(const line of lines){const colon=line.indexOf(":");if(colon<1)throw Error("C2_RAW_FRAMING");const name=line.slice(0,colon).toLowerCase(),value=line.slice(colon+1).trim();if(Object.hasOwn(headers,name))throw Error("C2_RAW_FRAMING");headers[name]=value}
     if(headers["set-cookie"]||headers["access-control-allow-origin"])throw Error("C2_RAW_FRAMING")
+    // Pinned Tomcat's pre-context 400 may end an otherwise empty response
+    // through ChunkedOutputFilter. This is not a general chunked decoder.
+    const zeroChunk=parserEmpty&&!head&&offset===0&&Number(match[1])===400&&
+      headers["transfer-encoding"]?.toLowerCase()==="chunked"&&
+      !Object.hasOwn(headers,"content-length")&&headers.connection?.toLowerCase()==="close"&&
+      bytes.subarray(end+4).equals(Buffer.from("0\r\n\r\n"))
     let length
     if(head)length=0
     else if(/^(0|[1-9][0-9]*)$/.test(headers["content-length"]??""))length=Number(headers["content-length"])
+    else if(zeroChunk)length=0
     else if(parserEmpty&&offset===0&&end+4===bytes.length)length=0
     else throw Error("C2_RAW_FRAMING")
-    if(headers["transfer-encoding"]||length>1048576||end+4+length>bytes.length)throw Error("C2_RAW_FRAMING")
+    if((headers["transfer-encoding"]&&!zeroChunk)||length>1048576||end+4+length>bytes.length)throw Error("C2_RAW_FRAMING")
     const body=bytes.subarray(end+4,end+4+length)
     if(body.toString("utf8").toLowerCase().includes("<html"))throw Error("C2_RAW_FRAMING")
-    frames.push({status:Number(match[1]),headers,body});offset=end+4+length
+    frames.push({status:Number(match[1]),headers,body,...zeroChunk?{parserZeroChunk:true,wireBodyBytes:5}:{}});offset=zeroChunk?bytes.length:end+4+length
     if(head&&offset!==bytes.length)throw Error("C2_RAW_FRAMING")
   }
   return frames

@@ -29,12 +29,12 @@ export async function httpTransport(server,runtime,entry,create,signal){
     if(!result.frames.length){check(parserEmpty)}else{
       check(result.frames.length===1);const frame=result.frames[0];check([].concat(expected).includes(frame.status))
       if(head){check(frame.status===400&&frame.body.length===0&&frame.headers.connection?.toLowerCase()==="close")}
-      else if(parserEmpty&&frame.body.length===0){check(frame.status===400||frame.status===408)}
+      else if(parserEmpty&&frame.body.length===0){check(frame.status===400||frame.status===408);if(frame.parserZeroChunk)check(frame.status===400&&frame.headers.connection.toLowerCase()==="close"&&frame.wireBodyBytes===5)}
       else{validateHttpResponse(op,frame.status,frame.body);assertHttpNoSecret(server,frame.body)}
     }
     if(window)check(result.elapsedMs>=window[0]&&result.elapsedMs<=window[1])
     check(isDeepStrictEqual(initial,await facts()));cases++
-    console.log(JSON.stringify({stage:"http-transport-case",label,status:result.frames[0]?.status??null,category:head?"rejected-method/no-body":parserEmpty&&(!result.frames.length||!result.frames[0].body.length)?"parser-framing":"ordinary-api-json",actualAjv:!head&&!!result.frames[0]?.body.length,elapsedMs:result.elapsedMs,allNineFactsUnchanged:true}))
+    console.log(JSON.stringify({stage:"http-transport-case",label,status:result.frames[0]?.status??null,category:head?"rejected-method/no-body":result.frames[0]?.parserZeroChunk?"parser-framing/exact-zero-chunk":parserEmpty&&(!result.frames.length||!result.frames[0].body.length)?"parser-framing":"ordinary-api-json",actualAjv:!head&&!!result.frames[0]?.body.length,connectionClose:result.frames[0]?.headers.connection?.toLowerCase()==="close",parserZeroChunk:result.frames[0]?.parserZeroChunk===true,wireBodyBytes:result.frames[0]?.wireBodyBytes??result.frames[0]?.body.length??0,elapsedMs:result.elapsedMs,allNineFactsUnchanged:true}))
   }
   for(const path of ["/api/bot/v1/bots/versions","/api/bot/v1/groups/members"]){const method=path.includes("bots")?"POST":"PUT";await ordinary("missing-id","getBot",x=>`${method} ${path} HTTP/1.1\r\n${base(x)}\r\n`,400)}
   for(const path of ["/api/bot/v1/bots/%6dissing","/api/bot/v1/bots/missing%3Aid","/api/bot/v1/bots/missing%2Eid"] )await ordinary("legal-single-encoded-id","getBot",get(path),404)
