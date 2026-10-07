@@ -24,6 +24,12 @@
 
 ## 下发与接受门槛
 
+## C2-R1 增量审查：原始 framing 证据（尚未解决）
+
+主代理5de3a2实际固定9.0.83 bytecode与[同版本官方源码](https://github.com/apache/tomcat/blob/9.0.83/java/org/apache/coyote/http11/Http11Processor.java)确认：CL与chunked TE并存时，容器在Valve前移除CL并关闭keepalive。后置getHeaders不足以证明原始共存拒绝；这不是已完成的安全测试。f3ef24/33cb63确认public Request.getInputBuffer与Http11InputBuffer.getByteBuffer存在；[官方InputBuffer源码](https://github.com/apache/tomcat/blob/9.0.83/java/org/apache/coyote/http11/Http11InputBuffer.java)同时证明头名/值会原地归一化，因此buffer不是未经修改的wire副本。
+
+已给同child最小调查：仅body前只读duplicate当前header区域，明确≤8192/32、当前原始request target/终止与keepalive/pipeline复位，不改变原position/limit/内容、不扫描body或旧请求。需实际CL+TE/重复和合法请求证据，再批准具体实现；不反射/复制第三方processor/额外proxy/升级依赖，也不偷偷放宽或skip验收。其他config/registry/raw/body部分可继续，当前仅两新类draft，未编译或HTTP验证。此open项不被此前设计批准或public getter存在自动关闭。
+
 保存本审查和main协调记录→对原已停止clean worker正常merge docs→actualHEAD/clean/源码字节核对→formal followup同一high原代理，才能写任务v1允许的新类/新http harness与测试。第一实现检查点先保存装配/身份/raw边界及对应unit/metadata测试和实际构建结果；后续全部HTTP探针、生命周期及原回归仍在同C2授权，不开第二写者。
 
 八入口按tasks/B01-C2.md完整执行；保留原26Node/25JUnit/24F03/1107parity/34库/class52/原源和artifact。自测仅待审查，最后真实code/report SHA、clean/无运行未知句柄并停写，主代理完整实际diff和独立真实验收、正常集成且实际freshcompile复验后才接受。无UI/Runtime/招乎/model/repo/B02/B03/outbox sender/新API、sudo/重建/prune/推送/部署/内网/付费；定时PAUSED。
