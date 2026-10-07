@@ -1,6 +1,6 @@
 # B01-C2 验收记录
 
-2026-10-07 · 候选已独立验收，待正常合入及集成产物复验 · 未部署
+2026-10-07 · 候选已独立验收并正常合入，集成产物复验中 · 未部署
 
 ## 范围
 
@@ -9,6 +9,8 @@
 唯一实施者为原 `/root/b01_contracts_high`、gpt-6.1-sol/high、B01-A02。主代理负责实际 diff、独立检查、集成和验收。定时自动续跑保持 PAUSED；本记录不授权下一阶段、推送、部署、真实内网或付费操作。
 
 ## 当前确证与缺口
+
+- 正常 no-ff merge `107e35481053e0a49528feff54b2581ec798dc0e`（`a4b35f` ort 成功，无冲突/reset），`7e9632` 确认除协调记录外与 worker8d 全部字节相等，`7b314f` clean。唯一集成 build `5344/78d627` 已启动，后续真正重新编译/产物逐项比较和八入口集成复验尚待；不因合入成功提前最终接受。
 
 - **11:31:36 UTC 最新出口优先于下方历史：主代理八个独立入口全部实际 exit0/closed，候选 `8d743627` 独立接受。** 最后数据库生命周期 `61509/e3923b` 三模式：23bac/6f78fe完整ID、dfe5/7402f7完整ID均ready前port null；d0fe/acc396完整ID/32954秘密发送前真实SIGTERM，child均expected1/databaseChildStarts0，精确资源实际absence。完整真实结果见矩阵和state，不由worker结论代替。
 - 中断的 functions431 只读核对已从实际结果恢复：main/worker clean，worker exact8d/stopped；当前 `4a1e71` pgrep exit1/空，daemon75050694，`baeac6/12a02e` 原三个完整ID/owner/digest/mount/12732893-32877-32876健康且OOMfalse，`03965f/529f0e/37ee50` 只原网络/三卷/runtime仅dev/inode68511080/无私有fixture。第一次freeze过滤误用了两个README路径，`c87532` 实际只返回两个允许README，未伪称空；按真实 `contracts/bot/v1/README.md`、`deploy/dev/README.md` 修正后的 `e0c4be` 实际源diff空，`900897` 最终37允许文件/2013新增行，无新产品源码。无未知副作用重放。
@@ -28,10 +30,10 @@
 
 | 固定入口 | Worker | 主代理独立 | 集成复验 |
 | --- | --- | --- | --- |
-| `node --test tests/bot/service/*.spec.mjs` | c5ca19 / exit0，35/35 | 3375bd / exit0，35/35 | 待 |
-| `node tests/bot/check-contracts.mjs` | 62353/be43a0 exit0，24/24；be666b实读报告 | 13d161 / exit0，24/24 | 待 |
-| `node deploy/dev/service/build.mjs` | 78758/337baa exit0，32JUnit/1107零差异/69class52/34库；up-to-date非fresh | 39591/995169 exit0，32/1107/69/34；up-to-date非fresh | 待真实重新编译 |
-| `node deploy/dev/service/http-check.mjs` | 19326 / exit0，两库；旧元数据缺口见上 | 12957/49011b exit0，两库完整证明/资源精确清理/原dev健康；304 safe facts 未截断 | 待产物复验 |
+| `node --test tests/bot/service/*.spec.mjs` | c5ca19 / exit0，35/35 | 3375bd / exit0，35/35 | a9045d / exit0，35/35 |
+| `node tests/bot/check-contracts.mjs` | 62353/be43a0 exit0，24/24；be666b实读报告 | 13d161 / exit0，24/24 | 59056实际exit0/24/type-drift，准确chunk见state |
+| `node deploy/dev/service/build.mjs` | 78758/337baa exit0，32JUnit/1107零差异/69class52/34库；up-to-date非fresh | 39591/995169 exit0，32/1107/69/34；up-to-date非fresh | 5344/4820c3 exit0，真实31main/11test新编，32/1107零差异/69class52/34库；fa546f182内容逐项相同 |
+| `node deploy/dev/service/http-check.mjs` | 19326 / exit0，两库；旧元数据缺口见上 | 12957/49011b exit0，两库完整证明/资源精确清理/原dev健康；304 safe facts 未截断 | 唯一集成HTTP运行，实际句柄见state |
 | `node deploy/dev/service/http-lifecycle.mjs` | 28401/c32e5a exit0，三新模式/真实absence；968d12实读报告 | 70240/5de693 exit0，3case/实际PID-listener-project-privatefiles absence，原dev健康 | 待 |
 | `node deploy/dev/service/application-check.mjs` | 33636/4d67bf exit0，两库＋注入/SIGTERM；e5f5db实读报告 | 80206/061ae1 exit0，两库各376/52/21/7/12/6及双JVM竞争，注入/SIGTERM实际清理 | 待 |
 | `node deploy/dev/service/database-check.mjs` | 22712/8087a9 exit0，两库/10表/0FK；d8347d实读报告 | 23594/d62c8f exit0，两库完整证明/0FK/迁移与历史拒绝/实际SQLTimeout/精确清理 | 待 |

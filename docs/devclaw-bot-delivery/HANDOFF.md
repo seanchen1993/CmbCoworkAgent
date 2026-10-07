@@ -4,6 +4,10 @@
 
 ## 最新C2接续（优先于下方C1历史）
 
+- **集成产物真实新编/内容比对/Node/F03通过，唯一HTTP实跑见state。** 原5344/4820c3实际exit0，31main/11test真正重编、32JUnit零fail/error/skip、1107同e7562b3c零差异/69class52/34libs/冻结资源；jar7c1ff653。fa546f全部182非目录内容与此前main独立HTTP实际测试9c jar逐项完全相等，added/removed/changed[]/aggregate2c5fee0a，只有ZIP总hash不同不猜其时间原因。Nodea9045d35与F0359056最终实测exit0/24/type-drift均通过。新的main集成HTTP两个owned空库已启动，须等待本人句柄最终exit/cleanup，再四旧新生命周期/应用/DB回归；没有build竞争或worker写者。main状态校验f0cfa6在stage前抓到空数组live索引误选B00；主代理实际定位只协调记录偏差，恢复B00[]并将anchor限定B01，5d8e6f已真实验证所有句柄闭合/旧任务保留后再顺序开F03/HTTP，不重放原build，不虚报失败校验通过。尚未finalaccepted，自动PAUSED。
+
+- **已正常merge 107e35481053e0a49528feff54b2581ec798dc0e。** a4b35f ort no-ff精确8d成功，无冲突/reset/覆盖，包含37允许产品文件与本人A02；7e9632实际与worker8d除coorddocs全部字节一致、7b314f clean。主代理八入口独立接受已保存9ed0f04d。唯一main集成build5344/78d627已开始，e7562b3c仅prepare不是parity通过；真正31main/11test新编、产物hash/182entry内容比较及后续八入口集成结果都待。无新写者/后续路线/定时恢复；原dev数据/target/cache保留。
+
 - **11:31:36UTC：C2候选8d已主代理独立接受，尚未合入。** 八入口全部真实exit0/closed，最后61509/e3923b三DB lifecycle exactabsence/JDBC0。functions431被用户中断后waitnotfound，但所有底层只读结果已实际从store恢复，不重放测试/副作用；worker8d clean/同原high completed，main5ec8clean、4a1e71 actualpgrep exit1空，原daemon/三完整ID owner healthy127ports、唯一原network三卷/runtimeonlydev/privatefixturesnone。c87532 sourcefreeze误排了两个README路径，仅返回真实允许README；修正e0c4be sourcezero，900897 final37/2013允许行。state保存完整各八入口/资源证据。下一正常exact8d merge到main、实际31main/11test新编/182entry逐项内容比较＋全部八入口集成产物实测及terminalaudit，才accepted_merged。全部句柄当前闭合，自动PAUSED，不新派代码/后续路线。
 
 - **独立数据库23594/d62c8f实际exit0/closed。** 0d0f/5cb02c7d全ID/DB32952与4cac/b6986cd0全ID/32953各migration1/noop0/10表/zeroFK/Unicode和bytes重开、5坏history拒绝且全facts不变/原样restore-ready、schemaALL限定3越界拒绝、SQLTimeoutException1029/1031ms、坏密码/离线和stale拒绝/精确finallyremoved通过。最后一个main独立入口database-lifecycle已顺序启动（唯一实际句柄见state），其后终末源码/进程/任务Docker只读审计；全部通过才候选接受/normal exactmerge及集成真实新编和八入口产物复验。原high8d持续停写/PAUSED，未提前接受或进入下一阶段。
