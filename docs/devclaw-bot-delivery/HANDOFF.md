@@ -4,6 +4,8 @@
 
 ## 最新C2接续（优先于下方C1历史）
 
+- **11:41:23UTC：唯一集成HTTP74345/7c新产物仍运行。** 166d56/f70b95/308890完整安全输出保存，首项目336f149a/完整5f6dd28d…ec3f/DB32955/生产Java79000:50729，13启动拒绝/10字节重放/33权限等拒绝当前exactstatus和全9facts通过；完整business/transport/双JVM/第二库/最后收尾仍未知，不提前接受。不竞争builder/DB或唤child；rootlive限定B01已b03b13实际验证，B00空/历史任务不受影响。随后按固定4入口/末审计，自动PAUSED。
+
 - **集成产物真实新编/内容比对/Node/F03通过，唯一HTTP实跑见state。** 原5344/4820c3实际exit0，31main/11test真正重编、32JUnit零fail/error/skip、1107同e7562b3c零差异/69class52/34libs/冻结资源；jar7c1ff653。fa546f全部182非目录内容与此前main独立HTTP实际测试9c jar逐项完全相等，added/removed/changed[]/aggregate2c5fee0a，只有ZIP总hash不同不猜其时间原因。Nodea9045d35与F0359056最终实测exit0/24/type-drift均通过。新的main集成HTTP两个owned空库已启动，须等待本人句柄最终exit/cleanup，再四旧新生命周期/应用/DB回归；没有build竞争或worker写者。main状态校验f0cfa6在stage前抓到空数组live索引误选B00；主代理实际定位只协调记录偏差，恢复B00[]并将anchor限定B01，5d8e6f已真实验证所有句柄闭合/旧任务保留后再顺序开F03/HTTP，不重放原build，不虚报失败校验通过。尚未finalaccepted，自动PAUSED。
 
 - **已正常merge 107e35481053e0a49528feff54b2581ec798dc0e。** a4b35f ort no-ff精确8d成功，无冲突/reset/覆盖，包含37允许产品文件与本人A02；7e9632实际与worker8d除coorddocs全部字节一致、7b314f clean。主代理八入口独立接受已保存9ed0f04d。唯一main集成build5344/78d627已开始，e7562b3c仅prepare不是parity通过；真正31main/11test新编、产物hash/182entry内容比较及后续八入口集成结果都待。无新写者/后续路线/定时恢复；原dev数据/target/cache保留。
