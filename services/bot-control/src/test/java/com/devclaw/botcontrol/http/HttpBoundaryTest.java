@@ -107,4 +107,36 @@ class HttpBoundaryTest {
         ByteBuffer folded = ByteBuffer.wrap(bytes(overwritten)); folded.position(folded.limit());
         ProtocolHeadValve.check(folded,line,Collections.singletonList(field(overwritten,"x","a bcdef")));
     }
+    @Test void publicMethodAdapterRejectsBeforeDelegateAndExactlyDelegatesOtherLifecycle() throws Exception {
+        List<String> calls = new ArrayList<String>();
+        org.apache.coyote.Adapter original = new org.apache.coyote.Adapter() {
+            public void service(org.apache.coyote.Request r,org.apache.coyote.Response s) { calls.add("service"); }
+            public boolean prepare(org.apache.coyote.Request r,org.apache.coyote.Response s) { calls.add("prepare"); return true; }
+            public boolean asyncDispatch(org.apache.coyote.Request r,org.apache.coyote.Response s,org.apache.tomcat.util.net.SocketEvent e) { calls.add("async"); return true; }
+            public void log(org.apache.coyote.Request r,org.apache.coyote.Response s,long time) { assertEquals(123,time); calls.add("log"); }
+            public void checkRecycled(org.apache.coyote.Request r,org.apache.coyote.Response s) { calls.add("recycled"); }
+            public String getDomain() { calls.add("domain"); return "fixed"; }
+        };
+        ClosedMethodAdapter wrapper = new ClosedMethodAdapter(original);
+        for(String method:Arrays.asList("OPTIONS","TRACE","CONNECT","DELETE","PATCH","get")) {
+            org.apache.coyote.Request request = new org.apache.coyote.Request(); request.method().setString(method);
+            org.apache.coyote.Response response = new org.apache.coyote.Response(); ByteArrayOutputStream body = new ByteArrayOutputStream();
+            response.setOutputBuffer(new org.apache.coyote.OutputBuffer() {
+                public int doWrite(ByteBuffer buffer) { int n = buffer.remaining(); while(buffer.hasRemaining()) body.write(buffer.get()); return n; }
+                public long getBytesWritten() { return body.size(); }
+            });
+            wrapper.service(request,response); assertEquals(400,response.getStatus()); assertTrue(calls.isEmpty());
+            assertEquals(body.size(),response.getContentLength()); assertEquals("close",response.getMimeHeaders().getHeader("Connection"));
+            assertEquals(ErrorCode.INVALID_PAYLOAD,new ContractBoundary().readResponse("getBot",400,body.toByteArray(),ErrorResponse.class).error.code);
+            assertFalse(wrapper.prepare(request,response)); assertTrue(calls.isEmpty());
+        }
+        for(String method:Arrays.asList("GET","POST","PUT","HEAD")) {
+            org.apache.coyote.Request request = new org.apache.coyote.Request(); request.method().setString(method);
+            org.apache.coyote.Response response = new org.apache.coyote.Response(); wrapper.service(request,response); assertTrue(wrapper.prepare(request,response));
+        }
+        org.apache.coyote.Request request = new org.apache.coyote.Request(); org.apache.coyote.Response response = new org.apache.coyote.Response();
+        assertTrue(wrapper.asyncDispatch(request,response,org.apache.tomcat.util.net.SocketEvent.OPEN_READ)); wrapper.log(request,response,123); wrapper.checkRecycled(request,response); assertEquals("fixed",wrapper.getDomain());
+        assertEquals(Arrays.asList("service","prepare","service","prepare","service","prepare","service","prepare","async","log","recycled","domain"),calls);
+        assertThrows(IllegalArgumentException.class,()->new ClosedMethodAdapter(null));
+    }
 }

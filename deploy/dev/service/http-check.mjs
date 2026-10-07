@@ -12,6 +12,7 @@ import { parseHttpFrames } from "./http-framing.mjs"
 import { httpBusiness } from "./http-business.mjs"
 import { httpTransactions } from "./http-transactions.mjs"
 import { httpTransport } from "./http-transport.mjs"
+import { httpStartup,httpOffline,stopHttpStartupChildren } from "./http-startup.mjs"
 
 const filename=fileURLToPath(import.meta.url),check=(value)=>{if(!value)throw Error("C2_ASSERTION")}
 const json=value=>Buffer.from(JSON.stringify(value))
@@ -79,8 +80,11 @@ export async function httpCheck(signal){
       try{
         active(signal)
         console.log(JSON.stringify({stage:"http-registered",project:entry.project,iteration}));console.log(JSON.stringify({stage:"http-database-ready",...await startTestDatabase(entry,signal)}));active(signal)
+        fixture=await createHttpFixture(httpPrincipals(),signal)
+        await httpStartup(runtime,entry,fixture,signal,{unmigrated:true})
         for(const expected of [1,0]){const migration=await javaDatabase(runtime,entry,"migrate",{signal});check(migration.exitCode===0&&migration.proof.migrations===expected)}
-        fixture=await createHttpFixture(httpPrincipals(),signal);server=await startHttpJava(runtime,entry,fixture,"production",signal)
+        const startupNegatives=1+await httpStartup(runtime,entry,fixture,signal)
+        server=await startHttpJava(runtime,entry,fixture,"production",signal)
         console.log(JSON.stringify({stage:"http-listener",pid:server.pid,port:server.port,project:entry.project,productionEOF:true}))
         const first=await httpCall(server,"createBot","POST","/api/bot/v1/bots",{body:create("create"),signal});check(first.status===201)
         const bot=first.value,read=await httpCall(server,"getBot","GET",`/api/bot/v1/bots/${bot.bot.id}`,{signal});check(read.status===200&&read.value.botVersion.id===bot.botVersion.id)
@@ -99,18 +103,27 @@ export async function httpCheck(signal){
         console.log(JSON.stringify({stage:"http-reopened-listener",pid:server.pid,port:server.port,project:entry.project}))
         const reopened=await httpCall(server,"getBot","GET",`/api/bot/v1/bots/${bot.bot.id}`,{signal});check(reopened.value.bot.version===2&&reopened.value.bot.name===bot.bot.name)
         const reopenedGroup=await httpCall(server,"getGroup","GET",`/api/bot/v1/groups/${g.id}`,{principal:"p4",signal});check(reopenedGroup.value.group.version===business.groupVersion&&isDeepStrictEqual(reopenedGroup.value.group.bots,g.bots))
-        console.log(JSON.stringify({stage:"http-core-proof",iteration,project:entry.project,sixRealHTTP:true,reopened:true,...business,...transport,...transactions,rawCases,scope:"HTTP-full-core-startup-and-lifecycle-pending"}));projects.push(entry.project)
+        check(isDeepStrictEqual(reopenedGroup.value.group.members,members())&&isDeepStrictEqual(reopened.value.bot.maintainerIds,create("unused").maintainerIds))
+        await server.stop();await closeHttpFixture(fixture);fixture=await createHttpFixture(httpPrincipals(false),signal);server=await startHttpJava(runtime,entry,fixture,"production",signal)
+        console.log(JSON.stringify({stage:"http-policy-reopened-listener",pid:server.pid,port:server.port,project:entry.project}))
+        const beforePolicy=await httpSql(runtime,entry,"facts",{},signal)
+        for(const [op,path,body,original] of [["createBotVersion",`/api/bot/v1/bots/${bot.bot.id}/versions`,append("append",1),version],["createGroup","/api/bot/v1/groups",group("group",bot),createdGroup]]){
+          const replay=await httpCall(server,op,"POST",path,{body,signal});check(replay.status===original.status&&replay.body.equals(original.body))
+        }
+        const newPolicy=await httpCall(server,"createBot","POST","/api/bot/v1/bots",{body:create("withdrawn-policy"),signal});check(newPolicy.status===403&&isDeepStrictEqual(beforePolicy,await httpSql(runtime,entry,"facts",{},signal)))
+        await server.stop();server=undefined;await httpOffline(entry,runtime,fixture,signal)
+        console.log(JSON.stringify({stage:"http-core-proof",iteration,project:entry.project,sixRealHTTP:true,reopened:true,policyWithdrawnHistoricalBytes:true,startupNegatives,...business,...transport,...transactions,rawCases,scope:"HTTP-full-check-lifecycle-and-old-regressions-pending"}));projects.push(entry.project)
       }finally{
         let failed=false
-        for(const finish of [async()=>{if(server)await server.stop()},stopHttpChildren,stopHttpSqlChildren,async()=>{if(fixture)await closeHttpFixture(fixture)}])try{await finish()}catch{failed=true}
+        for(const finish of [async()=>{if(server)await server.stop()},stopHttpChildren,stopHttpSqlChildren,stopHttpStartupChildren,async()=>{if(fixture)await closeHttpFixture(fixture)}])try{await finish()}catch{failed=true}
         try{console.log(JSON.stringify({stage:"http-cleanup",...await cleanupTestDatabase(entry)}));await httpAbsent(entry.project)}catch{failed=true;console.log(JSON.stringify({stage:"http-cleanup",project:entry.project,status:"failed"}))}
         if(failed)throw Error("C2_CLEANUP_FAILURE")
       }
     }
-    return {status:"verified",scope:"preliminary-protocol-core-only",sequentialDatabases:2,projects,...httpChildFacts()}
+    return {status:"verified",scope:"HTTP-check-full-lifecycle-and-old-regressions-separate",sequentialDatabases:2,projects,...httpChildFacts()}
   }finally{
     let failed=false
-    for(const finish of [stopHttpChildren,stopHttpSqlChildren,()=>closeDatabaseRuntime(runtime)])try{await finish()}catch{failed=true}
+    for(const finish of [stopHttpChildren,stopHttpSqlChildren,stopHttpStartupChildren,()=>closeDatabaseRuntime(runtime)])try{await finish()}catch{failed=true}
     try{check(isDeepStrictEqual(await httpDevProof(),originalDev));console.log(JSON.stringify({stage:"http-original-dev-proof",sameIdsMountsNetwork:true,allHealthy:true,credentialsRead:false}))}catch{failed=true}
     if(failed)throw Error("C2_FINAL_CLEANUP_FAILURE")
   }
@@ -119,5 +132,5 @@ if(process.argv[1]&&resolve(process.argv[1])===filename){
   const controller=new AbortController(),cancel=()=>controller.abort(),timer=setTimeout(cancel,1800000);process.once("SIGTERM",cancel);process.once("SIGINT",cancel)
   try{if(process.argv.length!==2)throw Error("C2_ARGUMENTS");console.log(JSON.stringify(await httpCheck(controller.signal)))}
   catch(error){console.log(JSON.stringify({status:"failed",category:controller.signal.aborted?"CANCELLED":/^C2_[A-Z_]+$/.test(error.message)?error.message:"IO"}));process.exitCode=1}
-  finally{clearTimeout(timer);await stopHttpChildren();await stopHttpSqlChildren();process.removeListener("SIGTERM",cancel);process.removeListener("SIGINT",cancel)}
+  finally{clearTimeout(timer);await stopHttpChildren();await stopHttpSqlChildren();await stopHttpStartupChildren();process.removeListener("SIGTERM",cancel);process.removeListener("SIGINT",cancel)}
 }

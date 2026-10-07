@@ -9,11 +9,15 @@ export async function httpBusiness(server,runtime,entry,data,state,signal){
   async function call(op,method,path,body,principal="p1",space="A",headers={}){return httpCall(server,op,method,path,{body,principal,space,headers,signal})}
   async function denied(op,method,path,body,status,code,principal="p1",space="A",headers={}){
     const before=await facts(),r=await call(op,method,path,body,principal,space,headers)
-    check(r.status===status&&r.value.error.code===code&&isDeepStrictEqual(before,await facts()));denials++
+    const unchanged=isDeepStrictEqual(before,await facts())
+    console.log(JSON.stringify({stage:"http-business-denial",index:denials+1,operation:op,expectedStatus:status,actualStatus:r.status,expectedCode:code,actualCode:r.value.error?.code??null,allNineFactsUnchanged:unchanged}))
+    check(r.status===status&&r.value.error.code===code&&unchanged);denials++
   }
   async function replay(op,method,path,body,original,principal="p1"){
     const before=await facts(),r=await call(op,method,path,body,principal)
-    check(r.status===original.status&&r.body.equals(original.body)&&isDeepStrictEqual(before,await facts()));replays++
+    const unchanged=isDeepStrictEqual(before,await facts()),identicalBytes=r.body.equals(original.body)
+    console.log(JSON.stringify({stage:"http-business-replay",index:replays+1,operation:op,actualStatus:r.status,expectedStatus:original.status,identicalBytes,allNineFactsUnchanged:unchanged}))
+    check(r.status===original.status&&identicalBytes&&unchanged);replays++
   }
   const bp=`/api/bot/v1/bots/${bot.bot.id}`,gp=`/api/bot/v1/groups/${g.id}`
   // Actual number representations on four writes; object key order changes,
@@ -41,7 +45,8 @@ export async function httpBusiness(server,runtime,entry,data,state,signal){
   badRef.config.repositoryRefs=["allowed"];badRef.config.capabilityCeiling=["command.execute"];await denied("createBot","POST","/api/bot/v1/bots",badRef,403,"FORBIDDEN")
   const foreignGroup=group("foreign-member",bot);foreignGroup.members.push({principalId:"foreign",role:"participant"});await denied("createGroup","POST","/api/bot/v1/groups",foreignGroup,403,"FORBIDDEN")
   const duplicate=group("duplicate-member",bot);duplicate.members.push(duplicate.members[0]);await denied("createGroup","POST","/api/bot/v1/groups",duplicate,400,"INVALID_PAYLOAD")
-  const coordinator=group("coordinator",bot);coordinator.bots[0].role="coordinator";await denied("createGroup","POST","/api/bot/v1/groups",coordinator,400,"INVALID_PAYLOAD")
+  const invalidRole=group("invalid-role",bot);invalidRole.bots[0].role="unknown";await denied("createGroup","POST","/api/bot/v1/groups",invalidRole,400,"INVALID_PAYLOAD")
+  const coordinator=group("coordinator",bot);coordinator.bots[0].role="coordinator";const coordinatorResult=await call("createGroup","POST","/api/bot/v1/groups",coordinator);check(coordinatorResult.status===201&&coordinatorResult.value.group.bots[0].role==="coordinator")
   const missing=group("missing-bot",bot);missing.bots[0].botId="missing";await denied("createGroup","POST","/api/bot/v1/groups",missing,400,"INVALID_PAYLOAD")
   const noAdmin=group("no-admin",bot);noAdmin.members=[{principalId:"p1",role:"participant"}];await denied("createGroup","POST","/api/bot/v1/groups",noAdmin,400,"INVALID_PAYLOAD")
   const extraBot=await call("createBot","POST","/api/bot/v1/bots",create("other-bot"));check(extraBot.status===201)

@@ -2,6 +2,7 @@ import { isDeepStrictEqual } from "node:util"
 import { rawHttpSocket,httpCall,validateHttpResponse } from "./http-client.mjs"
 import { parseHttpFrames } from "./http-framing.mjs"
 import { httpSql } from "./http-sql.mjs"
+import { assertHttpNoSecret } from "./http-java.mjs"
 
 const check=x=>{if(!x)throw Error("C2_TRANSPORT_ASSERTION")}
 export async function httpWire(handle,build,signal,{head=false,parserEmpty=false,dripMs=0}={}){
@@ -28,7 +29,7 @@ export async function httpTransport(server,runtime,entry,create,signal){
       check(result.frames.length===1);const frame=result.frames[0];check([].concat(expected).includes(frame.status))
       if(head){check(frame.status===400&&frame.body.length===0&&frame.headers.connection?.toLowerCase()==="close")}
       else if(parserEmpty&&frame.body.length===0){check(frame.status===400||frame.status===408)}
-      else validateHttpResponse(op,frame.status,frame.body)
+      else{validateHttpResponse(op,frame.status,frame.body);assertHttpNoSecret(server,frame.body)}
     }
     if(window)check(result.elapsedMs>=window[0]&&result.elapsedMs<=window[1])
     check(isDeepStrictEqual(initial,await facts()));cases++
@@ -40,6 +41,7 @@ export async function httpTransport(server,runtime,entry,create,signal){
   await ordinary("encoded-fixed-prefix-not-alias","getBot",get("/api/%62ot/v1/bots/missing"),404)
   await ordinary("head-void-filter","getBot",x=>`HEAD /api/bot/v1/bots/missing HTTP/1.1\r\n${base(x)}\r\n`,400,{head:true})
   await ordinary("options-not-auto-success","getBot",x=>`OPTIONS /api/bot/v1/bots/missing HTTP/1.1\r\n${base(x)}\r\n`,400)
+  for(const [method,target] of [["OPTIONS","*"],["TRACE","/api/bot/v1/bots/missing"],["CONNECT","127.0.0.1:443"],["CONNECT","/api/bot/v1/bots/missing"],["DELETE","/api/bot/v1/bots/missing"],["PATCH","/api/bot/v1/bots/missing"]])await ordinary("unknown-method-pre-adapter","getBot",x=>`${method} ${target} HTTP/1.1\r\n${base(x)}\r\n`,400)
   await ordinary("unknown-bearer","getBot",x=>get("/api/bot/v1/bots/missing")({...x,token:"0".repeat(64)}),401)
   await ordinary("missing-bearer","getBot",x=>get("/api/bot/v1/bots/missing")(x).replace(/Authorization:[^\r]+\r\n/,""),401)
   await ordinary("missing-space","getBot",x=>get("/api/bot/v1/bots/missing")(x).replace("X-DevClaw-Space: A\r\n",""),400)
@@ -50,6 +52,8 @@ export async function httpTransport(server,runtime,entry,create,signal){
   await ordinary("fold-normalized-span-limited-proof","getBot",get("/api/bot/v1/bots/missing","X-Extra:           a\r\n b\r\n"),[400,404])
   const bodies=[Buffer.from('{"commandId":"duplicate","commandId":"other"}'),Buffer.from('{}{}'),Buffer.from('{"x":'+"[".repeat(70)+"0"+"]".repeat(70)+'}'),Buffer.from([0x7b,0xff,0x7d]),Buffer.alloc(0)]
   for(const body of bodies)await ordinary("strict-json-bytes","createBot",x=>Buffer.concat([Buffer.from(`POST /api/bot/v1/bots HTTP/1.1\r\n${base(x)}Content-Type: application/json\r\nContent-Length: ${body.length}\r\n\r\n`),body]),400)
+  const sentinel=Buffer.from('{"HTTP_ERROR_INPUT_SENTINEL":"HTTP_ERROR_INPUT_SENTINEL"}')
+  await ordinary("error-input-sentinel","createBot",x=>Buffer.concat([Buffer.from(`POST /api/bot/v1/bots HTTP/1.1\r\n${base(x)}Content-Type: application/json\r\nContent-Length: ${sentinel.length}\r\n\r\n`),sentinel]),400)
   for(const extra of ["Content-Type: text/plain\r\n","Content-Type: application/json; charset=ISO-8859-1\r\n","Content-Type: application/json\r\nContent-Encoding: gzip\r\n"] )await ordinary("unsupported-body-metadata","createBot",x=>`POST /api/bot/v1/bots HTTP/1.1\r\n${base(x)}${extra}Content-Length: 2\r\n\r\n{}`,400)
   await ordinary("duplicate-content-length-parser","createBot",x=>`POST /api/bot/v1/bots HTTP/1.1\r\n${base(x)}Content-Type: application/json\r\nContent-Length: 2\r\nContent-Length: 2\r\n\r\n{}`,400,{parserEmpty:true})
   const large=Buffer.alloc(1048577,0x20)
@@ -72,7 +76,7 @@ export async function httpTransport(server,runtime,entry,create,signal){
   try{
     // More incomplete requests than eight workers, up to the fixed bounded
     // worker+queue capacity. No auth is sent before the own endpoint proof.
-    for(let batch=0;batch<3;batch++)pressure.push(...await Promise.all(Array.from({length:8},()=>rawHttpSocket(server,"p1",signal))))
+    pressure.push(...await Promise.all(Array.from({length:24},()=>rawHttpSocket(server,"p1",signal))))
     for(const wire of pressure)if(!wire.socket.destroyed)wire.socket.write(`GET /api/bot/v1/bots/missing HTTP/1.1\r\nHost: 127.0.0.1:${wire.port}\r\n`)
     await new Promise(resolve=>setTimeout(resolve,2300))
   }finally{for(const wire of pressure)wire.socket.destroy()}

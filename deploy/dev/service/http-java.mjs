@@ -49,8 +49,14 @@ export async function httpBearer(handle, principal, signal) {
   await proveHttpEndpoint(handle, signal); active(signal)
   return bearer.token
 }
+export function assertHttpNoSecret(handle,bytes){
+  const owner=owned.get(handle);if(!owner||!(Buffer.isBuffer(bytes)||typeof bytes==="string"))throw Error("C2_SECRET_PROOF")
+  const text=Buffer.isBuffer(bytes)?bytes.toString("utf8"):bytes
+  if(owner.secrets.some(value=>text.includes(value))||/jdbc:mysql:|SQLSyntaxErrorException|at com\.devclaw\.|HTTP_ERROR_INPUT_SENTINEL/.test(text))throw Error("C2_SECRET_LEAK")
+}
 export async function startHttpJava(runtime, entry, fixture, mode, signal) {
   const controlled = httpMode(mode); active(signal)
+  await currentHttpDatabase(entry, signal); await checkHttpFixture(fixture, signal); active(signal)
   const password = await appPassword(entry, signal); active(signal)
   const identity = await readHttpIdentity(fixture, signal); active(signal)
   const input = JSON.stringify({ mode: "local-dev", http: { host: "127.0.0.1", port: 0 }, db: { mode: "local-dev", host: "127.0.0.1", port: entry.port, schema: "devclaw", user: "devclaw_app", password }, identity })
@@ -59,7 +65,7 @@ export async function startHttpJava(runtime, entry, fixture, mode, signal) {
   const main = `com.devclaw.botcontrol.http.${controlled ? "HttpTestMain" : "LocalHttpMain"}`
   const child = ownedProcess(runtime.java, ["-Xmx256m", "-Duser.timezone=UTC", "-cp", runtime.classpath, main, ...(controlled ? [mode] : [])], { cwd: runtime.dir, env: runtime.env, maxOutput: 65536 })
   starts++; children.add(child)
-  const handle = {}, owner = { child, entry, fixture, port: null }; owned.set(handle, owner)
+  const handle = {}, owner = { child, entry, fixture, port: null, secrets:[password,...identity.bearers.map(x=>x.token)] }; owned.set(handle, owner)
   const stop = () => { void child.stop() }
   signal?.addEventListener("abort", stop, { once: true }); if (signal?.aborted) stop()
   let timedOut = false, released = new Set(), closing
@@ -93,6 +99,7 @@ export async function startHttpJava(runtime, entry, fixture, mode, signal) {
         try{process.kill(child.child.pid,0);throw Error("C2_JAVA_RESIDUE")}catch(error){if(error.code!=="ESRCH")throw error}
         for(const port of new Set([...ports,...(owner.port?[owner.port]:[])]))await listenerAbsent(port)
         children.delete(child);handles.delete(child)
+        assertHttpNoSecret(handle,result.stdout);assertHttpNoSecret(handle,result.stderr)
         if(proofFailed||result.stderr||result.overflow||result.spawnError)throw Error("C2_JAVA_BOUNDARY")
       })()
       return closing

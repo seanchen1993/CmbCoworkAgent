@@ -93,7 +93,7 @@ export async function audit() {
     }
     const suites = { CompatibilityTest: 4, ContractConsumptionTest: 5, "validation.BoundaryTest": 6, "persistence.PersistenceBoundaryTest": 5 }
     suites["application.ApplicationUnitTest"] = 5
-    suites["http.HttpBoundaryTest"] = 6
+    suites["http.HttpBoundaryTest"] = 7
     let tests = 0
     for (const [name, count] of Object.entries(suites)) {
       const xml = await readFile(join(project, `target/surefire-reports/TEST-com.devclaw.botcontrol.${name}.xml`), "utf8")

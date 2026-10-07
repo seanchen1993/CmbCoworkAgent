@@ -1,6 +1,6 @@
 import http from "node:http"
 import net from "node:net"
-import { httpBearer, proveHttpEndpoint } from "./http-java.mjs"
+import { httpBearer, proveHttpEndpoint,assertHttpNoSecret } from "./http-java.mjs"
 import { active } from "./test-database.mjs"
 import { operationDefinitions, dereference, validateRef } from "../../../tests/bot/schema-support.mjs"
 
@@ -22,7 +22,7 @@ export async function httpCall(handle,operation,method,path,{ principal="p1",spa
     const request = http.request({ host:"127.0.0.1",port:endpoint.port,method,path,agent:false,headers:{Authorization:`Bearer ${token}`,"X-DevClaw-Space":space,...(bytes ? {"Content-Type":"application/json","Content-Length":bytes.length} : {}),...headers} },response => {
       let size=0; const chunks=[]
       response.on("data",chunk => { size+=chunk.length; if(size>1048576)request.destroy(Error("C2_RESPONSE_SIZE")); else chunks.push(chunk) })
-      response.on("end",() => { try { const body=Buffer.concat(chunks); const value=validateHttpResponse(operation,response.statusCode,body); if(response.headers["cache-control"] !== "no-store" || response.headers["x-content-type-options"] !== "nosniff" || Number(response.headers["content-length"]) !== body.length || response.headers["set-cookie"] || response.headers["access-control-allow-origin"])throw Error("C2_RESPONSE_HEADERS"); finish(null,{status:response.statusCode,body,value,headers:response.headers}) } catch(error){finish(error)} })
+      response.on("end",() => { try { const body=Buffer.concat(chunks); if(response.statusCode>=400)assertHttpNoSecret(handle,body); const value=validateHttpResponse(operation,response.statusCode,body); if(response.headers["cache-control"] !== "no-store" || response.headers["x-content-type-options"] !== "nosniff" || Number(response.headers["content-length"]) !== body.length || response.headers["set-cookie"] || response.headers["access-control-allow-origin"])throw Error("C2_RESPONSE_HEADERS"); finish(null,{status:response.statusCode,body,value,headers:response.headers}) } catch(error){finish(error)} })
       response.on("error",() => finish(Error("C2_HTTP_RESPONSE")))
       response.on("aborted",() => finish(Error("C2_HTTP_RESPONSE")))
     })

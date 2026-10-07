@@ -70,6 +70,7 @@ public final class LocalHttpServer implements AutoCloseable {
         factory.addConnectorCustomizers(connector -> {
             if (!(connector.getProtocolHandler() instanceof Http11NioProtocol)) throw new IllegalStateException("HTTP_CONNECTOR");
             connector.setAllowTrace(false); connector.setXpoweredBy(false); connector.setEncodedSolidusHandling("reject");
+            ClosedMethodAdapter.install(connector);
             Http11NioProtocol protocol = (Http11NioProtocol)connector.getProtocolHandler();
             protocol.setExecutor(workers); protocol.setMaxConnections(32); protocol.setAcceptCount(32);
             protocol.setMaxThreads(8); protocol.setMinSpareThreads(8); protocol.setMaxHeaderCount(32); protocol.setMaxHttpRequestHeaderSize(8192);
