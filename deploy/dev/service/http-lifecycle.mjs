@@ -52,6 +52,7 @@ export async function httpLifecycle(){
     child.child.stdin.end()
     try{
       const result=await child.done;check(result.code===1&&!result.stderr&&!result.overflow&&!result.spawnError)
+      try{process.kill(child.child.pid,0);throw Error("C2_PARENT_RESIDUE")}catch(error){if(error.code!=="ESRCH")throw error}
       const rows=result.stdout.trim().split("\n").map(line=>JSON.parse(line)),registration=rows.find(x=>x.stage==="http-life-registered"),fixture=rows.find(x=>x.stage==="http-life-fixture"),failure=rows.find(x=>x.stage==="http-life-failure"),closed=rows.find(x=>x.stage==="http-life-closed"),cleanup=rows.find(x=>x.stage==="http-life-cleanup"),request=rows.find(x=>x.stage==="http-life-request")
       check(registration&&fixture&&failure?.category===(mode==="injected"?"C2_INJECTED":"C2_CANCELLED")&&closed?.active===0&&!closed.cleanupFailed&&cleanup?.status==="removed"&&cleanup.project===registration.project)
       if(mode==="secret-sigterm")check(sent&&failure.starts===0&&failure.secretSends===0&&closed.starts===0&&closed.secretSends===0&&!request)

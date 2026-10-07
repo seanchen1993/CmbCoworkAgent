@@ -37,7 +37,11 @@ export async function httpTransport(server,runtime,entry,create,signal){
   }
   for(const path of ["/api/bot/v1/bots/versions","/api/bot/v1/groups/members"]){const method=path.includes("bots")?"POST":"PUT";await ordinary("missing-id","getBot",x=>`${method} ${path} HTTP/1.1\r\n${base(x)}\r\n`,400)}
   for(const path of ["/api/bot/v1/bots/%6dissing","/api/bot/v1/bots/missing%3Aid","/api/bot/v1/bots/missing%2Eid"] )await ordinary("legal-single-encoded-id","getBot",get(path),404)
-  for(const path of ["/api/bot/v1/bots/missing?","/api/bot/v1/bots/missing?a=1","/api/bot/v1/bots/a;b","/api/bot/v1/bots/%252e","/api/bot/v1/bots/%2e","/api/bot/v1/bots/%2e%2e","/api/bot/v1/bots/a%2Fb","/api/bot/v1/bots/a%5Cb","/api/bot/v1/bots/%FF","/api/bot/v1/bots/%zz","/api/bot/v1/bots/missing/","/api/bot/v1/bots//missing"] )await ordinary("invalid-raw-target","getBot",get(path),400,{parserEmpty:true})
+  for(const path of ["/api/bot/v1/bots/missing?","/api/bot/v1/bots/missing?a=1","/api/bot/v1/bots/a;b","/api/bot/v1/bots/%252e","/api/bot/v1/bots/%2e","/api/bot/v1/bots/%2e%2e","/api/bot/v1/bots/missing/","/api/bot/v1/bots//missing"] )await ordinary("invalid-gate-target-nonempty","getBot",get(path),400)
+  // Pinned CoyoteAdapter URLDecoder/convertURI/normalize runs before the
+  // context gate: encoded solidus, backslash, malformed hex and invalid UTF8
+  // may produce its safe empty rejection rather than an API JSON response.
+  for(const path of ["/api/bot/v1/bots/a%2Fb","/api/bot/v1/bots/a%5Cb","/api/bot/v1/bots/%FF","/api/bot/v1/bots/%zz"] )await ordinary("coyote-pre-context-uri-parser","getBot",get(path),400,{parserEmpty:true})
   await ordinary("encoded-fixed-prefix-not-alias","getBot",get("/api/%62ot/v1/bots/missing"),404)
   await ordinary("head-void-filter","getBot",x=>`HEAD /api/bot/v1/bots/missing HTTP/1.1\r\n${base(x)}\r\n`,400,{head:true})
   await ordinary("options-not-auto-success","getBot",x=>`OPTIONS /api/bot/v1/bots/missing HTTP/1.1\r\n${base(x)}\r\n`,400)
