@@ -4,6 +4,8 @@
 
 ## 最新C2接续（优先于下方C1历史）
 
+- **独立数据库23594/d62c8f实际exit0/closed。** 0d0f/5cb02c7d全ID/DB32952与4cac/b6986cd0全ID/32953各migration1/noop0/10表/zeroFK/Unicode和bytes重开、5坏history拒绝且全facts不变/原样restore-ready、schemaALL限定3越界拒绝、SQLTimeoutException1029/1031ms、坏密码/离线和stale拒绝/精确finallyremoved通过。最后一个main独立入口database-lifecycle已顺序启动（唯一实际句柄见state），其后终末源码/进程/任务Docker只读审计；全部通过才候选接受/normal exactmerge及集成真实新编和八入口产物复验。原high8d持续停写/PAUSED，未提前接受或进入下一阶段。
+
 - **主代理旧应用回归80206/061ae1实际exit0/closed。** cb87/47ccb47c完整ID/DB32948及c404/7d379f44完整ID/32949两顺序空库各376断言、52全九表拒绝、21重放、7回滚、12腐坏回执、6原Ajv，samecommand真实2JVM201/201同hash、distinctprincipal双方scope握手CAS201/409和精确finally/originalsamehealthy。新注入f091/3fe859b5完整ID/32950/Java76449、实际SIGTERM5a07/e7342248完整ID/32951/Java76569各child1/Java实际absence/active0/精确资源absence，入口最终0。唯一main数据库23594/ffc6b0/600s已登记首0d0f项目、结果未知；之后3case旧DB生命周期/终末审计/正常合入真实新编及产物测试。child停写/PAUSED，未接受C2。
 
 - **新HTTP生命周期70240/5de693实际exit0，唯一main应用回归80206。** 注入故障4ee6/parent75347/Java75441:49989、真实afterHTTP SIGTERM6ae5/parent75533/Java75620:50006、secret前SIGTERMbb7d/parent75712均父实际PID/listener/project/privatefiles absent，secret模式0starts0sends，原devsamehealthy；入口没打印完整container/DBport不猜。d3ac74核对实际每child240s/每parentmode250s，先前live850s是记录估计非outertimer，已state明确更正。新独立application80206/9c6be4/1200s唯一运行，之后仅原DB和3lifecycle；worker冻结8d并停写，main全部八入口尚未齐，normalmerge/freshcompile待，自动PAUSED。

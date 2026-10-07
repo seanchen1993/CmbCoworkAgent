@@ -30,8 +30,8 @@
 | `node deploy/dev/service/http-check.mjs` | 19326 / exit0，两库；旧元数据缺口见上 | 12957/49011b exit0，两库完整证明/资源精确清理/原dev健康；304 safe facts 未截断 | 待产物复验 |
 | `node deploy/dev/service/http-lifecycle.mjs` | 28401/c32e5a exit0，三新模式/真实absence；968d12实读报告 | 70240/5de693 exit0，3case/实际PID-listener-project-privatefiles absence，原dev健康 | 待 |
 | `node deploy/dev/service/application-check.mjs` | 33636/4d67bf exit0，两库＋注入/SIGTERM；e5f5db实读报告 | 80206/061ae1 exit0，两库各376/52/21/7/12/6及双JVM竞争，注入/SIGTERM实际清理 | 待 |
-| `node deploy/dev/service/database-check.mjs` | 22712/8087a9 exit0，两库/10表/0FK；d8347d实读报告 | 唯一23594/ffc6b0运行，结果未知 | 待 |
-| `node deploy/dev/service/database-lifecycle.mjs` | 12726/35544b exit0，3case/实际cleanup；235ef5实读报告 | 待 | 待 |
+| `node deploy/dev/service/database-check.mjs` | 22712/8087a9 exit0，两库/10表/0FK；d8347d实读报告 | 23594/d62c8f exit0，两库完整证明/0FK/迁移与历史拒绝/实际SQLTimeout/精确清理 | 待 |
+| `node deploy/dev/service/database-lifecycle.mjs` | 12726/35544b exit0，3case/实际cleanup；235ef5实读报告 | 主代理最后一个独立入口运行，实际句柄见state | 待 |
 
 每项必须有实际代码 SHA、命令、句柄、exit、计数和清理证据；不能由旧结果/参考模型代替。原 Node26 / JUnit25 / F03 24 / 同轮 1107 parity / class major52 / 34 固定库与冻结原字节均需保留回归。记录 actual totals，不推测新总数。
 
