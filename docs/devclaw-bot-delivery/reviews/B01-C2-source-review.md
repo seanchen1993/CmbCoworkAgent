@@ -1,6 +1,10 @@
 # B01-C2 增量源码审查
 
-2026-10-07 · review_pending；不是最终接受
+2026-10-07 · accepted_merged；最终依据见B01-C2-acceptance.md
+
+## 最终关闭（优先于历史增量）
+
+正常合入107e3548，与冻结worker8d全部非协调源码字节相同。主代理八入口独立验收及集成真实31main/11test重编后的八入口全部实际exit0；32JUnit/1107同轮零差异/69class52/34固定库，182非目录内容与已独立测试jar逐项相同。最终564ac2/e15d72/46a0df/原dev审计全部通过，无活跃写者或测试句柄。R1/R4真实两库TCP/严格pipeline/封闭方法、R2真实私有文件与35Node、R3三新HTTP生命周期实际PID/listener/project/privatefiles收尾均已独立及集成证明；四项关闭。只读当前头窗口不是wire-copy/折叠不可逆、HEAD与两类精确非JSONframing、header-idle非absolute、压力证明不等于逐槽观测等限制继续保留，不被关闭状态扩大为生产安全保证。未实现企业SSO/IM/Thread/Runtime/UI/投递器；定时PAUSED，等待下一阶段用户决定。
 
 ## 最终冻结与主代理独立 HTTP 复验
 

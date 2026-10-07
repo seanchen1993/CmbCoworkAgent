@@ -1,6 +1,6 @@
 # B01-C2 验收记录
 
-2026-10-07 · 候选已独立验收并正常合入，集成产物复验中 · 未部署
+2026-10-07 · accepted_merged · B00＋B01本地里程碑完成 · 未部署
 
 ## 范围
 
@@ -9,6 +9,10 @@
 唯一实施者为原 `/root/b01_contracts_high`、gpt-6.1-sol/high、B01-A02。主代理负责实际 diff、独立检查、集成和验收。定时自动续跑保持 PAUSED；本记录不授权下一阶段、推送、部署、真实内网或付费操作。
 
 ## 当前确证与缺口
+
+- **最终结论（12:01:20 UTC，优先于下方历史）：C2 和 B01 正式 accepted_merged。** 正常合入 `107e35481053e0a49528feff54b2581ec798dc0e`，worker `8d743627` 冻结停写。主代理八入口独立验收与集成真实新编后的八入口全部实际 exit0/closed；最后 `31692/698bec` 三个数据库生命周期也已实际证明精确资源 absence / JDBC starts0。没有本轮范围内未完成项，没有派发下一路线。
+- 真正集成重新编译31main/11test、32JUnit、1107同轮parity零差异、69自有class52/34固定库；新jar `7c1ff6533555dd988795a656e360be0b1bcd50a29ee40c2a58b6d392d817c81c`。`fa546f` 全182非目录内容与主代理独立测试的9c jar逐项相等，aggregate `2c5fee0a0ed546b101b91e0eb1670d93cda457a6b4f730e369a88ac0591a440b`，没有内容增加/删除/变化；未把ZIP层总hash差异猜成时间原因。
+- 末审计 `564ac2/70c025/0c4e13` 生产字节与冻结worker相等/workerclean；`e15d72` actualpgrep exit1空，`46a0df`全部16入口closed0/无live/产物hash未变/私有fixture无残留。`ed54de/bc2da0/1efaac/9acde6/0f4039` 同task daemon、只原三个精确容器ID/owner/digest/健康/回环端口与挂载、只原network及三卷，runtime仅原dev/inode68511080/0700。`d1c6fa` 实际automation.toml仍PAUSED，未恢复或替换。原dev账号/数据/凭据未提升、迁移或读取；新测试资源全部回收。
 
 - 正常 no-ff merge `107e35481053e0a49528feff54b2581ec798dc0e`（`a4b35f` ort 成功，无冲突/reset），`7e9632` 确认除协调记录外与 worker8d 全部字节相等，`7b314f` clean。唯一集成 build `5344/78d627` 已启动，后续真正重新编译/产物逐项比较和八入口集成复验尚待；不因合入成功提前最终接受。
 
@@ -37,7 +41,7 @@
 | `node deploy/dev/service/http-lifecycle.mjs` | 28401/c32e5a exit0，三新模式/真实absence；968d12实读报告 | 70240/5de693 exit0，3case/实际PID-listener-project-privatefiles absence，原dev健康 | 52076/d8f8ea exit0，3case/实际PID-listener-project-privatefiles absence/原dev健康 |
 | `node deploy/dev/service/application-check.mjs` | 33636/4d67bf exit0，两库＋注入/SIGTERM；e5f5db实读报告 | 80206/061ae1 exit0，两库各376/52/21/7/12/6及双JVM竞争，注入/SIGTERM实际清理 | 22875/9ddbb4 exit0，两库各376/52/21/7/12/6＋双JVM竞争，注入/SIGTERM实际清理 |
 | `node deploy/dev/service/database-check.mjs` | 22712/8087a9 exit0，两库/10表/0FK；d8347d实读报告 | 23594/d62c8f exit0，两库完整证明/0FK/迁移与历史拒绝/实际SQLTimeout/精确清理 | 78601/0b1b25 exit0，两库全套/0FK/实际SQLTimeout1021-1023ms/精确清理 |
-| `node deploy/dev/service/database-lifecycle.mjs` | 12726/35544b exit0，3case/实际cleanup；235ef5实读报告 | 61509/e3923b exit0，注入与两个SIGTERM/实际absence，JDBC starts0 | 最后一个集成入口进行中，句柄见state |
+| `node deploy/dev/service/database-lifecycle.mjs` | 12726/35544b exit0，3case/实际cleanup；235ef5实读报告 | 61509/e3923b exit0，注入与两个SIGTERM/实际absence，JDBC starts0 | 31692/698bec exit0，3case/实际absence/JDBC starts0 |
 
 每项必须有实际代码 SHA、命令、句柄、exit、计数和清理证据；不能由旧结果/参考模型代替。原 Node26 / JUnit25 / F03 24 / 同轮 1107 parity / class major52 / 34 固定库与冻结原字节均需保留回归。记录 actual totals，不推测新总数。
 
@@ -49,4 +53,4 @@ HEAD 安全拒绝的无实体、Coyote 前置 URI closing 400 的精确五字节
 
 ## 最终结论
 
-候选 `8d743627528d65466320b9614a1e5eff53b2a7f8` 已完成实际源码全审、主代理八入口独立全验与终末资源审计，clean/所有句柄闭合/唯一写者停止。下一只正常合入和集成真实新编/全部八入口产物复验，通过后才填写最终 accepted_merged；不自动进入后续产品路线。
+正式 accepted_merged：实际源码全审、八入口主代理独立全验、正常合入、集成真实31main/11test新编和八入口新产物全验、终末资源/进程/源码/状态审计全部完成。仅完成本地B00＋B01：六个伙伴/团队HTTP操作和本机可信身份，不等于常驻生产Bot服务、企业SSO、招乎/Thread绑定、模型执行、Runtime或UI上线。保持自动续跑PAUSED，保存工作树与缓存，等待用户明确下一阶段；不推送/部署/真实内网/付费操作。

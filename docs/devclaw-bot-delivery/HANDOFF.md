@@ -1,8 +1,10 @@
 # DevClaw Bot 当前交接点
 
-2026-10-07 · C2已正式进入代码实施；C1已验收 · 定时续跑停用
+2026-10-07 · B00＋B01本地里程碑正式完成；C2已验收合入 · 定时续跑停用
 
 ## 最新C2接续（优先于下方C1历史）
+
+- **12:01:20UTC最终出口：B01/C2 accepted_merged，本轮B00+B01工作完成。** 正常merge107e35481053e0a49528feff54b2581ec798dc0e，原high8d冻结completed停写。main八独立入口与集成新产物八入口全部实际exit0/closed，最后31692/698bec三DB lifecycle exactabsence/JDBC0。真Java8 31main/11test新编、32JUnit/1107同e7562b3c零差异/69class52/34库/原资源；新jar7c1ff653实际182entry内容与main独立9c完全同（fa546f/aggregate2c5fee0a）。末审计564ac2源字节相等、e15d72 proc实际空、bc2da0/1efaac只原三sameowner-digest健康回环/9acde6只原network/0f4039只三原卷/46a0df runtimeonlydev0700原inode68511080、私有fixture无残留、16实际closed0/无live/产物未变；d1c6fa实际scheduler PAUSED。原dev账号/数据/秘密不读不改，新测试资源均回收，所有Git和缓存保留。reviews/B01-C2-acceptance.md完整矩阵、state准确元数据。现在没有本轮未完成项或新运行命令，不自动B02/B03/Runtime/UI/IM/推送部署/真实内网或付费，等待用户下一阶段决定。下方所有running/pending仅历史，不能据此重放测试或重新派写者。
 
 - **集成数据库78601/0b1b25实际exit0/closed。** f9a8/完整283da77a…9546/32964及dfece/完整e1400bf0…dd44两owned库各10表/zeroFK/migrate1-noop0/Unicode及bytes重开/5坏history拒绝全facts不变与原样restore-ready/3scopeprivilege拒绝/SQLTimeoutException1021/1023ms/坏密码offline-stale/精确finally通过。最后一个集成DB生命周期已顺序启动（唯一句柄见state），通过后终末只读源码/进程/Docker资源/私有目录/自动状态核对，全部真实通过才accepted_merged/B00+B01本轮收口并等用户下一阶段授权；不派B02/Runtime/UI/IM。原high停写，自动PAUSED，jar7c未变。
 
