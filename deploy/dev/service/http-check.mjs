@@ -8,6 +8,10 @@ import { startHttpJava,stopHttpChildren,httpChildFacts } from "./http-java.mjs"
 import { httpCall,rawHttpSocket,validateHttpResponse } from "./http-client.mjs"
 import { httpSql,stopHttpSqlChildren } from "./http-sql.mjs"
 import { httpDevProof,httpCapacity,httpAbsent } from "./http-proof.mjs"
+import { parseHttpFrames } from "./http-framing.mjs"
+import { httpBusiness } from "./http-business.mjs"
+import { httpTransactions } from "./http-transactions.mjs"
+import { httpTransport } from "./http-transport.mjs"
 
 const filename=fileURLToPath(import.meta.url),check=(value)=>{if(!value)throw Error("C2_ASSERTION")}
 const json=value=>Buffer.from(JSON.stringify(value))
@@ -20,7 +24,7 @@ export function httpPrincipals(references=true){
 }
 function config(){return {description:"中文🚀\u0000\ud800",instructions:"instructions\udc00",knowledgeRefs:["allowed"],repositoryRefs:["allowed"],skillAllowlist:["allowed"],capabilityCeiling:["repository.read"],memoryPolicy:"explicit_only"}}
 function create(commandId){return {commandId,name:"伙伴🚀\u0000\ud800y\udc00",config:config(),maintainerIds:["p2","p1"]}}
-function append(commandId,expectedVersion){return {commandId,expectedVersion,config:config()}}
+function append(commandId,expectedVersion){return {commandId,expectedVersion,config:{...config(),instructions:"immutable version two\udc00"}}}
 function members(){return [{principalId:"p4",role:"admin"},{principalId:"p1",role:"admin"},{principalId:"p3",role:"participant"}]}
 function group(commandId,bot){return {commandId,name:"群🚀\u0000\ud800",members:members(),bots:[{botId:bot.bot.id,botVersionId:bot.botVersion.id,role:"specialist"}],limits:{maxHandoffs:2,maxRuns:3,maxTokens:4}}}
 function reverse(value){if(Array.isArray(value))return value.map(reverse);if(value&&typeof value==="object")return Object.fromEntries(Object.keys(value).reverse().map(key=>[key,reverse(value[key])]));return value}
@@ -33,10 +37,7 @@ async function raw(handle,build,signal){
   })}finally{socket.destroy()}
 }
 function parseRaw(bytes){
-  if(!bytes.length)return {parserClosed:true}
-  const end=bytes.indexOf("\r\n\r\n");check(end>0);const head=bytes.subarray(0,end).toString("latin1"),match=/^HTTP\/1\.[01] ([0-9]{3})/.exec(head);check(match)
-  const body=bytes.subarray(end+4),status=Number(match[1]);check(!head.toLowerCase().includes("set-cookie:")&&!head.toLowerCase().includes("access-control-allow-origin:")&&!body.toString("utf8").includes("<html"))
-  return {status,body,head}
+  const frames=parseHttpFrames(bytes);check(frames.length===1);return frames[0]
 }
 async function protocol(handle,runtime,entry,signal){
   let cases=0
@@ -56,14 +57,15 @@ async function protocol(handle,runtime,entry,signal){
     ["visible-fold",x=>`GET /api/bot/v1/bots/missing HTTP/1.1\r\n${base(x)}X-Extra: a\r\n b\r\n\r\n`,400],
     ["cl-te-fold",x=>`POST /api/bot/v1/bots HTTP/1.1\r\n${base(x)}Content-Type: application/json\r\nContent-Length: 2\r\nTransfer-Encoding:\r\n chunked\r\n\r\n2\r\n{}\r\n0\r\n\r\n`,400]
   ]){
-    const result=parseRaw(await raw(handle,build,signal));check(result.status===expected||result.parserClosed&&expected===400)
-    if(result.body?.length)validateHttpResponse("getBot",result.status,result.body)
-    check(isDeepStrictEqual(before,await facts()));cases++;console.log(JSON.stringify({stage:"http-raw-case",label,status:result.status??null,parserClosed:!!result.parserClosed,allNineFactsUnchanged:true}))
+    const result=parseRaw(await raw(handle,build,signal));check(result.status===expected)
+    validateHttpResponse("getBot",result.status,result.body)
+    check(isDeepStrictEqual(before,await facts()));cases++;console.log(JSON.stringify({stage:"http-raw-case",label,status:result.status,category:"ordinary-api-json",actualAjv:true,allNineFactsUnchanged:true}))
   }
   // Both requests already occupy the socket buffer: nextRequest must compact
   // exactly the remaining current request, not an old body or stale header.
-  const pipeline=parseRaw(await raw(handle,x=>`GET /api/bot/v1/bots/missing HTTP/1.1\r\n${base(x).replace("Connection: close","Connection: keep-alive")}\r\nGET /api/bot/v1/bots/%6dissing HTTP/1.1\r\n${base(x)}\r\n`,signal))
-  check(pipeline.status===404 && pipeline.body.toString("latin1").includes("HTTP/1.1 404"));check(isDeepStrictEqual(before,await facts()));cases++
+  const pipeline=parseHttpFrames(await raw(handle,x=>`GET /api/bot/v1/bots/missing HTTP/1.1\r\n${base(x).replace("Connection: close","Connection: keep-alive")}\r\nGET /api/bot/v1/bots/%6dissing HTTP/1.1\r\n${base(x)}\r\n`,signal))
+  check(pipeline.length===2);for(const frame of pipeline){check(frame.status===404);validateHttpResponse("getBot",frame.status,frame.body)}check(isDeepStrictEqual(before,await facts()));cases++
+  console.log(JSON.stringify({stage:"http-pipeline-proof",frames:2,eachActualAjv:true,noResidual:true,allNineFactsUnchanged:true}))
   return cases
 }
 export async function httpCheck(signal){
@@ -89,11 +91,15 @@ export async function httpCheck(signal){
         for(const [operation,method,path,body,principal,original] of [["createBot","POST","/api/bot/v1/bots",create("create"),"p1",first],["createBotVersion","POST",`/api/bot/v1/bots/${bot.bot.id}/versions`,append("append",1),"p1",version],["createGroup","POST","/api/bot/v1/groups",group("group",bot),"p1",createdGroup],["updateGroupMembers","PUT",`/api/bot/v1/groups/${g.id}/members`,update,"p4",updated]]){
           const before=await httpSql(runtime,entry,"facts",{},signal),result=await httpCall(server,operation,method,path,{body:json(reverse(body)),principal,signal});check(result.status===original.status&&result.body.equals(original.body));check(isDeepStrictEqual(before,await httpSql(runtime,entry,"facts",{},signal)))
         }
+        const business=await httpBusiness(server,runtime,entry,{create,append,group,members,reverse},{first,bot,version,createdGroup,g,update,updated},signal)
         const rawCases=await protocol(server,runtime,entry,signal)
+        const transport=await httpTransport(server,runtime,entry,create,signal)
+        const transactions=await httpTransactions(runtime,entry,fixture,{create,append,group,members},{bot,g},signal)
         await server.stop();server=await startHttpJava(runtime,entry,fixture,"production",signal)
+        console.log(JSON.stringify({stage:"http-reopened-listener",pid:server.pid,port:server.port,project:entry.project}))
         const reopened=await httpCall(server,"getBot","GET",`/api/bot/v1/bots/${bot.bot.id}`,{signal});check(reopened.value.bot.version===2&&reopened.value.bot.name===bot.bot.name)
-        const reopenedGroup=await httpCall(server,"getGroup","GET",`/api/bot/v1/groups/${g.id}`,{principal:"p4",signal});check(reopenedGroup.value.group.version===2&&isDeepStrictEqual(reopenedGroup.value.group.bots,g.bots))
-        console.log(JSON.stringify({stage:"http-core-proof",iteration,project:entry.project,sixRealHTTP:true,reopened:true,replays:4,rawCases,scope:"preliminary-not-full-C2"}));projects.push(entry.project)
+        const reopenedGroup=await httpCall(server,"getGroup","GET",`/api/bot/v1/groups/${g.id}`,{principal:"p4",signal});check(reopenedGroup.value.group.version===business.groupVersion&&isDeepStrictEqual(reopenedGroup.value.group.bots,g.bots))
+        console.log(JSON.stringify({stage:"http-core-proof",iteration,project:entry.project,sixRealHTTP:true,reopened:true,...business,...transport,...transactions,rawCases,scope:"HTTP-full-core-startup-and-lifecycle-pending"}));projects.push(entry.project)
       }finally{
         let failed=false
         for(const finish of [async()=>{if(server)await server.stop()},stopHttpChildren,stopHttpSqlChildren,async()=>{if(fixture)await closeHttpFixture(fixture)}])try{await finish()}catch{failed=true}
