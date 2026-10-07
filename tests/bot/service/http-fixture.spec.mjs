@@ -24,6 +24,7 @@ test("registered private identity file checks metadata before reads and refuses 
     const extra = join(entry.dir, "unexpected"); await writeFile(extra, "x", { mode: 0o600, flag: "wx" }); await assert.rejects(checkHttpFixture(entry), /C2_IDENTITY_FILE/); await unlink(extra)
     const alias = join(entry.dir, "alias"); await link(entry.file, alias); await assert.rejects(readHttpIdentity(entry), /C2_IDENTITY_FILE/); await unlink(alias)
     const bytes = await readFile(entry.file); await writeFile(entry.file, "{}", { mode: 0o600 }); await assert.rejects(readHttpIdentity(entry), /C2_IDENTITY_FILE/); await writeFile(entry.file, bytes, { mode: 0o600 })
+    await writeFile(entry.file, Buffer.alloc(65537), { mode: 0o600 }); await assert.rejects(readHttpIdentity(entry), /C2_IDENTITY_FILE/); await writeFile(entry.file, bytes, { mode: 0o600 })
     await assert.rejects(readHttpIdentity(entry, controller.signal), /B1_CANCELLED/)
   } finally { await closeHttpFixture(entry) }
   await assert.rejects(lstat(entry.dir), { code: "ENOENT" })

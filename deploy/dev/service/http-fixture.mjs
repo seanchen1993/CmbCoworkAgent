@@ -48,15 +48,21 @@ export async function checkHttpFixture(entry, signal) {
   active(signal); const owner = entries.get(entry); if (!owner) fail()
   verifyHttpMetadata(await lstat(entry.dir), owner.directory, true)
   if ((await readdir(entry.dir)).join() !== "identity.json") fail()
-  verifyHttpMetadata(await lstat(entry.file), owner.file); active(signal)
+  const stat = await lstat(entry.file); verifyHttpMetadata(stat, owner.file)
+  if (!Number.isSafeInteger(stat.size) || stat.size < 1 || stat.size > 65536) fail()
+  active(signal)
   return owner
 }
 export async function readHttpIdentity(entry, signal) {
   const owner = await checkHttpFixture(entry, signal); active(signal)
   const file = await open(entry.file, constants.O_RDONLY | constants.O_NOFOLLOW)
   try {
-    verifyHttpMetadata(await file.stat(), owner.file); active(signal)
-    const bytes = await file.readFile(); active(signal)
+    const stat = await file.stat(); verifyHttpMetadata(stat, owner.file)
+    if (!Number.isSafeInteger(stat.size) || stat.size < 1 || stat.size > 65536) fail()
+    active(signal)
+    const bytes = Buffer.alloc(stat.size), read = await file.read(bytes, 0, bytes.length, 0), sentinel = Buffer.alloc(1)
+    if (read.bytesRead !== bytes.length || (await file.read(sentinel, 0, 1, bytes.length)).bytesRead !== 0) fail()
+    active(signal)
     if (bytes.length > 65536 || hash(bytes) !== owner.digest) fail()
     await checkHttpFixture(entry, signal); active(signal)
     return JSON.parse(bytes.toString("utf8"))

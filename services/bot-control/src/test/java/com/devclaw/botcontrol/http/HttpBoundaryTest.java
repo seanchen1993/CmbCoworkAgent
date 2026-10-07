@@ -15,6 +15,7 @@ import static org.junit.jupiter.api.Assertions.*;
 
 class HttpBoundaryTest {
     static byte[] bytes(String s) { return s.getBytes(StandardCharsets.UTF_8); }
+    static ProtocolHeadValve.HeadField field(String head, String name, String value) { int at = head.indexOf(name + ":"); int start = at + name.length() + 1; return new ProtocolHeadValve.HeadField(name, value, at, start, start + value.length()); }
     static String config() {
         return "{\"mode\":\"local-dev\",\"http\":{\"host\":\"127.0.0.1\",\"port\":0},\"db\":{\"mode\":\"local-dev\",\"host\":\"127.0.0.1\",\"port\":32893,\"schema\":\"devclaw\",\"user\":\"devclaw_app\",\"password\":\"" + String.join("", Collections.nCopies(64, "a")) + "\"},\"identity\":{\"principals\":[{\"principalId\":\"p:1\",\"active\":true,\"spaces\":[{\"spaceId\":\"A\",\"member\":true,\"canCreateBot\":true,\"canCreateGroup\":false,\"knowledgeRefs\":[\"k.1\"],\"repositoryRefs\":[],\"skillAllowlist\":[],\"capabilityCeiling\":[\"repository.read\"]}]}],\"bearers\":[{\"principalId\":\"p:1\",\"token\":\"" + String.join("", Collections.nCopies(64, "b")) + "\"}]}}";
     }
@@ -84,18 +85,26 @@ class HttpBoundaryTest {
     @Test void pinnedHeaderViewNeverReadsBodyOrChangesBufferAndRejectsUncertainFolding() {
         String line = "POST /api/bot/v1/bots HTTP/1.1", head = line + "\r\nhost:127.0.0.1:1234\r\ncontent-length:0\r\n\r\n";
         ByteBuffer buffer = ByteBuffer.wrap(bytes(head + "content-length:9\r\ntransfer-encoding:chunked\r\n\r\n")); buffer.position(head.length());
-        int limit = buffer.limit(); List<String[]> fields = Arrays.asList(new String[]{"host", "127.0.0.1:1234"}, new String[]{"content-length", "0"});
+        int limit = buffer.limit(); List<ProtocolHeadValve.HeadField> fields = Arrays.asList(field(head,"host","127.0.0.1:1234"), field(head,"content-length","0"));
         ProtocolHeadValve.check(buffer, line, fields); assertEquals(head.length(), buffer.position()); assertEquals(limit, buffer.limit());
         // CL was removed from MimeHeaders by prepareInputFilters, not from view.
         String ambiguous = line + "\r\ncontent-length:0\r\ntransfer-encoding:chunked\r\n\r\n";
         ByteBuffer both = ByteBuffer.wrap(bytes(ambiguous)); both.position(both.limit());
-        assertThrows(HttpFailure.class, () -> ProtocolHeadValve.check(both, line, Collections.singletonList(new String[]{"transfer-encoding", "chunked"})));
-        for (String malformed : Arrays.asList(line + "\r\nx:a b\n b\r\n\r\n", line + "\r\nx:a bcdefef\r\n\r\n", line + "\r\n x:a\r\n\r\n", line + "\n\nx:a\n\n")) {
+        assertThrows(HttpFailure.class, () -> ProtocolHeadValve.check(both, line, Collections.singletonList(field(ambiguous,"transfer-encoding","chunked"))));
+        for (String malformed : Arrays.asList(line + "\r\nx:a b\n b\r\n\r\n", line + "\r\nx:wrong\r\n\r\n", line + "\r\n x:a\r\n\r\n", line + "\n\nx:a\n\n")) {
             ByteBuffer view = ByteBuffer.wrap(bytes(malformed)); view.position(view.limit());
-            assertThrows(HttpFailure.class, () -> ProtocolHeadValve.check(view, line, Collections.singletonList(new String[]{"x", "a bcdef"})));
+            assertThrows(HttpFailure.class, () -> ProtocolHeadValve.check(view, line, Collections.singletonList(field(malformed,"x","a bcdef"))));
         }
         assertThrows(HttpFailure.class, () -> ProtocolHeadValve.check(buffer, "POST http://127.0.0.1:1234/api/bot/v1/bots HTTP/1.1", fields));
         ByteBuffer bodyPosition = buffer.duplicate(); bodyPosition.position(bodyPosition.limit());
         assertThrows(HttpFailure.class, () -> ProtocolHeadValve.check(bodyPosition, line, fields));
+        String compacted = line + "\r\nhost:127.0.0.1:12344\r\ncontent-length:00\r\n\r\n";
+        ByteBuffer ows = ByteBuffer.wrap(bytes(compacted)); ows.position(ows.limit());
+        ProtocolHeadValve.check(ows, line, Arrays.asList(field(compacted,"host","127.0.0.1:1234"),field(compacted,"content-length","0")));
+        // Fully overwritten folded value: exact parsed span is used, not stale
+        // tail reconstruction or a false assertion that all wire folds are seen.
+        String overwritten = line + "\r\nx:a bcdefef\r\n\r\n";
+        ByteBuffer folded = ByteBuffer.wrap(bytes(overwritten)); folded.position(folded.limit());
+        ProtocolHeadValve.check(folded,line,Collections.singletonList(field(overwritten,"x","a bcdef")));
     }
 }
