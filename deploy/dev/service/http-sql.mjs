@@ -3,7 +3,7 @@ import { appPassword, active } from "./test-database.mjs"
 import { currentHttpDatabase } from "./http-java.mjs"
 
 const actions=new Set(["facts","expire","revoke-bot","restore-bot","disable-bot","enable-bot","pointer","receipt-body","receipt"]), children=new Set()
-export async function stopHttpSqlChildren(){await Promise.all([...children].map(x=>x.stop()))}
+export async function stopHttpSqlChildren(){const settled=await Promise.allSettled([...children].map(x=>x.stop()));if(settled.some(x=>x.status!=="fulfilled"))throw Error("C2_SQL_CLEANUP")}
 export async function httpSql(runtime,entry,action,fixture={},signal){
   if(!actions.has(action))throw Error("C2_SQL_SELECTION")
   active(signal); const password=await appPassword(entry,signal); active(signal)

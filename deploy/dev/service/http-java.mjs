@@ -9,7 +9,7 @@ let starts = 0, secretSends = 0
 export function httpChildFacts() { return { starts, secretSends, active: children.size } }
 export function httpMode(mode) { if (!modes.has(mode)) throw Error("C2_SELECTION"); return mode !== "production" }
 const handles=new Map()
-export async function stopHttpChildren() { await Promise.all([...children].map(child => handles.get(child)?.stop() ?? child.stop())) }
+export async function stopHttpChildren() { const settled=await Promise.allSettled([...children].map(child => handles.get(child)?.stop() ?? child.stop()));if(settled.some(x=>x.status!=="fulfilled"))throw Error("C2_JAVA_CLEANUP") }
 async function listenerAbsent(port) {
   const child=ownedProcess("/usr/sbin/lsof",["-nP",`-iTCP:${port}`,"-sTCP:LISTEN","-Fpn"],{env:{PATH:"/usr/bin:/bin",LANG:"C",TZ:"UTC"},maxOutput:4096})
   const timer=setTimeout(()=>{void child.stop()},5000);child.child.stdin.end()
