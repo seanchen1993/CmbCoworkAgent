@@ -161,3 +161,26 @@ Compose健康后，`start`（包括`restart`）、`status`及真实测试使用�
 `BotApplication.execute`只接受固定六Operation、构造时可信IdentityPolicy/DataSource与可信space/principal上下文；原请求字节先严格原Schema再typed消费，响应和历史receipt再经原Schema。Policy只判断当前空间/成员/create/引用/ceiling资格，不访问模型、IM或仓库。无FK关系在READ_COMMITTED同事务核对，锁顺序command scope→Group父（如有）→排序Bot父→排序BotVersion；输入ordinal顺序与锁排序分开。当前权限先于receipt语义，receipt先于新CAS/配置授权，历史成功字节不重新生成；四写同事务保存唯一receipt与一条仅安全引用的outbox，没有投递器。OUTCOME_UNKNOWN固定409/false，复用原commandId对账；不声明生产exactly-once或HTTP可用。
 
 用Node22顺序执行`node --test tests/bot/service/*.spec.mjs`、`node tests/bot/check-contracts.mjs`、`node deploy/dev/service/build.mjs`、`node deploy/dev/service/application-check.mjs`、`node deploy/dev/service/database-check.mjs`、`node deploy/dev/service/database-lifecycle.mjs`。新application检查只在两个顺序新空owned MySQL测试库执行六操作、重开、完整九表facts拒绝/rollback/immutable replay、两个独立JVM同命令与不同主体同CAS；CAS双方scope锁受控握手而非进程mutex。新增故障/OS SIGTERM检查自己的Java PID实际不存在后再精确清理项目，原dev三服务/秘密/数据不改。应用检查外层1200s、Java90s、每个生命周期子测试240s；原B1入口不改，原20JUnit/1107parity/34固定库审计保留并追加5应用JUnit。Docker inspect的Mounts集合只按Destination稳定排序，保留完整字段且仍执行原安全/归属/实际回环listener检查。
+
+### B01-C2 本机HTTP适配（待完整独立验收）
+
+以上A1/A2/B1/C1段保留各历史切片的范围和当时计数；当前C2新增封闭的六个Bot/Group HTTP入口，不表示旧dev账号已提升、旧库已迁移或原三服务已提供Bot HTTP。固定Java8/Boot MVC/Tomcat及34库沿用，构建仍审计原三源、manifest、V1、日志字节和全部自有class52。最新实测/未完成项以B01-A02及主代理验收记录为准，不用此文档代替接受。
+
+仅显式local-dev、字面127.0.0.1/随机port0：可信启动JSON从私有stdin一次完整读至EOF，关闭环境配置猜测；完整身份和原DB readiness先于监听。不可变local bearer registry只将随机token映射为主体，空间头只是selector，active/成员/create/引用/能力来自可信启动快照，Group/maintainer权仍每次查DB。测试程序在每次读/发秘密前复核本进程登记的0700/0600单链接私有文件、当前owned数据库、实际Java PID及127 listener；秘密不进argv/env/日志。没有企业SSO、Cookie身份、招乎/IM、Runtime、模型/仓库调用、身份管理新API或outbox发送器，不开放公网，不把现存limited/unmigrated dev库拿来serve。
+
+Node22在根目录顺序运行，任一失败先保存证据，不并行数据库或构建：
+
+```sh
+node --test tests/bot/service/*.spec.mjs
+node tests/bot/check-contracts.mjs
+node deploy/dev/service/build.mjs
+node deploy/dev/service/http-check.mjs
+node deploy/dev/service/http-lifecycle.mjs
+node deploy/dev/service/application-check.mjs
+node deploy/dev/service/database-check.mjs
+node deploy/dev/service/database-lifecycle.mjs
+```
+
+HTTP检查仅两个顺序新登记隔离MySQL5.7空库：先迁移，root-free应用凭据stdin，再实际TCP六操作、原Ajv/九表完整facts、双独立JVM握手竞争、rollback及commit后丢响应原ID对账。HTTP生命周期另外实测故障/OS SIGTERM/秘密检查取消；先实际own JVM与listener退出再精确回收自己的容器/网络/卷/私有目录，保留原dev与缓存。SIGKILL/断电不能保证finally，未知资源不自动收养或重放。
+
+普通API成功/错误必须非空原Schema JSON；固定Tomcat9.0.83的三个有证据transport类别单独报告，绝不冒充Ajv通过：被拒HEAD仅400/close/零wire实体；前置URI解析错误只允许严格唯一400/close/noCL/TEchunked/恰5字节零chunk；唯一incomplete-body-idle/createBot固定案例只允许一帧400/CL字面0/完全无TE/close/空实体/1200–4500ms且九表不变、同server正常404恢复。慢滴body绝对截止仍要求非空400原Ajv与恢复，不泛化空响应豁免、不重置容器错误状态。头视图只读当前有界窗口且不是原wire副本，不声称恢复所有被覆盖的折叠头；header 2s是idle而非持续滴头的absolute截止，连接/worker/queue仍有限。

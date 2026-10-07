@@ -78,3 +78,11 @@ Java本地迁移及JDBC探针保持这些原契约不变。合法JSON escape中�
 ## B01-C1 应用消费（无HTTP）
 
 新离线应用只执行这六操作的原Schema/typed DTO，身份与当前策略来自可信构造器port而非请求。JDBC事务承担无FK关联、权限/CAS、固定版本、四写canonical命令/7天DBUTC receipt与reference-only outbox；历史body/status保持原字节，当前撤权优先。没有HTTP监听、外部调用或outbox投递器，也不修改这些冻结定义。真实探针原响应再由既有Ajv执行六operation声明映射，并保留既有1107数据值parity和精确JSON字节边界的分层，不宣称任意JS raw-number全链路等价。命令与资源边界见deploy/dev/README.md的C1段。
+
+## B01-C2 本机HTTP消费（待完整独立验收）
+
+前段“尚无Java/HTTP”等说明属于当时切片，保留历史；C2在不改本目录冻结字段/路径/错误映射的前提下适配六个入口，普通HTTP响应必须非空原Schema JSON并实跑原Ajv，历史成功status/body按原字节重放。真实Java8/MySQL5.7、1107数据值parity与精确JSON字节层仍分层，不宣称任意JS raw-number等价。
+
+仅local-dev/127.0.0.1：一次可信私有stdin完整EOF配置、监听前DB readiness、启动时不可变bearer→principal registry；请求头/目标成员不授予身份或权限。原现存dev limited账号/未迁移数据不变、不serve，没有企业SSO、招乎/IM、Runtime/UI、模型/仓库、全量Task/Run API或outbox投递。顺序执行全service Node、F03、build、http-check、http-lifecycle、application-check、database-check、database-lifecycle，准确命令和root-free owned资源/秘密收尾限制见[开发说明](../../../deploy/dev/README.md)。此段不是C2已接受声明。
+
+有证据的容器传输拒绝与普通ErrorResponse分开：HEAD拒绝400/close/零wire实体；前置URI唯一400/close/noCL/TEchunked/恰5byte零chunk；唯一createBot incomplete-body-idle固定400/CL字面0/无TE/close/空实体、1200–4500ms、九表不变且同server404恢复。这三类不声称wire JSON/Ajv通过，不新增契约错误字段或通用空body规则。slow-drip绝对截止及六操作普通失败仍非空原Schema JSON，原源和生产HTTPS要求不变。
