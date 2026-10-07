@@ -10,6 +10,10 @@
 
 ## 当前确证与缺口
 
+- 11:14:46 UTC 实际核对：原 high 已 completed/stopped，最终 worker `8d743627528d65466320b9614a1e5eff53b2a7f8` clean；生产实现保持 `204303`，仅两个 README 后续追加。实际最终 diff 共 37 个允许文件，旧 C1/B1/POM/契约/资源无变化。剩余三 worker 报告已完整实读：application `33636/4d67bf`、database `22712/8087a9`、database-lifecycle `12726/35544b` 均 exit0/closed，八个自测入口齐备；不等于主代理验收。
+- 主代理独立 Node `3375bd` 35/35、F03 `13d161` 24/24、build `39591/995169` 32JUnit 零 fail/error/skip、1107 parity 同轮 `dbce15bb-18cf-4b54-9246-49c4af187511` 零差异、69 自有 class major52 / 34 固定依赖均 exit0。Maven 本轮 up-to-date，不冒充新编；jar `9c20661eb6c63200dbe9fd2b5dfa200f0a777e0ad53bc05515b522032192f4fb`。`eabc3e` 已捕获全部 182 非目录 entry 内容哈希，aggregate `2c5fee0a0ed546b101b91e0eb1670d93cda457a6b4f730e369a88ac0591a440b`，供正常合入后的实际重新编译逐项比较。
+- 当前唯一主代理 HTTP `12957 / 0f32e8`，1800s 上限，完整输出未截断。`6e29aa/2d7389` 第一库 `48f3ebbf8aa58e2d` 全套真实 HTTP 证明及精确清理已通过；第二库 `2f149044677abd93` 已 ready、startup13 通过并继续业务断言。全句柄结果未知，不能称两库完整验收；准确 container/PID/port 在 state。其后四入口与集成复验仍待。
+
 - 产品代码检查点 `204303d673ed9c5225b614fbae47371e227f3824`：此前所有新增 Java/Node 文件和增量已实际读取；普通六操作错误仍须非空原 Schema/Ajv，生产 C1/B1/依赖/冻结资源未改变。
 - 主代理 `cc0ea6` 独立执行两个新增 framing/body-idle spec，5 tests / 5 pass / 0 fail / 0 skip；这不是完整八入口验收。
 - 原子代理自己的 `19326 / a1649e` 确切 exit 0 / closed / verified，顺序两个隔离数据库、30 starts / 30 secret sends / 0 active。其 `51ac9abd` 报告已主代理 `dc7c41` 完整实际读取。每库权限、原字节重放、严格两帧 pipeline、49 transport、两独立 JVM 明确握手的命令/CAS 竞争、六组 rollback、提交后真实 TCP 丢响应与原 command 重启恢复、完整九表事实及精确 finally 通过，仍属于 worker 证据。
@@ -20,14 +24,14 @@
 
 | 固定入口 | Worker | 主代理独立 | 集成复验 |
 | --- | --- | --- | --- |
-| `node --test tests/bot/service/*.spec.mjs` | c5ca19 / exit 0，35/35 | 仅 5 项局部通过 | 待 |
-| `node tests/bot/check-contracts.mjs` | 62353/be43a0 exit0，24/24；be666b实读报告 | 待 | 待 |
-| `node deploy/dev/service/build.mjs` | 78758/337baa exit0，32JUnit/1107零差异/69class52/34库；up-to-date非fresh | 待 | 待真实重新编译 |
-| `node deploy/dev/service/http-check.mjs` | 19326 / exit 0，两库；元数据缺口见上 | 待两库完整安全输出 | 待产物复验 |
+| `node --test tests/bot/service/*.spec.mjs` | c5ca19 / exit0，35/35 | 3375bd / exit0，35/35 | 待 |
+| `node tests/bot/check-contracts.mjs` | 62353/be43a0 exit0，24/24；be666b实读报告 | 13d161 / exit0，24/24 | 待 |
+| `node deploy/dev/service/build.mjs` | 78758/337baa exit0，32JUnit/1107零差异/69class52/34库；up-to-date非fresh | 39591/995169 exit0，32/1107/69/34；up-to-date非fresh | 待真实重新编译 |
+| `node deploy/dev/service/http-check.mjs` | 19326 / exit0，两库；旧元数据缺口见上 | 唯一12957运行；第一库全套/清理已通过，第二库进行中 | 待产物复验 |
 | `node deploy/dev/service/http-lifecycle.mjs` | 28401/c32e5a exit0，三新模式/真实absence；968d12实读报告 | 待 | 待 |
-| `node deploy/dev/service/application-check.mjs` | 唯一33636/bfd42c运行中，结果未知 | 待 | 待 |
-| `node deploy/dev/service/database-check.mjs` | 待 | 待 | 待 |
-| `node deploy/dev/service/database-lifecycle.mjs` | 待 | 待 | 待 |
+| `node deploy/dev/service/application-check.mjs` | 33636/4d67bf exit0，两库＋注入/SIGTERM；e5f5db实读报告 | 待 | 待 |
+| `node deploy/dev/service/database-check.mjs` | 22712/8087a9 exit0，两库/10表/0FK；d8347d实读报告 | 待 | 待 |
+| `node deploy/dev/service/database-lifecycle.mjs` | 12726/35544b exit0，3case/实际cleanup；235ef5实读报告 | 待 | 待 |
 
 每项必须有实际代码 SHA、命令、句柄、exit、计数和清理证据；不能由旧结果/参考模型代替。原 Node26 / JUnit25 / F03 24 / 同轮 1107 parity / class major52 / 34 固定库与冻结原字节均需保留回归。记录 actual totals，不推测新总数。
 
