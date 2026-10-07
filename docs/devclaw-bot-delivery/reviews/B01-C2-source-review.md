@@ -4,6 +4,8 @@
 
 ## 第一完整库部分通过与容器空分块判定
 
+最新62235/e5a997失败闭合，09bb3dae/ebd0f6实读保存失败：前三空分块URI真实400/close/精确5bytes+全9facts、UTF8普通400原Ajv通过，之后encoded固定prefix case未输出status即断言，未到HEAD/R4/慢流/双JVM。main12e116全RawRoute证明固定literal不解码末尾INVALID_PAYLOAD400；任务允许unknown400/404，批准仅该新test404→精确400（ab0e61实际f1f5a353两行diff），不改源/放宽普通JSON或接受alias。safe失败诊断仅固定label/op/status/长度/expected，不打印原bytes。93778唯一重新实跑仍未知，不能据源码把未输出case改写为实测400。
+
 精准规则code6be16b05实际3f37a4全三文件+18类反例/A02读/clean/diffcheck0符合批准；主代理98ff1d独立Node22纯framing3/3零失败/skip，普通TE拒、首唯一closing400零chunk恰5、CL共存/HEAD/408/多帧/trailer等反例仍拒。这仅纯测试独立证据，非最终冻结后完整C2验收。c1386841/dc0e5e实际读唯一62235新全HTTP句柄/结果未知；d71183主代理只读原3容器/网络/3卷/回环端口同且healthy，未竞争资源或读凭据。
 
 e60a2f/5b07d8完整实际读a5345df/ca212b66三新test文件与A02真实报告。68637/7a9918 exit1，首库13启动负例、42权限反例/11原bytes重放、最大Unicode及12raw（两CL帧各Ajv/无残余/全9facts）通过；首次encodedsolidus触发C2_RAW_FRAMING，R4方法/慢流/并发/第二库未运行。失败不可改称通过，旧finally/1fc624 absence及originalhealthy为worker证据，主代理独立运行仍待。
