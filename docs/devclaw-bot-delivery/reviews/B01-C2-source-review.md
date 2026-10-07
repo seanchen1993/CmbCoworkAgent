@@ -2,6 +2,12 @@
 
 2026-10-07 · implementing；不是最终接受
 
+## 完整HTTP草稿实际失败与R4装配决定
+
+2dd5ecf3的完整HTTP草稿906c26/acf20b实际范围与transactions/transport已读，69839/eaa6c4 exit1，d6fe3bf9报告第一owned库core六HTTP后business聚合断言失败，第二库/transport/races未进入，旧无子项日志不能捏造准确index。4b5876仅新harness将原合法coordinator错误负例改unknown、增加coordinator正例和固定safe index/status/code/九表全facts诊断，保持原C1/Schema。worker精确清理报告/main正确escalated dce26f只原三同ID/127端口healthy；08c370先前socket sandbox拒绝无变更，不伪称全资源或main全验通过。
+
+R4证据main618b6d及[固定CoyoteAdapter源码](https://raw.githubusercontent.com/apache/tomcat/9.0.83/java/org/apache/catalina/connector/CoyoteAdapter.java)：OPTIONS *默认成功、TRACE405、CONNECT501均Context前，非parser或HEAD例外。mainf90395实际Adapter六public方法/ProtocolHandler get-setAdapter/Connector.initInternal-startInternal、038f46/6c2e69 LifecycleBase.init→STARTING_PREP(before_start)→protocol.start，且[固定Connector源码](https://raw.githubusercontent.com/apache/tomcat/9.0.83/java/org/apache/catalina/connector/Connector.java)一致。批准同原high仅新http ClosedMethodAdapter/public BEFORE_START一次捕获原CoyoteAdapter；null/unknown启动失败，GET/POST/PUT/HEAD原delegate，其余原SafeHttpErrors400非空JSON/CL/no-store/nosniff/close；其他Adapter方法delegate。保持allowTrace=false、HEAD原Valve/VOID，不改method/request/processor/旧实现，无反射/复制库/proxy/依赖变化。还需pure委托和真TCP OPTIONS*/path/TRACE/CONNECT authority+path/DELETE/PATCH400/原Ajv/九表不变，实际新编和完整八入口/main独立/合入新编；计划批准不是验收。
+
 ## 首代码与构建事实
 
 唯一实施者仍为原 `/root/b01_contracts_high`、gpt-6.1-sol/high、B01-A02。代码 aea0b95339caa4a3700d30cc3e0fe551f7739c18 的17允许文件、736新增行已由主代理完整实际读取（5826ab至92dc4b及9dc535），5542d6范围与d19f7e diffcheck符合任务。原C1/B1、POM、契约与V1未修改；build只追加6项HTTP单元测试，旧25项保留。
