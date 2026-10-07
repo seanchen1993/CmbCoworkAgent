@@ -4,6 +4,8 @@
 
 ## 最新C2接续（优先于下方C1历史）
 
+- **单例诊断已冻结；主代理唯一92083独立复验中。** c61f0880/f7d81edf实际4ba700全diff/report读，原high completed/stopped/clean/无句柄。worker91006/c59fad exit0新b14f/6333216a完整ID/DB32929/生产4810-55375，body-idle实际400/CL0/无TE/空entity/92wirebytes/4130ms/close/noHTML、九表不变且同server404原Ajv恢复，精确finally/0c5b8a与3f8766 absence/originalhealthy保存；这不是普通JSON通过。main当前唯一e09403/session92083载同冻结诊断，180s/newownedDB/原dev不改，自行poll；worker停写不竞争。实际独立结论未知，尚未批准特例或生产改动。必须等主代理句柄闭合/精确cleanup后再作有证据的窄分类决定，后续full8/独立/merge/freshcompile仍待，自动PAUSED。
+
 - **93778确切失败闭合；仅body-idle单例诊断获批。** 525b4dfa/4c6345实际完整report：0f7ffe exit1首fef8完整container e4a7828eff20e489c364b8229d013333c01f68e11fa098277d638783fd20a77a/DB32928/生产93251-54759；R4/HEAD/alias/42反例11重放/raw12之外，真实1048577 CL及chunked413/150BJSON、headeridle0wire/2007ms通过。随后body-idle C2_RESPONSE_SCHEMA无status/bodybytes/elapsed输出，不猜其实际wire；drip/races/rollback/lostTCP/第二库未达。worker c225ac/305494报告精确absence/originalhealthy。main3a49ce实际固定InputBuffer.handleReadException→Response.sendError400→suspended→OutputBuffer.write直接return及官方primary核对，仅原因方向证据。原high已completed/stopped/clean，主代理formal复用同一代理批准仅新test单owned库/migrate/生产HTTP/固定POST CL100无body/180s、安全有限wire metadata/全9facts/同server404恢复/精确finally；未批准任何生产修复或ordinary豁免，须实测后main决定。不启动竞争full/lifecycle/build，不改原dev/自动PAUSED；此前93778running记录被本失败闭合覆盖。
 
 - **93778第一库方法限制真实局部通过，整轮仍unknown。** 原high运行中消息（main04:35:32UTC记录，045256只读9e2/f1clean）：fef8bfd1815895ba/container仅知e4a7828前缀/DB32928/生产93251-54759；42denials/11replays/raw12严格2帧通过，编码固定prefix实际400非空Ajv、HEAD400/close/wire0独立类、OPTIONS path和*、TRACE、CONNECT authority/path、DELETE/PATCH七请求都400/148byteJSON/原Ajv/close/全9facts不变。三前置URIclosing400精确零chunk亦通过；这仅worker首库运行中证据，未读最终报告/不称独立或全通过。慢流/races/第二库/closure、新lifecycle和旧8/main独立/合入新编仍待。主代理不接管93778或竞争资源，不恢复自动化。
