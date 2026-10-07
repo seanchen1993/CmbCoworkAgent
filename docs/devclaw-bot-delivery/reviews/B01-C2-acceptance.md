@@ -33,8 +33,8 @@
 | `node --test tests/bot/service/*.spec.mjs` | c5ca19 / exit0，35/35 | 3375bd / exit0，35/35 | a9045d / exit0，35/35 |
 | `node tests/bot/check-contracts.mjs` | 62353/be43a0 exit0，24/24；be666b实读报告 | 13d161 / exit0，24/24 | 59056实际exit0/24/type-drift，准确chunk见state |
 | `node deploy/dev/service/build.mjs` | 78758/337baa exit0，32JUnit/1107零差异/69class52/34库；up-to-date非fresh | 39591/995169 exit0，32/1107/69/34；up-to-date非fresh | 5344/4820c3 exit0，真实31main/11test新编，32/1107零差异/69class52/34库；fa546f182内容逐项相同 |
-| `node deploy/dev/service/http-check.mjs` | 19326 / exit0，两库；旧元数据缺口见上 | 12957/49011b exit0，两库完整证明/资源精确清理/原dev健康；304 safe facts 未截断 | 唯一集成HTTP运行，实际句柄见state |
-| `node deploy/dev/service/http-lifecycle.mjs` | 28401/c32e5a exit0，三新模式/真实absence；968d12实读报告 | 70240/5de693 exit0，3case/实际PID-listener-project-privatefiles absence，原dev健康 | 待 |
+| `node deploy/dev/service/http-check.mjs` | 19326 / exit0，两库；旧元数据缺口见上 | 12957/49011b exit0，两库完整证明/资源精确清理/原dev健康；304 safe facts 未截断 | 74345/eeb77f exit0，新jar7c两库全套/30starts30secret0active/精确清理及原dev健康，完整安全输出 |
+| `node deploy/dev/service/http-lifecycle.mjs` | 28401/c32e5a exit0，三新模式/真实absence；968d12实读报告 | 70240/5de693 exit0，3case/实际PID-listener-project-privatefiles absence，原dev健康 | 集成进行中，句柄见state |
 | `node deploy/dev/service/application-check.mjs` | 33636/4d67bf exit0，两库＋注入/SIGTERM；e5f5db实读报告 | 80206/061ae1 exit0，两库各376/52/21/7/12/6及双JVM竞争，注入/SIGTERM实际清理 | 待 |
 | `node deploy/dev/service/database-check.mjs` | 22712/8087a9 exit0，两库/10表/0FK；d8347d实读报告 | 23594/d62c8f exit0，两库完整证明/0FK/迁移与历史拒绝/实际SQLTimeout/精确清理 | 待 |
 | `node deploy/dev/service/database-lifecycle.mjs` | 12726/35544b exit0，3case/实际cleanup；235ef5实读报告 | 61509/e3923b exit0，注入与两个SIGTERM/实际absence，JDBC starts0 | 待 |
