@@ -10,6 +10,10 @@ R4证据main618b6d及[固定CoyoteAdapter源码](https://raw.githubusercontent.c
 
 ## 首代码与构建事实
 
+最新dac07832已实际b235c5全读公共Adapter/装配/第7JUnit/build窄审计，365dad全读startup/java/client/check/transport/report；wrapper符合R4最小批准，真实TCP仍待。94370/067438实际exit0（worker），31main/10test新编、32JUnit旧25+新7全零、1107同ab3d7a0d零差异、69自身class52/34固定库。main d4234c实际全部六XML=32零失败/跳过与jar85b3edb4993035c0380d880f8a7db321908d11a098df9dde8fa7d3645df61190同；这是子代理材料核对，不是主代理独立执行。
+
+新lifecycle d32675增加实际父PID ESRCH；仍需实际三模式。已提醒同一写者只新helpers：query/semicolon/double-encoding等普通gate错误不可一组parserEmpty跳过Ajv；实际bad-migration/missing/symlink启动拒绝和0Java/0secret；global stop所有登记JVM须全部settled再报错，不能Promise.all早reject后提前回收DB。当前后续窄测试修改未冻结，dac构建不能担保未来Java/test修改；八入口、main独立与新集成产物未通过。main dce26f/14a26c实际原三healthy/原网络/三卷/运行目录无测试，不改或读原秘密。
+
 唯一实施者仍为原 `/root/b01_contracts_high`、gpt-6.1-sol/high、B01-A02。代码 aea0b95339caa4a3700d30cc3e0fe551f7739c18 的17允许文件、736新增行已由主代理完整实际读取（5826ab至92dc4b及9dc535），5542d6范围与d19f7e diffcheck符合任务。原C1/B1、POM、契约与V1未修改；build只追加6项HTTP单元测试，旧25项保留。
 
 0147ce983a20706f92458413b3fa4d840e88c314保存子代理唯一build12101/e99263确切exit0：30main/8test真正重新编译、31JUnit零失败/错误/跳过、1107同3f0a475a零差异、67自身class major52、34固定库及原资源/fatjar审计。主代理1915e5/f57535实际读取六suite XML、dc2b97实际jarSHA相同6e9497bc453549a73157bd89f6fb72f73dc2550daeb510b7cd795cdc39819db3；这是核对自测材料，非主代理独立运行全验。两猜测源路径不存在已dbba50查真实路径纠正，不能据失败命令称所有冻结hash通过。
