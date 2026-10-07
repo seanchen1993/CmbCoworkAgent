@@ -8,6 +8,7 @@
 - main 实际9b166e1e clean、worker8d743627 clean、同原high completed停写、pgrep无Java/Maven/test进程；6533d7只原三Docker完整ID healthy/回环32893-32877-32876，实际automation PAUSED。没有重跑B01、部署、改原dev账号/数据/读秘密或启动新资源。
 - 12:19:32UTC正式派单已成功：main ready cfd79ce7 正常FF原停止clean worker（ab33ee精确HEAD/clean，只8协调文件，pgrep最后exit1为空非merge失败），formal followup同 `/root/b01_contracts_high`（gpt-6.1-sol/high，禁止派生），提供准确树/任务/文件/验收/新报告 `attempts/B02-A01.md`。直接小步实现，无额外长设计门禁；目前未交付代码或测试通过。主代理只增量审查，不竞争builder/DB或同步活跃树，独占state/HANDOFF/tasks/reviews；自动续跑保持PAUSED。
 - 12:23:01UTC起点已保存：main08949a实际读6590e10b B02-A01七行report-only/clean；worker633d7f只读原三sameID/owner/daemon/网络/inode/当前127端口健康，未读凭据或创建资源/新命令。现直接推进闭包及Task最小实现；尚无源码/测试交付，主代理不竞争构建。
+- 12:34:29UTC契约小步：actual a61ba5c2扩10操作/44定义，3d3f81b4保留原六断言并更正旧未选Task负例，1a97b81d仅报告。首10658真实exit1/3旧断言失败，修正50816真实exit0/closed，32JUnit与1884 Java/Ajv零差异；main c7bb12读六XML确认32/零失败，未独立完整验收。same high正做V2/Task事务/HTTP，无DB资源，当前未报告活跃命令；不竞争builder/DB，自动仍PAUSED。后续只本轮四操作验收，不扩路线。
 
 ## 最新C2接续（优先于下方C1历史）
 

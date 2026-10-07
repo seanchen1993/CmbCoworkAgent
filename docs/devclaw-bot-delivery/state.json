@@ -426,8 +426,24 @@
       "formal_followup": "succeeded",
       "dispatched_at_utc": "2026-10-07T12:19:32Z",
       "attempt_report": "/Users/heyirui/.codex/worktrees/devclaw-bot-local/cmbCowork/docs/devclaw-bot-delivery/attempts/B02-A01.md",
-      "latest_checkpoint": "12:23:01UTC main08949a actuallyread B02-A01 startreport6590e10b0c1606f4b52949ac33d517d6dc2a52b4/clean/only7reportlines; no source/newtest yet. Worker read instructions and readonly633d7f verifies original3samehealthy/resourceproof/no secrets or mutation, no live handles. SAME high begins fouroperation closure/V2/application/HTTP directly; automaticPAUSED and no acceptance claim.",
-      "checkpoint_head": "6590e10b0c1606f4b52949ac33d517d6dc2a52b4",
+      "latest_checkpoint": "12:34:29UTC main c8aed5/c7bb12 read actual a61 contract diff, 3d3f81b4 test correction and report-only1a97b81d. Child first10658 exited1 (three obsolete six-operation/Task-unselected assertions); corrected preserving original six coverage plus unselected Run/Upload. Child50816 final084e3f exit0/closed:32JUnit and1884 Java/Ajv zero mismatches; main actual six XML confirm32/zero. These are worker-only contract checks, not B02 acceptance or independent full verification. Current V2/Operation/readiness drafts preserved; same high implementing, no DB yet and no reported live handle. TimerPAUSED.",
+      "checkpoint_head": "1a97b81d8b0a677fe07feef52ab657709b6b2f9f",
+      "contract_checkpoint": {
+        "code_commit": "a61ba5c213e7c83fd85589cd94f7050f045668c1",
+        "test_correction_commit": "3d3f81b477593546cca1edcbcd3068e94d643f5e",
+        "worker_node_tests": 16,
+        "first_builder_session": 10658,
+        "first_builder_exit_code": 1,
+        "corrected_builder_session": 50816,
+        "corrected_builder_exit_code": 0,
+        "corrected_builder_final_chunk": "084e3f",
+        "worker_tests": 32,
+        "worker_parity_fixtures": 1884,
+        "worker_parity_mismatches": 0,
+        "run_id": "fec51b1d-0264-4893-bf37-290e58eaf951",
+        "main_xml_chunk": "c7bb12",
+        "independent_verification": "pending after stopped final candidate"
+      },
       "live_commands": [],
       "wait_reason": null
     }
