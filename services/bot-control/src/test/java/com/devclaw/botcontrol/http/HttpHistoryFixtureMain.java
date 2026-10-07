@@ -21,7 +21,7 @@ public final class HttpHistoryFixtureMain {
     private static Snapshot snapshot(Connection c) throws Exception {
         Snapshot s=new Snapshot();ByteArrayOutputStream bytes=new ByteArrayOutputStream();DataOutputStream data=new DataOutputStream(bytes);
         String[] names={"installed_rank","version","description","type","script","checksum","installed_by","installed_on","execution_time","success"};
-        try(PreparedStatement p=c.prepareStatement("SELECT * FROM flyway_schema_history ORDER BY installed_rank")){p.setQueryTimeout(2);try(ResultSet r=p.executeQuery()){
+        try(PreparedStatement p=c.prepareStatement("SELECT * FROM bot_schema_history ORDER BY installed_rank")){p.setQueryTimeout(2);try(ResultSet r=p.executeQuery()){
             ResultSetMetaData m=r.getMetaData();if(m.getColumnCount()!=10||!r.next())throw new IllegalStateException("TEST_HISTORY");
             for(int i=0;i<10;i++){if(!names[i].equals(m.getColumnName(i+1)))throw new IllegalStateException("TEST_HISTORY");data.writeUTF(names[i]);data.writeInt(m.getColumnType(i+1));s.values[i]=r.getObject(i+1);s.bytes[i]=r.getBytes(i+1);data.writeInt(s.bytes[i]==null?-1:s.bytes[i].length);if(s.bytes[i]!=null)data.write(s.bytes[i]);}
             if(r.next()||!Integer.valueOf(1).equals(s.values[0])||!"1".equals(s.values[1])||!(s.values[5] instanceof Integer)||!Boolean.TRUE.equals(s.values[9]))throw new IllegalStateException("TEST_HISTORY");
@@ -29,7 +29,7 @@ public final class HttpHistoryFixtureMain {
         byte[] digest=MessageDigest.getInstance("SHA-256").digest(bytes.toByteArray());StringBuilder hex=new StringBuilder();for(byte b:digest)hex.append(String.format(Locale.ROOT,"%02x",b&255));s.hash=hex.toString();return s;
     }
     private static void replaceChecksum(Connection c,int expected,int replacement) throws Exception {
-        c.setAutoCommit(false);try(PreparedStatement p=c.prepareStatement("UPDATE flyway_schema_history SET checksum=? WHERE installed_rank=1 AND version='1' AND checksum=? AND success=1")){p.setInt(1,replacement);p.setInt(2,expected);p.setQueryTimeout(2);if(p.executeUpdate()!=1){c.rollback();throw new IllegalStateException("TEST_HISTORY");}c.commit();}finally{c.setAutoCommit(true);}
+        c.setAutoCommit(false);try(PreparedStatement p=c.prepareStatement("UPDATE bot_schema_history SET checksum=? WHERE installed_rank=1 AND version='1' AND checksum=? AND success=1")){p.setInt(1,replacement);p.setInt(2,expected);p.setQueryTimeout(2);if(p.executeUpdate()!=1){c.rollback();throw new IllegalStateException("TEST_HISTORY");}c.commit();}finally{c.setAutoCommit(true);}
     }
     public static void main(String[] args){
         try{

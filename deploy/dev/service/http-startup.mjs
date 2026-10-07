@@ -37,7 +37,7 @@ async function badMigration(runtime,entry,fixture,signal){
   await currentHttpDatabase(entry,signal);await checkHttpFixture(fixture,signal);active(signal)
   const child=ownedProcess(runtime.java,["-Xmx256m","-Duser.timezone=UTC","-cp",runtime.classpath,"com.devclaw.botcontrol.http.HttpHistoryFixtureMain"],{cwd:runtime.dir,env:runtime.env,maxOutput:8192});children.add(child)
   const stop=()=>{void child.stop()},timer=setTimeout(stop,60000);signal?.addEventListener("abort",stop,{once:true});child.child.stdin.on("error",()=>{})
-  const records=()=>child.output.split("\n").filter(Boolean).map(x=>JSON.parse(x))
+  const records=()=>{if(child.output.length>8192)throw Error("C2_STARTUP_BOUNDARY");const lines=child.output.split("\n");lines.pop();if(lines.length>3)throw Error("C2_STARTUP_BOUNDARY");return lines.map(x=>JSON.parse(x))}
   try{
     await currentHttpDatabase(entry,signal);await checkHttpFixture(fixture,signal);active(signal);child.child.stdin.write(input+"\n")
     const deadline=Date.now()+15000;let mutated
