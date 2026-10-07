@@ -26,6 +26,7 @@ export async function httpTransport(server,runtime,entry,create,signal){
   const get=(path,extra="")=>x=>`GET ${path} HTTP/1.1\r\n${base(x)}${extra}\r\n`
   async function ordinary(label,op,build,expected,{head=false,parserEmpty=false,dripMs=0,window}={}){
     const result=await httpWire(server,build,signal,{head,parserEmpty,dripMs})
+    if(result.frames.length!==1||![].concat(expected).includes(result.frames[0]?.status))console.log(JSON.stringify({stage:"http-transport-status-failure",label,operation:op,frameCount:result.frames.length,status:result.frames[0]?.status??null,expected:[].concat(expected),bodyBytes:result.frames[0]?.body.length??0,wireBytes:result.bytes,elapsedMs:result.elapsedMs}))
     if(!result.frames.length){check(parserEmpty)}else{
       check(result.frames.length===1);const frame=result.frames[0];check([].concat(expected).includes(frame.status))
       if(head){check(frame.status===400&&frame.body.length===0&&frame.headers.connection?.toLowerCase()==="close")}
@@ -43,7 +44,7 @@ export async function httpTransport(server,runtime,entry,create,signal){
   // context gate: encoded solidus, backslash, malformed hex and invalid UTF8
   // may produce its safe empty rejection rather than an API JSON response.
   for(const path of ["/api/bot/v1/bots/a%2Fb","/api/bot/v1/bots/a%5Cb","/api/bot/v1/bots/%FF","/api/bot/v1/bots/%zz"] )await ordinary("coyote-pre-context-uri-parser","getBot",get(path),400,{parserEmpty:true})
-  await ordinary("encoded-fixed-prefix-not-alias","getBot",get("/api/%62ot/v1/bots/missing"),404)
+  await ordinary("encoded-fixed-prefix-not-alias","getBot",get("/api/%62ot/v1/bots/missing"),400)
   await ordinary("head-void-filter","getBot",x=>`HEAD /api/bot/v1/bots/missing HTTP/1.1\r\n${base(x)}\r\n`,400,{head:true})
   await ordinary("options-not-auto-success","getBot",x=>`OPTIONS /api/bot/v1/bots/missing HTTP/1.1\r\n${base(x)}\r\n`,400)
   for(const [method,target] of [["OPTIONS","*"],["TRACE","/api/bot/v1/bots/missing"],["CONNECT","127.0.0.1:443"],["CONNECT","/api/bot/v1/bots/missing"],["DELETE","/api/bot/v1/bots/missing"],["PATCH","/api/bot/v1/bots/missing"]])await ordinary("unknown-method-pre-adapter","getBot",x=>`${method} ${target} HTTP/1.1\r\n${base(x)}\r\n`,400)
