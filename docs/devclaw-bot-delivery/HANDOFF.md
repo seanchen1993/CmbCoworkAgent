@@ -1,9 +1,10 @@
 # DevClaw Bot 当前交接点
 
-2026-10-06 · C2设计checkpoint已正式派发；C1已验收 · 定时续跑停用
+2026-10-07 · C2设计额度恢复待同代理接续；C1已验收 · 定时续跑停用
 
 ## 最新C2接续（优先于下方C1历史）
 
+- **2026-10-07 02:53:29UTC人工继续/额度已恢复：** 原C2设计turn真实usage-limit错误提示北京时间10月7日00:11恢复，没有A02设计或源码新交付。实际原high errored，interrupt确认停止；fa402f worker仍dfbd1e38 clean/无C2记录或未跟踪成果，be50c0实际escalated pgrep空。当前ordinaryUsageAllowed=true、短窗0%/周窗43%，旧恢复时刻已过；不购买/重置额度、不换模型账号或新代理。af987d专用daemon75050694原三container同ID仍healthy/12732893-32877-32876，仅三容器；不触原数据/账号/凭据。先保存实际历史→正常docs FF停写worker→formal恢复同gpt-6.1-sol/high/B01-A02，只设计checkpoint、main批准前不实现。main无运行句柄/资源变更，自动续跑保持PAUSED，C1不重做。
 - **C2正式设计派单已成功，覆盖下方待派单：** 原high completed停写、9dd4e4 worker4019clean/e675f9祖先/9a1444实际pgrep空核对后，正常FF97ac72至 `dfbd1e380044f94ba0278e667d032cdc05dad12e`；98f687/748dad/4ecbb7确认clean准确HEAD且只有8协调docs，无源码/target/cache/dev数据改动。formal followup已给同 `/root/b01_contracts_high` / gpt-6.1-sol/high / B01-A02准确任务、树、文件范围、八验收入口与报告位置。**首轮仅设计报告并停写，main审批前不写HTTP实现。** 14:16:29UTC实际代理running、51a8c4 worker仍dfbdclean；main无构建/DB/HTTP句柄，不竞争或再次派单/同步。等待本人A02实际小SHA/clean/闭合句柄和设计检查，未交付C2代码或测试；自动续跑PAUSED。
 - 最新用户再次要求继续任务。本片 `tasks/B01-C2.md` v1ready，仅已有B01六个HTTP接口和可信local身份：沿用固定SpringMVC/Tomcat/JDK8/34库/原C1/B1，不新建UI/Runtime/IM/B02/B03/outboxsender或public新接口。旧C1 noHTTP是上一片，不覆盖本片正式派单后的新技术切片。
 - 原samehigh B01-A02实际completed停写，worker4c7102/0c4d0a在4019clean，main8fdclean；02d902源码除协调docs字节相同，0d3ebe actualpgrep空，d2075e原三完整ID同healthy/12732893-32877-32876且无testcontainer。没有构建/测试/HTTP/新资源或派单进行中。
