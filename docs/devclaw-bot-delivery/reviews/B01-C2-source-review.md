@@ -4,6 +4,8 @@
 
 ## 第一完整库部分通过与容器空分块判定
 
+恢复51ac9abd实际68e506/dc7c41全18行report及c6373c productdiff空/clean/actualcompleted。原owner19326 a1649e真实exit0/verified两库/starts30-active0；49transport含普通slowdrip5519/5516ms原Ajv、2JVM明确同步races、6rollbackeach、真实commit后TCP0bytes+原command新JVM恢复、九表及finally/devsamehealthy均worker通过。mainUnknownprocessid仅caller不可读，已被ownercompletion覆盖；第二resourceidentity/部分metadata因输出截断未知，completiontime亦未知，不补造或重跑，main最后独立捕获完整。cc0ea6 main5pure独立0fail/skip；剩余七入口/README/finalfreeze及main全验、normalmerge、集成freshcompile仍未完成。R1/R4保持main-final-independent-pending，不将worker结果称整体C2接受。
+
 204303d6实际新transport增量/A02由389fd9完整读取，d64556完整实际http-body-idle.spec17行：仅固定label/op/一400/CL字面0/完全无TE（空值也拒）/close/空Buffer/1200–4500ms，错误类别/操作及六普通empty响应都拒，同server404原Ajv+9facts恢复。纯5/5为worker4e105a，未代替主代理最终实跑。原high随后真实额度错误已停止，10:30:05UTC当前ordinaryUsageAllowed=true；旧19326句柄Unknownprocessid且26e415进程空/任务资源originalonly，结果仍未知不算通过。仅同原highaudit本人保存输出，不盲重放；main最终独立/八入口/merge新编仍待，自动PAUSED。
 
 主代理92083/a03388在原写者completed/clean/closed后独立同冻结c61-f7单例exit0：新31494/32930/生产5343-55487，400/CL0/noTE/空entity/92wirebytes/4139ms/close/noHTML、全9facts不变且同server404原Ajv恢复；精确cleanup和originalsamehealthy。30ea77实际ownPID ESRCH/lsofexit1空、0227a1原三healthy/唯一原网络三卷验证无测试残留。结合已独立固定sendError/suspended因果，批准仅明确incomplete-body-idle单一标签/createBot/一帧400/CL恰0/完全无TE/close/body0/有界耗时/9facts/404恢复的inputframing类别，非ordinary JSON通过；slow-drip仍要求非空400原Ajv，无production/errorflag/reset/依赖改动。纯正反例guard和完整新两库/8入口/main最终独立仍待，不因此接受C2。
