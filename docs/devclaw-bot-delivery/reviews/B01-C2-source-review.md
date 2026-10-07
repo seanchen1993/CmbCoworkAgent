@@ -31,3 +31,5 @@ connect close/abort已确定收束、HTTP总deadline10s、响应aborted和正常
 主代理7033a4/ff6563完整四文件实际增量、cbe2d9 diffcheck/33c98b clean；统一登记handle在所有异常/取消/globalcleanup保留到ownPID监听观察、ESRCH及精确port absence结束，arrayOffset显式0前提已写，R3代码问题修复但真实新生命周期验收仍待。第二build97399/8904cf及第三build17847/c97dfa确切exit0，后者30main/10test/31JUnit/1107同a6370f77零差异/68class52/34libs；reportb4062caa已实际读4b9623，main7456f2实际jar ebd67ee1完整hash同。
 
 唯一先决HTTP99987运行中，worker消息仅第一隔离项目通过六HTTP/四键序重放/重开/12raw/full九表facts并精确清理，第二项目未结束，不能接受完整两库或全C2。该脚本明确preliminary。主代理指出pipeline不能只首404+body contains第二HTTP状态，完整版本须按CL严格两帧无残余且分别原Ajv；401等普通拒绝不能空body跳过schema，容器framing空400/close需单列。child在当前句柄收束后补，不在实跑中改载入源码。所有full授权/数值canonical/竞争/rollback/lost-response/限流慢流/新lifecycle/secret扫描/原回归及main独立仍待，R1未关闭。
+
+99987现已a1aaa2确切exit0，180bdd6c本人报告实际36229d完整读取：两个顺序库各首六HTTP/四键序重放/重开/12有限raw和完整九表facts相等，starts4/secretSends4/active0，精确清理和原devdeepEqual健康。仍仅worker preliminary；reopen PID未打印、pipeline/普通空body分类、full suite和主代理独立都未补完。主代理52b2c2/35199d/daaf64/47b369只读证明现只原三健康容器、原网络/三卷/真实dev目录，无测试资源；没有竞争副作用或读原秘密。
