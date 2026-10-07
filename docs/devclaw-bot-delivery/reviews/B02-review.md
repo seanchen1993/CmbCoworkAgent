@@ -9,3 +9,4 @@
 - 草稿旧操作回执授权传null JDBC的问题已窄修为真实同事务Connection；新旧commandId双向409与撤权403仍须真库验证。
 - Task写锁顺序是command_scope→空间head→Group→Task，snapshot/head在同一事务，游标分页推进扫描水位并按当前Group权限过滤；实际并发/重启/回滚及V1升级证据未齐，不提前接受。
 - 后续按任务单做两隔离数据库 task-check、受影响生命周期及主代理独立验收；不重演无关B01完整矩阵，不自动进入后续路线。定时续跑仍PAUSED。
+- worker66430/f64bf6 实际exit0/closed，34main/13test新编、36JUnit/1884parity零差异；main7a41a5八XML确认36/零失败。有限SQLfixture/私有进程helper草稿已读：V1 target仅test-class，现有账号/原dev秘密不读取，真实升级验收待。该小步仍非主代理独立最终验收。
