@@ -2,6 +2,7 @@ package com.devclaw.botcontrol.http;
 
 import com.devclaw.botcontrol.adapters.local.LocalLaunchConfig;
 import com.devclaw.botcontrol.application.BotApplication;
+import com.devclaw.botcontrol.application.TaskApplication;
 import com.devclaw.botcontrol.persistence.DatabaseReadiness;
 import com.devclaw.botcontrol.ports.TransactionObserver;
 import com.zaxxer.hikari.HikariDataSource;
@@ -57,7 +58,7 @@ public final class LocalHttpServer implements AutoCloseable {
         environment.getPropertySources().remove(StandardEnvironment.SYSTEM_ENVIRONMENT_PROPERTY_SOURCE_NAME);
         environment.getPropertySources().remove(StandardEnvironment.SYSTEM_PROPERTIES_PROPERTY_SOURCE_NAME);
         context.setEnvironment(environment);
-        BotHttpHandler handler = new BotHttpHandler(new BotApplication(source, config.identity, observer));
+        BotHttpHandler handler = new BotHttpHandler(new BotApplication(source, config.identity, observer), new TaskApplication(source, config.identity, observer));
         TomcatServletWebServerFactory factory = new TomcatServletWebServerFactory() {
             @Override protected TomcatWebServer getTomcatWebServer(Tomcat tomcat) {
                 ((StandardHost)tomcat.getHost()).setErrorReportValveClass(null);

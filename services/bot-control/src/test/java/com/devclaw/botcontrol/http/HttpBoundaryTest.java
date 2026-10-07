@@ -45,12 +45,12 @@ class HttpBoundaryTest {
         LocalIdentityRegistry inactive = LocalLaunchConfig.parse(bytes(config().replace("\"active\":true", "\"active\":false"))).identity;
         assertEquals("p:1", inactive.principalFor("Bearer " + token)); assertFalse(inactive.activeMember("A", "p:1"));
     }
-    @Test void allSixRawRoutesDecodeOnlyIdOnceAndKeepSourcePunctuation() {
+    @Test void allTenRawRoutesDecodeOnlyIdOnceAndKeepSourcePunctuation() {
         for (Operation op : Operation.values()) {
             String path = op.path(op.create() ? null : "id:A.b-_1");
             RawRoute route = RawRoute.select(op.method, path, null); assertEquals(op, route.operation);
-            assertEquals(op.create() ? null : "id:A.b-_1", route.id);
-            if (!op.create()) assertEquals("id:A.b-_1", RawRoute.select(op.method, path.replace("id:A.b", "%69d%3AA%2Eb"), null).id);
+            assertEquals(op.create() || op == Operation.GET_EVENTS ? null : "id:A.b-_1", route.id);
+            if (!op.create() && op != Operation.GET_EVENTS) assertEquals("id:A.b-_1", RawRoute.select(op.method, path.replace("id:A.b", "%69d%3AA%2Eb"), null).id);
         }
         for (String path : Arrays.asList("/api/%62ot/v1/bots/x", "/api/bot/v1/bots/x/", "/api/bot/v1/bots//x", "/api/bot/v1/bots/.", "/api/bot/v1/bots/%2e%2e",
             "/api/bot/v1/bots/x%2fy", "/api/bot/v1/bots/x%5cy", "/api/bot/v1/bots/x%3by", "/api/bot/v1/bots/x%253Ay", "/api/bot/v1/bots/%c0%af", "/api/bot/v1/bots/%", "/api/bot/v1/bots/x?")) assertThrows(HttpFailure.class, () -> RawRoute.select("GET", path, null));

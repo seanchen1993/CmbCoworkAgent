@@ -4,6 +4,7 @@ import com.devclaw.botcontrol.contracts.BotContracts.*;
 import com.devclaw.botcontrol.domain.ApplicationFault;
 import com.devclaw.botcontrol.domain.CanonicalCommand;
 import com.devclaw.botcontrol.persistence.JdbcApplicationStore;
+import com.devclaw.botcontrol.persistence.JdbcTaskStore;
 import com.devclaw.botcontrol.ports.*;
 import com.devclaw.botcontrol.validation.ContractBoundary;
 import java.security.MessageDigest;
@@ -24,7 +25,7 @@ public final class BotApplication {
         this.source = source; this.policy = policy; this.observer = observer;
     }
     public ApplicationResponse execute(Operation operation, TrustedContext actor, String pathId, byte[] originalBytes) {
-        if (operation == null) throw new IllegalArgumentException("APPLICATION_SELECTION");
+        if (operation == null || operation.task()) throw new IllegalArgumentException("APPLICATION_SELECTION");
         try {
             if (originalBytes != null && originalBytes.length > 1048576) throw new ApplicationFault(operation.write() ? ErrorCode.PAYLOAD_TOO_LARGE : ErrorCode.INVALID_PAYLOAD);
             if (actor == null || actor.principalId == null) throw new ApplicationFault(ErrorCode.UNAUTHENTICATED);
@@ -74,7 +75,7 @@ public final class BotApplication {
                 }
                 JdbcApplicationStore.Receipt receipt = op.write() ? db.receipt(actor.principalId, command(input)) : null;
                 if (receipt != null) {
-                    if (op.create()) authorizeReceiptTarget(db, actor, receipt);
+                    authorizeReceiptTarget(db, new JdbcTaskStore(c, actor.spaceId), actor, receipt);
                     receiptMetadata(receipt);
                     if (!now.before(receipt.expires)) throw new ApplicationFault(ErrorCode.COMMAND_EXPIRED);
                     byte[] fingerprint = CanonicalCommand.fingerprint(actor, op, id, input);
@@ -135,19 +136,11 @@ public final class BotApplication {
             }
         } catch (SQLException failure) { throw new ApplicationFault(commitAttempted && op.write() ? ErrorCode.OUTCOME_UNKNOWN : ErrorCode.DEPENDENCY_UNAVAILABLE); }
     }
-    private void authorizeReceiptTarget(JdbcApplicationStore db, TrustedContext actor, JdbcApplicationStore.Receipt receipt) throws SQLException {
-        if ("bot".equals(receipt.type)) authorizeBot(actor, requireBot(db, receipt.target, true));
-        else if ("bot_version".equals(receipt.type)) authorizeBot(actor, requireBot(db, db.versionOwner(receipt.target), true));
-        else if ("group".equals(receipt.type)) authorizeGroup(actor, requireGroup(db, receipt.target, true), true);
-        else throw JdbcApplicationStore.corrupt();
+    private void authorizeReceiptTarget(JdbcApplicationStore db, JdbcTaskStore tasks, TrustedContext actor, JdbcApplicationStore.Receipt receipt) throws SQLException {
+        ReceiptAccess.authorize(db, tasks, actor, receipt);
     }
     private void receiptMetadata(JdbcApplicationStore.Receipt receipt) {
-        Operation original = null;
-        for (Operation candidate : Operation.values()) if (candidate.write() && candidate.wire.equals(receipt.operation)) original = candidate;
-        if (original == null || receipt.status != original.success ||
-            !(original == Operation.CREATE_BOT_VERSION ? "bot_version" : original.bot() ? "bot" : "group").equals(receipt.type)) throw JdbcApplicationStore.corrupt();
-        try { boundary.validateParameter("getBot", "botId", receipt.target); }
-        catch (ContractBoundary.Failure failure) { throw JdbcApplicationStore.corrupt(); }
+        ReceiptAccess.metadata(receipt, boundary);
     }
     private void verifyReceipt(JdbcApplicationStore db, Operation op, TrustedContext actor, String pathId, JdbcApplicationStore.Receipt r) throws SQLException {
         if (r.status != op.success) throw JdbcApplicationStore.corrupt();
