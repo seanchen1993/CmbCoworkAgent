@@ -426,8 +426,8 @@
       "prior_formal_followup": "succeeded 2026-10-07T12:19:32Z",
       "resumed_at_utc": "2026-10-08T06:09:27Z",
       "attempt_report": "/Users/heyirui/.codex/worktrees/devclaw-bot-local/cmbCowork/docs/devclaw-bot-delivery/attempts/B02-A02.md",
-      "latest_checkpoint": "Latest human strategy overrides mandatory delegation: root takes serial B02 from actual97875ce2 with all3modified/4untracked files retained, prior A01 readonly. Current source36JUnit/1884 prior worker only; realDB still pending. Original MySQL actualb24d6d OOMKilled/137/stopped at13:17UTC previous day; ES/S3 samehealthy, daemon/network/volume exact. Guest619112 available2448MiB, container limit768MiB, no new sudo/resourceconfig. Next owner-checked exact restart only, then finish minimal task-check/selfreview and real verification. Scheduler actual00f072 PAUSED.",
-      "checkpoint_head": "97875ce28123e1b5055ad026f54a49c29042c984",
+      "latest_checkpoint": "Root serial checkpoint b08659c2 saved retained Task harness/SQL proof/receipt integrity and minimal tests. Actual ea5058 originalMySQL exact start0 and6180b7 healthy/sameID/new127port32967; no config/data/secret change. Actual Node37723/90a30038 andF0330788/ea7f6b24/types0; new3harness tests2699460. Root build89143/6d1e43 closed0:trueJava8 recompiled34main/14test,36JUnit/1884parity zero,original34deps/V1 exact,V2exact. Real Task-check now launching on retainedlocal tree; no subagent. NoB02 acceptance until twoDB final exit/cleanup and integration verification. SchedulerPAUSED.",
+      "checkpoint_head": "b08659c2",
       "contract_checkpoint": {
         "code_commit": "a61ba5c213e7c83fd85589cd94f7050f045668c1",
         "test_correction_commit": "3d3f81b477593546cca1edcbcd3068e94d643f5e",
@@ -445,6 +445,7 @@
         "independent_verification": "pending after stopped final candidate"
       },
       "task_unit_checkpoint": {"code_commit":"816da293a4be5345c49b34acece79632768a13a9","worker_builder_session":66430,"worker_builder_final_chunk":"f64bf6","worker_builder_exit_code":0,"compiled_main_sources":34,"compiled_test_sources":13,"worker_tests":36,"worker_parity_fixtures":1884,"worker_parity_mismatches":0,"main_xml_chunk":"7a41a5","worker_jar_sha256":"f7808e81c8bf5642c31c71e57ced70680b594a1714195f1ac73cab83ac7537db","worker_v2_sha256":"db5822c729f342ca4d78b407d5ba81563ea138340019924ed0d18263679b56b2","independent_verification":"pending"},
+      "direct_build": {"session_id":89143,"exit_code":0,"final_chunk":"6d1e43","compiled_main":34,"compiled_test":14,"java":"1.8.0_482","junit_tests":36,"parity_fixtures":1884,"mismatches":0,"jar_sha256":"aaa37ae326ba9533a8ec26ea991c401d4617afe8372c163b1f7b121f2a509fe6","v2_sha256":"db5822c729f342ca4d78b407d5ba81563ea138340019924ed0d18263679b56b2"},
       "live_commands": [],
       "wait_reason": null
     }
