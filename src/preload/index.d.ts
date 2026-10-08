@@ -1,3 +1,6 @@
+import type { DashboardToolUsageCoverage } from "../shared/dashboard-tool-usage"
+import type { DashboardThreadTraceScope } from "../shared/dashboard-thread-trace-scope"
+import type { DashboardKnowledgeCommitRate } from "../shared/dashboard-knowledge-commit-rate"
 import type {
   AppNotification,
   AppDecisionInput,
@@ -120,6 +123,7 @@ import type {
   HarnessRunArtifactRevealInput,
   HarnessRunArtifactRevealResult,
   HarnessDeployUnitMapping,
+  HarnessDeployUnitConfig,
   HarnessLeanTokenConfig,
   HarnessSkipNodeInput,
   HarnessSkipNodeResult,
@@ -209,7 +213,7 @@ import type {
   CloseToTrayPromptEvent,
   WindowCloseBehavior
 } from "../shared/close-to-tray"
-import type { AgentRuntimeSettings } from "../shared/agent-runtime-limits"
+import type { AgentRuntimeSettings, AgentToolStrategy } from "../shared/agent-runtime-limits"
 
 interface ElectronAPI {
   openExternal: (url: string) => Promise<void>
@@ -230,10 +234,11 @@ interface ElectronAPI {
   getGitChangeNoticeEnabled: () => Promise<boolean>
   setGitChangeNoticeEnabled: (enabled: boolean) => Promise<boolean>
   getAgentRuntimeSettings: () => Promise<AgentRuntimeSettings>
+  setAgentToolStrategy: (value: AgentToolStrategy) => Promise<AgentRuntimeSettings>
   setAgentRuntimeRecursionLimit: (value: number) => Promise<AgentRuntimeSettings>
   setWorkflowWorktreeTimeoutMinutes: (value: number) => Promise<AgentRuntimeSettings>
   setWorkflowWorktreeRemoveTimeoutMinutes: (value: number) => Promise<AgentRuntimeSettings>
-  onNotifyMsg: (callback: (msg: string) => void) => void
+  onNotifyMsg: (callback: (msg: string) => void) => () => void
   ipcRenderer: {
     send: (channel: string, ...args: unknown[]) => void
     on: (channel: string, listener: (...args: unknown[]) => void) => () => void
@@ -340,6 +345,7 @@ interface DashboardTraceDetail {
   totalToolCalls: number
   modelCallCount: number
   userInputRequestCount: number
+  userInputRequestCountComplete?: boolean
   totalInputTokens: number
   totalOutputTokens: number
   totalTokens: number
@@ -716,6 +722,7 @@ interface DashboardProjectModeSkillAdoption extends DashboardCodeStats {
 }
 
 interface DashboardProjectModeToolUsage {
+  toolUsageCoverage?: DashboardToolUsageCoverage
   byTool: Array<{ tool: string; count: number }>
   byToolAll: Array<{ tool: string; count: number }>
   byToolFilteredAll: Array<{ tool: string; count: number }>
@@ -833,9 +840,18 @@ interface DashboardProjectModeProjectPageData {
   truncated: boolean
 }
 
-interface DashboardProjectModeProjectPageOptions {
+/**
+ * 项目运营概览的三个全局筛选口径。总览、代码指标换数、项目列表、导出共用同一组，
+ * 任何一处漏传都会让那块数据和其它块对不上。
+ */
+interface DashboardProjectModeFilterOptions {
   upperOrgLv1?: string | string[] | null
   fromLeanOnly?: boolean | null
+  /** 仅统计创建时间落在 range 内的项目；比较用的范围走同一次调用的 range 参数。 */
+  createdInRangeOnly?: boolean | null
+}
+
+interface DashboardProjectModeProjectPageOptions extends DashboardProjectModeFilterOptions {
   status?: DashboardProjectModeProjectStatus | null
   page?: number
   pageSize?: number
@@ -950,6 +966,42 @@ interface DashboardProjectModeHookStats {
 interface DashboardProjectModeOperationalDetails {
   constraintFiles: Array<{ path: string; traceCount: number }>
   hookEvents: Array<{ event: string; count: number }>
+}
+
+interface DashboardProjectModeStageMetrics {
+  conversationCount: number
+  /** 归属到该阶段的 Agent 忙碌总时长，不是阶段的墙钟周期。 */
+  totalDurationMs: number
+  avgDurationMs: number
+  p95DurationMs: number
+  runCost: {
+    toolCalls: number
+    modelCalls: number
+    /** 模型上报的总量；缓存子集不重复相加。 */
+    totalTokens: number
+    inputTokens: number
+    outputTokens: number
+    userInputRequests: number
+    userInputRequestDocs: number
+    traceDocs?: number
+  }
+}
+
+interface DashboardProjectModeStageAnalysis {
+  costAttribution?: {
+    callStartTraceCount: number
+    turnStartTraceCount: number
+    tokenUsageReportedCalls: number
+    modelCalls: number
+    truncated: boolean
+  }
+  projectId: string
+  total: DashboardProjectModeStageMetrics
+  stages: Array<{
+    nodeName: string
+    group: string | null
+    metrics: DashboardProjectModeStageMetrics
+  }>
 }
 
 interface DashboardProjectModeFeatureNode {
@@ -1434,6 +1486,7 @@ interface CustomAPI {
     }) => Promise<{ id: string }>
     upsertUserInfo: (config: UserInfoConfig) => Promise<{ id: string }>
     getUserInfo: () => Promise<UserInfoConfig | null>
+    onUserInfoChanged: (callback: () => void) => () => void
     deleteCustomConfig: (id: string) => Promise<void>
     testConnection: (params: {
       id?: string
@@ -2667,21 +2720,28 @@ interface CustomAPI {
     projectMode: (
       range: { from: string; to: string },
       granularity: "day" | "week" | "month" | "custom",
-      opts?: { upperOrgLv1?: string | string[] | null; fromLeanOnly?: boolean | null }
+      opts?: DashboardProjectModeFilterOptions
     ) => Promise<{ success: boolean; data?: DashboardProjectModeData; error?: string }>
     projectModeCodeStats: (
       range: { from: string; to: string },
-      opts: { upperOrgLv1?: string | string[] | null; fromLeanOnly?: boolean | null } | undefined,
+      opts: DashboardProjectModeFilterOptions | undefined,
       source: string | null
     ) => Promise<{
       success: boolean
       data?: { codeStats: DashboardCodeStats | null; skillCodeStats: DashboardCodeStats | null }
       error?: string
     }>
+    knowledgeCommitRate: (
+      range: { from: string; to: string },
+      opts?: { upperOrgLv1?: string | string[] | null }
+    ) => Promise<{ success: boolean; data?: DashboardKnowledgeCommitRate; error?: string }>
     efficiency: (
       range: { from: string; to: string },
       opts?: { upperOrgLv1?: string | string[] | null }
     ) => Promise<{ success: boolean; data?: DashboardEfficiencyData; error?: string }>
+    projectMetricGroupOptions: (
+      filters: Pick<ProjectMetricFilters, "range" | "upperOrgLv1">
+    ) => Promise<{ success: boolean; data?: string[]; error?: string }>
     projectMetricSummary: (
       filters: ProjectMetricFilters
     ) => Promise<{ success: boolean; data?: ProjectMetricSummaryData; error?: string }>
@@ -2698,7 +2758,7 @@ interface CustomAPI {
     ) => Promise<{ success: boolean; data?: DashboardProjectModeProjectPageData; error?: string }>
     projectModeExportData: (
       range: { from: string; to: string },
-      opts?: { upperOrgLv1?: string | string[] | null; fromLeanOnly?: boolean | null }
+      opts?: DashboardProjectModeFilterOptions
     ) => Promise<{ success: boolean; data?: DashboardProjectModeExportData; error?: string }>
     projectModeTraces: (
       projectId: string,
@@ -2717,6 +2777,15 @@ interface CustomAPI {
     ) => Promise<{
       success: boolean
       data?: DashboardProjectModeOperationalDetails
+      error?: string
+    }>
+    projectModeStageAnalysis: (
+      projectId: string,
+      range: { from: string; to: string },
+      opts?: { upperOrgLv1?: string | string[] | null }
+    ) => Promise<{
+      success: boolean
+      data?: DashboardProjectModeStageAnalysis
       error?: string
     }>
     pluginAggregate: (
@@ -2857,7 +2926,7 @@ interface CustomAPI {
     ) => Promise<{ success: boolean; data?: DashboardTraceDetail[]; error?: string }>
     threadTraces: (
       threadId: string,
-      options?: { scope?: "platform" | "project" }
+      options?: DashboardThreadTraceScope
     ) => Promise<{ success: boolean; data?: DashboardTraceDetail[]; error?: string }>
     marketSkillRecentTraces: (
       skill: string,
@@ -2954,11 +3023,11 @@ interface CustomAPI {
     }>
     registry: () => Promise<HarnessAdapterRegistryItem[]>
     listProjects: () => Promise<HarnessProjectListItem[]>
-    getDeployUnitMappings: () => Promise<HarnessDeployUnitMapping[]>
+    getDeployUnitMappings: () => Promise<HarnessDeployUnitConfig[]>
     getLeanTokenConfig: () => Promise<HarnessLeanTokenConfig>
     saveDeployUnitMappings: (
-      mappings: HarnessDeployUnitMapping[]
-    ) => Promise<HarnessDeployUnitMapping[]>
+      mappings: HarnessDeployUnitConfig[]
+    ) => Promise<HarnessDeployUnitConfig[]>
     saveLeanTokenConfig: (input: HarnessLeanTokenConfig) => Promise<HarnessLeanTokenConfig>
     syncProjectConstraints: (adapterId: string) => Promise<HarnessProjectConstraintSyncResult>
     getKnowledgePreview: (adapterId: string) => Promise<HarnessKnowledgePreviewResult>

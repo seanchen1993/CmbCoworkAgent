@@ -4,6 +4,8 @@ import { createThread as dbCreateThread } from "../db"
 import { getAgentModeFromMetadata } from "../agent/coordinator-mode"
 import {
   buildHarnessFeatureAgentContext,
+  requireHarnessFeatureWorkspace,
+  resolveHarnessFeatureCurrentStage,
   DEFAULT_HARNESS_REQUEST_USER_INPUT_CONFIG
 } from "../harness-board/service"
 import { getOpenworkDir } from "../storage"
@@ -16,7 +18,10 @@ const settingsStore = new Store({
   cwd: getOpenworkDir()
 })
 
-export async function createThreadService(metadata?: Record<string, unknown>): Promise<Thread> {
+export async function createThreadService(
+  metadata?: Record<string, unknown>,
+  options: { managedWorkspace?: boolean } = {}
+): Promise<Thread> {
   const threadId = uuid()
   const nextMetadata: Record<string, unknown> = { ...(metadata ?? {}) }
   const harnessFeatureMetadata =
@@ -26,10 +31,24 @@ export async function createThreadService(metadata?: Record<string, unknown>): P
       ? (nextMetadata.harnessFeature as Record<string, unknown>)
       : undefined
   if (harnessFeatureMetadata) {
+    const projectId = harnessFeatureMetadata.projectId
+    const slug = harnessFeatureMetadata.slug
+    const launchStage =
+      typeof projectId === "string" && typeof slug === "string"
+        ? await resolveHarnessFeatureCurrentStage(projectId, slug)
+        : null
     nextMetadata.harnessFeature = {
       ...harnessFeatureMetadata,
+      ...(launchStage?.name ? { launchStageName: launchStage.name } : {}),
       requestUserInputConfig: { ...DEFAULT_HARNESS_REQUEST_USER_INPUT_CONFIG }
     }
+  }
+
+  if (harnessFeatureMetadata && !options.managedWorkspace) {
+    const { projectId, slug } = harnessFeatureMetadata
+    if (typeof projectId !== "string" || typeof slug !== "string")
+      throw new Error("特性会话标识无效")
+    nextMetadata.workspacePath = await requireHarnessFeatureWorkspace(projectId, slug)
   }
 
   const hasWorkspacePath = Object.prototype.hasOwnProperty.call(nextMetadata, "workspacePath")
@@ -55,7 +74,7 @@ export async function createThreadService(metadata?: Record<string, unknown>): P
     })
     if (harnessFeatureMetadata && harnessContext?.agentConfig?.toolConfig?.requestUserInput) {
       nextMetadata.harnessFeature = {
-        ...harnessFeatureMetadata,
+        ...(nextMetadata.harnessFeature as Record<string, unknown>),
         requestUserInputConfig: harnessContext.agentConfig.toolConfig.requestUserInput
       }
     }

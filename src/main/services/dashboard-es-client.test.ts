@@ -94,6 +94,15 @@ beforeAll(async () => {
       response.end(oversizedOutputPayload)
       return
     }
+    if (index === "bad-request") {
+      response.writeHead(400, { "content-type": "application/json" })
+      response.end(
+        JSON.stringify({
+          error: { type: "search_phase_execution_exception", reason: "all shards failed" }
+        })
+      )
+      return
+    }
     if (index === "slow") {
       response.writeHead(200, { "content-type": "application/json" })
       setTimeout(() => response.end(JSON.stringify({ value: "slow" })), 200)
@@ -407,6 +416,63 @@ describe("Dashboard ES worker", () => {
     await client.close()
 
     await expect(pending).resolves.toBeInstanceOf(DashboardEsRequestCancelledError)
+  })
+})
+
+/**
+ * 这组用例钉的是一次排查断头：日志打出来是
+ * 「All 2 ES nodes failed. Last error: 请检查网络连接后重试」——"原因"栏里躺着的
+ * 是面向用户的提示语本身，真实原因不知去向。
+ *
+ * runDashboardEsQuery 其实把每个节点的失败原因挂在了 cause 上，但 worker 回传时
+ * 只 post 了 {code, message, stack}，cause 在结构化克隆边界上整条丢掉，客户端再
+ * `new Error(message)` 重建，于是 getErrorDetail 沿 cause 什么也找不到。
+ */
+describe("失败原因跨 worker 边界", () => {
+  it("HTTP 失败把 ES 自己的报错带回主进程", async () => {
+    const client = createClient()
+    const error = await query(client, "bad-request").catch((e: unknown) => e)
+
+    expect(error).toBeInstanceOf(Error)
+    // 对外仍是那句提示语，它是给用户看的，不该变。
+    expect((error as Error).message).toBe("请检查网络连接后重试")
+    // 但排查需要的东西必须在 cause 上，而不是只存在于 worker 内部。
+    const cause = (error as Error).cause as { code?: string; message?: string } | undefined
+    expect(cause?.code).toBe("DASHBOARD_ES_HTTP_ERROR")
+    expect(cause?.message).toContain("ES 400")
+    expect(cause?.message).toContain("search_phase_execution_exception")
+  })
+
+  it("节点不可达时带回 fetch 层的原生原因", async () => {
+    const client = createClient()
+    // 没有监听者的端口：fetch 直接失败，原因在它自己的 cause 里。
+    const error = await client
+      .query({
+        nodes: ["http://127.0.0.1:1"],
+        method: "POST",
+        path: "/unreachable/_search",
+        headers: { "content-type": "application/json" },
+        bodyText: JSON.stringify({ size: 0 }),
+        timeoutMs: 5_000
+      })
+      .catch((e: unknown) => e)
+
+    const cause = (error as Error).cause as
+      | { code?: string; message?: string; cause?: { message?: string } }
+      | undefined
+    expect(cause?.code).toBe("DASHBOARD_ES_NODE_UNAVAILABLE")
+    // 「fetch failed」这一层还是泛化的，真正能定位的是它下面那层，所以链要留住。
+    expect(cause?.cause?.message).toBeTruthy()
+  })
+
+  it("回传的 cause 是可克隆的普通对象，不是 Error", async () => {
+    // Error 实例过不了结构化克隆的 cause 语义，所以 worker 侧必须先摊平。
+    // 这条同时挡住"直接 post 一个 Error 就完事"的改法。
+    const client = createClient()
+    const error = (await query(client, "bad-request").catch((e: unknown) => e)) as Error
+    expect(error.cause).toBeTruthy()
+    expect(error.cause).not.toBeInstanceOf(Error)
+    expect(() => structuredClone(error.cause)).not.toThrow()
   })
 })
 

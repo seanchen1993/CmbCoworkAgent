@@ -114,6 +114,10 @@ function testRemoteThreadsHaveStableSourceAndModeLabels(): void {
   assert(rightPanel.includes("concealWorkspacePath"))
   assert(rightPanel.includes("REMOTE_INBOX_WORKSPACE_NAME"))
   assert(robotPanel.includes("同一用户只保留一个活动桌面连接"))
+  // No reply in Zhaohu names /帮助, so this line is how a reader learns the
+  // robot takes commands — and which one fixes a card cut short.
+  assert(robotPanel.includes("在招乎发送 /帮助 查看全部指令"))
+  assert(robotPanel.includes("发送 /文字模式 改用文字"))
   assert(robotPanel.includes('? "已登录"'))
   assert(robotPanel.includes(': "未登录"'))
   assert(!robotPanel.includes("企业账号"))

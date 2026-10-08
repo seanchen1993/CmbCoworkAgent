@@ -1,3 +1,21 @@
+import {
+  buildAwardSkillMatchFilter,
+  groupAwardSkillCandidates,
+  mapAwardBatches,
+  fetchAllAwardCompositeBuckets,
+  countAwardDistinctSkills,
+  readCompleteAwardAggregation
+} from "./dashboard-awards-skill"
+import { buildSkillUsageMatchFilter } from "./dashboard-skill-usage"
+import { isNestedMappingError } from "./dashboard-es-nested-mapping"
+import { queryWithToolUsageMappingFallback } from "./dashboard-tool-usage-query"
+import {
+  buildToolUsageAggs,
+  parseToolUsageAggs,
+  resolveUserInputRequestCount,
+  type DashboardToolUsageCoverage
+} from "../../shared/dashboard-tool-usage"
+import type { DashboardThreadTraceScope } from "../../shared/dashboard-thread-trace-scope"
 /**
  * Dashboard IPC Handlers
  *
@@ -41,7 +59,43 @@ import {
   type DashboardCodeStats,
   type DashboardSkillCodeAdoptionStats
 } from "./dashboard-code-stats"
+import { emptyOrgValueClauses, isMissingOrgValue, readOrgText } from "./dashboard-org-fields"
+import {
+  computeKnowledgeCommitRate,
+  formatKnowledgeApiTime,
+  getKnowledgeCommitRateUrl,
+  getKnowledgeRoomOrgIds,
+  mockKnowledgeCommitRate,
+  requestKnowledgeCommitRate,
+  resolveKnowledgeCommitRateScope
+} from "./dashboard-knowledge-commit-rate"
+import type { DashboardKnowledgeCommitRate } from "../../shared/dashboard-knowledge-commit-rate"
 import { countDevAssociatedFeatures, countDevStageConversations } from "./project-mode-metrics"
+import {
+  matchesProjectModeCreatedAtRange,
+  projectModeNarrowingEnabled,
+  projectModeSnapshotFilterArgs,
+  projectModeSnapshotFilters
+} from "./project-mode-snapshot-filters"
+import {
+  buildProjectModeManagedRunAggs,
+  buildProjectModeManagedRunFilters,
+  parseProjectModeManagedRunCount
+} from "./project-mode-managed-run-metrics"
+import {
+  buildProjectModeConversationAndCostAggs,
+  parseProjectModeRunCost,
+  EMPTY_PROJECT_MODE_RUN_COST,
+  isUserInputRequestCountComplete,
+  type ProjectModeRunCost
+} from "./project-mode-run-cost-metrics"
+import {
+  buildProjectModeStageAnalysisAggs,
+  emptyProjectModeStageMetrics,
+  parseProjectModeStageAnalysis,
+  type ProjectModeStageAnalysis,
+  type ProjectModeStageRow
+} from "./project-mode-stage-analysis"
 import {
   buildProjectModeOperationalAggs,
   parseProjectModeOperationalStats,
@@ -88,6 +142,7 @@ import {
 import {
   isDashboardEsRequestCancelled,
   isDashboardEsResponseTooLarge,
+  getDashboardEsHttpErrorStatus,
   isDashboardEsWorkerUnavailable,
   queryDashboardEsInWorker
 } from "../services/dashboard-es-client"
@@ -103,12 +158,27 @@ import {
   MAX_THREAD_LIST_BUCKETS,
   orderThreadListPreviewHits,
   collectPagedThreadTraces,
+  buildThreadTraceScopeFilters,
   parseThreadListKeys,
   threadListBucketsNeeded,
   threadListKeysAgg,
-  threadListPreviewSourceIncludes
+  threadListPreviewSourceIncludes,
+  resolveModelCallCount
 } from "./dashboard-trace-thread-list"
+import { resolveTokenTotal } from "./dashboard-token-totals"
 import {
+  buildChatTriggeredTraceFilter,
+  mainAgentConversationAggs,
+  parseStageBucketConversations,
+  projectModeMainAgentConversationFilter,
+  readMainAgentConversations,
+  stageBucketAggKey,
+  stageBucketCodeAggs,
+  stageBucketTraceAggs,
+  stageBucketTraceFilterClause
+} from "./dashboard-stage-buckets"
+import {
+  extractHarnessNodeGroup,
   STAGE_BUCKET_LABELS,
   STAGE_DONE_LABEL,
   STAGE_IN_PROGRESS_LABEL,
@@ -121,9 +191,11 @@ import type {
   ProjectMetricTrendFilters
 } from "../../shared/project-metrics"
 import {
+  fetchProjectMetricGroupOptions,
   fetchProjectMetricProjects,
   fetchProjectMetricSummary,
   fetchProjectMetricTrend,
+  makeMockProjectMetricGroupOptions,
   makeMockProjectMetricProjects,
   makeMockProjectMetricSummary,
   makeMockProjectMetricTrend
@@ -176,16 +248,27 @@ function enforceDashboardIpcByteLimit<T>(label: string, value: T, byteLimit: num
   throw error
 }
 
+/**
+ * 沿 cause 链拼出可排查的原因串。
+ *
+ * 只看一层不够：节点级失败是 `DASHBOARD_ES_NODE_UNAVAILABLE fetch failed`，而
+ * 「fetch failed」本身还是泛化的，连接被拒、DNS 失败、TLS 握手失败、超时在这一层
+ * 长得一模一样，真正的区别（ECONNREFUSED / ETIMEDOUT / …）在它自己的 cause 里。
+ */
 function getErrorDetail(error: Error): string {
-  const cause = error.cause
-  if (!cause || typeof cause !== "object") return error.message
-
-  const causeRecord = cause as Record<string, unknown>
-  const causeMessage = typeof causeRecord.message === "string" ? causeRecord.message : ""
-  const causeCode = typeof causeRecord.code === "string" ? causeRecord.code : ""
-  const causeDetail = [causeCode, causeMessage].filter(Boolean).join(" ")
-
-  return causeDetail ? `${error.message}: ${causeDetail}` : error.message
+  const parts: string[] = []
+  const seen = new Set<unknown>()
+  let current: unknown = error.cause
+  while (current && typeof current === "object" && !seen.has(current) && parts.length < 4) {
+    seen.add(current)
+    const record = current as Record<string, unknown>
+    const message = typeof record.message === "string" ? record.message : ""
+    const code = typeof record.code === "string" ? record.code : ""
+    const part = [code, message].filter(Boolean).join(" ")
+    if (part) parts.push(part)
+    current = record.cause
+  }
+  return parts.length > 0 ? `${error.message}: ${parts.join(" <- ")}` : error.message
 }
 
 function makeEsUnavailableError(nodes: string[], lastError: Error | null): Error {
@@ -196,8 +279,14 @@ function makeEsUnavailableError(nodes: string[], lastError: Error | null): Error
     console.warn("[Dashboard] ES response too large:", detail)
     return new Error("本次查询返回的数据量过大，请缩小时间范围或减少每页条数后重试")
   }
+  if (getDashboardEsHttpErrorStatus(lastError) === 400) {
+    console.warn("[Dashboard] ES rejected query parameters:", detail)
+    return new Error("统计查询失败：ES 拒绝了查询参数（HTTP 400），请检查客户端版本或索引配置", {
+      cause: lastError
+    })
+  }
   console.warn(`[Dashboard] All ${nodes.length} ES nodes failed. Last error:`, detail)
-  return new Error("请检查网络连接后重试")
+  return new Error("请检查网络连接后重试", { cause: lastError })
 }
 
 async function esQuery(
@@ -437,6 +526,7 @@ interface DashboardTraceDetail {
   modelCallCount: number
   /** 本次 trace 中调用 request_user_input（向用户提问）的次数。 */
   userInputRequestCount: number
+  userInputRequestCountComplete?: boolean
   totalInputTokens: number
   totalOutputTokens: number
   totalTokens: number
@@ -891,6 +981,10 @@ interface OrgFilterOptions {
   // 仅统计绑定了企业（精益）项目的项目（snapshot.properties.projectFromLean === true）。
   // 全局开关；缺省/false 表示不筛选。
   fromLeanOnly?: boolean | null
+  // 仅统计创建时间（snapshot.properties.lifecycleCreatedAt）落在当前所选时间范围内的项目。
+  // 和 fromLeanOnly 同一形状的全局开关；缺省/false 表示不筛选。比较用的范围不在这里传，
+  // 由各入口自己的 range 参数带下去，避免同一个时间范围在两处各存一份。
+  createdInRangeOnly?: boolean | null
 }
 
 type UserStatsOptions = OrgFilterOptions
@@ -1727,54 +1821,8 @@ function buildUserListSearchFilter(keyword: string): Record<string, unknown> | n
  * 使用 prefix 兼容 `技能名-v版本` 这一类上报格式，避免宽泛 wildcard 扫描。
  */
 function buildSkillUsageWildcardFilter(skillName: string): Record<string, unknown> {
-  const versionPrefix = buildVersionPrefix(skillName)
-  return {
-    bool: {
-      should: [
-        { term: { usedSkills: skillName } },
-        { term: { "usedSkills.keyword": skillName } },
-        { prefix: { usedSkills: versionPrefix } },
-        { prefix: { "usedSkills.keyword": versionPrefix } }
-      ],
-      minimum_should_match: 1
-    }
-  }
-}
-
-function buildVersionedSkillUsagePrefixFilter(skillName: string): Record<string, unknown> {
-  const versionPrefix = buildVersionPrefix(skillName)
-  return {
-    bool: {
-      should: [
-        { prefix: { usedSkills: versionPrefix } },
-        { prefix: { "usedSkills.keyword": versionPrefix } }
-      ],
-      minimum_should_match: 1
-    }
-  }
-}
-
-function buildVersionPrefix(skillName: string): string {
-  return `${skillName}-v`
-}
-
-/**
- * code 事件侧（`properties.usedSkills`）的技能命中过滤，匹配裸名或 `name-v*` 全部版本，
- * 与 trace 侧 buildSkillUsageWildcardFilter 同口径，用于评奖看板按技能聚合入库率。
- */
-function buildEventSkillUsageWildcardFilter(skillName: string): Record<string, unknown> {
-  const versionPrefix = buildVersionPrefix(skillName)
-  return {
-    bool: {
-      should: [
-        { term: { "properties.usedSkills": skillName } },
-        { term: { "properties.usedSkills.keyword": skillName } },
-        { prefix: { "properties.usedSkills": versionPrefix } },
-        { prefix: { "properties.usedSkills.keyword": versionPrefix } }
-      ],
-      minimum_should_match: 1
-    }
-  }
+  const [candidate] = groupAwardSkillCandidates([skillName])
+  return buildSkillUsageMatchFilter(candidate?.bases ?? [], ["usedSkills", "usedSkills.keyword"])
 }
 
 const SKILL_EVAL_STATS_PAGE_SIZE = 500
@@ -1784,19 +1832,6 @@ const SKILL_EVAL_RECENT_TASK_SCAN_LIMIT = 2000
 const SKILL_EVAL_STAT_CACHE_TTL_MS = 60_000
 const SKILL_EVAL_STAT_CACHE_LIMIT = 30
 const SKILL_EVAL_STATS_QUERY_TIMEOUT_MS = 45_000
-
-function buildChatTriggeredTraceFilter(): Record<string, unknown> {
-  return {
-    bool: {
-      should: [
-        { term: { triggerSource: "chat" } },
-        { term: { "triggerSource.keyword": "chat" } },
-        { bool: { must_not: { exists: { field: "triggerSource" } } } }
-      ],
-      minimum_should_match: 1
-    }
-  }
-}
 
 /**
  * 清洗技能名参数：
@@ -2354,6 +2389,7 @@ function dashboardTraceSourceIncludes(): string[] {
     "workflowAgentLabel",
     "outcome",
     "totalToolCalls",
+    "userInputRequestCount",
     "totalInputTokens",
     "totalOutputTokens",
     "totalTokens",
@@ -2507,7 +2543,11 @@ function getTotalHits(raw: EsSearchResponse, fallback: number): number {
   return fallback
 }
 
-/** 统计 trace 树中 request_user_input 工具节点的数量（向用户提问的次数）。 */
+function hasUserInputCount(value: unknown): boolean {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0
+}
+
+/** Legacy node count is only a lower bound when raw trace details were truncated. */
 function countUserInputRequests(nodes: TraceNode[] | undefined): number {
   if (!Array.isArray(nodes)) return 0
   return nodes.filter((node) => node.type === "tool" && node.name === "request_user_input").length
@@ -2566,17 +2606,27 @@ function normalizeTraceDetail(
       sapId: asOptionalString(source.sapId),
       ystId: asOptionalString(source.ystId),
       userName: asOptionalString(source.userName),
-      orgName: asOptionalString(source.orgName),
+      orgName: readOrgText(source.orgName),
       userIp: asOptionalString(source.userIp),
       modelId: trace.modelId || asOptionalString(source.modelId),
       modelName: trace.modelName || asOptionalString(source.modelName),
       ...traceObservabilityDetailFields(trace, source),
       outcome: trace.outcome || asString(source.outcome, "unknown"),
       totalToolCalls: asNumber(trace.totalToolCalls, asNumber(source.totalToolCalls)),
-      modelCallCount: Array.isArray(trace.modelCalls)
-        ? trace.modelCalls.length
-        : asNumber(source.modelCallCount),
-      userInputRequestCount: countUserInputRequests(nodes),
+      // 索引字段优先，和上一行的 totalToolCalls 同款口径。
+      // `modelCalls` 在客户端就停在 TRACE_MAX_MODEL_CALLS(64)，sanitizer 还可能
+      // 把它整个清空，而 `Array.isArray([])` 为真——原先的三元式让这两种情况都
+      // 绕过了回退，长会话直接少算成个位数。服务端存的 modelCallCount 取自客户端
+      // 的 totalModelCalls（实时计数，不受上限影响），才是该用的那个值。
+      modelCallCount: resolveModelCallCount(source.modelCallCount, trace.modelCalls),
+      userInputRequestCount: resolveUserInputRequestCount(
+        source.userInputRequestCount,
+        trace.userInputRequestCount,
+        countUserInputRequests(nodes)
+      ),
+      userInputRequestCountComplete:
+        hasUserInputCount(source.userInputRequestCount) ||
+        hasUserInputCount(trace.userInputRequestCount),
       totalInputTokens,
       totalOutputTokens,
       totalTokens,
@@ -2608,7 +2658,7 @@ function normalizeTraceDetail(
     sapId: asOptionalString(source.sapId),
     ystId: asOptionalString(source.ystId),
     userName: asOptionalString(source.userName),
-    orgName: asOptionalString(source.orgName),
+    orgName: readOrgText(source.orgName),
     userIp: asOptionalString(source.userIp),
     modelId: asOptionalString(source.modelId),
     modelName: asOptionalString(source.modelName),
@@ -2617,6 +2667,7 @@ function normalizeTraceDetail(
     totalToolCalls: asNumber(source.totalToolCalls),
     modelCallCount: asNumber(source.modelCallCount),
     userInputRequestCount: asNumber(source.userInputRequestCount),
+    userInputRequestCountComplete: hasUserInputCount(source.userInputRequestCount),
     totalInputTokens: fallbackInputTokens,
     totalOutputTokens: fallbackOutputTokens,
     totalTokens: asNumber(source.totalTokens, fallbackInputTokens + fallbackOutputTokens),
@@ -2652,8 +2703,15 @@ function traceToDashboardTraceDetail(trace: AgentTrace): DashboardTraceDetail {
     ...traceObservabilityDetailFields(trace),
     outcome: trace.outcome,
     totalToolCalls: asNumber(trace.totalToolCalls),
-    modelCallCount: Array.isArray(trace.modelCalls) ? trace.modelCalls.length : 0,
-    userInputRequestCount: countUserInputRequests(nodes),
+    // 本地 AgentTrace 上 totalModelCalls 一定在（collector 实时累加），数组长度
+    // 只作为上线前旧数据的兜底——理由同 normalizeTraceDetail。
+    modelCallCount: resolveModelCallCount(trace.totalModelCalls, trace.modelCalls),
+    userInputRequestCount: resolveUserInputRequestCount(
+      undefined,
+      trace.userInputRequestCount,
+      countUserInputRequests(nodes)
+    ),
+    userInputRequestCountComplete: hasUserInputCount(trace.userInputRequestCount),
     totalInputTokens: usage.totalInputTokens,
     totalOutputTokens: usage.totalOutputTokens,
     totalTokens: usage.totalTokens || usage.totalInputTokens + usage.totalOutputTokens,
@@ -2677,9 +2735,9 @@ function normalizeCommitDetail(hit: EsSearchHit): DashboardCommitDetail {
     userName: asString(source.userName, "unknown"),
     sapId: asOptionalString(source.sapId),
     ystId: asOptionalString(source.ystId),
-    orgName: asOptionalString(source.orgName),
-    upperOrgLv0: asOptionalString(source.upperOrgLv0),
-    upperOrgLv1: asOptionalString(source.upperOrgLv1),
+    orgName: readOrgText(source.orgName),
+    upperOrgLv0: readOrgText(source.upperOrgLv0),
+    upperOrgLv1: readOrgText(source.upperOrgLv1),
     userIp: asOptionalString(source.userIp),
     repoPath: asOptionalString(properties.repoPath),
     repositoryName: asOptionalString(properties.repositoryName),
@@ -2988,6 +3046,16 @@ async function fetchCommitAdoptionEvents(commitSha: string): Promise<CommitAdopt
 // Dashboard data fetchers
 // ─────────────────────────────────────────────────────────
 
+async function queryToolUsage(
+  body: Record<string, unknown>,
+  options?: Parameters<typeof esQuery>[2]
+): Promise<unknown> {
+  return queryWithToolUsageMappingFallback(
+    (query) => esQuery(getEsIndex("trace"), query, options),
+    body
+  )
+}
+
 async function fetchOverview(
   range: TimeRange,
   granularity: Granularity,
@@ -3014,32 +3082,11 @@ async function fetchOverview(
       total_input_tokens: { sum: { field: "totalInputTokens" } },
       total_output_tokens: { sum: { field: "totalOutputTokens" } },
       total_skills: { cardinality: { field: "usedSkills" } },
-      total_tools: { cardinality: { field: "toolNames" } },
       total_skill_calls: { value_count: { field: "usedSkills" } },
-      total_tool_calls: { value_count: { field: "toolNames" } },
       by_skill: { terms: { field: "usedSkills", size: rankingTopSize } },
       by_skill_all: { terms: { field: "usedSkills", size: rankingSearchSize } },
       skill_source: { terms: { field: "skillSource", size: rankingSearchSize } },
-      by_tool: {
-        terms: {
-          field: "toolNames",
-          size: rankingTopSize,
-          exclude: filteredToolExcludes
-        }
-      },
-      by_tool_filtered_all: {
-        terms: {
-          field: "toolNames",
-          size: rankingSearchSize,
-          exclude: filteredToolExcludes
-        }
-      },
-      by_tool_all: {
-        terms: { field: "toolNames", size: rankingTopSize }
-      },
-      by_tool_all_full: {
-        terms: { field: "toolNames", size: rankingSearchSize }
-      },
+      ...buildToolUsageAggs(filteredToolExcludes),
       trend: {
         date_histogram: {
           field: "startedAt",
@@ -3110,7 +3157,7 @@ async function fetchOverview(
   }
 
   const [traceRaw, codeRaw] = await Promise.all([
-    esQuery(getEsIndex("trace"), traceBody, {
+    queryToolUsage(traceBody, {
       projection: { kind: "overview-trace", granularity },
       outputByteLimit: DASHBOARD_HOME_RANKING_QUERY_OUTPUT_BYTE_LIMIT
     }),
@@ -3268,13 +3315,13 @@ function normalizeUpperOrgLv1List(value?: string | string[] | null): string[] {
   return Array.from(new Set(cleaned))
 }
 
-// upperOrgLv1 为空或缺失的匹配子句（「未归类」）。
+// upperOrgLv1 缺失、为空、或是采集占位串的匹配子句（「未归类」）。
 function buildUnclassifiedOrgClause(): Record<string, unknown> {
   return {
     bool: {
       should: [
         { bool: { must_not: { exists: { field: "upperOrgLv1" } } } },
-        { term: { upperOrgLv1: "" } }
+        ...emptyOrgValueClauses("upperOrgLv1")
       ],
       minimum_should_match: 1
     }
@@ -3282,7 +3329,7 @@ function buildUnclassifiedOrgClause(): Record<string, unknown> {
 }
 
 // 多选 LV1 组织筛选 → terms 过滤；空数组返回 null（表示全部，不过滤）。
-// 列表含「未归类」哨兵时，额外 OR 上「空/缺失 upperOrgLv1」的匹配。
+// 列表含「未归类」哨兵时，额外 OR 上「空 / 缺失 / 采集占位串 upperOrgLv1」的匹配。
 function buildUpperOrgLv1ListFilter(list: string[]): Record<string, unknown> | null {
   if (list.length === 0) return null
   const includeUnclassified = list.includes(DASHBOARD_UNCLASSIFIED_ORG)
@@ -3295,13 +3342,14 @@ function buildUpperOrgLv1ListFilter(list: string[]): Record<string, unknown> | n
   return { bool: { should: clauses, minimum_should_match: 1 } }
 }
 
+// 「这一级组织有真值」：排除缺失、空串和采集占位串，三者都归「未归类」，不进排行。
 function buildNonEmptyOrgLevelFilter(
   field: "upperOrgLv0" | "upperOrgLv1"
 ): Record<string, unknown> {
   return {
     bool: {
       must: [{ exists: { field } }],
-      must_not: [{ term: { [field]: "" } }]
+      must_not: emptyOrgValueClauses(field)
     }
   }
 }
@@ -3437,17 +3485,18 @@ function normalizeUserListBucket(bucket: Record<string, unknown>): DashboardUser
     typeof bucket.key === "string" ? bucket.key : asString(key.sap_id, asString(source.sapId))
   const totalInputTokens = asNumber(asRecord(bucket.total_input_tokens).value)
   const totalOutputTokens = asNumber(asRecord(bucket.total_output_tokens).value)
-  const totalTokens = asNumber(
+  const totalTokens = resolveTokenTotal(
     asRecord(bucket.total_tokens).value,
-    totalInputTokens + totalOutputTokens
+    totalInputTokens,
+    totalOutputTokens
   )
   return {
     sapId,
     ystId: asOptionalString(source.ystId),
     userName: asString(source.userName, sapId || "unknown"),
-    orgName: asOptionalString(source.orgName),
-    upperOrgLv0: asOptionalString(source.upperOrgLv0),
-    upperOrgLv1: asOptionalString(source.upperOrgLv1),
+    orgName: readOrgText(source.orgName),
+    upperOrgLv0: readOrgText(source.upperOrgLv0),
+    upperOrgLv1: readOrgText(source.upperOrgLv1),
     count: asNumber(bucket.doc_count),
     lastActiveAt: asOptionalString(source.startedAt),
     avgDurationMs: asNumber(asRecord(bucket.avg_duration).value),
@@ -3769,9 +3818,9 @@ async function fetchUncommittedRanking(
         sapId,
         ystId: asOptionalString(source.ystId),
         userName: asString(source.userName, sapId),
-        orgName: asOptionalString(source.orgName),
-        upperOrgLv0: asOptionalString(source.upperOrgLv0),
-        upperOrgLv1: asOptionalString(source.upperOrgLv1),
+        orgName: readOrgText(source.orgName),
+        upperOrgLv0: readOrgText(source.upperOrgLv0),
+        upperOrgLv1: readOrgText(source.upperOrgLv1),
         generatedLines,
         measuredGeneratedLines,
         uncommittedLines,
@@ -4116,9 +4165,10 @@ async function fetchUserDetail(
   const userInfo = getLatestHitSource(aggs, "latest_user_info")
   const totalInputTokens = asNumber(asRecord(aggs.total_input_tokens).value)
   const totalOutputTokens = asNumber(asRecord(aggs.total_output_tokens).value)
-  const totalTokens = asNumber(
+  const totalTokens = resolveTokenTotal(
     asRecord(aggs.total_tokens).value,
-    totalInputTokens + totalOutputTokens
+    totalInputTokens,
+    totalOutputTokens
   )
   // 统计指标：调用次数取自全量聚合。
   const totalCalls = asNumber(asRecord(aggs.total_calls).value)
@@ -4142,9 +4192,9 @@ async function fetchUserDetail(
     sapId: asString(userInfo.sapId, normalizedSapId),
     ystId: asOptionalString(userInfo.ystId),
     userName: asString(userInfo.userName, normalizedSapId),
-    orgName: asOptionalString(userInfo.orgName),
-    upperOrgLv0: asOptionalString(userInfo.upperOrgLv0),
-    upperOrgLv1: asOptionalString(userInfo.upperOrgLv1),
+    orgName: readOrgText(userInfo.orgName),
+    upperOrgLv0: readOrgText(userInfo.upperOrgLv0),
+    upperOrgLv1: readOrgText(userInfo.upperOrgLv1),
     totalCalls,
     avgDurationMs: asNumber(asRecord(aggs.avg_duration).value),
     totalToolCalls: asNumber(asRecord(aggs.total_tool_calls).value),
@@ -4184,10 +4234,17 @@ async function fetchSkillUsageSummary(
   void granularity
   // 模式 A：前端传入技能名列表，使用 filters 精确按“技能维度”统计。
   // 这样可以直接得到每个技能的用户数，避免按版本桶二次合并带来的误差。
-  const normalizedSkillNames = normalizeSkillQueryNames(skillNames)
-  if (normalizedSkillNames.length > 0) {
+  const candidates = groupAwardSkillCandidates(Array.isArray(skillNames) ? skillNames : []).slice(
+    0,
+    1000
+  )
+  if (candidates.length > 0) {
+    // 同一基础技能只生成一个桶，防止多个名称/版本命中同一 trace 后二次累加。
     const filters = Object.fromEntries(
-      normalizedSkillNames.map((skillName) => [skillName, buildSkillUsageWildcardFilter(skillName)])
+      candidates.map((candidate) => [
+        candidate.key,
+        buildSkillUsageMatchFilter(candidate.bases, ["usedSkills", "usedSkills.keyword"])
+      ])
     )
     // 统计口径计入全部触发来源；triggerSource 仅用于 trace 分析页切换，不在此过滤。
     const body = {
@@ -4656,12 +4713,12 @@ function parseSkillEvalRecordHit(hit: EsSearchHit): TraceSkillEvalRecord | null 
     ystId: asString(source.ystId),
     sapId: asString(source.sapId),
     userName: asString(source.userName),
-    orgName: asString(source.orgName),
+    orgName: readOrgText(source.orgName) ?? "",
     originOrgId: asString(source.originOrgId),
-    upperOrgLv0: asString(source.upperOrgLv0),
-    upperOrgLv1: asString(source.upperOrgLv1),
-    upperOrgLv2: asString(source.upperOrgLv2),
-    upperOrgLv3: asString(source.upperOrgLv3),
+    upperOrgLv0: readOrgText(source.upperOrgLv0) ?? "",
+    upperOrgLv1: readOrgText(source.upperOrgLv1) ?? "",
+    upperOrgLv2: readOrgText(source.upperOrgLv2) ?? "",
+    upperOrgLv3: readOrgText(source.upperOrgLv3) ?? "",
     appVersion: asString(source.appVersion),
     ...(skillAuthor ? { skillAuthor } : {}),
     userMessage: asString(source.userMessage),
@@ -5698,7 +5755,7 @@ async function fetchSkillUserStats(
   // 统计指标不做组织级数据权限过滤。
   const traceAccessFilter = null
   void granularity
-  const skillFilter = buildVersionedSkillUsagePrefixFilter(skillName)
+  const skillFilter = buildSkillUsageWildcardFilter(skillName)
   const body = {
     size: 0,
     // 统计口径计入全部触发来源；triggerSource 仅用于 trace 分析页切换，不在此过滤。
@@ -5949,8 +6006,8 @@ async function fetchOrgOptions(range: TimeRange): Promise<string[]> {
     const record = asRecord(bucket)
     const key = asString(record.key).trim()
     const docCount = asNumber(record.doc_count)
-    if (!key || key === DASHBOARD_ORG_MISSING_BUCKET) {
-      // 空串 或 字段缺失 → 计入「未归类」
+    if (key === DASHBOARD_ORG_MISSING_BUCKET || isMissingOrgValue(key)) {
+      // 空串、字段缺失、采集占位串 → 计入「未归类」，不作为一个室出现在下拉里
       if (docCount > 0) hasUnclassified = true
       continue
     }
@@ -6548,9 +6605,7 @@ const MAX_THREAD_TRACES = 200
  * 串行请求，延迟可接受。 */
 const THREAD_TRACES_FETCH_CHUNK = 25
 
-interface ThreadTracesOptions {
-  scope?: "platform" | "project"
-}
+type ThreadTracesOptions = DashboardThreadTraceScope
 
 async function fetchThreadTraces(
   threadId: string,
@@ -6572,6 +6627,7 @@ async function fetchThreadTraces(
       }
     }
   ]
+  filters.push(...buildThreadTraceScopeFilters(options))
   appendOptionalFilter(
     filters,
     projectScoped ? buildProjectModeAccessFilter(access) : buildTraceAccessFilter(access)
@@ -6681,103 +6737,109 @@ async function fetchSkillDetail(
   }
 }
 
+async function fetchAwardComposite(
+  index: "trace" | "event",
+  body: Record<string, unknown>,
+  aggregation: string
+): Promise<Record<string, unknown>[]> {
+  return fetchAllAwardCompositeBuckets(body, aggregation, (page) =>
+    esQuery(getEsIndex(index), page)
+  )
+}
+
 // ── 评奖辅助看板 fetchers ───────────────────────────────────────
-// 单批技能命名桶上限（避免聚合体过大）。个人技能数远小于此。
-const AWARD_SKILL_CONTRIBUTION_LIMIT = 300
-// 应用奖榜返回的个人数上限（多列展示、不自动排名，前端可自行排序/裁剪 Top10）。
-const AWARD_USER_APPLICATION_LIMIT = 100
+// 限制单次请求大小，全部候选分批查询。
+const AWARD_QUERY_BATCH_SIZE = 100
+const AWARD_COMPOSITE_PAGE_SIZE = 500
 
 /**
  * 技能贡献奖：对给定「个人构建」技能名集，按技能聚合跨室数 / 使用人数 / 调用数（trace 侧）
- * 与整体入库统计（code 事件侧）。两侧均用 filters 命名桶单次聚合，避免逐技能查询。
+ * 与整体入库统计（code 事件侧）。同一技能的多个版本合并为一行，两侧分批聚合全部候选。
  */
 async function fetchAwardSkillContributions(
   range: TimeRange,
   skillNames: string[]
 ): Promise<DashboardAwardSkillContribution[]> {
   requireDashboardAwardsAccess()
-  // 保留前端传入的原始名作为回传 key（供前端 join 市场展示字段），内部用归一化名建 ES 过滤。
-  const seen = new Set<string>()
-  const entries: Array<{ key: string; norm: string }> = []
-  for (const raw of Array.isArray(skillNames) ? skillNames : []) {
-    const key = String(raw || "").trim()
-    if (!key || seen.has(key)) continue
-    const norm = normalizeSkillQueryName(key)
-    if (!norm) continue
-    seen.add(key)
-    entries.push({ key, norm })
-    if (entries.length >= AWARD_SKILL_CONTRIBUTION_LIMIT) break
-  }
-  if (entries.length === 0) return []
-
-  // trace 侧：每个技能一个命名 filter 桶，统计去重室 / 去重用户；调用数取桶 doc_count。
-  const traceFilters: Record<string, unknown> = {}
-  for (const { key, norm } of entries) traceFilters[key] = buildSkillUsageWildcardFilter(norm)
-  const traceBody = {
-    size: 0,
-    query: { bool: { filter: [timeRangeFilter("startedAt", range)] } },
-    aggs: {
-      by_skill: {
-        filters: { filters: traceFilters },
-        aggs: {
-          cross_org: { cardinality: { field: "upperOrgLv1" } },
-          users: { cardinality: { field: "ystId" } }
-        }
-      }
-    }
-  }
-
-  // code 事件侧：每个技能一个命名 filter 桶，桶内复用 perBucketAggs 得入库统计。
+  const entries = groupAwardSkillCandidates(skillNames)
   const { codeGenFilters, codeAdoptFilters, perBucketAggs } = buildProjectModeCodeAggs(
     null,
     range,
     []
   )
-  const eventFilters: Record<string, unknown> = {}
-  for (const { key, norm } of entries) eventFilters[key] = buildEventSkillUsageWildcardFilter(norm)
-  const eventBody = {
-    size: 0,
-    query: {
-      bool: {
-        should: [{ bool: { filter: codeGenFilters } }, { bool: { filter: codeAdoptFilters } }],
-        minimum_should_match: 1
+  const batches = await mapAwardBatches(entries, AWARD_QUERY_BATCH_SIZE, async (batch) => {
+    const traceFilters = Object.fromEntries(
+      batch.map((entry) => [
+        entry.key,
+        buildAwardSkillMatchFilter(entry, ["usedSkills", "usedSkills.keyword"])
+      ])
+    )
+    const eventFilters = Object.fromEntries(
+      batch.map((entry) => [
+        entry.key,
+        buildAwardSkillMatchFilter(entry, [
+          "properties.usedSkills",
+          "properties.usedSkills.keyword"
+        ])
+      ])
+    )
+    const [traceRaw, eventRaw] = await Promise.all([
+      esQuery(getEsIndex("trace"), {
+        size: 0,
+        query: { bool: { filter: [timeRangeFilter("startedAt", range)] } },
+        aggs: {
+          by_skill: {
+            filters: { filters: traceFilters },
+            aggs: {
+              real_org: {
+                filter: buildNonEmptyOrgLevelFilter("upperOrgLv1"),
+                aggs: { cross_org: { cardinality: { field: "upperOrgLv1" } } }
+              },
+              real_users: {
+                filter: {
+                  bool: {
+                    filter: [{ exists: { field: "ystId" } }],
+                    must_not: [{ term: { ystId: "" } }]
+                  }
+                },
+                aggs: { users: { cardinality: { field: "ystId" } } }
+              }
+            }
+          }
+        }
+      }),
+      esQuery(getEsIndex("event"), {
+        size: 0,
+        query: {
+          bool: {
+            should: [{ bool: { filter: codeGenFilters } }, { bool: { filter: codeAdoptFilters } }],
+            minimum_should_match: 1
+          }
+        },
+        aggs: { by_skill: { filters: { filters: eventFilters }, aggs: perBucketAggs } }
+      })
+    ])
+    const traceBuckets = asRecord(readCompleteAwardAggregation(traceRaw, "by_skill").buckets)
+    const eventBuckets = asRecord(readCompleteAwardAggregation(eventRaw, "by_skill").buckets)
+    return batch.map(({ key }) => {
+      if (!traceBuckets[key] || !eventBuckets[key]) throw new Error("评奖查询缺少技能统计结果")
+      const tBucket = asRecord(traceBuckets[key])
+      const eBucket = asRecord(eventBuckets[key])
+      return {
+        skillKey: key,
+        crossOrgCount: asNumber(asRecord(asRecord(tBucket.real_org).cross_org).value),
+        userCount: asNumber(asRecord(asRecord(tBucket.real_users).users).value),
+        callCount: asNumber(tBucket.doc_count),
+        codeStats: asNumber(eBucket.doc_count) > 0 ? normalizeCodeStatsFromContainer(eBucket) : null
       }
-    },
-    aggs: {
-      by_skill: { filters: { filters: eventFilters }, aggs: perBucketAggs }
-    }
-  }
-
-  const [traceRaw, eventRaw] = await Promise.all([
-    esQuery(getEsIndex("trace"), traceBody),
-    esQuery(getEsIndex("event"), eventBody)
-  ])
-
-  const traceBuckets = asRecord(
-    asRecord(asRecord(asRecord(traceRaw).aggregations).by_skill).buckets
-  )
-  const eventBuckets = asRecord(
-    asRecord(asRecord(asRecord(eventRaw).aggregations).by_skill).buckets
-  )
-
-  return entries.map(({ key }) => {
-    const tBucket = asRecord(traceBuckets[key])
-    const eBucket = asRecord(eventBuckets[key])
-    const codeStats =
-      asNumber(eBucket.doc_count) > 0 ? normalizeCodeStatsFromContainer(eBucket) : null
-    return {
-      skillKey: key,
-      crossOrgCount: asNumber(asRecord(tBucket.cross_org).value),
-      userCount: asNumber(asRecord(tBucket.users).value),
-      callCount: asNumber(tBucket.doc_count),
-      codeStats
-    }
+    })
   })
+  return batches.flat()
 }
 
 /**
  * 技能应用奖榜：按个人（ystId）聚合深度使用指标（trace 侧）+ 个人入库统计（code 事件侧）。
- * 不自动排名；trace 按调用数取前 N 人，code 入库按 ystId join。
+ * 分页读取全部用户，code 入库按 ystId join；技能种类按基础名去重。
  */
 async function fetchAwardUserApplications(
   range: TimeRange
@@ -6797,7 +6859,10 @@ async function fetchAwardUserApplications(
     },
     aggs: {
       users: {
-        terms: { field: "ystId", size: AWARD_USER_APPLICATION_LIMIT, order: { _count: "desc" } },
+        composite: {
+          size: AWARD_COMPOSITE_PAGE_SIZE,
+          sources: [{ user: { terms: { field: "ystId" } } }]
+        },
         aggs: {
           latest_user_info: {
             top_hits: {
@@ -6808,7 +6873,6 @@ async function fetchAwardUserApplications(
               }
             }
           },
-          skill_count: { cardinality: { field: "usedSkills" } },
           skill_usage_total: { value_count: { field: "usedSkills" } },
           tool_calls: { sum: { field: "totalToolCalls" } },
           thread_count: { cardinality: { field: "threadId" } },
@@ -6832,32 +6896,47 @@ async function fetchAwardUserApplications(
       }
     },
     aggs: {
-      users: { terms: { field: "ystId", size: 2000 }, aggs: perBucketAggs }
+      users: {
+        composite: {
+          size: AWARD_COMPOSITE_PAGE_SIZE,
+          sources: [{ user: { terms: { field: "ystId" } } }]
+        },
+        aggs: perBucketAggs
+      }
     }
   }
 
-  const [traceRaw, eventRaw] = await Promise.all([
-    esQuery(getEsIndex("trace"), traceBody),
-    esQuery(getEsIndex("event"), eventBody)
+  const skillBody = {
+    size: 0,
+    query: traceBody.query,
+    aggs: {
+      users: {
+        composite: {
+          size: AWARD_COMPOSITE_PAGE_SIZE,
+          sources: [
+            { user: { terms: { field: "ystId" } } },
+            { skill: { terms: { field: "usedSkills" } } }
+          ]
+        }
+      }
+    }
+  }
+  const [traceList, eventList, skillList] = await Promise.all([
+    fetchAwardComposite("trace", traceBody, "users"),
+    fetchAwardComposite("event", eventBody, "users"),
+    fetchAwardComposite("trace", skillBody, "users")
   ])
-
-  // 个人入库统计按 ystId 建索引，供 trace 用户榜 join。
+  const skillCounts = countAwardDistinctSkills(skillList, (key) => asString(key.user))
   const codeByYst = new Map<string, DashboardCodeStats>()
-  const eventUsers = asRecord(asRecord(asRecord(eventRaw).aggregations).users)
-  const eventList = Array.isArray(eventUsers.buckets) ? eventUsers.buckets : []
-  for (const b of eventList) {
-    const bucket = asRecord(b)
-    const yst = asString(bucket.key)
-    if (!yst) continue
-    codeByYst.set(yst, normalizeCodeStatsFromContainer(bucket))
+  for (const bucket of eventList) {
+    const yst = asString(asRecord(bucket.key).user)
+    if (yst) codeByYst.set(yst, normalizeCodeStatsFromContainer(bucket))
   }
 
-  const traceUsers = asRecord(asRecord(asRecord(traceRaw).aggregations).users)
-  const traceList = Array.isArray(traceUsers.buckets) ? traceUsers.buckets : []
   return traceList
     .map((b): DashboardAwardUserApplication | null => {
       const bucket = asRecord(b)
-      const yst = asString(bucket.key)
+      const yst = asString(asRecord(bucket.key).user)
       if (!yst) return null
       const hits = asRecord(asRecord(bucket.latest_user_info).hits).hits
       const firstHit = asRecord(Array.isArray(hits) ? hits[0] : undefined)
@@ -6866,11 +6945,11 @@ async function fetchAwardUserApplications(
         sapId: asString(src.sapId),
         ystId: yst,
         userName: asString(src.userName),
-        orgName: asOptionalString(src.orgName),
-        upperOrgLv0: asOptionalString(src.upperOrgLv0),
-        upperOrgLv1: asOptionalString(src.upperOrgLv1),
+        orgName: readOrgText(src.orgName),
+        upperOrgLv0: readOrgText(src.upperOrgLv0),
+        upperOrgLv1: readOrgText(src.upperOrgLv1),
         callCount: asNumber(bucket.doc_count),
-        skillCount: asNumber(asRecord(bucket.skill_count).value),
+        skillCount: skillCounts.get(yst) ?? 0,
         skillUsageCount: asNumber(asRecord(bucket.skill_usage_total).value),
         toolCallCount: asNumber(asRecord(bucket.tool_calls).value),
         threadCount: asNumber(asRecord(bucket.thread_count).value),
@@ -6885,11 +6964,7 @@ async function fetchAwardUserApplications(
 function teamBenchmarkTraceMetricAggs(): Record<string, unknown> {
   return {
     usage_count: { value_count: { field: "traceId" } },
-    user_count: { cardinality: { field: "ystId" } },
-    skill_usage_count: { value_count: { field: "usedSkills" } },
-    distinct_skills: { cardinality: { field: "usedSkills" } },
-    // 各用户使用次数（doc_count），用于统计「超过人均次数的人数」。
-    users: { terms: { field: "ystId", size: 5000 } }
+    skill_usage_count: { value_count: { field: "usedSkills" } }
   }
 }
 
@@ -6897,7 +6972,11 @@ function teamBenchmarkTraceMetricAggs(): Record<string, unknown> {
  * 把一个组织桶（含 teamBenchmarkTraceMetricAggs）解析为标杆奖行的 trace 侧部分。
  * 本行内使用次数超过本行人均的用户计入 aboveAvgUserCount。
  */
-function parseTeamBenchmarkTraceBucket(bucket: Record<string, unknown>): {
+function parseTeamBenchmarkTraceBucket(
+  bucket: Record<string, unknown>,
+  userCounts: number[],
+  distinctSkills: number
+): {
   usageCount: number
   userCount: number
   perCapitaUsage: number
@@ -6906,29 +6985,23 @@ function parseTeamBenchmarkTraceBucket(bucket: Record<string, unknown>): {
   distinctSkillsUsed: number
 } {
   const usageCount = asNumber(asRecord(bucket.usage_count).value, asNumber(bucket.doc_count))
-  const userCount = asNumber(asRecord(bucket.user_count).value)
+  const userCount = userCounts.length
   const perCapitaUsage = userCount > 0 ? usageCount / userCount : 0
-  const userBuckets = asRecord(bucket.users).buckets
-  const aboveAvgUserCount = Array.isArray(userBuckets)
-    ? userBuckets.filter((u) => asNumber(asRecord(u).doc_count) > perCapitaUsage).length
-    : 0
+  const aboveAvgUserCount = userCounts.filter((count) => count > perCapitaUsage).length
   return {
     usageCount,
     userCount,
     perCapitaUsage,
     aboveAvgUserCount,
     skillUsageCount: asNumber(asRecord(bucket.skill_usage_count).value),
-    distinctSkillsUsed: asNumber(asRecord(bucket.distinct_skills).value)
+    distinctSkillsUsed: distinctSkills
   }
 }
 
-/** 组织桶 join key：室 或 室␀组。 */
+/** 室与组使用独立键；空组桶也不能覆盖室级汇总。 */
 function teamOrgKey(shi: string, group?: string): string {
-  return group ? `${shi}\u0000${group}` : shi
+  return JSON.stringify(group === undefined ? ["room", shi] : ["group", shi, group])
 }
-
-const TEAM_BENCHMARK_SHI_LIMIT = 200
-const TEAM_BENCHMARK_GROUP_LIMIT = 500
 
 /**
  * 团队标杆奖：按 室(upperOrgLv1) → 组(upperOrgLv0) 两级聚合使用深度（trace 侧）+ 代码产出（event 侧）。
@@ -6939,166 +7012,182 @@ async function fetchAwardTeamBenchmark(
 ): Promise<DashboardAwardTeamBenchmarkRow[]> {
   requireDashboardAwardsAccess()
 
-  const traceBody = {
-    size: 0,
-    query: {
-      bool: {
-        filter: [
-          timeRangeFilter("startedAt", range),
-          { exists: { field: "upperOrgLv1" } },
-          { bool: { must_not: { term: { upperOrgLv1: "" } } } }
-        ]
-      }
-    },
-    aggs: {
-      // 全员基线：总使用次数 / 总去重用户 → 总量人均使用次数。
-      total_usage: { value_count: { field: "traceId" } },
-      total_users: { cardinality: { field: "ystId" } },
-      by_shi: {
-        terms: { field: "upperOrgLv1", size: TEAM_BENCHMARK_SHI_LIMIT },
-        aggs: {
-          ...teamBenchmarkTraceMetricAggs(),
-          by_group: {
-            terms: { field: "upperOrgLv0", size: TEAM_BENCHMARK_GROUP_LIMIT },
-            aggs: teamBenchmarkTraceMetricAggs()
-          }
-        }
-      }
+  const traceQuery = {
+    bool: {
+      filter: [timeRangeFilter("startedAt", range), buildNonEmptyOrgLevelFilter("upperOrgLv1")]
     }
   }
-
   const { codeGenFilters, codeAdoptFilters, perBucketAggs } = buildProjectModeCodeAggs(
     null,
     range,
     []
   )
-  const eventBody = {
+  const eventQuery = {
+    bool: {
+      should: [{ bool: { filter: codeGenFilters } }, { bool: { filter: codeAdoptFilters } }],
+      minimum_should_match: 1
+    }
+  }
+  const roomSources = [{ shi: { terms: { field: "upperOrgLv1" } } }]
+  const groupSources = [...roomSources, { group: { terms: { field: "upperOrgLv0" } } }]
+  const userSource = { user: { terms: { field: "ystId" } } }
+  const skillSource = { skill: { terms: { field: "usedSkills" } } }
+  const compositeBody = (
+    sources: Record<string, unknown>[],
+    query: Record<string, unknown>,
+    aggs?: Record<string, unknown>
+  ): Record<string, unknown> => ({
     size: 0,
-    query: {
-      bool: {
-        should: [{ bool: { filter: codeGenFilters } }, { bool: { filter: codeAdoptFilters } }],
-        minimum_should_match: 1
-      }
-    },
+    query,
     aggs: {
-      by_shi: {
-        terms: { field: "upperOrgLv1", size: TEAM_BENCHMARK_SHI_LIMIT },
-        aggs: {
-          ...perBucketAggs,
-          by_group: {
-            terms: { field: "upperOrgLv0", size: TEAM_BENCHMARK_GROUP_LIMIT },
-            aggs: perBucketAggs
-          }
-        }
+      items: { composite: { size: AWARD_COMPOSITE_PAGE_SIZE, sources }, ...(aggs ? { aggs } : {}) }
+    }
+  })
+  // 分别分页读取室、组、用户、技能，避免嵌套 terms 的容量截断与桶数膨胀。
+  const queries: Array<{ index: "trace" | "event"; body: Record<string, unknown> }> = [
+    {
+      index: "trace",
+      body: compositeBody(roomSources, traceQuery, teamBenchmarkTraceMetricAggs())
+    },
+    {
+      index: "trace",
+      body: compositeBody(groupSources, traceQuery, teamBenchmarkTraceMetricAggs())
+    },
+    { index: "trace", body: compositeBody([...roomSources, userSource], traceQuery) },
+    { index: "trace", body: compositeBody([...groupSources, userSource], traceQuery) },
+    { index: "trace", body: compositeBody([...roomSources, skillSource], traceQuery) },
+    { index: "trace", body: compositeBody([...groupSources, skillSource], traceQuery) },
+    { index: "event", body: compositeBody(roomSources, eventQuery, perBucketAggs) },
+    { index: "event", body: compositeBody(groupSources, eventQuery, perBucketAggs) }
+  ]
+  const results = await mapAwardBatches(queries, 1, async ([query]) =>
+    fetchAwardComposite(query.index, query.body, "items")
+  )
+  const [rooms, groups, roomUsers, groupUsers, roomSkills, groupSkills, eventRooms, eventGroups] =
+    results
+  const totalsRaw = await esQuery(getEsIndex("trace"), {
+    size: 0,
+    query: traceQuery,
+    aggs: {
+      total_usage: { value_count: { field: "traceId" } },
+      real_users: {
+        filter: {
+          bool: { filter: [{ exists: { field: "ystId" } }], must_not: [{ term: { ystId: "" } }] }
+        },
+        aggs: { total_users: { cardinality: { field: "ystId" } } }
       }
     }
-  }
-
-  const [traceRaw, eventRaw] = await Promise.all([
-    esQuery(getEsIndex("trace"), traceBody),
-    esQuery(getEsIndex("event"), eventBody)
-  ])
-
-  // 代码统计按 室 / 室␀组 建索引，供 trace 行 join。
-  const codeByOrg = new Map<string, DashboardCodeStats>()
-  const eventShiBuckets = asRecord(asRecord(asRecord(eventRaw).aggregations).by_shi).buckets
-  for (const sb of Array.isArray(eventShiBuckets) ? eventShiBuckets : []) {
-    const shiBucket = asRecord(sb)
-    const shi = asString(shiBucket.key)
-    if (!shi) continue
-    codeByOrg.set(teamOrgKey(shi), normalizeCodeStatsFromContainer(shiBucket))
-    const groupBuckets = asRecord(shiBucket.by_group).buckets
-    for (const gb of Array.isArray(groupBuckets) ? groupBuckets : []) {
-      const groupBucket = asRecord(gb)
-      const group = asString(groupBucket.key)
-      if (!group) continue
-      codeByOrg.set(teamOrgKey(shi, group), normalizeCodeStatsFromContainer(groupBucket))
-    }
-  }
-
-  const traceAggs = asRecord(asRecord(traceRaw).aggregations)
-  const totalUsage = asNumber(asRecord(traceAggs.total_usage).value)
-  const totalUsers = asNumber(asRecord(traceAggs.total_users).value)
-  // 总量人均使用次数 = 全员总使用次数 / 全员去重用户数，仅作全局参考。
+  })
+  const totalUsage = asNumber(readCompleteAwardAggregation(totalsRaw, "total_usage").value)
+  const totalUsers = asNumber(
+    asRecord(readCompleteAwardAggregation(totalsRaw, "real_users").total_users).value
+  )
   const totalPerCapitaUsage = totalUsers > 0 ? totalUsage / totalUsers : 0
-
-  const shiBuckets = asRecord(traceAggs.by_shi).buckets
-  return (Array.isArray(shiBuckets) ? shiBuckets : [])
-    .map((sb): DashboardAwardTeamBenchmarkRow | null => {
-      const shiBucket = asRecord(sb)
-      const shi = asString(shiBucket.key)
-      if (!shi) return null
-      const groupBuckets = asRecord(shiBucket.by_group).buckets
-      const children = (Array.isArray(groupBuckets) ? groupBuckets : [])
-        .map((gb): DashboardAwardTeamBenchmarkRow | null => {
-          const groupBucket = asRecord(gb)
-          const group = asString(groupBucket.key)
-          if (!group) return null
-          return {
-            shi,
-            group,
-            ...parseTeamBenchmarkTraceBucket(groupBucket),
-            totalPerCapitaUsage,
-            codeStats: codeByOrg.get(teamOrgKey(shi, group)) ?? null
-          }
-        })
-        .filter((x): x is DashboardAwardTeamBenchmarkRow => x !== null)
-      return {
-        shi,
-        ...parseTeamBenchmarkTraceBucket(shiBucket),
-        totalPerCapitaUsage,
-        codeStats: codeByOrg.get(teamOrgKey(shi)) ?? null,
-        children
-      }
+  const ownerKey = (key: Record<string, unknown>): string =>
+    teamOrgKey(asString(key.shi), "group" in key ? asString(key.group) : undefined)
+  const codeByOrg = new Map<string, DashboardCodeStats>()
+  for (const bucket of [...eventRooms, ...eventGroups]) {
+    codeByOrg.set(ownerKey(asRecord(bucket.key)), normalizeCodeStatsFromContainer(bucket))
+  }
+  const userCountsByOrg = new Map<string, number[]>()
+  for (const bucket of [...roomUsers, ...groupUsers]) {
+    const key = asRecord(bucket.key)
+    if (!asString(key.user)) continue
+    const owner = ownerKey(key)
+    const counts = userCountsByOrg.get(owner) ?? []
+    counts.push(asNumber(bucket.doc_count))
+    userCountsByOrg.set(owner, counts)
+  }
+  const distinctSkills = countAwardDistinctSkills([...roomSkills, ...groupSkills], ownerKey)
+  const parseRow = (bucket: Record<string, unknown>): DashboardAwardTeamBenchmarkRow => {
+    const key = asRecord(bucket.key)
+    const shi = asString(key.shi)
+    const group = asString(key.group)
+    const owner = ownerKey(key)
+    return {
+      shi,
+      ...(group ? { group } : {}),
+      ...parseTeamBenchmarkTraceBucket(
+        bucket,
+        userCountsByOrg.get(owner) ?? [],
+        distinctSkills.get(owner) ?? 0
+      ),
+      totalPerCapitaUsage,
+      codeStats: codeByOrg.get(owner) ?? null
+    }
+  }
+  const childrenByShi = new Map<string, DashboardAwardTeamBenchmarkRow[]>()
+  for (const bucket of groups) {
+    const row = parseRow(bucket)
+    if (isMissingOrgValue(row.shi) || isMissingOrgValue(row.group)) continue
+    const children = childrenByShi.get(row.shi) ?? []
+    children.push(row)
+    childrenByShi.set(row.shi, children)
+  }
+  return rooms
+    .map((bucket) => {
+      const row = parseRow(bucket)
+      return { ...row, children: childrenByShi.get(row.shi) ?? [] }
     })
-    .filter((x): x is DashboardAwardTeamBenchmarkRow => x !== null)
+    .filter((row) => !isMissingOrgValue(row.shi))
 }
 
 /**
  * 团队标杆奖·技能试用覆盖室数：给定每个室「贡献技能名集」，返回该室技能被多少个去重室（upperOrgLv1）试用过。
- * 单次查询用命名 filter 桶（每室一桶，usedSkills 命中该室技能集），桶内 cardinality(upperOrgLv1)。
+ * 分页枚举室与技能，按技能基础名匹配，精确统计去重室数。
  */
 async function fetchAwardTeamSkillCoverage(
   range: TimeRange,
   groups: Array<{ shi: string; skillNames: string[] }>
 ): Promise<Record<string, number>> {
   requireDashboardAwardsAccess()
-  const filters: Record<string, unknown> = {}
-  for (const g of Array.isArray(groups) ? groups : []) {
-    const shi = String(g?.shi || "").trim()
-    const names = Array.isArray(g?.skillNames) ? g.skillNames : []
-    if (!shi || names.length === 0) continue
-    const should = names.flatMap((raw) => {
-      const norm = normalizeSkillQueryName(raw)
-      if (!norm) return []
-      const wildcard = `${escapeWildcard(norm)}**`
-      return [
-        { wildcard: { usedSkills: wildcard } },
-        { wildcard: { "usedSkills.keyword": wildcard } }
-      ]
-    })
-    if (should.length === 0) continue
-    filters[shi] = { bool: { should, minimum_should_match: 1 } }
-  }
-  if (Object.keys(filters).length === 0) return {}
-
-  const body = {
-    size: 0,
-    query: { bool: { filter: [timeRangeFilter("startedAt", range)] } },
-    aggs: {
-      by_shi: {
-        filters: { filters },
-        aggs: { covered_shi: { cardinality: { field: "upperOrgLv1" } } }
-      }
+  const skillOwners = new Map<string, Set<string>>()
+  const coveredRooms = new Map<string, Set<string>>()
+  for (const group of Array.isArray(groups) ? groups : []) {
+    const owner = String(group?.shi || "").trim()
+    if (!owner) continue
+    const candidates = groupAwardSkillCandidates(group.skillNames)
+    if (candidates.length === 0) continue
+    coveredRooms.set(owner, coveredRooms.get(owner) ?? new Set<string>())
+    for (const candidate of candidates) {
+      const owners = skillOwners.get(candidate.key) ?? new Set<string>()
+      owners.add(owner)
+      skillOwners.set(candidate.key, owners)
     }
   }
-  const raw = await esQuery(getEsIndex("trace"), body)
-  const buckets = asRecord(asRecord(asRecord(asRecord(raw).aggregations).by_shi).buckets)
-  const result: Record<string, number> = {}
-  for (const shi of Object.keys(filters)) {
-    result[shi] = asNumber(asRecord(asRecord(buckets[shi]).covered_shi).value)
+  if (skillOwners.size === 0) return {}
+  // 枚举室×技能后按基础名匹配，版本不重复计室，也避免巨大的 bool 技能列表。
+  const buckets = await fetchAwardComposite(
+    "trace",
+    {
+      size: 0,
+      query: {
+        bool: {
+          filter: [timeRangeFilter("startedAt", range), buildNonEmptyOrgLevelFilter("upperOrgLv1")]
+        }
+      },
+      aggs: {
+        items: {
+          composite: {
+            size: AWARD_COMPOSITE_PAGE_SIZE,
+            sources: [
+              { shi: { terms: { field: "upperOrgLv1" } } },
+              { skill: { terms: { field: "usedSkills" } } }
+            ]
+          }
+        }
+      }
+    },
+    "items"
+  )
+  for (const bucket of buckets) {
+    const key = asRecord(bucket.key)
+    const room = asString(key.shi)
+    if (isMissingOrgValue(room)) continue
+    const skill = normalizeSkillQueryName(asString(key.skill)).toLowerCase()
+    for (const owner of skillOwners.get(skill) ?? []) coveredRooms.get(owner)?.add(room)
   }
-  return result
+  return Object.fromEntries(Array.from(coveredRooms, ([owner, rooms]) => [owner, rooms.size]))
 }
 
 /** `_source` fields needed to render a Commit 明细 row (shared by commit-detail fetchers). */
@@ -7307,9 +7396,9 @@ function normalizeNonGitAdoptionReport(
     userName: asString(source.userName, "unknown"),
     sapId: asOptionalString(source.sapId),
     ystId: asOptionalString(source.ystId),
-    orgName: asOptionalString(source.orgName),
-    upperOrgLv0: asOptionalString(source.upperOrgLv0),
-    upperOrgLv1: asOptionalString(source.upperOrgLv1),
+    orgName: readOrgText(source.orgName),
+    upperOrgLv0: readOrgText(source.upperOrgLv0),
+    upperOrgLv1: readOrgText(source.upperOrgLv1),
     userIp: asOptionalString(source.userIp),
     source: asOptionalString(properties.source),
     harnessProjectId: asOptionalString(properties.harnessProjectId),
@@ -7500,6 +7589,110 @@ function mockProjectMatchesOrg(org: string, selectedOrgs: string[]): boolean {
   )
 }
 
+/** [工具名, 用过它的 Trace 数, 完整采集 Trace 里的调用次数] */
+type MockToolUsageRow = [tool: string, traces: number, calls: number]
+
+const MOCK_OVERVIEW_TOOL_USAGE: MockToolUsageRow[] = [
+  ["read_file", 1823, 8460],
+  ["write_file", 1245, 3120],
+  ["execute", 987, 4210],
+  ["grep", 876, 2950],
+  ["glob", 654, 1380],
+  ["git_workflow", 412, 690],
+  ["manage_skill", 298, 402],
+  ["edit_file", 267, 1130],
+  ["manage_scheduler", 241, 318],
+  ["web_search", 198, 455],
+  ["list_directory", 187, 263],
+  ["db_query", 163, 388],
+  ["task", 156, 171],
+  ["task_output", 148, 166],
+  ["create_pr", 134, 139],
+  ["search_tool", 128, 205],
+  ["run_tests", 112, 297],
+  ["search_code", 98, 244],
+  ["code_exec", 92, 150],
+  ["prepare_save_code_exec_tool", 81, 84],
+  ["notify", 76, 93],
+  ["query_logs", 68, 141],
+  ["schema_check", 59, 72],
+  ["request_user_input", 54, 71],
+  ["open_preview", 53, 61],
+  ["analyze_diff", 47, 58],
+  ["format_code", 42, 49],
+  ["lint_fix", 36, 57],
+  ["dependency_audit", 31, 33],
+  ["deploy_check", 26, 31],
+  ["trace_lookup", 19, 27],
+  ["ticket_update", 12, 14],
+  ["mcp_sqlQuery", 11, 23],
+  ["browser_visualDiff", 9, 12],
+  ["workflow_template", 7, 7]
+]
+
+const MOCK_PROJECT_TOOL_USAGE: MockToolUsageRow[] = [
+  ["git_workflow", 142, 236],
+  ["execute", 120, 488],
+  ["read_file", 96, 540],
+  ["manage_skill", 88, 104],
+  ["edit_file", 71, 263],
+  ["manage_scheduler", 61, 72],
+  ["grep", 58, 187],
+  ["write_file", 52, 96],
+  ["db_query", 44, 91],
+  ["create_pr", 33, 35],
+  ["request_user_input", 29, 37],
+  ["search_code", 21, 48]
+]
+
+/**
+ * DEV mock 里工具调用次数从 30 天前开始有：结束时间更早的范围只有旧数据，Tool 排行会退回
+ * 「用过该工具的 Trace 数」。选一个 30 天前的时间段就能看到这种情况。
+ */
+function mockRangeHasToolUsageCounts(range: TimeRange): boolean {
+  return new Date(range.to).getTime() >= Date.now() - 30 * 24 * 60 * 60 * 1000
+}
+
+/** 与 buildToolUsageAggs 同结构的 ES 聚合结果，mock 走和线上一样的解析。 */
+function makeMockToolUsageAggs(
+  rows: MockToolUsageRow[],
+  traceCount: number,
+  completeTraceCount: number
+): Record<string, unknown> {
+  const excluded = new Set(FILTERED_TOOL_EXCLUDES)
+  const filtered = rows.filter(([tool]) => !excluded.has(tool))
+  const counted = completeTraceCount > 0
+  const nested = (subset: MockToolUsageRow[]): Record<string, unknown> => ({
+    doc_count: counted ? subset.reduce((sum, [, traces]) => sum + traces, 0) : 0,
+    calls: { value: counted ? subset.reduce((sum, [, , calls]) => sum + calls, 0) : 0 },
+    kinds: { value: counted ? subset.length : 0 },
+    by_name: {
+      sum_other_doc_count: 0,
+      buckets: counted
+        ? [...subset]
+            .sort((a, b) => b[2] - a[2])
+            .map(([key, traces, calls]) => ({ key, doc_count: traces, calls: { value: calls } }))
+        : []
+    }
+  })
+  const byTraces = (subset: MockToolUsageRow[]): Record<string, unknown> => ({
+    sum_other_doc_count: 0,
+    buckets: [...subset]
+      .sort((a, b) => b[1] - a[1])
+      .map(([key, traces]) => ({ key, doc_count: traces }))
+  })
+  return {
+    tool_usage_trace_docs: { value: traceCount },
+    tool_usage_complete: {
+      doc_count: completeTraceCount,
+      usage: { ...nested(rows), filtered: nested(filtered) }
+    },
+    tool_usage_legacy_kinds: { value: rows.length },
+    tool_usage_legacy_all: byTraces(rows),
+    tool_usage_legacy_filtered: byTraces(filtered)
+  }
+}
+
 function makeMockOverview(range: TimeRange, opts?: OrgFilterOptions): unknown {
   const from = new Date(range.from)
   const to = new Date(range.to)
@@ -7549,9 +7742,7 @@ function makeMockOverview(range: TimeRange, opts?: OrgFilterOptions): unknown {
         total_input_tokens: { value: 2_340_000 },
         total_output_tokens: { value: 890_000 },
         total_skills: { value: 20 },
-        total_tools: { value: 27 },
         total_skill_calls: { value: 2022 },
-        total_tool_calls: { value: 6538 },
         code_generated_lines: { value: 4820 },
         code_deleted_lines: { value: 930 },
         code_measured_generated_lines: { value: 3900 },
@@ -7734,106 +7925,11 @@ function makeMockOverview(range: TimeRange, opts?: OrgFilterOptions): unknown {
             }
           ]
         },
-        by_tool: {
-          buckets: [
-            { key: "git_workflow", doc_count: 412 },
-            { key: "manage_skill", doc_count: 298 },
-            { key: "manage_scheduler", doc_count: 241 },
-            { key: "web_search", doc_count: 198 },
-            { key: "db_query", doc_count: 163 },
-            { key: "create_pr", doc_count: 134 },
-            { key: "run_tests", doc_count: 112 },
-            { key: "search_code", doc_count: 98 },
-            { key: "notify", doc_count: 76 },
-            { key: "query_logs", doc_count: 68 },
-            { key: "schema_check", doc_count: 59 },
-            { key: "open_preview", doc_count: 53 },
-            { key: "analyze_diff", doc_count: 47 },
-            { key: "format_code", doc_count: 42 },
-            { key: "lint_fix", doc_count: 36 },
-            { key: "dependency_audit", doc_count: 31 },
-            { key: "deploy_check", doc_count: 26 },
-            { key: "trace_lookup", doc_count: 19 },
-            { key: "ticket_update", doc_count: 12 }
-          ]
-        },
-        by_tool_filtered_all: {
-          buckets: [
-            { key: "git_workflow", doc_count: 412 },
-            { key: "manage_skill", doc_count: 298 },
-            { key: "manage_scheduler", doc_count: 241 },
-            { key: "web_search", doc_count: 198 },
-            { key: "db_query", doc_count: 163 },
-            { key: "create_pr", doc_count: 134 },
-            { key: "run_tests", doc_count: 112 },
-            { key: "search_code", doc_count: 98 },
-            { key: "notify", doc_count: 76 },
-            { key: "query_logs", doc_count: 68 },
-            { key: "schema_check", doc_count: 59 },
-            { key: "open_preview", doc_count: 53 },
-            { key: "analyze_diff", doc_count: 47 },
-            { key: "format_code", doc_count: 42 },
-            { key: "lint_fix", doc_count: 36 },
-            { key: "dependency_audit", doc_count: 31 },
-            { key: "deploy_check", doc_count: 26 },
-            { key: "trace_lookup", doc_count: 19 },
-            { key: "ticket_update", doc_count: 12 },
-            { key: "mcp_sqlQuery", doc_count: 11 },
-            { key: "browser_visualDiff", doc_count: 9 },
-            { key: "workflow_template", doc_count: 7 }
-          ]
-        },
-        by_tool_all: {
-          buckets: [
-            { key: "read_file", doc_count: 1823 },
-            { key: "write_file", doc_count: 1245 },
-            { key: "execute", doc_count: 987 },
-            { key: "grep", doc_count: 876 },
-            { key: "glob", doc_count: 654 },
-            { key: "git_workflow", doc_count: 412 },
-            { key: "manage_skill", doc_count: 298 },
-            { key: "edit_file", doc_count: 267 },
-            { key: "manage_scheduler", doc_count: 241 },
-            { key: "web_search", doc_count: 198 },
-            { key: "list_directory", doc_count: 187 },
-            { key: "db_query", doc_count: 163 },
-            { key: "task", doc_count: 156 },
-            { key: "task_output", doc_count: 148 },
-            { key: "create_pr", doc_count: 134 },
-            { key: "search_tool", doc_count: 128 },
-            { key: "run_tests", doc_count: 112 },
-            { key: "search_code", doc_count: 98 },
-            { key: "code_exec", doc_count: 92 }
-          ]
-        },
-        by_tool_all_full: {
-          buckets: [
-            { key: "read_file", doc_count: 1823 },
-            { key: "write_file", doc_count: 1245 },
-            { key: "execute", doc_count: 987 },
-            { key: "grep", doc_count: 876 },
-            { key: "glob", doc_count: 654 },
-            { key: "git_workflow", doc_count: 412 },
-            { key: "manage_skill", doc_count: 298 },
-            { key: "edit_file", doc_count: 267 },
-            { key: "manage_scheduler", doc_count: 241 },
-            { key: "web_search", doc_count: 198 },
-            { key: "list_directory", doc_count: 187 },
-            { key: "db_query", doc_count: 163 },
-            { key: "task", doc_count: 156 },
-            { key: "task_output", doc_count: 148 },
-            { key: "create_pr", doc_count: 134 },
-            { key: "search_tool", doc_count: 128 },
-            { key: "run_tests", doc_count: 112 },
-            { key: "search_code", doc_count: 98 },
-            { key: "code_exec", doc_count: 92 },
-            { key: "prepare_save_code_exec_tool", doc_count: 81 },
-            { key: "notify", doc_count: 76 },
-            { key: "query_logs", doc_count: 68 },
-            { key: "schema_check", doc_count: 59 },
-            { key: "open_preview", doc_count: 53 }
-          ]
-        },
+        ...makeMockToolUsageAggs(
+          MOCK_OVERVIEW_TOOL_USAGE,
+          1247,
+          mockRangeHasToolUsageCounts(range) ? 1103 : 0
+        ),
         trend: { buckets: trend }
       }
     },
@@ -8764,6 +8860,90 @@ function makeMockFeatureOperationalStats(
 }
 
 /** DEV mock for the lazy detail endpoint; deliberately long enough to exercise both scroll areas. */
+/**
+ * DEV mock：阶段耗时分析。
+ *
+ * 数字刻意造成「总耗时排名 ≠ 平均耗时排名」，这正是这个弹窗要回答的问题——DEV 阶段
+ * 总耗时最高只是因为轮次最多，而评审阶段单轮最慢。mock 要是把两个排名造成一致的，
+ * 本地就看不出为什么需要同时展示这两列。
+ */
+function makeMockProjectModeStageAnalysis(projectId: string): ProjectModeStageAnalysis {
+  const stage = (
+    nodeName: string,
+    conversationCount: number,
+    avgDurationMs: number,
+    p95DurationMs: number
+  ): ProjectModeStageRow => ({
+    nodeName,
+    group: extractHarnessNodeGroup(nodeName),
+    metrics: {
+      conversationCount,
+      totalDurationMs: conversationCount * avgDurationMs,
+      avgDurationMs,
+      p95DurationMs,
+      runCost: {
+        toolCalls: conversationCount * 9,
+        modelCalls: conversationCount * 2,
+        totalTokens: conversationCount * 31_000,
+        inputTokens: conversationCount * 26_000,
+        outputTokens: conversationCount * 4_200,
+        userInputRequests: Math.floor(conversationCount / 8),
+        userInputRequestDocs: conversationCount
+      }
+    }
+  })
+
+  const stages = [
+    stage("dev-编码实现", 142, 21_400, 68_000),
+    // 轮次少但单轮最慢：总耗时排第三，平均耗时排第一。
+    stage("review-代码评审", 18, 47_900, 132_000),
+    stage("plan-方案设计", 46, 24_800, 71_000),
+    stage("test-测试验证", 37, 15_200, 44_000),
+    stage(STAGE_BUCKET_LABELS.unattributed, 12, 9_800, 26_000)
+  ].sort((a, b) => b.metrics.totalDurationMs - a.metrics.totalDurationMs)
+
+  const total = stages.reduce((acc, item) => {
+    acc.conversationCount += item.metrics.conversationCount
+    acc.totalDurationMs += item.metrics.totalDurationMs
+    acc.runCost.toolCalls += item.metrics.runCost.toolCalls
+    acc.runCost.modelCalls += item.metrics.runCost.modelCalls
+    acc.runCost.totalTokens += item.metrics.runCost.totalTokens
+    acc.runCost.inputTokens += item.metrics.runCost.inputTokens
+    acc.runCost.outputTokens += item.metrics.runCost.outputTokens
+    acc.runCost.userInputRequests += item.metrics.runCost.userInputRequests
+    acc.runCost.userInputRequestDocs += item.metrics.runCost.userInputRequestDocs
+    return acc
+  }, emptyProjectModeStageMetrics())
+  total.avgDurationMs =
+    total.conversationCount > 0 ? Math.round(total.totalDurationMs / total.conversationCount) : 0
+  total.p95DurationMs = 96_000
+  // One mock turn crossed two stages: stage counts may exceed the project total.
+  stages[0].metrics.conversationCount += 1
+  stages[0].metrics.avgDurationMs =
+    stages[0].metrics.totalDurationMs / stages[0].metrics.conversationCount
+
+  // DEV 同样展示新旧 Trace 混合时的归因覆盖说明，避免只在生产数据里出现。
+  const traceCount = total.conversationCount + Math.ceil(total.conversationCount / 4)
+  const callStartTraceCount = Math.round(traceCount * 0.7)
+  return {
+    projectId,
+    total,
+    stages,
+    durationAttribution: {
+      splitTurnCount: Math.round(total.conversationCount * 0.7),
+      legacyTurnCount: Math.round(total.conversationCount * 0.3),
+      truncated: false
+    },
+    costAttribution: {
+      callStartTraceCount,
+      turnStartTraceCount: traceCount - callStartTraceCount,
+      tokenUsageReportedCalls: total.runCost.modelCalls,
+      modelCalls: total.runCost.modelCalls,
+      truncated: false
+    }
+  }
+}
+
 function makeMockProjectModeOperationalDetails(
   scope: ProjectModeOperationalDetailScope
 ): ProjectModeOperationalDetails {
@@ -8842,6 +9022,25 @@ function mergeMockOperationalStats(
   }
 }
 
+/**
+ * DEV mock 的项目创建时间。刻意锚在所选范围上、而不是写死日期：写死的话换个时间范围
+ * （或者过几个月再跑）所有 mock 项目就会一起掉到范围外，「仅本期新建」打开后列表直接空掉，
+ * 看不出开关到底生效没有。
+ *
+ * fraction 取 [0,1] 落在范围内部；传负数则落在范围开始之前，用来造「范围外」的项目。
+ */
+function mockProjectCreatedAt(range: TimeRange, fraction: number): string {
+  const from = Date.parse(range.from)
+  const to = Date.parse(range.to)
+  if (!Number.isFinite(from) || !Number.isFinite(to)) {
+    return new Date(Date.UTC(2026, 5, 1, 2, 0, 0)).toISOString()
+  }
+  const span = Math.max(to - from, 1)
+  // 范围外的点至少推到下界前一整天，免得范围极短时算出来还在界内。
+  const offset = fraction >= 0 ? span * fraction : fraction * Math.max(span, 24 * 60 * 60 * 1000)
+  return new Date(from + offset).toISOString()
+}
+
 function makeMockProjectMode(range: TimeRange, opts?: OrgFilterOptions): DashboardProjectModeData {
   // stageBuckets is derived from each draft's totals after assembly (see below).
   const projectDrafts: Array<
@@ -8858,10 +9057,24 @@ function makeMockProjectMode(range: TimeRange, opts?: OrgFilterOptions): Dashboa
       workspacePath: "/Users/demo/projects/cmbCowork",
       adapterName: "claude-code",
       adapterVersion: "1.4.2",
+      // 范围内新建：打开「仅本期新建」后应当留下。
+      lifecycleCreatedAt: mockProjectCreatedAt(range, 0.1),
       lifecycleStatus: "active",
       compatible: true,
       compatibilityStatus: "compatible",
       systemConstraintEverLoadedSuccessfully: true,
+      managedRunEverStarted: true,
+      managedRunCount: 7,
+      runCost: {
+        toolCalls: 4821,
+        modelCalls: 612,
+        totalTokens: 3_940_000,
+        inputTokens: 3_270_000,
+        outputTokens: 512_000,
+        userInputRequests: 37,
+        userInputRequestDocs: 128
+      },
+      userInputRequestCountComplete: true,
       featureCount: 3,
       conversationCount: 128,
       hasError: false,
@@ -8916,10 +9129,26 @@ function makeMockProjectMode(range: TimeRange, opts?: OrgFilterOptions): Dashboa
       workspacePath: "/Users/demo/projects/payment-core",
       adapterName: "claude-code",
       adapterVersion: "1.4.0",
+      // 范围之前就建好的老项目：打开「仅本期新建」后应当消失。
+      lifecycleCreatedAt: mockProjectCreatedAt(range, -30),
       lifecycleStatus: "active",
       compatible: false,
       compatibilityStatus: "outdated",
       systemConstraintEverLoadedSuccessfully: false,
+      // 标签亮着但当期次数为 0：跑过托管，只是不在当前时间范围内。真实数据里会出现。
+      managedRunEverStarted: true,
+      managedRunCount: 0,
+      // 覆盖度不足的样例：52 轮里只有 20 轮带 userInputRequestCount，展示的是下限。
+      runCost: {
+        toolCalls: 1503,
+        modelCalls: 208,
+        totalTokens: 1_120_000,
+        inputTokens: 929_000,
+        outputTokens: 146_000,
+        userInputRequests: 9,
+        userInputRequestDocs: 20
+      },
+      userInputRequestCountComplete: false,
       featureCount: 2,
       conversationCount: 47,
       hasError: false,
@@ -8961,10 +9190,16 @@ function makeMockProjectMode(range: TimeRange, opts?: OrgFilterOptions): Dashboa
       systemName: "风险管理平台",
       adapterName: "codex",
       adapterVersion: "0.9.1",
+      // 范围内新建。
+      lifecycleCreatedAt: mockProjectCreatedAt(range, 0.6),
       lifecycleStatus: "paused",
       compatible: true,
       compatibilityStatus: "compatible",
       systemConstraintEverLoadedSuccessfully: false,
+      managedRunEverStarted: false,
+      managedRunCount: 0,
+      runCost: EMPTY_PROJECT_MODE_RUN_COST,
+      userInputRequestCountComplete: true,
       featureCount: 1,
       conversationCount: 0,
       hasError: true,
@@ -8987,10 +9222,25 @@ function makeMockProjectMode(range: TimeRange, opts?: OrgFilterOptions): Dashboa
       systemName: "统一门户",
       adapterName: "claude-code",
       adapterVersion: "1.3.5",
+      // 归档的老项目，范围之前建的：「仅本期新建」下「已归档」页签也应当跟着变空。
+      lifecycleCreatedAt: mockProjectCreatedAt(range, -120),
       lifecycleStatus: "archived",
       compatible: true,
       compatibilityStatus: "compatible",
       systemConstraintEverLoadedSuccessfully: true,
+      managedRunEverStarted: true,
+      managedRunCount: 2,
+      runCost: {
+        toolCalls: 96,
+        modelCalls: 18,
+        totalTokens: 84_300,
+        inputTokens: 69_900,
+        outputTokens: 11_000,
+        userInputRequests: 0,
+        userInputRequestDocs: 11
+      },
+      // 11 轮全带字段、值全是 0：这是「确实没问过用户」，不是数据缺失。
+      userInputRequestCountComplete: true,
       featureCount: 1,
       conversationCount: 12,
       hasError: false,
@@ -9017,7 +9267,6 @@ function makeMockProjectMode(range: TimeRange, opts?: OrgFilterOptions): Dashboa
       ]
     }
   ]
-  void range
   // 额外填充若干进行中项目，便于在 DEV 模式演示项目列表的分页/搜索交互。
   for (let i = 1; i <= 12; i++) {
     projectDrafts.push({
@@ -9026,10 +9275,25 @@ function makeMockProjectMode(range: TimeRange, opts?: OrgFilterOptions): Dashboa
       systemName: "示例平台",
       adapterName: "claude-code",
       adapterVersion: "1.4.2",
+      // 奇偶交替落在范围内 / 范围外，打开「仅本期新建」时列表会明显变短而不是全空或没变化。
+      lifecycleCreatedAt:
+        i % 2 === 0 ? mockProjectCreatedAt(range, (i % 10) / 10) : mockProjectCreatedAt(range, -i),
       lifecycleStatus: "active",
       compatible: true,
       compatibilityStatus: "compatible",
       systemConstraintEverLoadedSuccessfully: i % 2 === 0,
+      managedRunEverStarted: i % 3 === 0,
+      managedRunCount: i % 3 === 0 ? i % 5 : 0,
+      runCost: {
+        toolCalls: (i % 7) * 140,
+        modelCalls: (i % 7) * 19,
+        totalTokens: (i % 7) * 96_000,
+        inputTokens: (i % 7) * 79_000,
+        outputTokens: (i % 7) * 12_500,
+        userInputRequests: i % 4,
+        userInputRequestDocs: (i % 5) + 1
+      },
+      userInputRequestCountComplete: i % 5 !== 0,
       featureCount: (i % 3) + 1,
       conversationCount: (i * 7) % 90,
       hasError: false,
@@ -9128,17 +9392,24 @@ function makeMockProjectMode(range: TimeRange, opts?: OrgFilterOptions): Dashboa
   const selectedOrgs = normalizeUpperOrgLv1List(opts?.upperOrgLv1)
   // DEV：把偶数下标的 mock 项目视为「精益项目」，让「仅精益项目」开关在无 ES 时也能可见地筛选。
   const leanOnly = opts?.fromLeanOnly === true
+  // 「仅本期新建」在 mock 里走和 ES 路径同一个口径函数，fixture 的创建时间是按 range 造的，
+  // 所以本地打开开关能真的看见列表变短。
+  const createdInRangeOnly = opts?.createdInRangeOnly === true
   const orgProjects = allProjects.filter((_, i) =>
     mockProjectMatchesOrg(mockProjectOrgAt(i), selectedOrgs)
   )
   const projects = allProjects.filter(
-    (_, i) => mockProjectMatchesOrg(mockProjectOrgAt(i), selectedOrgs) && (!leanOnly || i % 2 === 0)
+    (project, i) =>
+      mockProjectMatchesOrg(mockProjectOrgAt(i), selectedOrgs) &&
+      (!leanOnly || i % 2 === 0) &&
+      matchesProjectModeCreatedAtRange(project.lifecycleCreatedAt, createdInRangeOnly, range)
   )
-  // 写死的聚合块（token/工具/技能/采纳明细/漏斗）不是从项目列表算出来的，真实 ES 路径会按精益 id 集
-  // 过滤这些块；mock 没有明细，故用「精益项目占比」整体缩放，让开关在 dev 里整屏联动而非只动计数卡片。
-  const leanScale = orgProjects.length > 0 ? projects.length / orgProjects.length : 1
-  // 聚合块（token/工具/技能/采纳明细等）按室权重缩放，与其它面板口径一致；叠加精益占比。
-  const aggScale = getMockOrgScale(opts) * leanScale
+  // 写死的聚合块（token/工具/技能/采纳明细/漏斗）不是从项目列表算出来的，真实 ES 路径会按命中的
+  // 项目 id 集过滤这些块；mock 没有明细，故用「命中项目占比」整体缩放，让开关在 dev 里整屏联动
+  // 而非只动计数卡片。
+  const narrowedScale = orgProjects.length > 0 ? projects.length / orgProjects.length : 1
+  // 聚合块（token/工具/技能/采纳明细等）按室权重缩放，与其它面板口径一致；叠加开关占比。
+  const aggScale = getMockOrgScale(opts) * narrowedScale
   const featureCount = projects.reduce((sum, p) => sum + p.featureCount, 0)
   const conversationCount = projects.reduce((sum, p) => sum + p.conversationCount, 0)
   const activeProjectCount = projects.filter((p) => p.conversationCount > 0).length
@@ -9252,36 +9523,13 @@ function makeMockProjectMode(range: TimeRange, opts?: OrgFilterOptions): Dashboa
       aggScale
     ),
     tools: deepScaleMockMetrics(
-      {
-        byTool: [
-          { tool: "git_workflow", count: 142 },
-          { tool: "manage_skill", count: 88 },
-          { tool: "manage_scheduler", count: 61 },
-          { tool: "db_query", count: 44 },
-          { tool: "create_pr", count: 33 }
-        ],
-        byToolAll: [
-          { tool: "git_workflow", count: 142 },
-          { tool: "execute", count: 120 },
-          { tool: "read_file", count: 96 },
-          { tool: "manage_skill", count: 88 }
-        ],
-        byToolFilteredAll: [
-          { tool: "git_workflow", count: 142 },
-          { tool: "manage_skill", count: 88 },
-          { tool: "manage_scheduler", count: 61 },
-          { tool: "db_query", count: 44 },
-          { tool: "create_pr", count: 33 }
-        ],
-        byToolAllFull: [
-          { tool: "git_workflow", count: 142 },
-          { tool: "execute", count: 120 },
-          { tool: "read_file", count: 96 },
-          { tool: "manage_skill", count: 88 }
-        ],
-        totalTools: 23,
-        totalToolCalls: 1842
-      },
+      parseToolUsageAggs(
+        makeMockToolUsageAggs(
+          MOCK_PROJECT_TOOL_USAGE,
+          128,
+          mockRangeHasToolUsageCounts(range) ? 117 : 0
+        )
+      ),
       aggScale
     ),
     analytics: buildProjectModeMockAnalytics(projects),
@@ -10466,7 +10714,9 @@ function makeMockAwardSkillContributions(skillNames: string[]): DashboardAwardSk
   const names = (Array.isArray(skillNames) ? skillNames : [])
     .map((s) => String(s || "").trim())
     .filter(Boolean)
-  const seedNames = names.length > 0 ? names : ["code-review", "spec-writer", "db-migrate"]
+  const seedNames = groupAwardSkillCandidates(
+    names.length > 0 ? names : ["code-review", "spec-writer", "db-migrate"]
+  ).map((entry) => entry.key)
   return seedNames.map((name) => {
     const seed = Array.from(name).reduce((acc, c) => acc + c.charCodeAt(0), 0)
     return {
@@ -11008,9 +11258,6 @@ function makeMockProjectModeProjectCommits(
 // Project Mode (Harness Board) dashboard
 // ─────────────────────────────────────────────────────────
 
-/** Event name written by HarnessStatusReporter for project snapshots. */
-const HARNESS_PROJECT_SNAPSHOT_EVENT = "harness.project.snapshot"
-
 /**
  * ES 默认 index.max_result_window。基于 from+size 的深翻页一旦 from+size 超过它就会
  * 报 "Result window is too large"，所以翻页深度必须按 pageSize 钳制在此窗口内。
@@ -11071,6 +11318,7 @@ interface ProjectModeToolCount {
 }
 
 interface ProjectModeToolUsage {
+  toolUsageCoverage?: DashboardToolUsageCoverage
   byTool: ProjectModeToolCount[]
   byToolAll: ProjectModeToolCount[]
   byToolFilteredAll: ProjectModeToolCount[]
@@ -11128,6 +11376,14 @@ interface ProjectModeProjectView {
   compatibilityStatus?: string
   /** Whether at least one feature session has loaded its complete system-constraint set. */
   systemConstraintEverLoadedSuccessfully?: boolean
+  /** 是否至少开启过一次托管运行。快照上的单调标记，终身事实，不随时间范围变化。 */
+  managedRunEverStarted?: boolean
+  /** 所选时间范围内开启的托管运行次数。与上面那个标记不同源，可能标记为真而次数为 0。 */
+  managedRunCount: number
+  /** 运行开销四项：工具调用、模型调用、Token、请求用户回答。与「对话数」同口径。 */
+  runCost: ProjectModeRunCost
+  /** false 表示「请求用户回答次数」这段时间里混着没该字段的老 trace，展示的是下限。 */
+  userInputRequestCountComplete: boolean
   featureCount: number
   conversationCount: number
   /** Forward-only count of main-Agent turns matching the technical-detail heuristic. */
@@ -11252,114 +11508,11 @@ function emptyStageBuckets(): DashboardStageBuckets {
   }
 }
 
-/** ES agg key for one bucket (shared between trace + code aggregations). */
-function stageBucketAggKey(bucket: StageBucket): string {
-  return `sb_${bucket}`
-}
-
-/**
- * Four named filter sub-aggs splitting code events by stage×skill, each wrapping
- * the same `perBucketAggs` (code_gen/code_adopt/pushed) so every bucket yields a
- * clean DashboardCodeStats via normalizeCodeStatsFromContainer — no cross-status
- * summing of adoption rates. `unattributed` is the complement of 进行中/已完成 and
- * so also captures events missing harnessNodeStatus (historical / unresolved).
- */
-function stageBucketCodeAggs(perBucketAggs: Record<string, unknown>): Record<string, unknown> {
-  const inProgress = { term: { "properties.harnessNodeStatus": STAGE_IN_PROGRESS_LABEL } }
-  const done = { term: { "properties.harnessNodeStatus": STAGE_DONE_LABEL } }
-  const hasSkill = { exists: { field: "properties.usedSkills" } }
-  return {
-    [stageBucketAggKey("plugin_constrained")]: {
-      filter: { bool: { filter: [inProgress, hasSkill] } },
-      aggs: perBucketAggs
-    },
-    // VibeCoding = 进行中但绕过插件（无 Skill）∪ 已完成后的自由产出。
-    [stageBucketAggKey("vibecoding")]: {
-      filter: {
-        bool: {
-          should: [{ bool: { filter: [inProgress], must_not: [hasSkill] } }, done],
-          minimum_should_match: 1
-        }
-      },
-      aggs: perBucketAggs
-    },
-    [stageBucketAggKey("unattributed")]: {
-      filter: {
-        bool: {
-          must_not: [
-            {
-              terms: { "properties.harnessNodeStatus": [STAGE_IN_PROGRESS_LABEL, STAGE_DONE_LABEL] }
-            }
-          ]
-        }
-      },
-      aggs: perBucketAggs
-    }
-  }
-}
-
-/**
- * Trace-side ES filter clause for one stage bucket（字段无 `properties.` 前缀，用于 trace 索引）。
- * 单一来源：既给 stageBucketTraceAggs 的分桶用，也给「查看对话」按桶过滤 trace 用。
- *  - 插件约束（Harness）= 进行中 + 有 Skill
- *  - VibeCoding        = 进行中但无 Skill ∪ 已完成（不论 Skill）
- *  - 未归因            = 其余状态 / 无状态
- */
-function stageBucketTraceFilterClause(bucket: StageBucket): Record<string, unknown> {
-  const inProgress = { term: { harnessNodeStatus: STAGE_IN_PROGRESS_LABEL } }
-  const done = { term: { harnessNodeStatus: STAGE_DONE_LABEL } }
-  const hasSkill = { exists: { field: "usedSkills" } }
-  switch (bucket) {
-    case "plugin_constrained":
-      return { bool: { filter: [inProgress, hasSkill] } }
-    case "vibecoding":
-      return {
-        bool: {
-          should: [{ bool: { filter: [inProgress], must_not: [hasSkill] } }, done],
-          minimum_should_match: 1
-        }
-      }
-    case "unattributed":
-      return {
-        bool: {
-          must_not: [{ terms: { harnessNodeStatus: [STAGE_IN_PROGRESS_LABEL, STAGE_DONE_LABEL] } }]
-        }
-      }
-  }
-}
-
-/** Trace-side mirror of stageBucketCodeAggs (conversation counts, no perBucketAggs). */
-function stageBucketTraceAggs(): Record<string, unknown> {
-  return {
-    [stageBucketAggKey("plugin_constrained")]: {
-      filter: stageBucketTraceFilterClause("plugin_constrained")
-    },
-    [stageBucketAggKey("vibecoding")]: {
-      filter: stageBucketTraceFilterClause("vibecoding")
-    },
-    [stageBucketAggKey("unattributed")]: {
-      filter: stageBucketTraceFilterClause("unattributed")
-    }
-  }
-}
-
 /** Parse a container holding `sb_*` filter buckets → per-bucket code stats. */
 function parseStageBucketCodeStats(container: unknown): Record<StageBucket, DashboardCodeStats> {
   const c = asRecord(container)
   const read = (bucket: StageBucket): DashboardCodeStats =>
     normalizeCodeStatsFromContainer(asRecord(c[stageBucketAggKey(bucket)]))
-  return {
-    plugin_constrained: read("plugin_constrained"),
-    vibecoding: read("vibecoding"),
-    unattributed: read("unattributed")
-  }
-}
-
-/** Parse a container holding `sb_*` filter buckets → per-bucket conversation counts. */
-function parseStageBucketConversations(container: unknown): Record<StageBucket, number> {
-  const c = asRecord(container)
-  const read = (bucket: StageBucket): number =>
-    asNumber(asRecord(c[stageBucketAggKey(bucket)]).doc_count)
   return {
     plugin_constrained: read("plugin_constrained"),
     vibecoding: read("vibecoding"),
@@ -11438,8 +11591,9 @@ interface DashboardProjectModeData {
   projectPage: ProjectModeProjectPageData
   projects: ProjectModeProjectView[]
   /**
-   * 「仅精益项目」开关下，精益项目 id 集超过 PROJECT_MODE_PROJECT_ID_LIMIT 被截断，
-   * 遥测汇总（对话/代码等）可能不完整。开关关闭时恒为 false。
+   * 收窄开关（「仅精益项目」/「仅本期新建」）下，命中的项目 id 集超过
+   * PROJECT_MODE_PROJECT_ID_LIMIT 被截断，遥测汇总（对话/代码等）可能不完整。
+   * 两个开关都关闭时恒为 false。名字沿用 leanTruncated 是为了不动已发布的 IPC 字段。
    */
   leanTruncated: boolean
   /**
@@ -11468,42 +11622,6 @@ function projectModeTraceFilters(
     { exists: { field: "harnessProjectId" } },
     ...(orgFilterClause ? [orgFilterClause] : [])
   ]
-}
-
-/**
- * Project-list conversation count = user-initiated main-Agent turns only.
- *
- * Child traces inherit `triggerSource=chat` from their root turn, so the active-trigger
- * filter alone would still count coordinator workers / workflow agents / task agents.
- * Documents written before multi-Agent observability have no traceKind or parent fields;
- * treat those legacy records as root turns for backwards-compatible time ranges.
- */
-function projectModeMainAgentConversationFilter(): Record<string, unknown> {
-  return {
-    bool: {
-      filter: [
-        buildChatTriggeredTraceFilter(),
-        {
-          bool: {
-            should: [
-              { term: { traceKind: "root" } },
-              { term: { "traceKind.keyword": "root" } },
-              {
-                bool: {
-                  must_not: [
-                    { exists: { field: "traceKind" } },
-                    { exists: { field: "parentTraceId" } },
-                    { exists: { field: "subagentKind" } }
-                  ]
-                }
-              }
-            ],
-            minimum_should_match: 1
-          }
-        }
-      ]
-    }
-  }
 }
 
 /** Build the `name@version` key used to merge adapter rows across snapshot + usage. */
@@ -11821,11 +11939,9 @@ function parseProjectModeSnapshotHit(hit: unknown): ProjectModeProjectView | nul
     creatorSapId: asOptionalString(props.creatorSapId) ?? asOptionalString(source.sapId),
     creatorYstId: asOptionalString(props.creatorYstId) ?? asOptionalString(source.ystId),
     creatorUserName: asOptionalString(props.creatorUserName) ?? asOptionalString(source.userName),
-    creatorOrgName: asOptionalString(props.creatorOrgName) ?? asOptionalString(source.orgName),
-    creatorUpperOrgLv0:
-      asOptionalString(props.creatorUpperOrgLv0) ?? asOptionalString(source.upperOrgLv0),
-    creatorUpperOrgLv1:
-      asOptionalString(props.creatorUpperOrgLv1) ?? asOptionalString(source.upperOrgLv1),
+    creatorOrgName: readOrgText(props.creatorOrgName) ?? readOrgText(source.orgName),
+    creatorUpperOrgLv0: readOrgText(props.creatorUpperOrgLv0) ?? readOrgText(source.upperOrgLv0),
+    creatorUpperOrgLv1: readOrgText(props.creatorUpperOrgLv1) ?? readOrgText(source.upperOrgLv1),
     lifecycleStatus: asOptionalString(props.lifecycleStatus),
     lifecycleCreatedAt: asOptionalString(props.lifecycleCreatedAt),
     lifecycleUpdatedAt: asOptionalString(props.lifecycleUpdatedAt),
@@ -11835,6 +11951,13 @@ function parseProjectModeSnapshotHit(hit: unknown): ProjectModeProjectView | nul
       typeof props.systemConstraintEverLoadedSuccessfully === "boolean"
         ? props.systemConstraintEverLoadedSuccessfully
         : undefined,
+    managedRunEverStarted:
+      typeof props.managedRunEverStarted === "boolean" ? props.managedRunEverStarted : undefined,
+    // 快照自己不带次数，等 enrichProjectModeProjectViews 按时间范围聚合事件填进来。
+    managedRunCount: 0,
+    // 同理：运行开销来自 trace 聚合，快照这一层拿不到，先给零值占位。
+    runCost: EMPTY_PROJECT_MODE_RUN_COST,
+    userInputRequestCountComplete: true,
     featureCount: asNumber(props.featureCount, features.length),
     conversationCount: 0,
     devStageConversationCount: 0,
@@ -11849,19 +11972,6 @@ function parseProjectModeSnapshotHit(hit: unknown): ProjectModeProjectView | nul
     // snapshot hit alone carries no per-turn attribution.
     stageBuckets: emptyStageBuckets()
   }
-}
-
-/** Snapshot-index filter: snapshot event + optional LV1 org（快照顶层带 upperOrgLv1）。 */
-function projectModeSnapshotFilters(
-  orgFilterClause: Record<string, unknown> | null,
-  fromLeanOnly = false
-): Record<string, unknown>[] {
-  return [
-    { term: { eventName: HARNESS_PROJECT_SNAPSHOT_EVENT } },
-    ...(orgFilterClause ? [orgFilterClause] : []),
-    // 「仅精益项目」全局开关：快照当前状态字段，self-healing，无需回填历史。
-    ...(fromLeanOnly ? [{ term: { "properties.projectFromLean": true } }] : [])
-  ]
 }
 
 type ProjectModeSnapshotAdapterCount = {
@@ -11936,6 +12046,7 @@ function buildProjectModeAdapterShare(
  * （每项目一条），故 cardinality / sum 即为去重后的口径。
  */
 async function fetchProjectModeSnapshotAggs(
+  range: TimeRange,
   opts: OrgFilterOptions | undefined,
   access: DashboardAccessContext
 ): Promise<ProjectModeSnapshotAggs> {
@@ -11946,7 +12057,12 @@ async function fetchProjectModeSnapshotAggs(
     size: 0,
     track_total_hits: false,
     query: {
-      bool: { filter: projectModeSnapshotFilters(orgFilterClause, opts?.fromLeanOnly === true) }
+      bool: {
+        filter: projectModeSnapshotFilters(
+          orgFilterClause,
+          ...projectModeSnapshotFilterArgs(opts, range)
+        )
+      }
     },
     aggs: {
       project_count: projectCountAgg,
@@ -12126,6 +12242,7 @@ function buildProjectModeCreatorOrgSearchFilter(
  * org filtering.
  */
 function buildProjectModeProjectListFilters(
+  range: TimeRange,
   options: ProjectModeProjectPageOptions | undefined,
   access: DashboardAccessContext
 ): {
@@ -12173,7 +12290,10 @@ function buildProjectModeProjectListFilters(
   const creatorOrgSearchFilter = buildProjectModeCreatorOrgSearchFilter(creatorOrgKeyword)
 
   const filters = [
-    ...projectModeSnapshotFilters(orgFilterClause, options?.fromLeanOnly === true),
+    ...projectModeSnapshotFilters(
+      orgFilterClause,
+      ...projectModeSnapshotFilterArgs(options, range)
+    ),
     ...statusFilter,
     ...keywordFilter,
     ...adapterFilter,
@@ -12185,6 +12305,7 @@ function buildProjectModeProjectListFilters(
 }
 
 async function fetchProjectModeProjectPageHits(
+  range: TimeRange,
   options: ProjectModeProjectPageOptions | undefined,
   access: DashboardAccessContext
 ): Promise<{
@@ -12200,7 +12321,7 @@ async function fetchProjectModeProjectPageHits(
   truncated: boolean
 }> {
   const { filters, status, keyword, adapterName, creatorKeyword, creatorOrgKeyword } =
-    buildProjectModeProjectListFilters(options, access)
+    buildProjectModeProjectListFilters(range, options, access)
   const pageSize = clampLimit(options?.pageSize, 10, 100)
   const maxPage = Math.max(1, Math.floor(ES_MAX_RESULT_WINDOW / pageSize))
   const page = clampLimit(options?.page, 1, maxPage)
@@ -12360,12 +12481,13 @@ async function fetchProjectModeExportSnapshotGroup(
  * totals are returned separately so a truncated workbook remains explicit.
  */
 async function fetchProjectModeExportSnapshotProjects(
+  range: TimeRange,
   opts: OrgFilterOptions | undefined,
   access: DashboardAccessContext
 ): Promise<ProjectModeExportSnapshotResult> {
   const filters = projectModeSnapshotFilters(
     buildProjectModeOrgFilter(opts, access),
-    opts?.fromLeanOnly === true
+    ...projectModeSnapshotFilterArgs(opts, range)
   )
   const active = await fetchProjectModeExportSnapshotGroup(
     filters,
@@ -12389,17 +12511,18 @@ async function fetchProjectModeExportSnapshotProjects(
 }
 
 /**
- * Resolve every matching project id only when the lean-project filter needs to
- * scope the full user analysis. This is intentionally independent from the
+ * Resolve every matching project id only when a narrowing filter（仅精益项目 / 仅本期新建）
+ * needs to scope the full user analysis. This is intentionally independent from the
  * 2,000-row project worksheet limit.
  */
 async function fetchProjectModeExportProjectIds(
+  range: TimeRange,
   opts: OrgFilterOptions | undefined,
   access: DashboardAccessContext
 ): Promise<string[]> {
   const filters = projectModeSnapshotFilters(
     buildProjectModeOrgFilter(opts, access),
-    opts?.fromLeanOnly === true
+    ...projectModeSnapshotFilterArgs(opts, range)
   )
   const projectIds: string[] = []
   const seenCursors = new Set<string>()
@@ -12562,7 +12685,7 @@ async function fetchProjectModeProjectPageMetricSorted(
   truncated: boolean
 }> {
   const { filters, status, keyword, adapterName, creatorKeyword, creatorOrgKeyword } =
-    buildProjectModeProjectListFilters(options, access)
+    buildProjectModeProjectListFilters(range, options, access)
   const pageSize = clampLimit(options?.pageSize, 10, 100)
   const { ids: allIds, truncated } = await fetchProjectModeFilteredProjectIds(filters)
   const total = allIds.length
@@ -12619,18 +12742,6 @@ function projectFeatureKey(projectId: string, featureSlug: string): string {
   return JSON.stringify([projectId, featureSlug])
 }
 
-/** Convert a `terms toolNames` bucket list into a {tool,count}[] ranking. */
-function parseToolCountBuckets(raw: unknown): ProjectModeToolCount[] {
-  if (!Array.isArray(raw)) return []
-  const result: ProjectModeToolCount[] = []
-  for (const bucket of raw) {
-    const b = asRecord(bucket)
-    const tool = asString(b.key)
-    if (tool) result.push({ tool, count: asNumber(b.doc_count) })
-  }
-  return result
-}
-
 function parseProjectModeTopUserBuckets(raw: unknown): ProjectModeTopUser[] {
   if (!Array.isArray(raw)) return []
   const result: ProjectModeTopUser[] = []
@@ -12648,9 +12759,9 @@ function parseProjectModeTopUserBuckets(raw: unknown): ProjectModeTopUser[] {
     const ystId = asOptionalString(source.ystId)
     const userName = asString(source.userName, sapId)
     const orgName = formatProjectModeOrgName(
-      asOptionalString(source.orgName),
-      asOptionalString(source.upperOrgLv1),
-      asOptionalString(source.upperOrgLv0)
+      readOrgText(source.orgName),
+      readOrgText(source.upperOrgLv1),
+      readOrgText(source.upperOrgLv0)
     )
     result.push({
       sapId,
@@ -12721,34 +12832,31 @@ async function fetchProjectModeUsage(
           }
         }
       },
-      total_tools: { cardinality: { field: "toolNames" } },
-      tool_call_count: { value_count: { field: "toolNames" } },
-      by_tool: { terms: { field: "toolNames", size: 20, exclude: FILTERED_TOOL_EXCLUDES } },
-      by_tool_filtered_all: {
-        terms: { field: "toolNames", size: 1000, exclude: FILTERED_TOOL_EXCLUDES }
-      },
-      by_tool_all: { terms: { field: "toolNames", size: 20 } },
-      by_tool_all_full: { terms: { field: "toolNames", size: 1000 } },
+      ...buildToolUsageAggs(FILTERED_TOOL_EXCLUDES),
+      // 插件维度的对话数与三桶同口径：主动触发的主 Agent root trace，与项目列表
+      // 的「对话数」一致。不收进 filter 的话，一次用户轮次派出的每个子代理都会
+      // 各记一次对话，插件之间的对比就成了「谁更爱派子代理」。
       by_adapter: {
         terms: { field: "harnessAdapterName", size: 200 },
         aggs: {
           by_version: {
             terms: { field: "harnessAdapterVersion", size: 50 },
-            aggs: stageBucketTraceAggs()
+            aggs: mainAgentConversationAggs(stageBucketTraceAggs())
           },
-          ...stageBucketTraceAggs()
+          ...mainAgentConversationAggs(stageBucketTraceAggs())
         }
       }
     }
   }
-  const raw = (await esQuery(getEsIndex("trace"), body)) as EsSearchResponse
+  const raw = (await queryToolUsage(body)) as EsSearchResponse
   const aggs = asRecord(raw.aggregations)
 
   const totalInputTokens = asNumber(asRecord(aggs.total_input_tokens).value)
   const totalOutputTokens = asNumber(asRecord(aggs.total_output_tokens).value)
-  const totalTokens = asNumber(
+  const totalTokens = resolveTokenTotal(
     asRecord(aggs.total_tokens).value,
-    totalInputTokens + totalOutputTokens
+    totalInputTokens,
+    totalOutputTokens
   )
 
   const adapters = new Map<string, ProjectModeAdapterView>()
@@ -12761,28 +12869,30 @@ async function fetchProjectModeUsage(
       const rawVersions = asRecord(b.by_version).buckets
       const versions = Array.isArray(rawVersions) ? rawVersions : []
       if (versions.length === 0) {
+        const mainAgent = readMainAgentConversations(b)
         adapters.set(adapterKey(name), {
           name,
           version: undefined,
           projectCount: 0,
           featureCount: 0,
-          conversationCount: asNumber(b.doc_count),
+          conversationCount: asNumber(mainAgent.doc_count),
           codeStats: null,
-          stageBuckets: buildStageBuckets(parseStageBucketConversations(b), undefined)
+          stageBuckets: buildStageBuckets(parseStageBucketConversations(mainAgent), undefined)
         })
         continue
       }
       for (const vb of versions) {
         const v = asRecord(vb)
         const version = asOptionalString(v.key)
+        const mainAgent = readMainAgentConversations(v)
         adapters.set(adapterKey(name, version), {
           name,
           version,
           projectCount: 0,
           featureCount: 0,
-          conversationCount: asNumber(v.doc_count),
+          conversationCount: asNumber(mainAgent.doc_count),
           codeStats: null,
-          stageBuckets: buildStageBuckets(parseStageBucketConversations(v), undefined)
+          stageBuckets: buildStageBuckets(parseStageBucketConversations(mainAgent), undefined)
         })
       }
     }
@@ -12804,14 +12914,7 @@ async function fetchProjectModeUsage(
     distinctSkillCount: topSkills.length || asNumber(asRecord(aggs.distinct_skills).value),
     topSkills,
     topUsers: parseProjectModeTopUserBuckets(asRecord(aggs.top_users).buckets),
-    tools: {
-      byTool: parseToolCountBuckets(asRecord(aggs.by_tool).buckets),
-      byToolAll: parseToolCountBuckets(asRecord(aggs.by_tool_all).buckets),
-      byToolFilteredAll: parseToolCountBuckets(asRecord(aggs.by_tool_filtered_all).buckets),
-      byToolAllFull: parseToolCountBuckets(asRecord(aggs.by_tool_all_full).buckets),
-      totalTools: asNumber(asRecord(aggs.total_tools).value),
-      totalToolCalls: asNumber(asRecord(aggs.tool_call_count).value)
-    },
+    tools: parseToolUsageAggs(aggs),
     adapters
   }
 }
@@ -12910,6 +13013,7 @@ async function fetchProjectModePageUsage(
   perProjectDevAssociatedFeatures: Map<string, number>
   perProjectSkills: Map<string, ProjectModeSkillCount[]>
   perProjectStageConversations: Map<string, Record<StageBucket, number>>
+  perProjectRunCost: Map<string, ProjectModeRunCost>
 }> {
   const includeSuspectedTechnicalDetail = isDashboardSuspectedTechnicalDetailAllowed(access)
   const perProject = new Map<string, number>()
@@ -12918,6 +13022,7 @@ async function fetchProjectModePageUsage(
   const perProjectDevAssociatedFeatures = new Map<string, number>()
   const perProjectSkills = new Map<string, ProjectModeSkillCount[]>()
   const perProjectStageConversations = new Map<string, Record<StageBucket, number>>()
+  const perProjectRunCost = new Map<string, ProjectModeRunCost>()
   if (projectIds.length === 0) {
     return {
       perProject,
@@ -12925,7 +13030,8 @@ async function fetchProjectModePageUsage(
       perProjectDevStage,
       perProjectDevAssociatedFeatures,
       perProjectSkills,
-      perProjectStageConversations
+      perProjectStageConversations,
+      perProjectRunCost
     }
   }
 
@@ -12944,37 +13050,36 @@ async function fetchProjectModePageUsage(
       by_project: {
         terms: { field: "harnessProjectId", size: Math.max(1, projectIds.length) },
         aggs: {
-          // 对话数、疑似技术细节补充、DEV 阶段轮次数与 DEV 关联特性数共用同一口径：
-          // 主动触发的主 Agent root trace。DEV 两项此前挂在 by_project 下（与该
-          // filter 平级），把定时任务、心跳等后台触发和子 Agent trace 一并计入了，
-          // 与同一行的「对话数」对不上；现在一起收进 filter 内。
-          main_agent_conversations: {
-            filter: projectModeMainAgentConversationFilter(),
-            aggs: {
-              ...(includeSuspectedTechnicalDetail
-                ? {
-                    suspected_technical_detail_supplements: {
-                      filter: { term: { suspectedTechnicalDetailSupplement: true } }
-                    }
+          // 对话数、疑似技术细节补充、DEV 阶段轮次数、DEV 关联特性数与 stage×skill
+          // 三桶共用同一口径：主动触发的主 Agent root trace。这几项此前挂在
+          // by_project 下（与该 filter 平级），把定时任务、心跳等后台触发和子 Agent
+          // trace 一并计入了，与同一行的「对话数」对不上；现在一起收进 filter 内。
+          // 三桶尤其明显：一次用户轮次派出 10 个 Task 子代理就会被记成 11 次对话，
+          // 让「VibeCoding 对话远多于 Harness」看起来像结论，其实是口径差。
+          ...buildProjectModeConversationAndCostAggs({
+            ...stageBucketTraceAggs(),
+            ...(includeSuspectedTechnicalDetail
+              ? {
+                  suspected_technical_detail_supplements: {
+                    filter: { term: { suspectedTechnicalDetailSupplement: true } }
                   }
-                : {}),
-              by_node: { terms: { field: "harnessNodeName", size: 100 } },
-              by_feature: {
-                terms: {
-                  field: "harnessFeatureSlug",
-                  size: PROJECT_MODE_FEATURE_SLUG_LIMIT
-                },
-                aggs: {
-                  by_node: {
-                    terms: { field: "harnessNodeName", size: PROJECT_MODE_FEATURE_SLUG_LIMIT }
-                  }
+                }
+              : {}),
+            by_node: { terms: { field: "harnessNodeName", size: 100 } },
+            by_feature: {
+              terms: {
+                field: "harnessFeatureSlug",
+                size: PROJECT_MODE_FEATURE_SLUG_LIMIT
+              },
+              aggs: {
+                by_node: {
+                  terms: { field: "harnessNodeName", size: PROJECT_MODE_FEATURE_SLUG_LIMIT }
                 }
               }
             }
-          },
+          }),
           skills: { terms: { field: "usedSkills", size: 100 } },
-          skill_source: { terms: { field: "skillSource", size: 100 } },
-          ...stageBucketTraceAggs()
+          skill_source: { terms: { field: "skillSource", size: 100 } }
         }
       }
     }
@@ -12988,7 +13093,8 @@ async function fetchProjectModePageUsage(
       perProjectDevStage,
       perProjectDevAssociatedFeatures,
       perProjectSkills,
-      perProjectStageConversations
+      perProjectStageConversations,
+      perProjectRunCost
     }
   }
 
@@ -12996,7 +13102,7 @@ async function fetchProjectModePageUsage(
     const b = asRecord(bucket)
     const key = asString(b.key)
     if (!key) continue
-    const mainAgentConversations = asRecord(b.main_agent_conversations)
+    const mainAgentConversations = readMainAgentConversations(b)
     perProject.set(key, asNumber(mainAgentConversations.doc_count))
     if (includeSuspectedTechnicalDetail) {
       perProjectSuspectedTechnicalDetail.set(
@@ -13016,7 +13122,8 @@ async function fetchProjectModePageUsage(
       key,
       combineSkillCountBuckets(asRecord(b.skills).buckets, asRecord(b.skill_source).buckets, 10)
     )
-    perProjectStageConversations.set(key, parseStageBucketConversations(b))
+    perProjectStageConversations.set(key, parseStageBucketConversations(mainAgentConversations))
+    perProjectRunCost.set(key, parseProjectModeRunCost(b))
   }
 
   return {
@@ -13025,7 +13132,8 @@ async function fetchProjectModePageUsage(
     perProjectDevStage,
     perProjectDevAssociatedFeatures,
     perProjectSkills,
-    perProjectStageConversations
+    perProjectStageConversations,
+    perProjectRunCost
   }
 }
 
@@ -13337,6 +13445,7 @@ async function fetchProjectModeProjectMetrics(
   byProjectStage: Map<string, Record<StageBucket, DashboardCodeStats>>
   operationalByProject: Map<string, ProjectModeOperationalStats>
   operationalByFeature: Map<string, ProjectModeOperationalStats>
+  managedRunCountByProject: Map<string, number>
 }> {
   if (projectIds.length === 0) {
     return {
@@ -13344,7 +13453,8 @@ async function fetchProjectModeProjectMetrics(
       byFeature: new Map(),
       byProjectStage: new Map(),
       operationalByProject: new Map(),
-      operationalByFeature: new Map()
+      operationalByFeature: new Map(),
+      managedRunCountByProject: new Map()
     }
   }
 
@@ -13372,6 +13482,11 @@ async function fetchProjectModeProjectMetrics(
     { terms: { "properties.harnessProjectId": scopedProjectIds } },
     ...extraFilters
   ]
+  const managedRunFilters = buildProjectModeManagedRunFilters(
+    scopedProjectIds,
+    timeRangeFilter("eventTime", range),
+    extraFilters
+  )
   const projectOperationalAggs = buildProjectModeOperationalAggs(constraintFilters, hookFilters, {
     dedupeConstraintTraces: true,
     constraintFileLimit: 20,
@@ -13390,7 +13505,8 @@ async function fetchProjectModeProjectMetrics(
           { bool: { filter: codeGenFilters } },
           { bool: { filter: codeAdoptFilters } },
           { bool: { filter: constraintFilters } },
-          { bool: { filter: hookFilters } }
+          { bool: { filter: hookFilters } },
+          { bool: { filter: managedRunFilters } }
         ],
         minimum_should_match: 1
       }
@@ -13401,6 +13517,7 @@ async function fetchProjectModeProjectMetrics(
         aggs: {
           ...perBucketAggs,
           ...projectOperationalAggs,
+          ...buildProjectModeManagedRunAggs(managedRunFilters),
           by_feature: {
             terms: {
               field: "properties.harnessFeatureSlug",
@@ -13420,6 +13537,7 @@ async function fetchProjectModeProjectMetrics(
   const byProjectStage = new Map<string, Record<StageBucket, DashboardCodeStats>>()
   const operationalByProject = new Map<string, ProjectModeOperationalStats>()
   const operationalByFeature = new Map<string, ProjectModeOperationalStats>()
+  const managedRunCountByProject = new Map<string, number>()
   if (Array.isArray(projectBuckets)) {
     for (const bucket of projectBuckets) {
       const b = asRecord(bucket)
@@ -13433,6 +13551,7 @@ async function fetchProjectModeProjectMetrics(
         byProjectStage.set(projectId, parseStageBucketCodeStats(b))
       }
       operationalByProject.set(projectId, parseProjectModeOperationalStats(b))
+      managedRunCountByProject.set(projectId, parseProjectModeManagedRunCount(b))
       const featureBuckets = asRecord(b.by_feature).buckets
       if (!Array.isArray(featureBuckets)) continue
       for (const featureBucket of featureBuckets) {
@@ -13455,7 +13574,8 @@ async function fetchProjectModeProjectMetrics(
     byFeature,
     byProjectStage,
     operationalByProject,
-    operationalByFeature
+    operationalByFeature,
+    managedRunCountByProject
   }
 }
 
@@ -13490,6 +13610,14 @@ async function enrichProjectModeProjectViews(
     systemConstraintReads:
       code.operationalByProject.get(project.projectId)?.systemConstraintReads ?? null,
     hookExecutions: code.operationalByProject.get(project.projectId)?.hookExecutions ?? null,
+    managedRunCount: code.managedRunCountByProject.get(project.projectId) ?? 0,
+    runCost: usage.perProjectRunCost.get(project.projectId) ?? EMPTY_PROJECT_MODE_RUN_COST,
+    // 「请求用户回答次数」是后加的字段，老 trace 上没有。轮次数比带字段的文档数多，说明
+    // 这段时间混着老数据，展示的是下限而不是真值，界面要标出来。
+    userInputRequestCountComplete: isUserInputRequestCountComplete(
+      usage.perProjectRunCost.get(project.projectId) ?? EMPTY_PROJECT_MODE_RUN_COST,
+      usage.perProject.get(project.projectId) ?? 0
+    ),
     stageBuckets: buildStageBuckets(
       usage.perProjectStageConversations.get(project.projectId),
       code.byProjectStage.get(project.projectId)
@@ -13521,7 +13649,7 @@ async function fetchProjectModeProjectPage(
   // sorts (active tab only) rank the full set first, then page.
   const sliced = metricSort
     ? await fetchProjectModeProjectPageMetricSorted(range, options, access, sortBy, sortOrder)
-    : await fetchProjectModeProjectPageHits(options, access)
+    : await fetchProjectModeProjectPageHits(range, options, access)
   return {
     ...sliced,
     sortBy,
@@ -13539,15 +13667,16 @@ async function fetchProjectModeExportData(
   opts?: OrgFilterOptions
 ): Promise<ProjectModeExportData> {
   const access = requireDashboardProjectModeAccess()
-  const snapshotResult = await fetchProjectModeExportSnapshotProjects(opts, access)
+  const snapshotResult = await fetchProjectModeExportSnapshotProjects(range, opts, access)
   const snapshots = snapshotResult.projects
-  const leanProjectIds =
-    opts?.fromLeanOnly === true
-      ? snapshotResult.truncated
-        ? await fetchProjectModeExportProjectIds(opts, access)
-        : snapshots.map((project) => project.projectId)
-      : undefined
-  const usersPromise = fetchProjectModeExportUsers(range, opts, access, leanProjectIds)
+  // 两个收窄开关任一打开，用户分析表就得跟着圈到同一批项目上，否则导出里「项目」表已经
+  // 筛过、「用户」表还是全量，两张表对不上。
+  const scopedProjectIds = projectModeNarrowingEnabled(opts)
+    ? snapshotResult.truncated
+      ? await fetchProjectModeExportProjectIds(range, opts, access)
+      : snapshots.map((project) => project.projectId)
+    : undefined
+  const usersPromise = fetchProjectModeExportUsers(range, opts, access, scopedProjectIds)
   const projectsPromise = (async (): Promise<ProjectModeProjectView[]> => {
     const projects: ProjectModeProjectView[] = []
     for (
@@ -13851,7 +13980,11 @@ async function fetchDashboardEfficiency(
     compute: buildComputeEfficiency({
       totalInputTokens: asNumber(asRecord(traceAggs.total_input_tokens).value),
       totalOutputTokens: asNumber(asRecord(traceAggs.total_output_tokens).value),
-      totalTokens: asNumber(asRecord(traceAggs.total_tokens).value),
+      totalTokens: resolveTokenTotal(
+        asRecord(traceAggs.total_tokens).value,
+        asNumber(asRecord(traceAggs.total_input_tokens).value),
+        asNumber(asRecord(traceAggs.total_output_tokens).value)
+      ),
       cacheReadTokens: asNumber(asRecord(traceAggs.cache_read_tokens).value),
       pushedAdoptedLines: overall.pushedAdoptedLines,
       traceCount: asNumber(asRecord(traceAggs.trace_count).value),
@@ -13871,25 +14004,30 @@ async function fetchProjectMode(
 ): Promise<DashboardProjectModeData> {
   const access = requireDashboardProjectModeAccess()
 
-  // 「仅精益项目」：先从自愈快照解析精益项目 id 集（projectFromLean 的唯一真源），仅用于圈定
-  // 遥测汇总（trace / code）；快照聚合与项目列表各自按 projectFromLean term 直接过滤，无需 id 集。
+  // 「仅精益项目」/「仅本期新建」：这两个条件都只存在于自愈快照上（projectFromLean、
+  // lifecycleCreatedAt），trace / code 事件里没有，所以先把命中的项目 id 集解析出来，用于圈定
+  // 遥测汇总；快照聚合与项目列表自己就在快照上，直接按条件过滤即可，不需要 id 集。两个开关
+  // 同时打开时，这里拿到的天然是交集——条件都拼在同一个 filter 数组里。
   // id 集超过 PROJECT_MODE_PROJECT_ID_LIMIT 时截断，leanTruncated 透传给前端做守卫提示。空集表示
-  // 无精益项目 → 遥测 terms IN [] 命中 0 条，汇总为 0（语义正确）。
-  let leanProjectIds: string[] | undefined
+  // 没有项目命中 → 遥测 terms IN [] 命中 0 条，汇总为 0（语义正确）。
+  let scopedProjectIds: string[] | undefined
   let leanTruncated = false
-  if (opts?.fromLeanOnly === true) {
+  if (projectModeNarrowingEnabled(opts)) {
     const resolved = await fetchProjectModeFilteredProjectIds(
-      projectModeSnapshotFilters(buildProjectModeOrgFilter(opts, access), true)
+      projectModeSnapshotFilters(
+        buildProjectModeOrgFilter(opts, access),
+        ...projectModeSnapshotFilterArgs(opts, range)
+      )
     )
-    leanProjectIds = resolved.ids
+    scopedProjectIds = resolved.ids
     leanTruncated = resolved.truncated
   }
 
   // 总览与列表解耦：快照口径走 size:0 聚合、不回拉文档；列表第一页走 ES 分页。四条并行。
   const [snap, usage, code, projectPage] = await Promise.all([
-    fetchProjectModeSnapshotAggs(opts, access),
-    fetchProjectModeUsage(range, opts, access, leanProjectIds),
-    fetchProjectModeAggregateCodeStats(range, opts, access, leanProjectIds),
+    fetchProjectModeSnapshotAggs(range, opts, access),
+    fetchProjectModeUsage(range, opts, access, scopedProjectIds),
+    fetchProjectModeAggregateCodeStats(range, opts, access, scopedProjectIds),
     fetchProjectModeProjectPage(
       range,
       {
@@ -13973,7 +14111,7 @@ async function fetchProjectMode(
 
 /**
  * 「生产效能代码指标」按 source 局部换数：只重算两个子模块的整体 / Skill 代码采纳，
- * 不碰项目列表、对话数等其它维度。沿用 fetchProjectMode 的 org / 精益口径，叠加 source。
+ * 不碰项目列表、对话数等其它维度。沿用 fetchProjectMode 的 org / 精益 / 新建口径，叠加 source。
  */
 async function fetchProjectModeCodeStatsBySource(
   range: TimeRange,
@@ -13981,16 +14119,63 @@ async function fetchProjectModeCodeStatsBySource(
   source: string | null | undefined
 ): Promise<{ codeStats: DashboardCodeStats; skillCodeStats: DashboardCodeStats }> {
   const access = requireDashboardProjectModeAccess()
-  // 与 fetchProjectMode 一致：仅精益项目时先解析精益项目 id 集，用于圈定 code 事件。
-  let leanProjectIds: string[] | undefined
-  if (opts?.fromLeanOnly === true) {
+  // 与 fetchProjectMode 一致：开关收窄时先解析命中的项目 id 集，用于圈定 code 事件。
+  // 这里换的是同一块数，口径必须跟着走，否则切 source 会把开关的效果抹掉。
+  let scopedProjectIds: string[] | undefined
+  if (projectModeNarrowingEnabled(opts)) {
     const resolved = await fetchProjectModeFilteredProjectIds(
-      projectModeSnapshotFilters(buildProjectModeOrgFilter(opts, access), true)
+      projectModeSnapshotFilters(
+        buildProjectModeOrgFilter(opts, access),
+        ...projectModeSnapshotFilterArgs(opts, range)
+      )
     )
-    leanProjectIds = resolved.ids
+    scopedProjectIds = resolved.ids
   }
-  const code = await fetchProjectModeAggregateCodeStats(range, opts, access, leanProjectIds, source)
+  const code = await fetchProjectModeAggregateCodeStats(
+    range,
+    opts,
+    access,
+    scopedProjectIds,
+    source
+  )
   return { codeStats: code.overall, skillCodeStats: code.skillOverall }
+}
+
+/** 知识文档入库率。只看时间范围和室，不受「来源」「仅精益项目」「仅本期新建」影响。 */
+async function fetchKnowledgeCommitRate(
+  range: TimeRange,
+  opts: OrgFilterOptions | undefined
+): Promise<DashboardKnowledgeCommitRate> {
+  const access = requireDashboardProjectModeAccess()
+  const url = getKnowledgeCommitRateUrl()
+  if (!url) throw new Error("未配置知识文档入库率接口地址（VITE_KNOWLEDGE_COMMIT_RATE_URL）")
+  const scope = resolveKnowledgeCommitRateScope({
+    requestedRooms: normalizeUpperOrgLv1List(opts?.upperOrgLv1),
+    admin: isDashboardProjectModeAdmin(access),
+    ownRoom: access.upperOrgLv1,
+    unclassifiedRoom: DASHBOARD_UNCLASSIFIED_ORG
+  })
+  const startTime = formatKnowledgeApiTime(range.from)
+  const endTime = formatKnowledgeApiTime(range.to)
+  const signal = getDashboardRequestSignal()
+  return computeKnowledgeCommitRate(scope, getKnowledgeRoomOrgIds, (orgId) =>
+    requestKnowledgeCommitRate(url, { orgId, startTime, endTime }, signal)
+  )
+}
+
+/** 开发环境连不上内网：范围规则和室编号映射照常走，只把接口换成假值。 */
+function fetchMockKnowledgeCommitRate(
+  opts: OrgFilterOptions | undefined
+): Promise<DashboardKnowledgeCommitRate> {
+  const scope = resolveKnowledgeCommitRateScope({
+    requestedRooms: normalizeUpperOrgLv1List(opts?.upperOrgLv1),
+    admin: true,
+    ownRoom: "",
+    unclassifiedRoom: DASHBOARD_UNCLASSIFIED_ORG
+  })
+  return computeKnowledgeCommitRate(scope, getKnowledgeRoomOrgIds, async (orgId) =>
+    mockKnowledgeCommitRate(orgId)
+  )
 }
 
 interface ProjectModeTracesOptions {
@@ -14043,7 +14228,11 @@ async function fetchProjectModeTraces(
     ...(normalizedNodeName ? [harnessNodeNameTraceFilterClause(normalizedNodeName)] : []),
     ...(normalizedNodeStatus ? [{ term: { harnessNodeStatus: normalizedNodeStatus } }] : []),
     ...(stageBucket ? [stageBucketTraceFilterClause(stageBucket)] : []),
-    ...(triggerScope === "active" ? [buildChatTriggeredTraceFilter()] : [])
+    // "active" must list exactly the conversations the panel counted, so it uses
+    // the full main-Agent filter (chat-triggered *and* root) rather than the
+    // trigger half alone — otherwise clicking through a bucket showing 3 opened
+    // a list of 38, most of them sub-agent traces. "all" stays unscoped.
+    ...(triggerScope === "active" ? [projectModeMainAgentConversationFilter()] : [])
   ]
 
   if (traceViewMode === "thread") {
@@ -14301,6 +14490,58 @@ async function fetchProjectModeOperationalDetails(
     fetchAllProjectModeHookEvents(hookFilters)
   ])
   return { constraintFiles, hookEvents }
+}
+
+/**
+ * 单项目的阶段耗时分析，供项目列表的二级弹窗使用。
+ *
+ * 走 trace 索引而不是 event 索引：耗时、Token、模型调用都在 trace 上。
+ * 主 Agent 过滤仅用于轮次和耗时；运行开销包含同范围所有主、子 trace。
+ */
+async function fetchProjectModeStageAnalysis(
+  projectId: string,
+  range: TimeRange,
+  opts?: OrgFilterOptions
+): Promise<ProjectModeStageAnalysis> {
+  const access = requireDashboardProjectModeAccess()
+  const normalizedProjectId = typeof projectId === "string" ? projectId.trim() : ""
+  if (!normalizedProjectId) {
+    return { projectId: "", total: emptyProjectModeStageMetrics(), stages: [] }
+  }
+
+  const orgFilterClause = buildProjectModeOrgFilter(opts, access)
+  const body = {
+    size: 0,
+    query: {
+      bool: {
+        filter: [
+          timeRangeFilter("startedAt", range),
+          { term: { harnessProjectId: normalizedProjectId } },
+          ...(orgFilterClause ? [orgFilterClause] : [])
+        ]
+      }
+    },
+    aggs: buildProjectModeStageAnalysisAggs(UNATTRIBUTED_NODE_NAME, PROJECT_MODE_FEATURE_SLUG_LIMIT)
+  }
+  const execute = async (usage: boolean, duration: boolean): Promise<EsSearchResponse> => {
+    try {
+      return (await esQuery(getEsIndex("trace"), {
+        ...body,
+        aggs: buildProjectModeStageAnalysisAggs(
+          UNATTRIBUTED_NODE_NAME,
+          PROJECT_MODE_FEATURE_SLUG_LIMIT,
+          usage,
+          duration
+        )
+      })) as EsSearchResponse
+    } catch (error) {
+      if (duration && isNestedMappingError(error, "stageDuration")) return execute(usage, false)
+      if (usage && isNestedMappingError(error, "stageUsage")) return execute(false, duration)
+      throw error
+    }
+  }
+  const raw = await execute(true, true)
+  return parseProjectModeStageAnalysis(normalizedProjectId, asRecord(raw.aggregations))
 }
 
 /**
@@ -14564,6 +14805,11 @@ async function fetchProjectModeFeatureNodes(
           timeRangeFilter("startedAt", range),
           { term: { harnessProjectId: normalizedProjectId } },
           { term: { harnessFeatureSlug: normalizedFeatureSlug } },
+          // 阶段细分里的每一个对话数（阶段总数、状态细分、stage×skill 三桶）都走
+          // 项目列表「对话数」的口径：主动触发的主 Agent root trace。少了这条，
+          // 子代理 trace 会各记一次对话，同一行的「3 对话 523 行 vs 38 对话 296 行」
+          // 读起来就像 VibeCoding 压倒性占优，其实分母里多的全是子代理。
+          projectModeMainAgentConversationFilter(),
           ...(traceAccessFilter ? [traceAccessFilter] : [])
         ]
       }
@@ -14767,9 +15013,14 @@ async function fetchPluginAggregate(
         }
       },
       aggs: {
-        conversation_count: { value_count: { field: "traceId" } },
-        project_count: { cardinality: { field: "harnessProjectId" } },
-        ...traceNodeStatusAgg()
+        // 对话数与阶段细分同项目列表口径：主动触发的主 Agent root trace。
+        // project_count 留在外层不收窄：它回答「这个插件被多少项目用过」，
+        // 按项目存在性算，不该受轮次归属影响。
+        ...mainAgentConversationAggs({
+          conversation_count: { value_count: { field: "traceId" } },
+          ...traceNodeStatusAgg()
+        }),
+        project_count: { cardinality: { field: "harnessProjectId" } }
       }
     }) as Promise<EsSearchResponse>,
     fetchProjectModeCodeAggs(null, range, (perBucketAggs) => perBucketAggs, adapterEventFilters),
@@ -14777,9 +15028,10 @@ async function fetchPluginAggregate(
   ])
 
   const traceAggs = asRecord(traceRaw.aggregations)
-  const conversationCount = asNumber(asRecord(traceAggs.conversation_count).value)
+  const mainAgentTraceAggs = readMainAgentConversations(traceAggs)
+  const conversationCount = asNumber(asRecord(mainAgentTraceAggs.conversation_count).value)
   const projectCount = asNumber(asRecord(traceAggs.project_count).value)
-  const traceParsed = parseTraceNodeBuckets(traceAggs)
+  const traceParsed = parseTraceNodeBuckets(mainAgentTraceAggs)
   const codeStats = overallCodeRaw ? normalizeCodeStatsFromAggs(overallCodeRaw) : null
   const codeParsed = parseCodeNodeBuckets(asRecord(nodeCodeRaw).aggregations)
   const byNode = buildFeatureNodeBreakdown(traceParsed, codeParsed)
@@ -15007,6 +15259,32 @@ export function registerDashboardHandlers(_ipcMain: typeof ipcMain): void {
 
   registerLatestDashboardHandler(
     _ipcMain,
+    "dashboard:projectMetricGroupOptions",
+    async (_, filters: Pick<ProjectMetricFilters, "range" | "upperOrgLv1">) => {
+      if (import.meta.env.DEV) {
+        return { success: true, data: makeMockProjectMetricGroupOptions(filters) }
+      }
+      try {
+        const access = requireDashboardProjectModeAccess()
+        return {
+          success: true,
+          data: await fetchProjectMetricGroupOptions(filters, {
+            query: esQuery,
+            eventIndex: getEsIndex("event"),
+            traceIndex: getEsIndex("trace"),
+            factIndex: getEsIndex("projectFact"),
+            allowedRoomNames: projectMetricAllowedRoomNames(access)
+          })
+        }
+      } catch (e) {
+        logDashboardRequestError("projectMetricGroupOptions", e)
+        return { success: false, error: e instanceof Error ? e.message : String(e) }
+      }
+    }
+  )
+
+  registerLatestDashboardHandler(
+    _ipcMain,
     "dashboard:projectMetricSummary",
     async (_, filters: ProjectMetricFilters) => {
       if (import.meta.env.DEV) {
@@ -15080,7 +15358,11 @@ export function registerDashboardHandlers(_ipcMain: typeof ipcMain): void {
         logDashboardRequestError("projectMetricProjects", e)
         return { success: false, error: e instanceof Error ? e.message : String(e) }
       }
-    }
+    },
+    (_filters, options) =>
+      options?.exportAll
+        ? "dashboard:projectMetricProjects:export"
+        : "dashboard:projectMetricProjects:list"
   )
 
   registerLatestDashboardHandler(
@@ -15099,6 +15381,22 @@ export function registerDashboardHandlers(_ipcMain: typeof ipcMain): void {
         return { success: true, data: await fetchProjectModeCodeStatsBySource(range, opts, source) }
       } catch (e) {
         logDashboardRequestError("projectModeCodeStats", e)
+        return { success: false, error: e instanceof Error ? e.message : String(e) }
+      }
+    }
+  )
+
+  registerLatestDashboardHandler(
+    _ipcMain,
+    "dashboard:knowledgeCommitRate",
+    async (_, range: TimeRange, opts: OrgFilterOptions | undefined) => {
+      try {
+        const data = import.meta.env.DEV
+          ? await fetchMockKnowledgeCommitRate(opts)
+          : await fetchKnowledgeCommitRate(range, opts)
+        return { success: true, data }
+      } catch (e) {
+        logDashboardRequestError("knowledgeCommitRate", e)
         return { success: false, error: e instanceof Error ? e.message : String(e) }
       }
     }
@@ -15171,6 +15469,24 @@ export function registerDashboardHandlers(_ipcMain: typeof ipcMain): void {
     },
     (projectId, featureSlug) =>
       `dashboard:projectModeFeatureNodes:${projectId.slice(0, 128)}:${featureSlug.slice(0, 128)}`
+  )
+
+  registerLatestDashboardHandler(
+    _ipcMain,
+    "dashboard:projectModeStageAnalysis",
+    async (_, projectId: string, range: TimeRange, opts?: OrgFilterOptions) => {
+      if (import.meta.env.DEV) {
+        return { success: true, data: makeMockProjectModeStageAnalysis(projectId ?? "") }
+      }
+      try {
+        requireDashboardProjectModeAccess()
+        return { success: true, data: await fetchProjectModeStageAnalysis(projectId, range, opts) }
+      } catch (e) {
+        logDashboardRequestError("projectModeStageAnalysis", e)
+        return { success: false, error: e instanceof Error ? e.message : String(e) }
+      }
+    },
+    (projectId) => `dashboard:projectModeStageAnalysis:${String(projectId ?? "").slice(0, 128)}`
   )
 
   registerLatestDashboardHandler(
@@ -15427,7 +15743,8 @@ export function registerDashboardHandlers(_ipcMain: typeof ipcMain): void {
     }
   )
 
-  _ipcMain.handle(
+  registerLatestDashboardHandler(
+    _ipcMain,
     "dashboard:awardsSkillContributions",
     async (_, range: TimeRange, skillNames: string[]) => {
       if (import.meta.env.DEV) {
@@ -15436,37 +15753,46 @@ export function registerDashboardHandlers(_ipcMain: typeof ipcMain): void {
       try {
         return { success: true, data: await fetchAwardSkillContributions(range, skillNames) }
       } catch (e) {
-        console.error("[Dashboard] awardsSkillContributions error:", e)
+        logDashboardRequestError("awardsSkillContributions", e)
         return { success: false, error: e instanceof Error ? e.message : String(e) }
       }
     }
   )
 
-  _ipcMain.handle("dashboard:awardsUserApplications", async (_, range: TimeRange) => {
-    if (import.meta.env.DEV) {
-      return { success: true, data: makeMockAwardUserApplications() }
+  registerLatestDashboardHandler(
+    _ipcMain,
+    "dashboard:awardsUserApplications",
+    async (_, range: TimeRange) => {
+      if (import.meta.env.DEV) {
+        return { success: true, data: makeMockAwardUserApplications() }
+      }
+      try {
+        return { success: true, data: await fetchAwardUserApplications(range) }
+      } catch (e) {
+        logDashboardRequestError("awardsUserApplications", e)
+        return { success: false, error: e instanceof Error ? e.message : String(e) }
+      }
     }
-    try {
-      return { success: true, data: await fetchAwardUserApplications(range) }
-    } catch (e) {
-      console.error("[Dashboard] awardsUserApplications error:", e)
-      return { success: false, error: e instanceof Error ? e.message : String(e) }
-    }
-  })
+  )
 
-  _ipcMain.handle("dashboard:awardsTeamBenchmark", async (_, range: TimeRange) => {
-    if (import.meta.env.DEV) {
-      return { success: true, data: makeMockAwardTeamBenchmark() }
+  registerLatestDashboardHandler(
+    _ipcMain,
+    "dashboard:awardsTeamBenchmark",
+    async (_, range: TimeRange) => {
+      if (import.meta.env.DEV) {
+        return { success: true, data: makeMockAwardTeamBenchmark() }
+      }
+      try {
+        return { success: true, data: await fetchAwardTeamBenchmark(range) }
+      } catch (e) {
+        logDashboardRequestError("awardsTeamBenchmark", e)
+        return { success: false, error: e instanceof Error ? e.message : String(e) }
+      }
     }
-    try {
-      return { success: true, data: await fetchAwardTeamBenchmark(range) }
-    } catch (e) {
-      console.error("[Dashboard] awardsTeamBenchmark error:", e)
-      return { success: false, error: e instanceof Error ? e.message : String(e) }
-    }
-  })
+  )
 
-  _ipcMain.handle(
+  registerLatestDashboardHandler(
+    _ipcMain,
     "dashboard:awardsTeamSkillCoverage",
     async (_, range: TimeRange, groups: Array<{ shi: string; skillNames: string[] }>) => {
       if (import.meta.env.DEV) {
@@ -15480,7 +15806,7 @@ export function registerDashboardHandlers(_ipcMain: typeof ipcMain): void {
       try {
         return { success: true, data: await fetchAwardTeamSkillCoverage(range, groups) }
       } catch (e) {
-        console.error("[Dashboard] awardsTeamSkillCoverage error:", e)
+        logDashboardRequestError("awardsTeamSkillCoverage", e)
         return { success: false, error: e instanceof Error ? e.message : String(e) }
       }
     }

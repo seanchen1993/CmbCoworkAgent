@@ -155,6 +155,7 @@ export async function runPostSkillUseHooksForActivatedSkills({
   pluginWorkspace,
   featureId,
   harnessProjectId,
+  harnessAdapterId,
   harnessAdapterName,
   harnessAdapterVersion,
   harnessNodeName,
@@ -178,6 +179,7 @@ export async function runPostSkillUseHooksForActivatedSkills({
   pluginWorkspace?: string
   featureId?: string
   harnessProjectId?: string
+  harnessAdapterId?: string
   harnessAdapterName?: string
   harnessAdapterVersion?: string
   harnessNodeName?: string
@@ -211,6 +213,7 @@ export async function runPostSkillUseHooksForActivatedSkills({
       pluginWorkspace,
       featureId,
       harnessProjectId,
+      harnessAdapterId,
       harnessAdapterName,
       harnessAdapterVersion,
       harnessNodeName,
@@ -261,6 +264,7 @@ export async function runCompletionHooksWithRevision({
   pluginWorkspace,
   featureId,
   harnessProjectId,
+  harnessAdapterId,
   harnessAdapterName,
   harnessAdapterVersion,
   harnessNodeName,
@@ -294,6 +298,7 @@ export async function runCompletionHooksWithRevision({
   pluginWorkspace?: string
   featureId?: string
   harnessProjectId?: string
+  harnessAdapterId?: string
   harnessAdapterName?: string
   harnessAdapterVersion?: string
   harnessNodeName?: string
@@ -367,6 +372,7 @@ export async function runCompletionHooksWithRevision({
             pluginWorkspace,
             featureId,
             harnessProjectId,
+            harnessAdapterId,
             harnessAdapterName,
             harnessAdapterVersion,
             harnessNodeName,
@@ -439,6 +445,7 @@ export async function runCompletionHooksWithRevision({
                 pluginWorkspace,
                 featureId,
                 harnessProjectId,
+                harnessAdapterId,
                 harnessAdapterName,
                 harnessAdapterVersion,
                 harnessNodeName,
@@ -462,6 +469,7 @@ export async function runCompletionHooksWithRevision({
               pluginWorkspace,
               featureId,
               harnessProjectId,
+              harnessAdapterId,
               harnessAdapterName,
               harnessAdapterVersion,
               harnessNodeName,

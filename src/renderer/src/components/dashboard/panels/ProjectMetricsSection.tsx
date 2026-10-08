@@ -7,6 +7,7 @@ import {
   ChevronDown,
   ChevronLeft,
   ChevronRight,
+  Download,
   Info,
   Loader2,
   Search
@@ -24,6 +25,12 @@ import {
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip"
 import { cn } from "@/lib/utils"
 import { ProjectMetricTrend } from "./ProjectMetricTrend"
+import { projectMetricExportSheet } from "./project-metric-export"
+import {
+  PROJECT_METRIC_TOOLTIP_CLASS,
+  ProjectMetricIssueBreakdown,
+  ProjectMetricProjectIssueBreakdown
+} from "./ProjectMetricIssueBreakdown"
 import type {
   ProjectMetricFilters,
   ProjectMetricListOptions,
@@ -96,9 +103,10 @@ function TimeScopeTip(): React.JSX.Element {
           </button>
         </TooltipTrigger>
         <TooltipContent className="max-w-[420px] text-xs leading-relaxed">
-          日期、室组仅用于筛选项目；缺陷数、功能点均为 T-1 数据；代码行数取所选 CMBDevClaw
-          项目截至查询时的累计已 Push 采纳行数；输入/输出 Token 取所选 CMBDevClaw
-          项目截至查询时的累计 trace Token。日期不用于截断代码行数或 Token。
+          日期、室组仅用于筛选项目；缺陷数、功能点均为 T-1 数据；非功能问题数取项目索引中的累计值，
+          日期不截断问题检出时间。代码行数取所选 CMBDevClaw 项目截至查询时的累计已 Push
+          采纳行数；输入/输出 Token 取所选 CMBDevClaw 项目截至查询时的累计 trace
+          Token。日期不用于截断代码行数或 Token。
         </TooltipContent>
       </Tooltip>
     </TooltipProvider>
@@ -243,6 +251,47 @@ function SummaryMetricValue({
   )
 }
 
+function SummaryMetricCell({
+  row,
+  group,
+  tone,
+  issueGroups
+}: {
+  row: SummaryMetricRow
+  group: ProjectMetricSummaryGroup | null
+  tone: "devclaw" | "non_devclaw"
+  issueGroups: ProjectMetricSummaryGroup[]
+}): React.JSX.Element {
+  const cellClassName =
+    tone === "devclaw"
+      ? "border-l border-sky-500/10 bg-sky-500/[0.025]"
+      : "border-l border-amber-500/10 bg-amber-500/[0.025]"
+  const value = <SummaryMetricValue row={row} group={group} tone={tone} />
+  if (row.sample !== "kenanIssue") {
+    return <td className={`${cellClassName} px-4 py-2.5`}>{value}</td>
+  }
+  return (
+    <td className={cellClassName}>
+      <TooltipProvider delayDuration={150}>
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <div
+              tabIndex={0}
+              className="px-4 py-2.5 focus-visible:ring-2 focus-visible:ring-ring"
+              aria-label="查看非功能问题细分类别"
+            >
+              {value}
+            </div>
+          </TooltipTrigger>
+          <TooltipContent className={PROJECT_METRIC_TOOLTIP_CLASS}>
+            <ProjectMetricIssueBreakdown groups={issueGroups} />
+          </TooltipContent>
+        </Tooltip>
+      </TooltipProvider>
+    </td>
+  )
+}
+
 function SummaryComparison({
   data,
   loading,
@@ -258,12 +307,21 @@ function SummaryComparison({
 }): React.JSX.Element {
   const devclaw = summaryGroup(data, "devclaw")
   const nonDevclaw = summaryGroup(data, "non_devclaw")
+  const issueGroups = [devclaw, nonDevclaw].filter(
+    (group): group is ProjectMetricSummaryGroup => group !== null
+  )
   const rows: SummaryMetricRow[] = [
     {
       label: "平均缺陷数",
       hint: "无缺陷的项目按 0 计算",
       read: (group) => group.avgBugCount,
       sample: "bug"
+    },
+    {
+      label: "平均非功能问题数",
+      hint: "项目上线流程关联的 label 对应的 UAT 流水线构建的柯南问题",
+      read: (group) => group.avgKenanIssueCount,
+      sample: "kenanIssue"
     },
     {
       label: "平均功能点",
@@ -279,14 +337,21 @@ function SummaryComparison({
     },
     {
       label: "平均发起 ST 耗时",
-      hint: "ST 发起时间 - 立项时间",
+      hint: "ST 发起日期 - 立项日期",
       read: (group) => group.avgTestLeadDays,
       sample: "testLead",
       formatter: formatDays
     },
     {
+      label: "平均发起 UAT 耗时",
+      hint: "UAT 发起日期 - 立项日期",
+      read: (group) => group.avgUatLeadDays,
+      sample: "uatLead",
+      formatter: formatDays
+    },
+    {
       label: "平均特性上线耗时",
-      hint: "首次实施日期 - 特性审批通过时间",
+      hint: "项目首次上线日期 - 特性审批通过日期",
       read: (group) => group.avgDeliveryDays,
       sample: "delivery",
       formatter: formatDays
@@ -389,12 +454,18 @@ function SummaryComparison({
                     <MetricHint label={row.label}>{row.hint}</MetricHint>
                   </div>
                 </td>
-                <td className="border-l border-sky-500/10 bg-sky-500/[0.025] px-4 py-2.5">
-                  <SummaryMetricValue row={row} group={devclaw} tone="devclaw" />
-                </td>
-                <td className="border-l border-amber-500/10 bg-amber-500/[0.025] px-4 py-2.5">
-                  <SummaryMetricValue row={row} group={nonDevclaw} tone="non_devclaw" />
-                </td>
+                <SummaryMetricCell
+                  row={row}
+                  group={devclaw}
+                  tone="devclaw"
+                  issueGroups={issueGroups}
+                />
+                <SummaryMetricCell
+                  row={row}
+                  group={nonDevclaw}
+                  tone="non_devclaw"
+                  issueGroups={issueGroups}
+                />
               </tr>
             ))}
           </tbody>
@@ -556,6 +627,24 @@ function ProjectRow({ item }: { item: ProjectMetricProjectItem }): React.JSX.Ele
         <div className="mt-0.5 text-[10px] text-muted-foreground">{item.groupName || "—"}</div>
       </td>
       <td className="px-3 py-2 text-right tabular-nums">{formatCount(item.bugNum)}</td>
+      <td className="px-3 py-2 text-right tabular-nums">
+        <TooltipProvider delayDuration={150}>
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <button
+                type="button"
+                className="cursor-help border-b border-dashed border-muted-foreground/40 tabular-nums hover:border-foreground/60 hover:text-foreground"
+                aria-label={`查看${item.prjName || item.prjCode}非功能问题细分类别`}
+              >
+                {formatCount(item.kenanIssueCount)}
+              </button>
+            </TooltipTrigger>
+            <TooltipContent className={PROJECT_METRIC_TOOLTIP_CLASS}>
+              <ProjectMetricProjectIssueBreakdown categories={item.kenanIssueCategories} />
+            </TooltipContent>
+          </Tooltip>
+        </TooltipProvider>
+      </td>
       <td className="px-3 py-2 text-right tabular-nums">{formatMetric(item.notAdjustFuns)}</td>
       <td className="px-3 py-2 text-right tabular-nums">
         {formatMetric(item.defectDensityPer100Fp)}
@@ -572,11 +661,21 @@ function ProjectRow({ item }: { item: ProjectMetricProjectItem }): React.JSX.Ele
       </td>
       <td className="px-3 py-2 text-right tabular-nums">
         <ProjectDateMetric
+          value={item.uatLeadDays}
+          label="发起 UAT 耗时"
+          dates={[
+            { label: "UAT 发起时间", value: item.firstUatStartDate },
+            { label: "立项时间", value: item.createDate }
+          ]}
+        />
+      </td>
+      <td className="px-3 py-2 text-right tabular-nums">
+        <ProjectDateMetric
           value={item.deliveryDays}
           label="特性上线耗时"
           dates={[
             { label: "特性审批通过时间", value: item.approvedDate },
-            { label: "首次实施日期", value: item.firstOnlineDate }
+            { label: "项目首次上线日期", value: item.firstOnlineDate }
           ]}
         />
       </td>
@@ -602,10 +701,12 @@ function ProjectRow({ item }: { item: ProjectMetricProjectItem }): React.JSX.Ele
 export function ProjectMetricsSection({
   range,
   upperOrgLv1,
+  groupNames,
   refreshKey
 }: {
   range: { from: string; to: string }
   upperOrgLv1: string[]
+  groupNames: string[]
   refreshKey: number
 }): React.JSX.Element {
   const [phaseStatuses, setPhaseStatuses] = useState<string[]>([])
@@ -633,6 +734,8 @@ export function ProjectMetricsSection({
   const [projectsLoading, setProjectsLoading] = useState(false)
   const [summaryError, setSummaryError] = useState<string | null>(null)
   const [projectsError, setProjectsError] = useState<string | null>(null)
+  const [exporting, setExporting] = useState(false)
+  const [exportError, setExportError] = useState<string | null>(null)
   const summaryRequestId = useRef(0)
   const projectsRequestId = useRef(0)
 
@@ -657,6 +760,7 @@ export function ProjectMetricsSection({
   const trendFilters = useMemo<ProjectMetricTrendFilters>(
     () => ({
       upperOrgLv1,
+      groupNames,
       phaseStatuses,
       functionPointMin: nullableNumber(debouncedFunctionPointMin),
       functionPointMax: nullableNumber(debouncedFunctionPointMax),
@@ -671,6 +775,7 @@ export function ProjectMetricsSection({
       debouncedTokenConsumptionMax,
       debouncedTokenConsumptionMin,
       phaseStatuses,
+      groupNames,
       upperOrgLv1
     ]
   )
@@ -746,6 +851,30 @@ export function ProjectMetricsSection({
 
   const totalPages = Math.max(1, Math.ceil((projects?.total ?? 0) / pageSize))
   const truncated = summary?.truncated || projects?.truncated
+  const exportProjects = async (): Promise<void> => {
+    setExporting(true)
+    setExportError(null)
+    try {
+      const result = await window.api.dashboard.projectMetricProjects(filters, {
+        ...listOptions,
+        exportAll: true
+      })
+      if (!result.success || !result.data) {
+        throw new Error(result.error || "获取项目明细导出数据失败")
+      }
+      const saved = await window.api.dashboard.exportExcel(
+        [projectMetricExportSheet(result.data.items)],
+        { fileName: "研发效能看板-项目明细" }
+      )
+      if (!saved.success && !saved.canceled) {
+        throw new Error(saved.error || "导出项目明细失败")
+      }
+    } catch (error) {
+      setExportError(error instanceof Error ? error.message : String(error))
+    } finally {
+      setExporting(false)
+    }
+  }
   const cycleSort = (key: ProjectMetricSortKey): void => {
     setPage(1)
     if (sortBy !== key) {
@@ -897,6 +1026,20 @@ export function ProjectMetricsSection({
         <div className="flex flex-wrap items-center justify-between gap-3">
           <h3 className="text-xs font-semibold text-foreground">项目明细</h3>
           <div className="flex flex-wrap items-center gap-2">
+            <Button
+              variant="outline"
+              size="sm"
+              className="h-8"
+              disabled={exporting || projectsLoading}
+              onClick={() => void exportProjects()}
+            >
+              {exporting ? (
+                <Loader2 className="mr-1.5 size-3.5 animate-spin" />
+              ) : (
+                <Download className="mr-1.5 size-3.5" />
+              )}
+              导出 Excel
+            </Button>
             <Select
               value={developmentMode}
               onValueChange={(value: "all" | "devclaw" | "non_devclaw") => {
@@ -947,6 +1090,13 @@ export function ProjectMetricsSection({
           </div>
         </div>
 
+        {exportError ? (
+          <div className="mt-3 flex items-start gap-2 rounded-md bg-destructive/10 px-3 py-2 text-xs text-destructive">
+            <AlertCircle className="mt-0.5 size-3.5 shrink-0" />
+            {exportError}
+          </div>
+        ) : null}
+
         {projectsError ? (
           <div className="mt-3 flex items-start gap-2 rounded-md bg-destructive/10 px-3 py-2 text-xs text-destructive">
             <AlertCircle className="mt-0.5 size-3.5 shrink-0" />
@@ -955,14 +1105,16 @@ export function ProjectMetricsSection({
         ) : null}
 
         <div className="mt-3 overflow-x-auto rounded-md border border-border">
-          <table className="w-full min-w-[1455px] table-fixed text-xs">
+          <table className="w-full min-w-[1690px] table-fixed text-xs">
             <colgroup>
               <col className="w-[250px]" />
               <col className="w-[190px]" />
               <col className="w-[190px]" />
               <col className="w-[90px]" />
+              <col className="w-[115px]" />
               <col className="w-[90px]" />
               <col className="w-[105px]" />
+              <col className="w-[120px]" />
               <col className="w-[120px]" />
               <col className="w-[125px]" />
               <col className="w-[155px]" />
@@ -982,6 +1134,13 @@ export function ProjectMetricsSection({
                   onSort={cycleSort}
                 />
                 <SortableProjectMetricTh
+                  label="非功能问题数"
+                  sortKey="kenanIssueCount"
+                  activeKey={sortBy}
+                  order={sortOrder}
+                  onSort={cycleSort}
+                />
+                <SortableProjectMetricTh
                   label="功能点"
                   sortKey="notAdjustFuns"
                   activeKey={sortBy}
@@ -990,6 +1149,7 @@ export function ProjectMetricsSection({
                 />
                 <th className="px-3 py-2 text-right font-medium">缺陷密度</th>
                 <th className="px-3 py-2 text-right font-medium">发起 ST 耗时</th>
+                <th className="px-3 py-2 text-right font-medium">发起 UAT 耗时</th>
                 <SortableProjectMetricTh
                   label="特性上线耗时"
                   sortKey="deliveryDays"
@@ -1020,14 +1180,14 @@ export function ProjectMetricsSection({
             <tbody>
               {projectsLoading && !projects ? (
                 <tr>
-                  <td colSpan={12} className="h-28 text-center text-muted-foreground">
+                  <td colSpan={13} className="h-28 text-center text-muted-foreground">
                     <Loader2 className="mr-2 inline size-4 animate-spin" />
                     正在加载项目明细
                   </td>
                 </tr>
               ) : (projects?.items.length ?? 0) === 0 ? (
                 <tr>
-                  <td colSpan={12} className="h-28 text-center text-muted-foreground">
+                  <td colSpan={13} className="h-28 text-center text-muted-foreground">
                     暂无符合条件的项目
                   </td>
                 </tr>

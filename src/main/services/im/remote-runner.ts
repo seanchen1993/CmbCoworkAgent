@@ -87,6 +87,7 @@ import {
   resolveImProjectModeReplyContext,
   type ImProjectModeReplyContext
 } from "./project-reply-context"
+import { projectThreadAliasParts } from "./thread-alias"
 import {
   imRemoteInteractionRouteRegistry,
   type ImRemoteInteractionRouteRegistry
@@ -1125,7 +1126,8 @@ export class ImRemoteRunner {
       const replies = buildImEventReplies({
         event: executing,
         text: result,
-        prefix: this.terminalPrefixForEvent(executing, projectReplyContext)
+        prefix: this.terminalPrefixForEvent(executing, projectReplyContext),
+        format: "markdown"
       })
       const completed = await this.dependencies.eventStore.completeEvent(
         executing.eventId,
@@ -1395,6 +1397,9 @@ export class ImRemoteRunner {
     // point at it. A revoked grant still reaches /切换, which explains itself.
     const thread = this.dependencies.getThread(snapshot.threadId)
     if (!thread) return prefix
+    if (projectThreadAliasParts(thread)) {
+      return [prefix, "回复不会发到这个会话。要继续它，请发送 /会话 后选择。"].join("\n")
+    }
     const name = (thread.title?.trim() || snapshot.title || "").trim()
     if (!name) return prefix
     return [prefix, `回复不会发到这个会话。要继续它，请发送 /切换 ${name}`].join("\n")
@@ -1411,8 +1416,11 @@ export class ImRemoteRunner {
         ? this.dependencies.getThread(snapshot.threadId)?.title?.trim() || snapshot.title
         : undefined
     try {
-      const active = this.dependencies.conversationState.getActiveTarget(event.conversationKey)
-      const switched = Boolean(active && active.targetId !== snapshot.targetId)
+      // getSelectedTarget 而不是 getActiveTarget:后者在目标不是 active 时抛异常，下面的
+      // catch 会把整个 switched 判断丢掉，于是绑定的授权一失效就不再标注——最该标注的
+      // 时候反而没有。绑定关系和它可不可用是两件事，这里要判的是身份。
+      const bound = this.dependencies.conversationState.getSelectedTarget(event.conversationKey)
+      const switched = Boolean(bound && bound.snapshot.targetId !== snapshot.targetId)
       if (projectContext) {
         return imProjectModeReplyPrefix({ ...projectContext, switched })
       }

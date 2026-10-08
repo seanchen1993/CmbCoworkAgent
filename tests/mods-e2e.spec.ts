@@ -445,7 +445,7 @@ async function main(): Promise<void> {
         "packaged cold session executes a real approved command and previews/exports its report without a model or test bridge"
       )
       await verifyPackagedFunctions(page!, root, threadId, artifacts, until, pass)
-      await page!.getByRole("button", { name: "自定义", exact: true }).click()
+      await page!.getByRole("button", { name: "自定义设置", exact: true }).click()
       await page!.getByRole("button", { name: "Function Mods", exact: true }).click()
       await page!.locator("[data-mods-settings]").waitFor()
       await page!.screenshot({ path: join(artifacts, "settings.png") })
@@ -805,7 +805,7 @@ async function main(): Promise<void> {
     )
     assert(!JSON.stringify(revokedCards).includes("actionId"))
     pass("revocation invalidates existing cards")
-    await page!.getByRole("button", { name: "自定义", exact: true }).click()
+    await page!.getByRole("button", { name: "自定义设置", exact: true }).click()
     await page!.getByRole("button", { name: "Function Mods", exact: true }).click()
     await page!.locator("[data-mods-settings]").waitFor()
     await page!.locator("[data-mods-audit] > summary").click()
@@ -840,7 +840,7 @@ async function main(): Promise<void> {
       { id: threadId, pluginId: foundationMod.pluginId, digest: foundationMod.digest }
     )
     await page!.screenshot({ path: join(artifacts, "function-grant.png") })
-    await page!.getByRole("button", { name: "返回会话", exact: true }).click()
+    await page!.getByRole("button", { name: "返回应用", exact: true }).click()
     await page!.getByText("Mods E2E", { exact: true }).first().click()
     const functionComposer = page!.locator("textarea.composer-textarea")
     await functionComposer.fill("/claw")
@@ -3119,7 +3119,7 @@ async function main(): Promise<void> {
       .getByText("备注：这是保存到项目的偏好 · 视图：构建", { exact: true })
       .waitFor()
     pass("pane preferences survive renderer reload and complete application restart")
-    await page!.getByRole("button", { name: "自定义", exact: true }).click()
+    await page!.getByRole("button", { name: "自定义设置", exact: true }).click()
     await page!.getByRole("button", { name: "Function Mods", exact: true }).click()
     await page!.getByLabel("输入管理口令解锁 Function Mods 设置").fill("admin123456")
     await page!.getByRole("button", { name: "解锁设置", exact: true }).click()
@@ -3140,7 +3140,7 @@ async function main(): Promise<void> {
       ),
       "revoking one plugin preserves another approved plugin's commands"
     )
-    await page!.getByRole("button", { name: "返回会话", exact: true }).click()
+    await page!.getByRole("button", { name: "返回应用", exact: true }).click()
     await page!.getByText("Registered tools", { exact: true }).first().click()
     assert.deepEqual(
       await page!.evaluate((id) => window.api.mods.turnNotices(id), registryThread),

@@ -1,3 +1,9 @@
+import {
+  getThreadActiveSkillsRow,
+  upsertThreadActiveSkills,
+  type ThreadActiveSkillsRow
+} from "../../services/adoption-index"
+
 export interface SkillProposalWindowTurn {
   userMessage: string
   assistantText: string
@@ -47,9 +53,107 @@ const recentSkillUsageTurns = new Map<string, SkillProposalWindowTurn[]>()
  * NOTE: this feeds ONLY the adoption context (code_gen / code_adopt → commit
  * 明细的关联 Skill and skill-sliced adoption rate). A trace's own `usedSkills`
  * is set separately from the current run's skills and is unaffected.
+ *
+ * The maps are a cache in front of `thread_active_skills` in the adoption
+ * index. Persistence is not optional bookkeeping: a thread routinely spans an
+ * app restart (work stops for the night, resumes next morning), and with an
+ * in-memory-only set every generation between the restart and the next
+ * SKILL.md read lost its attribution and was misfiled as vibecoding.
  */
 const threadActiveSkills = new Map<string, string[]>()
 const threadActiveSkillSource = new Map<string, string[]>()
+/**
+ * Threads we already know have no stored set. Without this, every attribution
+ * sync on a skill-less thread re-queries sqlite, and sync runs on the streaming
+ * hot path (once per `values` snapshot that carries skillsMetadata). A negative
+ * result stays valid for the process: rows only appear through
+ * `rememberActiveSkills`, which drops the thread from this set as it writes.
+ */
+const threadsWithoutStoredSkills = new Set<string>()
+
+function sameList(a: string[], b: string[]): boolean {
+  return a.length === b.length && a.every((value, index) => value === b[index])
+}
+
+/**
+ * Write through to the adoption index, keeping the in-memory cache authoritative.
+ *
+ * `persist: false` keeps the set in memory only. Used for sub-agent threads,
+ * whose ids are minted per run (`…__wf_<runId>_a<n>`) and never resumed — a row
+ * for one would be read back by nobody and would still be re-serialized on
+ * every snapshot, because sql.js exports the whole database on each save. After
+ * a restart such a thread resolves through the parent chain instead, which is
+ * what gets persisted.
+ */
+function rememberActiveSkills(
+  threadId: string,
+  skills: string[],
+  skillSource: string[],
+  persist = true
+): void {
+  // Attribution re-syncs on every skill hit, and a long turn re-publishes the
+  // same set many times — only touch the index when something actually changed.
+  const cached = threadActiveSkills.get(threadId)
+  const unchanged =
+    cached !== undefined &&
+    sameList(cached, skills) &&
+    sameList(threadActiveSkillSource.get(threadId) ?? [], skillSource)
+  if (unchanged) return
+  // Evict oldest if the size cap would be exceeded (Map preserves insertion order).
+  if (cached === undefined && threadActiveSkills.size >= MAX_ACTIVE_SKILL_THREADS) {
+    const oldest = threadActiveSkills.keys().next().value
+    if (oldest !== undefined) {
+      threadActiveSkills.delete(oldest)
+      threadActiveSkillSource.delete(oldest)
+    }
+  }
+  threadActiveSkills.set(threadId, skills)
+  threadActiveSkillSource.set(threadId, skillSource)
+  // Cleared even when we don't persist: the lookup checks this set first, so a
+  // stale negative entry would hide the in-memory set we just wrote.
+  threadsWithoutStoredSkills.delete(threadId)
+  if (!persist) return
+  try {
+    upsertThreadActiveSkills(threadId, skills, skillSource)
+  } catch {
+    // Attribution must never break a turn; the in-memory set still works for
+    // this process, it just won't survive a restart.
+  }
+}
+
+/**
+ * Cache-then-index lookup. An eviction or a restart empties the map, so a miss
+ * has to consult the index before concluding the thread has no active skill.
+ */
+function loadActiveSkills(threadId: string): { skills: string[]; skillSource: string[] } {
+  if (!threadId || threadsWithoutStoredSkills.has(threadId)) {
+    return { skills: [], skillSource: [] }
+  }
+  const cached = threadActiveSkills.get(threadId)
+  if (cached) return { skills: cached, skillSource: threadActiveSkillSource.get(threadId) ?? [] }
+  let stored: ThreadActiveSkillsRow | null = null
+  try {
+    stored = getThreadActiveSkillsRow(threadId)
+  } catch {
+    stored = null
+  }
+  if (!stored) {
+    if (threadsWithoutStoredSkills.size >= MAX_ACTIVE_SKILL_THREADS) {
+      const oldest = threadsWithoutStoredSkills.values().next().value
+      if (oldest !== undefined) threadsWithoutStoredSkills.delete(oldest)
+    }
+    threadsWithoutStoredSkills.add(threadId)
+    return { skills: [], skillSource: [] }
+  }
+  // Warm the cache without re-writing the row we just read.
+  threadActiveSkills.set(threadId, stored.skills)
+  threadActiveSkillSource.set(threadId, stored.skillSource)
+  return { skills: stored.skills, skillSource: stored.skillSource }
+}
+
+function dedupe(values: string[]): string[] {
+  return Array.from(new Set(values.filter(Boolean)))
+}
 
 function clip(text: string, maxChars: number): string {
   return text.length > maxChars ? `${text.slice(0, maxChars)}…` : text
@@ -111,7 +215,9 @@ function buildTranscript(turns: SkillProposalWindowTurn[]): string {
       ]
 
       if (turn.toolCallNames.length > 0) {
-        parts.push(`Tools used (${turn.toolCallCount}): ${buildToolCallSummary(turn.toolCallNames)}`)
+        parts.push(
+          `Tools used (${turn.toolCallCount}): ${buildToolCallSummary(turn.toolCallNames)}`
+        )
       }
 
       if (turn.errorMessage) {
@@ -176,31 +282,53 @@ export function getRecentSkillUsageNames(threadId: string): string[] {
 export function setThreadActiveSkills(
   threadId: string,
   skills: string[],
+  skillSource: string[] = [],
+  options: { persist?: boolean } = {}
+): void {
+  if (!threadId) return
+  const normalized = dedupe(skills)
+  if (normalized.length === 0) return
+  rememberActiveSkills(threadId, normalized, dedupe(skillSource), options.persist ?? true)
+}
+
+/**
+ * Add skills to a thread's active set without superseding what is already
+ * there. Used when a sub-agent contributes skills to a thread it does not own:
+ * a Task sub-agent shares the parent's filesystem backend, so its generated
+ * code is recorded against the *parent* thread and has to be attributed there —
+ * but the parent may be running its own skill at the same time, and a
+ * supersede would silently drop it.
+ */
+export function mergeThreadActiveSkills(
+  threadId: string,
+  skills: string[],
   skillSource: string[] = []
 ): void {
   if (!threadId) return
-  const normalized = Array.from(new Set(skills.filter(Boolean)))
-  if (normalized.length === 0) return
-  // Evict oldest if the size cap would be exceeded (Map preserves insertion order).
-  if (!threadActiveSkills.has(threadId) && threadActiveSkills.size >= MAX_ACTIVE_SKILL_THREADS) {
-    const oldest = threadActiveSkills.keys().next().value
-    if (oldest !== undefined) {
-      threadActiveSkills.delete(oldest)
-      threadActiveSkillSource.delete(oldest)
-    }
+  const incoming = dedupe(skills)
+  if (incoming.length === 0) return
+  const current = loadActiveSkills(threadId)
+  const mergedSkills = dedupe([...current.skills, ...incoming])
+  const mergedSource = dedupe([...current.skillSource, ...skillSource])
+  // Nothing new to record — skip the write so a chatty sub-agent doesn't churn
+  // the index on every stream chunk.
+  if (
+    mergedSkills.length === current.skills.length &&
+    mergedSource.length === current.skillSource.length
+  ) {
+    return
   }
-  threadActiveSkills.set(threadId, normalized)
-  threadActiveSkillSource.set(threadId, Array.from(new Set(skillSource.filter(Boolean))))
+  rememberActiveSkills(threadId, mergedSkills, mergedSource)
 }
 
 /** The thread's currently-active skills (empty if none used yet). */
 export function getThreadActiveSkills(threadId: string): string[] {
-  return [...(threadActiveSkills.get(threadId) ?? [])]
+  return [...loadActiveSkills(threadId).skills]
 }
 
 /** Source map for the thread's currently-active skills. */
 export function getThreadActiveSkillSource(threadId: string): string[] {
-  return [...(threadActiveSkillSource.get(threadId) ?? [])]
+  return [...loadActiveSkills(threadId).skillSource]
 }
 
 export function buildSkillProposalWindowContext(

@@ -1,6 +1,9 @@
 import { createFunctionToolBatchMiddleware, type FunctionToolBatchOptions } from "./mods-tool-batch"
 import { createInstructionsLoadedMiddleware, type InstructionsLoadedOptions } from "./mods-instructions-loaded"
 import { applyClassicToolOutput } from "../hooks/tool-output"
+import { createStageUsageMiddleware } from "./trace/stage-usage-middleware"
+import { randomUUID } from "crypto"
+import { TurnTraceRecorder } from "./trace/turn-trace-recorder"
 import { foregroundToolPolicy } from "./foreground-tool-policy"
 import { createTaskModelOutcomeMiddleware, withTaskModelOutcome } from "./task-model-outcome"
 import { withScopedModMcp, publishCurrentModResult } from "../mods/adapters"
@@ -41,7 +44,6 @@ import {
   createFilesystemMiddleware,
   createSubAgentMiddleware,
   createPatchToolCallsMiddleware,
-  createSkillsMiddleware,
   createMemoryMiddleware,
   GENERAL_PURPOSE_SUBAGENT,
   StateBackend
@@ -100,12 +102,16 @@ import {
 } from "./local-sandbox"
 import { approvalMatchesRuntimeThread } from "./approval-thread-match"
 import { SkillLifecycleRegistry } from "./skill-lifecycle/registry"
-import { combineSkillMiddlewareSources } from "./skill-sources"
+import { combineSkillMiddlewareSources, createRefreshingSkillsMiddleware } from "./skill-sources"
 import {
   buildFunctionSessionContextSources,
   type FunctionSessionContextSourceResolver
 } from "./context-sources"
 import type { SkillUseTracker } from "./skill-lifecycle/tracker"
+import {
+  isSkillVisibleForProjectMode,
+  type ProjectModeSkillScope
+} from "../../shared/skill-visibility"
 import type { AgentFileMutationKind } from "../services/agent-auto-commit"
 import type { HookResultCallback } from "../hooks/runner"
 import type { HookResult } from "../hooks/types"
@@ -126,8 +132,18 @@ import {
 } from "../../shared/model-token-budget"
 import {
   getAgentGraphRecursionLimit,
-  getWorkflowWorktreeTimeoutMs
+  getAgentToolStrategy,
+  normalizeAgentToolStrategy,
+  getWorkflowWorktreeTimeoutMs,
+  type AgentToolStrategy
 } from "../../shared/agent-runtime-limits"
+import {
+  getToolStrategyReminder,
+  resolveEffectiveToolStrategy,
+  resolveFilesystemToolStrategy,
+  resolveWorkflowToolStrategy,
+  SHELL_FIRST_TOOL_DESCRIPTIONS
+} from "./tool-strategy"
 import {
   DEFAULT_AGENT_OUTPUT_STYLE,
   resolveAgentOutputStyle,
@@ -225,6 +241,7 @@ import { mergeUpdatedInput } from "../hooks/updated-input"
 import {
   createHookScope,
   createInheritedHookScope,
+  isSkillPathVisibleForProjectMode,
   resolvePluginIdForSkillPath,
   extractPluginIdFromProviderKey,
   resolveEnabledHooksForRun,
@@ -375,7 +392,7 @@ import {
   WorkerValuesSnapshotAccumulator,
   type WorkerValuesSnapshotContext
 } from "./coordinator-worker-stream"
-import { setAdoptionContext } from "../services/adoption-tracker"
+import { syncSubagentSkillAttribution } from "./turn-attribution"
 import { buildOrderedChain, isRetryableApiError } from "./failover"
 import { resolveModel } from "../routing"
 import { patchRuntimeReadFileTool } from "./read-file-tool"
@@ -1256,6 +1273,7 @@ export function createScopedMcpCapabilityService(
     pluginWorkspace?: string
     featureId?: string
     harnessProjectId?: string
+    harnessAdapterId?: string
     harnessAdapterName?: string
     harnessAdapterVersion?: string
     harnessNodeName?: string
@@ -1517,6 +1535,7 @@ export function createScopedMcpCapabilityService(
             pluginWorkspace: baseContext.pluginWorkspace,
             featureId: baseContext.featureId,
             harnessProjectId: baseContext.harnessProjectId,
+            harnessAdapterId: baseContext.harnessAdapterId,
             harnessAdapterName: baseContext.harnessAdapterName,
             harnessAdapterVersion: baseContext.harnessAdapterVersion,
             harnessNodeName: baseContext.harnessNodeName,
@@ -1789,7 +1808,29 @@ export function createSkillHookContextMiddleware(
 export function createOutputStyleTurnReminderMiddleware(
   outputStyle: AgentOutputStyle
 ): ReturnType<typeof createMiddleware> {
-  const reminder = getOutputStyleTurnReminder(outputStyle)
+  return createTurnReminderMiddleware(
+    "outputStyleTurnReminder",
+    getOutputStyleTurnReminder(outputStyle)
+  )
+}
+
+export function createToolStrategyTurnReminderMiddleware(
+  strategy: AgentToolStrategy,
+  access?: CoordinatorWorkerFilesystemAccess
+): ReturnType<typeof createMiddleware> {
+  return createTurnReminderMiddleware(
+    "toolStrategyTurnReminder",
+    getToolStrategyReminder(strategy),
+    (request) => resolveEffectiveToolStrategy(strategy, request.tools ?? [], access) !== "standard"
+  )
+}
+
+function createTurnReminderMiddleware(
+  name: string,
+  reminder: string | null,
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  shouldRemind: (request: any) => boolean = () => true
+): ReturnType<typeof createMiddleware> {
   const reminderContent = reminder ? `<system-reminder>\n${reminder}\n</system-reminder>` : null
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const appendReminder = (content: any): any =>
@@ -1798,7 +1839,7 @@ export function createOutputStyleTurnReminderMiddleware(
       : [...content, { type: "text" as const, text: reminderContent }]
 
   return createMiddleware({
-    name: "outputStyleTurnReminder",
+    name,
     // Mirror Claude Code's output-style attachment normalization without
     // persisting the reminder: merge into the current user turn, or smoosh into
     // the last tool result. Never append a standalone HumanMessage after a tool
@@ -1807,7 +1848,7 @@ export function createOutputStyleTurnReminderMiddleware(
     // fallback so the reminder remains model-visible without changing history.
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     wrapModelCall: (request: any, handler: any) => {
-      if (!reminderContent) return handler(request)
+      if (!reminderContent || !shouldRemind(request)) return handler(request)
       const messages = Array.isArray(request.messages) ? request.messages : []
       const lastMessage = messages[messages.length - 1]
       const lastType = lastMessage?._getType?.()
@@ -2370,6 +2411,7 @@ function assembleDeepAgent(
     onTurnCompletionRecovery,
     turnCompletionTodoGateEnabled = true,
     outputStyle,
+    toolStrategy = "standard",
     conciseModeEnabled = false
   }: {
     onFinalSystemPrompt?: (prompt: string) => void
@@ -2389,6 +2431,13 @@ function assembleDeepAgent(
 
   const loopGuardsEnabled = areAgentLoopGuardsEnabled()
 
+  // Only this graph's native filesystem descriptions use its effective strategy.
+  // Shared task tools and child runtimes retain the requested preference.
+  const mainToolStrategy = resolveFilesystemToolStrategy(toolStrategy, {
+    filesystemAccess,
+    blockedToolNames: mainBlockedToolNames,
+    filesystemEnabled: mainFilesystemEnabled
+  })
   const effectiveOutputStyle = resolveAgentOutputStyle(outputStyle, conciseModeEnabled)
   const outputStylePrompt = getOutputStylePrompt(effectiveOutputStyle)
 
@@ -2426,7 +2475,7 @@ function assembleDeepAgent(
   const filesystemBackend = backend ? backend : (config: any) => new StateBackend(config)
   const skillsMiddlewareArray =
     skills != null && skills.length > 0
-      ? [createSkillsMiddleware({ backend: filesystemBackend, sources: skills })]
+      ? [createRefreshingSkillsMiddleware({ backend: filesystemBackend, sources: skills })]
       : []
 
   const memoryMiddlewareArray =
@@ -2439,7 +2488,7 @@ function assembleDeepAgent(
   const processedSubagents = subagents.map((subagent: any) => {
     if (Runnable.isRunnable(subagent)) return subagent
     if (!("skills" in subagent) || subagent.skills?.length === 0) return subagent
-    const subagentSkillsMiddleware = createSkillsMiddleware({
+    const subagentSkillsMiddleware = createRefreshingSkillsMiddleware({
       backend: filesystemBackend,
       sources: subagent.skills ?? []
     })
@@ -2493,8 +2542,11 @@ function assembleDeepAgent(
   const mainSummarizationController = createCmbContextController(mainSummarizationOptions)
 
   // Create filesystem middleware and patch upstream tool defaults/descriptions.
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const createFsMiddleware = (fsSystemPrompt = filesystemSystemPrompt): any => {
+  const createFsMiddleware = (
+    fsSystemPrompt = filesystemSystemPrompt,
+    fsToolStrategy = toolStrategy
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  ): any => {
     // For any restricted leaf runtime — coordinator worker (workload) OR registry
     // workflow agent (explicit denylist/shell) — strip the blocked tools' docs
     // from the injected fs system prompt so a removed tool's description doesn't
@@ -2510,6 +2562,9 @@ function assembleDeepAgent(
         : fsSystemPrompt
     const mw = createFilesystemMiddleware({
       backend: filesystemBackend,
+      ...(fsToolStrategy !== "standard" && {
+        customToolDescriptions: SHELL_FIRST_TOOL_DESCRIPTIONS
+      }),
       ...(effectiveFsPrompt && { systemPrompt: effectiveFsPrompt }),
       ...(toolTokenLimitBeforeEvict != null && { toolTokenLimitBeforeEvict })
     })
@@ -3078,7 +3133,22 @@ function assembleDeepAgent(
     }
     return {
       ...subagent,
-      systemPrompt: appendTaskCompletionAndRepetitionPrompt(subagent.systemPrompt)
+      systemPrompt: appendTaskCompletionAndRepetitionPrompt(subagent.systemPrompt),
+      ...(toolStrategy !== "standard" && !("runnable" in subagent)
+        ? {
+            middleware: [
+              ...(subagent.middleware ?? []),
+              // Per-role tail: the shared filesystem tools are never mutated,
+              // and the guard has already removed unavailable tools by this point.
+              createToolStrategyTurnReminderMiddleware(
+                toolStrategy,
+                modAgentAccess.get(subagent.name)?.readOnly
+                  ? { ...filesystemAccess, shellAccess: "read_only" }
+                  : filesystemAccess
+              )
+            ]
+          }
+        : {})
     }
   })
 
@@ -3220,7 +3290,7 @@ function assembleDeepAgent(
         : []),
       ...(threadId ? [createTrustedToolFilePreviewContextMiddleware(threadId)] : []),
       ...(mainTodosEnabled ? [todoListMiddleware()] : []),
-      ...(mainFilesystemEnabled ? [createFsMiddleware("\n")] : []),
+      ...(mainFilesystemEnabled ? [createFsMiddleware("\n", mainToolStrategy)] : []),
       ...postFsToolDocStripMiddleware,
       // The filesystem middleware appends execute documentation dynamically;
       // run the transport denylist after it so the docs and tool disappear
@@ -3290,6 +3360,9 @@ function assembleDeepAgent(
       ...(interruptOn ? [humanInTheLoopMiddleware({ interruptOn })] : []),
       ...customMiddleware,
       ...outputStyleTurnReminderMiddleware,
+      ...(toolStrategy !== "standard"
+        ? [createToolStrategyTurnReminderMiddleware(toolStrategy, filesystemAccess)]
+        : []),
       ...systemPromptPreviewCaptureMiddleware,
       ...(!metadataOnly &&
       modRuntimeAuthority?.agentId === "main" &&
@@ -3481,8 +3554,16 @@ export function getSystemPrompt(
     includeSubagents?: boolean
     includeMemory?: boolean
     includeCurrentTime?: boolean
+    toolStrategy?: AgentToolStrategy
+    filesystemAccess?: CoordinatorWorkerFilesystemAccess
+    blockedToolNames?: Iterable<string>
+    filesystemEnabled?: boolean
   } = {}
 ): string {
+  const effectiveToolStrategy = resolveFilesystemToolStrategy(
+    options.toolStrategy ?? "standard",
+    options
+  )
   const includeBackgroundExec = options.includeBackgroundExec ?? true
   const managedForegroundExec = options.managedForegroundExec === true
   const isWindows = process.platform === "win32"
@@ -3524,7 +3605,7 @@ ${shellGuidance}
 - All file paths use fully qualified absolute system paths
 - The workspace root is: \`${workspacePath}\`
 - Example: \`${examplePath}\`
-- To list the workspace root, use \`ls("${workspacePath}")\`
+${effectiveToolStrategy !== "standard" ? "- Inspect the workspace root with tools appropriate for the active tool strategy" : `- To list the workspace root, use \`ls("${workspacePath}")\``}
 - Always use full absolute paths for all file operations
 `
 
@@ -3593,7 +3674,10 @@ ${shellGuidance}
     workingDirSection +
     backgroundExecSection +
     sandboxSection +
-    renderBaseSystemPrompt({ includeSubagents: options.includeSubagents }) +
+    renderBaseSystemPrompt({
+      includeSubagents: options.includeSubagents,
+      toolStrategy: effectiveToolStrategy
+    }) +
     memorySection
   )
 }
@@ -4758,6 +4842,8 @@ function applyDeployUnitMappingsToAgentmdLoadStatus(
 }
 
 export interface CreateAgentRuntimeOptions {
+  /** Internal inheritance override; absent on top-level runs to capture the global setting. */
+  toolStrategy?: AgentToolStrategy
   /** Thread ID - REQUIRED for per-thread checkpointing */
   threadId: string
   /** Per-thread output style. Applied only to the foreground normal-mode main agent. */
@@ -5114,6 +5200,9 @@ export async function prepareForegroundRuntimeToolCatalog(
 export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Promise<DeepAgent> {
   const completionCancellation = createCompletionRuntimeCancellation(options.abortSignal)
   options = { ...options, abortSignal: completionCancellation.signal }
+  // Snapshot once per runtime. Nested runtimes inherit this preference, NOT the
+  // parent's role-filtered effective value. Rebuilt top-level runtimes read anew.
+  const toolStrategy = normalizeAgentToolStrategy(options.toolStrategy ?? getAgentToolStrategy())
   const {
     threadId,
     agentId,
@@ -5240,6 +5329,11 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
     agentMode,
     memoryEnabled: memoryEnabledForThread
   })
+  const skillVisibility: ProjectModeSkillScope = {
+    projectMode: runtimePolicy.isProjectMode,
+    boundPluginId: pluginId,
+    boundPluginName: pluginName
+  }
   // Keep the registry catalogue tied to the task tool itself. This enables the
   // same task types in Multi and Workflow while excluding Solo, coordinator,
   // and every leaf runtime through the existing mainSubagentsEnabled policy.
@@ -5268,8 +5362,10 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
   // Only the explicit slash selection counts, not auto-routed skills.
   if (isCoordinatorMode && options.coordinatorExplicitSelectedSkill) {
     const sel = options.coordinatorExplicitSelectedSkill
-    const ownerPluginId = resolvePluginIdForSkillPath(sel.skillPath)
-    hookScope.activateSkill(sel.skillName, ownerPluginId, sel.skillPath)
+    if (isSkillPathVisibleForProjectMode(sel.skillPath, skillVisibility)) {
+      const ownerPluginId = resolvePluginIdForSkillPath(sel.skillPath)
+      hookScope.activateSkill(sel.skillName, ownerPluginId, sel.skillPath)
+    }
   }
   const resolveHooksForContext = (event: HookEvent, context: HookContext) =>
     resolveEnabledHooksForRun(
@@ -5419,6 +5515,8 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
   // file root and Git guard remain active when it is "none"; a configured Codex
   // sandbox adds defense in depth but is not required to use worktree isolation.
   const windowsSandbox = process.platform === "win32" ? getWindowsSandboxMode() : "none"
+  // Main and task-agent prompts must see the resolved shell, not a cold-cache cmd fallback.
+  await LocalSandbox.ensureShellReady(windowsSandbox)
   console.log(
     `[Runtime] codex.exe: ${codexExePath}, exists: ${codexExists}, sandboxMode: ${windowsSandbox}`
   )
@@ -5641,6 +5739,7 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
         pluginWorkspace,
         featureId,
         harnessProjectId,
+        harnessAdapterId: pluginId,
         harnessAdapterName,
         harnessAdapterVersion,
         harnessNodeName,
@@ -5714,6 +5813,10 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
   // agent would be told the host workspace is its root and write outside its
   // worktree (the sandbox would refuse, so it would just fail confusingly).
   let systemPrompt = getSystemPrompt(fileRoot, windowsSandbox, {
+    toolStrategy: windowsSandbox === "readonly" ? "standard" : toolStrategy,
+    filesystemAccess: options.filesystemAccess,
+    blockedToolNames: runtimeBlockedToolNames,
+    filesystemEnabled: !isCoordinatorMode,
     includeBackgroundExec: executeToolAvailable && !isReadOnlyRuntime,
     managedForegroundExec: managedExecution,
     includeSubagents: mainSubagentsEnabled,
@@ -5867,8 +5970,12 @@ The workspace root is: ${fileRoot}`
   console.log("[Runtime] Skill middleware sources:", skillsSources)
 
   // Merge plugin skills sources
-  const pluginSkillSourceMetadata = getEnabledPluginSkillSourceMetadata()
-  const pluginSkillsSources = await getEnabledPluginSkillMiddlewareSources()
+  const allPluginSkillSourceMetadata = getEnabledPluginSkillSourceMetadata()
+  const pluginSkillSourceMetadata = allPluginSkillSourceMetadata.filter((source) =>
+    isSkillVisibleForProjectMode(source, skillVisibility)
+  )
+  const pluginSkillsSources =
+    await getEnabledPluginSkillMiddlewareSources(pluginSkillSourceMetadata)
   console.log("[Runtime] Plugin skills sources:", pluginSkillsSources)
   console.log("[Runtime] Plugin skills sources count:", pluginSkillsSources.length)
 
@@ -5926,6 +6033,7 @@ The workspace root is: ${fileRoot}`
       pluginWorkspace,
       featureId,
       harnessProjectId,
+      harnessAdapterId: pluginId,
       harnessAdapterName,
       harnessAdapterVersion,
       harnessNodeName,
@@ -6110,6 +6218,9 @@ The workspace root is: ${fileRoot}`
             const worktreeIsolation = subagentOptions.worktreeIsolation
             const subagentFileRoot = worktreeIsolation?.workspaceRoot ?? workspacePath
             const subagentRuntime = await createAgentRuntime({
+              // Snapshot at leaf creation: approved file edits should not be steered
+              // into separately gated shell writes. YOLO leaves keep the preference.
+              toolStrategy: resolveWorkflowToolStrategy(toolStrategy, getYoloMode()),
               threadId: subagentOptions.threadId,
               agentId: subagentOptions.agentId,
               actionStationarityTurnId: subagentOptions.threadId,
@@ -6296,6 +6407,7 @@ The workspace root is: ${fileRoot}`
     pluginWorkspace,
     featureId,
     harnessProjectId,
+    harnessAdapterId: pluginId,
     harnessAdapterName,
     harnessAdapterVersion,
     harnessNodeName,
@@ -6487,7 +6599,16 @@ Use the same worker thread context for follow-up instructions. ${scratchpadGuida
       workerTracer.setUsedSkills(usedSkills)
       workerTracer.setSkillSource(skillSource)
       workerTracer.setEvolvedSkills(workerSkillUsageDetector.getUsedEvolvedSkillNames())
-      setAdoptionContext(workerInput.workerThreadId, { usedSkills, skillSource })
+      // Workers own their own thread, so recordGen reads the worker's adoption
+      // context. Resolve the fallback chain (this run → this worker thread →
+      // the coordinator thread) instead of publishing the bare detector result,
+      // which drops attribution the coordinator had already established.
+      syncSubagentSkillAttribution({
+        threadId: workerInput.workerThreadId,
+        parentThreadId: workerInput.parentThreadId,
+        currentRunSkills: usedSkills,
+        currentRunSkillSource: skillSource
+      })
     }
     const cancelWorkerBackgroundTasks = (): void => {
       LocalSandbox.cancelBackgroundTasks(workerInput.workerThreadId)
@@ -6602,6 +6723,17 @@ Use the same worker thread context for follow-up instructions. ${scratchpadGuida
         )
         workerRuntimeTraceContext = workerTracer?.getTraceContext() ?? traceContext
       }
+      const workerPromptMessage = new HumanMessage({
+        content: effectiveWorkerPrompt,
+        id: randomUUID()
+      })
+      const workerTraceRecorder = workerTracer
+        ? new TurnTraceRecorder({
+            tracer: workerTracer,
+            userMessageId: workerPromptMessage.id,
+            requireUserMessageAnchor: true
+          })
+        : undefined
       const streamConfig = {
         configurable: { thread_id: workerInput.workerThreadId },
         callbacks: [],
@@ -6619,6 +6751,7 @@ Use the same worker thread context for follow-up instructions. ${scratchpadGuida
               stream: { mode: mode as "messages" | "values", data }
             })
           }
+          if (mode === "values") workerTraceRecorder?.onRawValues(data)
           const valuesContext = workerValuesSnapshotAccumulator?.createContext(mode, data)
           runTraceSideEffect("CoordinatorWorker Skill observer", () => {
             if (observeWorkerSkillUsage(mode, data, workerSkillUsageDetector, valuesContext)) {
@@ -6718,6 +6851,7 @@ Use the same worker thread context for follow-up instructions. ${scratchpadGuida
         try {
           workerAgent = await createAgentRuntime({
             threadId: workerInput.workerThreadId,
+            toolStrategy,
             actionStationarityTurnId: workerActionStationarityTurnId,
             approvalThreadId: workerInput.parentThreadId,
             workspacePath,
@@ -6745,10 +6879,7 @@ Use the same worker thread context for follow-up instructions. ${scratchpadGuida
             onFailureFuseNotice
           })
 
-          workerStream = await workerAgent.stream(
-            { messages: [new HumanMessage(effectiveWorkerPrompt)] },
-            streamConfig
-          )
+          workerStream = await workerAgent.stream({ messages: [workerPromptMessage] }, streamConfig)
           usedWorkerModelId = candidateId
           runTraceSideEffect("CoordinatorWorker", () => workerTracer?.setModelId(candidateId))
           break
@@ -6793,6 +6924,7 @@ Use the same worker thread context for follow-up instructions. ${scratchpadGuida
           const nextCandidate = remainingWorkerCandidates.shift()!
           workerAgent = await createAgentRuntime({
             threadId: workerInput.workerThreadId,
+            toolStrategy,
             actionStationarityTurnId: workerActionStationarityTurnId,
             approvalThreadId: workerInput.parentThreadId,
             workspacePath,
@@ -6848,6 +6980,7 @@ Use the same worker thread context for follow-up instructions. ${scratchpadGuida
 
 Access limits: read-only handoff continuation. Do not modify files, run commands, or call tools. Return only the concise final handoff covering files changed or inspected, commands run and results, remaining risks, and any verification still needed.`
           const handoffAgent = await createAgentRuntime({
+            toolStrategy,
             threadId: workerInput.workerThreadId,
             actionStationarityTurnId: workerActionStationarityTurnId,
             approvalThreadId: workerInput.parentThreadId,
@@ -7426,6 +7559,7 @@ Access limits: read-only handoff continuation. Do not modify files, run commands
 
   const agent = createDeepAgent({
     completionCancellation,
+    middleware: traceContext?.harnessFeature ? [createStageUsageMiddleware(traceContext)] : [],
     model,
     summarizationModel: contextCompactionModel,
     tools: mainTools,
@@ -7435,6 +7569,7 @@ Access limits: read-only handoff continuation. Do not modify files, run commands
     backend,
     systemPrompt,
     outputStyle,
+    toolStrategy: windowsSandbox === "readonly" ? "standard" : toolStrategy,
     onFinalSystemPrompt,
     filesystemSystemPrompt,
     subagentExtraSystemPrompt: taskSubagentExtraSystemPrompt,
@@ -7520,6 +7655,7 @@ Access limits: read-only handoff continuation. Do not modify files, run commands
           pluginWorkspace,
           featureId,
           harnessProjectId,
+          harnessAdapterId: pluginId,
           harnessAdapterName,
           harnessAdapterVersion,
           harnessNodeName,
@@ -7557,6 +7693,7 @@ Access limits: read-only handoff continuation. Do not modify files, run commands
           pluginWorkspace,
           featureId,
           harnessProjectId,
+          harnessAdapterId: pluginId,
           harnessAdapterName,
           harnessAdapterVersion,
           harnessNodeName,
@@ -7606,6 +7743,7 @@ Access limits: read-only handoff continuation. Do not modify files, run commands
           pluginWorkspace,
           featureId,
           harnessProjectId,
+          harnessAdapterId: pluginId,
           harnessAdapterName,
           harnessAdapterVersion,
           harnessNodeName,
@@ -7645,6 +7783,7 @@ Access limits: read-only handoff continuation. Do not modify files, run commands
           pluginWorkspace,
           featureId,
           harnessProjectId,
+          harnessAdapterId: pluginId,
           harnessAdapterName,
           harnessAdapterVersion,
           harnessNodeName,
@@ -7697,6 +7836,7 @@ Access limits: read-only handoff continuation. Do not modify files, run commands
         pluginWorkspace,
         featureId,
         harnessProjectId,
+        harnessAdapterId: pluginId,
         harnessAdapterName,
         harnessAdapterVersion,
         harnessNodeName,

@@ -35,6 +35,9 @@ import { normalizeWindowCloseBehavior, type WindowCloseBehavior } from "../share
 import { readdir, rm, mkdir, readFile, writeFile } from "fs/promises"
 import {
   isAgentGraphRecursionLimit,
+  isAgentToolStrategy,
+  normalizeAgentToolStrategy,
+  type AgentToolStrategy,
   isWorkflowWorktreeRemoveTimeoutMinutes,
   isWorkflowWorktreeTimeoutMinutes,
   normalizeAgentGraphRecursionLimit,
@@ -99,6 +102,7 @@ import {
   calculateSummarizationTriggerTokens
 } from "../shared/model-token-budget"
 import { getHookDateKey } from "../shared/hook-time"
+import { isProjectModePluginRoot } from "./harness-board/plugin-mode"
 
 const OPENWORK_DIR = getCmbCoworkAgentDataRoot()
 const ENV_FILE = join(OPENWORK_DIR, ".env")
@@ -2075,6 +2079,23 @@ export function setWindowCloseBehavior(behavior: WindowCloseBehavior): WindowClo
 
 const AGENT_GRAPH_RECURSION_LIMIT_KEY = "agentGraphRecursionLimit"
 
+const AGENT_TOOL_STRATEGY_KEY = "agentToolStrategy"
+
+export function getStoredAgentToolStrategy(): AgentToolStrategy {
+  try {
+    return normalizeAgentToolStrategy(getSettingsStore().get(AGENT_TOOL_STRATEGY_KEY))
+  } catch (error) {
+    console.warn("[Storage] Failed to load tool strategy; using standard:", error)
+    return "standard"
+  }
+}
+
+export function setStoredAgentToolStrategy(value: unknown): AgentToolStrategy {
+  if (!isAgentToolStrategy(value)) throw new Error("Invalid agent tool strategy")
+  getSettingsStore().set(AGENT_TOOL_STRATEGY_KEY, value)
+  return value
+}
+
 export function getStoredAgentGraphRecursionLimit(): number {
   try {
     return normalizeAgentGraphRecursionLimit(
@@ -3282,10 +3303,12 @@ export function getEnabledPluginSkillsSources(): string[] {
   return _pluginSkillsCache
 }
 
-export async function getEnabledPluginSkillMiddlewareSources(): Promise<string[]> {
+export async function getEnabledPluginSkillMiddlewareSources(
+  sources = getEnabledPluginSkillSourceMetadata()
+): Promise<string[]> {
   const rootOnlySources: string[] = []
   const nestedSources: string[] = []
-  for (const source of getEnabledPluginSkillSourceMetadata()) {
+  for (const source of sources) {
     if (source.maxDepth === 0) rootOnlySources.push(source.sourceDir)
     else nestedSources.push(source.sourceDir)
   }
@@ -3297,6 +3320,7 @@ export interface PluginSkillSourceMetadata {
   pluginId: string
   pluginName: string
   pluginRoot: string
+  isProjectModePlugin: boolean
   maxDepth?: number
 }
 
@@ -3311,12 +3335,14 @@ export function getEnabledPluginSkillSourceMetadata(): PluginSkillSourceMetadata
   const sources: PluginSkillSourceMetadata[] = []
   for (const plugin of plugins) {
     const manifest = readPluginManifest(plugin.path)?.manifest ?? null
+    const isProjectModePlugin = isProjectModePluginRoot(plugin.path)
     for (const source of getPluginSkillSearchSources(plugin.path, manifest)) {
       sources.push({
         sourceDir: source.sourceDir,
         pluginId: plugin.id,
         pluginName: plugin.name,
         pluginRoot: plugin.path,
+        isProjectModePlugin,
         maxDepth: source.maxDepth
       })
     }
@@ -4355,6 +4381,7 @@ interface SkillHookSource {
   pluginId?: string
   pluginName?: string
   pluginRoot?: string
+  isProjectModePlugin?: boolean
 }
 
 function collectSkillHookSourcesFromDir(
@@ -4362,7 +4389,12 @@ function collectSkillHookSourcesFromDir(
   runtimePolicy: DisabledSkillRuntimePolicy,
   respectDisabledList: boolean,
   seenDirs: Set<string>,
-  pluginMeta?: { pluginId: string; pluginName: string; pluginRoot: string },
+  pluginMeta?: {
+    pluginId: string
+    pluginName: string
+    pluginRoot: string
+    isProjectModePlugin: boolean
+  },
   maxDepth?: number
 ): SkillHookSource[] {
   const result: SkillHookSource[] = []
@@ -4407,7 +4439,12 @@ function getEnabledSkillHookSources(): SkillHookSource[] {
         runtimePolicy,
         false,
         seenDirs,
-        { pluginId: source.pluginId, pluginName: source.pluginName, pluginRoot: source.pluginRoot },
+        {
+          pluginId: source.pluginId,
+          pluginName: source.pluginName,
+          pluginRoot: source.pluginRoot,
+          isProjectModePlugin: source.isProjectModePlugin
+        },
         source.maxDepth
       )
     )
@@ -4495,7 +4532,14 @@ function parseSkillHooks(skillDir: string, skillName: string, hooksRelPath: stri
 
 function buildEnabledSkillHookMetadata(): SkillHookMetadata[] {
   return getEnabledSkillHookSources().flatMap(
-    ({ skillDir, skillName, pluginId, pluginName, pluginRoot }): SkillHookMetadata[] => {
+    ({
+      skillDir,
+      skillName,
+      pluginId,
+      pluginName,
+      pluginRoot,
+      isProjectModePlugin
+    }): SkillHookMetadata[] => {
       const skillMdPath = join(skillDir, "SKILL.md")
       const addSkillMeta = (hookPath: string, hooks: HookConfig[]): SkillHookMetadata[] =>
         hooks.map((hook) => ({
@@ -4507,6 +4551,7 @@ function buildEnabledSkillHookMetadata(): SkillHookMetadata[] {
           pluginId,
           pluginName,
           pluginRoot,
+          isProjectModePlugin,
           hookSourceType: "skill",
           hookSourceRoot: skillDir,
           hookSourcePath: hookPath
