@@ -1350,6 +1350,8 @@ function requireDashboardAnalysisAgentAccess(): void {
 }
 
 // 「生成但未提交分析」（漏斗首层下钻）的访问门槛：
+// - 项目模式：继承项目运营概览的数据权限；
+// 平台模式沿用以下规则：
 // - 管理员（VITE_TRACE_EVOLVER_REVIEW_ADMIN_YST_IDS）：可看全部数据；
 // - 非管理员但在 VITE_DASHBOARD_UNRESTRICTED_YST_IDS 名单内：可看与自己 upperOrgLv1 相同的数据；
 // - 其他普通登录用户：仅可看自己的数据。
@@ -1359,6 +1361,7 @@ interface UncommittedAnalysisAccess {
   sapId: string
   ystId: string
   upperOrgLv1: string
+  projectAccessFilter: Record<string, unknown> | null
 }
 
 function isDashboardUncommittedAnalysisAllowed(
@@ -1371,9 +1374,17 @@ function isDashboardUncommittedAnalysisAllowed(
 function requireDashboardUncommittedAnalysisAccess(): UncommittedAnalysisAccess {
   const access = getDashboardAccessContext()
   if (import.meta.env.DEV) {
-    return { admin: true, selfOnly: false, sapId: "dev", ystId: "dev", upperOrgLv1: "" }
+    return {
+      admin: true,
+      selfOnly: false,
+      sapId: "dev",
+      ystId: "dev",
+      upperOrgLv1: "",
+      projectAccessFilter: null
+    }
   }
   if (!access.loggedIn) throw new Error("请先登录后再查看生成但未提交分析")
+  const projectAccessFilter = buildProjectModeAccessFilter(access)
   const admin = Boolean(access.ystId) && getTraceEvolverReviewAdminIds().has(access.ystId)
   if (admin) {
     return {
@@ -1381,7 +1392,8 @@ function requireDashboardUncommittedAnalysisAccess(): UncommittedAnalysisAccess 
       selfOnly: false,
       sapId: access.sapId,
       ystId: access.ystId,
-      upperOrgLv1: access.upperOrgLv1
+      upperOrgLv1: access.upperOrgLv1,
+      projectAccessFilter
     }
   }
   if (access.unrestricted && access.upperOrgLv1) {
@@ -1390,7 +1402,8 @@ function requireDashboardUncommittedAnalysisAccess(): UncommittedAnalysisAccess 
       selfOnly: false,
       sapId: access.sapId,
       ystId: access.ystId,
-      upperOrgLv1: access.upperOrgLv1
+      upperOrgLv1: access.upperOrgLv1,
+      projectAccessFilter
     }
   }
   return {
@@ -1398,7 +1411,8 @@ function requireDashboardUncommittedAnalysisAccess(): UncommittedAnalysisAccess 
     selfOnly: true,
     sapId: access.sapId,
     ystId: access.ystId,
-    upperOrgLv1: access.upperOrgLv1
+    upperOrgLv1: access.upperOrgLv1,
+    projectAccessFilter
   }
 }
 
@@ -3680,16 +3694,19 @@ function uncommittedScopeFilters(
   access: UncommittedAnalysisAccess
 ): Record<string, unknown>[] {
   const filters: Record<string, unknown>[] = []
-  // 数据权限与界面筛选 AND 叠加：普通用户锁本人，名单用户锁本室，管理员不加身份约束。
-  if (access.selfOnly) {
+  const projectId = typeof options?.projectId === "string" ? options.projectId.trim() : ""
+  const featureSlug = typeof options?.featureSlug === "string" ? options.featureSlug.trim() : ""
+  // 项目下钻沿用项目概览权限，平台模式沿用全量 / 本室 / 本人的限制。
+  // 权限约束继续与界面筛选 AND 叠加。
+  if (options?.projectMode || projectId || featureSlug) {
+    if (access.projectAccessFilter) filters.push(access.projectAccessFilter)
+  } else if (access.selfOnly) {
     filters.push(buildUncommittedSelfUserFilter(access))
   } else if (!access.admin && access.upperOrgLv1) {
     filters.push(buildUpperOrgLv1Filter(access.upperOrgLv1))
   }
   const orgFilterClause = buildUpperOrgLv1ListFilter(normalizeUpperOrgLv1List(options?.upperOrgLv1))
   if (orgFilterClause) filters.push(orgFilterClause)
-  const projectId = typeof options?.projectId === "string" ? options.projectId.trim() : ""
-  const featureSlug = typeof options?.featureSlug === "string" ? options.featureSlug.trim() : ""
   if (projectId) {
     filters.push({ term: { "properties.harnessProjectId": projectId } })
   } else if (options?.projectMode || featureSlug) {
@@ -3725,7 +3742,7 @@ async function fetchUncommittedRanking(
   range: TimeRange,
   options?: UncommittedScopeOptions
 ): Promise<UncommittedRankingData> {
-  // 管理员可看全部；unrestricted 名单用户看本室；普通用户只看本人。
+  // 项目模式继承项目概览权限，平台模式保留原有身份范围。
   const access = requireDashboardUncommittedAnalysisAccess()
   const scopeFilters = uncommittedScopeFilters(options, access)
 
@@ -3879,7 +3896,7 @@ async function fetchUncommittedDetail(
   range: TimeRange,
   options?: UncommittedScopeOptions
 ): Promise<UncommittedDetailData> {
-  // 管理员可看全部；unrestricted 名单用户看本室；普通用户只看本人。
+  // 项目模式继承项目概览权限，平台模式保留原有身份范围。
   const access = requireDashboardUncommittedAnalysisAccess()
   const normalizedSapId = sapId.trim()
   if (!normalizedSapId) throw new Error("sapId is required")
