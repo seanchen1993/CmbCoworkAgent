@@ -59,6 +59,12 @@ public final class JdbcTaskStore {
             try {
                 Task value = BOUNDARY.readResponse("createTask", 201, r.getBytes(4), TaskResult.class).task;
                 if (!space.equals(value.spaceId) || !id.equals(value.id) || !r.getString(1).equals(value.groupId) || r.getLong(2) != value.version || !r.getString(3).equals(value.taskNumber) || r.next()) throw JdbcApplicationStore.corrupt();
+                if (value.status != TaskStatus.ACTIVE || !value.inputArtifactVersions.isEmpty() || value.stages.size() != StageKind.values().length || !value.currentStageId.equals(value.stages.get(0).id)) throw JdbcApplicationStore.corrupt();
+                Set<String> stageIds = new HashSet<String>();
+                for (int i = 0; i < value.stages.size(); i++) {
+                    Stage stage = value.stages.get(i);
+                    if (!stageIds.add(stage.id) || stage.kind != StageKind.values()[i] || stage.status != (i == 0 ? StageStatus.ACTIVE : StageStatus.PENDING) || !stage.inputArtifactVersions.isEmpty() || !stage.outputArtifactVersions.isEmpty()) throw JdbcApplicationStore.corrupt();
+                }
                 return value;
             } catch (ContractBoundary.Failure failure) { throw JdbcApplicationStore.corrupt(); }
         }

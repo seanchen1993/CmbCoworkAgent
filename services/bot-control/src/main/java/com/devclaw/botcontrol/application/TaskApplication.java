@@ -146,10 +146,11 @@ public final class TaskApplication {
         try {
             if (op == Operation.CREATE_TASK) {
                 Task historical = boundary.readResponse(op.wire, r.status, r.body, TaskResult.class).task; Task stored = task(tasks, r.target, true);
-                if (!actor.spaceId.equals(historical.spaceId) || !r.target.equals(historical.id) || !stored.groupId.equals(historical.groupId) || !stored.taskNumber.equals(historical.taskNumber) || !stored.createdAt.equals(historical.createdAt) || !stored.title.equals(historical.title) || !stored.goal.equals(historical.goal) || historical.version != 1L || !Arrays.equals(JdbcApplicationStore.json(stored.stages), JdbcApplicationStore.json(historical.stages)) || !Objects.equals(stored.currentStageId, historical.currentStageId)) throw JdbcApplicationStore.corrupt();
+                if (!actor.spaceId.equals(historical.spaceId) || !r.target.equals(historical.id) || !stored.groupId.equals(historical.groupId) || !stored.taskNumber.equals(historical.taskNumber) || !stored.createdAt.equals(historical.createdAt) || !historical.createdAt.equals(historical.updatedAt) || !stored.title.equals(historical.title) || !stored.goal.equals(historical.goal) || historical.version != 1L || historical.status != TaskStatus.ACTIVE || !historical.inputArtifactVersions.isEmpty() || !Arrays.equals(JdbcApplicationStore.json(stored.stages), JdbcApplicationStore.json(historical.stages)) || !Objects.equals(stored.currentStageId, historical.currentStageId)) throw JdbcApplicationStore.corrupt();
             } else {
                 TaskMessageResult historical = boundary.readResponse(op.wire, r.status, r.body, TaskMessageResult.class); TaskMessageResult stored = tasks.message(r.target);
                 if (!actor.spaceId.equals(historical.message.spaceId) || !actor.principalId.equals(historical.message.authorPrincipalId) || !path.equals(historical.message.taskId) || !r.target.equals(historical.message.id) || !Arrays.equals(JdbcApplicationStore.json(historical), JdbcApplicationStore.json(stored))) throw JdbcApplicationStore.corrupt();
+                if (task(tasks, path, true).version < historical.taskVersion || !historical.message.artifactVersions.isEmpty()) throw JdbcApplicationStore.corrupt();
             }
         } catch (ContractBoundary.Failure failure) { throw JdbcApplicationStore.corrupt(); }
     }
