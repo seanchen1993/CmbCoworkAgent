@@ -7941,7 +7941,12 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               skillHookKeys,
               skillUseTracker,
               onAgentsPromptLoadStatus,
-              onFileMutation: autoCommit.onFileMutation,
+              onFileMutation: (filePath, kind) => {
+                autoCommit.onFileMutation?.(filePath)
+                // Shell edits are observed by the sandbox rather than read off
+                // the stream; memory maintenance still lists them with the turn.
+                if (kind === "shell") fileWritePaths.push(filePath.replace(/\\/g, "/"))
+              },
               onCoordinatorWorkerHookResult,
               onCoordinatorWorkerEvent,
               onCoordinatorNotificationAction,

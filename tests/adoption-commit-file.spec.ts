@@ -26,6 +26,10 @@ let flushAdoptionEventOutbox!: AdoptionTrackerModule["flushAdoptionEventOutbox"]
 let initializeAdoptionTracker!: AdoptionTrackerModule["initializeAdoptionTracker"]
 let measureForCommit!: AdoptionTrackerModule["measureForCommit"]
 let recordGen!: AdoptionTrackerModule["recordGen"]
+let recordShellEdit!: AdoptionTrackerModule["recordShellEdit"]
+let setAdoptionContext!: AdoptionTrackerModule["setAdoptionContext"]
+let clearAdoptionContext!: AdoptionTrackerModule["clearAdoptionContext"]
+let hasPendingGenerationsForCommit!: AdoptionTrackerModule["hasPendingGenerationsForCommit"]
 let shutdownAdoptionTracker!: AdoptionTrackerModule["shutdownAdoptionTracker"]
 let waitForAdoptionRecordGenIdleForTest!: AdoptionTrackerModule["waitForAdoptionRecordGenIdleForTest"]
 let NoopEventReporter!: EventReporterModule["NoopEventReporter"]
@@ -341,6 +345,114 @@ async function main(): Promise<void> {
   await testEditAndNewFileInOneCommit()
   await testDeletedFile()
   await testRootCommit()
+  await testShellGenerationDuringCommit()
+  await testShellAndFileToolOrdering()
+}
+
+async function testShellGenerationDuringCommit(): Promise<void> {
+  await withTracker(async (reporter) => {
+    await withRepo("commit-file-shell", true, async (repo) => {
+      const file = join(repo, "src", "Example.ts")
+      await writeFile(file, "export const value = 2\n")
+      let releaseStage!: (stage: { nodeName: string; nodeStatus: string }) => void
+      const harnessStagePromise = new Promise<{ nodeName: string; nodeStatus: string }>(
+        (resolve) => {
+          releaseStage = resolve
+        }
+      )
+      setAdoptionContext("shell", {
+        traceId: "shell-trace",
+        modelId: "shell-model",
+        usedSkills: ["implementation-v1.0.0"],
+        harnessProjectId: "project",
+        harnessFeatureSlug: "feature"
+      })
+      const generation = recordShellEdit({
+        threadId: "shell",
+        filePath: file,
+        workspacePath: repo,
+        beforeContent: Buffer.from("export const value = 1\n"),
+        afterContent: Buffer.from("export const value = 2\n"),
+        harnessStagePromise
+      })
+      clearAdoptionContext("shell")
+      await git(repo, ["add", "."])
+      const captureTimeMs = Date.now(),
+        snapshots = await captureStagedSnapshotsForCommit(repo)
+      assert(
+        hasPendingGenerationsForCommit(snapshots, captureTimeMs),
+        "Git-hook gate must see accepted asynchronous Shell generations"
+      )
+      await git(repo, ["commit", "-qm", "shell"])
+      const sha = await git(repo, ["rev-parse", "HEAD"])
+      assert(
+        !(await measureForCommit(snapshots, sha, captureTimeMs, repo)),
+        "in-flight generation must defer, not complete an empty measurement"
+      )
+      releaseStage({ nodeName: "implementation", nodeStatus: "in progress" })
+      await generation
+      assert(
+        await measureForCommit(snapshots, sha, captureTimeMs, repo),
+        "commit should measure after async generation completes"
+      )
+      await flushAdoptionEventOutbox()
+      const gen = reporter.events.find((event) => event.eventName === "code_gen")?.properties
+      assertEqual(gen?.tool, "execute", "Shell uses existing tool field")
+      assertEqual(gen?.traceId, "shell-trace", "finished turn must retain its trace")
+      assertEqual(gen?.modelId, "shell-model", "finished turn must retain its model")
+      assertEqual(gen?.usedSkills, ["implementation-v1.0.0"], "finished turn must retain skills")
+      assertEqual(gen?.harnessNodeName, "implementation", "Shell captures the mutation's stage")
+      assertEqual(
+        sum(reporter.named("code_commit_file", sha), "agentLineCount"),
+        1,
+        "Shell generation must reach commit attribution"
+      )
+    })
+  })
+  console.log("PASS asynchronous Shell generation retains context and defers commit measurement")
+}
+
+async function testShellAndFileToolOrdering(): Promise<void> {
+  await withTracker(async (reporter) => {
+    await withRepo("commit-file-shell-order", true, async (repo) => {
+      const file = join(repo, "src", "Example.ts")
+      await writeFile(file, "export const value = 3\n")
+      setAdoptionContext("shell", { traceId: "old-shell-trace" })
+      void recordShellEdit({
+        threadId: "shell",
+        filePath: file,
+        workspacePath: repo,
+        beforeContent: "",
+        afterContent: "export const value = 2\n"
+      })
+      setAdoptionContext("shell", { traceId: "new-file-trace" })
+      recordGen({
+        threadId: "shell",
+        filePath: file,
+        workspacePath: repo,
+        tool: "edit_file",
+        oldString: "export const value = 2\n",
+        generatedContent: "export const value = 3\n"
+      })
+      clearAdoptionContext("shell")
+      const sha = await commitAndMeasure(repo, "file-tool-after-shell")
+      const gens = reporter.events
+        .filter((event) => event.eventName === "code_gen")
+        .map((event) => event.properties)
+      assertEqual(
+        gens.map((gen) => gen?.traceId),
+        ["old-shell-trace", "new-file-trace"],
+        "same-file generation order must match mutation order"
+      )
+      assertEqual(
+        sum(reporter.named("code_commit_file", sha), "agentLineCount"),
+        1,
+        "replaced Shell line must not double-count the adopted file line"
+      )
+      assertRollupMatchesAdoptEvents(reporter, sha)
+    })
+  })
+  console.log("PASS asynchronous Shell and file-tool generations preserve same-file supersession")
 }
 
 async function run(): Promise<void> {
@@ -355,6 +467,10 @@ async function run(): Promise<void> {
       initializeAdoptionTracker,
       measureForCommit,
       recordGen,
+      recordShellEdit,
+      setAdoptionContext,
+      clearAdoptionContext,
+      hasPendingGenerationsForCommit,
       shutdownAdoptionTracker,
       waitForAdoptionRecordGenIdleForTest
     } = adoptionTracker)
