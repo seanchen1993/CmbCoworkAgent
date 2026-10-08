@@ -1,9 +1,11 @@
 # DevClaw Bot 当前交接点
 
-2026-10-07 · B02任务协作最小切片准备接续 · 定时续跑停用
+2026-10-08 · B02任务协作最小切片由主代理串行接续 · 定时续跑停用
 
 ## 最新手动继续（优先于下方已完成里程碑/历史停点）
 
+- 最新用户策略：没有可并行任务就不派子代理。本轮B02串行，由root从原local树97875ce2和保留的3modified/4untracked接手，B02-A02；旧A01只读、不创建替代代理。已核实当前执行树onlyroot、旧控制句柄not_found、实际相关pgrep/target lsof为空、reflog/文件前日停写且两次hash相同、无测试容器；不是仅根据ID缺失假定停止。此前36JUnit/1884是旧代码worker证据，不代替当前真库/集成验收。
+- 实际专用MySQL693a…OOMKilled/137停止，ES/S3原IDhealthy，daemon/network/volume及限额未变；guest可用2448MiB。先精确启动已核对原容器，保留数据/账号/私有凭据、不改内存/VM/宿主设置，再完成Task-check。自动实际PAUSED，权限和四接口边界不变。下方原high派单和running均为历史。
 - 用户最新直接要求“继续任务 不需要过度设计”。已完成 B00/B01 不重做；本轮只做 `tasks/B02.md` v1 的 createTask/getTask/createTaskMessage/getEvents 四个冻结接口，形成团队文本任务/澄清/活动基础。复用 Java 单体、JDK8、MySQL5.7、现有身份/回执/HTTP工具；不做 Run派发/Runtime/UI/招乎/S3产品API或工作流框架。
 - main 实际9b166e1e clean、worker8d743627 clean、同原high completed停写、pgrep无Java/Maven/test进程；6533d7只原三Docker完整ID healthy/回环32893-32877-32876，实际automation PAUSED。没有重跑B01、部署、改原dev账号/数据/读秘密或启动新资源。
 - 12:19:32UTC正式派单已成功：main ready cfd79ce7 正常FF原停止clean worker（ab33ee精确HEAD/clean，只8协调文件，pgrep最后exit1为空非merge失败），formal followup同 `/root/b01_contracts_high`（gpt-6.1-sol/high，禁止派生），提供准确树/任务/文件/验收/新报告 `attempts/B02-A01.md`。直接小步实现，无额外长设计门禁；目前未交付代码或测试通过。主代理只增量审查，不竞争builder/DB或同步活跃树，独占state/HANDOFF/tasks/reviews；自动续跑保持PAUSED。
