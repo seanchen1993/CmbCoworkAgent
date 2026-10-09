@@ -296,7 +296,9 @@ function ComputeCard({
   scope?: "dev" | "all"
 }): React.JSX.Element {
   const { totalTokens, totalInputTokens, totalOutputTokens, pushedAdoptedLines } = compute
-  const partialTokens = scope === "dev" && compute.tokenUsageReportedCalls < compute.modelCalls
+  const partialTokens =
+    scope === "dev" &&
+    (compute.tokenUsageIncomplete ?? compute.tokenUsageReportedCalls < compute.modelCalls)
   const cacheAvailable = scope === "all" || compute.cacheUsageReportedCalls > 0
   const cachePartial = scope === "dev" && compute.cacheUsageReportedCalls < compute.modelCalls
   const ratio = (value: number | null): string =>
@@ -408,8 +410,7 @@ function ComputeCard({
       </dl>
       {partialTokens ? (
         <p className="mt-3 text-xs text-muted-foreground">
-          模型用量覆盖 {formatCount(compute.tokenUsageReportedCalls)} /{" "}
-          {formatCount(compute.modelCalls)} 次调用；“≥”表示已采集的下限。
+          部分模型调用未返回完整用量，“≥”表示已采集的下限。
         </p>
       ) : null}
       {!compute.tokenTotalsConsistent ? (
@@ -498,7 +499,9 @@ function PluginComputeTable({
       metrics.traceCount === 0
     )
       return "—"
-    const partial = scope === "dev" && metrics.tokenUsageReportedCalls < metrics.modelCalls
+    const partial =
+      scope === "dev" &&
+      (metrics.tokenUsageIncomplete ?? metrics.tokenUsageReportedCalls < metrics.modelCalls)
     return `${partial ? "≥" : ""}${formatTokensPerLine(metrics.tokensPerAdoptedLine)}`
   }
   return (
@@ -560,7 +563,9 @@ function PluginComputeTable({
                     {row.versions.join("、") || "未记录"}
                   </td>
                   <td className="px-3 py-2">
-                    {scope === "dev" && metrics.tokenUsageReportedCalls < metrics.modelCalls
+                    {scope === "dev" &&
+                    (metrics.tokenUsageIncomplete ??
+                      metrics.tokenUsageReportedCalls < metrics.modelCalls)
                       ? "≥"
                       : ""}
                     {formatCompact(metrics.totalTokens)}
@@ -706,7 +711,7 @@ function ComputeSection({
       {loading ? (
         <div className="flex items-center gap-2 py-8 text-sm text-muted-foreground">
           <Loader2 className="size-4 animate-spin" />
-          更新算力统计
+          正在加载数据
         </div>
       ) : (
         <>
