@@ -2767,6 +2767,8 @@ export function DashboardView(): React.JSX.Element {
     projectModeLoading,
     projectModeError,
     efficiency,
+    efficiencyPluginFilter,
+    setEfficiencyPluginFilter,
     efficiencyLoading,
     efficiencyError,
     fetchEfficiency,
@@ -5448,6 +5450,8 @@ export function DashboardView(): React.JSX.Element {
           ) : activeMainTab === "efficiency" && projectModeAllowed ? (
             <EfficiencyPanel
               data={efficiency}
+              pluginFilter={efficiencyPluginFilter}
+              onPluginFilterChange={setEfficiencyPluginFilter}
               loading={efficiencyLoading}
               error={efficiencyError}
               range={range}

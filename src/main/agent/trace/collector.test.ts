@@ -75,6 +75,39 @@ afterEach(async () => {
 })
 
 describe("TraceCollector completion", () => {
+  it("uploads per-stage cache totals beyond the model-detail cap", async () => {
+    const tracer = new TraceCollector("stage-cache-cap", "go", "test", {
+      includeSkillEval: false,
+      harnessFeature: { projectId: "cache-p", slug: "f", nodeName: "Biz-需求" }
+    })
+    for (let index = 0; index < 1000; index++) {
+      tracer.recordModelCall({
+        startedAt: new Date().toISOString(),
+        inputMessages: [],
+        outputMessage: { role: "assistant", content: "" },
+        toolCalls: [],
+        stageAttribution: { nodeName: index < 512 ? "Biz-需求" : "Dev-实现" },
+        tokenUsage: {
+          inputTokens: 100,
+          outputTokens: 5,
+          totalTokens: 105,
+          cacheReadTokens: index < 512 ? 60 : 80
+        }
+      })
+    }
+    const trace = await tracer.finish("success")
+    expect(trace.modelCalls).toHaveLength(512)
+    expect(trace.totalTokens).toBe(105000)
+    expect(trace.cacheReadTokens).toBe(69760)
+    expect(trace.stageUsageComplete).toBe(true)
+    expect(trace.stageUsage?.find((row) => row.nodeName === "Dev-实现")).toMatchObject({
+      cacheReadTokens: 39040,
+      cacheUsageReportedCalls: 488,
+      totalTokens: 51240
+    })
+    expect(sanitizeTraceForCloudUpload(trace).stageUsage).toEqual(trace.stageUsage)
+  })
+
   it.each(["raw", "serialized"])(
     "captures call-start stages through the real graph (%s), including generated message IDs",
     async (transport) => {

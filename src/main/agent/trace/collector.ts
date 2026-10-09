@@ -53,7 +53,6 @@ import type {
 } from "./types"
 import { NoopTraceReporter, TRACE_OBSERVABILITY_SCHEMA_VERSION } from "./types"
 import { hasSuspectedTechnicalDetailSupplement } from "./technical-detail-supplement"
-import { summarizeTraceCacheTokens } from "./token-usage"
 import { app, safeStorage } from "electron"
 import { getLocalIP } from "../../net-utils"
 import { getUserInfo } from "../../storage"
@@ -760,6 +759,7 @@ export class TraceCollector {
   private observedInputTokens = 0
   private observedOutputTokens = 0
   private observedTotalTokens = 0
+  private observedCacheReadTokens = 0
 
   constructor(
     threadId: string,
@@ -1232,11 +1232,13 @@ export class TraceCollector {
       this.observedInputTokens += input
       this.observedOutputTokens += output
       this.observedTotalTokens += usage.totalTokens ?? input + output
+      const cacheRead = usage.cacheReadTokens ?? 0
+      if (Number.isFinite(cacheRead) && cacheRead > 0) this.observedCacheReadTokens += cacheRead
     }
     if (this.modelCalls.length >= TRACE_MAX_MODEL_CALL_SKELETONS) return
-    // Token totals are summed off this array by the dashboard, and per-call
-    // usage is worth keeping on its own. Neither a spent budget nor the
-    // full-entry cap should cost the entry: they cost its messages.
+    // Per-call usage is worth keeping alongside the independent totals.
+    // Neither a spent budget nor the full-entry cap should cost the entry:
+    // they cost its messages.
     if (this.modelCalls.length >= TRACE_MAX_MODEL_CALLS || !this.collectionBudget.canAdd(512)) {
       // Only when this turn has an llm node. The conversation view reads
       // assistant text off nodes first, so once nodes hit their cap the same
@@ -1738,10 +1740,8 @@ export class TraceCollector {
       appVersion: getAppVersionForTrace(),
       steps: this.steps,
       modelCalls: this.modelCalls,
-      // Flattened for dashboard aggregation — `sum` cannot reach into the
-      // per-call array above.
-      ...summarizeTraceCacheTokens(this.modelCalls),
-      // Counted as the turn ran, so these stay right past TRACE_MAX_MODEL_CALLS.
+      // Counted as the turn ran, independent of the retained model-call array.
+      cacheReadTokens: this.observedCacheReadTokens,
       totalInputTokens: this.observedInputTokens,
       totalOutputTokens: this.observedOutputTokens,
       totalTokens: this.observedTotalTokens,

@@ -134,4 +134,57 @@ describe("call-stage counters", () => {
       }).stageUsageComplete
     ).toBe(true)
   })
+
+  it("counts cache at model-start stages beyond 512 calls without adding it to total tokens", () => {
+    const c = new TraceStageUsageCounter()
+    for (let i = 0; i < 1000; i++) {
+      c.bindModel(String(i), { nodeName: i < 512 ? "Biz-需求" : "Dev-实现" })
+      c.recordModel(String(i), {
+        inputTokens: 100,
+        outputTokens: 5,
+        totalTokens: 105,
+        cacheReadTokens: i < 512 ? 60 : 80
+      })
+    }
+    const result = c.snapshot({
+      ...totals,
+      modelCalls: 1000,
+      inputTokens: 100000,
+      outputTokens: 5000,
+      totalTokens: 105000
+    })
+    expect(result.stageUsageComplete).toBe(true)
+    expect(result.stageUsage.find((row) => row.nodeName === "Biz-需求")).toMatchObject({
+      cacheReadTokens: 30720,
+      cacheUsageReportedCalls: 512
+    })
+    expect(result.stageUsage.find((row) => row.nodeName === "Dev-实现")).toMatchObject({
+      totalTokens: 488 * 105,
+      cacheReadTokens: 488 * 80,
+      cacheUsageReportedCalls: 488
+    })
+  })
+
+  it("distinguishes a reported cache zero from missing or invalid cache usage", () => {
+    const c = new TraceStageUsageCounter()
+    for (const cacheReadTokens of [0, undefined, -1, Number.NaN, Infinity])
+      c.recordModel(
+        undefined,
+        { inputTokens: 10, outputTokens: 2, cacheReadTokens },
+        { nodeName: "Dev-实现" }
+      )
+    const result = c.snapshot({
+      ...totals,
+      modelCalls: 5,
+      inputTokens: 50,
+      outputTokens: 10,
+      totalTokens: 60
+    })
+    expect(result.stageUsageComplete).toBe(true)
+    expect(result.stageUsage[0]).toMatchObject({
+      cacheReadTokens: 0,
+      cacheUsageReportedCalls: 1,
+      tokenUsageReportedCalls: 5
+    })
+  })
 })

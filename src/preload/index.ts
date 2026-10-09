@@ -1,3 +1,4 @@
+import type { EfficiencyPluginFilter } from "../shared/dashboard-efficiency-compute"
 import type { DashboardThreadTraceScope } from "../shared/dashboard-thread-trace-scope"
 import type {
   AppNotification,
@@ -3983,7 +3984,7 @@ const api = {
       ipcRenderer.invoke("dashboard:knowledgeCommitRate", range, opts),
     efficiency: (
       range: { from: string; to: string },
-      opts?: { upperOrgLv1?: string | string[] | null }
+      opts?: { upperOrgLv1?: string | string[] | null } & EfficiencyPluginFilter
     ): Promise<{ success: boolean; data?: unknown; error?: string }> =>
       ipcRenderer.invoke("dashboard:efficiency", range, opts),
     projectMetricGroupOptions: (

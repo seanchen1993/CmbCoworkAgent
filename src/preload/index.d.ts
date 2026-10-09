@@ -1,3 +1,7 @@
+import type {
+  EfficiencyDevComputeResult,
+  EfficiencyPluginFilter
+} from "../shared/dashboard-efficiency-compute"
 import type { DashboardToolUsageCoverage } from "../shared/dashboard-tool-usage"
 import type { DashboardThreadTraceScope } from "../shared/dashboard-thread-trace-scope"
 import type { DashboardKnowledgeCommitRate } from "../shared/dashboard-knowledge-commit-rate"
@@ -527,7 +531,7 @@ interface DashboardEfficiencyChangeKindStats extends DashboardCodeStats {
   changeKind: "new" | "legacy" | "unclassified"
 }
 
-interface DashboardEfficiencyData {
+interface DashboardEfficiencyData extends EfficiencyDevComputeResult {
   scalability: {
     slope: number | null
     pendingReason: string
@@ -537,18 +541,6 @@ interface DashboardEfficiencyData {
     byChangeKind: DashboardEfficiencyChangeKindStats[]
     newRatioHistogram: { from: number; docCount: number }[]
     unmeasuredRatio: number | null
-  }
-  compute: {
-    totalInputTokens: number
-    totalOutputTokens: number
-    totalTokens: number
-    cacheReadTokens: number
-    tokenTotalsConsistent: boolean
-    pushedAdoptedLines: number
-    tokensPerAdoptedLine: number | null
-    traceCount: number
-    codeProducingTraceCount: number
-    codeProducingTraceRatio: number | null
   }
   meta: {
     projectCount: number
@@ -2706,7 +2698,7 @@ interface CustomAPI {
     ) => Promise<{ success: boolean; data?: DashboardKnowledgeCommitRate; error?: string }>
     efficiency: (
       range: { from: string; to: string },
-      opts?: { upperOrgLv1?: string | string[] | null }
+      opts?: { upperOrgLv1?: string | string[] | null } & EfficiencyPluginFilter
     ) => Promise<{ success: boolean; data?: DashboardEfficiencyData; error?: string }>
     projectMetricGroupOptions: (
       filters: Pick<ProjectMetricFilters, "range" | "upperOrgLv1">

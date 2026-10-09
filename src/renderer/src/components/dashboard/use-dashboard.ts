@@ -1,3 +1,7 @@
+import type {
+  EfficiencyDevComputeResult,
+  EfficiencyPluginFilter
+} from "../../../../shared/dashboard-efficiency-compute"
 import {
   parseToolUsageAggs,
   type DashboardToolUsageCoverage
@@ -350,7 +354,7 @@ export interface DashboardEfficiencyChangeKindStats extends DashboardCodeStats {
   changeKind: DashboardEfficiencyChangeKind
 }
 
-export interface DashboardEfficiencyData {
+export interface DashboardEfficiencyData extends EfficiencyDevComputeResult {
   /** 指标 1 系统可扩展性。数据源未接入前 slope 恒为 null，由 pendingReason 说明原因。 */
   scalability: {
     slope: number | null
@@ -364,21 +368,6 @@ export interface DashboardEfficiencyData {
     newRatioHistogram: { from: number; docCount: number }[]
     /** 未测量行占分母的比例。偏高说明采纳率被系统性低估（主因是 14 天归因窗口）。 */
     unmeasuredRatio: number | null
-  }
-  /** 指标 3 算力产出效能。 */
-  compute: {
-    totalInputTokens: number
-    totalOutputTokens: number
-    totalTokens: number
-    /** totalInputTokens 的组成部分，不是额外的量。 */
-    cacheReadTokens: number
-    /** 总数是否等于输入+输出、且缓存不超过输入。为 false 时单行数值不可对外引用。 */
-    tokenTotalsConsistent: boolean
-    pushedAdoptedLines: number
-    tokensPerAdoptedLine: number | null
-    traceCount: number
-    codeProducingTraceCount: number
-    codeProducingTraceRatio: number | null
   }
   meta: {
     projectCount: number
@@ -2373,6 +2362,7 @@ export function useDashboard() {
   const [projectModeLoading, setProjectModeLoading] = useState(false)
   const [projectModeError, setProjectModeError] = useState<string | null>(null)
   const [efficiency, setEfficiency] = useState<DashboardEfficiencyData | null>(null)
+  const [efficiencyPluginFilter, setEfficiencyPluginFilter] = useState<EfficiencyPluginFilter>({})
   const [efficiencyLoading, setEfficiencyLoading] = useState(false)
   const [efficiencyError, setEfficiencyError] = useState<string | null>(null)
   // 「生产效能代码指标」source 局部筛选：当前选中的来源（null = 全部，用 projectMode 自带口径），
@@ -2509,25 +2499,30 @@ export function useDashboard() {
     []
   )
 
-  // 研发效能面板。范围（项目模式 + 精益项目）在后端固定，前端不传口径开关，
-  // 避免出现「关掉开关后数字含义变了但标题没变」的情况。
-  const fetchEfficiency = useCallback(async (r: TimeRange, orgList: string[]) => {
-    const id = ++efficiencyFetchIdRef.current
-    setEfficiencyLoading(true)
-    setEfficiencyError(null)
-    try {
-      const result = await window.api.dashboard.efficiency(r, { upperOrgLv1: orgList })
-      if (id !== efficiencyFetchIdRef.current) return
-      if (!result.success) throw new Error(result.error ?? "获取研发效能数据失败")
-      setEfficiency(result.data ?? null)
-    } catch (e) {
-      if (id !== efficiencyFetchIdRef.current) return
-      setEfficiencyError(e instanceof Error ? e.message : String(e))
-      setEfficiency(null)
-    } finally {
-      if (id === efficiencyFetchIdRef.current) setEfficiencyLoading(false)
-    }
-  }, [])
+  // Project-mode + Lean scope stays fixed; only compute accepts stage/plugin filters.
+  const fetchEfficiency = useCallback(
+    async (r: TimeRange, orgList: string[]) => {
+      const id = ++efficiencyFetchIdRef.current
+      setEfficiencyLoading(true)
+      setEfficiencyError(null)
+      try {
+        const result = await window.api.dashboard.efficiency(r, {
+          upperOrgLv1: orgList,
+          ...efficiencyPluginFilter
+        })
+        if (id !== efficiencyFetchIdRef.current) return
+        if (!result.success) throw new Error(result.error ?? "获取研发效能数据失败")
+        setEfficiency(result.data ?? null)
+      } catch (e) {
+        if (id !== efficiencyFetchIdRef.current) return
+        setEfficiencyError(e instanceof Error ? e.message : String(e))
+        setEfficiency(null)
+      } finally {
+        if (id === efficiencyFetchIdRef.current) setEfficiencyLoading(false)
+      }
+    },
+    [efficiencyPluginFilter]
+  )
 
   const fetchProjectMode = useCallback(
     async (
@@ -2950,6 +2945,8 @@ export function useDashboard() {
     projectModeLoading,
     projectModeError,
     efficiency,
+    efficiencyPluginFilter,
+    setEfficiencyPluginFilter,
     efficiencyLoading,
     efficiencyError,
     fetchEfficiency,
