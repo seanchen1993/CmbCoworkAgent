@@ -122,10 +122,11 @@ describe("persisted active file preview isolation", () => {
     expect(rightPanel).not.toContain("browserPreviewUrl")
     expect(resourcePanelOverlay).not.toContain('setMode("browser")')
     expect(htmlPreview).toContain("buildStaticHtmlPreviewDocument")
-    expect(htmlPreview).toContain('sandbox=""')
+    // Visual annotations inspect the static DOM; page scripts remain disabled.
+    expect(htmlPreview).toContain('sandbox="allow-same-origin"')
     expect(htmlPreview).not.toContain('setSrcDocContent(content)')
     expect(htmlPreview).not.toContain("allow-scripts")
-    expect(htmlPreview).not.toContain("allow-same-origin")
+    expect(htmlPreview).not.toContain("allow-modals")
     expect(htmlSrcDoc).toContain('"default-src \'none\'"')
     expect(htmlSrcDoc).toContain("script, iframe, frame, fencedframe, object, embed")
     expect(htmlSrcDoc).toContain('content.replace(/<\\/style/gi, "\\\\3C /style")')

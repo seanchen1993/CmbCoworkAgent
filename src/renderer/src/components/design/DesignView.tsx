@@ -1,6 +1,9 @@
 import React, { useState, useRef, useCallback, useEffect } from "react"
 import { v4 as uuid } from "uuid"
-import { inlineHtmlSiblingAssets } from "@/lib/html-srcdoc"
+import { buildDesignHtmlPreviewDocument } from "@/lib/design-html-srcdoc"
+import { DESIGN_PREVIEW_NAVIGATION_SCRIPT } from "@/lib/design-preview-navigation"
+import { buildDesignVariationDocument } from "@/lib/design-variation-document"
+import { getDesignPreviewViewport } from "@/lib/design-preview-viewport"
 import { useAppStore } from "@/lib/store"
 import { CodeModal } from "./CodeModal"
 import { CustomModelDialog } from "../chat/CustomModelDialog"
@@ -900,7 +903,6 @@ function parseVariations(fullHtml: string): VariationItem[] {
   try {
     const parser = new DOMParser()
     const doc = parser.parseFromString(fullHtml, "text/html")
-    const headHtml = doc.head.innerHTML
 
     return (["a", "b"] as const).reduce<VariationItem[]>((acc, id) => {
       const el = doc.getElementById(`variation-${id}`)
@@ -910,33 +912,7 @@ function parseVariations(fullHtml: string): VariationItem[] {
       const dataLabel = el.getAttribute("data-label")?.trim()
       const label = dataLabel || `方案 ${id.toUpperCase()}`
 
-      // Wrap variation in a self-contained HTML doc, inherit shared head (fonts, styles).
-      // The model's shared JS often references ALL variation elements (e.g. to hide variation-b/c).
-      // In a standalone file only variation-A is in the body, so those getElementById calls return
-      // null → TypeError → the entire JS init crashes → blank page.
-      // Fix: include hidden stub divs for the OTHER variations so JS references don't throw.
-      const otherIds = (["a", "b"] as const).filter((v) => v !== id)
-      const stubs = otherIds
-        .map(
-          (v) =>
-            `<div id="variation-${v}" style="display:none!important;visibility:hidden!important;position:absolute!important;pointer-events:none!important"></div>`
-        )
-        .join("\n")
-
-      const rawHtml = `<!DOCTYPE html>
-<html>
-<head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-${headHtml}
-<style>html,body{margin:0;padding:0;min-height:100vh;}</style>
-</head>
-<body>
-${el.outerHTML}
-${stubs}
-</body>
-</html>`
-      const html = ensureEditMode(rawHtml)
+      const html = ensureEditMode(buildDesignVariationDocument(doc, el))
 
       acc.push({ id, label, html })
       return acc
@@ -953,29 +929,7 @@ function collapseVariationsToSingleArtifact(fullHtml: string): string {
     const primary = doc.getElementById("variation-a") ?? doc.getElementById("variation-b")
     if (!primary) return fullHtml
 
-    const headHtml = doc.head.innerHTML
-    const primaryId = primary.id === "variation-b" ? "b" : "a"
-    const stubs = (["a", "b"] as const)
-      .filter((id) => id !== primaryId)
-      .map(
-        (id) =>
-          `<div id="variation-${id}" style="display:none!important;visibility:hidden!important;position:absolute!important;pointer-events:none!important"></div>`
-      )
-      .join("\n")
-
-    return ensureEditMode(`<!DOCTYPE html>
-<html>
-<head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-${headHtml}
-<style>html,body{margin:0;padding:0;min-height:100vh;}</style>
-</head>
-<body>
-${primary.outerHTML}
-${stubs}
-</body>
-</html>`)
+    return ensureEditMode(buildDesignVariationDocument(doc, primary))
   } catch {
     return fullHtml
   }
@@ -1378,7 +1332,7 @@ async function readPreviewDependencyDataUrlFile(resolvedPath: string): Promise<s
 
 async function prepareHtmlForSrcDoc(html: string, htmlPath?: string | null): Promise<string> {
   const inlinedHtml = htmlPath
-    ? await inlineHtmlSiblingAssets({
+    ? await buildDesignHtmlPreviewDocument({
         html,
         htmlPath,
         readTextFile: readPreviewDependencyTextFile,
@@ -1530,25 +1484,6 @@ function updateIndexMeta(id: string, patch: Partial<SessionMeta>) {
 // the iframe away from the design preview.
 // ─────────────────────────────────────────────────────────
 
-const NAV_BLOCK_INJECT = `(function(){
-  if(window.__nb_active)return;
-  window.__nb_active=true;
-  // Block <a href> navigation
-  document.addEventListener('click',function(e){
-    var el=e.target;
-    while(el&&el!==document){
-      if(el.tagName==='A'&&el.getAttribute('href')&&el.getAttribute('href')!=='#'){
-        e.preventDefault();e.stopPropagation();return;
-      }
-      el=el.parentElement;
-    }
-  },true);
-  // Block form submissions
-  document.addEventListener('submit',function(e){
-    e.preventDefault();e.stopPropagation();
-  },true);
-})();`
-
 const SCROLL_INJECT = `(function(){
   if(window.__st_active)return;
   window.__st_active=true;
@@ -1657,8 +1592,8 @@ const EDIT_SELECT_INJECT = `(function(){
   }
   document.addEventListener('mouseover',over,true);document.addEventListener('mouseout',out,true);document.addEventListener('click',ck,true);
   var _PX=['fontSize','letterSpacing','paddingTop','paddingRight','paddingBottom','paddingLeft','marginTop','marginRight','marginBottom','marginLeft','borderWidth','borderRadius'];
-  window.addEventListener('message',function(e){
-    if(!e.data)return;
+  function message(e){
+    if(e.source!==window.parent||!window.__ed_active||!e.data)return;
     if(e.data.type==='__edit_style'&&_sel){
       var p=e.data.property,v=e.data.value;
       _sel.style[p]=_PX.indexOf(p)>-1?v+'px':String(v);
@@ -1667,8 +1602,10 @@ const EDIT_SELECT_INJECT = `(function(){
     if(e.data.type==='__edit_get_html'){
       window.parent.postMessage({type:'__edit_html',html:'<!DOCTYPE html>'+document.documentElement.outerHTML},'*');
     }
-  });
+  }
+  window.addEventListener('message',message);
   window.__ed_cleanup=function(){
+    window.removeEventListener('message',message);
     document.removeEventListener('mouseover',over,true);document.removeEventListener('mouseout',out,true);document.removeEventListener('click',ck,true);
     var s=document.getElementById('__ed_sty');if(s)s.remove();
     if(_sel){_sel.classList.remove('__ed_s');_sel=null;}if(_hov){_hov.classList.remove('__ed_h');_hov=null;}
@@ -1963,6 +1900,7 @@ export function DesignView(): React.JSX.Element {
   const iframeRef = useRef<HTMLIFrameElement>(null)
   const canvasContainerRef = useRef<HTMLDivElement>(null)
   const previewScrollRef = useRef<HTMLDivElement>(null)
+  const [previewSize, setPreviewSize] = useState({ width: 800, height: 600 })
   const activeTabId = SINGLE_DESIGN_TAB_ID
   const activeTabIdRef = useRef(activeTabId)
   const tabStatesRef = useRef(tabStates)
@@ -1979,6 +1917,24 @@ export function DesignView(): React.JSX.Element {
   const tweaksOn = ts.tweaksOn
   const activeMode = ts.activeMode
   const zoom = ts.zoom
+  const previewVisible = Boolean(currentSessionId && ts.html && ts.rightTab === "design")
+
+  useEffect(() => {
+    const container = canvasContainerRef.current
+    if (!previewVisible || !container) return
+    const measure = () => {
+      const width = container.clientWidth
+      const height = container.clientHeight
+      if (!width || !height) return
+      setPreviewSize((previous) =>
+        previous.width === width && previous.height === height ? previous : { width, height }
+      )
+    }
+    measure()
+    const observer = new ResizeObserver(measure)
+    observer.observe(container)
+    return () => observer.disconnect()
+  }, [previewVisible])
   const selectedDesignSystem =
     designSystems.find((system) => system.id === ts.selectedDesignSystemId) ?? null
   const orderedDesignSystems = [...designSystems].sort(compareDesignSystemsForDisplay)
@@ -2458,7 +2414,7 @@ export function DesignView(): React.JSX.Element {
         variations,
         activeVariationId: variations[0]?.id ?? null,
         tweaksOn: true,
-        activeMode: "edit",
+        activeMode: null,
         zoom: prev.zoom,
         inputValue: "",
         comments: [],
@@ -2520,7 +2476,7 @@ export function DesignView(): React.JSX.Element {
         throw new Error(readResult.error || "读取 HTML 文件失败")
       }
 
-      const inlinedHtml = await inlineHtmlSiblingAssets({
+      const inlinedHtml = await buildDesignHtmlPreviewDocument({
         html: readResult.content,
         htmlPath: filePath,
         readTextFile: readDependencyTextFile,
@@ -2929,6 +2885,7 @@ export function DesignView(): React.JSX.Element {
   // ── Listen for all postMessages from iframe ───────────────
   useEffect(() => {
     const handler = (e: MessageEvent) => {
+      if (e.source !== iframeRef.current?.contentWindow) return
       const msg = e.data
       if (!msg?.type) return
 
@@ -5648,6 +5605,13 @@ ${regionBlocks || "无"}${looseSection}${variantNote}`
             {/* Top-bar tools — tweaks toggle + mode buttons + zoom + export */}
             {ts.html && ts.rightTab === "design" && (
               <div style={S.tweaksBar}>
+                <TweaksBtn
+                  label="预览"
+                  icon={<span aria-hidden="true">▷</span>}
+                  active={activeMode === null}
+                  onClick={() => setActiveMode(null)}
+                />
+                <div style={S.tweaksDivider} />
                 {/* Tweaks toggle */}
                 <div style={{ display: "flex", alignItems: "center", gap: 7 }}>
                   <span
@@ -5772,14 +5736,11 @@ ${regionBlocks || "无"}${looseSection}${variantNote}`
                             ? "#f59e0b"
                             : undefined
                     const iframeDoc = iframeRef.current?.contentDocument ?? null
-                    const visibleWidth = canvasContainerRef.current?.clientWidth || 800
-                    const visibleHeight = canvasContainerRef.current?.clientHeight || 600
-                    const scaledContentWidth =
-                      Math.max(visibleWidth / (zoom / 100), ts.iframeContentWidth || 0) *
-                      (zoom / 100)
-                    const scaledContentHeight =
-                      Math.max(visibleHeight / (zoom / 100), ts.iframeContentHeight || 0) *
-                      (zoom / 100)
+                    const viewport = getDesignPreviewViewport(
+                      previewSize.width,
+                      previewSize.height,
+                      zoom
+                    )
                     // Region numbers must match buildDrawPrompt's "[区域 N]" labels, so this uses
                     // the same filter and ordering the prompt does.
                     const regionNumberByStroke = new Map<string, number>()
@@ -5912,8 +5873,8 @@ ${regionBlocks || "无"}${looseSection}${variantNote}`
                             <div
                               style={{
                                 position: "relative",
-                                width: scaledContentWidth,
-                                height: scaledContentHeight,
+                                width: "100%",
+                                height: "100%",
                                 minWidth: "100%",
                                 minHeight: "100%"
                               }}
@@ -5930,14 +5891,8 @@ ${regionBlocks || "无"}${looseSection}${variantNote}`
                                   border: "none",
                                   transformOrigin: "top left",
                                   transform: `scale(${zoom / 100})`,
-                                  width: Math.max(
-                                    visibleWidth / (zoom / 100),
-                                    ts.iframeContentWidth || 0
-                                  ),
-                                  height: Math.max(
-                                    visibleHeight / (zoom / 100),
-                                    ts.iframeContentHeight || 0
-                                  ),
+                                  width: viewport.width,
+                                  height: viewport.height,
                                   // Comment + Edit modes need pointer events (scripts handle clicks via postMessage)
                                   pointerEvents:
                                     activeMode === null ||
@@ -5946,12 +5901,15 @@ ${regionBlocks || "无"}${looseSection}${variantNote}`
                                       ? "auto"
                                       : "none"
                                 }}
-                                sandbox="allow-scripts allow-same-origin"
+                                sandbox="allow-scripts allow-same-origin allow-modals allow-forms allow-downloads"
                                 title="Design Preview"
                                 onLoad={() => {
                                   // Block link/form navigation so clicks inside the preview
                                   // never navigate the iframe away from the design
-                                  injectIntoIframe(iframeRef.current, NAV_BLOCK_INJECT)
+                                  injectIntoIframe(
+                                    iframeRef.current,
+                                    DESIGN_PREVIEW_NAVIGATION_SCRIPT
+                                  )
                                   // Always inject scroll tracker so pins stay anchored to content
                                   injectIntoIframe(iframeRef.current, SCROLL_INJECT)
                                   // Reset scroll state — new iframe always starts at (0, 0)
