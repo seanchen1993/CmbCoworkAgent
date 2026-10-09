@@ -5,6 +5,7 @@ import type {
   AppDecisionResult
 } from "../shared/app-notifications"
 import type { SubagentExportTarget } from "../shared/subagent-session-export"
+import type { UiGuideConfig, UiGuideState } from "../shared/ui-guides"
 import { contextBridge, ipcRenderer, shell } from "electron"
 import { randomUUID } from "node:crypto"
 import type { UpdateSourceInfo } from "../main/updater/channel-config"
@@ -646,6 +647,14 @@ ipcRenderer.on(
 
 // Custom APIs for renderer
 const api = {
+  uiGuides: {
+    getState: (config: UiGuideConfig): Promise<UiGuideState> =>
+      ipcRenderer.invoke("uiGuides:getState", config),
+    recordDisplay: (config: UiGuideConfig): Promise<boolean> =>
+      ipcRenderer.invoke("uiGuides:recordDisplay", config),
+    acknowledge: (config: UiGuideConfig): Promise<void> =>
+      ipcRenderer.invoke("uiGuides:acknowledge", config)
+  },
   agent: {
     // Send message and receive events via callback
     invoke: (

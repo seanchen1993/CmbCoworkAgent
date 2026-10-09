@@ -1,4 +1,5 @@
 import { RepositoryBranchHint, RepositoryPathsField } from "./RepositoryPathField"
+import projectModeGuideImage from "@/assets/guides/feature-create-guide-v5.png"
 import {
   resolveFeatureWorkspace,
   MISSING_FEATURE_WORKSPACE
@@ -3960,7 +3961,7 @@ function FeatureCreateDialog({
                   tooltip="插件暂不支持"
                 >
                   <span className="inline-flex min-w-0 items-center gap-1.5">
-                    <span className="truncate">选择要开发的发布单元代码仓库</span>
+                    <span className="truncate">选择要开发的发布单元</span>
                     <Tooltip>
                       <TooltipTrigger asChild>
                         <span
@@ -3970,8 +3971,16 @@ function FeatureCreateDialog({
                           <Info className="size-3.5" />
                         </span>
                       </TooltipTrigger>
-                      <TooltipContent side="top" className="z-[70] max-w-72 text-xs leading-5">
-                        会话工作区必选，用于特性内开启新会话、开启托管模式、招乎发起新会话的默认路径。发布单元可选，用于在上下文注入对应的系统约束，并将对应代码库路径提供给大模型。已选中的发布单元路径可以作为会话工作区路径。
+                      <TooltipContent
+                        side="top"
+                        className="z-[70] w-[min(48rem,calc(100vw-2rem))] p-2"
+                      >
+                        <img
+                          src={projectModeGuideImage}
+                          alt="项目模式操作引导：配置发布单元与仓库、创建特性时选择发布单元、配置会话工作区"
+                          className="max-h-[calc(var(--radix-tooltip-content-available-height)-1rem)] w-full rounded-sm object-contain"
+                          draggable={false}
+                        />
                       </TooltipContent>
                     </Tooltip>
                   </span>
