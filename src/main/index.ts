@@ -2,6 +2,8 @@ import { initializeHarnessConfigV2 } from "./harness-board/config-v2"
 import { initializeNotificationRuntime } from "./notification-runtime"
 import { notificationService } from "./services/notification-service"
 import { registerNotificationHandlers } from "./ipc/notifications"
+import type { UiGuideConfig } from "../shared/ui-guides"
+import { acknowledgeUiGuide, getUiGuideState, recordUiGuideDisplay } from "./db/ui-guide-store"
 import {
   app,
   BrowserWindow,
@@ -425,7 +427,7 @@ import {
   startRegisteredGitHookEventSync,
   stopRegisteredGitHookEventSync
 } from "./services/git-hook-service"
-import { getAllThreadSummaries, initializeDatabase, flush } from "./db"
+import { getAllThreadSummaries, initializeDatabase, flush, getDb } from "./db"
 import { closeThreadMessageHydrationWorker } from "./thread-message-hydration/client"
 import { closeCheckpointRuntimeProjectionWorker } from "./checkpointer/runtime-projection-client"
 import { closeThreadMetadataHydrationWorker } from "./thread-metadata-hydration/client"
@@ -1174,6 +1176,15 @@ if (browserNativeMessagingHostLaunch) {
     registerAdoptionTraceHandlers(ipcMain)
     registerFeatureGateHandlers(ipcMain)
     registerNotificationHandlers(ipcMain)
+    ipcMain.handle("uiGuides:getState", (_event, config: UiGuideConfig) =>
+      getUiGuideState(getDb(), config)
+    )
+    ipcMain.handle("uiGuides:recordDisplay", (_event, config: UiGuideConfig) =>
+      recordUiGuideDisplay(getDb(), config)
+    )
+    ipcMain.handle("uiGuides:acknowledge", (_event, config: UiGuideConfig) =>
+      acknowledgeUiGuide(getDb(), config)
+    )
     registerHarnessBoardHandlers(ipcMain)
     registerUpdaterHandlers()
     registerLspHandlers(ipcMain)

@@ -7,6 +7,7 @@ import type {
   AppDecisionResult
 } from "../shared/app-notifications"
 import type { SubagentExportTarget } from "../shared/subagent-session-export"
+import type { UiGuideConfig, UiGuideState } from "../shared/ui-guides"
 import type { UpdateSourceInfo } from "../main/updater/channel-config"
 import type {
   WorkflowWorktreeAction,
@@ -1024,6 +1025,11 @@ interface DashboardPluginAggregate {
 }
 
 interface CustomAPI {
+  uiGuides: {
+    getState(config: UiGuideConfig): Promise<UiGuideState>
+    recordDisplay(config: UiGuideConfig): Promise<boolean>
+    acknowledge(config: UiGuideConfig): Promise<void>
+  }
   mods: {
     globalEnabled(): Promise<boolean>
     configureGlobal(enabled: boolean): Promise<boolean>
