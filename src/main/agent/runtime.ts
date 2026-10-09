@@ -6,6 +6,7 @@ import {
   createFunctionSessionViewMiddleware
 } from "./mods-session-view"
 import { authorizeCurrentModInput, getModsManager } from "../mods/manager"
+import { validateWorkspaceDirectory } from "../services/workspace-validation"
 import { getModCallContext } from "../mods/context"
 import type { ModRuntimeAuthority } from "../mods/runtime-instance"
 import { ModError } from "../mods/errors"
@@ -5150,7 +5151,13 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
     )
   }
 
-  const modRuntimeAuthority = getModsManager()?.createRuntimeAuthority({
+  // Validate even when Mods is off/uninstalled; old sessions can retain foreign or deleted paths.
+  const modManager = getModsManager()
+  if (modManager) await modManager.prepareWorkspace(workspacePath)
+  else await validateWorkspaceDirectory(workspacePath)
+  options.abortSignal?.throwIfAborted()
+
+  const modRuntimeAuthority = modManager?.createRuntimeAuthority({
     workspace: workspacePath,
     threadId,
     agentId,
