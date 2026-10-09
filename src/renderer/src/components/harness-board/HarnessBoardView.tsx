@@ -3732,7 +3732,21 @@ function FeatureCreateDialog({
                     ? "本地系统约束"
                     : ""
               return (
-                <div key={mapping.deployUnitIdMapping} className={rowClassName}>
+                <div
+                  key={mapping.deployUnitIdMapping}
+                  className={rowClassName}
+                  onClick={(event) => {
+                    if (
+                      creating ||
+                      !(event.target instanceof Element) ||
+                      !event.currentTarget.contains(event.target) ||
+                      event.target.closest("button, input, select, [role='combobox']")
+                    ) {
+                      return
+                    }
+                    onDeployUnitToggle(mapping.deployUnitIdMapping, !checked)
+                  }}
+                >
                   <input
                     type="checkbox"
                     checked={checked}
