@@ -101,8 +101,15 @@ import { isMemoryStoragePath } from "../memory/paths"
 import {
   isCodeFile,
   recordGen as recordAdoptionGen,
+  recordShellEdit as recordAdoptionShellEdit,
   recordShellFileOps as recordAdoptionShellFileOps
 } from "../services/adoption-tracker"
+import {
+  beginShellFileCapture,
+  noteFileToolWrite,
+  type ShellFileCapture
+} from "./shell-file-effects"
+import { extractShellCommandReadPaths } from "./shell-command-profile"
 import {
   openStableWritableFileHandle,
   type StableWritableFileHandle
@@ -425,6 +432,8 @@ export interface LocalSandboxOptions {
   internalArtifactRoots?: string[]
   /** Records successful agent-owned file mutations for post-run automation. */
   onFileMutation?: (filePath: string, kind: AgentFileMutationKind) => void
+  /** Bash First file telemetry only; never changes execution permissions. */
+  shellFileTelemetry?: boolean
   /** Detects reads of skill files so skill lifecycle hooks can wrap the load. */
   skillLifecycleRegistry?: SkillLifecycleRegistry
   /** Shared run-scoped set used to avoid firing skill lifecycle hooks twice. */
@@ -664,6 +673,8 @@ export const readOnlyShellExecutionContext = new AsyncLocalStorage<boolean>()
  * logical /large_tool_results directory.
  */
 export const agentFileWriteContext = new AsyncLocalStorage<boolean>()
+const shellFileCaptureContext = new AsyncLocalStorage<boolean>()
+export const executeTraceContext = new AsyncLocalStorage<TraceContext>()
 
 export class LocalSandbox
   extends FilesystemBackend
@@ -746,6 +757,7 @@ export class LocalSandbox
   /** mtime recorded after each successful read/write, for external-modification detection */
   private readonly _fileReadTimes = new Map<string, number>()
   private readonly _onFileMutation?: (filePath: string, kind: AgentFileMutationKind) => void
+  private readonly _shellFileTelemetry: boolean
   private _skillLifecycleRegistry?: SkillLifecycleRegistry
   private readonly _skillHooksFired: Set<string>
   private readonly _skillUseTracker?: SkillUseTracker
@@ -2080,6 +2092,7 @@ export class LocalSandbox
     this._humanGateThreadId = options.humanGateThreadId?.trim() || this.runId
     this._hookTurnId = options.hookTurnId
     this._onFileMutation = options.onFileMutation
+    this._shellFileTelemetry = options.shellFileTelemetry === true
     this._skillLifecycleRegistry = options.skillLifecycleRegistry
     this._skillHooksFired = options.skillHookKeys ?? new Set<string>()
     this._skillUseTracker = options.skillUseTracker
@@ -4966,7 +4979,10 @@ export class LocalSandbox
       }
       getModCallContext()?.assertLive?.()
       const r = await super.write(effectiveFilePath, effectiveContent)
-      if (!r.error) await this.recordReadTime(resolvedPath)
+      if (!r.error) {
+        await this.recordReadTime(resolvedPath)
+        await noteFileToolWrite(resolvedPath, effectiveContent)
+      }
       return r
     })
     if (!result.error) {
@@ -5274,6 +5290,7 @@ export class LocalSandbox
             await this.writeFileEncoded(resolvedPath, expectedContent, encoding)
             await this.recordReadTime(resolvedPath)
           }
+          await noteFileToolWrite(resolvedPath, () => iconv.encode(expectedContent, encoding))
           return { path: effectiveFilePath, filesUpdate: null, occurrences }
         } finally {
           await managedCapability?.handle.close().catch(() => undefined)
@@ -7003,12 +7020,14 @@ export class LocalSandbox
       (isGitCommitCommand(effectiveCommand, shellSyntax) ||
         isGitPushCommand(effectiveCommand, shellSyntax))
     ) {
-      const result = await this.orchestrator.execute(
-        effectiveCommand,
-        effectiveCwd,
-        this.windowsSandbox,
-        shellSyntax,
-        outsideShellSyntax
+      const result = await shellFileCaptureContext.run(true, () =>
+        this.orchestrator!.execute(
+          effectiveCommand,
+          effectiveCwd,
+          this.windowsSandbox,
+          shellSyntax,
+          outsideShellSyntax
+        )
       )
       if (this.commandMayMutateHarnessState(effectiveCommand, effectiveCwd)) {
         this.markHarnessStageAttributionDirty()
@@ -7445,19 +7464,22 @@ export class LocalSandbox
     // The orchestrator calls back into executeRaw() for actual execution.
     await authorizeCurrentModInput("host:execute", { command: effectiveCommand, cwd: effectiveCwd })
     if (this.orchestrator) {
-      const result = await this.orchestrator.execute(
-        effectiveCommand,
-        effectiveCwd,
-        this.windowsSandbox,
-        shellSyntax,
-        outsideShellSyntax
+      const result = await shellFileCaptureContext.run(true, () =>
+        this.orchestrator!.execute(
+          effectiveCommand,
+          effectiveCwd,
+          this.windowsSandbox,
+          shellSyntax,
+          outsideShellSyntax
+        )
       )
       if (this.commandMayMutateHarnessState(effectiveCommand, effectiveCwd)) {
         this.markHarnessStageAttributionDirty()
       }
       // Adoption tracking: react to agent rm/mv of generated files (side-effect
       // only, never throws). Only successful commands act (exitCode === 0).
-      recordAdoptionShellFileOps(effectiveCommand, this.workingDir, result.exitCode)
+      recordAdoptionShellFileOps(effectiveCommand, effectiveCwd, result.exitCode)
+      this.recordShellReadTelemetry(effectiveCommand, effectiveCwd, result, shellSyntax)
       const postResult = await this.runHooks("PostToolUse", {
         toolName: "execute",
         toolArgs: { command: effectiveCommand, cwd: effectiveCwd },
@@ -7468,13 +7490,16 @@ export class LocalSandbox
       return LocalSandbox.applyPostHookToExecResult(result, postResult)
     }
 
-    const result = await this.executeRaw(effectiveCommand, undefined, undefined, undefined, {
-      cwd: effectiveCwd
-    })
+    const result = await shellFileCaptureContext.run(true, () =>
+      this.executeRaw(effectiveCommand, undefined, undefined, undefined, {
+        cwd: effectiveCwd
+      })
+    )
     if (this.commandMayMutateHarnessState(effectiveCommand, effectiveCwd)) {
       this.markHarnessStageAttributionDirty()
     }
-    recordAdoptionShellFileOps(effectiveCommand, this.workingDir, result.exitCode)
+    recordAdoptionShellFileOps(effectiveCommand, effectiveCwd, result.exitCode)
+    this.recordShellReadTelemetry(effectiveCommand, effectiveCwd, result, shellSyntax)
     const postResult = await this.runHooks("PostToolUse", {
       toolName: "execute",
       toolArgs: { command: effectiveCommand, cwd: effectiveCwd },
@@ -7755,19 +7780,30 @@ export class LocalSandbox
         truncated: false
       }
     }
+    // Read the request flag here, in the caller's async context; the capture
+    // window itself starts after any Windows sandbox queue wait, right before
+    // the process starts.
+    const captureFileEffects =
+      this._shellFileTelemetry &&
+      !backgroundExecution &&
+      shellFileCaptureContext.getStore() === true
+    const runUnserialized = (): Promise<LocalExecuteResponse> =>
+      this.runWithShellFileCapture(command, effectiveCwd, captureFileEffects, shellSyntax, () =>
+        this.executeRawUnserialized(
+          command,
+          sandboxModeOverride,
+          timeoutMs,
+          overrideAbortSignal,
+          effectiveCwd,
+          options
+        )
+      )
     if (
       process.platform !== "win32" ||
       effectiveSandboxMode === "none" ||
       (backgroundExecution && !this.worktreeIsolation)
     ) {
-      return this.executeRawUnserialized(
-        command,
-        sandboxModeOverride,
-        timeoutMs,
-        overrideAbortSignal,
-        effectiveCwd,
-        options
-      )
+      return runUnserialized()
     }
 
     const sandboxWorkspaceRoot = path.resolve(this.workingDir)
@@ -7778,27 +7814,119 @@ export class LocalSandbox
     )
     const commandConcurrency = classifyCommandConcurrency(command)
     if (commandConcurrency === "parallel_safe") {
-      return LocalSandbox.runParallelSafeExecution(queueKey, () =>
-        this.executeRawUnserialized(
-          command,
-          sandboxModeOverride,
-          timeoutMs,
-          overrideAbortSignal,
-          effectiveCwd,
-          options
-        )
-      )
+      return LocalSandbox.runParallelSafeExecution(queueKey, runUnserialized)
     }
 
-    return LocalSandbox.runSerializedExecution(queueKey, () =>
-      this.executeRawUnserialized(
+    return LocalSandbox.runSerializedExecution(queueKey, runUnserialized)
+  }
+
+  /**
+   * Bash First telemetry: compare the workspace around a foreground agent
+   * command and report the file effects the way write_file/edit_file report
+   * theirs. Commands that cannot write are not captured; capture failures never
+   * reach the command result.
+   */
+  private async runWithShellFileCapture(
+    command: string,
+    cwd: string,
+    captureFileEffects: boolean,
+    shellSyntax: CommandShellSyntax,
+    run: () => Promise<LocalExecuteResponse>
+  ): Promise<LocalExecuteResponse> {
+    if (!captureFileEffects) return run()
+    let capture: ShellFileCapture | null = null
+    try {
+      capture = await beginShellFileCapture({
+        workspaceRoot: this.workingDir,
         command,
-        sandboxModeOverride,
-        timeoutMs,
-        overrideAbortSignal,
-        effectiveCwd,
-        options
-      )
+        cwd,
+        shellSyntax,
+        isCodeFile
+      })
+    } catch (error) {
+      console.warn("[LocalSandbox] shell file capture unavailable:", error)
+    }
+    if (!capture) return run()
+    // Stage at command start, like write/edit capture it right before mutating.
+    const harnessStage = this.captureHarnessStageForShellEdit()
+    try {
+      return await run()
+    } finally {
+      await this.applyShellFileCapture(capture, harnessStage)
+    }
+  }
+
+  private captureHarnessStageForShellEdit(): Promise<HarnessStageAttribution | undefined> {
+    if (!this.harnessProjectId || !this.featureId) return Promise.resolve(undefined)
+    return getHarnessStageAttributionForCodeGeneration(this.harnessProjectId, this.featureId).catch(
+      () => undefined
+    )
+  }
+
+  private async applyShellFileCapture(
+    capture: ShellFileCapture,
+    harnessStagePromise: Promise<HarnessStageAttribution | undefined>
+  ): Promise<void> {
+    try {
+      const { changes } = await capture.finish()
+      for (const change of changes) {
+        if (change.decision !== "unattributed") this._onFileMutation?.(change.absPath, "shell")
+      }
+      const counted = changes.filter((change) => change.decision === "counted")
+      if (changes.length) {
+        console.info("[LocalSandbox] Shell file capture completed", {
+          threadId: executeTraceContext.getStore()?.threadId || this.runId,
+          counted: counted.length,
+          attributed: changes.filter((change) => change.decision === "attributed").length,
+          unattributed: changes.filter((change) => change.decision === "unattributed").length
+        })
+      }
+      if (counted.length > 0) {
+        const threadId = executeTraceContext.getStore()?.threadId || this.runId
+        for (const change of counted) {
+          void recordAdoptionShellEdit({
+            threadId,
+            filePath: change.absPath,
+            beforeContent: change.before ?? "",
+            afterContent: change.after ?? "",
+            workspacePath: this.workingDir,
+            harnessStagePromise
+          })
+        }
+      }
+    } catch (error) {
+      console.warn("[LocalSandbox] shell file capture failed:", error)
+    }
+  }
+
+  /**
+   * read_file reports constraint-file reads itself; a Bash First `cat` of the
+   * same file reports here once the command succeeded with output.
+   */
+  private recordShellReadTelemetry(
+    command: string,
+    cwd: string,
+    result: ExecuteResponse,
+    shellSyntax: CommandShellSyntax
+  ): void {
+    if (!this._shellFileTelemetry || !this.pluginRoot || result.exitCode !== 0) return
+    if (!LocalSandbox.hasStdoutContent(result.output)) return
+    const traceContext = executeTraceContext.getStore()
+    for (const readPath of extractShellCommandReadPaths(command, cwd, shellSyntax)) {
+      void this.recordPluginSystemConstraintRead(readPath, traceContext)
+    }
+  }
+
+  /** True when an execute result carries real stdout, not only markers or stderr. */
+  private static hasStdoutContent(output: string | undefined): boolean {
+    if (!output) return false
+    return (
+      output
+        .replace(/<execute_metadata>[\s\S]*?<\/execute_metadata>/g, "")
+        .split("\n")
+        .filter((line) => !line.startsWith("[stderr] ") && line.trim() !== "<no output>")
+        .join("\n")
+        .trim().length > 0
     )
   }
 

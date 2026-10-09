@@ -149,8 +149,47 @@ export class ImFeatureBindingService {
   async listRemoteFeatures(projectId: string): Promise<ImRemoteFeatureListItem[]> {
     const projects = await this.listRemoteProjects()
     if (!projects.some((project) => project.id === projectId)) return []
+    return this.readRemoteFeatures(projectId)
+  }
+
+  /** Current catalog, not persisted grant snapshots. Read each project only once. */
+  async listRemoteFeatureCatalog(
+    projectIds?: ReadonlySet<string>
+  ): Promise<Array<{ project: ImRemoteProjectListItem; features: ImRemoteFeatureListItem[] }>> {
+    let projects: ImRemoteProjectListItem[]
+    try {
+      projects = await this.listRemoteProjects()
+    } catch (error) {
+      console.warn("[IM] Remote Feature catalog unavailable: project listing failed", error)
+      return []
+    }
+    return Promise.all(
+      projects
+        .filter((project) => !projectIds || projectIds.has(project.id))
+        .map(async (project) => {
+          try {
+            return { project, features: await this.readRemoteFeatures(project.id) }
+          } catch (error) {
+            // Fail closed for this read, without revoking durable grants on a
+            // transient filesystem/plugin failure or hiding other projects.
+            console.warn(
+              "[IM] Remote Feature catalog unavailable:",
+              { projectId: project.id },
+              error
+            )
+            return { project, features: [] }
+          }
+        })
+    )
+  }
+
+  private async readRemoteFeatures(projectId: string): Promise<ImRemoteFeatureListItem[]> {
     const detail = await this.dependencies.getProjectDetail(projectId)
-    if (detail.error || detail.projectState?.uiKind === "archived") return []
+    if (detail.error) {
+      console.warn("[IM] Remote Feature catalog unavailable:", { projectId, reason: detail.error })
+      return []
+    }
+    if (detail.projectState?.uiKind === "archived") return []
     return detail.runs.filter(activeFeature).map((run) => ({
       projectId,
       slug: run.slug,

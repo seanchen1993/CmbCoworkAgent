@@ -1084,6 +1084,38 @@ describe("project Mods lifecycle and UI authority", () => {
       policyDigest: f.manager.policy.digest
     })
   })
+
+  it.each([false, true])(
+    "keeps mandatory policy when the global switch is off (initially enabled: %s)",
+    async (initiallyEnabled) => {
+      let globallyEnabled = initiallyEnabled
+      const f = await fixture(
+        {
+          ...DEFAULT_MOD_POLICY,
+          required: true,
+          denyTools: ["host:write_file"],
+          redactLiterals: ["private-value"]
+        },
+        () => globallyEnabled
+      )
+      if (initiallyEnabled) {
+        await f.manager.approve(f.root, "plugin", f.digest)
+        f.manager.configure(f.root, true, true)
+      }
+      globallyEnabled = false
+      f.manager.invalidateAll()
+      expect(f.manager.isEnabled(f.root)).toBe(false)
+      expect(f.manager.isActive(f.root)).toBe(true)
+      expect(f.manager.protects(f.root)).toBe(true)
+      expect(await f.manager.commands(f.root, f.scope.threadId)).toEqual([])
+      const core = vi.fn(async () => "private-value")
+      await expect(f.manager.dispatch(f.scope, "host:write_file", {}, core)).rejects.toThrow(
+        "POLICY_TOOL_DENIED"
+      )
+      expect(core).not.toHaveBeenCalled()
+      expect(await f.manager.dispatch(f.scope, "host:read_file", {}, core)).toBe("[REDACTED]")
+    }
+  )
   it("keeps the disabled path unchanged and injects context only after approval", async () => {
     const f = await fixture()
     expect(await f.dispatch()).toBe("text")
