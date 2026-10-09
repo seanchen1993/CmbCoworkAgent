@@ -347,6 +347,138 @@ async function main(): Promise<void> {
   await testRootCommit()
   await testShellGenerationDuringCommit()
   await testShellAndFileToolOrdering()
+  await testProductionShellGenerationClosedLoop()
+}
+
+/** No network/LLM mock is involved in execution or persistence: only the model
+ * response is scripted. The real assembled execute tool, Orchestrator, shell,
+ * SQLite generation/outbox, and Git commit measurement all run here. */
+async function testProductionShellGenerationClosedLoop(): Promise<void> {
+  if (process.platform === "win32") {
+    console.log("SKIP POSIX execution closed loop; native Windows needs its own runner")
+    return
+  }
+  const { LocalSandbox } = await import("../src/main/agent/local-sandbox.ts")
+  const { ApprovalStore } = await import("../src/main/agent/approval-store.ts")
+  const { ToolOrchestrator } = await import("../src/main/agent/tool-orchestrator.ts")
+  const { createDeepAgent } = await import("../src/main/agent/runtime.ts")
+  const { BaseChatModel } = await import("@langchain/core/language_models/chat_models")
+  const { AIMessage, HumanMessage } = await import("@langchain/core/messages")
+  class ShellModel extends BaseChatModel {
+    constructor(
+      private readonly command: string,
+      private readonly cwd?: string
+    ) {
+      super({})
+    }
+    _llmType(): string {
+      return "shell-telemetry-closed-loop"
+    }
+    bindTools(): ShellModel {
+      return this
+    }
+    async _generate(messages: import("@langchain/core/messages").BaseMessage[]) {
+      const finished = messages.some((message) => message.type === "tool")
+      const message = finished
+        ? new AIMessage("Generated and verified 100 lines")
+        : new AIMessage({
+            content: "",
+            tool_calls: [
+              {
+                name: "execute",
+                id: "shell-write",
+                args: { command: this.command, ...(this.cwd ? { cwd: this.cwd } : {}) }
+              }
+            ]
+          })
+      return { generations: [{ text: String(message.content), message }] }
+    }
+  }
+  for (const [toolStrategy, yolo, explicitCwd] of [
+    ["shell-first", true, false],
+    ["shell-first-relaxed", false, true]
+  ] as const) {
+    await withTracker(async (reporter) => {
+      await withRepo("commit-file-production-shell", true, async (repo) => {
+        const mutations: string[] = []
+        let approvals = 0
+        const sandbox = new LocalSandbox({
+          rootDir: repo,
+          runId: "production-shell",
+          shellFileTelemetry: true,
+          windowsSandbox: "none",
+          onFileMutation: (file) => mutations.push(file)
+        })
+        sandbox.setOrchestrator(
+          new ToolOrchestrator(
+            new ApprovalStore(),
+            (command, mode, cwd) =>
+              sandbox.executeRaw(command, mode, undefined, undefined, { cwd }),
+            async (request) => {
+              approvals++
+              return { type: "approve", tool_call_id: request.tool_call.id }
+            },
+            () => yolo
+          )
+        )
+        setAdoptionContext("production-shell", {
+          traceId: "production-shell-trace",
+          modelId: "scripted-model"
+        })
+        // Use the same loop/compound-redirection shape as the user's report,
+        // both through the original deepagents handler and explicit execute.cwd.
+        const command =
+          'for i in $(seq 1 100); do echo "$i"; done > hello100.html && echo "count=$(wc -l < hello100.html)"'
+        const agent = createDeepAgent({
+          model: new ShellModel(command, explicitCwd ? repo : undefined),
+          backend: sandbox,
+          toolStrategy,
+          mainSubagentsEnabled: false,
+          mainTodosEnabled: false,
+          includeGeneralPurposeSubagent: false,
+          turnCompletionTodoGateEnabled: false
+        })
+        const result = await agent.invoke({ messages: [new HumanMessage("Create hello100.html")] })
+        assert(
+          result.messages.some(
+            (message) => message.type === "tool" && /count=\s*100/.test(String(message.content))
+          ),
+          "assembled execute tool must return actual shell result"
+        )
+        await waitForAdoptionRecordGenIdleForTest()
+        await flushAdoptionEventOutbox()
+        clearAdoptionContext("production-shell")
+        const gen = reporter.events.filter((event) => event.eventName === "code_gen")
+        assertEqual(gen.length, 1, `${toolStrategy}: exactly one Shell generation event`)
+        assertEqual(
+          gen[0].properties?.lineCount,
+          100,
+          `${toolStrategy}: all numeric lines are generated`
+        )
+        assertEqual(gen[0].properties?.tool, "execute", "Shell uses the established event schema")
+        assertEqual(
+          gen[0].properties?.traceId,
+          "production-shell-trace",
+          "production attribution retains context"
+        )
+        assertEqual(
+          mutations,
+          [join(repo, "hello100.html")],
+          "shared workspace receives mutation callback"
+        )
+        if (!yolo) assert(approvals > 0, "approval branch must actually execute")
+        const sha = await commitAndMeasure(repo, "generated-by-production-execute")
+        const files = reporter.named("code_commit_file", sha)
+        assertEqual(files.length, 1, "the generated file is measured once")
+        assertEqual(files[0].filePath, "hello100.html", "commit telemetry contains the actual path")
+        assertEqual(files[0].agentLineCount, 100, "all generated lines survive the real commit")
+        assertRollupMatchesAdoptEvents(reporter, sha)
+      })
+    })
+  }
+  console.log(
+    "PASS assembled execute + production Orchestrator → real Shell → SQLite/Outbox → commit adoption (both Bash First strategies)"
+  )
 }
 
 async function testShellGenerationDuringCommit(): Promise<void> {

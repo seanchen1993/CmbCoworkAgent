@@ -3,6 +3,7 @@ import { lstat, open, readdir, realpath } from "node:fs/promises"
 import { constants, type Stats } from "node:fs"
 import path from "node:path"
 import { performance } from "node:perf_hooks"
+import type { CommandShellSyntax } from "./exec-policy"
 import { withoutGitRepositoryOverrides } from "../services/git-environment"
 import {
   profileShellCommand,
@@ -16,6 +17,12 @@ export interface ShellFileChange {
   before?: Buffer | string
   after?: Buffer | string
   decision: "counted" | "attributed" | "unattributed"
+  reason?:
+    | "long-command-unscoped"
+    | "named-peer"
+    | "concurrent-unscoped"
+    | "stale-observation"
+    | "excluded-output"
 }
 export interface ShellFileCapture {
   finish(): Promise<{ changes: ShellFileChange[] }>
@@ -53,6 +60,7 @@ interface RepoSnapshot {
   root: string
   head: string | null
   files: Map<string, FileState>
+  epoch: number
 }
 interface Observation {
   repos: RepoSnapshot[]
@@ -70,6 +78,7 @@ interface Window {
 }
 interface WriteNote {
   epoch: number
+  state: "present" | "missing" | "unavailable"
   content: Buffer | null
   at: number
 }
@@ -90,6 +99,7 @@ const NOTE_BYTES = 32 * 1024 * 1024
 const MAX_WINDOWS = 64
 const ACTIVE_CONTENT_BYTES = 128 * 1024 * 1024
 let activeContentBytes = 0
+let activeCaptureSlots = 0
 
 function reserveContent(budget: ContentBudget, bytes: number): boolean {
   if (budget.closed || activeContentBytes + bytes > ACTIVE_CONTENT_BYTES) return false
@@ -334,7 +344,7 @@ async function observe(
   workspace: string,
   deadline: number,
   limits: Limits,
-  needsContent: boolean,
+  needsContent: boolean | (() => boolean),
   isCodeFile: (p: string) => boolean,
   budget: ContentBudget
 ): Promise<Observation> {
@@ -386,7 +396,7 @@ async function observe(
       })
       continue
     }
-    const repo: RepoSnapshot = { root, head: parsed.head, files: new Map() }
+    const repo: RepoSnapshot = { root, head: parsed.head, files: new Map(), epoch: ++epoch }
     for (const rel of parsed.paths) {
       checkBudget(deadline)
       const absPath = path.resolve(root, rel)
@@ -397,7 +407,7 @@ async function observe(
         const fingerprint = `${info.dev}:${info.ino}:${info.mtimeMs}:${info.ctimeMs}:${info.size}:${info.mode}`
         const state: FileState = { fingerprint, size: info.size, exists: true, epoch: ++epoch }
         if (
-          needsContent &&
+          (typeof needsContent === "function" ? needsContent() : needsContent) &&
           isCodeFile(absPath) &&
           info.size <= limits.fileBytes &&
           result.bytes + info.size <= limits.snapshotBytes &&
@@ -517,8 +527,17 @@ async function headContents(
   return contents
 }
 
-function saveNote(absPath: string, content: Buffer | null): void {
+function saveNote(
+  absPath: string,
+  content: Buffer | null,
+  missing = false,
+  observedEpoch = ++epoch
+): void {
+  if (missing) content = Buffer.alloc(0)
   const old = notes.get(absPath)
+  // Publication may finish out of order; it cannot make an old observation
+  // newer than a snapshot that already saw the resulting file state.
+  if (old && old.epoch > observedEpoch) return
   if (old) {
     noteBytes -= old.content?.length ?? 0
     notes.delete(absPath)
@@ -530,7 +549,12 @@ function saveNote(absPath: string, content: Buffer | null): void {
     notes.delete(key)
   }
   if ((content?.length ?? 0) <= NOTE_BYTES) {
-    notes.set(absPath, { content, epoch: ++epoch, at: Date.now() })
+    notes.set(absPath, {
+      content,
+      state: missing ? "missing" : content === null ? "unavailable" : "present",
+      epoch: observedEpoch,
+      at: Date.now()
+    })
     noteBytes += content?.length ?? 0
   }
 }
@@ -541,13 +565,14 @@ export async function noteFileToolWrite(
   content: Buffer | string | (() => Buffer | string)
 ): Promise<void> {
   if (!windows.size) return
+  const observedEpoch = ++epoch
   try {
     const canonical = await realpath(absPath)
     if (!windows.size) return
     // Do not re-encode every file-tool edit in standard mode or allocate a
     // giant buffer merely to mark it as over-budget.
     if (typeof content === "function" && (await lstat(canonical)).size > DEFAULTS.fileBytes) {
-      saveNote(canonical, null)
+      saveNote(canonical, null, false, observedEpoch)
       return
     }
     const value = typeof content === "function" ? content() : content
@@ -557,7 +582,7 @@ export async function noteFileToolWrite(
           ? value
           : Buffer.from(value)
         : null
-    if (windows.size) saveNote(canonical, buffer)
+    if (windows.size) saveNote(canonical, buffer, false, observedEpoch)
   } catch {
     console.warn("[ShellFileEffects] file-tool write note unavailable", { absPath })
   }
@@ -567,28 +592,31 @@ function named(profile: ShellCommandProfile, file: string): boolean {
   return profile.namedPaths.some((p) => shellPathMatches(p, file))
 }
 function kindFor(profile: ShellCommandProfile, file: string): ShellWriteKind {
+  const explicitlyNamed = named(profile, file)
   const applicable = profile.effects.filter(
-    (e) => e.paths.length === 0 || e.paths.some((p) => shellPathMatches(p, file))
+    (e) =>
+      (e.paths.length === 0 && !(e.scope === "unknown" && explicitlyNamed)) ||
+      e.paths.some((p) => shellPathMatches(p, file))
   )
+  if (applicable.some((e) => e.kind === "excluded")) return "excluded"
   if (applicable.some((e) => e.kind === "generated")) return "generated"
   if (applicable.some((e) => e.kind === "transfer")) return "transfer"
   return "model"
 }
 
-function owns(window: Window, file: string): boolean {
+function ownershipRejection(window: Window, file: string): ShellFileChange["reason"] {
   const long =
     window.profile.hasLongRunning ||
     (window.ended ?? performance.now()) - window.start > window.limits.shortMs
-  if (long && !named(window.profile, file)) return false
+  if (long && !named(window.profile, file)) return "long-command-unscoped"
   const peers = [...window.peers].filter(
     (w) => (w.ended ?? Infinity) > window.start && w.start < (window.ended ?? Infinity)
   )
   const namedPeers = peers.filter((w) => named(w.profile, file))
-  if (namedPeers.length)
-    return (
-      named(window.profile, file) &&
-      namedPeers.every((w) => w.ended !== undefined || w.id > window.id)
-    )
+  // Named windows settle in observation-completion order, not start-id order.
+  // The first settlement writes a note; a later one uses it as its preimage,
+  // or rejects a stale observation using the epoch check below.
+  if (namedPeers.length && !named(window.profile, file)) return "named-peer"
   if (
     !named(window.profile, file) &&
     peers.some(
@@ -596,8 +624,12 @@ function owns(window: Window, file: string): boolean {
         !w.profile.hasLongRunning && (w.ended ?? performance.now()) - w.start <= w.limits.shortMs
     )
   )
-    return false
-  return true
+    return "concurrent-unscoped"
+  return undefined
+}
+
+function owns(window: Window, file: string): boolean {
+  return ownershipRejection(window, file) === undefined
 }
 
 async function bounded<T>(work: Promise<T>, ms: number): Promise<T> {
@@ -619,23 +651,46 @@ export async function beginShellFileCapture(options: {
   command: string
   cwd: string
   isCodeFile: (p: string) => boolean
+  shellSyntax?: CommandShellSyntax
   limits?: Partial<Limits>
 }): Promise<ShellFileCapture | null> {
   const limits = { ...DEFAULTS, ...options.limits }
   const deadline = Date.now() + limits.beforeMs
   const budget: ContentBudget = { bytes: 0, closed: false }
-  if (windows.size >= MAX_WINDOWS) {
-    console.warn("[ShellFileEffects] skipped: active window budget exceeded")
+  if (activeCaptureSlots >= MAX_WINDOWS) {
+    console.warn("[ShellFileEffects] skipped: active window budget exceeded", {
+      active: activeCaptureSlots,
+      limit: MAX_WINDOWS
+    })
     return null
   }
+  // Reserve synchronously BEFORE any await: simultaneous callers must not all
+  // observe the same free slot. The reservation includes pending snapshots.
+  activeCaptureSlots++
   let window: Window | undefined
+  let released = false
+  const release = (): void => {
+    if (released) return
+    released = true
+    activeCaptureSlots--
+    if (window) windows.delete(window.id)
+    releaseContent(budget)
+    if (!activeCaptureSlots) {
+      notes.clear()
+      noteBytes = 0
+    }
+  }
   try {
     const cwd = await bounded(realpath(options.cwd), Math.max(1, deadline - Date.now()))
     const profile = await bounded(
-      profileShellCommand(options.command, cwd),
+      profileShellCommand(options.command, cwd, options.shellSyntax),
       Math.max(1, deadline - Date.now())
     )
-    if (!profile.canWrite) return null
+    if (!profile.canWrite) {
+      if (profile.background) console.info("[ShellFileEffects] skipped: shell background command")
+      release()
+      return null
+    }
     const workspace = await bounded(
       realpath(options.workspaceRoot),
       Math.max(1, deadline - Date.now())
@@ -666,8 +721,7 @@ export async function beginShellFileCapture(options: {
       Math.max(1, deadline - Date.now())
     )
     if (!before.repos.length) {
-      windows.delete(w.id)
-      releaseContent(budget)
+      release()
       return null
     }
     // Start duration attribution at actual command dispatch, not snapshot wait.
@@ -678,16 +732,21 @@ export async function beginShellFileCapture(options: {
       const endDeadline = Date.now() + limits.afterMs
       const changes: ShellFileChange[] = []
       try {
+        // A B/C window must hand a readable postimage to overlapping model
+        // windows too, including dirty files restored to clean HEAD status.
+        const postNeedsContent = () =>
+          needsContent ||
+          [...w.peers].some((p) => p.profile.effects.some((e) => e.kind === "model"))
         const after = await observe(
           before.repos.map((r) => r.root),
           workspace,
           endDeadline,
           limits,
-          needsContent ||
-            [...w.peers].some((p) => p.profile.effects.some((e) => e.kind === "model")),
+          postNeedsContent,
           options.isCodeFile,
           budget
         )
+        if (budget.closed) return { changes: [] }
         let remainingHeadBytes = limits.snapshotBytes
         for (const oldRepo of before.repos) {
           const newRepo = after.repos.find((r) => r.root === oldRepo.root)
@@ -712,6 +771,7 @@ export async function beginShellFileCapture(options: {
             { ...limits, snapshotBytes: remainingHeadBytes },
             budget
           )
+          if (budget.closed) return { changes: [] }
           for (const value of heads.values()) remainingHeadBytes -= value?.length ?? 0
           for (const absPath of changed) {
             checkBudget(endDeadline)
@@ -719,9 +779,17 @@ export async function beginShellFileCapture(options: {
               current = newRepo.files.get(absPath)
             // An absent post-status entry is a revert to HEAD, not a deletion.
             let afterContent = current?.content
-            if (!current && prior?.exists && needsContent && options.isCodeFile(absPath)) {
+            let afterMissing = current?.exists === false
+            let observedEpoch = current?.epoch ?? newRepo.epoch
+            if (
+              afterContent === undefined &&
+              prior &&
+              postNeedsContent() &&
+              options.isCodeFile(absPath)
+            ) {
               try {
                 const st = await lstat(absPath)
+                observedEpoch = ++epoch
                 if (!st.isFile() || st.isSymbolicLink()) continue
                 if (
                   st.size <= limits.fileBytes &&
@@ -734,16 +802,33 @@ export async function beginShellFileCapture(options: {
               } catch (e) {
                 if ((e as NodeJS.ErrnoException).code !== "ENOENT") continue
                 afterContent = Buffer.alloc(0)
+                afterMissing = true
+                observedEpoch = ++epoch
               }
             }
-            if (!owns(w, absPath)) {
-              changes.push({ absPath, decision: "unattributed" })
+            if (budget.closed) return { changes: [] }
+            const rejection = ownershipRejection(w, absPath)
+            if (rejection) {
+              changes.push({ absPath, decision: "unattributed", reason: rejection })
+              continue
+            }
+            // EVERY source class must obey the same settlement fence. A slow
+            // formatter/transfer must not overwrite a newer model preimage.
+            const note = notes.get(absPath)
+            const beforeEpoch = prior?.epoch ?? oldRepo.epoch
+            if (note && note.epoch > beforeEpoch && note.epoch > observedEpoch) {
+              changes.push({ absPath, decision: "unattributed", reason: "stale-observation" })
               continue
             }
             const kind = kindFor(profile, absPath)
+            if (kind === "excluded") {
+              changes.push({ absPath, decision: "unattributed", reason: "excluded-output" })
+              saveNote(absPath, afterContent ?? null, afterMissing, observedEpoch)
+              continue
+            }
             if (kind !== "model" || !options.isCodeFile(absPath)) {
               changes.push({ absPath, decision: "attributed" })
-              saveNote(absPath, afterContent ?? null)
+              saveNote(absPath, afterContent ?? null, afterMissing, observedEpoch)
               continue
             }
             let beforeContent = prior?.content ?? heads.get(absPath) ?? undefined
@@ -751,14 +836,9 @@ export async function beginShellFileCapture(options: {
             // New files do not exist in HEAD. Missing tracked preimages are NOT empty.
             if (!prior && heads.has(absPath) && heads.get(absPath) === null)
               beforeContent = Buffer.alloc(0)
-            const note = notes.get(absPath)
-            if (note && note.epoch > (prior?.epoch ?? w.epoch)) {
-              if (current && note.epoch > current.epoch) {
-                changes.push({ absPath, decision: "unattributed" })
-                continue
-              }
+            if (note && note.epoch > beforeEpoch) {
               if (afterContent && note.content?.equals(afterContent)) continue
-              if (note.content) beforeContent = note.content
+              if (note.state !== "unavailable") beforeContent = note.content ?? Buffer.alloc(0)
               else beforeContent = undefined
             }
             if (beforeContent === undefined || afterContent === undefined) {
@@ -772,9 +852,9 @@ export async function beginShellFileCapture(options: {
             if (beforeContent.equals(afterContent)) {
               // Creation/deletion of an empty file is still a mutation for
               // automatic commits, but contributes zero generated lines.
-              if ((!prior && current?.exists) || current?.exists === false) {
+              if ((!prior?.exists && !afterMissing) || afterMissing) {
                 changes.push({ absPath, decision: "attributed" })
-                saveNote(absPath, current?.exists === false ? null : afterContent)
+                saveNote(absPath, afterContent, afterMissing, observedEpoch)
               }
               continue
             }
@@ -784,36 +864,32 @@ export async function beginShellFileCapture(options: {
               after: afterContent,
               decision: "counted"
             })
-            saveNote(absPath, current?.exists === false ? null : afterContent)
+            saveNote(absPath, afterContent, afterMissing, observedEpoch)
           }
         }
         if (changes.some((c) => c.decision === "unattributed"))
-          console.info("[ShellFileEffects] ambiguous changes not counted", {
+          console.info("[ShellFileEffects] changes not counted", {
             windowId: w.id,
-            count: changes.filter((c) => c.decision === "unattributed").length
+            count: changes.filter((c) => c.decision === "unattributed").length,
+            reasons: [
+              ...new Set(changes.filter((c) => c.decision === "unattributed").map((c) => c.reason))
+            ]
           })
         return { changes }
       } finally {
-        windows.delete(w.id)
-        releaseContent(budget)
-        if (!windows.size) {
-          notes.clear()
-          noteBytes = 0
-        }
+        release()
       }
     }
     return {
       finish: () =>
         (finished ??= bounded(finish(), limits.afterMs).catch((error) => {
-          windows.delete(w.id)
-          releaseContent(budget)
+          release()
           console.warn("[ShellFileEffects] capture abandoned", { reason: String(error) })
           return { changes: [] }
         }))
     }
   } catch (error) {
-    if (window) windows.delete(window.id)
-    releaseContent(budget)
+    release()
     console.warn("[ShellFileEffects] capture unavailable; command continues", {
       reason: String(error)
     })

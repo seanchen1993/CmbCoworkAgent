@@ -11,7 +11,29 @@ import {
 import { tmpdir } from "node:os"
 import path from "node:path"
 import { execFileSync } from "node:child_process"
-import { afterEach, describe, expect, it } from "vitest"
+import { afterEach, describe, expect, it, vi } from "vitest"
+
+// Control only observation scheduling, not Git/file contents or classifications.
+const observationGate = vi.hoisted(() => ({
+  afterLstat: undefined as ((file: string) => Promise<void>) | undefined,
+  afterRealpath: undefined as ((file: string) => Promise<void>) | undefined
+}))
+vi.mock("node:fs/promises", async () => {
+  const actual = await vi.importActual<typeof import("node:fs/promises")>("node:fs/promises")
+  return {
+    ...actual,
+    lstat: async (...args: Parameters<typeof actual.lstat>) => {
+      const info = await actual.lstat(...args)
+      await observationGate.afterLstat?.(String(args[0]))
+      return info
+    },
+    realpath: async (...args: Parameters<typeof actual.realpath>) => {
+      const resolved = await actual.realpath(...args)
+      await observationGate.afterRealpath?.(String(args[0]))
+      return resolved
+    }
+  }
+})
 import {
   beginShellFileCapture,
   noteFileToolWrite,
@@ -55,6 +77,413 @@ afterEach(async () => {
 })
 
 describe("shell file effects against real Git repositories", () => {
+  it("hands clean restored content from a C window to an overlapping model edit", async () => {
+    const root = await repo(),
+      file = path.join(root, "a.ts")
+    await writeFile(file, "preexisting dirty\n")
+    const a = await capture(root),
+      b = await capture(root, "git restore a.ts")
+    git(root, "restore", "a.ts")
+    expect((await b.finish()).changes.find((change) => change.absPath === file)?.decision).toBe(
+      "attributed"
+    )
+    await writeFile(file, "new model\n")
+    const change = (await a.finish()).changes.find((change) => change.absPath === file)
+    expect(change?.decision).toBe("counted")
+    expect(change?.before?.toString()).toBe("const a = 1\n")
+    expect(change?.after?.toString()).toBe("new model\n")
+  })
+
+  it.each(["git restore a.ts", "cp b.ts a.ts"])(
+    "retains the preimage of a model peer joining during a C observation: %s",
+    async (command) => {
+      const root = await repo(),
+        file = path.join(root, "a.ts"),
+        sentinel = path.join(root, "z.ts")
+      await writeFile(file, "preexisting dirty\n")
+      await writeFile(path.join(root, "b.ts"), "copied B\n")
+      await writeFile(sentinel, "dirty sentinel\n")
+      const b = await capture(root, command)
+      execFileSync("bash", ["-c", command], { cwd: root, stdio: "pipe" })
+      let reached!: () => void, resume!: () => void
+      const paused = new Promise<void>((resolve) => {
+        reached = resolve
+      })
+      const resumed = new Promise<void>((resolve) => {
+        resume = resolve
+      })
+      observationGate.afterLstat = async (target) => {
+        if (target !== sentinel) return
+        observationGate.afterLstat = undefined
+        reached()
+        await resumed
+      }
+      const slowFinish = b.finish()
+      let a: ShellFileCapture | undefined
+      try {
+        await paused
+        a = await capture(root, "printf 'new model\\n' > a.ts")
+        resume()
+        expect((await slowFinish).changes.find((change) => change.absPath === file)?.decision).toBe(
+          "attributed"
+        )
+        execFileSync("bash", ["-c", "printf 'new model\\n' > a.ts"], { cwd: root, stdio: "pipe" })
+        const change = (await a.finish()).changes.find((change) => change.absPath === file)
+        expect(change?.decision).toBe("counted")
+        expect(change?.before?.toString()).toBe(
+          command.startsWith("git") ? "const a = 1\n" : "copied B\n"
+        )
+        expect(change?.after?.toString()).toBe("new model\n")
+      } finally {
+        observationGate.afterLstat = undefined
+        resume()
+        await slowFinish
+        await a?.finish()
+      }
+    }
+  )
+
+  it("does not publish an older file-tool fact after a newer write note", async () => {
+    const root = await repo(),
+      file = path.join(root, "a.ts"),
+      c = await capture(root)
+    await writeFile(file, "old file-tool write\n")
+    let reached!: () => void, resume!: () => void
+    const paused = new Promise<void>((resolve) => {
+      reached = resolve
+    })
+    const resumed = new Promise<void>((resolve) => {
+      resume = resolve
+    })
+    observationGate.afterRealpath = async (target) => {
+      if (target !== file) return
+      observationGate.afterRealpath = undefined
+      reached()
+      await resumed
+    }
+    const oldNote = noteFileToolWrite(file, "old file-tool write\n")
+    try {
+      await paused
+      await writeFile(file, "new file-tool write\n")
+      await noteFileToolWrite(file, "new file-tool write\n")
+      resume()
+      await oldNote
+      await writeFile(file, "model write\n")
+      const change = (await c.finish()).changes.find((change) => change.absPath === file)
+      expect(change?.decision).toBe("counted")
+      expect(change?.before?.toString()).toBe("new file-tool write\n")
+    } finally {
+      observationGate.afterRealpath = undefined
+      resume()
+      await oldNote
+      await c.finish()
+    }
+  })
+
+  it
+    .skipIf(process.platform === "win32")
+    .each([
+      "make test | bash -c 'sed s/passed/ok/' > wrapper-report.html",
+      "make test | npm run change > wrapper-report.html"
+    ])("keeps test stdout excluded through a real recursive consumer: %s", async (pipeline) => {
+    const root = await repo()
+    await writeFile(path.join(root, "Makefile"), "test:\n\t@printf '<p>test passed</p>\\n'\n")
+    await writeFile(
+      path.join(root, "package.json"),
+      JSON.stringify({ scripts: { change: "sed s/passed/ok/" } })
+    )
+    const command = pipeline + "; printf 'new model\\n' > a.ts"
+    const c = await beginShellFileCapture({
+      workspaceRoot: root,
+      cwd: root,
+      command,
+      isCodeFile: () => true
+    })
+    execFileSync("bash", ["-c", command], { cwd: root, stdio: "pipe" })
+    const changes = (await c!.finish()).changes
+    expect(
+      changes.find((change) => change.absPath === path.join(root, "wrapper-report.html"))?.reason
+    ).toBe("excluded-output")
+    expect(
+      changes.filter((change) => change.decision === "counted").map((change) => change.absPath)
+    ).toEqual([path.join(root, "a.ts")])
+  })
+
+  it.skipIf(process.platform === "win32").each(["make test", "cat b.ts", "prettier b.ts"])(
+    "does not let unknown output locations hide an explicit model write: %s",
+    async (producer) => {
+      const root = await repo()
+      await writeFile(path.join(root, "Makefile"), "test:\n\t@printf 'test passed\\n'\n")
+      const command = `printf 'new model\\n' > a.ts; ${producer} > "$REPORT_PATH"`
+      const c = await capture(root, command)
+      execFileSync("bash", ["-c", command], {
+        cwd: root,
+        stdio: "pipe",
+        env: { ...process.env, REPORT_PATH: path.join(root, "report.log") }
+      })
+      const change = (await c.finish()).changes.find(
+        (change) => change.absPath === path.join(root, "a.ts")
+      )
+      expect(change?.decision).toBe("counted")
+      expect(change?.after?.toString()).toBe("new model\n")
+    }
+  )
+
+  it
+    .skipIf(process.platform === "win32")
+    .each([
+      'target=a.ts; (target=b.ts); printf "new model\\n" > "$target"; make test',
+      'target=a.ts; if false; then target=b.ts; fi; printf "new model\\n" > "$target"; make test',
+      'target=a.ts; target=b.ts true; printf "new model\\n" > "$target"; make test',
+      'target=a.ts; false && target=b.ts; printf "new model\\n" > "$target"; make test',
+      'target=a.ts; true || target=b.ts; printf "new model\\n" > "$target"; make test',
+      'target=a.ts; target=b.ts | cat; printf "new model\\n" > "$target"; make test',
+      'target=a.ts; { target=b.ts; } | cat; printf "new model\\n" > "$target"; make test',
+      'target=a.ts; if false; then target=b.ts; else printf "new model\\n" > "$target"; fi; make test',
+      'target=a.ts; if false; then target=b.ts; elif true; then printf "new model\\n" > "$target"; fi; make test',
+      'false && cd nested; printf "new model\\n" > a.ts; make test',
+      'true || cd nested; printf "new model\\n" > a.ts; make test',
+      'cd nested | cat; printf "new model\\n" > a.ts; make test',
+      'if false; then cd nested; else printf "new model\\n" > a.ts; fi; make test'
+    ])("counts the file actually written using scoped variables: %s", async (command) => {
+    const root = await repo()
+    await mkdir(path.join(root, "nested"))
+    await writeFile(path.join(root, "Makefile"), "test:\n\t@true\n")
+    const c = await capture(root, command)
+    execFileSync("bash", ["-c", command], { cwd: root, stdio: "pipe" })
+    const changes = (await c.finish()).changes
+    expect(
+      changes.filter((change) => change.decision === "counted").map((change) => change.absPath)
+    ).toEqual([path.join(root, "a.ts")])
+    expect(
+      changes.find((change) => change.absPath === path.join(root, "a.ts"))?.after?.toString()
+    ).toBe("new model\n")
+  })
+
+  it.each(["prettier --write a.ts", "git restore a.ts"])(
+    "rejects a stale B/C observation before it can overwrite a newer model note: %s",
+    async (command) => {
+      const root = await repo(),
+        file = path.join(root, "a.ts"),
+        pausedFile = path.join(root, "z.ts")
+      await writeFile(pausedFile, "preexisting dirty\n")
+      const a = await capture(root),
+        b = await capture(root, command),
+        c = await capture(root)
+      await writeFile(file, "formatted or copied B\n")
+      let reached!: () => void, resume!: () => void
+      const paused = new Promise<void>((resolve) => {
+        reached = resolve
+      })
+      const resumed = new Promise<void>((resolve) => {
+        resume = resolve
+      })
+      observationGate.afterLstat = async (target) => {
+        if (target !== pausedFile) return
+        observationGate.afterLstat = undefined
+        reached()
+        await resumed
+      }
+      const slowFinish = b.finish()
+      try {
+        await paused
+        await writeFile(file, "model A\n")
+        expect((await a.finish()).changes.find((change) => change.absPath === file)?.decision).toBe(
+          "counted"
+        )
+        resume()
+        const stale = (await slowFinish).changes.find((change) => change.absPath === file)
+        expect(stale?.reason).toBe("stale-observation")
+        await writeFile(file, "model A\nmodel C\n")
+        const final = (await c.finish()).changes.find((change) => change.absPath === file)
+        expect(final?.decision).toBe("counted")
+        expect(final?.before?.toString()).toBe("model A\n")
+        expect(final?.after?.toString()).toBe("model A\nmodel C\n")
+      } finally {
+        observationGate.afterLstat = undefined
+        resume()
+        await slowFinish
+        await a.finish()
+        await c.finish()
+      }
+    }
+  )
+
+  it.skipIf(process.platform === "win32")(
+    "excludes real test logs piped to a code extension, including mixed model writes",
+    async () => {
+      const root = await repo()
+      await writeFile(path.join(root, "Makefile"), "test:\n\t@printf '<p>test passed</p>\\n'\n")
+      const command = "make test | tee report.html; printf 'model edit\\n' > a.ts"
+      const c = await beginShellFileCapture({
+        workspaceRoot: root,
+        cwd: root,
+        command,
+        isCodeFile: () => true
+      })
+      execFileSync("bash", ["-c", command], { cwd: root, stdio: "pipe" })
+      const changes = (await c!.finish()).changes
+      expect(
+        changes.find((change) => change.absPath === path.join(root, "report.html"))?.reason
+      ).toBe("excluded-output")
+      expect(
+        changes.filter((change) => change.decision === "counted").map((change) => change.absPath)
+      ).toEqual([path.join(root, "a.ts")])
+    }
+  )
+
+  it.skipIf(process.platform === "win32")(
+    "does not count mixed transfer stdout from a real nested shell",
+    async () => {
+      const root = await repo()
+      const command = "bash -c 'cat a.ts; printf generated' > combined.ts"
+      const c = await capture(root, command)
+      execFileSync("bash", ["-c", command], { cwd: root, stdio: "pipe" })
+      expect((await c.finish()).changes[0].decision).toBe("attributed")
+    }
+  )
+
+  it.skipIf(process.platform === "win32")(
+    "attributes real formatter stdout without counting it as model code",
+    async () => {
+      const root = await repo()
+      await writeFile(path.join(root, "template.ts"), "const value={hello:1};\n")
+      const command = "prettier template.ts > pretty.ts; printf 'model edit\\n' > a.ts"
+      const c = await capture(root, command)
+      execFileSync("bash", ["-c", command], { cwd: root, stdio: "pipe" })
+      const changes = (await c.finish()).changes
+      expect(
+        changes.find((change) => change.absPath === path.join(root, "pretty.ts"))?.decision
+      ).toBe("attributed")
+      expect(
+        changes.filter((change) => change.decision === "counted").map((change) => change.absPath)
+      ).toEqual([path.join(root, "a.ts")])
+    }
+  )
+
+  it("runs the nested package's actual script instead of classifying the parent package", async () => {
+    const root = await repo(),
+      nested = path.join(root, "nested")
+    await mkdir(nested)
+    await writeFile(
+      path.join(root, "package.json"),
+      JSON.stringify({ scripts: { tidy: "tsc --noEmit" } })
+    )
+    await writeFile(
+      path.join(nested, "package.json"),
+      JSON.stringify({ scripts: { tidy: "node edit.cjs" } })
+    )
+    await writeFile(
+      path.join(nested, "edit.cjs"),
+      "require('fs').writeFileSync('local.ts', 'nested code\\n')"
+    )
+    const c = await capture(root, "cd nested && npm run tidy")
+    execFileSync(process.platform === "win32" ? "npm.cmd" : "npm", ["run", "tidy"], {
+      cwd: nested,
+      stdio: "pipe"
+    })
+    expect(
+      (await c.finish()).changes
+        .filter((change) => change.decision === "counted")
+        .map((change) => change.absPath)
+    ).toEqual([path.join(nested, "local.ts")])
+  })
+  it("hands the first-completed named observation to a later-completed older window", async () => {
+    const root = await repo(),
+      a = await capture(root),
+      b = await capture(root)
+    await writeFile(path.join(root, "a.ts"), "second window first\n")
+    const first = (await b.finish()).changes[0]
+    expect(first.decision).toBe("counted")
+    expect(first.before?.toString()).toBe("const a = 1\n")
+    await writeFile(path.join(root, "a.ts"), "first window second\n")
+    const second = (await a.finish()).changes[0]
+    expect(second.decision).toBe("counted")
+    expect(second.before?.toString()).toBe("second window first\n")
+  })
+
+  it("counts rebuilding a predeleted tracked file even when it becomes clean", async () => {
+    const root = await repo()
+    await rm(path.join(root, "a.ts"))
+    const c = await capture(root, "printf 'const a = 1' > a.ts")
+    await writeFile(path.join(root, "a.ts"), "const a = 1\n")
+    const change = (await c.finish()).changes[0]
+    expect(change.decision).toBe("counted")
+    expect(change.before?.toString()).toBe("")
+    expect(change.after?.toString()).toBe("const a = 1\n")
+  })
+
+  it("keeps a confirmed deletion as an empty preimage for an overlapping rebuild", async () => {
+    const root = await repo(),
+      deletion = await capture(root, "rm a.ts"),
+      rebuild = await capture(root)
+    await rm(path.join(root, "a.ts"))
+    expect((await deletion.finish()).changes[0].decision).toBe("counted")
+    await writeFile(path.join(root, "a.ts"), "rebuilt\n")
+    const change = (await rebuild.finish()).changes[0]
+    expect(change.decision).toBe("counted")
+    expect(change.before?.toString()).toBe("")
+    expect(change.after?.toString()).toBe("rebuilt\n")
+  })
+
+  it("atomically admits at most 64 simultaneous captures and releases their slots", async () => {
+    const root = await repo()
+    const opened = await Promise.all(
+      Array.from({ length: 66 }, () =>
+        beginShellFileCapture({
+          workspaceRoot: root,
+          cwd: root,
+          command: "sed -i s/1/2/ a.ts",
+          isCodeFile: (p) => p.endsWith(".ts"),
+          limits: { beforeMs: 20000, afterMs: 20000, gitMs: 10000, slowMs: 10000 }
+        })
+      )
+    )
+    expect(opened.filter(Boolean)).toHaveLength(64)
+    await Promise.all(opened.map((c) => c?.finish()))
+    const next = await capture(root)
+    await next.finish()
+    // Read-only and failed admission paths must also release their reservation.
+    for (let i = 0; i < 66; i++)
+      expect(
+        await beginShellFileCapture({
+          workspaceRoot: root,
+          cwd: root,
+          command: "cat a.ts",
+          isCodeFile: () => true
+        })
+      ).toBeNull()
+    await (await capture(root)).finish()
+  }, 30000)
+
+  it("does not count real package formatter/test/build script writes", async () => {
+    const root = await repo()
+    await writeFile(
+      path.join(root, "package.json"),
+      JSON.stringify({
+        scripts: { format: "node format.cjs", test: "node format.cjs", build: "node format.cjs" }
+      })
+    )
+    await writeFile(
+      path.join(root, "format.cjs"),
+      "require('fs').writeFileSync('a.ts', 'formatted\\n')"
+    )
+    const c = await capture(root, "npm run format")
+    execFileSync(process.platform === "win32" ? "npm.cmd" : "npm", ["run", "format"], {
+      cwd: root,
+      stdio: "pipe"
+    })
+    expect((await c.finish()).changes[0].decision).toBe("attributed")
+    for (const script of ["test", "build"])
+      expect(
+        await beginShellFileCapture({
+          workspaceRoot: root,
+          cwd: root,
+          command: `npm run ${script}`,
+          isCodeFile: () => true
+        })
+      ).toBeNull()
+  })
   it("captures the clean HEAD preimage and changed content", async () => {
     const root = await repo(),
       c = await capture(root)
