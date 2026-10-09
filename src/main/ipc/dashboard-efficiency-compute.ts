@@ -1,4 +1,5 @@
-import { isHarnessDevStageNodeName } from "../../shared/harness-stage-bucket"
+import { completeStageUsageFilter } from "./project-mode-stage-usage"
+import { isNestedMappingError } from "./dashboard-es-nested-mapping"
 import type {
   EfficiencyDevComputeData,
   EfficiencyDevComputeResult,
@@ -130,71 +131,133 @@ export async function fetchEfficiencyPluginOptions(
   return options
 }
 
-export function readDevTrace(source: Record<string, unknown>): {
+const TRACE_PAGE_SIZE = 1000
+const CODE_CONCURRENCY = 4
+const devNodeFilter = (field: string) => ({ regexp: { [field]: "[dD][eE][vV]-.*" } })
+const stageActivityFilter = {
+  bool: {
+    should: [
+      { range: { "stageUsage.modelCalls": { gt: 0 } } },
+      { range: { "stageUsage.toolCalls": { gt: 0 } } }
+    ],
+    minimum_should_match: 1
+  }
+}
+const usageFields = {
+  totalInputTokens: "inputTokens",
+  totalOutputTokens: "outputTokens",
+  totalTokens: "totalTokens",
+  modelCalls: "modelCalls",
+  tokenUsageReportedCalls: "tokenUsageReportedCalls",
+  cacheReadTokens: "cacheReadTokens",
+  cacheUsageReportedCalls: "cacheUsageReportedCalls"
+}
+
+function devTraceAggs(legacyOnly: boolean): Record<string, unknown> {
+  return {
+    ...(!legacyOnly
+      ? {
+          precise: {
+            filter: completeStageUsageFilter,
+            aggs: {
+              usage: {
+                nested: { path: "stageUsage" },
+                aggs: {
+                  dev: {
+                    filter: {
+                      bool: { filter: [devNodeFilter("stageUsage.nodeName"), stageActivityFilter] }
+                    },
+                    aggs: Object.fromEntries(
+                      Object.entries(usageFields).map(([key, field]) => [
+                        key,
+                        { sum: { field: `stageUsage.${field}` } }
+                      ])
+                    )
+                  },
+                  unattributed: {
+                    filter: {
+                      bool: {
+                        filter: [stageActivityFilter],
+                        must_not: [{ exists: { field: "stageUsage.nodeName" } }]
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      : {}),
+    legacy: {
+      filter: {
+        bool: {
+          filter: [devNodeFilter("harnessNodeName")],
+          ...(!legacyOnly ? { must_not: [completeStageUsageFilter] } : {})
+        }
+      },
+      aggs: {
+        ...Object.fromEntries(
+          ["totalInputTokens", "totalOutputTokens", "totalTokens", "cacheReadTokens"].map((key) => [
+            key,
+            { sum: { field: key } }
+          ])
+        ),
+        modelCalls: { sum: { field: "modelCallCount" } },
+        cache_reported: {
+          filter: { exists: { field: "cacheReadTokens" } },
+          aggs: { calls: { sum: { field: "modelCallCount" } } }
+        }
+      }
+    }
+  }
+}
+
+function readDevBucket(bucket: Record<string, unknown>): {
   precise: boolean
   unattributed: boolean
   metrics: EfficiencyDevComputeData | null
 } {
-  const precise =
-    source.stageUsageSchemaVersion === 1 &&
-    source.stageUsageComplete === true &&
-    Array.isArray(source.stageUsage)
+  const scope = record(bucket.precise)
+  const precise = count(scope.doc_count) > 0
+  const usage = record(scope.usage)
+  const dev = record(usage.dev)
+  const legacy = record(bucket.legacy)
+  const unattributed = count(record(usage.unattributed).doc_count) > 0
+  if (count(precise ? dev.doc_count : legacy.doc_count) === 0)
+    return { precise, unattributed, metrics: null }
   const metrics = emptyDevCompute()
-  if (precise) {
-    const rows = (source.stageUsage as unknown[]).map(record)
-    const unattributed = rows.some(
-      (row) => !text(row.nodeName) && count(row.modelCalls) + count(row.toolCalls) > 0
+  const source = precise ? dev : legacy
+  for (const field of Object.keys(usageFields) as (keyof typeof usageFields)[])
+    metrics[field] = sumValue(source, field)
+  if (!precise) {
+    metrics.totalTokens = resolveTokenTotal(
+      record(source.totalTokens).value,
+      metrics.totalInputTokens,
+      metrics.totalOutputTokens
     )
-    const dev = rows.filter(
-      (row) =>
-        isHarnessDevStageNodeName(text(row.nodeName)) &&
-        count(row.modelCalls) + count(row.toolCalls) > 0
-    )
-    if (dev.length === 0) return { precise, unattributed, metrics: null }
-    for (const row of dev) {
-      metrics.totalInputTokens += count(row.inputTokens)
-      metrics.totalOutputTokens += count(row.outputTokens)
-      metrics.totalTokens += count(row.totalTokens)
-      metrics.modelCalls += count(row.modelCalls)
-      metrics.tokenUsageReportedCalls += Math.min(
-        count(row.tokenUsageReportedCalls),
-        count(row.modelCalls)
-      )
-      // Missing historical cache fields are unknown, not a measured zero.
-      if (
-        typeof row.cacheReadTokens === "number" &&
-        typeof row.cacheUsageReportedCalls === "number"
-      ) {
-        metrics.cacheReadTokens += count(row.cacheReadTokens)
-        metrics.cacheUsageReportedCalls += Math.min(
-          count(row.cacheUsageReportedCalls),
-          count(row.modelCalls)
-        )
-      }
-    }
-    metrics.traceCount = 1
-    return { precise, unattributed, metrics }
+    metrics.cacheUsageReportedCalls = sumValue(record(source.cache_reported), "calls")
   }
-  const nodeName = text(source.harnessNodeName)
-  if (!isHarnessDevStageNodeName(nodeName))
-    return { precise, unattributed: !nodeName, metrics: null }
   metrics.traceCount = 1
-  metrics.totalInputTokens = count(source.totalInputTokens)
-  metrics.totalOutputTokens = count(source.totalOutputTokens)
-  metrics.totalTokens = resolveTokenTotal(
-    source.totalTokens,
-    metrics.totalInputTokens,
-    metrics.totalOutputTokens
-  )
-  metrics.modelCalls = count(source.modelCallCount)
-  // Historical turn totals do not prove per-call reporting or Dev-only cache coverage.
-  return { precise, unattributed: false, metrics }
+  return { precise, unattributed, metrics }
 }
 
-/** Both tokens and code use the same trace cohort (started in the selected period).
- * Code generated by those traces can be committed/pushed later. No event-time filter
- * is added: that would discard cross-period output while retaining its token spend.
- * Only counter fields are fetched, in bounded pages; no messages/model-call payloads.
+/** Existing Dev records remain visible; complete new records still contribute only Dev calls.
+ * Coverage markers describe missing per-call reports, not the age of a record.
+ */
+export function mergeDevCompute(
+  precise: EfficiencyDevComputeData,
+  legacy: EfficiencyDevComputeData
+): EfficiencyDevComputeData {
+  const merged = emptyDevCompute()
+  addDevCompute(merged, precise)
+  addDevCompute(merged, legacy)
+  merged.tokenUsageIncomplete = precise.tokenUsageReportedCalls < precise.modelCalls
+  return finishDevCompute(merged)
+}
+
+/** Both counters and code retain the same trace cohort. Composite aggregation reads
+ * indexed counters instead of decompressing full trace sources; bounded concurrent
+ * code batches overlap the next trace page without per-trace requests.
  */
 export async function fetchDevCompute(
   query: (index: "trace" | "event", body: Record<string, unknown>) => Promise<unknown>,
@@ -219,147 +282,201 @@ export async function fetchDevCompute(
     legacyDevTraces: 0,
     unattributedTraces: 0
   }
-  let after: unknown[] | undefined
   const cursors = new Set<string>()
-  for (;;) {
-    const raw = completeResponse(
-      await query("trace", {
-        size: PAGE_SIZE,
-        track_total_hits: false,
-        query: { bool: { filter: [...selectedTraceFilters, { exists: { field: "traceId" } }] } },
-        sort: [{ traceId: "asc" }],
-        ...(after ? { search_after: after } : {}),
-        _source: {
-          includes: [
-            "traceId",
-            "harnessProjectId",
-            "harnessAdapterName",
-            "harnessAdapterVersion",
-            "harnessNodeName",
-            "stageUsageSchemaVersion",
-            "stageUsageComplete",
-            "stageUsage",
-            "totalInputTokens",
-            "totalOutputTokens",
-            "totalTokens",
-            "modelCallCount"
-          ]
-        }
-      })
-    )
-    const hits = record(raw.hits).hits
-    if (!Array.isArray(hits)) throw new Error("研发阶段记录查询缺少结果，请重试")
-    if (hits.length === 0) break
-    const traces = new Map<
+  const pending = new Set<Promise<void>>()
+  let codeFailure: unknown
+  let codeFailed = false
+  let legacyOnly = false
+  let after: Record<string, unknown> | undefined
+
+  async function applyCode(
+    traces: Map<
       string,
       {
-        parsed: ReturnType<typeof readDevTrace>
+        parsed: ReturnType<typeof readDevBucket>
         plugin: EfficiencyDevComputeResult["computeByPlugin"][number]
       }
-    >()
-    for (const hit of hits) {
-      const source = record(record(hit)._source)
-      const name = text(source.harnessAdapterName)
-      const version = text(source.harnessAdapterVersion)
-      if (name) {
-        const versions = options.get(name) ?? new Set<string>()
-        if (version) versions.add(version)
-        options.set(name, versions)
-      }
-      if (selectedName && name !== selectedName) continue
-      if (selectedVersion && version !== selectedVersion) continue
-      coverage.scopeTraces += 1
-      const parsed = readDevTrace(source)
-      if (parsed.unattributed) coverage.unattributedTraces += 1
-      if (!parsed.metrics) continue
-      if (parsed.precise) coverage.preciseDevTraces += 1
-      else coverage.legacyDevTraces += 1
-      const plugin = plugins.get(name) ?? {
-        adapterName: name || null,
-        versions: [],
-        compute: emptyDevCompute(),
-        legacyCompute: emptyDevCompute()
-      }
-      if (version && !plugin.versions.includes(version)) plugin.versions.push(version)
-      plugins.set(name, plugin)
-      const id = text(source.traceId)
-      if (!id || traces.has(id)) throw new Error("研发阶段记录标识缺失或重复，无法保证统计准确")
-      traces.set(id, { parsed, plugin })
-    }
-    if (traces.size > 0) {
-      const codeRaw = completeResponse(
-        await query("event", {
-          size: 0,
-          query: {
-            bool: {
-              filter: [
-                ...eventFilters,
-                { terms: { "properties.traceId": [...traces.keys()] } },
-                { terms: { eventName: ["code_gen", "code_adopt"] } },
-                { regexp: { "properties.harnessNodeName": "[dD][eE][vV]-.*" } }
-              ]
-            }
-          },
-          aggs: {
-            by_trace: {
-              terms: { field: "properties.traceId", size: traces.size },
-              aggs: {
-                generated: {
-                  filter: { term: { eventName: "code_gen" } },
-                  aggs: { lines: { sum: { field: "properties.lineCount" } } }
-                },
-                pushed: {
-                  filter: {
-                    bool: {
-                      filter: [
-                        { term: { eventName: "code_adopt" } },
-                        { term: { "properties.pushed": true } },
-                        { exists: { field: "properties.adoptedLineCount" } },
-                        { exists: { field: "properties.generatedLineCount" } },
-                        { exists: { field: "properties.effectiveGeneratedLineCount" } }
-                      ]
-                    }
-                  },
-                  aggs: { lines: { sum: { field: "properties.adoptedLineCount" } } }
+    >
+  ): Promise<void> {
+    const legacyIds = [...traces].filter(([, row]) => !row.parsed.precise).map(([id]) => id)
+    const stageFilter = {
+      bool: {
+        should: [
+          devNodeFilter("properties.harnessNodeName"),
+          ...(legacyIds.length
+            ? [
+                {
+                  bool: {
+                    filter: [{ terms: { "properties.traceId": legacyIds } }],
+                    must_not: [{ exists: { field: "properties.harnessNodeName" } }]
+                  }
                 }
+              ]
+            : [])
+        ],
+        minimum_should_match: 1
+      }
+    }
+    const raw = completeResponse(
+      await query("event", {
+        size: 0,
+        query: {
+          bool: {
+            filter: [
+              ...eventFilters,
+              { terms: { "properties.traceId": [...traces.keys()] } },
+              { terms: { eventName: ["code_gen", "code_adopt"] } },
+              stageFilter
+            ]
+          }
+        },
+        aggs: {
+          by_trace: {
+            terms: { field: "properties.traceId", size: traces.size },
+            aggs: {
+              generated: {
+                filter: { term: { eventName: "code_gen" } },
+                aggs: { lines: { sum: { field: "properties.lineCount" } } }
+              },
+              pushed: {
+                filter: {
+                  bool: {
+                    filter: [
+                      { term: { eventName: "code_adopt" } },
+                      { term: { "properties.pushed": true } },
+                      { exists: { field: "properties.adoptedLineCount" } },
+                      { exists: { field: "properties.generatedLineCount" } },
+                      { exists: { field: "properties.effectiveGeneratedLineCount" } }
+                    ]
+                  }
+                },
+                aggs: { lines: { sum: { field: "properties.adoptedLineCount" } } }
               }
             }
           }
-        })
-      )
-      const buckets = record(record(codeRaw.aggregations).by_trace)
-      if (!Array.isArray(buckets.buckets) || count(buckets.sum_other_doc_count) > 0)
-        throw new Error("研发阶段代码查询不完整，请重试")
-      for (const value of buckets.buckets) {
-        const bucket = record(value)
-        const trace = traces.get(text(bucket.key))
-        if (!trace?.parsed.metrics) continue
-        const generated = record(bucket.generated)
-        trace.parsed.metrics.generatedLines = sumValue(generated, "lines")
-        trace.parsed.metrics.pushedAdoptedLines = sumValue(record(bucket.pushed), "lines")
-        trace.parsed.metrics.codeProducingTraceCount = count(generated.doc_count) > 0 ? 1 : 0
-      }
-      for (const { parsed, plugin } of traces.values())
-        addDevCompute(parsed.precise ? plugin.compute : plugin.legacyCompute, parsed.metrics!)
+        }
+      })
+    )
+    const agg = record(record(raw.aggregations).by_trace)
+    if (!Array.isArray(agg.buckets) || count(agg.sum_other_doc_count) > 0)
+      throw new Error("研发阶段代码查询不完整，请重试")
+    for (const value of agg.buckets) {
+      const bucket = record(value)
+      const row = traces.get(text(bucket.key))
+      if (!row?.parsed.metrics) continue
+      const generated = record(bucket.generated)
+      row.parsed.metrics.generatedLines = sumValue(generated, "lines")
+      row.parsed.metrics.pushedAdoptedLines = sumValue(record(bucket.pushed), "lines")
+      row.parsed.metrics.codeProducingTraceCount = count(generated.doc_count) > 0 ? 1 : 0
     }
-    const last = record(hits[hits.length - 1])
-    if (!Array.isArray(last.sort) || last.sort.length !== 1)
-      throw new Error("研发阶段分页游标缺失，请重试")
-    const cursor = JSON.stringify(last.sort)
-    if (cursors.has(cursor)) throw new Error("研发阶段分页游标重复，请重试")
-    cursors.add(cursor)
-    after = last.sort
+    for (const { parsed, plugin } of traces.values())
+      addDevCompute(parsed.precise ? plugin.compute : plugin.legacyCompute, parsed.metrics!)
   }
-  const compute = emptyDevCompute()
-  const legacyCompute = emptyDevCompute()
+
+  try {
+    for (;;) {
+      if (codeFailed) throw codeFailure
+      const body = () => ({
+        size: 0,
+        track_total_hits: false,
+        query: { bool: { filter: selectedTraceFilters } },
+        aggs: {
+          by_trace: {
+            composite: {
+              size: TRACE_PAGE_SIZE,
+              sources: [
+                { id: { terms: { field: "traceId" } } },
+                { adapter: { terms: { field: "harnessAdapterName", missing_bucket: true } } },
+                { version: { terms: { field: "harnessAdapterVersion", missing_bucket: true } } }
+              ],
+              ...(after ? { after } : {})
+            },
+            aggs: devTraceAggs(legacyOnly)
+          }
+        }
+      })
+      let raw: Record<string, unknown>
+      try {
+        raw = completeResponse(await query("trace", body()))
+      } catch (error) {
+        if (legacyOnly || !isNestedMappingError(error, "stageUsage")) throw error
+        legacyOnly = true
+        raw = completeResponse(await query("trace", body()))
+      }
+      const agg = record(record(raw.aggregations).by_trace)
+      if (!Array.isArray(agg.buckets)) throw new Error("研发阶段记录查询缺少结果，请重试")
+      if (!agg.buckets.length) break
+      const next = record(agg.after_key)
+      if (!Object.keys(next).length && agg.buckets.length >= TRACE_PAGE_SIZE)
+        throw new Error("研发阶段分页游标缺失，请重试")
+      if (Object.keys(next).length) {
+        const cursor = JSON.stringify(next)
+        if (cursors.has(cursor)) throw new Error("研发阶段分页游标重复，请重试")
+        cursors.add(cursor)
+      }
+      const traces = new Map<
+        string,
+        {
+          parsed: ReturnType<typeof readDevBucket>
+          plugin: EfficiencyDevComputeResult["computeByPlugin"][number]
+        }
+      >()
+      for (const value of agg.buckets) {
+        const bucket = record(value)
+        if (count(bucket.doc_count) !== 1) throw new Error("研发阶段记录标识重复，无法保证统计准确")
+        const key = record(bucket.key)
+        const name = text(key.adapter)
+        const version = text(key.version)
+        if (name) {
+          const versions = options.get(name) ?? new Set<string>()
+          if (version) versions.add(version)
+          options.set(name, versions)
+        }
+        coverage.scopeTraces += count(bucket.doc_count)
+        const parsed = readDevBucket(bucket)
+        if (parsed.unattributed) coverage.unattributedTraces += 1
+        if (!parsed.metrics) continue
+        if (parsed.precise) coverage.preciseDevTraces += 1
+        else coverage.legacyDevTraces += 1
+        const plugin = plugins.get(name) ?? {
+          adapterName: name || null,
+          versions: [],
+          compute: emptyDevCompute(),
+          legacyCompute: emptyDevCompute()
+        }
+        if (version && !plugin.versions.includes(version)) plugin.versions.push(version)
+        plugins.set(name, plugin)
+        const id = text(key.id)
+        if (!id || traces.has(id)) throw new Error("研发阶段记录标识缺失或重复，无法保证统计准确")
+        traces.set(id, { parsed, plugin })
+      }
+      if (traces.size) {
+        const operation = applyCode(traces).catch((error) => {
+          if (!codeFailed) codeFailure = error
+          codeFailed = true
+        })
+        pending.add(operation)
+        void operation.then(() => pending.delete(operation))
+        if (pending.size >= CODE_CONCURRENCY) await Promise.race(pending)
+      }
+      if (agg.buckets.length < TRACE_PAGE_SIZE || !Object.keys(next).length) break
+      after = next
+    }
+  } finally {
+    // Drain bounded in-flight queries even if a later trace page fails.
+    await Promise.all(pending)
+  }
+  if (codeFailed) throw codeFailure
+  const precise = emptyDevCompute()
+  const legacy = emptyDevCompute()
   const rows = [...plugins.values()]
     .map((plugin) => {
-      addDevCompute(compute, plugin.compute)
-      addDevCompute(legacyCompute, plugin.legacyCompute)
+      addDevCompute(precise, plugin.compute)
+      addDevCompute(legacy, plugin.legacyCompute)
       return {
         ...plugin,
         versions: plugin.versions.sort(),
-        compute: finishDevCompute(plugin.compute),
+        compute: mergeDevCompute(plugin.compute, plugin.legacyCompute),
         legacyCompute: finishDevCompute(plugin.legacyCompute)
       }
     })
@@ -370,8 +487,8 @@ export async function fetchDevCompute(
     )
   return {
     computeScope: "dev",
-    compute: finishDevCompute(compute),
-    legacyCompute: finishDevCompute(legacyCompute),
+    compute: mergeDevCompute(precise, legacy),
+    legacyCompute: finishDevCompute(legacy),
     computeByPlugin: rows,
     computeCoverage: coverage,
     pluginOptions: [...options]

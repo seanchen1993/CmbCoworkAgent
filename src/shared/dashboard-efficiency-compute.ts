@@ -19,15 +19,17 @@ export interface EfficiencyDevComputeData {
   codeProducingTraceCount: number
   codeProducingTraceRatio: number | null
   modelCalls: number
+  /** Historical document totals do not imply missing per-call reports. */
+  tokenUsageIncomplete?: boolean
   tokenUsageReportedCalls: number
   cacheUsageReportedCalls: number
 }
 
 export interface EfficiencyDevComputeResult {
   computeScope: "dev" | "all"
-  /** Dev uses call-start attribution; all preserves the original full-flow windows. */
+  /** Dev uses call stages when available, otherwise historical Dev turn totals; all keeps its original windows. */
   compute: EfficiencyDevComputeData
-  /** Historical turn-start attribution is kept separate from precise usage. */
+  /** Internal coverage detail; historical Dev usage is also included in compute. */
   legacyCompute: EfficiencyDevComputeData
   computeByPlugin: {
     adapterName: string | null

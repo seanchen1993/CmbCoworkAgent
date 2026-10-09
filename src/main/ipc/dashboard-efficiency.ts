@@ -419,23 +419,25 @@ export function makeMockEfficiency(
   const metrics = (weight: number, legacy = false) => {
     // Keep Dev-only examples distinct from the full-flow mock (which includes Biz/Ops).
     if (selection.scope === "all" && !legacy) weight *= 1.4
-    const totalTokens = legacy ? weight * 10000 : weight * 223600000
-    const generatedLines = legacy ? weight * 80 : weight * 19020
-    const pushedAdoptedLines = legacy ? weight * 60 : weight * 12010
+    const historicalWeight = !legacy && selection.scope !== "all" ? weight : 0
+    const totalTokens = legacy ? weight * 10000 : weight * 223600000 + historicalWeight * 10000
+    const generatedLines = legacy ? weight * 80 : weight * 19020 + historicalWeight * 80
+    const pushedAdoptedLines = legacy ? weight * 60 : weight * 12010 + historicalWeight * 60
     const base = buildComputeEfficiency({
-      totalInputTokens: legacy ? weight * 9000 : weight * 214000000,
-      totalOutputTokens: legacy ? weight * 1000 : weight * 9600000,
+      totalInputTokens: legacy ? weight * 9000 : weight * 214000000 + historicalWeight * 9000,
+      totalOutputTokens: legacy ? weight * 1000 : weight * 9600000 + historicalWeight * 1000,
       totalTokens,
       cacheReadTokens: legacy ? 0 : weight * 178000000,
       pushedAdoptedLines,
-      traceCount: legacy ? weight * 30 : weight * 1840,
-      codeProducingTraceCount: legacy ? weight * 10 : weight * 712
+      traceCount: legacy ? weight * 30 : weight * 1840 + historicalWeight * 30,
+      codeProducingTraceCount: legacy ? weight * 10 : weight * 712 + historicalWeight * 10
     })
     return {
       ...base,
       generatedLines,
       tokensPerGeneratedLine: generatedLines ? totalTokens / generatedLines : null,
-      modelCalls: weight * 3000,
+      modelCalls: (weight + historicalWeight) * 3000,
+      tokenUsageIncomplete: false,
       tokenUsageReportedCalls: legacy ? 0 : weight * 3000,
       cacheUsageReportedCalls: legacy ? 0 : weight * 3000
     }
@@ -482,8 +484,9 @@ export function makeMockEfficiency(
         .map((entry) => entry.version)
     })),
     computeCoverage: {
-      scopeTraces: compute.traceCount + legacyCompute.traceCount,
-      preciseDevTraces: selection.scope === "all" ? 0 : compute.traceCount,
+      scopeTraces: compute.traceCount,
+      preciseDevTraces:
+        selection.scope === "all" ? 0 : compute.traceCount - legacyCompute.traceCount,
       legacyDevTraces: legacyCompute.traceCount,
       unattributedTraces: 0
     },
