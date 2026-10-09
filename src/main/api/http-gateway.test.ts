@@ -5,6 +5,7 @@ const bridge = vi.hoisted(() => {
   const consumed = new Set<string>()
   return {
     consumed,
+    apiCreateThread: vi.fn(),
     apiGetThread: vi.fn((threadId: string) =>
       threadId === "thread-a" || threadId === "thread-b"
         ? { thread_id: threadId, status: "idle" }
@@ -42,7 +43,7 @@ const bridge = vi.hoisted(() => {
 })
 
 vi.mock("./agent-bridge", () => ({
-  apiCreateThread: vi.fn(),
+  apiCreateThread: bridge.apiCreateThread,
   apiGetThread: bridge.apiGetThread,
   apiGetThreadRuntime: bridge.apiGetThreadRuntime,
   apiGetThreadMessages: vi.fn(),
@@ -52,6 +53,7 @@ vi.mock("./agent-bridge", () => ({
 }))
 
 import { createApiGatewayRequestHandler } from "./http-gateway"
+import { WorkspaceValidationError } from "../services/workspace-validation"
 import type { ApiGatewayConfig } from "./config"
 
 const config = (token = ""): ApiGatewayConfig => ({
@@ -194,5 +196,28 @@ describe("HTTP approval route", () => {
     } finally {
       consoleError.mockRestore()
     }
+  })
+
+  it.each([
+    { workspacePath: "/Users/demo/project" },
+    { metadata: { workspacePath: "/Users/demo/project" } }
+  ])("returns 400 when thread creation rejects a workspace: %j", async (body) => {
+    await start()
+    bridge.apiCreateThread.mockRejectedValueOnce(
+      new WorkspaceValidationError("/Users/demo/project", "不存在或不可访问")
+    )
+    const response = await fetch(`${origin}/v1/threads`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(body)
+    })
+    expect(response.status).toBe(400)
+    expect(await response.json()).toMatchObject({
+      error: "invalid_workspace_path",
+      message: expect.stringContaining("/Users/demo/project")
+    })
+    expect(bridge.apiCreateThread).toHaveBeenLastCalledWith({
+      workspacePath: "/Users/demo/project"
+    })
   })
 })

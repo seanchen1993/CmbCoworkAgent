@@ -12,6 +12,7 @@ import {
 } from "../harness-board/service"
 import { createProject, updateProject, createFeature } from "../harness-board/mutations"
 import { createThreadService } from "../services/thread-service"
+import { WorkspaceValidationError } from "../services/workspace-validation"
 import {
   HARNESS_SOURCE,
   type HarnessProjectCreateInput,
@@ -320,6 +321,7 @@ export function apiProjectError(error: unknown): {
 } {
   const message = error instanceof Error ? error.message : String(error)
   if (error instanceof URIError) return { status: 400, error: "invalid_path", message }
+  if (error instanceof WorkspaceValidationError) return { status: 400, error: error.code, message }
   if (error instanceof ApiInputError) return { status: error.status, error: error.code, message }
   // Keep legacy service errors unchanged until the UAT domain-error migration.
   if (message === "adapter_not_installed") return { status: 404, error: message, message }

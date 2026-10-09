@@ -119,6 +119,10 @@ CMB_API_TOKEN=your-secret CMB_API_PORT=9000 npm run start
 | `title` | string | `Thread <日期>` | 会话标题 |
 | `metadata` | object | — | 以上字段的另一种传法;顶层字段优先 |
 
+**工作区校验**：`workspacePath` 必须是运行应用的机器上实际存在、可访问的绝对目录，不是调用方电脑的路径。UOS/Linux 通常使用 `/home/<用户名>/...`，macOS 常用 `/Users/<用户名>/...`；请勿直接照抄示例。Postman 集合的 `workspacePath` 变量需要按目标机器填写（Windows 可用 `C:/project`）。
+
+目录不存在、是普通文件、不可访问或校验超时时，创建接口返回 HTTP 400，`error` 为 `invalid_workspace_path`，且不会创建会话。已经保存的旧会话也会在运行前重新校验；请重新选择有效工作区，或用正确路径新建会话。不会自动创建缺失目录或切换到另一个目录。
+
 **请求示例**
 ```bash
 curl -X POST http://192.168.43.16:8765/v1/threads \
