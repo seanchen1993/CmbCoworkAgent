@@ -6157,6 +6157,9 @@ The workspace root is: ${fileRoot}`
               // its background subagents must not re-prompt per file edit
               // (shell execution stays gated).
               autoApproveFileEdits: true,
+              // Only shared-workspace mutations belong to the parent's commit
+              // scope. Isolated worktrees retain their own generation records.
+              onFileMutation: worktreeIsolation ? undefined : onFileMutation,
               managedExecution
             })
             if (worktreeIsolation) worktreeSubagentThreads.add(subagentOptions.threadId)
@@ -6496,6 +6499,7 @@ Use the same worker thread context for follow-up instructions. ${scratchpadGuida
     // stays the worker thread id and is not part of this bundle.
     const workerHarnessContext = {
       agentId: workerInput.workerId,
+      onFileMutation,
       systemId,
       pluginRoot,
       pluginId,

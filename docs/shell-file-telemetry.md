@@ -9,7 +9,7 @@
 | 开关                 | 只在工具使用策略为"命令行优先"或"命令行优先（宽松）"时启用；标准模式完全走原来的逻辑                                                                                                                                                                                               |
 | 计入采纳（A 类）     | 内容由模型决定、借 Shell 写入：heredoc、`printf >`、`sed -i`、`perl -pi`、`sed … > 过滤结果`、内联脚本、python/node 脚本、`python3 <<EOF` 这类从 stdin 读程序的解释器、同一条命令里刚写出或暂存在临时目录的 shell 脚本；先写临时文件再 mv/cp 到目标的改动                          |
 | 归属但不计入（B 类） | 第三方工具按自身规则生成：formatter、代码生成器、脚手架、快照更新、pre-commit；包装它们的项目脚本（按 package.json 脚本内容或名字判断，如 `npm run format`、`make fmt`、`./scripts/format.sh`）；透传了 `--fix`、`-u` 等参数的脚本（如 `npm run lint -- --fix`、`npm test -- -u`） |
-| 归属但不计入（C 类） | 搬运或恢复已有内容：cp、mv、git checkout / restore / stash / merge / pull 等；把已有文件内容、git 历史版本、下载内容重定向到文件（`cat 模板 > 新文件`、`git show HEAD:x > x`、`curl … > x`）                                                                                       |
+| 归属但不计入（C 类） | 搬运或恢复已有内容：cp、mv、git checkout / restore / stash / merge / pull 等；把已有文件内容、git 历史版本、下载内容重定向或通过管道搬到文件（`cat 模板 > 新文件`、`cat 模板 \| tee 新文件`、`git show HEAD:x \| tee x`、`curl … > x`）                                            |
 | 不捕获               | 读命令、测试、构建、安装、后台命令；测试/构建把日志重定向到文件也不捕获                                                                                                                                                                                                            |
 | 短命令               | 运行时间不超过 5 秒且不含测试/构建类片段：窗口内变化的文件都归它                                                                                                                                                                                                                   |
 | 长命令               | 超过 5 秒或含测试/构建类片段：只认命令里点名的文件                                                                                                                                                                                                                                 |
@@ -29,7 +29,7 @@
 
 写入侧在 execute 前后比对工作区：
 
-1. 前台 execute 在 `executeAfterPreToolUse` 中通过 AsyncLocalStorage 标记本次调用，`executeRaw` 在进入 Windows 沙箱队列前读取标记。审批等待、钩子和队列等待都不计入窗口，沙箱失败后的重试单独成窗。
+1. 前台 execute 在 `executeAfterPreToolUse` 中通过 AsyncLocalStorage 标记本次调用，包括生产 Orchestrator 分支和兼容 fallback 分支；`executeRaw` 在进入 Windows 沙箱队列前读取标记。审批等待、前后钩子和队列等待都不计入窗口，沙箱失败后的每次重试单独成窗。直接调用 executeRaw 的 Hook 和后台任务不带此标记。
 2. 执行前对工作区内每个 git 仓库及其已初始化的子模块跑 `git status --porcelain=v2 -z --untracked-files=all --no-renames`，记录脏文件的 lstat，并读取脏代码文件内容（按路径、mtime、大小缓存）。只含 B/C 类的命令不读内容，只比 stat。
 3. 执行后再跑一次 status，找出变化文件。前像取自缓存（原本就脏的文件）、`git cat-file --batch` 取 HEAD 版本（原本干净的文件，先用 `--batch-check` 查大小）或空内容（新文件）。目录、符号链接、子模块入口和未跟踪的嵌套仓库不算文件改动，也不算删除；新建的空文件保留。
 4. 捕获模块只传原始字节，`recordShellEdit` 用提交时同一个 `decodeCodeBuffer` 解码，GBK 等非 UTF-8 文件的行哈希与提交时一致；再按行多重集相减，只记录新增行和删除行。解码和行比对的代码放在 `adoption-lines.ts`，前后内容合计 32 KB 以内在主线程直接算，更大的交给 worker 线程执行同一份代码，结果相同。
@@ -61,18 +61,19 @@
 
 ## 4. 代码位置
 
-| 文件                                    | 内容                                                                                    |
-| --------------------------------------- | --------------------------------------------------------------------------------------- |
-| src/main/agent/shell-command-profile.ts | 命令分词、分段、A/B/C 与测试构建类判定、点名路径与读路径提取、package.json 脚本异步加载 |
-| src/main/agent/shell-file-effects.ts    | 前后快照、差集、窗口登记表、归属规则、超时、熔断与预算                                  |
-| src/main/agent/tool-call-read-paths.ts  | 工具调用的读路径                                                                        |
-| src/main/agent/tool-strategy.ts         | `resolveShellFileTelemetry` 开关判断                                                    |
-| src/main/agent/local-sandbox.ts         | executeRaw 接入、write/edit 登记、约束文件读取、采纳记录延后执行                        |
-| src/main/agent/runtime.ts               | 打开沙箱的 `shellFileTelemetry`；execute 工具传入 trace                                 |
-| src/main/services/adoption-tracker.ts   | `tool: "execute"`、`recordShellEdit`                                                    |
-| src/main/services/adoption-lines.ts     | 解码、行归一化与哈希（从 adoption-tracker 原样移出）、`shellEditLineFragments`          |
-| src/main/services/shell-edit-diff-\*.ts | 大文件解码和行比对的 worker 线程及其客户端                                              |
-| src/main/ipc/agent.ts                   | Shell 写入进入记忆整理的写文件列表                                                      |
+| 文件                                     | 内容                                                                               |
+| ---------------------------------------- | ---------------------------------------------------------------------------------- |
+| src/main/agent/telemetry-shell-syntax.ts | 不执行命令的结构分词，保留重定向、复合块、引用、管道、heredoc 正文；不用于权限判定 |
+| src/main/agent/shell-command-profile.ts  | A/B/C 与测试构建类判定、点名路径与读路径提取、package.json 脚本异步加载            |
+| src/main/agent/shell-file-effects.ts     | 前后快照、差集、窗口登记表、归属规则、超时、熔断与预算                             |
+| src/main/agent/tool-call-read-paths.ts   | 工具调用的读路径                                                                   |
+| src/main/agent/tool-strategy.ts          | `resolveShellFileTelemetry` 开关判断                                               |
+| src/main/agent/local-sandbox.ts          | executeRaw 接入、write/edit 登记、约束文件读取、采纳记录延后执行                   |
+| src/main/agent/runtime.ts                | 打开沙箱的 `shellFileTelemetry`；execute 工具传入 trace                            |
+| src/main/services/adoption-tracker.ts    | `tool: "execute"`、`recordShellEdit`                                               |
+| src/main/services/adoption-lines.ts      | 解码、行归一化与哈希（从 adoption-tracker 原样移出）、`shellEditLineFragments`     |
+| src/main/services/shell-edit-diff-\*.ts  | 大文件解码和行比对的 worker 线程及其客户端                                         |
+| src/main/ipc/agent.ts                    | Shell 写入进入记忆整理的写文件列表                                                 |
 
 ## 5. 已知限制
 
@@ -108,8 +109,40 @@
 - `npm run typecheck:node`、`npm run typecheck:web`、`npm run build`、`npm run test:im-v1`。
 - `npm run build && npx tsx tests/shell-file-telemetry-benchmark.ts`：临时创建 2 万文件、200 个预存脏文件的仓库；校验只计目标改动，测量前后快照；使用真实打包 Worker 对比 GBK 内容并测主线程计时延迟，完成后删除临时数据。
 
-本地重建测量（macOS，仅说明当前机器上的量级，不代表所有内网机器）：2 万文件、200 个脏文件，前置采集约 60–84 ms、后置采集约 39–68 ms；前后合计 2.22 MB 的 GBK 内容由打包 Worker 比对约 376–407 ms，主线程 5 ms 定时器的最大额外延迟约 1.3–1.4 ms。
+修复后本地测量（macOS，仅说明当前机器上的量级，不代表所有内网机器）：2 万文件、200 个脏文件，前置采集约 63–87 ms、后置采集约 40–65 ms；前后合计 2.22 MB 的 GBK 内容由打包 Worker 比对约 371 ms，主线程 5 ms 定时器的最大额外延迟约 1.68 ms。
 
 本次验证在 macOS 上完成，Windows 路径和命令解析有单元测试，Windows 原生进程、文件系统及企业沙箱仍须在 Windows 环境验证。Unix Shell 真实执行集成测试不会在 Windows 上假装通过。
 
+完整 Vitest 也进行了候选与隔离 HEAD 对照：候选复跑的 41 个失败断言在未修改的 HEAD 中逐项同名复现，未作为本次 Shell 修复范围处理；不将整仓库测试描述为全绿。本次 Shell 专项、采纳闭环、类型检查和构建独立验证通过。
+
 桌面基线的旧源码断言 `desktop-agent-invoke-characterization.spec.ts` 因 `getHarnessAgentContext` 调用已改变而失败；未改动的原分支同样失败，已对照确认不是本次重建引入，暂不修复无关断言。其余六项桌面基线检查通过。
+
+## 7. 生产链路与结构性补齐
+
+此次漏报的直接原因是生产环境一直配置 Orchestrator（包括 YOLO），而最初捕获标记只覆盖 fallback 分支。原测试没有设置 Orchestrator，无法发现真实 App 入口根本未打开窗口。修复不仅覆盖该入口，还补齐以下独立问题：
+
+- 写入可能性与路径解析分开：`done > 文件`、`fi > 文件`、分组外重定向、shell 包装器外重定向都保留；未知变量路径仍开启短窗口，不因无法静态解析而误判成只读。
+- `2>&1`、`&>`、`&>>` 不误判为后台；引用中的 `<<EOF` 不误判为 heredoc。真正的解释器 heredoc 正文用来提取写入路径，不再作为 Shell 命令扫描。
+- 管道保留内容来源：模型输出按 A 类、模板/历史/下载按 C 类、格式化输出按 B 类。package 脚本名字的 format/test/build 语义不会被递归分析的 Node 包装器覆盖。
+- Git Bash 的 `/c/...`、`/cygdrive/c/...` 按当前 POSIX shell 转换；原生 PowerShell/CMD 不作 MSYS 转换。每次原始执行都使用实际 shell 类型，包含重试切换 shell 的情况。
+- 同文件重叠窗口按先完成观测的窗口登记，再向后续窗口交接前像；不再按先开始的编号抢占。已确认不存在的文件使用空前像，和读取失败/内容超限分开，支持删除后重建、预先删除后恢复为 HEAD 内容。
+- 64 个窗口名额在首次 await 之前预留，包含尚在获取前像的调用。正常结束、只读跳过、异常、超时都释放；超时后的异步续段不得继续修改登记。
+- workflow 共用工作区的子代理及 Team worker 传递文件变更通知；隔离 worktree 的路径不送到父线程自动提交范围。Shell rm/mv 的旧采纳归属更新使用实际 `execute.cwd`。
+
+验证增加真实闭环：脚本化模型响应 → App 实际组装的 execute 工具 → Orchestrator（YOLO/审批）→ 真实 Shell → SQLite/Outbox → Git 提交采纳，检查数字循环生成的 HTML 上报 100 行且提交采纳也是 100 行。另保留标准模式、Hook、后台、拒绝审批、部分失败、模板搬运、子代理 trace、同文件交叠和 66 路并发压力的回归测试。
+
+日志仅包含状态/路径/数量，不打印命令正文或文件内容。`Shell file capture completed` 提供 counted/attributed/unattributed 数量；未归属时区分 long-command-unscoped、named-peer、concurrent-unscoped、stale-observation、excluded-output，另有内容超限、仓库冷却、并发名额、前后快照超时日志。以上日志不依赖 Debug 级别。
+
+复核补充：
+
+- 测试/构建 stdout 显式携带 excluded 来源，经过 `tee`、过滤器、包装器或重定向都不变成 A 类；同命令包含其他模型写入时，日志目标仍按 excluded-output 排除。
+- 格式化器即使不带 `--write`，把 stdout 重定向到文件也按 B 类归属；管道和包装器同样保留其来源。
+- 复合生产者的 stdout 汇总所有未重定向的输出，而不是只认最后一段。模板与模型内容混在同一文件时保守归 C 类，不把模板行误计为生成行。
+- 同一结构分析器通过生成器请求 package 元数据，异步采集按当前有效 cwd（含静态 `cd`、npm `--prefix`、pnpm `-C/--dir`、yarn/bun `--cwd`）选择 package；同步读取路径分析不做文件系统 I/O。脚本透传 argv 保留并重新引用，不执行扩展。
+- 所有 A/B/C/排除类写后登记共用 epoch 新旧检查。慢 formatter 或搬运快照不能覆盖更新的模型前像；新增三窗口交错回归验证后续只计算新追加的行。
+- 递归包装器不仅保留 stdout，也接收 stdin 来源；`make test | bash -c 'sed …' > report.html` 和 package 脚本消费测试日志时仍排除。忽略 stdin 的 `printf` 或显式读取模板文件的 `cat` 不继承上游日志来源。
+- 未解析的重定向目标使用独立 unknown scope，不再等同于全工作区写入：测试日志重定向到环境变量时，不会吞掉同命令中明确点名的模型文件。真正全工作区 formatter 保留其保守归属语义。
+- 子 Shell 关闭时恢复 cwd 和变量环境；命令临时环境赋值不污染后续命令。变量与 cwd 分支值各保留最多 32 个候选，超限/无法解析时转为未知；`else/elif` 恢复可达的分支入口环境，不继承互斥 `then` 的变化，不执行命令来推断条件。
+- B/C 窗口与模型窗口交叠时，写后读取和 dirty→clean 补读使用同一个条件。`git restore` 先恢复 HEAD、模型随后续写时，以恢复后的实际内容作前像，而不是把干净文件误记为 unavailable。
+- AND/OR 条件列表保留右支关系并合并变量可能值；管道中的赋值或分组按子 Shell 环境处理，不泄漏到父 Shell。不会把 `false && target=b.ts` 静态误判为一定执行。
+- 写后登记使用文件事实的观测 epoch，不使用异步结算/发布时间；旧事实不能覆盖新登记，干净前像以实际仓库观察时点比较。模型 peer 在快照期间加入时动态补读所需内容；文件工具也在写后调用入口记录时点，避免 realpath 的异步顺序颠倒写入事实。
