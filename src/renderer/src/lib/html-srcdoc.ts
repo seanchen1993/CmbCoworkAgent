@@ -4,18 +4,6 @@ export interface StaticHtmlPreviewDocumentOptions {
   readTextFile?: (resolvedPath: string) => Promise<string | null>
 }
 
-/** Compatibility adapter for design previews. The static builder preserves the
- * sibling-asset behavior while applying the UAT preview safety policy. */
-export interface InlineHtmlSiblingAssetsOptions extends StaticHtmlPreviewDocumentOptions {
-  readDataUrlFile?: (resolvedPath: string) => Promise<string | null>
-}
-
-export async function inlineHtmlSiblingAssets(
-  options: InlineHtmlSiblingAssetsOptions
-): Promise<string> {
-  return buildStaticHtmlPreviewDocument(options)
-}
-
 /**
  * 统一路径分隔符为 `/`。
  * 作用：
