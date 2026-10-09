@@ -108,7 +108,6 @@ import {
 } from "./project-mode-operational-metrics"
 import {
   buildChangeKindAggs,
-  buildComputeEfficiency,
   buildNewRatioHistogramAgg,
   buildPendingScalability,
   computeUnmeasuredRatio,
@@ -117,6 +116,9 @@ import {
   normalizeNewRatioHistogram,
   type DashboardEfficiencyData
 } from "./dashboard-efficiency"
+import { fetchDevCompute } from "./dashboard-efficiency-compute"
+import { fetchFullCompute } from "./dashboard-efficiency-full"
+import type { EfficiencyPluginFilter } from "../../shared/dashboard-efficiency-compute"
 import {
   executeDashboardEsQuery,
   type DashboardEsIndexAlias,
@@ -13909,7 +13911,7 @@ async function fetchProjectModeProjectCommits(
  */
 async function fetchDashboardEfficiency(
   range: TimeRange,
-  opts?: OrgFilterOptions
+  opts?: OrgFilterOptions & EfficiencyPluginFilter
 ): Promise<DashboardEfficiencyData> {
   const access = requireDashboardProjectModeAccess()
   const orgFilterClause = buildProjectModeOrgFilter(opts, access)
@@ -13928,7 +13930,13 @@ async function fetchDashboardEfficiency(
     { terms: { "properties.harnessProjectId": leanProjectIds } }
   ]
 
-  const [changeKindRaw, overallRaw, traceRaw, codeTraceRaw] = await Promise.all([
+  const traceFilters = [
+    ...projectModeTraceFilters(range, orgFilterClause),
+    { terms: { harnessProjectId: leanProjectIds } }
+  ]
+  const computeQuery = (index: "trace" | "event", body: Record<string, unknown>) =>
+    esQuery(getEsIndex(index), body)
+  const [changeKindRaw, overallRaw, computeResult, projectRaw] = await Promise.all([
     // 指标 2 — adoption split by 新增 / 存量.
     fetchProjectModeCodeAggs(
       null,
@@ -13941,50 +13949,19 @@ async function fetchDashboardEfficiency(
     ),
     // Unsplit totals, used for the unmeasured-share credibility indicator.
     fetchProjectModeCodeAggs(null, range, (perBucketAggs) => perBucketAggs, codeExtraFilters),
-    // 指标 3 numerator — tokens live on the trace index.
+    opts?.scope === "all"
+      ? fetchFullCompute(computeQuery, traceFilters, codeExtraFilters, range, opts)
+      : fetchDevCompute(computeQuery, traceFilters, codeExtraFilters, opts),
+    // The panel-wide project count keeps its original active-project scope;
+    // compute-only plugin/stage filters must not alter the adoption section.
     esQuery(getEsIndex("trace"), {
       size: 0,
-      track_total_hits: false,
-      query: {
-        bool: {
-          filter: [
-            ...projectModeTraceFilters(range, orgFilterClause),
-            { terms: { harnessProjectId: leanProjectIds } }
-          ]
-        }
-      },
-      aggs: {
-        trace_count: { value_count: { field: "traceId" } },
-        project_count: { cardinality: { field: "harnessProjectId" } },
-        total_input_tokens: { sum: { field: "totalInputTokens" } },
-        total_output_tokens: { sum: { field: "totalOutputTokens" } },
-        total_tokens: { sum: { field: "totalTokens" } },
-        // Flattened at trace-finish time (see summarizeTraceCacheTokens);
-        // a part of the input total, not an addition to it.
-        cache_read_tokens: { sum: { field: "cacheReadTokens" } }
-      }
-    }),
-    // Traces that actually produced code, so the panel can show how much of the
-    // token spend went to conversations that never wrote anything.
-    esQuery(getEsIndex("event"), {
-      size: 0,
-      track_total_hits: false,
-      query: {
-        bool: {
-          filter: [
-            { term: { eventName: "code_gen" } },
-            timeRangeFilter("eventTime", range),
-            ...codeExtraFilters
-          ]
-        }
-      },
-      aggs: { code_traces: { cardinality: { field: "properties.traceId" } } }
+      query: { bool: { filter: traceFilters } },
+      aggs: { project_count: { cardinality: { field: "harnessProjectId" } } }
     })
   ])
 
   const overall = normalizeCodeStatsFromAggs(overallRaw)
-  const traceAggs = asRecord(asRecord(traceRaw).aggregations)
-  const codeTraceAggs = asRecord(asRecord(codeTraceRaw).aggregations)
 
   return {
     scalability: buildPendingScalability(),
@@ -13994,21 +13971,11 @@ async function fetchDashboardEfficiency(
       newRatioHistogram: normalizeNewRatioHistogram(changeKindRaw),
       unmeasuredRatio: computeUnmeasuredRatio(overall)
     },
-    compute: buildComputeEfficiency({
-      totalInputTokens: asNumber(asRecord(traceAggs.total_input_tokens).value),
-      totalOutputTokens: asNumber(asRecord(traceAggs.total_output_tokens).value),
-      totalTokens: resolveTokenTotal(
-        asRecord(traceAggs.total_tokens).value,
-        asNumber(asRecord(traceAggs.total_input_tokens).value),
-        asNumber(asRecord(traceAggs.total_output_tokens).value)
-      ),
-      cacheReadTokens: asNumber(asRecord(traceAggs.cache_read_tokens).value),
-      pushedAdoptedLines: overall.pushedAdoptedLines,
-      traceCount: asNumber(asRecord(traceAggs.trace_count).value),
-      codeProducingTraceCount: asNumber(asRecord(codeTraceAggs.code_traces).value)
-    }),
+    ...computeResult,
     meta: {
-      projectCount: asNumber(asRecord(traceAggs.project_count).value),
+      projectCount: asNumber(
+        asRecord(asRecord(asRecord(projectRaw).aggregations).project_count).value
+      ),
       truncated
     }
   }
@@ -15262,8 +15229,8 @@ export function registerDashboardHandlers(_ipcMain: typeof ipcMain): void {
   registerLatestDashboardHandler(
     _ipcMain,
     "dashboard:efficiency",
-    async (_, range: TimeRange, opts?: OrgFilterOptions) => {
-      if (import.meta.env.DEV) return { success: true, data: makeMockEfficiency() }
+    async (_, range: TimeRange, opts?: OrgFilterOptions & EfficiencyPluginFilter) => {
+      if (import.meta.env.DEV) return { success: true, data: makeMockEfficiency(opts) }
       try {
         requireDashboardProjectModeAccess()
         return { success: true, data: await fetchDashboardEfficiency(range, opts) }

@@ -13,6 +13,9 @@ export interface TraceStageUsage extends TraceCallStage {
   userInputRequests: number
   /** Calls with both input and output usage supplied. Missing usage is not a measured zero. */
   tokenUsageReportedCalls: number
+  /** Optional additive fields: old schema-v1 records may not report cache usage. */
+  cacheReadTokens?: number
+  cacheUsageReportedCalls?: number
 }
 
 export interface TraceStageUsageSnapshot {

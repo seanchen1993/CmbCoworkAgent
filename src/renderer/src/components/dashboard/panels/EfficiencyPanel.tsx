@@ -1,12 +1,23 @@
+import type { EfficiencyPluginFilter } from "../../../../../shared/dashboard-efficiency-compute"
 /**
  * 研发效能面板
  *
  * 展示 AI 编码有效性与算力产出效能。
- * 范围在后端固定为「项目模式 + 已绑定精益项目」，前端不提供口径开关——
- * 关掉开关会让同一个标题下的数字换一个含义。
+ * 范围固定为「项目模式 + 已绑定精益项目」。算力指标默认 Dev，
+ * 可切换原有全流程口径，并单独筛选项目绑定的插件及其版本。
  */
-import React, { useMemo } from "react"
-import { AlertCircle, Info, Loader2 } from "lucide-react"
+import React, { useMemo, useState } from "react"
+import {
+  AlertCircle,
+  ArrowDown,
+  ArrowUp,
+  ArrowUpDown,
+  ChevronLeft,
+  ChevronRight,
+  Info,
+  Loader2
+} from "lucide-react"
+import { Button } from "@/components/ui/button"
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip"
 import { cn } from "@/lib/utils"
 import type {
@@ -278,92 +289,97 @@ function PerLineSplit({
 }
 
 function ComputeCard({
-  compute
+  compute,
+  scope = "dev"
 }: {
   compute: DashboardEfficiencyData["compute"]
+  scope?: "dev" | "all"
 }): React.JSX.Element {
   const { totalTokens, totalInputTokens, totalOutputTokens, pushedAdoptedLines } = compute
-  // 单行成本的输入/输出拆分：同一个分母，所以两条相加恰好等于上面的总数。
-  const inputPerLine = pushedAdoptedLines > 0 ? totalInputTokens / pushedAdoptedLines : null
-  const outputPerLine = pushedAdoptedLines > 0 ? totalOutputTokens / pushedAdoptedLines : null
-  const inputShare = totalTokens > 0 ? totalInputTokens / totalTokens : null
-  const outputShare = totalTokens > 0 ? totalOutputTokens / totalTokens : null
-  // 缓存读取是 trace 完成时从 modelCalls 拍平上来的，早于该字段的历史 trace 没有，
-  // 所以为 0 时按「未采集」处理而不是当成「没命中缓存」。
-  const cacheAvailable = compute.cacheReadTokens > 0
-  const cacheShare =
-    cacheAvailable && totalInputTokens > 0 ? compute.cacheReadTokens / totalInputTokens : null
-
+  const partialTokens = scope === "dev" && compute.tokenUsageReportedCalls < compute.modelCalls
+  const cacheAvailable = scope === "all" || compute.cacheUsageReportedCalls > 0
+  const cachePartial = scope === "dev" && compute.cacheUsageReportedCalls < compute.modelCalls
+  const ratio = (value: number | null): string =>
+    compute.tokenTotalsConsistent ? `${partialTokens ? "≥" : ""}${formatTokensPerLine(value)}` : "—"
   return (
     <MetricCard
-      title="算力产出效能"
+      title={`算力产出效能 · ${scope === "all" ? "全流程" : "Dev 研发阶段"}`}
       hint={
         <div className="space-y-1.5">
-          <div>单行入库代码 Token 数 = Σ totalTokens ÷ Σ 已 Push 采纳行。</div>
           <div>
-            输入 Token 已包含缓存读取，因此缓存命中率越高，这一数值可能越大，但实际花费反而越低。
+            {scope === "all"
+              ? "汇总全部阶段的调用与代码，包含主、子 Agent。"
+              : "仅汇总研发阶段的调用与代码，包含主、子 Agent。"}
           </div>
+          <div>单行入库代码Token数 = Token 总量 ÷ 已 Push 采纳行数，后续入库会更新结果。</div>
         </div>
       }
     >
       <div className="flex flex-wrap items-center gap-x-10 gap-y-4 rounded-md border border-border bg-background p-3">
         <div>
-          <div className="text-xs text-muted-foreground">单行入库代码 Token 数</div>
+          <div className="text-xs text-muted-foreground">单行入库代码Token数</div>
           <div className="mt-1 text-3xl font-semibold tabular-nums text-foreground">
-            {formatTokensPerLine(compute.tokensPerAdoptedLine)}
+            {ratio(compute.tokensPerAdoptedLine)}
           </div>
           <div className="mt-1 text-xs text-muted-foreground">
             {formatCompact(totalTokens)} tokens ÷ {formatCount(pushedAdoptedLines)} 行
           </div>
         </div>
-
         <div className="flex gap-8">
           <PerLineSplit
             label="其中输入"
-            perLine={inputPerLine}
-            share={inputShare}
+            perLine={
+              compute.tokenTotalsConsistent && pushedAdoptedLines > 0
+                ? totalInputTokens / pushedAdoptedLines
+                : null
+            }
+            share={totalTokens > 0 ? totalInputTokens / totalTokens : null}
             barClassName="bg-sky-500"
           />
           <PerLineSplit
             label="其中输出"
-            perLine={outputPerLine}
-            share={outputShare}
+            perLine={
+              compute.tokenTotalsConsistent && pushedAdoptedLines > 0
+                ? totalOutputTokens / pushedAdoptedLines
+                : null
+            }
+            share={totalTokens > 0 ? totalOutputTokens / totalTokens : null}
             barClassName="bg-violet-500"
           />
         </div>
       </div>
-
       <dl className="mt-3 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
         <div className="rounded-md border border-border bg-background p-3">
           <dt className="text-xs text-muted-foreground">输入 Token</dt>
-          <dd className="mt-1 text-lg font-medium tabular-nums text-foreground">
-            {formatCompact(compute.totalInputTokens)}
+          <dd className="mt-1 text-lg font-medium tabular-nums">
+            {partialTokens ? "≥" : ""}
+            {formatCompact(totalInputTokens)}
           </dd>
         </div>
         <div className="rounded-md border border-border bg-background p-3">
           <dt className="text-xs text-muted-foreground">输出 Token</dt>
-          <dd className="mt-1 text-lg font-medium tabular-nums text-foreground">
-            {formatCompact(compute.totalOutputTokens)}
+          <dd className="mt-1 text-lg font-medium tabular-nums">
+            {partialTokens ? "≥" : ""}
+            {formatCompact(totalOutputTokens)}
           </dd>
         </div>
         <div className="rounded-md border border-border bg-background p-3">
           <dt className="flex items-center gap-1 text-xs text-muted-foreground">
-            <span>其中缓存读取</span>
+            其中缓存读取
             <Hint>
-              缓存读取的单价约为标准输入的 1/10，但在总 token 里通常占大头，是输入 token
-              的子集而非额外的量。
-              {cacheAvailable
-                ? ""
-                : " 该值是 trace 完成时从 modelCalls 拍平上来的，早于此字段的历史 trace 没有这项数据。"}
+              {scope === "all"
+                ? "汇总执行记录上报的缓存读取用量。"
+                : "只统计已上报的研发阶段缓存；“≥”表示部分调用缺少缓存用量。"}
             </Hint>
           </dt>
-          <dd className="mt-1 text-lg font-medium tabular-nums text-foreground">
+          <dd className="mt-1 text-lg font-medium tabular-nums">
             {cacheAvailable ? (
               <>
+                {cachePartial ? "≥" : ""}
                 {formatCompact(compute.cacheReadTokens)}
-                {cacheShare !== null ? (
+                {!cachePartial && totalInputTokens > 0 ? (
                   <span className="ml-1 text-xs font-normal text-muted-foreground">
-                    {formatPercent(cacheShare, 0)}
+                    {formatPercent(compute.cacheReadTokens / totalInputTokens, 1)}
                   </span>
                 ) : null}
               </>
@@ -374,13 +390,15 @@ function ComputeCard({
         </div>
         <div className="rounded-md border border-border bg-background p-3">
           <dt className="flex items-center gap-1 text-xs text-muted-foreground">
-            <span>产码会话占比</span>
+            产码记录占比
             <Hint>
-              产生过代码的会话 ÷ 全部会话。问答、评审类会话同样消耗算力但不产码，
-              这个比例说明分子里有多少被它们稀释。
+              {scope === "all"
+                ? "产生过代码的执行记录数 ÷ 全部执行记录数。"
+                : "研发阶段产生过代码的执行记录 ÷ 有研发阶段活动的全部执行记录。"}
+              子 Agent 独立计数；产生代码不代表已经入库。
             </Hint>
           </dt>
-          <dd className="mt-1 text-lg font-medium tabular-nums text-foreground">
+          <dd className="mt-1 text-lg font-medium tabular-nums">
             {formatPercent(compute.codeProducingTraceRatio, 1)}
             <span className="ml-1 text-xs font-normal text-muted-foreground">
               {formatCount(compute.codeProducingTraceCount)}/{formatCount(compute.traceCount)}
@@ -388,18 +406,316 @@ function ComputeCard({
           </dd>
         </div>
       </dl>
-
-      {compute.tokenTotalsConsistent ? null : (
-        <div className="mt-3 flex items-start gap-2 rounded-md bg-status-warning/10 px-3 py-2 text-xs leading-relaxed text-status-warning-foreground">
-          <AlertCircle className="mt-0.5 size-3.5 shrink-0" />
-          <span>
-            Token 自检未通过：总数 {formatCompact(totalTokens)} 与输入 + 输出{" "}
-            {formatCompact(totalInputTokens + totalOutputTokens)} 对不上。 常见原因是求和时把缓存
-            token 又加了一遍——而输入 token 本身已经含缓存。 上面的单行数值不要对外引用。
-          </span>
+      {partialTokens ? (
+        <p className="mt-3 text-xs text-muted-foreground">
+          模型用量覆盖 {formatCount(compute.tokenUsageReportedCalls)} /{" "}
+          {formatCount(compute.modelCalls)} 次调用；“≥”表示已采集的下限。
+        </p>
+      ) : null}
+      {!compute.tokenTotalsConsistent ? (
+        <div className="mt-3 flex items-start gap-2 text-xs text-status-warning-foreground">
+          <AlertCircle className="size-3.5 shrink-0" />
+          Token 总量与输入、输出或缓存用量不一致，暂不展示每行消耗。
         </div>
-      )}
+      ) : null}
     </MetricCard>
+  )
+}
+
+const PLUGIN_PAGE_SIZE = 10
+const PLUGIN_COLUMNS = [
+  { key: "adapterName", label: "插件" },
+  { key: "versions", label: "版本" },
+  { key: "totalTokens", label: "Token" },
+  { key: "generatedLines", label: "生成行" },
+  { key: "pushedAdoptedLines", label: "入库行" },
+  { key: "tokensPerAdoptedLine", label: "单行入库代码Token数" }
+] as const
+
+type PluginSortKey = (typeof PLUGIN_COLUMNS)[number]["key"]
+
+function pluginSortValue(
+  row: DashboardEfficiencyData["computeByPlugin"][number],
+  key: PluginSortKey
+): string | number | null {
+  if (key === "adapterName") return row.adapterName ?? "未归因插件"
+  if (key === "versions") return row.versions.join("、") || null
+  if (
+    key === "tokensPerAdoptedLine" &&
+    (!row.compute.tokenTotalsConsistent || row.compute.traceCount === 0)
+  )
+    return null
+  return row.compute[key]
+}
+
+function PluginComputeTable({
+  rows,
+  scope = "dev"
+}: {
+  rows: DashboardEfficiencyData["computeByPlugin"]
+  scope?: "dev" | "all"
+}): React.JSX.Element {
+  const [sort, setSort] = useState<{ key: PluginSortKey; direction: "asc" | "desc" }>({
+    key: "totalTokens",
+    direction: "desc"
+  })
+  const [page, setPage] = useState(1)
+  // Sort the complete list before taking a page, so ranking is global.
+  const visible = useMemo(
+    () =>
+      rows
+        .filter(
+          ({ compute }) =>
+            compute.traceCount > 0 || compute.generatedLines > 0 || compute.pushedAdoptedLines > 0
+        )
+        .sort((a, b) => {
+          const left = pluginSortValue(a, sort.key)
+          const right = pluginSortValue(b, sort.key)
+          // Values displayed as unavailable stay at the end in either direction.
+          if (left === null && right !== null) return 1
+          if (right === null && left !== null) return -1
+          const comparison =
+            typeof left === "number" && typeof right === "number"
+              ? left - right
+              : String(left ?? "").localeCompare(String(right ?? ""), "zh-CN", { numeric: true })
+          return (
+            (sort.direction === "desc" ? -1 : 1) * comparison ||
+            (a.adapterName ?? "").localeCompare(b.adapterName ?? "")
+          )
+        }),
+    [rows, sort]
+  )
+  const totalPages = Math.max(1, Math.ceil(visible.length / PLUGIN_PAGE_SIZE))
+  const currentPage = Math.min(page, totalPages)
+  const pageRows = visible.slice(
+    (currentPage - 1) * PLUGIN_PAGE_SIZE,
+    currentPage * PLUGIN_PAGE_SIZE
+  )
+  const perLine = (metrics: DashboardEfficiencyData["compute"]): string => {
+    if (
+      !metrics.tokenTotalsConsistent ||
+      metrics.tokensPerAdoptedLine === null ||
+      metrics.traceCount === 0
+    )
+      return "—"
+    const partial = scope === "dev" && metrics.tokenUsageReportedCalls < metrics.modelCalls
+    return `${partial ? "≥" : ""}${formatTokensPerLine(metrics.tokensPerAdoptedLine)}`
+  }
+  return (
+    <div>
+      <div className="overflow-x-auto rounded-md border border-border">
+        <table className="w-full text-xs">
+          <thead className="bg-muted/40 text-muted-foreground">
+            <tr>
+              {PLUGIN_COLUMNS.map((column) => {
+                const active = sort.key === column.key
+                return (
+                  <th
+                    key={column.key}
+                    className="whitespace-nowrap px-3 py-2 text-left font-medium"
+                    aria-sort={
+                      active ? (sort.direction === "desc" ? "descending" : "ascending") : "none"
+                    }
+                  >
+                    <button
+                      type="button"
+                      className="inline-flex items-center gap-1 hover:text-foreground"
+                      aria-label={`按${column.label}排序${active ? `，当前${sort.direction === "desc" ? "降序" : "升序"}` : ""}`}
+                      onClick={() => {
+                        setSort((current) => ({
+                          key: column.key,
+                          direction:
+                            current.key === column.key
+                              ? current.direction === "desc"
+                                ? "asc"
+                                : "desc"
+                              : column.key === "adapterName" || column.key === "versions"
+                                ? "asc"
+                                : "desc"
+                        }))
+                        setPage(1)
+                      }}
+                    >
+                      {column.label}
+                      {!active ? (
+                        <ArrowUpDown className="size-3 opacity-50" />
+                      ) : sort.direction === "desc" ? (
+                        <ArrowDown className="size-3" />
+                      ) : (
+                        <ArrowUp className="size-3" />
+                      )}
+                    </button>
+                  </th>
+                )
+              })}
+            </tr>
+          </thead>
+          <tbody>
+            {pageRows.map((row) => {
+              const metrics = row.compute
+              return (
+                <tr key={row.adapterName ?? ""} className="border-t border-border tabular-nums">
+                  <td className="px-3 py-2">{row.adapterName ?? "未归因插件"}</td>
+                  <td className="px-3 py-2 text-muted-foreground">
+                    {row.versions.join("、") || "未记录"}
+                  </td>
+                  <td className="px-3 py-2">
+                    {scope === "dev" && metrics.tokenUsageReportedCalls < metrics.modelCalls
+                      ? "≥"
+                      : ""}
+                    {formatCompact(metrics.totalTokens)}
+                  </td>
+                  <td className="px-3 py-2">{formatCount(metrics.generatedLines)}</td>
+                  <td className="px-3 py-2">{formatCount(metrics.pushedAdoptedLines)}</td>
+                  <td className="px-3 py-2">{perLine(metrics)}</td>
+                </tr>
+              )
+            })}
+            {!visible.length ? (
+              <tr>
+                <td colSpan={6} className="px-3 py-6 text-center text-muted-foreground">
+                  本期暂无对应{scope === "dev" ? "研发阶段" : "全流程"}记录
+                </td>
+              </tr>
+            ) : null}
+          </tbody>
+        </table>
+      </div>
+      {visible.length > PLUGIN_PAGE_SIZE ? (
+        <div className="mt-3 flex flex-wrap items-center justify-between gap-3 text-xs text-muted-foreground">
+          <span>
+            共 {formatCount(visible.length)} 个插件 · 每页 {PLUGIN_PAGE_SIZE} 个 · 第 {currentPage}/
+            {totalPages} 页
+          </span>
+          <div className="flex items-center gap-2">
+            <Button
+              variant="outline"
+              size="sm"
+              className="h-8"
+              disabled={currentPage <= 1}
+              onClick={() => setPage(currentPage - 1)}
+            >
+              <ChevronLeft className="mr-1 size-3.5" />
+              上一页
+            </Button>
+            <Button
+              variant="outline"
+              size="sm"
+              className="h-8"
+              disabled={currentPage >= totalPages}
+              onClick={() => setPage(currentPage + 1)}
+            >
+              下一页
+              <ChevronRight className="ml-1 size-3.5" />
+            </Button>
+          </div>
+        </div>
+      ) : null}
+    </div>
+  )
+}
+
+function ComputeSection({
+  data,
+  loading,
+  pluginFilter,
+  onPluginFilterChange
+}: {
+  data: DashboardEfficiencyData
+  loading: boolean
+  pluginFilter: EfficiencyPluginFilter
+  onPluginFilterChange: (filter: EfficiencyPluginFilter) => void
+}): React.JSX.Element {
+  const name = pluginFilter.adapterName ?? ""
+  const scope = pluginFilter.scope ?? "dev"
+  const version = pluginFilter.adapterVersion ?? ""
+  const options = data.pluginOptions
+  const versions = options.find((option) => option.adapterName === name)?.versions ?? []
+  return (
+    <section className="space-y-3">
+      <div className="flex flex-wrap items-center gap-3 text-xs">
+        <label htmlFor="efficiency-scope">统计口径</label>
+        <select
+          id="efficiency-scope"
+          value={scope}
+          disabled={loading}
+          onChange={(event) =>
+            onPluginFilterChange({
+              ...pluginFilter,
+              scope: event.target.value === "all" ? "all" : "dev"
+            })
+          }
+          className="h-8 rounded-md border border-border bg-background px-2"
+        >
+          <option value="dev">Dev 研发阶段</option>
+          <option value="all">全流程</option>
+        </select>
+        <label htmlFor="efficiency-plugin">算力统计插件</label>
+        <select
+          id="efficiency-plugin"
+          value={name}
+          disabled={loading}
+          onChange={(event) =>
+            onPluginFilterChange({
+              ...pluginFilter,
+              adapterName: event.target.value || null,
+              adapterVersion: null
+            })
+          }
+          className="h-8 max-w-64 rounded-md border border-border bg-background px-2"
+        >
+          <option value="">全部插件</option>
+          {name && !options.some((option) => option.adapterName === name) ? (
+            <option value={name}>{name}（本期无记录）</option>
+          ) : null}
+          {options.map((option) => (
+            <option key={option.adapterName} value={option.adapterName}>
+              {option.adapterName}
+            </option>
+          ))}
+        </select>
+        {name ? (
+          <>
+            <label htmlFor="efficiency-version">版本</label>
+            <select
+              id="efficiency-version"
+              value={version}
+              disabled={loading}
+              onChange={(event) =>
+                onPluginFilterChange({
+                  ...pluginFilter,
+                  adapterName: name,
+                  adapterVersion: event.target.value || null
+                })
+              }
+              className="h-8 max-w-48 rounded-md border border-border bg-background px-2"
+            >
+              <option value="">全部版本</option>
+              {version && !versions.includes(version) ? (
+                <option value={version}>{version}（本期无记录）</option>
+              ) : null}
+              {versions.map((item) => (
+                <option key={item} value={item}>
+                  {item}
+                </option>
+              ))}
+            </select>
+          </>
+        ) : null}
+      </div>
+      {loading ? (
+        <div className="flex items-center gap-2 py-8 text-sm text-muted-foreground">
+          <Loader2 className="size-4 animate-spin" />
+          更新算力统计
+        </div>
+      ) : (
+        <>
+          <ComputeCard compute={data.compute} scope={data.computeScope} />
+          <div className="text-sm font-medium">插件对比</div>
+          <PluginComputeTable rows={data.computeByPlugin} scope={data.computeScope} />
+        </>
+      )}
+    </section>
   )
 }
 
@@ -411,6 +727,8 @@ export function EfficiencyPanel({
   data,
   loading,
   error,
+  pluginFilter,
+  onPluginFilterChange,
   range,
   upperOrgLv1,
   groupNames,
@@ -419,6 +737,8 @@ export function EfficiencyPanel({
   data: DashboardEfficiencyData | null
   loading: boolean
   error: string | null
+  pluginFilter: EfficiencyPluginFilter
+  onPluginFilterChange: (filter: EfficiencyPluginFilter) => void
   range: { from: string; to: string }
   upperOrgLv1: string[]
   groupNames: string[]
@@ -464,7 +784,12 @@ export function EfficiencyPanel({
           </div>
 
           <AdoptionCard adoption={data.adoption} />
-          <ComputeCard compute={data.compute} />
+          <ComputeSection
+            data={data}
+            loading={loading}
+            pluginFilter={pluginFilter}
+            onPluginFilterChange={onPluginFilterChange}
+          />
         </>
       )}
     </div>
