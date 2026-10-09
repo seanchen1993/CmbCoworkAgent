@@ -1,12 +1,13 @@
 {
   "info": {
     "name": "CmbCoworkAgent HTTP API",
-    "description": "远端驱动 cmbcowork agent 的 HTTP 网关。\n\n用法:\n1) 启动 app(网关默认开)。\n2) 改集合变量 baseUrl 为目标机地址(默认本机局域网 IP)。\n3) 先跑「1. 健康检查」,再跑「2. 建 thread」(会自动把 thread_id 存进变量),然后「3. 发消息」看 SSE 流。\n\n鉴权:默认无鉴权。若 app 启动时设了 CMB_API_TOKEN,把集合变量 apiToken 填上,并在各请求 Headers 里启用 Authorization 那一行。",
+    "description": "远端驱动 cmbcowork agent 的 HTTP 网关。\n\n用法:\n1) 启动 app(网关默认开)。\n2) 改集合变量 baseUrl 为目标机地址(默认本机局域网 IP)。\n3) 设置集合变量 workspacePath 为运行 app 的机器上实际存在的绝对目录（UOS/Linux 示例 /home/用户名/project；Windows 建议使用 C:/project）。\n4) 先跑「1. 健康检查」,再跑「2. 建 thread」(会自动把 thread_id 存进变量),然后「3. 发消息」看 SSE 流。\n\n鉴权:默认无鉴权。若 app 启动时设了 CMB_API_TOKEN,把集合变量 apiToken 填上,并在各请求 Headers 里启用 Authorization 那一行。",
     "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
   },
   "variable": [
     { "key": "baseUrl", "value": "http://192.168.43.170:8765" },
     { "key": "threadId", "value": "" },
+    { "key": "workspacePath", "value": "" },
     { "key": "apiToken", "value": "" }
   ],
   "item": [
@@ -44,7 +45,7 @@
         ],
         "body": {
           "mode": "raw",
-          "raw": "{\n  \"metadata\": {\n    \"workspacePath\": \"/Users/chenqiang/IdeaProjects/firstDemo\",\n    \"title\": \"Postman 测试会话\"\n  }\n}"
+          "raw": "{\n  \"metadata\": {\n    \"workspacePath\": \"{{workspacePath}}\",\n    \"title\": \"Postman 测试会话\"\n  }\n}"
         },
         "url": { "raw": "{{baseUrl}}/v1/threads", "host": ["{{baseUrl}}"], "path": ["v1", "threads"] }
       }
