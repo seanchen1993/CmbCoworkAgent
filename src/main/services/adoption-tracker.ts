@@ -45,8 +45,17 @@ import { createHash, randomUUID } from "crypto"
 import { execFile } from "child_process"
 import { promisify } from "util"
 import { gzipSync, gunzipSync } from "zlib"
-import * as iconv from "iconv-lite"
-import * as chardet from "jschardet"
+import {
+  computeLineEntries,
+  computeLineHashes,
+  decodeCodeBuffer,
+  fnv1a32,
+  lineEntriesToTexts,
+  normalizeLine,
+  subtractLineEntryMultiset,
+  type LineEntry
+} from "./adoption-lines"
+import { diffShellEdit } from "./shell-edit-diff-client"
 import { getOpenworkDir } from "../storage"
 import {
   TRACE_OBSERVABILITY_SCHEMA_VERSION,
@@ -322,13 +331,15 @@ export interface AdoptionContext extends Partial<TraceObservabilityContext> {
 
 export interface RecordGenInput {
   threadId: string
-  tool: "write_file" | "edit_file"
+  /** `execute` marks a Bash First edit observed around an agent shell command. */
+  tool: "write_file" | "edit_file" | "execute"
   /** Absolute or workspace-relative path (tracker resolves it). */
   filePath: string
   /**
-   * The content that was written (write_file) or one copy of the new_string
-   * (edit_file). For replaceAll edits, `occurrences` expands this baseline into
-   * a repeated line-hash multiset without materialising a repeated string.
+   * The content that was written (write_file), one copy of the new_string
+   * (edit_file), or the new-only lines of a shell edit (execute). For replaceAll
+   * edits, `occurrences` expands this baseline into a repeated line-hash
+   * multiset without materialising a repeated string.
    */
   generatedContent: string
   /** Optional: when provided, stepIndex is included in the gen event. */
@@ -411,6 +422,10 @@ let appendChain: Promise<unknown> = Promise.resolve()
 
 /** Accepted recordGen calls that have not finished their asynchronous git/JSONL/index work. */
 const inFlightRecordGenTasks = new Set<Promise<void>>()
+const pendingGenerationPaths = new Map<Promise<void>, { absPath: string; createdAt: number }>()
+const generationTailByPath = new Map<string, Promise<void>>()
+let pendingShellBytes = 0
+let pendingShellCount = 0
 
 /** In-flight measurement dedup keyed by absolute file path. */
 const inFlightFileMeasurements = new Set<string>()
@@ -579,30 +594,6 @@ async function isInsideGitWorkTree(absPath: string): Promise<boolean> {
 // Line hashing (FNV-1a 32-bit) + normalisation
 // ─────────────────────────────────────────────────────────
 
-function fnv1a32(input: string): number {
-  let h = 0x811c9dc5
-  for (let i = 0; i < input.length; i++) {
-    h ^= input.charCodeAt(i)
-    h = (h + ((h << 1) + (h << 4) + (h << 7) + (h << 8) + (h << 24))) >>> 0
-  }
-  return h >>> 0
-}
-
-function normalizeLine(line: string): string {
-  return line.trim().replace(/\s+/g, " ")
-}
-
-function computeLineHashes(content: string): Uint32Array {
-  const lines = content.split(/\r?\n/)
-  const hashes: number[] = []
-  for (const raw of lines) {
-    const norm = normalizeLine(raw)
-    if (norm.length === 0) continue // skip blank lines — noise for matching
-    hashes.push(fnv1a32(norm))
-  }
-  return new Uint32Array(hashes)
-}
-
 /** `computeLineHashes` plus the physical line number of every hashed line. */
 function computeCommittedLineIndex(content: string): CommittedLineIndex {
   const lines = content.split(/\r?\n/)
@@ -621,20 +612,10 @@ function computeCommittedLineIndex(content: string): CommittedLineIndex {
   }
 }
 
-interface LineEntry {
-  hash: number
-  text: string
-}
-
-function computeLineEntries(content: string): LineEntry[] {
-  const lines = content.split(/\r?\n/)
-  const entries: LineEntry[] = []
-  for (const raw of lines) {
-    const norm = normalizeLine(raw)
-    if (norm.length === 0) continue
-    entries.push({ hash: fnv1a32(norm), text: raw })
-  }
-  return entries
+function hasReplacedFragment<T extends Pick<RecordGenInput, "tool" | "oldString">>(
+  input: T
+): input is T & { oldString: string } {
+  return input.tool !== "write_file" && typeof input.oldString === "string"
 }
 
 function getGenerationOccurrenceCount(input: Pick<RecordGenInput, "tool" | "occurrences">): number {
@@ -663,7 +644,7 @@ export function countNetLineChanges(
   const generatedCounts = buildLineHashCounts(computeLineHashes(input.generatedContent))
   const generationOccurrences = getGenerationOccurrenceCount(input)
 
-  if (input.tool !== "edit_file" || typeof input.oldString !== "string") {
+  if (!hasReplacedFragment(input)) {
     let generatedLineCount = 0
     for (const count of generatedCounts.values()) {
       generatedLineCount += count * generationOccurrences
@@ -706,30 +687,6 @@ function lineEntriesToHashes(entries: LineEntry[]): Uint32Array {
   return new Uint32Array(entries.map((entry) => entry.hash))
 }
 
-function lineEntriesToTexts(entries: LineEntry[]): string[] {
-  return entries.map((entry) => entry.text)
-}
-
-function subtractLineEntryMultiset(source: LineEntry[], subtract: LineEntry[]): LineEntry[] {
-  if (source.length === 0) return source
-  if (subtract.length === 0) return source
-
-  const subtractCounts = new Map<number, number>()
-  for (const entry of subtract) {
-    subtractCounts.set(entry.hash, (subtractCounts.get(entry.hash) ?? 0) + 1)
-  }
-  const kept: LineEntry[] = []
-  for (const entry of source) {
-    const count = subtractCounts.get(entry.hash)
-    if (count && count > 0) {
-      subtractCounts.set(entry.hash, count - 1)
-    } else {
-      kept.push(entry)
-    }
-  }
-  return kept
-}
-
 export function buildAdoptionLineBaseline(
   input: Pick<RecordGenInput, "tool" | "generatedContent" | "oldString" | "occurrences">
 ): AdoptionLineBaseline {
@@ -738,7 +695,7 @@ export function buildAdoptionLineBaseline(
     computeLineEntries(input.generatedContent),
     generationOccurrences
   )
-  if (input.tool !== "edit_file" || typeof input.oldString !== "string") {
+  if (!hasReplacedFragment(input)) {
     return {
       generatedLineHashes: lineEntriesToHashes(rawGeneratedLineEntries),
       supersededLineHashes: new Uint32Array(0),
@@ -811,35 +768,6 @@ function unpackLocalLineTexts(bytes: Uint8Array | null | undefined): string[] | 
 function contentFingerprint(content: string): string {
   // Cheap whole-content 32-bit fingerprint (not cryptographic — just a quick diff hint).
   return fnv1a32(content).toString(16).padStart(8, "0")
-}
-
-function isValidUtf8(buffer: Buffer): boolean {
-  try {
-    new TextDecoder("utf-8", { fatal: true }).decode(buffer)
-    return true
-  } catch {
-    return false
-  }
-}
-
-function detectTextEncoding(buffer: Buffer): string {
-  if (buffer.length === 0) return "utf-8"
-  try {
-    const detected = chardet.detect(buffer)
-    const encoding = typeof detected === "string" ? detected : detected?.encoding
-    const confidence = typeof detected === "string" ? 1 : (detected?.confidence ?? 0)
-    if (!encoding || encoding.toLowerCase() === "ascii" || !iconv.encodingExists(encoding)) {
-      return "utf-8"
-    }
-    if (confidence >= 0.8) return encoding
-    return isValidUtf8(buffer) ? "utf-8" : encoding
-  } catch {
-    return "utf-8"
-  }
-}
-
-function decodeCodeBuffer(buffer: Buffer): string {
-  return iconv.decode(buffer, detectTextEncoding(buffer))
 }
 
 function generationFingerprint(content: string, occurrences: number): string {
@@ -1088,6 +1016,43 @@ function getContext(threadId: string): AdoptionContext {
   return threadContexts.get(threadId) ?? {}
 }
 
+function snapshotContext(threadId: string): AdoptionContext {
+  const ctx = getContext(threadId)
+  return {
+    ...ctx,
+    ...(ctx.usedSkills ? { usedSkills: [...ctx.usedSkills] } : {}),
+    ...(ctx.skillSource ? { skillSource: [...ctx.skillSource] } : {})
+  }
+}
+
+function trackGeneration(
+  task: Promise<void>,
+  input: Pick<RecordGenInput, "filePath" | "workspacePath">,
+  createdAt: number
+): void {
+  const absPath = input.workspacePath
+    ? resolvePath(input.workspacePath, input.filePath)
+    : resolvePath(input.filePath)
+  inFlightRecordGenTasks.add(task)
+  pendingGenerationPaths.set(task, { absPath, createdAt })
+  generationTailByPath.set(absPath, task)
+  void task.then(() => {
+    inFlightRecordGenTasks.delete(task)
+    pendingGenerationPaths.delete(task)
+    if (generationTailByPath.get(absPath) === task) generationTailByPath.delete(absPath)
+  })
+}
+
+function previousGeneration(
+  input: Pick<RecordGenInput, "filePath" | "workspacePath">
+): Promise<void> | undefined {
+  return generationTailByPath.get(
+    input.workspacePath
+      ? resolvePath(input.workspacePath, input.filePath)
+      : resolvePath(input.filePath)
+  )
+}
+
 // ─────────────────────────────────────────────────────────
 // Shard rotation / retention
 // ─────────────────────────────────────────────────────────
@@ -1256,19 +1221,101 @@ export function recordGen(input: RecordGenInput): void {
   console.log(
     `[AdoptionTracker] recordGen: tool=${input.tool} file=${input.filePath} threadId=${input.threadId}`
   )
+  const context = snapshotContext(input.threadId)
+  const createdAt = Date.now()
+  const previous = previousGeneration(input)
   const task = new Promise<void>((resolveTask) => {
     queueMicrotask(() => {
-      void doRecordGen(input)
+      void (previous ?? Promise.resolve())
+        .then(() => doRecordGen(input, context, createdAt))
         .catch((e) => {
           console.warn("[AdoptionTracker] recordGen unexpected error:", e)
         })
         .finally(resolveTask)
     })
   })
-  inFlightRecordGenTasks.add(task)
-  void task.then(() => {
-    inFlightRecordGenTasks.delete(task)
-  })
+  trackGeneration(task, input, createdAt)
+}
+
+export interface RecordShellEditInput {
+  threadId: string
+  /** Absolute path of the changed code file. */
+  filePath: string
+  /** Raw bytes are decoded like committed blobs, so non-UTF-8 files hash alike. */
+  beforeContent: Buffer | string
+  afterContent: Buffer | string
+  workspacePath?: string
+  harnessStage?: RecordGenInput["harnessStage"]
+  harnessStagePromise?: Promise<RecordGenInput["harnessStage"]>
+}
+
+/**
+ * Called by LocalSandbox when an agent shell command changed a code file
+ * (Bash First). Only the changed lines are recorded, so a small edit to a
+ * large file stays below MAX_LINES_FOR_MEASURE. Decoding and diffing large
+ * files runs in a worker thread. Never rejects.
+ */
+export function recordShellEdit(input: RecordShellEditInput): Promise<void> {
+  if (!initialized) return Promise.resolve()
+  const bytes = Buffer.byteLength(input.beforeContent) + Buffer.byteLength(input.afterContent)
+  if (pendingShellCount >= 64 || pendingShellBytes + bytes > 32 * 1024 * 1024) {
+    console.warn("[AdoptionTracker] shell edit skipped: pending byte/task budget exceeded", {
+      filePath: input.filePath,
+      bytes
+    })
+    return Promise.resolve()
+  }
+  const context = snapshotContext(input.threadId)
+  const createdAt = Date.now()
+  const lifecycle = outboxLifecycleGeneration
+  const previous = previousGeneration(input)
+  pendingShellCount++
+  pendingShellBytes += bytes
+  const task = (async () => {
+    // Register ownership/time before the tool returns; defer CPU work until
+    // the next event-loop turn. A later trace/commit must not steal attribution.
+    await previous
+    await new Promise<void>((resolve) => setImmediate(resolve))
+    let stageTimer: NodeJS.Timeout | undefined
+    try {
+      const stage = input.harnessStagePromise
+        ? Promise.race([
+            input.harnessStagePromise,
+            new Promise<undefined>((resolve) => {
+              stageTimer = setTimeout(() => resolve(undefined), 2000)
+            })
+          ])
+        : Promise.resolve(input.harnessStage)
+      const [fragments, harnessStage] = await Promise.all([
+        diffShellEdit(input.beforeContent, input.afterContent),
+        stage
+      ])
+      if (!fragments || !initialized || lifecycle !== outboxLifecycleGeneration) return
+      await doRecordGen(
+        {
+          threadId: input.threadId,
+          tool: "execute",
+          filePath: input.filePath,
+          ...fragments,
+          workspacePath: input.workspacePath,
+          ...(harnessStage ? { harnessStage } : {})
+        },
+        context,
+        createdAt
+      )
+    } finally {
+      if (stageTimer) clearTimeout(stageTimer)
+    }
+  })()
+    .catch((e) => {
+      console.warn("[AdoptionTracker] shell edit not recorded:", input.filePath, e)
+    })
+    .finally(() => {
+      pendingShellCount--
+      pendingShellBytes -= bytes
+    })
+  trackGeneration(task, input, createdAt)
+  return task
 }
 
 /** @internal Standalone regression seam; production recordGen remains fire-and-forget. */
@@ -1355,7 +1402,11 @@ function enqueueTestCodeGeneration(
   return true
 }
 
-async function doRecordGen(input: RecordGenInput): Promise<void> {
+async function doRecordGen(
+  input: RecordGenInput,
+  turnContext = snapshotContext(input.threadId),
+  recordedAt = Date.now()
+): Promise<void> {
   try {
     if (!isCodeFile(input.filePath)) {
       console.log(`[AdoptionTracker] recordGen skip — not a code file: ${input.filePath}`)
@@ -1367,7 +1418,6 @@ async function doRecordGen(input: RecordGenInput): Promise<void> {
     // can run and clearAdoptionContext(threadId) — which would zero out the
     // skill/model/trace fields on both the cloud event and the sqlite row,
     // and in turn strip skill attribution from the downstream code_adopt.
-    const turnContext = getContext(input.threadId)
     const ctx: AdoptionContext = input.harnessStage
       ? {
           ...turnContext,
@@ -1405,7 +1455,7 @@ async function doRecordGen(input: RecordGenInput): Promise<void> {
         ? input.oldString.split(/\r?\n/).length * getDeletionOccurrenceCount(input)
         : 0
     const eventId = `g_${randomUUID()}`
-    const createdAt = Date.now()
+    const createdAt = recordedAt
 
     if (Math.max(rawLineCount, rawOldLineCount) > MAX_LINES_FOR_MEASURE) {
       const lineChanges = countNetLineChanges(input)
@@ -2716,6 +2766,31 @@ async function runCommitJob(
       seenPaths.add(absPath)
       measurable.push({ absPath, stagedContent: snapshot.stagedContent })
     }
+    // Async Shell diffing may still be in flight when auto-commit or a Git
+    // hook arrives. Keep the durable job retryable, not completed with no gens.
+    const paths = new Set(measurable.map((snapshot) => snapshot.absPath))
+    const maxCreated = resolveMaxGenCreatedAt(job.commit_time_ms ?? undefined)
+    const pending = [...pendingGenerationPaths]
+      .filter(
+        ([, info]) =>
+          paths.has(info.absPath) && (maxCreated === undefined || info.createdAt <= maxCreated)
+      )
+      .map(([task]) => task)
+    if (pending.length) {
+      let timer: NodeJS.Timeout | undefined
+      try {
+        const ready = await Promise.race([
+          Promise.all(pending).then(() => true),
+          new Promise<false>((resolve) => {
+            timer = setTimeout(() => resolve(false), 250)
+          })
+        ])
+        if (!ready)
+          throw new Error(`generation capture still pending for ${pending.length} task(s)`)
+      } finally {
+        if (timer) clearTimeout(timer)
+      }
+    }
     const fileDiffs = await readPendingCommitFileDiffs(
       job,
       measurable.map((snapshot) => snapshot.absPath),
@@ -2825,6 +2900,16 @@ export function hasPendingGenerationsForCommit(
   const maxCreated = resolveMaxGenCreatedAt(commitTimeMs)
   for (const snap of snapshots) {
     if (!isCodeFile(snap.absPath)) continue
+    const absPath = resolvePath(snap.absPath)
+    if (
+      [...pendingGenerationPaths.values()].some(
+        (info) =>
+          info.absPath === absPath &&
+          info.createdAt >= minCreated &&
+          (maxCreated === undefined || info.createdAt <= maxCreated)
+      )
+    )
+      return true
     if (findPendingGensForFile(snap.absPath, minCreated, maxCreated).length > 0) return true
   }
   return false
@@ -2874,9 +2959,13 @@ export function recordShellFileOps(command: string, cwd: string, exitCode: numbe
   if (!initialized) return
   if (exitCode !== 0 || !command) return
   queueMicrotask(() => {
-    doRecordShellFileOps(command, cwd).catch((e) => {
-      console.warn("[AdoptionTracker] recordShellFileOps unexpected error:", e)
-    })
+    // A preceding Shell generation can still be diffing when rm/mv finishes.
+    // Resolve accepted generations first so the path operation can find them.
+    Promise.all([...inFlightRecordGenTasks])
+      .then(() => doRecordShellFileOps(command, cwd))
+      .catch((e) => {
+        console.warn("[AdoptionTracker] recordShellFileOps unexpected error:", e)
+      })
   })
 }
 

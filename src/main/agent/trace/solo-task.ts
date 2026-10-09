@@ -8,6 +8,7 @@ import {
   type TraceCollector
 } from "./collector"
 import { SkillUsageDetector } from "../skill-evolution/usage-detector"
+import { readPathsForToolCall } from "../tool-call-read-paths"
 import { syncTaskSubagentSkillAttribution } from "../turn-attribution"
 import type { TraceChatMessage, TraceContext, TraceOutcome, TraceTokenUsage } from "./types"
 import { normalizeTraceTokenUsage } from "./token-usage"
@@ -501,13 +502,11 @@ export class SoloTaskTraceManager {
     const toolArgs = asRecord(toolCall.args) ?? {}
     let toolNodeId: string | undefined
     this.runSideEffect("SoloTask tool start", () => {
-      if (toolName === "read_file") {
-        const readPath =
-          (typeof toolArgs.path === "string" && toolArgs.path) ||
-          (typeof toolArgs.file_path === "string" && toolArgs.file_path) ||
-          ""
-        if (readPath && entry.skillUsageDetector.onReadFilePath(readPath)) this.syncSkills(entry)
+      let skillHit = false
+      for (const readPath of readPathsForToolCall(toolName, toolArgs)) {
+        if (entry.skillUsageDetector.onReadFilePath(readPath)) skillHit = true
       }
+      if (skillHit) this.syncSkills(entry)
       toolNodeId = entry.tracer.addToolNode({
         stageAttribution: pendingStage,
         name: toolName,

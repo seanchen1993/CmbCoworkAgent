@@ -8,7 +8,8 @@ import {
 import {
   getToolStrategyReminder,
   SHELL_FIRST_TOOL_DESCRIPTIONS,
-  resolveEffectiveToolStrategy
+  resolveEffectiveToolStrategy,
+  resolveShellFileTelemetry
 } from "./tool-strategy"
 import { BASE_SYSTEM_PROMPT, renderBaseSystemPrompt } from "./system-prompt"
 
@@ -66,6 +67,53 @@ describe("tool strategy capability gate", () => {
       expect(resolveEffectiveToolStrategy("shell-first", tools, access)).toBe("standard")
       expect(JSON.stringify({ tools, access })).toBe(before)
     }
+  })
+})
+
+describe("shell file telemetry switch", () => {
+  const base = { taskSubagentsEnabled: false }
+
+  it("stays off for the standard strategy", () => {
+    expect(resolveShellFileTelemetry("standard", { ...base, taskSubagentsEnabled: true })).toBe(
+      false
+    )
+  })
+
+  it("follows the main graph's effective strategy", () => {
+    expect(resolveShellFileTelemetry("shell-first", base)).toBe(true)
+    expect(resolveShellFileTelemetry("shell-first-relaxed", base)).toBe(true)
+    for (const filesystemAccess of [
+      { workload: "verify" as const },
+      { workload: "read_only" as const },
+      { shellAccess: "read_only" as const },
+      { ownedFiles: ["/workspace/a.ts"] }
+    ]) {
+      expect(resolveShellFileTelemetry("shell-first", { ...base, filesystemAccess })).toBe(false)
+    }
+    expect(
+      resolveShellFileTelemetry("shell-first", {
+        ...base,
+        blockedToolNames: ["edit_file", "write_file"]
+      })
+    ).toBe(false)
+    expect(resolveShellFileTelemetry("shell-first", { ...base, filesystemEnabled: false })).toBe(
+      false
+    )
+  })
+
+  it("stays on for writable task subagents sharing the sandbox", () => {
+    expect(
+      resolveShellFileTelemetry("shell-first", {
+        blockedToolNames: ["edit_file", "write_file"],
+        taskSubagentsEnabled: true
+      })
+    ).toBe(true)
+    expect(
+      resolveShellFileTelemetry("shell-first", {
+        filesystemAccess: { workload: "verify" },
+        taskSubagentsEnabled: true
+      })
+    ).toBe(false)
   })
 })
 

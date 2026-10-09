@@ -84,6 +84,7 @@ import { recoverMainCheckpointMessages } from "./checkpoint-message-recovery"
 import {
   LocalSandbox,
   agentFileWriteContext,
+  executeTraceContext,
   readOnlyShellExecutionContext,
   type SkillHookContextProvider
 } from "./local-sandbox"
@@ -124,6 +125,7 @@ import {
   getToolStrategyReminder,
   resolveEffectiveToolStrategy,
   resolveFilesystemToolStrategy,
+  resolveShellFileTelemetry,
   resolveWorkflowToolStrategy,
   SHELL_FIRST_TOOL_DESCRIPTIONS
 } from "./tool-strategy"
@@ -377,7 +379,7 @@ import {
 import { syncSubagentSkillAttribution } from "./turn-attribution"
 import { buildOrderedChain, isRetryableApiError } from "./failover"
 import { resolveModel } from "../routing"
-import { patchRuntimeReadFileTool } from "./read-file-tool"
+import { patchRuntimeReadFileTool, resolveReadFileTraceContext } from "./read-file-tool"
 import { createWorkflowTool } from "./workflow/tool"
 import { workflowRunManager } from "./workflow/run-manager"
 import { WORKFLOW_MODE_SYSTEM_PROMPT } from "./workflow/prompts"
@@ -2575,50 +2577,65 @@ function assembleDeepAgent(
         if (result.truncated) parts.push("\n[Output was truncated due to size limits]")
         return parts.join("")
       }
-      const customExecute = lcTool(
-        async (input: {
-          command: string
-          cwd?: string
-          run_in_background?: boolean
-        }): Promise<string> => {
-          const sandbox = filesystemBackend as LocalSandbox
-          // Read-only runtimes keep execute but may only run PROVABLY read-only
-          // commands — gated per command by isReadOnlyShellCommand. Covers both
-          // the registry path (shellAccess "read_only", e.g. Explore) and the
-          // coordinator read-only worker (workload "read_only"). Stronger than
-          // CC's prompt-only constraint AND stronger than plain "safe": "safe" is
-          // the auto-approve tier (so this never surfaces an extra prompt) but it
-          // also auto-approves build/install/codegen (npm install, cargo build,
-          // make, go run, javac …), which WRITE the tree / run arbitrary code.
-          // isReadOnlyShellCommand additionally rejects those while keeping the
-          // tools' inspection subcommands (npm ls, go list, mvn dependency:tree).
-          const readOnlyShell =
-            filesystemAccess?.shellAccess === "read_only" ||
-            filesystemAccess?.workload === "read_only"
-          if (
-            readOnlyShell &&
-            !isReadOnlyShellCommand(input.command, input.cwd ?? "", windowsShellKind)
-          ) {
-            return readOnlyExecuteBlockMessage(windowsShellKind)
-          }
-          if (input.run_in_background) {
-            if (managedExecution) {
-              return formatExecuteResponse(await sandbox.execute(input.command, input.cwd))
-            }
-            return sandbox.executeBackground(input.command, input.cwd)
-          }
-          if (input.cwd?.trim()) {
+      const runExecute = async (input: {
+        command: string
+        cwd?: string
+        run_in_background?: boolean
+      }): Promise<string> => {
+        const sandbox = filesystemBackend as LocalSandbox
+        // Read-only runtimes keep execute but may only run PROVABLY read-only
+        // commands — gated per command by isReadOnlyShellCommand. Covers both
+        // the registry path (shellAccess "read_only", e.g. Explore) and the
+        // coordinator read-only worker (workload "read_only"). Stronger than
+        // CC's prompt-only constraint AND stronger than plain "safe": "safe" is
+        // the auto-approve tier (so this never surfaces an extra prompt) but it
+        // also auto-approves build/install/codegen (npm install, cargo build,
+        // make, go run, javac …), which WRITE the tree / run arbitrary code.
+        // isReadOnlyShellCommand additionally rejects those while keeping the
+        // tools' inspection subcommands (npm ls, go list, mvn dependency:tree).
+        const readOnlyShell =
+          filesystemAccess?.shellAccess === "read_only" ||
+          filesystemAccess?.workload === "read_only"
+        if (
+          readOnlyShell &&
+          !isReadOnlyShellCommand(input.command, input.cwd ?? "", windowsShellKind)
+        ) {
+          return readOnlyExecuteBlockMessage(windowsShellKind)
+        }
+        if (input.run_in_background) {
+          if (managedExecution) {
             return formatExecuteResponse(await sandbox.execute(input.command, input.cwd))
           }
-          // Delegate to original execute handler for foreground execution
-          // eslint-disable-next-line @typescript-eslint/no-explicit-any
-          const result = await (oldExecute as any).invoke(input)
-          if (typeof result === "string") return result
-          try {
-            return JSON.stringify(result) ?? String(result)
-          } catch {
-            return String(result)
-          }
+          return sandbox.executeBackground(input.command, input.cwd)
+        }
+        if (input.cwd?.trim()) {
+          return formatExecuteResponse(await sandbox.execute(input.command, input.cwd))
+        }
+        // Delegate to original execute handler for foreground execution
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const result = await (oldExecute as any).invoke(input)
+        if (typeof result === "string") return result
+        try {
+          return JSON.stringify(result) ?? String(result)
+        } catch {
+          return String(result)
+        }
+      }
+      const customExecute = lcTool(
+        async (
+          input: { command: string; cwd?: string; run_in_background?: boolean },
+          config?: unknown
+        ): Promise<string> => {
+          // Task subagents share this sandbox: their shell reads report to their
+          // own trace, resolved the way read_file resolves it.
+          const traceContext = soloTaskTraceManager
+            ? resolveReadFileTraceContext(config, (agentId) =>
+                soloTaskTraceManager.getTraceContextForOwner(agentId)
+              )
+            : undefined
+          return traceContext
+            ? executeTraceContext.run(traceContext, () => runExecute(input))
+            : runExecute(input)
         },
         {
           name: "execute",
@@ -5417,6 +5434,18 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
     projectCode,
     projectDir,
     onFileMutation,
+    // Shell file telemetry follows Bash First exactly where the prompts apply
+    // it (same snapshot, readonly-sandbox downgrade and role limits); standard
+    // keeps the old file-tool-only path.
+    shellFileTelemetry: resolveShellFileTelemetry(
+      windowsSandbox === "readonly" ? "standard" : toolStrategy,
+      {
+        filesystemAccess: options.filesystemAccess,
+        blockedToolNames: runtimeBlockedToolNames,
+        filesystemEnabled: !isCoordinatorMode,
+        taskSubagentsEnabled: mainSubagentsEnabled
+      }
+    ),
     abortSignal: options.abortSignal,
     runId: threadId,
     // Foreground turns on the same thread can overlap briefly during bounded
@@ -6135,6 +6164,9 @@ The workspace root is: ${fileRoot}`
               // its background subagents must not re-prompt per file edit
               // (shell execution stays gated).
               autoApproveFileEdits: true,
+              // Only shared-workspace mutations belong to the parent's commit
+              // scope. Isolated worktrees retain their own generation records.
+              onFileMutation: worktreeIsolation ? undefined : onFileMutation,
               managedExecution
             })
             if (worktreeIsolation) worktreeSubagentThreads.add(subagentOptions.threadId)
@@ -6474,6 +6506,7 @@ Use the same worker thread context for follow-up instructions. ${scratchpadGuida
     // stays the worker thread id and is not part of this bundle.
     const workerHarnessContext = {
       agentId: workerInput.workerId,
+      onFileMutation,
       systemId,
       pluginRoot,
       pluginId,

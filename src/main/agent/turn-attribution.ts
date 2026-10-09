@@ -5,6 +5,7 @@ import {
   setThreadActiveSkills
 } from "./skill-evolution/proposal-window"
 import { SkillUsageDetector } from "./skill-evolution/usage-detector"
+import { readPathsForToolCall } from "./tool-call-read-paths"
 import { setAdoptionContext } from "../services/adoption-tracker"
 
 /**
@@ -208,10 +209,12 @@ export function observeToolCallForAttribution(
 ): ObservedToolCall {
   const name = call?.name
   if (!name) return NO_OBSERVATION
-  if (name === "read_file") {
-    const readPath = toolCallPath(call?.args)
-    if (!readPath) return NO_OBSERVATION
-    return { skillHit: detector.onReadFilePath(readPath) }
+  if (name === "read_file" || name === "execute") {
+    let skillHit = false
+    for (const readPath of readPathsForToolCall(name, call?.args)) {
+      if (detector.onReadFilePath(readPath)) skillHit = true
+    }
+    return skillHit ? { skillHit } : NO_OBSERVATION
   }
   if (name === "write_file" || name === "edit_file") {
     const writePath = toolCallPath(call?.args)

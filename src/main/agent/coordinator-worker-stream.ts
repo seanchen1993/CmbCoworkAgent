@@ -3,6 +3,7 @@ import type {
   CoordinatorWorkerTokenUsage
 } from "./coordinator-worker-manager"
 import type { SkillUsageDetector } from "./skill-evolution/usage-detector"
+import { readPathsForToolCall } from "./tool-call-read-paths"
 import { extractVisibleReasoning, TRACE_REASONING_MAX_CHARS } from "../../shared/model-reasoning"
 
 const TRANSCRIPT_FIELD_MAX_CHARS = 8_000
@@ -157,7 +158,9 @@ export function shouldClearWorkerFinalText(
   }
 
   if (mode !== "values") return false
-  return resolveWorkerValuesState(payload, currentTurnPrompt, valuesContext)?.clearFinalText ?? false
+  return (
+    resolveWorkerValuesState(payload, currentTurnPrompt, valuesContext)?.clearFinalText ?? false
+  )
 }
 
 export function summarizeWorkerText(text: string): string {
@@ -330,13 +333,10 @@ export function observeSkillUsageFromStream(
       const data = getSerializedObject(message)
       if (!data) return
       for (const rawToolCall of getWorkerToolCalls(data)) {
-        if (extractToolCallName(rawToolCall) !== "read_file") continue
         const args = getSerializedObject(extractToolCallArgs(rawToolCall)) ?? {}
-        const readPathRaw =
-          (typeof args.path === "string" && args.path) ||
-          (typeof args.file_path === "string" && args.file_path) ||
-          ""
-        if (readPathRaw) detector.onReadFilePath(readPathRaw)
+        for (const readPath of readPathsForToolCall(extractToolCallName(rawToolCall), args)) {
+          detector.onReadFilePath(readPath)
+        }
       }
     }
 
@@ -589,14 +589,8 @@ function scanWorkerValuesSnapshot(
     }
 
     toolCalls.forEach((call, callIndex) => {
-      if (extractToolCallName(call) === "read_file") {
-        const args = getSerializedObject(extractToolCallArgs(call)) ?? {}
-        const readPath =
-          (typeof args.path === "string" && args.path) ||
-          (typeof args.file_path === "string" && args.file_path) ||
-          ""
-        if (readPath) skillReadPaths.push(readPath)
-      }
+      const callArgs = getSerializedObject(extractToolCallArgs(call)) ?? {}
+      skillReadPaths.push(...readPathsForToolCall(extractToolCallName(call), callArgs))
       if (!deriveWorkerState) return
       const name = extractToolCallName(call)
       if (!name) return

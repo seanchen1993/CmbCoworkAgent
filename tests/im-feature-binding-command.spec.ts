@@ -147,40 +147,69 @@ async function createContext() {
     return updated
   }
   let id = 0
+  const featureCatalog = {
+    enabled: true,
+    projectMode: true,
+    projectExists: true,
+    projectStatus: "active",
+    compatible: true,
+    projectName: "支付平台",
+    detailArchived: false,
+    detailError: null as string | null,
+    readFailure: false,
+    projectReads: 0,
+    detailReads: 0,
+    runs: [
+      {
+        slug: "feature-pay",
+        title: "快捷支付",
+        location: "active",
+        featureStatus: "in_progress",
+        overallStatus: { label: "进行中", uiKind: "active" }
+      }
+    ]
+  }
   const featureService = new ImFeatureBindingService({
     getFeatureWorkspace: async () => root,
     conversationState: conversations,
-    getSettings: () => ({ enabled: true, remoteAccess: "inbox-and-features" }),
-    projectModeEnabled: async () => true,
-    listProjects: () =>
-      [
-        {
-          projectId: "project-secret-id",
-          name: "支付平台",
-          lifecycle: { status: "active", createAt: "2026-07-23T00:00:00.000Z" },
-          boardCompatibility: { compatible: true }
-        }
-      ] as never,
-    getProjectDetail: () =>
-      ({
+    getSettings: () => ({ enabled: featureCatalog.enabled, remoteAccess: "inbox-and-features" }),
+    projectModeEnabled: async () => featureCatalog.projectMode,
+    listProjects: () => {
+      featureCatalog.projectReads++
+      return (
+        featureCatalog.projectExists
+          ? [
+              {
+                projectId: "project-secret-id",
+                name: featureCatalog.projectName,
+                lifecycle: {
+                  status: featureCatalog.projectStatus,
+                  createAt: "2026-07-23T00:00:00.000Z"
+                },
+                boardCompatibility: { compatible: featureCatalog.compatible }
+              }
+            ]
+          : []
+      ) as never
+    },
+    getProjectDetail: () => {
+      featureCatalog.detailReads++
+      if (featureCatalog.readFailure) throw new Error("test project temporarily unavailable")
+      return {
         project: {
           projectId: "project-secret-id",
           name: "支付平台",
           projectRootPath: root,
           workspacePath: "/must-not-leak"
         },
-        projectState: { label: "active", uiKind: "active" },
-        runs: [
-          {
-            slug: "feature-pay",
-            title: "快捷支付",
-            location: "active",
-            featureStatus: "in_progress",
-            overallStatus: { label: "进行中", uiKind: "active" }
-          }
-        ],
-        error: null
-      }) as never,
+        projectState: {
+          label: "active",
+          uiKind: featureCatalog.detailArchived ? "archived" : "active"
+        },
+        runs: featureCatalog.runs,
+        error: featureCatalog.detailError
+      } as never
+    },
     getRunDetail: () => ({ sessions: [] }) as never,
     buildFeatureContext: () => ({ featureId: "feature-pay" }) as never,
     getThread: (threadId) => threads.get(threadId) ?? null,
@@ -216,6 +245,7 @@ async function createContext() {
     hasPendingUserInput: () => false
   })
   return {
+    featureCatalog,
     createdThreadMetadata,
     setFeatureConfiguredAgentMode: (mode: string | null) => {
       featureConfiguredAgentMode = mode
@@ -1493,7 +1523,136 @@ async function testTextModeSendsTheTargetListAsText(): Promise<void> {
   }
 }
 
+async function testFeatureDeletionFiltersTextAndCardSelections(): Promise<void> {
+  const context = await createContext()
+  const { router, sentCards } = textModeRouter(context)
+  try {
+    const grant = await context.access.enableFeature({
+      principalId: TEXT_MODE_ROUTE.principalId,
+      projectId: "project-secret-id",
+      featureSlug: "feature-pay"
+    })
+    await sendCommand(router, "/会话")
+    assert(sentCards.at(-1)!.includes("快捷支付"))
+
+    // Delete in project mode without touching the IM grant database. A card
+    // already delivered before deletion must still be rejected at bind time.
+    context.featureCatalog.runs = []
+    const stale = await router.resolveTargetBindCard({
+      ...TEXT_MODE_ROUTE,
+      feedback: [{ key: "target", value: "1" }]
+    })
+    assert(stale.includes("Feature 不存在或已归档"), stale)
+    assert.equal(context.createdThreadMetadata.length, 0)
+    const noTargets = await sendCommand(router, "/会话")
+    assert(noTargets.includes("当前没有已授权"), noTargets)
+    assert.equal(sentCards.length, 1, "no empty/stale card is published")
+    assert.equal(context.grants.getFeatureGrantById(grant.grantId)?.state, "active")
+
+    // Other enabled Features must still be offered, using current titles rather
+    // than the grant's original snapshots; both card and text use this catalog.
+    context.featureCatalog.runs = [
+      {
+        slug: "feature-other",
+        title: "另一个特性",
+        location: "active",
+        featureStatus: "in_progress",
+        overallStatus: { label: "进行中", uiKind: "active" }
+      }
+    ]
+    await context.access.enableFeature({
+      principalId: TEXT_MODE_ROUTE.principalId,
+      projectId: "project-secret-id",
+      featureSlug: "feature-other"
+    })
+    context.featureCatalog.projectName = "支付平台新名称"
+    context.featureCatalog.runs[0]!.title = "另一个特性新名称"
+    await sendCommand(router, "/会话")
+    const card = sentCards.at(-1)!
+    assert(!card.includes("快捷支付"), card)
+    assert(card.includes("支付平台新名称 / 另一个特性新名称"), card)
+    await sendCommand(router, "/文字模式")
+    const text = await sendCommand(router, "/会话")
+    assert(!text.includes("快捷支付"), text)
+    assert(text.includes("支付平台新名称 / 另一个特性新名称"), text)
+  } finally {
+    context.database.close()
+    await rm(context.root, { recursive: true, force: true })
+  }
+}
+
+async function testFeatureCatalogEligibilityAndRecovery(): Promise<void> {
+  const context = await createContext()
+  try {
+    const catalog = context.featureCatalog
+    const originalFeature = { ...catalog.runs[0]! }
+    const grant = await context.access.enableFeature({
+      principalId: TEXT_MODE_ROUTE.principalId,
+      projectId: "project-secret-id",
+      featureSlug: "feature-pay"
+    })
+    catalog.runs.push({ ...originalFeature, slug: "feature-other", title: "其他特性" })
+    await context.access.enableFeature({
+      principalId: TEXT_MODE_ROUTE.principalId,
+      projectId: "project-secret-id",
+      featureSlug: "feature-other"
+    })
+    context.makeThread("desktop-existing", { title: "已有会话", workspacePath: context.root })
+    await context.access.enableThread({ route: TEXT_MODE_ROUTE, threadId: "desktop-existing" })
+    catalog.projectReads = catalog.detailReads = 0
+    assert.equal((await context.access.listAuthorizedTargets(TEXT_MODE_ROUTE)).length, 3)
+    assert.equal(catalog.projectReads, 1, "one project listing for multiple grants")
+    assert.equal(catalog.detailReads, 1, "one detail read per project, not per grant")
+
+    for (const feature of [
+      { ...originalFeature, location: "archived" },
+      { ...originalFeature, featureStatus: "archived" }
+    ]) {
+      catalog.runs[0] = feature
+      const targets = await context.access.listAuthorizedTargets(TEXT_MODE_ROUTE)
+      assert(!targets.some((target) => target.grantId === grant.grantId))
+      assert.equal(targets.length, 2, "other Feature and desktop session remain available")
+    }
+    catalog.runs[0] = originalFeature
+    const original = { ...catalog }
+    for (const patch of [
+      { projectExists: false },
+      { projectStatus: "archived" },
+      { compatible: false },
+      { detailArchived: true },
+      { detailError: "temporarily unavailable" },
+      { readFailure: true },
+      { enabled: false },
+      { projectMode: false }
+    ]) {
+      Object.assign(catalog, patch)
+      const targets = await context.access.listAuthorizedTargets(TEXT_MODE_ROUTE)
+      assert.equal(targets.length, 1, JSON.stringify(patch))
+      assert.equal(
+        targets[0]!.kind,
+        "thread_grant",
+        "Feature failure must not hide ordinary sessions"
+      )
+      assert.equal(context.grants.getFeatureGrantById(grant.grantId)?.state, "active")
+      Object.assign(catalog, original)
+      assert.equal(
+        (await context.access.listAuthorizedTargets(TEXT_MODE_ROUTE)).length,
+        3,
+        "catalog recovery must restore valid grants without re-enabling"
+      )
+    }
+  } finally {
+    context.database.close()
+    await rm(context.root, { recursive: true, force: true })
+  }
+}
+
 const tests: Array<[string, () => Promise<void>]> = [
+  [
+    "testFeatureDeletionFiltersTextAndCardSelections",
+    testFeatureDeletionFiltersTextAndCardSelections
+  ],
+  ["testFeatureCatalogEligibilityAndRecovery", testFeatureCatalogEligibilityAndRecovery],
   ["testTheTextModeCommandIsASwitch", testTheTextModeCommandIsASwitch],
   ["testExplicitOnAndOffNeverFlipBack", testExplicitOnAndOffNeverFlipBack],
   ["testTheSwitchReportsWhatWasResent", testTheSwitchReportsWhatWasResent],
