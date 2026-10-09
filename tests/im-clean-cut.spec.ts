@@ -87,7 +87,13 @@ assert(main.includes("builtinRobotManager.start(app.getVersion())"))
 assert(main.includes("builtinRobotManager.stop()"))
 const robotManager = read("src/main/services/im/manager.ts")
 assert(
-  /listGrantableFeatures\(\)[\s\S]*Promise\.all\([\s\S]*listRemoteFeatures/u.test(robotManager),
+  /listGrantableFeatures\(\)[\s\S]*listRemoteFeatureCatalog/u.test(robotManager),
+  "Robot management and IM selections should use the same current Feature catalog"
+)
+assert(
+  /listRemoteFeatureCatalog\([\s\S]*Promise\.all\(/u.test(
+    read("src/main/services/im/feature-binding-service.ts")
+  ),
   "Feature details should load concurrently after the first robot paint"
 )
 
