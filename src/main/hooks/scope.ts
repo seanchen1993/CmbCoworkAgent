@@ -6,6 +6,10 @@ import {
 } from "../storage"
 import { hookMatchesRunCriteria, type HookContext } from "./runner"
 import type { HookConfig, HookEvent } from "./types"
+import {
+  isSkillVisibleForProjectMode,
+  type ProjectModeSkillScope
+} from "../../shared/skill-visibility"
 export { normalizePathKey } from "./path-key"
 import { normalizePathKey } from "./path-key"
 
@@ -255,6 +259,21 @@ export function resolvePluginIdForSkillPath(
   return undefined
 }
 
+export function isSkillPathVisibleForProjectMode(
+  skillPath: string | undefined | null,
+  visibilityScope: ProjectModeSkillScope
+): boolean {
+  const key = normalizePathKey(skillPath)
+  if (!key || !visibilityScope.projectMode) return true
+  for (const source of getEnabledPluginSkillSourceMetadata()) {
+    const root = normalizePathKey(source.pluginRoot)
+    if (root && (key === root || key.startsWith(`${root}/`))) {
+      return isSkillVisibleForProjectMode(source, visibilityScope)
+    }
+  }
+  return true
+}
+
 export interface ScopedHookCandidates {
   baseHooks: HookConfig[]
   /** Plugin hook entries also carry pluginName so the UI can show a friendly label. */
@@ -263,6 +282,7 @@ export interface ScopedHookCandidates {
     HookConfig & {
       pluginId?: string
       pluginName?: string
+      isProjectModePlugin?: boolean
       skillName?: string
       skillPath?: string
     }
@@ -287,6 +307,7 @@ export type ScopeSkipCallback = (
   hook: HookConfig & {
     pluginId?: string
     pluginName?: string
+    isProjectModePlugin?: boolean
     skillName?: string
     skillPath?: string
   },
@@ -307,6 +328,11 @@ export function filterScopedHooks(
 ): HookConfig[] {
   const { baseHooks, pluginHooks, skillHooks } = candidates
   if (!scope) return baseHooks
+  const visibilityScope: ProjectModeSkillScope = {
+    projectMode: Boolean(context.featureId || context.harnessProjectId),
+    boundPluginId: context.harnessAdapterId,
+    boundPluginName: context.harnessAdapterName
+  }
 
   const allowedPluginIds = new Set(scope.activePluginIds)
   const currentPluginId = normalizePluginId(context.pluginId)
@@ -358,6 +384,10 @@ export function filterScopedHooks(
 
   const filteredSkillHooks: typeof skillHooks = []
   for (const hook of skillHooks) {
+    if (!isSkillVisibleForProjectMode(hook, visibilityScope)) {
+      notifySkipped(hook, "skill-not-in-scope")
+      continue
+    }
     if (shouldIncludePersistentHook(hook)) {
       filteredSkillHooks.push(hook)
       continue

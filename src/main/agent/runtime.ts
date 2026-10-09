@@ -1,3 +1,6 @@
+import { createStageUsageMiddleware } from "./trace/stage-usage-middleware"
+import { randomUUID } from "crypto"
+import { TurnTraceRecorder } from "./trace/turn-trace-recorder"
 import { foregroundToolPolicy } from "./foreground-tool-policy"
 import { createTaskModelOutcomeMiddleware, withTaskModelOutcome } from "./task-model-outcome"
 import { withScopedModMcp, publishCurrentModResult } from "../mods/adapters"
@@ -6,6 +9,7 @@ import {
   createFunctionSessionViewMiddleware
 } from "./mods-session-view"
 import { authorizeCurrentModInput, getModsManager } from "../mods/manager"
+import { validateWorkspaceDirectory } from "../services/workspace-validation"
 import { getModCallContext } from "../mods/context"
 import type { ModRuntimeAuthority } from "../mods/runtime-instance"
 import { ModError } from "../mods/errors"
@@ -28,7 +32,6 @@ import {
   createFilesystemMiddleware,
   createSubAgentMiddleware,
   createPatchToolCallsMiddleware,
-  createSkillsMiddleware,
   createMemoryMiddleware,
   GENERAL_PURPOSE_SUBAGENT,
   StateBackend
@@ -86,8 +89,12 @@ import {
 } from "./local-sandbox"
 import { approvalMatchesRuntimeThread } from "./approval-thread-match"
 import { SkillLifecycleRegistry } from "./skill-lifecycle/registry"
-import { combineSkillMiddlewareSources } from "./skill-sources"
+import { combineSkillMiddlewareSources, createRefreshingSkillsMiddleware } from "./skill-sources"
 import type { SkillUseTracker } from "./skill-lifecycle/tracker"
+import {
+  isSkillVisibleForProjectMode,
+  type ProjectModeSkillScope
+} from "../../shared/skill-visibility"
 import type { AgentFileMutationKind } from "../services/agent-auto-commit"
 import type { HookResultCallback } from "../hooks/runner"
 import type { HookResult } from "../hooks/types"
@@ -216,6 +223,7 @@ import { mergeUpdatedInput } from "../hooks/updated-input"
 import {
   createHookScope,
   createInheritedHookScope,
+  isSkillPathVisibleForProjectMode,
   resolvePluginIdForSkillPath,
   extractPluginIdFromProviderKey,
   resolveEnabledHooksForRun,
@@ -366,7 +374,7 @@ import {
   WorkerValuesSnapshotAccumulator,
   type WorkerValuesSnapshotContext
 } from "./coordinator-worker-stream"
-import { setAdoptionContext } from "../services/adoption-tracker"
+import { syncSubagentSkillAttribution } from "./turn-attribution"
 import { buildOrderedChain, isRetryableApiError } from "./failover"
 import { resolveModel } from "../routing"
 import { patchRuntimeReadFileTool } from "./read-file-tool"
@@ -1247,6 +1255,7 @@ export function createScopedMcpCapabilityService(
     pluginWorkspace?: string
     featureId?: string
     harnessProjectId?: string
+    harnessAdapterId?: string
     harnessAdapterName?: string
     harnessAdapterVersion?: string
     harnessNodeName?: string
@@ -1506,6 +1515,7 @@ export function createScopedMcpCapabilityService(
             pluginWorkspace: baseContext.pluginWorkspace,
             featureId: baseContext.featureId,
             harnessProjectId: baseContext.harnessProjectId,
+            harnessAdapterId: baseContext.harnessAdapterId,
             harnessAdapterName: baseContext.harnessAdapterName,
             harnessAdapterVersion: baseContext.harnessAdapterVersion,
             harnessNodeName: baseContext.harnessNodeName,
@@ -2428,7 +2438,7 @@ function assembleDeepAgent(
   const filesystemBackend = backend ? backend : (config: any) => new StateBackend(config)
   const skillsMiddlewareArray =
     skills != null && skills.length > 0
-      ? [createSkillsMiddleware({ backend: filesystemBackend, sources: skills })]
+      ? [createRefreshingSkillsMiddleware({ backend: filesystemBackend, sources: skills })]
       : []
 
   const memoryMiddlewareArray =
@@ -2441,7 +2451,7 @@ function assembleDeepAgent(
   const processedSubagents = subagents.map((subagent: any) => {
     if (Runnable.isRunnable(subagent)) return subagent
     if (!("skills" in subagent) || subagent.skills?.length === 0) return subagent
-    const subagentSkillsMiddleware = createSkillsMiddleware({
+    const subagentSkillsMiddleware = createRefreshingSkillsMiddleware({
       backend: filesystemBackend,
       sources: subagent.skills ?? []
     })
@@ -5139,7 +5149,13 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
     )
   }
 
-  const modRuntimeAuthority = getModsManager()?.createRuntimeAuthority({
+  // Validate even when Mods is off/uninstalled; old sessions can retain foreign or deleted paths.
+  const modManager = getModsManager()
+  if (modManager) await modManager.prepareWorkspace(workspacePath)
+  else await validateWorkspaceDirectory(workspacePath)
+  options.abortSignal?.throwIfAborted()
+
+  const modRuntimeAuthority = modManager?.createRuntimeAuthority({
     workspace: workspacePath,
     threadId,
     agentId,
@@ -5174,6 +5190,11 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
     agentMode,
     memoryEnabled: memoryEnabledForThread
   })
+  const skillVisibility: ProjectModeSkillScope = {
+    projectMode: runtimePolicy.isProjectMode,
+    boundPluginId: pluginId,
+    boundPluginName: pluginName
+  }
   // Keep the registry catalogue tied to the task tool itself. This enables the
   // same task types in Multi and Workflow while excluding Solo, coordinator,
   // and every leaf runtime through the existing mainSubagentsEnabled policy.
@@ -5202,8 +5223,10 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
   // Only the explicit slash selection counts, not auto-routed skills.
   if (isCoordinatorMode && options.coordinatorExplicitSelectedSkill) {
     const sel = options.coordinatorExplicitSelectedSkill
-    const ownerPluginId = resolvePluginIdForSkillPath(sel.skillPath)
-    hookScope.activateSkill(sel.skillName, ownerPluginId, sel.skillPath)
+    if (isSkillPathVisibleForProjectMode(sel.skillPath, skillVisibility)) {
+      const ownerPluginId = resolvePluginIdForSkillPath(sel.skillPath)
+      hookScope.activateSkill(sel.skillName, ownerPluginId, sel.skillPath)
+    }
   }
   const resolveHooksForContext = (event: HookEvent, context: HookContext) =>
     resolveEnabledHooksForRun(
@@ -5779,8 +5802,12 @@ The workspace root is: ${fileRoot}`
   console.log("[Runtime] Skill middleware sources:", skillsSources)
 
   // Merge plugin skills sources
-  const pluginSkillSourceMetadata = getEnabledPluginSkillSourceMetadata()
-  const pluginSkillsSources = await getEnabledPluginSkillMiddlewareSources()
+  const allPluginSkillSourceMetadata = getEnabledPluginSkillSourceMetadata()
+  const pluginSkillSourceMetadata = allPluginSkillSourceMetadata.filter((source) =>
+    isSkillVisibleForProjectMode(source, skillVisibility)
+  )
+  const pluginSkillsSources =
+    await getEnabledPluginSkillMiddlewareSources(pluginSkillSourceMetadata)
   console.log("[Runtime] Plugin skills sources:", pluginSkillsSources)
   console.log("[Runtime] Plugin skills sources count:", pluginSkillsSources.length)
 
@@ -5838,6 +5865,7 @@ The workspace root is: ${fileRoot}`
       pluginWorkspace,
       featureId,
       harnessProjectId,
+      harnessAdapterId: pluginId,
       harnessAdapterName,
       harnessAdapterVersion,
       harnessNodeName,
@@ -6211,6 +6239,7 @@ The workspace root is: ${fileRoot}`
     pluginWorkspace,
     featureId,
     harnessProjectId,
+    harnessAdapterId: pluginId,
     harnessAdapterName,
     harnessAdapterVersion,
     harnessNodeName,
@@ -6402,7 +6431,16 @@ Use the same worker thread context for follow-up instructions. ${scratchpadGuida
       workerTracer.setUsedSkills(usedSkills)
       workerTracer.setSkillSource(skillSource)
       workerTracer.setEvolvedSkills(workerSkillUsageDetector.getUsedEvolvedSkillNames())
-      setAdoptionContext(workerInput.workerThreadId, { usedSkills, skillSource })
+      // Workers own their own thread, so recordGen reads the worker's adoption
+      // context. Resolve the fallback chain (this run → this worker thread →
+      // the coordinator thread) instead of publishing the bare detector result,
+      // which drops attribution the coordinator had already established.
+      syncSubagentSkillAttribution({
+        threadId: workerInput.workerThreadId,
+        parentThreadId: workerInput.parentThreadId,
+        currentRunSkills: usedSkills,
+        currentRunSkillSource: skillSource
+      })
     }
     const cancelWorkerBackgroundTasks = (): void => {
       LocalSandbox.cancelBackgroundTasks(workerInput.workerThreadId)
@@ -6517,6 +6555,17 @@ Use the same worker thread context for follow-up instructions. ${scratchpadGuida
         )
         workerRuntimeTraceContext = workerTracer?.getTraceContext() ?? traceContext
       }
+      const workerPromptMessage = new HumanMessage({
+        content: effectiveWorkerPrompt,
+        id: randomUUID()
+      })
+      const workerTraceRecorder = workerTracer
+        ? new TurnTraceRecorder({
+            tracer: workerTracer,
+            userMessageId: workerPromptMessage.id,
+            requireUserMessageAnchor: true
+          })
+        : undefined
       const streamConfig = {
         configurable: { thread_id: workerInput.workerThreadId },
         callbacks: [],
@@ -6534,6 +6583,7 @@ Use the same worker thread context for follow-up instructions. ${scratchpadGuida
               stream: { mode: mode as "messages" | "values", data }
             })
           }
+          if (mode === "values") workerTraceRecorder?.onRawValues(data)
           const valuesContext = workerValuesSnapshotAccumulator?.createContext(mode, data)
           runTraceSideEffect("CoordinatorWorker Skill observer", () => {
             if (observeWorkerSkillUsage(mode, data, workerSkillUsageDetector, valuesContext)) {
@@ -6661,10 +6711,7 @@ Use the same worker thread context for follow-up instructions. ${scratchpadGuida
             onFailureFuseNotice
           })
 
-          workerStream = await workerAgent.stream(
-            { messages: [new HumanMessage(effectiveWorkerPrompt)] },
-            streamConfig
-          )
+          workerStream = await workerAgent.stream({ messages: [workerPromptMessage] }, streamConfig)
           usedWorkerModelId = candidateId
           runTraceSideEffect("CoordinatorWorker", () => workerTracer?.setModelId(candidateId))
           break
@@ -7316,6 +7363,7 @@ Access limits: read-only handoff continuation. Do not modify files, run commands
   }
 
   const agent = createDeepAgent({
+    middleware: traceContext?.harnessFeature ? [createStageUsageMiddleware(traceContext)] : [],
     model,
     summarizationModel: contextCompactionModel,
     tools: mainTools,

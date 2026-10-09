@@ -1,3 +1,4 @@
+import { requireHarnessFeatureWorkspace } from "./service"
 import type { ManagedBizRetryDecisionInput, ManagedHumanGateDecisionInput, ManagedHumanGateConflictInput } from "./notification-operation-types"
 import { harnessNotifications } from "./notifications"
 import { BrowserWindow } from "electron"
@@ -9,7 +10,7 @@ import { hasActiveTopLevelAgentRun } from "../agent/agent-run-service"
 import { emitAppAttention } from "../app-attention-events"
 import { AsyncKeyedLock } from "../ipc/async-keyed-lock"
 import { managedBizRetryService } from "./biz-retry-service"
-import { readHarnessFeatureMetadata } from "./service"
+import { markHarnessProjectManagedRunStarted, readHarnessFeatureMetadata } from "./service"
 import { hasPendingHumanGateForThread, interruptHumanGatesForRun } from "./human-gate-service"
 import { inspectHarnessManagedFeatureStatus } from "./managed-feature-status"
 import {
@@ -24,6 +25,7 @@ import {
   type CreateManagedHarnessSessionInput
 } from "./auto-mode-action-executor"
 import { managedRunStore } from "./managed-run-store"
+import { reportManagedRunEnded, reportManagedRunStarted } from "./managed-run-telemetry"
 import { formatGmt8Timestamp } from "../../shared/gmt8-time"
 import {
   DEFAULT_MANAGED_RUN_POLICY,
@@ -549,6 +551,9 @@ async function markTerminal(
     ...(status === "completed" ? { completedAt: now, nextRetryAt: undefined } : {})
   }
   const persisted = managedRunStore.updateSnapshot(next)
+  // 上报放在本地流水之外：下面那条 appendEvent 被 decisionEventId 挡着，没有决策来源的
+  // 终止路径不写流水，但它同样是一次真实的托管结束，看板不能漏。
+  reportManagedRunEnded(persisted, status, reasonCode)
   // Release stale input guards even if subsequent notification persistence fails.
   managedBizRetryService.removeRunNotifications(run.runId, decisionNotificationId)
   try {
@@ -575,7 +580,8 @@ async function inspectAndLaunch(
   run: ManagedRunSnapshot,
   delivery: AgentRunDelivery,
   sourceEvent: ManagedRunSourceRef,
-  terminal?: Pick<AgentTurnEndEvent, "outcome" | "endReason" | "contextUsage">
+  terminal?: Pick<AgentTurnEndEvent, "outcome" | "endReason" | "contextUsage">,
+  initialUserMessage?: string
 ): Promise<void> {
   if (isManagedRunStopRequested(run)) return
   const feature = await inspectHarnessManagedFeatureStatus(run.projectId, run.featureId)
@@ -667,6 +673,9 @@ async function inspectAndLaunch(
   }
 
   const nextAction = toManagedRunSessionAction(feature.nextAction)
+  if (initialUserMessage?.trim()) {
+    nextAction.userMessage = initialUserMessage.trim()
+  }
   const workspacePath = decidedRun.workspacePath?.trim()
   if (!workspacePath) {
     await markTerminal(
@@ -748,6 +757,8 @@ async function inspectAndLaunch(
 
 export async function startManagedRun(input: ManagedRunStartRequest): Promise<ManagedRunSummary> {
   return featureLocks.withKey(featureKey(input.projectId, input.featureId), async () => {
+    // The persisted workspace is a configuration gate. A user-confirmed override remains valid.
+    await requireHarnessFeatureWorkspace(input.projectId, input.featureId)
     const workspacePath = typeof input.workspacePath === "string" ? input.workspacePath.trim() : ""
     if (!workspacePath) {
       throw new Error("请选择本次托管使用的会话工作区")
@@ -769,9 +780,20 @@ export async function startManagedRun(input: ManagedRunStartRequest): Promise<Ma
       scope: "global",
       summary: "用户确认开启托管运行"
     })
+    // createRun 之前的校验（工作区缺失、已有活跃运行）走的是 throw，不会走到这里，
+    // 所以这条只统计真正开起来的托管运行。
+    reportManagedRunStarted(created)
+    // 看板「托管运行」标签读的是项目元数据上的单调标记，不是事件，这样丢事件不影响标签。
+    void markHarnessProjectManagedRunStarted(created.projectId)
     publishManagedRunChanged(lastRunSummary(created))
     try {
-      await inspectAndLaunch(created, input.delivery, sourceEvent)
+      await inspectAndLaunch(
+        created,
+        input.delivery,
+        sourceEvent,
+        undefined,
+        input.initialUserMessage
+      )
     } catch (error) {
       const failed = recordManagedRunDecision({
         run: created,
@@ -978,7 +1000,7 @@ export async function resolveManagedBizRetryDecision(
     if (input.choice !== "stop" && isManagedRunStopRequested(run)) {
       return { applied: false, message: "托管运行正在停止，请等待结束。" }
     }
-    const channelLabel = input.channel === "im" ? "招乎" : "APP"
+    const channelLabel = input.channel === "im" ? "招乎" : "桌面"
     if (
       input.choice !== "stop" &&
       harnessNotifications

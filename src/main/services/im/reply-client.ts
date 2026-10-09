@@ -1,4 +1,4 @@
-import type { RemoteImReplyV1 } from "../../../shared/im-gateway-contract"
+import type { RemoteImReplyFormat, RemoteImReplyV1 } from "../../../shared/im-gateway-contract"
 import { trackEvent } from "../event-reporter"
 import { imEventStore, type ImEventStore, type ImReplyOutboxRecord } from "./event-store"
 import {
@@ -6,6 +6,7 @@ import {
   type ImGatewayClientPort,
   type ImReplySubmissionResult
 } from "./gateway-client"
+import { conversationSwitchedToText } from "./withheld-text-notices"
 
 export interface ImReplySendError extends Error {
   /** True when the gateway may already have durably accepted the reply. */
@@ -16,7 +17,7 @@ export interface ImReplySendError extends Error {
   permanent?: boolean
 }
 
-function toReply(record: ImReplyOutboxRecord): RemoteImReplyV1 {
+function toReply(record: ImReplyOutboxRecord, type: RemoteImReplyFormat): RemoteImReplyV1 {
   return {
     schemaVersion: 1,
     deliveryId: record.deliveryId,
@@ -24,9 +25,12 @@ function toReply(record: ImReplyOutboxRecord): RemoteImReplyV1 {
     conversationKey: record.conversationKey,
     idempotencyKey: record.idempotencyKey,
     segment: { index: record.segmentIndex, count: record.segmentCount },
-    message: { type: "text", content: record.content }
+    message: { type, content: record.content }
   }
 }
+
+const warnReplyMode = (message: string, error?: unknown): void =>
+  console.warn(`[IM] Reply delivery: ${message}`, error ?? "")
 
 function errorDetails(error: unknown): {
   reasonCode: string
@@ -57,7 +61,9 @@ export class ImReplyClient {
   constructor(
     private readonly gateway: ImGatewayClientPort = unavailableImGatewayClient,
     private readonly eventStore: ImEventStore = imEventStore,
-    private readonly now: () => number = Date.now
+    private readonly now: () => number = Date.now,
+    private readonly usesTextReplies: (conversationKey: string) => boolean = (conversationKey) =>
+      conversationSwitchedToText(conversationKey, warnReplyMode)
   ) {}
 
   async sendPending(): Promise<ImReplyDrainResult> {
@@ -111,12 +117,49 @@ export class ImReplyClient {
     return result
   }
 
+  /**
+   * Decided per send, not when the reply was queued: the connection a reply
+   * leaves on — and so what the gateway accepts — can differ from the one it
+   * was queued under, and /文字模式 covers everything not yet sent. Checked in
+   * this order so the reply mode is only read when it can make a difference.
+   */
+  private wireFormat(record: ImReplyOutboxRecord): RemoteImReplyFormat {
+    if (record.contentFormat !== "markdown") return "text"
+    if (this.gateway.supportsMarkdownReplies?.() !== true) return "text"
+    return this.usesTextReplies(record.conversationKey) ? "text" : "markdown"
+  }
+
+  /**
+   * A markdown segment refused as a payload goes again at once as text.
+   *
+   * That refusal can only mean the connection agreed to something the gateway
+   * does not accept after all — never that the reply is bad — and without this
+   * it would count as permanent and the answer would never arrive. A refused
+   * payload was not stored, so the text reuses the same idempotency key.
+   */
+  private async submit(
+    record: ImReplyOutboxRecord,
+    format: RemoteImReplyFormat
+  ): Promise<ImReplySubmissionResult> {
+    if (format === "text") return this.gateway.submitReply(toReply(record, "text"))
+    try {
+      return await this.gateway.submitReply(toReply(record, "markdown"))
+    } catch (error) {
+      if (errorDetails(error).reasonCode !== "INVALID_PAYLOAD") throw error
+      console.warn("[IM] Gateway refused a markdown reply; sending it as text.", {
+        deliveryId: record.deliveryId,
+        segmentIndex: record.segmentIndex
+      })
+      return this.gateway.submitReply(toReply(record, "text"))
+    }
+  }
+
   private async sendOne(
     record: ImReplyOutboxRecord
   ): Promise<"sent" | "unknown" | "failed" | "deferred"> {
     await this.eventStore.markOutboxSending(record.outboxId)
     try {
-      const submitted: ImReplySubmissionResult = await this.gateway.submitReply(toReply(record))
+      const submitted: ImReplySubmissionResult = await this.submit(record, this.wireFormat(record))
       if (submitted.state === "platform_unknown") {
         await this.eventStore.markOutboxUnknown(record.outboxId, "PLATFORM_RESULT_UNKNOWN")
         return this.reportDelivery(record, "unknown")

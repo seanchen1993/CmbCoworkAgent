@@ -18,6 +18,10 @@ import {
 import { runHooks, type HookContext, type HookResultCallback } from "./runner"
 import { joinHookText } from "./text"
 import type { HookConfig, HookEvent, HookResult } from "./types"
+import {
+  isSkillVisibleForProjectMode,
+  type ProjectModeSkillScope
+} from "../../shared/skill-visibility"
 
 const MAX_REQUIRED_SKILL_CHARS = 12_000
 
@@ -51,7 +55,10 @@ function trimSkillContent(content: string): string {
   return `${content.slice(0, MAX_REQUIRED_SKILL_CHARS)}\n\n[skill content truncated at ${MAX_REQUIRED_SKILL_CHARS} chars]`
 }
 
-async function resolveSkillGuidance(requiredSkill: string): Promise<ResolvedSkillGuidance | null> {
+async function resolveSkillGuidance(
+  requiredSkill: string,
+  visibilityScope?: ProjectModeSkillScope
+): Promise<ResolvedSkillGuidance | null> {
   const normalized = normalizeSkillId(requiredSkill)
   if (!normalized) return null
 
@@ -74,6 +81,9 @@ async function resolveSkillGuidance(requiredSkill: string): Promise<ResolvedSkil
     }
     if (!resolved) {
       for (const source of getEnabledPluginSkillSourceMetadata()) {
+        if (visibilityScope && !isSkillVisibleForProjectMode(source, visibilityScope)) {
+          continue
+        }
         if (!existsSync(source.sourceDir)) continue
 
         resolved = await resolveSkillGuidanceFromSource({
@@ -153,7 +163,12 @@ export async function enrichHookResultWithRequiredSkill(
 ): Promise<HookResult | null> {
   if (!result?.requiredSkill?.trim()) return result
 
-  const resolved = await resolveSkillGuidance(result.requiredSkill)
+  const visibilityScope: ProjectModeSkillScope = {
+    projectMode: Boolean(hookContext?.featureId || hookContext?.harnessProjectId),
+    boundPluginId: hookContext?.harnessAdapterId,
+    boundPluginName: hookContext?.harnessAdapterName
+  }
+  const resolved = await resolveSkillGuidance(result.requiredSkill, visibilityScope)
   const renderedResolved = resolved
     ? {
         ...resolved,

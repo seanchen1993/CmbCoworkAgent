@@ -19,6 +19,7 @@ import { ImConversationTurnQueue } from "../src/main/services/im/conversation-tu
 import { ImEventStore, ImEventStoreError } from "../src/main/services/im/event-store"
 import { ImIngressSequencer } from "../src/main/services/im/ingress-sequencer"
 import type { ImPersistenceDependencies } from "../src/main/services/im/persistence"
+import { buildImProactiveReplies } from "../src/main/services/im/reply-segmentation"
 import { ensureImServiceSchema } from "../src/main/services/im/schema"
 import {
   MockGatewayError,
@@ -498,6 +499,14 @@ async function testSingleDesktopSchemaMigrationPreservesLegacyRows(): Promise<vo
       )[0]?.values[0],
       ["principal-1", "active", 1]
     )
+    // The rebuild copies only the columns it lists, and the reply mode is not
+    // among them: the legacy row has to come out of it on the default.
+    assert.equal(
+      database.exec(
+        "SELECT reply_mode FROM im_conversations WHERE conversation_key = 'conversation-legacy'"
+      )[0]?.values[0]?.[0],
+      "card"
+    )
     assert(
       !columns("im_feature_grants").includes("conversation_key"),
       "Feature grants must migrate from conversation scope to principal scope"
@@ -510,6 +519,144 @@ async function testSingleDesktopSchemaMigrationPreservesLegacyRows(): Promise<vo
     )
   } finally {
     database.close()
+  }
+}
+
+/**
+ * /文字模式 is a column on the conversation. A database from before it gains
+ * the column with every conversation on the default — cards — and nothing but
+ * the two modes can be written to it.
+ */
+async function testReplyModeMigratesToCardsAndRejectsAnythingElse(): Promise<void> {
+  const SQL = await initSqlJs()
+  const database = new SQL.Database()
+  try {
+    // The current shape, from before the column existed: the ensureColumn path,
+    // not the device_epoch rebuild.
+    database.run(`
+      CREATE TABLE im_conversations (
+        conversation_key TEXT PRIMARY KEY,
+        principal_id TEXT NOT NULL,
+        active_target_id TEXT,
+        state TEXT NOT NULL CHECK(state IN ('active', 'suspended', 'revoked')),
+        last_received_seq INTEGER NOT NULL DEFAULT 0 CHECK(last_received_seq >= 0),
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL,
+        UNIQUE(principal_id, conversation_key)
+      )
+    `)
+    database.run(
+      "INSERT INTO im_conversations VALUES ('conversation-existing', 'principal-1', NULL, 'active', 3, 10, 11)"
+    )
+    ensureImServiceSchema(database)
+    ensureImServiceSchema(database)
+
+    const store = new ImConversationStateStore({
+      getDatabase: () => database,
+      markDirty: () => undefined,
+      flushStrict: async () => undefined,
+      now: () => 20
+    })
+    assert.equal(store.getReplyMode("conversation-existing"), "card")
+    assert.equal(store.getReplyMode("conversation-unknown"), "card", "unknown reads as the default")
+    await store.setReplyMode("conversation-existing", "text")
+    assert.equal(store.getReplyMode("conversation-existing"), "text")
+    assert.deepEqual(
+      database.exec(
+        "SELECT last_received_seq FROM im_conversations WHERE conversation_key = 'conversation-existing'"
+      )[0]?.values[0],
+      [3],
+      "the migration keeps the row it found"
+    )
+    assert.throws(
+      () => database.run("UPDATE im_conversations SET reply_mode = 'rich'"),
+      /CHECK constraint failed/u
+    )
+  } finally {
+    database.close()
+  }
+}
+
+/**
+ * A queued reply remembers whether it is Markdown. A database from before that
+ * gains the column with every queued reply as text — what it was sent as — and
+ * a reply queued again with the same content keeps the form it was first
+ * queued in, rather than conflicting with itself across an upgrade.
+ */
+async function testReplyContentFormatMigratesToTextAndRoundTrips(): Promise<void> {
+  const SQL = await initSqlJs()
+  const database = new SQL.Database()
+  try {
+    database.run(`
+      CREATE TABLE im_reply_outbox (
+        outbox_id TEXT PRIMARY KEY,
+        delivery_id TEXT NOT NULL,
+        event_id TEXT,
+        conversation_key TEXT NOT NULL,
+        idempotency_key TEXT NOT NULL UNIQUE,
+        segment_index INTEGER NOT NULL,
+        segment_count INTEGER NOT NULL,
+        content TEXT NOT NULL,
+        state TEXT NOT NULL,
+        platform_reply_id TEXT,
+        attempt_count INTEGER NOT NULL DEFAULT 0,
+        next_attempt_at INTEGER,
+        reason_code TEXT,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL,
+        UNIQUE(delivery_id, segment_index)
+      )
+    `)
+    database.run(
+      "INSERT INTO im_reply_outbox VALUES ('queued:0', 'queued', NULL, 'conversation-1', 'queued:reply:0', 0, 1, '**早先排队的**', 'pending', NULL, 0, NULL, NULL, 1, 1)"
+    )
+    ensureImServiceSchema(database)
+    ensureImServiceSchema(database)
+    assert.deepEqual(
+      database.exec(
+        "SELECT content, content_format FROM im_reply_outbox WHERE outbox_id = 'queued:0'"
+      )[0]?.values[0],
+      ["**早先排队的**", "text"]
+    )
+    assert.throws(
+      () => database.run("UPDATE im_reply_outbox SET content_format = 'html'"),
+      /CHECK constraint failed/u
+    )
+  } finally {
+    database.close()
+  }
+
+  const context = await createContext()
+  try {
+    const markdown = await context.eventStore.enqueueProactiveReplies(
+      buildImProactiveReplies({
+        deliveryId: "answer",
+        conversationKey: "conversation-1",
+        text: "## 结论",
+        format: "markdown"
+      })
+    )
+    assert.equal(markdown[0].contentFormat, "markdown")
+    const notice = await context.eventStore.enqueueProactiveReplies(
+      buildImProactiveReplies({
+        deliveryId: "notice",
+        conversationKey: "conversation-1",
+        text: "好"
+      })
+    )
+    assert.equal(notice[0].contentFormat, "text")
+    const again = await context.eventStore.enqueueProactiveReplies(
+      buildImProactiveReplies({
+        deliveryId: "answer",
+        conversationKey: "conversation-1",
+        text: "## 结论",
+        format: "markdown"
+      }).map((reply) => ({ ...reply, message: { ...reply.message, type: "text" as const } }))
+    )
+    assert.equal(again[0].contentFormat, "markdown", "the first form stands")
+    assert.equal(context.eventStore.listOutbox().length, 2)
+  } finally {
+    context.database.close()
   }
 }
 
@@ -1001,6 +1148,8 @@ async function main(): Promise<void> {
     testRemoteControlSchemaMigrationPreservesV1Rows,
     testFeatureGrantPrincipalScopeMigration,
     testSingleDesktopSchemaMigrationPreservesLegacyRows,
+    testReplyModeMigratesToCardsAndRejectsAnythingElse,
+    testReplyContentFormatMigratesToTextAndRoundTrips,
     testDurableDedupAndImmutableSnapshot,
     testPermitStateMachineAndAtomicOutbox,
     testFlushFailureIsNeverAcknowledgedAsDurable,

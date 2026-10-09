@@ -18,12 +18,6 @@ interface UserInfoConfig {
 const UserInfoPanel: React.FC = () => {
     const [user, setUser] = useState<UserInfoConfig>({} as UserInfoConfig);
     const [initFlag, setInitFlag] = useState(false)//初始化标志，用于判断是否已经初始化
-    useEffect(() => {
-        window.electron.onNotifyMsg(() => {
-            initUser()
-        })
-        initUser()
-    }, []);
     const initUser = () => {
         window.api.models.getUserInfo().then(user => {
             const userInfo = user as UserInfoConfig || {}
@@ -73,6 +67,14 @@ const UserInfoPanel: React.FC = () => {
             }
         });
     };
+
+    useEffect(() => {
+        const unsubscribe = window.electron.onNotifyMsg(() => {
+            initUser()
+        })
+        initUser()
+        return unsubscribe
+    }, []);
 
     const handleLogin = async () => {
         window.electron.openLoginWindow()

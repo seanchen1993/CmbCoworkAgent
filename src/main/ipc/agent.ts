@@ -468,6 +468,7 @@ const MAX_PENDING_MEMORY_FILE_PATHS = 512
 const MAX_MEMORY_BATCH_NOTICE_CHARACTERS = 512
 const MAX_PERSISTED_GOAL_ATTACHMENT_NAMES = 5
 const MAX_PERSISTED_GOAL_ATTACHMENT_SUMMARY_CHARS = 260
+
 /**
  * 完成门禁对所有物理运行入口一视同仁：invoke / resume / interrupt 跑的是同一张
  * 图、同一个中间件（三者都传 currentRunMessageQueueOwnerToken），所以恢复回合里
@@ -2090,6 +2091,7 @@ async function maybeRunSubagentStopHooksFromStreamPayload(params: {
   pluginWorkspace?: string
   featureId?: string
   harnessProjectId?: string
+  harnessAdapterId?: string
   harnessAdapterName?: string
   harnessAdapterVersion?: string
   harnessNodeName?: string
@@ -2130,6 +2132,7 @@ async function maybeRunSubagentStopHooksFromStreamPayload(params: {
     pluginWorkspace: params.pluginWorkspace,
     featureId: params.featureId,
     harnessProjectId: params.harnessProjectId,
+    harnessAdapterId: params.harnessAdapterId,
     harnessAdapterName: params.harnessAdapterName,
     harnessAdapterVersion: params.harnessAdapterVersion,
     harnessNodeName: params.harnessNodeName,
@@ -2170,6 +2173,10 @@ function maybeRunSubagentStartHooksFromToolCalls(params: {
   workspacePath?: string
   threadId: string
   turnId?: string
+  featureId?: string
+  harnessProjectId?: string
+  harnessAdapterId?: string
+  harnessAdapterName?: string
   hookScope: HookScopeController
   firedStartIds: Set<string>
   onHookResult?: HookResultCallback
@@ -2192,6 +2199,10 @@ function maybeRunSubagentStartHooksFromToolCalls(params: {
       subagentType,
       taskDescription
     })
+    context.featureId = params.featureId
+    context.harnessProjectId = params.harnessProjectId
+    context.harnessAdapterId = params.harnessAdapterId
+    context.harnessAdapterName = params.harnessAdapterName
     runHooksEnriched(
       resolveEnabledHooksForRun(
         params.workspacePath,
@@ -2221,6 +2232,7 @@ async function maybeRunSubagentLifecycleHooksFromStreamPayload(params: {
   pluginWorkspace?: string
   featureId?: string
   harnessProjectId?: string
+  harnessAdapterId?: string
   harnessAdapterName?: string
   harnessAdapterVersion?: string
   harnessNodeName?: string
@@ -2241,6 +2253,10 @@ async function maybeRunSubagentLifecycleHooksFromStreamPayload(params: {
     workspacePath: params.workspacePath,
     threadId: params.threadId,
     turnId: params.turnId,
+    featureId: params.featureId,
+    harnessProjectId: params.harnessProjectId,
+    harnessAdapterId: params.harnessAdapterId,
+    harnessAdapterName: params.harnessAdapterName,
     hookScope: params.hookScope,
     firedStartIds: params.firedStartIds,
     onHookResult: params.onHookResult,
@@ -2255,6 +2271,7 @@ async function maybeRunSubagentLifecycleHooksFromStreamPayload(params: {
     pluginWorkspace: params.pluginWorkspace,
     featureId: params.featureId,
     harnessProjectId: params.harnessProjectId,
+    harnessAdapterId: params.harnessAdapterId,
     harnessAdapterName: params.harnessAdapterName,
     harnessAdapterVersion: params.harnessAdapterVersion,
     harnessNodeName: params.harnessNodeName,
@@ -6948,6 +6965,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
         // proves the result, not that workers were dispatched — a mechanism-
         // constrained coordinator goal false-blocks without this evidence too.
         let pendingBackgroundResultEvidence: string | undefined
+        let harnessAgentContext: HarnessAgentContext = {}
 
         physicalStreamRunSetupGuard.handoff()
         pendingPhysicalStreamRunSetupGuard = undefined
@@ -6974,7 +6992,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           })
           if (authorizationRefusal) throw new Error(authorizationRefusal)
           sessionWorkspacePath = workspacePath ?? undefined
-          const harnessAgentContext = await getHarnessAgentContext(metadata, {
+          harnessAgentContext = await getHarnessAgentContext(metadata, {
             workspacePath,
             featureBinding: harnessFeatureBinding
           })
@@ -9774,6 +9792,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
                 workspacePath: sessionWorkspacePath,
                 sessionId: threadId,
                 turnId: turnState.turnId,
+                ...getHarnessHookContext(harnessAgentContext),
                 stopFailureError: stopFailureErrorCode,
                 toolResult: JSON.stringify({
                   error: errMsg,

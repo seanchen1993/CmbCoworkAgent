@@ -89,7 +89,8 @@ async function testStableDesktopDeliveryIsDurableAndIdempotent(): Promise<void> 
     assert.deepEqual(second, first)
     const outbox = context.events.listOutbox()
     assert.equal(outbox.length, 1)
-    assert.equal(outbox[0].content, `【会话：桌面会话】\n${completion.finalText}`)
+    assert.equal(outbox[0].content, `【会话：桌面会话】\n\n${completion.finalText}`)
+    assert.equal(outbox[0].contentFormat, "markdown")
     assert.equal(outbox[0].eventId, null)
     assert(context.persistence.flushCount > 0, "proactive outbox must cross a strict flush")
   } finally {
@@ -314,7 +315,7 @@ async function testADesktopResultFromAnotherThreadSaysSo(): Promise<void> {
     })
     const outbox = context.events.listOutbox()
     assert.equal(outbox.length, 1)
-    assert.equal(outbox[0].content, `【会话：桌面会话】（非当前绑定会话）\n桌面最终答复`)
+    assert.equal(outbox[0].content, `【会话：桌面会话】（非当前绑定会话）\n\n桌面最终答复`)
   } finally {
     context.database.close()
   }
@@ -345,7 +346,7 @@ async function testADesktopResultFromTheBoundThreadStaysQuiet(): Promise<void> {
     })
     const outbox = context.events.listOutbox()
     assert.equal(outbox.length, 1)
-    assert.equal(outbox[0].content, `【会话：桌面会话】\n桌面最终答复`)
+    assert.equal(outbox[0].content, `【会话：桌面会话】\n\n桌面最终答复`)
   } finally {
     context.database.close()
   }
@@ -385,7 +386,7 @@ async function testASuspendedBindingStillGetsTheNotice(): Promise<void> {
     })
     const outbox = context.events.listOutbox()
     assert.equal(outbox.length, 1)
-    assert.equal(outbox[0].content, `【会话：桌面会话】（非当前绑定会话）\n桌面最终答复`)
+    assert.equal(outbox[0].content, `【会话：桌面会话】（非当前绑定会话）\n\n桌面最终答复`)
   } finally {
     context.database.close()
   }
@@ -424,7 +425,7 @@ async function testASuspendedBindingOnThisVeryThreadStaysQuiet(): Promise<void> 
     })
     const outbox = context.events.listOutbox()
     assert.equal(outbox.length, 1)
-    assert.equal(outbox[0].content, `【会话：桌面会话】\n桌面最终答复`)
+    assert.equal(outbox[0].content, `【会话：桌面会话】\n\n桌面最终答复`)
   } finally {
     context.database.close()
   }

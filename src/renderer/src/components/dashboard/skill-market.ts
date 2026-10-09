@@ -18,12 +18,12 @@ export function normalizeMarketSkillKey(value?: string): string {
   const base = String(value || "")
     .trim()
     .replace(/^\$/, "")
-    .replace(/\.(zip|tar\.gz|tgz)$/i, "")
+    .replace(/\.(zip|tar\.gz|tgz|md)$/i, "")
 
   if (!base) return ""
 
   return base
-    .replace(/-v?\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$/i, "")
+    .replace(/-v?\d+(?:\.\d+){0,3}(?:[-+][0-9A-Za-z.-]+)?$/i, "")
     .trim()
     .toLowerCase()
 }

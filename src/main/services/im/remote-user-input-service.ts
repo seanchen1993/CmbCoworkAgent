@@ -3,6 +3,7 @@ import { existsSync, realpathSync, statSync } from "node:fs"
 import { parseStandardThreadMetadata } from "../../agent/standard-thread-turn"
 import { getThread } from "../../db"
 import { getBuiltinRobotSettings } from "../../storage"
+import type { RemoteImReplyV1 } from "../../../shared/im-gateway-contract"
 import type {
   UserInputAnswer,
   UserInputQuestion,
@@ -42,6 +43,7 @@ import {
 } from "./reply-context"
 import { buildImProactiveReplies } from "./reply-segmentation"
 import type { ImReplyClient } from "./reply-client"
+import type { ImTextResendResult } from "./withheld-text-notices"
 
 const REMOTE_USER_INPUT_MAX_CUSTOM_CHARACTERS = 4_000
 
@@ -67,6 +69,15 @@ interface RemoteUserInputSession {
    * — crediting the desktop for something they did from Zhaohu.
    */
   pendingCardOutcome?: string
+  /**
+   * The first-question notice a delivered card stood in for, exactly as built.
+   *
+   * Set only when the card went out and the text did not; /文字模式 sends it
+   * and clears it. Stored rather than rebuilt because the outbox rejects a
+   * delivery id that comes back with different content. It carries the session's
+   * first code, which is why it is never sent once answering has begun.
+   */
+  withheldNotice?: RemoteImReplyV1[]
 }
 
 export interface ImRemoteUserInputAnswerNotice {
@@ -410,6 +421,66 @@ export class ImRemoteUserInputService {
     return this.finalizeSession(session)
   }
 
+  /**
+   * Sends as text every question in this conversation whose card stood in for
+   * its notice, and returns how many went out. The card stays live; whichever
+   * the reader answers first wins.
+   */
+  async resendPendingAsText(conversationKey: string): Promise<ImTextResendResult> {
+    let resent = 0
+    let failed = 0
+    for (const session of [...this.sessions.values()]) {
+      const notice = session.withheldNotice
+      if (!notice || session.route.conversationKey !== conversationKey) continue
+      // Cleared before the first await, so nothing that runs meanwhile can
+      // send the same notice a second time.
+      session.withheldNotice = undefined
+      // Answering has begun, so the code rotated and the question in front of
+      // the reader is a later one: this notice would hand them a dead code.
+      if (session.questionIndex > 0) continue
+      if (!this.isStillPending(session)) continue
+      try {
+        const outbox = await this.dependencies.events.enqueueProactiveReplies(notice)
+        // The check the original text path makes: a question answered while
+        // this was being queued must not arrive afterwards looking open.
+        if (!this.isStillPending(session)) {
+          await Promise.all(
+            outbox.map((record) =>
+              this.dependencies.events.markOutboxFailed(
+                record.outboxId,
+                "USER_INPUT_ALREADY_RESOLVED"
+              )
+            )
+          )
+          continue
+        }
+        resent += 1
+      } catch (error) {
+        // Put back, so the next /文字模式 开 can try this one again.
+        session.withheldNotice = notice
+        failed += 1
+        this.dependencies.warn("Withheld user-input notice could not be resent.", error)
+      }
+    }
+    if (resent > 0) this.drainReplies()
+    return { resent, failed }
+  }
+
+  private switchedToText(conversationKey: string): boolean {
+    try {
+      return this.dependencies.conversations.getReplyMode(conversationKey) === "text"
+    } catch (error) {
+      // Kept either way; only the immediate handover is skipped.
+      this.dependencies.warn("Reply mode could not be read.", error)
+      return false
+    }
+  }
+
+  private isStillPending(session: RemoteUserInputSession): boolean {
+    const pending = this.dependencies.getPendingForThread(session.request.threadId)
+    return Boolean(pending && pending.requestId === session.request.requestId)
+  }
+
   private async handlePending(request: Readonly<UserInputRequest>): Promise<void> {
     const settings = this.dependencies.getSettings()
     if (!settings.enabled || request.questions.length === 0) return
@@ -443,6 +514,12 @@ export class ImRemoteUserInputService {
       this.dependencies.warn("Remote user-input card could not be published.", error)
     }
 
+    const notice = buildImProactiveReplies({
+      deliveryId: `user-input-request:${request.requestId}:0`,
+      conversationKey: route.conversationKey,
+      text: renderQuestion(session)
+    })
+
     if (carded) {
       // The card carries the question in full, so no notice follows it. The
       // pending check still runs: publishing now happens before it, so a
@@ -452,18 +529,24 @@ export class ImRemoteUserInputService {
       if (!pending || pending.requestId !== request.requestId) {
         this.resolveCardFor(session, "已在桌面处理")
         this.removeSession(request.requestId)
+        return
+      }
+      // Kept for /文字模式: the reader may find the card cut short by the
+      // client and ask for this instead.
+      session.withheldNotice = notice
+      // Or they already have: the switch can land while this card is in
+      // flight, and the resend that came with it could not see a question not
+      // yet recorded. Hand it over now. Through the resend rather than the
+      // text path below, because a failure there ends the session — and here
+      // the card is live and still answers the question.
+      if (this.switchedToText(route.conversationKey)) {
+        await this.resendPendingAsText(route.conversationKey)
       }
       return
     }
 
     try {
-      const outbox = await this.dependencies.events.enqueueProactiveReplies(
-        buildImProactiveReplies({
-          deliveryId: `user-input-request:${request.requestId}:0`,
-          conversationKey: route.conversationKey,
-          text: renderQuestion(session)
-        })
-      )
+      const outbox = await this.dependencies.events.enqueueProactiveReplies(notice)
       const pending = this.dependencies.getPendingForThread(request.threadId)
       if (!pending || pending.requestId !== request.requestId) {
         this.removeSession(request.requestId)
