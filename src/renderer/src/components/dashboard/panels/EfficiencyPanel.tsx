@@ -1,4 +1,7 @@
-import type { EfficiencyPluginFilter } from "../../../../../shared/dashboard-efficiency-compute"
+import type {
+  EfficiencyPluginFilter,
+  EfficiencyStage
+} from "../../../../../shared/dashboard-efficiency-compute"
 /**
  * 研发效能面板
  *
@@ -102,17 +105,20 @@ function Hint({ children }: { children: React.ReactNode }): React.JSX.Element {
 function MetricCard({
   title,
   hint,
+  note,
   children
 }: {
   title: string
   hint?: React.ReactNode
+  note?: React.ReactNode
   children: React.ReactNode
 }): React.JSX.Element {
   return (
     <section className="rounded-lg border border-border bg-card p-4">
-      <div className="flex items-center gap-1.5">
+      <div className="flex flex-wrap items-center gap-1.5">
         <h3 className="text-sm font-semibold text-foreground">{title}</h3>
         {hint ? <Hint>{hint}</Hint> : null}
+        {note ? <span className="text-xs font-normal text-muted-foreground">{note}</span> : null}
       </div>
       <div className="mt-3">{children}</div>
     </section>
@@ -306,6 +312,11 @@ function ComputeCard({
   return (
     <MetricCard
       title={`算力产出效能 · ${scope === "all" ? "全流程" : "Dev 研发阶段"}`}
+      note={
+        scope === "dev"
+          ? "老版本数据可能存在阶段归属偏差，1.5.3 及以后版本支持按阶段统计。"
+          : undefined
+      }
       hint={
         <div className="space-y-1.5">
           <div>
@@ -420,6 +431,67 @@ function ComputeCard({
         </div>
       ) : null}
     </MetricCard>
+  )
+}
+
+const STAGE_LABELS: Record<EfficiencyStage, string> = {
+  biz: "BIZ 业务阶段",
+  dev: "DEV 研发阶段",
+  ops: "OPS 交付阶段",
+  unattributed: "未归因"
+}
+const DISTRIBUTION_COLUMNS = [
+  { key: "totalTokens", label: "Token" },
+  { key: "generatedLines", label: "生成行" },
+  { key: "pushedAdoptedLines", label: "入库行" }
+] as const
+
+function StageDistribution({ data }: { data: DashboardEfficiencyData }): React.JSX.Element | null {
+  if (data.computeScope !== "all" || !data.stageDistribution) return null
+  return (
+    <div className="space-y-2">
+      <div className="flex items-center gap-1.5 text-sm font-medium">
+        阶段分布
+        <Hint>
+          各阶段分别占全流程 Token、生成行和入库行的比例。入库代码按生成时的阶段归属；
+          无法确定阶段的用量与代码计入“未归因”。老版本数据可能存在阶段归属偏差。
+        </Hint>
+      </div>
+      <div className="overflow-x-auto rounded-md border border-border">
+        <table className="w-full text-xs">
+          <thead className="bg-muted/40 text-muted-foreground">
+            <tr>
+              <th className="px-3 py-2 text-left font-medium">阶段</th>
+              {DISTRIBUTION_COLUMNS.map(({ key, label }) => (
+                <th key={key} className="px-3 py-2 text-right font-medium">
+                  {label} / 占比
+                </th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {data.stageDistribution.map((row) => (
+              <tr key={row.stage} className="border-t border-border tabular-nums">
+                <td className="whitespace-nowrap px-3 py-2">{STAGE_LABELS[row.stage]}</td>
+                {DISTRIBUTION_COLUMNS.map(({ key }) => (
+                  <td key={key} className="whitespace-nowrap px-3 py-2 text-right">
+                    {key === "totalTokens"
+                      ? formatCompact(row[key])
+                      : `${formatCount(row[key])} 行`}
+                    <span className="ml-2 text-muted-foreground">
+                      {formatPercent(
+                        data.compute[key] > 0 ? row[key] / data.compute[key] : null,
+                        1
+                      )}
+                    </span>
+                  </td>
+                ))}
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </div>
   )
 }
 
@@ -716,6 +788,7 @@ function ComputeSection({
       ) : (
         <>
           <ComputeCard compute={data.compute} scope={data.computeScope} />
+          <StageDistribution data={data} />
           <div className="text-sm font-medium">插件对比</div>
           <PluginComputeTable rows={data.computeByPlugin} scope={data.computeScope} />
         </>

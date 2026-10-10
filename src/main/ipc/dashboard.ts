@@ -116,8 +116,7 @@ import {
   normalizeNewRatioHistogram,
   type DashboardEfficiencyData
 } from "./dashboard-efficiency"
-import { fetchDevCompute } from "./dashboard-efficiency-compute"
-import { fetchFullCompute } from "./dashboard-efficiency-full"
+import { fetchEfficiencyCompute } from "./dashboard-efficiency-full"
 import type { EfficiencyPluginFilter } from "../../shared/dashboard-efficiency-compute"
 import {
   executeDashboardEsQuery,
@@ -13949,9 +13948,10 @@ async function fetchDashboardEfficiency(
     ),
     // Unsplit totals, used for the unmeasured-share credibility indicator.
     fetchProjectModeCodeAggs(null, range, (perBucketAggs) => perBucketAggs, codeExtraFilters),
-    opts?.scope === "all"
-      ? fetchFullCompute(computeQuery, traceFilters, codeExtraFilters, range, opts)
-      : fetchDevCompute(computeQuery, traceFilters, codeExtraFilters, opts),
+    fetchEfficiencyCompute(computeQuery, traceFilters, codeExtraFilters, range, {
+      ...opts,
+      scope: opts?.scope ?? "dev"
+    }),
     // The panel-wide project count keeps its original active-project scope;
     // compute-only plugin/stage filters must not alter the adoption section.
     esQuery(getEsIndex("trace"), {
