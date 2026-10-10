@@ -25,9 +25,18 @@ export interface EfficiencyDevComputeData {
   cacheUsageReportedCalls: number
 }
 
+export type EfficiencyStage = "biz" | "dev" | "ops" | "unattributed"
+
+export interface EfficiencyStageDistribution {
+  stage: EfficiencyStage
+  totalTokens: number
+  generatedLines: number
+  pushedAdoptedLines: number
+}
+
 export interface EfficiencyDevComputeResult {
   computeScope: "dev" | "all"
-  /** Dev uses call stages when available, otherwise historical Dev turn totals; all keeps its original windows. */
+  /** Both scopes use the original full-flow windows; Dev selects the Dev partition. */
   compute: EfficiencyDevComputeData
   /** Internal coverage detail; historical Dev usage is also included in compute. */
   legacyCompute: EfficiencyDevComputeData
@@ -37,6 +46,8 @@ export interface EfficiencyDevComputeResult {
     compute: EfficiencyDevComputeData
     legacyCompute: EfficiencyDevComputeData
   }[]
+  /** Stage amounts partition the full-flow totals, including missing/unknown attribution. */
+  stageDistribution?: EfficiencyStageDistribution[]
   pluginOptions: { adapterName: string; versions: string[] }[]
   computeCoverage: {
     scopeTraces: number

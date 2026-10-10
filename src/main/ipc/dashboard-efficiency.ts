@@ -1,6 +1,7 @@
 import type {
   EfficiencyDevComputeResult,
-  EfficiencyPluginFilter
+  EfficiencyPluginFilter,
+  EfficiencyStage
 } from "../../shared/dashboard-efficiency-compute"
 /**
  * 研发效能面板 — query shaping and response normalization.
@@ -416,27 +417,26 @@ export function makeMockEfficiency(
         !selection.adapterVersion ||
         entry.version === selection.adapterVersion)
   )
-  const metrics = (weight: number, legacy = false) => {
-    // Keep Dev-only examples distinct from the full-flow mock (which includes Biz/Ops).
-    if (selection.scope === "all" && !legacy) weight *= 1.4
-    const historicalWeight = !legacy && selection.scope !== "all" ? weight : 0
-    const totalTokens = legacy ? weight * 10000 : weight * 223600000 + historicalWeight * 10000
-    const generatedLines = legacy ? weight * 80 : weight * 19020 + historicalWeight * 80
-    const pushedAdoptedLines = legacy ? weight * 60 : weight * 12010 + historicalWeight * 60
+  const metrics = (weight: number, legacy = false, share = selection.scope === "all" ? 1 : 0.7) => {
+    // Dev and stage distribution are partitions of the same full-flow mock.
+    if (!legacy) weight *= 1.4 * share
+    const totalTokens = legacy ? weight * 10000 : weight * 223600000
+    const generatedLines = legacy ? weight * 80 : weight * 19020
+    const pushedAdoptedLines = legacy ? weight * 60 : weight * 12010
     const base = buildComputeEfficiency({
-      totalInputTokens: legacy ? weight * 9000 : weight * 214000000 + historicalWeight * 9000,
-      totalOutputTokens: legacy ? weight * 1000 : weight * 9600000 + historicalWeight * 1000,
+      totalInputTokens: legacy ? weight * 9000 : weight * 214000000,
+      totalOutputTokens: legacy ? weight * 1000 : weight * 9600000,
       totalTokens,
       cacheReadTokens: legacy ? 0 : weight * 178000000,
       pushedAdoptedLines,
-      traceCount: legacy ? weight * 30 : weight * 1840 + historicalWeight * 30,
-      codeProducingTraceCount: legacy ? weight * 10 : weight * 712 + historicalWeight * 10
+      traceCount: legacy ? weight * 30 : weight * 1840,
+      codeProducingTraceCount: legacy ? weight * 10 : weight * 712
     })
     return {
       ...base,
       generatedLines,
       tokensPerGeneratedLine: generatedLines ? totalTokens / generatedLines : null,
-      modelCalls: (weight + historicalWeight) * 3000,
+      modelCalls: weight * 3000,
       tokenUsageIncomplete: false,
       tokenUsageReportedCalls: legacy ? 0 : weight * 3000,
       cacheUsageReportedCalls: legacy ? 0 : weight * 3000
@@ -477,6 +477,22 @@ export function makeMockEfficiency(
     compute,
     legacyCompute,
     computeByPlugin,
+    stageDistribution: (
+      [
+        ["biz", 0.15],
+        ["dev", 0.7],
+        ["ops", 0.1],
+        ["unattributed", 0.05]
+      ] as [EfficiencyStage, number][]
+    ).map(([stage, share]) => {
+      const data = metrics(weight, false, share)
+      return {
+        stage,
+        totalTokens: data.totalTokens,
+        generatedLines: data.generatedLines,
+        pushedAdoptedLines: data.pushedAdoptedLines
+      }
+    }),
     pluginOptions: names.map((adapterName) => ({
       adapterName,
       versions: entries
