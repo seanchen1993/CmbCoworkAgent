@@ -454,7 +454,8 @@ function StageDistribution({ data }: { data: DashboardEfficiencyData }): React.J
         阶段分布
         <Hint>
           各阶段分别占全流程 Token、生成行和入库行的比例。入库代码按生成时的阶段归属；
-          无法确定阶段的用量与代码计入“未归因”。老版本数据可能存在阶段归属偏差。
+          无法确定阶段的用量与代码计入“未归因”。老版本数据可能存在阶段归属偏差。 单行入库代码Token数
+          = 该阶段 Token 总量 ÷ 该阶段入库行数。
         </Hint>
       </div>
       <div className="overflow-x-auto rounded-md border border-border">
@@ -462,6 +463,9 @@ function StageDistribution({ data }: { data: DashboardEfficiencyData }): React.J
           <thead className="bg-muted/40 text-muted-foreground">
             <tr>
               <th className="px-3 py-2 text-left font-medium">阶段</th>
+              <th className="whitespace-nowrap px-3 py-2 text-right font-medium">
+                单行入库代码Token数
+              </th>
               {DISTRIBUTION_COLUMNS.map(({ key, label }) => (
                 <th key={key} className="px-3 py-2 text-right font-medium">
                   {label} / 占比
@@ -473,6 +477,11 @@ function StageDistribution({ data }: { data: DashboardEfficiencyData }): React.J
             {data.stageDistribution.map((row) => (
               <tr key={row.stage} className="border-t border-border tabular-nums">
                 <td className="whitespace-nowrap px-3 py-2">{STAGE_LABELS[row.stage]}</td>
+                <td className="whitespace-nowrap px-3 py-2 text-right">
+                  {formatTokensPerLine(
+                    row.pushedAdoptedLines > 0 ? row.totalTokens / row.pushedAdoptedLines : null
+                  )}
+                </td>
                 {DISTRIBUTION_COLUMNS.map(({ key }) => (
                   <td key={key} className="whitespace-nowrap px-3 py-2 text-right">
                     {key === "totalTokens"
