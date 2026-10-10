@@ -335,6 +335,10 @@ curl -sN -X POST "http://192.168.43.16:8765/v1/threads/<thread_id>/messages" \
 
 **响应**:`Content-Type: text/event-stream`。格式详见 [§9 SSE 流格式](#9-sse-流格式)。
 
+HTTP 200 表示 SSE 连接已建立，不表示桌面已经提交消息或模型已经生成回复。默认流会立即发送 `: open` 注释，等待期间每 15 秒发送 `: ping`；SSE 客户端通常不将这些注释显示为消息。正常回复以 `data: [DONE]` 结束，运行错误通过 SSE 正文返回。
+
+如果 Postman 显示 200 但没有回复，请先区分发送消息的 POST 与读取历史的 GET。使用 `?format=raw` 查看内部事件，同时在另一条请求中读取 `GET /v1/threads/:id` 的 `runtime`：`not_started` 表示尚未启动，需检查桌面是否就绪、会话模型是否存在且可用、工作区是否已选择以及界面的错误提示；`awaiting_approval` 表示需处理审批；`generating` 表示任务仍在运行。正常桌面路径的 `modelId` 不生效，模型来自创建会话时的 `model`。可以用 `curl -N` 对照查看 SSE，避免客户端显示缓冲造成误判。
+
 ---
 
 ### 5.6 POST /v1/threads/:id/cancel — 取消
@@ -474,7 +478,7 @@ curl -X POST \
 
 ### 9.1 默认:OpenAI 兼容(`format=openai`)
 
-每个事件是一行 `data: <json>`,`json` 是 OpenAI `chat.completion.chunk` 结构。以 `data: [DONE]` 结束。期间可能夹带 `: ping` 心跳注释行(标准 SSE,客户端应忽略 `:` 开头的行)。
+每个事件是一行 `data: <json>`,`json` 是 OpenAI `chat.completion.chunk` 结构。以 `data: [DONE]` 结束。连接建立时发送 `: open`，期间可能夹带 `: ping` 心跳注释行(标准 SSE,客户端应忽略 `:` 开头的行)。
 
 **chunk 通用结构**
 ```json
@@ -557,7 +561,7 @@ curl -s $BASE/v1/threads/$TID/messages
 2. **一次一回合**:同一会话同一时刻只跑一个回合。会话有运行锁,重复发送会按现有并发逻辑处理。
 3. **界面联动**:发消息时 app 会自动切到该会话并实时渲染(与手动输入完全一致);模型/YOLO 徽标也会反映该会话的设置。
 4. **重启后**:消息与会话状态都持久化(重启不丢);但重启后 app 不会自动打开这个会话,需在列表里点开——数据仍在。
-5. **超时**:单个 SSE 回合最长约 15 分钟(含等待审批的暂停);超时会自动关闭连接。
+5. **超时**:单个 SSE 回合最长约 15 分钟(含等待审批的暂停);超时会先返回 SSE 错误，再关闭连接并取消回合。客户端主动断开连接也会取消该回合。
 6. **客户端断开**:SSE 连接断开会自动取消该回合的运行。
 7. **workflow 结果异步**:见 [§6](#6-执行模式),最终结果需轮询 `GET .../messages`。
 

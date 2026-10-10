@@ -6,6 +6,8 @@ const bridge = vi.hoisted(() => {
   return {
     consumed,
     apiCreateThread: vi.fn(),
+    apiCancelThread: vi.fn(),
+    runApiAgentTurn: vi.fn<() => Promise<void>>(),
     apiGetThread: vi.fn((threadId: string) =>
       threadId === "thread-a" || threadId === "thread-b"
         ? { thread_id: threadId, status: "idle" }
@@ -47,12 +49,13 @@ vi.mock("./agent-bridge", () => ({
   apiGetThread: bridge.apiGetThread,
   apiGetThreadRuntime: bridge.apiGetThreadRuntime,
   apiGetThreadMessages: vi.fn(),
-  apiCancelThread: vi.fn(),
+  apiCancelThread: bridge.apiCancelThread,
   apiDecideThreadApproval: bridge.apiDecideThreadApproval,
-  runApiAgentTurn: vi.fn()
+  runApiAgentTurn: bridge.runApiAgentTurn
 }))
 
 import { createApiGatewayRequestHandler } from "./http-gateway"
+import { forwardAgentStreamToSinks, hasAgentStreamSink } from "../agent/agent-stream-sinks"
 import { WorkspaceValidationError } from "../services/workspace-validation"
 import type { ApiGatewayConfig } from "./config"
 
@@ -61,6 +64,152 @@ const config = (token = ""): ApiGatewayConfig => ({
   host: "127.0.0.1",
   port: 0,
   token
+})
+
+describe("HTTP message SSE lifecycle", () => {
+  let server: Server | null = null
+  let origin = ""
+  const timers = new Set<ReturnType<typeof setTimeout>>()
+  const clients = new Set<AbortController>()
+
+  beforeEach(async () => {
+    bridge.apiCancelThread.mockReset()
+    bridge.runApiAgentTurn.mockReset().mockResolvedValue(undefined)
+    const listening = await listen()
+    server = listening.server
+    origin = listening.origin
+  })
+
+  afterEach(async () => {
+    for (const timer of timers) clearTimeout(timer)
+    timers.clear()
+    for (const client of clients) client.abort()
+    clients.clear()
+    server?.closeAllConnections()
+    if (server) await close(server)
+    server = null
+  })
+
+  function later(callback: () => void): void {
+    timers.add(setTimeout(callback, 30))
+  }
+
+  function emit(payload: unknown): void {
+    forwardAgentStreamToSinks("thread-a", "agent:stream:thread-a", payload)
+  }
+
+  function send(format: "openai" | "raw"): Promise<Response> {
+    const client = new AbortController()
+    clients.add(client)
+    const deadline = setTimeout(() => client.abort(), 2000)
+    timers.add(deadline)
+    return fetch(`${origin}/v1/threads/thread-a/messages?format=${format}`, {
+      method: "POST",
+      headers: { "content-type": "application/json", accept: "text/event-stream" },
+      body: JSON.stringify({ message: "hello" }),
+      signal: client.signal
+    })
+  }
+
+  it.each([
+    { format: "openai" as const, lateRequestClose: false },
+    { format: "raw" as const, lateRequestClose: false },
+    { format: "openai" as const, lateRequestClose: true },
+    { format: "raw" as const, lateRequestClose: true }
+  ])(
+    "keeps $format open after POST completion (late request close: $lateRequestClose)",
+    async ({ format, lateRequestClose }) => {
+      if (lateRequestClose) {
+        // Request completion may be observed after the route's await resumes.
+        // It must not be confused with disconnecting the still-open response.
+        server!.on("request", (request) => {
+          request.on("end", () => queueMicrotask(() => request.emit("close")))
+        })
+      }
+      bridge.runApiAgentTurn.mockImplementationOnce(async () => {
+        later(() => {
+          emit({
+            type: "stream",
+            mode: "messages",
+            data: [
+              {
+                id: ["langchain_core", "messages", "AIMessageChunk"],
+                kwargs: { content: "delayed answer" }
+              },
+              { ls_model_name: "test-model" }
+            ]
+          })
+          emit({ type: "done" })
+        })
+      })
+
+      const response = await send(format)
+      const body = await response.text()
+      expect(response.status).toBe(200)
+      expect(response.headers.get("content-type")).toContain("text/event-stream")
+      expect(body).toContain("delayed answer")
+      expect(body).toContain(format === "openai" ? "data: [DONE]" : '"type":"done"')
+      expect(bridge.apiCancelThread).not.toHaveBeenCalled()
+      expect(hasAgentStreamSink("thread-a")).toBe(false)
+    }
+  )
+
+  it.each(["openai", "raw"] as const)(
+    "streams delayed startup failures in %s format",
+    async (format) => {
+      bridge.runApiAgentTurn.mockImplementationOnce(
+        () => new Promise((_resolve, reject) => later(() => reject(new Error("model unavailable"))))
+      )
+
+      const response = await send(format)
+      const body = await response.text()
+      expect(body).toContain("model unavailable")
+      expect(body).toContain(format === "openai" ? "data: [DONE]" : '"type":"error"')
+      expect(bridge.apiCancelThread).not.toHaveBeenCalled()
+      expect(hasAgentStreamSink("thread-a")).toBe(false)
+    }
+  )
+
+  it.each(["openai", "raw"] as const)(
+    "reports the %s stream deadline and cancels a stalled turn",
+    async (format) => {
+      const realSetTimeout = globalThis.setTimeout
+      const deadline = vi
+        .spyOn(globalThis, "setTimeout")
+        .mockImplementation((callback, delay, ...args) =>
+          realSetTimeout(callback, delay === 15 * 60 * 1000 ? 30 : delay, ...args)
+        )
+      try {
+        const response = await send(format)
+        const body = await response.text()
+        expect(body).toContain("Agent turn timed out after 15 minutes")
+        expect(body).toContain(format === "openai" ? "data: [DONE]" : '"type":"error"')
+        expect(bridge.apiCancelThread).toHaveBeenCalledExactlyOnceWith("thread-a")
+        expect(hasAgentStreamSink("thread-a")).toBe(false)
+      } finally {
+        deadline.mockRestore()
+      }
+    }
+  )
+
+  it.each(["openai", "raw"] as const)(
+    "opens %s immediately and cancels exactly once when the client disconnects",
+    async (format) => {
+      const response = await send(format)
+      const reader = response.body!.getReader()
+      const first = await reader.read()
+      expect(first.done).toBe(false)
+      expect(hasAgentStreamSink("thread-a")).toBe(true)
+      expect(bridge.apiCancelThread).not.toHaveBeenCalled()
+
+      await reader.cancel()
+      await vi.waitFor(() => {
+        expect(bridge.apiCancelThread).toHaveBeenCalledExactlyOnceWith("thread-a")
+        expect(hasAgentStreamSink("thread-a")).toBe(false)
+      })
+      expect(() => emit({ type: "done" })).not.toThrow()
+    }
+  )
 })
 
 async function listen(token = ""): Promise<{ server: Server; origin: string }> {
@@ -138,10 +287,7 @@ describe("HTTP approval route", () => {
 
   it("accepts exactly one of two concurrent decisions", async () => {
     await start()
-    const responses = await Promise.all([
-      decide("thread-a", "once"),
-      decide("thread-a", "once")
-    ])
+    const responses = await Promise.all([decide("thread-a", "once"), decide("thread-a", "once")])
     expect(responses.map((response) => response.status).sort()).toEqual([200, 404])
     const duplicate = responses.find((response) => response.status === 404)
     expect(duplicate).toBeDefined()

@@ -141,7 +141,6 @@ function readJsonBody(req: IncomingMessage): Promise<unknown> {
  *  - "raw": the agent's internal payloads verbatim (debugging / full fidelity).
  */
 function handleSendMessage(
-  req: IncomingMessage,
   res: ServerResponse,
   threadId: string,
   message: string,
@@ -157,8 +156,11 @@ function handleSendMessage(
 
   const encoder =
     format === "openai" ? createOpenAiStreamEncoder(threadId, Math.floor(Date.now() / 1000)) : null
-  if (!encoder) {
-    // Prime the raw stream so proxies/clients open it immediately.
+  // Prime both formats before waiting for renderer submission or model output.
+  // SSE comments open the connection without inventing a model response.
+  if (encoder) {
+    res.write(": open\n\n")
+  } else {
     res.write(`event: open\ndata: ${JSON.stringify({ threadId })}\n\n`)
   }
 
@@ -169,7 +171,14 @@ function handleSendMessage(
   // Safety cap: the turn runs asynchronously (renderer-driven), so the response
   // stays open until a terminal payload arrives. Bound it so a stuck run can't
   // hold the connection forever.
-  const maxTimer = setTimeout(() => end(), 15 * 60 * 1000)
+  const maxTimer = setTimeout(
+    () => {
+      if (ended) return
+      fail("Agent turn timed out after 15 minutes; check the desktop submission and approval state")
+      apiCancelThread(threadId)
+    },
+    15 * 60 * 1000
+  )
 
   const end = (): void => {
     if (ended) return
@@ -178,6 +187,16 @@ function handleSendMessage(
     clearTimeout(maxTimer)
     unsubscribe()
     res.end()
+  }
+
+  const fail = (message: string): void => {
+    if (ended) return
+    res.write(
+      encoder
+        ? encoder.error(message)
+        : `data: ${JSON.stringify({ type: "error", error: message })}\n\n`
+    )
+    end()
   }
 
   const unsubscribe = registerAgentStreamSink(threadId, (_channel, payload) => {
@@ -202,8 +221,9 @@ function handleSendMessage(
     }
   })
 
-  // Client hung up → stop streaming and abort the run.
-  req.on("close", () => {
+  // IncomingMessage.close reports POST-body completion, not response disconnects.
+  // Observe the response so a real client hangup releases the sink and run.
+  res.on("close", () => {
     if (ended) return
     apiCancelThread(threadId)
     end()
@@ -213,14 +233,15 @@ function handleSendMessage(
   // its terminal payload — NOT when this promise resolves (renderer-driven turns
   // resolve immediately after handing off). Only a failure to start ends here.
   runApiAgentTurn(threadId, message, modelId).catch((err) => {
-    if (ended) return
-    const msg = String(err instanceof Error ? err.message : err)
-    res.write(encoder ? encoder.error(msg) : `data: ${JSON.stringify({ type: "error", error: msg })}\n\n`)
-    end()
+    fail(String(err instanceof Error ? err.message : err))
   })
 }
 
-async function route(req: IncomingMessage, res: ServerResponse, config: ApiGatewayConfig): Promise<void> {
+async function route(
+  req: IncomingMessage,
+  res: ServerResponse,
+  config: ApiGatewayConfig
+): Promise<void> {
   const method = req.method ?? "GET"
   const url = new URL(req.url ?? "/", "http://localhost")
   const path = url.pathname
@@ -380,7 +401,7 @@ async function route(req: IncomingMessage, res: ServerResponse, config: ApiGatew
       const modelId = typeof body?.modelId === "string" ? body.modelId : undefined
       // Clean OpenAI-style stream by default; ?format=raw for the internal stream.
       const format = url.searchParams.get("format") === "raw" ? "raw" : "openai"
-      handleSendMessage(req, res, threadId, message, modelId, format)
+      handleSendMessage(res, threadId, message, modelId, format)
       return
     }
 
