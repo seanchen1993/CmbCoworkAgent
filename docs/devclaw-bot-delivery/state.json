@@ -410,7 +410,7 @@
     },
     {
       "id": "B02",
-      "status": "implementing",
+      "status": "review_pending",
       "spec": "tasks/B02.md",
       "scope": "Task/text clarification/events only: createTask/getTask/createTaskMessage/getEvents; noRun or execution",
       "depends_on": ["B01"],
@@ -458,7 +458,8 @@
       "assertion_probe": {"session_id":43237,"final_chunk":"696f22","exit_code":1,"category":"B02_ASSERTION","line":40,"location":"denied helper; old six/Task creation/read succeeded before this, individual denial cause not yet known","cleanup":"exact removed; original same healthy"},
       "cursor_failure": {"session_id":83616,"final_chunk":"311b93","exit_code":1,"case":15,"operation":"getEvents","expected":"410 CURSOR_EXPIRED","actual":"503 DEPENDENCY_UNAVAILABLE","facts_unchanged":true,"cleanup":"exact removed; original same healthy","cause":"primitive head in ternary unboxed nullable stored Long cursor; fixed Long.valueOf(head), focused transaction unit regression added"},
       "cursor_fix_build": {"code_commit":"30455849","first_session":87091,"first_final_chunk":"a6288c","first_exit_code":1,"first_cause":"37JUnit passed but fixed TaskUnitTest audit expected old3; corrected actual4, no assertions removed","session_id":97502,"final_chunk":"98c742","exit_code":0,"main":34,"test":14,"junit":37,"parity":1884,"mismatches":0,"jar_sha256":"555d5f907a0ad8136f2a6c8685d86f2098a295407dc5a4a2b7c562228be39f77"},
-      "live_commands": [{"owner":"root","session_id":21240,"start_chunk":"fa5432","command":"node deploy/dev/service/task-check.mjs","worktree":"/Users/heyirui/.codex/worktrees/devclaw-bot-local/cmbCowork","status":"running_unknown","source":"30455849 minimal logger/cursor fixes and V2 regression adaptations","jar_sha256":"555d5f907a0ad8136f2a6c8685d86f2098a295407dc5a4a2b7c562228be39f77"}],
+      "direct_task_verification": {"session_id":21240,"final_chunk":"fec7a9","exit_code":0,"source":"30455849","jar_sha256":"555d5f907a0ad8136f2a6c8685d86f2098a295407dc5a4a2b7c562228be39f77","projects":["devclaw-bot-test-20eb2457c572ddea","devclaw-bot-test-7358602f94fcbc1b"],"sequential_databases":2,"per_db":{"denials":30,"byte_replays":4,"independent_jvm_races":2,"rollbacks":4,"lost_response_wire_bytes":0},"V1_upgrade":"actual old Bot/Group/pin and nine facts preserved, upgrade1/noop0","http_starts":24,"http_secret_sends":24,"http_active":0,"cleanup":"both exact removed; original three same healthy; no original secret read","final_node":"c8f11340/40","not_yet_accepted":"impacted old DB catalog/entry regression and integrated new compile/check pending"},
+      "live_commands": [{"owner":"root","session_id":25437,"start_chunk":"c193d5","command":"node deploy/dev/service/database-check.mjs","worktree":"/Users/heyirui/.codex/worktrees/devclaw-bot-local/cmbCowork","status":"running_unknown","source":"30455849 impacted legacy catalog/migration regression only","jar_sha256":"555d5f907a0ad8136f2a6c8685d86f2098a295407dc5a4a2b7c562228be39f77"}],
       "wait_reason": null
     }
   ],

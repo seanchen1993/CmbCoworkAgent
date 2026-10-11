@@ -4,6 +4,7 @@
 
 ## 最新手动继续（优先于下方已完成里程碑/历史停点）
 
+- 2026-10-11 06:47UTC Task真库全通过：21240/fec7a9 exit0/closed，两个顺序库各30拒绝/4重放/2JVM race/4rollback/commit后wire0重开原字节/持久cursor/old六接口；真实V1升级旧九facts/pin保留，24starts/24sends/active0、两exactremoved/原dev健康。代码30455849/产物555d5f，Node40/37JUnit/1884parity均过。当前25437只受影响旧DB catalog/migration回归，之后normalmerge/freshmaincompile/Task复验才accept；root串行，定时PAUSED，无新路线。
 - 2026-10-11返工当前：logger强引用修复已真实production启动，Node40/F03全24过。83616/311b93第15拒绝（跨空间getEvents游标）实际503而预期410、13表facts不变/精确cleanup；TaskApplication三元表达式对nullable Long拆箱是原因，30455849窄修并加事务路径未知游标410/rollback1/commit0 unit。97502/98c742真Java8新编34/14、37JUnit/1884零/原依赖V1保留、jar555d5f…；首87091是计数审计未更新而exit1，历史保留。21240正在两库实测，闭合前不接受；旧验收入口仅迁移2/14表适配，不改旧功能。root串行/自动PAUSED。
 - 2026-10-11启动定位：V1/V2/noop均成功，真实失败为Tomcat非JSON日志进入closed launcher输出，不是DB迁移；四次诊断都精确回收、原dev健康。JUL父logger原只临时引用，现最小强引用修复（推断GC丢失OFF级别）；临时HTTP-helper/test-main诊断全部撤回，Task入口production。97618真实Java8新编结果待，之后完整两库/升级/事务/旧six回归才接受，仍root串行/自动PAUSED。
 - 2026-10-11手动继续：96552已于fff2cd实际exit1/closed，数据库ready之后、HTTP之前失败IO；测试资源精确回收、当时原dev健康，不再当running或重放未知副作用。实际worker b08659c2只两个README保留改动、相关进程e099f7空。原MySQL后于10-09再次OOM/137（91896e），同image/owner/network/volume；guest可用2451MiB后b3692a仅start同一容器，90034b healthy/127:32969，不改数据/凭据/内存/VM。root串行补安全阶段诊断，继续最小Task真库验收；自动PAUSED，不派串行代理或扩路线。
