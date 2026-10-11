@@ -206,7 +206,10 @@
       "wait_reason": null,
       "code_commit": "7a82c9bf4034c24207743752cb2121c050934939",
       "report_commit": "fad7a736715081e3cfd7e7c3192ef2bafacf7ab0",
-      "live_commands": [],
+      "integration_commit": "f65446633517c1ccafe2f4de9a314976df069158",
+      "integration_build": {"session_id":29030,"final_chunk":"512ba3","exit_code":0,"compiled_main":34,"compiled_test":14,"junit":37,"parity":1884,"mismatches":0,"java":"1.8.0_482","class_major":52,"runtime_libraries":34,"jar_sha256":"81922056e5a04e1ded00eac335e9c3dabc19c69eb74763081c0703f4769f2c76","source_identity":"e92a11 product byte-identical to e54d3fb0; frozenJSON/V1/dependencies unchanged"},
+      "integration_offline": {"Node":"dc3f76 exit0 40/40","F03":"75695 final exit0,24/24 drift/types passed"},
+      "live_commands": [{"owner":"root","session_id":52935,"start_chunk":"19ea46","command":"node deploy/dev/service/task-check.mjs","worktree":"/Users/heyirui/.codex/worktrees/devclaw-bot-integration/cmbCowork","status":"running_unknown","source":"f6544663 reviewed e54d3fb0 normalmerge","jar_sha256":"81922056e5a04e1ded00eac335e9c3dabc19c69eb74763081c0703f4769f2c76"}],
       "accepted_on": "2026-10-05",
       "merge_status": "merged",
       "integration_commit": "1ba44e2fd6984f80b8d1aa7be6b3ed9ec51b72d8"
