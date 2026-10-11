@@ -4,6 +4,7 @@
 
 ## 最新手动继续（优先于下方已完成里程碑/历史停点）
 
+- 集成52935/dbbb20首库0724107a全30拒绝/4重放/13启动拒绝/双JVM CAS与同命令唯一/4rollback/提交后wire0断开重开/持久cursor/oldSix通过且精确removed。次库88ae4b09真实V1旧数据→V2 migration1/noop0、旧九facts不变/oldpin可读，23574:52316运行中；尚无完整exit，仍不接受。产物81922056/自动PAUSED。
 - 集成正常merge f6544663产品字节同e54d3fb0（e92a11），29030/512ba3真正新编34main/14test，37JUnit/1884parity零/class52/原34依赖与V1不变，jar81922056e5a04e1ded00eac335e9c3dabc19c69eb74763081c0703f4769f2c76。Node dc3f76 40/40、F03 75695/343e0e全24/drift/types exit0。唯一活跃52935/19ea46集成Task+首库13startup验证，结果待；之后旧DB和受影响lifecycle，不跑全旧矩阵、不重编活跃产物。仍review_pending/自动PAUSED。
 - 2026-10-11候选冻结e54d3fb0 clean；21240/fec7a9完整两DB Task验收证据已取回。71051最后输出在上下文边界截断，现unknownprocess且实际80080b无相关进程、c4d975仅原3healthy/3volume/dev-runtime，最终exit不可恢复，不能记通过。两行history/原13startup复用增量3e1497实际审查、冻结文件不变/diffcheck0。下一正常merge候选并在集成树真新编，再Task+13startup与旧DB复验；root串行/no subagent/自动PAUSED，不进入下一阶段。
 - 2026-10-11 06:47UTC Task真库全通过：21240/fec7a9 exit0/closed，两个顺序库各30拒绝/4重放/2JVM race/4rollback/commit后wire0重开原字节/持久cursor/old六接口；真实V1升级旧九facts/pin保留，24starts/24sends/active0、两exactremoved/原dev健康。代码30455849/产物555d5f，Node40/37JUnit/1884parity均过。当前25437只受影响旧DB catalog/migration回归，之后normalmerge/freshmaincompile/Task复验才accept；root串行，定时PAUSED，无新路线。

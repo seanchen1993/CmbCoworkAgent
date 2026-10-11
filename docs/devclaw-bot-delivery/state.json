@@ -209,6 +209,7 @@
       "integration_commit": "f65446633517c1ccafe2f4de9a314976df069158",
       "integration_build": {"session_id":29030,"final_chunk":"512ba3","exit_code":0,"compiled_main":34,"compiled_test":14,"junit":37,"parity":1884,"mismatches":0,"java":"1.8.0_482","class_major":52,"runtime_libraries":34,"jar_sha256":"81922056e5a04e1ded00eac335e9c3dabc19c69eb74763081c0703f4769f2c76","source_identity":"e92a11 product byte-identical to e54d3fb0; frozenJSON/V1/dependencies unchanged"},
       "integration_offline": {"Node":"dc3f76 exit0 40/40","F03":"75695 final exit0,24/24 drift/types passed"},
+      "integration_task_progress": {"session_id":52935,"chunk":"dbbb20","status":"partial_not_final","first_db":"0724107a16f45200 full30denials/4replays/13startup/2JVMraces/4rollback/wire0/reopen/oldSix passed; exactremoved","second_db":"88ae4b09d8cfb399 actualV1 seeded/upgraded1/noop0,oldninefacts unchanged,pin readable; listener23574:52316, business still running","jar_sha256":"81922056e5a04e1ded00eac335e9c3dabc19c69eb74763081c0703f4769f2c76"},
       "live_commands": [{"owner":"root","session_id":52935,"start_chunk":"19ea46","command":"node deploy/dev/service/task-check.mjs","worktree":"/Users/heyirui/.codex/worktrees/devclaw-bot-integration/cmbCowork","status":"running_unknown","source":"f6544663 reviewed e54d3fb0 normalmerge","jar_sha256":"81922056e5a04e1ded00eac335e9c3dabc19c69eb74763081c0703f4769f2c76"}],
       "accepted_on": "2026-10-05",
       "merge_status": "merged",
