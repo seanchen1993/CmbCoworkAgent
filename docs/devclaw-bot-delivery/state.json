@@ -448,7 +448,7 @@
       "direct_build": {"session_id":89143,"exit_code":0,"final_chunk":"6d1e43","compiled_main":34,"compiled_test":14,"java":"1.8.0_482","junit_tests":36,"parity_fixtures":1884,"mismatches":0,"jar_sha256":"aaa37ae326ba9533a8ec26ea991c401d4617afe8372c163b1f7b121f2a509fe6","v2_sha256":"db5822c729f342ca4d78b407d5ba81563ea138340019924ed0d18263679b56b2"},
       "first_task_check": {"session_id":96552,"final_chunk":"fff2cd","exit_code":1,"category":"IO","last_stage":"database ready, before HTTP listener","exact_test_cleanup":true,"original_dev_same_healthy":true,"not_acceptance":true},
       "recovery_20261011": {"worker_head":"b08659c20bbf091655112f8bd9720bf1626d7a78","dirty":"two narrow README additions preserved","relevant_processes":"actual e099f7 empty","mysql_oom":"91896e: same original ID OOMKilled/137 finished 2026-10-09T09:58:27Z","guest_available_mib":2451,"mysql_exact_start":"b3692a exit0","mysql_health":"90034b sameID running/healthy/OOMfalse/127port32969; no data/account/config/secret change","next":"safe fixed stage diagnosis of first real DB failure, then isolated two-DB Task verification","automatic":"PAUSED"},
-      "live_commands": [],
+      "live_commands": [{"owner":"root","session_id":99302,"start_chunk":"5b6cb3","command":"node deploy/dev/service/task-check.mjs","worktree":"/Users/heyirui/.codex/worktrees/devclaw-bot-local/cmbCowork","status":"running_unknown","jar":"aaa37ae326ba9533a8ec26ea991c401d4617afe8372c163b1f7b121f2a509fe6","source":"b08659c2 plus safe JS diagnosis; Node29312/7e404f40 passed"}],
       "wait_reason": null
     }
   ],
