@@ -1,5 +1,11 @@
 # DevClaw Bot 当前交接点
 
+**2026-10-11 最新出口：R01-A5 accepted，代码 96368bba。** 本地独立节点凭据摘要/Session与每调用撤销、轮换、到期检查；认证observe/claim复用A3/A4当前应用授权。App专用space/task/stage/node Thread同SQLite事务，无FK；不走个人最近目录/默认模型，严格检查owner/group/workspace与incarnation，不借个人Thread或静默重建替代。
+
+55JUnit/1884parity零、Node44/F03全24、伙伴+SQLite40、原Thread13/main tsc通过；两真MySQL5.7（空库/实际V3升级）各36拒绝及认证路径/并发/回滚/失回执/重开通过。新strict零错误，但旧未改sql.js两条声明缺失单独记录，不夸大全仓strict。所有句柄closed，新临时目录/DB项目精确回收，原3sameID healthy/3卷/devnetwork保留、旧local e54d3fb0 clean、定时实际PAUSED、只有root。见tasks/R01-A5.md、attempts/R01-A5-root.md、reviews/R01-A5-acceptance.md。
+
+下一有限接续：只读需求的现有AgentRunService薄适配，启动前当前授权/完整输入、受限工具/共享上下文、本地互斥、租约失效停止与结果结算；先假模型验证，不重写原Runtime。当前本地组件未在启动HTTP/WSS/IPC注册、两端还未联网，不是实际Run闭环。没有工具/模型执行、真实招乎/UI/群绑定、完整文件沙箱、公共RunSpec或完成恢复协议。不得把claim/Thread准备当工具授权；等待人类接续，不恢复自动任务。下方 A4 与 implementing 为历史。
+
 **2026-10-11 当前出口：R01-A4 已验收并保存 a3b402d6。** 只读需求 Run 内部持久队列、指定节点单次领取/30秒不续租票据、领取前当前 ACL 与冻结版本复核、离线 waiting_node、仅 pending 可取消。重复入队返回原内部回执，重复领取同一 attempt/lease/fence；发现租约过期后 outcome_unknown 不重发/迁移/自动释放容量。一个 V4 表、无 FK；不是公共 createRun/完整 RunSpec，不是执行或 exactly-once 工具保证。
 
 49JUnit/44Node/F03全24与1884parity零/伙伴30，队列2真库空库/全部V3升级、A3节点2库、旧DB2库、Task HTTP2库（真V1升级、13启动负例、双JVM/4rollback/提交后真实TCP0字节恢复）和生命周期3case全部过。旧 history 测试夹具漏V4已改并复验，报告 attempts/R01-A4-root.md。所有句柄 closed，临时测试项目精确 removed 可重新创建，原3sameID healthy/3卷/devnetwork保留，旧local e54d3fb0 clean，定时实际 PAUSED，只有root。常规Git hook仅产生本地采纳快照，已读全helper，无push/network，快照保留。

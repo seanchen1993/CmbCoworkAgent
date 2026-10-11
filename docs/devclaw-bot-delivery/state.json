@@ -2,13 +2,13 @@
   "schema_version": 1,
   "updated_on": "2026-10-11",
   "project": "DevClaw Bot",
-  "phase": "R01_REQUIREMENT_RUN_CONTROL_ACCEPTED",
+  "phase": "R01_LOCAL_NODE_THREAD_ACCEPTED",
   "status": "accepted",
   "integration": {
     "worktree": "/Users/heyirui/.codex/worktrees/devclaw-bot-integration/cmbCowork",
     "branch": "codex/devclaw-bot-integration",
     "code_baseline": "4d778d28972eb9a60fe792bd0a9c5450f4c5f0ee",
-    "last_accepted_commit": "a3b402d65b1330cbb35546ec431e50d7ccc4d666"
+    "last_accepted_commit": "96368bba6253bf21247fcae7197a4b47bc05e4ba"
   },
   "authorization": {
     "approved_work": [
@@ -23,20 +23,21 @@
       "R01_PARTNER_PROMPT_SLICE",
       "R01_GROUP_INTENT_PRIVACY_SLICE",
       "R01_NODE_AUTHORIZATION_SLICE",
-      "R01_REQUIREMENT_RUN_CONTROL_SLICE"
+      "R01_REQUIREMENT_RUN_CONTROL_SLICE",
+      "R01_LOCAL_NODE_THREAD_SLICE"
     ],
     "implementation_task_ids": [
-      "R01-A4"
+      "R01-A5"
     ],
     "scope_confirmed": true,
-    "scope_confirmation": "2026-10-11 用户继续任务。本次R01-A4内部只读需求Run持久队列、指定节点单次领取/租约/领取前重验及真库验证。复用A3判定，不开放公共Run API/WSS/节点凭据生产适配/Thread/provider/工具或模型、UI和真实招乎；root串行，不恢复定时。",
+    "scope_confirmation": "2026-10-11 用户继续任务；R01-A5本地独立节点凭据适配与专用Task/stage/node Thread。root串行，不实际执行/开放WSS/真实招乎，不恢复定时。",
     "task_guest_dns_sudo_allowed": true,
     "local_es_s3_containers_allowed": true,
     "host_sudo_or_network_change_allowed": false,
     "explicit_user_pause": false,
     "automatic_continuation_paused_by_user": true,
     "manual_continuation_authorized_at_utc": "2026-10-11T11:21:29Z",
-    "manual_continuation_instruction": "Human says continue task; root serial R01-A4 internal durable requirement Run queue and single designated node claim/lease, not execution/public Run API/WSS. No timer resume; do not treat previous A3 scope verification timestamp as exact current user send.",
+    "manual_continuation_instruction": "Human continue authorizes R01-A5 bounded node authentication and dedicated Thread preparation. Stored older timestamp is not latest message send; timer PAUSED.",
     "database_foreign_keys": "none; application transactional validation/locks plus PK/unique/index",
     "local_database_permissions": "ALL PRIVILEGES ON devclaw.* only; no GRANT OPTION/global/other schemas. B1 fixed official new-empty-test bootstrap only; retained dev unchanged.",
     "external_push_allowed": false,
@@ -63,7 +64,7 @@
     "proposed_interval_minutes": 240,
     "not_before_utc": null,
     "last_run_outcome": "2026-10-07 d1c6fa actualautomationTOML PAUSED atlocal milestonecompletion; no resume/replacement/deletion, manualB00+B01 accepted_merged and no newdispatch",
-    "last_verified_at_utc": "2026-10-11T12:57:23Z"
+    "last_verified_at_utc": "2026-10-11T13:24:04Z"
   },
   "tasks": [
     {
@@ -593,9 +594,10 @@
       "final_build": "73757/d70c3a exit0 fresh40main/18test49JUnit/1884parity zero/class52/112classes/34libs/four migration bytes audit,jara4785992b49bfeba8cc0e30f26208d27aea3f7b68f50c2ce71f5e5b5e91961bf; Nodef096de44/44 exit0",
       "verification": {"first_build":"15986/921574 exit0 fresh Java8 40main/18test,49JUnit/1884parity zero,class52,34libs,V1..V4 artifact audit,jar06b4dff390530e6e7c13de4921fa23ab2fecce114514862a90b05d2f111a8dc7","node_service":"d3b623 exit0 44/44"},
       "next": "This bounded slice accepted a3b402d6; all commands closed. Next human continuation: independent node authentication/local adapter plus dedicated Task/node Thread then thin reuse of AgentRunService, revalidate actual start and limit shared tools. Public contract adapter must not expose internal command namespace or claim as complete RunSpec. No timer resume or automatic execution."
-    }
+    },
+    {"id":"R01-A5","status":"accepted","spec":"tasks/R01-A5.md","attempt_id":"R01-A5-root","report":"attempts/R01-A5-root.md","worktree":"/Users/heyirui/.codex/worktrees/devclaw-bot-integration/cmbCowork","baseline":"e1f9b1d4","implementation_strategy":"root serial","live_commands":[],"next":"After human continuation, thin read-only requirement adapter reusing AgentRunService with actual-start authorization, restricted tools/shared context, local mutex, lease stop and settlement. Not wired/executing/WSS/real IM; no automatic continuation.","verification":{"sqlite_first":"f2dcf7 exit0 8/8 real SQLite with two independent App workers","build":"89351/9a1449 exit0 fresh Java8 42main/19test,55JUnit,1884parity zero,34libs,class52,V1..V4 unchanged,jar2c7efcc23e2bafde6aec6ed6abb820ec0abbaca90188756a4c667e1e379d1616","main_tsc":"75231/a2b593 exit0","node_and_f03":"61614/bff7da exit0 Node44/F03full24/drift/typeconsumption","thread_regression":"35246/ec0e98 exit0 original4files13","real_database":"86717/e93e80 exit0 two MySQL5.7 empty/actualV3 upgrade;36 denials each incl5 credential and1 other-nodeSession; authenticated admission/replay/concurrency/rollback/unknown preserved, exactcleanup active0 original3samehealthy","strict_new_types":"a1a306 exit0 new code zero; only2 exact baseline sql.js7016 isolated; not whole strict project","final_tsc":"46379/ce2732 exit0","sqlite_and_partner":"7ab6b4 exit0 finalSQLite10+partner30=40","resource_audit":"9acf89 onlyoriginal3healthy/3vol/devnetwork/runtime; local e54d3fb0 clean; actualPAUSED"},"accepted_code_commit":"96368bba6253bf21247fcae7197a4b47bc05e4ba","acceptance":"reviews/R01-A5-acceptance.md"}
   ],
-  "next_action": "R01-A4 accepted a3b402d6. Next bounded work after human continuation: trusted node credential/transport adapter and dedicated Task/node Thread, then reuse existing AgentRunService with current authorization and shared context/tool isolation at actual start. Not delivered by queue ticket; no automatic execution, failover or timer resume.",
+  "next_action": "After human continuation, thin read-only requirement adapter reusing AgentRunService with actual-start authorization, restricted tools/shared context, local mutex, lease stop and settlement. Not wired/executing/WSS/real IM; no automatic continuation.",
   "quota_recovery": {
     "verified_at_utc": "2026-10-05T03:55:26Z",
     "ordinary_usage_allowed": true,
@@ -606,6 +608,6 @@
     "previous_interruption": "Originalworkeractualusage-limit error after3045checkpoint; resumedsameoriginalafteractualquota recovery. Nocredits/reset/account/modelchange.",
     "last_verified_limits": {"verified_at_utc":"2026-10-07T10:30:05Z","actual_error":"You have hit your usage limit; try again at4:29PM","advertised_timezone":"notreturned; previouslocalAsia/Shanghai inferred","ordinaryUsageAllowed":true,"primary_used_percent":2,"secondary_used_percent":16,"primary_resets_at_utc":"2026-10-07T15:29:46Z","secondary_resets_at_utc":"2026-10-14T03:29:55Z","agent_previous_status":"actualerrored; interruptconfirmedstopped","worker_head":"5e6d4b430cc47c1148a70ed5d7f615ab94aa11b2","worker_clean":"d92e47","next":"sameoriginalhigh sameA02 audit-only afteractualstop/resourcechecks; no credits/reset/account/modelchange/newwriter/automaticresume","policy":"Currentordinaryusageallowed andoldadvertisedtimepassed. Only recover SAME stoppedoriginalhigh, auditlost19326result first; fresh tests wait maindecision. No reset/purchase/modelaccountchange; automaticPAUSED."}
   },
-  "recovery_notes": "Prior F01..R01-A3 objects preserved (a5753f deepEqual). Root serial R01-A4 a3b402d6 accepted after actual source/diff review and Java8 49JUnit/Node44/F03full24/partner30 plus two queueDBs, two oldDBs, two A3 nodeDBs, two TaskHTTPs and three lifecycle cases. One old history fixture failure preserved and corrected without weakening assertions. All handles closed, test resources exactly removed, original3samehealthy, oldlocal e54d3fb0 clean, automatic actualPAUSED. Internal queue/claim only; no WSS/authenticated production node adapter/provider/Thread/real group execution/full workspace sandbox. Preserve dev and user local hook snapshots; no push/deploy.",
-  "current_task_id": "R01-A4"
+  "recovery_notes": "R01-A5 accepted 96368bba; original12 accepted task objects retained exactly. Root serial;55Java/1884parity zero,44Node/F03full24,40partner+SQLite,13originalThread/mainTS and2authenticated MySQL5.7 probe databases passed. Strict new code zero;2 unchanged baseline sql.js7016 explicitly separated, not whole project strict. All handles closed and only original3healthy/3vol/devnetwork/runtime; oldlocal e54d3fb0 clean, actualPAUSED, no agents/new effects. Internal node/Thread preparation only, no runtime start/listener/model/tools/real IM. Preserve code/dev/local hook snapshots; no push/deploy.",
+  "current_task_id": "R01-A5"
 }
