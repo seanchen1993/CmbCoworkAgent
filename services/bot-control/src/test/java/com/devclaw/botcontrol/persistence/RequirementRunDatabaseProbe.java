@@ -2,6 +2,7 @@ package com.devclaw.botcontrol.persistence;
 
 import com.devclaw.botcontrol.CompatibilityProbe;
 import com.devclaw.botcontrol.application.*;
+import com.devclaw.botcontrol.adapters.local.*;
 import com.devclaw.botcontrol.application.RequirementRunApplication.Enqueued;
 import com.devclaw.botcontrol.contracts.BotContracts.*;
 import com.devclaw.botcontrol.domain.ApplicationFault;
@@ -17,6 +18,9 @@ import java.security.MessageDigest;
 import java.security.DigestOutputStream;
 import java.sql.*;
 import java.time.Instant;
+import java.time.Clock;
+import java.time.ZoneId;
+import java.time.ZoneOffset;
 import java.util.*;
 
 /** Fixed finite actions, disposable test schemas only. Never an execution main. */
@@ -27,6 +31,11 @@ public final class RequirementRunDatabaseProbe {
     private static final TrustedNodeContext NODE=new TrustedNodeContext("A","node","owner");
     private static final Set<Capability> CAPS=Collections.singleton(Capability.REQUIREMENTS_ANALYZE);
     private static String phase="input"; private static int denials;
+    private static final class AuthClock extends Clock {
+        Instant now=Instant.now(); public Instant instant(){return now;}
+        public ZoneId getZone(){return ZoneOffset.UTC;} public Clock withZone(ZoneId zone){return this;}
+    }
+    private static String nodeCredential(){byte[] bytes=new byte[32];new java.security.SecureRandom().nextBytes(bytes);StringBuilder s=new StringBuilder("dcn1_");for(byte b:bytes)s.append(String.format(Locale.ROOT,"%02x",b&255));return s.toString();}
     private static void check(boolean v){if(!v)throw new IllegalStateException("RUN_PROBE_ASSERTION");}
     private static void denied(ErrorCode code,Runnable work){try{work.run();throw new IllegalStateException("MISSING_DENIAL");}catch(ApplicationFault f){if(f.code!=code)throw new IllegalStateException("EXPECTED_"+code.wire()+"_ACTUAL_"+f.code.wire());check(f.getCause()==null);denials++;}}
     private static void exact(JsonNode n,String... keys){Set<String> names=new HashSet<String>();n.fieldNames().forEachRemaining(names::add);check(n.isObject()&&names.equals(new HashSet<String>(Arrays.asList(keys))));}
@@ -93,8 +102,23 @@ public final class RequirementRunDatabaseProbe {
         Run lateWait=app.claimRequirementRun(NODE,lateOffline.runId);check(lateWait.status==Status.WAITING_NODE&&lateWait.version==2&&lateWait.attemptId==null);
         check(app.claimRequirementRun(NODE,lateWait.id).version==2);check(app.cancelPendingRequirementRun(BUSINESS,lateWait.id,2).version==4);
         Enqueued waiting=app.enqueueRequirement(BUSINESS,"waiting",task,bot,2,until);check(waiting.status==Status.WAITING_NODE);Run pending=app.claimRequirementRun(NODE,waiting.runId);check(pending.status==Status.WAITING_NODE&&pending.attemptId==null);
-        nodes.observeDesktopNode(NODE,true,CAPS);Run started=app.claimRequirementRun(NODE,waiting.runId),duplicate=app.claimRequirementRun(NODE,waiting.runId);
+        // Actual application transactions reached only through authenticated sessions.
+        final int beforeAuth=denials;AuthClock authClock=new AuthClock();String credential=nodeCredential(),otherCredential=nodeCredential(),rotated=nodeCredential();
+        LocalNodeCredentialRegistry credentials=new LocalNodeCredentialRegistry(authClock,Arrays.asList(
+            new LocalNodeCredentialRegistry.Binding("A","node","owner",credential,authClock.now.plusSeconds(300)),
+            new LocalNodeCredentialRegistry.Binding("A","other-node","other",otherCredential,authClock.now.plusSeconds(300))));
+        LocalAuthenticatedNodeAdapter adapter=new LocalAuthenticatedNodeAdapter(credentials,nodes,app);
+        denied(ErrorCode.UNAUTHENTICATED,()->adapter.authenticate("Bearer "+credential.substring(5)));
+        final LocalNodeCredentialRegistry.Session session=adapter.authenticate("Bearer "+credential),otherSession=adapter.authenticate("Bearer "+otherCredential);
+        denied(ErrorCode.FORBIDDEN,()->adapter.claim(otherSession,waiting.runId));
+        adapter.observe(session,true,CAPS);Run started=adapter.claim(session,waiting.runId),duplicate=adapter.claim(session,waiting.runId);
         check(started.status==Status.STARTING&&started.fence==1&&started.readOnly&&started.botVersionId.equals(pin)&&started.attemptId.equals(duplicate.attemptId)&&started.leaseId.equals(duplicate.leaseId)&&started.leaseExpiresAt.equals(duplicate.leaseExpiresAt));
+        credentials.revoke("A","node");denied(ErrorCode.UNAUTHENTICATED,()->adapter.observe(session,true,CAPS));denied(ErrorCode.UNAUTHENTICATED,()->adapter.claim(session,waiting.runId));
+        credentials.replace(Collections.singletonList(new LocalNodeCredentialRegistry.Binding("A","node","owner",rotated,authClock.now.plusSeconds(300))));
+        denied(ErrorCode.UNAUTHENTICATED,()->adapter.authenticate("Bearer "+credential));final LocalNodeCredentialRegistry.Session expires=adapter.authenticate("Bearer "+rotated);
+        check(adapter.claim(expires,waiting.runId).attemptId.equals(started.attemptId));authClock.now=authClock.now.plusSeconds(300);
+        denied(ErrorCode.UNAUTHENTICATED,()->adapter.claim(expires,waiting.runId));check(app.getRequirementRun(BUSINESS,waiting.runId).attemptId.equals(started.attemptId));
+        final int credentialDenials=denials-beforeAuth-1;check(credentialDenials==5);
         denied(ErrorCode.OUTCOME_UNKNOWN,()->app.cancelPendingRequirementRun(BUSINESS,started.id,2));
         sql(s,"UPDATE requirement_run_queue SET lease_expires_at=DATE_SUB(UTC_TIMESTAMP(3),INTERVAL 1000 MICROSECOND) WHERE space_id='A' AND id=?",started.id);
         Run unknown=app.claimRequirementRun(NODE,started.id);check(unknown.status==Status.OUTCOME_UNKNOWN&&unknown.attemptId.equals(started.attemptId));check(app.claimRequirementRun(NODE,started.id).leaseId.equals(started.leaseId));
@@ -108,7 +132,7 @@ public final class RequirementRunDatabaseProbe {
         denied(ErrorCode.OUTCOME_UNKNOWN,()->lost.enqueueRequirement(BUSINESS,"lost-enqueue",task,bot,2,until));Enqueued committed=app.enqueueRequirement(BUSINESS,"lost-enqueue",task,bot,2,until);check(count(s)==before+1);
         denied(ErrorCode.DEPENDENCY_UNAVAILABLE,()->rollback.claimRequirementRun(NODE,committed.runId));check(app.getRequirementRun(BUSINESS,committed.runId).attemptId==null);
         denied(ErrorCode.OUTCOME_UNKNOWN,()->lost.claimRequirementRun(NODE,committed.runId));Run readBack=app.getRequirementRun(BUSINESS,committed.runId),same=app.claimRequirementRun(NODE,committed.runId);check(readBack.status==Status.STARTING&&readBack.attemptId.equals(same.attemptId)&&readBack.leaseId.equals(same.leaseId));
-        return f.put("denials",denials).put("unknownRun",unknown.id).put("committedRun",committed.runId).put("taskVersion",2).put("raceDeadline",deadline().toString());
+        return f.put("denials",denials).put("authenticatedNode",true).put("credentialDenials",credentialDenials).put("unknownRun",unknown.id).put("committedRun",committed.runId).put("taskVersion",2).put("raceDeadline",deadline().toString());
     }
     public static void main(String[] args){int exit=1;try{
         check(args.length==1&&Arrays.asList("seed-v3","exercise","enqueue","claim","admission-business","admission-owner","reopen").contains(args[0]));ByteArrayOutputStream bytes=new ByteArrayOutputStream();for(int b;(b=System.in.read())!=-1;){check(bytes.size()<65536);bytes.write(b);}JsonNode input=JSON.readTree(bytes.toByteArray());exact(input,"db","fixture");check(input.path("fixture").isObject());

@@ -62,10 +62,8 @@ import {
   SUBAGENT_TRANSCRIPT_STARTUP_BUCKET_LIMIT
 } from "../../shared/subagent-transcript-storage"
 import { createHash } from "crypto"
-import {
-  attachFreshThreadIncarnation,
-  preserveThreadIncarnationMetadata
-} from "../services/thread-incarnation"
+import { preserveThreadIncarnationMetadata } from "../services/thread-incarnation"
+import { insertThreadRecord } from "./thread-record"
 import {
   legacySubagentMigrationBatchTransactionBytes,
   LEGACY_SUBAGENT_MIGRATION_BATCH_BYTES,
@@ -5814,29 +5812,9 @@ export function getThread(threadId: string): ThreadRow | null {
 }
 
 export function createThread(threadId: string, metadata?: Record<string, unknown>): ThreadRow {
-  const database = getDb()
-  const now = Date.now()
-  const storedMetadata = attachFreshThreadIncarnation(metadata)
-  const title = (storedMetadata.title as string) || null
-  const serializedMetadata = JSON.stringify(storedMetadata)
-
-  database.run(
-    `INSERT INTO threads (thread_id, created_at, updated_at, metadata, status, title)
-     VALUES (?, ?, ?, ?, ?, ?)`,
-    [threadId, now, now, serializedMetadata, "idle", title]
-  )
-
+  const thread = insertThreadRecord(getDb(), threadId, metadata)
   saveToDisk()
-
-  return {
-    thread_id: threadId,
-    created_at: now,
-    updated_at: now,
-    metadata: serializedMetadata,
-    status: "idle",
-    thread_values: null,
-    title
-  }
+  return thread
 }
 
 export function updateThread(

@@ -146,7 +146,12 @@ export async function requirementRunCheck(signal) {
         const noop = await javaDatabase(runtime, entry, "migrate", { signal })
         check(noop.exitCode === 0 && noop.proof.migrations === 0)
         const exercised = await requirementRunProbe(runtime, entry, "exercise", fixture, signal)
-        check(exercised.denials >= 25 && exercised.taskVersion === 2)
+        check(
+          exercised.denials >= 25 &&
+            exercised.taskVersion === 2 &&
+            exercised.authenticatedNode === true &&
+            exercised.credentialDenials === 5
+        )
         fixture = {
           ...selectFixture(exercised),
           taskVersion: 2,
@@ -187,6 +192,8 @@ export async function requirementRunCheck(signal) {
             emptyOrActualV3Upgrade:
               iteration === 1 ? "empty-V1-V2-V3-V4" : "all-V3-bytes-and-history-preserved",
             designatedOnly: true,
+            authenticatedNodeAdmission: true,
+            credentialDenials: exercised.credentialDenials,
             offlineWaiting: true,
             frozenInputVersions: true,
             enqueueJvmCount: 2,

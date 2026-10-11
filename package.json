@@ -49,6 +49,7 @@
     "test:bot-service-contracts": "node --test tests/bot/service/*.spec.mjs && node deploy/dev/service/build.mjs",
     "test:bot-contracts": "node tests/bot/check-contracts.mjs",
     "test:bot-partner": "node --import tsx --test tests/bot/partner-prompt.spec.ts tests/bot/group-task-intent.spec.ts tests/bot/personal-context.spec.ts",
+    "test:bot-task-threads": "node --import tsx --test tests/bot/task-thread-store.spec.ts",
     "dev:bot-doctor": "node deploy/dev/cli.mjs doctor",
     "test:bot-dev": "node deploy/dev/cli.mjs mock --profile dev",
     "test:bot-dev-real": "node deploy/dev/cli.mjs real --profile dev",
