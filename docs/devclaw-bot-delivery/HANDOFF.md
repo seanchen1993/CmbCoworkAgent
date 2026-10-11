@@ -4,6 +4,7 @@
 
 ## 最新手动继续（优先于下方已完成里程碑/历史停点）
 
+- 旧DB集成81545/ec692a实际exit0，两个新项目b5abdb3e/e44026c7都V1/V2 migrate2/noop0、14表零FK/字节与Unicode重开/5坏history维持+显式还原/3schema权限拒绝/坏密码与离线和stale拒绝；真实SQLTimeout1025/1016ms，both exactremoved。诊断字段修正后Node18161/348ace40/40 exit0。最后受影响http-lifecycle验证将运行，尚待终末资源审计和最终accepted。
 - 集成52935/1a5e95实际exit0/closed，两库完整Task/升级/每库30拒绝+4字节重放+2独立JVM races+4rollback+提交后wire0重开/持久cursor/oldSix通过；首库13startup，24starts/sends/active0、both精确removed/原三samehealthy、不读原秘密。两行history实际断言/全hash恢复通过，只发现proof摘要旧hardcode rows1，命令闭合后改为validated mutated.rows/columns，产品/断言未变。下一受影响旧DB和lifecycle；尚未最终accepted，自动PAUSED。
 - 集成52935/dbbb20首库0724107a全30拒绝/4重放/13启动拒绝/双JVM CAS与同命令唯一/4rollback/提交后wire0断开重开/持久cursor/oldSix通过且精确removed。次库88ae4b09真实V1旧数据→V2 migration1/noop0、旧九facts不变/oldpin可读，23574:52316运行中；尚无完整exit，仍不接受。产物81922056/自动PAUSED。
 - 集成正常merge f6544663产品字节同e54d3fb0（e92a11），29030/512ba3真正新编34main/14test，37JUnit/1884parity零/class52/原34依赖与V1不变，jar81922056e5a04e1ded00eac335e9c3dabc19c69eb74763081c0703f4769f2c76。Node dc3f76 40/40、F03 75695/343e0e全24/drift/types exit0。唯一活跃52935/19ea46集成Task+首库13startup验证，结果待；之后旧DB和受影响lifecycle，不跑全旧矩阵、不重编活跃产物。仍review_pending/自动PAUSED。
