@@ -1,5 +1,7 @@
 # B02 最小任务切片审查
 
+2026-10-11串行接续（用户最新策略）：root已读30455849之前实际完整Task/ReceiptAccess/JdbcTaskStore/V2/路由/生成消费闭包/测试与改动边界。仅四接口、payload五初始阶段、单空间head锁/有界游标与原Outbox，无FK/新服务/派发器/Runtime；原冻结JSON、V1、POM/锁、src/F05/B00保持原字节。修复GC丢失JUL OFF级别（静态强引用原三个父logger，临时诊断撤回），修复nullable cursor三元拆箱503（boxed head，新增实际应用事务路径unit410/rollback/no commit）；旧入口只适配固定V2数量/14表及新增索引/nullable。97502/98c742新编34main/14test、37JUnit/1884parity零、原34依赖与V1原样；Node40/F03全24已过。21240正在真实两库验证，第一库30拒绝/4重放/最大Unicode/扫描分页撤权、双主体双JVM CAS真实通过，完整事务/升级/finalcleanup仍待，**尚未接受或集成**。先前失败与诊断依据在state/A02保留，不将部分通过冒充里程碑。
+
 2026-10-07；范围只限 tasks/B02.md v1 四接口。待完整候选、主代理独立验证及集成；以下小步不等同最终验收。
 
 - 已读 a61ba5c2 生成器/双来源离线边界和 3d3f81b4 消费测试；原六操作断言保留，新闭包仅 Task/Stage/Event，不扩 Run/Upload。
