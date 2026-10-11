@@ -4,6 +4,7 @@
 
 ## 最新手动继续（优先于下方已完成里程碑/历史停点）
 
+- 2026-10-11手动继续：96552已于fff2cd实际exit1/closed，数据库ready之后、HTTP之前失败IO；测试资源精确回收、当时原dev健康，不再当running或重放未知副作用。实际worker b08659c2只两个README保留改动、相关进程e099f7空。原MySQL后于10-09再次OOM/137（91896e），同image/owner/network/volume；guest可用2451MiB后b3692a仅start同一容器，90034b healthy/127:32969，不改数据/凭据/内存/VM。root串行补安全阶段诊断，继续最小Task真库验收；自动PAUSED，不派串行代理或扩路线。
 - 最新用户策略：没有可并行任务就不派子代理。本轮B02串行，由root从原local树97875ce2和保留的3modified/4untracked接手，B02-A02；旧A01只读、不创建替代代理。已核实当前执行树onlyroot、旧控制句柄not_found、实际相关pgrep/target lsof为空、reflog/文件前日停写且两次hash相同、无测试容器；不是仅根据ID缺失假定停止。此前36JUnit/1884是旧代码worker证据，不代替当前真库/集成验收。
 - 实际专用MySQL693a…OOMKilled/137停止，ES/S3原IDhealthy，daemon/network/volume及限额未变；guest可用2448MiB。先精确启动已核对原容器，保留数据/账号/私有凭据、不改内存/VM/宿主设置，再完成Task-check。自动实际PAUSED，权限和四接口边界不变。下方原high派单和running均为历史。
 - ea5058精确恢复原MySQL实际0，6180b7 healthy/原ID/127:32967；未改数据配置或凭据。root b08659c2保存当前最小harness，Node38/F03全24及新3取消纯测均0；89143/6d1e43真实34main/14test Java8新编、36JUnit/1884parity零、原34libs/V1及V2打包exact。下一唯一real task-check两个顺序隔离库，完成/cleanup/集成复验才可验收；不会再派串行子代理，自动PAUSED。
