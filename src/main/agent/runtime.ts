@@ -36,6 +36,7 @@ import {
 } from "deepagents"
 import { withModelResponseDiagnostics } from "./model-response-diagnostics"
 import { withModelStreamCancellation } from "./model-stream-cancellation"
+import { buildPersonalIdentityPrompt, isPersonalMemoryEnabled } from "./personal-context"
 import {
   getThreadCheckpointPath,
   deleteThreadCheckpoint,
@@ -4820,6 +4821,9 @@ export interface CreateAgentRuntimeOptions {
   /** Effective per-session memory switch. Child runtimes inherit this because
    * worker thread ids may not have persisted thread metadata. */
   memoryEnabled?: boolean
+  /** Trusted shared-task boundary: disables personal memory and employee identity only.
+   * Does not authorize tools, isolate workspace/history, or filter skills/hooks. */
+  sharedTaskContext?: boolean
   /** Turn-scoped internal coordinator context injected only into the main coordinator prompt. */
   coordinatorTurnPrompt?: string
   /** Explicit /skill selection parsed from the current coordinator turn, if any. */
@@ -5107,6 +5111,7 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
     onFinalSystemPrompt,
     disableMemoryInjection = false,
     memoryEnabled: inheritedMemoryEnabled,
+    sharedTaskContext = false,
     agentMode = "normal",
     traceContext,
     soloTaskTraceManager,
@@ -5190,8 +5195,10 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
     }
   })()
   const managedExecution = options.managedExecution === true
-  const memoryEnabledForThread =
+  const memoryEnabledForThread = isPersonalMemoryEnabled(
+    { sharedTaskContext },
     inheritedMemoryEnabled ?? isThreadMemoryEnabled(runtimeThreadMetadata)
+  )
   const runtimePolicy = createRuntimePromptToolPolicy({
     featureId,
     isHarnessProjectSession,
@@ -5769,14 +5776,7 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
   const platform = isWindows ? "Windows" : process.platform === "darwin" ? "macOS" : "Linux"
   const { name: shell, isBashLike, isPowerShell } = getShellInfo(windowsSandbox)
   const timeContext = getRuntimeTimeContext()
-  const userInfo = getUserInfo()
-  const userInfoPrompt = `## Current user's employee identity information
-- sap编号、员工编号:${userInfo?.sapId}
-- yst编号、一事通编号: ${userInfo?.ystId}
-- userName、员工姓名: ${userInfo?.userName}
-- originOrgId、员工机构号: ${userInfo?.originOrgId}
-- orgName、员机构号名称: ${userInfo?.orgName}
-- ystCode、一事通code: ${userInfo?.ystCode}`
+  const userInfoPrompt = buildPersonalIdentityPrompt({ sharedTaskContext }, getUserInfo)
   const filesystemTimeContextLines = renderRuntimeTimeContextLines(timeContext, {
     includeCurrentTime: runtimePolicy.includeCurrentTime,
     includeTimestampRule: runtimePolicy.includeTimestampRule
@@ -6095,6 +6095,7 @@ The workspace root is: ${fileRoot}`
               enableAgentsPrompt: !restrictedRole,
               disableMemoryInjection: restrictedRole,
               memoryEnabled: memoryEnabledForThread,
+              sharedTaskContext,
               agentMode: "normal",
               traceContext: subagentOptions.traceContext,
               disableSubagents: true,
@@ -6728,6 +6729,7 @@ Use the same worker thread context for follow-up instructions. ${scratchpadGuida
             memoryEnabled: memoryEnabledForThread,
             traceContext: workerRuntimeTraceContext,
             ...workerHarnessContext,
+            sharedTaskContext,
             onHookResult: workerOnHookResult,
             onFailureFuseNotice
           })
@@ -6801,6 +6803,7 @@ Use the same worker thread context for follow-up instructions. ${scratchpadGuida
             memoryEnabled: memoryEnabledForThread,
             traceContext: workerRuntimeTraceContext,
             ...workerHarnessContext,
+            sharedTaskContext,
             onHookResult: workerOnHookResult,
             onFailureFuseNotice
           })
@@ -6858,6 +6861,7 @@ Access limits: read-only handoff continuation. Do not modify files, run commands
             memoryEnabled: memoryEnabledForThread,
             traceContext: workerRuntimeTraceContext,
             ...workerHarnessContext,
+            sharedTaskContext,
             onHookResult: workerOnHookResult,
             onFailureFuseNotice
           })
@@ -7147,7 +7151,7 @@ Access limits: read-only handoff continuation. Do not modify files, run commands
       systemPrompt += WORKFLOW_MODE_SYSTEM_PROMPT
     }
   }
-  systemPrompt += "\n\n" + userInfoPrompt
+  if (userInfoPrompt) systemPrompt += "\n\n" + userInfoPrompt
   console.log("[Runtime] System prompt summary:", {
     chars: systemPrompt.length,
     hasAgentsPrompt: Boolean(agentsPrompt.prompt),

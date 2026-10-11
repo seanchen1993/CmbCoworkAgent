@@ -1,4 +1,5 @@
 import { foregroundToolPolicy } from "../agent/foreground-tool-policy"
+import { isPersonalMemoryEnabled } from "../agent/personal-context"
 import { managedBizRetryService } from "../harness-board/biz-retry-service"
 import { IpcMain, BrowserWindow, dialog } from "electron"
 import { getModsManager } from "../mods/manager"
@@ -7014,9 +7015,11 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
                 rawOnAgentsPromptLoadStatus
               )
             : undefined
-          const memoryEnabledForThread =
+          const memoryEnabledForThread = isPersonalMemoryEnabled(
+            { sharedTaskContext: runExecutionContext.remotePolicy?.sharedTaskContext },
             isThreadMemoryEnabled(metadata) &&
-            isMemoryAllowedForProjectMode(harnessAgentContext.featureId)
+              isMemoryAllowedForProjectMode(harnessAgentContext.featureId)
+          )
 
           if (!workspacePath) {
             pauseActiveGoalForRuntimeStop("WORKSPACE_REQUIRED")

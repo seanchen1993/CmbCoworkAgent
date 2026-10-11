@@ -745,6 +745,8 @@ export interface RemoteTurnPolicy {
   disableRequestUserInput?: boolean
   disableSubagents?: boolean
   disableMemoryInjection?: boolean
+  /** Trusted shared-task policy; never derived from user message text. */
+  sharedTaskContext?: boolean
   disableAgentsPrompt?: boolean
   disableMcpTools?: boolean
   blockedToolNames?: string[]
@@ -797,6 +799,7 @@ function applyRemoteTurnPolicy(
     ...(policy.disableRequestUserInput ? { enableRequestUserInput: false } : {}),
     ...(policy.disableSubagents ? { disableSubagents: true } : {}),
     ...(policy.disableMemoryInjection ? { disableMemoryInjection: true } : {}),
+    ...(policy.sharedTaskContext ? { sharedTaskContext: true, memoryEnabled: false } : {}),
     ...(policy.disableAgentsPrompt ? { enableAgentsPrompt: false } : {}),
     ...(policy.disableMcpTools ? { disableMcpTools: true } : {}),
     ...(policy.blockedToolNames ? { blockedToolNames: policy.blockedToolNames } : {}),
