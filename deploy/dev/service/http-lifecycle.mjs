@@ -28,7 +28,7 @@ async function childCase(mode){
       await startHttpJava(runtime,entry,fixture,"production",controller.signal)
       throw Error("C2_CANCEL_NOT_OBSERVED")
     }
-    const migration=await javaDatabase(runtime,entry,"migrate",{signal:controller.signal});check(migration.exitCode===0&&migration.proof.migrations===2)
+    const migration=await javaDatabase(runtime,entry,"migrate",{signal:controller.signal});check(migration.exitCode===0&&migration.proof.migrations===3)
     server=await startHttpJava(runtime,entry,fixture,"production",controller.signal)
     const request=await httpCall(server,"getBot","GET","/api/bot/v1/bots/missing",{signal:controller.signal});check(request.status===404)
     console.log(JSON.stringify({stage:"http-life-request",pid:server.pid,port:server.port,status:404,actualAjv:true}))

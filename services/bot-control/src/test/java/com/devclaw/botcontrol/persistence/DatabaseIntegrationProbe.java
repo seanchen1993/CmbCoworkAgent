@@ -47,6 +47,8 @@ public final class DatabaseIntegrationProbe {
             {"tasks","space_id,id,group_id,version,task_number,body_bytes"},
             {"task_messages","space_id,id,task_id,author_principal_id,task_version,target_bot_id,body_bytes"},
             {"task_event_cursors","space_id,id,high_water,created_at,expires_at"},
+            {"desktop_runtime_nodes","space_id,id,owner_principal_id,version,supports_requirement,capabilities_bytes,last_seen_at,created_at,updated_at"},
+            {"group_runtime_grants","space_id,group_id,id,node_id,owner_principal_id,version,workspace_ref,enabled,expires_at,created_at,updated_at"},
             {"bot_schema_history","installed_rank,version,description,type,script,checksum,installed_by,installed_on,execution_time,success"}
         };
         for (String[] table : expected) {
@@ -67,6 +69,7 @@ public final class DatabaseIntegrationProbe {
                         else if (name.equals("ordinal")) check("int".equals(type));
                         else if (name.equals("fingerprint")) check("binary".equals(type) && r.getLong(6) == 32);
                         else if (name.equals("http_status")) check("smallint".equals(type));
+                        else if (name.equals("supports_requirement") || name.equals("enabled")) check("tinyint".equals(type));
                         else check("varchar".equals(type) && "ascii_bin".equals(r.getString(5)));
                     }
                 }
@@ -90,7 +93,8 @@ public final class DatabaseIntegrationProbe {
             "mutation_outbox.PRIMARY=0:space_id,id", "mutation_outbox.uq_outbox_command=0:space_id,principal_id,command_id", "mutation_outbox.ix_outbox_target=1:space_id,target_type,target_id,target_version", "mutation_outbox.uq_outbox_task_seq=0:space_id,task_seq",
             "task_space_head.PRIMARY=0:space_id", "tasks.PRIMARY=0:space_id,id", "tasks.uq_task_number=0:space_id,task_number", "tasks.ix_task_group=1:space_id,group_id,id",
             "task_messages.PRIMARY=0:space_id,id", "task_messages.uq_task_message_version=0:space_id,task_id,task_version",
-            "task_event_cursors.PRIMARY=0:space_id,id", "task_event_cursors.ix_task_cursor_expiry=1:space_id,expires_at"
+            "task_event_cursors.PRIMARY=0:space_id,id", "task_event_cursors.ix_task_cursor_expiry=1:space_id,expires_at",
+            "desktop_runtime_nodes.PRIMARY=0:space_id,id", "group_runtime_grants.PRIMARY=0:space_id,group_id", "group_runtime_grants.uq_group_runtime_grant_id=0:space_id,id"
         };
         Map<String,String> wanted = new TreeMap<String,String>();
         for (String value : declarations) { int split = value.indexOf('='); wanted.put(value.substring(0, split), value.substring(split + 1)); }
@@ -98,6 +102,7 @@ public final class DatabaseIntegrationProbe {
         check(scalar(c, "SELECT COUNT(*) FROM information_schema.referential_constraints WHERE constraint_schema='devclaw'") == 0);
         check(scalar(c, "SELECT COUNT(*) FROM bot_schema_history WHERE version='1' AND success=1 AND checksum IS NOT NULL") == 1);
         check(scalar(c, "SELECT COUNT(*) FROM bot_schema_history WHERE version='2' AND success=1 AND checksum IS NOT NULL") == 1);
+        check(scalar(c, "SELECT COUNT(*) FROM bot_schema_history WHERE version='3' AND success=1 AND checksum IS NOT NULL") == 1);
     }
     private static byte[] padded(String value, int size) {
         byte[] result = new byte[size], original = value.getBytes(StandardCharsets.UTF_8);
@@ -205,7 +210,7 @@ public final class DatabaseIntegrationProbe {
         for (int index = 0; index < edits.length; index++) try (Connection c = source.getConnection()) {
             DatabaseReadiness.requireReady(source);
             List<List<String>> original = historyFacts(c);
-            check(original.size() == 2);
+            check(original.size() == 3);
             List<String> row = original.get(0);
             check("1".equals(row.get(0)) && "1".equals(row.get(1)) && "SQL".equals(row.get(3)) && MigrationRunner.SCRIPT.equals(row.get(4)) && row.get(5) != null && "1".equals(row.get(9)));
             List<List<String>> expected = new ArrayList<List<String>>();
@@ -216,9 +221,10 @@ public final class DatabaseIntegrationProbe {
                 else changed.set(9, "0");
                 expected.add(changed);
             }
-            // The fixed fixture changes only V1. V2 must remain byte-for-byte
+            // The fixed fixture changes only V1. V2/V3 must remain byte-for-byte
             // represented in both the rejected history and explicit restore.
             expected.add(original.get(1));
+            expected.add(original.get(2));
             c.setAutoCommit(false); check(execute(c, edits[index]) == 1); c.commit();
             List<List<String>> mutated = historyFacts(c);
             check(expected.equals(mutated));

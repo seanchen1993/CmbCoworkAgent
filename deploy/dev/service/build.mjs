@@ -77,8 +77,11 @@ export async function audit() {
     if (resources.some(name => contents.filter(value => value === name).length !== 1)) throw new Error("B01_PACKAGED_SCHEMA_RESOURCES")
     const migrationResource = "BOOT-INF/classes/db/bot-migration/V1__bot_group_storage.sql"
     const taskMigration = "BOOT-INF/classes/db/bot-migration/V2__task_collaboration.sql"
-    if (contents.filter(name => name.startsWith("BOOT-INF/classes/db/bot-migration/") && name.endsWith(".sql")).sort().join() !== [migrationResource, taskMigration].sort().join()) throw new Error("B01_PACKAGED_MIGRATIONS")
-    await run(join(jdk, "bin/jar"), ["xf", jar, ...classes, ...resources, migrationResource, taskMigration, "BOOT-INF/classes/log4j2.xml"], { env, cwd: temp })
+    const nodeMigration = "BOOT-INF/classes/db/bot-migration/V3__runtime_node_authorization.sql"
+    if (contents.filter(name => name.startsWith("BOOT-INF/classes/db/bot-migration/") && name.endsWith(".sql")).sort().join() !== [migrationResource, taskMigration, nodeMigration].sort().join()) throw new Error("B01_PACKAGED_MIGRATIONS")
+    await run(join(jdk, "bin/jar"), ["xf", jar, ...classes, ...resources, migrationResource, taskMigration, nodeMigration, "BOOT-INF/classes/log4j2.xml"], { env, cwd: temp })
+    const nodeMigrationBytes = await readFile(join(temp, nodeMigration))
+    if (!nodeMigrationBytes.equals(await readFile(join(project, "src/main/resources/db/bot-migration/V3__runtime_node_authorization.sql")))) throw new Error("B01_PACKAGED_MIGRATIONS")
     const taskMigrationBytes = await readFile(join(temp, taskMigration))
     if (!taskMigrationBytes.equals(await readFile(join(project, "src/main/resources/db/bot-migration/V2__task_collaboration.sql")))) throw new Error("B02_PACKAGED_MIGRATIONS")
     const migrationBytes = await readFile(join(temp, migrationResource))
@@ -99,6 +102,7 @@ export async function audit() {
     suites["http.HttpBoundaryTest"] = 7
     suites["application.TaskUnitTest"] = 4
     suites["http.TaskHttpBoundaryTest"] = 1
+    suites["application.RuntimeNodeUnitTest"] = 6
     let tests = 0
     for (const [name, count] of Object.entries(suites)) {
       const xml = await readFile(join(project, `target/surefire-reports/TEST-com.devclaw.botcontrol.${name}.xml`), "utf8")
@@ -107,7 +111,7 @@ export async function audit() {
       tests += count
     }
     const tree = await readFile(join(project, "target/dependency-tree.txt"), "utf8")
-    console.log(JSON.stringify({ stage: "artifact-audit", classMajor: 52, classes, libraries, sourceHashes, migrationSha256: createHash("sha256").update(migrationBytes).digest("hex"), taskMigrationSha256: createHash("sha256").update(taskMigrationBytes).digest("hex"), suites, tests, failures: 0, errors: 0, skipped: 0, treeSha256: createHash("sha256").update(tree).digest("hex"), jarSha256: createHash("sha256").update(await readFile(jar)).digest("hex") }))
+    console.log(JSON.stringify({ stage: "artifact-audit", classMajor: 52, classes, libraries, sourceHashes, migrationSha256: createHash("sha256").update(migrationBytes).digest("hex"), taskMigrationSha256: createHash("sha256").update(taskMigrationBytes).digest("hex"), nodeMigrationSha256: createHash("sha256").update(nodeMigrationBytes).digest("hex"), suites, tests, failures: 0, errors: 0, skipped: 0, treeSha256: createHash("sha256").update(tree).digest("hex"), jarSha256: createHash("sha256").update(await readFile(jar)).digest("hex") }))
   } finally { await removePrivateTemp(temp) }
 }
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
