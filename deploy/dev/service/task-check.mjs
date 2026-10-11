@@ -9,6 +9,7 @@ import { httpCall,rawHttpSocket } from "./http-client.mjs"
 import { httpDevProof,httpCapacity,httpAbsent } from "./http-proof.mjs"
 import { httpPrincipals } from "./http-check.mjs"
 import { taskSql,stopTaskSqlChildren } from "./task-sql.mjs"
+import { httpStartup,stopHttpStartupChildren } from "./http-startup.mjs"
 
 const filename=fileURLToPath(import.meta.url),check=value=>{
   if(!value){const error=Error("B02_ASSERTION"),line=/task-check\.mjs:([0-9]+):[0-9]+/.exec(error.stack?.split("\n")[2]??"")
@@ -139,7 +140,8 @@ export async function taskCheck(signal){
         active(signal);console.log(JSON.stringify({stage:"task-registered",iteration,project:entry.project}));console.log(JSON.stringify({stage:"task-database-ready",...await startTestDatabase(entry,signal)}));active(signal)
         console.log(JSON.stringify({stage:"task-identity-start",iteration}));fixture=await createHttpFixture(httpPrincipals(),signal)
         console.log(JSON.stringify({stage:"task-identity-ready",iteration}))
-        let legacy,seed
+        let legacy,seed,startupCases=0
+        if(iteration===1)startupCases=await httpStartup(runtime,entry,fixture,signal,{unmigrated:true})
         if(iteration===2){seed=await taskSql(runtime,entry,"v1",{},signal);legacy=await taskSql(runtime,entry,"legacy",{},signal)}
         console.log(JSON.stringify({stage:"task-migration-start",iteration}))
         const migration=await javaDatabase(runtime,entry,"migrate",{signal})
@@ -147,6 +149,7 @@ export async function taskCheck(signal){
         check(migration.exitCode===0&&migration.proof.migrations===(iteration===1?2:1))
         const noop=await javaDatabase(runtime,entry,"migrate",{signal});check(noop.exitCode===0&&noop.proof.migrations===0)
         if(legacy)check(isDeepStrictEqual(legacy,await taskSql(runtime,entry,"legacy",{},signal)))
+        if(iteration===1)startupCases+=await httpStartup(runtime,entry,fixture,signal)
         server=await startHttpJava(runtime,entry,fixture,"production",signal);console.log(JSON.stringify({stage:"task-listener",project:entry.project,pid:server.pid,port:server.port}))
         if(seed){const preserved=await httpCall(server,"getGroup","GET",`/api/bot/v1/groups/${seed.group}`,{signal});check(preserved.status===200&&preserved.value.group.bots[0].botVersionId===seed.botVersion)}
         const old=await oldSmoke(server,signal),state=await taskBusiness(server,runtime,entry,old,signal)
@@ -155,16 +158,16 @@ export async function taskCheck(signal){
         const reopened=await httpCall(server,"getTask","GET",`/api/bot/v1/tasks/${state.task.id}`,{signal});check(reopened.status===200&&reopened.value.task.title===state.task.title&&reopened.value.task.version===3)
         const replay=await httpCall(server,"createTaskMessage","POST",`/api/bot/v1/tasks/${state.task.id}/messages`,{principal:"p2",body:state.mbody,signal});check(replay.status===201&&replay.body.equals(state.sent.body))
         const resumed=await httpCall(server,"getEvents","GET",`/api/bot/v1/events?after=${state.resumeCursor}`,{principal:"p2",signal});check(resumed.status===200&&resumed.value.events.some(event=>event.taskId===state.task.id&&event.entityRef.version===3)&&!resumed.value.hasMore)
-        console.log(JSON.stringify({stage:"task-proof",iteration,project:entry.project,emptyOrV1Upgrade:iteration===1?"empty-V1-V2":"actual-V1-data-preserved",legacyNineFactsPreserved:iteration===2,fourRealHTTP:true,oldSixSmoke:true,reopened:true,noExecution:true,...{denials:state.denials,replays:state.replays}}));projects.push(entry.project)
+        console.log(JSON.stringify({stage:"task-proof",iteration,project:entry.project,emptyOrV1Upgrade:iteration===1?"empty-V1-V2":"actual-V1-data-preserved",legacyNineFactsPreserved:iteration===2,fourRealHTTP:true,oldSixSmoke:true,reopened:true,noExecution:true,startupCases,...{denials:state.denials,replays:state.replays}}));projects.push(entry.project)
       }finally{
-        let failed=false;for(const finish of[async()=>{if(server)await server.stop()},stopHttpChildren,stopTaskSqlChildren,async()=>{if(fixture)await closeHttpFixture(fixture)}])try{await finish()}catch{failed=true}
+        let failed=false;for(const finish of[async()=>{if(server)await server.stop()},stopHttpChildren,stopHttpStartupChildren,stopTaskSqlChildren,async()=>{if(fixture)await closeHttpFixture(fixture)}])try{await finish()}catch{failed=true}
         try{console.log(JSON.stringify({stage:"task-cleanup",...await cleanupTestDatabase(entry)}));await httpAbsent(entry.project)}catch{failed=true}
         if(failed)throw Error("B02_CLEANUP_FAILURE")
       }
     }
     return{status:"verified",sequentialDatabases:2,projects,...httpChildFacts()}
   }finally{
-    let failed=false;for(const finish of[stopHttpChildren,stopTaskSqlChildren,()=>closeDatabaseRuntime(runtime)])try{await finish()}catch{failed=true}
+    let failed=false;for(const finish of[stopHttpChildren,stopHttpStartupChildren,stopTaskSqlChildren,()=>closeDatabaseRuntime(runtime)])try{await finish()}catch{failed=true}
     try{check(isDeepStrictEqual(originalDev,await httpDevProof()));console.log(JSON.stringify({stage:"task-original-dev",sameIdentityHealthy:true,credentialsRead:false}))}catch{failed=true}
     if(failed)throw Error("B02_FINAL_CLEANUP_FAILURE")
   }
@@ -172,5 +175,5 @@ export async function taskCheck(signal){
 if(process.argv[1]&&resolve(process.argv[1])===filename){
   const controller=new AbortController(),cancel=()=>controller.abort(),timer=setTimeout(cancel,1200000);process.once("SIGTERM",cancel);process.once("SIGINT",cancel)
   try{if(process.argv.length!==2)throw Error("B02_ARGUMENTS");console.log(JSON.stringify(await taskCheck(controller.signal)))}catch(error){console.log(JSON.stringify({status:"failed",category:controller.signal.aborted?"CANCELLED":taskFailureCategory(error)}));process.exitCode=1}
-  finally{clearTimeout(timer);await stopHttpChildren();await stopTaskSqlChildren();process.removeListener("SIGTERM",cancel);process.removeListener("SIGINT",cancel)}
+  finally{clearTimeout(timer);await stopHttpChildren();await stopHttpStartupChildren();await stopTaskSqlChildren();process.removeListener("SIGTERM",cancel);process.removeListener("SIGINT",cancel)}
 }
