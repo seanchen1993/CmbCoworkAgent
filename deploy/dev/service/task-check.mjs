@@ -11,6 +11,9 @@ import { httpPrincipals } from "./http-check.mjs"
 import { taskSql,stopTaskSqlChildren } from "./task-sql.mjs"
 
 const filename=fileURLToPath(import.meta.url),check=value=>{if(!value)throw Error("B02_ASSERTION")}
+// Emit codes and fixed stages only, never arbitrary child output or error text.
+export const taskFailureCategory=error=>/^(?:B02|B1|C2)_[A-Z_]+$/.test(error?.message)?error.message:"IO"
+const databaseCategory=value=>["CONFIG_INVALID","SECRET_INVALID","DB_AUTH","DB_UNAVAILABLE","DB_TIMEOUT","DB_CONFIGURATION","MIGRATION_INVALID","STORAGE_INVALID"].includes(value)?value:"UNKNOWN"
 const reverse=value=>Array.isArray(value)?value.map(reverse):value&&typeof value==="object"?Object.fromEntries(Object.keys(value).reverse().map(key=>[key,reverse(value[key])])):value
 const config={description:"中文🚀\u0000\ud800",instructions:"text only",knowledgeRefs:[],repositoryRefs:[],skillAllowlist:[],capabilityCeiling:["repository.read"],memoryPolicy:"disabled"}
 const createBot=commandId=>({commandId,name:"伙伴",config,maintainerIds:["p1","p2"]})
@@ -124,10 +127,14 @@ export async function taskCheck(signal){
       console.log(JSON.stringify(await httpCapacity(signal)));active(signal);const entry=await createTestDatabase();let fixture,server
       try{
         active(signal);console.log(JSON.stringify({stage:"task-registered",iteration,project:entry.project}));console.log(JSON.stringify({stage:"task-database-ready",...await startTestDatabase(entry,signal)}));active(signal)
-        fixture=await createHttpFixture(httpPrincipals(),signal)
+        console.log(JSON.stringify({stage:"task-identity-start",iteration}));fixture=await createHttpFixture(httpPrincipals(),signal)
+        console.log(JSON.stringify({stage:"task-identity-ready",iteration}))
         let legacy,seed
         if(iteration===2){seed=await taskSql(runtime,entry,"v1",{},signal);legacy=await taskSql(runtime,entry,"legacy",{},signal)}
-        const migration=await javaDatabase(runtime,entry,"migrate",{signal});check(migration.exitCode===0&&migration.proof.migrations===(iteration===1?2:1))
+        console.log(JSON.stringify({stage:"task-migration-start",iteration}))
+        const migration=await javaDatabase(runtime,entry,"migrate",{signal})
+        console.log(JSON.stringify({stage:"task-migration-result",iteration,exitCode:migration.exitCode,...(migration.exitCode===0?{migrations:migration.proof.migrations}:{category:databaseCategory(migration.proof.category)})}))
+        check(migration.exitCode===0&&migration.proof.migrations===(iteration===1?2:1))
         const noop=await javaDatabase(runtime,entry,"migrate",{signal});check(noop.exitCode===0&&noop.proof.migrations===0)
         if(legacy)check(isDeepStrictEqual(legacy,await taskSql(runtime,entry,"legacy",{},signal)))
         server=await startHttpJava(runtime,entry,fixture,"production",signal);console.log(JSON.stringify({stage:"task-listener",project:entry.project,pid:server.pid,port:server.port}))
@@ -154,6 +161,6 @@ export async function taskCheck(signal){
 }
 if(process.argv[1]&&resolve(process.argv[1])===filename){
   const controller=new AbortController(),cancel=()=>controller.abort(),timer=setTimeout(cancel,1200000);process.once("SIGTERM",cancel);process.once("SIGINT",cancel)
-  try{if(process.argv.length!==2)throw Error("B02_ARGUMENTS");console.log(JSON.stringify(await taskCheck(controller.signal)))}catch(error){console.log(JSON.stringify({status:"failed",category:controller.signal.aborted?"CANCELLED":/^B02_[A-Z_]+$/.test(error.message)?error.message:"IO"}));process.exitCode=1}
+  try{if(process.argv.length!==2)throw Error("B02_ARGUMENTS");console.log(JSON.stringify(await taskCheck(controller.signal)))}catch(error){console.log(JSON.stringify({status:"failed",category:controller.signal.aborted?"CANCELLED":taskFailureCategory(error)}));process.exitCode=1}
   finally{clearTimeout(timer);await stopHttpChildren();await stopTaskSqlChildren();process.removeListener("SIGTERM",cancel);process.removeListener("SIGINT",cancel)}
 }

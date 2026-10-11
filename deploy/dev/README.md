@@ -164,6 +164,10 @@ Compose健康后，`start`（包括`restart`）、`status`及真实测试使用�
 
 ### B01-C2 本机HTTP适配（待完整独立验收）
 
+**当前B02最小切片：** B01已验收记录保留，现仅增加createTask/getTask/createTaskMessage/getEvents，复用同一Java8本机入口/可信身份/MySQL5.7。V1原样，显式V2增四个Task/Message/head/cursor表及原Outbox可空活动列，无外键/新服务/事件派发器。Task继承Group当前成员权限、消息CAS及原命令回执，活动只含实体引用。GET Task返回快照而非消息正文列表；非空成果引用明确409 INPUT_CHANGED，无附件服务/Run/模型/Runtime/UI/招乎实现。
+
+B02比例化验证：先运行`node --test tests/bot/service/*.spec.mjs`、`node tests/bot/check-contracts.mjs`、`node deploy/dev/service/build.mjs`，再运行`node deploy/dev/service/task-check.mjs`。后者只创建两个顺序ownerchecked隔离测试库，分别验证空库V1+V2、真实V1旧数据增量升级/零次重复迁移、四任务HTTP与原六操作烟测、并发/回滚/撤权/分页/重启回执和游标；精准收尾并确认原三服务未变。原limited/unmigrated开发库不自动升级，凭据不读取。旧八入口矩阵为历史B01验收，不要求每次B02重演无关链路。最终通过/未完成项仍以B02报告和主代理实际验收为准。
+
 以上A1/A2/B1/C1段保留各历史切片的范围和当时计数；当前C2新增封闭的六个Bot/Group HTTP入口，不表示旧dev账号已提升、旧库已迁移或原三服务已提供Bot HTTP。固定Java8/Boot MVC/Tomcat及34库沿用，构建仍审计原三源、manifest、V1、日志字节和全部自有class52。最新实测/未完成项以B01-A02及主代理验收记录为准，不用此文档代替接受。
 
 仅显式local-dev、字面127.0.0.1/随机port0：可信启动JSON从私有stdin一次完整读至EOF，关闭环境配置猜测；完整身份和原DB readiness先于监听。不可变local bearer registry只将随机token映射为主体，空间头只是selector，active/成员/create/引用/能力来自可信启动快照，Group/maintainer权仍每次查DB。测试程序在每次读/发秘密前复核本进程登记的0700/0600单链接私有文件、当前owned数据库、实际Java PID及127 listener；秘密不进argv/env/日志。没有企业SSO、Cookie身份、招乎/IM、Runtime、模型/仓库调用、身份管理新API或outbox发送器，不开放公网，不把现存limited/unmigrated dev库拿来serve。

@@ -3,7 +3,13 @@ import assert from "node:assert/strict"
 import { operations } from "../../../contracts/bot/v1/fixtures/positive.mjs"
 import { validateHttpResponse } from "../../../deploy/dev/service/http-client.mjs"
 import { taskSql } from "../../../deploy/dev/service/task-sql.mjs"
-import { taskCheck } from "../../../deploy/dev/service/task-check.mjs"
+import { taskCheck,taskFailureCategory } from "../../../deploy/dev/service/task-check.mjs"
+
+test("Task diagnostics expose fixed error codes, not arbitrary child or secret text",()=>{
+  for(const code of["B02_ASSERTION","B1_JAVA_BOUNDARY","C2_IDENTITY_FILE"])assert.equal(taskFailureCategory(Error(code)),code)
+  for(const message of["password=secret","SQL SELECT text","B1_FAILURE\nsecret",""])assert.equal(taskFailureCategory(Error(message)),"IO")
+  assert.equal(taskFailureCategory(null),"IO")
+})
 
 test("four Task response baselines execute the original Ajv without expanding Run",()=>{
   for(const operation of["createTask","getTask","createTaskMessage","getEvents"]){

@@ -28,6 +28,10 @@ import org.springframework.web.servlet.mvc.HttpRequestHandlerAdapter;
 
 /** Explicit local-only assembly. No SpringApplication/env/config scanning or DDL. */
 public final class LocalHttpServer implements AutoCloseable {
+    // JUL keeps named loggers weakly. Retain these parents so schema-loading GC
+    // cannot discard their OFF levels and pollute the closed launcher output.
+    private static final List<Logger> QUIET_LOGGERS = Arrays.asList(
+        Logger.getLogger("org.apache.catalina"), Logger.getLogger("org.apache.coyote"), Logger.getLogger("org.apache.tomcat"));
     private final HikariDataSource source;
     private final GenericWebApplicationContext context = new GenericWebApplicationContext();
     private final TaskQueue queue = new TaskQueue(16);
@@ -53,7 +57,7 @@ public final class LocalHttpServer implements AutoCloseable {
         }
     }
     private void bind(LocalLaunchConfig config, TransactionObserver observer) throws Exception {
-        for (String name : Arrays.asList("org.apache.catalina", "org.apache.coyote", "org.apache.tomcat")) Logger.getLogger(name).setLevel(Level.OFF);
+        for (Logger logger : QUIET_LOGGERS) logger.setLevel(Level.OFF);
         StandardEnvironment environment = new StandardEnvironment();
         environment.getPropertySources().remove(StandardEnvironment.SYSTEM_ENVIRONMENT_PROPERTY_SOURCE_NAME);
         environment.getPropertySources().remove(StandardEnvironment.SYSTEM_PROPERTIES_PROPERTY_SOURCE_NAME);
