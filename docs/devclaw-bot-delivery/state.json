@@ -2,13 +2,13 @@
   "schema_version": 1,
   "updated_on": "2026-10-11",
   "project": "DevClaw Bot",
-  "phase": "R01_PARTNER_PROMPT_SLICE",
+  "phase": "R01_GROUP_INTENT_PRIVACY_SLICE",
   "status": "accepted",
   "integration": {
     "worktree": "/Users/heyirui/.codex/worktrees/devclaw-bot-integration/cmbCowork",
     "branch": "codex/devclaw-bot-integration",
     "code_baseline": "4d778d28972eb9a60fe792bd0a9c5450f4c5f0ee",
-    "last_accepted_commit": "89a61a5974ab906aedde2baea03e17e7d273c670"
+    "last_accepted_commit": "7bbb77e6dd729a05ee07ad86bf1b05caa6f79ac9"
   },
   "authorization": {
     "approved_work": [
@@ -20,20 +20,21 @@
       "B00",
       "B01",
       "B02_TASK_SLICE",
-      "R01_PARTNER_PROMPT_SLICE"
+      "R01_PARTNER_PROMPT_SLICE",
+      "R01_GROUP_INTENT_PRIVACY_SLICE"
     ],
     "implementation_task_ids": [
-      "R01-A1"
+      "R01-A2"
     ],
     "scope_confirmed": true,
-    "scope_confirmation": "2026-10-11 用户确认可以新申请DevClaw伙伴机器人并按此方向继续。先做R01-A1纯提示词装配切片与入口产品决定，复用冻结BotVersion/Group/Task/ModeRef；不改旧IM或执行引擎，不调用模型/派发Run/连真实招乎/自动恢复定时任务。节点授权与群任务识别已征询，回复前不实现依赖行为。",
+    "scope_confirmation": "2026-10-11 用户已接受只响应@、新任务/任务编号和开发负责人提供本地App执行环境。本次R01-A2先做群任务意图解析和现有Runtime个人记忆/身份显式关闭开关，不做实际群路由、Run/节点/授权服务或模型调用；旧入口默认行为不变，定时保持PAUSED。",
     "task_guest_dns_sudo_allowed": true,
     "local_es_s3_containers_allowed": true,
     "host_sudo_or_network_change_allowed": false,
     "explicit_user_pause": false,
     "automatic_continuation_paused_by_user": true,
-    "manual_continuation_authorized_at_utc": "2026-10-11T08:29:36Z",
-    "manual_continuation_instruction": "Latest human accepts new partner robot and asks to continue on this design and identify remaining decisions. Timestamp is scope verification, not exact human send. Root directly handles serial R01-A1 in integration tree; no subagent or timer resume.",
+    "manual_continuation_authorized_at_utc": "2026-10-11T09:13:07Z",
+    "manual_continuation_instruction": "Human accepts both pending interaction/local-runtime choices. Timestamp is verification, not exact send. Root serial R01-A2 narrow preparation in integration tree; no subagent or automatic resume.",
     "database_foreign_keys": "none; application transactional validation/locks plus PK/unique/index",
     "local_database_permissions": "ALL PRIVILEGES ON devclaw.* only; no GRANT OPTION/global/other schemas. B1 fixed official new-empty-test bootstrap only; retained dev unchanged.",
     "external_push_allowed": false,
@@ -507,9 +508,35 @@
       "remaining_acceptance": [],
       "wait_reason": null,
       "not_delivered": "No callsite in AgentRunService, Run/Runtime dispatch, realIM/UI or full memory ACL guarantee. Runtime must disable default personal-context injection and enforce actual authorization."
+    },
+    {
+      "id": "R01-A2",
+      "status": "accepted",
+      "spec": "tasks/R01-A2.md",
+      "attempt_report": "attempts/R01-A2-root.md",
+      "writer": "root_serial",
+      "worktree": "/Users/heyirui/.codex/worktrees/devclaw-bot-integration/cmbCowork",
+      "branch": "codex/devclaw-bot-integration",
+      "baseline": "87a7b307",
+      "accepted_code_commit": "7bbb77e6dd729a05ee07ad86bf1b05caa6f79ac9",
+      "acceptance_evidence": "attempts/R01-A2-root.md",
+      "live_commands": [],
+      "verification": {
+        "partner_tests": "a7926d/168917 exit0 30/30 (new17 + prior13); actual npm script passed",
+        "test_types": "99216/f8899a standalone tsc exit0",
+        "main_types": "34199/26e600 exit0; afterwards only indentation and script addition",
+        "frozen_contracts": "53654/beeb54 exit0 24/24 drift/type consumption",
+        "legacy_im": "8f0d73 exit0 16PASS",
+        "legacy_im_runner": "14826/19b35c exit0 11PASS",
+        "standard_architecture": "a0678a exit0",
+        "desktop_entrypoints": "c511ef exit0 and 0e60e1 exit0 10PASS",
+        "legacy_final_prompt": "6741/eacc48 exit0 mock-model regression, not shared createAgentRuntime E2E",
+        "format_and_diff": "e337a0 new files/package formatting exit0, b7ed03 diffcheck0; old big files baseline format warnings retained; e29799 prior accepted task objects exact; abeeab dependencies/old scripts/frozen areas unchanged"
+      },
+      "not_delivered": "No activated group route/Run/node/provider, model or full environment isolation. Shared privacy flag covers personal memory/identity only."
     }
   ],
-  "next_action": "R01-A1 prompt preparation accepted in89a61a59; no live commands or resource changes. Confirm mention/task-number routing and developer-authorized local node with user, then scope Run/node minimum control and DesktopRuntimeProvider integration. No realIM/UI/full roadmap or automatic continuation resume.",
+  "next_action": "R01-A2 preparation accepted7bbb77e6, all commands closed. Next local execution slice: minimum Run/node grant control with developer-owner explicit authorization and offline waiting, dedicated Task/node Thread, then existing AgentRunService adapter. Do not activate group execution before real ACL/context boundary; no whole-roadmap expansion or automatic resume.",
   "quota_recovery": {
     "verified_at_utc": "2026-10-05T03:55:26Z",
     "ordinary_usage_allowed": true,
@@ -520,6 +547,6 @@
     "previous_interruption": "Originalworkeractualusage-limit error after3045checkpoint; resumedsameoriginalafteractualquota recovery. Nocredits/reset/account/modelchange.",
     "last_verified_limits": {"verified_at_utc":"2026-10-07T10:30:05Z","actual_error":"You have hit your usage limit; try again at4:29PM","advertised_timezone":"notreturned; previouslocalAsia/Shanghai inferred","ordinaryUsageAllowed":true,"primary_used_percent":2,"secondary_used_percent":16,"primary_resets_at_utc":"2026-10-07T15:29:46Z","secondary_resets_at_utc":"2026-10-14T03:29:55Z","agent_previous_status":"actualerrored; interruptconfirmedstopped","worker_head":"5e6d4b430cc47c1148a70ed5d7f615ab94aa11b2","worker_clean":"d92e47","next":"sameoriginalhigh sameA02 audit-only afteractualstop/resourcechecks; no credits/reset/account/modelchange/newwriter/automaticresume","policy":"Currentordinaryusageallowed andoldadvertisedtimepassed. Only recover SAME stoppedoriginalhigh, auditlost19326result first; fresh tests wait maindecision. No reset/purchase/modelaccountchange; automaticPAUSED."}
   },
-  "recovery_notes": "B00/B01/B02 accepted records preserved. Latest human authorizes new partner-entry direction; root serial R01-A1 pure preparation accepted. Pending product questions recorded, no quota failure or timer resume; retain oldlocal tree and all dev resources.",
-  "current_task_id": "R01-A1"
+  "recovery_notes": "Prior accepted task objects preserved. Latest human confirmed both product choices. Root serial R01-A2 local preparation7bbb77e6 accepted after actual diff/tests; no live command/quota failure/timer resume. No activated provider/Run/group execution or full context sandbox; retain oldlocal and all resources.",
+  "current_task_id": "R01-A2"
 }
