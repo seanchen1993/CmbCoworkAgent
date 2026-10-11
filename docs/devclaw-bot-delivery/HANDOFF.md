@@ -1,5 +1,13 @@
 # DevClaw Bot 当前交接点
 
+**2026-10-11 当前出口：R01-A4 已验收并保存 a3b402d6。** 只读需求 Run 内部持久队列、指定节点单次领取/30秒不续租票据、领取前当前 ACL 与冻结版本复核、离线 waiting_node、仅 pending 可取消。重复入队返回原内部回执，重复领取同一 attempt/lease/fence；发现租约过期后 outcome_unknown 不重发/迁移/自动释放容量。一个 V4 表、无 FK；不是公共 createRun/完整 RunSpec，不是执行或 exactly-once 工具保证。
+
+49JUnit/44Node/F03全24与1884parity零/伙伴30，队列2真库空库/全部V3升级、A3节点2库、旧DB2库、Task HTTP2库（真V1升级、13启动负例、双JVM/4rollback/提交后真实TCP0字节恢复）和生命周期3case全部过。旧 history 测试夹具漏V4已改并复验，报告 attempts/R01-A4-root.md。所有句柄 closed，临时测试项目精确 removed 可重新创建，原3sameID healthy/3卷/devnetwork保留，旧local e54d3fb0 clean，定时实际 PAUSED，只有root。常规Git hook仅产生本地采纳快照，已读全helper，无push/network，快照保留。
+
+下一有限接续：独立节点认证/本地适配与专用 Task/node Thread，再薄复用原 AgentRunService；真正 start 时还要重验授权、约束共享上下文和工具。当前没有节点 WSS/生产认证、公共 Run API、实际 provider/Thread/模型/工具/UI/群绑定或真实招乎、完整沙箱、事件完成/恢复/迁移。不得把 queue claim 直接作为执行授权，也不能将内部 command 空间当公共 receipts。等待下一人类继续，不自动扩大或恢复定时。下方 implementing/旧出口均历史。
+
+2026-10-11 最新手动继续：R01-A3 已验收保留。本次 R01-A4 内部需求 Run 队列/指定节点单次领取、领取前当前权限和冻结版本重验；root 串行从 ee412814 实施，任务 tasks/R01-A4.md，报告 attempts/R01-A4-root.md。只读、一 attempt、无自动重试/fallback；未开放实际 Runtime/模型/工具、公共 Run API、WSS 或真实 IM。实际原三健康、只有 root、无旧命令、定时 PAUSED。不把后文 A3 完成出口当当前 A4 完成。
+
 2026-10-11 · R01-A3节点授权与需求可派发判定已验收 · 定时续跑停用
 
 当前：用户“继续实现”授权的R01-A3已串行验收并保存代码de266e83（integration，旧local不动）。V3两表无FK，内部节点登记/开发负责人Group授权与撤销/需求可派发判定；独立执行与工作区ACL，不借用配置权限；指定节点无60秒内心跳等待，绝不fallback，撤权后心跳不复权。只读引用、固定专家版本、当前成员/管理员和有效期/CAS复核，READY只是快照不是Run或lease。

@@ -2,6 +2,8 @@
 
 2026-10-01 · 协作机制 v1
 
+**2026-10-11 最新出口：** R01-A4 内部需求 Run 持久队列/指定节点单次领取已验收，代码 a3b402d6。一 V4 表无 FK，复用 A3 同事务当前授权与冻结版本检查；离线 waiting_node、重复入队/领取保持原记录、30秒租约不续期、发现过期 unknown 不自动重跑/迁移，仅未领取可取消，受 Group maxRuns 约束。49JUnit/44Node/F03全24/1884parity零/伙伴30及真实 queue2/node2/旧DB2/TaskHTTP2/生命周期3场景通过；临时资源精确回收、原三健康、旧local clean、所有句柄closed、定时PAUSED。见 tasks/R01-A4.md/attempts/R01-A4-root.md。尚非公共Run API/完整RunSpec、节点认证/WSS、实际执行器/专用Thread/工具/模型/UI/真实群或完整沙箱；下一可信节点+专用Thread再复用旧引擎，需人类接续。下方 A3 与早期 implementing 条目为历史。
+
 **2026-10-11最新出口：** R01-A3内部节点/Group授权与需求可派发判定已验收，代码de266e83。两表无FK，开发负责人必须拥有节点且是Group管理员，独立执行/工作区ACL，指定节点过期心跳等待不fallback；READY非Run/lease。38main/16test Java8真新编、43JUnit/1884parity零、Node42/伙伴30/F03全24，以及节点两个真库/旧DB两个/Task HTTP两个/生命周期三case通过，测试资源已精确回收，原三健康、所有句柄闭合，定时实际PAUSED。详见tasks/R01-A3.md和attempts/R01-A3-root.md；下一有限Run/认证节点/专用Thread再接已有引擎，当前没有真实群执行/生产节点适配器或完整沙箱，不自动扩大。下方A2最新出口为已验收历史。
 
 **2026-10-11最新出口：** 用户已接受只响应@、新任务/任务编号、开发负责人提供本地App且离线等待。R01-A1保留；root串行完成R01-A2准备能力7bbb77e6：新17+原13=30测试、两类tsc/F03全24及旧IM/桌面/最终提示词回归通过，见tasks/R01-A2.md及报告。只补纯任务识别和Runtime个人记忆/员工身份关闭开关，不是完整上下文沙箱；未开放模型/真实群/Run或节点服务。所有测试闭合，定时PAUSED。下一Run/节点授权最小控制及专用协作Thread，再接现有执行器。下方“建议待用户反馈/仅A1已交付”是历史，不重复征询。
