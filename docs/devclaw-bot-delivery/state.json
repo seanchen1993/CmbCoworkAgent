@@ -426,8 +426,8 @@
       "prior_formal_followup": "succeeded 2026-10-07T12:19:32Z",
       "resumed_at_utc": "2026-10-08T06:09:27Z",
       "attempt_report": "/Users/heyirui/.codex/worktrees/devclaw-bot-local/cmbCowork/docs/devclaw-bot-delivery/attempts/B02-A02.md",
-      "latest_checkpoint": "Root serial30455849: minimal JUL logger retention and nullable cursor fixes, focused unit regression and V2 old test counters/catalog. 97502/98c742 closed0 trueJava8 34main/14test,37JUnit/1884parity zero,original34deps/V1 exact. Actual21240 partial35afd6 firstDB all30 denials/4replays, Unicode/maxtext/events/currentauthorization and independent JVM CAS oneCommit passed; secondDB/remaining transactions/finalexit/cleanup still pending. NoB02 acceptance until complete plus integrated verification. SchedulerPAUSED, no subagent/nextstage.",
-      "checkpoint_head": "b08659c2",
+      "latest_checkpoint": "Root e54d3fb0 clean candidate; actual21240/fec7a9 exit0 twoDB Task/upgrade/transactions/reopen and exact cleanup complete. Incremental two-row history preservation and reused13startup source reviewed3e1497; frozen files/diffcheck unchanged. 71051 process no longer available; last output truncation lost finalexit, NOT counted as pass. Actual80080b no relevantprocess, c4d975 only original3healthy/3volumes/dev-runtime. Normalmerge for fresh integrated build/Task+startup/legacyDB verification, not yetaccepted. Serialroot/automaticPAUSED/no nextstage.",
+      "checkpoint_head": "e54d3fb0e9d3d9d1f7504d7f8ae39e79946542de",
       "contract_checkpoint": {
         "code_commit": "a61ba5c213e7c83fd85589cd94f7050f045668c1",
         "test_correction_commit": "3d3f81b477593546cca1edcbcd3068e94d643f5e",
@@ -462,7 +462,8 @@
       "legacy_db_first": {"session_id":25437,"final_chunk":"5d6f7f","exit_code":1,"actual_passed":"V1/V2 migrate2/noop0, catalog/byte reload/privilege denials, real SQLTimeoutException1024ms","failure":"old history fixture still assumed exactly one row; test-only fix retain unchanged V2 in mutated/restore comparisons","cleanup":"exact owned test removed"},
       "history_fixture_build": {"session_id":55899,"final_chunk":"1416f4","exit_code":0,"main_compile":"up to date","test_compile":14,"junit":37,"parity":1884,"mismatches":0,"jar_sha256":"e359ecf52486ac22680ae764824efe07dbfe1becc42cf4262138f248f7e5513b"},
       "final_candidate_build": {"session_id":89019,"final_chunk":"8010f7","exit_code":0,"product_main":"unchanged30455849/up-to-date","test_compile":14,"junit":37,"parity":1884,"mismatches":0,"jar_sha256":"a55505fc140c9f761a0de47885d26dd01ed9af6c7afb1a0233b48d4dcfbb9a89","candidate":"e54d3fb0","test_only_changes":"whole two-row history fixtures, reuse13startup negatives in Task-check and cleanup"},
-      "live_commands": [{"owner":"root","session_id":71051,"start_chunk":"40f40b","command":"node deploy/dev/service/database-check.mjs","worktree":"/Users/heyirui/.codex/worktrees/devclaw-bot-local/cmbCowork","status":"running_unknown","source":"e54d3fb0 fixed two-row history fixtures","jar_sha256":"a55505fc140c9f761a0de47885d26dd01ed9af6c7afb1a0233b48d4dcfbb9a89"}],
+      "legacy_db_recovery": {"session_id":71051,"status":"closed_final_exit_unavailable_not_pass","last_progress":"firstDB allproofs/exactremoved; secondDB migration2/noop0/timeout/history5 passed, finaloutput truncated","recovery":"write_stdin unknownprocess; actual80080b no relevantprocess; c4d975 only original3healthy/3volumes/dev-runtime; no unknown ongoing external mutation","next":"repeat impacted oldDB regression once on fresh integrated artifact"},
+      "live_commands": [],
       "wait_reason": null
     }
   ],
