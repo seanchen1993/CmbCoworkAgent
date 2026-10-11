@@ -1,6 +1,12 @@
 # DevClaw Bot 当前交接点
 
-2026-10-11 · R01-A2群任务识别/个人上下文开关已验收 · 定时续跑停用
+2026-10-11 · R01-A3节点授权与需求可派发判定已验收 · 定时续跑停用
+
+当前：用户“继续实现”授权的R01-A3已串行验收并保存代码de266e83（integration，旧local不动）。V3两表无FK，内部节点登记/开发负责人Group授权与撤销/需求可派发判定；独立执行与工作区ACL，不借用配置权限；指定节点无60秒内心跳等待，绝不fallback，撤权后心跳不复权。只读引用、固定专家版本、当前成员/管理员和有效期/CAS复核，READY只是快照不是Run或lease。
+
+真实JDK8新编38main/16test、43JUnit/1884parity零；Node42/伙伴30/F03全24通过；两个节点真库（空库/真实V2数据和V1V2history保留）各32拒绝、两rollback、提交后unknown读回、双JVM CAS/重开通过；旧DB两个/Task HTTP两个（含真实V1升级、旧六新四、真实失回包恢复）及三生命周期case通过。原V1/V2/依赖/生成契约/旧HTTP/TaskStore/Runtime不变，报告attempts/R01-A3-root.md。所有句柄闭合、测试资源精确回收、原MySQL/ES/S3 sameID healthy/三卷与devnetwork保留，只有root，定时实际PAUSED。
+
+尚未交付生产节点认证、Run队列/租约/实际执行、专用协作Thread、工作区沙箱、App授权UI、群绑定或真实招乎。B02 TaskStore仍仅初始需求态，不把坏存储注入当阶段流转功能。下一先做有限Run/认证节点与启动前重验，再薄适配现有AgentRunService；需下次人类继续，不自动派发或恢复定时。下方A2与早期pending条目均历史。
 
 最新：用户明确接受只响应@、新任务/任务编号、开发负责人提供本地App且离线等待。R01-A1不重做；root串行从87a7b307接续并完成R01-A2，代码7bbb77e6。纯任务意图解析沿用当前TASK-数字，现有Runtime显式sharedTaskContext收窄个人记忆/员工身份并继承四个子创建点及本次运行结束维护；旧默认不变。新17+原13=30测试、主/测试tsc、F03全24漂移/消费、IM桥接16/runner11、标准架构/桌面入口/characterization10、旧最终提示词模拟回归全部实际exit0。报告attempts/R01-A2-root.md；新文件格式过，旧两大文件基线formatter偏差保留。源码已读，旧任务对象/依赖/原测试脚本/冻结契约/Java/Docker未动，所有句柄闭合，自动实际PAUSED。未连接模型/实际群或派发Run；开关不是技能/Hook/工作区/旧Thread历史隔离。下一先做Run/节点最小控制、开发负责人显式授权与离线等待，再用专用协作Thread接现有执行器；不可借用个人节点/Thread或自动扩大完整路线。下方“问题待确认”及R01-A1唯一当前任务为历史，保留证据，不再征询已确认两项。
 

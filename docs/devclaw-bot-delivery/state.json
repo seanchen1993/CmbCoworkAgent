@@ -2,13 +2,13 @@
   "schema_version": 1,
   "updated_on": "2026-10-11",
   "project": "DevClaw Bot",
-  "phase": "R01_GROUP_INTENT_PRIVACY_SLICE",
+  "phase": "R01_NODE_AUTHORIZATION_ACCEPTED",
   "status": "accepted",
   "integration": {
     "worktree": "/Users/heyirui/.codex/worktrees/devclaw-bot-integration/cmbCowork",
     "branch": "codex/devclaw-bot-integration",
     "code_baseline": "4d778d28972eb9a60fe792bd0a9c5450f4c5f0ee",
-    "last_accepted_commit": "7bbb77e6dd729a05ee07ad86bf1b05caa6f79ac9"
+    "last_accepted_commit": "de266e8333318cf09706b5f166b4aad44695472f"
   },
   "authorization": {
     "approved_work": [
@@ -21,20 +21,21 @@
       "B01",
       "B02_TASK_SLICE",
       "R01_PARTNER_PROMPT_SLICE",
-      "R01_GROUP_INTENT_PRIVACY_SLICE"
+      "R01_GROUP_INTENT_PRIVACY_SLICE",
+      "R01_NODE_AUTHORIZATION_SLICE"
     ],
     "implementation_task_ids": [
-      "R01-A2"
+      "R01-A3"
     ],
     "scope_confirmed": true,
-    "scope_confirmation": "2026-10-11 用户已接受只响应@、新任务/任务编号和开发负责人提供本地App执行环境。本次R01-A2先做群任务意图解析和现有Runtime个人记忆/身份显式关闭开关，不做实际群路由、Run/节点/授权服务或模型调用；旧入口默认行为不变，定时保持PAUSED。",
+    "scope_confirmation": "2026-10-11 用户最新继续实现。本次R01-A3落地Java/MySQL节点登记、开发负责人显式Group授权与撤销、需求任务派发前判定及真库验证；只读需求模式内部接口，不开放HTTP/WSS/Run队列或执行/真实招乎/模型/UI，不改旧入口或依赖，定时保持PAUSED。",
     "task_guest_dns_sudo_allowed": true,
     "local_es_s3_containers_allowed": true,
     "host_sudo_or_network_change_allowed": false,
     "explicit_user_pause": false,
     "automatic_continuation_paused_by_user": true,
-    "manual_continuation_authorized_at_utc": "2026-10-11T09:13:07Z",
-    "manual_continuation_instruction": "Human accepts both pending interaction/local-runtime choices. Timestamp is verification, not exact send. Root serial R01-A2 narrow preparation in integration tree; no subagent or automatic resume.",
+    "manual_continuation_authorized_at_utc": "2026-10-11T11:21:29Z",
+    "manual_continuation_instruction": "Human says continue implementation; root serial R01-A3 durable node/group authorization and requirement dispatch eligibility, not Run execution. Timestamp is scope verification, not exact send. No timer resume.",
     "database_foreign_keys": "none; application transactional validation/locks plus PK/unique/index",
     "local_database_permissions": "ALL PRIVILEGES ON devclaw.* only; no GRANT OPTION/global/other schemas. B1 fixed official new-empty-test bootstrap only; retained dev unchanged.",
     "external_push_allowed": false,
@@ -61,7 +62,7 @@
     "proposed_interval_minutes": 240,
     "not_before_utc": null,
     "last_run_outcome": "2026-10-07 d1c6fa actualautomationTOML PAUSED atlocal milestonecompletion; no resume/replacement/deletion, manualB00+B01 accepted_merged and no newdispatch",
-    "last_verified_at_utc": "2026-10-07T12:13:41Z"
+    "last_verified_at_utc": "2026-10-11T11:52:05Z"
   },
   "tasks": [
     {
@@ -534,9 +535,37 @@
         "format_and_diff": "e337a0 new files/package formatting exit0, b7ed03 diffcheck0; old big files baseline format warnings retained; e29799 prior accepted task objects exact; abeeab dependencies/old scripts/frozen areas unchanged"
       },
       "not_delivered": "No activated group route/Run/node/provider, model or full environment isolation. Shared privacy flag covers personal memory/identity only."
+    },
+    {
+      "id": "R01-A3",
+      "status": "accepted",
+      "spec": "tasks/R01-A3.md",
+      "attempt_report": "attempts/R01-A3-root.md",
+      "writer": "root_serial",
+      "worktree": "/Users/heyirui/.codex/worktrees/devclaw-bot-integration/cmbCowork",
+      "branch": "codex/devclaw-bot-integration",
+      "baseline": "bce5de48",
+      "accepted_code_commit": "de266e8333318cf09706b5f166b4aad44695472f",
+      "accepted_on": "2026-10-11",
+      "acceptance_evidence": "attempts/R01-A3-root.md",
+      "live_commands": [],
+      "verification": {
+        "first_build": "23932 exit1, test Timestamp import ambiguity; diagnostic24110 exit1; fixed explicit imports",
+        "build": "28104/d58eb4 exit0 actual JDK8 fresh38main/16test,43JUnit/1884parity zero/34libs/class52/V1V2 preserved/V3 audit; jarbb872e2fd38f2e306608ca6075e35141d5443655a6e44fcc4f084a42fff22d50",
+        "node_service": "17f444 exit0 42/42 after new runner formatting/final cleanup edits",
+        "first_database_probe": "80335/c91090 exit1 phase-boundary fixture expected wrong error; existing initial-only TaskStore refuses non-requirement stored state503. Fixture corrected, production not weakened. Exact test cleanup.",
+        "runtime_node_database": "70710/98c765 exit0 two sequential owned realMySQL5.7 empty/V2 populated upgrade; V2 thirteen tables and V1V2 history exact SHA preserved; each32denials/2rollback/afterCommit unknown readback+no blind replay/two independentJVM CAS exactly1winner/reopen/offline designated only/revoke+expiry; exactremoved,originalsamehealthy,active0",
+        "legacy_database": "55548/618ee0 exit0 two owned DBs,3migrate/noop0/16tables zeroFK/Unicode and large bytes reopen/5bad-history unchanged exactrestore/3privilege denials/password/stale/offline; queryTimeout1028/1019ms,exactremoved",
+        "legacy_task_http": "59414/ff6e14 exit0 two owned DBs empty/actualV1 upgrade; oldSix+fourTask HTTP,each30denials4replays/2independentJVM races/4rollback/real commit-after TCP0byte loss and byte/cursor reopen;13startup incl V3history,24starts/sends/active0,exactremoved,originalsamehealthy",
+        "legacy_http_lifecycle": "97978/949bf6 exit0 injected/afterHTTP SIGTERM/secretSIGTERM three cases,actual PID/listener/project/privatefiles absence;secret cancellation0starts/sends,originalsamehealthy",
+        "frozen_contracts": "60313/37afce exit0 full24/drift/generated-type consumption",
+        "partner_preparation": "f6ebb7 exit0 30/30",
+        "review_and_final_audit": "f9f28f/7f24ac actualnew service/store/SQL/runner reviewed; b716b2 unchanged originalHTTP/TaskStore/contracts/oldRuntime/POM/V1V2; 6cd62a format/syntax/diffcheck0;2f8d51 only original3healthy/3volumes/devnetwork,bea34d no relevant process,a7aa1c runtime onlydev and actualPAUSED; onlyroot live"
+      },
+      "not_delivered": "Internal eligibility only; no execution credential adapter, HTTP/WSS, Run queue/lease/provider or real IM/model/UI."
     }
   ],
-  "next_action": "R01-A2 preparation accepted7bbb77e6, all commands closed. Next local execution slice: minimum Run/node grant control with developer-owner explicit authorization and offline waiting, dedicated Task/node Thread, then existing AgentRunService adapter. Do not activate group execution before real ACL/context boundary; no whole-roadmap expansion or automatic resume.",
+  "next_action": "R01-A3 accepted de266e83; all commands closed. Next bounded implementation is durable Run queue/lease and authenticated node adapter, revalidate ACL/version at start, dedicated Task/node Thread, then reuse AgentRunService. Not delivered by eligibility snapshot; do not auto-expand or resume timer, require next human continuation.",
   "quota_recovery": {
     "verified_at_utc": "2026-10-05T03:55:26Z",
     "ordinary_usage_allowed": true,
@@ -547,6 +576,6 @@
     "previous_interruption": "Originalworkeractualusage-limit error after3045checkpoint; resumedsameoriginalafteractualquota recovery. Nocredits/reset/account/modelchange.",
     "last_verified_limits": {"verified_at_utc":"2026-10-07T10:30:05Z","actual_error":"You have hit your usage limit; try again at4:29PM","advertised_timezone":"notreturned; previouslocalAsia/Shanghai inferred","ordinaryUsageAllowed":true,"primary_used_percent":2,"secondary_used_percent":16,"primary_resets_at_utc":"2026-10-07T15:29:46Z","secondary_resets_at_utc":"2026-10-14T03:29:55Z","agent_previous_status":"actualerrored; interruptconfirmedstopped","worker_head":"5e6d4b430cc47c1148a70ed5d7f615ab94aa11b2","worker_clean":"d92e47","next":"sameoriginalhigh sameA02 audit-only afteractualstop/resourcechecks; no credits/reset/account/modelchange/newwriter/automaticresume","policy":"Currentordinaryusageallowed andoldadvertisedtimepassed. Only recover SAME stoppedoriginalhigh, auditlost19326result first; fresh tests wait maindecision. No reset/purchase/modelaccountchange; automaticPAUSED."}
   },
-  "recovery_notes": "Prior accepted task objects preserved. Latest human confirmed both product choices. Root serial R01-A2 local preparation7bbb77e6 accepted after actual diff/tests; no live command/quota failure/timer resume. No activated provider/Run/group execution or full context sandbox; retain oldlocal and all resources.",
-  "current_task_id": "R01-A2"
+  "recovery_notes": "Prior accepted task objects preserved. R01-A3 root serial code de266e83 accepted after actual new-source audit/freshJava8 build/two-nodeDB+two-oldDB+two-TaskHTTP+three-lifecycle verification; all handles closed and test resources removed, original3healthy, automatic actualPAUSED. No authenticated production adapter/Run queue/lease/provider/group execution or full workspace sandbox. Retain oldlocal and original dev data/credentials.",
+  "current_task_id": "R01-A3"
 }
