@@ -47,7 +47,7 @@ async function badMigration(runtime,entry,fixture,signal){
     active(signal);child.child.stdin.end("restore\n")
     const result=await child.done,restored=records().find(x=>x.stage==="history-restored")
     check(result.code===0&&!result.stderr&&!result.spawnError&&!result.overflow&&restored?.originalFacts===mutated.originalFacts&&restored.mutatedFactsUnchangedByRuntime&&restored.completeOriginalFactsRestored)
-    console.log(JSON.stringify({stage:"http-startup-history-proof",fixturePid:child.child.pid,rows:1,columns:10,originalFacts:mutated.originalFacts,mutatedFacts:mutated.mutatedFacts,runtimeNoRepair:true,exactOriginalTearDownAndReady:true}))
+    console.log(JSON.stringify({stage:"http-startup-history-proof",fixturePid:child.child.pid,rows:mutated.rows,columns:mutated.columns,originalFacts:mutated.originalFacts,mutatedFacts:mutated.mutatedFacts,runtimeNoRepair:true,exactOriginalTearDownAndReady:true}))
   }finally{
     clearTimeout(timer);signal?.removeEventListener("abort",stop);await child.stop();await child.done;children.delete(child)
     try{process.kill(child.child.pid,0);throw Error("C2_JAVA_RESIDUE")}catch(error){if(error.code!=="ESRCH")throw error}
