@@ -97,7 +97,7 @@ export async function audit() {
     const suites = { CompatibilityTest: 4, ContractConsumptionTest: 5, "validation.BoundaryTest": 6, "persistence.PersistenceBoundaryTest": 5 }
     suites["application.ApplicationUnitTest"] = 5
     suites["http.HttpBoundaryTest"] = 7
-    suites["application.TaskUnitTest"] = 3
+    suites["application.TaskUnitTest"] = 4
     suites["http.TaskHttpBoundaryTest"] = 1
     let tests = 0
     for (const [name, count] of Object.entries(suites)) {

@@ -17,7 +17,7 @@ try{
   if(process.argv.length!==2)throw Error("C2_ARGUMENTS")
   await httpAbsent("devclaw-bot-test-fef8bfd1815895ba");original=await httpDevProof();active(controller.signal);runtime=await packagedDatabaseRuntime();active(controller.signal);await httpCapacity(controller.signal);active(controller.signal)
   entry=await createTestDatabase();active(controller.signal);console.log(JSON.stringify({stage:"http-diagnostic-db",...await startTestDatabase(entry,controller.signal)}))
-  const migration=await javaDatabase(runtime,entry,"migrate",{signal:controller.signal});check(migration.exitCode===0&&migration.proof.migrations===1)
+  const migration=await javaDatabase(runtime,entry,"migrate",{signal:controller.signal});check(migration.exitCode===0&&migration.proof.migrations===2)
   fixture=await createHttpFixture(httpPrincipals(),controller.signal);server=await startHttpJava(runtime,entry,fixture,"production",controller.signal);console.log(JSON.stringify({stage:"http-diagnostic-listener",pid:server.pid,port:server.port}))
   const before=await httpSql(runtime,entry,"facts",{},controller.signal)
   const result=await httpWire(server,x=>`POST /api/bot/v1/bots HTTP/1.1\r\nHost: 127.0.0.1:${x.port}\r\nAuthorization: Bearer ${x.token}\r\nX-DevClaw-Space: A\r\nContent-Type: application/json\r\nContent-Length: 100\r\nConnection: close\r\n\r\n`,controller.signal)

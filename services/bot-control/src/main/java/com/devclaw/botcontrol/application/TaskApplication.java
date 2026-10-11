@@ -104,7 +104,9 @@ public final class TaskApplication {
                         observer.reached(TransactionObserver.Stage.MEMBER_WRITTEN); result = message; receiptTarget = m.id; break;
                     }
                     case GET_EVENTS: {
-                        Long cursor = after == null ? head : tasks.cursor(after, now, head);
+                        // Keep both branches boxed: a missing cursor is 410,
+                        // not a null-unboxing failure disguised as dependency 503.
+                        Long cursor = after == null ? Long.valueOf(head) : tasks.cursor(after, now, head);
                         if (cursor == null) throw new ApplicationFault(ErrorCode.CURSOR_EXPIRED);
                         List<JdbcTaskStore.EventRow> rows = tasks.events(cursor, head, limit);
                         TreeMap<String, Group> groups = new TreeMap<String, Group>();
