@@ -146,7 +146,7 @@ export async function taskCheck(signal){
         console.log(JSON.stringify({stage:"task-migration-start",iteration}))
         const migration=await javaDatabase(runtime,entry,"migrate",{signal})
         console.log(JSON.stringify({stage:"task-migration-result",iteration,exitCode:migration.exitCode,...(migration.exitCode===0?{migrations:migration.proof.migrations}:{category:databaseCategory(migration.proof.category)})}))
-        check(migration.exitCode===0&&migration.proof.migrations===(iteration===1?3:2))
+        check(migration.exitCode===0&&migration.proof.migrations===(iteration===1?4:3))
         const noop=await javaDatabase(runtime,entry,"migrate",{signal});check(noop.exitCode===0&&noop.proof.migrations===0)
         if(legacy)check(isDeepStrictEqual(legacy,await taskSql(runtime,entry,"legacy",{},signal)))
         if(iteration===1)startupCases+=await httpStartup(runtime,entry,fixture,signal)
@@ -158,7 +158,7 @@ export async function taskCheck(signal){
         const reopened=await httpCall(server,"getTask","GET",`/api/bot/v1/tasks/${state.task.id}`,{signal});check(reopened.status===200&&reopened.value.task.title===state.task.title&&reopened.value.task.version===3)
         const replay=await httpCall(server,"createTaskMessage","POST",`/api/bot/v1/tasks/${state.task.id}/messages`,{principal:"p2",body:state.mbody,signal});check(replay.status===201&&replay.body.equals(state.sent.body))
         const resumed=await httpCall(server,"getEvents","GET",`/api/bot/v1/events?after=${state.resumeCursor}`,{principal:"p2",signal});check(resumed.status===200&&resumed.value.events.some(event=>event.taskId===state.task.id&&event.entityRef.version===3)&&!resumed.value.hasMore)
-        console.log(JSON.stringify({stage:"task-proof",iteration,project:entry.project,emptyOrV1Upgrade:iteration===1?"empty-V1-V2-V3":"actual-V1-data-preserved",legacyNineFactsPreserved:iteration===2,fourRealHTTP:true,oldSixSmoke:true,reopened:true,noExecution:true,startupCases,...{denials:state.denials,replays:state.replays}}));projects.push(entry.project)
+        console.log(JSON.stringify({stage:"task-proof",iteration,project:entry.project,emptyOrV1Upgrade:iteration===1?"empty-V1-V2-V3-V4":"actual-V1-data-preserved",legacyNineFactsPreserved:iteration===2,fourRealHTTP:true,oldSixSmoke:true,reopened:true,noExecution:true,startupCases,...{denials:state.denials,replays:state.replays}}));projects.push(entry.project)
       }finally{
         let failed=false;for(const finish of[async()=>{if(server)await server.stop()},stopHttpChildren,stopHttpStartupChildren,stopTaskSqlChildren,async()=>{if(fixture)await closeHttpFixture(fixture)}])try{await finish()}catch{failed=true}
         try{console.log(JSON.stringify({stage:"task-cleanup",...await cleanupTestDatabase(entry)}));await httpAbsent(entry.project)}catch{failed=true}

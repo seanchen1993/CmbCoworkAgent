@@ -16,7 +16,7 @@ export async function databaseCheck(signal) {
         let result = await javaDatabase(runtime, entry, "readiness", { signal })
         console.log(JSON.stringify({ stage: "empty-readiness", status: result.proof.status, category: /^[A-Z_]+$/.test(result.proof.category) ? result.proof.category : "NONE" }))
         check(result.exitCode === 1 && result.proof.category === "MIGRATION_INVALID")
-        result = await javaDatabase(runtime, entry, "migrate", { signal }); console.log(JSON.stringify({ stage: "first-migrate", status: result.proof.status, category: /^[A-Z_]+$/.test(result.proof.category) ? result.proof.category : "NONE", migrations: result.proof.migrations })); check(result.exitCode === 0 && result.proof.migrations === 3)
+        result = await javaDatabase(runtime, entry, "migrate", { signal }); console.log(JSON.stringify({ stage: "first-migrate", status: result.proof.status, category: /^[A-Z_]+$/.test(result.proof.category) ? result.proof.category : "NONE", migrations: result.proof.migrations })); check(result.exitCode === 0 && result.proof.migrations === 4)
         result = await javaDatabase(runtime, entry, "migrate", { signal }); console.log(JSON.stringify({ stage: "noop-migrate", status: result.proof.status, category: /^[A-Z_]+$/.test(result.proof.category) ? result.proof.category : "NONE", migrations: result.proof.migrations })); check(result.exitCode === 0 && result.proof.migrations === 0)
         for (const command of ["store", "reload", "history"]) {
           result = await javaDatabase(runtime, entry, command, { signal, probe: true })
@@ -35,7 +35,7 @@ export async function databaseCheck(signal) {
         let stoppedDenied = false; try { await appPassword(entry, signal) } catch { stoppedDenied = true }
         check(stoppedDenied)
         projects.push(entry.project)
-        console.log(JSON.stringify({ stage: "database-proof", project: entry.project, iteration, migrations: "3-then-noop", tables: 16, zeroForeignKeys: true, unicodeAndBytes: "reopened", historyFailures: 5, scopedPrivilegeDenials: 3, queryTimeout: true, badPasswordRejected: true, stoppedAndStaleEndpointRejected: true }))
+        console.log(JSON.stringify({ stage: "database-proof", project: entry.project, iteration, migrations: "4-then-noop", tables: 17, zeroForeignKeys: true, unicodeAndBytes: "reopened", historyFailures: 5, scopedPrivilegeDenials: 3, queryTimeout: true, badPasswordRejected: true, stoppedAndStaleEndpointRejected: true }))
       } finally {
         try { console.log(JSON.stringify({ stage: "cleanup", ...await cleanupTestDatabase(entry) })) }
         catch { cleanupFailed = true; console.log(JSON.stringify({ stage: "cleanup", status: "failed", project: entry.project })) }

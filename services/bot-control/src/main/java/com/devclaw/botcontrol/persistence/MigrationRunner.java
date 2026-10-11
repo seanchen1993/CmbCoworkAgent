@@ -11,6 +11,7 @@ public final class MigrationRunner {
     static final String SCRIPT = "V1__bot_group_storage.sql";
     static final String TASK_SCRIPT = "V2__task_collaboration.sql";
     static final String NODE_SCRIPT = "V3__runtime_node_authorization.sql";
+    static final String RUN_SCRIPT = "V4__requirement_run_queue.sql";
     private final Flyway flyway;
     public MigrationRunner(DataSource source) { flyway = configuration(source).load(); }
     static FluentConfiguration configuration(DataSource source) {
@@ -19,7 +20,7 @@ public final class MigrationRunner {
             .cleanDisabled(true).cleanOnValidationError(false).baselineOnMigrate(false).createSchemas(false)
             .validateOnMigrate(true).validateMigrationNaming(true).failOnMissingLocations(true)
             // Pending source migrations are legitimate for explicit migrate;
-            // readiness additionally requires the exact three applied successes.
+            // readiness additionally requires the exact four applied successes.
             .ignorePendingMigrations(true).ignoreFutureMigrations(false)
             .ignoreMissingMigrations(false).ignoreIgnoredMigrations(false)
             .outOfOrder(false).placeholderReplacement(false)
@@ -33,8 +34,8 @@ public final class MigrationRunner {
         try {
             flyway.validate();
             MigrationInfo[] all = flyway.info().all();
-            if (all.length != 3) throw new IllegalStateException();
-            String[] scripts = {SCRIPT, TASK_SCRIPT, NODE_SCRIPT};
+            if (all.length != 4) throw new IllegalStateException();
+            String[] scripts = {SCRIPT, TASK_SCRIPT, NODE_SCRIPT, RUN_SCRIPT};
             for (int i = 0; i < scripts.length; i++) if (all[i].getVersion() == null || !String.valueOf(i + 1).equals(all[i].getVersion().getVersion()) ||
                 !scripts[i].equals(all[i].getScript()) || all[i].getChecksum() == null || all[i].getState() != MigrationState.SUCCESS) throw new IllegalStateException();
         } catch (RuntimeException e) { throw new DatabaseFailure(DatabaseFailure.Category.MIGRATION_INVALID); }

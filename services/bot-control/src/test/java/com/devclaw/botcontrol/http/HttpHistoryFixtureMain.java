@@ -19,6 +19,7 @@ public final class HttpHistoryFixtureMain {
         final Object[] values=new Object[10]; final byte[][] bytes=new byte[10][]; String hash;
         final byte[][] v2=new byte[10][];
         final byte[][] v3=new byte[10][];
+        final byte[][] v4=new byte[10][];
     }
     private static Snapshot snapshot(Connection c) throws Exception {
         Snapshot s=new Snapshot();ByteArrayOutputStream bytes=new ByteArrayOutputStream();DataOutputStream data=new DataOutputStream(bytes);
@@ -31,6 +32,8 @@ public final class HttpHistoryFixtureMain {
             for(int i=0;i<10;i++){s.v2[i]=r.getBytes(i+1);data.writeInt(s.v2[i]==null?-1:s.v2[i].length);if(s.v2[i]!=null)data.write(s.v2[i]);}
             if(!r.next()||r.getInt(1)!=3||!"3".equals(r.getString(2))||!(r.getObject(6) instanceof Integer)||!Boolean.TRUE.equals(r.getObject(10)))throw new IllegalStateException("TEST_HISTORY");
             for(int i=0;i<10;i++){s.v3[i]=r.getBytes(i+1);data.writeInt(s.v3[i]==null?-1:s.v3[i].length);if(s.v3[i]!=null)data.write(s.v3[i]);}
+            if(!r.next()||r.getInt(1)!=4||!"4".equals(r.getString(2))||!(r.getObject(6) instanceof Integer)||!Boolean.TRUE.equals(r.getObject(10)))throw new IllegalStateException("TEST_HISTORY");
+            for(int i=0;i<10;i++){s.v4[i]=r.getBytes(i+1);data.writeInt(s.v4[i]==null?-1:s.v4[i].length);if(s.v4[i]!=null)data.write(s.v4[i]);}
             if(r.next())throw new IllegalStateException("TEST_HISTORY");
         }}
         byte[] digest=MessageDigest.getInstance("SHA-256").digest(bytes.toByteArray());StringBuilder hex=new StringBuilder();for(byte b:digest)hex.append(String.format(Locale.ROOT,"%02x",b&255));s.hash=hex.toString();return s;
@@ -47,8 +50,9 @@ public final class HttpHistoryFixtureMain {
                 for(int i=0;i<10;i++)if(i!=5&&!Arrays.equals(original.bytes[i],mutated.bytes[i]))throw new IllegalStateException("TEST_HISTORY");
                 if(!Arrays.deepEquals(original.v2,mutated.v2))throw new IllegalStateException("TEST_HISTORY");
                 if(!Arrays.deepEquals(original.v3,mutated.v3))throw new IllegalStateException("TEST_HISTORY");
+                if(!Arrays.deepEquals(original.v4,mutated.v4))throw new IllegalStateException("TEST_HISTORY");
                 if(((Integer)mutated.values[5])!=changed)throw new IllegalStateException("TEST_HISTORY");
-                System.out.println("{\"stage\":\"history-mutated\",\"originalFacts\":\""+original.hash+"\",\"mutatedFacts\":\""+mutated.hash+"\",\"rows\":3,\"columns\":10}");System.out.flush();
+                System.out.println("{\"stage\":\"history-mutated\",\"originalFacts\":\""+original.hash+"\",\"mutatedFacts\":\""+mutated.hash+"\",\"rows\":4,\"columns\":10}");System.out.flush();
                 if(!"restore".equals(new String(line(32),StandardCharsets.US_ASCII)))throw new IllegalStateException("TEST_CONTROL");
                 // Runtime refusal must not repair/change ANY mutated fact. Never
                 // restore unexpectedly changed/extra/missing rows by assumption.

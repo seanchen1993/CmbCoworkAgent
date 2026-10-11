@@ -125,31 +125,37 @@ public final class RuntimeNodeApplication {
         // retained READY value: membership/ACL, grant and node can change later.
         return safe(() -> {
             actor(requester); id(taskId); id(botId);
-            return transaction(requester.spaceId, false, (c, db, nodes) -> {
-                JdbcTaskStore tasks = new JdbcTaskStore(c, requester.spaceId); String groupId = tasks.groupId(taskId);
-                if (groupId == null) throw new ApplicationFault(ErrorCode.NOT_FOUND);
-                Group g = group(db, requester, groupId, false); Task t = tasks.task(taskId);
-                if (t == null || !g.id.equals(t.groupId)) throw JdbcApplicationStore.corrupt();
-                Stage stage = null; for (Stage s : t.stages) if (s.id.equals(t.currentStageId)) { if (stage != null) throw JdbcApplicationStore.corrupt(); stage = s; }
-                if (t.status != TaskStatus.ACTIVE || stage == null || stage.kind != StageKind.REQUIREMENT || stage.status != StageStatus.ACTIVE) throw new ApplicationFault(ErrorCode.INPUT_CHANGED);
-                GroupBot binding = null; for (GroupBot b : g.bots) if (botId.equals(b.botId)) binding = b;
-                if (binding == null) throw new ApplicationFault(ErrorCode.FORBIDDEN);
-                Bot bot = db.bot(botId); BotVersion version = db.version(binding.botVersionId);
-                if (bot == null || version == null || !botId.equals(version.botId) || !requester.spaceId.equals(version.spaceId)) throw JdbcApplicationStore.corrupt();
-                if (bot.status != BotStatus.ACTIVE || !version.config.capabilityCeiling.contains(Capability.REQUIREMENTS_ANALYZE)) throw new ApplicationFault(ErrorCode.FORBIDDEN);
-                Grant grant = nodes.grant(g.id);
-                if (grant == null || !grant.enabled) throw new ApplicationFault(ErrorCode.FORBIDDEN);
-                TrustedContext owner = new TrustedContext(requester.spaceId, grant.ownerPrincipalId); actor(owner);
-                if (!ReceiptAccess.member(owner, g, true)) throw new ApplicationFault(ErrorCode.FORBIDDEN);
-                use(owner, grant.workspaceRef); use(requester, grant.workspaceRef);
-                Node node = nodes.node(grant.nodeId);
-                if (node == null || !grant.ownerPrincipalId.equals(node.ownerPrincipalId)) throw JdbcApplicationStore.corrupt();
-                if (!node.supportsRequirement || !node.capabilities.contains(Capability.REQUIREMENTS_ANALYZE)) throw new ApplicationFault(ErrorCode.FORBIDDEN);
-                Instant now = db.now().toInstant();
-                if (!now.isBefore(grant.expiresAt)) throw new ApplicationFault(ErrorCode.FORBIDDEN);
-                DispatchStatus status = !node.lastSeenAt.isAfter(now) && now.isBefore(node.lastSeenAt.plusMillis(HEARTBEAT_TTL_MILLIS)) ? DispatchStatus.READY : DispatchStatus.WAITING_NODE;
-                return new RequirementDispatch(status, requester, t, g, binding, node, grant, now);
-            });
+            return transaction(requester.spaceId, false, (c, db, nodes) -> resolveInTransaction(c, db, nodes, requester, taskId, botId));
         });
+    }
+    // Queue/claim reuse the same locks and current ACLs, never a cached READY.
+    RequirementDispatch resolveInTransaction(Connection c, JdbcApplicationStore db, JdbcRuntimeNodeStore nodes, TrustedContext requester, String taskId, String botId) throws SQLException {
+        actor(requester); id(taskId); id(botId);
+        JdbcTaskStore tasks = new JdbcTaskStore(c, requester.spaceId); String groupId = tasks.groupId(taskId);
+        if (groupId == null) throw new ApplicationFault(ErrorCode.NOT_FOUND);
+        Group g = group(db, requester, groupId, false); Task t = tasks.task(taskId);
+        if (t == null || !g.id.equals(t.groupId)) throw JdbcApplicationStore.corrupt();
+        Stage stage = null; for (Stage s : t.stages) if (s.id.equals(t.currentStageId)) { if (stage != null) throw JdbcApplicationStore.corrupt(); stage = s; }
+        if (t.status != TaskStatus.ACTIVE || stage == null || stage.kind != StageKind.REQUIREMENT || stage.status != StageStatus.ACTIVE) throw new ApplicationFault(ErrorCode.INPUT_CHANGED);
+        GroupBot binding = null; for (GroupBot b : g.bots) if (botId.equals(b.botId)) binding = b;
+        if (binding == null) throw new ApplicationFault(ErrorCode.FORBIDDEN);
+        Bot bot = db.bot(botId); BotVersion version = db.version(binding.botVersionId);
+        if (bot == null || version == null || !botId.equals(version.botId) || !requester.spaceId.equals(version.spaceId)) throw JdbcApplicationStore.corrupt();
+        if (bot.status != BotStatus.ACTIVE || !version.config.capabilityCeiling.contains(Capability.REQUIREMENTS_ANALYZE)) throw new ApplicationFault(ErrorCode.FORBIDDEN);
+        Grant grant = nodes.grant(g.id);
+        if (grant == null || !grant.enabled) throw new ApplicationFault(ErrorCode.FORBIDDEN);
+        TrustedContext owner = new TrustedContext(requester.spaceId, grant.ownerPrincipalId); actor(owner);
+        if (!ReceiptAccess.member(owner, g, true)) throw new ApplicationFault(ErrorCode.FORBIDDEN);
+        use(owner, grant.workspaceRef); use(requester, grant.workspaceRef);
+        Node node = nodes.node(grant.nodeId);
+        if (node == null || !grant.ownerPrincipalId.equals(node.ownerPrincipalId)) throw JdbcApplicationStore.corrupt();
+        if (!node.supportsRequirement || !node.capabilities.contains(Capability.REQUIREMENTS_ANALYZE)) throw new ApplicationFault(ErrorCode.FORBIDDEN);
+        Instant now = db.now().toInstant();
+        if (!now.isBefore(grant.expiresAt)) throw new ApplicationFault(ErrorCode.FORBIDDEN);
+        DispatchStatus status = !node.lastSeenAt.isAfter(now) && now.isBefore(node.lastSeenAt.plusMillis(HEARTBEAT_TTL_MILLIS)) ? DispatchStatus.READY : DispatchStatus.WAITING_NODE;
+        return new RequirementDispatch(status, requester, t, g, binding, node, grant, now);
+    }
+    Group readGroupInTransaction(JdbcApplicationStore db, TrustedContext actor, String groupId) throws SQLException {
+        actor(actor); return group(db, actor, groupId, false);
     }
 }

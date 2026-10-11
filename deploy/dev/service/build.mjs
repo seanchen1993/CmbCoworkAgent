@@ -78,8 +78,11 @@ export async function audit() {
     const migrationResource = "BOOT-INF/classes/db/bot-migration/V1__bot_group_storage.sql"
     const taskMigration = "BOOT-INF/classes/db/bot-migration/V2__task_collaboration.sql"
     const nodeMigration = "BOOT-INF/classes/db/bot-migration/V3__runtime_node_authorization.sql"
-    if (contents.filter(name => name.startsWith("BOOT-INF/classes/db/bot-migration/") && name.endsWith(".sql")).sort().join() !== [migrationResource, taskMigration, nodeMigration].sort().join()) throw new Error("B01_PACKAGED_MIGRATIONS")
-    await run(join(jdk, "bin/jar"), ["xf", jar, ...classes, ...resources, migrationResource, taskMigration, nodeMigration, "BOOT-INF/classes/log4j2.xml"], { env, cwd: temp })
+    const runMigration = "BOOT-INF/classes/db/bot-migration/V4__requirement_run_queue.sql"
+    if (contents.filter(name => name.startsWith("BOOT-INF/classes/db/bot-migration/") && name.endsWith(".sql")).sort().join() !== [migrationResource, taskMigration, nodeMigration, runMigration].sort().join()) throw new Error("B01_PACKAGED_MIGRATIONS")
+    await run(join(jdk, "bin/jar"), ["xf", jar, ...classes, ...resources, migrationResource, taskMigration, nodeMigration, runMigration, "BOOT-INF/classes/log4j2.xml"], { env, cwd: temp })
+    const runMigrationBytes = await readFile(join(temp, runMigration))
+    if (!runMigrationBytes.equals(await readFile(join(project, "src/main/resources/db/bot-migration/V4__requirement_run_queue.sql")))) throw new Error("B01_PACKAGED_MIGRATIONS")
     const nodeMigrationBytes = await readFile(join(temp, nodeMigration))
     if (!nodeMigrationBytes.equals(await readFile(join(project, "src/main/resources/db/bot-migration/V3__runtime_node_authorization.sql")))) throw new Error("B01_PACKAGED_MIGRATIONS")
     const taskMigrationBytes = await readFile(join(temp, taskMigration))
@@ -103,6 +106,7 @@ export async function audit() {
     suites["application.TaskUnitTest"] = 4
     suites["http.TaskHttpBoundaryTest"] = 1
     suites["application.RuntimeNodeUnitTest"] = 6
+    suites["application.RequirementRunUnitTest"] = 6
     let tests = 0
     for (const [name, count] of Object.entries(suites)) {
       const xml = await readFile(join(project, `target/surefire-reports/TEST-com.devclaw.botcontrol.${name}.xml`), "utf8")

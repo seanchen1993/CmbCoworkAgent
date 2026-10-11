@@ -30,7 +30,7 @@ public final class RuntimeNodeDatabaseProbe {
     private static void check(boolean value) { if (!value) throw new IllegalStateException("NODE_PROBE_ASSERTION"); }
     private static void exact(JsonNode n, String... keys) { Set<String> names=new HashSet<String>();n.fieldNames().forEachRemaining(names::add);check(n.isObject()&&names.equals(new HashSet<String>(Arrays.asList(keys)))); }
     private static String id(JsonNode n,String key) { check(n.path(key).isTextual());return B.validateParameter("getBot","botId",n.path(key).textValue()); }
-    private static final class Policy implements IdentityPolicy, RuntimeAccessPolicy {
+    static final class Policy implements IdentityPolicy, RuntimeAccessPolicy {
         final Set<String> denied = new HashSet<String>();
         public boolean activeMember(String s,String p) { return Arrays.asList("A","B").contains(s)&&Arrays.asList("owner","business","other","outsider").contains(p)&&!denied.contains("member:"+p); }
         public boolean mayCreateBot(TrustedContext a) { return true; } public boolean mayCreateGroup(TrustedContext a) { return true; }
@@ -48,7 +48,7 @@ public final class RuntimeNodeDatabaseProbe {
             check(failure.getCause()==null&&failure.getMessage().equals(code.wire()));denials++;
         }
     }
-    private static ObjectNode seed(HikariDataSource source,Policy policy) {
+    static ObjectNode seed(HikariDataSource source,Policy policy) {
         BotApplication bots=new BotApplication(source,policy);
         BotConfig config=new BotConfig();config.description="Requirement expert";config.instructions="Analyze only";config.knowledgeRefs=config.repositoryRefs=config.skillAllowlist=Collections.emptyList();config.capabilityCeiling=new ArrayList<Capability>(CAPS);config.memoryPolicy=BotConfigMemoryPolicy.DISABLED;
         CreateBotRequest r=new CreateBotRequest();r.commandId="seed-bot";r.name="Expert";r.maintainerIds=Arrays.asList("owner","other");r.config=config;

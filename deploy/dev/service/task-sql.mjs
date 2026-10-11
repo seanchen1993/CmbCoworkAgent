@@ -13,7 +13,7 @@ export async function taskSql(runtime,entry,action,fixture={},signal){
   try{await currentHttpDatabase(entry,signal);active(signal);child.child.stdin.end(input);const result=await child.done;active(signal)
     if(result.code!==0||result.stderr||result.spawnError||result.overflow||result.stdout.trim().split("\n").length!==1)throw Error("B02_SQL_BOUNDARY")
     const proof=JSON.parse(result.stdout);if(proof.status!=="verified")throw Error("B02_SQL_BOUNDARY")
-    if(["facts","legacy"].includes(action)&&(!/^[a-f0-9]{64}$/.test(proof.factsSha256)||proof.tables!==(action==="facts"?15:9)||Object.keys(proof.rows??{}).length!==proof.tables))throw Error("B02_SQL_BOUNDARY")
+    if(["facts","legacy"].includes(action)&&(!/^[a-f0-9]{64}$/.test(proof.factsSha256)||proof.tables!==(action==="facts"?16:9)||Object.keys(proof.rows??{}).length!==proof.tables))throw Error("B02_SQL_BOUNDARY")
     return proof
   }finally{clearTimeout(timer);signal?.removeEventListener("abort",stop);await child.stop();try{process.kill(child.child.pid,0);throw Error("B02_SQL_RESIDUE")}catch(error){if(error.code!=="ESRCH")throw error}children.delete(child)}
 }
