@@ -4,9 +4,9 @@ import { httpBearer, proveHttpEndpoint,assertHttpNoSecret } from "./http-java.mj
 import { active } from "./test-database.mjs"
 import { operationDefinitions, dereference, validateRef } from "../../../tests/bot/schema-support.mjs"
 
-const six = new Set(["createBot","getBot","createBotVersion","createGroup","getGroup","updateGroupMembers"])
+const selectedOperations = new Set(["createBot","getBot","createBotVersion","createGroup","getGroup","updateGroupMembers","createTask","getTask","createTaskMessage","getEvents"])
 export function validateHttpResponse(operation,status,body) {
-  if (!six.has(operation)) throw Error("C2_OPERATION_SELECTION")
+  if (!selectedOperations.has(operation)) throw Error("C2_OPERATION_SELECTION")
   const op = operationDefinitions.find(x => x.operation.operationId === operation)?.operation, response = op?.responses[String(status)]
   const schema = response && dereference(response).content?.["application/json"]?.schema
   if (!schema || !Buffer.isBuffer(body) || !body.length || body.length > 1048576) throw Error("C2_RESPONSE_SCHEMA")

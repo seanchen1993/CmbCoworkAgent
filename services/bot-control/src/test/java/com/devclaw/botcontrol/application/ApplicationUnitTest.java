@@ -62,6 +62,7 @@ class ApplicationUnitTest {
     @Test void allSelectorsUseDeclaredSafeErrorsWithoutDatabaseForBadInput() throws Exception {
         AtomicInteger calls = new AtomicInteger(); BotApplication app = new BotApplication(unavailable(calls), policy(true));
         for (Operation op : Operation.values()) {
+            if (op.task()) continue; // Task core has its own equally strict selector tests.
             String id = op.create() ? null : "object";
             ApplicationResponse noActor = app.execute(op, null, id, op.write() ? bytes("{}") : null);
             assertEquals(401, noActor.status); boundary.readResponse(op.wire, noActor.status, noActor.body(), ErrorResponse.class);

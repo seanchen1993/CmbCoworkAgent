@@ -61,6 +61,8 @@ ThreadBinding/ProjectBinding.provider 是不透明 ProviderId（同 Id 格式）
 本轮**未验证真实 HTTP/WSS、MySQL 事务/Outbox、S3 不可变、ES、Runtime 进程、节点停止、真实模型、真实内网、生产授权或跨进程重启恢复**；没有生产 exactly-once 保证。下一阶段必须在批准技术栈与真实资源上独立验证这些边界。
 # B01 Java typed consumption (A2a)
 
+**当前 B02 窄扩展：** 上述/下述B01计数是历史切片。Java消费现为原六Bot/Group加createTask/getTask/createTaskMessage/getEvents，共10操作、44可达定义；Task/Stage状态仍来自原state-transitions.json，冻结JSON不改。Run/Runtime/Upload不进入Java服务闭包。当前真实验收见docs/devclaw-bot-delivery/reviews/B02-review.md。
+
 `scripts/generate-bot-java-contracts.mjs` derives only the six Bot/Group operations' request, success/error, header and path schema closure from these frozen documents. Its Java8 output is `services/bot-control/src/main/java/com/devclaw/botcontrol/contracts/BotContracts.java`: closed POJOs, wire-valued enums, `Long` integers and typed lists/consumer signatures. The generated header hashes exact source bytes; `--check` compares without writing and rejects drift. Unknown reachable keywords, nonlocal references, open objects and unsupported shapes fail before output is written. Task/Run/Runtime types are outside this slice.
 
 Optional null fields are omitted; required fields remain represented. DTOs are structural consumption types, not runtime Schema validation, null/range/conditional enforcement, permissions or a running HTTP service. Original Schema validation and Java/Ajv parity belong to A2b. Run `npm run test:bot-java-generator` with Node22 and `npm run test:bot-service-build` for the isolated real-JDK8 compatibility/consumption build. The build checks drift and never regenerates silently.

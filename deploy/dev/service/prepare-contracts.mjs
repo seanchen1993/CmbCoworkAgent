@@ -3,8 +3,7 @@ import { createHash, randomUUID } from "node:crypto"
 import { fileURLToPath } from "node:url"
 import { join } from "node:path"
 import { generate } from "../../../scripts/generate-bot-java-contracts.mjs"
-import { parityFixtures } from "../../../tests/bot/service/parity-fixtures.mjs"
-import { validator } from "../../../tests/bot/schema-support.mjs"
+import { parityFixtures, parityValidator } from "../../../tests/bot/service/parity-fixtures.mjs"
 
 const root = fileURLToPath(new URL("../../../", import.meta.url))
 export async function prepareContracts() {
@@ -22,6 +21,8 @@ export async function prepareContracts() {
     return match[1]
   }
   const manifest = { hashes, definitions: closure.reachable.map(ref => ref.split("/$defs/")[1]), operations: {} }
+  manifest.definitionSources = Object.fromEntries(closure.reachable.map(ref => [ref.split("/$defs/")[1], ref.split("#")[0]]))
+  if (new Set(manifest.definitions).size !== manifest.definitions.length) throw new Error("B02_DEFINITION_COLLISION")
   for (const item of Object.values(docs["openapi.json"].paths)) for (const operation of Object.values(item)) {
     if (!closure.operations.some(op => op.id === operation?.operationId)) continue
     const mapping = { parameters: {}, responses: {} }
@@ -40,7 +41,7 @@ export async function prepareContracts() {
   await writeFile(join(output, "manifest.json"), JSON.stringify(manifest, null, 2) + "\n")
   const fixtures = parityFixtures(docs, closure)
   const runId = randomUUID()
-  const ajv = fixtures.map(fixture => ({ id: fixture.id, schema: fixture.schema, valid: Boolean(validator(fixture.schema)(JSON.parse(fixture.json))) }))
+  const ajv = fixtures.map(fixture => ({ id: fixture.id, schema: fixture.schema, valid: Boolean(parityValidator(docs, fixture.schema)(JSON.parse(fixture.json))) }))
   await writeFile(join(testOutput, "parity-fixtures.json"), JSON.stringify({ runId, fixtures }) + "\n")
   await writeFile(join(root, "services/bot-control/target/parity-ajv-results.json"), JSON.stringify({ runId, results: ajv }, null, 2) + "\n")
   console.log(JSON.stringify({ stage: "schema-resources", runId, hashes, definitions: manifest.definitions.length, operations: Object.keys(manifest.operations).length, parityFixtures: fixtures.length }))

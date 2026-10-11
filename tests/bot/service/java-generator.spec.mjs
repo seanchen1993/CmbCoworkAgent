@@ -31,16 +31,19 @@ function rejected(change, reason) {
   })
 }
 
-test("six-operation closure is source-derived, typed, deterministic and excludes Task/Run", () => {
+test("ten-operation closure is source-derived, typed, deterministic and excludes Run/Upload", () => {
   const docs = documents(), result = generate(docs)
   assert.deepEqual(result, generate(docs))
-  assert.equal(result.operations.length, 6)
+  assert.equal(result.operations.length, 10)
   assert.ok(result.reachable.includes("schemas.json#/$defs/Id"))
   assert.ok(result.reachable.includes("schemas.json#/$defs/ErrorResponse"))
-  assert.equal(result.reachable.some(name => /Task|Run|Upload/.test(name)), false)
+  assert.ok(result.reachable.includes("schemas.json#/$defs/Task"))
+  assert.ok(result.reachable.includes("state-transitions.json#/$defs/TaskStatus"))
+  assert.equal(result.reachable.some(name => /Run|Upload/.test(name)), false)
   assert.match(result.text, /public Long expectedVersion/)
   assert.match(result.text, /List<GroupMember> members/)
   assert.match(result.text, /getBot\(String xDevClawSpace, String botId\)/)
+  assert.match(result.text, /getEvents\(String xDevClawSpace, String after, Long limit\)/)
   assert.doesNotMatch(result.text, /\bObject\b|\bMap\b/)
   docs["schemas.json"].$defs.Text.description = "supported annotation changes exact source hash, not Java structural types"
   assert.deepEqual(generate(docs).reachable, result.reachable)
@@ -90,6 +93,11 @@ test("remote OpenAPI component/header/path references also fail", () => {
 test("enum wire identifier collision fails and unselected schemas remain outside graph", () => {
   rejected(d => { d["schemas.json"].$defs.Capability.enum = ["a.b", "a_b"] }, /enum identifier collision/)
   const docs = documents()
-  docs["schemas.json"].$defs.Task.unsupportedUnreachable = true
+  docs["schemas.json"].$defs.Run.unsupportedUnreachable = true
   assert.deepEqual(generate(docs).reachable, generate(documents()).reachable)
+})
+test("query parameters are limited to the two original optional getEvents selectors", () => {
+  rejected(d => { d["openapi.json"].paths["/api/bot/v1/events"].get.parameters[0].name = "arbitrary" }, /unsupported\/duplicate parameter/)
+  rejected(d => { d["openapi.json"].paths["/api/bot/v1/events"].get.parameters[1].required = true }, /unsupported\/duplicate parameter/)
+  rejected(d => { d["schemas.json"].$defs.Task.hack = true }, /unsupported keyword hack/)
 })

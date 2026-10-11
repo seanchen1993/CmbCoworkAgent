@@ -5,7 +5,7 @@ import { fileURLToPath } from "node:url"
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..")
 const files = ["schemas.json", "openapi.json", "state-transitions.json"]
-const selected = new Set(["createBot", "getBot", "createBotVersion", "createGroup", "getGroup", "updateGroupMembers"])
+const selected = new Set(["createBot", "getBot", "createBotVersion", "createGroup", "getGroup", "updateGroupMembers", "createTask", "getTask", "createTaskMessage", "getEvents"])
 const annotations = ["description", "title"]
 const identifier = /^[A-Za-z][A-Za-z0-9]*$/
 const fail = (where, reason) => { throw new Error(`${where}: ${reason}`) }
@@ -154,7 +154,8 @@ export function generate(documents, digest = "in-memory-fixture") {
     const parameterNames = new Set()
     for (const parameterRef of parameters) {
       const parameter = component(parameterRef, id)
-      if (!["header", "path"].includes(parameter?.in) || parameter.required !== true || parameterNames.has(parameter.name)) fail(id, "unsupported/duplicate parameter")
+      const query = id === "getEvents" && parameter?.in === "query" && ["after", "limit"].includes(parameter.name) && parameter.required === false
+      if ((!query && (!["header", "path"].includes(parameter?.in) || parameter.required !== true)) || parameterNames.has(parameter.name)) fail(id, "unsupported/duplicate parameter")
       parameterNames.add(parameter.name)
       const type = visit(parameter.schema, "openapi.json", upper(id) + "Parameter", id + "/" + parameter.name)
       args.push(`${type} ${javaName(parameter.name[0].toLowerCase() + parameter.name.slice(1))}`)
@@ -173,7 +174,7 @@ export function generate(documents, digest = "in-memory-fixture") {
     if (results.size !== 1 || errors.size !== 1) fail(id, "single success/error type required")
     operations.push({ id, method, path, args, result: [...results][0], error: [...errors][0] })
   }
-  if (operations.length !== selected.size) fail("OpenAPI", "six selected operations required")
+  if (operations.length !== selected.size) fail("OpenAPI", "selected operations required")
   operations.sort((a, b) => a.id.localeCompare(b.id, "en"))
   const text = [
     "// Generated offline by scripts/generate-bot-java-contracts.mjs. DO NOT EDIT.",

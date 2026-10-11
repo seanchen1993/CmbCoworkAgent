@@ -49,26 +49,32 @@ public final class ContractBoundary {
             manifest = mapper.readTree(resource("manifest.json"));
             final Map<String, byte[]> sources = new HashMap<String, byte[]>();
             final Set<String> patterns = new HashSet<String>();
-            JsonNode fieldSource = null;
+            Map<String, JsonNode> documents = new HashMap<String, JsonNode>();
             for (String file : new String[]{"schemas.json", "openapi.json", "state-transitions.json"}) {
                 byte[] bytes = resource(file);
                 if (!digest(bytes).equals(manifest.path("hashes").path(file).asText())) throw new Failure(Category.SCHEMA_RESOURCE);
                 JsonNode document = mapper.readTree(bytes);
-                if (file.equals("schemas.json")) fieldSource = document;
+                documents.put(file, document);
                 if (!file.equals("openapi.json")) sources.put(document.path("$id").asText(), bytes);
             }
-            for (JsonNode name : manifest.path("definitions")) collectPatterns(fieldSource.path("$defs").path(name.asText()), patterns);
             // networknt eagerly compiles $defs when loading a document. Project only original
             // reachable definition nodes; no field/constraint is rewritten or made permissive.
-            ObjectNode scoped = (ObjectNode) fieldSource.deepCopy();
-            ObjectNode reachableDefs = mapper.createObjectNode();
-            for (JsonNode name : manifest.path("definitions")) {
-                JsonNode definition = fieldSource.path("$defs").get(name.asText());
-                if (definition == null) throw new Failure(Category.SCHEMA_RESOURCE);
-                reachableDefs.set(name.asText(), definition);
+            for (String file : new String[]{"schemas.json", "state-transitions.json"}) {
+                JsonNode source = documents.get(file);
+                ObjectNode scoped = (ObjectNode) source.deepCopy();
+                ObjectNode reachableDefs = mapper.createObjectNode();
+                for (JsonNode name : manifest.path("definitions")) {
+                    String origin = manifest.path("definitionSources").path(name.asText()).asText();
+                    if (!origin.equals("schemas.json") && !origin.equals("state-transitions.json")) throw new Failure(Category.SCHEMA_RESOURCE);
+                    if (!file.equals(origin)) continue;
+                    JsonNode definition = source.path("$defs").get(name.asText());
+                    if (definition == null) throw new Failure(Category.SCHEMA_RESOURCE);
+                    collectPatterns(definition, patterns);
+                    reachableDefs.set(name.asText(), definition);
+                }
+                scoped.set("$defs", reachableDefs);
+                sources.put(source.path("$id").asText(), mapper.writeValueAsBytes(scoped));
             }
-            scoped.set("$defs", reachableDefs);
-            sources.put(fieldSource.path("$id").asText(), mapper.writeValueAsBytes(scoped));
             factory = JsonSchemaFactory.getInstance(VersionFlag.V202012, builder -> builder.schemaLoaders(loaders -> loaders.values(values -> {
                 values.clear();
                 values.add(iri -> {
@@ -86,7 +92,8 @@ public final class ContractBoundary {
             for (JsonNode name : manifest.path("definitions")) {
                 String definition = name.asText();
                 if (!definition.matches("[A-Za-z][A-Za-z0-9]*")) throw new Failure(Category.SCHEMA_RESOURCE);
-                schemas.put(definition, factory.getSchema(SchemaLocation.of("https://contracts.devclaw.invalid/bot/v1/schemas.json#/$defs/" + definition), config));
+                String file = manifest.path("definitionSources").path(definition).asText();
+                schemas.put(definition, factory.getSchema(SchemaLocation.of(documents.get(file).path("$id").asText() + "#/$defs/" + definition), config));
             }
             if (schemas.isEmpty()) throw new Failure(Category.SCHEMA_RESOURCE);
         } catch (Failure failure) { throw failure; }
@@ -221,6 +228,13 @@ public final class ContractBoundary {
         catch (Exception failure) { throw new Failure(Category.DTO_INVALID); }
     }
     public String validateParameter(String operation, String name, String value) {
+        String definition = operation(operation).path("parameters").path(name == null ? "" : name).asText();
+        if (definition.isEmpty()) throw new Failure(Category.SELECTION);
+        try { validateDefinition(definition, serialize(value)); return value; }
+        catch (Failure failure) { throw failure; }
+        catch (Exception failure) { throw new Failure(Category.DTO_INVALID); }
+    }
+    public long validateIntegerParameter(String operation, String name, long value) {
         String definition = operation(operation).path("parameters").path(name == null ? "" : name).asText();
         if (definition.isEmpty()) throw new Failure(Category.SELECTION);
         try { validateDefinition(definition, serialize(value)); return value; }
