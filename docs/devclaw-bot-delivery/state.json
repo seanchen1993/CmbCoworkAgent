@@ -2,13 +2,13 @@
   "schema_version": 1,
   "updated_on": "2026-10-11",
   "project": "DevClaw Bot",
-  "phase": "B02_TASK_COLLABORATION_SLICE",
-  "status": "accepted_merged",
+  "phase": "R01_PARTNER_PROMPT_SLICE",
+  "status": "accepted",
   "integration": {
     "worktree": "/Users/heyirui/.codex/worktrees/devclaw-bot-integration/cmbCowork",
     "branch": "codex/devclaw-bot-integration",
     "code_baseline": "4d778d28972eb9a60fe792bd0a9c5450f4c5f0ee",
-    "last_accepted_commit": "ad9ded7a138f0c2874034506d7705f10592605b4"
+    "last_accepted_commit": "89a61a5974ab906aedde2baea03e17e7d273c670"
   },
   "authorization": {
     "approved_work": [
@@ -19,20 +19,21 @@
       "F05",
       "B00",
       "B01",
-      "B02_TASK_SLICE"
+      "B02_TASK_SLICE",
+      "R01_PARTNER_PROMPT_SLICE"
     ],
     "implementation_task_ids": [
-      "B02"
+      "R01-A1"
     ],
     "scope_confirmed": true,
-    "scope_confirmation": "2026-10-07 最新用户继续任务、不需要过度设计。已完成B00/B01；本轮只B02任务协作最小切片createTask/getTask/createTaskMessage/getEvents，复用Java单体/MySQL/JDK8。无Run派发/Runtime/UI/IM/B03/外部部署，内部参数延后。",
+    "scope_confirmation": "2026-10-11 用户确认可以新申请DevClaw伙伴机器人并按此方向继续。先做R01-A1纯提示词装配切片与入口产品决定，复用冻结BotVersion/Group/Task/ModeRef；不改旧IM或执行引擎，不调用模型/派发Run/连真实招乎/自动恢复定时任务。节点授权与群任务识别已征询，回复前不实现依赖行为。",
     "task_guest_dns_sudo_allowed": true,
     "local_es_s3_containers_allowed": true,
     "host_sudo_or_network_change_allowed": false,
     "explicit_user_pause": false,
     "automatic_continuation_paused_by_user": true,
-    "manual_continuation_authorized_at_utc": "2026-10-07T12:13:41Z",
-    "manual_continuation_instruction": "Latest human: 继续任务 不需要过度设计. Timestamp is actual scope verification, not exact human send. Continue next minimalTask slice with SAME stopped gpt-6.1-sol/high writer; no automatic continuation resume.",
+    "manual_continuation_authorized_at_utc": "2026-10-11T08:29:36Z",
+    "manual_continuation_instruction": "Latest human accepts new partner robot and asks to continue on this design and identify remaining decisions. Timestamp is scope verification, not exact human send. Root directly handles serial R01-A1 in integration tree; no subagent or timer resume.",
     "database_foreign_keys": "none; application transactional validation/locks plus PK/unique/index",
     "local_database_permissions": "ALL PRIVILEGES ON devclaw.* only; no GRANT OPTION/global/other schemas. B1 fixed official new-empty-test bootstrap only; retained dev unchanged.",
     "external_push_allowed": false,
@@ -478,9 +479,37 @@
       "open_review_items": [],
       "remaining_acceptance": [],
       "wait_reason": null
+    },
+    {
+      "id": "R01-A1",
+      "status": "accepted",
+      "spec": "tasks/R01-A1.md",
+      "decisions": "partner-entry-decisions.md",
+      "attempt_report": "attempts/R01-A1-root.md",
+      "writer": "root_serial",
+      "worktree": "/Users/heyirui/.codex/worktrees/devclaw-bot-integration/cmbCowork",
+      "branch": "codex/devclaw-bot-integration",
+      "baseline": "31a795c1dc7c548d4065c7a08e3d4ae5dd938b6f",
+      "accepted_code_commit": "89a61a5974ab906aedde2baea03e17e7d273c670",
+      "accepted_on": "2026-10-11",
+      "acceptance_evidence": "attempts/R01-A1-root.md",
+      "recovery_check": "Only root live; integration31a795c1 and local e54d3fb0 clean at entry; pgrep relevant Java/Maven/task commands empty. Original MySQL/ES/S3 containers healthy on loopback, automaticTOML PAUSED. No resource mutation.",
+      "verification": {
+        "partner_tests": "Node22/tsx fa50a5 exit0 13/13",
+        "test_types": "0311c8 standalone tsc exit0 after correcting initial invalid capability fixture",
+        "main_types": "43386/8cc07b tsc exit0; formatting only afterwards, final module again consumed by strict test tsc",
+        "frozen_contracts": "71250/87e5b1 exit0 24/24, drift and generated type consumption",
+        "legacy_im_bridge": "c43d0c exit0,16PASS; old execution/IM source untouched",
+        "diff": "fb9ada diffcheck exit0; five explicit new files in89a61a59, only controller docs remain"
+      },
+      "live_commands": [],
+      "open_review_items": [],
+      "remaining_acceptance": [],
+      "wait_reason": null,
+      "not_delivered": "No callsite in AgentRunService, Run/Runtime dispatch, realIM/UI or full memory ACL guarantee. Runtime must disable default personal-context injection and enforce actual authorization."
     }
   ],
-  "next_action": "Authorized B02 Task/text/events slice accepted_merged; all commands closed and owned tests removed, originaldev/code/cache preserved. Stop this milestone and wait for next explicit scope. NoRun/Runtime/UI/IM or automatic continuation resume.",
+  "next_action": "R01-A1 prompt preparation accepted in89a61a59; no live commands or resource changes. Confirm mention/task-number routing and developer-authorized local node with user, then scope Run/node minimum control and DesktopRuntimeProvider integration. No realIM/UI/full roadmap or automatic continuation resume.",
   "quota_recovery": {
     "verified_at_utc": "2026-10-05T03:55:26Z",
     "ordinary_usage_allowed": true,
@@ -491,6 +520,6 @@
     "previous_interruption": "Originalworkeractualusage-limit error after3045checkpoint; resumedsameoriginalafteractualquota recovery. Nocredits/reset/account/modelchange.",
     "last_verified_limits": {"verified_at_utc":"2026-10-07T10:30:05Z","actual_error":"You have hit your usage limit; try again at4:29PM","advertised_timezone":"notreturned; previouslocalAsia/Shanghai inferred","ordinaryUsageAllowed":true,"primary_used_percent":2,"secondary_used_percent":16,"primary_resets_at_utc":"2026-10-07T15:29:46Z","secondary_resets_at_utc":"2026-10-14T03:29:55Z","agent_previous_status":"actualerrored; interruptconfirmedstopped","worker_head":"5e6d4b430cc47c1148a70ed5d7f615ab94aa11b2","worker_clean":"d92e47","next":"sameoriginalhigh sameA02 audit-only afteractualstop/resourcechecks; no credits/reset/account/modelchange/newwriter/automaticresume","policy":"Currentordinaryusageallowed andoldadvertisedtimepassed. Only recover SAME stoppedoriginalhigh, auditlost19326result first; fresh tests wait maindecision. No reset/purchase/modelaccountchange; automaticPAUSED."}
   },
-  "recovery_notes": "B00+B01 actually accepted_merged. Historical interruption/proof retained inside completedtasks. Latest human manually authorizes next minimal Task slice, no overdesign and no timer resume. Same stopped high writer/tree reused, no quota error observed thisturn; investigate actualerrors before retries.",
-  "current_task_id": "B02"
+  "recovery_notes": "B00/B01/B02 accepted records preserved. Latest human authorizes new partner-entry direction; root serial R01-A1 pure preparation accepted. Pending product questions recorded, no quota failure or timer resume; retain oldlocal tree and all dev resources.",
+  "current_task_id": "R01-A1"
 }
