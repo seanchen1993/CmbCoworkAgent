@@ -4,6 +4,7 @@
 
 ## 最新手动继续（优先于下方已完成里程碑/历史停点）
 
+- 2026-10-11启动定位：V1/V2/noop均成功，真实失败为Tomcat非JSON日志进入closed launcher输出，不是DB迁移；四次诊断都精确回收、原dev健康。JUL父logger原只临时引用，现最小强引用修复（推断GC丢失OFF级别）；临时HTTP-helper/test-main诊断全部撤回，Task入口production。97618真实Java8新编结果待，之后完整两库/升级/事务/旧six回归才接受，仍root串行/自动PAUSED。
 - 2026-10-11手动继续：96552已于fff2cd实际exit1/closed，数据库ready之后、HTTP之前失败IO；测试资源精确回收、当时原dev健康，不再当running或重放未知副作用。实际worker b08659c2只两个README保留改动、相关进程e099f7空。原MySQL后于10-09再次OOM/137（91896e），同image/owner/network/volume；guest可用2451MiB后b3692a仅start同一容器，90034b healthy/127:32969，不改数据/凭据/内存/VM。root串行补安全阶段诊断，继续最小Task真库验收；自动PAUSED，不派串行代理或扩路线。
 - 最新用户策略：没有可并行任务就不派子代理。本轮B02串行，由root从原local树97875ce2和保留的3modified/4untracked接手，B02-A02；旧A01只读、不创建替代代理。已核实当前执行树onlyroot、旧控制句柄not_found、实际相关pgrep/target lsof为空、reflog/文件前日停写且两次hash相同、无测试容器；不是仅根据ID缺失假定停止。此前36JUnit/1884是旧代码worker证据，不代替当前真库/集成验收。
 - 实际专用MySQL693a…OOMKilled/137停止，ES/S3原IDhealthy，daemon/network/volume及限额未变；guest可用2448MiB。先精确启动已核对原容器，保留数据/账号/私有凭据、不改内存/VM/宿主设置，再完成Task-check。自动实际PAUSED，权限和四接口边界不变。下方原high派单和running均为历史。
