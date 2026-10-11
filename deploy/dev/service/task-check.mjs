@@ -10,7 +10,11 @@ import { httpDevProof,httpCapacity,httpAbsent } from "./http-proof.mjs"
 import { httpPrincipals } from "./http-check.mjs"
 import { taskSql,stopTaskSqlChildren } from "./task-sql.mjs"
 
-const filename=fileURLToPath(import.meta.url),check=value=>{if(!value)throw Error("B02_ASSERTION")}
+const filename=fileURLToPath(import.meta.url),check=value=>{
+  if(!value){const error=Error("B02_ASSERTION"),line=/task-check\.mjs:([0-9]+):[0-9]+/.exec(error.stack?.split("\n")[2]??"")
+    // Only the assertion's source line, not a stack, SQL, request or response.
+    console.log(JSON.stringify({stage:"task-assertion",line:line?Number(line[1]):null}));throw error}
+}
 // Emit codes and fixed stages only, never arbitrary child output or error text.
 export const taskFailureCategory=error=>/^(?:B02|B1|C2)_[A-Z_]+$/.test(error?.message)?error.message:"IO"
 const databaseCategory=value=>["CONFIG_INVALID","SECRET_INVALID","DB_AUTH","DB_UNAVAILABLE","DB_TIMEOUT","DB_CONFIGURATION","MIGRATION_INVALID","STORAGE_INVALID"].includes(value)?value:"UNKNOWN"
@@ -33,7 +37,13 @@ async function oldSmoke(server,signal){
 async function taskBusiness(server,runtime,entry,state,signal){
   const facts=()=>taskSql(runtime,entry,"facts",{},signal);let denials=0,replays=0
   const call=(op,method,path,options={})=>httpCall(server,op,method,path,{signal,...options})
-  const denied=async(op,method,path,options,status,code)=>{const before=await facts(),r=await call(op,method,path,options);check(r.status===status&&r.value.error.code===code&&isDeepStrictEqual(before,await facts()));denials++;return r}
+  const denied=async(op,method,path,options,status,code)=>{
+    const before=await facts(),r=await call(op,method,path,options),unchanged=isDeepStrictEqual(before,await facts())
+    if(r.status!==status||r.value.error?.code!==code||!unchanged)console.log(JSON.stringify({stage:"task-denial-failure",case:denials+1,operation:op,expectedStatus:status,actualStatus:r.status,expectedCode:code,actualCode:r.value.error?.code,unchanged}))
+    check(r.status===status&&r.value.error.code===code&&unchanged);denials++
+    if(denials%5===0)console.log(JSON.stringify({stage:"task-denials",verified:denials}))
+    return r
+  }
   const group=state.group,body=createTask("task-create",group.id)
   const empty=await call("getEvents","GET","/api/bot/v1/events");check(empty.status===200&&empty.value.events.length===0&&!empty.value.hasMore)
   const created=await call("createTask","POST","/api/bot/v1/tasks",{body});check(created.status===201)
