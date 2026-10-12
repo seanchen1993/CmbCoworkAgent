@@ -1,5 +1,7 @@
 # DevClaw Bot 长程交付与断点续跑
 
+**2026-10-12 最新出口：R01-A7 accepted，代码0a711b31。** App独立伙伴开发页+明确负责人配置/团队授权+本地node HTTP常驻连接+假招乎命令+既有引擎模拟模型/持久结果已完成。root独立真实JavaHTTP+MySQL+AppControllerWorker+SQLite+DeepAgent model1/tools0/离线等待/取消/澄清/重开不重跑，最终62JUnit1884parity0/55serviceNode/71App9IPC/主含test+web0/完整Appbuild/Chromium假IPC页、新HTTP25/持久launcher/旧defaultHTTP两库均过。所有测试资源闭合，原三健康保留，默认Partner未创建，定时PAUSED；启动说明local-partner-app.md，审查reviews/R01-A7-acceptance.md。只模拟模型，不真实招乎/WSS/云/源码工具/正式审批/长期记忆；下方A6等“最新”为已接受历史，不自动进入后续。
+
 **2026-10-12 最新出口：R01-A6 accepted，代码a07dd89b。** 本地文本需求执行闭环：Task显式澄清→节点当前授权与单attempt启动/续租→专用Thread与现有DeepAgent零工具profile→MySQL原子结果→SQLite重开/失回执同结果重交不重跑。root独立57JUnit/1884parity零、Node46/F03全24、App56/项目+新test类型零、旧入口/Thread/技能回归；真实execution/message/catalog库与App+Java+MySQL+SQLite假模型旅程通过。原三服务保留健康、所有测试句柄/资源精确闭合，定时PAUSED。运行说明local-requirement-demo.md；未接通真实招乎/生产WSS/UI/云/附件源码/完整事件恢复，不扩后续路线。下方A5等“最新”为历史。
 
 2026-10-01 · 协作机制 v1

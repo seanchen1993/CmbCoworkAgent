@@ -1,0 +1,31 @@
+# R01-A7 root
+
+2026-10-12 从ebed5fd3 clean接续。用户要求继续已说明的可操作开发版，root已读现有App/Java接入与AGENTS及最新恢复记录。原Javaagent completed/相关pgrep空；原三sameIDhealthy、定时PAUSED。actualusageordinaryallowed/primary25/secondary30，无reset/purchase/modelaccount变更。
+
+按tasks/R01-A7.md冻结内部开发HTTP接口，Java与App文件真正可并行；root负责App/协调/独立验收。模型连接/成本选择已异步问用户，默认fake，不自动实际调用付费/内网。当前接口与范围ready，未交付新代码/页面，不把A6脚本闭环算A7完成。
+
+用户已明确“先模拟模型返回吧”，scope更新仅fake，无真实模型入口或调用。本轮新App源码草稿已落地：固定回环NodeHTTP客户端/三identity核对/原Schema消费/secret echo拒绝；串行poll与独立heartbeat、generation/stop等graph清理；main安全文件导入/加密连接持久化/指定工作区/团队授权/假招乎命令/单mutation原command+deadline持久重交；独立Customize面板及15固定IPC入口，启动默认不连接不执行。新控制authorization只读经child确认并补task，用当前grant版本CAS，不推断0。
+
+state JSON补丁前几次仅失败校验（过长/锚错序/压缩末任务锚不匹配），均未改文件；最终609ffe验证15tasks/currentA7 implementing/PAUSED、原14task对象deepEqual不变。当前代码未通过最终验收；节点/页面测试与真实HTTP+MySQL+SQLite联调待，Java builder/DB仍子代理独占，root不竞争。main tsc初轮5051b6/8ed922零诊断，最近64181/71848运行结果待；原BuiltinRobotPanel/冻结schema/个人Runtime未改，fake模型只显式sentinel接入旧受限profile。
+
+App里程碑自测：31622b/45168a与3f0fae/5fa309 main/web tsc均exit0（初轮is未定义/页面5层相对路径两诊断已窄修并复验）。6a1b76 15个unique Node用例全过；首867831导入spec导致5重复计数已拆纯fixture，不把15重复当新15。2bd708真实固定IPC注册9Vitest通过：只有主窗口/主frame可信本地URL、闭合参数、native导入对话框、原始异常不透传；未模拟执行旧引擎。4bdc39真实React在Electron Chromium操作旅程通过，无pageerror：导入/连接/工作区/团队/授权、Task创建澄清、离线等待、模拟结果、stop/reconnect不自动执行；IPC为明确stub，后端真实性由另一个HTTP旅程证明。bd0d8f新test类型两诊断（headers推断undefined/unusedmkdir）已修，c27617最后env类型一项已修，最终新test类型复验待。
+
+真实HTTP+MySQL+SQLite+AppController/worker/实际DeepAgent旅程tests/bot/partner-http-journey.ts已备，当前未启动（child仍独占DB/builder）。源码pending，不使用任何真实模型/APIkey；需要child最终freeze后root全diff与独立build/新旧HTTP/持久launcher验收。
+
+08:30UTC child最终freeze/completed/相关process空，root接手。实际读Java核心diff/PartnerLaunchConfig/Handler/Main/4JUnit及launcher资源/启动/停机/5Node测试/实际验收脚本，原公共冻结源/POM/迁移不变。独立37827/68a7ce exit0 JDK8 61JUnit/1884parity0/class52/34libs/V1..V5，main/test编译up-to-date（child真实46/21），root重打jar ed3650790d169f8c02e8843e1887fb780a35821142e04fa527ba63a88c8d0e23，不冒充freshcompile。独立serviceNode37feca 51/51，F03 48313/761609 full24/check/consumption通过；rootApp77206/edb343 71通过，全Electron-vite40402/93db1f exit0，project+newtest71301/9b9129 diagnostics0。
+
+集成前源码审查发现：UI先授权再enable，但首次node未observe登记会NOT_FOUND。窄修App authorizeTeam在明确工作区且人点击授权后，先用已核对nodeSession observe固定能力一次，不auto-enable/poll/execute；不是改服务端授权逻辑。文档说明60s离线宽限；realJourney明确等62s过旧TTL，不能伪造SQL时间假装offline。84048最终15Node+9IPC结果待。真实97876/f2ff95已启动新隔离DB8fcb04ce85aabdaa/7e6d12cf:33040和PartnerJava22145:53802，当前offlineTTL等待，未算通过；只本任务临时资源/原三个保留。下一待完整旅程和精确cleanup，再HTTP边界、持久launcher及受影响旧defaultHTTP独立复验。
+
+97876/8cf87b exit0完整实际App+JavaHTTP+MySQL+SQLite+既有DeepAgent模拟模型，model1/tools0、明确Task澄清、真正60s过期waiting_node/未领取取消、SQLite重开/结果持久可见/重连不重跑/currentGrantCAS全过；8fcb04ce全部精确removed，原3samehealthy。39080/b3f7ac独立新HTTP exit0 25denials/poll8/auth-role/currentrights/concurrentstart+settle/旧公共4，b5791a69/34b7d907:33041/Java22443:53911精确removed。78530/8cdb64 main含全部新test+web diagnostics0。最终App全build73093/6e1ea1 exit0（同旧dynamic/static chunk warnings，不影响build）。84048/1dd876 15Node+9IPC脚本实际exit0。
+
+独立launcher91869/268ec9 exit1 phase stop-preserve；测试a0e50c465deffb72/Java22720:54068 finally精确removed、原三保留健康，禁止记通过。源码发现processInfo先kill0再ps无exit-race处理；PID可在两调用之间退出，run(ps)抛异常后finally第二stop正常。原因目前推断（原checker无更细phase）；窄补ps失败仅重新kill0确认ESRCH才返回null，live/reused或其他失败仍抛、不放宽归属。checker拆stop-owned-process/stop-preserve并记录六个safe布尔事实，真实复验待；当前不能accept。child已completed，root串行修此单点，不新增代理/资源竞争或回滚已有成果。
+
+95594/416997修后launcher真实exit0：21b2394d99ec5137/Java23125:54392，六stop-preserve事实均true、同DBcontainer/volume/credentials跨restart且真实Bot精确读回，finally精确removed/原3健康。为防偶然通过，partnerProcessInfo窄可信本地probe seam与4确定性race/ESRCH/live-reused/EPERM/invalidPID测试已加，2f76a9 9/9，service全部7f6d99 55/55。最后重构后的真实launcher复验待（函数默认仍真实kill0/ps，无新CLI选择/写权）。88b6d9 formatter全部通过，ae0b1b默认Partner未创建。
+
+旧defaultHTTP探针命令最初误用不存在task-http-check.mjs，628ae3只MODULE_NOT_FOUND无副作用；正确90933/f8bf66真实旧LocalHttpMain/13startupnegative通过后B02_SQL_BOUNDARY失败，e057f8bc86fe627e/c2c29553:33045/Java24529:54486均精确回收。源码确证是既有V5测试fixture漏同步：TaskDatabaseProbe.TABLES17但ORDER16导致最后表数组越界，task-sql仍预期16。只补test-only V5结果表实际PK space_id,run_id排序和17表计数，新增JUnit反射护栏；不改生产DB/migration/schema/业务实现。builder审计PersistenceBoundaryTest5→6，总61→62。新编及正确旧HTTP两库复验待，原失败证据保留；仍不accept或扩大路线。
+
+22948/f11418 exit0最终JDK8 build：main up-to-date、test21 actualnewcompile，62JUnit/1884parity0/class52/34libs/V1-V5 bytes不变，main sourceTree c6eeac9cad3a0209dc4ef80d5b0a1e33ca638dbe4f0e1b49f2018020a38317f6同上一产物；jar294d21325a4110411ad9dd3eee009a182e4c0264747d09605ac122ca3a61a1c8。9294/606fc6最终React/Chromium模拟IPC页操作exit0零error。98338/e56d71正确旧defaultHTTP两库当前首库d76905e5/cb0cb836:33046/Java26006:54867已13startupnegative+firstdenials5，running未pass；等待结束并精确清理，之后最终launcher默认probe调用复验/终末audit才能accept。所有root写者串行，child已completed。
+
+最终98338/45f824 exit0旧defaultHTTP两库完整through原6+Task4：empty d76905e5、actualV1upgrade82f6288e/008c2116:33047/Java33107:55988，各30denials4replays/2handshakedJVM races4rollback/commit后真实TCP0bytes+重开receipt/cursor原bytes，首库13startup、旧9facts保持；24starts/sends、active0、both exactremoved，原3samehealthy。只日志标签empty-V4随后补V5，不改变断言/数据/业务。最终6233/f62bc7 launcher默认probes真实再测通过：f7ec77a2/Java40211:56499、6preservefactstrue/同DBvolumecredentials/真实Bot跨restartexact、PID/listeners/DB/network/volume/temp精确removed。默认Partner仍not-created。
+
+终末737424/4003f8原3sameIDhealthy/仅3originalvoldevnetwork，无相关进程；oldlocal2f2c31 e54d3fb0clean；71c800实际PAUSED/defaultPartnernot-created，9c48e8最终service55通过、formatter88b6d9/diffcheck0。正常sourcecommit bc326b/0a711b31450d11f8e3bfa5d85689bced172ee502：46允许文件4100+11-，只任务代码与测试、原公共源/POM/migrations/旧机器人/个人Runtime无变，Git hook复核为原Sep22本地采纳helper/无用户hook/无network（正常本地快照保留）。当前accepted，仅协调docs后续保存；原14Task对象exact，所有句柄闭合/childcompleted，不自动后续或timer。用户可以按local-partner-app.md手动启动开发版，只模拟模型。
