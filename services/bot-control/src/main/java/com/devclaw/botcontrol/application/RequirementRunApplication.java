@@ -62,7 +62,9 @@ public final class RequirementRunApplication {
         } catch (Exception f) { throw JdbcApplicationStore.corrupt(); }
     }
     public static final class Enqueued {
-        public final String runId; public final Status status; public final long taskVersion; public final Instant createdAt;
+        public final String runId; public final Status status; public final long taskVersion;
+        @com.fasterxml.jackson.databind.annotation.JsonSerialize(using=com.devclaw.botcontrol.application.RequirementInstantSerializer.class)
+        public final Instant createdAt;
         private Enqueued(Run run) { runId = run.id; status = run.initialStatus; taskVersion = run.taskVersion; createdAt = run.createdAt; }
     }
     private Group group(JdbcApplicationStore db, TrustedContext actor, String groupId) throws SQLException { return nodes.readGroupInTransaction(db, actor, groupId); }
@@ -218,6 +220,42 @@ public final class RequirementRunApplication {
             Run old=run(db,runs,reader,runId);Result result=runs.result(runId);
             storedResult(old,result);return result;
         });});
+    }
+    public static final class Inspected {
+        public final Run run;public final Result result;
+        private Inspected(Run run,Result result){this.run=run;this.result=result;}
+    }
+    public Inspected inspectRequirementRun(TrustedContext reader,String runId){
+        return safe(()->{actor(reader);id(runId);return transaction(reader.spaceId,false,(c,db,runs)->{
+            Run current=run(db,runs,reader,runId);Result result=runs.result(runId);storedResult(current,result);return new Inspected(current,result);
+        });});
+    }
+    public Inspected inspectNodeRequirementRun(TrustedNodeContext node,String runId){
+        return safe(()->{if(node==null)throw new ApplicationFault(ErrorCode.UNAUTHENTICATED);TrustedContext owner=new TrustedContext(node.spaceId,node.ownerPrincipalId);actor(owner);id(node.nodeId);id(runId);
+            return transaction(node.spaceId,false,(c,db,runs)->{
+                Run current=run(db,runs,owner,runId);if(!node.nodeId.equals(current.nodeId)||!node.ownerPrincipalId.equals(current.ownerPrincipalId))throw new ApplicationFault(ErrorCode.FORBIDDEN);
+                Result result=runs.result(runId);storedResult(current,result);return new Inspected(current,result);
+            });
+        });
+    }
+    public java.util.List<Run> pollNodeRequirementRuns(TrustedNodeContext node){
+        return safe(()->{if(node==null)throw new ApplicationFault(ErrorCode.UNAUTHENTICATED);TrustedContext owner=new TrustedContext(node.spaceId,node.ownerPrincipalId);actor(owner);id(node.nodeId);
+            return transaction(node.spaceId,false,(c,db,runs)->{
+                java.util.List<Run> result=new java.util.ArrayList<Run>();
+                for(String runId:runs.pollIds(node.nodeId,node.ownerPrincipalId)){
+                    try{Run current=run(db,runs,owner,runId);if(!node.nodeId.equals(current.nodeId)||!node.ownerPrincipalId.equals(current.ownerPrincipalId))throw JdbcApplicationStore.corrupt();
+                        if(current.status==Status.QUEUED||current.status==Status.WAITING_NODE||current.status==Status.STARTING||current.status==Status.RUNNING)result.add(current);
+                    }catch(ApplicationFault failure){if(failure.code!=ErrorCode.FORBIDDEN)throw failure;}
+                }return java.util.Collections.unmodifiableList(result);
+            });
+        });
+    }
+    public Task lookupTaskNumber(TrustedContext reader,String groupId,String number){
+        return safe(()->{actor(reader);id(groupId);
+            if(number==null||!number.matches("TASK-[1-9][0-9]{0,15}"))throw new ApplicationFault(ErrorCode.INVALID_PAYLOAD);
+            try{if(Long.parseLong(number.substring(5))>JdbcTaskStore.MAX)throw new ApplicationFault(ErrorCode.INVALID_PAYLOAD);}catch(NumberFormatException failure){throw new ApplicationFault(ErrorCode.INVALID_PAYLOAD);}
+            return transaction(reader.spaceId,false,(c,db,runs)->{group(db,reader,groupId);Task task=new JdbcTaskStore(c,reader.spaceId).taskNumber(groupId,number);if(task==null)throw new ApplicationFault(ErrorCode.NOT_FOUND);return task;});
+        });
     }
     public Run cancelPendingRequirementRun(TrustedContext actor, String runId, long expectedRunVersion) {
         return safe(() -> {

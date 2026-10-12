@@ -49,6 +49,12 @@ public final class JdbcTaskStore {
             if (!r.next()) return null; String group = r.getString(1); if (group == null || r.next()) throw JdbcApplicationStore.corrupt(); return group;
         }
     }
+    public Task taskNumber(String group, String number) throws SQLException {
+        try(PreparedStatement p=prepare("SELECT id FROM tasks WHERE space_id=? AND group_id=? AND task_number=?",space,group,number);ResultSet r=p.executeQuery()){
+            if(!r.next())return null;String id=r.getString(1);if(r.next())throw JdbcApplicationStore.corrupt();
+            Task value=task(id);if(value==null||!group.equals(value.groupId)||!number.equals(value.taskNumber))throw JdbcApplicationStore.corrupt();return value;
+        }
+    }
     public String messageTask(String id) throws SQLException {
         try (PreparedStatement p = prepare("SELECT task_id FROM task_messages WHERE space_id=? AND id=?", space, id); ResultSet r = p.executeQuery()) {
             if (!r.next()) throw JdbcApplicationStore.corrupt(); String task = r.getString(1); if (task == null || r.next()) throw JdbcApplicationStore.corrupt(); return task;

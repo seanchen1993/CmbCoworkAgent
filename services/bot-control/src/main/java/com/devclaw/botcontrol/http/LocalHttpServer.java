@@ -1,6 +1,7 @@
 package com.devclaw.botcontrol.http;
 
 import com.devclaw.botcontrol.adapters.local.LocalLaunchConfig;
+import com.devclaw.botcontrol.adapters.local.PartnerLaunchConfig;
 import com.devclaw.botcontrol.application.BotApplication;
 import com.devclaw.botcontrol.application.TaskApplication;
 import com.devclaw.botcontrol.persistence.DatabaseReadiness;
@@ -41,28 +42,33 @@ public final class LocalHttpServer implements AutoCloseable {
     private WebServer server;
     private LocalHttpServer(HikariDataSource source) { this.source = source; queue.setParent(workers); }
     public static LocalHttpServer start(LocalLaunchConfig config) { return start(config, TransactionObserver.NONE); }
+    public static LocalHttpServer start(PartnerLaunchConfig config) { if(config==null)throw new IllegalArgumentException("HTTP_STARTUP");return start(config.legacy,TransactionObserver.NONE,config); }
     // Package-private existing observer is available only to same-package tests.
     static LocalHttpServer start(LocalLaunchConfig config, TransactionObserver observer) {
+        return start(config,observer,null);
+    }
+    private static LocalHttpServer start(LocalLaunchConfig config,TransactionObserver observer,PartnerLaunchConfig partner) {
         HikariDataSource source = config.database.openPool(); LocalHttpServer result = null;
         try {
             // Even getWebServer/factory construction can bind: do not create either
             // until the complete immutable config and actual DB readiness passed.
             DatabaseReadiness.requireReady(source);
             result = new LocalHttpServer(source);
-            result.bind(config, observer);
+            result.bind(config, observer,partner);
             return result;
         } catch (Exception failure) {
             if (result != null) result.close(); else source.close();
             throw new IllegalStateException("HTTP_STARTUP");
         }
     }
-    private void bind(LocalLaunchConfig config, TransactionObserver observer) throws Exception {
+    private void bind(LocalLaunchConfig config, TransactionObserver observer,PartnerLaunchConfig partnerConfig) throws Exception {
         for (Logger logger : QUIET_LOGGERS) logger.setLevel(Level.OFF);
         StandardEnvironment environment = new StandardEnvironment();
         environment.getPropertySources().remove(StandardEnvironment.SYSTEM_ENVIRONMENT_PROPERTY_SOURCE_NAME);
         environment.getPropertySources().remove(StandardEnvironment.SYSTEM_PROPERTIES_PROPERTY_SOURCE_NAME);
         context.setEnvironment(environment);
         BotHttpHandler handler = new BotHttpHandler(new BotApplication(source, config.identity, observer), new TaskApplication(source, config.identity, observer));
+        PartnerHttpHandler partner=partnerConfig==null?null:new PartnerHttpHandler(partnerConfig,source);
         TomcatServletWebServerFactory factory = new TomcatServletWebServerFactory() {
             @Override protected TomcatWebServer getTomcatWebServer(Tomcat tomcat) {
                 ((StandardHost)tomcat.getHost()).setErrorReportValveClass(null);
@@ -92,7 +98,7 @@ public final class LocalHttpServer implements AutoCloseable {
             DispatcherServlet dispatcher = new DispatcherServlet(context);
             ServletRegistration.Dynamic registration = servletContext.addServlet("bot-contract", dispatcher);
             registration.setLoadOnStartup(1); registration.addMapping("/");
-            FilterRegistration.Dynamic gate = servletContext.addFilter("raw-contract-gate", new RawRequestGate(config.identity));
+            FilterRegistration.Dynamic gate = servletContext.addFilter("raw-contract-gate", new RawRequestGate(config.identity,partner));
             gate.setAsyncSupported(false); gate.addMappingForUrlPatterns(EnumSet.of(DispatcherType.REQUEST), false, "/*");
         });
         server.start();

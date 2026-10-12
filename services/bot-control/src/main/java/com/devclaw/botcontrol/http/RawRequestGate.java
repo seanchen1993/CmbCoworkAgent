@@ -12,9 +12,12 @@ import javax.servlet.http.*;
 final class RawRequestGate implements Filter {
     static final String ROUTE = RawRequestGate.class.getName() + ".route", ACTOR = RawRequestGate.class.getName() + ".actor";
     private final LocalIdentityRegistry identity; private final ContractBoundary boundary = new ContractBoundary();
-    RawRequestGate(LocalIdentityRegistry identity) { this.identity = identity; }
+    private final PartnerHttpHandler partner;
+    RawRequestGate(LocalIdentityRegistry identity) { this(identity,null); }
+    RawRequestGate(LocalIdentityRegistry identity,PartnerHttpHandler partner) { this.identity = identity;this.partner=partner; }
     @Override public void doFilter(ServletRequest input, ServletResponse output, FilterChain chain) throws IOException, ServletException {
         HttpServletRequest request = (HttpServletRequest)input; HttpServletResponse response = (HttpServletResponse)output; RawRoute route = null;
+        if(partner!=null&&partner.accepts(request.getRequestURI())){partner.handle(request,response);return;}
         try {
             route = RawRoute.select(request.getMethod(), request.getRequestURI(), request.getQueryString());
             if (!"127.0.0.1".equals(request.getLocalAddr()) || !"127.0.0.1".equals(request.getRemoteAddr())) throw invalid();

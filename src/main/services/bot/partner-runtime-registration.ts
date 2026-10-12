@@ -1,4 +1,5 @@
 import { getThread } from "../../db"
+import { PARTNER_FAKE_MODEL_REF, PartnerFakeRequirementModel } from "./partner-fake-model"
 import { registerPartnerInputOnlyImplementation } from "../../agent/agent-run-service"
 import {
   createInputOnlyRequirementImplementation,
@@ -21,6 +22,7 @@ export function registerPartnerInputOnlyRuntime(): void {
         }
       },
       async resolveModel(modelRef) {
+        if (modelRef === PARTNER_FAKE_MODEL_REF) return new PartnerFakeRequirementModel({})
         const { getModelConfigByRef } = await import("../../models/registry")
         const config = getModelConfigByRef(modelRef)
         if (!config) throw new InputOnlyRequirementFault("EXECUTION_FAILED")

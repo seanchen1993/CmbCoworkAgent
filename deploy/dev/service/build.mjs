@@ -102,7 +102,7 @@ export async function audit() {
       const bytes = await readFile(join(temp, name))
       if (bytes.readUInt32BE(0) !== 0xcafebabe || bytes.readUInt16BE(6) !== 52) throw new Error("B01_CLASS_MAJOR")
     }
-    const suites = { CompatibilityTest: 4, ContractConsumptionTest: 5, "validation.BoundaryTest": 6, "persistence.PersistenceBoundaryTest": 5 }
+    const suites = { CompatibilityTest: 4, ContractConsumptionTest: 5, "validation.BoundaryTest": 6, "persistence.PersistenceBoundaryTest": 6 }
     suites["application.ApplicationUnitTest"] = 5
     suites["http.HttpBoundaryTest"] = 7
     suites["application.TaskUnitTest"] = 4
@@ -110,6 +110,7 @@ export async function audit() {
     suites["application.RuntimeNodeUnitTest"] = 6
     suites["application.RequirementRunUnitTest"] = 8
     suites["adapters.local.NodeCredentialUnitTest"] = 6
+    suites["adapters.local.PartnerConfigUnitTest"] = 4
     let tests = 0
     for (const [name, count] of Object.entries(suites)) {
       const xml = await readFile(join(project, `target/surefire-reports/TEST-com.devclaw.botcontrol.${name}.xml`), "utf8")

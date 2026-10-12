@@ -1,4 +1,5 @@
 import type { DashboardThreadTraceScope } from "../shared/dashboard-thread-trace-scope"
+import type { PartnerDevApi } from "../shared/bot/partner-dev"
 import type { DashboardKnowledgeCommitRate } from "../shared/dashboard-knowledge-commit-rate"
 import type {
   AppNotification,
@@ -2222,6 +2223,7 @@ interface CustomAPI {
       callback: (event: { type: string; [key: string]: unknown }) => void
     ) => () => void
   }
+  partnerDev: PartnerDevApi
   builtinRobot: {
     cancelThread: (threadId: string) => Promise<boolean>
     getStatus: () => Promise<BuiltinRobotStatus>

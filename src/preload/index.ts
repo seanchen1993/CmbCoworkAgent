@@ -2928,6 +2928,23 @@ const api = {
       }
     }
   },
+  partnerDev: {
+    getStatus: () => ipcRenderer.invoke("partnerDev:getStatus"),
+    importConnection: () => ipcRenderer.invoke("partnerDev:importConnection"),
+    chooseWorkspace: () => ipcRenderer.invoke("partnerDev:chooseWorkspace"),
+    connect: () => ipcRenderer.invoke("partnerDev:connect"),
+    disconnect: () => ipcRenderer.invoke("partnerDev:disconnect"),
+    enableNode: () => ipcRenderer.invoke("partnerDev:enableNode"),
+    stopNode: () => ipcRenderer.invoke("partnerDev:stopNode"),
+    createTeam: (input: {name:string;instructions:string}) => ipcRenderer.invoke("partnerDev:createTeam",input),
+    bindTeam: (input: {groupId:string}) => ipcRenderer.invoke("partnerDev:bindTeam",input),
+    authorizeTeam: () => ipcRenderer.invoke("partnerDev:authorizeTeam"),
+    revokeTeam: () => ipcRenderer.invoke("partnerDev:revokeTeam"),
+    sendMessage: (input: {mentioned:boolean;text:string}) => ipcRenderer.invoke("partnerDev:sendMessage",input),
+    analyzeTask: (input: {taskNumber:string}) => ipcRenderer.invoke("partnerDev:analyzeTask",input),
+    inspectRun: (input: {runId:string}) => ipcRenderer.invoke("partnerDev:inspectRun",input),
+    cancelPending: (input: {runId:string;expectedVersion:number}) => ipcRenderer.invoke("partnerDev:cancelPending",input)
+  },
   builtinRobot: {
     cancelThread: (threadId: string): Promise<boolean> =>
       ipcRenderer.invoke("builtinRobot:cancelThread", threadId),

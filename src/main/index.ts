@@ -406,6 +406,7 @@ import { closeHarnessEnterpriseProjectionWorker } from "./harness-board/enterpri
 import { closeHarnessJsonCodecWorker } from "./harness-board/json-codec-client"
 import { registerUserInputHandlers } from "./ipc/user-input"
 import { registerBuiltinRobotHandlers } from "./ipc/builtin-robot"
+import { registerPartnerDevHandlers, hasActivePartnerDevRun, stopPartnerDev } from "./ipc/partner-dev"
 import { registerBuiltinBrowserIpc } from "./ipc/browser"
 import {
   beginBuiltinBrowserAppQuitCleanup,
@@ -649,7 +650,8 @@ function hasActiveForegroundRuns(): boolean {
     hasAnyActiveAgentTasks() ||
     hasActiveScheduledTaskRuns() ||
     isHeartbeatRunning() ||
-    builtinRobotManager.hasActiveRuns()
+    builtinRobotManager.hasActiveRuns() ||
+    hasActivePartnerDevRun()
   )
 }
 
@@ -1192,6 +1194,7 @@ if (browserNativeMessagingHostLaunch) {
     registerPetHandlers(ipcMain)
     registerUserInputHandlers(ipcMain)
     registerBuiltinRobotHandlers(ipcMain)
+    registerPartnerDevHandlers(ipcMain, () => mainWindow, trustedMainRendererUrl)
     browserService = registerBuiltinBrowserIpc(ipcMain, () => mainWindow, browserCdpPort)
 
     ipcMain.on(APP_ATTENTION_CHANNEL, (event, payload: unknown) => {
@@ -1648,7 +1651,8 @@ if (browserNativeMessagingHostLaunch) {
           shutdownAllAgentTasks(5_000),
           stopSchedulerAndWait(5_000),
           stopHeartbeatAndWait(5_000),
-          builtinRobotManager.stop()
+          builtinRobotManager.stop(),
+          stopPartnerDev()
         ])
         for (const result of shutdownResults) {
           if (result.status === "rejected") {
@@ -1716,6 +1720,7 @@ if (browserNativeMessagingHostLaunch) {
     }
 
     const cleanup = Promise.all([
+      stopPartnerDev().catch(() => console.warn("[Main] partner development shutdown failed")),
       builtinRobotManager
         .stop()
         .catch((err) => console.warn("[Main] stop built-in robot error:", err)),

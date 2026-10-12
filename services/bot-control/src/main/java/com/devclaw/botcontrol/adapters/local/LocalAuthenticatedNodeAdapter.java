@@ -37,4 +37,6 @@ public final class LocalAuthenticatedNodeAdapter {
     public com.devclaw.botcontrol.persistence.JdbcRequirementRunStore.Result getResult(LocalNodeCredentialRegistry.Session session,String runId){
         return credentials.use(session,context->runs.getRequirementResult(new com.devclaw.botcontrol.ports.TrustedContext(context.spaceId,context.ownerPrincipalId),runId));
     }
+    public java.util.List<Run> poll(LocalNodeCredentialRegistry.Session session){return credentials.use(session,context->runs.pollNodeRequirementRuns(context));}
+    public RequirementRunApplication.Inspected inspect(LocalNodeCredentialRegistry.Session session,String runId){return credentials.use(session,context->runs.inspectNodeRequirementRun(context,runId));}
 }

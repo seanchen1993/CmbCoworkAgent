@@ -92,6 +92,12 @@ public final class JdbcRequirementRunStore {
         }
     }
     public Run run(String id) throws SQLException { return one("SELECT * FROM requirement_run_queue WHERE space_id=? AND id=? FOR UPDATE", space, id); }
+    public List<String> pollIds(String node,String owner) throws SQLException {
+        List<String> values=new ArrayList<String>();
+        try(PreparedStatement p=prepare("SELECT q.id FROM requirement_run_queue q INNER JOIN group_members m ON m.space_id=q.space_id AND m.group_id=q.group_id AND m.principal_id=? WHERE q.space_id=? AND q.node_id=? AND q.owner_principal_id=? AND q.status IN ('queued','waiting_node','starting','running') ORDER BY q.group_id,q.id LIMIT 8",owner,space,node,owner);ResultSet r=p.executeQuery()){
+            while(r.next())values.add(id(r.getString(1)));
+        }return values;
+    }
     public Run command(String requester, String command) throws SQLException { return one("SELECT * FROM requirement_run_queue WHERE space_id=? AND requester_principal_id=? AND command_id=? FOR UPDATE", space, requester, command); }
     public String commandGroupId(String requester, String command) throws SQLException {
         try (PreparedStatement p = prepare("SELECT group_id FROM requirement_run_queue WHERE space_id=? AND requester_principal_id=? AND command_id=?", space, requester, command); ResultSet r = p.executeQuery()) {

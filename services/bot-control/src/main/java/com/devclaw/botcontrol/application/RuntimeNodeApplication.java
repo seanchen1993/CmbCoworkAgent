@@ -105,6 +105,9 @@ public final class RuntimeNodeApplication {
             });
         });
     }
+    public Grant getRequirementNodeAuthorization(TrustedContext reader,String groupId){
+        return safe(()->{actor(reader);id(groupId);return transaction(reader.spaceId,false,(c,db,nodes)->{group(db,reader,groupId,false);return nodes.grant(groupId);});});
+    }
     public enum DispatchStatus { READY, WAITING_NODE }
     public static final class RequirementDispatch {
         public final DispatchStatus status;

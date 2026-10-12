@@ -47,6 +47,9 @@ const EvolutionPanel = lazy(() =>
 const BuiltinRobotPanel = lazy(() =>
   import("./BuiltinRobotPanel").then((m) => ({ default: m.BuiltinRobotPanel }))
 )
+const PartnerDevPanel = lazy(() =>
+  import("./PartnerDevPanel").then((m) => ({ default: m.PartnerDevPanel }))
+)
 const UserInfoPanel = lazy(() =>
   import("./UserInfoPanel").then((m) => ({ default: m.UserInfoPanel }))
 )
@@ -73,6 +76,7 @@ type CustomizeTab =
   | "sandbox"
   | "evolution"
   | "robot"
+  | "partnerDev"
   | "userinfo"
   | "pet"
   | "hooks"
@@ -120,6 +124,7 @@ const MENU_GROUPS: MenuGroup[] = [
       { tab: "lsp", label: "Java LSP", icon: Code2 },
       { tab: "evolution", label: "自优化", icon: GitBranch },
       { tab: "robot", label: "机器人管理", icon: Cpu },
+      { tab: "partnerDev", label: "DevClaw 伙伴", icon: Users },
       { tab: "hooks", label: "钩子", icon: Webhook },
       { tab: "codeExecTools", label: "编程式工具调用", icon: Wrench, truncate: true }
     ]
@@ -301,6 +306,8 @@ export function CustomizeView(): React.JSX.Element {
           <EvolutionPanel />
         ) : activeTab === "robot" ? (
           <BuiltinRobotPanel />
+        ) : activeTab === "partnerDev" ? (
+          <PartnerDevPanel />
         ) : activeTab === "lsp" ? (
           <LspPanel threadId={currentThreadId} />
         ) : activeTab === "sandbox" ? (

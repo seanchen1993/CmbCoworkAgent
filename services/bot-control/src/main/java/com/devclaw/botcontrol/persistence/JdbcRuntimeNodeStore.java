@@ -63,6 +63,7 @@ public final class JdbcRuntimeNodeStore {
         public final String id, groupId, nodeId, ownerPrincipalId, workspaceRef;
         public final long version;
         public final boolean enabled;
+        @com.fasterxml.jackson.databind.annotation.JsonSerialize(using=com.devclaw.botcontrol.application.RequirementInstantSerializer.class)
         public final Instant expiresAt, createdAt, updatedAt;
         private Grant(String groupId, ResultSet r) throws SQLException {
             this.groupId = id(groupId); id = id(r.getString(1)); nodeId = id(r.getString(2)); ownerPrincipalId = id(r.getString(3));
