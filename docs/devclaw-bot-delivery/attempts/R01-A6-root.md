@@ -41,3 +41,5 @@ App新增执行器/SQLite单attempt日志、受限AgentRunService分流、专用
 1547/ac2669实际exit0，两个18表零FK/5migration/坏history/权限/真实timeout/重开真库均exactremoved；78077/9bb5b4最终App56全过，63844/6f9a6f主项目+新tests零诊断。最后源代码早停修复后的42108/751baf demo实际exit0/model1/tools0/SQL与重开同结果，9e133c5c…33032与SQLiteowned目录精确回收。
 
 67206a terminalaudit无相关进程，list_agents仅root运行/原childcompleted；原3samehealthy/3卷/devnetworkonly，无test资源，旧local e54d3fb0 clean，实际PAUSED。全部句柄closed。95a2e4 formatter/diffcheck过、jar27f5e401…未变，94a664原13task逐个deepEqual保留。源码在35be83正常提交a07dd89b/39允许产品文件，reviewaccepted。没有push/部署/真实招乎/生产传输/真实模型工具或付费。root随后只保存协调文档与state；本轮完成，不自动扩大路线，不恢复timer。
+
+最后state保存6a0db1发现integration末字段多尾逗号导致JSON校验失败；同shell后续命令未被失败阻断，已产生155e6407 docs提交。只移除该逗号，之后独立完整JSON/旧13task深比较/accepted索引/0live/PAUSED校验必须通过才提交修正。不把失败校验当通过，代码a07dd89b与全部运行证据不变，不重放模型/DB或清空成果。
