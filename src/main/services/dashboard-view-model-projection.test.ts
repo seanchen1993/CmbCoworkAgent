@@ -401,7 +401,7 @@ describe("dashboard worker view-model projection", () => {
       3 * DASHBOARD_HOME_RANKING_QUERY_OUTPUT_BYTE_LIMIT +
         5 * DASHBOARD_HOME_QUERY_OUTPUT_BYTE_LIMIT
     )
-    expect(DASHBOARD_HOME_PAGE_OUTPUT_BYTE_LIMIT).toBe(4.875 * 1024 * 1024)
+    expect(DASHBOARD_HOME_PAGE_OUTPUT_BYTE_LIMIT).toBe(9.75 * 1024 * 1024)
 
     const projected = projectDashboardEsResponse(
       {
@@ -429,6 +429,6 @@ describe("dashboard worker view-model projection", () => {
     expect(DASHBOARD_USER_DIRECTORY_PAGE_SIZE).toBe(1000)
     expect(DASHBOARD_USER_DIRECTORY_MAX_PAGES).toBe(5)
     expect(DASHBOARD_USER_DIRECTORY_MAX_ITEMS).toBe(5000)
-    expect(DASHBOARD_USER_DIRECTORY_OUTPUT_BYTE_LIMIT).toBe(2 * 1024 * 1024)
+    expect(DASHBOARD_USER_DIRECTORY_OUTPUT_BYTE_LIMIT).toBe(4 * 1024 * 1024)
   })
 })
