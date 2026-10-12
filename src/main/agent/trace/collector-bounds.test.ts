@@ -3,6 +3,7 @@ import { tmpdir } from "os"
 import { join } from "path"
 import { afterEach, describe, expect, it, vi } from "vitest"
 import type { AgentTrace } from "./types"
+import { sanitizeTraceForCloudUpload } from "./sanitizer"
 
 const tempRoots: string[] = []
 const adoptionContexts = new Map<string, Record<string, unknown>>()
@@ -151,7 +152,7 @@ describe("bounded trace telemetry", () => {
         inputMessages: [{ role: "tool", content: blob }],
         outputMessage: { role: "assistant", content: blob },
         toolCalls: [{ name: "exec_command", args: { i } }],
-        tokenUsage: { inputTokens: 1000, outputTokens: 50, totalTokens: 1050 }
+        tokenUsage: { inputTokens: 1000, outputTokens: 50, totalTokens: 1050, cacheReadTokens: 600 }
       })
       tracer.endLlmNode({ nodeId, output: blob })
     }
@@ -166,6 +167,7 @@ describe("bounded trace telemetry", () => {
     expect(trace.totalInputTokens).toBe(TURNS * 1000)
     expect(trace.totalOutputTokens).toBe(TURNS * 50)
     expect(trace.totalTokens).toBe(TURNS * 1050)
+    expect(trace.cacheReadTokens).toBe(TURNS * 600)
     // The arrays still stop at their caps: 64 full model calls, then skeletons
     // to 512, and 128 steps.
     expect(trace.modelCalls?.length).toBeLessThanOrEqual(512)
@@ -188,6 +190,72 @@ describe("bounded trace telemetry", () => {
     expect(skeletonTools.every((call) => call.name === "exec_command")).toBe(true)
     expect(skeletonTools.every((call) => Object.keys(call.args).length === 0)).toBe(true)
   }, 30_000)
+
+  it.each([512, 513, 1000])(
+    "counts cache reads across %i model calls despite the detail cap",
+    async (calls) => {
+      const root = makeRoot("trace-cache-total-")
+      process.env.CMB_COWORK_TRACES_DIR = root
+      process.env.CMB_COWORK_TRACE_STORAGE_MODE = "plaintext"
+      mockCollectorDependencies()
+      const { TraceCollector, flushTraceWriteQueue } = await import("./collector")
+      const tracer = new TraceCollector("cache-total", "go", "model", { includeSkillEval: false })
+      for (let index = 0; index < calls; index += 1) {
+        tracer.recordModelCall({
+          startedAt: new Date().toISOString(),
+          inputMessages: [],
+          outputMessage: { role: "assistant", content: "" },
+          toolCalls: [],
+          tokenUsage: {
+            inputTokens: 100,
+            outputTokens: 5,
+            totalTokens: 105,
+            cacheReadTokens: index < 512 ? 60 : 80
+          }
+        })
+      }
+      const trace = await tracer.finish("success")
+      await flushTraceWriteQueue()
+      const expected = Math.min(calls, 512) * 60 + Math.max(0, calls - 512) * 80
+      expect(trace.modelCalls).toHaveLength(Math.min(calls, 512))
+      expect(trace.totalModelCalls).toBe(calls)
+      expect(trace.totalInputTokens).toBe(calls * 100)
+      expect(trace.totalOutputTokens).toBe(calls * 5)
+      expect(trace.totalTokens).toBe(calls * 105)
+      expect(trace.cacheReadTokens).toBe(expected)
+      expect((await tracer.finish("success")).cacheReadTokens).toBe(expected)
+      expect(sanitizeTraceForCloudUpload(trace).cacheReadTokens).toBe(expected)
+      const persisted = JSON.parse(
+        readFileSync(join(root, "cache-total", `${trace.traceId}.jsonl`), "utf8")
+      )
+      expect(persisted.cacheReadTokens).toBe(expected)
+    }
+  )
+
+  it("ignores missing, negative and non-finite cache readings", async () => {
+    const root = makeRoot("trace-cache-invalid-")
+    process.env.CMB_COWORK_TRACES_DIR = root
+    process.env.CMB_COWORK_TRACE_STORAGE_MODE = "plaintext"
+    mockCollectorDependencies()
+    const { TraceCollector } = await import("./collector")
+    const tracer = new TraceCollector("cache-invalid", "go", "model", { includeSkillEval: false })
+    for (const cacheReadTokens of [undefined, -1, Number.NaN, Infinity, -Infinity, 0, 60]) {
+      tracer.recordModelCall({
+        startedAt: new Date().toISOString(),
+        inputMessages: [],
+        outputMessage: { role: "assistant", content: "" },
+        toolCalls: [],
+        tokenUsage: { inputTokens: 100, cacheReadTokens }
+      })
+    }
+    tracer.recordModelCall({
+      startedAt: new Date().toISOString(),
+      inputMessages: [],
+      outputMessage: { role: "assistant", content: "" },
+      toolCalls: []
+    })
+    expect((await tracer.finish("success")).cacheReadTokens).toBe(60)
+  })
 
   it("holds a trace under the persist limit even when every field is maxed out", async () => {
     const root = makeRoot("trace-collector-ceiling-")

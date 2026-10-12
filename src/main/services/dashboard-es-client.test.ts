@@ -32,7 +32,7 @@ let serverUrl = ""
 let overlapSlowActiveRequests = 0
 let overlapSlowPeakRequests = 0
 
-const tickerPayload = `${JSON.stringify({ value: "ticker" })}${" ".repeat(7 * 1024 * 1024)}`
+const tickerPayload = `${JSON.stringify({ value: "ticker" })}${" ".repeat(15 * 1024 * 1024)}`
 const projectedHomePayload = JSON.stringify({
   aggregations: {
     by_model: {
@@ -49,8 +49,10 @@ const projectedHomePayload = JSON.stringify({
     by_layer: { buckets: [] },
     smart_by_tier: { by_tier: { buckets: [{ key: "smart", doc_count: 4 }] } }
   },
-  ignored: "p".repeat(7 * 1024 * 1024)
+  ignored: "p".repeat(15 * 1024 * 1024)
 })
+const expandedBudgetValue = "e".repeat(9 * 1024 * 1024)
+const expandedBudgetPayload = JSON.stringify({ value: expandedBudgetValue })
 const oversizedOutputPayload = JSON.stringify({
   value: "x".repeat(DASHBOARD_ES_OUTPUT_BYTE_LIMIT + 64 * 1024)
 })
@@ -92,6 +94,11 @@ beforeAll(async () => {
     if (index === "oversized-output") {
       response.writeHead(200, { "content-type": "application/json" })
       response.end(oversizedOutputPayload)
+      return
+    }
+    if (index === "expanded-budget") {
+      response.writeHead(200, { "content-type": "application/json" })
+      response.end(expandedBudgetPayload)
       return
     }
     if (index === "bad-request") {
@@ -145,7 +152,10 @@ afterAll(async () => {
 function createClient(onStart?: () => void): DashboardEsWorkerClient {
   const client = new DashboardEsWorkerClient(async () => {
     onStart?.()
-    return new Worker(workerBundlePath, { name: "dashboard-es-test" })
+    return new Worker(workerBundlePath, {
+      name: "dashboard-es-test",
+      resourceLimits: DASHBOARD_ES_WORKER_RESOURCE_LIMITS
+    })
   })
   clients.push(client)
   return client
@@ -217,6 +227,16 @@ describe("Dashboard ES worker", () => {
       clearInterval(ticker)
     }
     expect(ticks).toBeGreaterThan(0)
+  }, 30_000)
+
+  it("accepts responses above the previous raw and normalized byte limits", async () => {
+    const client = createClient()
+    const result = await query(client, "expanded-budget")
+    expect(result).toEqual({ value: expandedBudgetValue })
+    expect(client.getDiagnostics().lastStats).toMatchObject({
+      sourceBytes: expandedBudgetPayload.length,
+      outputBytes: expect.any(Number)
+    })
   }, 30_000)
 
   it("enforces hard limits before raw or normalized payloads cross into main", async () => {

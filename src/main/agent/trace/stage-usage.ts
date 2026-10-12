@@ -53,6 +53,11 @@ export class TraceStageUsageCounter {
     bucket.inputTokens += input
     bucket.outputTokens += output
     bucket.totalTokens += total
+    const cacheRead = usage?.cacheReadTokens
+    if (cacheRead !== undefined && validCount(cacheRead)) {
+      bucket.cacheReadTokens = (bucket.cacheReadTokens ?? 0) + cacheRead
+      bucket.cacheUsageReportedCalls = (bucket.cacheUsageReportedCalls ?? 0) + 1
+    }
     if (usage?.inputTokens !== undefined && usage?.outputTokens !== undefined)
       bucket.tokenUsageReportedCalls += 1
   }
