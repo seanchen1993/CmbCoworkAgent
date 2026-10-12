@@ -79,8 +79,10 @@ export async function audit() {
     const taskMigration = "BOOT-INF/classes/db/bot-migration/V2__task_collaboration.sql"
     const nodeMigration = "BOOT-INF/classes/db/bot-migration/V3__runtime_node_authorization.sql"
     const runMigration = "BOOT-INF/classes/db/bot-migration/V4__requirement_run_queue.sql"
-    if (contents.filter(name => name.startsWith("BOOT-INF/classes/db/bot-migration/") && name.endsWith(".sql")).sort().join() !== [migrationResource, taskMigration, nodeMigration, runMigration].sort().join()) throw new Error("B01_PACKAGED_MIGRATIONS")
-    await run(join(jdk, "bin/jar"), ["xf", jar, ...classes, ...resources, migrationResource, taskMigration, nodeMigration, runMigration, "BOOT-INF/classes/log4j2.xml"], { env, cwd: temp })
+    const resultMigration = "BOOT-INF/classes/db/bot-migration/V5__requirement_run_results.sql"
+    if (contents.filter(name => name.startsWith("BOOT-INF/classes/db/bot-migration/") && name.endsWith(".sql")).sort().join() !== [migrationResource, taskMigration, nodeMigration, runMigration, resultMigration].sort().join()) throw new Error("B01_PACKAGED_MIGRATIONS")
+    await run(join(jdk, "bin/jar"), ["xf", jar, ...classes, ...resources, migrationResource, taskMigration, nodeMigration, runMigration, resultMigration, "BOOT-INF/classes/log4j2.xml"], { env, cwd: temp })
+    if (!(await readFile(join(temp, resultMigration))).equals(await readFile(join(project, "src/main/resources/db/bot-migration/V5__requirement_run_results.sql")))) throw new Error("B01_PACKAGED_MIGRATIONS")
     const runMigrationBytes = await readFile(join(temp, runMigration))
     if (!runMigrationBytes.equals(await readFile(join(project, "src/main/resources/db/bot-migration/V4__requirement_run_queue.sql")))) throw new Error("B01_PACKAGED_MIGRATIONS")
     const nodeMigrationBytes = await readFile(join(temp, nodeMigration))
@@ -106,7 +108,7 @@ export async function audit() {
     suites["application.TaskUnitTest"] = 4
     suites["http.TaskHttpBoundaryTest"] = 1
     suites["application.RuntimeNodeUnitTest"] = 6
-    suites["application.RequirementRunUnitTest"] = 6
+    suites["application.RequirementRunUnitTest"] = 8
     suites["adapters.local.NodeCredentialUnitTest"] = 6
     let tests = 0
     for (const [name, count] of Object.entries(suites)) {

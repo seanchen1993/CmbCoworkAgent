@@ -50,6 +50,7 @@ public final class DatabaseIntegrationProbe {
             {"desktop_runtime_nodes","space_id,id,owner_principal_id,version,supports_requirement,capabilities_bytes,last_seen_at,created_at,updated_at"},
             {"group_runtime_grants","space_id,group_id,id,node_id,owner_principal_id,version,workspace_ref,enabled,expires_at,created_at,updated_at"},
             {"requirement_run_queue","space_id,id,requester_principal_id,command_id,fingerprint,group_id,task_id,stage_id,bot_id,bot_version_id,node_id,owner_principal_id,grant_id,workspace_ref,task_version,group_version,node_version,grant_version,version,initial_status,status,deadline,created_at,updated_at,attempt_id,lease_id,fence,lease_expires_at"},
+            {"requirement_run_results","space_id,run_id,attempt_id,outcome,result_text,settled_at"},
             {"bot_schema_history","installed_rank,version,description,type,script,checksum,installed_by,installed_on,execution_time,success"}
         };
         for (String[] table : expected) {
@@ -72,6 +73,7 @@ public final class DatabaseIntegrationProbe {
                         else if (name.equals("fingerprint")) check("binary".equals(type) && r.getLong(6) == 32);
                         else if (name.equals("http_status")) check("smallint".equals(type));
                         else if (name.equals("supports_requirement") || name.equals("enabled")) check("tinyint".equals(type));
+                        else if (name.equals("result_text")) check("mediumtext".equals(type) && "utf8mb4".equals(r.getString(4)) && "utf8mb4_unicode_ci".equals(r.getString(5)));
                         else check("varchar".equals(type) && "ascii_bin".equals(r.getString(5)));
                     }
                 }
@@ -97,7 +99,8 @@ public final class DatabaseIntegrationProbe {
             "task_messages.PRIMARY=0:space_id,id", "task_messages.uq_task_message_version=0:space_id,task_id,task_version",
             "task_event_cursors.PRIMARY=0:space_id,id", "task_event_cursors.ix_task_cursor_expiry=1:space_id,expires_at",
             "desktop_runtime_nodes.PRIMARY=0:space_id,id", "group_runtime_grants.PRIMARY=0:space_id,group_id", "group_runtime_grants.uq_group_runtime_grant_id=0:space_id,id",
-            "requirement_run_queue.PRIMARY=0:space_id,id", "requirement_run_queue.uq_requirement_enqueue=0:space_id,requester_principal_id,command_id", "requirement_run_queue.ix_requirement_group_status=1:space_id,group_id,status", "requirement_run_queue.ix_requirement_node_status=1:space_id,node_id,status"
+            "requirement_run_queue.PRIMARY=0:space_id,id", "requirement_run_queue.uq_requirement_enqueue=0:space_id,requester_principal_id,command_id", "requirement_run_queue.ix_requirement_group_status=1:space_id,group_id,status", "requirement_run_queue.ix_requirement_node_status=1:space_id,node_id,status",
+            "requirement_run_results.PRIMARY=0:space_id,run_id", "requirement_run_results.uq_requirement_result_attempt=0:space_id,attempt_id"
         };
         Map<String,String> wanted = new TreeMap<String,String>();
         for (String value : declarations) { int split = value.indexOf('='); wanted.put(value.substring(0, split), value.substring(split + 1)); }
@@ -107,6 +110,7 @@ public final class DatabaseIntegrationProbe {
         check(scalar(c, "SELECT COUNT(*) FROM bot_schema_history WHERE version='2' AND success=1 AND checksum IS NOT NULL") == 1);
         check(scalar(c, "SELECT COUNT(*) FROM bot_schema_history WHERE version='3' AND success=1 AND checksum IS NOT NULL") == 1);
         check(scalar(c, "SELECT COUNT(*) FROM bot_schema_history WHERE version='4' AND success=1 AND checksum IS NOT NULL") == 1);
+        check(scalar(c, "SELECT COUNT(*) FROM bot_schema_history WHERE version='5' AND success=1 AND checksum IS NOT NULL") == 1);
     }
     private static byte[] padded(String value, int size) {
         byte[] result = new byte[size], original = value.getBytes(StandardCharsets.UTF_8);
@@ -214,7 +218,7 @@ public final class DatabaseIntegrationProbe {
         for (int index = 0; index < edits.length; index++) try (Connection c = source.getConnection()) {
             DatabaseReadiness.requireReady(source);
             List<List<String>> original = historyFacts(c);
-            check(original.size() == 4);
+            check(original.size() == 5);
             List<String> row = original.get(0);
             check("1".equals(row.get(0)) && "1".equals(row.get(1)) && "SQL".equals(row.get(3)) && MigrationRunner.SCRIPT.equals(row.get(4)) && row.get(5) != null && "1".equals(row.get(9)));
             List<List<String>> expected = new ArrayList<List<String>>();
@@ -225,11 +229,12 @@ public final class DatabaseIntegrationProbe {
                 else changed.set(9, "0");
                 expected.add(changed);
             }
-            // The fixed fixture changes only V1. V2/V3/V4 must remain byte-for-byte
+            // The fixed fixture changes only V1. V2/V3/V4/V5 must remain byte-for-byte
             // represented in both the rejected history and explicit restore.
             expected.add(original.get(1));
             expected.add(original.get(2));
             expected.add(original.get(3));
+            expected.add(original.get(4));
             c.setAutoCommit(false); check(execute(c, edits[index]) == 1); c.commit();
             List<List<String>> mutated = historyFacts(c);
             check(expected.equals(mutated));

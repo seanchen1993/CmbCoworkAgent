@@ -59,4 +59,23 @@ class RequirementRunUnitTest {
         fault(ErrorCode.DEPENDENCY_UNAVAILABLE,()->app.getRequirementRun(owner,"run"));
         assertEquals(2,connections.get()); assertEquals(30000,RequirementRunApplication.LEASE_MILLIS);
     }
+    @Test void executionTicketsAndSafeFailureCodesAreValidatedBeforeSql() {
+        TrustedNodeContext node=new TrustedNodeContext("A","node","owner");
+        fault(ErrorCode.UNAUTHENTICATED,()->app.startRequirementRun(null,"run","attempt","lease",1));
+        fault(ErrorCode.COMMAND_CONFLICT,()->app.startRequirementRun(node,"run","attempt","lease",2));
+        fault(ErrorCode.INVALID_PAYLOAD,()->app.renewRequirementRun(node,"run","attempt","/lease",1));
+        for(String text:new String[]{null,""," ","SECRET_STACK","\uD800"})
+            fault(ErrorCode.INVALID_PAYLOAD,()->app.settleRequirementRun(node,"run","attempt","lease",1,"failed",text));
+        fault(ErrorCode.INVALID_PAYLOAD,()->app.settleRequirementRun(node,"run","attempt","lease",1,"unknown","safe"));
+        fault(ErrorCode.INVALID_PAYLOAD,()->app.settleRequirementRun(node,"run","attempt","lease",1,"succeeded","\u0000"));
+        fault(ErrorCode.INVALID_PAYLOAD,()->app.settleRequirementRun(node,"run","attempt","lease",1,"succeeded",String.join("",java.util.Collections.nCopies(16385,"x"))));
+        assertEquals(0,connections.get());
+    }
+    @Test void explicitInternalDatesAreMillisIsoUtc() throws Exception {
+        com.fasterxml.jackson.databind.ObjectMapper mapper=new com.fasterxml.jackson.databind.ObjectMapper();
+        com.fasterxml.jackson.databind.module.SimpleModule module=new com.fasterxml.jackson.databind.module.SimpleModule();
+        module.addSerializer(Instant.class,new RequirementInstantSerializer());mapper.registerModule(module);
+        assertEquals("\"2026-10-11T00:00:00.001Z\"",mapper.writeValueAsString(Instant.parse("2026-10-11T00:00:00.001Z")));
+        assertEquals("\"2026-10-11T00:00:00.000Z\"",mapper.writeValueAsString(Instant.parse("2026-10-11T00:00:00Z")));
+    }
 }

@@ -1,6 +1,7 @@
 package com.devclaw.botcontrol.persistence;
 
 import com.devclaw.botcontrol.contracts.BotContracts.*;
+import com.devclaw.botcontrol.domain.ApplicationFault;
 import com.devclaw.botcontrol.validation.ContractBoundary;
 import java.sql.*;
 import java.util.*;
@@ -89,6 +90,27 @@ public final class JdbcTaskStore {
                 return value;
             } catch (ContractBoundary.Failure failure) { throw JdbcApplicationStore.corrupt(); }
         }
+    }
+    /** Internal input-only requirement view. Caller already holds the current
+     * authorized Group/Task locks; never a whole-group or personal-history read.
+     * LIMIT 51 detects excess and fails, it never truncates accepted context. */
+    public List<TaskMessageResult> requirementMessages(Task task, String botId) throws SQLException {
+        if(task==null||!space.equals(task.spaceId)||task.version<1||task.version>MAX||botId==null)throw JdbcApplicationStore.corrupt();
+        long characters=(long)task.title.length()+task.goal.length();
+        if(characters>60000)throw new ApplicationFault(ErrorCode.RATE_LIMITED);
+        List<TaskMessageResult> result=new ArrayList<TaskMessageResult>();
+        try(PreparedStatement p=prepare("SELECT id,task_version,author_principal_id FROM task_messages WHERE space_id=? AND task_id=? AND task_version<=? AND (target_bot_id IS NULL OR target_bot_id=?) ORDER BY task_version LIMIT 51",space,task.id,task.version,botId);ResultSet r=p.executeQuery()){
+            long previous=1;
+            while(r.next()){
+                if(result.size()==50)throw new ApplicationFault(ErrorCode.RATE_LIMITED);
+                TaskMessageResult value=message(r.getString(1));
+                if(!task.id.equals(value.message.taskId)||!space.equals(value.message.spaceId)||!r.getString(3).equals(value.message.authorPrincipalId)||value.taskVersion!=r.getLong(2)||value.taskVersion<=previous||value.taskVersion>task.version)throw JdbcApplicationStore.corrupt();
+                if(!value.message.artifactVersions.isEmpty())throw new ApplicationFault(ErrorCode.INVALID_PAYLOAD);
+                characters+=value.message.text.length();if(characters>60000)throw new ApplicationFault(ErrorCode.RATE_LIMITED);
+                previous=value.taskVersion;result.add(value);
+            }
+        }
+        return Collections.unmodifiableList(result);
     }
     public void event(Task task, String principal, String command, long oldHead, Timestamp now) throws SQLException {
         if (oldHead < 0 || oldHead >= MAX) throw JdbcApplicationStore.corrupt();

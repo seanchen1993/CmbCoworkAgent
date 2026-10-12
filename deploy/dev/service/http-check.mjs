@@ -82,7 +82,7 @@ export async function httpCheck(signal){
         console.log(JSON.stringify({stage:"http-registered",project:entry.project,iteration}));console.log(JSON.stringify({stage:"http-database-ready",...await startTestDatabase(entry,signal)}));active(signal)
         fixture=await createHttpFixture(httpPrincipals(),signal)
         await httpStartup(runtime,entry,fixture,signal,{unmigrated:true})
-        for(const expected of [3,0]){const migration=await javaDatabase(runtime,entry,"migrate",{signal});check(migration.exitCode===0&&migration.proof.migrations===expected)}
+        for(const expected of [5,0]){const migration=await javaDatabase(runtime,entry,"migrate",{signal});check(migration.exitCode===0&&migration.proof.migrations===expected)}
         const startupNegatives=1+await httpStartup(runtime,entry,fixture,signal)
         server=await startHttpJava(runtime,entry,fixture,"production",signal)
         console.log(JSON.stringify({stage:"http-listener",pid:server.pid,port:server.port,project:entry.project,productionEOF:true}))

@@ -17,7 +17,7 @@ import java.util.*;
 public final class TaskDatabaseProbe {
     private static final ObjectMapper JSON = CompatibilityProbe.strictMapper();
     private static final ContractBoundary B = new ContractBoundary();
-    private static final String[] TABLES = {"bots","bot_versions","bot_maintainers","groups","group_members","group_bots","command_scope","command_receipts","mutation_outbox","tasks","task_messages","task_space_head","task_event_cursors","desktop_runtime_nodes","group_runtime_grants","requirement_run_queue"};
+    private static final String[] TABLES = {"bots","bot_versions","bot_maintainers","groups","group_members","group_bots","command_scope","command_receipts","mutation_outbox","tasks","task_messages","task_space_head","task_event_cursors","desktop_runtime_nodes","group_runtime_grants","requirement_run_queue","requirement_run_results"};
     private static final String[] ORDER = {"space_id,id","space_id,id","space_id,bot_id,principal_id","space_id,id","space_id,group_id,principal_id","space_id,group_id,bot_id","space_id,principal_id","space_id,principal_id,command_id","space_id,id","space_id,id","space_id,id","space_id","space_id,id","space_id,id","space_id,group_id","space_id,id"};
     private static final String LEGACY_OUTBOX = "space_id,id,principal_id,command_id,operation,target_type,target_id,target_version,created_at";
     private static void check(boolean value) { if (!value) throw new IllegalStateException("TASK_FIXTURE"); }

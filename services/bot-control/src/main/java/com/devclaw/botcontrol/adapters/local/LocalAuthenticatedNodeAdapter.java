@@ -25,4 +25,16 @@ public final class LocalAuthenticatedNodeAdapter {
     public Run claim(LocalNodeCredentialRegistry.Session session, String runId) {
         return credentials.use(session, context -> runs.claimRequirementRun(context, runId));
     }
+    public RequirementRunApplication.Started start(LocalNodeCredentialRegistry.Session session,String runId,String attemptId,String leaseId,long fence){
+        return credentials.use(session,context->runs.startRequirementRun(context,runId,attemptId,leaseId,fence));
+    }
+    public Run renew(LocalNodeCredentialRegistry.Session session,String runId,String attemptId,String leaseId,long fence){
+        return credentials.use(session,context->runs.renewRequirementRun(context,runId,attemptId,leaseId,fence));
+    }
+    public com.devclaw.botcontrol.persistence.JdbcRequirementRunStore.Result settle(LocalNodeCredentialRegistry.Session session,String runId,String attemptId,String leaseId,long fence,String outcome,String text){
+        return credentials.use(session,context->runs.settleRequirementRun(context,runId,attemptId,leaseId,fence,outcome,text));
+    }
+    public com.devclaw.botcontrol.persistence.JdbcRequirementRunStore.Result getResult(LocalNodeCredentialRegistry.Session session,String runId){
+        return credentials.use(session,context->runs.getRequirementResult(new com.devclaw.botcontrol.ports.TrustedContext(context.spaceId,context.ownerPrincipalId),runId));
+    }
 }

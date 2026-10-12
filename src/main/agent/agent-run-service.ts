@@ -88,6 +88,8 @@ export interface AgentGoalControlResult {
  */
 export interface AgentRunExecutionContext {
   source: StandardTurnSource
+  /** Trusted main-process profile. Never read from AgentInvokeParams/renderer/IM. */
+  partnerInputOnly?: { systemPrompt: string; modelRef: string }
   localRunLease?: {
     owner: LocalThreadRunOwner
     runId: string
@@ -172,12 +174,19 @@ type AgentGoalControlImplementation = (
  * ESM import cycle.
  */
 let agentRunImplementation: AgentRunImplementation | null = null
+let partnerInputOnlyImplementation: AgentRunImplementation | null = null
 let agentGoalControlImplementation: AgentGoalControlImplementation | null = null
 let activeAgentRunInspector: ActiveAgentRunInspector = () => false
 let activeAgentRunCanceller: ActiveAgentRunCanceller = () => false
 
 export function registerAgentRunImplementation(implementation: AgentRunImplementation): void {
   agentRunImplementation = implementation
+}
+
+export function registerPartnerInputOnlyImplementation(
+  implementation: AgentRunImplementation
+): void {
+  partnerInputOnlyImplementation = implementation
 }
 
 export function registerAgentGoalControlImplementation(
@@ -231,13 +240,18 @@ export async function startAgentRun(
   delivery: AgentRunDelivery,
   context: AgentRunExecutionContext = { source: "desktop" }
 ): Promise<AgentRunHandle> {
-  if (!agentRunImplementation) {
+  // An uninitialized restricted profile MUST NOT fall through to the personal
+  // desktop body (skills/Hooks/history/default model). Old callers are unchanged.
+  const implementation = context.partnerInputOnly
+    ? partnerInputOnlyImplementation
+    : agentRunImplementation
+  if (!implementation) {
     throw new Error("Agent run service is not initialized")
   }
   if (!delivery.isAvailable()) {
     throw new Error("Agent run delivery is unavailable")
   }
-  const completion = agentRunImplementation(request, delivery, context).finally(() => {
+  const completion = implementation(request, delivery, context).finally(() => {
     delivery.finish?.(request.threadId)
   })
   return {

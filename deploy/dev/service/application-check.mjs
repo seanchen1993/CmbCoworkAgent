@@ -55,7 +55,7 @@ async function absent(project) {
   try { await lstat(join(RUNTIME, project)); throw Error("C1_RESIDUE") } catch (error) { if (error.code !== "ENOENT") throw error }
 }
 async function migrated(runtime, entry, signal) {
-  for (const expected of [3, 0]) {
+  for (const expected of [5, 0]) {
     const result = await javaDatabase(runtime, entry, "migrate", { signal })
     if (result.exitCode !== 0) console.log(JSON.stringify({ stage: "migration-failure", category: result.proof.category }))
     check(result.exitCode === 0 && result.proof.migrations === expected)

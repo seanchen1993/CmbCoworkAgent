@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto"
 import { isAbsolute, normalize } from "node:path"
+import { isDeepStrictEqual } from "node:util"
 import type { ThreadBinding } from "../../../shared/bot/contracts.generated"
 import type { NativeSqliteAdapter, NativeSqliteValue } from "../../db/native-sqlite-adapter"
 import { insertThreadRecord } from "../../db/thread-record"
@@ -88,6 +89,37 @@ export class PartnerTaskThreadStore {
       return statement.step() ? statement.getAsObject() : null
     } finally {
       statement.free()
+    }
+  }
+
+  /** Read-only execution check: never recreates a missing binding/Thread. */
+  verify(
+    input: PartnerTaskThreadContext,
+    threadId: string,
+    resolved?: { workspacePath: string | undefined; metadata: Record<string, unknown> }
+  ): void {
+    const value = context(input)
+    const binding = this.row(
+      "SELECT * FROM bot_task_threads WHERE space_id=? AND task_id=? AND stage_id=? AND node_id=?",
+      SCOPE_KEYS.map((key) => value[key])
+    )
+    if (!binding || binding.thread_id !== threadId)
+      throw new PartnerTaskThreadFault("PARTNER_THREAD_MISSING")
+    if (
+      binding.group_id !== value.groupId ||
+      binding.owner_principal_id !== value.ownerPrincipalId ||
+      binding.workspace_ref !== value.workspaceRef
+    )
+      throw new PartnerTaskThreadFault("PARTNER_THREAD_BINDING_CHANGED")
+    this.validateThread(value, binding)
+    if (resolved) {
+      const stored = this.row("SELECT metadata FROM threads WHERE thread_id=?", [threadId])
+      if (
+        resolved.workspacePath !== value.workspacePath ||
+        !stored ||
+        !isDeepStrictEqual(JSON.parse(String(stored.metadata)), resolved.metadata)
+      )
+        throw new PartnerTaskThreadFault("PARTNER_THREAD_CONTEXT_CHANGED")
     }
   }
 

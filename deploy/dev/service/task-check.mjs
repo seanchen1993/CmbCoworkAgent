@@ -146,7 +146,7 @@ export async function taskCheck(signal){
         console.log(JSON.stringify({stage:"task-migration-start",iteration}))
         const migration=await javaDatabase(runtime,entry,"migrate",{signal})
         console.log(JSON.stringify({stage:"task-migration-result",iteration,exitCode:migration.exitCode,...(migration.exitCode===0?{migrations:migration.proof.migrations}:{category:databaseCategory(migration.proof.category)})}))
-        check(migration.exitCode===0&&migration.proof.migrations===(iteration===1?4:3))
+        check(migration.exitCode===0&&migration.proof.migrations===(iteration===1?5:4))
         const noop=await javaDatabase(runtime,entry,"migrate",{signal});check(noop.exitCode===0&&noop.proof.migrations===0)
         if(legacy)check(isDeepStrictEqual(legacy,await taskSql(runtime,entry,"legacy",{},signal)))
         if(iteration===1)startupCases+=await httpStartup(runtime,entry,fixture,signal)

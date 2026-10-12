@@ -9,7 +9,10 @@ import java.util.*;
 /** One-attempt internal queue. Group lock serializes enqueue/claim/cancel.
  * Not a public Run DTO or an executable RunSpec. No secret or absolute path. */
 public final class JdbcRequirementRunStore {
-    public enum Status { QUEUED, WAITING_NODE, STARTING, CANCEL_REQUESTED, CANCELLED, OUTCOME_UNKNOWN }
+    public enum Status {
+        QUEUED, WAITING_NODE, STARTING, RUNNING, SUCCEEDED, FAILED, CANCEL_REQUESTED, CANCELLED, OUTCOME_UNKNOWN;
+        @com.fasterxml.jackson.annotation.JsonValue public String wireValue(){return name().toLowerCase(Locale.ROOT);}
+    }
     private final Connection c; private final String space;
     public JdbcRequirementRunStore(Connection c, String space) { this.c = c; this.space = space; }
     private static Calendar utc() { return Calendar.getInstance(TimeZone.getTimeZone("UTC")); }
@@ -45,6 +48,7 @@ public final class JdbcRequirementRunStore {
         public final String spaceId, id, requesterPrincipalId, commandId, groupId, taskId, stageId, botId, botVersionId, nodeId, ownerPrincipalId, grantId, workspaceRef;
         public final long version, taskVersion, groupVersion, nodeVersion, grantVersion;
         public final Status status, initialStatus;
+        @com.fasterxml.jackson.databind.annotation.JsonSerialize(using=com.devclaw.botcontrol.application.RequirementInstantSerializer.class)
         public final Instant deadline, createdAt, updatedAt, leaseExpiresAt;
         public final String attemptId, leaseId;
         public final Long fence;
@@ -62,12 +66,13 @@ public final class JdbcRequirementRunStore {
             fingerprint = r.getBytes("fingerprint"); if (fingerprint == null || fingerprint.length != 32) throw JdbcApplicationStore.corrupt();
             attemptId = r.getString("attempt_id"); leaseId = r.getString("lease_id"); long f = r.getLong("fence"); fence = r.wasNull() ? null : Long.valueOf(f);
             Timestamp expiry = r.getTimestamp("lease_expires_at", utc()); leaseExpiresAt = expiry == null ? null : expiry.toInstant();
-            boolean claimed = status == Status.STARTING || status == Status.OUTCOME_UNKNOWN;
+            boolean claimed = status == Status.STARTING || status == Status.RUNNING || status == Status.SUCCEEDED || status == Status.FAILED || status == Status.OUTCOME_UNKNOWN;
             if (claimed) {
                 id(attemptId); id(leaseId);
                 if (fence == null || fence != 1 || leaseExpiresAt == null || leaseExpiresAt.getNano() % 1000000 != 0 || !leaseExpiresAt.isAfter(createdAt) || leaseExpiresAt.isAfter(deadline) || version < 2) throw JdbcApplicationStore.corrupt();
             } else if (attemptId != null || leaseId != null || fence != null || leaseExpiresAt != null) throw JdbcApplicationStore.corrupt();
             if (status == Status.QUEUED && version != 1 || status == Status.OUTCOME_UNKNOWN && version < 3 || status == Status.CANCELLED && version < 3 || status == Status.CANCEL_REQUESTED) throw JdbcApplicationStore.corrupt();
+            if (status == Status.RUNNING && version < 3 || (status == Status.SUCCEEDED || status == Status.FAILED) && version < 4) throw JdbcApplicationStore.corrupt();
         }
         public boolean sameCommand(byte[] hash) { return MessageDigest.isEqual(fingerprint, hash); }
         public boolean sameSnapshot(RequirementDispatch d) {
@@ -95,7 +100,7 @@ public final class JdbcRequirementRunStore {
     }
     public long activeCount(String group) throws SQLException {
         // Unknown execution remains reserved until a future explicit reconciliation.
-        try (PreparedStatement p = prepare("SELECT COUNT(*) FROM requirement_run_queue WHERE space_id=? AND group_id=? AND status<>'cancelled'", space, group); ResultSet r = p.executeQuery()) {
+        try (PreparedStatement p = prepare("SELECT COUNT(*) FROM requirement_run_queue WHERE space_id=? AND group_id=? AND status NOT IN ('cancelled','succeeded','failed')", space, group); ResultSet r = p.executeQuery()) {
             if (!r.next()) throw JdbcApplicationStore.corrupt(); return r.getLong(1);
         }
     }
@@ -114,7 +119,31 @@ public final class JdbcRequirementRunStore {
         change("UPDATE requirement_run_queue SET status='waiting_node',version=?,updated_at=? WHERE space_id=? AND id=? AND version=? AND status='queued'", next(old, 1), now, space, old.id, old.version); return run(old.id);
     }
     public Run expiredClaim(Run old, Instant now) throws SQLException {
-        change("UPDATE requirement_run_queue SET status='outcome_unknown',version=?,updated_at=? WHERE space_id=? AND id=? AND version=? AND status='starting'", next(old, 1), now, space, old.id, old.version); return run(old.id);
+        change("UPDATE requirement_run_queue SET status='outcome_unknown',version=?,updated_at=? WHERE space_id=? AND id=? AND version=? AND status IN ('starting','running')", next(old, 1), now, space, old.id, old.version); return run(old.id);
+    }
+    public Run start(Run old, Instant now) throws SQLException {
+        change("UPDATE requirement_run_queue SET status='running',version=?,updated_at=? WHERE space_id=? AND id=? AND version=? AND status='starting'",next(old,1),now,space,old.id,old.version);return run(old.id);
+    }
+    public Run renew(Run old, Instant now, Instant expiry) throws SQLException {
+        change("UPDATE requirement_run_queue SET version=?,updated_at=?,lease_expires_at=? WHERE space_id=? AND id=? AND version=? AND status='running'",next(old,1),now,expiry,space,old.id,old.version);return run(old.id);
+    }
+    public static final class Result {
+        public final String runId, attemptId, outcome, text;
+        @com.fasterxml.jackson.databind.annotation.JsonSerialize(using=com.devclaw.botcontrol.application.RequirementInstantSerializer.class)
+        public final Instant settledAt;
+        private Result(ResultSet r) throws SQLException {
+            runId=id(r.getString("run_id"));attemptId=id(r.getString("attempt_id"));outcome=r.getString("outcome");text=r.getString("result_text");settledAt=instant(r,"settled_at");
+            if (!Arrays.asList("succeeded","failed").contains(outcome) || text==null || text.trim().isEmpty() || text.codePointCount(0,text.length())>16384) throw JdbcApplicationStore.corrupt();
+        }
+    }
+    public Result result(String runId) throws SQLException {
+        try(PreparedStatement p=prepare("SELECT * FROM requirement_run_results WHERE space_id=? AND run_id=?",space,runId);ResultSet r=p.executeQuery()) {
+            if(!r.next())return null;Result value=new Result(r);if(r.next())throw JdbcApplicationStore.corrupt();return value;
+        }
+    }
+    public Result settle(Run old, Instant now, String outcome, String text) throws SQLException {
+        change("INSERT INTO requirement_run_results(space_id,run_id,attempt_id,outcome,result_text,settled_at) VALUES(?,?,?,?,?,?)",space,old.id,old.attemptId,outcome,text,now);
+        change("UPDATE requirement_run_queue SET status=?,version=?,updated_at=? WHERE space_id=? AND id=? AND version=? AND status='running'",outcome,next(old,1),now,space,old.id,old.version);return result(old.id);
     }
     public Run cancelPending(Run old, Instant now) throws SQLException {
         // Neither status is externally observed before commit; no attempt exists.

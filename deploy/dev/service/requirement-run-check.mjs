@@ -142,7 +142,7 @@ export async function requirementRunCheck(signal) {
           fixture = { ...selectFixture(seed), v3Facts: seed.v3Facts, migrations: 3 }
         }
         const migration = await javaDatabase(runtime, entry, "migrate", { signal })
-        check(migration.exitCode === 0 && migration.proof.migrations === (iteration === 1 ? 4 : 1))
+        check(migration.exitCode === 0 && migration.proof.migrations === (iteration === 1 ? 5 : 2))
         const noop = await javaDatabase(runtime, entry, "migrate", { signal })
         check(noop.exitCode === 0 && noop.proof.migrations === 0)
         const exercised = await requirementRunProbe(runtime, entry, "exercise", fixture, signal)

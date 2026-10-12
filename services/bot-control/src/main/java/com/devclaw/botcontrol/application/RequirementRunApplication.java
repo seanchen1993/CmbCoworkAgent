@@ -109,6 +109,7 @@ public final class RequirementRunApplication {
                 Run old = run(db, runs, owner, runId);
                 if (!node.nodeId.equals(old.nodeId) || !owner.principalId.equals(old.ownerPrincipalId)) throw new ApplicationFault(ErrorCode.FORBIDDEN);
                 if (old.status == Status.CANCELLED || old.status == Status.CANCEL_REQUESTED) throw new ApplicationFault(ErrorCode.COMMAND_CONFLICT);
+                if (old.status == Status.RUNNING || old.status == Status.SUCCEEDED || old.status == Status.FAILED) throw new ApplicationFault(ErrorCode.COMMAND_CONFLICT);
                 RequirementDispatch d = nodes.resolveInTransaction(c, db, new JdbcRuntimeNodeStore(c, node.spaceId), new TrustedContext(old.spaceId, old.requesterPrincipalId), old.taskId, old.botId);
                 if (!old.sameSnapshot(d)) throw new ApplicationFault(ErrorCode.INPUT_CHANGED);
                 if (old.status == Status.OUTCOME_UNKNOWN) return old; // Never allocates a new lease/attempt.
@@ -125,6 +126,98 @@ public final class RequirementRunApplication {
                 return runs.claim(old, d.observedAt, expiry);
             });
         });
+    }
+    public static final class Input {
+        public final Bot bot; public final BotVersion botVersion; public final Group group; public final Task task;
+        public final java.util.List<TaskMessageResult> messages;
+        private Input(Connection c, JdbcApplicationStore db, Run run) throws SQLException {
+            bot=db.bot(run.botId);botVersion=db.version(run.botVersionId);group=db.group(run.groupId);task=new JdbcTaskStore(c,run.spaceId).task(run.taskId);
+            if(bot==null||botVersion==null||group==null||task==null)throw JdbcApplicationStore.corrupt();
+            if(task.version!=run.taskVersion)throw new ApplicationFault(ErrorCode.INPUT_CHANGED);
+            messages=new JdbcTaskStore(c,run.spaceId).requirementMessages(task,run.botId);
+        }
+    }
+    public static final class Started {
+        public final Run run; public final Input input;
+        private Started(Run run,Input input){this.run=run;this.input=input;}
+    }
+    private TrustedContext nodeOwner(TrustedNodeContext node,String runId,String attemptId,String leaseId,long fence) {
+        if(node==null)throw new ApplicationFault(ErrorCode.UNAUTHENTICATED);
+        TrustedContext owner=new TrustedContext(node.spaceId,node.ownerPrincipalId);actor(owner);id(node.nodeId);id(runId);id(attemptId);id(leaseId);
+        if(fence!=1)throw new ApplicationFault(ErrorCode.COMMAND_CONFLICT);return owner;
+    }
+    private void ticket(TrustedNodeContext node,Run old,String attempt,String lease,long fence){
+        if(!old.nodeId.equals(node.nodeId)||!old.ownerPrincipalId.equals(node.ownerPrincipalId))throw new ApplicationFault(ErrorCode.FORBIDDEN);
+        if(!attempt.equals(old.attemptId)||!lease.equals(old.leaseId)||old.fence==null||old.fence!=fence)throw new ApplicationFault(ErrorCode.COMMAND_CONFLICT);
+    }
+    private RequirementDispatch dispatch(Connection c,JdbcApplicationStore db,Run old)throws SQLException{
+        RequirementDispatch d=nodes.resolveInTransaction(c,db,new JdbcRuntimeNodeStore(c,old.spaceId),new TrustedContext(old.spaceId,old.requesterPrincipalId),old.taskId,old.botId);
+        if(!old.sameSnapshot(d))throw new ApplicationFault(ErrorCode.INPUT_CHANGED);
+        if(d.status!=DispatchStatus.READY)throw new ApplicationFault(ErrorCode.NODE_OFFLINE);return d;
+    }
+    public Started startRequirementRun(TrustedNodeContext node,String runId,String attemptId,String leaseId,long fence){
+        return safe(()->{TrustedContext owner=nodeOwner(node,runId,attemptId,leaseId,fence);
+            Started result=transaction(node.spaceId,true,(c,db,runs)->{
+                Run old=run(db,runs,owner,runId);ticket(node,old,attemptId,leaseId,fence);
+                if(old.status==Status.OUTCOME_UNKNOWN) return new Started(old,null);
+                if(old.status!=Status.STARTING&&old.status!=Status.RUNNING)throw new ApplicationFault(ErrorCode.COMMAND_CONFLICT);
+                // Persist unknown before raising outside the transaction, including after ACL withdrawal.
+                Instant now=db.now().toInstant();if(!now.isBefore(old.leaseExpiresAt)||!now.isBefore(old.deadline))return new Started(runs.expiredClaim(old,now),null);
+                RequirementDispatch d=dispatch(c,db,old);Input input=new Input(c,db,old);now=db.now().toInstant();
+                if(!now.isBefore(old.leaseExpiresAt)||!now.isBefore(old.deadline))return new Started(runs.expiredClaim(old,now),null);
+                if(!now.isBefore(d.validUntil))throw new ApplicationFault(ErrorCode.NODE_OFFLINE);
+                Run running=old.status==Status.STARTING?runs.start(old,now):old;return new Started(running,input);
+            });if(result.run.status==Status.OUTCOME_UNKNOWN)throw new ApplicationFault(ErrorCode.OUTCOME_UNKNOWN);return result;
+        });
+    }
+    public Run renewRequirementRun(TrustedNodeContext node,String runId,String attemptId,String leaseId,long fence){
+        return safe(()->{TrustedContext owner=nodeOwner(node,runId,attemptId,leaseId,fence);
+            Run result=transaction(node.spaceId,true,(c,db,runs)->{
+                Run old=run(db,runs,owner,runId);ticket(node,old,attemptId,leaseId,fence);
+                if(old.status==Status.OUTCOME_UNKNOWN)return old;
+                if(old.status!=Status.RUNNING)throw new ApplicationFault(ErrorCode.COMMAND_CONFLICT);
+                Instant now=db.now().toInstant();if(!now.isBefore(old.leaseExpiresAt)||!now.isBefore(old.deadline))return runs.expiredClaim(old,now);
+                RequirementDispatch d=dispatch(c,db,old);now=db.now().toInstant();
+                if(!now.isBefore(old.leaseExpiresAt)||!now.isBefore(old.deadline))return runs.expiredClaim(old,now);
+                if(!now.isBefore(d.validUntil))throw new ApplicationFault(ErrorCode.NODE_OFFLINE);
+                Instant expiry=now.plusMillis(LEASE_MILLIS);
+                if(expiry.isAfter(d.validUntil))expiry=d.validUntil;if(expiry.isAfter(old.deadline))expiry=old.deadline;
+                return runs.renew(old,now,expiry);
+            });if(result.status==Status.OUTCOME_UNKNOWN)throw new ApplicationFault(ErrorCode.OUTCOME_UNKNOWN);return result;
+        });
+    }
+    private static void resultText(String outcome,String text){
+        if(!"succeeded".equals(outcome)&&!"failed".equals(outcome)||text==null||text.trim().isEmpty()||text.codePointCount(0,text.length())>16384)throw new ApplicationFault(ErrorCode.INVALID_PAYLOAD);
+        for(int i=0;i<text.length();i++){char ch=text.charAt(i);if(Character.isHighSurrogate(ch)){if(++i>=text.length()||!Character.isLowSurrogate(text.charAt(i)))throw new ApplicationFault(ErrorCode.INVALID_PAYLOAD);}else if(Character.isLowSurrogate(ch)||ch==0)throw new ApplicationFault(ErrorCode.INVALID_PAYLOAD);}
+        if("failed".equals(outcome)&&!java.util.Arrays.asList("EXECUTION_FAILED","CANCELLED","LEASE_LOST","EMPTY_OUTPUT","TOOL_CALL_REJECTED").contains(text))throw new ApplicationFault(ErrorCode.INVALID_PAYLOAD);
+    }
+    private static void storedResult(Run run,Result result){
+        if(result==null){if(run.status==Status.SUCCEEDED||run.status==Status.FAILED)throw JdbcApplicationStore.corrupt();return;}
+        if(!run.id.equals(result.runId)||run.attemptId==null||!run.attemptId.equals(result.attemptId)||!run.status.name().equalsIgnoreCase(result.outcome)||
+            !run.updatedAt.equals(result.settledAt)||result.settledAt.isBefore(run.createdAt)||!result.settledAt.isBefore(run.leaseExpiresAt)||!result.settledAt.isBefore(run.deadline))throw JdbcApplicationStore.corrupt();
+        try{resultText(result.outcome,result.text);}catch(ApplicationFault failure){throw JdbcApplicationStore.corrupt();}
+    }
+    public Result settleRequirementRun(TrustedNodeContext node,String runId,String attemptId,String leaseId,long fence,String outcome,String text){
+        return safe(()->{TrustedContext owner=nodeOwner(node,runId,attemptId,leaseId,fence);resultText(outcome,text);
+            Result result=transaction(node.spaceId,true,(c,db,runs)->{
+                Run old=run(db,runs,owner,runId);ticket(node,old,attemptId,leaseId,fence);Result previous=runs.result(runId);storedResult(old,previous);
+                if(previous!=null){if(!previous.attemptId.equals(attemptId)||!previous.outcome.equals(outcome)||!previous.text.equals(text))throw new ApplicationFault(ErrorCode.COMMAND_CONFLICT);
+                    return previous;}
+                if(old.status==Status.OUTCOME_UNKNOWN) return null;
+                if(old.status!=Status.RUNNING)throw new ApplicationFault(ErrorCode.COMMAND_CONFLICT);
+                Instant now=db.now().toInstant();if(!now.isBefore(old.leaseExpiresAt)||!now.isBefore(old.deadline)){runs.expiredClaim(old,now);return null;}
+                RequirementDispatch d=dispatch(c,db,old);now=db.now().toInstant();
+                if(!now.isBefore(old.leaseExpiresAt)||!now.isBefore(old.deadline)){runs.expiredClaim(old,now);return null;}
+                if(!now.isBefore(d.validUntil))throw new ApplicationFault(ErrorCode.NODE_OFFLINE);
+                return runs.settle(old,now,outcome,text);
+            });if(result==null)throw new ApplicationFault(ErrorCode.OUTCOME_UNKNOWN);return result;
+        });
+    }
+    public Result getRequirementResult(TrustedContext reader,String runId){
+        return safe(()->{actor(reader);id(runId);return transaction(reader.spaceId,false,(c,db,runs)->{
+            Run old=run(db,runs,reader,runId);Result result=runs.result(runId);
+            storedResult(old,result);return result;
+        });});
     }
     public Run cancelPendingRequirementRun(TrustedContext actor, String runId, long expectedRunVersion) {
         return safe(() -> {

@@ -49,7 +49,7 @@ public final class RequirementRunDatabaseProbe {
         MessageDigest digest=MessageDigest.getInstance("SHA-256");
         try(DataOutputStream out=new DataOutputStream(new DigestOutputStream(new OutputStream(){public void write(int b){}},digest));Connection c=s.getConnection()){
             c.setTransactionIsolation(Connection.TRANSACTION_REPEATABLE_READ);c.setAutoCommit(false);
-            for(String table:DatabaseReadiness.TABLES){if(table.equals("requirement_run_queue"))continue;
+            for(String table:DatabaseReadiness.TABLES){if(table.equals("requirement_run_queue")||table.equals("requirement_run_results"))continue;
                 // Hash rows as sorted original bytes, including every V3 table and history1..3.
                 List<String> rows=new ArrayList<String>();try(PreparedStatement p=c.prepareStatement("SELECT * FROM "+table+(table.equals("bot_schema_history")?" WHERE version IN ('1','2','3')":""))){p.setQueryTimeout(2);try(ResultSet r=p.executeQuery()){while(r.next()){ByteArrayOutputStream b=new ByteArrayOutputStream();DataOutputStream row=new DataOutputStream(b);for(int i=1;i<=r.getMetaData().getColumnCount();i++){byte[] value=r.getBytes(i);row.writeInt(value==null?-1:value.length);if(value!=null)row.write(value);}rows.add(Base64.getEncoder().encodeToString(b.toByteArray()));}}}Collections.sort(rows);out.writeUTF(table);for(String row:rows){byte[] bytes=row.getBytes("US-ASCII");out.writeInt(bytes.length);out.write(bytes);}out.writeInt(-1);
             }c.rollback();

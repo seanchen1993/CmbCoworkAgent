@@ -135,7 +135,7 @@ export async function runtimeNodeCheck(signal) {
           fixture = { ...selectFixture(seed), v2Facts: seed.v2Facts, migrations: seed.migrations }
         }
         const migration = await javaDatabase(runtime, entry, "migrate", { signal })
-        check(migration.exitCode === 0 && migration.proof.migrations === (iteration === 1 ? 4 : 2))
+        check(migration.exitCode === 0 && migration.proof.migrations === (iteration === 1 ? 5 : 3))
         const noop = await javaDatabase(runtime, entry, "migrate", { signal })
         check(noop.exitCode === 0 && noop.proof.migrations === 0)
         const exercised = await runtimeNodeProbe(runtime, entry, "exercise", fixture, signal)

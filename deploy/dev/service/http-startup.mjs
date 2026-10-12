@@ -42,7 +42,7 @@ async function badMigration(runtime,entry,fixture,signal){
     await currentHttpDatabase(entry,signal);await checkHttpFixture(fixture,signal);active(signal);child.child.stdin.write(input+"\n")
     const deadline=Date.now()+15000;let mutated
     while(Date.now()<deadline&&!child.exited){active(signal);mutated=records().find(x=>x.stage==="history-mutated");if(mutated)break;await new Promise(resolve=>setTimeout(resolve,20))}
-    check(mutated?.rows===4&&mutated.columns===10&&/^[a-f0-9]{64}$/.test(mutated.originalFacts)&&/^[a-f0-9]{64}$/.test(mutated.mutatedFacts)&&mutated.originalFacts!==mutated.mutatedFacts)
+    check(mutated?.rows===5&&mutated.columns===10&&/^[a-f0-9]{64}$/.test(mutated.originalFacts)&&/^[a-f0-9]{64}$/.test(mutated.mutatedFacts)&&mutated.originalFacts!==mutated.mutatedFacts)
     await rejected(runtime,entry,fixture,"drifted-migration-checksum",x=>Buffer.from(JSON.stringify(x)),signal)
     active(signal);child.child.stdin.end("restore\n")
     const result=await child.done,restored=records().find(x=>x.stage==="history-restored")
