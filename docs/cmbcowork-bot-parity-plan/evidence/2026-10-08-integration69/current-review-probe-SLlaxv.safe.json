@@ -1,0 +1,46 @@
+{
+  "kind": "configured-real-model-production-review-probe",
+  "appAcceptance": false,
+  "liveDatabaseReadOnly": true,
+  "model": "MiniMax-M3",
+  "originalRunId": "c8340c02-ce4d-40c7-a31c-de9a89e34293",
+  "taskSha256": "2c6d12eaee44151464c74b88d86cc55782ee4301971a0540041d11a867860684",
+  "sources": [
+    {
+      "name": "project-records.csv",
+      "size": 279,
+      "sha256": "dbc20dad04f59df0d704601fdd6559ab33fd1722283496a2092215a387695ac8"
+    },
+    {
+      "name": "review-policy.txt",
+      "size": 537,
+      "sha256": "f8b581c7338cc60fa4b02adaa7a22a89465daf675c991856bf8114069d54da60"
+    }
+  ],
+  "verdicts": [
+    {
+      "sha256": "7832fed246384d78f42ef6064d7a001e9340cb9521d97fd2c79663445da42bcb",
+      "verdict": {
+        "decision": "uncertain",
+        "findings": [
+          "独立原件核验未返回有效结论，未发布该候选文件。"
+        ],
+        "diagnostic": {
+          "stage": "schema",
+          "reason": "invalid_schema",
+          "finish": "tool_call"
+        }
+      }
+    },
+    {
+      "sha256": "abbeebd5407d4025f4dbe4b3d8bbadddf325d05b18ba420f64294c294de7aac8",
+      "verdict": {
+        "decision": "revise",
+        "findings": [
+          "result.csv中P101金额列为15.40万元，对应project-records.csv中P101版本1的记录；但review-policy.txt明确规定\"同一project_id有多个版本时只保留数值最大版本\"，P101在附件中存在版本1(15.40)与版本2(12.40)两条北区已验收记录，按规则应保留版本号最大的v2，对应金额应为12.40万元，候选文件将比较对象从\"版本号\"偷换为\"金额数值\"，违反原规则。",
+          "候选文件中P102(8.55)、P105(-2.50)、P106(0.00)取值与project-records.csv中各自版本号最大的北区已验收记录一致，纳入条数4条与策略相符；但因P101取值错误，候选合计15.40+8.55+(-2.50)+0.00=21.45万元，按规则正确合计应为12.40+8.55+(-2.50)+0.00=18.45万元，与周报草案38.45万元的实际差额应为38.45-18.45=20.00万元，而非候选暗示的17.00万元。"
+        ]
+      }
+    }
+  ]
+}

@@ -15,6 +15,7 @@ interface ThemeSettings {
   mode: ThemeModePreference
   lightTheme: ThemeId
   darkTheme: ThemeId
+  botMessageTint: boolean
 }
 
 const DEFAULT_DARK_THEME_ID: ThemeId = "codex-dark"
@@ -25,7 +26,8 @@ const SYSTEM_DARK_MODE_QUERY = "(prefers-color-scheme: dark)"
 const DEFAULT_THEME_SETTINGS: ThemeSettings = {
   mode: "light",
   lightTheme: DEFAULT_THEME_ID,
-  darkTheme: DEFAULT_DARK_THEME_ID
+  darkTheme: DEFAULT_DARK_THEME_ID,
+  botMessageTint: true
 }
 
 let volatileThemeSettings: ThemeSettings | null = null
@@ -64,7 +66,8 @@ function parseThemeSettings(value: string | null): ThemeSettings | null {
         candidate.darkTheme,
         "dark",
         DEFAULT_THEME_SETTINGS.darkTheme
-      )
+      ),
+      botMessageTint: candidate.botMessageTint !== false
     }
   } catch {
     return null
@@ -172,6 +175,15 @@ export function getLightThemePreference(): ThemeId {
 
 export function getDarkThemePreference(): ThemeId {
   return getThemeSettings().darkTheme
+}
+
+export function getBotMessageTintEnabled(): boolean {
+  return getThemeSettings().botMessageTint
+}
+
+export function setBotMessageTintEnabled(enabled: boolean): void {
+  if (getBotMessageTintEnabled() === enabled) return
+  persistThemeSettings({ ...getThemeSettings(), botMessageTint: enabled })
 }
 
 export function applyThemePreference(theme: ThemePreference): void {

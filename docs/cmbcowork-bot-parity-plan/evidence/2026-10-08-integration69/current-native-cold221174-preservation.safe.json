@@ -1,0 +1,145 @@
+{
+  "kind": "owned-native-cold-schema72-to75-preservation",
+  "recordedAt": "2026-10-10T23:54:10.060Z",
+  "buildId": "832d1cecdbaa1a920e736ff5",
+  "candidateDirectoryName": "acceptance69-cold-22117411bc48127eb79a6cea",
+  "host": {
+    "pid": 46324,
+    "hostId": "7ea96b32-bf29-49e2-879a-15ad1876f9bf"
+  },
+  "observedMain": [
+    {
+      "pid": 46075,
+      "ppid": 1,
+      "start": "Sun Oct 11 07:49:10 2026",
+      "commandSha256": "2fd2f26d734a613157e150820ad4e2a29183a7c10ca4e4fc7d7c00a269519ae9"
+    }
+  ],
+  "schemaBefore": 72,
+  "schemaAfter": 75,
+  "selectedRuns": 35,
+  "checkpointPayloadBytesHashed": 3838027,
+  "inputReceipt": {
+    "path": "/tmp/cmb-combined75-post-start.safe.json",
+    "bytes": 2373,
+    "sha256": "d0d90539126791806d4d0973bc3d0363d9d560390d48c05412530a636c867af2"
+  },
+  "quiescentReceipt": {
+    "path": "/Users/chenqiang/Library/Application Support/CMBDevClaw-development/2026-10-08/presentation/cold-ui-output-plan/pins-quiesced-before-start-1791676150003953000.safe.json",
+    "bytes": 579028,
+    "sha256": "acd6bacbeb325884f6cb4b46bce33928740fe5ab6450f08a60c3951a3d3c5e75"
+  },
+  "postStartReceipt": {
+    "path": "/Users/chenqiang/Library/Application Support/CMBDevClaw-development/2026-10-08/presentation/cold-ui-output-plan/pins-post-start-pre-review-1791676278730616000.safe.json",
+    "bytes": 580143,
+    "sha256": "e1e26c2f9c2ced1ed9b23ddae67f995d9c965ec2d3fb684edd65d66e5c1f4323"
+  },
+  "comparisonMethod": "Deep equality of complete selected-group safe pin objects, with sorted-key canonical SHA-256; not counts alone",
+  "selectedGroupsEqual": {
+    "runs": true,
+    "effects": true,
+    "interactions": true,
+    "artifacts": true,
+    "artifactObjects": true,
+    "peerDispatch": true,
+    "peerWaits": true,
+    "checkpoints": true,
+    "skills": true,
+    "project": true
+  },
+  "groupFingerprints": {
+    "runs": {
+      "beforeSha256": "9d35877e2b8ef214c269b2ee55b8a69db6c39a3af988135eceb4531afd475a0a",
+      "afterSha256": "9d35877e2b8ef214c269b2ee55b8a69db6c39a3af988135eceb4531afd475a0a",
+      "beforeCount": 35,
+      "afterCount": 35
+    },
+    "effects": {
+      "beforeSha256": "469c263b8185f95d0564b833486627431abd16c99db0878e5dbf4c8a88b384d7",
+      "afterSha256": "469c263b8185f95d0564b833486627431abd16c99db0878e5dbf4c8a88b384d7",
+      "beforeCount": 11,
+      "afterCount": 11
+    },
+    "interactions": {
+      "beforeSha256": "11a16fc675e4b4a2e77bcf4510ae160c3d46506697aa76b4b18d4193f83686aa",
+      "afterSha256": "11a16fc675e4b4a2e77bcf4510ae160c3d46506697aa76b4b18d4193f83686aa",
+      "beforeCount": 15,
+      "afterCount": 15
+    },
+    "artifacts": {
+      "beforeSha256": "f2febb53b8a8ffa9d1a8178672bfb74bd26a41fc7ac83a07b805bc43da501ae6",
+      "afterSha256": "f2febb53b8a8ffa9d1a8178672bfb74bd26a41fc7ac83a07b805bc43da501ae6",
+      "beforeCount": 13,
+      "afterCount": 13
+    },
+    "artifactObjects": {
+      "beforeSha256": "203856383281c14c98b348ee674871399532b556021e4b16b8f35054ee86d238",
+      "afterSha256": "203856383281c14c98b348ee674871399532b556021e4b16b8f35054ee86d238"
+    },
+    "peerDispatch": {
+      "beforeSha256": "9635b8d2d506260e41adb663785e6e2c7d8c195e5e058a4d431a6de67b725395",
+      "afterSha256": "9635b8d2d506260e41adb663785e6e2c7d8c195e5e058a4d431a6de67b725395",
+      "beforeCount": 7,
+      "afterCount": 7
+    },
+    "peerWaits": {
+      "beforeSha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+      "afterSha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+      "beforeCount": 0,
+      "afterCount": 0
+    },
+    "checkpoints": {
+      "beforeSha256": "76ce25a31313693dcea6f5da6b377b6c9c5801f8ee7f3829a5473fc395e17ac0",
+      "afterSha256": "76ce25a31313693dcea6f5da6b377b6c9c5801f8ee7f3829a5473fc395e17ac0"
+    },
+    "skills": {
+      "beforeSha256": "e96b169c75bf5b6d9629469f02d65763690f1033f286c4f084800b828a34bc54",
+      "afterSha256": "e96b169c75bf5b6d9629469f02d65763690f1033f286c4f084800b828a34bc54",
+      "beforeCount": 6,
+      "afterCount": 6
+    },
+    "project": {
+      "beforeSha256": "8e9a231dcfaa2ec990970091b5bcfe77373b91fe4017d0dceb10064cf6230b04",
+      "afterSha256": "8e9a231dcfaa2ec990970091b5bcfe77373b91fe4017d0dceb10064cf6230b04"
+    }
+  },
+  "configurationFingerprintsEqual": {
+    "custom-models.json": true,
+    ".env": true,
+    "userinfo-models.json": true,
+    "bot-host/models.private": false,
+    "bot-host/workspace.private.json": true
+  },
+  "configuration": {
+    "path": "/Users/chenqiang/Library/Application Support/CMBDevClaw-development/2026-10-08/acceptance69-final/home/bot-host/models.private",
+    "bytes": 2652,
+    "beforeSha256": "bcf654e9af164e1267e94aa9218ac294a9aa9725746437823ba61ac6f418097d",
+    "afterSha256": "c61497bc9f72417cbd399d4e476a90fefd0dea955cb036d394bc67a53b981344",
+    "changedFields": [
+      "skillSources.builtinSkillsDir",
+      "execution.resourceDirectory"
+    ],
+    "beforeRuntimePrefix": "acceptance69-cold-f3d5afe6873fe5f9de067041",
+    "afterRuntimePrefix": "acceptance69-cold-22117411bc48127eb79a6cea",
+    "replacementCount": 2,
+    "currentMatchesPostStartPin": true,
+    "inverseReplacementMatchesOriginalByteSha256": true,
+    "inverseReplacementSha256": "bcf654e9af164e1267e94aa9218ac294a9aa9725746437823ba61ac6f418097d",
+    "onlyFrozenRuntimePrefixChanged": true,
+    "otherConfigurationFingerprintsUnchanged": true,
+    "credentialsDecrypted": false,
+    "privateValuesPrinted": false
+  },
+  "scope": {
+    "sourcePinsReadOnly": true,
+    "hostStartedByThisAudit": false,
+    "personalDatabaseModified": false,
+    "productionSourceModified": false,
+    "deliveryLedgerModified": false,
+    "selectedLogicalGroupsOnly": true,
+    "wholeDatabaseByteEqualityClaimed": false,
+    "credentialsDecrypted": false,
+    "privateValuesPrinted": false
+  },
+  "fullTaskOrParitySuccessClaimed": false
+}

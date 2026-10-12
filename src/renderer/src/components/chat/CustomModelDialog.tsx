@@ -322,11 +322,16 @@ export function CustomModelDialog({
   const [allConfigs, setAllConfigs] = useState<CustomModelItem[]>([])
   const [defaultModelId, setDefaultModelId] = useState("")
   const [defaultModelDraftId, setDefaultModelDraftId] = useState("")
+  const [loading, setLoading] = useState(true)
+  const [loadFailed, setLoadFailed] = useState(false)
+  const [loadAttempt, setLoadAttempt] = useState(0)
 
   useEffect(() => {
     let cancelled = false
 
     if (open) {
+      setLoading(true)
+      setLoadFailed(false)
       setShowKey(false)
       setFormError(null)
       setTestResult(null)
@@ -368,14 +373,21 @@ export function CustomModelDialog({
           }
         })
         .catch((error) => {
+          if (cancelled) return
           console.error("[CustomModelDialog] Failed to load model settings:", error)
+          setLoadFailed(true)
         })
+        .finally(() => {
+          if (!cancelled) setLoading(false)
+        })
+    } else {
+      setLoading(true)
     }
 
     return () => {
       cancelled = true
     }
-  }, [open, selectedModelId])
+  }, [open, selectedModelId, loadAttempt])
 
   const selectedConfigKey = config.id ? `${config.source}:${config.id}` : ""
 
@@ -678,7 +690,33 @@ export function CustomModelDialog({
           </DialogDescription>
         </DialogHeader>
 
-        <div className="min-h-0 flex-1 grid grid-cols-[220px_1fr] gap-4">
+        {(loading || loadFailed) && (
+          <div className="flex min-h-48 flex-col items-center justify-center gap-3 rounded-lg bg-muted/30 p-6 text-sm text-muted-foreground">
+            {loading ? (
+              <div role="status" className="flex items-center gap-2">
+                <Loader2
+                  aria-hidden="true"
+                  className="size-4 animate-spin motion-reduce:animate-none"
+                />
+                正在读取模型配置…
+              </div>
+            ) : (
+              <>
+                <p role="alert">读取模型配置失败，请重试。</p>
+                <Button variant="outline" onClick={() => setLoadAttempt((attempt) => attempt + 1)}>
+                  重试
+                </Button>
+              </>
+            )}
+          </div>
+        )}
+        <div
+          hidden={loading || loadFailed}
+          className={cn(
+            "min-h-0 flex-1 grid-cols-[220px_1fr] gap-4",
+            loading || loadFailed ? "hidden" : "grid"
+          )}
+        >
           <div className="rounded-md border border-border p-2">
             <div className="mb-1.5 flex items-center justify-between">
               <div className="text-xs font-medium text-muted-foreground">模型列表</div>

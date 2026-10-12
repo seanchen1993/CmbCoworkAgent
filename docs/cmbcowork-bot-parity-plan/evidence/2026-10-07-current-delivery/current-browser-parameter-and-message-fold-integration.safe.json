@@ -1,0 +1,39 @@
+{
+  "status": "integrated; not yet live real-model reaccepted",
+  "browserFailure": "actual M3 task rejected view-source protocol and terminated; original failure retained",
+  "browserCorrection": {
+    "pureValidationReusedByBrokerAndTool": true,
+    "beforeComputerWake": true,
+    "authorityReceiptLeaseDispatchErrorsRemainFatal": true,
+    "inputIdentityStillPinned": true,
+    "nearestTests": 19,
+    "actualGraphControlledModelTests": 6,
+    "realMiniMaxReacceptance": "pending"
+  },
+  "userMessageFold": {
+    "officialGrokSourceReference": "current app.asar lL full DOM and measured 24-line fold",
+    "originalFullTextLinksQuoteRangesUnchanged": true,
+    "realReactChromiumFixture": "PASS",
+    "productionWorkspaceActualUI": "pending",
+    "copyButtonActualUI": "pending",
+    "rootAdjustment": "only clamp when measured tall; no hidden body without a fold button"
+  },
+  "sources": {
+    "src/main/bots/browser-action-validation.ts": "12aaf87ec50529562f1b92faeba1975bec8bc4a2a92b22d4b9931ac1e4f8b35a",
+    "src/main/bots/browser-broker.ts": "ca937aced4c47e4b670ec3e7c518f922d8c6a768292c34fc47842dd92be27bfc",
+    "src/main/bots/browser-tool.ts": "e4b19be7dfea6839206016dbdce72c5616b368523c579659d8bea5c60448db75",
+    "src/main/bots/agent-runtime.ts": "bf2820009963888a52ae8763209574b2a63ee1f0f105e1eb77f5bcba772bb3ac",
+    "src/main/bots/browser-parameter-recovery.test.ts": "b9f5f9481fe726e234a218fab9698a54a0ced0f482f9c6c54875c8bacf18d3a9",
+    "src/main/bots/agent-runtime.test.ts": "d73d687a3e8106d29739795ab947462a87f7b5ceec8ba2103ff56712f5264642",
+    "src/renderer/src/components/bots/BotMessageText.tsx": "5b90f7a3102f1e33bee4f1798b6cb6a21b29560f481d1acd5444de429c6f68fc",
+    "src/renderer/src/components/bots/bot-workspace.css": "703a61e35994d23c8a387315f812463b6158d82eeee1538e225443dd223d00b1",
+    "src/renderer/src/components/bots/BotWorkspace.tsx": "6fdaaee0b8807ae0008171c7eecd5f24be3d45ab1a35259f360afbfc2255d0d9",
+    "tests/bot-user-message-fold-browser.spec.ts": "02a620b9b4dc8dad5f75ca018c92cfc66788052a8eef2a4b5fdb104d18d8c3f9"
+  },
+  "gates": {
+    "nearest": "/tmp/cmb-browser-parameter-nearest.log",
+    "graph": "/tmp/cmb-browser-parameter-real-graph.log",
+    "fold": "/tmp/cmb-long-message-current-browser.log"
+  },
+  "scope": "No blanket full-parity or production completion claim"
+}

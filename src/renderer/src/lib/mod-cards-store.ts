@@ -1,7 +1,9 @@
 import type { ModCard } from "../../../shared/mods/types"
+import type { ModsThreadScope } from "./mods-thread-scope"
 
 const empty: ModCard[] = []
 interface Entry {
+  scope: ModsThreadScope
   cards: ModCard[]
   listeners: Set<() => void>
   sequence: number
@@ -10,20 +12,31 @@ interface Entry {
 }
 const threads = new Map<string, Entry>()
 
-// One IPC fetch and one subscription per mounted thread, regardless of tool-row count.
-export function subscribeModCards(threadId: string, listener: () => void): () => void {
+// One IPC fetch and one subscription per current thread owner, regardless of tool-row count.
+export function subscribeModCards(scope: ModsThreadScope | null, listener: () => void): () => void {
+  if (!scope) return () => {}
+  const threadId = scope.threadId
   let entry = threads.get(threadId)
+  let created = false
+  if (entry && entry.scope !== scope) {
+    entry.stop()
+    threads.delete(threadId)
+    entry = undefined
+  }
   if (!entry) {
     const value: Entry = {
+      scope,
       cards: empty,
       listeners: new Set(),
       sequence: 0,
       refresh: () => {},
       stop: () => {}
     }
-    let running = false
-    let pending = false
+    let alive = true,
+      running = false,
+      pending = false
     value.refresh = () => {
+      if (!alive || !value.listeners.size || threads.get(threadId) !== value) return
       if (running) {
         pending = true
         value.sequence++
@@ -35,19 +48,19 @@ export function subscribeModCards(threadId: string, listener: () => void): () =>
         .cards(threadId, "")
         .then(
           (cards) => {
-            if (threads.get(threadId) !== value || sequence !== value.sequence) return
+            if (!alive || threads.get(threadId) !== value || sequence !== value.sequence) return
             value.cards = cards
             for (const notify of value.listeners) notify()
           },
           () => {
-            if (threads.get(threadId) !== value || sequence !== value.sequence) return
+            if (!alive || threads.get(threadId) !== value || sequence !== value.sequence) return
             value.cards = empty
             for (const notify of value.listeners) notify()
           }
         )
         .finally(() => {
           running = false
-          if (pending && threads.get(threadId) === value) {
+          if (alive && pending && threads.get(threadId) === value) {
             pending = false
             value.refresh()
           }
@@ -58,18 +71,22 @@ export function subscribeModCards(threadId: string, listener: () => void): () =>
     })
     window.addEventListener("mods:configuration-changed", value.refresh)
     value.stop = () => {
+      if (!alive) return
+      alive = false
+      pending = false
       stopCards()
       window.removeEventListener("mods:configuration-changed", value.refresh)
     }
     threads.set(threadId, value)
-    value.refresh()
     entry = value
+    created = true
   }
   entry.listeners.add(listener)
+  if (created) entry.refresh()
   const current = entry
   return () => {
     current.listeners.delete(listener)
-    // React can unmount/remount rows in the same frame during virtual scrolling.
+    // React can unmount/remount rows for the same owner in one virtual-scrolling frame.
     queueMicrotask(() => {
       if (!current.listeners.size && threads.get(threadId) === current) {
         current.stop()
@@ -78,7 +95,8 @@ export function subscribeModCards(threadId: string, listener: () => void): () =>
     })
   }
 }
-
-export function getModCards(threadId: string): ModCard[] {
-  return threads.get(threadId)?.cards ?? empty
+export function getModCards(scope: ModsThreadScope | null): ModCard[] {
+  if (!scope) return empty
+  const entry = threads.get(scope.threadId)
+  return entry?.scope === scope ? entry.cards : empty
 }

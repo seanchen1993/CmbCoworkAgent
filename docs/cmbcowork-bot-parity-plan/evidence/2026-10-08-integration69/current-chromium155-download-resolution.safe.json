@@ -1,0 +1,153 @@
+{
+  "kind": "chromium-download-regression-resolution-and-current-cold-upgrade",
+  "recordedAt": "2026-10-10T07:05:44.997684+00:00",
+  "primaryIssue": "https://issues.chromium.org/issues/556160935",
+  "officialStableMetadata": "https://googlechromelabs.github.io/chrome-for-testing/last-known-good-versions-with-downloads.json",
+  "affectedObservedBrowser": "154.0.8037.98",
+  "currentDiskBrowser": "155.0.8059.40",
+  "resolution": "Existing Chrome updated through official native updater. Completed downloads are not cancelled; known affected majors 152–154 fail before pages/receivers publish, instructing update to 155+. Persistent-profile blob and POST downloads succeed across three process opens. Full workspace test passes on 155.",
+  "failed154EvidenceRetained": [
+    "current-workspace-post-export-chrome-crash.safe.json",
+    "/tmp/cmb-download-profile-reopen-final-20261010.log",
+    "/tmp/cmb-download-completed-cancel-fix-20261010.log"
+  ],
+  "deletingOrResettingProfile": false,
+  "replayingExternalPost": false,
+  "gates": [
+    {
+      "name": "full-workspace",
+      "status": "PASS",
+      "observedExitCode": 0,
+      "log": {
+        "path": "/tmp/cmb-workspace-chrome155-20261010.log",
+        "bytes": 1450,
+        "sha256": "13a1e9b0e5e0aa5ec7ccdec52242e146c0826399e6c22f269ab2bf1629da8ddd"
+      }
+    },
+    {
+      "name": "download-lifecycle",
+      "status": "PASS",
+      "observedExitCode": 0,
+      "log": {
+        "path": "/tmp/cmb-browser-download-lifecycle155-20261010.log",
+        "bytes": 676,
+        "sha256": "c2625f29635a606777e7f2a81e8c35206471c0b94a072ff869547019b5662f4f"
+      }
+    },
+    {
+      "name": "provider-and-journal",
+      "status": "PASS",
+      "observedExitCode": 0,
+      "log": {
+        "path": "/tmp/cmb-browser-version-and-download-gates-20261010.log",
+        "bytes": 1145,
+        "sha256": "f4e8702e19ac7e4984ae16d6c43937de25ad485f8e5bf22567c309386efed2a4"
+      }
+    },
+    {
+      "name": "literal-and-markdown-links",
+      "status": "PASS",
+      "observedExitCode": 0,
+      "log": {
+        "path": "/tmp/cmb-literal-links-all-final-20261010.log",
+        "bytes": 449,
+        "sha256": "ae415000e4dd564a717b77eaabab769eddd6d4b84ea96f58218b42f93ebb4c8a"
+      }
+    },
+    {
+      "name": "all-types",
+      "status": "PASS",
+      "observedExitCode": 0,
+      "log": {
+        "path": "/tmp/cmb-browser-links-all-types-20261010.log",
+        "bytes": 261,
+        "sha256": "627ec3a8512b4f91344392a207bf63f0f95a26571befc80d2a1b3e2d0cc2f71a"
+      }
+    },
+    {
+      "name": "strict-lint",
+      "status": "PASS",
+      "observedExitCode": 0,
+      "log": {
+        "path": "/tmp/cmb-browser-links-strict-final-20261010.log",
+        "bytes": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      }
+    },
+    {
+      "name": "build",
+      "status": "PASS",
+      "observedExitCode": 0,
+      "log": {
+        "path": "/tmp/cmb-browser155-links-build-20261010.log",
+        "bytes": 56263,
+        "sha256": "3c8b3ab9367812d1a4dd55b2686f2175a3c76dc2a993cb8ed19e4c1b6667573c"
+      }
+    },
+    {
+      "name": "message-gates",
+      "status": "PASS",
+      "observedExitCode": 0,
+      "log": {
+        "path": "/tmp/cmb-link-message-gates-20261010.log",
+        "bytes": 15386,
+        "sha256": "07e2f675a357db15a60fa0715f5a4c40f7f427d6804a39101b6729b0ee295875"
+      }
+    }
+  ],
+  "currentIdentity": {
+    "version": 1,
+    "pid": 10785,
+    "hostId": "6ac9945c-91b7-4e75-9e04-0ca82994f672",
+    "buildId": "797ddf60a7528584a14a31cc",
+    "socketPath": "/private/tmp/cmb-bot-501-4b987f56222e7e971f75407b/rpc.sock"
+  },
+  "outputIdentity": "e22de1844241cc52f810bba5",
+  "compiledSourceSha256": "e22de1844241cc52f810bba5b9dc782787774d1dc8912c3d137e1522a5143990",
+  "coldPreservation": {
+    "selectedRuns": 186,
+    "checkpointPayloadBytesHashed": 18113443,
+    "logicalGroupsEqual": {
+      "runs": true,
+      "effects": true,
+      "interactions": true,
+      "artifacts": true,
+      "artifactObjects": true,
+      "peerDispatch": true,
+      "peerWaits": true,
+      "checkpoints": true,
+      "skills": true,
+      "project": true
+    },
+    "extraTablesEqual": {
+      "bot_memories": true,
+      "bot_memory_metadata": true,
+      "bot_model_usage": true,
+      "bot_group_cycles": true,
+      "bot_group_runs": true,
+      "bot_introduction_questions": true
+    },
+    "schemaBefore": 72,
+    "schemaAfter": 72,
+    "legacyMemberOrderEqual": true,
+    "modelNormalizedFingerprintMatched": true,
+    "forceKillUsed": false
+  },
+  "privatePreservationReceipt": {
+    "path": "/Users/chenqiang/Library/Application Support/CMBDevClaw-development/2026-10-08/presentation/cold-ui-output-plan/browser155-output-cold-preservation-1791615829558809000.safe.json",
+    "bytes": 32365,
+    "sha256": "9703d9b4d5b6f9bd4f1b7eb8f775ac6fd651d8f4c0a8f222cf72cdb853232b8d"
+  },
+  "fixtureAuthPatchOnlyOwnedCompiledCopy": true,
+  "usesSharedDependencies": true,
+  "nativeUiObserved": {
+    "plainHelpAcknowledgementLinkExcludesFullwidthParenthesis": true,
+    "computerFullscreenTrafficLightInsetOnPreceding331Build": true
+  },
+  "notProven": [
+    "All core tasks and full UI parity",
+    "Windows native generic input and installation",
+    "Independent current installer",
+    "Linux K8s production acceptance"
+  ]
+}

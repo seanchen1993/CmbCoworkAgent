@@ -65,6 +65,62 @@ function fixture() {
 }
 
 describe("function turn lifecycle", () => {
+  it("awaits terminal delivery across a busy lease and releases waiters on invalidation", async () => {
+    const f = fixture()
+    f.busy.add("thread")
+    await f.lifecycle.start(f.binding())
+    let settled = false
+    const completion = f.lifecycle.finishAndWait("thread", "run", { reason: "answer" }).then(() => {
+      settled = true
+    })
+    await tick()
+    expect(settled).toBe(false)
+    f.busy.delete("thread")
+    f.idle()
+    await completion
+    expect(f.ends).toHaveLength(1)
+    await f.lifecycle.start(f.binding("next", "next"))
+    f.busy.add("thread")
+    const cancelled = f.lifecycle.finishAndWait("thread", "next", { reason: "error" })
+    f.lifecycle.invalidate("/workspace", "thread")
+    await cancelled
+    expect(f.ends).toHaveLength(1)
+    expect(f.lifecycle.stats).toEqual({ entries: 0, running: 0 })
+    f.lifecycle.close()
+  })
+
+  it("does not settle until an asynchronous completion hook returns, including failure", async () => {
+    let unblock!: () => void
+    const hold = new Promise<void>((resolve) => {
+      unblock = resolve
+    })
+    const error = vi.fn()
+    const lifecycle = new FunctionTurnLifecycle({
+      isBusy: () => false,
+      onIdle: () => () => {},
+      error,
+      start: async () => {},
+      complete: async () => {
+        await hold
+        throw new Error("hook failed")
+      }
+    })
+    const f = fixture()
+    await lifecycle.start(f.binding())
+    f.lifecycle.close()
+    let settled = false
+    const done = lifecycle.finishAndWait("thread", "run", { reason: "answer" }).then(() => {
+      settled = true
+    })
+    await tick()
+    expect(settled).toBe(false)
+    unblock()
+    await done
+    expect(error).toHaveBeenCalledOnce()
+    expect(lifecycle.stats).toEqual({ entries: 0, running: 0 })
+    lifecycle.close()
+  })
+
   it("dispatches a host message anchor separately from the public hook event", async () => {
     const f = fixture()
     await f.lifecycle.start(f.binding())

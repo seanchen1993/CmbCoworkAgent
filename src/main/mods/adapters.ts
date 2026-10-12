@@ -3,7 +3,8 @@ import { randomUUID } from "node:crypto"
 import type { ModObject } from "../../shared/mods/types"
 import { getHookAgentIdFromRequest } from "../hooks/execution-context"
 import { getModCallContext, modCallContext } from "./context"
-import { getModsManager, type ModThreadBinding } from "./manager"
+import { getModsManager } from "./manager-context"
+import type { ModThreadBinding } from "./manager-core"
 import { filterModData, filterModResult } from "./publication"
 import { ModError } from "./errors"
 import type { McpCapabilityTool, McpInvocationResult } from "../mcp/capability-types"
@@ -32,7 +33,8 @@ export function withModToolCall<T, R extends ToolRequest>(
   binding: ModThreadBinding,
   request: R,
   delegatedNames: ReadonlySet<string>,
-  handler: (request: R) => Promise<T>
+  handler: (request: R) => Promise<T>,
+  backendOwnsNativeTools = true
 ): Promise<T | ToolMessage> {
   const manager = getModsManager()
   if (!manager || !manager.isActive(binding.workspace) || !request.toolCall?.name)
@@ -84,7 +86,7 @@ export function withModToolCall<T, R extends ToolRequest>(
     }
     return modCallContext.run(context, async () => {
       const delegated =
-        nativeNames.has(tool.name!) ||
+        (backendOwnsNativeTools && nativeNames.has(tool.name!)) ||
         (delegatedNames.has(tool.name!) && tool.name !== "task_output")
       const value = delegated
         ? await handler({ ...request, toolCall: { ...tool, args } })

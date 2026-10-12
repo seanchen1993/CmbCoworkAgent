@@ -1,4 +1,3 @@
-/* eslint-disable @typescript-eslint/no-explicit-any */
 import { ContextOverflowError } from "@langchain/core/errors"
 import type { BaseLanguageModel } from "@langchain/core/language_models/base"
 import type { BaseChatModel } from "@langchain/core/language_models/chat_models"
@@ -70,6 +69,9 @@ export interface CmbSummarizationMiddlewareOptions {
    */
   postCompactionInputBudgetTokens?: number
   historyPathPrefix?: string
+  /** Checkpoint hosts retain the complete message log and expose their own scoped
+   * reader. Do not advertise virtual files that those hosts cannot read. */
+  historyStorage?: "backend" | "checkpoint"
   /**
    * Optional pre-migration history directory. It is consulted only when the
    * corresponding file does not yet exist beneath historyPathPrefix.
@@ -256,9 +258,7 @@ export interface CmbCompactionPlan {
   estimatedTokensAfter: number
   summaryAttempts: number
   /** Explicit compaction commits its archive only after the caller validates the checkpoint. */
-  commitArchive?: (
-    signal: AbortSignal
-  ) => Promise<{
+  commitArchive?: (signal: AbortSignal) => Promise<{
     filePath: string
     messages: BaseMessage[]
     update: CmbCompactionPlan["update"]
@@ -481,6 +481,11 @@ function prepareHistoryArchiveMessages(messages: BaseMessage[]): BaseMessage[] {
     clone.content = message.content.map(historyArchiveBlockText).filter(Boolean).join("\n")
     return clone
   })
+}
+
+/** Shared text projection for archive files and checkpoint-backed history readers. */
+export function renderContextHistory(messages: BaseMessage[]): string {
+  return renderMessagesAsSummaryXml(prepareHistoryArchiveMessages(messages))
 }
 
 function isRealUserMessage(message: BaseMessage): boolean {
@@ -854,6 +859,7 @@ export function createCmbContextController(
     maxInputTokens: configuredMaxInputTokens,
     postCompactionInputBudgetTokens,
     historyPathPrefix = "/conversation_history",
+    historyStorage = "backend",
     legacyHistoryPathPrefix,
     stateOwnerConfigKey
   } = options
@@ -1341,7 +1347,7 @@ export function createCmbContextController(
     const filePath = getHistoryPath(state, owner, initialOwnerSessionId)
     const legacyFilePath = getLegacyHistoryPath(state, owner, initialOwnerSessionId)
     const filteredMessages = messages.filter((message) => !isSummaryMessage(message))
-    const newSection = `## Summarized at ${new Date().toISOString()}\n\n${renderMessagesAsSummaryXml(prepareHistoryArchiveMessages(filteredMessages))}\n\n`
+    const newSection = `## Summarized at ${new Date().toISOString()}\n\n${renderContextHistory(filteredMessages)}\n\n`
     const sectionBytes = new TextEncoder().encode(newSection)
 
     try {
@@ -1621,20 +1627,21 @@ ${summary}
     )
     signal?.throwIfAborted()
     const resolvedBackend = getBackend(state)
-    const filePath = persistArchive
-      ? await offloadToBackend(
-          resolvedBackend,
-          historyMessages,
-          state,
-          owner,
-          initialOwnerSessionId
-        )
-      : null
+    const filePath =
+      persistArchive && historyStorage === "backend"
+        ? await offloadToBackend(
+            resolvedBackend,
+            historyMessages,
+            state,
+            owner,
+            initialOwnerSessionId
+          )
+        : null
     // Local archival writes are intentionally allowed to finish once started,
     // but a cancellation that arrives during that short window must prevent
     // the outer model handler from running afterward.
     signal?.throwIfAborted()
-    if (persistArchive && filePath == null) {
+    if (persistArchive && historyStorage === "backend" && filePath == null) {
       console.warn(
         "[SummarizationMiddleware] Backend offload failed during summarization. Proceeding with summary generation."
       )
@@ -1709,7 +1716,10 @@ ${summary}
         request.systemMessage,
         request.tools
       )
-      if (compact.modified) {
+      if (
+        compact.modified &&
+        (outerInputBudget == null || estimateOuterInputTokens(compact.messages) <= outerInputBudget)
+      ) {
         try {
           return await handler({ ...request, messages: compact.messages })
         } catch (error) {
@@ -1863,18 +1873,18 @@ ${summary}
     }
 
     const update: CmbCompactionPlan["update"] = {
-        _summarizationEvent: {
-          cutoffIndex: handler ? finalStateCutoffIndex : 1,
-          usageStartIndex: handler
-            ? Array.isArray(request.state.messages)
-              ? request.state.messages.length
-              : request.messages.length
-            : modifiedMessages.length,
-          summaryMessage: finalSummaryMessage,
-          filePath: finalFilePath
-        } satisfies SummarizationEvent,
-        _summarizationSessionId: getSessionId(request.state, owner, initialOwnerSessionId),
-        ...(owner ? { [SUMMARIZATION_STATE_OWNER_KEY]: owner } : {})
+      _summarizationEvent: {
+        cutoffIndex: handler ? finalStateCutoffIndex : 1,
+        usageStartIndex: handler
+          ? Array.isArray(request.state.messages)
+            ? request.state.messages.length
+            : request.messages.length
+          : modifiedMessages.length,
+        summaryMessage: finalSummaryMessage,
+        filePath: finalFilePath
+      } satisfies SummarizationEvent,
+      _summarizationSessionId: getSessionId(request.state, owner, initialOwnerSessionId),
+      ...(owner ? { [SUMMARIZATION_STATE_OWNER_KEY]: owner } : {})
     }
     if (handler) return new Command({ update }) as TResult
     request.runtime?.signal?.throwIfAborted()
@@ -1899,7 +1909,7 @@ ${summary}
             filePath: string
             messages: BaseMessage[]
             update: CmbCompactionPlan["update"]
-        }
+          }
         | undefined
       let commitPromise:
         | Promise<{
@@ -2125,6 +2135,9 @@ ${summary}
       signal: AbortSignal
     ): Promise<CmbCompactionPlan | { skip: string }> {
       signal.throwIfAborted()
+      // Explicit compaction replaces messages, unlike automatic compaction's
+      // projection. A checkpoint-only host must not discard its history this way.
+      if (historyStorage === "checkpoint") throw new ModError("MODS_CONTEXT_ARCHIVE_FAILED")
       if (typeof instructions !== "string" || instructions.length > 32000)
         throw new Error("CONTEXT_COMPACTION_INSTRUCTIONS_INVALID")
       const owner = getStateOwner(request)

@@ -1,0 +1,65 @@
+{
+  "kind": "actual-owned-minimax-waiting-input-shutdown-failure",
+  "capturedAtUnixMs": 1791495242737,
+  "oldBuildId": "9074c99f74c0ca1cbf08d085",
+  "newObservedBuildId": "dd51a8228a34bb7aab78438b",
+  "signal": "SIGTERM",
+  "notSigkillOrStreamingCrashProof": true,
+  "activeRunningOrQueuedBeforeEachSignal": 0,
+  "beforeRun": {
+    "id": "3c1c4efb-8ff1-43c0-94a6-a35698c0eb7c",
+    "status": "waiting_input",
+    "revision": 456,
+    "fence": 1
+  },
+  "afterRun": {
+    "id": "3c1c4efb-8ff1-43c0-94a6-a35698c0eb7c",
+    "status": "cancelled",
+    "revision": 458,
+    "fence": 1,
+    "error": "Bot 后台正在停止",
+    "updated_at": 1791494560959
+  },
+  "systemEvents": [
+    {
+      "cursor": 3819,
+      "kind": "run.cancel_requested",
+      "status": "cancelling",
+      "createdAt": 1791494560949
+    },
+    {
+      "cursor": 3821,
+      "kind": "run.settled",
+      "status": "cancelled",
+      "createdAt": 1791494560964
+    }
+  ],
+  "cause": "host.stop calls business cancellation for active waiting_input; abort catch then settles cancelled",
+  "checkpointPayloadBytesHashedEachPin": 3956664,
+  "modelReasoningIncluded": false,
+  "recordsMutatedByDiagnostic": false,
+  "historicalFailureRetained": true,
+  "fixAndSameRunRecoveryStillPending": true,
+  "receipts": [
+    {
+      "path": "/Users/chenqiang/Library/Application Support/CMBDevClaw-development/2026-10-08/presentation/cold-upgrade-plan/pins-live-before-stop-1791494501669896000.safe.json",
+      "sha256": "7e64466dc0e7884fae437487b7dbaa61f2258d0b2f8f3d23903828af549d07c2"
+    },
+    {
+      "path": "/Users/chenqiang/Library/Application Support/CMBDevClaw-development/2026-10-08/presentation/cold-upgrade-plan/pins-quiesced-before-start-1791494611717876000.safe.json",
+      "sha256": "c5ef6b3c97a32ae24eaf98ab36dbbf0f03a5a1d680b264f9ce9d2c931562391c"
+    },
+    {
+      "path": "/Users/chenqiang/Library/Application Support/CMBDevClaw-development/2026-10-08/presentation/cold-upgrade-plan/pins-post-start-pre-review-1791494752609629000.safe.json",
+      "sha256": "87f8ea61a43c0cf41c990ef48209b42b28feaf636d35c16ef106d34cbaf719ca"
+    },
+    {
+      "path": "/Users/chenqiang/Library/Application Support/CMBDevClaw-development/2026-10-08/presentation/cold-upgrade-plan/normal-upgrade-main-stop-1791494532987365000.safe.json",
+      "sha256": "48e0407516dda94a95a0cf315fcc483f431ef4589ea04cdd77f0b4115e5580f3"
+    },
+    {
+      "path": "/Users/chenqiang/Library/Application Support/CMBDevClaw-development/2026-10-08/presentation/cold-upgrade-plan/normal-upgrade-host-stop-1791494560947748000.safe.json",
+      "sha256": "75576921f0786f4bd3d14758fb36815e289104886149d2779f5a2bae7e1afcb7"
+    }
+  ]
+}

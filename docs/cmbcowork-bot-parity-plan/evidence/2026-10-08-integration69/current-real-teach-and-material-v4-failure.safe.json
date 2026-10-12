@@ -1,0 +1,629 @@
+{
+  "kind": "real-minimax-teach-and-material-before-select-v5-upgrade",
+  "capturedAt": "2026-10-09T01:33:30.546009+00:00",
+  "sourceDatabaseReadOnly": true,
+  "runningBuildId": "25838d3eb2c932ef4fb7ab98",
+  "runs": [
+    {
+      "id": "acd6c2ed-c3cc-4a0b-aa60-4ce916131087",
+      "bot_id": "e1d81813-1ff0-4fca-9948-d966e1a77189",
+      "source": "teach-learning",
+      "status": "succeeded",
+      "revision": 41,
+      "fence": 1,
+      "error": null
+    },
+    {
+      "id": "575a5849-386d-45f1-998a-15143e62882e",
+      "bot_id": "e1d81813-1ff0-4fca-9948-d966e1a77189",
+      "source": "skill-trial",
+      "status": "needs_review",
+      "revision": 95,
+      "fence": 1,
+      "error": "存在未结算的操作或子任务，请核对后再继续"
+    },
+    {
+      "id": "44ceec36-e7a5-429a-b4e7-bd7b4df53815",
+      "bot_id": "e194fc5a-4c4a-45d1-a4ef-d96f6dc2ed05",
+      "source": "user",
+      "status": "needs_review",
+      "revision": 38,
+      "fence": 1,
+      "error": "交付原件核验未能完成或连续失败，请核对后继续；已完成的外部操作不会重做。"
+    }
+  ],
+  "teach": [
+    {
+      "id": "41f51a77-37f3-4d6c-966c-ea0cb90aeb32",
+      "phase": "ready",
+      "revision": 13,
+      "frame_count": 14,
+      "event_count": 14,
+      "error": null,
+      "learning_run_id": "acd6c2ed-c3cc-4a0b-aa60-4ce916131087",
+      "skill_id": "549ee150-2467-43f0-999e-bed2d184296c"
+    }
+  ],
+  "teachFrameReads": [
+    {
+      "frame_idx": 0
+    },
+    {
+      "frame_idx": 1
+    },
+    {
+      "frame_idx": 2
+    },
+    {
+      "frame_idx": 3
+    },
+    {
+      "frame_idx": 4
+    },
+    {
+      "frame_idx": 5
+    },
+    {
+      "frame_idx": 6
+    },
+    {
+      "frame_idx": 7
+    },
+    {
+      "frame_idx": 8
+    },
+    {
+      "frame_idx": 9
+    },
+    {
+      "frame_idx": 10
+    },
+    {
+      "frame_idx": 11
+    },
+    {
+      "frame_idx": 12
+    },
+    {
+      "frame_idx": 13
+    }
+  ],
+  "skill": [
+    {
+      "id": "549ee150-2467-43f0-999e-bed2d184296c",
+      "bot_id": "e1d81813-1ff0-4fca-9948-d966e1a77189",
+      "name": "工单月报生成",
+      "version": 1,
+      "enabled": 1,
+      "verified": 0,
+      "instructionsSha256": "c2b3954fd226ecfc1158d9b975cea4e754cad2d259ce6a9af76c8c7c06d7dc24"
+    }
+  ],
+  "learnModelUsage": [
+    {
+      "model": "MiniMax-M3",
+      "purpose": "task",
+      "input_tokens": 6468,
+      "output_tokens": 46,
+      "settled_at": 1791507680569
+    },
+    {
+      "model": "MiniMax-M3",
+      "purpose": "task",
+      "input_tokens": 19075,
+      "output_tokens": 43,
+      "settled_at": 1791507684069
+    },
+    {
+      "model": "MiniMax-M3",
+      "purpose": "task",
+      "input_tokens": 31684,
+      "output_tokens": 34,
+      "settled_at": 1791507689662
+    },
+    {
+      "model": "MiniMax-M3",
+      "purpose": "task",
+      "input_tokens": 44319,
+      "output_tokens": 49,
+      "settled_at": 1791507695238
+    },
+    {
+      "model": "MiniMax-M3",
+      "purpose": "task",
+      "input_tokens": 50858,
+      "output_tokens": 1922,
+      "settled_at": 1791507717973
+    },
+    {
+      "model": "MiniMax-M3",
+      "purpose": "task",
+      "input_tokens": 54664,
+      "output_tokens": 782,
+      "settled_at": 1791507727187
+    }
+  ],
+  "trial": [
+    {
+      "id": "e2169d70-1055-411f-aa66-89489ede0eb8",
+      "bot_id": "e1d81813-1ff0-4fca-9948-d966e1a77189",
+      "skill_id": "549ee150-2467-43f0-999e-bed2d184296c",
+      "version": 1,
+      "run_id": "575a5849-386d-45f1-998a-15143e62882e",
+      "verdict": "pending"
+    }
+  ],
+  "materialArtifacts": [
+    {
+      "id": "result:44ceec36-e7a5-429a-b4e7-bd7b4df53815:call_function_fs6ubqu57eq0_2",
+      "run_id": "44ceec36-e7a5-429a-b4e7-bd7b4df53815",
+      "name": "review.md",
+      "size": 4503,
+      "sha256": "dcd96441b9863f845f0f13e13b4c00d0062485ee5ca8e9712af6648ceceff430",
+      "retainedObjectVerified": true
+    }
+  ],
+  "materialVerdicts": [
+    {
+      "nonce": "tool:44ceec36-e7a5-429a-b4e7-bd7b4df53815:delivery-evidence:started:0fc23bc9531facfe134718f377eb491e0a030e8937980a70f51fc0ec1bf8eafc",
+      "responseSha256": "56f30abaa83b65884d832ab2e8218b1c8efa65f2f1c016fb5ba3670ca83cfb5f",
+      "verdict": {
+        "started": true
+      }
+    },
+    {
+      "nonce": "tool:44ceec36-e7a5-429a-b4e7-bd7b4df53815:delivery-evidence:verdict:0fc23bc9531facfe134718f377eb491e0a030e8937980a70f51fc0ec1bf8eafc",
+      "responseSha256": "bb22fd8a41ab48fd734a2d7f7f423b2d124baee558fd45b8fa155f6b728acb3f",
+      "verdict": {
+        "decision": "revise",
+        "findings": [
+          "result.csv 第1行 P101=12.40 万元错误。按 review-policy.txt 与 project-records.csv，P101 有两个北区已验收版本（v1=15.40、v2=12.40），应保留数值最大版本 v1=15.40，而非 v2=12.40。",
+          "按上述修正，最终纳入 P101=15.40、P102=8.55、P105=-2.50、P106=0.00 四条，合计 21.45 万元，而非草稿的 38.45 万元，差额 17.00 万元，且该差额只能以\"无法归因到具体项目旧版本（原始附件不提供溯源证据）\"的措辞说明，不得归因到 P101 等具体项目。"
+        ]
+      }
+    },
+    {
+      "nonce": "tool:44ceec36-e7a5-429a-b4e7-bd7b4df53815:delivery-evidence:attempt:71986f57fa7d8cbfc6955dc343f493212faafef1c77c1894ef50a3db58c0d458",
+      "responseSha256": "da71ec0241be6729056c66fa5b8cf9bc2adf5aaf9ba310be0222aa5ec6b4a816",
+      "verdict": {
+        "index": 0,
+        "artifactId": "result:44ceec36-e7a5-429a-b4e7-bd7b4df53815:call_function_1d3g05ufx1ty_1",
+        "binding": {
+          "reviewProtocol": "tool-v4-canonical-verdict-envelope",
+          "epoch": "initial",
+          "task": "3e7d3b6dd5c1fcd355e1078cd1582a41d7bbe8f3dd5fa26233df185bdcfc31ca",
+          "model": "96e856ae93a1b030f2cb6cfc4143a309827f992f0f32be55ddaf72a165db65e2",
+          "sources": [
+            {
+              "id": "44e43e7c-17fa-4613-8799-abe582e3b375",
+              "sha256": "f8b581c7338cc60fa4b02adaa7a22a89465daf675c991856bf8114069d54da60"
+            },
+            {
+              "id": "9f4fb6ab-1b76-4ebc-801e-b36872a8c4ff",
+              "sha256": "dbc20dad04f59df0d704601fdd6559ab33fd1722283496a2092215a387695ac8"
+            }
+          ],
+          "name": "result.csv",
+          "sha256": "7f49376f9672cf7362ea26ea0ce624c881d3c9250f3b7207024ca5870bc8903f"
+        },
+        "verdict": {
+          "decision": "revise",
+          "findings": [
+            "result.csv 第1行 P101=12.40 万元错误。按 review-policy.txt 与 project-records.csv，P101 有两个北区已验收版本（v1=15.40、v2=12.40），应保留数值最大版本 v1=15.40，而非 v2=12.40。",
+            "按上述修正，最终纳入 P101=15.40、P102=8.55、P105=-2.50、P106=0.00 四条，合计 21.45 万元，而非草稿的 38.45 万元，差额 17.00 万元，且该差额只能以\"无法归因到具体项目旧版本（原始附件不提供溯源证据）\"的措辞说明，不得归因到 P101 等具体项目。"
+          ]
+        }
+      }
+    },
+    {
+      "nonce": "tool:44ceec36-e7a5-429a-b4e7-bd7b4df53815:delivery-evidence:started:dafadaf9ef9b66f99d82d2e0fa42011f1e63a2bc460c75669e6961a1c73bcb8b",
+      "responseSha256": "56f30abaa83b65884d832ab2e8218b1c8efa65f2f1c016fb5ba3670ca83cfb5f",
+      "verdict": {
+        "started": true
+      }
+    },
+    {
+      "nonce": "tool:44ceec36-e7a5-429a-b4e7-bd7b4df53815:delivery-evidence:verdict:dafadaf9ef9b66f99d82d2e0fa42011f1e63a2bc460c75669e6961a1c73bcb8b",
+      "responseSha256": "5baad262d8b7a8d52aff9ea90e048831f213c5e5eb1dd04c13f97d0b46fc4065",
+      "verdict": {
+        "decision": "revise",
+        "findings": [
+          "review-policy.txt 原文中\"同一project_id有多个版本时只保留数值最大版本\"，按文本\"数值最大版本\"通常理解指金额数值最大者，而非版本号最大；候选将其解读为版本号最大并据此选 P101 v2=12.40（保留 v1=15.40 才符合规则），导致总额错误。正确结果应为 P101=15.40, P102=8.55, P105=-2.50, P106=0.00，合计 21.45 万元，与草案 38.45 万元差额 17.00 万元，差额仍无法证明归因到某旧版本。",
+          "候选把差额 20.00 万元（实为 17.00 万元）归因为\"无法判定\"，但建立在规则误读之上；请按 policy 原文\"数值最大版本=金额最大\"重算 result.csv 与 review.md 合计与差额。"
+        ]
+      }
+    },
+    {
+      "nonce": "tool:44ceec36-e7a5-429a-b4e7-bd7b4df53815:delivery-evidence:attempt:70468e83f1a0292034b5387fa090202768a81a92a889852a67cc4d24ecf70831",
+      "responseSha256": "9213e94d4c169fb04918377749513d980f0e95ce8a710f7458bcfd1e14a4bffe",
+      "verdict": {
+        "index": 1,
+        "artifactId": "result:44ceec36-e7a5-429a-b4e7-bd7b4df53815:call_function_1d3g05ufx1ty_2",
+        "binding": {
+          "reviewProtocol": "tool-v4-canonical-verdict-envelope",
+          "epoch": "initial",
+          "task": "3e7d3b6dd5c1fcd355e1078cd1582a41d7bbe8f3dd5fa26233df185bdcfc31ca",
+          "model": "96e856ae93a1b030f2cb6cfc4143a309827f992f0f32be55ddaf72a165db65e2",
+          "sources": [
+            {
+              "id": "44e43e7c-17fa-4613-8799-abe582e3b375",
+              "sha256": "f8b581c7338cc60fa4b02adaa7a22a89465daf675c991856bf8114069d54da60"
+            },
+            {
+              "id": "9f4fb6ab-1b76-4ebc-801e-b36872a8c4ff",
+              "sha256": "dbc20dad04f59df0d704601fdd6559ab33fd1722283496a2092215a387695ac8"
+            }
+          ],
+          "name": "review.md",
+          "sha256": "3d818c9dec30832d51819ea69a78f868305adad36094e443c8831476605f9361"
+        },
+        "verdict": {
+          "decision": "revise",
+          "findings": [
+            "review-policy.txt 原文中\"同一project_id有多个版本时只保留数值最大版本\"，按文本\"数值最大版本\"通常理解指金额数值最大者，而非版本号最大；候选将其解读为版本号最大并据此选 P101 v2=12.40（保留 v1=15.40 才符合规则），导致总额错误。正确结果应为 P101=15.40, P102=8.55, P105=-2.50, P106=0.00，合计 21.45 万元，与草案 38.45 万元差额 17.00 万元，差额仍无法证明归因到某旧版本。",
+            "候选把差额 20.00 万元（实为 17.00 万元）归因为\"无法判定\"，但建立在规则误读之上；请按 policy 原文\"数值最大版本=金额最大\"重算 result.csv 与 review.md 合计与差额。"
+          ]
+        }
+      }
+    },
+    {
+      "nonce": "tool:44ceec36-e7a5-429a-b4e7-bd7b4df53815:delivery-evidence:started:c53fe8ab572e5fb75d9b4770075f7ea625d1dc9895f6dd88f83f1d992676bdec",
+      "responseSha256": "56f30abaa83b65884d832ab2e8218b1c8efa65f2f1c016fb5ba3670ca83cfb5f",
+      "verdict": {
+        "started": true
+      }
+    },
+    {
+      "nonce": "tool:44ceec36-e7a5-429a-b4e7-bd7b4df53815:delivery-evidence:verdict:c53fe8ab572e5fb75d9b4770075f7ea625d1dc9895f6dd88f83f1d992676bdec",
+      "responseSha256": "4a03fa1df880e1ea9e87d677f444ca1b620c92504dcf454cbf3eadcd9fb419f7",
+      "verdict": {
+        "decision": "uncertain",
+        "findings": [
+          "独立原件核验未返回有效结论，未发布该候选文件。"
+        ],
+        "diagnostic": {
+          "stage": "stream",
+          "reason": "invalid_tool_call",
+          "finish": "missing",
+          "toolCall": {
+            "source": "raw",
+            "field": "type",
+            "valueType": "string"
+          }
+        }
+      }
+    },
+    {
+      "nonce": "tool:44ceec36-e7a5-429a-b4e7-bd7b4df53815:delivery-evidence:attempt:17f12d491e2913a9cffffbf4afb64978ad89c928e8c40ac78a1eb74624a68783",
+      "responseSha256": "578b928ef31b8f5a6ea80535387ba87a43f02a3777457801afff6d9c95b9f630",
+      "verdict": {
+        "index": 2,
+        "artifactId": "result:44ceec36-e7a5-429a-b4e7-bd7b4df53815:call_function_fs6ubqu57eq0_1",
+        "binding": {
+          "reviewProtocol": "tool-v4-canonical-verdict-envelope",
+          "epoch": "initial",
+          "task": "3e7d3b6dd5c1fcd355e1078cd1582a41d7bbe8f3dd5fa26233df185bdcfc31ca",
+          "model": "96e856ae93a1b030f2cb6cfc4143a309827f992f0f32be55ddaf72a165db65e2",
+          "sources": [
+            {
+              "id": "44e43e7c-17fa-4613-8799-abe582e3b375",
+              "sha256": "f8b581c7338cc60fa4b02adaa7a22a89465daf675c991856bf8114069d54da60"
+            },
+            {
+              "id": "9f4fb6ab-1b76-4ebc-801e-b36872a8c4ff",
+              "sha256": "dbc20dad04f59df0d704601fdd6559ab33fd1722283496a2092215a387695ac8"
+            }
+          ],
+          "name": "result.csv",
+          "sha256": "a4c3332dd4d3f4a4e5927e27cb0db1439f4f04a2505d6915ca21bf8929451298"
+        },
+        "verdict": {
+          "decision": "uncertain",
+          "findings": [
+            "独立原件核验未返回有效结论，未发布该候选文件。"
+          ],
+          "diagnostic": {
+            "stage": "stream",
+            "reason": "invalid_tool_call",
+            "finish": "missing",
+            "toolCall": {
+              "source": "raw",
+              "field": "type",
+              "valueType": "string"
+            }
+          }
+        }
+      }
+    },
+    {
+      "nonce": "tool:44ceec36-e7a5-429a-b4e7-bd7b4df53815:delivery-evidence:started:6d871a01d62b6648386ea135688f43002f534f57988d0150219bbabccf905590",
+      "responseSha256": "56f30abaa83b65884d832ab2e8218b1c8efa65f2f1c016fb5ba3670ca83cfb5f",
+      "verdict": {
+        "started": true
+      }
+    },
+    {
+      "nonce": "tool:44ceec36-e7a5-429a-b4e7-bd7b4df53815:delivery-evidence:verdict:6d871a01d62b6648386ea135688f43002f534f57988d0150219bbabccf905590",
+      "responseSha256": "0b4dea96a4ac8df59fd98c9e02a92223b0991ff403a3388feab02177d48b690d",
+      "verdict": {
+        "decision": "pass",
+        "findings": [
+          "规则1筛选(北区+已验收)正确：6行(P101v2、P102v1、P101v1、P105v1、P106v1、P102v2)，排除P103(南区)和P104(待验收)正确。规则5去重：P101保留v1=15.40(15.40>12.40)，P102保留v2=8.55(8.55>7.05)，P105=-2.50，P106=0.00。4个项目，合计15.40+8.55-2.50+0.00=21.45万元，计算正确。与草案38.45万元差额17.00万元，归因分析未将差额归因于任何具体项目旧版本，符合\"不得归因除非附件能证明\"的要求。引用了project-records.csv和review-policy.txt原文件名及具体行记录。"
+        ]
+      }
+    },
+    {
+      "nonce": "tool:44ceec36-e7a5-429a-b4e7-bd7b4df53815:delivery-evidence:attempt:d7e7ad2bc376279515ae5a15609d198b8ee758c8bdf4844dfd4a4ec1a12efbf0",
+      "responseSha256": "1443a1ee2f4cf80b9849bdc5e49943bfb02d2464f277cda2bfa08cd21ef75ace",
+      "verdict": {
+        "index": 3,
+        "artifactId": "result:44ceec36-e7a5-429a-b4e7-bd7b4df53815:call_function_fs6ubqu57eq0_2",
+        "binding": {
+          "reviewProtocol": "tool-v4-canonical-verdict-envelope",
+          "epoch": "initial",
+          "task": "3e7d3b6dd5c1fcd355e1078cd1582a41d7bbe8f3dd5fa26233df185bdcfc31ca",
+          "model": "96e856ae93a1b030f2cb6cfc4143a309827f992f0f32be55ddaf72a165db65e2",
+          "sources": [
+            {
+              "id": "44e43e7c-17fa-4613-8799-abe582e3b375",
+              "sha256": "f8b581c7338cc60fa4b02adaa7a22a89465daf675c991856bf8114069d54da60"
+            },
+            {
+              "id": "9f4fb6ab-1b76-4ebc-801e-b36872a8c4ff",
+              "sha256": "dbc20dad04f59df0d704601fdd6559ab33fd1722283496a2092215a387695ac8"
+            }
+          ],
+          "name": "review.md",
+          "sha256": "dcd96441b9863f845f0f13e13b4c00d0062485ee5ca8e9712af6648ceceff430"
+        },
+        "verdict": {
+          "decision": "pass",
+          "findings": [
+            "规则1筛选(北区+已验收)正确：6行(P101v2、P102v1、P101v1、P105v1、P106v1、P102v2)，排除P103(南区)和P104(待验收)正确。规则5去重：P101保留v1=15.40(15.40>12.40)，P102保留v2=8.55(8.55>7.05)，P105=-2.50，P106=0.00。4个项目，合计15.40+8.55-2.50+0.00=21.45万元，计算正确。与草案38.45万元差额17.00万元，归因分析未将差额归因于任何具体项目旧版本，符合\"不得归因除非附件能证明\"的要求。引用了project-records.csv和review-policy.txt原文件名及具体行记录。"
+          ]
+        }
+      }
+    },
+    {
+      "nonce": "tool:44ceec36-e7a5-429a-b4e7-bd7b4df53815:delivery-evidence:published:26c2cc5cbe2aa2ba4a95531ac195068738bdde180ac0b5ddfe9173a34d955b27:6d871a01d62b6648386ea135688f43002f534f57988d0150219bbabccf905590",
+      "responseSha256": "ff9e485612331fac700077bbab97df84259e7311e975fc3e9b69b49c1b89d346",
+      "verdict": {
+        "verdict": {
+          "decision": "pass",
+          "findings": [
+            "规则1筛选(北区+已验收)正确：6行(P101v2、P102v1、P101v1、P105v1、P106v1、P102v2)，排除P103(南区)和P104(待验收)正确。规则5去重：P101保留v1=15.40(15.40>12.40)，P102保留v2=8.55(8.55>7.05)，P105=-2.50，P106=0.00。4个项目，合计15.40+8.55-2.50+0.00=21.45万元，计算正确。与草案38.45万元差额17.00万元，归因分析未将差额归因于任何具体项目旧版本，符合\"不得归因除非附件能证明\"的要求。引用了project-records.csv和review-policy.txt原文件名及具体行记录。"
+          ]
+        },
+        "artifactId": "result:44ceec36-e7a5-429a-b4e7-bd7b4df53815:call_function_fs6ubqu57eq0_2",
+        "sha256": "dcd96441b9863f845f0f13e13b4c00d0062485ee5ca8e9712af6648ceceff430",
+        "binding": {
+          "reviewProtocol": "tool-v4-canonical-verdict-envelope",
+          "epoch": "initial",
+          "task": "3e7d3b6dd5c1fcd355e1078cd1582a41d7bbe8f3dd5fa26233df185bdcfc31ca",
+          "model": "96e856ae93a1b030f2cb6cfc4143a309827f992f0f32be55ddaf72a165db65e2",
+          "sources": [
+            {
+              "id": "44e43e7c-17fa-4613-8799-abe582e3b375",
+              "sha256": "f8b581c7338cc60fa4b02adaa7a22a89465daf675c991856bf8114069d54da60"
+            },
+            {
+              "id": "9f4fb6ab-1b76-4ebc-801e-b36872a8c4ff",
+              "sha256": "dbc20dad04f59df0d704601fdd6559ab33fd1722283496a2092215a387695ac8"
+            }
+          ],
+          "name": "review.md",
+          "sha256": "dcd96441b9863f845f0f13e13b4c00d0062485ee5ca8e9712af6648ceceff430"
+        }
+      }
+    },
+    {
+      "nonce": "tool:44ceec36-e7a5-429a-b4e7-bd7b4df53815:delivery-evidence:attempt:1b08f6a31e58e40a3a27dc7b26ff6feecdc4eb832f640e38e81f29c3eddbeba8",
+      "responseSha256": "3dffda87441848f4c5a09176d6ac96daf5b5322d61199f6e31f3e1f06989da6f",
+      "verdict": {
+        "index": 4,
+        "artifactId": "result:44ceec36-e7a5-429a-b4e7-bd7b4df53815:call_function_lhdojnws4jsv_1",
+        "binding": {
+          "reviewProtocol": "tool-v4-canonical-verdict-envelope",
+          "epoch": "initial",
+          "task": "3e7d3b6dd5c1fcd355e1078cd1582a41d7bbe8f3dd5fa26233df185bdcfc31ca",
+          "model": "96e856ae93a1b030f2cb6cfc4143a309827f992f0f32be55ddaf72a165db65e2",
+          "sources": [
+            {
+              "id": "44e43e7c-17fa-4613-8799-abe582e3b375",
+              "sha256": "f8b581c7338cc60fa4b02adaa7a22a89465daf675c991856bf8114069d54da60"
+            },
+            {
+              "id": "9f4fb6ab-1b76-4ebc-801e-b36872a8c4ff",
+              "sha256": "dbc20dad04f59df0d704601fdd6559ab33fd1722283496a2092215a387695ac8"
+            }
+          ],
+          "name": "result.csv",
+          "sha256": "a4c3332dd4d3f4a4e5927e27cb0db1439f4f04a2505d6915ca21bf8929451298"
+        },
+        "verdict": {
+          "decision": "uncertain",
+          "findings": [
+            "独立原件核验未返回有效结论，未发布该候选文件。"
+          ],
+          "diagnostic": {
+            "stage": "stream",
+            "reason": "invalid_tool_call",
+            "finish": "missing",
+            "toolCall": {
+              "source": "raw",
+              "field": "type",
+              "valueType": "string"
+            }
+          }
+        }
+      }
+    }
+  ],
+  "observedBoundaries": {
+    "teachLearn": "All fourteen frames were read and v1 skill saved; it is not yet verified.",
+    "trial": "Formal UI trial paused after missing native selected-label caused an unsupported fill. No trial pass claimed.",
+    "material": "Executor initially generated the correct version-2 value 12.40. Independent v4 reviewer incorrectly equated version with amount and caused revision to wrong 15.40. A wrong Markdown was published; CSV held after invalid raw tool-call type. Failure retained.",
+    "notProven": [
+      "All task quality",
+      "Skill new-input success",
+      "Entire UI parity",
+      "Windows native desktop",
+      "Cause of malformed reviewer raw type"
+    ]
+  },
+  "standaloneReviewProbes": [
+    {
+      "path": "/Users/chenqiang/Library/Application Support/CMBDevClaw-development/2026-10-08/presentation/verdict-shape-probe.safe.json",
+      "sha256": "e0876b94ed21b7f730e2bea46d22e5022ed4d2a5553c10eff4d92343ddcec9ac",
+      "result": {
+        "sample": "non-sensitive standalone provider protocol probe; not App acceptance",
+        "model": "MiniMax-M3",
+        "shapes": [
+          {
+            "typeClass": "function",
+            "hasFunction": true,
+            "nameClass": "expected",
+            "argumentLength": 39,
+            "hasId": true,
+            "index": 0
+          }
+        ],
+        "finish": "tool_calls",
+        "usage": {
+          "input_tokens": 461,
+          "output_tokens": 50,
+          "total_tokens": 511,
+          "input_token_details": {
+            "cache_read": 128
+          },
+          "output_token_details": {}
+        },
+        "argumentBytes": 39
+      },
+      "boundary": "Configured MiniMax standalone reviewer, not actual App task or final delivery acceptance"
+    },
+    {
+      "path": "/Users/chenqiang/Library/Application Support/CMBDevClaw-development/2026-10-08/presentation/verdict-j2-shape-probe.safe.json",
+      "sha256": "a34b6bb1492d04f007f0f1cf61fac0e8e5427a3749d32e5a454ab3d9e09dbe27",
+      "result": {
+        "sample": "non-sensitive standalone provider protocol probe; not App acceptance",
+        "model": "MiniMax-M3",
+        "shapes": [
+          {
+            "typeClass": "function",
+            "hasFunction": true,
+            "nameClass": "expected",
+            "argumentLength": 1,
+            "hasId": true,
+            "index": 0
+          },
+          {
+            "typeClass": "missing",
+            "hasFunction": true,
+            "nameClass": "missing",
+            "argumentLength": 34,
+            "hasId": false,
+            "index": 0
+          },
+          {
+            "typeClass": "missing",
+            "hasFunction": true,
+            "nameClass": "missing",
+            "argumentLength": 387,
+            "hasId": false,
+            "index": 0
+          }
+        ],
+        "finish": "tool_calls",
+        "usage": {
+          "input_tokens": 1163,
+          "output_tokens": 253,
+          "total_tokens": 1416,
+          "input_token_details": {
+            "cache_read": 131
+          },
+          "output_token_details": {}
+        },
+        "argumentBytes": 422,
+        "verdict": {
+          "decision": "revise",
+          "findings": [
+            "review-policy规定同一project_id保留金额最大版本。P101在project-records.csv中存在两版：version2金额12.40万元、version1金额15.40万元，max应为15.40万元，但result.csv仍写成12.40万元，需改为15.40万元并重新计算合计。",
+            "按规则\"金额为0的记录也应计入条数\"，P106(0.00)纳入正确；P105(-2.50)作为冲销纳入正确；P102保留version2=8.55万元正确。",
+            "修正后4条记录合计应为15.40+8.55+(-2.50)+0.00=21.45万元，与草稿38.45万元的差额为17.00万元，差额应归因于P101旧版本15.40万元未被取最大，需在review.md中明确引用project-records.csv中P101的两行记录说明。"
+          ]
+        }
+      },
+      "boundary": "Configured MiniMax standalone reviewer, not actual App task or final delivery acceptance"
+    },
+    {
+      "path": "/Users/chenqiang/Library/Application Support/CMBDevClaw-development/2026-10-08/presentation/verdict-j2-v5-shape-probe.safe.json",
+      "sha256": "52f8fb382f49a94064e243463bcb05a748e3603eafaefadd67f6d86752aad04a",
+      "result": {
+        "sample": "non-sensitive standalone provider protocol probe; not App acceptance",
+        "model": "MiniMax-M3",
+        "shapes": [
+          {
+            "typeClass": "function",
+            "hasFunction": true,
+            "nameClass": "expected",
+            "argumentLength": 271,
+            "hasId": true,
+            "index": 0
+          }
+        ],
+        "finish": "tool_calls",
+        "usage": {
+          "input_tokens": 1323,
+          "output_tokens": 739,
+          "total_tokens": 2062,
+          "input_token_details": {
+            "cache_read": 128
+          },
+          "output_token_details": {}
+        },
+        "argumentBytes": 271,
+        "verdict": {
+          "decision": "pass",
+          "findings": [
+            "依据 review-policy.txt 的规则（状态=已验收、区域=北区、保留数值最大版本），从 project-records.csv 筛选出的四条记录（P101 v2=12.40、P102 v2=8.55、P105 v1=-2.50、P106 v1=0.00）与 candidate result.csv 完全一致；条数4与周报草案吻合，合计18.45万元，与草案38.45万元的差额为20.00万元（差额原因在 review.md 中说明，非本候选文件审查范围）。"
+          ]
+        }
+      },
+      "boundary": "Configured MiniMax standalone reviewer, not actual App task or final delivery acceptance"
+    }
+  ],
+  "trialEffects": [
+    {
+      "id": "browser:575a5849-386d-45f1-998a-15143e62882e:call_function_d5ump3q95rqh_1",
+      "run_id": "575a5849-386d-45f1-998a-15143e62882e",
+      "status": "succeeded",
+      "resultSha256": "edf6ace9ab6c5c035492d276ee0a8881a3418d50dc18ff1d342d93f8ba6af0a9"
+    },
+    {
+      "id": "browser:575a5849-386d-45f1-998a-15143e62882e:call_function_usycq5l950dl_1",
+      "run_id": "575a5849-386d-45f1-998a-15143e62882e",
+      "status": "succeeded",
+      "resultSha256": "1fa77ffc7c49ff59f708eb5b2a55ec45fb1c6d3a9562874f0fa8f310159dd16b"
+    },
+    {
+      "id": "browser:575a5849-386d-45f1-998a-15143e62882e:call_function_smsggx3aeiaa_1",
+      "run_id": "575a5849-386d-45f1-998a-15143e62882e",
+      "status": "succeeded",
+      "resultSha256": "658304f19a3629555056610144a560c70565bfe7cb2a1558466d3d7bb653a746"
+    },
+    {
+      "id": "browser:575a5849-386d-45f1-998a-15143e62882e:call_function_cfpt3lx57zid_1",
+      "run_id": "575a5849-386d-45f1-998a-15143e62882e",
+      "status": "succeeded",
+      "resultSha256": "21c0971c85cf5aed49439d4db54aa3ac53b6fdc24afb9150f0540736b347a145"
+    },
+    {
+      "id": "browser:575a5849-386d-45f1-998a-15143e62882e:call_function_jdqpaph2d6kv_1",
+      "run_id": "575a5849-386d-45f1-998a-15143e62882e",
+      "status": "unknown",
+      "resultSha256": "b17936ee90d13a1ec88f7a4fe6bbba2575c75c32ec79276151459af98e149405",
+      "boundedKnownFailure": "Native select was passed to fill; Playwright rejected because it was not an input, textarea or contenteditable element."
+    }
+  ]
+}

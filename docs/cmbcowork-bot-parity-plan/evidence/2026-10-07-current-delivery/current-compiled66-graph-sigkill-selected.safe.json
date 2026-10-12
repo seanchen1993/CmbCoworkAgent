@@ -1,0 +1,57 @@
+{
+  "schemaVersion": 1,
+  "kind": "Root-new-compiled66-owned-graph-SIGKILL-recovery-selected-process-test",
+  "recordedAt": "2026-10-07T17:01:14.100705+00:00",
+  "runnerExitCode": 0,
+  "selectedCase": "resumes a persisted graph after SIGKILL and review without repeating a committed tool",
+  "passed": 1,
+  "failed": 0,
+  "skipped": 64,
+  "originalAssertionsAnd75000msTimeoutUnchanged": true,
+  "actualCompiledProcesses": true,
+  "provider": "controlled-local-not-MiniMax",
+  "actualAppUI": false,
+  "fullRecoveryMatrixClaimed": false,
+  "compiledBuildId": "18eb3cb377377989a66c0b28",
+  "sourceSchemaVersion": 66,
+  "logs": [
+    {
+      "path": "/tmp/cmb-compiled66-graph-recovery.log",
+      "bytes": 672,
+      "sha256": "52623e73319d424b318c7f0ef07ab7f793f63411a6f0787c14f9ce4fedf64624"
+    },
+    {
+      "path": "/tmp/cmb-compiled66-graph-recovery.private.json",
+      "bytes": 19502,
+      "sha256": "908e317d43c90973402cbb771be9157f47d064d9d227a89a0118ab56102dffa4"
+    }
+  ],
+  "compiled": [
+    {
+      "path": "/Users/chenqiang/Desktop/projects/CmbCoworkAgent/out/main/bot-native-build.json",
+      "bytes": 23240,
+      "sha256": "7af9a4982f3448ab235e25b43546048bd92b9204f7cb6da8da10b05482873aa9"
+    },
+    {
+      "path": "/Users/chenqiang/Desktop/projects/CmbCoworkAgent/out/main/bot-host.js",
+      "bytes": 6215,
+      "sha256": "622f356fadaf7834f14fb2782d9f1ffb73bb5c57f680eaf40c03fbe8e42ddf9e"
+    }
+  ],
+  "testSource": {
+    "path": "/Users/chenqiang/Desktop/projects/CmbCoworkAgent/src/main/bots/host-process.test.ts",
+    "bytes": 179107,
+    "sha256": "8a5403c0e41cc56982974cead06252a264016934a87379165afc6a6cddb35391"
+  },
+  "testedBehavior": [
+    "Fresh owned compiled Host saves a dependent incremental message checkpoint and one memory; the process is stopped by SIGKILL.",
+    "A second owned compiled Host opens the same DB/run, requires review, and resumes only after the test explicit recovery.",
+    "Committed memory tool is not repeated; final message keeps the same run, one memory remains and controlled provider total is exactly3 requests."
+  ],
+  "limitations": [
+    "This is the unchanged selected graph test, not a new real model task.",
+    "No claim of exact head count/schema rows or independent PID trace beyond the executed test assertions.",
+    "The actual App host remains b4/schema65 and was not upgraded or terminated.",
+    "Old schema65 recovery and first failure evidence remain preserved."
+  ]
+}

@@ -1,0 +1,134 @@
+{
+  "at": "2026-10-07T08:36:48.779442+00:00",
+  "status": "PASS",
+  "actualResult": {
+    "phase": "actual-current-opening-metadata-output-original-packaged-desktop26",
+    "startedAt": "2026-10-07T08:34:41.694667+00:00",
+    "completedAt": "2026-10-07T08:35:54.844814+00:00",
+    "seconds": 73.15017770801205,
+    "exitCode": 0,
+    "inputCount": 4017,
+    "sourceDrift": [],
+    "logSHA256": "747586852c95eed71b23e2422cbcc48b10acb4d0a13f57a31798626262182059",
+    "automaticRetries": 0,
+    "wrapperOverridesOriginalTimeouts": false
+  },
+  "nativeBuildId": "aa183a16dd2d22fe8ad060e4",
+  "outputRevisionSHA256": "0ce3e79902f8ee8bedfaead445890c67cc96fb08a40e12252ec30743d7b05dcc",
+  "rendererChunk": "BotWorkspace-D-23g-nQ.js",
+  "originalNonCommandCases": 23,
+  "approvedNativeMacScopeCases": 3,
+  "actualCases": 26,
+  "modelRequests": 4,
+  "memoryRequests": 1,
+  "freshOutputFiles": [
+    {
+      "path": "checks.json",
+      "bytes": 7283,
+      "sha256": "e8617bfb2d4feda20ac254f2007751c5374b96cfe1acc31c5779e9cc80343401"
+    },
+    {
+      "path": "desktop-about.png",
+      "bytes": 214436,
+      "sha256": "3c267190262d006f36674713b341d352f2b411005a2d41f839d9b233a2c43231"
+    },
+    {
+      "path": "desktop-artifact-downloads.png",
+      "bytes": 194448,
+      "sha256": "3ce7066552e56137dfc8c63d4e3263d93e0ae7a9b0518fce965b055793084f5e"
+    },
+    {
+      "path": "desktop-bot-details.png",
+      "bytes": 185444,
+      "sha256": "7ba8eaf56b2511046a7966afd4e6819a6f41b2c82ec942acbb85dd13b48db2fa"
+    },
+    {
+      "path": "desktop-bot-library.png",
+      "bytes": 158364,
+      "sha256": "de0457d1e488ae8e03306b675cffbcda6b66bc5e1d290fde6fa29fe274f3018f"
+    },
+    {
+      "path": "desktop-browser-maintenance.png",
+      "bytes": 265098,
+      "sha256": "8c55d510d2fa03edc8057cd4438b06c315491c814999a4ab0e6ee5a0931767f3"
+    },
+    {
+      "path": "desktop-browser-preview.png",
+      "bytes": 183354,
+      "sha256": "881f5387aa195c46752773ade068116ae8b8a98f536a6fd2709e00537078676f"
+    },
+    {
+      "path": "desktop-browser.png",
+      "bytes": 201008,
+      "sha256": "79f1e90230e8ba9e7394d1e7736f1957caa30b86721571e9705d37f471fb7dbc"
+    },
+    {
+      "path": "desktop-command-palette.png",
+      "bytes": 124939,
+      "sha256": "ac736283c2f9ff2e2e17a8c1a9a87d67e2394c377dea94c7b5e007709aec805a"
+    },
+    {
+      "path": "desktop-composer-restart-draft.json",
+      "bytes": 928,
+      "sha256": "b22c341c06a1c4874f1f68bec5a0856a5d36daf00c2d2c6f15f0bd3c9d4d90c3"
+    },
+    {
+      "path": "desktop-computer-checkpoints.png",
+      "bytes": 279812,
+      "sha256": "795028b6c539872a608c0d512010f6bbd3393a4204590072af93b89d3f07b3ce"
+    },
+    {
+      "path": "desktop-connect-apps.png",
+      "bytes": 183207,
+      "sha256": "a7c7b77bee138d2e3cd4a5dbce7a73ae69d7730be205d011d0b1157dfd00fa68"
+    },
+    {
+      "path": "desktop-external-branch.png",
+      "bytes": 137556,
+      "sha256": "49bc924d4d6e1f243e2151c3cff940e28a5aa01d3a9d6de396e35ba5064ae2ea"
+    },
+    {
+      "path": "desktop-model-settings.png",
+      "bytes": 284211,
+      "sha256": "ae9c9ed2133d702676fab8525217dc648dacacd2934e4c92b9f2194ff7737f72"
+    },
+    {
+      "path": "desktop-native-command-unavailable.png",
+      "bytes": 277633,
+      "sha256": "ff6d338480e9f154c10f8695a2997f8759e9ca134d7ae33a69b057e4b461a67b"
+    },
+    {
+      "path": "desktop-running.png",
+      "bytes": 118351,
+      "sha256": "2d6303403bf27820771c758501ad1dec66a5ef0d7cd6757ddd015df3e5c50695"
+    },
+    {
+      "path": "desktop-settings-over-browser.png",
+      "bytes": 297299,
+      "sha256": "04942d087c0ebbee1b8776db35304f581f05911436e310b97ecad2b01a70b23b"
+    },
+    {
+      "path": "desktop-settings.png",
+      "bytes": 276121,
+      "sha256": "56c45d6cb0250c64b4dba8982a3708a96ffc0f49406b106f5bd4567a77bf34e5"
+    },
+    {
+      "path": "desktop-startup-branch.png",
+      "bytes": 138530,
+      "sha256": "2fa75c5c778c1242cba1318d0f19331e40aabf652500bcdbd615cb362b5bd798"
+    },
+    {
+      "path": "desktop-table-preview.png",
+      "bytes": 116527,
+      "sha256": "0d40a7dffd6853f9909dc74f7567244ca721294e729bb3e938f1480070cd4637"
+    },
+    {
+      "path": "native-command-scope.json",
+      "bytes": 14545,
+      "sha256": "2becf65dc0fd62367a5d9ed3343c15d4e9c3ece01d1081c219cad3ea3553689e"
+    }
+  ],
+  "originalAssertionsAndTimeoutsUnchanged": true,
+  "WindowsLinuxRealUserModelAcceptance": false,
+  "signing": "ad-hoc; not notarized"
+}

@@ -1,0 +1,89 @@
+{
+  "schemaVersion": 1,
+  "kind": "formal-compiled-host-sigkill65-controlled-native",
+  "actualRealProvider": false,
+  "actualUI": false,
+  "startedAt": "2026-10-07T15:38:28.774Z",
+  "completedAt": "2026-10-07T15:38:34.759Z",
+  "durationMs": 5985,
+  "runnerCode": 0,
+  "runnerSignal": null,
+  "sourceAndCompiledInputsUnchanged": true,
+  "selectedCase": "resumes a persisted graph after SIGKILL and review without repeating a committed tool",
+  "passedTests": 1,
+  "failedTests": 0,
+  "ownedHostProcesses": 2,
+  "forceKilledCheckpoint": true,
+  "sameRun": true,
+  "succeeded": true,
+  "passed": true,
+  "processes": [
+    {
+      "event": "spawn",
+      "at": 1791387511596,
+      "pid": 12291,
+      "dataDirectory": "/private/tmp/cmb-native-sigkill65-QPH6xt/cmb-bot-process-NJmuoO",
+      "entrySHA256": "226270eca55f0e2aa35720ff928c57072eb4e3dbea8b54feb97e8ad2402e761d"
+    },
+    {
+      "event": "exit",
+      "at": 1791387513239,
+      "pid": 12291,
+      "dataDirectory": "/private/tmp/cmb-native-sigkill65-QPH6xt/cmb-bot-process-NJmuoO",
+      "entrySHA256": "226270eca55f0e2aa35720ff928c57072eb4e3dbea8b54feb97e8ad2402e761d",
+      "code": null,
+      "signal": "SIGKILL",
+      "durable": {
+        "schema": 65,
+        "run": {
+          "id": "509e7123-3a6a-4973-be77-52cef1ec8027",
+          "status": "running",
+          "has_checkpoint": 1,
+          "result_bytes": null
+        },
+        "delta": {
+          "heads": 4,
+          "dependent_heads": 4
+        },
+        "memories": 1
+      }
+    },
+    {
+      "event": "spawn",
+      "at": 1791387513254,
+      "pid": 12320,
+      "dataDirectory": "/private/tmp/cmb-native-sigkill65-QPH6xt/cmb-bot-process-NJmuoO",
+      "entrySHA256": "226270eca55f0e2aa35720ff928c57072eb4e3dbea8b54feb97e8ad2402e761d"
+    },
+    {
+      "event": "exit",
+      "at": 1791387514610,
+      "pid": 12320,
+      "dataDirectory": "/private/tmp/cmb-native-sigkill65-QPH6xt/cmb-bot-process-NJmuoO",
+      "entrySHA256": "226270eca55f0e2aa35720ff928c57072eb4e3dbea8b54feb97e8ad2402e761d",
+      "code": 0,
+      "signal": null,
+      "durable": {
+        "schema": 65,
+        "run": {
+          "id": "509e7123-3a6a-4973-be77-52cef1ec8027",
+          "status": "succeeded",
+          "has_checkpoint": 1,
+          "result_bytes": 21
+        },
+        "delta": {
+          "heads": 4,
+          "dependent_heads": 4
+        },
+        "memories": 1
+      }
+    }
+  ],
+  "log": {
+    "bytes": 252,
+    "sha256": "304d72f1e52ad1a1b567307197b949c1bc028ea3a509c9af93037f18aec710cd"
+  },
+  "inputsSHA256": "809fdd875bb7fc9b35aa1cba4f2f92b3a639b6586121a832cf5dc25f3ba40c91",
+  "originalAssertionsAnd75SecondTimeoutUnchanged": true,
+  "privateEvidenceDirectory": "/tmp/cmb-native-sigkill65-QPH6xt"
+}

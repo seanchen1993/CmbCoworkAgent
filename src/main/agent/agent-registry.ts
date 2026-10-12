@@ -18,10 +18,7 @@
  * coarse `workload` shortcut.
  */
 import { existsSync, readdirSync, readFileSync, realpathSync, statSync } from "fs"
-import {
-  opendir,
-  realpath as realpathAsync
-} from "fs/promises"
+import { opendir, realpath as realpathAsync } from "fs/promises"
 import { homedir } from "os"
 import { basename, dirname, extname, isAbsolute, join } from "path"
 import { parseYamlFrontmatter } from "../utils/skill-identifiers"
@@ -54,6 +51,10 @@ export interface AgentProfile {
   disallowedTools: string[]
   /** execute/shell access tier. */
   shellAccess: AgentShellAccess
+  /** Trusted execution adapter capability; never parsed from user frontmatter. */
+  browserAccess?: "page"
+  /** Host-only shared native desktop capability; never parsed from user frontmatter. */
+  desktopAccess?: "shared-native"
 }
 
 /** The built-in tools an allowlist/denylist can govern in this project. Mirrors
@@ -201,9 +202,15 @@ function deriveToolPolicy(fm: Record<string, string>): ToolPolicy {
   if (!hasAllowlist && !hasDenylist) {
     const workload = fm.workload?.trim()
     if (workload === "read_only")
-      return { disallowedTools: ["write_file", "edit_file"], shellAccess: "read_only" }
+      return {
+        disallowedTools: ["write_file", "edit_file"],
+        shellAccess: "read_only"
+      }
     if (workload === "verify")
-      return { disallowedTools: ["write_file", "edit_file"], shellAccess: "full" }
+      return {
+        disallowedTools: ["write_file", "edit_file"],
+        shellAccess: "full"
+      }
     return { disallowedTools: [], shellAccess: "full" }
   }
 
@@ -256,8 +263,7 @@ export function accessTierForPolicy(
   disallowedTools: readonly string[],
   shellAccess: AgentShellAccess
 ): ExpertAgentAccess {
-  const noWrites =
-    disallowedTools.includes("write_file") && disallowedTools.includes("edit_file")
+  const noWrites = disallowedTools.includes("write_file") && disallowedTools.includes("edit_file")
   if (!noWrites) return "full"
   return shellAccess === "read_only" ? "read_only" : "verify"
 }
@@ -588,9 +594,9 @@ async function parseAgentFileAsync(
   let opened: Awaited<ReturnType<typeof openStableFileHandle>> | undefined
   try {
     opened = await openStableFileHandle(dirname(filePath), filePath)
-    const content = (
-      await readStableFileHandleBounded(opened, MAX_AGENT_FILE_BYTES)
-    ).toString("utf-8")
+    const content = (await readStableFileHandleBounded(opened, MAX_AGENT_FILE_BYTES)).toString(
+      "utf-8"
+    )
     return parseAgentContent(filePath, fallbackName, content)
   } catch (error) {
     if (error instanceof StableBoundedReadError) {
@@ -683,10 +689,7 @@ async function loadUserAgentsAsync(dir: string): Promise<AgentProfile[]> {
   }
   const out: AgentProfile[] = []
   for (const entry of entries) {
-    const profile = await parseAgentFileAsync(
-      join(dir, entry),
-      entry.slice(0, -".md".length)
-    )
+    const profile = await parseAgentFileAsync(join(dir, entry), entry.slice(0, -".md".length))
     if (profile) out.push(profile)
     await new Promise<void>((resolveYield) => setImmediate(resolveYield))
   }
@@ -750,10 +753,7 @@ async function loadExplicitUserAgentFilesAsync(
         )
         continue
       }
-      const profile = await parseAgentFileAsync(
-        filePath,
-        basename(filePath, extname(filePath))
-      )
+      const profile = await parseAgentFileAsync(filePath, basename(filePath, extname(filePath)))
       if (profile) out.push(profile)
     } catch (error) {
       console.warn(
@@ -1049,7 +1049,10 @@ export function stripBlockedToolDocs(systemMessage: unknown, blocked: Iterable<s
   // SystemMessage object. Replace .content on a prototype-preserving clone (keeps
   // it an instanceof SystemMessage with all other fields) + sync LangChain's
   // serialization mirror (lc_kwargs.content) when present.
-  const msg = systemMessage as { content?: unknown; lc_kwargs?: { content?: unknown } }
+  const msg = systemMessage as {
+    content?: unknown
+    lc_kwargs?: { content?: unknown }
+  }
   const cloneWithContent = (content: unknown): unknown => {
     const clone = Object.assign(
       Object.create(Object.getPrototypeOf(systemMessage)),

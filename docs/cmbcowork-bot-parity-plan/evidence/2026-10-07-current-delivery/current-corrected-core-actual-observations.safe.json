@@ -1,0 +1,40 @@
+{
+  "schemaVersion": 1,
+  "recordedAt": "2026-10-07T12:22:46.780063+00:00",
+  "liveBuild": "b05f08414bcd1618c94ec3f2",
+  "peer": {
+    "root": "bb2a4ebf-4680-4f96-a732-2143168521ee",
+    "rootCorrectlyAggregatedTwoActualBots": true,
+    "sum": 64,
+    "average": 16,
+    "entireJourneyPassed": false,
+    "extraRun": "7f064263-affa-4514-952c-50ac31a3f7eb",
+    "extraOutcome": "failed",
+    "extraCauseConfirmedByExactPrivateDispatchRead": "First child automatic result was queued while parent awaited second dispatch approval; parent later consumed terminal child result without suppressing redundant automatic wakeup. Explicit second-child reply was not the extra run."
+  },
+  "material": {
+    "runId": "450dd853-67b5-4090-8ea8-b484e44bbe65",
+    "originalFilesActuallyReadAgain": true,
+    "bodyStartsWithCompleteHeading": true,
+    "originalNumbersAndUnitsCorrect": true,
+    "evidenceGroundingPassed": false,
+    "unsupportedClaim": "The draft used P101 version1=15.40; the input draft gives only total and count, so its construction cause is not established.",
+    "actualLengthContinuationOccurred": null,
+    "overallPassed": false,
+    "contextDifference": "New task in existing conversation; not a pristine same-history Grok comparison."
+  },
+  "programming": {
+    "stopRunId": "86f867fa-b9f4-4c58-a90d-30ce5c64dd5e",
+    "actualUiStopAfterSuccessfulEdit": true,
+    "file": "src/money.js",
+    "fileSha256AtStop": "6e245e2a04d355b7157d33c1c60058eb1a1ff6537624eaf50982404326c89d26",
+    "fileBytesAtStop": 1519,
+    "resumeSubmittedThroughUi": true,
+    "resumeResultPassed": false,
+    "reason": "task still in progress"
+  },
+  "sourcePendingLive": [
+    "evidence-grounded concise delivery prompt"
+  ],
+  "scope": "Separate true correctness, lifecycle failures, unknown provider output tokens and pending checks. No overall completion percentage is inferred."
+}

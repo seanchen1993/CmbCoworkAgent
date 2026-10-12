@@ -1,0 +1,522 @@
+{
+  "date": "2026-09-30",
+  "review_scope": "Windows native local first; future Linux Kubernetes; targeted source review and official original-app samples",
+  "baseline_commit": "0ba63bd2f6a1eb48066882e94bd81c7fdda9c0ee",
+  "requirements": 260,
+  "scope_counts": {
+    "core": 124,
+    "deferred": 73,
+    "core_subset": 53,
+    "conditional": 10
+  },
+  "supplemental_checks": 14,
+  "core_journeys": 12,
+  "original_journeys_mapped": 10,
+  "failure_cases_mapped": 42,
+  "rpc_methods_mapped": 210,
+  "original_source_file_hashes_checked": 71,
+  "original_source_hash_results": [
+    {
+      "path": "/Users/chenqiang/Desktop/AI/grok-bot-0.18-reconstructed-main/source/shared/rpc/coordinator.ts",
+      "sha256": "60a2f6a2eec1adecf23ee04f1385c5a17cd3973d2cdab20f69d8fc3811b4cc38",
+      "matches": true
+    },
+    {
+      "path": "/Users/chenqiang/Desktop/AI/grok-bot-0.18-reconstructed-main/source/shared/rpc/main.ts",
+      "sha256": "8e2c27a949b130b71299b05b4f2463e4a8ac0f23c3d1fb046c3180dd46cea6d4",
+      "matches": true
+    },
+    {
+      "path": "/Users/chenqiang/Desktop/AI/grok-bot-0.18-reconstructed-main/source/shared/agents/agents.ts",
+      "sha256": "08cb670207b0b184e8c4e7bf15a831803d8355297a8a16b7726494382d32b72f",
+      "matches": true
+    },
+    {
+      "path": "/Users/chenqiang/Desktop/AI/grok-bot-0.18-reconstructed-main/source/host/extensions/transcript/send-pipeline.ts",
+      "sha256": "c67d93108fdaf717450aa8a31a5acb8b223e0f612e066b7ec07e48b752a64cd2",
+      "matches": true
+    },
+    {
+      "path": "/Users/chenqiang/Desktop/AI/grok-bot-0.18-reconstructed-main/source/host/extensions/transcript/run-scheduler.ts",
+      "sha256": "f4b22c1eeff33f4d6ca6e2daf38592e89f902e68916f2e2b3bd41a0a9de1768a",
+      "matches": true
+    },
+    {
+      "path": "/Users/chenqiang/Desktop/AI/grok-bot-0.18-reconstructed-main/source/host/extensions/transcript/agent-to-agent-messaging.ts",
+      "sha256": "453d97db38543aaf087ca54a9dc6ade7491e7907083cc713c10249b6d7fa249f",
+      "matches": true
+    },
+    {
+      "path": "/Users/chenqiang/Desktop/AI/grok-bot-0.18-reconstructed-main/source/host/extensions/transcript/group-chat-orchestrator.ts",
+      "sha256": "5ff5626a9234be5ab0ca4cc94490e96c55f3ca2f7f886eaf1e0f381ae7f209a1",
+      "matches": true
+    },
+    {
+      "path": "/Users/chenqiang/Desktop/AI/grok-bot-0.18-reconstructed-main/source/host/extensions/transcript/send-group-fanout.ts",
+      "sha256": "5113ded559c642185b301ba9e5250cee3d1062f85a1cd147e1e3a90290733bfd",
+      "matches": true
+    },
+    {
+      "path": "/Users/chenqiang/Desktop/AI/grok-bot-0.18-reconstructed-main/source/host/groups/group-chat.ts",
+      "sha256": "acc0e97d40f264d553b063751044b9c796ef0b7238a17ddc1f8901b92408f4fb",
+      "matches": true
+    },
+    {
+      "path": "/Users/chenqiang/Desktop/AI/grok-bot-0.18-reconstructed-main/source/host/agents/agent-clone.ts",
+      "sha256": "345d35642793b117da53cb3c58aa07df77f7107bb82f1f4d8c68353daab50959",
+      "matches": true
+    },
+    {
+      "path": "/Users/chenqiang/Desktop/AI/grok-bot-0.18-reconstructed-main/source/host/extensions/memory/memory-service.ts",
+      "sha256": "1c04f00b27bf1a1dd416638094525a9fbac0527f8131202b8c2cbf63681af762",
+      "matches": true
+    },
+    {
+      "path": "/Users/chenqiang/Desktop/AI/grok-bot-0.18-reconstructed-main/source/host/extensions/memory/memory-synthesis-service.ts",
+      "sha256": "827de2d86ea95ec3df48bfff2ab91507426a81dc58dd40e2f36711a8a722f671",
+      "matches": true
+    },
+    {
+      "path": "/Users/chenqiang/Desktop/AI/grok-bot-0.18-reconstructed-main/source/host/extensions/teach-recording/teach-recording-service.ts",
+      "sha256": "b72f9bd4c7967ea00dafb51cda7b42413d8139fa74622c0665894519f6b4710a",
+      "matches": true
+    },
+    {
+      "path": "/Users/chenqiang/Desktop/AI/grok-bot-0.18-reconstructed-main/source/shared/automations.ts",
+      "sha256": "b00336c85e9c316710a43d050fec10159849b9c3d15a35979b2a8e922efd24a5",
+      "matches": true
+    },
+    {
+      "path": "/Users/chenqiang/Desktop/AI/grok-bot-0.18-reconstructed-main/source/host/automations/automation.ts",
+      "sha256": "c21bafc22d8d7c2fa8a9235da7055cebf28949584de3e8e361b1e143a7d83538",
+      "matches": true
+    },
+    {
+      "path": "/Users/chenqiang/Desktop/AI/grok-bot-0.18-reconstructed-main/source/host/automations/automation-store.ts",
+      "sha256": "5937cab677e05c7e6af0ab7ef3c429c6973c58b809d32b2f72600ce27502b546",
+      "matches": true
+    },
+    {
+      "path": "/Users/chenqiang/Desktop/AI/grok-bot-0.18-reconstructed-main/source/host/extensions/transcript/automation-runtime.ts",
+      "sha256": "c1eb297aec74614814c4f59a765856921900295efaa86f83645f39a271e889dc",
+      "matches": true
+    },
+    {
+      "path": "/Users/chenqiang/Desktop/AI/grok-bot-0.18-reconstructed-main/source/host/runner/sand-auto-review.ts",
+      "sha256": "9c274406ec0fbbfcb723c0ff2dd9bb6d3eed834f9a511657b6cd831e9b4f92f4",
+      "matches": true
+    },
+    {
+      "path": "/Users/chenqiang/Desktop/AI/grok-bot-0.18-reconstructed-main/source/host/extensions/local-tool-permission/local-tool-permission-resolution.ts",
+      "sha256": "21e93cf08de7e5cc54886edc76051c034ba81bc33ce53f907d7c775bb7fcd0f6",
+      "matches": true
+    },
+    {
+      "path": "/Users/chenqiang/Desktop/AI/grok-bot-0.18-reconstructed-main/source/host/extensions/state-backstop/state-backstop-service.ts",
+      "sha256": "bb1cbcf984f76b20d8429c6cc9f40a8c8ee2e3f4b249c907d84449ea7b711258",
+      "matches": true
+    },
+    {
+      "path": "/Users/chenqiang/Desktop/AI/grok-bot-0.18-reconstructed-main/source/host/extensions/session/agent-db-recovery.ts",
+      "sha256": "ad51f95381393c4d4e0d7654eb3e05640863d420629ac952ace157d7024f3e1a",
+      "matches": true
+    },
+    {
+      "path": "/Users/chenqiang/Desktop/AI/grok-bot-0.18-reconstructed-main/source/host/extensions/box-store-sync/box-store-sync-service.ts",
+      "sha256": "f6a5becf243e7cac774caa8079b4168efd721b4b927a39f9ff2d04432ec3b462",
+      "matches": true
+    },
+    {
+      "path": "/Users/chenqiang/Desktop/AI/grok-bot-0.18-reconstructed-main/source/host/extensions/host-upgrade/host-upgrade-service.ts",
+      "sha256": "f8af60e3b78abb3da2a46cf8c29df8b6d62d556480939b27ec76185e8c6f73c3",
+      "matches": true
+    },
+    {
+      "path": "/Users/chenqiang/Desktop/AI/grok-bot-0.18-reconstructed-main/source/host/extensions/mcp/mcp-service.ts",
+      "sha256": "064d8bdfef4440ad9083acef39ab5fc640e86f24d2a8de7da8b9f90f25a19051",
+      "matches": true
+    },
+    {
+      "path": "/Users/chenqiang/Desktop/AI/grok-bot-0.18-reconstructed-main/source/host/extensions/cloud-agents/cloud-agents-service.ts",
+      "sha256": "6e7b1bb01cc5ee916ea2b9af256262e71873bd8373a48f80576ae513479235a9",
+      "matches": true
+    },
+    {
+      "path": "/Users/chenqiang/Desktop/AI/grok-bot-0.18-reconstructed-main/PROVENANCE.md",
+      "sha256": "ce0f08a247393f6abf2658006aed123bf9ee48616db39ca3667647b68ee27232",
+      "matches": true
+    },
+    {
+      "path": "/Users/chenqiang/Desktop/AI/grok-bot-0.18-reconstructed-main/frontend/README.md",
+      "sha256": "1d12c96f8fe9935004fcba4975c7403508c20383067f39f844ae04719a26de89",
+      "matches": true
+    },
+    {
+      "path": "/Users/chenqiang/Desktop/AI/grok-bot-0.18-reconstructed-main/frontend/src/recovered/features/conversation/workspace/sidebar.tsx",
+      "sha256": "fa69a02cea8a7d51d67ddb2bdc78a80608d6962d182515ee57847454ee191f3d",
+      "matches": true
+    },
+    {
+      "path": "/Users/chenqiang/Desktop/AI/grok-bot-0.18-reconstructed-main/frontend/src/recovered/features/conversation/workspace/composer.tsx",
+      "sha256": "e6511a16bd286ae06a144cf85d85e60e25d32281904cd7b79fad1f9c07f6b980",
+      "matches": true
+    },
+    {
+      "path": "/Users/chenqiang/Desktop/AI/grok-bot-0.18-reconstructed-main/frontend/src/recovered/features/conversation/workspace/voice.tsx",
+      "sha256": "ff6276858048c3954416f942aa3cd5e7be371c913665f5126e75422670df8938",
+      "matches": true
+    },
+    {
+      "path": "/Users/chenqiang/Desktop/AI/grok-bot-0.18-reconstructed-main/frontend/src/recovered/features/conversation/cards/transcript-card/views/email-draft.tsx",
+      "sha256": "8df26908f5a6265d3ba9c88a06b092e321768124fb9629024acc00a6df114eaf",
+      "matches": true
+    },
+    {
+      "path": "/Users/chenqiang/Desktop/AI/grok-bot-0.18-reconstructed-main/frontend/src/recovered/features/computer/shell/vnc-webview.tsx",
+      "sha256": "958a5732a2a57aa72fb049baf5aaf20d73e0c1957e30bf315383e550426cd1d3",
+      "matches": true
+    },
+    {
+      "path": "/Users/chenqiang/Desktop/AI/grok-bot-0.18-reconstructed-main/frontend/manifests/ui-evidence-anchors.json",
+      "sha256": "61d84a194104f2241b8246e906e11b822e46886ee1adbc561f9032d6f5289391",
+      "matches": true
+    },
+    {
+      "path": "/Users/chenqiang/Desktop/AI/grok-bot-0.18-reconstructed-main/source/electron-main/box/box-host-connector.ts",
+      "sha256": "89ee5ff3b3fb5906c70ba59dd286d44d91c4ac502dc18d75f6b7c0854734049f",
+      "matches": true
+    },
+    {
+      "path": "/Users/chenqiang/Desktop/AI/grok-bot-0.18-reconstructed-main/source/node-agent-coordinator/gateway/gateway-client.ts",
+      "sha256": "f78f06114ba5bf0eddc9d047cb744a619f01b974e112cae506a1545e1da5446e",
+      "matches": true
+    },
+    {
+      "path": "/Users/chenqiang/Desktop/AI/grok-bot-0.18-reconstructed-main/source/node-agent-coordinator/gateway/box-vnc-proxy.ts",
+      "sha256": "20db85d6801c062ea424170ceda2cb48e84f61071bd2a6e02fe6317677c81504",
+      "matches": true
+    },
+    {
+      "path": "/Users/chenqiang/Desktop/AI/grok-bot-0.18-reconstructed-main/source/shared/gateway-wire.ts",
+      "sha256": "5f8ba84359a80f06534c36a5616c7591f4184404f74bdc05b2edaa8b0c41a113",
+      "matches": true
+    },
+    {
+      "path": "/Users/chenqiang/Desktop/AI/grok-bot-0.18-reconstructed-main/source/host/gateway-server.ts",
+      "sha256": "e5f8f2602b2237926ec5e51c790fff9ea97be9f3ee5dd7bbed38d80ddd7b44f1",
+      "matches": true
+    },
+    {
+      "path": "/Users/chenqiang/Desktop/AI/grok-bot-0.18-reconstructed-main/source/host/runner/tools/turn-toolset.ts",
+      "sha256": "239200b356d757a02a0a584de53273f4b1bb806d84284b903523666e22c0a037",
+      "matches": true
+    },
+    {
+      "path": "/Users/chenqiang/Desktop/AI/grok-bot-0.18-reconstructed-main/source/host/runner/tools/sand-agent-management-tools.ts",
+      "sha256": "60365b6976c9b1c469d1e0a952c8c58cbc50c66b7db204f9ca4f531e661482c4",
+      "matches": true
+    },
+    {
+      "path": "/Users/chenqiang/Desktop/AI/cmb-bot-reference-sources/rakazo/packages/adapters/src/executor.ts",
+      "sha256": "9d6fa638ba2d8925240ed5096a7ef330ae8b749e964e4e963acce00b9aa08ca1",
+      "matches": true
+    },
+    {
+      "path": "/Users/chenqiang/Desktop/AI/cmb-bot-reference-sources/rakazo/packages/adapters/src/job-reconciler.ts",
+      "sha256": "5fd6ac77e0c4d755e86673fbff8feaea1df9d4a34566e1a959133c35e0839a06",
+      "matches": true
+    },
+    {
+      "path": "/Users/chenqiang/Desktop/AI/cmb-bot-reference-sources/rakazo/packages/adapters/src/bot-messages.ts",
+      "sha256": "f83fa273ca8ba9a4b15d9c909b5c78412ce28c21e6c471df1148826d58722807",
+      "matches": true
+    },
+    {
+      "path": "/Users/chenqiang/Desktop/AI/cmb-bot-reference-sources/rakazo/packages/adapters/src/approval-effect.ts",
+      "sha256": "bf3dc911d8e688c1b42bb6099149293f9f6b3080c0c10d94061147a1be53fcf4",
+      "matches": true
+    },
+    {
+      "path": "/Users/chenqiang/Desktop/AI/cmb-bot-reference-sources/rakazo/packages/core/src/teach-playbook.ts",
+      "sha256": "1e94f113dac087c5dada9b065f2bdc26553ab9f89c18f74e97838be09168cf01",
+      "matches": true
+    },
+    {
+      "path": "/Users/chenqiang/Desktop/AI/cmb-bot-reference-sources/openbot/server/src/work/queue.ts",
+      "sha256": "a9f928ef57b26899e052763f3adbb07188dbe58823a722a1f7ab833a5a29ed4b",
+      "matches": true
+    },
+    {
+      "path": "/Users/chenqiang/Desktop/AI/cmb-bot-reference-sources/openbot/server/src/computer/gateway.ts",
+      "sha256": "2c0d19cc2e766445e26e9f96c6ef93c882489b8faa4dc7232cc1ee6010945cc4",
+      "matches": true
+    },
+    {
+      "path": "/Users/chenqiang/Desktop/AI/cmb-bot-reference-sources/openbot/server/src/routines/run-turn.ts",
+      "sha256": "e1d715614d55333df955ba2547ca767d08e63ba75f0cba3eeea3d429ee446c82",
+      "matches": true
+    },
+    {
+      "path": "/Users/chenqiang/Desktop/AI/cmb-bot-reference-sources/openbot/docs/architecture.md",
+      "sha256": "10163aa8573e02aa07481b676fdc782ba2a76269942fedc12df803d6fc06db7c",
+      "matches": true
+    },
+    {
+      "path": "/Users/chenqiang/Desktop/AI/cmb-bot-reference-sources/openbot/server/src/config.ts",
+      "sha256": "9692db515588a39aec37ef29e3821bb8ecaefde9b2ae861b8d81de920bfb7621",
+      "matches": true
+    },
+    {
+      "path": "/Users/chenqiang/Desktop/projects/CmbCoworkAgent/src/main/agent/agent-run-service.ts",
+      "sha256": "e9f789d24f07786b6c5a9ea7b2b1acf9fdde92d36f92d275268c3b3570452d5e",
+      "matches": true
+    },
+    {
+      "path": "/Users/chenqiang/Desktop/projects/CmbCoworkAgent/src/main/ipc/agent.ts",
+      "sha256": "0ad42754acc4c5d41ac3231143bf16ff1f9063693a24edcb408521f348367ca0",
+      "matches": true
+    },
+    {
+      "path": "/Users/chenqiang/Desktop/projects/CmbCoworkAgent/src/main/agent/standard-thread-turn.ts",
+      "sha256": "05a3d17795a5c95f4e3e2925ae388636e70bbf6ba5849f9a564417502481b019",
+      "matches": true
+    },
+    {
+      "path": "/Users/chenqiang/Desktop/projects/CmbCoworkAgent/src/main/agent/runtime.ts",
+      "sha256": "b41439de38549a18800c5a5d71b4bb79e541b5f38cf8bbe6441bf9d26f90c529",
+      "matches": true
+    },
+    {
+      "path": "/Users/chenqiang/Desktop/projects/CmbCoworkAgent/src/main/agent/coordinator-worker-manager.ts",
+      "sha256": "fc8edce81e53c8335a399fe281ed5647c75d201844ed42aa0921eb8f3354e1ee",
+      "matches": true
+    },
+    {
+      "path": "/Users/chenqiang/Desktop/projects/CmbCoworkAgent/src/main/services/scheduler.ts",
+      "sha256": "5d813c927ab2b9b2853b36ac281afcc85cefd400ceb2f09d5dfa466548a51009",
+      "matches": true
+    },
+    {
+      "path": "/Users/chenqiang/Desktop/projects/CmbCoworkAgent/src/main/agent/thread-run-lease.ts",
+      "sha256": "7e774a2e0e06be2bc905a2678c3f079deed8a9175fef79f6887eeef644d9b5a6",
+      "matches": true
+    },
+    {
+      "path": "/Users/chenqiang/Desktop/projects/CmbCoworkAgent/src/main/services/im/manager.ts",
+      "sha256": "eb3c802314653facd530e71a50058e181f9ad887a602f4f5bbb9ca3ab93afc7e",
+      "matches": true
+    },
+    {
+      "path": "/Users/chenqiang/Desktop/projects/CmbCoworkAgent/src/main/services/im/remote-runner.ts",
+      "sha256": "adfa585c9b1e17d59e62e407062d679e33565c62b6706c83e7860b9cc7ac7782",
+      "matches": true
+    },
+    {
+      "path": "/Users/chenqiang/Desktop/projects/CmbCoworkAgent/src/main/services/im/gateway-ws-client.ts",
+      "sha256": "2ee1f960ab7ebbee03f8da77d99be4abc10390443b7cb116a964644d2dca10cc",
+      "matches": true
+    },
+    {
+      "path": "/Users/chenqiang/Desktop/projects/CmbCoworkAgent/src/main/memory/paths.ts",
+      "sha256": "6ee48ff235e2af70012750f37511267ec0c073636b6906f77f737b1c842a4df2",
+      "matches": true
+    },
+    {
+      "path": "/Users/chenqiang/Desktop/projects/CmbCoworkAgent/src/main/agent/post-run-memory-maintenance.ts",
+      "sha256": "a786ff271dea56f55c947479ec73450d0c4c593bc4a056a3c4de13ba1c054fd4",
+      "matches": true
+    },
+    {
+      "path": "/Users/chenqiang/Desktop/projects/CmbCoworkAgent/src/main/browser/core/browser-service.ts",
+      "sha256": "08a94ebbac2501f9ad4c9397107856f7aeff19595e0631252088561e42309f1e",
+      "matches": true
+    },
+    {
+      "path": "/Users/chenqiang/Desktop/projects/CmbCoworkAgent/src/main/browser/record/script-record/script-recording-service.ts",
+      "sha256": "ae94c3d6a1416d5c4f117193d96d24c4236002658cf925585b56e6c6a7770a51",
+      "matches": true
+    },
+    {
+      "path": "/Users/chenqiang/Desktop/projects/CmbCoworkAgent/src/main/browser/record/common/browser-script-execution-service.ts",
+      "sha256": "536c8a569c7847d2d94eec6e486b627ea8d1a35019ec4540d57a6ef926a6cc37",
+      "matches": true
+    },
+    {
+      "path": "/Users/chenqiang/Desktop/projects/CmbCoworkAgent/src/main/agent/approval-decision-broker.ts",
+      "sha256": "8270c92c2d26c2e58a03f6be345365411ef20a47e046addbd2f7de8c5bad4138",
+      "matches": true
+    },
+    {
+      "path": "/Users/chenqiang/Desktop/projects/CmbCoworkAgent/src/main/agent/managed-transport-delivery.ts",
+      "sha256": "18f1a55bf6807be16cb69b9505a1f440b6e7d79483a3d1b17e25b00348b8cb95",
+      "matches": true
+    },
+    {
+      "path": "/Users/chenqiang/Desktop/projects/CmbCoworkAgent/src/renderer/src/App.tsx",
+      "sha256": "0c9a31055b5c031cf3b4a57681336f88fa7b7097efe9b13d0e9f8f4cd16adaf8",
+      "matches": true
+    },
+    {
+      "path": "/Users/chenqiang/Desktop/projects/CmbCoworkAgent/src/renderer/src/lib/store.ts",
+      "sha256": "43f5dc0d0e5c030df94b575a8e805435e5a671f767539efaf3bbae81fc2e638f",
+      "matches": true
+    },
+    {
+      "path": "/Users/chenqiang/Desktop/projects/CmbCoworkAgent/src/renderer/src/lib/electron-transport.ts",
+      "sha256": "9e80e89a07f473cf94c74f45ea5a4a4c17953bcf064325860d87d12b7fa3d0b3",
+      "matches": true
+    },
+    {
+      "path": "/Users/chenqiang/Desktop/projects/CmbCoworkAgent/src/main/mods/v2/host-call.ts",
+      "sha256": "332fb54f25a5fb49e925e866e7a5d74df46a67a1e71fd9d97e3fb46976977cae",
+      "matches": true
+    }
+  ],
+  "additional_local_review_evidence": [
+    {
+      "path": "/Users/chenqiang/Desktop/projects/CmbCoworkAgent/src/main/agent/agent-run-service.ts",
+      "sha256": "e9f789d24f07786b6c5a9ea7b2b1acf9fdde92d36f92d275268c3b3570452d5e",
+      "review_scope": "相关依赖、存储及运行入口段落；不是逐行审计"
+    },
+    {
+      "path": "/Users/chenqiang/Desktop/projects/CmbCoworkAgent/src/main/agent/thread-run-lease.ts",
+      "sha256": "7e774a2e0e06be2bc905a2678c3f079deed8a9175fef79f6887eeef644d9b5a6",
+      "review_scope": "相关依赖、存储及运行入口段落；不是逐行审计"
+    },
+    {
+      "path": "/Users/chenqiang/Desktop/projects/CmbCoworkAgent/src/main/agent/runtime.ts",
+      "sha256": "b41439de38549a18800c5a5d71b4bb79e541b5f38cf8bbe6441bf9d26f90c529",
+      "review_scope": "相关依赖、存储及运行入口段落；不是逐行审计"
+    },
+    {
+      "path": "/Users/chenqiang/Desktop/projects/CmbCoworkAgent/src/main/checkpointer/sqljs-saver.ts",
+      "sha256": "c474640bcb4c372621eaea5336be04af3f5e808a33d542a8edcbf5ca0463d731",
+      "review_scope": "相关依赖、存储及运行入口段落；不是逐行审计"
+    },
+    {
+      "path": "/Users/chenqiang/Desktop/projects/CmbCoworkAgent/src/main/models/registry.ts",
+      "sha256": "fbfb74deb0fea49e2f0867388d90abd41924db799bd3d97909c0beb2dd69dc98",
+      "review_scope": "相关依赖、存储及运行入口段落；不是逐行审计"
+    },
+    {
+      "path": "/Users/chenqiang/Desktop/projects/CmbCoworkAgent/src/main/browser/core/browser-service.ts",
+      "sha256": "08a94ebbac2501f9ad4c9397107856f7aeff19595e0631252088561e42309f1e",
+      "review_scope": "相关依赖、存储及运行入口段落；不是逐行审计"
+    },
+    {
+      "path": "/Users/chenqiang/Desktop/projects/CmbCoworkAgent/src/main/browser/record/common/browser-script-execution-service.ts",
+      "sha256": "536c8a569c7847d2d94eec6e486b627ea8d1a35019ec4540d57a6ef926a6cc37",
+      "review_scope": "相关依赖、存储及运行入口段落；不是逐行审计"
+    },
+    {
+      "path": "/Users/chenqiang/Desktop/projects/CmbCoworkAgent/src/main/agent/local-sandbox.ts",
+      "sha256": "0b4f5ab02a1742298901efcebf51a016703e93c0d553571d04778a93e0915f74",
+      "review_scope": "相关依赖、存储及运行入口段落；不是逐行审计"
+    },
+    {
+      "path": "/Users/chenqiang/Desktop/projects/CmbCoworkAgent/package.json",
+      "sha256": "e90eb535e8949e2782319619a4777df802a9daf9924120a8864df1f1af35957b",
+      "review_scope": "相关依赖、存储及运行入口段落；不是逐行审计"
+    }
+  ],
+  "official_pages_reopened": [
+    "https://docs.x.ai/grok-bot/computer-and-apps",
+    "https://docs.x.ai/grok-bot/chat-and-collaboration",
+    "https://docs.x.ai/grok-bot/skills-routines-and-automations",
+    "https://cursor.com/help/grok-bot/routines",
+    "https://docs.x.ai/grok-bot/approvals-security-and-privacy",
+    "https://cursor.com/docs/grok-bot/work"
+  ],
+  "documentation_check_passed": true,
+  "structural_errors": [],
+  "product_code_modified": false,
+  "product_tests_run": false,
+  "prototype_gates_run": false,
+  "original_app_parity_verified": false,
+  "remaining_decision_profiles": [
+    "computer_provider",
+    "network",
+    "capacity",
+    "retention_recovery",
+    "original_baseline"
+  ],
+  "note": "摘要匹配不表示本轮重新逐行阅读全部 71 文件；结构通过不表示工程原型或产品能力验证通过。",
+  "original_app_samples_observed": 14,
+  "original_app_samples_document": "13-original-app-observations.md",
+  "platform_contract": {
+    "local_os": "windows",
+    "local_native_only": true,
+    "local_disallowed_prerequisites": [
+      "wsl2",
+      "linux_containers"
+    ],
+    "future_server_os": "linux",
+    "future_orchestrator": "kubernetes",
+    "future_windows_nodes_required": false,
+    "common_core": [
+      "bot_identity",
+      "messages",
+      "runs",
+      "collaboration",
+      "memory",
+      "skills",
+      "approvals",
+      "model_routing"
+    ],
+    "os_adapters": [
+      "computer",
+      "browser",
+      "shell",
+      "process",
+      "capture",
+      "credentials",
+      "filesystem"
+    ],
+    "linux_core_build_gate": "G1",
+    "cross_os_migration_document": "12-windows-local-first.md",
+    "cross_os_execution_state_portability": "validate_capabilities_and_checkpoint_schema; never assume executable/profile/credentials portability",
+    "future_cluster_implementation_status": "planned_deferred",
+    "current_review_machine": "macOS"
+  },
+  "current_review_document": "12-windows-local-first.md",
+  "general_contract_document": "11-core-final-review.md",
+  "windows_prototypes_run": false,
+  "linux_build_check_run": false,
+  "checked_local_links": 413,
+  "native_computer_review": {
+    "document": "14-windows-computer-feasibility.md",
+    "evidence": "windows-computer-review.json",
+    "additional_pinned_repositories": 2,
+    "source_files_hash_checked": 18,
+    "source_hash_mismatches": 0,
+    "windows_tests_run": false,
+    "g2b_proven": false
+  },
+  "latest_review_date": "2026-09-30",
+  "reference_checkouts": [
+    {
+      "root": "/Users/chenqiang/Desktop/AI/cmb-bot-reference-sources/rakazo",
+      "commit": "60ac790cd9a1bb9560b489c0535deb5db2e1e39f"
+    },
+    {
+      "root": "/Users/chenqiang/Desktop/AI/cmb-bot-reference-sources/openbot",
+      "commit": "b6932d31a8d6e7896c15139dfc27a6c6911deb27"
+    },
+    {
+      "root": "/Users/chenqiang/Desktop/AI/cmb-bot-reference-sources/ufo",
+      "commit": "a795552d976c4c019d7c2f778a0effb5cef7de6b"
+    },
+    {
+      "root": "/Users/chenqiang/Desktop/AI/cmb-bot-reference-sources/winapp",
+      "commit": "3fd590017806562f088e6b275302610b9937674b"
+    }
+  ],
+  "host_dependency_review": {
+    "evidence": "host-boundary-review.json",
+    "entrypoints_analyzed": 4,
+    "source_files_hash_checked": 22,
+    "registration_wrapper_probe": "expected uninitialized error observed",
+    "g1_passed": false
+  },
+  "written_review_status": "delivered_with_explicit_G2B_blocker"
+}

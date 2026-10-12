@@ -1,0 +1,62 @@
+{
+  "capturedAt": "2026-10-08T03:26:32.298397+00:00",
+  "buildId": "a8bfdebf528d16a3d088071c",
+  "schema": 69,
+  "sourceFiles": {
+    "src/main/bots/delivery-evidence-store.ts": "8001142f61ecfa8925be8065d6bdabf9ce6c721094e0df9cc4c8e4e8ba9fe3cc",
+    "src/main/bots/delivery-evidence-review.ts": "aeffeaadbd60963cad5bc79f167b0f1bfd58759e8b06ec97279b1358d17b1692",
+    "src/main/bots/deliver-file-tool.ts": "f9a0eb5d1b82531bbc14f5acb319965ba755c2e1e263442b169b7543f5a3787e",
+    "src/main/bots/store.ts": "883501d701cc264486ebe74be4afb87cddef30e540515619baf64d418829b866",
+    "src/main/bots/agent-runtime.ts": "f2364f75cbabcbecb6ec9e48109bfada70120d21230370d81ee23802e3956948",
+    "src/main/bots/presentation-tool.ts": "7e50d874a493cf6f7196deed0b4c89d90c3040196e697a2ce6ff74d1a647b3af",
+    "src/main/bots/browser-tool.ts": "3e4a0804d65e20ec42af6c7f0a4f4c6e5c2d9b58ebb970a904ea665023b90470",
+    "src/main/bots/auto-review-store.ts": "7470a8b17c1ddbb34e65889c62c2ce0dfae966cfd9ec05b8320d31ab41b9f78b",
+    "src/renderer/src/components/bots/BotCreationReview.tsx": "896da5680599658875975bf09ffe4af3f46648f81016ba7a912d124037de2377",
+    "src/renderer/src/components/bots/BotWorkspace.tsx": "f31b6b2215cf202a8d604796418ed820e85e9a440b8cc85b0e08313ffb159e14"
+  },
+  "integrated": [
+    "bounded original-evidence review before new data-file publication",
+    "same original PPTX first/replay attachment semantics",
+    "explicit atomic review choice at three human creation entries",
+    "page-only browser capability description"
+  ],
+  "rootGates": {
+    "nodeTypes": "PASS",
+    "webTypes": "PASS",
+    "strictLint": {
+      "files": 27,
+      "exitCode": 0
+    },
+    "productionBuild": "PASS",
+    "evidencePresentationErrors": {
+      "files": 4,
+      "tests": 52,
+      "exitCode": 0
+    },
+    "createEvidencePending": {
+      "files": 4,
+      "tests": 58,
+      "exitCode": 0
+    },
+    "createReviewStore": {
+      "files": 2,
+      "tests": 27,
+      "exitCode": 0
+    },
+    "fullVitest": "RUNNING; prior 7985/1FAIL remains historical"
+  },
+  "notClaimed": [
+    "tests are not additive unique totals",
+    "real J2/PPTX or classifier parity passed",
+    "long programming nine original files delivered",
+    "whole Grok UI or all core journeys verified",
+    "Windows independent generic input implemented",
+    "zero defects or resource leaks"
+  ],
+  "actualApp": {
+    "coreApp": "isolated new owned schema69 app loaded; tasks not sent at capture",
+    "programmingAppBuild": "ef0083ed47a57133bc698a81",
+    "pptxAppBuild": "3c57fe8f8daf706a5c9d7e72",
+    "temporaryLoginBypass": "owned compiled acceptance copies only; not shared source/out"
+  }
+}

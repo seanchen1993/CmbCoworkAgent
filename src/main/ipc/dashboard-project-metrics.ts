@@ -1236,7 +1236,7 @@ export function makeMockProjectMetricSummary(
         }
       }
     ],
-    pluginOptions: ["AutoBizDevOps", "CmbCowork Compose Delivery"],
+    pluginOptions: ["AutoBizDevOps", "CMBDevClaw Compose Delivery"],
     truncated: false
   }
 }
@@ -1278,7 +1278,7 @@ const MOCK_PROJECTS: ProjectMetricProjectItem[] = [
     prjCode: "T26HTL91",
     prjName: "客户经营平台交付优化",
     developmentMode: "devclaw",
-    plugins: ["CmbCowork Compose Delivery"],
+    plugins: ["CMBDevClaw Compose Delivery"],
     phaseStatus: "上线完成",
     roomName: "零售客户经营开发室",
     groupName: "经营分析二组",

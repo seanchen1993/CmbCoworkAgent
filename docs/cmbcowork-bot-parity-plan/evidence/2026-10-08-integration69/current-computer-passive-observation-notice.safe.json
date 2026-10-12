@@ -1,0 +1,54 @@
+{
+  "kind": "computer-passive-observation-notice-baseline",
+  "nativeObservedOutput": "f6f95214276c127e5f4ea772",
+  "nativeScenario": "Open browser preview without any manual input; transient read failure recovers but leaves a cancellation notice",
+  "isolatedBaselineExitCode": 1,
+  "expectedNewChecksFailed": 2,
+  "existingLifetimeChecksPassed": 9,
+  "pageErrors": [],
+  "originalFailureLog": "/tmp/cmb-computer-observation-notice-baseline-20261010.log",
+  "fix": "Only actual input failure or discarded queued input creates cancellation notice; observation failure retains its actual error and existing passive refresh",
+  "sourceCandidateInstalled": true,
+  "coreParityComplete": false,
+  "compiledOutputIdentity": "705f608a75850fdf63c5b476",
+  "nativeBuildId": "8a8cce465e9db2b4ce8a78fd",
+  "nearestActualChecksPassed": 12,
+  "nearestFailures": [],
+  "webTypes": "PASS",
+  "strictLint": "PASS",
+  "productionBuild": "PASS",
+  "nativeOpenNoFalseCancellationNoticePassed": true,
+  "hostBrowserRetainedWhenAppQuit": true,
+  "hostBrowserNormalStopPassed": true,
+  "coldPreservation": {
+    "selectedRuns": 189,
+    "checkpointPayloadBytesHashed": 18539323,
+    "logicalGroupsEqual": {
+      "runs": true,
+      "effects": true,
+      "interactions": true,
+      "artifacts": true,
+      "artifactObjects": true,
+      "peerDispatch": true,
+      "peerWaits": true,
+      "checkpoints": true,
+      "skills": true,
+      "project": true
+    },
+    "extraTablesEqual": {
+      "bot_memories": true,
+      "bot_memory_metadata": true,
+      "bot_model_usage": true,
+      "bot_group_cycles": true,
+      "bot_group_runs": true,
+      "bot_introduction_questions": true
+    },
+    "legacyMemberOrderEqual": true,
+    "modelNormalizedFingerprintMatched": true
+  },
+  "retainedHarnessFailures": [
+    "initial stop preparation assumed no live Host browser",
+    "next preparation required every current Chromium renderer to exist in an earlier process snapshot; fixed to verify ancestry under the original pinned private browser and signal only the original Host",
+    "first uncertain-input fixture incorrectly assumed a legacy human view passively refreshes the painted frame; corrected to request a manual observation and keep the original no-replay assertion"
+  ]
+}

@@ -5,6 +5,8 @@ export interface FunctionWireError {
   code: string
   message: string
   downstream: boolean
+  /** Opaque per-invocation proof. Only the originating Host can resolve it. */
+  failureId?: string
 }
 
 export type FunctionRequest = {

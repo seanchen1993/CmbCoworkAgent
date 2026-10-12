@@ -11,6 +11,7 @@
  */
 
 import { AIMessage, HumanMessage } from "@langchain/core/messages"
+import { messagesStateReducer } from "@langchain/langgraph"
 import {
   queueCurrentRunMessage as queueOwnedCurrentRunMessage,
   deleteCurrentRunQueuedMessage,
@@ -68,8 +69,11 @@ async function runAfterModel(state: any, runtime: any, runToken?: string): Promi
   return await hook(state, runtime)
 }
 
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-async function runWrappedModelCall(response: AIMessage, runtime: any, runToken?: string): Promise<void> {
+async function runWrappedModelCall(
+  response: AIMessage,
+  runtime: ReturnType<typeof rt>,
+  runToken?: string
+): Promise<void> {
   const ownerToken = runToken ?? (runtime.configurable?.thread_id === T2 ? RUN2 : RUN1)
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const mw = createCurrentRunMessageQueueMiddleware(ownerToken) as any
@@ -467,10 +471,10 @@ function testCompletedAssistantRouteHandlesFragmentsAndIsRunScoped(): void {
     "a delayed delta prefix must keep routing to the completed stable row"
   )
   const routedSuffix = routeCurrentRunCompletedAssistantMessage(T1, {
-      id: rawId,
-      role: "assistant",
-      content: "answer"
-    })
+    id: rawId,
+    role: "assistant",
+    content: "answer"
+  })
   assertEqual(
     routedSuffix?.stableId,
     stableId,
@@ -603,10 +607,7 @@ function testCompletedAssistantRouteHandlesFragmentsAndIsRunScoped(): void {
     stableId,
     providerSourceId: rawId,
     providerOccurrence: 2,
-    content: [
-      { type: "text", text: "completed answer", index: 0 },
-      imageBlock
-    ]
+    content: [{ type: "text", text: "completed answer", index: 0 }, imageBlock]
   })
   assertEqual(
     routeCurrentRunCompletedAssistantMessage(T1, {
@@ -820,7 +821,11 @@ function testPeekReturnsCopy(): void {
   queueCurrentRunMessage(T1, msg("a", "one"))
   const q = peekCurrentRunMessageQueue(T1)
   q.push(msg("x", "mutated"))
-  assertEqual(peekCurrentRunMessageQueue(T1).length, 1, "peek returns a copy; caller mutation ignored")
+  assertEqual(
+    peekCurrentRunMessageQueue(T1).length,
+    1,
+    "peek returns a copy; caller mutation ignored"
+  )
 }
 
 // ── beforeModel ────────────────────────────────────────────────────────────────
@@ -854,7 +859,11 @@ async function testInjectedMessagePreservesVisibleAlias(): Promise<void> {
   queueCurrentRunMessage(T1, msg("a", "hook context\n\nrewritten prompt", "user original"))
   const result = await runBeforeModel({ messages: [] }, rt(T1))
   const injected = result.messages[0] as HumanMessage
-  assertEqual(injected.content, "hook context\n\nrewritten prompt", "model receives prepared content")
+  assertEqual(
+    injected.content,
+    "hook context\n\nrewritten prompt",
+    "model receives prepared content"
+  )
   assertEqual(
     injected.additional_kwargs?.cmb_visible_user_message,
     "user original",
@@ -893,10 +902,26 @@ async function testBeforeModelEmptyNoop(): Promise<void> {
 async function testAfterModelInjectsOnFinalReply(): Promise<void> {
   reset()
   queueCurrentRunMessage(T1, msg("a", "steer me"))
-  const state = { messages: [new AIMessage({ content: "all done" })] }
+  // Graph state already passed through this reducer, including its assignment
+  // of ids when the provider omitted one. The hook returns a reducer patch,
+  // containing the immutable assistant replacement as well as the user steer.
+  const state = { messages: messagesStateReducer([], [new AIMessage({ content: "all done" })]) }
+  const originalReply = state.messages[0]
+  const originalId = originalReply.id
   const result = await runAfterModel(state, rt(T1))
   assert(result && Array.isArray(result.messages), "afterModel injects on final reply")
-  assertEqual(result.messages.length, 1, "one injected message")
+  const injected = result.messages.filter(HumanMessage.isInstance)
+  assertEqual(injected.length, 1, "one injected message")
+  assertEqual(injected[0].id, "a", "injected message keeps the queued id")
+  assertEqual(injected[0].content, "steer me", "injected model content is preserved")
+  const reduced = messagesStateReducer(state.messages, result.messages)
+  assertEqual(reduced.length, 2, "the reducer retains one completed reply and one steer")
+  assert(AIMessage.isInstance(reduced[0]), "completed reply remains an AIMessage")
+  assertEqual(reduced[0].content, "all done", "completed assistant content is retained")
+  assert(reduced[0].id?.startsWith("current-run-assistant:"), "completed reply uses its durable id")
+  assertEqual(reduced[1], injected[0], "the steer follows the completed reply exactly once")
+  assertEqual(originalReply.id, originalId, "the previous checkpoint message id is not mutated")
+  assertEqual(state.messages.length, 1, "the previous checkpoint prefix is not changed")
   assertEqual(result.jumpTo, "model", "jumps back to model so the steer is answered")
   assertEqual(peekCurrentRunMessageQueue(T1).length, 0, "queue drained")
 }
@@ -920,11 +945,26 @@ async function testAfterModelPassesCompletedAssistantToNotifier(): Promise<void>
   })
   queueCurrentRunMessage(T1, msg("a", "steer me"))
   const finalReply = new AIMessage({ id: "assistant-final", content: "the first reply" })
-  await runAfterModel(
-    {
-      messages: [new HumanMessage({ id: "original-user", content: "question" }), finalReply]
-    },
-    rt(T1)
+  const originalSerialized = JSON.stringify(finalReply.toJSON())
+  const state = {
+    messages: [new HumanMessage({ id: "original-user", content: "question" }), finalReply]
+  }
+  const result = await runAfterModel(state, rt(T1))
+  const reduced = messagesStateReducer(state.messages, result.messages)
+  const completedReply = reduced[1]
+  assert(
+    AIMessage.isInstance(completedReply),
+    "reducer applies the completed assistant replacement"
+  )
+  assertEqual(reduced.length, 3, "original user, completed reply and one steer remain in order")
+  assertEqual(reduced[0], state.messages[0], "the original user predecessor is preserved")
+  assert(HumanMessage.isInstance(reduced[2]), "only the queued turn is injected as a HumanMessage")
+  assertEqual(reduced[2].id, "a", "the unique injected turn keeps its queued id")
+  assertEqual(reduced[2].content, "steer me", "the unique injected turn keeps its content")
+  assertEqual(
+    completedReply.content,
+    "the first reply",
+    "the completed graph reply retains content"
   )
   assert(
     completedAssistant?.id.startsWith("current-run-assistant:"),
@@ -936,7 +976,7 @@ async function testAfterModelPassesCompletedAssistantToNotifier(): Promise<void>
     "notifier receives final assistant content before the steer"
   )
   assertEqual(
-    finalReply.id,
+    completedReply.id,
     completedAssistant?.id,
     "graph state final assistant id is aligned with the durable transcript id"
   )
@@ -947,15 +987,28 @@ async function testAfterModelPassesCompletedAssistantToNotifier(): Promise<void>
     "afterModel anchors the completed reply and guide before any replacement turn"
   )
   assertEqual(
-    finalReply.additional_kwargs.cmb_internal_provider_source_id,
+    completedReply.additional_kwargs.cmb_internal_provider_source_id,
     "assistant-final",
     "graph state records the completed reply provider source"
   )
   assertEqual(
-    finalReply.additional_kwargs.cmb_internal_provider_occurrence,
+    completedReply.additional_kwargs.cmb_internal_provider_occurrence,
     2,
     "graph state records the completed reply provider occurrence"
   )
+  assertEqual(finalReply.id, "assistant-final", "the checkpoint prefix keeps its provider id")
+  assertEqual(
+    JSON.stringify(finalReply.toJSON()),
+    originalSerialized,
+    "identity and provider metadata are applied without mutating the checkpoint prefix"
+  )
+  assertEqual(
+    completedReply.lc_kwargs.id,
+    completedAssistant?.id,
+    "the replacement serialization mirror keeps the durable transcript identity"
+  )
+  assertEqual(result.jumpTo, "model", "the steered turn continues on the same model loop")
+  assertEqual(peekCurrentRunMessageQueue(T1).length, 0, "the exact queued turn is drained")
 }
 
 async function testAfterModelMintsTranscriptIdWhenProviderOmitsOne(): Promise<void> {
@@ -965,7 +1018,13 @@ async function testAfterModelMintsTranscriptIdWhenProviderOmitsOne(): Promise<vo
     completedAssistant = context?.completedAssistantMessage
   })
   queueCurrentRunMessage(T1, msg("a", "steer me"))
-  await runAfterModel({ messages: [new AIMessage({ content: "id-less provider reply" })] }, rt(T1))
+  const providerReply = new AIMessage({ content: "id-less provider reply" })
+  assertEqual(providerReply.id, undefined, "the provider response starts without an id")
+  await runWrappedModelCall(providerReply, rt(T1))
+  const state = { messages: messagesStateReducer([], [providerReply]) }
+  const graphId = providerReply.id
+  const result = await runAfterModel(state, rt(T1))
+  const reduced = messagesStateReducer(state.messages, result.messages)
   assert(
     completedAssistant?.id.startsWith("current-run-assistant:"),
     "id-less provider replies receive an isolated transcript id"
@@ -975,6 +1034,20 @@ async function testAfterModelMintsTranscriptIdWhenProviderOmitsOne(): Promise<vo
     "id-less provider reply",
     "id-less provider reply content is still persisted"
   )
+  assertEqual(reduced.length, 2, "id-less provider handling does not duplicate the completed reply")
+  assert(
+    AIMessage.isInstance(reduced[0]),
+    "the id-less provider reply retains its AIMessage subtype"
+  )
+  assertEqual(reduced[0].id, completedAssistant?.id, "the graph uses the persisted assistant id")
+  assertEqual(
+    reduced[0].content,
+    completedAssistant?.content,
+    "the graph retains completed content"
+  )
+  assert(HumanMessage.isInstance(reduced[1]), "the single steer remains a HumanMessage")
+  assertEqual(reduced[1].id, "a", "the single steer keeps its original id")
+  assertEqual(providerReply.id, graphId, "afterModel does not mutate the reducer-assigned graph id")
 }
 
 async function testAfterModelUsesRawWrappedModelResponse(): Promise<void> {
@@ -1211,11 +1284,7 @@ async function testClearResetsInjectedTracking(): Promise<void> {
   await runBeforeModel({ messages: [] }, rt(T1)) // drains "a", marks it injected
   clearCurrentRunMessageQueue(T1) // run ends
   setCurrentRunMessageQueueOwner(T1, RUN2)
-  const accepted = queueCurrentRunMessage(
-    T1,
-    msg("a", "next run reusing the same id"),
-    RUN2
-  )
+  const accepted = queueCurrentRunMessage(T1, msg("a", "next run reusing the same id"), RUN2)
   assertEqual(accepted, true, "a new run on the same thread isn't poisoned by a past run's ids")
 }
 

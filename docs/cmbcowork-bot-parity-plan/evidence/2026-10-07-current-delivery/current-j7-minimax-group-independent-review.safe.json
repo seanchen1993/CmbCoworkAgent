@@ -1,0 +1,108 @@
+{
+  "schemaVersion": 1,
+  "kind": "Root-independent-J7-group-delivery-quality-review",
+  "reviewedAt": "2026-10-07T17:11:38.981280+00:00",
+  "formal": {
+    "path": "/Users/chenqiang/Desktop/projects/CmbCoworkAgent/docs/cmbcowork-bot-parity-plan/evidence/2026-10-07-current-delivery/current-j7-minimax-group-formal.safe.json",
+    "bytes": 37968,
+    "sha256": "a6f0e228a6bc0d650336aa4e5fbb199d8881da40587ddd9446457d35be230760"
+  },
+  "overallTaskPass": false,
+  "mechanicalPass": true,
+  "actualUI": false,
+  "realModel": true,
+  "compiledBuildId": "18eb3cb377377989a66c0b28",
+  "compiledSchema": 66,
+  "taskSha256": "d78c8bbb53d016b9f0ce0cb40c755bbda057b1142c255bdd8e5a48a78c2c2273",
+  "expected": {
+    "rule": "Select largest numeric version per project_id after region/status filtering; count zero and include negative amounts.",
+    "projects": {
+      "P101": {
+        "version": 2,
+        "amountWan": "12.40"
+      },
+      "P102": {
+        "version": 2,
+        "amountWan": "8.55"
+      },
+      "P105": {
+        "version": 1,
+        "amountWan": "-2.50"
+      },
+      "P106": {
+        "version": 1,
+        "amountWan": "0.00"
+      }
+    },
+    "count": 4,
+    "amountWan": "18.45",
+    "draftAmountWan": "38.45",
+    "draftExcessWan": "20.00",
+    "draftFormationProvable": false
+  },
+  "actual": {
+    "publicReplies": [
+      {
+        "id": "a3769ffe-0802-4696-abe3-198a48baa154",
+        "bot_id": "5c96fd0f-7dcf-4ab6-8db3-622be488a507",
+        "run_id": "07182977-0f4b-468f-a9cf-5236aeb8f23d",
+        "reply_to": "ed9886df-badd-4a72-b316-aca328e0b2fd",
+        "text": "【计算Bot · 交付】\n\n原附件：\n- project-records.csv（8行明细）\n- review-policy.txt（核对规则）\n\n策略应用：仅取 status=已验收 且 region=北区；同 project_id 保留\"数值最大版本\"——结合上下文指金额最大；负数冲销计入总额；零值计入条数。\n\n纳入项目（4 条）：\n- P101 v1：15.40 万元\n- P102 v2：8.55 万元\n- P105 v1：-2.50 万元（冲销，计入）\n- P106 v1：0.00 万元（计入条数）\n\n条数 = 4；金额总额 = 15.40 + 8.55 − 2.50 + 0.00 = 21.45 万元。\n\n周报草案\"北区已验收 4 个项目，累计 38.45 万元\"：\n- 条数 4：与实际一致。\n- 金额 38.45 万元：与实际不符，多计 17.00 万元。\n- 结论：草案条目数正确，累计金额不正确。\n\n差额：38.45 − 21.45 = 17.00 万元（草案多计）。\n\n材料无法确定草稿 38.45 万元的具体形成方式——按规则可推得的几种相近口径（按版本号最大去重→18.45；不去重→40.90；将负数取绝对值→45.90）均不等于 38.45，无法从现有材料唯一反推草稿的算式。等待核算Bot独立核验。"
+      },
+      {
+        "id": "f9131411-58a0-410f-9735-af8c65ff14df",
+        "bot_id": "dc9aa569-9a3d-420c-963f-26324276fd14",
+        "run_id": "b7bab4e3-679f-4f73-b021-82516e387575",
+        "reply_to": "ed9886df-badd-4a72-b316-aca328e0b2fd",
+        "text": "【核算Bot · 交付】\n\n原附件：project-records.csv（8 行）、review-policy.txt（核对规则）。\n\n独立按策略筛选（北区 + 已验收）：\n- P101 v1: 15.40、P101 v2: 12.40\n- P102 v1: 7.05、P102 v2: 8.55\n- P105 v1: -2.50\n- P106 v1: 0.00\n\n同 project_id 保留金额最大版本：\n- P101 → v1（15.40）\n- P102 → v2（8.55）\n- P105 → v1（-2.50，冲销计入）\n- P106 → v1（0.00，仅计入条数）\n\n纳入项目（4 条）、金额总额 = 15.40 + 8.55 − 2.50 + 0.00 = 21.45 万元，条数 = 4。\n\n与计算Bot结果比对：四项金额、条数、合计 21.45 万元完全一致 ✓ 无差异。\n\n草案\"北区已验收 4 个项目，累计 38.45 万元\"：\n- 条数 4：正确 ✓\n- 累计金额：与实际不符，差额 = 38.45 − 21.45 = 17.00 万元（草案多计）。\n\n项目依据：review-policy.txt\"只统计状态=已验收且区域=北区的项目；同 project_id 取金额最大版本；负数计入总额；零值计入条数\"；金额单位为万元。\n\n草稿 38.45 的形成方式无法从材料唯一确定：按规则应为 21.45；按版本号最大去重得 18.45；不去重得 40.90；负数取绝对值得 45.90——几种相近口径均不等于 38.45，现有材料无法唯一反推其算式。"
+      }
+    ],
+    "ruleMisread": "Both authors selected highest amount rather than numeric version; P101 v1 was used.",
+    "count": 4,
+    "amountWan": "21.45",
+    "draftExcessWan": "17.00",
+    "auditorSourceQuoteAccurate": false,
+    "bothAuthorsReadBothFullOriginalsBeforeOwnPublication": true,
+    "eachAuthorPublicOnce": true,
+    "originalsIntact": true,
+    "allGroupRootsSucceeded": true,
+    "outsideOrChildRunsObserved": false
+  },
+  "failure": {
+    "arithmeticAgainstPolicy": true,
+    "independentAuditQuality": true,
+    "unsupportedPolicyReinterpretation": true,
+    "falsePolicyQuoteByAuditor": true,
+    "unsubstantiatedDraftCause": false
+  },
+  "usage": {
+    "requests": 9,
+    "unknownRequests": 4,
+    "reportedInputTokens": 93806,
+    "reportedOutputTokens": 5496,
+    "reservedOutputTokens": 32768,
+    "unknownIsNotZero": true,
+    "moneyCostClaimed": false
+  },
+  "cleanup": {
+    "cancelRequested": false,
+    "cancelSettled": false,
+    "idleShutdownAccepted": true,
+    "forcedTermination": false,
+    "processExited": true,
+    "exit": {
+      "code": 0,
+      "signal": null,
+      "spawnFailed": false
+    },
+    "privateCredentialSnapshotRemoved": true,
+    "transportClosed": true
+  },
+  "limits": [
+    "One frozen formal group task, no retry or answer injection.",
+    "Not actual App UI or a Grok same-task sample.",
+    "Mechanical runner exit0 does not prove semantic pass.",
+    "Source/context investigation remains pending; model misreading alone is not proof of an application code defect.",
+    "No whole-project completion or quality equivalence is inferred."
+  ]
+}

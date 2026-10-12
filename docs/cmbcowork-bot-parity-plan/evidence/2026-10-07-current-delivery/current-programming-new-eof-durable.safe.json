@@ -1,0 +1,78 @@
+{
+  "schemaVersion": 1,
+  "kind": "durable-model-receipt-safe",
+  "runId": "5d219477-5620-42be-97ef-b9bb7561e887",
+  "rootRunId": "5d219477-5620-42be-97ef-b9bb7561e887",
+  "status": "waiting_input",
+  "calls": [
+    {
+      "callId": "b150600a-fb4f-462f-92cb-976ed07f898a",
+      "runId": "5d219477-5620-42be-97ef-b9bb7561e887",
+      "reservedCeiling": 8192,
+      "providerOutput": 142,
+      "providerInput": 19277,
+      "sharedPoolConsumed": 142,
+      "settled": true,
+      "consistentSettlement": true
+    },
+    {
+      "callId": "9316933f-6910-483d-9d88-13167bcd5534",
+      "runId": "5d219477-5620-42be-97ef-b9bb7561e887",
+      "reservedCeiling": 8192,
+      "providerOutput": 221,
+      "providerInput": 20188,
+      "sharedPoolConsumed": 221,
+      "settled": true,
+      "consistentSettlement": true
+    },
+    {
+      "callId": "f9e9aa82-0fb7-4c90-a46f-95f325e1596d",
+      "runId": "5d219477-5620-42be-97ef-b9bb7561e887",
+      "reservedCeiling": 8192,
+      "providerOutput": 279,
+      "providerInput": 21246,
+      "sharedPoolConsumed": 279,
+      "settled": true,
+      "consistentSettlement": true
+    },
+    {
+      "callId": "91637e71-5dfa-43eb-80e7-74ceb6862fd3",
+      "runId": "5d219477-5620-42be-97ef-b9bb7561e887",
+      "reservedCeiling": 8192,
+      "providerOutput": 101,
+      "providerInput": 24261,
+      "sharedPoolConsumed": 101,
+      "settled": true,
+      "consistentSettlement": true
+    },
+    {
+      "callId": "38970dfb-3b40-4872-8514-1ca86c0f3f1b",
+      "runId": "5d219477-5620-42be-97ef-b9bb7561e887",
+      "reservedCeiling": 8192,
+      "providerOutput": 38,
+      "providerInput": 24491,
+      "sharedPoolConsumed": 38,
+      "settled": true,
+      "consistentSettlement": true
+    },
+    {
+      "callId": "d4391c8a-9562-4a80-8f1d-ded4c8ccf52c",
+      "runId": "5d219477-5620-42be-97ef-b9bb7561e887",
+      "reservedCeiling": 8192,
+      "providerOutput": 54,
+      "providerInput": 24705,
+      "sharedPoolConsumed": 54,
+      "settled": true,
+      "consistentSettlement": true
+    }
+  ],
+  "summary": {
+    "requests": 6,
+    "settledRequests": 6,
+    "unknownRequests": 0,
+    "inconsistentSettlement": 0,
+    "confirmedOutput": 835,
+    "unknownReserved": 0
+  },
+  "caution": "Provider counters are not fees. ReservedCeiling is a per-call maximum, never actual output. Match each exact callId with protocol-safe logs; missing/length/errored receipts must remain unknown. No old-row repair or refund performed."
+}

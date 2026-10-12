@@ -1,0 +1,237 @@
+{
+  "review_iteration": 6,
+  "goal_status": "active",
+  "previous_goal_turn_classification": "progress",
+  "progress": [
+    "逐项范围/契约已写入权威文档",
+    "发现 Rakazo profile 与共享登录目标存在明确差异",
+    "观察到本机 0.57.1 及远端不可用状态",
+    "撤回无依据的复制后统一暂停决定",
+    "补齐分支 continuation 与严格提交屏障语义",
+    "官方运行实例已连通并实测浏览器、Bot私下协作、群聊、示范生成技能及异输入复用",
+    "用户确认纯Windows原生/不允许WSL2或Linux容器/本机优先/K8s扩展/用户配置模型",
+    "发现当前Cmb浏览器只有全局activeSession，原生桌面多屏仍缺可行性证据",
+    "修订当前部署范围及Teach真实交互，不把原版样本算作Cmb验收",
+    "明确 Windows 本机与后续 Linux K8s 两套平台适配，更新当前基线与范围",
+    "微软 Child Session 官方单活动连接限制；核查 UFO 和 WinApp CLI 未证明独立多屏",
+    "发现 Cmb URL/标题页面选择歧义、截图回退与真实输入锁域、本机控制面身份缺口并补入方案",
+    "原版例程创建/编辑/暂停已观察；记录年度描述冲突及详情刷新滞后，不把UI状态当调度器成功",
+    "核实当前Mac菜单无复制入口，官方最新说明列在iPhone，复制后的调度状态仍未验证",
+    "用户再次确认本机macOS；明确当前复核环境与Windows首版、Linux K8s目标不同",
+    "按原固定commit恢复四份参考仓库到Desktop/AI长期目录，更新失效临时链接",
+    "完成四个入口的静态依赖构建和纯注册入口诊断，补入Host抽离位置、双端插件IPC适配、Worker产物和Node SQLite最低API版本",
+    "根据用户反馈结束泛化书面复核；将实现期测试与尚未闭合的Windows桌面并行架构问题分开，不再以尚未实施为由反复扩大方案"
+  ],
+  "new_source_evidence": [
+    {
+      "path": "/Applications/Grok Bot.app/Contents/Info.plist",
+      "sha256": "1a389c559609093ecbcfcac8f222f7e5e97db6d8d7e5feeb9105c035b196957f"
+    },
+    {
+      "path": "/Users/chenqiang/Desktop/AI/cmb-bot-reference-sources/rakazo/infra/sandboxes/computer/rakazo-browser",
+      "sha256": "3783da8bc66bc0d192e36aa43b58d00e7febe9731d6bc72c763e7316f0af71a2"
+    },
+    {
+      "path": "/Users/chenqiang/Desktop/AI/cmb-bot-reference-sources/rakazo/infra/sandboxes/supervisor/src/browser-profile.test.ts",
+      "sha256": "42642d60057e52f37d618105a178a3cf20255c656e8f189dbddab313c0dce33e"
+    },
+    {
+      "path": "/Users/chenqiang/Desktop/AI/grok-bot-0.18-reconstructed-main/source/host/box/box-windows.ts",
+      "sha256": "54c23168a1e95bc0682430ff49084551441befcaefc034b4edc3790d7e281d6c"
+    },
+    {
+      "path": "/Users/chenqiang/Desktop/AI/grok-bot-0.18-reconstructed-main/source/host/agents/agent-clone.ts",
+      "sha256": "345d35642793b117da53cb3c58aa07df77f7107bb82f1f4d8c68353daab50959"
+    },
+    {
+      "path": "/Users/chenqiang/Desktop/AI/grok-bot-0.18-reconstructed-main/source/host/automations/automation-store.ts",
+      "sha256": "5937cab677e05c7e6af0ab7ef3c429c6973c58b809d32b2f72600ce27502b546"
+    },
+    {
+      "path": "/Users/chenqiang/Desktop/projects/CmbCoworkAgent/src/main/checkpointer/sqljs-saver.ts",
+      "sha256": "c474640bcb4c372621eaea5336be04af3f5e808a33d542a8edcbf5ca0463d731"
+    },
+    {
+      "path": "/Users/chenqiang/Desktop/projects/CmbCoworkAgent/src/main/models/registry.ts",
+      "sha256": "fbfb74deb0fea49e2f0867388d90abd41924db799bd3d97909c0beb2dd69dc98",
+      "scope": "目标相关段落"
+    },
+    {
+      "path": "/Users/chenqiang/Desktop/projects/CmbCoworkAgent/src/main/browser/core/browser-service.ts",
+      "sha256": "08a94ebbac2501f9ad4c9397107856f7aeff19595e0631252088561e42309f1e",
+      "scope": "目标相关段落"
+    },
+    {
+      "path": "/Users/chenqiang/Desktop/projects/CmbCoworkAgent/src/main/browser/record/common/browser-script-execution-service.ts",
+      "sha256": "536c8a569c7847d2d94eec6e486b627ea8d1a35019ec4540d57a6ef926a6cc37",
+      "scope": "目标相关段落"
+    },
+    {
+      "path": "/Users/chenqiang/Desktop/projects/CmbCoworkAgent/src/main/agent/local-sandbox.ts",
+      "sha256": "0b4f5ab02a1742298901efcebf51a016703e93c0d553571d04778a93e0915f74",
+      "scope": "目标相关段落"
+    }
+  ],
+  "native_ui_observation": {
+    "schema_version": 1,
+    "date": "2026-09-30",
+    "app_version": "0.57.1",
+    "platform_observed": "macOS",
+    "user_confirmed_connection": "official_client_direct_to_official_service",
+    "server_and_model_version_verified": false,
+    "document": "13-original-app-observations.md",
+    "samples": [
+      {
+        "id": "OB01",
+        "status": "observed",
+        "scope": "partial original behavior only"
+      },
+      {
+        "id": "OB02",
+        "status": "observed",
+        "scope": "partial original behavior only"
+      },
+      {
+        "id": "OB03",
+        "status": "observed",
+        "scope": "partial original behavior only"
+      },
+      {
+        "id": "OB04",
+        "status": "observed",
+        "scope": "partial original behavior only"
+      },
+      {
+        "id": "OB05",
+        "status": "observed",
+        "scope": "partial original behavior only"
+      },
+      {
+        "id": "OB06",
+        "status": "observed",
+        "scope": "partial original behavior only"
+      },
+      {
+        "id": "OB07",
+        "status": "observed",
+        "scope": "partial original behavior only"
+      },
+      {
+        "id": "OB08",
+        "status": "observed",
+        "scope": "partial original behavior only"
+      },
+      {
+        "id": "OB09",
+        "status": "observed",
+        "scope": "partial original behavior only"
+      },
+      {
+        "id": "OB10",
+        "status": "observed",
+        "scope": "partial original behavior only"
+      },
+      {
+        "id": "OB11",
+        "status": "observed_discrepancy",
+        "scope": "annual claim versus once-only UI; actual scheduler unverified"
+      },
+      {
+        "id": "OB12",
+        "status": "observed",
+        "scope": "edit prefill, weekly detail after navigation; stale open detail observed; no scheduled run"
+      },
+      {
+        "id": "OB13",
+        "status": "observed",
+        "scope": "pause button and paused list state; scheduler cancellation not fault-tested"
+      },
+      {
+        "id": "OB14",
+        "status": "observed_partial",
+        "scope": "Mac menus inspected; latest official Duplicate documented on iPhone; clone not performed"
+      }
+    ],
+    "created": {
+      "bots": 1,
+      "groups": 1,
+      "private_skills": [
+        "在 Chrome 打开网址"
+      ],
+      "routines": 1
+    },
+    "test_prompts_sent": 6,
+    "automatic_learning_prompts": 1,
+    "recordings_saved": 1,
+    "unsaved_recordings_cancelled": 1,
+    "settings_or_permissions_changed": false,
+    "external_business_data_submitted": false,
+    "complete_original_parity": false,
+    "cmb_tests_run": false,
+    "screenshots_exported": false,
+    "routines": [
+      {
+        "name": "复刻核验-每周空任务",
+        "created_as": "复刻核验-年度空任务",
+        "ui_schedule_after_edit": "每星期日 12:00",
+        "requested_timezone": "Asia/Shanghai",
+        "timezone_conversion_verified": false,
+        "final_ui_state": "paused",
+        "manual_test_run": false,
+        "scheduled_execution_verified": false
+      }
+    ],
+    "bots_duplicated": 0,
+    "user_confirmed_current_machine": "macOS",
+    "windows_runtime_verified": false
+  },
+  "remaining_blockers": [
+    "Windows 原生多 Bot 独立桌面并行实现仍无充分证据，G2B 未闭合",
+    "当前可访问机器为用户的 macOS；Cmb G1～G4/Windows 原型未执行",
+    "原版例程实际触发、复制后状态、故障恢复、并发与 Windows 体验对照尚未完成"
+  ],
+  "product_code_modified": false,
+  "product_tests_run": false,
+  "documentation_only_checks_not_completion_proof": true,
+  "previous_native_ui_observation": {
+    "app_version": "0.57.1",
+    "bundle_id": "com.anysphere.sand",
+    "observed_surfaces": [
+      "侧边栏",
+      "新建聊天中的创建 Bot/群聊选项",
+      "市场入口",
+      "云电脑重新连接及对话加载失败"
+    ],
+    "connection_retry": "one retry, returned to failure",
+    "tasks_sent": 0,
+    "bots_created": 0,
+    "settings_changed": false,
+    "private_conversation_contents_recorded": false,
+    "full_behavior_verified": false
+  },
+  "platform_confirmation": {
+    "local": "Windows native; no WSL2/Linux containers",
+    "future_server": "Linux on Kubernetes",
+    "common_core_with_platform_adapters": true,
+    "document": "12-windows-local-first.md",
+    "product_implementation_started": false,
+    "current_review_machine": "macOS"
+  },
+  "native_computer_review": "windows-computer-review.json",
+  "pending_information_request": {
+    "subject": "Windows test machine version and connection method",
+    "reason": "Current accessible environment is macOS; native Windows behavior cannot be proven here.",
+    "required_to_mark_windows_validation_passed": true,
+    "g2b_design_evidence_still_missing": true
+  },
+  "work_status": "written_review_delivered; Windows native parallel desktop architecture remains unproven",
+  "host_dependency_review": "host-boundary-review.json",
+  "plan_architecture_blocker": "G2B: pure Windows native generic desktop parallel input without focus contention not demonstrated",
+  "implementation_verification_pending": [
+    "G1 full Host execution and packaging on supported runtime",
+    "G2A browser targeting and shared login",
+    "G2B native desktop feasibility",
+    "G3 durable restart and effect settlement",
+    "G4 teaching and different-input reuse"
+  ]
+}

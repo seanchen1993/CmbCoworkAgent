@@ -1,4 +1,5 @@
 import { lstat, opendir, realpath, stat } from "node:fs/promises"
+import { createHash } from "node:crypto"
 import { isAbsolute, join, parse, relative, resolve, sep } from "node:path"
 import type { ModJson } from "../../../shared/mods/types"
 import type { ToolPermissionResult } from "../../../shared/tool-permission"
@@ -18,10 +19,16 @@ export interface FunctionFileAccess {
   run(method: FunctionFileMethod, path: string, signal: AbortSignal): Promise<ModJson>
 }
 
+export interface FunctionFileReadAdmission {
+  assert(): void
+}
 export interface FunctionFileScope {
   workspace: string
   assertLive(): void
   queryTool(tool: string, input: Record<string, unknown>): Promise<ToolPermissionResult>
+  recordRead?(pluginId: string, path: string, sha256: string): void
+  /** Optional Host admission for each fresh SDK operation, not result publication. */
+  admitRead?(signal: AbortSignal): Promise<FunctionFileReadAdmission | undefined>
 }
 
 function inside(root: string, path: string): boolean {
@@ -39,7 +46,9 @@ export class ProjectFunctionFiles implements FunctionFileAccess {
     private readonly workspace: string,
     private readonly assertLive: () => void,
     private readonly publish: (value: ModJson, signal: AbortSignal) => Promise<ModJson>,
-    private readonly queryTool?: FunctionFileScope["queryTool"]
+    private readonly queryTool?: FunctionFileScope["queryTool"],
+    private readonly recordRead?: (path: string, sha256: string) => void,
+    private readonly admitRead?: FunctionFileScope["admitRead"]
   ) {}
 
   private async allowed(method: FunctionFileMethod, path: string): Promise<boolean> {
@@ -91,7 +100,11 @@ export class ProjectFunctionFiles implements FunctionFileAccess {
       this.assertLive()
     }
     check()
+    const admission = this.admitRead ? await this.admitRead(signal) : undefined
+    check()
+    admission?.assert()
     let result: ModJson
+    let read: { path: string; sha256: string } | undefined
     try {
       if (!(await this.allowed(method, resolve(this.workspace, input))))
         throw new ModFunctionError("MODS_FS_ACCESS_DENIED")
@@ -101,11 +114,14 @@ export class ProjectFunctionFiles implements FunctionFileAccess {
       if (!(await this.allowed(method, target.path)))
         throw new ModFunctionError("MODS_FS_ACCESS_DENIED")
       check()
+      admission?.assert()
       if (method === "fs.read") {
         const opened = await openStableFileHandle(target.root, target.path)
         try {
           check()
-          result = (await readStableFileHandleBounded(opened, FUNCTION_READ_LIMIT)).toString("utf8")
+          const bytes = await readStableFileHandleBounded(opened, FUNCTION_READ_LIMIT)
+          result = bytes.toString("utf8")
+          read = { path: target.path, sha256: createHash("sha256").update(bytes).digest("hex") }
           const resolved = await this.path(input)
           if (resolved.path !== target.path) throw new ModFunctionError("MODS_FS_CHANGED")
         } finally {
@@ -175,6 +191,7 @@ export class ProjectFunctionFiles implements FunctionFileAccess {
       throw new ModFunctionError("MODS_FS_ACCESS_DENIED")
     }
     check()
+    if (read) this.recordRead?.(read.path, read.sha256)
     return published
   }
 }

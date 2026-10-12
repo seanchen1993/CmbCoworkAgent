@@ -1,0 +1,37 @@
+{
+  "kind": "owned-native-cold-trial-select-and-verdict-preservation",
+  "recordedAt": "2026-10-09T01:37:48.649002+00:00",
+  "buildId": "9a03515028153e38a4d743be",
+  "hostId": "bb56ffba-2986-4f3e-9a15-a740d979f931",
+  "selectedGroupsEqual": {
+    "runs": true,
+    "effects": true,
+    "interactions": true,
+    "artifacts": true,
+    "artifactObjects": true,
+    "peerDispatch": true,
+    "peerWaits": true,
+    "checkpoints": true,
+    "skills": true,
+    "project": true
+  },
+  "quiescentReceipt": {
+    "path": "/Users/chenqiang/Library/Application Support/CMBDevClaw-development/2026-10-08/presentation/cold-upgrade-plan/pins-quiesced-before-start-1791509806446855000.safe.json",
+    "sha256": "415de0cd0e302d28a02bffb2e8dde5ff666318c2437399234b3769b7b612c3ff"
+  },
+  "postStartReceipt": {
+    "path": "/Users/chenqiang/Library/Application Support/CMBDevClaw-development/2026-10-08/presentation/cold-upgrade-plan/pins-post-start-pre-review-1791509828421521000.safe.json",
+    "sha256": "5382f8eb3bf3e74ab42841b6a680da2cb753cd984acb0aaf8531dea43f7c9ba0"
+  },
+  "programmingRunAfterStop": "needs_review",
+  "configurationFingerprintsEqual": {
+    "custom-models.json": true,
+    ".env": true,
+    "userinfo-models.json": true,
+    "bot-host/models.private": false,
+    "bot-host/workspace.private.json": true
+  },
+  "plainModelConfigurationSemanticEqualityProven": false,
+  "normalMainAndHostTerminatedWithoutForce": true,
+  "coreTaskOrParityPassed": false
+}

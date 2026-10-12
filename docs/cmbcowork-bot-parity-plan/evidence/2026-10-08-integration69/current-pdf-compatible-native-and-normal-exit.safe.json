@@ -1,0 +1,83 @@
+{
+  "kind": "native-pdf-compat-preview-and-original-save",
+  "compiledOutputIdentity": "f6f95214276c127e5f4ea772",
+  "nativeBuildId": "8a8cce465e9db2b4ce8a78fd",
+  "fileName": "dummy.pdf",
+  "bytes": 13264,
+  "sha256": "3df79d34abbca99308e79cb94461c1893582604d68329a41fd4bec1885e6adb4",
+  "sameOriginalBytes": true,
+  "preview": {
+    "nativeTitle": "Dummy PDF file",
+    "pages": 1,
+    "zoom125AndAuto100Observed": true,
+    "blobUuidHeaderVisible": false,
+    "chromiumPluginDuplicateHeaderVisible": false,
+    "closeRestoresAttachmentFocus": true
+  },
+  "saveDialogObserved": true,
+  "overwriteUsed": false,
+  "notFullPdfParity": true,
+  "failedPriorOutput": "12e66ea860012285dea3776e",
+  "failedPriorReason": "default PDF.js build uses Map.getOrInsertComputed unsupported by Electron 39 Chromium",
+  "compatibilityFix": "upstream PDF.js legacy build in renderer and worker",
+  "isolatedBundledElectronSixChecksPassed": true,
+  "normalMainSignalExit": {
+    "kind": "owned-main-sigterm-native-exit",
+    "pid": 20030,
+    "commandSha256": "84215e434fcf9bcf2bec0dcc3576a82a84a618eb9edb3f664a0d0744e216dcef",
+    "start": "Sat Oct 10 16:43:27 2026",
+    "signal": "SIGTERM",
+    "mainExited": true,
+    "remainingRoles": [
+      "host"
+    ],
+    "seconds": 0.305,
+    "forceKillUsed": false,
+    "buildId": "8a8cce465e9db2b4ce8a78fd",
+    "outputIdentity": "12e66ea860012285dea3776e",
+    "fullLifecycleParityClaimed": false,
+    "lifecycleMarkers": [
+      "[Main] before-quit",
+      "[Main] will-quit",
+      "[Main] before-quit",
+      "[Main] will-quit"
+    ]
+  },
+  "coldPreservation": {
+    "selectedRuns": 189,
+    "checkpointPayloadBytesHashed": 18539323,
+    "logicalGroupsEqual": {
+      "runs": true,
+      "effects": true,
+      "interactions": true,
+      "artifacts": true,
+      "artifactObjects": true,
+      "peerDispatch": true,
+      "peerWaits": true,
+      "checkpoints": true,
+      "skills": true,
+      "project": true
+    },
+    "extraTablesEqual": {
+      "bot_memories": true,
+      "bot_memory_metadata": true,
+      "bot_model_usage": true,
+      "bot_group_cycles": true,
+      "bot_group_runs": true,
+      "bot_introduction_questions": true
+    },
+    "schemaBefore": 72,
+    "schemaAfter": 72,
+    "legacyMemberOrderEqual": true,
+    "modelNormalizedFingerprintMatched": true,
+    "forceKillUsed": false
+  },
+  "quality": {
+    "isolatedElectronActualPassedChecks": 6,
+    "nearestUnitPassedChecks": 27,
+    "webTypes": "PASS",
+    "strictLint": "PASS",
+    "productionBuild": "PASS",
+    "fullCoreParityComplete": false
+  }
+}

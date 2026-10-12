@@ -1,4 +1,27 @@
 import {
+  redactHarnessText,
+  redactHarnessValue,
+  replaceHarnessConfigPlaceholders,
+  parseInspectCommand,
+  assembleHarnessFeatureAgentContext,
+  normalizeHarnessAgentConfig,
+  isHarnessSessionContextOk
+} from "./agent-context-core"
+import type {
+  HarnessFeatureAgentContext,
+  HarnessFeatureAgentContextOptions,
+  HarnessAgentConfig,
+  HarnessCommandParseOptions,
+  HarnessInspectCommandName
+} from "./agent-context-core"
+export { DEFAULT_HARNESS_REQUEST_USER_INPUT_CONFIG } from "./agent-context-core"
+export type {
+  HarnessFeatureAgentContext,
+  HarnessFeatureAgentContextOptions,
+  HarnessRuntimeAgentMode,
+  HarnessAgentConfig
+} from "./agent-context-core"
+import {
   assertHarnessConfigAvailable,
   readHarnessConfigV2File,
   DEPLOY_UNIT_V2_FILE,
@@ -100,8 +123,6 @@ import type {
   HarnessProjectListItem,
   HarnessProjectMetadata,
   HarnessProjectMetadataUpdateInput,
-  HarnessProjectModeSubagentConfig,
-  HarnessRequestUserInputConfig,
   HarnessRunDetailViewModel,
   HarnessSessionContextInjectionSource,
   HarnessDeployUnitMapping,
@@ -171,15 +192,6 @@ interface HarnessFeatureDeployUnitBindingStoreFile {
   bindings: HarnessFeatureDeployUnitBindingRecord[]
 }
 
-type HarnessInspectCommandName =
-  | "project"
-  | "run"
-  | "createProject"
-  | "createFeature"
-  | "dynamicWorkflow"
-  | "skipNode"
-  | "sessionContext"
-  | "pullKnowledge"
 type HarnessInspectCommandConfigKey =
   | "project_status"
   | "feature_status"
@@ -215,6 +227,7 @@ interface ConfiguredHarnessInvocation {
   invocation: {
     executable: string
     args: string[]
+    sensitiveValues?: readonly string[]
   }
 }
 
@@ -253,19 +266,6 @@ class HarnessInvocationSemaphore {
       }
     }
   }
-}
-
-interface HarnessCommandParseOptions {
-  leanToken?: string
-  feature?: string
-  selectedDeployUnitsJson?: string
-  sessionWorkspacePath?: string
-  projectDirs?: string[]
-  workflowTemplate?: string
-  workflowNodes?: string
-  nodeId?: string
-  eventJson?: string
-  preserveMissingPlaceholders?: boolean
 }
 
 const HARNESS_BOARD_FILE = join(getOpenworkDir(), "harness-board-projects.json")
@@ -766,11 +766,16 @@ function formatHarnessCommandToken(value: string): string {
 }
 
 function formatHarnessCommand(invocation: ConfiguredHarnessInvocation["invocation"]): string {
-  return [invocation.executable, ...invocation.args].map(formatHarnessCommandToken).join(" ")
+  return [invocation.executable, ...invocation.args]
+    .map((value) => formatHarnessCommandToken(redactHarnessText(value, invocation)))
+    .join(" ")
 }
 
-function formatHarnessLogOutput(value: unknown): string {
-  const output = toTrimmedOutput(value)
+function formatHarnessLogOutput(
+  value: unknown,
+  invocation: Pick<ConfiguredHarnessInvocation["invocation"], "sensitiveValues"> = {}
+): string {
+  const output = redactHarnessText(toTrimmedOutput(value), invocation)
   return output || "(empty)"
 }
 
@@ -803,12 +808,13 @@ function logHarnessInvocationStart(
 
 function logHarnessInvocationSuccess(
   stdoutBuffer: Buffer,
-  options: HarnessInvocationLogOptions
+  options: HarnessInvocationLogOptions,
+  invocation: ConfiguredHarnessInvocation["invocation"]
 ): void {
   if (options.successResult === "none") return
   if (options.successResult === "full") {
     console.log(
-      `[HarnessBoard] [${options.configKey}] Result:\n${formatHarnessLogOutput(stdoutBuffer)}`
+      `[HarnessBoard] [${options.configKey}] Result:\n${formatHarnessLogOutput(stdoutBuffer, invocation)}`
     )
     return
   }
@@ -821,16 +827,18 @@ function logHarnessInvocationFailure(
   error: unknown
 ): void {
   const maybeError = error as { stdout?: unknown; stderr?: unknown }
-  console.error(`[HarnessBoard] [${options.configKey}] Failed: ${formatAdapterError(error)}`)
+  console.error(
+    `[HarnessBoard] [${options.configKey}] Failed: ${redactHarnessText(formatAdapterError(error), configured.invocation)}`
+  )
   console.error(
     `[HarnessBoard] [${options.configKey}] Command: ${formatHarnessCommand(configured.invocation)}`
   )
   console.error(`[HarnessBoard] [${options.configKey}] CWD: ${configured.cwd}`)
   console.error(
-    `[HarnessBoard] [${options.configKey}] stdout:\n${formatHarnessLogOutput(maybeError.stdout)}`
+    `[HarnessBoard] [${options.configKey}] stdout:\n${formatHarnessLogOutput(maybeError.stdout, configured.invocation)}`
   )
   console.error(
-    `[HarnessBoard] [${options.configKey}] stderr:\n${formatHarnessLogOutput(maybeError.stderr)}`
+    `[HarnessBoard] [${options.configKey}] stderr:\n${formatHarnessLogOutput(maybeError.stderr, configured.invocation)}`
   )
 }
 
@@ -840,159 +848,16 @@ function logHarnessStatusResultFailure(
   stdoutBuffer: Buffer,
   errorMessage: string
 ): void {
-  console.error(`[HarnessBoard] [${configKey}] Failed after command completed: ${errorMessage}`)
+  console.error(
+    `[HarnessBoard] [${configKey}] Failed after command completed: ${redactHarnessText(errorMessage, configured.invocation)}`
+  )
   console.error(
     `[HarnessBoard] [${configKey}] Command: ${formatHarnessCommand(configured.invocation)}`
   )
   console.error(`[HarnessBoard] [${configKey}] CWD: ${configured.cwd}`)
-  console.error(`[HarnessBoard] [${configKey}] Result:\n${formatHarnessLogOutput(stdoutBuffer)}`)
-}
-
-function tokenizeInspectCommand(command: string): string[] {
-  const tokens: string[] = []
-  let current = ""
-  let quote: '"' | "'" | null = null
-
-  for (let i = 0; i < command.length; i += 1) {
-    const ch = command[i]
-    if (!ch) continue
-
-    if (!quote) {
-      if (ch === "\\") {
-        const next = command[i + 1]
-        if (next && (/\s/.test(next) || next === '"' || next === "'" || next === "\\")) {
-          current += next
-          i += 1
-          continue
-        }
-        current += ch
-        continue
-      }
-      if (ch === '"' || ch === "'") {
-        quote = ch
-        continue
-      }
-      if (/\s/.test(ch)) {
-        if (current) {
-          tokens.push(current)
-          current = ""
-        }
-        continue
-      }
-      current += ch
-      continue
-    }
-
-    if (quote === '"' && ch === "\\") {
-      const next = command[i + 1]
-      if (next === '"' || next === "\\") {
-        current += next
-        i += 1
-        continue
-      }
-    }
-
-    if (ch === quote) {
-      quote = null
-      continue
-    }
-
-    current += ch
-  }
-
-  if (quote) {
-    throw new Error("Inspect adapter command parse failed: quote is not closed")
-  }
-  if (current) {
-    tokens.push(current)
-  }
-  return tokens
-}
-
-function replaceHarnessConfigPlaceholders(
-  value: string,
-  project: HarnessProjectMetadata,
-  mode: HarnessInspectCommandName,
-  cwd: string,
-  options: HarnessCommandParseOptions = {}
-): string {
-  const projectDir = projectDirectoryName(project)
-  const leanToken = options.leanToken ?? ""
-  const replacements: Record<string, string | undefined> = {
-    pluginWorkspace: project.workspacePath,
-    project: projectDir,
-    projectDir,
-    projectCode: project.projectCode,
-    leanToken,
-    feature: options.feature ?? "",
-    selectedDeployUnits: options.selectedDeployUnitsJson ?? "",
-    sessionWorkspacePath: options.sessionWorkspacePath ?? "",
-    pluginPath: cwd,
-    mode,
-    workflowTemplate: options.workflowTemplate ?? "",
-    workflowNodes: options.workflowNodes ?? "",
-    nodeId: options.nodeId ?? "",
-    eventJson: options.eventJson ?? ""
-  }
-  return value.replace(
-    /\$\{(pluginWorkspace|project|projectDir|projectCode|leanToken|feature|selectedDeployUnits|sessionWorkspacePath|pluginPath|mode|workflowTemplate|workflowNodes|nodeId|eventJson)\}/g,
-    (placeholder: string, key: string) => {
-      const replacement = replacements[key]
-      if (replacement) return replacement
-      return options.preserveMissingPlaceholders ? placeholder : ""
-    }
+  console.error(
+    `[HarnessBoard] [${configKey}] Result:\n${formatHarnessLogOutput(stdoutBuffer, configured.invocation)}`
   )
-}
-
-function parseInspectCommand(
-  command: string,
-  project: HarnessProjectMetadata,
-  mode: HarnessInspectCommandName,
-  cwd: string,
-  options: HarnessCommandParseOptions = {}
-): { executable: string; args: string[] } {
-  const args: string[] = []
-  const optionalCommandArgs: Array<{
-    key: keyof Pick<
-      HarnessCommandParseOptions,
-      "workflowTemplate" | "workflowNodes" | "selectedDeployUnitsJson"
-    >
-    placeholder: string
-    flag: string
-  }> = [
-    { key: "workflowTemplate", placeholder: "${workflowTemplate}", flag: "--workflow-template" },
-    { key: "workflowNodes", placeholder: "${workflowNodes}", flag: "--workflow-nodes" },
-    {
-      key: "selectedDeployUnitsJson",
-      placeholder: "${selectedDeployUnits}",
-      flag: "--selected-deployUnit"
-    }
-  ]
-  const tokens = tokenizeInspectCommand(command.trim())
-  for (let index = 0; index < tokens.length; index += 1) {
-    const token = tokens[index]
-    if ((token === "${projectCodes...}" || token === "${projectDirs...}") && options.projectDirs) {
-      args.push(...options.projectDirs)
-      continue
-    }
-    const optionalArg = optionalCommandArgs.find(
-      (item) =>
-        !options[item.key] &&
-        (token === item.placeholder ||
-          token === `${item.flag}=${item.placeholder}` ||
-          (token === item.flag && tokens[index + 1] === item.placeholder))
-    )
-    if (optionalArg) {
-      if (token === optionalArg.flag) index += 1
-      continue
-    }
-    args.push(replaceHarnessConfigPlaceholders(token, project, mode, cwd, options))
-  }
-  const [executable, ...restArgs] = args
-  if (!executable) {
-    throw new Error("Inspect adapter command is empty")
-  }
-  return { executable, args: restArgs }
 }
 
 async function readBoardConfig(cwd: string): Promise<Record<string, unknown> | null> {
@@ -1352,11 +1217,11 @@ async function runHarnessInvocationAsync(
         })
       })
     })
-    if (logOptions) logHarnessInvocationSuccess(stdoutBuffer, logOptions)
+    if (logOptions) logHarnessInvocationSuccess(stdoutBuffer, logOptions, configured.invocation)
     return stdoutBuffer
   } catch (error) {
     if (logOptions) logHarnessInvocationFailure(configured, logOptions, error)
-    throw new Error(formatAdapterError(error))
+    throw new Error(redactHarnessText(formatAdapterError(error), configured.invocation))
   } finally {
     release()
   }
@@ -1403,7 +1268,7 @@ function parseInspectAdapterOutput(
     if (!isObject(parsed)) {
       throw new Error("top-level JSON is not an object")
     }
-    return parsed
+    return redactHarnessValue(parsed, invocation.invocation) as Record<string, unknown>
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error)
     logHarnessStatusResultFailure(
@@ -1445,7 +1310,9 @@ function assertSkipNodeInvocationResult(
 
   if (!isObject(parsed) || parsed.ok !== false) return
 
-  const message = normalizeText(parsed.message).trim() || "插件返回跳过节点失败"
+  const message =
+    redactHarnessText(normalizeText(parsed.message).trim(), configured.invocation) ||
+    "插件返回跳过节点失败"
   logHarnessStatusResultFailure(configured, "skip_node", stdoutBuffer, message)
   throw new Error(message)
 }
@@ -2659,138 +2526,6 @@ export function readHarnessFeatureMetadata(
     : null
 }
 
-export interface HarnessFeatureAgentContext {
-  systemPromptInject?: string
-  enableAgentsPrompt?: boolean
-  agentConfig?: HarnessAgentConfig
-  harnessAgentsPrompt?: string
-  additionalAgentsWorkspacePaths?: string[]
-  additionalAgentsWorkspaceMappings?: HarnessDeployUnitMapping[]
-  sessionContextInjectWarning?: string
-  agentmdLoadStatus?: HarnessAgentmdLoadStatusItem[]
-  pluginOutputDir?: string
-  systemId?: string
-  pluginRoot?: string
-  pluginId?: string
-  pluginName?: string
-  pluginWorkspace?: string
-  featureId?: string
-  /** Harness project stable id (= properties.harnessProjectId on events). Exposed to hooks as HARNESS_PROJECT_ID. */
-  harnessProjectId?: string
-  /** Bound adapter name (= properties.harnessAdapterName on events). Exposed to hooks as HARNESS_ADAPTER_NAME. */
-  harnessAdapterName?: string
-  /** Bound adapter version (= properties.harnessAdapterVersion on events). Exposed to hooks as HARNESS_ADAPTER_VERSION. */
-  harnessAdapterVersion?: string
-  projectCode?: string
-  projectDir?: string
-}
-
-export interface HarnessFeatureAgentContextOptions {
-  workspacePath?: string
-  /** Resolve tool policy from the plugin while a project feature session is created. */
-  requestUserInputConfigSource?: "plugin" | "session_snapshot"
-}
-
-function isHarnessSessionContextOk(value: unknown): boolean {
-  return value === true
-}
-
-export type HarnessRuntimeAgentMode = "solo" | "multi" | "agent_team" | "workflow"
-
-export interface HarnessAgentConfig {
-  agentMode?: HarnessRuntimeAgentMode
-  subagentConfig?: HarnessProjectModeSubagentConfig
-  toolConfig?: {
-    requestUserInput?: HarnessRequestUserInputConfig
-  }
-}
-
-export const DEFAULT_HARNESS_REQUEST_USER_INPUT_CONFIG: HarnessRequestUserInputConfig = {
-  allowAutoResolution: false,
-  autoResolutionType: "select_first"
-}
-
-const REQUEST_USER_INPUT_TIMEOUT_MIN_MS = 30_000
-const REQUEST_USER_INPUT_TIMEOUT_MAX_MS = 240_000
-const REQUEST_USER_INPUT_TIMEOUT_MESSAGE_MAX_CHARS = 1_000
-
-function normalizeHarnessRequestUserInputConfig(
-  value: unknown
-): HarnessRequestUserInputConfig | undefined {
-  if (!isObject(value)) return undefined
-
-  if (value.allowAutoResolution !== true) {
-    return { ...DEFAULT_HARNESS_REQUEST_USER_INPUT_CONFIG }
-  }
-
-  const defaultTimeoutMs =
-    typeof value.defaultTimeoutMs === "number" &&
-    Number.isInteger(value.defaultTimeoutMs) &&
-    value.defaultTimeoutMs >= REQUEST_USER_INPUT_TIMEOUT_MIN_MS &&
-    value.defaultTimeoutMs <= REQUEST_USER_INPUT_TIMEOUT_MAX_MS
-      ? value.defaultTimeoutMs
-      : undefined
-  const userMessage = normalizeText(value.userMessage).trim()
-  const autoResolutionType =
-    value.autoResolutionType === "user_message" && userMessage ? "user_message" : "select_first"
-
-  return {
-    allowAutoResolution: true,
-    ...(defaultTimeoutMs !== undefined ? { defaultTimeoutMs } : {}),
-    autoResolutionType,
-    ...(autoResolutionType === "user_message"
-      ? { userMessage: userMessage.slice(0, REQUEST_USER_INPUT_TIMEOUT_MESSAGE_MAX_CHARS) }
-      : {})
-  }
-}
-
-function resolveHarnessRequestUserInputConfig(value: unknown): HarnessRequestUserInputConfig {
-  const normalized = normalizeHarnessRequestUserInputConfig(value)
-  return normalized ?? { ...DEFAULT_HARNESS_REQUEST_USER_INPUT_CONFIG }
-}
-
-function normalizeHarnessAgentConfig(value: unknown): HarnessAgentConfig | undefined {
-  if (!isObject(value)) return undefined
-
-  const agentMode =
-    value.agentMode === "solo" ||
-    value.agentMode === "multi" ||
-    value.agentMode === "agent_team" ||
-    value.agentMode === "workflow"
-      ? value.agentMode
-      : undefined
-  const normalizeStringList = (input: unknown): string[] => {
-    if (!Array.isArray(input)) return []
-    return [
-      ...new Set(
-        input
-          .filter((item): item is string => typeof item === "string")
-          .map((item) => item.trim())
-          .filter(Boolean)
-      )
-    ]
-  }
-  const subagentConfig = isObject(value.subagentConfig)
-    ? {
-        disabledBuiltinSubagents: normalizeStringList(
-          value.subagentConfig.disabledBuiltinSubagents
-        ),
-        customSubagentFiles: normalizeStringList(value.subagentConfig.customSubagentFiles)
-      }
-    : undefined
-
-  const requestUserInputConfig = isObject(value.toolConfig)
-    ? normalizeHarnessRequestUserInputConfig(value.toolConfig.requestUserInput)
-    : undefined
-
-  if (!agentMode && !subagentConfig && !requestUserInputConfig) return undefined
-  return {
-    ...(agentMode ? { agentMode } : {}),
-    ...(subagentConfig ? { subagentConfig } : {}),
-    ...(requestUserInputConfig ? { toolConfig: { requestUserInput: requestUserInputConfig } } : {})
-  }
-}
-
 interface HarnessSessionContextInjectResult {
   prompt?: string
   warning?: string
@@ -2951,11 +2686,14 @@ export async function buildHarnessFeatureAgentContext(
     command: HarnessInspectCommandName
   ): string | undefined =>
     template
-      ? replaceHarnessConfigPlaceholders(template, project, command, cwd, {
-          feature: feature.slug,
-          sessionWorkspacePath,
-          leanToken: context.leanToken
-        }).trim() || undefined
+      ? redactHarnessText(
+          replaceHarnessConfigPlaceholders(template, project, command, cwd, {
+            feature: feature.slug,
+            sessionWorkspacePath,
+            leanToken: ""
+          }),
+          { sensitiveValues: workerContext.leanToken ? [workerContext.leanToken] : [] }
+        ).trim() || undefined
       : undefined
   const renderedStaticPrompt = render(staticSystemPromptInject, "run")
   const sessionContextInjectResult = usePluginAgentsPrompt
@@ -2964,65 +2702,37 @@ export async function buildHarnessFeatureAgentContext(
         selectedDeployUnits: workerContext.selectedDeployUnits
       })
     : undefined
-  const pluginAgentConfig = sessionContextInjectResult?.agentConfig
   const persistedToolConfig =
     isObject(metadata) && isObject(metadata.harnessFeature)
       ? metadata.harnessFeature.requestUserInputConfig
       : undefined
-  const requestUserInputConfig =
-    options.requestUserInputConfigSource === "plugin"
-      ? resolveHarnessRequestUserInputConfig(pluginAgentConfig?.toolConfig?.requestUserInput)
-      : resolveHarnessRequestUserInputConfig(persistedToolConfig)
-  const agentConfig: HarnessAgentConfig = {
-    ...(pluginAgentConfig ?? {}),
-    toolConfig: { requestUserInput: requestUserInputConfig }
-  }
-  const harnessAgentsPrompt = sessionContextInjectResult?.prompt
-  const pluginPromptLoaded = Boolean(harnessAgentsPrompt?.trim())
-  const additionalWorkspaceRootMappings = await resolveHarnessAdditionalWorkspaceRootMappings(
+  const mappings = await resolveHarnessAdditionalWorkspaceRootMappings(
     project.projectId,
     feature.slug,
     workerContext.selectedDeployUnits
   )
-  const additionalWorkspaceRoots = additionalWorkspaceRootMappings.map(
-    (mapping) => mapping.localRepoPath
-  )
-  const additionalWorkspaceRootsPrompt = pluginPromptLoaded
-    ? undefined
-    : buildHarnessAdditionalWorkspaceRootsPrompt(additionalWorkspaceRootMappings)
-  const systemPromptInject =
-    [renderedStaticPrompt, additionalWorkspaceRootsPrompt].filter(Boolean).join("\n\n") || undefined
-
-  return {
-    systemPromptInject,
-    enableAgentsPrompt: !pluginPromptLoaded,
-    ...(agentConfig ? { agentConfig } : {}),
-    ...(harnessAgentsPrompt ? { harnessAgentsPrompt } : {}),
-    ...(!pluginPromptLoaded && additionalWorkspaceRoots.length > 0
-      ? {
-          additionalAgentsWorkspacePaths: additionalWorkspaceRoots,
-          additionalAgentsWorkspaceMappings: additionalWorkspaceRootMappings
-        }
-      : {}),
-    ...(sessionContextInjectResult?.warning
-      ? { sessionContextInjectWarning: sessionContextInjectResult.warning }
-      : {}),
-    ...(sessionContextInjectResult?.agentmdLoadStatus
-      ? { agentmdLoadStatus: sessionContextInjectResult.agentmdLoadStatus }
-      : {}),
-    pluginOutputDir: render(pluginOutputDir, "run"),
-    systemId: systemId || undefined,
-    pluginRoot: cwd,
-    pluginId: normalizeText(plugin.id) || adapter.id,
-    pluginName: normalizeText(plugin.name) || adapter.name,
-    pluginWorkspace: project.workspacePath,
-    featureId: feature.slug,
-    harnessProjectId: feature.projectId,
-    harnessAdapterName: normalizeText(adapterSnapshot.name).trim() || undefined,
-    harnessAdapterVersion: normalizeText(adapterSnapshot.version).trim() || undefined,
-    projectCode: project.projectCode,
-    projectDir: projectDirectoryName(project)
-  }
+  return assembleHarnessFeatureAgentContext({
+    staticPrompt: renderedStaticPrompt,
+    session: sessionContextInjectResult,
+    mappings,
+    additionalRootsPrompt: buildHarnessAdditionalWorkspaceRootsPrompt(mappings),
+    requestUserInputConfig: persistedToolConfig,
+    requestUserInputConfigSource: options.requestUserInputConfigSource,
+    identity: {
+      pluginOutputDir: render(pluginOutputDir, "run"),
+      systemId: systemId || undefined,
+      pluginRoot: cwd,
+      pluginId: normalizeText(plugin.id) || adapter.id,
+      pluginName: normalizeText(plugin.name) || adapter.name,
+      pluginWorkspace: project.workspacePath,
+      featureId: feature.slug,
+      harnessProjectId: feature.projectId,
+      harnessAdapterName: normalizeText(adapterSnapshot.name).trim() || undefined,
+      harnessAdapterVersion: normalizeText(adapterSnapshot.version).trim() || undefined,
+      projectCode: project.projectCode,
+      projectDir: projectDirectoryName(project)
+    }
+  })
 }
 
 /**
@@ -3402,7 +3112,11 @@ export async function skipHarnessRunNode(
       HARNESS_ADAPTER_TIMEOUT_MS
     )
     assertSkipNodeInvocationResult(configured, stdoutBuffer)
-    logHarnessInvocationSuccess(stdoutBuffer, harnessCommandLogOptions("skipNode"))
+    logHarnessInvocationSuccess(
+      stdoutBuffer,
+      harnessCommandLogOptions("skipNode"),
+      configured.invocation
+    )
   } catch (error) {
     const raw = error instanceof Error ? error.message : String(error)
     throw new Error(`跳过节点失败：${raw}`)

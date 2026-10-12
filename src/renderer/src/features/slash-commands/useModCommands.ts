@@ -1,27 +1,43 @@
-import { useEffect, useMemo, useRef, useState } from "react"
+import { useEffect, useLayoutEffect, useMemo, useState } from "react"
 import type { ModCommandDescriptor } from "../../../../shared/mods/types"
 import { parseFunctionCommandInput } from "../../../../shared/mods/v2/command-input"
 import type { SlashCommandItem } from "./useSlashCommands"
 import { mayBeModCommand, resolveModSubmission } from "./mod-submission"
+import { createModsScopeLifetime, type ModsThreadScope } from "../../lib/mods-thread-scope"
 
-export function useModCommands(threadId: string) {
-  const [commands, setCommands] = useState<ModCommandDescriptor[]>([])
-  const submitting = useRef(false)
-  const currentThread = useRef(threadId)
-  currentThread.current = threadId
+const EMPTY_COMMANDS: readonly ModCommandDescriptor[] = []
+export function useModCommands(threadId: string, scope: ModsThreadScope | null = null) {
+  const admitted = scope?.threadId === threadId ? scope : null
+  const [snapshot, setSnapshot] = useState<{
+    scope: ModsThreadScope
+    commands: ModCommandDescriptor[]
+  }>()
+  const owner = useMemo(
+    () => ({
+      threadId,
+      scope: admitted,
+      lifetime: createModsScopeLifetime(),
+      submission: null as Promise<boolean> | null
+    }),
+    [threadId, admitted]
+  )
+  useLayoutEffect(() => {
+    owner.lifetime.activate()
+    return () => owner.lifetime.dispose()
+  }, [owner])
   useEffect(() => {
-    currentThread.current = threadId
+    if (!admitted) return
     let live = true
     let sequence = 0
-    setCommands([])
     const refresh = (): void => {
+      if (!live || !owner.lifetime.isActive()) return
       const current = ++sequence
       void window.api.mods.commands(threadId).then(
-        (values) => {
-          if (live && current === sequence) setCommands(values)
+        (commands) => {
+          if (live && current === sequence) setSnapshot({ scope: admitted, commands })
         },
         () => {
-          if (live && current === sequence) setCommands([])
+          if (live && current === sequence) setSnapshot({ scope: admitted, commands: [] })
         }
       )
     }
@@ -36,13 +52,13 @@ export function useModCommands(threadId: string) {
     })
     return () => {
       live = false
-      if (currentThread.current === threadId) currentThread.current = ""
       stop()
       stopJobs()
       window.removeEventListener("focus", refresh)
       window.removeEventListener("mods:configuration-changed", refresh)
     }
-  }, [threadId])
+  }, [threadId, admitted, owner])
+  const commands = admitted && snapshot?.scope === admitted ? snapshot.commands : EMPTY_COMMANDS
   const items = useMemo<SlashCommandItem[]>(
     () =>
       commands
@@ -64,24 +80,31 @@ export function useModCommands(threadId: string) {
     [commands]
   )
   async function submit(text: string, beforeSubmit?: () => void): Promise<boolean> {
-    if (!mayBeModCommand(text)) return false
-    if (submitting.current) return true
-    submitting.current = true
-    try {
+    if (!admitted || !owner.lifetime.isActive() || !mayBeModCommand(text)) return false
+    if (owner.submission) return owner.submission
+    const token = owner.lifetime.capture()
+    const operation = (async () => {
       const parsed = await resolveModSubmission(text, () => window.api.mods.commands(threadId))
-      if (currentThread.current !== threadId) throw new Error("会话已切换，请重新提交命令。")
+      if (!owner.lifetime.isCurrent(token)) return false
       if (!parsed) return false
       beforeSubmit?.()
+      if (!owner.lifetime.isCurrent(token)) return false
       await window.api.mods.enqueue(threadId, parsed.descriptor, parsed.args)
-      return true
+      return owner.lifetime.isCurrent(token)
+    })()
+    owner.submission = operation
+    try {
+      return await operation
     } finally {
-      submitting.current = false
+      if (owner.submission === operation) owner.submission = null
     }
   }
   return {
     items,
     submit,
-    mayHandle: mayBeModCommand,
+    isCurrent: () =>
+      owner.scope !== null && owner.threadId === threadId && owner.lifetime.isActive(),
+    mayHandle: (text: string) => admitted !== null && mayBeModCommand(text),
     handles: (text: string) => parseFunctionCommandInput(text, commands) !== null
   }
 }

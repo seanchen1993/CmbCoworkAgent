@@ -1,0 +1,55 @@
+{
+  "kind": "configured-real-model-production-review-probe",
+  "appAcceptance": false,
+  "liveDatabaseReadOnly": true,
+  "model": "MiniMax-M3",
+  "originalRunId": "c8340c02-ce4d-40c7-a31c-de9a89e34293",
+  "taskSha256": "2c6d12eaee44151464c74b88d86cc55782ee4301971a0540041d11a867860684",
+  "sources": [
+    {
+      "name": "project-records.csv",
+      "size": 279,
+      "sha256": "dbc20dad04f59df0d704601fdd6559ab33fd1722283496a2092215a387695ac8"
+    },
+    {
+      "name": "review-policy.txt",
+      "size": 537,
+      "sha256": "f8b581c7338cc60fa4b02adaa7a22a89465daf675c991856bf8114069d54da60"
+    }
+  ],
+  "verdicts": [
+    {
+      "sha256": "7832fed246384d78f42ef6064d7a001e9340cb9521d97fd2c79663445da42bcb",
+      "verdict": {
+        "decision": "pass",
+        "findings": [
+          "result.csv 符合 review-policy.txt 规则：先按 status=已验收 且 region=北区 筛选，再保留 project_id 的最大版本，最终保留 P101 v2=12.40、P102 v2=8.55、P105 v1=-2.50、P106 v1=0.00，4 行；合计 12.40+8.55−2.50+0.00=18.45 万元。负值和 0 按规则已计入，与周报草案 38.45 万元的差额为 20.00 万元。"
+        ]
+      }
+    },
+    {
+      "sha256": "abbeebd5407d4025f4dbe4b3d8bbadddf325d05b18ba420f64294c294de7aac8",
+      "verdict": {
+        "decision": "uncertain",
+        "findings": [
+          "独立原件核验未返回有效结论，未发布该候选文件。"
+        ],
+        "diagnostic": {
+          "stage": "schema",
+          "reason": "invalid_schema",
+          "finish": "tool_call",
+          "schemaIssues": [
+            "findings_format"
+          ],
+          "schemaShape": {
+            "findingsType": "array",
+            "findingsCount": 1,
+            "findingKinds": [
+              "array"
+            ]
+          }
+        }
+      }
+    }
+  ]
+}

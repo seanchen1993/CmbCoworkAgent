@@ -1,0 +1,46 @@
+{
+  "root": "6ee9f377-cada-4d68-876d-2c5eb21223cb",
+  "scope": "own exact run_id; formal task-card usage instead aggregates root family",
+  "rows": [
+    {
+      "id": "6ee9f377-cada-4d68-876d-2c5eb21223cb",
+      "parent_run_id": null,
+      "root_run_id": "6ee9f377-cada-4d68-876d-2c5eb21223cb",
+      "source": "user",
+      "status": "succeeded",
+      "fence": 1,
+      "hasCheckpoint": 1,
+      "ownRequests": 3
+    },
+    {
+      "id": "eab18312-a2c7-419c-91cf-96aee7293435",
+      "parent_run_id": "6ee9f377-cada-4d68-876d-2c5eb21223cb",
+      "root_run_id": "6ee9f377-cada-4d68-876d-2c5eb21223cb",
+      "source": "peer",
+      "status": "succeeded",
+      "fence": 1,
+      "hasCheckpoint": 1,
+      "ownRequests": 1
+    },
+    {
+      "id": "0b19dba7-1c01-4c03-859b-c44256d94a81",
+      "parent_run_id": "eab18312-a2c7-419c-91cf-96aee7293435",
+      "root_run_id": "6ee9f377-cada-4d68-876d-2c5eb21223cb",
+      "source": "peer",
+      "status": "cancelled",
+      "fence": 0,
+      "hasCheckpoint": 0,
+      "ownRequests": 0
+    },
+    {
+      "id": "1b27b4db-4d14-4827-b406-d88a56a31c36",
+      "parent_run_id": "6ee9f377-cada-4d68-876d-2c5eb21223cb",
+      "root_run_id": "6ee9f377-cada-4d68-876d-2c5eb21223cb",
+      "source": "peer",
+      "status": "succeeded",
+      "fence": 1,
+      "hasCheckpoint": 1,
+      "ownRequests": 1
+    }
+  ]
+}

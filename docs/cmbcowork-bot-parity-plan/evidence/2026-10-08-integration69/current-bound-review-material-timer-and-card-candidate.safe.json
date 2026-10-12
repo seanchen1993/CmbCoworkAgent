@@ -1,0 +1,206 @@
+{
+  "kind": "current-bound-review-formal-delivery-and-timer",
+  "recordedAt": "2026-10-09T07:05:06.623916+00:00",
+  "sampledBuildId": "2535b8fc1b6ee4bef1ac56ae",
+  "schema": 69,
+  "coreParityComplete": false,
+  "databaseReadOnly": true,
+  "cold": {
+    "pre": {
+      "path": "/Users/chenqiang/Library/Application Support/CMBDevClaw-development/2026-10-08/presentation/cold-upgrade-plan/pins-quiesced-before-start-1791527756185350000.safe.json",
+      "bytes": 282506,
+      "sha256": "cf12084519b57b0abf1e2e32c45b0e01c9b78efcf82a7b033c402d0c2b83c091"
+    },
+    "post": {
+      "path": "/Users/chenqiang/Library/Application Support/CMBDevClaw-development/2026-10-08/presentation/cold-upgrade-plan/pins-post-start-pre-review-1791527796266714000.safe.json",
+      "bytes": 283616,
+      "sha256": "813d2e5c86eaf017d67702d96fc8068586ce3d51c5bcff2b39251707fa52c4b5"
+    },
+    "selectedRuns": 6,
+    "checkpointPayloadBytesHashed": 6593506,
+    "preserved": {
+      "schema": true,
+      "checkpoints": true,
+      "effects": true,
+      "interactions": true,
+      "artifacts": true,
+      "artifactObjects": true,
+      "peerDispatch": true,
+      "peerWaits": true,
+      "skills": true,
+      "project": true
+    },
+    "modelOnlyTwoRuntimeDirectoriesChanged": true
+  },
+  "reviewChanges": [
+    "Empty raw type accepted only with the same fully bound single verdict identity; other malformed calls still rejected",
+    "Review windows may continue only after explicit human recovery; lifetime 48 started reviews remain bounded"
+  ],
+  "isolatedProbe": {
+    "evidence": "current-review-probe-zYdx8S.safe.json",
+    "path": "/Users/chenqiang/Desktop/projects/CmbCoworkAgent/docs/cmbcowork-bot-parity-plan/evidence/2026-10-08-integration69/current-review-probe-zYdx8S.safe.json",
+    "bytes": 2184,
+    "sha256": "04ee2768e7a10ffff446aefe5103343077563f976f8bfd3b20632fbc1cca1649",
+    "appAcceptance": false
+  },
+  "formalMaterial": {
+    "run": {
+      "id": "c8340c02-ce4d-40c7-a31c-de9a89e34293",
+      "status": "succeeded",
+      "revision": 140,
+      "updated_at": 1791527996444
+    },
+    "outputs": [
+      {
+        "id": "result:c8340c02-ce4d-40c7-a31c-de9a89e34293:call_function_6xb5nzz9kgt8_1",
+        "name": "result.csv",
+        "mime": "text/csv",
+        "size": 66,
+        "sha256": "7f49376f9672cf7362ea26ea0ce624c881d3c9250f3b7207024ca5870bc8903f"
+      },
+      {
+        "id": "result:c8340c02-ce4d-40c7-a31c-de9a89e34293:call_function_vwqed5lp5aeu_2",
+        "name": "review.md",
+        "mime": "text/markdown",
+        "size": 3469,
+        "sha256": "aaa7a52e32b888e5dddd721497c7161cb97cd44611c8be11dbb527c4f320504f"
+      }
+    ],
+    "sourceObjectsUnchanged": [
+      {
+        "sha256": "dbc20dad04f59df0d704601fdd6559ab33fd1722283496a2092215a387695ac8",
+        "bytes": 279
+      },
+      {
+        "sha256": "f8b581c7338cc60fa4b02adaa7a22a89465daf675c991856bf8114069d54da60",
+        "bytes": 537
+      }
+    ],
+    "csvOriginalBytesVerified": true,
+    "csvRows": 4,
+    "csvTotalWan": "18.45",
+    "draftExcessWan": "20.00",
+    "finalInlineAttachmentCount": 0,
+    "qualityLimitations": [
+      "Final chat introduction partially English",
+      "Report conclusion says difference cannot be determined although difference is quantified; cause and magnitude should be distinguished"
+    ],
+    "wholeDeliveryQualityPassed": false
+  },
+  "timer": {
+    "routine": {
+      "id": "57a6d317-d873-4757-9814-39bbf975efe6",
+      "bot_id": "4002cdce-8149-4dfc-9c4b-28abd67d30c1",
+      "name": "核心对齐-单次定时核验",
+      "schedule": "{\"kind\":\"once\",\"at\":1791528360000}",
+      "timezone": "Asia/Shanghai",
+      "enabled": 0,
+      "next_at": null,
+      "revision": 2
+    },
+    "actualRun": {
+      "id": "4fe297c7-70ee-4f79-bc27-e7a1738c8629",
+      "source": "routine:57a6d317-d873-4757-9814-39bbf975efe6",
+      "status": "succeeded",
+      "created_at": 1791528360072,
+      "updated_at": 1791528363740
+    },
+    "replySha256": "1cd559381186a06d8091f922b66cbe69632103a2b9b0f6da96fbefec40528cc3",
+    "renderedSingleLineMatches": true,
+    "rawReplyHasLeadingNewline": true,
+    "dispatchDelayMs": 72,
+    "externalEffects": 0,
+    "manualRunClicked": false,
+    "grokObserved": {
+      "savedSchedule": "CRON_TZ=Asia/Shanghai 46 14 9 10 *",
+      "savedDisplay": "仅一次 10月9日 14:46",
+      "noDueReplyObservedThroughLocalTime": "2026-10-09 15:00",
+      "allRoutineCasesPassed": false
+    }
+  },
+  "program": {
+    "run": {
+      "id": "a09a7dfc-de97-4bad-9c2b-2945e71360ad",
+      "status": "failed",
+      "error": "任务共享输出预算已用尽，已保留当前结果",
+      "revision": 1097,
+      "updated_at": 1791529134945
+    },
+    "effects": [
+      {
+        "status": "failed",
+        "count": 2
+      },
+      {
+        "status": "succeeded",
+        "count": 66
+      }
+    ],
+    "READMEAndNineOriginalsDelivered": false
+  },
+  "cardCandidate": {
+    "buildId": "187be134917ed76187052f4b",
+    "live": false,
+    "reuse": "Atomic artifact notice, message-file link and receipt already used by browser downloads",
+    "nearestFiles": 4,
+    "nearestPassed": 67,
+    "nodeExit": 0,
+    "strictLintExit": 0,
+    "formatExit": 0,
+    "buildExit": 0
+  },
+  "logs": {
+    "boundNearest151": {
+      "path": "/tmp/cmb-bound-verdict-near-tests-retry1-20261009.log",
+      "bytes": 1071,
+      "sha256": "ad234e6be6e4b587c79b4faa06c966e46866e1d62adfe1dafba2d89d115c8ae4"
+    },
+    "boundFirstFixtureFailure": {
+      "path": "/tmp/cmb-bound-verdict-near-tests-20261009.log",
+      "bytes": 4261,
+      "sha256": "6fc8e75b9038854c597483ae2fac93535201ca32f4227278a4e70ddc36cc5875"
+    },
+    "boundBuild": {
+      "path": "/tmp/cmb-bound-verdict-production-build-20261009.log",
+      "bytes": 56263,
+      "sha256": "36f76a82fcd0704d6793a875a48672fd1b65f6e9202ced1c8ca9ad7bdb598ff6"
+    },
+    "cardsNearest67": {
+      "path": "/tmp/cmb-generated-delivery-card-tests-20261009.log",
+      "bytes": 1415,
+      "sha256": "248e78b669180a9c0a9a329f48f5898bf90e01538fa422116c53112d9db529c8"
+    },
+    "cardsNode": {
+      "path": "/tmp/cmb-generated-delivery-card-node-20261009.log",
+      "bytes": 91,
+      "sha256": "546c7bfd36ecac14793f941add6251c16a729819d1b744cccbaf256a91e1b42c"
+    },
+    "cardsLint": {
+      "path": "/tmp/cmb-generated-delivery-card-lint-retry1-20261009.log",
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "cardsFirstInvalidLintPath": {
+      "path": "/tmp/cmb-generated-delivery-card-lint-20261009.log",
+      "bytes": 189,
+      "sha256": "e8c4fe12fc5d1292abc3611b2701acef729f57baaa9671e750036af18166b731"
+    },
+    "cardsFormat": {
+      "path": "/tmp/cmb-generated-delivery-card-format-20261009.log",
+      "bytes": 66,
+      "sha256": "17aa973d3f004560237d9a95171210b0671deff23d61628eecf7322ff5938f20"
+    },
+    "cardsBuild": {
+      "path": "/tmp/cmb-generated-delivery-card-production-build-20261009.log",
+      "bytes": 56263,
+      "sha256": "7be303654a511b1de53f4000c413a9364d3989be58fcd8e57be8fd8f7abc3c23"
+    }
+  },
+  "remaining": [
+    "Complete actual long programming journey and final originals",
+    "Formal UI inline generated file cards and precise Chinese result presentation",
+    "Other memory, event routine and whole Grok core/UI cases",
+    "Windows independent native desktop implementation and platform machine acceptance",
+    "Final standalone installation and Linux/K8s delivery"
+  ]
+}

@@ -1,0 +1,12 @@
+{
+  "phase": "actual-opening-metadata-guard-output-original-complete-npm-test",
+  "startedAt": "2026-10-07T09:16:37.252671+00:00",
+  "completedAt": "2026-10-07T09:30:19.523167+00:00",
+  "seconds": 822.2705202089855,
+  "exitCode": 0,
+  "inputCount": 3834,
+  "sourceDrift": [],
+  "logSHA256": "58905828ea176e7f94d5d74dca3e9d7185e5c334fcd5f3904a34babfafae3c3c",
+  "automaticRetries": 0,
+  "wrapperOverridesOriginalTimeouts": false
+}

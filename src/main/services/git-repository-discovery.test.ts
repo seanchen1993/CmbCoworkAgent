@@ -27,7 +27,7 @@ function gitIn(cwd: string, args: string[]): string {
 }
 
 function createWorkspace(): string {
-  const workspace = mkdtempSync(join(tmpdir(), "multi-repo-workspace-"))
+  const workspace = realpathSync(mkdtempSync(join(tmpdir(), "multi-repo-workspace-")))
   roots.push(workspace)
   return workspace
 }

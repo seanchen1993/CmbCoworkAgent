@@ -1,4 +1,7 @@
+import { buildMcpServerConfig } from "../mcp/server-config"
+export { buildMcpServerConfig } from "../mcp/server-config"
 import { IpcMain } from "electron"
+import { z } from "zod"
 import { MultiServerMCPClient } from "@langchain/mcp-adapters"
 import type { Connection } from "@langchain/mcp-adapters"
 import {
@@ -6,7 +9,8 @@ import {
   getEnabledMcpConnectors,
   upsertMcpConnector,
   deleteMcpConnector,
-  setMcpConnectorEnabled
+  setMcpConnectorEnabled,
+  setMcpConnectorLazyLoad
 } from "../storage"
 import { resolveMcpConnectorKind } from "../mcp/connector-kind"
 import type { McpConnectorConfig, McpConnectorUpsert } from "../types"
@@ -25,6 +29,12 @@ import type {
 
 const MCP_TEST_CONNECTION_TIMEOUT_MS = 30_000
 const MCP_TEST_CLOSE_TIMEOUT_MS = 3_000
+const connectorEnabledInput = z
+  .object({ id: z.string().trim().min(1).max(200), enabled: z.boolean() })
+  .strict()
+const connectorLazyLoadInput = z
+  .object({ id: z.string().trim().min(1).max(200), lazyLoad: z.boolean() })
+  .strict()
 
 function withTimeout<T>(promise: Promise<T>, timeoutMs: number, message: string): Promise<T> {
   let timer: ReturnType<typeof setTimeout> | undefined
@@ -34,42 +44,6 @@ function withTimeout<T>(promise: Promise<T>, timeoutMs: number, message: string)
   return Promise.race([promise, timeout]).finally(() => {
     if (timer) clearTimeout(timer)
   })
-}
-
-export function buildMcpServerConfig(config: {
-  kind?: McpConnectorConfig["kind"]
-  url?: string
-  advanced?: McpConnectorConfig["advanced"]
-  command?: string
-  args?: string[]
-  env?: Record<string, string>
-}): Record<string, unknown> {
-  const kind = resolveMcpConnectorKind(config)
-  if (kind === "stdio") {
-    return {
-      transport: "stdio",
-      command: config.command?.trim(),
-      args: config.args ?? [],
-      ...(config.env && Object.keys(config.env).length > 0 ? { env: config.env } : {})
-    }
-  }
-
-  const base: Record<string, unknown> = { url: config.url?.trim() }
-  if (config.advanced?.headers && Object.keys(config.advanced.headers).length > 0) {
-    base.headers = config.advanced.headers
-  }
-  if (config.advanced?.transport) {
-    base.transport =
-      config.advanced.transport === "streamable-http" ? "http" : config.advanced.transport
-  }
-  if (config.advanced?.reconnect?.enabled) {
-    base.reconnect = {
-      enabled: true,
-      maxAttempts: config.advanced.reconnect.maxAttempts ?? 3,
-      delayMs: config.advanced.reconnect.delayMs ?? 1000
-    }
-  }
-  return base
 }
 
 function toMcpConnectorUpsert(config: McpConnectorConfig): McpConnectorUpsert {
@@ -216,13 +190,17 @@ export function registerMcpHandlers(ipcMain: IpcMain): void {
     await invalidateGlobalMcpCapabilityService("mcp:delete")
   })
 
-  ipcMain.handle(
-    "mcp:setEnabled",
-    async (_event, { id, enabled }: { id: string; enabled: boolean }): Promise<void> => {
-      setMcpConnectorEnabled(id, enabled)
-      await invalidateGlobalMcpCapabilityService("mcp:setEnabled")
-    }
-  )
+  ipcMain.handle("mcp:setEnabled", async (_event, input: unknown): Promise<void> => {
+    const { id, enabled } = connectorEnabledInput.parse(input)
+    setMcpConnectorEnabled(id, enabled)
+    await invalidateGlobalMcpCapabilityService("mcp:setEnabled")
+  })
+
+  ipcMain.handle("mcp:setLazyLoad", async (_event, input: unknown): Promise<void> => {
+    const { id, lazyLoad } = connectorLazyLoadInput.parse(input)
+    setMcpConnectorLazyLoad(id, lazyLoad)
+    await invalidateGlobalMcpCapabilityService("mcp:setLazyLoad")
+  })
 
   ipcMain.handle(
     "mcp:testConnection",

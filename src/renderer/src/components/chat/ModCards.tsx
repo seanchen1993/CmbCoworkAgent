@@ -1,22 +1,40 @@
-import { useCallback, useState, useSyncExternalStore } from "react"
+import { useCallback, useLayoutEffect, useMemo, useState, useSyncExternalStore } from "react"
 import type { ModUiNode } from "../../../../shared/mods/types"
 import { Button } from "@/components/ui/button"
 import { getModCards, subscribeModCards } from "@/lib/mod-cards-store"
+import {
+  createModsScopeLifetime,
+  useModsThreadScope,
+  type ModsThreadScope
+} from "@/lib/mods-thread-scope"
 
-export function ModCards({
+type ModCardsProps = { threadId: string; callId?: string; slot?: "turn.summary" }
+export function ModCards(props: ModCardsProps): React.JSX.Element | null {
+  const scope = useModsThreadScope(props.threadId)
+  return scope ? (
+    <ScopedModCards
+      key={JSON.stringify([scope.threadId, scope.workspaceKey])}
+      {...props}
+      scope={scope}
+    />
+  ) : null
+}
+function ScopedModCards({
   threadId,
   callId,
-  slot
-}: {
-  threadId: string
-  callId?: string
-  slot?: "turn.summary"
-}): React.JSX.Element | null {
+  slot,
+  scope
+}: ModCardsProps & { scope: ModsThreadScope }): React.JSX.Element | null {
   const subscribe = useCallback(
-    (listener: () => void) => subscribeModCards(threadId, listener),
-    [threadId]
+    (listener: () => void) => subscribeModCards(scope, listener),
+    [scope]
   )
-  const snapshot = useCallback(() => getModCards(threadId), [threadId])
+  const snapshot = useCallback(() => getModCards(scope), [scope])
+  const lifetime = useMemo(createModsScopeLifetime, [scope])
+  useLayoutEffect(() => {
+    lifetime.activate()
+    return () => lifetime.dispose()
+  }, [lifetime])
   const all = useSyncExternalStore(subscribe, snapshot)
   const summaryCallId = slot ? all.filter((card) => card.slot === slot).at(-1)?.callId : undefined
   const cards = all.filter((card) =>
@@ -27,14 +45,31 @@ export function ModCards({
   const [result, setResult] = useState("")
 
   async function act(actionId: string): Promise<void> {
+    const token = lifetime.capture()
+    if (token === null) return
     setBusy(actionId)
     setUsed((previous) => new Set(previous).add(actionId))
     try {
-      setResult((await window.api.mods.act(threadId, actionId)).text)
+      const result = await window.api.mods.act(threadId, actionId)
+      if (lifetime.isCurrent(token)) setResult(result.text)
     } catch (error) {
-      setResult(error instanceof Error ? error.message : "插件操作未完成")
+      if (lifetime.isCurrent(token))
+        setResult(error instanceof Error ? error.message : "插件操作未完成")
     } finally {
-      setBusy(null)
+      if (lifetime.isCurrent(token)) setBusy(null)
+    }
+  }
+  async function inspectArtifact(artifactId: string, save: boolean) {
+    const token = lifetime.capture()
+    if (token === null) return
+    try {
+      if (save) await window.api.mods.saveArtifact(threadId, artifactId)
+      else {
+        const artifact = await window.api.mods.artifact(threadId, artifactId)
+        if (lifetime.isCurrent(token)) setResult(`${artifact.label}\n${artifact.text}`)
+      }
+    } catch (error) {
+      if (lifetime.isCurrent(token)) setResult(String(error))
     }
   }
   function render(node: ModUiNode, key: string): React.ReactNode {
@@ -45,23 +80,14 @@ export function ModCards({
             <Button
               size="sm"
               variant="outline"
-              onClick={() =>
-                void window.api.mods.artifact(threadId, node.artifactId).then(
-                  (artifact) => setResult(`${artifact.label}\n${artifact.text}`),
-                  (error) => setResult(String(error))
-                )
-              }
+              onClick={() => void inspectArtifact(node.artifactId, false)}
             >
               {node.label}
             </Button>
             <Button
               size="sm"
               variant="outline"
-              onClick={() =>
-                void window.api.mods
-                  .saveArtifact(threadId, node.artifactId)
-                  .catch((error) => setResult(String(error)))
-              }
+              onClick={() => void inspectArtifact(node.artifactId, true)}
             >
               导出文本
             </Button>

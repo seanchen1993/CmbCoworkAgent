@@ -1,0 +1,12 @@
+{
+  "phase": "actual-current-opening-metadata-output-original-packaged-desktop26",
+  "startedAt": "2026-10-07T08:34:41.694667+00:00",
+  "completedAt": "2026-10-07T08:35:54.844814+00:00",
+  "seconds": 73.15017770801205,
+  "exitCode": 0,
+  "inputCount": 4017,
+  "sourceDrift": [],
+  "logSHA256": "747586852c95eed71b23e2422cbcc48b10acb4d0a13f57a31798626262182059",
+  "automaticRetries": 0,
+  "wrapperOverridesOriginalTimeouts": false
+}

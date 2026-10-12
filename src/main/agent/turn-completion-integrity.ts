@@ -42,8 +42,10 @@
 //   - Every recovery path is bounded. An exhausted budget is a terminal
 //     failure, never an infinite nag.
 
+import { createHash } from "node:crypto"
 import { AIMessage, HumanMessage, ToolMessage, type BaseMessage } from "@langchain/core/messages"
-import { createMiddleware } from "langchain"
+import { createMiddleware, todoListMiddleware } from "langchain"
+import { z } from "zod/v3"
 import { TURN_COMPLETION_GATE_MARKER_PREFIX } from "../../shared/checkpoint-transcript"
 import { ModelRefusalError, readModelRefusal, type ModelRefusal } from "./model-refusal"
 
@@ -80,6 +82,19 @@ const TRUNCATION_FINISH_REASONS = new Set([
   "model_length",
   "content_filter_length"
 ])
+
+/** Protocol-only truncation fact, shared by final answers and isolated tool
+ * capability samples (which legitimately have no assistant body). */
+export function isTruncationFinishSignal(signal: string | null): boolean {
+  return signal !== null && TRUNCATION_FINISH_REASONS.has(signal)
+}
+
+/** Known text completion terminators, normalized by readFinishSignal. This
+ * alone does not establish valid content: callers must still reject refusal,
+ * tool calls and incomplete output before accepting a result. */
+export function isCompleteTextFinishSignal(signal: string | null): boolean {
+  return signal === "stop" || signal === "end_turn" || signal === "stop_sequence"
+}
 
 const TOOL_CALL_FINISH_REASONS = new Set(["tool_calls", "tool_use", "function_call"])
 
@@ -129,7 +144,33 @@ const DSML_TOOL_TAIL_RE =
  */
 const modelsWithObservedFinishSignal = new Set<string>()
 
+/** Durable identity links, not user text, authorize answer continuation. */
+export interface TurnCompletionLengthLink {
+  threadId: string
+  predecessorId: string
+  cueId: string
+  attempt: number
+}
+const MAX_LENGTH_CONTINUATION_LINKS = 64
+const lengthLinkSchema = z.object({
+  threadId: z.string().min(1).max(4096),
+  predecessorId: z.string().min(1).max(4096),
+  cueId: z.string().min(1).max(512),
+  attempt: z.number().int().positive()
+})
+function lengthCueId(
+  threadId: string,
+  owner: string,
+  predecessorId: string,
+  attempt: number
+): string {
+  return `cmb-length:${createHash("sha256")
+    .update(JSON.stringify([threadId, owner, predecessorId, attempt]))
+    .digest("hex")}`
+}
+
 interface GateRunState {
+  lengthContinuations?: TurnCompletionLengthLink[]
   refusal?: ModelRefusal
   retriesUsed: number
   todoNudgesUsed: number
@@ -176,6 +217,7 @@ function ensureRunState(key: string): GateRunState {
 }
 
 export interface TurnCompletionGateReport {
+  lengthContinuations?: TurnCompletionLengthLink[]
   refusal?: ModelRefusal
   retriesUsed: number
   todoNudgesUsed: number
@@ -199,7 +241,10 @@ export function readTurnCompletionGateReport(
     retriesUsed: state.retriesUsed,
     todoNudgesUsed: state.todoNudgesUsed,
     unresolved: state.unresolved,
-    unfinishedTodos: [...state.unfinishedTodos]
+    unfinishedTodos: [...state.unfinishedTodos],
+    ...(state.lengthContinuations?.length
+      ? { lengthContinuations: state.lengthContinuations.map((link) => ({ ...link })) }
+      : {})
   }
 }
 
@@ -404,7 +449,7 @@ export function inspectFinalAssistantMessage(
         }
   }
 
-  if (finishSignal && TRUNCATION_FINISH_REASONS.has(finishSignal)) {
+  if (isTruncationFinishSignal(finishSignal)) {
     return {
       defect: "length_truncated",
       detail: `回复被长度上限截断（finish_reason=${finishSignal}）`
@@ -516,7 +561,51 @@ export type TurnCompletionRecoveryCallback = (input: {
   maxAttempts: number
 }) => void
 
+const completionCheckpointSchema = z.object({
+  owner: z.string(),
+  report: z.object({
+    refusal: z
+      .object({ category: z.string().nullable(), explanation: z.string().nullable() })
+      .optional(),
+    retriesUsed: z.number().int().nonnegative(),
+    todoNudgesUsed: z.number().int().nonnegative(),
+    unresolved: z
+      .object({
+        defect: z
+          .enum([
+            "empty_response",
+            "reasoning_only",
+            "length_truncated",
+            "unparsed_tool_call",
+            "textual_tool_call",
+            "missing_finish_signal"
+          ])
+          .nullable(),
+        detail: z.string()
+      })
+      .nullable(),
+    unfinishedTodos: z.array(z.string()),
+    lengthContinuations: z.array(lengthLinkSchema).max(MAX_LENGTH_CONTINUATION_LINKS).optional()
+  })
+})
+
+/** A resumed graph may already be at END and never rerun afterModel. */
+export function readCheckpointedTurnCompletionReport(
+  state: unknown,
+  owner: string
+): TurnCompletionGateReport | null {
+  const value =
+    state && typeof state === "object" && "cmbCompletionGate" in state
+      ? state.cmbCompletionGate
+      : undefined
+  if (value == null) return null
+  const saved = completionCheckpointSchema.parse(value)
+  return saved.owner === owner ? saved.report : null
+}
+
 export interface TurnCompletionGateOptions {
+  /** Persist budgets and the terminal verdict in the graph checkpoint for headless restart. */
+  checkpointed?: boolean
   /** Foreground physical run token that enables completion and todo recovery. */
   ownerRunToken?: string
   /** Records refusal for managed transports without enabling foreground retries or queue access. */
@@ -546,6 +635,7 @@ export function createTurnCompletionGateMiddleware(
   const {
     ownerRunToken,
     observationRunToken,
+    checkpointed = false,
     maxRetries = DEFAULT_MAX_COMPLETION_RETRIES,
     maxTodoNudges = DEFAULT_MAX_TODO_NUDGES,
     todoGateEnabled = true,
@@ -554,6 +644,11 @@ export function createTurnCompletionGateMiddleware(
 
   return createMiddleware({
     name: "turnCompletionGate",
+    // LangChain projects each hook onto its declared state fields. Include the
+    // real todo schema or the gate would only see messages and miss open work.
+    stateSchema: todoListMiddleware().stateSchema!.extend(
+      checkpointed ? { cmbCompletionGate: completionCheckpointSchema.optional() } : {}
+    ),
     afterModel: {
       canJumpTo: ["model", "end"],
       hook: async (state, runtime) => {
@@ -564,104 +659,128 @@ export function createTurnCompletionGateMiddleware(
         const runId = ownerRunToken ?? observationRunToken
         if (!threadId || !runId) return undefined
 
-        const messages = Array.isArray((state as GateGraphState).messages)
-          ? ((state as GateGraphState).messages as BaseMessage[])
-          : []
-        const lastMessage = messages.at(-1)
-        if (!AIMessage.isInstance(lastMessage)) return undefined
+        if (checkpointed) {
+          const restored = readCheckpointedTurnCompletionReport(state, runId)
+          if (restored) gateStateByRun.set(runScopedKey(threadId, runId), restored)
+        }
+        const evaluate = async () => {
+          const messages = Array.isArray((state as GateGraphState).messages)
+            ? ((state as GateGraphState).messages as BaseMessage[])
+            : []
+          const lastMessage = messages.at(-1)
+          if (!AIMessage.isInstance(lastMessage)) return undefined
 
-        const key = runScopedKey(threadId, runId)
-        const refusal = readModelRefusal(lastMessage)
-        if (refusal) {
+          const key = runScopedKey(threadId, runId)
+          const refusal = readModelRefusal(lastMessage)
+          if (refusal) {
+            const runState = ensureRunState(key)
+            settleRunState(runState)
+            runState.refusal = refusal
+            return { jumpTo: "end" as const }
+          }
+          if (!ownerRunToken) return undefined
+
+          // Tools were requested: the loop continues on its own. Record the finish
+          // signal (a tool-call turn is the most reliable place to learn that this
+          // model reports one) and stand down.
+          if (Array.isArray(lastMessage.tool_calls) && lastMessage.tool_calls.length > 0) {
+            const signal = readFinishSignal(lastMessage)
+            if (signal) modelsWithObservedFinishSignal.add(readModelKey(lastMessage))
+            const running = gateStateByRun.get(key)
+            if (running) running.unresolved = null
+            return undefined
+          }
+
           const runState = ensureRunState(key)
-          settleRunState(runState)
-          runState.refusal = refusal
-          return { jumpTo: "end" as const }
-        }
-        if (!ownerRunToken) return undefined
+          const inspection = inspectFinalAssistantMessage(lastMessage)
 
-        // Tools were requested: the loop continues on its own. Record the finish
-        // signal (a tool-call turn is the most reliable place to learn that this
-        // model reports one) and stand down.
-        if (Array.isArray(lastMessage.tool_calls) && lastMessage.tool_calls.length > 0) {
-          const signal = readFinishSignal(lastMessage)
-          if (signal) modelsWithObservedFinishSignal.add(readModelKey(lastMessage))
-          const running = gateStateByRun.get(key)
-          if (running) running.unresolved = null
-          return undefined
-        }
-
-        const runState = ensureRunState(key)
-        const inspection = inspectFinalAssistantMessage(lastMessage)
-
-        if (inspection.defect) {
-          if (runState.retriesUsed >= maxRetries) {
-            // Budget spent. END is now unavoidable (this middleware cannot fail
-            // the graph without losing the partial transcript), so record the
-            // defect instead: the IPC layer reads it and refuses to report
-            // success. That is the whole point — an unusable turn must surface
-            // as failed, not as "✅ 任务完成".
-            runState.unresolved = inspection
+          if (inspection.defect) {
+            if (runState.retriesUsed >= maxRetries) {
+              // Budget spent. END is now unavoidable (this middleware cannot fail
+              // the graph without losing the partial transcript), so record the
+              // defect instead: the IPC layer reads it and refuses to report
+              // success. That is the whole point — an unusable turn must surface
+              // as failed, not as "✅ 任务完成".
+              runState.unresolved = inspection
+              console.warn(
+                `[TurnCompletionGate] ${threadId} exhausted ${maxRetries} retries: ${inspection.defect} — ${inspection.detail}`
+              )
+              return undefined
+            }
+            runState.retriesUsed += 1
+            runState.unresolved = null
+            const prompt = buildCompletionRecoveryPrompt(
+              inspection.defect,
+              runState.retriesUsed,
+              maxRetries
+            )
             console.warn(
-              `[TurnCompletionGate] ${threadId} exhausted ${maxRetries} retries: ${inspection.defect} — ${inspection.detail}`
+              `[TurnCompletionGate] ${threadId} retry ${runState.retriesUsed}/${maxRetries}: ${inspection.defect} — ${inspection.detail}`
+            )
+            onRecovery?.({
+              kind: "defect",
+              detail: inspection.detail,
+              attempt: runState.retriesUsed,
+              maxAttempts: maxRetries
+            })
+            let recovery = new HumanMessage(prompt)
+            if (inspection.defect === "length_truncated" && lastMessage.id) {
+              const link: TurnCompletionLengthLink = {
+                threadId,
+                predecessorId: lastMessage.id,
+                cueId: lengthCueId(threadId, runId, lastMessage.id, runState.retriesUsed),
+                attempt: runState.retriesUsed
+              }
+              lengthLinkSchema.parse(link)
+              runState.lengthContinuations = [...(runState.lengthContinuations ?? []), link].slice(
+                -MAX_LENGTH_CONTINUATION_LINKS
+              )
+              recovery = new HumanMessage({ id: link.cueId, content: prompt })
+            }
+            return { messages: [recovery], jumpTo: "model" as const }
+          }
+
+          // The protocol is satisfied. Now the task-state gate: a final answer
+          // that leaves the model's OWN todo list open is the ordinary-path
+          // analogue of the /goal evaluator's "continue" verdict.
+          runState.unresolved = null
+          if (!todoGateEnabled) {
+            settleRunState(runState)
+            return undefined
+          }
+          const unfinished = collectUnfinishedTodos((state as GateGraphState).todos)
+          if (unfinished.length === 0) {
+            settleRunState(runState)
+            return undefined
+          }
+          if (runState.todoNudgesUsed >= maxTodoNudges) {
+            runState.unfinishedTodos = unfinished
+            console.warn(
+              `[TurnCompletionGate] ${threadId} ended with ${unfinished.length} unfinished todos after ${maxTodoNudges} nudges`
             )
             return undefined
           }
-          runState.retriesUsed += 1
-          runState.unresolved = null
-          const prompt = buildCompletionRecoveryPrompt(
-            inspection.defect,
-            runState.retriesUsed,
-            maxRetries
-          )
-          console.warn(
-            `[TurnCompletionGate] ${threadId} retry ${runState.retriesUsed}/${maxRetries}: ${inspection.defect} — ${inspection.detail}`
-          )
+          runState.todoNudgesUsed += 1
+          runState.unfinishedTodos = []
           onRecovery?.({
-            kind: "defect",
-            detail: inspection.detail,
-            attempt: runState.retriesUsed,
-            maxAttempts: maxRetries
+            kind: "todo",
+            detail: `仍有 ${unfinished.length} 项待办未完成`,
+            attempt: runState.todoNudgesUsed,
+            maxAttempts: maxTodoNudges
           })
-          return { messages: [new HumanMessage(prompt)], jumpTo: "model" as const }
+          return {
+            messages: [
+              new HumanMessage(
+                buildTodoRecoveryPrompt(unfinished, runState.todoNudgesUsed, maxTodoNudges)
+              )
+            ],
+            jumpTo: "model" as const
+          }
         }
-
-        // The protocol is satisfied. Now the task-state gate: a final answer
-        // that leaves the model's OWN todo list open is the ordinary-path
-        // analogue of the /goal evaluator's "continue" verdict.
-        runState.unresolved = null
-        if (!todoGateEnabled) {
-          settleRunState(runState)
-          return undefined
-        }
-        const unfinished = collectUnfinishedTodos((state as GateGraphState).todos)
-        if (unfinished.length === 0) {
-          settleRunState(runState)
-          return undefined
-        }
-        if (runState.todoNudgesUsed >= maxTodoNudges) {
-          runState.unfinishedTodos = unfinished
-          console.warn(
-            `[TurnCompletionGate] ${threadId} ended with ${unfinished.length} unfinished todos after ${maxTodoNudges} nudges`
-          )
-          return undefined
-        }
-        runState.todoNudgesUsed += 1
-        runState.unfinishedTodos = []
-        onRecovery?.({
-          kind: "todo",
-          detail: `仍有 ${unfinished.length} 项待办未完成`,
-          attempt: runState.todoNudgesUsed,
-          maxAttempts: maxTodoNudges
-        })
-        return {
-          messages: [
-            new HumanMessage(
-              buildTodoRecoveryPrompt(unfinished, runState.todoNudgesUsed, maxTodoNudges)
-            )
-          ],
-          jumpTo: "model" as const
-        }
+        const update = await evaluate()
+        if (!checkpointed) return update
+        const report = readTurnCompletionGateReport(threadId, runId)
+        return report ? { ...update, cmbCompletionGate: { owner: runId, report } } : update
       }
     }
   })
@@ -673,4 +792,52 @@ export function createTurnCompletionGateMiddleware(
 export function isPostToolResultReply(messages: readonly BaseMessage[]): boolean {
   const previous = messages.at(-2)
   return ToolMessage.isInstance(previous)
+}
+
+/** The completed answer may span only adjacent, Host-owned length retries.
+ * Scope and predecessor checks survive checkpoint reload; tool calls, user
+ * steering and other recovery kinds terminate the chain rather than merging
+ * unrelated model prose into the deliverable. */
+export function collectLengthContinuationMessages(
+  messages: readonly BaseMessage[],
+  report: TurnCompletionGateReport | null | undefined,
+  threadId: string,
+  owner: string
+): AIMessage[] {
+  const final = messages.at(-1)
+  if (!AIMessage.isInstance(final)) return []
+  const links = report?.lengthContinuations ?? []
+  if (links.length > MAX_LENGTH_CONTINUATION_LINKS) throw new Error("答复续写关联超出上限")
+  const byCue = new Map<string, TurnCompletionLengthLink>()
+  for (const raw of links) {
+    const link = lengthLinkSchema.parse(raw)
+    if (
+      link.threadId !== threadId ||
+      link.cueId !== lengthCueId(threadId, owner, link.predecessorId, link.attempt)
+    )
+      throw new Error("答复续写关联不属于当前任务")
+    const previous = byCue.get(link.cueId)
+    if (previous && previous.predecessorId !== link.predecessorId)
+      throw new Error("答复续写关联重复且不一致")
+    byCue.set(link.cueId, link)
+  }
+  const chain = [final]
+  let at = messages.length - 1
+  while (at >= 2) {
+    const cue = messages[at - 1]
+    if (!HumanMessage.isInstance(cue) || !cue.id) break
+    const link = byCue.get(cue.id)
+    if (!link) break
+    const previous = messages[at - 2]
+    if (
+      !AIMessage.isInstance(previous) ||
+      previous.id !== link.predecessorId ||
+      previous.tool_calls?.length ||
+      inspectFinalAssistantMessage(previous).defect !== "length_truncated"
+    )
+      throw new Error("答复续写关联与原始模型答复不一致")
+    chain.push(previous)
+    at -= 2
+  }
+  return chain.reverse()
 }

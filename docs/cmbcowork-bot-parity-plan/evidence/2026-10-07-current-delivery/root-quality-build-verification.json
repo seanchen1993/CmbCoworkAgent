@@ -1,0 +1,17 @@
+{
+  "at": "2026-10-07T08:30:25.565032+00:00",
+  "status": "PASS",
+  "originalNeighboringFiles": 3,
+  "actualNeighboringCasesPassed": 78,
+  "nodeTypes": "PASS",
+  "webTypes": "PASS",
+  "strictLint": "PASS",
+  "format": "PASS",
+  "productionBuild": "PASS",
+  "whitespaceOnlyCorrectionProof": "/tmp/cmb-root-thread-metadata-opening-integration-v1/source-format-correction.json",
+  "firstAttemptPreservedWithFormatWarning": true,
+  "currentOutputRevisionSHA256": "0ce3e79902f8ee8bedfaead445890c67cc96fb08a40e12252ec30743d7b05dcc",
+  "nativeBuildId": "aa183a16dd2d22fe8ad060e4",
+  "rendererChunk": "BotWorkspace-D-23g-nQ.js",
+  "browserAndWholeNpmPending": true
+}

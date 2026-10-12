@@ -1,0 +1,120 @@
+{
+  "kind": "actual-memory-first-pair-and-current-csv-preview",
+  "recordedAtUtc": "2026-10-09T10:53:27.720103+00:00",
+  "liveBuildId": "6677a7e6323d46222f9838ef",
+  "model": "custom:minimax-m3",
+  "wholeCoreParityComplete": false,
+  "csvPreview": {
+    "runId": "5f2d5bb0-1b87-41e0-b1c9-16460d190bdc",
+    "filename": "result.csv",
+    "bytes": 65,
+    "actualNativeUi": true,
+    "rows": 5,
+    "columns": 2,
+    "selectedCell": "B1",
+    "literalContent": "amount万元",
+    "previewLoaded": true,
+    "originalSaveNotRepeatedForThisCsv": true
+  },
+  "memoryPair": {
+    "botId": "954dd5e0-e2e7-4247-9303-276c8111c870",
+    "name": "记忆对照核验",
+    "saveRunId": "819836f6-bdc4-418b-abd8-eab0d861940e",
+    "useRunId": "a8dba885-846e-4c7d-b6f9-068f43a14c87",
+    "bothSucceeded": true,
+    "memoryId": "62b23ea9-c2b2-4b14-b8d7-628348d47e67",
+    "revision": 1,
+    "origin": "explicit",
+    "kind": "profile",
+    "sourceMessageId": "da542c33-3111-4c5c-8bc5-662faa3827a0",
+    "durableRowReadOnlyVerified": true,
+    "actualSdkTools": [
+      "read_bot",
+      "update_bot",
+      "remember",
+      "read_memory"
+    ],
+    "facts": [
+      "蓝桥-314",
+      "先结论后依据",
+      "简体中文"
+    ],
+    "finiteSaveReadUsePassed": true,
+    "crossConversationOrRestartUseNotYetVerified": true,
+    "completeReplyQualityPassed": false,
+    "cmbDifferences": [
+      "Exact self rename prompted manual approval under smart review",
+      "Human replies exposed internal IDs/revisions",
+      "Summary added unobserved registration and planned-work claims"
+    ],
+    "officialGrokActualUiObservation": {
+      "sameInputs": true,
+      "selfRenameWithoutManualDialog": true,
+      "privatePreferenceStoredAsReported": true,
+      "laterReplyAppliedChineseConclusionThenBasis": true,
+      "outputAlsoAddedUnsupportedOtherChecksNoProblemClaim": true,
+      "privateBackendMemoryNotAccessible": true
+    }
+  },
+  "isolationAttempt": {
+    "otherBotId": "e441bbef-6498-4bc9-8cac-2c4f889507ed",
+    "runId": "b0e50056-db1e-4bfd-9656-24b8f395632c",
+    "toolsObserved": [
+      "memory_list"
+    ],
+    "status": "needs_review",
+    "error": "系统时间变化或休眠导致执行间隔中断，请核对现场后恢复",
+    "isolationPassed": false,
+    "outcomeNotInferredFromInterruptedTask": true
+  },
+  "candidateSource": {
+    "src/main/bots/agent-runtime.ts": {
+      "bytes": 114314,
+      "sha256": "4262d141cce0b0d20cd0c89a1b70d47f6ae75daefd4e635c4e9ef2286ce4eb32"
+    },
+    "src/main/bots/delivery-quality-policy.ts": {
+      "bytes": 2530,
+      "sha256": "495186af0abd1e666c5a1b026a3849eb820a3aba461489026232dc4b7308bc32"
+    },
+    "src/main/bots/auto-review.ts": {
+      "bytes": 18055,
+      "sha256": "f4b15bf821b8f5e1af2019a18dff0a0ad29f5e05618d78d98e99c587d5ead89f"
+    },
+    "src/main/bots/auto-review-sdk-refusal.test.ts": {
+      "bytes": 14562,
+      "sha256": "130c3b47685989646a990c9d27afa73b4d8ebe24e36b96e738f1203611d61517"
+    }
+  },
+  "candidateScope": [
+    "Keep IDs for tools/structured handoffs, omit in human replies",
+    "Do not infer completion/registration/unspecified check outcomes",
+    "Allow strict name-only current self-profile action to reach independent reviewer; exact version, creation/duties/other Bots remain manual"
+  ],
+  "candidateNotYetLive": true,
+  "gates": {
+    "promptAndWorkflowChildSdk": {
+      "tests": 3,
+      "exit": 0,
+      "log": "/tmp/cmb-human-reply-final-contract-20261009.log"
+    },
+    "profileApprovalSdkAndBoundary": {
+      "tests": 47,
+      "exit": 0,
+      "log": "/tmp/cmb-self-rename-tests-20261009.log"
+    },
+    "node": {
+      "exit": 0,
+      "log": "/tmp/cmb-memory-profile-node-20261009.log"
+    },
+    "lint": {
+      "exit": 0,
+      "log": "/tmp/cmb-memory-profile-lint-20261009.log"
+    },
+    "workflow": "pending",
+    "productionBuild": "pending"
+  },
+  "retainedFailures": [
+    "Lock/sleep interrupted the isolation task; original needs_review record retained",
+    "Initial read-only diagnostic used nonexistent bot_runs.state column; corrected to status, no data write"
+  ]
+}

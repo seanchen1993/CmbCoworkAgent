@@ -55,12 +55,13 @@ function assertSourceOrder(value: string, before: string, after: string, label: 
   assert(b < a, `${label}: expected ${JSON.stringify(before)} before ${JSON.stringify(after)}`)
 }
 
-const runtime = read("src/main/agent/runtime.ts")
+const runtime = read("src/main/agent/runtime.ts") + "\n" + read("src/main/agent/deep-agent-core.ts")
 const queueModule = read("src/main/agent/current-run-message-queue.ts")
 const standardTurn = read("src/main/agent/standard-thread-turn.ts")
+const promptCore = read("src/main/agent/prompt-preparation.ts")
 const physicalStreamRunSetup = read("src/main/agent/physical-stream-run-setup.ts")
 const runSettlementFence = read("src/main/agent/run-settlement-fence.ts")
-const localSandbox = read("src/main/agent/local-sandbox.ts")
+const localSandbox = read("src/main/agent/local-sandbox-core.ts")
 const agentIpc = read("src/main/ipc/agent.ts")
 const streamTranscriptFlush = read("src/main/ipc/stream-transcript-flush.ts")
 const streamTranscriptPayload = read("src/main/ipc/stream-transcript-payload.ts")
@@ -82,7 +83,7 @@ function testMiddlewareOnlyOnMainStack(): void {
   // can't leak into a background subagent's loop.
   assertOccurrences(
     runtime,
-    "createCurrentRunMessageQueueMiddleware(currentRunMessageQueueOwnerToken)",
+    "createCurrentRunMessageQueueMiddleware(",
     1,
     "middleware invoked once (main stack only)"
   )
@@ -91,23 +92,21 @@ function testMiddlewareOnlyOnMainStack(): void {
 function testMiddlewareBeforeSummarizationAndHITL(): void {
   // Slice from the (single) main-stack invocation — summarization also appears in
   // the subagent stack earlier in the file, so a whole-file order check is wrong.
-  const idx = runtime.indexOf(
-    "createCurrentRunMessageQueueMiddleware(currentRunMessageQueueOwnerToken)"
-  )
+  const idx = runtime.indexOf("createCurrentRunMessageQueueMiddleware(")
   assert(idx >= 0, "queue middleware present on the main stack")
   const after = runtime.slice(idx)
   // beforeModel must run before summarization (injected turns participate in
   // context management): the queue middleware immediately precedes it in the array.
   assertMatches(
     after,
-    /createCurrentRunMessageQueueMiddleware\(currentRunMessageQueueOwnerToken\),\s*\n\s*createCmbSummarizationMiddleware\(mainSummarizationOptions\)/,
+    /createCurrentRunMessageQueueMiddleware\(\s*currentRunMessageQueueOwnerToken,\s*currentRunDurableQueue\s*\),\s*\n\s*mainSummarizationController\.middleware/,
     "queue middleware immediately precedes summarization on the main stack"
   )
   // afterModel must sit before HITL in the array so an approval interrupt preempts
   // injection.
   assertSourceOrder(
     after,
-    "createCurrentRunMessageQueueMiddleware(currentRunMessageQueueOwnerToken)",
+    "createCurrentRunMessageQueueMiddleware(",
     "humanInTheLoopMiddleware",
     "queue middleware before HITL on the main stack"
   )
@@ -212,9 +211,10 @@ function testGuideUsesCurrentRunPromptPipeline(): void {
   )
   assertIncludes(
     standardTurn,
-    '"UserPromptSubmit",\n    promptSubmitContext,',
+    '"UserPromptSubmit",\n        context,',
     "shared preparation executes UserPromptSubmit hooks"
   )
+  assertIncludes(standardTurn, "return prepareUserPromptCore({", "desktop preparation delegates to the common lifecycle")
   assertIncludes(
     standardTurn,
     "activateExplicitSkillFromMessage({",
@@ -231,7 +231,7 @@ function testGuideUsesCurrentRunPromptPipeline(): void {
     "async steer preparation snapshots run-scoped hook state"
   )
   assertIncludes(
-    standardTurn,
+    promptCore,
     "isPreparationCurrent && !isPreparationCurrent()",
     "stale async hook results stop before committing skill and prompt side effects"
   )
@@ -511,8 +511,14 @@ function testClearOnEveryRunExit(): void {
   assertOccurrences(
     agentIpc,
     "resolveAgentStreamRequestChannel(",
-    3,
-    "invoke, resume, and interrupt isolate terminal events on request-scoped channels"
+    4,
+    "invoke, resume, interrupt, and the managed-decision rejection isolate terminal events on request-scoped channels"
+  )
+  assertSourceOrder(
+    agentIpc,
+    "if (!managedExecution && managedBizRetryService.blocksThread(threadId))",
+    "resolveAgentStreamRequestChannel(`agent:stream:${threadId}`, streamRequestId)",
+    "a managed-decision rejection reports only to its request-scoped channel"
   )
   assert(
     !agentIpc.includes("abort: () => {\n      LocalSandbox.cancelBackgroundTasks(threadId)"),
@@ -648,7 +654,7 @@ function testClearOnEveryRunExit(): void {
   )
   assertIncludes(
     runtime,
-    "createCurrentRunMessageQueueMiddleware(currentRunMessageQueueOwnerToken)",
+    "createCurrentRunMessageQueueMiddleware(",
     "each middleware closure is bound to its physical run token"
   )
   assertOccurrences(
@@ -1456,7 +1462,10 @@ function testStreamTranscriptBuffersArePhysicalRunScoped(): void {
     `invoke, resume, and interrupt each have one completion hook: got ${completionHookIndexes.length}`
   )
   for (const [index, label] of ["invoke", "resume", "interrupt"].entries()) {
-    const body = agentIpc.slice(completionHookIndexes[index], completionHookIndexes[index] + 2600)
+    const failedOutcome = 'if (completionOutcome === "failed")'
+    const outcomeIndex = agentIpc.indexOf(failedOutcome, completionHookIndexes[index])
+    assert(outcomeIndex >= 0, `${label} handles the completion outcome`)
+    const body = agentIpc.slice(completionHookIndexes[index], outcomeIndex + failedOutcome.length)
     const fence =
       label === "invoke"
         ? "throwIfInvokeAborted()"
@@ -1916,8 +1925,8 @@ function testPumpGatedOnHistoryLoadingReadOnlyContextReminder(): void {
   // never accept one. Mirrors handleSubmit's own early-return guards.
   assertIncludes(
     chat,
-    "if (historyLoading || readOnly || contextReminderPending) return",
-    "auto-drain gated on historyLoading/readOnly/contextReminderPending"
+    "if (historyLoading || readOnly || contextReminderPending || bizRetryPending) return",
+    "auto-drain gated on historyLoading/readOnly/contextReminderPending and pending business decisions"
   )
 }
 

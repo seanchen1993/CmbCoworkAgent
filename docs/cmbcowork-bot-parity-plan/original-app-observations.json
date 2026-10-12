@@ -1,0 +1,113 @@
+{
+  "schema_version": 1,
+  "date": "2026-09-30",
+  "app_version": "0.57.1",
+  "platform_observed": "macOS",
+  "user_confirmed_connection": "official_client_direct_to_official_service",
+  "server_and_model_version_verified": false,
+  "document": "13-original-app-observations.md",
+  "samples": [
+    {
+      "id": "OB01",
+      "status": "observed",
+      "scope": "partial original behavior only"
+    },
+    {
+      "id": "OB02",
+      "status": "observed",
+      "scope": "partial original behavior only"
+    },
+    {
+      "id": "OB03",
+      "status": "observed",
+      "scope": "partial original behavior only"
+    },
+    {
+      "id": "OB04",
+      "status": "observed",
+      "scope": "partial original behavior only"
+    },
+    {
+      "id": "OB05",
+      "status": "observed",
+      "scope": "partial original behavior only"
+    },
+    {
+      "id": "OB06",
+      "status": "observed",
+      "scope": "partial original behavior only"
+    },
+    {
+      "id": "OB07",
+      "status": "observed",
+      "scope": "partial original behavior only"
+    },
+    {
+      "id": "OB08",
+      "status": "observed",
+      "scope": "partial original behavior only"
+    },
+    {
+      "id": "OB09",
+      "status": "observed",
+      "scope": "partial original behavior only"
+    },
+    {
+      "id": "OB10",
+      "status": "observed",
+      "scope": "partial original behavior only"
+    },
+    {
+      "id": "OB11",
+      "status": "observed_discrepancy",
+      "scope": "annual claim versus once-only UI; actual scheduler unverified"
+    },
+    {
+      "id": "OB12",
+      "status": "observed",
+      "scope": "edit prefill, weekly detail after navigation; stale open detail observed; no scheduled run"
+    },
+    {
+      "id": "OB13",
+      "status": "observed",
+      "scope": "pause button and paused list state; scheduler cancellation not fault-tested"
+    },
+    {
+      "id": "OB14",
+      "status": "observed_partial",
+      "scope": "Mac menus inspected; latest official Duplicate documented on iPhone; clone not performed"
+    }
+  ],
+  "created": {
+    "bots": 1,
+    "groups": 1,
+    "private_skills": [
+      "在 Chrome 打开网址"
+    ],
+    "routines": 1
+  },
+  "test_prompts_sent": 6,
+  "automatic_learning_prompts": 1,
+  "recordings_saved": 1,
+  "unsaved_recordings_cancelled": 1,
+  "settings_or_permissions_changed": false,
+  "external_business_data_submitted": false,
+  "complete_original_parity": false,
+  "cmb_tests_run": false,
+  "screenshots_exported": false,
+  "routines": [
+    {
+      "name": "复刻核验-每周空任务",
+      "created_as": "复刻核验-年度空任务",
+      "ui_schedule_after_edit": "每星期日 12:00",
+      "requested_timezone": "Asia/Shanghai",
+      "timezone_conversion_verified": false,
+      "final_ui_state": "paused",
+      "manual_test_run": false,
+      "scheduled_execution_verified": false
+    }
+  ],
+  "bots_duplicated": 0,
+  "user_confirmed_current_machine": "macOS",
+  "windows_runtime_verified": false
+}

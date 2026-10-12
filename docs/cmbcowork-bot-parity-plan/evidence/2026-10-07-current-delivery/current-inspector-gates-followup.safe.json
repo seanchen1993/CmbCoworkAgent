@@ -1,0 +1,41 @@
+{
+  "schemaVersion": 1,
+  "kind": "inspector-system-fold-gate-followup",
+  "observedAt": "2026-10-07T15:51:33.521196+00:00",
+  "correction": {
+    "previousEvidence": "current-inspector-and-system-fold-integration.safe.json",
+    "previousField": "workspaceLintAfterStableCallbackZeroWarnings",
+    "previousTrueNotSupported": true,
+    "actualPriorLint": "exit0 with one react-hooks/exhaustive-deps warning for bots fallback array",
+    "fix": "Memoize Bot collection by snapshot.bots, preserving existing selection authority checks."
+  },
+  "source": {
+    "path": "src/renderer/src/components/bots/BotWorkspace.tsx",
+    "bytes": 164075,
+    "sha256": "7b07e1ac69f9d6115176af851afe5a6c83e8dffd1596b8e95850cd7c3bb2ab60"
+  },
+  "gates": [
+    {
+      "path": "/tmp/cmb-inspector-stable-bots-lint.log",
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "exitCode": 0,
+      "warnings": 0
+    },
+    {
+      "path": "/tmp/cmb-inspector-stable-bots-web.log",
+      "bytes": 89,
+      "sha256": "aba1d996409180225c6f720bd909b367ee8681e710f7b8537e5a1d7f6d07f2ac",
+      "exitCode": 0
+    },
+    {
+      "path": "/tmp/cmb-inspector-system-fold-messages.log",
+      "bytes": 15386,
+      "sha256": "07e2f675a357db15a60fa0715f5a4c40f7f427d6804a39101b6729b0ee295875",
+      "exitCode": 0
+    }
+  ],
+  "actualUiNewSourceAccepted": false,
+  "actualUiSamplesRemainTiedToPriorBuiltRenderer": "BotWorkspace-DP71eTLy.js",
+  "pending": "Controlled navigation contracts and next source build; no added actual UI pass inferred from memoization."
+}

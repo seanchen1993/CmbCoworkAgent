@@ -1,7 +1,7 @@
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { afterEach, describe, expect, it } from "vitest"
+import { afterEach, describe, expect, it, vi } from "vitest"
 import {
   getHarnessStoreQueueSizeForTests,
   HarnessStoreLimitError,
@@ -26,18 +26,25 @@ describe("Harness async JSON store", () => {
   it("rejects a giant file from asynchronous metadata without allocating or parsing it", async () => {
     const path = await makeStorePath()
     await writeFile(path, Buffer.alloc(8 * 1024 * 1024, 0x20))
-    let ticks = 0
-    const ticker = setInterval(() => {
-      ticks += 1
-    }, 1)
+    // A metadata rejection can finish before a 1 ms timer fires. Assert the actual
+    // contract: no giant allocation and no JSON parsing, while the call yields.
+    const allocate = vi.spyOn(Buffer, "allocUnsafeSlow")
+    const parse = vi.spyOn(JSON, "parse")
+    let yielded = false
+    queueMicrotask(() => {
+      yielded = true
+    })
     try {
       await expect(readHarnessJsonFileBounded(path, 1024, "pressure store")).rejects.toBeInstanceOf(
         HarnessStoreLimitError
       )
+      expect(yielded).toBe(true)
+      expect(allocate.mock.calls.some(([size]) => size >= 8 * 1024 * 1024)).toBe(false)
+      expect(parse.mock.calls.some(([text]) => text.length >= 8 * 1024 * 1024)).toBe(false)
     } finally {
-      clearInterval(ticker)
+      allocate.mockRestore()
+      parse.mockRestore()
     }
-    expect(ticks).toBeGreaterThan(0)
   })
 
   it("keeps the caller loop responsive while parsing a near-limit valid store", async () => {

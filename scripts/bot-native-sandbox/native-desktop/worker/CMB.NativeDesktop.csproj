@@ -1,0 +1,50 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0-windows10.0.19041.0</TargetFramework>
+    <UseWindowsForms>true</UseWindowsForms>
+    <RestorePackagesWithLockFile>true</RestorePackagesWithLockFile>
+    <DebugType>embedded</DebugType>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <EnableNETAnalyzers>true</EnableNETAnalyzers><AnalysisMode>Recommended</AnalysisMode>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    <RuntimeIdentifier>win-x64</RuntimeIdentifier>
+    <SelfContained>true</SelfContained>
+    <PublishSingleFile>true</PublishSingleFile>
+    <IncludeNativeLibrariesForSelfExtract>false</IncludeNativeLibrariesForSelfExtract>
+    <PublishTrimmed>false</PublishTrimmed>
+    <AssemblyName>CMBDevClaw.NativeDesktop</AssemblyName>
+  </PropertyGroup>
+  <ItemGroup><ProjectReference Include="../vendor/WinApp.UIAutomation/WinApp.UIAutomation.csproj" /></ItemGroup>
+  <!-- Use the actual SDK-resolved package directories; never guess runtime versions.
+       Notices remain beside the managed bundle in the read-only installation. -->
+  <Target Name="CmbIncludeRuntimeNotices"
+          BeforeTargets="ComputeResolvedFilesToPublishList"
+          DependsOnTargets="ResolveRuntimePackAssets">
+    <ItemGroup>
+      <_CmbCoreRuntimePack Include="@(ResolvedRuntimePack)"
+                           Condition="'%(ResolvedRuntimePack.FrameworkName)' == 'Microsoft.NETCore.App'" />
+      <_CmbDesktopRuntimePack Include="@(ResolvedRuntimePack)"
+                              Condition="'%(ResolvedRuntimePack.FrameworkName)' == 'Microsoft.WindowsDesktop.App'" />
+      <_CmbRuntimeNotice Include="%(_CmbCoreRuntimePack.PackageDirectory)/LICENSE.TXT"
+                         TargetPath="DOTNET-RUNTIME-LICENSE.TXT" />
+      <_CmbRuntimeNotice Include="%(_CmbCoreRuntimePack.PackageDirectory)/THIRD-PARTY-NOTICES.TXT"
+                         TargetPath="DOTNET-RUNTIME-THIRD-PARTY-NOTICES.TXT" />
+      <_CmbRuntimeNotice Include="%(_CmbDesktopRuntimePack.PackageDirectory)/LICENSE"
+                         TargetPath="DOTNET-WINDOWSDESKTOP-LICENSE.TXT" />
+    </ItemGroup>
+    <Error Condition="'@(_CmbCoreRuntimePack)' == '' or '@(_CmbDesktopRuntimePack)' == ''"
+           Text="CMBDevClaw native desktop requires SDK-resolved Core and WindowsDesktop runtime packs." />
+    <Error Condition="!Exists('%(_CmbRuntimeNotice.Identity)')"
+           Text="Required runtime notice is missing: %(_CmbRuntimeNotice.Identity)" />
+    <ItemGroup>
+      <ResolvedFileToPublish Include="@(_CmbRuntimeNotice)">
+        <RelativePath>%(_CmbRuntimeNotice.TargetPath)</RelativePath>
+        <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
+        <ExcludeFromSingleFile>true</ExcludeFromSingleFile>
+      </ResolvedFileToPublish>
+    </ItemGroup>
+  </Target>
+</Project>

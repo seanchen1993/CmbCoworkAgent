@@ -30,11 +30,8 @@ import {
   type HookScopeController,
   type ScopeSkipCallback
 } from "../hooks/scope"
-import type { HookConfig, HookEvent, HookResult } from "../hooks/types"
-import {
-  applyPromptRewritePreservingGoalMarker,
-  buildInternalGoalPromptFromHookResult
-} from "./goals/internal-prompt"
+import type { HookConfig, HookEvent } from "../hooks/types"
+import { prepareUserPromptCore, type PreparedUserPrompt } from "./prompt-preparation"
 import { buildOrderedChain } from "./failover"
 import { activateSkillLifecycle, formatSkillHookContext } from "./skill-lifecycle/activation"
 import { parseSkillUseBlock, type ParsedSkillUseBlock } from "./skill-lifecycle/marker"
@@ -336,28 +333,7 @@ interface ExplicitSkillActivation {
   reason?: string
 }
 
-export type PreparedUserPrompt =
-  | {
-      accepted: true
-      content: string
-      explicitSkillHookContext?: string
-    }
-  | {
-      accepted: false
-      blockedBy: "explicit_skill"
-      reason: string
-    }
-  | {
-      accepted: false
-      blockedBy: "user_prompt_submit"
-      reason: string
-      hookResult: HookResult
-    }
-  | {
-      accepted: false
-      blockedBy: "run_not_ready"
-      reason: string
-    }
+export type { PreparedUserPrompt } from "./prompt-preparation"
 
 function normalizeSkillPathKey(input: string): string {
   return normalizePathKey(resolve(input))
@@ -545,7 +521,6 @@ export async function prepareStandardUserPrompt({
   onSystemMessage?: (message: string) => void
   isPreparationCurrent?: () => boolean
 }): Promise<PreparedUserPrompt> {
-  let preparedMessage = initialModelInput
   const trustedExplicitSkillBlock = trustedExplicitSkill
     ? formatTrustedSkillUseBlock(trustedExplicitSkill)
     : undefined
@@ -563,124 +538,53 @@ export async function prepareStandardUserPrompt({
     boundPluginId: harnessAgentContext.pluginId,
     boundPluginName: harnessAgentContext.pluginName
   }
-  const explicitSkillActivation = await activateExplicitSkillFromMessage({
-    message: explicitSkillActivationMessage,
-    workspacePath,
-    pluginOutputDir: harnessAgentContext.pluginOutputDir,
-    systemId: harnessAgentContext.systemId,
-    ...getHarnessHookContext(harnessAgentContext),
-    sessionId: threadId,
-    turnId: turnState.turnId,
-    hookScope: turnState.hookScope,
-    firedSkillKeys: turnState.skillHookKeys,
-    skillUseTracker: turnState.skillUseTracker,
-    onHookResult,
-    onHookSkippedFactory,
-    skillVisibility
+  return prepareUserPromptCore({
+    rawMessage,
+    initialModelInput,
+    isPreparationCurrent,
+    onSystemMessage,
+    onExplicitSkillActivated,
+    activateExplicitSkill: () =>
+      activateExplicitSkillFromMessage({
+        message: explicitSkillActivationMessage,
+        workspacePath,
+        pluginOutputDir: harnessAgentContext.pluginOutputDir,
+        systemId: harnessAgentContext.systemId,
+        ...getHarnessHookContext(harnessAgentContext),
+        sessionId: threadId,
+        turnId: turnState.turnId,
+        hookScope: turnState.hookScope,
+        firedSkillKeys: turnState.skillHookKeys,
+        skillUseTracker: turnState.skillUseTracker,
+        onHookResult,
+        onHookSkippedFactory,
+        skillVisibility
+      }),
+    submit: (hookVisibleMessage) => {
+      const context: HookContext = {
+        toolArgs: { message: hookVisibleMessage, rawMessage },
+        userPrompt: hookVisibleMessage,
+        workspacePath,
+        sessionId: threadId,
+        turnId: turnState.turnId,
+        pluginOutputDir: harnessAgentContext.pluginOutputDir,
+        systemId: harnessAgentContext.systemId,
+        ...getHarnessHookContext(harnessAgentContext)
+      }
+      return runHooksEnriched(
+        resolveEnabledHooksForRun(
+          workspacePath,
+          "UserPromptSubmit",
+          context,
+          turnState.hookScope,
+          onHookSkippedFactory("UserPromptSubmit")
+        ),
+        "UserPromptSubmit",
+        context,
+        onHookResult
+      )
+    }
   })
-  if (isPreparationCurrent && !isPreparationCurrent()) {
-    return {
-      accepted: false,
-      blockedBy: "run_not_ready",
-      reason: "当前运行已结束或被替换"
-    }
-  }
-  if (explicitSkillActivation?.blocked) {
-    return {
-      accepted: false,
-      blockedBy: "explicit_skill",
-      reason: explicitSkillActivation.reason || "显式选择的技能被 Hook 拦截"
-    }
-  }
-  const isInternalGoalModelInput =
-    initialModelInput.startsWith("[Starting active goal]") ||
-    initialModelInput.startsWith("[Continuing active goal]")
-  const hookVisibleMessage = isInternalGoalModelInput ? initialModelInput : rawMessage
-  const promptSubmitContext: HookContext = {
-    toolArgs: { message: hookVisibleMessage, rawMessage },
-    userPrompt: hookVisibleMessage,
-    workspacePath,
-    sessionId: threadId,
-    turnId: turnState.turnId,
-    pluginOutputDir: harnessAgentContext.pluginOutputDir,
-    systemId: harnessAgentContext.systemId,
-    ...getHarnessHookContext(harnessAgentContext)
-  }
-  const promptSubmitResult = await runHooksEnriched(
-    resolveEnabledHooksForRun(
-      workspacePath,
-      "UserPromptSubmit",
-      promptSubmitContext,
-      turnState.hookScope,
-      onHookSkippedFactory("UserPromptSubmit")
-    ),
-    "UserPromptSubmit",
-    promptSubmitContext,
-    onHookResult
-  )
-  if (isPreparationCurrent && !isPreparationCurrent()) {
-    return {
-      accepted: false,
-      blockedBy: "run_not_ready",
-      reason: "当前运行已结束或被替换"
-    }
-  }
-  if (promptSubmitResult?.blocked || promptSubmitResult?.continue === false) {
-    return {
-      accepted: false,
-      blockedBy: "user_prompt_submit",
-      reason:
-        promptSubmitResult.stopReason ||
-        promptSubmitResult.reason ||
-        promptSubmitResult.stderr ||
-        promptSubmitResult.stdout ||
-        "消息被 Hook 策略拦截",
-      hookResult: promptSubmitResult
-    }
-  }
-
-  const updatedMessage =
-    promptSubmitResult?.updatedInput?.message ??
-    promptSubmitResult?.updatedInput?.prompt ??
-    promptSubmitResult?.updatedInput?.userPrompt
-  if (isInternalGoalModelInput) {
-    preparedMessage = buildInternalGoalPromptFromHookResult(initialModelInput, {
-      updatedInput: promptSubmitResult?.updatedInput,
-      additionalContexts: [
-        explicitSkillActivation?.hookContext,
-        promptSubmitResult?.additionalContext
-      ]
-    })
-  } else if (typeof updatedMessage === "string" && updatedMessage.length > 0) {
-    preparedMessage = applyPromptRewritePreservingGoalMarker(initialModelInput, updatedMessage)
-  }
-  if (
-    !isInternalGoalModelInput &&
-    explicitSkillActivation?.parsed &&
-    !parseSkillUseBlock(preparedMessage)
-  ) {
-    preparedMessage = [preparedMessage.trimEnd(), explicitSkillActivation.parsed.block]
-      .filter(Boolean)
-      .join("\n\n")
-  }
-  const promptContextBlocks = [
-    explicitSkillActivation?.hookContext,
-    promptSubmitResult?.additionalContext
-  ].filter((item): item is string => Boolean(item?.trim()))
-  if (!isInternalGoalModelInput && promptContextBlocks.length > 0) {
-    preparedMessage = `${promptContextBlocks.join("\n\n")}\n\n${preparedMessage}`
-  }
-  if (promptSubmitResult?.systemMessage) {
-    onSystemMessage?.(promptSubmitResult.systemMessage)
-  }
-  if (explicitSkillActivation?.skill) {
-    onExplicitSkillActivated?.(explicitSkillActivation.skill)
-  }
-  return {
-    accepted: true,
-    content: preparedMessage,
-    explicitSkillHookContext: explicitSkillActivation?.hookContext
-  }
 }
 
 export interface StandardTurnRoutingInput {

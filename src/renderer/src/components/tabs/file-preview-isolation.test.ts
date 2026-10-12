@@ -51,9 +51,9 @@ const htmlSrcDoc = readFileSync(new URL("../../lib/html-srcdoc.ts", import.meta.
 const agentRuntime = readFileSync(
   new URL("../../../../main/agent/runtime.ts", import.meta.url),
   "utf8"
-)
+) + readFileSync(new URL("../../../../main/agent/deep-agent-core.ts", import.meta.url), "utf8")
 const localSandbox = readFileSync(
-  new URL("../../../../main/agent/local-sandbox.ts", import.meta.url),
+  new URL("../../../../main/agent/local-sandbox-core.ts", import.meta.url),
   "utf8"
 )
 const mediaProtocol = readFileSync(
@@ -182,9 +182,12 @@ describe("persisted active file preview isolation", () => {
     expect(rightPanel).toContain("disabled={!canRevealInFolder}")
     expect(rightPanel).toContain('data-testid="resource-preview-reveal"')
     expect(agentRuntime).toContain("createTrustedToolFilePreviewContextMiddleware(threadId)")
-    expect(localSandbox).toContain('recordTrustedToolFilePreviewSource(resolvedPath, "read")')
-    expect(localSandbox).toContain('recordTrustedToolFilePreviewSource(resolvedPath, "write")')
-    expect(localSandbox).toContain('recordTrustedToolFilePreviewSource(resolvedPath, "edit")')
+    const desktopSandbox = readFileSync(new URL("../../../../main/agent/local-sandbox.ts", import.meta.url), "utf8")
+    expect(desktopSandbox).toContain('from "../services/trusted-tool-file-preview"')
+    expect(desktopSandbox).toContain("  recordTrustedToolFilePreviewSource")
+    expect(localSandbox).toContain('recordTrustedToolFilePreviewSource?.(resolvedPath, "read")')
+    expect(localSandbox).toContain('recordTrustedToolFilePreviewSource?.(resolvedPath, "write")')
+    expect(localSandbox).toContain('recordTrustedToolFilePreviewSource?.(resolvedPath, "edit")')
     for (const removedChannel of [
       "workspace:requestExternalFileRead",
       "workspace:readExternalFile",

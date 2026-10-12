@@ -310,14 +310,22 @@ export type WorkflowSubagentRunner = (request: {
    * (cache-hit + live-miss); callIndex distinguishes same-prompt (same-callHash) instances. A
    * cached agent uses its ORIGINAL callIndex (from the journal) so it still reads its OWN stream. */
   toolStreamKey: string
+  /** Stable content occurrence, independent of concurrent completion order.
+   * Present only when the embedding host enables durable child receipts. */
+  durableCallKey?: string
   label: string
   phase: string | null
   signal: AbortSignal
+  /** Resolved registry role name for lifecycle matching (not the display label). */
+  agentType?: string
   /** Role prompt resolved from the call's agentType (undefined = default agent). */
   roleSystemPrompt?: string
   /** agentType-resolved tool denylist (project tool names, undefined = none). */
   disallowedTools?: string[]
   /** agentType-resolved shell policy (undefined = full). */
+  browserAccess?: "page"
+  /** Resolved trusted role capability; not a public workflow option. */
+  desktopAccess?: "shared-native"
   shellAccess?: AgentShellAccess
   /** When "worktree", the runner MUST run this agent in a private git worktree and
    * MUST fail the call if it cannot — degrading to the shared workspace would give
@@ -399,6 +407,7 @@ export type WorkflowProgressEmitter = (event: WorkflowProgressEvent) => void
  */
 export interface WorkflowJournalEntry {
   index: number
+  durableCallKey?: string
   /**
    * sha256 of the call identity: child + prompt + schema + resolved model +
    * agentType/profile. Phase and label are intentionally EXCLUDED (they don't

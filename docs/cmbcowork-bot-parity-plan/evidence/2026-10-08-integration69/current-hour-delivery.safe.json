@@ -1,0 +1,208 @@
+{
+  "kind": "hour-delivery-packaging-and-regression",
+  "recordedAt": "2026-10-10T13:18:40.805748+00:00",
+  "coreParityComplete": false,
+  "productionReleaseApproved": false,
+  "initialMacPackage": {
+    "outputIdentity": "b1f8e59c8ea58f41813a2667",
+    "dmgBytes": 372855498,
+    "dmgSha256": "ac4c75ca849409c67924651831ad6392e1de594abb309960d5e89b72f5d6001c",
+    "codesignDeepStrictVerified": true,
+    "dmgVerified": true,
+    "signature": "ad-hoc",
+    "notarized": false,
+    "actualStartup": "Normal Zhaohu authentication page after user handled Keychain confirmation",
+    "authBypass": false,
+    "packagedNativeCanvasAndPtyPassed": true,
+    "packagedHostRecoveryCasesPassed": 4,
+    "realModelInsideProductionPackageTested": false
+  },
+  "service": {
+    "runtime": "Node v22.23.3 darwin arm64",
+    "checksPassed": 6,
+    "entries": 17,
+    "externalModelAcceptance": false,
+    "nativeSandboxAcceptance": false,
+    "k8sAcceptance": false
+  },
+  "currentSource": {
+    "compiledOutput": "3c775f87780ce43f5652d86c",
+    "compiledOutputSha256": "3c775f87780ce43f5652d86c5bf150741a8a2b378067c5c426e4046bbf2c1cf8",
+    "manifest": "delivery-compiled-output-manifest.safe.json",
+    "peerExchangeSameRevisionReadCoalesced": true,
+    "peerExchangeOldEpochSelectionRetired": true,
+    "replacementMacPackage": "Built; native authentication startup, signatures, DMG integrity, package runtime and 4 Host recovery checks passed"
+  },
+  "browserRegression": {
+    "previous186CaseRun": {
+      "passed": 183,
+      "failed": 3
+    },
+    "originalFailuresRetained": true,
+    "assetImportFixtureFixed": true,
+    "directionalPeerSelectorsUpdated": true,
+    "heldFrameTestReplacesBoundarySensitiveTimerCount": true,
+    "targetedNewRegression": {
+      "caseAssertionsPassed": 10,
+      "filesPassed": 1,
+      "filesFailed": 1,
+      "failure": "Playwright browser close hook exceeded 10 seconds; all ten assertions passed. Not recorded as suite pass."
+    },
+    "completeRerun": {
+      "assertionsPassed": 186,
+      "assertionsFailed": 0,
+      "filesPassed": 26,
+      "filesFailed": 1,
+      "gatePassed": false,
+      "remainingFailure": "peer-dispatch browser.close afterAll exceeded 10 seconds"
+    },
+    "isolatedPeerShutdownRetest": {
+      "passed": 2,
+      "filesPassed": 1,
+      "browserExitCode": 0,
+      "gracefulCloseMs": 1177,
+      "temporaryDirectoriesRemoved": true,
+      "intermittentFullRunIssueDeclaredFixed": false
+    },
+    "standaloneStages": {
+      "completedBeforeTeachFailure": 4,
+      "completedAfterTeachStage": 8,
+      "teachRetestPassedCases": 9,
+      "profileEpochRetestPassed": false,
+      "profileEpochRetestFailure": "Group save acknowledged-state notice did not hide after retry, test line 685; cause unresolved",
+      "remainingStagesNotRun": true
+    },
+    "teachNavigationReadiness": {
+      "originalFailure": "Test chose take/release before new Bot initial frame arrived; no computerTake call was dispatched.",
+      "fix": "Wait for actual enabled control before choosing release versus take.",
+      "passed": 9,
+      "originalFailureRetained": true,
+      "productAuthorityAssertionsPreserved": true
+    },
+    "profileCreationFixtureUpdated": "Actual BotQuickCreateFeedback creation consent mounted and clicked; prior missing-review fixture failure resolved, later group receipt failure retained"
+  },
+  "limits": [
+    "Windows independent general native desktop physical input / IME / Raw Input implementation and machine acceptance incomplete",
+    "Full Grok core journeys and overall UI acceptance incomplete",
+    "PDF real-model download latency acceptance incomplete",
+    "Linux and Kubernetes platform acceptance incomplete"
+  ],
+  "logFingerprints": [
+    {
+      "path": "/tmp/cmb-packaged-complete-20261010.log",
+      "bytes": 1767,
+      "sha256": "d2d99107e98299be46a4d0ae30133070f22cc2cc67ed5d82ed826071905b9aae"
+    },
+    {
+      "path": "/tmp/cmb-final-standalone-service-20261010.log",
+      "bytes": 519,
+      "sha256": "d2627f96f717bd47dbc35d9cc624b868cc44d747e6c8e2ea224ebdae4c48e505"
+    },
+    {
+      "path": "/tmp/cmb-delivery-final2-build-20261010.log",
+      "bytes": 73233,
+      "sha256": "99240de262a6aac9c8b9c5b12b64508150effdbfd35a8289df34c507f94c25bf"
+    },
+    {
+      "path": "/tmp/cmb-peer-revision-fixed-20261010.log",
+      "bytes": 2475,
+      "sha256": "a08a9737d49bd0774a1a8d9d761a6ff8a4627016ce6ddddf16bca985a5be32af"
+    },
+    {
+      "path": "/tmp/cmb-final-browser-gate-current-20261010.log",
+      "bytes": 501750,
+      "sha256": "6934e3010aa2dc765aa721c1c0dadc54a72d4140bd3d10198e977355503e2d1c"
+    },
+    {
+      "path": "/tmp/cmb-final-three-fixed-20261010.log",
+      "bytes": 4382,
+      "sha256": "974e0e207b257934b2950af9ce558287d58ec36af81dc4990378296c9393920a"
+    },
+    {
+      "path": "/tmp/cmb-delivery-final2-package-20261010.log",
+      "bytes": 15073,
+      "sha256": "07808f08612efc08e7d0f62d22b8385c9997187a1a929cec97765876c696369b"
+    },
+    {
+      "path": "/tmp/cmb-delivery-final2-packaged-host-20261010.log",
+      "bytes": 1750,
+      "sha256": "66c89a23286f2226d829505f51a4dce9c480628dc0673b6c97d7ffffeea1a201"
+    },
+    {
+      "path": "/tmp/cmb-delivery-final2-signature-20261010.log",
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "path": "/tmp/cmb-delivery-final2-dmg-20261010.log",
+      "bytes": 466,
+      "sha256": "f516fb3f729861bc39e6c5c58cfaeab3266a90c641993456a4e9b9f7242a2b24"
+    },
+    {
+      "path": "/tmp/cmb-delivery-final2-dmg-verify-20261010.log",
+      "bytes": 1295,
+      "sha256": "5f79fde7e35b77654dfdbf6f56c8c57dc9f85d08996feafee8580b1e9d2611ce"
+    },
+    {
+      "path": "/tmp/cmb-delivery-final2-web-types-20261010.log",
+      "bytes": 89,
+      "sha256": "aba1d996409180225c6f720bd909b367ee8681e710f7b8537e5a1d7f6d07f2ac"
+    },
+    {
+      "path": "/tmp/cmb-delivery-final2-lint-20261010.log",
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "path": "/tmp/cmb-delivery-final2-messages-20261010.log",
+      "bytes": 15386,
+      "sha256": "07e2f675a357db15a60fa0715f5a4c40f7f427d6804a39101b6729b0ee295875"
+    },
+    {
+      "path": "/tmp/cmb-final-browser-gate-epoch-fixed-20261010.log",
+      "bytes": 497185,
+      "sha256": "59c653950f04762d7d77b651d937abfb38fe77d5c03abccb6cba7784eed7fe5b"
+    },
+    {
+      "path": "/tmp/cmb-peer-shutdown-trace-20261010.log",
+      "bytes": 7904,
+      "sha256": "910a69bcddbf3ada6a63feb7dac46265c06a9945b0943a0989ecb94939524a23"
+    },
+    {
+      "path": "/tmp/cmb-browser-standalone-stages-20261010.log",
+      "bytes": 4516,
+      "sha256": "13109625951148808a9ed0f05ac17946144d1c78483e224cf772fee395aa2cc5"
+    },
+    {
+      "path": "/tmp/cmb-teach-navigation-ready-20261010.log",
+      "bytes": 1208,
+      "sha256": "2ae9619015271cf9af950e8739884069293955539386fca4257adbc0cc9469c3"
+    },
+    {
+      "path": "/tmp/cmb-browser-remaining-stages-20261010.log",
+      "bytes": 10817,
+      "sha256": "bec77038c26af39956a88426913d303ded731f075529892f22f19d0cad7d3dc6"
+    },
+    {
+      "path": "/tmp/cmb-profile-epoch-review-retest-20261010.log",
+      "bytes": 1431,
+      "sha256": "5894f5bc7fec2c425c8f593081d427a64524f69b51149618675da10d178ea914"
+    }
+  ],
+  "replacementMacPackage": {
+    "kind": "replacement-mac-dmg",
+    "path": "/Users/chenqiang/Desktop/CMBDevClaw-delivery-20261010/CMBDevClaw-1.5.3-arm64.dmg",
+    "bytes": 372859218,
+    "sha256": "71b42bb5cb7af70d40721e615fe06aaa6cffdb83c4a8c2db314f8baaa063b0a8",
+    "compiledOutputManifestIdentity": "3c775f87780ce43f5652d86c",
+    "compiledOutputManifestSha256": "3c775f87780ce43f5652d86c5bf150741a8a2b378067c5c426e4046bbf2c1cf8",
+    "hostSha256": "a2b2c9ab4611bbe997e4a8cf80778a9b5dc0b119ba6a1915556436ed473674b1",
+    "codesignDeepStrictPassed": true,
+    "actualNativeStartup": "Zhaohu authentication page",
+    "authBypass": false,
+    "packagedHostChecksPassed": 4,
+    "packagedCanvasAndPtyPassed": true,
+    "realModelInProductionPackageTested": false,
+    "dmgVerified": true
+  }
+}

@@ -1,0 +1,178 @@
+{
+  "recordedAt": "2026-10-10T00:36:19.770144+00:00",
+  "kind": "formal-93cc-historical-group-result-and-c50d-cold",
+  "formalFailedBuild": "93cc0fc93ce52d302b4feed4",
+  "formalFailedSchema": 70,
+  "conversationId": "221b4a41-095a-4836-b7df-954a50e18798",
+  "cycleId": "1caebd2f-d4f4-4225-bd8d-0136629fc218",
+  "cycleStatus": "completed",
+  "wholeScenarioPassed": false,
+  "publicCalculationAndVerificationCorrect": true,
+  "publicReplyCount": 2,
+  "publicMessages": [
+    {
+      "id": "21a47328-b348-49d4-9a0e-6bb8b326832f",
+      "bot_id": "924e1689-7b6d-411c-a429-28decb91b179",
+      "text": "独立计算：17+25 = 42。",
+      "run_id": "963ceea0-0f90-42ce-a71a-bf4b2b6f66ef"
+    },
+    {
+      "id": "76d8b1fc-afd1-4661-8f80-81c0d53565a3",
+      "bot_id": "e1d81813-1ff0-4fca-9948-d966e1a77189",
+      "text": "核对：17+25 = 42，与独立计算结果一致，正确。",
+      "run_id": "15b15841-e8ed-4325-affb-93c8197dea9a"
+    }
+  ],
+  "runs": [
+    {
+      "id": "1020ed34-1d99-42e8-95aa-8ae54733cb0f",
+      "bot_id": "4002cdce-8149-4dfc-9c4b-28abd67d30c1",
+      "status": "failed",
+      "error": "群聊回复尚未发布，已保留执行记录，请重试或接手处理。",
+      "sent_count": 0,
+      "modelRequests": 4,
+      "unknownUsage": 0,
+      "outputTokens": 212
+    },
+    {
+      "id": "963ceea0-0f90-42ce-a71a-bf4b2b6f66ef",
+      "bot_id": "924e1689-7b6d-411c-a429-28decb91b179",
+      "status": "succeeded",
+      "error": null,
+      "sent_count": 1,
+      "modelRequests": 2,
+      "unknownUsage": 0,
+      "outputTokens": 74
+    },
+    {
+      "id": "15b15841-e8ed-4325-affb-93c8197dea9a",
+      "bot_id": "e1d81813-1ff0-4fca-9948-d966e1a77189",
+      "status": "succeeded",
+      "error": null,
+      "sent_count": 1,
+      "modelRequests": 4,
+      "unknownUsage": 0,
+      "outputTokens": 235
+    },
+    {
+      "id": "a39b4e42-c737-47b1-bf03-834fc0f59500",
+      "bot_id": "924e1689-7b6d-411c-a429-28decb91b179",
+      "status": "succeeded",
+      "error": null,
+      "sent_count": 0,
+      "modelRequests": 3,
+      "unknownUsage": 0,
+      "outputTokens": 159
+    },
+    {
+      "id": "d249675f-11aa-41cb-ab80-36e1ff3a3cb8",
+      "bot_id": "e1d81813-1ff0-4fca-9948-d966e1a77189",
+      "status": "succeeded",
+      "error": null,
+      "sent_count": 0,
+      "modelRequests": 3,
+      "unknownUsage": 0,
+      "outputTokens": 297
+    },
+    {
+      "id": "3f9c1a3a-b300-43ab-8b64-b5b81ed7be68",
+      "bot_id": "4002cdce-8149-4dfc-9c4b-28abd67d30c1",
+      "status": "succeeded",
+      "error": null,
+      "sent_count": 0,
+      "modelRequests": 2,
+      "unknownUsage": 0,
+      "outputTokens": 413
+    }
+  ],
+  "modelRequests": 18,
+  "unknownUsage": 0,
+  "failureWasNotSilentlyDropped": true,
+  "newBuild": {
+    "version": 1,
+    "pid": 43117,
+    "hostId": "699af657-06b7-4dd3-ab3a-d103621154da",
+    "buildId": "c50d453abbe890e3773db0a4",
+    "socketPath": "/private/tmp/cmb-bot-501-4b987f56222e7e971f75407b/rpc.sock"
+  },
+  "newSchema": 71,
+  "coldPreservation": {
+    "receipt": "/Users/chenqiang/Library/Application Support/CMBDevClaw-development/2026-10-08/presentation/cold-upgrade-plan/member-order-cold-preservation-1791592535887876000.safe.json",
+    "selectedRuns": 83,
+    "checkpointPayloadBytesHashed": 12935228,
+    "logicalGroupsEqual": {
+      "runs": true,
+      "effects": true,
+      "interactions": true,
+      "artifacts": true,
+      "artifactObjects": true,
+      "peerDispatch": true,
+      "peerWaits": true,
+      "checkpoints": true,
+      "skills": true,
+      "project": true
+    },
+    "extraTablesEqual": {
+      "bot_memories": true,
+      "bot_memory_metadata": true,
+      "bot_model_usage": true,
+      "bot_group_cycles": true,
+      "bot_group_runs": true
+    },
+    "legacyMemberOrderEqual": true,
+    "migrationBackupNames": [
+      "bots-v70-1791592528746-1fca09b6-a87c-4bd8-bb30-14774eff8c3e.sqlite"
+    ],
+    "modelNormalizedFingerprintMatched": true
+  },
+  "changes": [
+    "Persist selected group member order; migrate old groups without changing visible or in-flight order",
+    "Supply room delivery persona after general reply guidance"
+  ],
+  "newRealModelRetestPending": true,
+  "coreParityComplete": false,
+  "sourceGates": {
+    "owning88": {
+      "path": "/tmp/cmb-member-order-owning-final-20261010.log",
+      "bytes": 2505,
+      "sha256": "d59bb210111c24176a55e39d1ba3feb5a8deebf2238e27ce942b9368de8d768c",
+      "exitCode": 0
+    },
+    "SDK11": {
+      "path": "/tmp/cmb-member-order-sdk-retest-20261010.log",
+      "bytes": 135424,
+      "sha256": "109e7cc7d3dbd7df06de1480f3d13c6a8d5246f53c44f8ac9afcba4842320d9b",
+      "exitCode": 0
+    },
+    "workflow96": {
+      "path": "/tmp/cmb-member-order-workflow-20261010.log",
+      "bytes": 5128,
+      "sha256": "26e19744102b3d80135727ddabe281ea8ec5be4b5204b43eb971049a5ceb2c60",
+      "exitCode": 0
+    },
+    "node": {
+      "path": "/tmp/cmb-member-order-node-final-20261010.log",
+      "bytes": 91,
+      "sha256": "546c7bfd36ecac14793f941add6251c16a729819d1b744cccbaf256a91e1b42c",
+      "exitCode": 0
+    },
+    "lint": {
+      "path": "/tmp/cmb-member-order-lint-20261010.log",
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "exitCode": 0
+    },
+    "format": {
+      "path": "/tmp/cmb-member-order-format-20261010.log",
+      "bytes": 66,
+      "sha256": "17aa973d3f004560237d9a95171210b0671deff23d61628eecf7322ff5938f20",
+      "exitCode": 0
+    },
+    "build": {
+      "path": "/tmp/cmb-member-order-build-20261010.log",
+      "bytes": 56264,
+      "sha256": "93fce5dc4f76fe81357d0e82d0850c0f4240abef2f955d06992704021e378b5c",
+      "exitCode": 0
+    }
+  }
+}

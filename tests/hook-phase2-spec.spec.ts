@@ -157,6 +157,10 @@ assertEqual(fetchStatusDetail.reason, "upstream proxy failed", "P12g-3 raw body 
 assertEqual(detectToolFailure("read_file", null), null, "P12h null result → no signal")
 assertEqual(detectToolFailure("read_file", undefined), null, "P12i undefined result → no signal")
 assertEqual(detectToolFailure("read_file", { success: true }), null, "P12j success:true → no signal")
+assertEqual(detectToolFailure("execute", '{"exitCode":0}'), null, "successful JSON receipt is not a failure")
+assertEqual(detectToolFailure("execute", 'prose {"exitCode":7}'), null, "prose is not a JSON receipt")
+assertEqual(detectToolFailure("execute", '{"exitCode":'), null, "partial JSON is not a completed receipt")
+assertEqual(detectToolFailure("execute", '{"exitCode":7}')?.kind, "exit-nonzero", "JSON command receipt preserves failure")
 assert(
   detectToolFailure("execute", { success: false, error: "boom" })?.kind === "explicit-error",
   "P12k success:false + error → explicit-error"

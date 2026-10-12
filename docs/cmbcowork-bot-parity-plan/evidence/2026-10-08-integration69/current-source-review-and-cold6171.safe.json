@@ -1,0 +1,179 @@
+{
+  "kind": "current-source-review-repair-and-cold-start",
+  "recordedAt": "2026-10-09T06:18:30.310165+00:00",
+  "live": {
+    "version": 1,
+    "pid": 26015,
+    "hostId": "9c1ef50c-ca3b-4ff8-8f84-3ffbc5c2c637",
+    "buildId": "6171b42a6dccbaaaab703336",
+    "socketPath": "/private/tmp/cmb-bot-501-4b987f56222e7e971f75407b/rpc.sock"
+  },
+  "schema": 69,
+  "coreParityComplete": false,
+  "sourceChanges": [
+    "Reuse original Grok delimited-table lexer for bounded lossless named fields; raw sources remain complete",
+    "Evidence review follows task model reasoning purpose, unchanged configured model snapshot parameters",
+    "Strict scalar verdict wire envelope; canonical durable findings remain an array, no flattening or automatic retry",
+    "Closed validation labels only; no provider bodies or reasoning persisted as diagnostics",
+    "Review individual action effects rather than requiring each input key to prove the entire task"
+  ],
+  "tests": {
+    "nearestFiles": 6,
+    "nearestPassed": 177,
+    "finalPromptTestsExit": 0,
+    "nodeExit": 0,
+    "strictLintExit": 0,
+    "productionBuildExit": 0
+  },
+  "logs": {
+    "nearest177": {
+      "path": "/tmp/cmb-scalar-verdict-near-tests-20261009.log",
+      "bytes": 1316,
+      "sha256": "b23393b7b1cbbb91e21c97eaaabccd6cdc95b7a52238aec3b35586dcc8261779"
+    },
+    "node": {
+      "path": "/tmp/cmb-scalar-verdict-node-20261009.log",
+      "bytes": 91,
+      "sha256": "546c7bfd36ecac14793f941add6251c16a729819d1b744cccbaf256a91e1b42c"
+    },
+    "lint": {
+      "path": "/tmp/cmb-scalar-verdict-lint-20261009.log",
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "finalPromptLint": {
+      "path": "/tmp/cmb-scalar-concise-final-lint-20261009.log",
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "finalPromptTests": {
+      "path": "/tmp/cmb-scalar-concise-prompt-tests-20261009.log",
+      "bytes": 488,
+      "sha256": "5f1a645cb49330b30d8f15b514b6f4f3de576208ac6cc10a445e78c9fa99e68e"
+    },
+    "format": {
+      "path": "/tmp/cmb-scalar-verdict-format-check-20261009.log",
+      "bytes": 66,
+      "sha256": "17aa973d3f004560237d9a95171210b0671deff23d61628eecf7322ff5938f20"
+    },
+    "build": {
+      "path": "/tmp/cmb-scalar-concise-production-build-20261009.log",
+      "bytes": 56263,
+      "sha256": "15e463904bb9239e52dc9f3ebb062b9641d78d3f729596bae69e57773edbb575"
+    },
+    "earlierDiagnosticExpectationFailure": {
+      "path": "/tmp/cmb-evidence-reasoning-final-near-tests-20261009.log",
+      "bytes": 12809,
+      "sha256": "9385e391854b12c09639e5ff9792e111aef1d27f9a470c2a589b73a8c0bd0ef1"
+    }
+  },
+  "probes": [
+    {
+      "stage": "v6-named-table",
+      "evidence": "current-review-probe-d9WC0I.safe.json",
+      "sha256": "fdb504f34561247061809bb555bd9f71fedfc91f13c62da028f748866bbf40d5",
+      "decisions": ["uncertain", "pass"],
+      "appAcceptance": false
+    },
+    {
+      "stage": "v7-task-model",
+      "evidence": "current-review-probe-SLlaxv.safe.json",
+      "sha256": "3996a0223a102b81e9386e9c95a171f00c3611cd2ad06117f62e6aa6cfb33ed8",
+      "decisions": ["uncertain", "revise"],
+      "appAcceptance": false
+    },
+    {
+      "stage": "v7-concise-array",
+      "evidence": "current-review-probe-4j0Fw8.safe.json",
+      "sha256": "81a0ced54285fedf9ac0abb2a95ecda38e2eb88cfcfc9384d1fd61bbe6800ce0",
+      "decisions": ["pass", "uncertain"],
+      "appAcceptance": false
+    },
+    {
+      "stage": "v7-array-shape",
+      "evidence": "current-review-probe-VqJCuN.safe.json",
+      "sha256": "73a0675ca2ccb39684260e26461cfc992f9e1095b7c98ae5ea35e3f3759f2a68",
+      "decisions": ["pass", "uncertain"],
+      "appAcceptance": false
+    },
+    {
+      "stage": "v8-scalar-first",
+      "evidence": "current-review-probe-ScWez1.safe.json",
+      "sha256": "31c672dc7382350694aea21de787e0ed9f722cf6623c3db8d4437be2b40915a5",
+      "decisions": ["uncertain", "uncertain"],
+      "appAcceptance": false
+    },
+    {
+      "stage": "v8-scalar-repeat",
+      "evidence": "current-review-probe-Wn5bOs.safe.json",
+      "sha256": "ed569890eaf4031b4108b52af79a5a262d4f2458849ba62067dfe2156aa7f3c6",
+      "decisions": ["revise", "revise"],
+      "appAcceptance": false
+    },
+    {
+      "stage": "v8-concise-source-review",
+      "evidence": "current-review-probe-E2rPBA.safe.json",
+      "sha256": "f3e52d736ed40a5b778761c2b05e8a621da18342fb0ba87458855011f75c0231",
+      "decisions": ["pass", "revise"],
+      "appAcceptance": false
+    }
+  ],
+  "probeLimitations": [
+    "First scalar probe timed out and rejected an empty raw type; retained",
+    "Scalar repeat incorrectly rejected correct CSV; retained",
+    "Concise probe passed correct CSV and rejected wrong CSV, but pass finding invented an unsupported difference attribution; not quality passed",
+    "Probe verdicts do not substitute formal application delivery"
+  ],
+  "cold": {
+    "pre": {
+      "path": "/Users/chenqiang/Library/Application Support/CMBDevClaw-development/2026-10-08/presentation/cold-upgrade-plan/pins-quiesced-before-start-1791526432101979000.safe.json",
+      "sha256": "d226e4a5e670973ba852b6eee2ad9b76f2400e02d53de4503552918a38b55fb2"
+    },
+    "post": {
+      "path": "/Users/chenqiang/Library/Application Support/CMBDevClaw-development/2026-10-08/presentation/cold-upgrade-plan/pins-post-start-pre-review-1791526461540204000.safe.json",
+      "sha256": "9d779d237a4a75bcd148c98ff600761c29922694c21835d7320c1af9ced56f0f"
+    },
+    "selectedRuns": 6,
+    "checkpointPayloadBytesHashed": 5996559,
+    "preserved": {
+      "schema": true,
+      "checkpoints": true,
+      "effects": true,
+      "interactions": true,
+      "artifacts": true,
+      "artifactObjects": true,
+      "peerDispatch": true,
+      "peerWaits": true,
+      "skills": true,
+      "project": true
+    },
+    "configurationExact": {
+      "custom-models.json": true,
+      ".env": true,
+      "userinfo-models.json": true,
+      "bot-host/models.private": false,
+      "bot-host/workspace.private.json": true
+    },
+    "modelSnapshotOnlyTwoRuntimeDirectoryStringsChanged": true,
+    "modelSnapshotRuntimeDirectoryOccurrences": 2
+  },
+  "actualRecovery": {
+    "programRun": "a09a7dfc-de97-4bad-9c2b-2945e71360ad",
+    "programEffects": {
+      "succeeded": 62,
+      "failed": 2,
+      "unknown": 0
+    },
+    "materialRun": "c8340c02-ce4d-40c7-a31c-de9a89e34293",
+    "materialEffects": 0,
+    "sameTasksResumedViaFormalUI": true,
+    "finalFilesVerified": false
+  },
+  "pending": [
+    "Correct formal material CSV and report delivery",
+    "Original long programming journey and nine files",
+    "Timer/event routines, complete UI and remaining core journeys",
+    "Windows general desktop implementation and real machine acceptance",
+    "Final standalone packaging and Linux/K8s delivery"
+  ]
+}

@@ -1,0 +1,42 @@
+{
+  "schemaVersion": 1,
+  "kind": "Root-generated-text-artifact-tool-field-guidance",
+  "createdAt": "2026-10-07T18:32:59.295495+00:00",
+  "source": {
+    "path": "/Users/chenqiang/Desktop/projects/CmbCoworkAgent/src/main/bots/deliver-file-tool.ts",
+    "bytes": 4469,
+    "sha256": "8f82f327dc39aaf9734a0edd87b76cdeab324c95fc70227b8eeee2df2e5b51fd"
+  },
+  "change": "New-text name/content field descriptions now direct the model to preserve the requested filename and exact column names, order, language and units. The existing original-file and new-text modes, data schema, byte identity, receipt, permissions and replay path remain unchanged.",
+  "motivation": "Frozen real MiniMax J2 produced amount_wan where the user requested amount万元; no evidence the application changed that column. Earlier quality failure evidence is preserved.",
+  "rootGates": {
+    "nearest": {
+      "filesPassed": 2,
+      "testsPassed": 40,
+      "skipped": 0,
+      "exitCode": 0,
+      "log": {
+        "path": "/private/tmp/cmb-generated-artifact-field-description-root-nearest.log",
+        "bytes": 821,
+        "sha256": "1a1f6dc04ad8956fba5b621270ae8d9e58e0c8fbe061f522e0cbd6ebbc96d3dc"
+      }
+    },
+    "strictLint": {
+      "exitCode": 0,
+      "warnings": 0,
+      "log": {
+        "path": "/private/tmp/cmb-generated-artifact-field-description-root-lint.log",
+        "bytes": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      }
+    }
+  },
+  "claims": {
+    "applicationMissingMandatoryValidatorProven": false,
+    "automaticFormatOrSemanticValidationAdded": false,
+    "realModelBehaviorVerifiedForChange": false,
+    "J2FailureClosed": false,
+    "wholeDeliveryQualityPassed": false
+  },
+  "pending": "Include this source in the next unified production build, then at most one unchanged frozen J2 trial. Do not edit outputs, relax exact headers or repeat until success."
+}

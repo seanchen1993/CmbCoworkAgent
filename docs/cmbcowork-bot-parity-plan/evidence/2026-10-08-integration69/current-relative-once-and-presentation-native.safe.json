@@ -1,0 +1,243 @@
+{
+  "kind": "actual-relative-once-and-presentation-retest",
+  "recordedAt": "2026-10-10T11:43:47.233548+00:00",
+  "compiledOutputIdentity": "fcfc3da8d8d96fe448a50df7",
+  "compiledOutputSha256": "fcfc3da8d8d96fe448a50df755c09f5324b8e1d973805450cf015b420abfe3e1",
+  "buildId": "1ed8ff0ded9d41074a49c3a1",
+  "schema": 72,
+  "hostId": "3d119fda-216b-43b2-9523-718d64643179",
+  "fixedMechanisms": [
+    "Current dispatched routine instructions keep their active identity; previous setup remains historical",
+    "Remove CR/LF separator only after a stripped leading inline reasoning wrapper; preserve actual body indentation",
+    "Prefer Host-calculated one-shot after_seconds, frozen with the existing receipt/review mechanism; existing store rejects past activation",
+    "Show consumed once cursor as plan ended without claiming task success; reschedule uses original time editor, not chat-edit routing"
+  ],
+  "actual": {
+    "capturedAtMs": 1791632164211,
+    "runs": [
+      {
+        "id": "302ee7bf-65a8-47d8-84c5-f8aa57aee4ed",
+        "source": "routine:92dfba53-68a6-492c-b738-153fc6e7b66c",
+        "status": "succeeded",
+        "created_at": 1791632103095,
+        "updated_at": 1791632105754
+      },
+      {
+        "id": "34e7c472-2022-4c33-9e30-98b4df562cc7",
+        "source": "user",
+        "status": "succeeded",
+        "created_at": 1791631917857,
+        "updated_at": 1791631933056
+      }
+    ],
+    "finalMessage": {
+      "id": "2f2b453f-c21b-4556-8507-250bd0137f9d",
+      "sequence": 408,
+      "textLength": 33,
+      "exact": 1,
+      "trimmedExact": 1
+    },
+    "routine": {
+      "id": "92dfba53-68a6-492c-b738-153fc6e7b66c",
+      "revision": 2,
+      "enabled": 0,
+      "next_at": null,
+      "schedule": {
+        "kind": "once",
+        "at": 1791632102284
+      },
+      "created_at": 1791631922285
+    },
+    "savedDelayMs": 179999,
+    "dispatchDelayMs": 811,
+    "dispatchDurationMs": 2659,
+    "effects": 0,
+    "originalSetupTimingAligned": true,
+    "appAbsentDuringRun": false,
+    "quitAttemptConfirmed": false,
+    "coreParityComplete": false,
+    "modelUsage": [
+      {
+        "id": "8c3e082b-a0cc-464a-af6b-37a5f6ac9b25",
+        "run_id": "34e7c472-2022-4c33-9e30-98b4df562cc7",
+        "model": "MiniMax-M3",
+        "purpose": "task",
+        "input_tokens": 25068,
+        "output_tokens": 414,
+        "created_at": 1791631918238,
+        "settled_at": 1791631922215
+      },
+      {
+        "id": "4117ec7c-1224-42ea-8d2b-dd7ddae5f9de",
+        "run_id": "34e7c472-2022-4c33-9e30-98b4df562cc7",
+        "model": "MiniMax-M3",
+        "purpose": "task",
+        "input_tokens": 25696,
+        "output_tokens": 1784,
+        "created_at": 1791631922361,
+        "settled_at": 1791631933003
+      },
+      {
+        "id": "3e79ea92-70b0-4c45-a39d-3629896cf1c5",
+        "run_id": "302ee7bf-65a8-47d8-84c5-f8aa57aee4ed",
+        "model": "MiniMax-M3",
+        "purpose": "task",
+        "input_tokens": 23828,
+        "output_tokens": 46,
+        "created_at": 1791632103382,
+        "settled_at": 1791632105676
+      }
+    ]
+  },
+  "memoryFingerprints": {
+    "bot_memories": {
+      "unchanged": true,
+      "fingerprint": {
+        "rows": 9,
+        "bytes": 4377,
+        "sha256": "d21327c34521fcbe5989cc498c56aef9bda4f271be075fdb07d143c68982f948"
+      }
+    },
+    "bot_memory_metadata": {
+      "unchanged": true,
+      "fingerprint": {
+        "rows": 9,
+        "bytes": 3035,
+        "sha256": "18da05afcb1fccbff92a82fd985a2af6b702780502ed4989a22e15e8a3cdc5cf"
+      }
+    }
+  },
+  "nativeReschedule": {
+    "endedStateVisible": true,
+    "originalTimeEditorVisible": true,
+    "timeField": "2026-10-10T19:35:02",
+    "cancelWithoutSave": true,
+    "routineBefore": {
+      "routine": {
+        "id": "92dfba53-68a6-492c-b738-153fc6e7b66c",
+        "revision": 2,
+        "enabled": 0,
+        "next_at": null
+      },
+      "runs": 252,
+      "capturedAtMs": 1791632196047
+    },
+    "routineAfter": {
+      "routine": {
+        "id": "92dfba53-68a6-492c-b738-153fc6e7b66c",
+        "revision": 2,
+        "enabled": 0,
+        "next_at": null
+      },
+      "runs": 252,
+      "capturedAtMs": 1791632374151
+    },
+    "draftChanged": false
+  },
+  "priorFormatSample": {
+    "capturedAtMs": 1791631065072,
+    "runs": [
+      {
+        "id": "ef9e23f4-a822-4da2-b15f-b76727b74381",
+        "source": "routine:afabeed0-df90-451a-a4a7-16f147a8e584",
+        "status": "succeeded",
+        "created_at": 1791630600981,
+        "updated_at": 1791630603782
+      },
+      {
+        "id": "e26b6db6-c664-4655-8cec-dbcaa455b0da",
+        "source": "user",
+        "status": "succeeded",
+        "created_at": 1791629358906,
+        "updated_at": 1791629848965
+      }
+    ],
+    "finalMessage": {
+      "id": "53a357be-6e81-46c9-bdc0-b95a4e26613a",
+      "sequence": 403,
+      "textLength": 31,
+      "exact": 1,
+      "trimmedExact": 1
+    },
+    "routine": {
+      "id": "afabeed0-df90-451a-a4a7-16f147a8e584",
+      "revision": 3,
+      "enabled": 0,
+      "next_at": null,
+      "schedule": "{\"kind\":\"once\",\"at\":1791630600000}",
+      "desired_enabled": 1
+    },
+    "originalSetupTimingAligned": false,
+    "appAbsentDuringFormatRun": false,
+    "coreParityComplete": false
+  },
+  "retainedFailures": [
+    "Original automatic assignment misclassified as history",
+    "Initial exact raw output contained two LF separators",
+    "FORMAT sample created temporary plans and moved requested time; exact output alone does not pass scheduling",
+    "First browser harness lacked Vite URL-asset loading and tracked-work fixture state",
+    "Initial relative-delay test advanced beyond its lease without a matching renewal",
+    "A Cmd-Q attempt did not remove the current Main; this sample is not an App-absent proof"
+  ],
+  "officialGrok": {
+    "transport": "Official client, direct official service",
+    "originalMarkerVisible": true,
+    "fixMarkerVisible": true,
+    "fixRoutineSelfDeleted": true,
+    "thirdPromptSubmissionConfirmed": false,
+    "newTaskDraftPreserved": true,
+    "comparableScope": "Same original three-minute single-marker instruction, visible scheduled result; no official Host timing or raw-byte inspection"
+  },
+  "quality": {
+    "unit": {
+      "files": 5,
+      "passed": 52,
+      "log": "/tmp/cmb-relative-once-and-route-unit-valid-20261010.log"
+    },
+    "reactChromeSqlite": {
+      "passed": 9,
+      "log": "/tmp/cmb-reschedule-route-fixed-cleanup-20261010.log",
+      "full49StageBrowserChainRun": false
+    },
+    "actualGraphContract": {
+      "passed": 4,
+      "skipped": 328,
+      "log": "/tmp/cmb-relative-once-runtime-contract-20261010.log"
+    },
+    "nodeTypes": "PASS",
+    "webTypes": "PASS",
+    "strictLint": "PASS",
+    "messageRegression": "PASS",
+    "productionBuild": "PASS"
+  },
+  "coldPreservation": {
+    "selectedRuns": 195,
+    "checkpointPayloadBytesHashed": 19008632,
+    "logicalGroupsEqual": {
+      "runs": true,
+      "effects": true,
+      "interactions": true,
+      "artifacts": true,
+      "artifactObjects": true,
+      "peerDispatch": true,
+      "peerWaits": true,
+      "checkpoints": true,
+      "skills": true,
+      "project": true
+    },
+    "extraTablesEqual": {
+      "bot_memories": true,
+      "bot_memory_metadata": true,
+      "bot_model_usage": true,
+      "bot_group_cycles": true,
+      "bot_group_runs": true,
+      "bot_introduction_questions": true
+    },
+    "forceKillUsed": false,
+    "receipt": "/Users/chenqiang/Library/Application Support/CMBDevClaw-development/2026-10-08/presentation/cold-ui-output-plan/relative-once-and-time-editor-cold-preservation-1791631423868363000.safe.json"
+  },
+  "pendingObservedIssue": "Memory-synthesis error summary currently announces task incomplete even when the actual task succeeded; inspect cause and summary projection",
+  "coreParityComplete": false,
+  "nativeDistribution": null,
+  "scope": "Native frozen Mac App with shared dependencies and actual configured MiniMax-M3; finite routine/presentation tests, not whole product or Windows/Linux acceptance"
+}

@@ -4,8 +4,9 @@ import { Command } from "@langchain/langgraph"
 import { ModGuestRuntime } from "./guest-runtime"
 import type { ModObject } from "../../shared/mods/types"
 import type { ModHostCall } from "./guest-runtime"
+import { ModError } from "./errors"
 
-const control = vi.hoisted(() => ({ fail: false }))
+const control = vi.hoisted(() => ({ fail: false, guestFailures: 0, invokes: 0 }))
 vi.mock("./runtime-client", () => ({
   ModRuntimeClient: class {
     version = 0
@@ -17,6 +18,11 @@ vi.mock("./runtime-client", () => ({
       return guest.registrations
     }
     invoke(id: string, handler: string, event: ModObject, call: ModHostCall) {
+      control.invokes++
+      if (control.guestFailures > 0) {
+        control.guestFailures--
+        return Promise.reject(new ModError("MODS_GUEST_ERROR"))
+      }
       if (control.fail) return Promise.reject(Error("host failed"))
       return this.guests.get(id)!.invoke(handler, event, call)
     }
@@ -30,6 +36,50 @@ vi.mock("./runtime-client", () => ({
 import { ManagedModPolicy, DEFAULT_MOD_POLICY, parseManagedModDeployment } from "./policy"
 
 describe("application-owned isolated policy", () => {
+  it("filters a bounded large connector result including nested values and maximum configured literals", async () => {
+    const literals = Array.from(
+      { length: 64 },
+      (_, i) => `PRIVATE_VALUE_${i.toString().padStart(2, "0")}`
+    )
+    const policy = new ManagedModPolicy({
+      ...DEFAULT_MOD_POLICY,
+      required: true,
+      redactLiterals: literals
+    })
+    const text = literals.join(" ").repeat(240)
+    try {
+      const result = await policy.filter({ text, nested: { text }, isError: true })
+      expect(JSON.stringify(result.value)).not.toContain("PRIVATE_VALUE_")
+      expect(result.value).toEqual({
+        text: "[REDACTED]".concat(" [REDACTED]".repeat(63)).repeat(240),
+        nested: { text: "[REDACTED]".concat(" [REDACTED]".repeat(63)).repeat(240) },
+        isError: true
+      })
+      expect(result.ruleIds).toContain("deployment-literal")
+    } finally {
+      policy.stop()
+    }
+  })
+  it("retries only pure policy computation once and remains closed after repeated failure", async () => {
+    const policy = new ManagedModPolicy({
+      ...DEFAULT_MOD_POLICY,
+      required: true,
+      redactLiterals: ["private-value"]
+    })
+    try {
+      control.guestFailures = 1
+      const before = control.invokes
+      expect((await policy.filter("private-value")).value).toBe("[REDACTED]")
+      expect(control.invokes - before).toBe(2)
+      control.guestFailures = 2
+      const failed = control.invokes
+      await expect(policy.filter("new private-value")).rejects.toThrow("POLICY_UNAVAILABLE")
+      expect(control.invokes - failed).toBe(2)
+    } finally {
+      control.guestFailures = 0
+      policy.stop()
+    }
+  })
   it("filters every observable field and keeps tool status and graph routing", async () => {
     const policy = new ManagedModPolicy({
       ...DEFAULT_MOD_POLICY,

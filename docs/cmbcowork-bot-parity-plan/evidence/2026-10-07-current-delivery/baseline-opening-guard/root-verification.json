@@ -1,0 +1,21 @@
+{
+  "verifiedAt": "2026-10-07T08:21:42.782645+00:00",
+  "status": "EXPECTED_BASELINE_FAIL",
+  "actualResult": {
+    "phase": "actual-private-regression-against-unchanged-production-store",
+    "startedAt": "2026-10-07T08:17:45.407902+00:00",
+    "completedAt": "2026-10-07T08:17:47.489432+00:00",
+    "seconds": 2.0815637500490993,
+    "exitCode": 1,
+    "inputCount": 3836,
+    "sourceDrift": [],
+    "logSHA256": "05dc3fa522f996ce2ee5a98ccc0542bf28dea27cac40a8ac346d31e9c47ad769",
+    "automaticRetries": 0,
+    "wrapperOverridesOriginalTimeouts": false
+  },
+  "selectedRealStoreRegressionCases": 1,
+  "unselectedCases": 61,
+  "actualFailure": "latest cursor accepted during opening, subsequent same-cursor refresh makes zero threadSummaries calls",
+  "rootSourceWrites": false,
+  "original4318CausalityProven": false
+}

@@ -28,6 +28,8 @@ export interface ParsedAttachment {
   size: number
   /** true when content was truncated */
   truncated: boolean
+  /** Present only for paged reads; offsets count UTF-16 characters, without a truncation notice. */
+  page?: { offset: number; totalCharacters: number; nextOffset: number | null }
 }
 
 /** Max text length (characters) to inject into context. ~24k chars ≈ ~6-7k tokens */
@@ -36,7 +38,17 @@ export const MAX_ATTACHMENT_ARCHIVE_ENTRIES = 4_096
 export const MAX_ATTACHMENT_ARCHIVE_ENTRY_BYTES = 32 * 1024 * 1024
 export const MAX_ATTACHMENT_ARCHIVE_TOTAL_BYTES = 64 * 1024 * 1024
 
-const SUPPORTED_EXTENSIONS = new Set([".txt", ".md", ".csv", ".docx", ".xlsx", ".xls"])
+const SUPPORTED_EXTENSIONS = new Set([
+  ".txt",
+  ".md",
+  ".csv",
+  ".docx",
+  ".xlsx",
+  ".xls",
+  ".pptx",
+  ".pdf"
+])
+export const MAX_DOCUMENT_CHARACTERS = 8 * 1024 * 1024
 
 export function isSupportedFile(filePath: string): boolean {
   const ext = path.extname(filePath).toLowerCase()
@@ -76,7 +88,9 @@ function truncateContent(
     const kept = lines.slice(0, keepLines).join("\n")
     const droppedLines = totalLines - keepLines
     return {
-      content: kept + `\n\n... [内容已截取：显示前 ${keepLines} 行（共 ${totalLines} 行），省略了 ${droppedLines} 行、${(totalChars - kept.length).toLocaleString()} 个字符]`,
+      content:
+        kept +
+        `\n\n... [内容已截取：显示前 ${keepLines} 行（共 ${totalLines} 行），省略了 ${droppedLines} 行、${(totalChars - kept.length).toLocaleString()} 个字符]`,
       truncated: true
     }
   }
@@ -85,16 +99,15 @@ function truncateContent(
   const sliced = content.slice(0, maxLen)
   const lastParagraph = sliced.lastIndexOf("\n\n")
   const lastNewline = sliced.lastIndexOf("\n")
-  const cutPoint = lastParagraph > maxLen * 0.8
-    ? lastParagraph
-    : lastNewline > maxLen * 0.8
-      ? lastNewline
-      : maxLen
+  const cutPoint =
+    lastParagraph > maxLen * 0.8 ? lastParagraph : lastNewline > maxLen * 0.8 ? lastNewline : maxLen
   const kept = content.slice(0, cutPoint)
   const droppedChars = totalChars - kept.length
 
   return {
-    content: kept + `\n\n... [内容已截取：显示前 ${kept.length.toLocaleString()} 个字符（共 ${totalChars.toLocaleString()} 个字符），省略了 ${droppedChars.toLocaleString()} 个字符]`,
+    content:
+      kept +
+      `\n\n... [内容已截取：显示前 ${kept.length.toLocaleString()} 个字符（共 ${totalChars.toLocaleString()} 个字符），省略了 ${droppedChars.toLocaleString()} 个字符]`,
     truncated: true
   }
 }
@@ -103,7 +116,9 @@ function truncateContent(
 export async function parseFileBytes(
   fileName: string,
   bytes: ArrayBuffer,
-  maxLength?: number
+  maxLength?: number,
+  pageOffset?: number,
+  byteLimit = MAX_ATTACHMENT_FILE_BYTES
 ): Promise<ParsedAttachment> {
   if (
     typeof fileName !== "string" ||
@@ -115,31 +130,41 @@ export async function parseFileBytes(
   }
   if (!(bytes instanceof ArrayBuffer)) throw new Error("无效的附件内容")
   const filename = path.basename(fileName)
-  return parseAttachmentBuffer(Buffer.from(bytes), filename, filename, maxLength)
+  if (!Number.isSafeInteger(byteLimit) || byteLimit < 1 || byteLimit > 25 * 1024 * 1024)
+    throw new Error("附件大小预算无效")
+  return parseAttachmentBuffer(
+    Buffer.from(bytes),
+    filename,
+    filename,
+    maxLength,
+    pageOffset,
+    byteLimit
+  )
 }
 
 async function parseAttachmentBuffer(
   buffer: Buffer,
   filename: string,
   filePath: string,
-  maxLength?: number
+  maxLength?: number,
+  pageOffset?: number,
+  byteLimit = MAX_ATTACHMENT_FILE_BYTES
 ): Promise<ParsedAttachment> {
-  if (
-    maxLength !== undefined &&
-    (!Number.isSafeInteger(maxLength) || maxLength <= 0)
-  ) {
+  if (maxLength !== undefined && (!Number.isSafeInteger(maxLength) || maxLength <= 0)) {
     throw new Error("附件字符预算无效")
   }
-  if (buffer.byteLength > MAX_ATTACHMENT_FILE_BYTES) {
+  if (pageOffset !== undefined && (!Number.isSafeInteger(pageOffset) || pageOffset < 0))
+    throw new Error("附件分页位置无效")
+  if (buffer.byteLength > byteLimit) {
     throw new Error(
-      `文件过大（${(buffer.byteLength / 1024 / 1024).toFixed(1)}MB），单文件不超过 5MB`
+      `文件过大（${(buffer.byteLength / 1024 / 1024).toFixed(1)}MB），单文件不超过 ${byteLimit / 1024 / 1024}MB`
     )
   }
   const ext = path.extname(filename).toLowerCase()
   if (!SUPPORTED_EXTENSIONS.has(ext)) {
-    throw new Error(`不支持的文件类型: ${ext}，仅支持 txt、md、csv、docx、xlsx、xls`)
+    throw new Error(`不支持的文件类型: ${ext}，仅支持 txt、md、csv、docx、xlsx、xls、pptx、pdf`)
   }
-  if (ext === ".docx" || ext === ".xlsx") assertBoundedOfficeArchive(buffer)
+  if (ext === ".docx" || ext === ".xlsx" || ext === ".pptx") assertBoundedOfficeArchive(buffer)
 
   let content: string
   let mimeType: string
@@ -166,14 +191,52 @@ async function parseAttachmentBuffer(
     case ".xlsx":
     case ".xls": {
       content = await parseExcel(buffer)
-      mimeType = ext === ".xlsx"
-        ? "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-        : "application/vnd.ms-excel"
+      mimeType =
+        ext === ".xlsx"
+          ? "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+          : "application/vnd.ms-excel"
       isLineBased = true
+      break
+    }
+    case ".pptx": {
+      const { parsePresentation } = await import("./file-presentation-parser")
+      content = parsePresentation(buffer)
+      mimeType = "application/vnd.openxmlformats-officedocument.presentationml.presentation"
+      break
+    }
+    case ".pdf": {
+      const { parsePdfText } = await import("./file-pdf-parser")
+      content = await parsePdfText(buffer, MAX_DOCUMENT_CHARACTERS)
+      mimeType = "application/pdf"
       break
     }
     default:
       throw new Error(`Unsupported file type: ${ext}`)
+  }
+
+  // Plaintext cannot expand like compressed Office/PDF content. Bot byte limits
+  // may exceed the desktop's 5 MiB limit; paging must still reach the file tail.
+  const characterLimit = [".txt", ".md", ".csv"].includes(ext)
+    ? Math.max(MAX_DOCUMENT_CHARACTERS, byteLimit)
+    : MAX_DOCUMENT_CHARACTERS
+  if (content.length > characterLimit)
+    throw new Error(`文档文本超过 ${characterLimit / (1024 * 1024)}M 字符解析上限，请拆分后读取`)
+  if (pageOffset !== undefined) {
+    const limit = Math.min(maxLength ?? MAX_ATTACHMENT_TEXT_LENGTH, 32_000)
+    const next = Math.min(pageOffset + limit, content.length)
+    return {
+      filename,
+      filePath,
+      mimeType,
+      size: buffer.byteLength,
+      content: content.slice(pageOffset, next),
+      truncated: next < content.length,
+      page: {
+        offset: pageOffset,
+        totalCharacters: content.length,
+        nextOffset: next < content.length ? next : null
+      }
+    }
   }
 
   const limit =
@@ -192,7 +255,7 @@ async function parseAttachmentBuffer(
   }
 }
 
-function assertBoundedOfficeArchive(buffer: Buffer): void {
+export function assertBoundedOfficeArchive(buffer: Buffer): void {
   let entries: ReturnType<AdmZip["getEntries"]>
   try {
     entries = new AdmZip(buffer).getEntries()
@@ -226,7 +289,8 @@ function assertBoundedOfficeArchive(buffer: Buffer): void {
 const ENCODING_SAMPLE_SIZE = 8192
 
 function detectEncoding(buffer: Buffer): string {
-  const sample = buffer.length > ENCODING_SAMPLE_SIZE ? buffer.subarray(0, ENCODING_SAMPLE_SIZE) : buffer
+  const sample =
+    buffer.length > ENCODING_SAMPLE_SIZE ? buffer.subarray(0, ENCODING_SAMPLE_SIZE) : buffer
   const detected = chardet.detect(sample)
   if (detected && detected.encoding && iconv.encodingExists(detected.encoding)) {
     if (detected.encoding.toLowerCase() === "ascii") return "utf-8"
@@ -235,7 +299,7 @@ function detectEncoding(buffer: Buffer): string {
   return "utf-8"
 }
 
-function decodeTextFileAutoEncoding(buffer: Buffer): string {
+export function decodeTextFileAutoEncoding(buffer: Buffer): string {
   const encoding = detectEncoding(buffer)
   return iconv.decode(buffer, encoding)
 }
@@ -255,8 +319,15 @@ async function parseExcel(buffer: Buffer): Promise<string> {
   const workbook = XLSX.read(buffer, { type: "buffer" })
 
   const parts: string[] = []
+  let cells = 0
   for (const sheetName of workbook.SheetNames) {
     const sheet = workbook.Sheets[sheetName]
+    if (sheet["!ref"]) {
+      const range = XLSX.utils.decode_range(sheet["!ref"])
+      cells += (range.e.r - range.s.r + 1) * (range.e.c - range.s.c + 1)
+      if (!Number.isSafeInteger(cells) || cells > 2_000_000)
+        throw new Error("表格有效区域超过 200 万单元格，请拆分后读取")
+    }
     const csv = XLSX.utils.sheet_to_csv(sheet)
     if (csv.trim()) {
       parts.push(`## Sheet: ${sheetName}\n${csv}`)

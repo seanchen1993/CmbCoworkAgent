@@ -1,5 +1,5 @@
 import path from "node:path"
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises"
+import { mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { afterEach, describe, expect, it } from "vitest"
 import {
@@ -84,7 +84,7 @@ describe("trusted tool file preview sources", () => {
   })
 
   it("issues a sender-bound grant for only the recorded file", async () => {
-    const root = await mkdtemp(path.join(tmpdir(), "cmb-tool-preview-"))
+    const root = await realpath(await mkdtemp(path.join(tmpdir(), "cmb-tool-preview-")))
     try {
       const filePath = path.join(root, "report.md")
       const otherPath = path.join(root, "other.md")

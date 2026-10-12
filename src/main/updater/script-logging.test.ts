@@ -197,6 +197,63 @@ describe.skipIf(process.platform !== "win32")(
       expect(rollback.log).toContain("Restoring ASAR")
       expect(rollback.log).toContain("Operation failed")
     })
+
+    it.each(["update", "rollback"])(
+      "publishes a complete ASAR with a real %s file replacement",
+      async (kind) => {
+        const resources = join(state.root, "app", "resources")
+        mkdirSync(resources, { recursive: true })
+        const current = join(resources, "app.asar"),
+          payload = join(state.root, "payload.asar")
+        writeFileSync(current, "original complete application")
+        writeFileSync(payload, "replacement complete application")
+        const result = await runPowerShell(
+          "function Get-Process {}\nfunction Start-Process { [pscustomobject]@{ Id = 12345 } }\n" +
+            (kind === "update"
+              ? generateUpdatePs1(payload, "1.0.0", "1.0.1")
+              : generateRollbackPs1(payload))
+        )
+        expect(result.status).toBe(0)
+        expect(readFileSync(current, "utf8")).toBe("replacement complete application")
+        if (kind === "update")
+          expect(readFileSync(join(resources, "app.asar.bak"), "utf8")).toBe(
+            "original complete application"
+          )
+      }
+    )
+
+    it.each(["update", "rollback"])(
+      "retains the installed ASAR after its %s copy process is killed",
+      async (kind) => {
+        const resources = join(state.root, "app", "resources")
+        mkdirSync(resources, { recursive: true })
+        const current = join(resources, "app.asar"),
+          payload = join(state.root, "payload.asar")
+        writeFileSync(current, "original complete application")
+        writeFileSync(payload, "replacement complete application")
+        const fault = `function Get-Process {}
+function Copy-Item {
+  [CmdletBinding()]
+  param([string] $Path, [string] $LiteralPath, [string] $Destination, [switch] $Force)
+  $sourcePath = if ($LiteralPath) { $LiteralPath } else { $Path }
+  if ($sourcePath -eq '${payload.replaceAll("'", "''")}') {
+    [System.IO.File]::WriteAllText($Destination, 'partial payload')
+    Stop-Process -Id $PID -Force
+  }
+  Microsoft.PowerShell.Management\\Copy-Item -LiteralPath $sourcePath -Destination $Destination -Force -ErrorAction Stop
+}
+`
+        const result = await runPowerShell(
+          fault +
+            (kind === "update"
+              ? generateUpdatePs1(payload, "1.0.0", "1.0.1")
+              : generateRollbackPs1(payload))
+        )
+        expect(result.status).not.toBe(0)
+        expect(readFileSync(current, "utf8")).toBe("original complete application")
+        expect(readFileSync(payload, "utf8")).toBe("replacement complete application")
+      }
+    )
   }
 )
 

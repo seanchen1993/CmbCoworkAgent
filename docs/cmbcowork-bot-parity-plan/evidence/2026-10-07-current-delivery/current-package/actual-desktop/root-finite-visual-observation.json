@@ -1,0 +1,12 @@
+{
+  "at": "2026-10-07T08:40:33.943354+00:00",
+  "inspectedBy": "root",
+  "actualPackagedOutput": "/tmp/cmb-root-thread-metadata-opening-integration-v1/current-package/actual-desktop/browser-output/desktop-external-branch.png",
+  "bytes": 137556,
+  "sha256": "49bc924d4d6e1f243e2151c3cff940e28a5aa01d3a9d6de396e35ba5064ae2ea",
+  "currentOutputRevisionSHA256": "0ce3e79902f8ee8bedfaead445890c67cc96fb08a40e12252ec30743d7b05dcc",
+  "rendererChunk": "BotWorkspace-D-23g-nQ.js",
+  "finiteVisualObservation": "Single Bot sidebar, aligned pill identity, two-reply branch navigation, addressed message focus ring, preserved branch composer and visible CMBDevClaw branding rendered in the actual new packaged app. No new confirmed visual defect in this screenshot.",
+  "provesAllGrokUIParity": false,
+  "newBrowserOrElectronLaunched": false
+}

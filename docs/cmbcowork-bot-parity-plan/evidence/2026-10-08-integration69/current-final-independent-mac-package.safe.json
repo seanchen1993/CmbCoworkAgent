@@ -1,0 +1,21 @@
+{
+  "kind": "independent-mac-current-package",
+  "recordedAt": "2026-10-10T15:31:52.483562+00:00",
+  "path": "/Users/chenqiang/Desktop/CMBDevClaw-delivery-20261010/CMBDevClaw-1.5.3-arm64-63f35a4.dmg",
+  "bytes": 372904574,
+  "sha256": "911831b93094638298532ee4e80460d9026263287f3f027153dc13f3c5ae3679",
+  "compiledOutputIdentity": "63f35a4f83867a90acec439b",
+  "compiledOutputSha256": "63f35a4f83867a90acec439bf9a24fbea7ac344011dab36f3d2dac90c8a1b419",
+  "nativeBuildId": "464c0d8da601e78e9ec973b9",
+  "codesignDeepStrictPassed": true,
+  "dmgVerified": true,
+  "packagedCanvasAndPtyPassed": true,
+  "packagedHostRecoveryPassedCases": 4,
+  "formalAuthBypass": false,
+  "notarized": false,
+  "realModelInProductionPackageTested": false,
+  "actualNativeStartupPending": false,
+  "actualNativeAuthPageStartupPassed": true,
+  "actualNativeStartupObservedAt": "2026-10-10T19:42:46.278272+00:00",
+  "actualNativeStartupEvidence": "current-native-startup-three-bot-official.safe.json"
+}

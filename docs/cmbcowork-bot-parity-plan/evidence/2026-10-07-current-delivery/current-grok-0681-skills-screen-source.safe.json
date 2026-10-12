@@ -1,0 +1,165 @@
+{
+  "schemaVersion": 1,
+  "kind": "Root-source-Grok-0.68.1-browser-and-explicit-skill-action-alignment",
+  "createdAt": "2026-10-07T18:29:47.932219+00:00",
+  "officialReference": {
+    "url": "https://x.ai/changelog/bot",
+    "version": "0.68.1",
+    "released": "2026-10-07",
+    "verified": "2026-10-08",
+    "facts": [
+      "Typing slash no longer opens skills/actions menu",
+      "Computer screen increased from1280x800 to1920x1200"
+    ],
+    "ownAdaptation": "Skills remain reachable through an explicit Plus menu action; no claim this exact submenu was observed in the official0.68.1 client."
+  },
+  "sourceFiles": [
+    {
+      "path": "/Users/chenqiang/Desktop/projects/CmbCoworkAgent/src/renderer/src/components/bots/BotComposer.tsx",
+      "bytes": 19803,
+      "sha256": "2cd373b058242828392de1521c524bb597d9c876635514458706ef6a52e40a9f"
+    },
+    {
+      "path": "/Users/chenqiang/Desktop/projects/CmbCoworkAgent/src/renderer/src/components/bots/BotComposerActions.tsx",
+      "bytes": 3669,
+      "sha256": "00fd08dc399d907491ce54867f11989a141568068ee417082716de62e107678c"
+    },
+    {
+      "path": "/Users/chenqiang/Desktop/projects/CmbCoworkAgent/src/renderer/src/lib/use-bot-composer-suggestions.ts",
+      "bytes": 3383,
+      "sha256": "7051e9abdce8cf6a0980f2d7662f72a274cb21e8b99668c98e07888b5fa2599e"
+    },
+    {
+      "path": "/Users/chenqiang/Desktop/projects/CmbCoworkAgent/src/renderer/src/lib/use-bot-skill-suggestions.ts",
+      "bytes": 2898,
+      "sha256": "f17ab30aa258de6a8b4ac707f88053f0fe3f214883fc9fcd86c31f72a7ca27ae"
+    },
+    {
+      "path": "/Users/chenqiang/Desktop/projects/CmbCoworkAgent/tests/bot-composer-browser.spec.ts",
+      "bytes": 17681,
+      "sha256": "03a7a3b05dabed36a7a0044f8f99b8f4870df9fba93fb6e3de7205d9bc38139d"
+    },
+    {
+      "path": "/Users/chenqiang/Desktop/projects/CmbCoworkAgent/src/shared/bot-computer.ts",
+      "bytes": 1653,
+      "sha256": "6b918583637575f8438cc14c2a300465efd395908f9c3fff0e201b3fa04e7609"
+    },
+    {
+      "path": "/Users/chenqiang/Desktop/projects/CmbCoworkAgent/src/main/bots/computer-provider.ts",
+      "bytes": 15197,
+      "sha256": "37e4ae33245d234889672f5ce9184c4e2f4045bb37b61985442aa7661825d5d4"
+    },
+    {
+      "path": "/Users/chenqiang/Desktop/projects/CmbCoworkAgent/src/main/bots/browser-broker.ts",
+      "bytes": 50659,
+      "sha256": "c8cbaba1951993bfd16cdbfb8a49b245d951350421f5a0e48f4d822e18bd4303"
+    }
+  ],
+  "rootGates": {
+    "composerBrowser": {
+      "exitCode": 0,
+      "originalCasesRetained": true,
+      "additionalChecks": [
+        "Slash file paths remain ordinary text and do not request skills",
+        "Explicit search and keyboard selection preserve draft text and exact skill version",
+        "Escape preserves the draft",
+        "Reopening cannot choose a stale cached catalog while fresh lookup is pending",
+        "Replacement data epoch retires the picker and rejects a late old lookup"
+      ]
+    },
+    "teachMenu": {
+      "exitCode": 0,
+      "casesPassed": 9,
+      "realAuthenticatedLocalRpc": true,
+      "realModel": false,
+      "actualApp": false
+    },
+    "workScreen": {
+      "exitCode": 0,
+      "filesPassed": 3,
+      "testsPassed": 27,
+      "skipped": 0,
+      "durationSeconds": 64.29,
+      "scope": "Native Chromium broker, actual React/RPC/SQLite fixtures; no generic OS desktop or real model"
+    },
+    "typecheckWeb": {
+      "exitCode": 0,
+      "scope": "Explicit skills source before subsequent work-screen constant; final unified Node/Web gate remains required"
+    },
+    "typecheckNode": {
+      "exitCode": 0
+    },
+    "strictLint": {
+      "exitCode": 0,
+      "warnings": 0
+    },
+    "logs": [
+      {
+        "path": "/private/tmp/cmb-explicit-skill-picker-root-browser-v3.log",
+        "bytes": 119,
+        "sha256": "27040a4400682f3e11bc51dedcff7f1f85e91e94e32c86994d6e26868a5ceb29"
+      },
+      {
+        "path": "/private/tmp/cmb-explicit-skill-picker-root-lint-v3.log",
+        "bytes": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      {
+        "path": "/private/tmp/cmb-explicit-skill-picker-root-web-v3.log",
+        "bytes": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      {
+        "path": "/private/tmp/cmb-explicit-skill-picker-root-teach-menu.log",
+        "bytes": 1208,
+        "sha256": "7e53a901f1174d166c85988bf449187019a1b403866200a02f9aeea95c1441e3"
+      },
+      {
+        "path": "/private/tmp/cmb-grok-0681-work-screen-root-browser.log",
+        "bytes": 3080,
+        "sha256": "7fae9fa499abc7d28b6566968c068c609f690bbc787670714c82688321e02674"
+      },
+      {
+        "path": "/private/tmp/cmb-grok-0681-work-screen-root-node.log",
+        "bytes": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      {
+        "path": "/private/tmp/cmb-grok-0681-work-screen-root-lint.log",
+        "bytes": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      }
+    ]
+  },
+  "visualInspection": {
+    "source": "Owned isolated production composer fixture, not actual App or original Grok",
+    "image": {
+      "path": "/Users/chenqiang/Desktop/projects/CmbCoworkAgent/output/bot-composer/explicit-skills.png",
+      "bytes": 23406,
+      "sha256": "6a70a4b4758713d87b65be02d293775991b5011bcf93af623251e0bf154161e4"
+    },
+    "inspectedByRoot": true,
+    "observation": "Existing dark theme tokens, icon, aligned skill row, focus border and retained draft are visible; whole UI parity is not proven."
+  },
+  "compiled": {
+    "lastBuildId": "b42ce5022ce1d4624fbe7e04",
+    "schema": 66,
+    "containsTheseNewUiAndScreenChanges": false,
+    "unifiedBuildPending": true
+  },
+  "remaining": [
+    "Whole current official UI/function comparison remains open",
+    "Actual App last observed b4/schema65; CUA connection timed out and no alternative App mutation was used",
+    "Larger screen raises render/encode cost; poll rate and one-frame ticket semantics unchanged, no CPU/memory benchmark claimed",
+    "B task/pending/notification paging is still privately integrating",
+    "Windows generic native desktop implementation gap remains"
+  ],
+  "claims": {
+    "sourceImplemented": true,
+    "nearestFiniteVerificationPassed": true,
+    "wholeUiParityPassed": false,
+    "wholeCoreDeliveryPassed": false,
+    "productionReady": false,
+    "completionPercent": null
+  }
+}

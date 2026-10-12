@@ -1,0 +1,9 @@
+{
+  "at": "2026-10-07T08:24:43.398983+00:00",
+  "change": "join shorter guard and body to satisfy existing Prettier convention",
+  "beforeSHA256": "6b2d52601397a6b1d7a3640adf4ab13450e16d9176024f05a30c77e024c57fc0",
+  "afterSHA256": "6f69289e0ec8ca40373843eae3a232d5fcc7c6fcf7cf00dbbde84b36923fb50c",
+  "byteExactBeforeReconstructedByUndoingWhitespaceOnlyJoin": true,
+  "semanticsChanged": false,
+  "failedStrictLintPreserved": "current-nearest-types-quality-build/result.json"
+}

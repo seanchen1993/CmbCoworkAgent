@@ -1,0 +1,123 @@
+{
+  "observedAtEpochMs": 1791383131566,
+  "actualUi": true,
+  "manualRunOnceClicked": false,
+  "routine": {
+    "id": "c44bc265-ba48-435f-a6b0-8c4ff263ec8d",
+    "bot_id": "a99aa585-9532-4867-b00f-48b25a1bc8a6",
+    "name": "旅程验收-到期核算",
+    "prompt": "计算17+25，只回复“旅程例程：42”。不用外部服务，不调用其他 Bot，不执行命令。",
+    "schedule": "{\"kind\":\"interval\",\"anchor\":1791382461851,\"everyMs\":60000}",
+    "timezone": "Asia/Shanghai",
+    "enabled": 0,
+    "next_at": 1791382701851,
+    "revision": 6,
+    "created_at": 1791382401858,
+    "desired_enabled": 0,
+    "activation_required": 0
+  },
+  "runs": [
+    {
+      "id": "f922b8e2-45c5-482f-9b78-54562d05d64a",
+      "conversation_id": "c339e13c-b89f-420a-8f42-2eebc1255e93",
+      "status": "succeeded",
+      "created_at": 1791382462256,
+      "updated_at": 1791382503213,
+      "result": "\n\n42",
+      "error": null
+    },
+    {
+      "id": "659a0a57-d810-4a2e-9d03-58044fca9ac0",
+      "conversation_id": "c339e13c-b89f-420a-8f42-2eebc1255e93",
+      "status": "succeeded",
+      "created_at": 1791382522352,
+      "updated_at": 1791382526950,
+      "result": "\n\n旅程例程：42",
+      "error": null
+    },
+    {
+      "id": "0922b58a-6416-4089-b3cf-6d997d1f3f60",
+      "conversation_id": "c339e13c-b89f-420a-8f42-2eebc1255e93",
+      "status": "succeeded",
+      "created_at": 1791382582411,
+      "updated_at": 1791382585156,
+      "result": "\n\n旅程例程：42",
+      "error": null
+    },
+    {
+      "id": "33320d8e-5e95-437b-8b0b-2c55461281be",
+      "conversation_id": "c339e13c-b89f-420a-8f42-2eebc1255e93",
+      "status": "succeeded",
+      "created_at": 1791382642478,
+      "updated_at": 1791382644303,
+      "result": "旅程例程：42",
+      "error": null
+    }
+  ],
+  "pauseVerified": true,
+  "noAdditionalOccurrenceAfterPause": true,
+  "qualityCaution": "First of initial4 answered42 without required prefix; later occurrences including resumed due followed prefix. This is schedule lifecycle evidence, not whole routine feature or task quality acceptance.",
+  "reenabledAtObservedEpochMs": 1791385353873,
+  "reenabledRoutine": {
+    "id": "c44bc265-ba48-435f-a6b0-8c4ff263ec8d",
+    "enabled": 1,
+    "next_at": 1791385401851,
+    "revision": 8,
+    "schedule": "{\"kind\":\"interval\",\"anchor\":1791382461851,\"everyMs\":60000}"
+  },
+  "finalObservedAtEpochMs": 1791385554435,
+  "finalRoutine": {
+    "id": "c44bc265-ba48-435f-a6b0-8c4ff263ec8d",
+    "enabled": 0,
+    "next_at": 1791385401851,
+    "revision": 9
+  },
+  "finalRuns": [
+    {
+      "id": "f922b8e2-45c5-482f-9b78-54562d05d64a",
+      "status": "succeeded",
+      "created_at": 1791382462256,
+      "updated_at": 1791382503213,
+      "result": "\n\n42"
+    },
+    {
+      "id": "659a0a57-d810-4a2e-9d03-58044fca9ac0",
+      "status": "succeeded",
+      "created_at": 1791382522352,
+      "updated_at": 1791382526950,
+      "result": "\n\n旅程例程：42"
+    },
+    {
+      "id": "0922b58a-6416-4089-b3cf-6d997d1f3f60",
+      "status": "succeeded",
+      "created_at": 1791382582411,
+      "updated_at": 1791382585156,
+      "result": "\n\n旅程例程：42"
+    },
+    {
+      "id": "33320d8e-5e95-437b-8b0b-2c55461281be",
+      "status": "succeeded",
+      "created_at": 1791382642478,
+      "updated_at": 1791382644303,
+      "result": "旅程例程：42"
+    },
+    {
+      "id": "86686ad1-5a07-43ff-92d0-a88b0b8f014f",
+      "status": "succeeded",
+      "created_at": 1791385343194,
+      "updated_at": 1791385345792,
+      "result": "\n\n旅程例程：42"
+    }
+  ],
+  "reenabledActualDueRun": {
+    "id": "86686ad1-5a07-43ff-92d0-a88b0b8f014f",
+    "status": "succeeded",
+    "created_at": 1791385343194,
+    "updated_at": 1791385345792,
+    "result": "\n\n旅程例程：42"
+  },
+  "reenabledDueResultActuallyReadUi": true,
+  "pausedAgainVerifiedUi": true,
+  "pausedGapHadNoOccurrences": true,
+  "scheduleLifecycleSamplePassed": true
+}

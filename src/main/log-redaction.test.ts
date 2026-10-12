@@ -8,6 +8,18 @@ import {
 } from "./log-redaction"
 
 describe("log redaction", () => {
+  it("preserves typed task UUIDs without exempting credentials or phone-shaped ID values", () => {
+    const id = "19911645-654b-465e-a0b9-a82b11abeb40"
+    for (const key of ["callId", "botId", "runId", "rootRunId", "hostId"])
+      expect(redactLogValue({ [key]: id })).toEqual({ [key]: id })
+    expect(redactLogValue({ runId: "13800138000", apiKey: id, token: { runId: id } })).toEqual({
+      runId: "138****8000",
+      apiKey: "[REDACTED]",
+      token: "[REDACTED]"
+    })
+    expect(redactLogValue({ runId: `Bearer ${id}` })).toEqual({ runId: "Bearer [REDACTED]" })
+    expect(redactLogValue({ message: id })).not.toEqual({ message: id })
+  })
   it("partially masks Chinese ID cards and mobile phone numbers", () => {
     const redacted = redactSensitiveText(
       "身份证 11010119900307123X，旧证 110101900307123，手机 13800138000 / +86-139-1234-5678"

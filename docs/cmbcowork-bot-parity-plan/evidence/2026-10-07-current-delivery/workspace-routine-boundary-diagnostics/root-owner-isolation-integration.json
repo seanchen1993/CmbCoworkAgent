@@ -1,0 +1,47 @@
+{
+  "at": "2026-10-07T09:01:58.196747+00:00",
+  "rootApplied": true,
+  "beforeSHA256": "5f5966ac5598049bd9304911959820b62af9d5f4a1559e2a84ea823cedd4f58b",
+  "afterSHA256": "ac2ae0ff3193f31ec40f72316b67640194f0d4ad3cbe9a781cb9ec145116d939",
+  "candidateVerification": {
+    "baselineSha256": "5f5966ac5598049bd9304911959820b62af9d5f4a1559e2a84ea823cedd4f58b",
+    "candidateSha256": "ac2ae0ff3193f31ec40f72316b67640194f0d4ad3cbe9a781cb9ec145116d939",
+    "assertions": {
+      "baselineCount": 660,
+      "candidateCount": 660,
+      "identicalNormalizedTokens": true
+    },
+    "timing": {
+      "baselineCount": 33,
+      "candidateCount": 33,
+      "identicalNormalizedTokens": true
+    },
+    "browserControl": {
+      "baselineCount": 1268,
+      "candidateCount": 1270,
+      "retainedOriginalCount": 1268,
+      "originalSequenceIdentical": true,
+      "declaredAddedActionsMatch": true,
+      "addedActions": [
+        {
+          "line": 5750,
+          "text": "boundaryInspector.getByRole(\"button\", { name: \"\u5173\u95ed\u8be6\u60c5\u9762\u677f\", exact: true }).click()",
+          "index": 1201
+        },
+        {
+          "line": 5751,
+          "text": "boundaryInspector.waitFor({ state: \"hidden\" })",
+          "index": 1202
+        }
+      ]
+    },
+    "diagnosticsPreserved": true,
+    "parseDiagnostics": [],
+    "fixtureParseDiagnostics": []
+  },
+  "productionChanged": false,
+  "originalAssertionsAndTimeoutsPreserved": true,
+  "addsOriginalInspectorCloseAndHiddenSynchronization": true,
+  "previous31ReadOriginProven": false,
+  "originalFailurePreserved": true
+}

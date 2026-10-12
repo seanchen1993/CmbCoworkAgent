@@ -23,9 +23,11 @@
 // renderer notification (which uses BrowserWindow) is injected by runtime.ts via
 // `setCurrentRunInjectionNotifier`.
 
-import { AIMessage, HumanMessage } from "@langchain/core/messages"
+import { AIMessage, HumanMessage, RemoveMessage } from "@langchain/core/messages"
 import { createMiddleware } from "langchain"
+import { registry } from "@langchain/langgraph/zod"
 import { randomUUID } from "crypto"
+import { z } from "zod"
 import type { Message } from "../types"
 import {
   advanceCompletedMessageContentRoute,
@@ -167,8 +169,7 @@ export function resolveCurrentRunCompletedAssistantIdentity(
   if (durableCompletedMessage) {
     return {
       sourceId: durableCompletedMessage.id,
-      providerSourceId:
-        durableCompletedMessage.provider_source_id?.trim() || rawSourceId,
+      providerSourceId: durableCompletedMessage.provider_source_id?.trim() || rawSourceId,
       providerOccurrence: getMessageProviderOccurrence(durableCompletedMessage) ?? 1
     }
   }
@@ -222,7 +223,9 @@ export function resolveCurrentRunInjectionAnchorId(
   )?.id
 }
 
-function currentRunInjectionAnchorForMessage(value: unknown): CurrentRunInjectionAnchor | undefined {
+function currentRunInjectionAnchorForMessage(
+  value: unknown
+): CurrentRunInjectionAnchor | undefined {
   if (!value || typeof value !== "object" || Array.isArray(value)) return undefined
   const message = value as Record<string, unknown>
   const id = typeof message.id === "string" ? message.id.trim() : ""
@@ -462,9 +465,7 @@ async function drainCurrentRunMessagesForInjection(
   // The notifier durably persists these user turns before acknowledging them to
   // the renderer. If persistence fails, restore the queue and let the graph fail
   // this hook instead of losing the only durable copy of the user's instruction.
-  let acknowledgement:
-    | void
-    | { completedAssistantIdentity?: CurrentRunCompletedAssistantIdentity }
+  let acknowledgement: void | { completedAssistantIdentity?: CurrentRunCompletedAssistantIdentity }
   try {
     acknowledgement = await notifyInjected(threadId, queued, { ...context, runToken })
   } catch (error) {
@@ -485,22 +486,20 @@ async function drainCurrentRunMessagesForInjection(
   )
 
   return {
-    messages: queued.map(
-      (message) => {
-        const visibleContent = message.displayContent || message.content
-        return new HumanMessage({
-          id: message.id,
-          content: message.content,
-          ...(visibleContent !== message.content
-            ? {
-                additional_kwargs: {
-                  [VISIBLE_USER_MESSAGE_KEY]: visibleContent
-                }
+    messages: queued.map((message) => {
+      const visibleContent = message.displayContent || message.content
+      return new HumanMessage({
+        id: message.id,
+        content: message.content,
+        ...(visibleContent !== message.content
+          ? {
+              additional_kwargs: {
+                [VISIBLE_USER_MESSAGE_KEY]: visibleContent
               }
-            : {})
-        })
-      }
-    ),
+            }
+          : {})
+      })
+    }),
     ...(acknowledgement?.completedAssistantIdentity
       ? { completedAssistantIdentity: acknowledgement.completedAssistantIdentity }
       : {})
@@ -510,7 +509,8 @@ async function drainCurrentRunMessagesForInjection(
 function completedAssistantMessageForTranscript(
   message: AIMessage
 ): CurrentRunCompletedAssistantMessage | undefined {
-  const sourceId = typeof message.id === "string" && message.id.trim() ? message.id.trim() : undefined
+  const sourceId =
+    typeof message.id === "string" && message.id.trim() ? message.id.trim() : undefined
   if (typeof message.content === "string") {
     return message.content.length > 0
       ? {
@@ -525,12 +525,24 @@ function completedAssistantMessageForTranscript(
       : undefined
   }
   return Array.isArray(message.content) && message.content.length > 0
-      ? {
+    ? {
         id: `current-run-assistant:${randomUUID()}`,
         content: message.content as Message["content"],
         ...(sourceId ? { sourceId } : {})
       }
     : undefined
+}
+
+/** Optional durable inbox. The graph marker survives compaction and restart; an
+ * inbox may redeliver acknowledged entries absent from that marker after a crash.
+ * Desktop queues keep their existing notifier and physical-run ownership path. */
+export interface CurrentRunDurableQueue {
+  take(input: {
+    threadId: string
+    ownerRunToken: string
+    appliedIds: string[]
+    phase: "beforeModel" | "afterModel"
+  }): Promise<HumanMessage[]>
 }
 
 /** Middleware that injects steered messages into the running model loop. Wired
@@ -548,10 +560,36 @@ function completedAssistantMessageForTranscript(
  * into a foreground run can never be drained by a differently-keyed background
  * run, even though they all share this exact middleware. */
 export function createCurrentRunMessageQueueMiddleware(
-  ownerRunToken?: string
+  ownerRunToken?: string,
+  durableQueue?: CurrentRunDurableQueue
 ): ReturnType<typeof createMiddleware> {
+  const drain = async (
+    threadId: string,
+    token: string,
+    phase: "beforeModel" | "afterModel",
+    context: Parameters<typeof drainCurrentRunMessagesForInjection>[3],
+    appliedIds: string[]
+  ) => {
+    if (!durableQueue) return drainCurrentRunMessagesForInjection(threadId, token, phase, context)
+    const messages = await durableQueue.take({ threadId, ownerRunToken: token, appliedIds, phase })
+    return messages.length ? { messages } : undefined
+  }
   return createMiddleware({
     name: "currentRunMessageQueue",
+    stateSchema: z.object({
+      // These are durable receipts, not a replaceable snapshot. Nested model
+      // middleware can propagate the same Command more than once in one step;
+      // replay must neither fail the channel nor forget an earlier receipt.
+      cmbCurrentRunMessageIds: z
+        .array(z.string())
+        .default(() => [])
+        .register(registry, {
+          reducer: {
+            fn: (current: string[], next: string[]) => [...new Set([...current, ...next])]
+          },
+          default: () => []
+        })
+    }),
     wrapModelCall: async (request, handler) => {
       const response = await handler(request)
       const threadId =
@@ -575,13 +613,26 @@ export function createCurrentRunMessageQueueMiddleware(
 
       const messages = Array.isArray(state.messages) ? state.messages : []
       const anchorMessage = currentRunInjectionAnchorForMessage(messages.at(-1))
-      const injection = await drainCurrentRunMessagesForInjection(
+      const injection = await drain(
         threadId,
         ownerRunToken,
         "beforeModel",
-        { anchorMessage }
+        { anchorMessage },
+        state.cmbCurrentRunMessageIds ?? []
       )
-      return injection ? { messages: injection.messages } : undefined
+      return injection
+        ? {
+            messages: injection.messages,
+            ...(durableQueue
+              ? {
+                  cmbCurrentRunMessageIds: [
+                    ...(state.cmbCurrentRunMessageIds ?? []),
+                    ...injection.messages.map((message) => message.id!)
+                  ]
+                }
+              : {})
+          }
+        : undefined
     },
     afterModel: {
       canJumpTo: ["model"],
@@ -611,31 +662,57 @@ export function createCurrentRunMessageQueueMiddleware(
         completedAssistantMessagesByRun.delete(completedKey)
         const anchorMessage = currentRunInjectionAnchorForMessage(messages.at(-2))
 
-        const injection = await drainCurrentRunMessagesForInjection(
+        const injection = await drain(
           threadId,
           ownerRunToken,
           "afterModel",
-          { completedAssistantMessage, anchorMessage }
+          { completedAssistantMessage, anchorMessage },
+          state.cmbCurrentRunMessageIds ?? []
         )
-        // The preceding reply is persisted with a fresh id so providers that
-        // reuse AI message ids cannot overwrite it with the guided reply. Keep
-        // LangGraph state on that same id before the next values snapshot is
-        // emitted; otherwise the renderer sees the provider id and the durable
-        // id as two separate assistant messages after a reload.
+        // Replace through the message reducer. Mutating its existing AIMessage
+        // would also mutate the cached prefix used by incremental checkpoints.
+        let injectedMessages: (AIMessage | HumanMessage | RemoveMessage)[] | undefined
         if (injection && completedAssistantMessage) {
-          if (lastMessage.id !== completedAssistantMessage.id) {
-            lastMessage.id = completedAssistantMessage.id
-          }
           const completedIdentity = injection.completedAssistantIdentity
-          if (completedIdentity?.providerSourceId && completedIdentity.providerOccurrence) {
-            lastMessage.additional_kwargs = {
-              ...lastMessage.additional_kwargs,
-              [MESSAGE_PROVIDER_SOURCE_ID_METADATA_KEY]: completedIdentity.providerSourceId,
-              [MESSAGE_PROVIDER_OCCURRENCE_METADATA_KEY]: completedIdentity.providerOccurrence
-            }
-          }
+          const additional_kwargs =
+            completedIdentity?.providerSourceId && completedIdentity.providerOccurrence
+              ? {
+                  ...lastMessage.additional_kwargs,
+                  [MESSAGE_PROVIDER_SOURCE_ID_METADATA_KEY]: completedIdentity.providerSourceId,
+                  [MESSAGE_PROVIDER_OCCURRENCE_METADATA_KEY]: completedIdentity.providerOccurrence
+                }
+              : lastMessage.additional_kwargs
+          // Preserve the SDK message subtype and all metadata, including chunks;
+          // sync its serialization mirror without changing the previous state.
+          const fields = { id: completedAssistantMessage.id, additional_kwargs }
+          const replacement = Object.assign(
+            Object.create(Object.getPrototypeOf(lastMessage)),
+            lastMessage,
+            fields
+          ) as AIMessage
+          replacement.lc_kwargs = { ...lastMessage.lc_kwargs, ...fields }
+          injectedMessages = [
+            ...(lastMessage.id && lastMessage.id !== replacement.id
+              ? [new RemoveMessage({ id: lastMessage.id })]
+              : []),
+            replacement,
+            ...injection.messages
+          ]
         }
-        return injection ? { messages: injection.messages, jumpTo: "model" as const } : undefined
+        return injection
+          ? {
+              messages: injectedMessages ?? injection.messages,
+              jumpTo: "model" as const,
+              ...(durableQueue
+                ? {
+                    cmbCurrentRunMessageIds: [
+                      ...(state.cmbCurrentRunMessageIds ?? []),
+                      ...injection.messages.map((message) => message.id!)
+                    ]
+                  }
+                : {})
+            }
+          : undefined
       }
     }
   })

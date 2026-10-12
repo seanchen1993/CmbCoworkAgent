@@ -1,0 +1,428 @@
+import { createModModelMiddleware } from "../mods/model-middleware"
+import { ToolMessage } from "@langchain/core/messages"
+import { Command, isCommand } from "@langchain/langgraph"
+import { createMiddleware } from "langchain"
+import { withModToolCall, publishCurrentModResult } from "../mods/adapters"
+import { authorizeCurrentModInput } from "../mods/manager-context"
+import { currentFunctionExecution } from "../mods/v2/execution-context"
+import type { ModRuntimeAuthority } from "../mods/runtime-instance"
+import type { HookContext, HookResultCallback } from "../hooks/runner"
+import type { runHooksEnriched as RunHooksEnriched } from "../hooks/required-skill"
+import {
+  getCurrentHookAgentId,
+  getHookAgentIdFromRequest,
+  runWithHookAgentId
+} from "../hooks/execution-context"
+import { throwIfHookHalt } from "../hooks/halt"
+import { mergeUpdatedInput as mergeHookUpdatedInput } from "../hooks/updated-input"
+import type { HookConfig, HookEvent, HookResult } from "../hooks/types"
+import type { HookScopeController } from "../hooks/scope"
+import { detectToolFailure, hasFailureFired, type ToolFailureSignal } from "../hooks/tool-failure"
+import {
+  formatFailureFuseWarning,
+  shouldAttachFailureFuseFeedback,
+  shouldSendFailureFuseNotice,
+  throwIfFailureFuseHalt,
+  type FailureFuseDecision,
+  type FailureFuseNoticeCallback
+} from "./failure-fuse"
+
+export interface ToolHookMiddlewareOptions {
+  /** Bot's existing Mods adapter already owns dispatch; only add Hook semantics. */
+  manageMods?: boolean
+  /** Resolved capability identity when the caller already owns the MCP dispatch. */
+  modInputTarget?: string
+  /** Headless Hosts await failure Hooks within the leased tool call. Desktop
+   * runtimes already own a separate failure callback and leave this disabled. */
+  runFailureHooks?: boolean
+  runtimeAuthority?: ModRuntimeAuthority
+  workspacePath: string
+  threadId: string
+  hookScope: HookScopeController
+  resolveHooksForContext: (event: HookEvent, context: HookContext) => HookConfig[]
+  onHookResult?: HookResultCallback
+  hookTurnId?: string
+  agentId?: string
+  systemId?: string
+  pluginWorkspace?: string
+  featureId?: string
+  harnessProjectId?: string
+  harnessAdapterId?: string
+  harnessAdapterName?: string
+  harnessAdapterVersion?: string
+  harnessNodeName?: string
+  harnessNodeStatus?: string
+  projectCode?: string
+  projectDir?: string
+  workspaceHookCwd?: string
+  forceSyncWorkspaceHooks?: boolean
+  skipToolNames?: ReadonlySet<string>
+  onToolFailureDecision?: (input: {
+    toolName: string
+    toolCallId?: string
+    toolArgs: Record<string, unknown>
+    signal: ToolFailureSignal
+  }) => FailureFuseDecision | null
+  onFailureFuseNotice?: FailureFuseNoticeCallback
+  onToolSuccess?: (input: { toolName: string; toolArgs: Record<string, unknown> }) => void
+}
+
+function buildHookContext(
+  toolName: string,
+  toolArgs: Record<string, unknown>,
+  options: ToolHookMiddlewareOptions
+): HookContext {
+  return {
+    toolName,
+    toolArgs,
+    workspacePath: options.workspacePath,
+    sessionId: options.threadId,
+    turnId: options.hookTurnId,
+    agentId: getCurrentHookAgentId() ?? options.agentId,
+    systemId: options.systemId,
+    pluginWorkspace: options.pluginWorkspace,
+    featureId: options.featureId,
+    harnessProjectId: options.harnessProjectId,
+    harnessAdapterId: options.harnessAdapterId,
+    harnessAdapterName: options.harnessAdapterName,
+    harnessAdapterVersion: options.harnessAdapterVersion,
+    harnessNodeName: options.harnessNodeName,
+    harnessNodeStatus: options.harnessNodeStatus,
+    projectCode: options.projectCode,
+    projectDir: options.projectDir,
+    workspaceHookCwd: options.workspaceHookCwd,
+    forceSyncWorkspaceHooks: options.forceSyncWorkspaceHooks
+  }
+}
+
+function stringifyToolResult(result: unknown): string {
+  if (typeof result === "string") return result
+  if (ToolMessage.isInstance(result)) {
+    if (typeof result.content === "string") return result.content
+    if (Array.isArray(result.content)) {
+      return result.content
+        .map((item) => {
+          if (typeof item === "string") return item
+          if (item && typeof item === "object" && "text" in item && typeof item.text === "string") {
+            return item.text
+          }
+          return JSON.stringify(item)
+        })
+        .join("")
+    }
+  }
+  try {
+    return JSON.stringify(result) ?? String(result)
+  } catch {
+    return String(result)
+  }
+}
+
+function getFailureDetectionInput(result: unknown): unknown {
+  if (typeof result === "string") return result
+  if (ToolMessage.isInstance(result)) {
+    const content = stringifyToolResult(result)
+    return result.status === "error"
+      ? {
+          is_error: true,
+          error: content || "tool returned error status"
+        }
+      : content
+  }
+  if (isCommand(result)) return stringifyToolResult(result)
+  return result
+}
+
+function buildPostHookFeedback(postResult: HookResult | null): string | null {
+  if (!postResult) return null
+  const parts = [
+    !postResult.suppressOutput && postResult.stdout
+      ? `[Hook output]\n${postResult.stdout}`
+      : undefined,
+    postResult.additionalContext ? `[Hook context]\n${postResult.additionalContext}` : undefined,
+    postResult.systemMessage ? `[Hook notice]\n${postResult.systemMessage}` : undefined,
+    postResult.decision === "block" && postResult.reason
+      ? `[Hook requested review] ${postResult.reason}`
+      : undefined,
+    postResult.continue === false
+      ? `[Hook stopped turn] ${postResult.stopReason || postResult.reason || "PostToolUse hook stopped the turn"}`
+      : undefined
+  ].filter((item): item is string => Boolean(item))
+  return parts.length > 0 ? parts.join("\n\n") : null
+}
+
+function mergeFailureFuseWarning(
+  postResult: HookResult | null,
+  decision: FailureFuseDecision | null
+): HookResult | null {
+  if (!shouldAttachFailureFuseFeedback(decision)) return postResult
+  const warning = formatFailureFuseWarning(decision)
+  if (!postResult) {
+    return {
+      exitCode: null,
+      stdout: "",
+      stderr: "",
+      blocked: false,
+      additionalContext: warning
+    }
+  }
+  return {
+    ...postResult,
+    additionalContext: postResult.additionalContext
+      ? `${postResult.additionalContext}\n\n${warning}`
+      : warning
+  }
+}
+
+function appendFeedbackToToolContent(content: unknown, feedback: string): unknown {
+  if (typeof content === "string") return content ? `${content}\n\n${feedback}` : feedback
+  if (Array.isArray(content)) {
+    return [...content, { type: "text", text: feedback }]
+  }
+  if (content == null) return feedback
+  return `${stringifyToolResult(content)}\n\n${feedback}`
+}
+
+function appendFeedbackToToolMessage(message: ToolMessage, feedback: string): ToolMessage {
+  return new ToolMessage({
+    content: appendFeedbackToToolContent(message.content, feedback) as ToolMessage["content"],
+    tool_call_id: message.tool_call_id,
+    name: message.name,
+    status: message.status,
+    artifact: message.artifact,
+    metadata: {
+      ...(message.metadata ?? {}),
+      hookFeedback: feedback
+    }
+  })
+}
+
+function appendFeedbackToCommand(result: unknown, feedback: string, toolCallId?: string): unknown {
+  if (!isCommand(result)) return result
+  const command = result as Command<unknown, Record<string, unknown>, string>
+  const update = command.update
+  if (!update || typeof update !== "object" || Array.isArray(update)) return result
+  const typedUpdate = update as Record<string, unknown>
+  const messages = Array.isArray(typedUpdate.messages) ? typedUpdate.messages : []
+  if (messages.length === 0) return result
+
+  const nextMessages = [...messages]
+  for (let index = nextMessages.length - 1; index >= 0; index -= 1) {
+    const message = nextMessages[index]
+    if (!ToolMessage.isInstance(message)) continue
+    if (toolCallId && message.tool_call_id !== toolCallId) continue
+    nextMessages[index] = appendFeedbackToToolMessage(message, feedback)
+    const nextUpdate = { ...typedUpdate, messages: nextMessages }
+    const commandArgs: Record<string, unknown> = { update: nextUpdate }
+    if (command.graph !== undefined) commandArgs.graph = command.graph
+    if (command.resume !== undefined) commandArgs.resume = command.resume
+    if (command.goto !== undefined) commandArgs.goto = command.goto
+    return new Command(commandArgs)
+  }
+
+  return result
+}
+
+function appendFeedbackToResult(result: unknown, feedback: string, toolCallId?: string): unknown {
+  if (ToolMessage.isInstance(result)) {
+    return appendFeedbackToToolMessage(result, feedback)
+  }
+  if (isCommand(result)) {
+    return appendFeedbackToCommand(result, feedback, toolCallId)
+  }
+  if (typeof result === "string") {
+    return result ? `${result}\n\n${feedback}` : feedback
+  }
+  return result
+}
+
+function buildBlockedToolResult(
+  toolName: string,
+  toolCallId: string | undefined,
+  reason: string
+): ToolMessage {
+  return new ToolMessage({
+    content: `[Hook blocked] ${reason}`,
+    tool_call_id: toolCallId ?? toolName,
+    name: toolName,
+    status: "error"
+  })
+}
+
+function normalizeToolArgs(args: unknown): Record<string, unknown> {
+  if (!args || typeof args !== "object" || Array.isArray(args)) return {}
+  return args as Record<string, unknown>
+}
+
+function mergeUpdatedInput(
+  toolArgs: Record<string, unknown>,
+  updatedInput?: Record<string, unknown>
+): Record<string, unknown> {
+  return mergeHookUpdatedInput(toolArgs, updatedInput)
+}
+
+export function createToolHookMiddlewareCore(
+  options: ToolHookMiddlewareOptions,
+  runHooksEnriched: typeof RunHooksEnriched
+) {
+  const skipToolNames = options.skipToolNames ?? new Set<string>()
+  const modModel = createModModelMiddleware({
+    ...options,
+    activePluginIds: options.hookScope.activePluginIds
+  })
+  const dispatch: typeof withModToolCall =
+    options.manageMods === false
+      ? async (_context, request, _skip, handler) => handler(request)
+      : withModToolCall
+
+  return createMiddleware({
+    name: "toolHookMiddleware",
+    wrapModelCall: options.manageMods === false ? undefined : modModel.wrapModelCall,
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    wrapToolCall: async (request: any, handler: any): Promise<any> => {
+      const execution = currentFunctionExecution()
+      const runtimeAuthority = execution ? execution.runtimeAuthority : options.runtimeAuthority
+      return dispatch(
+        {
+          runtimeAuthority,
+          workspace: options.workspacePath,
+          threadId: options.threadId,
+          turnId: execution?.turnId ?? options.hookTurnId ?? options.threadId,
+          agentId: execution?.agentId ?? options.agentId,
+          activePluginIds: options.hookScope.activePluginIds,
+          signal: request.runtime?.signal
+        },
+        request,
+        skipToolNames,
+        async (request) => {
+          const agentId =
+            getHookAgentIdFromRequest(request) ?? execution?.agentId ?? options.agentId
+          return runWithHookAgentId(agentId, async () => {
+            const toolCall = request.toolCall as
+              | { id?: string; name?: string; args?: unknown }
+              | undefined
+            const toolName = toolCall?.name
+            if (!toolName || skipToolNames.has(toolName)) {
+              return handler(request)
+            }
+
+            const baseToolArgs = normalizeToolArgs(toolCall.args)
+            const hookContext = buildHookContext(toolName, baseToolArgs, options)
+            hookContext.toolCallId = toolCall?.id
+            const preResult = await runHooksEnriched(
+              options.resolveHooksForContext("PreToolUse", hookContext),
+              "PreToolUse",
+              hookContext,
+              options.onHookResult
+            )
+            if (preResult) {
+              options.hookScope.activatePersistentHooks(
+                options.resolveHooksForContext("PreToolUse", hookContext)
+              )
+            }
+            throwIfHookHalt("PreToolUse", preResult, `${toolName} was stopped by a PreToolUse hook`)
+
+            if (preResult?.blocked || preResult?.decision === "block") {
+              const reason =
+                preResult.reason ||
+                preResult.stopReason ||
+                preResult.stdout ||
+                preResult.stderr ||
+                `${toolName} was blocked by a hook`
+              return buildBlockedToolResult(toolName, toolCall?.id, reason)
+            }
+
+            const toolArgs = mergeUpdatedInput(baseToolArgs, preResult?.updatedInput)
+            await authorizeCurrentModInput(options.modInputTarget ?? `host:${toolName}`, toolArgs)
+            const result = await publishCurrentModResult(
+              await handler({
+                ...request,
+                toolCall: toolCall ? { ...toolCall, args: toolArgs } : toolCall,
+                state:
+                  request.state &&
+                  typeof request.state === "object" &&
+                  !Array.isArray(request.state)
+                    ? { ...(request.state as Record<string, unknown>) }
+                    : request.state
+              })
+            )
+
+            const signal = detectToolFailure(toolName, getFailureDetectionInput(result))
+            const alreadyRecordedThrowFailure = Boolean(
+              signal && toolCall?.id && hasFailureFired(toolCall.id)
+            )
+            const failureFuseDecision =
+              signal && !alreadyRecordedThrowFailure
+                ? (options.onToolFailureDecision?.({
+                    toolName,
+                    toolCallId: toolCall?.id,
+                    toolArgs,
+                    signal
+                  }) ?? null)
+                : null
+            if (shouldSendFailureFuseNotice(failureFuseDecision)) {
+              options.onFailureFuseNotice?.(failureFuseDecision)
+            }
+            if (!signal) options.onToolSuccess?.({ toolName, toolArgs })
+
+            const postContext: HookContext = {
+              ...hookContext,
+              toolArgs,
+              toolResult: stringifyToolResult(result)
+            }
+            let failureResult: HookResult | null = null
+            if (options.runFailureHooks && signal) {
+              const failureContext = {
+                ...postContext,
+                toolResult: JSON.stringify({
+                  error: signal.message,
+                  error_type: signal.errorType,
+                  failure_kind: signal.kind,
+                  is_interrupt: signal.isInterrupt,
+                  is_timeout: signal.isTimeout,
+                  tool_use_id: toolCall?.id
+                })
+              }
+              failureResult = await runHooksEnriched(
+                options.resolveHooksForContext("PostToolUseFailure", failureContext),
+                "PostToolUseFailure",
+                failureContext,
+                options.onHookResult
+              )
+              throwIfHookHalt(
+                "PostToolUseFailure",
+                failureResult,
+                `${toolName} failure requires review`
+              )
+            }
+            const postResult = await runHooksEnriched(
+              options.resolveHooksForContext("PostToolUse", postContext),
+              "PostToolUse",
+              postContext,
+              options.onHookResult
+            )
+            if (postResult) {
+              options.hookScope.activatePersistentHooks(
+                options.resolveHooksForContext("PostToolUse", postContext)
+              )
+            }
+            throwIfHookHalt(
+              "PostToolUse",
+              postResult,
+              `${toolName} was stopped by a PostToolUse hook`
+            )
+            if (failureFuseDecision) throwIfFailureFuseHalt(failureFuseDecision)
+
+            const feedback = [
+              buildPostHookFeedback(failureResult),
+              buildPostHookFeedback(mergeFailureFuseWarning(postResult, failureFuseDecision))
+            ]
+              .filter(Boolean)
+              .join("\n\n")
+            return feedback ? appendFeedbackToResult(result, feedback, toolCall?.id) : result
+          })
+        }
+      )
+    }
+  })
+}

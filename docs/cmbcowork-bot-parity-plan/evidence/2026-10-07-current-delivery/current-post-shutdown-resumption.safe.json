@@ -1,0 +1,54 @@
+{
+  "recordedAt": "2026-10-08T00:33:43.220740+00:00",
+  "sourceAndArchivedEvidenceRetained": true,
+  "missingTemporaryWork": [
+    "/tmp/cmb-root-current67-wide-npm-test.log",
+    "/tmp/cmb-presentation-egifx9xf",
+    "/var/folders/r4/m2gmdyyn06z9488ghc1044zh0000gn/T/cmb-artifact-contract-jo4r_yht",
+    "/var/folders/r4/m2gmdyyn06z9488ghc1044zh0000gn/T/cmb-local-ui-real-model-wA53ub/home/bot-host/bots.sqlite"
+  ],
+  "previousIncompleteNpmGate": "interrupted; final result unavailable; not a pass",
+  "previousRealProgrammingRun": "cc0a1ee7-87e4-4d06-bc1e-800a3f04ce54; no final delivery accepted; original data no longer present",
+  "newWorkRoot": "/Users/chenqiang/Library/Application Support/CMBDevClaw-development/2026-10-08",
+  "clipboardFix": {
+    "rootFiles": [
+      {
+        "path": "/Users/chenqiang/Desktop/projects/CmbCoworkAgent/src/renderer/src/lib/bot-composer-extensions.ts",
+        "bytes": 7045,
+        "sha256": "02ecd0b3d46550efaa991d1c05cbe6a7d72b60fe0704fb972fb77d8ea2153e79"
+      },
+      {
+        "path": "/Users/chenqiang/Desktop/projects/CmbCoworkAgent/tests/bot-composer-browser.spec.ts",
+        "bytes": 19732,
+        "sha256": "b9237a10e4ec4fc30f2ca495acaf71feaec571315e3cd197c30baeb5bcae1910"
+      }
+    ],
+    "actualChromiumComposerTest": {
+      "exitCode": 0,
+      "log": {
+        "path": "/Users/chenqiang/Library/Application Support/CMBDevClaw-development/2026-10-08/root-gates/composer-browser.log",
+        "bytes": 119,
+        "sha256": "27040a4400682f3e11bc51dedcff7f1f85e91e94e32c86994d6e26868a5ceb29"
+      },
+      "checks": [
+        "plain text technical filenames remain verbatim",
+        "selected-text replacement does not turn AGENTS.md into an inferred URL",
+        "send input contains exact filename",
+        "explicit https URL still marked",
+        "rich link label retains explicit destination",
+        "original undo/IME/inline references/epoch/lost receipt checks pass"
+      ]
+    },
+    "limits": [
+      "not yet rebuilt into actual Electron App",
+      "web typecheck/lint/messages pending"
+    ]
+  },
+  "builtOutputBeforeFix": {
+    "path": "/Users/chenqiang/Desktop/projects/CmbCoworkAgent/out/main/bot-native-build.json",
+    "bytes": 23240,
+    "sha256": "a82d193e032da7af57fac99a1bbca8b1f3058a43fc93b049038d597885183fd7"
+  },
+  "completionPercentage": null,
+  "wholeDeliveryPassed": false
+}

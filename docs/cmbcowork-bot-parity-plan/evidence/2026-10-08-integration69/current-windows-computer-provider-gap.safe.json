@@ -1,0 +1,693 @@
+{
+  "schemaVersion": 1,
+  "kind": "current-Windows-shared-computer-provider-gap-read-only-source-audit",
+  "capturedAt": "2026-10-08T21:59:55.961120+00:00",
+  "scope": {
+    "productionCodeEdited": false,
+    "testsStarted": false,
+    "liveUiUsed": false,
+    "databaseReadOrChanged": false,
+    "modelRequestsSent": false,
+    "hiddenReasoningOrSecretsIncluded": false,
+    "documentsWrittenOnly": [
+      "/Users/chenqiang/Desktop/projects/CmbCoworkAgent/docs/cmbcowork-bot-parity-plan/evidence/2026-10-08-integration69/current-windows-computer-provider-gap.safe.json",
+      "docs/cmbcowork-bot-parity-plan/14-windows-computer-feasibility.md"
+    ]
+  },
+  "decisions": {
+    "officialComputerBoundary": "同一用户所有Grok Bot共享一台持久云电脑、文件、浏览器和登录；官网不支持一Bot一VM的要求。",
+    "currentSharedComputerDirection": "用户共享workspace/browser profile/context，加每Bot目标归属、授权和接管，方向与官方共享电脑主体一致。",
+    "currentModifierCorrection": "目前已有受限Control/Shift/Alt窗口消息chords；旧文档若写完全未实现修饰组合键应改为未实现通用物理组合键/任意应用效果。",
+    "actualGap": "任意Windows原生应用/画布所需的有效点击、拖拽、快捷键和文本输入，且不扰用户主桌面输入；现有UIA/窗口消息不能保证该效果。",
+    "mechanismsNotStandaloneOfficialFeatures": [
+      "per-Bot VM",
+      "per-Bot physical hardware input",
+      "Windows IME API implementation",
+      "Windows RawInput API implementation"
+    ],
+    "scopeNotReduced": "Windows完整目标保留；Mac用户已接受的范围调整不向Windows推广；K8s与手机仍按既定后置。",
+    "completionClaim": "存在真实实现缺口，不能仅凭源文件、capability或Mac mock签Windows任意原生应用通过；未判定所有Windows原生路径不可能。"
+  },
+  "currentSources": [
+    {
+      "path": "/Users/chenqiang/Desktop/projects/CmbCoworkAgent/src/shared/bot-native-desktop.ts",
+      "bytes": 19284,
+      "sha256": "f19512e1a301f458068870d21efa28f5c4e197c922acab521b3221e6b2856714",
+      "lines": [
+        [
+          49,
+          64
+        ]
+      ],
+      "finding": "物理pointerInput、keyboardInput及independentDesktopVerified仍固定false；messageChords是独立受限消息能力。"
+    },
+    {
+      "path": "/Users/chenqiang/Desktop/projects/CmbCoworkAgent/scripts/bot-native-sandbox/native-desktop/worker/Program.cs",
+      "bytes": 45296,
+      "sha256": "9d9b284e02130d33a11ebec54f0627dae8912680b3fc1268e4985540e805693f",
+      "lines": [
+        [
+          64,
+          71
+        ]
+      ],
+      "finding": "真实ready声明capture/UIA及message pointer/drag/keyboard/chords；未声明物理输入。"
+    },
+    {
+      "path": "/Users/chenqiang/Desktop/projects/CmbCoworkAgent/scripts/bot-native-sandbox/native-desktop/worker/WindowMessages.cs",
+      "bytes": 26047,
+      "sha256": "e73c458034688e686fc666f3b1eaabfc62abdf432a1072f726412e5b4f8edbc2",
+      "lines": [
+        [
+          329,
+          401
+        ]
+      ],
+      "finding": "已实现Control/Shift/Alt的受限WM_KEY/WM_SYSKEY序列及WM_CHAR字面Unicode；返回effectVerified:false，不更新物理键盘状态或实现IME/RawInput。"
+    },
+    {
+      "path": "/Users/chenqiang/Desktop/projects/CmbCoworkAgent/scripts/bot-native-sandbox/native-desktop/worker/Native.cs",
+      "bytes": 7976,
+      "sha256": "8f4c0fbd7bdf2a3c5b05e6a2982e6a7ef385c45738a4938ec97db381e752cd1e",
+      "lines": [
+        [
+          37,
+          49
+        ]
+      ],
+      "finding": "worker必须位于指定私有desktop，核验不具备switch/hook/journal权限。"
+    },
+    {
+      "path": "/Users/chenqiang/Desktop/projects/CmbCoworkAgent/scripts/bot-native-sandbox/native-desktop/worker/Launch.cs",
+      "bytes": 10730,
+      "sha256": "ac9216ade68dd7d80ce0fe48fdf2ff21d0318ad5e690784336b27d21e89fa068",
+      "lines": [
+        [
+          98,
+          117
+        ]
+      ],
+      "finding": "应用以Winsta0私有desktop启动，PID/startTicks/session/desktop明确绑定；未建立独立交互child session。"
+    },
+    {
+      "path": "/Users/chenqiang/Desktop/projects/CmbCoworkAgent/scripts/bot-native-sandbox/codex-fork/desktop.rs",
+      "bytes": 18260,
+      "sha256": "cc1f1c348296f5741b2e37eb1ea5a50760e9842ab467f68a19ae43f6bbf79041",
+      "lines": [
+        [
+          85,
+          92
+        ],
+        [
+          338,
+          377
+        ]
+      ],
+      "finding": "复用Codex私有桌面创建和ACL；Bot参与者不切换用户输入desktop，不等于独立物理输入通道。"
+    },
+    {
+      "path": "/Users/chenqiang/Desktop/projects/CmbCoworkAgent/src/main/bots/host-runtime-entry.ts",
+      "bytes": 16852,
+      "sha256": "47a2ca885bf9ed67e6a3b814b81091083e28dc53f16f2bf91ca56962ddad4af0",
+      "lines": [
+        [
+          79,
+          79
+        ],
+        [
+          135,
+          136
+        ],
+        [
+          242,
+          319
+        ]
+      ],
+      "finding": "一个用户目录建立持久browser profile和共享workspace；Windows native通过已有broker/factory绑定。"
+    },
+    {
+      "path": "/Users/chenqiang/Desktop/projects/CmbCoworkAgent/src/main/bots/computer-provider.ts",
+      "bytes": 17878,
+      "sha256": "14c27c646174e8e725b6b2924d8cda57f9543eb707756327cee8fa1537c6ac89",
+      "lines": [
+        [
+          223,
+          235
+        ]
+      ],
+      "finding": "共享持久Chromium context由专用profile启动，headless输入不依赖用户系统鼠标。"
+    },
+    {
+      "path": "/Users/chenqiang/Desktop/projects/CmbCoworkAgent/src/main/bots/browser-broker.ts",
+      "bytes": 78359,
+      "sha256": "f7f104e53760692b7180ff77fd142afc5bf8cdc0e608c53fe588b1a20a5f04c9",
+      "lines": [
+        [
+          112,
+          116
+        ]
+      ],
+      "finding": "共享用户browser context与每Bot页面/输入归属保持分离。"
+    },
+    {
+      "path": "/Users/chenqiang/Desktop/projects/CmbCoworkAgent/src/main/bots/native-desktop-broker.ts",
+      "bytes": 63657,
+      "sha256": "85f720a986d83001c073d384f7d3150ae3523fd2f2f9f3d97b7207472a136eb0",
+      "lines": [
+        [
+          77,
+          96
+        ],
+        [
+          290,
+          314
+        ],
+        [
+          1518,
+          1578
+        ]
+      ],
+      "finding": "已有scope/control epoch/目标/画面与接管边界；受限输入按真实capability判断。"
+    },
+    {
+      "path": "/Users/chenqiang/Desktop/projects/CmbCoworkAgent/src/main/bots/windows-native-desktop-factory.ts",
+      "bytes": 9265,
+      "sha256": "15618e08a540ff5556ac0605cd373079e2187ffda5ecc9dfdf24aff664dc0173",
+      "lines": [
+        [
+          78,
+          92
+        ],
+        [
+          177,
+          208
+        ]
+      ],
+      "finding": "已有资源完整性、owner协议、启动归属与Job空成员关闭证明可复用。"
+    },
+    {
+      "path": "/Users/chenqiang/Desktop/projects/CmbCoworkAgent/src/main/bots/native-desktop-tool.ts",
+      "bytes": 12725,
+      "sha256": "27955d00e490800c014ef148e83ba7018b9a0b2507827f263d967ce39a3f8c54",
+      "lines": [
+        [
+          234,
+          251
+        ]
+      ],
+      "finding": "模型工具已明确有限UIA/窗口消息范围和effect检查要求，不声称任意原生canvas成功。"
+    },
+    {
+      "path": "/Users/chenqiang/Desktop/projects/CmbCoworkAgent/scripts/bot-native-sandbox/native-desktop/source-manifest.json",
+      "bytes": 7395,
+      "sha256": "42816993978b18f410f8623d8f1112700f215de302a6c3f7eba4b944906cd5a2",
+      "lines": [],
+      "finding": "WinApp/Codex source pins、提取范围和当前未Windows实测状态的原始清单。"
+    },
+    {
+      "path": "/Users/chenqiang/Desktop/projects/CmbCoworkAgent/scripts/bot-native-sandbox/codex-fork/runner_client.rs",
+      "bytes": 20581,
+      "sha256": "bec267f6a2f9f13486c0196efa9df091184e46dbf8220fb49a0b5344a3d2edae",
+      "lines": [
+        [
+          324,
+          346
+        ],
+        [
+          348,
+          362
+        ],
+        [
+          380,
+          441
+        ],
+        [
+          451,
+          467
+        ]
+      ],
+      "finding": "既有runner以prepared SandboxCreds执行CreateProcessWithLogonW；先悬停/加入已有Job再resume，按确定PID认证pipes后发送请求。child迁入不可跳过或改用父用户执行模型应用。"
+    },
+    {
+      "path": "/Users/chenqiang/Desktop/projects/CmbCoworkAgent/src/main/bots/windows-native-preparation.ts",
+      "bytes": 8239,
+      "sha256": "4c9c446e17d0636a5640ce3ff2a4d9df495532bd38e42bddcb1ad5f86d4d7a59",
+      "lines": [
+        [
+          47,
+          118
+        ]
+      ],
+      "finding": "既有固定read/write/denied/code roots与Code/Workspace重叠拒绝，需在迁入child后继续作为同一授权policy，不因为session不同改为full-disk。"
+    }
+  ],
+  "referenceOriginals": [
+    {
+      "path": "/Users/chenqiang/Desktop/AI/cmb-bot-reference-sources/winapp/src/winapp-CLI/WinApp.UIAutomation/Input/KeyboardInput.cs",
+      "bytes": 26795,
+      "sha256": "d8d656c7dc8f687dc51e3fa637b2b3b3c8d49d86b988f4ed96e9c7b82527c9fd",
+      "lines": [
+        [
+          12,
+          21
+        ],
+        [
+          132,
+          147
+        ],
+        [
+          222,
+          274
+        ]
+      ],
+      "finding": "WinApp原件明确PostMessage不提供低层hook/raw键状态；SendInput为foreground通路，含分块/释放/焦点漂移处理可在隔离交互session内参考。"
+    },
+    {
+      "path": "/Users/chenqiang/Desktop/AI/cmb-bot-reference-sources/winapp/src/winapp-CLI/WinApp.UIAutomation/Input/ForegroundGuard.cs",
+      "bytes": 12973,
+      "sha256": "2c223ecf50f393b12770cb5adbe365cf9a62905cbd40a2f13ea4d110c5eccc51",
+      "lines": [
+        [
+          16,
+          22
+        ],
+        [
+          83,
+          114
+        ]
+      ],
+      "finding": "原件对SendInput检查真实foreground/root HWND；不能直接当后台独立输入实现。"
+    },
+    {
+      "path": "/Users/chenqiang/Desktop/AI/grok-bot-0.18-reconstructed-main/source/host/runner/box-reference-docs.ts",
+      "bytes": 8788,
+      "sha256": "bec437016b01064acf7b46d79d211a234f4700a150825b36ff919bdc7c3c065b",
+      "lines": [
+        [
+          26,
+          27
+        ]
+      ],
+      "finding": "重建源码描述X display :1与local Docker/默认brokered anyrun pod；不含Windows本机物理输入实现。"
+    },
+    {
+      "path": "/Users/chenqiang/Desktop/AI/grok-bot-0.18-reconstructed-main/source/host/runner/remote-box-resources.ts",
+      "bytes": 10095,
+      "sha256": "09be7488ce4e6ca3234c161630a5c2a206c6ecd8787c6db74e800e560b3eb15a",
+      "lines": [
+        [
+          241,
+          267
+        ]
+      ],
+      "finding": "Computer executor通过remoteAccessor调用；可参考协议和归属，不等于获得官方云端输入驱动源码。"
+    },
+    {
+      "path": "/Users/chenqiang/Desktop/AI/grok-bot-0.18-reconstructed-main/source/host/runner/tools/sand-computer-tool.ts",
+      "bytes": 15015,
+      "sha256": "daed23a47e3c76623d893e9f5036970323c3dbfff36b981f827bf2ab56c4d61e",
+      "lines": [
+        [
+          111,
+          132
+        ],
+        [
+          249,
+          258
+        ]
+      ],
+      "finding": "动作封装/批次/观察结果可参考；转换协议本身不解决Windows底层输入。"
+    },
+    {
+      "path": "/Users/chenqiang/Desktop/AI/cmb-bot-reference-sources/rakazo/infra/sandboxes/computer/start.sh",
+      "bytes": 4624,
+      "sha256": "25ad701a266eb0ec13aa0bf39c8ab1a4834b24ffd2478433fedd0dfcf294385c",
+      "lines": [
+        [
+          35,
+          38
+        ],
+        [
+          101,
+          101
+        ]
+      ],
+      "finding": "Xvfb和x11vnc构成Linux电脑画面，非Windows native driver。"
+    },
+    {
+      "path": "/Users/chenqiang/Desktop/AI/cmb-bot-reference-sources/rakazo/infra/sandboxes/computer/control.py",
+      "bytes": 12238,
+      "sha256": "d88bd90092c130052f7a8c4f85f44c69f72a8ccfc23f368c1e5c9c175c475b04",
+      "lines": [
+        [
+          124,
+          181
+        ],
+        [
+          202,
+          204
+        ]
+      ],
+      "finding": "受控DISPLAY+xdotool操作，动作/锁/边界可参考，不能移植为Windows物理输入。"
+    },
+    {
+      "path": "/Users/chenqiang/Desktop/AI/cmb-bot-reference-sources/rakazo/infra/sandboxes/supervisor/src/index.ts",
+      "bytes": 60924,
+      "sha256": "cf63a1ed6de1687a225f9cef72f59022388330279a0974c00818f836f16b9017",
+      "lines": [
+        [
+          749,
+          779
+        ]
+      ],
+      "finding": "输入根据可信managedScreen选container/layout，再在对应DISPLAY执行。"
+    }
+  ],
+  "referenceIdentity": {
+    "WinAppCliPinnedCommit": "3fd590017806562f088e6b275302610b9937674b",
+    "CodexPinnedCommitFromSourceManifest": "954fa9057bf3a4521ea34dbd010ff291d5b39763",
+    "GrokReconstruction": "0.18 reconstructed local source; content hashes above are original local identities, not official cloud source or current shipped behavior proof.",
+    "GrokCurrentInstalledIdentityEvidence": {
+      "path": "/Users/chenqiang/Desktop/projects/CmbCoworkAgent/docs/cmbcowork-bot-parity-plan/evidence/2026-10-07-current-delivery/current-grok-0681-installed-source-identity.safe.json",
+      "bytes": 1050,
+      "sha256": "1bc2daa2befe07e3f9b5fdb204574edff970c8ef2c782fd34479e2eeb55c76ac",
+      "lines": [],
+      "finding": "此前Root核验0.68.1 renderer原件identity；本次未重读或操作正式App。"
+    },
+    "RakazoIdentity": "以上实际读取的本地源码原件SHA；本次git identity查询未完成，未伪造commit。"
+  },
+  "officialSources": [
+    {
+      "url": "https://x.ai/bot",
+      "retrievedAtDate": "2026-10-09",
+      "lines": [
+        [
+          198,
+          200
+        ]
+      ],
+      "supports": "所有同用户Bot共享一台持久云电脑和文件/浏览器/登录，隔离按用户；并未要求每Bot一VM。"
+    },
+    {
+      "url": "https://learn.microsoft.com/en-us/windows/win32/winstation/desktops",
+      "retrievedAtDate": "2026-10-09",
+      "lines": [
+        [
+          31,
+          34
+        ]
+      ],
+      "supports": "同一Winsta0同时一个活动input desktop；CreateDesktop本身不创建多路物理输入。"
+    },
+    {
+      "url": "https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-sendinput",
+      "retrievedAtDate": "2026-10-09",
+      "lines": [
+        [
+          36,
+          40
+        ],
+        [
+          65,
+          73
+        ]
+      ],
+      "supports": "SendInput注入键鼠输入流，无HWND目标参数，存在UIPI及既有按键状态影响。"
+    },
+    {
+      "url": "https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-setkeyboardstate",
+      "retrievedAtDate": "2026-10-09",
+      "lines": [
+        [
+          30,
+          32
+        ]
+      ],
+      "supports": "SetKeyboardState只更改调用线程键状态，不能独立修复任意目标线程的键盘语义。"
+    },
+    {
+      "url": "https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-attachthreadinput",
+      "retrievedAtDate": "2026-10-09",
+      "lines": [
+        [
+          66,
+          68
+        ]
+      ],
+      "supports": "AttachThreadInput共享输入状态且不能跨desktop；不是多路独立输入保证。"
+    },
+    {
+      "url": "https://learn.microsoft.com/en-us/windows/win32/inputdev/about-raw-input",
+      "retrievedAtDate": "2026-10-09",
+      "lines": [
+        [
+          38,
+          40
+        ],
+        [
+          59,
+          62
+        ]
+      ],
+      "supports": "RawInput设备数据/WM_INPUT与传统窗口消息不同；不能据WM_CHAR/WM_MOUSE投递推断全部应用效果。"
+    },
+    {
+      "url": "https://learn.microsoft.com/en-us/windows/win32/termserv/child-sessions",
+      "retrievedAtDate": "2026-10-09",
+      "lines": [
+        [
+          31,
+          45
+        ]
+      ],
+      "supports": "Windows原生loopback RDP child session、最多一个活动已连接child、父session退出即结束；需WTSEnableChildSessions及ActiveX ConnectToChildSession。"
+    },
+    {
+      "url": "https://learn.microsoft.com/en-us/windows/win32/api/wtsapi32/nf-wtsapi32-wtsenablechildsessions",
+      "retrievedAtDate": "2026-10-09",
+      "lines": [
+        [
+          32,
+          49
+        ],
+        [
+          54,
+          63
+        ]
+      ],
+      "supports": "已有公共API开启/关闭child sessions，不需要从零发明OS输入隔离。"
+    },
+    {
+      "url": "https://learn.microsoft.com/en-us/power-automate/desktop-flows/run-desktop-flows-pip",
+      "retrievedAtDate": "2026-10-09",
+      "lines": [
+        [
+          110,
+          129
+        ],
+        [
+          149,
+          173
+        ],
+        [
+          181,
+          199
+        ]
+      ],
+      "supports": "Microsoft产品child模式可在次级session执行物理键鼠/截图；profile、身份、Office、剪贴板等限制为兼容性验证线索，不直接把所有产品限制推广为原生API硬限制。"
+    },
+    {
+      "url": "https://learn.microsoft.com/en-us/windows/win32/termserv/imsrdpextendedsettings-property",
+      "retrievedAtDate": "2026-10-09",
+      "lines": [
+        [
+          38,
+          58
+        ],
+        [
+          136,
+          152
+        ]
+      ],
+      "supports": "ConnectToChildSession是IMsRdpExtendedSettings.Property中的VT_BOOL；IID为302D8188-0052-4807-806A-362B628F9AC5，true把连接定向localhost。"
+    },
+    {
+      "url": "https://learn.microsoft.com/en-us/windows/win32/termserv/imsrdpclientnonscriptable5",
+      "retrievedAtDate": "2026-10-09",
+      "lines": [
+        [
+          31,
+          67
+        ],
+        [
+          92,
+          93
+        ]
+      ],
+      "supports": "此接口由QueryInterface获得，成员表未包含ConnectToChildSession；不能把extended settings属性声明为该vtable成员。"
+    },
+    {
+      "url": "https://learn.microsoft.com/en-us/windows/win32/termserv/imsrdpclientadvancedsettings5",
+      "retrievedAtDate": "2026-10-09",
+      "supports": "从AdvancedSettings取得接口再QI至AdvancedSettings5；RedirectClipboard默认true，RedirectDevices和POS默认false。必须明确设置并核验版本，不依赖默认安全性。"
+    },
+    {
+      "url": "https://learn.microsoft.com/en-us/windows/win32/termserv/imsrdpclientadvancedsettings5-redirectclipboard",
+      "retrievedAtDate": "2026-10-09",
+      "lines": [
+        [
+          38,
+          48
+        ]
+      ],
+      "supports": "有读写RedirectClipboard布尔属性，可显式设false并读回核对。"
+    },
+    {
+      "url": "https://learn.microsoft.com/en-us/windows/win32/termserv/imsrdpclientadvancedsettings-redirectdrives",
+      "retrievedAtDate": "2026-10-09",
+      "lines": [
+        [
+          38,
+          48
+        ]
+      ],
+      "supports": "RedirectDrives以VARIANT_FALSE禁止磁盘重定向。"
+    },
+    {
+      "url": "https://learn.microsoft.com/en-us/windows/win32/termserv/imsrdpclientadvancedsettings5-redirectdevices",
+      "retrievedAtDate": "2026-10-09",
+      "lines": [
+        [
+          38,
+          48
+        ]
+      ],
+      "supports": "RedirectDevices以false禁止设备重定向。"
+    },
+    {
+      "url": "https://learn.microsoft.com/en-us/windows/win32/termserv/imstscsecuredsettings-startprogram",
+      "retrievedAtDate": "2026-10-09",
+      "supports": "StartProgram指定连接后启动程序；为空则启动session用户shell。它可以作为固定可信bootstrap候选，但尚无其在具体Child Session策略下有效的实机证据，不能失败后开放完整父用户shell。"
+    },
+    {
+      "url": "https://learn.microsoft.com/en-us/windows/win32/api/wtsapi32/nf-wtsapi32-wtsgetchildsessionid",
+      "retrievedAtDate": "2026-10-09",
+      "lines": [
+        [
+          32,
+          48
+        ]
+      ],
+      "supports": "取当前session的child ID；无child返回ULONG(-1)，必须与实际启动process session证明比对。"
+    },
+    {
+      "url": "https://learn.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-createprocessasuserw",
+      "retrievedAtDate": "2026-10-09",
+      "lines": [
+        [
+          54,
+          58
+        ],
+        [
+          87,
+          90
+        ],
+        [
+          148,
+          152
+        ]
+      ],
+      "supports": "进程session由token决定，默认与LogonUser调用session一致；不能跨session继承handles，需匹配desktop/DACL与用户environment。证明session迁入不等于证明权限隔离。"
+    }
+  ],
+  "minimalReliableCandidate": {
+    "name": "user-shared-native-Windows-Child-Session-provider",
+    "status": "documented-OS-candidate-not-implemented-or-Windows-tested",
+    "reasonNowWorthValidating": "官网每用户共享一电脑，使只有一个child session不足以否定多Bot共享电脑路线；需要对照实际Grok输入资源调度，不能凭FAQ推断所有GUI并行方式。",
+    "reuse": [
+      "既有Bot任务/store/lease/恢复，不引入第二套Agent循环",
+      "共享workspace与专用browser profile",
+      "native broker目标身份、frame/control epoch、审批/effect/unknown、人工接管",
+      "已固定WinApp的UIA/WGC与键鼠编码/焦点漂移/有界分块/释放逻辑",
+      "资源owner/Job关闭证明和打包seal/hash/protocol约束"
+    ],
+    "requiredNewCode": [
+      "Windows API探测与原生ActiveX child-session连接/状态生命周期",
+      "可信session ID/父用户/owner绑定；worker明确运行在child而非用户主session",
+      "以真实child input domain建立用户级输入仲裁和Bot具体目标授权，UIA/CDP目标操作可独立调度",
+      "隔离child内的输入实现与画面；取消/部分投递为unknown且不重放，接管后重新观察",
+      "对连接/父session退出/锁屏/断网/Host重启/升级建立资源和恢复证明",
+      "明确浏览器profile唯一所有者；配置剪贴板/磁盘/设备重定向，禁止静默跨主桌面输入"
+    ],
+    "probeNotPresent": {
+      "searchRoots": [
+        "scripts/bot-native-sandbox",
+        "src/main/bots",
+        "src/shared"
+      ],
+      "sourceGlobs": [
+        "*.cs",
+        "*.ts",
+        "*.rs",
+        "*.py"
+      ],
+      "terms": [
+        "WTSEnableChildSessions",
+        "WTSGetChildSessionId",
+        "ConnectToChildSession",
+        "IMsRdpExtendedSettings",
+        "MstscAx",
+        "MsRdpClient"
+      ],
+      "matches": 0,
+      "completed": true,
+      "scope": "本项目上述核心源文件，无外部库完整实现缺失断言。"
+    },
+    "validationRequired": [
+      "实际目标Windows版本/策略/认证方式能建立child，不能以公共文档代替实机通过",
+      "用户主桌面输入与Bot画布点击/拖拽/快捷键/中文及应用效果互不误投",
+      "共享Bot电脑中的并发与任务交接；设备输入互斥不得冒充独立多套物理输入",
+      "浏览器登录共享、profile锁、原生应用跨session兼容性与上传下载归属",
+      "接管/中止/Host失联/恢复/安装升级的真实闭环"
+    ],
+    "architectureAssessment": "无需重做任务、持久化和UI主体；需新增computer provider/原生session控制面及受支持环境验证，不是给现有WindowMessages加几个API即可完成。",
+    "notApprovedFallbacks": [
+      "SwitchDesktop到用户主session然后SendInput",
+      "全局pyautogui/UFO foreground input作为私有目标回退",
+      "拷贝WinApp SendInput后直接翻真实能力flag",
+      "将Windows核心范围悄悄缩为UIA/浏览器",
+      "未经授权安装Linux容器或虚拟机"
+    ]
+  },
+  "remainingClaim": "保留Windows通用原生电脑实现缺口；共享电脑架构主体已对齐，有限modifier消息已有源码；本记录没有新增Windows实测通过证据。",
+  "childSessionIdentityAssessment": {
+    "status": "specific-safe-candidate-contract-not-implemented-or-verified-on-Windows",
+    "interfaceCorrection": {
+      "correct": "IMsRdpExtendedSettings.Property(\"ConnectToChildSession\", VT_BOOL=true)",
+      "iid": "302D8188-0052-4807-806A-362B628F9AC5",
+      "not": "IMsRdpClientNonScriptable5.ConnectToChildSession",
+      "actualTypeLibrary": "MsTscAx.dll",
+      "comDeclarationRule": "构建时按实际Windows type library/SDK生成或完整核对interop；不能把不完整COM vtable、dynamic成功或缺属性当通过。"
+    },
+    "minimumControlInitializationContract": [
+      "受信任独立STA ActiveX宿主负责Windows API状态探测、WTSEnableChildSessions及MsTscAx实例；不把MTA UIA worker直接变成RDP控件容器。",
+      "Connect之前设置正确ExtendedSettings的VT_BOOL child模式和固定localhost目标；连接事件本身不证明restricted执行身份。",
+      "显式设置并读回RedirectClipboard=false、RedirectDrives=false、RedirectDevices=false及所需设备/POS等禁用项；可用接口和属性由受支持版本探测。ManualClipboardSync只控制同步，不能代替禁止剪贴板。",
+      "RDP连接只是受信任控制/展示通路；模型不能得到父用户完整桌面输入、命令启动、剪贴板或任意redirection访问。",
+      "优先固定安装路径及hash的可信bootstrap作为StartProgram候选；若Child Session不执行或策略拒绝，关闭/拒绝该provider，不能fallback成父用户Explorer/Run或全局输入。",
+      "连接后以WTSGetChildSessionId及实际bootstrap/runner/worker PID、启动身份、TokenUser、TokenSessionId、窗口desktop、Job归属组成完整证据；不能只接受worker自报session ID。"
+    ],
+    "preparedAccountPreservation": {
+      "verifiedExistingChain": "当前runner_client.rs通过现有SandboxCreds启动codex-command-runner.exe，以确定进程handles先加入资源Job再resume，认证pipes PID后下发固定spawn request。windows-native-preparation继续固定roots/policy。",
+      "neededMigration": "可信child内bootstrap继续复用该prepared account/SID链和restricted runner/child权限；由child内调用secondary-logon/token创建使实际process位于child。迁入前后核验同policy hash、read/write/deny/code roots与实际TokenUser/restricting groups/TokenSessionId；未证明前不开放模型输入。",
+      "notEquivalent": "父用户自动登录、仅将模型worker移动到child，或者仅校验PID/sessionID，均不等于prepared Bot运行账号和文件权限保留。",
+      "indirectPrivilegeRisk": "即便一个worker受限，若模型可向完整父用户child shell输入，仍可能经Explorer/Run/已有父用户应用间接读取或修改未授权资料。需要模型可达的应用/窗口确属受限SID、目标和Job，私有desktop/input边界明确；不能以secondary-logon一个进程就签整台电脑安全。",
+      "crossSessionBoundary": "跨session不能依赖继承stdio/Job handles；控制pipe/Job命名域、ACL、对端PID/token/session认证和owner关闭证明必须按实际拓扑验证。把Host现有工厂直接换目标session不足以成立。",
+      "currentWorkerCompatibility": "当前Native.AssertPrivate要求指定CodexSandboxDesktop前缀和switch/hook/journal权限拒绝，Native.Launch绑定同worker session。若使用child输入desktop，trusted owner与worker权利必须分别证明；不能删除private/identity检查来让程序启动。",
+      "knownUnverified": "尚未证明具体Child Session上固定bootstrap启动、prepared账号令牌/读取约束、私有输入desktop选择、Job/IPC跨session与物理效果；本次不补假provider或能力flag。"
+    },
+    "nextCodingGate": "可作为下一computer provider实现目标，但先完成真实Token/SID/Job/policy/session/桌面输入及禁重定向关系的原生验证；不以没有用户提供Windows连接为源码分析前置条件。",
+    "auditStoppedAtParentRequestedBoundary": true,
+    "windowsScopeReduced": false
+  }
+}

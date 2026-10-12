@@ -1,0 +1,32 @@
+{
+  "verifiedAt": "2026-10-07T09:16:37.085611+00:00",
+  "status": "PASS",
+  "actualResult": {
+    "phase": "actual-opening-metadata-output-original-full49-with-routine-read-owner-isolation",
+    "startedAt": "2026-10-07T09:02:08.372703+00:00",
+    "completedAt": "2026-10-07T09:15:55.155278+00:00",
+    "seconds": 826.782604750013,
+    "exitCode": 0,
+    "inputCount": 3834,
+    "sourceDrift": [],
+    "logSHA256": "25d936d2636064a5e7f57ec10bc037086141c532fc40df7518e76c1c3ee2fd8a",
+    "automaticRetries": 0,
+    "wrapperOverridesOriginalTimeouts": false
+  },
+  "nativeBuildId": "aa183a16dd2d22fe8ad060e4",
+  "outputRevisionSHA256": "0ce3e79902f8ee8bedfaead445890c67cc96fb08a40e12252ec30743d7b05dcc",
+  "rendererChunk": "BotWorkspace-D-23g-nQ.js",
+  "actualStagesCompletedInOriginalOrder": 49,
+  "firstOriginalFiles": 27,
+  "firstActualPassedTests": 166,
+  "firstPendingAndFailedTests": 0,
+  "firstReportSHA256": "fddfca0e1d06a45d67a0d3c526b7a0ea1aaf417ab2652d848a4930b6c9f71396",
+  "directScripts": 47,
+  "finalSeparateNewChatStagePassed": true,
+  "originalAssertionsAndTimeoutsPreserved": true,
+  "previousWorkspaceTimeoutRootCauseProven": false,
+  "previous31ReadOriginProven": false,
+  "testPreconditionIsolatesVisibleSummary": true,
+  "fixtureAddsOriginalInspectorCloseAndHiddenSynchronization": true,
+  "windowsLinuxRealModelAcceptance": false
+}

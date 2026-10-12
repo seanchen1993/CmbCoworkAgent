@@ -1,4 +1,5 @@
 import { normalizeWorkspacePathKey } from "../../shared/workspace-path"
+import { notifyRuntimeConfigurationChanged } from "../runtime-configuration-events"
 
 let globalRevision = 0
 const workspaceRevisions = new Map<string, number>()
@@ -9,6 +10,7 @@ export function getHookCatalogGlobalRevision(): number {
 
 export function bumpHookCatalogGlobalRevision(): number {
   globalRevision += 1
+  notifyRuntimeConfigurationChanged()
   return globalRevision
 }
 

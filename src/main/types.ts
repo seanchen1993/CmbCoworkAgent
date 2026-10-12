@@ -1187,6 +1187,8 @@ export interface UserInputQuestion {
   id: string
   question: string
   options: UserInputOption[]
+  /** Bot forms may allow several choices; existing desktop tool requests remain single-choice. */
+  multiple?: boolean
 }
 
 export interface UserInputRequest {
@@ -1198,6 +1200,7 @@ export interface UserInputRequest {
 }
 
 export type UserInputAnswer =
+  | { type: "multiple"; questionId: string; optionIndices: number[]; labels: string[] }
   | {
       type: "option"
       questionId: string

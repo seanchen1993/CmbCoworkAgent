@@ -5309,7 +5309,7 @@ async function testRestoreRunningWorkerAsRecoverableStaleFailure(): Promise<void
     assert(restored.length === 1, "restore should load stale running worker")
     assert(restored[0].status === "failed", "stale running worker should become failed")
     assert(
-      restored[0].error?.includes("CmbCowork restarted"),
+      restored[0].error?.includes("CMBDevClaw restarted"),
       "stale worker should explain restart interruption"
     )
     assert(
@@ -5326,7 +5326,7 @@ async function testRestoreRunningWorkerAsRecoverableStaleFailure(): Promise<void
     const result = await manager.readWorkerResult(threadId, workerId)
     assert(result.worker.status === "failed", "stale restored worker result should be readable")
     assert(
-      result.result_text.includes("CmbCowork restarted"),
+      result.result_text.includes("CMBDevClaw restarted"),
       "stale restored worker result should include the restart interruption reason"
     )
 

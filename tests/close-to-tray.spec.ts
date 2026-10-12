@@ -7,6 +7,7 @@ import {
   normalizeWindowCloseBehavior,
   reduceCloseToTrayPrompt,
   resolveWindowCloseRequest,
+  shouldQuitAfterAllWindowsClosed,
   type CloseToTrayPromptOpenEvent
 } from "../src/shared/close-to-tray"
 
@@ -14,6 +15,12 @@ const readRepositoryFile = (path: string): string =>
   readFileSync(resolve(process.cwd(), path), "utf8")
 
 describe("window close behavior", () => {
+  it("retains macOS background operation but completes a confirmed quit after window teardown", () => {
+    expect(shouldQuitAfterAllWindowsClosed("darwin", false)).toBe(false)
+    expect(shouldQuitAfterAllWindowsClosed("darwin", true)).toBe(true)
+    expect(shouldQuitAfterAllWindowsClosed("win32", false)).toBe(true)
+    expect(shouldQuitAfterAllWindowsClosed("linux", false)).toBe(true)
+  })
   it("normalizes stored values and maps prompt actions", () => {
     expect(normalizeWindowCloseBehavior(undefined)).toBe("ask")
     expect(normalizeWindowCloseBehavior("not-a-behavior")).toBe("ask")
@@ -109,9 +116,7 @@ describe("close behavior UI integration", () => {
   const mainProcess = readRepositoryFile("src/main/index.ts")
   const agentIpc = readRepositoryFile("src/main/ipc/agent.ts")
   const workflowManager = readRepositoryFile("src/main/agent/workflow/run-manager.ts")
-  const coordinatorManager = readRepositoryFile(
-    "src/main/agent/coordinator-worker-manager.ts"
-  )
+  const coordinatorManager = readRepositoryFile("src/main/agent/coordinator-worker-manager.ts")
   const scheduler = readRepositoryFile("src/main/services/scheduler.ts")
   const heartbeat = readRepositoryFile("src/main/services/heartbeat.ts")
   const builtinRobotManager = readRepositoryFile("src/main/services/im/manager.ts")
@@ -165,9 +170,7 @@ describe("close behavior UI integration", () => {
     expect(workflowManager.includes("cancelAllAndWait")).toBe(true)
     expect(coordinatorManager.includes("cancelAllWorkersAndWait")).toBe(true)
     expect(agentIpc.includes("LocalSandbox.beginApplicationShutdown()")).toBe(true)
-    expect(agentIpc.includes("LocalSandbox.cancelAllBackgroundTasksAndWait(timeoutMs)")).toBe(
-      true
-    )
+    expect(agentIpc.includes("LocalSandbox.cancelAllBackgroundTasksAndWait(timeoutMs)")).toBe(true)
     expect(agentIpc.includes("LocalSandbox.killAllAndWait(timeoutMs)")).toBe(true)
     const agentShutdown = agentIpc.slice(
       agentIpc.indexOf("export async function shutdownAllAgentTasks("),

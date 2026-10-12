@@ -19,6 +19,8 @@ export function FunctionClient({
   pane,
   node,
   snapshot,
+  disabled = false,
+  dispatch,
   refresh,
   render
 }: {
@@ -26,6 +28,8 @@ export function FunctionClient({
   pane: string
   node: FunctionUiElement
   snapshot: FunctionClientSnapshot
+  disabled?: boolean
+  dispatch?: Window["api"]["mods"]["clientAct"]
   refresh(): void
   render(tree: FunctionUiElement, busy: boolean, act: Control): ReactNode
 }) {
@@ -47,7 +51,8 @@ export function FunctionClient({
   }, [])
   const send = useCallback(
     async (kind: FunctionClientAction["kind"], value?: ModJson, handle?: number) => {
-      await window.api.mods.clientAct(threadId, {
+      if (disabled) return
+      await (dispatch ?? window.api.mods.clientAct)(threadId, {
         pane,
         instance: snapshot.id,
         intentId: crypto.randomUUID(),
@@ -57,11 +62,11 @@ export function FunctionClient({
       })
       if (mounted.current && ["press", "submit", "select"].includes(kind)) refreshRef.current()
     },
-    [threadId, pane, snapshot.id]
+    [threadId, pane, snapshot.id, dispatch, disabled]
   )
   useEffect(() => {
     const element = region.current
-    if (!element || snapshot.error) return
+    if (!element || snapshot.error || disabled) return
     let frame = 0,
       last = ""
     const observer = new ResizeObserver(() => {
@@ -83,7 +88,7 @@ export function FunctionClient({
       observer.disconnect()
       cancelAnimationFrame(frame)
     }
-  }, [send, snapshot.error])
+  }, [send, snapshot.error, disabled])
   const control: Control = async (control, kind, value) => {
     if (kind === "close" || !control?.press) return
     if (kind !== "change") setBusy(true)
@@ -98,6 +103,7 @@ export function FunctionClient({
   }
   const pointer = (event: React.PointerEvent<HTMLDivElement>, type: string): void => {
     if (
+      disabled ||
       snapshot.error ||
       (event.target instanceof HTMLElement && event.target.closest("button,input,select,a"))
     )
@@ -167,7 +173,7 @@ export function FunctionClient({
           if (previousFocus.current?.isConnected) previousFocus.current.focus()
           return
         }
-        if (event.target !== event.currentTarget || snapshot.error) return
+        if (event.target !== event.currentTarget || snapshot.error || disabled) return
         const names: Record<string, string> = {
           ArrowUp: "up",
           ArrowDown: "down",
@@ -199,7 +205,7 @@ export function FunctionClient({
           {error}
         </p>
       )}
-      {render(snapshot.tree, busy, control)}
+      {render(snapshot.tree, busy || disabled, control)}
     </div>
   )
 }

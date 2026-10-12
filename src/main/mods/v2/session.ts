@@ -63,6 +63,7 @@ import { validateFunctionTurnInput, validateFunctionTurnResult } from "./turn-co
 import { FunctionTurnAbortBudget } from "./turn-lifecycle"
 
 export interface FunctionSessionHost {
+  background?<T>(run: () => Promise<T>): Promise<T>
   threadId: string
   workspace: string
   cwd?(): string
@@ -137,17 +138,20 @@ export class FunctionSession {
       assertLive: () => this.assertLive(),
       // Mounted surfaces outlive the event that created them. A host timer is a fresh
       // read-only entry; it never inherits a click's lease or user-write authority.
-      background: (run) =>
-        withFunctionAgentExecution(
-          {
-            workspace: host.workspace,
-            threadId: host.threadId,
-            userInitiated: false,
-            leased: false,
-            immediate: true
-          },
-          run
-        ),
+      background: (run) => {
+        const execute = () =>
+          withFunctionAgentExecution(
+            {
+              workspace: host.workspace,
+              threadId: host.threadId,
+              userInitiated: false,
+              leased: false,
+              immediate: true
+            },
+            run
+          )
+        return this.host.background ? this.host.background(execute) : execute()
+      },
       changed: () => this.panes.notify(),
       publish: (value) => this.host.publish(value, this.controller.signal),
       load: (plugin, module) => {

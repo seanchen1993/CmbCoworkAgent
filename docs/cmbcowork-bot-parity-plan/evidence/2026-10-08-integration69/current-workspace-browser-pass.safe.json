@@ -1,0 +1,24 @@
+{
+  "at": "2026-10-08T02:03:20.200867+00:00",
+  "script": "tests/bot-workspace-browser.spec.ts",
+  "exitCode": 0,
+  "completeOriginalFixture": true,
+  "log": {
+    "path": "/Users/chenqiang/Library/Application Support/CMBDevClaw-development/2026-10-08/root-gates/integration69-workspace-browser-current-pending-path.log",
+    "bytes": 1451,
+    "sha256": "04676378cb9ef39d26e4d160a7115664dd78f5fc979b930dbdf4cc66b0a7aa6a"
+  },
+  "changes": [
+    "Actual explicit skill entry and returned editor focus",
+    "Production Sonner placement",
+    "Short routine menu labels with exact accessible menu scope",
+    "Modern pending-card RPC fault and retry with approval inaccessible until exact full card is read"
+  ],
+  "productionMenuAccessibilityFixed": true,
+  "priorFailuresRetained": true,
+  "boundary": "Actual Chromium production React workspace with deterministic task executor and owned synthetic Host; not real MiniMax execution or all Grok/UI parity",
+  "completePlanClaimed": false,
+  "sourceScript": {
+    "sha256": "83b5de4ccaa6183b6b700f33613f698b3996a7bb3850d55af5b5718fd7b52ce5"
+  }
+}

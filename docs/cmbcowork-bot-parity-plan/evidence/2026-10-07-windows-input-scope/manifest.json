@@ -1,0 +1,18 @@
+{
+  "status": "READ_ONLY_SOURCE_REVIEW",
+  "generatedAtUtc": "2026-10-07T03:44:35.375453+00:00",
+  "candidateRoot": "/tmp/cmb-windows-input-scope-readonly-v1",
+  "reportSha256": "5f9ffeab0c459879fca6ae49b4090ed621f9af12e3087ef6e7b3f0bc46f48d9b",
+  "sourceContractsSha256": "80065d5bc591df7b6eabd1ee68a545c4ebf266c67c679e996494455b2e36dc16",
+  "sourceFiles": 18,
+  "supportedUnmodifiedKeyCount": 27,
+  "genericHwndChordModuleAvailable": false,
+  "existingUiASelectAllAndSetValueAvailable": true,
+  "arbitraryTargetModifierImeRawInputSupported": false,
+  "productionWritten": false,
+  "windowsExecuted": false,
+  "chromeLaunched": false,
+  "electronLaunched": false,
+  "wholeAuditOrGateRun": false,
+  "parallelGrokReview": "/tmp/cmb-windows-input-grok-readonly-v1/REPORT.md"
+}

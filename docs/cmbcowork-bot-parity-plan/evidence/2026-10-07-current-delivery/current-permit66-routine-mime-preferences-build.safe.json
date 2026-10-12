@@ -1,0 +1,187 @@
+{
+  "schemaVersion": 1,
+  "kind": "Root-integrated-per-Bot-preferences-routine-admission-MIME-source-and-build",
+  "recordedAt": "2026-10-07T17:00:48.884068+00:00",
+  "schema": 66,
+  "buildId": "18eb3cb377377989a66c0b28",
+  "productionSource": [
+    {
+      "path": "/Users/chenqiang/Desktop/projects/CmbCoworkAgent/src/main/bots/local-tool-permission.ts",
+      "bytes": 21836,
+      "sha256": "a85cc9650fbaaebba99f3475d4dbe0d4444ff34bfa49f2835c8c7f814cfff638"
+    },
+    {
+      "path": "/Users/chenqiang/Desktop/projects/CmbCoworkAgent/src/main/bots/local-tool-gate.ts",
+      "bytes": 10893,
+      "sha256": "b244c40c35fce6f0896a372a382aeb4e877b3d6f15705657c4a2e38c915899c7"
+    },
+    {
+      "path": "/Users/chenqiang/Desktop/projects/CmbCoworkAgent/src/main/bots/schema.ts",
+      "bytes": 30492,
+      "sha256": "93b9cde87b20d596f286dd10818e71ea6a2416262a22c8e86bce36c537077b0a"
+    },
+    {
+      "path": "/Users/chenqiang/Desktop/projects/CmbCoworkAgent/src/main/bots/migrations.ts",
+      "bytes": 14059,
+      "sha256": "1c24772dfe26ee621d1948121aac19aaf0ae29ae82e094703a4d2c5cbf5d7e43"
+    },
+    {
+      "path": "/Users/chenqiang/Desktop/projects/CmbCoworkAgent/src/main/bots/routine-tools.ts",
+      "bytes": 14597,
+      "sha256": "c9ae374ecf178c8e639544dd04ee86f70790490b9c642622848d972b5315e937"
+    },
+    {
+      "path": "/Users/chenqiang/Desktop/projects/CmbCoworkAgent/src/main/bots/deliver-file-tool.ts",
+      "bytes": 4015,
+      "sha256": "cbdc9c5143bc89ee3ad452b9c85e342a788c517342f3b1b34aba66e50304e657"
+    },
+    {
+      "path": "/Users/chenqiang/Desktop/projects/CmbCoworkAgent/src/renderer/src/components/bots/BotApprovalContent.tsx",
+      "bytes": 27813,
+      "sha256": "41f8cf61bcce97326981cb66e9683eada0749f43ebb9f8f5c16fc2f7fe524f7a"
+    },
+    {
+      "path": "/Users/chenqiang/Desktop/projects/CmbCoworkAgent/src/renderer/src/components/bots/BotWorkspace.tsx",
+      "bytes": 166967,
+      "sha256": "4f798f8c86c815b0a5f22d96b691e2b7262a6d10237e0086e7809e253e2ca82a"
+    },
+    {
+      "path": "/Users/chenqiang/Desktop/projects/CmbCoworkAgent/src/renderer/src/lib/bot-inspector-preferences.ts",
+      "bytes": 5370,
+      "sha256": "0bb0cac5a32ceb11e6226a8ad1af848b2c63ab85e957ee98decf08322a7d289b"
+    }
+  ],
+  "compiled": [
+    {
+      "path": "/Users/chenqiang/Desktop/projects/CmbCoworkAgent/out/main/bot-native-build.json",
+      "bytes": 23240,
+      "sha256": "7af9a4982f3448ab235e25b43546048bd92b9204f7cb6da8da10b05482873aa9"
+    },
+    {
+      "path": "/Users/chenqiang/Desktop/projects/CmbCoworkAgent/out/main/bot-host.js",
+      "bytes": 6215,
+      "sha256": "622f356fadaf7834f14fb2782d9f1ffb73bb5c57f680eaf40c03fbe8e42ddf9e"
+    },
+    {
+      "path": "/Users/chenqiang/Desktop/projects/CmbCoworkAgent/out/renderer/assets/BotWorkspace-DlZdivxg.js",
+      "bytes": 2496598,
+      "sha256": "79a31970d37787f49365f4e57156a9dfc3a6209003db04084acbd8b38de61a49"
+    }
+  ],
+  "gates": [
+    {
+      "name": "permission-routine-migration-approval-nearest",
+      "passed": 131,
+      "filesPassed": 10,
+      "exitCode": 0,
+      "log": {
+        "path": "/tmp/cmb-permit66-routine-root-nearest.log",
+        "bytes": 4673,
+        "sha256": "956de6cd822a01bf32ddc23d1b0169cad4bce494a918bd5c7b0439104ec88115"
+      }
+    },
+    {
+      "name": "additional-negative-admission-boundary",
+      "passed": 1,
+      "skipped": 22,
+      "exitCode": 0,
+      "log": {
+        "path": "/tmp/cmb-permit66-negative-root.log",
+        "bytes": 507,
+        "sha256": "1a9b371c21d9795093a4a681093535b8858070193897b3ab7d7bd0b71f0c507d"
+      }
+    },
+    {
+      "name": "MIME-deliver-file-nearest",
+      "passed": 36,
+      "filesPassed": 1,
+      "exitCode": 0,
+      "log": {
+        "path": "/tmp/cmb-generated-mime-root-nearest.log",
+        "bytes": 480,
+        "sha256": "80b3c51df94fc0995838e03344a4f750963834d3338e6d191e8e2e1dd38833e5"
+      },
+      "selectionCorrection": "The first filter named two absent neighboring files; Vitest ran only the intended deliver-file36. Missing intended neighbors were then run separately, not counted as covered."
+    },
+    {
+      "name": "MIME-remaining-artifacts-publication-nearest",
+      "passed": 14,
+      "filesPassed": 2,
+      "exitCode": 0,
+      "log": {
+        "path": "/tmp/cmb-generated-mime-root-remaining14.log",
+        "bytes": 713,
+        "sha256": "e9c11cf4d783c6b3af27ad7ece303885b83a70b283105ccef3848b9f604fe531"
+      }
+    },
+    {
+      "name": "Node-types-after-final-production-change",
+      "exitCode": 0,
+      "log": {
+        "path": "/tmp/cmb-generated-mime-root-node.log",
+        "bytes": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      }
+    },
+    {
+      "name": "Web-types-after-approval-UI-change",
+      "exitCode": 0,
+      "log": {
+        "path": "/tmp/cmb-permit66-routine-root-web.log",
+        "bytes": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      }
+    },
+    {
+      "name": "permission-routine-lint",
+      "exitCode": 0,
+      "warnings": 0,
+      "log": {
+        "path": "/tmp/cmb-permit66-routine-root-lint.log",
+        "bytes": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      }
+    },
+    {
+      "name": "MIME-and-new-negative-test-lint",
+      "exitCode": 0,
+      "warnings": 0,
+      "log": {
+        "path": "/tmp/cmb-generated-mime-root-lint.log",
+        "bytes": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      }
+    },
+    {
+      "name": "production-build",
+      "exitCode": 0,
+      "log": {
+        "path": "/tmp/cmb-permit66-routine-mime-prefs-production-build.log",
+        "bytes": 56050,
+        "sha256": "58649eb3351e7124f4fbc231181bf6e048bf86b16ed6721c6129a4c61079d7b9"
+      }
+    }
+  ],
+  "additionalInspectorEvidence": {
+    "path": "/Users/chenqiang/Desktop/projects/CmbCoworkAgent/docs/cmbcowork-bot-parity-plan/evidence/2026-10-07-current-delivery/current-inspector-per-bot-preferences.safe.json",
+    "bytes": 3209,
+    "sha256": "1ace1b6f14e12d8c307d85a5455c6ddec8e1cf37aa82cc64f3ff946d75bc638c"
+  },
+  "contracts": [
+    "Per-Bot tab choice with bounded existing workspace-scoped storage; explicit choice alone is durable, temporary header views do not replace it.",
+    "Create routine enabled=false is atomic, omitted enabled preserves legacy receipt identity; skill selection reuses existing exact version and verified-skill fences.",
+    "Standing Always renewal requires exact unchanged policy/target/data epoch; explicit own write-promotion may allocate a new read, never revive an old handle.",
+    "schema66 prevents prior strict schema65 readers from misreading new provenance; upgrade preserves old JSON and backup bytes.",
+    "New UTF8 deliver_file MIME is frozen in intent; legacy intent and immutable artifact MIME remain unchanged on replay."
+  ],
+  "notProven": [
+    "Actual App still old b4/schema65, no in-place upgrade or UI pass inferred.",
+    "Real natural-language paused creation and bound-skill approval UI acceptance pending.",
+    "Compiled schema66 SIGKILL recovery running separately; no result claimed in this record.",
+    "No CPU/memory benchmark or complete Grok/Windows/Linux acceptance claimed.",
+    "The previous full7783 code gate remains historical, not recounted for these new changes."
+  ],
+  "actualAppAcceptance": false,
+  "fullGrokParityClaimed": false,
+  "overallCompletionPercent": null
+}

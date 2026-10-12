@@ -1,0 +1,54 @@
+{
+  "createdAt": "2026-10-07T04:48:57.652543+00:00",
+  "kind": "current_scope_interpretation_overlay_on_immutable_historical_ledger",
+  "baselineLedger": {
+    "path": "/tmp/cmb-core-progress-ledger-v1/ledger.json",
+    "sha256": "47dc587c1ed785df3abf39e8c23628b11a56ab232fb459f0add154d015e2ba15",
+    "createdAt": "2026-10-07T01:57:15.076097+00:00",
+    "historicalScopeCountsPreserved": true
+  },
+  "completionPercentage": null,
+  "original177DenominatorPreserved": true,
+  "doesNotModifyHistoricalLedger": true,
+  "basis": "2026-10-07 user-approved Mac native-only scope; proposed core-scope.json/platform_contract.macos_scope_override",
+  "gapInterpretations": [
+    {
+      "key": "mac-native-app-desktop",
+      "currentFirstReleaseBlocker": false,
+      "reason": "explicitly excluded for macOS first release by user; original capability remains not implemented",
+      "affectedOriginalIds": [
+        "CPU-02",
+        "CPU-04"
+      ],
+      "mustNotCountAsOriginalImplemented": true
+    },
+    {
+      "key": "mac-shell-strong-closure",
+      "currentFirstReleaseBlocker": false,
+      "reason": "arbitrary Mac commands excluded; current formal command closure and retained old weak receipts are required, not arbitrary-shell containment success",
+      "affectedOriginalIds": [
+        "CPU-05"
+      ],
+      "mustNotCountAsOriginalImplemented": true
+    },
+    {
+      "key": "windows-complete-input",
+      "currentFirstReleaseBlocker": true,
+      "reason": "confirmed code gap; Mac decision does not reduce Windows scope; user Windows first-release decision pending",
+      "affectedOriginalIds": [
+        "CPU-04",
+        "CPU-17"
+      ]
+    },
+    {
+      "key": "windows-install-native-acceptance",
+      "currentFirstReleaseBlocker": true,
+      "reason": "target machine installation/run/upgrade/native lifetime acceptance not yet executed",
+      "affectedOriginalIds": [
+        "OPS-09"
+      ]
+    }
+  ],
+  "noNewCompletedRows": true,
+  "currentCodeAndTestInputsNotIndividuallyReaudited": true
+}

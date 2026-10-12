@@ -1,0 +1,195 @@
+{
+  "recordedAt": "2026-10-09T09:54:12.096717+00:00",
+  "scope": "One same-material real MiniMax M3 task in official App; source, recovery and final objects verified; not all task quality",
+  "nativeBuildId": "6677a7e6323d46222f9838ef",
+  "run": {
+    "id": "5f2d5bb0-1b87-41e0-b1c9-16460d190bdc",
+    "status": "succeeded",
+    "revision": 93,
+    "error": null
+  },
+  "sources": [
+    {
+      "id": "19cc7525-e9e8-4f3d-81e7-7c878b7f24e8",
+      "name": "project-records.csv",
+      "size": 279,
+      "sha256": "dbc20dad04f59df0d704601fdd6559ab33fd1722283496a2092215a387695ac8"
+    },
+    {
+      "id": "c1eb53e0-da13-478a-8253-2f06b2b060c3",
+      "name": "review-policy.txt",
+      "size": 537,
+      "sha256": "f8b581c7338cc60fa4b02adaa7a22a89465daf675c991856bf8114069d54da60"
+    }
+  ],
+  "artifacts": [
+    {
+      "id": "result:5f2d5bb0-1b87-41e0-b1c9-16460d190bdc:call_01a11ff33f0e7514b86dc0ad",
+      "name": "review.md",
+      "size": 4711,
+      "sha256": "ab56e2be03062d34928d8f74483b4fedc68b547d6833b1721da84eed819c6d7d",
+      "objectBytesVerified": true
+    },
+    {
+      "id": "result:5f2d5bb0-1b87-41e0-b1c9-16460d190bdc:call_function_9qa6q215ingp_1",
+      "name": "result.csv",
+      "size": 65,
+      "sha256": "7832fed246384d78f42ef6064d7a001e9340cb9521d97fd2c79663445da42bcb",
+      "objectBytesVerified": true
+    },
+    {
+      "id": "result:5f2d5bb0-1b87-41e0-b1c9-16460d190bdc:call_function_9qa6q215ingp_2",
+      "name": "review-v2.md",
+      "size": 5641,
+      "sha256": "e38f87f7f25a0e468fcaf233d83a0de8ce9bce6ee35727db4312e7dede288007",
+      "objectBytesVerified": true
+    },
+    {
+      "id": "result:5f2d5bb0-1b87-41e0-b1c9-16460d190bdc:call_function_ksldlggr2vmf_1",
+      "name": "review.md",
+      "size": 5540,
+      "sha256": "89be8375c02b8e8b135f76bdffdc5e352c32005c06442df87bf3f2a481c3f1fe",
+      "objectBytesVerified": true
+    }
+  ],
+  "reviews": [
+    {
+      "index": 0,
+      "name": "result.csv",
+      "sha256": "abbeebd5407d4025f4dbe4b3d8bbadddf325d05b18ba420f64294c294de7aac8",
+      "protocol": "tool-v9-bound-scalar-source-reasoning",
+      "decision": "revise",
+      "diagnostic": null
+    },
+    {
+      "index": 1,
+      "name": "review.md",
+      "sha256": "958b59571178d9b56e6e84da6d57c9fb9007550f0005bbbbf7293bd3606aefa6",
+      "protocol": "tool-v9-bound-scalar-source-reasoning",
+      "decision": "revise",
+      "diagnostic": null
+    },
+    {
+      "index": 2,
+      "name": "result.csv",
+      "sha256": "7832fed246384d78f42ef6064d7a001e9340cb9521d97fd2c79663445da42bcb",
+      "protocol": "tool-v9-bound-scalar-source-reasoning",
+      "decision": "uncertain",
+      "diagnostic": {
+        "stage": "stream",
+        "reason": "invalid_tool_call",
+        "finish": "missing",
+        "toolCall": {
+          "source": "raw",
+          "field": "type",
+          "typeClass": "empty",
+          "valueType": "string"
+        }
+      }
+    },
+    {
+      "index": 3,
+      "name": "review.md",
+      "sha256": "ab56e2be03062d34928d8f74483b4fedc68b547d6833b1721da84eed819c6d7d",
+      "protocol": "tool-v9-bound-scalar-source-reasoning",
+      "decision": "pass",
+      "diagnostic": null
+    },
+    {
+      "index": 4,
+      "name": "result.csv",
+      "sha256": "7832fed246384d78f42ef6064d7a001e9340cb9521d97fd2c79663445da42bcb",
+      "protocol": "tool-v9-bound-scalar-source-reasoning",
+      "decision": "uncertain",
+      "diagnostic": {
+        "stage": "stream",
+        "reason": "invalid_tool_call",
+        "finish": "missing",
+        "toolCall": {
+          "source": "raw",
+          "field": "type",
+          "typeClass": "empty",
+          "valueType": "string"
+        }
+      }
+    },
+    {
+      "index": 5,
+      "name": "result.csv",
+      "sha256": "7832fed246384d78f42ef6064d7a001e9340cb9521d97fd2c79663445da42bcb",
+      "protocol": "tool-v10-bound-scalar-stream-identity",
+      "decision": "pass",
+      "diagnostic": null
+    },
+    {
+      "index": 6,
+      "name": "review-v2.md",
+      "sha256": "e38f87f7f25a0e468fcaf233d83a0de8ce9bce6ee35727db4312e7dede288007",
+      "protocol": "tool-v10-bound-scalar-stream-identity",
+      "decision": "pass",
+      "diagnostic": null
+    },
+    {
+      "index": 7,
+      "name": "review.md",
+      "sha256": "89be8375c02b8e8b135f76bdffdc5e352c32005c06442df87bf3f2a481c3f1fe",
+      "protocol": "tool-v10-bound-scalar-stream-identity",
+      "decision": "pass",
+      "diagnostic": null
+    }
+  ],
+  "usage": {
+    "requests": 17,
+    "unknown": 1,
+    "reportedOutputTokens": 33343
+  },
+  "officialGrokComparison": {
+    "csvLogicalFieldsAndRowsEqual": true,
+    "currentCsvBytesEqual": false,
+    "difference": "Current CMB CSV omits the final newline; values and literal fields match. Prior byte-equal CSV sample retained separately.",
+    "grokCsvSha256": "7f49376f9672cf7362ea26ea0ce624c881d3c9250f3b7207024ca5870bc8903f",
+    "grokReportSha256": "85fcfc287eaa226ab60e2a6843d5c7186f5c1d146c9348df8ba3c8099515609c"
+  },
+  "formalUi": {
+    "resumedSameTaskViaRecovery": true,
+    "correctedReportPreviewOpened": true,
+    "csvPreviewPendingObservation": true
+  },
+  "retainedIssues": [
+    "First incorrect-version candidates rejected",
+    "Old empty-type verifier failures and unknown usage retained",
+    "Original report used ambiguous row numbering; old immutable object retained",
+    "SIGTERM Main did not exit within eight seconds; normal Cmd+Q completed; no escalation"
+  ],
+  "gates": {
+    "reviewAndTransportTests": 128,
+    "node": "/tmp/cmb-verdict-identity-node-20261009.log",
+    "lint": "/tmp/cmb-verdict-identity-lint-final-20261009.log",
+    "workflow": "/tmp/cmb-verdict-identity-workflow-20261009.log",
+    "build": "/tmp/cmb-verdict-identity-build-20261009.log"
+  },
+  "coldPins": {
+    "live": {
+      "receipt": "/Users/chenqiang/Library/Application Support/CMBDevClaw-development/2026-10-08/presentation/cold-upgrade-plan/pins-live-before-stop-1791538457247699000.safe.json",
+      "sha256": "b4cb85f526caf032b37451f926ca467606d577233ec6cea8c83b2c60517231d6",
+      "phase": "live-before-stop",
+      "runs": 12,
+      "checkpointPayloadBytesHashed": 9784889
+    },
+    "quiescent": {
+      "receipt": "/Users/chenqiang/Library/Application Support/CMBDevClaw-development/2026-10-08/presentation/cold-upgrade-plan/pins-quiesced-before-start-1791538672512741000.safe.json",
+      "sha256": "e67fbedb03198f5230cf22c1b4a3a4dee5e99f69d7deadf7bbb19b42bacbca99",
+      "phase": "quiesced-before-start",
+      "runs": 12,
+      "checkpointPayloadBytesHashed": 9784889
+    },
+    "post": {
+      "receipt": "/Users/chenqiang/Library/Application Support/CMBDevClaw-development/2026-10-08/presentation/cold-upgrade-plan/pins-post-start-pre-review-1791538731606743000.safe.json",
+      "sha256": "17778782d6584ffa0be0f920f1968eaa67041a9d6df0fd77cefd17d2ea9983e6",
+      "phase": "post-start-pre-review",
+      "runs": 12,
+      "checkpointPayloadBytesHashed": 9784889
+    }
+  },
+  "wholeCoreParityComplete": false
+}

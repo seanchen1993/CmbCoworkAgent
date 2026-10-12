@@ -1,0 +1,76 @@
+{
+  "kind": "native-user-library-skill-reuse-finite-sample",
+  "recordedAt": "2026-10-10T14:57:29.338775+00:00",
+  "source": "native CUA + read-only original Host SQLite; real configured MiniMax",
+  "sharedSnapshot": {
+    "id": "library:0085b62f-ab5c-4d21-a01f-416beee43237",
+    "source_bot_id": "e1d81813-1ff0-4fca-9948-d966e1a77189",
+    "source_skill_id": "2a50a207-f562-4348-9a90-4b38a827bca3",
+    "source_version": 3,
+    "name": "技能状态核验",
+    "revision": 1,
+    "enabled": 1
+  },
+  "runs": [
+    {
+      "id": "39bcddcd-e206-4a6a-80b4-99c31a0ab88f",
+      "bot_id": "50a4ae56-72c2-49be-b93b-7957fe9f5674",
+      "status": "succeeded",
+      "created_at": 1791640669142,
+      "updated_at": 1791640672647,
+      "elapsedMs": 3505,
+      "modelRequests": 1,
+      "models": [
+        "MiniMax-M3"
+      ],
+      "allUsageSettled": true,
+      "effects": [],
+      "messages": [
+        {
+          "id": "96d2a837-2470-4635-95c9-c63e6e8a9663",
+          "sender": "bot",
+          "characters": 37,
+          "textSha256": "1f4e9d05cf813226f209d13073d04278eed8b572a11d262865a49b8b50e30c85"
+        }
+      ]
+    },
+    {
+      "id": "1fd8b3f9-6535-496b-8fbc-a5cde7a3c2ca",
+      "bot_id": "50a4ae56-72c2-49be-b93b-7957fe9f5674",
+      "status": "succeeded",
+      "created_at": 1791640758137,
+      "updated_at": 1791640769188,
+      "elapsedMs": 11051,
+      "modelRequests": 1,
+      "models": [
+        "MiniMax-M3"
+      ],
+      "allUsageSettled": true,
+      "effects": [],
+      "messages": [
+        {
+          "id": "b6525991-a61d-4142-8e7f-8d624296c59f",
+          "sender": "bot",
+          "characters": 14,
+          "textSha256": "05d563dcab5863cefdabd8d2be7ea6c1bd9c9653879034e8ddf1ec33b606d94a"
+        }
+      ]
+    }
+  ],
+  "invalidAutomationInputRetained": {
+    "firstInput": "72184",
+    "cause": "CUA typeText omitted Chinese and conjunction; source input is not product validation failure",
+    "actualResponse": "Asked for the missing second integer"
+  },
+  "correctedInput": "两个整数是721和84。只输出一行算式与结果。",
+  "cmbFinal": "721 + 84 = 805",
+  "officialGrokFinal": "721 + 84 = 805",
+  "officialGrokProgress": "我先看一下这个技能。",
+  "scopeDifference": "Grok observed private user-wide skills; CMB retains Bot-private workflows and explicit independent user-library snapshot. Existing private skills were not exposed automatically.",
+  "boundaries": [
+    "The shared skill chip was selected on the first input; the correction followed in the same conversation without a new chip selection.",
+    "Only this finite arithmetic workflow was compared.",
+    "No external model keys, raw checkpoints or private reasoning emitted."
+  ],
+  "fullSkillParityClaimed": false
+}

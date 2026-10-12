@@ -19,6 +19,7 @@ import {
 } from "../../../shared/mods/v2/contracts"
 import { FUNCTION_GUEST_BOOTSTRAP } from "./guest-bootstrap"
 import { modCompiler } from "../loader"
+import { FunctionHostFailures, wireError, fromWireError } from "./wire"
 
 let compiledBootstrap: string | undefined
 
@@ -31,6 +32,7 @@ interface InvocationFrame {
   resolve(value: { value?: ModJson; absent?: boolean }): void
   reject(error: Error): void
   detach(): void
+  failures: FunctionHostFailures
 }
 
 /** A persistent guest. SDK calls carry their continuation's frame; next stays dispatch-bound. */
@@ -76,11 +78,10 @@ export class FunctionGuestRuntime {
           (reply) => guest.reply(pending, reply),
           (error) =>
             guest.reply(pending, {
-              error: {
-                code: error instanceof ModFunctionError ? error.code : "MODS_HOST_ERROR",
-                message: error instanceof Error ? error.message.slice(0, 2048) : "MODS_HOST_ERROR",
-                downstream: error instanceof ModFunctionError && error.downstream
-              }
+              error: (() => {
+                const packet = wireError(error)
+                return packet.failureId ? packet : wireError(error, frame.failures.record(error))
+              })()
             })
         )
       return pending.handle
@@ -95,7 +96,9 @@ export class FunctionGuestRuntime {
         target: "es2016"
       }).code
       const program = compiler.transformSync(code, { target: "es2016" }).code
-      guest.evaluate(compiledBootstrap).dispose()
+      // The application-owned bootstrap initializes bounded SDK tables. Allow cold
+      // startup scheduling here; plugin code and handlers retain the 50 ms slice.
+      guest.evaluate(compiledBootstrap, 1000).dispose()
       guest.evaluate(program).dispose()
       const registration = guest.evaluate(
         `__functionRegister(${JSON.stringify(encodeModJson(options))})`
@@ -128,9 +131,9 @@ export class FunctionGuestRuntime {
     return { frames: this.frames.size, replies: this.replies.size, disposed: this.disposed }
   }
 
-  private evaluate(code: string): QuickJSHandle {
+  private evaluate(code: string, budgetMs = 50): QuickJSHandle {
     if (this.disposed) throw new ModFunctionError("MODS_UNLOADED")
-    this.deadline = Date.now() + 50
+    this.deadline = Date.now() + budgetMs
     const result = this.context.evalCode(code)
     if (result.error) {
       // Dumping an arbitrary guest object could execute accessors. Read a fixed diagnostic only.
@@ -169,6 +172,7 @@ export class FunctionGuestRuntime {
     return new Promise((resolve, reject) => {
       const cancel = (): void => this.cancel(token)
       const frame: InvocationFrame = {
+        failures: new FunctionHostFailures(),
         id: token,
         host: AsyncResource.bind(host),
         controller: new AbortController(),
@@ -251,14 +255,21 @@ export class FunctionGuestRuntime {
         const packet = parseModJson(this.context.getString(state.value))
         if (!isModObject(packet)) throw new ModFunctionError("MODS_INVALID_GUEST_RESULT")
         if (isModObject(packet.error)) {
-          throw new ModFunctionError(
-            packet.error.downstream === true &&
-              typeof packet.error.code === "string" &&
-              /^MODS_[A-Z0-9_]{1,80}$/.test(packet.error.code)
-              ? packet.error.code
-              : "MODS_HOOK_FAILED",
-            String(packet.error.message),
-            packet.error.downstream === true
+          throw fromWireError(
+            {
+              code:
+                packet.error.downstream === true &&
+                typeof packet.error.code === "string" &&
+                /^MODS_[A-Z0-9_]{1,80}$/.test(packet.error.code)
+                  ? packet.error.code
+                  : "MODS_HOOK_FAILED",
+              message: String(packet.error.message),
+              downstream: packet.error.downstream === true,
+              ...(typeof packet.error.failureId === "string"
+                ? { failureId: packet.error.failureId }
+                : {})
+            },
+            frame.failures
           )
         }
         this.finish(frame, undefined, packet)

@@ -1,0 +1,25 @@
+{
+  "recordedAt": "2026-10-10T13:27:57.770208+00:00",
+  "kind": "profile-group-save-fixture-host-identity",
+  "previousFailureRetained": "/tmp/cmb-profile-epoch-review-retest-20261010.log",
+  "cause": "The test constructed a different BotHost for each status call and returned a raw Store snapshot lacking the matching Host identity. Production refresh rejected this invalid frame on every retry.",
+  "change": "Reuse one production API per Store; route snapshot requests through its actual Host snapshot API. Preserve all mutation, epoch, receipt and cleanup assertions.",
+  "productSaveLogicChanged": false,
+  "actualReactChromeSqliteJourneysPassed": 48,
+  "pageErrors": [],
+  "browserPhysicallyClosed": true,
+  "strictLintPassed": true,
+  "fullBrowserGatePassed": false,
+  "logs": [
+    {
+      "path": "/tmp/cmb-profile-epoch-stable-host-20261010.log",
+      "bytes": 1040,
+      "sha256": "c1f22d1d0e148e738f181bdd54373644652cb155e66a3dc0209c93a769e99965"
+    },
+    {
+      "path": "/tmp/cmb-profile-stable-host-lint-20261010.log",
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    }
+  ]
+}

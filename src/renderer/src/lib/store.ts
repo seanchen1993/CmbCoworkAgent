@@ -1,5 +1,6 @@
 import { resolveWorkerSnapshotContent } from "./worker-message-content"
 import { create } from "zustand"
+import { botStartupPreferences } from "./bot-startup-preferences"
 import type { EvolutionCandidate } from "@/api/evolution"
 import type {
   Thread,
@@ -851,6 +852,7 @@ type WorkerFocusAppendOptions = {
 
 type EvolutionTab = "candidates" | "traces" | "review"
 type MainView =
+  | "bots"
   | "thread"
   | "customize"
   | "evolution"
@@ -1171,7 +1173,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   subagentFocusView: null,
   workflowAgentFocusView: null,
   workflowAgentFocusSnapshot: null,
-  mainView: "thread",
+  mainView: botStartupPreferences.mainView(),
   showKanbanView: false,
   showSubagentsInKanban: true,
   showHarnessBoardView: false,
@@ -2278,7 +2280,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   },
 
   setMainView: (view) => {
-    if (view === "scheduled" || view === "market") {
+    if (view === "scheduled" || view === "market" || view === "bots") {
       set({
         mainView: view,
         showCustomizeView: false,
@@ -2480,6 +2482,12 @@ export const useAppStore = create<AppState>((set, get) => ({
   setEvolutionStreamError: (err) => set({ evolutionStreamError: err }),
   setEvolutionLastRunOpts: (opts) => set({ evolutionLastRunOpts: opts })
 }))
+
+// Record only stable workspaces; transient settings/boards keep the previous choice.
+const unsubscribeStartupPreference = useAppStore.subscribe((state, previous) => {
+  if (state.mainView !== previous.mainView) botStartupPreferences.rememberMainView(state.mainView)
+})
+if (import.meta.hot) import.meta.hot.dispose(unsubscribeStartupPreference)
 
 // ─────────────────────────────────────────────────────────
 // Selector helpers

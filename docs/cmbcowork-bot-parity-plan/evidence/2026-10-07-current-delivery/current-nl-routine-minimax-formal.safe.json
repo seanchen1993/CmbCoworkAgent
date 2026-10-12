@@ -1,0 +1,385 @@
+{
+  "schemaVersion": 1,
+  "kind": "NL-routine-isolated-real-MiniMax-compiled-Host-API-only",
+  "startedAt": "2026-10-07T17:15:14.812Z",
+  "status": "complete",
+  "overallTaskPassClaimed": false,
+  "approvalPolicy": "No approval/permission API is called. Three frozen user messages create paused, enable and pause the one owned routine; unexpected pending action ends this attempt.",
+  "evidence": {
+    "uploads": [],
+    "artifacts": [],
+    "messages": [],
+    "pendingActions": []
+  },
+  "cleanup": {
+    "cancelRequested": false,
+    "cancelSettled": true,
+    "idleShutdownAccepted": true,
+    "forcedTermination": false,
+    "processExited": true,
+    "exit": {
+      "code": 0,
+      "signal": null,
+      "spawnFailed": false
+    },
+    "privateCredentialSnapshotRemoved": true,
+    "transportClosed": true
+  },
+  "scope": [
+    "New owned home, database, Bot and three fixed user sends; no existing App task or permission is mutated",
+    "Exact saved custom:minimax-m3 model only; no project, instructions, plugins, skills, MCP, Hooks or Harness data is copied",
+    "Fixed natural-language create-paused, enable and pause tasks; no expected calculation result enters the prompts",
+    "Stored routine state and actual schedule runs are checked; this does not establish actual UI or Grok same-task parity",
+    "This is a real model API sample, not an actual App UI or official Grok comparison PASS",
+    "Default production 200000 shared output allowance remains unchanged; observed request threshold is a cancellation guard, not a strict account monetary cap",
+    "Provider reported/unknown receipt counters are preserved; no pricing estimate or unknown-to-zero conversion"
+  ],
+  "model": {
+    "ref": "custom:minimax-m3",
+    "name": "MiniMax-M3",
+    "model": "MiniMax-M3",
+    "endpointHost": "api.minimaxi.com",
+    "hasCredential": true
+  },
+  "execution": {
+    "platform": "darwin",
+    "runnerNodeVersion": "v22.23.3",
+    "hostExecutable": "/Users/chenqiang/Library/Caches/CMBDevClaw-development-deps/cmb-bot-locked-ci-20261007-737983438cdd48f8a502c385c8d6c6f4/node_modules/electron/dist/Electron.app/Contents/MacOS/Electron",
+    "compiledHostEntry": "/Users/chenqiang/Desktop/projects/CmbCoworkAgent/out/main/bot-host.js",
+    "compiledHostSha256": "622f356fadaf7834f14fb2782d9f1ffb73bb5c57f680eaf40c03fbe8e42ddf9e",
+    "compiledManifestSha256": "7af9a4982f3448ab235e25b43546048bd92b9204f7cb6da8da10b05482873aa9",
+    "expectedBuildId": "18eb3cb377377989a66c0b28",
+    "nativeBuildId": "18eb3cb377377989a66c0b28",
+    "isolatedHome": "/tmp/cmb-nl-routine-real-acceptance-VN9mWx",
+    "originalUserSnapshotReadOnly": true,
+    "sourceSnapshotUnchangedAfterTask": true,
+    "sourceDefaultUnchangedAfterTask": true,
+    "selectedModelUnchangedAfterTask": true,
+    "selection": "explicit-saved-M3",
+    "threeFrozenUserSends": true,
+    "overallDeadlineMs": 600000,
+    "taskDeadlineMs": 180000,
+    "observedRequestCancelThreshold": 16,
+    "productionSharedOutputLimit": 200000,
+    "noMoneyLimitClaimed": true,
+    "compiledBuildUnchangedAfterTask": true
+  },
+  "input": {
+    "tasks": [
+      {
+        "text": "创建一个名为‘暂停旅程核对’的例程，每分钟执行一次，时区为Asia/Shanghai。任务内容是计算6×7，并且只输出一行，以ROUTINE-NL-CHECK: 开头，后面是计算结果。先保存但不要启用，也不要现在运行。只创建这一个例程，创建后告诉我当前状态。",
+        "sha256": "ad4e7b898bbdbefdd13fff0f423b48855965bf6905b1511331b6dabbe5ed98db"
+      },
+      {
+        "text": "启用刚才保存的‘暂停旅程核对’，不要改任务内容、名字、时区或执行周期，也不要手动执行一次。",
+        "sha256": "8e1984db5560acc68b43abbefa147e729f32c2d904bc3b1043dd0fe07096f0ff"
+      },
+      {
+        "text": "暂停刚才的‘暂停旅程核对’例程，保留它和执行记录。不要创建替代例程，也不要手动执行。",
+        "sha256": "a79e6d8447bdf9e6ed58dd98823cf1913cb1b75eb83231a66eada0b39e633634"
+      }
+    ],
+    "expectedRoutineName": "暂停旅程核对",
+    "expectedTimezone": "Asia/Shanghai",
+    "expectedIntervalMinutes": 1
+  },
+  "tasks": [
+    {
+      "conversationId": "28c31f43-40d9-4d72-af9f-a12ad87bf5c8",
+      "runId": "5b739b49-b2de-49d3-867f-5d51f2d36396",
+      "messageId": "863097ae-4fd7-4ec5-8d65-1b1296ab0a54",
+      "inputSha256": "ad4e7b898bbdbefdd13fff0f423b48855965bf6905b1511331b6dabbe5ed98db",
+      "sentAt": "2026-10-07T17:15:16.384Z"
+    },
+    {
+      "conversationId": "28c31f43-40d9-4d72-af9f-a12ad87bf5c8",
+      "runId": "b65c48e7-d206-4b92-9116-d79d1ebacb5a",
+      "messageId": "926725a7-aee0-4109-9ae8-0ab9f66cf528",
+      "inputSha256": "8e1984db5560acc68b43abbefa147e729f32c2d904bc3b1043dd0fe07096f0ff",
+      "sentAt": "2026-10-07T17:16:38.662Z"
+    },
+    {
+      "conversationId": "28c31f43-40d9-4d72-af9f-a12ad87bf5c8",
+      "runId": "7f57f7d6-7adb-4b82-bee3-b4c718769fc0",
+      "messageId": "895584be-0184-484f-b9c5-a9012ace03b4",
+      "inputSha256": "a79e6d8447bdf9e6ed58dd98823cf1913cb1b75eb83231a66eada0b39e633634",
+      "sentAt": "2026-10-07T17:17:30.965Z"
+    }
+  ],
+  "routines": [
+    {
+      "stage": "natural-language-create-paused",
+      "routine": {
+        "id": "c4885e61-009d-4fa9-a41d-6c8f4115e333",
+        "botId": "03d389fe-3139-4b3c-b1e1-cc2f612420e0",
+        "name": "暂停旅程核对",
+        "prompt": "计算 6×7 的结果。只输出一行，以 ROUTINE-NL-CHECK: 开头，后面是计算结果。例如：ROUTINE-NL-CHECK: 42",
+        "schedule": {
+          "kind": "interval",
+          "anchor": 1791393386648,
+          "everyMs": 60000
+        },
+        "timezone": "Asia/Shanghai",
+        "enabled": false,
+        "desiredEnabled": false,
+        "effectiveState": "paused",
+        "activationRequired": false,
+        "nextAt": 1791393386648,
+        "revision": 1,
+        "createdAt": 1791393326651
+      }
+    },
+    {
+      "stage": "natural-language-enable",
+      "routine": {
+        "id": "c4885e61-009d-4fa9-a41d-6c8f4115e333",
+        "botId": "03d389fe-3139-4b3c-b1e1-cc2f612420e0",
+        "name": "暂停旅程核对",
+        "prompt": "计算 6×7 的结果。只输出一行，以 ROUTINE-NL-CHECK: 开头，后面是计算结果。例如：ROUTINE-NL-CHECK: 42",
+        "schedule": {
+          "kind": "interval",
+          "anchor": 1791393386648,
+          "everyMs": 60000
+        },
+        "timezone": "Asia/Shanghai",
+        "enabled": true,
+        "desiredEnabled": true,
+        "effectiveState": "active",
+        "activationRequired": false,
+        "nextAt": 1791393446648,
+        "revision": 2,
+        "createdAt": 1791393326651
+      }
+    },
+    {
+      "stage": "natural-language-pause",
+      "routine": {
+        "id": "c4885e61-009d-4fa9-a41d-6c8f4115e333",
+        "botId": "03d389fe-3139-4b3c-b1e1-cc2f612420e0",
+        "name": "暂停旅程核对",
+        "prompt": "计算 6×7 的结果。只输出一行，以 ROUTINE-NL-CHECK: 开头，后面是计算结果。例如：ROUTINE-NL-CHECK: 42",
+        "schedule": {
+          "kind": "interval",
+          "anchor": 1791393386648,
+          "everyMs": 60000
+        },
+        "timezone": "Asia/Shanghai",
+        "enabled": false,
+        "desiredEnabled": false,
+        "effectiveState": "paused",
+        "activationRequired": false,
+        "nextAt": 1791393506648,
+        "revision": 4,
+        "createdAt": 1791393326651
+      }
+    }
+  ],
+  "waits": [
+    {
+      "kind": "paused-no-due-run",
+      "startedAt": "2026-10-07T17:15:33.640Z",
+      "completedAt": "2026-10-07T17:16:38.643Z",
+      "minimumMs": 65000,
+      "occurrences": 0
+    },
+    {
+      "kind": "paused-no-due-run",
+      "startedAt": "2026-10-07T17:17:39.142Z",
+      "completedAt": "2026-10-07T17:18:44.144Z",
+      "minimumMs": 65000,
+      "occurrences": 1
+    }
+  ],
+  "receipts": [
+    {
+      "runId": "5b739b49-b2de-49d3-867f-5d51f2d36396",
+      "status": "succeeded",
+      "source": "user",
+      "revision": 37,
+      "createdAt": 1791393316376,
+      "updatedAt": 1791393333633,
+      "result": "\n\n例程已创建完成 ✅**当前状态：**\n\n| 项目 | 值 |\n|---|---|\n| 名称 | 暂停旅程核对 |\n| ID | `c4885e61-009d-4fa9-a41d-6c8f4115e333` |\n| 时区 | Asia/Shanghai |\n| 触发器 | 每分钟一次（interval, every 60000ms） |\n| 任务内容 | 计算 6×7，只输出一行 `ROUTINE-NL-CHECK: <结果>` |\n| desiredEnabled | false |\n| enabled | false |\n| **effectiveState** | **paused（已暂停，未启用）** |\n| 下次执行 | 已存在 nextAt，但因 paused 不会触发 |\n| 创建时间 | 当前会话内（revision 1） |\n\n**确认：** 只创建了这一个例程，未启用，也未运行。当前处于\"已保存但暂停\"状态，待你明确指示后再启用。",
+      "diagnosticCode": null,
+      "modelUsage": {
+        "requests": 4,
+        "unknownRequests": 0,
+        "inputTokens": 72666,
+        "outputTokens": 828,
+        "reservedOutputTokens": 0,
+        "inputReportedRequests": 4,
+        "otherModelRequests": 0,
+        "models": [
+          {
+            "modelRef": "custom:minimax-m3",
+            "model": "MiniMax-M3",
+            "purpose": "task",
+            "requests": 4,
+            "unknownRequests": 0,
+            "inputTokens": 72666,
+            "outputTokens": 828,
+            "inputReportedRequests": 4
+          }
+        ]
+      },
+      "modelBudget": {
+        "limit": 200000,
+        "consumed": 828,
+        "reserved": 0,
+        "requests": 4
+      }
+    },
+    {
+      "runId": "b65c48e7-d206-4b92-9116-d79d1ebacb5a",
+      "status": "succeeded",
+      "source": "user",
+      "revision": 29,
+      "createdAt": 1791393398646,
+      "updatedAt": 1791393408075,
+      "result": "例程已启用 ✅**当前状态：**\n\n| 项目 | 值 |\n|---|---|\n| 名称 | 暂停旅程核对（未改） |\n| ID | `c4885e61-009d-4fa9-a41d-6c8f4115e333` |\n| 时区 | Asia/Shanghai（未改） |\n| 任务内容 | 计算 6×7，输出 `ROUTINE-NL-CHECK: <结果>`（未改） |\n| 触发器 | 每分钟一次 / 60000ms（未改） |\n| revision | 2（从 1 → 2） |\n| enabled | true |\n| desiredEnabled | true |\n| **effectiveState** | **active（已激活）** |\n| 下次执行 | 1791393446648（启用后重新计算，未手动触发） |\n\n**确认：** 已按要求只启用（enabled: false → true），名字、任务内容、时区、执行周期均未改动，也未手动执行一次。当前为 active 状态，将按每分钟一次自动触发。",
+      "diagnosticCode": null,
+      "modelUsage": {
+        "requests": 3,
+        "unknownRequests": 3,
+        "inputTokens": 0,
+        "outputTokens": 0,
+        "reservedOutputTokens": 24576,
+        "inputReportedRequests": 0,
+        "otherModelRequests": 0,
+        "models": [
+          {
+            "modelRef": "custom:minimax-m3",
+            "model": "MiniMax-M3",
+            "purpose": "task",
+            "requests": 3,
+            "unknownRequests": 3,
+            "inputTokens": 0,
+            "outputTokens": 0,
+            "inputReportedRequests": 0
+          }
+        ]
+      },
+      "modelBudget": {
+        "limit": 200000,
+        "consumed": 0,
+        "reserved": 24576,
+        "requests": 3
+      }
+    },
+    {
+      "runId": "2b39c370-c78c-4488-95bd-08ce69c1691a",
+      "status": "succeeded",
+      "source": "routine:c4885e61-009d-4fa9-a41d-6c8f4115e333",
+      "revision": 13,
+      "createdAt": 1791393447584,
+      "updatedAt": 1791393450521,
+      "result": "ROUTINE-NL-CHECK: 42",
+      "diagnosticCode": null,
+      "modelUsage": {
+        "requests": 1,
+        "unknownRequests": 0,
+        "inputTokens": 16940,
+        "outputTokens": 10,
+        "reservedOutputTokens": 0,
+        "inputReportedRequests": 1,
+        "otherModelRequests": 0,
+        "models": [
+          {
+            "modelRef": "custom:minimax-m3",
+            "model": "MiniMax-M3",
+            "purpose": "task",
+            "requests": 1,
+            "unknownRequests": 0,
+            "inputTokens": 16940,
+            "outputTokens": 10,
+            "inputReportedRequests": 1
+          }
+        ]
+      },
+      "modelBudget": {
+        "limit": 200000,
+        "consumed": 10,
+        "reserved": 0,
+        "requests": 1
+      }
+    },
+    {
+      "runId": "7f57f7d6-7adb-4b82-bee3-b4c718769fc0",
+      "status": "succeeded",
+      "source": "user",
+      "revision": 37,
+      "createdAt": 1791393450953,
+      "updatedAt": 1791393459133,
+      "result": "\n\n例程已暂停 ✅\n\n| 项目 | 值 |\n|---|---|\n| 名称 | 暂停旅程核对（未改） |\n| ID | `c4885e61-009d-4fa9-a41d-6c8f4115e333` |\n| 时区 | Asia/Shanghai（未改） |\n| 任务内容 | 计算 6×7，输出 `ROUTINE-NL-CHECK: <结果>`（未改） |\n| 触发器 | 每分钟一次 / 60000ms（未改） |\n| revision | 3 → 4 |\n| enabled | true → false |\n| desiredEnabled | true → false |\n| **effectiveState** | **paused）** |\n| 历史 | 已保留（例程未删除） |\n\n**确认：** 例程已暂停，未创建任何替代例程，也未手动触发。下次执行时间 `nextAt=1791393506648` 仍存在，但因 paused 不会触发，待你再次启用时将按当前触发器继续按每分钟一次调度。",
+      "diagnosticCode": null,
+      "modelUsage": {
+        "requests": 4,
+        "unknownRequests": 0,
+        "inputTokens": 76011,
+        "outputTokens": 528,
+        "reservedOutputTokens": 0,
+        "inputReportedRequests": 4,
+        "otherModelRequests": 0,
+        "models": [
+          {
+            "modelRef": "custom:minimax-m3",
+            "model": "MiniMax-M3",
+            "purpose": "task",
+            "requests": 4,
+            "unknownRequests": 0,
+            "inputTokens": 76011,
+            "outputTokens": 528,
+            "inputReportedRequests": 4
+          }
+        ]
+      },
+      "modelBudget": {
+        "limit": 200000,
+        "consumed": 528,
+        "reserved": 0,
+        "requests": 4
+      }
+    }
+  ],
+  "occurrence": {
+    "id": "2b39c370-c78c-4488-95bd-08ce69c1691a",
+    "status": "succeeded",
+    "trigger": "scheduled",
+    "conversationId": "28c31f43-40d9-4d72-af9f-a12ad87bf5c8",
+    "messageId": "08dd1cce-a962-413a-920d-9ab3e7dacaa6",
+    "resultMessageId": "1c70b914-0ff8-4c13-b899-934b55e8490f",
+    "createdAt": 1791393447584,
+    "updatedAt": 1791393450521,
+    "summary": "ROUTINE-NL-CHECK: 42"
+  },
+  "historyAfterPause": {
+    "items": [
+      {
+        "id": "2b39c370-c78c-4488-95bd-08ce69c1691a",
+        "status": "succeeded",
+        "trigger": "scheduled",
+        "conversationId": "28c31f43-40d9-4d72-af9f-a12ad87bf5c8",
+        "messageId": "08dd1cce-a962-413a-920d-9ab3e7dacaa6",
+        "resultMessageId": "1c70b914-0ff8-4c13-b899-934b55e8490f",
+        "createdAt": 1791393447584,
+        "updatedAt": 1791393450521,
+        "summary": "ROUTINE-NL-CHECK: 42"
+      }
+    ],
+    "next": null
+  },
+  "mechanical": {
+    "oneRoutine": true,
+    "sameId": true,
+    "pausedAtomicCreation": true,
+    "noOccurrenceOverOnePeriod": true,
+    "naturalLanguageEnable": true,
+    "actualScheduledRun": true,
+    "deliveryExact": true,
+    "naturalLanguagePause": true,
+    "noOccurrenceAfterPause": true,
+    "threeUserSends": true,
+    "scopeIdle": true,
+    "passed": true
+  },
+  "completedAt": "2026-10-07T17:18:44.202Z"
+}

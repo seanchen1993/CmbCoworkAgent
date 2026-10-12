@@ -1,0 +1,49 @@
+{
+  "schemaVersion": 1,
+  "kind": "formal-compiled-host-sigkill65-controlled-native",
+  "actualRealProvider": false,
+  "actualUI": false,
+  "startedAt": "2026-10-07T15:34:09.913Z",
+  "completedAt": "2026-10-07T15:34:14.444Z",
+  "durationMs": 4531,
+  "runnerCode": 1,
+  "runnerSignal": null,
+  "sourceAndCompiledInputsUnchanged": true,
+  "selectedCase": "resumes a persisted graph after SIGKILL and review without repeating a committed tool",
+  "passedTests": 0,
+  "failedTests": 1,
+  "ownedHostProcesses": 1,
+  "forceKilledCheckpoint": false,
+  "sameRun": false,
+  "succeeded": false,
+  "passed": false,
+  "processes": [
+    {
+      "event": "spawn",
+      "at": 1791387253084,
+      "pid": 7443,
+      "dataDirectory": "/private/var/folders/r4/m2gmdyyn06z9488ghc1044zh0000gn/T/cmb-native-sigkill65-6hpKj3/cmb-bot-process-pjVbby",
+      "entrySHA256": "226270eca55f0e2aa35720ff928c57072eb4e3dbea8b54feb97e8ad2402e761d"
+    },
+    {
+      "event": "exit",
+      "at": 1791387254213,
+      "pid": 7443,
+      "dataDirectory": "/private/var/folders/r4/m2gmdyyn06z9488ghc1044zh0000gn/T/cmb-native-sigkill65-6hpKj3/cmb-bot-process-pjVbby",
+      "entrySHA256": "226270eca55f0e2aa35720ff928c57072eb4e3dbea8b54feb97e8ad2402e761d",
+      "code": 1,
+      "signal": null,
+      "durable": {
+        "schema": 65,
+        "memories": 0
+      }
+    }
+  ],
+  "log": {
+    "bytes": 295,
+    "sha256": "4bd686c89367cd12b74467e46709a37dd42a5372fac8d0b2e82909c3282fd2fa"
+  },
+  "inputsSHA256": "809fdd875bb7fc9b35aa1cba4f2f92b3a639b6586121a832cf5dc25f3ba40c91",
+  "originalAssertionsAnd75SecondTimeoutUnchanged": true,
+  "privateEvidenceDirectory": "/var/folders/r4/m2gmdyyn06z9488ghc1044zh0000gn/T/cmb-native-sigkill65-6hpKj3"
+}

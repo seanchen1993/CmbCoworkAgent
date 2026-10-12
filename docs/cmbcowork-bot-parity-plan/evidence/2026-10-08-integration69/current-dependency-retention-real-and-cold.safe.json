@@ -1,0 +1,352 @@
+{
+  "kind": "formal-group-dependency-and-human-memory-retention",
+  "recordedAt": "2026-10-10T01:41:39.151360+00:00",
+  "nativeBuildId": "9205e58973c8131dc4973e98",
+  "schema": 71,
+  "formalVia": "CUA native App UI, configured real MiniMax M3",
+  "memory": {
+    "id": "c5dcfc65-dbd8-4f28-aed3-e1f8da79455d",
+    "bot_id": "954dd5e0-e2e7-4247-9303-276c8111c870",
+    "status": "succeeded",
+    "error": null,
+    "result": "\n\n**项目：蓝桥-314 工作摘要**\n\n**依据：**\n- 已完成 3 项检查\n- 发现 1 项页面输入问题\n- 计划明天修复\n\n**结论：**\n本日检查工作进展：完成 3 项检查，其中发现 1 项页面输入问题待处理，安排明日修复。",
+    "modelRequests": 2,
+    "unknownUsage": 0,
+    "structuralProof": {
+      "runId": "c5dcfc65-dbd8-4f28-aed3-e1f8da79455d",
+      "messageTypes": {
+        "HumanMessage": 33,
+        "AIMessageChunk": 2,
+        "ToolMessage": 1
+      },
+      "modelToolNames": [
+        "read_memory"
+      ],
+      "toolResultClassifications": [
+        {
+          "name": "read_memory",
+          "containsSavedPreferenceId": true,
+          "containsSavedPreferenceCode": true,
+          "containsSavedPreferenceFormat": true,
+          "containsPreviousPublicSummary": false
+        }
+      ],
+      "selectedInstructionClassifications": [],
+      "privateTextNotCopied": true
+    },
+    "wholeMemoryTableUnchanged": true,
+    "automaticEvidenceRowsForRun": 0,
+    "newMemorySourcesForRun": 0,
+    "originalPreferenceRevision": 2,
+    "finiteScenarioPassed": true
+  },
+  "groupSelectedSkill": {
+    "id": "164fcfc3-5be1-4665-a351-45238f9079d8",
+    "conversation_id": "7f08d20f-73d8-4507-a26f-dfbc64d6529e",
+    "status": "completed",
+    "round": 2,
+    "total_messages": 2,
+    "input": "/技能状态核验 @月报示范核验 按所选技能计算 286+47；@报价工具编程核验 独立核对结果。完成后各只回复一条结果，不访问外部服务。",
+    "runs": [
+      {
+        "id": "86dd3bc8-1c82-4259-98d3-8cf73a576172",
+        "bot_id": "924e1689-7b6d-411c-a429-28decb91b179",
+        "message_id": "164fcfc3-5be1-4665-a351-45238f9079d8",
+        "status": "succeeded",
+        "error": null,
+        "sent_count": 0,
+        "modelRequests": 2,
+        "unknownUsage": 0
+      },
+      {
+        "id": "839d2ff0-a95f-4c2e-95f7-08cfc0cae6dd",
+        "bot_id": "e1d81813-1ff0-4fca-9948-d966e1a77189",
+        "message_id": "164fcfc3-5be1-4665-a351-45238f9079d8",
+        "status": "succeeded",
+        "error": null,
+        "sent_count": 1,
+        "modelRequests": 2,
+        "unknownUsage": 0
+      },
+      {
+        "id": "477d61c4-eda8-405a-b5d8-1d85d3a2248d",
+        "bot_id": "e1d81813-1ff0-4fca-9948-d966e1a77189",
+        "message_id": "d9836c63-488c-48a3-a7a4-866439c6d051",
+        "status": "succeeded",
+        "error": null,
+        "sent_count": 0,
+        "modelRequests": 2,
+        "unknownUsage": 0
+      },
+      {
+        "id": "7a98df0e-9044-4954-bb97-766fe5936939",
+        "bot_id": "924e1689-7b6d-411c-a429-28decb91b179",
+        "message_id": "d9836c63-488c-48a3-a7a4-866439c6d051",
+        "status": "succeeded",
+        "error": null,
+        "sent_count": 1,
+        "modelRequests": 2,
+        "unknownUsage": 0
+      },
+      {
+        "id": "214ce498-3975-4f79-b021-bd025e3249ad",
+        "bot_id": "924e1689-7b6d-411c-a429-28decb91b179",
+        "message_id": "096780b9-57c1-4ddb-baa9-f55d30534f5d",
+        "status": "succeeded",
+        "error": null,
+        "sent_count": 0,
+        "modelRequests": 1,
+        "unknownUsage": 0
+      },
+      {
+        "id": "95776932-e913-480d-b77d-92c78ff20d7f",
+        "bot_id": "e1d81813-1ff0-4fca-9948-d966e1a77189",
+        "message_id": "096780b9-57c1-4ddb-baa9-f55d30534f5d",
+        "status": "succeeded",
+        "error": null,
+        "sent_count": 0,
+        "modelRequests": 2,
+        "unknownUsage": 0
+      }
+    ],
+    "publicMessages": [
+      {
+        "bot_id": "e1d81813-1ff0-4fca-9948-d966e1a77189",
+        "run_id": "839d2ff0-a95f-4c2e-95f7-08cfc0cae6dd",
+        "text": "286+47=333"
+      },
+      {
+        "bot_id": "924e1689-7b6d-411c-a429-28decb91b179",
+        "run_id": "7a98df0e-9044-4954-bb97-766fe5936939",
+        "text": "独立核对：286+47=333，与月报示范核验结果一致，正确。"
+      }
+    ],
+    "modelRequests": 11,
+    "unknownUsage": 0,
+    "acceptedSelections": [
+      {
+        "botId": "e1d81813-1ff0-4fca-9948-d966e1a77189",
+        "id": "2a50a207-f562-4348-9a90-4b38a827bca3",
+        "version": 3,
+        "name": "技能状态核验"
+      }
+    ],
+    "runtimeSelectionProof": [
+      {
+        "runId": "86dd3bc8-1c82-4259-98d3-8cf73a576172",
+        "messageTypes": {
+          "HumanMessage": 7,
+          "AIMessageChunk": 2,
+          "ToolMessage": 1
+        },
+        "modelToolNames": [
+          "send_group_message"
+        ],
+        "toolResultClassifications": [
+          {
+            "name": "send_group_message",
+            "containsSavedPreferenceId": false,
+            "containsSavedPreferenceCode": false,
+            "containsSavedPreferenceFormat": false,
+            "containsPreviousPublicSummary": false
+          }
+        ],
+        "selectedInstructionClassifications": [],
+        "privateTextNotCopied": true
+      },
+      {
+        "runId": "839d2ff0-a95f-4c2e-95f7-08cfc0cae6dd",
+        "messageTypes": {
+          "HumanMessage": 7,
+          "AIMessageChunk": 2,
+          "ToolMessage": 1
+        },
+        "modelToolNames": [
+          "send_group_message"
+        ],
+        "toolResultClassifications": [
+          {
+            "name": "send_group_message",
+            "containsSavedPreferenceId": false,
+            "containsSavedPreferenceCode": false,
+            "containsSavedPreferenceFormat": false,
+            "containsPreviousPublicSummary": false
+          }
+        ],
+        "selectedInstructionClassifications": [
+          {
+            "hasAcceptedSkillId": true,
+            "hasPinnedVersion3": true,
+            "hasActualWorkflowInstruction": true
+          }
+        ],
+        "privateTextNotCopied": true
+      },
+      {
+        "runId": "477d61c4-eda8-405a-b5d8-1d85d3a2248d",
+        "messageTypes": {
+          "HumanMessage": 7,
+          "AIMessageChunk": 2,
+          "ToolMessage": 1
+        },
+        "modelToolNames": [
+          "send_group_message"
+        ],
+        "toolResultClassifications": [
+          {
+            "name": "send_group_message",
+            "containsSavedPreferenceId": false,
+            "containsSavedPreferenceCode": false,
+            "containsSavedPreferenceFormat": false,
+            "containsPreviousPublicSummary": false
+          }
+        ],
+        "selectedInstructionClassifications": [
+          {
+            "hasAcceptedSkillId": true,
+            "hasPinnedVersion3": true,
+            "hasActualWorkflowInstruction": true
+          }
+        ],
+        "privateTextNotCopied": true
+      },
+      {
+        "runId": "7a98df0e-9044-4954-bb97-766fe5936939",
+        "messageTypes": {
+          "HumanMessage": 7,
+          "AIMessageChunk": 2,
+          "ToolMessage": 1
+        },
+        "modelToolNames": [
+          "send_group_message"
+        ],
+        "toolResultClassifications": [
+          {
+            "name": "send_group_message",
+            "containsSavedPreferenceId": false,
+            "containsSavedPreferenceCode": false,
+            "containsSavedPreferenceFormat": false,
+            "containsPreviousPublicSummary": false
+          }
+        ],
+        "selectedInstructionClassifications": [],
+        "privateTextNotCopied": true
+      },
+      {
+        "runId": "214ce498-3975-4f79-b021-bd025e3249ad",
+        "messageTypes": {
+          "HumanMessage": 7,
+          "AIMessageChunk": 1
+        },
+        "modelToolNames": [],
+        "toolResultClassifications": [],
+        "selectedInstructionClassifications": [],
+        "privateTextNotCopied": true
+      },
+      {
+        "runId": "95776932-e913-480d-b77d-92c78ff20d7f",
+        "messageTypes": {
+          "HumanMessage": 7,
+          "AIMessageChunk": 2,
+          "ToolMessage": 1
+        },
+        "modelToolNames": [
+          "send_group_message"
+        ],
+        "toolResultClassifications": [
+          {
+            "name": "send_group_message",
+            "containsSavedPreferenceId": false,
+            "containsSavedPreferenceCode": false,
+            "containsSavedPreferenceFormat": false,
+            "containsPreviousPublicSummary": false
+          }
+        ],
+        "selectedInstructionClassifications": [
+          {
+            "hasAcceptedSkillId": true,
+            "hasPinnedVersion3": true,
+            "hasActualWorkflowInstruction": true
+          }
+        ],
+        "privateTextNotCopied": true
+      }
+    ],
+    "namedDependencyOrderPassed": true,
+    "wholeFiniteScenarioPassed": true
+  },
+  "previousFailureEvidence": "current-group-skill-history-real-and-cold.safe.json",
+  "officialGrokReference": {
+    "evidence": "current-group-skill-history-real-and-cold.safe.json",
+    "sameMemoryInput": true,
+    "groupScope": "Same arithmetic and designated roles with the native member picker; different identities and models. CMB fixed skill version 3, Grok stored skill by name. Not a byte-identical environment."
+  },
+  "cold": {
+    "descriptor": {
+      "version": 1,
+      "pid": 64648,
+      "hostId": "e6d0e99a-b8f9-4ada-85cd-54fd19485460",
+      "buildId": "9205e58973c8131dc4973e98",
+      "socketPath": "/private/tmp/cmb-bot-501-4b987f56222e7e971f75407b/rpc.sock"
+    },
+    "selectedRuns": 124,
+    "checkpointPayloadBytesHashed": 15222058,
+    "logicalGroupsEqual": {
+      "runs": true,
+      "effects": true,
+      "interactions": true,
+      "artifacts": true,
+      "artifactObjects": true,
+      "peerDispatch": true,
+      "peerWaits": true,
+      "checkpoints": true,
+      "skills": true,
+      "project": true
+    },
+    "extraTablesEqual": {
+      "bot_memories": true,
+      "bot_memory_metadata": true,
+      "bot_model_usage": true,
+      "bot_group_cycles": true,
+      "bot_group_runs": true
+    },
+    "schemaBefore": 71,
+    "schemaAfter": 71,
+    "legacyMemberOrderEqual": true,
+    "modelNormalizedFingerprintMatched": true,
+    "forceKillUsed": false
+  },
+  "sourceGates": {
+    "memoryOwning": {
+      "files": 6,
+      "passed": 72,
+      "log": "/tmp/cmb-retention-six-owning-fixed-20261010.log",
+      "initialFailuresRetained": "/tmp/cmb-retention-owning-20261010.log",
+      "fixtureFixesOnly": "SQLite empty result shape and explicit complete terminal SSE; no production completion guard relaxed"
+    },
+    "groupOwning": {
+      "files": 4,
+      "passed": 47,
+      "log": "/tmp/cmb-group-dependency-owning-20261010.log"
+    },
+    "actualSdk": {
+      "passed": 5,
+      "unselected": 324,
+      "log": "/tmp/cmb-group-dependency-sdk-20261010.log"
+    },
+    "node": {
+      "passed": true,
+      "log": "/tmp/cmb-dependency-retention-node-20261010.log"
+    },
+    "lint": {
+      "passed": true,
+      "log": "/tmp/cmb-dependency-retention-lint-20261010.log"
+    },
+    "productionBuild": {
+      "passed": true,
+      "log": "/tmp/cmb-dependency-retention-build-20261010.log"
+    }
+  },
+  "coreParityComplete": false,
+  "independentInstallerAccepted": false
+}

@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process"
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs"
+import { mkdtempSync, mkdirSync, realpathSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { basename, dirname, join, resolve } from "node:path"
 import { afterEach, expect, it, vi } from "vitest"
@@ -9,7 +9,7 @@ import { readFunctionSessionRepo, sessionRepoRemote } from "./session-repo"
 const roots: string[] = []
 const signal = () => new AbortController().signal
 function fixture(bare = false) {
-  const root = mkdtempSync(join(tmpdir(), "mods-session-repo-"))
+  const root = realpathSync(mkdtempSync(join(tmpdir(), "mods-session-repo-")))
   roots.push(root)
   const repo = join(root, "main repo")
   mkdirSync(repo)
@@ -28,7 +28,7 @@ afterEach(() => {
   vi.unstubAllEnvs()
   for (const root of roots.splice(0)) {
     if (
-      dirname(resolve(root)) !== resolve(tmpdir()) ||
+      dirname(resolve(root)) !== realpathSync(tmpdir()) ||
       !basename(root).startsWith("mods-session-repo-")
     )
       throw Error("Unexpected cleanup target")

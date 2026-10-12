@@ -6,6 +6,12 @@ export type CloseToTrayPromptReason = "close-choice" | "active-runs" | "tray-una
 
 export const DEFAULT_WINDOW_CLOSE_BEHAVIOR: WindowCloseBehavior = "ask"
 
+/** macOS normally keeps the app alive without windows; an explicit quit must
+ * still reach will-quit after an asynchronous before-quit drain. */
+export function shouldQuitAfterAllWindowsClosed(platform: string, appQuitting: boolean): boolean {
+  return platform !== "darwin" || appQuitting
+}
+
 export function isWindowCloseBehavior(value: unknown): value is WindowCloseBehavior {
   return value === "ask" || value === "minimize-to-tray" || value === "quit"
 }

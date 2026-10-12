@@ -1,0 +1,72 @@
+{
+  "schemaVersion": 1,
+  "kind": "current-inspector-selection-and-system-fold-integration",
+  "sourcePins": [
+    {
+      "path": "src/renderer/src/components/bots/BotWorkspace.tsx",
+      "bytes": 164057,
+      "sha256": "5b7806e89188b881a3ac51f7b9af9d84af9974bccc991e9826c853cf1df3d289"
+    },
+    {
+      "path": "src/renderer/src/components/bots/BotMessageText.tsx",
+      "bytes": 9553,
+      "sha256": "7ff775d2742c760f61b7532a35f6ab7a38d245c18daeabaf17060f80dca5b18d"
+    },
+    {
+      "path": "tests/bot-user-message-fold-browser.spec.ts",
+      "bytes": 15347,
+      "sha256": "83cfed0b552c32e77d0b66b5bbdefcd5a32f722018e3984990ff2e213e26fef2"
+    }
+  ],
+  "gatePins": [
+    {
+      "path": "/tmp/cmb-inspector-navigation-existing-browser.log",
+      "bytes": 651,
+      "sha256": "ab1b4b9a77f5c7e5cb32b10e6278762d2f0f7512b15935da9859b6bc46fe5ba9"
+    },
+    {
+      "path": "/tmp/cmb-system-message-fold-browser.log",
+      "bytes": 135,
+      "sha256": "2e773745ec9a7028b08c83e41145dd1f26b3e826b543c6532934232ae57665bd"
+    },
+    {
+      "path": "/tmp/cmb-inspector-and-system-fold-build.log",
+      "bytes": 56051,
+      "sha256": "bce75eefbdf1fe4e90f2f9c6d729e3d8878672c3d70cac499223a1279f1c497e"
+    },
+    {
+      "path": "/tmp/cmb-inspector-selection-final-web.log",
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "path": "/tmp/cmb-inspector-selection-final-lint.log",
+      "bytes": 379,
+      "sha256": "11d8df83216daf059d6aa59723d1813301dc7a4a239fa7682e72d367dd0d48a5"
+    }
+  ],
+  "observedAtEpochMs": 1791387760208,
+  "buildPassed": true,
+  "requiredWebTypecheckPassedBeforeFold": true,
+  "workspaceLintAfterStableCallbackZeroWarnings": true,
+  "realReactChromiumComposerTeachExistingCasesPassed": 3,
+  "realReactChromiumSystemFoldContractPassed": true,
+  "actualUiReopenedNewClient": true,
+  "rendererBundle": "BotWorkspace-DP71eTLy.js",
+  "backendBuildBeforeAndAfterUiOnly": "b4d31d62d589840f5147422a",
+  "actualUiSamples": {
+    "directDetailsFollowsSelectedBot": true,
+    "computerFollowsSelectedBot": true,
+    "groupReplacesOldBotInspector": true,
+    "groupMemberOpenPreservesPaneAndCorrectOwner": true,
+    "closedPaneStaysClosedOnSelect": true
+  },
+  "pendingActualUi": [
+    "same-Bot branch navigation",
+    "keyboard/history routes",
+    "routine child busy guard",
+    "epoch recovery",
+    "Main system-fold actual expand/reveal"
+  ],
+  "caution": "Finite actual UI samples plus isolated browser contracts; not all Grok UI parity or production acceptance. No actual input submitted through old target; scripted owner/late-frame/epoch guards still need dedicated controlled contract."
+}

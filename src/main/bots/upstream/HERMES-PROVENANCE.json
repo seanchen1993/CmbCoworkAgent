@@ -1,0 +1,26 @@
+{
+  "upstream": "https://github.com/NousResearch/hermes-agent",
+  "inspectedCheckout": "https://github.com/seanchen1993/hermes-agent",
+  "commit": "ecf9655b5aacbc826ebbe9bf11a6db5cbbcb214d",
+  "license": "MIT; HERMES-LICENSE",
+  "adaptations": [
+    {
+      "source": "agent/learn_prompt.py",
+      "destination": "src/main/bots/upstream/hermes-skill-authoring.ts",
+      "changes": "Adapted workflow authoring guidance to Cmb's existing save_skill tool and approval/verification rules. Hermes-specific frontmatter, tool names and runtime paths are not copied."
+    },
+    {
+      "source": "agent/curator.py",
+      "destination": "src/main/bots/skill-maintenance.ts",
+      "changes": "Adapted managed/pinned scopes, inactivity checks and reversible archive to the existing Bot Host and SQLite transactions. Explicit opt-in, existing task/routine protection, bounded pagination and bounded sweeps replace Python file writes and auxiliary agent execution."
+    }
+  ],
+  "behavioralReferences": [
+    "tools/bot_live_delivery.py",
+    "gateway/hosted_room_driver.py",
+    "gateway/hosted_room_policy_checkpoint.py",
+    "cron/occurrences.py",
+    "cron/delivery_queue.py"
+  ],
+  "existingImplementationPreserved": "Cmb durable peer dispatch, group epochs/cursors, effect uncertainty handling, and atomic routine dispatch remain their single execution/storage authority. No Hermes Python runtime, engine, queue, or database is integrated."
+}

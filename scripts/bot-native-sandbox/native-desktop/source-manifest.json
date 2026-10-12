@@ -1,0 +1,176 @@
+{
+  "candidate": "cmb-native-scoped-message-chords-unicode-ci-gate-v2",
+  "protocol": "cmb-native-desktop-v1",
+  "status": "source-with-locked-production-helper-gate-not-Windows-tested",
+  "files": [
+    {
+      "path": "vendor/Directory.Build.props",
+      "bytes": 1002,
+      "sha256": "2219d94bfe6674b95f973bccaa5822bf16d2544de7d70d15e46873355da21caf"
+    },
+    {
+      "path": "vendor/Directory.Packages.props",
+      "bytes": 3077,
+      "sha256": "62d2b577816f1040fd54a0b4191d4fa37a48c35b94db3d0bf273cf2653e926c9"
+    },
+    {
+      "path": "vendor/WINAPP-LICENSE",
+      "bytes": 1158,
+      "sha256": "c421b2a5e0ee627bb1c5d859bbca37d7654c02f63d626e753644484a9054c2d1"
+    },
+    {
+      "path": "vendor/WinApp.UIAutomation/Capture/CapturedFrame.cs",
+      "bytes": 1397,
+      "sha256": "8a901bb3a411a9fccf85ac33e092c94a9815dbf7febe5b0bbfde5aad27f26d92"
+    },
+    {
+      "path": "vendor/WinApp.UIAutomation/Capture/IFrameGrabber.cs",
+      "bytes": 1299,
+      "sha256": "187606579926185c662136f51d993066fd2de56e3bbd2fb0516f5db5851a7007"
+    },
+    {
+      "path": "vendor/WinApp.UIAutomation/Capture/WgcCapture.FrameGrabber.cs",
+      "bytes": 16837,
+      "sha256": "2a2f6eaa61d48c7e9fd7b4167e2c601c28840d6cbed3e2affe4a920782c7fa8f"
+    },
+    {
+      "path": "vendor/WinApp.UIAutomation/Capture/WgcCapture.cs",
+      "bytes": 12046,
+      "sha256": "89b8ed6044218d8a86ff9feb60b55d50b46f152e904485178c2f24638c6bc01b"
+    },
+    {
+      "path": "vendor/WinApp.UIAutomation/Models/UiControlTypes.cs",
+      "bytes": 1724,
+      "sha256": "a5342d0c235ccd2341076c17b483c216772779bc5033379a6d89696a41d8c97f"
+    },
+    {
+      "path": "vendor/WinApp.UIAutomation/Models/UiInvokeAction.cs",
+      "bytes": 1507,
+      "sha256": "0dfacf853a5998191ab577de842b99c7790da911f37b3ae8e857c1c480b81643"
+    },
+    {
+      "path": "vendor/WinApp.UIAutomation/NativeMethods.json",
+      "bytes": 65,
+      "sha256": "158d70e73d78c132ec3fa0ba00f95a4c7c34caffa5815e010fc8652b925a8d99"
+    },
+    {
+      "path": "vendor/WinApp.UIAutomation/NativeMethods.txt",
+      "bytes": 627,
+      "sha256": "6bd33b120d95392895d0f11459faac3b451816d0a5b0ace153531af447aa9e77"
+    },
+    {
+      "path": "vendor/WinApp.UIAutomation/Services/NativeDesktopAutomation.cs",
+      "bytes": 42538,
+      "sha256": "09522d03e79bd5e1e89d8d8e22366a15de68aad68af5c1f00565ffd42f9cfbce"
+    },
+    {
+      "path": "vendor/WinApp.UIAutomation/Services/NativeDesktopComDeclarations.cs",
+      "bytes": 1148,
+      "sha256": "29eb8690547fdce0a23875b7c14cebe96532256c3041143a88a1c09756a2072a"
+    },
+    {
+      "path": "vendor/WinApp.UIAutomation/Services/NativeDesktopComOwnership.cs",
+      "bytes": 2580,
+      "sha256": "e36c84d344877cae24c3a9befd17d9efeff40b6ac1f7779b32e06f4ef1e4fb6b"
+    },
+    {
+      "path": "vendor/WinApp.UIAutomation/WinApp.UIAutomation.csproj",
+      "bytes": 7140,
+      "sha256": "503c95ce17c5f9e32dcb9196bc50174d703f0cf2f59cd37fedb8e47d98ff7579"
+    },
+    {
+      "path": "vendor/WinApp.UIAutomation/packages.lock.json",
+      "bytes": 2362,
+      "sha256": "654f981729d1c213ae43f0010d5074793bdbdf81d48fad5823bcc69d838e4168"
+    },
+    {
+      "path": "worker/CMB.NativeDesktop.csproj",
+      "bytes": 2931,
+      "sha256": "c4df9dfbf9be2be2b8b966ddddaca6231656a667d1d3c47d65a3103681ed7c02"
+    },
+    {
+      "path": "worker/Launch.cs",
+      "bytes": 10730,
+      "sha256": "ac9216ade68dd7d80ce0fe48fdf2ff21d0318ad5e690784336b27d21e89fa068"
+    },
+    {
+      "path": "worker/Native.cs",
+      "bytes": 7976,
+      "sha256": "8f4c0fbd7bdf2a3c5b05e6a2982e6a7ef385c45738a4938ec97db381e752cd1e"
+    },
+    {
+      "path": "worker/Program.cs",
+      "bytes": 45296,
+      "sha256": "9d9b284e02130d33a11ebec54f0627dae8912680b3fc1268e4985540e805693f"
+    },
+    {
+      "path": "worker/WindowMessages.cs",
+      "bytes": 26047,
+      "sha256": "e73c458034688e686fc666f3b1eaabfc62abdf432a1072f726412e5b4f8edbc2"
+    },
+    {
+      "path": "worker/Wire.cs",
+      "bytes": 4883,
+      "sha256": "0a7b064ebe94713a6e6cf61ecdeceb243d997edea7952e85e3adc68574d20a59"
+    },
+    {
+      "path": "worker/packages.lock.json",
+      "bytes": 1163,
+      "sha256": "a456fef7f7037cac1c0f1b54693bfa08db1dab221d39d58e5e08078d5a5124a8"
+    },
+    {
+      "path": "worker/WindowKeyboardSequence.cs",
+      "bytes": 2773,
+      "sha256": "f876bbd17b1e2b27815dd901685337c399daaa370f5daaef86caeddf70d6e463"
+    },
+    {
+      "path": "tests/keyboard-sequence/Program.cs",
+      "bytes": 3326,
+      "sha256": "944b30a09e39acd38b5770c1596de6832802a0338780d7c7f737ec91d78d13e4"
+    },
+    {
+      "path": "tests/keyboard-sequence/WindowKeyboardSequence.Tests.csproj",
+      "bytes": 534,
+      "sha256": "a6300718c1175085fe1a525b0ce6bebd3f8570e023a16d42526e13947dd837ca"
+    },
+    {
+      "path": "tests/keyboard-sequence/packages.lock.json",
+      "bytes": 62,
+      "sha256": "98540f8c8005e000cc83cffb4598281f61900a13426b470f1d1114c62b54a63d"
+    }
+  ],
+  "sourcePins": {
+    "WinAppCli": "3fd590017806562f088e6b275302610b9937674b",
+    "Codex": "954fa9057bf3a4521ea34dbd010ff291d5b39763"
+  },
+  "license": "MIT WinApp source; Codex Apache-2.0 launcher not bundled here",
+  "unchangedSources": [
+    "Models/UiControlTypes.cs",
+    "Capture/CapturedFrame.cs"
+  ],
+  "adaptedSources": [
+    "Capture/IFrameGrabber.cs extracted IWindowCapture.cs first interface",
+    "Capture/WgcCapture.cs HWND/D3D/interop methods; unused single-capture route removed; narrow HRESULT exception type",
+    "Capture/WgcCapture.FrameGrabber.cs persistent original; max4k bounds before allocations, sourcegenerated debug logs",
+    "worker/WindowMessages.cs limited HWND chords, lParam ALT context and newline normalization adapted pinned WinApp Input/KeyboardInput.cs; original target, focus, approval and finally-release guards; global SendInput/modifier-state branch omitted",
+    "Models/UiInvokeAction.cs enum adds semantic select_all_text; not Ctrl+A",
+    "Capture/WgcCapture.cs and FrameGrabber unique owned D3D/raw COM acquisition; projection raw refs independently released; constructor callback drain",
+    "Services/NativeDesktopAutomation.cs retained provider semantics and bounded complete-text selection; all source-generated COM acquisitions use owned wrappers",
+    "WinApp.UIAutomation.csproj locked generator override declarations compiled first; caller-specific 9-way batched ownership build guard"
+  ],
+  "newSources": [
+    "Services/NativeDesktopAutomation.cs exact bounded provider bridge, no fallback",
+    "worker/Program.cs",
+    "worker/Wire.cs",
+    "worker/Native.cs",
+    "worker/Launch.cs",
+    "worker/WindowMessages.cs bounded geometry/child/focus input adapter",
+    "Services/NativeDesktopComDeclarations.cs fixed unique source-generated COM marshalling declarations",
+    "Services/NativeDesktopComOwnership.cs exact raw factory/transfer/release helper",
+    "NativeMethods.json CsWin32 raw IUnknown out-pointer configuration",
+    "worker/WindowKeyboardSequence.cs bounded production sequence/Unicode helper; reverse release attempts retain original primary failure",
+    "tests/keyboard-sequence directly linked actual production helper regression; zero external packages, locked restore, build gate only/no physical input claim"
+  ],
+  "previousManifest": "745c9b63cfe529003bb38c5e17a9d26866b13edec74201d1d79eee3596d56bb3",
+  "revision": "scoped-message-chords-unicode-v2-linked-regression-gate"
+}

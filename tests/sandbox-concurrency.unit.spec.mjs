@@ -3,8 +3,8 @@ import assert from "node:assert/strict"
 import { readFileSync } from "node:fs"
 
 const execPolicySource = readFileSync(new URL("../src/main/agent/exec-policy.ts", import.meta.url), "utf8")
-const runtimeSource = readFileSync(new URL("../src/main/agent/runtime.ts", import.meta.url), "utf8")
-const localSandboxSource = readFileSync(new URL("../src/main/agent/local-sandbox.ts", import.meta.url), "utf8")
+const runtimeSource = readFileSync(new URL("../src/main/agent/runtime.ts", import.meta.url), "utf8") + "\n" + readFileSync(new URL("../src/main/agent/deep-agent-core.ts", import.meta.url), "utf8")
+const localSandboxSource = readFileSync(new URL("../src/main/agent/local-sandbox-core.ts", import.meta.url), "utf8")
 
 function sectionBetween(source, startMarker, endMarker) {
   const start = source.indexOf(startMarker)
@@ -70,12 +70,12 @@ test("runtime allows parallel task subagent spawns", () => {
 })
 
 test("subagents use their own concurrency gate to avoid parent task deadlock", () => {
-  const subagentSection = sectionBetween(runtimeSource, "const subagentMiddleware: any[] = [", "const generalPurposeSubagent =")
-  const mainAgentSection = sectionBetween(runtimeSource, "return createAgent({", "createSubAgentMiddleware({")
+  const subagentSection = sectionBetween(runtimeSource, "const subagentMiddleware: any[] = mainSubagentsEnabled", "const generalPurposeSubagent =")
+  const mainAgentSection = sectionBetween(runtimeSource, "const agentOptions = {", "createSubAgentMiddleware({")
 
   assert.match(
     runtimeSource,
-    /const subagentToolConcurrencyMiddleware = createGradedToolConcurrencyMiddleware\(\s*`\$\{toolConcurrencyQueueId\}:subagent`\s*\)/,
+    /const subagentToolConcurrencyMiddleware = createGradedToolConcurrencyMiddleware\(\s*`\$\{toolConcurrencyQueueId\}:subagent`,\s*services\.isWorkflowActive\s*\)/,
     "subagents should have a separate queue id from the parent agent"
   )
   assert.match(
@@ -115,8 +115,8 @@ test("local sandbox keeps risky commands exclusive while limiting read-only comm
   )
   assert.match(
     executeRawSection,
-    /effectiveSandboxMode === "none" \|\| backgroundExecution[\s\S]*executeRawUnserialized/,
-    "background commands should bypass the foreground workspace gate"
+    /effectiveSandboxMode === "none" \|\|\s*\(backgroundExecution && !this\.worktreeIsolation\)[\s\S]*executeRawUnserialized/,
+    "background commands only bypass the workspace gate outside worktree isolation"
   )
   assert.doesNotMatch(
     executeRawSection,

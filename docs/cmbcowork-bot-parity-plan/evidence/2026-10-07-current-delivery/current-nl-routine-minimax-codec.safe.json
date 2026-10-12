@@ -1,0 +1,146 @@
+{
+  "schemaVersion": 1,
+  "kind": "Root-actual-owned-NL-routine-codec-tool-evidence",
+  "buildId": "18eb3cb377377989a66c0b28",
+  "formalSha256": "54c1387821478df0c7ffd2f02d69ed0887fcd02bfa00c184959fd8fb327c404c",
+  "completeStoredHeadsReadOnly": true,
+  "scope": "Four exited owned runs only; original formal codec; no config/provider protocol or thought content exported",
+  "runs": [
+    {
+      "runId": "5b739b49-b2de-49d3-867f-5d51f2d36396",
+      "source": "user",
+      "checkpointId": "1f1c272b-488f-61d0-8020-60958e01dfbe",
+      "calls": [
+        {
+          "id": "call_01a1175caa2c73098e7d4c68",
+          "name": "create_routine",
+          "args": {
+            "name": "暂停旅程核对",
+            "prompt": "计算 6×7 的结果。只输出一行，以 ROUTINE-NL-CHECK: 开头，后面是计算结果。例如：ROUTINE-NL-CHECK: 42",
+            "timezone": "Asia/Shanghai",
+            "every_minutes": 1,
+            "enabled": false
+          }
+        }
+      ],
+      "results": [
+        {
+          "toolCallId": "call_01a1175caa2c73098e7d4c68",
+          "name": "create_routine",
+          "errorCode": null,
+          "id": "c4885e61-009d-4fa9-a41d-6c8f4115e333",
+          "enabled": false,
+          "desiredEnabled": false,
+          "revision": 1,
+          "schedule": {
+            "kind": "interval",
+            "anchor": 1791393386648,
+            "everyMs": 60000
+          },
+          "promptSha256": "2dda199669c1afe2fc68409491aa539d5c87d850281973e04952082a073f47f2"
+        }
+      ]
+    },
+    {
+      "runId": "b65c48e7-d206-4b92-9116-d79d1ebacb5a",
+      "source": "user",
+      "checkpointId": "1f1c272e-0e7e-6470-8018-e985d12d10fe",
+      "calls": [
+        {
+          "id": "call_01a1175dd4a373f0a5700650",
+          "name": "update_routine",
+          "args": {
+            "id": "c4885e61-009d-4fa9-a41d-6c8f4115e333",
+            "revision": 1,
+            "enabled": true
+          }
+        }
+      ],
+      "results": [
+        {
+          "toolCallId": "call_01a1175dd4a373f0a5700650",
+          "name": "update_routine",
+          "errorCode": null,
+          "id": "c4885e61-009d-4fa9-a41d-6c8f4115e333",
+          "enabled": true,
+          "desiredEnabled": true,
+          "revision": 2,
+          "schedule": {
+            "kind": "interval",
+            "anchor": 1791393386648,
+            "everyMs": 60000
+          },
+          "promptSha256": "2dda199669c1afe2fc68409491aa539d5c87d850281973e04952082a073f47f2"
+        }
+      ]
+    },
+    {
+      "runId": "2b39c370-c78c-4488-95bd-08ce69c1691a",
+      "source": "routine:c4885e61-009d-4fa9-a41d-6c8f4115e333",
+      "checkpointId": "1f1c272f-a351-6880-8008-719b8435531c",
+      "calls": [],
+      "results": []
+    },
+    {
+      "runId": "7f57f7d6-7adb-4b82-bee3-b4c718769fc0",
+      "source": "user",
+      "checkpointId": "1f1c272f-f56e-60a0-8020-8da2305a3a71",
+      "calls": [
+        {
+          "id": "call_01a1175e99c97696a9ac6987",
+          "name": "update_routine",
+          "args": {
+            "id": "c4885e61-009d-4fa9-a41d-6c8f4115e333",
+            "revision": 2,
+            "enabled": false
+          }
+        },
+        {
+          "id": "call_01a1175ea4c5726f985e0902",
+          "name": "update_routine",
+          "args": {
+            "id": "c4885e61-009d-4fa9-a41d-6c8f4115e333",
+            "revision": 3,
+            "enabled": false
+          }
+        }
+      ],
+      "results": [
+        {
+          "toolCallId": "call_01a1175e99c97696a9ac6987",
+          "name": "update_routine",
+          "errorCode": "revision_conflict",
+          "promptSha256": null
+        },
+        {
+          "toolCallId": "call_01a1175ea4c5726f985e0902",
+          "name": "update_routine",
+          "errorCode": null,
+          "id": "c4885e61-009d-4fa9-a41d-6c8f4115e333",
+          "enabled": false,
+          "desiredEnabled": false,
+          "revision": 4,
+          "schedule": {
+            "kind": "interval",
+            "anchor": 1791393386648,
+            "everyMs": 60000
+          },
+          "promptSha256": "2dda199669c1afe2fc68409491aa539d5c87d850281973e04952082a073f47f2"
+        }
+      ]
+    }
+  ],
+  "revisionConflictRejected": [
+    {
+      "toolCallId": "call_01a1175e99c97696a9ac6987",
+      "errorCode": "revision_conflict"
+    }
+  ],
+  "rootReaderFirstAssumptionCorrection": "The first finite reader incorrectly required exactly three mutation calls; scheduled execution legitimately advances revision, and the pause turn first received revision_conflict then reread/retried. This was a reader assumption failure; original model run was not repeated. Only successful same-ID mutations count as state changes.",
+  "atomicCreatePausedProven": true,
+  "sameRoutineEnabledAndPausedProven": true,
+  "limits": [
+    "Finite API-only lifecycle case; no actual App/Grok comparison",
+    "The creating model itself put an example answer42 in the stored task, so the scheduled result is not evidence of an independent arithmetic challenge."
+  ]
+}

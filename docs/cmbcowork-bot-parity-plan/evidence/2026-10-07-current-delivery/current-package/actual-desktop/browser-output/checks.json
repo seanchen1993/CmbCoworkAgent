@@ -1,0 +1,199 @@
+{
+  "completedAt": "2026-10-07T08:35:52.830Z",
+  "platform": "darwin",
+  "packaged": true,
+  "modelRequests": 4,
+  "memoryRequests": 1,
+  "configurationTrace": [
+    {
+      "at": "2026-10-07T08:34:51.101Z",
+      "event": "rename",
+      "name": "bot-host/models.private.6dd64334-153a-4081-a4d0-c2d4447173b6.tmp",
+      "pending": false
+    },
+    {
+      "at": "2026-10-07T08:34:51.101Z",
+      "event": "rename",
+      "name": "bot-host/models.private",
+      "pending": false
+    },
+    {
+      "at": "2026-10-07T08:34:54.491Z",
+      "event": "rename",
+      "name": "bot-host/models.private.pending",
+      "pending": true
+    },
+    {
+      "at": "2026-10-07T08:34:54.541Z",
+      "event": "rename",
+      "name": "bot-host/models.private.pending",
+      "pending": true
+    },
+    {
+      "at": "2026-10-07T08:34:54.597Z",
+      "event": "rename",
+      "name": "bot-host/models.private.1c9f943f-6ab2-49bf-ac58-d1a04f85a268.tmp",
+      "pending": true
+    },
+    {
+      "at": "2026-10-07T08:34:54.648Z",
+      "event": "rename",
+      "name": "bot-host/models.private.1c9f943f-6ab2-49bf-ac58-d1a04f85a268.tmp",
+      "pending": false
+    },
+    {
+      "at": "2026-10-07T08:34:54.648Z",
+      "event": "rename",
+      "name": "bot-host/models.private",
+      "pending": false
+    },
+    {
+      "at": "2026-10-07T08:34:54.648Z",
+      "event": "rename",
+      "name": "bot-host/models.private.008477bf-b896-4f44-8f83-42c4e506662c.tmp",
+      "pending": false
+    },
+    {
+      "at": "2026-10-07T08:34:54.648Z",
+      "event": "rename",
+      "name": "bot-host/models.private",
+      "pending": false
+    },
+    {
+      "at": "2026-10-07T08:34:54.648Z",
+      "event": "rename",
+      "name": "bot-host/models.private.pending",
+      "pending": false
+    },
+    {
+      "at": "2026-10-07T08:34:54.648Z",
+      "event": "rename",
+      "name": "bot-host/models.private.2d34723e-79f2-4375-b5d1-33516c6a9989.tmp",
+      "pending": false
+    },
+    {
+      "at": "2026-10-07T08:34:54.648Z",
+      "event": "rename",
+      "name": "bot-host/models.private",
+      "pending": false
+    },
+    {
+      "at": "2026-10-07T08:34:54.648Z",
+      "event": "rename",
+      "name": "bot-host/models.private.86367d24-955c-439c-aa15-7e871d83e8ab.tmp",
+      "pending": false
+    },
+    {
+      "at": "2026-10-07T08:34:54.648Z",
+      "event": "rename",
+      "name": "bot-host/models.private",
+      "pending": false
+    },
+    {
+      "at": "2026-10-07T08:34:54.648Z",
+      "event": "rename",
+      "name": "bot-host/models.private",
+      "pending": false
+    },
+    {
+      "at": "2026-10-07T08:34:54.699Z",
+      "event": "rename",
+      "name": "bot-host/models.private.c06d0fbe-1595-4334-9fff-231cf14fe679.tmp",
+      "pending": false
+    },
+    {
+      "at": "2026-10-07T08:34:54.699Z",
+      "event": "rename",
+      "name": "bot-host/models.private",
+      "pending": false
+    },
+    {
+      "at": "2026-10-07T08:34:54.699Z",
+      "event": "rename",
+      "name": "bot-host/models.private.8c75e87c-b2c7-4696-85fb-62cfa8f46c31.tmp",
+      "pending": false
+    },
+    {
+      "at": "2026-10-07T08:34:54.699Z",
+      "event": "rename",
+      "name": "bot-host/models.private",
+      "pending": false
+    },
+    {
+      "at": "2026-10-07T08:34:54.699Z",
+      "event": "rename",
+      "name": "bot-host/models.private.43b2fc5d-93e3-4540-9c77-5a64d2e3c12a.tmp",
+      "pending": false
+    },
+    {
+      "at": "2026-10-07T08:34:54.699Z",
+      "event": "rename",
+      "name": "bot-host/models.private",
+      "pending": false
+    },
+    {
+      "at": "2026-10-07T08:34:54.699Z",
+      "event": "rename",
+      "name": "bot-host/models.private.e2752d27-c725-4cb6-a5ee-dadb9b8fec50.tmp",
+      "pending": false
+    },
+    {
+      "at": "2026-10-07T08:34:54.699Z",
+      "event": "rename",
+      "name": "bot-host/models.private",
+      "pending": false
+    },
+    {
+      "at": "2026-10-07T08:34:54.699Z",
+      "event": "rename",
+      "name": "bot-host/models.private",
+      "pending": false
+    },
+    {
+      "at": "2026-10-07T08:34:58.774Z",
+      "event": "rename",
+      "name": "bot-host/models.private.7e8e9225-3330-4571-9aef-62186ae5beeb.tmp",
+      "pending": false
+    },
+    {
+      "at": "2026-10-07T08:34:58.774Z",
+      "event": "rename",
+      "name": "bot-host/models.private",
+      "pending": false
+    },
+    {
+      "at": "2026-10-07T08:34:58.774Z",
+      "event": "rename",
+      "name": "bot-host/models.private",
+      "pending": false
+    }
+  ],
+  "checks": [
+    "Packaged Main preview IPC rejects a non-HTTPS request without creating a Host task",
+    "Connect apps opens the existing connector settings and returns to the Bot workspace",
+    "Bot settings opens the shared model editor and saves a usable model",
+    "Bot workspace uses one sidebar; workbench navigation remains available",
+    "Shared execution limits, tool strategy, failure feedback and Git budgets reach the detached Host before acknowledgement",
+    "Bot profile save replays its receipt through preload and the detached Host without duplicate edits",
+    "Packaged preload preserves a stale routine version rejection without creating a task",
+    "Packaged restart control rejects unfinished work without cancelling the running model",
+    "Detached Host completes task after desktop exits",
+    "Desktop restart reloads the original Bot and durable result",
+    "Packaged restart control starts a new idle Host and retains Bot history without another model call",
+    "Packaged table preview uses the detached file service and compiled parser; sheet selection and cell inspection work",
+    "Packaged artifact saving uses a controlled chooser response with real IPC, authenticated transfer and native SHA verification; exact receipts do not reopen the chooser or rewrite forgotten files",
+    "Inspector tabs retain browser control and unsent text without duplicating panels",
+    "Floating Bot settings preserve the mounted browser, unsent input and control on return",
+    "Rejected browser input preserves the user's text",
+    "Native hide suspends conversation and routine refresh even with browser focus emulation; Host work continues and reopening refreshes data and retains input",
+    "Packaged UI takes browser control, navigates, sends input and releases control",
+    "Packaged IPC reports the running browser's actual version",
+    "Packaged UI/IPC/worker saves, resets and restores real browser cookies and site storage",
+    "Packaged computer checkpoints use the shipped native worker and preserve exact creation and deletion receipts across preload IPC",
+    "macOS opens an external message link in the running packaged app's correct branch without submitting work",
+    "A message URL supplied at packaged cold startup waits for the renderer and opens its original branch without submitting work",
+    "Packaged macOS Host omits command execution capabilities despite saved shell-first settings; dependency metadata and original task history remain readable",
+    "Packaged macOS model requests omit command tools and unsolicited execute creates no command authorization, command job or effect",
+    "Packaged macOS command rejection leaves owned command resources, control marker and result canaries unchanged; browser and file acceptance remains intact"
+  ]
+}

@@ -5,8 +5,11 @@ import type { SupportedIde } from "../types"
 const testState = vi.hoisted(() => ({
   mockExecFileSync: vi.fn(),
   mockSpawn: vi.fn(),
+  existsSync: vi.fn(),
   configuredPaths: {} as Partial<Record<SupportedIde, string>>
 }))
+
+vi.mock("fs", () => ({ existsSync: testState.existsSync }))
 
 vi.mock("child_process", () => ({
   execFileSync: testState.mockExecFileSync,
@@ -43,8 +46,16 @@ function createMockChildProcess(): MockChildProcess {
 }
 
 describe("openIde", () => {
+  it("rejects a removed macOS app bundle before spawning a process", async () => {
+    setPlatform("darwin")
+    testState.configuredPaths.webstorm = "/Applications/WebStorm.app"
+    testState.existsSync.mockReturnValue(false)
+    await expect(openIde({ ide: "webstorm", workspacePath: "/repo" })).rejects.toThrow("应用路径无效")
+    expect(mockSpawn).not.toHaveBeenCalled()
+  })
   beforeEach(() => {
     testState.configuredPaths = {}
+    testState.existsSync.mockReset().mockImplementation((value: string) => ["/Applications/WebStorm.app", "/Applications/WebStorm.app/Contents/MacOS/webstorm"].includes(value))
     mockSpawn.mockReset()
     mockExecFileSync.mockReset()
   })

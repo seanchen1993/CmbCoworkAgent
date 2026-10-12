@@ -1,7 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react"
 import { Plug, Power, Trash2, Database, Store } from "lucide-react"
 import { Button } from "@/components/ui/button"
-import { ScrollArea } from "@/components/ui/scroll-area"
 import { cn } from "@/lib/utils"
 import type { McpConnectorConfig } from "@/types"
 import { resolveMcpConnectorKind } from "../../../../main/mcp/connector-kind"
@@ -13,82 +12,21 @@ function getConnectorSummary(connector: McpConnectorConfig): string {
   return connector.url ?? ""
 }
 
-const PROJECTION_PROMPT_EXAMPLE =
-  "查最近 20 条未关闭工单，只保留 id、title、status、owner；正文、评论、附件先不要展开。"
-const PROJECTION_DEMO_MCP_PATH = "examples/mcp-ticket-demo-server.mjs"
-const PROJECTION_DEMO_DOC_PATH = "docs/mcp-ticket-demo-usage.md"
-
-function ProjectionGuide(props: { lazyLoad?: boolean; compact?: boolean }): React.JSX.Element {
-  const { lazyLoad, compact = false } = props
-  const statusLabel =
-    typeof lazyLoad === "boolean"
-      ? lazyLoad
-        ? "懒加载已开启"
-        : "开启懒加载后可用"
-      : "配合懒加载使用"
-
+function ProjectionGuide({ lazyLoad }: { lazyLoad?: boolean }): React.JSX.Element {
   return (
-    <div
-      className={cn(
-        "rounded-xl border border-border/60 bg-muted/30",
-        compact ? "p-3 space-y-2" : "p-4 space-y-3"
-      )}
-    >
-      <div className="flex items-center justify-between gap-2">
-        <div className="min-w-0 flex items-center gap-2">
-          <Database className="size-4 shrink-0 text-muted-foreground/70" />
-          <p className="text-sm font-medium text-foreground/70">大结果裁剪</p>
-        </div>
-        <span
-          className={cn(
-            "shrink-0 rounded-sm border px-1.5 py-0.5 text-[11px]",
-            lazyLoad
-              ? "border-primary/20 bg-primary/10 text-primary"
-              : "border-border bg-background/60 text-muted-foreground"
-          )}
-        >
-          {statusLabel}
-        </span>
+    <div className="rounded-xl border border-border/60 bg-muted/30 p-4 space-y-2">
+      <div className="flex items-center gap-2">
+        <Database className="size-4 text-muted-foreground" />
+        <p className="text-sm font-medium">按需读取结果</p>
       </div>
-      <p className={cn("text-[13px] text-muted-foreground leading-relaxed", compact && "text-xs")}>
-        对搜索、列表、知识库这类返回很大的 MCP 工具，Agent 会先用{" "}
-        <span className="font-mono text-foreground/70">inspect_tool</span> 读取字段提示，再用{" "}
-        <span className="font-mono text-foreground/70">invoke_deferred_tool</span> 传入{" "}
-        <span className="font-mono text-foreground/70">required_fields</span>、{" "}
-        <span className="font-mono text-foreground/70">max_array_items</span>、{" "}
-        <span className="font-mono text-foreground/70">max_result_chars</span> 只取本轮需要的结果。
+      <p className="text-xs leading-relaxed text-muted-foreground">
+        {lazyLoad
+          ? "处理大量数据时，可以在任务中指定需要的字段和数量，减少无关内容。"
+          : "开启懒加载后，可按任务需要查找工具，并限制返回的数据量。"}
       </p>
-
-      <div className="rounded-md border border-border/60 bg-background/70 px-3 py-2 space-y-1.5">
-        <p className="text-[11px] font-medium text-foreground/60">可以直接这样问</p>
-        <p className="text-xs leading-relaxed text-muted-foreground">{PROJECTION_PROMPT_EXAMPLE}</p>
-      </div>
-
-      <div className="rounded-md border border-border/60 bg-background/70 px-3 py-2 space-y-1.5">
-        <p className="text-[11px] font-medium text-foreground/60">完整测试 MCP</p>
-        <p className="text-xs leading-relaxed text-muted-foreground">
-          源码环境可添加一个{" "}
-          <span className="font-mono text-foreground/70">Local stdio command</span>：启动命令填{" "}
-          <span className="font-mono text-foreground/70">node</span>，命令参数填当前 checkout 下的{" "}
-          <span className="font-mono text-foreground/70">{PROJECTION_DEMO_MCP_PATH}</span>
-          ，并勾选懒加载。完整步骤见{" "}
-          <span className="font-mono text-foreground/70">{PROJECTION_DEMO_DOC_PATH}</span>。
-        </p>
-      </div>
-
-      <p className="text-[11px] text-muted-foreground">
-        这类提问会被转换成下面这样的裁剪字段：
+      <p className="text-xs leading-relaxed text-muted-foreground">
+        例如：查最近 20 条未关闭工单，只返回标题、状态和负责人。
       </p>
-      <div className="flex flex-wrap gap-1.5 text-[11px]">
-        {["items[].id", "items[].title", "items[].status", "items[].owner"].map((field) => (
-          <span
-            key={field}
-            className="rounded-sm border border-border bg-background/70 px-1.5 py-0.5 font-mono text-muted-foreground"
-          >
-            {field}
-          </span>
-        ))}
-      </div>
     </div>
   )
 }
@@ -103,6 +41,7 @@ export function MCPConnectorDetail(props: {
   publishLabel?: string
   hideActions?: boolean
   testByUrlOnly?: boolean
+  actionsDisabled?: boolean
 }): React.JSX.Element {
   const {
     connector,
@@ -113,7 +52,8 @@ export function MCPConnectorDetail(props: {
     onPublish,
     publishLabel = "发布到市场",
     hideActions = false,
-    testByUrlOnly = false
+    testByUrlOnly = false,
+    actionsDisabled = false
   } = props
   const [testing, setTesting] = useState(false)
   const [testResult, setTestResult] = useState<{
@@ -121,18 +61,21 @@ export function MCPConnectorDetail(props: {
     tools?: string[]
     error?: string
   } | null>(null)
-  const prevConnectorId = useRef<string | null>(null)
+  const testRevision = useRef(0)
 
   useEffect(() => {
-    if (connector?.id !== prevConnectorId.current) {
-      setTestResult(null)
-      setTesting(false)
-      prevConnectorId.current = connector?.id ?? null
+    setTestResult(null)
+    setTesting(false)
+    const revision = testRevision
+    revision.current++
+    return () => {
+      revision.current++
     }
-  }, [connector?.id])
+  }, [connector])
 
   const handleTest = useCallback(async () => {
-    if (!connector) return
+    if (!connector || actionsDisabled) return
+    const revision = ++testRevision.current
     setTesting(true)
     setTestResult(null)
     try {
@@ -149,97 +92,53 @@ export function MCPConnectorDetail(props: {
             }
           })
         : await window.api.mcp.testConnection({ id: connector.id })
-      setTestResult(res)
+      if (revision === testRevision.current) setTestResult(res)
     } catch (e) {
-      setTestResult({ success: false, error: e instanceof Error ? e.message : "测试失败" })
+      if (revision === testRevision.current)
+        setTestResult({ success: false, error: e instanceof Error ? e.message : "测试失败" })
     } finally {
-      setTesting(false)
+      if (revision === testRevision.current) setTesting(false)
     }
-  }, [connector, testByUrlOnly])
+  }, [connector, testByUrlOnly, actionsDisabled])
 
   if (!connector) {
     return (
-      <div className="flex-1 flex items-center justify-center overflow-y-auto p-8">
-        <div className="max-w-md space-y-6">
-          <div className="text-center space-y-3">
-            <div className="size-14 rounded-2xl bg-muted/60 flex items-center justify-center mx-auto">
-              <Plug className="size-7 text-muted-foreground/60" />
-            </div>
-            <h3 className="text-lg font-semibold text-foreground/80">MCP 连接器</h3>
-            <p className="text-sm text-muted-foreground leading-relaxed">
-              MCP（Model Context Protocol）是一种开放协议，让 AI 能够连接远程工具服务器。通过 MCP
-              连接器，AI
-              可以调用服务器提供的各种工具（Tools），从而获取外部数据、执行远程操作，大幅扩展能力边界。
+      <div className="flex min-h-0 min-w-0 flex-1 items-center justify-center overflow-y-auto p-8">
+        <div className="max-w-sm space-y-5 text-center">
+          <div className="mx-auto flex size-14 items-center justify-center rounded-2xl bg-muted/60">
+            <Plug className="size-6 text-muted-foreground" />
+          </div>
+          <div className="space-y-2">
+            <h3 className="text-lg font-semibold">连接你的工具与数据</h3>
+            <p className="text-sm leading-relaxed text-muted-foreground">
+              添加 MCP 服务器，在对话中使用其提供的工具。支持远程服务和本机命令。
             </p>
           </div>
-
-          <div className="space-y-3">
-            <div className="rounded-xl border border-border/60 bg-muted/30 p-4 space-y-3">
-              <p className="text-sm font-medium text-foreground/70">什么是 MCP？</p>
-              <p className="text-[13px] text-muted-foreground leading-relaxed">
-                MCP 服务器是一个远程服务，它向 AI 暴露一组工具（Tools）。AI
-                在对话过程中会根据需要自动调用这些工具来获取信息或执行操作。例如，一个搜索类 MCP
-                可以让 AI 直接查询网络信息并返回结果。当前支持{" "}
-                <span className="font-medium text-foreground/60">SSE</span> 和{" "}
-                <span className="font-medium text-foreground/60">Streamable HTTP</span>{" "}
-                两种传输协议，也可设为自动检测。
-              </p>
-            </div>
-
-            <div className="rounded-xl border border-border/60 bg-muted/30 p-4 space-y-3">
-              <p className="text-sm font-medium text-foreground/70">如何添加？</p>
-              <ul className="text-[13px] text-muted-foreground space-y-2 leading-relaxed">
-                <li className="flex gap-2">
-                  <span className="text-foreground/40 shrink-0">1.</span>点击{" "}
-                  <span className="font-medium text-foreground/60">+</span>{" "}
-                  按钮，填写连接器名称和远程服务器 URL
-                </li>
-                <li className="flex gap-2">
-                  <span className="text-foreground/40 shrink-0">2.</span>可选择传输类型（SSE /
-                  Streamable HTTP / 自动），并配置自定义请求头
-                </li>
-                <li className="flex gap-2">
-                  <span className="text-foreground/40 shrink-0">3.</span>
-                  保存后点击「测试连接」验证是否可用，成功后会显示服务器提供的工具列表
-                </li>
-                <li className="flex gap-2">
-                  <span className="text-foreground/40 shrink-0">4.</span>
-                  还可配置断线重连策略：最大重试次数和重连延迟
-                </li>
-              </ul>
-            </div>
-
-            <div className="rounded-xl border border-border/60 bg-muted/30 p-4 space-y-3">
-              <p className="text-sm font-medium text-foreground/70">适用场景</p>
-              <p className="text-[13px] text-muted-foreground leading-relaxed">
-                网络搜索、知识库检索、代码仓库操作、项目管理工具集成、消息通知推送……几乎任何提供 MCP
-                协议接口的远程服务都可以接入。连接器支持随时启用 / 禁用，不影响其他功能。
-              </p>
-            </div>
-
-            <ProjectionGuide />
-          </div>
+          <p className="text-xs leading-relaxed text-muted-foreground">
+            选择一个连接器查看配置，或点击“添加连接器”创建连接。
+          </p>
         </div>
       </div>
     )
   }
 
   return (
-    <div className="flex-1 flex flex-col min-w-0 overflow-hidden">
-      <div className="p-4 border-b border-border flex items-start justify-between gap-3">
-        <div className="min-w-0 flex-1">
+    <div className="flex-1 min-h-0 min-w-0 overflow-y-auto">
+      <div className="p-4 border-b border-border flex flex-wrap items-start justify-between gap-3">
+        <div className="min-w-[160px] flex-1">
           <h2 className="text-base font-semibold truncate">{connector.name}</h2>
           <p className="text-xs text-muted-foreground mt-0.5 truncate">
             {getConnectorSummary(connector)}
           </p>
         </div>
         {!hideActions && (
-          <div className="flex items-center gap-1.5 shrink-0">
+          <div className="flex flex-wrap items-center gap-1.5">
             {onPublish && (
               <Button
                 variant="outline"
                 size="sm"
                 className="h-7 gap-1.5 text-xs"
+                disabled={actionsDisabled}
                 onClick={() => onPublish(connector)}
               >
                 <Store className="size-3" />
@@ -250,6 +149,7 @@ export function MCPConnectorDetail(props: {
               variant="ghost"
               size="sm"
               className="h-7 gap-1.5 text-xs text-destructive hover:text-destructive hover:bg-destructive/10"
+              disabled={actionsDisabled}
               onClick={() => {
                 if (confirm(`确定要删除连接器「${connector.name}」吗？`)) onDelete(connector)
               }}
@@ -261,6 +161,7 @@ export function MCPConnectorDetail(props: {
               variant="ghost"
               size="sm"
               className="h-7 gap-1.5 text-xs"
+              disabled={actionsDisabled}
               onClick={() => onEdit(connector)}
             >
               编辑
@@ -269,6 +170,7 @@ export function MCPConnectorDetail(props: {
               variant={connector.enabled ? "default" : "outline"}
               size="sm"
               className="h-7 gap-1.5 text-xs"
+              disabled={actionsDisabled}
               onClick={() => onToggleEnabled(connector.id, !connector.enabled)}
             >
               <Power className="size-3" />
@@ -284,7 +186,7 @@ export function MCPConnectorDetail(props: {
           size="sm"
           className="h-7 gap-1.5 text-xs"
           onClick={handleTest}
-          disabled={testing}
+          disabled={testing || actionsDisabled}
         >
           {testing ? "测试中..." : "测试连接"}
         </Button>
@@ -332,6 +234,7 @@ export function MCPConnectorDetail(props: {
             variant={connector.lazyLoad ? "default" : "outline"}
             size="sm"
             className="h-7 gap-1.5 text-xs"
+            disabled={actionsDisabled}
             onClick={() => onToggleLazyLoad(connector.id, !connector.lazyLoad)}
           >
             <Database className="size-3" />
@@ -341,7 +244,7 @@ export function MCPConnectorDetail(props: {
       </div>
 
       <div className="px-4 py-3 border-b border-border">
-        <ProjectionGuide lazyLoad={connector.lazyLoad} compact />
+        <ProjectionGuide lazyLoad={connector.lazyLoad} />
       </div>
 
       <div className="px-4 py-3 border-b border-border">
@@ -349,10 +252,6 @@ export function MCPConnectorDetail(props: {
           MCP 连接器可访问你配置的数据与工具。请仅添加你信任的服务器。
         </p>
       </div>
-
-      <ScrollArea className="flex-1">
-        <div className="p-4" />
-      </ScrollArea>
     </div>
   )
 }

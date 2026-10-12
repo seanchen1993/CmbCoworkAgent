@@ -1,4 +1,4 @@
-import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs"
+import { mkdtempSync, mkdirSync, realpathSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterEach, describe, expect, it } from "vitest"
@@ -43,7 +43,7 @@ describe("skill/plugin catalog reader", () => {
   })
 
   it("preserves custom precedence, plugin enablement and disabled ids", () => {
-    const root = mkdtempSync(join(tmpdir(), "cmb-skill-plugin-reader-"))
+    const root = realpathSync(mkdtempSync(join(tmpdir(), "cmb-skill-plugin-reader-")))
     temporaryDirectories.push(root)
     const source: SkillPluginCatalogSourceConfig = {
       builtinSkillsDir: join(root, "builtin"),
@@ -149,7 +149,7 @@ describe("skill/plugin catalog reader", () => {
   })
 
   it("resolves one legacy display-name alias to every matching standalone canonical id", () => {
-    const root = mkdtempSync(join(tmpdir(), "cmb-skill-plugin-alias-reader-"))
+    const root = realpathSync(mkdtempSync(join(tmpdir(), "cmb-skill-plugin-alias-reader-")))
     temporaryDirectories.push(root)
     const source: SkillPluginCatalogSourceConfig = {
       builtinSkillsDir: join(root, "builtin"),
@@ -193,7 +193,7 @@ describe("skill/plugin catalog reader", () => {
   })
 
   it("keeps disabled identity scans independent from a truncated plugin store", () => {
-    const root = mkdtempSync(join(tmpdir(), "cmb-skill-disabled-plugin-isolation-"))
+    const root = realpathSync(mkdtempSync(join(tmpdir(), "cmb-skill-disabled-plugin-isolation-")))
     temporaryDirectories.push(root)
     const source: SkillPluginCatalogSourceConfig = {
       builtinSkillsDir: join(root, "builtin"),
@@ -233,7 +233,7 @@ describe("skill/plugin catalog reader", () => {
     ["malformed JSON", '["review"'],
     ["non-array JSON", '{"review":true}']
   ])("fails closed for an existing %s disabled-skill store", async (_label, contents) => {
-    const root = mkdtempSync(join(tmpdir(), "cmb-skill-disabled-invalid-"))
+    const root = realpathSync(mkdtempSync(join(tmpdir(), "cmb-skill-disabled-invalid-")))
     temporaryDirectories.push(root)
     const source: SkillPluginCatalogSourceConfig = {
       builtinSkillsDir: join(root, "builtin"),
@@ -274,7 +274,7 @@ describe("skill/plugin catalog reader", () => {
   })
 
   it("treats a missing disabled-skill store as an empty valid store", () => {
-    const root = mkdtempSync(join(tmpdir(), "cmb-skill-disabled-missing-"))
+    const root = realpathSync(mkdtempSync(join(tmpdir(), "cmb-skill-disabled-missing-")))
     temporaryDirectories.push(root)
     const source: SkillPluginCatalogSourceConfig = {
       builtinSkillsDir: join(root, "builtin"),
@@ -300,7 +300,7 @@ describe("skill/plugin catalog reader", () => {
   })
 
   it("fails closed when the disabled-skill store path is not a regular file", () => {
-    const root = mkdtempSync(join(tmpdir(), "cmb-skill-disabled-directory-"))
+    const root = realpathSync(mkdtempSync(join(tmpdir(), "cmb-skill-disabled-directory-")))
     temporaryDirectories.push(root)
     const source: SkillPluginCatalogSourceConfig = {
       builtinSkillsDir: join(root, "builtin"),
@@ -324,7 +324,7 @@ describe("skill/plugin catalog reader", () => {
   })
 
   it("bounds expanded skill metadata snapshots and preserves disabled summary semantics", () => {
-    const root = mkdtempSync(join(tmpdir(), "cmb-skill-plugin-snapshot-bytes-"))
+    const root = realpathSync(mkdtempSync(join(tmpdir(), "cmb-skill-plugin-snapshot-bytes-")))
     temporaryDirectories.push(root)
     const source: SkillPluginCatalogSourceConfig = {
       builtinSkillsDir: join(root, "builtin"),
@@ -386,7 +386,7 @@ describe("skill/plugin catalog reader", () => {
   })
 
   it("prioritizes retained-skill disabled ids when the disabled projection reaches its byte cap", () => {
-    const root = mkdtempSync(join(tmpdir(), "cmb-skill-plugin-disabled-bytes-"))
+    const root = realpathSync(mkdtempSync(join(tmpdir(), "cmb-skill-plugin-disabled-bytes-")))
     temporaryDirectories.push(root)
     const source: SkillPluginCatalogSourceConfig = {
       builtinSkillsDir: join(root, "builtin"),
@@ -425,7 +425,7 @@ describe("skill/plugin catalog reader", () => {
   })
 
   it("resolves the exact plugin when two plugins expose the same skill name and id", () => {
-    const root = mkdtempSync(join(tmpdir(), "cmb-skill-preview-reader-"))
+    const root = realpathSync(mkdtempSync(join(tmpdir(), "cmb-skill-preview-reader-")))
     temporaryDirectories.push(root)
     const source: SkillPluginCatalogSourceConfig = {
       builtinSkillsDir: join(root, "builtin"),

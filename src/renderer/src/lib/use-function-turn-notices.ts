@@ -1,21 +1,30 @@
 import { useEffect, useState } from "react"
 import type { FunctionTurnNotice } from "../../../shared/mods/v2/turn"
+import type { ModsThreadScope } from "./mods-thread-scope"
 
 const EMPTY_NOTICES: readonly FunctionTurnNotice[] = []
-
-export function useFunctionTurnNotices(threadId: string): readonly FunctionTurnNotice[] {
-  const [snapshot, setSnapshot] = useState<{ threadId: string; notices: FunctionTurnNotice[] }>()
+export function useFunctionTurnNotices(
+  threadId: string,
+  scope: ModsThreadScope | null = null
+): readonly FunctionTurnNotice[] {
+  const admitted = scope?.threadId === threadId ? scope : null
+  const [snapshot, setSnapshot] = useState<{
+    scope: ModsThreadScope
+    notices: FunctionTurnNotice[]
+  }>()
   useEffect(() => {
+    if (!admitted) return
     let live = true
     let sequence = 0
     const refresh = () => {
+      if (!live) return
       const request = ++sequence
       void window.api.mods.turnNotices(threadId).then(
         (notices) => {
-          if (live && sequence === request) setSnapshot({ threadId, notices })
+          if (live && sequence === request) setSnapshot({ scope: admitted, notices })
         },
         () => {
-          if (live && sequence === request) setSnapshot({ threadId, notices: [] })
+          if (live && sequence === request) setSnapshot({ scope: admitted, notices: [] })
         }
       )
     }
@@ -29,6 +38,6 @@ export function useFunctionTurnNotices(threadId: string): readonly FunctionTurnN
       stop()
       window.removeEventListener("mods:configuration-changed", refresh)
     }
-  }, [threadId])
-  return snapshot?.threadId === threadId ? snapshot.notices : EMPTY_NOTICES
+  }, [threadId, admitted])
+  return admitted && snapshot?.scope === admitted ? snapshot.notices : EMPTY_NOTICES
 }

@@ -6,6 +6,13 @@ import type {
 } from "../shared/app-notifications"
 import type { SubagentExportTarget } from "../shared/subagent-session-export"
 import { contextBridge, ipcRenderer, shell } from "electron"
+import { createCoworkBotAPI, createBotHostControlAPI } from "./bot-api"
+import {
+  WINDOW_VISIBILITY_READ,
+  WINDOW_VISIBILITY_CHANGED,
+  isWindowVisibilitySnapshot
+} from "../shared/window-visibility"
+import type { BotDeepLink, BotNavigationAPI } from "../shared/bot-deep-link"
 import { randomUUID } from "node:crypto"
 import type { ModCard, ModProjection, ModWorkspaceStatus } from "../shared/mods/types"
 import type { UpdateSourceInfo } from "../main/updater/channel-config"
@@ -647,6 +654,86 @@ ipcRenderer.on(
 
 // Custom APIs for renderer
 const api = {
+  windowVisibility: {
+    read: () => ipcRenderer.invoke(WINDOW_VISIBILITY_READ),
+    onChanged(callback) {
+      const listener = (_event: Electron.IpcRendererEvent, value: unknown) => {
+        if (isWindowVisibilitySnapshot(value)) callback(value)
+      }
+      ipcRenderer.on(WINDOW_VISIBILITY_CHANGED, listener)
+      return () => ipcRenderer.removeListener(WINDOW_VISIBILITY_CHANGED, listener)
+    }
+  } satisfies import("../shared/window-visibility").WindowVisibilityAPI,
+  bots: createCoworkBotAPI(),
+  botHost: createBotHostControlAPI(),
+  botLinkPreviews: {
+    getLinkPreview: (input) => ipcRenderer.invoke("bots:getLinkPreview", input),
+    cancelLinkPreview: (input) => ipcRenderer.invoke("bots:cancelLinkPreview", input)
+  } satisfies import("../shared/bot-ipc-result").BotIpcTransport<
+    import("../shared/bot-link-preview").BotLinkPreviewClient
+  >,
+  botWindowsSandbox: {
+    status: () => ipcRenderer.invoke("bots:windows-sandbox:status"),
+    initialize: (input) => ipcRenderer.invoke("bots:windows-sandbox:initialize", input)
+  } satisfies import("../shared/bot-ipc-result").BotIpcTransport<
+    import("../shared/bot-windows-native-setup").BotWindowsNativeSetupAPI
+  >,
+  botShellResources: {
+    inspect: () => ipcRenderer.invoke("bots:shell-resources:inspect"),
+    reveal: (input) => ipcRenderer.invoke("bots:shell-resources:reveal", input),
+    revealDiagnostics: () => ipcRenderer.invoke("bots:shell-resources:reveal-diagnostics")
+  } satisfies import("../shared/bot-ipc-result").BotIpcTransport<
+    import("../shared/bot-shell-resources").BotShellResourcesAPI
+  >,
+  botArtifactDownloads: {
+    start: (input) => ipcRenderer.invoke("bots:artifact-download:start", input),
+    page: (input) => ipcRenderer.invoke("bots:artifact-download:page", input),
+    resume: (input) => ipcRenderer.invoke("bots:artifact-download:resume", input),
+    pause: (input) => ipcRenderer.invoke("bots:artifact-download:pause", input),
+    cancel: (input) => ipcRenderer.invoke("bots:artifact-download:cancel", input),
+    reveal: (input) => ipcRenderer.invoke("bots:artifact-download:reveal", input),
+    forget: (input) => ipcRenderer.invoke("bots:artifact-download:forget", input)
+  } satisfies import("../shared/bot-ipc-result").BotIpcTransport<
+    import("../shared/bot-artifact-downloads").BotArtifactDownloadsAPI
+  >,
+  botComputerCheckpoints: {
+    list: () => ipcRenderer.invoke("bots:computer-checkpoint:list"),
+    deliverables: () => ipcRenderer.invoke("bots:computer-checkpoint:deliverables"),
+    recoveryCopies: () => ipcRenderer.invoke("bots:computer-checkpoint:recovery-copies"),
+    progress: () => ipcRenderer.invoke("bots:computer-checkpoint:progress"),
+    execute: (input) => ipcRenderer.invoke("bots:computer-checkpoint:execute", input),
+    deleteRecovery: (selection) =>
+      ipcRenderer.invoke("bots:computer-checkpoint:delete-recovery", selection),
+    revealRecovery: (id) => ipcRenderer.invoke("bots:computer-checkpoint:reveal-recovery", id),
+    revealDeliverables: (id) =>
+      ipcRenderer.invoke("bots:computer-checkpoint:reveal-deliverables", id)
+  } satisfies import("../shared/bot-ipc-result").BotIpcTransport<
+    import("../shared/bot-computer-checkpoint").BotComputerCheckpointAPI
+  >,
+  botWorkspaceMaintenance: {
+    list: () => ipcRenderer.invoke("bots:workspace-maintenance:list"),
+    execute: (input) => ipcRenderer.invoke("bots:workspace-maintenance:execute", input),
+    revealRecovery: () => ipcRenderer.invoke("bots:workspace-maintenance:reveal-recovery")
+  } satisfies import("../shared/bot-workspace-maintenance").BotWorkspaceMaintenanceAPI,
+  botBrowserMaintenance: {
+    list: () => ipcRenderer.invoke("bots:browser-maintenance:list"),
+    execute: (input) => ipcRenderer.invoke("bots:browser-maintenance:execute", input)
+  } satisfies import("../shared/bot-ipc-result").BotIpcTransport<
+    import("../shared/bot-browser-maintenance").BotBrowserMaintenanceAPI
+  >,
+  botBackups: {
+    list: () => ipcRenderer.invoke("bots:backup:list"),
+    execute: (input) => ipcRenderer.invoke("bots:backup:execute", input),
+    reveal: () => ipcRenderer.invoke("bots:backup:reveal")
+  } satisfies import("../shared/bot-backup").BotBackupAPI,
+  botNavigation: {
+    ready: () => ipcRenderer.invoke("bots:navigationReady"),
+    onOpen(callback: (link: BotDeepLink) => void) {
+      const listener = (_event: Electron.IpcRendererEvent, link: BotDeepLink) => callback(link)
+      ipcRenderer.on("bots:navigate", listener)
+      return () => ipcRenderer.removeListener("bots:navigate", listener)
+    }
+  } satisfies BotNavigationAPI,
   agent: {
     // Send message and receive events via callback
     invoke: (
@@ -2394,10 +2481,16 @@ const api = {
     ): Promise<{ success: boolean; exportedPath?: string; error?: string }> => {
       return ipcRenderer.invoke("skills:exportCloudEvolutionBackup", { backupId, targetDir })
     },
+    previewImport: (
+      id: string,
+      input: import("../shared/skill-import").SkillImportRequest
+    ): Promise<import("../shared/skill-import").SkillImportResult> =>
+      ipcRenderer.invoke("skills:previewImport", id, input),
+    cancelImport: (id: string): Promise<void> => ipcRenderer.invoke("skills:cancelImport", id),
     upload: (
       buffer: ArrayBuffer,
       fileName: string,
-      options?: { allowNestedNameDuplicates?: boolean }
+      options?: { allowNestedNameDuplicates?: boolean; expectedSha256?: string; importId?: string }
     ): Promise<{
       success: boolean
       skillName?: string
@@ -2451,6 +2544,8 @@ const api = {
     delete: (id: string): Promise<void> => ipcRenderer.invoke("mcp:delete", id),
     setEnabled: (id: string, enabled: boolean): Promise<void> =>
       ipcRenderer.invoke("mcp:setEnabled", { id, enabled }),
+    setLazyLoad: (id: string, lazyLoad: boolean): Promise<void> =>
+      ipcRenderer.invoke("mcp:setLazyLoad", { id, lazyLoad }),
     testConnection: (params: {
       id?: string
       config?: McpConnectorUpsert
@@ -3075,33 +3170,59 @@ const api = {
       threadId: string,
       action: import("../shared/mods/v2/ui").FunctionClientAction
     ): Promise<void> => ipcRenderer.invoke("mods:function-client-act", { threadId, action }),
-    approveFunction: (threadId: string, pluginId: string, digest: string): Promise<void> => ipcRenderer.invoke("mods:approve-function", { threadId, pluginId, digest }),
-    revokeFunction: (threadId: string, name: string): Promise<void> => ipcRenderer.invoke("mods:revoke-function", { threadId, name }),
-    status: (threadId: string): Promise<ModWorkspaceStatus> => ipcRenderer.invoke("mods:status", threadId),
+    approveFunction: (threadId: string, pluginId: string, digest: string): Promise<void> =>
+      ipcRenderer.invoke("mods:approve-function", { threadId, pluginId, digest }),
+    revokeFunction: (threadId: string, name: string): Promise<void> =>
+      ipcRenderer.invoke("mods:revoke-function", { threadId, name }),
+    status: (threadId: string): Promise<ModWorkspaceStatus> =>
+      ipcRenderer.invoke("mods:status", threadId),
     configure: (threadId: string, enabled: boolean, outputPolicy: boolean): Promise<void> =>
       ipcRenderer.invoke("mods:configure", { threadId, enabled, outputPolicy }),
     approve: (threadId: string, pluginId: string, digest: string): Promise<void> =>
       ipcRenderer.invoke("mods:approve", { threadId, pluginId, digest }),
-    revoke: (threadId: string, modId: string): Promise<void> => ipcRenderer.invoke("mods:revoke", { threadId, modId }),
-    cards: (threadId: string, callId: string): Promise<ModCard[]> => ipcRenderer.invoke("mods:cards", { threadId, callId }),
-    act: (threadId: string, actionId: string): Promise<ModProjection> => ipcRenderer.invoke("mods:act", { threadId, actionId }),
+    revoke: (threadId: string, modId: string): Promise<void> =>
+      ipcRenderer.invoke("mods:revoke", { threadId, modId }),
+    cards: (threadId: string, callId: string): Promise<ModCard[]> =>
+      ipcRenderer.invoke("mods:cards", { threadId, callId }),
+    act: (threadId: string, actionId: string): Promise<ModProjection> =>
+      ipcRenderer.invoke("mods:act", { threadId, actionId }),
     installExamples: (): Promise<void> => ipcRenderer.invoke("mods:install-examples"),
-    audit: (threadId: string, before?: number): Promise<import("../shared/mods/types").ModAuditEntry[]> => ipcRenderer.invoke("mods:audit", { threadId, before }),
-    reconcile: (threadId: string, callId: string, resolution: "confirmed-success" | "confirmed-failure"): Promise<void> => ipcRenderer.invoke("mods:reconcile", { threadId, callId, resolution }),
+    audit: (
+      threadId: string,
+      before?: number
+    ): Promise<import("../shared/mods/types").ModAuditEntry[]> =>
+      ipcRenderer.invoke("mods:audit", { threadId, before }),
+    reconcile: (
+      threadId: string,
+      callId: string,
+      resolution: "confirmed-success" | "confirmed-failure"
+    ): Promise<void> => ipcRenderer.invoke("mods:reconcile", { threadId, callId, resolution }),
     backup: (): Promise<boolean> => ipcRenderer.invoke("mods:backup"),
-    artifact: (threadId: string, id: string): Promise<{ label: string; text: string }> => ipcRenderer.invoke("mods:artifact", { threadId, id }),
-    saveArtifact: (threadId: string, id: string): Promise<boolean> => ipcRenderer.invoke("mods:save-artifact", { threadId, id }),
-    commands: (threadId: string): Promise<import("../shared/mods/types").ModCommandDescriptor[]> => ipcRenderer.invoke("mods:commands", threadId),
-    enqueue: (threadId: string, descriptor: import("../shared/mods/types").ModCommandDescriptor, args: import("../shared/mods/types").ModObject): Promise<import("../shared/mods/types").ModCommandJob> => ipcRenderer.invoke("mods:enqueue", { threadId, descriptor, args }),
-    jobs: (threadId: string): Promise<import("../shared/mods/types").ModCommandJob[]> => ipcRenderer.invoke("mods:jobs", threadId),
-    cancelJob: (threadId: string, id: string): Promise<void> => ipcRenderer.invoke("mods:cancel-job", { threadId, id }),
+    artifact: (threadId: string, id: string): Promise<{ label: string; text: string }> =>
+      ipcRenderer.invoke("mods:artifact", { threadId, id }),
+    saveArtifact: (threadId: string, id: string): Promise<boolean> =>
+      ipcRenderer.invoke("mods:save-artifact", { threadId, id }),
+    commands: (threadId: string): Promise<import("../shared/mods/types").ModCommandDescriptor[]> =>
+      ipcRenderer.invoke("mods:commands", threadId),
+    enqueue: (
+      threadId: string,
+      descriptor: import("../shared/mods/types").ModCommandDescriptor,
+      args: import("../shared/mods/types").ModObject
+    ): Promise<import("../shared/mods/types").ModCommandJob> =>
+      ipcRenderer.invoke("mods:enqueue", { threadId, descriptor, args }),
+    jobs: (threadId: string): Promise<import("../shared/mods/types").ModCommandJob[]> =>
+      ipcRenderer.invoke("mods:jobs", threadId),
+    cancelJob: (threadId: string, id: string): Promise<void> =>
+      ipcRenderer.invoke("mods:cancel-job", { threadId, id }),
     onJobsChanged: (callback: (event: { threadId: string }) => void): (() => void) => {
-      const listener = (_event: Electron.IpcRendererEvent, payload: { threadId: string }): void => callback(payload)
+      const listener = (_event: Electron.IpcRendererEvent, payload: { threadId: string }): void =>
+        callback(payload)
       ipcRenderer.on("mods:jobs-changed", listener)
       return () => ipcRenderer.removeListener("mods:jobs-changed", listener)
     },
     onCardsChanged: (callback: (event: { threadId: string }) => void): (() => void) => {
-      const listener = (_event: Electron.IpcRendererEvent, value: { threadId: string }): void => callback(value)
+      const listener = (_event: Electron.IpcRendererEvent, value: { threadId: string }): void =>
+        callback(value)
       ipcRenderer.on("mods:cards-changed", listener)
       return () => ipcRenderer.removeListener("mods:cards-changed", listener)
     }
@@ -3117,12 +3238,20 @@ const api = {
       version?: string,
       requireMods?: boolean
     ): Promise<{ success: boolean; pluginName?: string; error?: string }> =>
-      ipcRenderer.invoke("plugins:install", { buffer, fileName, origin, version, requireMods }) as Promise<{
+      ipcRenderer.invoke("plugins:install", {
+        buffer,
+        fileName,
+        origin,
+        version,
+        requireMods
+      }) as Promise<{
         success: boolean
         pluginName?: string
         error?: string
       }>,
-    installFromDir: (requireMods?: boolean): Promise<{ success: boolean; pluginName?: string; error?: string }> =>
+    installFromDir: (
+      requireMods?: boolean
+    ): Promise<{ success: boolean; pluginName?: string; error?: string }> =>
       ipcRenderer.invoke("plugins:installFromDir", requireMods) as Promise<{
         success: boolean
         pluginName?: string
@@ -4667,8 +4796,11 @@ const api = {
       canRollback: boolean
       source: UpdateSourceInfo | null
     }> => ipcRenderer.invoke("update:get-status"),
-    getStartupResult: (): Promise<{ updatedFrom?: string; updatedTo?: string }> =>
-      ipcRenderer.invoke("update:get-startup-result"),
+    getStartupResult: (): Promise<{
+      updatedFrom?: string
+      updatedTo?: string
+      rollbackError?: string
+    }> => ipcRenderer.invoke("update:get-startup-result"),
     onAvailable: (
       callback: (info: {
         version: string

@@ -1,0 +1,128 @@
+{
+  "kind": "actual-background-once-delivery-failure",
+  "observedAtMs": 1791624771423,
+  "compiledOutputIdentity": "705f608a75850fdf63c5b476",
+  "buildId": "8a8cce465e9db2b4ce8a78fd",
+  "schema": 72,
+  "setup": {
+    "capturedAtMs": 1791623963071,
+    "setupRun": {
+      "id": "a53780e4-0190-4f17-9ede-42b0a07ba05b",
+      "status": "succeeded",
+      "created_at": 1791623821628,
+      "updated_at": 1791623906299
+    },
+    "routines": [
+      {
+        "id": "a4d5729a-e0f6-4408-b919-09b611a2b7b5",
+        "name": "BACKGROUND_CORE_20261010 单次触发",
+        "enabled": 1,
+        "next_at": 1791624001000,
+        "revision": 1,
+        "timezone": "Asia/Shanghai"
+      }
+    ],
+    "pin": "/Users/chenqiang/Library/Application Support/CMBDevClaw-development/2026-10-08/presentation/cold-ui-output-plan/pins-live-before-stop-1791623963065050000.safe.json",
+    "compiledOutputIdentity": "705f608a75850fdf63c5b476"
+  },
+  "appAbsent": {
+    "observedAtMs": 1791624107469,
+    "ownedProcessRoles": [
+      "host",
+      "browser",
+      "browser",
+      "browser",
+      "browser",
+      "browser",
+      "browser",
+      "browser",
+      "browser",
+      "browser",
+      "browser"
+    ],
+    "appMainPresent": false,
+    "recentRuns": [
+      {
+        "id": "bd37b2cb-4b8a-4ded-a325-264802756449",
+        "status": "succeeded",
+        "source": "routine:a4d5729a-e0f6-4408-b919-09b611a2b7b5",
+        "created_at": 1791624001290,
+        "updated_at": 1791624049400
+      },
+      {
+        "id": "a53780e4-0190-4f17-9ede-42b0a07ba05b",
+        "status": "succeeded",
+        "source": "user",
+        "created_at": 1791623821628,
+        "updated_at": 1791623906299
+      },
+      {
+        "id": "19af4b9f-cd1c-4f9e-b5b4-748f7db2f355",
+        "status": "succeeded",
+        "source": "bot-introduction",
+        "created_at": 1791599355938,
+        "updated_at": 1791599357697
+      }
+    ],
+    "routineState": [
+      {
+        "id": "a4d5729a-e0f6-4408-b919-09b611a2b7b5",
+        "enabled": 0,
+        "next_at": null,
+        "revision": 2
+      }
+    ]
+  },
+  "task": {
+    "synthetic": true,
+    "requestedMarker": "BACKGROUND_CORE_20261010",
+    "expected": "exactly one line after the one-shot fires; no browsing, files, memory or peer messages"
+  },
+  "observed": {
+    "hostScheduledAtJitterMs": 290,
+    "hostExecutionWithoutDesktopApp": true,
+    "onceConsumedEnabledFalse": true,
+    "deliveryPassed": false,
+    "nativeFinalSummary": "Bot checked previous setup instead of delivering the requested marker, treated the consumed one-shot as paused and invented older dates.",
+    "sourceCause": "Active scheduled/event messages have sender=system. prepareBotUserPrompt uses botUserMessageContent, which labels all system messages as historical data; current task instruction is thus wrongly labelled historical.",
+    "currentInputFixVerified": false
+  },
+  "modelUsageMetadata": [
+    {
+      "model": "MiniMax-M3",
+      "purpose": "task",
+      "input_tokens": 20071,
+      "output_tokens": 1210,
+      "created_at": 1791624001569,
+      "settled_at": 1791624021530
+    },
+    {
+      "model": "MiniMax-M3",
+      "purpose": "task",
+      "input_tokens": 21508,
+      "output_tokens": 938,
+      "created_at": 1791624021670,
+      "settled_at": 1791624035931
+    },
+    {
+      "model": "MiniMax-M3",
+      "purpose": "task",
+      "input_tokens": 22663,
+      "output_tokens": 672,
+      "created_at": 1791624036056,
+      "settled_at": 1791624049324
+    }
+  ],
+  "effectsMetadata": [],
+  "officialGrok": {
+    "sameSyntheticPrompt": true,
+    "nativeFinalMarkerObserved": true,
+    "marker": "BACKGROUND_CORE_20261010",
+    "routineRemoved": true,
+    "appQuitConfirmed": false,
+    "timestampsFromUiNotUsedAsExecutionProof": true,
+    "comparison": "Grok delivery passed finite sample; CMB delivery failed"
+  },
+  "privacy": "No checkpoint, memory, result or credential bodies read or retained; native observations use only synthetic task text.",
+  "coreParityComplete": false
+}

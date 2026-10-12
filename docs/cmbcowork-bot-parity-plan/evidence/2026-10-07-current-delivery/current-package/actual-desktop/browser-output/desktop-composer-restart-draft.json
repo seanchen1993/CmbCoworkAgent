@@ -1,0 +1,21 @@
+{
+  "source": "actual packaged renderer draft storage and attached Tiptap document",
+  "beforeHostId": "217a5b8c-9d1c-4bd9-876f-cb99c3b35256",
+  "afterHostId": "ffd05688-c15c-4aab-a75e-6fb0721b9995",
+  "dataEpoch": "initial",
+  "editorId": "bot-composer-90cf23d2-1ef5-415d-a1bf-271cdbb368c6/thread/78dc2ccf-6824-4204-9940-4b398f3cf871",
+  "selectedBot": "桌面验收 Bot",
+  "draft": {
+    "prompt": "取得清理句柄前，保留这份未发送草稿。",
+    "attachments": [],
+    "richText": "{\"type\":\"doc\",\"content\":[{\"type\":\"paragraph\",\"content\":[{\"type\":\"text\",\"text\":\"取得清理句柄前，保留这份未发送草稿。\"}]}]}",
+    "skills": [],
+    "references": [],
+    "recipients": [],
+    "revision": "74f96648-6572-478f-a38b-f86f1185c7d3",
+    "dataEpoch": "initial"
+  },
+  "sameRawImmediatelyAfterRestart": true,
+  "sameRawAfterEditorReady": true,
+  "sameEditorDocumentAfterReady": true
+}

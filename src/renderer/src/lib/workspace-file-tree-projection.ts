@@ -23,7 +23,8 @@ const projections = new WeakMap<WorkspaceFileTreeFile[], WorkspaceFileTreeProjec
 const PROJECTION_TASK_ENTRY_BUDGET = 128
 const SORT_RUN_SIZE = 256
 const yieldResolvers: Array<() => void> = []
-let yieldSequence = 0
+const TIMER_YIELD_BUDGET_MS = 4
+let lastTimerYield = 0
 const yieldChannel =
   typeof MessageChannel === "undefined"
     ? null
@@ -34,10 +35,12 @@ const yieldChannel =
       })()
 
 function yieldToRenderer(): Promise<void> {
-  yieldSequence += 1
   // MessageChannel is low-latency, but an uninterrupted chain can starve
-  // timers/input on some runtimes. Periodically enter the timer queue too.
-  if (!yieldChannel || yieldSequence % 64 === 0) {
+  // timers/input. Bound elapsed time, not the number of messages: a fixed
+  // message count can hold the timer queue too long on a busy/slow machine.
+  const now = performance.now()
+  if (!yieldChannel || now - lastTimerYield >= TIMER_YIELD_BUDGET_MS) {
+    lastTimerYield = now
     return new Promise((resolve) => setTimeout(resolve, 0))
   }
   return new Promise((resolve) => {
@@ -132,8 +135,10 @@ async function cooperativeSortNodes(
     await yieldToRenderer()
     throwIfProjectionAborted(signal)
   }
+  // Reuse the two merge buffers; large trees should not allocate a new
+  // full-size array at every merge level and trigger avoidable GC pauses.
+  let target = new Array<WorkspaceFileTreeNode>(source.length)
   for (let width = SORT_RUN_SIZE; width < source.length; width *= 2) {
-    const target = new Array<WorkspaceFileTreeNode>(source.length)
     let operations = 0
     for (let start = 0; start < source.length; start += width * 2) {
       const middle = Math.min(start + width, source.length)
@@ -155,7 +160,9 @@ async function cooperativeSortNodes(
         }
       }
     }
+    const previous = source
     source = target
+    target = previous
   }
   return source
 }
@@ -167,7 +174,9 @@ async function finalizeUnorderedProjection(
   const directories: WorkspaceFileTreeNode[] = []
   let count = 0
   for (const node of projection.nodesByPath.values()) {
-    if (node.is_dir) directories.push(node)
+    // Empty/single-child directories are already sorted. Avoid retaining and
+    // scheduling another traversal over tens of thousands of empty roots.
+    if (node.is_dir && node.children.length > 1) directories.push(node)
     count += 1
     if (count >= PROJECTION_TASK_ENTRY_BUDGET) {
       count = 0
@@ -275,9 +284,7 @@ function removeProjectionPath(projection: WorkspaceFileTreeProjection, filePath:
   while (node) {
     const separator = normalizedPath.lastIndexOf("/")
     const parentPath = separator < 0 ? "" : normalizedPath.slice(0, separator)
-    const siblings = parentPath
-      ? projection.nodesByPath.get(parentPath)?.children
-      : projection.tree
+    const siblings = parentPath ? projection.nodesByPath.get(parentPath)?.children : projection.tree
     const index = siblings ? findExistingNodeIndex(siblings, node) : -1
     if (siblings && index >= 0) siblings.splice(index, 1)
     projection.nodesByPath.delete(normalizedPath)

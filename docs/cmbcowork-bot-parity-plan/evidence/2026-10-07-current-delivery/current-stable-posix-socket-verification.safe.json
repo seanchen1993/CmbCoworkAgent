@@ -1,0 +1,123 @@
+{
+  "schemaVersion": 1,
+  "kind": "stable-posix-host-socket-source-and-compiled-process-verification",
+  "observedAt": "2026-10-07T16:12:29.725176+00:00",
+  "changes": [
+    "All POSIX endpoints use stable private namespace per canonical data/lock identity, independent of TMPDIR byte length",
+    "Exact stale socket reused after SIGKILL; normal closure retains one small ownership marker",
+    "Windows named pipe unchanged; held lock checked at lifetime boundaries"
+  ],
+  "limitations": [
+    "First provisioning SIGKILL can leave ambiguous unmarked namespace, preserved and rejected",
+    "Data/lock identity replacement retains old namespace, no global scan or foreign deletion",
+    "Existing legacy random socket leftovers are not deleted automatically",
+    "Not real MiniMax, actual app UI, full production or Windows kernel acceptance"
+  ],
+  "sourcePins": [
+    {
+      "path": "src/main/bots/host-socket.ts",
+      "bytes": 9093,
+      "sha256": "5e92c99646a74f68eb9812c3b779099b8ffe516ab0fbd57f91db5ba76f61a3de"
+    },
+    {
+      "path": "src/main/bots/host-socket.test.ts",
+      "bytes": 8810,
+      "sha256": "b0b64a70311f91bd3488c952cd12c883c0a3d4ac523767b6cd46f198988084b3"
+    },
+    {
+      "path": "src/main/bots/host-runtime-entry.ts",
+      "bytes": 16850,
+      "sha256": "456c04a322321d9674c3f875935b609792925e6ab61faf0b01aa2562d062cc76"
+    },
+    {
+      "path": "src/main/bots/host-runtime-shutdown.test.ts",
+      "bytes": 13846,
+      "sha256": "5d6ae34f6417f48be2187cf08d3c4331f4c5db340e2a77c506ef7160c506cb35"
+    },
+    {
+      "path": "src/main/bots/host-process.test.ts",
+      "bytes": 179107,
+      "sha256": "8a5403c0e41cc56982974cead06252a264016934a87379165afc6a6cddb35391"
+    },
+    {
+      "path": "tests/run-bot-host-native.mjs",
+      "bytes": 2504,
+      "sha256": "5a14fc6aa19a9ddf2ee697334b00807d5ab0c30dc4495569cd75e96307ad0742"
+    }
+  ],
+  "nearest": {
+    "passed": 30,
+    "skippedNativeTests": 65,
+    "exitCode": 0,
+    "log": {
+      "path": "/tmp/cmb-stable-socket-final-nearest.log",
+      "bytes": 1092,
+      "sha256": "7969291ada94a5d4b25d49fb5472e730e2adbc850c2cdf5959077da7d3e580b3"
+    }
+  },
+  "nodeTypes": {
+    "exitCode": 0,
+    "log": {
+      "path": "/tmp/cmb-stable-socket-final-node.log",
+      "bytes": 91,
+      "sha256": "546c7bfd36ecac14793f941add6251c16a729819d1b744cccbaf256a91e1b42c"
+    }
+  },
+  "lint": {
+    "exitCode": 0,
+    "warnings": 0,
+    "log": {
+      "path": "/tmp/cmb-stable-socket-final-lint.log",
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    }
+  },
+  "productionBuild": {
+    "exitCode": 0,
+    "log": {
+      "path": "/tmp/cmb-stable-socket-production-build.log",
+      "bytes": 56051,
+      "sha256": "96ae3db419c3e2b739147619772f57d7836eb487d35da94d04fc15cbcc6c74b9"
+    }
+  },
+  "compiledLongMultibyteTMPDIR": {
+    "selectedCase": "uses an owned bounded endpoint for long multibyte TMPDIR and reclaims its exact socket after compiled Host SIGKILL",
+    "passed": 1,
+    "otherCasesSkipped": 64,
+    "exitCode": 0,
+    "privateJson": {
+      "path": "/tmp/cmb-stable-socket-compiled-long-tmpdir.private.json",
+      "bytes": 19508,
+      "sha256": "113b486f29a3c77d661036b936540b7214dbaa5e6c281d98f9c09c590a0999f6"
+    },
+    "log": {
+      "path": "/tmp/cmb-stable-socket-compiled-long-tmpdir.log",
+      "bytes": 249,
+      "sha256": "4ea565f827077cc2cc2e8a5cd4978ad505e08bbe562e4a61857778013f5381f3"
+    }
+  },
+  "compiledPersistedGraphRecovery": {
+    "path": "docs/cmbcowork-bot-parity-plan/evidence/2026-10-07-current-delivery/current-native-stable-socket-graph-recovery.safe.json",
+    "bytes": 3964,
+    "sha256": "847c48369a5595d8a5e63e8f749eb78c41966d598509619506969d4d0a23c0d5"
+  },
+  "firstCandidateTypesAndLintFailurePreserved": [
+    {
+      "path": "/tmp/cmb-stable-socket-node-types.log",
+      "bytes": 356,
+      "sha256": "dc54bc7c99d3afe9b4641170cbb73897379b63b49e87d77a115cf11a5afcfe40"
+    },
+    {
+      "path": "/tmp/cmb-stable-socket-navigation-lint.log",
+      "bytes": 722,
+      "sha256": "9a3d92ebb329c591151f0f2cecfcbd0aa1859953b01c659fbccb176430d51959"
+    }
+  ],
+  "rootRepairs": [
+    "Use supported Vitest skipIf entry before process selection",
+    "Narrow optional POSIX UID method in skipped Windows fixture",
+    "Check held lock on Windows endpoint; document OS-owned pipe cleanup"
+  ],
+  "actualAppHostNotUpgraded": true,
+  "actualAppSourceIdentityRemains": "b4d31d62d589840f5147422a"
+}

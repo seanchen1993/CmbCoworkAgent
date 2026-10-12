@@ -1,0 +1,12 @@
+{
+  "phase": "actual-original-workspace-with-readonly-routine-read-provenance",
+  "startedAt": "2026-10-07T08:56:13.802377+00:00",
+  "completedAt": "2026-10-07T08:59:22.997528+00:00",
+  "seconds": 189.19517958303913,
+  "exitCode": 0,
+  "inputCount": 3834,
+  "sourceDrift": [],
+  "logSHA256": "884fd332e4bd843df3fd3ac7e2f2a5f0638e036ba64210ff3d185bf66d8064af",
+  "automaticRetries": 0,
+  "wrapperOverridesOriginalTimeouts": false
+}

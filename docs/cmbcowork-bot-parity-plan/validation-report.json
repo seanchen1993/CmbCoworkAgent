@@ -1,0 +1,94 @@
+{
+  "requirement_groups": 20,
+  "requirements": 260,
+  "unique_test_ids": 260,
+  "rpc_methods": 210,
+  "source_ids": 81,
+  "source_files": 71,
+  "official_snapshot_manifest_entries": 52,
+  "checked_local_links": 413,
+  "by_phase": {
+    "P2": 79,
+    "P5": 43,
+    "P3": 72,
+    "P4": 63,
+    "P1": 3
+  },
+  "structural_errors": [],
+  "product_tests_run": false,
+  "original_app_parity_verified": false,
+  "implementation_policy_document": "08-code-reuse-plan.md",
+  "code_size_estimate_check": {
+    "document": "09-code-size-estimate.md",
+    "measurement": "code-size-measurement.json",
+    "checked_links_in_changed_documents": 18,
+    "measurement_totals_consistent": true,
+    "core_module_budget_sum_consistent": true,
+    "product_tests_run": false,
+    "scope_applicability": "historical_remote_core; current Windows native estimate not yet recalculated"
+  },
+  "core_review_document": "12-windows-local-first.md",
+  "core_scope_document": "core-scope.json",
+  "core_review_report": "core-review-report.json",
+  "core_scope_counts": {
+    "core": 124,
+    "deferred": 73,
+    "core_subset": 53,
+    "conditional": 10
+  },
+  "core_supplemental_checks": 14,
+  "core_journeys": 12,
+  "general_contract_document": "11-core-final-review.md",
+  "original_observations_document": "13-original-app-observations.md",
+  "original_app_samples_observed": 14,
+  "platform_contract": {
+    "local_os": "windows",
+    "local_native_only": true,
+    "local_disallowed_prerequisites": [
+      "wsl2",
+      "linux_containers"
+    ],
+    "future_server_os": "linux",
+    "future_orchestrator": "kubernetes",
+    "future_windows_nodes_required": false,
+    "common_core": [
+      "bot_identity",
+      "messages",
+      "runs",
+      "collaboration",
+      "memory",
+      "skills",
+      "approvals",
+      "model_routing"
+    ],
+    "os_adapters": [
+      "computer",
+      "browser",
+      "shell",
+      "process",
+      "capture",
+      "credentials",
+      "filesystem"
+    ],
+    "linux_core_build_gate": "G1",
+    "cross_os_migration_document": "12-windows-local-first.md",
+    "cross_os_execution_state_portability": "validate_capabilities_and_checkpoint_schema; never assume executable/profile/credentials portability",
+    "future_cluster_implementation_status": "planned_deferred",
+    "current_review_machine": "macOS"
+  },
+  "latest_review_date": "2026-09-30",
+  "documentation_check_passed": true,
+  "latest_source_hash_check": {
+    "original": 71,
+    "native": 18,
+    "mismatches": 0
+  },
+  "host_dependency_review": {
+    "evidence": "host-boundary-review.json",
+    "entrypoints_analyzed": 4,
+    "source_files_hash_checked": 22,
+    "registration_wrapper_probe": "expected uninitialized error observed",
+    "g1_passed": false
+  },
+  "written_review_status": "delivered_with_explicit_G2B_blocker"
+}

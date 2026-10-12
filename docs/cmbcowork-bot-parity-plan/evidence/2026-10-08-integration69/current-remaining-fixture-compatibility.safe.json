@@ -1,0 +1,53 @@
+{
+  "recordedAt": "2026-10-10T13:35:28.077719+00:00",
+  "kind": "remaining-browser-fixture-compatibility",
+  "productSourceChanged": false,
+  "changes": {
+    "approval": "Emit actual imported CSS with an esbuild output path and include its styles in the fixture HTML.",
+    "routine": "Add the trackedWork state map to legacy workspace test seams, matching the current renderer contract. No assertions removed."
+  },
+  "passes": {
+    "approvalJourneys": 7,
+    "protectedOperationJourneys": 25,
+    "settingsRecoveryJourneys": 12,
+    "routinePendingRecoveryJourneys": "No completed pass receipt found",
+    "routineMutationJourneys": 20
+  },
+  "limits": [
+    "Only partial continuation stages completed. Original complete browser gate remains failed on the prior Chrome close timeout.",
+    "Later standalone stages have not run.",
+    "Native Grok/CMB whole-product acceptance is separate and incomplete."
+  ],
+  "logs": [
+    {
+      "path": "/tmp/cmb-browser-after-profile-20261010.log",
+      "bytes": 10386,
+      "sha256": "a1e5bf1db031aedfe29e2c1c981b252aee1d0385082825df098018065ab0a136"
+    },
+    {
+      "path": "/tmp/cmb-browser-after-approval-20261010.log",
+      "bytes": 15081,
+      "sha256": "4fe006ecd4a0e352ae34e03088466b2c566f11950763801346d0107f91875d37"
+    },
+    {
+      "path": "/tmp/cmb-browser-after-protected-20261010.log",
+      "bytes": 26205,
+      "sha256": "01bd94dc91fd28925cf186468c2247d0202680b58f48c79bc9a611cf45bf2c1e"
+    },
+    {
+      "path": "/tmp/cmb-routine-mutation-fixture-current-20261010.log",
+      "bytes": 4009,
+      "sha256": "4fb72153e1ab08f1b9530ee4bec88bbae73fd9c1e1bcaf3c241e6716703ca18f"
+    },
+    {
+      "path": "/tmp/cmb-current-fixture-format-20261010.log",
+      "bytes": 66,
+      "sha256": "17aa973d3f004560237d9a95171210b0671deff23d61628eecf7322ff5938f20"
+    },
+    {
+      "path": "/tmp/cmb-current-fixture-lint-20261010.log",
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    }
+  ]
+}

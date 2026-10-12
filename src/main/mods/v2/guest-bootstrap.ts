@@ -12,6 +12,9 @@ export const FUNCTION_GUEST_BOOTSTRAP = String.raw`
   const freeze = Object.freeze.bind(Object);
   const define = Object.defineProperty.bind(Object);
   const ownKeys = Object.keys.bind(Object);
+  const FailureMap = WeakMap;
+  const setFailure = Function.prototype.call.bind(WeakMap.prototype.set);
+  const getFailure = Function.prototype.call.bind(WeakMap.prototype.get);
   ${FUNCTION_ASYNC_SCOPE}
   ${FUNCTION_UI_BOOTSTRAP}
   const handlers = new Map();
@@ -99,6 +102,7 @@ export const FUNCTION_GUEST_BOOTSTRAP = String.raw`
     let reason;
     let trace = freeze([]);
     const inheritedActions = new Set();
+    const hostFailures = new FailureMap();
     const listeners = new Set();
     const signal = freeze({
       get aborted() { return aborted; },
@@ -121,6 +125,9 @@ export const FUNCTION_GUEST_BOOTSTRAP = String.raw`
         const error = Error(reply.error.message);
         define(error, "__downstream", { value: reply.error.downstream === true });
         define(error, "code", { value: reply.error.code });
+        // Proof stays in this invocation's private map, never on a guest-readable
+        // error property that could be copied to an unrelated failure.
+        setFailure(hostFailures, error, reply.error.failureId);
         throw error;
       }
       if (meta.operation && method === "next" && reply.value && typeof reply.value === "object" &&
@@ -233,7 +240,8 @@ export const FUNCTION_GUEST_BOOTSTRAP = String.raw`
       return pack({ error: {
         code: error && error.code,
         message: String(error && error.message || error).slice(0, 2048),
-        downstream: error && error.__downstream === true
+        downstream: error && error.__downstream === true,
+        failureId: getFailure(hostFailures, error)
       }});
     } finally {
       signals.delete(token);

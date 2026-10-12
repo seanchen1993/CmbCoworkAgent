@@ -2580,7 +2580,7 @@ export class CoordinatorWorkerManager {
           record.finishedAt = timestamp
           record.lastActivityAt = timestamp
           record.error =
-            "Worker was interrupted because CmbCowork restarted before it finished. Use continue_worker to resume with the same worker checkpoint."
+            "Worker was interrupted because CMBDevClaw restarted before it finished. Use continue_worker to resume with the same worker checkpoint."
           record.lastEvent = "Worker restored as stale after app restart."
           record.summary = record.error
           record.rawText = record.error

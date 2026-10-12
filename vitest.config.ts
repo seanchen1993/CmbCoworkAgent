@@ -2,6 +2,7 @@ import { resolve } from "node:path"
 import { defineConfig } from "vitest/config"
 
 export default defineConfig({
+  esbuild: { jsx: "automatic" },
   resolve: {
     alias: {
       "@": resolve(__dirname, "src/renderer/src"),
@@ -13,10 +14,15 @@ export default defineConfig({
     // renderer tests that are pure TypeScript utilities). Renderer-side tests that
     // need jsdom would require a separate config; keep this scope narrow.
     environment: "node",
+    // Suites also launch model servers, SQLite/QuickJS workers and subprocesses.
+    // Bound outer concurrency so their latency checks measure work, not pool starvation.
+    // The CLI can override this for hosts with a larger process/CPU budget.
+    maxWorkers: 2,
     include: [
       "src/main/**/*.test.ts",
       "src/shared/**/*.test.ts",
       "tests/browser/**/*.test.ts",
+      "tests/browser/**/*.test.tsx",
       "src/renderer/src/components/panels/git-panel-file-tree.test.ts",
       "src/renderer/src/lib/**/*.test.ts",
       "src/renderer/src/lib/agent-git-commit-selection.test.ts",
@@ -33,6 +39,8 @@ export default defineConfig({
       "src/renderer/src/components/chat/chat-scroll-navigator.test.ts",
       "src/renderer/src/components/chat/chat-search-overlay.test.ts",
       "src/renderer/src/components/chat/reasoning-expansion-context.test.ts",
+      "src/renderer/src/components/bots/native-message-input.test.ts",
+      "src/renderer/src/components/bots/BotMessageAttachments.test.ts",
       "src/renderer/src/lib/chat-scroll-tail-change.test.ts",
       "src/renderer/src/lib/chat-thread-projection-cache.test.ts",
       "src/renderer/src/lib/app-catalog-cache.test.ts",

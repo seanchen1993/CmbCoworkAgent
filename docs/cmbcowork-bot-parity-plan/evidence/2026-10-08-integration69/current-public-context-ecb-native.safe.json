@@ -1,0 +1,185 @@
+{
+  "kind": "formal-group-public-speaker-outcome-native-retest",
+  "recordedAt": "2026-10-10T03:57:54.047112+00:00",
+  "nativeBuildId": "ecbff0f576b74a71097bc25c",
+  "schema": 71,
+  "formalVia": "CUA native App, real configured MiniMax M3",
+  "groupFollowups": [
+    {
+      "id": "6029a1ab-326f-43ca-b239-945d2dfd254d",
+      "conversation_id": "7f08d20f-73d8-4507-a26f-dfbc64d6529e",
+      "status": "completed",
+      "round": 1,
+      "total_messages": 1,
+      "input": "刚才的核对结果呢？",
+      "runs": [
+        {
+          "id": "2dadd8bb-e0d6-4bb9-9b14-f0dcf7db7b2e",
+          "bot_id": "924e1689-7b6d-411c-a429-28decb91b179",
+          "status": "succeeded",
+          "sent_count": 1,
+          "modelRequests": 2,
+          "unknownUsage": 0,
+          "checkpointStructure": {
+            "messageClasses": {
+              "AIMessage": 8,
+              "HumanMessage": 17,
+              "AIMessageChunk": 2,
+              "ToolMessage": 1
+            },
+            "toolNamesOnly": [
+              "send_group_message"
+            ],
+            "messageContentsNotCopied": true
+          }
+        },
+        {
+          "id": "7cd3faed-6fd7-4b40-ae15-fb4f106bddb6",
+          "bot_id": "e1d81813-1ff0-4fca-9948-d966e1a77189",
+          "status": "succeeded",
+          "sent_count": 0,
+          "modelRequests": 2,
+          "unknownUsage": 0,
+          "checkpointStructure": {
+            "messageClasses": {
+              "HumanMessage": 17,
+              "AIMessage": 8,
+              "AIMessageChunk": 2,
+              "ToolMessage": 1
+            },
+            "toolNamesOnly": [
+              "send_group_message"
+            ],
+            "messageContentsNotCopied": true
+          }
+        },
+        {
+          "id": "00931d62-19f1-4161-b7d2-a167c32ed8ff",
+          "bot_id": "e1d81813-1ff0-4fca-9948-d966e1a77189",
+          "status": "succeeded",
+          "sent_count": 0,
+          "modelRequests": 2,
+          "unknownUsage": 0,
+          "checkpointStructure": {
+            "messageClasses": {
+              "HumanMessage": 17,
+              "AIMessage": 8,
+              "AIMessageChunk": 2,
+              "ToolMessage": 1
+            },
+            "toolNamesOnly": [
+              "send_group_message"
+            ],
+            "messageContentsNotCopied": true
+          }
+        }
+      ],
+      "publicMessages": [
+        {
+          "id": "691bbb5b-6653-4562-b9f8-1141a441a733",
+          "bot_id": "924e1689-7b6d-411c-a429-28decb91b179",
+          "run_id": "2dadd8bb-e0d6-4bb9-9b14-f0dcf7db7b2e",
+          "text": "本轮核对结果：286+47=333。我独立计算 333，@月报示范核验 给出 333，双方一致，核对通过。"
+        }
+      ],
+      "publicFactsCorrect": true,
+      "finiteCycleAndSingleOutcomeReplyPassed": true,
+      "fullContextExpressionAligned": true
+    },
+    {
+      "id": "1f259d57-00bb-4874-bfca-f4b426378dc8",
+      "conversation_id": "7f08d20f-73d8-4507-a26f-dfbc64d6529e",
+      "status": "completed",
+      "round": 1,
+      "total_messages": 1,
+      "input": "？",
+      "runs": [
+        {
+          "id": "536887d9-22e3-4b36-8e5d-fe1ac319525b",
+          "bot_id": "924e1689-7b6d-411c-a429-28decb91b179",
+          "status": "succeeded",
+          "sent_count": 0,
+          "modelRequests": 1,
+          "unknownUsage": 0,
+          "checkpointStructure": {
+            "messageClasses": {
+              "HumanMessage": 17,
+              "AIMessage": 8,
+              "AIMessageChunk": 1
+            },
+            "toolNamesOnly": [],
+            "messageContentsNotCopied": true
+          }
+        },
+        {
+          "id": "e646f184-e47e-4555-a270-3073ec5c0a00",
+          "bot_id": "e1d81813-1ff0-4fca-9948-d966e1a77189",
+          "status": "succeeded",
+          "sent_count": 1,
+          "modelRequests": 2,
+          "unknownUsage": 0,
+          "checkpointStructure": {
+            "messageClasses": {
+              "HumanMessage": 18,
+              "AIMessage": 7,
+              "AIMessageChunk": 2,
+              "ToolMessage": 1
+            },
+            "toolNamesOnly": [
+              "send_group_message"
+            ],
+            "messageContentsNotCopied": true
+          }
+        },
+        {
+          "id": "b5902b2e-17f8-4eb7-b112-47601666a83b",
+          "bot_id": "924e1689-7b6d-411c-a429-28decb91b179",
+          "status": "succeeded",
+          "sent_count": 0,
+          "modelRequests": 2,
+          "unknownUsage": 0,
+          "checkpointStructure": {
+            "messageClasses": {
+              "HumanMessage": 17,
+              "AIMessage": 8,
+              "AIMessageChunk": 2,
+              "ToolMessage": 1
+            },
+            "toolNamesOnly": [
+              "send_group_message"
+            ],
+            "messageContentsNotCopied": true
+          }
+        }
+      ],
+      "publicMessages": [
+        {
+          "id": "1b688550-72df-446d-8e5c-461227144dac",
+          "bot_id": "e1d81813-1ff0-4fca-9948-d966e1a77189",
+          "run_id": "e646f184-e47e-4555-a270-3073ec5c0a00",
+          "text": "按所选技能独立计算 286+47=333，与 @报价工具编程核验 独立核对的 333 一致，核对通过。"
+        }
+      ],
+      "publicFactsCorrect": true,
+      "finiteCycleAndSingleOutcomeReplyPassed": true,
+      "fullContextExpressionAligned": false,
+      "remainingExpressionDifference": "Bare question still reuses old selected-skill phrasing; no selected skill was bound by this input."
+    }
+  ],
+  "grokBaselineReceipt": "current-context-turn-0ba-native.safe.json",
+  "earlierFailuresPreserved": [
+    "current-context-turn-0ba-native.safe.json",
+    "current-public-context-b609-native.safe.json"
+  ],
+  "comparisonBoundary": "Finite synthetic followups in existing room; official and CMB identities, model and prior failed exchanges differ. No general task quality or whole-core parity claimed.",
+  "coldPreservationReceipt": "/Users/chenqiang/Library/Application Support/CMBDevClaw-development/2026-10-08/presentation/cold-unique-upgrade-plan/room-role-context-cold-preservation-1791602994162040000.safe.json",
+  "developmentRefreshObservation": {
+    "nativeDevMenuReloadWasUsed": true,
+    "temporaryBlankObserved": true,
+    "freshExactAppObservationRestoredWorkspace": true,
+    "persistentProductionFailureEstablished": false,
+    "restartOrDataMutationUsed": false
+  },
+  "privateTextNotCopied": true,
+  "coreParityComplete": false
+}

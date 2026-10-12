@@ -1,0 +1,192 @@
+{
+  "schemaVersion": 1,
+  "kind": "independent_current_project_frozen22_plus3_actual_chromium",
+  "startedAt": "2026-10-07T15:30:15.816706+00:00",
+  "finishedAt": "2026-10-07T15:30:21.772920+00:00",
+  "source": "/var/folders/r4/m2gmdyyn06z9488ghc1044zh0000gn/T/cmb-real-programming-project-l8sw9epg/project",
+  "scratch": "/private/var/folders/r4/m2gmdyyn06z9488ghc1044zh0000gn/T/cmb-current-core-progress-finite-g5wxzpnp/programming-current-independent-v2/scratch/project",
+  "sourceBefore": {
+    "index.html": {
+      "bytes": 746,
+      "sha256": "2d2861c4d178e687107facb1635b3f75fa8c7b36bcba5e5fd7dae942fe51ba11"
+    },
+    "styles.css": {
+      "bytes": 3161,
+      "sha256": "1a7a8226446f5522ce7f2f2c1cabb0d6f671fa9510ca41cf7128b04203238c5b"
+    },
+    "README.md": {
+      "bytes": 79,
+      "sha256": "b025a2149d21e002e608748d70a803f9c7bd92ba9a83179345011b849141c9cf"
+    },
+    "AGENTS.md": {
+      "bytes": 483,
+      "sha256": "1cc9668514035e017a218bd8f0a573c3e8a6c0dfe44b4cfaac0b4e118782f51d"
+    },
+    "src/money.js": {
+      "bytes": 1519,
+      "sha256": "6e245e2a04d355b7157d33c1c60058eb1a1ff6537624eaf50982404326c89d26"
+    },
+    "src/quote.js": {
+      "bytes": 1544,
+      "sha256": "fbdb525fe26493fa7693f5ba68fd92f0e6d8b0d3ca73462517ce6d70ffdf8551"
+    },
+    "src/storage.js": {
+      "bytes": 1756,
+      "sha256": "912dbe11a597ea57d89219cc19af8a3fa9edf30d71ac14a94d82daeca824860e"
+    },
+    "src/render.js": {
+      "bytes": 3325,
+      "sha256": "db3ae9b9b56558c7b9a29fca8954c542b62c103e0e6295b6c212201883e948ad"
+    },
+    "src/sample.js": {
+      "bytes": 283,
+      "sha256": "e40644ac729988daad1d98dfd9f93fafd7c34b75806e40c5a0cf624099859591"
+    },
+    "src/app.js": {
+      "bytes": 3295,
+      "sha256": "6cf7feb544859980e96c6444b05afd38d2452eca7c538f971a5bd98d55adb1bc"
+    }
+  },
+  "sourceAfter": {
+    "index.html": {
+      "bytes": 746,
+      "sha256": "2d2861c4d178e687107facb1635b3f75fa8c7b36bcba5e5fd7dae942fe51ba11"
+    },
+    "styles.css": {
+      "bytes": 3161,
+      "sha256": "1a7a8226446f5522ce7f2f2c1cabb0d6f671fa9510ca41cf7128b04203238c5b"
+    },
+    "README.md": {
+      "bytes": 79,
+      "sha256": "b025a2149d21e002e608748d70a803f9c7bd92ba9a83179345011b849141c9cf"
+    },
+    "AGENTS.md": {
+      "bytes": 483,
+      "sha256": "1cc9668514035e017a218bd8f0a573c3e8a6c0dfe44b4cfaac0b4e118782f51d"
+    },
+    "src/money.js": {
+      "bytes": 1519,
+      "sha256": "6e245e2a04d355b7157d33c1c60058eb1a1ff6537624eaf50982404326c89d26"
+    },
+    "src/quote.js": {
+      "bytes": 1544,
+      "sha256": "fbdb525fe26493fa7693f5ba68fd92f0e6d8b0d3ca73462517ce6d70ffdf8551"
+    },
+    "src/storage.js": {
+      "bytes": 1756,
+      "sha256": "912dbe11a597ea57d89219cc19af8a3fa9edf30d71ac14a94d82daeca824860e"
+    },
+    "src/render.js": {
+      "bytes": 3325,
+      "sha256": "db3ae9b9b56558c7b9a29fca8954c542b62c103e0e6295b6c212201883e948ad"
+    },
+    "src/sample.js": {
+      "bytes": 283,
+      "sha256": "e40644ac729988daad1d98dfd9f93fafd7c34b75806e40c5a0cf624099859591"
+    },
+    "src/app.js": {
+      "bytes": 3295,
+      "sha256": "6cf7feb544859980e96c6444b05afd38d2452eca7c538f971a5bd98d55adb1bc"
+    }
+  },
+  "sourceStableDuringCopyAndRun": true,
+  "scratchSourceStable": true,
+  "oracleUnmodified": true,
+  "frozen22": {
+    "cases": 22,
+    "passed": 22,
+    "accepted": true
+  },
+  "additionalStorage3": {
+    "cases": 3,
+    "passed": 3,
+    "accepted": true,
+    "sameContractsComparedToGrokReport": [
+      {
+        "name": "illegal nested line structure",
+        "currentCopiedProjectPassed": true,
+        "originalGrokDeliveredModulePassed": false,
+        "originalGrokActual": {
+          "lines": [
+            null
+          ],
+          "discountPercent": 0,
+          "taxPercent": 8
+        },
+        "expected": {
+          "lines": [
+            {
+              "id": "a",
+              "description": "A",
+              "quantity": 1,
+              "unitPrice": "1.00"
+            }
+          ],
+          "discountPercent": 0,
+          "taxPercent": 8
+        }
+      },
+      {
+        "name": "illegal nested quantity type",
+        "currentCopiedProjectPassed": true,
+        "originalGrokDeliveredModulePassed": false,
+        "originalGrokActual": {
+          "lines": [
+            {
+              "id": "a",
+              "description": "A",
+              "quantity": "oops",
+              "unitPrice": "1.00"
+            }
+          ],
+          "discountPercent": 0,
+          "taxPercent": 8
+        },
+        "expected": {
+          "lines": [
+            {
+              "id": "a",
+              "description": "A",
+              "quantity": 1,
+              "unitPrice": "1.00"
+            }
+          ],
+          "discountPercent": 0,
+          "taxPercent": 8
+        }
+      },
+      {
+        "name": "invalid saved tax range",
+        "currentCopiedProjectPassed": true,
+        "originalGrokDeliveredModulePassed": false,
+        "originalGrokActual": {
+          "lines": [],
+          "discountPercent": 0,
+          "taxPercent": 101
+        },
+        "expected": {
+          "lines": [
+            {
+              "id": "a",
+              "description": "A",
+              "quantity": 1,
+              "unitPrice": "1.00"
+            }
+          ],
+          "discountPercent": 0,
+          "taxPercent": 8
+        }
+      }
+    ]
+  },
+  "all25CaseSampleAccepted": true,
+  "currentSourceChangesArchiveAsSampleOnly": false,
+  "wholeProgrammingDeliveryPassed": null,
+  "actualApplicationConnected": false,
+  "modelCalled": false,
+  "hostMutated": false,
+  "sharedSourceWritten": false,
+  "originalFixtureModified": false,
+  "browserVersion": "131.0.6778.33",
+  "scope": "Only copied current ten-file project modules, unchanged frozen22 plus existing three invalid-storage contracts. No actual app or work-browser connection. Module tests do not verify render/application interaction, final original artifact, or full programming/stop-resume journey. Source changed during run would invalidate current-source acceptance."
+}

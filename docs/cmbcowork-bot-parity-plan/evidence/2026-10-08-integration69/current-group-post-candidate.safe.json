@@ -1,0 +1,286 @@
+{
+  "kind": "reviewed-private-to-group-original-file-publication-candidate",
+  "recordedAt": "2026-10-10T23:43:03.430179+00:00",
+  "coreParityComplete": false,
+  "productionReleaseReady": false,
+  "acceptanceBoundary": {
+    "sourceCandidateOnly": true,
+    "sourceSchemaVersionAtCapture": 75,
+    "includedInLiveF3d": false,
+    "liveF3dOutputIdentity": "f3d5afe6873fe5f9de067041",
+    "nativeMiniMaxCandidateVerified": false,
+    "nativeGrokCandidateComparisonComplete": false,
+    "candidateCompiledOutputIdentity": null,
+    "candidateFormalPackageVerified": false,
+    "unifiedTypeChecks": "Owned by parent integration; this evidence does not claim a final node/web gate.",
+    "statement": "The new list_groups/post_to_group implementation and continuation/accounting fixes are source candidates. They are not present in the currently observed f3d app and have not been run with native MiniMax. Controlled graph/domain/static-render tests are not substituted for live acceptance.",
+    "sourceSnapshotBoundary": "The hashes capture the working tree at recordedAt. Concurrent skill/event work changed shared files and schema after some individual feature gates. These logs do not certify one identical final integrated source snapshot or compiled package; parent integration gates are separate."
+  },
+  "grokReference": {
+    "providedVersion": "0.18.0 reconstructed",
+    "sourceRoot": "/Users/chenqiang/Desktop/AI/grok-bot-0.18-reconstructed-main",
+    "license": "No upstream source-code license implied by reconstruction; redistribution rights not established.",
+    "sources": [
+      {
+        "path": "source/host/agents/agent-messaging.ts",
+        "bytes": 11451,
+        "sha256": "4c9fe82afe95c3c7f92e9fb26b67f96f25544fc3240ae88d40b9a3f2ee5991fc",
+        "reviewedLines": [36, 47],
+        "observedBehavior": "Directory explains asynchronous delivery to an agent or an existing group the sender belongs to; outbound group publication is a side effect requiring user intent, not an automatic relay of private words."
+      },
+      {
+        "path": "source/host/extensions/transcript/agent-to-agent-messaging.ts",
+        "bytes": 12439,
+        "sha256": "453d97db38543aaf087ca54a9dc6ade7491e7907083cc713c10249b6d7fa249f",
+        "reviewedLines": [69, 86],
+        "observedBehavior": "A group target routes through postToGroup. This reconstructed version explicitly states group messages are text-only and does not deliver its image arguments to groups."
+      },
+      {
+        "path": "source/host/extensions/transcript/shared-rooms.ts",
+        "bytes": 24208,
+        "sha256": "17959d3834e0c7c041f0711d041ce9a158dd0cc3f4ea2b8511dd3f04af14c96f",
+        "reviewedLines": [51, 113],
+        "observedBehavior": "postToGroup rejects missing/non-group targets, non-members and pass text; records a public member message and schedules a bounded group turn on the agent lane."
+      },
+      {
+        "path": "source/host/extensions/transcript/group-chat-orchestrator.ts",
+        "bytes": 3372,
+        "sha256": "5ff5626a9234be5ab0ca4cc94490e96c55f3ca2f7f886eaf1e0f381ae7f209a1",
+        "reviewedLines": [41, 107],
+        "observedBehavior": "Existing bounded round-robin/member routing, pass semantics and message limits; this orchestration was already adapted by CMB to durable group epochs."
+      }
+    ],
+    "referenceBoundary": "Behavior/protocol reference only for this new integration. The 0.18 reconstruction proves text publication to own groups, not generic binary group attachments or the current proprietary cloud backend. CMB reuses its own original-file storage/approval/file-card interfaces to support explicit originals.",
+    "officialNativeObservation": {
+      "version": "0.68.1",
+      "reportedBy": "Parent agent native UI observations in this task",
+      "evidence": "current-peer-original-files-candidate.safe.json",
+      "scenario": "CJ02 three-Bot original-file handoff and public result delivery",
+      "groupDeliveryObservedLocalTime": "2026-10-11 07:13:06 Asia/Shanghai",
+      "displayedResultCsvBytes": 77,
+      "displayedReviewMdSize": "1.3 kB",
+      "originalFilesIndependentlyHashed": false,
+      "boundary": "Official client behavior observed by parent; not evidence of the implementation or file transport used by its backend."
+    }
+  },
+  "f3dComparisonContext": {
+    "reportedBy": "Parent native UI observations on f3d in current task",
+    "finalPublicOutcomeReportedCorrect": true,
+    "observedDifference": "Private work and later group turns produced separate copies of the outputs; another same-cycle handoff was then attempted and rejected in the UI. The approved direct-publication path and same-cycle receipt context target these differences.",
+    "validatesNewCandidate": false
+  },
+  "reuse": [
+    {
+      "paths": [
+        "src/main/bots/peer-approval.ts",
+        "src/main/bots/profile-tools.ts",
+        "src/main/bots/store.ts"
+      ],
+      "behavior": "Existing exact approval, run lease and atomic toolOnce/approvedToolOnce receipts."
+    },
+    {
+      "paths": [
+        "src/main/bots/artifacts.ts",
+        "src/shared/bot-peer-files.ts",
+        "src/shared/bot-files.ts"
+      ],
+      "behavior": "Existing task-visible original selectors, immutable object aliases, per-type file limits and streaming integrity verification under sorted object locks; no extra whole-file copy or locks while waiting on human approval."
+    },
+    {
+      "paths": ["src/main/bots/upstream/grok-group-chat.ts", "src/main/bots/group-store.ts"],
+      "behavior": "Previously adapted Grok group routing/pass and bounded round robin; existing durable queue, cycle and recovery machinery."
+    },
+    {
+      "paths": [
+        "src/shared/bot-message-attachments.ts",
+        "src/renderer/src/components/bots/BotApprovalContent.tsx"
+      ],
+      "behavior": "Existing message file cards and approval rendering, retaining original names, sizes, hashes and exact destination context."
+    }
+  ],
+  "implementation": [
+    "Only list existing member groups; do not create guessed targets. Original public group assignment may be visible through verified parent lineage, but private transcript/history is not shared.",
+    "Freeze group identity/revision, named member identities/revisions, original route and latest cycle/cancellation status; recheck these with run ownership and selected file metadata at commit.",
+    "Commit exact public text, explicitly selected same-byte file aliases, provenance, tool receipt and any scheduler admission in one SQLite transaction. Lost acknowledgement replays the receipt without re-reading source bytes or waking again.",
+    "An active room continues without cancelling its original task. An idle public-origin cycle uses agent priority, never becomes human auto-review authority, and excludes the publisher from its initial recipients.",
+    "The active room turn may read explicitly published same-cycle originals even after its original trigger; unrelated/private/same-Bot artifacts, other branches and obsolete turns gain no broader access.",
+    "Late same-origin public continuation is verified through the publication source run parent chain. New human tasks, cancelled continuations and unrelated publications are not treated as the old task.",
+    "First public post counts toward both round and global message budgets. Its presence alone does not start another round when every recipient passes. Existing two-per-turn, ten-message and three-round limits remain bounded.",
+    "Room prompt contains this member's own same-cycle delivered peer receipt metadata (recipient, status, intent, original file names), not private bodies or returned content. This provides actual phase state; it is not proof that a real model will never duplicate work."
+  ],
+  "sourceSnapshot": [
+    {
+      "path": "src/shared/bot-group-post.ts",
+      "bytes": 1274,
+      "sha256": "248f8f538e8469ae6b9ef10ad2d3211dc0affaaf39574bf4241610c80864b06a",
+      "role": "Strict model input, frozen destination/member revisions and exact group publication approval payload."
+    },
+    {
+      "path": "src/main/bots/group-post-tool.ts",
+      "bytes": 4514,
+      "sha256": "a2ff10d5ca4ed06605ab7a46df9efe01ff7a09842451e2a83b8b01c78e249707",
+      "role": "list_groups and post_to_group; original authorization review, frozen plan, short streaming hash locks and replay receipt."
+    },
+    {
+      "path": "src/main/bots/group-store.ts",
+      "bytes": 38479,
+      "sha256": "c8db9a6c145161e613d390d5f58201d6cf4c6e1b4682a3e1116b0d020881f60c",
+      "role": "Approved public provenance, same-origin continuation, group epoch/cancellation checks, bounded scheduler, current-cycle delivery status and exact message accounting."
+    },
+    {
+      "path": "src/main/bots/store.ts",
+      "bytes": 237647,
+      "sha256": "13234ef476107c2389a4059225ceeb39f7d3f7990121762777d2828eaa1b9b61",
+      "role": "Existing group enqueue lane injection and narrowly scoped current-group-cycle public file reads; same-Bot identity grants no cross-conversation access."
+    },
+    {
+      "path": "src/main/bots/agent-runtime.ts",
+      "bytes": 123956,
+      "sha256": "278780287576c8e2aee76a6d03c8182dfd4c1f68d25673c694f93ba0194d1ca1",
+      "role": "Private-run tool registration and accurate private/group delivery descriptions."
+    },
+    {
+      "path": "src/main/bots/auto-review.ts",
+      "bytes": 19064,
+      "sha256": "1db91270f96f2943cb1e9a29041e7a280f8d4bda412d0722b943f1e863fa525e",
+      "role": "Strict typed group payload gate and original-user public destination/data exposure review."
+    },
+    {
+      "path": "src/main/bots/activity.ts",
+      "bytes": 4654,
+      "sha256": "32564cae0b38546272fde59d036a6606f95830c41466222aca82844021e5e964",
+      "role": "Human-readable group lookup and publication progress labels."
+    },
+    {
+      "path": "src/main/bots/schema.ts",
+      "bytes": 34995,
+      "sha256": "d025254a4a4b4c5887a7a7afc69f8a28e9f052d8068acc8d4f5a502c47e46aa1",
+      "role": "Group publication source records and member/publication/group-history indexes; overall schema version also includes unrelated concurrent features."
+    },
+    {
+      "path": "src/renderer/src/components/bots/BotApprovalContent.tsx",
+      "bytes": 33152,
+      "sha256": "b252d71cf1114818bdae57dc20f9b71a5d4e66de56fa18f13035acbb641ed127",
+      "role": "Existing approval UI shows actual group, named recipients, text and original file names/sizes without exposing technical IDs."
+    }
+  ],
+  "testSourceSnapshot": [
+    {
+      "path": "src/main/bots/group-post.test.ts",
+      "bytes": 16791,
+      "sha256": "bf882cfdd69c8fe775a34d170aca335232aa67d47b70d90039c684813285fd33"
+    },
+    {
+      "path": "src/main/bots/agent-runtime.test.ts",
+      "bytes": 483990,
+      "sha256": "c92ab46a429e969be0eb299dcfdda62a05c4e76430aedfdcdd29cb3c6f03e4e0"
+    },
+    {
+      "path": "src/main/bots/auto-review-terminal.test.ts",
+      "bytes": 9670,
+      "sha256": "435dcc3f17aa23e95902f252fe61dcbfd29446dd9960a3e70200ee9cecd830b1"
+    },
+    {
+      "path": "tests/browser/bot-group-post-approval.test.tsx",
+      "bytes": 2578,
+      "sha256": "60c95f53698dde0423ea58d5a28f6912118d51de808a9ff51622221b4cb74d87"
+    }
+  ],
+  "verification": [
+    {
+      "name": "group-publication-domain",
+      "status": "passed",
+      "passed": 18,
+      "scope": "Direct and original-group/branch publication; immutable original aliases; no private-history disclosure; review-time member/revision/cancel/file revocation checks; rollback; restart receipt; task limits; late same-origin second post; stopped/replaced continuation rejection; actual hard ten-message room limit.",
+      "log": {
+        "path": "/tmp/cmb-group-post-independent-fixes.log",
+        "bytes": 474,
+        "sha256": "8cb6da9af7707bbb2ea1e13d6219f025000e83613921b8671d225b0584609b99"
+      }
+    },
+    {
+      "name": "group-scheduler-and-private-peer-neighbors",
+      "status": "passed",
+      "passed": 35,
+      "scope": "30 original group-store tests plus 5 peer-dispatch-group tests after continuation and accounting fixes.",
+      "log": {
+        "path": "/tmp/cmb-group-post-reviewed-neighbors.log",
+        "bytes": 1651,
+        "sha256": "7c1addec07f1aef6007c6a22072f093d6a79dc841a7adf2e1fe68f65288ce281"
+      }
+    },
+    {
+      "name": "actual-runtime-graph-controlled-model",
+      "status": "passed",
+      "passed": 1,
+      "scope": "Actual Cmb graph/runtime/SQLite/object path with controlled HTTP model protocol: list_groups, exact approval, post_to_group, another member reads the immutable original CSV alias. 336 other tests were skipped. This is not MiniMax or native UI acceptance.",
+      "log": {
+        "path": "/tmp/cmb-group-post-reviewed-graph.log",
+        "bytes": 16734,
+        "sha256": "9472ed94626ce97269249678d818b8cf807a08064b5870854d26923c2b0cd017"
+      }
+    },
+    {
+      "name": "typed-auto-review-gate",
+      "status": "passed",
+      "passed": 1,
+      "scope": "Controlled reviewer admits a complete exact payload; malformed member list/revision/file path/extra action remain manual. 30 other tests skipped. Does not establish real-model authorization quality.",
+      "log": {
+        "path": "/tmp/cmb-group-post-review.log",
+        "bytes": 616,
+        "sha256": "9147d23410a4de589fe64f2426b99a038ffd14fa5556b0d3713669b810029bf9"
+      }
+    },
+    {
+      "name": "approval-static-rendering-and-neighbor",
+      "status": "passed",
+      "passed": 6,
+      "scope": "3 group approval plus 3 routine approval React static-render tests; named recipients, actual payload and malformed-target handling. Not native interaction or screenshot acceptance.",
+      "log": {
+        "path": "/tmp/cmb-group-approval-final-20261011.log",
+        "bytes": 378,
+        "sha256": "d0b4c4d4539e26a151042727335a2ed0b12ecf91aa30c8572458740d031150c7"
+      }
+    },
+    {
+      "name": "peer-file-neighbor",
+      "status": "passed",
+      "passed": 15,
+      "scope": "15 peer-files tests, including ordinary/video byte policy and chained immutable handoff. This log also has 13 earlier group-post cases; final group-post count is recorded separately above.",
+      "log": {
+        "path": "/tmp/cmb-group-post-final-domain.log",
+        "bytes": 916,
+        "sha256": "ece6d53c439a936dbea205a860ad316ef342a2fedc0664630f152dad36f8cc4e"
+      }
+    },
+    {
+      "name": "strict-lint",
+      "status": "passed",
+      "exitCode": 0,
+      "scope": "Nine group-related production/test files, --max-warnings 0. store.ts was left for the parent unified gate because an unrelated concurrently changed event-policy line needed formatting.",
+      "log": {
+        "path": "/tmp/cmb-group-post-reviewed-lint.log",
+        "bytes": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      }
+    }
+  ],
+  "reviewCorrections": [
+    {
+      "finding": "Strict latest==origin comparison rejected a legitimate second late publication after the first created a public continuation.",
+      "correction": "Allow only a verified public continuation with the same original group task and branch; retain cancelled/new-task fences.",
+      "verification": "Three late continuation/stop/new-human domain cases in the final 18-case log."
+    },
+    {
+      "finding": "The initial public message was absent from round/total counters, allowing 11 actual public messages with a stored cap of 10.",
+      "correction": "Count the initial message once; distinguish the starter from subsequent replies for all-pass quiescence.",
+      "verification": "Final domain test checks initial counters [1,1], terminal count 10 and exactly 10 public Bot messages."
+    }
+  ],
+  "remaining": [
+    "Parent unified node/web checks, final compiled output identity and frozen native package.",
+    "Native MiniMax CJ02 rerun of the new path: same original bytes, one authorized handoff per stage, direct final file cards and no repeat work after group scheduling.",
+    "Actual approval/attachment interaction comparison against official Grok and installed CMB candidate.",
+    "Windows/Linux/K8s runtime acceptance remains separate; these tests ran in the current macOS development environment."
+  ]
+}

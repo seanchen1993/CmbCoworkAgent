@@ -1,5 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest"
 import {
+  getBotMessageTintEnabled,
+  setBotMessageTintEnabled,
   applyThemePreference,
   getDarkThemePreference,
   getLightThemePreference,
@@ -96,6 +98,28 @@ describe("theme preference", () => {
     vi.unstubAllGlobals()
   })
 
+  it("keeps Bot tint on for old settings and preserves an explicit choice across theme changes", () => {
+    const { values } = installFakeWindow()
+    values.set(
+      "cmb:theme-settings",
+      JSON.stringify({ mode: "light", lightTheme: "codex-light", darkTheme: "codex-dark" })
+    )
+    expect(getBotMessageTintEnabled()).toBe(true)
+    const listener = vi.fn()
+    const stop = subscribeThemePreference(listener)
+    setBotMessageTintEnabled(false)
+    expect(getBotMessageTintEnabled()).toBe(false)
+    expect(listener).toHaveBeenCalledOnce()
+    setBotMessageTintEnabled(false)
+    expect(listener).toHaveBeenCalledOnce()
+    setThemePreference("codex-dark")
+    expect(getBotMessageTintEnabled()).toBe(false)
+    expect(JSON.parse(values.get("cmb:theme-settings")!).botMessageTint).toBe(false)
+    stop()
+    setBotMessageTintEnabled(true)
+    expect(listener).toHaveBeenCalledTimes(2)
+  })
+
   it("defaults to the classic CMBDevClaw white theme", () => {
     installFakeWindow()
     expect(getThemePreference()).toBe("cmbdevclaw-white")
@@ -112,7 +136,8 @@ describe("theme preference", () => {
     expect(JSON.parse(values.get("cmb:theme-settings") ?? "{}")).toEqual({
       mode: "dark",
       lightTheme: "cmbdevclaw-white",
-      darkTheme: "codex-dark"
+      darkTheme: "codex-dark",
+      botMessageTint: true
     })
     expect(root.classList.contains("dark")).toBe(true)
     expect(root.dataset.theme).toBe("codex-dark")
@@ -148,7 +173,8 @@ describe("theme preference", () => {
     expect(JSON.parse(values.get("cmb:theme-settings") ?? "{}")).toEqual({
       mode: "light",
       lightTheme: "cmbdevclaw-white",
-      darkTheme: "codex-dark"
+      darkTheme: "codex-dark",
+      botMessageTint: true
     })
     expect(root.classList.contains("dark")).toBe(false)
     expect(root.style.colorScheme).toBe("light")

@@ -1,0 +1,291 @@
+{
+  "kind": "peer-original-file-handoff-candidate",
+  "recordedAt": "2026-10-10T23:16:40.113484+00:00",
+  "coreParityComplete": false,
+  "productionReleaseReady": false,
+  "liveAcceptance": {
+    "outputIdentity": "f3d5afe6873fe5f9de067041",
+    "outputSha256": "f3d5afe6873fe5f9de067041d1f9ba0f55b0dd118cd0a0abf149493d253baf35",
+    "fileCount": 681,
+    "nativeBuildId": "fe31d05d4f8c054872a6473d",
+    "schema": 72,
+    "hostId": "43d12c2a-e58e-48af-98a7-8199f46fcfbb",
+    "hostPid": 53742,
+    "app": "/Users/chenqiang/Library/Application Support/CMBDevClaw-development/2026-10-08/acceptance69-cold-f3d5afe6873fe5f9de067041/CMBDevClaw Cold Acceptance.app",
+    "authBypass": "User-authorized private acceptance renderer only; formal package retains authentication.",
+    "compiledManifest": "current-peer-original-files-compiled-output-manifest.safe.json",
+    "genericFilesLive": true,
+    "realMiniMaxCJ02Complete": false
+  },
+  "implementation": {
+    "reusedCmb": [
+      "Original approval/revision checks, peer dispatch transaction and durable receipts",
+      "Scoped artifact reads, immutable object storage, existing file lifecycle and byte policy",
+      "Existing message file cards, preview/focus handling and bounded exchange read queue",
+      "Existing botUserMessageContent prompt preparation"
+    ],
+    "changes": [
+      "Explicit files artifact IDs create approved same-byte aliases scoped to recipient conversation/run; no source transcript or unrestricted file paths are granted.",
+      "Integrity verification streams a bounded 512 KiB buffer under sorted object locks outside human approval waits; existing bytes are not copied.",
+      "Original transaction includes aliases, messages, receipt and child dispatch. Replay returns original receipt. Chained handoff and source deletion retain authorized originals.",
+      "Only known preflight image-format mismatch is recoverable. Actual peer prompt now preserves attachment IDs.",
+      "peer-files-v1 and explicit includeFiles preserve legacy backend/client exchange contracts."
+    ]
+  },
+  "sourceCandidateNotYetBuilt": {
+    "files": ["src/shared/bot-peer-files.ts", "src/main/bots/peer-files.test.ts"],
+    "change": "Reuse existing per-type limits: video up to 200 MiB, ordinary files up to 25 MiB.",
+    "sourceGatesPassed": true,
+    "live": false
+  },
+  "grokReference": {
+    "providedVersion": "0.18.0 reconstructed",
+    "sources": [
+      {
+        "path": "/Users/chenqiang/Desktop/AI/grok-bot-0.18-reconstructed-main/source/host/agents/agent-messaging.ts",
+        "bytes": 11451,
+        "sha256": "4c9fe82afe95c3c7f92e9fb26b67f96f25544fc3240ae88d40b9a3f2ee5991fc"
+      },
+      {
+        "path": "/Users/chenqiang/Desktop/AI/grok-bot-0.18-reconstructed-main/source/host/cloud-agents/cloud-agent-images.ts",
+        "bytes": 3873,
+        "sha256": "f9762450dc0e2643c0c5dd307a5ef0bc72f7882516678bc9fc42f601fc3fb14d"
+      }
+    ],
+    "license": "No upstream source-code license implied by reconstruction; redistribution rights not established.",
+    "referenceBehavior": "Asynchronous agent messaging attaches images through the vision channel; the image loader explicitly rejects non-images and points to shared-workspace file references. CMB adapts this to approved scoped aliases.",
+    "officialVersion": "0.68.1",
+    "observationSource": "Root agent native UI observations in current task",
+    "priorConstraint": "Original no-command task reached correct records/total but requested permission for writing the two files.",
+    "currentNativeComparison": {
+      "samePromptExceptMappedBotNames": true,
+      "workspaceNecessaryReadWriteCommandsAllowed": true,
+      "submittedLocalTime": "2026-10-11 07:11:40 Asia/Shanghai",
+      "aOriginalReadAndHandoffLocalTime": "07:12:05",
+      "bResultFileLocalTime": "07:12:35",
+      "cGroupDeliveryLocalTime": "07:13:06",
+      "resultCsvDisplayedBytes": 77,
+      "reviewMdDisplayedSize": "1.3 kB",
+      "reviewPreviewOpened": true,
+      "retainedRecords": 4,
+      "totalCny": "8750.75",
+      "originalLines": [2, 5, 7, 8],
+      "excludedLines": [3, 4, 6, 9],
+      "originalFilesIndependentlyHashed": false
+    }
+  },
+  "realMiniMax": {
+    "firstFailure": {
+      "groupId": "221b4a41-095a-4836-b7df-954a50e18798",
+      "input": {
+        "path": "/Users/chenqiang/Library/Application Support/CMBDevClaw-development/2026-10-11/cj02-orders-synthetic.csv",
+        "bytes": 367,
+        "sha256": "a4a5c538d811dc19afa214a10927572c45ebdd6572ac04e57006f0b1dd176abf",
+        "approvedLatestIds": ["P101", "P102", "P105", "P106"],
+        "dataSourceLines": [2, 5, 7, 8],
+        "expectedTotalCny": "8750.75"
+      },
+      "peerRunId": "7572f391-2c73-4b50-ae9a-12ffe097bfe5",
+      "failure": "CSV passed through images; 协作图片仅支持 PNG、JPEG、WebP 和 GIF",
+      "laterRunId": "69b83cac-7ae7-41ee-8b38-b6aafb54aac3",
+      "laterApprovalId": "c193ab73-fb01-45b0-a3dd-65299f0c2349",
+      "laterApprovalStatus": "expired",
+      "laterClosure": "Root confirmed through native UI; no direct database mutation."
+    },
+    "f3dInProgress": {
+      "aApprovedOriginalToBBytes": 367,
+      "bApprovedOriginalToCBytes": 367,
+      "bApprovedResultToCBytes": 72,
+      "cActualIndependentReadsAndCorrectPrivateReview": true,
+      "finalTwoFileGroupDeliveryVerified": false,
+      "laterBGroupTurnResultBytes": 71,
+      "laterBGroupTurnDispatchedToC": true,
+      "boundary": "Private peer child lacks direct send_group_message; later group task cannot directly read private-conversation artifacts. Root is addressing authorized group result routing. Later group turns are still progressing; no final failure or completion claimed."
+    }
+  },
+  "coldUpgrade": {
+    "pins": {
+      "live": {
+        "receipt": "/Users/chenqiang/Library/Application Support/CMBDevClaw-development/2026-10-08/presentation/cold-ui-output-plan/pins-live-before-stop-1791673741449732000.safe.json",
+        "sha256": "66bd3a878c6b2e0f6e6baec8f914b3578124ebe2a1a91909c44e6661e539a8ce",
+        "phase": "live-before-stop",
+        "runs": 22,
+        "checkpointPayloadBytesHashed": 1793696
+      },
+      "quiescent": {
+        "receipt": "/Users/chenqiang/Library/Application Support/CMBDevClaw-development/2026-10-08/presentation/cold-ui-output-plan/pins-quiesced-before-start-1791673810636540000.safe.json",
+        "sha256": "3f255cfee616ee02a9b0c1e684e418db1d057f52203943f8fb64811c1a64961b",
+        "phase": "quiesced-before-start",
+        "runs": 22,
+        "checkpointPayloadBytesHashed": 1793696
+      },
+      "post": {
+        "receipt": "/Users/chenqiang/Library/Application Support/CMBDevClaw-development/2026-10-08/presentation/cold-ui-output-plan/pins-post-start-pre-review-1791673824409766000.safe.json",
+        "sha256": "666ff63e31893a71da5838b09813f32e104aba56f5eac13b001c1ce2e3c7a6f1",
+        "phase": "post-start-pre-review",
+        "runs": 22,
+        "checkpointPayloadBytesHashed": 1793696
+      }
+    },
+    "selectedRuns": 22,
+    "checkpointPayloadBytesHashed": 1793696,
+    "equalLogicalGroups": [
+      "runs",
+      "effects",
+      "interactions",
+      "artifacts",
+      "artifactObjects",
+      "peerDispatch",
+      "peerWaits",
+      "checkpoints",
+      "skills",
+      "project"
+    ],
+    "allThreePinsEqual": true,
+    "configuration": {
+      "changedFields": ["skillSources.builtinSkillsDir", "execution.resourceDirectory"],
+      "onlyFrozenRuntimePrefixChanged": true,
+      "replacementCount": 2,
+      "inverseReplacementMatchesOriginalByteSha256": true,
+      "beforeSha256": "49776488fd853d7856a16ef1d8777abb7387a73ef29d100bc896771550bebd02",
+      "afterSha256": "bcf654e9af164e1267e94aa9218ac294a9aa9725746437823ba61ac6f418097d",
+      "otherConfigurationFingerprintsUnchanged": true
+    }
+  },
+  "verification": [
+    {
+      "name": "peer-files-f3d",
+      "status": "passed",
+      "passed": 14,
+      "scope": "Scoped files, aliases, chains, receipt replay, rollback, deletion, provenance.",
+      "log": {
+        "path": "/tmp/cmb-peer-files-chain-20261011.log",
+        "bytes": 473,
+        "sha256": "b4f311f2adcb3339145ba3e2d7f0764b7c7c589414c0d42b7eebaa11a00491ff"
+      }
+    },
+    {
+      "name": "peer-files-current-source",
+      "status": "passed",
+      "passed": 15,
+      "scope": "Includes video above 25 MiB under existing video policy; this correction is not in live f3d.",
+      "log": {
+        "path": "/tmp/cmb-peer-file-video-fixed-20261011.log",
+        "bytes": 576,
+        "sha256": "d2db8064c4ae601ce796e9b8f7fed121d098d1d09347ae7f2e590fa439436868"
+      }
+    },
+    {
+      "name": "peer-exchange-browser",
+      "status": "passed",
+      "passed": 9,
+      "scope": "Actual React/Chrome/SQLite/RPC; file preview from both participants and existing focus/history behavior.",
+      "log": {
+        "path": "/tmp/cmb-peer-files-browser-complete-20261011.log",
+        "bytes": 1496,
+        "sha256": "cc51c6b2d678ca7fad25b5e2f4c135c4b0fb5bf3ab7f79244bcc8b9c5ee5c7c5"
+      }
+    },
+    {
+      "name": "peer-actual-graph",
+      "status": "passed",
+      "passed": 1,
+      "scope": "Actual runtime graph with controlled model protocol; 332 other tests skipped, not MiniMax.",
+      "log": {
+        "path": "/tmp/cmb-peer-files-runtime-final-20261011.log",
+        "bytes": 14184,
+        "sha256": "ea56b951bdff7ddda9632ad15bd507e9e9fc22fc6ff71f0fbb6b0e3f075dda08"
+      }
+    },
+    {
+      "name": "nearby-dispatch-history",
+      "status": "passed",
+      "passed": 52,
+      "scope": "Five nearby test files on prior scoped source revision.",
+      "log": {
+        "path": "/tmp/cmb-peer-files-nearby-final-20261011.log",
+        "bytes": 4580,
+        "sha256": "06206291d6dea166d68172b8a2aa509f2b3688f6f4e15dcf7ca5efdcbe5d741a"
+      }
+    },
+    {
+      "name": "node-typecheck",
+      "status": "passed",
+      "exitObservedBy": "Root tool result; retained log",
+      "log": {
+        "path": "/tmp/cmb-peer-file-video-type-node-20261011.log",
+        "bytes": 91,
+        "sha256": "546c7bfd36ecac14793f941add6251c16a729819d1b744cccbaf256a91e1b42c"
+      }
+    },
+    {
+      "name": "web-typecheck",
+      "status": "passed",
+      "exitObservedBy": "Root tool result; retained log",
+      "log": {
+        "path": "/tmp/cmb-peer-file-video-type-web-20261011.log",
+        "bytes": 89,
+        "sha256": "aba1d996409180225c6f720bd909b367ee8681e710f7b8537e5a1d7f6d07f2ac"
+      }
+    },
+    {
+      "name": "strict-lint",
+      "status": "passed",
+      "exitObservedBy": "Root tool result; retained log",
+      "log": {
+        "path": "/tmp/cmb-peer-file-video-lint-20261011.log",
+        "bytes": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      }
+    },
+    {
+      "name": "message-regression",
+      "status": "passed",
+      "exitObservedBy": "Root tool result; retained log",
+      "log": {
+        "path": "/tmp/cmb-peer-files-messages-20261011.log",
+        "bytes": 15386,
+        "sha256": "07e2f675a357db15a60fa0715f5a4c40f7f427d6804a39101b6729b0ee295875"
+      }
+    },
+    {
+      "name": "build-f3d",
+      "status": "passed",
+      "exitObservedBy": "Root tool result; retained log",
+      "log": {
+        "path": "/tmp/cmb-peer-files-build-20261011.log",
+        "bytes": 73231,
+        "sha256": "825d9944c4ad44c9e1fab5107edd89f66de008f91165006438b3849cd10abc43"
+      }
+    }
+  ],
+  "retainedFailedTestLogs": [
+    {
+      "path": "/tmp/cmb-peer-files-runtime-20261011.log",
+      "bytes": 45409,
+      "sha256": "66ceca92c03dc08c4b6f7cc4efcf2390e75fdbe1a043444032586765ce38f3e3"
+    },
+    {
+      "path": "/tmp/cmb-peer-files-compat-browser-file-final-20261011.log",
+      "bytes": 2304,
+      "sha256": "43a523e3e49bd53b31dca48f6731ea42869764e8049c93e2d68b366c2dcbcdc5"
+    },
+    {
+      "path": "/tmp/cmb-peer-file-video-before-fix-20261011.log",
+      "bytes": 3255,
+      "sha256": "8c897a2a001fa58ffedb4c5994decd772b3690a5f858857e68e4f36fc3505bed"
+    }
+  ],
+  "formalPackage": {
+    "compiledOutputIdentity": "daf57e15b7a627bdc4e8ef6a",
+    "evidence": "current-single-room-independent-mac-package.safe.json",
+    "includesGenericFileHandoff": false,
+    "newPackagePending": true
+  },
+  "remaining": [
+    "Final real MiniMax three-Bot two-file group delivery and comparison against observed official result",
+    "Private peer to group result publication within original authorization",
+    "Compile and install current video-limit correction",
+    "Formal new package, all CJ01-CJ12/UI states, Windows/Linux machines and K8s acceptance"
+  ]
+}

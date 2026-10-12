@@ -1,0 +1,265 @@
+{
+  "schemaVersion": 1,
+  "kind": "formal-host-read-only-task-evidence",
+  "startedAt": "2026-10-07T14:58:48.641Z",
+  "collection": "collected",
+  "host": {
+    "id": "5f323fa4-a308-4e82-bdb3-ee3740da51d4",
+    "pid": 37565,
+    "buildId": "b4d31d62d589840f5147422a",
+    "dataEpoch": "initial",
+    "platform": "darwin",
+    "runtimeReady": true,
+    "hasError": false,
+    "startCursor": 2542,
+    "endCursor": 2542,
+    "identityStable": true,
+    "stateChangedDuringCollection": false
+  },
+  "bots": [
+    {
+      "id": "7cd28510-8e81-41d5-b4fc-9d7c858d266e",
+      "modelRef": "custom:minimax-m3",
+      "modelSelection": "explicit",
+      "revision": 3,
+      "hidden": false,
+      "deleted": false
+    }
+  ],
+  "conversations": [
+    {
+      "id": "a6e10e67-9823-4cdf-a946-6313c225907d",
+      "kind": "direct",
+      "memberIds": [
+        "7cd28510-8e81-41d5-b4fc-9d7c858d266e"
+      ],
+      "revision": 3,
+      "messages": [
+        {
+          "id": "d9574336-c730-40e2-b538-10eb88561dab",
+          "sequence": 67,
+          "botId": "7cd28510-8e81-41d5-b4fc-9d7c858d266e",
+          "sender": "bot",
+          "runId": "144195ad-186d-4fc4-9b34-6b08eb1a5428",
+          "replyTo": null,
+          "threadRootId": null,
+          "createdAt": 1791384502835,
+          "text": {
+            "bytes": 42,
+            "sha256": "c0050499f6e3ca6bef06149e3bd932a5c2d2bc3751ed25d62e877a36d72625ac"
+          },
+          "attachmentIds": []
+        },
+        {
+          "id": "7738f540-939f-4211-9121-33341c333142",
+          "sequence": 68,
+          "botId": null,
+          "sender": "user",
+          "runId": null,
+          "replyTo": null,
+          "threadRootId": null,
+          "createdAt": 1791384827228,
+          "text": {
+            "bytes": 293,
+            "sha256": "d3dee409aa828294ced65d3af4ca81725455d6c81c1768758883d748f8c39af6"
+          },
+          "attachmentIds": [
+            "f0a10282-ffe7-4754-83d7-f7f95a56ed0d",
+            "bb153b76-e1ed-413f-aa38-1f553a806302"
+          ]
+        },
+        {
+          "id": "c9a8df83-09f6-42a1-8883-ae5268eec847",
+          "sequence": 69,
+          "botId": "7cd28510-8e81-41d5-b4fc-9d7c858d266e",
+          "sender": "bot",
+          "runId": "84ffabac-57b3-46cc-8949-bbabb7197fbb",
+          "replyTo": "7738f540-939f-4211-9121-33341c333142",
+          "threadRootId": null,
+          "createdAt": 1791384899579,
+          "text": {
+            "bytes": 1940,
+            "sha256": "35e0f41c5dbb8fa4c3922063adfb9001d049de20298e89e14d7a0f3b408fae2e"
+          },
+          "attachmentIds": []
+        }
+      ]
+    }
+  ],
+  "runs": [
+    {
+      "conversationId": "a6e10e67-9823-4cdf-a946-6313c225907d",
+      "runId": "84ffabac-57b3-46cc-8949-bbabb7197fbb",
+      "botId": "7cd28510-8e81-41d5-b4fc-9d7c858d266e",
+      "outcome": "succeeded",
+      "source": "user",
+      "messageId": "7738f540-939f-4211-9121-33341c333142",
+      "revision": 21,
+      "createdAt": 1791384827229,
+      "updatedAt": 1791384899579,
+      "parentRunId": null,
+      "rootRunId": null,
+      "lineageAvailable": false,
+      "result": {
+        "bytes": 1940,
+        "sha256": "35e0f41c5dbb8fa4c3922063adfb9001d049de20298e89e14d7a0f3b408fae2e"
+      },
+      "error": null,
+      "diagnostic": null,
+      "tokenUsage": {
+        "requests": 2,
+        "unknownRequests": 0,
+        "inputTokens": 36708,
+        "outputTokens": 5293,
+        "reservedOutputTokens": 0,
+        "otherModelRequests": 0,
+        "inputReportedRequests": 2,
+        "models": [
+          {
+            "modelRef": "custom:minimax-m3",
+            "model": "MiniMax-M3",
+            "purpose": "task",
+            "requests": 2,
+            "unknownRequests": 0,
+            "inputReportedRequests": 2,
+            "inputTokens": 36708,
+            "outputTokens": 5293
+          }
+        ]
+      },
+      "hasBrowser": false,
+      "hasWorktree": false,
+      "children": [],
+      "history": {
+        "pages": 1,
+        "complete": true,
+        "items": [
+          {
+            "cursor": 2505,
+            "createdAt": 1791384899584,
+            "label": {
+              "bytes": 18,
+              "sha256": "f8365c6c29a0525ddbed8d46e443725de8e746e68e7dcae822ec70b580f8901b"
+            },
+            "detail": null,
+            "effectId": null,
+            "interactionId": null,
+            "hasPeerExchange": false
+          },
+          {
+            "cursor": 2453,
+            "createdAt": 1791384834051,
+            "label": {
+              "bytes": 21,
+              "sha256": "dea4334da67f8274bb32488a41b0eedaa87542e015a0e8a1f70e25efc0f5720f"
+            },
+            "detail": null,
+            "effectId": null,
+            "interactionId": null,
+            "hasPeerExchange": false
+          },
+          {
+            "cursor": 2450,
+            "createdAt": 1791384833795,
+            "label": {
+              "bytes": 18,
+              "sha256": "581f57a9324f1dffef2e77dd5c76281b8f405d4c59026b5b5cd1bdcee60ec30e"
+            },
+            "detail": null,
+            "effectId": null,
+            "interactionId": null,
+            "hasPeerExchange": false
+          },
+          {
+            "cursor": 2440,
+            "createdAt": 1791384827472,
+            "label": {
+              "bytes": 21,
+              "sha256": "dea4334da67f8274bb32488a41b0eedaa87542e015a0e8a1f70e25efc0f5720f"
+            },
+            "detail": null,
+            "effectId": null,
+            "interactionId": null,
+            "hasPeerExchange": false
+          },
+          {
+            "cursor": 2436,
+            "createdAt": 1791384827231,
+            "label": {
+              "bytes": 12,
+              "sha256": "f7d5b61de2fd0fc86187780659fc0232438932a7424d16176e72c2f68c878cfa"
+            },
+            "detail": null,
+            "effectId": null,
+            "interactionId": null,
+            "hasPeerExchange": false
+          },
+          {
+            "cursor": 2435,
+            "createdAt": 1791384827229,
+            "label": {
+              "bytes": 12,
+              "sha256": "08127c4d770b4145810c2e7b393fd72cc98fb9e52dbb321048b3e6f3970937ff"
+            },
+            "detail": null,
+            "effectId": null,
+            "interactionId": null,
+            "hasPeerExchange": false
+          }
+        ]
+      },
+      "toolRecords": [],
+      "shellJobs": []
+    }
+  ],
+  "peerExchanges": [],
+  "teach": [
+    {
+      "botId": "7cd28510-8e81-41d5-b4fc-9d7c858d266e",
+      "sessions": [],
+      "trials": []
+    }
+  ],
+  "artifacts": [],
+  "limits": {
+    "bots": 8,
+    "conversations": 8,
+    "messages": 100,
+    "runs": 24,
+    "historyPages": 3,
+    "effects": 32,
+    "peers": 16,
+    "teach": 32,
+    "trials": 32,
+    "artifacts": 32,
+    "artifactBytes": 26214400,
+    "totalArtifactBytes": 104857600,
+    "calls": 512,
+    "deadlineMs": 90000,
+    "callMs": 12000
+  },
+  "coverage": {
+    "truncations": [],
+    "unknownToolNames": true,
+    "exactToolHistoryComplete": false,
+    "businessTextIncluded": false,
+    "providerRawIncluded": false,
+    "credentialsIncluded": false,
+    "taskPassClaimed": false
+  },
+  "transport": {
+    "calls": 11,
+    "closed": true
+  },
+  "scope": [
+    "collection is not task PASS",
+    "run outcomes are Host-recorded outcomes; semantic correctness needs independent fixture/result verification",
+    "token usage is provider-reported accounting; unknown counters remain explicit",
+    "runHistory modelUsage aggregates the root run including children, so never sum parent and child totals",
+    "tool names are only inferred from original structured approval action shape with matching effect ID prefix; read-only/unapproved tools are not guessed",
+    "browser form completion needs fixture POST/download records as well as these Host records",
+    "Teach readiness or trial verdict alone does not prove the learned skill succeeded on new inputs",
+    "no configuration, descriptor token, raw logs or raw business files are exported"
+  ],
+  "completedAt": "2026-10-07T14:58:49.104Z"
+}

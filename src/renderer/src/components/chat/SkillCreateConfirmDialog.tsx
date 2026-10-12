@@ -53,10 +53,13 @@ export function SkillCreateConfirmDialog({
   const canApprove = draftContent.trim().length > 0
 
   return (
-    <Dialog open={visible && !!request} onOpenChange={(open) => {
-      // If the dialog is dismissed by clicking outside, treat as reject
-      if (!open) onReject(request.requestId)
-    }}>
+    <Dialog
+      open={visible && !!request}
+      onOpenChange={(open) => {
+        // If the dialog is dismissed by clicking outside, treat as reject
+        if (!open) onReject(request.requestId)
+      }}
+    >
       <DialogContent className="max-w-lg">
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2">
@@ -79,9 +82,7 @@ export function SkillCreateConfirmDialog({
                   {request.skillId}
                 </Badge>
               </div>
-              <p className="text-xs text-muted-foreground leading-relaxed">
-                {request.description}
-              </p>
+              <p className="text-xs text-muted-foreground leading-relaxed">{request.description}</p>
             </div>
           </div>
 
@@ -92,10 +93,11 @@ export function SkillCreateConfirmDialog({
               onClick={() => setShowContent((v) => !v)}
             >
               <span>查看/编辑完整 SKILL.md 草稿</span>
-              {showContent
-                ? <ChevronUp className="w-3.5 h-3.5" />
-                : <ChevronDown className="w-3.5 h-3.5" />
-              }
+              {showContent ? (
+                <ChevronUp className="w-3.5 h-3.5" />
+              ) : (
+                <ChevronDown className="w-3.5 h-3.5" />
+              )}
             </button>
             {showContent && (
               <div className="border-t">
@@ -112,7 +114,7 @@ export function SkillCreateConfirmDialog({
           <p className="text-xs text-muted-foreground">
             技能保存后将在下次对话中自动生效，存储于{" "}
             <code className="text-xs bg-muted px-1 py-0.5 rounded">
-              ~/.cmbcoworkagent/skills/{request.skillId}/
+              应用数据目录/skills/{request.skillId}/
             </code>
           </p>
         </div>

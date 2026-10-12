@@ -9008,10 +9008,10 @@ function makeMockProjectMode(range: TimeRange, opts?: OrgFilterOptions): Dashboa
   > = [
     {
       projectId: "proj-cmb-cowork",
-      name: "CmbCowork Agent",
+      name: "CMBDevClaw Agent",
       description: "桌面 AI Agent 主项目",
       systemName: "智能研发平台",
-      workspacePath: "/Users/demo/projects/cmbCowork",
+      workspacePath: "/Users/demo/projects/CMBDevClaw",
       adapterName: "claude-code",
       adapterVersion: "1.4.2",
       // 范围内新建：打开「仅本期新建」后应当留下。
@@ -9985,7 +9985,7 @@ function makeMockTraceWithConversation(args: {
     evolvedSkills: args.userIndex % 2 === 0 ? [args.skill] : [],
     triggerSource: "chat",
     metadata: {
-      workspacePath: "/Users/demo/projects/cmbCowork"
+      workspacePath: "/Users/demo/projects/CMBDevClaw"
     }
   }
 }
@@ -10605,7 +10605,7 @@ function makeMockAgentTrace(skill: string, range: TimeRange, index: number): Age
     evolvedSkills: index % 2 === 0 ? [skill] : [],
     triggerSource: "chat",
     metadata: {
-      workspacePath: "/Users/demo/projects/cmbCowork"
+      workspacePath: "/Users/demo/projects/CMBDevClaw"
     }
   }
   const skillEval = buildSkillEvalTraceExtension(trace, {

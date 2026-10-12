@@ -23,6 +23,7 @@ import {
   PanelRightOpen
 } from "lucide-react"
 import { ThreadSidebar } from "@/components/sidebar/ThreadSidebar"
+import { useBotNavigation } from "@/lib/use-bot-navigation"
 import { SettingsOverlay } from "@/components/customize/SettingsOverlay"
 import { CmbDevClawLogo } from "@/components/branding/CmbDevClawLogo"
 import { TabbedPanel } from "@/components/tabs"
@@ -32,6 +33,9 @@ import { SubagentStreamPanel } from "@/components/chat/SubagentStreamPanel"
 import { WorkflowAgentStreamPanel } from "@/components/chat/WorkflowAgentStreamPanel"
 const KanbanView = lazy(() =>
   import("@/components/kanban").then((m) => ({ default: m.KanbanView }))
+)
+const BotWorkspace = lazy(() =>
+  import("@/components/bots/BotWorkspace").then((m) => ({ default: m.BotWorkspace }))
 )
 const HarnessBoardView = lazy(() =>
   import("@/components/harness-board/HarnessBoardView").then((m) => ({
@@ -225,6 +229,7 @@ function AnimatedThreadSidebar({
 }
 
 function App(): React.JSX.Element {
+  useBotNavigation()
   const themePreference = useSyncExternalStore(
     subscribeThemePreference,
     getThemePreference,
@@ -588,17 +593,20 @@ function App(): React.JSX.Element {
       }
     }
 
-    document.addEventListener("click", (e) => {
+    const onExternalLinkClick = (e: MouseEvent): void => {
       if (e.defaultPrevented) return
-      const target = e.target as HTMLElement
+      const target = e.target
+      if (!(target instanceof Element)) return
       const link = target.closest("a") // 找到点击的<a>标签
       if (link instanceof HTMLAnchorElement && isExternalLink(link)) {
         e.preventDefault() // 阻止默认跳转
         window.electron.openExternal(link.href)
       }
-    })
+    }
+    document.addEventListener("click", onExternalLinkClick)
     initMMJ()
     initUser()
+    return () => document.removeEventListener("click", onExternalLinkClick)
   }, [])
 
   // Track drag start widths
@@ -1100,7 +1108,7 @@ function App(): React.JSX.Element {
             className="flex flex-1 h-9 min-w-0 items-center"
             style={{ marginLeft: "var(--titlebar-inset-left, 0px)" }}
           >
-            {!showCustomizeView && !isAgentFocusActive && (
+            {!showCustomizeView && !isAgentFocusActive && renderedMainView !== "bots" && (
               <button
                 type="button"
                 className={`${panelToggleBaseClass} ${
@@ -1137,10 +1145,18 @@ function App(): React.JSX.Element {
             }}
             className="flex flex-1 min-w-0 items-center justify-center gap-1.5"
           >
-            <CmbDevClawLogo className="size-7 shrink-0 object-contain" />
-            <span className="app-badge-name">
-              CMBDev<span className="text-red-500">Claw</span>
-            </span>
+            {renderedMainView === "bots" ? (
+              <span className="text-xs font-medium tracking-wide text-muted-foreground">
+                CMBDevClaw
+              </span>
+            ) : (
+              <>
+                <CmbDevClawLogo className="size-7 shrink-0 object-contain" />
+                <span className="app-badge-name">
+                  CMBDev<span className="text-red-500">Claw</span>
+                </span>
+              </>
+            )}
           </div>
           {/* Right: right panel toggle */}
           <div className="flex flex-1 h-full items-center justify-end pl-1 gap-1">
@@ -1245,7 +1261,7 @@ function App(): React.JSX.Element {
         */}
         <div className="relative flex min-h-0 flex-1 overflow-hidden">
           <div
-            className={`relative flex min-h-0 flex-1 overflow-hidden${showCustomizeView ? " opacity-0 pointer-events-none" : ""}`}
+            className={`relative flex min-h-0 flex-1 overflow-hidden${showCustomizeView ? (renderedMainView === "bots" ? " pointer-events-none" : " opacity-0 pointer-events-none") : ""}`}
             inert={showCustomizeView ? true : undefined}
             aria-hidden={showCustomizeView || undefined}
             data-workspace-surface
@@ -1266,7 +1282,7 @@ function App(): React.JSX.Element {
                 className="relative flex flex-1 overflow-hidden bg-grid-subtle"
               >
                 {/* Left Sidebar */}
-                {!sidebarCollapsed && !isAgentFocusActive && (
+                {!sidebarCollapsed && !isAgentFocusActive && renderedMainView !== "bots" && (
                   <AnimatedThreadSidebar
                     hidden={browserFullscreen}
                     width={leftWidth}
@@ -1286,7 +1302,9 @@ function App(): React.JSX.Element {
                       <KanbanView />
                     </Suspense>
                   </main>
-                ) : renderedMainView === "scheduled" || renderedMainView === "market" ? (
+                ) : renderedMainView === "scheduled" ||
+                  renderedMainView === "market" ||
+                  renderedMainView === "bots" ? (
                   <main className="relative flex flex-1 min-w-0 overflow-hidden bg-background">
                     <Suspense
                       fallback={
@@ -1295,7 +1313,9 @@ function App(): React.JSX.Element {
                         </div>
                       }
                     >
-                      {renderedMainView === "scheduled" ? (
+                      {renderedMainView === "bots" ? (
+                        <BotWorkspace />
+                      ) : renderedMainView === "scheduled" ? (
                         <ScheduledPanel />
                       ) : (
                         <MarketPanel key={accountRevision} />
@@ -1537,7 +1557,10 @@ function App(): React.JSX.Element {
             />
           </div>
           {showCustomizeView && (
-            <SettingsOverlay onClose={() => setShowCustomizeView(false)}>
+            <SettingsOverlay
+              floating={renderedMainView === "bots"}
+              onClose={() => setShowCustomizeView(false)}
+            >
               <Suspense
                 fallback={
                   <div className="flex flex-1 items-center justify-center">
@@ -1545,7 +1568,7 @@ function App(): React.JSX.Element {
                   </div>
                 }
               >
-                <CustomizeView />
+                <CustomizeView floating={renderedMainView === "bots"} />
               </Suspense>
             </SettingsOverlay>
           )}

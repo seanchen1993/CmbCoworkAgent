@@ -766,7 +766,7 @@ function reserveSnapshotSlot(): void {
   }
 }
 
-function isSkillMetadataDisabled(
+export function isSkillMetadataDisabled(
   skill: SkillMetadata,
   disabledSkillIds: ReadonlySet<string>
 ): boolean {

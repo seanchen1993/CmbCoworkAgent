@@ -1,0 +1,235 @@
+{
+  "schemaVersion": 1,
+  "kind": "Root-integrated-output-summary-and-demand-read-production-gates",
+  "createdAt": "2026-10-07T18:00:12.397551+00:00",
+  "rootWriterOnly": true,
+  "privateCandidate": {
+    "patch": {
+      "path": "/var/folders/r4/m2gmdyyn06z9488ghc1044zh0000gn/T/cmb-current-core-progress-finite-g5wxzpnp/snapshot-stage-a/snapshot-stage-a.patch",
+      "bytes": 68241,
+      "sha256": "c5437baf331af2d7d0874354da58ff6368d1e5164c1a5d62055d9bb387073ad8"
+    },
+    "manifest": {
+      "path": "/var/folders/r4/m2gmdyyn06z9488ghc1044zh0000gn/T/cmb-current-core-progress-finite-g5wxzpnp/snapshot-stage-a/manifest.json",
+      "bytes": 5792,
+      "sha256": "153b00937c6e7d2a1bc3049f6c4943ca67011e9f2a47a86869038e5f0550bef3"
+    },
+    "verification": {
+      "path": "/var/folders/r4/m2gmdyyn06z9488ghc1044zh0000gn/T/cmb-current-core-progress-finite-g5wxzpnp/snapshot-stage-a/verification.safe.json",
+      "bytes": 4626,
+      "sha256": "9021e3cd6a709f611281fb8c2aa572aa72359d16651292ee16151d4985e18629"
+    }
+  },
+  "sourceFiles": [
+    {
+      "path": "/Users/chenqiang/Desktop/projects/CmbCoworkAgent/src/main/bots/desktop-notifications.ts",
+      "bytes": 2196,
+      "sha256": "3114363e4cae552cd23ad110adadc061a256fe44ebc3e9aadda297279dd2d1ce"
+    },
+    {
+      "path": "/Users/chenqiang/Desktop/projects/CmbCoworkAgent/src/main/bots/host-build.ts",
+      "bytes": 1976,
+      "sha256": "cdd8e88be74abc24d7d25288af3edf87847b6c393120c57bbeb5effbe20c4abe"
+    },
+    {
+      "path": "/Users/chenqiang/Desktop/projects/CmbCoworkAgent/src/main/bots/rpc.ts",
+      "bytes": 45020,
+      "sha256": "f2415bdd514c95eba3a59ee776b287378b6a390451b4b905a345fa6b235854cd"
+    },
+    {
+      "path": "/Users/chenqiang/Desktop/projects/CmbCoworkAgent/src/main/bots/run-output.test.ts",
+      "bytes": 7473,
+      "sha256": "997cb1b34372722aa2b97511a1c2ae1e1bcc41a6ac7310685ace9080fa6fa17e"
+    },
+    {
+      "path": "/Users/chenqiang/Desktop/projects/CmbCoworkAgent/src/main/bots/store.ts",
+      "bytes": 219113,
+      "sha256": "a0e74087b7308cdbea561b64974f3b8d24abd561edd6c1d6cc67151054479d27"
+    },
+    {
+      "path": "/Users/chenqiang/Desktop/projects/CmbCoworkAgent/src/main/ipc/bots.test.ts",
+      "bytes": 15776,
+      "sha256": "29a66d2eefb6113080cb7d6f013899da9520e8396fa8b30f9e35cb3cc07fcd46"
+    },
+    {
+      "path": "/Users/chenqiang/Desktop/projects/CmbCoworkAgent/src/main/ipc/bots.ts",
+      "bytes": 9255,
+      "sha256": "976b199479a3961e9c053dd56ef99df2b2ac2791057c38c948058cb23f33918f"
+    },
+    {
+      "path": "/Users/chenqiang/Desktop/projects/CmbCoworkAgent/src/preload/bot-api.ts",
+      "bytes": 10869,
+      "sha256": "a84f1f3d19b4040c0fb51772f500bc587a6b94caedb63d42715a332aae6ff8d2"
+    },
+    {
+      "path": "/Users/chenqiang/Desktop/projects/CmbCoworkAgent/src/renderer/src/components/bots/BotConversationTasks.tsx",
+      "bytes": 14148,
+      "sha256": "d79adc5a342581e637615061020a6e16078aa2efbae58db8ae811fb476a1379c"
+    },
+    {
+      "path": "/Users/chenqiang/Desktop/projects/CmbCoworkAgent/src/renderer/src/components/bots/BotWorkspace.tsx",
+      "bytes": 167396,
+      "sha256": "dca4243211e4a3d60143323b5da3ebf526ea5c6c8eec0569809015be3230b13f"
+    },
+    {
+      "path": "/Users/chenqiang/Desktop/projects/CmbCoworkAgent/src/renderer/src/lib/bot-persona-state.ts",
+      "bytes": 1130,
+      "sha256": "9a2e77a0ff414de809725958560878c3d5fdb6de5f166a1acf959e61bd330878"
+    },
+    {
+      "path": "/Users/chenqiang/Desktop/projects/CmbCoworkAgent/src/renderer/src/lib/bot-run-output-cache.test.ts",
+      "bytes": 6201,
+      "sha256": "6f48a6ace558941aa55d6046e7656b21bd0d2b54d6ee72155eae379bd50d1341"
+    },
+    {
+      "path": "/Users/chenqiang/Desktop/projects/CmbCoworkAgent/src/renderer/src/lib/bot-run-output-cache.ts",
+      "bytes": 6772,
+      "sha256": "44f69a7b88ea54ccc7119a0a3413508e00a9dd924bd75eff8117a2cb23fde514"
+    },
+    {
+      "path": "/Users/chenqiang/Desktop/projects/CmbCoworkAgent/src/renderer/src/lib/bot-workspace-output-publication.test.ts",
+      "bytes": 4418,
+      "sha256": "ab6e671ab905bf39ab2652dc335e17ecf73ecc8ac80c352289dea025189e0fe2"
+    },
+    {
+      "path": "/Users/chenqiang/Desktop/projects/CmbCoworkAgent/src/renderer/src/lib/bot-workspace-store.ts",
+      "bytes": 56107,
+      "sha256": "4205866b7b4cf48e875462fe0e70294460013293ff343bcc00cc95a33028ffb8"
+    },
+    {
+      "path": "/Users/chenqiang/Desktop/projects/CmbCoworkAgent/src/shared/bot-api.ts",
+      "bytes": 16542,
+      "sha256": "4dceaee34e5dc98f236d15876c84e7b7cda6436b3606f066519b4ef7db51e7f5"
+    },
+    {
+      "path": "/Users/chenqiang/Desktop/projects/CmbCoworkAgent/src/shared/bot-run-output.ts",
+      "bytes": 1805,
+      "sha256": "2a4d335ae41976488b1aca93e6d5919339705eff370a3bab08b5d355318c924c"
+    },
+    {
+      "path": "/Users/chenqiang/Desktop/projects/CmbCoworkAgent/src/shared/bot-types.ts",
+      "bytes": 12117,
+      "sha256": "bf17e3bd15a45ab47cc8a402948e369423d17039b8d4bd9ea750551361ffebee"
+    },
+    {
+      "path": "/Users/chenqiang/Desktop/projects/CmbCoworkAgent/src/shared/bot-workspace-frame.ts",
+      "bytes": 894,
+      "sha256": "41fa1fd545c58ce696cbff48ea5c1a64a4a0f68841d1fcdf3a73bfa20be36ffd"
+    },
+    {
+      "path": "/Users/chenqiang/Desktop/projects/CmbCoworkAgent/tests/browser/bot-task-output-summary.test.tsx",
+      "bytes": 2674,
+      "sha256": "10fb7c31a23631a60b7371688c94e4e5632bc7711a1607d6a6a5b6f558e9c9d8"
+    },
+    {
+      "path": "/Users/chenqiang/Desktop/projects/CmbCoworkAgent/src/main/bots/delivery-quality-policy.ts",
+      "bytes": 1942,
+      "sha256": "71df633e2fa8e30370735480b56d66143c7adf1a12aec5afd9d66952a2d285ac"
+    }
+  ],
+  "rootGates": {
+    "nearest": {
+      "files": 10,
+      "passed": 159,
+      "skipped": 0,
+      "exitCode": 0,
+      "log": {
+        "path": "/tmp/cmb-output-projection-root-nearest.log",
+        "bytes": 2255,
+        "sha256": "d7ce41e796f0f321530eccaea0cc18bfab8d61f30169a19f1e87c47f87322a25"
+      }
+    },
+    "nodeTypecheck": {
+      "exitCode": 0,
+      "log": {
+        "path": "/tmp/cmb-output-projection-root-node.log",
+        "bytes": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      }
+    },
+    "webTypecheck": {
+      "exitCode": 0,
+      "log": {
+        "path": "/tmp/cmb-output-projection-root-web.log",
+        "bytes": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      }
+    },
+    "lint": {
+      "exitCode": 0,
+      "warnings": 0,
+      "log": {
+        "path": "/tmp/cmb-output-projection-root-lint.log",
+        "bytes": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      }
+    },
+    "messages": {
+      "exitCode": 0,
+      "originalNineStageScript": true,
+      "log": {
+        "path": "/tmp/cmb-output-projection-root-messages.log",
+        "bytes": 15386,
+        "sha256": "07e2f675a357db15a60fa0715f5a4c40f7f427d6804a39101b6729b0ee295875"
+      }
+    },
+    "sharedPolicyControlledSDK": {
+      "passed": 4,
+      "skipped": 333,
+      "exitCode": 0,
+      "log": {
+        "path": "/tmp/cmb-output-projection-policy-root-four.log",
+        "bytes": 32348,
+        "sha256": "a7a62950eabc3e2fb576c6da564f2cf95b0d9f7f25886e99a365e9d9242f747a"
+      }
+    },
+    "productionBuild": {
+      "exitCode": 0,
+      "log": {
+        "path": "/tmp/cmb-output-projection-root-production-build.log",
+        "bytes": 56050,
+        "sha256": "0ecdd50a137ea87c72f7b6afaebeecf2feaa70a8e22115837163fa5dd08abbaa"
+      }
+    }
+  },
+  "compiled": {
+    "nativeBuildId": "b42ce5022ce1d4624fbe7e04",
+    "schema": 66,
+    "manifest": {
+      "path": "/Users/chenqiang/Desktop/projects/CmbCoworkAgent/out/main/bot-native-build.json",
+      "bytes": 23240,
+      "sha256": "2c136351ee167e9a8d1b39e4e1b2323f3cbb5adc44e1ee075f579141a833f361"
+    },
+    "hostEntry": {
+      "path": "/Users/chenqiang/Desktop/projects/CmbCoworkAgent/out/main/bot-host.js",
+      "bytes": 6215,
+      "sha256": "f5b11c80913c47e833fd392689221734103484027b943c4a1128b1efe11a2290"
+    },
+    "rendererBundle": "BotWorkspace-BBaPH9-D.js"
+  },
+  "actualAppUnchanged": {
+    "buildId": "b4d31d62d589840f5147422a",
+    "schema": 65
+  },
+  "claims": [
+    "Modern readers negotiate summary capability; old Host/noarg snapshot compatibility remains.",
+    "Summary preserves every unfinished task identity and omits heavy checkpoint/result/output bodies.",
+    "Only current four inline plus one expanded body cache;2 in-flight output RPC,2 pages per entry/cycle, existing poll only.",
+    "Metadata/approval and formal messages commit before asynchronous output pages;late output filtered by scope/epoch/Host/run revision/fence/mount.",
+    "Output page offsets count Unicode codepoints;outputLength hint and existing event characters remain UTF16.",
+    "Generic quality policy now qualifies exhaustive/max/bounds assertions;4 controlled SDK tests, no added model calls."
+  ],
+  "correction": "NUL was a review false positive: original centralized validation rejects it before streamOutput writes. The test preserves that existing rejection; no production NUL fix or new fallback was introduced.",
+  "knownRemaining": [
+    "Global live run metadata and pending card cardinality still unbounded;full work paging is in private implementation.",
+    "Legacy full snapshot intentionally retained for old clients.",
+    "Global coalesced old-scope read can delay newly selected Bot output until it settles; metadata/approval remains responsive. B owner has scoped scheduling followup.",
+    "Pure SELECT runOutput currently uses existing BEGIN IMMEDIATE transaction; B owner has dedicated deferred-read transaction followup.",
+    "Actual App UI still blocked by Sky timeout;latest bounded getApp attempt ignored20s caller deadline and timed out after121.41s;no UI state or pass obtained.",
+    "Windows independent generic desktop input implementation and OS constraints remain;not merely awaiting PC.",
+    "Real J2 exact field and J7 extra exhaustive report quality remain open;new domain clause not independently real-model tested."
+  ],
+  "actualUI": false,
+  "realModelForThisCompiledVersion": false,
+  "wholeCompletionPercent": null
+}

@@ -1,0 +1,94 @@
+{
+  "kind": "schema-metadata-correction-and-selected-skill-formal",
+  "recordedAt": "2026-10-10T00:13:41.307406+00:00",
+  "liveAppBuildIdAtObservation": "0f082081e267fd8323f9b2cc",
+  "schemaObservedReadOnly": 70,
+  "schemaFromPreUpgradePin": [
+    {
+      "version": 70
+    }
+  ],
+  "pinReceipt": "/Users/chenqiang/Library/Application Support/CMBDevClaw-development/2026-10-08/presentation/cold-upgrade-plan/pins-live-before-stop-1791585594638503000.safe.json",
+  "correction": "Earlier progress summaries and current-0f082-trial-event-and-group.safe.json reported schema 69. Actual DB and original preservation pins are schema 70. acceptance69 is a legacy directory name. Existing raw pins and old failures are not rewritten.",
+  "selectedSkill": {
+    "run": {
+      "id": "bb5fc279-cf9d-473e-ad96-f03ec26fb22d",
+      "bot_id": "e1d81813-1ff0-4fca-9948-d966e1a77189",
+      "source": "user",
+      "status": "succeeded",
+      "result": "583 + 29 = 612",
+      "error": null
+    },
+    "acceptedImmutableReferences": [
+      {
+        "botId": "e1d81813-1ff0-4fca-9948-d966e1a77189",
+        "id": "2a50a207-f562-4348-9a90-4b38a827bca3",
+        "version": 3,
+        "name": "技能状态核验"
+      }
+    ],
+    "usage": {
+      "requests": 1,
+      "unknown": 0
+    },
+    "selectionPillObservedInFormalUi": true,
+    "receiptScope": "Private skill body is loaded by input preparation from the selected immutable version. No read_skill invocation receipt is present; matching text alone is not reported as dynamic tool activation.",
+    "officialGrokVisibleReply": "583 + 29 = 612",
+    "officialInput": "/技能状态核验 两个整数是583和29。只输出一行算式与结果。",
+    "cmbInput": " 两个整数是583和29。只输出一行算式与结果。 plus structured version 3 skill reference",
+    "sameNumbersAndResultFiniteSamplePassed": true
+  },
+  "candidateSourceGates": [
+    {
+      "gate": "owning-v3",
+      "log": "/tmp/cmb-public-history-owning-v3-20261010.log",
+      "bytes": 706,
+      "sha256": "dcd84f959124450012f04c60b4a9eccea47cd0ddd2cb2ed7743b96095f6cc74a",
+      "scope": "32 tests; previous fixture failures retained"
+    },
+    {
+      "gate": "sdk",
+      "log": "/tmp/cmb-public-history-sdk-20261010.log",
+      "bytes": 135431,
+      "sha256": "7c31a754b63900e331561d742b07cf840018d0f5a348e084c6be40a91e59fd34",
+      "scope": "11 selected actual SDK tests; 314 unselected"
+    },
+    {
+      "gate": "node",
+      "log": "/tmp/cmb-public-history-node-20261010.log",
+      "bytes": 91,
+      "sha256": "546c7bfd36ecac14793f941add6251c16a729819d1b744cccbaf256a91e1b42c",
+      "scope": "node"
+    },
+    {
+      "gate": "lint",
+      "log": "/tmp/cmb-public-history-lint-20261010.log",
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "scope": "lint"
+    },
+    {
+      "gate": "format-check",
+      "log": "/tmp/cmb-public-history-format-check-20261010.log",
+      "bytes": 66,
+      "sha256": "17aa973d3f004560237d9a95171210b0671deff23d61628eecf7322ff5938f20",
+      "scope": "format-check"
+    },
+    {
+      "gate": "workflow",
+      "log": "/tmp/cmb-public-history-workflow-20261010.log",
+      "bytes": 163696,
+      "sha256": "d70157d4a86661a8c32cb26f80dc53e09ebbc212163c3a9e568f16b92b0fb42b",
+      "scope": "npm run test:workflow"
+    },
+    {
+      "gate": "build",
+      "log": "/tmp/cmb-public-history-build-20261010.log",
+      "bytes": 56263,
+      "sha256": "6e0bfde649d483370bc6ebe1507eff5ac9a740bf5345ead3235c3f2a2a226d89",
+      "scope": "production source build"
+    }
+  ],
+  "candidateBuildId": "93cc0fc93ce52d302b4feed4",
+  "coreParityComplete": false
+}

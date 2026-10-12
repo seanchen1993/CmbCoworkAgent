@@ -1,0 +1,176 @@
+{
+  "kind": "actual-cold-memory-isolation-and-rename-followup",
+  "recordedAtUtc": "2026-10-09T11:50:11.134344+00:00",
+  "sourceDatabaseReadOnly": true,
+  "liveBuildId": "50e4868638f7f77b3396b3c5",
+  "hostId": "78308c2c-03d3-46a3-97e4-edbc96ae20c8",
+  "schema": 69,
+  "model": "MiniMax-M3",
+  "wholeCoreParityComplete": false,
+  "coldPreservation": {
+    "selectedRuns": 16,
+    "groupsUnchanged": [
+      "runs",
+      "effects",
+      "interactions",
+      "artifacts",
+      "artifactObjects",
+      "peerDispatch",
+      "peerWaits",
+      "checkpoints",
+      "skills",
+      "project"
+    ],
+    "checkpointPayloadBytesHashed": 9911846,
+    "receipts": [
+      {
+        "path": "/Users/chenqiang/Library/Application Support/CMBDevClaw-development/2026-10-08/presentation/cold-upgrade-plan/pins-live-before-stop-1791543329130208000.safe.json",
+        "sha256": "eedf4dced7684f006adc7659f1ec3682bd757c14a66aa4f78770f524ee1610bd"
+      },
+      {
+        "path": "/Users/chenqiang/Library/Application Support/CMBDevClaw-development/2026-10-08/presentation/cold-upgrade-plan/pins-quiesced-before-start-1791543546431604000.safe.json",
+        "sha256": "6e4f5401b8205549402fd6c53e25ce8bb433d39a8e49bdb43e8fb2304dac9a59"
+      },
+      {
+        "path": "/Users/chenqiang/Library/Application Support/CMBDevClaw-development/2026-10-08/presentation/cold-upgrade-plan/pins-post-start-pre-review-1791543660766160000.safe.json",
+        "sha256": "f919a24a9be30a44a7ee8e2b1e0e0594bed1dd318480747c00b96a24408c1a2b"
+      }
+    ],
+    "configurationFingerprints": {
+      "unchangedExceptModelsRuntimePaths": true,
+      "privateModelRuntimePathReplacements": 2,
+      "noCredentialsRecorded": true
+    },
+    "failuresRetained": [
+      "initial quiescent gate found an old default Electron shell opened by a previous CUA app lookup; exact owned shell later exited under SIGTERM",
+      "ambiguous app bundle lookup",
+      "CUA stale observation/input and later native-pipe failure are tool observations, not proof of an application bug"
+    ]
+  },
+  "samples": {
+    "isolation": {
+      "id": "b0e50056-db1e-4bfd-9656-24b8f395632c",
+      "status": "succeeded",
+      "revision": 32,
+      "resultSha256": "011fc504131205a798df64e5497d63c4ecbb0081be38198177a747164b47550c",
+      "actualSdkTools": [
+        "memory_list",
+        "memory_list"
+      ],
+      "effectStates": [],
+      "modelRequests": 4,
+      "settledRequests": 3,
+      "unknownRequestsRetained": 1,
+      "privateIsolationFiniteSamplePassed": true,
+      "earlySleepInterruptionRetained": true,
+      "humanReviewedResume": true,
+      "replyPresentationPassed": false
+    },
+    "sameReplyRetest": {
+      "id": "b815f552-6c69-4614-ba80-e105b17674cc",
+      "status": "succeeded",
+      "revision": 21,
+      "resultSha256": "b0432c7758194e12dbd23eb30be45a7d8aa6cb44bcd047161f0f9513d568d83e",
+      "actualSdkTools": [
+        "read_memory"
+      ],
+      "effectStates": [],
+      "modelRequests": 2,
+      "settledRequests": 2,
+      "unknownRequestsRetained": 0,
+      "readAfterColdRestartPassed": true,
+      "newMemoryWritten": false,
+      "replyQualityPassed": false,
+      "observedIssues": [
+        "raw memory ID and revision exposed",
+        "unprovided 本日按计划",
+        "unprovided 已登记处理计划"
+      ]
+    },
+    "rename": {
+      "id": "cdbd3133-3c81-411e-a160-37e6cd6fe4b5",
+      "status": "succeeded",
+      "revision": 31,
+      "resultSha256": "2d91ec8450716cdef9f272b38b39e81bb87a838733c867ff29147f3a9f59d5ea",
+      "actualSdkTools": [
+        "read_bot",
+        "update_bot"
+      ],
+      "effectStates": [
+        {
+          "status": "succeeded",
+          "count": 1
+        }
+      ],
+      "modelRequests": 4,
+      "settledRequests": 4,
+      "unknownRequestsRetained": 0,
+      "interaction": {
+        "id": "f80298b5-da5c-4ef6-9b5a-a8b69bba538e",
+        "status": "answered",
+        "answer": "approve"
+      },
+      "independentReview": {
+        "decision": "ask",
+        "reason": "自动审核未返回有效结论，请人工确认。",
+        "model": "MiniMax-M3"
+      },
+      "manualApprovalRequired": true,
+      "automaticRenameParityPassed": false
+    }
+  },
+  "durablePrivatePreference": {
+    "id": "62b23ea9-c2b2-4b14-b8d7-628348d47e67",
+    "bot_id": "954dd5e0-e2e7-4247-9303-276c8111c870",
+    "revision": 1,
+    "source_message_id": "da542c33-3111-4c5c-8bc5-662faa3827a0"
+  },
+  "memoryTableRowCounts": {
+    "memories": 5,
+    "metadata": 5
+  },
+  "currentBotProfile": {
+    "id": "954dd5e0-e2e7-4247-9303-276c8111c870",
+    "name": "记忆核验助手",
+    "revision": 3
+  },
+  "grokObservedSameInputs": {
+    "isolatedBotReportedNoPrivatePreferences": true,
+    "renameCompletedWithoutManualApproval": true,
+    "cloudStorageAndToolTraceNotInspectable": true
+  },
+  "candidateNotYetLive": {
+    "replyPolicyLastInFinalPrompt": true,
+    "reviewPromptUsesValidJsonExample": true,
+    "pluginTranscriptPreservesHistoricalSpeakerRoles": true,
+    "renameApprovalCopyDistinguishesNameOnly": true
+  },
+  "formalNativeUiRetestBlockedByTool": {
+    "error": "Sky Computer Use native pipe closed before response",
+    "bothApplicationDraftInputsWereNotObserved": "not counted as sent",
+    "noBackendApiSubstitutedForNativeUi": true
+  },
+  "retainedRegressionFailureLog": "/tmp/cmb-final-contract-nearest-20261009.log",
+  "regressionFollowup": {
+    "initial": {
+      "failed": 17,
+      "passed": 363,
+      "skipped": 24
+    },
+    "focusedRecoveryAndDelivery": {
+      "passed": 21,
+      "skipped": 286
+    },
+    "reviewAndTranscriptAndWorkflowChild": {
+      "passed": 100,
+      "skipped": 4
+    },
+    "actualSdkGroupGuard": {
+      "passed": 2,
+      "skipped": 305
+    },
+    "assertionsAndOldFailureLogPreserved": true,
+    "pluginHistoryWasAnImplementationFix": true,
+    "disposedOwnerAndOldVerdictResponsesWereTestHarnessRepairs": true
+  }
+}

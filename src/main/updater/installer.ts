@@ -6,22 +6,25 @@ import { basename, join, dirname } from "path"
 import { getUpdatesDir } from "./downloader"
 import { clearPendingUpdateChain, writePendingUpdateChain } from "./update-chain"
 import { canCompleteWithAsar } from "./update-marker"
-import { bashLoggingHeader, powerShellLoggingLauncher, withPowerShellLogging } from "./script-logging"
+import { bashAtomicCopy, powerShellAtomicCopy } from "./script-atomic-copy"
+import {
+  bashLoggingHeader,
+  powerShellLoggingLauncher,
+  withPowerShellLogging
+} from "./script-logging"
 
 const isWindows = process.platform === "win32"
 const isLinux = process.platform === "linux"
 const LINUX_WRAPPER_NAME = "CMBDevClaw"
 const LINUX_REAL_EXE_NAME = "cmbdevclaw"
 
-/** Executable name varies by platform */
-const EXE_NAME = isWindows ? "CMBDevClaw.exe" : LINUX_REAL_EXE_NAME
-
 /**
- * Process name used to detect running instances.
- * On Windows we strip ".exe" for Get-Process; on Linux we use the binary name directly.
+ * Wait for the executable that is actually running, including the macOS bundle
+ * name and renamed/portable builds. A Linux packaging name can miss a live Mac app.
  */
-function getProcessName(): string {
-  return isWindows ? EXE_NAME.replace(".exe", "") : EXE_NAME
+function getProcessName(executable = getExePath()): string {
+  const name = basename(executable)
+  return isWindows ? name.replace(/\.exe$/i, "") : name
 }
 
 /**
@@ -123,7 +126,7 @@ export function writePs1Launcher(ps1Path: string): string {
  * Directly detaching powershell.exe proved unreliable in production, while
  * the existing detached cmd/bat flow is stable on Windows.
  */
-export function launchDetachedPowerShellScript(ps1Path: string): void {
+export async function launchDetachedPowerShellScript(ps1Path: string): Promise<void> {
   const launcherPath = writePs1Launcher(ps1Path)
   const logPath = ps1Path.replace(/\.ps1$/i, ".launcher.log")
   appendUpdateLog(logPath, "log", ["launch-requested", { script: ps1Path }])
@@ -141,14 +144,31 @@ export function launchDetachedPowerShellScript(ps1Path: string): void {
   child.on("spawn", () => {
     appendUpdateLog(logPath, "log", ["launcher-spawned", { pid: child.pid }])
   })
-  child.unref()
+  await waitForInstallerSpawn(child)
+}
+
+/** spawn() returning a ChildProcess does not mean the OS started it. */
+function waitForInstallerSpawn(child: ReturnType<typeof spawn>): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const failed = (error: Error) => {
+      child.off("spawn", started)
+      reject(error)
+    }
+    const started = () => {
+      child.off("error", failed)
+      child.unref()
+      resolve()
+    }
+    child.once("error", failed)
+    child.once("spawn", started)
+  })
 }
 
 /**
  * Generate the update.ps1 script content for ASAR replacement.
  *   1. Waits for the Electron process to exit (up to 30s)
  *   2. Backs up current app.asar → app.asar.bak
- *   3. Copies new app.asar into place (retries up to 5 times)
+ *   3. Stages new app.asar and atomically replaces it (retries up to 5 times)
  *   4. Writes update-marker.json for startup self-check
  *   5. Cleans up temp file
  *   6. Restarts the application
@@ -162,10 +182,11 @@ export function generateUpdatePs1(
   const backupPath = getBackupPath()
   const markerPath = getMarkerPath()
   const exePath = getExePath()
-  const exeBaseName = EXE_NAME.replace(".exe", "")
+  const exeBaseName = getProcessName()
   const markerJson = makeUpdateMarkerJson(fromVersion, toVersion)
 
   return `
+${powerShellAtomicCopy()}
 Write-UpdateStage ("Install context: {0}" -f ${toPsString(markerJson)})
 $exeBaseName = ${toPsString(exeBaseName)}
 $appAsarPath = ${toPsString(appAsarPath)}
@@ -191,7 +212,7 @@ Write-UpdateStage ("Backing up ASAR: {0} -> {1}" -f $appAsarPath, $backupPath)
 # Backup
 if (Test-Path $appAsarPath) {
   try {
-    Copy-Item -Path $appAsarPath -Destination $backupPath -Force -ErrorAction Stop
+    Copy-UpdateFileAtomically -Source $appAsarPath -Destination $backupPath
   } catch {
     Write-UpdateStage ("Operation failed: {0}; position={1}" -f $_.Exception.Message, $_.InvocationInfo.PositionMessage)
     exit 1
@@ -205,7 +226,7 @@ $retry = 0
 $ok = $false
 while ($retry -lt 5 -and -not $ok) {
   try {
-    Copy-Item -Path $newAsarPath -Destination $appAsarPath -Force -ErrorAction Stop
+    Copy-UpdateFileAtomically -Source $newAsarPath -Destination $appAsarPath
     $ok = $true
   } catch {
     Write-UpdateStage ("Operation failed: {0}; position={1}" -f $_.Exception.Message, $_.InvocationInfo.PositionMessage)
@@ -214,8 +235,7 @@ while ($retry -lt 5 -and -not $ok) {
   }
 }
 if (-not $ok) {
-  Write-UpdateStage "ASAR replacement exhausted retries; restoring backup"
-  if (Test-Path $backupPath) { Copy-Item -Path $backupPath -Destination $appAsarPath -Force -ErrorAction SilentlyContinue }
+  Write-UpdateStage "ASAR replacement exhausted retries; original installation retained"
   exit 1
 }
 
@@ -241,9 +261,10 @@ export function generateRollbackPs1(backupAsarPath: string): string {
   const appAsarPath = getAppAsarPath()
   const markerPath = getMarkerPath()
   const exePath = getExePath()
-  const exeBaseName = EXE_NAME.replace(".exe", "")
+  const exeBaseName = getProcessName()
 
   return `
+${powerShellAtomicCopy()}
 $exeBaseName    = ${toPsString(exeBaseName)}
 $backupAsarPath = ${toPsString(backupAsarPath)}
 $appAsarPath    = ${toPsString(appAsarPath)}
@@ -266,7 +287,7 @@ if (Get-Process -Name $exeBaseName -ErrorAction SilentlyContinue) {
 Write-UpdateStage ("Restoring ASAR: {0} -> {1}" -f $backupAsarPath, $appAsarPath)
 # Rollback
 try {
-  Copy-Item -Path $backupAsarPath -Destination $appAsarPath -Force -ErrorAction Stop
+  Copy-UpdateFileAtomically -Source $backupAsarPath -Destination $appAsarPath
 } catch {
   Write-UpdateStage ("Operation failed: {0}; position={1}" -f $_.Exception.Message, $_.InvocationInfo.PositionMessage)
   exit 1
@@ -308,7 +329,7 @@ function writeBashScript(shPath: string, content: string): void {
 /**
  * Launch a bash installer script detached from the Electron process.
  */
-function launchDetachedBashScript(shPath: string): void {
+async function launchDetachedBashScript(shPath: string): Promise<void> {
   const logPath = shPath.replace(/\.sh$/i, ".log")
   appendUpdateLog(logPath, "log", ["launch-requested", { script: shPath }])
   updaterLog.log("[Updater] Launching bash script:", { shPath, logPath })
@@ -337,7 +358,7 @@ function launchDetachedBashScript(shPath: string): void {
   child.on("spawn", () => {
     appendUpdateLog(logPath, "log", ["script-spawned", { pid: child.pid }])
   })
-  child.unref()
+  await waitForInstallerSpawn(child)
 }
 
 /**
@@ -352,7 +373,7 @@ export function generateUpdateSh(
   const backupPath = getBackupPath()
   const markerPath = getMarkerPath()
   const exePath = getExePath()
-  const processName = getProcessName()
+  const processName = getProcessName(exePath)
   const markerJson = makeUpdateMarkerJson(fromVersion, toVersion)
 
   return `#!/bin/bash
@@ -367,6 +388,7 @@ PROC_NAME=${toBashString(processName)}
 LOG_FILE="\${UPDATE_LOG:-/tmp/cmbdevclaw-update.log}"
 
 ${bashLoggingHeader()}
+${bashAtomicCopy()}
 update_stage ${toBashString(markerJson)}
 
 update_stage "Waiting for process to exit: $PROC_NAME"
@@ -384,7 +406,7 @@ fi
 update_stage "Backing up ASAR: $APP_ASAR -> $BACKUP"
 # Backup
 if [ -f "$APP_ASAR" ]; then
-  cp -f "$APP_ASAR" "$BACKUP" || exit 1
+  copy_update_file_atomically "$APP_ASAR" "$BACKUP" || exit 1
 fi
 
 update_stage "Replacing ASAR: $NEW_ASAR -> $APP_ASAR"
@@ -392,14 +414,13 @@ update_stage "Replacing ASAR: $NEW_ASAR -> $APP_ASAR"
 if [ ! -f "$NEW_ASAR" ]; then echo "New asar not found"; exit 1; fi
 ok=0
 for i in 1 2 3 4 5; do
-  if cp -f "$NEW_ASAR" "$APP_ASAR"; then
+  if copy_update_file_atomically "$NEW_ASAR" "$APP_ASAR"; then
     ok=1
     break
   fi
   sleep 2
 done
 if [ $ok -eq 0 ]; then
-  [ -f "$BACKUP" ] && cp -f "$BACKUP" "$APP_ASAR"
   echo "Failed to copy new asar after retries"
   exit 1
 fi
@@ -438,6 +459,7 @@ PROC_NAME=${toBashString(processName)}
 LOG_FILE="\${UPDATE_LOG:-/tmp/cmbdevclaw-rollback.log}"
 
 ${bashLoggingHeader()}
+${bashAtomicCopy()}
 
 update_stage "Waiting for process to exit: $PROC_NAME"
 # Wait for process to exit (up to 30s)
@@ -453,7 +475,7 @@ fi
 
 update_stage "Restoring ASAR: $BACKUP -> $APP_ASAR"
 # Rollback
-cp -f "$BACKUP" "$APP_ASAR" || exit 1
+copy_update_file_atomically "$BACKUP" "$APP_ASAR" || exit 1
 
 # Remove marker
 rm -f "$MARKER"
@@ -480,7 +502,7 @@ export function generateFullZipUpdateSh(
 ): string {
   const backupDir = `${appDir}.bak`
   const markerPath = join(appDir, "resources", "update-marker.json")
-  const processName = getProcessName()
+  const processName = getProcessName(exePath)
   const markerJson = makeUpdateMarkerJson(
     fromVersion,
     toVersion,
@@ -673,7 +695,7 @@ export function generateFullZipUpdatePs1(
 ): string {
   const backupDir = `${appDir}.bak`
   const markerPath = join(appDir, "resources", "update-marker.json")
-  const exeBaseName = EXE_NAME.replace(".exe", "")
+  const exeBaseName = getProcessName(exePath)
   const markerJson = makeUpdateMarkerJson(
     fromVersion,
     toVersion,
@@ -779,30 +801,33 @@ Write-UpdateStage ("Restart spawned: pid={0}; startup self-check pending" -f $re
  * Execute ASAR replacement update.
  * Generates a platform-specific script, spawns it detached, and quits the app.
  */
-export function installAsarUpdate(newAsarPath: string, toVersion: string): void {
-  const fromVersion = app.getVersion()
-  updaterLog.log(`[Updater] Installing ASAR update: ${fromVersion} → ${toVersion}`)
-  updaterLog.log("[Updater] New ASAR source:", newAsarPath)
-  updaterLog.log("[Updater] Target ASAR:", getAppAsarPath())
-  updaterLog.log("[Updater] Backup path:", getBackupPath())
-  updaterLog.log("[Updater] EXE path:", getExePath())
-  updaterLog.log("[Updater] Platform:", process.platform)
+export async function installAsarUpdate(newAsarPath: string, toVersion: string): Promise<void> {
+  const { withDesktopBotUpdate } = await import("../bots/desktop-client")
+  await withDesktopBotUpdate(async () => {
+    const fromVersion = app.getVersion()
+    updaterLog.log(`[Updater] Installing ASAR update: ${fromVersion} → ${toVersion}`)
+    updaterLog.log("[Updater] New ASAR source:", newAsarPath)
+    updaterLog.log("[Updater] Target ASAR:", getAppAsarPath())
+    updaterLog.log("[Updater] Backup path:", getBackupPath())
+    updaterLog.log("[Updater] EXE path:", getExePath())
+    updaterLog.log("[Updater] Platform:", process.platform)
 
-  if (isWindows) {
-    const ps1Content = generateUpdatePs1(newAsarPath, fromVersion, toVersion)
-    const ps1Path = join(getUpdatesDir(), "update.ps1")
-    writePowerShellScript(ps1Path, ps1Content)
-    updaterLog.log("[Updater] Generated update.ps1 at", ps1Path)
-    launchDetachedPowerShellScript(ps1Path)
-  } else {
-    const shContent = generateUpdateSh(newAsarPath, fromVersion, toVersion)
-    const shPath = join(getUpdatesDir(), "update.sh")
-    writeBashScript(shPath, shContent)
-    updaterLog.log("[Updater] Generated update.sh at", shPath)
-    launchDetachedBashScript(shPath)
-  }
+    if (isWindows) {
+      const ps1Content = generateUpdatePs1(newAsarPath, fromVersion, toVersion)
+      const ps1Path = join(getUpdatesDir(), "update.ps1")
+      writePowerShellScript(ps1Path, ps1Content)
+      updaterLog.log("[Updater] Generated update.ps1 at", ps1Path)
+      await launchDetachedPowerShellScript(ps1Path)
+    } else {
+      const shContent = generateUpdateSh(newAsarPath, fromVersion, toVersion)
+      const shPath = join(getUpdatesDir(), "update.sh")
+      writeBashScript(shPath, shContent)
+      updaterLog.log("[Updater] Generated update.sh at", shPath)
+      await launchDetachedBashScript(shPath)
+    }
 
-  updaterLog.log("[Updater] Spawned update script, quitting app...")
+    updaterLog.log("[Updater] Spawned update script, quitting app...")
+  })
   app.quit()
 }
 
@@ -812,100 +837,109 @@ export function installAsarUpdate(newAsarPath: string, toVersion: string): void 
  * - If the file is a .exe (Windows only): launches the NSIS setup installer directly.
  * - If the file is a .deb (Linux only): launches dpkg to install.
  */
-export function installFullUpdate(
+export async function installFullUpdate(
   filePath: string,
   toVersion: string,
   releaseVersion: string = toVersion,
   channel: "stable" | "staging" = "stable",
   minVersion: string = toVersion
-): void {
-  const ext = filePath.toLowerCase().split(".").pop()
+): Promise<void> {
+  const { withDesktopBotUpdate } = await import("../bots/desktop-client")
+  await withDesktopBotUpdate(async () => {
+    const ext = filePath.toLowerCase().split(".").pop()
 
-  if (canCompleteWithAsar(toVersion, releaseVersion, minVersion)) {
-    // Persist before launching an external installer. The state is only honored
-    // when the next process reports exactly toVersion, so a failed install
-    // cannot accidentally activate the continuation.
-    const persisted = writePendingUpdateChain({
-      intermediateVersion: toVersion,
-      targetVersion: releaseVersion,
-      channel,
-      minVersion
-    })
-    if (!persisted) {
-      throw new Error("无法保存链式更新状态，已取消本次全量安装")
+    if (canCompleteWithAsar(toVersion, releaseVersion, minVersion)) {
+      // Persist before launching an external installer. The state is only honored
+      // when the next process reports exactly toVersion, so a failed install
+      // cannot accidentally activate the continuation.
+      const persisted = writePendingUpdateChain({
+        intermediateVersion: toVersion,
+        targetVersion: releaseVersion,
+        channel,
+        minVersion
+      })
+      if (!persisted) {
+        throw new Error("无法保存链式更新状态，已取消本次全量安装")
+      }
+    } else if (releaseVersion === toVersion) {
+      clearPendingUpdateChain()
     }
-  } else if (releaseVersion === toVersion) {
-    clearPendingUpdateChain()
-  }
 
-  if (ext === "zip") {
-    const exePath = getExePath()
-    const appDir = dirname(exePath)
-    const fromVersion = app.getVersion()
-    updaterLog.log(`[Updater] Installing full zip update: ${fromVersion} → ${toVersion}`)
-    updaterLog.log("[Updater] zip path:", filePath)
-    updaterLog.log("[Updater] app dir:", appDir)
-    updaterLog.log("[Updater] exe path:", exePath)
-    updaterLog.log("[Updater] Platform:", process.platform)
+    if (ext === "zip") {
+      const exePath = getExePath()
+      const appDir = dirname(exePath)
+      const fromVersion = app.getVersion()
+      updaterLog.log(`[Updater] Installing full zip update: ${fromVersion} → ${toVersion}`)
+      updaterLog.log("[Updater] zip path:", filePath)
+      updaterLog.log("[Updater] app dir:", appDir)
+      updaterLog.log("[Updater] exe path:", exePath)
+      updaterLog.log("[Updater] Platform:", process.platform)
 
-    if (isWindows) {
-      const ps1Content = generateFullZipUpdatePs1(
-        filePath,
-        appDir,
-        exePath,
-        fromVersion,
-        toVersion,
-        releaseVersion,
-        channel,
-        minVersion
+      if (isWindows) {
+        const ps1Content = generateFullZipUpdatePs1(
+          filePath,
+          appDir,
+          exePath,
+          fromVersion,
+          toVersion,
+          releaseVersion,
+          channel,
+          minVersion
+        )
+        const ps1Path = join(getUpdatesDir(), "full-update.ps1")
+        writePowerShellScript(ps1Path, ps1Content)
+        updaterLog.log("[Updater] Generated full-update.ps1 at", ps1Path)
+        await launchDetachedPowerShellScript(ps1Path)
+      } else if (isLinux) {
+        const shContent = generateFullZipUpdateSh(
+          filePath,
+          appDir,
+          exePath,
+          fromVersion,
+          toVersion,
+          releaseVersion,
+          channel,
+          minVersion
+        )
+        const shPath = join(getUpdatesDir(), "full-update.sh")
+        writeBashScript(shPath, shContent)
+        updaterLog.log("[Updater] Generated full-update.sh at", shPath)
+        await launchDetachedBashScript(shPath)
+      } else {
+        throw new Error(`当前平台暂不支持完整 zip 更新: ${process.platform}`)
+      }
+
+      updaterLog.log("[Updater] Spawned full-update script, quitting app...")
+    } else if (ext === "deb" && isLinux) {
+      // .deb mode: install via dpkg (Linux/UOS)
+      updaterLog.log("[Updater] Installing .deb package:", filePath)
+      const child = spawn(
+        "bash",
+        [
+          "-c",
+          `sudo dpkg -i '${escapeBashLiteral(filePath)}' && rm -f '${escapeBashLiteral(filePath)}'`
+        ],
+        {
+          detached: true,
+          stdio: "ignore"
+        }
       )
-      const ps1Path = join(getUpdatesDir(), "full-update.ps1")
-      writePowerShellScript(ps1Path, ps1Content)
-      updaterLog.log("[Updater] Generated full-update.ps1 at", ps1Path)
-      launchDetachedPowerShellScript(ps1Path)
-    } else if (isLinux) {
-      const shContent = generateFullZipUpdateSh(
-        filePath,
-        appDir,
-        exePath,
-        fromVersion,
-        toVersion,
-        releaseVersion,
-        channel,
-        minVersion
-      )
-      const shPath = join(getUpdatesDir(), "full-update.sh")
-      writeBashScript(shPath, shContent)
-      updaterLog.log("[Updater] Generated full-update.sh at", shPath)
-      launchDetachedBashScript(shPath)
+      await waitForInstallerSpawn(child)
+      updaterLog.log("[Updater] Spawned dpkg installer, quitting app...")
+    } else if (ext === "exe" && isWindows) {
+      // .exe mode: launch NSIS installer directly (requires company whitelist)
+      updaterLog.log("[Updater] Launching NSIS installer:", filePath)
+      const child = spawn(filePath, [], {
+        detached: true,
+        stdio: "ignore",
+        windowsHide: false // Show the NSIS UI
+      })
+      await waitForInstallerSpawn(child)
+      updaterLog.log("[Updater] Spawned installer, quitting app...")
     } else {
-      throw new Error(`当前平台暂不支持完整 zip 更新: ${process.platform}`)
+      throw new Error(`不支持的完整更新包格式: ${filePath}`)
     }
-
-    updaterLog.log("[Updater] Spawned full-update script, quitting app...")
-  } else if (ext === "deb" && isLinux) {
-    // .deb mode: install via dpkg (Linux/UOS)
-    updaterLog.log("[Updater] Installing .deb package:", filePath)
-    const child = spawn("bash", ["-c", `sudo dpkg -i '${escapeBashLiteral(filePath)}' && rm -f '${escapeBashLiteral(filePath)}'`], {
-      detached: true,
-      stdio: "ignore"
-    })
-    child.unref()
-    updaterLog.log("[Updater] Spawned dpkg installer, quitting app...")
-  } else if (ext === "exe" && isWindows) {
-    // .exe mode: launch NSIS installer directly (requires company whitelist)
-    updaterLog.log("[Updater] Launching NSIS installer:", filePath)
-    const child = spawn(filePath, [], {
-      detached: true,
-      stdio: "ignore",
-      windowsHide: false // Show the NSIS UI
-    })
-    child.unref()
-    updaterLog.log("[Updater] Spawned installer, quitting app...")
-  } else {
-    throw new Error(`不支持的完整更新包格式: ${filePath}`)
-  }
-
+  })
   app.quit()
 }
 

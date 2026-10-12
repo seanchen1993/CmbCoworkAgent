@@ -4380,6 +4380,7 @@ async function testAgentTypeResolution(workspace: string): Promise<void> {
   const harness = createHarness(workspace)
   const captured: Array<{
     prompt: string
+    agentType?: string
     role?: string
     disallowedTools?: string[]
     shellAccess?: string
@@ -4387,6 +4388,7 @@ async function testAgentTypeResolution(workspace: string): Promise<void> {
   const runner: WorkflowSubagentRunner = async (request) => {
     captured.push({
       prompt: request.prompt,
+      agentType: request.agentType,
       role: request.roleSystemPrompt,
       disallowedTools: request.disallowedTools,
       shellAccess: request.shellAccess
@@ -4403,6 +4405,8 @@ return "done"`
   assert(result.status === "completed", `completed, got ${result.status}: ${result.error}`)
   assert(captured.length === 4, `4 agents ran, got ${captured.length}`)
   const byPrompt = new Map(captured.map((c) => [c.prompt, c]))
+  assert(byPrompt.get("recon")!.agentType === "Explore", "lifecycle receives the resolved role")
+  assert(byPrompt.get("build")!.agentType === undefined, "default role is not a display label")
   // Explore → read-only shell, blocks writes, has a role prompt.
   assert(byPrompt.get("recon")!.shellAccess === "read_only", "Explore → read-only shell")
   assert(

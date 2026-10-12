@@ -1,0 +1,355 @@
+{
+  "kind": "formal-minimax-07-group-and-official-repeat",
+  "recordedAt": "2026-10-09T22:27:23.408562+00:00",
+  "nativeBuildId": "07f3051b007c9ee227b39dc1",
+  "hostId": "cd44e3b0-d43c-4766-abc3-41cb4886ea62",
+  "schema": 69,
+  "actualNativeUi": true,
+  "model": "MiniMax-M3",
+  "wholeCoreParityComplete": false,
+  "samples": [
+    {
+      "cycle": {
+        "id": "8f4a4080-6abb-47b2-9518-220f6e22f632",
+        "conversation_id": "221b4a41-095a-4836-b7df-954a50e18798",
+        "member_ids": "[\"4002cdce-8149-4dfc-9c4b-28abd67d30c1\",\"924e1689-7b6d-411c-a429-28decb91b179\",\"e1d81813-1ff0-4fca-9948-d966e1a77189\"]",
+        "round": 1,
+        "speakers": "[\"924e1689-7b6d-411c-a429-28decb91b179\",\"e1d81813-1ff0-4fca-9948-d966e1a77189\",\"4002cdce-8149-4dfc-9c4b-28abd67d30c1\"]",
+        "speaker_index": 2,
+        "round_messages": 0,
+        "total_messages": 2,
+        "current_run_id": "c627b09e-26b3-426c-ad91-d2642aa8beaf",
+        "status": "completed",
+        "created_at": 1791584208473,
+        "updated_at": 1791584262657,
+        "thread_root": ""
+      },
+      "verdict": "failed",
+      "runs": [
+        {
+          "id": "819a7324-757c-4f5c-8b65-1d795d0848c2",
+          "bot_id": "4002cdce-8149-4dfc-9c4b-28abd67d30c1",
+          "status": "failed",
+          "error": "群聊回复尚未发布，已保留执行记录，请重试或接手处理。",
+          "sent_count": 0
+        },
+        {
+          "id": "e8abc3f7-0029-4fa7-8170-8074f91168cd",
+          "bot_id": "924e1689-7b6d-411c-a429-28decb91b179",
+          "status": "succeeded",
+          "error": null,
+          "sent_count": 1
+        },
+        {
+          "id": "46f0c2e1-fdec-462f-bb1d-6b01269ed551",
+          "bot_id": "e1d81813-1ff0-4fca-9948-d966e1a77189",
+          "status": "succeeded",
+          "error": null,
+          "sent_count": 1
+        },
+        {
+          "id": "41036f2d-3232-418b-b146-23cc0a71a5b4",
+          "bot_id": "924e1689-7b6d-411c-a429-28decb91b179",
+          "status": "succeeded",
+          "error": null,
+          "sent_count": 0
+        },
+        {
+          "id": "eb922194-0e82-4457-ac71-978a897befa6",
+          "bot_id": "e1d81813-1ff0-4fca-9948-d966e1a77189",
+          "status": "succeeded",
+          "error": null,
+          "sent_count": 0
+        },
+        {
+          "id": "c627b09e-26b3-426c-ad91-d2642aa8beaf",
+          "bot_id": "4002cdce-8149-4dfc-9c4b-28abd67d30c1",
+          "status": "succeeded",
+          "error": null,
+          "sent_count": 0
+        }
+      ],
+      "visibleMessages": [
+        {
+          "sequence": 252,
+          "id": "ffe0b4cc-e3e5-4d96-8349-c0718d89cdff",
+          "bot_id": "4002cdce-8149-4dfc-9c4b-28abd67d30c1",
+          "sender": "system",
+          "text": "群聊回复尚未发布，已保留执行记录，请重试或接手处理。",
+          "run_id": "819a7324-757c-4f5c-8b65-1d795d0848c2",
+          "created_at": 1791584235167
+        },
+        {
+          "sequence": 253,
+          "id": "f248cc62-ca28-4e15-babf-aabe0c3d9898",
+          "bot_id": "924e1689-7b6d-411c-a429-28decb91b179",
+          "sender": "bot",
+          "text": "独立计算 17+25 = 42。",
+          "run_id": "e8abc3f7-0029-4fa7-8170-8074f91168cd",
+          "created_at": 1791584238391
+        },
+        {
+          "sequence": 254,
+          "id": "93d754d2-6925-4bc3-80d3-8fc5ea9abbe8",
+          "bot_id": "e1d81813-1ff0-4fca-9948-d966e1a77189",
+          "sender": "bot",
+          "text": "核对：17+25 = 42，与核心旅程核验结果一致，正确。",
+          "run_id": "46f0c2e1-fdec-462f-bb1d-6b01269ed551",
+          "created_at": 1791584247092
+        }
+      ],
+      "usage": [
+        {
+          "run_id": "41036f2d-3232-418b-b146-23cc0a71a5b4",
+          "model": "MiniMax-M3",
+          "requests": 2,
+          "unknown_requests": 0,
+          "input_tokens": 42535,
+          "output_tokens": 157
+        },
+        {
+          "run_id": "46f0c2e1-fdec-462f-bb1d-6b01269ed551",
+          "model": "MiniMax-M3",
+          "requests": 2,
+          "unknown_requests": 0,
+          "input_tokens": 42856,
+          "output_tokens": 611
+        },
+        {
+          "run_id": "819a7324-757c-4f5c-8b65-1d795d0848c2",
+          "model": "MiniMax-M3",
+          "requests": 4,
+          "unknown_requests": 0,
+          "input_tokens": 37141,
+          "output_tokens": 2106
+        },
+        {
+          "run_id": "c627b09e-26b3-426c-ad91-d2642aa8beaf",
+          "model": "MiniMax-M3",
+          "requests": 2,
+          "unknown_requests": 0,
+          "input_tokens": 42889,
+          "output_tokens": 709
+        },
+        {
+          "run_id": "e8abc3f7-0029-4fa7-8170-8074f91168cd",
+          "model": "MiniMax-M3",
+          "requests": 2,
+          "unknown_requests": 0,
+          "input_tokens": 42694,
+          "output_tokens": 425
+        },
+        {
+          "run_id": "eb922194-0e82-4457-ac71-978a897befa6",
+          "model": "MiniMax-M3",
+          "requests": 2,
+          "unknown_requests": 0,
+          "input_tokens": 42466,
+          "output_tokens": 260
+        }
+      ],
+      "modelRequests": 14,
+      "unknownUsage": 0,
+      "interactions": [],
+      "effectStates": [],
+      "childTaskCount": 0,
+      "scope": "Same 17+25 request; new two-Bot group and historical three-Bot group are separate samples, not substitutes.",
+      "failureReasons": [
+        "Primary member exhausted bounded real-send repair without actual public delivery",
+        "Verifier attributed the current calculation to a different member"
+      ]
+    },
+    {
+      "cycle": {
+        "id": "2ed26b67-c23e-4dd9-960e-80c50c0aa017",
+        "conversation_id": "7f08d20f-73d8-4507-a26f-dfbc64d6529e",
+        "member_ids": "[\"924e1689-7b6d-411c-a429-28decb91b179\",\"e1d81813-1ff0-4fca-9948-d966e1a77189\"]",
+        "round": 1,
+        "speakers": "[\"e1d81813-1ff0-4fca-9948-d966e1a77189\",\"924e1689-7b6d-411c-a429-28decb91b179\"]",
+        "speaker_index": 1,
+        "round_messages": 0,
+        "total_messages": 2,
+        "current_run_id": "7cc383a5-78c5-4733-bc2c-d0977af522d3",
+        "status": "completed",
+        "created_at": 1791584457544,
+        "updated_at": 1791584486911,
+        "thread_root": ""
+      },
+      "verdict": "finite_sample_pass",
+      "runs": [
+        {
+          "id": "f9bfd2c6-f2dc-431c-8983-aee98eea2ef9",
+          "bot_id": "924e1689-7b6d-411c-a429-28decb91b179",
+          "status": "succeeded",
+          "error": null,
+          "sent_count": 1
+        },
+        {
+          "id": "3276aba6-0d3e-45a2-87d2-a4276454eb16",
+          "bot_id": "e1d81813-1ff0-4fca-9948-d966e1a77189",
+          "status": "succeeded",
+          "error": null,
+          "sent_count": 1
+        },
+        {
+          "id": "f11fc700-c926-4a41-909a-028d73a8ed5e",
+          "bot_id": "e1d81813-1ff0-4fca-9948-d966e1a77189",
+          "status": "succeeded",
+          "error": null,
+          "sent_count": 0
+        },
+        {
+          "id": "7cc383a5-78c5-4733-bc2c-d0977af522d3",
+          "bot_id": "924e1689-7b6d-411c-a429-28decb91b179",
+          "status": "succeeded",
+          "error": null,
+          "sent_count": 0
+        }
+      ],
+      "visibleMessages": [
+        {
+          "sequence": 256,
+          "id": "10f350df-6364-4fe2-9592-2a423553907c",
+          "bot_id": "924e1689-7b6d-411c-a429-28decb91b179",
+          "sender": "bot",
+          "text": "独立计算：17 + 25 = 42。",
+          "run_id": "f9bfd2c6-f2dc-431c-8983-aee98eea2ef9",
+          "created_at": 1791584461041
+        },
+        {
+          "sequence": 257,
+          "id": "d34d4c7e-51d6-43d9-a99b-d5c779af8aba",
+          "bot_id": "e1d81813-1ff0-4fca-9948-d966e1a77189",
+          "sender": "bot",
+          "text": "独立核对：17 + 25 = 42，与上方计算一致，结果正确。",
+          "run_id": "3276aba6-0d3e-45a2-87d2-a4276454eb16",
+          "created_at": 1791584469340
+        }
+      ],
+      "usage": [
+        {
+          "run_id": "3276aba6-0d3e-45a2-87d2-a4276454eb16",
+          "model": "MiniMax-M3",
+          "requests": 2,
+          "unknown_requests": 0,
+          "input_tokens": 41801,
+          "output_tokens": 129
+        },
+        {
+          "run_id": "7cc383a5-78c5-4733-bc2c-d0977af522d3",
+          "model": "MiniMax-M3",
+          "requests": 2,
+          "unknown_requests": 0,
+          "input_tokens": 41519,
+          "output_tokens": 244
+        },
+        {
+          "run_id": "f11fc700-c926-4a41-909a-028d73a8ed5e",
+          "model": "MiniMax-M3",
+          "requests": 3,
+          "unknown_requests": 0,
+          "input_tokens": 62188,
+          "output_tokens": 523
+        },
+        {
+          "run_id": "f9bfd2c6-f2dc-431c-8983-aee98eea2ef9",
+          "model": "MiniMax-M3",
+          "requests": 2,
+          "unknown_requests": 0,
+          "input_tokens": 41378,
+          "output_tokens": 156
+        }
+      ],
+      "modelRequests": 9,
+      "unknownUsage": 0,
+      "interactions": [],
+      "effectStates": [],
+      "childTaskCount": 0,
+      "scope": "Same 17+25 request; new two-Bot group and historical three-Bot group are separate samples, not substitutes."
+    }
+  ],
+  "officialGrok": {
+    "actualNativeUi": true,
+    "submittedInput": "群聊功能核验：先由一位 Bot 独立计算 17+25，另一位 Bot 核对并说明是否正确。各回复一次，完成后停止；不访问外部服务。",
+    "humanUiTime": "今天 6:23:39",
+    "observedReplies": [
+      {
+        "speaker": "新建 Bot",
+        "text": "重新算一遍：17+25 = 42。 新 Bot 请核对。"
+      },
+      {
+        "speaker": "新 Bot",
+        "text": "核对完毕：17+25 = 42，New Bot 的结果正确。"
+      }
+    ],
+    "actualBotMembers": 2,
+    "cloudRunOrUsageNotObservable": true,
+    "timestampOrderingNotUsedAsLatencyEvidence": true,
+    "freshRepeatObserved": true
+  },
+  "coldPreservation": {
+    "descriptor": {
+      "version": 1,
+      "pid": 66467,
+      "hostId": "cd44e3b0-d43c-4766-abc3-41cb4886ea62",
+      "buildId": "07f3051b007c9ee227b39dc1",
+      "socketPath": "/private/tmp/cmb-bot-501-4b987f56222e7e971f75407b/rpc.sock"
+    },
+    "selectedRuns": 47,
+    "checkpointPayloadBytesHashed": 10644347,
+    "logicalGroupsEqual": {
+      "runs": true,
+      "effects": true,
+      "interactions": true,
+      "artifacts": true,
+      "artifactObjects": true,
+      "peerDispatch": true,
+      "peerWaits": true,
+      "checkpoints": true,
+      "skills": true,
+      "project": true
+    },
+    "extraTablesEqual": {
+      "bot_memories": true,
+      "bot_memory_metadata": true,
+      "bot_model_usage": true,
+      "bot_group_cycles": true,
+      "bot_group_runs": true
+    },
+    "modelRuntimePathReplacementsOnly": 2,
+    "modelNormalizedFingerprintMatched": true,
+    "otherConfigurationEqual": {
+      "custom-models.json": true,
+      ".env": true,
+      "userinfo-models.json": true,
+      "bot-host/workspace.private.json": true
+    },
+    "normalExits": [
+      {
+        "role": "main",
+        "pid": 66111,
+        "signal": "SIGTERM",
+        "exited": true,
+        "seconds": 0.366
+      },
+      {
+        "role": "host",
+        "pid": 66119,
+        "signal": "SIGTERM",
+        "exited": true,
+        "seconds": 0.044
+      }
+    ],
+    "forceKillUsed": false,
+    "privateReceiptSha256": "31aa23ceb7ab48d06c9a6f6b62c969bb4eda9c26ea911b056ae62f3559300b57"
+  },
+  "candidate": {
+    "notYetLive": true,
+    "changes": [
+      "Preserve owner past assistant role while keeping records quoted and imported references inert",
+      "Place earlier group reference before current messages and current assignment"
+    ],
+    "noStoredHistoryRewritten": true,
+    "boundedCompletionRepairAndRealToolRequirementUnchanged": true
+  }
+}

@@ -36,9 +36,7 @@ describe("bounded attachment byte parser", () => {
     )
     expect(result.truncated).toBe(true)
     expect(result.content.length).toBeLessThan(32_000)
-    await expect(parseFileBytes("bad.txt", bytes("x"), 0)).rejects.toThrow(
-      /字符预算无效/
-    )
+    await expect(parseFileBytes("bad.txt", bytes("x"), 0)).rejects.toThrow(/字符预算无效/)
   })
 
   it("rejects unsupported extensions without interpreting bytes", async () => {
@@ -54,11 +52,8 @@ describe("bounded attachment byte parser", () => {
     const centralHeader = payload.indexOf(Buffer.from([0x50, 0x4b, 0x01, 0x02]))
     expect(centralHeader).toBeGreaterThanOrEqual(0)
     payload.writeUInt32LE(MAX_ATTACHMENT_ARCHIVE_TOTAL_BYTES + 1, centralHeader + 24)
-    await expect(
-      parseFileBytes(
-        "bomb.xlsx",
-        Uint8Array.from(payload).buffer
-      )
-    ).rejects.toThrow(/解压|条目/)
+    await expect(parseFileBytes("bomb.xlsx", Uint8Array.from(payload).buffer)).rejects.toThrow(
+      /解压|条目/
+    )
   })
 })

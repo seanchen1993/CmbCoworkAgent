@@ -1,0 +1,95 @@
+{
+  "schemaVersion": 1,
+  "kind": "grok-source-guided-per-bot-inspector-preferences-integration",
+  "observedAt": "2026-10-07T16:33:01.366216+00:00",
+  "changes": [
+    "Keep distinct Bot tab preferences within the existing persistent sharedWorkspace scope",
+    "Explicit tab choices update per-Bot and fallback; header/Teach/routine reveals remain temporary",
+    "Same-Bot branch retains its temporary tab; closed/epoch/busy navigation guards preserved",
+    "Index pinned conversation ranks once per snapshot collection; retain existing order without repeated linear comparator scans"
+  ],
+  "sourcePins": [
+    {
+      "path": "src/renderer/src/components/bots/BotWorkspace.tsx",
+      "bytes": 166967,
+      "sha256": "4f798f8c86c815b0a5f22d96b691e2b7262a6d10237e0086e7809e253e2ca82a"
+    },
+    {
+      "path": "src/renderer/src/lib/bot-inspector-preferences.ts",
+      "bytes": 5370,
+      "sha256": "0bb0cac5a32ceb11e6226a8ad1af848b2c63ab85e957ee98decf08322a7d289b"
+    },
+    {
+      "path": "src/renderer/src/lib/bot-inspector-preferences.test.ts",
+      "bytes": 5970,
+      "sha256": "6412318b985f9741957b092d44e7470045d2b22fbfbfcbdb425c57c26693dbcb"
+    },
+    {
+      "path": "tests/bot-composer-teach-menu-browser.spec.ts",
+      "bytes": 49024,
+      "sha256": "e34ea02d05f1f4d7396dd2de2947c4ef3b054e7bc081baf30ed8afe766d4ff86"
+    }
+  ],
+  "sourceReference": {
+    "path": "/var/folders/r4/m2gmdyyn06z9488ghc1044zh0000gn/T/cmb-inspector-preferences-qywbkgok/SOURCE-FACTS.md",
+    "bytes": 2798,
+    "sha256": "d2c3171d750ea3ddc57db2793364b8e952042e99683d127aaa5b2d2cf4f06dea"
+  },
+  "limits": {
+    "scopeCount": 8,
+    "botsPerScope": 128,
+    "rawCharacterLimit": 262144,
+    "unknownHostScope": "memory-only"
+  },
+  "gates": {
+    "nearest": {
+      "passed": 12,
+      "exitCode": 0,
+      "log": {
+        "path": "/tmp/cmb-inspector-preferences-nearest.log",
+        "bytes": 322,
+        "sha256": "94b9f8da351ac874002f2d2b0e28cefb7f91fd20973f454f4496bfd1a891c1df"
+      }
+    },
+    "authenticatedReactBrowserRpc": {
+      "passed": 9,
+      "originalCasesRetained": 8,
+      "exitCode": 0,
+      "log": {
+        "path": "/tmp/cmb-inspector-preferences-nine-navigation.log",
+        "bytes": 1208,
+        "sha256": "ea1faaec5ac93a2531cfab3c299673b062168b8eae788e4f0e5952b952027107"
+      }
+    },
+    "webTypes": {
+      "exitCode": 0,
+      "log": {
+        "path": "/tmp/cmb-inspector-preferences-web.log",
+        "bytes": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      }
+    },
+    "lint": {
+      "exitCode": 0,
+      "warnings": 0,
+      "log": {
+        "path": "/tmp/cmb-inspector-preferences-lint.log",
+        "bytes": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      }
+    },
+    "messages": {
+      "exitCode": 0,
+      "log": {
+        "path": "/tmp/cmb-inspector-preferences-messages.log",
+        "bytes": 15386,
+        "sha256": "07e2f675a357db15a60fa0715f5a4c40f7f427d6804a39101b6729b0ee295875"
+      }
+    }
+  },
+  "productionBuildPending": true,
+  "actualAppUi": false,
+  "realModel": false,
+  "fullGrokUiParityClaimed": false,
+  "performanceBenchmarkClaimed": false
+}

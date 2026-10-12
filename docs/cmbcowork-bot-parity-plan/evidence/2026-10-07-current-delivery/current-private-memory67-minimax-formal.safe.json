@@ -1,0 +1,1635 @@
+{
+  "schemaVersion": 1,
+  "kind": "private-memory-isolated-real-MiniMax-compiled-Host-API-only",
+  "startedAt": "2026-10-07T21:33:17.443Z",
+  "status": "complete",
+  "overallTaskPassClaimed": false,
+  "approvalPolicy": "No approval/permission API is called. Six frozen synthetic user sends and exact owned private-memory delete only; unexpected pending action ends this attempt.",
+  "evidence": {
+    "uploads": [],
+    "artifacts": [],
+    "messages": [],
+    "pendingActions": []
+  },
+  "cleanup": {
+    "cancelRequested": false,
+    "cancelSettled": true,
+    "idleShutdownAccepted": true,
+    "forcedTermination": false,
+    "processExited": true,
+    "exit": {
+      "code": 0,
+      "signal": null,
+      "spawnFailed": false
+    },
+    "privateCredentialSnapshotRemoved": true,
+    "transportClosed": true
+  },
+  "scope": [
+    "New owned home/database and two Bots; six fixed synthetic user sends; no existing App/home/task/permission is mutated",
+    "Exact saved custom:minimax-m3 model only; no project, instructions, plugins, skills, MCP, Hooks or Harness data is copied",
+    "Two preference-free root anchors precede explicit remember; later branches inherit only those anchors; original preference is never repeated in recall inputs",
+    "Actual remember receipt and optional read_memory receipt, clean Host restart, cross-Bot isolation and explicit user-API deletion are checked; no actual UI/Grok parity claim",
+    "This is a real model API sample, not an actual App UI or official Grok comparison PASS",
+    "Default production 200000 shared output allowance remains unchanged; observed request threshold is a cancellation guard, not a strict account monetary cap",
+    "Provider reported/unknown receipt counters are preserved; no pricing estimate or unknown-to-zero conversion"
+  ],
+  "model": {
+    "ref": "custom:minimax-m3",
+    "name": "MiniMax-M3",
+    "model": "MiniMax-M3",
+    "endpointHost": "api.minimaxi.com",
+    "hasCredential": true
+  },
+  "execution": {
+    "platform": "darwin",
+    "runnerNodeVersion": "v22.23.3",
+    "hostExecutable": "/Users/chenqiang/Library/Caches/CMBDevClaw-development-deps/cmb-bot-locked-ci-20261007-737983438cdd48f8a502c385c8d6c6f4/node_modules/electron/dist/Electron.app/Contents/MacOS/Electron",
+    "compiledHostEntry": "/Users/chenqiang/Desktop/projects/CmbCoworkAgent/out/main/bot-host.js",
+    "compiledHostSha256": "3e0587448602b90a9264755a477515d2defaf7837bf37c4a43e6b8d2a21789b9",
+    "compiledManifestSha256": "fc8c08c126bab11fa2f7ab49d2b124662e971e3de48e57882a80b4600ce518fb",
+    "expectedBuildId": "3e1e9683fe548bf21c26dc86",
+    "nativeBuildId": "3e1e9683fe548bf21c26dc86",
+    "isolatedHome": "/tmp/cmb-private-memory-real-acceptance-tLMVOM",
+    "originalUserSnapshotReadOnly": true,
+    "sourceSnapshotUnchangedAfterTask": true,
+    "sourceDefaultUnchangedAfterTask": true,
+    "selectedModelUnchangedAfterTask": true,
+    "selection": "explicit-saved-M3",
+    "sixFrozenUserSends": true,
+    "overallDeadlineMs": 600000,
+    "taskDeadlineMs": 150000,
+    "observedRequestCancelThreshold": 12,
+    "productionSharedOutputLimit": 200000,
+    "noMoneyLimitClaimed": true,
+    "compiledBuildUnchangedAfterTask": true
+  },
+  "input": {
+    "sha256": "ecb6d7746c7f71674e056488b4e171ad67c20643a4d6d3e050033ab644a666d0",
+    "schemaVersion": 1,
+    "preference": "MEM-7F9E7B1197FB",
+    "tasks": {
+      "anchorA": {
+        "text": "这是中性起点A。只回复READY-A。",
+        "sha256": "d64c04cc4c257055f2d3408ac77aaa0df1bd5348a039cb68ab6b69c587e00b55"
+      },
+      "anchorB": {
+        "text": "这是中性起点B。只回复READY-B。",
+        "sha256": "65a12583cf4841efdb49b3070b6ad8978dff1564008f6b5641faf1352fd80376"
+      },
+      "remember": {
+        "text": "请记住：我的验收条码偏好是MEM-7F9E7B1197FB。这是需要长期保留的个人偏好，不是一次性任务结果。",
+        "sha256": "a109f9f91cb12acca5604c2652e94e20d96cc0e3ef99ec74c5bafef10fd26b04"
+      },
+      "recall": {
+        "text": "我的验收条码偏好是什么？只回复已保存的条码；如果没有保存，回复UNKNOWN。不要读取旧聊天、文件或网络，也不要新增或修改记忆。",
+        "sha256": "c71ac72d82ca7fc6eb7d6fcb95db0843ea415b76fb0a92cc825d99612d40d84c"
+      },
+      "isolatedRecall": {
+        "text": "我的验收条码偏好是什么？只回复已保存的条码；如果没有保存，回复UNKNOWN。不要读取其他Bot、旧聊天、文件或网络，也不要新增或修改记忆。",
+        "sha256": "718b47cebf41c31dd1762f25a0b0ef2b63f425fca9feeced1d809d68f218dbd4"
+      },
+      "deletedRecall": {
+        "text": "我的验收条码偏好是什么？只回复已保存的条码；如果没有保存，回复UNKNOWN。不要读取旧聊天、文件或网络，也不要新增或修改记忆。",
+        "sha256": "c71ac72d82ca7fc6eb7d6fcb95db0843ea415b76fb0a92cc825d99612d40d84c"
+      }
+    },
+    "oracle": {
+      "rememberReceiptRequired": true,
+      "recallReadMemoryReceiptRequired": false,
+      "recallHistoryNoPreferenceRequired": true,
+      "isolationAnswer": "UNKNOWN",
+      "deletedAnswer": "UNKNOWN",
+      "automaticSynthesisDefaultUnchanged": true
+    }
+  },
+  "tasks": [
+    {
+      "conversationId": "ee6fd1b0-f134-48c4-9ec2-6c34621f3d10",
+      "runId": "17bfa638-d3c3-483d-8716-e278698724e9",
+      "key": "anchorA",
+      "messageId": "5dac8afb-5c97-4554-ad86-ba9762e6b750",
+      "inputSha256": "d64c04cc4c257055f2d3408ac77aaa0df1bd5348a039cb68ab6b69c587e00b55",
+      "sentAt": "2026-10-07T21:33:18.783Z"
+    },
+    {
+      "conversationId": "ee6fd1b0-f134-48c4-9ec2-6c34621f3d10",
+      "runId": "8be556d2-b2a2-4612-a2bf-184a5dcb690f",
+      "key": "anchorB",
+      "messageId": "703c6a69-f2af-4656-8a3e-e1434e847bd4",
+      "inputSha256": "65a12583cf4841efdb49b3070b6ad8978dff1564008f6b5641faf1352fd80376",
+      "sentAt": "2026-10-07T21:33:20.948Z"
+    },
+    {
+      "conversationId": "ee6fd1b0-f134-48c4-9ec2-6c34621f3d10",
+      "runId": "3856418f-873f-4104-a8e0-0d2cfe535652",
+      "key": "remember",
+      "messageId": "bb058492-e3b1-48e2-959d-78c2bd81e9b8",
+      "inputSha256": "a109f9f91cb12acca5604c2652e94e20d96cc0e3ef99ec74c5bafef10fd26b04",
+      "sentAt": "2026-10-07T21:33:23.038Z"
+    },
+    {
+      "conversationId": "ee6fd1b0-f134-48c4-9ec2-6c34621f3d10",
+      "runId": "cb00112b-643f-464a-b205-b2c066dcfb97",
+      "key": "recall",
+      "messageId": "456f7155-a357-4ba3-b036-ada18e0d0bcd",
+      "inputSha256": "c71ac72d82ca7fc6eb7d6fcb95db0843ea415b76fb0a92cc825d99612d40d84c",
+      "threadRootId": "5dac8afb-5c97-4554-ad86-ba9762e6b750",
+      "sentAt": "2026-10-07T21:33:29.975Z"
+    },
+    {
+      "conversationId": "88f44d20-41f8-4e18-a23a-ff5fe6ec7d30",
+      "runId": "81bd9b69-b303-460c-98e1-af3a7ce972c3",
+      "key": "isolatedRecall",
+      "messageId": "69d4d87a-b550-45ee-8f9c-44171f8941aa",
+      "inputSha256": "718b47cebf41c31dd1762f25a0b0ef2b63f425fca9feeced1d809d68f218dbd4",
+      "sentAt": "2026-10-07T21:33:33.023Z"
+    },
+    {
+      "conversationId": "ee6fd1b0-f134-48c4-9ec2-6c34621f3d10",
+      "runId": "ac1e370d-93b6-4f1b-a8b0-72fee2dd4eb4",
+      "key": "deletedRecall",
+      "messageId": "fe681e62-0f3b-4e4e-91a8-7f212d2c7b59",
+      "inputSha256": "c71ac72d82ca7fc6eb7d6fcb95db0843ea415b76fb0a92cc825d99612d40d84c",
+      "threadRootId": "703c6a69-f2af-4656-8a3e-e1434e847bd4",
+      "sentAt": "2026-10-07T21:33:37.073Z"
+    }
+  ],
+  "receipts": [
+    {
+      "conversationId": "ee6fd1b0-f134-48c4-9ec2-6c34621f3d10",
+      "runId": "17bfa638-d3c3-483d-8716-e278698724e9",
+      "key": "anchorA",
+      "status": "succeeded",
+      "revision": 13,
+      "result": "\n\nREADY-A",
+      "modelUsage": {
+        "requests": 1,
+        "unknownRequests": 0,
+        "inputTokens": 17905,
+        "outputTokens": 53,
+        "reservedOutputTokens": 0,
+        "inputReportedRequests": 1,
+        "otherModelRequests": 0,
+        "models": [
+          {
+            "modelRef": "custom:minimax-m3",
+            "model": "MiniMax-M3",
+            "purpose": "task",
+            "requests": 1,
+            "unknownRequests": 0,
+            "inputTokens": 17905,
+            "outputTokens": 53,
+            "inputReportedRequests": 1
+          }
+        ]
+      },
+      "modelBudget": {
+        "limit": 200000,
+        "consumed": 53,
+        "reserved": 0,
+        "requests": 1
+      },
+      "diagnosticCode": null
+    },
+    {
+      "conversationId": "ee6fd1b0-f134-48c4-9ec2-6c34621f3d10",
+      "runId": "8be556d2-b2a2-4612-a2bf-184a5dcb690f",
+      "key": "anchorB",
+      "status": "succeeded",
+      "revision": 13,
+      "result": "\n\nREADY-B",
+      "modelUsage": {
+        "requests": 1,
+        "unknownRequests": 1,
+        "inputTokens": 0,
+        "outputTokens": 0,
+        "reservedOutputTokens": 8192,
+        "inputReportedRequests": 0,
+        "otherModelRequests": 0,
+        "models": [
+          {
+            "modelRef": "custom:minimax-m3",
+            "model": "MiniMax-M3",
+            "purpose": "task",
+            "requests": 1,
+            "unknownRequests": 1,
+            "inputTokens": 0,
+            "outputTokens": 0,
+            "inputReportedRequests": 0
+          }
+        ]
+      },
+      "modelBudget": {
+        "limit": 200000,
+        "consumed": 0,
+        "reserved": 8192,
+        "requests": 1
+      },
+      "diagnosticCode": null
+    },
+    {
+      "conversationId": "ee6fd1b0-f134-48c4-9ec2-6c34621f3d10",
+      "runId": "3856418f-873f-4104-a8e0-0d2cfe535652",
+      "key": "remember",
+      "status": "succeeded",
+      "revision": 21,
+      "result": "\n\n已记住：您的验收条码偏好为 **MEM-7F9E7B1197FB**，作为长期个人偏好保留。",
+      "modelUsage": {
+        "requests": 2,
+        "unknownRequests": 2,
+        "inputTokens": 0,
+        "outputTokens": 0,
+        "reservedOutputTokens": 16384,
+        "inputReportedRequests": 0,
+        "otherModelRequests": 0,
+        "models": [
+          {
+            "modelRef": "custom:minimax-m3",
+            "model": "MiniMax-M3",
+            "purpose": "task",
+            "requests": 2,
+            "unknownRequests": 2,
+            "inputTokens": 0,
+            "outputTokens": 0,
+            "inputReportedRequests": 0
+          }
+        ]
+      },
+      "modelBudget": {
+        "limit": 200000,
+        "consumed": 0,
+        "reserved": 16384,
+        "requests": 2
+      },
+      "diagnosticCode": null
+    },
+    {
+      "conversationId": "ee6fd1b0-f134-48c4-9ec2-6c34621f3d10",
+      "runId": "cb00112b-643f-464a-b205-b2c066dcfb97",
+      "key": "recall",
+      "status": "succeeded",
+      "revision": 13,
+      "result": "\n\nMEM-7F9E7B1197FB",
+      "modelUsage": {
+        "requests": 1,
+        "unknownRequests": 0,
+        "inputTokens": 18142,
+        "outputTokens": 118,
+        "reservedOutputTokens": 0,
+        "inputReportedRequests": 1,
+        "otherModelRequests": 0,
+        "models": [
+          {
+            "modelRef": "custom:minimax-m3",
+            "model": "MiniMax-M3",
+            "purpose": "task",
+            "requests": 1,
+            "unknownRequests": 0,
+            "inputTokens": 18142,
+            "outputTokens": 118,
+            "inputReportedRequests": 1
+          }
+        ]
+      },
+      "modelBudget": {
+        "limit": 200000,
+        "consumed": 118,
+        "reserved": 0,
+        "requests": 1
+      },
+      "diagnosticCode": null
+    },
+    {
+      "conversationId": "88f44d20-41f8-4e18-a23a-ff5fe6ec7d30",
+      "runId": "81bd9b69-b303-460c-98e1-af3a7ce972c3",
+      "key": "isolatedRecall",
+      "status": "succeeded",
+      "revision": 21,
+      "result": "\n\nUNKNOWN",
+      "modelUsage": {
+        "requests": 2,
+        "unknownRequests": 2,
+        "inputTokens": 0,
+        "outputTokens": 0,
+        "reservedOutputTokens": 16384,
+        "inputReportedRequests": 0,
+        "otherModelRequests": 0,
+        "models": [
+          {
+            "modelRef": "custom:minimax-m3",
+            "model": "MiniMax-M3",
+            "purpose": "task",
+            "requests": 2,
+            "unknownRequests": 2,
+            "inputTokens": 0,
+            "outputTokens": 0,
+            "inputReportedRequests": 0
+          }
+        ]
+      },
+      "modelBudget": {
+        "limit": 200000,
+        "consumed": 0,
+        "reserved": 16384,
+        "requests": 2
+      },
+      "diagnosticCode": null
+    },
+    {
+      "conversationId": "ee6fd1b0-f134-48c4-9ec2-6c34621f3d10",
+      "runId": "ac1e370d-93b6-4f1b-a8b0-72fee2dd4eb4",
+      "key": "deletedRecall",
+      "status": "succeeded",
+      "revision": 21,
+      "result": "\n\nUNKNOWN",
+      "modelUsage": {
+        "requests": 2,
+        "unknownRequests": 2,
+        "inputTokens": 0,
+        "outputTokens": 0,
+        "reservedOutputTokens": 16384,
+        "inputReportedRequests": 0,
+        "otherModelRequests": 0,
+        "models": [
+          {
+            "modelRef": "custom:minimax-m3",
+            "model": "MiniMax-M3",
+            "purpose": "task",
+            "requests": 2,
+            "unknownRequests": 2,
+            "inputTokens": 0,
+            "outputTokens": 0,
+            "inputReportedRequests": 0
+          }
+        ]
+      },
+      "modelBudget": {
+        "limit": 200000,
+        "consumed": 0,
+        "reserved": 16384,
+        "requests": 2
+      },
+      "diagnosticCode": null
+    }
+  ],
+  "usageObservations": [
+    {
+      "stage": "owned-bots-and-anchors",
+      "asOf": 1791408798770,
+      "usage": {
+        "requests": 0,
+        "unknownRequests": 0,
+        "inputTokens": 0,
+        "outputTokens": 0,
+        "reservedOutputTokens": 0,
+        "inputReportedRequests": 0,
+        "otherModelRequests": 0,
+        "models": []
+      }
+    },
+    {
+      "stage": "owned-bots-and-anchors",
+      "asOf": 1791408798786,
+      "usage": {
+        "requests": 0,
+        "unknownRequests": 0,
+        "inputTokens": 0,
+        "outputTokens": 0,
+        "reservedOutputTokens": 0,
+        "inputReportedRequests": 0,
+        "otherModelRequests": 0,
+        "models": []
+      }
+    },
+    {
+      "stage": "owned-bots-and-anchors",
+      "asOf": 1791408799798,
+      "usage": {
+        "requests": 1,
+        "unknownRequests": 1,
+        "inputTokens": 0,
+        "outputTokens": 0,
+        "reservedOutputTokens": 8192,
+        "inputReportedRequests": 0,
+        "otherModelRequests": 0,
+        "models": [
+          {
+            "modelRef": "custom:minimax-m3",
+            "model": "MiniMax-M3",
+            "purpose": "task",
+            "requests": 1,
+            "unknownRequests": 1,
+            "inputTokens": 0,
+            "outputTokens": 0,
+            "inputReportedRequests": 0
+          }
+        ]
+      }
+    },
+    {
+      "stage": "owned-bots-and-anchors",
+      "asOf": 1791408800814,
+      "usage": {
+        "requests": 1,
+        "unknownRequests": 0,
+        "inputTokens": 17905,
+        "outputTokens": 53,
+        "reservedOutputTokens": 0,
+        "inputReportedRequests": 1,
+        "otherModelRequests": 0,
+        "models": [
+          {
+            "modelRef": "custom:minimax-m3",
+            "model": "MiniMax-M3",
+            "purpose": "task",
+            "requests": 1,
+            "unknownRequests": 0,
+            "inputTokens": 17905,
+            "outputTokens": 53,
+            "inputReportedRequests": 1
+          }
+        ]
+      }
+    },
+    {
+      "stage": "owned-bots-and-anchors",
+      "asOf": 1791408800938,
+      "usage": {
+        "requests": 1,
+        "unknownRequests": 0,
+        "inputTokens": 17905,
+        "outputTokens": 53,
+        "reservedOutputTokens": 0,
+        "inputReportedRequests": 1,
+        "otherModelRequests": 0,
+        "models": [
+          {
+            "modelRef": "custom:minimax-m3",
+            "model": "MiniMax-M3",
+            "purpose": "task",
+            "requests": 1,
+            "unknownRequests": 0,
+            "inputTokens": 17905,
+            "outputTokens": 53,
+            "inputReportedRequests": 1
+          }
+        ]
+      }
+    },
+    {
+      "stage": "owned-bots-and-anchors",
+      "asOf": 1791408800951,
+      "usage": {
+        "requests": 1,
+        "unknownRequests": 0,
+        "inputTokens": 17905,
+        "outputTokens": 53,
+        "reservedOutputTokens": 0,
+        "inputReportedRequests": 1,
+        "otherModelRequests": 0,
+        "models": [
+          {
+            "modelRef": "custom:minimax-m3",
+            "model": "MiniMax-M3",
+            "purpose": "task",
+            "requests": 1,
+            "unknownRequests": 0,
+            "inputTokens": 17905,
+            "outputTokens": 53,
+            "inputReportedRequests": 1
+          }
+        ]
+      }
+    },
+    {
+      "stage": "owned-bots-and-anchors",
+      "asOf": 1791408801961,
+      "usage": {
+        "requests": 2,
+        "unknownRequests": 1,
+        "inputTokens": 17905,
+        "outputTokens": 53,
+        "reservedOutputTokens": 8192,
+        "inputReportedRequests": 1,
+        "otherModelRequests": 0,
+        "models": [
+          {
+            "modelRef": "custom:minimax-m3",
+            "model": "MiniMax-M3",
+            "purpose": "task",
+            "requests": 2,
+            "unknownRequests": 1,
+            "inputTokens": 17905,
+            "outputTokens": 53,
+            "inputReportedRequests": 1
+          }
+        ]
+      }
+    },
+    {
+      "stage": "owned-bots-and-anchors",
+      "asOf": 1791408803028,
+      "usage": {
+        "requests": 2,
+        "unknownRequests": 1,
+        "inputTokens": 17905,
+        "outputTokens": 53,
+        "reservedOutputTokens": 8192,
+        "inputReportedRequests": 1,
+        "otherModelRequests": 0,
+        "models": [
+          {
+            "modelRef": "custom:minimax-m3",
+            "model": "MiniMax-M3",
+            "purpose": "task",
+            "requests": 2,
+            "unknownRequests": 1,
+            "inputTokens": 17905,
+            "outputTokens": 53,
+            "inputReportedRequests": 1
+          }
+        ]
+      }
+    },
+    {
+      "stage": "explicit-remember",
+      "asOf": 1791408803031,
+      "usage": {
+        "requests": 2,
+        "unknownRequests": 1,
+        "inputTokens": 17905,
+        "outputTokens": 53,
+        "reservedOutputTokens": 8192,
+        "inputReportedRequests": 1,
+        "otherModelRequests": 0,
+        "models": [
+          {
+            "modelRef": "custom:minimax-m3",
+            "model": "MiniMax-M3",
+            "purpose": "task",
+            "requests": 2,
+            "unknownRequests": 1,
+            "inputTokens": 17905,
+            "outputTokens": 53,
+            "inputReportedRequests": 1
+          }
+        ]
+      }
+    },
+    {
+      "stage": "explicit-remember",
+      "asOf": 1791408803038,
+      "usage": {
+        "requests": 2,
+        "unknownRequests": 1,
+        "inputTokens": 17905,
+        "outputTokens": 53,
+        "reservedOutputTokens": 8192,
+        "inputReportedRequests": 1,
+        "otherModelRequests": 0,
+        "models": [
+          {
+            "modelRef": "custom:minimax-m3",
+            "model": "MiniMax-M3",
+            "purpose": "task",
+            "requests": 2,
+            "unknownRequests": 1,
+            "inputTokens": 17905,
+            "outputTokens": 53,
+            "inputReportedRequests": 1
+          }
+        ]
+      }
+    },
+    {
+      "stage": "explicit-remember",
+      "asOf": 1791408804050,
+      "usage": {
+        "requests": 3,
+        "unknownRequests": 2,
+        "inputTokens": 17905,
+        "outputTokens": 53,
+        "reservedOutputTokens": 16384,
+        "inputReportedRequests": 1,
+        "otherModelRequests": 0,
+        "models": [
+          {
+            "modelRef": "custom:minimax-m3",
+            "model": "MiniMax-M3",
+            "purpose": "task",
+            "requests": 3,
+            "unknownRequests": 2,
+            "inputTokens": 17905,
+            "outputTokens": 53,
+            "inputReportedRequests": 1
+          }
+        ]
+      }
+    },
+    {
+      "stage": "explicit-remember",
+      "asOf": 1791408805060,
+      "usage": {
+        "requests": 3,
+        "unknownRequests": 2,
+        "inputTokens": 17905,
+        "outputTokens": 53,
+        "reservedOutputTokens": 16384,
+        "inputReportedRequests": 1,
+        "otherModelRequests": 0,
+        "models": [
+          {
+            "modelRef": "custom:minimax-m3",
+            "model": "MiniMax-M3",
+            "purpose": "task",
+            "requests": 3,
+            "unknownRequests": 2,
+            "inputTokens": 17905,
+            "outputTokens": 53,
+            "inputReportedRequests": 1
+          }
+        ]
+      }
+    },
+    {
+      "stage": "explicit-remember",
+      "asOf": 1791408806070,
+      "usage": {
+        "requests": 3,
+        "unknownRequests": 2,
+        "inputTokens": 17905,
+        "outputTokens": 53,
+        "reservedOutputTokens": 16384,
+        "inputReportedRequests": 1,
+        "otherModelRequests": 0,
+        "models": [
+          {
+            "modelRef": "custom:minimax-m3",
+            "model": "MiniMax-M3",
+            "purpose": "task",
+            "requests": 3,
+            "unknownRequests": 2,
+            "inputTokens": 17905,
+            "outputTokens": 53,
+            "inputReportedRequests": 1
+          }
+        ]
+      }
+    },
+    {
+      "stage": "explicit-remember",
+      "asOf": 1791408807081,
+      "usage": {
+        "requests": 3,
+        "unknownRequests": 2,
+        "inputTokens": 17905,
+        "outputTokens": 53,
+        "reservedOutputTokens": 16384,
+        "inputReportedRequests": 1,
+        "otherModelRequests": 0,
+        "models": [
+          {
+            "modelRef": "custom:minimax-m3",
+            "model": "MiniMax-M3",
+            "purpose": "task",
+            "requests": 3,
+            "unknownRequests": 2,
+            "inputTokens": 17905,
+            "outputTokens": 53,
+            "inputReportedRequests": 1
+          }
+        ]
+      }
+    },
+    {
+      "stage": "explicit-remember",
+      "asOf": 1791408808086,
+      "usage": {
+        "requests": 4,
+        "unknownRequests": 3,
+        "inputTokens": 17905,
+        "outputTokens": 53,
+        "reservedOutputTokens": 24576,
+        "inputReportedRequests": 1,
+        "otherModelRequests": 0,
+        "models": [
+          {
+            "modelRef": "custom:minimax-m3",
+            "model": "MiniMax-M3",
+            "purpose": "task",
+            "requests": 4,
+            "unknownRequests": 3,
+            "inputTokens": 17905,
+            "outputTokens": 53,
+            "inputReportedRequests": 1
+          }
+        ]
+      }
+    },
+    {
+      "stage": "explicit-remember",
+      "asOf": 1791408809108,
+      "usage": {
+        "requests": 4,
+        "unknownRequests": 3,
+        "inputTokens": 17905,
+        "outputTokens": 53,
+        "reservedOutputTokens": 24576,
+        "inputReportedRequests": 1,
+        "otherModelRequests": 0,
+        "models": [
+          {
+            "modelRef": "custom:minimax-m3",
+            "model": "MiniMax-M3",
+            "purpose": "task",
+            "requests": 4,
+            "unknownRequests": 3,
+            "inputTokens": 17905,
+            "outputTokens": 53,
+            "inputReportedRequests": 1
+          }
+        ]
+      }
+    },
+    {
+      "stage": "normal-host-shutdown-and-restart",
+      "asOf": 1791408809119,
+      "usage": {
+        "requests": 4,
+        "unknownRequests": 3,
+        "inputTokens": 17905,
+        "outputTokens": 53,
+        "reservedOutputTokens": 24576,
+        "inputReportedRequests": 1,
+        "otherModelRequests": 0,
+        "models": [
+          {
+            "modelRef": "custom:minimax-m3",
+            "model": "MiniMax-M3",
+            "purpose": "task",
+            "requests": 4,
+            "unknownRequests": 3,
+            "inputTokens": 17905,
+            "outputTokens": 53,
+            "inputReportedRequests": 1
+          }
+        ]
+      }
+    },
+    {
+      "stage": "preference-free-first-branch-recall",
+      "asOf": 1791408809960,
+      "usage": {
+        "requests": 4,
+        "unknownRequests": 3,
+        "inputTokens": 17905,
+        "outputTokens": 53,
+        "reservedOutputTokens": 24576,
+        "inputReportedRequests": 1,
+        "otherModelRequests": 0,
+        "models": [
+          {
+            "modelRef": "custom:minimax-m3",
+            "model": "MiniMax-M3",
+            "purpose": "task",
+            "requests": 4,
+            "unknownRequests": 3,
+            "inputTokens": 17905,
+            "outputTokens": 53,
+            "inputReportedRequests": 1
+          }
+        ]
+      }
+    },
+    {
+      "stage": "preference-free-first-branch-recall",
+      "asOf": 1791408809978,
+      "usage": {
+        "requests": 4,
+        "unknownRequests": 3,
+        "inputTokens": 17905,
+        "outputTokens": 53,
+        "reservedOutputTokens": 24576,
+        "inputReportedRequests": 1,
+        "otherModelRequests": 0,
+        "models": [
+          {
+            "modelRef": "custom:minimax-m3",
+            "model": "MiniMax-M3",
+            "purpose": "task",
+            "requests": 4,
+            "unknownRequests": 3,
+            "inputTokens": 17905,
+            "outputTokens": 53,
+            "inputReportedRequests": 1
+          }
+        ]
+      }
+    },
+    {
+      "stage": "preference-free-first-branch-recall",
+      "asOf": 1791408810989,
+      "usage": {
+        "requests": 5,
+        "unknownRequests": 4,
+        "inputTokens": 17905,
+        "outputTokens": 53,
+        "reservedOutputTokens": 32768,
+        "inputReportedRequests": 1,
+        "otherModelRequests": 0,
+        "models": [
+          {
+            "modelRef": "custom:minimax-m3",
+            "model": "MiniMax-M3",
+            "purpose": "task",
+            "requests": 5,
+            "unknownRequests": 4,
+            "inputTokens": 17905,
+            "outputTokens": 53,
+            "inputReportedRequests": 1
+          }
+        ]
+      }
+    },
+    {
+      "stage": "preference-free-first-branch-recall",
+      "asOf": 1791408812000,
+      "usage": {
+        "requests": 5,
+        "unknownRequests": 4,
+        "inputTokens": 17905,
+        "outputTokens": 53,
+        "reservedOutputTokens": 32768,
+        "inputReportedRequests": 1,
+        "otherModelRequests": 0,
+        "models": [
+          {
+            "modelRef": "custom:minimax-m3",
+            "model": "MiniMax-M3",
+            "purpose": "task",
+            "requests": 5,
+            "unknownRequests": 4,
+            "inputTokens": 17905,
+            "outputTokens": 53,
+            "inputReportedRequests": 1
+          }
+        ]
+      }
+    },
+    {
+      "stage": "preference-free-first-branch-recall",
+      "asOf": 1791408813008,
+      "usage": {
+        "requests": 5,
+        "unknownRequests": 3,
+        "inputTokens": 36047,
+        "outputTokens": 171,
+        "reservedOutputTokens": 24576,
+        "inputReportedRequests": 2,
+        "otherModelRequests": 0,
+        "models": [
+          {
+            "modelRef": "custom:minimax-m3",
+            "model": "MiniMax-M3",
+            "purpose": "task",
+            "requests": 5,
+            "unknownRequests": 3,
+            "inputTokens": 36047,
+            "outputTokens": 171,
+            "inputReportedRequests": 2
+          }
+        ]
+      }
+    },
+    {
+      "stage": "other-bot-private-isolation",
+      "asOf": 1791408813015,
+      "usage": {
+        "requests": 5,
+        "unknownRequests": 3,
+        "inputTokens": 36047,
+        "outputTokens": 171,
+        "reservedOutputTokens": 24576,
+        "inputReportedRequests": 2,
+        "otherModelRequests": 0,
+        "models": [
+          {
+            "modelRef": "custom:minimax-m3",
+            "model": "MiniMax-M3",
+            "purpose": "task",
+            "requests": 5,
+            "unknownRequests": 3,
+            "inputTokens": 36047,
+            "outputTokens": 171,
+            "inputReportedRequests": 2
+          }
+        ]
+      }
+    },
+    {
+      "stage": "other-bot-private-isolation",
+      "asOf": 1791408813025,
+      "usage": {
+        "requests": 5,
+        "unknownRequests": 3,
+        "inputTokens": 36047,
+        "outputTokens": 171,
+        "reservedOutputTokens": 24576,
+        "inputReportedRequests": 2,
+        "otherModelRequests": 0,
+        "models": [
+          {
+            "modelRef": "custom:minimax-m3",
+            "model": "MiniMax-M3",
+            "purpose": "task",
+            "requests": 5,
+            "unknownRequests": 3,
+            "inputTokens": 36047,
+            "outputTokens": 171,
+            "inputReportedRequests": 2
+          }
+        ]
+      }
+    },
+    {
+      "stage": "other-bot-private-isolation",
+      "asOf": 1791408814033,
+      "usage": {
+        "requests": 6,
+        "unknownRequests": 4,
+        "inputTokens": 36047,
+        "outputTokens": 171,
+        "reservedOutputTokens": 32768,
+        "inputReportedRequests": 2,
+        "otherModelRequests": 0,
+        "models": [
+          {
+            "modelRef": "custom:minimax-m3",
+            "model": "MiniMax-M3",
+            "purpose": "task",
+            "requests": 6,
+            "unknownRequests": 4,
+            "inputTokens": 36047,
+            "outputTokens": 171,
+            "inputReportedRequests": 2
+          }
+        ]
+      }
+    },
+    {
+      "stage": "other-bot-private-isolation",
+      "asOf": 1791408815043,
+      "usage": {
+        "requests": 6,
+        "unknownRequests": 4,
+        "inputTokens": 36047,
+        "outputTokens": 171,
+        "reservedOutputTokens": 32768,
+        "inputReportedRequests": 2,
+        "otherModelRequests": 0,
+        "models": [
+          {
+            "modelRef": "custom:minimax-m3",
+            "model": "MiniMax-M3",
+            "purpose": "task",
+            "requests": 6,
+            "unknownRequests": 4,
+            "inputTokens": 36047,
+            "outputTokens": 171,
+            "inputReportedRequests": 2
+          }
+        ]
+      }
+    },
+    {
+      "stage": "other-bot-private-isolation",
+      "asOf": 1791408816052,
+      "usage": {
+        "requests": 7,
+        "unknownRequests": 5,
+        "inputTokens": 36047,
+        "outputTokens": 171,
+        "reservedOutputTokens": 40960,
+        "inputReportedRequests": 2,
+        "otherModelRequests": 0,
+        "models": [
+          {
+            "modelRef": "custom:minimax-m3",
+            "model": "MiniMax-M3",
+            "purpose": "task",
+            "requests": 7,
+            "unknownRequests": 5,
+            "inputTokens": 36047,
+            "outputTokens": 171,
+            "inputReportedRequests": 2
+          }
+        ]
+      }
+    },
+    {
+      "stage": "other-bot-private-isolation",
+      "asOf": 1791408817058,
+      "usage": {
+        "requests": 7,
+        "unknownRequests": 5,
+        "inputTokens": 36047,
+        "outputTokens": 171,
+        "reservedOutputTokens": 40960,
+        "inputReportedRequests": 2,
+        "otherModelRequests": 0,
+        "models": [
+          {
+            "modelRef": "custom:minimax-m3",
+            "model": "MiniMax-M3",
+            "purpose": "task",
+            "requests": 7,
+            "unknownRequests": 5,
+            "inputTokens": 36047,
+            "outputTokens": 171,
+            "inputReportedRequests": 2
+          }
+        ]
+      }
+    },
+    {
+      "stage": "second-preference-free-branch-after-delete",
+      "asOf": 1791408817065,
+      "usage": {
+        "requests": 7,
+        "unknownRequests": 5,
+        "inputTokens": 36047,
+        "outputTokens": 171,
+        "reservedOutputTokens": 40960,
+        "inputReportedRequests": 2,
+        "otherModelRequests": 0,
+        "models": [
+          {
+            "modelRef": "custom:minimax-m3",
+            "model": "MiniMax-M3",
+            "purpose": "task",
+            "requests": 7,
+            "unknownRequests": 5,
+            "inputTokens": 36047,
+            "outputTokens": 171,
+            "inputReportedRequests": 2
+          }
+        ]
+      }
+    },
+    {
+      "stage": "second-preference-free-branch-after-delete",
+      "asOf": 1791408817074,
+      "usage": {
+        "requests": 7,
+        "unknownRequests": 5,
+        "inputTokens": 36047,
+        "outputTokens": 171,
+        "reservedOutputTokens": 40960,
+        "inputReportedRequests": 2,
+        "otherModelRequests": 0,
+        "models": [
+          {
+            "modelRef": "custom:minimax-m3",
+            "model": "MiniMax-M3",
+            "purpose": "task",
+            "requests": 7,
+            "unknownRequests": 5,
+            "inputTokens": 36047,
+            "outputTokens": 171,
+            "inputReportedRequests": 2
+          }
+        ]
+      }
+    },
+    {
+      "stage": "second-preference-free-branch-after-delete",
+      "asOf": 1791408818080,
+      "usage": {
+        "requests": 8,
+        "unknownRequests": 6,
+        "inputTokens": 36047,
+        "outputTokens": 171,
+        "reservedOutputTokens": 49152,
+        "inputReportedRequests": 2,
+        "otherModelRequests": 0,
+        "models": [
+          {
+            "modelRef": "custom:minimax-m3",
+            "model": "MiniMax-M3",
+            "purpose": "task",
+            "requests": 8,
+            "unknownRequests": 6,
+            "inputTokens": 36047,
+            "outputTokens": 171,
+            "inputReportedRequests": 2
+          }
+        ]
+      }
+    },
+    {
+      "stage": "second-preference-free-branch-after-delete",
+      "asOf": 1791408819092,
+      "usage": {
+        "requests": 8,
+        "unknownRequests": 6,
+        "inputTokens": 36047,
+        "outputTokens": 171,
+        "reservedOutputTokens": 49152,
+        "inputReportedRequests": 2,
+        "otherModelRequests": 0,
+        "models": [
+          {
+            "modelRef": "custom:minimax-m3",
+            "model": "MiniMax-M3",
+            "purpose": "task",
+            "requests": 8,
+            "unknownRequests": 6,
+            "inputTokens": 36047,
+            "outputTokens": 171,
+            "inputReportedRequests": 2
+          }
+        ]
+      }
+    },
+    {
+      "stage": "second-preference-free-branch-after-delete",
+      "asOf": 1791408820109,
+      "usage": {
+        "requests": 8,
+        "unknownRequests": 6,
+        "inputTokens": 36047,
+        "outputTokens": 171,
+        "reservedOutputTokens": 49152,
+        "inputReportedRequests": 2,
+        "otherModelRequests": 0,
+        "models": [
+          {
+            "modelRef": "custom:minimax-m3",
+            "model": "MiniMax-M3",
+            "purpose": "task",
+            "requests": 8,
+            "unknownRequests": 6,
+            "inputTokens": 36047,
+            "outputTokens": 171,
+            "inputReportedRequests": 2
+          }
+        ]
+      }
+    },
+    {
+      "stage": "second-preference-free-branch-after-delete",
+      "asOf": 1791408821123,
+      "usage": {
+        "requests": 8,
+        "unknownRequests": 6,
+        "inputTokens": 36047,
+        "outputTokens": 171,
+        "reservedOutputTokens": 49152,
+        "inputReportedRequests": 2,
+        "otherModelRequests": 0,
+        "models": [
+          {
+            "modelRef": "custom:minimax-m3",
+            "model": "MiniMax-M3",
+            "purpose": "task",
+            "requests": 8,
+            "unknownRequests": 6,
+            "inputTokens": 36047,
+            "outputTokens": 171,
+            "inputReportedRequests": 2
+          }
+        ]
+      }
+    },
+    {
+      "stage": "second-preference-free-branch-after-delete",
+      "asOf": 1791408822138,
+      "usage": {
+        "requests": 8,
+        "unknownRequests": 6,
+        "inputTokens": 36047,
+        "outputTokens": 171,
+        "reservedOutputTokens": 49152,
+        "inputReportedRequests": 2,
+        "otherModelRequests": 0,
+        "models": [
+          {
+            "modelRef": "custom:minimax-m3",
+            "model": "MiniMax-M3",
+            "purpose": "task",
+            "requests": 8,
+            "unknownRequests": 6,
+            "inputTokens": 36047,
+            "outputTokens": 171,
+            "inputReportedRequests": 2
+          }
+        ]
+      }
+    },
+    {
+      "stage": "second-preference-free-branch-after-delete",
+      "asOf": 1791408823157,
+      "usage": {
+        "requests": 9,
+        "unknownRequests": 7,
+        "inputTokens": 36047,
+        "outputTokens": 171,
+        "reservedOutputTokens": 57344,
+        "inputReportedRequests": 2,
+        "otherModelRequests": 0,
+        "models": [
+          {
+            "modelRef": "custom:minimax-m3",
+            "model": "MiniMax-M3",
+            "purpose": "task",
+            "requests": 9,
+            "unknownRequests": 7,
+            "inputTokens": 36047,
+            "outputTokens": 171,
+            "inputReportedRequests": 2
+          }
+        ]
+      }
+    },
+    {
+      "stage": "second-preference-free-branch-after-delete",
+      "asOf": 1791408824181,
+      "usage": {
+        "requests": 9,
+        "unknownRequests": 7,
+        "inputTokens": 36047,
+        "outputTokens": 171,
+        "reservedOutputTokens": 57344,
+        "inputReportedRequests": 2,
+        "otherModelRequests": 0,
+        "models": [
+          {
+            "modelRef": "custom:minimax-m3",
+            "model": "MiniMax-M3",
+            "purpose": "task",
+            "requests": 9,
+            "unknownRequests": 7,
+            "inputTokens": 36047,
+            "outputTokens": 171,
+            "inputReportedRequests": 2
+          }
+        ]
+      }
+    },
+    {
+      "stage": "second-preference-free-branch-after-delete",
+      "asOf": 1791408824188,
+      "usage": {
+        "requests": 9,
+        "unknownRequests": 7,
+        "inputTokens": 36047,
+        "outputTokens": 171,
+        "reservedOutputTokens": 57344,
+        "inputReportedRequests": 2,
+        "otherModelRequests": 0,
+        "models": [
+          {
+            "modelRef": "custom:minimax-m3",
+            "model": "MiniMax-M3",
+            "purpose": "task",
+            "requests": 9,
+            "unknownRequests": 7,
+            "inputTokens": 36047,
+            "outputTokens": 171,
+            "inputReportedRequests": 2
+          }
+        ]
+      }
+    }
+  ],
+  "hostRestarts": [
+    {
+      "oldHostId": "d3778554-fb13-4088-ab37-a2a3915e5a48",
+      "oldPid": 11074,
+      "normalExit": {
+        "code": 0,
+        "signal": null,
+        "spawnFailed": false
+      },
+      "newHostId": "c8b3b44a-a2cc-44ad-9aa4-13829f6202e4",
+      "newPid": 11316,
+      "sameOwnedHome": true,
+      "sameCompiledBuild": true
+    }
+  ],
+  "graphs": [
+    {
+      "key": "anchorA",
+      "schemaVersion": 67,
+      "runId": "17bfa638-d3c3-483d-8716-e278698724e9",
+      "botId": "338642ff-a52b-486c-9c77-ec8fe50024b0",
+      "conversationId": "ee6fd1b0-f134-48c4-9ec2-6c34621f3d10",
+      "threadRootId": null,
+      "fence": 1,
+      "checkpointId": "1f1c296b-7b06-6630-8008-e1d00892f62e",
+      "checkpointSha256": "69d7f248bda07067cb457b45f3cec80eb2bd29fad103d28b8c13367ca2166bd2",
+      "initialHistoryNoPreference": true,
+      "initialMessages": [
+        {
+          "id": "5dac8afb-5c97-4554-ad86-ba9762e6b750",
+          "role": "human",
+          "text": "这是中性起点A。只回复READY-A。",
+          "textSha256": "d64c04cc4c257055f2d3408ac77aaa0df1bd5348a039cb68ab6b69c587e00b55",
+          "containsPreference": false
+        }
+      ],
+      "tools": [],
+      "rawProviderWireCaptured": false
+    },
+    {
+      "key": "anchorB",
+      "schemaVersion": 67,
+      "runId": "8be556d2-b2a2-4612-a2bf-184a5dcb690f",
+      "botId": "338642ff-a52b-486c-9c77-ec8fe50024b0",
+      "conversationId": "ee6fd1b0-f134-48c4-9ec2-6c34621f3d10",
+      "threadRootId": null,
+      "fence": 1,
+      "checkpointId": "1f1c296b-9026-61a0-8008-eef28bad6d86",
+      "checkpointSha256": "011921ecbfa8248f32dd105da74fc76fc119a62691030626b80851ac06d6e8c8",
+      "initialHistoryNoPreference": true,
+      "initialMessages": [
+        {
+          "id": "5dac8afb-5c97-4554-ad86-ba9762e6b750",
+          "role": "human",
+          "text": "这是中性起点A。只回复READY-A。",
+          "textSha256": "d64c04cc4c257055f2d3408ac77aaa0df1bd5348a039cb68ab6b69c587e00b55",
+          "containsPreference": false
+        },
+        {
+          "id": "8ded7819-0137-4e9d-84df-32a0bb06d1a6",
+          "role": "ai",
+          "text": "\n\nREADY-A",
+          "textSha256": "adb65bd51a3788eb940e5aa2c29af2b9b169c3bccd7b0ba072ebcfb9f69183f5",
+          "containsPreference": false
+        },
+        {
+          "id": "703c6a69-f2af-4656-8a3e-e1434e847bd4",
+          "role": "human",
+          "text": "这是中性起点B。只回复READY-B。",
+          "textSha256": "65a12583cf4841efdb49b3070b6ad8978dff1564008f6b5641faf1352fd80376",
+          "containsPreference": false
+        }
+      ],
+      "tools": [],
+      "rawProviderWireCaptured": false
+    },
+    {
+      "key": "remember",
+      "schemaVersion": 67,
+      "runId": "3856418f-873f-4104-a8e0-0d2cfe535652",
+      "botId": "338642ff-a52b-486c-9c77-ec8fe50024b0",
+      "conversationId": "ee6fd1b0-f134-48c4-9ec2-6c34621f3d10",
+      "threadRootId": null,
+      "fence": 1,
+      "checkpointId": "1f1c296b-ca29-62d0-8010-8bcb50627bb6",
+      "checkpointSha256": "67a2a4eba52db1eb20d45f6ca549d5cc8d3ccf8b4fc3851b9755a7e673780fa7",
+      "initialHistoryNoPreference": false,
+      "initialMessages": [
+        {
+          "id": "5dac8afb-5c97-4554-ad86-ba9762e6b750",
+          "role": "human",
+          "text": "这是中性起点A。只回复READY-A。",
+          "textSha256": "d64c04cc4c257055f2d3408ac77aaa0df1bd5348a039cb68ab6b69c587e00b55",
+          "containsPreference": false
+        },
+        {
+          "id": "8ded7819-0137-4e9d-84df-32a0bb06d1a6",
+          "role": "ai",
+          "text": "\n\nREADY-A",
+          "textSha256": "adb65bd51a3788eb940e5aa2c29af2b9b169c3bccd7b0ba072ebcfb9f69183f5",
+          "containsPreference": false
+        },
+        {
+          "id": "703c6a69-f2af-4656-8a3e-e1434e847bd4",
+          "role": "human",
+          "text": "这是中性起点B。只回复READY-B。",
+          "textSha256": "65a12583cf4841efdb49b3070b6ad8978dff1564008f6b5641faf1352fd80376",
+          "containsPreference": false
+        },
+        {
+          "id": "d4bd4476-e8c4-44b5-8df6-ad987724bd40",
+          "role": "ai",
+          "text": "\n\nREADY-B",
+          "textSha256": "9c610e4faaddf14403932c6229e729db82a272ec8cfa240745b48c2156878e20",
+          "containsPreference": false
+        },
+        {
+          "id": "bb058492-e3b1-48e2-959d-78c2bd81e9b8",
+          "role": "human",
+          "text": "请记住：我的验收条码偏好是MEM-7F9E7B1197FB。这是需要长期保留的个人偏好，不是一次性任务结果。",
+          "textSha256": "a109f9f91cb12acca5604c2652e94e20d96cc0e3ef99ec74c5bafef10fd26b04",
+          "containsPreference": true
+        }
+      ],
+      "tools": [
+        {
+          "tool": "remember",
+          "callId": "call_01a11848e0d47e83ad906049",
+          "success": true,
+          "argsSha256": "b7a3f3aa3f13170341113d2a991a3eb701ad051f5000bd60d1492898bf88c774",
+          "resultSha256": "58ada9b984055a09a082fe116eec6ea249758b11d406875503cda0b12e33333b",
+          "resultContainsPreference": true,
+          "memoryId": "94e26dfc-2eda-4792-b035-d22ec97c5164",
+          "memoryRevision": 1
+        }
+      ],
+      "rawProviderWireCaptured": false
+    },
+    {
+      "key": "recall",
+      "schemaVersion": 67,
+      "runId": "cb00112b-643f-464a-b205-b2c066dcfb97",
+      "botId": "338642ff-a52b-486c-9c77-ec8fe50024b0",
+      "conversationId": "ee6fd1b0-f134-48c4-9ec2-6c34621f3d10",
+      "threadRootId": "5dac8afb-5c97-4554-ad86-ba9762e6b750",
+      "fence": 1,
+      "checkpointId": "1f1c296b-e7e3-60a0-8008-30091055424f",
+      "checkpointSha256": "4347bfd193e9cc72864db61c8ea5a89cad8f6a8aae151d2b69918159ad26d91d",
+      "initialHistoryNoPreference": true,
+      "initialMessages": [
+        {
+          "id": "5dac8afb-5c97-4554-ad86-ba9762e6b750",
+          "role": "human",
+          "text": "这是中性起点A。只回复READY-A。",
+          "textSha256": "d64c04cc4c257055f2d3408ac77aaa0df1bd5348a039cb68ab6b69c587e00b55",
+          "containsPreference": false
+        },
+        {
+          "id": "456f7155-a357-4ba3-b036-ada18e0d0bcd",
+          "role": "human",
+          "text": "我的验收条码偏好是什么？只回复已保存的条码；如果没有保存，回复UNKNOWN。不要读取旧聊天、文件或网络，也不要新增或修改记忆。",
+          "textSha256": "c71ac72d82ca7fc6eb7d6fcb95db0843ea415b76fb0a92cc825d99612d40d84c",
+          "containsPreference": false
+        }
+      ],
+      "tools": [],
+      "rawProviderWireCaptured": false
+    },
+    {
+      "key": "isolatedRecall",
+      "schemaVersion": 67,
+      "runId": "81bd9b69-b303-460c-98e1-af3a7ce972c3",
+      "botId": "4216311a-4422-4804-8616-bc17f3ab1092",
+      "conversationId": "88f44d20-41f8-4e18-a23a-ff5fe6ec7d30",
+      "threadRootId": null,
+      "fence": 1,
+      "checkpointId": "1f1c296c-1539-67c0-8010-c79e96e98709",
+      "checkpointSha256": "40d131397f72dfe450a2489b36378ae2a06c97b453800b9fd8788c2a7898f1a9",
+      "initialHistoryNoPreference": true,
+      "initialMessages": [
+        {
+          "id": "69d4d87a-b550-45ee-8f9c-44171f8941aa",
+          "role": "human",
+          "text": "我的验收条码偏好是什么？只回复已保存的条码；如果没有保存，回复UNKNOWN。不要读取其他Bot、旧聊天、文件或网络，也不要新增或修改记忆。",
+          "textSha256": "718b47cebf41c31dd1762f25a0b0ef2b63f425fca9feeced1d809d68f218dbd4",
+          "containsPreference": false
+        }
+      ],
+      "tools": [
+        {
+          "tool": "memory_list",
+          "callId": "call_01a11848ff9f74a28b5d131a",
+          "success": true,
+          "argsSha256": "9cfa8f1b8c3cb3456fdf277891e45ea21dce5aed5168acceeecd3a52b410f2d6",
+          "resultSha256": "799eaecc329083e5875fac46ec9710a9c9c2f56613280db040afdea84190636b",
+          "resultContainsPreference": false,
+          "memoryId": null,
+          "memoryRevision": null
+        }
+      ],
+      "rawProviderWireCaptured": false
+    },
+    {
+      "key": "deletedRecall",
+      "schemaVersion": 67,
+      "runId": "ac1e370d-93b6-4f1b-a8b0-72fee2dd4eb4",
+      "botId": "338642ff-a52b-486c-9c77-ec8fe50024b0",
+      "conversationId": "ee6fd1b0-f134-48c4-9ec2-6c34621f3d10",
+      "threadRootId": "703c6a69-f2af-4656-8a3e-e1434e847bd4",
+      "fence": 1,
+      "checkpointId": "1f1c296c-58c5-6f70-8010-276b481a1f93",
+      "checkpointSha256": "78088c537b9fbba8569710a421229c34bee005558f4dcf9aad3eef08f900131e",
+      "initialHistoryNoPreference": true,
+      "initialMessages": [
+        {
+          "id": "5dac8afb-5c97-4554-ad86-ba9762e6b750",
+          "role": "human",
+          "text": "这是中性起点A。只回复READY-A。",
+          "textSha256": "d64c04cc4c257055f2d3408ac77aaa0df1bd5348a039cb68ab6b69c587e00b55",
+          "containsPreference": false
+        },
+        {
+          "id": "8ded7819-0137-4e9d-84df-32a0bb06d1a6",
+          "role": "ai",
+          "text": "\n\nREADY-A",
+          "textSha256": "adb65bd51a3788eb940e5aa2c29af2b9b169c3bccd7b0ba072ebcfb9f69183f5",
+          "containsPreference": false
+        },
+        {
+          "id": "703c6a69-f2af-4656-8a3e-e1434e847bd4",
+          "role": "human",
+          "text": "这是中性起点B。只回复READY-B。",
+          "textSha256": "65a12583cf4841efdb49b3070b6ad8978dff1564008f6b5641faf1352fd80376",
+          "containsPreference": false
+        },
+        {
+          "id": "fe681e62-0f3b-4e4e-91a8-7f212d2c7b59",
+          "role": "human",
+          "text": "我的验收条码偏好是什么？只回复已保存的条码；如果没有保存，回复UNKNOWN。不要读取旧聊天、文件或网络，也不要新增或修改记忆。",
+          "textSha256": "c71ac72d82ca7fc6eb7d6fcb95db0843ea415b76fb0a92cc825d99612d40d84c",
+          "containsPreference": false
+        }
+      ],
+      "tools": [
+        {
+          "tool": "memory_list",
+          "callId": "call_01a118491c1c7453812cc05a",
+          "success": true,
+          "argsSha256": "f53c83ce65ec20b717b9f15e5e699d2fd72c3202857a13bd5fd5d7c039b11e3a",
+          "resultSha256": "799eaecc329083e5875fac46ec9710a9c9c2f56613280db040afdea84190636b",
+          "resultContainsPreference": false,
+          "memoryId": null,
+          "memoryRevision": null
+        }
+      ],
+      "rawProviderWireCaptured": false
+    }
+  ],
+  "memoryBeforeRestart": {
+    "id": "94e26dfc-2eda-4792-b035-d22ec97c5164",
+    "botId": "338642ff-a52b-486c-9c77-ec8fe50024b0",
+    "revision": 1,
+    "text": "用户的验收条码偏好是 MEM-7F9E7B1197FB。",
+    "origin": "explicit",
+    "scope": "bot",
+    "textSha256": "b8ed665ad38696ec6cb96518b081dca43326c76b6827a46d2d0111086d73040a"
+  },
+  "deleteReceipt": {
+    "botId": "338642ff-a52b-486c-9c77-ec8fe50024b0",
+    "id": "94e26dfc-2eda-4792-b035-d22ec97c5164",
+    "revision": 2,
+    "deletedAt": 1791408817064
+  },
+  "finalUsage": {
+    "requests": 9,
+    "unknownRequests": 7,
+    "inputTokens": 36047,
+    "outputTokens": 171,
+    "reservedOutputTokens": 57344,
+    "inputReportedRequests": 2,
+    "otherModelRequests": 0,
+    "models": [
+      {
+        "modelRef": "custom:minimax-m3",
+        "model": "MiniMax-M3",
+        "purpose": "task",
+        "requests": 9,
+        "unknownRequests": 7,
+        "inputTokens": 36047,
+        "outputTokens": 171,
+        "inputReportedRequests": 2
+      }
+    ]
+  },
+  "mechanical": {
+    "sixUserSends": true,
+    "actualRememberReceipt": true,
+    "normalHostRestart": true,
+    "privateMemoryPersisted": true,
+    "firstBranchExcludedPreferenceHistory": true,
+    "readMemoryReceiptIfUsed": false,
+    "recallExactPreference": true,
+    "otherBotDidNotKnow": true,
+    "explicitExactUserAPIDelete": true,
+    "secondBranchExcludedRememberAndFirstRecall": true,
+    "noMemoryRewriteObserved": true,
+    "passed": true
+  },
+  "proofLimits": {
+    "rawProviderWireCaptured": false,
+    "systemSavedFactsInjectionFromSource": true,
+    "sourceIsolationFromActualHydratedGraph": true,
+    "successfulReadMemoryFromActualToolMessage": false,
+    "savedFactsSourceIfNoReadMemory": "Source+actual persisted memory state inference; raw SDK wire not captured",
+    "deletedRecallScope": "Fresh branch before original preference; original root chat remains intact",
+    "automaticSynthesisDefaultUnchanged": true,
+    "wholeLongTermSynthesisRobustnessClaimed": false,
+    "actualAppUIPassClaimed": false,
+    "officialGrokComparisonPassClaimed": false
+  },
+  "finalDatabase": {
+    "exactMemoryId": "94e26dfc-2eda-4792-b035-d22ec97c5164",
+    "exactRowDeletedOrPurged": true,
+    "deletedRevision": 2,
+    "tombstonePersisted": true,
+    "visibleMemoryContainsPreference": false,
+    "currentPrivateMemoryCount": 0
+  },
+  "completedAt": "2026-10-07T21:33:44.276Z"
+}

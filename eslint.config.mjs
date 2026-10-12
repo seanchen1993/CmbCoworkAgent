@@ -23,7 +23,14 @@ export default defineConfig(
       // They are user data rather than repository source; scanning them makes
       // lint time and output grow with application usage.
       "**/.cmbdevclaw/**",
+      // A local recovery copy of node_modules is neither source nor an install
+      // tree. It intentionally has a unique hidden name, so the normal
+      // node_modules ignore does not match it.
+      "**/.cmb-node-modules-cloud-backup-*/**",
       "**/.claude/worktrees/**",
+      // Benchmark outputs can contain full fixture workspaces. They are
+      // immutable test evidence, not code that belongs to this checkout.
+      "scripts/ab/results/**",
       "src/main/browser/record/common/playwright-codegen/codegen/**",
       "src/main/browser/record/common/playwright-codegen/generated/**",
       "src/main/browser/record/common/playwright-codegen/{cssParser,cssTokenizer,locatorGenerators,selectorParser,stringUtils,deviceDescriptors}.ts"

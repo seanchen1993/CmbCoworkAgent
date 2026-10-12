@@ -1,0 +1,516 @@
+{
+  "kind": "formal-lazy-history-selected-skill-and-cold-followup",
+  "recordedAt": "2026-10-10T01:26:25.971898+00:00",
+  "nativeBuildId": "1922fa0dc3f6ef8cc8664c37",
+  "schema": 71,
+  "formalVia": "CUA native App UI, configured real MiniMax M3",
+  "historicalThreeMemberArithmetic": {
+    "id": "9e19ad16-df97-473b-86f5-2a24d7c442fc",
+    "conversation_id": "221b4a41-095a-4836-b7df-954a50e18798",
+    "status": "completed",
+    "round": 1,
+    "total_messages": 2,
+    "input": "群聊功能核验：先由一位 Bot 独立计算 17+25，另一位 Bot 核对并说明是否正确。各回复一次，完成后停止；不访问外部服务。",
+    "runs": [
+      {
+        "id": "bbf71720-4034-4c81-8db8-5f85fc91e85c",
+        "bot_id": "4002cdce-8149-4dfc-9c4b-28abd67d30c1",
+        "message_id": "9e19ad16-df97-473b-86f5-2a24d7c442fc",
+        "status": "succeeded",
+        "error": null,
+        "sent_count": 1,
+        "modelRequests": 2,
+        "unknownUsage": 0
+      },
+      {
+        "id": "2ac21baf-03f1-4ef7-a840-264e673b327e",
+        "bot_id": "924e1689-7b6d-411c-a429-28decb91b179",
+        "message_id": "db366d65-4539-45af-862f-e2ca4acb014e",
+        "status": "succeeded",
+        "error": null,
+        "sent_count": 1,
+        "modelRequests": 2,
+        "unknownUsage": 0
+      },
+      {
+        "id": "a3014e6a-8a34-46ce-87f9-bd0214d314d4",
+        "bot_id": "e1d81813-1ff0-4fca-9948-d966e1a77189",
+        "message_id": "c5ede61a-feec-4742-97b5-e6a8c0e4a3c4",
+        "status": "succeeded",
+        "error": null,
+        "sent_count": 0,
+        "modelRequests": 2,
+        "unknownUsage": 0
+      },
+      {
+        "id": "23424402-1bd1-488d-9988-5b8af358bba4",
+        "bot_id": "924e1689-7b6d-411c-a429-28decb91b179",
+        "message_id": "c5ede61a-feec-4742-97b5-e6a8c0e4a3c4",
+        "status": "succeeded",
+        "error": null,
+        "sent_count": 0,
+        "modelRequests": 2,
+        "unknownUsage": 0
+      },
+      {
+        "id": "6c3735b6-6443-4701-baf5-3db3dca81da4",
+        "bot_id": "e1d81813-1ff0-4fca-9948-d966e1a77189",
+        "message_id": "c5ede61a-feec-4742-97b5-e6a8c0e4a3c4",
+        "status": "succeeded",
+        "error": null,
+        "sent_count": 0,
+        "modelRequests": 2,
+        "unknownUsage": 0
+      },
+      {
+        "id": "d20c4ebf-f4e6-456b-b85c-f42f3ec0f5df",
+        "bot_id": "4002cdce-8149-4dfc-9c4b-28abd67d30c1",
+        "message_id": "c5ede61a-feec-4742-97b5-e6a8c0e4a3c4",
+        "status": "succeeded",
+        "error": null,
+        "sent_count": 0,
+        "modelRequests": 2,
+        "unknownUsage": 0
+      }
+    ],
+    "publicMessages": [
+      {
+        "bot_id": "4002cdce-8149-4dfc-9c4b-28abd67d30c1",
+        "run_id": "bbf71720-4034-4c81-8db8-5f85fc91e85c",
+        "text": "独立计算：17+25=42。请下一位 Bot 核对。"
+      },
+      {
+        "bot_id": "924e1689-7b6d-411c-a429-28decb91b179",
+        "run_id": "2ac21baf-03f1-4ef7-a840-264e673b327e",
+        "text": "独立核对：17+25=42，计算正确。"
+      }
+    ],
+    "modelRequests": 12,
+    "unknownUsage": 0,
+    "wholeFiniteScenarioPassed": true
+  },
+  "groupFollowup": {
+    "id": "d570585d-9ec6-4ba5-bf78-f21a394c35af",
+    "conversation_id": "221b4a41-095a-4836-b7df-954a50e18798",
+    "status": "completed",
+    "round": 1,
+    "total_messages": 1,
+    "input": "？",
+    "runs": [
+      {
+        "id": "831986e9-6a3c-4617-a6fb-45c819c0d498",
+        "bot_id": "4002cdce-8149-4dfc-9c4b-28abd67d30c1",
+        "message_id": "d570585d-9ec6-4ba5-bf78-f21a394c35af",
+        "status": "succeeded",
+        "error": null,
+        "sent_count": 0,
+        "modelRequests": 2,
+        "unknownUsage": 0
+      },
+      {
+        "id": "27417ea6-fd16-434b-918d-91119de833d2",
+        "bot_id": "924e1689-7b6d-411c-a429-28decb91b179",
+        "message_id": "d570585d-9ec6-4ba5-bf78-f21a394c35af",
+        "status": "succeeded",
+        "error": null,
+        "sent_count": 0,
+        "modelRequests": 2,
+        "unknownUsage": 0
+      },
+      {
+        "id": "466e945a-d541-4a51-a93b-dc2dd25e4096",
+        "bot_id": "e1d81813-1ff0-4fca-9948-d966e1a77189",
+        "message_id": "d570585d-9ec6-4ba5-bf78-f21a394c35af",
+        "status": "succeeded",
+        "error": null,
+        "sent_count": 1,
+        "modelRequests": 2,
+        "unknownUsage": 0
+      },
+      {
+        "id": "72933f0d-8973-4f28-b782-fec48d0a4b15",
+        "bot_id": "924e1689-7b6d-411c-a429-28decb91b179",
+        "message_id": "15a01368-d335-417c-a5fa-c52494c06d91",
+        "status": "succeeded",
+        "error": null,
+        "sent_count": 0,
+        "modelRequests": 2,
+        "unknownUsage": 0
+      },
+      {
+        "id": "30ab995b-0de1-48e6-8b68-330320187230",
+        "bot_id": "e1d81813-1ff0-4fca-9948-d966e1a77189",
+        "message_id": "15a01368-d335-417c-a5fa-c52494c06d91",
+        "status": "succeeded",
+        "error": null,
+        "sent_count": 0,
+        "modelRequests": 2,
+        "unknownUsage": 0
+      },
+      {
+        "id": "46b94537-8963-481f-82ca-fad900eb094e",
+        "bot_id": "4002cdce-8149-4dfc-9c4b-28abd67d30c1",
+        "message_id": "15a01368-d335-417c-a5fa-c52494c06d91",
+        "status": "succeeded",
+        "error": null,
+        "sent_count": 0,
+        "modelRequests": 1,
+        "unknownUsage": 0
+      }
+    ],
+    "publicMessages": [
+      {
+        "bot_id": "e1d81813-1ff0-4fca-9948-d966e1a77189",
+        "run_id": "466e945a-d541-4a51-a93b-dc2dd25e4096",
+        "text": "请问您需要我们做什么？请给一个明确的任务，例如需要核对月报、计算或验证某个具体内容。"
+      }
+    ],
+    "modelRequests": 11,
+    "unknownUsage": 0,
+    "singleResponseAndNaturalCompletionPassed": true,
+    "contextExpressionMatchesGrok": false
+  },
+  "memory": {
+    "id": "e131d7f7-4d68-425a-9201-86fd463a8e66",
+    "bot_id": "954dd5e0-e2e7-4247-9303-276c8111c870",
+    "status": "succeeded",
+    "error": null,
+    "result": "\n\n【蓝桥-314】\n\n依据：已完成 3 项检查，其中发现 1 项页面输入问题。\n\n结论：计划明天修复该问题。",
+    "modelRequests": 2,
+    "unknownUsage": 0,
+    "structuralProof": {
+      "runId": "e131d7f7-4d68-425a-9201-86fd463a8e66",
+      "messageTypes": {
+        "HumanMessage": 29,
+        "AIMessageChunk": 2,
+        "ToolMessage": 1
+      },
+      "modelToolNames": [
+        "read_memory"
+      ],
+      "toolResultClassifications": [
+        {
+          "name": "read_memory",
+          "containsSavedPreferenceId": true,
+          "containsSavedPreferenceCode": true,
+          "containsSavedPreferenceFormat": true,
+          "containsPreviousPublicSummary": false
+        }
+      ],
+      "selectedInstructionClassifications": [],
+      "privateTextNotCopied": true
+    },
+    "allMemoryRowsUnchangedSinceColdStart": false,
+    "originalPreferenceRevision": 2,
+    "noInternalIds": true,
+    "noUnobservedRegistrationClaim": true,
+    "finiteReplyQualityPassed": true,
+    "wholeScenarioPassed": false,
+    "backgroundRestrictionHonored": false,
+    "unexpectedSynthesizedEntry": {
+      "id": "78739200-f152-421d-a93f-ca8348d837c0",
+      "revision": 1,
+      "origin": "synthesized",
+      "kind": "log",
+      "sourceRunId": "e131d7f7-4d68-425a-9201-86fd463a8e66",
+      "privateTextNotCopied": true
+    }
+  },
+  "previousReplyExactRead": {
+    "id": "a5398802-df78-4505-a52f-44018c758d12",
+    "bot_id": "954dd5e0-e2e7-4247-9303-276c8111c870",
+    "status": "succeeded",
+    "error": null,
+    "result": "\n\n【蓝桥-314】\n\n依据：已完成 3 项检查，其中发现 1 项页面输入问题。\n\n结论：计划明天修复该问题。",
+    "modelRequests": 2,
+    "unknownUsage": 0,
+    "structuralProof": {
+      "runId": "a5398802-df78-4505-a52f-44018c758d12",
+      "messageTypes": {
+        "HumanMessage": 31,
+        "AIMessageChunk": 2,
+        "ToolMessage": 1
+      },
+      "modelToolNames": [
+        "read_message"
+      ],
+      "toolResultClassifications": [
+        {
+          "name": "read_message",
+          "containsSavedPreferenceId": false,
+          "containsSavedPreferenceCode": true,
+          "containsSavedPreferenceFormat": false,
+          "containsPreviousPublicSummary": true
+        }
+      ],
+      "selectedInstructionClassifications": [],
+      "privateTextNotCopied": true
+    },
+    "publishedTextExactlyEqualsPreviousAfterOuterWhitespace": true
+  },
+  "groupSelectedSkill": {
+    "id": "14497312-ab2a-4453-afe8-5b655e7c5749",
+    "conversation_id": "7f08d20f-73d8-4507-a26f-dfbc64d6529e",
+    "status": "completed",
+    "round": 1,
+    "total_messages": 2,
+    "input": "/技能状态核验 @月报示范核验 按所选技能计算 286+47；@报价工具编程核验 独立核对结果。完成后各只回复一条结果，不访问外部服务。",
+    "runs": [
+      {
+        "id": "ccfd98f6-8457-45ad-a2b9-ae9484f7f603",
+        "bot_id": "924e1689-7b6d-411c-a429-28decb91b179",
+        "message_id": "14497312-ab2a-4453-afe8-5b655e7c5749",
+        "status": "succeeded",
+        "error": null,
+        "sent_count": 1,
+        "modelRequests": 2,
+        "unknownUsage": 0
+      },
+      {
+        "id": "bf51989c-6b53-48fd-9ebe-af9a2fd9adb8",
+        "bot_id": "e1d81813-1ff0-4fca-9948-d966e1a77189",
+        "message_id": "d1ff6a62-2703-4538-95c3-c82db333ddb9",
+        "status": "succeeded",
+        "error": null,
+        "sent_count": 1,
+        "modelRequests": 2,
+        "unknownUsage": 0
+      },
+      {
+        "id": "8e5dc842-ce46-42cb-813f-dfc05948fc8e",
+        "bot_id": "e1d81813-1ff0-4fca-9948-d966e1a77189",
+        "message_id": "be754344-bd1e-47da-b580-934d912cfb51",
+        "status": "succeeded",
+        "error": null,
+        "sent_count": 0,
+        "modelRequests": 2,
+        "unknownUsage": 0
+      },
+      {
+        "id": "ec148779-cd84-4032-aab2-406a0380cd30",
+        "bot_id": "924e1689-7b6d-411c-a429-28decb91b179",
+        "message_id": "be754344-bd1e-47da-b580-934d912cfb51",
+        "status": "succeeded",
+        "error": null,
+        "sent_count": 0,
+        "modelRequests": 1,
+        "unknownUsage": 0
+      }
+    ],
+    "publicMessages": [
+      {
+        "bot_id": "924e1689-7b6d-411c-a429-28decb91b179",
+        "run_id": "ccfd98f6-8457-45ad-a2b9-ae9484f7f603",
+        "text": "独立核对：286+47=333。@月报示范核验 请给出你的结果供对照。"
+      },
+      {
+        "bot_id": "e1d81813-1ff0-4fca-9948-d966e1a77189",
+        "run_id": "bf51989c-6b53-48fd-9ebe-af9a2fd9adb8",
+        "text": "独立计算：286+47=333。"
+      }
+    ],
+    "modelRequests": 7,
+    "unknownUsage": 0,
+    "acceptedSelections": [
+      {
+        "botId": "e1d81813-1ff0-4fca-9948-d966e1a77189",
+        "id": "2a50a207-f562-4348-9a90-4b38a827bca3",
+        "version": 3,
+        "name": "技能状态核验"
+      }
+    ],
+    "runtimeSelectionProof": [
+      {
+        "runId": "ccfd98f6-8457-45ad-a2b9-ae9484f7f603",
+        "messageTypes": {
+          "HumanMessage": 4,
+          "AIMessageChunk": 2,
+          "ToolMessage": 1
+        },
+        "modelToolNames": [
+          "send_group_message"
+        ],
+        "toolResultClassifications": [
+          {
+            "name": "send_group_message",
+            "containsSavedPreferenceId": false,
+            "containsSavedPreferenceCode": false,
+            "containsSavedPreferenceFormat": false,
+            "containsPreviousPublicSummary": false
+          }
+        ],
+        "selectedInstructionClassifications": [],
+        "privateTextNotCopied": true
+      },
+      {
+        "runId": "bf51989c-6b53-48fd-9ebe-af9a2fd9adb8",
+        "messageTypes": {
+          "HumanMessage": 4,
+          "AIMessageChunk": 2,
+          "ToolMessage": 1
+        },
+        "modelToolNames": [
+          "send_group_message"
+        ],
+        "toolResultClassifications": [
+          {
+            "name": "send_group_message",
+            "containsSavedPreferenceId": false,
+            "containsSavedPreferenceCode": false,
+            "containsSavedPreferenceFormat": false,
+            "containsPreviousPublicSummary": false
+          }
+        ],
+        "selectedInstructionClassifications": [
+          {
+            "hasAcceptedSkillId": true,
+            "hasPinnedVersion3": true,
+            "hasActualWorkflowInstruction": true
+          }
+        ],
+        "privateTextNotCopied": true
+      },
+      {
+        "runId": "8e5dc842-ce46-42cb-813f-dfc05948fc8e",
+        "messageTypes": {
+          "HumanMessage": 4,
+          "AIMessageChunk": 2,
+          "ToolMessage": 1
+        },
+        "modelToolNames": [
+          "send_group_message"
+        ],
+        "toolResultClassifications": [
+          {
+            "name": "send_group_message",
+            "containsSavedPreferenceId": false,
+            "containsSavedPreferenceCode": false,
+            "containsSavedPreferenceFormat": false,
+            "containsPreviousPublicSummary": false
+          }
+        ],
+        "selectedInstructionClassifications": [
+          {
+            "hasAcceptedSkillId": true,
+            "hasPinnedVersion3": true,
+            "hasActualWorkflowInstruction": true
+          }
+        ],
+        "privateTextNotCopied": true
+      },
+      {
+        "runId": "ec148779-cd84-4032-aab2-406a0380cd30",
+        "messageTypes": {
+          "HumanMessage": 4,
+          "AIMessageChunk": 1
+        },
+        "modelToolNames": [],
+        "toolResultClassifications": [],
+        "selectedInstructionClassifications": [],
+        "privateTextNotCopied": true
+      }
+    ],
+    "skillVersionBindingAcrossLaterTurnsPassed": true,
+    "bothArithmeticResultsCorrect": true,
+    "dependencyOrderPassed": false,
+    "wholeScenarioPassed": false
+  },
+  "officialGrokObservations": {
+    "via": "CUA native UI, official service",
+    "originalArithmeticThreeMembersEvidence": "current-final-pass-real-and-current-assignment-source.safe.json",
+    "followupInput": "？",
+    "followupPublicMessages": [
+      "这轮核验已经完成：我算出 17+25 = 42，新 Bot 核对后确认正确。按你的要求，我们各回复一次后就停下了。"
+    ],
+    "memoryInputSame": true,
+    "memoryPublicFinal": "依据：3 项检查都做完了，其中 1 项查出了页面输入方面的问题，其余检查没有发现问题。\n结论：现在只剩这 1 项页面输入问题要处理，计划明天修复。\n（我读取的是已保存的“蓝桥-314”偏好，所以先写依据、再写结论，用简体中文，没有新增记忆。）",
+    "memoryUnprovidedOtherChecksClaimObserved": true,
+    "previousReplyExactReadMatchedVisiblePriorReply": true,
+    "skillFirstPastedTargetHadAmbiguousMentionAndOnlyVerification": true,
+    "skillCorrectedUsingNativeMemberPicker": true,
+    "skillCorrectedPublicMessages": [
+      "286 + 47 = 333",
+      "核对完毕：286+47 = 333，New Bot 的结果正确。"
+    ],
+    "scope": "Different Bot identities and models. Grok uses stored skill by name; CMB pins its own version with the formal picker. Corrected Grok input uses native mention targets; invalid first mention observation retained."
+  },
+  "cold": {
+    "descriptor": {
+      "version": 1,
+      "pid": 55145,
+      "hostId": "5f74eaf0-fb53-40a8-b03b-faa10da8638f",
+      "buildId": "1922fa0dc3f6ef8cc8664c37",
+      "socketPath": "/private/tmp/cmb-bot-501-4b987f56222e7e971f75407b/rpc.sock"
+    },
+    "selectedRuns": 106,
+    "checkpointPayloadBytesHashed": 14248020,
+    "logicalGroupsEqual": {
+      "runs": true,
+      "effects": true,
+      "interactions": true,
+      "artifacts": true,
+      "artifactObjects": true,
+      "peerDispatch": true,
+      "peerWaits": true,
+      "checkpoints": true,
+      "skills": true,
+      "project": true
+    },
+    "extraTablesEqual": {
+      "bot_memories": true,
+      "bot_memory_metadata": true,
+      "bot_model_usage": true,
+      "bot_group_cycles": true,
+      "bot_group_runs": true
+    },
+    "schemaBefore": 71,
+    "schemaAfter": 71,
+    "legacyMemberOrderEqual": true,
+    "modelNormalizedFingerprintMatched": true,
+    "forceKillUsed": false
+  },
+  "sourceGates": {
+    "owning": {
+      "files": 6,
+      "passed": 72,
+      "log": "/tmp/cmb-group-skill-history-owning-20261010.log"
+    },
+    "actualSdk": {
+      "passed": 15,
+      "unselected": 314,
+      "log": "/tmp/cmb-group-skill-history-sdk-20261010.log"
+    },
+    "historyActualSdk": {
+      "passed": 7,
+      "unselected": 322,
+      "overlapsEarlierHistoryCase": true,
+      "log": "/tmp/cmb-group-skill-history-history-sdk-20261010.log"
+    },
+    "workflow": {
+      "files": 4,
+      "passed": 75,
+      "skipped": 4,
+      "log": "/tmp/cmb-group-skill-history-workflow-20261010.log"
+    },
+    "node": {
+      "passed": true,
+      "initialTestNullGuardTypeFailureRetained": "/tmp/cmb-group-skill-history-node-20261010.log",
+      "fixedLog": "/tmp/cmb-group-skill-history-node-fixed-20261010.log"
+    },
+    "lint": {
+      "passed": true,
+      "log": "/tmp/cmb-group-skill-history-lint-20261010.log"
+    },
+    "format": {
+      "passed": true,
+      "log": "/tmp/cmb-group-skill-history-format-20261010.log"
+    },
+    "productionBuild": {
+      "passed": true,
+      "log": "/tmp/cmb-group-skill-history-build-20261010.log"
+    }
+  },
+  "candidateDependencyRuleNotLive": true,
+  "coreParityComplete": false,
+  "candidateRetentionRestrictionNotLive": true
+}

@@ -1,0 +1,852 @@
+{
+  "schemaVersion": 1,
+  "kind": "J7-isolated-real-MiniMax-original-compiled-Host-group-API-only",
+  "startedAt": "2026-10-07T17:37:39.117Z",
+  "status": "complete_requires_independent_semantic_review",
+  "overallTaskPassClaimed": false,
+  "approvalPolicy": "No approval/permission API is called. Any pending action is recorded safely and ends this one attempt.",
+  "evidence": {
+    "uploads": [
+      {
+        "id": "faa94348-6643-4af8-9a2e-44473af9963f",
+        "conversationId": "f05ba123-2b18-4ddc-bceb-eef8c1465c68",
+        "runId": null,
+        "name": "review-policy.txt",
+        "mime": "text/plain",
+        "size": 537,
+        "sha256": "f8b581c7338cc60fa4b02adaa7a22a89465daf675c991856bf8114069d54da60",
+        "createdAt": 1791394661760,
+        "origin": "upload",
+        "actualSha256": "f8b581c7338cc60fa4b02adaa7a22a89465daf675c991856bf8114069d54da60",
+        "bytesFile": "artifact-0-f8b581c7338cc60f.bytes",
+        "text": "合成材料核对规则（验收任务，不是真实业务数据）\n只统计状态=已验收且区域=北区的项目。金额单位为万元；注意不等同于元。\n金额负数表示冲销，应计入总额。金额为0的记录也应计入条数。\n同一project_id有多个版本时只保留数值最大版本，不能按文件中的行顺序取最后一条。\n结论须给出保留的项目ID、条数、金额总额，并指出周报草案是否正确。\n周报草案：北区已验收4个项目，累计金额38.45万元。\n",
+        "original": true
+      },
+      {
+        "id": "81de0ccb-bd60-44e7-9c70-802e587091ef",
+        "conversationId": "f05ba123-2b18-4ddc-bceb-eef8c1465c68",
+        "runId": null,
+        "name": "project-records.csv",
+        "mime": "text/csv",
+        "size": 279,
+        "sha256": "dbc20dad04f59df0d704601fdd6559ab33fd1722283496a2092215a387695ac8",
+        "createdAt": 1791394661733,
+        "origin": "upload",
+        "actualSha256": "dbc20dad04f59df0d704601fdd6559ab33fd1722283496a2092215a387695ac8",
+        "bytesFile": "artifact-1-dbc20dad04f59df0.bytes",
+        "text": "project_id,version,region,status,amount_wan\nP101,2,北区,已验收,12.40\nP102,1,北区,已验收,7.05\nP101,1,北区,已验收,15.40\nP103,1,南区,已验收,9.00\nP104,1,北区,待验收,3.00\nP105,1,北区,已验收,-2.50\nP106,1,北区,已验收,0.00\nP102,2,北区,已验收,8.55\n",
+        "original": true
+      }
+    ],
+    "artifacts": [
+      {
+        "id": "faa94348-6643-4af8-9a2e-44473af9963f",
+        "conversationId": "f05ba123-2b18-4ddc-bceb-eef8c1465c68",
+        "runId": null,
+        "name": "review-policy.txt",
+        "mime": "text/plain",
+        "size": 537,
+        "sha256": "f8b581c7338cc60fa4b02adaa7a22a89465daf675c991856bf8114069d54da60",
+        "createdAt": 1791394661760,
+        "origin": "upload",
+        "actualSha256": "f8b581c7338cc60fa4b02adaa7a22a89465daf675c991856bf8114069d54da60",
+        "bytesFile": "artifact-0-f8b581c7338cc60f.bytes",
+        "text": "合成材料核对规则（验收任务，不是真实业务数据）\n只统计状态=已验收且区域=北区的项目。金额单位为万元；注意不等同于元。\n金额负数表示冲销，应计入总额。金额为0的记录也应计入条数。\n同一project_id有多个版本时只保留数值最大版本，不能按文件中的行顺序取最后一条。\n结论须给出保留的项目ID、条数、金额总额，并指出周报草案是否正确。\n周报草案：北区已验收4个项目，累计金额38.45万元。\n",
+        "original": true
+      },
+      {
+        "id": "81de0ccb-bd60-44e7-9c70-802e587091ef",
+        "conversationId": "f05ba123-2b18-4ddc-bceb-eef8c1465c68",
+        "runId": null,
+        "name": "project-records.csv",
+        "mime": "text/csv",
+        "size": 279,
+        "sha256": "dbc20dad04f59df0d704601fdd6559ab33fd1722283496a2092215a387695ac8",
+        "createdAt": 1791394661733,
+        "origin": "upload",
+        "actualSha256": "dbc20dad04f59df0d704601fdd6559ab33fd1722283496a2092215a387695ac8",
+        "bytesFile": "artifact-1-dbc20dad04f59df0.bytes",
+        "text": "project_id,version,region,status,amount_wan\nP101,2,北区,已验收,12.40\nP102,1,北区,已验收,7.05\nP101,1,北区,已验收,15.40\nP103,1,南区,已验收,9.00\nP104,1,北区,待验收,3.00\nP105,1,北区,已验收,-2.50\nP106,1,北区,已验收,0.00\nP102,2,北区,已验收,8.55\n",
+        "original": true
+      }
+    ],
+    "messages": [
+      {
+        "id": "f924e0c1-9692-441b-aa04-41c6cbff599f",
+        "sender": "user",
+        "botId": null,
+        "runId": null,
+        "text": "@计算Bot 请读取两份原附件，按策略列出纳入项目、金额、数量和合计。@核算Bot 请独立读取同一两份原附件完成核验，不能只相信计算Bot的结果；指出一致或具体差异。两位在本群各交付一次，注明原文件名和项目依据，不需要再向群外Bot派任务。草稿4个项目38.45万元与按策略结果的差额是多少？材料无法确定草稿如何形成时请明确说明。",
+        "attachments": [
+          "81de0ccb-bd60-44e7-9c70-802e587091ef",
+          "faa94348-6643-4af8-9a2e-44473af9963f"
+        ],
+        "replyTo": null,
+        "recipientReferences": [
+          {
+            "botId": "789336c4-182a-42ba-917a-ab0d28398cb4",
+            "name": "计算Bot"
+          },
+          {
+            "botId": "fbd205a8-6308-43fb-85c1-df30acad5127",
+            "name": "核算Bot"
+          }
+        ],
+        "createdAt": 1791394661766
+      },
+      {
+        "id": "b3538612-3c0d-413b-a294-f06d7e6e906d",
+        "sender": "bot",
+        "botId": "789336c4-182a-42ba-917a-ab0d28398cb4",
+        "runId": "bd6aa6ae-e4a8-4e3f-991d-5dcf5d03f977",
+        "text": "我读取的两份原件：\n• review-policy.txt（核对规则）\n• project-records.csv（项目台账）\n\n按策略\"状态=已验收 且 区域=北区 → 同 project_id 只保留版本号最大的一条\"过滤与去重后：\n\n| 保留项目 | 版本 | 金额(万元) | 依据 |\n|---|---|---|---|\n| P101 | v2 | 12.40 | 策略第4条：保留最大版本，覆盖 v1 的 15.40 |\n| P102 | v2 | 8.55  | 策略第4条：保留最大版本，覆盖 v1 的 7.05 |\n| P105 | v1 | -2.50 | 策略第3条：负数冲销计入总额 |\n| P106 | v1 |  0.00 | 策略第3条：零金额计入条数 |\n\n被剔除：P103（南区）、P104（待验收）、P101 v1、P102 v1。\n\n合计：4 个项目，金额 = 12.40 + 8.55 + (−2.50) + 0.00 = **18.45 万元**。\n\n与草案对照（草案：北区已验收 4 个项目，38.45 万元）：\n• 项目数：4 vs 4，一致。\n• 金额：18.45 vs 38.45，**差额 20.00 万元**（草案高出 20.00 万元）。\n\n草案如何形成：从原件可验证的组合中（北区已验收的 6 条汇总 40.90；选 P101 v1+P102 v1+P105+P106 = 19.95；选 P101 v1+P102 v2+P105+P106 = 21.45；P101 取高金额 v1=15.40 时合计 21.45 等）均无法推出 38.45，也无法对应到一条可重建的规则。**材料不足以确定草案 38.45 万元的形成方式**，疑似口径错误或来自其它数据源，需向起草方回溯确认。@核算Bot 请独立核验。",
+        "attachments": [],
+        "replyTo": "f924e0c1-9692-441b-aa04-41c6cbff599f",
+        "recipientReferences": [],
+        "createdAt": 1791394714330
+      },
+      {
+        "id": "90d08856-ea9a-422a-af2c-086c35e526f5",
+        "sender": "bot",
+        "botId": "fbd205a8-6308-43fb-85c1-df30acad5127",
+        "runId": "e16875b6-5f07-42f1-b994-6f2fed9f2f3b",
+        "text": "已独立读取两份原附件（review-policy.txt、project-records.csv），核验结果与计算Bot一致：\n\n**纳入项目（按策略过滤+按最大版本号去重后）**\n\n| 项目 | 保留版本 | 金额(万元) | 依据 |\n|---|---|---|---|\n| P101 | v2 | 12.40 | 策略第4条：保留最大版本号，覆盖 v1（15.40） |\n| P102 | v2 | 8.55  | 策略第4条：保留最大版本号，覆盖 v1（7.05） |\n| P105 | v1 | -2.50 | 策略第2、3条：北区已验收，负数冲销计入总额 |\n| P106 | v1 |  0.00 | 策略第3条：北区已验收，零金额计入条数 |\n\n剔除：P103（南区，不符\"北区\"条件）、P104（待验收，不符\"已验收\"条件）、P101 v1、P102 v1（按策略被高版本覆盖）。\n\n**合计：4 个项目，金额 = 12.40 + 8.55 + (−2.50) + 0.00 = 18.45 万元**。\n\n**与草案对照（草案：北区已验收 4 个项目，38.45 万元）**\n- 项目数：4 vs 4，**一致**。\n- 金额：18.45 vs 38.45，**差额 20.00 万元（草案高出）**。\n\n**草案 38.45 万元形成方式：材料无法确定**。我把 4 项目和 5、6 条记录的所有合理组合都试了一遍——包括 P101 v1、P101 v2、P102 v1、P102 v2、P105、P106 的各种取法——最大合计是 6 条全计的 40.90，4 条组合的合计落在 16.95–21.45 区间，没有任何一种自然组合能凑出 38.45。差额 20.00 万元也无法由原件中任何单笔或可识别冲销项解释。**仅凭现有原附件无法重建草案 38.45 万元的口径**，建议回起草方核对口径（疑似非源于本份台账，或存在单位/录入错误）。",
+        "attachments": [],
+        "replyTo": "f924e0c1-9692-441b-aa04-41c6cbff599f",
+        "recipientReferences": [],
+        "createdAt": 1791394753759
+      }
+    ],
+    "pendingActions": [],
+    "groupEvents": [
+      {
+        "cursor": 9,
+        "kind": "group.turn",
+        "groupId": "f05ba123-2b18-4ddc-bceb-eef8c1465c68",
+        "runId": "bd6aa6ae-e4a8-4e3f-991d-5dcf5d03f977",
+        "botId": "789336c4-182a-42ba-917a-ab0d28398cb4",
+        "round": 1,
+        "createdAt": 1791394661779
+      },
+      {
+        "cursor": 55,
+        "kind": "group.turn",
+        "groupId": "f05ba123-2b18-4ddc-bceb-eef8c1465c68",
+        "runId": "e16875b6-5f07-42f1-b994-6f2fed9f2f3b",
+        "botId": "fbd205a8-6308-43fb-85c1-df30acad5127",
+        "round": 1,
+        "createdAt": 1791394721785
+      },
+      {
+        "cursor": 91,
+        "kind": "group.turn",
+        "groupId": "f05ba123-2b18-4ddc-bceb-eef8c1465c68",
+        "runId": "4bede322-222c-441e-891c-d11ff835ebff",
+        "botId": "fbd205a8-6308-43fb-85c1-df30acad5127",
+        "round": 2,
+        "createdAt": 1791394755853
+      },
+      {
+        "cursor": 106,
+        "kind": "group.turn",
+        "groupId": "f05ba123-2b18-4ddc-bceb-eef8c1465c68",
+        "runId": "9b6e54e0-e503-4dc0-bde6-4e623132293b",
+        "botId": "789336c4-182a-42ba-917a-ab0d28398cb4",
+        "round": 2,
+        "createdAt": 1791394757849
+      },
+      {
+        "cursor": 120,
+        "kind": "group.completed",
+        "groupId": "f05ba123-2b18-4ddc-bceb-eef8c1465c68",
+        "cycleId": "f924e0c1-9692-441b-aa04-41c6cbff599f",
+        "createdAt": 1791394760850
+      }
+    ],
+    "collected": true
+  },
+  "cleanup": {
+    "cancelRequested": false,
+    "cancelSettled": false,
+    "idleShutdownAccepted": true,
+    "forcedTermination": false,
+    "processExited": true,
+    "exit": {
+      "code": 0,
+      "signal": null,
+      "spawnFailed": false
+    },
+    "privateCredentialSnapshotRemoved": true,
+    "transportClosed": true
+  },
+  "scope": [
+    "New owned home, database, two Bots and one group send; no existing App task or permission is mutated",
+    "Exact saved custom:minimax-m3 model only; no project, instructions, plugins, skills, MCP, Hooks or Harness data is copied",
+    "Frozen J7 same two synthetic originals and the exact original group task; no expected answer enters model prompts",
+    "Mechanical original/hash, exact authors, public messages and full-read proof are separate from Root semantic review of both real group replies",
+    "This is a real model API sample, not an actual App UI or official Grok comparison PASS",
+    "Default production 200000 shared output allowance per root remains unchanged; sample-global observed request threshold is a cancellation guard, not a strict account monetary cap",
+    "Provider reported/unknown receipt counters are preserved; no pricing estimate or unknown-to-zero conversion"
+  ],
+  "input": {
+    "task": "@计算Bot 请读取两份原附件，按策略列出纳入项目、金额、数量和合计。@核算Bot 请独立读取同一两份原附件完成核验，不能只相信计算Bot的结果；指出一致或具体差异。两位在本群各交付一次，注明原文件名和项目依据，不需要再向群外Bot派任务。草稿4个项目38.45万元与按策略结果的差额是多少？材料无法确定草稿如何形成时请明确说明。",
+    "taskSha256": "d78c8bbb53d016b9f0ce0cb40c755bbda057b1142c255bdd8e5a48a78c2c2273",
+    "files": [
+      {
+        "name": "project-records.csv",
+        "mime": "text/csv",
+        "bytes": 279,
+        "sha256": "dbc20dad04f59df0d704601fdd6559ab33fd1722283496a2092215a387695ac8"
+      },
+      {
+        "name": "review-policy.txt",
+        "mime": "text/plain",
+        "bytes": 537,
+        "sha256": "f8b581c7338cc60fa4b02adaa7a22a89465daf675c991856bf8114069d54da60"
+      }
+    ]
+  },
+  "model": {
+    "ref": "custom:minimax-m3",
+    "name": "MiniMax-M3",
+    "model": "MiniMax-M3",
+    "endpointHost": "api.minimaxi.com",
+    "hasCredential": true
+  },
+  "execution": {
+    "platform": "darwin",
+    "runnerNodeVersion": "v22.23.3",
+    "hostExecutable": "/Users/chenqiang/Library/Caches/CMBDevClaw-development-deps/cmb-bot-locked-ci-20261007-737983438cdd48f8a502c385c8d6c6f4/node_modules/electron/dist/Electron.app/Contents/MacOS/Electron",
+    "compiledHostEntry": "/Users/chenqiang/Desktop/projects/CmbCoworkAgent/out/main/bot-host.js",
+    "compiledHostSha256": "0f9cfa9a664394688e0292d992a0b5496fdab6a153dd8ca5bddfef624ee72d1f",
+    "compiledManifestSha256": "c1ebeaded57b8178adbc6b0793587bad52aa874223f9b0e774d551358526ba01",
+    "expectedBuildId": "a61f41784e20c7199366f8d6",
+    "nativeBuildId": "a61f41784e20c7199366f8d6",
+    "isolatedHome": "/tmp/cmb-j7-real-model-acceptance-nwTYgc",
+    "originalUserSnapshotReadOnly": true,
+    "sourceSnapshotUnchangedAfterTask": true,
+    "sourceDefaultUnchangedAfterTask": true,
+    "selectedModelUnchangedAfterTask": true,
+    "selection": "explicit-saved-M3",
+    "oneSendOnly": true,
+    "overallDeadlineMs": 600000,
+    "taskDeadlineMs": 540000,
+    "observedRequestCancelThreshold": 12,
+    "productionSharedOutputLimitPerRoot": 200000,
+    "noMoneyLimitClaimed": true,
+    "compiledBuildUnchangedAfterTask": true
+  },
+  "group": {
+    "id": "f05ba123-2b18-4ddc-bceb-eef8c1465c68",
+    "name": "旅程验收-原件核算",
+    "kind": "group",
+    "members": [
+      {
+        "id": "789336c4-182a-42ba-917a-ab0d28398cb4",
+        "name": "计算Bot",
+        "privateConversationId": "34141154-cc00-4307-bbb0-0c652060dae7"
+      },
+      {
+        "id": "fbd205a8-6308-43fb-85c1-df30acad5127",
+        "name": "核算Bot",
+        "privateConversationId": "6a407c34-fb4b-447d-9f5b-da9a78100f16"
+      }
+    ]
+  },
+  "task": {
+    "conversationId": "f05ba123-2b18-4ddc-bceb-eef8c1465c68",
+    "cycleId": "f924e0c1-9692-441b-aa04-41c6cbff599f",
+    "initialRunId": "bd6aa6ae-e4a8-4e3f-991d-5dcf5d03f977",
+    "recipients": [
+      "789336c4-182a-42ba-917a-ab0d28398cb4",
+      "fbd205a8-6308-43fb-85c1-df30acad5127"
+    ],
+    "sentAt": "2026-10-07T17:37:41.794Z",
+    "status": "group_completed",
+    "groupRunIds": [
+      "bd6aa6ae-e4a8-4e3f-991d-5dcf5d03f977",
+      "e16875b6-5f07-42f1-b994-6f2fed9f2f3b",
+      "4bede322-222c-441e-891c-d11ff835ebff",
+      "9b6e54e0-e503-4dc0-bde6-4e623132293b"
+    ]
+  },
+  "receipts": [
+    {
+      "runId": "bd6aa6ae-e4a8-4e3f-991d-5dcf5d03f977",
+      "botId": "789336c4-182a-42ba-917a-ab0d28398cb4",
+      "status": "succeeded",
+      "source": "group-member",
+      "messageId": "f924e0c1-9692-441b-aa04-41c6cbff599f",
+      "result": "\n\n我的交付已完成，等待核算Bot独立核验。",
+      "diagnosticCode": null,
+      "modelUsage": {
+        "requests": 4,
+        "unknownRequests": 0,
+        "inputTokens": 79626,
+        "outputTokens": 4295,
+        "reservedOutputTokens": 0,
+        "inputReportedRequests": 4,
+        "otherModelRequests": 0,
+        "models": [
+          {
+            "modelRef": "custom:minimax-m3",
+            "model": "MiniMax-M3",
+            "purpose": "task",
+            "requests": 4,
+            "unknownRequests": 0,
+            "inputTokens": 79626,
+            "outputTokens": 4295,
+            "inputReportedRequests": 4
+          }
+        ]
+      },
+      "modelBudget": {
+        "limit": 200000,
+        "consumed": 4295,
+        "reserved": 0,
+        "requests": 4
+      }
+    },
+    {
+      "runId": "e16875b6-5f07-42f1-b994-6f2fed9f2f3b",
+      "botId": "fbd205a8-6308-43fb-85c1-df30acad5127",
+      "status": "succeeded",
+      "source": "group-member",
+      "messageId": "b3538612-3c0d-413b-a294-f06d7e6e906d",
+      "result": "(pass)",
+      "diagnosticCode": null,
+      "modelUsage": {
+        "requests": 3,
+        "unknownRequests": 3,
+        "inputTokens": 0,
+        "outputTokens": 0,
+        "reservedOutputTokens": 24576,
+        "inputReportedRequests": 0,
+        "otherModelRequests": 0,
+        "models": [
+          {
+            "modelRef": "custom:minimax-m3",
+            "model": "MiniMax-M3",
+            "purpose": "task",
+            "requests": 3,
+            "unknownRequests": 3,
+            "inputTokens": 0,
+            "outputTokens": 0,
+            "inputReportedRequests": 0
+          }
+        ]
+      },
+      "modelBudget": {
+        "limit": 200000,
+        "consumed": 0,
+        "reserved": 24576,
+        "requests": 3
+      }
+    },
+    {
+      "runId": "4bede322-222c-441e-891c-d11ff835ebff",
+      "botId": "fbd205a8-6308-43fb-85c1-df30acad5127",
+      "status": "succeeded",
+      "source": "group-member",
+      "messageId": "90d08856-ea9a-422a-af2c-086c35e526f5",
+      "result": "\n\n(pass)",
+      "diagnosticCode": null,
+      "modelUsage": {
+        "requests": 1,
+        "unknownRequests": 0,
+        "inputTokens": 17342,
+        "outputTokens": 34,
+        "reservedOutputTokens": 0,
+        "inputReportedRequests": 1,
+        "otherModelRequests": 0,
+        "models": [
+          {
+            "modelRef": "custom:minimax-m3",
+            "model": "MiniMax-M3",
+            "purpose": "task",
+            "requests": 1,
+            "unknownRequests": 0,
+            "inputTokens": 17342,
+            "outputTokens": 34,
+            "inputReportedRequests": 1
+          }
+        ]
+      },
+      "modelBudget": {
+        "limit": 200000,
+        "consumed": 34,
+        "reserved": 0,
+        "requests": 1
+      }
+    },
+    {
+      "runId": "9b6e54e0-e503-4dc0-bde6-4e623132293b",
+      "botId": "789336c4-182a-42ba-917a-ab0d28398cb4",
+      "status": "succeeded",
+      "source": "group-member",
+      "messageId": "90d08856-ea9a-422a-af2c-086c35e526f5",
+      "result": "\n\n(pass)",
+      "diagnosticCode": null,
+      "modelUsage": {
+        "requests": 1,
+        "unknownRequests": 0,
+        "inputTokens": 17827,
+        "outputTokens": 128,
+        "reservedOutputTokens": 0,
+        "inputReportedRequests": 1,
+        "otherModelRequests": 0,
+        "models": [
+          {
+            "modelRef": "custom:minimax-m3",
+            "model": "MiniMax-M3",
+            "purpose": "task",
+            "requests": 1,
+            "unknownRequests": 0,
+            "inputTokens": 17827,
+            "outputTokens": 128,
+            "inputReportedRequests": 1
+          }
+        ]
+      },
+      "modelBudget": {
+        "limit": 200000,
+        "consumed": 128,
+        "reserved": 0,
+        "requests": 1
+      }
+    }
+  ],
+  "observed": {
+    "groupCompleted": true,
+    "groupRuns": [
+      {
+        "runId": "bd6aa6ae-e4a8-4e3f-991d-5dcf5d03f977",
+        "botId": "789336c4-182a-42ba-917a-ab0d28398cb4",
+        "round": 1
+      },
+      {
+        "runId": "e16875b6-5f07-42f1-b994-6f2fed9f2f3b",
+        "botId": "fbd205a8-6308-43fb-85c1-df30acad5127",
+        "round": 1
+      },
+      {
+        "runId": "4bede322-222c-441e-891c-d11ff835ebff",
+        "botId": "fbd205a8-6308-43fb-85c1-df30acad5127",
+        "round": 2
+      },
+      {
+        "runId": "9b6e54e0-e503-4dc0-bde6-4e623132293b",
+        "botId": "789336c4-182a-42ba-917a-ab0d28398cb4",
+        "round": 2
+      }
+    ],
+    "observedRuns": [
+      {
+        "runId": "bd6aa6ae-e4a8-4e3f-991d-5dcf5d03f977",
+        "botId": "789336c4-182a-42ba-917a-ab0d28398cb4",
+        "conversationId": "f05ba123-2b18-4ddc-bceb-eef8c1465c68",
+        "messageId": "f924e0c1-9692-441b-aa04-41c6cbff599f",
+        "source": "group-member",
+        "parentRunId": null
+      },
+      {
+        "runId": "e16875b6-5f07-42f1-b994-6f2fed9f2f3b",
+        "botId": "fbd205a8-6308-43fb-85c1-df30acad5127",
+        "conversationId": "f05ba123-2b18-4ddc-bceb-eef8c1465c68",
+        "messageId": "b3538612-3c0d-413b-a294-f06d7e6e906d",
+        "source": "group-member",
+        "parentRunId": null
+      },
+      {
+        "runId": "4bede322-222c-441e-891c-d11ff835ebff",
+        "botId": "fbd205a8-6308-43fb-85c1-df30acad5127",
+        "conversationId": "f05ba123-2b18-4ddc-bceb-eef8c1465c68",
+        "messageId": "90d08856-ea9a-422a-af2c-086c35e526f5",
+        "source": "group-member",
+        "parentRunId": null
+      },
+      {
+        "runId": "9b6e54e0-e503-4dc0-bde6-4e623132293b",
+        "botId": "789336c4-182a-42ba-917a-ab0d28398cb4",
+        "conversationId": "f05ba123-2b18-4ddc-bceb-eef8c1465c68",
+        "messageId": "90d08856-ea9a-422a-af2c-086c35e526f5",
+        "source": "group-member",
+        "parentRunId": null
+      }
+    ],
+    "totalObservedRequests": 9,
+    "countersAreReportedNotEstimated": true
+  },
+  "mechanical": {
+    "originalsIntact": true,
+    "authors": [
+      {
+        "botId": "789336c4-182a-42ba-917a-ab0d28398cb4",
+        "publicMessageIds": [
+          "b3538612-3c0d-413b-a294-f06d7e6e906d"
+        ]
+      },
+      {
+        "botId": "fbd205a8-6308-43fb-85c1-df30acad5127",
+        "publicMessageIds": [
+          "90d08856-ea9a-422a-af2c-086c35e526f5"
+        ]
+      }
+    ],
+    "publicMessages": 2,
+    "exactCycleLinkedMessages": 2,
+    "eachAuthorPublicOnce": true,
+    "groupCompleted": true,
+    "allObservedTasksSucceeded": true,
+    "noOutsideOrChildTasksObserved": true,
+    "independentFullReads": true,
+    "passed": true,
+    "semanticRepliesNotAutomaticallyJudged": true,
+    "exactGroupCycle": true,
+    "noOutsideOrChildRuns": true
+  },
+  "semanticReview": {
+    "status": "pending_Root_full_original_and_both_public_reply_review",
+    "mustCheck": [
+      "Both public authors independently read the full two original files from this exact group cycle",
+      "Each author publishes once in the group under their own Bot identity",
+      "Inclusion/exclusion evidence, count, sum and unit agree with original material",
+      "Draft-minus-result direction is correct and no unsupported causal attribution is invented",
+      "The audit Bot actually compares the independently calculated result, not only the other Bot statement",
+      "No private attachment, outside task or duplicate public message; pass control turns are allowed and separately recorded"
+    ]
+  },
+  "graphEvidence": {
+    "schemaVersion": 66,
+    "cycle": {
+      "id": "f924e0c1-9692-441b-aa04-41c6cbff599f",
+      "conversation_id": "f05ba123-2b18-4ddc-bceb-eef8c1465c68",
+      "status": "completed",
+      "round": 1,
+      "total_messages": 2,
+      "current_run_id": "9b6e54e0-e503-4dc0-bde6-4e623132293b"
+    },
+    "exactGroupCycle": true,
+    "originalLinks": [
+      {
+        "artifact_id": "81de0ccb-bd60-44e7-9c70-802e587091ef"
+      },
+      {
+        "artifact_id": "faa94348-6643-4af8-9a2e-44473af9963f"
+      }
+    ],
+    "originalArtifacts": [
+      {
+        "id": "81de0ccb-bd60-44e7-9c70-802e587091ef",
+        "conversation_id": "f05ba123-2b18-4ddc-bceb-eef8c1465c68",
+        "run_id": null,
+        "name": "project-records.csv",
+        "size": 279,
+        "sha256": "dbc20dad04f59df0d704601fdd6559ab33fd1722283496a2092215a387695ac8"
+      },
+      {
+        "id": "faa94348-6643-4af8-9a2e-44473af9963f",
+        "conversation_id": "f05ba123-2b18-4ddc-bceb-eef8c1465c68",
+        "run_id": null,
+        "name": "review-policy.txt",
+        "size": 537,
+        "sha256": "f8b581c7338cc60fa4b02adaa7a22a89465daf675c991856bf8114069d54da60"
+      }
+    ],
+    "authors": [
+      {
+        "botId": "789336c4-182a-42ba-917a-ab0d28398cb4",
+        "publicMessageIds": [
+          "b3538612-3c0d-413b-a294-f06d7e6e906d"
+        ],
+        "substantiveRunIds": [
+          "bd6aa6ae-e4a8-4e3f-991d-5dcf5d03f977"
+        ],
+        "fullOriginalReadsProvenBeforeOwnPublication": true,
+        "controlRunIds": [
+          "9b6e54e0-e503-4dc0-bde6-4e623132293b"
+        ]
+      },
+      {
+        "botId": "fbd205a8-6308-43fb-85c1-df30acad5127",
+        "publicMessageIds": [
+          "90d08856-ea9a-422a-af2c-086c35e526f5"
+        ],
+        "substantiveRunIds": [
+          "e16875b6-5f07-42f1-b994-6f2fed9f2f3b"
+        ],
+        "fullOriginalReadsProvenBeforeOwnPublication": true,
+        "controlRunIds": [
+          "4bede322-222c-441e-891c-d11ff835ebff"
+        ]
+      }
+    ],
+    "runs": [
+      {
+        "id": "bd6aa6ae-e4a8-4e3f-991d-5dcf5d03f977",
+        "bot_id": "789336c4-182a-42ba-917a-ab0d28398cb4",
+        "conversation_id": "f05ba123-2b18-4ddc-bceb-eef8c1465c68",
+        "message_id": "f924e0c1-9692-441b-aa04-41c6cbff599f",
+        "root_run_id": "bd6aa6ae-e4a8-4e3f-991d-5dcf5d03f977",
+        "parent_run_id": null,
+        "source": "group-member",
+        "status": "succeeded",
+        "sent_count": 1,
+        "checkpointId": "1f1c275e-fdce-6770-8020-74f9929d62d8",
+        "exactTriggerFound": true,
+        "messageCount": 9,
+        "toolCalls": [
+          {
+            "callId": "chatcmpl-tool-bc4033bed382f379",
+            "tool": "read_file",
+            "inputFileId": "81de0ccb-bd60-44e7-9c70-802e587091ef",
+            "completedToolMessage": true,
+            "status": "success",
+            "resultSha256": "eabbc56706f6e981fb4635728c5286d9cee4dca17556af2f579d8b254e80f8dd",
+            "page": {
+              "name": "project-records.csv",
+              "offset": 0,
+              "returnedCharacters": 199,
+              "totalCharacters": 199,
+              "nextOffset": null,
+              "hasMore": false,
+              "parsedTextSha256": "dbc20dad04f59df0d704601fdd6559ab33fd1722283496a2092215a387695ac8",
+              "originalArtifactSha256": "dbc20dad04f59df0d704601fdd6559ab33fd1722283496a2092215a387695ac8"
+            },
+            "aiBatchIndex": 1
+          },
+          {
+            "callId": "chatcmpl-tool-99b5da380261e2d3",
+            "tool": "read_file",
+            "inputFileId": "faa94348-6643-4af8-9a2e-44473af9963f",
+            "completedToolMessage": true,
+            "status": "success",
+            "resultSha256": "030150b1ae8cfd48ace079af2e9616f1f77d4ea280f75569e0f9b0d3f08d7e6e",
+            "page": {
+              "name": "review-policy.txt",
+              "offset": 0,
+              "returnedCharacters": 197,
+              "totalCharacters": 197,
+              "nextOffset": null,
+              "hasMore": false,
+              "parsedTextSha256": "f8b581c7338cc60fa4b02adaa7a22a89465daf675c991856bf8114069d54da60",
+              "originalArtifactSha256": "f8b581c7338cc60fa4b02adaa7a22a89465daf675c991856bf8114069d54da60"
+            },
+            "aiBatchIndex": 1
+          },
+          {
+            "callId": "chatcmpl-tool-b4b2d649a27badc2",
+            "tool": "send_group_message",
+            "inputFileId": null,
+            "completedToolMessage": true,
+            "status": "success",
+            "resultSha256": "34cef59fd192c7bdbb8773493b008c24fd8a9f7e6b710000d62ac37ae32c6562",
+            "publicMessageId": "b3538612-3c0d-413b-a294-f06d7e6e906d",
+            "aiBatchIndex": 4
+          },
+          {
+            "callId": "chatcmpl-tool-afb72d2d7b1aa089",
+            "tool": "send_group_message",
+            "inputFileId": null,
+            "completedToolMessage": true,
+            "status": "success",
+            "resultSha256": "a84f4ef00cef3f34f08f5292e4e1568c9c8df87ad460f18ecc46cc4b068d3c73",
+            "controlPassPublished": false,
+            "aiBatchIndex": 6
+          }
+        ],
+        "publicDeliveries": [
+          {
+            "messageId": "b3538612-3c0d-413b-a294-f06d7e6e906d",
+            "batch": 4,
+            "callId": "chatcmpl-tool-b4b2d649a27badc2"
+          }
+        ],
+        "originalReads": [
+          {
+            "fileId": "81de0ccb-bd60-44e7-9c70-802e587091ef",
+            "name": "project-records.csv",
+            "totalCharacters": 199,
+            "coveredThrough": 199,
+            "terminalPage": true,
+            "consistent": true,
+            "publicationAiBatchIndex": 4,
+            "successfulReadAiBatchIndices": [
+              1
+            ],
+            "fullParsedOriginalReadBeforeOwnPublication": true
+          },
+          {
+            "fileId": "faa94348-6643-4af8-9a2e-44473af9963f",
+            "name": "review-policy.txt",
+            "totalCharacters": 197,
+            "coveredThrough": 197,
+            "terminalPage": true,
+            "consistent": true,
+            "publicationAiBatchIndex": 4,
+            "successfulReadAiBatchIndices": [
+              1
+            ],
+            "fullParsedOriginalReadBeforeOwnPublication": true
+          }
+        ],
+        "bothFullOriginalsRead": true
+      },
+      {
+        "id": "e16875b6-5f07-42f1-b994-6f2fed9f2f3b",
+        "bot_id": "fbd205a8-6308-43fb-85c1-df30acad5127",
+        "conversation_id": "f05ba123-2b18-4ddc-bceb-eef8c1465c68",
+        "message_id": "b3538612-3c0d-413b-a294-f06d7e6e906d",
+        "root_run_id": "e16875b6-5f07-42f1-b994-6f2fed9f2f3b",
+        "parent_run_id": null,
+        "source": "group-member",
+        "status": "succeeded",
+        "sent_count": 1,
+        "checkpointId": "1f1c2760-3ed0-6330-8018-5908df6d98f9",
+        "exactTriggerFound": true,
+        "messageCount": 7,
+        "toolCalls": [
+          {
+            "callId": "call_01a11771ffdd7e328d9ba23b",
+            "tool": "read_file",
+            "inputFileId": "81de0ccb-bd60-44e7-9c70-802e587091ef",
+            "completedToolMessage": true,
+            "status": "success",
+            "resultSha256": "eabbc56706f6e981fb4635728c5286d9cee4dca17556af2f579d8b254e80f8dd",
+            "page": {
+              "name": "project-records.csv",
+              "offset": 0,
+              "returnedCharacters": 199,
+              "totalCharacters": 199,
+              "nextOffset": null,
+              "hasMore": false,
+              "parsedTextSha256": "dbc20dad04f59df0d704601fdd6559ab33fd1722283496a2092215a387695ac8",
+              "originalArtifactSha256": "dbc20dad04f59df0d704601fdd6559ab33fd1722283496a2092215a387695ac8"
+            },
+            "aiBatchIndex": 1
+          },
+          {
+            "callId": "call_01a1177201e671d096a46884",
+            "tool": "read_file",
+            "inputFileId": "faa94348-6643-4af8-9a2e-44473af9963f",
+            "completedToolMessage": true,
+            "status": "success",
+            "resultSha256": "030150b1ae8cfd48ace079af2e9616f1f77d4ea280f75569e0f9b0d3f08d7e6e",
+            "page": {
+              "name": "review-policy.txt",
+              "offset": 0,
+              "returnedCharacters": 197,
+              "totalCharacters": 197,
+              "nextOffset": null,
+              "hasMore": false,
+              "parsedTextSha256": "f8b581c7338cc60fa4b02adaa7a22a89465daf675c991856bf8114069d54da60",
+              "originalArtifactSha256": "f8b581c7338cc60fa4b02adaa7a22a89465daf675c991856bf8114069d54da60"
+            },
+            "aiBatchIndex": 1
+          },
+          {
+            "callId": "call_01a117725b037b72b8d40971",
+            "tool": "send_group_message",
+            "inputFileId": null,
+            "completedToolMessage": true,
+            "status": "success",
+            "resultSha256": "8711679ac1eaea2d7ab09ac91e709ee1c521af4aa534ed3f5b46b9d24b8a7266",
+            "publicMessageId": "90d08856-ea9a-422a-af2c-086c35e526f5",
+            "aiBatchIndex": 4
+          }
+        ],
+        "publicDeliveries": [
+          {
+            "messageId": "90d08856-ea9a-422a-af2c-086c35e526f5",
+            "batch": 4,
+            "callId": "call_01a117725b037b72b8d40971"
+          }
+        ],
+        "originalReads": [
+          {
+            "fileId": "81de0ccb-bd60-44e7-9c70-802e587091ef",
+            "name": "project-records.csv",
+            "totalCharacters": 199,
+            "coveredThrough": 199,
+            "terminalPage": true,
+            "consistent": true,
+            "publicationAiBatchIndex": 4,
+            "successfulReadAiBatchIndices": [
+              1
+            ],
+            "fullParsedOriginalReadBeforeOwnPublication": true
+          },
+          {
+            "fileId": "faa94348-6643-4af8-9a2e-44473af9963f",
+            "name": "review-policy.txt",
+            "totalCharacters": 197,
+            "coveredThrough": 197,
+            "terminalPage": true,
+            "consistent": true,
+            "publicationAiBatchIndex": 4,
+            "successfulReadAiBatchIndices": [
+              1
+            ],
+            "fullParsedOriginalReadBeforeOwnPublication": true
+          }
+        ],
+        "bothFullOriginalsRead": true
+      },
+      {
+        "id": "4bede322-222c-441e-891c-d11ff835ebff",
+        "bot_id": "fbd205a8-6308-43fb-85c1-df30acad5127",
+        "conversation_id": "f05ba123-2b18-4ddc-bceb-eef8c1465c68",
+        "message_id": "90d08856-ea9a-422a-af2c-086c35e526f5",
+        "root_run_id": "4bede322-222c-441e-891c-d11ff835ebff",
+        "parent_run_id": null,
+        "source": "group-member",
+        "status": "succeeded",
+        "sent_count": 0,
+        "checkpointId": "1f1c2760-52ad-6a60-8008-75f668c90f81",
+        "exactTriggerFound": true,
+        "messageCount": 2,
+        "toolCalls": [],
+        "publicDeliveries": [],
+        "originalReads": [],
+        "bothFullOriginalsRead": false
+      },
+      {
+        "id": "9b6e54e0-e503-4dc0-bde6-4e623132293b",
+        "bot_id": "789336c4-182a-42ba-917a-ab0d28398cb4",
+        "conversation_id": "f05ba123-2b18-4ddc-bceb-eef8c1465c68",
+        "message_id": "90d08856-ea9a-422a-af2c-086c35e526f5",
+        "root_run_id": "9b6e54e0-e503-4dc0-bde6-4e623132293b",
+        "parent_run_id": null,
+        "source": "group-member",
+        "status": "succeeded",
+        "sent_count": 0,
+        "checkpointId": "1f1c2760-6b1c-6880-8008-158ca4e2db29",
+        "exactTriggerFound": true,
+        "messageCount": 2,
+        "toolCalls": [],
+        "publicDeliveries": [],
+        "originalReads": [],
+        "bothFullOriginalsRead": false
+      }
+    ],
+    "extraRuns": [],
+    "actualPublicReplies": [
+      {
+        "id": "b3538612-3c0d-413b-a294-f06d7e6e906d",
+        "bot_id": "789336c4-182a-42ba-917a-ab0d28398cb4",
+        "run_id": "bd6aa6ae-e4a8-4e3f-991d-5dcf5d03f977",
+        "reply_to": "f924e0c1-9692-441b-aa04-41c6cbff599f",
+        "text": "我读取的两份原件：\n• review-policy.txt（核对规则）\n• project-records.csv（项目台账）\n\n按策略\"状态=已验收 且 区域=北区 → 同 project_id 只保留版本号最大的一条\"过滤与去重后：\n\n| 保留项目 | 版本 | 金额(万元) | 依据 |\n|---|---|---|---|\n| P101 | v2 | 12.40 | 策略第4条：保留最大版本，覆盖 v1 的 15.40 |\n| P102 | v2 | 8.55  | 策略第4条：保留最大版本，覆盖 v1 的 7.05 |\n| P105 | v1 | -2.50 | 策略第3条：负数冲销计入总额 |\n| P106 | v1 |  0.00 | 策略第3条：零金额计入条数 |\n\n被剔除：P103（南区）、P104（待验收）、P101 v1、P102 v1。\n\n合计：4 个项目，金额 = 12.40 + 8.55 + (−2.50) + 0.00 = **18.45 万元**。\n\n与草案对照（草案：北区已验收 4 个项目，38.45 万元）：\n• 项目数：4 vs 4，一致。\n• 金额：18.45 vs 38.45，**差额 20.00 万元**（草案高出 20.00 万元）。\n\n草案如何形成：从原件可验证的组合中（北区已验收的 6 条汇总 40.90；选 P101 v1+P102 v1+P105+P106 = 19.95；选 P101 v1+P102 v2+P105+P106 = 21.45；P101 取高金额 v1=15.40 时合计 21.45 等）均无法推出 38.45，也无法对应到一条可重建的规则。**材料不足以确定草案 38.45 万元的形成方式**，疑似口径错误或来自其它数据源，需向起草方回溯确认。@核算Bot 请独立核验。"
+      },
+      {
+        "id": "90d08856-ea9a-422a-af2c-086c35e526f5",
+        "bot_id": "fbd205a8-6308-43fb-85c1-df30acad5127",
+        "run_id": "e16875b6-5f07-42f1-b994-6f2fed9f2f3b",
+        "reply_to": "f924e0c1-9692-441b-aa04-41c6cbff599f",
+        "text": "已独立读取两份原附件（review-policy.txt、project-records.csv），核验结果与计算Bot一致：\n\n**纳入项目（按策略过滤+按最大版本号去重后）**\n\n| 项目 | 保留版本 | 金额(万元) | 依据 |\n|---|---|---|---|\n| P101 | v2 | 12.40 | 策略第4条：保留最大版本号，覆盖 v1（15.40） |\n| P102 | v2 | 8.55  | 策略第4条：保留最大版本号，覆盖 v1（7.05） |\n| P105 | v1 | -2.50 | 策略第2、3条：北区已验收，负数冲销计入总额 |\n| P106 | v1 |  0.00 | 策略第3条：北区已验收，零金额计入条数 |\n\n剔除：P103（南区，不符\"北区\"条件）、P104（待验收，不符\"已验收\"条件）、P101 v1、P102 v1（按策略被高版本覆盖）。\n\n**合计：4 个项目，金额 = 12.40 + 8.55 + (−2.50) + 0.00 = 18.45 万元**。\n\n**与草案对照（草案：北区已验收 4 个项目，38.45 万元）**\n- 项目数：4 vs 4，**一致**。\n- 金额：18.45 vs 38.45，**差额 20.00 万元（草案高出）**。\n\n**草案 38.45 万元形成方式：材料无法确定**。我把 4 项目和 5、6 条记录的所有合理组合都试了一遍——包括 P101 v1、P101 v2、P102 v1、P102 v2、P105、P106 的各种取法——最大合计是 6 条全计的 40.90，4 条组合的合计落在 16.95–21.45 区间，没有任何一种自然组合能凑出 38.45。差额 20.00 万元也无法由原件中任何单笔或可识别冲销项解释。**仅凭现有原附件无法重建草案 38.45 万元的口径**，建议回起草方核对口径（疑似非源于本份台账，或存在单位/录入错误）。"
+      }
+    ],
+    "bothAuthorsReadBothFullOriginals": true
+  },
+  "completedAt": "2026-10-07T17:39:21.189Z"
+}

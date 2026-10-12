@@ -187,6 +187,23 @@ it("prepares explicit compaction without invoking the outer model or archiving",
   expect(writes).toHaveLength(1)
 })
 
+it("refuses destructive explicit compaction for hosts whose original history lives in checkpoints", async () => {
+  const write = vi.fn(async (path: string) => ({ path }))
+  const controller = createCmbContextController({
+    model: new FakeListChatModel({ responses: [validSummary("unused")] }),
+    backend: { write, downloadFiles: async () => [] } as never,
+    historyStorage: "checkpoint"
+  })
+  await expect(
+    controller.prepare(
+      { messages: [new HumanMessage("Keep original history")], state: {} },
+      "compact",
+      new AbortController().signal
+    )
+  ).rejects.toThrow("MODS_CONTEXT_ARCHIVE_FAILED")
+  expect(write).not.toHaveBeenCalled()
+})
+
 it("stages an explicit archive once and exposes compensation for a failed checkpoint", async () => {
   const write = vi.fn(async (path: string) => ({ path }))
   const remove = vi.fn(async () => ({}))

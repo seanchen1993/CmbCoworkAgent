@@ -1,0 +1,148 @@
+{
+  "kind": "trial-authority-source-field-native-select-and-reviewed-failure-code-gates",
+  "recordedAt": "2026-10-09T02:24:29.977204+00:00",
+  "buildId": "7c5c54361ee72bafe429e9b0",
+  "logs": {
+    "authority_final_8_files_106_tests": {
+      "path": "/private/tmp/cmb-trial-authority-final-20261009.log",
+      "bytes": 15790,
+      "sha256": "27972f015036977bd047f796f6c6f07de83234bbad0a268aa9e64977b5ccced9",
+      "exitCode": 0
+    },
+    "delivery_final_3_files_106_tests": {
+      "path": "/private/tmp/cmb-verdict-field-final-20261009.log",
+      "bytes": 73246,
+      "sha256": "80ea04de7d576957abee5288a041843bcfa39795b2b58719b867bc293e2ab4f5",
+      "exitCode": 0
+    },
+    "browser_final_4_files_22_tests": {
+      "path": "/private/tmp/cmb-select-and-fence-browser-complete-20261009.log",
+      "bytes": 3401,
+      "sha256": "a474b7721da59463840eddf947ed9a44d5c550ba8fdcd84450664cbe09d6ef0f",
+      "exitCode": 0
+    },
+    "reviewed_failure_and_graph_final_4_files_74_tests": {
+      "path": "/private/tmp/cmb-reviewed-graph-browser-final-20261009.log",
+      "bytes": 86209,
+      "sha256": "cee97b0f5c288ead0a553b146d056a7006322d22a3d2bbbe1584725ec4fb3eab",
+      "exitCode": 0
+    },
+    "node_types": {
+      "path": "/private/tmp/cmb-reviewed-feedback-node-20261009.log",
+      "bytes": 91,
+      "sha256": "546c7bfd36ecac14793f941add6251c16a729819d1b744cccbaf256a91e1b42c",
+      "exitCode": 0
+    },
+    "lint": {
+      "path": "/private/tmp/cmb-reviewed-feedback-lint-20261009.log",
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "exitCode": 0
+    },
+    "production_build": {
+      "path": "/private/tmp/cmb-reviewed-feedback-build-20261009.log",
+      "bytes": 56263,
+      "sha256": "22d17610f806375965183a088595d27c867649017e97145161c31c51a1a23c11",
+      "exitCode": 0
+    }
+  },
+  "sources": [
+    {
+      "path": "/Users/chenqiang/Desktop/projects/CmbCoworkAgent/src/main/bots/auto-review-store.ts",
+      "bytes": 16300,
+      "sha256": "3ddca7aaeaeb61aed01b2b96f3e609a50e9b3438918f334541a0d369b9d8377d"
+    },
+    {
+      "path": "/Users/chenqiang/Desktop/projects/CmbCoworkAgent/src/main/bots/review-task.ts",
+      "bytes": 2797,
+      "sha256": "b96227de50967d515081b833776658f34e1ac8face41b3377cf2f5c5fffcec73"
+    },
+    {
+      "path": "/Users/chenqiang/Desktop/projects/CmbCoworkAgent/src/main/bots/auto-review.ts",
+      "bytes": 14923,
+      "sha256": "6772094dee8c13e00a659ed926b74f45157ea383eddf5a80e52763c913c5c45c"
+    },
+    {
+      "path": "/Users/chenqiang/Desktop/projects/CmbCoworkAgent/src/main/bots/steering.ts",
+      "bytes": 14574,
+      "sha256": "5bdcff383c371d5cb328ecf2e89c0e684a6d737fce4f3092a705be61baf7e82a"
+    },
+    {
+      "path": "/Users/chenqiang/Desktop/projects/CmbCoworkAgent/src/main/bots/work-pages.ts",
+      "bytes": 18709,
+      "sha256": "5d1c8192996567318f06adb8bbd7156585c4cf2fcc9c1888e45a2b30ac8190c7"
+    },
+    {
+      "path": "/Users/chenqiang/Desktop/projects/CmbCoworkAgent/src/main/bots/delivery-evidence-review.ts",
+      "bytes": 24865,
+      "sha256": "2e0538cdbbf18a5dea39881c7fc01ace99480c5d0810af23d92320f1e55feaf5"
+    },
+    {
+      "path": "/Users/chenqiang/Desktop/projects/CmbCoworkAgent/src/main/bots/upstream/grok-browser-actions.js",
+      "bytes": 28379,
+      "sha256": "79af3253bc0c4ffdf038d99ca98eab40c8a1f73f06adfa3e6a87991257418a86"
+    },
+    {
+      "path": "/Users/chenqiang/Desktop/projects/CmbCoworkAgent/src/main/bots/store.ts",
+      "bytes": 229060,
+      "sha256": "f8704a4045e4d40c0fc9b14bb3624362dc83a179a0e044302b4005af0497c25a"
+    },
+    {
+      "path": "/Users/chenqiang/Desktop/projects/CmbCoworkAgent/src/main/bots/agent-runtime.ts",
+      "bytes": 112683,
+      "sha256": "e6271c74c2e90797764221880d7e8ab05a20df1ee4809e341c0c8386beaa713c"
+    },
+    {
+      "path": "/Users/chenqiang/Desktop/projects/CmbCoworkAgent/src/main/bots/reviewed-effect-feedback.ts",
+      "bytes": 1742,
+      "sha256": "afe1da652f88246f47d18ae5e0f1f4e9eec81440dcdb3387158057cd2f77d746"
+    },
+    {
+      "path": "/Users/chenqiang/Desktop/projects/CmbCoworkAgent/src/main/bots/browser-tool.ts",
+      "bytes": 12025,
+      "sha256": "cac43496e754d9fc065a195f4351a4a03d508d787fb4f9b8686cca3597ebac7d"
+    },
+    {
+      "path": "/Users/chenqiang/Desktop/projects/CmbCoworkAgent/src/renderer/src/lib/bot-steering.ts",
+      "bytes": 1221,
+      "sha256": "c9bb696aeb94eeace14c672fc84700d28d98dca05dec9dfa7412a75073ef2a8d"
+    }
+  ],
+  "boundaries": [
+    "Controlled provider with actual Chromium, original graph and Host restart is not a real MiniMax task result.",
+    "Test sets overlap and are not summed into a total.",
+    "Full workflow gate is still running; full npm and platform acceptance are not claimed."
+  ],
+  "preservedFirstFailures": {
+    "cmb-select-state-browser-20261009.log": {
+      "path": "/private/tmp/cmb-select-state-browser-20261009.log",
+      "bytes": 5658,
+      "sha256": "7d2fa114262a37b1f1b181489c6cd81cd06677fc96489e04c377c5867df73759"
+    },
+    "cmb-select-state-browser-final-20261009.log": {
+      "path": "/private/tmp/cmb-select-state-browser-final-20261009.log",
+      "bytes": 4263,
+      "sha256": "a098dbf1e160f366e85287ceea4adada9d6d6ad537b3c839a1bdb3f04bcf4111"
+    },
+    "cmb-reviewed-failure-20261009.log": {
+      "path": "/private/tmp/cmb-reviewed-failure-20261009.log",
+      "bytes": 6243,
+      "sha256": "21c2d873491d7a889294e9ff74b33211f9706ef154e622182a859ef3378173bb"
+    },
+    "cmb-reviewed-failure-second-20261009.log": {
+      "path": "/private/tmp/cmb-reviewed-failure-second-20261009.log",
+      "bytes": 6489,
+      "sha256": "134d23d45abac50ca3eeaae1eacf35bce98397823c69ebcbead2574a8b279ce6"
+    },
+    "cmb-reviewed-graph-browser-20261009.log": {
+      "path": "/private/tmp/cmb-reviewed-graph-browser-20261009.log",
+      "bytes": 75730,
+      "sha256": "94e897a17e465074d05343c27534b068a377e54212a0138bf4e02f701dbcf6df"
+    },
+    "cmb-reviewed-graph-browser-second-20261009.log": {
+      "path": "/private/tmp/cmb-reviewed-graph-browser-second-20261009.log",
+      "bytes": 94119,
+      "sha256": "c890ca2d21afa9f3bd968b4420b26c40ecbebd436263a642c869ea1506285ade"
+    }
+  }
+}

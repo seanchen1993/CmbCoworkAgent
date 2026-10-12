@@ -24,6 +24,7 @@ beforeAll(async () => {
     bundle: true,
     platform: "node",
     format: "cjs",
+    external: ["pdfjs-dist/*"],
     target: "node22"
   })
 })

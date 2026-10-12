@@ -8,6 +8,8 @@ import {
   subscribeAppleIntelligenceGlow
 } from "@/lib/apple-intelligence-glow"
 import {
+  getBotMessageTintEnabled,
+  setBotMessageTintEnabled,
   getDarkThemePreference,
   getLightThemePreference,
   getThemeModePreference,
@@ -87,6 +89,11 @@ function ThemeModePreview({
 }
 
 export function AppearancePanel(): React.JSX.Element {
+  const botMessageTintEnabled = useSyncExternalStore(
+    subscribeThemePreference,
+    getBotMessageTintEnabled,
+    () => true
+  )
   const appleIntelligenceGlowEnabled = useSyncExternalStore(
     subscribeAppleIntelligenceGlow,
     getAppleIntelligenceGlowEnabled,
@@ -259,6 +266,29 @@ export function AppearancePanel(): React.JSX.Element {
         <section className="overflow-hidden rounded-xl border border-border/70 bg-muted/20">
           <div className="border-b border-border/60 bg-muted/35 px-5 py-4">
             <h2 className="text-sm font-semibold text-foreground">视觉效果</h2>
+          </div>
+          <div className="flex items-center justify-between gap-4 border-b border-border/60 px-5 py-5">
+            <div className="flex min-w-0 items-start gap-3 sm:pr-8">
+              <div className="mt-0.5 flex size-8 shrink-0 items-center justify-center rounded-md bg-background/80 text-muted-foreground shadow-sm ring-1 ring-border/60">
+                <Palette className="size-4" />
+              </div>
+              <div className="min-w-0">
+                <div className="text-sm font-medium text-foreground">Bot 消息配色</div>
+                <p className="mt-1 text-xs leading-5 text-muted-foreground">
+                  单独与 Bot 对话时，你的消息气泡使用它的头像颜色；群聊和照片头像保持中性配色。
+                </p>
+              </div>
+            </div>
+            <div className="flex shrink-0 items-center gap-2.5">
+              <span className="text-xs text-muted-foreground">
+                {botMessageTintEnabled ? "已开启" : "已关闭"}
+              </span>
+              <Switch
+                checked={botMessageTintEnabled}
+                onCheckedChange={setBotMessageTintEnabled}
+                aria-label="Bot 消息配色"
+              />
+            </div>
           </div>
           <div className="flex items-center justify-between gap-4 px-5 py-5">
             <div className="flex min-w-0 items-start gap-3 sm:pr-8">

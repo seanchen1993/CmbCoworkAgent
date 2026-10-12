@@ -1,0 +1,94 @@
+{
+  "schemaVersion": 1,
+  "kind": "Root-independent-real-MiniMax-J2-output-review",
+  "reviewedAt": "2026-10-07T16:53:20.468067+00:00",
+  "runId": "951e6bbc-c041-4045-9f2d-398de88e92fe",
+  "actualProvider": true,
+  "actualAppUI": false,
+  "GrokSameJ2Compared": false,
+  "fullGrokParityClaimed": false,
+  "overallTaskPassed": false,
+  "apiTaskStatus": "succeeded",
+  "evidence": [
+    {
+      "path": "/Users/chenqiang/Desktop/projects/CmbCoworkAgent/docs/cmbcowork-bot-parity-plan/evidence/2026-10-07-current-delivery/current-j2-minimax-formal.safe.json",
+      "bytes": 20217,
+      "sha256": "293ddc7a541ef88bfd83e9488ecc199514097b016ef5cead2b2c558bdac6d6bf"
+    },
+    {
+      "path": "/Users/chenqiang/Desktop/projects/CmbCoworkAgent/docs/cmbcowork-bot-parity-plan/evidence/2026-10-07-current-delivery/current-j2-minimax-full-read.safe.json",
+      "bytes": 2475,
+      "sha256": "ef9f24a2b62f16b09a56624069a57b6f0ef4bdec5840a759002aa28ed8749331"
+    }
+  ],
+  "checks": {
+    "twoOriginalFilesIntact": true,
+    "twoOriginalsFullyReadFromActualCheckpointTools": true,
+    "twoGeneratedArtifactsDeliveredThroughFormalFileChunk": true,
+    "originalAndDerivativeIdentityDistinct": true,
+    "fourProjectIdsAndAmountsCorrect": true,
+    "countSumUnitAndDraftDifferenceCorrect": true,
+    "explicitUnsupportedDraftCauseInvented": false,
+    "finalCsvMarkdownValuesAgree": true,
+    "requestedCsvHeadersExact": false,
+    "allReportNumericalClaimsPrecise": false,
+    "cleanOwnedHostExitAndCredentialCopyRemoval": true
+  },
+  "requiredCsvHeader": [
+    "project_id",
+    "amount万元"
+  ],
+  "actualCsvHeader": [
+    "project_id",
+    "amount_wan"
+  ],
+  "findings": [
+    {
+      "kind": "task-format-failure",
+      "detail": "The frozen task requests amount万元; the actual generated CSV uses amount_wan. The original exact mechanical checker remains unchanged and failed."
+    },
+    {
+      "kind": "report-precision",
+      "detail": "The report describes maximum version-related deviation as approximately ±4.50万元. The four possible switches yield 0,+3.00,-1.50,+1.50万元; the tight largest absolute deviation is3.00万元. No causal origin of the draft can be proven."
+    },
+    {
+      "kind": "generated-mime",
+      "detail": "result.csv was formally delivered as text/plain. MIME inference/source/UI impact is under separate review; file bytes and correct values remain intact."
+    }
+  ],
+  "receipts": {
+    "modelUsage": {
+      "requests": 4,
+      "unknownRequests": 1,
+      "inputTokens": 72730,
+      "outputTokens": 2467,
+      "reservedOutputTokens": 8192,
+      "inputReportedRequests": 3,
+      "otherModelRequests": 0,
+      "models": [
+        {
+          "modelRef": "custom:minimax-m3",
+          "model": "MiniMax-M3",
+          "purpose": "task",
+          "requests": 4,
+          "unknownRequests": 1,
+          "inputTokens": 72730,
+          "outputTokens": 2467,
+          "inputReportedRequests": 3
+        }
+      ]
+    },
+    "modelBudget": {
+      "limit": 200000,
+      "consumed": 2467,
+      "reserved": 8192,
+      "requests": 4
+    }
+  },
+  "scopeNotes": [
+    "This is one new J2 API sample on compiled17d/schema65, not actual desktop UI acceptance.",
+    "The prior material84 unsupported-cause FAIL is preserved; this different prompt does not retroactively close it.",
+    "The task was sent once, no automatic approval/retry, no source configuration edits, no extra owned run.",
+    "No checker threshold or expected header was relaxed after viewing the model output."
+  ]
+}

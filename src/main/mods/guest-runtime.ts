@@ -9,16 +9,19 @@ import { parseModJson, encodeModJson } from "../../shared/mods/validation"
 import type { ModJson, ModObject, ModRegistration } from "../../shared/mods/types"
 import { GUEST_BOOTSTRAP } from "./guest-bootstrap"
 import { ModError } from "./errors"
+import { MANAGED_POLICY_SOURCE } from "./policy-program"
 
 export type ModHostCall = (method: string, input: ModJson) => Promise<ModJson>
 
 export class ModGuestRuntime {
   private constructor(
     private readonly runtime: QuickJSRuntime,
-    private readonly context: QuickJSContext
+    private readonly context: QuickJSContext,
+    private readonly sliceMs: number
   ) {}
 
   private deadline = 0
+  private interrupted = false
   private active: { token: string; call: ModHostCall; waiting: number } | null = null
   private readonly deferred = new Set<QuickJSDeferredPromise>()
   private disposed = false
@@ -34,8 +37,15 @@ export class ModGuestRuntime {
     runtime.setMemoryLimit(16 * 1024 * 1024)
     runtime.setMaxStackSize(512 * 1024)
     const context = runtime.newContext()
-    const guest = new ModGuestRuntime(runtime, context)
-    runtime.setInterruptHandler(() => guest.cancelled || Date.now() > guest.deadline)
+    // Only the exact release-owned, I/O-free policy receives enough time for
+    // its bounded 1 MiB JSON envelope and 64 redaction literals. Plugin source,
+    // names and manifests cannot opt into this allowance.
+    const guest = new ModGuestRuntime(runtime, context, code === MANAGED_POLICY_SOURCE ? 1000 : 50)
+    runtime.setInterruptHandler(() => {
+      const interrupted = guest.cancelled || performance.now() > guest.deadline
+      if (interrupted) guest.interrupted = true
+      return interrupted
+    })
     const hostCall = context.newFunction("__cmbHostCall", (token, method, json) => {
       const active = guest.active
       if (!active || context.getString(token) !== active.token) {
@@ -63,7 +73,8 @@ export class ModGuestRuntime {
     context.setProp(context.global, "__cmbHostCall", hostCall)
     hostCall.dispose()
     try {
-      guest.evaluate(GUEST_BOOTSTRAP)
+      // Only the application-owned SDK gets a cold-start allowance.
+      guest.evaluate(GUEST_BOOTSTRAP, 1000)
       guest.evaluate(code)
       const registrationJson = guest.evaluate("__cmbRegister()")
       const registrations = parseModJson(registrationJson)
@@ -76,12 +87,27 @@ export class ModGuestRuntime {
     }
   }
 
-  private evaluate(code: string): string {
-    this.deadline = Date.now() + 50
+  private startSlice(budgetMs = this.sliceMs): void {
+    this.deadline = performance.now() + budgetMs
+  }
+
+  private guestError(): ModError {
+    return new ModError(
+      this.cancelled
+        ? "MODS_CANCELLED"
+        : this.interrupted
+          ? "MODS_BUDGET_EXCEEDED"
+          : "MODS_GUEST_ERROR"
+    )
+  }
+
+  private evaluate(code: string, budgetMs = this.sliceMs): string {
+    this.interrupted = false
+    this.startSlice(budgetMs)
     const result = this.context.evalCode(code)
     if (result.error) {
       result.error.dispose()
-      throw new ModError("MODS_GUEST_ERROR")
+      throw this.guestError()
     }
     const value =
       this.context.typeof(result.value) === "string" ? this.context.getString(result.value) : ""
@@ -110,17 +136,18 @@ export class ModGuestRuntime {
     const token = randomUUID()
     this.active = { token, call, waiting: 0 }
     this.cancelled = false
+    this.interrupted = false
     let ownTime = 0
     let cpuTime = 0
-    let lastTick = Date.now()
-    this.deadline = lastTick + 50
+    let lastTick = performance.now()
+    this.startSlice()
     const promiseResult = this.context.evalCode(
       `__cmbInvoke(${JSON.stringify(token)},${JSON.stringify(registration)},${JSON.stringify(encodeModJson(event))})`
     )
     if (promiseResult.error) {
       promiseResult.error.dispose()
       this.active = null
-      throw new ModError("MODS_GUEST_ERROR")
+      throw this.guestError()
     }
     const handle = promiseResult.value
     let rejectPump: (error: Error) => void = () => {}
@@ -129,20 +156,20 @@ export class ModGuestRuntime {
     })
     const pump = (): void => {
       this.scheduled = undefined
-      const now = Date.now()
+      const now = performance.now()
       if (!this.active?.waiting) ownTime += now - lastTick
       lastTick = now
-      if (ownTime > 5000 || cpuTime > 500 || this.cancelled) {
+      if (ownTime > 5000 || cpuTime > Math.max(500, this.sliceMs) || this.cancelled) {
         rejectPump(new ModError(this.cancelled ? "MODS_CANCELLED" : "MODS_BUDGET_EXCEEDED"))
         return
       }
-      this.deadline = now + 50
+      this.startSlice()
       const started = performance.now()
       const pumped = this.runtime.executePendingJobs(32)
       cpuTime += performance.now() - started
       if (pumped.error) {
         pumped.error.dispose()
-        rejectPump(new ModError("MODS_GUEST_ERROR"))
+        rejectPump(this.guestError())
         return
       }
       if (this.runtime.hasPendingJob()) this.wake?.()
@@ -158,7 +185,7 @@ export class ModGuestRuntime {
       const result = await Promise.race([this.context.resolvePromise(handle), pumpFailure])
       if (result.error) {
         result.error.dispose()
-        throw new ModError("MODS_GUEST_ERROR")
+        throw this.guestError()
       }
       try {
         return parseModJson(this.context.getString(result.value)) as ModJson

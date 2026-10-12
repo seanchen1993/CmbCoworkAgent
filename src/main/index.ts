@@ -1,7 +1,24 @@
+import { closeDesktopBotLinkPreviews, hasDesktopBotLinkPreviews } from "./bots/desktop-link-preview"
 import { initializeHarnessConfigV2 } from "./harness-board/config-v2"
+import { NativeWindowVisibility } from "./native-window-visibility"
+import { WINDOW_VISIBILITY_READ } from "../shared/window-visibility"
 import { initializeNotificationRuntime } from "./notification-runtime"
 import { notificationService } from "./services/notification-service"
 import { registerNotificationHandlers } from "./ipc/notifications"
+import { registerBotHandlers } from "./ipc/bots"
+import { registerBotNavigationHandlers } from "./ipc/bot-navigation"
+import { startDesktopBotNotifications } from "./bots/desktop-notifications"
+import {
+  closeDesktopBotArtifactDownloads,
+  hasDesktopBotArtifactDownloads
+} from "./bots/desktop-artifact-download-service"
+import { BotDeepLinkController } from "./bots/upstream/grok-deep-link-controller"
+import { BOT_DEEP_LINK_SCHEME } from "../shared/bot-deep-link"
+import {
+  startDesktopBotConfigurationSync,
+  stopDesktopBotConfigurationSync,
+  syncActiveBotExecutionSettings
+} from "./bots/desktop-configuration-sync"
 import {
   app,
   BrowserWindow,
@@ -80,6 +97,7 @@ import {
   isCloseToTrayPromptResponse,
   isWindowCloseBehavior,
   resolveWindowCloseRequest,
+  shouldQuitAfterAllWindowsClosed,
   type CloseToTrayPromptReason,
   type CloseToTrayPromptEvent,
   type WindowCloseBehavior
@@ -118,6 +136,18 @@ const CLOSE_TO_TRAY_PROMPT_TIMEOUT_MS = 15_000
 const nativeClosePrompt = createNativeClosePrompt()
 const mainLogForwardingGate = createMainLogForwardingGate()
 let mainWindow: BrowserWindow | null = null
+let mainWindowVisibility: NativeWindowVisibility | undefined
+let stopBotNotifications: (() => void) | undefined
+const botDeepLinks = new BotDeepLinkController({
+  dispatch: ({ link }) => {
+    if (mainWindow && !mainWindow.isDestroyed() && !mainWindow.webContents.isDestroyed())
+      mainWindow.webContents.send("bots:navigate", link)
+  },
+  focusWindow: () => {
+    if (app.isReady()) ensureMainWindowVisible()
+  },
+  log: () => {}
+})
 let mainWindowUnresponsive = false
 const trustedMainRendererUrl = resolveTrustedRendererUrl(
   app.isPackaged
@@ -626,6 +656,7 @@ function applyMacDockIcon(): void {
 function hideMainWindowToTray(window: BrowserWindow): void {
   if (window.isDestroyed()) return
   window.hide()
+  mainWindowVisibility?.refresh()
   showPendingAppAttention()
   if (process.platform === "darwin" && app.dock) {
     app.dock.hide()
@@ -676,7 +707,11 @@ function requestNativeWindowCloseChoice(window: BrowserWindow): void {
 function requestWindowCloseChoice(window: BrowserWindow, reason: CloseToTrayPromptReason): void {
   if (window.isDestroyed()) return
   if (nativeClosePrompt.isOpen) return
-  if (window.webContents.isDestroyed() || window.webContents.isCrashed() || mainWindowUnresponsive) {
+  if (
+    window.webContents.isDestroyed() ||
+    window.webContents.isCrashed() ||
+    mainWindowUnresponsive
+  ) {
     requestNativeWindowCloseChoice(window)
     return
   }
@@ -741,8 +776,10 @@ function createWindow(): void {
     ) // 自动隐藏菜单栏
   })
 
+  mainWindowVisibility = new NativeWindowVisibility(mainWindow)
   mainWindow.on("ready-to-show", () => {
     mainWindow?.show()
+    mainWindowVisibility?.refresh()
     applyMacDockIcon()
   })
 
@@ -764,7 +801,9 @@ function createWindow(): void {
   })
 
   mainWindow.webContents.setWindowOpenHandler((details) => {
-    shell.openExternal(details.url)
+    if (details.url.toLowerCase().startsWith(`${BOT_DEEP_LINK_SCHEME}:`))
+      botDeepLinks.handleCandidate(details.url, "window-open")
+    else shell.openExternal(details.url)
     return { action: "deny" }
   })
 
@@ -781,10 +820,16 @@ function createWindow(): void {
 
   // Every new top-level document must opt in again from its trusted main frame.
   // This also closes the teardown race while a previously trusted frame reloads.
-  mainWindow.webContents.on("will-navigate", () => {
+  mainWindow.webContents.on("will-navigate", (event, url) => {
+    if (url.toLowerCase().startsWith(`${BOT_DEEP_LINK_SCHEME}:`)) {
+      event.preventDefault()
+      botDeepLinks.handleCandidate(url, "navigation")
+      return
+    }
     mainLogForwardingGate.disableForLifecycle()
   })
   mainWindow.webContents.once("destroyed", () => {
+    botDeepLinks.markNotReady()
     mainLogForwardingGate.disableForLifecycle()
   })
 
@@ -838,6 +883,10 @@ function createWindow(): void {
     mainLogForwardingGate.disableForLifecycle()
     nativeClosePrompt.cancel()
     clearCloseToTrayPromptState()
+  })
+  mainWindow.webContents.on("did-start-navigation", (_event, url, isInPlace, isMainFrame) => {
+    if (isMainFrame && !isInPlace && !url.toLowerCase().startsWith(`${BOT_DEEP_LINK_SCHEME}:`))
+      botDeepLinks.markNotReady()
   })
 
   mainWindow.webContents.on("render-process-gone", (_event, details) => {
@@ -957,6 +1006,7 @@ function ensureMainWindowVisible(): BrowserWindow | null {
     mainWindow.show()
   }
   mainWindow.focus()
+  mainWindowVisibility?.refresh()
   return mainWindow
 }
 
@@ -1006,9 +1056,15 @@ if (browserNativeMessagingHostLaunch) {
 } else if (!gotTheLock) {
   app.quit()
 } else {
-  app.on("second-instance", () => {
+  app.on("second-instance", (_event, argv) => {
+    botDeepLinks.handleArgv(argv, "second-instance")
     ensureMainWindowVisible()
   })
+  app.on("open-url", (event, url) => {
+    event.preventDefault()
+    botDeepLinks.handleCandidate(url, "open-url")
+  })
+  botDeepLinks.handleArgv(process.argv, "startup")
 
   app.whenReady().then(async () => {
     configureAgentGraphRecursionLimit(getStoredAgentGraphRecursionLimit())
@@ -1162,7 +1218,7 @@ if (browserNativeMessagingHostLaunch) {
     registerPluginHandlers(ipcMain)
     registerModsHandlers(ipcMain, () => mainWindow)
     registerPluginFileHandlers(ipcMain)
-    registerSandboxHandlers(ipcMain)
+    registerSandboxHandlers(ipcMain, syncActiveBotExecutionSettings)
     registerOptimizerHandlers(ipcMain)
     registerHooksHandlers(ipcMain)
     // Best-effort cleanup of stale hook-log jsonl files. Doesn't block startup.
@@ -1186,6 +1242,20 @@ if (browserNativeMessagingHostLaunch) {
     registerPetHandlers(ipcMain)
     registerUserInputHandlers(ipcMain)
     registerBuiltinRobotHandlers(ipcMain)
+    registerBotHandlers()
+    ipcMain.handle(WINDOW_VISIBILITY_READ, (event) => {
+      if (!mainWindowVisibility) throw new Error("Main window is unavailable")
+      return mainWindowVisibility.read(event)
+    })
+    registerBotNavigationHandlers(botDeepLinks, () => mainWindow)
+    if (app.isPackaged) app.setAsDefaultProtocolClient(BOT_DEEP_LINK_SCHEME)
+    startDesktopBotConfigurationSync()
+    stopBotNotifications = startDesktopBotNotifications({
+      window: () => mainWindow,
+      navigate: (url) => {
+        botDeepLinks.handleCandidate(url, "notification")
+      }
+    })
     browserService = registerBuiltinBrowserIpc(ipcMain, () => mainWindow, browserCdpPort)
 
     ipcMain.on(APP_ATTENTION_CHANNEL, (event, payload: unknown) => {
@@ -1263,7 +1333,7 @@ if (browserNativeMessagingHostLaunch) {
 
     ipcMain.handle(
       AGENT_RUNTIME_RECURSION_LIMIT_SET_CHANNEL,
-      (event, value: unknown): AgentRuntimeSettings => {
+      async (event, value: unknown): Promise<AgentRuntimeSettings> => {
         if (
           !mainWindow ||
           mainWindow.isDestroyed() ||
@@ -1275,8 +1345,10 @@ if (browserNativeMessagingHostLaunch) {
           throw new Error("Agent graph recursion limit must be an integer between 25 and 100000")
         }
         const persisted = setStoredAgentGraphRecursionLimit(value)
+        configureAgentGraphRecursionLimit(persisted)
+        await syncActiveBotExecutionSettings()
         return {
-          recursionLimit: configureAgentGraphRecursionLimit(persisted),
+          recursionLimit: getAgentGraphRecursionLimit(),
           toolStrategy: getAgentToolStrategy(),
           workflowWorktreeTimeoutMinutes: getWorkflowWorktreeTimeoutMinutes(),
           workflowWorktreeRemoveTimeoutMinutes: getWorkflowWorktreeRemoveTimeoutMinutes()
@@ -1286,7 +1358,7 @@ if (browserNativeMessagingHostLaunch) {
 
     ipcMain.handle(
       WORKFLOW_WORKTREE_TIMEOUT_SET_CHANNEL,
-      (event, value: unknown): AgentRuntimeSettings => {
+      async (event, value: unknown): Promise<AgentRuntimeSettings> => {
         if (
           !mainWindow ||
           mainWindow.isDestroyed() ||
@@ -1298,10 +1370,12 @@ if (browserNativeMessagingHostLaunch) {
           throw new Error("Workflow worktree timeout must be an integer between 1 and 120 minutes")
         }
         const persisted = setStoredWorkflowWorktreeTimeoutMinutes(value)
+        configureWorkflowWorktreeTimeoutMinutes(persisted)
+        await syncActiveBotExecutionSettings()
         return {
           recursionLimit: getAgentGraphRecursionLimit(),
           toolStrategy: getAgentToolStrategy(),
-          workflowWorktreeTimeoutMinutes: configureWorkflowWorktreeTimeoutMinutes(persisted),
+          workflowWorktreeTimeoutMinutes: getWorkflowWorktreeTimeoutMinutes(),
           workflowWorktreeRemoveTimeoutMinutes: getWorkflowWorktreeRemoveTimeoutMinutes()
         }
       }
@@ -1309,7 +1383,7 @@ if (browserNativeMessagingHostLaunch) {
 
     ipcMain.handle(
       WORKFLOW_WORKTREE_REMOVE_TIMEOUT_SET_CHANNEL,
-      (event, value: unknown): AgentRuntimeSettings => {
+      async (event, value: unknown): Promise<AgentRuntimeSettings> => {
         if (
           !mainWindow ||
           mainWindow.isDestroyed() ||
@@ -1323,19 +1397,20 @@ if (browserNativeMessagingHostLaunch) {
           )
         }
         const persisted = setStoredWorkflowWorktreeRemoveTimeoutMinutes(value)
+        configureWorkflowWorktreeRemoveTimeoutMinutes(persisted)
+        await syncActiveBotExecutionSettings()
         return {
           recursionLimit: getAgentGraphRecursionLimit(),
           toolStrategy: getAgentToolStrategy(),
           workflowWorktreeTimeoutMinutes: getWorkflowWorktreeTimeoutMinutes(),
-          workflowWorktreeRemoveTimeoutMinutes:
-            configureWorkflowWorktreeRemoveTimeoutMinutes(persisted)
+          workflowWorktreeRemoveTimeoutMinutes: getWorkflowWorktreeRemoveTimeoutMinutes()
         }
       }
     )
 
     ipcMain.handle(
       AGENT_TOOL_STRATEGY_SET_CHANNEL,
-      (event, value: unknown): AgentRuntimeSettings => {
+      async (event, value: unknown): Promise<AgentRuntimeSettings> => {
         if (
           !mainWindow ||
           mainWindow.isDestroyed() ||
@@ -1345,8 +1420,10 @@ if (browserNativeMessagingHostLaunch) {
         }
         if (!isAgentToolStrategy(value)) throw new Error("Invalid agent tool strategy")
         const persisted = setStoredAgentToolStrategy(value)
+        configureAgentToolStrategy(persisted)
+        await syncActiveBotExecutionSettings()
         return {
-          toolStrategy: configureAgentToolStrategy(persisted),
+          toolStrategy: getAgentToolStrategy(),
           recursionLimit: getAgentGraphRecursionLimit(),
           workflowWorktreeTimeoutMinutes: getWorkflowWorktreeTimeoutMinutes(),
           workflowWorktreeRemoveTimeoutMinutes: getWorkflowWorktreeRemoveTimeoutMinutes()
@@ -1542,6 +1619,7 @@ if (browserNativeMessagingHostLaunch) {
     ipcMain.handle("update:get-startup-result", () => selfCheckResult)
 
     const initialModelCatalogLoad = startBuiltinModelCatalogRefresh()
+    await startHookConfigWatcher()
     createWindow()
     // An IM turn must not depend on someone having the desktop open, and must
     // not be tied to whichever window happened to be focused when it arrived.
@@ -1570,7 +1648,6 @@ if (browserNativeMessagingHostLaunch) {
     await builtinRobotManager.start(app.getVersion())
     startScheduler()
     startHeartbeat()
-    startHookConfigWatcher()
     startUpdateChecker()
     markFullBackupCleanupReady(selfCheckResult)
 
@@ -1597,8 +1674,12 @@ if (browserNativeMessagingHostLaunch) {
       platform: process.platform,
       pet: getPetWindowDebugInfo()
     })
-    if (process.platform !== "darwin") {
-      app.quit()
+    if (shouldQuitAfterAllWindowsClosed(process.platform, isAppQuitting())) {
+      // Continue a confirmed quit after native window teardown, outside the
+      // closing event stack. Normal macOS close-to-background stays alive.
+      setImmediate(() => {
+        if (shouldQuitAfterAllWindowsClosed(process.platform, isAppQuitting())) app.quit()
+      })
     }
   })
 
@@ -1611,12 +1692,15 @@ if (browserNativeMessagingHostLaunch) {
     const activeSessions = hasActiveSessions()
     const activeTasks = hasActiveForegroundRuns()
     const pendingTraceReports = hasPendingTraceReports()
+    const artifactDownloads = hasDesktopBotArtifactDownloads()
+    const linkPreviews = hasDesktopBotLinkPreviews()
     console.warn("[Main] before-quit", {
       sessionEndDone,
       sessionEndInProgress,
       hasActiveSessions: activeSessions,
       hasActiveTasks: activeTasks,
       hasPendingTraceReports: pendingTraceReports,
+      hasArtifactDownloads: artifactDownloads,
       pet: getPetWindowDebugInfo()
     })
     if (sessionEndDone) {
@@ -1629,7 +1713,13 @@ if (browserNativeMessagingHostLaunch) {
       event.preventDefault()
       return
     }
-    if (!activeSessions && !activeTasks && !pendingTraceReports) {
+    if (
+      !activeSessions &&
+      !activeTasks &&
+      !pendingTraceReports &&
+      !artifactDownloads &&
+      !linkPreviews
+    ) {
       sessionEndDone = true
       setAppQuitting(true)
       return
@@ -1640,6 +1730,8 @@ if (browserNativeMessagingHostLaunch) {
       try {
         const shutdownResults = await Promise.allSettled([
           shutdownAllAgentTasks(5_000),
+          closeDesktopBotArtifactDownloads(),
+          closeDesktopBotLinkPreviews(),
           stopSchedulerAndWait(5_000),
           stopHeartbeatAndWait(5_000),
           builtinRobotManager.stop()
@@ -1687,6 +1779,7 @@ if (browserNativeMessagingHostLaunch) {
       return
     }
     quitting = true
+    stopBotNotifications?.()
     e.preventDefault()
     setAppAttentionHandler(null)
     disposeAppTray()
@@ -1710,6 +1803,9 @@ if (browserNativeMessagingHostLaunch) {
     }
 
     const cleanup = Promise.all([
+      closeDesktopBotArtifactDownloads(),
+      closeDesktopBotLinkPreviews(),
+      stopDesktopBotConfigurationSync(),
       builtinRobotManager
         .stop()
         .catch((err) => console.warn("[Main] stop built-in robot error:", err)),

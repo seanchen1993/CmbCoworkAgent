@@ -1,0 +1,43 @@
+{
+  "schemaVersion": 1,
+  "kind": "Root-finite-NL-routine-real-model-independent-review",
+  "reviewedAt": "2026-10-07T17:24:02.263927+00:00",
+  "formalAndCodec": [
+    {
+      "path": "/Users/chenqiang/Desktop/projects/CmbCoworkAgent/docs/cmbcowork-bot-parity-plan/evidence/2026-10-07-current-delivery/current-nl-routine-minimax-formal.safe.json",
+      "bytes": 15408,
+      "sha256": "54c1387821478df0c7ffd2f02d69ed0887fcd02bfa00c184959fd8fb327c404c"
+    },
+    {
+      "path": "/Users/chenqiang/Desktop/projects/CmbCoworkAgent/docs/cmbcowork-bot-parity-plan/evidence/2026-10-07-current-delivery/current-nl-routine-minimax-codec.safe.json",
+      "bytes": 5003,
+      "sha256": "ae260ab4f492055d27005270be58d873c41f2adb859902648fddcc4b907906dc"
+    }
+  ],
+  "compiledBuildId": "18eb3cb377377989a66c0b28",
+  "schema": 66,
+  "actualUI": false,
+  "realModel": true,
+  "lifecyclePassed": true,
+  "observations": [
+    "Model invoked create_routine enabled=false atomically; initial revision1 and no scheduled run over65s.",
+    "Explicit second user send enabled the same ID and preserved task/schedule/timezone; one real scheduled run delivered required prefix.",
+    "Explicit third user send paused the same ID; oldrevision was rejected as revision_conflict after scheduled execution advanced it; subsequent refreshed update succeeded.",
+    "After pause65s, no additional occurrence; one Bot/one conversation/four runs/three user sends, no pending task, clean owned exit."
+  ],
+  "usage": {
+    "requests": 12,
+    "unknownRequests": 3,
+    "reportedInputTokens": 165617,
+    "reportedOutputTokens": 1366,
+    "reservedOutputTokens": 24576,
+    "unknownIsNotZero": true
+  },
+  "qualityLimits": [
+    "Creating model inserted its own example answer42 into saved routine; lifecycle result is not proof of independent arithmetic reasoning.",
+    "Ordinary state response exposed verbose internal IDs/configuration keys/revision/Unix timestamps, a presentation quality gap targeted by shared delivery policy candidate.",
+    "No skill-bound real model trial, actualApp UI, officialGrok same-case, calendar/event/restore/revocation coverage inferred.",
+    "Initial Root codec reader assumed exactly3 mutationcalls; rejected stale revision introduced a valid fourth call. Reader failure logs preserved, no model retry or task oracle modification."
+  ],
+  "wholeCompletionPercent": null
+}

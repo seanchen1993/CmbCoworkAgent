@@ -1,0 +1,41 @@
+{
+  "kind": "configured-real-model-production-review-probe",
+  "appAcceptance": false,
+  "liveDatabaseReadOnly": true,
+  "model": "MiniMax-M3",
+  "originalRunId": "c8340c02-ce4d-40c7-a31c-de9a89e34293",
+  "taskSha256": "2c6d12eaee44151464c74b88d86cc55782ee4301971a0540041d11a867860684",
+  "sources": [
+    {
+      "name": "project-records.csv",
+      "size": 279,
+      "sha256": "dbc20dad04f59df0d704601fdd6559ab33fd1722283496a2092215a387695ac8"
+    },
+    {
+      "name": "review-policy.txt",
+      "size": 537,
+      "sha256": "f8b581c7338cc60fa4b02adaa7a22a89465daf675c991856bf8114069d54da60"
+    }
+  ],
+  "shapeObservations": [],
+  "verdicts": [
+    {
+      "sha256": "7832fed246384d78f42ef6064d7a001e9340cb9521d97fd2c79663445da42bcb",
+      "verdict": {
+        "decision": "pass",
+        "findings": [
+          "依据review-policy.txt，result.csv正确执行了\"北区+已验收\"筛选和\"同一project_id保留版本最大\"规则：P101取v2=12.40（非v1的15.40），P102取v2=8.55（非v1的7.05），P105=-2.50、P106=0.00均纳入；P103（南区）、P104（待验收）已排除。4项合计18.45万元，与草案38.45万元相差20.00万元。result.csv字段名\"amount万元\"、记录条数与金额均与源数据及规则一致。"
+        ]
+      }
+    },
+    {
+      "sha256": "abbeebd5407d4025f4dbe4b3d8bbadddf325d05b18ba420f64294c294de7aac8",
+      "verdict": {
+        "decision": "revise",
+        "findings": [
+          "依据 review-policy.txt，规则为\"同一project_id有多个版本时只保留数值最大版本\"。project-records.csv 中 P101 存在两条记录：version=1（amount 15.40）和 version=2（amount 12.40），应保留 version 最大的 2，对应金额 12.40 万元。但候选 result.csv 中 P101 的金额为 15.40 万元，错误地保留了 version=1 的金额，违反\"数值最大版本\"规则（亦属规则明确禁止的\"按行顺序取最后一条\"式错误）。正确纳入项目应为 P101=12.40、P102=8.55、P105=-2.50、P106=0.00，共 4 条，合计 18.45 万元。候选 P101 金额须改为 12.40，并相应重算总额与对草稿 38.45 万元的差额分析。"
+        ]
+      }
+    }
+  ]
+}

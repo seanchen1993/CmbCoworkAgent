@@ -1,6 +1,7 @@
 import { lazy, Suspense, useEffect, useState } from "react"
 import {
   ArrowLeft,
+  X,
   Brain,
   ChevronDown,
   ChevronRight,
@@ -29,6 +30,7 @@ import { cn } from "@/lib/utils"
 
 const SkillsPanel = lazy(() => import("./SkillsPanel").then((m) => ({ default: m.SkillsPanel })))
 const GeneralPanel = lazy(() => import("./GeneralPanel").then((m) => ({ default: m.GeneralPanel })))
+const ModelsPanel = lazy(() => import("./ModelsPanel").then((m) => ({ default: m.ModelsPanel })))
 const AppearancePanel = lazy(() =>
   import("./AppearancePanel").then((m) => ({ default: m.AppearancePanel }))
 )
@@ -62,6 +64,7 @@ const ExpertTeamPanel = lazy(() =>
 
 type CustomizeTab =
   | "general"
+  | "models"
   | "appearance"
   | "skills"
   | "connectors"
@@ -102,6 +105,7 @@ const MENU_GROUPS: MenuGroup[] = [
     items: [
       { tab: "general", label: "通用", icon: Settings2 },
       { tab: "appearance", label: "外观", icon: Palette },
+      { tab: "models", label: "模型", icon: Cpu },
       { tab: "skills", label: "技能", icon: Sparkles },
       { tab: "connectors", label: "MCP 连接器", icon: Plug },
       { tab: "plugins", label: "插件", icon: Puzzle },
@@ -157,7 +161,7 @@ function CustomizePanelFallback(): React.JSX.Element {
   )
 }
 
-export function CustomizeView(): React.JSX.Element {
+export function CustomizeView({ floating = false }: { floating?: boolean }): React.JSX.Element {
   const {
     setShowCustomizeView,
     customizeInitialTab,
@@ -211,12 +215,13 @@ export function CustomizeView(): React.JSX.Element {
       <button
         key={item.tab}
         className={cn(
-          "cursor-pointer flex items-center gap-3 w-full rounded-md px-2.5 py-1.5 text-sm transition-colors",
+          "cursor-pointer flex items-center gap-3 w-full rounded-lg px-2.5 py-2 text-sm transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
           isActive ? "bg-muted font-medium" : "text-muted-foreground hover:bg-muted/50"
         )}
+        aria-current={isActive ? "page" : undefined}
         onClick={() => setActiveTab(item.tab)}
       >
-        <Icon className="size-3 shrink-0" />
+        <Icon aria-hidden className="size-4 shrink-0" />
         <span className="min-w-0 flex-1 truncate whitespace-nowrap text-left">{item.label}</span>
         {item.tab === "evolution" && pendingEvolution && (
           <span className="ml-auto size-2 shrink-0 rounded-full bg-orange-500" />
@@ -226,101 +231,121 @@ export function CustomizeView(): React.JSX.Element {
   }
 
   return (
-    <div className="flex h-full overflow-hidden bg-background">
-      <div className="w-[200px] shrink-0 border-r border-border flex flex-col">
-        <div className="p-3 flex items-center gap-2">
+    <div className="flex h-full min-w-0 flex-col overflow-hidden bg-background">
+      {floating && (
+        <header className="flex h-12 shrink-0 items-center justify-between px-5">
+          <span className="text-sm font-semibold">设置</span>
           <Button
             variant="ghost"
-            size="sm"
-            className="h-7 w-9 p-0"
-            aria-label="返回应用"
+            size="icon"
+            className="size-8 rounded-full text-muted-foreground"
+            aria-label="关闭设置"
             onClick={() => setShowCustomizeView(false)}
           >
-            <ArrowLeft className="size-6" strokeWidth={1} />
+            <X className="size-4" />
           </Button>
-          <span className="text-base font-bold">返回应用</span>
+        </header>
+      )}
+      <div className="flex min-h-0 flex-1 overflow-hidden">
+        <div className="w-[200px] shrink-0 border-r border-border/60 flex flex-col">
+          {!floating && (
+            <div className="p-3 flex items-center gap-2">
+              <Button
+                variant="ghost"
+                size="sm"
+                className="h-7 w-9 p-0"
+                aria-label="返回应用"
+                onClick={() => setShowCustomizeView(false)}
+              >
+                <ArrowLeft className="size-6" strokeWidth={1} />
+              </Button>
+              <span className="text-base font-bold">返回应用</span>
+            </div>
+          )}
+          <nav className="min-h-0 flex-1 px-3 pb-3 space-y-3 overflow-y-auto">
+            {MENU_GROUPS.map((group) => {
+              const expanded = expandedGroups[group.id]
+
+              return (
+                <div key={group.id} className="space-y-1">
+                  <button
+                    className={cn(
+                      "flex h-8 w-full items-center gap-2 rounded-md px-2 text-sm font-semibold transition-colors",
+                      expanded
+                        ? "bg-muted/70 text-foreground"
+                        : "text-muted-foreground hover:bg-muted/50 hover:text-foreground"
+                    )}
+                    aria-expanded={expanded}
+                    onClick={() => toggleGroup(group.id)}
+                  >
+                    {expanded ? (
+                      <ChevronDown className="size-4 shrink-0" />
+                    ) : (
+                      <ChevronRight className="size-4 shrink-0" />
+                    )}
+                    <span className="min-w-0 flex-1 text-left">{group.label}</span>
+                  </button>
+                  {expanded && (
+                    <div className="space-y-0.5 pl-2 border-l border-border/60 ml-3">
+                      {group.items.map(renderMenuItem)}
+                    </div>
+                  )}
+                </div>
+              )
+            })}
+          </nav>
         </div>
-        <nav className="min-h-0 flex-1 px-3 pb-3 space-y-3 overflow-y-auto">
-          {MENU_GROUPS.map((group) => {
-            const expanded = expandedGroups[group.id]
 
-            return (
-              <div key={group.id} className="space-y-1">
-                <button
-                  className={cn(
-                    "flex h-8 w-full items-center gap-2 rounded-md px-2 text-sm font-semibold transition-colors",
-                    expanded
-                      ? "bg-muted/70 text-foreground"
-                      : "text-muted-foreground hover:bg-muted/50 hover:text-foreground"
-                  )}
-                  aria-expanded={expanded}
-                  onClick={() => toggleGroup(group.id)}
-                >
-                  {expanded ? (
-                    <ChevronDown className="size-4 shrink-0" />
-                  ) : (
-                    <ChevronRight className="size-4 shrink-0" />
-                  )}
-                  <span className="min-w-0 flex-1 text-left">{group.label}</span>
-                </button>
-                {expanded && (
-                  <div className="space-y-0.5 pl-2 border-l border-border/60 ml-3">
-                    {group.items.map(renderMenuItem)}
-                  </div>
-                )}
-              </div>
-            )
-          })}
-        </nav>
+        <Suspense fallback={<CustomizePanelFallback />}>
+          {activeTab === "general" ? (
+            <GeneralPanel targetSection={customizeInitialSection} />
+          ) : activeTab === "models" ? (
+            <ModelsPanel />
+          ) : activeTab === "appearance" ? (
+            <AppearancePanel />
+          ) : activeTab === "skills" ? (
+            <SkillsPanel />
+          ) : activeTab === "connectors" ? (
+            <McpPanel />
+          ) : activeTab === "plugins" ? (
+            <div className="flex flex-1 min-w-0 min-h-0 overflow-hidden">
+              <PluginsPanel />
+            </div>
+          ) : activeTab === "mods" ? (
+            <div className="flex flex-1 min-w-0 min-h-0 overflow-y-auto">
+              <ModsPanel threadId={currentThreadId} />
+            </div>
+          ) : activeTab === "heartbeat" ? (
+            <HeartbeatPanel />
+          ) : activeTab === "memory" ? (
+            <MemoryPanel workspacePath={currentWorkspacePath} />
+          ) : activeTab === "taskMmd" ? (
+            <TaskMmdPanel currentThreadId={currentThreadId} threads={threads} />
+          ) : activeTab === "evolution" ? (
+            <EvolutionPanel />
+          ) : activeTab === "robot" ? (
+            <BuiltinRobotPanel />
+          ) : activeTab === "lsp" ? (
+            <LspPanel threadId={currentThreadId} />
+          ) : activeTab === "sandbox" ? (
+            <SandboxPanel />
+          ) : activeTab === "userinfo" ? (
+            <UserInfoPanel />
+          ) : activeTab === "hooks" ? (
+            <div className="flex flex-1 overflow-hidden">
+              <HooksPanel />
+            </div>
+          ) : activeTab === "codeExecTools" ? (
+            <div className="flex flex-1 overflow-hidden">
+              <CodeExecToolsPanel />
+            </div>
+          ) : activeTab === "pet" ? (
+            <PetPanel />
+          ) : activeTab === "expertTeam" ? (
+            <ExpertTeamPanel />
+          ) : null}
+        </Suspense>
       </div>
-
-      <Suspense fallback={<CustomizePanelFallback />}>
-        {activeTab === "general" ? (
-          <GeneralPanel targetSection={customizeInitialSection} />
-        ) : activeTab === "appearance" ? (
-          <AppearancePanel />
-        ) : activeTab === "skills" ? (
-          <SkillsPanel />
-        ) : activeTab === "connectors" ? (
-          <McpPanel />
-        ) : activeTab === "plugins" ? (
-          <div className="flex flex-1 min-w-0 min-h-0 overflow-hidden">
-            <PluginsPanel />
-          </div>
-        ) : activeTab === "mods" ? (
-          <div className="flex flex-1 min-w-0 min-h-0 overflow-y-auto">
-            <ModsPanel threadId={currentThreadId} />
-          </div>
-        ) : activeTab === "heartbeat" ? (
-          <HeartbeatPanel />
-        ) : activeTab === "memory" ? (
-          <MemoryPanel workspacePath={currentWorkspacePath} />
-        ) : activeTab === "taskMmd" ? (
-          <TaskMmdPanel currentThreadId={currentThreadId} threads={threads} />
-        ) : activeTab === "evolution" ? (
-          <EvolutionPanel />
-        ) : activeTab === "robot" ? (
-          <BuiltinRobotPanel />
-        ) : activeTab === "lsp" ? (
-          <LspPanel threadId={currentThreadId} />
-        ) : activeTab === "sandbox" ? (
-          <SandboxPanel />
-        ) : activeTab === "userinfo" ? (
-          <UserInfoPanel />
-        ) : activeTab === "hooks" ? (
-          <div className="flex flex-1 overflow-hidden">
-            <HooksPanel />
-          </div>
-        ) : activeTab === "codeExecTools" ? (
-          <div className="flex flex-1 overflow-hidden">
-            <CodeExecToolsPanel />
-          </div>
-        ) : activeTab === "pet" ? (
-          <PetPanel />
-        ) : activeTab === "expertTeam" ? (
-          <ExpertTeamPanel />
-        ) : null}
-      </Suspense>
     </div>
   )
 }

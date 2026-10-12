@@ -545,7 +545,7 @@ function expandCcHooks(
   return result
 }
 
-function parseHookDocument(
+export function parseHookDocument(
   parsed: unknown,
   idPrefix: string,
   meta: { enabled: boolean; createdAt: string; updatedAt: string },

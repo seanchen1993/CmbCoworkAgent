@@ -1,0 +1,53 @@
+{
+  "observedAt": "2026-10-07T11:39:37.292009+00:00",
+  "kind": "actual-cua-and-formal-host-core-regression",
+  "host": {
+    "id": "6b356851-9d78-47a7-96ee-e0925e81dddb",
+    "pid": 38213,
+    "buildId": "476e8cecaa5374571cc5cf50",
+    "dataEpoch": "initial",
+    "platform": "darwin",
+    "runtimeReady": true,
+    "hasError": false,
+    "startCursor": 508,
+    "endCursor": 508,
+    "identityStable": true,
+    "stateChangedDuringCollection": false
+  },
+  "runId": "fb1ce1fc-3c2a-46d6-9993-8868fff729d4",
+  "sourceModel": "MiniMax-M3, explicitly configured profile; actual provider call",
+  "tests": {
+    "formattedMarkdownSelectionQuote": "PASS: CUA selected bold plus plain text in table/list message and Cmd+L added exact amount fragment",
+    "undoRedo": "PASS: Cmd+Z removed only new quote; Cmd+Shift+Z restored quote, original quote and draft retained",
+    "twoQuoteSubmission": "PASS: actual formal UI rendered both source links in sent user message",
+    "newAnswerProjection": "PASS: fresh final body visible without old inline think wrapper",
+    "originalArtifactDelivery": "PASS: actual new attachment preview shows 294 B browser download; Host artifacts retain original SHA and no new artifact",
+    "mainCreateWelcome": "PASS: explicit UI created 验收协调 Bot on MiniMax-M3; real natural welcome appeared, main badge visible",
+    "mainTwoPeer": "FAIL: first actual approved request delivered and peer returned 60/15, but parent failed stale_lease before second dispatch and aggregation",
+    "M3ModelCheck": "PARTIAL: formal UI text/tool PASS, image response not exact expected; no claim no vision support"
+  },
+  "originalArtifact": {
+    "id": "browser-download:1abf7205-695f-4867-a774-6d95039fce21",
+    "origin": "browser",
+    "size": 294,
+    "sha256": "2e3b857312ad9e302cd2efe2da1567e2a2afd72906cd43cb6dc14be3722a9391"
+  },
+  "artifactCount": 2,
+  "historicalGeneratedArtifactRetained": true,
+  "limits": [
+    "prior raw-thinking history remains unchanged and needs subsequent bugfix",
+    "same-task Grok browser comparison not yet passed",
+    "does not establish all core features or platform acceptance",
+    "the new user task explicitly asked original file_id mode; fresh autonomous browser task remains to verify automatic original-file choice"
+  ],
+  "formalEvidence": "current-real-minimax-body-quote-original-final.safe.json",
+  "formalEvidenceSha256": "4f4daf81df4150ff98d7d7826a618f5ee666f6ff4bd295b9317fafe3ffa1a9d1",
+  "firstPeer": {
+    "peerRunId": "4d062bfc-a075-4d47-a56f-843697952515",
+    "senderBotId": "108c3860-7c30-4822-9975-201a98334516",
+    "recipientBotId": "a99aa585-9532-4867-b00f-48b25a1bc8a6",
+    "outcome": "succeeded"
+  },
+  "failedParentRunId": "00f3ae79-4a93-48d6-9e8e-89eea1d00d54",
+  "firstPeerExchangeUI": "actual read-only exchange opened; request and successful recipient reply observed"
+}

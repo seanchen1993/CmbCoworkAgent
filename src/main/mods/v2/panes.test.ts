@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto"
 import { resolve } from "node:path"
-import { afterEach, describe, expect, it } from "vitest"
+import { afterEach, describe, expect, it, vi } from "vitest"
 import { compileFunctionPlugin } from "./loader"
 import { FunctionGuestRuntime } from "./guest-runtime"
 import { FunctionSession, SESSION_CAPABILITIES } from "./session"
@@ -192,12 +192,46 @@ describe("desktop function panes through the production session", () => {
     expect(state.get("board-count")).toBe(1)
   })
 
+  it.each([false, true])(
+    "preserves render error policy when cleanup encounters an unloaded guest (required=%s)",
+    async (required) => {
+      const { session, guest } = await fixture()
+      const render = vi
+        .spyOn(guest, "invoke")
+        .mockRejectedValue(
+          new ModFunctionError("MODS_BUDGET_EXCEEDED", "MODS_BUDGET_EXCEEDED", required)
+        )
+      const release = vi.spyOn(guest, "releaseUi").mockImplementation(() => {
+        throw new ModFunctionError("MODS_UNLOADED")
+      })
+      try {
+        session.panes.invalidate()
+        if (required) await expect(session.panes.snapshot()).rejects.toThrow("MODS_BUDGET_EXCEEDED")
+        else
+          await expect(session.panes.snapshot()).resolves.toMatchObject([{ tree: { type: "Box" } }])
+      } finally {
+        render.mockRestore()
+        release.mockRestore()
+      }
+    }
+  )
+
   it("reclaims callback generations through hundreds of redraws", async () => {
     const { session } = await fixture()
-    for (let index = 0; index < 260; index++) {
-      const [pane] = await session.panes.snapshot()
-      expect(JSON.stringify(pane.tree)).toContain("加一")
-      session.panes.invalidate()
+    const clock = Date.now.bind(Date)
+    let elapsed = 0
+    // Exercise 260 drawings across normal CPU windows. Doing them back-to-back
+    // can correctly trip the independent 500ms/5s guest budget on slower hosts.
+    const now = vi.spyOn(Date, "now").mockImplementation(() => clock() + elapsed)
+    try {
+      for (let index = 0; index < 260; index++) {
+        const [pane] = await session.panes.snapshot()
+        expect(JSON.stringify(pane.tree)).toContain("加一")
+        session.panes.invalidate()
+        elapsed += 100
+      }
+    } finally {
+      now.mockRestore()
     }
   }, 15000)
 })

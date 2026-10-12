@@ -1,0 +1,16 @@
+{
+  "kind": "Root-localized-peer-consumption-integration",
+  "patchSHA256": "e7b0b90dec1c93515885a80799e2fa83102ee8c47c8ead735c5b134561e57761",
+  "rootPriorSHA256": {
+    "src/main/bots/store.ts": "e869ea5fa84a225309f3cba52f4894e975e9179ec609de686c5c06f49d75b071",
+    "src/main/bots/peer-dispatch-store.test.ts": "4e3955c180194cb0c31b95ca1176872df264e33a1a9566146c088c028c8e0b46",
+    "src/main/bots/agent-runtime.test.ts": "badb741fb08177aacbfe756607cb976b40d7f3dba1299939de8cfd1f768bd9cd"
+  },
+  "rootCurrentSHA256": {
+    "src/main/bots/store.ts": "22443447608f604885f3520f077e9fe7e1f30fa21876abf84a2c0c2f3b2856e2",
+    "src/main/bots/peer-dispatch-store.test.ts": "d44a44d6ce6ac49570958d075bcb1336a24dfcbc9734ad0a496890b3ea0deda0",
+    "src/main/bots/agent-runtime.test.ts": "ea0d390d583e7085103a8f4dbc015097ad2fa41a9fe86996692332509c57ecf1"
+  },
+  "rootAttachmentAndGroundingEditsPreserved": true,
+  "actualLivePass": false
+}

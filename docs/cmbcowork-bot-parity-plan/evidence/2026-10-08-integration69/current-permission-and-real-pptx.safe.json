@@ -1,0 +1,109 @@
+{
+  "observedAt": "2026-10-08T02:32:48.199689+00:00",
+  "currentSourceCompiledBuild": "ef0083ed47a57133bc698a81",
+  "schema": 69,
+  "sharedSourceChanges": [
+    "6-file permission natural expiry and homogeneous aggregate diagnostic recovery integrated",
+    "error-tray Host negotiation test fixture now covers held status and held snapshot; production transport unchanged"
+  ],
+  "gates": {
+    "permissionTests": {
+      "passed": 60,
+      "failed": 0
+    },
+    "errorTrayTests": {
+      "passed": 5,
+      "failed": 0
+    },
+    "nodeTypes": "exit 0",
+    "strictChangedFileLint": "exit 0",
+    "changedFileFormatting": "exit 0",
+    "productionBuild": "exit 0",
+    "fullVitestBeforeFixtureCorrection": {
+      "passed": 7985,
+      "failed": 1,
+      "skipped": 282,
+      "reason": "test fixture assumed simultaneous status and snapshot; actual negotiation awaits status before snapshot"
+    },
+    "fullVitestAfterCorrection": "pending; nearest 5 passed is not a replacement",
+    "npmMessages": "exit 0",
+    "npmWorkflow": "exit 0"
+  },
+  "realPresentation": {
+    "appBuild": "3c57fe8f8daf706a5c9d7e72",
+    "runId": "af5838b2-dba3-453c-89d3-48a6e12ef8b3",
+    "model": "MiniMax-M3",
+    "originalFile": "客服工作台升级方案.pptx",
+    "sha256": "bb221f19c4418b6cd111192a02c066f641c3df3b4238b6c5e1c69ef559a8e2e4",
+    "bytes": 84472,
+    "actualUI": [
+      "three distinct previews",
+      "second style selected through ordinary UI",
+      "downloaded published original through actual Save dialog",
+      "all four pages visited, final next disabled, returned to page 3",
+      "closed and reopened the published attachment"
+    ],
+    "originalEditableContent": "four-page original verifier passed",
+    "interactionQuality": "FAIL: model asked same style a second time and generated extra unused originals",
+    "officeRendered": false,
+    "grokSamePresentationJourneyAccepted": false
+  },
+  "stillOpen": [
+    "complete long programming task and original project delivery",
+    "J2/J7 material task factual correctness; newest J2 failed",
+    "presentation repeated choice repair and genuine-model retest",
+    "remaining whole core UI/Teach/memory/routine journeys",
+    "Windows generic independent desktop input implementation and machine acceptance",
+    "current complete regression and packaging/platform acceptance"
+  ],
+  "percentage": null,
+  "completion": "not complete",
+  "boundary": "No test proves all tasks or zero bugs; old real failures remain immutable.",
+  "logs": [
+    {
+      "path": "/Users/chenqiang/Library/Application Support/CMBDevClaw-development/2026-10-08/root-gates/local-permission-integrated.log",
+      "bytes": 3991,
+      "sha256": "5a4d7e1c5015daf90b429b3c616f6b8dc2699ab126e2a88a104e2ed4a5e2c8b2"
+    },
+    {
+      "path": "/Users/chenqiang/Library/Application Support/CMBDevClaw-development/2026-10-08/root-gates/error-tray-negotiation-fixed.log",
+      "bytes": 314,
+      "sha256": "9d14bcb0b18e36ed94a000d1eb1831ecb01579bcba2830cbd8aed9ac2502a3b0"
+    },
+    {
+      "path": "/Users/chenqiang/Library/Application Support/CMBDevClaw-development/2026-10-08/root-gates/local-permission-node-types.log",
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "path": "/Users/chenqiang/Library/Application Support/CMBDevClaw-development/2026-10-08/root-gates/local-permission-lint.log",
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "path": "/Users/chenqiang/Library/Application Support/CMBDevClaw-development/2026-10-08/root-gates/local-permission-format.log",
+      "bytes": 66,
+      "sha256": "17aa973d3f004560237d9a95171210b0671deff23d61628eecf7322ff5938f20"
+    },
+    {
+      "path": "/Users/chenqiang/Library/Application Support/CMBDevClaw-development/2026-10-08/root-gates/local-permission-production-build.log",
+      "bytes": 56264,
+      "sha256": "7134535d2fbb2325013c8c3d001424a909ba8a534eab4d53fc8fcd8e1abf607e"
+    },
+    {
+      "path": "/Users/chenqiang/Library/Application Support/CMBDevClaw-development/2026-10-08/root-gates/local-permission-messages.log",
+      "bytes": 15386,
+      "sha256": "07e2f675a357db15a60fa0715f5a4c40f7f427d6804a39101b6729b0ee295875"
+    },
+    {
+      "path": "/Users/chenqiang/Library/Application Support/CMBDevClaw-development/2026-10-08/root-gates/local-permission-workflow.log",
+      "bytes": 174938,
+      "sha256": "6bf2d7a3af38225d799cc448ad6816ccc3d696d3fefdc588c65a68e8477df403"
+    },
+    {
+      "path": "/Users/chenqiang/Library/Application Support/CMBDevClaw-development/2026-10-08/root-gates/integration69-full-npm-test.log",
+      "bytes": 2623961,
+      "sha256": "6b7586611ade860b9bae32084872a338e9a2f0cb6a737827fea10f4f87160a44"
+    }
+  ]
+}

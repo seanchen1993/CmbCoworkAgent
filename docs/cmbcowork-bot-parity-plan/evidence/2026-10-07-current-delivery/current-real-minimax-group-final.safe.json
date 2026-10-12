@@ -1,0 +1,413 @@
+{
+  "schemaVersion": 1,
+  "kind": "formal-host-read-only-task-evidence",
+  "startedAt": "2026-10-07T11:43:41.021Z",
+  "collection": "collected",
+  "host": {
+    "id": "6b356851-9d78-47a7-96ee-e0925e81dddb",
+    "pid": 38213,
+    "buildId": "476e8cecaa5374571cc5cf50",
+    "dataEpoch": "initial",
+    "platform": "darwin",
+    "runtimeReady": true,
+    "hasError": false,
+    "startCursor": 756,
+    "endCursor": 756,
+    "identityStable": true,
+    "stateChangedDuringCollection": false
+  },
+  "bots": [
+    {
+      "id": "6053ad88-f72a-43fe-9e7c-2c549c1375c0",
+      "modelRef": "custom:minimax-m3",
+      "modelSelection": "explicit",
+      "revision": 2,
+      "hidden": false,
+      "deleted": false
+    },
+    {
+      "id": "108c3860-7c30-4822-9975-201a98334516",
+      "modelRef": "custom:minimax-m3",
+      "modelSelection": "explicit",
+      "revision": 2,
+      "hidden": false,
+      "deleted": false
+    },
+    {
+      "id": "a99aa585-9532-4867-b00f-48b25a1bc8a6",
+      "modelRef": "custom:minimax-m3",
+      "modelSelection": "explicit",
+      "revision": 2,
+      "hidden": false,
+      "deleted": false
+    }
+  ],
+  "conversations": [
+    {
+      "id": "451ee9ad-453a-4347-8dda-3671596a77ff",
+      "kind": "group",
+      "memberIds": [
+        "6053ad88-f72a-43fe-9e7c-2c549c1375c0",
+        "a99aa585-9532-4867-b00f-48b25a1bc8a6"
+      ],
+      "revision": 1,
+      "messages": [
+        {
+          "id": "fcc131d4-3bd5-454b-bee7-0e769357bc82",
+          "sequence": 19,
+          "botId": null,
+          "sender": "user",
+          "runId": null,
+          "replyTo": null,
+          "threadRootId": null,
+          "createdAt": 1791373125515,
+          "text": {
+            "bytes": 190,
+            "sha256": "c7af97f5510c55a9a65734f931d29ba4c2dd621d41f4eb8b09138c9af96ef2cf"
+          },
+          "attachmentIds": []
+        },
+        {
+          "id": "bae93549-319d-412a-879f-2aa2ae223e8b",
+          "sequence": 20,
+          "botId": "a99aa585-9532-4867-b00f-48b25a1bc8a6",
+          "sender": "bot",
+          "runId": "9ce04c34-5960-46e4-9ff3-6730f948f97b",
+          "replyTo": "fcc131d4-3bd5-454b-bee7-0e769357bc82",
+          "threadRootId": null,
+          "createdAt": 1791373145089,
+          "text": {
+            "bytes": 15,
+            "sha256": "f04ccbd18411376e19b1c6fae0db7ebc1afbf0e0a7b9917fbab2e9272cee099f"
+          },
+          "attachmentIds": []
+        },
+        {
+          "id": "0d13c146-068b-4a6a-a39c-a57c6034558a",
+          "sequence": 21,
+          "botId": "6053ad88-f72a-43fe-9e7c-2c549c1375c0",
+          "sender": "bot",
+          "runId": "179c917f-d218-4b12-9198-d4c690256a6f",
+          "replyTo": "fcc131d4-3bd5-454b-bee7-0e769357bc82",
+          "threadRootId": null,
+          "createdAt": 1791373153909,
+          "text": {
+            "bytes": 83,
+            "sha256": "d5048a03fdd44b354f3123bafeceac584f8a95fcee9bd7624277aa8b4cc574df"
+          },
+          "attachmentIds": []
+        }
+      ]
+    }
+  ],
+  "runs": [
+    {
+      "conversationId": "451ee9ad-453a-4347-8dda-3671596a77ff",
+      "runId": "9ce04c34-5960-46e4-9ff3-6730f948f97b",
+      "botId": "a99aa585-9532-4867-b00f-48b25a1bc8a6",
+      "outcome": "succeeded",
+      "source": "group-member",
+      "messageId": "fcc131d4-3bd5-454b-bee7-0e769357bc82",
+      "revision": 21,
+      "createdAt": 1791373141168,
+      "updatedAt": 1791373146737,
+      "parentRunId": null,
+      "rootRunId": null,
+      "lineageAvailable": false,
+      "result": {
+        "bytes": 6,
+        "sha256": "9f8d8fdd290c6ac01b1178a95a6499cfd14af3c6a2bf162374e6d2984586b317"
+      },
+      "error": null,
+      "diagnostic": null,
+      "tokenUsage": {
+        "requests": 2,
+        "unknownRequests": 2,
+        "inputTokens": 0,
+        "outputTokens": 0,
+        "reservedOutputTokens": 16384,
+        "otherModelRequests": 0,
+        "inputReportedRequests": 0,
+        "models": [
+          {
+            "modelRef": "custom:minimax-m3",
+            "model": "MiniMax-M3",
+            "purpose": "task",
+            "requests": 2,
+            "unknownRequests": 2,
+            "inputReportedRequests": 0,
+            "inputTokens": 0,
+            "outputTokens": 0
+          }
+        ]
+      },
+      "hasBrowser": false,
+      "hasWorktree": false,
+      "children": [],
+      "history": {
+        "pages": 1,
+        "complete": true,
+        "items": [
+          {
+            "cursor": 681,
+            "createdAt": 1791373146737,
+            "label": {
+              "bytes": 18,
+              "sha256": "f8365c6c29a0525ddbed8d46e443725de8e746e68e7dcae822ec70b580f8901b"
+            },
+            "detail": null,
+            "effectId": null,
+            "interactionId": null,
+            "hasPeerExchange": false
+          },
+          {
+            "cursor": 672,
+            "createdAt": 1791373145112,
+            "label": {
+              "bytes": 21,
+              "sha256": "dea4334da67f8274bb32488a41b0eedaa87542e015a0e8a1f70e25efc0f5720f"
+            },
+            "detail": null,
+            "effectId": null,
+            "interactionId": null,
+            "hasPeerExchange": false
+          },
+          {
+            "cursor": 669,
+            "createdAt": 1791373145082,
+            "label": {
+              "bytes": 18,
+              "sha256": "5c4e9522777d8dbfefd38d333a6d67a193d1236b43190c19b4a15c63e1b134d2"
+            },
+            "detail": null,
+            "effectId": null,
+            "interactionId": null,
+            "hasPeerExchange": false
+          },
+          {
+            "cursor": 661,
+            "createdAt": 1791373141752,
+            "label": {
+              "bytes": 21,
+              "sha256": "dea4334da67f8274bb32488a41b0eedaa87542e015a0e8a1f70e25efc0f5720f"
+            },
+            "detail": null,
+            "effectId": null,
+            "interactionId": null,
+            "hasPeerExchange": false
+          },
+          {
+            "cursor": 657,
+            "createdAt": 1791373141170,
+            "label": {
+              "bytes": 12,
+              "sha256": "f7d5b61de2fd0fc86187780659fc0232438932a7424d16176e72c2f68c878cfa"
+            },
+            "detail": null,
+            "effectId": null,
+            "interactionId": null,
+            "hasPeerExchange": false
+          },
+          {
+            "cursor": 655,
+            "createdAt": 1791373141168,
+            "label": {
+              "bytes": 12,
+              "sha256": "08127c4d770b4145810c2e7b393fd72cc98fb9e52dbb321048b3e6f3970937ff"
+            },
+            "detail": null,
+            "effectId": null,
+            "interactionId": null,
+            "hasPeerExchange": false
+          }
+        ]
+      },
+      "toolRecords": [],
+      "shellJobs": []
+    },
+    {
+      "conversationId": "451ee9ad-453a-4347-8dda-3671596a77ff",
+      "runId": "179c917f-d218-4b12-9198-d4c690256a6f",
+      "botId": "6053ad88-f72a-43fe-9e7c-2c549c1375c0",
+      "outcome": "succeeded",
+      "source": "group-member",
+      "messageId": "bae93549-319d-412a-879f-2aa2ae223e8b",
+      "revision": 21,
+      "createdAt": 1791373150183,
+      "updatedAt": 1791373156783,
+      "parentRunId": null,
+      "rootRunId": null,
+      "lineageAvailable": false,
+      "result": {
+        "bytes": 95,
+        "sha256": "25a4881602a77c79f7e26668e58f60cd24fc2e8783efa304e50c606ba29cf890"
+      },
+      "error": null,
+      "diagnostic": null,
+      "tokenUsage": {
+        "requests": 2,
+        "unknownRequests": 2,
+        "inputTokens": 0,
+        "outputTokens": 0,
+        "reservedOutputTokens": 16384,
+        "otherModelRequests": 0,
+        "inputReportedRequests": 0,
+        "models": [
+          {
+            "modelRef": "custom:minimax-m3",
+            "model": "MiniMax-M3",
+            "purpose": "task",
+            "requests": 2,
+            "unknownRequests": 2,
+            "inputReportedRequests": 0,
+            "inputTokens": 0,
+            "outputTokens": 0
+          }
+        ]
+      },
+      "hasBrowser": false,
+      "hasWorktree": false,
+      "children": [],
+      "history": {
+        "pages": 1,
+        "complete": true,
+        "items": [
+          {
+            "cursor": 723,
+            "createdAt": 1791373156784,
+            "label": {
+              "bytes": 18,
+              "sha256": "f8365c6c29a0525ddbed8d46e443725de8e746e68e7dcae822ec70b580f8901b"
+            },
+            "detail": null,
+            "effectId": null,
+            "interactionId": null,
+            "hasPeerExchange": false
+          },
+          {
+            "cursor": 714,
+            "createdAt": 1791373154003,
+            "label": {
+              "bytes": 21,
+              "sha256": "dea4334da67f8274bb32488a41b0eedaa87542e015a0e8a1f70e25efc0f5720f"
+            },
+            "detail": null,
+            "effectId": null,
+            "interactionId": null,
+            "hasPeerExchange": false
+          },
+          {
+            "cursor": 711,
+            "createdAt": 1791373153878,
+            "label": {
+              "bytes": 18,
+              "sha256": "5c4e9522777d8dbfefd38d333a6d67a193d1236b43190c19b4a15c63e1b134d2"
+            },
+            "detail": null,
+            "effectId": null,
+            "interactionId": null,
+            "hasPeerExchange": false
+          },
+          {
+            "cursor": 703,
+            "createdAt": 1791373150503,
+            "label": {
+              "bytes": 21,
+              "sha256": "dea4334da67f8274bb32488a41b0eedaa87542e015a0e8a1f70e25efc0f5720f"
+            },
+            "detail": null,
+            "effectId": null,
+            "interactionId": null,
+            "hasPeerExchange": false
+          },
+          {
+            "cursor": 699,
+            "createdAt": 1791373150185,
+            "label": {
+              "bytes": 12,
+              "sha256": "f7d5b61de2fd0fc86187780659fc0232438932a7424d16176e72c2f68c878cfa"
+            },
+            "detail": null,
+            "effectId": null,
+            "interactionId": null,
+            "hasPeerExchange": false
+          },
+          {
+            "cursor": 697,
+            "createdAt": 1791373150183,
+            "label": {
+              "bytes": 12,
+              "sha256": "08127c4d770b4145810c2e7b393fd72cc98fb9e52dbb321048b3e6f3970937ff"
+            },
+            "detail": null,
+            "effectId": null,
+            "interactionId": null,
+            "hasPeerExchange": false
+          }
+        ]
+      },
+      "toolRecords": [],
+      "shellJobs": []
+    }
+  ],
+  "peerExchanges": [],
+  "teach": [
+    {
+      "botId": "6053ad88-f72a-43fe-9e7c-2c549c1375c0",
+      "sessions": [],
+      "trials": []
+    },
+    {
+      "botId": "108c3860-7c30-4822-9975-201a98334516",
+      "sessions": [],
+      "trials": []
+    },
+    {
+      "botId": "a99aa585-9532-4867-b00f-48b25a1bc8a6",
+      "sessions": [],
+      "trials": []
+    }
+  ],
+  "artifacts": [],
+  "limits": {
+    "bots": 8,
+    "conversations": 8,
+    "messages": 100,
+    "runs": 24,
+    "historyPages": 3,
+    "effects": 32,
+    "peers": 16,
+    "teach": 32,
+    "trials": 32,
+    "artifacts": 32,
+    "artifactBytes": 26214400,
+    "totalArtifactBytes": 104857600,
+    "calls": 512,
+    "deadlineMs": 90000,
+    "callMs": 12000
+  },
+  "coverage": {
+    "truncations": [],
+    "unknownToolNames": true,
+    "exactToolHistoryComplete": false,
+    "businessTextIncluded": false,
+    "providerRawIncluded": false,
+    "credentialsIncluded": false,
+    "taskPassClaimed": false
+  },
+  "transport": {
+    "calls": 19,
+    "closed": true
+  },
+  "scope": [
+    "collection is not task PASS",
+    "run outcomes are Host-recorded outcomes; semantic correctness needs independent fixture/result verification",
+    "token usage is provider-reported accounting; unknown counters remain explicit",
+    "runHistory modelUsage aggregates the root run including children, so never sum parent and child totals",
+    "tool names are only inferred from original structured approval action shape with matching effect ID prefix; read-only/unapproved tools are not guessed",
+    "browser form completion needs fixture POST/download records as well as these Host records",
+    "Teach readiness or trial verdict alone does not prove the learned skill succeeded on new inputs",
+    "no configuration, descriptor token, raw logs or raw business files are exported"
+  ],
+  "completedAt": "2026-10-07T11:43:41.861Z"
+}

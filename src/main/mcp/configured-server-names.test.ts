@@ -14,7 +14,7 @@ vi.mock("../storage", () => ({
   getUserInfo: () => ({}),
   parseMcpJsonFile: mocks.config
 }))
-vi.mock("../ipc/mcp", () => ({ buildMcpServerConfig: (value: unknown) => value }))
+vi.mock("./server-config", () => ({ buildMcpServerConfig: (value: unknown) => value }))
 vi.mock("@langchain/mcp-adapters", () => ({ MultiServerMCPClient: mocks.client }))
 vi.mock("../mods/manager", () => ({ authorizeCurrentModInput: vi.fn() }))
 vi.mock("../mods/adapters", () => ({ withRawModMcp: vi.fn(), publishCurrentModResult: vi.fn() }))

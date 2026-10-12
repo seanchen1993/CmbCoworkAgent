@@ -1,0 +1,39 @@
+{
+  "at": "2026-10-07T08:55:21.661704+00:00",
+  "rootApplied": true,
+  "testOnly": "/Users/chenqiang/Desktop/projects/CmbCoworkAgent/tests/bot-workspace-browser.spec.ts",
+  "beforeSHA256": "e2397d06697c13e9ba72e8548accfd10131851da3f24d28a08cee2269d3712ab",
+  "candidateBeforeFormatSHA256": "38fa0e1c4a915f4fc16ac6dbf0f27cea23c4f34e489a91504d40f37b22ef1e3c",
+  "candidateStaticProof": {
+    "baselineSha256": "e2397d06697c13e9ba72e8548accfd10131851da3f24d28a08cee2269d3712ab",
+    "candidateSha256": "38fa0e1c4a915f4fc16ac6dbf0f27cea23c4f34e489a91504d40f37b22ef1e3c",
+    "assertions": {
+      "baselineCount": 660,
+      "candidateCount": 660,
+      "identicalTokens": true,
+      "tokenSha256": "c89eb68fe6d036ca8e020e398d2138ea98f8449ea65977b330998ba5bde8c376"
+    },
+    "timing": {
+      "baselineCount": 33,
+      "candidateCount": 33,
+      "identicalTokens": true,
+      "tokenSha256": "cb5aca7c24979ec130b5bc30f74e95ea2acf4064e9d60dc4818db9cc2c6c10a7"
+    },
+    "browserControl": {
+      "baselineCount": 1268,
+      "candidateCount": 1268,
+      "identicalTokens": true,
+      "tokenSha256": "0b7463e1fc84d5976625766c7855ed533bb432e19ce83b33546509796684a15b"
+    },
+    "parseDiagnostics": [],
+    "fixtureParseDiagnostics": []
+  },
+  "productionChanged": false,
+  "assertionsTimeoutsBrowserActionsChanged": false,
+  "additionalAPIsPollsSleepsSelections": false,
+  "failureStillRethrown": true,
+  "afterFormatSHA256": "5f5966ac5598049bd9304911959820b62af9d5f4a1559e2a84ea823cedd4f58b",
+  "strictLintExitCode": 0,
+  "prettierCheckExitCode": 0,
+  "formatOnlyAppliedWithPrettier": true
+}

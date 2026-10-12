@@ -1,0 +1,85 @@
+{
+  "kind": "real-native-cj05-question-client-reopen",
+  "date": "2026-10-11",
+  "candidateOutput": "f3d5afe6873fe5f9de067041",
+  "scenario": "Pending question; normal client exit while local Host remains alive; reopen same client, answer once, same run completes.",
+  "cmb": {
+    "run": {
+      "id": "ffb36969-b348-4eff-be70-27b9f510001f",
+      "bot_id": "e441bbef-6498-4bc9-8cac-2c4f889507ed",
+      "conversation_id": "6e5f2a4f-68b0-4181-a719-aa1ebe9d3213",
+      "source": "user",
+      "status": "succeeded",
+      "revision": 23,
+      "fence": 1,
+      "created_at": 1791674527090,
+      "updated_at": 1791674778075
+    },
+    "interaction": [
+      {
+        "id": "f008873d-18db-44cd-9f54-cbc4c01eac0e",
+        "run_id": "ffb36969-b348-4eff-be70-27b9f510001f",
+        "kind": "question",
+        "status": "answered",
+        "revision": 2,
+        "answer": "CJ05-1011"
+      }
+    ],
+    "clientClosedMainPid": 53719,
+    "retainedHostPid": 53742,
+    "reopenedMainPid": 2072,
+    "pendingAfterClientExit": true,
+    "sameInteractionAndRun": true,
+    "modelUsage": [
+      {
+        "model": "MiniMax-M3",
+        "purpose": "task",
+        "input_tokens": 22414,
+        "output_tokens": 180,
+        "created_at": 1791674532207,
+        "settled_at": 1791674543573
+      },
+      {
+        "model": "MiniMax-M3",
+        "purpose": "task",
+        "input_tokens": 22614,
+        "output_tokens": 99,
+        "created_at": 1791674775369,
+        "settled_at": 1791674778011
+      }
+    ],
+    "answer": "CJ05-1011",
+    "observedFinal": "批次号=CJ05-1011；结果=423"
+  },
+  "grok": {
+    "application": "com.anysphere.sand",
+    "officialService": true,
+    "bot": "记忆核验助手",
+    "samePrompt": true,
+    "questionVisible": "本次检查批次号是什么？",
+    "clientExitVerifiedWithAppInventory": true,
+    "questionRetainedAfterRelaunch": true,
+    "answer": "CJ05-1011",
+    "observedFinal": "批次号=CJ05-1011；结果=423",
+    "evidenceSource": "Native accessibility observations, no cloud database access"
+  },
+  "limits": [
+    "This is client close/reopen, not Host crash recovery.",
+    "One finite question scenario, not all CJ05 or all UI states.",
+    "Grok cloud run identity is not independently available."
+  ],
+  "sourceReceipts": [
+    {
+      "file": "cmb-cj05-client-closed.safe.json",
+      "sha256": "27c06a3e38685bfac34a7f9df65ece3a039e49237c15e414a5552aa19d5b6381"
+    },
+    {
+      "file": "cmb-cj05-client-reopened.safe.json",
+      "sha256": "3ff613e65ce308c5ffe6374852edbcbaa7c387f22e854d7e620e50447cbe6d2a"
+    },
+    {
+      "file": "cmb-cj05-real-minimax-completed.safe.json",
+      "sha256": "956c2212dafa25ded50553b7a4f9617284b868037ba5fa3f5e33d25712dc1cf2"
+    }
+  ]
+}

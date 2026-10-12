@@ -27,6 +27,10 @@ export interface StableWritableFileHandle extends StableFileHandle {
   assertPathIdentity: () => Promise<void>
 }
 
+/** Trusted filesystem port for physical ASAR reads in Electron. Ordinary
+ * capabilities continue using the default Node filesystem and the same checks. */
+export type StableFileReadIO = Pick<typeof import("node:fs/promises"), "open" | "realpath" | "stat">
+
 export type StableBoundedReadFailure = "initial-too-large" | "grew-too-large" | "changed"
 
 /** Structured failure from a bounded capability read so callers can preserve
@@ -62,11 +66,13 @@ function isPathInside(parent: string, child: string): boolean {
  */
 export async function openStableFileHandle(
   trustedRootPath: string,
-  candidatePath: string
+  candidatePath: string,
+  filesystem?: StableFileReadIO
 ): Promise<StableFileHandle> {
+  const io = filesystem ?? { open, realpath, stat }
   const [realRoot, initialRealCandidate] = await Promise.all([
-    realpath(path.resolve(trustedRootPath)),
-    realpath(path.resolve(candidatePath))
+    io.realpath(path.resolve(trustedRootPath)),
+    io.realpath(path.resolve(candidatePath))
   ])
   if (!isPathInside(realRoot, initialRealCandidate)) {
     throw new Error("Access denied: file is outside the trusted root")
@@ -77,15 +83,15 @@ export async function openStableFileHandle(
   // reject it. O_NONBLOCK makes the capability acquisition fail/return promptly;
   // it is harmless for the regular files this helper ultimately accepts.
   const nonBlocking = process.platform === "win32" ? 0 : (constants.O_NONBLOCK ?? 0)
-  const handle = await open(initialRealCandidate, constants.O_RDONLY | noFollow | nonBlocking)
+  const handle = await io.open(initialRealCandidate, constants.O_RDONLY | noFollow | nonBlocking)
   const assertPathIdentity = async (): Promise<void> => {
     const handleStat = await handle.stat({ bigint: true })
     if (!handleStat.isFile()) throw new Error("Cannot preview a directory")
-    const currentRealCandidate = await realpath(initialRealCandidate)
+    const currentRealCandidate = await io.realpath(initialRealCandidate)
     if (!isPathInside(realRoot, currentRealCandidate)) {
       throw new Error("Access denied: file moved outside the trusted root")
     }
-    const currentPathStat = await stat(currentRealCandidate, { bigint: true })
+    const currentPathStat = await io.stat(currentRealCandidate, { bigint: true })
     if (
       !currentPathStat.isFile() ||
       currentPathStat.dev !== handleStat.dev ||
@@ -151,12 +157,7 @@ export async function readStableFileHandleBounded(
   const buffer = Buffer.allocUnsafe(opened.size + 1)
   let total = 0
   while (total < buffer.byteLength) {
-    const { bytesRead } = await opened.handle.read(
-      buffer,
-      total,
-      buffer.byteLength - total,
-      total
-    )
+    const { bytesRead } = await opened.handle.read(buffer, total, buffer.byteLength - total, total)
     if (bytesRead === 0) break
     total += bytesRead
   }
@@ -207,10 +208,7 @@ export async function openStableWritableFileHandle(
 
   const noFollow = process.platform === "win32" ? 0 : (constants.O_NOFOLLOW ?? 0)
   const nonBlocking = process.platform === "win32" ? 0 : (constants.O_NONBLOCK ?? 0)
-  const handle = await open(
-    absoluteCandidate,
-    constants.O_RDWR | noFollow | nonBlocking
-  )
+  const handle = await open(absoluteCandidate, constants.O_RDWR | noFollow | nonBlocking)
 
   const assertPathIdentity = async (): Promise<void> => {
     const handleStat = await handle.stat({ bigint: true })

@@ -1,0 +1,417 @@
+{
+  "kind": "formal-group-context-turn-native-comparison",
+  "recordedAt": "2026-10-10T02:56:09.203258+00:00",
+  "nativeBuildId": "0ba8dd42d13ec7ba3d9e2e62",
+  "schema": 71,
+  "formalVia": "CUA native App, real configured MiniMax M3",
+  "groupFollowups": [
+    {
+      "id": "b4b9d59a-1b73-426f-87b5-0f2065b94ba3",
+      "status": "completed",
+      "round": 1,
+      "total_messages": 2,
+      "input": "刚才的核对结果呢？",
+      "runs": [
+        {
+          "id": "e2a3b5c6-447f-495d-9263-b4340e211727",
+          "bot_id": "924e1689-7b6d-411c-a429-28decb91b179",
+          "status": "succeeded",
+          "error": null,
+          "sent_count": 1,
+          "modelRequests": 3,
+          "unknownUsage": 0,
+          "structuralProof": {
+            "runId": "e2a3b5c6-447f-495d-9263-b4340e211727",
+            "messageTypes": {
+              "HumanMessage": 18,
+              "AIMessageChunk": 3,
+              "ToolMessage": 3
+            },
+            "modelToolNames": [
+              "read_message",
+              "read_message",
+              "send_group_message"
+            ],
+            "toolResultClassifications": [
+              {
+                "name": "read_message",
+                "containsSavedPreferenceId": false,
+                "containsSavedPreferenceCode": false,
+                "containsSavedPreferenceFormat": false,
+                "containsPreviousPublicSummary": false
+              },
+              {
+                "name": "read_message",
+                "containsSavedPreferenceId": false,
+                "containsSavedPreferenceCode": false,
+                "containsSavedPreferenceFormat": false,
+                "containsPreviousPublicSummary": false
+              },
+              {
+                "name": "send_group_message",
+                "containsSavedPreferenceId": false,
+                "containsSavedPreferenceCode": false,
+                "containsSavedPreferenceFormat": false,
+                "containsPreviousPublicSummary": false
+              }
+            ],
+            "selectedInstructionClassifications": [],
+            "privateTextNotCopied": true
+          }
+        },
+        {
+          "id": "66e21528-4659-447e-aaa6-1144052f436e",
+          "bot_id": "e1d81813-1ff0-4fca-9948-d966e1a77189",
+          "status": "succeeded",
+          "error": null,
+          "sent_count": 1,
+          "modelRequests": 2,
+          "unknownUsage": 0,
+          "structuralProof": {
+            "runId": "66e21528-4659-447e-aaa6-1144052f436e",
+            "messageTypes": {
+              "HumanMessage": 18,
+              "AIMessageChunk": 2,
+              "ToolMessage": 1
+            },
+            "modelToolNames": [
+              "send_group_message"
+            ],
+            "toolResultClassifications": [
+              {
+                "name": "send_group_message",
+                "containsSavedPreferenceId": false,
+                "containsSavedPreferenceCode": false,
+                "containsSavedPreferenceFormat": false,
+                "containsPreviousPublicSummary": false
+              }
+            ],
+            "selectedInstructionClassifications": [],
+            "privateTextNotCopied": true
+          }
+        },
+        {
+          "id": "37397dbe-292b-4238-b606-12ae2f4e8821",
+          "bot_id": "e1d81813-1ff0-4fca-9948-d966e1a77189",
+          "status": "succeeded",
+          "error": null,
+          "sent_count": 0,
+          "modelRequests": 2,
+          "unknownUsage": 0,
+          "structuralProof": {
+            "runId": "37397dbe-292b-4238-b606-12ae2f4e8821",
+            "messageTypes": {
+              "HumanMessage": 18,
+              "AIMessageChunk": 2,
+              "ToolMessage": 1
+            },
+            "modelToolNames": [
+              "send_group_message"
+            ],
+            "toolResultClassifications": [
+              {
+                "name": "send_group_message",
+                "containsSavedPreferenceId": false,
+                "containsSavedPreferenceCode": false,
+                "containsSavedPreferenceFormat": false,
+                "containsPreviousPublicSummary": false
+              }
+            ],
+            "selectedInstructionClassifications": [],
+            "privateTextNotCopied": true
+          }
+        },
+        {
+          "id": "ea6af8ba-3abe-4f6d-809a-de734b9c35f5",
+          "bot_id": "924e1689-7b6d-411c-a429-28decb91b179",
+          "status": "succeeded",
+          "error": null,
+          "sent_count": 0,
+          "modelRequests": 2,
+          "unknownUsage": 0,
+          "structuralProof": {
+            "runId": "ea6af8ba-3abe-4f6d-809a-de734b9c35f5",
+            "messageTypes": {
+              "HumanMessage": 18,
+              "AIMessageChunk": 2,
+              "ToolMessage": 1
+            },
+            "modelToolNames": [
+              "send_group_message"
+            ],
+            "toolResultClassifications": [
+              {
+                "name": "send_group_message",
+                "containsSavedPreferenceId": false,
+                "containsSavedPreferenceCode": false,
+                "containsSavedPreferenceFormat": false,
+                "containsPreviousPublicSummary": false
+              }
+            ],
+            "selectedInstructionClassifications": [],
+            "privateTextNotCopied": true
+          }
+        }
+      ],
+      "publicMessages": [
+        {
+          "id": "5e1067fb-03af-42c0-8d27-477c672d711e",
+          "bot_id": "924e1689-7b6d-411c-a429-28decb91b179",
+          "run_id": "e2a3b5c6-447f-495d-9263-b4340e211727",
+          "text": "独立核对结果：286+47=333。与 @月报示范核验 的计算一致。"
+        },
+        {
+          "id": "3cffe740-fc75-4243-b7fa-9984114b38cf",
+          "bot_id": "e1d81813-1ff0-4fca-9948-d966e1a77189",
+          "run_id": "66e21528-4659-447e-aaa6-1144052f436e",
+          "text": "按所选技能独立计算：286+47=333。与 @报价工具编程核验 的核对结果一致。"
+        }
+      ],
+      "arithmeticFactsCorrect": true,
+      "contextExplanationAligned": false
+    },
+    {
+      "id": "b26e6282-cce2-46c6-8b12-1ab3c1857d60",
+      "status": "completed",
+      "round": 1,
+      "total_messages": 2,
+      "input": "？",
+      "runs": [
+        {
+          "id": "3bf4794e-22b6-4fe6-940f-575970f280a8",
+          "bot_id": "924e1689-7b6d-411c-a429-28decb91b179",
+          "status": "succeeded",
+          "error": null,
+          "sent_count": 1,
+          "modelRequests": 2,
+          "unknownUsage": 0,
+          "structuralProof": {
+            "runId": "3bf4794e-22b6-4fe6-940f-575970f280a8",
+            "messageTypes": {
+              "HumanMessage": 21,
+              "AIMessageChunk": 2,
+              "ToolMessage": 1
+            },
+            "modelToolNames": [
+              "send_group_message"
+            ],
+            "toolResultClassifications": [
+              {
+                "name": "send_group_message",
+                "containsSavedPreferenceId": false,
+                "containsSavedPreferenceCode": false,
+                "containsSavedPreferenceFormat": false,
+                "containsPreviousPublicSummary": false
+              }
+            ],
+            "selectedInstructionClassifications": [],
+            "privateTextNotCopied": true
+          }
+        },
+        {
+          "id": "914b17cb-4fc9-4b91-a069-0f2aae650494",
+          "bot_id": "e1d81813-1ff0-4fca-9948-d966e1a77189",
+          "status": "succeeded",
+          "error": null,
+          "sent_count": 1,
+          "modelRequests": 2,
+          "unknownUsage": 0,
+          "structuralProof": {
+            "runId": "914b17cb-4fc9-4b91-a069-0f2aae650494",
+            "messageTypes": {
+              "HumanMessage": 21,
+              "AIMessageChunk": 2,
+              "ToolMessage": 1
+            },
+            "modelToolNames": [
+              "send_group_message"
+            ],
+            "toolResultClassifications": [
+              {
+                "name": "send_group_message",
+                "containsSavedPreferenceId": false,
+                "containsSavedPreferenceCode": false,
+                "containsSavedPreferenceFormat": false,
+                "containsPreviousPublicSummary": false
+              }
+            ],
+            "selectedInstructionClassifications": [],
+            "privateTextNotCopied": true
+          }
+        },
+        {
+          "id": "d1066ecf-6be8-4d02-ab82-31feb8dd35f5",
+          "bot_id": "e1d81813-1ff0-4fca-9948-d966e1a77189",
+          "status": "succeeded",
+          "error": null,
+          "sent_count": 0,
+          "modelRequests": 3,
+          "unknownUsage": 0,
+          "structuralProof": {
+            "runId": "d1066ecf-6be8-4d02-ab82-31feb8dd35f5",
+            "messageTypes": {
+              "HumanMessage": 21,
+              "AIMessageChunk": 3,
+              "ToolMessage": 2
+            },
+            "modelToolNames": [
+              "send_group_message",
+              "send_group_message"
+            ],
+            "toolResultClassifications": [
+              {
+                "name": "send_group_message",
+                "containsSavedPreferenceId": false,
+                "containsSavedPreferenceCode": false,
+                "containsSavedPreferenceFormat": false,
+                "containsPreviousPublicSummary": false
+              },
+              {
+                "name": "send_group_message",
+                "containsSavedPreferenceId": false,
+                "containsSavedPreferenceCode": false,
+                "containsSavedPreferenceFormat": false,
+                "containsPreviousPublicSummary": false
+              }
+            ],
+            "selectedInstructionClassifications": [],
+            "privateTextNotCopied": true
+          }
+        },
+        {
+          "id": "775b4c7e-eeb9-4240-a1d0-53a39a2670d1",
+          "bot_id": "924e1689-7b6d-411c-a429-28decb91b179",
+          "status": "succeeded",
+          "error": null,
+          "sent_count": 0,
+          "modelRequests": 2,
+          "unknownUsage": 0,
+          "structuralProof": {
+            "runId": "775b4c7e-eeb9-4240-a1d0-53a39a2670d1",
+            "messageTypes": {
+              "HumanMessage": 21,
+              "AIMessageChunk": 2,
+              "ToolMessage": 1
+            },
+            "modelToolNames": [
+              "send_group_message"
+            ],
+            "toolResultClassifications": [
+              {
+                "name": "send_group_message",
+                "containsSavedPreferenceId": false,
+                "containsSavedPreferenceCode": false,
+                "containsSavedPreferenceFormat": false,
+                "containsPreviousPublicSummary": false
+              }
+            ],
+            "selectedInstructionClassifications": [],
+            "privateTextNotCopied": true
+          }
+        }
+      ],
+      "publicMessages": [
+        {
+          "id": "61211214-db49-42dc-8282-5d122ecac3bf",
+          "bot_id": "924e1689-7b6d-411c-a429-28decb91b179",
+          "run_id": "3bf4794e-22b6-4fe6-940f-575970f280a8",
+          "text": "独立核对 286+47=333。"
+        },
+        {
+          "id": "acdebfd4-99ea-4a49-ada9-b280c79de6b4",
+          "bot_id": "e1d81813-1ff0-4fca-9948-d966e1a77189",
+          "run_id": "914b17cb-4fc9-4b91-a069-0f2aae650494",
+          "text": "按所选技能计算 286+47=333。"
+        }
+      ],
+      "arithmeticFactsCorrect": true,
+      "contextExplanationAligned": false
+    }
+  ],
+  "officialGrok": {
+    "explicitInput": "刚才的核对结果呢？",
+    "explicitPublicReplies": [
+      "刚才那轮的结果：我算出 286 + 47 = 333，新 Bot 核对后确认正确。",
+      "我的核对结果：286+47 = 333，New Bot 算得正确。"
+    ],
+    "bareInput": "？",
+    "barePublicReplies": [
+      "结果是 286 + 47 = 333，我和新 Bot 都确认无误，这轮已经结束。如果你那边没看到我们的消息，或者想做下一项测试，直接告诉我就行。"
+    ],
+    "comparisonScope": "Same two new follow-up texts after the same arithmetic outcome; original identities, member count, model and preceding failed CMB follow-ups differ. Counts alone are not a parity criterion without an explicit user constraint."
+  },
+  "remainingDifference": "CMB arithmetic is correct and tasks end naturally, but replies still use former assignment/selected-skill wording without reading old public source bodies. A prompt-only change did not resolve this; keep original failures. Bounded attributed public excerpts are a source candidate, not yet live.",
+  "cold": {
+    "descriptor": {
+      "version": 1,
+      "pid": 87355,
+      "hostId": "fd42aa23-1475-4926-acef-1c6306549095",
+      "buildId": "0ba8dd42d13ec7ba3d9e2e62",
+      "socketPath": "/private/tmp/cmb-bot-501-4b987f56222e7e971f75407b/rpc.sock"
+    },
+    "selectedRuns": 149,
+    "checkpointPayloadBytesHashed": 16216859,
+    "logicalGroupsEqual": {
+      "runs": true,
+      "effects": true,
+      "interactions": true,
+      "artifacts": true,
+      "artifactObjects": true,
+      "peerDispatch": true,
+      "peerWaits": true,
+      "checkpoints": true,
+      "skills": true,
+      "project": true
+    },
+    "extraTablesEqual": {
+      "bot_memories": true,
+      "bot_memory_metadata": true,
+      "bot_model_usage": true,
+      "bot_group_cycles": true,
+      "bot_group_runs": true
+    },
+    "schemaBefore": 71,
+    "schemaAfter": 71,
+    "legacyMemberOrderEqual": true,
+    "modelNormalizedFingerprintMatched": true,
+    "forceKillUsed": false
+  },
+  "sourceGates": {
+    "owning": {
+      "files": 6,
+      "passed": 128,
+      "log": "/tmp/cmb-context-turn-owning-fixed-20261010.log",
+      "initialFailuresRetained": "/tmp/cmb-context-turn-owning-20261010.log",
+      "fixtureChanges": "Expectations account for the scoped one-message predecessor probe; no retry or stale-state fencing relaxed."
+    },
+    "actualSdk": {
+      "passed": 4,
+      "unselected": 327,
+      "log": "/tmp/cmb-context-turn-sdk-20261010.log"
+    },
+    "node": {
+      "passed": true,
+      "log": "/tmp/cmb-context-turn-node-20261010.log"
+    },
+    "web": {
+      "passed": true,
+      "log": "/tmp/cmb-context-turn-web-20261010.log"
+    },
+    "messages": {
+      "passed": true,
+      "log": "/tmp/cmb-context-turn-messages-20261010.log"
+    },
+    "lint": {
+      "passed": true,
+      "log": "/tmp/cmb-context-turn-lint-fixed-20261010.log"
+    },
+    "productionBuild": {
+      "passed": true,
+      "log": "/tmp/cmb-context-turn-build-20261010.log"
+    }
+  },
+  "creationQueryPlan": "Indexed lookup of originating event, Bot, exact recorded conversation and membership; no conversation-table scan.",
+  "coreParityComplete": false,
+  "independentInstallerAccepted": false,
+  "privateReasoningNotCopied": true
+}

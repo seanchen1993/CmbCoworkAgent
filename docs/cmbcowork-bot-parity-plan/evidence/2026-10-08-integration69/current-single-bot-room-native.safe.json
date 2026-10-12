@@ -1,0 +1,252 @@
+{
+  "kind": "single-bot-room-native-minimax-official-and-no-self-turn",
+  "recordedAt": "2026-10-10T20:03:29.931503+00:00",
+  "nativeOutputIdentity": "f83923f50600d82c16d119ea",
+  "nativeBuildId": "aed219153915cedb9469220b",
+  "beforeSend": {
+    "id": "7f8934f0-59b8-46c6-b16d-b84ade175e06",
+    "kind": "group",
+    "created_at": 1791662159120,
+    "bot_id": "50a4ae56-72c2-49be-b93b-7957fe9f5674",
+    "members": 1,
+    "messages": 0,
+    "runs": 0,
+    "botCount": 15,
+    "canonical": {
+      "id": "8c0440df-1768-4e73-b920-d5e32952f1f4",
+      "messages": 29
+    }
+  },
+  "realMiniMaxRuns": [
+    {
+      "id": "46bea54e-c327-4762-ba1f-cad2c7060189",
+      "bot_id": "50a4ae56-72c2-49be-b93b-7957fe9f5674",
+      "status": "succeeded",
+      "source": "group-member",
+      "created_at": 1791662195785,
+      "updated_at": 1791662201148,
+      "usage": [
+        {
+          "model": "MiniMax-M3",
+          "purpose": "task",
+          "input_tokens": 21378,
+          "output_tokens": 415,
+          "settled_at": 1791662199537
+        },
+        {
+          "model": "MiniMax-M3",
+          "purpose": "task",
+          "input_tokens": 21842,
+          "output_tokens": 112,
+          "settled_at": 1791662201042
+        }
+      ],
+      "effects": 0,
+      "artifacts": 0
+    },
+    {
+      "id": "6cb40ed4-47e1-48cd-8b5b-de130fa9c81e",
+      "bot_id": "50a4ae56-72c2-49be-b93b-7957fe9f5674",
+      "status": "succeeded",
+      "source": "group-member",
+      "created_at": 1791662201832,
+      "updated_at": 1791662205295,
+      "usage": [
+        {
+          "model": "MiniMax-M3",
+          "purpose": "task",
+          "input_tokens": 21481,
+          "output_tokens": 85,
+          "settled_at": 1791662203693
+        },
+        {
+          "model": "MiniMax-M3",
+          "purpose": "task",
+          "input_tokens": 21589,
+          "output_tokens": 52,
+          "settled_at": 1791662205173
+        }
+      ],
+      "effects": 0,
+      "artifacts": 0
+    }
+  ],
+  "publicMessages": [
+    {
+      "id": "4e23b0ef-5fe2-449b-aa01-6bbdd6750206",
+      "sender": "user",
+      "text": "这是本会话的第一条任务。仅根据本条消息核对合成数据27、14、33、6：草稿称总和82、平均数20。请给出实际总和、平均数、两项草稿结论及差额，并检查草稿内部是否自洽。只在当前会话回复，不查询其他会话，不操作文件、浏览器或命令，不保存记忆、技能或例程。",
+      "created_at": 1791662195779
+    },
+    {
+      "id": "8fcb2471-4ac5-41cb-b780-3e07d937e493",
+      "sender": "bot",
+      "text": "核对结果（仅基于本条消息中的合成数据 27、14、33、6）：\n- 实际总和：80（27+14+33+6）\n- 实际平均数：20（80÷4）\n- 草稿\"总和82\"：差额 −2（草稿偏大2）\n- 草稿\"平均数20\"：差额 0（一致）\n- 草稿内部自洽性：不自洽。按草稿自身，总和82对应平均数应为20.5，而非20；两项结论互相矛盾。",
+      "created_at": 1791662199628
+    }
+  ],
+  "canonicalMessagesAfter": 29,
+  "nativeObserved": {
+    "createdThroughNewChatGroup": true,
+    "oneExistingMember": true,
+    "initiallyNoHistoryOrTasks": true,
+    "resultAndDraftSeparate": true,
+    "originalDirectHistoryRetained": true,
+    "draftRestoredOnReturn": "单会话草稿：仅保留，不发送。",
+    "initialBlankCaptureResolvedAfterNativeWindowZoom": true,
+    "blankRootCauseConfirmed": false
+  },
+  "officialGrok": {
+    "samePrompt": true,
+    "reusedExistingMember": true,
+    "priorIndependentRoomWasEmpty": true,
+    "publicResult": "实际总和：27 + 14 + 33 + 6 = 80\n实际平均数：80 ÷ 4 = 20\n草稿总和 82 有误，多写了 2\n草稿平均数 20 正确，差额为 0\n草稿内部不自洽：按它写的总和 82 算，平均数应为 82 ÷ 4 = 20.5，和它写的 20 对不上",
+    "nativeUserTime": "3:58:10",
+    "nativeBotTime": "3:58:01",
+    "serverClientTimesNotLatencyEvidence": true,
+    "vendorModelCallsUnavailable": true,
+    "autoRoomTitleUsedPromptPrefix": true,
+    "cmbRoomTitleRetainsSelectedBotName": true
+  },
+  "finiteResultCriteriaPassed": true,
+  "noSelfTurnFix": {
+    "nativeBaselineExtraRunObserved": true,
+    "baselineRuns": 2,
+    "regressionBeforeFix": "3 failed, 27 passed; no-self assertions failed",
+    "finalRegression": "4 files, 45 passed",
+    "fixCandidateBuilt": true,
+    "fixNativeRetestPending": false,
+    "multiMemberRoundRobinRetained": true,
+    "realMiniMaxAfter": {
+      "conversationId": "5aa9b529-198c-424e-ab9a-d7c5f2583a14",
+      "runs": [
+        {
+          "id": "db86449e-aac6-4845-8341-bfde6d6804d2",
+          "bot_id": "50a4ae56-72c2-49be-b93b-7957fe9f5674",
+          "status": "succeeded",
+          "created_at": 1791662822254,
+          "updated_at": 1791662829875,
+          "modelUsage": [
+            {
+              "model": "MiniMax-M3",
+              "purpose": "task",
+              "input_tokens": 21386,
+              "output_tokens": 326,
+              "settled_at": 1791662827831
+            },
+            {
+              "model": "MiniMax-M3",
+              "purpose": "task",
+              "input_tokens": 21759,
+              "output_tokens": 45,
+              "settled_at": 1791662829750
+            }
+          ],
+          "effects": 0,
+          "artifacts": 0
+        }
+      ],
+      "cycle": [
+        {
+          "round": 0,
+          "total_messages": 1,
+          "status": "completed"
+        }
+      ],
+      "publicReplies": [
+        {
+          "text": "核对结果（依据仅本条消息提供的数据 [27, 14, 33, 6]）：\n\n• 实际总和：27 + 14 + 33 + 6 = 80\n• 实际平均数：80 ÷ 4 = 20\n• 草稿\"总和 82\"：差额 −2（草稿多报 2）\n• 草稿\"平均数 20\"：差额 0（与实际一致）\n• 内部自洽：若总和真为 82，则平均数应为 82 ÷ 4 = 20.5，与\"平均 20\"矛盾。结论：草稿总和与平均数不自洽，总和数值为误，平均数数值正确。",
+          "created_at": 1791662827916
+        }
+      ]
+    },
+    "nativeRetestOutputIdentity": "daf57e15b7a627bdc4e8ef6a",
+    "nativeRetestBuildId": "4b756e4010bce314e249e657",
+    "nativeCallsBefore": 4,
+    "nativeCallsAfter": 2,
+    "publishedResultAndOriginalHistoryRetained": true,
+    "coldPreservation": {
+      "pins": [
+        {
+          "receipt": "/Users/chenqiang/Library/Application Support/CMBDevClaw-development/2026-10-08/presentation/cold-ui-output-plan/pins-quiesced-before-start-1791662679645648000.safe.json",
+          "sha256": "5250b27443de0536798519d842a18aaacc28f0e8a1d9694b067d56aa5d091315",
+          "phase": "quiesced-before-start",
+          "runs": 15,
+          "checkpointPayloadBytesHashed": 885137
+        },
+        {
+          "receipt": "/Users/chenqiang/Library/Application Support/CMBDevClaw-development/2026-10-08/presentation/cold-ui-output-plan/pins-post-start-pre-review-1791662746018115000.safe.json",
+          "sha256": "a2fa3304070d6049ec1af3b26c9536999271581b67704cb51b95aaa3e22b18c4",
+          "phase": "post-start-pre-review",
+          "runs": 15,
+          "checkpointPayloadBytesHashed": 885137
+        }
+      ],
+      "selectedRuns": 15,
+      "checkpointPayloadBytesHashed": 885137,
+      "logicalGroupsEqual": [
+        "runs",
+        "effects",
+        "interactions",
+        "artifacts",
+        "artifactObjects",
+        "peerDispatch",
+        "peerWaits",
+        "checkpoints",
+        "skills",
+        "project"
+      ],
+      "configReversal": [
+        {
+          "file": "bot-host/models.private",
+          "pathSubstitutions": 2,
+          "exactPriorBytesRestored": true
+        }
+      ],
+      "oldRoomDraftRestoredInNativeUI": true
+    }
+  },
+  "coldPreservation": {
+    "pins": [
+      {
+        "receipt": "/Users/chenqiang/Library/Application Support/CMBDevClaw-development/2026-10-08/presentation/cold-ui-output-plan/pins-quiesced-before-start-1791661535354113000.safe.json",
+        "sha256": "186c1110467d6c8adad9e08b9d2b015f9cb5084108e96be1996dc9778e3f7fc8",
+        "phase": "quiesced-before-start",
+        "runs": 13,
+        "checkpointPayloadBytesHashed": 845313
+      },
+      {
+        "receipt": "/Users/chenqiang/Library/Application Support/CMBDevClaw-development/2026-10-08/presentation/cold-ui-output-plan/pins-post-start-pre-review-1791661571971861000.safe.json",
+        "sha256": "64187eb1c16721e7cd6b8bfe9ba8c58ac864bbfb28211e722987b0a3f66837e3",
+        "phase": "post-start-pre-review",
+        "runs": 13,
+        "checkpointPayloadBytesHashed": 845313
+      }
+    ],
+    "selectedRuns": 13,
+    "checkpointPayloadBytesHashed": 845313,
+    "logicalGroupsEqual": [
+      "runs",
+      "effects",
+      "interactions",
+      "artifacts",
+      "artifactObjects",
+      "peerDispatch",
+      "peerWaits",
+      "checkpoints",
+      "skills",
+      "project"
+    ],
+    "configReversal": [
+      {
+        "file": "bot-host/models.private",
+        "substitutions": 2,
+        "exactPriorBytesRestored": true
+      }
+    ],
+    "actualUserHostSigkill": false
+  },
+  "fullCoreParityClaimed": false,
+  "productionReadyClaimed": false,
+  "updatedAt": "2026-10-10T20:09:36.856711+00:00"
+}

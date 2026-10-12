@@ -1,0 +1,166 @@
+{
+  "schemaVersion": 1,
+  "kind": "actual-official-grok-programming-and-independent-delivery-check",
+  "recordedAt": "2026-10-07T12:12:54.187650+00:00",
+  "officialClient": "Grok Bot 0.68.1; direct official service",
+  "inputFixture": {
+    "seedSha256": "28874d97014a90a1d162b2eff3e64cb08d5b91efac1898116809435ca47884cc",
+    "sameContractForCmbBot": true,
+    "containsNoUserBusinessData": true
+  },
+  "actualUi": {
+    "taskSubmitted": true,
+    "artifactDownloadedThroughOfficialUi": true,
+    "savedArtifactName": "quote-workbench-fixed.zip",
+    "artifactBytes": 7171,
+    "artifactSha256": "ec64db2f4d0dab91f686d87e55d680e4f6bd9ee36e81cdccfaeea5c1a18e68b4",
+    "claimedFixedBrowserCases": 22,
+    "claimedNodeNpmRun": false,
+    "actualStopResumeTested": false
+  },
+  "independentOriginalFrozenBrowserAcceptance": {
+    "actualDownloadedModulesExecuted": true,
+    "browserPage": "http://127.0.0.1:57182/__acceptance",
+    "button": "运行当前源码验收",
+    "cases": 22,
+    "passed": 22,
+    "accepted": true,
+    "sourceStable": true,
+    "oracleUnchanged": true,
+    "observedThrough": "CUA browser UI; no fabricated return values"
+  },
+  "independentAdditionalQualityCheck": {
+    "kind": "independent-real-delivered-module-contract-check",
+    "sourceSha": "aed26dc35b8946732ba68219a5269a4e6f06e037e5c73d448986c891e2f3c881",
+    "sourceStable": true,
+    "cases": [
+      {
+        "name": "illegal nested line structure",
+        "passed": false,
+        "actual": {
+          "lines": [
+            null
+          ],
+          "discountPercent": 0,
+          "taxPercent": 8
+        },
+        "expected": {
+          "lines": [
+            {
+              "id": "a",
+              "description": "A",
+              "quantity": 1,
+              "unitPrice": "1.00"
+            }
+          ],
+          "discountPercent": 0,
+          "taxPercent": 8
+        }
+      },
+      {
+        "name": "illegal nested quantity type",
+        "passed": false,
+        "actual": {
+          "lines": [
+            {
+              "id": "a",
+              "description": "A",
+              "quantity": "oops",
+              "unitPrice": "1.00"
+            }
+          ],
+          "discountPercent": 0,
+          "taxPercent": 8
+        },
+        "expected": {
+          "lines": [
+            {
+              "id": "a",
+              "description": "A",
+              "quantity": 1,
+              "unitPrice": "1.00"
+            }
+          ],
+          "discountPercent": 0,
+          "taxPercent": 8
+        }
+      },
+      {
+        "name": "invalid saved tax range",
+        "passed": false,
+        "actual": {
+          "lines": [],
+          "discountPercent": 0,
+          "taxPercent": 101
+        },
+        "expected": {
+          "lines": [
+            {
+              "id": "a",
+              "description": "A",
+              "quantity": 1,
+              "unitPrice": "1.00"
+            }
+          ],
+          "discountPercent": 0,
+          "taxPercent": 8
+        }
+      }
+    ],
+    "scope": "This checks only the reviewed generated storage module against the supplied invalid-structure recovery contract; it is not the frozen 22-case oracle or a full UI/model-quality pass."
+  },
+  "deliveredFiles": [
+    {
+      "file": "AGENTS.md",
+      "bytes": 483,
+      "sha256": "1cc9668514035e017a218bd8f0a573c3e8a6c0dfe44b4cfaac0b4e118782f51d"
+    },
+    {
+      "file": "README.md",
+      "bytes": 2402,
+      "sha256": "9c1c26ed944193aa470c9368747273763255a6122976c2a759ef4424c0f0cc55"
+    },
+    {
+      "file": "index.html",
+      "bytes": 746,
+      "sha256": "2d2861c4d178e687107facb1635b3f75fa8c7b36bcba5e5fd7dae942fe51ba11"
+    },
+    {
+      "file": "src/app.js",
+      "bytes": 2220,
+      "sha256": "dfcd03a200b804c9ffc4cc6ceb66045085eb17788cc2e5bc6d6c77394875c2e5"
+    },
+    {
+      "file": "src/money.js",
+      "bytes": 870,
+      "sha256": "c61c839850bfd79817fb831f84c89a5dc1c274391a1537bd70f391976fca32ac"
+    },
+    {
+      "file": "src/quote.js",
+      "bytes": 1204,
+      "sha256": "aa8ae72e3a9e8160b5a530bc2f6ea729b75fc27fa174d3a11f6a876685ae3615"
+    },
+    {
+      "file": "src/render.js",
+      "bytes": 2135,
+      "sha256": "088087fa165fbe6ed79db2c640a76ee3377f4592bcd9744489c9f41c10320580"
+    },
+    {
+      "file": "src/sample.js",
+      "bytes": 295,
+      "sha256": "450a2c1f799f70c4011bce399eed9d57cc317ce75316b485b9b2008536991b6a"
+    },
+    {
+      "file": "src/storage.js",
+      "bytes": 721,
+      "sha256": "aed26dc35b8946732ba68219a5269a4e6f06e037e5c73d448986c891e2f3c881"
+    },
+    {
+      "file": "styles.css",
+      "bytes": 1071,
+      "sha256": "f199df2b52cf361b6ff2836d5129008f3fd8153ba60645277542cfba3166fada"
+    }
+  ],
+  "overallProgrammingQualityPass": false,
+  "scope": "Frozen 22 cases passed independently. Three additional invalid saved-state contract cases failed. No generic long-command execution or stop-resume parity is claimed. CMB Bot and original CmbCowork comparison remains pending."
+}

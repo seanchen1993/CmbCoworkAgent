@@ -1,0 +1,146 @@
+{
+  "kind": "formal-context-followup-and-created-role",
+  "recordedAt": "2026-10-10T02:12:44.339928+00:00",
+  "nativeBuildId": "9205e58973c8131dc4973e98",
+  "schema": 71,
+  "formalVia": "CUA native App UI, configured real MiniMax M3",
+  "createdRole": {
+    "creation": {
+      "id": "48c43977-005e-4ea5-8737-1eca2314e4da",
+      "bot_id": "4002cdce-8149-4dfc-9c4b-28abd67d30c1",
+      "conversation_id": "605d7439-67dd-48e8-a482-c3e988c39a76",
+      "message_id": "b8b849df-5a17-4470-9201-e41d4918603a",
+      "status": "succeeded",
+      "result": "\n\n已创建 Bot「资料校对助手」，职责如上，未建立例程。",
+      "modelRequests": 2,
+      "unknownUsage": 0,
+      "structure": {
+        "runId": "48c43977-005e-4ea5-8737-1eca2314e4da",
+        "messageTypes": {
+          "HumanMessage": 37,
+          "AIMessageChunk": 2,
+          "ToolMessage": 1
+        },
+        "modelToolNames": [
+          "create_bot"
+        ],
+        "toolResultClassifications": [
+          {
+            "name": "create_bot",
+            "containsSavedPreferenceId": false,
+            "containsSavedPreferenceCode": false,
+            "containsSavedPreferenceFormat": false,
+            "containsPreviousPublicSummary": false
+          }
+        ],
+        "selectedInstructionClassifications": [],
+        "privateTextNotCopied": true
+      }
+    },
+    "profile": {
+      "id": "33b3c8f1-45d8-4cf0-8463-1f6c7134247a",
+      "name": "资料校对助手",
+      "model_ref": "custom:minimax-m3",
+      "workspace_path": "/Users/chenqiang/Library/Application Support/CMBDevClaw-development/2026-10-08/acceptance69-quality/home/bot-host.workspace/1d4cb47e-3800-4f9c-bf38-d734dbbcbafd",
+      "instructions": "核对用户提供的材料和数字，并报告差异；不主动修改文件，不主动访问外部服务。仅基于用户提供的内容进行核对，按差异如实报告。",
+      "revision": 1,
+      "connectorIds": [],
+      "routineCount": 0,
+      "explicitAndAutomaticMemoryCounts": [],
+      "historyBeforeFirstUserTaskCount": 0
+    },
+    "materialTask": {
+      "id": "530f4405-94c5-497e-8a5c-2d5c2f96c51e",
+      "bot_id": "33b3c8f1-45d8-4cf0-8463-1f6c7134247a",
+      "conversation_id": "66db73e0-5fbe-4d60-9fc0-91b070ec416c",
+      "message_id": "54ec3c07-64df-410b-af5f-5181865b7d3e",
+      "status": "succeeded",
+      "result": "\n\n合计：18 + 7 + 25 = **50**\n差额：草稿 52 − 实际合计 50 = **+2**（草稿多算 2）\n草稿是否正确：**不正确**，合计应为 50，不是 52。",
+      "modelRequests": 1,
+      "unknownUsage": 0,
+      "structure": {
+        "runId": "530f4405-94c5-497e-8a5c-2d5c2f96c51e",
+        "messageTypes": {
+          "HumanMessage": 1,
+          "AIMessageChunk": 1
+        },
+        "modelToolNames": [],
+        "toolResultClassifications": [],
+        "selectedInstructionClassifications": [],
+        "privateTextNotCopied": true
+      }
+    },
+    "sameInputOfficialGrokReply": "草稿不正确：甲 18 + 乙 7 + 丙 25 的合计是 50，不是 52。草稿多写了 2。",
+    "finiteResultPassed": true,
+    "creationNavigationDifference": "Official reply links to the created Bot; current CMB final text does not. Candidate attaches original transaction identity via existing entity references.",
+    "introductionDifference": "Official automatically greets in the new chat. Current tool-created CMB Bot remains empty until user assignment; candidate does not change this."
+  },
+  "contextFollowup": {
+    "current": {
+      "id": "331bc3c7-1789-4773-be39-3b35a3062533",
+      "conversation_id": "7f08d20f-73d8-4507-a26f-dfbc64d6529e",
+      "status": "completed",
+      "round": 1,
+      "total_messages": 1,
+      "input": "？",
+      "runs": [
+        {
+          "id": "9b6f8335-be85-4bae-b4fb-3ad628821b57",
+          "status": "succeeded",
+          "sent_count": 0,
+          "modelRequests": 2,
+          "unknownUsage": 0
+        },
+        {
+          "id": "41d4d0c4-7d3b-4c3f-b019-44aea7194bdf",
+          "status": "succeeded",
+          "sent_count": 1,
+          "modelRequests": 2,
+          "unknownUsage": 0
+        },
+        {
+          "id": "66c04af8-9b1f-4674-8091-d0bcd0fa6d90",
+          "status": "succeeded",
+          "sent_count": 0,
+          "modelRequests": 2,
+          "unknownUsage": 0
+        },
+        {
+          "id": "a41b7d8a-bc9b-4a39-91b0-b484b018b59d",
+          "status": "succeeded",
+          "sent_count": 0,
+          "modelRequests": 2,
+          "unknownUsage": 0
+        }
+      ],
+      "publicMessages": [
+        {
+          "bot_id": "e1d81813-1ff0-4fca-9948-d966e1a77189",
+          "run_id": "41d4d0c4-7d3b-4c3f-b019-44aea7194bdf",
+          "text": "请问需要我做什么？目前没有具体任务，请说明需求。"
+        }
+      ]
+    },
+    "sameInputOfficialGrokReply": "这轮完成了：我用「技能状态核验」算出 286 + 47 = 333，新 Bot 核对后确认正确。还要接着测别的吗？",
+    "contextAligned": false,
+    "candidate": "Use original human history and read_message for related saved public replies before clarification; no punctuation classifier, answer rewriting or new authorization."
+  },
+  "sourceCandidatesNotYetLive": [
+    "group-context-followup",
+    "created-bot-result-navigation"
+  ],
+  "sourceGates": {
+    "nearest": {
+      "files": 4,
+      "passed": 49,
+      "log": "/tmp/cmb-profile-result-owning-20261010.log"
+    },
+    "actualSdk": {
+      "passed": 4,
+      "unselected": 326,
+      "log": "/tmp/cmb-profile-result-sdk-20261010.log"
+    }
+  },
+  "coreParityComplete": false,
+  "privateCheckpointBodiesCopied": false
+}

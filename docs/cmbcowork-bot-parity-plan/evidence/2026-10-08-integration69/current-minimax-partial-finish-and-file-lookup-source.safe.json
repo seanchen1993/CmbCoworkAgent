@@ -1,0 +1,151 @@
+{
+  "kind": "minimax-partial-finish-and-missing-attachment-source-verification",
+  "recordedAt": "2026-10-09T08:09:21.098274+00:00",
+  "liveBuildAtObservation": "d83a01a9b33434377e0f6dd7",
+  "candidateSourceNotYetLive": true,
+  "compatibilityScope": "Exact configured MiniMax-M3 only; empty marker before this choice terminal only; requires explicit normal terminal, valid final usage, clean complete EOF and no errors/uninspected frames",
+  "historicalReadOnlyBudget": {
+    "runId": "a09a7dfc-de97-4bad-9c2b-2945e71360ad",
+    "ledgerRequests": 210,
+    "unknownRequests": 38,
+    "traceMatched": 188,
+    "onlyEmptyFinishRejectionCalls": 15,
+    "reservedForMatched": 30720,
+    "providerReportedForMatched": 805,
+    "historicalReservationsRefunded": false,
+    "sourceLogs": [
+      {
+        "path": "/Users/chenqiang/Library/Application Support/CMBDevClaw-development/2026-10-08/acceptance69-final/home/bot-host/host.log",
+        "bytes": 1623807,
+        "sha256": "3d5e726fc60aca47ea993a92aebbc7e52113d55257db1a2195d76d6166a1e313"
+      }
+    ]
+  },
+  "configuredRealModelProbe": {
+    "report": {
+      "path": "/Users/chenqiang/Library/Application Support/CMBDevClaw-development/2026-10-08/output-contract/operation-real-review-Vq4hqA/result.safe.json",
+      "bytes": 1067,
+      "sha256": "f01e179bb4b0599dba06c6b814eba49672283811dcc0c01c65f71f00b4b6b9dc"
+    },
+    "actionsExecuted": false,
+    "formalAppAcceptance": false,
+    "results": [
+      {
+        "originalInteraction": "716f57f6-e43a-48e9-924f-9b2c263714c3",
+        "actionSha256": "c69922e898d0820fa27151a974d4bff3334db2c787c3a3d987fad326ee66d3e3",
+        "decision": "ask",
+        "reason": "自动审核超时，请人工确认。"
+      },
+      {
+        "originalInteraction": "fbaef5de-81f4-4106-8f7f-e14e5eefa6bd",
+        "actionSha256": "f8a199176b74bbc536c205f68dadd7991fec9f3aa2bcd94f77270cb1511c8071",
+        "decision": "allow",
+        "reason": "导航目标是用户明确指定的测试页面 http://127.0.0.1:63066/，用于执行第二阶段要求的真实页面验证，属于原授权范围内的操作。"
+      }
+    ],
+    "diagnostics": [
+      {
+        "model": "MiniMax-M3",
+        "purpose": "operation-review",
+        "doneEvents": 1,
+        "eofCompleted": true,
+        "eofRejectionReasons": [],
+        "terminalFinishEvents": 1,
+        "terminalFinishReasons": [
+          "stop"
+        ],
+        "nonterminalFinishPlaceholders": 13,
+        "outputTokens": 236,
+        "errorEvents": 0,
+        "uninspectedEvents": 0
+      }
+    ],
+    "newUsageRows": [
+      {
+        "id": "f67717b3-b469-4bfc-824d-b5617f4cd224",
+        "reserved": 2048,
+        "consumed": null
+      },
+      {
+        "id": "7fdd09e1-6c2d-4f96-ab08-4ed2e006f968",
+        "reserved": 2048,
+        "consumed": 236
+      }
+    ],
+    "oneTimedOutAttemptRetainsReservation": true,
+    "completeReceiptSettled": true
+  },
+  "lookupRepair": {
+    "observedFormalRun": {
+      "id": "87fca90c-e365-4a0f-afba-e4fc5d246ecc",
+      "status": "failed",
+      "error": "文件不存在",
+      "revision": 697,
+      "updated_at": 1791532377614
+    },
+    "missingArtifactIdOnlyReturnsErrorToolMessage": true,
+    "missingTaskLeaseScopeAndForbiddenFileStillFatal": true,
+    "permissionExpanded": false,
+    "sourceReference": "Existing deepagents FileSystem read errors are returned as model feedback; Bot retains stricter scope failures"
+  },
+  "nearestGates": {
+    "protocolBudgetUsage106": {
+      "exit": 0,
+      "tests": 106,
+      "log": {
+        "path": "/tmp/cmb-minimax-partial-finish-tests-20261009.log",
+        "bytes": 24319,
+        "sha256": "eecb45159a51b0a7e089a2dfb7b9961801f8d5fa498ec9aa2f41c22ee857d22b"
+      }
+    },
+    "projectOriginalCards55": {
+      "exit": 0,
+      "tests": 55,
+      "log": {
+        "path": "/tmp/cmb-project-original-card-tests-20261009.log",
+        "bytes": 1068,
+        "sha256": "35659e53efe28d2046711d4042932b74e076d791212f7b7efa143b6114cac581"
+      }
+    },
+    "actualSdkLookupAndFileScope8": {
+      "exit": 0,
+      "tests": 8,
+      "skippedByNameFilter": 298,
+      "log": {
+        "path": "/tmp/cmb-read-lookup-recovery-sdk-tests-retry1-20261009.log",
+        "bytes": 77745,
+        "sha256": "2852699e550813fa58e7c1c190b711384b50d2235251601293fa77b1ca877dae"
+      }
+    },
+    "lookupNodeTypes": {
+      "exit": 0,
+      "log": {
+        "path": "/tmp/cmb-read-lookup-recovery-node-20261009.log",
+        "bytes": 91,
+        "sha256": "546c7bfd36ecac14793f941add6251c16a729819d1b744cccbaf256a91e1b42c"
+      }
+    },
+    "lookupStrictLint": {
+      "exit": 0,
+      "log": {
+        "path": "/tmp/cmb-read-lookup-recovery-lint-retry1-20261009.log",
+        "bytes": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      }
+    }
+  },
+  "retainedFailures": [
+    {
+      "path": "/tmp/cmb-read-lookup-recovery-sdk-tests-20261009.log",
+      "bytes": 53901,
+      "sha256": "d1601484e24255518277f17ca9dcd81a914412ad210e6bb8bbeb8dde880b0979"
+    },
+    {
+      "path": "/tmp/cmb-read-lookup-recovery-lint-20261009.log",
+      "bytes": 289,
+      "sha256": "827c2ffc44622e391ff1334c61692724fe4e8178f1a6086678d8acf87b9f1644"
+    }
+  ],
+  "projectOriginalCardScope": "Only explicit approved project_publish, using original bytes plus the existing atomic artifact/message transaction; no backup/draft auto-delivery",
+  "wholeCoreParityComplete": false
+}

@@ -14,6 +14,7 @@ import {
 } from "../../shared/agent-runtime-limits"
 import { getCmbCoworkAgentDataRoot } from "../app-data-root"
 import { withoutGitRepositoryOverrides } from "./git-environment"
+import { readWorktreePreview } from "./git-worktree-preview"
 import {
   openStableFileHandle,
   readStableFileHandleBounded
@@ -135,6 +136,7 @@ interface GitResult {
   stdout: string
   stderr: string
   infrastructureFailure: boolean
+  outputLimitExceeded?: boolean
 }
 
 interface GitProcessTestOverride {
@@ -152,7 +154,8 @@ async function git(
   args: string[],
   timeoutMs = GIT_QUERY_TIMEOUT_MS,
   signal?: AbortSignal,
-  processTestOverride?: GitProcessTestOverride
+  processTestOverride?: GitProcessTestOverride,
+  maxBuffer = 16 * 1024 * 1024
 ): Promise<GitResult> {
   try {
     // These are host-owned lifecycle commands, so none may execute hooks from
@@ -176,7 +179,7 @@ async function git(
         env: GIT_BASE_ENV,
         timeout: timeoutMs,
         signal,
-        maxBuffer: 16 * 1024 * 1024,
+        maxBuffer,
         ...GIT_SPAWN_OPTIONS
       }
     )
@@ -187,7 +190,9 @@ async function git(
       code: typeof e.code === "number" ? e.code : 1,
       stdout: typeof e.stdout === "string" ? e.stdout : "",
       stderr: typeof e.stderr === "string" && e.stderr ? e.stderr : (e.message ?? "git failed"),
-      infrastructureFailure: typeof e.code !== "number"
+      infrastructureFailure: typeof e.code !== "number",
+      outputLimitExceeded: e.code === "ERR_CHILD_PROCESS_STDIO_MAXBUFFER" &&
+        Boolean(e.message?.startsWith("stdout"))
     }
   }
 }
@@ -1321,7 +1326,7 @@ async function readWorkflowWorktreeRecord(
   return selected
 }
 
-async function loadCurrentWorkflowWorktreeRecord(
+export async function loadCurrentWorkflowWorktreeRecord(
   expected: WorkflowWorktreeRecord,
   appDataRoot?: string
 ): Promise<WorkflowWorktreeRecord> {
@@ -2036,6 +2041,8 @@ interface WorkflowWorktreeDiff {
   record: WorkflowWorktreeRecord
   /** Human-readable bounded summary: commits, diffstat, then working-tree status. */
   summary: string
+  patch?: string
+  patchTruncated?: boolean
 }
 
 interface WorkflowWorktreeActionResult {
@@ -2244,6 +2251,7 @@ export async function diffWorkflowWorktree(input: {
   workspacePath: string
   record: WorkflowWorktreeRecord
   appDataRoot?: string
+  includePatch?: boolean
 }): Promise<WorkflowWorktreeDiff> {
   return withWorktreeActionLock(input.record, async () => {
     const current = await loadCurrentWorkflowWorktreeRecord(input.record, input.appDataRoot)
@@ -2293,9 +2301,24 @@ export async function diffWorkflowWorktree(input: {
         throw new GitWorktreeError(gitFailure(status, "failed to inspect worktree status"))
       }
       if (status.stdout.trim()) sections.push(`Uncommitted changes:\n${status.stdout.trim()}`)
+      let patch: string | undefined
+      let patchTruncated = false
+      if (input.includePatch) {
+        const preview = await readWorktreePreview({
+          ...record,
+          query: (args, maxBytes) => git(record.directory, [
+            "-c", `core.excludesFile=${path.join(path.dirname(record.directory), WORKTREE_INTERNAL_EXCLUDES_FILE_NAME)}`,
+            ...args
+          ], GIT_QUERY_TIMEOUT_MS, undefined, undefined, maxBytes)
+        })
+        patch = preview.patch
+        patchTruncated = preview.patchTruncated
+        if (preview.warnings.length) sections.push(preview.warnings.join("\n"))
+      }
       const summary = sections.join("\n\n") || "No changes."
       return {
         record,
+        ...(input.includePatch ? { patch, patchTruncated } : {}),
         summary:
           summary.length <= WORKFLOW_WORKTREE_DIFF_SUMMARY_MAX_CHARS
             ? summary
@@ -2312,6 +2335,8 @@ export async function discardWorkflowWorktree(input: {
   workspacePath: string
   record: WorkflowWorktreeRecord
   appDataRoot?: string
+  /** Pins the commit shown in the caller's explicit discard confirmation. */
+  expectedHeadCommit?: string
 }): Promise<WorkflowWorktreeActionResult> {
   return withWorktreeActionLock(input.record, async () => {
     const current = await loadCurrentWorkflowWorktreeRecord(input.record, input.appDataRoot)
@@ -2340,6 +2365,9 @@ export async function discardWorkflowWorktree(input: {
         discardHeadResult.code === 0 && /^[0-9a-f]{40,64}$/i.test(discardHeadResult.stdout.trim())
           ? discardHeadResult.stdout.trim()
           : undefined
+      if (input.expectedHeadCommit && discardHead !== input.expectedHeadCommit) {
+        throw new GitWorktreeError("reviewed deliverable changed before discard; refresh and review again")
+      }
       let record = await transitionWorkflowWorktreeRecord(
         current,
         "discarded",
@@ -2478,6 +2506,8 @@ export async function mergeWorkflowWorktree(input: {
   record: WorkflowWorktreeRecord
   appDataRoot?: string
   signal?: AbortSignal
+  /** Optional exact deliverable approved by a caller's review UI. */
+  expectedHeadCommit?: string
   /** Deterministic regression seam for the irreversible ref-CAS boundary. */
   testHooks?: { afterSourceRefAdvanced?: () => void | Promise<void> }
 }): Promise<WorkflowWorktreeActionResult> {
@@ -2513,6 +2543,10 @@ export async function mergeWorkflowWorktree(input: {
         if (repo.checkoutState === "missing") {
           const sourceBranch = record.sourceBranch
           const headCommit = record.headCommit
+          if (input.expectedHeadCommit && headCommit !== input.expectedHeadCommit)
+            throw new GitWorktreeError(
+              "reviewed deliverable changed; review the current diff before merging"
+            )
           if (
             !sourceBranch ||
             !headCommit ||
@@ -2564,6 +2598,10 @@ export async function mergeWorkflowWorktree(input: {
         )
         throwIfAborted()
         if (!inspected.headCommit) throw new GitWorktreeError("cannot resolve deliverable HEAD")
+        if (input.expectedHeadCommit && inspected.headCommit !== input.expectedHeadCommit)
+          throw new GitWorktreeError(
+            "reviewed deliverable changed; review the current diff before merging"
+          )
         if (inspected.dirty) {
           throw new GitWorktreeError(
             "commit or discard all worktree changes before merging",

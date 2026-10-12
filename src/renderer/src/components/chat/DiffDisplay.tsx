@@ -1,6 +1,7 @@
 import { GitCommit, Maximize2, Minimize2, Eye, Minus, Plus } from "lucide-react"
 import { memo, useEffect, useMemo, useState, useSyncExternalStore } from "react"
 import { VirtualList } from "@/components/ui/virtual-list"
+import { Dialog, DialogContent, DialogTitle } from "@/components/ui/dialog"
 import { cn } from "@/lib/utils"
 import { buildLineDiffRows, type DiffRow } from "@/lib/diff-utils"
 import { DEFAULT_THEME_ID, getThemeDefinition } from "@/lib/theme-registry"
@@ -511,6 +512,11 @@ export const DiffDisplay = memo(({ diff, oldValue, newValue, filePath }: DiffDis
           <span className="text-[11px] font-semibold text-foreground tracking-wide truncate">
             变更预览
           </span>
+          {diffFiles.length === 1 && selectedFile?.displayPath && (
+            <span className="truncate font-mono text-[10px] text-muted-foreground" title={selectedFile.displayPath}>
+              {filePath || selectedFile.displayPath}
+            </span>
+          )}
           {diffFiles.length > 1 && (
             <span className="text-[10px] text-muted-foreground shrink-0">
               {diffFiles.length} 个文件
@@ -579,21 +585,22 @@ export const DiffDisplay = memo(({ diff, oldValue, newValue, filePath }: DiffDis
       </div>
 
       {/* Fullscreen modal */}
-      {isFullscreen && (
-        <div
-          className="fixed inset-0 z-50 flex flex-col bg-background/98 backdrop-blur-sm"
-          style={{ marginTop: "40px" }}
+      <Dialog open={isFullscreen} onOpenChange={setIsFullscreen}>
+        <DialogContent
+          className="top-[calc(50%+20px)] flex h-[calc(100dvh-40px)] max-w-none flex-col gap-0 rounded-none border-0 bg-background/98 p-0 backdrop-blur-sm sm:rounded-none"
+          aria-describedby={undefined}
         >
+          <DialogTitle className="sr-only">代码差异</DialogTitle>
           {/* Modal header */}
-          <div className="flex items-center justify-between px-4 py-3 border-b border-border bg-muted/40 shrink-0">
+          <div className="flex items-center justify-between pl-4 pr-12 py-3 border-b border-border bg-muted/40 shrink-0">
             <div className="flex items-center gap-3">
               <div className="min-w-0 flex items-center gap-2">
-                {filePath && (
+                {(filePath || selectedFile?.displayPath) && (
                   <div
                     className="mt-1 max-w-[60vw] truncate font-mono text-sm font-semibold"
-                    title={filePath}
+                    title={filePath || selectedFile?.displayPath}
                   >
-                    {filePath}
+                    {filePath || selectedFile?.displayPath}
                   </div>
                 )}
               </div>
@@ -639,8 +646,8 @@ export const DiffDisplay = memo(({ diff, oldValue, newValue, filePath }: DiffDis
               {makeDiffViewer(true)}
             </div>
           </div>
-        </div>
-      )}
+        </DialogContent>
+      </Dialog>
     </div>
   )
 })

@@ -1,0 +1,293 @@
+{
+  "kind": "exact-run-adjacent-safe-diagnostic",
+  "runId": "7ce95aad-593c-494e-b345-58bd267815f8",
+  "exactStreamEnded": 25,
+  "matched": 25,
+  "ambiguousOrMissing": 0,
+  "counts": [
+    {
+      "doneEvents": 0,
+      "errorEvents": 0,
+      "uninspectedEvents": 0,
+      "calls": 25
+    }
+  ],
+  "calls": [
+    {
+      "callId": "7256aef2-9b9d-46be-b835-28a305e378bb",
+      "adjacentExactCounterMatch": true,
+      "doneEvents": 0,
+      "errorEvents": 0,
+      "uninspectedEvents": 0,
+      "dataEvents": 48,
+      "deltaEvents": 47,
+      "messageEvents": 0,
+      "format": "sse"
+    },
+    {
+      "callId": "031de6f6-24a8-41ae-af60-ca9550c5001e",
+      "adjacentExactCounterMatch": true,
+      "doneEvents": 0,
+      "errorEvents": 0,
+      "uninspectedEvents": 0,
+      "dataEvents": 11,
+      "deltaEvents": 10,
+      "messageEvents": 0,
+      "format": "sse"
+    },
+    {
+      "callId": "dd199ce2-115d-4772-82c7-fc05ecf9b201",
+      "adjacentExactCounterMatch": true,
+      "doneEvents": 0,
+      "errorEvents": 0,
+      "uninspectedEvents": 0,
+      "dataEvents": 9,
+      "deltaEvents": 8,
+      "messageEvents": 0,
+      "format": "sse"
+    },
+    {
+      "callId": "d1bf1fab-b835-4ec8-8ab4-7ef4c948ac88",
+      "adjacentExactCounterMatch": true,
+      "doneEvents": 0,
+      "errorEvents": 0,
+      "uninspectedEvents": 0,
+      "dataEvents": 11,
+      "deltaEvents": 10,
+      "messageEvents": 0,
+      "format": "sse"
+    },
+    {
+      "callId": "16099eae-a93d-4ac8-9326-458a065d27d3",
+      "adjacentExactCounterMatch": true,
+      "doneEvents": 0,
+      "errorEvents": 0,
+      "uninspectedEvents": 0,
+      "dataEvents": 9,
+      "deltaEvents": 8,
+      "messageEvents": 0,
+      "format": "sse"
+    },
+    {
+      "callId": "75213327-43b9-4bc4-9aa0-d0dc4585cd03",
+      "adjacentExactCounterMatch": true,
+      "doneEvents": 0,
+      "errorEvents": 0,
+      "uninspectedEvents": 0,
+      "dataEvents": 332,
+      "deltaEvents": 331,
+      "messageEvents": 0,
+      "format": "sse"
+    },
+    {
+      "callId": "ae2faa78-5d9f-42ca-8b91-899ea15ae289",
+      "adjacentExactCounterMatch": true,
+      "doneEvents": 0,
+      "errorEvents": 0,
+      "uninspectedEvents": 0,
+      "dataEvents": 4,
+      "deltaEvents": 3,
+      "messageEvents": 0,
+      "format": "sse"
+    },
+    {
+      "callId": "42b4e50c-cc06-46fd-9aff-763bc44e650a",
+      "adjacentExactCounterMatch": true,
+      "doneEvents": 0,
+      "errorEvents": 0,
+      "uninspectedEvents": 0,
+      "dataEvents": 4,
+      "deltaEvents": 3,
+      "messageEvents": 0,
+      "format": "sse"
+    },
+    {
+      "callId": "29bb78ee-e422-485c-8a0d-d97e1098eb3f",
+      "adjacentExactCounterMatch": true,
+      "doneEvents": 0,
+      "errorEvents": 0,
+      "uninspectedEvents": 0,
+      "dataEvents": 14,
+      "deltaEvents": 13,
+      "messageEvents": 0,
+      "format": "sse"
+    },
+    {
+      "callId": "8faad8d3-7753-4b24-b423-42712b2ab018",
+      "adjacentExactCounterMatch": true,
+      "doneEvents": 0,
+      "errorEvents": 0,
+      "uninspectedEvents": 0,
+      "dataEvents": 4,
+      "deltaEvents": 3,
+      "messageEvents": 0,
+      "format": "sse"
+    },
+    {
+      "callId": "bfe299b7-3b1f-4a6d-b1c8-fcf191f537f1",
+      "adjacentExactCounterMatch": true,
+      "doneEvents": 0,
+      "errorEvents": 0,
+      "uninspectedEvents": 0,
+      "dataEvents": 11,
+      "deltaEvents": 10,
+      "messageEvents": 0,
+      "format": "sse"
+    },
+    {
+      "callId": "a89891ab-7529-463c-b86f-fe689885437f",
+      "adjacentExactCounterMatch": true,
+      "doneEvents": 0,
+      "errorEvents": 0,
+      "uninspectedEvents": 0,
+      "dataEvents": 4,
+      "deltaEvents": 3,
+      "messageEvents": 0,
+      "format": "sse"
+    },
+    {
+      "callId": "dc99a337-6865-427f-ab72-aebc096b67b3",
+      "adjacentExactCounterMatch": true,
+      "doneEvents": 0,
+      "errorEvents": 0,
+      "uninspectedEvents": 0,
+      "dataEvents": 13,
+      "deltaEvents": 12,
+      "messageEvents": 0,
+      "format": "sse"
+    },
+    {
+      "callId": "ec41211e-321f-456f-bc0a-76c41fa6f0ac",
+      "adjacentExactCounterMatch": true,
+      "doneEvents": 0,
+      "errorEvents": 0,
+      "uninspectedEvents": 0,
+      "dataEvents": 4,
+      "deltaEvents": 3,
+      "messageEvents": 0,
+      "format": "sse"
+    },
+    {
+      "callId": "36012c2d-6787-4114-8a65-5c1dc08e9e4e",
+      "adjacentExactCounterMatch": true,
+      "doneEvents": 0,
+      "errorEvents": 0,
+      "uninspectedEvents": 0,
+      "dataEvents": 12,
+      "deltaEvents": 11,
+      "messageEvents": 0,
+      "format": "sse"
+    },
+    {
+      "callId": "3b65d3b1-ba0c-4f62-bd7a-48530c5bbd51",
+      "adjacentExactCounterMatch": true,
+      "doneEvents": 0,
+      "errorEvents": 0,
+      "uninspectedEvents": 0,
+      "dataEvents": 4,
+      "deltaEvents": 3,
+      "messageEvents": 0,
+      "format": "sse"
+    },
+    {
+      "callId": "33954ed5-720e-47dd-a7b8-54150d0c7b4c",
+      "adjacentExactCounterMatch": true,
+      "doneEvents": 0,
+      "errorEvents": 0,
+      "uninspectedEvents": 0,
+      "dataEvents": 10,
+      "deltaEvents": 9,
+      "messageEvents": 0,
+      "format": "sse"
+    },
+    {
+      "callId": "3a465542-6c2e-4bee-a782-0dd1f7c2fe39",
+      "adjacentExactCounterMatch": true,
+      "doneEvents": 0,
+      "errorEvents": 0,
+      "uninspectedEvents": 0,
+      "dataEvents": 4,
+      "deltaEvents": 3,
+      "messageEvents": 0,
+      "format": "sse"
+    },
+    {
+      "callId": "47925e13-bb19-4b3c-91ac-2b37d528da59",
+      "adjacentExactCounterMatch": true,
+      "doneEvents": 0,
+      "errorEvents": 0,
+      "uninspectedEvents": 0,
+      "dataEvents": 156,
+      "deltaEvents": 155,
+      "messageEvents": 0,
+      "format": "sse"
+    },
+    {
+      "callId": "bcbc70a1-106c-4456-996d-2399b0de46b1",
+      "adjacentExactCounterMatch": true,
+      "doneEvents": 0,
+      "errorEvents": 0,
+      "uninspectedEvents": 0,
+      "dataEvents": 1261,
+      "deltaEvents": 1260,
+      "messageEvents": 0,
+      "format": "sse"
+    },
+    {
+      "callId": "ac214b41-d553-40b6-b51a-3e73753799f8",
+      "adjacentExactCounterMatch": true,
+      "doneEvents": 0,
+      "errorEvents": 0,
+      "uninspectedEvents": 0,
+      "dataEvents": 4,
+      "deltaEvents": 3,
+      "messageEvents": 0,
+      "format": "sse"
+    },
+    {
+      "callId": "6ac9a248-9ade-4f57-97e4-a002795863c9",
+      "adjacentExactCounterMatch": true,
+      "doneEvents": 0,
+      "errorEvents": 0,
+      "uninspectedEvents": 0,
+      "dataEvents": 4,
+      "deltaEvents": 3,
+      "messageEvents": 0,
+      "format": "sse"
+    },
+    {
+      "callId": "44c74490-ff4b-4512-a239-5d375b26432b",
+      "adjacentExactCounterMatch": true,
+      "doneEvents": 0,
+      "errorEvents": 0,
+      "uninspectedEvents": 0,
+      "dataEvents": 13,
+      "deltaEvents": 12,
+      "messageEvents": 0,
+      "format": "sse"
+    },
+    {
+      "callId": "b52ca835-a0c1-4ab0-8929-baeece36106a",
+      "adjacentExactCounterMatch": true,
+      "doneEvents": 0,
+      "errorEvents": 0,
+      "uninspectedEvents": 0,
+      "dataEvents": 4,
+      "deltaEvents": 3,
+      "messageEvents": 0,
+      "format": "sse"
+    },
+    {
+      "callId": "176c83bd-7c83-4b07-9ff4-0d952a6afb9f",
+      "adjacentExactCounterMatch": true,
+      "doneEvents": 0,
+      "errorEvents": 0,
+      "uninspectedEvents": 0,
+      "dataEvents": 16,
+      "deltaEvents": 15,
+      "messageEvents": 0,
+      "format": "sse"
+    }
+  ],
+  "correlation": "Existing factory diagnostic immediately follows exact run call trace with identical pid/status/bytes/provider counters; no durable callId in factory diagnostic."
+}

@@ -1,0 +1,19 @@
+{
+  "atEpochMs": 1791384173398,
+  "host": {
+    "hostId": "5f323fa4-a308-4e82-bdb3-ee3740da51d4",
+    "pid": 37565,
+    "buildId": "b4d31d62d589840f5147422a"
+  },
+  "schema": 65,
+  "rendererBundle": "BotWorkspace-DbBvFzU3.js",
+  "newRun": {
+    "id": "5d219477-5620-42be-97ef-b9bb7561e887",
+    "root_run_id": "5d219477-5620-42be-97ef-b9bb7561e887",
+    "conversation_id": "018288c9-f29e-45f8-9131-e9a34e0a36aa",
+    "status": "waiting_input",
+    "created_at": 1791384118921
+  },
+  "previousUpgradeAttemptStoppedByRoot": "346c3d95-fe71-4c9f-b705-9dec1a181ce3",
+  "caution": "Initial idle restart spawned old binary before build; Root stopped that task, restarted after build, verified schema65 and new buildId. Only newRun may validate EOF fix."
+}

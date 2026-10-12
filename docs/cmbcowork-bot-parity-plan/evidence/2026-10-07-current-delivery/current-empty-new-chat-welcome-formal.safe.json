@@ -1,0 +1,260 @@
+{
+  "schemaVersion": 1,
+  "kind": "formal-host-read-only-task-evidence",
+  "startedAt": "2026-10-07T12:46:34.199Z",
+  "collection": "collected",
+  "host": {
+    "id": "150315b5-afdd-4a8a-a774-541856a2cc26",
+    "pid": 84644,
+    "buildId": "b05f08414bcd1618c94ec3f2",
+    "dataEpoch": "initial",
+    "platform": "darwin",
+    "runtimeReady": true,
+    "hasError": false,
+    "startCursor": 1532,
+    "endCursor": 1532,
+    "identityStable": true,
+    "stateChangedDuringCollection": false
+  },
+  "bots": [
+    {
+      "id": "2d863a9d-de36-4cc5-adf9-da3e5a8b7079",
+      "modelRef": null,
+      "modelSelection": "host-default-not-read",
+      "revision": 1,
+      "hidden": false,
+      "deleted": false
+    },
+    {
+      "id": "5494f94d-75a8-4831-b3b0-5d35563f2c69",
+      "modelRef": "custom:minimax-m3",
+      "modelSelection": "explicit",
+      "revision": 2,
+      "hidden": false,
+      "deleted": false
+    },
+    {
+      "id": "6053ad88-f72a-43fe-9e7c-2c549c1375c0",
+      "modelRef": "custom:minimax-m3",
+      "modelSelection": "explicit",
+      "revision": 2,
+      "hidden": false,
+      "deleted": false
+    },
+    {
+      "id": "108c3860-7c30-4822-9975-201a98334516",
+      "modelRef": "custom:minimax-m3",
+      "modelSelection": "explicit",
+      "revision": 2,
+      "hidden": false,
+      "deleted": false
+    },
+    {
+      "id": "a99aa585-9532-4867-b00f-48b25a1bc8a6",
+      "modelRef": "custom:minimax-m3",
+      "modelSelection": "explicit",
+      "revision": 2,
+      "hidden": false,
+      "deleted": false
+    }
+  ],
+  "conversations": [
+    {
+      "id": "f37ae835-4aec-4b33-9455-69da80564ba0",
+      "kind": "direct",
+      "memberIds": [
+        "2d863a9d-de36-4cc5-adf9-da3e5a8b7079"
+      ],
+      "revision": 1,
+      "messages": [
+        {
+          "id": "089a7e0b-fcf1-4137-a0aa-e99d7c5ccd94",
+          "sequence": 42,
+          "botId": "2d863a9d-de36-4cc5-adf9-da3e5a8b7079",
+          "sender": "bot",
+          "runId": "e29a8e83-9fdc-4914-a20b-d68c9452b583",
+          "replyTo": null,
+          "threadRootId": null,
+          "createdAt": 1791376999678,
+          "text": {
+            "bytes": 42,
+            "sha256": "c0050499f6e3ca6bef06149e3bd932a5c2d2bc3751ed25d62e877a36d72625ac"
+          },
+          "attachmentIds": []
+        }
+      ]
+    }
+  ],
+  "runs": [
+    {
+      "conversationId": "f37ae835-4aec-4b33-9455-69da80564ba0",
+      "runId": "e29a8e83-9fdc-4914-a20b-d68c9452b583",
+      "botId": "2d863a9d-de36-4cc5-adf9-da3e5a8b7079",
+      "outcome": "succeeded",
+      "source": "bot-introduction",
+      "messageId": "027cbfd7-71f3-4425-9a6d-f22b66102437",
+      "revision": 11,
+      "createdAt": 1791376995638,
+      "updatedAt": 1791376999678,
+      "parentRunId": null,
+      "rootRunId": null,
+      "lineageAvailable": false,
+      "result": {
+        "bytes": 42,
+        "sha256": "c0050499f6e3ca6bef06149e3bd932a5c2d2bc3751ed25d62e877a36d72625ac"
+      },
+      "error": null,
+      "diagnostic": null,
+      "tokenUsage": {
+        "requests": 1,
+        "unknownRequests": 1,
+        "inputTokens": 0,
+        "outputTokens": 0,
+        "reservedOutputTokens": 8192,
+        "otherModelRequests": 0,
+        "inputReportedRequests": 0,
+        "models": [
+          {
+            "modelRef": "custom:minimax-m2-5",
+            "model": "MiniMax-M2.7",
+            "purpose": "task",
+            "requests": 1,
+            "unknownRequests": 1,
+            "inputReportedRequests": 0,
+            "inputTokens": 0,
+            "outputTokens": 0
+          }
+        ]
+      },
+      "hasBrowser": false,
+      "hasWorktree": false,
+      "children": [],
+      "history": {
+        "pages": 1,
+        "complete": true,
+        "items": [
+          {
+            "cursor": 1529,
+            "createdAt": 1791376999678,
+            "label": {
+              "bytes": 18,
+              "sha256": "f8365c6c29a0525ddbed8d46e443725de8e746e68e7dcae822ec70b580f8901b"
+            },
+            "detail": null,
+            "effectId": null,
+            "interactionId": null,
+            "hasPeerExchange": false
+          },
+          {
+            "cursor": 1517,
+            "createdAt": 1791376996466,
+            "label": {
+              "bytes": 18,
+              "sha256": "a04925737889aa58feaec2ac15b3915159b7c2fe2bcd86270659024e28c241de"
+            },
+            "detail": null,
+            "effectId": null,
+            "interactionId": null,
+            "hasPeerExchange": false
+          },
+          {
+            "cursor": 1516,
+            "createdAt": 1791376996446,
+            "label": {
+              "bytes": 12,
+              "sha256": "f7d5b61de2fd0fc86187780659fc0232438932a7424d16176e72c2f68c878cfa"
+            },
+            "detail": null,
+            "effectId": null,
+            "interactionId": null,
+            "hasPeerExchange": false
+          },
+          {
+            "cursor": 1515,
+            "createdAt": 1791376995638,
+            "label": {
+              "bytes": 12,
+              "sha256": "08127c4d770b4145810c2e7b393fd72cc98fb9e52dbb321048b3e6f3970937ff"
+            },
+            "detail": null,
+            "effectId": null,
+            "interactionId": null,
+            "hasPeerExchange": false
+          }
+        ]
+      },
+      "toolRecords": [],
+      "shellJobs": []
+    }
+  ],
+  "peerExchanges": [],
+  "teach": [
+    {
+      "botId": "2d863a9d-de36-4cc5-adf9-da3e5a8b7079",
+      "sessions": [],
+      "trials": []
+    },
+    {
+      "botId": "5494f94d-75a8-4831-b3b0-5d35563f2c69",
+      "sessions": [],
+      "trials": []
+    },
+    {
+      "botId": "6053ad88-f72a-43fe-9e7c-2c549c1375c0",
+      "sessions": [],
+      "trials": []
+    },
+    {
+      "botId": "108c3860-7c30-4822-9975-201a98334516",
+      "sessions": [],
+      "trials": []
+    },
+    {
+      "botId": "a99aa585-9532-4867-b00f-48b25a1bc8a6",
+      "sessions": [],
+      "trials": []
+    }
+  ],
+  "artifacts": [],
+  "limits": {
+    "bots": 8,
+    "conversations": 8,
+    "messages": 100,
+    "runs": 24,
+    "historyPages": 3,
+    "effects": 32,
+    "peers": 16,
+    "teach": 32,
+    "trials": 32,
+    "artifacts": 32,
+    "artifactBytes": 26214400,
+    "totalArtifactBytes": 104857600,
+    "calls": 512,
+    "deadlineMs": 90000,
+    "callMs": 12000
+  },
+  "coverage": {
+    "truncations": [],
+    "unknownToolNames": true,
+    "exactToolHistoryComplete": false,
+    "businessTextIncluded": false,
+    "providerRawIncluded": false,
+    "credentialsIncluded": false,
+    "taskPassClaimed": false
+  },
+  "transport": {
+    "calls": 23,
+    "closed": true
+  },
+  "scope": [
+    "collection is not task PASS",
+    "run outcomes are Host-recorded outcomes; semantic correctness needs independent fixture/result verification",
+    "token usage is provider-reported accounting; unknown counters remain explicit",
+    "runHistory modelUsage aggregates the root run including children, so never sum parent and child totals",
+    "tool names are only inferred from original structured approval action shape with matching effect ID prefix; read-only/unapproved tools are not guessed",
+    "browser form completion needs fixture POST/download records as well as these Host records",
+    "Teach readiness or trial verdict alone does not prove the learned skill succeeded on new inputs",
+    "no configuration, descriptor token, raw logs or raw business files are exported"
+  ],
+  "completedAt": "2026-10-07T12:46:34.561Z"
+}

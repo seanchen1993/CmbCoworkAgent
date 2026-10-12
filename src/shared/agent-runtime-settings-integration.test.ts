@@ -1,6 +1,6 @@
 import { readFileSync } from "fs"
 import { resolve } from "path"
-import { describe, expect, it } from "vitest"
+import { describe, expect, it, vi } from "vitest"
 import ts from "typescript"
 import {
   configureAgentToolStrategy,
@@ -29,14 +29,170 @@ describe("agent runtime settings integration", () => {
     "src/renderer/src/components/customize/CustomizeView.tsx"
   )
 
-  it("validates the actual tool-strategy IPC handler and restricts it to the main window", () => {
+  it.each([
+    ["Warning", "CMB_AGENT_FAILURE_FUSE_WARN"],
+    ["ModelFeedback", "CMB_AGENT_FAILURE_FUSE_MODEL_FEEDBACK"],
+    ["Debug", "CMB_AGENT_FAIL_FAST"]
+  ])(
+    "waits for failure %s publication and permits retry after a failed acknowledgement",
+    async (suffix, variable) => {
+      const sandbox = readRepositoryFile("src/main/ipc/sandbox.ts")
+      const registration = sourceBetween(
+        sandbox,
+        'ipcMain.handle("sandbox:setFailureFuseWarning"',
+        'ipcMain.handle("sandbox:getPendingApprovals"'
+      )
+      const handlers = new Map<string, (event: unknown, input: unknown) => Promise<void>>()
+      const env: Record<string, string> = {}
+      let release!: () => void
+      const blocked = new Promise<void>((resolve) => {
+        release = resolve
+      })
+      const publish = vi.fn(() => blocked)
+      const notify = vi.fn()
+      new Function(
+        "ipcMain",
+        "process",
+        "publishExecutionSettings",
+        "notifyChanged",
+        ts.transpile(registration, { target: ts.ScriptTarget.ES2022 })
+      )(
+        {
+          handle: (name: string, handler: (event: unknown, input: unknown) => Promise<void>) =>
+            handlers.set(name, handler)
+        },
+        { env },
+        publish,
+        notify
+      )
+      const handler = handlers.get(`sandbox:setFailureFuse${suffix}`)!
+      await expect(handler({}, "true")).rejects.toThrow("Invalid")
+      expect(env).toEqual({})
+      expect(publish).not.toHaveBeenCalled()
+      let acknowledged = false
+      const pending = handler({}, true).then(() => {
+        acknowledged = true
+      })
+      await Promise.resolve()
+      expect(env[variable]).toBe("1")
+      expect(publish).toHaveBeenCalledOnce()
+      expect(acknowledged).toBe(false)
+      expect(notify).not.toHaveBeenCalled()
+      release()
+      await pending
+      expect(notify).toHaveBeenCalledOnce()
+      publish.mockRejectedValueOnce(new Error("publication failed"))
+      await expect(handler({}, false)).rejects.toThrow("publication failed")
+      expect(env[variable]).toBe(suffix === "Warning" ? "0" : undefined)
+      expect(notify).toHaveBeenCalledOnce()
+      await handler({}, false)
+      expect(publish).toHaveBeenCalledTimes(3)
+      expect(notify).toHaveBeenCalledTimes(2)
+      expect(mainProcess).toContain(
+        "registerSandboxHandlers(ipcMain, syncActiveBotExecutionSettings)"
+      )
+    }
+  )
+
+  it("acknowledges a runtime limit only after Bot publication and rejects an unauthorized window", async () => {
+    const registration = sourceBetween(
+      mainProcess,
+      "ipcMain.handle(\n      AGENT_RUNTIME_RECURSION_LIMIT_SET_CHANNEL,",
+      "ipcMain.handle(\n      WORKFLOW_WORKTREE_TIMEOUT_SET_CHANNEL,"
+    )
+    let handler!: (
+      event: { sender: { id: number } },
+      value: unknown
+    ) => Promise<{ recursionLimit: number }>
+    let current = 2000,
+      saved = 2000,
+      publications = 0
+    let publicationFailure = false
+    let publish!: () => void
+    const pending = new Promise<void>((done) => {
+      publish = done
+    })
+    new Function(
+      "ipcMain",
+      "AGENT_RUNTIME_RECURSION_LIMIT_SET_CHANNEL",
+      "mainWindow",
+      "isAgentGraphRecursionLimit",
+      "setStoredAgentGraphRecursionLimit",
+      "configureAgentGraphRecursionLimit",
+      "getAgentGraphRecursionLimit",
+      "getAgentToolStrategy",
+      "getWorkflowWorktreeTimeoutMinutes",
+      "getWorkflowWorktreeRemoveTimeoutMinutes",
+      "syncActiveBotExecutionSettings",
+      ts.transpile(registration, { target: ts.ScriptTarget.ES2022 })
+    )(
+      {
+        handle: (_channel: string, fn: typeof handler) => {
+          handler = fn
+        }
+      },
+      "set-limit",
+      { isDestroyed: () => false, webContents: { id: 7 } },
+      (value: unknown) =>
+        typeof value === "number" && Number.isSafeInteger(value) && value >= 25 && value <= 100000,
+      (value: number) => {
+        saved = value
+        return value
+      },
+      (value: number) => {
+        current = value
+        return value
+      },
+      () => current,
+      () => "standard",
+      () => 3,
+      () => 1,
+      () => {
+        publications++
+        if (publicationFailure) throw new Error("publication failed")
+        return pending
+      }
+    )
+    await expect(handler({ sender: { id: 8 } }, 25)).rejects.toThrow("main window")
+    await expect(handler({ sender: { id: 7 } }, -1)).rejects.toThrow("integer")
+    expect(saved).toBe(2000)
+    expect(publications).toBe(0)
+    let acknowledged = false
+    const result = handler({ sender: { id: 7 } }, 25).then((settings) => {
+      acknowledged = true
+      return settings
+    })
+    await Promise.resolve()
+    expect(saved).toBe(25)
+    expect(current).toBe(25)
+    expect(publications).toBe(1)
+    expect(acknowledged).toBe(false)
+    publish()
+    expect((await result).recursionLimit).toBe(25)
+    publicationFailure = true
+    await expect(handler({ sender: { id: 7 } }, 50)).rejects.toThrow("publication failed")
+    // The local setting may be durable even when detached publication failed.
+    // Repeating the same requested value must retry publication before success.
+    expect(saved).toBe(50)
+    expect(current).toBe(50)
+    publicationFailure = false
+    expect((await handler({ sender: { id: 7 } }, 50)).recursionLimit).toBe(50)
+    expect(publications).toBe(3)
+  })
+
+  it("validates the tool-strategy IPC handler and waits for Bot publication", async () => {
     const registration = sourceBetween(
       mainProcess,
       "ipcMain.handle(\n      AGENT_TOOL_STRATEGY_SET_CHANNEL,",
       "ipcMain.on(CLOSE_TO_TRAY_PROMPT_RESPONSE_CHANNEL"
     )
-    let handler: (event: { sender: { id: number } }, value: unknown) => unknown
+    let handler: (event: { sender: { id: number } }, value: unknown) => Promise<unknown>
     let persisted: unknown
+    let publish!: () => void
+    let publications = 0
+    const publication = new Promise<void>((done) => {
+      publish = done
+    })
     const compiled = ts.transpile(registration, { target: ts.ScriptTarget.ES2022 })
     new Function(
       "ipcMain",
@@ -45,9 +201,11 @@ describe("agent runtime settings integration", () => {
       "isAgentToolStrategy",
       "setStoredAgentToolStrategy",
       "configureAgentToolStrategy",
+      "getAgentToolStrategy",
       "getAgentGraphRecursionLimit",
       "getWorkflowWorktreeTimeoutMinutes",
       "getWorkflowWorktreeRemoveTimeoutMinutes",
+      "syncActiveBotExecutionSettings",
       compiled
     )(
       {
@@ -63,16 +221,31 @@ describe("agent runtime settings integration", () => {
         return value
       },
       configureAgentToolStrategy,
+      getAgentToolStrategy,
       () => 2000,
       () => 3,
-      () => 1
+      () => 1,
+      () => {
+        publications++
+        return publication
+      }
     )
     try {
-      expect(() => handler!({ sender: { id: 8 } }, "shell-first")).toThrow("main window")
-      expect(() => handler!({ sender: { id: 7 } }, "bogus")).toThrow("Invalid")
+      await expect(handler!({ sender: { id: 8 } }, "shell-first")).rejects.toThrow("main window")
+      await expect(handler!({ sender: { id: 7 } }, "bogus")).rejects.toThrow("Invalid")
       expect(persisted).toBeUndefined()
       expect(getAgentToolStrategy()).toBe("standard")
-      expect(handler!({ sender: { id: 7 } }, "shell-first")).toEqual({
+      expect(publications).toBe(0)
+      let acknowledged = false
+      const pending = handler!({ sender: { id: 7 } }, "shell-first").then((value) => {
+        acknowledged = true
+        return value
+      })
+      await Promise.resolve()
+      expect(publications).toBe(1)
+      expect(acknowledged).toBe(false)
+      publish()
+      expect(await pending).toEqual({
         toolStrategy: "shell-first",
         recursionLimit: 2000,
         workflowWorktreeTimeoutMinutes: 3,
@@ -88,7 +261,7 @@ describe("agent runtime settings integration", () => {
       "ipcMain.handle(AGENT_RUNTIME_SETTINGS_GET_CHANNEL",
       "ipcMain.on(CLOSE_TO_TRAY_PROMPT_RESPONSE_CHANNEL"
     )
-    expect(runtimeHandlers.match(/toolStrategy: getAgentToolStrategy\(\)/g)).toHaveLength(4)
+    expect(runtimeHandlers.match(/toolStrategy: getAgentToolStrategy\(\)/g)).toHaveLength(5)
     expect(preload).toContain("setAgentToolStrategy: (value: AgentToolStrategy)")
     expect(preloadTypes).toContain("setAgentToolStrategy: (value: AgentToolStrategy)")
     expect(generalPanel).toContain("下次运行生效，当前任务不受影响")
@@ -97,8 +270,92 @@ describe("agent runtime settings integration", () => {
     )
   })
 
+  it.each([
+    {
+      channel: "WORKFLOW_WORKTREE_TIMEOUT_SET_CHANNEL",
+      next: "WORKFLOW_WORKTREE_REMOVE_TIMEOUT_SET_CHANNEL",
+      suffix: "WorkflowWorktreeTimeoutMinutes",
+      field: "workflowWorktreeTimeoutMinutes",
+      initial: 3,
+      value: 17,
+      max: 120
+    },
+    {
+      channel: "WORKFLOW_WORKTREE_REMOVE_TIMEOUT_SET_CHANNEL",
+      next: "AGENT_TOOL_STRATEGY_SET_CHANNEL",
+      suffix: "WorkflowWorktreeRemoveTimeoutMinutes",
+      field: "workflowWorktreeRemoveTimeoutMinutes",
+      initial: 1,
+      value: 4,
+      max: 10
+    }
+  ])(
+    "publishes $field before acknowledging the settings save",
+    async ({ channel, next, suffix, field, initial, value, max }) => {
+      const registration = sourceBetween(
+        mainProcess,
+        `ipcMain.handle(\n      ${channel},`,
+        `ipcMain.handle(\n      ${next},`
+      )
+      let handler!: (
+        event: { sender: { id: number } },
+        value: unknown
+      ) => Promise<Record<string, unknown>>
+      let current = initial,
+        publications = 0
+      let release!: () => void
+      const publishing = new Promise<void>((done) => {
+        release = done
+      })
+      const deps: Record<string, unknown> = {
+        ipcMain: {
+          handle: (_channel: string, fn: typeof handler) => {
+            handler = fn
+          }
+        },
+        [channel]: channel,
+        mainWindow: { isDestroyed: () => false, webContents: { id: 7 } },
+        [`is${suffix}`]: (value: unknown) =>
+          typeof value === "number" && Number.isSafeInteger(value) && value >= 1 && value <= max,
+        [`setStored${suffix}`]: (value: number) => value,
+        [`configure${suffix}`]: (value: number) => {
+          current = value
+          return value
+        },
+        getAgentGraphRecursionLimit: () => 2000,
+        getAgentToolStrategy: () => "standard",
+        getWorkflowWorktreeTimeoutMinutes: () => 3,
+        getWorkflowWorktreeRemoveTimeoutMinutes: () => 1,
+        [`get${suffix}`]: () => current,
+        syncActiveBotExecutionSettings: () => {
+          publications++
+          return publishing
+        }
+      }
+      new Function(
+        ...Object.keys(deps),
+        ts.transpile(registration, { target: ts.ScriptTarget.ES2022 })
+      )(...Object.values(deps))
+      await expect(handler({ sender: { id: 8 } }, value)).rejects.toThrow("main window")
+      await expect(handler({ sender: { id: 7 } }, max + 1)).rejects.toThrow("integer")
+      expect(current).toBe(initial)
+      expect(publications).toBe(0)
+      let acknowledged = false
+      const pending = handler({ sender: { id: 7 } }, value).then((result) => {
+        acknowledged = true
+        return result
+      })
+      await Promise.resolve()
+      expect(acknowledged).toBe(false)
+      expect(current).toBe(value)
+      expect(publications).toBe(1)
+      release()
+      expect((await pending)[field]).toBe(value)
+    }
+  )
+
   it("validates unknown renderer input before persisting or applying it", () => {
-    expect(mainProcess).toContain("(event, value: unknown): AgentRuntimeSettings")
+    expect(mainProcess).toContain("async (event, value: unknown): Promise<AgentRuntimeSettings>")
     expect(mainProcess).toContain("if (!isAgentGraphRecursionLimit(value))")
     expect(mainProcess).toContain("if (!isWorkflowWorktreeTimeoutMinutes(value))")
     expect(mainProcess).toContain("if (!isWorkflowWorktreeRemoveTimeoutMinutes(value))")

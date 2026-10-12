@@ -1,0 +1,146 @@
+{
+  "schemaVersion": 1,
+  "kind": "Root-integrated-indexed-task-history-and-shared-delivery-policy-source-gates",
+  "createdAt": "2026-10-07T17:29:03.958769+00:00",
+  "sourceFiles": [
+    {
+      "path": "/Users/chenqiang/Desktop/projects/CmbCoworkAgent/src/main/bots/checkpoint-messages.ts",
+      "bytes": 16542,
+      "sha256": "42d2f42448b5a393c3cb6b952726e03e9c3a5b9060a027736e28439663acb017"
+    },
+    {
+      "path": "/Users/chenqiang/Desktop/projects/CmbCoworkAgent/src/main/bots/checkpointer.ts",
+      "bytes": 17638,
+      "sha256": "7e40da86f378befc3e614a2f573d39b491f8738503124516e42f574781b25e8f"
+    },
+    {
+      "path": "/Users/chenqiang/Desktop/projects/CmbCoworkAgent/src/main/bots/task-history.ts",
+      "bytes": 2532,
+      "sha256": "cd3c5d52cc41393fd52950a2eafcf6f904a7d8cc252bc1210aa83cfde3597f2d"
+    },
+    {
+      "path": "/Users/chenqiang/Desktop/projects/CmbCoworkAgent/src/main/bots/task-history.test.ts",
+      "bytes": 17969,
+      "sha256": "caf4b349678b41022d8349fa4955664c73c0939a88dd98bc80cae3d854d7c336"
+    },
+    {
+      "path": "/Users/chenqiang/Desktop/projects/CmbCoworkAgent/src/main/bots/delivery-quality-policy.ts",
+      "bytes": 1733,
+      "sha256": "c17303a01d59eafb1e6986f38250d16b7be1dc68a2b433f5a69342e4a34777aa"
+    },
+    {
+      "path": "/Users/chenqiang/Desktop/projects/CmbCoworkAgent/src/main/bots/agent-runtime.ts",
+      "bytes": 106845,
+      "sha256": "a50bb6231f93f4c7260d612b7cb6ba34c6302c2443bea4a00afb11c54f84f440"
+    },
+    {
+      "path": "/Users/chenqiang/Desktop/projects/CmbCoworkAgent/src/main/bots/agent-runtime.test.ts",
+      "bytes": 409015,
+      "sha256": "ba1ccfee95c157105699036cfbcc3db8ccc85f4a592d7ac3d6cf4797a46aa8a6"
+    },
+    {
+      "path": "/Users/chenqiang/Desktop/projects/CmbCoworkAgent/src/main/bots/workflow-child-runtime.test.ts",
+      "bytes": 91405,
+      "sha256": "48217b3980b668fa0b88fc2a9d9d9c486c541f1ce7d25f2ed39f60009be6a881"
+    }
+  ],
+  "rootWriterOnly": true,
+  "schemaChange": false,
+  "persistedFormatChange": false,
+  "newReadCache": false,
+  "fullGetTupleRestoreChanged": false,
+  "extraModelCallsAdded": false,
+  "nearestTests": [
+    {
+      "path": "/tmp/cmb-indexed-history-root-nearest.log",
+      "passed": 45,
+      "skipped": 0,
+      "files": 3,
+      "exitCode": 0
+    },
+    {
+      "path": "/tmp/cmb-delivery-quality-current-root-four.log",
+      "passed": 4,
+      "skipped": 333,
+      "files": 2,
+      "exitCode": 0,
+      "provider": "controlled local SDK server",
+      "realModel": false
+    }
+  ],
+  "gates": {
+    "nodeTypecheck": {
+      "log": "/tmp/cmb-indexed-history-quality-root-node-corrected.log",
+      "exitCode": 0,
+      "command": "Existing package typecheck:node includes --composite false"
+    },
+    "changedLint": {
+      "log": "/tmp/cmb-indexed-history-quality-root-lint-corrected.log",
+      "exitCode": 0,
+      "warnings": 0
+    }
+  },
+  "retainedFirstFailures": [
+    {
+      "path": "/tmp/cmb-indexed-history-quality-root-node.log",
+      "exitCode": 2,
+      "cause": "Root invocation omitted standard package --composite false; cross-project TS6307, no TSconfig change."
+    },
+    {
+      "path": "/tmp/cmb-indexed-history-quality-root-lint.log",
+      "exitCode": 1,
+      "warnings": 2,
+      "cause": "Prettier warned on two new test JSON.stringify layouts; Root corrected formatting only."
+    }
+  ],
+  "claims": [
+    "Task history synchronously pins one committed scoped head/encoded target before async same serde decoding, then rechecks lease/fence/dataEpoch.",
+    "Only requested message decoded; full ancestor/count/prefix/depth/bytes/thread/ns integrity checked. Existing render and full restoration methods retained.",
+    "Actual45 tests cover delta/legacy inline/reopenedSQLite/selected large message/no unrelatedstate or pending writes hydration/concurrenthead prune/restore epoch/corruption.",
+    "Shared policy actually reaches direct/group/child SDK requests without new model calls, while original scope/tool/schema contracts remain in closest4 tests."
+  ],
+  "limits": [
+    "JSON1 scans each JSON block; not constant-byte random access and selected large message is decoded/rendered per page.",
+    "Unselected serialized classes are not all revived or class-checked in indexed read; target BaseMessage is checked. Full getTuple/serde/hydrate unchanged.",
+    "Source only at this point; production build pending and actual App remains b4/schema65.",
+    "Controlled policy injection tests do not prove real providers obey instructions. RealJ2/J7 semantic failures remain open until new frozen-input samples.",
+    "Global snapshot open run/pending interaction total still needs the separate projection/paging work.",
+    "No whole completion or CPU/memory benchmark percentage claimed."
+  ],
+  "productionBuildPending": true,
+  "actualUI": false,
+  "realModelRunForTheseChanges": false,
+  "wholeCompletionPercent": null,
+  "logs": [
+    {
+      "path": "/tmp/cmb-indexed-history-root-nearest.log",
+      "bytes": 1215,
+      "sha256": "a8b41f2d7d4a659ef54c7ebcd33097735b91146a3d1e1bfb1ac3236c25a36681"
+    },
+    {
+      "path": "/tmp/cmb-delivery-quality-current-root-four.log",
+      "bytes": 32352,
+      "sha256": "b0984438e087df2ef0ba41d99dcceb165e0db031b9ee63aab622fe7d5f16a02d"
+    },
+    {
+      "path": "/tmp/cmb-indexed-history-quality-root-node.log",
+      "bytes": 14684,
+      "sha256": "37b61d59b78d3b3c7001e512290f04e7254395d928ccb55767bf1b5f62b0acd8"
+    },
+    {
+      "path": "/tmp/cmb-indexed-history-quality-root-lint.log",
+      "bytes": 780,
+      "sha256": "2a93c54ae4c7001f3984e959334a82756c95a7ca6ae489b26808fc158001564c"
+    },
+    {
+      "path": "/tmp/cmb-indexed-history-quality-root-node-corrected.log",
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "path": "/tmp/cmb-indexed-history-quality-root-lint-corrected.log",
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    }
+  ]
+}

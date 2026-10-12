@@ -1,7 +1,7 @@
 import { tmpdir } from "os"
 import path from "path"
 import { execFileSync } from "child_process"
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "fs"
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "fs"
 import { describe, expect, it, vi } from "vitest"
 import { ApprovalStore } from "./approval-store"
 import { ToolOrchestrator, type RawExecuteFn, type RequestApprovalFn } from "./tool-orchestrator"
@@ -355,7 +355,7 @@ describe("ToolOrchestrator YOLO git behavior", () => {
   })
 
   it("routes a commit from a multi-repository parent to a target-selection approval", async () => {
-    const workspace = mkdtempSync(path.join(tmpdir(), "agent-multi-repo-"))
+    const workspace = realpathSync(mkdtempSync(path.join(tmpdir(), "agent-multi-repo-")))
     try {
       const repoA = path.join(workspace, "repo-a")
       const repoB = path.join(workspace, "repo-b")
@@ -396,7 +396,7 @@ describe("ToolOrchestrator YOLO git behavior", () => {
   })
 
   it("infers the only repository below a non-Git parent without showing a target selector", async () => {
-    const workspace = mkdtempSync(path.join(tmpdir(), "agent-single-child-repo-"))
+    const workspace = realpathSync(mkdtempSync(path.join(tmpdir(), "agent-single-child-repo-")))
     try {
       const repository = path.join(workspace, "repo-a")
       initRepository(repository)

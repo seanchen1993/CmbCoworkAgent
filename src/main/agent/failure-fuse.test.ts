@@ -92,6 +92,34 @@ describe("failure fuse", () => {
     expect(recordToolFailure(input).threshold).toBe(0)
   })
 
+  it("uses explicit per-run feedback settings even when the host environment differs", () => {
+    const input = {
+      threadId: "thread",
+      turnId: "turn",
+      toolName: "execute",
+      signal: signal(),
+      mode: "warn" as const
+    }
+    recordToolFailure(input)
+    const repeated = recordToolFailure(input)
+    process.env.CMB_AGENT_FAILURE_FUSE_WARN = "0"
+    process.env.CMB_AGENT_FAILURE_FUSE_MODEL_FEEDBACK = "0"
+    expect(shouldSendFailureFuseNotice({ ...repeated, userNoticeEnabled: true })).toBe(true)
+    expect(shouldAttachFailureFuseFeedback({ ...repeated, modelFeedbackEnabled: true })).toBe(true)
+    process.env.CMB_AGENT_FAILURE_FUSE_WARN = "1"
+    process.env.CMB_AGENT_FAILURE_FUSE_MODEL_FEEDBACK = "1"
+    expect(shouldSendFailureFuseNotice({ ...repeated, userNoticeEnabled: false })).toBe(false)
+    expect(shouldAttachFailureFuseFeedback({ ...repeated, modelFeedbackEnabled: false })).toBe(
+      false
+    )
+    expect(
+      shouldSendFailureFuseNotice({ ...repeated, action: "observe", userNoticeEnabled: true })
+    ).toBe(false)
+    expect(
+      shouldAttachFailureFuseFeedback({ ...repeated, action: "halt", modelFeedbackEnabled: true })
+    ).toBe(false)
+  })
+
   it("does not inspect tool args when fuse mode is off", () => {
     const throwingArgs = new Proxy(
       {},

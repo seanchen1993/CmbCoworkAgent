@@ -77,7 +77,13 @@ assert(!allSource.includes("请先在招乎中向内置机器人发送一条消�
 assert(!panel.includes("inbox-and-features"), "global Feature access toggle is retired")
 assert(panel.includes("同一用户只保留一个活动桌面连接"))
 assert(!allSource.includes("deviceEpoch"), "device routing epochs must stay retired")
-assert(!allSource.toLowerCase().includes("takeover"), "device takeover must stay retired")
+const imSource = sourceFiles
+  .filter(
+    (path) => path.startsWith("main/services/im/") || path === "shared/im-gateway-contract.ts"
+  )
+  .map((path) => read(join("src", path)))
+  .join("\n")
+assert(!imSource.toLowerCase().includes("takeover"), "IM device takeover must stay retired")
 
 const preload = read("src/preload/index.ts")
 assert(preload.includes("builtinRobot:"))

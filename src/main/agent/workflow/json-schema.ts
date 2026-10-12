@@ -84,9 +84,27 @@ function hasNestedQuantifier(pattern: string): boolean {
   return false
 }
 
-export function validateJsonSchemaValue(schema: JsonSchemaNode, value: unknown): string[] {
+export type JsonSchemaValidationBudget = { operations: number; characters: number }
+class ValidationBudgetExceeded extends Error {}
+function charge(budget: JsonSchemaValidationBudget | undefined, characters = 0): void {
+  if (!budget) return
+  budget.operations--
+  budget.characters -= characters
+  if (budget.operations < 0 || budget.characters < 0) throw new ValidationBudgetExceeded()
+}
+export function validateJsonSchemaValue(
+  schema: JsonSchemaNode,
+  value: unknown,
+  limit?: JsonSchemaValidationBudget
+): string[] {
   const errors: string[] = []
-  validateNode(schema, value, "$", errors, 0)
+  const budget = limit ? { ...limit } : undefined
+  try {
+    validateNode(schema, value, "$", errors, 0, budget)
+  } catch (error) {
+    if (!(error instanceof ValidationBudgetExceeded)) throw error
+    errors.push("$: validation work limit exceeded; value not fully validated")
+  }
   return errors
 }
 
@@ -313,8 +331,10 @@ function validateNode(
   value: unknown,
   path: string,
   errors: string[],
-  depth: number
+  depth: number,
+  budget?: JsonSchemaValidationBudget
 ): void {
+  charge(budget)
   if (errors.length >= MAX_ERRORS) return
   if (depth > MAX_DEPTH) {
     // Fail loud instead of silently passing unvalidated branches.
@@ -347,7 +367,14 @@ function validateNode(
     if (typeof candidate !== "object" || candidate === null)
       return { matched: false, errors: [`${path}: invalid schema variant`], actionable: false }
     const candidateErrors: string[] = []
-    validateNode(candidate as Record<string, unknown>, value, path, candidateErrors, depth + 1)
+    validateNode(
+      candidate as Record<string, unknown>,
+      value,
+      path,
+      candidateErrors,
+      depth + 1,
+      budget
+    )
     return {
       matched: candidateErrors.length === 0,
       errors: candidateErrors,
@@ -412,7 +439,7 @@ function validateNode(
   }
 
   if ("const" in schema) {
-    if (!deepEquals(schema.const, value)) {
+    if (!deepEquals(schema.const, value, budget)) {
       errors.push(`${path}: must equal the constant ${JSON.stringify(schema.const)}`)
     }
     // No early return: `const` is one assertion ANDed with its siblings (type,
@@ -421,7 +448,7 @@ function validateNode(
   }
 
   if (Array.isArray(schema.enum)) {
-    if (!schema.enum.some((candidate) => deepEquals(candidate, value))) {
+    if (!schema.enum.some((candidate) => deepEquals(candidate, value, budget))) {
       errors.push(`${path}: must be one of ${JSON.stringify(schema.enum)}`)
     }
     // No early return — same reason as `const` above: `{ enum: ["a"], minLength: 5 }`
@@ -456,6 +483,7 @@ function validateNode(
   if (typeof value === "string") {
     const minLength = asNumber(schema.minLength)
     const maxLength = asNumber(schema.maxLength)
+    charge(budget, value.length)
     const valueLength = jsonStringLength(value)
     if (minLength !== null && valueLength < minLength) {
       errors.push(`${path}: string is shorter than minLength ${minLength}`)
@@ -506,7 +534,7 @@ function validateNode(
     const items = schema.items
     if (isSchemaNode(items) && !Array.isArray(items)) {
       for (let index = 0; index < value.length; index += 1) {
-        validateNode(items, value[index], `${path}[${index}]`, errors, depth + 1)
+        validateNode(items, value[index], `${path}[${index}]`, errors, depth + 1, budget)
         if (errors.length >= MAX_ERRORS) return
       }
     }
@@ -515,6 +543,7 @@ function validateNode(
   if (isPlainObject(value)) {
     const required = Array.isArray(schema.required) ? schema.required : []
     for (const key of required) {
+      charge(budget, typeof key === "string" ? key.length : 0)
       if (typeof key === "string" && !hasOwn(value, key)) {
         errors.push(`${path}: missing required property "${key}"`)
       }
@@ -522,6 +551,7 @@ function validateNode(
     const properties = schema.properties
     if (isPlainObject(properties)) {
       for (const [key, propertySchema] of Object.entries(properties)) {
+        charge(budget, key.length)
         if (!hasOwn(value, key)) continue
         if (!isSchemaNode(propertySchema)) continue
         validateNode(
@@ -529,7 +559,8 @@ function validateNode(
           (value as Record<string, unknown>)[key],
           `${path}.${key}`,
           errors,
-          depth + 1
+          depth + 1,
+          budget
         )
         if (errors.length >= MAX_ERRORS) return
       }
@@ -540,6 +571,7 @@ function validateNode(
       // accept extra keys.
       const declaredKeys = isPlainObject(properties) ? properties : {}
       for (const key in value) {
+        charge(budget, key.length)
         if (!hasOwn(value, key)) continue
         if (!hasOwn(declaredKeys, key)) {
           errors.push(`${path}: unexpected property "${key}" (additionalProperties is false)`)
@@ -551,6 +583,7 @@ function validateNode(
       // `properties` against it instead of silently accepting them.
       const declared = isPlainObject(properties) ? properties : {}
       for (const key in value) {
+        charge(budget, key.length)
         if (!hasOwn(value, key)) continue
         if (hasOwn(declared, key)) continue
         const child = (value as Record<string, unknown>)[key]
@@ -559,7 +592,8 @@ function validateNode(
           child,
           `${path}.${key}`,
           errors,
-          depth + 1
+          depth + 1,
+          budget
         )
         if (errors.length >= MAX_ERRORS) return
       }
@@ -603,14 +637,19 @@ function asNumber(value: unknown): number | null {
   return typeof value === "number" && Number.isFinite(value) ? value : null
 }
 
-function deepEquals(a: unknown, b: unknown): boolean {
+function deepEquals(a: unknown, b: unknown, budget?: JsonSchemaValidationBudget): boolean {
+  charge(budget, (typeof a === "string" ? a.length : 0) + (typeof b === "string" ? b.length : 0))
   if (Object.is(a, b)) return true
   if (typeof a !== "object" || typeof b !== "object" || a === null || b === null) return false
   if (Array.isArray(a) !== Array.isArray(b)) return false
   const aKeys = Object.keys(a as object)
   const bKeys = Object.keys(b as object)
+  if (budget) {
+    budget.operations -= aKeys.length + bKeys.length
+    charge(budget)
+  }
   if (aKeys.length !== bKeys.length) return false
   return aKeys.every((key) =>
-    deepEquals((a as Record<string, unknown>)[key], (b as Record<string, unknown>)[key])
+    deepEquals((a as Record<string, unknown>)[key], (b as Record<string, unknown>)[key], budget)
   )
 }

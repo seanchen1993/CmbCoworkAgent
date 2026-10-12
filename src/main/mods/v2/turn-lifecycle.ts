@@ -43,6 +43,16 @@ interface TurnEntry {
   observation: FunctionTurnObservation
   anchorMessageId?: string
   suspended?: boolean
+  settled: Promise<void>
+  settle(): void
+}
+
+function settlement(): Pick<TurnEntry, "settled" | "settle"> {
+  let settle!: () => void
+  const settled = new Promise<void>((resolve) => {
+    settle = resolve
+  })
+  return { settled, settle }
 }
 
 export interface FunctionTurnLifecycleHost {
@@ -109,6 +119,7 @@ export class FunctionTurnLifecycle {
       this.finish(binding.threadId, previous.binding.runId, { reason: "aborted" })
     if (this.entries.size >= 100) return Promise.reject(new ModFunctionError("MODS_TURN_CAPACITY"))
     const entry: TurnEntry = {
+      ...settlement(),
       binding,
       startedAt: this.now(),
       starting: Promise.resolve(),
@@ -142,6 +153,7 @@ export class FunctionTurnLifecycle {
     if (this.entries.has(key)) throw new ModFunctionError("MODS_TURN_SCOPE_CHANGED")
     if (this.entries.size >= 100) throw new ModFunctionError("MODS_TURN_CAPACITY")
     const entry: TurnEntry = {
+      ...settlement(),
       binding,
       startedAt: this.now(),
       starting: Promise.resolve(),
@@ -222,6 +234,14 @@ export class FunctionTurnLifecycle {
     if (entry) this.finishEntry(entry, result)
   }
 
+  /** Per-run hosts must drain terminal hooks before disposing their guest workers. */
+  async finishAndWait(threadId: string, runId: string, result: TurnEnding): Promise<void> {
+    const entry = this.entries.get(this.key(threadId, runId))
+    if (!entry) return
+    this.finishEntry(entry, result)
+    await entry.settled
+  }
+
   private clearActive(entry: TurnEntry): void {
     const { threadId } = entry.binding
     if (this.running.get(threadId) === entry) this.running.delete(threadId)
@@ -241,6 +261,7 @@ export class FunctionTurnLifecycle {
       this.entries.delete(this.key(threadId, runId))
       this.clearActive(entry)
       entry.controller.abort(error)
+      entry.settle()
       this.host.error(error)
       return
     }
@@ -294,13 +315,19 @@ export class FunctionTurnLifecycle {
           entry.controller.signal,
           entry.anchorMessageId
         )
-        if (this.entries.get(this.key(threadId, entry.binding.runId)) === entry)
+        if (this.entries.get(this.key(threadId, entry.binding.runId)) === entry) {
           this.entries.delete(this.key(threadId, entry.binding.runId))
+          entry.settle()
+        }
       })
       .catch((error) => {
         if (this.entries.get(this.key(threadId, entry.binding.runId)) === entry)
           this.entries.delete(this.key(threadId, entry.binding.runId))
-        if (!entry.controller.signal.aborted) this.host.error(error)
+        try {
+          if (!entry.controller.signal.aborted) this.host.error(error)
+        } finally {
+          entry.settle()
+        }
       })
       .finally(() => {
         entry.dispatching = false
@@ -315,6 +342,7 @@ export class FunctionTurnLifecycle {
       entry.controller.abort(new ModFunctionError("MODS_TURN_SCOPE_CHANGED"))
       this.entries.delete(key)
       this.clearActive(entry)
+      entry.settle()
     }
   }
 

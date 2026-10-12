@@ -1,0 +1,38 @@
+{
+  "schemaVersion": 1,
+  "kind": "Root-unified-production-build-history-and-quality-policy",
+  "createdAt": "2026-10-07T17:33:01.167905+00:00",
+  "nativeBuildId": "a61f41784e20c7199366f8d6",
+  "databaseSchema": 66,
+  "sourceGateReference": {
+    "path": "/Users/chenqiang/Desktop/projects/CmbCoworkAgent/docs/cmbcowork-bot-parity-plan/evidence/2026-10-07-current-delivery/current-indexed-history-and-delivery-policy-source.safe.json",
+    "bytes": 6022,
+    "sha256": "5b5a3afded4276aff50ff86239f2cddd174f4c97eeae256588959bf09982687d"
+  },
+  "artifacts": [
+    {
+      "path": "/Users/chenqiang/Desktop/projects/CmbCoworkAgent/out/main/bot-native-build.json",
+      "bytes": 23240,
+      "sha256": "c1ebeaded57b8178adbc6b0793587bad52aa874223f9b0e774d551358526ba01"
+    },
+    {
+      "path": "/Users/chenqiang/Desktop/projects/CmbCoworkAgent/out/main/bot-host.js",
+      "bytes": 6215,
+      "sha256": "0f9cfa9a664394688e0292d992a0b5496fdab6a153dd8ca5bddfef624ee72d1f"
+    }
+  ],
+  "buildLog": {
+    "path": "/tmp/cmb-indexed-history-delivery-policy-production-build.log",
+    "bytes": 56051,
+    "sha256": "ff6aa8201fda0d931a4ea461d4fc6d8ea813b16fea7b6be5f8893d5fa06aa787"
+  },
+  "exitCode": 0,
+  "originalSourceRecordBuildPendingRetained": true,
+  "actualAppHostUnchanged": "b4d31d62d589840f5147422a",
+  "actualAppSchema": 65,
+  "wholeCompletionPercent": null,
+  "limits": [
+    "This compiled build includes history and shared delivery policy; workspace output projection candidate not yet integrated.",
+    "No actual App UI or real-model task pass inferred from build success."
+  ]
+}

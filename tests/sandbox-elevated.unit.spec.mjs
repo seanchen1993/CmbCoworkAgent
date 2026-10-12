@@ -3,10 +3,10 @@ import assert from "node:assert/strict"
 import { readFileSync } from "node:fs"
 
 const localSandboxSource = readFileSync(
-  new URL("../src/main/agent/local-sandbox.ts", import.meta.url),
+  new URL("../src/main/agent/local-sandbox-core.ts", import.meta.url),
   "utf8"
 )
-const sandboxSource = readFileSync(new URL("../src/main/ipc/sandbox.ts", import.meta.url), "utf8")
+const sandboxSource = readFileSync(new URL("../src/main/agent/windows-sandbox-state.ts", import.meta.url), "utf8") + "\n" + readFileSync(new URL("../src/main/ipc/sandbox.ts", import.meta.url), "utf8")
 const execPolicySource = readFileSync(
   new URL("../src/main/agent/exec-policy.ts", import.meta.url),
   "utf8"
@@ -15,11 +15,14 @@ const windowsSafeCommandsSource = readFileSync(
   new URL("../src/main/agent/windows-safe-commands.ts", import.meta.url),
   "utf8"
 )
-const runtimeSource = readFileSync(new URL("../src/main/agent/runtime.ts", import.meta.url), "utf8")
+const runtimeSource = readFileSync(new URL("../src/main/agent/runtime.ts", import.meta.url), "utf8") + "\n" + readFileSync(new URL("../src/main/agent/deep-agent-core.ts", import.meta.url), "utf8")
 const workflowEngineSource = readFileSync(
   new URL("../src/main/agent/workflow/engine.ts", import.meta.url),
   "utf8"
 )
+const workflowCallIdentitySource = readFileSync(new URL("../src/main/agent/workflow/agent-call-identity.ts", import.meta.url), "utf8")
+const workflowRunStateSource = readFileSync(new URL("../src/main/agent/workflow/run-state.ts", import.meta.url), "utf8")
+const workflowGlobSource = readFileSync(new URL("../src/main/agent/workflow/glob.ts", import.meta.url), "utf8")
 const workflowSubagentSource = readFileSync(
   new URL("../src/main/agent/workflow/subagent.ts", import.meta.url),
   "utf8"
@@ -541,7 +544,7 @@ test("LocalSandbox exposes a single sandbox-denial detector modelled on Codex", 
   //   one keyword set, one function, one bypass prompt — keep it simple.
   assert.match(
     localSandboxSource,
-    /static isLikelySandboxDenied\(exitCode: number \| null, output: string, command\?: string\): boolean/,
+    /static isLikelySandboxDenied\(\s*exitCode: number \| null,\s*output: string,\s*command\?: string\s*\): boolean/,
     "LocalSandbox should expose a single command-aware sandbox denial detector"
   )
   assert.match(
@@ -928,7 +931,7 @@ test("isLikelySandboxDenied keyword check matches real failure outputs and rejec
 test("background execute() routes results through the orchestrator's bypass check", () => {
   const backgroundSection = sectionBetween(
     localSandboxSource,
-    "async executeBackground(command: string, cwd?: string)",
+    "async executeBackground(",
     "  /**\r\n   * Retrieve a background task's"
   )
 
@@ -1546,9 +1549,11 @@ test("sandbox execute safety checks do not synchronously spawn helper processes"
 test("sandbox-adjacent runtime startup avoids synchronous filesystem probes", () => {
   const runtimeResourceSection = sectionBetween(
     runtimeSource,
-    "async function ensureCodexExe(",
-    "  const enabledHooks = getEnabledHooks(workspacePath)"
-  )
+    "  let resourceBase: string",
+    "  const baseHooks = getEnabledHooks(workspacePath)"
+  ) + readFileSync(new URL("../src/main/agent/codex-sandbox-binary.ts", import.meta.url), "utf8")
+  assert.match(runtimeSource, /import \{ ensureCodexExe \} from "\.\/codex-sandbox-binary"/)
+  assert.match(runtimeResourceSection, /await ensureCodexExe\(codexExePath\)/)
   const codeExecHelperSection = sectionBetween(
     codeExecRunnerSource,
     "async function resolveHelperEntryPath(",
@@ -1840,7 +1845,7 @@ test("workflow notification backlog drains: ack kicks the next pending run", () 
   )
   assert.match(
     workflowRunManagerSource,
-    /kickNextPendingNotificationAsync[\s\S]*?await this\.findPendingNotificationAsync\(workspacePath, threadId\)[\s\S]*?broadcast\(threadId, \{ type: "workflow_notification"/,
+    /kickNextPendingNotificationAsync[\s\S]*?await this\.findPendingNotificationAsync\(workspacePath, threadId\)[\s\S]*?broadcast\(threadId, \{\s*type: "workflow_notification"/,
     "the async kick re-broadcasts the next undelivered run's notification"
   )
   assert.match(
@@ -1868,10 +1873,12 @@ test("workflow resume keeps an append-only journal (never wiped) for crash safet
   // round-trip, so a large resumed journal neither blocks main nor aliases the
   // caller's array/entry records.
   assert.match(
-    workflowRunStoreSource,
+    workflowRunStateSource,
     /const state: PersistedWorkflowRun = \{[\s\S]*?journal: initial\.journal\.map\(\(entry\) => \(\{ \.\.\.entry \}\)\)[\s\S]*?stats: \{ \.\.\.initial\.stats \}/,
     "run store copies mutable state without cloning a potentially huge payload graph"
   )
+  assert.match(workflowRunStoreSource, /const memory = createWorkflowRunState\(initial\)/)
+  assert.match(workflowRunStoreSource, /memory\.appendJournal\(entry\)/)
   // resetJournal is gone (dead once resume is append-only).
   assert.doesNotMatch(
     workflowRunStoreSource,
@@ -2603,20 +2610,21 @@ test("child workflow journal cache keys on script content, not meta.name (#5)", 
     "child spawn keys the cache on the child script sha"
   )
   assert.match(
-    workflowEngineSource,
-    /child: context\.childCacheKey \?\? null/,
+    workflowCallIdentitySource,
+    /child: input\.childCacheKey \?\? null/,
     "call-identity hash uses the script-based child key, not the display name"
   )
 })
 
 test("workflow call-identity hash folds the session-default model (resume after model switch re-runs) (#1)", () => {
+  assert.match(workflowEngineSource, /workflowAgentCallHash\(\{[\s\S]*?model: resolvedModel,[\s\S]*?defaultModelId: context\.defaultModelId/, "engine passes the resolved and session-default models to the shared identity function")
   // An agent() with no opts.model / phase model / profile model runs on the SESSION
   // DEFAULT (subagent.ts falls back to deps.defaultModelId). The journal call-hash
   // must include that default, or switching the thread's model then resuming would
   // replay the OLD default model's cached result instead of re-running.
   assert.match(
-    workflowEngineSource,
-    /model: resolvedModel \?\? context\.defaultModelId \?\? null/,
+    workflowCallIdentitySource,
+    /model: input\.model \?\? input\.defaultModelId \?\? null/,
     "call-identity hash falls back to the session-default model, not just resolvedModel"
   )
   assert.match(
@@ -2674,23 +2682,24 @@ test("workflow glob caps its result count to avoid huge fan-outs", () => {
     "glob result count is capped (parsed/guarded in types)"
   )
   assert.match(
-    workflowEngineSource,
-    /safe\.length > MAX_GLOB_RESULTS[\s\S]*narrow the pattern/,
+    workflowGlobSource,
+    /safe\.length > maxResults[\s\S]*narrow the pattern/,
     "glob throws a narrow-the-pattern error past the cap"
   )
   // #2(P3): lock the implementation to the STREAMING API so a future refactor can't
   // silently regress to materialize-then-check (which the "more than" wording alone
   // wouldn't catch if the message were kept).
   assert.match(
-    workflowEngineSource,
+    workflowGlobSource,
     /fastGlob\.stream\(/,
     "glob walks via the streaming API (early-stop), not a full fastGlob() materialize"
   )
   assert.doesNotMatch(
-    workflowEngineSource,
+    workflowGlobSource,
     /await fastGlob\(pattern/,
     "glob must not materialize the full match array before the cap check"
   )
+  assert.match(workflowEngineSource, /globWorkflowFiles\(context\.workspacePath, pattern\)/)
 })
 
 test("workflow run IPC strips the (tens-of-MB) journal before sending a run to the renderer", () => {
@@ -2724,8 +2733,8 @@ test("workflow notification is at-least-once: delivered persisted only on SUCCES
   )
   assert.match(
     agentIpcSource,
-    /await workflowRunManager\.claimPendingNotificationAsync\(\s*workspacePath,\s*threadId\s*\)/,
-    "notification turn uses the atomic async claim"
+    /await workflowRunManager\.claimPendingNotificationAsync\(\s*workspacePath,\s*threadId,\s*\{ owner: backgroundNotificationOwner \}\s*\)/,
+    "notification turn uses the atomic async claim scoped to the current owner"
   )
   const notificationClaimStart = agentIpcSource.indexOf(
     "claimWorkflowNotification(pendingWorkflowRun.runId, runToken)"

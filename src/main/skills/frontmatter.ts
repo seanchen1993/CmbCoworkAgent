@@ -5,18 +5,30 @@ export interface ParsedSkillFrontmatter {
   body: string
 }
 
-export function parseSkillFrontmatter(content: string): ParsedSkillFrontmatter {
+export interface CheckedSkillFrontmatter extends ParsedSkillFrontmatter {
+  status: "absent" | "valid" | "invalid"
+}
+
+/** Preserve the original body/name semantics while allowing dependency readers
+ * to distinguish malformed declarations from a skill with no frontmatter. */
+export function parseSkillFrontmatterChecked(content: string): CheckedSkillFrontmatter {
   const match = content.match(/^---\r?\n([\s\S]*?)\r?\n---(?:\r?\n)?/)
   if (!match) {
-    return { frontmatter: {}, body: content }
+    return {
+      frontmatter: {},
+      body: content,
+      status: /^---\r?\n/.test(content) ? "invalid" : "absent"
+    }
   }
 
   const rawYaml = match[1]
   let frontmatter: Record<string, unknown> = {}
+  let status: CheckedSkillFrontmatter["status"] = "invalid"
   try {
     const parsed = parseYaml(rawYaml)
     if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
       frontmatter = parsed as Record<string, unknown>
+      status = "valid"
     }
   } catch {
     frontmatter = {}
@@ -24,8 +36,14 @@ export function parseSkillFrontmatter(content: string): ParsedSkillFrontmatter {
 
   return {
     frontmatter,
-    body: content.slice(match[0].length)
+    body: content.slice(match[0].length),
+    status
   }
+}
+
+export function parseSkillFrontmatter(content: string): ParsedSkillFrontmatter {
+  const { frontmatter, body } = parseSkillFrontmatterChecked(content)
+  return { frontmatter, body }
 }
 
 export function getFrontmatterString(

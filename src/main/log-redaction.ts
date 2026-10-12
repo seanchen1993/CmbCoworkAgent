@@ -147,6 +147,8 @@ const CHINESE_ID_18_PATTERN = /(^|[^\d])([1-9]\d{16}[\dXx])(?=$|[^\d])/g
 const CHINESE_ID_15_PATTERN = /(^|[^\d])([1-9]\d{14})(?=$|[^\d])/g
 const CHINA_MOBILE_PATTERN = /(^|[^\d])((?:\+?86[\s-]?)?1[3-9]\d(?:[\s-]?\d){8})(?=$|[^\d])/g
 const BANK_CARD_CANDIDATE_PATTERN = /(^|[^\d])((?:\d[ -]?){15,18}\d)(?=$|[^\d])/g
+const DIAGNOSTIC_ID_FIELDS = new Set(["callId", "botId", "runId", "rootRunId", "hostId"])
+const DIAGNOSTIC_UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-[1-8][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/i
 
 function normalizeFieldName(fieldName: string): string {
   return fieldName.toLowerCase().replace(/[^a-z0-9\u4e00-\u9fff]/g, "")
@@ -800,7 +802,23 @@ function redactValueUnsafe(
   }
   context.remainingNodes -= 1
 
-  if (typeof value === "string") return redactStringValue(value, context)
+  if (typeof value === "string") {
+    // A generated UUID can accidentally contain a formatted phone substring.
+    // Preserve only exact typed diagnostic identities, after sensitive-field
+    // classification. Arbitrary text, phone values and credential UUIDs still
+    // go through the existing redaction rules and shared resource budgets.
+    if (
+      fieldName &&
+      DIAGNOSTIC_ID_FIELDS.has(fieldName) &&
+      value.length === 36 &&
+      DIAGNOSTIC_UUID.test(value)
+    ) {
+      if (context.remainingStringChars < value.length) return TEXT_BUDGET_PLACEHOLDER
+      context.remainingStringChars -= value.length
+      return value
+    }
+    return redactStringValue(value, context)
+  }
   if (typeof value === "number") {
     if (!Number.isFinite(value)) return value
     const text = String(value)

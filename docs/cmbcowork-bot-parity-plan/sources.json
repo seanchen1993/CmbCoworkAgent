@@ -1,0 +1,1769 @@
+{
+  "baseline_date": "2026-09-29",
+  "method": "关键执行链与对应 UI、官方目录及功能文档交叉核对。不是全仓逐行审计，也没有完成原版真机或完整供应商链路验证。",
+  "versions": {
+    "GR": {
+      "root": "/Users/chenqiang/Desktop/AI/grok-bot-0.18-reconstructed-main",
+      "commit": null,
+      "repository": null
+    },
+    "RK": {
+      "root": "/Users/chenqiang/Desktop/AI/cmb-bot-reference-sources/rakazo",
+      "commit": "60ac790cd9a1bb9560b489c0535deb5db2e1e39f",
+      "repository": "https://github.com/elie222/rakazo"
+    },
+    "OB": {
+      "root": "/Users/chenqiang/Desktop/AI/cmb-bot-reference-sources/openbot",
+      "commit": "b6932d31a8d6e7896c15139dfc27a6c6911deb27",
+      "repository": "https://github.com/CopilotKit/OpenBot"
+    },
+    "CM": {
+      "root": "/Users/chenqiang/Desktop/projects/CmbCoworkAgent",
+      "commit": "0ba63bd2f6a1eb48066882e94bd81c7fdda9c0ee",
+      "repository": null
+    }
+  },
+  "reconstructed_artifacts": {
+    "dmg_sha256": "a253ccd8aab01e083f9812a0264354c5034d8ba7f0610bbb557e82ae77d203eb",
+    "asar_sha256": "6665408168466f9cacc6087e917890c17f59d2e2e9c2404a5c4a59ad79c1de58"
+  },
+  "sources": [
+    {
+      "id": "GR01",
+      "kind": "local_source",
+      "title": "Bot / 群聊 / 主进程 RPC 与协议",
+      "root": "/Users/chenqiang/Desktop/AI/grok-bot-0.18-reconstructed-main",
+      "commit": null,
+      "review_scope": "关键链路和相关段落；不是全仓逐行审计或端到端验证",
+      "files": [
+        {
+          "path": "/Users/chenqiang/Desktop/AI/grok-bot-0.18-reconstructed-main/source/shared/rpc/coordinator.ts",
+          "relative_path": "source/shared/rpc/coordinator.ts",
+          "line": 1,
+          "anchor": null,
+          "sha256": "60a2f6a2eec1adecf23ee04f1385c5a17cd3973d2cdab20f69d8fc3811b4cc38",
+          "bytes": 9153
+        },
+        {
+          "path": "/Users/chenqiang/Desktop/AI/grok-bot-0.18-reconstructed-main/source/shared/rpc/main.ts",
+          "relative_path": "source/shared/rpc/main.ts",
+          "line": 1,
+          "anchor": null,
+          "sha256": "8e2c27a949b130b71299b05b4f2463e4a8ac0f23c3d1fb046c3180dd46cea6d4",
+          "bytes": 5344
+        },
+        {
+          "path": "/Users/chenqiang/Desktop/AI/grok-bot-0.18-reconstructed-main/source/shared/agents/agents.ts",
+          "relative_path": "source/shared/agents/agents.ts",
+          "line": 1,
+          "anchor": null,
+          "sha256": "08cb670207b0b184e8c4e7bf15a831803d8355297a8a16b7726494382d32b72f",
+          "bytes": 1929
+        }
+      ]
+    },
+    {
+      "id": "GR02",
+      "kind": "local_source",
+      "title": "接收去重与发送状态",
+      "root": "/Users/chenqiang/Desktop/AI/grok-bot-0.18-reconstructed-main",
+      "commit": null,
+      "review_scope": "关键链路和相关段落；不是全仓逐行审计或端到端验证",
+      "files": [
+        {
+          "path": "/Users/chenqiang/Desktop/AI/grok-bot-0.18-reconstructed-main/source/host/extensions/transcript/send-pipeline.ts",
+          "relative_path": "source/host/extensions/transcript/send-pipeline.ts",
+          "line": 74,
+          "anchor": "class",
+          "sha256": "c67d93108fdaf717450aa8a31a5acb8b223e0f612e066b7ec07e48b752a64cd2",
+          "bytes": 20376
+        }
+      ]
+    },
+    {
+      "id": "GR03",
+      "kind": "local_source",
+      "title": "运行调度和代次",
+      "root": "/Users/chenqiang/Desktop/AI/grok-bot-0.18-reconstructed-main",
+      "commit": null,
+      "review_scope": "关键链路和相关段落；不是全仓逐行审计或端到端验证",
+      "files": [
+        {
+          "path": "/Users/chenqiang/Desktop/AI/grok-bot-0.18-reconstructed-main/source/host/extensions/transcript/run-scheduler.ts",
+          "relative_path": "source/host/extensions/transcript/run-scheduler.ts",
+          "line": 53,
+          "anchor": "class",
+          "sha256": "f4b22c1eeff33f4d6ca6e2daf38592e89f902e68916f2e2b3bd41a0a9de1768a",
+          "bytes": 11050
+        }
+      ]
+    },
+    {
+      "id": "GR04",
+      "kind": "local_source",
+      "title": "异步 Bot 信箱",
+      "root": "/Users/chenqiang/Desktop/AI/grok-bot-0.18-reconstructed-main",
+      "commit": null,
+      "review_scope": "关键链路和相关段落；不是全仓逐行审计或端到端验证",
+      "files": [
+        {
+          "path": "/Users/chenqiang/Desktop/AI/grok-bot-0.18-reconstructed-main/source/host/extensions/transcript/agent-to-agent-messaging.ts",
+          "relative_path": "source/host/extensions/transcript/agent-to-agent-messaging.ts",
+          "line": 47,
+          "anchor": "class AgentToAgentMessaging",
+          "sha256": "453d97db38543aaf087ca54a9dc6ade7491e7907083cc713c10249b6d7fa249f",
+          "bytes": 12439
+        }
+      ]
+    },
+    {
+      "id": "GR05",
+      "kind": "local_source",
+      "title": "群聊轮次、扇出和协作边界",
+      "root": "/Users/chenqiang/Desktop/AI/grok-bot-0.18-reconstructed-main",
+      "commit": null,
+      "review_scope": "关键链路和相关段落；不是全仓逐行审计或端到端验证",
+      "files": [
+        {
+          "path": "/Users/chenqiang/Desktop/AI/grok-bot-0.18-reconstructed-main/source/host/extensions/transcript/group-chat-orchestrator.ts",
+          "relative_path": "source/host/extensions/transcript/group-chat-orchestrator.ts",
+          "line": 32,
+          "anchor": "class",
+          "sha256": "5ff5626a9234be5ab0ca4cc94490e96c55f3ca2f7f886eaf1e0f381ae7f209a1",
+          "bytes": 3372
+        },
+        {
+          "path": "/Users/chenqiang/Desktop/AI/grok-bot-0.18-reconstructed-main/source/host/extensions/transcript/send-group-fanout.ts",
+          "relative_path": "source/host/extensions/transcript/send-group-fanout.ts",
+          "line": 1,
+          "anchor": null,
+          "sha256": "5113ded559c642185b301ba9e5250cee3d1062f85a1cd147e1e3a90290733bfd",
+          "bytes": 1859
+        },
+        {
+          "path": "/Users/chenqiang/Desktop/AI/grok-bot-0.18-reconstructed-main/source/host/groups/group-chat.ts",
+          "relative_path": "source/host/groups/group-chat.ts",
+          "line": 1,
+          "anchor": null,
+          "sha256": "acc0e97d40f264d553b063751044b9c796ef0b7238a17ddc1f8901b92408f4fb",
+          "bytes": 8033
+        }
+      ]
+    },
+    {
+      "id": "GR06",
+      "kind": "local_source",
+      "title": "复制 Bot 的复制/排除规则",
+      "root": "/Users/chenqiang/Desktop/AI/grok-bot-0.18-reconstructed-main",
+      "commit": null,
+      "review_scope": "关键链路和相关段落；不是全仓逐行审计或端到端验证",
+      "files": [
+        {
+          "path": "/Users/chenqiang/Desktop/AI/grok-bot-0.18-reconstructed-main/source/host/agents/agent-clone.ts",
+          "relative_path": "source/host/agents/agent-clone.ts",
+          "line": 15,
+          "anchor": "export function cloneAgentDir",
+          "sha256": "345d35642793b117da53cb3c58aa07df77f7107bb82f1f4d8c68353daab50959",
+          "bytes": 3302
+        }
+      ]
+    },
+    {
+      "id": "GR07",
+      "kind": "local_source",
+      "title": "分域记忆和提炼核验",
+      "root": "/Users/chenqiang/Desktop/AI/grok-bot-0.18-reconstructed-main",
+      "commit": null,
+      "review_scope": "关键链路和相关段落；不是全仓逐行审计或端到端验证",
+      "files": [
+        {
+          "path": "/Users/chenqiang/Desktop/AI/grok-bot-0.18-reconstructed-main/source/host/extensions/memory/memory-service.ts",
+          "relative_path": "source/host/extensions/memory/memory-service.ts",
+          "line": 50,
+          "anchor": "class FileMemoryStore",
+          "sha256": "1c04f00b27bf1a1dd416638094525a9fbac0527f8131202b8c2cbf63681af762",
+          "bytes": 18963
+        },
+        {
+          "path": "/Users/chenqiang/Desktop/AI/grok-bot-0.18-reconstructed-main/source/host/extensions/memory/memory-synthesis-service.ts",
+          "relative_path": "source/host/extensions/memory/memory-synthesis-service.ts",
+          "line": 1,
+          "anchor": null,
+          "sha256": "827de2d86ea95ec3df48bfff2ab91507426a81dc58dd40e2f36711a8a722f671",
+          "bytes": 20920
+        }
+      ]
+    },
+    {
+      "id": "GR08",
+      "kind": "local_source",
+      "title": "Teach 录制及持久学习任务",
+      "root": "/Users/chenqiang/Desktop/AI/grok-bot-0.18-reconstructed-main",
+      "commit": null,
+      "review_scope": "关键链路和相关段落；不是全仓逐行审计或端到端验证",
+      "files": [
+        {
+          "path": "/Users/chenqiang/Desktop/AI/grok-bot-0.18-reconstructed-main/source/host/extensions/teach-recording/teach-recording-service.ts",
+          "relative_path": "source/host/extensions/teach-recording/teach-recording-service.ts",
+          "line": 1,
+          "anchor": null,
+          "sha256": "b72f9bd4c7967ea00dafb51cda7b42413d8139fa74622c0665894519f6b4710a",
+          "bytes": 23450
+        }
+      ]
+    },
+    {
+      "id": "GR09",
+      "kind": "local_source",
+      "title": "例程协议、存储与执行",
+      "root": "/Users/chenqiang/Desktop/AI/grok-bot-0.18-reconstructed-main",
+      "commit": null,
+      "review_scope": "关键链路和相关段落；不是全仓逐行审计或端到端验证",
+      "files": [
+        {
+          "path": "/Users/chenqiang/Desktop/AI/grok-bot-0.18-reconstructed-main/source/shared/automations.ts",
+          "relative_path": "source/shared/automations.ts",
+          "line": 1,
+          "anchor": null,
+          "sha256": "b00336c85e9c316710a43d050fec10159849b9c3d15a35979b2a8e922efd24a5",
+          "bytes": 7619
+        },
+        {
+          "path": "/Users/chenqiang/Desktop/AI/grok-bot-0.18-reconstructed-main/source/host/automations/automation.ts",
+          "relative_path": "source/host/automations/automation.ts",
+          "line": 1,
+          "anchor": null,
+          "sha256": "c21bafc22d8d7c2fa8a9235da7055cebf28949584de3e8e361b1e143a7d83538",
+          "bytes": 24456
+        },
+        {
+          "path": "/Users/chenqiang/Desktop/AI/grok-bot-0.18-reconstructed-main/source/host/automations/automation-store.ts",
+          "relative_path": "source/host/automations/automation-store.ts",
+          "line": 1,
+          "anchor": null,
+          "sha256": "5937cab677e05c7e6af0ab7ef3c429c6973c58b809d32b2f72600ce27502b546",
+          "bytes": 15655
+        },
+        {
+          "path": "/Users/chenqiang/Desktop/AI/grok-bot-0.18-reconstructed-main/source/host/extensions/transcript/automation-runtime.ts",
+          "relative_path": "source/host/extensions/transcript/automation-runtime.ts",
+          "line": 1,
+          "anchor": null,
+          "sha256": "c1eb297aec74614814c4f59a765856921900295efaa86f83645f39a271e889dc",
+          "bytes": 15925
+        }
+      ]
+    },
+    {
+      "id": "GR10",
+      "kind": "local_source",
+      "title": "具体动作自动审核",
+      "root": "/Users/chenqiang/Desktop/AI/grok-bot-0.18-reconstructed-main",
+      "commit": null,
+      "review_scope": "关键链路和相关段落；不是全仓逐行审计或端到端验证",
+      "files": [
+        {
+          "path": "/Users/chenqiang/Desktop/AI/grok-bot-0.18-reconstructed-main/source/host/runner/sand-auto-review.ts",
+          "relative_path": "source/host/runner/sand-auto-review.ts",
+          "line": 1,
+          "anchor": null,
+          "sha256": "9c274406ec0fbbfcb723c0ff2dd9bb6d3eed834f9a511657b6cd831e9b4f92f4",
+          "bytes": 12522
+        }
+      ]
+    },
+    {
+      "id": "GR11",
+      "kind": "local_source",
+      "title": "本地权限响应验证",
+      "root": "/Users/chenqiang/Desktop/AI/grok-bot-0.18-reconstructed-main",
+      "commit": null,
+      "review_scope": "关键链路和相关段落；不是全仓逐行审计或端到端验证",
+      "files": [
+        {
+          "path": "/Users/chenqiang/Desktop/AI/grok-bot-0.18-reconstructed-main/source/host/extensions/local-tool-permission/local-tool-permission-resolution.ts",
+          "relative_path": "source/host/extensions/local-tool-permission/local-tool-permission-resolution.ts",
+          "line": 1,
+          "anchor": null,
+          "sha256": "21e93cf08de7e5cc54886edc76051c034ba81bc33ce53f907d7c775bb7fcd0f6",
+          "bytes": 2015
+        }
+      ]
+    },
+    {
+      "id": "GR12",
+      "kind": "local_source",
+      "title": "宿主状态、数据库恢复、文件同步和升级",
+      "root": "/Users/chenqiang/Desktop/AI/grok-bot-0.18-reconstructed-main",
+      "commit": null,
+      "review_scope": "关键链路和相关段落；不是全仓逐行审计或端到端验证",
+      "files": [
+        {
+          "path": "/Users/chenqiang/Desktop/AI/grok-bot-0.18-reconstructed-main/source/host/extensions/state-backstop/state-backstop-service.ts",
+          "relative_path": "source/host/extensions/state-backstop/state-backstop-service.ts",
+          "line": 1,
+          "anchor": null,
+          "sha256": "bb1cbcf984f76b20d8429c6cc9f40a8c8ee2e3f4b249c907d84449ea7b711258",
+          "bytes": 3540
+        },
+        {
+          "path": "/Users/chenqiang/Desktop/AI/grok-bot-0.18-reconstructed-main/source/host/extensions/session/agent-db-recovery.ts",
+          "relative_path": "source/host/extensions/session/agent-db-recovery.ts",
+          "line": 1,
+          "anchor": null,
+          "sha256": "ad51f95381393c4d4e0d7654eb3e05640863d420629ac952ace157d7024f3e1a",
+          "bytes": 6534
+        },
+        {
+          "path": "/Users/chenqiang/Desktop/AI/grok-bot-0.18-reconstructed-main/source/host/extensions/box-store-sync/box-store-sync-service.ts",
+          "relative_path": "source/host/extensions/box-store-sync/box-store-sync-service.ts",
+          "line": 1,
+          "anchor": null,
+          "sha256": "f6a5becf243e7cac774caa8079b4168efd721b4b927a39f9ff2d04432ec3b462",
+          "bytes": 15227
+        },
+        {
+          "path": "/Users/chenqiang/Desktop/AI/grok-bot-0.18-reconstructed-main/source/host/extensions/host-upgrade/host-upgrade-service.ts",
+          "relative_path": "source/host/extensions/host-upgrade/host-upgrade-service.ts",
+          "line": 1,
+          "anchor": null,
+          "sha256": "f8af60e3b78abb3da2a46cf8c29df8b6d62d556480939b27ec76185e8c6f73c3",
+          "bytes": 9674
+        }
+      ]
+    },
+    {
+      "id": "GR13",
+      "kind": "local_source",
+      "title": "连接器账号、MCP 工具与技能同步",
+      "root": "/Users/chenqiang/Desktop/AI/grok-bot-0.18-reconstructed-main",
+      "commit": null,
+      "review_scope": "关键链路和相关段落；不是全仓逐行审计或端到端验证",
+      "files": [
+        {
+          "path": "/Users/chenqiang/Desktop/AI/grok-bot-0.18-reconstructed-main/source/host/extensions/mcp/mcp-service.ts",
+          "relative_path": "source/host/extensions/mcp/mcp-service.ts",
+          "line": 1,
+          "anchor": null,
+          "sha256": "064d8bdfef4440ad9083acef39ab5fc640e86f24d2a8de7da8b9f90f25a19051",
+          "bytes": 20761
+        }
+      ]
+    },
+    {
+      "id": "GR14",
+      "kind": "local_source",
+      "title": "独立云端编码任务",
+      "root": "/Users/chenqiang/Desktop/AI/grok-bot-0.18-reconstructed-main",
+      "commit": null,
+      "review_scope": "关键链路和相关段落；不是全仓逐行审计或端到端验证",
+      "files": [
+        {
+          "path": "/Users/chenqiang/Desktop/AI/grok-bot-0.18-reconstructed-main/source/host/extensions/cloud-agents/cloud-agents-service.ts",
+          "relative_path": "source/host/extensions/cloud-agents/cloud-agents-service.ts",
+          "line": 1,
+          "anchor": null,
+          "sha256": "6e7b1bb01cc5ee916ea2b9af256262e71873bd8373a48f80576ae513479235a9",
+          "bytes": 17026
+        }
+      ]
+    },
+    {
+      "id": "GR15",
+      "kind": "local_source",
+      "title": "部分可读前端及重建边界",
+      "root": "/Users/chenqiang/Desktop/AI/grok-bot-0.18-reconstructed-main",
+      "commit": null,
+      "review_scope": "关键链路和相关段落；不是全仓逐行审计或端到端验证",
+      "files": [
+        {
+          "path": "/Users/chenqiang/Desktop/AI/grok-bot-0.18-reconstructed-main/PROVENANCE.md",
+          "relative_path": "PROVENANCE.md",
+          "line": 1,
+          "anchor": null,
+          "sha256": "ce0f08a247393f6abf2658006aed123bf9ee48616db39ca3667647b68ee27232",
+          "bytes": 2654
+        },
+        {
+          "path": "/Users/chenqiang/Desktop/AI/grok-bot-0.18-reconstructed-main/frontend/README.md",
+          "relative_path": "frontend/README.md",
+          "line": 1,
+          "anchor": null,
+          "sha256": "1d12c96f8fe9935004fcba4975c7403508c20383067f39f844ae04719a26de89",
+          "bytes": 863
+        },
+        {
+          "path": "/Users/chenqiang/Desktop/AI/grok-bot-0.18-reconstructed-main/frontend/src/recovered/features/conversation/workspace/sidebar.tsx",
+          "relative_path": "frontend/src/recovered/features/conversation/workspace/sidebar.tsx",
+          "line": 1,
+          "anchor": null,
+          "sha256": "fa69a02cea8a7d51d67ddb2bdc78a80608d6962d182515ee57847454ee191f3d",
+          "bytes": 31965
+        },
+        {
+          "path": "/Users/chenqiang/Desktop/AI/grok-bot-0.18-reconstructed-main/frontend/src/recovered/features/conversation/workspace/composer.tsx",
+          "relative_path": "frontend/src/recovered/features/conversation/workspace/composer.tsx",
+          "line": 1,
+          "anchor": null,
+          "sha256": "e6511a16bd286ae06a144cf85d85e60e25d32281904cd7b79fad1f9c07f6b980",
+          "bytes": 13628
+        },
+        {
+          "path": "/Users/chenqiang/Desktop/AI/grok-bot-0.18-reconstructed-main/frontend/src/recovered/features/conversation/workspace/voice.tsx",
+          "relative_path": "frontend/src/recovered/features/conversation/workspace/voice.tsx",
+          "line": 1,
+          "anchor": null,
+          "sha256": "ff6276858048c3954416f942aa3cd5e7be371c913665f5126e75422670df8938",
+          "bytes": 17969
+        },
+        {
+          "path": "/Users/chenqiang/Desktop/AI/grok-bot-0.18-reconstructed-main/frontend/src/recovered/features/conversation/cards/transcript-card/views/email-draft.tsx",
+          "relative_path": "frontend/src/recovered/features/conversation/cards/transcript-card/views/email-draft.tsx",
+          "line": 1,
+          "anchor": null,
+          "sha256": "8df26908f5a6265d3ba9c88a06b092e321768124fb9629024acc00a6df114eaf",
+          "bytes": 3892
+        },
+        {
+          "path": "/Users/chenqiang/Desktop/AI/grok-bot-0.18-reconstructed-main/frontend/src/recovered/features/computer/shell/vnc-webview.tsx",
+          "relative_path": "frontend/src/recovered/features/computer/shell/vnc-webview.tsx",
+          "line": 1,
+          "anchor": null,
+          "sha256": "958a5732a2a57aa72fb049baf5aaf20d73e0c1957e30bf315383e550426cd1d3",
+          "bytes": 8679
+        },
+        {
+          "path": "/Users/chenqiang/Desktop/AI/grok-bot-0.18-reconstructed-main/frontend/manifests/ui-evidence-anchors.json",
+          "relative_path": "frontend/manifests/ui-evidence-anchors.json",
+          "line": 1,
+          "anchor": null,
+          "sha256": "61d84a194104f2241b8246e906e11b822e46886ee1adbc561f9032d6f5289391",
+          "bytes": 24780
+        }
+      ]
+    },
+    {
+      "id": "GR16",
+      "kind": "local_source",
+      "title": "电脑连接、命令、事件及远程画面通道",
+      "root": "/Users/chenqiang/Desktop/AI/grok-bot-0.18-reconstructed-main",
+      "commit": null,
+      "review_scope": "关键链路和相关段落；不是全仓逐行审计或端到端验证",
+      "files": [
+        {
+          "path": "/Users/chenqiang/Desktop/AI/grok-bot-0.18-reconstructed-main/source/electron-main/box/box-host-connector.ts",
+          "relative_path": "source/electron-main/box/box-host-connector.ts",
+          "line": 74,
+          "anchor": "class BrokeredHostConnector",
+          "sha256": "89ee5ff3b3fb5906c70ba59dd286d44d91c4ac502dc18d75f6b7c0854734049f",
+          "bytes": 10810
+        },
+        {
+          "path": "/Users/chenqiang/Desktop/AI/grok-bot-0.18-reconstructed-main/source/node-agent-coordinator/gateway/gateway-client.ts",
+          "relative_path": "source/node-agent-coordinator/gateway/gateway-client.ts",
+          "line": 246,
+          "anchor": "async request(",
+          "sha256": "f78f06114ba5bf0eddc9d047cb744a619f01b974e112cae506a1545e1da5446e",
+          "bytes": 28259
+        },
+        {
+          "path": "/Users/chenqiang/Desktop/AI/grok-bot-0.18-reconstructed-main/source/node-agent-coordinator/gateway/box-vnc-proxy.ts",
+          "relative_path": "source/node-agent-coordinator/gateway/box-vnc-proxy.ts",
+          "line": 1,
+          "anchor": null,
+          "sha256": "20db85d6801c062ea424170ceda2cb48e84f61071bd2a6e02fe6317677c81504",
+          "bytes": 2035
+        },
+        {
+          "path": "/Users/chenqiang/Desktop/AI/grok-bot-0.18-reconstructed-main/source/shared/gateway-wire.ts",
+          "relative_path": "source/shared/gateway-wire.ts",
+          "line": 1,
+          "anchor": null,
+          "sha256": "5f8ba84359a80f06534c36a5616c7591f4184404f74bdc05b2edaa8b0c41a113",
+          "bytes": 484
+        },
+        {
+          "path": "/Users/chenqiang/Desktop/AI/grok-bot-0.18-reconstructed-main/source/host/gateway-server.ts",
+          "relative_path": "source/host/gateway-server.ts",
+          "line": 46,
+          "anchor": "export async function handleRequest",
+          "sha256": "e5f8f2602b2237926ec5e51c790fff9ea97be9f3ee5dd7bbed38d80ddd7b44f1",
+          "bytes": 15267
+        }
+      ]
+    },
+    {
+      "id": "GR17",
+      "kind": "local_source",
+      "title": "场景工具组装与同级协作工具",
+      "root": "/Users/chenqiang/Desktop/AI/grok-bot-0.18-reconstructed-main",
+      "commit": null,
+      "review_scope": "关键链路和相关段落；不是全仓逐行审计或端到端验证",
+      "files": [
+        {
+          "path": "/Users/chenqiang/Desktop/AI/grok-bot-0.18-reconstructed-main/source/host/runner/tools/turn-toolset.ts",
+          "relative_path": "source/host/runner/tools/turn-toolset.ts",
+          "line": 1153,
+          "anchor": "export function createTurnToolsetFactoriesForTurn",
+          "sha256": "239200b356d757a02a0a584de53273f4b1bb806d84284b903523666e22c0a037",
+          "bytes": 55738
+        },
+        {
+          "path": "/Users/chenqiang/Desktop/AI/grok-bot-0.18-reconstructed-main/source/host/runner/tools/sand-agent-management-tools.ts",
+          "relative_path": "source/host/runner/tools/sand-agent-management-tools.ts",
+          "line": 45,
+          "anchor": "sendToAgentParameters",
+          "sha256": "60365b6976c9b1c469d1e0a952c8c58cbc50c66b7db204f9ca4f531e661482c4",
+          "bytes": 9871
+        }
+      ]
+    },
+    {
+      "id": "RK01",
+      "kind": "local_source",
+      "title": "持久运行、租约和电脑资源",
+      "root": "/Users/chenqiang/Desktop/AI/cmb-bot-reference-sources/rakazo",
+      "commit": "60ac790cd9a1bb9560b489c0535deb5db2e1e39f",
+      "review_scope": "关键链路和相关段落；不是全仓逐行审计或端到端验证",
+      "files": [
+        {
+          "path": "/Users/chenqiang/Desktop/AI/cmb-bot-reference-sources/rakazo/packages/adapters/src/executor.ts",
+          "relative_path": "packages/adapters/src/executor.ts",
+          "line": 1136,
+          "anchor": "async continueRun(",
+          "sha256": "9d6fa638ba2d8925240ed5096a7ef330ae8b749e964e4e963acce00b9aa08ca1",
+          "bytes": 241706,
+          "permalink": "https://github.com/elie222/rakazo/blob/60ac790cd9a1bb9560b489c0535deb5db2e1e39f/packages/adapters/src/executor.ts#L1136"
+        }
+      ]
+    },
+    {
+      "id": "RK02",
+      "kind": "local_source",
+      "title": "领导者对账与恢复",
+      "root": "/Users/chenqiang/Desktop/AI/cmb-bot-reference-sources/rakazo",
+      "commit": "60ac790cd9a1bb9560b489c0535deb5db2e1e39f",
+      "review_scope": "关键链路和相关段落；不是全仓逐行审计或端到端验证",
+      "files": [
+        {
+          "path": "/Users/chenqiang/Desktop/AI/cmb-bot-reference-sources/rakazo/packages/adapters/src/job-reconciler.ts",
+          "relative_path": "packages/adapters/src/job-reconciler.ts",
+          "line": 1,
+          "anchor": null,
+          "sha256": "5fd6ac77e0c4d755e86673fbff8feaea1df9d4a34566e1a959133c35e0839a06",
+          "bytes": 14144,
+          "permalink": "https://github.com/elie222/rakazo/blob/60ac790cd9a1bb9560b489c0535deb5db2e1e39f/packages/adapters/src/job-reconciler.ts#L1"
+        }
+      ]
+    },
+    {
+      "id": "RK03",
+      "kind": "local_source",
+      "title": "事务内 Bot 消息投递",
+      "root": "/Users/chenqiang/Desktop/AI/cmb-bot-reference-sources/rakazo",
+      "commit": "60ac790cd9a1bb9560b489c0535deb5db2e1e39f",
+      "review_scope": "关键链路和相关段落；不是全仓逐行审计或端到端验证",
+      "files": [
+        {
+          "path": "/Users/chenqiang/Desktop/AI/cmb-bot-reference-sources/rakazo/packages/adapters/src/bot-messages.ts",
+          "relative_path": "packages/adapters/src/bot-messages.ts",
+          "line": 1,
+          "anchor": null,
+          "sha256": "f83fa273ca8ba9a4b15d9c909b5c78412ce28c21e6c471df1148826d58722807",
+          "bytes": 13552,
+          "permalink": "https://github.com/elie222/rakazo/blob/60ac790cd9a1bb9560b489c0535deb5db2e1e39f/packages/adapters/src/bot-messages.ts#L1"
+        }
+      ]
+    },
+    {
+      "id": "RK04",
+      "kind": "local_source",
+      "title": "批准动作和未知外部效果",
+      "root": "/Users/chenqiang/Desktop/AI/cmb-bot-reference-sources/rakazo",
+      "commit": "60ac790cd9a1bb9560b489c0535deb5db2e1e39f",
+      "review_scope": "关键链路和相关段落；不是全仓逐行审计或端到端验证",
+      "files": [
+        {
+          "path": "/Users/chenqiang/Desktop/AI/cmb-bot-reference-sources/rakazo/packages/adapters/src/approval-effect.ts",
+          "relative_path": "packages/adapters/src/approval-effect.ts",
+          "line": 1,
+          "anchor": null,
+          "sha256": "bf3dc911d8e688c1b42bb6099149293f9f6b3080c0c10d94061147a1be53fcf4",
+          "bytes": 16079,
+          "permalink": "https://github.com/elie222/rakazo/blob/60ac790cd9a1bb9560b489c0535deb5db2e1e39f/packages/adapters/src/approval-effect.ts#L1"
+        }
+      ]
+    },
+    {
+      "id": "RK05",
+      "kind": "local_source",
+      "title": "Teach 事件转步骤的能力边界",
+      "root": "/Users/chenqiang/Desktop/AI/cmb-bot-reference-sources/rakazo",
+      "commit": "60ac790cd9a1bb9560b489c0535deb5db2e1e39f",
+      "review_scope": "关键链路和相关段落；不是全仓逐行审计或端到端验证",
+      "files": [
+        {
+          "path": "/Users/chenqiang/Desktop/AI/cmb-bot-reference-sources/rakazo/packages/core/src/teach-playbook.ts",
+          "relative_path": "packages/core/src/teach-playbook.ts",
+          "line": 1,
+          "anchor": null,
+          "sha256": "1e94f113dac087c5dada9b065f2bdc26553ab9f89c18f74e97838be09168cf01",
+          "bytes": 7218,
+          "permalink": "https://github.com/elie222/rakazo/blob/60ac790cd9a1bb9560b489c0535deb5db2e1e39f/packages/core/src/teach-playbook.ts#L1"
+        }
+      ]
+    },
+    {
+      "id": "OB01",
+      "kind": "local_source",
+      "title": "数据库时间与持久工作队列",
+      "root": "/Users/chenqiang/Desktop/AI/cmb-bot-reference-sources/openbot",
+      "commit": "b6932d31a8d6e7896c15139dfc27a6c6911deb27",
+      "review_scope": "关键链路和相关段落；不是全仓逐行审计或端到端验证",
+      "files": [
+        {
+          "path": "/Users/chenqiang/Desktop/AI/cmb-bot-reference-sources/openbot/server/src/work/queue.ts",
+          "relative_path": "server/src/work/queue.ts",
+          "line": 1,
+          "anchor": null,
+          "sha256": "a9f928ef57b26899e052763f3adbb07188dbe58823a722a1f7ab833a5a29ed4b",
+          "bytes": 17046,
+          "permalink": "https://github.com/CopilotKit/OpenBot/blob/b6932d31a8d6e7896c15139dfc27a6c6911deb27/server/src/work/queue.ts#L1"
+        }
+      ]
+    },
+    {
+      "id": "OB02",
+      "kind": "local_source",
+      "title": "服务端目标解析与动作策略网关",
+      "root": "/Users/chenqiang/Desktop/AI/cmb-bot-reference-sources/openbot",
+      "commit": "b6932d31a8d6e7896c15139dfc27a6c6911deb27",
+      "review_scope": "关键链路和相关段落；不是全仓逐行审计或端到端验证",
+      "files": [
+        {
+          "path": "/Users/chenqiang/Desktop/AI/cmb-bot-reference-sources/openbot/server/src/computer/gateway.ts",
+          "relative_path": "server/src/computer/gateway.ts",
+          "line": 1,
+          "anchor": null,
+          "sha256": "2c0d19cc2e766445e26e9f96c6ef93c882489b8faa4dc7232cc1ee6010945cc4",
+          "bytes": 49664,
+          "permalink": "https://github.com/CopilotKit/OpenBot/blob/b6932d31a8d6e7896c15139dfc27a6c6911deb27/server/src/computer/gateway.ts#L1"
+        }
+      ]
+    },
+    {
+      "id": "OB03",
+      "kind": "local_source",
+      "title": "后台例程工具限制",
+      "root": "/Users/chenqiang/Desktop/AI/cmb-bot-reference-sources/openbot",
+      "commit": "b6932d31a8d6e7896c15139dfc27a6c6911deb27",
+      "review_scope": "关键链路和相关段落；不是全仓逐行审计或端到端验证",
+      "files": [
+        {
+          "path": "/Users/chenqiang/Desktop/AI/cmb-bot-reference-sources/openbot/server/src/routines/run-turn.ts",
+          "relative_path": "server/src/routines/run-turn.ts",
+          "line": 371,
+          "anchor": "tools: []",
+          "sha256": "e1d715614d55333df955ba2547ca767d08e63ba75f0cba3eeea3d429ee446c82",
+          "bytes": 25739,
+          "permalink": "https://github.com/CopilotKit/OpenBot/blob/b6932d31a8d6e7896c15139dfc27a6c6911deb27/server/src/routines/run-turn.ts#L371"
+        },
+        {
+          "path": "/Users/chenqiang/Desktop/AI/cmb-bot-reference-sources/openbot/docs/architecture.md",
+          "relative_path": "docs/architecture.md",
+          "line": 1,
+          "anchor": null,
+          "sha256": "10163aa8573e02aa07481b676fdc782ba2a76269942fedc12df803d6fc06db7c",
+          "bytes": 28083,
+          "permalink": "https://github.com/CopilotKit/OpenBot/blob/b6932d31a8d6e7896c15139dfc27a6c6911deb27/docs/architecture.md#L1"
+        }
+      ]
+    },
+    {
+      "id": "OB04",
+      "kind": "local_source",
+      "title": "外部 Intelligence 服务依赖",
+      "root": "/Users/chenqiang/Desktop/AI/cmb-bot-reference-sources/openbot",
+      "commit": "b6932d31a8d6e7896c15139dfc27a6c6911deb27",
+      "review_scope": "关键链路和相关段落；不是全仓逐行审计或端到端验证",
+      "files": [
+        {
+          "path": "/Users/chenqiang/Desktop/AI/cmb-bot-reference-sources/openbot/server/src/config.ts",
+          "relative_path": "server/src/config.ts",
+          "line": 887,
+          "anchor": "INTELLIGENCE_API",
+          "sha256": "9692db515588a39aec37ef29e3821bb8ecaefde9b2ae861b8d81de920bfb7621",
+          "bytes": 55101,
+          "permalink": "https://github.com/CopilotKit/OpenBot/blob/b6932d31a8d6e7896c15139dfc27a6c6911deb27/server/src/config.ts#L887"
+        }
+      ]
+    },
+    {
+      "id": "CM01",
+      "kind": "local_source",
+      "title": "运行服务和 IPC 实现注册",
+      "root": "/Users/chenqiang/Desktop/projects/CmbCoworkAgent",
+      "commit": "0ba63bd2f6a1eb48066882e94bd81c7fdda9c0ee",
+      "review_scope": "关键链路和相关段落；不是全仓逐行审计或端到端验证",
+      "files": [
+        {
+          "path": "/Users/chenqiang/Desktop/projects/CmbCoworkAgent/src/main/agent/agent-run-service.ts",
+          "relative_path": "src/main/agent/agent-run-service.ts",
+          "line": 1,
+          "anchor": null,
+          "sha256": "e9f789d24f07786b6c5a9ea7b2b1acf9fdde92d36f92d275268c3b3570452d5e",
+          "bytes": 9785
+        },
+        {
+          "path": "/Users/chenqiang/Desktop/projects/CmbCoworkAgent/src/main/ipc/agent.ts",
+          "relative_path": "src/main/ipc/agent.ts",
+          "line": 5735,
+          "anchor": "  registerAgentRunImplementation(",
+          "sha256": "0ad42754acc4c5d41ac3231143bf16ff1f9063693a24edcb408521f348367ca0",
+          "bytes": 531421
+        }
+      ]
+    },
+    {
+      "id": "CM02",
+      "kind": "local_source",
+      "title": "标准 turn 准备",
+      "root": "/Users/chenqiang/Desktop/projects/CmbCoworkAgent",
+      "commit": "0ba63bd2f6a1eb48066882e94bd81c7fdda9c0ee",
+      "review_scope": "关键链路和相关段落；不是全仓逐行审计或端到端验证",
+      "files": [
+        {
+          "path": "/Users/chenqiang/Desktop/projects/CmbCoworkAgent/src/main/agent/standard-thread-turn.ts",
+          "relative_path": "src/main/agent/standard-thread-turn.ts",
+          "line": 1,
+          "anchor": null,
+          "sha256": "05a3d17795a5c95f4e3e2925ae388636e70bbf6ba5849f9a564417502481b019",
+          "bytes": 27670
+        }
+      ]
+    },
+    {
+      "id": "CM03",
+      "kind": "local_source",
+      "title": "运行内核及 Electron 依赖",
+      "root": "/Users/chenqiang/Desktop/projects/CmbCoworkAgent",
+      "commit": "0ba63bd2f6a1eb48066882e94bd81c7fdda9c0ee",
+      "review_scope": "关键链路和相关段落；不是全仓逐行审计或端到端验证",
+      "files": [
+        {
+          "path": "/Users/chenqiang/Desktop/projects/CmbCoworkAgent/src/main/agent/runtime.ts",
+          "relative_path": "src/main/agent/runtime.ts",
+          "line": 159,
+          "anchor": "from \"electron\"",
+          "sha256": "b41439de38549a18800c5a5d71b4bb79e541b5f38cf8bbe6441bf9d26f90c529",
+          "bytes": 316668
+        }
+      ]
+    },
+    {
+      "id": "CM04",
+      "kind": "local_source",
+      "title": "任务内 coordinator / workers",
+      "root": "/Users/chenqiang/Desktop/projects/CmbCoworkAgent",
+      "commit": "0ba63bd2f6a1eb48066882e94bd81c7fdda9c0ee",
+      "review_scope": "关键链路和相关段落；不是全仓逐行审计或端到端验证",
+      "files": [
+        {
+          "path": "/Users/chenqiang/Desktop/projects/CmbCoworkAgent/src/main/agent/coordinator-worker-manager.ts",
+          "relative_path": "src/main/agent/coordinator-worker-manager.ts",
+          "line": 1,
+          "anchor": null,
+          "sha256": "fc8edce81e53c8335a399fe281ed5647c75d201844ed42aa0921eb8f3354e1ee",
+          "bytes": 164241
+        }
+      ]
+    },
+    {
+      "id": "CM05",
+      "kind": "local_source",
+      "title": "桌面调度与内存 lease",
+      "root": "/Users/chenqiang/Desktop/projects/CmbCoworkAgent",
+      "commit": "0ba63bd2f6a1eb48066882e94bd81c7fdda9c0ee",
+      "review_scope": "关键链路和相关段落；不是全仓逐行审计或端到端验证",
+      "files": [
+        {
+          "path": "/Users/chenqiang/Desktop/projects/CmbCoworkAgent/src/main/services/scheduler.ts",
+          "relative_path": "src/main/services/scheduler.ts",
+          "line": 1,
+          "anchor": null,
+          "sha256": "5d813c927ab2b9b2853b36ac281afcc85cefd400ceb2f09d5dfa466548a51009",
+          "bytes": 23458
+        },
+        {
+          "path": "/Users/chenqiang/Desktop/projects/CmbCoworkAgent/src/main/agent/thread-run-lease.ts",
+          "relative_path": "src/main/agent/thread-run-lease.ts",
+          "line": 1,
+          "anchor": null,
+          "sha256": "7e774a2e0e06be2bc905a2678c3f079deed8a9175fef79f6887eeef644d9b5a6",
+          "bytes": 3944
+        }
+      ]
+    },
+    {
+      "id": "CM06",
+      "kind": "local_source",
+      "title": "招乎/IM 入口与远程执行桥",
+      "root": "/Users/chenqiang/Desktop/projects/CmbCoworkAgent",
+      "commit": "0ba63bd2f6a1eb48066882e94bd81c7fdda9c0ee",
+      "review_scope": "关键链路和相关段落；不是全仓逐行审计或端到端验证",
+      "files": [
+        {
+          "path": "/Users/chenqiang/Desktop/projects/CmbCoworkAgent/src/main/services/im/manager.ts",
+          "relative_path": "src/main/services/im/manager.ts",
+          "line": 1,
+          "anchor": null,
+          "sha256": "eb3c802314653facd530e71a50058e181f9ad887a602f4f5bbb9ca3ab93afc7e",
+          "bytes": 22405
+        },
+        {
+          "path": "/Users/chenqiang/Desktop/projects/CmbCoworkAgent/src/main/services/im/remote-runner.ts",
+          "relative_path": "src/main/services/im/remote-runner.ts",
+          "line": 1,
+          "anchor": null,
+          "sha256": "adfa585c9b1e17d59e62e407062d679e33565c62b6706c83e7860b9cc7ac7782",
+          "bytes": 57140
+        },
+        {
+          "path": "/Users/chenqiang/Desktop/projects/CmbCoworkAgent/src/main/services/im/gateway-ws-client.ts",
+          "relative_path": "src/main/services/im/gateway-ws-client.ts",
+          "line": 1,
+          "anchor": null,
+          "sha256": "2ee1f960ab7ebbee03f8da77d99be4abc10390443b7cb116a964644d2dca10cc",
+          "bytes": 49046
+        }
+      ]
+    },
+    {
+      "id": "CM07",
+      "kind": "local_source",
+      "title": "当前记忆作用域与维护",
+      "root": "/Users/chenqiang/Desktop/projects/CmbCoworkAgent",
+      "commit": "0ba63bd2f6a1eb48066882e94bd81c7fdda9c0ee",
+      "review_scope": "关键链路和相关段落；不是全仓逐行审计或端到端验证",
+      "files": [
+        {
+          "path": "/Users/chenqiang/Desktop/projects/CmbCoworkAgent/src/main/memory/paths.ts",
+          "relative_path": "src/main/memory/paths.ts",
+          "line": 1,
+          "anchor": null,
+          "sha256": "6ee48ff235e2af70012750f37511267ec0c073636b6906f77f737b1c842a4df2",
+          "bytes": 9557
+        },
+        {
+          "path": "/Users/chenqiang/Desktop/projects/CmbCoworkAgent/src/main/agent/post-run-memory-maintenance.ts",
+          "relative_path": "src/main/agent/post-run-memory-maintenance.ts",
+          "line": 1,
+          "anchor": null,
+          "sha256": "a786ff271dea56f55c947479ec73450d0c4c593bc4a056a3c4de13ba1c054fd4",
+          "bytes": 1410
+        }
+      ]
+    },
+    {
+      "id": "CM08",
+      "kind": "local_source",
+      "title": "浏览器和录制/回放基础",
+      "root": "/Users/chenqiang/Desktop/projects/CmbCoworkAgent",
+      "commit": "0ba63bd2f6a1eb48066882e94bd81c7fdda9c0ee",
+      "review_scope": "关键链路和相关段落；不是全仓逐行审计或端到端验证",
+      "files": [
+        {
+          "path": "/Users/chenqiang/Desktop/projects/CmbCoworkAgent/src/main/browser/core/browser-service.ts",
+          "relative_path": "src/main/browser/core/browser-service.ts",
+          "line": 1,
+          "anchor": null,
+          "sha256": "08a94ebbac2501f9ad4c9397107856f7aeff19595e0631252088561e42309f1e",
+          "bytes": 27004
+        },
+        {
+          "path": "/Users/chenqiang/Desktop/projects/CmbCoworkAgent/src/main/browser/record/script-record/script-recording-service.ts",
+          "relative_path": "src/main/browser/record/script-record/script-recording-service.ts",
+          "line": 1,
+          "anchor": null,
+          "sha256": "ae94c3d6a1416d5c4f117193d96d24c4236002658cf925585b56e6c6a7770a51",
+          "bytes": 29752
+        },
+        {
+          "path": "/Users/chenqiang/Desktop/projects/CmbCoworkAgent/src/main/browser/record/common/browser-script-execution-service.ts",
+          "relative_path": "src/main/browser/record/common/browser-script-execution-service.ts",
+          "line": 1,
+          "anchor": null,
+          "sha256": "536c8a569c7847d2d94eec6e486b627ea8d1a35019ec4540d57a6ef926a6cc37",
+          "bytes": 16586
+        }
+      ]
+    },
+    {
+      "id": "CM09",
+      "kind": "local_source",
+      "title": "待审批记录与一次性消费",
+      "root": "/Users/chenqiang/Desktop/projects/CmbCoworkAgent",
+      "commit": "0ba63bd2f6a1eb48066882e94bd81c7fdda9c0ee",
+      "review_scope": "关键链路和相关段落；不是全仓逐行审计或端到端验证",
+      "files": [
+        {
+          "path": "/Users/chenqiang/Desktop/projects/CmbCoworkAgent/src/main/agent/approval-decision-broker.ts",
+          "relative_path": "src/main/agent/approval-decision-broker.ts",
+          "line": 1,
+          "anchor": null,
+          "sha256": "8270c92c2d26c2e58a03f6be345365411ef20a47e046addbd2f7de8c5bad4138",
+          "bytes": 4479
+        }
+      ]
+    },
+    {
+      "id": "CM10",
+      "kind": "local_source",
+      "title": "流投递与窗口 shim",
+      "root": "/Users/chenqiang/Desktop/projects/CmbCoworkAgent",
+      "commit": "0ba63bd2f6a1eb48066882e94bd81c7fdda9c0ee",
+      "review_scope": "关键链路和相关段落；不是全仓逐行审计或端到端验证",
+      "files": [
+        {
+          "path": "/Users/chenqiang/Desktop/projects/CmbCoworkAgent/src/main/agent/managed-transport-delivery.ts",
+          "relative_path": "src/main/agent/managed-transport-delivery.ts",
+          "line": 1,
+          "anchor": null,
+          "sha256": "18f1a55bf6807be16cb69b9505a1f440b6e7d79483a3d1b17e25b00348b8cb95",
+          "bytes": 9751
+        }
+      ]
+    },
+    {
+      "id": "CM11",
+      "kind": "local_source",
+      "title": "现有桌面 UI、状态与传输",
+      "root": "/Users/chenqiang/Desktop/projects/CmbCoworkAgent",
+      "commit": "0ba63bd2f6a1eb48066882e94bd81c7fdda9c0ee",
+      "review_scope": "关键链路和相关段落；不是全仓逐行审计或端到端验证",
+      "files": [
+        {
+          "path": "/Users/chenqiang/Desktop/projects/CmbCoworkAgent/src/renderer/src/App.tsx",
+          "relative_path": "src/renderer/src/App.tsx",
+          "line": 1,
+          "anchor": null,
+          "sha256": "0c9a31055b5c031cf3b4a57681336f88fa7b7097efe9b13d0e9f8f4cd16adaf8",
+          "bytes": 61574
+        },
+        {
+          "path": "/Users/chenqiang/Desktop/projects/CmbCoworkAgent/src/renderer/src/lib/store.ts",
+          "relative_path": "src/renderer/src/lib/store.ts",
+          "line": 1,
+          "anchor": null,
+          "sha256": "43f5dc0d0e5c030df94b575a8e805435e5a671f767539efaf3bbae81fc2e638f",
+          "bytes": 92938
+        },
+        {
+          "path": "/Users/chenqiang/Desktop/projects/CmbCoworkAgent/src/renderer/src/lib/electron-transport.ts",
+          "relative_path": "src/renderer/src/lib/electron-transport.ts",
+          "line": 1,
+          "anchor": null,
+          "sha256": "9e80e89a07f473cf94c74f45ea5a4a4c17953bcf064325860d87d12b7fa3d0b3",
+          "bytes": 329246
+        }
+      ]
+    },
+    {
+      "id": "CM12",
+      "kind": "local_source",
+      "title": "Mods 身份、grant 和执行收据",
+      "root": "/Users/chenqiang/Desktop/projects/CmbCoworkAgent",
+      "commit": "0ba63bd2f6a1eb48066882e94bd81c7fdda9c0ee",
+      "review_scope": "关键链路和相关段落；不是全仓逐行审计或端到端验证",
+      "files": [
+        {
+          "path": "/Users/chenqiang/Desktop/projects/CmbCoworkAgent/src/main/mods/v2/host-call.ts",
+          "relative_path": "src/main/mods/v2/host-call.ts",
+          "line": 1,
+          "anchor": null,
+          "sha256": "332fb54f25a5fb49e925e866e7a5d74df46a67a1e71fd9d97e3fb46976977cae",
+          "bytes": 6093
+        }
+      ]
+    },
+    {
+      "id": "W-home",
+      "kind": "official_web",
+      "title": "Grok Bot 官网",
+      "url": "https://x.ai/bot",
+      "retrieved_date": "2026-09-29",
+      "review_scope": "目录检索及相关功能/限制段落核对；非真机验证"
+    },
+    {
+      "id": "W-marketplace",
+      "kind": "official_web",
+      "title": "公开模板市场",
+      "url": "https://x.ai/bot/marketplace",
+      "retrieved_date": "2026-09-29",
+      "review_scope": "目录检索及相关功能/限制段落核对；非真机验证"
+    },
+    {
+      "id": "W-guides",
+      "kind": "official_web",
+      "title": "Grok Bot Guides",
+      "url": "https://x.ai/bot/guides",
+      "retrieved_date": "2026-09-29",
+      "review_scope": "目录检索及相关功能/限制段落核对；非真机验证"
+    },
+    {
+      "id": "W-overview",
+      "kind": "official_web",
+      "title": "产品概览",
+      "url": "https://docs.x.ai/grok-bot/overview",
+      "retrieved_date": "2026-09-29",
+      "review_scope": "目录检索及相关功能/限制段落核对；非真机验证",
+      "snapshot_url": "https://docs.x.ai/grok-bot/overview.md",
+      "sha256": "776db67333b62277f8d4bb4685dbcf42b8bf79c71e3607fc9affa671e0da518c",
+      "bytes": 5404
+    },
+    {
+      "id": "W-get-started",
+      "kind": "official_web",
+      "title": "账号与入门",
+      "url": "https://docs.x.ai/grok-bot/get-started",
+      "retrieved_date": "2026-09-29",
+      "review_scope": "目录检索及相关功能/限制段落核对；非真机验证",
+      "snapshot_url": "https://docs.x.ai/grok-bot/get-started.md",
+      "sha256": "f5d0122116d3e8ab09a0cd85aa798e8a03866a77eddf3bf75fa5e9d6bf30940a",
+      "bytes": 6516
+    },
+    {
+      "id": "W-bots",
+      "kind": "official_web",
+      "title": "个人 Bot 管理",
+      "url": "https://docs.x.ai/grok-bot/bots",
+      "retrieved_date": "2026-09-29",
+      "review_scope": "目录检索及相关功能/限制段落核对；非真机验证",
+      "snapshot_url": "https://docs.x.ai/grok-bot/bots.md",
+      "sha256": "9fbc6f99df81d92e909133a26f9f47585932b235aff701fa7d5ed8f109a200c8",
+      "bytes": 5332
+    },
+    {
+      "id": "W-chat",
+      "kind": "official_web",
+      "title": "聊天、协作与快捷键",
+      "url": "https://docs.x.ai/grok-bot/chat-and-collaboration",
+      "retrieved_date": "2026-09-29",
+      "review_scope": "目录检索及相关功能/限制段落核对；非真机验证",
+      "snapshot_url": "https://docs.x.ai/grok-bot/chat-and-collaboration.md",
+      "sha256": "13cfa782b8e5fb3915cbcb410db2fe3cb5d25cd5ed7223907aff75979889c292",
+      "bytes": 6708
+    },
+    {
+      "id": "W-files",
+      "kind": "official_web",
+      "title": "文件与成果",
+      "url": "https://docs.x.ai/grok-bot/files-and-results",
+      "retrieved_date": "2026-09-29",
+      "review_scope": "目录检索及相关功能/限制段落核对；非真机验证",
+      "snapshot_url": "https://docs.x.ai/grok-bot/files-and-results.md",
+      "sha256": "62d0417cc14c9c7d57b33fea90a5e05ee2ebbe593c24d8e878f064504fd9795e",
+      "bytes": 3573
+    },
+    {
+      "id": "W-computer",
+      "kind": "official_web",
+      "title": "电脑与应用",
+      "url": "https://docs.x.ai/grok-bot/computer-and-apps",
+      "retrieved_date": "2026-09-29",
+      "review_scope": "目录检索及相关功能/限制段落核对；非真机验证",
+      "snapshot_url": "https://docs.x.ai/grok-bot/computer-and-apps.md",
+      "sha256": "a854c8afee4338d3d88dca622fa29d992d0418deb6d1723d2d181929eece604b",
+      "bytes": 4310
+    },
+    {
+      "id": "W-mobile",
+      "kind": "official_web",
+      "title": "移动端",
+      "url": "https://docs.x.ai/grok-bot/mobile",
+      "retrieved_date": "2026-09-29",
+      "review_scope": "目录检索及相关功能/限制段落核对；非真机验证",
+      "snapshot_url": "https://docs.x.ai/grok-bot/mobile.md",
+      "sha256": "fedd9fde278767c34fb496368f9c72dcdaab1484abd82dff0eb0610f7f38e740",
+      "bytes": 4541
+    },
+    {
+      "id": "W-skills",
+      "kind": "official_web",
+      "title": "技能、示范与例程",
+      "url": "https://docs.x.ai/grok-bot/skills-routines-and-automations",
+      "retrieved_date": "2026-09-29",
+      "review_scope": "目录检索及相关功能/限制段落核对；非真机验证",
+      "snapshot_url": "https://docs.x.ai/grok-bot/skills-routines-and-automations.md",
+      "sha256": "303b49492614b4519d933e287dab630c673bba9958bdcaaa3a641b46e588eef9",
+      "bytes": 5439
+    },
+    {
+      "id": "W-settings",
+      "kind": "official_web",
+      "title": "设置和通知",
+      "url": "https://docs.x.ai/grok-bot/settings-and-notifications",
+      "retrieved_date": "2026-09-29",
+      "review_scope": "目录检索及相关功能/限制段落核对；非真机验证",
+      "snapshot_url": "https://docs.x.ai/grok-bot/settings-and-notifications.md",
+      "sha256": "e17fe02042abe58a36364acd09778dbae69256ba851922a5af551c03959fbe6f",
+      "bytes": 7371
+    },
+    {
+      "id": "W-approvals",
+      "kind": "official_web",
+      "title": "审批与隐私",
+      "url": "https://docs.x.ai/grok-bot/approvals-security-and-privacy",
+      "retrieved_date": "2026-09-29",
+      "review_scope": "目录检索及相关功能/限制段落核对；非真机验证",
+      "snapshot_url": "https://docs.x.ai/grok-bot/approvals-security-and-privacy.md",
+      "sha256": "37a876b1ff2f73367634adc569ca8bf1b9c50f9c2d914358627850ab02a580f9",
+      "bytes": 7844
+    },
+    {
+      "id": "W-enterprise",
+      "kind": "official_web",
+      "title": "团队与企业",
+      "url": "https://docs.x.ai/grok-bot/teams-and-enterprises",
+      "retrieved_date": "2026-09-29",
+      "review_scope": "目录检索及相关功能/限制段落核对；非真机验证",
+      "snapshot_url": "https://docs.x.ai/grok-bot/teams-and-enterprises.md",
+      "sha256": "d2cc99c5f1b5d221eaa8f589eb5bd7966bcfa1f392f06b361c5388922bb37aef",
+      "bytes": 29050
+    },
+    {
+      "id": "W-troubleshooting",
+      "kind": "official_web",
+      "title": "故障处理",
+      "url": "https://docs.x.ai/grok-bot/troubleshooting",
+      "retrieved_date": "2026-09-29",
+      "review_scope": "目录检索及相关功能/限制段落核对；非真机验证",
+      "snapshot_url": "https://docs.x.ai/grok-bot/troubleshooting.md",
+      "sha256": "03f94a9aefc822b5c5feb9689fb379468838f63036f6d327e9469e5123f9de69",
+      "bytes": 6464
+    },
+    {
+      "id": "W-faq",
+      "kind": "official_web",
+      "title": "常见问题",
+      "url": "https://docs.x.ai/grok-bot/faq",
+      "retrieved_date": "2026-09-29",
+      "review_scope": "目录检索及相关功能/限制段落核对；非真机验证",
+      "snapshot_url": "https://docs.x.ai/grok-bot/faq.md",
+      "sha256": "8708500465354197072693c131540f07f684db3976c752f2d8b8dc8e328f62a2",
+      "bytes": 6747
+    },
+    {
+      "id": "W-use-cases",
+      "kind": "official_web",
+      "title": "使用场景",
+      "url": "https://docs.x.ai/grok-bot/use-cases",
+      "retrieved_date": "2026-09-29",
+      "review_scope": "目录检索及相关功能/限制段落核对；非真机验证",
+      "snapshot_url": "https://docs.x.ai/grok-bot/use-cases.md",
+      "sha256": "8e31da97d549b9b7c5bd9fec80f93c73be878468b350643571e0fe22c28df316",
+      "bytes": 5489
+    },
+    {
+      "id": "W-security",
+      "kind": "official_web",
+      "title": "安全机制",
+      "url": "https://docs.x.ai/grok-bot/security",
+      "retrieved_date": "2026-09-29",
+      "review_scope": "目录检索及相关功能/限制段落核对；非真机验证",
+      "snapshot_url": "https://docs.x.ai/grok-bot/security.md",
+      "sha256": "917b179235c240ae2250fcafc8666a59cd0eb7666a251e0d882b13cf9c134494",
+      "bytes": 17874
+    },
+    {
+      "id": "W-security-faq",
+      "kind": "official_web",
+      "title": "安全问题",
+      "url": "https://docs.x.ai/grok-bot/security-faq",
+      "retrieved_date": "2026-09-29",
+      "review_scope": "目录检索及相关功能/限制段落核对；非真机验证",
+      "snapshot_url": "https://docs.x.ai/grok-bot/security-faq.md",
+      "sha256": "47bb17a93a871e282652c6f289e5e40532807b3694cf7b2cd2a27e0b2dc4a065",
+      "bytes": 8696
+    },
+    {
+      "id": "W-private-networks",
+      "kind": "official_web",
+      "title": "私有网络",
+      "url": "https://docs.x.ai/grok-bot/private-networks",
+      "retrieved_date": "2026-09-29",
+      "review_scope": "目录检索及相关功能/限制段落核对；非真机验证",
+      "snapshot_url": "https://docs.x.ai/grok-bot/private-networks.md",
+      "sha256": "037e8a41fbd1405c02ffd59f58d5413a4bec09b975eb4967a8c424086c0324be",
+      "bytes": 18186
+    },
+    {
+      "id": "W-proxies",
+      "kind": "official_web",
+      "title": "TLS 与代理",
+      "url": "https://docs.x.ai/grok-bot/proxies",
+      "retrieved_date": "2026-09-29",
+      "review_scope": "目录检索及相关功能/限制段落核对；非真机验证",
+      "snapshot_url": "https://docs.x.ai/grok-bot/proxies.md",
+      "sha256": "011b86e9a52dc01d6523bca4e719dddf8277b35fd0ebc3a41b5374e4041ee2c5",
+      "bytes": 8825
+    },
+    {
+      "id": "W-identity",
+      "kind": "official_web",
+      "title": "身份与访问",
+      "url": "https://docs.x.ai/grok-bot/identity-and-access",
+      "retrieved_date": "2026-09-29",
+      "review_scope": "目录检索及相关功能/限制段落核对；非真机验证",
+      "snapshot_url": "https://docs.x.ai/grok-bot/identity-and-access.md",
+      "sha256": "81118c243e543e40cabbb5c2de6660a0c8a0d5bbd6a8eddbebae008aeb6d5ffd",
+      "bytes": 10697
+    },
+    {
+      "id": "W-computers",
+      "kind": "official_web",
+      "title": "电脑管理",
+      "url": "https://docs.x.ai/grok-bot/computers",
+      "retrieved_date": "2026-09-29",
+      "review_scope": "目录检索及相关功能/限制段落核对；非真机验证",
+      "snapshot_url": "https://docs.x.ai/grok-bot/computers.md",
+      "sha256": "634c181ccf2036e8051ce1bc084b86f011c205946ab70a334a149d2ef55f89ac",
+      "bytes": 8039
+    },
+    {
+      "id": "W-sign-in",
+      "kind": "official_web",
+      "title": "登录",
+      "url": "https://cursor.com/help/grok-bot/sign-in",
+      "retrieved_date": "2026-09-29",
+      "review_scope": "目录检索及相关功能/限制段落核对；非真机验证",
+      "snapshot_url": "https://cursor.com/help/grok-bot/sign-in.md",
+      "sha256": "6b0c1860ee2dab180bae80406a9dea81d75f51a977b2c277a0afaf2e6997d10b",
+      "bytes": 3592
+    },
+    {
+      "id": "W-delete-account",
+      "kind": "official_web",
+      "title": "删除账号",
+      "url": "https://cursor.com/help/grok-bot/delete-account",
+      "retrieved_date": "2026-09-29",
+      "review_scope": "目录检索及相关功能/限制段落核对；非真机验证",
+      "snapshot_url": "https://cursor.com/help/grok-bot/delete-account.md",
+      "sha256": "ab85f6d7e4320d8012f08e0c29cc43ba95ebed17512044dc7ed5f87755fd14b4",
+      "bytes": 2690
+    },
+    {
+      "id": "W-plans",
+      "kind": "official_web",
+      "title": "计划与用量",
+      "url": "https://cursor.com/help/grok-bot/plans",
+      "retrieved_date": "2026-09-29",
+      "review_scope": "目录检索及相关功能/限制段落核对；非真机验证",
+      "snapshot_url": "https://cursor.com/help/grok-bot/plans.md",
+      "sha256": "3224175b1935058274af0f5053477f7e6717ea12d48f2d083d08151ef8577dc0",
+      "bytes": 17520
+    },
+    {
+      "id": "W-faqs",
+      "kind": "official_web",
+      "title": "当前帮助 FAQ",
+      "url": "https://cursor.com/help/grok-bot/faqs",
+      "retrieved_date": "2026-09-29",
+      "review_scope": "目录检索及相关功能/限制段落核对；非真机验证",
+      "snapshot_url": "https://cursor.com/help/grok-bot/faqs.md",
+      "sha256": "2c1714d6249c345af6dd2042974c093876b6679b9339ead349d695f603421832",
+      "bytes": 11366
+    },
+    {
+      "id": "W-how-to",
+      "kind": "official_web",
+      "title": "当前操作帮助",
+      "url": "https://cursor.com/help/grok-bot/how-to",
+      "retrieved_date": "2026-09-29",
+      "review_scope": "目录检索及相关功能/限制段落核对；非真机验证",
+      "snapshot_url": "https://cursor.com/help/grok-bot/how-to.md",
+      "sha256": "2b3f827b9c4da23b30e3c9fad4e3342668846eee6a8f772114176dc1e8f02d3c",
+      "bytes": 19624
+    },
+    {
+      "id": "W-group-chats",
+      "kind": "official_web",
+      "title": "群聊",
+      "url": "https://cursor.com/help/grok-bot/group-chats",
+      "retrieved_date": "2026-09-29",
+      "review_scope": "目录检索及相关功能/限制段落核对；非真机验证",
+      "snapshot_url": "https://cursor.com/help/grok-bot/group-chats.md",
+      "sha256": "f644dc91932f3e5b902d62326657c88453f85e90a4d822226a8fc9b5f72badf2",
+      "bytes": 3219
+    },
+    {
+      "id": "W-routines",
+      "kind": "official_web",
+      "title": "当前例程与事件触发",
+      "url": "https://cursor.com/help/grok-bot/routines",
+      "retrieved_date": "2026-09-29",
+      "review_scope": "目录检索及相关功能/限制段落核对；非真机验证",
+      "snapshot_url": "https://cursor.com/help/grok-bot/routines.md",
+      "sha256": "5bca6548fb08af3de1403b2a93433333e3ffeb7572fa0619728bf70af2e9c745",
+      "bytes": 6774
+    },
+    {
+      "id": "W-connect-plugins",
+      "kind": "official_web",
+      "title": "插件连接",
+      "url": "https://cursor.com/help/grok-bot/connect-plugins",
+      "retrieved_date": "2026-09-29",
+      "review_scope": "目录检索及相关功能/限制段落核对；非真机验证",
+      "snapshot_url": "https://cursor.com/help/grok-bot/connect-plugins.md",
+      "sha256": "a6ea5b48ec0c2083d5f4c74de0318cf4862caa0095fb8b4281fd50eb71311cda",
+      "bytes": 6237
+    },
+    {
+      "id": "W-secrets",
+      "kind": "official_web",
+      "title": "Bot 秘密",
+      "url": "https://cursor.com/help/grok-bot/secrets",
+      "retrieved_date": "2026-09-29",
+      "review_scope": "目录检索及相关功能/限制段落核对；非真机验证",
+      "snapshot_url": "https://cursor.com/help/grok-bot/secrets.md",
+      "sha256": "c035f367bb4dc062597ec7a9bd5e3b0e0f79c3fb13ae46d8b8ee6161cfdb4844",
+      "bytes": 3864
+    },
+    {
+      "id": "W-team-bots",
+      "kind": "official_web",
+      "title": "Team Bots",
+      "url": "https://cursor.com/help/grok-bot/team-bots",
+      "retrieved_date": "2026-09-29",
+      "review_scope": "目录检索及相关功能/限制段落核对；非真机验证",
+      "snapshot_url": "https://cursor.com/help/grok-bot/team-bots.md",
+      "sha256": "9b5fc4d6fa7fda97e5e833f3e71a3151b6c653caacd01e328c744626566bdb9e",
+      "bytes": 11465
+    },
+    {
+      "id": "W-voice-chat",
+      "kind": "official_web",
+      "title": "实时语音",
+      "url": "https://cursor.com/help/grok-bot/voice-chat",
+      "retrieved_date": "2026-09-29",
+      "review_scope": "目录检索及相关功能/限制段落核对；非真机验证",
+      "snapshot_url": "https://cursor.com/help/grok-bot/voice-chat.md",
+      "sha256": "da04e7c4ab126cef5ca45d8c3f3fa1ecd5fdaa46089eccabc4c77123db067403",
+      "bytes": 3334
+    },
+    {
+      "id": "W-cursor-mobile",
+      "kind": "official_web",
+      "title": "当前移动端帮助",
+      "url": "https://cursor.com/help/grok-bot/mobile",
+      "retrieved_date": "2026-09-29",
+      "review_scope": "目录检索及相关功能/限制段落核对；非真机验证",
+      "snapshot_url": "https://cursor.com/help/grok-bot/mobile.md",
+      "sha256": "fda8d04144171548605814c3e11a54a54811177ca795d31c6222dd6c8f4dfbe9",
+      "bytes": 3127
+    },
+    {
+      "id": "W-mobile-purchase",
+      "kind": "official_web",
+      "title": "移动购买",
+      "url": "https://cursor.com/help/grok-bot/mobile-purchase",
+      "retrieved_date": "2026-09-29",
+      "review_scope": "目录检索及相关功能/限制段落核对；非真机验证",
+      "snapshot_url": "https://cursor.com/help/grok-bot/mobile-purchase.md",
+      "sha256": "221589a4b7a1e1295d505c714e6f1d6afb4e3f2ad03f7391cd0b110875a74a56",
+      "bytes": 3400
+    },
+    {
+      "id": "W-supergrok",
+      "kind": "official_web",
+      "title": "权益关联",
+      "url": "https://cursor.com/help/grok-bot/supergrok",
+      "retrieved_date": "2026-09-29",
+      "review_scope": "目录检索及相关功能/限制段落核对；非真机验证",
+      "snapshot_url": "https://cursor.com/help/grok-bot/supergrok.md",
+      "sha256": "8ce0a83d28d75fcc8dd704cd52e5293458f899fd9f144762543162ecb917adcb",
+      "bytes": 8547
+    },
+    {
+      "id": "W-recovery",
+      "kind": "official_web",
+      "title": "电脑恢复",
+      "url": "https://cursor.com/help/grok-bot/computer-recovery",
+      "retrieved_date": "2026-09-29",
+      "review_scope": "目录检索及相关功能/限制段落核对；非真机验证",
+      "snapshot_url": "https://cursor.com/help/grok-bot/computer-recovery.md",
+      "sha256": "6ef034d7b9c3b5984f70104757b17d67dccb77c87565b07c1eb947e25807c320",
+      "bytes": 10224
+    },
+    {
+      "id": "W-onboarding",
+      "kind": "official_web",
+      "title": "当前引导",
+      "url": "https://cursor.com/help/grok-bot/onboarding",
+      "retrieved_date": "2026-09-29",
+      "review_scope": "目录检索及相关功能/限制段落核对；非真机验证",
+      "snapshot_url": "https://cursor.com/help/grok-bot/onboarding.md",
+      "sha256": "42e7ba665b147325e7cbcb1b54861e7dca6138dc7fc71572965a12301a716b46",
+      "bytes": 3549
+    },
+    {
+      "id": "W-edit-bot",
+      "kind": "official_web",
+      "title": "编辑 Bot",
+      "url": "https://cursor.com/help/grok-bot/edit-bot",
+      "retrieved_date": "2026-09-29",
+      "review_scope": "目录检索及相关功能/限制段落核对；非真机验证",
+      "snapshot_url": "https://cursor.com/help/grok-bot/edit-bot.md",
+      "sha256": "5c5eabe4abf531eaeec7e75ddf9ef66237e23489f9290b2cc15a4201a12abaf0",
+      "bytes": 3257
+    },
+    {
+      "id": "W-cursor-teams",
+      "kind": "official_web",
+      "title": "当前团队设置",
+      "url": "https://cursor.com/docs/grok-bot/teams",
+      "retrieved_date": "2026-09-29",
+      "review_scope": "目录检索及相关功能/限制段落核对；非真机验证",
+      "snapshot_url": "https://cursor.com/docs/grok-bot/teams.md",
+      "sha256": "24bcb222d6aa456aacdaa59c1f636900db106e61d126693b3d9a2327f43bb663",
+      "bytes": 30588
+    },
+    {
+      "id": "W-deployment",
+      "kind": "official_web",
+      "title": "平台和更新分发",
+      "url": "https://cursor.com/docs/grok-bot/deployment",
+      "retrieved_date": "2026-09-29",
+      "review_scope": "目录检索及相关功能/限制段落核对；非真机验证",
+      "snapshot_url": "https://cursor.com/docs/grok-bot/deployment.md",
+      "sha256": "5d908b6cb8713ae33c486073b0daa678460d48a7a0cb6023c8095335c947c04f",
+      "bytes": 16871
+    },
+    {
+      "id": "W-admin-api",
+      "kind": "official_web",
+      "title": "团队管理 API 的 Grok Bot 部分",
+      "url": "https://cursor.com/docs/account/teams/admin-api",
+      "retrieved_date": "2026-09-29",
+      "review_scope": "目录检索及相关功能/限制段落核对；非真机验证",
+      "snapshot_url": "https://cursor.com/docs/account/teams/admin-api.md",
+      "sha256": "c343f7113017f71ee481421f606c4bddd413ee496b9b11bc4d0a66d769b1e41b",
+      "bytes": 85574
+    }
+  ],
+  "official_snapshot_manifest": [
+    {
+      "url": "https://docs.x.ai/grok-bot/overview.md",
+      "local_snapshot": "/tmp/cmb-bot-plan-research/overview.md",
+      "sha256": "776db67333b62277f8d4bb4685dbcf42b8bf79c71e3607fc9affa671e0da518c",
+      "bytes": 5404
+    },
+    {
+      "url": "https://docs.x.ai/grok-bot/get-started.md",
+      "local_snapshot": "/tmp/cmb-bot-plan-research/get-started.md",
+      "sha256": "f5d0122116d3e8ab09a0cd85aa798e8a03866a77eddf3bf75fa5e9d6bf30940a",
+      "bytes": 6516
+    },
+    {
+      "url": "https://docs.x.ai/grok-bot/bots.md",
+      "local_snapshot": "/tmp/cmb-bot-plan-research/bots.md",
+      "sha256": "9fbc6f99df81d92e909133a26f9f47585932b235aff701fa7d5ed8f109a200c8",
+      "bytes": 5332
+    },
+    {
+      "url": "https://docs.x.ai/grok-bot/chat-and-collaboration.md",
+      "local_snapshot": "/tmp/cmb-bot-plan-research/chat-and-collaboration.md",
+      "sha256": "13cfa782b8e5fb3915cbcb410db2fe3cb5d25cd5ed7223907aff75979889c292",
+      "bytes": 6708
+    },
+    {
+      "url": "https://docs.x.ai/grok-bot/files-and-results.md",
+      "local_snapshot": "/tmp/cmb-bot-plan-research/files-and-results.md",
+      "sha256": "62d0417cc14c9c7d57b33fea90a5e05ee2ebbe593c24d8e878f064504fd9795e",
+      "bytes": 3573
+    },
+    {
+      "url": "https://docs.x.ai/grok-bot/computer-and-apps.md",
+      "local_snapshot": "/tmp/cmb-bot-plan-research/computer-and-apps.md",
+      "sha256": "a854c8afee4338d3d88dca622fa29d992d0418deb6d1723d2d181929eece604b",
+      "bytes": 4310
+    },
+    {
+      "url": "https://docs.x.ai/grok-bot/mobile.md",
+      "local_snapshot": "/tmp/cmb-bot-plan-research/mobile.md",
+      "sha256": "fedd9fde278767c34fb496368f9c72dcdaab1484abd82dff0eb0610f7f38e740",
+      "bytes": 4541
+    },
+    {
+      "url": "https://docs.x.ai/grok-bot/skills-routines-and-automations.md",
+      "local_snapshot": "/tmp/cmb-bot-plan-research/skills-routines-and-automations.md",
+      "sha256": "303b49492614b4519d933e287dab630c673bba9958bdcaaa3a641b46e588eef9",
+      "bytes": 5439
+    },
+    {
+      "url": "https://docs.x.ai/grok-bot/settings-and-notifications.md",
+      "local_snapshot": "/tmp/cmb-bot-plan-research/settings-and-notifications.md",
+      "sha256": "e17fe02042abe58a36364acd09778dbae69256ba851922a5af551c03959fbe6f",
+      "bytes": 7371
+    },
+    {
+      "url": "https://docs.x.ai/grok-bot/approvals-security-and-privacy.md",
+      "local_snapshot": "/tmp/cmb-bot-plan-research/approvals-security-and-privacy.md",
+      "sha256": "37a876b1ff2f73367634adc569ca8bf1b9c50f9c2d914358627850ab02a580f9",
+      "bytes": 7844
+    },
+    {
+      "url": "https://docs.x.ai/grok-bot/teams-and-enterprises.md",
+      "local_snapshot": "/tmp/cmb-bot-plan-research/teams-and-enterprises.md",
+      "sha256": "d2cc99c5f1b5d221eaa8f589eb5bd7966bcfa1f392f06b361c5388922bb37aef",
+      "bytes": 29050
+    },
+    {
+      "url": "https://docs.x.ai/grok-bot/troubleshooting.md",
+      "local_snapshot": "/tmp/cmb-bot-plan-research/troubleshooting.md",
+      "sha256": "03f94a9aefc822b5c5feb9689fb379468838f63036f6d327e9469e5123f9de69",
+      "bytes": 6464
+    },
+    {
+      "url": "https://docs.x.ai/grok-bot/faq.md",
+      "local_snapshot": "/tmp/cmb-bot-plan-research/faq.md",
+      "sha256": "8708500465354197072693c131540f07f684db3976c752f2d8b8dc8e328f62a2",
+      "bytes": 6747
+    },
+    {
+      "url": "https://docs.x.ai/grok-bot/use-cases.md",
+      "local_snapshot": "/tmp/cmb-bot-plan-research/use-cases.md",
+      "sha256": "8e31da97d549b9b7c5bd9fec80f93c73be878468b350643571e0fe22c28df316",
+      "bytes": 5489
+    },
+    {
+      "url": "https://docs.x.ai/grok-bot/security.md",
+      "local_snapshot": "/tmp/cmb-bot-plan-research/security.md",
+      "sha256": "917b179235c240ae2250fcafc8666a59cd0eb7666a251e0d882b13cf9c134494",
+      "bytes": 17874
+    },
+    {
+      "url": "https://docs.x.ai/grok-bot/security-faq.md",
+      "local_snapshot": "/tmp/cmb-bot-plan-research/security-faq.md",
+      "sha256": "47bb17a93a871e282652c6f289e5e40532807b3694cf7b2cd2a27e0b2dc4a065",
+      "bytes": 8696
+    },
+    {
+      "url": "https://docs.x.ai/grok-bot/private-networks.md",
+      "local_snapshot": "/tmp/cmb-bot-plan-research/private-networks.md",
+      "sha256": "037e8a41fbd1405c02ffd59f58d5413a4bec09b975eb4967a8c424086c0324be",
+      "bytes": 18186
+    },
+    {
+      "url": "https://docs.x.ai/grok-bot/proxies.md",
+      "local_snapshot": "/tmp/cmb-bot-plan-research/proxies.md",
+      "sha256": "011b86e9a52dc01d6523bca4e719dddf8277b35fd0ebc3a41b5374e4041ee2c5",
+      "bytes": 8825
+    },
+    {
+      "url": "https://docs.x.ai/grok-bot/identity-and-access.md",
+      "local_snapshot": "/tmp/cmb-bot-plan-research/identity-and-access.md",
+      "sha256": "81118c243e543e40cabbb5c2de6660a0c8a0d5bbd6a8eddbebae008aeb6d5ffd",
+      "bytes": 10697
+    },
+    {
+      "url": "https://docs.x.ai/grok-bot/computers.md",
+      "local_snapshot": "/tmp/cmb-bot-plan-research/computers.md",
+      "sha256": "634c181ccf2036e8051ce1bc084b86f011c205946ab70a334a149d2ef55f89ac",
+      "bytes": 8039
+    },
+    {
+      "url": "https://cursor.com/docs/grok-bot.md",
+      "local_snapshot": "/tmp/cmb-bot-plan-research/cursor-docs-grok-bot.md",
+      "sha256": "2f80c6a162b8498901990a14e03d8aefa24639f4c627aa943d706fa08cc3b8d6",
+      "bytes": 5472
+    },
+    {
+      "url": "https://cursor.com/docs/grok-bot/get-started.md",
+      "local_snapshot": "/tmp/cmb-bot-plan-research/cursor-docs-grok-bot-get-started.md",
+      "sha256": "5cc53d3ca4011f76fb7df716ae44b5a1731435305ab26c765945ee1b5f7e17ac",
+      "bytes": 5376
+    },
+    {
+      "url": "https://cursor.com/docs/grok-bot/use-cases.md",
+      "local_snapshot": "/tmp/cmb-bot-plan-research/cursor-docs-grok-bot-use-cases.md",
+      "sha256": "7941b5fab61161f1cadcdf6d127669d5fcba754cc19f003ed3f0187ff9097849",
+      "bytes": 5611
+    },
+    {
+      "url": "https://cursor.com/docs/grok-bot/work.md",
+      "local_snapshot": "/tmp/cmb-bot-plan-research/cursor-docs-grok-bot-work.md",
+      "sha256": "b5e8bcd38244d78120d078d550ec2b276933d3993d1d54564e35bdf36c025d70",
+      "bytes": 18447
+    },
+    {
+      "url": "https://cursor.com/docs/grok-bot/settings.md",
+      "local_snapshot": "/tmp/cmb-bot-plan-research/cursor-docs-grok-bot-settings.md",
+      "sha256": "2151ff561497a22de3dd05786decb4a963bb766f8d4221fd9947045d03989538",
+      "bytes": 6937
+    },
+    {
+      "url": "https://cursor.com/docs/grok-bot/teams.md",
+      "local_snapshot": "/tmp/cmb-bot-plan-research/cursor-docs-grok-bot-teams.md",
+      "sha256": "24bcb222d6aa456aacdaa59c1f636900db106e61d126693b3d9a2327f43bb663",
+      "bytes": 30588
+    },
+    {
+      "url": "https://cursor.com/docs/grok-bot/deployment.md",
+      "local_snapshot": "/tmp/cmb-bot-plan-research/cursor-docs-grok-bot-deployment.md",
+      "sha256": "5d908b6cb8713ae33c486073b0daa678460d48a7a0cb6023c8095335c947c04f",
+      "bytes": 16871
+    },
+    {
+      "url": "https://cursor.com/docs/grok-bot/identity.md",
+      "local_snapshot": "/tmp/cmb-bot-plan-research/cursor-docs-grok-bot-identity.md",
+      "sha256": "d4f1742046bdd08b24e94a3585a3aa040e3881692fed0712d66c7efd541deaf1",
+      "bytes": 10269
+    },
+    {
+      "url": "https://cursor.com/docs/grok-bot/private-networks.md",
+      "local_snapshot": "/tmp/cmb-bot-plan-research/cursor-docs-grok-bot-private-networks.md",
+      "sha256": "348c31c3e6ef05316e60bcf183730d76d419e8b9b27b43ca2bcacab62c1618c8",
+      "bytes": 18226
+    },
+    {
+      "url": "https://cursor.com/docs/grok-bot/proxies.md",
+      "local_snapshot": "/tmp/cmb-bot-plan-research/cursor-docs-grok-bot-proxies.md",
+      "sha256": "25c67e9a0794c5876bce5ad5b1bb455e17fc75b41d794f1632503eeab40f09aa",
+      "bytes": 10174
+    },
+    {
+      "url": "https://cursor.com/docs/grok-bot/computers.md",
+      "local_snapshot": "/tmp/cmb-bot-plan-research/cursor-docs-grok-bot-computers.md",
+      "sha256": "76fcafafb44e4b0d3146dd8f067fac5481c7d5b7735cf9b321e2566cce1ea0bc",
+      "bytes": 11635
+    },
+    {
+      "url": "https://cursor.com/docs/grok-bot/security.md",
+      "local_snapshot": "/tmp/cmb-bot-plan-research/cursor-docs-grok-bot-security.md",
+      "sha256": "efa8d4c185f6cf6b5953ff7c29f06f2cc67d970dfd94c657dc41c8911342f60b",
+      "bytes": 16823
+    },
+    {
+      "url": "https://cursor.com/docs/grok-bot/security-faq.md",
+      "local_snapshot": "/tmp/cmb-bot-plan-research/cursor-docs-grok-bot-security-faq.md",
+      "sha256": "8e71c04b343f53793ef3e7a34085a680e2bcb561af6fcd3992f55ac8c85a3a52",
+      "bytes": 8304
+    },
+    {
+      "url": "https://cursor.com/docs/account/teams/admin-api.md",
+      "local_snapshot": "/tmp/cmb-bot-plan-research/cursor-docs-account-teams-admin-api.md",
+      "sha256": "c343f7113017f71ee481421f606c4bddd413ee496b9b11bc4d0a66d769b1e41b",
+      "bytes": 85574
+    },
+    {
+      "url": "https://cursor.com/help/grok-bot/onboarding.md",
+      "local_snapshot": "/tmp/cmb-bot-plan-research/cursor-help-grok-bot-onboarding.md",
+      "sha256": "42e7ba665b147325e7cbcb1b54861e7dca6138dc7fc71572965a12301a716b46",
+      "bytes": 3549
+    },
+    {
+      "url": "https://cursor.com/help/grok-bot/how-to.md",
+      "local_snapshot": "/tmp/cmb-bot-plan-research/cursor-help-grok-bot-how-to.md",
+      "sha256": "2b3f827b9c4da23b30e3c9fad4e3342668846eee6a8f772114176dc1e8f02d3c",
+      "bytes": 19624
+    },
+    {
+      "url": "https://cursor.com/help/grok-bot/faqs.md",
+      "local_snapshot": "/tmp/cmb-bot-plan-research/cursor-help-grok-bot-faqs.md",
+      "sha256": "2c1714d6249c345af6dd2042974c093876b6679b9339ead349d695f603421832",
+      "bytes": 11366
+    },
+    {
+      "url": "https://cursor.com/help/grok-bot/sign-in.md",
+      "local_snapshot": "/tmp/cmb-bot-plan-research/cursor-help-grok-bot-sign-in.md",
+      "sha256": "6b0c1860ee2dab180bae80406a9dea81d75f51a977b2c277a0afaf2e6997d10b",
+      "bytes": 3592
+    },
+    {
+      "url": "https://cursor.com/help/grok-bot/mobile.md",
+      "local_snapshot": "/tmp/cmb-bot-plan-research/cursor-help-grok-bot-mobile.md",
+      "sha256": "fda8d04144171548605814c3e11a54a54811177ca795d31c6222dd6c8f4dfbe9",
+      "bytes": 3127
+    },
+    {
+      "url": "https://cursor.com/help/grok-bot/plans.md",
+      "local_snapshot": "/tmp/cmb-bot-plan-research/cursor-help-grok-bot-plans.md",
+      "sha256": "3224175b1935058274af0f5053477f7e6717ea12d48f2d083d08151ef8577dc0",
+      "bytes": 17520
+    },
+    {
+      "url": "https://cursor.com/help/grok-bot/supergrok.md",
+      "local_snapshot": "/tmp/cmb-bot-plan-research/cursor-help-grok-bot-supergrok.md",
+      "sha256": "8ce0a83d28d75fcc8dd704cd52e5293458f899fd9f144762543162ecb917adcb",
+      "bytes": 8547
+    },
+    {
+      "url": "https://cursor.com/help/grok-bot/mobile-purchase.md",
+      "local_snapshot": "/tmp/cmb-bot-plan-research/cursor-help-grok-bot-mobile-purchase.md",
+      "sha256": "221589a4b7a1e1295d505c714e6f1d6afb4e3f2ad03f7391cd0b110875a74a56",
+      "bytes": 3400
+    },
+    {
+      "url": "https://cursor.com/help/grok-bot/delete-account.md",
+      "local_snapshot": "/tmp/cmb-bot-plan-research/cursor-help-grok-bot-delete-account.md",
+      "sha256": "ab85f6d7e4320d8012f08e0c29cc43ba95ebed17512044dc7ed5f87755fd14b4",
+      "bytes": 2690
+    },
+    {
+      "url": "https://cursor.com/help/grok-bot/connect-plugins.md",
+      "local_snapshot": "/tmp/cmb-bot-plan-research/cursor-help-grok-bot-connect-plugins.md",
+      "sha256": "a6ea5b48ec0c2083d5f4c74de0318cf4862caa0095fb8b4281fd50eb71311cda",
+      "bytes": 6237
+    },
+    {
+      "url": "https://cursor.com/help/grok-bot/routines.md",
+      "local_snapshot": "/tmp/cmb-bot-plan-research/cursor-help-grok-bot-routines.md",
+      "sha256": "5bca6548fb08af3de1403b2a93433333e3ffeb7572fa0619728bf70af2e9c745",
+      "bytes": 6774
+    },
+    {
+      "url": "https://cursor.com/help/grok-bot/edit-bot.md",
+      "local_snapshot": "/tmp/cmb-bot-plan-research/cursor-help-grok-bot-edit-bot.md",
+      "sha256": "5c5eabe4abf531eaeec7e75ddf9ef66237e23489f9290b2cc15a4201a12abaf0",
+      "bytes": 3257
+    },
+    {
+      "url": "https://cursor.com/help/grok-bot/group-chats.md",
+      "local_snapshot": "/tmp/cmb-bot-plan-research/cursor-help-grok-bot-group-chats.md",
+      "sha256": "f644dc91932f3e5b902d62326657c88453f85e90a4d822226a8fc9b5f72badf2",
+      "bytes": 3219
+    },
+    {
+      "url": "https://cursor.com/help/grok-bot/team-bots.md",
+      "local_snapshot": "/tmp/cmb-bot-plan-research/cursor-help-grok-bot-team-bots.md",
+      "sha256": "9b5fc4d6fa7fda97e5e833f3e71a3151b6c653caacd01e328c744626566bdb9e",
+      "bytes": 11465
+    },
+    {
+      "url": "https://cursor.com/help/grok-bot/voice-chat.md",
+      "local_snapshot": "/tmp/cmb-bot-plan-research/cursor-help-grok-bot-voice-chat.md",
+      "sha256": "da04e7c4ab126cef5ca45d8c3f3fa1ecd5fdaa46089eccabc4c77123db067403",
+      "bytes": 3334
+    },
+    {
+      "url": "https://cursor.com/help/grok-bot/computer-recovery.md",
+      "local_snapshot": "/tmp/cmb-bot-plan-research/cursor-help-grok-bot-computer-recovery.md",
+      "sha256": "6ef034d7b9c3b5984f70104757b17d67dccb77c87565b07c1eb947e25807c320",
+      "bytes": 10224
+    },
+    {
+      "url": "https://cursor.com/help/grok-bot/secrets.md",
+      "local_snapshot": "/tmp/cmb-bot-plan-research/cursor-help-grok-bot-secrets.md",
+      "sha256": "c035f367bb4dc062597ec7a9bd5e3b0e0f79c3fb13ae46d8b8ee6161cfdb4844",
+      "bytes": 3864
+    },
+    {
+      "url": "https://cursor.com/help/grok-bot/get-help.md",
+      "local_snapshot": "/tmp/cmb-bot-plan-research/cursor-help-grok-bot-get-help.md",
+      "sha256": "f542ce9dac1cacf61bf3db9b843cd1c46ffb9895a6e6515c268b1641bff987e0",
+      "bytes": 1244
+    }
+  ],
+  "snapshot_note": "临时下载仅用于检索核对，不把全文复制进项目。摘要用于核对当时内容；下载不等于全文阅读或验证。临时路径不作为交付依赖。开源代码可通过仓库和 commit 重取。"
+}

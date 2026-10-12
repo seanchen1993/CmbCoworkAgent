@@ -34,8 +34,8 @@ import {
 } from "fs"
 import { readFile, readdir, stat } from "fs/promises"
 import { tmpdir } from "os"
-import { join } from "path"
-import { afterAll, describe, expect, it, vi } from "vitest"
+import { isAbsolute, join, resolve } from "path"
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest"
 
 const openworkDir = mkdtempSync(join(tmpdir(), "cmbdevclaw-hook-test-"))
 
@@ -804,6 +804,49 @@ describe("snapshots whose repository disappeared entirely", () => {
   })
 })
 
+describe("native Git hook directory resolution", () => {
+  it.each(["default", "worktree", "internal", "relative-external", "absolute-external"])(
+    "preserves Git's hook paths and installation boundary (%s)",
+    async (mode) => {
+      const { repoRoot } = makeRepo()
+      let workspace = repoRoot
+      if (mode === "worktree") {
+        const parent = mkdtempSync(join(tmpdir(), "cmbdevclaw-hook-worktree-"))
+        tempRoots.push(parent)
+        workspace = join(parent, "linked checkout")
+        git(repoRoot, "worktree", "add", "-q", "--detach", workspace)
+      }
+      const external = mode.endsWith("external")
+      if (mode === "internal") git(workspace, "config", "core.hooksPath", ".git/custom hooks")
+      if (mode === "relative-external") git(workspace, "config", "core.hooksPath", ".team hooks")
+      if (mode === "absolute-external") {
+        git(workspace, "config", "core.hooksPath", join(realpathSync(repoRoot), "team hooks"))
+      }
+      const hooks = ["pre-commit", "post-commit", "pre-push"]
+      const expectedPaths = hooks.map((hook) => {
+        const raw = git(workspace, "rev-parse", "--git-path", `hooks/${hook}`)
+        return isAbsolute(raw) ? raw : resolve(realpathSync(workspace), raw)
+      })
+      if (external) {
+        mkdirSync(resolve(expectedPaths[0], ".."), { recursive: true })
+        writeFileSync(expectedPaths[0], "#!/bin/sh\necho team-owned\n")
+      }
+      const subdirectory = join(workspace, "packages", "app")
+      mkdirSync(subdirectory, { recursive: true })
+      const status = await installGitHooks(subdirectory)
+      expect(status.hooks.map((hook) => hook.path)).toEqual(expectedPaths)
+      expect(status.installed).toBe(!external)
+      if (external) {
+        expect(status.state).toBe("external_hooks_path")
+        expect(readFileSync(expectedPaths[0], "utf-8")).toBe("#!/bin/sh\necho team-owned\n")
+        expect(expectedPaths.slice(1).map((path) => existsSync(path))).toEqual([false, false])
+      } else {
+        expect(status.hooks.every((hook) => hook.state === "managed")).toBe(true)
+      }
+    }
+  )
+})
+
 /**
  * The hook helper is one shared file, written by every install and by the
  * startup refresh. Those all run concurrently in a single process — one install
@@ -813,14 +856,19 @@ describe("snapshots whose repository disappeared entirely", () => {
  * installOneHook, and those repositories silently end up with no hooks at all.
  */
 describe("concurrent hook helper installs", () => {
-  it("installs every repository when many install at once", async () => {
-    const repos = Array.from({ length: 20 }, () => {
+  let repos: string[]
+  beforeAll(() => {
+    // Repository creation is fixture setup; measure the actual concurrent
+    // installs separately; 20 repositories issue real native Git commands.
+    repos = Array.from({ length: 20 }, () => {
       const root = mkdtempSync(join(tmpdir(), "cmbdevclaw-parallel-"))
       tempRoots.push(root)
       git(root, "init", "-q")
       return root
     })
+  }, 30_000)
 
+  it("installs every repository when many install at once", async () => {
     const results = await Promise.allSettled(repos.map((repo) => installGitHooks(repo)))
 
     const rejected = results.filter((result) => result.status === "rejected")
@@ -842,7 +890,7 @@ describe("concurrent hook helper installs", () => {
       name.endsWith(".tmp")
     )
     expect(leftovers).toEqual([])
-  })
+  }, 20_000)
 })
 
 /**
@@ -888,9 +936,15 @@ describe("hook helper writes", () => {
  * 临时 worktree，N 正好是会涨的那个数。
  */
 describe("注册表扫描的写放大", () => {
+  let repos: string[]
+  beforeAll(() => {
+    // Keep the 72 synchronous Git fixture commands outside the scan's time limit.
+    // The test still scans all 12 real committed repositories and counts real writes.
+    repos = Array.from({ length: 12 }, () => makeRepo().repoRoot)
+  }, 20000)
+
   it("一轮扫描只写一次 repos.json，与仓库数无关", async () => {
     const reposPath = join(openworkDir, "git-hooks", "repos.json")
-    const repos = Array.from({ length: 12 }, () => makeRepo().repoRoot)
     mkdirSync(join(openworkDir, "git-hooks"), { recursive: true })
     writeFileSync(
       reposPath,

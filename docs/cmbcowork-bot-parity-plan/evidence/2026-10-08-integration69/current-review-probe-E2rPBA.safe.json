@@ -1,0 +1,41 @@
+{
+  "kind": "configured-real-model-production-review-probe",
+  "appAcceptance": false,
+  "liveDatabaseReadOnly": true,
+  "model": "MiniMax-M3",
+  "originalRunId": "c8340c02-ce4d-40c7-a31c-de9a89e34293",
+  "taskSha256": "2c6d12eaee44151464c74b88d86cc55782ee4301971a0540041d11a867860684",
+  "sources": [
+    {
+      "name": "project-records.csv",
+      "size": 279,
+      "sha256": "dbc20dad04f59df0d704601fdd6559ab33fd1722283496a2092215a387695ac8"
+    },
+    {
+      "name": "review-policy.txt",
+      "size": 537,
+      "sha256": "f8b581c7338cc60fa4b02adaa7a22a89465daf675c991856bf8114069d54da60"
+    }
+  ],
+  "shapeObservations": [],
+  "verdicts": [
+    {
+      "sha256": "7832fed246384d78f42ef6064d7a001e9340cb9521d97fd2c79663445da42bcb",
+      "verdict": {
+        "decision": "pass",
+        "findings": [
+          "result.csv 正确应用了 review-policy.txt 的规则。筛选条件 status=已验收 且 region=北区 后，P103（南区）和 P104（待验收）被排除；同一 project_id 保留数值最大版本：P101 保留 v2（12.40）而非 v1（15.40），P102 保留 v2（8.55）而非 v1（7.05）；P105 负数 -2.50、P106 零值 0.00 按规则计入。最终保留 4 个项目：P101=12.40、P102=8.55、P105=-2.50、P106=0.00，合计 18.45 万元，与草稿 38.45 万元相差 20.00 万元，原因在于草稿可能误用了 v1 旧版本金额（15.40+7.05=22.45，多出 20.00）。result.csv 本身字段、项目选择及金额均与原始附件一致，通过。"
+        ]
+      }
+    },
+    {
+      "sha256": "abbeebd5407d4025f4dbe4b3d8bbadddf325d05b18ba420f64294c294de7aac8",
+      "verdict": {
+        "decision": "revise",
+        "findings": [
+          "候选result.csv中P101取值为15.40（version=1），违反review-policy.txt明确规则\"同一project_id有多个版本时只保留数值最大版本\"。project-records.csv中P101存在version=1（15.40）和version=2（12.40）两条北区已验收记录，规则要求按版本号比较，保留version=2的12.40，而不是金额更大的15.40。正确保留记录为：P101=12.40、P102=8.55、P105=-2.50、P106=0.00，合计18.45万元，4条。与周报草案38.45万元差额20.00万元，无法归因到单一项目旧版本。"
+        ]
+      }
+    }
+  ]
+}

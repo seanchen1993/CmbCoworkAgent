@@ -1,0 +1,14 @@
+{
+  "format": 1,
+  "upstreamRevision": "954fa9057bf3a4521ea34dbd010ff291d5b39763",
+  "license": "Apache-2.0",
+  "protocol": "codex-cmb-owned-sandbox-v1",
+  "files": [
+    {
+      "candidate": "launcher.rs",
+      "relative": "codex-rs/linux-sandbox/src/launcher.rs",
+      "baseSha256": "bf1d23f8020d4e73f7a3e235165f0953154170256a92cf0c8254e5ab32578f91",
+      "sha256": "c6203d082f162026edb891713139f584b4bff89ba508c677577984febd6f8403"
+    }
+  ]
+}

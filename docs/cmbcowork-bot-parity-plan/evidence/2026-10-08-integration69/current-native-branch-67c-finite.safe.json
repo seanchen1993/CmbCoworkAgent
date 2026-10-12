@@ -1,0 +1,78 @@
+{
+  "kind": "native-branch-thread-finite-model-sample",
+  "recordedAt": "2026-10-10T06:12:59.086110+00:00",
+  "nativeBuildId": "67c7cdcf69158c96cf8bbb7b",
+  "schema": 72,
+  "compiledOutputIdentity": "8a5386b6835e84362135ea5d",
+  "via": "CUA native App and actual configured MiniMax M3",
+  "rootId": "8d3dedd0-d5f9-4b45-b43b-d8dd8fe23c4f",
+  "publicSyntheticMessages": [
+    {
+      "id": "4990c579-5940-43d0-b9de-a6e0c89a48ff",
+      "sender": "user",
+      "text": "仅在这条分支里把差额口径改为“实际减草稿”。写出带符号差额和一句说明，不改主会话的结论，不访问外部服务、不保存记忆。",
+      "run_id": null,
+      "reply_to": null,
+      "root_id": "8d3dedd0-d5f9-4b45-b43b-d8dd8fe23c4f"
+    },
+    {
+      "id": "bb7a44db-3da9-4a53-a924-22a4010683f6",
+      "sender": "bot",
+      "text": "\n\n实际合计：35\n差额（实际减草稿）：-1\n结论：草稿合计36不正确，实际合计为35，少1。",
+      "run_id": "1c2314be-08f3-4876-9c4c-8dfd36ed9f76",
+      "reply_to": "4990c579-5940-43d0-b9de-a6e0c89a48ff",
+      "root_id": "8d3dedd0-d5f9-4b45-b43b-d8dd8fe23c4f"
+    }
+  ],
+  "run": {
+    "id": "1c2314be-08f3-4876-9c4c-8dfd36ed9f76",
+    "bot_id": "37e011ed-107d-4c0b-92d7-151b478972d6",
+    "conversation_id": "08e830cb-bee2-4b73-bd3e-93273ab9899d",
+    "message_id": "4990c579-5940-43d0-b9de-a6e0c89a48ff",
+    "source": "user",
+    "status": "succeeded",
+    "lease_owner": null,
+    "lease_until": null
+  },
+  "usage": {
+    "requests": 1,
+    "unknown": 0
+  },
+  "unchangedMainPublicMessages": [
+    {
+      "id": "1d1fd132-8c02-49a0-aa61-1babdae64f5d",
+      "sender": "bot",
+      "text": "\n\n差额方向为正（草稿 − 实际 = 36 − 35 = +1），即草稿比实际合计多 1。"
+    },
+    {
+      "id": "8d3dedd0-d5f9-4b45-b43b-d8dd8fe23c4f",
+      "sender": "bot",
+      "text": "\n\n实际合计：35\n差额：1（草稿多1）\n结论：草稿\"合计36\"不正确"
+    }
+  ],
+  "botMemoryCount": 0,
+  "nativeObserved": {
+    "createdFromActualMessage": true,
+    "resultMinusOne": true,
+    "mainRemainsPositiveDraftMinusActual": true,
+    "mainHasTwoReplyAffordance": true
+  },
+  "originalReference": {
+    "reconstructedSource": "frontend/src/recovered/features/conversation/cards/transcript-card/message-actions.tsx",
+    "sourceStartThreadAction": true,
+    "installedGrokObservedMenu": [
+      "Reply",
+      "Copy",
+      "Copy request ID",
+      "Reactions"
+    ],
+    "branchEntryPresentInObservedMenu": false,
+    "nativeOfficialBranchComparisonClaimed": false
+  },
+  "boundaries": [
+    "Single finite arithmetic branch task, not every branch workload",
+    "Official native observed menu did not expose Start a thread; source reuse is not proof of official live branch parity",
+    "Result gives correct signed difference but an extra total line and ambiguous final wording; perfect output quality unclaimed",
+    "Full core, whole UI, Windows and installer acceptance incomplete"
+  ]
+}

@@ -1,0 +1,103 @@
+{
+  "kind": "native-final-network-pdf-and-cold-preservation",
+  "recordedAt": "2026-10-10T15:35:30.356148+00:00",
+  "compiledOutputIdentity": "63f35a4f83867a90acec439b",
+  "nativeBuildId": "464c0d8da601e78e9ec973b9",
+  "schema": 72,
+  "realMiniMaxSamples": {
+    "network": {
+      "id": "0f52ecb8-381f-442f-a29e-7a1958ed1703",
+      "bot_id": "4002cdce-8149-4dfc-9c4b-28abd67d30c1",
+      "status": "succeeded",
+      "created_at": 1791644682772,
+      "updated_at": 1791644702760,
+      "durationMs": 19988,
+      "modelCalls": 4,
+      "allUsageSettled": true,
+      "effects": [
+        {
+          "id": "browser:0f52ecb8-381f-442f-a29e-7a1958ed1703:call_01a12658213576b49aba9674",
+          "status": "succeeded",
+          "resultChars": 721
+        }
+      ],
+      "artifacts": []
+    },
+    "pdf": {
+      "id": "aa80a7a9-7e3a-497b-b3b9-4d27a10cdce4",
+      "bot_id": "37e011ed-107d-4c0b-92d7-151b478972d6",
+      "status": "succeeded",
+      "created_at": 1791644775660,
+      "updated_at": 1791644799238,
+      "durationMs": 23578,
+      "modelCalls": 5,
+      "allUsageSettled": true,
+      "effects": [
+        {
+          "id": "download:aa80a7a9-7e3a-497b-b3b9-4d27a10cdce4:call_6nU3SLfxYOojg6ydT41jkESH",
+          "status": "succeeded",
+          "resultChars": 374
+        }
+      ],
+      "artifacts": [
+        {
+          "id": "download:aa80a7a9-7e3a-497b-b3b9-4d27a10cdce4:call_6nU3SLfxYOojg6ydT41jkESH",
+          "name": "dummy.pdf",
+          "mime": "application/octet-stream",
+          "size": 13264,
+          "sha256": "3df79d34abbca99308e79cb94461c1893582604d68329a41fd4bec1885e6adb4"
+        }
+      ]
+    }
+  },
+  "networkNativeResult": {
+    "requiresObservation": true,
+    "classification": "network_error",
+    "errorCode": "ERR_CONNECTION_CLOSED",
+    "singleNavigationEffect": true,
+    "noRetryObserved": true,
+    "noOrdinaryUserBrowserHelpClaim": true,
+    "notDnsRootCauseProof": true
+  },
+  "pdfNativePreview": {
+    "openedExactNewAttachment": true,
+    "pages": 1,
+    "firstPageTitle": "Dummy PDF file",
+    "actualObjectHashVerified": true,
+    "saveOriginalControlVisible": true
+  },
+  "officialGrokPdf": {
+    "samePrompt": true,
+    "nativeDeliveredFileName": "dummy.pdf",
+    "nativeDisplayedBytes": 13264,
+    "pages": 1,
+    "firstPageTitle": "Dummy PDF file",
+    "userMessageNativeTime": "23:09:34",
+    "attachmentNativeTime": "23:15:04",
+    "observedAt": "2026-10-10T15:27:00Z",
+    "fileSha256NotIndependentlyRetrieved": true,
+    "originalDraftRestoredWithoutSending": "meiyong",
+    "networkRestartReportedByOfficial": true
+  },
+  "coldPreservation": {
+    "selectedRuns": 5,
+    "checkpointBytes": 298864,
+    "logicalGroupsEqual": [
+      "runs",
+      "effects",
+      "interactions",
+      "artifacts",
+      "artifactObjects",
+      "peerDispatch",
+      "peerWaits",
+      "checkpoints",
+      "checkpointPayloadBytesHashed",
+      "skills",
+      "project"
+    ],
+    "noActualUserHostSigkill": true,
+    "configurationChangesOnlyTwoFrozenBuiltinPaths": true,
+    "configBytesReconstructedExactly": true
+  },
+  "scope": "Two finite real-model samples and selected cold-upgrade records; not all Grok tasks, general latency, all historical data, Windows input, K8s or production release acceptance."
+}

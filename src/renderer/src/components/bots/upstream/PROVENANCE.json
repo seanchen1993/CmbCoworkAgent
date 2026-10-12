@@ -1,0 +1,403 @@
+{
+  "product": "Grok Bot",
+  "version": "0.18.0",
+  "origin": "User-provided reconstruction",
+  "license": "No upstream source-code license implied; redistribution rights not established",
+  "files": [
+    {
+      "source": "frontend/src/recovered/features/conversation/workspace/sidebar-agent-status.ts",
+      "sha256": "7c0b0e484d295748c54b8656f7b18031cd8cac092b22a6f5fb119c645f6c8c40"
+    },
+    {
+      "source": "frontend/src/recovered/features/conversation/workspace/model.ts",
+      "sha256": "6413f460193b11e21b2ea15e075d03e6348c68d2d03e4b5c00cb22be269b513e"
+    },
+    {
+      "source": "frontend/src/recovered/features/onboarding/signed-in/character.tsx",
+      "sha256": "c67a400a2d3c5e9c0b1e738cdfd4fdf6f937491cee0a66bf9d08058f78866393"
+    },
+    {
+      "source": "frontend/src/recovered/features/conversation/workspace/agent-avatar.tsx",
+      "sha256": "4c8ae710a259f85e6cd452fa4f0706444cc5abaf152e2c253e3f53bd87063693"
+    },
+    {
+      "source": "frontend/src/recovered/features/onboarding/signed-in/scene.ts",
+      "sha256": "cf982b8287d5f011f7bc64a1224ab155e9e9bdb64cef43d312f329fa27f289b1"
+    },
+    {
+      "source": "frontend/src/recovered/features/onboarding/signed-in/view.tsx",
+      "sha256": "94e0548b0d0d6f7671b950b8a6fa4d5b58434ea72949569384425a0b0148e8e0"
+    },
+    {
+      "source": "frontend/src/recovered/features/conversation/workspace/view.css",
+      "sha256": "937ccbce14817f7587a2d13463f72d2f89a20d73450e1c4ae9cb23a2fe0d1c5c"
+    },
+    {
+      "source": "frontend/src/recovered/features/conversation/workspace/sidebar-agent-preview-content.tsx",
+      "sha256": "bba044145c6a9737fcfa808fd1c2b1d54e008ae2f503ecbb6e52dc1a128a2c3f"
+    },
+    {
+      "source": "frontend/src/recovered/features/agent-info/avatar-editor/model.ts",
+      "sha256": "f9d64114869849a4777ba0e0a40e4ffae2a467c7359168b6985b27b39a4289a7"
+    },
+    {
+      "source": "frontend/src/recovered/features/agent-info/avatar-editor/view.tsx",
+      "sha256": "6dafe7af361a71429c58ee16e8afe263d001e88ce9b1bce7146cfcc0bb7a8ba4"
+    },
+    {
+      "source": "frontend/src/recovered/features/conversation/workspace/sidebar.tsx",
+      "sha256": "fa69a02cea8a7d51d67ddb2bdc78a80608d6962d182515ee57847454ee191f3d"
+    },
+    {
+      "source": "frontend/src/recovered/features/conversation/cards/transcript-card/views/secret-request.tsx",
+      "sha256": "b1b8112c87c0863b576ecd865da67e5eefa50947817beafe00bfbe3e56b54be8",
+      "destination": "src/renderer/src/components/bots/BotSecretInput.tsx",
+      "changes": "Adapted masked secure-input card and local draft clearing to Cmb primitives, actual destination preview and narrow provideSecret IPC. Credential management UI uses existing Cmb dialog and form primitives."
+    },
+    {
+      "source": "frontend/src/recovered/features/conversation/cards/transcript-card/reaction-actions.ts",
+      "sha256": "f502e86d7d85e3fd9167d8f89fd2cbe0bd96751f6d09f8d8099ddef425149970",
+      "destination": "src/shared/upstream/grok-reactions.ts",
+      "changes": "Extracted original me identity, six quick emoji, transcript projection and count grouping. Cmb reuses Radix popovers, explicit desired-state writes and monotonic revisions instead of silently swallowing toggle failures. The full bundled emoji catalog is not copied; other single emoji can be pasted or entered with the OS picker."
+    },
+    {
+      "source": "frontend/src/recovered/features/conversation/cards/transcript-card/reaction-picker.tsx",
+      "sha256": "040efe5b82e9eadfcd30ed072445e2d23e49f0b0bf22033bdedc62d88854fc03",
+      "destination": "src/shared/upstream/grok-reactions.ts",
+      "changes": "Extracted original me identity, six quick emoji, transcript projection and count grouping. Cmb reuses Radix popovers, explicit desired-state writes and monotonic revisions instead of silently swallowing toggle failures. The full bundled emoji catalog is not copied; other single emoji can be pasted or entered with the OS picker."
+    },
+    {
+      "source": "frontend/src/recovered/features/conversation/workspace/editor-suggestion-provider.ts",
+      "sha256": "2995107ecbcada839f322b3e92c71ecec893e45e432ca48f2ef3eb1a5d14d02c",
+      "destination": "src/renderer/src/components/bots/upstream/grok-editor-suggestions.ts",
+      "changes": "Extracted original normalization, fuzzy ranking, stable deduplication and arrow/Enter/Tab/Escape selection helpers; reduced entry type to fields used by these helpers. Cmb supplies durable scoped skill IDs and version validation."
+    },
+    {
+      "source": "frontend/src/recovered/features/conversation/workspace/rich-text-editor.tsx",
+      "sha256": "6c502d8f3f55ed8bb5e8ac673b2ec9b103f277e35bce3ca48670181dde5bd6ca",
+      "destination": "src/renderer/src/components/bots/upstream/grok-suggestion-match.ts",
+      "changes": "Extracted findSpaceSuggestionMatch and its constants/escaping unchanged; replaced the Tiptap-only type dependency with the text-position fields it actually reads, for Cmb existing textarea."
+    },
+    {
+      "source": "frontend/src/recovered/features/conversation/workspace/reply-preview.tsx",
+      "sha256": "d8b551a59df58f3625bcfa3047479576c8699a8f03856b2f1c13c04e061462ed",
+      "destination": "src/renderer/src/components/bots/upstream/grok-reply-preview.ts",
+      "changes": "Extracted original compact label, quote normalization and truncation with local structural types and Chinese fallback labels. Cmb supplies scoped, server-resolved targets and uses existing theme primitives. Quote appears above its message bubble with the original corner-up-right affordance, as observed in the official 2026-10-10 native App; scoped jump and preview resolution remain unchanged."
+    },
+    {
+      "source": "frontend/src/recovered/features/conversation/cards/transcript-card/thread-summary-controller.ts",
+      "sha256": "be135d5552c909c188acfb7615a8f4970993038942c2d8014998f161a2d582c3",
+      "destination": "src/renderer/src/components/bots/upstream/grok-thread-counts.ts",
+      "changes": "Extracted original thread-count projection unchanged. Cmb persists branch scope separately from reply anchors, preserves per-view drafts/read revisions, and adapts navigation to its existing paged transcript."
+    },
+    {
+      "source": "frontend/src/production/sidebar-model.ts",
+      "sha256": "fa7b6c3b49b2cb2c1d0b3057d42fe76acbdca58f7e4c7a83c20cac753d35db49",
+      "destination": "src/shared/upstream/grok-sidebar-order.ts",
+      "changes": "Original partitionSidebarAgents and movePinnedAgent copied unchanged apart from formatting. Cmb adds Host-owned revisions, membership validation, durable receipts, IPC and accessible drag/keyboard controls."
+    },
+    {
+      "source": "frontend/src/recovered/features/automations/routines/run-history.ts",
+      "sha256": "fe16c9df5c722fd3bc643850f2aa3e377d7671847b6337ff4133f81986955aea",
+      "destination": "src/renderer/src/components/bots/upstream/grok-routine-time.ts",
+      "changes": "Extracted original timezone/calendar-relative timestamp projection; localized labels and clock to Chinese/24 hours. Host run states remain distinct, including queued/cancelled/waiting/review, rather than mapping them to failed or succeeded."
+    },
+    {
+      "source": "frontend/src/recovered/features/conversation/workspace/composer.tsx",
+      "sha256": "e6511a16bd286ae06a144cf85d85e60e25d32281904cd7b79fad1f9c07f6b980",
+      "destination": "src/renderer/src/components/bots/upstream/grok-composer-files.ts",
+      "changes": "Copied extractClipboardFiles and hasFileDragData unchanged apart from formatting. Adapted original nested drag-depth interaction to Cmb textarea and theme. Existing Cmb Bot uploads own hash verification, scoped draft insertion, retry nonces and cancellation; reject excess attachments explicitly instead of silently slicing the selected files."
+    },
+    {
+      "source": "frontend/src/recovered/features/automations/routines/schedule.ts",
+      "sha256": "57653552735d50bbbb5afb51a400fde3f26555641052eaadac0c9fdfdc9b2a62",
+      "destination": "src/renderer/src/components/bots/upstream/grok-routine-schedule.ts",
+      "changes": "Extracted serializeSchedule calendar preset cases and narrowed associated types; preserves exact cron output. Cmb retains its existing Host calendar validation, durable revisions and receipt storage. Custom cron, interval, one-off and event schedules use the existing Cmb contracts."
+    },
+    {
+      "source": "frontend/src/recovered/features/agent-info/async-tasks/clock.ts",
+      "sha256": "bbeb9c5a57279557b26ffb6d07914941e529d1c5d523cd4783aac4c58b2e717e"
+    },
+    {
+      "source": "frontend/src/recovered/features/agent-info/async-tasks/provider.ts",
+      "sha256": "736f4b276baf75f0115c3d5650a5b30c9dcae9415421dcdff6b436a30b259017"
+    },
+    {
+      "source": "frontend/src/recovered/features/agent-info/async-tasks/view.tsx",
+      "sha256": "05540ceccf3b7d18ab61120ba656cda2ca52a174b0dede2fc3f9b44d5c7e6909"
+    },
+    {
+      "source": "frontend/src/recovered/features/agent-info/avatar-editor/model.ts",
+      "sha256": "f9d64114869849a4777ba0e0a40e4ffae2a467c7359168b6985b27b39a4289a7",
+      "destination": "src/renderer/src/components/bots/upstream/grok-avatar-crop.ts",
+      "changes": "Copied original crop math, pan/zoom bounds, 1024px source normalization and 256px PNG codec. Reuses existing persona palette separately; localizes errors and restricts input to raster data URLs with a 40M decoded-pixel limit. Cmb persists only normalized PNGs through the isolated media worker and durable scoped receipts."
+    },
+    {
+      "source": "frontend/src/recovered/features/conversation/workspace/agent-avatar.tsx",
+      "destination": "src/renderer/src/components/bots/upstream/grok-agent-avatar.tsx",
+      "changes": "Retains original persona/photo dispatch and group slot geometry; allows bounded cached member PNG images in those same group slots."
+    },
+    {
+      "source": "frontend/src/recovered/features/window-chrome/global-keyboard-shortcuts.ts",
+      "sha256": "20c4486bcfebce1fdbadcdd690097f78daed39c3cd1ff27b4f2bd7494c436d8b",
+      "destination": "src/renderer/src/components/bots/upstream/grok-keyboard-shortcuts.ts",
+      "changes": "Copied normalization, editable-target and chord matching helpers. Reused core root registry chords; Cmb binds new Bot, existing search dialogs, current Bot/group settings, focus and visible conversation selection. Added IME/repeat guards and excludes portals, menus and the remote computer panel."
+    },
+    {
+      "source": "frontend/src/recovered/features/window-chrome/root-shell-state.tsx",
+      "sha256": "766142ca8a53d7c15f8bcfdc635a5cae85f50450658c054472d8a630d743d943",
+      "destination": "src/renderer/src/components/bots/upstream/grok-keyboard-shortcuts.ts",
+      "changes": "Copied adjacent conversation lookup; preserve no-wrap edges. Cmb supplies the same ordered and filtered conversation list as the visible sidebar."
+    },
+    {
+      "source": "frontend/src/recovered/features/about/overlay/view.tsx",
+      "sha256": "88ab0047b1d6a47827a9886658b51d5267c8129ef3b9e69e22024524d9e3a025",
+      "destination": "src/renderer/src/components/bots/BotHelp.tsx",
+      "changes": "Referenced original About version/track/platform display, asynchronous status lifetime and resettable clipboard confirmation. Adapted to Cmb Dialog/Tabs and existing version/updater APIs; added a local help guide and an explicit basic-diagnostic allowlist. No original branding assets or entire About component transplanted."
+    },
+    {
+      "source": "frontend/src/recovered/features/settings/overlay/computer.ts",
+      "sha256": "c18eb7b7d0e75fa7a82c25dc201980c8d4bec8ab1479f4ddfd5efdd20d13189c",
+      "destination": "src/renderer/src/components/bots/BotBrowserMaintenance.tsx",
+      "changes": "Referenced original separation of update/reset, shared-computer impact, pending guards and confirmation. Cmb uses its existing Dialog and backup lifecycle; local profile checkpoints are implemented with stable file handles, authenticated idle shutdown, lifetime locks and durable recovery receipts. No cloud VM implementation copied."
+    },
+    {
+      "source": "frontend/src/recovered/features/computer/update/confirmation.ts",
+      "sha256": "982657677d1f55b37d20aead7540aa0eeae997b771a0067b1f9641d4e3552814",
+      "destination": "src/renderer/src/components/bots/BotBrowserMaintenance.tsx",
+      "changes": "Referenced original separation of update/reset, shared-computer impact, pending guards and confirmation. Cmb uses its existing Dialog and backup lifecycle; local profile checkpoints are implemented with stable file handles, authenticated idle shutdown, lifetime locks and durable recovery receipts. No cloud VM implementation copied."
+    },
+    {
+      "source": "frontend/src/production/command-palette-model.ts",
+      "sha256": "c434c7efd606fcc58dc90c5768b05d1c4dd67a0e8c28c97b2f12ef48ac3b7e7b",
+      "destination": "src/renderer/src/components/bots/upstream/grok-palette-primitives.ts",
+      "changes": "Copied normalizePaletteSearch, paletteSearchTokens, fuzzyPaletteScore, highlight/indexed shortcuts and virtual list geometry. Cmb supplies its existing domain search and authorized UI actions; no upstream coordinator transport copied."
+    },
+    {
+      "source": "frontend/src/recovered/features/window-chrome/root-shell-state.tsx",
+      "sha256": "766142ca8a53d7c15f8bcfdc635a5cae85f50450658c054472d8a630d743d943",
+      "destination": "src/renderer/src/components/bots/upstream/grok-navigation-history.ts",
+      "changes": "Copied navigation state, selection and back/forward resolution. Bound retained visits to 200; Cmb feeds existing conversation IDs and omits hidden/deleted conversations from available destinations."
+    },
+    {
+      "source": "/Applications/Grok Bot.app/Contents/Resources/app.asar:dist/renderer/assets/index.eager-common-CdCvBQNJ.js",
+      "version": "0.66.0",
+      "sha256": "41e1f756b1db45a73c619f872db44f75d931c1d91471fd187160265ae1327d68",
+      "destination": "src/renderer/src/components/bots/upstream/grok-persona-rest-contours.ts",
+      "changes": "Generated eight deterministic resting SVG body/eye contours by evaluating only the pure geometry declarations and c3(t1(body), body, 229) in an isolated VM; verified identical output on two runs. Sphere is mapped to the existing blob shape ID. Retains original light/dark solid palette and cutout eyes. No upstream runtime bundle, telemetry or 3D animation engine shipped. Cmb keeps its existing lightweight state motion and offscreen/reduced-motion lifecycle."
+    },
+    {
+      "source": "/Applications/Grok Bot.app/Contents/Resources/app.asar:dist/renderer/assets/index.eager-app-Cj5f8Gby.js",
+      "version": "0.66.0",
+      "sha256": "dd5b92add9e5ee9c3d3ed224c68eff2b09f7a4e5204393a1b4076f0258e157cc",
+      "destination": "src/renderer/src/lib/bot-transcript-time.ts",
+      "changes": "Adapted T$, $p and U$: first visible timestamp, absolute 15-minute gap or local calendar-day change. Keeps Cmb authoritative message ordering and existing pagination/read anchors. Uses Cmb absolute-date formatter rather than relative today/yesterday labels, avoiding stale day labels without a clock subscription. Native Grok communication/tool row grouping is not copied."
+    },
+    {
+      "source": "frontend/src/recovered/features/conversation/workspace/rich-text-editor.tsx",
+      "sha256": "6c502d8f3f55ed8bb5e8ac673b2ec9b103f277e35bce3ca48670181dde5bd6ca",
+      "destination": "src/renderer/src/lib/bot-composer-document.ts",
+      "changes": "Adapted paragraph/hard-break/link serialization and persisted JSON fallback. Uses bounded typed Cmb references and synchronizes skills, recipients and entities with the editor document; appending routine instructions preserves those identities."
+    },
+    {
+      "source": "frontend/src/recovered/features/conversation/workspace/rich-text-editor.tsx",
+      "sha256": "6c502d8f3f55ed8bb5e8ac673b2ec9b103f277e35bce3ca48670181dde5bd6ca",
+      "destination": "src/renderer/src/lib/bot-composer-extensions.ts",
+      "changes": "Reuses the same Tiptap 3.14 dependency line and adapts selectable inline reference nodes, non-inclusive links, Backspace mention editing and Mac Ctrl+A/E line motion. Cmb adds explicit undo boundaries, document/rendered-reference limits and schema-checked clipboard atoms."
+    },
+    {
+      "source": "frontend/src/recovered/features/conversation/workspace/rich-text-editor.tsx",
+      "sha256": "6c502d8f3f55ed8bb5e8ac673b2ec9b103f277e35bce3ca48670181dde5bd6ca",
+      "destination": "src/renderer/src/components/bots/BotPromptEditor.tsx",
+      "changes": "Adapts rich document editing, IME-safe submission, conversation scope and accepted-send fencing to the existing Cmb Zustand draft revisions. Preserves newer drafts after uncertain receipts, restores focus on editor readiness, and bounds history. Uses existing Cmb avatars and UI primitives for node views."
+    },
+    {
+      "source": "frontend/src/recovered/features/conversation/workspace/pdf-viewer.tsx",
+      "sha256": "64f7cb529e28a5822fc400b68590731a929ba99964cbcc508815bdf45f33b499",
+      "destination": "src/renderer/src/components/bots/BotPdfPreview.tsx; src/renderer/src/lib/pdf-preview-geometry.ts",
+      "changes": "Adapted continuous selectable PDF pages, document-owned worker lifecycle and bounded raster calculations to existing Cmb Radix dialogs, verified original-file loading/save and react-virtuoso. Uses existing Apache-2.0 pdfjs-dist 6.3.289 compatibility builds for both renderer and worker, so bundled Electron does not depend on newer user Chrome APIs, instead of shipping Grok compiled assets. Mounted pages own direct canvases; no base64 image cache, old document cache, global key listener or custom focus authority. Worker/font/CMap/WASM assets ship offline through the Vite asset plugin. Finite isolated tests run the real production viewer in Chrome and bundled Electron and cover rendering, jump, zoom, replacement and teardown; complete PDF/UI parity remains unclaimed."
+    }
+  ],
+  "changes": [
+    "Sidebar status component and state projection copied; Cmb supplies indicator styling.",
+    "Extracted composer draft contracts and parsing/equality helpers without other model dependencies.",
+    "Initially adapted the user-provided reconstruction of character geometry, deterministic identity mapping, local motion catalog and avatar dispatcher. Resting contours and palette semantics now verified against the installed 0.66.0 renderer; full official 3D motion is not ported.",
+    "Adapted animation lifetime for hidden surfaces and reduced-motion changes; reset transforms when paused and bound imperative actions.",
+    "Workspace spacing, bubble geometry and easing are adapted from upstream view.css to Cmb theme tokens; not a transplant of the whole current official UI.",
+    "Files use the repository formatter; evidence comments retain their original source anchors.",
+    "Extracted original Markdown-to-preview replacements; capped source text at 2000 characters and adapted Cmb draft/last-message projection.",
+    "Extracted avatar palette and shape identifiers into shared/bot-persona.ts; adapted CharacterChooser to the Cmb editor and durable Bot profile. Group avatar members use saved appearances. Image upload/cropping is implemented separately as recorded below; image generation is not ported.",
+    "Extracted SidebarResizeHandle for the right computer panel; retains pointer capture/cleanup and adds width bounds, keyboard resizing, and restoration of previous body styles.",
+    "Copied original formatAttachmentBytes from the already indexed workspace/model.ts for small-file and large-file labels."
+  ],
+  "moduleOrganization": "Persona color/identity helpers remain in grok-persona-geometry.ts; verified resting SVG data is in grok-persona-rest-contours.ts. Character rendering uses theme-aware solid fill and cutout eye masks, retaining local motion and lifecycle guards. This is not a transplant of the official 3D animation engine.",
+  "asyncTaskAdaptation": "Copied cached clock (refresh snapshot when first subscriber reopens after idle) and extracted localized relative time formatter; adapted original async task rows to durable Cmb Host task identities, bounded pagination and existing task history/controls. Cmb preserves unacknowledged control requests across renderer reloads.",
+  "onboardingAdaptation": "References original signed-in onboarding responsibilities/computer/first-task sequence and reuses already ported persona animations. Cmb uses existing model settings, Bot editor, authorized connector selections and real local browser opening. Task suggestions only fill the existing draft; no cloud-computer demo or simulated readiness.",
+  "groupMembersAdaptation": {
+    "sources": [
+      {
+        "source": "frontend/src/recovered/features/agent-info/group-members/view.tsx",
+        "sha256": "aad3ac6e3f6e7fd12f014c7eba850e9a59de56f75d00231eedac87578e0d23a5"
+      },
+      {
+        "source": "frontend/src/recovered/features/agent-info/group-members/model.ts",
+        "sha256": "ccb96fc7d4a5fb43261244c58e5b8f198bf58d77298dc1e3f231d6a227712e02"
+      },
+      {
+        "source": "source/host/extensions/transcript/group-chat-glue.ts",
+        "sha256": "17654bf5fedd191eba3d89e77dd1dbcf9710f8d60d5f3b596fd854949cf933eb"
+      }
+    ],
+    "destination": "src/renderer/src/components/bots/BotGroupMembers.tsx",
+    "changes": "Adapted member rows, hover removal, removal confirmation and the searchable add-member picker to existing Cmb Radix primitives and Bot avatars. Reuses CAS group updates, durable nonce receipts, unknown-result recovery and restored-data fencing. Removal may retain one Bot. New rooms allow 1–6 existing Bots when the Host advertises single-bot-rooms-v1; older Hosts retain 2–6. Saving unchanged settings does not cancel work."
+  },
+  "mediaPreviewIntegration": {
+    "product": "Grok Bot",
+    "version": "0.66.0",
+    "origin": "Actual installed official renderer, distinct from the user-provided 0.18 reconstruction",
+    "rawAsset": "dist/renderer/assets/index-ZYxf-aBb.js",
+    "rawSha256": "113565e9936674429ee4cb52c66aa2668c63ff483553b5ece2e57e9070c5d0b1",
+    "formattedReferenceSha256": "4aa00f95268444ae86c4c3f509f1024a3a532476db2cd2d837999394ce2a9160",
+    "referenceRanges": [
+      "56155–56187 Lye/Fye bounds and focal zoom",
+      "56880–56896 actual media zoom/key constants",
+      "57183–57344 wheel and scoped keyboard handling",
+      "57596–57720 caption and multi-image filmstrip"
+    ],
+    "destinations": [
+      "src/renderer/src/components/tabs/ImageViewer.tsx",
+      "src/renderer/src/components/bots/BotFilePreview.tsx",
+      "src/renderer/src/components/bots/BotPeerImages.tsx",
+      "src/renderer/src/components/bots/BotWorkspace.tsx",
+      "src/renderer/src/components/bots/BotPeerExchange.tsx"
+    ],
+    "reuse": "Existing Cmb file parser/preview RPC, abort, download, immutable image descriptors, scoped owner and blob cleanup; original gallery is also the bounded filmstrip. No new file cache or document keyboard listener.",
+    "changes": "Adapts the actual media behavior: fit scale 1, maximum 5, click 2.5, keyboard multiplier 1.4, arrow pan 40 px, focal wheel zoom, offset clamping and cyclic unzoomed navigation. Keeps the original Dialog and focus return while replacing only its current ImageViewer. Latest navigation callback is updated in layout effect so same-card refresh does not retire a held pointer.",
+    "boundaries": "Current media component was read and its existing single-image interaction observed. Multi-image behavior is confirmed by the installed source and local controlled React/SQLite/RPC tests, not a newly created official multi-image task. Original general file viewer remains distinct."
+  },
+  "ordinaryUserFormIntegration": {
+    "product": "Grok Bot",
+    "version": "0.66.0",
+    "origin": "Actual installed official renderer user-form view and submit entry; not a reconstruction of the proprietary backend",
+    "asset": "dist/renderer/assets/chunk-view-B0nrWtCh.js",
+    "sha256": "415defea91401ff0b96c6fc803eb63c686747fc262793434e07b1ef33da5b766",
+    "formattedReferenceSha256": "bcbb76bdc531bfc189a0e05b951ebcf5a8f2d72ab4cb88166d4a5fc677e89bf8",
+    "referenceRanges": [
+      "78–105 typed ordinary controls",
+      "222–411 text/select/textarea",
+      "1076–1125 required fields and original entryId/agentId string-value submit"
+    ],
+    "reuse": "Cmb question-card entry, Input/Select/Button, historical interaction viewer, original answer IPC and createProtectedSavePending exact-record recovery. No global keyboard hook, periodic form polling or automatic form dispatch.",
+    "changes": "Compact inline ordinary fields, required/optional labels, localized validation and readable accepted answers. Same-card refresh preserves values; old ACK cannot erase a newer card. Another window's unknown submission is displayed before a second explicit confirmation of that exact original answer. Submitted ordinary records are bounded; unknown outcomes are retained for scoped reconciliation.",
+    "boundaries": "Current frontend source was read; no new official form was submitted. Local controlled-model/runtime/UI tests verify Cmb behavior, not external model task quality or Windows native execution."
+  },
+  "inspectorFocusIntegration": {
+    "product": "Grok Bot",
+    "version": "0.68.1",
+    "asset": "dist/renderer/assets/chunk-box-desktop-modal-CZ66jeVR.js",
+    "sha256": "f9cb2db39e721bd6eea81bce6efe256b5c046b92aa3b6c7b830d8d5f76502913",
+    "formattedReferenceSha256": "75e922484980a0e55eb4b798799170f17c318c1e274bf121cc2f11e419aed178",
+    "referenceRanges": [
+      "520–544 onRequestComposerFocus",
+      "602–615 minimize followed by composer focus request"
+    ],
+    "reuse": "Existing Cmb composerFocusRequested, restoreComposerFocus, editor-ready callback and Inspector FocusScope unmount callback.",
+    "changes": "The user explicitly closing an individual Bot or group inspector requests focus restoration to the existing composer. Group inspector forwards the existing FocusScope exit callback. Keeps drafts, settings dialog focus, control owner and input transport; route changes or arbitrary unmounts do not create a focus request.",
+    "boundaries": "Read actual current installed renderer source, not a reconstruction. Local Chrome verifies the close/draft/input behavior; no live Grok screen interaction was possible while the Mac was locked.",
+    "additionalReferences": [
+      {
+        "version": "0.66.0",
+        "asset": "dist/renderer/assets/index-ZYxf-aBb.js",
+        "formattedReferenceSha256": "4aa00f95268444ae86c4c3f509f1024a3a532476db2cd2d837999394ce2a9160",
+        "referenceRange": "43462–43549 shared info-pane close restores prompt focus",
+        "boundary": "Frozen older installed renderer reference; not a current 0.68.1 group-screen observation."
+      }
+    ]
+  },
+  "localInspectorShortcutIntegration": {
+    "product": "Grok Bot",
+    "version": "0.68.1",
+    "references": [
+      {
+        "asset": "dist/renderer/assets/chunk-pane-header-bXSI6Zpy.js",
+        "sha256": "d7ee1b87f142d97de9c4bc3a550d9b5624f367674ca57b7afe59b3a985493552"
+      },
+      {
+        "asset": "dist/renderer/assets/index-ByKx0M82.js",
+        "sha256": "df12e610a991666f90081984460c22636409f4a80a7c690ef94f1b327092c8df"
+      },
+      {
+        "asset": "dist/renderer/assets/index.eager-app-aiFqpW8R.js",
+        "sha256": "eacc26cdb08b53e7ad5e1543ef4b76da377ecc1d833b4d62e1f170fb00169eee"
+      },
+      {
+        "asset": "dist/renderer/assets/index.eager-vendor-DwFd2u6y.js",
+        "sha256": "d64a9a603df8828e92cf9c416c7c918ed76b6c327a9a36c87f69b8b63910fdf5"
+      }
+    ],
+    "referenceRanges": [
+      "index-ByKx0M82:106413 sand.focusInput mod+i",
+      "index.eager-app-aiFqpW8R:43769–43828 action keyboard adapter",
+      "index.eager-vendor-DwFd2u6y:29833–29923 scoped editable keyboard listener"
+    ],
+    "reuse": "Existing Cmb global shortcut matcher, Workspace focusInput and shared InspectorPanel data-tab state.",
+    "changes": "Only exclude the actual computer tab from workspace shortcuts. Local details, library and group member buttons can use the existing focus-input action; modal, editable, IME, handled and repeated-key exclusions remain. No new keyboard listener, focus owner or remote input.",
+    "boundaries": "Read actual installed client sources; no live Grok UI operation while locked. Local actual Chrome verifies exact current Cmb behavior."
+  },
+  "singleBotIndependentRooms": {
+    "product": "Grok Bot",
+    "version": "0.68.1",
+    "rawAsset": "dist/renderer/assets/index-ByKx0M82.js",
+    "rawSha256": "df12e610a991666f90081984460c22636409f4a80a7c690ef94f1b327092c8df",
+    "sourceFunctions": [
+      "b2 existing-agent single/group feature-flag branch",
+      "FS direct existing-agent selection"
+    ],
+    "observedBehavior": "Current official account can create a separate room with one existing Bot, retain its original direct history and draft, and open its direct chat through the member row. Source behavior varies by account feature flags.",
+    "adaptation": "Keeps direct existing-Bot selection and adds capability-gated singleton rooms to existing group creation, receipts, scoped drafts, public transcript and Bot execution. Does not clone Bot identity, memory, skills or model configuration. Singleton room ends after the one member task settles; multi-member round-robin stays unchanged."
+  },
+  "peerOriginalFileHandoffIntegration": {
+    "references": [
+      {
+        "source": "/Users/chenqiang/Desktop/AI/grok-bot-0.18-reconstructed-main/source/host/agents/agent-messaging.ts",
+        "sha256": "4c9fe82afe95c3c7f92e9fb26b67f96f25544fc3240ae88d40b9a3f2ee5991fc",
+        "version": "0.18.0 reconstructed"
+      },
+      {
+        "source": "/Users/chenqiang/Desktop/AI/grok-bot-0.18-reconstructed-main/source/host/cloud-agents/cloud-agent-images.ts",
+        "sha256": "f9762450dc0e2643c0c5dd307a5ef0bc72f7882516678bc9fc42f601fc3fb14d",
+        "version": "0.18.0 reconstructed"
+      }
+    ],
+    "referenceBoundary": "Provided image/shared-workspace messaging source and official 0.68.1 native observations. No current proprietary backend or redistribution license is claimed.",
+    "reuse": [
+      "Original approval/revision checks, peer dispatch transaction and durable receipts",
+      "Scoped artifact reads, immutable object storage, existing file lifecycle and byte policy",
+      "Existing message file cards, preview/focus handling and bounded exchange read queue",
+      "Existing botUserMessageContent prompt preparation"
+    ],
+    "changes": [
+      "Reuses BotMessageAttachments and BotFilePreview in the original peer exchange and focus owner.",
+      "Approval uses existing action details to show exact original file names and sizes.",
+      "Capability-gated includeFiles preserves legacy response shape, read coalescing and private-history boundaries."
+    ],
+    "verificationBoundary": "14 domain and 9 actual React/Chrome/SQLite checks passed for built f3d. Controlled-model actual graph test passed. Video limit correction raises domain coverage to 15 but is not yet built. Real MiniMax original handoff reached C and correct private review; final group two-file delivery remains pending.",
+    "evidence": "docs/cmbcowork-bot-parity-plan/evidence/2026-10-08-integration69/current-peer-original-files-candidate.safe.json"
+  },
+  "versionedLatestStateEvents": {
+    "requirement": "CJ04: explicitly versioned object-state events must not allow an older task to dispatch after a newer accepted source state.",
+    "origin": "CMBDevClaw integration using the original Cmb durable receipt, task ownership, approval, lease, drain and effect lifecycle. This is not copied or inferred proprietary Grok backend code.",
+    "reuse": [
+      "Original inbound event transaction and immutable request receipt",
+      "Existing root_run_id ownership for peer/workflow descendants",
+      "Existing cancellation/drain, final assertDispatch/beginEffect and unknown-effect recovery"
+    ],
+    "boundary": "Opt-in per-routine source epoch and entity sequence. Ordinary events keep every-event behavior. Host dispatch fencing cannot retract an issued request; arbitrary external atomic updates require target-side CAS/ETag. Real provider/MiniMax CJ04 and frozen App remain separately unverified.",
+    "documentation": "docs/cmbcowork-bot-parity-plan/18-webhook-latest-state.md",
+    "changes": [
+      "Reuses the original routine editor, pending-save recovery and webhook configuration window.",
+      "Explicit latest-state mode and owner source epoch are capability gated; ordinary event defaults are unchanged.",
+      "Webhook instructions show the exact envelope and external conditional-write boundary; manual run is disabled for versioned event routines."
+    ]
+  }
+}

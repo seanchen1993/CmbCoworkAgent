@@ -1,0 +1,170 @@
+{
+  "recordedAt": "2026-10-10T08:09:37.576202+00:00",
+  "scope": "Finite native development App verification; not whole product parity",
+  "identity": {
+    "buildId": "d9ac5d25c2b1b81a3b0d1c06",
+    "outputId": "dc65a4aac8953fe940812081",
+    "outputSha256": "dc65a4aac8953fe9408120814ee971480d4da83ffd27df67dd6261b82af0e6f3",
+    "schema": 72,
+    "hostId": "6bcf927f-c06a-42e7-acee-4b15a5e8ae06",
+    "sharedDependencies": true,
+    "independentInstallerAccepted": false
+  },
+  "cloneFinite": {
+    "sourceBotId": "954dd5e0-e2e7-4247-9303-276c8111c870",
+    "copyBotId": "53e8c25b-596e-4aef-a9f2-e50e990e5a71",
+    "copyConversationId": "e38aa4b1-0f38-417c-8246-750c1ff65519",
+    "newBotIdentity": true,
+    "configurationEqual": {
+      "instructions": true,
+      "model_ref": true,
+      "workspace_path": true
+    },
+    "before": {
+      "sourceBotId": "954dd5e0-e2e7-4247-9303-276c8111c870",
+      "sourceBotRevision": 3,
+      "bots": {
+        "rows": 1,
+        "sha256": "b313c494fdf13c40bccf1176d82dde40bc119d71d96be08b10050ebc43a04e07"
+      },
+      "bot_memories": {
+        "rows": 3,
+        "sha256": "73b9e4b46bc3d07d7bedcb99e88ef2d22abe0ec61cc15ede2c578ca27e4e9b16"
+      },
+      "bot_routines": {
+        "rows": 0,
+        "sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
+      },
+      "bot_skills": {
+        "rows": 0,
+        "sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
+      },
+      "bot_personas": {
+        "rows": 1,
+        "sha256": "d7763046179206be331073591fa21d9ff5bfa2e656285ea312d020f7083ec0fc"
+      }
+    },
+    "sourceUnchanged": {
+      "bots": true,
+      "bot_memories": true,
+      "bot_routines": true,
+      "bot_skills": true,
+      "bot_personas": true
+    },
+    "copiedCounts": {
+      "bots": 1,
+      "bot_memories": 0,
+      "bot_routines": 0,
+      "bot_skills": 0,
+      "bot_personas": 1,
+      "bot_messages": 0,
+      "bot_artifacts": 0,
+      "bot_runsBeforeFirstTask": 0
+    },
+    "postTask": {
+      "run": {
+        "id": "f1e56064-9664-415c-8b36-da020284a32f",
+        "status": "succeeded",
+        "created_at": 1791618404074,
+        "updated_at": 1791618411049
+      },
+      "usage": {
+        "model": "MiniMax-M3",
+        "requests": 3,
+        "settled": 3
+      },
+      "memoryCount": 0,
+      "hiddenRestored": true
+    }
+  },
+  "hiddenNative": {
+    "officialGrok": "Hide from sidebar, inline hidden count, expand hidden row, restore from context menu observed; synthetic Bot restored",
+    "cmb": "Native sidebar hide, inline count 1, expand, show Bot, original history retained; test copy restored",
+    "installedUiPassed": true,
+    "wholeSidebarParityClaimed": false
+  },
+  "pdfNative": {
+    "sameOriginalArtifactAfterColdStart": true,
+    "duplicateProductHeaderRemoved": true,
+    "nativeText": "Dummy PDF file",
+    "pageCount": 1,
+    "internalBlobUuidStillVisible": true,
+    "fullPdfUiParityClaimed": false
+  },
+  "recoverySummary": {
+    "installed": true,
+    "nativeCollapsedRecoverySampleNotYetObserved": true,
+    "expandedOperationDetailRemainsRawPagedReceipt": true
+  },
+  "coldPreservation": {
+    "selectedRuns": 189,
+    "checkpointPayloadBytesHashed": 18539323,
+    "logicalGroupsEqual": {
+      "runs": true,
+      "effects": true,
+      "interactions": true,
+      "artifacts": true,
+      "artifactObjects": true,
+      "peerDispatch": true,
+      "peerWaits": true,
+      "checkpoints": true,
+      "skills": true,
+      "project": true
+    },
+    "extraTablesEqual": {
+      "bot_memories": true,
+      "bot_memory_metadata": true,
+      "bot_model_usage": true,
+      "bot_group_cycles": true,
+      "bot_group_runs": true,
+      "bot_introduction_questions": true
+    },
+    "schemaBefore": 72,
+    "schemaAfter": 72,
+    "legacyMemberOrderEqual": true,
+    "modelNormalizedFingerprintMatched": true,
+    "otherConfigurationEqual": {
+      "custom-models.json": true,
+      ".env": true,
+      "userinfo-models.json": true,
+      "bot-host/workspace.private.json": true
+    },
+    "forceKillUsed": false
+  },
+  "coldEvidencePrivate": {
+    "path": "/Users/chenqiang/Library/Application Support/CMBDevClaw-development/2026-10-08/presentation/cold-ui-output-plan/lifecycle-ui-output-cold-preservation-1791619307767268000.safe.json",
+    "sha256": "bb1d5b270bfc29da0f99b60189c6f6a90692c37af8f90fffd47e89a0b74a8191"
+  },
+  "shutdownGap": {
+    "signalQuitFailedAndRetained": true,
+    "mainReactivatedThenNativeQuitObserved": true,
+    "hostStoppedNormallyAfterMainGone": true,
+    "nativeQuitReceiptSha256": "8268e22571bd2eebda81e42b832205cee99d14101c2614ce722373e14411778f",
+    "rootCauseUnproven": true,
+    "fixClaimed": false,
+    "originalFailedUpgradeNotRewritten": true
+  },
+  "gates": {
+    "unit": {
+      "path": "/tmp/cmb-native-lifecycle-ui-unit-20261010.log",
+      "sha256": "56554b1e44d9475927e6d12174eca1f12094cfc01ece9efdd424cab14a69596a",
+      "exitCode": 0
+    },
+    "types": {
+      "path": "/tmp/cmb-native-lifecycle-ui-types-20261010.log",
+      "sha256": "aba1d996409180225c6f720bd909b367ee8681e710f7b8537e5a1d7f6d07f2ac",
+      "exitCode": 0
+    },
+    "lint": {
+      "path": "/tmp/cmb-native-lifecycle-ui-lint-20261010.log",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "exitCode": 0
+    },
+    "build": {
+      "path": "/tmp/cmb-native-lifecycle-ui-build-20261010.log",
+      "sha256": "97c9f6cc070455c9448a37a728a268841514a53d31896585ba767d04ed4ecbec",
+      "exitCode": 0
+    }
+  },
+  "coreParityComplete": false
+}

@@ -1,16 +1,10 @@
+import { modParentPort } from "./node-process"
 import { randomUUID } from "node:crypto"
 import type { ModJson, ModRuntimeRequest, ModRuntimeResponse } from "../../shared/mods/types"
 import { ModGuestRuntime } from "./guest-runtime"
 import { modErrorCode } from "./errors"
 
-const port = (
-  process as NodeJS.Process & {
-    parentPort: {
-      on(event: "message", listener: (event: { data: ModRuntimeRequest }) => void): void
-      postMessage(value: ModRuntimeResponse): void
-    }
-  }
-).parentPort
+const port = modParentPort<ModRuntimeRequest, ModRuntimeResponse>()
 
 const runtimes = new Map<string, ModGuestRuntime>()
 const loading = new Set<string>()

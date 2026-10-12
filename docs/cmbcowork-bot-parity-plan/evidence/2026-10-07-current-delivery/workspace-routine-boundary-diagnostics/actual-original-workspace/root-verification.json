@@ -1,0 +1,25 @@
+{
+  "verifiedAt": "2026-10-07T09:00:13.089885+00:00",
+  "status": "PASS",
+  "actualResult": {
+    "phase": "actual-original-workspace-with-readonly-routine-read-provenance",
+    "startedAt": "2026-10-07T08:56:13.802377+00:00",
+    "completedAt": "2026-10-07T08:59:22.997528+00:00",
+    "seconds": 189.19517958303913,
+    "exitCode": 0,
+    "inputCount": 3834,
+    "sourceDrift": [],
+    "logSHA256": "884fd332e4bd843df3fd3ac7e2f2a5f0638e036ba64210ff3d185bf66d8064af",
+    "automaticRetries": 0,
+    "wrapperOverridesOriginalTimeouts": false
+  },
+  "nativeBuildId": "aa183a16dd2d22fe8ad060e4",
+  "outputRevisionSHA256": "0ce3e79902f8ee8bedfaead445890c67cc96fb08a40e12252ec30743d7b05dcc",
+  "rendererChunk": "BotWorkspace-D-23g-nQ.js",
+  "actualOriginalWorkspacePassed": true,
+  "diagnosticCaptureTriggered": false,
+  "previous31ReadOriginProven": false,
+  "productionChangedByDiagnostics": false,
+  "originalAssertionsAndTimeoutsPreserved": true,
+  "full49Gate": false
+}

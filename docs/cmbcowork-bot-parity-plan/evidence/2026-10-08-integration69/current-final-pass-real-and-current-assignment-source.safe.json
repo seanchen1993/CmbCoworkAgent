@@ -1,0 +1,283 @@
+{
+  "kind": "formal-final-pass-and-current-assignment-followup",
+  "recordedAt": "2026-10-10T00:51:24.072535+00:00",
+  "sourceRead": [
+    "/Users/chenqiang/Desktop/ai/grok-bot-0.18-reconstructed-main/source/host/extensions/transcript/group-chat-orchestrator.ts",
+    "src/main/bots/upstream/grok-group-chat.ts"
+  ],
+  "c50dFormalFailed": {
+    "nativeBuildId": "c50d453abbe890e3773db0a4",
+    "cycle": {
+      "id": "0703035a-ece3-4522-b4f7-e8e8589efe59",
+      "status": "completed",
+      "round": 2,
+      "total_messages": 3
+    },
+    "runs": [
+      {
+        "id": "f8e13541-b44c-4444-a704-d9214c579f48",
+        "bot_id": "4002cdce-8149-4dfc-9c4b-28abd67d30c1",
+        "status": "succeeded",
+        "error": null,
+        "sent_count": 0,
+        "modelRequests": 2,
+        "unknownUsage": 0
+      },
+      {
+        "id": "a00075f6-0a8e-42f1-9ec7-edcc087f559c",
+        "bot_id": "924e1689-7b6d-411c-a429-28decb91b179",
+        "status": "succeeded",
+        "error": null,
+        "sent_count": 1,
+        "modelRequests": 2,
+        "unknownUsage": 0
+      },
+      {
+        "id": "318f0ce5-f320-49ee-aac2-e5187b2fe0c3",
+        "bot_id": "e1d81813-1ff0-4fca-9948-d966e1a77189",
+        "status": "succeeded",
+        "error": null,
+        "sent_count": 1,
+        "modelRequests": 2,
+        "unknownUsage": 0
+      },
+      {
+        "id": "d2f2f656-e0b5-4987-b476-ce84e218b794",
+        "bot_id": "924e1689-7b6d-411c-a429-28decb91b179",
+        "status": "succeeded",
+        "error": null,
+        "sent_count": 0,
+        "modelRequests": 4,
+        "unknownUsage": 0
+      },
+      {
+        "id": "a3839d85-984b-43c3-b02c-18937a520ba4",
+        "bot_id": "e1d81813-1ff0-4fca-9948-d966e1a77189",
+        "status": "failed",
+        "error": "群聊回复尚未发布，已保留执行记录，请重试或接手处理。",
+        "sent_count": 0,
+        "modelRequests": 4,
+        "unknownUsage": 0
+      },
+      {
+        "id": "087c3808-6565-4f3f-9a84-1edde2118823",
+        "bot_id": "4002cdce-8149-4dfc-9c4b-28abd67d30c1",
+        "status": "succeeded",
+        "error": null,
+        "sent_count": 1,
+        "modelRequests": 2,
+        "unknownUsage": 0
+      },
+      {
+        "id": "ff6551a8-1d45-4ce6-907b-e4840594ed25",
+        "bot_id": "e1d81813-1ff0-4fca-9948-d966e1a77189",
+        "status": "succeeded",
+        "error": null,
+        "sent_count": 0,
+        "modelRequests": 2,
+        "unknownUsage": 0
+      },
+      {
+        "id": "e26d3e21-64c6-47f4-9273-436db0410605",
+        "bot_id": "4002cdce-8149-4dfc-9c4b-28abd67d30c1",
+        "status": "succeeded",
+        "error": null,
+        "sent_count": 0,
+        "modelRequests": 2,
+        "unknownUsage": 0
+      },
+      {
+        "id": "d3262ade-ea2a-4041-a4db-604944fda67e",
+        "bot_id": "924e1689-7b6d-411c-a429-28decb91b179",
+        "status": "succeeded",
+        "error": null,
+        "sent_count": 0,
+        "modelRequests": 2,
+        "unknownUsage": 0
+      }
+    ],
+    "publicMessages": [
+      {
+        "bot_id": "924e1689-7b6d-411c-a429-28decb91b179",
+        "text": "独立计算：17+25 = 42。",
+        "run_id": "a00075f6-0a8e-42f1-9ec7-edcc087f559c"
+      },
+      {
+        "bot_id": "e1d81813-1ff0-4fca-9948-d966e1a77189",
+        "text": "核对：17+25 = 42，与独立计算结果一致，正确。",
+        "run_id": "318f0ce5-f320-49ee-aac2-e5187b2fe0c3"
+      },
+      {
+        "bot_id": "4002cdce-8149-4dfc-9c4b-28abd67d30c1",
+        "text": "两次结果一致：17+25 = 42，核验通过。",
+        "run_id": "087c3808-6565-4f3f-9a84-1edde2118823"
+      }
+    ],
+    "wholeScenarioPassed": false,
+    "modelRequests": 22,
+    "unknownUsage": 0
+  },
+  "finalPassSourceLiveFormal": {
+    "nativeBuildId": "93fb917571ef316b5f7a78f9",
+    "cycle": {
+      "id": "94502723-daf5-4712-bd74-8c104c64eecc",
+      "status": "completed",
+      "round": 1,
+      "total_messages": 3
+    },
+    "runs": [
+      {
+        "id": "88edbcdf-22a4-4d78-ab25-d225786527ba",
+        "bot_id": "4002cdce-8149-4dfc-9c4b-28abd67d30c1",
+        "status": "succeeded",
+        "error": null,
+        "sent_count": 1,
+        "modelRequests": 2,
+        "unknownUsage": 0
+      },
+      {
+        "id": "18efa9fa-dcb9-489f-87f0-c8cd2521e4f9",
+        "bot_id": "924e1689-7b6d-411c-a429-28decb91b179",
+        "status": "succeeded",
+        "error": null,
+        "sent_count": 1,
+        "modelRequests": 2,
+        "unknownUsage": 0
+      },
+      {
+        "id": "5f12719e-2fc0-427f-afcb-21b0d6f11294",
+        "bot_id": "e1d81813-1ff0-4fca-9948-d966e1a77189",
+        "status": "succeeded",
+        "error": null,
+        "sent_count": 1,
+        "modelRequests": 5,
+        "unknownUsage": 0
+      },
+      {
+        "id": "ffa3aa92-4d8c-42cc-a5ae-e7dcbd0c1490",
+        "bot_id": "924e1689-7b6d-411c-a429-28decb91b179",
+        "status": "succeeded",
+        "error": null,
+        "sent_count": 0,
+        "modelRequests": 1,
+        "unknownUsage": 0
+      },
+      {
+        "id": "4aa22cf3-7ef0-4c34-a9b0-de37e7e54cab",
+        "bot_id": "e1d81813-1ff0-4fca-9948-d966e1a77189",
+        "status": "succeeded",
+        "error": null,
+        "sent_count": 0,
+        "modelRequests": 1,
+        "unknownUsage": 0
+      },
+      {
+        "id": "3a5f370e-1ac0-404d-b3b0-c9ad1eab315a",
+        "bot_id": "4002cdce-8149-4dfc-9c4b-28abd67d30c1",
+        "status": "succeeded",
+        "error": null,
+        "sent_count": 0,
+        "modelRequests": 2,
+        "unknownUsage": 0
+      }
+    ],
+    "publicMessages": [
+      {
+        "bot_id": "4002cdce-8149-4dfc-9c4b-28abd67d30c1",
+        "text": "本轮分工：\n• 报价工具编程核验：独立计算 17+25，发结果（1 条）。\n• 月报示范核验：核对上述结果是否正确，给判断（1 条）。\n各发一条后停止，不访问外部服务。",
+        "run_id": "88edbcdf-22a4-4d78-ab25-d225786527ba"
+      },
+      {
+        "bot_id": "924e1689-7b6d-411c-a429-28decb91b179",
+        "text": "独立计算：17+25 = 42。",
+        "run_id": "18efa9fa-dcb9-489f-87f0-c8cd2521e4f9"
+      },
+      {
+        "bot_id": "e1d81813-1ff0-4fca-9948-d966e1a77189",
+        "text": "核对：17+25 = 42，与独立计算结果一致，正确。",
+        "run_id": "5f12719e-2fc0-427f-afcb-21b0d6f11294"
+      }
+    ],
+    "wholeScenarioPassed": false,
+    "modelRequests": 13,
+    "unknownUsage": 0
+  },
+  "exactPlainPassFailureDiagnosis": {
+    "runId": "a3839d85-984b-43c3-b02c-18937a520ba4",
+    "firstFinalBodyOnlyPlainPass": true,
+    "thenThreeRepairsWithoutNativeToolCall": true,
+    "privateReasoningOrResponseBodyNotCopied": true
+  },
+  "officialGrokThreeMemberObservation": {
+    "via": "CUA native UI",
+    "memberNames": [
+      "新建 Bot",
+      "新 Bot",
+      "sean"
+    ],
+    "humanSentAt": "2026-10-10 08:46:45 Asia/Shanghai",
+    "exactSameInput": true,
+    "publicMessages": [
+      "我来算：17+25 = 42。新 Bot 请核对。",
+      "核对完毕：17+25 = 42，New Bot 的结果正确。"
+    ],
+    "seenReplyCompleteSignal": true,
+    "extraPrimarySummaryObserved": false,
+    "scope": "Existing official test group with third Bot added; not same member names, instructions or model as CMB."
+  },
+  "memoryFormalRetest": {
+    "id": "813b76ee-4dd2-4153-8a75-1c83e27ba44d",
+    "status": "succeeded",
+    "error": null,
+    "bot_id": "954dd5e0-e2e7-4247-9303-276c8111c870",
+    "result": "\n已读取项目偏好（记忆 ID `62b23ea9-c2b2-4b14-b8d7-628348d47e67`，revision 2），未新增记忆。按「蓝桥-314」项目偏好输出工作摘要如下：\n\n---\n\n**【蓝桥-314】工作摘要**\n\n**依据**\n1. 检查执行情况：本日推进 3 项检查任务，均已执行完成。\n2. 问题识别情况：在上述 3 项检查范围内，发现 1 项与页面输入相关的问题。\n3. 后续安排：该问题已登记处理计划，安排在明天修复。\n\n**结论**\n- 今日共完成 3 项检查；\n- 其中发现 1 项页面输入问题；\n- 该问题计划明天修复。\n\n---\n\n备注：摘要严格依据用户提供的三项事实产出，未引入未经验证的额外信息；按项目偏好采用简体中文，并按「先写依据、再写结论」结构呈现。",
+    "modelRequests": 2,
+    "unknownUsage": 0,
+    "noInternalIds": false,
+    "noUnobservedRegistrationClaim": false,
+    "qualityPassed": false,
+    "originalMemory": {
+      "id": "62b23ea9-c2b2-4b14-b8d7-628348d47e67",
+      "revision": 2,
+      "text": "项目偏好（适用于用户说「按项目偏好」时）：\n\n1. 测试项目代号：蓝桥-314\n2. 工作摘要格式：先写依据，再写结论\n3. 语言：使用简体中文\n\n触发条件：用户明确说「按项目偏好」时，必须按上述三条要求产出工作摘要。"
+    }
+  },
+  "cold": {
+    "receipt": "/Users/chenqiang/Library/Application Support/CMBDevClaw-development/2026-10-08/presentation/cold-upgrade-plan/final-pass-cold-preservation-1791593185752300000.safe.json",
+    "descriptor": {
+      "version": 1,
+      "pid": 46379,
+      "hostId": "3dee7a55-699d-48c9-bd2c-30df52bfe388",
+      "buildId": "93fb917571ef316b5f7a78f9",
+      "socketPath": "/private/tmp/cmb-bot-501-4b987f56222e7e971f75407b/rpc.sock"
+    },
+    "schema": 71,
+    "selectedRuns": 93,
+    "checkpointPayloadBytesHashed": 13517082,
+    "logicalGroupsEqual": {
+      "runs": true,
+      "effects": true,
+      "interactions": true,
+      "artifacts": true,
+      "artifactObjects": true,
+      "peerDispatch": true,
+      "peerWaits": true,
+      "checkpoints": true,
+      "skills": true,
+      "project": true
+    },
+    "extraTablesEqual": {
+      "bot_memories": true,
+      "bot_memory_metadata": true,
+      "bot_model_usage": true,
+      "bot_group_cycles": true,
+      "bot_group_runs": true
+    },
+    "forceKillUsed": false
+  },
+  "sourceCandidateNotLive": [
+    "Past assistant replies retained as attributed reference records, not live assistant examples",
+    "Validated current group human assignment no longer labeled as historical quoted data"
+  ],
+  "coreParityComplete": false
+}

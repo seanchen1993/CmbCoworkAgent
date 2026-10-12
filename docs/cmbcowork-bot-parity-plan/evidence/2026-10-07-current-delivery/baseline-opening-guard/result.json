@@ -1,0 +1,12 @@
+{
+  "phase": "actual-private-regression-against-unchanged-production-store",
+  "startedAt": "2026-10-07T08:17:45.407902+00:00",
+  "completedAt": "2026-10-07T08:17:47.489432+00:00",
+  "seconds": 2.0815637500490993,
+  "exitCode": 1,
+  "inputCount": 3836,
+  "sourceDrift": [],
+  "logSHA256": "05dc3fa522f996ce2ee5a98ccc0542bf28dea27cac40a8ac346d31e9c47ad769",
+  "automaticRetries": 0,
+  "wrapperOverridesOriginalTimeouts": false
+}

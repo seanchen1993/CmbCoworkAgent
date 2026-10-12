@@ -17,7 +17,7 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: "20"
+          node-version-file: ".nvmrc"
           cache: "npm"
 
       - name: Install dependencies
@@ -28,6 +28,41 @@ jobs:
 
       - name: Type check
         run: npm run typecheck
+
+  bot-protocols:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version-file: ".nvmrc"
+          cache: "npm"
+
+      - name: Install dependencies
+        run: npm ci
+
+      # M152–M154 has Chromium 556160935 (persistent download history crash).
+      # Test the official current stable binary instead of a stale runner image.
+      - name: Install stable Chrome for Bot browser protocols
+        run: npx playwright install chrome
+
+      # These paths carry effects that are intentionally fail-closed: a file
+      # selection binds the reviewed DOM identity, a native select is scoped to
+      # its human-controlled page, and delivery evidence accepts one forced
+      # result envelope. Keep their actual Chromium and transport coverage in
+      # the required CI gate rather than relying on a compile-only check.
+      - name: Test Bot browser input and delivery protocols
+        run: >-
+          CMB_BOT_BROWSER_TEST=1 npx vitest run --maxWorkers=1 --minWorkers=1
+          src/main/bots/browser-file-upload.test.ts
+          src/main/bots/browser-file-upload-tool.test.ts
+          src/main/bots/browser-native-select.test.ts
+          src/main/bots/computer-provider.test.ts
+          src/main/bots/browser-download-lifecycle.test.ts
+          src/main/bots/delivery-evidence-review.test.ts
+          src/main/bots/delivery-evidence-transport.test.ts
 
   build:
     runs-on: ${{ matrix.os }}
@@ -41,11 +76,415 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: "20"
+          node-version-file: ".nvmrc"
           cache: "npm"
 
       - name: Install dependencies
         run: npm ci
 
+      - name: Build sealed Windows Bot native inputs
+        if: runner.os == 'Windows'
+        timeout-minutes: 60
+        uses: ./.github/actions/build-bot-windows-native
+
       - name: Build
         run: npm run build
+
+      - name: Prepare isolated Windows native acceptance
+        if: runner.os == 'Windows'
+        timeout-minutes: 8
+        run: node --import tsx tests/prepare-bot-windows-native.mts
+
+      # Native Node storage/lifecycle contracts; no model credentials, browser,
+      # macOS Keychain, deployment or external service is required.
+      - name: Test Bot storage and lifecycle
+        run: >-
+          npx vitest run --maxWorkers=1 --minWorkers=1
+          src/main/bots/store.test.ts
+          src/main/bots/migrations.test.ts
+          src/main/bots/deletion-ledger.test.ts
+          src/main/bots/host-lock.test.ts
+          src/main/bots/host-supervision.test.ts
+          src/main/bots/host-ownership-services.test.ts
+          src/main/bots/transport-client.test.ts
+          src/main/bots/desktop-client.test.ts
+          src/main/bots/host-startup-environment.test.ts
+          src/main/bots/host-upgrade.test.ts
+          src/main/updater/installer-bot-maintenance.test.ts
+          src/main/updater/installer-process-wait.test.ts
+          src/main/updater/script-logging.test.ts
+          src/main/updater/rollback.test.ts
+          src/main/bots/rpc.test.ts
+          src/main/bots/bot-profile-metadata.test.ts
+          src/shared/bot-profile-line.test.ts
+          src/main/ipc/bot-shell-resources.test.ts
+          src/main/bots/link-preview-bridge.test.ts
+          src/main/bots/link-preview-security.test.ts
+          src/main/bots/link-preview-lifecycle.test.ts
+          src/main/bots/link-preview-image-and-ipc.test.ts
+          src/renderer/src/lib/bot-link-preview-policy.test.ts
+          src/renderer/src/lib/bot-link-preview-cache.test.ts
+          src/renderer/src/lib/bot-quick-create.test.ts
+          src/renderer/src/lib/mods-thread-scope.test.ts
+          src/renderer/src/lib/mod-cards-store.test.ts
+          src/main/build/service-lockfile.test.ts
+          src/main/bots/rpc-frame-decoder.test.ts
+          src/main/bots/model-check.test.ts
+          src/main/bots/runtime-model.test.ts
+          src/main/bots/runtime-limits.test.ts
+          src/main/bots/memory-synthesis.test.ts
+          src/main/bots/memory-model.test.ts
+          src/main/bots/model-usage.test.ts
+          src/main/bots/model-call-diagnostics.test.ts
+          src/main/bots/usage-budget.test.ts
+          src/main/bots/workflow-budget.test.ts
+          src/main/bots/memory-context.test.ts
+          src/renderer/src/lib/bot-memory-pending.test.ts
+          src/renderer/src/lib/bot-budget-pending.test.ts
+          src/main/bots/clock-fence.test.ts
+          src/main/bots/execution-authority.test.ts
+          src/main/bots/entity-references.test.ts
+          src/main/bots/inline-references.test.ts
+          src/main/bots/desktop-model-sync.test.ts
+          src/main/bots/desktop-configuration-sync.test.ts
+          src/main/services/hook-config-watcher.test.ts
+          src/main/services/hook-config-watcher-filesystem.test.ts
+          src/main/storage-userinfo-refresh.test.ts
+          src/main/native-window-visibility.test.ts
+          src/renderer/src/lib/window-visibility-store.test.ts
+          src/main/bots/global-instructions.test.ts
+          src/main/bots/project-search.test.ts
+          src/main/agent/runtime-time-context.test.ts
+          src/main/agent/command-shell-resolution.test.ts
+          src/main/agent/local-sandbox-shell-resolution.test.ts
+          src/main/bots/context-compaction-runtime.test.ts
+          src/main/bots/network.test.ts
+          src/main/bots/task-history.test.ts
+          src/main/bots/checkpointer-limits.test.ts
+          src/main/bots/checkpointer-retention.test.ts
+          src/main/bots/checkpointer-orphan-writes.test.ts
+          src/main/bots/checkpoint-messages.test.ts
+          src/main/bots/checkpoint-steering-identity.test.ts
+          src/main/bots/recovery-receipts.test.ts
+          src/renderer/src/lib/bot-recovery-pending.test.ts
+          src/main/bots/worktree-settings.test.ts
+          src/main/bots/browser-download-recovery.test.ts
+          src/main/bots/browser-download-journal.test.ts
+          src/main/bots/browser-download-lifecycle.test.ts
+          src/main/bots/browser-files.test.ts
+          src/main/bots/artifacts.test.ts
+          src/main/bots/peer-images.test.ts
+          src/main/bots/peer-images-runtime.test.ts
+          src/main/bots/peer-exchange.test.ts
+          src/main/bots/peer-exchange-batch.test.ts
+          src/main/bots/peer-history-batch.test.ts
+          src/main/bots/bot-delete-group-members.test.ts
+          src/main/bots/bot-delete-epoch.test.ts
+          src/main/bots/artifact-publication-lifecycle.test.ts
+          src/main/bots/artifact-service-lifecycle.test.ts
+          src/main/bots/desktop-artifact-download-provider.test.ts
+          src/main/bots/desktop-artifact-download-service.test.ts
+          src/shared/bot-file-base64.test.ts
+          src/renderer/src/lib/bot-artifact-download-client.test.ts
+          src/renderer/src/lib/bot-artifact-download-starts.test.ts
+          src/renderer/src/lib/bot-artifact-download-view.test.ts
+          src/shared/bot-message-links.test.ts
+          src/renderer/src/lib/bot-markdown-links.test.ts
+          src/main/bots/maintenance-receipts.test.ts
+          src/main/bots/maintenance-create-receipts.test.ts
+          src/main/bots/backup-scheduler.test.ts
+          src/main/bots/webhook-server.test.ts
+          src/main/bots/backup-io.test.ts
+          src/main/bots/backup-io-observer.test.ts
+          src/main/bots/computer-checkpoints.test.ts
+          src/main/bots/computer-checkpoint-git.test.ts
+          src/main/bots/computer-checkpoint-native.test.ts
+          src/main/bots/computer-maintenance-supervision.test.ts
+          src/main/bots/computer-maintenance-protocol.test.ts
+          src/main/bots/computer-checkpoint-output.test.ts
+          src/main/bots/computer-startup-progress.test.ts
+          src/main/bots/desktop-maintenance-worker.test.ts
+          src/main/bots/desktop-computer-checkpoints.test.ts
+          src/main/bots/owned-maintenance-process.test.ts
+          src/main/bots/maintenance-receipts-migration.test.ts
+          src/main/bots/maintenance-receipts-regression.test.ts
+          src/main/bots/maintenance-receipts-continuity.test.ts
+          src/renderer/src/lib/bot-computer-checkpoint-operation.test.ts
+          src/renderer/src/lib/bot-browser-maintenance-pending.test.ts
+          src/main/bots/error-diagnostic.test.ts
+          src/main/bots/error-trays.test.ts
+          src/main/bots/host-error-trays.test.ts
+          src/renderer/src/lib/bot-error-notice.test.ts
+          src/renderer/src/lib/bot-error-tray-projection.test.ts
+          src/renderer/src/lib/bot-error-tray-state.test.ts
+          src/main/agent/local-sandbox-preserve-mode.test.ts
+          src/main/bots/backup-restore-integrity.test.ts
+          src/main/bots/backups.test.ts
+          src/main/bots/browser-maintenance.test.ts
+          src/main/bots/computer-provider.test.ts
+          src/main/bots/browser-child.test.ts
+          src/main/bots/browser-keyboard-recovery.test.ts
+          src/main/bots/native-desktop-text-selection.test.ts
+          src/main/bots/computer-idle.test.ts
+          src/main/bots/computer-idle-budget.test.ts
+          src/main/bots/computer-idle-store.test.ts
+          src/main/bots/harness-context-provider.test.ts
+          src/main/bots/harness-binding-store.test.ts
+          src/main/bots/harness-question-policy.test.ts
+          src/main/harness-board/agent-context-core.test.ts
+          src/main/harness-board/catalog-reader.test.ts
+          src/main/models/connection-diagnostics.test.ts
+          src/main/bots/mcp-result.test.ts
+          src/main/hooks/tool-failure.test.ts
+          src/main/bots/failure-fuse.test.ts
+          src/main/bots/table-reader.test.ts
+          src/main/bots/file-preview.test.ts
+          src/main/bots/group-store.test.ts
+          src/main/bots/group-mutation-epoch.test.ts
+          src/renderer/src/lib/bot-group-pending.test.ts
+          src/renderer/src/lib/use-bot-group-save.test.ts
+          src/renderer/src/lib/bot-protected-operation-pending.test.ts
+          src/renderer/src/lib/bot-protected-envelope-pending.test.ts
+          src/renderer/src/lib/bot-flat-settings-pending.test.ts
+          src/renderer/src/lib/use-bot-settings-save.test.ts
+          src/renderer/src/lib/bot-routine-pending-inventory.test.ts
+          src/main/bots/mutation-data-epoch.test.ts
+          src/main/bots/routine-mutation-epoch.test.ts
+          src/renderer/src/lib/bot-routine-mutation-pending-epoch.test.ts
+          src/renderer/src/lib/bot-routine-toggle.test.ts
+          src/renderer/src/lib/bot-budget-notification-pending.test.ts
+          src/main/bots/rpc-mutation-epoch.test.ts
+          src/main/bots/skill-trial-review-epoch.test.ts
+          src/main/bots/memory-policy-epoch.test.ts
+          src/main/bots/memory-card-epoch.test.ts
+          src/main/bots/private-memory-receipts.test.ts
+          src/main/bots/peer-cancellation.test.ts
+          src/main/bots/local-tool-permission.test.ts
+          src/main/bots/local-admission-isolation.test.ts
+          src/main/bots/test-local-project-permission.test.ts
+          src/renderer/src/lib/bot-local-tool-permission-pending.test.ts
+          src/renderer/src/lib/bot-help-tool-storage.test.ts
+          src/renderer/src/lib/bot-private-memory-pending.test.ts
+          src/main/bots/native-shell-contract.test.ts
+          src/main/bots/owned-shell-startup-cleanup.test.ts
+          src/main/bots/owned-shell-wire.test.ts
+          src/main/bots/native-readonly-contract.test.ts
+          src/main/bots/native-readonly-entry.test.ts
+          src/main/bots/native-readonly-policy.test.ts
+          src/main/bots/native-shell-installed.test.ts
+          src/main/bots/native-shell-factory-lazy.test.ts
+          src/main/bots/host-shell-factory-startup.test.ts
+          src/main/bots/owned-shell-artifact.test.ts
+          src/main/bots/host-runtime-shutdown.test.ts
+          src/main/build/bot-native-distribution.test.ts
+          src/main/build/bot-native-compiled.test.ts
+          src/main/build/bot-native-compiled-read-boundaries.test.ts
+          src/main/build/bot-service-budget.test.ts
+          src/main/build/bot-service-file-identity.test.ts
+          src/main/build/main-generated-scripts.test.ts
+          src/main/build/bot-windows-native-ci.test.ts
+          src/main/bots/shell-test-host-lease.test.ts
+          src/main/bots/windows-native-test-configuration.test.ts
+          src/main/bots/windows-native-setup-service.test.ts
+          src/main/build/bot-native-build-inputs.test.ts
+          src/main/build/bot-native-build-target.test.ts
+          src/main/build/bot-native-linux-abi.test.ts
+          src/main/bots/grok-browser-actions-handles.test.ts
+          src/main/bots/windows-native-resource.test.ts
+          src/main/bots/windows-setup-recovery.test.ts
+          src/main/bots/windows-native-kernel.test.ts
+          src/main/ipc/bot-windows-native-setup.test.ts
+          src/renderer/src/lib/bot-windows-setup-pending.test.ts
+          src/renderer/src/lib/bot-shared-memory-pending.test.ts
+          src/main/bots/profile-skill-mutation-epoch.test.ts
+          src/main/bots/shell-jobs.test.ts
+          src/main/bots/shell-preparation.test.ts
+          src/renderer/src/lib/bot-recovery-shell-pending.test.ts
+          src/renderer/src/lib/bot-recovery-inventory.test.ts
+          src/renderer/src/lib/use-bot-epoch-operation.test.ts
+          src/renderer/src/lib/bot-memory-backup-pending.test.ts
+          src/renderer/src/lib/bot-memory-pending.test.ts
+          src/renderer/src/lib/bot-budget-pending.test.ts
+          src/renderer/src/lib/bot-composer-document.test.ts
+          src/renderer/src/lib/bot-message-inline-references.test.ts
+          src/renderer/src/lib/bot-skill-send.test.ts
+          src/renderer/src/lib/bot-skill-deletion-pending.test.ts
+          src/renderer/src/lib/bot-message-fetch.test.ts
+          src/renderer/src/lib/bot-message-history.test.ts
+          src/renderer/src/lib/bot-viewport-position.test.ts
+          src/renderer/src/lib/bot-virtual-window.test.ts
+          src/renderer/src/lib/use-bot-transcript-scroll.test.ts
+          src/renderer/src/lib/bot-conversation-tasks.test.ts
+          src/main/bots/skill-deletion.test.ts
+          src/main/skills/dependencies.test.ts
+          src/main/skills/dependency-import.test.ts
+          src/main/bots/skill-dependency-store.test.ts
+          src/main/bots/skill-dependency-check.test.ts
+          src/main/bots/skill-dependency-history.test.ts
+          src/renderer/src/lib/bot-skill-dependency-pending.test.ts
+          src/main/bots/skill-deletion-recovery.test.ts
+          src/renderer/src/lib/bot-recipient-state.test.ts
+          src/renderer/src/lib/bot-reply-state.test.ts
+          src/renderer/src/lib/bot-thread-state.test.ts
+          src/renderer/src/lib/bot-editor-pending.test.ts
+          src/renderer/src/lib/bot-skill-save-pending.test.ts
+          src/renderer/src/lib/use-bot-skill-save.test.ts
+          src/main/bots/skill-save-receipts.test.ts
+          src/renderer/src/lib/bot-routine-run-pending.test.ts
+          src/renderer/src/lib/bot-routine-draft.test.ts
+          src/main/bots/routine-management.test.ts
+          src/main/ipc/bots.test.ts
+          src/main/bots/shell-process.test.ts
+          src/main/bots/shell-services.test.ts
+          src/main/bots/shell-current-guard.test.ts
+          src/main/bots/owned-shell-physical-closure.test.ts
+          src/main/bots/mac-shell-sandbox.test.ts
+          src/main/bots/mac-shell-runtime-write.test.ts
+          src/main/bots/workflow-store.test.ts
+          src/main/bots/workflow-files.test.ts
+          src/main/bots/workflow-children.test.ts
+          src/main/mods/runtime-client-core.test.ts
+          src/main/mods/v2/panes.test.ts
+          src/main/mods/v2/guest-runtime.test.ts
+          src/main/mods/v2/file-access.test.ts
+          src/main/mods/v2/manager.test.ts
+          src/main/ipc/mcp-settings.test.ts
+          src/main/bots/approval-rules.test.ts
+          src/main/bots/hook-notifications.test.ts
+          src/main/bots/secret-vault.test.ts
+          src/main/bots/credential-protection.test.ts
+          src/main/bots/mac-secret-helper.test.ts
+          src/main/bots/mac-secret-protection.test.ts
+          src/main/bots/mac-secret-owner-watch.test.ts
+
+      - name: Test Bot save receipt scope and lifecycle callbacks
+        run: node tests/bot-save-epoch-callbacks.spec.mjs
+
+      - name: Test Bot environment and plugin completion
+        run: >-
+          npx vitest run src/main/bots/agent-runtime.test.ts
+          -t "in-flight configuration check|waits for initial configuration publication|actual command shell|native plugin command receipts|published timezone|blocks the actual model graph at zero allowance|enforces macOS private data isolation|Notification Hook approvals independent|permission notifications for questions|local admission isolation|known shell preparation failure|cancels actual .*trusted preparation|prior background preparation error|rejected owned .* admission"
+
+      - name: Test compiled Bot Host with the shipped Node runtime
+        run: node tests/run-bot-host-native.mjs
+
+      - name: Test independent Node Bot Host and restart recovery
+        run: npm run test:bot:service
+
+      - name: Test compiled Bot computer checkpoint recovery
+        run: node tests/run-bot-computer-checkpoint-native.mjs
+
+      - name: Test native Bot artifact saving and authenticated cancellation
+        run: node tests/run-bot-artifact-download-native.mjs
+
+      - name: Test Bot isolated checkout commit and reviewed merge
+        run: >-
+          npx vitest run src/main/bots/workflow-child-runtime.test.ts
+          -t "isolated coding child"
+
+      - name: Test compiled Bot Shell with the shipped Node runtime
+        run: node tests/run-bot-shell-native.mjs
+
+      - name: Publish pinned Windows text-selection fixture
+        if: runner.os == 'Windows'
+        timeout-minutes: 8
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if ((dotnet --version).Trim() -ne '10.0.401') { throw 'The existing fixed native SDK is required' }
+          $fixtureRoot = Join-Path $env:RUNNER_TEMP ('cmb-windows-selection-fixture-' + [guid]::NewGuid())
+          $source = Join-Path $fixtureRoot 'source'
+          $artifacts = Join-Path $fixtureRoot 'artifacts'
+          $publish = Join-Path $fixtureRoot 'publish'
+          New-Item -ItemType Directory -Path $source | Out-Null
+          foreach ($name in @('CMB.NativeSelectionFixture.csproj', 'Program.cs', 'packages.lock.json')) {
+            Copy-Item -LiteralPath (Join-Path 'tests/windows-native-selection-fixture' $name) -Destination $source
+          }
+          $project = Join-Path $source 'CMB.NativeSelectionFixture.csproj'
+          dotnet restore $project --locked-mode --artifacts-path $artifacts --runtime win-x64 --property:Configuration=Release --disable-build-servers
+          if ($LASTEXITCODE -ne 0) { throw 'Locked fixture restore failed' }
+          dotnet publish $project --no-restore --artifacts-path $artifacts --output $publish --configuration Release --runtime win-x64 --disable-build-servers --property:UseSharedCompilation=false
+          if ($LASTEXITCODE -ne 0) { throw 'Strict fixture publish failed' }
+          $pin = @'
+          import assert from "node:assert/strict"
+          import { createReadStream } from "node:fs"
+          import { appendFile, lstat, realpath } from "node:fs/promises"
+          import { createHash } from "node:crypto"
+          import { join } from "node:path"
+          assert.equal(process.platform, "win32")
+          assert.equal(process.arch, "x64")
+          const requested = join(process.argv[1], "CMBDevClaw.NativeSelectionFixture.exe")
+          const info = await lstat(requested)
+          assert.ok(info.isFile() && !info.isSymbolicLink() && info.size > 0 && info.size <= 256 * 1024 * 1024)
+          const entry = await realpath(requested)
+          const hash = createHash("sha256")
+          for await (const part of createReadStream(entry)) hash.update(part)
+          const values = { CMB_BOT_NATIVE_WINDOWS_SELECTION_FIXTURE: entry, CMB_BOT_NATIVE_WINDOWS_SELECTION_FIXTURE_SHA256: hash.digest("hex") }
+          for (const [key, value] of Object.entries(values)) {
+            assert.ok(value && !/[\r\n\0]/.test(value))
+            await appendFile(process.env.GITHUB_ENV, key + "=" + value + "\n", "utf8")
+          }
+          '@
+          node --input-type=module -e $pin $publish
+          if ($LASTEXITCODE -ne 0) { throw 'Fixture identity pin failed' }
+
+      - name: Test actual Windows native text selection
+        if: runner.os == 'Windows'
+        timeout-minutes: 8
+        run: node tests/run-bot-windows-native-selection.mjs
+
+      - name: Test compiled Bot link preview thumbnails and cancellation
+        run: node tests/run-bot-link-preview-native.mjs
+
+      - name: Keep sanitized Windows native gate reports
+        if: failure() && runner.os == 'Windows'
+        uses: actions/upload-artifact@v4
+        with:
+          name: bot-windows-native-failure
+          path: |
+            ${{ runner.temp }}/cmb-native-build-report.json
+            ${{ runner.temp }}/cmb-windows-native-acceptance.json
+            ${{ runner.temp }}/cmb-windows-selection-report-*/summary.json
+            ${{ runner.temp }}/bot-native-shell-report-*/results.json
+          if-no-files-found: ignore
+
+      - name: Test owned macOS Shell interruption and independent closure
+        if: runner.os == 'macOS'
+        run: node tests/run-bot-owned-shell-native.mjs
+
+      - name: Test Bot errors across Electron context isolation
+        if: runner.os != 'Linux'
+        run: npx tsx tests/bot-ipc-context-bridge.spec.ts
+
+      - name: Test Bot errors across Electron context isolation (Linux)
+        if: runner.os == 'Linux'
+        run: xvfb-run -a npx tsx tests/bot-ipc-context-bridge.spec.ts
+
+  bot-browser:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version-file: ".nvmrc"
+          cache: "npm"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Install Chrome and its system dependencies
+        run: npx playwright install --with-deps chrome
+
+      - name: Test actual Bot interactions and bounded rendering
+        run: xvfb-run -a npm run test:bot:browser
+
+      - name: Keep Bot UI failure evidence
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bot-browser-failure
+          path: output/bot-*/
+          if-no-files-found: ignore

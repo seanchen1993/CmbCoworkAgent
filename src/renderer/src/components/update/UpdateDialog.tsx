@@ -168,7 +168,9 @@ export function UpdateDialog({
     window.api.update
       .getStartupResult()
       .then((r) => {
-        if (r.updatedTo) {
+        if (r.rollbackError) {
+          toast.error("自动回退未完成", { description: r.rollbackError, duration: 10_000 })
+        } else if (r.updatedTo) {
           toast.success(`已成功更新到 v${r.updatedTo}`, { duration: 5000 })
         }
       })

@@ -1,0 +1,21 @@
+{
+  "schemaVersion": 1,
+  "kind": "Root-read-only-installed-Grok-client-source-identity",
+  "verifiedAt": "2026-10-07T18:42:18.271238+00:00",
+  "installedPackage": "/Applications/Grok Bot.app/Contents/Resources/app.asar",
+  "packageVersion": "0.68.1",
+  "rendererEntry": "dist/renderer/assets/index-ByKx0M82.js",
+  "bytes": 2006618,
+  "sha256": "df12e610a991666f90081984460c22636409f4a80a7c690ef94f1b327092c8df",
+  "matchesPreviouslyReadExtractedSource": true,
+  "extractedSource": "/tmp/cmb-main-bot-068-source-ofK71Y/index-ByKx0M82.js",
+  "readableSource": "/tmp/cmb-main-bot-068-source-ofK71Y/index-ByKx0M82.js.formatted.js",
+  "officialChangelog": "https://x.ai/changelog/bot",
+  "claims": {
+    "clientSourceVersionVerified": true,
+    "liveUiObservedThisTurn": false,
+    "cloudImplementationObtained": false,
+    "accountFeatureFlagsVerified": false
+  },
+  "limit": "Matching client bundle bytes do not prove cloud behavior or feature availability. Native UI automation remains connection-blocked; no screenshot or input fallback was used."
+}

@@ -124,7 +124,7 @@ export async function ensureCmbChromeNativeHostRegistration(): Promise<BrowserCo
   if (process.platform !== "win32") {
     return {
       connected: false,
-      error: "CmbCoworkAgent Chrome Cookie 导入目前仅支持 Windows",
+      error: "CMBDevClaw Chrome Cookie 导入目前仅支持 Windows",
       extensionId: CMB_CHROME_EXTENSION_ID,
       nativeHostRegistered: false,
       platformSupported: false
@@ -133,7 +133,7 @@ export async function ensureCmbChromeNativeHostRegistration(): Promise<BrowserCo
   if (!app.isPackaged) {
     return {
       connected: false,
-      error: "Chrome Native Messaging Host 需要使用 Windows 打包版 CmbCoworkAgent 验证",
+      error: "Chrome Native Messaging Host 需要使用 Windows 打包版 CMBDevClaw 验证",
       extensionId: CMB_CHROME_EXTENSION_ID,
       nativeHostRegistered: false,
       platformSupported: true

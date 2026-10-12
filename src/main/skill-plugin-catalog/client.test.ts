@@ -1,6 +1,6 @@
 import { execFile } from "node:child_process"
 import { EventEmitter } from "node:events"
-import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs"
+import { mkdtempSync, mkdirSync, realpathSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import { createRequire } from "node:module"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
@@ -258,7 +258,7 @@ describe("SkillPluginCatalogClient", () => {
   })
 
   it("reads bundled skills from an ASAR directory in a real Electron Worker", async () => {
-    const root = mkdtempSync(join(tmpdir(), "cmb-skill-plugin-catalog-asar-"))
+    const root = realpathSync(mkdtempSync(join(tmpdir(), "cmb-skill-plugin-catalog-asar-")))
     temporaryDirectories.push(root)
     const packageRoot = join(root, "package")
     const asarPath = join(root, "app.asar")
@@ -349,7 +349,7 @@ worker.postMessage({
   }, 60_000)
 
   it("invalidates shared detail snapshots only when the main epoch advances", async () => {
-    const root = mkdtempSync(join(tmpdir(), "cmb-skill-plugin-catalog-epoch-"))
+    const root = realpathSync(mkdtempSync(join(tmpdir(), "cmb-skill-plugin-catalog-epoch-")))
     temporaryDirectories.push(root)
     const source = makeSource(root)
     const skillDirectory = join(source.builtinSkillsDir, "epoch-skill")
@@ -387,7 +387,7 @@ worker.postMessage({
   }, 30_000)
 
   it("parses 20k skills plus a 2 MiB file off-main while pages stay bounded", async () => {
-    const root = mkdtempSync(join(tmpdir(), "cmb-skill-plugin-catalog-large-"))
+    const root = realpathSync(mkdtempSync(join(tmpdir(), "cmb-skill-plugin-catalog-large-")))
     temporaryDirectories.push(root)
     const source = makeSource(root)
     mkdirSync(source.builtinSkillsDir, { recursive: true })

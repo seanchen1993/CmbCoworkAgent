@@ -1,0 +1,51 @@
+{
+  "source": "CmbCoworkAgent local Git history",
+  "commit": "c660e8f93200f291400c419e86e754d1638900d3",
+  "files": [
+    {
+      "source": "chrome-extension/README.md",
+      "sha256": "0c334a517e71cf5824e8343370c43bc5354fca93d4c1f0096554744e6f42f270"
+    },
+    {
+      "source": "chrome-extension/icons/icon-128.png",
+      "sha256": "c5bff0d8474ed82fc06ffa97900f458397a613637965738d01d5d89d081b4646"
+    },
+    {
+      "source": "chrome-extension/icons/icon-16.png",
+      "sha256": "2a7bb42f7ef34b1a1da2904698ca647fe456c3b25d76636f7adb74442ebcaf98"
+    },
+    {
+      "source": "chrome-extension/icons/icon-32.png",
+      "sha256": "ff7526eacb34338c47bc1c1cc3a797322b0f756433f2cac893fa89b85db388fb"
+    },
+    {
+      "source": "chrome-extension/icons/icon-48.png",
+      "sha256": "d0af1367f9126f88d4f00836d35ec103bcd0b4e626fc274d9427dc3b4e38ebb4"
+    },
+    {
+      "source": "chrome-extension/manifest.json",
+      "sha256": "2ca3010678200f6ab741133c73ba9fa6ea7904829ef5317b7a2db12d67e622e6"
+    },
+    {
+      "source": "chrome-extension/popup.css",
+      "sha256": "995e8ec611ab64dca320321415486eb0287673dd4e2031315b8282040e2be2e4"
+    },
+    {
+      "source": "chrome-extension/popup.html",
+      "sha256": "fe2793072bfbb13b03d72d9f85a1f5c5b9e1c312ca67215d5c2d9699ef054a04"
+    },
+    {
+      "source": "chrome-extension/popup.js",
+      "sha256": "c851d48324fa21bb12039e9c0f6889ccb2804c71c62ba0f412c3ba71787694bb"
+    },
+    {
+      "source": "chrome-extension/service-worker.js",
+      "sha256": "720de5f576e33d23e25840429fcd05a8f35385fb1eb118f93fd231107f8ba656"
+    }
+  ],
+  "changes": [
+    "Restore missing extension assets from the existing Cmb implementation.",
+    "Align initial connection recovery with the checked-in alarm/backoff contract; retain bounded recovery after a successful connection.",
+    "Bound export count/chunk/total bytes, require the active protocol connection and normal profile, and remove placeholder support text."
+  ]
+}

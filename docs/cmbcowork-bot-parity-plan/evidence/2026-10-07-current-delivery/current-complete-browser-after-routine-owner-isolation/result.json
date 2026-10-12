@@ -1,0 +1,12 @@
+{
+  "phase": "actual-opening-metadata-output-original-full49-with-routine-read-owner-isolation",
+  "startedAt": "2026-10-07T09:02:08.372703+00:00",
+  "completedAt": "2026-10-07T09:15:55.155278+00:00",
+  "seconds": 826.782604750013,
+  "exitCode": 0,
+  "inputCount": 3834,
+  "sourceDrift": [],
+  "logSHA256": "25d936d2636064a5e7f57ec10bc037086141c532fc40df7518e76c1c3ee2fd8a",
+  "automaticRetries": 0,
+  "wrapperOverridesOriginalTimeouts": false
+}

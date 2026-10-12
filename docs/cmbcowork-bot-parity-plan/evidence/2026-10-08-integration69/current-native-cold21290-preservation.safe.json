@@ -1,0 +1,160 @@
+{
+  "kind": "independent-finite-owned-cold-start-preservation",
+  "verifiedAt": "2026-10-08T22:01:06.014157+00:00",
+  "testedBuildId": "21290c091a0ff1a60b0185fd",
+  "schemaVersion": 69,
+  "receipts": [
+    {
+      "name": "pins-live-before-stop-1791496110690731000.safe.json",
+      "sha256": "e9acd5895d11010487ca8dd107711ce4900560e7762032e7939d6f8962479d52"
+    },
+    {
+      "name": "pins-post-start-pre-review-1791496186941339000.safe.json",
+      "sha256": "2ed4e8dca355379796ace4a9c99896322aa1f9ad6cc1ba6fb476ed29ee06b4fd"
+    },
+    {
+      "name": "prepared.safe.json",
+      "sha256": "53b722ddb86cf1721cc359d38d8cd9a5d2626fb9a1f0f63d7e27214fb1704813"
+    },
+    {
+      "name": "launched.safe.json",
+      "sha256": "6cc7ceea66ad1a7d7fba160670fc9cefe7fd0e4df7deee5662bb6aa277d231db"
+    }
+  ],
+  "capturedBefore": {
+    "capturedAtUnixMs": 1791496110690,
+    "buildId": "dd51a8228a34bb7aab78438b",
+    "hostId": "1e745aeb-b952-4549-8ebf-c746d793241c",
+    "databaseReadOnly": true
+  },
+  "capturedAfter": {
+    "capturedAtUnixMs": 1791496186941,
+    "buildId": "21290c091a0ff1a60b0185fd",
+    "hostId": "7ef695e9-3066-418e-9a9d-96321c790061",
+    "databaseReadOnly": true
+  },
+  "scope": "Only the selected records and project captured by both immutable pins; not every row in the database or every file in the user home.",
+  "comparisonAlgorithm": "SHA256 of UTF8 JSON with sorted keys, compact separators, ensure_ascii=false; equality is also checked before hashing.",
+  "selectedRecords": {
+    "runs": {
+      "equal": true,
+      "beforeCount": 3,
+      "afterCount": 3,
+      "canonicalSha256": "6499c9a3bee22cfc1faad6c30f3ab0b2af6069c1e39f7a2315b62a7903ab4d4d"
+    },
+    "effects": {
+      "equal": true,
+      "beforeCount": 16,
+      "afterCount": 16,
+      "canonicalSha256": "a5ecbda124fce9856c5a8ee73e002f6dde38b565febc5ca94181ecb32db1d366"
+    },
+    "interactions": {
+      "equal": true,
+      "beforeCount": 24,
+      "afterCount": 24,
+      "canonicalSha256": "a0f519abe67380a0a120bd48d6dad836dad834b82ce27dd2a98664968fed852f"
+    },
+    "artifacts": {
+      "equal": true,
+      "beforeCount": 12,
+      "afterCount": 12,
+      "canonicalSha256": "3de231b8d8ac2171ff0dd71282dbb1f3ab40bdc168749242a168a7eccfade6f4"
+    },
+    "artifactObjects": {
+      "equal": true,
+      "beforeCount": 12,
+      "afterCount": 12,
+      "canonicalSha256": "d9593b5b2970503ce8d686ab5d534afcd93ad3129b344eaa76e6830df0f882b8"
+    },
+    "peerDispatch": {
+      "equal": true,
+      "beforeCount": 0,
+      "afterCount": 0,
+      "canonicalSha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
+    },
+    "peerWaits": {
+      "equal": true,
+      "beforeCount": 0,
+      "afterCount": 0,
+      "canonicalSha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
+    },
+    "checkpoints": {
+      "equal": true,
+      "beforeCount": 4,
+      "afterCount": 4,
+      "canonicalSha256": "eed03aa7188a35b6e25804d9f18c0cf26833a1ebcb28caaf349c4f7a36b539ee",
+      "groupCounts": {
+        "bot_graph_checkpoints": 12,
+        "bot_graph_message_snapshots": 129,
+        "bot_graph_writes": 14,
+        "bot_graph_message_heads": 12
+      }
+    },
+    "skills": {
+      "equal": true,
+      "beforeCount": 1,
+      "afterCount": 1,
+      "canonicalSha256": "56c2019737ce0488eaf11f16e7bf979d82802ff66dfe8bf98ef7bc2d872ea813"
+    },
+    "project": {
+      "equal": true,
+      "beforeCount": 10,
+      "afterCount": 10,
+      "canonicalSha256": "9060949b6f99e61365cc97c0cf8ddf75c37c4eeb9d561533a8ed4621fbabad05"
+    }
+  },
+  "checkpointPayloadBytesHashedInEachPin": 3956664,
+  "configurationBoundary": {
+    "otherFourCapturedConfigurationFingerprintsEqual": true,
+    "modelVaultCiphertextEqual": false,
+    "beforeModelVaultCiphertext": {
+      "bytes": 2652,
+      "sha256": "3ec8b31766a4b1ed4f929d2b445d433c2d5e5cb498ff4191b7c0d84fca7b5ca2"
+    },
+    "afterModelVaultCiphertext": {
+      "bytes": 2652,
+      "sha256": "d105d36884d8284fb1ed05a3a365e9c231df6a63e717a306f6c468facc88e57d"
+    },
+    "decryptedConfigurationRead": false,
+    "entireConfigurationByteEqualityClaimed": false,
+    "semanticModelConfigurationEqualityClaimed": false
+  },
+  "preparedBuild": {
+    "buildId": "21290c091a0ff1a60b0185fd",
+    "members": 183,
+    "sealSha256": "d19e302b54a9d6d2050391e2633b7f81089a1b824cb970fbffa2872f9dc58963",
+    "nativeDistribution": null
+  },
+  "preparedBuiltinSkillCount": 2,
+  "preparedBuiltinFileCount": 20,
+  "ownedLoginFixture": {
+    "relativePath": "out/renderer/assets/index-h36WOfsg.js",
+    "beforeSha256": "d9c0fb69b3e9792a243ca9d5c652010e970eb8811ee0f2b02446a911a6a573c7",
+    "afterSha256": "9431deb595dad39dbc9bc221131d1e8480f69c3eeb545438e141ec7aad6ff737",
+    "onlyOwnedCompiledCopy": true,
+    "productionAuthenticationSourceModified": false,
+    "officialInstallerByteIdentityClaimed": false
+  },
+  "launchBoundary": {
+    "tasksExplicitlySentByLauncher": false,
+    "queuedWorkMayDispatch": true,
+    "smoothUpgradeClaimed": false,
+    "historicalCancelledRunRecoveryPassed": false,
+    "privateCopyUsedSharedDependencies": true,
+    "formalInstallerAcceptanceClaimed": false,
+    "noNewUiActionsAtAfterPin": true,
+    "noNewUiActionsProvenance": "Root reported locked screen and no real UI action after launch at this capture."
+  },
+  "limits": [
+    "No production source is called current or frozen by this preservation receipt. The next shutdown guard build is separate.",
+    "No Windows operating-system installation or signal behavior is asserted.",
+    "No new real MiniMax, Grok comparison, complete Teach, full programming delivery, or full feature parity is asserted.",
+    "Historical erroneous cancelled programming run remains unchanged and needs an explicit user-authorized UI continuation; no silent cancellation rollback."
+  ],
+  "redaction": {
+    "personalAbsolutePathsIncluded": false,
+    "tokensOrConfigurationValuesIncluded": false,
+    "rawModelPayloadIncluded": false,
+    "privateDatabaseCopied": false
+  }
+}

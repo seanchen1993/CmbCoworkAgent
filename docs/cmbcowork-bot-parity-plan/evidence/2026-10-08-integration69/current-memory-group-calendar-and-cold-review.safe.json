@@ -1,0 +1,701 @@
+{
+  "kind": "actual-memory-update-group-delivery-calendar-and-cold-review",
+  "recordedAtUtc": "2026-10-09T14:10:13.177176+00:00",
+  "sourceDatabaseReadOnly": true,
+  "liveBuildId": "19bdae0f0bda83a4b039d426",
+  "hostId": "11b08ad1-ef13-4c58-8579-0d5988b5a33b",
+  "schema": 69,
+  "model": "MiniMax-M3",
+  "wholeCoreParityComplete": false,
+  "coldPreservation": {
+    "comparison": {
+      "kind": "group-current-cycle-cold-preservation",
+      "descriptor": {
+        "version": 1,
+        "pid": 63003,
+        "hostId": "11b08ad1-ef13-4c58-8579-0d5988b5a33b",
+        "buildId": "19bdae0f0bda83a4b039d426",
+        "socketPath": "/private/tmp/cmb-bot-501-4b987f56222e7e971f75407b/rpc.sock"
+      },
+      "selectedRuns": 31,
+      "checkpointPayloadBytesHashed": 10310127,
+      "logicalGroupsEqual": {
+        "runs": true,
+        "effects": true,
+        "interactions": true,
+        "artifacts": true,
+        "artifactObjects": true,
+        "peerDispatch": true,
+        "peerWaits": true,
+        "checkpoints": true,
+        "skills": true,
+        "project": true
+      },
+      "extraTablesEqual": {
+        "bot_memories": true,
+        "bot_memory_metadata": true,
+        "bot_model_usage": true,
+        "bot_group_cycles": true,
+        "bot_group_runs": true
+      },
+      "extraTables": {
+        "bot_memories": {
+          "rows": 6,
+          "bytes": 2750,
+          "sha256": "0f63bf48057da13ee6968674f76834022141b5dae04e505a10de9540d04ad1a7"
+        },
+        "bot_memory_metadata": {
+          "rows": 6,
+          "bytes": 1940,
+          "sha256": "8aa66c6058e1ae70a88faa07e77aa1232285822bc1dab9bfd0fc532c88f09362"
+        },
+        "bot_model_usage": {
+          "rows": 940,
+          "bytes": 346294,
+          "sha256": "2b2ac086c903a11e5ab70c339bd91e7c71cc7be4913583b0b36960faeb7ffc4a"
+        },
+        "bot_group_cycles": {
+          "rows": 2,
+          "bytes": 1191,
+          "sha256": "246f5a9dcfe40a2c6f09cd8b13a3b0dfcbf5d10a75bc49f6dbfa141d06b89736"
+        },
+        "bot_group_runs": {
+          "rows": 6,
+          "bytes": 691,
+          "sha256": "0ce1d4c38b39dfe4dbe345ad38fccf812939fd546014905f3c24068ba5ecba2d"
+        }
+      },
+      "beforeReceipt": "/Users/chenqiang/Library/Application Support/CMBDevClaw-development/2026-10-08/presentation/cold-upgrade-plan/pins-live-before-stop-1791553716911983000.safe.json",
+      "postReceipt": "/Users/chenqiang/Library/Application Support/CMBDevClaw-development/2026-10-08/presentation/cold-upgrade-plan/pins-post-start-pre-review-1791553881080476000.safe.json"
+    },
+    "receipts": [
+      {
+        "path": "/Users/chenqiang/Library/Application Support/CMBDevClaw-development/2026-10-08/presentation/cold-upgrade-plan/pins-live-before-stop-1791553716911983000.safe.json",
+        "sha256": "89e21b2fa1372850341f74bb13d1154754163e5ffd271ffe1d8b57e8fb0c2a11"
+      },
+      {
+        "path": "/Users/chenqiang/Library/Application Support/CMBDevClaw-development/2026-10-08/presentation/cold-upgrade-plan/pins-quiesced-before-start-1791553799634474000.safe.json",
+        "sha256": "663a91ff6bfeda4b0be8260c421dc748c3da8e0dfbe13f64b5676a32337bb6df"
+      },
+      {
+        "path": "/Users/chenqiang/Library/Application Support/CMBDevClaw-development/2026-10-08/presentation/cold-upgrade-plan/pins-post-start-pre-review-1791553881080476000.safe.json",
+        "sha256": "50332d3e63696e339c6ea281a72603463cc9ba564bc8be3b537c416d6bf982e4"
+      }
+    ],
+    "modelRuntimePathReplacementsOnly": 2,
+    "normalizedModelConfigMatched": true,
+    "otherFourConfigurationFilesUnchanged": true,
+    "notStandaloneInstaller": true
+  },
+  "formalMemorySamples": {
+    "memoryUpdate": {
+      "id": "0bf3eee9-51be-4e14-ad21-4f3d2db281d9",
+      "status": "succeeded",
+      "message_id": "de9010ae-3735-4a52-871e-9c24a2cee24a",
+      "result": "\n\n已更新蓝桥-314 项目偏好（原条目原地修改，revision 1 → 2，未新增重复记忆）：\n\n1. 测试项目代号：**蓝桥-314**（未改动）\n2. 工作摘要格式：**先写依据，再写结论**（已由「先写结论、再写依据」替换）\n3. 语言：**简体中文**（未改动）\n\n触发条件与其他项目偏好保持不变。",
+      "error": null,
+      "input": "把“蓝桥-314”的摘要偏好更新为：先写依据、再写结论，仍使用简体中文。替换原偏好，不要新增重复记忆或改其他项目。完成后简短说明更新后的内容。",
+      "resultSha256": "47fc5903721fe10192497a994287c361fc410eb140aff34002a086733fd9039c",
+      "modelRequests": 3,
+      "unknownRequests": 0,
+      "resultPresentationPassed": false,
+      "effectCount": 0
+    },
+    "updatedPreferenceUse": {
+      "id": "a3c5d96d-ac11-4704-a2b2-a9d884324121",
+      "status": "succeeded",
+      "message_id": "da67e06e-f221-4719-8256-f043847ca3c2",
+      "result": "\n\n已读取项目偏好（记忆 ID `62b23ea9-c2b2-4b14-b8d7-628348d47e67`，revision 2），未新增记忆。按「蓝桥-314」项目偏好输出工作摘要如下：\n\n---\n\n**【蓝桥-314】工作摘要**\n\n**依据**\n1. 检查执行情况：本日推进 3 项检查任务，均已执行完成。\n2. 问题识别情况：在上述 3 项检查范围内，发现 1 项与页面输入相关的问题。\n3. 后续安排：该问题已登记处理计划，安排在明天修复。\n\n**结论**\n- 今日共完成 3 项检查；\n- 其中发现 1 项页面输入问题；\n- 该问题计划明天修复。\n\n---\n\n备注：摘要严格依据用户提供的三项事实产出，未引入未经验证的额外信息；按项目偏好采用简体中文，并按「先写依据、再写结论」结构呈现。",
+      "error": null,
+      "input": "按项目偏好，写一段工作摘要：已完成3项检查，发现1项页面输入问题，计划明天修复。请先读取你已保存的项目偏好，不要新增记忆。",
+      "resultSha256": "e11d50ed29e4579fe5c5ec54e3ae506b279cadb88326ead29a7efc673bcecac8",
+      "modelRequests": 2,
+      "unknownRequests": 0,
+      "resultPresentationPassed": false,
+      "effectCount": 0
+    }
+  },
+  "currentPrivatePreference": {
+    "id": "62b23ea9-c2b2-4b14-b8d7-628348d47e67",
+    "revision": 2,
+    "source_message_id": "de9010ae-3735-4a52-871e-9c24a2cee24a",
+    "text": "项目偏好（适用于用户说「按项目偏好」时）：\n\n1. 测试项目代号：蓝桥-314\n2. 工作摘要格式：先写依据，再写结论\n3. 语言：使用简体中文\n\n触发条件：用户明确说「按项目偏好」时，必须按上述三条要求产出工作摘要。",
+    "deleted_at": null,
+    "privateProjectPreferenceRows": 1
+  },
+  "officialGrokMemoryComparison": {
+    "sameUpdateAndUseInputsSubmittedInOfficialClient": true,
+    "updateReply": "更新好了。现在“蓝桥-314”的摘要偏好是先写依据、再写结论，仍然用简体中文，你只说“按项目偏好”时就按这个来。旧的那条已经删掉，现在只剩这一条，别的项目都没动。",
+    "updatedUseReply": "依据：3 项检查已全部完成，其中 1 项发现了页面输入相关的问题，其余检查没有发现问题。结论：目前只有 1 项页面输入问题需要处理，计划明天修复。",
+    "officialInternalMemoryDeletionVerified": false,
+    "bothReplyQualityPassed": false,
+    "issues": [
+      "CMB exposes internal memory ID/revision and adds an unobserved registration claim",
+      "Grok adds unprovided results for other checks; do not reproduce that claim"
+    ]
+  },
+  "isolatedMemory": {
+    "receipt": {
+      "path": "/Users/chenqiang/Library/Application Support/CMBDevClaw-development/2026-10-08/presentation/memory-core-isolated-20261009-2008/result.safe.json",
+      "sha256": "4ee81e9b19ce10042d1e939caa722d7888687e89e4d186f912c16f74ce9d7d06"
+    },
+    "failureClass": null,
+    "sourceUnchanged": true,
+    "results": [
+      {
+        "kind": "save",
+        "runId": "654be9e9-186d-426d-8097-3da5fe61e3bb",
+        "status": "succeeded",
+        "result": "\n\n已保存到我的私有长期记忆（id: d0aa5934…，revision: 1）。\n\n**结论**：偏好已保存成功，后续你说\"按项目偏好\"时我会按此规则输出。\n\n**实际保存的内容**：\n- **触发条件**：指令中含\"按项目偏好\"\n- **适用范围**：仅限测试项目代号\"蓝桥-314\"\n- **两条规则**：\n  1. 工作摘要\"先写结论，再写依据\"\n  2. 使用简体中文\n- **scope**：私有记忆（仅本 Bot 可见，未写入共享或项目级记忆）",
+        "error": null,
+        "modelRequests": 2,
+        "unknownRequests": 0,
+        "effectStates": []
+      },
+      {
+        "kind": "read-use",
+        "runId": "48f66041-5f2c-4d7f-81f1-4583c1a5c73d",
+        "status": "succeeded",
+        "result": "\n\n**结论**：今日完成 3 项检查，发现 1 项页面输入问题，计划明日修复。\n\n**依据**：\n- **检查完成情况**：3 项检查均按计划完成（具体检查项内容未提供，按用户口述）。\n- **发现问题**：发现 1 项页面输入问题（具体页面/字段未提供，按用户口述）。\n- **后续计划**：计划明天修复该问题（具体修复方案待定）。\n\n**备注**：以上为按\"蓝桥-314\"项目偏好（先结论后依据、简体中文）撰写的摘要；三条要点中的具体细节（检查项名称、问题页面、修复方案）当前未在指令中给出，如需补全请告知。",
+        "error": null,
+        "modelRequests": 2,
+        "unknownRequests": 0,
+        "effectStates": []
+      },
+      {
+        "kind": "update",
+        "runId": "e8d45e17-fbfe-44ee-8607-c5a0638566a5",
+        "status": "succeeded",
+        "result": "\n\n**依据**：\n- 已读取原记忆，确认 id 为 `d0aa5934-666f-400b-b5fd-1b3291adaf7c`、revision 为 1、scope 为本 Bot 私有。\n- 已对该 id 原位调用更新，未新增重复条目，未触碰其他 Bot 或其他项目记忆。\n- 更新字段：仅将第 1 条规则由\"先写结论、再写依据\"改为\"先写依据、再写结论\"，并同步调整其解释句；第 2 条（简体中文）、第 3 条（触发条件\"按项目偏好\"）以及适用范围段落保持原样。\n- 更新后 revision 由 1 升为 2，记录时间戳已刷新。\n\n**结论**：已按要求在原记忆中替换摘要顺序偏好，scope 仍为私有，仅限\"蓝桥-314\"项目使用。",
+        "error": null,
+        "modelRequests": 3,
+        "unknownRequests": 0,
+        "effectStates": []
+      },
+      {
+        "kind": "durable-update-check",
+        "sameId": true,
+        "revisionAdvanced": true,
+        "privatePreferenceRows": 1,
+        "revisedText": "测试项目代号\"蓝桥-314\"工作偏好：\n1. 工作摘要须\"先写依据、再写结论\"——先给出依据、分析与细节，再给出结论或结果。\n2. 使用简体中文。\n3. 当用户指令中包含\"按项目偏好\"时，对该项目（蓝桥-314）相关输出应用上述两条要求。\n\n适用范围：仅限测试项目\"蓝桥-314\"相关任务。其他项目不受此偏好约束。"
+      },
+      {
+        "kind": "updated-use",
+        "runId": "c1ade068-5560-4dd5-ba83-892eddfaec9e",
+        "status": "succeeded",
+        "result": "\n\n**依据**：\n- 已读取\"蓝桥-314\"项目偏好记忆（id: d0aa5934…，revision: 2，scope: 私有），确认本摘要按\"先依据、后结论、简体中文\"规则撰写，未修改或新增记忆。\n- 检查完成情况：今日 3 项检查均已按计划完成（具体检查项名称未提供，按用户口述）。\n- 问题发现：发现 1 项页面输入问题（具体页面/字段未提供，按用户口述）。\n- 后续计划：计划明天进行修复（具体修复方案待定）。\n\n**结论**：今日完成 3 项检查、发现 1 项页面输入问题，计划明天修复。\n\n**备注**：3 项检查的具体名称、问题所在页面/字段以及明日修复方案，本次指令中未给出，如需补全请告知。",
+        "error": null,
+        "modelRequests": 2,
+        "unknownRequests": 0,
+        "effectStates": []
+      },
+      {
+        "kind": "isolation",
+        "runId": "e5201912-b93d-448a-ab3d-9486e89c5800",
+        "status": "succeeded",
+        "result": "\n\n未保存。\n\n- 自己的私有记忆中没有任何条目（memory_list 两次空查询均返回 `items: []`；系统提示中的 `recentFacts` 也为空、`otherCount` 为 0）。\n- 因此没有可汇报的项目代号，也没有可汇报的摘要偏好。",
+        "error": null,
+        "modelRequests": 3,
+        "unknownRequests": 0,
+        "effectStates": []
+      }
+    ],
+    "actualNativeUi": false,
+    "wholeCoreParityComplete": false
+  },
+  "isolatedCalendarAndEvent": {
+    "receipt": {
+      "path": "/Users/chenqiang/Library/Application Support/CMBDevClaw-development/2026-10-08/presentation/routine-event-isolated-20261009-2040/result.safe.json",
+      "sha256": "efd5af6c2993d9beff518fed8e1031d727691e621ecdc37df7d5913f57aa91ee"
+    },
+    "failureClass": null,
+    "sourceUnchanged": true,
+    "results": [
+      {
+        "kind": "calendar-save",
+        "runId": "5589a1f2-f6c0-485f-8840-95cf1215619c",
+        "status": "succeeded",
+        "result": "\n\n例程已保存为停用状态：\n- 名称：合成日历核验\n- 触发：每周三上午 9:00（Asia/Shanghai）\n- 输出：仅回复 `CORE_CALENDAR_PARITY_20261009`\n- 状态：暂停（未启用）\n\n未新增其他例程。需要启用时告诉我即可。",
+        "error": null,
+        "modelRequests": 2,
+        "unknownRequests": 0,
+        "effectStates": []
+      },
+      {
+        "kind": "calendar-create-check",
+        "count": 1,
+        "name": "合成日历核验",
+        "schedule": {
+          "kind": "cron",
+          "expression": "0 9 * * 3"
+        },
+        "timezone": "Asia/Shanghai",
+        "enabled": false,
+        "revision": 1
+      },
+      {
+        "kind": "calendar-edit",
+        "runId": "a3c80c3d-ac0a-40cb-835d-7aaee045ac7a",
+        "status": "succeeded",
+        "result": "\n\n例程已更新（同一例程，未新增）：\n\n- 名称：合成日历核验\n- 触发：每周四上午 10:00（Asia/Shanghai）\n- 输出原文：仅回复 `CORE_CALENDAR_PARITY_20261009`，不要添加其他内容。\n- 状态：保持停用",
+        "error": null,
+        "modelRequests": 4,
+        "unknownRequests": 0,
+        "effectStates": []
+      },
+      {
+        "kind": "calendar-edit-check",
+        "sameId": true,
+        "revisionAdvancedOnce": true,
+        "promptUnchanged": true,
+        "enabled": false,
+        "schedule": {
+          "kind": "cron",
+          "expression": "0 10 * * 4"
+        }
+      },
+      {
+        "kind": "event-save",
+        "runId": "31e765cc-4d77-401c-a163-23e0cef01ff8",
+        "status": "succeeded",
+        "result": "\n\n例程已创建（事件触发，未新增其他例程）：\n\n- 名称：合成事件核验\n- 触发：事件 topic = `synthetic.report.ready`\n- 时区：Asia/Shanghai\n- 启用状态：active（事件触发已启用）\n- 行为：收到事件时只使用事件数据中的 `ticketCount`，回复 `CORE_EVENT_PARITY_20261009:<ticketCount>`，不读取文件、不执行命令、不添加其他内容\n\n未立即运行，也未改动先前那条“合成日历核验”例程。",
+        "error": null,
+        "modelRequests": 2,
+        "unknownRequests": 0,
+        "effectStates": []
+      },
+      {
+        "kind": "event-create-check",
+        "count": 2,
+        "enabled": true,
+        "schedule": {
+          "kind": "event",
+          "topic": "synthetic.report.ready"
+        }
+      },
+      {
+        "kind": "automatic-event-result",
+        "runId": "c8c4a30c-7429-402f-bfcf-81ca34b5a455",
+        "status": "succeeded",
+        "result": "\n\nCORE_EVENT_PARITY_20261009:3",
+        "error": null,
+        "expectedReplyMatched": true,
+        "routineCountUnchanged": true,
+        "effectStates": [],
+        "modelRequests": 1,
+        "unknownRequests": 0,
+        "manualRunOnceUsed": false
+      },
+      {
+        "kind": "event-pause",
+        "runId": "73ad8530-8cd0-46ad-bc62-1cac3ae80c78",
+        "status": "succeeded",
+        "result": "\n\n已停用原例程“合成事件核验”（未删除，未新增其他例程）：\n\n- 名称：合成事件核验\n- 触发：事件 topic = `synthetic.report.ready`\n- 状态：paused（已停用）\n- 原文与 schedule 保留不变",
+        "error": null,
+        "modelRequests": 3,
+        "unknownRequests": 0,
+        "effectStates": []
+      },
+      {
+        "kind": "event-pause-check",
+        "sameId": true,
+        "enabled": false,
+        "routineCount": 2,
+        "newRunsAfterEvent": 0
+      }
+    ],
+    "actualNativeUi": false,
+    "wholeCoreParityComplete": false
+  },
+  "isolatedGroupCurrentCycle": {
+    "receipt": {
+      "path": "/Users/chenqiang/Library/Application Support/CMBDevClaw-development/2026-10-08/presentation/group-delivery-isolated-20261009-current-cycle-1791553456040/result.safe.json",
+      "sha256": "baddc01e947841fa9f21719b0b316db00c8eaef5dc1a654e18c1e0fc2672aa36"
+    },
+    "failureClass": null,
+    "sourceUnchanged": true,
+    "results": [
+      {
+        "kind": "identity",
+        "originalUserInput": "你是谁",
+        "cycleStatus": "completed",
+        "runs": [
+          {
+            "id": "acfcc9ec-c512-4695-9828-b676c4bf4c08",
+            "botId": "5b8af131-2da9-4873-b594-ac03831670d2",
+            "status": "succeeded",
+            "error": null,
+            "publicMessages": 1,
+            "passEvents": 0,
+            "repairReceipts": 0,
+            "modelRequests": 2,
+            "unknownRequests": 0,
+            "effectStates": []
+          },
+          {
+            "id": "32ea2d48-833f-49ee-afd9-e4a9de8fd1c4",
+            "botId": "b24c964e-9eb8-4c10-9f1c-bed012e9d5a9",
+            "status": "succeeded",
+            "error": null,
+            "publicMessages": 1,
+            "passEvents": 0,
+            "repairReceipts": 0,
+            "modelRequests": 2,
+            "unknownRequests": 0,
+            "effectStates": []
+          },
+          {
+            "id": "9f4aeb40-de93-4acd-8959-fd9825d1e8a2",
+            "botId": "eda88c78-0bd8-4b7a-9209-0b4bfced5de7",
+            "status": "succeeded",
+            "error": null,
+            "publicMessages": 1,
+            "passEvents": 0,
+            "repairReceipts": 0,
+            "modelRequests": 2,
+            "unknownRequests": 0,
+            "effectStates": []
+          },
+          {
+            "id": "974d952e-5eed-4846-a666-aa4a1867eaff",
+            "botId": "b24c964e-9eb8-4c10-9f1c-bed012e9d5a9",
+            "status": "succeeded",
+            "error": null,
+            "publicMessages": 0,
+            "passEvents": 1,
+            "repairReceipts": 0,
+            "modelRequests": 2,
+            "unknownRequests": 0,
+            "effectStates": []
+          },
+          {
+            "id": "07def720-ec1a-4137-97d7-828f148d94c6",
+            "botId": "eda88c78-0bd8-4b7a-9209-0b4bfced5de7",
+            "status": "succeeded",
+            "error": null,
+            "publicMessages": 0,
+            "passEvents": 1,
+            "repairReceipts": 0,
+            "modelRequests": 2,
+            "unknownRequests": 0,
+            "effectStates": []
+          },
+          {
+            "id": "7066f258-ae0c-46bf-93e2-c4d45f05e1e4",
+            "botId": "5b8af131-2da9-4873-b594-ac03831670d2",
+            "status": "succeeded",
+            "error": null,
+            "publicMessages": 0,
+            "passEvents": 1,
+            "repairReceipts": 0,
+            "modelRequests": 3,
+            "unknownRequests": 0,
+            "effectStates": []
+          }
+        ],
+        "publicReplies": [
+          {
+            "id": "a973b304-e5f2-4f4e-9a46-8cf5fe68834b",
+            "botId": "5b8af131-2da9-4873-b594-ac03831670d2",
+            "runId": "acfcc9ec-c512-4695-9828-b676c4bf4c08",
+            "text": "我是核心旅程核验，负责统筹跟进用户交办的目标，核对交付结果。请问有什么需要协助的？"
+          },
+          {
+            "id": "c3060fab-3738-40a4-9af0-9fcc38a248e1",
+            "botId": "b24c964e-9eb8-4c10-9f1c-bed012e9d5a9",
+            "runId": "32ea2d48-833f-49ee-afd9-e4a9de8fd1c4",
+            "text": "我是报价工具编程核验，负责项目报价工具代码层面的核验工作。请随时告知需要核验的内容。"
+          },
+          {
+            "id": "55a41c45-b65c-4607-8294-e7b80d573bf1",
+            "botId": "eda88c78-0bd8-4b7a-9209-0b4bfced5de7",
+            "runId": "9f4aeb40-de93-4acd-8959-fd9825d1e8a2",
+            "text": "我是月报示范核验，负责工单月报的生成与核验工作。如需月报相关协助，请随时告知。"
+          }
+        ],
+        "noPrivateMemoryDisclosed": true,
+        "allMembersReplied": true
+      },
+      {
+        "kind": "follow-up",
+        "originalUserInput": "？",
+        "cycleStatus": "completed",
+        "runs": [
+          {
+            "id": "ce235663-74db-4a42-89af-d88b90a2c0b3",
+            "botId": "5b8af131-2da9-4873-b594-ac03831670d2",
+            "status": "succeeded",
+            "error": null,
+            "publicMessages": 1,
+            "passEvents": 0,
+            "repairReceipts": 0,
+            "modelRequests": 2,
+            "unknownRequests": 0,
+            "effectStates": []
+          },
+          {
+            "id": "564b39de-dd9b-4eaf-883e-d657c56ad060",
+            "botId": "b24c964e-9eb8-4c10-9f1c-bed012e9d5a9",
+            "status": "succeeded",
+            "error": null,
+            "publicMessages": 0,
+            "passEvents": 1,
+            "repairReceipts": 0,
+            "modelRequests": 2,
+            "unknownRequests": 0,
+            "effectStates": []
+          },
+          {
+            "id": "304476b4-79cd-4212-b0e0-f017e06bf38e",
+            "botId": "eda88c78-0bd8-4b7a-9209-0b4bfced5de7",
+            "status": "succeeded",
+            "error": null,
+            "publicMessages": 0,
+            "passEvents": 1,
+            "repairReceipts": 0,
+            "modelRequests": 4,
+            "unknownRequests": 0,
+            "effectStates": []
+          },
+          {
+            "id": "b7e70854-048b-4b6f-9765-51e95e67b87a",
+            "botId": "b24c964e-9eb8-4c10-9f1c-bed012e9d5a9",
+            "status": "succeeded",
+            "error": null,
+            "publicMessages": 0,
+            "passEvents": 1,
+            "repairReceipts": 0,
+            "modelRequests": 2,
+            "unknownRequests": 0,
+            "effectStates": []
+          },
+          {
+            "id": "6b91a2d9-56b0-4cc3-a889-d5edf5f911fb",
+            "botId": "eda88c78-0bd8-4b7a-9209-0b4bfced5de7",
+            "status": "succeeded",
+            "error": null,
+            "publicMessages": 0,
+            "passEvents": 1,
+            "repairReceipts": 0,
+            "modelRequests": 2,
+            "unknownRequests": 0,
+            "effectStates": []
+          },
+          {
+            "id": "a77a1d05-1e42-4210-942e-9eca6aa02d01",
+            "botId": "5b8af131-2da9-4873-b594-ac03831670d2",
+            "status": "succeeded",
+            "error": null,
+            "publicMessages": 0,
+            "passEvents": 1,
+            "repairReceipts": 0,
+            "modelRequests": 2,
+            "unknownRequests": 0,
+            "effectStates": []
+          }
+        ],
+        "publicReplies": [
+          {
+            "id": "2fd2baa9-b38e-45f9-8332-d514a906cdc1",
+            "botId": "5b8af131-2da9-4873-b594-ac03831670d2",
+            "runId": "ce235663-74db-4a42-89af-d88b90a2c0b3",
+            "text": "收到，请问您具体需要哪方面的协助？是报价工具代码核验、工单月报生成，还是其他事项？"
+          }
+        ],
+        "noPrivateMemoryDisclosed": true,
+        "allMembersReplied": false
+      }
+    ],
+    "actualNativeUi": false,
+    "wholeCoreParityComplete": false
+  },
+  "groupFormalSameShortInputs": [
+    {
+      "id": "4b19f618-3065-43be-a20f-948216f04b7f",
+      "status": "completed",
+      "total_messages": 3,
+      "input": "你是谁",
+      "runs": [
+        {
+          "id": "7a5e15a6-c76b-44ca-99c6-662d4a54c264",
+          "bot_id": "4002cdce-8149-4dfc-9c4b-28abd67d30c1",
+          "status": "succeeded",
+          "error": null,
+          "sent_count": 1,
+          "explicitPasses": 0
+        },
+        {
+          "id": "4d89065a-f81f-456e-9d97-0921464bc504",
+          "bot_id": "924e1689-7b6d-411c-a429-28decb91b179",
+          "status": "succeeded",
+          "error": null,
+          "sent_count": 1,
+          "explicitPasses": 0
+        },
+        {
+          "id": "c73e377d-e89b-45f0-8456-2106488e0e76",
+          "bot_id": "e1d81813-1ff0-4fca-9948-d966e1a77189",
+          "status": "succeeded",
+          "error": null,
+          "sent_count": 1,
+          "explicitPasses": 0
+        },
+        {
+          "id": "0491a365-45c3-47c6-9cf1-c3139a31a1ea",
+          "bot_id": "924e1689-7b6d-411c-a429-28decb91b179",
+          "status": "succeeded",
+          "error": null,
+          "sent_count": 0,
+          "explicitPasses": 1
+        },
+        {
+          "id": "686661b9-f356-410f-9b40-ba95e3236d58",
+          "bot_id": "e1d81813-1ff0-4fca-9948-d966e1a77189",
+          "status": "succeeded",
+          "error": null,
+          "sent_count": 0,
+          "explicitPasses": 1
+        },
+        {
+          "id": "c40ebba6-ea19-4414-b113-8c98229b09a0",
+          "bot_id": "4002cdce-8149-4dfc-9c4b-28abd67d30c1",
+          "status": "succeeded",
+          "error": null,
+          "sent_count": 0,
+          "explicitPasses": 1
+        }
+      ],
+      "publicReplies": [
+        {
+          "bot_id": "4002cdce-8149-4dfc-9c4b-28abd67d30c1",
+          "text": "我是核心旅程核验，负责在用户交办的目标中统一跟进、协作已有 Bot 并核对交付结果。今天有什么我可以帮忙协调或核对的？"
+        },
+        {
+          "bot_id": "924e1689-7b6d-411c-a429-28decb91b179",
+          "text": "我是报价工具编程核验，负责在用户交办的报价工具相关编程任务中完成实现、读取真实文件与工具结果作为依据，并按群里的反馈核对交付。"
+        },
+        {
+          "bot_id": "e1d81813-1ff0-4fca-9948-d966e1a77189",
+          "text": "我是月报示范核验，负责在工单月报生成与核验任务中，基于工单原件按格式生成月报示范，并对其他 Bot 输出的月报进行对照核验，按差异给出修订建议。有什么需要协调的请直接说明。"
+        }
+      ],
+      "finiteInputPassed": true
+    },
+    {
+      "id": "f2fbcad5-0438-4fc9-b363-d0b4e7cbe3a5",
+      "status": "completed",
+      "total_messages": 0,
+      "input": "？",
+      "runs": [
+        {
+          "id": "76e50cdb-b7a8-4d84-86a2-d27edc788ea2",
+          "bot_id": "4002cdce-8149-4dfc-9c4b-28abd67d30c1",
+          "status": "succeeded",
+          "error": null,
+          "sent_count": 0,
+          "explicitPasses": 1
+        },
+        {
+          "id": "c34fe930-f602-43d8-aa8e-c28b2fa7ab56",
+          "bot_id": "924e1689-7b6d-411c-a429-28decb91b179",
+          "status": "succeeded",
+          "error": null,
+          "sent_count": 0,
+          "explicitPasses": 1
+        },
+        {
+          "id": "94c4bb14-a057-42fd-9c27-d60937dff9b7",
+          "bot_id": "e1d81813-1ff0-4fca-9948-d966e1a77189",
+          "status": "succeeded",
+          "error": null,
+          "sent_count": 0,
+          "explicitPasses": 1
+        }
+      ],
+      "publicReplies": [],
+      "finiteInputPassed": false
+    }
+  ],
+  "officialGrokGroupComparison": {
+    "actualOfficialClient": true,
+    "inputs": [
+      "你是谁",
+      "？"
+    ],
+    "botParticipants": 2,
+    "cmbBotParticipants": 3,
+    "sameParticipantFixture": false,
+    "identityReplies": [
+      "我是 New Bot，你的助手之一。在这个群里，我负责给出结果，新 Bot 负责核对。",
+      "我是新 Bot，也是你的助手之一。在这个群里，我负责核对 New Bot 给出的结果。"
+    ],
+    "followupReply": "我在这儿。刚才的核验已经完成，17+25 = 42，新 Bot 也确认无误。接下来想让我们做什么，直接说就行。",
+    "groupCoreJourneyAligned": false
+  },
+  "gates": {
+    "nearest": "4 files / 36 passed / 1 skipped",
+    "sdkGroupRuntime": "1 file / 10 passed / 313 deselected",
+    "nodeTypecheckExit": 0,
+    "strictLintExit": 0,
+    "productionBuildExit": 0,
+    "doNotSumOverlappingRuns": true,
+    "receipts": [
+      {
+        "path": "/tmp/cmb-group-current-cycle-nearest-final-20261009.log",
+        "sha256": "d7f5028ead61b5dca28af745e25c4aec40808eea2fc4c8161945ff33c7333f44"
+      },
+      {
+        "path": "/tmp/cmb-group-current-cycle-runtime-final-20261009.log",
+        "sha256": "1bc57dc6bff17e3ac046dab34e6537fe150f4f75b6f2c07e2f2d74d309ceceb3"
+      },
+      {
+        "path": "/tmp/cmb-group-current-cycle-node-final-20261009.log",
+        "sha256": "546c7bfd36ecac14793f941add6251c16a729819d1b744cccbaf256a91e1b42c"
+      },
+      {
+        "path": "/tmp/cmb-group-current-cycle-lint-final-20261009.log",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      {
+        "path": "/tmp/cmb-group-current-cycle-build-final-20261009.log",
+        "sha256": "f6ed8cb82c5cd0b56d63bde3149c740085117891fc5c8af58f5623b1d387e9fd"
+      },
+      {
+        "path": "/tmp/cmb-group-current-cycle-nearest-20261009.log",
+        "sha256": "565c1d092909d620088fe63677dc1b46a1d6eeaff9aa3dca8b637a929a8b31a3"
+      },
+      {
+        "path": "/tmp/cmb-group-current-cycle-nearest-followup-20261009.log",
+        "sha256": "432e5b3e1bf942b66cbcc7ba2a07f39705e825e377a1a3e5e5548335d89a10ca"
+      },
+      {
+        "path": "/tmp/cmb-group-nearest-completion-followup-20261009.log",
+        "sha256": "4a9cac3b9a7a7db2f68baa287ebcfdc2ebaf57118ee2301aa6fac235df9b9bbb"
+      }
+    ]
+  },
+  "unpromotedCurrentRequestPriorityCandidate": {
+    "file": "src/main/bots/group-store.ts",
+    "sha256": "e1e4166670ffaf7a3365b7289c9423e3739a60b8d93e47dca547269a86f8070b",
+    "change": "Place current-request delivery status after quoted old public replies; explicitly require an answer or clarification for an unanswered fresh short request",
+    "formalRetestPending": true
+  },
+  "retainedFailures": [
+    "Original live six group runs succeeded privately with zero public messages",
+    "Original reconstructed prompt-only and forced-choice probes failed or produced repeated introductions",
+    "Empty private final after a real group pass was misclassified; group-only final/recovery guards repaired without relaxing normal or child turns",
+    "Initial new cycle-context query referenced nonexistent bot_id in group table; owning tests rejected it; repaired with indexed join to bot_runs",
+    "New-request fixture tried to claim while prior discussion was still running; preserved drain rule and completed the original cycle first",
+    "Formal 19b follow-up question mark produced three explicit passes and no public answer, despite finite isolated success",
+    "A 64-run pin selection exceeded an existing read gate; retained bounds and reused prior 27 selected runs plus 4 new formal/user runs",
+    "CUA stale snapshots, input failure, ambiguous repeated bundle IDs and an accidentally opened then stopped dictation were observations; after reset the actual current renderer and identity replies were verified"
+  ],
+  "pending": [
+    "Formal follow-up group reply and collaborative work comparisons",
+    "Human-facing memory reply quality",
+    "Remaining scheduled/event/skill-state formal journeys",
+    "Full Grok UI/interaction comparison",
+    "Windows native general desktop implementation and machine acceptance",
+    "Final standalone installers and Linux/K8s deployment acceptance"
+  ]
+}

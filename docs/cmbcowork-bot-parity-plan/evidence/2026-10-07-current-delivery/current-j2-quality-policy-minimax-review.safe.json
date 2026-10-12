@@ -1,0 +1,98 @@
+{
+  "schemaVersion": 1,
+  "kind": "Root-J2-same-frozen-task-after-generic-delivery-policy-independent-review",
+  "reviewedAt": "2026-10-07T17:37:39.964690+00:00",
+  "formal": {
+    "path": "/Users/chenqiang/Desktop/projects/CmbCoworkAgent/docs/cmbcowork-bot-parity-plan/evidence/2026-10-07-current-delivery/current-j2-quality-policy-minimax-formal.safe.json",
+    "bytes": 21183,
+    "sha256": "002b3c0b2de71bb50517e067d80c6400e7912c5f58d558f74dd6ae8e025d8add"
+  },
+  "priorFormal": {
+    "path": "/Users/chenqiang/Desktop/projects/CmbCoworkAgent/docs/cmbcowork-bot-parity-plan/evidence/2026-10-07-current-delivery/current-j2-minimax-formal.safe.json",
+    "bytes": 20217,
+    "sha256": "293ddc7a541ef88bfd83e9488ecc199514097b016ef5cead2b2c558bdac6d6bf"
+  },
+  "sourceGate": {
+    "path": "/Users/chenqiang/Desktop/projects/CmbCoworkAgent/docs/cmbcowork-bot-parity-plan/evidence/2026-10-07-current-delivery/current-indexed-history-and-delivery-policy-source.safe.json",
+    "bytes": 6022,
+    "sha256": "5b5a3afded4276aff50ff86239f2cddd174f4c97eeae256588959bf09982687d"
+  },
+  "compiledBuildId": "a61f41784e20c7199366f8d6",
+  "databaseSchemaNotReadByOriginalRunner": true,
+  "actualUI": false,
+  "realModel": true,
+  "overallTaskPassed": false,
+  "mechanicalPassed": false,
+  "expectedInputUnchanged": true,
+  "sourceConfigurationUnchanged": true,
+  "expectedHeader": [
+    "project_id",
+    "amount万元"
+  ],
+  "actualHeader": [
+    "project_id",
+    "amount_wan"
+  ],
+  "csvCorrectValues": {
+    "P101": "12.40",
+    "P102": "8.55",
+    "P105": "-2.50",
+    "P106": "0.00"
+  },
+  "correctCount": 4,
+  "correctAmountWan": "18.45",
+  "draftExcessWan": "20.00",
+  "reportMaxVersionErrorCorrect": "3.00",
+  "draftCauseUnknown": true,
+  "failure": "Exact requested CSV field was not preserved, despite new generic format clause. No artifact rewrite or checker relaxation.",
+  "notableChange": "Report correctly states P101 old amount explains at most3.00 and P102 direction is opposite; unlike prior loose4.50 maximum. Single samples do not establish causal policy effect.",
+  "usage": {
+    "modelUsage": {
+      "requests": 6,
+      "unknownRequests": 0,
+      "inputTokens": 132245,
+      "outputTokens": 6651,
+      "reservedOutputTokens": 0,
+      "inputReportedRequests": 6,
+      "otherModelRequests": 0,
+      "models": [
+        {
+          "modelRef": "custom:minimax-m3",
+          "model": "MiniMax-M3",
+          "purpose": "task",
+          "requests": 6,
+          "unknownRequests": 0,
+          "inputTokens": 132245,
+          "outputTokens": 6651,
+          "inputReportedRequests": 6
+        }
+      ]
+    },
+    "modelBudget": {
+      "limit": 200000,
+      "consumed": 6651,
+      "reserved": 0,
+      "requests": 6
+    }
+  },
+  "cleanup": {
+    "cancelRequested": false,
+    "cancelSettled": false,
+    "idleShutdownAccepted": true,
+    "forcedTermination": false,
+    "processExited": true,
+    "exit": {
+      "code": 0,
+      "signal": null,
+      "spawnFailed": false
+    },
+    "privateCredentialSnapshotRemoved": true,
+    "transportClosed": true
+  },
+  "limits": [
+    "One new frozen-input sample, same original runner; no provider retries after failure or gold-answer injection.",
+    "Full generated report/CSV/final reply independently read; report/input artifacts stayed original identities.",
+    "No actualApp/Grok same-J2 comparison or quality equivalence inferred.",
+    "Need audit existing reusable output-format verification contract; free-form instruction adherence remains a failure."
+  ]
+}

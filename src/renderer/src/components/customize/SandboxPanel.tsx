@@ -1,3 +1,4 @@
+import { BotWindowsSandboxSetup } from "./BotWindowsSandboxSetup"
 import { useCallback, useEffect, useRef, useState } from "react"
 import {
   Shield,
@@ -279,6 +280,7 @@ export function SandboxPanel(): React.JSX.Element {
       await loadSettings()
     } catch (e) {
       console.error("[SandboxPanel] Failed to set failure fuse warning mode:", e)
+      toast.error("未能确认设置已生效，请重试")
       await loadSettings()
     } finally {
       if (mountedRef.current) setFailureFuseWarningPending(false)
@@ -293,6 +295,7 @@ export function SandboxPanel(): React.JSX.Element {
       await loadSettings()
     } catch (e) {
       console.error("[SandboxPanel] Failed to set failure fuse model feedback mode:", e)
+      toast.error("未能确认设置已生效，请重试")
       await loadSettings()
     } finally {
       if (mountedRef.current) setFailureFuseModelFeedbackPending(false)
@@ -307,6 +310,7 @@ export function SandboxPanel(): React.JSX.Element {
       await loadSettings()
     } catch (e) {
       console.error("[SandboxPanel] Failed to set failure fuse debug mode:", e)
+      toast.error("未能确认设置已生效，请重试")
       await loadSettings()
     } finally {
       if (mountedRef.current) setFailureFuseDebugPending(false)
@@ -330,6 +334,7 @@ export function SandboxPanel(): React.JSX.Element {
         onConfirm={() => void handleConfirmEnableYolo()}
       />
       <div className="w-full flex flex-col p-6 gap-8 overflow-y-auto">
+        {isWindows && <BotWindowsSandboxSetup />}
         {/* Yolo 模式 */}
         <div className="flex flex-col gap-4">
           <div className="flex items-center gap-2">
@@ -409,8 +414,8 @@ export function SandboxPanel(): React.JSX.Element {
             <Info className="size-4 mt-0.5 shrink-0" />
             <div className="space-y-1">
               <p>
-                重复失败提醒默认开启，只给用户弹出通知；Agent 防重试提示默认关闭，只把重复失败提示追加给模型；
-                这两个开关都不会停止本轮。
+                重复失败提醒默认开启，只给用户弹出通知；Agent
+                防重试提示默认关闭，只把重复失败提示追加给模型； 这两个开关都不会停止本轮。
               </p>
               <p className="text-xs text-blue-700/80 dark:text-blue-200/80">
                 Debug 首错即停是独立调试开关；开启后工具错误第 1 次就会停止本轮。也可在启动前设置
@@ -421,8 +426,7 @@ export function SandboxPanel(): React.JSX.Element {
                 <code className="mx-1 rounded bg-blue-500/10 px-1 font-mono">
                   CMB_AGENT_FAILURE_FUSE_WARN=0
                 </code>
-                控制用户提醒，
-                设置
+                控制用户提醒， 设置
                 <code className="mx-1 rounded bg-blue-500/10 px-1 font-mono">
                   CMB_AGENT_FAILURE_FUSE_MODEL_FEEDBACK=1
                 </code>
@@ -637,10 +641,7 @@ export function SandboxPanel(): React.JSX.Element {
                 <Info className="size-4 mt-0.5 shrink-0" />
                 <p>
                   当前默认关闭沙箱，命令会直接在当前用户权限下执行。需要隔离执行时，可手动切换到
-                  <strong>受限令牌沙箱</strong>
-                  或
-                  <strong>强隔离沙箱</strong>
-                  。
+                  <strong>受限令牌沙箱</strong>或<strong>强隔离沙箱</strong>。
                 </p>
               </div>
               {unlocked && (

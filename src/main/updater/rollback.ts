@@ -1,7 +1,15 @@
 import { bashLoggingHeader } from "./script-logging"
 import { updaterLog } from "./logger"
 import { app } from "electron"
-import { existsSync, readFileSync, renameSync, rmSync, statSync, unlinkSync, writeFileSync } from "fs"
+import {
+  existsSync,
+  readFileSync,
+  renameSync,
+  rmSync,
+  statSync,
+  unlinkSync,
+  writeFileSync
+} from "fs"
 import { basename, dirname, join, resolve } from "path"
 import {
   getBackupPath,
@@ -91,7 +99,10 @@ function shouldRetainForRollbackAttempt(attemptPath: string): boolean {
     updaterLog.warn("[Updater] Removed stale full rollback attempt marker:", attemptPath)
     return false
   } catch (e) {
-    updaterLog.warn("[Updater] Failed to inspect full rollback attempt marker; retaining backup:", e)
+    updaterLog.warn(
+      "[Updater] Failed to inspect full rollback attempt marker; retaining backup:",
+      e
+    )
     return true
   }
 }
@@ -136,6 +147,7 @@ export interface StartupCheckResult {
   updatedTo?: string
   updateType?: string
   retainedFullBackup?: boolean
+  rollbackError?: string
 }
 
 export async function runStartupSelfCheck(): Promise<StartupCheckResult> {
@@ -224,7 +236,11 @@ export async function runStartupSelfCheck(): Promise<StartupCheckResult> {
     clearPendingUpdateChain()
     cleanupBackups()
 
-    return { updatedFrom: marker.fromVersion, updatedTo: marker.toVersion, updateType: marker.updateType }
+    return {
+      updatedFrom: marker.fromVersion,
+      updatedTo: marker.toVersion,
+      updateType: marker.updateType
+    }
   }
 
   if (legacyIntermediateCandidate) {
@@ -251,9 +267,11 @@ export async function runStartupSelfCheck(): Promise<StartupCheckResult> {
       return {}
     }
 
-    clearPendingUpdateChain()
-    markFullRollbackAttempting(markerPath)
-    executeFullRollback(fullBackupDir)
+    try {
+      await executeFullRollback(fullBackupDir, () => markFullRollbackAttempting(markerPath))
+    } catch (error) {
+      return rollbackDeferred(error)
+    }
     return {}
   }
 
@@ -264,9 +282,20 @@ export async function runStartupSelfCheck(): Promise<StartupCheckResult> {
     return {}
   }
 
-  clearPendingUpdateChain()
-  executeRollback(backupPath)
+  try {
+    await executeRollback(backupPath)
+  } catch (error) {
+    return rollbackDeferred(error)
+  }
   return {}
+}
+
+function rollbackDeferred(error: unknown): StartupCheckResult {
+  // Still open the desktop: the user may need it to finish an approval or stop
+  // a background service before retrying. Keep the marker and backup intact.
+  const message = error instanceof Error ? error.message : "无法启动回退程序"
+  updaterLog.warn("[Updater] Automatic rollback deferred:", message)
+  return { rollbackError: message, retainedFullBackup: true }
 }
 
 /**
@@ -307,14 +336,20 @@ function cleanupStaleFullBackup(): void {
   }
 
   if (shouldRetainForRollbackAttempt(getRollbackAttemptMarkerPath())) {
-    updaterLog.log("[Updater] Retaining full backup because a rollback attempt marker exists:", fullBackupDir)
+    updaterLog.log(
+      "[Updater] Retaining full backup because a rollback attempt marker exists:",
+      fullBackupDir
+    )
     return
   }
 
   const cleanupState = readFullBackupCleanupState()
   if (cleanupState && cleanupState.state !== "ready") {
     if (shouldDiscardStaleFullBackupCleanupState(cleanupState)) {
-      updaterLog.log("[Updater] Full backup cleanup state expired; allowing backup cleanup:", fullBackupDir)
+      updaterLog.log(
+        "[Updater] Full backup cleanup state expired; allowing backup cleanup:",
+        fullBackupDir
+      )
     } else {
       updaterLog.log("[Updater] Retaining full backup until app is marked ready:", fullBackupDir)
       return
@@ -358,7 +393,11 @@ function writeFullBackupCleanupState(state: FullBackupCleanupState): void {
 function removeFullBackupCleanupState(): void {
   const statePath = getFullBackupCleanupStatePath()
   if (existsSync(statePath)) {
-    try { unlinkSync(statePath) } catch { /* ignore */ }
+    try {
+      unlinkSync(statePath)
+    } catch {
+      /* ignore */
+    }
   }
 }
 
@@ -373,12 +412,14 @@ function holdFullBackupCleanup(marker: UpdateMarker): void {
 }
 
 export function markFullBackupCleanupReady(startupResult: StartupCheckResult): void {
+  if (startupResult.rollbackError) return
   const state = readFullBackupCleanupState()
   if (!state || state.state !== "hold") {
     return
   }
 
-  const isCurrentFullSelfCheck = startupResult.updateType === "full" && startupResult.retainedFullBackup
+  const isCurrentFullSelfCheck =
+    startupResult.updateType === "full" && startupResult.retainedFullBackup
   const isRecoveredHoldFromPreviousBoot = state.toVersion === app.getVersion()
   if (!isCurrentFullSelfCheck && !isRecoveredHoldFromPreviousBoot) {
     return
@@ -905,7 +946,9 @@ function scheduleWindowsBackupCleanup(
     )
     const ps1Path = join(getUpdatesDir(), "cleanup-backups.ps1")
     writePowerShellScript(ps1Path, ps1Content)
-    launchDetachedPowerShellScript(ps1Path)
+    void launchDetachedPowerShellScript(ps1Path).catch((error) => {
+      updaterLog.warn("[Updater] Backup cleanup launch failed:", error)
+    })
     updaterLog.log("[Updater] Scheduled backup cleanup script:", ps1Path)
   } catch (e) {
     updaterLog.warn("[Updater] Failed to schedule backup cleanup:", e)
@@ -1030,15 +1073,12 @@ function scheduleLinuxBackupCleanup(
   includeAsarBackup: boolean
 ): void {
   try {
-    const shContent = generateCleanupBackupsSh(
-      appDir,
-      asarBackup,
-      fullBackupDir,
-      includeAsarBackup
-    )
+    const shContent = generateCleanupBackupsSh(appDir, asarBackup, fullBackupDir, includeAsarBackup)
     const shPath = join(getUpdatesDir(), "cleanup-backups.sh")
     writeBashScript(shPath, shContent)
-    launchDetachedBashScript(shPath)
+    void launchDetachedBashScript(shPath).catch((error) => {
+      updaterLog.warn("[Updater] Backup cleanup launch failed:", error)
+    })
     updaterLog.log("[Updater] Scheduled Linux backup cleanup script:", shPath)
   } catch (e) {
     updaterLog.warn("[Updater] Failed to schedule Linux backup cleanup:", e)
@@ -1048,39 +1088,48 @@ function scheduleLinuxBackupCleanup(
 /**
  * Execute a rollback by spawning a platform-specific script and quitting.
  */
-function executeFullRollback(fullBackupDir: string): void {
-  if (isWindows) {
-    const ps1Content = generateFullRollbackPs1(fullBackupDir)
-    const ps1Path = join(getUpdatesDir(), "full-rollback.ps1")
-    writePowerShellScript(ps1Path, ps1Content)
-    updaterLog.log("[Updater] Generated full-rollback.ps1, executing...")
-    launchDetachedPowerShellScript(ps1Path)
-  } else {
-    const shContent = generateFullRollbackSh(fullBackupDir)
-    const shPath = join(getUpdatesDir(), "full-rollback.sh")
-    writeBashScript(shPath, shContent)
-    updaterLog.log("[Updater] Generated full-rollback.sh, executing...")
-    launchDetachedBashScript(shPath)
-  }
+async function executeFullRollback(fullBackupDir: string, prepare?: () => void): Promise<void> {
+  const { withDesktopBotUpdate } = await import("../bots/desktop-client")
+  await withDesktopBotUpdate(async () => {
+    if (isWindows) {
+      const ps1Content = generateFullRollbackPs1(fullBackupDir)
+      const ps1Path = join(getUpdatesDir(), "full-rollback.ps1")
+      writePowerShellScript(ps1Path, ps1Content)
+      updaterLog.log("[Updater] Generated full-rollback.ps1, executing...")
+      await launchDetachedPowerShellScript(ps1Path)
+    } else {
+      const shContent = generateFullRollbackSh(fullBackupDir)
+      const shPath = join(getUpdatesDir(), "full-rollback.sh")
+      writeBashScript(shPath, shContent)
+      updaterLog.log("[Updater] Generated full-rollback.sh, executing...")
+      await launchDetachedBashScript(shPath)
+    }
 
+    prepare?.()
+    clearPendingUpdateChain()
+  })
   app.quit()
 }
 
-function executeRollback(backupAsarPath: string): void {
-  if (isWindows) {
-    const ps1Content = generateRollbackPs1(backupAsarPath)
-    const ps1Path = join(getUpdatesDir(), "rollback.ps1")
-    writePowerShellScript(ps1Path, ps1Content)
-    updaterLog.log("[Updater] Generated rollback.ps1, executing...")
-    launchDetachedPowerShellScript(ps1Path)
-  } else {
-    const shContent = generateRollbackSh(backupAsarPath)
-    const shPath = join(getUpdatesDir(), "rollback.sh")
-    writeBashScript(shPath, shContent)
-    updaterLog.log("[Updater] Generated rollback.sh, executing...")
-    launchDetachedBashScript(shPath)
-  }
+async function executeRollback(backupAsarPath: string): Promise<void> {
+  const { withDesktopBotUpdate } = await import("../bots/desktop-client")
+  await withDesktopBotUpdate(async () => {
+    if (isWindows) {
+      const ps1Content = generateRollbackPs1(backupAsarPath)
+      const ps1Path = join(getUpdatesDir(), "rollback.ps1")
+      writePowerShellScript(ps1Path, ps1Content)
+      updaterLog.log("[Updater] Generated rollback.ps1, executing...")
+      await launchDetachedPowerShellScript(ps1Path)
+    } else {
+      const shContent = generateRollbackSh(backupAsarPath)
+      const shPath = join(getUpdatesDir(), "rollback.sh")
+      writeBashScript(shPath, shContent)
+      updaterLog.log("[Updater] Generated rollback.sh, executing...")
+      await launchDetachedBashScript(shPath)
+    }
 
+    clearPendingUpdateChain()
+  })
   app.quit()
 }
 
@@ -1089,25 +1138,24 @@ function executeRollback(backupAsarPath: string): void {
  * Tries local backup first, then downloads from server if needed.
  */
 export async function rollbackToPrevious(baseUrl: string): Promise<void> {
-  clearPendingUpdateChain()
   const backupPath = getBackupPath()
   const fullBackupDir = getFullBackupDir()
 
   if (hasFullBackup() && fullBackupBelongsToCurrentVersionOrUnknown()) {
     updaterLog.log("[Updater] Rolling back using local full backup:", fullBackupDir)
-    executeFullRollback(fullBackupDir)
+    await executeFullRollback(fullBackupDir)
     return
   }
 
   if (existsSync(backupPath)) {
     updaterLog.log("[Updater] Rolling back using local backup:", backupPath)
-    executeRollback(backupPath)
+    await executeRollback(backupPath)
     return
   }
 
   if (hasFullBackup()) {
     updaterLog.log("[Updater] Rolling back using local full backup:", fullBackupDir)
-    executeFullRollback(fullBackupDir)
+    await executeFullRollback(fullBackupDir)
     return
   }
 
@@ -1127,7 +1175,7 @@ export async function rollbackToPrevious(baseUrl: string): Promise<void> {
     0
   )
 
-  executeRollback(downloadedPath)
+  await executeRollback(downloadedPath)
 }
 
 /**

@@ -1,12 +1,33 @@
-/* eslint-disable @typescript-eslint/no-require-imports, @typescript-eslint/explicit-function-return-type */
+/* eslint-disable @typescript-eslint/no-require-imports */
 const fs = require("fs")
 const path = require("path")
+const { execFile } = require("child_process")
+const { promisify } = require("util")
+const verifyNativeRelease = require("./bot-native-sandbox/verify-packaged.cjs")
 
 module.exports = async function (context) {
+  await verifyNativeRelease(context)
+  if (context && context.electronPlatformName === "darwin") {
+    const output = fs.realpathSync(context.appOutDir)
+    const product = context.packager.appInfo.productFilename
+    if (path.basename(product) !== product) throw new Error("Invalid application bundle name")
+    const bundle = path.join(output, product + ".app")
+    if (!fs.lstatSync(bundle).isDirectory() || fs.realpathSync(bundle) !== bundle)
+      throw new Error("Application bundle must be a directory inside the build output")
+    // Apple QA1940: metadata copied from source/cache files may invalidate
+    // codesigning. Clean only the newly built bundle, before builder signs it.
+    // https://developer.apple.com/library/archive/qa/qa1940/_index.html
+    await promisify(execFile)("/usr/bin/xattr", ["-cr", bundle], {
+      timeout: 120000
+    })
+    return
+  }
   try {
     const isLinux = process.platform === "linux" || process.env.FORCE_AFTER_PACK_LINUX === "1"
     if (!isLinux) {
-      console.log(`after-pack: not running because platform is ${process.platform} (only runs on 'linux')`)
+      console.log(
+        `after-pack: not running because platform is ${process.platform} (only runs on 'linux')`
+      )
       return
     }
 
@@ -16,8 +37,15 @@ module.exports = async function (context) {
       return
     }
 
-    const productName = (context && context.packager && context.packager.appInfo && context.packager.appInfo.productFilename) || "CMBDevClaw"
-    const packageJson = JSON.parse(fs.readFileSync(path.join(__dirname, "../package.json"), "utf-8"))
+    const productName =
+      (context &&
+        context.packager &&
+        context.packager.appInfo &&
+        context.packager.appInfo.productFilename) ||
+      "CMBDevClaw"
+    const packageJson = JSON.parse(
+      fs.readFileSync(path.join(__dirname, "../package.json"), "utf-8")
+    )
     const packageName = packageJson.name
     const launcherPath = path.join(appOutDir, productName)
     const packageBinPath = path.join(appOutDir, packageName)
@@ -28,11 +56,13 @@ module.exports = async function (context) {
         try {
           const magic = Buffer.alloc(4)
           const bytesRead = fs.readSync(fd, magic, 0, 4, 0)
-          return bytesRead === 4 &&
+          return (
+            bytesRead === 4 &&
             magic[0] === 0x7f &&
             magic[1] === 0x45 &&
             magic[2] === 0x4c &&
             magic[3] === 0x46
+          )
         } finally {
           fs.closeSync(fd)
         }
@@ -57,7 +87,9 @@ module.exports = async function (context) {
         fs.renameSync(launcherPath, packageBinPath)
         console.log(`after-pack: renamed ${productName} -> ${packageName}`)
       } else {
-        console.log("after-pack: no ELF binary found to rename; leaving existing launcher untouched")
+        console.log(
+          "after-pack: no ELF binary found to rename; leaving existing launcher untouched"
+        )
       }
     }
     if (fs.existsSync(packageBinPath)) {
@@ -80,7 +112,6 @@ exit 1
     fs.writeFileSync(launcherPath, wrapperContent, { mode: 0o755 })
     fs.chmodSync(launcherPath, 0o755)
     console.log(`after-pack: created no-sandbox wrapper as ${productName}`)
-
   } catch (e) {
     console.warn("after-pack: unexpected error", e && e.stack)
   }

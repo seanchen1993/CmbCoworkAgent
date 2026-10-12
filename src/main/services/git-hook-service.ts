@@ -399,19 +399,6 @@ async function resolveGitCommonDir(gitRoot: string): Promise<string> {
   return resolveGitPath(rawPath, gitRoot)
 }
 
-async function resolveHookPath(
-  gitRoot: string,
-  gitCommonDir: string,
-  hook: HookName
-): Promise<{ path: string; isGitInternal: boolean }> {
-  const rawPath = await runGit(gitRoot, ["rev-parse", "--git-path", `hooks/${hook}`])
-  const hookPath = resolveGitPath(rawPath, gitRoot)
-  return {
-    path: hookPath,
-    isGitInternal: isPathInsideOrSame(gitCommonDir, hookPath)
-  }
-}
-
 async function resolveGitContext(workspacePath: string): Promise<GitContext | null> {
   const workspace = workspacePath.trim()
   if (!workspace) return null
@@ -419,13 +406,19 @@ async function resolveGitContext(workspacePath: string): Promise<GitContext | nu
   try {
     const gitRoot = await runGit(workspace, ["rev-parse", "--show-toplevel"])
     const gitCommonDir = await resolveGitCommonDir(gitRoot)
-    const hookPaths = {} as Record<HookName, string>
-    let hasExternalHookPath = false
-    for (const hook of HOOK_NAMES) {
-      const resolved = await resolveHookPath(gitRoot, gitCommonDir, hook)
-      hookPaths[hook] = resolved.path
-      if (!resolved.isGitInternal) hasExternalHookPath = true
+    // Git resolves worktree sharing and core.hooksPath for the directory once.
+    // All managed hooks live in that directory; querying each filename spawns
+    // two extra Git processes per status check or installation context.
+    const hookDir = resolveGitPath(
+      await runGit(gitRoot, ["rev-parse", "--git-path", "hooks"]),
+      gitRoot
+    )
+    const hookPaths: Record<HookName, string> = {
+      "pre-commit": join(hookDir, "pre-commit"),
+      "post-commit": join(hookDir, "post-commit"),
+      "pre-push": join(hookDir, "pre-push")
     }
+    const hasExternalHookPath = !isPathInsideOrSame(gitCommonDir, hookDir)
     return { gitRoot, hookPaths, hasExternalHookPath }
   } catch {
     return null

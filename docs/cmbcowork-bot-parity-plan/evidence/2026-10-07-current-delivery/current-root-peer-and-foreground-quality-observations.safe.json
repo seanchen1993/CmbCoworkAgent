@@ -1,0 +1,56 @@
+{
+  "recordedAt": "2026-10-07T14:07:23.924024+00:00",
+  "kind": "actual-cua-root-peer-and-original-workbench-quality-observations",
+  "peer": {
+    "runId": "6ee9f377-cada-4d68-876d-2c5eb21223cb",
+    "actualVisibleFinal": true,
+    "sum": 80,
+    "mean": 20,
+    "draftSum": 82,
+    "draftOverstatement": 2,
+    "bothPeerAuthorsAndExchangeLinksVisible": true,
+    "rootOwnRequests": 3,
+    "peerOwnRequests": [
+      1,
+      1
+    ],
+    "consumedAutomaticReturnOwnRequests": 0,
+    "labelAmbiguityFixedInSourceNotLive": true,
+    "briefness": "final repeats two identical results across several sections; functional success does not prove optimal answer quality"
+  },
+  "oldWorkbench": {
+    "realModel": "MiniMax-M3",
+    "mode": "Solo",
+    "scope": "current existing foreground Harness, not an old binary",
+    "sourceFiles": [
+      {
+        "name": "project-records.csv",
+        "bytes": 279,
+        "sha256": "dbc20dad04f59df0d704601fdd6559ab33fd1722283496a2092215a387695ac8"
+      },
+      {
+        "name": "review-policy.txt",
+        "bytes": 537,
+        "sha256": "f8b581c7338cc60fa4b02adaa7a22a89465daf675c991856bf8114069d54da60"
+      }
+    ],
+    "sourceAccess": "workspace original copies; Bot comparison used attachment tools; access wrapper differs",
+    "oracleFileProvided": false,
+    "rootDeclinedShellBecauseOriginalTaskForbidsCommands": true,
+    "actualVisibleResult": {
+      "ids": [
+        "P101",
+        "P102",
+        "P105",
+        "P106"
+      ],
+      "count": 4,
+      "sumWan": 18.45,
+      "draftWan": 38.45,
+      "draftOverstatementWan": 20
+    },
+    "quality": "numbers correct; final speculates causal calculation from matching sum without source proof; original draft count is four while proposed hypothesis uses six projects; not accepted as causal proof",
+    "visibleReasoningLeak": true,
+    "overallParityClaimed": false
+  }
+}

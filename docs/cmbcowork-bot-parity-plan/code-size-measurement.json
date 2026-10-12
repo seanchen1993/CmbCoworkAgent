@@ -1,0 +1,137 @@
+{
+  "date": "2026-09-29",
+  "root": "/Users/chenqiang/Desktop/AI/grok-bot-0.18-reconstructed-main",
+  "metric": "physical lines, both total and nonblank; comments included",
+  "enumeration": "rg --files --hidden, excluding .git/node_modules/dist/.build/.cache/research-archives",
+  "extensions": [
+    ".c",
+    ".cc",
+    ".cjs",
+    ".cpp",
+    ".css",
+    ".h",
+    ".html",
+    ".js",
+    ".jsx",
+    ".mjs",
+    ".py",
+    ".rs",
+    ".scss",
+    ".sh",
+    ".sql",
+    ".swift",
+    ".ts",
+    ".tsx"
+  ],
+  "classification_priority": [
+    "*.d.ts => declarations",
+    "generated directory or *.gen.* / *.generated.* => generated",
+    "tests/test/__tests__/fixtures/__fixtures__ directory or *.test.* / *.spec.* => tests",
+    "source/ or frontend/src/ => runtime_source",
+    "remaining code files => build_and_support"
+  ],
+  "categories": {
+    "build_and_support": {
+      "files": 35,
+      "physical_lines": 7471,
+      "nonblank_lines": 7005
+    },
+    "tests": {
+      "files": 9,
+      "physical_lines": 603,
+      "nonblank_lines": 555
+    },
+    "runtime_source": {
+      "files": 1784,
+      "physical_lines": 225200,
+      "nonblank_lines": 210939
+    },
+    "declarations": {
+      "files": 3,
+      "physical_lines": 42,
+      "nonblank_lines": 37
+    },
+    "generated": {
+      "files": 241,
+      "physical_lines": 270413,
+      "nonblank_lines": 269597
+    }
+  },
+  "runtime_modules": {
+    "frontend/src": {
+      "files": 306,
+      "physical_lines": 54440,
+      "nonblank_lines": 50322
+    },
+    "source/box-exec-daemon": {
+      "files": 3,
+      "physical_lines": 537,
+      "nonblank_lines": 499
+    },
+    "source/electron-dev-controls": {
+      "files": 1,
+      "physical_lines": 167,
+      "nonblank_lines": 156
+    },
+    "source/electron-main": {
+      "files": 183,
+      "physical_lines": 16231,
+      "nonblank_lines": 15207
+    },
+    "source/electron-preload": {
+      "files": 16,
+      "physical_lines": 1622,
+      "nonblank_lines": 1514
+    },
+    "source/host": {
+      "files": 470,
+      "physical_lines": 64820,
+      "nonblank_lines": 61563
+    },
+    "source/internal": {
+      "files": 2,
+      "physical_lines": 426,
+      "nonblank_lines": 394
+    },
+    "source/local-exec-daemon": {
+      "files": 3,
+      "physical_lines": 514,
+      "nonblank_lines": 478
+    },
+    "source/node-agent-coordinator": {
+      "files": 24,
+      "physical_lines": 3386,
+      "nonblank_lines": 3106
+    },
+    "source/packages": {
+      "files": 614,
+      "physical_lines": 73454,
+      "nonblank_lines": 68666
+    },
+    "source/shared": {
+      "files": 162,
+      "physical_lines": 9603,
+      "nonblank_lines": 9034
+    }
+  },
+  "generated_named_files": [
+    {
+      "file": "source/shared/node/experiments/experiment-config.gen.ts",
+      "nonblank_lines": 6046
+    },
+    {
+      "file": "source/shared/observability/sentry-scrub.gen.ts",
+      "nonblank_lines": 501
+    },
+    {
+      "file": "source/host/extensions/extension-ids.generated.ts",
+      "nonblank_lines": 13
+    }
+  ],
+  "scope_note": "Local unofficial 0.18 reconstruction, not the full official Grok Bot source. Embedded common libraries remain included; external dependencies, packaged binaries and lockfiles are excluded.",
+  "total": {
+    "files": 2072,
+    "physical_lines": 503729,
+    "nonblank_lines": 488133
+  }
+}

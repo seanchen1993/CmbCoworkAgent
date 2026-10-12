@@ -50,11 +50,15 @@ jobs:
   # 下限的 tarball,但它还依赖 GITHUB_WORKSPACE 权限和 node_modules 缓存的路径
   # 假设,在 container 里不稳。手动下 tarball 最可控。
   rebuild-node-pty-linux:
-    name: Rebuild node-pty (manylinux_2_28 / glibc 2.28)
+    name: Build Linux native components (manylinux_2_28 / glibc 2.28)
+    timeout-minutes: 120
     runs-on: ubuntu-latest
     container:
       image: quay.io/pypa/manylinux_2_28_x86_64
       options: --user root
+    outputs:
+      native_manifest_sha256: ${{ steps.native.outputs.manifest_sha256 }}
+      native_archive_sha256: ${{ steps.native_archive.outputs.archive_sha256 }}
     steps:
       # 预防 git 2.35.2+ 的 "dubious ownership" 检查:容器内是 root,
       # 但 GHA mount 的 workspace 目录 owner 是宿主的 runner user,
@@ -284,6 +288,215 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
+      # The GNU V8 release uses hermetic LLVM 0.8.11 with default gnu.2.28.
+      # This is a viable build input, not ABI proof: every final ELF is checked.
+      - name: Checkout fixed native source
+        uses: actions/checkout@v4
+        with:
+          repository: openai/codex
+          ref: 954fa9057bf3a4521ea34dbd010ff291d5b39763
+          path: .bot-native-source
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Setup fixed Rust toolchain
+        uses: dtolnay/rust-toolchain@e081816240890017053eacbb1bdf337761dc5582
+        with:
+          toolchain: 1.95.0
+      - name: Install low-ABI Linux native build dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          dnf install -y pkgconf-pkg-config libcap-devel openssl-devel cmake clang
+          command -v objdump
+          gcc --version
+          cmake --version
+          # Build admission does not require userns/cgroup/sysctl changes.
+      - name: Verify fixed source and V8 release inputs
+        id: native_inputs
+        shell: bash
+        env:
+          CMB_NATIVE_RUST_TARGET: x86_64-unknown-linux-gnu
+        run: |
+          node --input-type=module <<'NODE'
+          import assert from 'node:assert/strict'
+          import { createHash } from 'node:crypto'
+          import { execFileSync } from 'node:child_process'
+          import { appendFile, mkdir, open, readFile, realpath } from 'node:fs/promises'
+          import { join, resolve } from 'node:path'
+          const revision = '954fa9057bf3a4521ea34dbd010ff291d5b39763'
+          const source = await realpath(resolve('.bot-native-source'))
+          assert.equal(execFileSync('git', ['rev-parse', 'HEAD'], { cwd: source, encoding: 'utf8' }).trim(), revision)
+          assert.equal(process.arch, 'x64', 'Only matching x64 release builders are configured')
+          const target = process.env.CMB_NATIVE_RUST_TARGET
+          assert.equal(target, process.platform === 'win32' ? 'x86_64-pc-windows-msvc' : process.platform === 'linux' ? 'x86_64-unknown-linux-gnu' : null)
+          const fixedText = path => execFileSync('git', ['show', `${revision}:${path}`], { cwd: source, encoding: 'utf8', maxBuffer: 4 * 1024 * 1024 })
+          const toolchain = fixedText('codex-rs/rust-toolchain.toml')
+          assert.match(toolchain, /^channel = "1\.95\.0"\r?$/m)
+          const lock = fixedText('codex-rs/Cargo.lock')
+          assert.match(lock.replace(/\r\n/g, "\n"), /\[\[package\]\]\nname = "v8"\nversion = "150\.4\.0"\n/)
+          const profile = 'ptrcomp_sandbox_release'
+          const archiveName = process.platform === 'win32' ? `rusty_v8_${profile}_${target}.lib.gz` : `librusty_v8_${profile}_${target}.a.gz`
+          const bindingName = `src_binding_${profile}_${target}.rs`
+          const checksumsName = `rusty_v8_${profile}_${target}.sha256`
+          const trusted = fixedText('third_party/v8/rusty_v8_150_4_0_release_manifests.sha256')
+          const expected = trusted.trim().split(/\r?\n/).filter(line => line.endsWith(`  ${checksumsName}`))
+          assert.equal(expected.length, 1, 'V8 target needs exactly one source-pinned checksum manifest')
+          assert.match(expected[0], /^[a-f0-9]{64}  [a-zA-Z0-9_.-]+$/)
+          const directory = join(await realpath(process.env.RUNNER_TEMP), 'cmb-native-v8')
+          await mkdir(directory, { mode: 0o700 })
+          const base = 'https://github.com/openai/codex/releases/download/rusty-v8-v150.4.0/'
+          async function download(name, hash, maximum) {
+            const response = await fetch(base + name, { signal: AbortSignal.timeout(600_000) })
+            assert.equal(response.ok, true, `V8 release download failed (${response.status})`)
+            assert.equal(new URL(response.url).protocol, 'https:')
+            assert.ok(response.body, 'V8 release response has no body')
+            const file = await open(join(directory, name), 'wx', 0o600)
+            const digest = createHash('sha256')
+            let size = 0
+            try {
+              for await (const part of response.body) {
+                size += part.length
+                assert.ok(size <= maximum, 'V8 release input exceeds its byte budget')
+                digest.update(part)
+                let offset = 0
+                while (offset < part.length) {
+                  const written = await file.write(part, offset, part.length - offset, null)
+                  assert.ok(written.bytesWritten > 0, 'V8 release write stalled')
+                  offset += written.bytesWritten
+                }
+              }
+              assert.ok(size > 0, 'V8 release input is empty')
+              assert.equal(digest.digest('hex'), hash, 'V8 release input checksum mismatch')
+              await file.sync()
+            } finally {
+              await file.close()
+            }
+          }
+          await download(checksumsName, expected[0].slice(0, 64), 4096)
+          const checksums = (await readFile(join(directory, checksumsName), 'utf8')).trim().split(/\r?\n/)
+          assert.equal(checksums.length, 2, 'V8 checksum manifest needs exactly two members')
+          const members = new Map()
+          for (const line of checksums) {
+            const match = /^([a-f0-9]{64}) [ *]([a-zA-Z0-9_.-]+)$/.exec(line)
+            assert.ok(match, 'Invalid V8 checksum entry')
+            assert.ok(!members.has(match[2]), 'Duplicate V8 checksum entry')
+            members.set(match[2], match[1])
+          }
+          assert.ok(members.has(archiveName) && members.has(bindingName), 'V8 manifest names differ from this exact target')
+          await download(archiveName, members.get(archiveName), 1024 * 1024 * 1024)
+          await download(bindingName, members.get(bindingName), 16 * 1024 * 1024)
+          const values = {
+            RUSTY_V8_ARCHIVE: join(directory, archiveName),
+            RUSTY_V8_SRC_BINDING_PATH: join(directory, bindingName),
+            STABLE_GIT_COMMIT: revision,
+            CARGO_NET_GIT_FETCH_WITH_CLI: 'true'
+          }
+          for (const [name, value] of Object.entries(values)) {
+            assert.ok(!/[\r\n\0]/.test(value), 'Invalid environment value')
+            await appendFile(process.env.GITHUB_ENV, `${name}=${value}\n`, 'utf8')
+          }
+          NODE
+      - name: Setup fixed native desktop compiler
+        if: runner.os == 'Windows'
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.401
+      - name: Build and seal native release inputs
+        id: native
+        shell: bash
+        run: |
+          node --import tsx --input-type=module <<'NODE'
+          import assert from 'node:assert/strict'
+          import { execFileSync } from 'node:child_process'
+          import { appendFile, readFile, realpath, writeFile } from 'node:fs/promises'
+          import { join, resolve } from 'node:path'
+          import { buildNativeSandboxPackage, REVISION } from './scripts/bot-native-sandbox/build-native-package.mjs'
+          import { prepareBotNativeDistribution } from './src/main/build/bot-native-distribution.ts'
+          import { verifyLinuxAbi } from './scripts/bot-native-sandbox/verify-linux-abi.mjs'
+          assert.equal(process.arch, 'x64')
+          assert.ok(['win32', 'linux'].includes(process.platform))
+          assert.match(execFileSync('rustc', ['--version'], { encoding: 'utf8' }), /^rustc 1\.95\.0 /)
+          const sourceCheckout = await realpath(resolve('.bot-native-source'))
+          const temporary = await realpath(process.env.RUNNER_TEMP)
+          const outputDirectory = join(temporary, `cmb-native-${process.platform}-${process.arch}`)
+          const repositoryLicense = await realpath(resolve('scripts/bot-native-sandbox/codex-fork/CMB-LICENSE'))
+          const license = await readFile(repositoryLicense, 'utf8')
+          assert.match(license, /^MIT License\r?\n/, 'CMB owner needs its current repository license')
+          if (process.platform === 'win32') process.env.LIBSQLITE3_FLAGS = 'SQLITE_DISABLE_INTRINSIC'
+          process.env.STABLE_GIT_COMMIT = REVISION
+          const csc = process.platform === 'win32'
+            ? await realpath(join(process.env.SystemRoot, 'Microsoft.NET/Framework64/v4.0.30319/csc.exe'))
+            : undefined
+          const rustTarget = process.env.CMB_NATIVE_RUST_TARGET
+          assert.equal(rustTarget, process.platform === 'win32' ? 'x86_64-pc-windows-msvc' : 'x86_64-unknown-linux-gnu')
+          const dotnet = process.platform === 'win32'
+            ? await realpath(execFileSync('where.exe', ['dotnet'], { encoding: 'utf8' }).trim().split(/\r?\n/)[0])
+            : undefined
+          const result = await buildNativeSandboxPackage({ sourceCheckout, outputDirectory, rustTarget, ...(csc ? { csc, dotnet, repositoryLicense } : {}) })
+          assert.equal(result.kernelAcceptance, 'not-tested')
+          assert.match(result.manifestSha256, /^[a-f0-9]{64}$/)
+          const values = {
+            CMB_BUILD_BOT_NATIVE_DIRECTORY: result.directory,
+            CMB_BUILD_BOT_NATIVE_MANIFEST_SHA256: result.manifestSha256,
+            CMB_BUILD_BOT_NATIVE_TARGET: `${process.platform}-${process.arch}`
+          }
+          const prepared = await prepareBotNativeDistribution(values)
+          assert.ok(prepared, 'A release must not fall back to a null native distribution')
+          await prepared.package.assertCurrent()
+          const abi = process.platform === 'linux' ? await verifyLinuxAbi({ directory: result.directory }) : null
+          const report = {
+            target: values.CMB_BUILD_BOT_NATIVE_TARGET,
+            revision: REVISION,
+            manifestSha256: result.manifestSha256,
+            kernelAcceptance: 'not-tested',
+            ...(abi ? { abi } : {})
+          }
+          await writeFile(join(temporary, 'cmb-native-build-report.json'), JSON.stringify(report, null, 2) + '\n', { flag: 'wx' })
+          await appendFile(process.env.GITHUB_OUTPUT, `manifest_sha256=${result.manifestSha256}\n`, 'utf8')
+          // Persist all three explicit pins for both electron-vite and afterPack.
+          for (const [name, value] of Object.entries(values)) {
+            assert.ok(value && !/[\r\n\0]/.test(value), 'Invalid release pin')
+            await appendFile(process.env.GITHUB_ENV, `${name}=${value}\n`, 'utf8')
+          }
+          const summary = `Native distribution ${report.target}: fixed source ${report.revision}, manifest ${report.manifestSha256}. Kernel acceptance: NOT TESTED; Windows setup and Linux delegated cgroup tests remain separate.\n`
+          await appendFile(process.env.GITHUB_STEP_SUMMARY, summary, 'utf8')
+          NODE
+        env:
+          CMB_NATIVE_RUST_TARGET: x86_64-unknown-linux-gnu
+      - name: Archive sealed manylinux native distribution
+        id: native_archive
+        shell: bash
+        run: |
+          node --input-type=module <<'NODE'
+          import assert from 'node:assert/strict'
+          import { createHash } from 'node:crypto'
+          import { execFileSync } from 'node:child_process'
+          import { createReadStream } from 'node:fs'
+          import { appendFile, realpath } from 'node:fs/promises'
+          import { join } from 'node:path'
+          const temporary = await realpath(process.env.RUNNER_TEMP)
+          const archive = join(temporary, 'cmb-native-linux-x64.tgz')
+          execFileSync('tar', ['-czf', archive, '-C', process.env.CMB_BUILD_BOT_NATIVE_DIRECTORY, '.'], { stdio: 'inherit' })
+          const hash = createHash('sha256')
+          let size = 0
+          for await (const bytes of createReadStream(archive)) { size += bytes.length; assert.ok(size <= 2 * 1024 ** 3, 'Native archive exceeds its budget'); hash.update(bytes) }
+          assert.ok(size > 0)
+          await appendFile(process.env.GITHUB_OUTPUT, 'archive_sha256=' + hash.digest('hex') + '\n', 'utf8')
+          NODE
+      - name: Upload sealed low-ABI Linux native distribution
+        uses: actions/upload-artifact@v4
+        with:
+          name: bot-native-linux-x64-glibc228
+          path: ${{ runner.temp }}/cmb-native-linux-x64.tgz
+          if-no-files-found: error
+          compression-level: 0
+      - name: Upload native compile and ABI evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: bot-native-linux-x64-build-report
+          path: ${{ runner.temp }}/cmb-native-build-report.json
+          if-no-files-found: error
+
   # ------------------------------------------------------------------
   # 主 build job:Windows 原生,Linux 在 ubuntu-latest 宿主上打 deb
   # ------------------------------------------------------------------
@@ -308,9 +521,11 @@ jobs:
           - os: windows-2022
             platform: win
             script: dist:win
+            rustTarget: x86_64-pc-windows-msvc
           - os: ubuntu-latest
             platform: linux
             script: dist
+            rustTarget: x86_64-unknown-linux-gnu
 
     runs-on: ${{ matrix.os }}
     name: Build (${{ matrix.platform }})
@@ -435,6 +650,89 @@ jobs:
             exit 1
           fi
 
+      - name: Build sealed Windows Bot native inputs
+        id: native
+        if: runner.os == 'Windows'
+        uses: ./.github/actions/build-bot-windows-native
+
+      - name: Download sealed manylinux native distribution
+        if: runner.os == 'Linux'
+        uses: actions/download-artifact@v4
+        with:
+          name: bot-native-linux-x64-glibc228
+          path: ${{ runner.temp }}/cmb-native-transfer
+
+      - name: Verify and import sealed low-ABI Linux native inputs
+        if: runner.os == 'Linux'
+        shell: bash
+        env:
+          CMB_NATIVE_ARCHIVE_SHA256: ${{ needs.rebuild-node-pty-linux.outputs.native_archive_sha256 }}
+          CMB_NATIVE_MANIFEST_SHA256: ${{ needs.rebuild-node-pty-linux.outputs.native_manifest_sha256 }}
+        run: |
+          node --import tsx --input-type=module <<'NODE'
+          import assert from 'node:assert/strict'
+          import { createHash } from 'node:crypto'
+          import { execFileSync } from 'node:child_process'
+          import { createReadStream } from 'node:fs'
+          import { appendFile, mkdir, realpath } from 'node:fs/promises'
+          import { join } from 'node:path'
+          import { prepareBotNativeDistribution } from './src/main/build/bot-native-distribution.ts'
+          import { verifyLinuxAbi } from './scripts/bot-native-sandbox/verify-linux-abi.mjs'
+          assert.equal(process.platform, 'linux')
+          assert.equal(process.arch, 'x64')
+          const temporary = await realpath(process.env.RUNNER_TEMP)
+          const manifestSha256 = process.env.CMB_NATIVE_MANIFEST_SHA256
+          const archiveSha256 = process.env.CMB_NATIVE_ARCHIVE_SHA256
+          assert.match(manifestSha256 ?? '', /^[a-f0-9]{64}$/)
+          assert.match(archiveSha256 ?? '', /^[a-f0-9]{64}$/)
+          const archive = join(temporary, 'cmb-native-transfer/cmb-native-linux-x64.tgz')
+          const hash = createHash('sha256')
+          let size = 0
+          for await (const bytes of createReadStream(archive)) { size += bytes.length; assert.ok(size <= 2 * 1024 ** 3, 'Native archive exceeds its budget'); hash.update(bytes) }
+          assert.ok(size > 0)
+          assert.equal(hash.digest('hex'), archiveSha256, 'Native transfer differs from independent producer pin')
+          const directory = join(temporary, 'cmb-native-imported-linux-x64')
+          await mkdir(directory, { mode: 0o700 })
+          execFileSync('tar', ['-xzf', archive, '-C', directory, '--no-same-owner'], { stdio: 'inherit' })
+          const values = {
+            CMB_BUILD_BOT_NATIVE_DIRECTORY: directory,
+            CMB_BUILD_BOT_NATIVE_MANIFEST_SHA256: manifestSha256,
+            CMB_BUILD_BOT_NATIVE_TARGET: 'linux-x64'
+          }
+          const prepared = await prepareBotNativeDistribution(values)
+          assert.ok(prepared, 'Linux release must not use a null native distribution')
+          await prepared.package.assertCurrent()
+          await verifyLinuxAbi({ directory })
+          for (const [name, value] of Object.entries(values)) {
+            assert.ok(value && !/[\r\n\0]/.test(value))
+            await appendFile(process.env.GITHUB_ENV, `${name}=${value}\n`, 'utf8')
+          }
+          NODE
+
+      - name: Preserve Electron Depends and declare native Linux libraries
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          node --input-type=module <<'NODE'
+          import assert from 'node:assert/strict'
+          import { createRequire } from 'node:module'
+          import { readFile, realpath, writeFile } from 'node:fs/promises'
+          import { join, resolve } from 'node:path'
+          import { verifyLinuxAbi } from './scripts/bot-native-sandbox/verify-linux-abi.mjs'
+          const require = createRequire(resolve('package.json'))
+          const { default: FpmTarget } = require('app-builder-lib/out/targets/FpmTarget.js')
+          const metadata = JSON.parse(await readFile('package.json', 'utf8'))
+          const configured = metadata.build.deb?.depends ?? metadata.build.linux?.depends
+          const original = configured == null ? FpmTarget.prototype.getDefaultDepends('deb') : typeof configured === 'string' ? [configured] : configured
+          assert.ok(Array.isArray(original) && original.every(value => typeof value === 'string' && value.trim()))
+          const abi = await verifyLinuxAbi({ directory: process.env.CMB_BUILD_BOT_NATIVE_DIRECTORY })
+          const depends = [...new Set([...original, ...abi.nativeDependencies])]
+          const configuration = { ...metadata.build, deb: { ...metadata.build.deb, depends } }
+          const temporary = await realpath(process.env.RUNNER_TEMP)
+          await writeFile(join(temporary, 'cmb-native-linux-builder.json'), JSON.stringify(configuration, null, 2) + '\n', { flag: 'wx' })
+          await writeFile(join(temporary, 'cmb-native-linux-depends.json'), JSON.stringify({ original, native: abi.nativeDependencies, depends }, null, 2) + '\n', { flag: 'wx' })
+          NODE
+
       - name: Build
         run: npm run build
 
@@ -454,7 +752,7 @@ jobs:
       - name: Package (Linux x64)
         if: matrix.platform == 'linux'
         run: |
-          npx electron-builder --linux deb --x64 --publish=never --config.npmRebuild=false
+          npx electron-builder --config "$RUNNER_TEMP/cmb-native-linux-builder.json" --linux deb --x64 --publish=never --config.npmRebuild=false
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
@@ -525,6 +823,57 @@ jobs:
           npx electron-builder --${{ matrix.platform }} --publish=never
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Verify final native and compiled package seals
+        shell: bash
+        run: |
+          node --import tsx --input-type=module <<'NODE'
+          import assert from 'node:assert/strict'
+          import { execFileSync } from 'node:child_process'
+          import { createRequire } from 'node:module'
+          import { readFile, readdir, realpath, writeFile } from 'node:fs/promises'
+          import { join, resolve } from 'node:path'
+          import { verifyLinuxAbi } from './scripts/bot-native-sandbox/verify-linux-abi.mjs'
+          import { prepareBotNativeDistribution } from './src/main/build/bot-native-distribution.ts'
+          assert.ok(['linux', 'win32'].includes(process.platform))
+          for (const name of ['CMB_BUILD_BOT_NATIVE_DIRECTORY', 'CMB_BUILD_BOT_NATIVE_MANIFEST_SHA256', 'CMB_BUILD_BOT_NATIVE_TARGET']) assert.ok(process.env[name], 'Native release pin is missing')
+          const require = createRequire(resolve('package.json'))
+          const verifyPackaged = require('./scripts/bot-native-sandbox/verify-packaged.cjs')
+          const native = await prepareBotNativeDistribution(process.env)
+          assert.ok(native, 'Installer release requires all three independent native pins')
+          const appOutDir = await realpath(resolve(process.platform === 'win32' ? 'dist/win-unpacked' : 'dist/linux-unpacked'))
+          await verifyPackaged({ appOutDir, electronPlatformName: process.platform, arch: 1 })
+          if (process.platform === 'linux') {
+            const nativeDirectory = join(appOutDir, 'resources/bot-native-sandbox/linux-x64')
+            const abi = await verifyLinuxAbi({ directory: appOutDir, nativeDirectory })
+            const temporary = await realpath(process.env.RUNNER_TEMP)
+            const expected = JSON.parse(await readFile(join(temporary, 'cmb-native-linux-depends.json'), 'utf8'))
+            assert.deepEqual(abi.nativeDependencies, expected.native, 'Packaged provider library requirements changed')
+            const debs = (await readdir('dist')).filter(name => name.endsWith('.deb'))
+            assert.equal(debs.length, 1, 'Expected one x64 Debian installer')
+            const actual = execFileSync('dpkg-deb', ['--field', join('dist', debs[0]), 'Depends'], { encoding: 'utf8', maxBuffer: 65536 }).trim().split(',').map(value => value.replace(/\s/g, ''))
+            for (const dependency of expected.depends) assert.ok(actual.includes(dependency.replace(/\s/g, '')), `Installer omits declared dependency: ${dependency}`)
+            await writeFile(join(temporary, 'cmb-native-packaged-linux-abi.json'), JSON.stringify(abi, null, 2) + '\n', { flag: 'wx' })
+          }
+          NODE
+
+      - name: Verify packaged Host recovery (Windows)
+        if: runner.os == 'Windows'
+        run: node tests/run-bot-packaged-host.mjs dist/win-unpacked
+
+      - name: Verify packaged Host recovery (Linux)
+        if: runner.os == 'Linux'
+        run: node tests/run-bot-packaged-host.mjs dist/linux-unpacked
+
+      - name: Upload native distribution verification evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: bot-native-${{ matrix.platform }}-package-evidence
+          path: |
+            ${{ runner.temp }}/cmb-native-build-report.json
+            ${{ runner.temp }}/cmb-native-linux-depends.json
+            ${{ runner.temp }}/cmb-native-packaged-linux-abi.json
+          if-no-files-found: error
 
       - name: Upload installer
         uses: actions/upload-artifact@v4

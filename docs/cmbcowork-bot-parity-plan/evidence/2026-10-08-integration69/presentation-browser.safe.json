@@ -1,0 +1,23 @@
+{
+  "boundary": "original React components with finite transport; real worker-independent layout/OOXML sources; not model/Office/native app acceptance",
+  "evidence": [
+    {
+      "theme": "light",
+      "threeSamples": true,
+      "exactTypedChoice": true,
+      "pageNavigation": true,
+      "originalDownloadEntry": true,
+      "blobCountAfterClose": 0,
+      "errors": []
+    },
+    {
+      "theme": "dark",
+      "threeSamples": true,
+      "exactTypedChoice": true,
+      "pageNavigation": true,
+      "originalDownloadEntry": true,
+      "blobCountAfterClose": 0,
+      "errors": []
+    }
+  ]
+}

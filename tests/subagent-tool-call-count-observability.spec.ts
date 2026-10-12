@@ -33,7 +33,7 @@ function assertNotIncludes(source: string, unexpected: string, message: string):
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const readSource = (relativePath: string): string =>
   readFileSync(join(__dirname, relativePath), "utf8").replace(/\r\n/g, "\n")
-const runtimeSource = readSource("../src/main/agent/runtime.ts")
+const runtimeSource = readSource("../src/main/agent/runtime.ts") + "\n" + readSource("../src/main/agent/deep-agent-core.ts")
 const workflowSubagentSource = readSource("../src/main/agent/workflow/subagent.ts")
 const traceCollectorSource = readSource("../src/main/agent/trace/collector.ts")
 const soloTaskTraceSource = readSource("../src/main/agent/trace/solo-task.ts")

@@ -1,0 +1,91 @@
+{
+  "format": 1,
+  "kind": "Root independent frozen J2 review after generic artifact field guidance; no repeated trial",
+  "reviewedAt": "2026-10-07T21:34:31.415823+00:00",
+  "formal": {
+    "path": "/Users/chenqiang/Desktop/projects/CmbCoworkAgent/docs/cmbcowork-bot-parity-plan/evidence/2026-10-07-current-delivery/current-j2-field-guidance67-minimax-formal.safe.json",
+    "bytes": 20511,
+    "sha256": "cf4ef08290d429537974a3fed91682b2fe256f7347724aef9863e72152014278"
+  },
+  "sameOriginalTask": true,
+  "inputTaskSha256": "0c6eb4b2b4b713cc474d8398ac79ce663b70d7240907ffbdbbee2b131e0ab2ed",
+  "actualBuildId": "3e1e9683fe548bf21c26dc86",
+  "actualOwnedDatabaseSchemaVersion": 67,
+  "originalsBothActuallyRead": true,
+  "originalBytesUnchanged": true,
+  "verdict": {
+    "taskTerminal": "succeeded",
+    "overallTaskQuality": "FAIL",
+    "CSVExactRequestedColumns": "FAIL",
+    "expectedHeader": [
+      "project_id",
+      "amount万元"
+    ],
+    "actualHeader": [
+      "project_id",
+      "amount_wan"
+    ],
+    "independentSelectedProjectValues": {
+      "P101": "12.40",
+      "P102": "8.55",
+      "P105": "-2.50",
+      "P106": "0.00"
+    },
+    "independentValueSumWan": "18.45",
+    "valueSelectionAndArithmetic": "PASS",
+    "negativeAndZeroRowsPreserved": true,
+    "markdownOriginalNamesAndSelectionGrounded": true,
+    "unsupportedSpecificCauseInvented": false,
+    "taskCompleteDoesNotMeanAccepted": true
+  },
+  "mechanicalReaderClarification": "csvSumHundredthsWan=0 is the existing missing-required-column calculation, not a claim that actual amount_wan values sum to zero. Root independently reads actual second column and verifies18.45 while retaining exact-header FAIL.",
+  "reportedUsage": {
+    "requests": 4,
+    "unknownRequests": 4,
+    "inputTokens": 0,
+    "outputTokens": 0,
+    "reservedOutputTokens": 32768,
+    "inputReportedRequests": 0,
+    "otherModelRequests": 0,
+    "models": [
+      {
+        "modelRef": "custom:minimax-m3",
+        "model": "MiniMax-M3",
+        "purpose": "task",
+        "requests": 4,
+        "unknownRequests": 4,
+        "inputTokens": 0,
+        "outputTokens": 0,
+        "inputReportedRequests": 0
+      }
+    ]
+  },
+  "usageInterpretation": "All4 requests unknown; reported0 input/output does not mean zero real usage or free execution. No price estimate.",
+  "cleanup": {
+    "cancelRequested": false,
+    "cancelSettled": false,
+    "idleShutdownAccepted": true,
+    "forcedTermination": false,
+    "processExited": true,
+    "exit": {
+      "code": 0,
+      "signal": null,
+      "spawnFailed": false
+    },
+    "privateCredentialSnapshotRemoved": true,
+    "transportClosed": true
+  },
+  "configurationAndBuildUnchanged": {
+    "sourceSnapshotUnchangedAfterTask": true,
+    "sourceDefaultUnchangedAfterTask": true,
+    "selectedModelUnchangedAfterTask": true,
+    "compiledBuildUnchangedAfterTask": true
+  },
+  "remaining": "Generic name/content guidance did not correct the repeated output-schema mismatch. Keep this gap open; no expected-file rewrite, oracle relaxation, or automatic repeat-until-pass.",
+  "limits": {
+    "singleFiniteSample": true,
+    "officialGrokSameTaskPass": false,
+    "actualAppUIAcceptance": false,
+    "wholeQualityGuarantee": false
+  }
+}

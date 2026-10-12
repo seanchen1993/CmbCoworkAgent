@@ -6,6 +6,7 @@
  */
 
 import { useAppStore, type WorkerFocusView } from "../src/renderer/src/lib/store.ts"
+import { botStartupPreferences } from "../src/renderer/src/lib/bot-startup-preferences.ts"
 
 function assert(condition: unknown, message: string): void {
   if (!condition) throw new Error(message)
@@ -120,6 +121,36 @@ async function testClaudeCodeMainViewClearsWorkerFocus(): Promise<void> {
   )
 }
 
+async function testStableWorkspacePreferenceFollowsNavigation(): Promise<void> {
+  const previous = Object.getOwnPropertyDescriptor(globalThis, "localStorage")
+  const values = new Map<string, string>()
+  Object.defineProperty(globalThis, "localStorage", {
+    configurable: true,
+    value: {
+      getItem: (key: string) => values.get(key) ?? null,
+      setItem: (key: string, value: string) => values.set(key, value)
+    }
+  })
+  try {
+    resetNavigationState()
+    useAppStore.getState().setMainView("bots")
+    assert(botStartupPreferences.mainView() === "bots", "Bot navigation should survive restart")
+    useAppStore.getState().setMainView("harness")
+    assert(
+      botStartupPreferences.mainView() === "bots",
+      "a temporary board must not replace Bot startup"
+    )
+    useAppStore.getState().setMainView("thread")
+    assert(
+      botStartupPreferences.mainView() === "thread",
+      "returning to tasks must preserve that choice"
+    )
+  } finally {
+    if (previous) Object.defineProperty(globalThis, "localStorage", previous)
+    else Reflect.deleteProperty(globalThis, "localStorage")
+  }
+}
+
 async function run(): Promise<void> {
   await testBrowserPanelOpenRequestUsesGlobalStore()
   console.log("PASS browser panel open request uses global store")
@@ -131,6 +162,8 @@ async function run(): Promise<void> {
   console.log("PASS harness board clears worker focus")
   await testClaudeCodeMainViewClearsWorkerFocus()
   console.log("PASS Claude Code main view clears worker focus")
+  await testStableWorkspacePreferenceFollowsNavigation()
+  console.log("PASS stable workspace preference follows navigation")
 }
 
 run().catch((error) => {

@@ -1,0 +1,22 @@
+{
+  "verifiedBy": "root",
+  "actualResult": {
+    "phase": "actual-current-shell-job-controls-formal-compiled-host-original9",
+    "startedAt": "2026-10-07T05:29:40.205232+00:00",
+    "completedAt": "2026-10-07T05:30:06.632625+00:00",
+    "seconds": 26.42741904198192,
+    "exitCode": 0,
+    "inputCount": 3834,
+    "sourceDrift": [],
+    "logSHA256": "8899a0e92bdb8ddfb7f1c38942206bda11e14adaf68648d39249cd89c1726695",
+    "automaticRetries": 0,
+    "wrapperOverridesOriginalTimeouts": false
+  },
+  "buildId": "aa183a16dd2d22fe8ad060e4",
+  "passed": 9,
+  "unselected": 55,
+  "actualCompiledSIGKILLResumeVerified": true,
+  "actualCompletedToolNotRepeated": true,
+  "inputScope": "original source plus 475 current compiled outputs",
+  "originalRunnerAssertionsAndTimeoutsUnchanged": true
+}

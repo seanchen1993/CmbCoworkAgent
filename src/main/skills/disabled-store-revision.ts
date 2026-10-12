@@ -1,3 +1,5 @@
+import { notifyRuntimeConfigurationChanged } from "../runtime-configuration-events"
+
 let revision = 0
 
 /**
@@ -14,6 +16,7 @@ export function getDisabledSkillStoreRevision(): number {
 
 export function bumpDisabledSkillStoreRevision(): number {
   revision += 1
+  notifyRuntimeConfigurationChanged()
   return revision
 }
 

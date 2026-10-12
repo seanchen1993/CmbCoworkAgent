@@ -1,0 +1,372 @@
+{
+  "kind": "native-minimax-cj02-original-files-f3d-observation",
+  "compiledOutput": "f3d5afe6873fe5f9de067041",
+  "runs": [
+    {
+      "id": "a30973a9-0eae-4795-9a61-93363e2e5d0e",
+      "bot_id": "4002cdce-8149-4dfc-9c4b-28abd67d30c1",
+      "conversation_id": "221b4a41-095a-4836-b7df-954a50e18798",
+      "parent_run_id": null,
+      "root_run_id": "a30973a9-0eae-4795-9a61-93363e2e5d0e",
+      "status": "succeeded",
+      "source": "group-member",
+      "created_at": 1791673885493,
+      "updated_at": 1791673900389
+    },
+    {
+      "id": "c2854ad1-7f20-4a22-858e-3db065eeef27",
+      "bot_id": "e1d81813-1ff0-4fca-9948-d966e1a77189",
+      "conversation_id": "039e6d50-8ecf-4337-8754-a9f67f97bb58",
+      "parent_run_id": "a30973a9-0eae-4795-9a61-93363e2e5d0e",
+      "root_run_id": "a30973a9-0eae-4795-9a61-93363e2e5d0e",
+      "status": "succeeded",
+      "source": "peer",
+      "created_at": 1791673897001,
+      "updated_at": 1791674008733
+    },
+    {
+      "id": "0b2f112a-cd77-413a-9878-48d0ac46b306",
+      "bot_id": "924e1689-7b6d-411c-a429-28decb91b179",
+      "conversation_id": "221b4a41-095a-4836-b7df-954a50e18798",
+      "parent_run_id": null,
+      "root_run_id": "0b2f112a-cd77-413a-9878-48d0ac46b306",
+      "status": "succeeded",
+      "source": "group-member",
+      "created_at": 1791673900582,
+      "updated_at": 1791673905960
+    },
+    {
+      "id": "673355e9-e5fc-45f2-aadb-7b77e0be7358",
+      "bot_id": "e1d81813-1ff0-4fca-9948-d966e1a77189",
+      "conversation_id": "221b4a41-095a-4836-b7df-954a50e18798",
+      "parent_run_id": null,
+      "root_run_id": "673355e9-e5fc-45f2-aadb-7b77e0be7358",
+      "status": "succeeded",
+      "source": "group-member",
+      "created_at": 1791673906584,
+      "updated_at": 1791674036820
+    },
+    {
+      "id": "318bd8b1-acdc-4895-931b-233cd98f4863",
+      "bot_id": "924e1689-7b6d-411c-a429-28decb91b179",
+      "conversation_id": "a5fb9b45-3b3c-475c-ae11-20f039e9ca0a",
+      "parent_run_id": "c2854ad1-7f20-4a22-858e-3db065eeef27",
+      "root_run_id": "a30973a9-0eae-4795-9a61-93363e2e5d0e",
+      "status": "succeeded",
+      "source": "peer",
+      "created_at": 1791673977276,
+      "updated_at": 1791674023417
+    },
+    {
+      "id": "4110aa5d-bfe2-4d5d-9bd7-2faca1e9bd93",
+      "bot_id": "4002cdce-8149-4dfc-9c4b-28abd67d30c1",
+      "conversation_id": "605d7439-67dd-48e8-a482-c3e988c39a76",
+      "parent_run_id": "c2854ad1-7f20-4a22-858e-3db065eeef27",
+      "root_run_id": "a30973a9-0eae-4795-9a61-93363e2e5d0e",
+      "status": "succeeded",
+      "source": "peer",
+      "created_at": 1791673998625,
+      "updated_at": 1791674012312
+    },
+    {
+      "id": "fc4338d5-7073-4c98-a378-c234c1fa3f0c",
+      "bot_id": "e1d81813-1ff0-4fca-9948-d966e1a77189",
+      "conversation_id": "039e6d50-8ecf-4337-8754-a9f67f97bb58",
+      "parent_run_id": "318bd8b1-acdc-4895-931b-233cd98f4863",
+      "root_run_id": "a30973a9-0eae-4795-9a61-93363e2e5d0e",
+      "status": "succeeded",
+      "source": "peer",
+      "created_at": 1791674021156,
+      "updated_at": 1791674042241
+    },
+    {
+      "id": "d6cb861b-d78c-4ad7-9998-1214780b0f90",
+      "bot_id": "924e1689-7b6d-411c-a429-28decb91b179",
+      "conversation_id": "a5fb9b45-3b3c-475c-ae11-20f039e9ca0a",
+      "parent_run_id": "673355e9-e5fc-45f2-aadb-7b77e0be7358",
+      "root_run_id": "673355e9-e5fc-45f2-aadb-7b77e0be7358",
+      "status": "succeeded",
+      "source": "peer",
+      "created_at": 1791674033149,
+      "updated_at": 1791674184549
+    },
+    {
+      "id": "af65e502-d602-4d8d-9e6f-ee0b097cddfe",
+      "bot_id": "924e1689-7b6d-411c-a429-28decb91b179",
+      "conversation_id": "221b4a41-095a-4836-b7df-954a50e18798",
+      "parent_run_id": null,
+      "root_run_id": "af65e502-d602-4d8d-9e6f-ee0b097cddfe",
+      "status": "succeeded",
+      "source": "group-member",
+      "created_at": 1791674038375,
+      "updated_at": 1791674211847
+    },
+    {
+      "id": "f3b084b1-2b22-4017-bbe0-38234bff8037",
+      "bot_id": "e1d81813-1ff0-4fca-9948-d966e1a77189",
+      "conversation_id": "039e6d50-8ecf-4337-8754-a9f67f97bb58",
+      "parent_run_id": "d6cb861b-d78c-4ad7-9998-1214780b0f90",
+      "root_run_id": "673355e9-e5fc-45f2-aadb-7b77e0be7358",
+      "status": "succeeded",
+      "source": "peer",
+      "created_at": 1791674179409,
+      "updated_at": 1791674186603
+    },
+    {
+      "id": "8b579d92-1a0f-4075-b102-f21118ec260e",
+      "bot_id": "e1d81813-1ff0-4fca-9948-d966e1a77189",
+      "conversation_id": "221b4a41-095a-4836-b7df-954a50e18798",
+      "parent_run_id": null,
+      "root_run_id": "8b579d92-1a0f-4075-b102-f21118ec260e",
+      "status": "succeeded",
+      "source": "group-member",
+      "created_at": 1791674212457,
+      "updated_at": 1791674218285
+    },
+    {
+      "id": "b9ef12a4-edba-4e1d-9a4b-9302f1dacb7a",
+      "bot_id": "4002cdce-8149-4dfc-9c4b-28abd67d30c1",
+      "conversation_id": "221b4a41-095a-4836-b7df-954a50e18798",
+      "parent_run_id": null,
+      "root_run_id": "b9ef12a4-edba-4e1d-9a4b-9302f1dacb7a",
+      "status": "waiting_input",
+      "source": "group-member",
+      "created_at": 1791674218457,
+      "updated_at": 1791674397753
+    }
+  ],
+  "usage": [
+    {
+      "model": "MiniMax-M3",
+      "purpose": "task",
+      "calls": 44,
+      "inputTokens": 1482433,
+      "outputTokens": 32716
+    }
+  ],
+  "artifacts": [
+    {
+      "id": "peer-file:6511d51d-e9bb-401e-951e-e2bdb9cf88fc:0",
+      "conversation_id": "039e6d50-8ecf-4337-8754-a9f67f97bb58",
+      "run_id": "c2854ad1-7f20-4a22-858e-3db065eeef27",
+      "name": "cj02-orders-synthetic.csv",
+      "mime": "text/csv",
+      "size": 367,
+      "sha256": "a4a5c538d811dc19afa214a10927572c45ebdd6572ac04e57006f0b1dd176abf",
+      "physicalBytesVerified": true
+    },
+    {
+      "id": "result:c2854ad1-7f20-4a22-858e-3db065eeef27:call_bG3gwc0SnWwoTLiBctW2niZt",
+      "conversation_id": "039e6d50-8ecf-4337-8754-a9f67f97bb58",
+      "run_id": "c2854ad1-7f20-4a22-858e-3db065eeef27",
+      "name": "result.csv",
+      "mime": "text/csv",
+      "size": 72,
+      "sha256": "80e4f213a9dcbea70ba193a510ca2a77faabcf61967f217a578e2284b646a28a",
+      "physicalBytesVerified": true,
+      "csvRows": [
+        {
+          "record_id": "P101",
+          "amount_cny": "1200.50"
+        },
+        {
+          "record_id": "P102",
+          "amount_cny": "2350.00"
+        },
+        {
+          "record_id": "P105",
+          "amount_cny": "700.25"
+        },
+        {
+          "record_id": "P106",
+          "amount_cny": "4500.00"
+        }
+      ]
+    },
+    {
+      "id": "peer-file:862fb0e8-6798-4b7f-9891-1d84d090db1d:0",
+      "conversation_id": "a5fb9b45-3b3c-475c-ae11-20f039e9ca0a",
+      "run_id": "318bd8b1-acdc-4895-931b-233cd98f4863",
+      "name": "cj02-orders-synthetic.csv",
+      "mime": "text/csv",
+      "size": 367,
+      "sha256": "a4a5c538d811dc19afa214a10927572c45ebdd6572ac04e57006f0b1dd176abf",
+      "physicalBytesVerified": true
+    },
+    {
+      "id": "peer-file:862fb0e8-6798-4b7f-9891-1d84d090db1d:1",
+      "conversation_id": "a5fb9b45-3b3c-475c-ae11-20f039e9ca0a",
+      "run_id": "318bd8b1-acdc-4895-931b-233cd98f4863",
+      "name": "result.csv",
+      "mime": "text/csv",
+      "size": 72,
+      "sha256": "80e4f213a9dcbea70ba193a510ca2a77faabcf61967f217a578e2284b646a28a",
+      "physicalBytesVerified": true,
+      "csvRows": [
+        {
+          "record_id": "P101",
+          "amount_cny": "1200.50"
+        },
+        {
+          "record_id": "P102",
+          "amount_cny": "2350.00"
+        },
+        {
+          "record_id": "P105",
+          "amount_cny": "700.25"
+        },
+        {
+          "record_id": "P106",
+          "amount_cny": "4500.00"
+        }
+      ]
+    },
+    {
+      "id": "result:673355e9-e5fc-45f2-aadb-7b77e0be7358:call_01a12817c97b754f82287cc5",
+      "conversation_id": "221b4a41-095a-4836-b7df-954a50e18798",
+      "run_id": "673355e9-e5fc-45f2-aadb-7b77e0be7358",
+      "name": "result.csv",
+      "mime": "text/csv",
+      "size": 71,
+      "sha256": "940d18c629a7cb1c0769af86566e825a849fc230e316fc467507f2fe48a4ab3e",
+      "physicalBytesVerified": true,
+      "csvRows": [
+        {
+          "record_id": "P101",
+          "amount_cny": "1200.50"
+        },
+        {
+          "record_id": "P102",
+          "amount_cny": "2350.00"
+        },
+        {
+          "record_id": "P105",
+          "amount_cny": "700.25"
+        },
+        {
+          "record_id": "P106",
+          "amount_cny": "4500.00"
+        }
+      ]
+    },
+    {
+      "id": "peer-file:9ff7cfac-e16b-4c1c-ba75-2d089d5d79a1:0",
+      "conversation_id": "a5fb9b45-3b3c-475c-ae11-20f039e9ca0a",
+      "run_id": "d6cb861b-d78c-4ad7-9998-1214780b0f90",
+      "name": "cj02-orders-synthetic.csv",
+      "mime": "text/csv",
+      "size": 367,
+      "sha256": "a4a5c538d811dc19afa214a10927572c45ebdd6572ac04e57006f0b1dd176abf",
+      "physicalBytesVerified": true
+    },
+    {
+      "id": "peer-file:9ff7cfac-e16b-4c1c-ba75-2d089d5d79a1:1",
+      "conversation_id": "a5fb9b45-3b3c-475c-ae11-20f039e9ca0a",
+      "run_id": "d6cb861b-d78c-4ad7-9998-1214780b0f90",
+      "name": "result.csv",
+      "mime": "text/csv",
+      "size": 71,
+      "sha256": "940d18c629a7cb1c0769af86566e825a849fc230e316fc467507f2fe48a4ab3e",
+      "physicalBytesVerified": true,
+      "csvRows": [
+        {
+          "record_id": "P101",
+          "amount_cny": "1200.50"
+        },
+        {
+          "record_id": "P102",
+          "amount_cny": "2350.00"
+        },
+        {
+          "record_id": "P105",
+          "amount_cny": "700.25"
+        },
+        {
+          "record_id": "P106",
+          "amount_cny": "4500.00"
+        }
+      ]
+    },
+    {
+      "id": "result:d6cb861b-d78c-4ad7-9998-1214780b0f90:call_8HxUTmmB8NsWuuFEOlOusUM5",
+      "conversation_id": "a5fb9b45-3b3c-475c-ae11-20f039e9ca0a",
+      "run_id": "d6cb861b-d78c-4ad7-9998-1214780b0f90",
+      "name": "review.md",
+      "mime": "text/markdown",
+      "size": 3215,
+      "sha256": "84e680d481cf8a55b09296ff94ff3c3cab6809c11057756fde20de8033c7c760",
+      "physicalBytesVerified": true,
+      "text": "# review.md — 阶段 B 月报示范数据核验\n\n## 一、输入材料\n\n### 原件：cj02-orders-synthetic.csv\n- 总行数 9（含表头第 1 行），数据行 8 条\n- 字段：record_id, status, amount_cny, updated_at\n- SHA-256：a4a5c538d811dc19afa214a10927572c45ebdd6572ac04e57006f0b1dd176abf\n\n### 输出：result.csv\n- 4 条数据（不含表头），按 record_id 升序\n- 字段：record_id, amount_cny（两位小数）\n- SHA-256：940d18c629a7cb1c0769af86566e825a849fc230e316fc467507f2fe48a4ab3e\n\n## 二、原件逐行映射（表头 = 第 1 行）\n\n| 行号 | record_id | status    | amount_cny | updated_at            | 处理结果         |\n|------|-----------|-----------|------------|-----------------------|------------------|\n| 1    | —         | —         | —          | —                     | 表头             |\n| 2    | P101      | approved  | 1200.50    | 2026-10-01T09:00:00   | 保留             |\n| 3    | P102      | approved  | 2300.00    | 2026-10-01T10:00:00   | 被去重（用第 5 行） |\n| 4    | P103      | draft     | 9999.00    | 2026-10-01T11:00:00   | 排除（draft）    |\n| 5    | P102      | approved  | 2350.00    | 2026-10-02T10:00:00   | 保留（最新）     |\n| 6    | P104      | cancelled | 888.00     | 2026-10-02T11:00:00   | 排除（cancelled）|\n| 7    | P105      | approved  | 700.25     | 2026-10-03T12:00:00   | 保留             |\n| 8    | P106      | approved  | 4500.00    | 2026-10-03T13:00:00   | 保留             |\n| 9    | P107      | draft     | 100.00     | 2026-10-03T14:00:00   | 排除（draft）    |\n\n## 三、去重依据\n\n按 record_id 保留 updated_at 最新的一条。\n\nP102 在原文件中出现两次：\n- 第 3 行：updated_at = 2026-10-01T10:00:00，amount = 2300.00\n- 第 5 行：updated_at = 2026-10-02T10:00:00，amount = 2350.00\n\n第 5 行 updated_at 较晚，最终保留 2350.00，来源行号 = 第 5 行。\n\n## 四、排除依据\n\nstatus 仅保留 approved，其余排除：\n- 第 4 行 P103：status = draft，排除\n- 第 6 行 P104：status = cancelled，排除\n- 第 9 行 P107：status = draft，排除\n\n第 3 行 P102 在去重阶段被第 5 行覆盖，等效未保留。\n\n## 五、保留明细\n\n| record_id | amount_cny | 原文件行号 |\n|-----------|------------|------------|\n| P101      | 1200.50    | 第 2 行    |\n| P102      | 2350.00    | 第 5 行    |\n| P105      | 700.25     | 第 7 行    |\n| P106      | 4500.00    | 第 8 行    |\n\n排序：按 record_id 升序（P101 < P102 < P105 < P106）。\n\n## 六、金额合计\n\n1200.50 + 2350.00 + 700.25 + 4500.00 = 8750.75\n\n## 七、与 result.csv 逐行核对\n\n| result.csv 行 | record_id | amount_cny | 对应原文件 | 核对 |\n|---------------|-----------|------------|------------|------|\n| 2             | P101      | 1200.50    | 第 2 行    | ✓    |\n| 3             | P102      | 2350.00    | 第 5 行    | ✓    |\n| 4             | P105      | 700.25     | 第 7 行    | ✓    |\n| 5             | P106      | 4500.00    | 第 8 行    | ✓    |\n\n金额均为两位小数；按 record_id 升序；保留记录全部来自原文件 approved 行且每条为该 record_id 下 updated_at 最新的一行。核验通过。\n"
+    },
+    {
+      "id": "result:af65e502-d602-4d8d-9e6f-ee0b097cddfe:chatcmpl-tool-93f38270a375d632",
+      "conversation_id": "221b4a41-095a-4836-b7df-954a50e18798",
+      "run_id": "af65e502-d602-4d8d-9e6f-ee0b097cddfe",
+      "name": "result.csv",
+      "mime": "text/csv",
+      "size": 72,
+      "sha256": "80e4f213a9dcbea70ba193a510ca2a77faabcf61967f217a578e2284b646a28a",
+      "physicalBytesVerified": true,
+      "csvRows": [
+        {
+          "record_id": "P101",
+          "amount_cny": "1200.50"
+        },
+        {
+          "record_id": "P102",
+          "amount_cny": "2350.00"
+        },
+        {
+          "record_id": "P105",
+          "amount_cny": "700.25"
+        },
+        {
+          "record_id": "P106",
+          "amount_cny": "4500.00"
+        }
+      ]
+    },
+    {
+      "id": "result:af65e502-d602-4d8d-9e6f-ee0b097cddfe:chatcmpl-tool-b22979fa67e4abd9",
+      "conversation_id": "221b4a41-095a-4836-b7df-954a50e18798",
+      "run_id": "af65e502-d602-4d8d-9e6f-ee0b097cddfe",
+      "name": "review.md",
+      "mime": "text/markdown",
+      "size": 2728,
+      "sha256": "198b125f83a6e1b20ad2763e3b016b281f55b4b8351d7af36f6b9201970c3da1",
+      "physicalBytesVerified": true,
+      "text": "# CJ02 原文件复核报告\n\n## 原文件\n- 文件名：cj02-orders-synthetic.csv\n- 大小：367 字节；SHA-256：a4a5c538d811dc19afa214a10927572c45ebdd6572ac04e57006f0b1dd176abf\n- 字段：record_id, status, amount_cny, updated_at\n- 行数：表头 1 行 + 数据 8 行（共 9 行）\n\n## 处理规则（按用户交办）\n1. 按 record_id 去重，保留 updated_at 最新的一行\n2. 仅保留 status=approved\n3. 按 record_id 升序\n4. 输出字段 record_id, amount_cny，金额保留两位小数\n\n## 逐行处理与排除依据\n\n| 原文件行号 | record_id | status    | amount_cny | updated_at          | 处理                           |\n|-----------|-----------|-----------|------------|---------------------|--------------------------------|\n| 1         | (表头)    | —         | —          | —                   | 表头，不计入                   |\n| 2         | P101      | approved  | 1200.50    | 2026-10-01T09:00:00 | 唯一记录，approved → 保留      |\n| 3         | P102      | approved  | 2300.00    | 2026-10-01T10:00:00 | 与第 5 行重复，取 updated_at 更新的第 5 行 |\n| 4         | P103      | draft     | 9999.00    | 2026-10-01T11:00:00 | status=draft → 排除            |\n| 5         | P102      | approved  | 2350.00    | 2026-10-02T10:00:00 | 重复组中 updated_at 最新 → 保留 |\n| 6         | P104      | cancelled | 888.00     | 2026-10-02T11:00:00 | status=cancelled → 排除        |\n| 7         | P105      | approved  | 700.25     | 2026-10-03T12:00:00 | 唯一记录，approved → 保留      |\n| 8         | P106      | approved  | 4500.00    | 2026-10-03T13:00:00 | 唯一记录，approved → 保留      |\n| 9         | P107      | draft     | 100.00     | 2026-10-03T14:00:00 | status=draft → 排除            |\n\n## 保留记录（原文件行号 / 表头为第 1 行）\n\n| 原文件行号 | record_id | amount_cny |\n|-----------|-----------|------------|\n| 2         | P101      | 1200.50    |\n| 5         | P102      | 2350.00    |\n| 7         | P105      | 700.25     |\n| 8         | P106      | 4500.00    |\n\n## 去重及排除依据\n- 重复：P102 出现在第 3 行和第 5 行；按 updated_at 取第 5 行（2026-10-02T10:00:00）作为最终保留行，第 3 行被覆盖。\n- 排除（status≠approved）：第 4 行 P103 (draft)、第 6 行 P104 (cancelled)、第 9 行 P107 (draft)。\n- 其余 record_id（P101、P105、P106）均仅出现一次且 status=approved，直接保留。\n\n## 总金额\n1200.50 + 2350.00 + 700.25 + 4500.00 = **8750.75**\n\n## 结论\nresult.csv 与规则一致，4 条保留记录、合计 8750.75 元，与本复核独立计算结果完全相符，可作为本轮 CJ02 协作测试的最终交付。\n"
+    }
+  ],
+  "coreParityComplete": false,
+  "remainingDifferences": [
+    "Private handoff followed by group turns duplicated production and dispatch",
+    "Private task cannot directly publish selected files to original group in this build",
+    "A requested repeated handoff after group final delivery; native approval rejected"
+  ],
+  "officialObserved": {
+    "product": "Grok Bot 0.68.1",
+    "promptSentLocal": "2026-10-11 07:11:40",
+    "finalGroupDeliveryLocal": "2026-10-11 07:13:06",
+    "resultCsvBytes": 77,
+    "reviewPreviewVerified": true,
+    "expectedSum": "8750.75",
+    "originalRows": [
+      2,
+      5,
+      7,
+      8
+    ]
+  },
+  "subsequentObservedGroupStop": {
+    "duplicateHandoffApprovalRejectedThroughNativeUI": true,
+    "discussionStopThroughNativeUI": true,
+    "run": {
+      "id": "b9ef12a4-edba-4e1d-9a4b-9302f1dacb7a",
+      "status": "cancelled",
+      "revision": 34,
+      "updated_at": 1791674466689
+    },
+    "replayedUnapprovedHandoff": false
+  }
+}

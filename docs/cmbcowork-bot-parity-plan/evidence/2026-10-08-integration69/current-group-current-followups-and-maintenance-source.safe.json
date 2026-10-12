@@ -1,0 +1,220 @@
+{
+  "capturedAtMs": 1791633824207,
+  "conversationId": "7f08d20f-73d8-4507-a26f-dfbc64d6529e",
+  "samples": [
+    {
+      "cycle": {
+        "id": "99c66cf4-216d-4157-85e7-4e1613133e60",
+        "round": 1,
+        "speaker_index": 0,
+        "total_messages": 1,
+        "status": "completed",
+        "created_at": 1791633718857,
+        "updated_at": 1791633738417
+      },
+      "runs": [
+        {
+          "id": "95e89640-a8f5-49b6-b3a4-973e7aa19e03",
+          "bot_id": "e1d81813-1ff0-4fca-9948-d966e1a77189",
+          "source": "group-member",
+          "status": "succeeded",
+          "created_at": 1791633729378,
+          "updated_at": 1791633738299
+        },
+        {
+          "id": "bc6dd7db-379c-417d-810f-eb496b610614",
+          "bot_id": "924e1689-7b6d-411c-a429-28decb91b179",
+          "source": "group-member",
+          "status": "succeeded",
+          "created_at": 1791633718858,
+          "updated_at": 1791633724908
+        },
+        {
+          "id": "e62bcb47-6e3c-4ec0-8240-6f75ed7ebc22",
+          "bot_id": "e1d81813-1ff0-4fca-9948-d966e1a77189",
+          "source": "group-member",
+          "status": "succeeded",
+          "created_at": 1791633725365,
+          "updated_at": 1791633728558
+        }
+      ],
+      "usage": [
+        {
+          "model": "MiniMax-M3",
+          "purpose": "task",
+          "calls": 5,
+          "settled": 5
+        }
+      ],
+      "effects": 0,
+      "messages": [
+        {
+          "sequence": 411,
+          "id": "99c66cf4-216d-4157-85e7-4e1613133e60",
+          "sender": "user",
+          "bot_id": null,
+          "run_id": null,
+          "created_at": 1791633718846,
+          "textLength": 1
+        },
+        {
+          "sequence": 412,
+          "id": "f87b2621-6e10-496a-915f-ef06a9b755cf",
+          "sender": "bot",
+          "bot_id": "924e1689-7b6d-411c-a429-28decb91b179",
+          "run_id": "bc6dd7db-379c-417d-810f-eb496b610614",
+          "created_at": 1791633723724,
+          "textLength": 37
+        }
+      ]
+    },
+    {
+      "cycle": {
+        "id": "accd55fa-875e-4b33-82fa-c2c00c166db1",
+        "round": 1,
+        "speaker_index": 0,
+        "total_messages": 1,
+        "status": "completed",
+        "created_at": 1791633527149,
+        "updated_at": 1791633557948
+      },
+      "runs": [
+        {
+          "id": "5f15f711-ba10-4a19-9173-2c7016cd15fd",
+          "bot_id": "924e1689-7b6d-411c-a429-28decb91b179",
+          "source": "group-member",
+          "status": "succeeded",
+          "created_at": 1791633552853,
+          "updated_at": 1791633557076
+        },
+        {
+          "id": "8155e952-3dd9-4474-ae0d-241b561622ac",
+          "bot_id": "924e1689-7b6d-411c-a429-28decb91b179",
+          "source": "group-member",
+          "status": "succeeded",
+          "created_at": 1791633527153,
+          "updated_at": 1791633544649
+        },
+        {
+          "id": "e80d990a-ccf4-4b5c-b6d7-00a31d60736c",
+          "bot_id": "e1d81813-1ff0-4fca-9948-d966e1a77189",
+          "source": "group-member",
+          "status": "succeeded",
+          "created_at": 1791633544826,
+          "updated_at": 1791633551968
+        }
+      ],
+      "usage": [
+        {
+          "model": "MiniMax-M3",
+          "purpose": "task",
+          "calls": 8,
+          "settled": 8
+        }
+      ],
+      "effects": 0,
+      "messages": [
+        {
+          "sequence": 409,
+          "id": "accd55fa-875e-4b33-82fa-c2c00c166db1",
+          "sender": "user",
+          "bot_id": null,
+          "run_id": null,
+          "created_at": 1791633527135,
+          "textLength": 9
+        },
+        {
+          "sequence": 410,
+          "id": "070b6759-85ae-4c6b-8429-7b2048461394",
+          "sender": "bot",
+          "bot_id": "e1d81813-1ff0-4fca-9948-d966e1a77189",
+          "run_id": "e80d990a-ccf4-4b5c-b6d7-00a31d60736c",
+          "created_at": 1791633550582,
+          "textLength": 40
+        }
+      ]
+    }
+  ],
+  "memoryFingerprintsOnly": {
+    "bot_memories": {
+      "rows": 9,
+      "bytes": 4377,
+      "sha256": "d21327c34521fcbe5989cc498c56aef9bda4f271be075fdb07d143c68982f948",
+      "equalBeforeGroupTest": true
+    },
+    "bot_memory_metadata": {
+      "rows": 9,
+      "bytes": 3035,
+      "sha256": "18da05afcb1fccbff92a82fd985a2af6b702780502ed4989a22e15e8a3cdc5cf",
+      "equalBeforeGroupTest": true
+    }
+  },
+  "noCheckpointOrPrivateResultsPrinted": true,
+  "kind": "current-group-followups-and-maintenance-notice-source",
+  "recordedAt": "2026-10-10T12:05:19.433459+00:00",
+  "nativeBuildId": "1ed8ff0ded9d41074a49c3a1",
+  "compiledOutputIdentity": "fcfc3da8d8d96fe448a50df7",
+  "schema": 72,
+  "model": "MiniMax-M3",
+  "officialComparison": {
+    "source": "official native Grok app; direct official service",
+    "naturalFollowup": {
+      "prompt": "刚才的核对结果呢？",
+      "publicReplies": [
+        "核对结果出来了：我算出 419 + 68 = 487，新 Bot 核对后确认正确。",
+        "我的核对结果：419+68 = 487，正确。"
+      ],
+      "count": 2
+    },
+    "bareQuestion": {
+      "prompt": "？",
+      "publicReplies": [
+        "这一题已经结束：419 + 68 = 487，新 Bot 核对后确认正确。要是哪里看着不对，或者想出下一题，直接说就行。"
+      ],
+      "count": 1
+    },
+    "rawProviderTimingAndUsageNotObserved": true,
+    "existingOtherChatDraftPreserved": true
+  },
+  "cmbNativePublicReplies": {
+    "naturalFollowup": {
+      "prompt": "刚才的核对结果呢？",
+      "publicReplies": [
+        "上一轮独立计算 419+68=487，@报价工具编程核验 已核对一致，结果通过。"
+      ],
+      "count": 1
+    },
+    "bareQuestion": {
+      "prompt": "？",
+      "publicReplies": [
+        "独立核对：419+68=487，与 @月报示范核验 的计算一致，结果通过。"
+      ],
+      "count": 1
+    }
+  },
+  "criteria": {
+    "latest419Plus68Result": true,
+    "noOld333OrSelectedSkillClaimInNewReplies": true,
+    "oneBareQuestionReplyBothApps": true,
+    "naturalFollowupCountDiffersWithoutUserCountConstraint": true,
+    "literalWordingAndSpeakerIdentityNotIdentical": true,
+    "boundedNaturalCompletion": true,
+    "finiteSamplePassed": true,
+    "allGroupWorkloadsOrWholeCoreParityClaimed": false
+  },
+  "maintenanceNotice": {
+    "originalObserved": "memory error compact summary falsely says task incomplete",
+    "transportFailureCallId": "1871faa7-63ba-45cf-83b3-a8d988e418e6",
+    "retryCallId": "4abac6b5-18bd-4c7a-8fe7-4da71172630a",
+    "retrySucceededAndMemoryNoWork": true,
+    "taskActuallySucceeded": true,
+    "sourceFix": "typed error source summary reuses existing HTTP/network labels and notice component",
+    "unitPass": 17,
+    "actualIsolatedReactChromeSqlitePassed": true,
+    "webTypesPassed": true,
+    "strictLintPassed": true,
+    "nativeFixNotYetInstalled": true
+  },
+  "coreParityComplete": false,
+  "nativeDistribution": null
+}

@@ -1,0 +1,73 @@
+{
+  "kind": "J7 finite original/context check, exact exited owned roots",
+  "buildId": "18eb3cb377377989a66c0b28",
+  "schemaVersion": 66,
+  "runs": [
+    {
+      "runId": "07182977-0f4b-468f-a9cf-5236aeb8f23d",
+      "botId": "5c96fd0f-7dcf-4ab6-8db3-622be488a507",
+      "initialGroupEnvelopeSHA256": "6795a64ddbf7c505e4fc29aca0871e1aad195cd0718bd8910667897f6d664131",
+      "initialEnvelopeContainsOriginalExactTask": true,
+      "summarizationEventPresent": false,
+      "summarizationSessionIdPresent": false,
+      "readTools": [
+        {
+          "fileId": "5f219a8f-260e-41ba-823a-0c05d2b7c4d3",
+          "name": "review-policy.txt",
+          "offset": 0,
+          "characters": 197,
+          "totalCharacters": 197,
+          "hasMore": false,
+          "returnedTextUTF8SHA256": "f8b581c7338cc60fa4b02adaa7a22a89465daf675c991856bf8114069d54da60",
+          "originalByteSHA256": "f8b581c7338cc60fa4b02adaa7a22a89465daf675c991856bf8114069d54da60",
+          "returnedTextExactlyMatchesOriginalBytes": true
+        },
+        {
+          "fileId": "f1469765-0d3b-46dd-b538-45011ad4823f",
+          "name": "project-records.csv",
+          "offset": 0,
+          "characters": 199,
+          "totalCharacters": 199,
+          "hasMore": false,
+          "returnedTextUTF8SHA256": "dbc20dad04f59df0d704601fdd6559ab33fd1722283496a2092215a387695ac8",
+          "originalByteSHA256": "dbc20dad04f59df0d704601fdd6559ab33fd1722283496a2092215a387695ac8",
+          "returnedTextExactlyMatchesOriginalBytes": true
+        }
+      ]
+    },
+    {
+      "runId": "b7bab4e3-679f-4f73-b021-82516e387575",
+      "botId": "dc9aa569-9a3d-420c-963f-26324276fd14",
+      "initialGroupEnvelopeSHA256": "f58015d73cc723c355a4790de3c4d43e571f4c2ae29bb8353e7d623b8647b658",
+      "initialEnvelopeContainsOriginalExactTask": true,
+      "summarizationEventPresent": false,
+      "summarizationSessionIdPresent": false,
+      "readTools": [
+        {
+          "fileId": "f1469765-0d3b-46dd-b538-45011ad4823f",
+          "name": "project-records.csv",
+          "offset": 0,
+          "characters": 199,
+          "totalCharacters": 199,
+          "hasMore": false,
+          "returnedTextUTF8SHA256": "dbc20dad04f59df0d704601fdd6559ab33fd1722283496a2092215a387695ac8",
+          "originalByteSHA256": "dbc20dad04f59df0d704601fdd6559ab33fd1722283496a2092215a387695ac8",
+          "returnedTextExactlyMatchesOriginalBytes": true
+        },
+        {
+          "fileId": "5f219a8f-260e-41ba-823a-0c05d2b7c4d3",
+          "name": "review-policy.txt",
+          "offset": 0,
+          "characters": 197,
+          "totalCharacters": 197,
+          "hasMore": false,
+          "returnedTextUTF8SHA256": "f8b581c7338cc60fa4b02adaa7a22a89465daf675c991856bf8114069d54da60",
+          "originalByteSHA256": "f8b581c7338cc60fa4b02adaa7a22a89465daf675c991856bf8114069d54da60",
+          "returnedTextExactlyMatchesOriginalBytes": true
+        }
+      ]
+    }
+  ],
+  "sourceEvidence": "/tmp/cmb-j7-context-original-control-v2.safe.json",
+  "sourceEvidenceSHA256": "3ff0f613b792e06003563eb014314b7646f352aa6d9c19ae1d68793ffeca8677"
+}

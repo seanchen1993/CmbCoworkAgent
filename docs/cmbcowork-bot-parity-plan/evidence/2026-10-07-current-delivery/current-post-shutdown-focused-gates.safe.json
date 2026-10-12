@@ -1,0 +1,69 @@
+{
+  "recordedAt": "2026-10-08T00:37:09.044507+00:00",
+  "scope": "current Root post-shutdown focused gates",
+  "gates": {
+    "actualChromiumComposer": {
+      "exitCode": 0
+    },
+    "prior19FailedSuitesSerial": {
+      "exitCode": 0,
+      "filesPassed": 19,
+      "testsPassed": 242,
+      "testsSkipped": 4,
+      "durationSeconds": 191.31,
+      "maxWorkers": 1,
+      "timeoutsChanged": false
+    },
+    "webTypes": {
+      "exitCode": 0
+    },
+    "ownedRendererAndWorkspaceLint": {
+      "exitCode": 0,
+      "warnings": 0
+    }
+  },
+  "logs": [
+    {
+      "path": "/Users/chenqiang/Library/Application Support/CMBDevClaw-development/2026-10-08/root-gates/composer-browser.log",
+      "bytes": 119,
+      "sha256": "27040a4400682f3e11bc51dedcff7f1f85e91e94e32c86994d6e26868a5ceb29"
+    },
+    {
+      "path": "/Users/chenqiang/Library/Application Support/CMBDevClaw-development/2026-10-08/root-gates/prior-failures-serial.log",
+      "bytes": 420726,
+      "sha256": "a6af1fea0e1e679268be13ce2090ce4214f9562b971c2f9d6fc79c97d122c33e"
+    },
+    {
+      "path": "/Users/chenqiang/Library/Application Support/CMBDevClaw-development/2026-10-08/root-gates/clipboard-typecheck-web.log",
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "path": "/Users/chenqiang/Library/Application Support/CMBDevClaw-development/2026-10-08/root-gates/clipboard-workspace-lint.log",
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    }
+  ],
+  "sourceFiles": [
+    {
+      "path": "src/renderer/src/lib/bot-composer-extensions.ts",
+      "sha256": "02ecd0b3d46550efaa991d1c05cbe6a7d72b60fe0704fb972fb77d8ea2153e79"
+    },
+    {
+      "path": "tests/bot-composer-browser.spec.ts",
+      "sha256": "b9237a10e4ec4fc30f2ca495acaf71feaec571315e3cd197c30baeb5bcae1910"
+    },
+    {
+      "path": "tests/bot-workspace-browser.spec.ts",
+      "sha256": "4491c4e67a8e2a79e73af5ffa563492a6e2b4a74cfa26e3a22e50415e3cb611e"
+    }
+  ],
+  "limits": [
+    "original interrupted all-npm result remains unavailable, no full-suite pass claim",
+    "four existing conditional workflow browser tests skipped",
+    "focused passing rerun does not prove resource competition caused previous timeouts",
+    "actual App not rebuilt yet",
+    "full Workspace browser gate still running"
+  ],
+  "wholeDeliveryPassed": false
+}

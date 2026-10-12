@@ -1,0 +1,581 @@
+{
+  "schemaVersion": 1,
+  "savedByRootAt": "2026-10-07T09:34:17.369136+00:00",
+  "actualLocalRequiredRegressionGatesPassed": true,
+  "overallCoreDeliveryComplete": false,
+  "productionReleaseAccepted": false,
+  "nativeBuildIdBackendOnly": "aa183a16dd2d22fe8ad060e4",
+  "outputRevisionSHA256": "0ce3e79902f8ee8bedfaead445890c67cc96fb08a40e12252ec30743d7b05dcc",
+  "rendererChunk": "BotWorkspace-D-23g-nQ.js",
+  "sourceAllowlistSHA256": "37f7c635eddb7eab74bf4e7bebf68cfc8609cd75689070b9e43831d94f3ce6db",
+  "copiedFileCount": 41,
+  "copiedContentBytes": 701944,
+  "copiedFiles": [
+    {
+      "path": "/tmp/cmb-root-thread-metadata-opening-integration-v1/root-integration.json",
+      "bytes": 1005,
+      "sha256": "2e15ed6f87c7375c7503e71c543112de67dd54e1c1c2dd3efcb411a8e7212180",
+      "relativeEvidencePath": "root-integration.json",
+      "purpose": "production guard integration",
+      "immutableCompletedEvidence": true
+    },
+    {
+      "path": "/tmp/cmb-root-thread-metadata-opening-integration-v1/source-format-correction.json",
+      "bytes": 479,
+      "sha256": "7f424a77dae30ae1f3252cef8999e63e0f13c2192ad45a92c5797def18a0ddf4",
+      "relativeEvidencePath": "source-format-correction.json",
+      "purpose": "format-only byte-exact undo proof",
+      "immutableCompletedEvidence": true
+    },
+    {
+      "path": "/tmp/cmb-root-thread-metadata-opening-integration-v1/root-quality-build-verification.json",
+      "bytes": 659,
+      "sha256": "7a7f68c5e4c1488264333bd76ec3ba297e5e8946a71256fc3faaa17b8931a11c",
+      "relativeEvidencePath": "root-quality-build-verification.json",
+      "purpose": "combined actual quality receipt",
+      "immutableCompletedEvidence": true
+    },
+    {
+      "path": "/tmp/cmb-root-thread-metadata-opening-integration-v1/current-output-manifest.json",
+      "bytes": 84184,
+      "sha256": "a21a5e7473827c0316bb2c73a79c79f3ac799ddaa2dbb1cdc55f4b7b449d8507",
+      "relativeEvidencePath": "current-output-manifest.json",
+      "purpose": "whole compiled output identity",
+      "immutableCompletedEvidence": true
+    },
+    {
+      "path": "/tmp/cmb-root-thread-metadata-opening-integration-v1/unchanged-backend-evidence.json",
+      "bytes": 586,
+      "sha256": "27c496d89b19e99761893ab34a78288ea65a25c91f7927b0f0e76c8f78c9101a",
+      "relativeEvidencePath": "unchanged-backend-evidence.json",
+      "purpose": "byte-exact unchanged backend applicability",
+      "immutableCompletedEvidence": true
+    },
+    {
+      "path": "/tmp/cmb-root-thread-metadata-opening-integration-v1/current-nearest-types-quality-build/result.json",
+      "bytes": 443,
+      "sha256": "1e38d0f39f441cdaeb2963446ed9e7f3b8fdbad01d9324af9279a05912f82c50",
+      "relativeEvidencePath": "current-nearest-types-quality-build/result.json",
+      "purpose": "original strict-format failure retained",
+      "immutableCompletedEvidence": true
+    },
+    {
+      "path": "/tmp/cmb-root-thread-metadata-opening-integration-v1/current-nearest-types-quality-build/gate.log",
+      "bytes": 1307,
+      "sha256": "8fb27657406f3a33a6c82a57e2936da0d242fc8e78ae96722977abc43548fe79",
+      "relativeEvidencePath": "current-nearest-types-quality-build/gate.log",
+      "purpose": "78 neighboring cases and Node/Web types; preserved strict warning",
+      "immutableCompletedEvidence": true
+    },
+    {
+      "path": "/tmp/cmb-root-thread-metadata-opening-integration-v1/current-strict-quality-build-after-format/result.json",
+      "bytes": 458,
+      "sha256": "6f727cd5a526fcd046c4eedabc5eb5fd70c92e4e74c4fa3f4b15b159c7bddd53",
+      "relativeEvidencePath": "current-strict-quality-build-after-format/result.json",
+      "purpose": "actual final strict-quality/build exit",
+      "immutableCompletedEvidence": true
+    },
+    {
+      "path": "/tmp/cmb-root-thread-metadata-opening-integration-v1/current-strict-quality-build-after-format/gate.log",
+      "bytes": 56421,
+      "sha256": "4378620f3cd3fc5381bedb17ccc6f4f25796e2e8bfab1b4aaf4d09b5e680ed5e",
+      "relativeEvidencePath": "current-strict-quality-build-after-format/gate.log",
+      "purpose": "actual strict lint/format/production build log",
+      "immutableCompletedEvidence": true
+    },
+    {
+      "path": "/tmp/cmb-root-thread-metadata-opening-integration-v1/current-independent-node-service/root-verification.json",
+      "bytes": 1404,
+      "sha256": "e92ee6a06e509a955f2fcb72c947bf2e30325d8a580eaaffecfc864afc3cfe38",
+      "relativeEvidencePath": "current-independent-node-service/root-verification.json",
+      "purpose": "actual current service6 root proof",
+      "immutableCompletedEvidence": true
+    },
+    {
+      "path": "/tmp/cmb-root-thread-metadata-opening-integration-v1/current-independent-node-service/result.json",
+      "bytes": 440,
+      "sha256": "410ee729c7d56b7fbca0dd50cb40dfc8239b72e255ca6c7f29bb8919b004e192",
+      "relativeEvidencePath": "current-independent-node-service/result.json",
+      "purpose": "actual current service6 result",
+      "immutableCompletedEvidence": true
+    },
+    {
+      "path": "/tmp/cmb-root-thread-metadata-opening-integration-v1/current-independent-node-service/gate.log",
+      "bytes": 519,
+      "sha256": "d2627f96f717bd47dbc35d9cc624b868cc44d747e6c8e2ea224ebdae4c48e505",
+      "relativeEvidencePath": "current-independent-node-service/gate.log",
+      "purpose": "actual current service6 log",
+      "immutableCompletedEvidence": true
+    },
+    {
+      "path": "/tmp/cmb-root-thread-metadata-opening-integration-v1/current-package/root-verification.json",
+      "bytes": 1639,
+      "sha256": "eb54769c850cdd150c05c4b5a3e2e956af5f19c36dd4aafdd283b5a1ef8e4919",
+      "relativeEvidencePath": "current-package/root-verification.json",
+      "purpose": "actual current Mac builder/package root proof",
+      "immutableCompletedEvidence": true
+    },
+    {
+      "path": "/tmp/cmb-root-thread-metadata-opening-integration-v1/current-package/result.json",
+      "bytes": 417,
+      "sha256": "0dcf227c6c2074afb5f23fd061b2cf15bc82a6e2378a2c6630746c8ff2240107",
+      "relativeEvidencePath": "current-package/result.json",
+      "purpose": "actual current Mac builder result",
+      "immutableCompletedEvidence": true
+    },
+    {
+      "path": "/tmp/cmb-root-thread-metadata-opening-integration-v1/current-package/gate.log",
+      "bytes": 14592,
+      "sha256": "32674a39161735874e019169ab480703d199cc1c22a63cd9fcb9580356953755",
+      "relativeEvidencePath": "current-package/gate.log",
+      "purpose": "actual current Mac builder log",
+      "immutableCompletedEvidence": true
+    },
+    {
+      "path": "/tmp/cmb-root-thread-metadata-opening-integration-v1/current-package/package-verification.json",
+      "bytes": 868,
+      "sha256": "23ce6ecbe048d420cfbb65a7d6516967e15a433e1313c981a4ff6270dca8e1bf",
+      "relativeEvidencePath": "current-package/package-verification.json",
+      "purpose": "actual package content identity",
+      "immutableCompletedEvidence": true
+    },
+    {
+      "path": "/tmp/cmb-root-thread-metadata-opening-integration-v1/current-package/actual-desktop/root-verification.json",
+      "bytes": 4437,
+      "sha256": "9378a810d93c3d6471c3cc324540d218f6893488dfb2323e946bdc6a2faab799",
+      "relativeEvidencePath": "current-package/actual-desktop/root-verification.json",
+      "purpose": "actual current Desktop26 root proof including 21 fresh hashes",
+      "immutableCompletedEvidence": true
+    },
+    {
+      "path": "/tmp/cmb-root-thread-metadata-opening-integration-v1/current-package/actual-desktop/result.json",
+      "bytes": 433,
+      "sha256": "027a1c07e1ad2cd1f9c2b37c084b024796e473c6c17aa4e15ef57333aeda52b6",
+      "relativeEvidencePath": "current-package/actual-desktop/result.json",
+      "purpose": "actual current Desktop26 result",
+      "immutableCompletedEvidence": true
+    },
+    {
+      "path": "/tmp/cmb-root-thread-metadata-opening-integration-v1/current-package/actual-desktop/gate.log",
+      "bytes": 16273,
+      "sha256": "747586852c95eed71b23e2422cbcc48b10acb4d0a13f57a31798626262182059",
+      "relativeEvidencePath": "current-package/actual-desktop/gate.log",
+      "purpose": "actual current Desktop26 log",
+      "immutableCompletedEvidence": true
+    },
+    {
+      "path": "/tmp/cmb-root-thread-metadata-opening-integration-v1/current-package/actual-desktop/browser-output/checks.json",
+      "bytes": 7283,
+      "sha256": "e8617bfb2d4feda20ac254f2007751c5374b96cfe1acc31c5779e9cc80343401",
+      "relativeEvidencePath": "current-package/actual-desktop/browser-output/checks.json",
+      "purpose": "actual Desktop26 checks",
+      "immutableCompletedEvidence": true
+    },
+    {
+      "path": "/tmp/cmb-root-thread-metadata-opening-integration-v1/current-package/actual-desktop/browser-output/desktop-composer-restart-draft.json",
+      "bytes": 928,
+      "sha256": "b22c341c06a1c4874f1f68bec5a0856a5d36daf00c2d2c6f15f0bd3c9d4d90c3",
+      "relativeEvidencePath": "current-package/actual-desktop/browser-output/desktop-composer-restart-draft.json",
+      "purpose": "actual persisted composer ownership proof",
+      "immutableCompletedEvidence": true
+    },
+    {
+      "path": "/tmp/cmb-root-thread-metadata-opening-integration-v1/current-package/actual-desktop/browser-output/native-command-scope.json",
+      "bytes": 14545,
+      "sha256": "2becf65dc0fd62367a5d9ed3343c15d4e9c3ece01d1081c219cad3ea3553689e",
+      "relativeEvidencePath": "current-package/actual-desktop/browser-output/native-command-scope.json",
+      "purpose": "actual approved Mac native scope proof",
+      "immutableCompletedEvidence": true
+    },
+    {
+      "path": "/tmp/cmb-root-thread-metadata-opening-integration-v1/current-package/actual-desktop/root-finite-visual-observation.json",
+      "bytes": 834,
+      "sha256": "036938b3d2a1b7298c3292d1436f75c8823b24e39773a02df7912325f8d61b64",
+      "relativeEvidencePath": "current-package/actual-desktop/root-finite-visual-observation.json",
+      "purpose": "Root finite screenshot observation; not UI parity",
+      "immutableCompletedEvidence": true
+    },
+    {
+      "path": "/tmp/cmb-root-thread-metadata-opening-integration-v1/current-complete-browser/root-verification.json",
+      "bytes": 1898,
+      "sha256": "4a064f12658ded2ef91bf3bde05c8ea7822e4a162dfa1b5b79b388ced7362e78",
+      "relativeEvidencePath": "current-complete-browser/root-verification.json",
+      "purpose": "preserved failed current renderer full49 proof",
+      "immutableCompletedEvidence": true
+    },
+    {
+      "path": "/tmp/cmb-root-thread-metadata-opening-integration-v1/current-complete-browser/result.json",
+      "bytes": 431,
+      "sha256": "420d92017fc52f54342649df0c9a1189165a14f88bc0ae558c0c91ae8d383a6d",
+      "relativeEvidencePath": "current-complete-browser/result.json",
+      "purpose": "preserved failed current renderer full49 result",
+      "immutableCompletedEvidence": true
+    },
+    {
+      "path": "/tmp/cmb-root-thread-metadata-opening-integration-v1/workspace-routine-boundary-diagnostics/root-integration.json",
+      "bytes": 1595,
+      "sha256": "8616d3c9abf4ace90e1713e37be2fb036507486e203031aa8a5da9b3068d8c09",
+      "relativeEvidencePath": "workspace-routine-boundary-diagnostics/root-integration.json",
+      "purpose": "read-only provenance diagnostic integration",
+      "immutableCompletedEvidence": true
+    },
+    {
+      "path": "/tmp/cmb-root-thread-metadata-opening-integration-v1/workspace-routine-boundary-diagnostics/actual-original-workspace/root-verification.json",
+      "bytes": 970,
+      "sha256": "4ec7a0b2791621bea08268fee08e3ba90857f0061d9c12dbb82339425ec024ce",
+      "relativeEvidencePath": "workspace-routine-boundary-diagnostics/actual-original-workspace/root-verification.json",
+      "purpose": "actual standalone Workspace proof; not source causality",
+      "immutableCompletedEvidence": true
+    },
+    {
+      "path": "/tmp/cmb-root-thread-metadata-opening-integration-v1/workspace-routine-boundary-diagnostics/actual-original-workspace/result.json",
+      "bytes": 431,
+      "sha256": "8179234caacd30c3d26a740c51f23aff6edaa614c24326d9372c15a51333fead",
+      "relativeEvidencePath": "workspace-routine-boundary-diagnostics/actual-original-workspace/result.json",
+      "purpose": "actual standalone Workspace result",
+      "immutableCompletedEvidence": true
+    },
+    {
+      "path": "/tmp/cmb-root-thread-metadata-opening-integration-v1/workspace-routine-boundary-diagnostics/actual-original-workspace/gate.log",
+      "bytes": 1451,
+      "sha256": "884fd332e4bd843df3fd3ac7e2f2a5f0638e036ba64210ff3d185bf66d8064af",
+      "relativeEvidencePath": "workspace-routine-boundary-diagnostics/actual-original-workspace/gate.log",
+      "purpose": "actual standalone Workspace log",
+      "immutableCompletedEvidence": true
+    },
+    {
+      "path": "/tmp/cmb-root-thread-metadata-opening-integration-v1/workspace-routine-boundary-diagnostics/root-owner-isolation-integration.json",
+      "bytes": 1593,
+      "sha256": "1e87ef8839e7b7c332b047b6d6ff5c23a4d380a44b30c03414d537ef6d3de1d6",
+      "relativeEvidencePath": "workspace-routine-boundary-diagnostics/root-owner-isolation-integration.json",
+      "purpose": "test-only owner close/hidden precondition and original-token/action proof",
+      "immutableCompletedEvidence": true
+    },
+    {
+      "path": "/tmp/cmb-root-thread-metadata-opening-integration-v1/current-complete-browser-after-routine-owner-isolation/root-verification.json",
+      "bytes": 1353,
+      "sha256": "f1d665a61197fdc676299ebf3c0baed5fa217bf52b109632c48d5d15d0f1e948",
+      "relativeEvidencePath": "current-complete-browser-after-routine-owner-isolation/root-verification.json",
+      "purpose": "actual current full49 ordered PASS proof",
+      "immutableCompletedEvidence": true
+    },
+    {
+      "path": "/tmp/cmb-root-thread-metadata-opening-integration-v1/current-complete-browser-after-routine-owner-isolation/result.json",
+      "bytes": 446,
+      "sha256": "68b9475128141f5a6c9723396e0aba06f17bc6f146ff020acdc263d05b9054e9",
+      "relativeEvidencePath": "current-complete-browser-after-routine-owner-isolation/result.json",
+      "purpose": "actual current full49 PASS result",
+      "immutableCompletedEvidence": true
+    },
+    {
+      "path": "/tmp/cmb-root-thread-metadata-opening-integration-v1/current-complete-browser-after-routine-owner-isolation/gate.log",
+      "bytes": 468797,
+      "sha256": "25d936d2636064a5e7f57ec10bc037086141c532fc40df7518e76c1c3ee2fd8a",
+      "relativeEvidencePath": "current-complete-browser-after-routine-owner-isolation/gate.log",
+      "purpose": "actual current full49 PASS log",
+      "immutableCompletedEvidence": true
+    },
+    {
+      "path": "/tmp/cmb-root-opening-metadata-race-reproduction-v1/actual-baseline/root-verification.json",
+      "bytes": 822,
+      "sha256": "ee4f4885d741b37ed9cf679734d8a012f091c56c7c00d896a760f31db92af8fa",
+      "relativeEvidencePath": "baseline-opening-guard/root-verification.json",
+      "purpose": "actual unchanged-store expected baseline failure",
+      "immutableCompletedEvidence": true
+    },
+    {
+      "path": "/tmp/cmb-root-opening-metadata-race-reproduction-v1/actual-baseline/result.json",
+      "bytes": 428,
+      "sha256": "220d6ef6b77d0d5bc2eee804a95eb2e1703755943128ddf93078b1619f08f369",
+      "relativeEvidencePath": "baseline-opening-guard/result.json",
+      "purpose": "actual unchanged-store baseline result",
+      "immutableCompletedEvidence": true
+    },
+    {
+      "path": "/tmp/cmb-root-opening-metadata-race-reproduction-v1/actual-baseline/gate.log",
+      "bytes": 7085,
+      "sha256": "05dc3fa522f996ce2ee5a98ccc0542bf28dea27cac40a8ac346d31e9c47ad769",
+      "relativeEvidencePath": "baseline-opening-guard/gate.log",
+      "purpose": "actual unchanged-store baseline failure log",
+      "immutableCompletedEvidence": true
+    },
+    {
+      "path": "/tmp/cmb-root-shell-job-controls-integration-v1/current-compiled-host/root-verification.json",
+      "bytes": 789,
+      "sha256": "97d3c88024eaf7fd0bfea646eb6714c107bc826df5f7845ae7d12f71ebcb7c8c",
+      "relativeEvidencePath": "unchanged-backend-original-host/root-verification.json",
+      "purpose": "actual Host9 proof applicable only to unchanged backend",
+      "immutableCompletedEvidence": true
+    },
+    {
+      "path": "/tmp/cmb-root-shell-job-controls-integration-v1/current-compiled-host/result.json",
+      "bytes": 431,
+      "sha256": "ab8a9ea6a9c983b7ca924728d946668a925f2766cf43abd25be4df453e154362",
+      "relativeEvidencePath": "unchanged-backend-original-host/result.json",
+      "purpose": "actual Host9 result",
+      "immutableCompletedEvidence": true
+    },
+    {
+      "path": "/tmp/cmb-root-shell-job-controls-integration-v1/current-compiled-host/gate.log",
+      "bytes": 1516,
+      "sha256": "8899a0e92bdb8ddfb7f1c38942206bda11e14adaf68648d39249cd89c1726695",
+      "relativeEvidencePath": "unchanged-backend-original-host/gate.log",
+      "purpose": "actual Host9 log",
+      "immutableCompletedEvidence": true
+    },
+    {
+      "path": "/tmp/cmb-root-thread-metadata-opening-integration-v1/current-full-npm-test/root-verification.json",
+      "bytes": 1324,
+      "sha256": "a99d174b5d06744d68d17ceabe14fc4d0f15683efd5a2d45984c97adf622409c",
+      "relativeEvidencePath": "current-full-npm-test/root-verification.json",
+      "purpose": "actual current original npm and nine ordered stages Root proof",
+      "immutableCompletedEvidence": true
+    },
+    {
+      "path": "/tmp/cmb-root-thread-metadata-opening-integration-v1/current-full-npm-test/result.json",
+      "bytes": 430,
+      "sha256": "2be5e16655ba91cc83f29eb3e1a1d26d70c8982690f480fc989e42861bacaae3",
+      "relativeEvidencePath": "current-full-npm-test/result.json",
+      "purpose": "actual current original npm final result",
+      "immutableCompletedEvidence": true
+    }
+  ],
+  "hashOnlySourceReferences": [
+    {
+      "path": "/tmp/cmb-root-thread-metadata-opening-integration-v1/current-complete-browser/gate.log",
+      "bytes": 469022,
+      "sha256": "e72e4a67f8f296126117186c839794730777b2071db1300bd430a25813f25b50",
+      "reason": "optional prior failure log; root proof/result selected, preserve budget for npm final",
+      "copy": false
+    },
+    {
+      "path": "/tmp/cmb-root-thread-metadata-opening-integration-v1/current-complete-browser/workspace-failure-artifacts/failure-drafts.json",
+      "bytes": 12779,
+      "sha256": "cc7f06e9fc720dae16fc1291b12c03d21d983b18285595f6d4c0a9ebb2a35f28",
+      "copiedIntoCandidate": false,
+      "reason": "large original failure artifact retained at source; Root SHA reference only",
+      "copy": false,
+      "hashSource": "current-complete-browser/root-verification.json"
+    },
+    {
+      "path": "/tmp/cmb-root-thread-metadata-opening-integration-v1/current-complete-browser/workspace-failure-artifacts/failure-state.json",
+      "bytes": 118382,
+      "sha256": "30123aa0c812007df9290c71fe96162de57b75f36ea0e6b4355acddf0eb9f9c0",
+      "copiedIntoCandidate": false,
+      "reason": "large original failure artifact retained at source; Root SHA reference only",
+      "copy": false,
+      "hashSource": "current-complete-browser/root-verification.json"
+    },
+    {
+      "path": "/tmp/cmb-root-thread-metadata-opening-integration-v1/current-complete-browser/workspace-failure-artifacts/failure.html",
+      "bytes": 9299133,
+      "sha256": "e71292b3ea331b237a3151f2628c67244173a3e3a395f4f21d03d01bd25c6da3",
+      "copiedIntoCandidate": false,
+      "reason": "large original failure artifact retained at source; Root SHA reference only",
+      "copy": false,
+      "hashSource": "current-complete-browser/root-verification.json"
+    },
+    {
+      "path": "/tmp/cmb-root-thread-metadata-opening-integration-v1/current-complete-browser/workspace-failure-artifacts/failure.png",
+      "bytes": 114907,
+      "sha256": "3c96ae1dbd7c6b5e3d6d505887ac245f7b18343c7c949e2f22a3e3a0d614e915",
+      "copiedIntoCandidate": false,
+      "reason": "large original failure artifact retained at source; Root SHA reference only",
+      "copy": false,
+      "hashSource": "current-complete-browser/root-verification.json"
+    },
+    {
+      "path": "/tmp/cmb-root-thread-metadata-opening-integration-v1/current-complete-browser/workspace-failure-artifacts/failure-transcript.json",
+      "bytes": 1332,
+      "sha256": "afb2b788d73b50bc0d76a6f49cf4c6d67479dd329a17aba7bfb1a22ba1568d43",
+      "copiedIntoCandidate": false,
+      "reason": "large original failure artifact retained at source; Root SHA reference only",
+      "copy": false,
+      "hashSource": "current-complete-browser/root-verification.json"
+    },
+    {
+      "path": "/tmp/cmb-root-thread-metadata-opening-integration-v1/current-package/actual-desktop/browser-output/desktop-about.png",
+      "bytes": 214436,
+      "sha256": "3c267190262d006f36674713b341d352f2b411005a2d41f839d9b233a2c43231",
+      "reason": "Root-verified fresh desktop output; no image duplication",
+      "copy": false,
+      "hashSource": "current-package/actual-desktop/root-verification.json"
+    },
+    {
+      "path": "/tmp/cmb-root-thread-metadata-opening-integration-v1/current-package/actual-desktop/browser-output/desktop-artifact-downloads.png",
+      "bytes": 194448,
+      "sha256": "3ce7066552e56137dfc8c63d4e3263d93e0ae7a9b0518fce965b055793084f5e",
+      "reason": "Root-verified fresh desktop output; no image duplication",
+      "copy": false,
+      "hashSource": "current-package/actual-desktop/root-verification.json"
+    },
+    {
+      "path": "/tmp/cmb-root-thread-metadata-opening-integration-v1/current-package/actual-desktop/browser-output/desktop-bot-details.png",
+      "bytes": 185444,
+      "sha256": "7ba8eaf56b2511046a7966afd4e6819a6f41b2c82ec942acbb85dd13b48db2fa",
+      "reason": "Root-verified fresh desktop output; no image duplication",
+      "copy": false,
+      "hashSource": "current-package/actual-desktop/root-verification.json"
+    },
+    {
+      "path": "/tmp/cmb-root-thread-metadata-opening-integration-v1/current-package/actual-desktop/browser-output/desktop-bot-library.png",
+      "bytes": 158364,
+      "sha256": "de0457d1e488ae8e03306b675cffbcda6b66bc5e1d290fde6fa29fe274f3018f",
+      "reason": "Root-verified fresh desktop output; no image duplication",
+      "copy": false,
+      "hashSource": "current-package/actual-desktop/root-verification.json"
+    },
+    {
+      "path": "/tmp/cmb-root-thread-metadata-opening-integration-v1/current-package/actual-desktop/browser-output/desktop-browser-maintenance.png",
+      "bytes": 265098,
+      "sha256": "8c55d510d2fa03edc8057cd4438b06c315491c814999a4ab0e6ee5a0931767f3",
+      "reason": "Root-verified fresh desktop output; no image duplication",
+      "copy": false,
+      "hashSource": "current-package/actual-desktop/root-verification.json"
+    },
+    {
+      "path": "/tmp/cmb-root-thread-metadata-opening-integration-v1/current-package/actual-desktop/browser-output/desktop-browser-preview.png",
+      "bytes": 183354,
+      "sha256": "881f5387aa195c46752773ade068116ae8b8a98f536a6fd2709e00537078676f",
+      "reason": "Root-verified fresh desktop output; no image duplication",
+      "copy": false,
+      "hashSource": "current-package/actual-desktop/root-verification.json"
+    },
+    {
+      "path": "/tmp/cmb-root-thread-metadata-opening-integration-v1/current-package/actual-desktop/browser-output/desktop-browser.png",
+      "bytes": 201008,
+      "sha256": "79f1e90230e8ba9e7394d1e7736f1957caa30b86721571e9705d37f471fb7dbc",
+      "reason": "Root-verified fresh desktop output; no image duplication",
+      "copy": false,
+      "hashSource": "current-package/actual-desktop/root-verification.json"
+    },
+    {
+      "path": "/tmp/cmb-root-thread-metadata-opening-integration-v1/current-package/actual-desktop/browser-output/desktop-command-palette.png",
+      "bytes": 124939,
+      "sha256": "ac736283c2f9ff2e2e17a8c1a9a87d67e2394c377dea94c7b5e007709aec805a",
+      "reason": "Root-verified fresh desktop output; no image duplication",
+      "copy": false,
+      "hashSource": "current-package/actual-desktop/root-verification.json"
+    },
+    {
+      "path": "/tmp/cmb-root-thread-metadata-opening-integration-v1/current-package/actual-desktop/browser-output/desktop-computer-checkpoints.png",
+      "bytes": 279812,
+      "sha256": "795028b6c539872a608c0d512010f6bbd3393a4204590072af93b89d3f07b3ce",
+      "reason": "Root-verified fresh desktop output; no image duplication",
+      "copy": false,
+      "hashSource": "current-package/actual-desktop/root-verification.json"
+    },
+    {
+      "path": "/tmp/cmb-root-thread-metadata-opening-integration-v1/current-package/actual-desktop/browser-output/desktop-connect-apps.png",
+      "bytes": 183207,
+      "sha256": "a7c7b77bee138d2e3cd4a5dbce7a73ae69d7730be205d011d0b1157dfd00fa68",
+      "reason": "Root-verified fresh desktop output; no image duplication",
+      "copy": false,
+      "hashSource": "current-package/actual-desktop/root-verification.json"
+    },
+    {
+      "path": "/tmp/cmb-root-thread-metadata-opening-integration-v1/current-package/actual-desktop/browser-output/desktop-external-branch.png",
+      "bytes": 137556,
+      "sha256": "49bc924d4d6e1f243e2151c3cff940e28a5aa01d3a9d6de396e35ba5064ae2ea",
+      "reason": "Root-verified fresh desktop output; no image duplication",
+      "copy": false,
+      "hashSource": "current-package/actual-desktop/root-verification.json"
+    },
+    {
+      "path": "/tmp/cmb-root-thread-metadata-opening-integration-v1/current-package/actual-desktop/browser-output/desktop-model-settings.png",
+      "bytes": 284211,
+      "sha256": "ae9c9ed2133d702676fab8525217dc648dacacd2934e4c92b9f2194ff7737f72",
+      "reason": "Root-verified fresh desktop output; no image duplication",
+      "copy": false,
+      "hashSource": "current-package/actual-desktop/root-verification.json"
+    },
+    {
+      "path": "/tmp/cmb-root-thread-metadata-opening-integration-v1/current-package/actual-desktop/browser-output/desktop-native-command-unavailable.png",
+      "bytes": 277633,
+      "sha256": "ff6d338480e9f154c10f8695a2997f8759e9ca134d7ae33a69b057e4b461a67b",
+      "reason": "Root-verified fresh desktop output; no image duplication",
+      "copy": false,
+      "hashSource": "current-package/actual-desktop/root-verification.json"
+    },
+    {
+      "path": "/tmp/cmb-root-thread-metadata-opening-integration-v1/current-package/actual-desktop/browser-output/desktop-running.png",
+      "bytes": 118351,
+      "sha256": "2d6303403bf27820771c758501ad1dec66a5ef0d7cd6757ddd015df3e5c50695",
+      "reason": "Root-verified fresh desktop output; no image duplication",
+      "copy": false,
+      "hashSource": "current-package/actual-desktop/root-verification.json"
+    },
+    {
+      "path": "/tmp/cmb-root-thread-metadata-opening-integration-v1/current-package/actual-desktop/browser-output/desktop-settings-over-browser.png",
+      "bytes": 297299,
+      "sha256": "04942d087c0ebbee1b8776db35304f581f05911436e310b97ecad2b01a70b23b",
+      "reason": "Root-verified fresh desktop output; no image duplication",
+      "copy": false,
+      "hashSource": "current-package/actual-desktop/root-verification.json"
+    },
+    {
+      "path": "/tmp/cmb-root-thread-metadata-opening-integration-v1/current-package/actual-desktop/browser-output/desktop-settings.png",
+      "bytes": 276121,
+      "sha256": "56c45d6cb0250c64b4dba8982a3708a96ffc0f49406b106f5bd4567a77bf34e5",
+      "reason": "Root-verified fresh desktop output; no image duplication",
+      "copy": false,
+      "hashSource": "current-package/actual-desktop/root-verification.json"
+    },
+    {
+      "path": "/tmp/cmb-root-thread-metadata-opening-integration-v1/current-package/actual-desktop/browser-output/desktop-startup-branch.png",
+      "bytes": 138530,
+      "sha256": "2fa75c5c778c1242cba1318d0f19331e40aabf652500bcdbd615cb362b5bd798",
+      "reason": "Root-verified fresh desktop output; no image duplication",
+      "copy": false,
+      "hashSource": "current-package/actual-desktop/root-verification.json"
+    },
+    {
+      "path": "/tmp/cmb-root-thread-metadata-opening-integration-v1/current-package/actual-desktop/browser-output/desktop-table-preview.png",
+      "bytes": 116527,
+      "sha256": "0d40a7dffd6853f9909dc74f7567244ca721294e729bb3e938f1480070cd4637",
+      "reason": "Root-verified fresh desktop output; no image duplication",
+      "copy": false,
+      "hashSource": "current-package/actual-desktop/root-verification.json"
+    },
+    {
+      "path": "/private/var/folders/r4/m2gmdyyn06z9488ghc1044zh0000gn/T/cmb-current-opening-metadata-pack-4dikgfi6/mac-arm64/CMBDevClaw.app/Contents/Resources/app.asar",
+      "bytes": 37550654,
+      "sha256": "1c47eeabbeea11bd8c9768e3b8dd55804c375c1b528bec913cb80f4ace0a4509",
+      "reason": "actual app archive retained at source; no app duplication",
+      "copy": false,
+      "hashSource": "current-package/root-verification.json"
+    },
+    {
+      "path": "/tmp/cmb-root-shell-job-controls-integration-v1/current-complete-browser-after-workspace-diagnostics/root-verification.json",
+      "bytes": 953,
+      "sha256": "7d007d42a0acb461ea44c1f8998c59748dd1b371e23ac7f1216ebaefcaab1213",
+      "reason": "older AGN renderer ordered PASS remains historical only",
+      "copy": false
+    },
+    {
+      "path": "/tmp/cmb-root-thread-metadata-opening-integration-v1/current-full-npm-test/gate.log",
+      "bytes": 2436812,
+      "sha256": "58905828ea176e7f94d5d74dca3e9d7185e5c334fcd5f3904a34babfafae3c3c",
+      "reason": "actual full npm log alone exceeds 2 MiB; final Root proof/result selected",
+      "copy": false,
+      "hashSource": "current-full-npm-test/root-verification.json",
+      "rootRecordedLogSHA256": "58905828ea176e7f94d5d74dca3e9d7185e5c334fcd5f3904a34babfafae3c3c"
+    }
+  ],
+  "copyScope": "Only the finite completed JSON/log allowlist; no source/output changes, images, HTML, ASAR, app, or input inventories copied.",
+  "remainingDeliveryWork": {
+    "WindowsInputCode": [
+      "CPU-04/CPU-17 generic target chords",
+      "real target IME composition",
+      "Raw Input"
+    ],
+    "WindowsInputScopeReply": "pending; no reduction approved",
+    "WindowsFirstInstallAndNativeKernel": "not accepted",
+    "LinuxK8sRealEnvironment": "planned later; not accepted",
+    "realUserModelAndFixedGrokOutputComparison": "not accepted",
+    "allGrokFeatureAndUiAlignment": "not accepted",
+    "currentMacSigning": "ad-hoc; not notarized",
+    "complete177CurrentAcceptanceMatrix": "not proven",
+    "completionPercentage": null
+  }
+}

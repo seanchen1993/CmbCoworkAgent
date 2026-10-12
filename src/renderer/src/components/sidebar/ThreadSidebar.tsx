@@ -2,6 +2,7 @@ import { useState, useCallback, useEffect, useMemo, useRef, memo } from "react"
 import { useShallow } from "zustand/react/shallow"
 import {
   Plus,
+  Bot,
   Trash2,
   Pencil,
   Pin,
@@ -1280,6 +1281,16 @@ export const ThreadSidebar = memo(function ThreadSidebar(): React.JSX.Element {
       ) : activeSidebarTab === "chat" ? (
         <ScrollArea className="flex-1 min-h-0">
           <div className="space-y-0.5 px-1 pb-1">
+            <Button
+              variant="ghost"
+              size="sm"
+              className={cn("w-full justify-start gap-2 text-sm font-semibold", mainView === "bots" && "bg-muted")}
+              aria-current={mainView === "bots" ? "page" : undefined}
+              onClick={() => setMainView("bots")}
+            >
+              <div className="flex size-5 items-center justify-center rounded-full bg-muted-foreground/15"><Bot className="size-3" /></div>
+              <span>Bot 工作区</span>
+            </Button>
             <Button
               variant="ghost"
               size="sm"

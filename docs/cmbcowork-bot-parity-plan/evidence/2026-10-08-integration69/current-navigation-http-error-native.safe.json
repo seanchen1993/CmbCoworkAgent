@@ -1,0 +1,82 @@
+{
+  "kind": "native-http-error-navigation-recovery-finite-sample",
+  "recordedAt": "2026-10-10T14:57:29.338775+00:00",
+  "compiledOutputIdentity": "7eee3308680ac6041abd3d3b",
+  "nativeBuildId": "b8c92e589f39ef3d7c80390a",
+  "failedOriginalRunRetained": "a7cb4ffb-667c-49a8-86bc-525257e8ca21",
+  "failedOriginalFollowupStillQueued": "7daa229d-feee-42aa-beff-673ea5034e1e",
+  "actualRun": {
+    "id": "47fa9597-f641-4691-8456-1d878655c91a",
+    "bot_id": "4002cdce-8149-4dfc-9c4b-28abd67d30c1",
+    "status": "succeeded",
+    "created_at": 1791642912724,
+    "updated_at": 1791642951815,
+    "elapsedMs": 39091,
+    "modelRequests": 7,
+    "models": [
+      "MiniMax-M3"
+    ],
+    "allUsageSettled": true,
+    "effects": [
+      {
+        "id": "browser:47fa9597-f641-4691-8456-1d878655c91a:call_01a1263d2ef57dd190e9785e",
+        "status": "succeeded",
+        "resultCharacters": 448
+      },
+      {
+        "id": "browser:47fa9597-f641-4691-8456-1d878655c91a:call_01a1263d612b7a3096106358",
+        "status": "succeeded",
+        "resultCharacters": 680
+      }
+    ],
+    "messages": [
+      {
+        "id": "6e623a92-3125-49d0-a00a-ecacdcf24d5f",
+        "sender": "bot",
+        "characters": 494,
+        "textSha256": "237c3a208f3a23bfb6c05f6bd774d4032506b70bb02d3ba9c1132117458fc454"
+      }
+    ]
+  },
+  "prompt": "在新标签页打开以下地址，只检查页面能否正常访问：\nhttps://x.com/\n若遇到 HTTP 错误或访问限制，观察当前页面后直接说明原因和需要我做什么；不要登录、反复重试、创建例程、保存记忆或修改文件。",
+  "cmbObserved": {
+    "httpError": "ERR_HTTP_RESPONSE_CODE_FAILURE",
+    "pageText": [
+      "访问 x.com 的请求遭到拒绝",
+      "您未获授权，无法查看此网页。"
+    ],
+    "freshObservationAfterFailure": true,
+    "finishedWithoutNeedsReview": true,
+    "requestNotReplayed": true
+  },
+  "officialGrokObserved": {
+    "error": "ERR_CONNECTION_CLOSED",
+    "pageText": "This site can’t be reached",
+    "explainedFailureWithoutLoginOrRetry": true,
+    "originalDraftRestored": "meiyong"
+  },
+  "knownDifference": [
+    "Network environments returned different error kinds; successful X login/content lookup was not verified.",
+    "CMB proposed using request_computer_help to change browsers. That claim was inaccurate; a subsequent prompt clarification is code-tested but not yet live at this recording.",
+    "Grok offers proprietary public X search without browser access; no equivalence with a default configured MiniMax model is claimed."
+  ],
+  "regressionCandidate": {
+    "nodeAndRealChromeTestsPassed": 52,
+    "knownNavigationErrorScope": [
+      "HTTP error",
+      "DNS",
+      "connection refused",
+      "connection closed",
+      "connection reset",
+      "empty response"
+    ],
+    "stillUnconfirmed": [
+      "navigation deadline",
+      "ERR_ABORTED",
+      "target closure",
+      "automation transport disconnect",
+      "lost authority"
+    ]
+  },
+  "coreParityComplete": false
+}

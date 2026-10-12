@@ -1,0 +1,37 @@
+{
+  "kind": "existing-original-file-picker-cold-start",
+  "recordedAt": "2026-10-09T07:54:15.521163+00:00",
+  "live": {
+    "version": 1,
+    "pid": 34233,
+    "hostId": "d3f6f3ca-87cf-4684-b398-3a09296b2bda",
+    "buildId": "d83a01a9b33434377e0f6dd7",
+    "socketPath": "/private/tmp/cmb-bot-501-4b987f56222e7e971f75407b/rpc.sock"
+  },
+  "pre": {
+    "path": "/Users/chenqiang/Library/Application Support/CMBDevClaw-development/2026-10-08/presentation/cold-upgrade-plan/pins-quiesced-before-start-1791530733887151000.safe.json",
+    "sha256": "88398e718036cd68aff2fecd86b7f20331a8310084514d1a4dfc706b3d464241"
+  },
+  "post": {
+    "path": "/Users/chenqiang/Library/Application Support/CMBDevClaw-development/2026-10-08/presentation/cold-upgrade-plan/pins-post-start-pre-review-1791530757660774000.safe.json",
+    "sha256": "4f8cc3846ca5e409d4b84bc28867c73b617dee3b23d3d3aa8e7e028fd47b255a"
+  },
+  "selectedRuns": 9,
+  "preserved": {
+    "schema": true,
+    "checkpoints": true,
+    "effects": true,
+    "interactions": true,
+    "artifacts": true,
+    "artifactObjects": true,
+    "peerDispatch": true,
+    "peerWaits": true,
+    "skills": true,
+    "project": true
+  },
+  "checkpointPayloadBytesHashed": 7274242,
+  "modelSnapshotOnlyTwoRuntimeDirectoryStringsChanged": true,
+  "otherConfigurationFingerprintsEqual": true,
+  "previousTaskHistoriesRewritten": false,
+  "coreParityComplete": false
+}

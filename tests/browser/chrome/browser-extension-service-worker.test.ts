@@ -189,3 +189,144 @@ describe("Chrome extension native host lifecycle", () => {
     expect(worker.timers.map((timer) => timer.delay)).toEqual([1000])
   })
 })
+
+const exportId = "a0000000-0000-4000-8000-000000000001"
+const secondId = "a0000000-0000-4000-8000-000000000002"
+const cookie = { name: "session", value: "fixture", domain: ".example.test", path: "/" }
+const flush = async () => {
+  for (let i = 0; i < 12; i++) await Promise.resolve()
+}
+function connectForExport(worker: ReturnType<typeof loadServiceWorker>) {
+  worker.ports[0].onMessage.emit({ type: "host-status", connected: true, protocolVersion: 1 })
+}
+function requestExport(worker: ReturnType<typeof loadServiceWorker>, requestId = exportId) {
+  worker.ports[0].onMessage.emit({ type: "export-cookies", protocolVersion: 1, requestId })
+}
+function exportMessages(worker: ReturnType<typeof loadServiceWorker>) {
+  return worker.ports[0].postMessage.mock.calls
+    .map(([message]) => message)
+    .filter((message) => message.type.startsWith("cookie-export-"))
+}
+
+describe("Chrome extension export boundaries", () => {
+  it("requires an established protocol and host permission before reading cookies", async () => {
+    const worker = loadServiceWorker()
+    requestExport(worker)
+    expect(worker.chrome.cookies.getAll).not.toHaveBeenCalled()
+    expect(exportMessages(worker)[0].code).toBe("protocol_error")
+    connectForExport(worker)
+    worker.chrome.permissions.contains.mockImplementation((_permission, callback) =>
+      callback(false)
+    )
+    requestExport(worker)
+    await flush()
+    expect(exportMessages(worker).at(-1).code).toBe("permission_required")
+    expect(worker.chrome.cookies.getAllCookieStores).not.toHaveBeenCalled()
+    expect(worker.chrome.cookies.getAll).not.toHaveBeenCalled()
+  })
+
+  it("never falls back to an incognito store", async () => {
+    const worker = loadServiceWorker()
+    connectForExport(worker)
+    worker.chrome.cookies.getAllCookieStores.mockImplementation((callback) =>
+      callback([{ id: "1" }])
+    )
+    requestExport(worker)
+    await flush()
+    expect(exportMessages(worker).at(-1).code).toBe("export_failed")
+    expect(worker.chrome.cookies.getAll).not.toHaveBeenCalled()
+  })
+
+  it("bounds UTF-8 chunk bytes and reports skipped oversized cookies", async () => {
+    const worker = loadServiceWorker()
+    connectForExport(worker)
+    worker.chrome.cookies.getAll.mockImplementation((_query, callback) =>
+      callback([
+        cookie,
+        { ...cookie, name: "too-big", value: "界".repeat(200000) },
+        { ...cookie, name: "bounded", value: "界".repeat(170000) }
+      ])
+    )
+    requestExport(worker)
+    await flush()
+    while (worker.timers.some((timer) => timer.delay === 0)) {
+      worker.runTimer(0)
+      await flush()
+    }
+    const messages = exportMessages(worker)
+    expect(worker.chrome.cookies.getAll).toHaveBeenCalledWith(
+      { storeId: "0" },
+      expect.any(Function)
+    )
+    expect(messages.at(-1)).toMatchObject({ type: "cookie-export-complete", total: 2, skipped: 1 })
+    for (const chunk of messages.filter((message) => message.type === "cookie-export-chunk"))
+      expect(Buffer.byteLength(JSON.stringify(chunk.cookies))).toBeLessThanOrEqual(512 * 1024)
+    expect(JSON.stringify(messages)).not.toContain("too-big")
+  })
+
+  it("bounds the export count and keeps cancellation effective between chunks", async () => {
+    const worker = loadServiceWorker()
+    connectForExport(worker)
+    worker.chrome.cookies.getAll.mockImplementation((_query, callback) =>
+      callback(
+        Array.from({ length: 10001 }, (_, index) => ({
+          ...cookie,
+          name: String(index),
+          value: "x".repeat(80)
+        }))
+      )
+    )
+    requestExport(worker)
+    await flush()
+    expect(exportMessages(worker)[0]).toMatchObject({
+      type: "cookie-export-begin",
+      total: 10000,
+      skipped: 1
+    })
+    worker.ports[0].onMessage.emit({ type: "cancel-cookie-export", requestId: exportId })
+    worker.runTimer(0)
+    await flush()
+    expect(
+      exportMessages(worker).filter((message) => message.type === "cookie-export-chunk")
+    ).toHaveLength(1)
+    expect(
+      exportMessages(worker).some((message) => message.type === "cookie-export-complete")
+    ).toBe(false)
+    worker.chrome.cookies.getAll.mockImplementation((_query, callback) => callback([]))
+    requestExport(worker, secondId)
+    await flush()
+    expect(exportMessages(worker).at(-1)).toMatchObject({
+      type: "cookie-export-complete",
+      requestId: secondId
+    })
+  })
+
+  it("does not export stale cookies to a replacement native connection", async () => {
+    const worker = loadServiceWorker()
+    connectForExport(worker)
+    let release!: (cookies: unknown[]) => void
+    worker.chrome.cookies.getAll.mockImplementation((_query, callback) => {
+      release = callback
+    })
+    requestExport(worker)
+    await flush()
+    requestExport(worker, secondId)
+    await flush()
+    expect(worker.chrome.cookies.getAll).toHaveBeenCalledTimes(1)
+    expect(exportMessages(worker).at(-1)).toMatchObject({
+      code: "export_failed",
+      requestId: secondId
+    })
+    worker.runtimeMessages.emit({ type: "reconnect-native" }, undefined, vi.fn())
+    release([cookie])
+    await flush()
+    expect(
+      worker.ports[1].postMessage.mock.calls.every(
+        ([message]) => message.type === "extension-ready"
+      )
+    ).toBe(true)
+    expect(exportMessages(worker).some((message) => message.type === "cookie-export-chunk")).toBe(
+      false
+    )
+  })
+})

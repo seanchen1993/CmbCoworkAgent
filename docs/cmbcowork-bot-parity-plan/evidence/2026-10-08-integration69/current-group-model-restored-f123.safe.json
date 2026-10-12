@@ -1,0 +1,391 @@
+{
+  "kind": "formal-model-restored-group-comparison",
+  "recordedAt": "2026-10-09T16:26:45.624832+00:00",
+  "liveBuildId": "f1230619793dffcad9ff1717",
+  "schema": 69,
+  "model": "MiniMax-M3",
+  "comparisonBoundary": "Formal isolated CMB App with configured real provider; official Grok App directly connected to official service. CMB room has 3 Bots and Grok room has 2; this participant difference is retained. Model arithmetic independence is not proven by visible answers.",
+  "coldPreservation": {
+    "receipt": "/Users/chenqiang/Library/Application Support/CMBDevClaw-development/2026-10-08/presentation/cold-upgrade-plan/group-request-priority-cold-preservation-1791555716685663000.safe.json",
+    "bytes": 3297,
+    "sha256": "aaf6f96fd789795db0848d09a34ecce09535aaa29fa0e4ea61a88917a6651b92",
+    "selectedRuns": 40,
+    "logicalGroups": 10,
+    "checkpointPayloadBytes": 10465650
+  },
+  "quotaBlockedOriginal": {
+    "id": "6e8e844c-d153-4b43-8de8-8366de2ed04a",
+    "conversation_id": "221b4a41-095a-4836-b7df-954a50e18798",
+    "status": "completed",
+    "round": 0,
+    "total_messages": 0,
+    "input": "？",
+    "publicMessages": [],
+    "runs": [
+      {
+        "id": "8835dc35-e8af-4379-a97d-5a32c789735a",
+        "source": "group-member",
+        "status": "failed",
+        "root_run_id": "8835dc35-e8af-4379-a97d-5a32c789735a",
+        "sent_count": 0
+      },
+      {
+        "id": "bf3d963e-e73c-43a5-ba3a-df34c16d72e2",
+        "source": "group-member",
+        "status": "failed",
+        "root_run_id": "bf3d963e-e73c-43a5-ba3a-df34c16d72e2",
+        "sent_count": 0
+      },
+      {
+        "id": "b8aa1852-be8a-4ee2-9858-e5af0fa6747c",
+        "source": "group-member",
+        "status": "failed",
+        "root_run_id": "b8aa1852-be8a-4ee2-9858-e5af0fa6747c",
+        "sent_count": 0
+      }
+    ],
+    "usage": {
+      "requests": 18,
+      "unknown": 18,
+      "unknownReservedTokens": 147456
+    },
+    "approvals": [],
+    "explicitPasses": 0
+  },
+  "modelRestoredFollowup": {
+    "id": "351e8768-d302-4586-96f1-9631f2fb5b1d",
+    "conversation_id": "221b4a41-095a-4836-b7df-954a50e18798",
+    "status": "completed",
+    "round": 1,
+    "total_messages": 3,
+    "input": "？",
+    "publicMessages": [
+      {
+        "id": "3272a3dc-b618-4e87-bbab-ffef43509a52",
+        "run_id": "c35c9691-5279-4f45-b5df-a7446b943a02",
+        "bot_id": "4002cdce-8149-4dfc-9c4b-28abd67d30c1",
+        "name": "核心旅程核验",
+        "text": "收到三位\"？\"。目前还没有具体任务交办进来，请说一下需要协调/核对的目标（例如：报价工具、月报、还是其他流程），我再分配给对应的 Bot 并跟进交付。"
+      },
+      {
+        "id": "711c039f-97a7-42a9-933b-d9dd93763790",
+        "run_id": "3474c465-87dd-41aa-94dd-b0c289ba1390",
+        "bot_id": "924e1689-7b6d-411c-a429-28decb91b179",
+        "name": "报价工具编程核验",
+        "text": "目前没有报价工具相关任务待办，等用户明确需求后跟进。"
+      },
+      {
+        "id": "56818f95-c285-4cbd-95b1-d2f1cdd685bf",
+        "run_id": "aaf2ecfd-d157-4cf1-a89e-4df15873f797",
+        "bot_id": "e1d81813-1ff0-4fca-9948-d966e1a77189",
+        "name": "月报示范核验",
+        "text": "我这边也待命中，如有月报生成或核验的具体工单/数据，请直接发给我。"
+      }
+    ],
+    "runs": [
+      {
+        "id": "c35c9691-5279-4f45-b5df-a7446b943a02",
+        "source": "group-member",
+        "status": "succeeded",
+        "root_run_id": "c35c9691-5279-4f45-b5df-a7446b943a02",
+        "sent_count": 1
+      },
+      {
+        "id": "3474c465-87dd-41aa-94dd-b0c289ba1390",
+        "source": "group-member",
+        "status": "succeeded",
+        "root_run_id": "3474c465-87dd-41aa-94dd-b0c289ba1390",
+        "sent_count": 1
+      },
+      {
+        "id": "aaf2ecfd-d157-4cf1-a89e-4df15873f797",
+        "source": "group-member",
+        "status": "succeeded",
+        "root_run_id": "aaf2ecfd-d157-4cf1-a89e-4df15873f797",
+        "sent_count": 1
+      },
+      {
+        "id": "768737aa-0461-4034-89a0-17d82ce7b856",
+        "source": "group-member",
+        "status": "succeeded",
+        "root_run_id": "768737aa-0461-4034-89a0-17d82ce7b856",
+        "sent_count": 0
+      },
+      {
+        "id": "6ec35788-fdd8-4f60-83b5-b4c624dbd11c",
+        "source": "group-member",
+        "status": "succeeded",
+        "root_run_id": "6ec35788-fdd8-4f60-83b5-b4c624dbd11c",
+        "sent_count": 0
+      },
+      {
+        "id": "07b5354d-13de-4016-87e7-d60fabd2b3ad",
+        "source": "group-member",
+        "status": "succeeded",
+        "root_run_id": "07b5354d-13de-4016-87e7-d60fabd2b3ad",
+        "sent_count": 0
+      }
+    ],
+    "usage": {
+      "requests": 16,
+      "unknown": 0,
+      "unknownReservedTokens": 0
+    },
+    "approvals": [],
+    "explicitPasses": 4
+  },
+  "collaboration": {
+    "id": "c0a12135-0bd8-4cd1-9c85-808589052638",
+    "conversation_id": "221b4a41-095a-4836-b7df-954a50e18798",
+    "status": "completed",
+    "round": 2,
+    "total_messages": 4,
+    "input": "群聊功能核验：先由一位 Bot 独立计算 17+25，另一位 Bot 核对并说明是否正确。各回复一次，完成后停止；不访问外部服务。",
+    "publicMessages": [
+      {
+        "id": "73856f80-5faf-423b-a217-4ebc85358824",
+        "run_id": "57e767ee-c17f-4086-ab49-6c259aa2fb5e",
+        "bot_id": "4002cdce-8149-4dfc-9c4b-28abd67d30c1",
+        "name": "核心旅程核验",
+        "text": "群聊功能核验分工：\n• 报价工具编程核验：独立计算 17+25，发结果（1 条）。\n• 月报示范核验：核对上述结果是否正确，给判断（1 条）。\n各发一条后停止，不访问外部服务。"
+      },
+      {
+        "id": "5039fcaa-a042-4626-91ed-c50cf1741a32",
+        "run_id": "3c571d83-3de6-4469-a138-b537a7d9b51f",
+        "bot_id": "924e1689-7b6d-411c-a429-28decb91b179",
+        "name": "报价工具编程核验",
+        "text": "独立计算：17+25 = 42。"
+      },
+      {
+        "id": "c2654a37-8cf9-4b6a-ae13-d902f7a88404",
+        "run_id": "bf9f3839-23f1-4067-8e58-0dd7ee742160",
+        "bot_id": "e1d81813-1ff0-4fca-9948-d966e1a77189",
+        "name": "月报示范核验",
+        "text": "核对结果：17+25 = 42，正确。"
+      },
+      {
+        "id": "f0f13958-e2f1-4437-ae36-5816146c1833",
+        "run_id": "f04abe6b-0e0b-420b-9f1c-26f1a871fba0",
+        "bot_id": "4002cdce-8149-4dfc-9c4b-28abd67d30c1",
+        "name": "核心旅程核验",
+        "text": "两次结果一致：17+25=42，无差异。"
+      }
+    ],
+    "runs": [
+      {
+        "id": "57e767ee-c17f-4086-ab49-6c259aa2fb5e",
+        "source": "group-member",
+        "status": "succeeded",
+        "root_run_id": "57e767ee-c17f-4086-ab49-6c259aa2fb5e",
+        "sent_count": 1
+      },
+      {
+        "id": "2ce25b92-141e-4989-93a2-805c6bef4fd8",
+        "source": "peer",
+        "status": "succeeded",
+        "root_run_id": "57e767ee-c17f-4086-ab49-6c259aa2fb5e",
+        "sent_count": null
+      },
+      {
+        "id": "206e2d5c-aaa9-49c2-97ef-1f7d0ebd53c3",
+        "source": "peer",
+        "status": "succeeded",
+        "root_run_id": "57e767ee-c17f-4086-ab49-6c259aa2fb5e",
+        "sent_count": null
+      },
+      {
+        "id": "3c571d83-3de6-4469-a138-b537a7d9b51f",
+        "source": "group-member",
+        "status": "succeeded",
+        "root_run_id": "3c571d83-3de6-4469-a138-b537a7d9b51f",
+        "sent_count": 1
+      },
+      {
+        "id": "92a81049-bbab-4886-a566-2f7fb2816979",
+        "source": "peer",
+        "status": "succeeded",
+        "root_run_id": "57e767ee-c17f-4086-ab49-6c259aa2fb5e",
+        "sent_count": null
+      },
+      {
+        "id": "bf9f3839-23f1-4067-8e58-0dd7ee742160",
+        "source": "group-member",
+        "status": "succeeded",
+        "root_run_id": "bf9f3839-23f1-4067-8e58-0dd7ee742160",
+        "sent_count": 1
+      },
+      {
+        "id": "bbb62221-5e21-4839-a8a8-ccfca15a0a1f",
+        "source": "peer",
+        "status": "succeeded",
+        "root_run_id": "57e767ee-c17f-4086-ab49-6c259aa2fb5e",
+        "sent_count": null
+      },
+      {
+        "id": "51725b8b-16d4-4951-93d6-96e73c8a53b1",
+        "source": "group-member",
+        "status": "succeeded",
+        "root_run_id": "51725b8b-16d4-4951-93d6-96e73c8a53b1",
+        "sent_count": 0
+      },
+      {
+        "id": "419f88d8-1e6d-4c06-8d54-ad57427e1759",
+        "source": "group-member",
+        "status": "succeeded",
+        "root_run_id": "419f88d8-1e6d-4c06-8d54-ad57427e1759",
+        "sent_count": 0
+      },
+      {
+        "id": "f04abe6b-0e0b-420b-9f1c-26f1a871fba0",
+        "source": "group-member",
+        "status": "succeeded",
+        "root_run_id": "f04abe6b-0e0b-420b-9f1c-26f1a871fba0",
+        "sent_count": 1
+      },
+      {
+        "id": "ed77f723-1a7e-4750-b746-c31d92cbc668",
+        "source": "group-member",
+        "status": "succeeded",
+        "root_run_id": "ed77f723-1a7e-4750-b746-c31d92cbc668",
+        "sent_count": 0
+      },
+      {
+        "id": "74d8821a-7dfe-4110-903b-90ec7623e0a4",
+        "source": "group-member",
+        "status": "succeeded",
+        "root_run_id": "74d8821a-7dfe-4110-903b-90ec7623e0a4",
+        "sent_count": 0
+      },
+      {
+        "id": "d66822b9-2ed9-41c3-a817-cb66a08a7bd8",
+        "source": "group-member",
+        "status": "succeeded",
+        "root_run_id": "d66822b9-2ed9-41c3-a817-cb66a08a7bd8",
+        "sent_count": 0
+      }
+    ],
+    "usage": {
+      "requests": 32,
+      "unknown": 2,
+      "unknownReservedTokens": 16384
+    },
+    "approvals": [
+      {
+        "id": "efe2f556-cd7b-4815-bfe1-c091beab81b3",
+        "run_id": "57e767ee-c17f-4086-ab49-6c259aa2fb5e",
+        "status": "answered",
+        "answer": "approve",
+        "hasAutoReview": 1
+      },
+      {
+        "id": "390d5e22-5a6f-412a-9b32-4e813edb5e6d",
+        "run_id": "57e767ee-c17f-4086-ab49-6c259aa2fb5e",
+        "status": "answered",
+        "answer": "approve",
+        "hasAutoReview": 1
+      },
+      {
+        "id": "f4dd42ed-559c-4c8b-b30f-b0c075917cd8",
+        "run_id": "2ce25b92-141e-4989-93a2-805c6bef4fd8",
+        "status": "answered",
+        "answer": "approve",
+        "hasAutoReview": 1
+      },
+      {
+        "id": "8f534fee-59ce-43f3-b7d9-5747070cdcf5",
+        "run_id": "206e2d5c-aaa9-49c2-97ef-1f7d0ebd53c3",
+        "status": "answered",
+        "answer": "approve",
+        "hasAutoReview": 1
+      }
+    ],
+    "explicitPasses": 6
+  },
+  "officialGrokObserved": {
+    "via": "CUA native AX and screenshot in this logical turn",
+    "followupInput": "？",
+    "followupPublicReplyCount": 1,
+    "followupReply": "我在这儿。刚才的核验已经完成，17+25 = 42，新 Bot 也确认无误。接下来想让我们做什么，直接说就行。",
+    "collaborationInput": "群聊功能核验：先由一位 Bot 独立计算 17+25，另一位 Bot 核对并说明是否正确。各回复一次，完成后停止；不访问外部服务。",
+    "collaborationPublicReplies": [
+      "我来算：17+25 = 42。 新 Bot 请核对。",
+      "核对完毕：17+25 = 42，New Bot 算得正确。"
+    ]
+  },
+  "finiteOutcome": {
+    "newFollowupDelivered": true,
+    "followupConciseQualityPassed": false,
+    "arithmeticPublicResultsCorrect": true,
+    "collaborationInteractionAligned": false,
+    "collaborationRequestedMessageCountMet": false,
+    "extraPrivateAssignments": 2,
+    "manualApprovalsObserved": 4,
+    "coreParityComplete": false
+  },
+  "diagnosis": [
+    "A group turn is triggered by the latest peer public message; auto-review lacked the original human group-cycle task.",
+    "Private main-Bot coordination caused group relay to become private delegation. The private recipient has no group-send tool.",
+    "The older prompt encouraged every member to answer an already answered short query and allowed redundant coordinator summaries."
+  ],
+  "sourceCandidate": {
+    "live": false,
+    "changes": [
+      "Review original human request bound to active cycle, member, branch and conversation; retain cross-member refusals.",
+      "Adapt main-Bot group coordination and actual send tool descriptions; keep private return distinct.",
+      "Current request and exact public reply count are contextual data, not proof of completion.",
+      "Explicit provider quota exhaustion skips same-endpoint retries; preserves provider response and historical unknown usage."
+    ]
+  },
+  "gates": {
+    "groupStoreAndAuthority": "98 PASS / 5 files; /tmp/cmb-group-authority-boundaries-final-20261010.log",
+    "actualSdkGroupRuntime": "10 PASS / 315 not selected; /tmp/cmb-group-authority-runtime-final-20261010.log",
+    "quotaOwning": "51 PASS / 7 files; /tmp/cmb-quota-exhaustion-owning-final-20261009.log",
+    "node": "exit 0; /tmp/cmb-group-authority-node-20261010.log",
+    "workflow": "running at this evidence capture",
+    "strictLint": "final check running at this evidence capture",
+    "productionBuild": "running at this evidence capture"
+  },
+  "retainedFailureLogs": {
+    "cmb-group-authority-owning-20261010.log": {
+      "bytes": 8086,
+      "sha256": "9454818a2ca9a9ed2194872a4ce474433c4315e8d5600bb3b5c09f54958f27b6"
+    },
+    "cmb-group-authority-runtime-20261010.log": {
+      "bytes": 171613,
+      "sha256": "4b1cc131918b628356270915d08e6e49c50ac94d4d049739c3e64c2e03e18d54"
+    }
+  },
+  "sourceFiles": {
+    "src/main/bots/group-store.ts": {
+      "bytes": 20619,
+      "sha256": "7596a0617ecd32d08524ace4447a89b7321c8160982b9c966756bc13117c0932"
+    },
+    "src/main/bots/auto-review-store.ts": {
+      "bytes": 16500,
+      "sha256": "96b5e712ef48d8d6cb121a61d0fa52231d39d2da9932b9203149d9c9eaee305d"
+    },
+    "src/main/bots/primary-bot-store.ts": {
+      "bytes": 21562,
+      "sha256": "cd1fca17cf82f442a71bd4b92b2e6db7167264c1832b0640b6fe456ba1befd2b"
+    },
+    "src/main/bots/agent-runtime.ts": {
+      "bytes": 120109,
+      "sha256": "e89e71f7d3b4132759201d0a31a1555a0c745e048fc473113a8b3420f5e453b7"
+    },
+    "src/shared/model-quota-error.ts": {
+      "bytes": 2109,
+      "sha256": "96c66478704f55a718767963fd509f93dc64c1d961085c2fbae226939e83cc93"
+    },
+    "src/main/models/retrying-fetch.ts": {
+      "bytes": 13214,
+      "sha256": "16acdd63cf827f5c27371d838e7ebb31b2e118b53a6b9918e524de39dada9a2f"
+    }
+  },
+  "remaining": [
+    "Human-facing memory factual and concise reply quality",
+    "Remaining formal timer/event and skill-state journeys",
+    "Full Grok UI and core comparison",
+    "Windows generic native desktop input implementation and real machine acceptance",
+    "Final standalone installers and platform delivery"
+  ]
+}

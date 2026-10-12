@@ -1,0 +1,117 @@
+{
+  "schemaVersion": 1,
+  "kind": "formal-compiled-host-sigkill65-long-tmpdir-controlled-native",
+  "actualRealProvider": false,
+  "actualUI": false,
+  "startedAt": "2026-10-07T16:10:40.724Z",
+  "completedAt": "2026-10-07T16:10:47.909Z",
+  "durationMs": 7185,
+  "runnerCode": 0,
+  "runnerSignal": null,
+  "sourceAndCompiledInputsUnchanged": true,
+  "selectedCase": "resumes a persisted graph after SIGKILL and review without repeating a committed tool",
+  "passedTests": 1,
+  "failedTests": 0,
+  "ownedHostProcesses": 2,
+  "forceKilledCheckpoint": true,
+  "sameRun": true,
+  "succeeded": true,
+  "passed": true,
+  "processes": [
+    {
+      "event": "spawn",
+      "at": 1791389443919,
+      "pid": 49743,
+      "dataDirectory": "/private/var/folders/r4/m2gmdyyn06z9488ghc1044zh0000gn/T/cmb-native-sigkill65-long-zlKIBN/cmb-bot-process-wCEk3G",
+      "entrySHA256": "86598ca7711b2c141b5478a00219bb134c504493be79f7c25856536db87959e8"
+    },
+    {
+      "event": "exit",
+      "at": 1791389445980,
+      "pid": 49743,
+      "dataDirectory": "/private/var/folders/r4/m2gmdyyn06z9488ghc1044zh0000gn/T/cmb-native-sigkill65-long-zlKIBN/cmb-bot-process-wCEk3G",
+      "entrySHA256": "86598ca7711b2c141b5478a00219bb134c504493be79f7c25856536db87959e8",
+      "code": null,
+      "signal": "SIGKILL",
+      "durable": {
+        "schema": 65,
+        "run": {
+          "id": "360dcaf4-a731-4eb3-a49b-cbcdd0959c77",
+          "status": "running",
+          "has_checkpoint": 1,
+          "result_bytes": null
+        },
+        "delta": {
+          "heads": 4,
+          "dependent_heads": 4
+        },
+        "memories": 1
+      },
+      "socketEndpoint": {
+        "descriptorPid": 49743,
+        "descriptorObservedAt": 1791389445941,
+        "pathBytes": 58,
+        "underTemporaryRoot": false,
+        "namespaceHash": "1992b0da7584b1cfc6844ef08bcb8e74de333284b90f42aa652d0598ebf530ba",
+        "namespaceMode": 448,
+        "namespacePhysical": true,
+        "namespaceEntryCount": 2,
+        "socketPresent": true,
+        "socketMode": 384,
+        "isSocket": true
+      }
+    },
+    {
+      "event": "spawn",
+      "at": 1791389445998,
+      "pid": 49798,
+      "dataDirectory": "/private/var/folders/r4/m2gmdyyn06z9488ghc1044zh0000gn/T/cmb-native-sigkill65-long-zlKIBN/cmb-bot-process-wCEk3G",
+      "entrySHA256": "86598ca7711b2c141b5478a00219bb134c504493be79f7c25856536db87959e8"
+    },
+    {
+      "event": "exit",
+      "at": 1791389447771,
+      "pid": 49798,
+      "dataDirectory": "/private/var/folders/r4/m2gmdyyn06z9488ghc1044zh0000gn/T/cmb-native-sigkill65-long-zlKIBN/cmb-bot-process-wCEk3G",
+      "entrySHA256": "86598ca7711b2c141b5478a00219bb134c504493be79f7c25856536db87959e8",
+      "code": 0,
+      "signal": null,
+      "durable": {
+        "schema": 65,
+        "run": {
+          "id": "360dcaf4-a731-4eb3-a49b-cbcdd0959c77",
+          "status": "succeeded",
+          "has_checkpoint": 1,
+          "result_bytes": 21
+        },
+        "delta": {
+          "heads": 4,
+          "dependent_heads": 4
+        },
+        "memories": 1
+      },
+      "socketEndpoint": {
+        "descriptorPid": 49798,
+        "descriptorObservedAt": 1791389447741,
+        "pathBytes": 58,
+        "underTemporaryRoot": false,
+        "namespaceHash": "1992b0da7584b1cfc6844ef08bcb8e74de333284b90f42aa652d0598ebf530ba",
+        "namespaceMode": 448,
+        "namespacePhysical": true,
+        "namespaceEntryCount": 1,
+        "socketPresent": false,
+        "socketMode": null,
+        "isSocket": false
+      }
+    }
+  ],
+  "log": {
+    "bytes": 301,
+    "sha256": "66af80e6acf08b237717da0983566dfc5f055ff11872a28aad8364f99cada789"
+  },
+  "inputsSHA256": "d62f22eaafa7b99c39bf4681509211d96665ba5b60994a4caca1e6b2bca3e24d",
+  "longTemporaryRootBytes": 81,
+  "fallbackVerified": true,
+  "originalAssertionsAnd75SecondTimeoutUnchanged": true,
+  "privateEvidenceDirectory": "/var/folders/r4/m2gmdyyn06z9488ghc1044zh0000gn/T/cmb-native-sigkill65-long-zlKIBN"
+}

@@ -447,7 +447,7 @@ const HTTP_HOOK_FLAT_EXAMPLE = `{
   "url": "https://policy.internal.example/hooks/check",
   "headers": {
     "Authorization": "Bearer \${POLICY_TOKEN}",
-    "X-Source": "cmbcoworkagent"
+    "X-Source": "CMBDevClaw"
   },
   "allowedEnvVars": ["POLICY_TOKEN"],
   "fallback": "allow",
@@ -552,13 +552,13 @@ function getMatcherInfo(hook: DisplayHook): { label: string; detail?: string; mo
 
 function getHookConfigPath(hook: DisplayHook): string {
   if (hook.source === "plugin" || hook.source === "skill") return hook.hookPath
-  return hook.hookSourcePath || "~/.cmbcoworkagent/hooks.json"
+  return hook.hookSourcePath || "应用数据目录/hooks.json"
 }
 
 function getHookExecutionRoot(hook: DisplayHook): string {
   if (hook.source === "plugin") return hook.pluginRoot
   if (hook.source === "skill") return hook.skillPath
-  return hook.hookSourceRoot || "~/.cmbcoworkagent"
+  return hook.hookSourceRoot || "应用数据目录"
 }
 
 function getForcedOutcomeLabel(hook: DisplayHook): string | null {
@@ -1837,7 +1837,7 @@ function HooksGuide(): React.JSX.Element {
               </p>
               <p>
                 command Hook 的默认执行目录由 Hook 来源决定： 全局 Hook 在
-                <code className="mx-1 font-mono text-foreground/85">~/.cmbcoworkagent</code>
+                <code className="mx-1 font-mono text-foreground/85">应用数据目录</code>
                 执行，插件 Hook 在插件根目录执行，技能 Hook 在技能目录执行，工作区 Hook 在当前
                 workspace 执行。事件里的
                 <code className="mx-1 font-mono text-foreground/85">SKILL_ROOT</code>
@@ -1933,7 +1933,7 @@ function HooksGuide(): React.JSX.Element {
                 字段里。如果是嵌套子技能，就放在子技能自己的目录里。
               </p>
               <pre className="rounded-md border border-border/40 bg-background p-2 text-xs leading-5">
-                {`~/.cmbcoworkagent/skills/office/\n  SKILL.md\n  hooks/\n    hooks.json\n    pre-write-check.py\n  pdf/\n    SKILL.md\n    hooks/\n      hooks.json      ← 子技能自己的 Hook\n      pre-write-check.py`}
+                {`应用数据目录/skills/office/\n  SKILL.md\n  hooks/\n    hooks.json\n    pre-write-check.py\n  pdf/\n    SKILL.md\n    hooks/\n      hooks.json      ← 子技能自己的 Hook\n      pre-write-check.py`}
               </pre>
               <p>
                 Skill Hook 命令默认在技能所在目录作为
@@ -2037,7 +2037,7 @@ function HooksGuide(): React.JSX.Element {
                 字段指定自定义路径。
               </p>
               <pre className="rounded-md border border-border/40 bg-background p-2 text-xs leading-5">
-                {`~/.cmbcoworkagent/plugins/<plugin-name>/\n  manifest.json\n  hooks/\n    hooks.json      ← 默认路径\n    check.py`}
+                {`应用数据目录/plugins/<plugin-name>/\n  manifest.json\n  hooks/\n    hooks.json      ← 默认路径\n    check.py`}
               </pre>
               <p>
                 在<code className="mx-1 font-mono text-foreground/85">插件</code>

@@ -505,9 +505,10 @@ function readSource(path: string): string {
   return readFileSync(new URL(path, import.meta.url), "utf-8").replace(/\r\n?/g, "\n")
 }
 
-const RUNTIME_SRC = readSource("../src/main/agent/runtime.ts")
-const LOCAL_SANDBOX_SRC = readSource("../src/main/agent/local-sandbox.ts")
+const RUNTIME_SRC = readSource("../src/main/agent/runtime.ts") + "\n" + readSource("../src/main/agent/deep-agent-core.ts")
+const LOCAL_SANDBOX_SRC = readSource("../src/main/agent/local-sandbox-core.ts")
 const ENGINE_SRC = readSource("../src/main/agent/workflow/engine.ts")
+const WORKFLOW_CALL_IDENTITY_SRC = readSource("../src/main/agent/workflow/agent-call-identity.ts")
 const SUBAGENT_SRC = readSource("../src/main/agent/workflow/subagent.ts")
 const ACCESS_SRC = readSource("../src/main/agent/coordinator-worker-access.ts")
 const WORKFLOW_TOOL_SRC = readSource("../src/main/agent/workflow/tool.ts")
@@ -961,7 +962,7 @@ function testEngineResolvesAndHashesAgentType(): void {
     "engine resolves agentType against the run-cached workspace registry"
   )
   assert(
-    ENGINE_SRC.includes("agentType: agentProfile?.name ?? null"),
+    ENGINE_SRC.includes("workflowAgentCallHash({") && WORKFLOW_CALL_IDENTITY_SRC.includes("agentType: agentProfile?.name ?? null"),
     "the call-identity hash includes the resolved agentType (resume correctness)"
   )
   assert(

@@ -1,4 +1,5 @@
 import { BrowserWindow } from "electron"
+import { notifyRuntimeConfigurationChanged } from "../runtime-configuration-events"
 import type { RemoteModelCatalog, RemoteModelCatalogItem } from "../../shared/model-catalog"
 import {
   DEFAULT_MAX_OUTPUT_TOKENS,
@@ -70,6 +71,7 @@ let catalogRequest: Promise<void> | null = null
 let refreshTimer: ReturnType<typeof setInterval> | null = null
 
 function notifyModelChanges(): void {
+  notifyRuntimeConfigurationChanged()
   for (const win of BrowserWindow.getAllWindows()) {
     if (!win.isDestroyed() && !win.webContents.isDestroyed()) {
       win.webContents.send("models:changed")

@@ -1,0 +1,184 @@
+{
+  "kind": "inline-pdf-original-download-feature-fix",
+  "recordedAt": "2026-10-10T07:26:37.833698+00:00",
+  "originalUrl": "https://www.w3.org/WAI/ER/tests/xhtml/testfiles/resources/pdf/dummy.pdf",
+  "referenceDocument": {
+    "pages": 1,
+    "firstPageText": "Dummy PDF file"
+  },
+  "retainedFailure": {
+    "run": {
+      "id": "3e5e58e3-1435-48fb-9b8e-6bb5aa1a63dc",
+      "status": "cancelled",
+      "created_at": 1791615861851,
+      "updated_at": 1791616330307
+    },
+    "effects": [
+      {
+        "id": "browser:3e5e58e3-1435-48fb-9b8e-6bb5aa1a63dc:call_01a124a058bd77688ef7ea9c",
+        "status": "succeeded"
+      },
+      {
+        "id": "download:3e5e58e3-1435-48fb-9b8e-6bb5aa1a63dc:call_01a124a0aeb575c39e0f2775",
+        "status": "failed"
+      }
+    ],
+    "deliveredArtifactCount": 0,
+    "nativeBrowserObserved": "PDF rendered in Chrome native viewer; no attachment event collected. Direct URL transfer timed out in 30 seconds.",
+    "humanRecovery": "Exact original failed transfer confirmed uncompleted; task ended with written evidence through native recovery form. No automatic replay."
+  },
+  "officialGrokSameTask": {
+    "browserObservedResult": "ERR_CONNECTION_CLOSED; no PDF saved. Asked whether command-line fallback is allowed.",
+    "browserSuccessClaimed": false,
+    "sameOriginalFileDeliveryParityClaimed": false
+  },
+  "implementation": {
+    "ownerPage": "Temporary direct-download page only",
+    "bodyHandling": "Continue original HTTP streamed response with attachment disposition through CDP; preserve session cookies, redirects and RFC5987 filename. No body buffering or second HTTP GET.",
+    "ordinaryBrowserNavigationChanged": false,
+    "postExportPathChanged": false,
+    "limitsRetained": "25 MiB per original; 30 seconds; lease and human control fence; immutable publication"
+  },
+  "gates": [
+    {
+      "name": "actual inline and persistent profile lifecycle",
+      "status": "PASS",
+      "passedTests": 11,
+      "log": {
+        "path": "/tmp/cmb-inline-download-lifecycle-20261010.log",
+        "bytes": 790,
+        "sha256": "5f7faeb3387a5e1aa7cd78dc9baac053449a9d63db36d97e6960df24737acbf1"
+      }
+    },
+    {
+      "name": "shared-login download, takeover cancellation, POST/blob/frame regression",
+      "status": "PASS",
+      "passedTests": 3,
+      "skippedUnselectedTests": 10,
+      "log": {
+        "path": "/tmp/cmb-inline-download-broker-regression-20261010.log",
+        "bytes": 933,
+        "sha256": "f69d371186b5c9966ce4b922f9335fd922d6634fe34f61c185b1ae1b8a58ca2b"
+      }
+    },
+    {
+      "name": "node-types",
+      "status": "PASS",
+      "observedExitCode": 0,
+      "log": {
+        "path": "/tmp/cmb-inline-download-types-20261010.log",
+        "bytes": 91,
+        "sha256": "546c7bfd36ecac14793f941add6251c16a729819d1b744cccbaf256a91e1b42c"
+      }
+    },
+    {
+      "name": "strict-lint",
+      "status": "PASS",
+      "observedExitCode": 0,
+      "log": {
+        "path": "/tmp/cmb-inline-download-lint-20261010.log",
+        "bytes": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      }
+    },
+    {
+      "name": "build",
+      "status": "PASS",
+      "observedExitCode": 0,
+      "log": {
+        "path": "/tmp/cmb-inline-download-build-20261010.log",
+        "bytes": 56263,
+        "sha256": "9da542b7246c4533612e188770b72c5aca894b077f4de2d521660c1c47aa8491"
+      }
+    },
+    {
+      "name": "complete actual browser workspace after inline fix",
+      "status": "PASS",
+      "observedExitCode": 0,
+      "log": {
+        "path": "/tmp/cmb-inline-download-full-workspace-20261010.log",
+        "bytes": 1451,
+        "sha256": "6a7466d7944d19e9c88a35ec282affd8b1d61ab173e2de5ef7ff6e2ba4e43712"
+      }
+    }
+  ],
+  "coldPreservation": {
+    "descriptor": {
+      "version": 1,
+      "pid": 12184,
+      "hostId": "1e0f2b2b-29e9-47e9-af76-c35834d5dcb7",
+      "buildId": "d9ac5d25c2b1b81a3b0d1c06",
+      "socketPath": "/private/tmp/cmb-bot-501-4b987f56222e7e971f75407b/rpc.sock"
+    },
+    "selectedRuns": 187,
+    "checkpointPayloadBytesHashed": 18295508,
+    "logicalGroupsEqual": {
+      "runs": true,
+      "effects": true,
+      "interactions": true,
+      "artifacts": true,
+      "artifactObjects": true,
+      "peerDispatch": true,
+      "peerWaits": true,
+      "checkpoints": true,
+      "skills": true,
+      "project": true
+    },
+    "extraTablesEqual": {
+      "bot_memories": true,
+      "bot_memory_metadata": true,
+      "bot_model_usage": true,
+      "bot_group_cycles": true,
+      "bot_group_runs": true,
+      "bot_introduction_questions": true
+    },
+    "modelNormalizedFingerprintMatched": true,
+    "forceKillUsed": false
+  },
+  "privatePreservationReceipt": {
+    "path": "/Users/chenqiang/Library/Application Support/CMBDevClaw-development/2026-10-08/presentation/cold-ui-output-plan/inline-output-cold-preservation-1791616465369935000.safe.json",
+    "bytes": 32363,
+    "sha256": "c37969aac7a71e3103e10f59b8809c36df59f843592965b2b1a9372189b80b11"
+  },
+  "outputIdentity": "20cce3236a01c815f1b720fc",
+  "compiledSourceSha256": "20cce3236a01c815f1b720fc0d46868baf094f14cd2ef67b9b4935e9c3d52eaa",
+  "nativeMiniMaxRetest": {
+    "runId": "d9e01a9b-c393-42e1-a795-89194730b27a",
+    "status": "succeeded",
+    "createdAt": 1791616629887,
+    "finishedAt": 1791617361562,
+    "elapsedMs": 731675,
+    "automaticReviewTimeoutObserved": true,
+    "publicPdfNavigationHumanApproved": true,
+    "actualDeliveryPassed": true,
+    "pagesObservedInNativePreview": 1,
+    "firstPageTextObserved": "Dummy PDF file",
+    "artifact": {
+      "id": "download:d9e01a9b-c393-42e1-a795-89194730b27a:call_zUrTsAjWq1psQqj7ogCIig5U",
+      "filename": "dummy.pdf",
+      "bytes": 13264,
+      "sha256": "3df79d34abbca99308e79cb94461c1893582604d68329a41fd4bec1885e6adb4"
+    },
+    "nativeSavedFile": {
+      "path": "/tmp/cmb-native-inline-pdf-20261010-28gxqqhe/dummy.pdf",
+      "bytes": 13264,
+      "sha256": "3df79d34abbca99308e79cb94461c1893582604d68329a41fd4bec1885e6adb4",
+      "publicSourceUrl": "https://www.w3.org/WAI/ER/tests/xhtml/testfiles/resources/pdf/dummy.pdf",
+      "originalSourceBytesEqual": true,
+      "savedThroughNativeUi": true,
+      "referenceCertificateVerificationEnabled": true
+    },
+    "realModelUsage": {
+      "model": "MiniMax-M3",
+      "requests": 16,
+      "settled": 13,
+      "unknownUsage": 3
+    },
+    "newMemoryWrites": 0,
+    "latencyAndAllUsageSettledPassed": false,
+    "previewUiPolishRemaining": true
+  },
+  "coreParityComplete": false,
+  "independentInstallerClaimed": false,
+  "lastUpdatedAt": "2026-10-10T07:39:58.076331+00:00"
+}

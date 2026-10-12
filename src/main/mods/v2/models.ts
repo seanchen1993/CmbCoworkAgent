@@ -12,11 +12,11 @@ import {
   type FunctionModelReply
 } from "./model-sdk"
 
-interface FunctionModelHost {
+interface FunctionModelHost<Config extends { ref: string; maxOutputTokens?: number }> {
   assertScope(workspace: string, threadId: string): void
-  resolve(name: string): Promise<ResolvedModelConfig>
+  resolve(name: string): Promise<Config>
   invoke(
-    config: ResolvedModelConfig,
+    config: Config,
     request: FunctionModelRequest,
     signal: AbortSignal
   ): Promise<FunctionModelReply>
@@ -25,13 +25,15 @@ interface FunctionModelHost {
 }
 
 /** Bounded, separately accounted completions. Every explicit next reaches a fresh reservation. */
-export class FunctionModels {
+export class FunctionModels<
+  Config extends { ref: string; maxOutputTokens?: number } = ResolvedModelConfig
+> {
   private readonly active = new Map<string, number>()
   private pending = 0
 
   constructor(
     private readonly store: ModControlStore,
-    private readonly host: FunctionModelHost
+    private readonly host: FunctionModelHost<Config>
   ) {}
 
   get stats() {

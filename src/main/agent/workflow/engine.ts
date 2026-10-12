@@ -1,6 +1,7 @@
 import { promises as fsp } from "fs"
-import { dirname, isAbsolute, resolve } from "path"
-import fastGlob from "fast-glob"
+import { dirname, resolve } from "path"
+import { globWorkflowFiles } from "./glob"
+import { workflowAgentCallHash } from "./agent-call-identity"
 import {
   openStableFileHandle,
   readStableFileHandleBounded,
@@ -66,7 +67,7 @@ import {
 
 export interface WorkflowEngineOptions {
   parsed: ParsedWorkflowScript
-  runStore: WorkflowRunStore
+  runStore: WorkflowEngineStore
   args?: unknown
   tokenBudget?: number | null
   subagentRunner: WorkflowSubagentRunner
@@ -95,6 +96,25 @@ export interface WorkflowEngineOptions {
    * silo (fileWriteChain vs the tool-concurrency lock). Falls back to the local chain
    * when absent (unit harness / embedded caller). (#2) */
   runExclusiveFileWrite?: <T>(fn: () => Promise<T>) => Promise<T>
+  /** Embedded hosts supply the complete file boundary. No native workspace IO
+   * is used when present, including reads of nested workflow scripts. */
+  files?: WorkflowFileAccess
+  /** Durable hosts retain child receipts before the journal acknowledgement.
+   * Reserve journaled identities so recovery cannot consume one receipt twice. */
+  durableAgentCalls?: boolean
+}
+
+export type WorkflowEngineStore = Pick<
+  WorkflowRunStore,
+  "state" | "update" | "appendJournal" | "upsertAgent" | "flush" | "persistFullResult"
+>
+
+export interface WorkflowFileAccess {
+  read(path: string, signal: AbortSignal): Promise<string>
+  exists(path: string, signal: AbortSignal): Promise<boolean>
+  glob(pattern: string, signal: AbortSignal): Promise<string[]>
+  write(path: string, content: string, signal: AbortSignal): Promise<void>
+  workflow(path: string, signal: AbortSignal): Promise<string>
 }
 
 export interface WorkflowEngineResult {
@@ -125,6 +145,8 @@ interface SharedRuntime {
   agentsFailed: number
   outputTokens: number
   callSeq: number
+  reservedCallKeys: Set<string>
+  nextCallOccurrence: Map<string, number>
 }
 
 // Process-wide concurrency ceiling shared by ALL runs + nested children, so
@@ -144,7 +166,8 @@ export async function runWorkflowEngine(
 ): Promise<WorkflowEngineResult> {
   const startedAt = Date.now()
   const runId = options.runStore.state.runId
-  const agentProfiles = options.agentProfiles ?? (await loadAgentProfilesAsync(options.workspacePath))
+  const agentProfiles =
+    options.agentProfiles ?? (await loadAgentProfilesAsync(options.workspacePath))
   // Per-run limiter (NARROWable via maxConcurrency) composed UNDER the global
   // ceiling: a run is bounded by min(its own cap, the process-wide cap), and
   // concurrent runs can't collectively exceed the global cap. Order matters —
@@ -163,7 +186,9 @@ export async function runWorkflowEngine(
     agentsCached: 0,
     agentsFailed: 0,
     outputTokens: 0,
-    callSeq: 0
+    callSeq: 0,
+    reservedCallKeys: new Set(),
+    nextCallOccurrence: new Map()
   }
   // Content-based replay (official semantics): index the journal by call-identity
   // HASH, not by call index. A resumed agent() replays whenever its hash has an
@@ -176,6 +201,15 @@ export async function runWorkflowEngine(
     options.runStore.state.resumed === true || options.runStore.state.journal.length > 0
   const availableByHash = new Map<string, WorkflowJournalEntry[]>()
   for (const entry of options.runStore.state.journal) {
+    if (options.durableAgentCalls) {
+      if (
+        !entry.durableCallKey ||
+        !new RegExp(`^${entry.hash}_n[0-9]{1,5}$`).test(entry.durableCallKey) ||
+        shared.reservedCallKeys.has(entry.durableCallKey)
+      )
+        throw new Error("Workflow journal has missing or duplicate durable child identity")
+      shared.reservedCallKeys.add(entry.durableCallKey)
+    }
     const bucket = availableByHash.get(entry.hash)
     if (bucket) bucket.push(entry)
     else availableByHash.set(entry.hash, [entry])
@@ -277,7 +311,13 @@ export async function runWorkflowEngine(
       warning: effectiveWarning,
       stats: runStats
     })
-    return { status, result, error, warning: effectiveWarning, stats: runStats }
+    return {
+      status,
+      result,
+      error,
+      warning: effectiveWarning,
+      stats: runStats
+    }
   }
 
   // Engine-owned lifetime signal: follows the caller's signal, and is also
@@ -722,44 +762,15 @@ function buildWorkflowGlobals(context: GlobalsContext): Record<string, unknown> 
     // them out is what lets a reordered/concurrent call still match its journal.
     // The resolved model IS included, so editing a phase's model invalidates that
     // call's cache.
-    const callHash = sha256Hex(
-      JSON.stringify({
-        // Child identity keys on the SCRIPT (childCacheKey), NOT the display name —
-        // two child files sharing a meta.name must not share journal cache (#5).
-        child: context.childCacheKey ?? null,
-        prompt: request.prompt,
-        schema: request.options.schema ?? null,
-        // resolvedModel === undefined means this agent runs on the SESSION DEFAULT
-        // (subagent.ts falls back to deps.defaultModelId). Fold that default in so
-        // switching the thread's model invalidates the cache — else a resume
-        // replays the old default model's result. (#1)
-        model: resolvedModel ?? context.defaultModelId ?? null,
-        // A known agentType changes the subagent's role prompt and tool workload,
-        // so it MUST be part of the identity — otherwise a resume after editing a
-        // call's agentType would wrongly replay the old agent's output. Omitted
-        // agentType collapses to null (the default agent); unknown agentTypes
-        // fail closed before reaching this hash.
-        agentType: agentProfile?.name ?? null,
-        // The NAME alone is not enough: a user can edit a same-named agent file
-        // (.cmbcoworkagent/agents/<name>.md) to change its role prompt or tool
-        // policy — all of which are passed to the subagent (see subagentRunner
-        // call: roleSystemPrompt/disallowedTools/shellAccess). Fold the resolved
-        // profile's behaviour-affecting fields into the hash so such an edit
-        // invalidates the journal entry (resume re-runs instead of replaying the
-        // stale agent). model is already covered by `model` (resolvedModel) above.
-        agentProfile: agentProfile
-          ? {
-              systemPrompt: agentProfile.systemPrompt,
-              disallowedTools: [...agentProfile.disallowedTools].sort(),
-              shellAccess: agentProfile.shellAccess
-            }
-          : null,
-        // Preserve the pre-worktree hash for ordinary agents so existing journals
-        // still replay after an upgrade. An explicitly isolated call gets a
-        // distinct identity and can never consume a shared-workspace entry.
-        ...(request.options.isolation ? { isolation: request.options.isolation } : {})
-      })
-    )
+    const callHash = workflowAgentCallHash({
+      childCacheKey: context.childCacheKey,
+      prompt: request.prompt,
+      schema: request.options.schema,
+      model: resolvedModel,
+      defaultModelId: context.defaultModelId,
+      profile: agentProfile,
+      isolation: request.options.isolation
+    })
 
     // Composite tool-stream sidecar key for a LIVE run of this call: callHash (content identity)
     // + this run's callIndex (uniqueness). A cached replay below substitutes the journal's
@@ -824,12 +835,30 @@ function buildWorkflowGlobals(context: GlobalsContext): Record<string, unknown> 
       return cached.hasStructured ? toJsonSafe(cached.structured) : cached.result
     }
 
+    // Allocate only for live calls, after reserving ALL seeded journal receipts.
+    // A completed child whose journal acknowledgement was lost gets its old key,
+    // even when a sibling of identical content finished first or a pipeline reorders.
+    let durableCallKey: string | undefined
+    if (context.durableAgentCalls) {
+      let occurrence = shared.nextCallOccurrence.get(callHash) ?? 0
+      while (shared.reservedCallKeys.has(`${callHash}_n${occurrence}`)) occurrence++
+      durableCallKey = `${callHash}_n${occurrence}`
+      shared.reservedCallKeys.add(durableCallKey)
+      shared.nextCallOccurrence.set(callHash, occurrence + 1)
+    }
     const execution = shared.limiter(async () => {
       // The run may have been aborted while this call waited for a slot —
       // don't announce agents that will never start.
       if (signal.aborted) throw new WorkflowAbortError()
       const startedAt = Date.now()
-      emit({ kind: "agent_start", runId, agentIndex, label, phase: assignedPhase, promptPreview })
+      emit({
+        kind: "agent_start",
+        runId,
+        agentIndex,
+        label,
+        phase: assignedPhase,
+        promptPreview
+      })
       recordAgentState(runStore, {
         index: agentIndex,
         label,
@@ -847,12 +876,16 @@ function buildWorkflowGlobals(context: GlobalsContext): Record<string, unknown> 
           model: resolvedModel,
           agentIndex,
           toolStreamKey: liveToolStreamKey,
+          ...(durableCallKey ? { durableCallKey } : {}),
           label,
           phase: assignedPhase,
           signal,
+          agentType: agentProfile?.name,
           roleSystemPrompt: agentProfile?.systemPrompt,
           disallowedTools: agentProfile?.disallowedTools,
           shellAccess: agentProfile?.shellAccess,
+          ...(agentProfile?.browserAccess ? { browserAccess: agentProfile.browserAccess } : {}),
+          ...(agentProfile?.desktopAccess ? { desktopAccess: agentProfile.desktopAccess } : {}),
           isolation: request.options.isolation
         })
         throwIfAborted()
@@ -899,8 +932,12 @@ function buildWorkflowGlobals(context: GlobalsContext): Record<string, unknown> 
           )
         } else {
           runStore.appendJournal({
-            index: callIndex,
+            // Durable hosts key the journal slot by content occurrence too. A
+            // reordered live call must not replace a cached sibling on the same
+            // lexical index/hash. Desktop sidecars keep their original indexing.
+            index: durableCallKey ? Number(durableCallKey.split("_n")[1]) : callIndex,
             hash: callHash,
+            ...(durableCallKey ? { durableCallKey } : {}),
             result: text,
             structured: structuredSafe,
             hasStructured: Boolean(request.options.schema),
@@ -1053,7 +1090,9 @@ function buildWorkflowGlobals(context: GlobalsContext): Record<string, unknown> 
     if (context.childName) {
       throw new WorkflowFatalError("workflow() cannot be called from within a child workflow")
     }
-    const { source, name } = await loadChildWorkflowSource(context.workspacePath, nameOrRef)
+    const { source, name } = context.files
+      ? await loadHostedWorkflowSource(context.files, nameOrRef, signal)
+      : await loadChildWorkflowSource(context.workspacePath, nameOrRef)
     let parsedChild: ParsedWorkflowScript
     try {
       parsedChild = validateWorkflowScript(source)
@@ -1098,6 +1137,13 @@ function buildWorkflowGlobals(context: GlobalsContext): Record<string, unknown> 
   const readFile = async (filePath: unknown): Promise<string> => {
     throwIfAborted()
     if (typeof filePath !== "string") throw new TypeError("readFile(path) expects a string path")
+    if (context.files) {
+      const text = await context.files.read(filePath, signal)
+      throwIfAborted()
+      if (typeof text !== "string" || Buffer.byteLength(text, "utf8") > FILE_READ_MAX_BYTES)
+        throw new WorkflowFatalError("readFile returned invalid or oversized text")
+      return text
+    }
     const resolved = resolveExistingWorkspacePath(
       context.workspacePath,
       filePath,
@@ -1118,7 +1164,9 @@ function buildWorkflowGlobals(context: GlobalsContext): Record<string, unknown> 
     return await fsp.readFile(resolved, "utf-8")
   }
   const exists = async (filePath: unknown): Promise<boolean> => {
+    throwIfAborted()
     if (typeof filePath !== "string") throw new TypeError("exists(path) expects a string path")
+    if (context.files) return context.files.exists(filePath, signal)
     try {
       // resolveExistingWorkspacePath throws if the path is missing OR outside the
       // workspace; either way the script should see false (never leak which).
@@ -1131,43 +1179,14 @@ function buildWorkflowGlobals(context: GlobalsContext): Record<string, unknown> 
   const glob = async (pattern: unknown): Promise<string[]> => {
     throwIfAborted()
     if (typeof pattern !== "string") throw new TypeError("glob(pattern) expects a string pattern")
-    // STREAM + count as we walk, so the moment we cross MAX_GLOB_RESULTS we abort
-    // the traversal itself — never materializing the full path array for a
-    // pathological pattern. (A post-hoc length check on `await fastGlob(...)` would
-    // only protect the downstream fan-out, AFTER the whole tree was walked and the
-    // giant array allocated on the main process.)
-    const stream = fastGlob.stream(pattern, {
-      cwd: context.workspacePath,
-      onlyFiles: true,
-      dot: false,
-      followSymbolicLinks: false,
-      absolute: false,
-      suppressErrors: true,
-      // Skip the universal build/VCS noise. A workflow orchestrating over a repo
-      // virtually never wants node_modules/.git, and on a real project including
-      // them both floods the fan-out with junk and blows the result set past
-      // MAX_GLOB_RESULTS. (dist is intentionally NOT excluded — it's project-specific
-      // and sometimes holds source the script legitimately wants.)
-      ignore: ["**/node_modules/**", "**/.git/**"]
-    })
-    const safe: string[] = []
-    for await (const entry of stream) {
-      const m = String(entry)
-      // Defensive: drop any match that escaped the cwd.
-      if (m.startsWith("..") || isAbsolute(m)) continue
-      safe.push(m)
-      if (safe.length > MAX_GLOB_RESULTS) {
-        // Throwing breaks the for-await, whose return() tears the stream down, so we
-        // stop enumerating the tree instead of walking it to completion + allocating
-        // the whole array.
-        throw new WorkflowFatalError(
-          `glob("${pattern}") matched more than ${MAX_GLOB_RESULTS} files (limit ${MAX_GLOB_RESULTS}) — narrow the pattern`
-        )
-      }
+    if (context.files) {
+      const matches = await context.files.glob(pattern, signal)
+      throwIfAborted()
+      if (matches.length > MAX_GLOB_RESULTS || matches.some((item) => typeof item !== "string"))
+        throw new WorkflowFatalError("glob returned invalid or too many paths")
+      return [...matches].sort()
     }
-    // SORT for deterministic fan-out order (the resume journal keys on call order,
-    // so order must be stable between the original and resumed runs).
-    return safe.sort()
+    return globWorkflowFiles(context.workspacePath, pattern)
   }
   const writeFile = async (filePath: unknown, content: unknown): Promise<void> => {
     throwIfAborted()
@@ -1186,6 +1205,7 @@ function buildWorkflowGlobals(context: GlobalsContext): Record<string, unknown> 
         `writeFile "${filePath}" content is too large (${contentBytes} > ${FILE_WRITE_MAX_BYTES} byte limit)`
       )
     }
+    if (context.files) return context.files.write(filePath, content, signal)
     const resolved = resolveWorkspaceWritePath(
       context.workspacePath,
       filePath,
@@ -1386,7 +1406,7 @@ function normalizeAgentArgs(
 }
 
 function recordAgentState(
-  runStore: WorkflowRunStore,
+  runStore: WorkflowEngineStore,
   record: {
     index: number
     label: string
@@ -1402,6 +1422,23 @@ function recordAgentState(
   // Delegates to the store's O(1) by-index upsert (was an O(n) array scan per
   // call → O(n²) over a large run).
   runStore.upsertAgent(record)
+}
+
+async function loadHostedWorkflowSource(
+  files: WorkflowFileAccess,
+  nameOrRef: unknown,
+  signal: AbortSignal
+): Promise<{ source: string; name: string }> {
+  const name =
+    nameOrRef && typeof nameOrRef === "object" && "scriptPath" in nameOrRef
+      ? nameOrRef.scriptPath
+      : undefined
+  if (typeof name !== "string" || !name)
+    throw new TypeError('workflow() expects { scriptPath: "…" }')
+  const source = await files.workflow(name, signal)
+  if (typeof source !== "string" || Buffer.byteLength(source, "utf8") > MAX_WORKFLOW_SCRIPT_BYTES)
+    throw new WorkflowScriptError(`workflow "${name}" returned invalid or oversized source`)
+  return { source, name }
 }
 
 async function loadChildWorkflowSource(
@@ -1461,9 +1498,7 @@ async function readBoundedChildWorkflowScript(
   scriptPath: string
 ): Promise<string> {
   try {
-    return (await readStableFileHandleBounded(opened, MAX_WORKFLOW_SCRIPT_BYTES)).toString(
-      "utf8"
-    )
+    return (await readStableFileHandleBounded(opened, MAX_WORKFLOW_SCRIPT_BYTES)).toString("utf8")
   } catch (error) {
     if (error instanceof StableBoundedReadError) {
       if (error.failure === "initial-too-large") {

@@ -17,7 +17,6 @@ import {
   Sparkles,
   Store,
   Trash2,
-  Upload,
   X
 } from "lucide-react"
 import { Button } from "@/components/ui/button"
@@ -26,13 +25,6 @@ import { ScrollArea } from "@/components/ui/scroll-area"
 import { Badge } from "@/components/ui/badge"
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover"
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip"
-import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogHeader,
-  DialogTitle
-} from "@/components/ui/dialog"
 import { cn } from "@/lib/utils"
 import type { SkillMetadata } from "@/types"
 import { useAppStore } from "@/lib/store"
@@ -51,6 +43,7 @@ import {
   DEFAULT_SCENE_CATEGORY,
   getUploaderIdCandidates
 } from "../../lib/skill-data-service"
+import { UploadSkillDialog } from "./UploadSkillDialog"
 import { SkillFileEditor } from "./SkillFileEditor"
 import { UniversalUploadDialog } from "./MarketPanel/UniversalUploadDialog"
 import { toast } from "sonner"
@@ -337,144 +330,6 @@ function mergeMarkdownFrontmatter(protectedPrefix: string, editableContent: stri
     return `${protectedPrefix}${editableContent}`
   }
   return `${protectedPrefix}\n${editableContent}`
-}
-
-function buildNestedNameConflictConfirmMessage(
-  conflicts: Array<{ name: string; relativePath: string }>
-): string {
-  const preview =
-    conflicts.length <= 5
-      ? conflicts.map((item) => `${item.name}（${item.relativePath}）`).join("、")
-      : `${conflicts
-          .slice(0, 5)
-          .map((item) => `${item.name}（${item.relativePath}）`)
-          .join("、")} 等`
-  return `导入会引入 ${conflicts.length} 个与现有 skill 同名的子技能：${preview}，是否继续？\n\n继续后面板中可能出现同名技能，可通过目录层级区分。`
-}
-
-function UploadSkillDialog(props: {
-  open: boolean
-  onOpenChange: (open: boolean) => void
-  onSuccess: (uploadedSkillDirName?: string) => void
-}): React.JSX.Element {
-  const { open, onOpenChange, onSuccess } = props
-  const [dragOver, setDragOver] = useState(false)
-  const [uploading, setUploading] = useState(false)
-  const [error, setError] = useState<string | null>(null)
-
-  const handleFile = useCallback(
-    async (file: File) => {
-      const ext = file.name.toLowerCase().slice(file.name.lastIndexOf("."))
-      if (ext !== ".md" && ext !== ".zip") {
-        setError("仅支持 .md 或 .zip 文件")
-        return
-      }
-      if (typeof window.api?.skills?.upload !== "function") {
-        setError("上传功能不可用，请重启应用后重试")
-        return
-      }
-      setError(null)
-      setUploading(true)
-      try {
-        const buffer = await file.arrayBuffer()
-        let res = await window.api.skills.upload(buffer, file.name)
-        if (!res.success && res.nestedNameConflicts?.length) {
-          const shouldContinue = window.confirm(
-            buildNestedNameConflictConfirmMessage(res.nestedNameConflicts)
-          )
-          if (!shouldContinue) {
-            setError("已取消导入")
-            return
-          }
-          res = await window.api.skills.upload(buffer, file.name, {
-            allowNestedNameDuplicates: true
-          })
-        }
-        if (res.success) {
-          onSuccess(res.skillName)
-          onOpenChange(false)
-        } else {
-          setError(res.error || "上传失败")
-        }
-      } catch (e) {
-        setError(e instanceof Error ? e.message : "Unknown error")
-      } finally {
-        setUploading(false)
-      }
-    },
-    [onOpenChange, onSuccess]
-  )
-
-  const onDrop = useCallback(
-    (e: React.DragEvent) => {
-      e.preventDefault()
-      setDragOver(false)
-      const file = e.dataTransfer.files[0]
-      if (file) handleFile(file)
-    },
-    [handleFile]
-  )
-
-  const onDragOver = useCallback((e: React.DragEvent) => {
-    e.preventDefault()
-    setDragOver(true)
-  }, [])
-
-  const onDragLeave = useCallback(() => setDragOver(false), [])
-
-  const onInputChange = useCallback(
-    (e: React.ChangeEvent<HTMLInputElement>) => {
-      const file = e.target.files?.[0]
-      if (file) handleFile(file)
-      e.target.value = ""
-    },
-    [handleFile]
-  )
-
-  return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="sm:max-w-md">
-        <DialogHeader>
-          <DialogTitle>上传技能</DialogTitle>
-          <DialogDescription>
-            .md 文件需包含 YAML frontmatter 中的 name 字段；.zip 文件需包含
-            SKILL.md，可包含嵌套子技能
-          </DialogDescription>
-        </DialogHeader>
-        <div
-          className={cn(
-            "mt-4 border-2 border-dashed rounded-lg p-8 text-center transition-colors cursor-pointer",
-            dragOver
-              ? "border-primary bg-primary/5"
-              : "border-muted-foreground/30 hover:border-muted-foreground/50",
-            uploading && "pointer-events-none opacity-60"
-          )}
-          onDrop={onDrop}
-          onDragOver={onDragOver}
-          onDragLeave={onDragLeave}
-          onClick={() => document.getElementById("upload-skill-input")?.click()}
-        >
-          <input
-            id="upload-skill-input"
-            type="file"
-            accept=".md,.zip"
-            className="hidden"
-            onChange={onInputChange}
-            disabled={uploading}
-          />
-          {uploading ? (
-            <p className="text-sm text-muted-foreground">上传中...</p>
-          ) : (
-            <>
-              <Upload className="size-10 mx-auto text-muted-foreground mb-2" />
-              <p className="text-sm text-muted-foreground">拖拽文件到此处，或点击选择</p>
-            </>
-          )}
-        </div>
-        {error && <p className="mt-2 text-sm text-destructive">{error}</p>}
-      </DialogContent>
-    </Dialog>
-  )
 }
 
 function PublishSkillDialog(props: {
@@ -770,13 +625,13 @@ function defaultSkillFile(files: string[]): string | null {
   return skillMd ?? files[0]
 }
 
-const SKILL_HOOK_TREE_EXAMPLE = `~/.cmbcoworkagent/skills/<skill-name>/
+const SKILL_HOOK_TREE_EXAMPLE = `应用数据目录/skills/<skill-name>/
   SKILL.md
   hooks/
     hooks.json
     pre-write-check.py`
 
-const SKILL_NESTED_TREE_EXAMPLE = `~/.cmbcoworkagent/skills/office/
+const SKILL_NESTED_TREE_EXAMPLE = `应用数据目录/skills/office/
   SKILL.md
   hooks/
     hooks.json
@@ -882,13 +737,13 @@ const SKILL_HOOK_WINDOWS_ARG_EXAMPLE = `"command": "python hooks/check.py \\"%WO
 
 const SKILL_HOOK_STDIN_EXAMPLE = `{
   "hook_event_name": "PreToolUse",
-  "cwd": "~/.cmbcoworkagent/skills/<skill-name>",
+  "cwd": "应用数据目录/skills/<skill-name>",
   "tool_name": "write_file",
   "tool_input": { "path": "src/demo.ts" },
   "skill_name": "<skill-name>",
   "hook_source_type": "skill",
-  "hook_source_root": "~/.cmbcoworkagent/skills/<skill-name>",
-  "skill_root": "~/.cmbcoworkagent/skills/<skill-name>"
+  "hook_source_root": "应用数据目录/skills/<skill-name>",
+  "skill_root": "应用数据目录/skills/<skill-name>"
 }`
 
 function SkillGuideSection(props: {

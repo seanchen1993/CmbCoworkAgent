@@ -1,0 +1,12 @@
+{
+  "phase": "actual-opening-metadata-guard-output-original-complete-browser49",
+  "startedAt": "2026-10-07T08:36:48.819139+00:00",
+  "completedAt": "2026-10-07T08:49:58.110157+00:00",
+  "seconds": 789.2910505830077,
+  "exitCode": 1,
+  "inputCount": 3834,
+  "sourceDrift": [],
+  "logSHA256": "e72e4a67f8f296126117186c839794730777b2071db1300bd430a25813f25b50",
+  "automaticRetries": 0,
+  "wrapperOverridesOriginalTimeouts": false
+}

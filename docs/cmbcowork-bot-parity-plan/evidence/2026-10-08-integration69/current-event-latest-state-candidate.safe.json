@@ -1,0 +1,91 @@
+{
+  "recordedAt": "2026-10-11",
+  "scope": "CJ04 source candidate: explicit versioned latest-state events",
+  "schemaVersion": 74,
+  "implementation": "Original request receipt and SQLite transaction commit version identity, high water, new run and old-run draining together. Original final dispatch authority follows root ownership across peer/workflow children. Issued/unknown effects retain original settlement and human reconciliation; newer same-entity tasks cannot overtake them.",
+  "ordinaryEventCompatibility": "Default every-event behavior unchanged; no new stale-drop semantics without explicit routine policy.",
+  "gates": [
+    {
+      "kind": "domain-and-neighbor",
+      "result": "passed",
+      "files": 7,
+      "tests": 52,
+      "log": "/tmp/cmb-latest-event-final-20261011.log"
+    },
+    {
+      "kind": "domain-after-unknown-mode-exit-assertion",
+      "result": "passed",
+      "tests": 10,
+      "log": "/tmp/cmb-latest-event-ui-20261011.log",
+      "note": "This run also contained 2 obsolete/missing-style browser fixture failures; browser was corrected and separately passed."
+    },
+    {
+      "kind": "actual-react-rpc-sqlite-http",
+      "result": "passed",
+      "tests": 2,
+      "log": "/tmp/cmb-latest-event-ui-final-20261011.log",
+      "coverage": [
+        "Ordinary event behavior",
+        "Actual editor selects latest-state and saves source epoch",
+        "Actual webhook sends versioned HTTP and stale delivery is durably ignored",
+        "Credential copy, lost rotation reply, reload receipt recovery and revocation in both modes"
+      ]
+    },
+    {
+      "kind": "focused-eslint-max-warnings-0",
+      "result": "passed",
+      "files": 14,
+      "log": "/tmp/cmb-latest-event-lint-20261011.log"
+    },
+    {
+      "kind": "web-typecheck",
+      "result": "passed",
+      "log": "/tmp/cmb-latest-event-web-20261011.log"
+    }
+  ],
+  "meaningfulFaultCoverage": [
+    "Approval pending and already approved when newer version arrives",
+    "Same sequence different content rejected",
+    "Out-of-order and duplicate stable receipts",
+    "Failure rolls back high water, dispatch and drains",
+    "Cross-Bot child carries original source version",
+    "Restart retains unknown effect and blocks successor",
+    "Actual controlled HTTP CAS applies old write then loses reply; later stale If-Match rejected after reconciliation and new write"
+  ],
+  "fixedDuringVerification": "SQLite result adapter maps duplicate column names; source/head sequence query now has unique aliases and the cross-Bot stale-version assertion remains strict.",
+  "unclaimed": [
+    "Real MiniMax CJ04",
+    "Grok official CJ04 comparison",
+    "Frozen native App or DMG includes this source",
+    "Every external connector supports conditional writes",
+    "Issued external requests can be retracted",
+    "Whole product parity or completion percentage"
+  ],
+  "externalAtomicityBoundary": "Target-side CAS/ETag is required for arbitrary external atomic updates; Host version fencing alone cannot retract or control an already-issued request.",
+  "documentation": "docs/cmbcowork-bot-parity-plan/18-webhook-latest-state.md",
+  "sourceHashes": {
+    "src/shared/bot-event-state.ts": "8f5a7ed28586d5bea1771f33531545e56a6e9b97cf793a25aa951687cd9f8e9d",
+    "src/main/bots/event-state.ts": "6b02b0ae1126e38bf94f6e2a0ee12c311a02af6375f1693733fbbe0563e0804b",
+    "src/main/bots/event-state-schema.ts": "3b678247b2922d74b902953350100dd443397c0ce691092baf2ea6ce72324033",
+    "src/main/bots/event-state.test.ts": "34959dc2d48a98dafe4aee5d523c3ac856201522550b83abb323bdf35ec02170",
+    "src/main/bots/webhooks.ts": "38ff2f3545c9644c98cff9f0baec42d103b9cb1981774d2b997c5c327efda307",
+    "src/main/bots/webhook-server.ts": "99a738ba859dced9d63c6e2cbb39c66e7b02ebb36cea9d2786bbae5a47b03f26",
+    "src/main/bots/webhooks.browser.test.ts": "af017418a84a8d0597f41193b5e4f0d5bd8a68738223ff69b903e3e83764973b",
+    "src/main/bots/routine-tools.ts": "af31a9121198a386ced17d0c9394b348468504c2435cac614167e498e885d45d",
+    "src/renderer/src/lib/bot-routine-draft.ts": "63f3e538da4581331a5f09743ea752aa09b0e7549cf3758c73b6912071321f56",
+    "src/renderer/src/lib/use-bot-routine-run.ts": "cb558cf80dd6f8ac0a29010b064bdfd0b3738d6c2b2d9477cafd57b31f93159b",
+    "src/renderer/src/components/bots/BotRoutineForm.tsx": "c52aadc288d308c10ba88d1e81f159a11e8c1abb11144faa67f174123b1ee321",
+    "src/renderer/src/components/bots/BotWebhook.tsx": "0f4ecb21e2fffefa96c4fdc1cf1175aefbfa86e60a640c54b1cbf9c175487678"
+  },
+  "logHashes": {
+    "/tmp/cmb-latest-event-final-20261011.log": "4cd13c1b8a928fcedcedbae9eebe766ae59133c9bdf1a9510912f3e6cf448209",
+    "/tmp/cmb-latest-event-ui-20261011.log": "d9d7acf72dae8e8d0b29aabbbaebc6736b6d1b53844a058f8410dba840081615",
+    "/tmp/cmb-latest-event-ui-final-20261011.log": "3739f30a23a77bd73c60cd44133a540cf29b185181c7a8d9b79d8d655dfbe290",
+    "/tmp/cmb-latest-event-lint-20261011.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "/tmp/cmb-latest-event-web-20261011.log": "aba1d996409180225c6f720bd909b367ee8681e710f7b8537e5a1d7f6d07f2ac"
+  },
+  "screenshots": [
+    "output/bot-webhooks/latest-state/webhook-light.png",
+    "output/bot-webhooks/latest-state/webhook-recovered-dark.png"
+  ]
+}

@@ -4,7 +4,10 @@ import { randomUUID } from "node:crypto"
 import * as fs from "fs/promises"
 import * as path from "path"
 import { existsSync, mkdirSync, rmSync } from "fs"
-import * as chardet from "jschardet"
+import { decodeSkillTextFile } from "../skills/text-decoding"
+import { inspectSkillImport } from "../skills/import-preview"
+import { registerSkillImportHandlers } from "./skill-import"
+import { SkillImportInstaller, SkillImportQueue } from "../skills/import-install"
 import * as iconv from "iconv-lite"
 import {
   getCustomSkillsDir,
@@ -52,6 +55,7 @@ import type {
 } from "../../shared/skill-preview"
 
 const disabledSkillMutationQueue = new DisabledSkillMutationQueue()
+const skillImportQueue = new SkillImportQueue()
 
 interface ZipEntryLike {
   entryName: string
@@ -249,80 +253,6 @@ const TEXT_BUNDLE_FILE_EXTENSIONS = new Set([
 const MAX_TEXT_BUNDLE_FILE_BYTES = 512 * 1024
 const MAX_TEXT_BUNDLE_TOTAL_BYTES = 2 * 1024 * 1024
 
-const CHARDET_CONFIDENCE_THRESHOLD = 0.6
-
-function isValidUtf8(buf: Buffer): boolean {
-  try {
-    new TextDecoder("utf-8", { fatal: true }).decode(buf)
-    return true
-  } catch {
-    return false
-  }
-}
-
-function decodeSkillTextFile(content: Buffer, filePath: string): string {
-  if (content.length === 0) return ""
-
-  // UTF BOM 明确优先，避免误判。
-  if (content.length >= 3 && content[0] === 0xef && content[1] === 0xbb && content[2] === 0xbf) {
-    return content.toString("utf-8")
-  }
-  if (content.length >= 2 && content[0] === 0xff && content[1] === 0xfe) {
-    return iconv.decode(content, "utf-16le")
-  }
-  if (content.length >= 2 && content[0] === 0xfe && content[1] === 0xff) {
-    return iconv.decode(content, "utf-16be")
-  }
-
-  const detected = chardet.detect(content)
-  const detectedEncoding = typeof detected === "string" ? detected : detected?.encoding
-  const confidence = typeof detected === "object" ? detected.confidence || 0 : 1
-  const normalizedEncoding = String(detectedEncoding || "")
-    .trim()
-    .toLowerCase()
-
-  if (isValidUtf8(content)) {
-    return content.toString("utf-8")
-  }
-
-  if (
-    normalizedEncoding &&
-    normalizedEncoding !== "ascii" &&
-    iconv.encodingExists(normalizedEncoding)
-  ) {
-    if (confidence >= CHARDET_CONFIDENCE_THRESHOLD || process.platform !== "win32") {
-      try {
-        return iconv.decode(content, normalizedEncoding)
-      } catch {
-        // fallback below
-      }
-    }
-  }
-
-  // Windows 下 CSV 常见 ANSI(GBK/GB18030)；当 UTF-8 无效时优先做兼容回退。
-  if (process.platform === "win32" && path.extname(filePath).toLowerCase() === ".csv") {
-    try {
-      return iconv.decode(content, "gb18030")
-    } catch {
-      // fallback below
-    }
-  }
-
-  if (
-    normalizedEncoding &&
-    normalizedEncoding !== "ascii" &&
-    iconv.encodingExists(normalizedEncoding)
-  ) {
-    try {
-      return iconv.decode(content, normalizedEncoding)
-    } catch {
-      // fallback below
-    }
-  }
-
-  return content.toString("utf-8")
-}
-
 function normalizeZipEntryName(name: string): string {
   return normalizeArchiveEntryName(name)
 }
@@ -451,6 +381,8 @@ interface MarketplaceSkillMetadata {
 
 interface SkillUploadOptions {
   allowNestedNameDuplicates?: boolean
+  expectedSha256?: string
+  importId?: string
 }
 
 interface SkillUploadNameConflict {
@@ -756,6 +688,7 @@ export async function listPluginSkills(): Promise<SkillMetadata[]> {
 }
 
 export function registerSkillsHandlers(ipcMain: IpcMain): void {
+  registerSkillImportHandlers(ipcMain)
   console.log("[Skills] Registering skills handlers...")
 
   ipcMain.handle(
@@ -1433,176 +1366,195 @@ export function registerSkillsHandlers(ipcMain: IpcMain): void {
     async (
       _event,
       payload: { buffer: ArrayBuffer; fileName: string; options?: SkillUploadOptions }
-    ): Promise<SkillUploadResult> => {
-      const { buffer, fileName, options = {} } = payload
-      if (!buffer || !fileName || typeof fileName !== "string") {
-        return { success: false, error: "Invalid buffer or fileName" }
-      }
-
-      const ext = path.extname(fileName).toLowerCase()
-      const customDir = getCustomSkillsDir()
-      mkdirSync(customDir, { recursive: true })
-
-      let existingSkillNamesCache: Set<string> | null = null
-      const getExistingSkillNames = async (): Promise<Set<string>> => {
-        if (existingSkillNamesCache) return existingSkillNamesCache
-        const [builtin, custom] = await Promise.all([
-          loadSkills(getSkillsDir(), "project"),
-          loadSkills(getCustomSkillsDir(), "user")
-        ])
-        existingSkillNamesCache = new Set(
-          [...builtin, ...custom].map((s) => normalizeSkillNameForComparison(s.name))
-        )
-        return existingSkillNamesCache
-      }
-
-      const checkNameDuplicate = async (nameToCheck: string): Promise<boolean> => {
-        return (await getExistingSkillNames()).has(normalizeSkillNameForComparison(nameToCheck))
-      }
-
-      const checkDirCollision = (sanitizedName: string): boolean => {
-        return (
-          existsSync(path.join(customDir, sanitizedName)) ||
-          existsSync(path.join(getSkillsDir(), sanitizedName))
-        )
-      }
-
-      try {
-        if (ext === ".md") {
-          const content = Buffer.from(buffer).toString("utf-8")
-          const frontmatter = parseYamlFrontmatter(content)
-          const name = frontmatter.name?.trim()
-          if (!name) {
-            return { success: false, error: "SKILL.md 必须包含 YAML frontmatter 中的 name 字段" }
+    ): Promise<SkillUploadResult> =>
+      skillImportQueue
+        .run(async () => {
+          const { buffer, fileName, options = {} } = payload ?? {}
+          if (!(buffer instanceof ArrayBuffer) || !fileName || typeof fileName !== "string") {
+            return { success: false, error: "Invalid buffer or fileName" }
           }
-          if (await checkNameDuplicate(name)) {
-            return { success: false, error: `技能名称「${name}」已存在` }
-          }
-          const skillName = sanitizeSkillName(name)
-          if (checkDirCollision(skillName)) {
-            return { success: false, error: `技能目录「${skillName}」已存在，请换一个名称` }
-          }
-          const skillDir = path.join(customDir, skillName)
-          const endTopologyMutation = beginSkillCatalogTopologyMutation()
-          let createdSkillDir = false
+
+          let preview: ReturnType<typeof inspectSkillImport>
           try {
-            mkdirSync(skillDir)
-            createdSkillDir = true
-            await fs.writeFile(path.join(skillDir, "SKILL.md"), content, "utf-8")
-            clearDisabledSkillsForSkillDir(skillDir)
-            invalidateEnabledSkillsCache()
-            notifyHooksChanged("skill-uploaded")
-            return { success: true, skillName }
+            preview = inspectSkillImport(Buffer.from(buffer), fileName)
+            if (options.expectedSha256 !== undefined && options.expectedSha256 !== preview.sha256)
+              throw new Error("技能内容已变化，请重新预览后导入")
           } catch (error) {
-            if (createdSkillDir) {
-              await fs.rm(skillDir, { recursive: true, force: true }).catch(() => undefined)
-            }
-            throw error
-          } finally {
-            endTopologyMutation()
-          }
-        }
-
-        if (ext === ".zip") {
-          const zip = new AdmZip(Buffer.from(buffer))
-          const entries = zip.getEntries()
-          const decodedEntries: DecodedZipEntry[] = entries.map((entry) => ({
-            entry,
-            decodedName: decodeZipEntryName(entry)
-          }))
-
-          const skillMdEntry = selectRootSkillMarkdownEntry<(typeof decodedEntries)[number]>(
-            decodedEntries,
-            (item) => item.entry.isDirectory
-          )
-
-          if (!skillMdEntry) {
-            return { success: false, error: "ZIP 文件必须包含 SKILL.md" }
-          }
-
-          const content = decodeSkillTextFile(
-            skillMdEntry.entry.getData(),
-            skillMdEntry.decodedName
-          )
-          const frontmatter = parseYamlFrontmatter(content)
-          const name = frontmatter.name?.trim()
-          if (!name) {
-            return { success: false, error: "SKILL.md 必须包含 YAML frontmatter 中的 name 字段" }
-          }
-          if (await checkNameDuplicate(name)) {
-            return { success: false, error: `技能名称「${name}」已存在` }
-          }
-          const skillName = sanitizeSkillName(name)
-          if (checkDirCollision(skillName)) {
-            return { success: false, error: `技能目录「${skillName}」已存在，请换一个名称` }
-          }
-
-          const basePrefix = skillMdEntry.decodedName.replace(/SKILL\.md$/i, "")
-          const metadata = readMarketplaceSkillMetadataFromZip(decodedEntries, basePrefix)
-          const nestedNameConflicts = findNestedSkillNameConflicts(
-            getNestedSkillNameCandidates(decodedEntries, basePrefix, metadata),
-            await getExistingSkillNames()
-          )
-          if (nestedNameConflicts.length > 0 && !options.allowNestedNameDuplicates) {
-            const preview = nestedNameConflicts
-              .slice(0, 5)
-              .map((item) => `${item.name}（${item.relativePath}）`)
-              .join("、")
-            const suffix = nestedNameConflicts.length > 5 ? "等" : ""
             return {
               success: false,
-              error: `导入会引入 ${nestedNameConflicts.length} 个与现有 skill 同名的子技能：${preview}${suffix}`,
-              nestedNameConflicts
+              error: error instanceof Error ? error.message : "技能文件无效"
             }
           }
 
-          const skillDir = path.join(customDir, skillName)
-          const endTopologyMutation = beginSkillCatalogTopologyMutation()
-          let createdSkillDir = false
-          try {
-            mkdirSync(skillDir)
-            createdSkillDir = true
-
-            for (const item of decodedEntries) {
-              const entry = item.entry
-              if (entry.isDirectory) continue
-              if (!item.decodedName.startsWith(basePrefix)) continue
-              const relativePath = item.decodedName.slice(basePrefix.length)
-              if (!relativePath) continue
-              if (isMarketplaceSkillMetadataPath(relativePath)) continue
-              const destPath = path.resolve(skillDir, relativePath)
-              if (
-                !destPath.startsWith(path.resolve(skillDir) + path.sep) &&
-                destPath !== path.resolve(skillDir)
-              ) {
-                console.warn(
-                  `[Skills] Skipping ZIP entry with path traversal: ${item.decodedName || entry.entryName}`
-                )
-                continue
-              }
-              const destDir = path.dirname(destPath)
-              mkdirSync(destDir, { recursive: true })
-              await fs.writeFile(destPath, entry.getData())
-            }
-            clearDisabledSkillsForSkillDir(skillDir)
+          const ext = path.extname(fileName).toLowerCase()
+          const customDir = getCustomSkillsDir()
+          const importId = options.importId ?? randomUUID()
+          const installer = new SkillImportInstaller(
+            path.join(getOpenworkDir(), "skill-imports"),
+            customDir
+          )
+          const recovered = await installer.recover(importId, preview.sha256)
+          if (recovered) {
             invalidateEnabledSkillsCache()
-            notifyHooksChanged("skill-uploaded")
-            return { success: true, skillName }
-          } catch (error) {
-            if (createdSkillDir) {
-              await fs.rm(skillDir, { recursive: true, force: true }).catch(() => undefined)
-            }
-            throw error
-          } finally {
-            endTopologyMutation()
+            notifyHooksChanged("skill-import-recovered")
+            return { success: true, skillName: recovered }
           }
-        }
 
-        return { success: false, error: "仅支持 .md 或 .zip 文件" }
-      } catch (e) {
-        return { success: false, error: e instanceof Error ? e.message : "Unknown error" }
-      }
-    }
+          let existingSkillNamesCache: Set<string> | null = null
+          const getExistingSkillNames = async (): Promise<Set<string>> => {
+            if (existingSkillNamesCache) return existingSkillNamesCache
+            const [builtin, custom] = await Promise.all([
+              loadSkills(getSkillsDir(), "project"),
+              loadSkills(getCustomSkillsDir(), "user")
+            ])
+            existingSkillNamesCache = new Set(
+              [...builtin, ...custom].map((s) => normalizeSkillNameForComparison(s.name))
+            )
+            return existingSkillNamesCache
+          }
+
+          const checkNameDuplicate = async (nameToCheck: string): Promise<boolean> => {
+            return (await getExistingSkillNames()).has(normalizeSkillNameForComparison(nameToCheck))
+          }
+
+          const checkDirCollision = (sanitizedName: string): boolean => {
+            if (
+              !isSafePathSegment(sanitizedName) ||
+              /^(con|prn|aux|nul|com[0-9]|lpt[0-9])$/i.test(sanitizedName)
+            )
+              throw new Error("技能名称不能用作 Windows 目录，请修改 name 后导入")
+            return (
+              existsSync(path.join(customDir, sanitizedName)) ||
+              existsSync(path.join(getSkillsDir(), sanitizedName))
+            )
+          }
+
+          try {
+            if (ext === ".md") {
+              const content = preview.markdown
+              const frontmatter = parseYamlFrontmatter(content)
+              const name = frontmatter.name?.trim()
+              if (!name) {
+                return {
+                  success: false,
+                  error: "SKILL.md 必须包含 YAML frontmatter 中的 name 字段"
+                }
+              }
+              if (await checkNameDuplicate(name)) {
+                return { success: false, error: `技能名称「${name}」已存在` }
+              }
+              const skillName = sanitizeSkillName(name)
+              if (checkDirCollision(skillName)) {
+                return { success: false, error: `技能目录「${skillName}」已存在，请换一个名称` }
+              }
+              const skillDir = path.join(customDir, skillName)
+              const endTopologyMutation = beginSkillCatalogTopologyMutation()
+              try {
+                await installer.install({
+                  id: importId,
+                  sourceSha256: preview.sha256,
+                  skillName,
+                  files: [{ path: "SKILL.md", bytes: Buffer.from(content, "utf8") }]
+                })
+                clearDisabledSkillsForSkillDir(skillDir)
+                invalidateEnabledSkillsCache()
+                notifyHooksChanged("skill-uploaded")
+                return { success: true, skillName }
+              } finally {
+                endTopologyMutation()
+              }
+            }
+
+            if (ext === ".zip") {
+              const zip = new AdmZip(Buffer.from(buffer))
+              const entries = zip.getEntries()
+              const decodedEntries: DecodedZipEntry[] = entries.map((entry) => ({
+                entry,
+                decodedName: decodeZipEntryName(entry)
+              }))
+
+              const skillMdEntry = selectRootSkillMarkdownEntry<(typeof decodedEntries)[number]>(
+                decodedEntries,
+                (item) => item.entry.isDirectory
+              )
+
+              if (!skillMdEntry) {
+                return { success: false, error: "ZIP 文件必须包含 SKILL.md" }
+              }
+
+              const content = decodeSkillTextFile(
+                skillMdEntry.entry.getData(),
+                skillMdEntry.decodedName
+              )
+              const frontmatter = parseYamlFrontmatter(content)
+              const name = frontmatter.name?.trim()
+              if (!name) {
+                return {
+                  success: false,
+                  error: "SKILL.md 必须包含 YAML frontmatter 中的 name 字段"
+                }
+              }
+              if (await checkNameDuplicate(name)) {
+                return { success: false, error: `技能名称「${name}」已存在` }
+              }
+              const skillName = sanitizeSkillName(name)
+              if (checkDirCollision(skillName)) {
+                return { success: false, error: `技能目录「${skillName}」已存在，请换一个名称` }
+              }
+
+              const basePrefix = skillMdEntry.decodedName.replace(/SKILL\.md$/i, "")
+              const metadata = readMarketplaceSkillMetadataFromZip(decodedEntries, basePrefix)
+              const nestedNameConflicts = findNestedSkillNameConflicts(
+                getNestedSkillNameCandidates(decodedEntries, basePrefix, metadata),
+                await getExistingSkillNames()
+              )
+              if (nestedNameConflicts.length > 0 && !options.allowNestedNameDuplicates) {
+                const preview = nestedNameConflicts
+                  .slice(0, 5)
+                  .map((item) => `${item.name}（${item.relativePath}）`)
+                  .join("、")
+                const suffix = nestedNameConflicts.length > 5 ? "等" : ""
+                return {
+                  success: false,
+                  error: `导入会引入 ${nestedNameConflicts.length} 个与现有 skill 同名的子技能：${preview}${suffix}`,
+                  nestedNameConflicts
+                }
+              }
+
+              const skillDir = path.join(customDir, skillName)
+              const endTopologyMutation = beginSkillCatalogTopologyMutation()
+              try {
+                const files: { path: string; bytes: Buffer }[] = []
+                for (const item of decodedEntries) {
+                  if (item.entry.isDirectory || !item.decodedName.startsWith(basePrefix)) continue
+                  const relativePath = item.decodedName.slice(basePrefix.length)
+                  if (!relativePath || isMarketplaceSkillMetadataPath(relativePath)) continue
+                  files.push({ path: relativePath, bytes: item.entry.getData() })
+                }
+                await installer.install({
+                  id: importId,
+                  sourceSha256: preview.sha256,
+                  skillName,
+                  files
+                })
+                clearDisabledSkillsForSkillDir(skillDir)
+                invalidateEnabledSkillsCache()
+                notifyHooksChanged("skill-uploaded")
+                return { success: true, skillName }
+              } finally {
+                endTopologyMutation()
+              }
+            }
+
+            return { success: false, error: "仅支持 .md 或 .zip 文件" }
+          } catch (e) {
+            return { success: false, error: e instanceof Error ? e.message : "Unknown error" }
+          }
+        })
+        .catch((error) => ({
+          success: false,
+          error: error instanceof Error ? error.message : "技能安装失败"
+        }))
   )
 
   ipcMain.handle(

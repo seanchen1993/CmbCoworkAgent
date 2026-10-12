@@ -3,7 +3,7 @@
  *
  * Tool failures take more shapes than a thrown exception in this runtime:
  *   (a) thrown JS error caught by `toolErrorMiddleware` (runtime.ts:953)
- *   (b) result object with `success: false` / `is_error: true` / non-empty
+ *   (b) result object with `success: false` / `is_error: true` / MCP `isError: true` / non-empty
  *       `error` field
  *   (c) result object with non-zero `exitCode` (playwright / etc.)
  *   (d) plain-string result containing `[Command failed with exit code N]`
@@ -18,14 +18,10 @@
  * `tool_call_id`.
  */
 
-import { classifyApiError, type ApiErrorCode } from "../agent/failover"
+import { classifyApiError, type ApiErrorCode } from "../agent/api-errors"
+import { AsyncLocalStorage } from "node:async_hooks"
 
-export type ToolFailureKind =
-  | "throw"
-  | "exit-nonzero"
-  | "explicit-error"
-  | "abort"
-  | "timeout"
+export type ToolFailureKind = "throw" | "exit-nonzero" | "explicit-error" | "abort" | "timeout"
 
 export interface ToolFailureSignal {
   kind: ToolFailureKind
@@ -55,6 +51,17 @@ export function detectToolFailure(
   // failed) with exit code N]" marker — only "failed" (and any explicit
   // non-zero code) triggers; bare "succeeded" returns null.
   if (typeof toolResult === "string") {
+    // Host tools use bounded JSON receipts as well as native objects. Parse
+    // only a complete object, never prose containing an embedded JSON fragment.
+    if (toolResult.length <= 128_000 && toolResult.trimStart().startsWith("{")) {
+      try {
+        const value: unknown = JSON.parse(toolResult)
+        if (value && typeof value === "object" && !Array.isArray(value))
+          return detectToolFailure(_toolName, value)
+      } catch {
+        /* Non-JSON text may still use the native command failure marker. */
+      }
+    }
     const m = /\[Command (succeeded|failed) with exit code (-?\d+)\]/.exec(toolResult)
     if (m) {
       const status = m[1]
@@ -79,6 +86,7 @@ export function detectToolFailure(
   const explicitError =
     r.success === false ||
     r.is_error === true ||
+    r.isError === true ||
     (typeof r.error === "string" && r.error.trim().length > 0)
   const exitCode = typeof r.exitCode === "number" ? r.exitCode : undefined
   const exitNonZero = exitCode !== undefined && exitCode !== 0
@@ -88,6 +96,10 @@ export function detectToolFailure(
     (typeof r.error === "string" && r.error) ||
     (typeof r.message === "string" && r.message) ||
     (typeof r.stderr === "string" && r.stderr) ||
+    // MCP SDK and Bot publication envelopes retain the protocol flag at the top level.
+    // Nested data is provider content, not another authority-bearing result envelope.
+    (r.isError === true && typeof r.text === "string" && r.text.slice(0, 8000)) ||
+    (r.isError === true && typeof r.data === "string" && r.data.slice(0, 8000)) ||
     (exitCode !== undefined ? `exit code ${exitCode}` : "tool returned failure")
 
   return {
@@ -118,7 +130,8 @@ export function toolFailureSignalFromThrow(
   }
   const isTimeout =
     err instanceof Error &&
-    (err.message.toLowerCase().includes("timeout") || (err as { code?: string }).code === "ETIMEDOUT")
+    (err.message.toLowerCase().includes("timeout") ||
+      (err as { code?: string }).code === "ETIMEDOUT")
   return {
     kind: isTimeout ? "timeout" : "throw",
     message: err instanceof Error ? err.message : String(err),
@@ -129,30 +142,41 @@ export function toolFailureSignalFromThrow(
 }
 
 // ─── Dedupe set ─────────────────────────────────────────────────────────────
-// One Set per (threadId|runId) is overkill — failures are sparse, so a single
-// global Set with size cap is enough. We never want unbounded growth so callers
-// drop entries when they fire (we add) and a sweep keeps it under cap.
+// Legacy callers share the bounded fallback. Independent Bot executions opt
+// into an async scope: provider tool-call IDs are not unique across Bots/runs.
 
 const FIRED_CAP = 4096
 const firedFailureToolCallIds = new Set<string>()
+const failureScope = new AsyncLocalStorage<Set<string>>()
+
+export async function withToolFailureScope<T>(execute: () => Promise<T>): Promise<T> {
+  const fired = new Set<string>()
+  try {
+    return await failureScope.run(fired, execute)
+  } finally {
+    fired.clear()
+  }
+}
 
 export function markFailureFired(toolCallId: string): void {
   if (!toolCallId) return
-  if (firedFailureToolCallIds.size > FIRED_CAP) {
+  const fired = failureScope.getStore() ?? firedFailureToolCallIds
+  if (fired.size > FIRED_CAP) {
     // Cheap pruning — drop the first ~512 entries when over cap.
     let dropped = 0
-    for (const id of firedFailureToolCallIds) {
-      firedFailureToolCallIds.delete(id)
+    for (const id of fired) {
+      fired.delete(id)
       if (++dropped >= 512) break
     }
   }
-  firedFailureToolCallIds.add(toolCallId)
+  fired.add(toolCallId)
 }
 
 export function hasFailureFired(toolCallId: string): boolean {
-  return toolCallId !== "" && firedFailureToolCallIds.has(toolCallId)
+  return toolCallId !== "" && (failureScope.getStore() ?? firedFailureToolCallIds).has(toolCallId)
 }
 
 export function clearFailureFiredState(): void {
-  firedFailureToolCallIds.clear()
+  const fired = failureScope.getStore() ?? firedFailureToolCallIds
+  fired.clear()
 }

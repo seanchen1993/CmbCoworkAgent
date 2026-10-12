@@ -1,0 +1,366 @@
+{
+  "version": 1,
+  "recordedAt": "2026-10-07T22:25:29.877167+00:00",
+  "kind": "root-source-integrated-current67-crash-tint-routine-and-actual-app-upgrade",
+  "candidates": [
+    {
+      "name": "browser-crash",
+      "manifest": {
+        "path": "/var/folders/r4/m2gmdyyn06z9488ghc1044zh0000gn/T/cmb-browser-crash-recovery-305ib9pc/manifest.json",
+        "bytes": 1740,
+        "sha256": "478062de70d5520168b1e5049be7aca5c234bb994c938b2d42541177b31bd9bb"
+      },
+      "patchSha256": "588d7a7ce81c34e5c1cfda5c154eb2a5fa6c6bb59893938ea2276e00efe3eba8",
+      "rootFiles": [
+        {
+          "path": "/Users/chenqiang/Desktop/projects/CmbCoworkAgent/src/main/bots/browser-broker.ts",
+          "bytes": 56548,
+          "sha256": "4d18cf83fa9c97e3ccc944efdae38a70b831aad4046513ae50b0353aa6a6d5d6",
+          "candidateAfterSha256": "4d18cf83fa9c97e3ccc944efdae38a70b831aad4046513ae50b0353aa6a6d5d6",
+          "matchesCandidate": true
+        },
+        {
+          "path": "/Users/chenqiang/Desktop/projects/CmbCoworkAgent/src/main/bots/browser-crash-page.ts",
+          "bytes": 1769,
+          "sha256": "d69d3a43ee165c5de9c20fa257f01636506455538ff58772edcf663f4f7bba97",
+          "candidateAfterSha256": "d69d3a43ee165c5de9c20fa257f01636506455538ff58772edcf663f4f7bba97",
+          "matchesCandidate": true
+        },
+        {
+          "path": "/Users/chenqiang/Desktop/projects/CmbCoworkAgent/src/main/bots/browser-crash-page.test.ts",
+          "bytes": 861,
+          "sha256": "0f03c5cfe5130cc313000138ece7f47f7bda4fce5158627669844e9229704c7c",
+          "candidateAfterSha256": "0f03c5cfe5130cc313000138ece7f47f7bda4fce5158627669844e9229704c7c",
+          "matchesCandidate": true
+        },
+        {
+          "path": "/Users/chenqiang/Desktop/projects/CmbCoworkAgent/src/main/bots/browser-tab-crash.browser.test.ts",
+          "bytes": 19190,
+          "sha256": "ee80cc74e5a3de62b8b1185787492efe2b796b242097425b8225e51db7558bc2",
+          "candidateAfterSha256": "ee80cc74e5a3de62b8b1185787492efe2b796b242097425b8225e51db7558bc2",
+          "matchesCandidate": true
+        }
+      ]
+    },
+    {
+      "name": "user-bubble-tint",
+      "manifest": {
+        "path": "/var/folders/r4/m2gmdyyn06z9488ghc1044zh0000gn/T/cmb-bot-user-tint-brprgm50/manifest.json",
+        "bytes": 2566,
+        "sha256": "e3d3cdefa12d00de84c20c538ba3817bf71aa1d7e7a77a5a98c5cafac9ed7e37"
+      },
+      "patchSha256": "2c92d3fb802f43f143945d93622a8b138a9ae71c65b0c7a90dcb69197e209b24",
+      "rootFiles": [
+        {
+          "path": "/Users/chenqiang/Desktop/projects/CmbCoworkAgent/src/renderer/src/components/bots/BotWorkspace.tsx",
+          "bytes": 179360,
+          "sha256": "b964f7cd9bb605bdb0929aeee3e8b1b6756be7cedbc05eedbe9341075810f172",
+          "candidateAfterSha256": "b964f7cd9bb605bdb0929aeee3e8b1b6756be7cedbc05eedbe9341075810f172",
+          "matchesCandidate": true
+        },
+        {
+          "path": "/Users/chenqiang/Desktop/projects/CmbCoworkAgent/src/renderer/src/components/bots/bot-workspace.css",
+          "bytes": 46614,
+          "sha256": "21efa81a8894c92c7c68cde1de4d4c51d4d4dc19d103b542789bf360c68ceb92",
+          "candidateAfterSha256": "21efa81a8894c92c7c68cde1de4d4c51d4d4dc19d103b542789bf360c68ceb92",
+          "matchesCandidate": true
+        },
+        {
+          "path": "/Users/chenqiang/Desktop/projects/CmbCoworkAgent/src/renderer/src/components/customize/AppearancePanel.tsx",
+          "bytes": 13859,
+          "sha256": "6ffacd196e4d1baf537c2073cae9eeace2e9e6795e19c9e20a0e3232c6f4f8a4",
+          "candidateAfterSha256": "6ffacd196e4d1baf537c2073cae9eeace2e9e6795e19c9e20a0e3232c6f4f8a4",
+          "matchesCandidate": true
+        },
+        {
+          "path": "/Users/chenqiang/Desktop/projects/CmbCoworkAgent/src/renderer/src/lib/bot-user-bubble-tint.test.ts",
+          "bytes": 2147,
+          "sha256": "e440b22e22906521e153f69c0453aff07a3d411608271026aa43be4bfde8088e",
+          "candidateAfterSha256": "e440b22e22906521e153f69c0453aff07a3d411608271026aa43be4bfde8088e",
+          "matchesCandidate": true
+        },
+        {
+          "path": "/Users/chenqiang/Desktop/projects/CmbCoworkAgent/src/renderer/src/lib/theme-preference.test.ts",
+          "bytes": 18403,
+          "sha256": "72e568f1dd861f31528df7a40969ff6f385770964988815cbddb93026a6125dd",
+          "candidateAfterSha256": "72e568f1dd861f31528df7a40969ff6f385770964988815cbddb93026a6125dd",
+          "matchesCandidate": true
+        },
+        {
+          "path": "/Users/chenqiang/Desktop/projects/CmbCoworkAgent/src/renderer/src/lib/theme-preference.ts",
+          "bytes": 7796,
+          "sha256": "c235af91a9b3cf064d8a4c1786c271a640edc9de73e94ca88af63745458cc8d6",
+          "candidateAfterSha256": "c235af91a9b3cf064d8a4c1786c271a640edc9de73e94ca88af63745458cc8d6",
+          "matchesCandidate": true
+        },
+        {
+          "path": "/Users/chenqiang/Desktop/projects/CmbCoworkAgent/src/renderer/src/lib/use-bot-user-bubble-tint.ts",
+          "bytes": 2030,
+          "sha256": "f249232b3ddda99952c32c170f8fd5cfbe3c9d8240dfb64acd57f00ceff24e1e",
+          "candidateAfterSha256": "f249232b3ddda99952c32c170f8fd5cfbe3c9d8240dfb64acd57f00ceff24e1e",
+          "matchesCandidate": true
+        },
+        {
+          "path": "/Users/chenqiang/Desktop/projects/CmbCoworkAgent/tests/bot-presentation-browser.spec.ts",
+          "bytes": 30166,
+          "sha256": "7a1a6d927a4957e1797efefe71119439cf6f496e6608b143716be72bdbe615c8",
+          "candidateAfterSha256": "7a1a6d927a4957e1797efefe71119439cf6f496e6608b143716be72bdbe615c8",
+          "matchesCandidate": true
+        }
+      ]
+    },
+    {
+      "name": "routine-context-menu",
+      "manifest": {
+        "path": "/tmp/cmb-routine-context-menu-p86mzj3m/manifest.json",
+        "bytes": 6244,
+        "sha256": "71a679f034cb28bcc9761890a1d4d202659411eb8f091e20402d82e8fcd03d08"
+      },
+      "patchSha256": "fbe4b1eccb0c31d6bdaf88998bcbd540e5529be99e60315cc9249d3cac3311f5",
+      "rootFiles": [
+        {
+          "path": "/Users/chenqiang/Desktop/projects/CmbCoworkAgent/src/renderer/src/components/bots/BotRoutineActions.tsx",
+          "bytes": 8477,
+          "sha256": "ecb7f0aaf5293ea6b6d721a0793909323d8683ea59c963733177f4e27988f7fe",
+          "candidateAfterSha256": "ecb7f0aaf5293ea6b6d721a0793909323d8683ea59c963733177f4e27988f7fe",
+          "matchesCandidate": true
+        },
+        {
+          "path": "/Users/chenqiang/Desktop/projects/CmbCoworkAgent/src/renderer/src/components/bots/BotRoutineCard.tsx",
+          "bytes": 9844,
+          "sha256": "cff37e034e29d2ba9411b24434f7c9466f262b1f4c2177b4a30fb1953a867be5",
+          "candidateAfterSha256": "cff37e034e29d2ba9411b24434f7c9466f262b1f4c2177b4a30fb1953a867be5",
+          "matchesCandidate": true
+        },
+        {
+          "path": "/Users/chenqiang/Desktop/projects/CmbCoworkAgent/src/renderer/src/components/bots/BotRoutineSummary.tsx",
+          "bytes": 11891,
+          "sha256": "525236f5bc75b42d75853eb78b1786c0ddf40f294574c5cd59ae731f611f8bea",
+          "candidateAfterSha256": "525236f5bc75b42d75853eb78b1786c0ddf40f294574c5cd59ae731f611f8bea",
+          "matchesCandidate": true
+        },
+        {
+          "path": "/Users/chenqiang/Desktop/projects/CmbCoworkAgent/src/renderer/src/components/bots/BotResources.tsx",
+          "bytes": 44326,
+          "sha256": "906342aa638dcffad910cecef222be54ddc8f8e69c008165d963203e4b001ecc",
+          "candidateAfterSha256": "906342aa638dcffad910cecef222be54ddc8f8e69c008165d963203e4b001ecc",
+          "matchesCandidate": true
+        },
+        {
+          "path": "/Users/chenqiang/Desktop/projects/CmbCoworkAgent/src/renderer/src/lib/bot-routine-toggle.ts",
+          "bytes": 2868,
+          "sha256": "a88d24498426a292399189a134a325258e9277b8cabbc0e66066ae3b24fda918",
+          "candidateAfterSha256": "a88d24498426a292399189a134a325258e9277b8cabbc0e66066ae3b24fda918",
+          "matchesCandidate": true
+        },
+        {
+          "path": "/Users/chenqiang/Desktop/projects/CmbCoworkAgent/src/renderer/src/components/bots/BotRoutineRunButton.tsx",
+          "bytes": 2554,
+          "sha256": "1b9c8bb539cb93690d502a1f930d0ba4d89245ef1e337a535947edf68fb046bd",
+          "candidateAfterSha256": "1b9c8bb539cb93690d502a1f930d0ba4d89245ef1e337a535947edf68fb046bd",
+          "matchesCandidate": true
+        },
+        {
+          "path": "/Users/chenqiang/Desktop/projects/CmbCoworkAgent/src/renderer/src/lib/use-bot-routine-run.ts",
+          "bytes": 7789,
+          "sha256": "df39bd73e2892d60514ac37917105ca3c4b761749aefb217ea164129e65cc1ee",
+          "candidateAfterSha256": "df39bd73e2892d60514ac37917105ca3c4b761749aefb217ea164129e65cc1ee",
+          "matchesCandidate": true
+        },
+        {
+          "path": "/Users/chenqiang/Desktop/projects/CmbCoworkAgent/tests/bot-routine-context-menu-browser.spec.ts",
+          "bytes": 19696,
+          "sha256": "5663621845a2986a86557ae65254078a17c28bd95c6e2e6526f640b59a1ef0d0",
+          "candidateAfterSha256": "5663621845a2986a86557ae65254078a17c28bd95c6e2e6526f640b59a1ef0d0",
+          "matchesCandidate": true
+        },
+        {
+          "path": "/Users/chenqiang/Desktop/projects/CmbCoworkAgent/tests/bot-routine-trial-plugin-epoch-browser.spec.ts",
+          "bytes": 17424,
+          "sha256": "7b122d7b5130a902c349f84b7bde7d6b99c870ec20655456eccea6dd75a10f11",
+          "candidateAfterSha256": "7b122d7b5130a902c349f84b7bde7d6b99c870ec20655456eccea6dd75a10f11",
+          "matchesCandidate": true
+        }
+      ]
+    }
+  ],
+  "rootVerification": [
+    {
+      "log": {
+        "path": "/tmp/cmb-crash-root-exact-original67.log",
+        "bytes": 3998,
+        "sha256": "97fad1c7f02a05369916fb10cf65c523b7841b69d797f5e59f307a65f4817f54"
+      },
+      "exitCode": 0,
+      "claim": "67 tests in 5 suites, including 11 actual CDP crashes"
+    },
+    {
+      "log": {
+        "path": "/tmp/cmb-routine-tint-root-nearest.log",
+        "bytes": 590,
+        "sha256": "c36848cb64c02cf404631cc0b29b206d4b16ddc5c178e2aa655791f9d5b1901b"
+      },
+      "exitCode": 0,
+      "claim": "37 unit tests in 5 suites"
+    },
+    {
+      "log": {
+        "path": "/tmp/cmb-routine-context-menu-root-browser.log",
+        "bytes": 954,
+        "sha256": "5faa609544fb0e8c1f6681d551f4db17841b978b6806ed6cc6a2792f843ef0b7"
+      },
+      "exitCode": 0,
+      "claim": "9 controlled actual Chrome routine menu checks"
+    },
+    {
+      "log": {
+        "path": "/tmp/cmb-routine-context-menu-root-original16.log",
+        "bytes": 1321,
+        "sha256": "fe71f0aeb69ade6f0682f11967b80f9becd541b287b080814d0e92bddc1ce881"
+      },
+      "exitCode": 0,
+      "claim": "16 original epoch and unmount controlled Chrome checks"
+    },
+    {
+      "log": {
+        "path": "/tmp/cmb-bot-user-tint-root-presentation49.log",
+        "bytes": 152,
+        "sha256": "17f5120bcf2087e7117795c0c948b51aeb8cfc0d42faa65d00274952da502959"
+      },
+      "exitCode": 0,
+      "claim": "49 actual Chrome presentation checks"
+    },
+    {
+      "log": {
+        "path": "/tmp/cmb-routine-crash-tint-root-lint.log",
+        "bytes": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      "exitCode": 0,
+      "claim": "strict owned-file lint"
+    },
+    {
+      "log": {
+        "path": "/tmp/cmb-routine-context-menu-root-web.log",
+        "bytes": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      "exitCode": 0,
+      "claim": "Web TypeScript"
+    },
+    {
+      "log": {
+        "path": "/tmp/cmb-crash-tint-root-node.log",
+        "bytes": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      "exitCode": 0,
+      "claim": "Node TypeScript"
+    },
+    {
+      "log": {
+        "path": "/tmp/cmb-crash-tint-routine-root-production-build.log",
+        "bytes": 56002,
+        "sha256": "ff299a1ab3c2f53e778280ca76a1df9807b6e3c3da03d3a5115a72c4e68aa17f"
+      },
+      "exitCode": 0,
+      "claim": "production build"
+    }
+  ],
+  "retainedFailures": [
+    {
+      "log": {
+        "path": "/tmp/cmb-crash-tint-root-nearest.log",
+        "bytes": 4541,
+        "sha256": "a5b0a305c1f1f44a49f20b6192c976a3dba3e6307feba1d760f6ff132fc21cbd"
+      },
+      "result": "48 assertions passed, but afterAll cleanup timed out: overall failed"
+    },
+    {
+      "log": {
+        "path": "/tmp/cmb-work-pages-root-workspace-browser-inline-width-current.log",
+        "bytes": 1113,
+        "sha256": "c84937271acbbe7dd6d15bc16ce90c7e157bb622da44538681edbbf5bfe204cd"
+      },
+      "result": "fixture used incorrect close-control label: failed"
+    },
+    {
+      "log": {
+        "path": "/tmp/cmb-work-pages-root-workspace-browser-inline-width-label-current.log",
+        "bytes": 795,
+        "sha256": "d8edc5a2d84ab7c662391927f963b964bf830ab4c12d9e3c52ece8f6493070d3"
+      },
+      "result": "first browser preview timed out; cleanup exceeded at Bot browser: failed, cause unproved"
+    }
+  ],
+  "compiled": {
+    "manifest": {
+      "path": "/Users/chenqiang/Desktop/projects/CmbCoworkAgent/out/main/bot-native-build.json",
+      "bytes": 23240,
+      "sha256": "a82d193e032da7af57fac99a1bbca8b1f3058a43fc93b049038d597885183fd7"
+    },
+    "buildId": "972493a6e2324e9fc3042534",
+    "hostEntry": {
+      "path": "/Users/chenqiang/Desktop/projects/CmbCoworkAgent/out/main/bot-host.js",
+      "bytes": 6215,
+      "sha256": "2bca425c356787bd4e722fa7e2b99c43495a72e51891686a213de7183da5db4e"
+    },
+    "renderer": {
+      "path": "/Users/chenqiang/Desktop/projects/CmbCoworkAgent/out/renderer/assets/BotWorkspace-XQ3lc_J0.js",
+      "bytes": 2530276,
+      "sha256": "b781d6fd7c07786b00d0163b693597e63f5c357e72425088e81f1e02f47d563a"
+    }
+  },
+  "actualApp": {
+    "path": "/private/var/folders/r4/m2gmdyyn06z9488ghc1044zh0000gn/T/cmb-unique-electron-8yijwxd6/CMBDevClaw Local Acceptance.app",
+    "hostId": "e4fb5c7a-64ba-495a-b78a-fac340283b30",
+    "pid": 47550,
+    "buildId": "972493a6e2324e9fc3042534",
+    "schemaVersion": 67,
+    "modelSourceSha256": "3a80c675611eb1306ca39f32ec1217a93989d276d5a8e5104b1ad2521ea68ff3",
+    "previousProgrammingRun": {
+      "id": "5d219477-5620-42be-97ef-b9bb7561e887",
+      "status": "failed",
+      "error": "任务执行权已失效，禁止继续操作",
+      "updated_at": 1791391045425
+    },
+    "newProgrammingRunPartial": {
+      "id": "a7892c0a-07a0-4ac3-b71c-aa2f01eda829",
+      "status": "waiting_input",
+      "error": null,
+      "updated_at": 1791411759916
+    },
+    "syntheticProjectBeforeUiSend": {
+      "path": "/tmp/cmb-programming-current67-before-ui-send.safe.json",
+      "bytes": 1499,
+      "sha256": "bf3ff3902912baf16de5fcb9e94cb05a061dd844bcf3932fcb35e2b2ad3a0cf3"
+    },
+    "upgradeOccurredThroughOwnUiNormalIdleRestart": true,
+    "approvalTransportBypass": false,
+    "wholeProgrammingQualityPassed": false
+  },
+  "actualGrokObserved": {
+    "version": "0.68.1",
+    "connectionRestored": true,
+    "mainInputMenu": [
+      "添加附件",
+      "教它做一项任务"
+    ],
+    "noSelectSkillVisibleForCurrentMainContext": true,
+    "ordinaryPausedRoutineContextMenu": [
+      "恢复",
+      "编辑",
+      "删除"
+    ],
+    "routineStateChanged": false,
+    "sourceConditionalEntriesNotAllClaimedAsVisible": true
+  },
+  "limits": [
+    "Controlled fixture assertions are not all-route actual product parity.",
+    "Earlier crash cleanup failure and current Workspace preview/cleanup failure remain recorded; cause not established.",
+    "The exact original crash suite subsequently passed on Root without raising timeouts.",
+    "Full npm gate is running and is not counted as passed.",
+    "Production PPTX and enforceable exact output contracts are separate pending candidates.",
+    "Windows-native arbitrary desktop independent parallelism and target-OS validation remain open."
+  ]
+}

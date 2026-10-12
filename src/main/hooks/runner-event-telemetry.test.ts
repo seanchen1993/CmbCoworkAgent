@@ -67,3 +67,27 @@ describe("hook execution telemetry", () => {
     )
   })
 })
+
+describe("command hooks that close stdin early", () => {
+  it.each([0, 2])("preserves exit %i instead of raising an unhandled EPIPE", async (exitCode) => {
+    const records: import("./types").HookResult[] = []
+    const hook = {
+      ...makeHook(),
+      command: process.platform === "win32" ? `cmd /c exit ${exitCode}` : `exit ${exitCode}`
+    }
+    const result = await runHooks(
+      [hook],
+      "PreToolUse",
+      {
+        toolName: "read_file",
+        toolArgs: { body: "input".repeat(100000) }
+      },
+      (_event, _hook, value) => {
+        records.push(value)
+      }
+    )
+    expect(records).toHaveLength(1)
+    expect(records[0].exitCode).toBe(exitCode)
+    if (exitCode === 2) expect(result?.blocked).toBe(true)
+  })
+})

@@ -1014,6 +1014,32 @@ interface DashboardPluginAggregate {
 }
 
 interface CustomAPI {
+  windowVisibility: import("../shared/window-visibility").WindowVisibilityAPI
+  bots: import("../shared/bot-ipc-result").BotIpcTransport<import("../shared/bot-api").CoworkBotAPI>
+  botHost: import("../shared/bot-ipc-result").BotIpcTransport<
+    import("../shared/bot-api").BotHostControlAPI
+  >
+  botWindowsSandbox: import("../shared/bot-ipc-result").BotIpcTransport<
+    import("../shared/bot-windows-native-setup").BotWindowsNativeSetupAPI
+  >
+  botShellResources: import("../shared/bot-ipc-result").BotIpcTransport<
+    import("../shared/bot-shell-resources").BotShellResourcesAPI
+  >
+  botLinkPreviews: import("../shared/bot-ipc-result").BotIpcTransport<
+    import("../shared/bot-link-preview").BotLinkPreviewClient
+  >
+  botBackups: import("../shared/bot-backup").BotBackupAPI
+  botArtifactDownloads: import("../shared/bot-ipc-result").BotIpcTransport<
+    import("../shared/bot-artifact-downloads").BotArtifactDownloadsAPI
+  >
+  botWorkspaceMaintenance: import("../shared/bot-workspace-maintenance").BotWorkspaceMaintenanceAPI
+  botBrowserMaintenance: import("../shared/bot-ipc-result").BotIpcTransport<
+    import("../shared/bot-browser-maintenance").BotBrowserMaintenanceAPI
+  >
+  botComputerCheckpoints: import("../shared/bot-ipc-result").BotIpcTransport<
+    import("../shared/bot-computer-checkpoint").BotComputerCheckpointAPI
+  >
+  botNavigation: import("../shared/bot-deep-link").BotNavigationAPI
   mods: {
     globalEnabled(): Promise<boolean>
     configureGlobal(enabled: boolean): Promise<boolean>
@@ -1038,13 +1064,24 @@ interface CustomAPI {
     cards(threadId: string, callId: string): Promise<import("../shared/mods/types").ModCard[]>
     act(threadId: string, actionId: string): Promise<import("../shared/mods/types").ModProjection>
     installExamples(): Promise<void>
-    audit(threadId: string, before?: number): Promise<import("../shared/mods/types").ModAuditEntry[]>
-    reconcile(threadId: string, callId: string, resolution: "confirmed-success" | "confirmed-failure"): Promise<void>
+    audit(
+      threadId: string,
+      before?: number
+    ): Promise<import("../shared/mods/types").ModAuditEntry[]>
+    reconcile(
+      threadId: string,
+      callId: string,
+      resolution: "confirmed-success" | "confirmed-failure"
+    ): Promise<void>
     backup(): Promise<boolean>
     artifact(threadId: string, id: string): Promise<{ label: string; text: string }>
     saveArtifact(threadId: string, id: string): Promise<boolean>
     commands(threadId: string): Promise<import("../shared/mods/types").ModCommandDescriptor[]>
-    enqueue(threadId: string, descriptor: import("../shared/mods/types").ModCommandDescriptor, args: import("../shared/mods/types").ModObject): Promise<import("../shared/mods/types").ModCommandJob>
+    enqueue(
+      threadId: string,
+      descriptor: import("../shared/mods/types").ModCommandDescriptor,
+      args: import("../shared/mods/types").ModObject
+    ): Promise<import("../shared/mods/types").ModCommandJob>
     jobs(threadId: string): Promise<import("../shared/mods/types").ModCommandJob[]>
     cancelJob(threadId: string, id: string): Promise<void>
     onJobsChanged(callback: (event: { threadId: string }) => void): () => void
@@ -1847,10 +1884,15 @@ interface CustomAPI {
       backupId: string,
       targetDir: string
     ) => Promise<{ success: boolean; exportedPath?: string; error?: string }>
+    previewImport: (
+      id: string,
+      input: import("../shared/skill-import").SkillImportRequest
+    ) => Promise<import("../shared/skill-import").SkillImportResult>
+    cancelImport: (id: string) => Promise<void>
     upload: (
       buffer: ArrayBuffer,
       fileName: string,
-      options?: { allowNestedNameDuplicates?: boolean }
+      options?: { allowNestedNameDuplicates?: boolean; expectedSha256?: string; importId?: string }
     ) => Promise<{
       success: boolean
       skillName?: string
@@ -1874,6 +1916,7 @@ interface CustomAPI {
     update: (config: McpConnectorUpsert & { id: string }) => Promise<{ id: string }>
     delete: (id: string) => Promise<void>
     setEnabled: (id: string, enabled: boolean) => Promise<void>
+    setLazyLoad: (id: string, lazyLoad: boolean) => Promise<void>
     testConnection: (params: {
       id?: string
       config?: McpConnectorUpsert
@@ -2229,7 +2272,9 @@ interface CustomAPI {
       version?: string,
       requireMods?: boolean
     ) => Promise<{ success: boolean; pluginName?: string; error?: string }>
-    installFromDir: (requireMods?: boolean) => Promise<{ success: boolean; pluginName?: string; error?: string }>
+    installFromDir: (
+      requireMods?: boolean
+    ) => Promise<{ success: boolean; pluginName?: string; error?: string }>
     exportForMarket: (
       id: string,
       options?: { version?: string | null }
@@ -3111,7 +3156,11 @@ interface CustomAPI {
       canRollback: boolean
       source: UpdateSourceInfo | null
     }>
-    getStartupResult: () => Promise<{ updatedFrom?: string; updatedTo?: string }>
+    getStartupResult: () => Promise<{
+      updatedFrom?: string
+      updatedTo?: string
+      rollbackError?: string
+    }>
     onAvailable: (
       callback: (info: {
         version: string

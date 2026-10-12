@@ -1,0 +1,150 @@
+{
+  "kind": "formal-group-retest-835",
+  "recordedAt": "2026-10-09T22:05:07.604794+00:00",
+  "buildId": "835094608c21b67c0f360483",
+  "schema": 69,
+  "hostId": "7ec2cd4c-56d1-4d42-8214-d255d2bcfe42",
+  "realModel": "MiniMax-M3",
+  "comparisonBoundary": "Formal isolated native CMB App; official Grok same-task baseline retained in current-group-model-restored-f123.safe.json. CMB 3 participants and Grok 2. No model replacement or mocked provider.",
+  "formalCycle": {
+    "id": "e6fa03ef-b02b-4478-843c-a19e99b3eb37",
+    "conversation_id": "221b4a41-095a-4836-b7df-954a50e18798",
+    "status": "completed",
+    "round": 1,
+    "total_messages": 1,
+    "input": "群聊功能核验：先由一位 Bot 独立计算 17+25，另一位 Bot 核对并说明是否正确。各回复一次，完成后停止；不访问外部服务。",
+    "publicMessages": [
+      {
+        "id": "45245114-44a9-44ac-aa29-c0035e74851a",
+        "run_id": "5f9aecd6-7c57-43dc-a399-3300f5041f10",
+        "name": "核心旅程核验",
+        "text": "独立计算 17+25=42。"
+      }
+    ],
+    "runs": [
+      {
+        "id": "5f9aecd6-7c57-43dc-a399-3300f5041f10",
+        "source": "group-member",
+        "status": "succeeded",
+        "root_run_id": "5f9aecd6-7c57-43dc-a399-3300f5041f10",
+        "sent_count": 1
+      },
+      {
+        "id": "c1836b8c-9113-468b-bae7-789559f319e8",
+        "source": "group-member",
+        "status": "succeeded",
+        "root_run_id": "c1836b8c-9113-468b-bae7-789559f319e8",
+        "sent_count": 0
+      },
+      {
+        "id": "f960303d-25a3-48ca-8924-1a57e68bcd74",
+        "source": "group-member",
+        "status": "succeeded",
+        "root_run_id": "f960303d-25a3-48ca-8924-1a57e68bcd74",
+        "sent_count": 0
+      },
+      {
+        "id": "08c4d06e-d2b9-49a0-85a3-5ac2d0ec67fa",
+        "source": "group-member",
+        "status": "succeeded",
+        "root_run_id": "08c4d06e-d2b9-49a0-85a3-5ac2d0ec67fa",
+        "sent_count": 0
+      },
+      {
+        "id": "5731817e-a2b5-4af0-9cef-1c38828beaa3",
+        "source": "group-member",
+        "status": "succeeded",
+        "root_run_id": "5731817e-a2b5-4af0-9cef-1c38828beaa3",
+        "sent_count": 0
+      },
+      {
+        "id": "c709f83f-a502-444e-82ec-232d56830770",
+        "source": "group-member",
+        "status": "succeeded",
+        "root_run_id": "c709f83f-a502-444e-82ec-232d56830770",
+        "sent_count": 0
+      }
+    ],
+    "usage": {
+      "requests": 13,
+      "unknown": 0
+    },
+    "approvals": []
+  },
+  "coldPreservation": {
+    "receipt": "/Users/chenqiang/Library/Application Support/CMBDevClaw-development/2026-10-08/presentation/cold-upgrade-plan/group-authority-cold-preservation-1791563556347629000.safe.json",
+    "bytes": 12620,
+    "sha256": "3e943e23301055436b52eb1add32ab3fb24b55a5ba5a687a39428d3cecc78a81",
+    "selectedRuns": 62,
+    "checkpointPayloadBytesHashed": 11382976,
+    "logicalGroupsEqual": {
+      "runs": true,
+      "effects": true,
+      "interactions": true,
+      "artifacts": true,
+      "artifactObjects": true,
+      "peerDispatch": true,
+      "peerWaits": true,
+      "checkpoints": true,
+      "skills": true,
+      "project": true
+    },
+    "extraTablesEqual": {
+      "bot_memories": true,
+      "bot_memory_metadata": true,
+      "bot_model_usage": true,
+      "bot_group_cycles": true,
+      "bot_group_runs": true
+    },
+    "forceKillUsed": false,
+    "modelRuntimePathReplacementsOnly": 2
+  },
+  "gates": {
+    "group98": {
+      "result": "exit 0",
+      "bytes": 1483,
+      "sha256": "e698f22e045318049679879838e37e2d164e5fbf578a044a916117c572925502",
+      "log": "/tmp/cmb-group-authority-boundaries-final-20261010.log"
+    },
+    "actualSdkGroup10": {
+      "result": "exit 0",
+      "bytes": 129432,
+      "sha256": "cef4cfaa7969637cb5f7fb87a9d10f9697b99d4badbac1a55e79cdcbba874603",
+      "log": "/tmp/cmb-group-authority-runtime-final-20261010.log"
+    },
+    "node": {
+      "result": "exit 0",
+      "bytes": 91,
+      "sha256": "546c7bfd36ecac14793f941add6251c16a729819d1b744cccbaf256a91e1b42c",
+      "log": "/tmp/cmb-group-authority-node-20261010.log"
+    },
+    "strictLint": {
+      "result": "exit 0",
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "log": "/tmp/cmb-group-authority-lint-final-20261010.log"
+    },
+    "workflow": {
+      "result": "exit 0",
+      "bytes": 165317,
+      "sha256": "28f929e2166bd1f0276a262a5c8a2098da992ab55ae002993a7e714938454967",
+      "log": "/tmp/cmb-group-authority-workflow-20261010.log"
+    },
+    "productionBuild": {
+      "result": "exit 0",
+      "bytes": 56264,
+      "sha256": "5a12392ba050c3ee0304480f0ac0d425a34a35feaf4d39b37be295f4f82eec2e",
+      "log": "/tmp/cmb-group-authority-build-20261010.log"
+    }
+  },
+  "outcome": {
+    "arithmeticVisibleCorrect": true,
+    "extraPrivateAssignments": 0,
+    "manualApprovals": 0,
+    "requestedIndependentVerificationDelivered": false,
+    "requestedTwoMessagesDelivered": false,
+    "coreParityComplete": false
+  },
+  "diagnosis": "Current turn prompt mixed previously completed identical task answers with new-task messages. Old public reply was described as already delivered without a task boundary; later unnamed verifier passed. Retain bounded old history as context while isolating current cycle messages and next-role work.",
+  "uiObservation": "CUA observed loaded native Bot sidebar and actual complete Chinese submitted task after Reload/DevTools close/Raise; prior spinner observation retained, loading delay root cause not proven. No source loading patch or UI pass claimed."
+}

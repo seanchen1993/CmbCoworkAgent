@@ -1,0 +1,77 @@
+{
+  "status": "READ_ONLY_SOURCE_SNAPSHOT",
+  "files": [
+    {
+      "path": "src/shared/bot-native-desktop.ts",
+      "sha256": "f3e5f0d2f817ecb652c57759c39347090e9c6fc8ef7df5748c54f4b5d22cda23"
+    },
+    {
+      "path": "src/main/bots/native-desktop-tool.ts",
+      "sha256": "37cf697c05cacac4240f6ff23b5e5b3cc741b2b87a73e20aea594a29cd11d855"
+    },
+    {
+      "path": "src/main/bots/native-desktop-message-review.ts",
+      "sha256": "51bc2390b1134e7f980fb29b8d5f8d2ee4d7b26d9aea7b840852e95980ce10dd"
+    },
+    {
+      "path": "src/main/bots/native-desktop-message-review.test.ts",
+      "sha256": "1c4eb93cacbab848c68974141e0ef0a2f5be65d2c99face9233a251b3d85995d"
+    },
+    {
+      "path": "src/main/bots/native-desktop-broker.ts",
+      "sha256": "8fe5073efface4d6828dfb4febc2f57b869fef624aee77bf3c5f18902cf74f6d"
+    },
+    {
+      "path": "src/renderer/src/components/bots/native-message-input.ts",
+      "sha256": "2be7d1f756e17a96ee6d4bd47994c44e6130c70eadf033575ac95284efe684c1"
+    },
+    {
+      "path": "src/renderer/src/components/bots/BotNativeComputer.tsx",
+      "sha256": "917b12354538f0f31517c83b67b125e4d9bfb8a74739df8e24ab3ccc9049f1ba"
+    },
+    {
+      "path": "src/main/bots/upstream/grok-browser-actions.js",
+      "sha256": "ff1d9d03e33d30f044fbeb72504a798e63eb6e2803826280a0798223cc1788ed"
+    },
+    {
+      "path": "scripts/bot-native-sandbox/native-desktop/worker/WindowMessages.cs",
+      "sha256": "47d426df06a1574afc9cc6b81a96ff72c78b459f4d77235e3a7c4992f3cd037d"
+    },
+    {
+      "path": "scripts/bot-native-sandbox/native-desktop/worker/Program.cs",
+      "sha256": "0b441aeb008747e7d331a35a41e31e307d7359571cdafcf17563af0973fe14b6"
+    },
+    {
+      "path": "scripts/bot-native-sandbox/native-desktop/worker/Native.cs",
+      "sha256": "8f4c0fbd7bdf2a3c5b05e6a2982e6a7ef385c45738a4938ec97db381e752cd1e"
+    },
+    {
+      "path": "scripts/bot-native-sandbox/native-desktop/vendor/WinApp.UIAutomation/Services/NativeDesktopAutomation.cs",
+      "sha256": "09522d03e79bd5e1e89d8d8e22366a15de68aad68af5c1f00565ffd42f9cfbce"
+    },
+    {
+      "path": "scripts/bot-native-sandbox/native-desktop/vendor/WinApp.UIAutomation/NativeMethods.txt",
+      "sha256": "6bd33b120d95392895d0f11459faac3b451816d0a5b0ace153531af447aa9e77"
+    },
+    {
+      "path": "scripts/bot-native-sandbox/native-desktop/vendor/WinApp.UIAutomation/WinApp.UIAutomation.csproj",
+      "sha256": "503c95ce17c5f9e32dcb9196bc50174d703f0cf2f59cd37fedb8e47d98ff7579"
+    },
+    {
+      "path": "scripts/bot-native-sandbox/native-desktop/source-manifest.json",
+      "sha256": "236b1824845760768a1b5011d951f22232298fd36b30523ec5e2c7bf5be8c06c"
+    },
+    {
+      "path": "tests/run-bot-windows-native-selection.mjs",
+      "sha256": "343c92fa30570f1276231430f866a50065244b7b486db70929c57c2226734057"
+    },
+    {
+      "path": "/Users/chenqiang/Desktop/AI/grok-bot-0.18-reconstructed-main/source/electron-preload/preload-vnc.ts",
+      "sha256": "c5cc9d3b17bdbb504d78c7e1526f62315b4f6af60b1cdeb99dada23f5aced2b9"
+    },
+    {
+      "path": "/Users/chenqiang/Desktop/AI/grok-bot-0.18-reconstructed-main/source/host/runner/tools/sand-computer-tool.ts",
+      "sha256": "daed23a47e3c76623d893e9f5036970323c3dbfff36b981f827bf2ab56c4d61e"
+    }
+  ]
+}

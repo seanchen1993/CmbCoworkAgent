@@ -1,11 +1,5 @@
 import { execFileSync } from "node:child_process"
-import {
-  mkdirSync,
-  mkdtempSync,
-  readFileSync,
-  rmSync,
-  writeFileSync
-} from "node:fs"
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { dirname, join } from "node:path"
 import { afterEach, expect, test, vi } from "vitest"
@@ -104,10 +98,13 @@ async function verifyImplicitGlobalIgnore(mode: "xdg" | "home"): Promise<void> {
   }
 }
 
+// Each case imports the real Git service, creates a committed repository and
+// adds/removes an actual worktree. A short timeout leaves its async finally
+// racing the next case's HOME/XDG override; give this integration its own bound.
 test("worktree private excludes preserve XDG's implicit global ignore file", async () => {
   await verifyImplicitGlobalIgnore("xdg")
-})
+}, 20_000)
 
 test("worktree private excludes preserve ~/.config/git/ignore without XDG", async () => {
   await verifyImplicitGlobalIgnore("home")
-})
+}, 20_000)

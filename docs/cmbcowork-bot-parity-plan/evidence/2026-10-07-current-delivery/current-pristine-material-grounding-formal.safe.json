@@ -1,0 +1,317 @@
+{
+  "schemaVersion": 1,
+  "kind": "formal-host-read-only-task-evidence",
+  "startedAt": "2026-10-07T13:38:14.628Z",
+  "collection": "collected",
+  "host": {
+    "id": "27a1ed73-2bf0-4235-8bc5-c014ae8d69d6",
+    "pid": 68616,
+    "buildId": "3586cdee11d28a971028e875",
+    "dataEpoch": "initial",
+    "platform": "darwin",
+    "runtimeReady": true,
+    "hasError": false,
+    "startCursor": 1993,
+    "endCursor": 1993,
+    "identityStable": true,
+    "stateChangedDuringCollection": false
+  },
+  "bots": [
+    {
+      "id": "2d863a9d-de36-4cc5-adf9-da3e5a8b7079",
+      "modelRef": "custom:minimax-m3",
+      "modelSelection": "explicit",
+      "revision": 2,
+      "hidden": false,
+      "deleted": false
+    },
+    {
+      "id": "5494f94d-75a8-4831-b3b0-5d35563f2c69",
+      "modelRef": "custom:minimax-m3",
+      "modelSelection": "explicit",
+      "revision": 2,
+      "hidden": false,
+      "deleted": false
+    },
+    {
+      "id": "6053ad88-f72a-43fe-9e7c-2c549c1375c0",
+      "modelRef": "custom:minimax-m3",
+      "modelSelection": "explicit",
+      "revision": 2,
+      "hidden": false,
+      "deleted": false
+    },
+    {
+      "id": "108c3860-7c30-4822-9975-201a98334516",
+      "modelRef": "custom:minimax-m3",
+      "modelSelection": "explicit",
+      "revision": 2,
+      "hidden": false,
+      "deleted": false
+    },
+    {
+      "id": "a99aa585-9532-4867-b00f-48b25a1bc8a6",
+      "modelRef": "custom:minimax-m3",
+      "modelSelection": "explicit",
+      "revision": 2,
+      "hidden": false,
+      "deleted": false
+    }
+  ],
+  "conversations": [
+    {
+      "id": "f37ae835-4aec-4b33-9455-69da80564ba0",
+      "kind": "direct",
+      "memberIds": [
+        "2d863a9d-de36-4cc5-adf9-da3e5a8b7079"
+      ],
+      "revision": 2,
+      "messages": [
+        {
+          "id": "089a7e0b-fcf1-4137-a0aa-e99d7c5ccd94",
+          "sequence": 42,
+          "botId": "2d863a9d-de36-4cc5-adf9-da3e5a8b7079",
+          "sender": "bot",
+          "runId": "e29a8e83-9fdc-4914-a20b-d68c9452b583",
+          "replyTo": null,
+          "threadRootId": null,
+          "createdAt": 1791376999678,
+          "text": {
+            "bytes": 42,
+            "sha256": "c0050499f6e3ca6bef06149e3bd932a5c2d2bc3751ed25d62e877a36d72625ac"
+          },
+          "attachmentIds": []
+        },
+        {
+          "id": "10565562-8fe2-4727-80e3-a2279fd9a305",
+          "sequence": 52,
+          "botId": null,
+          "sender": "user",
+          "runId": null,
+          "replyTo": null,
+          "threadRootId": null,
+          "createdAt": 1791380096939,
+          "text": {
+            "bytes": 293,
+            "sha256": "d3dee409aa828294ced65d3af4ca81725455d6c81c1768758883d748f8c39af6"
+          },
+          "attachmentIds": [
+            "9d6b8266-c5d0-4e09-8477-540ddc00f96b",
+            "d8f09e21-19df-4636-8ba9-3e4898d4cddf"
+          ]
+        },
+        {
+          "id": "3f26c3dd-9f94-4bd6-a972-b568ff9fccd6",
+          "sequence": 53,
+          "botId": "2d863a9d-de36-4cc5-adf9-da3e5a8b7079",
+          "sender": "bot",
+          "runId": "5e60d287-a072-4288-b6c8-db16e9708733",
+          "replyTo": "10565562-8fe2-4727-80e3-a2279fd9a305",
+          "threadRootId": null,
+          "createdAt": 1791380172243,
+          "text": {
+            "bytes": 1973,
+            "sha256": "ed70e5c74d3f49ac9a01f2e910d24ae731f24b33bc19ffd95a9c8ffc5415d89d"
+          },
+          "attachmentIds": []
+        }
+      ]
+    }
+  ],
+  "runs": [
+    {
+      "conversationId": "f37ae835-4aec-4b33-9455-69da80564ba0",
+      "runId": "5e60d287-a072-4288-b6c8-db16e9708733",
+      "botId": "2d863a9d-de36-4cc5-adf9-da3e5a8b7079",
+      "outcome": "succeeded",
+      "source": "user",
+      "messageId": "10565562-8fe2-4727-80e3-a2279fd9a305",
+      "revision": 21,
+      "createdAt": 1791380096940,
+      "updatedAt": 1791380172241,
+      "parentRunId": null,
+      "rootRunId": null,
+      "lineageAvailable": false,
+      "result": {
+        "bytes": 1973,
+        "sha256": "ed70e5c74d3f49ac9a01f2e910d24ae731f24b33bc19ffd95a9c8ffc5415d89d"
+      },
+      "error": null,
+      "diagnostic": null,
+      "tokenUsage": {
+        "requests": 2,
+        "unknownRequests": 2,
+        "inputTokens": 0,
+        "outputTokens": 0,
+        "reservedOutputTokens": 16384,
+        "otherModelRequests": 0,
+        "inputReportedRequests": 0,
+        "models": [
+          {
+            "modelRef": "custom:minimax-m3",
+            "model": "MiniMax-M3",
+            "purpose": "task",
+            "requests": 2,
+            "unknownRequests": 2,
+            "inputReportedRequests": 0,
+            "inputTokens": 0,
+            "outputTokens": 0
+          }
+        ]
+      },
+      "hasBrowser": false,
+      "hasWorktree": false,
+      "children": [],
+      "history": {
+        "pages": 1,
+        "complete": true,
+        "items": [
+          {
+            "cursor": 1985,
+            "createdAt": 1791380172246,
+            "label": {
+              "bytes": 18,
+              "sha256": "f8365c6c29a0525ddbed8d46e443725de8e746e68e7dcae822ec70b580f8901b"
+            },
+            "detail": null,
+            "effectId": null,
+            "interactionId": null,
+            "hasPeerExchange": false
+          },
+          {
+            "cursor": 1941,
+            "createdAt": 1791380102411,
+            "label": {
+              "bytes": 21,
+              "sha256": "dea4334da67f8274bb32488a41b0eedaa87542e015a0e8a1f70e25efc0f5720f"
+            },
+            "detail": null,
+            "effectId": null,
+            "interactionId": null,
+            "hasPeerExchange": false
+          },
+          {
+            "cursor": 1938,
+            "createdAt": 1791380102139,
+            "label": {
+              "bytes": 18,
+              "sha256": "581f57a9324f1dffef2e77dd5c76281b8f405d4c59026b5b5cd1bdcee60ec30e"
+            },
+            "detail": null,
+            "effectId": null,
+            "interactionId": null,
+            "hasPeerExchange": false
+          },
+          {
+            "cursor": 1928,
+            "createdAt": 1791380097222,
+            "label": {
+              "bytes": 21,
+              "sha256": "dea4334da67f8274bb32488a41b0eedaa87542e015a0e8a1f70e25efc0f5720f"
+            },
+            "detail": null,
+            "effectId": null,
+            "interactionId": null,
+            "hasPeerExchange": false
+          },
+          {
+            "cursor": 1924,
+            "createdAt": 1791380096954,
+            "label": {
+              "bytes": 12,
+              "sha256": "f7d5b61de2fd0fc86187780659fc0232438932a7424d16176e72c2f68c878cfa"
+            },
+            "detail": null,
+            "effectId": null,
+            "interactionId": null,
+            "hasPeerExchange": false
+          },
+          {
+            "cursor": 1923,
+            "createdAt": 1791380096940,
+            "label": {
+              "bytes": 12,
+              "sha256": "08127c4d770b4145810c2e7b393fd72cc98fb9e52dbb321048b3e6f3970937ff"
+            },
+            "detail": null,
+            "effectId": null,
+            "interactionId": null,
+            "hasPeerExchange": false
+          }
+        ]
+      },
+      "toolRecords": [],
+      "shellJobs": []
+    }
+  ],
+  "peerExchanges": [],
+  "teach": [
+    {
+      "botId": "2d863a9d-de36-4cc5-adf9-da3e5a8b7079",
+      "sessions": [],
+      "trials": []
+    },
+    {
+      "botId": "5494f94d-75a8-4831-b3b0-5d35563f2c69",
+      "sessions": [],
+      "trials": []
+    },
+    {
+      "botId": "6053ad88-f72a-43fe-9e7c-2c549c1375c0",
+      "sessions": [],
+      "trials": []
+    },
+    {
+      "botId": "108c3860-7c30-4822-9975-201a98334516",
+      "sessions": [],
+      "trials": []
+    },
+    {
+      "botId": "a99aa585-9532-4867-b00f-48b25a1bc8a6",
+      "sessions": [],
+      "trials": []
+    }
+  ],
+  "artifacts": [],
+  "limits": {
+    "bots": 8,
+    "conversations": 8,
+    "messages": 100,
+    "runs": 24,
+    "historyPages": 3,
+    "effects": 32,
+    "peers": 16,
+    "teach": 32,
+    "trials": 32,
+    "artifacts": 32,
+    "artifactBytes": 26214400,
+    "totalArtifactBytes": 104857600,
+    "calls": 512,
+    "deadlineMs": 90000,
+    "callMs": 12000
+  },
+  "coverage": {
+    "truncations": [],
+    "unknownToolNames": true,
+    "exactToolHistoryComplete": false,
+    "businessTextIncluded": false,
+    "providerRawIncluded": false,
+    "credentialsIncluded": false,
+    "taskPassClaimed": false
+  },
+  "transport": {
+    "calls": 23,
+    "closed": true
+  },
+  "scope": [
+    "collection is not task PASS",
+    "run outcomes are Host-recorded outcomes; semantic correctness needs independent fixture/result verification",
+    "token usage is provider-reported accounting; unknown counters remain explicit",
+    "runHistory modelUsage aggregates the root run including children, so never sum parent and child totals",
+    "tool names are only inferred from original structured approval action shape with matching effect ID prefix; read-only/unapproved tools are not guessed",
+    "browser form completion needs fixture POST/download records as well as these Host records",
+    "Teach readiness or trial verdict alone does not prove the learned skill succeeded on new inputs",
+    "no configuration, descriptor token, raw logs or raw business files are exported"
+  ],
+  "completedAt": "2026-10-07T13:38:15.085Z"
+}

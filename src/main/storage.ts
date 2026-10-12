@@ -1,5 +1,26 @@
+import {
+  DEFAULT_MAX_TOKENS,
+  MIN_MAX_TOKENS,
+  MAX_MAX_TOKENS,
+  DEFAULT_MAX_OUTPUT_TOKENS,
+  MIN_MAX_OUTPUT_TOKENS,
+  MAX_MAX_OUTPUT_TOKENS,
+  DEFAULT_TEMPERATURE,
+  MIN_TEMPERATURE,
+  MAX_TEMPERATURE,
+  DEFAULT_TOP_P,
+  MIN_TOP_P,
+  MAX_TOP_P,
+  DEFAULT_TOP_K,
+  MIN_TOP_K,
+  MAX_TOP_K,
+  type ThinkingEffort,
+  DEFAULT_THINKING_EFFORT
+} from "./models/defaults"
 import { basename, isAbsolute, join, relative, resolve } from "path"
 import { createHash } from "crypto"
+import { isDeepStrictEqual } from "node:util"
+import { notifyRuntimeConfigurationChanged } from "./runtime-configuration-events"
 import { v4 as uuid } from "uuid"
 import {
   type Dirent,
@@ -1645,23 +1666,25 @@ export interface UserInfoConfig {
   ystAccessToken?: string
 }
 
-export const DEFAULT_MAX_TOKENS = 128_000
-export const MIN_MAX_TOKENS = 32_000
-export const MAX_MAX_TOKENS = 1_000_000
-export const DEFAULT_MAX_OUTPUT_TOKENS = 8_192
-export const MIN_MAX_OUTPUT_TOKENS = 1
-export const MAX_MAX_OUTPUT_TOKENS = 100_000
-export const DEFAULT_TEMPERATURE = 0.1
-export const MIN_TEMPERATURE = 0
-export const MAX_TEMPERATURE = 2
-export const DEFAULT_TOP_P = 0.95
-export const MIN_TOP_P = 0
-export const MAX_TOP_P = 1
-export const DEFAULT_TOP_K = 40
-export const MIN_TOP_K = 0
-export const MAX_TOP_K = 1_000
-export type ThinkingEffort = "low" | "high" | "max"
-export const DEFAULT_THINKING_EFFORT: ThinkingEffort = "high"
+export {
+  DEFAULT_MAX_TOKENS,
+  MIN_MAX_TOKENS,
+  MAX_MAX_TOKENS,
+  DEFAULT_MAX_OUTPUT_TOKENS,
+  MIN_MAX_OUTPUT_TOKENS,
+  MAX_MAX_OUTPUT_TOKENS,
+  DEFAULT_TEMPERATURE,
+  MIN_TEMPERATURE,
+  MAX_TEMPERATURE,
+  DEFAULT_TOP_P,
+  MIN_TOP_P,
+  MAX_TOP_P,
+  DEFAULT_TOP_K,
+  MIN_TOP_K,
+  MAX_TOP_K,
+  type ThinkingEffort,
+  DEFAULT_THINKING_EFFORT
+} from "./models/defaults"
 
 export interface CustomModelPublicConfig {
   id: string
@@ -2002,6 +2025,7 @@ export function setBuiltinModelOverride(id: string, override: BuiltinModelOverri
     ...current,
     [normalizedId]: override
   })
+  notifyRuntimeConfigurationChanged()
 }
 
 export function resetBuiltinModelOverride(id: string): void {
@@ -2009,6 +2033,7 @@ export function resetBuiltinModelOverride(id: string): void {
   if (!(id in current)) return
   delete current[id]
   getSettingsStore().set(BUILTIN_MODEL_OVERRIDES_KEY, current)
+  notifyRuntimeConfigurationChanged()
 }
 
 export function getStoredDefaultModelId(): string {
@@ -2017,6 +2042,7 @@ export function getStoredDefaultModelId(): string {
 
 export function setStoredDefaultModelId(modelId: string): void {
   getSettingsStore().set("defaultModel", modelId.trim())
+  notifyRuntimeConfigurationChanged()
 }
 
 const WINDOW_CLOSE_BEHAVIOR_KEY = "windowCloseBehavior"
@@ -2036,6 +2062,7 @@ export function getModsGlobalEnabled(): boolean {
 export function setModsGlobalEnabled(enabled: boolean): boolean {
   const normalized = Boolean(enabled)
   getSettingsStore().set(MODS_GLOBAL_ENABLED_KEY, normalized)
+  notifyRuntimeConfigurationChanged()
   return normalized
 }
 
@@ -2230,10 +2257,28 @@ function readCustomModelsRaw(): StoredCustomModelRecord[] {
 function writeCustomModelsRaw(items: StoredCustomModelRecord[]): void {
   writeFileSync(CUSTOM_MODELS_FILE, JSON.stringify(items, null, 2))
   customModelsRawCache = cloneStoredCustomModels(items)
+  notifyRuntimeConfigurationChanged()
 }
 
 function writeUserInfoModelsRaw(items: UserInfoConfig): void {
-  writeFileSync(USERINFO_MODELS_FILE, JSON.stringify(items, null, 2))
+  const serialized = JSON.stringify(items, null, 2)
+  try {
+    // Login checks can return the same identity while a detached Bot is running.
+    // Compare the full persisted value (including credentials); a no-op refresh
+    // must not revoke its configuration or rewrite the file.
+    if (
+      isDeepStrictEqual(
+        JSON.parse(readFileSync(USERINFO_MODELS_FILE, "utf-8")),
+        JSON.parse(serialized)
+      )
+    )
+      return
+  } catch {
+    // A missing/unreadable/malformed prior value is not evidence of equality.
+    // Preserve the existing write/repair behavior and notify only after success.
+  }
+  writeFileSync(USERINFO_MODELS_FILE, serialized)
+  notifyRuntimeConfigurationChanged()
 }
 
 function slugify(input: string): string {
@@ -2679,6 +2724,7 @@ export function upsertMcpConnector(
     items.push(next)
   }
   writeFileSync(MCP_CONNECTORS_FILE, JSON.stringify(items, null, 2))
+  notifyRuntimeConfigurationChanged()
   return id
 }
 
@@ -2686,17 +2732,31 @@ export function deleteMcpConnector(id: string): void {
   getOpenworkDir()
   const items = getMcpConnectors().filter((i) => i.id !== id)
   writeFileSync(MCP_CONNECTORS_FILE, JSON.stringify(items, null, 2))
+  notifyRuntimeConfigurationChanged()
 }
 
 export function setMcpConnectorEnabled(id: string, enabled: boolean): void {
+  setMcpConnectorFlag(id, "enabled", enabled)
+}
+
+export function setMcpConnectorLazyLoad(id: string, lazyLoad: boolean): void {
+  setMcpConnectorFlag(id, "lazyLoad", lazyLoad)
+}
+
+function setMcpConnectorFlag(id: string, key: "enabled" | "lazyLoad", value: boolean): void {
+  if (typeof id !== "string" || !id.trim() || typeof value !== "boolean") {
+    throw new Error("Invalid MCP connector setting")
+  }
   getOpenworkDir()
   const items = getMcpConnectors()
   const target = items.find((i) => i.id === id)
-  if (!target) return
+  if (!target) throw new Error("MCP 连接器不存在")
+  if (target[key] === value) return
   const next = items.map((i) =>
-    i.id === id ? { ...i, enabled, updatedAt: new Date().toISOString() } : i
+    i.id === id ? { ...i, [key]: value, updatedAt: new Date().toISOString() } : i
   )
   writeFileSync(MCP_CONNECTORS_FILE, JSON.stringify(next, null, 2))
+  notifyRuntimeConfigurationChanged()
 }
 
 // Scheduled Tasks
@@ -3222,6 +3282,7 @@ export function getPlugins(): PluginMetadata[] {
 function writePlugins(items: PluginMetadata[]): void {
   getOpenworkDir()
   writeFileSync(PLUGINS_FILE, JSON.stringify(items, null, 2))
+  notifyRuntimeConfigurationChanged()
   // Plugin enable/disable changes the set of skills that listPluginSkills()
   // and the hook system surface. Invalidate the cache here so the next read
   // rebuilds — otherwise users see stale plugin entries in the slash popover
@@ -3661,6 +3722,7 @@ function updateSandboxSettings(
   const next = { ...current, ...patch }
   writeFileSync(SANDBOX_SETTINGS_FILE, JSON.stringify(next, null, 2))
   sandboxSettingsCache = next
+  notifyRuntimeConfigurationChanged()
 }
 
 export function getWindowsSandboxMode(): SandboxMode {

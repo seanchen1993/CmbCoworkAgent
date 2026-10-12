@@ -1,0 +1,11 @@
+{
+  "at": "2026-10-07T08:30:25.563802+00:00",
+  "previousActualHostGate": "/tmp/cmb-root-shell-job-controls-integration-v1/current-compiled-host/root-verification.json",
+  "previousActualNativeBuildId": "aa183a16dd2d22fe8ad060e4",
+  "currentOutputRevisionSHA256": "0ce3e79902f8ee8bedfaead445890c67cc96fb08a40e12252ec30743d7b05dcc",
+  "byteExactCurrentMainAndPreloadFiles": 182,
+  "allMainAndPreloadBytesUnchanged": true,
+  "changedProductionFile": "src/renderer/src/lib/bot-workspace-store.ts",
+  "rendererAcceptanceCarriedOver": false,
+  "realUserModelWindowsLinuxAcceptance": false
+}

@@ -1,0 +1,368 @@
+{
+  "schemaVersion": 1,
+  "kind": "exact-run-model-protocol-safe",
+  "runId": "7ce95aad-593c-494e-b345-58bd267815f8",
+  "filesRead": 1,
+  "parseErrors": 0,
+  "matchedEntries": 75,
+  "calls": [
+    {
+      "callId": "7256aef2-9b9d-46be-b835-28a305e378bb",
+      "phases": [
+        "started",
+        "response",
+        "stream_ended"
+      ],
+      "httpStatus": 200,
+      "protocolComplete": false,
+      "format": "sse",
+      "inputTokensReported": 18924,
+      "outputTokensReported": 218,
+      "bytes": 12133
+    },
+    {
+      "callId": "031de6f6-24a8-41ae-af60-ca9550c5001e",
+      "phases": [
+        "started",
+        "response",
+        "stream_ended"
+      ],
+      "httpStatus": 200,
+      "protocolComplete": false,
+      "format": "sse",
+      "inputTokensReported": 19911,
+      "outputTokensReported": 131,
+      "bytes": 3269
+    },
+    {
+      "callId": "dd199ce2-115d-4772-82c7-fc05ecf9b201",
+      "phases": [
+        "started",
+        "response",
+        "stream_ended"
+      ],
+      "httpStatus": 200,
+      "protocolComplete": false,
+      "format": "sse",
+      "inputTokensReported": 20397,
+      "outputTokensReported": 143,
+      "bytes": 2832
+    },
+    {
+      "callId": "d1bf1fab-b835-4ec8-8ab4-7ef4c948ac88",
+      "phases": [
+        "started",
+        "response",
+        "stream_ended"
+      ],
+      "httpStatus": 200,
+      "protocolComplete": false,
+      "format": "sse",
+      "inputTokensReported": 21164,
+      "outputTokensReported": 190,
+      "bytes": 3504
+    },
+    {
+      "callId": "16099eae-a93d-4ac8-9326-458a065d27d3",
+      "phases": [
+        "started",
+        "response",
+        "stream_ended"
+      ],
+      "httpStatus": 200,
+      "protocolComplete": false,
+      "format": "sse",
+      "inputTokensReported": 22119,
+      "outputTokensReported": 262,
+      "bytes": 3236
+    },
+    {
+      "callId": "75213327-43b9-4bc4-9aa0-d0dc4585cd03",
+      "phases": [
+        "started",
+        "response",
+        "stream_ended"
+      ],
+      "httpStatus": 200,
+      "protocolComplete": false,
+      "format": "sse",
+      "inputTokensReported": 24273,
+      "outputTokensReported": 1198,
+      "bytes": 80729
+    },
+    {
+      "callId": "ae2faa78-5d9f-42ca-8b91-899ea15ae289",
+      "phases": [
+        "started",
+        "response",
+        "stream_ended"
+      ],
+      "httpStatus": 200,
+      "protocolComplete": false,
+      "format": "sse",
+      "inputTokensReported": 25596,
+      "outputTokensReported": 38,
+      "bytes": 1207
+    },
+    {
+      "callId": "42b4e50c-cc06-46fd-9aff-763bc44e650a",
+      "phases": [
+        "started",
+        "response",
+        "stream_ended"
+      ],
+      "httpStatus": 200,
+      "protocolComplete": false,
+      "format": "sse",
+      "inputTokensReported": 26989,
+      "outputTokensReported": 38,
+      "bytes": 1205
+    },
+    {
+      "callId": "29bb78ee-e422-485c-8a0d-d97e1098eb3f",
+      "phases": [
+        "started",
+        "response",
+        "stream_ended"
+      ],
+      "httpStatus": 200,
+      "protocolComplete": false,
+      "format": "sse",
+      "inputTokensReported": 27201,
+      "outputTokensReported": 78,
+      "bytes": 3778
+    },
+    {
+      "callId": "8faad8d3-7753-4b24-b423-42712b2ab018",
+      "phases": [
+        "started",
+        "response",
+        "stream_ended"
+      ],
+      "httpStatus": 200,
+      "protocolComplete": false,
+      "format": "sse",
+      "inputTokensReported": 27396,
+      "outputTokensReported": 38,
+      "bytes": 1207
+    },
+    {
+      "callId": "bfe299b7-3b1f-4a6d-b1c8-fcf191f537f1",
+      "phases": [
+        "started",
+        "response",
+        "stream_ended"
+      ],
+      "httpStatus": 200,
+      "protocolComplete": false,
+      "format": "sse",
+      "inputTokensReported": 28789,
+      "outputTokensReported": 72,
+      "bytes": 3038
+    },
+    {
+      "callId": "a89891ab-7529-463c-b86f-fe689885437f",
+      "phases": [
+        "started",
+        "response",
+        "stream_ended"
+      ],
+      "httpStatus": 200,
+      "protocolComplete": false,
+      "format": "sse",
+      "inputTokensReported": 28980,
+      "outputTokensReported": 38,
+      "bytes": 1207
+    },
+    {
+      "callId": "dc99a337-6865-427f-ab72-aebc096b67b3",
+      "phases": [
+        "started",
+        "response",
+        "stream_ended"
+      ],
+      "httpStatus": 200,
+      "protocolComplete": false,
+      "format": "sse",
+      "inputTokensReported": 30373,
+      "outputTokensReported": 75,
+      "bytes": 3542
+    },
+    {
+      "callId": "ec41211e-321f-456f-bc0a-76c41fa6f0ac",
+      "phases": [
+        "started",
+        "response",
+        "stream_ended"
+      ],
+      "httpStatus": 200,
+      "protocolComplete": false,
+      "format": "sse",
+      "inputTokensReported": 30571,
+      "outputTokensReported": 38,
+      "bytes": 1207
+    },
+    {
+      "callId": "36012c2d-6787-4114-8a65-5c1dc08e9e4e",
+      "phases": [
+        "started",
+        "response",
+        "stream_ended"
+      ],
+      "httpStatus": 200,
+      "protocolComplete": false,
+      "format": "sse",
+      "inputTokensReported": 31964,
+      "outputTokensReported": 72,
+      "bytes": 3272
+    },
+    {
+      "callId": "3b65d3b1-ba0c-4f62-bd7a-48530c5bbd51",
+      "phases": [
+        "started",
+        "response",
+        "stream_ended"
+      ],
+      "httpStatus": 200,
+      "protocolComplete": false,
+      "format": "sse",
+      "inputTokensReported": 32156,
+      "outputTokensReported": 38,
+      "bytes": 1207
+    },
+    {
+      "callId": "33954ed5-720e-47dd-a7b8-54150d0c7b4c",
+      "phases": [
+        "started",
+        "response",
+        "stream_ended"
+      ],
+      "httpStatus": 200,
+      "protocolComplete": false,
+      "format": "sse",
+      "inputTokensReported": 33549,
+      "outputTokensReported": 76,
+      "bytes": 2847
+    },
+    {
+      "callId": "3a465542-6c2e-4bee-a782-0dd1f7c2fe39",
+      "phases": [
+        "started",
+        "response",
+        "stream_ended"
+      ],
+      "httpStatus": 200,
+      "protocolComplete": false,
+      "format": "sse",
+      "inputTokensReported": 33744,
+      "outputTokensReported": 38,
+      "bytes": 1207
+    },
+    {
+      "callId": "47925e13-bb19-4b3c-91ac-2b37d528da59",
+      "phases": [
+        "started",
+        "response",
+        "stream_ended"
+      ],
+      "httpStatus": 200,
+      "protocolComplete": false,
+      "format": "sse",
+      "inputTokensReported": 35137,
+      "outputTokensReported": 686,
+      "bytes": 38341
+    },
+    {
+      "callId": "bcbc70a1-106c-4456-996d-2399b0de46b1",
+      "phases": [
+        "started",
+        "response",
+        "stream_ended"
+      ],
+      "httpStatus": 200,
+      "protocolComplete": false,
+      "format": "sse",
+      "inputTokensReported": 35905,
+      "outputTokensReported": 5213,
+      "bytes": 306670
+    },
+    {
+      "callId": "ac214b41-d553-40b6-b51a-3e73753799f8",
+      "phases": [
+        "started",
+        "response",
+        "stream_ended"
+      ],
+      "httpStatus": 200,
+      "protocolComplete": false,
+      "format": "sse",
+      "inputTokensReported": 41265,
+      "outputTokensReported": 543,
+      "bytes": 3235
+    },
+    {
+      "callId": "6ac9a248-9ade-4f57-97e4-a002795863c9",
+      "phases": [
+        "started",
+        "response",
+        "stream_ended"
+      ],
+      "httpStatus": 200,
+      "protocolComplete": false,
+      "format": "sse",
+      "inputTokensReported": 41958,
+      "outputTokensReported": 186,
+      "bytes": 1657
+    },
+    {
+      "callId": "44c74490-ff4b-4512-a239-5d375b26432b",
+      "phases": [
+        "started",
+        "response",
+        "stream_ended"
+      ],
+      "httpStatus": 200,
+      "protocolComplete": false,
+      "format": "sse",
+      "inputTokensReported": 42291,
+      "outputTokensReported": 84,
+      "bytes": 3554
+    },
+    {
+      "callId": "b52ca835-a0c1-4ab0-8929-baeece36106a",
+      "phases": [
+        "started",
+        "response",
+        "stream_ended"
+      ],
+      "httpStatus": 200,
+      "protocolComplete": false,
+      "format": "sse",
+      "inputTokensReported": 42491,
+      "outputTokensReported": 38,
+      "bytes": 1207
+    },
+    {
+      "callId": "176c83bd-7c83-4b07-9ff4-0d952a6afb9f",
+      "phases": [
+        "started",
+        "response",
+        "stream_ended"
+      ],
+      "httpStatus": 200,
+      "protocolComplete": false,
+      "format": "sse",
+      "inputTokensReported": 43884,
+      "outputTokensReported": 78,
+      "bytes": 4212
+    }
+  ],
+  "summary": {
+    "calls": 25,
+    "streamEnded": 25,
+    "protocolComplete": 0,
+    "completeWithoutOutputUsage": 0,
+    "outputUsageReported": 25
+  },
+  "coverage": "Best-effort rotating logger only; not a durable usage receipt, and absence cannot prove an event did not occur."
+}

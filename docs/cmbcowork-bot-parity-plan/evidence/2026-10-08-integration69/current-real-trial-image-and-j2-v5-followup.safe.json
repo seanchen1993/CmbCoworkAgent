@@ -1,0 +1,197 @@
+{
+  "kind": "real-minimax-teach-trial-and-material-followup",
+  "recordedAt": "2026-10-09T03:43:17.016299+00:00",
+  "observedBuildId": "7c5c54361ee72bafe429e9b0",
+  "newBuildIdAwaitingActualRetest": "bd964743316fdbdca8574863",
+  "learnedSkillId": "549ee150-2467-43f0-999e-bed2d184296c",
+  "trials": [
+    {
+      "id": "127fbf1b-252a-4511-ba66-ec6c257c0132",
+      "bot_id": "e1d81813-1ff0-4fca-9948-d966e1a77189",
+      "skill_id": "549ee150-2467-43f0-999e-bed2d184296c",
+      "version": 1,
+      "run_id": "ee9448fa-a9f5-42fb-ac22-0481a054951c",
+      "verdict": "failed",
+      "note": "本次未执行浏览器调用，没有报表或截图；模型把历史 fetch failed 事件误当作当前工具状态。未达到验收条件，不通过，失败记录保留。",
+      "created_at": 1791512831447,
+      "inputsSha256": "a9853e1760b7678075fa5fd962d21166e91108e3875ec4ef609b6dc96897e3f4",
+      "criteriaSha256": "f58fcad3ca148d2e77b4fd29336a0831ca0f0c22e5779572a7cefb0b2c741268",
+      "run": {
+        "id": "ee9448fa-a9f5-42fb-ac22-0481a054951c",
+        "status": "succeeded",
+        "revision": 13,
+        "fence": 1
+      },
+      "browserEffects": 0,
+      "artifacts": []
+    },
+    {
+      "id": "cc3224a9-acf9-45ce-a128-43a1b97dea11",
+      "bot_id": "e1d81813-1ff0-4fca-9948-d966e1a77189",
+      "skill_id": "549ee150-2467-43f0-999e-bed2d184296c",
+      "version": 1,
+      "run_id": "281b7445-83d7-41c3-bbe1-9dabb2c9853b",
+      "verdict": "passed",
+      "note": "已独立打开交付的48339字节JPEG原件，SHA256为6041cb852b198d8f0935bd62db817de3ed8b3ca2c5e385691bc4396d665b0821。实际2026-10/西区，REPLAY-2026，青禾18、白鹭27、长风9，3项目，合计54，页面、截图、明细求和与交付文字一致。本次补充了重新观察当前工具状态的输入；仅本次试跑通过，上一轮未执行失败保留。",
+      "created_at": 1791513325792,
+      "inputsSha256": "2abcf62804d7cb3a852babce606d6438083d4cc132d3d8c0d734b2703c2f600f",
+      "criteriaSha256": "f58fcad3ca148d2e77b4fd29336a0831ca0f0c22e5779572a7cefb0b2c741268",
+      "run": {
+        "id": "281b7445-83d7-41c3-bbe1-9dabb2c9853b",
+        "status": "succeeded",
+        "revision": 95,
+        "fence": 1
+      },
+      "browserEffects": 5,
+      "artifacts": [
+        {
+          "id": "281b7445-83d7-41c3-bbe1-9dabb2c9853b:browser-shot:432b96ad721352f96a1e8c4e043c05754e57541eec595de154b00066bbcb303b",
+          "name": "工单月报_2026-10_西区.jpg",
+          "mime": "image/jpeg",
+          "size": 48339,
+          "sha256": "6041cb852b198d8f0935bd62db817de3ed8b3ca2c5e385691bc4396d665b0821",
+          "originalObject": {
+            "path": "/Users/chenqiang/Library/Application Support/CMBDevClaw-development/2026-10-08/acceptance69-final/home/bot-host/objects/6041cb852b198d8f0935bd62db817de3ed8b3ca2c5e385691bc4396d665b0821",
+            "bytes": 48339,
+            "sha256": "6041cb852b198d8f0935bd62db817de3ed8b3ca2c5e385691bc4396d665b0821"
+          }
+        }
+      ]
+    },
+    {
+      "id": "31e98c13-1cc6-4966-a01b-3cafc562dc41",
+      "bot_id": "e1d81813-1ff0-4fca-9948-d966e1a77189",
+      "skill_id": "549ee150-2467-43f0-999e-bed2d184296c",
+      "version": 2,
+      "run_id": "151015e4-d141-493d-9e87-060a691307ed",
+      "verdict": "pending",
+      "note": null,
+      "created_at": 1791514285323,
+      "inputsSha256": "a984a3457970e76a0de1d44ff1f47d386690c875624c3ba749b35cc2b4f247d0",
+      "criteriaSha256": "6121151c02f30eeb3dbc515fddaf05435320090a611a463f068032e7b1b74f10",
+      "run": {
+        "id": "151015e4-d141-493d-9e87-060a691307ed",
+        "status": "succeeded",
+        "revision": 13,
+        "fence": 1
+      },
+      "browserEffects": 0,
+      "artifacts": []
+    }
+  ],
+  "manualImageObservation": {
+    "file": {
+      "id": "281b7445-83d7-41c3-bbe1-9dabb2c9853b:browser-shot:432b96ad721352f96a1e8c4e043c05754e57541eec595de154b00066bbcb303b",
+      "name": "工单月报_2026-10_西区.jpg",
+      "mime": "image/jpeg",
+      "size": 48339,
+      "sha256": "6041cb852b198d8f0935bd62db817de3ed8b3ca2c5e385691bc4396d665b0821",
+      "originalObject": {
+        "path": "/Users/chenqiang/Library/Application Support/CMBDevClaw-development/2026-10-08/acceptance69-final/home/bot-host/objects/6041cb852b198d8f0935bd62db817de3ed8b3ca2c5e385691bc4396d665b0821",
+        "bytes": 48339,
+        "sha256": "6041cb852b198d8f0935bd62db817de3ed8b3ca2c5e385691bc4396d665b0821"
+      }
+    },
+    "month": "2026-10",
+    "region": "西区",
+    "sourceId": "REPLAY-2026",
+    "rows": [
+      {
+        "project": "青禾",
+        "count": 18
+      },
+      {
+        "project": "白鹭",
+        "count": 27
+      },
+      {
+        "project": "长风",
+        "count": 9
+      }
+    ],
+    "total": 54,
+    "actualOriginalImageOpened": true,
+    "inputAddedFreshObservationHint": true,
+    "originalUnclarifiedInputPassed": false
+  },
+  "v2EastTrial": {
+    "actualBrowserWorkObserved": false,
+    "taskQuality": "FAIL",
+    "formalVerdictStillPending": true,
+    "routineCreated": false
+  },
+  "materialRetest": {
+    "runId": "e466a055-112f-4cd2-a896-901cb4bd81f2",
+    "candidate": {
+      "id": "result:e466a055-112f-4cd2-a896-901cb4bd81f2:chatcmpl-tool-bc943bc898a28b2b",
+      "name": "result.csv",
+      "mime": "text/csv",
+      "size": 66,
+      "sha256": "a4c3332dd4d3f4a4e5927e27cb0db1439f4f04a2505d6915ca21bf8929451298",
+      "originalObject": {
+        "path": "/Users/chenqiang/Library/Application Support/CMBDevClaw-development/2026-10-08/acceptance69-final/home/bot-host/objects/a4c3332dd4d3f4a4e5927e27cb0db1439f4f04a2505d6915ca21bf8929451298",
+        "bytes": 66,
+        "sha256": "a4c3332dd4d3f4a4e5927e27cb0db1439f4f04a2505d6915ca21bf8929451298"
+      },
+      "content": "project_id,amount万元\nP101,15.40\nP102,8.55\nP105,-2.50\nP106,0.00\n"
+    },
+    "reviews": [
+      {
+        "receipt": "tool:e466a055-112f-4cd2-a896-901cb4bd81f2:delivery-evidence:verdict:5f057b2cfa9b8ffcc9bf713bd38fa75400dacb9e85a73f0ff3a137d25ddc4a1a",
+        "verdict": {
+          "decision": "uncertain",
+          "findings": [
+            "独立原件核验未返回有效结论，未发布该候选文件。"
+          ],
+          "diagnostic": {
+            "stage": "stream",
+            "reason": "invalid_tool_call",
+            "finish": "missing",
+            "toolCall": {
+              "source": "raw",
+              "field": "type",
+              "valueType": "string"
+            }
+          }
+        }
+      },
+      {
+        "receipt": "tool:e466a055-112f-4cd2-a896-901cb4bd81f2:delivery-evidence:verdict:abae2e23b8e48767fb3061be956537e8714c4daabd669c3c7293b0bfc416ca67",
+        "verdict": {
+          "decision": "pass",
+          "findings": [
+            "按 review-policy.txt 规则：北区+已验收过滤得 P101(v1=15.40,v2=12.40)、P102(v1=7.05,v2=8.55)、P105(-2.50)、P106(0.00)；P103南区、P104待验收排除；同id保留数值最大版本，对应 result.csv 中 P101=15.40、P102=8.55、P105=-2.50、P106=0.00，筛选与去重规则一致。",
+            "金额合计 15.40+8.55+(-2.50)+0.00=21.45 万元（与各原始记录 amount_wan 字段计算一致），条数 4，与 result.csv 行数一致。"
+          ]
+        }
+      }
+    ],
+    "independentExpectedP101Version": 2,
+    "independentExpectedP101AmountWan": "12.40",
+    "independentExpectedTotalWan": "18.45",
+    "independentExpectedDraftExcessWan": "20.00",
+    "modelReceivedIndependentExpectedAnswers": false,
+    "taskQuality": "FAIL"
+  },
+  "standaloneProbe": {
+    "receipt": {
+      "path": "/Users/chenqiang/Library/Application Support/CMBDevClaw-development/2026-10-08/presentation/verdict-j2-actual-8192-retry-shape.safe.json",
+      "bytes": 1380,
+      "sha256": "0892e7837730796bc627fdc24d7c9e8c598127a54e05e719dca7286c921153e3"
+    },
+    "providerReturnedReviseForWrongCandidate": true,
+    "previousAttemptHTTP529Retained": {
+      "path": "/private/tmp/cmb-j2-actual-provider-shape-20261009.log",
+      "bytes": 2012,
+      "sha256": "2ce7941cc9aa23a00555dd3aad3486abe081c77eb92304ed408657829efc3156"
+    },
+    "notAppAcceptance": true
+  },
+  "boundaries": [
+    "The passed JPEG trial used an additional fresh-observation hint. It does not close the original-input failure.",
+    "Execution terminal succeeded is not an accepted task-quality verdict.",
+    "The v2 skill does not inherit its previous version trial pass.",
+    "The isolated reviewer probe is not a formal App pass.",
+    "No full core parity or platform completion claimed."
+  ]
+}

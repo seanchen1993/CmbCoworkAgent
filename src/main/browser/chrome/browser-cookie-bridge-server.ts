@@ -145,7 +145,7 @@ export class BrowserCookieBridgeServer {
     if (!client) {
       throw new BrowserCookieBridgeError(
         "extension_not_connected",
-        "CmbCoworkAgent Chrome 扩展尚未连接，请安装或启用扩展后重试"
+        "CMBDevClaw Chrome 扩展尚未连接，请安装或启用扩展后重试"
       )
     }
 

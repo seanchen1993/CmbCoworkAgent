@@ -1,10 +1,42 @@
 import { mkdir, mkdtemp, realpath, rename, rm, symlink, writeFile } from "node:fs/promises"
 import { join } from "node:path"
+import { createHash } from "node:crypto"
 import { tmpdir } from "node:os"
 import { afterEach, expect, it, vi } from "vitest"
 import { FUNCTION_READ_LIMIT, ProjectFunctionFiles } from "./file-access"
 
 const roots: string[] = []
+
+it("records only an actually read and published file version for host CAS writes", async () => {
+  const f = await fixture()
+  const record = vi.fn()
+  const bytes = Buffer.from("原始文件\n")
+  await writeFile(join(f.project, "source.txt"), bytes)
+  let publish = true
+  const files = new ProjectFunctionFiles(
+    f.project,
+    () => {},
+    async (value) => {
+      if (!publish) throw new Error("publication denied")
+      return value
+    },
+    async () => ({ decision: "allow" }),
+    record
+  )
+  await files.run("fs.exists", "source.txt", f.signal)
+  await files.run("fs.stat", "source.txt", f.signal)
+  await files.run("fs.list", ".", f.signal)
+  expect(record).not.toHaveBeenCalled()
+  publish = false
+  await expect(files.run("fs.read", "source.txt", f.signal)).rejects.toThrow("publication denied")
+  expect(record).not.toHaveBeenCalled()
+  publish = true
+  await files.run("fs.read", "source.txt", f.signal)
+  expect(record).toHaveBeenCalledExactlyOnceWith(
+    join(f.project, "source.txt"),
+    createHash("sha256").update(bytes).digest("hex")
+  )
+})
 afterEach(async () => {
   for (const root of roots.splice(0)) await rm(root, { recursive: true, force: true })
 })

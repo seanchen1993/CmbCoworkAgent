@@ -70,6 +70,27 @@ describe("tool strategy capability gate", () => {
 })
 
 describe("tool strategy prompt contract", () => {
+  it("uses explicit adapter tool names only when those actual capabilities are available", () => {
+    const mapping = { read: "project_read", edit: "project_edit", skill: "read_skill" }
+    const tools = [{ name: "execute" }, { name: "project_edit" }]
+    expect(resolveEffectiveToolStrategy("shell-first", tools)).toBe("standard")
+    expect(resolveEffectiveToolStrategy("shell-first", tools, undefined, mapping)).toBe(
+      "shell-first"
+    )
+    expect(
+      resolveEffectiveToolStrategy("shell-first", [{ name: "execute" }], undefined, mapping)
+    ).toBe("standard")
+    expect(
+      resolveEffectiveToolStrategy("shell-first", tools, { shellAccess: "read_only" }, mapping)
+    ).toBe("standard")
+    const prompt = getToolStrategyReminder("shell-first", mapping)
+    expect(prompt).toContain("load SKILL.md with read_skill")
+    expect(prompt).toContain(
+      "Refresh the file with project_read before falling back to project_edit"
+    )
+    expect(prompt).not.toContain("read_file")
+    expect(prompt).not.toContain("edit_file")
+  })
   it("preserves the default base prompt exactly", () => {
     expect(renderBaseSystemPrompt()).toBe(BASE_SYSTEM_PROMPT)
     expect(renderBaseSystemPrompt({ toolStrategy: "standard" })).toBe(BASE_SYSTEM_PROMPT)

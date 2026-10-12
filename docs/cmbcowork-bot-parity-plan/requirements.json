@@ -1,0 +1,4629 @@
+{
+  "baseline_date": "2026-09-29",
+  "all_statuses": "planned",
+  "modules_document": "03-architecture.md",
+  "groups": [
+    {
+      "code": "ACC",
+      "title": "账号、接入与首次使用",
+      "rows": [
+        {
+          "id": "ACC-01",
+          "feature": "统一身份",
+          "acceptance": "使用 Cmb 账号登录；浏览器授权回调绑定发起设备和账号；取消、超时、失败可恢复",
+          "current_basis": "现有登录/设置可适配；Bot 账号同步需新建",
+          "module": "M01 身份与接入",
+          "phase": "P2",
+          "source_ids": [
+            "W-get-started",
+            "W-sign-in",
+            "CM11"
+          ],
+          "classification": "scoped_requirement",
+          "test_id": "T-ACC-01",
+          "status": "planned"
+        },
+        {
+          "id": "ACC-02",
+          "feature": "首次引导",
+          "acceptance": "解释职责、电脑和任务；创建 Bot、准备电脑与推荐首项工作有明确进度；未连插件不显示已授权",
+          "current_basis": "现有登录/设置可适配；Bot 账号同步需新建",
+          "module": "M01 身份与接入",
+          "phase": "P2",
+          "source_ids": [
+            "W-get-started",
+            "W-sign-in",
+            "CM11"
+          ],
+          "classification": "scoped_requirement",
+          "test_id": "T-ACC-02",
+          "status": "planned"
+        },
+        {
+          "id": "ACC-03",
+          "feature": "多账号",
+          "acceptance": "添加/切换/移除本机账号时，草稿、缓存、通知、连接和权限不串账号",
+          "current_basis": "现有登录/设置可适配；Bot 账号同步需新建",
+          "module": "M01 身份与接入",
+          "phase": "P2",
+          "source_ids": [
+            "W-get-started",
+            "W-sign-in",
+            "CM11"
+          ],
+          "classification": "scoped_requirement",
+          "test_id": "T-ACC-03",
+          "status": "planned"
+        },
+        {
+          "id": "ACC-04",
+          "feature": "多端同账号",
+          "acceptance": "桌面与手机看到同一 Bot 列表和已持久化消息；一端退出不删除服务端工作",
+          "current_basis": "现有登录/设置可适配；Bot 账号同步需新建",
+          "module": "M01 身份与接入",
+          "phase": "P2",
+          "source_ids": [
+            "W-get-started",
+            "W-sign-in",
+            "CM11"
+          ],
+          "classification": "scoped_requirement",
+          "test_id": "T-ACC-04",
+          "status": "planned"
+        },
+        {
+          "id": "ACC-05",
+          "feature": "访问受限",
+          "acceptance": "未开通、被管理员禁用、额度不足、身份过期各有不同状态和恢复入口",
+          "current_basis": "现有登录/设置可适配；Bot 账号同步需新建",
+          "module": "M01 身份与接入",
+          "phase": "P2",
+          "source_ids": [
+            "W-get-started",
+            "W-sign-in",
+            "CM11"
+          ],
+          "classification": "scoped_requirement",
+          "test_id": "T-ACC-05",
+          "status": "planned"
+        },
+        {
+          "id": "ACC-06",
+          "feature": "设备与会话撤销",
+          "acceptance": "撤销设备后旧 token、WS 和电脑票据不可继续使用；其他有效设备按权限继续",
+          "current_basis": "现有登录/设置可适配；Bot 账号同步需新建",
+          "module": "M01 身份与接入",
+          "phase": "P2",
+          "source_ids": [
+            "W-get-started",
+            "W-sign-in",
+            "CM11"
+          ],
+          "classification": "scoped_requirement",
+          "test_id": "T-ACC-06",
+          "status": "planned"
+        },
+        {
+          "id": "ACC-07",
+          "feature": "账户注销",
+          "acceptance": "提供重新认证、删除范围和状态；Cmb 员工账号停用与 Bot 数据删除分别处理",
+          "current_basis": "现有登录/设置可适配；Bot 账号同步需新建",
+          "module": "M01 身份与接入",
+          "phase": "P5",
+          "source_ids": [
+            "W-delete-account",
+            "CM11"
+          ],
+          "classification": "scoped_requirement",
+          "test_id": "T-ACC-07",
+          "status": "planned"
+        },
+        {
+          "id": "ACC-08",
+          "feature": "试用和权益关联",
+          "acceptance": "保留权益接入/用量入口；Cursor、Grok、X 的品牌订阅关系映射为 Cmb 权益服务，不能宣称复用了官方账户",
+          "current_basis": "现有登录/设置可适配；Bot 账号同步需新建",
+          "module": "M01 身份与接入",
+          "phase": "P5",
+          "source_ids": [
+            "W-plans"
+          ],
+          "classification": "scoped_requirement",
+          "test_id": "T-ACC-08",
+          "status": "planned"
+        },
+        {
+          "id": "ACC-09",
+          "feature": "默认模型体验",
+          "acceptance": "Bot 创建和执行不要求用户选择模型；管理端的路由、失败切换仍可追踪",
+          "current_basis": "现有登录/设置可适配；Bot 账号同步需新建",
+          "module": "M01 身份与接入",
+          "phase": "P2",
+          "source_ids": [
+            "W-security",
+            "CM02"
+          ],
+          "classification": "scoped_requirement",
+          "test_id": "T-ACC-09",
+          "status": "planned"
+        }
+      ]
+    },
+    {
+      "code": "BOT",
+      "title": "个人 Bot 生命周期",
+      "rows": [
+        {
+          "id": "BOT-01",
+          "feature": "自然语言建立职责",
+          "acceptance": "新建后直接聊天说明职责，不强制填写工具编排表",
+          "current_basis": "需要长期 Bot 实体；已有会话/子任务只能部分复用",
+          "module": "M01 Bot Registry",
+          "phase": "P2",
+          "source_ids": [
+            "W-bots",
+            "GR01",
+            "GR06",
+            "CM04"
+          ],
+          "classification": "scoped_requirement",
+          "test_id": "T-BOT-01",
+          "status": "planned"
+        },
+        {
+          "id": "BOT-02",
+          "feature": "资料维护",
+          "acceptance": "姓名、标签、描述、头像可编辑；原图选择与生成头像都进入一致的保存流程",
+          "current_basis": "需要长期 Bot 实体；已有会话/子任务只能部分复用",
+          "module": "M01 Bot Registry",
+          "phase": "P2",
+          "source_ids": [
+            "W-bots",
+            "GR01",
+            "GR06",
+            "CM04"
+          ],
+          "classification": "scoped_requirement",
+          "test_id": "T-BOT-02",
+          "status": "planned"
+        },
+        {
+          "id": "BOT-03",
+          "feature": "稳定身份",
+          "acceptance": "重启、跨设备、连续多次任务仍为同一 Bot；修改名称不改变 ID",
+          "current_basis": "需要长期 Bot 实体；已有会话/子任务只能部分复用",
+          "module": "M01 Bot Registry",
+          "phase": "P2",
+          "source_ids": [
+            "W-bots",
+            "GR01",
+            "GR06",
+            "CM04"
+          ],
+          "classification": "scoped_requirement",
+          "test_id": "T-BOT-03",
+          "status": "planned"
+        },
+        {
+          "id": "BOT-04",
+          "feature": "Bot 创建 Bot",
+          "acceptance": "经数量与权限检查可建立新职责 Bot；新实体在侧边栏可见且可继续交谈",
+          "current_basis": "需要长期 Bot 实体；已有会话/子任务只能部分复用",
+          "module": "M01 Bot Registry",
+          "phase": "P2",
+          "source_ids": [
+            "W-bots",
+            "GR01",
+            "GR06",
+            "CM04"
+          ],
+          "classification": "scoped_requirement",
+          "test_id": "T-BOT-04",
+          "status": "planned"
+        },
+        {
+          "id": "BOT-05",
+          "feature": "置顶与排序",
+          "acceptance": "置顶、取消、拖动排序、快捷键目标一致；重启与同步后顺序正确",
+          "current_basis": "需要长期 Bot 实体；已有会话/子任务只能部分复用",
+          "module": "M01 Bot Registry",
+          "phase": "P2",
+          "source_ids": [
+            "W-bots",
+            "GR01",
+            "GR06",
+            "CM04"
+          ],
+          "classification": "scoped_requirement",
+          "test_id": "T-BOT-05",
+          "status": "planned"
+        },
+        {
+          "id": "BOT-06",
+          "feature": "自定义分区",
+          "acceptance": "新增、改名、折叠、移动、删除分区；删除分区只把 Bot 移回未分区",
+          "current_basis": "需要长期 Bot 实体；已有会话/子任务只能部分复用",
+          "module": "M01 Bot Registry",
+          "phase": "P2",
+          "source_ids": [
+            "W-bots",
+            "GR01",
+            "GR06",
+            "CM04"
+          ],
+          "classification": "scoped_requirement",
+          "test_id": "T-BOT-06",
+          "status": "planned"
+        },
+        {
+          "id": "BOT-07",
+          "feature": "隐藏与恢复",
+          "acceptance": "隐藏保留任务、历史和例程，停止该 Bot 通知；隐藏列表能恢复",
+          "current_basis": "需要长期 Bot 实体；已有会话/子任务只能部分复用",
+          "module": "M01 Bot Registry",
+          "phase": "P2",
+          "source_ids": [
+            "W-how-to",
+            "GR15"
+          ],
+          "classification": "scoped_requirement",
+          "test_id": "T-BOT-07",
+          "status": "planned"
+        },
+        {
+          "id": "BOT-08",
+          "feature": "手动已读未读",
+          "acceptance": "读取位置与人工未读标记独立，重新打开能定位未读内容",
+          "current_basis": "需要长期 Bot 实体；已有会话/子任务只能部分复用",
+          "module": "M01 Bot Registry",
+          "phase": "P2",
+          "source_ids": [
+            "W-bots",
+            "GR01",
+            "GR06",
+            "CM04"
+          ],
+          "classification": "scoped_requirement",
+          "test_id": "T-BOT-08",
+          "status": "planned"
+        },
+        {
+          "id": "BOT-09",
+          "feature": "复制 Bot",
+          "acceptance": "生成新 ID；复制资料、配置、启用技能和例程；不复制历史、记忆、附件和秘密；该用户已有共享电脑登录仍可能可用",
+          "current_basis": "需要长期 Bot 实体；已有会话/子任务只能部分复用",
+          "module": "M01 Bot Registry",
+          "phase": "P2",
+          "source_ids": [
+            "W-bots",
+            "GR01",
+            "GR06",
+            "CM04"
+          ],
+          "classification": "scoped_requirement",
+          "test_id": "T-BOT-09",
+          "status": "planned"
+        },
+        {
+          "id": "BOT-10",
+          "feature": "复制例程状态",
+          "acceptance": "明确展示复制后的例程与触发条件；若引入重新启用确认，标为 Cmb 差异并核对原版",
+          "current_basis": "需要长期 Bot 实体；已有会话/子任务只能部分复用",
+          "module": "M01 Bot Registry",
+          "phase": "P2",
+          "source_ids": [
+            "GR06",
+            "W-bots"
+          ],
+          "classification": "scoped_requirement",
+          "test_id": "T-BOT-10",
+          "status": "planned"
+        },
+        {
+          "id": "BOT-11",
+          "feature": "删除 Bot",
+          "acceptance": "确认后停止未来任务、取消待处理交互、移出群聊；保留共享电脑文件/登录的行为明确",
+          "current_basis": "需要长期 Bot 实体；已有会话/子任务只能部分复用",
+          "module": "M01 Bot Registry",
+          "phase": "P2",
+          "source_ids": [
+            "W-bots",
+            "GR01",
+            "GR06",
+            "CM04"
+          ],
+          "classification": "scoped_requirement",
+          "test_id": "T-BOT-11",
+          "status": "planned"
+        },
+        {
+          "id": "BOT-12",
+          "feature": "删除正在运行的 Bot",
+          "acceptance": "晚到消息、worker 结果、后台唤醒不能复活已删除 Bot",
+          "current_basis": "需要长期 Bot 实体；已有会话/子任务只能部分复用",
+          "module": "M01 Bot Registry",
+          "phase": "P2",
+          "source_ids": [
+            "W-bots",
+            "GR01",
+            "GR06",
+            "CM04"
+          ],
+          "classification": "scoped_requirement",
+          "test_id": "T-BOT-12",
+          "status": "planned"
+        },
+        {
+          "id": "BOT-13",
+          "feature": "Bot 数量上限",
+          "acceptance": "配置上限与提示一致；以 0.18 的 50 为核实起点，不写死为当前官方所有计划上限",
+          "current_basis": "需要长期 Bot 实体；已有会话/子任务只能部分复用",
+          "module": "M01 Bot Registry",
+          "phase": "P2",
+          "source_ids": [
+            "GR01"
+          ],
+          "classification": "scoped_requirement",
+          "test_id": "T-BOT-13",
+          "status": "planned"
+        },
+        {
+          "id": "BOT-14",
+          "feature": "批量组织操作",
+          "acceptance": "多选/范围选择、批量移动或删除有数量确认，失败逐项返回",
+          "current_basis": "需要长期 Bot 实体；已有会话/子任务只能部分复用",
+          "module": "M01 Bot Registry",
+          "phase": "P2",
+          "source_ids": [
+            "GR15"
+          ],
+          "classification": "scoped_requirement",
+          "test_id": "T-BOT-14",
+          "status": "planned"
+        }
+      ]
+    },
+    {
+      "code": "MSG",
+      "title": "对话、消息和结果卡片",
+      "rows": [
+        {
+          "id": "MSG-01",
+          "feature": "消息收发",
+          "acceptance": "文本、链接、粘贴图片可发送；输入草稿按账号和会话保存",
+          "current_basis": "已有消息渲染/流转换；Bot 协议与卡片需扩展",
+          "module": "M03 消息同步 / M13 UI",
+          "phase": "P2",
+          "source_ids": [
+            "W-chat",
+            "GR01",
+            "GR02",
+            "GR15",
+            "GR16",
+            "CM10",
+            "CM11"
+          ],
+          "classification": "scoped_requirement",
+          "test_id": "T-MSG-01",
+          "status": "planned"
+        },
+        {
+          "id": "MSG-02",
+          "feature": "发送接收回执",
+          "acceptance": "nonce 与 payload 摘要入库后才显示已接收；超时可查询接收状态",
+          "current_basis": "已有消息渲染/流转换；Bot 协议与卡片需扩展",
+          "module": "M03 消息同步 / M13 UI",
+          "phase": "P2",
+          "source_ids": [
+            "W-chat",
+            "GR01",
+            "GR02",
+            "GR15",
+            "GR16",
+            "CM10",
+            "CM11"
+          ],
+          "classification": "scoped_requirement",
+          "test_id": "T-MSG-02",
+          "status": "planned"
+        },
+        {
+          "id": "MSG-03",
+          "feature": "重复发送",
+          "acceptance": "同 nonce 同内容仅执行一次；同 nonce 不同内容拒绝，重连不会多出一条任务",
+          "current_basis": "已有消息渲染/流转换；Bot 协议与卡片需扩展",
+          "module": "M03 消息同步 / M13 UI",
+          "phase": "P2",
+          "source_ids": [
+            "W-chat",
+            "GR01",
+            "GR02",
+            "GR15",
+            "GR16",
+            "CM10",
+            "CM11"
+          ],
+          "classification": "scoped_requirement",
+          "test_id": "T-MSG-03",
+          "status": "planned"
+        },
+        {
+          "id": "MSG-04",
+          "feature": "执行中补充指令",
+          "acceptance": "用户新消息在安全边界优先处理；展示排队/已采纳，不静默吞掉或强断外部提交",
+          "current_basis": "已有消息渲染/流转换；Bot 协议与卡片需扩展",
+          "module": "M03 消息同步 / M13 UI",
+          "phase": "P2",
+          "source_ids": [
+            "W-chat",
+            "GR01",
+            "GR02",
+            "GR15",
+            "GR16",
+            "CM10",
+            "CM11"
+          ],
+          "classification": "scoped_requirement",
+          "test_id": "T-MSG-04",
+          "status": "planned"
+        },
+        {
+          "id": "MSG-05",
+          "feature": "停止任务",
+          "acceptance": "停止未来动作并结算已开始动作；显示已做和未做事项；不宣称撤销已产生效果",
+          "current_basis": "已有消息渲染/流转换；Bot 协议与卡片需扩展",
+          "module": "M03 消息同步 / M13 UI",
+          "phase": "P2",
+          "source_ids": [
+            "W-chat",
+            "GR01",
+            "GR02",
+            "GR15",
+            "GR16",
+            "CM10",
+            "CM11"
+          ],
+          "classification": "scoped_requirement",
+          "test_id": "T-MSG-05",
+          "status": "planned"
+        },
+        {
+          "id": "MSG-06",
+          "feature": "回复分支",
+          "acceptance": "对指定消息回复；主线与分支历史、计数、未读、深链接一致",
+          "current_basis": "已有消息渲染/流转换；Bot 协议与卡片需扩展",
+          "module": "M03 消息同步 / M13 UI",
+          "phase": "P2",
+          "source_ids": [
+            "W-chat",
+            "GR01",
+            "GR02",
+            "GR15",
+            "GR16",
+            "CM10",
+            "CM11"
+          ],
+          "classification": "scoped_requirement",
+          "test_id": "T-MSG-06",
+          "status": "planned"
+        },
+        {
+          "id": "MSG-07",
+          "feature": "表情回应",
+          "acceptance": "表情与消息绑定并同步；点赞不会被视为批准外部动作",
+          "current_basis": "已有消息渲染/流转换；Bot 协议与卡片需扩展",
+          "module": "M03 消息同步 / M13 UI",
+          "phase": "P2",
+          "source_ids": [
+            "W-chat",
+            "GR01",
+            "GR02",
+            "GR15",
+            "GR16",
+            "CM10",
+            "CM11"
+          ],
+          "classification": "scoped_requirement",
+          "test_id": "T-MSG-07",
+          "status": "planned"
+        },
+        {
+          "id": "MSG-08",
+          "feature": "技能命令",
+          "acceptance": "输入 / 搜索和插入可用技能，禁用或无权限技能不可调用",
+          "current_basis": "已有消息渲染/流转换；Bot 协议与卡片需扩展",
+          "module": "M03 消息同步 / M13 UI",
+          "phase": "P3",
+          "source_ids": [
+            "W-chat",
+            "GR01",
+            "GR02",
+            "GR15",
+            "GR16",
+            "CM10",
+            "CM11"
+          ],
+          "classification": "scoped_requirement",
+          "test_id": "T-MSG-08",
+          "status": "planned"
+        },
+        {
+          "id": "MSG-09",
+          "feature": "对象提及",
+          "acceptance": "@ 可区分 Bot、群聊、例程、连接器；保存稳定实体 ID",
+          "current_basis": "已有消息渲染/流转换；Bot 协议与卡片需扩展",
+          "module": "M03 消息同步 / M13 UI",
+          "phase": "P3",
+          "source_ids": [
+            "W-chat",
+            "GR01",
+            "GR02",
+            "GR15",
+            "GR16",
+            "CM10",
+            "CM11"
+          ],
+          "classification": "scoped_requirement",
+          "test_id": "T-MSG-09",
+          "status": "planned"
+        },
+        {
+          "id": "MSG-10",
+          "feature": "活动流",
+          "acceptance": "文字、工具、电脑操作、后台任务、问题与成果按稳定 ID 更新，不重复闪动",
+          "current_basis": "已有消息渲染/流转换；Bot 协议与卡片需扩展",
+          "module": "M03 消息同步 / M13 UI",
+          "phase": "P2",
+          "source_ids": [
+            "W-chat",
+            "GR01",
+            "GR02",
+            "GR15",
+            "GR16",
+            "CM10",
+            "CM11"
+          ],
+          "classification": "scoped_requirement",
+          "test_id": "T-MSG-10",
+          "status": "planned"
+        },
+        {
+          "id": "MSG-11",
+          "feature": "问题卡片",
+          "acceptance": "单选/多选/文字回答与取消均恢复对应运行；旧问题不能驱动新任务",
+          "current_basis": "已有消息渲染/流转换；Bot 协议与卡片需扩展",
+          "module": "M03 消息同步 / M13 UI",
+          "phase": "P2",
+          "source_ids": [
+            "W-chat",
+            "GR01",
+            "GR02",
+            "GR15",
+            "GR16",
+            "CM10",
+            "CM11"
+          ],
+          "classification": "scoped_requirement",
+          "test_id": "T-MSG-11",
+          "status": "planned"
+        },
+        {
+          "id": "MSG-12",
+          "feature": "审批卡片",
+          "acceptance": "展示准确目标、参数、原因和状态；批准/拒绝/过期/已处理明确",
+          "current_basis": "已有消息渲染/流转换；Bot 协议与卡片需扩展",
+          "module": "M03 消息同步 / M13 UI",
+          "phase": "P2",
+          "source_ids": [
+            "W-chat",
+            "GR01",
+            "GR02",
+            "GR15",
+            "GR16",
+            "CM10",
+            "CM11"
+          ],
+          "classification": "scoped_requirement",
+          "test_id": "T-MSG-12",
+          "status": "planned"
+        },
+        {
+          "id": "MSG-13",
+          "feature": "本地权限卡片",
+          "acceptance": "准确显示目标设备和命令；一次允许/始终/从不/本次拒绝语义不同",
+          "current_basis": "已有消息渲染/流转换；Bot 协议与卡片需扩展",
+          "module": "M03 消息同步 / M13 UI",
+          "phase": "P2",
+          "source_ids": [
+            "W-chat",
+            "GR01",
+            "GR02",
+            "GR15",
+            "GR16",
+            "CM10",
+            "CM11"
+          ],
+          "classification": "scoped_requirement",
+          "test_id": "T-MSG-13",
+          "status": "planned"
+        },
+        {
+          "id": "MSG-14",
+          "feature": "安全输入卡片",
+          "acceptance": "秘密不进入聊天或模型上下文；填充失败可重试且不回显明文",
+          "current_basis": "已有消息渲染/流转换；Bot 协议与卡片需扩展",
+          "module": "M03 消息同步 / M13 UI",
+          "phase": "P2",
+          "source_ids": [
+            "W-chat",
+            "GR01",
+            "GR02",
+            "GR15",
+            "GR16",
+            "CM10",
+            "CM11"
+          ],
+          "classification": "scoped_requirement",
+          "test_id": "T-MSG-14",
+          "status": "planned"
+        },
+        {
+          "id": "MSG-15",
+          "feature": "普通表单卡片",
+          "acceptance": "多字段校验、必填、取消和提交归属正确；秘密字段走单独安全通道",
+          "current_basis": "已有消息渲染/流转换；Bot 协议与卡片需扩展",
+          "module": "M03 消息同步 / M13 UI",
+          "phase": "P2",
+          "source_ids": [
+            "W-chat",
+            "GR01",
+            "GR02",
+            "GR15",
+            "GR16",
+            "CM10",
+            "CM11"
+          ],
+          "classification": "scoped_requirement",
+          "test_id": "T-MSG-15",
+          "status": "planned"
+        },
+        {
+          "id": "MSG-16",
+          "feature": "邮件草稿",
+          "acceptance": "可修改收件人、主题和正文；只发送最后确认版本；发送与丢弃真实改变状态",
+          "current_basis": "已有消息渲染/流转换；Bot 协议与卡片需扩展",
+          "module": "M03 消息同步 / M13 UI",
+          "phase": "P3",
+          "source_ids": [
+            "W-chat",
+            "GR15",
+            "RK04"
+          ],
+          "classification": "scoped_requirement",
+          "test_id": "T-MSG-16",
+          "status": "planned"
+        },
+        {
+          "id": "MSG-17",
+          "feature": "消息草稿",
+          "acceptance": "Slack 或对应通道草稿可编辑、发送、丢弃；防止重复点击导致重复外发",
+          "current_basis": "已有消息渲染/流转换；Bot 协议与卡片需扩展",
+          "module": "M03 消息同步 / M13 UI",
+          "phase": "P3",
+          "source_ids": [
+            "W-chat",
+            "GR01",
+            "GR02",
+            "GR15",
+            "GR16",
+            "CM10",
+            "CM11"
+          ],
+          "classification": "scoped_requirement",
+          "test_id": "T-MSG-17",
+          "status": "planned"
+        },
+        {
+          "id": "MSG-18",
+          "feature": "附件与成果卡",
+          "acceptance": "展示预览、下载、来源、版本；后续修改可关联原成果",
+          "current_basis": "已有消息渲染/流转换；Bot 协议与卡片需扩展",
+          "module": "M03 消息同步 / M13 UI",
+          "phase": "P2",
+          "source_ids": [
+            "W-chat",
+            "GR01",
+            "GR02",
+            "GR15",
+            "GR16",
+            "CM10",
+            "CM11"
+          ],
+          "classification": "scoped_requirement",
+          "test_id": "T-MSG-18",
+          "status": "planned"
+        },
+        {
+          "id": "MSG-19",
+          "feature": "错误通知",
+          "acceptance": "错误可关闭/清除/复制请求 ID；清除不删执行历史",
+          "current_basis": "已有消息渲染/流转换；Bot 协议与卡片需扩展",
+          "module": "M03 消息同步 / M13 UI",
+          "phase": "P2",
+          "source_ids": [
+            "W-chat",
+            "GR01",
+            "GR02",
+            "GR15",
+            "GR16",
+            "CM10",
+            "CM11"
+          ],
+          "classification": "scoped_requirement",
+          "test_id": "T-MSG-19",
+          "status": "planned"
+        },
+        {
+          "id": "MSG-20",
+          "feature": "全局搜索",
+          "acceptance": "检索 Bots/群聊/消息/文件/链接/例程并跳到位置；结果先过滤权限",
+          "current_basis": "已有消息渲染/流转换；Bot 协议与卡片需扩展",
+          "module": "M03 消息同步 / M13 UI",
+          "phase": "P4",
+          "source_ids": [
+            "W-chat",
+            "GR01",
+            "GR02",
+            "GR15",
+            "GR16",
+            "CM10",
+            "CM11"
+          ],
+          "classification": "scoped_requirement",
+          "test_id": "T-MSG-20",
+          "status": "planned"
+        },
+        {
+          "id": "MSG-21",
+          "feature": "长历史与滚动",
+          "acceptance": "分页、分支、展开工具、切换 Bot 后位置稳定；流式输出不抢用户正在阅读的位置",
+          "current_basis": "已有消息渲染/流转换；Bot 协议与卡片需扩展",
+          "module": "M03 消息同步 / M13 UI",
+          "phase": "P2",
+          "source_ids": [
+            "W-chat",
+            "GR01",
+            "GR02",
+            "GR15",
+            "GR16",
+            "CM10",
+            "CM11"
+          ],
+          "classification": "scoped_requirement",
+          "test_id": "T-MSG-21",
+          "status": "planned"
+        },
+        {
+          "id": "MSG-22",
+          "feature": "未知卡片兼容",
+          "acceptance": "旧客户端遇到新消息类型可读降级，不白屏且不提供不可执行按钮",
+          "current_basis": "已有消息渲染/流转换；Bot 协议与卡片需扩展",
+          "module": "M03 消息同步 / M13 UI",
+          "phase": "P2",
+          "source_ids": [
+            "W-chat",
+            "GR01",
+            "GR02",
+            "GR15",
+            "GR16",
+            "CM10",
+            "CM11"
+          ],
+          "classification": "scoped_requirement",
+          "test_id": "T-MSG-22",
+          "status": "planned"
+        }
+      ]
+    },
+    {
+      "code": "FIL",
+      "title": "文件、产物与工作区",
+      "rows": [
+        {
+          "id": "FIL-01",
+          "feature": "上传限制",
+          "acceptance": "默认对齐 6 个附件、普通文件 25 MiB、视频 200 MiB；边界与超限提示可验收",
+          "current_basis": "现有解析与预览可复用；需云端存储/授权",
+          "module": "M11 Artifact Service",
+          "phase": "P2",
+          "source_ids": [
+            "W-files",
+            "GR01",
+            "CM08"
+          ],
+          "classification": "scoped_requirement",
+          "test_id": "T-FIL-01",
+          "status": "planned"
+        },
+        {
+          "id": "FIL-02",
+          "feature": "格式处理",
+          "acceptance": "覆盖图片/音视频/PDF/文本/Office/CSV/JSON/YAML/代码/HTML/邮件/ipynb；不支持或加密内容明确报错",
+          "current_basis": "现有解析与预览可复用；需云端存储/授权",
+          "module": "M11 Artifact Service",
+          "phase": "P2",
+          "source_ids": [
+            "W-files",
+            "GR01",
+            "CM08"
+          ],
+          "classification": "scoped_requirement",
+          "test_id": "T-FIL-02",
+          "status": "planned"
+        },
+        {
+          "id": "FIL-03",
+          "feature": "上传完成再发送",
+          "acceptance": "上传中、取消、失败、重试状态明确；未就绪附件不可进入已接收任务",
+          "current_basis": "现有解析与预览可复用；需云端存储/授权",
+          "module": "M11 Artifact Service",
+          "phase": "P2",
+          "source_ids": [
+            "W-files",
+            "GR01",
+            "CM08"
+          ],
+          "classification": "scoped_requirement",
+          "test_id": "T-FIL-03",
+          "status": "planned"
+        },
+        {
+          "id": "FIL-04",
+          "feature": "多端访问产物",
+          "acceptance": "成果先入对象存储再发可用链接；跨设备下载有效且不可越权",
+          "current_basis": "现有解析与预览可复用；需云端存储/授权",
+          "module": "M11 Artifact Service",
+          "phase": "P2",
+          "source_ids": [
+            "W-files",
+            "GR01",
+            "CM08"
+          ],
+          "classification": "scoped_requirement",
+          "test_id": "T-FIL-04",
+          "status": "planned"
+        },
+        {
+          "id": "FIL-05",
+          "feature": "文件预览",
+          "acceptance": "受控预览 HTML/Office/PDF/图像，不执行产物内宿主代码；文本可复制",
+          "current_basis": "现有解析与预览可复用；需云端存储/授权",
+          "module": "M11 Artifact Service",
+          "phase": "P2",
+          "source_ids": [
+            "W-files",
+            "GR01",
+            "CM08"
+          ],
+          "classification": "scoped_requirement",
+          "test_id": "T-FIL-05",
+          "status": "planned"
+        },
+        {
+          "id": "FIL-06",
+          "feature": "产物修订",
+          "acceptance": "后续修改产生新版本或明确覆盖记录；旧消息不能下载到不相干的新文件",
+          "current_basis": "现有解析与预览可复用；需云端存储/授权",
+          "module": "M11 Artifact Service",
+          "phase": "P2",
+          "source_ids": [
+            "W-files",
+            "GR01",
+            "CM08"
+          ],
+          "classification": "scoped_requirement",
+          "test_id": "T-FIL-06",
+          "status": "planned"
+        },
+        {
+          "id": "FIL-07",
+          "feature": "共享工作盘",
+          "acceptance": "个人 Bots 可访问同一 /workspace；重启文件仍在；并发写入有锁或版本冲突提示",
+          "current_basis": "现有解析与预览可复用；需云端存储/授权",
+          "module": "M11 Artifact Service",
+          "phase": "P2",
+          "source_ids": [
+            "W-files",
+            "GR01",
+            "CM08"
+          ],
+          "classification": "scoped_requirement",
+          "test_id": "T-FIL-07",
+          "status": "planned"
+        },
+        {
+          "id": "FIL-08",
+          "feature": "外部链接",
+          "acceptance": "预览只读取允许的 URL；点击外链交给系统浏览器；内部深链接定位正确",
+          "current_basis": "现有解析与预览可复用；需云端存储/授权",
+          "module": "M11 Artifact Service",
+          "phase": "P2",
+          "source_ids": [
+            "W-files",
+            "GR01",
+            "CM08"
+          ],
+          "classification": "scoped_requirement",
+          "test_id": "T-FIL-08",
+          "status": "planned"
+        },
+        {
+          "id": "FIL-09",
+          "feature": "文件来源与清理",
+          "acceptance": "区分上传、生成、临时、共享资源；删 Bot 不误删其他 Bot 使用的共享文件",
+          "current_basis": "现有解析与预览可复用；需云端存储/授权",
+          "module": "M11 Artifact Service",
+          "phase": "P2",
+          "source_ids": [
+            "W-files",
+            "GR01",
+            "CM08"
+          ],
+          "classification": "scoped_requirement",
+          "test_id": "T-FIL-09",
+          "status": "planned"
+        }
+      ]
+    },
+    {
+      "code": "CPU",
+      "title": "持久电脑与人机交接",
+      "rows": [
+        {
+          "id": "CPU-01",
+          "feature": "按用户持久电脑",
+          "acceptance": "个人 Bots 共用文件与登录态；不同用户的磁盘、内存、网络和显示会话隔离",
+          "current_basis": "现有本地浏览器部分可用；远程完整电脑需新建",
+          "module": "M04 Computer Service",
+          "phase": "P2",
+          "source_ids": [
+            "W-computer",
+            "W-computers",
+            "GR12",
+            "CM08"
+          ],
+          "classification": "scoped_requirement",
+          "test_id": "T-CPU-01",
+          "status": "planned"
+        },
+        {
+          "id": "CPU-02",
+          "feature": "Bot 独立屏幕",
+          "acceptance": "不同 Bot 可在各自屏幕工作；同屏最多一个电脑操作持有者；创建/销毁不抢其他屏幕",
+          "current_basis": "现有本地浏览器部分可用；远程完整电脑需新建",
+          "module": "M04 Computer Service",
+          "phase": "P2",
+          "source_ids": [
+            "W-computer",
+            "W-computers",
+            "GR12",
+            "CM08"
+          ],
+          "classification": "scoped_requirement",
+          "test_id": "T-CPU-02",
+          "status": "planned"
+        },
+        {
+          "id": "CPU-03",
+          "feature": "共享浏览器登录",
+          "acceptance": "一次登录能供该用户其他 Bot 使用；不能并发启动多个进程写同一 Chrome profile",
+          "current_basis": "现有本地浏览器部分可用；远程完整电脑需新建",
+          "module": "M04 Computer Service",
+          "phase": "P2",
+          "source_ids": [
+            "W-computer",
+            "W-computers",
+            "GR12",
+            "CM08"
+          ],
+          "classification": "scoped_requirement",
+          "test_id": "T-CPU-03",
+          "status": "planned"
+        },
+        {
+          "id": "CPU-04",
+          "feature": "浏览器与桌面应用",
+          "acceptance": "既支持语义浏览器操作，也能截图/点按/键盘/滚动/拖拽操控桌面应用",
+          "current_basis": "现有本地浏览器部分可用；远程完整电脑需新建",
+          "module": "M04 Computer Service",
+          "phase": "P2",
+          "source_ids": [
+            "W-computer",
+            "W-computers",
+            "GR12",
+            "CM08"
+          ],
+          "classification": "scoped_requirement",
+          "test_id": "T-CPU-04",
+          "status": "planned"
+        },
+        {
+          "id": "CPU-05",
+          "feature": "Shell 与后台命令",
+          "acceptance": "执行、标准输出、超时、取消、持续进程和完成唤醒在无桌面客户端时工作",
+          "current_basis": "现有本地浏览器部分可用；远程完整电脑需新建",
+          "module": "M04 Computer Service",
+          "phase": "P2",
+          "source_ids": [
+            "W-computer",
+            "W-computers",
+            "GR12",
+            "CM08"
+          ],
+          "classification": "scoped_requirement",
+          "test_id": "T-CPU-05",
+          "status": "planned"
+        },
+        {
+          "id": "CPU-06",
+          "feature": "观看电脑",
+          "acceptance": "打开预览、展开、全屏、切换屏幕；关闭 viewer 不停止任务",
+          "current_basis": "现有本地浏览器部分可用；远程完整电脑需新建",
+          "module": "M04 Computer Service",
+          "phase": "P2",
+          "source_ids": [
+            "W-computer",
+            "W-computers",
+            "GR12",
+            "CM08"
+          ],
+          "classification": "scoped_requirement",
+          "test_id": "T-CPU-06",
+          "status": "planned"
+        },
+        {
+          "id": "CPU-07",
+          "feature": "人工接管",
+          "acceptance": "同屏 Bot 暂停发新动作，用户独占控制；归还后重新观察再继续",
+          "current_basis": "现有本地浏览器部分可用；远程完整电脑需新建",
+          "module": "M04 Computer Service",
+          "phase": "P2",
+          "source_ids": [
+            "W-computer",
+            "W-computers",
+            "GR12",
+            "CM08"
+          ],
+          "classification": "scoped_requirement",
+          "test_id": "T-CPU-07",
+          "status": "planned"
+        },
+        {
+          "id": "CPU-08",
+          "feature": "登录与人工步骤",
+          "acceptance": "登录/MFA/验证码/支付等进入明确接管状态，完成、跳过、取消各自可返回任务",
+          "current_basis": "现有本地浏览器部分可用；远程完整电脑需新建",
+          "module": "M04 Computer Service",
+          "phase": "P2",
+          "source_ids": [
+            "W-computer",
+            "W-computers",
+            "GR12",
+            "CM08"
+          ],
+          "classification": "scoped_requirement",
+          "test_id": "T-CPU-08",
+          "status": "planned"
+        },
+        {
+          "id": "CPU-09",
+          "feature": "查看器故障",
+          "acceptance": "区分电脑离线、鉴权过期、画面连接失败与任务失败；重试不会创建第二台电脑",
+          "current_basis": "现有本地浏览器部分可用；远程完整电脑需新建",
+          "module": "M04 Computer Service",
+          "phase": "P2",
+          "source_ids": [
+            "W-computer",
+            "W-computers",
+            "GR12",
+            "CM08"
+          ],
+          "classification": "scoped_requirement",
+          "test_id": "T-CPU-09",
+          "status": "planned"
+        },
+        {
+          "id": "CPU-10",
+          "feature": "电脑休眠唤醒",
+          "acceptance": "空闲可休眠；消息、例程、事件可唤醒；持久盘和任务状态保留",
+          "current_basis": "现有本地浏览器部分可用；远程完整电脑需新建",
+          "module": "M04 Computer Service",
+          "phase": "P3",
+          "source_ids": [
+            "W-computer",
+            "W-computers",
+            "GR12",
+            "CM08"
+          ],
+          "classification": "scoped_requirement",
+          "test_id": "T-CPU-10",
+          "status": "planned"
+        },
+        {
+          "id": "CPU-11",
+          "feature": "电脑更新",
+          "acceptance": "先准备新环境，在可恢复边界交接；无法安全暂停则失败并保留旧环境",
+          "current_basis": "现有本地浏览器部分可用；远程完整电脑需新建",
+          "module": "M04 Computer Service",
+          "phase": "P5",
+          "source_ids": [
+            "W-computer",
+            "W-computers",
+            "GR12",
+            "CM08"
+          ],
+          "classification": "scoped_requirement",
+          "test_id": "T-CPU-11",
+          "status": "planned"
+        },
+        {
+          "id": "CPU-12",
+          "feature": "电脑恢复",
+          "acceptance": "展示可用恢复点与可能损失的近期状态；原环境不可达时不宣称已保存所有内容",
+          "current_basis": "现有本地浏览器部分可用；远程完整电脑需新建",
+          "module": "M04 Computer Service",
+          "phase": "P5",
+          "source_ids": [
+            "W-computer",
+            "W-computers",
+            "GR12",
+            "CM08"
+          ],
+          "classification": "scoped_requirement",
+          "test_id": "T-CPU-12",
+          "status": "planned"
+        },
+        {
+          "id": "CPU-13",
+          "feature": "电脑重置",
+          "acceptance": "独立于更新/恢复，明确使用哪个持久快照；实际重建完成后再报告成功",
+          "current_basis": "现有本地浏览器部分可用；远程完整电脑需新建",
+          "module": "M04 Computer Service",
+          "phase": "P5",
+          "source_ids": [
+            "W-computer",
+            "W-computers",
+            "GR12",
+            "CM08"
+          ],
+          "classification": "scoped_requirement",
+          "test_id": "T-CPU-13",
+          "status": "planned"
+        },
+        {
+          "id": "CPU-14",
+          "feature": "软件安装与配置",
+          "acceptance": "支持在电脑安装工具；重建后由 Team Setup 重装受管软件，持久数据边界清楚",
+          "current_basis": "现有本地浏览器部分可用；远程完整电脑需新建",
+          "module": "M04 Computer Service",
+          "phase": "P5",
+          "source_ids": [
+            "W-computer",
+            "W-computers",
+            "GR12",
+            "CM08"
+          ],
+          "classification": "scoped_requirement",
+          "test_id": "T-CPU-14",
+          "status": "planned"
+        },
+        {
+          "id": "CPU-15",
+          "feature": "磁盘容量和 Disk Saver",
+          "acceptance": "云盘不足显示告警，专用清理 Bot 分析并提出删除方案；批准前不清理",
+          "current_basis": "现有本地浏览器部分可用；远程完整电脑需新建",
+          "module": "M04 Computer Service",
+          "phase": "P5",
+          "source_ids": [
+            "W-faqs",
+            "GR01"
+          ],
+          "classification": "scoped_requirement",
+          "test_id": "T-CPU-15",
+          "status": "planned"
+        },
+        {
+          "id": "CPU-16",
+          "feature": "电脑状态诊断",
+          "acceptance": "容量、版本、连接、同步时间、更新进度与请求 ID 可查看",
+          "current_basis": "现有本地浏览器部分可用；远程完整电脑需新建",
+          "module": "M04 Computer Service",
+          "phase": "P5",
+          "source_ids": [
+            "W-computer",
+            "W-computers",
+            "GR12",
+            "CM08"
+          ],
+          "classification": "scoped_requirement",
+          "test_id": "T-CPU-16",
+          "status": "planned"
+        },
+        {
+          "id": "CPU-17",
+          "feature": "分辨率与输入映射",
+          "acceptance": "窗口缩放、高 DPI、全屏、中文输入、快捷键不产生点击坐标偏移",
+          "current_basis": "现有本地浏览器部分可用；远程完整电脑需新建",
+          "module": "M04 Computer Service",
+          "phase": "P4",
+          "source_ids": [
+            "W-computer",
+            "W-computers",
+            "GR12",
+            "CM08"
+          ],
+          "classification": "scoped_requirement",
+          "test_id": "T-CPU-17",
+          "status": "planned"
+        },
+        {
+          "id": "CPU-18",
+          "feature": "跨端接管竞争",
+          "acceptance": "手机和桌面同时接管时只有一方持有有效 lease，另一方得到可解释状态",
+          "current_basis": "现有本地浏览器部分可用；远程完整电脑需新建",
+          "module": "M04 Computer Service",
+          "phase": "P4",
+          "source_ids": [
+            "W-computer",
+            "W-computers",
+            "GR12",
+            "CM08"
+          ],
+          "classification": "scoped_requirement",
+          "test_id": "T-CPU-18",
+          "status": "planned"
+        }
+      ]
+    },
+    {
+      "code": "DEV",
+      "title": "本地电脑与网络桥",
+      "rows": [
+        {
+          "id": "DEV-01",
+          "feature": "本地设备注册",
+          "acceptance": "服务端列出已注册电脑、名称和在线状态；只在设备授权范围内派发命令",
+          "current_basis": "已有本地执行工具；设备桥与远程策略需扩展",
+          "module": "M19 Device Bridge",
+          "phase": "P3",
+          "source_ids": [
+            "W-settings",
+            "W-security",
+            "GR11"
+          ],
+          "classification": "scoped_requirement",
+          "test_id": "T-DEV-01",
+          "status": "planned"
+        },
+        {
+          "id": "DEV-02",
+          "feature": "本地执行策略",
+          "acceptance": "每台设备支持询问/始终允许/从不允许；用户更严格设置不能被团队上限放宽",
+          "current_basis": "已有本地执行工具；设备桥与远程策略需扩展",
+          "module": "M19 Device Bridge",
+          "phase": "P3",
+          "source_ids": [
+            "W-settings",
+            "W-security",
+            "GR11"
+          ],
+          "classification": "scoped_requirement",
+          "test_id": "T-DEV-02",
+          "status": "planned"
+        },
+        {
+          "id": "DEV-03",
+          "feature": "本地执行生命周期",
+          "acceptance": "设备离线可解释等待/失败；重连不得重跑结果不明的外部动作",
+          "current_basis": "已有本地执行工具；设备桥与远程策略需扩展",
+          "module": "M19 Device Bridge",
+          "phase": "P3",
+          "source_ids": [
+            "W-settings",
+            "W-security",
+            "GR11"
+          ],
+          "classification": "scoped_requirement",
+          "test_id": "T-DEV-03",
+          "status": "planned"
+        },
+        {
+          "id": "DEV-04",
+          "feature": "设备出口代理",
+          "acceptance": "可选择通过在线桌面访问网络；断开后不静默绕过策略切换到其他出口",
+          "current_basis": "已有本地执行工具；设备桥与远程策略需扩展",
+          "module": "M19 Device Bridge",
+          "phase": "P3",
+          "source_ids": [
+            "W-settings",
+            "W-security",
+            "GR11"
+          ],
+          "classification": "scoped_requirement",
+          "test_id": "T-DEV-04",
+          "status": "planned"
+        },
+        {
+          "id": "DEV-05",
+          "feature": "管理员禁止出口",
+          "acceptance": "关闭策略后旧 tunnel 在限定窗口内停止；保留用户偏好供重新允许后恢复",
+          "current_basis": "已有本地执行工具；设备桥与远程策略需扩展",
+          "module": "M19 Device Bridge",
+          "phase": "P5",
+          "source_ids": [
+            "W-settings",
+            "W-security",
+            "GR11"
+          ],
+          "classification": "scoped_requirement",
+          "test_id": "T-DEV-05",
+          "status": "planned"
+        },
+        {
+          "id": "DEV-06",
+          "feature": "WebAuthn 代理",
+          "acceptance": "macOS/Windows 支持本机密钥确认；每次请求绑定 origin/challenge/设备；Linux 显示不可用",
+          "current_basis": "已有本地执行工具；设备桥与远程策略需扩展",
+          "module": "M19 Device Bridge",
+          "phase": "P4",
+          "source_ids": [
+            "W-settings",
+            "W-security",
+            "GR11"
+          ],
+          "classification": "scoped_requirement",
+          "test_id": "T-DEV-06",
+          "status": "planned"
+        },
+        {
+          "id": "DEV-07",
+          "feature": "私有网络接入",
+          "acceptance": "受管电脑可安装网络客户端；网络策略单独生效，不将插件授权视为网络授权",
+          "current_basis": "已有本地执行工具；设备桥与远程策略需扩展",
+          "module": "M19 Device Bridge",
+          "phase": "P5",
+          "source_ids": [
+            "W-settings",
+            "W-security",
+            "GR11"
+          ],
+          "classification": "scoped_requirement",
+          "test_id": "T-DEV-07",
+          "status": "planned"
+        },
+        {
+          "id": "DEV-08",
+          "feature": "本地 Bot 运行位置",
+          "acceptance": "预留 placement 和本地宿主；当前完整 Local Bot 的创建/迁移/离线行为待原版实测，不冒充已确认能力",
+          "current_basis": "已有本地执行工具；设备桥与远程策略需扩展",
+          "module": "M19 Device Bridge",
+          "phase": "P4",
+          "source_ids": [
+            "W-team-bots",
+            "GR11"
+          ],
+          "classification": "scoped_requirement",
+          "test_id": "T-DEV-08",
+          "status": "planned"
+        }
+      ]
+    },
+    {
+      "code": "COL",
+      "title": "多 Bot 协作",
+      "rows": [
+        {
+          "id": "COL-01",
+          "feature": "Bot 直接通信",
+          "acceptance": "发送/接收与结果可追溯，可展开独立只读 Bot 交流记录；接收方不依赖其聊天窗口打开而被唤醒。",
+          "current_basis": "有任务型 workers；长期同级 Bot 通信需新建",
+          "module": "M05 Collaboration",
+          "phase": "P3",
+          "source_ids": [
+            "W-chat",
+            "W-group-chats",
+            "GR04",
+            "GR05",
+            "RK03",
+            "CM04"
+          ],
+          "classification": "scoped_requirement",
+          "test_id": "T-COL-01",
+          "status": "planned",
+          "runtime_observation": "13-original-app-observations.md；本轮原版样本，非Cmb验收。"
+        },
+        {
+          "id": "COL-02",
+          "feature": "交接与结果返回",
+          "acceptance": "区分 request/question/status/result；持久关联原请求，结果回到正确会话/分支",
+          "current_basis": "有任务型 workers；长期同级 Bot 通信需新建",
+          "module": "M05 Collaboration",
+          "phase": "P3",
+          "source_ids": [
+            "W-chat",
+            "W-group-chats",
+            "GR04",
+            "GR05",
+            "RK03",
+            "CM04"
+          ],
+          "classification": "scoped_requirement",
+          "test_id": "T-COL-02",
+          "status": "planned"
+        },
+        {
+          "id": "COL-03",
+          "feature": "重复与失败投递",
+          "acceptance": "发送后断线、接收前重启、回执丢失均可恢复；同 delivery key 不重复唤醒",
+          "current_basis": "有任务型 workers；长期同级 Bot 通信需新建",
+          "module": "M05 Collaboration",
+          "phase": "P3",
+          "source_ids": [
+            "W-chat",
+            "W-group-chats",
+            "GR04",
+            "GR05",
+            "RK03",
+            "CM04"
+          ],
+          "classification": "scoped_requirement",
+          "test_id": "T-COL-03",
+          "status": "planned"
+        },
+        {
+          "id": "COL-04",
+          "feature": "循环控制",
+          "acceptance": "限制消息链深度、并发与预算；到界限向用户报告卡点，不无限互相唤醒",
+          "current_basis": "有任务型 workers；长期同级 Bot 通信需新建",
+          "module": "M05 Collaboration",
+          "phase": "P3",
+          "source_ids": [
+            "W-chat",
+            "W-group-chats",
+            "GR04",
+            "GR05",
+            "RK03",
+            "CM04"
+          ],
+          "classification": "scoped_requirement",
+          "test_id": "T-COL-04",
+          "status": "planned"
+        },
+        {
+          "id": "COL-05",
+          "feature": "创建群聊",
+          "acceptance": "2–6 个 Bots，支持名称、描述和成员编辑；无权成员不能加入",
+          "current_basis": "有任务型 workers；长期同级 Bot 通信需新建",
+          "module": "M05 Collaboration",
+          "phase": "P3",
+          "source_ids": [
+            "W-chat",
+            "W-group-chats",
+            "GR04",
+            "GR05",
+            "RK03",
+            "CM04"
+          ],
+          "classification": "scoped_requirement",
+          "test_id": "T-COL-05",
+          "status": "planned"
+        },
+        {
+          "id": "COL-06",
+          "feature": "群聊路由",
+          "acceptance": "普通发言选 responder；@单人/@多人/@everyone 确定目标；群指令不泄露到无关会话",
+          "current_basis": "有任务型 workers；长期同级 Bot 通信需新建",
+          "module": "M05 Collaboration",
+          "phase": "P3",
+          "source_ids": [
+            "W-chat",
+            "W-group-chats",
+            "GR04",
+            "GR05",
+            "RK03",
+            "CM04"
+          ],
+          "classification": "scoped_requirement",
+          "test_id": "T-COL-06",
+          "status": "planned"
+        },
+        {
+          "id": "COL-07",
+          "feature": "发言范围",
+          "acceptance": "群内答复留在群内，私下 Bot 交接留在对应私聊；能从群看到必要的协作进展",
+          "current_basis": "有任务型 workers；长期同级 Bot 通信需新建",
+          "module": "M05 Collaboration",
+          "phase": "P3",
+          "source_ids": [
+            "W-chat",
+            "W-group-chats",
+            "GR04",
+            "GR05",
+            "RK03",
+            "CM04"
+          ],
+          "classification": "scoped_requirement",
+          "test_id": "T-COL-07",
+          "status": "planned"
+        },
+        {
+          "id": "COL-08",
+          "feature": "群聊停止与改口",
+          "acceptance": "新用户指令使旧编排 epoch 失效；迟到发言不继续触发旧任务",
+          "current_basis": "有任务型 workers；长期同级 Bot 通信需新建",
+          "module": "M05 Collaboration",
+          "phase": "P3",
+          "source_ids": [
+            "W-chat",
+            "W-group-chats",
+            "GR04",
+            "GR05",
+            "RK03",
+            "CM04"
+          ],
+          "classification": "scoped_requirement",
+          "test_id": "T-COL-08",
+          "status": "planned"
+        },
+        {
+          "id": "COL-09",
+          "feature": "协作附件",
+          "acceptance": "用户群消息能附文件；Bot→群按已确认 text-only 边界；直接 Bot 消息支持图像",
+          "current_basis": "有任务型 workers；长期同级 Bot 通信需新建",
+          "module": "M05 Collaboration",
+          "phase": "P3",
+          "source_ids": [
+            "W-chat",
+            "W-group-chats",
+            "GR04",
+            "GR05",
+            "RK03",
+            "CM04"
+          ],
+          "classification": "scoped_requirement",
+          "test_id": "T-COL-09",
+          "status": "planned"
+        },
+        {
+          "id": "COL-10",
+          "feature": "并行工作与资源冲突",
+          "acceptance": "独立工作可并行；共享文件、屏幕、同一外部记录的修改按资源协调",
+          "current_basis": "有任务型 workers；长期同级 Bot 通信需新建",
+          "module": "M05 Collaboration",
+          "phase": "P3",
+          "source_ids": [
+            "W-chat",
+            "W-group-chats",
+            "GR04",
+            "GR05",
+            "RK03",
+            "CM04"
+          ],
+          "classification": "scoped_requirement",
+          "test_id": "T-COL-10",
+          "status": "planned"
+        },
+        {
+          "id": "COL-11",
+          "feature": "任务型子代理",
+          "acceptance": "短期子任务继续复用 coordinator/workflow，返回状态/产物；不伪装为常驻 Bot",
+          "current_basis": "有任务型 workers；长期同级 Bot 通信需新建",
+          "module": "M05 Collaboration",
+          "phase": "P3",
+          "source_ids": [
+            "W-chat",
+            "W-group-chats",
+            "GR04",
+            "GR05",
+            "RK03",
+            "CM04"
+          ],
+          "classification": "scoped_requirement",
+          "test_id": "T-COL-11",
+          "status": "planned"
+        },
+        {
+          "id": "COL-12",
+          "feature": "编码任务委托",
+          "acceptance": "独立工作区执行、查询、补充、取消；结果携带代码差异/验证证据和可选 PR",
+          "current_basis": "有任务型 workers；长期同级 Bot 通信需新建",
+          "module": "M05 Collaboration",
+          "phase": "P3",
+          "source_ids": [
+            "W-chat",
+            "W-group-chats",
+            "GR04",
+            "GR05",
+            "RK03",
+            "CM04"
+          ],
+          "classification": "scoped_requirement",
+          "test_id": "T-COL-12",
+          "status": "planned"
+        }
+      ]
+    },
+    {
+      "code": "MEM",
+      "title": "长期记忆与上下文",
+      "rows": [
+        {
+          "id": "MEM-01",
+          "feature": "长期职责记忆",
+          "acceptance": "新任务和重启后使用角色、偏好和已确认经验，不要求重放全部聊天",
+          "current_basis": "global/project 记忆可复用；Bot/成员作用域需扩展",
+          "module": "M06 Memory",
+          "phase": "P3",
+          "source_ids": [
+            "W-bots",
+            "GR07",
+            "CM07"
+          ],
+          "classification": "scoped_requirement",
+          "test_id": "T-MEM-01",
+          "status": "planned"
+        },
+        {
+          "id": "MEM-02",
+          "feature": "记忆作用域",
+          "acceptance": "个人 Bot、用户共享、项目、Team Bot 公共、成员私聊可明确区分并按权限检索",
+          "current_basis": "global/project 记忆可复用；Bot/成员作用域需扩展",
+          "module": "M06 Memory",
+          "phase": "P3",
+          "source_ids": [
+            "W-bots",
+            "GR07",
+            "CM07"
+          ],
+          "classification": "scoped_requirement",
+          "test_id": "T-MEM-02",
+          "status": "planned"
+        },
+        {
+          "id": "MEM-03",
+          "feature": "显式记忆",
+          "acceptance": "用户要求记住的事实带来源和显式标记；自动整理不能覆盖",
+          "current_basis": "global/project 记忆可复用；Bot/成员作用域需扩展",
+          "module": "M06 Memory",
+          "phase": "P3",
+          "source_ids": [
+            "W-bots",
+            "GR07",
+            "CM07"
+          ],
+          "classification": "scoped_requirement",
+          "test_id": "T-MEM-03",
+          "status": "planned"
+        },
+        {
+          "id": "MEM-04",
+          "feature": "自动整理",
+          "acceptance": "从已结束任务提炼事实，附证据 ID 并独立核验；失败不损坏旧记忆",
+          "current_basis": "global/project 记忆可复用；Bot/成员作用域需扩展",
+          "module": "M06 Memory",
+          "phase": "P3",
+          "source_ids": [
+            "W-bots",
+            "GR07",
+            "CM07"
+          ],
+          "classification": "scoped_requirement",
+          "test_id": "T-MEM-04",
+          "status": "planned"
+        },
+        {
+          "id": "MEM-05",
+          "feature": "纠错与删除",
+          "acceptance": "改正旧事实或删除记忆后，旧会话的汇总不能再次写回被删除内容",
+          "current_basis": "global/project 记忆可复用；Bot/成员作用域需扩展",
+          "module": "M06 Memory",
+          "phase": "P3",
+          "source_ids": [
+            "W-bots",
+            "GR07",
+            "CM07"
+          ],
+          "classification": "scoped_requirement",
+          "test_id": "T-MEM-05",
+          "status": "planned"
+        },
+        {
+          "id": "MEM-06",
+          "feature": "时效管理",
+          "acceptance": "过期计划只能标为过去，不能推断已经完成；重要决策重新查源系统",
+          "current_basis": "global/project 记忆可复用；Bot/成员作用域需扩展",
+          "module": "M06 Memory",
+          "phase": "P3",
+          "source_ids": [
+            "W-bots",
+            "GR07",
+            "CM07"
+          ],
+          "classification": "scoped_requirement",
+          "test_id": "T-MEM-06",
+          "status": "planned"
+        },
+        {
+          "id": "MEM-07",
+          "feature": "协作上下文",
+          "acceptance": "共享资料和消息传递相关证据；不把所有 Bot 私聊直接塞入每个 Bot",
+          "current_basis": "global/project 记忆可复用；Bot/成员作用域需扩展",
+          "module": "M06 Memory",
+          "phase": "P3",
+          "source_ids": [
+            "W-bots",
+            "GR07",
+            "CM07"
+          ],
+          "classification": "scoped_requirement",
+          "test_id": "T-MEM-07",
+          "status": "planned"
+        },
+        {
+          "id": "MEM-08",
+          "feature": "记忆更新冲突",
+          "acceptance": "异步提炼使用版本/CAS；快照过期重算，不覆盖最新人工修订",
+          "current_basis": "global/project 记忆可复用；Bot/成员作用域需扩展",
+          "module": "M06 Memory",
+          "phase": "P3",
+          "source_ids": [
+            "W-bots",
+            "GR07",
+            "CM07"
+          ],
+          "classification": "scoped_requirement",
+          "test_id": "T-MEM-08",
+          "status": "planned"
+        }
+      ]
+    },
+    {
+      "code": "SKL",
+      "title": "Skills 与示范学习",
+      "rows": [
+        {
+          "id": "SKL-01",
+          "feature": "私有技能库",
+          "acceptance": "用户技能跨个人 Bots 可用；支持启停、更新、删除及文本/URL/本地技能导入，检查依赖并定位固定版本",
+          "current_basis": "已有技能与浏览器录制；缺学习/验证产品链路",
+          "module": "M07 Skills & Teach",
+          "phase": "P3",
+          "source_ids": [
+            "W-skills",
+            "GR08",
+            "RK05",
+            "CM08"
+          ],
+          "classification": "scoped_requirement",
+          "test_id": "T-SKL-01",
+          "status": "planned"
+        },
+        {
+          "id": "SKL-02",
+          "feature": "技能定义",
+          "acceptance": "技能包含适用条件、输入、步骤、分支、完成检查、产物和授权边界",
+          "current_basis": "已有技能与浏览器录制；缺学习/验证产品链路",
+          "module": "M07 Skills & Teach",
+          "phase": "P3",
+          "source_ids": [
+            "W-skills",
+            "GR08",
+            "RK05",
+            "CM08"
+          ],
+          "classification": "scoped_requirement",
+          "test_id": "T-SKL-02",
+          "status": "planned"
+        },
+        {
+          "id": "SKL-03",
+          "feature": "插件技能同步",
+          "acceptance": "安装/更新/卸载插件时技能目录与实际可调用能力一致",
+          "current_basis": "已有技能与浏览器录制；缺学习/验证产品链路",
+          "module": "M07 Skills & Teach",
+          "phase": "P3",
+          "source_ids": [
+            "W-skills",
+            "GR08",
+            "RK05",
+            "CM08"
+          ],
+          "classification": "scoped_requirement",
+          "test_id": "T-SKL-03",
+          "status": "planned"
+        },
+        {
+          "id": "SKL-04",
+          "feature": "开始教学",
+          "acceptance": "一对一电脑视图明确目标 Bot/屏幕，点击 Teach 可开始录制；目标可从演示和上下文理解，歧义时追问，不强制前置目标表单。",
+          "current_basis": "已有技能与浏览器录制；缺学习/验证产品链路",
+          "module": "M07 Skills & Teach",
+          "phase": "P3",
+          "source_ids": [
+            "W-skills",
+            "GR08",
+            "RK05",
+            "CM08"
+          ],
+          "classification": "scoped_requirement",
+          "test_id": "T-SKL-04",
+          "status": "planned",
+          "runtime_observation": "13-original-app-observations.md；本轮原版样本，非Cmb验收。"
+        },
+        {
+          "id": "SKL-05",
+          "feature": "录制行为",
+          "acceptance": "记录可见屏幕及操作事件，最多 10 分钟，不录麦克风；中途退出可保存或丢弃",
+          "current_basis": "已有技能与浏览器录制；缺学习/验证产品链路",
+          "module": "M07 Skills & Teach",
+          "phase": "P3",
+          "source_ids": [
+            "W-skills",
+            "GR08",
+            "RK05",
+            "CM08"
+          ],
+          "classification": "scoped_requirement",
+          "test_id": "T-SKL-05",
+          "status": "planned"
+        },
+        {
+          "id": "SKL-06",
+          "feature": "教学隐私",
+          "acceptance": "登录和秘密输入经安全通道；录制中出现敏感界面可暂停/遮挡，并提醒用户确认草稿",
+          "current_basis": "已有技能与浏览器录制；缺学习/验证产品链路",
+          "module": "M07 Skills & Teach",
+          "phase": "P3",
+          "source_ids": [
+            "W-skills",
+            "GR08",
+            "RK05",
+            "CM08"
+          ],
+          "classification": "scoped_requirement",
+          "test_id": "T-SKL-06",
+          "status": "planned"
+        },
+        {
+          "id": "SKL-07",
+          "feature": "生成技能草稿",
+          "acceptance": "结合目标、视频和事件提取参数、定位、判断、验证；不是机械回放坐标",
+          "current_basis": "已有技能与浏览器录制；缺学习/验证产品链路",
+          "module": "M07 Skills & Teach",
+          "phase": "P3",
+          "source_ids": [
+            "W-skills",
+            "GR08",
+            "RK05",
+            "CM08"
+          ],
+          "classification": "scoped_requirement",
+          "test_id": "T-SKL-07",
+          "status": "planned"
+        },
+        {
+          "id": "SKL-08",
+          "feature": "技能审阅与修改",
+          "acceptance": "生成技能后提供可打开的名称、描述和步骤/参数内容，支持修改保存；区分已保存与已验证，不强制增加未观察到的独立草稿向导。",
+          "current_basis": "已有技能与浏览器录制；缺学习/验证产品链路",
+          "module": "M07 Skills & Teach",
+          "phase": "P3",
+          "source_ids": [
+            "W-skills",
+            "GR08",
+            "RK05",
+            "CM08"
+          ],
+          "classification": "scoped_requirement",
+          "test_id": "T-SKL-08",
+          "status": "planned",
+          "runtime_observation": "13-original-app-observations.md；本轮原版样本，非Cmb验收。"
+        },
+        {
+          "id": "SKL-09",
+          "feature": "技能真实验证",
+          "acceptance": "换一份输入试跑，检查目标系统与产物，给出成功/失败证据；测试本身仍需动作授权",
+          "current_basis": "已有技能与浏览器录制；缺学习/验证产品链路",
+          "module": "M07 Skills & Teach",
+          "phase": "P3",
+          "source_ids": [
+            "W-skills",
+            "GR08",
+            "RK05",
+            "CM08"
+          ],
+          "classification": "scoped_requirement",
+          "test_id": "T-SKL-09",
+          "status": "planned"
+        },
+        {
+          "id": "SKL-10",
+          "feature": "学习任务恢复",
+          "acceptance": "录制完成后服务崩溃可继续生成草稿；不能产生重复技能或丢失视频",
+          "current_basis": "已有技能与浏览器录制；缺学习/验证产品链路",
+          "module": "M07 Skills & Teach",
+          "phase": "P3",
+          "source_ids": [
+            "W-skills",
+            "GR08",
+            "RK05",
+            "CM08"
+          ],
+          "classification": "scoped_requirement",
+          "test_id": "T-SKL-10",
+          "status": "planned"
+        },
+        {
+          "id": "SKL-11",
+          "feature": "技能转例程",
+          "acceptance": "验证后的技能可交由 Bot 按计划或事件运行；技能升级不静默扩大原授权",
+          "current_basis": "已有技能与浏览器录制；缺学习/验证产品链路",
+          "module": "M07 Skills & Teach",
+          "phase": "P3",
+          "source_ids": [
+            "W-skills",
+            "GR08",
+            "RK05",
+            "CM08"
+          ],
+          "classification": "scoped_requirement",
+          "test_id": "T-SKL-11",
+          "status": "planned"
+        },
+        {
+          "id": "SKL-12",
+          "feature": "团队技能发布",
+          "acceptance": "发布/更新/撤回使用版本与范围；私有技能不会自动公开",
+          "current_basis": "已有技能与浏览器录制；缺学习/验证产品链路",
+          "module": "M07 Skills & Teach",
+          "phase": "P4",
+          "source_ids": [
+            "GR01",
+            "GR13",
+            "W-skills"
+          ],
+          "classification": "scoped_requirement",
+          "test_id": "T-SKL-12",
+          "status": "planned"
+        }
+      ]
+    },
+    {
+      "code": "AUT",
+      "title": "计划、事件和后台持续运行",
+      "rows": [
+        {
+          "id": "AUT-01",
+          "feature": "自然语言创建",
+          "acceptance": "用户说何时做什么，Bot 形成例程；从已提交配置回读 Instruction、触发类型、时区与 revision，聊天事件、列表及详情一致；不增加原版未出现的必经确认表单",
+          "current_basis": "本地 scheduler 有基础；需服务端调度与外部事件",
+          "module": "M08 Automation",
+          "phase": "P3",
+          "source_ids": [
+            "W-routines",
+            "GR09",
+            "CM05",
+            "RK02"
+          ],
+          "classification": "scoped_requirement",
+          "test_id": "T-AUT-01",
+          "status": "planned",
+          "review_evidence": "13-original-app-observations.md#4-例程与复制的证据边界"
+        },
+        {
+          "id": "AUT-02",
+          "feature": "编辑入口",
+          "acceptance": "Edit 预填修改消息，由 Bot 修改原例程；打开中的详情同步更新，重连补齐最新 revision；不强制暴露 cron 配置",
+          "current_basis": "本地 scheduler 有基础；需服务端调度与外部事件",
+          "module": "M08 Automation",
+          "phase": "P3",
+          "source_ids": [
+            "W-routines"
+          ],
+          "classification": "scoped_requirement",
+          "test_id": "T-AUT-02",
+          "status": "planned",
+          "review_evidence": "13-original-app-observations.md#4-例程与复制的证据边界"
+        },
+        {
+          "id": "AUT-03",
+          "feature": "计划与时区",
+          "acceptance": "日/周/月/年/间隔/单次和 IANA 时区可表达；单次与年度重复分开；验证未来两个触发点、夏令时和换时区语义，不能静默改成单次",
+          "current_basis": "本地 scheduler 有基础；需服务端调度与外部事件",
+          "module": "M08 Automation",
+          "phase": "P3",
+          "source_ids": [
+            "W-routines",
+            "GR09",
+            "CM05",
+            "RK02"
+          ],
+          "classification": "scoped_requirement",
+          "test_id": "T-AUT-03",
+          "status": "planned",
+          "review_evidence": "13-original-app-observations.md#4-例程与复制的证据边界"
+        },
+        {
+          "id": "AUT-04",
+          "feature": "创建不立即执行",
+          "acceptance": "新计划等下个时点；立即执行由用户明确 Test 发起",
+          "current_basis": "本地 scheduler 有基础；需服务端调度与外部事件",
+          "module": "M08 Automation",
+          "phase": "P3",
+          "source_ids": [
+            "W-routines",
+            "GR09",
+            "CM05",
+            "RK02"
+          ],
+          "classification": "scoped_requirement",
+          "test_id": "T-AUT-04",
+          "status": "planned"
+        },
+        {
+          "id": "AUT-05",
+          "feature": "暂停与恢复",
+          "acceptance": "暂停阻止未来发生；恢复重新计算下次时间；不默认撤销已开始动作",
+          "current_basis": "本地 scheduler 有基础；需服务端调度与外部事件",
+          "module": "M08 Automation",
+          "phase": "P3",
+          "source_ids": [
+            "W-routines",
+            "GR09",
+            "CM05",
+            "RK02"
+          ],
+          "classification": "scoped_requirement",
+          "test_id": "T-AUT-05",
+          "status": "planned"
+        },
+        {
+          "id": "AUT-06",
+          "feature": "测试例程",
+          "acceptance": "Test 按例程能力显示；支持时真实执行并记录独立 occurrence、运行状态及同 Bot 结果，失败可定位；不能假设原版每条任务均有 Test",
+          "current_basis": "本地 scheduler 有基础；需服务端调度与外部事件",
+          "module": "M08 Automation",
+          "phase": "P3",
+          "source_ids": [
+            "W-routines",
+            "GR09",
+            "CM05",
+            "RK02"
+          ],
+          "classification": "scoped_requirement",
+          "test_id": "T-AUT-06",
+          "status": "planned",
+          "review_evidence": "13-original-app-observations.md#4-例程与复制的证据边界"
+        },
+        {
+          "id": "AUT-07",
+          "feature": "执行历史",
+          "acceptance": "提供分页执行历史，展示运行状态、触发原因、时间和错误；这是 Cmb 验收要求，当前原版样本未显示历史控件",
+          "current_basis": "本地 scheduler 有基础；需服务端调度与外部事件",
+          "module": "M08 Automation",
+          "phase": "P3",
+          "source_ids": [
+            "W-routines",
+            "GR09",
+            "CM05",
+            "RK02"
+          ],
+          "classification": "scoped_requirement",
+          "test_id": "T-AUT-07",
+          "status": "planned",
+          "review_evidence": "13-original-app-observations.md#4-例程与复制的证据边界"
+        },
+        {
+          "id": "AUT-08",
+          "feature": "删除例程",
+          "acceptance": "按当前专项帮助显示确认；删除后未来事件不执行，旧记录/在途动作有明确结算",
+          "current_basis": "本地 scheduler 有基础；需服务端调度与外部事件",
+          "module": "M08 Automation",
+          "phase": "P3",
+          "source_ids": [
+            "W-routines",
+            "GR09",
+            "CM05",
+            "RK02"
+          ],
+          "classification": "scoped_requirement",
+          "test_id": "T-AUT-08",
+          "status": "planned"
+        },
+        {
+          "id": "AUT-09",
+          "feature": "例程数量",
+          "acceptance": "每 Bot 上限按配置校验，0.18 的 50 作为兼容基线；服务端与 UI 一致",
+          "current_basis": "本地 scheduler 有基础；需服务端调度与外部事件",
+          "module": "M08 Automation",
+          "phase": "P3",
+          "source_ids": [
+            "W-routines",
+            "GR09",
+            "CM05",
+            "RK02"
+          ],
+          "classification": "scoped_requirement",
+          "test_id": "T-AUT-09",
+          "status": "planned"
+        },
+        {
+          "id": "AUT-10",
+          "feature": "Slack 触发",
+          "acceptance": "提及、关键词、反应、消息与频道过滤可配置；触发授权与调用 Slack 插件分开",
+          "current_basis": "本地 scheduler 有基础；需服务端调度与外部事件",
+          "module": "M08 Automation",
+          "phase": "P3",
+          "source_ids": [
+            "W-routines",
+            "GR09",
+            "CM05",
+            "RK02"
+          ],
+          "classification": "scoped_requirement",
+          "test_id": "T-AUT-10",
+          "status": "planned"
+        },
+        {
+          "id": "AUT-11",
+          "feature": "GitHub 触发",
+          "acceptance": "仓库/事件范围可约束；重复通知合并或去重，结果在任务内有来源",
+          "current_basis": "本地 scheduler 有基础；需服务端调度与外部事件",
+          "module": "M08 Automation",
+          "phase": "P3",
+          "source_ids": [
+            "W-routines",
+            "GR09",
+            "CM05",
+            "RK02"
+          ],
+          "classification": "scoped_requirement",
+          "test_id": "T-AUT-11",
+          "status": "planned"
+        },
+        {
+          "id": "AUT-12",
+          "feature": "Linear/Sentry/PagerDuty 触发",
+          "acceptance": "实现官方专项帮助所列事件；配置、验签、测试和失败状态完整",
+          "current_basis": "本地 scheduler 有基础；需服务端调度与外部事件",
+          "module": "M08 Automation",
+          "phase": "P3",
+          "source_ids": [
+            "W-routines",
+            "GR09",
+            "CM05",
+            "RK02"
+          ],
+          "classification": "scoped_requirement",
+          "test_id": "T-AUT-12",
+          "status": "planned"
+        },
+        {
+          "id": "AUT-13",
+          "feature": "邮件触发",
+          "acceptance": "限定邮箱、匹配条件、游标与去重；不把邮件正文中的指令当系统授权",
+          "current_basis": "本地 scheduler 有基础；需服务端调度与外部事件",
+          "module": "M08 Automation",
+          "phase": "P3",
+          "source_ids": [
+            "W-routines",
+            "GR09",
+            "CM05",
+            "RK02"
+          ],
+          "classification": "scoped_requirement",
+          "test_id": "T-AUT-13",
+          "status": "planned"
+        },
+        {
+          "id": "AUT-14",
+          "feature": "Webhook 触发",
+          "acceptance": "显示 URL/key/header；验证 Bearer key；HTTP 200 只表示已接收启动，不表示完成",
+          "current_basis": "本地 scheduler 有基础；需服务端调度与外部事件",
+          "module": "M08 Automation",
+          "phase": "P3",
+          "source_ids": [
+            "W-routines",
+            "GR09",
+            "CM05",
+            "RK02"
+          ],
+          "classification": "scoped_requirement",
+          "test_id": "T-AUT-14",
+          "status": "planned"
+        },
+        {
+          "id": "AUT-15",
+          "feature": "触发密钥管理",
+          "acceptance": "可替换并撤销旧 key；日志、聊天和复制提示不泄露无关密钥",
+          "current_basis": "本地 scheduler 有基础；需服务端调度与外部事件",
+          "module": "M08 Automation",
+          "phase": "P3",
+          "source_ids": [
+            "W-routines",
+            "GR09",
+            "CM05",
+            "RK02"
+          ],
+          "classification": "scoped_requirement",
+          "test_id": "T-AUT-15",
+          "status": "planned"
+        },
+        {
+          "id": "AUT-16",
+          "feature": "复合触发",
+          "acceptance": "源码支持多个触发条件组合；明确 OR/合并窗口与最大数量，配置回读不丢条件",
+          "current_basis": "本地 scheduler 有基础；需服务端调度与外部事件",
+          "module": "M08 Automation",
+          "phase": "P3",
+          "source_ids": [
+            "GR09"
+          ],
+          "classification": "scoped_requirement",
+          "test_id": "T-AUT-16",
+          "status": "planned"
+        },
+        {
+          "id": "AUT-17",
+          "feature": "断电与漏触发恢复",
+          "acceptance": "调度落库，宿主离线后恢复；同 occurrence 只生成一个运行，漏跑采用明确策略",
+          "current_basis": "本地 scheduler 有基础；需服务端调度与外部事件",
+          "module": "M08 Automation",
+          "phase": "P3",
+          "source_ids": [
+            "W-routines",
+            "GR09",
+            "CM05",
+            "RK02"
+          ],
+          "classification": "scoped_requirement",
+          "test_id": "T-AUT-17",
+          "status": "planned"
+        },
+        {
+          "id": "AUT-18",
+          "feature": "用户久未使用",
+          "acceptance": "支持确认持续运行及暂停状态，说明原因，用户恢复后继续",
+          "current_basis": "本地 scheduler 有基础；需服务端调度与外部事件",
+          "module": "M08 Automation",
+          "phase": "P3",
+          "source_ids": [
+            "W-routines",
+            "GR09",
+            "CM05",
+            "RK02"
+          ],
+          "classification": "scoped_requirement",
+          "test_id": "T-AUT-18",
+          "status": "planned"
+        },
+        {
+          "id": "AUT-19",
+          "feature": "触发风暴与用量",
+          "acceptance": "限流、预算、去重和失败告警；停止后不因已有队列立即无限重启",
+          "current_basis": "本地 scheduler 有基础；需服务端调度与外部事件",
+          "module": "M08 Automation",
+          "phase": "P3",
+          "source_ids": [
+            "W-routines",
+            "GR09",
+            "CM05",
+            "RK02"
+          ],
+          "classification": "scoped_requirement",
+          "test_id": "T-AUT-19",
+          "status": "planned"
+        }
+      ]
+    },
+    {
+      "code": "PLG",
+      "title": "插件、连接器与市场",
+      "rows": [
+        {
+          "id": "PLG-01",
+          "feature": "插件发现",
+          "acceptance": "可浏览、搜索、查看详情、安装与移除；团队禁用状态明确",
+          "current_basis": "已有 MCP/插件框架；云端凭据和 Bot 市场需扩展",
+          "module": "M09 Connector Service",
+          "phase": "P3",
+          "source_ids": [
+            "W-connect-plugins",
+            "GR13",
+            "CM02",
+            "CM12"
+          ],
+          "classification": "scoped_requirement",
+          "test_id": "T-PLG-01",
+          "status": "planned"
+        },
+        {
+          "id": "PLG-02",
+          "feature": "授权生命周期",
+          "acceptance": "安装/需认证/等待授权/已连接/失效分开；可 Reopen/取消/重试",
+          "current_basis": "已有 MCP/插件框架；云端凭据和 Bot 市场需扩展",
+          "module": "M09 Connector Service",
+          "phase": "P3",
+          "source_ids": [
+            "W-connect-plugins",
+            "GR13",
+            "CM02",
+            "CM12"
+          ],
+          "classification": "scoped_requirement",
+          "test_id": "T-PLG-02",
+          "status": "planned"
+        },
+        {
+          "id": "PLG-03",
+          "feature": "账号范围",
+          "acceptance": "个人安装作用于该用户 Bots；Team Bot 使用个人账号需另行授权",
+          "current_basis": "已有 MCP/插件框架；云端凭据和 Bot 市场需扩展",
+          "module": "M09 Connector Service",
+          "phase": "P3",
+          "source_ids": [
+            "W-connect-plugins",
+            "GR13",
+            "CM02",
+            "CM12"
+          ],
+          "classification": "scoped_requirement",
+          "test_id": "T-PLG-03",
+          "status": "planned"
+        },
+        {
+          "id": "PLG-04",
+          "feature": "多账号差异",
+          "acceptance": "按 provider 声明能力显示添加账号；Gmail 单账号与 Notion 可多账号不混淆",
+          "current_basis": "已有 MCP/插件框架；云端凭据和 Bot 市场需扩展",
+          "module": "M09 Connector Service",
+          "phase": "P3",
+          "source_ids": [
+            "W-connect-plugins",
+            "GR13",
+            "CM02",
+            "CM12"
+          ],
+          "classification": "scoped_requirement",
+          "test_id": "T-PLG-04",
+          "status": "planned"
+        },
+        {
+          "id": "PLG-05",
+          "feature": "工具级控制",
+          "acceptance": "查看工具列表、逐项禁用及自定义说明，服务端执行时再检查",
+          "current_basis": "已有 MCP/插件框架；云端凭据和 Bot 市场需扩展",
+          "module": "M09 Connector Service",
+          "phase": "P3",
+          "source_ids": [
+            "W-connect-plugins",
+            "GR13",
+            "CM02",
+            "CM12"
+          ],
+          "classification": "scoped_requirement",
+          "test_id": "T-PLG-05",
+          "status": "planned"
+        },
+        {
+          "id": "PLG-06",
+          "feature": "远程与 stdio MCP",
+          "acceptance": "后台托管连接器与用户电脑进程分别管理，均可在无 UI 时执行",
+          "current_basis": "已有 MCP/插件框架；云端凭据和 Bot 市场需扩展",
+          "module": "M09 Connector Service",
+          "phase": "P3",
+          "source_ids": [
+            "W-connect-plugins",
+            "GR13",
+            "CM02",
+            "CM12"
+          ],
+          "classification": "scoped_requirement",
+          "test_id": "T-PLG-06",
+          "status": "planned"
+        },
+        {
+          "id": "PLG-07",
+          "feature": "凭据保管",
+          "acceptance": "OAuth token 保存在连接器服务，刷新与撤销可用；模型只接收工具结果",
+          "current_basis": "已有 MCP/插件框架；云端凭据和 Bot 市场需扩展",
+          "module": "M09 Connector Service",
+          "phase": "P3",
+          "source_ids": [
+            "W-connect-plugins",
+            "GR13",
+            "CM02",
+            "CM12"
+          ],
+          "classification": "scoped_requirement",
+          "test_id": "T-PLG-07",
+          "status": "planned"
+        },
+        {
+          "id": "PLG-08",
+          "feature": "插件依赖变量",
+          "acceptance": "必填变量和授权齐全才可用；敏感值不放入模型提示或普通配置导出",
+          "current_basis": "已有 MCP/插件框架；云端凭据和 Bot 市场需扩展",
+          "module": "M09 Connector Service",
+          "phase": "P3",
+          "source_ids": [
+            "W-connect-plugins",
+            "GR13",
+            "CM02",
+            "CM12"
+          ],
+          "classification": "scoped_requirement",
+          "test_id": "T-PLG-08",
+          "status": "planned"
+        },
+        {
+          "id": "PLG-09",
+          "feature": "第三方权限限制",
+          "acceptance": "目标服务无权限/管理员待批准/速率限制提供真实原因，不把 Added 当作 Authenticated",
+          "current_basis": "已有 MCP/插件框架；云端凭据和 Bot 市场需扩展",
+          "module": "M09 Connector Service",
+          "phase": "P3",
+          "source_ids": [
+            "W-connect-plugins",
+            "GR13",
+            "CM02",
+            "CM12"
+          ],
+          "classification": "scoped_requirement",
+          "test_id": "T-PLG-09",
+          "status": "planned"
+        },
+        {
+          "id": "PLG-10",
+          "feature": "技能与资源",
+          "acceptance": "插件提供工具、Skills 和 MCP resources，实际目录与服务端可调用范围一致",
+          "current_basis": "已有 MCP/插件框架；云端凭据和 Bot 市场需扩展",
+          "module": "M09 Connector Service",
+          "phase": "P3",
+          "source_ids": [
+            "W-connect-plugins",
+            "GR13",
+            "CM02",
+            "CM12"
+          ],
+          "classification": "scoped_requirement",
+          "test_id": "T-PLG-10",
+          "status": "planned"
+        },
+        {
+          "id": "PLG-11",
+          "feature": "断开与卸载",
+          "acceptance": "撤销后在途调用按边界结算，后续调用拒绝；清理引用且不破坏其他插件",
+          "current_basis": "已有 MCP/插件框架；云端凭据和 Bot 市场需扩展",
+          "module": "M09 Connector Service",
+          "phase": "P3",
+          "source_ids": [
+            "W-connect-plugins",
+            "GR13",
+            "CM02",
+            "CM12"
+          ],
+          "classification": "scoped_requirement",
+          "test_id": "T-PLG-11",
+          "status": "planned"
+        }
+      ]
+    },
+    {
+      "code": "APR",
+      "title": "审批、秘密与动作执行",
+      "rows": [
+        {
+          "id": "APR-01",
+          "feature": "自动审核",
+          "acceptance": "独立审查动作相对用户请求的风险；对 Shell/MCP/电脑/例程变更/委托均覆盖",
+          "current_basis": "已有权限和 Mods 边界；需持久交互与云端策略",
+          "module": "M10 Policy / Interaction",
+          "phase": "P2",
+          "source_ids": [
+            "W-approvals",
+            "W-secrets",
+            "GR10",
+            "GR11",
+            "RK04",
+            "OB02",
+            "CM09",
+            "CM12"
+          ],
+          "classification": "scoped_requirement",
+          "test_id": "T-APR-01",
+          "status": "planned"
+        },
+        {
+          "id": "APR-02",
+          "feature": "允许一次/始终/拒绝",
+          "acceptance": "始终允许只产生可解释的窄规则；拒绝动作后不能自动换通道重做同一外部行为",
+          "current_basis": "已有权限和 Mods 边界；需持久交互与云端策略",
+          "module": "M10 Policy / Interaction",
+          "phase": "P2",
+          "source_ids": [
+            "W-approvals",
+            "W-secrets",
+            "GR10",
+            "GR11",
+            "RK04",
+            "OB02",
+            "CM09",
+            "CM12"
+          ],
+          "classification": "scoped_requirement",
+          "test_id": "T-APR-02",
+          "status": "planned"
+        },
+        {
+          "id": "APR-03",
+          "feature": "规则优先级",
+          "acceptance": "Ask first 优先；Allow automatically 仍接受其他检查；管理员锁定项不可编辑",
+          "current_basis": "已有权限和 Mods 边界；需持久交互与云端策略",
+          "module": "M10 Policy / Interaction",
+          "phase": "P2",
+          "source_ids": [
+            "W-approvals",
+            "W-secrets",
+            "GR10",
+            "GR11",
+            "RK04",
+            "OB02",
+            "CM09",
+            "CM12"
+          ],
+          "classification": "scoped_requirement",
+          "test_id": "T-APR-03",
+          "status": "planned"
+        },
+        {
+          "id": "APR-04",
+          "feature": "精确动作绑定",
+          "acceptance": "批准绑定最终参数摘要、账号、目标资源、版本、run generation；改参数须重新决策",
+          "current_basis": "已有权限和 Mods 边界；需持久交互与云端策略",
+          "module": "M10 Policy / Interaction",
+          "phase": "P2",
+          "source_ids": [
+            "W-approvals",
+            "W-secrets",
+            "GR10",
+            "GR11",
+            "RK04",
+            "OB02",
+            "CM09",
+            "CM12"
+          ],
+          "classification": "scoped_requirement",
+          "test_id": "T-APR-04",
+          "status": "planned"
+        },
+        {
+          "id": "APR-05",
+          "feature": "多端竞争",
+          "acceptance": "两端同时回答只一个成功；另一端显示已处理；不能执行两次",
+          "current_basis": "已有权限和 Mods 边界；需持久交互与云端策略",
+          "module": "M10 Policy / Interaction",
+          "phase": "P2",
+          "source_ids": [
+            "W-approvals",
+            "W-secrets",
+            "GR10",
+            "GR11",
+            "RK04",
+            "OB02",
+            "CM09",
+            "CM12"
+          ],
+          "classification": "scoped_requirement",
+          "test_id": "T-APR-05",
+          "status": "planned"
+        },
+        {
+          "id": "APR-06",
+          "feature": "过期与改口",
+          "acceptance": "超时、用户新指令、环境重建、权限变化均可废止旧卡；自动任务可持久等待",
+          "current_basis": "已有权限和 Mods 边界；需持久交互与云端策略",
+          "module": "M10 Policy / Interaction",
+          "phase": "P2",
+          "source_ids": [
+            "W-approvals",
+            "W-secrets",
+            "GR10",
+            "GR11",
+            "RK04",
+            "OB02",
+            "CM09",
+            "CM12"
+          ],
+          "classification": "scoped_requirement",
+          "test_id": "T-APR-06",
+          "status": "planned"
+        },
+        {
+          "id": "APR-07",
+          "feature": "动作结果不明",
+          "acceptance": "外部提交后断线进入 uncertain；查询外部状态或人工核对后再决定重试",
+          "current_basis": "已有权限和 Mods 边界；需持久交互与云端策略",
+          "module": "M10 Policy / Interaction",
+          "phase": "P2",
+          "source_ids": [
+            "W-approvals",
+            "W-secrets",
+            "GR10",
+            "GR11",
+            "RK04",
+            "OB02",
+            "CM09",
+            "CM12"
+          ],
+          "classification": "scoped_requirement",
+          "test_id": "T-APR-07",
+          "status": "planned"
+        },
+        {
+          "id": "APR-08",
+          "feature": "真实目标解析",
+          "acceptance": "从服务端快照解析元素/资源，拒绝过期 ref；不接受模型自报目标名称替代",
+          "current_basis": "已有权限和 Mods 边界；需持久交互与云端策略",
+          "module": "M10 Policy / Interaction",
+          "phase": "P2",
+          "source_ids": [
+            "W-approvals",
+            "W-secrets",
+            "GR10",
+            "GR11",
+            "RK04",
+            "OB02",
+            "CM09",
+            "CM12"
+          ],
+          "classification": "scoped_requirement",
+          "test_id": "T-APR-08",
+          "status": "planned"
+        },
+        {
+          "id": "APR-09",
+          "feature": "接管互斥",
+          "acceptance": "人工持有电脑时所有 Bot 输入通路都被网关阻止，非只禁用 UI 按钮",
+          "current_basis": "已有权限和 Mods 边界；需持久交互与云端策略",
+          "module": "M10 Policy / Interaction",
+          "phase": "P2",
+          "source_ids": [
+            "W-approvals",
+            "W-secrets",
+            "GR10",
+            "GR11",
+            "RK04",
+            "OB02",
+            "CM09",
+            "CM12"
+          ],
+          "classification": "scoped_requirement",
+          "test_id": "T-APR-09",
+          "status": "planned"
+        },
+        {
+          "id": "APR-10",
+          "feature": "秘密录入",
+          "acceptance": "卡片掩码；存储成功有确认，聊天/日志/模型中不可见原值",
+          "current_basis": "已有权限和 Mods 边界；需持久交互与云端策略",
+          "module": "M10 Policy / Interaction",
+          "phase": "P2",
+          "source_ids": [
+            "W-approvals",
+            "W-secrets",
+            "GR10",
+            "GR11",
+            "RK04",
+            "OB02",
+            "CM09",
+            "CM12"
+          ],
+          "classification": "scoped_requirement",
+          "test_id": "T-APR-10",
+          "status": "planned"
+        },
+        {
+          "id": "APR-11",
+          "feature": "Bot 秘密管理",
+          "acceptance": "仅显示名称与说明，支持新增/替换/删除；不提供读取旧值给 Bot 的工具",
+          "current_basis": "已有权限和 Mods 边界；需持久交互与云端策略",
+          "module": "M10 Policy / Interaction",
+          "phase": "P3",
+          "source_ids": [
+            "W-approvals",
+            "W-secrets",
+            "GR10",
+            "GR11",
+            "RK04",
+            "OB02",
+            "CM09",
+            "CM12"
+          ],
+          "classification": "scoped_requirement",
+          "test_id": "T-APR-11",
+          "status": "planned"
+        },
+        {
+          "id": "APR-12",
+          "feature": "安全页面填充",
+          "acceptance": "秘密直接交给受限填充器；页面变化时失败，不把值退回 Bot",
+          "current_basis": "已有权限和 Mods 边界；需持久交互与云端策略",
+          "module": "M10 Policy / Interaction",
+          "phase": "P2",
+          "source_ids": [
+            "W-approvals",
+            "W-secrets",
+            "GR10",
+            "GR11",
+            "RK04",
+            "OB02",
+            "CM09",
+            "CM12"
+          ],
+          "classification": "scoped_requirement",
+          "test_id": "T-APR-12",
+          "status": "planned"
+        },
+        {
+          "id": "APR-13",
+          "feature": "模板与复制秘密",
+          "acceptance": "默认不导出秘密；Team Bot 发布迁移资源必须逐项选择并明示共享范围",
+          "current_basis": "已有权限和 Mods 边界；需持久交互与云端策略",
+          "module": "M10 Policy / Interaction",
+          "phase": "P4",
+          "source_ids": [
+            "W-approvals",
+            "W-secrets",
+            "GR10",
+            "GR11",
+            "RK04",
+            "OB02",
+            "CM09",
+            "CM12"
+          ],
+          "classification": "scoped_requirement",
+          "test_id": "T-APR-13",
+          "status": "planned"
+        },
+        {
+          "id": "APR-14",
+          "feature": "规则不是权限",
+          "acceptance": "描述/记忆/群消息只能提供任务上下文，不能扩大签名执行上下文的权限",
+          "current_basis": "已有权限和 Mods 边界；需持久交互与云端策略",
+          "module": "M10 Policy / Interaction",
+          "phase": "P2",
+          "source_ids": [
+            "W-approvals",
+            "W-secrets",
+            "GR10",
+            "GR11",
+            "RK04",
+            "OB02",
+            "CM09",
+            "CM12"
+          ],
+          "classification": "scoped_requirement",
+          "test_id": "T-APR-14",
+          "status": "planned"
+        },
+        {
+          "id": "APR-15",
+          "feature": "权限撤回",
+          "acceptance": "账号、插件、Bot、成员、设备授权撤回后新动作立刻检查有效版本",
+          "current_basis": "已有权限和 Mods 边界；需持久交互与云端策略",
+          "module": "M10 Policy / Interaction",
+          "phase": "P2",
+          "source_ids": [
+            "W-approvals",
+            "W-secrets",
+            "GR10",
+            "GR11",
+            "RK04",
+            "OB02",
+            "CM09",
+            "CM12"
+          ],
+          "classification": "scoped_requirement",
+          "test_id": "T-APR-15",
+          "status": "planned"
+        },
+        {
+          "id": "APR-16",
+          "feature": "审计前置",
+          "acceptance": "记录动作意图和授权决定后执行，再写结果；事件脱敏且可关联 run/actor",
+          "current_basis": "已有权限和 Mods 边界；需持久交互与云端策略",
+          "module": "M10 Policy / Interaction",
+          "phase": "P2",
+          "source_ids": [
+            "W-approvals",
+            "W-secrets",
+            "GR10",
+            "GR11",
+            "RK04",
+            "OB02",
+            "CM09",
+            "CM12"
+          ],
+          "classification": "scoped_requirement",
+          "test_id": "T-APR-16",
+          "status": "planned"
+        }
+      ]
+    },
+    {
+      "code": "SHR",
+      "title": "模板与分享",
+      "rows": [
+        {
+          "id": "SHR-01",
+          "feature": "创建模板",
+          "acceptance": "保存 Bot 资料、描述、技能和例程配置的可发布快照",
+          "current_basis": "已有插件市场概念；Bot 模板产品需新建",
+          "module": "M18 Template Catalog",
+          "phase": "P4",
+          "source_ids": [
+            "W-bots",
+            "W-marketplace",
+            "GR01"
+          ],
+          "classification": "scoped_requirement",
+          "test_id": "T-SHR-01",
+          "status": "planned"
+        },
+        {
+          "id": "SHR-02",
+          "feature": "分享范围",
+          "acceptance": "公共链接/团队链接分别检查；企业默认团队范围，并服从管理员公开分享设置",
+          "current_basis": "已有插件市场概念；Bot 模板产品需新建",
+          "module": "M18 Template Catalog",
+          "phase": "P4",
+          "source_ids": [
+            "W-bots",
+            "W-marketplace",
+            "GR01"
+          ],
+          "classification": "scoped_requirement",
+          "test_id": "T-SHR-02",
+          "status": "planned"
+        },
+        {
+          "id": "SHR-03",
+          "feature": "模板预览",
+          "acceptance": "未安装也可看范围内的资料、创建者、所需插件与技能；无权模板不可泄露详情",
+          "current_basis": "已有插件市场概念；Bot 模板产品需新建",
+          "module": "M18 Template Catalog",
+          "phase": "P4",
+          "source_ids": [
+            "W-bots",
+            "W-marketplace",
+            "GR01"
+          ],
+          "classification": "scoped_requirement",
+          "test_id": "T-SHR-03",
+          "status": "planned"
+        },
+        {
+          "id": "SHR-04",
+          "feature": "从模板创建",
+          "acceptance": "生成自己拥有的新 Bot；不复制作者历史、电脑、登录与附件",
+          "current_basis": "已有插件市场概念；Bot 模板产品需新建",
+          "module": "M18 Template Catalog",
+          "phase": "P4",
+          "source_ids": [
+            "W-bots",
+            "W-marketplace",
+            "GR01"
+          ],
+          "classification": "scoped_requirement",
+          "test_id": "T-SHR-04",
+          "status": "planned"
+        },
+        {
+          "id": "SHR-05",
+          "feature": "模板更新",
+          "acceptance": "更新已发布配置有版本；既有导入副本不静默改变职责和权限",
+          "current_basis": "已有插件市场概念；Bot 模板产品需新建",
+          "module": "M18 Template Catalog",
+          "phase": "P4",
+          "source_ids": [
+            "W-bots",
+            "W-marketplace",
+            "GR01"
+          ],
+          "classification": "scoped_requirement",
+          "test_id": "T-SHR-05",
+          "status": "planned"
+        },
+        {
+          "id": "SHR-06",
+          "feature": "撤回与链接失效",
+          "acceptance": "撤回后新用户不可导入；现有副本保留其自有身份与数据",
+          "current_basis": "已有插件市场概念；Bot 模板产品需新建",
+          "module": "M18 Template Catalog",
+          "phase": "P4",
+          "source_ids": [
+            "W-bots",
+            "W-marketplace",
+            "GR01"
+          ],
+          "classification": "scoped_requirement",
+          "test_id": "T-SHR-06",
+          "status": "planned"
+        },
+        {
+          "id": "SHR-07",
+          "feature": "市场浏览",
+          "acceptance": "分类、搜索创建者/Bot 名、精选和详情到创建完整可用",
+          "current_basis": "已有插件市场概念；Bot 模板产品需新建",
+          "module": "M18 Template Catalog",
+          "phase": "P4",
+          "source_ids": [
+            "W-bots",
+            "W-marketplace",
+            "GR01"
+          ],
+          "classification": "scoped_requirement",
+          "test_id": "T-SHR-07",
+          "status": "planned"
+        },
+        {
+          "id": "SHR-08",
+          "feature": "依赖补齐",
+          "acceptance": "导入后缺插件/权限/技能给出设置步骤；未就绪例程不能误执行",
+          "current_basis": "已有插件市场概念；Bot 模板产品需新建",
+          "module": "M18 Template Catalog",
+          "phase": "P4",
+          "source_ids": [
+            "W-bots",
+            "W-marketplace",
+            "GR01"
+          ],
+          "classification": "scoped_requirement",
+          "test_id": "T-SHR-08",
+          "status": "planned"
+        }
+      ]
+    },
+    {
+      "code": "TEAM",
+      "title": "Team Bots：多人使用同一 Bot",
+      "rows": [
+        {
+          "id": "TEAM-01",
+          "feature": "创建团队 Bot",
+          "acceptance": "专门新建入口，默认未发布；按插件、秘密、文件完成团队可用资源设置",
+          "current_basis": "需要新共享 Bot 领域；不得以模板复制代替",
+          "module": "M17 Team Bot Service",
+          "phase": "P4",
+          "source_ids": [
+            "W-team-bots",
+            "W-cursor-teams",
+            "W-secrets"
+          ],
+          "classification": "scoped_requirement",
+          "test_id": "T-TEAM-01",
+          "status": "planned"
+        },
+        {
+          "id": "TEAM-02",
+          "feature": "个人转团队副本",
+          "acceptance": "原 Bot 继续存在；选择迁移记忆/秘密/例程；不移动个人聊天",
+          "current_basis": "需要新共享 Bot 领域；不得以模板复制代替",
+          "module": "M17 Team Bot Service",
+          "phase": "P4",
+          "source_ids": [
+            "W-team-bots",
+            "W-cursor-teams",
+            "W-secrets"
+          ],
+          "classification": "scoped_requirement",
+          "test_id": "T-TEAM-02",
+          "status": "planned"
+        },
+        {
+          "id": "TEAM-03",
+          "feature": "发布与撤回",
+          "acceptance": "名称/描述就绪后发布；撤回立即阻止成员新执行，原主人仍可管理",
+          "current_basis": "需要新共享 Bot 领域；不得以模板复制代替",
+          "module": "M17 Team Bot Service",
+          "phase": "P4",
+          "source_ids": [
+            "W-team-bots",
+            "W-cursor-teams",
+            "W-secrets"
+          ],
+          "classification": "scoped_requirement",
+          "test_id": "T-TEAM-03",
+          "status": "planned"
+        },
+        {
+          "id": "TEAM-04",
+          "feature": "发现与链接",
+          "acceptance": "团队列表、名称搜索和链接进入同一共享 Bot，不生成个人副本",
+          "current_basis": "需要新共享 Bot 领域；不得以模板复制代替",
+          "module": "M17 Team Bot Service",
+          "phase": "P4",
+          "source_ids": [
+            "W-team-bots",
+            "W-cursor-teams",
+            "W-secrets"
+          ],
+          "classification": "scoped_requirement",
+          "test_id": "T-TEAM-04",
+          "status": "planned"
+        },
+        {
+          "id": "TEAM-05",
+          "feature": "成员私聊",
+          "acceptance": "各成员有独立会话；发布者及其他成员不能读取彼此私聊和个人记忆",
+          "current_basis": "需要新共享 Bot 领域；不得以模板复制代替",
+          "module": "M17 Team Bot Service",
+          "phase": "P4",
+          "source_ids": [
+            "W-team-bots",
+            "W-cursor-teams",
+            "W-secrets"
+          ],
+          "classification": "scoped_requirement",
+          "test_id": "T-TEAM-05",
+          "status": "planned"
+        },
+        {
+          "id": "TEAM-06",
+          "feature": "团队共同记忆",
+          "acceptance": "提炼团队通用知识时告知用户；个人偏好和私聊信息不得直接写入公共记忆",
+          "current_basis": "需要新共享 Bot 领域；不得以模板复制代替",
+          "module": "M17 Team Bot Service",
+          "phase": "P4",
+          "source_ids": [
+            "W-team-bots",
+            "W-cursor-teams",
+            "W-secrets"
+          ],
+          "classification": "scoped_requirement",
+          "test_id": "T-TEAM-06",
+          "status": "planned"
+        },
+        {
+          "id": "TEAM-07",
+          "feature": "发布者资源",
+          "acceptance": "所选插件、秘密、技能、文件能供团队任务使用；读取范围和来源明确",
+          "current_basis": "需要新共享 Bot 领域；不得以模板复制代替",
+          "module": "M17 Team Bot Service",
+          "phase": "P4",
+          "source_ids": [
+            "W-team-bots",
+            "W-cursor-teams",
+            "W-secrets"
+          ],
+          "classification": "scoped_requirement",
+          "test_id": "T-TEAM-07",
+          "status": "planned"
+        },
+        {
+          "id": "TEAM-08",
+          "feature": "个人连接器授权",
+          "acceptance": "一次允许/对该 Bot 永久/对所有 Team Bots 永久/跳过；可清除偏好",
+          "current_basis": "需要新共享 Bot 领域；不得以模板复制代替",
+          "module": "M17 Team Bot Service",
+          "phase": "P4",
+          "source_ids": [
+            "W-team-bots",
+            "W-cursor-teams",
+            "W-secrets"
+          ],
+          "classification": "scoped_requirement",
+          "test_id": "T-TEAM-08",
+          "status": "planned"
+        },
+        {
+          "id": "TEAM-09",
+          "feature": "凭据选择",
+          "acceptance": "运行上下文同时记录 Bot owner、发起人、账号 owner 和计费人；成员 A 账号不用于 B",
+          "current_basis": "需要新共享 Bot 领域；不得以模板复制代替",
+          "module": "M17 Team Bot Service",
+          "phase": "P4",
+          "source_ids": [
+            "W-team-bots",
+            "W-cursor-teams",
+            "W-secrets"
+          ],
+          "classification": "scoped_requirement",
+          "test_id": "T-TEAM-09",
+          "status": "planned"
+        },
+        {
+          "id": "TEAM-10",
+          "feature": "电脑选择",
+          "acceptance": "私聊通常用发起人成员电脑；群聊/Slack 用 Team Bot 专用电脑；隐私不兼容走独立分配或明确拒绝",
+          "current_basis": "需要新共享 Bot 领域；不得以模板复制代替",
+          "module": "M17 Team Bot Service",
+          "phase": "P4",
+          "source_ids": [
+            "W-team-bots",
+            "W-cursor-teams",
+            "W-secrets"
+          ],
+          "classification": "scoped_requirement",
+          "test_id": "T-TEAM-10",
+          "status": "planned"
+        },
+        {
+          "id": "TEAM-11",
+          "feature": "团队场景审批",
+          "acceptance": "发布者私聊可回答动作审批；其他表面仅在预授权范围内执行，无人可审批不等于自动批准",
+          "current_basis": "需要新共享 Bot 领域；不得以模板复制代替",
+          "module": "M17 Team Bot Service",
+          "phase": "P4",
+          "source_ids": [
+            "W-team-bots",
+            "W-cursor-teams",
+            "W-secrets"
+          ],
+          "classification": "scoped_requirement",
+          "test_id": "T-TEAM-11",
+          "status": "planned"
+        },
+        {
+          "id": "TEAM-12",
+          "feature": "Slack 接入",
+          "acceptance": "发布后连接、管理员待审批、成员账号绑定、私信和频道提及均完整",
+          "current_basis": "需要新共享 Bot 领域；不得以模板复制代替",
+          "module": "M17 Team Bot Service",
+          "phase": "P4",
+          "source_ids": [
+            "W-team-bots",
+            "W-cursor-teams",
+            "W-secrets"
+          ],
+          "classification": "scoped_requirement",
+          "test_id": "T-TEAM-12",
+          "status": "planned"
+        },
+        {
+          "id": "TEAM-13",
+          "feature": "成员群聊",
+          "acceptance": "发布 Team Bot 可入群，不能与不兼容的本地 Bot 混组；身份和资源隔离仍成立",
+          "current_basis": "需要新共享 Bot 领域；不得以模板复制代替",
+          "module": "M17 Team Bot Service",
+          "phase": "P4",
+          "source_ids": [
+            "W-team-bots",
+            "W-cursor-teams",
+            "W-secrets"
+          ],
+          "classification": "scoped_requirement",
+          "test_id": "T-TEAM-13",
+          "status": "planned"
+        },
+        {
+          "id": "TEAM-14",
+          "feature": "用量归属",
+          "acceptance": "成员私聊计入该成员；其他通道的计费主体需冻结规则，界面与账本一致",
+          "current_basis": "需要新共享 Bot 领域；不得以模板复制代替",
+          "module": "M17 Team Bot Service",
+          "phase": "P4",
+          "source_ids": [
+            "W-team-bots",
+            "W-cursor-teams",
+            "W-secrets"
+          ],
+          "classification": "scoped_requirement",
+          "test_id": "T-TEAM-14",
+          "status": "planned"
+        },
+        {
+          "id": "TEAM-15",
+          "feature": "管理权限",
+          "acceptance": "仅 owner 可修改/删除；成员可隐藏，强制分发的 Team Bot 不可隐藏",
+          "current_basis": "需要新共享 Bot 领域；不得以模板复制代替",
+          "module": "M17 Team Bot Service",
+          "phase": "P4",
+          "source_ids": [
+            "W-team-bots",
+            "W-cursor-teams",
+            "W-secrets"
+          ],
+          "classification": "scoped_requirement",
+          "test_id": "T-TEAM-15",
+          "status": "planned"
+        },
+        {
+          "id": "TEAM-16",
+          "feature": "删除影响",
+          "acceptance": "确认影响全团队，关闭新访问/例程，按保留策略处理各成员私聊；不泄露给 owner",
+          "current_basis": "需要新共享 Bot 领域；不得以模板复制代替",
+          "module": "M17 Team Bot Service",
+          "phase": "P4",
+          "source_ids": [
+            "W-team-bots",
+            "W-cursor-teams",
+            "W-secrets"
+          ],
+          "classification": "scoped_requirement",
+          "test_id": "T-TEAM-16",
+          "status": "planned"
+        },
+        {
+          "id": "TEAM-17",
+          "feature": "手机使用",
+          "acceptance": "能聊天及回答连接器 Allow 卡；创建/发布/Slack 设置在桌面；同事 Team Bot 不提供语音通话",
+          "current_basis": "需要新共享 Bot 领域；不得以模板复制代替",
+          "module": "M17 Team Bot Service",
+          "phase": "P4",
+          "source_ids": [
+            "W-team-bots",
+            "W-cursor-teams",
+            "W-secrets"
+          ],
+          "classification": "scoped_requirement",
+          "test_id": "T-TEAM-17",
+          "status": "planned"
+        },
+        {
+          "id": "TEAM-18",
+          "feature": "管理员分发",
+          "acceptance": "按全团队/指定组/无分发同步侧边栏，撤回与用户离组及时生效",
+          "current_basis": "需要新共享 Bot 领域；不得以模板复制代替",
+          "module": "M17 Team Bot Service",
+          "phase": "P5",
+          "source_ids": [
+            "W-team-bots",
+            "W-cursor-teams",
+            "W-secrets"
+          ],
+          "classification": "scoped_requirement",
+          "test_id": "T-TEAM-18",
+          "status": "planned"
+        }
+      ]
+    },
+    {
+      "code": "VOC",
+      "title": "语音能力",
+      "rows": [
+        {
+          "id": "VOC-01",
+          "feature": "听写",
+          "acceptance": "录音后转文字进入草稿可编辑；快捷键、取消、无麦克风、权限拒绝和失败重试明确",
+          "current_basis": "未发现完整现成链路；需语音服务和客户端",
+          "module": "M12 Voice",
+          "phase": "P4",
+          "source_ids": [
+            "W-voice-chat",
+            "W-chat",
+            "GR15"
+          ],
+          "classification": "scoped_requirement",
+          "test_id": "T-VOC-01",
+          "status": "planned"
+        },
+        {
+          "id": "VOC-02",
+          "feature": "实时语音",
+          "acceptance": "空输入框入口，连接/通话/静音/挂断完整；模型可经同一任务服务调用工具",
+          "current_basis": "未发现完整现成链路；需语音服务和客户端",
+          "module": "M12 Voice",
+          "phase": "P4",
+          "source_ids": [
+            "W-voice-chat",
+            "W-chat",
+            "GR15"
+          ],
+          "classification": "scoped_requirement",
+          "test_id": "T-VOC-02",
+          "status": "planned"
+        },
+        {
+          "id": "VOC-03",
+          "feature": "语音设置",
+          "acceptance": "音色、速度、语言自动检测与麦克风选择生效且保存",
+          "current_basis": "未发现完整现成链路；需语音服务和客户端",
+          "module": "M12 Voice",
+          "phase": "P4",
+          "source_ids": [
+            "W-voice-chat",
+            "W-chat",
+            "GR15"
+          ],
+          "classification": "scoped_requirement",
+          "test_id": "T-VOC-03",
+          "status": "planned"
+        },
+        {
+          "id": "VOC-04",
+          "feature": "跨页面通话",
+          "acceptance": "切换聊天不挂断；可返回正在通话的 Bot；开始另一通话先确认结束前一个",
+          "current_basis": "未发现完整现成链路；需语音服务和客户端",
+          "module": "M12 Voice",
+          "phase": "P4",
+          "source_ids": [
+            "W-voice-chat",
+            "W-chat",
+            "GR15"
+          ],
+          "classification": "scoped_requirement",
+          "test_id": "T-VOC-04",
+          "status": "planned"
+        },
+        {
+          "id": "VOC-05",
+          "feature": "通话转写",
+          "acceptance": "可展开实时文字，结束后显示时长、完整通话记录与可选评价，不重复生成文本任务",
+          "current_basis": "未发现完整现成链路；需语音服务和客户端",
+          "module": "M12 Voice",
+          "phase": "P4",
+          "source_ids": [
+            "W-voice-chat",
+            "W-chat",
+            "GR15"
+          ],
+          "classification": "scoped_requirement",
+          "test_id": "T-VOC-05",
+          "status": "planned"
+        },
+        {
+          "id": "VOC-06",
+          "feature": "通话后续任务",
+          "acceptance": "挂断不会丢掉已交办任务；结果可稍后回到同一会话",
+          "current_basis": "未发现完整现成链路；需语音服务和客户端",
+          "module": "M12 Voice",
+          "phase": "P4",
+          "source_ids": [
+            "W-voice-chat",
+            "W-chat",
+            "GR15"
+          ],
+          "classification": "scoped_requirement",
+          "test_id": "T-VOC-06",
+          "status": "planned"
+        },
+        {
+          "id": "VOC-07",
+          "feature": "语音便笺",
+          "acceptance": "Bot 可发音频，支持播放/暂停/展开转写，多端可用",
+          "current_basis": "未发现完整现成链路；需语音服务和客户端",
+          "module": "M12 Voice",
+          "phase": "P4",
+          "source_ids": [
+            "W-voice-chat",
+            "W-chat",
+            "GR15"
+          ],
+          "classification": "scoped_requirement",
+          "test_id": "T-VOC-07",
+          "status": "planned"
+        },
+        {
+          "id": "VOC-08",
+          "feature": "通话限制与故障",
+          "acceptance": "群聊和同事 Team Bot 不显示通话；断线说明原因，重新发起不自动重复已执行动作",
+          "current_basis": "未发现完整现成链路；需语音服务和客户端",
+          "module": "M12 Voice",
+          "phase": "P4",
+          "source_ids": [
+            "W-voice-chat",
+            "W-chat",
+            "GR15"
+          ],
+          "classification": "scoped_requirement",
+          "test_id": "T-VOC-08",
+          "status": "planned"
+        }
+      ]
+    },
+    {
+      "code": "UI",
+      "title": "桌面体验与可访问性",
+      "rows": [
+        {
+          "id": "UI-01",
+          "feature": "Bot 工作区入口",
+          "acceptance": "与现有项目/Feature 工作台衔接；进入 Bot 后创建/聊天/电脑的主要操作路径一致",
+          "current_basis": "现有桌面壳可复用；新增专门 Bot 工作区",
+          "module": "M13 Desktop UI",
+          "phase": "P2",
+          "source_ids": [
+            "W-settings",
+            "W-how-to",
+            "GR15",
+            "CM11"
+          ],
+          "classification": "scoped_requirement",
+          "test_id": "T-UI-01",
+          "status": "planned"
+        },
+        {
+          "id": "UI-02",
+          "feature": "Bot 详情",
+          "acceptance": "资料、Tasks/例程、Skills、文件、秘密、分享入口有统一位置和返回路径",
+          "current_basis": "现有桌面壳可复用；新增专门 Bot 工作区",
+          "module": "M13 Desktop UI",
+          "phase": "P3",
+          "source_ids": [
+            "W-settings",
+            "W-how-to",
+            "GR15",
+            "CM11"
+          ],
+          "classification": "scoped_requirement",
+          "test_id": "T-UI-02",
+          "status": "planned"
+        },
+        {
+          "id": "UI-03",
+          "feature": "状态区分",
+          "acceptance": "工作中、未读、待审批、待回答、待接管、错误独立，不用一个红点表示所有情况",
+          "current_basis": "现有桌面壳可复用；新增专门 Bot 工作区",
+          "module": "M13 Desktop UI",
+          "phase": "P2",
+          "source_ids": [
+            "W-settings",
+            "W-how-to",
+            "GR15",
+            "CM11"
+          ],
+          "classification": "scoped_requirement",
+          "test_id": "T-UI-03",
+          "status": "planned"
+        },
+        {
+          "id": "UI-04",
+          "feature": "通知行为",
+          "acceptance": "Bot 完成/需输入时通知；隐藏和静音生效；前台抑制桌面系统提醒但保留未读",
+          "current_basis": "现有桌面壳可复用；新增专门 Bot 工作区",
+          "module": "M13 Desktop UI",
+          "phase": "P2",
+          "source_ids": [
+            "W-settings",
+            "W-how-to",
+            "GR15",
+            "CM11"
+          ],
+          "classification": "scoped_requirement",
+          "test_id": "T-UI-04",
+          "status": "planned"
+        },
+        {
+          "id": "UI-05",
+          "feature": "全局快捷键",
+          "acceptance": "按平台对齐聊天、切换、查找、市场、详情、设置、缩放、全屏；无快捷键冲突",
+          "current_basis": "现有桌面壳可复用；新增专门 Bot 工作区",
+          "module": "M13 Desktop UI",
+          "phase": "P2",
+          "source_ids": [
+            "W-settings",
+            "W-how-to",
+            "GR15",
+            "CM11"
+          ],
+          "classification": "scoped_requirement",
+          "test_id": "T-UI-05",
+          "status": "planned"
+        },
+        {
+          "id": "UI-06",
+          "feature": "主题与语言",
+          "acceptance": "系统/浅/深主题；语言切换、字体、长文案、时区，桌面全语言目录按基准验证",
+          "current_basis": "现有桌面壳可复用；新增专门 Bot 工作区",
+          "module": "M13 Desktop UI",
+          "phase": "P4",
+          "source_ids": [
+            "W-settings",
+            "W-how-to",
+            "GR15",
+            "CM11"
+          ],
+          "classification": "scoped_requirement",
+          "test_id": "T-UI-06",
+          "status": "planned"
+        },
+        {
+          "id": "UI-07",
+          "feature": "焦点和可访问性",
+          "acceptance": "Tab 顺序、焦点恢复、屏幕阅读器、缩放、高对比和减少动画不破坏操作",
+          "current_basis": "现有桌面壳可复用；新增专门 Bot 工作区",
+          "module": "M13 Desktop UI",
+          "phase": "P4",
+          "source_ids": [
+            "W-settings",
+            "W-how-to",
+            "GR15",
+            "CM11"
+          ],
+          "classification": "scoped_requirement",
+          "test_id": "T-UI-07",
+          "status": "planned"
+        },
+        {
+          "id": "UI-08",
+          "feature": "菜单细节",
+          "acceptance": "右键、悬停、复制会话 ID、复制请求 ID、重命名/隐藏/删除按实际权限显示",
+          "current_basis": "现有桌面壳可复用；新增专门 Bot 工作区",
+          "module": "M13 Desktop UI",
+          "phase": "P2",
+          "source_ids": [
+            "W-settings",
+            "W-how-to",
+            "GR15",
+            "CM11"
+          ],
+          "classification": "scoped_requirement",
+          "test_id": "T-UI-08",
+          "status": "planned"
+        },
+        {
+          "id": "UI-09",
+          "feature": "错误与离线态",
+          "acceptance": "保留未发送草稿，区分 API 断线、电脑断线、模型失败与账户禁用",
+          "current_basis": "现有桌面壳可复用；新增专门 Bot 工作区",
+          "module": "M13 Desktop UI",
+          "phase": "P2",
+          "source_ids": [
+            "W-settings",
+            "W-how-to",
+            "GR15",
+            "CM11"
+          ],
+          "classification": "scoped_requirement",
+          "test_id": "T-UI-09",
+          "status": "planned"
+        },
+        {
+          "id": "UI-10",
+          "feature": "视觉一致性",
+          "acceptance": "固定版本/窗口尺寸/字体对照截图；空态、菜单、卡片、loading、error 均验收",
+          "current_basis": "现有桌面壳可复用；新增专门 Bot 工作区",
+          "module": "M13 Desktop UI",
+          "phase": "P5",
+          "source_ids": [
+            "W-settings",
+            "W-how-to",
+            "GR15",
+            "CM11"
+          ],
+          "classification": "scoped_requirement",
+          "test_id": "T-UI-10",
+          "status": "planned"
+        },
+        {
+          "id": "UI-11",
+          "feature": "应用更新",
+          "acceptance": "检查/下载/重启/失败重试和最低版本拦截；客户端更新不停止云端工作",
+          "current_basis": "现有桌面壳可复用；新增专门 Bot 工作区",
+          "module": "M13 Desktop UI",
+          "phase": "P5",
+          "source_ids": [
+            "W-settings",
+            "W-how-to",
+            "GR15",
+            "CM11"
+          ],
+          "classification": "scoped_requirement",
+          "test_id": "T-UI-11",
+          "status": "planned"
+        },
+        {
+          "id": "UI-12",
+          "feature": "关于与帮助",
+          "acceptance": "版本、发布通道、系统信息、帮助和反馈可获取；诊断包先脱敏",
+          "current_basis": "现有桌面壳可复用；新增专门 Bot 工作区",
+          "module": "M13 Desktop UI",
+          "phase": "P5",
+          "source_ids": [
+            "W-settings",
+            "W-how-to",
+            "GR15",
+            "CM11"
+          ],
+          "classification": "scoped_requirement",
+          "test_id": "T-UI-12",
+          "status": "planned"
+        }
+      ]
+    },
+    {
+      "code": "MOB",
+      "title": "移动客户端",
+      "rows": [
+        {
+          "id": "MOB-01",
+          "feature": "平台与登录",
+          "acceptance": "iOS/iPadOS 18+、Android 9+；统一账号、首次引导和会话续期",
+          "current_basis": "需新移动客户端；招乎只作补充入口",
+          "module": "M14 Mobile",
+          "phase": "P4",
+          "source_ids": [
+            "W-mobile",
+            "W-cursor-mobile",
+            "W-team-bots"
+          ],
+          "classification": "scoped_requirement",
+          "test_id": "T-MOB-01",
+          "status": "planned"
+        },
+        {
+          "id": "MOB-02",
+          "feature": "Bot 与群聊",
+          "acceptance": "创建、资料、成员、置顶、隐藏、删除；按平台支持的分区手势同步桌面",
+          "current_basis": "需新移动客户端；招乎只作补充入口",
+          "module": "M14 Mobile",
+          "phase": "P4",
+          "source_ids": [
+            "W-mobile",
+            "W-cursor-mobile",
+            "W-team-bots"
+          ],
+          "classification": "scoped_requirement",
+          "test_id": "T-MOB-02",
+          "status": "planned"
+        },
+        {
+          "id": "MOB-03",
+          "feature": "消息草稿",
+          "acceptance": "文本、分支、表情、草稿恢复、发送去重与桌面一致",
+          "current_basis": "需新移动客户端；招乎只作补充入口",
+          "module": "M14 Mobile",
+          "phase": "P4",
+          "source_ids": [
+            "W-mobile",
+            "W-cursor-mobile",
+            "W-team-bots"
+          ],
+          "classification": "scoped_requirement",
+          "test_id": "T-MOB-03",
+          "status": "planned"
+        },
+        {
+          "id": "MOB-04",
+          "feature": "照片和文件",
+          "acceptance": "相机/相册/文件选择、上传进度、预览和下载；系统权限失败有恢复路径",
+          "current_basis": "需新移动客户端；招乎只作补充入口",
+          "module": "M14 Mobile",
+          "phase": "P4",
+          "source_ids": [
+            "W-mobile",
+            "W-cursor-mobile",
+            "W-team-bots"
+          ],
+          "classification": "scoped_requirement",
+          "test_id": "T-MOB-04",
+          "status": "planned"
+        },
+        {
+          "id": "MOB-05",
+          "feature": "系统分享",
+          "acceptance": "iOS 文本/链接/照片/文件进入指定会话草稿；Android 至少覆盖已确认文本分享",
+          "current_basis": "需新移动客户端；招乎只作补充入口",
+          "module": "M14 Mobile",
+          "phase": "P4",
+          "source_ids": [
+            "W-mobile",
+            "W-cursor-mobile",
+            "W-team-bots"
+          ],
+          "classification": "scoped_requirement",
+          "test_id": "T-MOB-05",
+          "status": "planned"
+        },
+        {
+          "id": "MOB-06",
+          "feature": "电脑观看和接管",
+          "acceptance": "手机看画面并操作，适应触屏/键盘；控制 lease 与桌面互斥",
+          "current_basis": "需新移动客户端；招乎只作补充入口",
+          "module": "M14 Mobile",
+          "phase": "P4",
+          "source_ids": [
+            "W-mobile",
+            "W-cursor-mobile",
+            "W-team-bots"
+          ],
+          "classification": "scoped_requirement",
+          "test_id": "T-MOB-06",
+          "status": "planned"
+        },
+        {
+          "id": "MOB-07",
+          "feature": "审批与安全输入",
+          "acceptance": "批准/拒绝/账号 Allow/秘密卡准确回到原任务，多端竞争只消费一次",
+          "current_basis": "需新移动客户端；招乎只作补充入口",
+          "module": "M14 Mobile",
+          "phase": "P4",
+          "source_ids": [
+            "W-mobile",
+            "W-cursor-mobile",
+            "W-team-bots"
+          ],
+          "classification": "scoped_requirement",
+          "test_id": "T-MOB-07",
+          "status": "planned"
+        },
+        {
+          "id": "MOB-08",
+          "feature": "草稿发送",
+          "acceptance": "邮件/Slack 草稿可编辑与确认发送，手机不落掉必填字段",
+          "current_basis": "需新移动客户端；招乎只作补充入口",
+          "module": "M14 Mobile",
+          "phase": "P4",
+          "source_ids": [
+            "W-mobile",
+            "W-cursor-mobile",
+            "W-team-bots"
+          ],
+          "classification": "scoped_requirement",
+          "test_id": "T-MOB-08",
+          "status": "planned"
+        },
+        {
+          "id": "MOB-09",
+          "feature": "听写/语音/便笺",
+          "acceptance": "完整接入语音服务；后台/来电/耳机切换后状态可恢复",
+          "current_basis": "需新移动客户端；招乎只作补充入口",
+          "module": "M14 Mobile",
+          "phase": "P4",
+          "source_ids": [
+            "W-mobile",
+            "W-cursor-mobile",
+            "W-team-bots"
+          ],
+          "classification": "scoped_requirement",
+          "test_id": "T-MOB-09",
+          "status": "planned"
+        },
+        {
+          "id": "MOB-10",
+          "feature": "例程管理",
+          "acceptance": "查看/暂停/恢复/删除/运行历史与 Add routine 预填消息；编辑/测试入口按官方平台范围",
+          "current_basis": "需新移动客户端；招乎只作补充入口",
+          "module": "M14 Mobile",
+          "phase": "P4",
+          "source_ids": [
+            "W-mobile",
+            "W-cursor-mobile",
+            "W-team-bots"
+          ],
+          "classification": "scoped_requirement",
+          "test_id": "T-MOB-10",
+          "status": "planned"
+        },
+        {
+          "id": "MOB-11",
+          "feature": "插件和设置",
+          "acceptance": "安装/授权回跳、主题、语言、时区范围、用量和通知设置符合移动端能力",
+          "current_basis": "需新移动客户端；招乎只作补充入口",
+          "module": "M14 Mobile",
+          "phase": "P4",
+          "source_ids": [
+            "W-mobile",
+            "W-cursor-mobile",
+            "W-team-bots"
+          ],
+          "classification": "scoped_requirement",
+          "test_id": "T-MOB-11",
+          "status": "planned"
+        },
+        {
+          "id": "MOB-12",
+          "feature": "推送与深链接",
+          "acceptance": "推送权限、Bot 开关、隐藏状态均生效；点击打开准确消息且不跨账号",
+          "current_basis": "需新移动客户端；招乎只作补充入口",
+          "module": "M14 Mobile",
+          "phase": "P4",
+          "source_ids": [
+            "W-mobile",
+            "W-cursor-mobile",
+            "W-team-bots"
+          ],
+          "classification": "scoped_requirement",
+          "test_id": "T-MOB-12",
+          "status": "planned"
+        },
+        {
+          "id": "MOB-13",
+          "feature": "退出与账号删除",
+          "acceptance": "退出清理本机敏感缓存；删除走重新认证和明确的数据范围",
+          "current_basis": "需新移动客户端；招乎只作补充入口",
+          "module": "M14 Mobile",
+          "phase": "P5",
+          "source_ids": [
+            "W-mobile",
+            "W-cursor-mobile",
+            "W-team-bots"
+          ],
+          "classification": "scoped_requirement",
+          "test_id": "T-MOB-13",
+          "status": "planned"
+        },
+        {
+          "id": "MOB-14",
+          "feature": "电脑维护限制",
+          "acceptance": "手机不伪装已有更新/恢复/重置电脑入口；有清楚的桌面处理指引",
+          "current_basis": "需新移动客户端；招乎只作补充入口",
+          "module": "M14 Mobile",
+          "phase": "P4",
+          "source_ids": [
+            "W-mobile",
+            "W-cursor-mobile",
+            "W-team-bots"
+          ],
+          "classification": "scoped_requirement",
+          "test_id": "T-MOB-14",
+          "status": "planned"
+        }
+      ]
+    },
+    {
+      "code": "ADM",
+      "title": "团队与企业管理",
+      "rows": [
+        {
+          "id": "ADM-01",
+          "feature": "启用与访问范围",
+          "acceptance": "全组织开关及成员组访问，禁用立即阻止新任务而不误删持久盘",
+          "current_basis": "已有受管配置概念；完整 Bot 控制面需新建",
+          "module": "M15 Admin",
+          "phase": "P5",
+          "source_ids": [
+            "W-cursor-teams",
+            "W-security",
+            "W-private-networks",
+            "W-admin-api"
+          ],
+          "classification": "scoped_requirement",
+          "test_id": "T-ADM-01",
+          "status": "planned"
+        },
+        {
+          "id": "ADM-02",
+          "feature": "SSO/SCIM",
+          "acceptance": "接企业身份，自动入组/离组与会话撤销；登录客户端与电脑内业务系统登录分开",
+          "current_basis": "已有受管配置概念；完整 Bot 控制面需新建",
+          "module": "M15 Admin",
+          "phase": "P5",
+          "source_ids": [
+            "W-cursor-teams",
+            "W-security",
+            "W-private-networks",
+            "W-admin-api"
+          ],
+          "classification": "scoped_requirement",
+          "test_id": "T-ADM-02",
+          "status": "planned"
+        },
+        {
+          "id": "ADM-03",
+          "feature": "成员和组织角色",
+          "acceptance": "组织管理员、团队管理员、Bot owner、普通成员权限分开；电脑跨团队操作需组织权限",
+          "current_basis": "已有受管配置概念；完整 Bot 控制面需新建",
+          "module": "M15 Admin",
+          "phase": "P5",
+          "source_ids": [
+            "W-cursor-teams",
+            "W-security",
+            "W-private-networks",
+            "W-admin-api"
+          ],
+          "classification": "scoped_requirement",
+          "test_id": "T-ADM-03",
+          "status": "planned"
+        },
+        {
+          "id": "ADM-04",
+          "feature": "能力策略",
+          "acceptance": "云端编码委托、公开模板、本地执行上限、出口代理分别控制",
+          "current_basis": "已有受管配置概念；完整 Bot 控制面需新建",
+          "module": "M15 Admin",
+          "phase": "P5",
+          "source_ids": [
+            "W-cursor-teams",
+            "W-security",
+            "W-private-networks",
+            "W-admin-api"
+          ],
+          "classification": "scoped_requirement",
+          "test_id": "T-ADM-04",
+          "status": "planned"
+        },
+        {
+          "id": "ADM-05",
+          "feature": "团队/组规则",
+          "acceptance": "团队基线、组例外、锁定及多组组合给出 effective policy，用户界面可解释",
+          "current_basis": "已有受管配置概念；完整 Bot 控制面需新建",
+          "module": "M15 Admin",
+          "phase": "P5",
+          "source_ids": [
+            "W-cursor-teams",
+            "W-security",
+            "W-private-networks",
+            "W-admin-api"
+          ],
+          "classification": "scoped_requirement",
+          "test_id": "T-ADM-05",
+          "status": "planned"
+        },
+        {
+          "id": "ADM-06",
+          "feature": "Auto-review 强制",
+          "acceptance": "管理员规则与个人规则组合，Ask first 优先；只在有效强制策略下应用相应团队规则",
+          "current_basis": "已有受管配置概念；完整 Bot 控制面需新建",
+          "module": "M15 Admin",
+          "phase": "P5",
+          "source_ids": [
+            "W-cursor-teams",
+            "W-security",
+            "W-private-networks",
+            "W-admin-api"
+          ],
+          "classification": "scoped_requirement",
+          "test_id": "T-ADM-06",
+          "status": "planned"
+        },
+        {
+          "id": "ADM-07",
+          "feature": "连接器策略",
+          "acceptance": "允许/禁止插件与网络访问分别执行；不把禁止插件误称为完全阻断目标网站",
+          "current_basis": "已有受管配置概念；完整 Bot 控制面需新建",
+          "module": "M15 Admin",
+          "phase": "P5",
+          "source_ids": [
+            "W-cursor-teams",
+            "W-security",
+            "W-private-networks",
+            "W-admin-api"
+          ],
+          "classification": "scoped_requirement",
+          "test_id": "T-ADM-07",
+          "status": "planned"
+        },
+        {
+          "id": "ADM-08",
+          "feature": "网络策略",
+          "acceptance": "四种模式、域名/IP/CIDR/端口、组覆盖与锁定；运行中更新可在约定时间生效",
+          "current_basis": "已有受管配置概念；完整 Bot 控制面需新建",
+          "module": "M15 Admin",
+          "phase": "P5",
+          "source_ids": [
+            "W-cursor-teams",
+            "W-security",
+            "W-private-networks",
+            "W-admin-api"
+          ],
+          "classification": "scoped_requirement",
+          "test_id": "T-ADM-08",
+          "status": "planned"
+        },
+        {
+          "id": "ADM-09",
+          "feature": "TLS/代理兼容",
+          "acceptance": "验证 HTTP 流、WS、画面及证书链；API 可通而电脑不可通要能诊断",
+          "current_basis": "已有受管配置概念；完整 Bot 控制面需新建",
+          "module": "M15 Admin",
+          "phase": "P5",
+          "source_ids": [
+            "W-cursor-teams",
+            "W-security",
+            "W-private-networks",
+            "W-admin-api"
+          ],
+          "classification": "scoped_requirement",
+          "test_id": "T-ADM-09",
+          "status": "planned"
+        },
+        {
+          "id": "ADM-10",
+          "feature": "Team Setup 清单",
+          "acceptance": "脚本 ID/setup/check，串行执行；check 成功跳过安装；启动、周期刷新、重装可用",
+          "current_basis": "已有受管配置概念；完整 Bot 控制面需新建",
+          "module": "M15 Admin",
+          "phase": "P5",
+          "source_ids": [
+            "W-cursor-teams",
+            "W-security",
+            "W-private-networks",
+            "W-admin-api"
+          ],
+          "classification": "scoped_requirement",
+          "test_id": "T-ADM-10",
+          "status": "planned"
+        },
+        {
+          "id": "ADM-11",
+          "feature": "Setup 超时和失败",
+          "acceptance": "单脚本 30 分钟限时；失败不阻止整台电脑启动，后续可重试并显示结果",
+          "current_basis": "已有受管配置概念；完整 Bot 控制面需新建",
+          "module": "M15 Admin",
+          "phase": "P5",
+          "source_ids": [
+            "W-cursor-teams",
+            "W-security",
+            "W-private-networks",
+            "W-admin-api"
+          ],
+          "classification": "scoped_requirement",
+          "test_id": "T-ADM-11",
+          "status": "planned"
+        },
+        {
+          "id": "ADM-12",
+          "feature": "Team Secrets",
+          "acceptance": "只写、替换、删除；注入安装脚本进程且日志脱敏，不能混为 Bot Secrets",
+          "current_basis": "已有受管配置概念；完整 Bot 控制面需新建",
+          "module": "M15 Admin",
+          "phase": "P5",
+          "source_ids": [
+            "W-cursor-teams",
+            "W-security",
+            "W-private-networks",
+            "W-admin-api"
+          ],
+          "classification": "scoped_requirement",
+          "test_id": "T-ADM-12",
+          "status": "planned"
+        },
+        {
+          "id": "ADM-13",
+          "feature": "多团队秘密边界",
+          "acceptance": "多个团队的 setup 共用一台电脑时按原版规则不注入团队秘密，避免跨团队混用",
+          "current_basis": "已有受管配置概念；完整 Bot 控制面需新建",
+          "module": "M15 Admin",
+          "phase": "P5",
+          "source_ids": [
+            "W-cursor-teams",
+            "W-security",
+            "W-private-networks",
+            "W-admin-api"
+          ],
+          "classification": "scoped_requirement",
+          "test_id": "T-ADM-13",
+          "status": "planned"
+        },
+        {
+          "id": "ADM-14",
+          "feature": "批量电脑操作",
+          "acceptance": "选择成员执行 recreate/terminate/delete-data；进度按成员返回，关闭页面不停止后台操作",
+          "current_basis": "已有受管配置概念；完整 Bot 控制面需新建",
+          "module": "M15 Admin",
+          "phase": "P5",
+          "source_ids": [
+            "W-cursor-teams",
+            "W-security",
+            "W-private-networks",
+            "W-admin-api"
+          ],
+          "classification": "scoped_requirement",
+          "test_id": "T-ADM-14",
+          "status": "planned"
+        },
+        {
+          "id": "ADM-15",
+          "feature": "批量操作幂等",
+          "acceptance": "重复 Start 不重复重建，单团队操作互斥，无电脑/成员离组/重建冲突分别报告",
+          "current_basis": "已有受管配置概念；完整 Bot 控制面需新建",
+          "module": "M15 Admin",
+          "phase": "P5",
+          "source_ids": [
+            "W-cursor-teams",
+            "W-security",
+            "W-private-networks",
+            "W-admin-api"
+          ],
+          "classification": "scoped_requirement",
+          "test_id": "T-ADM-15",
+          "status": "planned"
+        },
+        {
+          "id": "ADM-16",
+          "feature": "空闲电脑回收",
+          "acceptance": "支持 30 天无使用后的 terminate，默认关闭；保留持久盘，再次使用可恢复",
+          "current_basis": "已有受管配置概念；完整 Bot 控制面需新建",
+          "module": "M15 Admin",
+          "phase": "P5",
+          "source_ids": [
+            "W-cursor-teams",
+            "W-security",
+            "W-private-networks",
+            "W-admin-api"
+          ],
+          "classification": "scoped_requirement",
+          "test_id": "T-ADM-16",
+          "status": "planned"
+        },
+        {
+          "id": "ADM-17",
+          "feature": "控制面审计",
+          "acceptance": "创建 Bot、授权、成员、插件、例程、管理操作有 actor 与时间，能查询和导出",
+          "current_basis": "已有受管配置概念；完整 Bot 控制面需新建",
+          "module": "M15 Admin",
+          "phase": "P5",
+          "source_ids": [
+            "W-cursor-teams",
+            "W-security",
+            "W-private-networks",
+            "W-admin-api"
+          ],
+          "classification": "scoped_requirement",
+          "test_id": "T-ADM-17",
+          "status": "planned"
+        },
+        {
+          "id": "ADM-18",
+          "feature": "动作记录",
+          "acceptance": "工具、Shell、电脑、文件、消息、例程、委托有执行元数据；默认脱敏不导出完整内容",
+          "current_basis": "已有受管配置概念；完整 Bot 控制面需新建",
+          "module": "M15 Admin",
+          "phase": "P5",
+          "source_ids": [
+            "W-cursor-teams",
+            "W-security",
+            "W-private-networks",
+            "W-admin-api"
+          ],
+          "classification": "scoped_requirement",
+          "test_id": "T-ADM-18",
+          "status": "planned"
+        },
+        {
+          "id": "ADM-19",
+          "feature": "OTel 与内容导出",
+          "acceptance": "元数据导出和内容/工具 I/O 导出分开开关，不回填历史；收集器故障不丢关键记录",
+          "current_basis": "已有受管配置概念；完整 Bot 控制面需新建",
+          "module": "M15 Admin",
+          "phase": "P5",
+          "source_ids": [
+            "W-cursor-teams",
+            "W-security",
+            "W-private-networks",
+            "W-admin-api"
+          ],
+          "classification": "scoped_requirement",
+          "test_id": "T-ADM-19",
+          "status": "planned"
+        },
+        {
+          "id": "ADM-20",
+          "feature": "用量和预算",
+          "acceptance": "成员/Bot/模型/任务用量可归因；周额度、额外用量和月上限分开，运行中超额策略明确",
+          "current_basis": "已有受管配置概念；完整 Bot 控制面需新建",
+          "module": "M15 Admin",
+          "phase": "P5",
+          "source_ids": [
+            "W-cursor-teams",
+            "W-security",
+            "W-private-networks",
+            "W-admin-api"
+          ],
+          "classification": "scoped_requirement",
+          "test_id": "T-ADM-20",
+          "status": "planned"
+        },
+        {
+          "id": "ADM-21",
+          "feature": "Admin API",
+          "acceptance": "版本化的启用/能力/审核/访问/网络/规则/Setup API，分页、冲突、权限和幂等有契约",
+          "current_basis": "已有受管配置概念；完整 Bot 控制面需新建",
+          "module": "M15 Admin",
+          "phase": "P5",
+          "source_ids": [
+            "W-cursor-teams",
+            "W-security",
+            "W-private-networks",
+            "W-admin-api"
+          ],
+          "classification": "scoped_requirement",
+          "test_id": "T-ADM-21",
+          "status": "planned"
+        },
+        {
+          "id": "ADM-22",
+          "feature": "数据保留与删除",
+          "acceptance": "成员停用、Bot 删除、账号删除、电脑 terminate 与 delete-data 分开；删除状态可核验",
+          "current_basis": "已有受管配置概念；完整 Bot 控制面需新建",
+          "module": "M15 Admin",
+          "phase": "P5",
+          "source_ids": [
+            "W-cursor-teams",
+            "W-security",
+            "W-private-networks",
+            "W-admin-api"
+          ],
+          "classification": "scoped_requirement",
+          "test_id": "T-ADM-22",
+          "status": "planned"
+        }
+      ]
+    },
+    {
+      "code": "OPS",
+      "title": "可靠性、部署与运行质量",
+      "rows": [
+        {
+          "id": "OPS-01",
+          "feature": "无客户端执行",
+          "acceptance": "云端已接收任务、例程和 Bot 协作不依赖客户端在线；依赖本地执行/设备出口的步骤在设备离线时明确等待",
+          "current_basis": "需在现有内核外建设服务端保障",
+          "module": "M02 Runtime / M16 Operations",
+          "phase": "P2",
+          "source_ids": [
+            "GR02",
+            "GR12",
+            "RK01",
+            "RK02",
+            "OB01",
+            "CM01",
+            "CM05"
+          ],
+          "classification": "scoped_requirement",
+          "test_id": "T-OPS-01",
+          "status": "planned"
+        },
+        {
+          "id": "OPS-02",
+          "feature": "原子任务接收",
+          "acceptance": "消息、运行、outbox 同事务提交；HTTP/WS 应答丢失可以查询，不出现假成功",
+          "current_basis": "需在现有内核外建设服务端保障",
+          "module": "M02 Runtime / M16 Operations",
+          "phase": "P1",
+          "source_ids": [
+            "GR02",
+            "GR12",
+            "RK01",
+            "RK02",
+            "OB01",
+            "CM01",
+            "CM05"
+          ],
+          "classification": "scoped_requirement",
+          "test_id": "T-OPS-02",
+          "status": "planned"
+        },
+        {
+          "id": "OPS-03",
+          "feature": "跨进程租约",
+          "acceptance": "DB 时间、fence、heartbeat 控制所有写入和工具派发；旧 worker 不可继续提交",
+          "current_basis": "需在现有内核外建设服务端保障",
+          "module": "M02 Runtime / M16 Operations",
+          "phase": "P1",
+          "source_ids": [
+            "GR02",
+            "GR12",
+            "RK01",
+            "RK02",
+            "OB01",
+            "CM01",
+            "CM05"
+          ],
+          "classification": "scoped_requirement",
+          "test_id": "T-OPS-03",
+          "status": "planned"
+        },
+        {
+          "id": "OPS-04",
+          "feature": "故障恢复",
+          "acceptance": "杀进程/网络分区/节点迁移后按 checkpoint 和动作收据恢复，unknown 不盲重放",
+          "current_basis": "需在现有内核外建设服务端保障",
+          "module": "M02 Runtime / M16 Operations",
+          "phase": "P2",
+          "source_ids": [
+            "GR02",
+            "GR12",
+            "RK01",
+            "RK02",
+            "OB01",
+            "CM01",
+            "CM05"
+          ],
+          "classification": "scoped_requirement",
+          "test_id": "T-OPS-04",
+          "status": "planned"
+        },
+        {
+          "id": "OPS-05",
+          "feature": "备份与恢复演练",
+          "acceptance": "数据库、工作盘、浏览器持久状态和附件有一致 manifest；随机抽样实际恢复",
+          "current_basis": "需在现有内核外建设服务端保障",
+          "module": "M02 Runtime / M16 Operations",
+          "phase": "P5",
+          "source_ids": [
+            "GR02",
+            "GR12",
+            "RK01",
+            "RK02",
+            "OB01",
+            "CM01",
+            "CM05"
+          ],
+          "classification": "scoped_requirement",
+          "test_id": "T-OPS-05",
+          "status": "planned"
+        },
+        {
+          "id": "OPS-06",
+          "feature": "升级与回滚",
+          "acceptance": "协议向后兼容，读旧写新迁移可回滚，旧宿主不能被启动成第二个活跃 owner",
+          "current_basis": "需在现有内核外建设服务端保障",
+          "module": "M02 Runtime / M16 Operations",
+          "phase": "P5",
+          "source_ids": [
+            "GR02",
+            "GR12",
+            "RK01",
+            "RK02",
+            "OB01",
+            "CM01",
+            "CM05"
+          ],
+          "classification": "scoped_requirement",
+          "test_id": "T-OPS-06",
+          "status": "planned"
+        },
+        {
+          "id": "OPS-07",
+          "feature": "容量与公平调度",
+          "acceptance": "同一用户/团队的高频 Bot 不饿死其他任务；多屏、模型、内存、磁盘分别限额",
+          "current_basis": "需在现有内核外建设服务端保障",
+          "module": "M02 Runtime / M16 Operations",
+          "phase": "P5",
+          "source_ids": [
+            "GR02",
+            "GR12",
+            "RK01",
+            "RK02",
+            "OB01",
+            "CM01",
+            "CM05"
+          ],
+          "classification": "scoped_requirement",
+          "test_id": "T-OPS-07",
+          "status": "planned"
+        },
+        {
+          "id": "OPS-08",
+          "feature": "端到端可观测",
+          "acceptance": "从 clientNonce 到 run/lease/tool/approval/artifact 有关联 ID 和可定位时间线",
+          "current_basis": "需在现有内核外建设服务端保障",
+          "module": "M02 Runtime / M16 Operations",
+          "phase": "P5",
+          "source_ids": [
+            "GR02",
+            "GR12",
+            "RK01",
+            "RK02",
+            "OB01",
+            "CM01",
+            "CM05"
+          ],
+          "classification": "scoped_requirement",
+          "test_id": "T-OPS-08",
+          "status": "planned"
+        },
+        {
+          "id": "OPS-09",
+          "feature": "全平台分发",
+          "acceptance": "mac 双架构、Win 双架构、Linux 双架构及 deb/rpm/AppImage；签名、升级和安装恢复",
+          "current_basis": "需在现有内核外建设服务端保障",
+          "module": "M02 Runtime / M16 Operations",
+          "phase": "P5",
+          "source_ids": [
+            "GR02",
+            "GR12",
+            "RK01",
+            "RK02",
+            "OB01",
+            "CM01",
+            "CM05"
+          ],
+          "classification": "scoped_requirement",
+          "test_id": "T-OPS-09",
+          "status": "planned"
+        },
+        {
+          "id": "OPS-10",
+          "feature": "任务能力评测",
+          "acceptance": "原版与 Cmb 相同任务、输入、账号权限下重复评测成功率/介入/时延/成本",
+          "current_basis": "需在现有内核外建设服务端保障",
+          "module": "M02 Runtime / M16 Operations",
+          "phase": "P5",
+          "source_ids": [
+            "GR02",
+            "GR12",
+            "RK01",
+            "RK02",
+            "OB01",
+            "CM01",
+            "CM05"
+          ],
+          "classification": "scoped_requirement",
+          "test_id": "T-OPS-10",
+          "status": "planned"
+        },
+        {
+          "id": "OPS-11",
+          "feature": "现有功能回归",
+          "acceptance": "桌面会话/项目/Feature/IM/Goals/Coordinator/Workflow/Mods 不因抽宿主失效",
+          "current_basis": "需在现有内核外建设服务端保障",
+          "module": "M02 Runtime / M16 Operations",
+          "phase": "P1",
+          "source_ids": [
+            "GR02",
+            "GR12",
+            "RK01",
+            "RK02",
+            "OB01",
+            "CM01",
+            "CM05"
+          ],
+          "classification": "scoped_requirement",
+          "test_id": "T-OPS-11",
+          "status": "planned"
+        },
+        {
+          "id": "OPS-12",
+          "feature": "数据迁移",
+          "acceptance": "旧 Thread 和本地记录可按明确选择关联 Bot；不自动上传全部历史、凭据或项目文件",
+          "current_basis": "需在现有内核外建设服务端保障",
+          "module": "M02 Runtime / M16 Operations",
+          "phase": "P2",
+          "source_ids": [
+            "GR02",
+            "GR12",
+            "RK01",
+            "RK02",
+            "OB01",
+            "CM01",
+            "CM05"
+          ],
+          "classification": "scoped_requirement",
+          "test_id": "T-OPS-12",
+          "status": "planned"
+        }
+      ]
+    },
+    {
+      "code": "OBS",
+      "title": "源码出现或产品文档未充分确定的能力",
+      "rows": [
+        {
+          "id": "OBS-01",
+          "feature": "跨用户共享房间",
+          "acceptance": "验证邀请/加入审批/退出/移出和远端 Bot 镜像；与 Team Bot、模板分开",
+          "current_basis": "保留任务与核实入口，不能标记完成",
+          "module": "M13 / M17 / M19",
+          "phase": "P4",
+          "source_ids": [
+            "GR01",
+            "GR15"
+          ],
+          "classification": "needs_observation",
+          "test_id": "T-OBS-01",
+          "status": "planned"
+        },
+        {
+          "id": "OBS-02",
+          "feature": "Agent Network 图",
+          "acceptance": "核实当前开关与界面是否公开；若目标版本可见则复刻节点、关系和跳转",
+          "current_basis": "保留任务与核实入口，不能标记完成",
+          "module": "M13 / M17 / M19",
+          "phase": "P4",
+          "source_ids": [
+            "GR01",
+            "GR15"
+          ],
+          "classification": "needs_observation",
+          "test_id": "T-OBS-02",
+          "status": "planned"
+        },
+        {
+          "id": "OBS-03",
+          "feature": "广播消息",
+          "acceptance": "核实群发目标、内容、确认及回执；不以普通群聊模拟私聊广播",
+          "current_basis": "保留任务与核实入口，不能标记完成",
+          "module": "M13 / M17 / M19",
+          "phase": "P4",
+          "source_ids": [
+            "GR01",
+            "GR15"
+          ],
+          "classification": "needs_observation",
+          "test_id": "T-OBS-03",
+          "status": "planned"
+        },
+        {
+          "id": "OBS-04",
+          "feature": "侧边栏异步任务入口",
+          "acceptance": "核实任务、Shell、云代理状态列表和跳转，覆盖源协议 getAsyncTasks",
+          "current_basis": "保留任务与核实入口，不能标记完成",
+          "module": "M13 / M17 / M19",
+          "phase": "P4",
+          "source_ids": [
+            "GR01",
+            "GR15"
+          ],
+          "classification": "needs_observation",
+          "test_id": "T-OBS-04",
+          "status": "planned"
+        },
+        {
+          "id": "OBS-05",
+          "feature": "技能发布目标管理",
+          "acceptance": "核实发布/重新同步/撤回和团队目标；当前源接口不能证明所有账户可用",
+          "current_basis": "保留任务与核实入口，不能标记完成",
+          "module": "M13 / M17 / M19",
+          "phase": "P4",
+          "source_ids": [
+            "GR01",
+            "GR15"
+          ],
+          "classification": "needs_observation",
+          "test_id": "T-OBS-05",
+          "status": "planned"
+        },
+        {
+          "id": "OBS-06",
+          "feature": "当前 Local Bots",
+          "acceptance": "验证完整本地 Bot 入口、创建/迁移、跨设备可见性及不能进入 Team 群的限制",
+          "current_basis": "保留任务与核实入口，不能标记完成",
+          "module": "M13 / M17 / M19",
+          "phase": "P4",
+          "source_ids": [
+            "GR01",
+            "GR15"
+          ],
+          "classification": "needs_observation",
+          "test_id": "T-OBS-06",
+          "status": "planned"
+        },
+        {
+          "id": "OBS-07",
+          "feature": "Team Bot 私聊资源混用",
+          "acceptance": "核实个人插件在群聊/Slack 的允许范围及隐私不兼容电脑选择",
+          "current_basis": "保留任务与核实入口，不能标记完成",
+          "module": "M13 / M17 / M19",
+          "phase": "P4",
+          "source_ids": [
+            "GR01",
+            "GR15"
+          ],
+          "classification": "needs_observation",
+          "test_id": "T-OBS-07",
+          "status": "planned"
+        },
+        {
+          "id": "OBS-08",
+          "feature": "模型生成媒体工具",
+          "acceptance": "协议存在图像生成/录屏；核对实际工具可调用范围，不能把整个 Grok Imagine 当 Bot 功能",
+          "current_basis": "保留任务与核实入口，不能标记完成",
+          "module": "M13 / M17 / M19",
+          "phase": "P4",
+          "source_ids": [
+            "GR01",
+            "GR15"
+          ],
+          "classification": "needs_observation",
+          "test_id": "T-OBS-08",
+          "status": "planned"
+        }
+      ]
+    }
+  ],
+  "implementation_policy": {
+    "priority": [
+      "reuse_existing_cmb_code",
+      "port_existing_module_and_adapt",
+      "extract_reusable_submodule",
+      "implement_confirmed_gaps"
+    ],
+    "document": "08-code-reuse-plan.md",
+    "note": "新增模块表示能力归属，不表示从零实现；优先移植 Grok Bot、Rakazo、OpenBot 的可用代码。"
+  }
+}

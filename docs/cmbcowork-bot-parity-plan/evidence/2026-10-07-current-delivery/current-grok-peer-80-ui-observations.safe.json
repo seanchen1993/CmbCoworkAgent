@@ -1,0 +1,22 @@
+{
+  "observedAtEpochMs": 1791383241680,
+  "officialClient": "Grok Bot 0.68.1 direct official",
+  "taskGoal": "Two independent peers compute [31,9,24,16], verify draft82, return concise result with traceable exchanges",
+  "actualUiTaskSubmittedAt": "2026-10-07 21:57:11 Asia/Shanghai",
+  "actualUiFinalAt": "21:57:33",
+  "actualUiFinal": {
+    "sum": 80,
+    "mean": 20,
+    "draftCorrect": false,
+    "bothPeersReported": true
+  },
+  "firstExchangeActuallyOpened": {
+    "peerDisplayName": "新 Bot",
+    "assignmentAt": "21:57:04",
+    "replyAt": "21:57:08",
+    "reply": "总和：80；平均数：20；草稿总和为82不正确"
+  },
+  "secondExchangeNotYetVisuallyVerified": true,
+  "qualityCaution": "Official Main reported Chinese target delivery problem and alias New Bot; do not equate display name resolution with CMB exact Bot identity. Final concise and mathematically correct.",
+  "accidentalVoiceEntryNotAcceptanceEvidence": true
+}

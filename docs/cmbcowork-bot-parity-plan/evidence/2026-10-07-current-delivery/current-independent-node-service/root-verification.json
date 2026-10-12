@@ -1,0 +1,37 @@
+{
+  "at": "2026-10-07T08:32:35.773584+00:00",
+  "status": "PASS",
+  "actualResult": {
+    "phase": "actual-current-opening-metadata-output-original-independent-node-service",
+    "startedAt": "2026-10-07T08:31:49.007290+00:00",
+    "completedAt": "2026-10-07T08:31:59.300656+00:00",
+    "seconds": 10.293388666934334,
+    "exitCode": 0,
+    "inputCount": 3834,
+    "sourceDrift": [],
+    "logSHA256": "d2627f96f717bd47dbc35d9cc624b868cc44d747e6c8e2ea224ebdae4c48e505",
+    "automaticRetries": 0,
+    "wrapperOverridesOriginalTimeouts": false
+  },
+  "currentNativeBuildId": "aa183a16dd2d22fe8ad060e4",
+  "currentOutputRevisionSHA256": "0ce3e79902f8ee8bedfaead445890c67cc96fb08a40e12252ec30743d7b05dcc",
+  "originalServiceChecks": {
+    "pass": true,
+    "runtime": "v22.23.3",
+    "platform": "darwin",
+    "architecture": "arm64",
+    "entries": 17,
+    "checks": [
+      "installed-Mods-native-compiler-and-QuickJS-runtime",
+      "independent-build-and-locked-fresh-install-without-Electron",
+      "disconnect-retains-Host-and-SIGKILL-restart-retains-exact-receipt",
+      "modified-worker-rejects-before-data-effects",
+      "oversized-manifest-rejects-before-read-and-data-effects",
+      "existing-service-directory-never-replaced"
+    ],
+    "externalModelAcceptance": false,
+    "nativeSandboxAcceptance": false,
+    "k8sAcceptance": false
+  },
+  "originalAssertionsAndTimeoutsUnchanged": true
+}

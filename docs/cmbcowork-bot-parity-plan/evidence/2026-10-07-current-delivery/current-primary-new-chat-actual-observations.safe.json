@@ -1,0 +1,25 @@
+{
+  "kind": "actual-formal-ui-primary-and-new-chat-observations",
+  "buildId": "b05f08414bcd1618c94ec3f2",
+  "privateAcceptanceOnly": true,
+  "newChat": {
+    "actualRoute": "新建聊天 → 创建新 Bot（消息草稿为空）",
+    "conversationId": "f37ae835-4aec-4b33-9455-69da80564ba0",
+    "observedAnswer": "你好！有什么我可以帮你的吗？",
+    "formal": "current-empty-new-chat-welcome-formal.safe.json",
+    "status": "passed"
+  },
+  "primaryGuide": {
+    "actions": [
+      "工作区菜单 → 主 Bot 与主动跟进",
+      "不设置主 Bot → 确认清除",
+      "实际出现首次引导：创建主 Bot/选择现有 Bot",
+      "刷新后仍保留引导，Bot数量5、活动任务0",
+      "选择现有 Bot → 验收协调 Bot → 设为主 Bot → 完成"
+    ],
+    "priorPrimaryRestored": true,
+    "checkinRemainsOff": true,
+    "status": "passed",
+    "limits": "This verifies reachable known-null existing-profile guidance/choose-existing, not all proactive checkin runs or fresh bootstrap create-main path."
+  }
+}

@@ -1,0 +1,117 @@
+{
+  "schemaVersion": 1,
+  "kind": "Root-independent-finite-private-memory-real-model-review",
+  "reviewedAt": "2026-10-07T21:45:05.144887+00:00",
+  "formal": {
+    "path": "/Users/chenqiang/Desktop/projects/CmbCoworkAgent/docs/cmbcowork-bot-parity-plan/evidence/2026-10-07-current-delivery/current-private-memory67-minimax-formal.safe.json",
+    "bytes": 50862,
+    "sha256": "b79fdb1633fce11531e04a36073b1eea438c6ec44eb1c2f51969525b1ba22a56"
+  },
+  "runner": {
+    "path": "/tmp/cmb-private-memory-real-model-wgnlcfng/run-private-memory-real-model.mts",
+    "bytes": 40463,
+    "sha256": "d7385a14f2e52e3d0345b0dbbd4cdbdea4a8c2b437bf0d4046c4bf98da216ea0"
+  },
+  "inputKit": {
+    "path": "/tmp/cmb-private-memory-real-model-wgnlcfng/input-kit.json",
+    "bytes": 1861,
+    "sha256": "ecb6d7746c7f71674e056488b4e171ad67c20643a4d6d3e050033ab644a666d0"
+  },
+  "rootIndependentScript": {
+    "path": "/tmp/cmb-memory-root-independent-review.mts",
+    "bytes": 4459,
+    "sha256": "550179277cb82bc42446dc6e8e10657730fceab8b32ac17383e38b6316b76da0"
+  },
+  "rootIndependentLog": {
+    "path": "/tmp/cmb-memory-root-independent-review.log",
+    "bytes": 1865,
+    "sha256": "c041d1451f02c31643555bb2dec604d8531dd6efbd370ca6b01e7a5ff6e820fa"
+  },
+  "verdict": "PASS for the frozen explicit private-memory/restart/isolation/deletion journey",
+  "independent": {
+    "kind": "Root-independent-readonly-SQLite-and-official-codec-review",
+    "schemaVersion": 67,
+    "sixOriginalRunsExactlyOnce": true,
+    "rememberExactReceiptRevision1": true,
+    "deletedExactRevision2": true,
+    "tombstoneRetained": true,
+    "oldRootHistoryIntact": true,
+    "normalHostRestart": true,
+    "rawProviderWireCaptured": false,
+    "wholeUiOrGrokComparisonClaimed": false,
+    "rows": [
+      {
+        "key": "anchorA",
+        "checkpointSha256": "69d7f248bda07067cb457b45f3cec80eb2bd29fad103d28b8c13367ca2166bd2",
+        "initialHistoryExcludedPreference": true,
+        "toolNames": []
+      },
+      {
+        "key": "anchorB",
+        "checkpointSha256": "011921ecbfa8248f32dd105da74fc76fc119a62691030626b80851ac06d6e8c8",
+        "initialHistoryExcludedPreference": true,
+        "toolNames": []
+      },
+      {
+        "key": "remember",
+        "checkpointSha256": "67a2a4eba52db1eb20d45f6ca549d5cc8d3ccf8b4fc3851b9755a7e673780fa7",
+        "initialHistoryExcludedPreference": false,
+        "toolNames": [
+          "remember"
+        ]
+      },
+      {
+        "key": "recall",
+        "checkpointSha256": "4347bfd193e9cc72864db61c8ea5a89cad8f6a8aae151d2b69918159ad26d91d",
+        "initialHistoryExcludedPreference": true,
+        "toolNames": []
+      },
+      {
+        "key": "isolatedRecall",
+        "checkpointSha256": "40d131397f72dfe450a2489b36378ae2a06c97b453800b9fd8788c2a7898f1a9",
+        "initialHistoryExcludedPreference": true,
+        "toolNames": [
+          "memory_list"
+        ]
+      },
+      {
+        "key": "deletedRecall",
+        "checkpointSha256": "78088c537b9fbba8569710a421229c34bee005558f4dcf9aad3eef08f900131e",
+        "initialHistoryExcludedPreference": true,
+        "toolNames": [
+          "memory_list"
+        ]
+      }
+    ],
+    "finalUsage": {
+      "requests": 9,
+      "unknownRequests": 7,
+      "inputTokens": 36047,
+      "outputTokens": 171,
+      "reservedOutputTokens": 57344,
+      "inputReportedRequests": 2,
+      "otherModelRequests": 0,
+      "models": [
+        {
+          "modelRef": "custom:minimax-m3",
+          "model": "MiniMax-M3",
+          "purpose": "task",
+          "requests": 9,
+          "unknownRequests": 7,
+          "inputTokens": 36047,
+          "outputTokens": 171,
+          "inputReportedRequests": 2
+        }
+      ]
+    }
+  },
+  "limits": [
+    "Six fixed synthetic sends on owned compiled Host API; not App UI or official Grok comparison.",
+    "Recall excludes preference from actual hydrated chat history; savedFacts system injection inferred from production source+persisted memory, raw provider wire not captured.",
+    "Delete is the explicit exact owned memory API CAS, not an invented model forget tool. Original root chat remains intact.",
+    "Automatic synthesis defaults unchanged; no claim for all long-term synthesis/conflict behavior.",
+    "9 requests,7 unknown; reported input36047/output171/reserved57344 is partial usage, not zero-cost or monetary accounting.",
+    "Compiled build3e1e9683fe548bf21c26dc86/schema67 before later crash/tint source integration; source snapshots/models/defaults unchanged.",
+    "Normal idle shutdown and private credential cleanup verified; actual App and its waiting programming run untouched."
+  ]
+}

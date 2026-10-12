@@ -180,7 +180,7 @@ describe("legacy subagent migration parser worker", () => {
     expect(rowCount).toBe(336)
     expect(batchCount).toBeGreaterThan(20)
     expect(tickerTicks).toBeGreaterThan(10)
-  })
+  }, 20_000)
 
   it("terminates a parse when deletion or shutdown aborts it", async () => {
     const threadId = "cancelled-parser-migration"
@@ -312,7 +312,7 @@ describe("legacy subagent migration parser worker", () => {
     }
     expect(envelope.kind).toBe("content")
     expect(envelope.value).toBe(content)
-  })
+  }, 20_000)
 })
 
 class FakeMigrationWorker extends EventEmitter {

@@ -40,6 +40,18 @@ export interface McpInvocationResult {
   isError: boolean
 }
 
+export interface McpInvocationOptions {
+  signal?: AbortSignal
+  expectedConnectionGeneration?: string
+}
+
+/** Opaque connection identity for resource discovery/read; carries no credentials. */
+export interface McpResourceProvider {
+  providerKey: string
+  providerDisplayName: string
+  connectionGeneration: string
+}
+
 export interface McpCapabilityService {
   /** Configured provider names only; no credentials, connection initialization or discovery. */
   configuredServerNames?(): string[]
@@ -48,7 +60,11 @@ export interface McpCapabilityService {
   listTools(): Promise<McpCapabilityTool[]>
   getSnapshot?(): Promise<{ fingerprint: string; tools: McpCapabilityTool[] }>
   getTool(idOrAlias: string): Promise<McpCapabilityTool | null>
-  invoke(idOrAlias: string, args: Record<string, unknown>): Promise<McpInvocationResult>
+  invoke(
+    idOrAlias: string,
+    args: Record<string, unknown>,
+    options?: McpInvocationOptions
+  ): Promise<McpInvocationResult>
   invalidate(reason?: string): Promise<void>
   close(): Promise<void>
 }

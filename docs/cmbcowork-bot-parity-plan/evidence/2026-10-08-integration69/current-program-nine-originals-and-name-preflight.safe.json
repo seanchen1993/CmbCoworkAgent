@@ -1,0 +1,362 @@
+{
+  "kind": "formal-minimax-program-original-delivery-and-name-preflight-verification",
+  "recordedAt": "2026-10-09T09:16:39.487795+00:00",
+  "liveBuildId": "cfbe9bb9418b3ca51008202f",
+  "schema": 69,
+  "run": {
+    "id": "379dc2a8-6cab-4873-b75c-27c723e87aee",
+    "status": "succeeded",
+    "error": null,
+    "revision": 100,
+    "created_at": 1791535677339,
+    "updated_at": 1791537049611
+  },
+  "originalFiles": [
+    {
+      "id": "project-publish:379dc2a8-6cab-4873-b75c-27c723e87aee:chatcmpl-tool-8f251d07f3a47c42",
+      "name": "index.html",
+      "size": 1357,
+      "sha256": "63db1296df0b60e295cec5c1125f14aa5b4ea8be7ba9bc20b7e994acba16d54b",
+      "projectBytesEqual": true,
+      "objectHashMatches": true,
+      "sizeMatches": true,
+      "originalChatCards": 1
+    },
+    {
+      "id": "project-publish:379dc2a8-6cab-4873-b75c-27c723e87aee:chatcmpl-tool-bb8750e42f231383",
+      "name": "styles.css",
+      "size": 4519,
+      "sha256": "b1cf90c6e63ba3e2c2ebe773f385568156df419a6586adb016394cc072f29389",
+      "projectBytesEqual": true,
+      "objectHashMatches": true,
+      "sizeMatches": true,
+      "originalChatCards": 1
+    },
+    {
+      "id": "project-publish:379dc2a8-6cab-4873-b75c-27c723e87aee:chatcmpl-tool-9999c8d578136069",
+      "name": "README.md",
+      "size": 4895,
+      "sha256": "b536e5ec0861b253dcc350565fddc5f35a6bfdb602540abfc0ac7c47a5255ade",
+      "projectBytesEqual": true,
+      "objectHashMatches": true,
+      "sizeMatches": true,
+      "originalChatCards": 1
+    },
+    {
+      "id": "project-publish:379dc2a8-6cab-4873-b75c-27c723e87aee:call_function_sqh3pigoh9v9_1",
+      "name": "money.js",
+      "size": 1254,
+      "sha256": "51ab2c95bf7c1b2bf3358b55b4397a1c3efa759336bb40c938c9111f98b6da16",
+      "projectBytesEqual": true,
+      "objectHashMatches": true,
+      "sizeMatches": true,
+      "originalChatCards": 1
+    },
+    {
+      "id": "project-publish:379dc2a8-6cab-4873-b75c-27c723e87aee:call_function_sqh3pigoh9v9_2",
+      "name": "quote.js",
+      "size": 1779,
+      "sha256": "c23d9e17ba3a1ac1868f3641a538db9309364b4f4210438c264e2762eae5c018",
+      "projectBytesEqual": true,
+      "objectHashMatches": true,
+      "sizeMatches": true,
+      "originalChatCards": 1
+    },
+    {
+      "id": "project-publish:379dc2a8-6cab-4873-b75c-27c723e87aee:call_function_sqh3pigoh9v9_3",
+      "name": "storage.js",
+      "size": 1651,
+      "sha256": "2efb34bc65abffe895e49b5d51c1444bed2d5a4ac495ca296aaf685ba6d69c7e",
+      "projectBytesEqual": true,
+      "objectHashMatches": true,
+      "sizeMatches": true,
+      "originalChatCards": 1
+    },
+    {
+      "id": "project-publish:379dc2a8-6cab-4873-b75c-27c723e87aee:call_function_sqh3pigoh9v9_4",
+      "name": "sample.js",
+      "size": 282,
+      "sha256": "1148c0d6f4b6e2d5a0676ad3b26f4b1fafd2eca604e1419eef837fcc95d0682c",
+      "projectBytesEqual": true,
+      "objectHashMatches": true,
+      "sizeMatches": true,
+      "originalChatCards": 1
+    },
+    {
+      "id": "project-publish:379dc2a8-6cab-4873-b75c-27c723e87aee:call_function_sqh3pigoh9v9_5",
+      "name": "render.js",
+      "size": 2102,
+      "sha256": "d3e2b9c46155a6f516c7ff088b39efb61b2f29f8e9bd0633368c2a0e0338bf26",
+      "projectBytesEqual": true,
+      "objectHashMatches": true,
+      "sizeMatches": true,
+      "originalChatCards": 1
+    },
+    {
+      "id": "project-publish:379dc2a8-6cab-4873-b75c-27c723e87aee:call_function_sqh3pigoh9v9_6",
+      "name": "app.js",
+      "size": 4410,
+      "sha256": "eddb4807f801a40b60e7a04be44f03518fc82f4c567a80f54de68e5b91392469",
+      "projectBytesEqual": true,
+      "objectHashMatches": true,
+      "sizeMatches": true,
+      "originalChatCards": 1
+    }
+  ],
+  "effects": [
+    {
+      "id": "project:379dc2a8-6cab-4873-b75c-27c723e87aee:chatcmpl-tool-a828b22fa5d5a34b",
+      "status": "succeeded"
+    },
+    {
+      "id": "project-publish:379dc2a8-6cab-4873-b75c-27c723e87aee:chatcmpl-tool-8f251d07f3a47c42",
+      "status": "succeeded"
+    },
+    {
+      "id": "project-publish:379dc2a8-6cab-4873-b75c-27c723e87aee:chatcmpl-tool-bb8750e42f231383",
+      "status": "succeeded"
+    },
+    {
+      "id": "project-publish:379dc2a8-6cab-4873-b75c-27c723e87aee:chatcmpl-tool-9999c8d578136069",
+      "status": "succeeded"
+    },
+    {
+      "id": "project-publish:379dc2a8-6cab-4873-b75c-27c723e87aee:chatcmpl-tool-8026cae6142c14ce",
+      "status": "failed"
+    },
+    {
+      "id": "project-publish:379dc2a8-6cab-4873-b75c-27c723e87aee:call_function_sqh3pigoh9v9_1",
+      "status": "succeeded"
+    },
+    {
+      "id": "project-publish:379dc2a8-6cab-4873-b75c-27c723e87aee:call_function_sqh3pigoh9v9_2",
+      "status": "succeeded"
+    },
+    {
+      "id": "project-publish:379dc2a8-6cab-4873-b75c-27c723e87aee:call_function_sqh3pigoh9v9_3",
+      "status": "succeeded"
+    },
+    {
+      "id": "project-publish:379dc2a8-6cab-4873-b75c-27c723e87aee:call_function_sqh3pigoh9v9_4",
+      "status": "succeeded"
+    },
+    {
+      "id": "project-publish:379dc2a8-6cab-4873-b75c-27c723e87aee:call_function_sqh3pigoh9v9_5",
+      "status": "succeeded"
+    },
+    {
+      "id": "project-publish:379dc2a8-6cab-4873-b75c-27c723e87aee:call_function_sqh3pigoh9v9_6",
+      "status": "succeeded"
+    }
+  ],
+  "usage": {
+    "requests": 10,
+    "unknown": 0,
+    "consumed": 7409
+  },
+  "failedPublishReviewedThroughOfficialUi": true,
+  "completedEffectsNotReplayed": true,
+  "directNativeSave": {
+    "path": "/Users/chenqiang/Library/Application Support/CMBDevClaw-development/2026-10-08/output-contract/cmb-money-original-20261009-1710.js",
+    "bytes": 1254,
+    "sha256": "51ab2c95bf7c1b2bf3358b55b4397a1c3efa759336bb40c938c9111f98b6da16",
+    "exactSourceBytes": true,
+    "startedThroughActualChatCard": true
+  },
+  "grokOriginalReport": {
+    "path": "/Users/chenqiang/Library/Application Support/CMBDevClaw-development/2026-10-08/output-contract/grok-review-core-parity-20261009-1649.md",
+    "bytes": 2426,
+    "sha256": "85fcfc287eaa226ab60e2a6843d5c7186f5c1d146c9348df8ba3c8099515609c"
+  },
+  "priorActualBrowserImages": [
+    {
+      "id": "87fca90c-e365-4a0f-afba-e4fc5d246ecc:browser-shot:720e6dc0c6af725af6216e98c2b5b57ea1e50440473f4d994b27bf2e3a0bafba",
+      "name": "phase3-fresh-reset.jpg",
+      "size": 36953,
+      "sha256": "8ef453ab6242a292429c0fa6605626d08b43c47416dc8fa40f2b8fd8c5aaa5cb",
+      "objectHashMatches": true
+    },
+    {
+      "id": "87fca90c-e365-4a0f-afba-e4fc5d246ecc:browser-shot:e8770518fc014ea9d7b2079741c6e4c1ae789c8bb54a796c983f11e9f672889a",
+      "name": "phase3-qty-change.jpg",
+      "size": 37347,
+      "sha256": "647ea5b77f4473b64556d359f36ea7a6bbd177207fe2187ba17377d7ea70860c",
+      "objectHashMatches": true
+    },
+    {
+      "id": "87fca90c-e365-4a0f-afba-e4fc5d246ecc:browser-shot:3ff835f85903ce5d270a668d6790969e021b44ac9027ea1fcf5c46e146a27520",
+      "name": "phase3-valid-1.50.jpg",
+      "size": 37414,
+      "sha256": "af6703e7a865c6a092b87025d74d2e3d55f09a65ce9867a62712fc7cf4c2674f",
+      "objectHashMatches": true
+    },
+    {
+      "id": "87fca90c-e365-4a0f-afba-e4fc5d246ecc:browser-shot:f7424ae10f390e7388d5e8addb793ddbeaaf8e3f6547d3b04c129d7ace555cfd",
+      "name": "phase3-discount-tax.jpg",
+      "size": 37319,
+      "sha256": "780df8b7e45cd9c8a4047ae4fdc32222712762e83f16f759eacf660dc02204a3",
+      "objectHashMatches": true
+    },
+    {
+      "id": "87fca90c-e365-4a0f-afba-e4fc5d246ecc:browser-shot:4f5512a481e3718f86b944cba32218c1372d35dc75d6a4d270ab4675137c94d6",
+      "name": "phase3-three-lines.jpg",
+      "size": 41471,
+      "sha256": "eb62266a97bd99f583004cbc683ac3f9911dce5b29676e3bba1766c74ced1396",
+      "objectHashMatches": true
+    },
+    {
+      "id": "87fca90c-e365-4a0f-afba-e4fc5d246ecc:browser-shot:42d5676e56568337e4a0b5425c2273064397f1e971e8fa995505a4fc9c2f7bc8",
+      "name": "phase3-after-delete.jpg",
+      "size": 37279,
+      "sha256": "fab9365bbc856dcfb4be1ba21bd790193767be4c3dd9e324c3858916e31c3013",
+      "objectHashMatches": true
+    },
+    {
+      "id": "87fca90c-e365-4a0f-afba-e4fc5d246ecc:browser-shot:ae7686ff9f453a9a53842f972a01d2254056812e516c7c985af0e53a8b6824f0",
+      "name": "phase3-html-literal.jpg",
+      "size": 39648,
+      "sha256": "a14ed52f7aedc184b5c5c8e9300aa936af0084b4deffcc61c03a6e3139a36330",
+      "objectHashMatches": true
+    },
+    {
+      "id": "87fca90c-e365-4a0f-afba-e4fc5d246ecc:browser-shot:5426ed8524e66acd57d9bbd91495a2b7ddbb9a4dc027b5798d0022ade6f32ef9",
+      "name": "phase3-narrow-375.jpg",
+      "size": 20875,
+      "sha256": "76f3c46e2b8ffb1b8c124d6b1d6d7674b082e1738e86a10f891e96e3aa7b1758",
+      "objectHashMatches": true
+    },
+    {
+      "id": "87fca90c-e365-4a0f-afba-e4fc5d246ecc:browser-shot:f27731fde0f6ec95951c3c7a84e21348ca79f316aaee0331ecce96af737da9ea",
+      "name": "phase3-narrow-320.jpg",
+      "size": 18043,
+      "sha256": "1ed3dc42041bcc6b4e7e541993ed795731c4dc29311ee8fe1e6567ef1ddd61d6",
+      "objectHashMatches": true
+    },
+    {
+      "id": "87fca90c-e365-4a0f-afba-e4fc5d246ecc:browser-shot:a1d04e904c329eac0eaa25a0a2230bf292d93da935698817dc4682f8b1594c7a",
+      "name": "phase3-typo-correction.jpg",
+      "size": 31206,
+      "sha256": "abe485973a25a5c55010820014e9f05eb9a058839ac05ba620f6d53b667b47c3",
+      "objectHashMatches": true
+    }
+  ],
+  "qualityScope": "Current final original delivery and precise README passed; prior actual browser/oracle checks retained, no modification to test fixture or other eight source files during this continuation; does not certify all programming tasks or every UI path",
+  "coldPreservation": {
+    "runs": 11,
+    "checkpointBytes": 11417002,
+    "groups": {
+      "runs": true,
+      "checkpoints": true,
+      "effects": true,
+      "interactions": true,
+      "artifacts": true,
+      "artifactObjects": true,
+      "peerDispatch": true,
+      "peerWaits": true,
+      "skills": true,
+      "project": true
+    },
+    "receipts": [
+      {
+        "path": "/Users/chenqiang/Library/Application Support/CMBDevClaw-development/2026-10-08/presentation/cold-upgrade-plan/pins-live-before-stop-1791536279627199000.safe.json",
+        "bytes": 465403,
+        "sha256": "b56ea162a423ca0d1609a5187b2ea2506aa10a7641c778c7b757442465d8d6bd"
+      },
+      {
+        "path": "/Users/chenqiang/Library/Application Support/CMBDevClaw-development/2026-10-08/presentation/cold-upgrade-plan/pins-quiesced-before-start-1791536310777177000.safe.json",
+        "bytes": 464298,
+        "sha256": "868ca2ba074a73b6ff1df0d40cd4ad865e62359e2308707e89a720db2785d422"
+      },
+      {
+        "path": "/Users/chenqiang/Library/Application Support/CMBDevClaw-development/2026-10-08/presentation/cold-upgrade-plan/pins-post-start-pre-review-1791536580855165000.safe.json",
+        "bytes": 465398,
+        "sha256": "e1a9d7980db17802eb172a7891f99ce1df6f3cfc13ee5e0120907aa14b4de58a"
+      }
+    ]
+  },
+  "sourceAndGates": {
+    "files": [
+      {
+        "path": "/Users/chenqiang/Desktop/projects/CmbCoworkAgent/src/main/bots/project-tools.ts",
+        "bytes": 12605,
+        "sha256": "d20dc114870c0bcde61681e691886a73d5076ffbfa6a0364ba5c5ff1d8252276"
+      },
+      {
+        "path": "/Users/chenqiang/Desktop/projects/CmbCoworkAgent/src/main/bots/project-encoding.test.ts",
+        "bytes": 12526,
+        "sha256": "57f5562eab4e8e82b07b63180f31f8c0d4fad7b6857b0742f781fa819f68b978"
+      },
+      {
+        "path": "/Users/chenqiang/Desktop/projects/CmbCoworkAgent/src/renderer/src/components/bots/BotMessageAttachments.tsx",
+        "bytes": 4406,
+        "sha256": "b24bf6805d82244e524eaab6352d7688ccf691bc042f6aeb9e47bd8e79647d65"
+      },
+      {
+        "path": "/Users/chenqiang/Desktop/projects/CmbCoworkAgent/src/renderer/src/components/bots/BotWorkspace.tsx",
+        "bytes": 180166,
+        "sha256": "439c0b82f41e609e6bee3027b08d076a17c02181868fcec2493decf9389dbe7c"
+      },
+      {
+        "path": "/Users/chenqiang/Desktop/projects/CmbCoworkAgent/tests/bot-skill-trial-contrast-browser.spec.ts",
+        "bytes": 13375,
+        "sha256": "f80ab0d86e5d3c0d39c05eba0d46dccf60007ea98fbdf6f97e7cb6e794370970"
+      }
+    ],
+    "filePublication56": {
+      "path": "/tmp/cmb-project-name-preflight-tests-final-20261009.log",
+      "bytes": 1178,
+      "sha256": "df6ba16e04dcae85547f1825f982a47c9bebbfe40457b80b996930b6067cb039"
+    },
+    "sdk3": {
+      "path": "/tmp/cmb-project-name-preflight-sdk-20261009.log",
+      "bytes": 17156,
+      "sha256": "22621d0d359f4b7a913d03f2ab3c3d42be36792671cb0b21986bf2d3a6e9bd87"
+    },
+    "saveUnit10": {
+      "path": "/tmp/cmb-direct-file-save-unit-20261009.log",
+      "bytes": 489,
+      "sha256": "fc103d31a2f7458f24f1bad6925504d44422912fa2985072a957945d44ec65d5"
+    },
+    "saveBrowser8": {
+      "path": "/tmp/cmb-direct-file-save-browser-20261009.log",
+      "bytes": 827,
+      "sha256": "9e623aad64f2ae8dd5d768830cbac3315ca61ecbcbcbcf47cf76e2442f8d4eae"
+    },
+    "messages": {
+      "path": "/tmp/cmb-direct-file-save-messages-20261009.log",
+      "bytes": 15386,
+      "sha256": "07e2f675a357db15a60fa0715f5a4c40f7f427d6804a39101b6729b0ee295875"
+    },
+    "workflow": {
+      "path": "/tmp/cmb-project-name-preflight-workflow-20261009.log",
+      "bytes": 163930,
+      "sha256": "e5df8099c808d3661bb87321af7159f9d346b061a1e1be0308559fcc2a58d3d6"
+    },
+    "node": {
+      "path": "/tmp/cmb-project-name-preflight-node-final-20261009.log",
+      "bytes": 91,
+      "sha256": "546c7bfd36ecac14793f941add6251c16a729819d1b744cccbaf256a91e1b42c"
+    },
+    "web": {
+      "path": "/tmp/cmb-direct-file-save-web-20261009.log",
+      "bytes": 89,
+      "sha256": "aba1d996409180225c6f720bd909b367ee8681e710f7b8537e5a1d7f6d07f2ac"
+    },
+    "strictLint": {
+      "path": "/tmp/cmb-project-name-preflight-lint-final-20261009.log",
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "build": {
+      "path": "/tmp/cmb-project-name-preflight-build-final-20261009.log",
+      "bytes": 56263,
+      "sha256": "4cec475269bd66cb278584537f7fc8bd100e84e428411e594d86c5458d76e6e1"
+    },
+    "retainedFirstFixtureCallIdFailure": {
+      "path": "/tmp/cmb-project-name-preflight-tests-20261009.log",
+      "bytes": 3485,
+      "sha256": "19e9f965518682ff05030658ea015690d0c73b76652af216c84ae3fff78a9827"
+    }
+  },
+  "wholeCoreParityComplete": false
+}

@@ -1,0 +1,76 @@
+{
+  "checkpointId": "1f1c26eb-c0da-6d00-801b-19b9a5e81ae8",
+  "originalReadPages": [
+    {
+      "fileId": "28ed5937-269f-4abe-ab8f-57c1d97e2c2c",
+      "callId": "call_01a117412cf4720a804f72cc",
+      "name": "project-records.csv",
+      "inputOffset": 0,
+      "returnedOffset": 0,
+      "totalCharacters": 199,
+      "renderedTextLength": 199,
+      "hasMore": false,
+      "renderedTextSha256": "dbc20dad04f59df0d704601fdd6559ab33fd1722283496a2092215a387695ac8",
+      "fullRenderedText": true
+    },
+    {
+      "fileId": "464f78fd-3bb9-4b1d-9d41-911bc63e03ad",
+      "callId": "call_01a117412cf4720a804f72cd",
+      "name": "review-policy.txt",
+      "inputOffset": 0,
+      "returnedOffset": 0,
+      "totalCharacters": 197,
+      "renderedTextLength": 197,
+      "hasMore": false,
+      "renderedTextSha256": "f8b581c7338cc60fa4b02adaa7a22a89465daf675c991856bf8114069d54da60",
+      "fullRenderedText": true
+    }
+  ],
+  "bothOriginalsFullyRendered": true,
+  "exactTriggerFound": true,
+  "messageCount": 10,
+  "toolCalls": [
+    {
+      "callId": "call_01a117412cf4720a804f72cc",
+      "tool": "read_file",
+      "inputFileId": "28ed5937-269f-4abe-ab8f-57c1d97e2c2c",
+      "outputName": null,
+      "completedToolMessage": true,
+      "status": "success",
+      "resultSha256": "eabbc56706f6e981fb4635728c5286d9cee4dca17556af2f579d8b254e80f8dd"
+    },
+    {
+      "callId": "call_01a117412cf4720a804f72cd",
+      "tool": "read_file",
+      "inputFileId": "464f78fd-3bb9-4b1d-9d41-911bc63e03ad",
+      "outputName": null,
+      "completedToolMessage": true,
+      "status": "success",
+      "resultSha256": "030150b1ae8cfd48ace079af2e9616f1f77d4ea280f75569e0f9b0d3f08d7e6e"
+    },
+    {
+      "callId": "call_01a11742af9177aabc3a843d",
+      "tool": "deliver_file",
+      "inputFileId": null,
+      "outputName": "result.csv",
+      "completedToolMessage": true,
+      "status": "success",
+      "resultSha256": "3c61d05729c0172dfa76cbac60bf6462b43e0901a05edf399f1681ffd491a139"
+    },
+    {
+      "callId": "call_01a11742af9177aabc3a843e",
+      "tool": "deliver_file",
+      "inputFileId": null,
+      "outputName": "review.md",
+      "completedToolMessage": true,
+      "status": "success",
+      "resultSha256": "5233f3e886550b8964315c8a39bd9489b312d161738485930edbc5f8f44e3d04"
+    }
+  ],
+  "originalsReadIds": [
+    "28ed5937-269f-4abe-ab8f-57c1d97e2c2c",
+    "464f78fd-3bb9-4b1d-9d41-911bc63e03ad"
+  ],
+  "bothOriginalsActuallyRead": true,
+  "extraRuns": []
+}

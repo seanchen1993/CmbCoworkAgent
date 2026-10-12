@@ -1,0 +1,508 @@
+{
+  "schemaVersion": 1,
+  "kind": "formal-host-read-only-task-evidence",
+  "startedAt": "2026-10-07T11:56:20.521Z",
+  "collection": "collected",
+  "host": {
+    "id": "6b356851-9d78-47a7-96ee-e0925e81dddb",
+    "pid": 38213,
+    "buildId": "476e8cecaa5374571cc5cf50",
+    "dataEpoch": "initial",
+    "platform": "darwin",
+    "runtimeReady": true,
+    "hasError": false,
+    "startCursor": 881,
+    "endCursor": 881,
+    "identityStable": true,
+    "stateChangedDuringCollection": false
+  },
+  "bots": [
+    {
+      "id": "6053ad88-f72a-43fe-9e7c-2c549c1375c0",
+      "modelRef": "custom:minimax-m3",
+      "modelSelection": "explicit",
+      "revision": 2,
+      "hidden": false,
+      "deleted": false
+    },
+    {
+      "id": "108c3860-7c30-4822-9975-201a98334516",
+      "modelRef": "custom:minimax-m3",
+      "modelSelection": "explicit",
+      "revision": 2,
+      "hidden": false,
+      "deleted": false
+    },
+    {
+      "id": "a99aa585-9532-4867-b00f-48b25a1bc8a6",
+      "modelRef": "custom:minimax-m3",
+      "modelSelection": "explicit",
+      "revision": 2,
+      "hidden": false,
+      "deleted": false
+    }
+  ],
+  "conversations": [
+    {
+      "id": "30ff027a-a294-4471-b68d-1a695444722c",
+      "kind": "direct",
+      "memberIds": [
+        "6053ad88-f72a-43fe-9e7c-2c549c1375c0"
+      ],
+      "revision": 2,
+      "messages": [
+        {
+          "id": "687d5d92-c18f-42e9-97cb-6c9fe1ff97c1",
+          "sequence": 22,
+          "botId": null,
+          "sender": "user",
+          "runId": null,
+          "replyTo": null,
+          "threadRootId": null,
+          "createdAt": 1791373442460,
+          "text": {
+            "bytes": 293,
+            "sha256": "d3dee409aa828294ced65d3af4ca81725455d6c81c1768758883d748f8c39af6"
+          },
+          "attachmentIds": [
+            "18ea2e3f-13bc-4a26-b223-789fc3acc348",
+            "dc23decd-3506-46f3-a3d8-d34264bb5162"
+          ]
+        },
+        {
+          "id": "fb62daee-e418-41dc-9c68-73f9031612e0",
+          "sequence": 23,
+          "botId": "6053ad88-f72a-43fe-9e7c-2c549c1375c0",
+          "sender": "bot",
+          "runId": "d62d1b39-aa6e-43a4-9fd0-6fdb8eaa9cec",
+          "replyTo": "687d5d92-c18f-42e9-97cb-6c9fe1ff97c1",
+          "threadRootId": null,
+          "createdAt": 1791373595102,
+          "text": {
+            "bytes": 2046,
+            "sha256": "f9e7e7ce0a8222938989097bc0c7165f60d10c91e5a4c15d3ca032be8614e5a1"
+          },
+          "attachmentIds": []
+        },
+        {
+          "id": "bf95f7c2-8ed9-44cb-887a-148b46d51a77",
+          "sequence": 24,
+          "botId": null,
+          "sender": "user",
+          "runId": null,
+          "replyTo": null,
+          "threadRootId": null,
+          "createdAt": 1791374094836,
+          "text": {
+            "bytes": 201,
+            "sha256": "4e8c4c81664603fb1242507bffeffa702188bd3f5fe89c7547ea372b3cf54f28"
+          },
+          "attachmentIds": [
+            "da19f833-a7da-4136-8fb0-9b57ae845af5"
+          ]
+        },
+        {
+          "id": "fa07b521-f988-48a9-ae72-d915bf11027d",
+          "sequence": 25,
+          "botId": "6053ad88-f72a-43fe-9e7c-2c549c1375c0",
+          "sender": "bot",
+          "runId": "7a67620c-cf2e-4438-b0df-21a7dff60213",
+          "replyTo": "bf95f7c2-8ed9-44cb-887a-148b46d51a77",
+          "threadRootId": null,
+          "createdAt": 1791374102420,
+          "text": {
+            "bytes": 29,
+            "sha256": "2365acca831f003c17cfb21eaabe29e6c366e23e124bdb15e19082c34e0e033d"
+          },
+          "attachmentIds": []
+        }
+      ]
+    }
+  ],
+  "runs": [
+    {
+      "conversationId": "30ff027a-a294-4471-b68d-1a695444722c",
+      "runId": "d62d1b39-aa6e-43a4-9fd0-6fdb8eaa9cec",
+      "botId": "6053ad88-f72a-43fe-9e7c-2c549c1375c0",
+      "outcome": "succeeded",
+      "source": "user",
+      "messageId": "687d5d92-c18f-42e9-97cb-6c9fe1ff97c1",
+      "revision": 24,
+      "createdAt": 1791373442462,
+      "updatedAt": 1791373595102,
+      "parentRunId": null,
+      "rootRunId": null,
+      "lineageAvailable": false,
+      "result": {
+        "bytes": 2046,
+        "sha256": "f9e7e7ce0a8222938989097bc0c7165f60d10c91e5a4c15d3ca032be8614e5a1"
+      },
+      "error": null,
+      "diagnostic": null,
+      "tokenUsage": {
+        "requests": 3,
+        "unknownRequests": 3,
+        "inputTokens": 0,
+        "outputTokens": 0,
+        "reservedOutputTokens": 24576,
+        "otherModelRequests": 0,
+        "inputReportedRequests": 0,
+        "models": [
+          {
+            "modelRef": "custom:minimax-m3",
+            "model": "MiniMax-M3",
+            "purpose": "task",
+            "requests": 3,
+            "unknownRequests": 3,
+            "inputReportedRequests": 0,
+            "inputTokens": 0,
+            "outputTokens": 0
+          }
+        ]
+      },
+      "hasBrowser": false,
+      "hasWorktree": false,
+      "children": [],
+      "history": {
+        "pages": 1,
+        "complete": true,
+        "items": [
+          {
+            "cursor": 841,
+            "createdAt": 1791373595103,
+            "label": {
+              "bytes": 18,
+              "sha256": "f8365c6c29a0525ddbed8d46e443725de8e746e68e7dcae822ec70b580f8901b"
+            },
+            "detail": null,
+            "effectId": null,
+            "interactionId": null,
+            "hasPeerExchange": false
+          },
+          {
+            "cursor": 795,
+            "createdAt": 1791373576959,
+            "label": {
+              "bytes": 72,
+              "sha256": "674297cba5459351b188b802415f7531c517afbcba4e02d28a28c8587627600c"
+            },
+            "detail": null,
+            "effectId": null,
+            "interactionId": null,
+            "hasPeerExchange": false
+          },
+          {
+            "cursor": 775,
+            "createdAt": 1791373448422,
+            "label": {
+              "bytes": 21,
+              "sha256": "dea4334da67f8274bb32488a41b0eedaa87542e015a0e8a1f70e25efc0f5720f"
+            },
+            "detail": null,
+            "effectId": null,
+            "interactionId": null,
+            "hasPeerExchange": false
+          },
+          {
+            "cursor": 772,
+            "createdAt": 1791373448147,
+            "label": {
+              "bytes": 18,
+              "sha256": "581f57a9324f1dffef2e77dd5c76281b8f405d4c59026b5b5cd1bdcee60ec30e"
+            },
+            "detail": null,
+            "effectId": null,
+            "interactionId": null,
+            "hasPeerExchange": false
+          },
+          {
+            "cursor": 763,
+            "createdAt": 1791373442823,
+            "label": {
+              "bytes": 21,
+              "sha256": "dea4334da67f8274bb32488a41b0eedaa87542e015a0e8a1f70e25efc0f5720f"
+            },
+            "detail": null,
+            "effectId": null,
+            "interactionId": null,
+            "hasPeerExchange": false
+          },
+          {
+            "cursor": 759,
+            "createdAt": 1791373442465,
+            "label": {
+              "bytes": 12,
+              "sha256": "f7d5b61de2fd0fc86187780659fc0232438932a7424d16176e72c2f68c878cfa"
+            },
+            "detail": null,
+            "effectId": null,
+            "interactionId": null,
+            "hasPeerExchange": false
+          },
+          {
+            "cursor": 758,
+            "createdAt": 1791373442462,
+            "label": {
+              "bytes": 12,
+              "sha256": "08127c4d770b4145810c2e7b393fd72cc98fb9e52dbb321048b3e6f3970937ff"
+            },
+            "detail": null,
+            "effectId": null,
+            "interactionId": null,
+            "hasPeerExchange": false
+          }
+        ]
+      },
+      "toolRecords": [],
+      "shellJobs": []
+    },
+    {
+      "conversationId": "30ff027a-a294-4471-b68d-1a695444722c",
+      "runId": "7a67620c-cf2e-4438-b0df-21a7dff60213",
+      "botId": "6053ad88-f72a-43fe-9e7c-2c549c1375c0",
+      "outcome": "succeeded",
+      "source": "user",
+      "messageId": "bf95f7c2-8ed9-44cb-887a-148b46d51a77",
+      "revision": 21,
+      "createdAt": 1791374094836,
+      "updatedAt": 1791374102420,
+      "parentRunId": null,
+      "rootRunId": null,
+      "lineageAvailable": false,
+      "result": {
+        "bytes": 29,
+        "sha256": "2365acca831f003c17cfb21eaabe29e6c366e23e124bdb15e19082c34e0e033d"
+      },
+      "error": null,
+      "diagnostic": null,
+      "tokenUsage": {
+        "requests": 2,
+        "unknownRequests": 2,
+        "inputTokens": 0,
+        "outputTokens": 0,
+        "reservedOutputTokens": 16384,
+        "otherModelRequests": 0,
+        "inputReportedRequests": 0,
+        "models": [
+          {
+            "modelRef": "custom:minimax-m3",
+            "model": "MiniMax-M3",
+            "purpose": "task",
+            "requests": 2,
+            "unknownRequests": 2,
+            "inputReportedRequests": 0,
+            "inputTokens": 0,
+            "outputTokens": 0
+          }
+        ]
+      },
+      "hasBrowser": false,
+      "hasWorktree": false,
+      "children": [],
+      "history": {
+        "pages": 1,
+        "complete": true,
+        "items": [
+          {
+            "cursor": 879,
+            "createdAt": 1791374102423,
+            "label": {
+              "bytes": 18,
+              "sha256": "f8365c6c29a0525ddbed8d46e443725de8e746e68e7dcae822ec70b580f8901b"
+            },
+            "detail": null,
+            "effectId": null,
+            "interactionId": null,
+            "hasPeerExchange": false
+          },
+          {
+            "cursor": 867,
+            "createdAt": 1791374099572,
+            "label": {
+              "bytes": 21,
+              "sha256": "dea4334da67f8274bb32488a41b0eedaa87542e015a0e8a1f70e25efc0f5720f"
+            },
+            "detail": null,
+            "effectId": null,
+            "interactionId": null,
+            "hasPeerExchange": false
+          },
+          {
+            "cursor": 864,
+            "createdAt": 1791374098987,
+            "label": {
+              "bytes": 18,
+              "sha256": "581f57a9324f1dffef2e77dd5c76281b8f405d4c59026b5b5cd1bdcee60ec30e"
+            },
+            "detail": null,
+            "effectId": null,
+            "interactionId": null,
+            "hasPeerExchange": false
+          },
+          {
+            "cursor": 854,
+            "createdAt": 1791374095067,
+            "label": {
+              "bytes": 21,
+              "sha256": "dea4334da67f8274bb32488a41b0eedaa87542e015a0e8a1f70e25efc0f5720f"
+            },
+            "detail": null,
+            "effectId": null,
+            "interactionId": null,
+            "hasPeerExchange": false
+          },
+          {
+            "cursor": 850,
+            "createdAt": 1791374094838,
+            "label": {
+              "bytes": 12,
+              "sha256": "f7d5b61de2fd0fc86187780659fc0232438932a7424d16176e72c2f68c878cfa"
+            },
+            "detail": null,
+            "effectId": null,
+            "interactionId": null,
+            "hasPeerExchange": false
+          },
+          {
+            "cursor": 849,
+            "createdAt": 1791374094836,
+            "label": {
+              "bytes": 12,
+              "sha256": "08127c4d770b4145810c2e7b393fd72cc98fb9e52dbb321048b3e6f3970937ff"
+            },
+            "detail": null,
+            "effectId": null,
+            "interactionId": null,
+            "hasPeerExchange": false
+          }
+        ]
+      },
+      "toolRecords": [],
+      "shellJobs": []
+    }
+  ],
+  "peerExchanges": [],
+  "teach": [
+    {
+      "botId": "6053ad88-f72a-43fe-9e7c-2c549c1375c0",
+      "sessions": [],
+      "trials": []
+    },
+    {
+      "botId": "108c3860-7c30-4822-9975-201a98334516",
+      "sessions": [],
+      "trials": []
+    },
+    {
+      "botId": "a99aa585-9532-4867-b00f-48b25a1bc8a6",
+      "sessions": [],
+      "trials": []
+    }
+  ],
+  "artifacts": [
+    {
+      "id": "da19f833-a7da-4136-8fb0-9b57ae845af5",
+      "conversationId": "30ff027a-a294-4471-b68d-1a695444722c",
+      "runId": null,
+      "origin": "upload",
+      "name": {
+        "bytes": 10,
+        "sha256": "2f73b8081892c041e0869ed267cccfa542a158e2c153848ee116d447d0f581f4"
+      },
+      "size": 259,
+      "sha256": "cb55a2f4137cb53f5d6b7f10d0f655c770b05a829e038f135ce83622282dd123",
+      "createdAt": 1791374091082,
+      "disk": {
+        "state": "verified",
+        "path": "/private/var/folders/r4/m2gmdyyn06z9488ghc1044zh0000gn/T/cmb-local-ui-real-model-wA53ub/home/bot-host/objects/cb55a2f4137cb53f5d6b7f10d0f655c770b05a829e038f135ce83622282dd123",
+        "size": 259,
+        "sha256": "cb55a2f4137cb53f5d6b7f10d0f655c770b05a829e038f135ce83622282dd123",
+        "declaredShaMatches": true,
+        "declaredSizeMatches": true
+      }
+    },
+    {
+      "id": "dc23decd-3506-46f3-a3d8-d34264bb5162",
+      "conversationId": "30ff027a-a294-4471-b68d-1a695444722c",
+      "runId": null,
+      "origin": "upload",
+      "name": {
+        "bytes": 17,
+        "sha256": "8bea44c2594124d918cb791e10360c345ae292c3ae245600b36948915a5e440f"
+      },
+      "size": 537,
+      "sha256": "f8b581c7338cc60fa4b02adaa7a22a89465daf675c991856bf8114069d54da60",
+      "createdAt": 1791373362569,
+      "disk": {
+        "state": "verified",
+        "path": "/private/var/folders/r4/m2gmdyyn06z9488ghc1044zh0000gn/T/cmb-local-ui-real-model-wA53ub/home/bot-host/objects/f8b581c7338cc60fa4b02adaa7a22a89465daf675c991856bf8114069d54da60",
+        "size": 537,
+        "sha256": "f8b581c7338cc60fa4b02adaa7a22a89465daf675c991856bf8114069d54da60",
+        "declaredShaMatches": true,
+        "declaredSizeMatches": true
+      }
+    },
+    {
+      "id": "18ea2e3f-13bc-4a26-b223-789fc3acc348",
+      "conversationId": "30ff027a-a294-4471-b68d-1a695444722c",
+      "runId": null,
+      "origin": "upload",
+      "name": {
+        "bytes": 19,
+        "sha256": "ac2c98d89cbcf4a51fcb3af9b9e33a47b797fb5ba17189db33300ce6c3597e01"
+      },
+      "size": 279,
+      "sha256": "dbc20dad04f59df0d704601fdd6559ab33fd1722283496a2092215a387695ac8",
+      "createdAt": 1791373361548,
+      "disk": {
+        "state": "verified",
+        "path": "/private/var/folders/r4/m2gmdyyn06z9488ghc1044zh0000gn/T/cmb-local-ui-real-model-wA53ub/home/bot-host/objects/dbc20dad04f59df0d704601fdd6559ab33fd1722283496a2092215a387695ac8",
+        "size": 279,
+        "sha256": "dbc20dad04f59df0d704601fdd6559ab33fd1722283496a2092215a387695ac8",
+        "declaredShaMatches": true,
+        "declaredSizeMatches": true
+      }
+    }
+  ],
+  "limits": {
+    "bots": 8,
+    "conversations": 8,
+    "messages": 100,
+    "runs": 24,
+    "historyPages": 3,
+    "effects": 32,
+    "peers": 16,
+    "teach": 32,
+    "trials": 32,
+    "artifacts": 32,
+    "artifactBytes": 26214400,
+    "totalArtifactBytes": 104857600,
+    "calls": 512,
+    "deadlineMs": 90000,
+    "callMs": 12000
+  },
+  "coverage": {
+    "truncations": [],
+    "unknownToolNames": true,
+    "exactToolHistoryComplete": false,
+    "businessTextIncluded": false,
+    "providerRawIncluded": false,
+    "credentialsIncluded": false,
+    "taskPassClaimed": false
+  },
+  "transport": {
+    "calls": 19,
+    "closed": true
+  },
+  "scope": [
+    "collection is not task PASS",
+    "run outcomes are Host-recorded outcomes; semantic correctness needs independent fixture/result verification",
+    "token usage is provider-reported accounting; unknown counters remain explicit",
+    "runHistory modelUsage aggregates the root run including children, so never sum parent and child totals",
+    "tool names are only inferred from original structured approval action shape with matching effect ID prefix; read-only/unapproved tools are not guessed",
+    "browser form completion needs fixture POST/download records as well as these Host records",
+    "Teach readiness or trial verdict alone does not prove the learned skill succeeded on new inputs",
+    "no configuration, descriptor token, raw logs or raw business files are exported"
+  ],
+  "completedAt": "2026-10-07T11:56:20.938Z"
+}

@@ -1,0 +1,38 @@
+{
+  "kind": "formal-memory-reply-quality-835",
+  "recordedAt": "2026-10-09T22:09:55.037560+00:00",
+  "nativeBuildId": "835094608c21b67c0f360483",
+  "schema": 69,
+  "realModel": "MiniMax-M3",
+  "formalAppVia": "CUA native UI",
+  "sample": {
+    "id": "7b995084-cbb6-4a7a-ba4b-77be3a3fc6a9",
+    "status": "succeeded",
+    "message_id": "7caebd32-67c7-442b-90f5-1367df204eb7",
+    "result": "\n\n已读取项目偏好（记忆 ID `62b23ea9-c2b2-4b14-b8d7-628348d47e67`，revision 2），未新增记忆。按「蓝桥-314」项目偏好输出工作摘要如下：\n\n---\n\n**【蓝桥-314】工作摘要**\n\n**依据**\n1. 检查执行情况：本日推进 3 项检查任务，均已执行完成。\n2. 问题识别情况：在上述 3 项检查范围内，发现 1 项与页面输入相关的问题。\n3. 后续安排：该问题已登记处理计划，安排在明天修复。\n\n**结论**\n- 今日共完成 3 项检查；\n- 其中发现 1 项页面输入问题；\n- 该问题计划明天修复。\n\n---\n\n备注：摘要严格依据用户提供的三项事实产出，未引入未经验证的额外信息；按项目偏好采用简体中文，并按「先写依据、再写结论」结构呈现。",
+    "error": null,
+    "bot_id": "954dd5e0-e2e7-4247-9303-276c8111c870",
+    "input": "按项目偏好，写一段工作摘要：已完成3项检查，发现1项页面输入问题，计划明天修复。请先读取你已保存的项目偏好，不要新增记忆。",
+    "usage": {
+      "requests": 2,
+      "unknown": 0
+    },
+    "memory": {
+      "id": "62b23ea9-c2b2-4b14-b8d7-628348d47e67",
+      "revision": 2,
+      "text": "项目偏好（适用于用户说「按项目偏好」时）：\n\n1. 测试项目代号：蓝桥-314\n2. 工作摘要格式：先写依据，再写结论\n3. 语言：使用简体中文\n\n触发条件：用户明确说「按项目偏好」时，必须按上述三条要求产出工作摘要。"
+    },
+    "privateMemoryCount": 2
+  },
+  "outcome": {
+    "usesSavedOrder": true,
+    "noNewMemory": true,
+    "conciseNoInternalIds": false,
+    "noUnobservedRegistrationClaim": false,
+    "overallReplyQualityPassed": false,
+    "coreParityComplete": false
+  },
+  "retainedDifference": "Actual reply repeated the earlier answer, including internal ID/revision and claim that the planned repair had been registered. No raw reply rewriting, synthetic history change or benchmark relaxation.",
+  "officialBaselineEvidence": "current-memory-group-calendar-and-cold-review.safe.json",
+  "remaining": "Review actual final assembled prompt and current evidence publication. A finite sample does not establish every memory workload."
+}

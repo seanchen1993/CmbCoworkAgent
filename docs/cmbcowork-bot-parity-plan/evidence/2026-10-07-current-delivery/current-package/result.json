@@ -1,0 +1,12 @@
+{
+  "phase": "actual-current-opening-metadata-output-Mac-builder",
+  "startedAt": "2026-10-07T08:32:35.806764+00:00",
+  "completedAt": "2026-10-07T08:33:34.848992+00:00",
+  "seconds": 59.04225216701161,
+  "exitCode": 0,
+  "inputCount": 4313,
+  "sourceDrift": [],
+  "logSHA256": "32674a39161735874e019169ab480703d199cc1c22a63cd9fcb9580356953755",
+  "automaticRetries": 0,
+  "wrapperOverridesOriginalTimeouts": false
+}

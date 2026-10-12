@@ -1,0 +1,12 @@
+{
+  "phase": "actual-current-opening-metadata-race-nearest-types-quality-production-build",
+  "startedAt": "2026-10-07T08:22:58.509060+00:00",
+  "completedAt": "2026-10-07T08:23:57.830094+00:00",
+  "seconds": 59.321059832931496,
+  "exitCode": 1,
+  "inputCount": 3360,
+  "sourceDrift": [],
+  "logSHA256": "8fb27657406f3a33a6c82a57e2936da0d242fc8e78ae96722977abc43548fe79",
+  "automaticRetries": 0,
+  "wrapperOverridesOriginalTimeouts": false
+}

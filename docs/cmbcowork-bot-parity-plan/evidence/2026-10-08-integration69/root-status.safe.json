@@ -1,0 +1,159 @@
+{
+  "capturedAt": "2026-10-08T09:19:54.163131+08:00",
+  "schema": 69,
+  "sourceIntegrated": true,
+  "compiledAppSchema": 67,
+  "newRuntimeAppAccepted": false,
+  "fullPlanComplete": false,
+  "checks": [
+    {
+      "name": "integrated-unit-tests",
+      "suites": 6,
+      "passed": 83,
+      "log": "/Users/chenqiang/Library/Application Support/CMBDevClaw-development/2026-10-08/root-gates/output-presentation69-nearest.log",
+      "bytes": 2800,
+      "sha256": "3575adb67222c7bba276691d33f9bf9ee3066d585d9a9c77ff1798aaf9d650f0"
+    },
+    {
+      "name": "runtime-contract-resume",
+      "selectedPassed": 2,
+      "deselected": 297,
+      "log": "/Users/chenqiang/Library/Application Support/CMBDevClaw-development/2026-10-08/root-gates/integration69-runtime-contract.log",
+      "bytes": 27447,
+      "sha256": "c47c0d33f772c820d2c0b9c8aaa4217acfa90510fdd9346e3c0b15965924d631"
+    },
+    {
+      "name": "presentation-after-text-validation",
+      "suites": 2,
+      "passed": 13,
+      "overlapsUnitTests": true,
+      "log": "/Users/chenqiang/Library/Application Support/CMBDevClaw-development/2026-10-08/root-gates/integration69-presentation-final-fixed.log",
+      "bytes": 1903,
+      "sha256": "288134677ef1a04a6d9419038067da6f07d3acd68ecd77e9363a64a8127c6ac3"
+    },
+    {
+      "name": "messages",
+      "exitCode": 0,
+      "log": "/Users/chenqiang/Library/Application Support/CMBDevClaw-development/2026-10-08/root-gates/integration69-messages.log",
+      "bytes": 15386,
+      "sha256": "07e2f675a357db15a60fa0715f5a4c40f7f427d6804a39101b6729b0ee295875"
+    },
+    {
+      "name": "workflow",
+      "exitCode": 0,
+      "log": "/Users/chenqiang/Library/Application Support/CMBDevClaw-development/2026-10-08/root-gates/integration69-workflow.log",
+      "bytes": 175166,
+      "sha256": "54e20796edfd25e1dc94acc27e0a84923d27e2b694c0ca08ae4b0a94c28207e5"
+    },
+    {
+      "name": "strict-eslint",
+      "exitCode": 0,
+      "log": "/Users/chenqiang/Library/Application Support/CMBDevClaw-development/2026-10-08/root-gates/eslint69-final.log",
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "name": "node-types",
+      "exitCode": 0,
+      "log": "/Users/chenqiang/Library/Application Support/CMBDevClaw-development/2026-10-08/root-gates/types69-node-final.log",
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "name": "web-types",
+      "exitCode": 0,
+      "log": "/Users/chenqiang/Library/Application Support/CMBDevClaw-development/2026-10-08/root-gates/types69-web-final.log",
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "name": "actual-chromium-presentation",
+      "themes": [
+        "light",
+        "dark"
+      ],
+      "passed": 2,
+      "log": "/Users/chenqiang/Library/Application Support/CMBDevClaw-development/2026-10-08/root-gates/integration69-powerpoint-browser-final.log",
+      "bytes": 99,
+      "sha256": "796d56ee321061d64d359519d5a883901490add14b797ce619ecaf9a067b95a4"
+    },
+    {
+      "name": "actual-composer-focus",
+      "exitCode": 0,
+      "log": "/Users/chenqiang/Library/Application Support/CMBDevClaw-development/2026-10-08/root-gates/skill-caret-focused.log",
+      "bytes": 119,
+      "sha256": "27040a4400682f3e11bc51dedcff7f1f85e91e94e32c86994d6e26868a5ceb29"
+    },
+    {
+      "name": "production-build",
+      "exitCode": 0,
+      "log": "/Users/chenqiang/Library/Application Support/CMBDevClaw-development/2026-10-08/root-gates/integration69-production-build.log",
+      "bytes": 56263,
+      "sha256": "bb1f384c9600a7baddd44058d6777dc1eb05e58b12334efff7182706dbf56465"
+    }
+  ],
+  "sourceSha256": {
+    "package.json": "b26e644d9c98e5bd8ddfd7079097d9d37e33d370a9f7699fefcd38ecc032ccbd",
+    "src/main/agent/workflow/json-schema.ts": "32ff6b0a98c630249abfc9f15b9b0cc35e90cab21a905e2beabaab242f3c1f00",
+    "src/main/bots/activity.ts": "22f0199183124b6cf6be567837274f841c6ee799b151d26444ec2fd607eed5da",
+    "src/main/bots/agent-runtime.test.ts": "8648b5ef21c652c3839955ff55a4249325949b68dc774ec103d5e983ef4df627",
+    "src/main/bots/agent-runtime.ts": "5f7f7716d02a13f43f19bbfd8c14108b96c9ff8cc98d3880b694d6b32d93f2c9",
+    "src/main/bots/deliver-file-tool.ts": "3bcccbabd0e1b93207cdd1a79bb31f67a4979def41a7537c2fda03b1159dad4d",
+    "src/main/bots/document-reader.ts": "53e61cb4bbfe5e4d3cd31c88ad0586648bfff6ae4b335a52cdeba9b42feed755",
+    "src/main/bots/document-worker-entry.ts": "d8d838f532da292323353fbd45730e60123a69f29762ce94cc7168531d6e69bf",
+    "src/main/bots/file-preview.ts": "37d6ba3fbc84d6fff4762a4e7c02ef4c04abe2b1a4dbee502eb3d02ca1044ca4",
+    "src/main/bots/migration-current-additions.test-fixture.ts": "91fe6d26d0abab24b843f449eda8cbdcb260ef40e768bedf3630e5e6b1c3d8be",
+    "src/main/bots/migrations.ts": "81df2ad1a7feca09f744b321fcdc2962bd1a975280ecc1730f222d37dcf950a4",
+    "src/main/bots/output-contract-migration.test.ts": "44bcc0f2f3574fff92672932aec94d1648e559e0d6e9e8185160ab2bf3f3f326",
+    "src/main/bots/output-contract-store.test.ts": "bb70ad25876e74ee3ee7b14639569bda9639329476c8849c697d3333f9875318",
+    "src/main/bots/output-contract-store.ts": "be322aad54caa5e3d42eecdf73ba59b9bf026fc9794c3477dc2edf9255566bc6",
+    "src/main/bots/output-contract.test.ts": "83d69de830c6379bd834995d72e3378e717e9b4d81897f4e9797113372bad149",
+    "src/main/bots/output-contract.ts": "9c752f59429305ac02128933fb71824186d07e78ba38f67c79ac79d268efc44b",
+    "src/main/bots/presentation-choice.ts": "30b0048769c392daddd350c9b2fb1cbe8804aa34a474332c62d2497242740138",
+    "src/main/bots/presentation-contract.ts": "b682fdfd7c11b7d71e23f6ccf4302603cb7e622a2e42ad6d234aa8728728553e",
+    "src/main/bots/presentation-layout.ts": "71df9fbd1ca4da14a826cb6dc30631e8296a144759ccaf558ccd727f61d86a93",
+    "src/main/bots/presentation-record.ts": "80a60f2029810acd0dcbf27411973a95e5d39af18c51338223f6bbada93050c3",
+    "src/main/bots/presentation-tool.ts": "5b8e4c57cbf7f5e5c8a715f08494ea12f9c56195638c42348e7db77d649723d5",
+    "src/main/bots/presentation-version.test.ts": "4a2955c9db59dfb633fe9a46913e6d2effae41d6a6acfcda04705ffb6c43fb5b",
+    "src/main/bots/presentation-writer.ts": "dbf4b118997cf8dad462f7ef5e8aad1b5a7a3b1e72266e476bef65aab4d0c628",
+    "src/main/bots/presentation.test.ts": "9dc44b72481f61b142a2e004b1971e610b82659f654d4aa57963146d4cb24424",
+    "src/main/bots/schema.ts": "d7145c7a38acfd34407cb0526c0e959a46afb7986ade5feeabee93e6a08177f1",
+    "src/main/bots/store.ts": "74ef1a324b94f0376b4ce9b102616268bf5d28eb3e997224824137db87972008",
+    "src/main/bots/upstream/grok-delimited-table.ts": "4d9e73a21db345b938cc9b4388d6992d5286cab2aed3784bd7fe2108881d12d7",
+    "src/main/bots/utility-process.ts": "5dc303569056dc734ab667baf4f169f1bcb89b38a4a4ab232f85ee20ad4a6a50",
+    "src/main/bots/workflow-child-policy.ts": "09f3d2325168ab8c0a9fba0e7e70a28ed3eca5a149de5968f9c75c0c90e96aa2",
+    "src/renderer/src/components/bots/BotFilePreview.tsx": "2a0f7fef79193ab05d378508dffcfc260a8c6194427fdac7f455269bbd6ea608",
+    "src/renderer/src/components/bots/BotQuestions.tsx": "88031ca874951b8a8cc38f2642d072afa43bcf890114cb5ad11d1f662e886065",
+    "src/shared/bot-file-preview.ts": "f017c02ec6718bf18754ea81ac39b86d7a98b47280ac1134eb8790ff01cf20e3",
+    "src/shared/bot-output-contract.ts": "09679bff97b9e879dda67437948619266d0e1811da7c952d865f078876a5219d",
+    "src/shared/bot-presentation.ts": "5456cd1a4b2a79e12a958e2b0607854c75aa54b9e4fcb1d5b108850764927026",
+    "src/shared/bot-types.ts": "b8d2765d8e3304b629623cf176512f5037dbaedff9a6a84a490b1169e5caa90c",
+    "tests/bot-powerpoint-browser.spec.ts": "c03b4fbdf2bf60718872ad7e6d6460de7edda481507520e65086d2462d9c6eb1",
+    "tests/bot-workspace-browser.spec.ts": "0f84368f2dbf55e05fb11ae0a46958c921d37f9b9c899972fc3f7849953a02dc",
+    "package-lock.json": "1b02166b6dd6e9a3e1fa99b451f01a322214ed74983424555b6000de6c8fc1dc",
+    "tests/bot-composer-browser.spec.ts": "6839f677d97fb414aa3e2662f015d7ec942a381e366145261e9d7278082ecf88"
+  },
+  "pending": [
+    "workspace browser rerun after real focus handoff precondition",
+    "new production build and owned app upgrade",
+    "real MiniMax exact J2 delivery and PPTX task",
+    "real programming all deliverables and user journey",
+    "complete Grok core/UI parity",
+    "Windows native generic input implementation and platform acceptance",
+    "Linux/Kubernetes deployment acceptance"
+  ],
+  "testBoundaries": [
+    "Runtime resume uses controlled provider, not real MiniMax",
+    "PPTX browser test uses production React and finite transport, not Office rendering or actual Electron model flow",
+    "Presentation 13-test rerun overlaps the original 83; do not sum them",
+    "Earlier failures are retained; 2 runtime passes do not imply all 299 tests ran"
+  ],
+  "realProgramming": {
+    "runId": "3c6bc0d6-cc9e-4e1a-ba26-5c9bb2b22bba",
+    "state": "in progress; no complete delivery pass",
+    "priorMoneyEditPreserved": true,
+    "modelCorrectedEarlierProgressClaimAfterOracle": true
+  },
+  "dependencyInstall": "Pinned pptxgenjs copied into development cache; clean npm ci and packaged cross-platform verification remain pending",
+  "productionBuildCompleted": true
+}

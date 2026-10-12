@@ -1,0 +1,379 @@
+{
+  "date": "2026-09-30",
+  "current_machine": "macOS",
+  "analysis_node": "v24.13.0",
+  "purpose": "headless Host dependency and initialization review; no full Host execution",
+  "build_options": {
+    "bundle": true,
+    "write": false,
+    "metafile": true,
+    "platform": "node",
+    "format": "esm",
+    "target": "node22",
+    "packages": "external"
+  },
+  "entry_results": [
+    {
+      "entry": "src/main/agent/agent-run-service.ts",
+      "local_files_parsed": 1,
+      "local_files_emitted": 1,
+      "direct_electron_importers": [],
+      "warnings": [],
+      "external_imports": [],
+      "bootstrap_probe": "Agent run service is not initialized"
+    },
+    {
+      "entry": "src/main/agent/standard-thread-turn.ts",
+      "local_files_parsed": 498,
+      "local_files_emitted": 489,
+      "direct_electron_importers": [
+        "src/main/storage.ts",
+        "src/main/updater/checker.ts",
+        "src/main/models/registry.ts",
+        "src/main/mods/runtime-client.ts",
+        "src/main/hooks/notifications.ts",
+        "src/main/catalog-source-paths.ts",
+        "src/main/ipc/skills.ts",
+        "src/main/agent/trace/collector.ts",
+        "src/main/ipc/sandbox.ts",
+        "src/main/services/notify.ts",
+        "src/main/pet.ts",
+        "src/main/agent/workflow/run-manager.ts",
+        "src/main/services/user-input.ts",
+        "src/main/services/workspace-watcher.ts",
+        "src/main/memory/events.ts",
+        "src/main/agent/tools/skill-evolution-tool.ts",
+        "src/main/services/agent-auto-commit.ts",
+        "src/main/agent/renderer-stream-mirror.ts",
+        "src/main/services/enterprise-login-refresh.ts",
+        "src/main/hooks/result-callback.ts",
+        "src/main/harness-board/auto-mode-controller.ts",
+        "src/main/ipc/agent.ts",
+        "src/main/ipc/git-panel.ts",
+        "src/main/ipc/models.ts",
+        "src/main/services/scheduler.ts",
+        "src/main/services/heartbeat.ts",
+        "src/main/agent/tools/scheduler-tool.ts",
+        "src/main/code-exec/runner.ts",
+        "src/main/ipc/mcp.ts",
+        "src/main/lsp/index.ts",
+        "src/main/agent/runtime.ts"
+      ],
+      "warnings": [],
+      "external_imports": [
+        "node:worker_threads",
+        "node:fs",
+        "node:fs/promises",
+        "node:crypto",
+        "node:path",
+        "sql.js",
+        "fs",
+        "fs/promises",
+        "path",
+        "os",
+        "yaml",
+        "crypto",
+        "uuid",
+        "electron",
+        "electron-store",
+        "node:sqlite",
+        "@langchain/core/messages",
+        "node:v8",
+        "jschardet",
+        "iconv-lite",
+        "child_process",
+        "node:util",
+        "util",
+        "zlib",
+        "stream/promises",
+        "http",
+        "https",
+        "node:async_hooks",
+        "node:module",
+        "@langchain/langgraph",
+        "node:child_process",
+        "@langchain/openai",
+        "langchain",
+        "zod",
+        "adm-zip",
+        "node:timers/promises",
+        "@langchain/core/errors",
+        "langchain/chat_models/universal",
+        "@langchain/core/callbacks/base",
+        "@langchain/langgraph-checkpoint",
+        "deepagents",
+        "fast-glob",
+        "micromatch",
+        "node:os",
+        "node:stream/promises",
+        "node:zlib",
+        "url",
+        "vm",
+        "acorn",
+        "worker_threads",
+        "@langchain/core/tools",
+        "./types",
+        "ws",
+        "mammoth",
+        "xlsx",
+        "module",
+        "./approval-store",
+        "@langchain/mcp-adapters",
+        "@langchain/core/callbacks/manager",
+        "vscode-jsonrpc/node",
+        "@langchain/core/runnables"
+      ]
+    },
+    {
+      "entry": "src/main/agent/runtime.ts",
+      "local_files_parsed": 498,
+      "local_files_emitted": 489,
+      "direct_electron_importers": [
+        "src/main/mods/runtime-client.ts",
+        "src/main/storage.ts",
+        "src/main/updater/checker.ts",
+        "src/main/models/registry.ts",
+        "src/main/ipc/sandbox.ts",
+        "src/main/hooks/notifications.ts",
+        "src/main/catalog-source-paths.ts",
+        "src/main/ipc/skills.ts",
+        "src/main/agent/trace/collector.ts",
+        "src/main/services/notify.ts",
+        "src/main/pet.ts",
+        "src/main/agent/workflow/run-manager.ts",
+        "src/main/services/user-input.ts",
+        "src/main/services/workspace-watcher.ts",
+        "src/main/memory/events.ts",
+        "src/main/agent/tools/skill-evolution-tool.ts",
+        "src/main/services/agent-auto-commit.ts",
+        "src/main/agent/renderer-stream-mirror.ts",
+        "src/main/services/enterprise-login-refresh.ts",
+        "src/main/hooks/result-callback.ts",
+        "src/main/harness-board/auto-mode-controller.ts",
+        "src/main/ipc/agent.ts",
+        "src/main/ipc/git-panel.ts",
+        "src/main/ipc/models.ts",
+        "src/main/services/scheduler.ts",
+        "src/main/services/heartbeat.ts",
+        "src/main/agent/tools/scheduler-tool.ts",
+        "src/main/code-exec/runner.ts",
+        "src/main/ipc/mcp.ts",
+        "src/main/lsp/index.ts",
+        "src/main/agent/runtime.ts"
+      ],
+      "warnings": [],
+      "external_imports": [
+        "node:async_hooks",
+        "@langchain/core/messages",
+        "langchain",
+        "fs",
+        "path",
+        "node:crypto",
+        "node:fs",
+        "node:path",
+        "node:sqlite",
+        "node:fs/promises",
+        "node:module",
+        "electron",
+        "@langchain/langgraph",
+        "crypto",
+        "node:timers/promises",
+        "@langchain/core/errors",
+        "langchain/chat_models/universal",
+        "zod",
+        "sql.js",
+        "fs/promises",
+        "os",
+        "yaml",
+        "uuid",
+        "electron-store",
+        "node:util",
+        "util",
+        "zlib",
+        "stream/promises",
+        "http",
+        "https",
+        "@langchain/core/callbacks/base",
+        "node:worker_threads",
+        "@langchain/langgraph-checkpoint",
+        "child_process",
+        "node:child_process",
+        "@langchain/openai",
+        "jschardet",
+        "iconv-lite",
+        "node:v8",
+        "deepagents",
+        "fast-glob",
+        "micromatch",
+        "node:os",
+        "node:stream/promises",
+        "node:zlib",
+        "adm-zip",
+        "url",
+        "vm",
+        "acorn",
+        "worker_threads",
+        "@langchain/core/tools",
+        "./types",
+        "ws",
+        "mammoth",
+        "xlsx",
+        "module",
+        "./approval-store",
+        "@langchain/mcp-adapters",
+        "@langchain/core/callbacks/manager",
+        "vscode-jsonrpc/node",
+        "@langchain/core/runnables"
+      ]
+    },
+    {
+      "entry": "src/main/checkpointer/sqljs-saver.ts",
+      "local_files_parsed": 24,
+      "local_files_emitted": 24,
+      "direct_electron_importers": [],
+      "warnings": [],
+      "external_imports": [
+        "sql.js",
+        "fs",
+        "fs/promises",
+        "path",
+        "node:sqlite",
+        "@langchain/core/messages",
+        "node:fs",
+        "node:crypto",
+        "node:timers/promises",
+        "langchain",
+        "node:async_hooks",
+        "node:worker_threads",
+        "node:path",
+        "@langchain/langgraph-checkpoint"
+      ]
+    }
+  ],
+  "source_evidence": [
+    {
+      "path": "/Users/chenqiang/Desktop/projects/CmbCoworkAgent/src/main/agent/agent-run-service.ts",
+      "sha256": "e9f789d24f07786b6c5a9ea7b2b1acf9fdde92d36f92d275268c3b3570452d5e",
+      "review_scope": "relevant entry, imports and methods; not full-file audit"
+    },
+    {
+      "path": "/Users/chenqiang/Desktop/projects/CmbCoworkAgent/src/main/agent/standard-thread-turn.ts",
+      "sha256": "05a3d17795a5c95f4e3e2925ae388636e70bbf6ba5849f9a564417502481b019",
+      "review_scope": "relevant entry, imports and methods; not full-file audit"
+    },
+    {
+      "path": "/Users/chenqiang/Desktop/projects/CmbCoworkAgent/src/main/agent/runtime.ts",
+      "sha256": "b41439de38549a18800c5a5d71b4bb79e541b5f38cf8bbe6441bf9d26f90c529",
+      "review_scope": "relevant entry, imports and methods; not full-file audit"
+    },
+    {
+      "path": "/Users/chenqiang/Desktop/projects/CmbCoworkAgent/src/main/ipc/agent.ts",
+      "sha256": "0ad42754acc4c5d41ac3231143bf16ff1f9063693a24edcb408521f348367ca0",
+      "review_scope": "relevant entry, imports and methods; not full-file audit"
+    },
+    {
+      "path": "/Users/chenqiang/Desktop/projects/CmbCoworkAgent/src/main/agent/local-sandbox.ts",
+      "sha256": "0b4f5ab02a1742298901efcebf51a016703e93c0d553571d04778a93e0915f74",
+      "review_scope": "relevant entry, imports and methods; not full-file audit"
+    },
+    {
+      "path": "/Users/chenqiang/Desktop/projects/CmbCoworkAgent/src/main/ipc/sandbox.ts",
+      "sha256": "aa2ae9a91b1198656f165247051865da70e3f9a49a9a98ba14a5e7dbfd99781b",
+      "review_scope": "relevant entry, imports and methods; not full-file audit"
+    },
+    {
+      "path": "/Users/chenqiang/Desktop/projects/CmbCoworkAgent/src/main/agent/tools/scheduler-tool.ts",
+      "sha256": "176ffb38e71b88dc387e5b32c5a2b0d6bdcbcd45fdafff8771b0b2092044af1a",
+      "review_scope": "relevant entry, imports and methods; not full-file audit"
+    },
+    {
+      "path": "/Users/chenqiang/Desktop/projects/CmbCoworkAgent/src/main/storage.ts",
+      "sha256": "75f34fc54c359df10dc5a492439bd9618462d3a4ce90bf8274d46e95ed10a751",
+      "review_scope": "relevant entry, imports and methods; not full-file audit"
+    },
+    {
+      "path": "/Users/chenqiang/Desktop/projects/CmbCoworkAgent/src/main/models/registry.ts",
+      "sha256": "fbfb74deb0fea49e2f0867388d90abd41924db799bd3d97909c0beb2dd69dc98",
+      "review_scope": "relevant entry, imports and methods; not full-file audit"
+    },
+    {
+      "path": "/Users/chenqiang/Desktop/projects/CmbCoworkAgent/src/main/mcp/capability-service.ts",
+      "sha256": "9e3984afc38537496105c0964e3ae8d673c74fe6add9003ff158d626c26ca0b9",
+      "review_scope": "relevant entry, imports and methods; not full-file audit"
+    },
+    {
+      "path": "/Users/chenqiang/Desktop/projects/CmbCoworkAgent/src/main/mods/runtime-client.ts",
+      "sha256": "46fc44e8a97706b6c7e892e46e6f304d2996fa16c765d627a1540fa5bb605040",
+      "review_scope": "relevant entry, imports and methods; not full-file audit"
+    },
+    {
+      "path": "/Users/chenqiang/Desktop/projects/CmbCoworkAgent/src/main/mods/host-entry.ts",
+      "sha256": "e31b0b87492301d74d43626dc3d3d45ee93bca285ae7c971588033bcffa27ea8",
+      "review_scope": "relevant entry, imports and methods; not full-file audit"
+    },
+    {
+      "path": "/Users/chenqiang/Desktop/projects/CmbCoworkAgent/src/main/mods/v2/runtime-client.ts",
+      "sha256": "1945ca574f5ad36f76a481a0e6664699d0d30e7c720f1351b1de3c4f62ee9dff",
+      "review_scope": "relevant entry, imports and methods; not full-file audit"
+    },
+    {
+      "path": "/Users/chenqiang/Desktop/projects/CmbCoworkAgent/src/main/mods/v2/host-entry.ts",
+      "sha256": "21740d2c665cf08923d3f5ee0888545af716f7c4d9122b35989aa186a535fe01",
+      "review_scope": "relevant entry, imports and methods; not full-file audit"
+    },
+    {
+      "path": "/Users/chenqiang/Desktop/projects/CmbCoworkAgent/src/main/code-exec/runner.ts",
+      "sha256": "5d2d4feb3c49d23b3d4a694e96a8fa6cfe38140942d8b4f33dc4266462f2e335",
+      "review_scope": "relevant entry, imports and methods; not full-file audit"
+    },
+    {
+      "path": "/Users/chenqiang/Desktop/projects/CmbCoworkAgent/src/main/checkpointer/sqljs-saver.ts",
+      "sha256": "c474640bcb4c372621eaea5336be04af3f5e808a33d542a8edcbf5ca0463d731",
+      "review_scope": "relevant entry, imports and methods; not full-file audit"
+    },
+    {
+      "path": "/Users/chenqiang/Desktop/projects/CmbCoworkAgent/src/main/checkpointer/runtime-projection-client.ts",
+      "sha256": "20c03aa347c30019a1d5011733130b683d53d28edb8a6b6162d614589cd80356",
+      "review_scope": "relevant entry, imports and methods; not full-file audit"
+    },
+    {
+      "path": "/Users/chenqiang/Desktop/projects/CmbCoworkAgent/src/main/checkpointer/runtime-projection-worker.ts",
+      "sha256": "196c360948859ce9f6d0be448431eb2f44bbfe405ebeae8ffb07726e1184ad02",
+      "review_scope": "relevant entry, imports and methods; not full-file audit"
+    },
+    {
+      "path": "/Users/chenqiang/Desktop/projects/CmbCoworkAgent/src/main/db/native-sqlite-adapter.ts",
+      "sha256": "d4b0c286351c9a3f6fc070027e7801403d57b4f10affacc47ba696d3eb911776",
+      "review_scope": "relevant entry, imports and methods; not full-file audit"
+    },
+    {
+      "path": "/Users/chenqiang/Desktop/projects/CmbCoworkAgent/src/main/services/user-input.ts",
+      "sha256": "10e5afd76b3f52b00b6de84e6a7ea1534b0c36fdedcac15b942c86fbdf11cc11",
+      "review_scope": "relevant entry, imports and methods; not full-file audit"
+    },
+    {
+      "path": "/Users/chenqiang/Desktop/projects/CmbCoworkAgent/electron.vite.config.ts",
+      "sha256": "8fcc128c15bc954c70a778e8cc567d4c29e96e79b2ee9e9636edb63833cd163d",
+      "review_scope": "relevant entry, imports and methods; not full-file audit"
+    },
+    {
+      "path": "/Users/chenqiang/Desktop/projects/CmbCoworkAgent/package.json",
+      "sha256": "e90eb535e8949e2782319619a4777df802a9daf9924120a8864df1f1af35957b",
+      "review_scope": "relevant entry, imports and methods; not full-file audit"
+    }
+  ],
+  "probe_scope": "Only the pure registration wrapper was loaded and called without a registered implementation; no model, tool, IPC, business data or application storage was accessed.",
+  "runtime_requirement": {
+    "node_major": 22,
+    "minimum_from_observed_sqlite_apis": "22.16.0",
+    "exact_release_requires_implementation_validation": true
+  },
+  "official_sources": [
+    "https://nodejs.org/download/release/latest-jod/docs/api/sqlite.html",
+    "https://www.electronjs.org/docs/latest/api/utility-process"
+  ],
+  "g1_passed": false,
+  "windows_runtime_tested": false,
+  "linux_runtime_tested": false,
+  "product_code_modified": false
+}

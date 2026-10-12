@@ -1,0 +1,166 @@
+{
+  "date": "2026-09-30",
+  "document": "14-windows-computer-feasibility.md",
+  "review_scope": "targeted static source and official documentation; not full repository audit",
+  "repositories": [
+    {
+      "repository": "microsoft/UFO",
+      "path": "/Users/chenqiang/Desktop/AI/cmb-bot-reference-sources/ufo",
+      "commit": "a795552d976c4c019d7c2f778a0effb5cef7de6b",
+      "license": "MIT",
+      "usage": "native adapter candidate only",
+      "reviewed_files": [
+        {
+          "path": "/Users/chenqiang/Desktop/AI/cmb-bot-reference-sources/ufo/LICENSE",
+          "sha256": "fd532481d828e13a0b13ccb598e02338a3617740675a862ee6bdc1541b68e93d",
+          "review": "relevant methods/sections; not necessarily every line"
+        },
+        {
+          "path": "/Users/chenqiang/Desktop/AI/cmb-bot-reference-sources/ufo/ufo/automator/ui_control/controller.py",
+          "sha256": "6d9cefcc743a23044d1d4b1aa50ef1247e6734a5fbd5cbf51134ba2599fd5db9",
+          "review": "relevant methods/sections; not necessarily every line"
+        },
+        {
+          "path": "/Users/chenqiang/Desktop/AI/cmb-bot-reference-sources/ufo/ufo/automator/ui_control/screenshot.py",
+          "sha256": "0ee4fad0da41e10a714f34bc92e63a1899a0b61366c2715707590eba3ac2ada1",
+          "review": "relevant methods/sections; not necessarily every line"
+        },
+        {
+          "path": "/Users/chenqiang/Desktop/AI/cmb-bot-reference-sources/ufo/ufo/README.md",
+          "sha256": "e5744ebfd1fcab4d94817060b3016b1764089c378a89f93415d8bd2b7a51a9ef",
+          "review": "relevant methods/sections; not necessarily every line"
+        },
+        {
+          "path": "/Users/chenqiang/Desktop/AI/cmb-bot-reference-sources/ufo/documents/docs/faq.md",
+          "sha256": "62137e65565ec1c56aec8c3721aa6f10d206758fc8d981763333f84e449b9496",
+          "review": "relevant methods/sections; not necessarily every line"
+        },
+        {
+          "path": "/Users/chenqiang/Desktop/AI/cmb-bot-reference-sources/ufo/documents/docs/ufo2/overview.md",
+          "sha256": "2101bc60aa050e74726091681753fba4fdbde7ab015de7e69f17e1e1da69e3d6",
+          "review": "relevant methods/sections; not necessarily every line"
+        },
+        {
+          "path": "/Users/chenqiang/Desktop/AI/cmb-bot-reference-sources/ufo/documents/docs/index.md",
+          "sha256": "04083e48c92c1269be121224e57a956948eca536bd6800fac2ed6467ddeb8ce3",
+          "review": "relevant methods/sections; not necessarily every line"
+        }
+      ]
+    },
+    {
+      "repository": "microsoft/WinAppCli",
+      "path": "/Users/chenqiang/Desktop/AI/cmb-bot-reference-sources/winapp",
+      "commit": "3fd590017806562f088e6b275302610b9937674b",
+      "license": "MIT",
+      "usage": "native adapter candidate only",
+      "reviewed_files": [
+        {
+          "path": "/Users/chenqiang/Desktop/AI/cmb-bot-reference-sources/winapp/LICENSE",
+          "sha256": "c421b2a5e0ee627bb1c5d859bbca37d7654c02f63d626e753644484a9054c2d1",
+          "review": "relevant methods/sections; not necessarily every line"
+        },
+        {
+          "path": "/Users/chenqiang/Desktop/AI/cmb-bot-reference-sources/winapp/src/winapp-CLI/WinApp.UIAutomation/WinApp.UIAutomation.csproj",
+          "sha256": "63f666d6f47e557ea7382890d90f794fa8e8e9a40b2438dc937a082e92eecc41",
+          "review": "relevant methods/sections; not necessarily every line"
+        },
+        {
+          "path": "/Users/chenqiang/Desktop/AI/cmb-bot-reference-sources/winapp/src/winapp-CLI/WinApp.Cli/WinApp.Cli.csproj",
+          "sha256": "33620300a8a5d94776afcdce6510e050b09e2af3e3a3546714fc4ce87f0ba755",
+          "review": "relevant methods/sections; not necessarily every line"
+        },
+        {
+          "path": "/Users/chenqiang/Desktop/AI/cmb-bot-reference-sources/winapp/src/winapp-CLI/WinApp.Cli/Commands/UiScreenshotCommand.cs",
+          "sha256": "a9722cacbd470421aa8bf4d052d4315ea6e72621196993fb29b074b77b5aa2f9",
+          "review": "relevant methods/sections; not necessarily every line"
+        },
+        {
+          "path": "/Users/chenqiang/Desktop/AI/cmb-bot-reference-sources/winapp/src/winapp-CLI/WinApp.Cli/Services/InteractiveDesktop/UiTurnMode.cs",
+          "sha256": "6f295b672777de6fa83637dbb9c733bcf26ac37103abf0b107eb1ef94eccf202",
+          "review": "relevant methods/sections; not necessarily every line"
+        },
+        {
+          "path": "/Users/chenqiang/Desktop/AI/cmb-bot-reference-sources/winapp/src/winapp-CLI/WinApp.Cli/Services/InteractiveDesktop/InteractiveDesktopPaths.cs",
+          "sha256": "e17327774459c89f5aa97d8c490b73da28e39ef51d7989cae302058227c85fd8",
+          "review": "relevant methods/sections; not necessarily every line"
+        },
+        {
+          "path": "/Users/chenqiang/Desktop/AI/cmb-bot-reference-sources/winapp/src/winapp-CLI/WinApp.UIAutomation/Services/UiAutomationService.Screenshot.cs",
+          "sha256": "be98ce29f63c1a6d5384f65a17fed1f043df9bc1e33f5eab13f17db24a3091e9",
+          "review": "relevant methods/sections; not necessarily every line"
+        }
+      ]
+    }
+  ],
+  "product_code_modified": false,
+  "windows_tests_run": false,
+  "linux_tests_run": false,
+  "g2b_proven": false,
+  "checks": [
+    {
+      "id": "WIN-01",
+      "status": "not_run"
+    },
+    {
+      "id": "WIN-02",
+      "status": "not_run"
+    },
+    {
+      "id": "WIN-03",
+      "status": "not_run"
+    },
+    {
+      "id": "WIN-04",
+      "status": "not_run"
+    },
+    {
+      "id": "WIN-05",
+      "status": "not_run"
+    },
+    {
+      "id": "WIN-06",
+      "status": "not_run"
+    },
+    {
+      "id": "WIN-07",
+      "status": "not_run"
+    },
+    {
+      "id": "WIN-08",
+      "status": "not_run"
+    }
+  ],
+  "official_sources": [
+    "https://docs.x.ai/grok-bot/computer-and-apps",
+    "https://learn.microsoft.com/en-us/windows/win32/winstation/desktops",
+    "https://learn.microsoft.com/en-us/windows/win32/termserv/child-sessions",
+    "https://learn.microsoft.com/en-us/power-automate/desktop-flows/run-desktop-flows-pip",
+    "https://learn.microsoft.com/en-us/windows/apps/dev-tools/winapp-cli/ui-automation",
+    "https://learn.microsoft.com/en-us/windows/win32/winauto/uiauto-controlpatternsoverview",
+    "https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-sendinput",
+    "https://learn.microsoft.com/en-us/windows/win32/api/dpapi/nf-dpapi-cryptprotectdata"
+  ],
+  "cmb_source_evidence": [
+    {
+      "path": "/Users/chenqiang/Desktop/projects/CmbCoworkAgent/src/main/browser/core/browser-service.ts",
+      "sha256": "08a94ebbac2501f9ad4c9397107856f7aeff19595e0631252088561e42309f1e"
+    },
+    {
+      "path": "/Users/chenqiang/Desktop/projects/CmbCoworkAgent/src/main/browser/record/common/browser-script-execution-service.ts",
+      "sha256": "536c8a569c7847d2d94eec6e486b627ea8d1a35019ec4540d57a6ef926a6cc37"
+    },
+    {
+      "path": "/Users/chenqiang/Desktop/projects/CmbCoworkAgent/src/main/agent/local-sandbox.ts",
+      "sha256": "0b4f5ab02a1742298901efcebf51a016703e93c0d553571d04778a93e0915f74"
+    },
+    {
+      "path": "/Users/chenqiang/Desktop/projects/CmbCoworkAgent/src/main/ipc/sandbox.ts",
+      "sha256": "aa2ae9a91b1198656f165247051865da70e3f9a49a9a98ba14a5e7dbfd99781b"
+    }
+  ],
+  "source_integrity_check": {
+    "files_checked": 18,
+    "mismatches": [],
+    "method": "SHA-256 recomputed from fixed commits in persistent reference directory; not runtime verification"
+  }
+}

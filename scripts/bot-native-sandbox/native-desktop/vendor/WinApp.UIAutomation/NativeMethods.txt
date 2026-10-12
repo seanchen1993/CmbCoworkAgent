@@ -1,0 +1,26 @@
+// Exact UIA semantic patterns; intentionally no foreground, global input, GDI or desktop capture.
+IUIAutomation
+CUIAutomation8
+IUIAutomationElement
+IUIAutomationTreeWalker
+IUIAutomationInvokePattern
+IUIAutomationTogglePattern
+IUIAutomationSelectionItemPattern
+IUIAutomationExpandCollapsePattern
+IUIAutomationValuePattern
+IUIAutomationScrollPattern
+IUIAutomationTextPattern
+IUIAutomationTextRange
+// Pinned HWND WGC backend.
+D3D11CreateDevice
+D3D_DRIVER_TYPE
+D3D11_CREATE_DEVICE_FLAG
+ID3D11Device
+ID3D11DeviceContext
+ID3D11Texture2D
+D3D11_TEXTURE2D_DESC
+D3D11_USAGE
+D3D11_CPU_ACCESS_FLAG
+D3D11_MAP
+DXGI_FORMAT
+DXGI_SAMPLE_DESC

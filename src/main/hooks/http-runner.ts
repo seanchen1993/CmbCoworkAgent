@@ -37,24 +37,28 @@ function sanitiseHeaderValue(value: string): string {
  * collapse to empty string (NOT left as `$NAME`) so a hook author can't
  * accidentally exfiltrate an env var that wasn't whitelisted.
  */
-function interpolateHeaderValue(value: string, allowed: ReadonlySet<string>): string {
+function interpolateHeaderValue(
+  value: string,
+  allowed: ReadonlySet<string>,
+  env: NodeJS.ProcessEnv
+): string {
   const expanded = value.replace(
     /\$\{([A-Z_][A-Z0-9_]*)\}|\$([A-Z_][A-Z0-9_]*)/g,
     (_full, braced: string | undefined, unbraced: string | undefined) => {
       const name = braced ?? unbraced ?? ""
       if (!allowed.has(name)) return ""
-      return process.env[name] ?? ""
+      return env[name] ?? ""
     }
   )
   return sanitiseHeaderValue(expanded)
 }
 
-function buildHeaders(hook: HookConfig): Record<string, string> {
+function buildHeaders(hook: HookConfig, env: NodeJS.ProcessEnv): Record<string, string> {
   const headers: Record<string, string> = { "Content-Type": "application/json" }
   if (!hook.headers) return headers
   const allowed = new Set(hook.allowedEnvVars ?? [])
   for (const [name, raw] of Object.entries(hook.headers)) {
-    headers[name] = interpolateHeaderValue(raw, allowed)
+    headers[name] = interpolateHeaderValue(raw, allowed, env)
   }
   return headers
 }
@@ -83,7 +87,9 @@ async function readBoundedBody(response: Response): Promise<BoundedBody> {
       total += value.byteLength
       if (total > MAX_RESPONSE_BYTES) {
         limitExceeded = true
-        out += decoder.decode(value.slice(0, Math.max(0, MAX_RESPONSE_BYTES - (total - value.byteLength))))
+        out += decoder.decode(
+          value.slice(0, Math.max(0, MAX_RESPONSE_BYTES - (total - value.byteLength)))
+        )
         try {
           await reader.cancel()
         } catch {
@@ -107,7 +113,8 @@ async function readBoundedBody(response: Response): Promise<BoundedBody> {
 export async function executeHttpHook(
   hook: HookConfig,
   stdinPayload: string,
-  timeout: number
+  timeout: number,
+  host?: { signal: AbortSignal; env: NodeJS.ProcessEnv }
 ): Promise<HookResult> {
   const url = hook.url?.trim()
   if (!url) {
@@ -139,11 +146,13 @@ export async function executeHttpHook(
   const timer = setTimeout(() => controller.abort(), timeout)
 
   try {
+    host?.signal.throwIfAborted()
     const response = await fetch(url, {
       method: "POST",
-      headers: buildHeaders(hook),
+      ...(host ? { redirect: "error" as const } : {}),
+      headers: buildHeaders(hook, host?.env ?? process.env),
       body: stdinPayload,
-      signal: controller.signal
+      signal: host ? AbortSignal.any([controller.signal, host.signal]) : controller.signal
     })
     const { body, limitExceeded } = await readBoundedBody(response)
     if (limitExceeded) {
@@ -162,6 +171,7 @@ export async function executeHttpHook(
     }
     return fallbackResult(`[HttpHook] HTTP ${response.status}: ${body.slice(0, 200)}`)
   } catch (err) {
+    host?.signal.throwIfAborted()
     const msg = err instanceof Error ? err.message : String(err)
     // Abort during body read surfaces as a generic AbortError; rephrase so
     // the fallback log makes the timeout reason obvious.

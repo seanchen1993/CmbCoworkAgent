@@ -1,0 +1,37 @@
+{
+  "format": 1,
+  "upstreamRevision": "954fa9057bf3a4521ea34dbd010ff291d5b39763",
+  "license": "Apache-2.0",
+  "protocol": "codex-cmb-owned-sandbox-v1",
+  "files": [
+    {
+      "candidate": "lib.rs",
+      "relative": "codex-rs/windows-sandbox-rs/src/lib.rs",
+      "sha256": "e7ad7d0e8c0f2181807cd7c98f6b9b846bb023fce5e69aeaa66e9ab0be062c50",
+      "baseSha256": "013efb556644a04a76574b922cbb3e6825d811dae91b4efe330a56b07051e271"
+    },
+    {
+      "candidate": "runner_client.rs",
+      "relative": "codex-rs/windows-sandbox-rs/src/elevated/runner_client.rs",
+      "sha256": "bec267f6a2f9f13486c0196efa9df091184e46dbf8220fb49a0b5344a3d2edae",
+      "baseSha256": "bd8a1762e740eb348a2b6a44487103c576319e3dc41661b43105c1c4e734672a"
+    },
+    {
+      "candidate": "cmb_owned_job.rs",
+      "relative": "codex-rs/windows-sandbox-rs/src/cmb_owned_job.rs",
+      "sha256": "944192e3622f47ce78cc0d45844956102cff9d1386db650bc148854ddf077692"
+    },
+    {
+      "candidate": "desktop.rs",
+      "relative": "codex-rs/windows-sandbox-rs/src/desktop.rs",
+      "sha256": "cc1f1c348296f5741b2e37eb1ea5a50760e9842ab467f68a19ae43f6bbf79041",
+      "baseSha256": "41ed23a9cc57471775279a7b9e1a05d22be6478ff89ed46d1174602d4cea5fc0"
+    },
+    {
+      "candidate": "desktop_tests.rs",
+      "relative": "codex-rs/windows-sandbox-rs/src/desktop_tests.rs",
+      "sha256": "5ddd1311ab26dba3fdd310acf5854bd1278490848701cbf5501cdb706651a820",
+      "baseSha256": "9fb109967a443ffc5e49e788a05ee659529479328bc969d3399b257e28dc099b"
+    }
+  ]
+}

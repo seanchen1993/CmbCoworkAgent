@@ -1,0 +1,110 @@
+{
+  "kind": "real-minimax-v2-same-input-and-manual-routine",
+  "recordedAt": "2026-10-09T04:56:27.161545+00:00",
+  "liveBackendBuildId": "bd964743316fdbdca8574863",
+  "rootEditedModelProject": false,
+  "oracleAnswersAddedToInputs": false,
+  "failedTrialsPreserved": true,
+  "trials": [
+    {
+      "id": "31e98c13-1cc6-4966-a01b-3cafc562dc41",
+      "skill_id": "549ee150-2467-43f0-999e-bed2d184296c",
+      "version": 2,
+      "run_id": "151015e4-d141-493d-9e87-060a691307ed",
+      "verdict": "failed",
+      "note": "本次没有浏览器操作或交付文件，模型再次将历史结论当作本次状态，未执行实际东区报表。验收不通过，记录保留；新版上下文处理将以同一输入复验。",
+      "inputsSha256": "a984a3457970e76a0de1d44ff1f47d386690c875624c3ba749b35cc2b4f247d0",
+      "criteriaSha256": "6121151c02f30eeb3dbc515fddaf05435320090a611a463f068032e7b1b74f10"
+    },
+    {
+      "id": "0d0dd256-1f9a-4ee6-a5f1-8dccf7ff1bfb",
+      "skill_id": "549ee150-2467-43f0-999e-bed2d184296c",
+      "version": 2,
+      "run_id": "f937b0d1-c396-40c7-9c1b-ad6a1bb75155",
+      "verdict": "passed",
+      "note": "使用与此前失败试跑完全相同的输入和验收条件，未提示预期数字。5项浏览器操作已成功；独立打开交付的43368字节JPEG，SHA256 4e0855e0722d6aebcbeee3629c817d17294b56ba0d4ed945b52944c6ac5594d8。实际2026-10/东区，REPLAY-04新月项目61，1项目合计61，REPLAY-2026，页面、截图、明细求和与文字一致。本次v2报表试跑通过，旧失败保留。",
+      "inputsSha256": "a984a3457970e76a0de1d44ff1f47d386690c875624c3ba749b35cc2b4f247d0",
+      "criteriaSha256": "6121151c02f30eeb3dbc515fddaf05435320090a611a463f068032e7b1b74f10"
+    }
+  ],
+  "routineRun": {
+    "id": "752b2bbb-8e94-410e-918c-974cde84dea8",
+    "status": "succeeded",
+    "revision": 161,
+    "error": null,
+    "finalResultSha256": "34e4682244180734aee32817afbb09e822e684bd2575b332efa88c373b5be8b5",
+    "effects": [
+      {
+        "status": "succeeded",
+        "count": 9
+      }
+    ]
+  },
+  "routine": {
+    "id": "ef28d355-6c64-47f5-9428-b1906e1ae157",
+    "bot_id": "e1d81813-1ff0-4fca-9948-d966e1a77189",
+    "name": "演练月报例程 · v2",
+    "prompt": "page_url=http://127.0.0.1:53741/replay；month=2026-09；region=西区。按绑定技能生成本次报表，交付明细、项目数、总数、页面数据标识及结果截图；逐行求和核对页面总数，截图与文字一致。不沿用历史试跑数字。",
+    "schedule": "{\"kind\":\"cron\",\"expression\":\"0 9 * * *\"}",
+    "timezone": "Asia/Shanghai",
+    "enabled": 0,
+    "next_at": 1791594000000,
+    "revision": 1,
+    "created_at": 1791520489922,
+    "desired_enabled": 0,
+    "activation_required": 0
+  },
+  "routineSkillBinding": [
+    {
+      "botId": "e1d81813-1ff0-4fca-9948-d966e1a77189",
+      "id": "549ee150-2467-43f0-999e-bed2d184296c",
+      "name": "工单月报生成与核验",
+      "version": 2
+    }
+  ],
+  "images": [
+    {
+      "id": "752b2bbb-8e94-410e-918c-974cde84dea8:browser-shot:e90ba90df8bce10b3c494fe0f6175d0cf84976df66ef83d9c9820094401ea975",
+      "run_id": "752b2bbb-8e94-410e-918c-974cde84dea8",
+      "name": "工单月报_2026-09_西区.jpg",
+      "mime": "image/jpeg",
+      "size": 35895,
+      "sha256": "a933ed95c7ec0cf347220f6bdabb2bc48580b1cdf450c179f3322c4af8f84087",
+      "originalBytesVerified": true,
+      "rootViewedOriginalImage": true
+    },
+    {
+      "id": "f937b0d1-c396-40c7-9c1b-ad6a1bb75155:browser-shot:cefc47636d2060467369bf9c3dd80257d14eb0f25210e3a3e4ea148772f323ee",
+      "run_id": "f937b0d1-c396-40c7-9c1b-ad6a1bb75155",
+      "name": "工单月报_2026-10_东区.jpg",
+      "mime": "image/jpeg",
+      "size": 43368,
+      "sha256": "4e0855e0722d6aebcbeee3629c817d17294b56ba0d4ed945b52944c6ac5594d8",
+      "originalBytesVerified": true,
+      "rootViewedOriginalImage": true
+    }
+  ],
+  "observedResults": {
+    "sameEastInputs": {
+      "month": "2026-10",
+      "region": "东区",
+      "rows": 1,
+      "total": 61,
+      "source": "REPLAY-2026"
+    },
+    "manualRoutineNewInputs": {
+      "month": "2026-09",
+      "region": "西区",
+      "rows": 1,
+      "total": 33,
+      "source": "REPLAY-2026"
+    }
+  },
+  "limits": [
+    "Manual routine execution verified; timer/event triggers are not newly verified by this record.",
+    "Auto-review unnecessarily requested approval for stale starting-page conditions and ordinary field editing.",
+    "Final answer still repeats obsolete skill state and is too verbose; semantic delivery data and original screenshots are correct.",
+    "Material and long programming final delivery remain incomplete.",
+    "Not full Grok parity or complete platform acceptance."
+  ]
+}

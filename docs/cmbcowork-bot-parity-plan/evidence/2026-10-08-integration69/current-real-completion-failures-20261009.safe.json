@@ -1,0 +1,160 @@
+{
+  "recordedAt": "2026-10-09T00:45:13.716246+00:00",
+  "buildId": "18567d7fda0e97e783e927d7",
+  "hostId": "8804b4e6-a39d-41af-98e2-f2e131ceeaf9",
+  "boundary": "Formal owned App UI, official configured MiniMax-M3, readonly storage observation; failures are retained",
+  "runs": [
+    {
+      "id": "ddcb75d5-dfe0-4170-a704-bd40b3b969c4",
+      "status": "failed",
+      "revision": 91,
+      "error": "文件 result.csv 的核验早于当前要求，请重新交付以核验新要求。",
+      "source": "user",
+      "fence": 9,
+      "artifacts": [
+        {
+          "id": "result:ddcb75d5-dfe0-4170-a704-bd40b3b969c4:call_function_uz7vtd72bwxn_1",
+          "name": "result.csv",
+          "mime": "text/csv",
+          "size": 66,
+          "sha256": "7f49376f9672cf7362ea26ea0ce624c881d3c9250f3b7207024ca5870bc8903f"
+        }
+      ],
+      "modelCalls": [
+        {
+          "model_ref": "custom:minimax-m3",
+          "model": "MiniMax-M3",
+          "purpose": "task",
+          "input_tokens": 19803,
+          "output_tokens": 273,
+          "settled_at": 1791464809455
+        },
+        {
+          "model_ref": "custom:minimax-m3",
+          "model": "MiniMax-M3",
+          "purpose": "task",
+          "input_tokens": null,
+          "output_tokens": null,
+          "settled_at": null
+        },
+        {
+          "model_ref": "custom:minimax-m3",
+          "model": "MiniMax-M3",
+          "purpose": "task",
+          "input_tokens": 28697,
+          "output_tokens": 2918,
+          "settled_at": 1791464884089
+        },
+        {
+          "model_ref": "custom:minimax-m3",
+          "model": "MiniMax-M3",
+          "purpose": "task",
+          "input_tokens": 947,
+          "output_tokens": 212,
+          "settled_at": 1791464887258
+        },
+        {
+          "model_ref": "custom:minimax-m3",
+          "model": "MiniMax-M3",
+          "purpose": "task",
+          "input_tokens": 2165,
+          "output_tokens": 301,
+          "settled_at": 1791464889969
+        },
+        {
+          "model_ref": "custom:minimax-m3",
+          "model": "MiniMax-M3",
+          "purpose": "task",
+          "input_tokens": null,
+          "output_tokens": null,
+          "settled_at": null
+        },
+        {
+          "model_ref": "custom:minimax-m3",
+          "model": "MiniMax-M3",
+          "purpose": "task",
+          "input_tokens": 40479,
+          "output_tokens": 1561,
+          "settled_at": 1791475853638
+        },
+        {
+          "model_ref": "custom:minimax-m3",
+          "model": "MiniMax-M3",
+          "purpose": "task",
+          "input_tokens": 2928,
+          "output_tokens": 670,
+          "settled_at": 1791475857698
+        },
+        {
+          "model_ref": "custom:minimax-m3",
+          "model": "MiniMax-M3",
+          "purpose": "task",
+          "input_tokens": 42152,
+          "output_tokens": 5735,
+          "settled_at": 1791489283122
+        },
+        {
+          "model_ref": "custom:minimax-m3",
+          "model": "MiniMax-M3",
+          "purpose": "task",
+          "input_tokens": null,
+          "output_tokens": null,
+          "settled_at": null
+        },
+        {
+          "model_ref": "custom:minimax-m3",
+          "model": "MiniMax-M3",
+          "purpose": "task",
+          "input_tokens": 47991,
+          "output_tokens": 8192,
+          "settled_at": 1791490213060
+        },
+        {
+          "model_ref": "custom:minimax-m3",
+          "model": "MiniMax-M3",
+          "purpose": "task",
+          "input_tokens": 55459,
+          "output_tokens": 805,
+          "settled_at": 1791490222778
+        },
+        {
+          "model_ref": "custom:minimax-m3",
+          "model": "MiniMax-M3",
+          "purpose": "task",
+          "input_tokens": 2243,
+          "output_tokens": 813,
+          "settled_at": 1791490227931
+        },
+        {
+          "model_ref": "custom:minimax-m3",
+          "model": "MiniMax-M3",
+          "purpose": "task",
+          "input_tokens": 56375,
+          "output_tokens": 2198,
+          "settled_at": 1791506008374
+        }
+      ],
+      "effectCount": 0
+    },
+    {
+      "id": "a3c38479-396d-4e2b-bd58-26bfa4387acf",
+      "status": "failed",
+      "revision": 11,
+      "error": "示范学习未保存技能，请检查模型是否支持图像理解及学习记录",
+      "source": "teach-learning",
+      "fence": 1,
+      "artifacts": [],
+      "modelCalls": [
+        {
+          "model_ref": "custom:minimax-m3",
+          "model": "MiniMax-M3",
+          "purpose": "task",
+          "input_tokens": 6416,
+          "output_tokens": 25,
+          "settled_at": 1791506034901
+        }
+      ],
+      "effectCount": 0
+    }
+  ]
+}

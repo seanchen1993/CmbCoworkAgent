@@ -1,0 +1,586 @@
+{
+  "kind": "formal-created-bot-navigation-opening-and-group-followup",
+  "recordedAt": "2026-10-10T02:43:36.337414+00:00",
+  "nativeBuildId": "07aac09d6b9d845f2a988953",
+  "schema": 71,
+  "formalVia": "CUA native App and real configured MiniMax M3",
+  "creation": {
+    "profile": {
+      "id": "50a4ae56-72c2-49be-b93b-7957fe9f5674",
+      "name": "结果核对助手",
+      "instructions": "核对用户提供的材料和数字，并报告差异；不主动修改文件，不主动访问外部服务。仅基于用户提供的内容进行核对，按差异如实报告。",
+      "model_ref": "custom:minimax-m3",
+      "workspace_path": "/Users/chenqiang/Library/Application Support/CMBDevClaw-development/2026-10-08/acceptance69-quality/home/bot-host.workspace/1d4cb47e-3800-4f9c-bf38-d734dbbcbafd"
+    },
+    "creator": {
+      "id": "8437fe2a-41ce-43db-87fb-42e56ab20337",
+      "bot_id": "4002cdce-8149-4dfc-9c4b-28abd67d30c1",
+      "conversation_id": "605d7439-67dd-48e8-a482-c3e988c39a76",
+      "source": "user",
+      "status": "succeeded",
+      "message_id": "e7f2b7dc-bb2f-47be-a7cf-61295fc97d50",
+      "error": null,
+      "modelRequests": 2,
+      "unknownUsage": 0,
+      "structuralProof": {
+        "runId": "8437fe2a-41ce-43db-87fb-42e56ab20337",
+        "messageTypes": {
+          "HumanMessage": 39,
+          "AIMessageChunk": 2,
+          "ToolMessage": 1
+        },
+        "modelToolNames": [
+          "create_bot"
+        ],
+        "toolResultClassifications": [
+          {
+            "name": "create_bot",
+            "containsSavedPreferenceId": false,
+            "containsSavedPreferenceCode": false,
+            "containsSavedPreferenceFormat": false,
+            "containsPreviousPublicSummary": false
+          }
+        ],
+        "selectedInstructionClassifications": [],
+        "privateTextNotCopied": true
+      },
+      "actualEffectCount": 1
+    },
+    "creationEvent": {
+      "botId": "50a4ae56-72c2-49be-b93b-7957fe9f5674",
+      "conversationId": "8c0440df-1768-4e73-b920-d5e32952f1f4"
+    },
+    "creatorPublicMessages": [
+      {
+        "id": "d616f19e-9495-42ef-aa53-f8df1d6384da",
+        "text": "\n\n已创建 Bot「结果核对助手」：核对用户提供的材料和数字，并报告差异；不主动修改文件，不主动访问外部服务。未建立例程。",
+        "entityReferences": [
+          {
+            "kind": "bot",
+            "id": "50a4ae56-72c2-49be-b93b-7957fe9f5674",
+            "name": "结果核对助手",
+            "conversationId": "8c0440df-1768-4e73-b920-d5e32952f1f4"
+          }
+        ]
+      }
+    ],
+    "introduction": {
+      "id": "19af4b9f-cd1c-4f9e-b5b4-748f7db2f355",
+      "bot_id": "50a4ae56-72c2-49be-b93b-7957fe9f5674",
+      "conversation_id": "8c0440df-1768-4e73-b920-d5e32952f1f4",
+      "source": "bot-introduction",
+      "status": "succeeded",
+      "message_id": "2df37bb2-e23e-42f0-b2c4-ed3064cb175c",
+      "error": null,
+      "modelRequests": 1,
+      "unknownUsage": 0,
+      "structuralProof": {
+        "runId": "19af4b9f-cd1c-4f9e-b5b4-748f7db2f355",
+        "messageTypes": {
+          "HumanMessage": 1,
+          "AIMessageChunk": 1
+        },
+        "modelToolNames": [],
+        "toolResultClassifications": [],
+        "selectedInstructionClassifications": [],
+        "privateTextNotCopied": true
+      },
+      "actualEffectCount": 0
+    },
+    "publicWelcome": [
+      {
+        "id": "52d474fd-b08d-4b91-86ae-c68fcfb46f48",
+        "text": "你好！有什么材料或数字需要我帮你核对？"
+      }
+    ],
+    "privateMemoryRows": 0,
+    "routines": 0,
+    "connectorIds": [],
+    "visibleUserMessagesInNewChat": 0,
+    "nativeNavigationObserved": {
+      "clicked": "@结果核对助手 on creator final",
+      "destinationHeading": "结果核对助手",
+      "welcomeVisible": true
+    },
+    "finiteCreationNavigationWelcomePassed": true
+  },
+  "groupCalculation": {
+    "id": "64dfe9f4-0a15-4d2d-b9fc-97b266b273f2",
+    "status": "completed",
+    "round": 2,
+    "total_messages": 2,
+    "input": "/技能状态核验  @月报示范核验 按所选技能计算 286+47；@报价工具编程核验 独立核对结果。完成后各只回复一条结果，不访问外部服务。",
+    "acceptedSelections": [
+      [
+        {
+          "botId": "e1d81813-1ff0-4fca-9948-d966e1a77189",
+          "id": "2a50a207-f562-4348-9a90-4b38a827bca3",
+          "version": 3,
+          "name": "技能状态核验"
+        }
+      ]
+    ],
+    "runs": [
+      {
+        "id": "89a444b5-c064-4a50-af0f-a0c33172c68c",
+        "bot_id": "924e1689-7b6d-411c-a429-28decb91b179",
+        "conversation_id": "7f08d20f-73d8-4507-a26f-dfbc64d6529e",
+        "source": "group-member",
+        "status": "succeeded",
+        "message_id": "64dfe9f4-0a15-4d2d-b9fc-97b266b273f2",
+        "error": null,
+        "modelRequests": 2,
+        "unknownUsage": 0,
+        "structuralProof": {
+          "runId": "89a444b5-c064-4a50-af0f-a0c33172c68c",
+          "messageTypes": {
+            "HumanMessage": 12,
+            "AIMessageChunk": 2,
+            "ToolMessage": 1
+          },
+          "modelToolNames": [
+            "send_group_message"
+          ],
+          "toolResultClassifications": [
+            {
+              "name": "send_group_message",
+              "containsSavedPreferenceId": false,
+              "containsSavedPreferenceCode": false,
+              "containsSavedPreferenceFormat": false,
+              "containsPreviousPublicSummary": false
+            }
+          ],
+          "selectedInstructionClassifications": [],
+          "privateTextNotCopied": true
+        },
+        "actualEffectCount": 0
+      },
+      {
+        "id": "cc186f00-4c72-4afa-8a87-fb4dd771141d",
+        "bot_id": "e1d81813-1ff0-4fca-9948-d966e1a77189",
+        "conversation_id": "7f08d20f-73d8-4507-a26f-dfbc64d6529e",
+        "source": "group-member",
+        "status": "succeeded",
+        "message_id": "64dfe9f4-0a15-4d2d-b9fc-97b266b273f2",
+        "error": null,
+        "modelRequests": 2,
+        "unknownUsage": 0,
+        "structuralProof": {
+          "runId": "cc186f00-4c72-4afa-8a87-fb4dd771141d",
+          "messageTypes": {
+            "HumanMessage": 12,
+            "AIMessageChunk": 2,
+            "ToolMessage": 1
+          },
+          "modelToolNames": [
+            "send_group_message"
+          ],
+          "toolResultClassifications": [
+            {
+              "name": "send_group_message",
+              "containsSavedPreferenceId": false,
+              "containsSavedPreferenceCode": false,
+              "containsSavedPreferenceFormat": false,
+              "containsPreviousPublicSummary": false
+            }
+          ],
+          "selectedInstructionClassifications": [
+            {
+              "hasAcceptedSkillId": true,
+              "hasPinnedVersion3": true,
+              "hasActualWorkflowInstruction": true
+            }
+          ],
+          "privateTextNotCopied": true
+        },
+        "actualEffectCount": 0
+      },
+      {
+        "id": "ad879dad-e50c-4c82-a3e1-516febcf0485",
+        "bot_id": "e1d81813-1ff0-4fca-9948-d966e1a77189",
+        "conversation_id": "7f08d20f-73d8-4507-a26f-dfbc64d6529e",
+        "source": "group-member",
+        "status": "succeeded",
+        "message_id": "62694f9d-f09f-4b5f-a45f-4d0488d530f6",
+        "error": null,
+        "modelRequests": 2,
+        "unknownUsage": 0,
+        "structuralProof": {
+          "runId": "ad879dad-e50c-4c82-a3e1-516febcf0485",
+          "messageTypes": {
+            "HumanMessage": 12,
+            "AIMessageChunk": 2,
+            "ToolMessage": 1
+          },
+          "modelToolNames": [
+            "send_group_message"
+          ],
+          "toolResultClassifications": [
+            {
+              "name": "send_group_message",
+              "containsSavedPreferenceId": false,
+              "containsSavedPreferenceCode": false,
+              "containsSavedPreferenceFormat": false,
+              "containsPreviousPublicSummary": false
+            }
+          ],
+          "selectedInstructionClassifications": [
+            {
+              "hasAcceptedSkillId": true,
+              "hasPinnedVersion3": true,
+              "hasActualWorkflowInstruction": true
+            }
+          ],
+          "privateTextNotCopied": true
+        },
+        "actualEffectCount": 0
+      },
+      {
+        "id": "555d45df-6808-4f35-92f7-29e698be9ba9",
+        "bot_id": "924e1689-7b6d-411c-a429-28decb91b179",
+        "conversation_id": "7f08d20f-73d8-4507-a26f-dfbc64d6529e",
+        "source": "group-member",
+        "status": "succeeded",
+        "message_id": "62694f9d-f09f-4b5f-a45f-4d0488d530f6",
+        "error": null,
+        "modelRequests": 2,
+        "unknownUsage": 0,
+        "structuralProof": {
+          "runId": "555d45df-6808-4f35-92f7-29e698be9ba9",
+          "messageTypes": {
+            "HumanMessage": 12,
+            "AIMessageChunk": 2,
+            "ToolMessage": 1
+          },
+          "modelToolNames": [
+            "send_group_message"
+          ],
+          "toolResultClassifications": [
+            {
+              "name": "send_group_message",
+              "containsSavedPreferenceId": false,
+              "containsSavedPreferenceCode": false,
+              "containsSavedPreferenceFormat": false,
+              "containsPreviousPublicSummary": false
+            }
+          ],
+          "selectedInstructionClassifications": [],
+          "privateTextNotCopied": true
+        },
+        "actualEffectCount": 0
+      },
+      {
+        "id": "222a1882-88ff-41d3-a4dc-cdcd92fb6e08",
+        "bot_id": "924e1689-7b6d-411c-a429-28decb91b179",
+        "conversation_id": "7f08d20f-73d8-4507-a26f-dfbc64d6529e",
+        "source": "group-member",
+        "status": "succeeded",
+        "message_id": "e665fba4-85d7-4f33-8f09-e94900658683",
+        "error": null,
+        "modelRequests": 2,
+        "unknownUsage": 0,
+        "structuralProof": {
+          "runId": "222a1882-88ff-41d3-a4dc-cdcd92fb6e08",
+          "messageTypes": {
+            "HumanMessage": 12,
+            "AIMessageChunk": 2,
+            "ToolMessage": 1
+          },
+          "modelToolNames": [
+            "send_group_message"
+          ],
+          "toolResultClassifications": [
+            {
+              "name": "send_group_message",
+              "containsSavedPreferenceId": false,
+              "containsSavedPreferenceCode": false,
+              "containsSavedPreferenceFormat": false,
+              "containsPreviousPublicSummary": false
+            }
+          ],
+          "selectedInstructionClassifications": [],
+          "privateTextNotCopied": true
+        },
+        "actualEffectCount": 0
+      },
+      {
+        "id": "73127aab-6d6d-40ac-a2f6-1ae4b6e0d049",
+        "bot_id": "e1d81813-1ff0-4fca-9948-d966e1a77189",
+        "conversation_id": "7f08d20f-73d8-4507-a26f-dfbc64d6529e",
+        "source": "group-member",
+        "status": "succeeded",
+        "message_id": "e665fba4-85d7-4f33-8f09-e94900658683",
+        "error": null,
+        "modelRequests": 1,
+        "unknownUsage": 0,
+        "structuralProof": {
+          "runId": "73127aab-6d6d-40ac-a2f6-1ae4b6e0d049",
+          "messageTypes": {
+            "HumanMessage": 12,
+            "AIMessageChunk": 1
+          },
+          "modelToolNames": [],
+          "toolResultClassifications": [],
+          "selectedInstructionClassifications": [
+            {
+              "hasAcceptedSkillId": true,
+              "hasPinnedVersion3": true,
+              "hasActualWorkflowInstruction": true
+            }
+          ],
+          "privateTextNotCopied": true
+        },
+        "actualEffectCount": 0
+      }
+    ],
+    "publicMessages": [
+      {
+        "id": "62694f9d-f09f-4b5f-a45f-4d0488d530f6",
+        "bot_id": "e1d81813-1ff0-4fca-9948-d966e1a77189",
+        "run_id": "cc186f00-4c72-4afa-8a87-fb4dd771141d",
+        "text": "286+47=333。@报价工具编程核验 请独立核对。"
+      },
+      {
+        "id": "e665fba4-85d7-4f33-8f09-e94900658683",
+        "bot_id": "924e1689-7b6d-411c-a429-28decb91b179",
+        "run_id": "555d45df-6808-4f35-92f7-29e698be9ba9",
+        "text": "独立核对：286+47=333，结论正确。"
+      }
+    ],
+    "finiteNamedCalculationAndIndependentVerificationPassed": true
+  },
+  "groupFollowup": {
+    "id": "35c5a8f5-00c6-44b3-8cbc-ce59a0523dd9",
+    "status": "completed",
+    "round": 1,
+    "total_messages": 2,
+    "input": "？",
+    "acceptedSelections": [],
+    "runs": [
+      {
+        "id": "e25254e0-e264-47f2-b122-1e4a610c7699",
+        "bot_id": "924e1689-7b6d-411c-a429-28decb91b179",
+        "conversation_id": "7f08d20f-73d8-4507-a26f-dfbc64d6529e",
+        "source": "group-member",
+        "status": "succeeded",
+        "message_id": "35c5a8f5-00c6-44b3-8cbc-ce59a0523dd9",
+        "error": null,
+        "modelRequests": 2,
+        "unknownUsage": 0,
+        "structuralProof": {
+          "runId": "e25254e0-e264-47f2-b122-1e4a610c7699",
+          "messageTypes": {
+            "HumanMessage": 15,
+            "AIMessageChunk": 2,
+            "ToolMessage": 1
+          },
+          "modelToolNames": [
+            "send_group_message"
+          ],
+          "toolResultClassifications": [
+            {
+              "name": "send_group_message",
+              "containsSavedPreferenceId": false,
+              "containsSavedPreferenceCode": false,
+              "containsSavedPreferenceFormat": false,
+              "containsPreviousPublicSummary": false
+            }
+          ],
+          "selectedInstructionClassifications": [],
+          "privateTextNotCopied": true
+        },
+        "actualEffectCount": 0
+      },
+      {
+        "id": "493c4aa9-43a0-42ff-8317-f0a66c8fd10a",
+        "bot_id": "e1d81813-1ff0-4fca-9948-d966e1a77189",
+        "conversation_id": "7f08d20f-73d8-4507-a26f-dfbc64d6529e",
+        "source": "group-member",
+        "status": "succeeded",
+        "message_id": "931f11ad-c115-4aca-90b3-fccc1054f1f5",
+        "error": null,
+        "modelRequests": 2,
+        "unknownUsage": 0,
+        "structuralProof": {
+          "runId": "493c4aa9-43a0-42ff-8317-f0a66c8fd10a",
+          "messageTypes": {
+            "HumanMessage": 15,
+            "AIMessageChunk": 2,
+            "ToolMessage": 1
+          },
+          "modelToolNames": [
+            "send_group_message"
+          ],
+          "toolResultClassifications": [
+            {
+              "name": "send_group_message",
+              "containsSavedPreferenceId": false,
+              "containsSavedPreferenceCode": false,
+              "containsSavedPreferenceFormat": false,
+              "containsPreviousPublicSummary": false
+            }
+          ],
+          "selectedInstructionClassifications": [],
+          "privateTextNotCopied": true
+        },
+        "actualEffectCount": 0
+      },
+      {
+        "id": "cd9075b5-b85b-4664-a8f7-73ba229e1844",
+        "bot_id": "e1d81813-1ff0-4fca-9948-d966e1a77189",
+        "conversation_id": "7f08d20f-73d8-4507-a26f-dfbc64d6529e",
+        "source": "group-member",
+        "status": "succeeded",
+        "message_id": "5866fae3-d775-4ff0-9e77-b0bba86bd163",
+        "error": null,
+        "modelRequests": 2,
+        "unknownUsage": 0,
+        "structuralProof": {
+          "runId": "cd9075b5-b85b-4664-a8f7-73ba229e1844",
+          "messageTypes": {
+            "HumanMessage": 15,
+            "AIMessageChunk": 2,
+            "ToolMessage": 1
+          },
+          "modelToolNames": [
+            "send_group_message"
+          ],
+          "toolResultClassifications": [
+            {
+              "name": "send_group_message",
+              "containsSavedPreferenceId": false,
+              "containsSavedPreferenceCode": false,
+              "containsSavedPreferenceFormat": false,
+              "containsPreviousPublicSummary": false
+            }
+          ],
+          "selectedInstructionClassifications": [],
+          "privateTextNotCopied": true
+        },
+        "actualEffectCount": 0
+      },
+      {
+        "id": "1dda189f-6f4b-45b1-b98a-6e03d53f660c",
+        "bot_id": "924e1689-7b6d-411c-a429-28decb91b179",
+        "conversation_id": "7f08d20f-73d8-4507-a26f-dfbc64d6529e",
+        "source": "group-member",
+        "status": "succeeded",
+        "message_id": "5866fae3-d775-4ff0-9e77-b0bba86bd163",
+        "error": null,
+        "modelRequests": 2,
+        "unknownUsage": 0,
+        "structuralProof": {
+          "runId": "1dda189f-6f4b-45b1-b98a-6e03d53f660c",
+          "messageTypes": {
+            "HumanMessage": 15,
+            "AIMessageChunk": 2,
+            "ToolMessage": 1
+          },
+          "modelToolNames": [
+            "send_group_message"
+          ],
+          "toolResultClassifications": [
+            {
+              "name": "send_group_message",
+              "containsSavedPreferenceId": false,
+              "containsSavedPreferenceCode": false,
+              "containsSavedPreferenceFormat": false,
+              "containsPreviousPublicSummary": false
+            }
+          ],
+          "selectedInstructionClassifications": [],
+          "privateTextNotCopied": true
+        },
+        "actualEffectCount": 0
+      }
+    ],
+    "publicMessages": [
+      {
+        "id": "931f11ad-c115-4aca-90b3-fccc1054f1f5",
+        "bot_id": "924e1689-7b6d-411c-a429-28decb91b179",
+        "run_id": "e25254e0-e264-47f2-b122-1e4a610c7699",
+        "text": "独立核对：286+47=333。"
+      },
+      {
+        "id": "5866fae3-d775-4ff0-9e77-b0bba86bd163",
+        "bot_id": "e1d81813-1ff0-4fca-9948-d966e1a77189",
+        "run_id": "493c4aa9-43a0-42ff-8317-f0a66c8fd10a",
+        "text": "按所选技能计算：286+47=333，与独立核对结果一致。"
+      }
+    ],
+    "finiteContextFollowupPassed": false,
+    "difference": "Both members repeated previous assigned roles, not one contextual explanation. No read_message call; no selected skill inherited into this follow-up. Original failure and checkpoints retained."
+  },
+  "officialGrok": {
+    "sameCreationInput": true,
+    "createdBotName": "结果核对助手",
+    "linkedCreationResult": true,
+    "newChatWelcomeObserved": true,
+    "optionalQuestionObserved": "你最想让我核对哪类结果？",
+    "difference": "CMB gives one brief role-appropriate welcome; Grok also asks an optional preference question. Not full onboarding or identical wording parity.",
+    "earlierBareFollowup": "这轮完成了：我用「技能状态核验」算出 286 + 47 = 333，新 Bot 核对后确认正确。还要接着测别的吗？",
+    "earlierEvidence": "current-context-followup-and-created-role.safe.json"
+  },
+  "cold": {
+    "descriptor": {
+      "version": 1,
+      "pid": 84475,
+      "hostId": "7c123354-e83e-444b-933a-38a30e8b3044",
+      "buildId": "07aac09d6b9d845f2a988953",
+      "socketPath": "/private/tmp/cmb-bot-501-4b987f56222e7e971f75407b/rpc.sock"
+    },
+    "selectedRuns": 137,
+    "checkpointPayloadBytesHashed": 15706757,
+    "logicalGroupsEqual": {
+      "runs": true,
+      "effects": true,
+      "interactions": true,
+      "artifacts": true,
+      "artifactObjects": true,
+      "peerDispatch": true,
+      "peerWaits": true,
+      "checkpoints": true,
+      "skills": true,
+      "project": true
+    },
+    "extraTablesEqual": {
+      "bot_memories": true,
+      "bot_memory_metadata": true,
+      "bot_model_usage": true,
+      "bot_group_cycles": true,
+      "bot_group_runs": true
+    },
+    "schemaBefore": 71,
+    "schemaAfter": 71,
+    "legacyMemberOrderEqual": true,
+    "modelNormalizedFingerprintMatched": true,
+    "forceKillUsed": false
+  },
+  "sourceGates": {
+    "owning": {
+      "files": 4,
+      "passed": 28,
+      "log": "/tmp/cmb-created-opening-owning-20261010.log"
+    },
+    "actualSdk": {
+      "passed": 3,
+      "unselected": 327,
+      "log": "/tmp/cmb-created-opening-sdk-20261010.log"
+    },
+    "node": {
+      "passed": true,
+      "log": "/tmp/cmb-created-opening-node-20261010.log"
+    },
+    "lint": {
+      "passed": true,
+      "log": "/tmp/cmb-created-opening-lint-20261010.log"
+    },
+    "productionBuild": {
+      "passed": true,
+      "log": "/tmp/cmb-created-opening-build-20261010.log"
+    }
+  },
+  "coreParityComplete": false,
+  "independentInstallerAccepted": false,
+  "privateModelReasoningNotCopied": true
+}

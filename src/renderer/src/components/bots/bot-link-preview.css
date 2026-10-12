@@ -1,0 +1,89 @@
+.bot-link-preview-wrap {
+  margin-top: 10px;
+  width: min(400px, 100%);
+}
+.bot-link-preview-card {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  box-sizing: border-box;
+  width: 100%;
+  height: 126px;
+  padding: 14px 16px;
+  border: 1px solid color-mix(in srgb, var(--foreground, #171717) 10%, transparent);
+  border-radius: 16px;
+  background: color-mix(in srgb, var(--foreground, #171717) 3%, var(--background, #fff));
+  color: var(--foreground, #171717);
+  text-decoration: none;
+  transition: border-color 140ms ease;
+}
+.bot-link-preview-card:hover {
+  background: color-mix(in srgb, var(--foreground, #171717) 6%, var(--background, #fff));
+  border-color: color-mix(in srgb, var(--foreground, #171717) 18%, transparent);
+}
+.bot-link-preview-card:focus-visible {
+  outline: 2px solid var(--ring, #888);
+  outline-offset: 3px;
+}
+.bot-link-preview-content {
+  min-width: 0;
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+.bot-link-preview-title {
+  font-size: 14px;
+  line-height: 18px;
+  font-weight: 600;
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  overflow: hidden;
+  overflow-wrap: anywhere;
+}
+.bot-link-preview-description {
+  color: var(--muted-foreground, #777);
+  font-size: 12px;
+  line-height: 16px;
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  overflow: hidden;
+  overflow-wrap: anywhere;
+}
+.bot-link-preview-origin {
+  display: flex;
+  gap: 5px;
+  align-items: center;
+  font-size: 11px;
+  line-height: 14px;
+  color: var(--muted-foreground, #777);
+}
+.bot-link-preview-origin span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.bot-link-preview-thumbnail {
+  height: 78px;
+  width: 78px;
+  flex: none;
+  overflow: hidden;
+  border-radius: 9px;
+  background: color-mix(in srgb, var(--foreground, #171717) 6%, transparent);
+}
+.bot-link-preview-thumbnail img {
+  height: 100%;
+  width: 100%;
+  object-fit: cover;
+}
+.bot-link-preview-open-error {
+  font-size: 12px;
+  color: var(--destructive, #c43737);
+}
+@media (prefers-reduced-motion: reduce) {
+  .bot-link-preview-card {
+    transition: none;
+  }
+}

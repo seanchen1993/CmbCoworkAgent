@@ -9,6 +9,7 @@ import {
   collectUnfinishedTodos,
   createTurnCompletionGateMiddleware,
   describeTurnCompletionFailure,
+  isCompleteTextFinishSignal,
   inspectFinalAssistantMessage,
   readFinishSignal,
   readTurnCompletionGateReport,
@@ -240,6 +241,19 @@ describe("final message inspection", () => {
     expect(readFinishSignal(aiMessage("x", { stop_reason: "end_turn" }))).toBe("end_turn")
     expect(readFinishSignal(aiMessage("x", { done_reason: "stop" }))).toBe("stop")
     expect(readFinishSignal(aiMessage("x"))).toBeNull()
+  })
+
+  it.each([
+    ["finish_reason", "stop"],
+    ["finishReason", "STOP"],
+    ["stop_reason", "end_turn"],
+    ["stop_reason", "stop_sequence"],
+    ["done_reason", "stop"]
+  ])("recognizes complete text under provider metadata %s=%s", (key, signal) => {
+    for (const field of ["response_metadata", "additional_kwargs"]) {
+      const message = new AIMessage({ content: "complete", [field]: { [key]: signal } })
+      expect(isCompleteTextFinishSignal(readFinishSignal(message))).toBe(true)
+    }
   })
 })
 

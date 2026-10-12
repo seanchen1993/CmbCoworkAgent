@@ -1,0 +1,770 @@
+{
+  "kind": "actual-background-current-assignment-retest",
+  "observedAtMs": 1791625939954,
+  "compiledOutputIdentity": "19f3858533652299ef203d73",
+  "compiledOutputSha256": "19f3858533652299ef203d73dd67c8ade898a6e42b090251f5e128118f1d4927",
+  "buildId": "4812259bb0c41145c6044e94",
+  "schema": 72,
+  "hostId": "c2c07504-90e3-4b11-acff-3ac1ebe3afb3",
+  "before": {
+    "kind": "new-background-once-before-dispatch",
+    "observedAtMs": 1791625205113,
+    "setupRun": {
+      "id": "3920be83-f821-4a02-b5b9-205cb6248ed1",
+      "status": "succeeded",
+      "created_at": 1791625067436,
+      "updated_at": 1791625121096
+    },
+    "routine": {
+      "id": "99740926-883f-41d3-a593-6881a73aae4e",
+      "name": "BACKGROUND_CORE_FIX_20261010",
+      "enabled": 1,
+      "next_at": 1791625247000,
+      "revision": 1,
+      "timezone": "Asia/Shanghai"
+    },
+    "compiledOutputIdentity": "19f3858533652299ef203d73",
+    "buildId": "4812259bb0c41145c6044e94",
+    "appMainPresent": false,
+    "ownedProcessRoles": [
+      "host"
+    ],
+    "memoryFingerprintsBefore": {
+      "bot_memories": {
+        "rows": 9,
+        "sha256": "d21327c34521fcbe5989cc498c56aef9bda4f271be075fdb07d143c68982f948"
+      },
+      "bot_memory_metadata": {
+        "rows": 9,
+        "sha256": "18da05afcb1fccbff92a82fd985a2af6b702780502ed4989a22e15e8a3cdc5cf"
+      }
+    },
+    "pin": "/Users/chenqiang/Library/Application Support/CMBDevClaw-development/2026-10-08/presentation/cold-ui-output-plan/pins-post-start-pre-review-1791625205106089000.safe.json"
+  },
+  "appAbsent": {
+    "observedAtMs": 1791625307080,
+    "appMainPresent": false,
+    "ownedProcessRoles": [
+      "host"
+    ],
+    "runs": [
+      {
+        "id": "1e40fff2-a0dd-4480-ab82-0536cbc18397",
+        "status": "succeeded",
+        "source": "routine:99740926-883f-41d3-a593-6881a73aae4e",
+        "created_at": 1791625247587,
+        "updated_at": 1791625250860
+      }
+    ],
+    "routineState": {
+      "id": "99740926-883f-41d3-a593-6881a73aae4e",
+      "enabled": 0,
+      "next_at": null,
+      "revision": 2
+    }
+  },
+  "explicitRelaunch": {
+    "kind": "explicit-relaunch-same-frozen-app-existing-host",
+    "mainPid": 26813,
+    "hostPidBefore": 26365,
+    "hostFingerprintVerified": true,
+    "outputIdentity": "19f3858533652299ef203d73",
+    "buildId": "4812259bb0c41145c6044e94",
+    "lastMainLogWriteBeforeRelaunchMs": 1791625148243,
+    "relaunchAtMs": 1791625315247,
+    "taskExplicitlySent": false,
+    "privateDataRewritten": false,
+    "modelExplicitlyCalled": false,
+    "authPolicyChanged": false,
+    "frozenPrivateDevelopmentFixtureOnly": true
+  },
+  "nativeObservedFinal": "BACKGROUND_CORE_FIX_20261010",
+  "nativeDisplayedSingleLine": true,
+  "rawFormatMetadata": {
+    "id": "a03e1af8-d190-4265-8a09-34864cf6c300",
+    "sender": "bot",
+    "run_id": "1e40fff2-a0dd-4480-ab82-0536cbc18397",
+    "characters": 30,
+    "exactRequestedText": 0,
+    "requestedTextAfterWhitespaceTrim": 1,
+    "leadingTwoLf": 1
+  },
+  "memoryFingerprintsUnchanged": true,
+  "scheduledAtJitterMs": 587,
+  "scheduledExecutionElapsedMs": 3273,
+  "modelUsageMetadata": [
+    {
+      "model": "MiniMax-M3",
+      "purpose": "task",
+      "input_tokens": 21374,
+      "output_tokens": 63,
+      "created_at": 1791625247853,
+      "settled_at": 1791625250783
+    }
+  ],
+  "mutatingEffectCount": 0,
+  "artifactCount": 0,
+  "coldPreservation": {
+    "kind": "routine-current-input-cold-preservation",
+    "descriptor": {
+      "version": 1,
+      "pid": 26365,
+      "hostId": "c2c07504-90e3-4b11-acff-3ac1ebe3afb3",
+      "buildId": "4812259bb0c41145c6044e94",
+      "socketPath": "/private/tmp/cmb-bot-501-4b987f56222e7e971f75407b/rpc.sock"
+    },
+    "selectedRuns": 191,
+    "checkpointPayloadBytesHashed": 18643804,
+    "logicalGroupsEqual": {
+      "runs": true,
+      "effects": true,
+      "interactions": true,
+      "artifacts": true,
+      "artifactObjects": true,
+      "peerDispatch": true,
+      "peerWaits": true,
+      "checkpoints": true,
+      "skills": true,
+      "project": true
+    },
+    "extraTablesEqual": {
+      "bot_memories": true,
+      "bot_memory_metadata": true,
+      "bot_model_usage": true,
+      "bot_group_cycles": true,
+      "bot_group_runs": true,
+      "bot_introduction_questions": true
+    },
+    "schemaBefore": 72,
+    "schemaAfter": 72,
+    "legacyMemberOrderEqual": true,
+    "migrationBackupNames": [
+      "bots-v71-1791609309097-53e16352-2d16-41dd-863c-915dd2b338fd.sqlite"
+    ],
+    "beforeExtra": {
+      "bot_memories": {
+        "rows": 9,
+        "bytes": 4377,
+        "sha256": "d21327c34521fcbe5989cc498c56aef9bda4f271be075fdb07d143c68982f948"
+      },
+      "bot_memory_metadata": {
+        "rows": 9,
+        "bytes": 3035,
+        "sha256": "18da05afcb1fccbff92a82fd985a2af6b702780502ed4989a22e15e8a3cdc5cf"
+      },
+      "bot_model_usage": {
+        "rows": 1388,
+        "bytes": 511183,
+        "sha256": "7ae1c02ff760c10371fd3dedb4eb88a312b74e990ca7e2a3fa42a739b37a5b44"
+      },
+      "bot_group_cycles": {
+        "rows": 30,
+        "bytes": 16703,
+        "sha256": "9c65545fc8b6ea2b75522308e6b5f69b4656ccf4c2220375521cd1f8f71f98ef"
+      },
+      "bot_group_runs": {
+        "rows": 152,
+        "bytes": 17481,
+        "sha256": "7cbbbfe1ab4ad9eb207ccbafd9f83d71ea22a33d3a7b594e06167f3539b6baa2"
+      },
+      "bot_introduction_questions": {
+        "rows": 3,
+        "bytes": 2161,
+        "sha256": "562eb643f0f4a3f840b1124d1cc702257d9eacac366f9d4ded63eddb5f8186b2"
+      }
+    },
+    "afterExtra": {
+      "bot_memories": {
+        "rows": 9,
+        "bytes": 4377,
+        "sha256": "d21327c34521fcbe5989cc498c56aef9bda4f271be075fdb07d143c68982f948"
+      },
+      "bot_memory_metadata": {
+        "rows": 9,
+        "bytes": 3035,
+        "sha256": "18da05afcb1fccbff92a82fd985a2af6b702780502ed4989a22e15e8a3cdc5cf"
+      },
+      "bot_model_usage": {
+        "rows": 1388,
+        "bytes": 511183,
+        "sha256": "7ae1c02ff760c10371fd3dedb4eb88a312b74e990ca7e2a3fa42a739b37a5b44"
+      },
+      "bot_group_cycles": {
+        "rows": 30,
+        "bytes": 16703,
+        "sha256": "9c65545fc8b6ea2b75522308e6b5f69b4656ccf4c2220375521cd1f8f71f98ef"
+      },
+      "bot_group_runs": {
+        "rows": 152,
+        "bytes": 17481,
+        "sha256": "7cbbbfe1ab4ad9eb207ccbafd9f83d71ea22a33d3a7b594e06167f3539b6baa2"
+      },
+      "bot_introduction_questions": {
+        "rows": 3,
+        "bytes": 2161,
+        "sha256": "562eb643f0f4a3f840b1124d1cc702257d9eacac366f9d4ded63eddb5f8186b2"
+      }
+    },
+    "modelRuntimePathReplacementsOnly": 2,
+    "modelNormalizedFingerprintMatched": true,
+    "otherConfigurationEqual": {
+      "custom-models.json": true,
+      ".env": true,
+      "userinfo-models.json": true,
+      "bot-host/workspace.private.json": true
+    },
+    "captureBatches": {
+      "live-before-stop": [
+        {
+          "receipt": "/Users/chenqiang/Library/Application Support/CMBDevClaw-development/2026-10-08/presentation/cold-ui-output-plan/pins-live-before-stop-1791624959039071000.safe.json",
+          "sha256": "46874bfc57e0f6a7fe4240485f6a326bc192b740a1ac3ca9c3b0e4353d868284",
+          "phase": "live-before-stop",
+          "runs": 8,
+          "checkpointPayloadBytesHashed": 300217
+        },
+        {
+          "receipt": "/Users/chenqiang/Library/Application Support/CMBDevClaw-development/2026-10-08/presentation/cold-ui-output-plan/pins-live-before-stop-1791624959135630000.safe.json",
+          "sha256": "5ddcee00251297436f64c62d817b14b790e19657dae559b81061f3cff9d778d6",
+          "phase": "live-before-stop",
+          "runs": 8,
+          "checkpointPayloadBytesHashed": 396996
+        },
+        {
+          "receipt": "/Users/chenqiang/Library/Application Support/CMBDevClaw-development/2026-10-08/presentation/cold-ui-output-plan/pins-live-before-stop-1791624959230169000.safe.json",
+          "sha256": "1d925ee39a0a5fba25d5dc2108741e98733be7932f43c8c7223f74e8d67da4e8",
+          "phase": "live-before-stop",
+          "runs": 8,
+          "checkpointPayloadBytesHashed": 476086
+        },
+        {
+          "receipt": "/Users/chenqiang/Library/Application Support/CMBDevClaw-development/2026-10-08/presentation/cold-ui-output-plan/pins-live-before-stop-1791624959326158000.safe.json",
+          "sha256": "bc3034d96d04d66ccf857c44e82936515aae068d446a971d084b6a96c342e181",
+          "phase": "live-before-stop",
+          "runs": 8,
+          "checkpointPayloadBytesHashed": 481337
+        },
+        {
+          "receipt": "/Users/chenqiang/Library/Application Support/CMBDevClaw-development/2026-10-08/presentation/cold-ui-output-plan/pins-live-before-stop-1791624959432166000.safe.json",
+          "sha256": "5a9be016adbb079f7b736e514170b5be6d483dafcf6a5ce55d361fe4151bdeab",
+          "phase": "live-before-stop",
+          "runs": 8,
+          "checkpointPayloadBytesHashed": 1212726
+        },
+        {
+          "receipt": "/Users/chenqiang/Library/Application Support/CMBDevClaw-development/2026-10-08/presentation/cold-ui-output-plan/pins-live-before-stop-1791624959537434000.safe.json",
+          "sha256": "e16e966085c8522641a9c72085d7698e0213bf60d457dce9f549c7103b6c7e6e",
+          "phase": "live-before-stop",
+          "runs": 8,
+          "checkpointPayloadBytesHashed": 961461
+        },
+        {
+          "receipt": "/Users/chenqiang/Library/Application Support/CMBDevClaw-development/2026-10-08/presentation/cold-ui-output-plan/pins-live-before-stop-1791624959633686000.safe.json",
+          "sha256": "b8707aabfa15712fa8380bd1bc31653f5acaf70cea71bccaa8248ad95e285925",
+          "phase": "live-before-stop",
+          "runs": 8,
+          "checkpointPayloadBytesHashed": 351596
+        },
+        {
+          "receipt": "/Users/chenqiang/Library/Application Support/CMBDevClaw-development/2026-10-08/presentation/cold-ui-output-plan/pins-live-before-stop-1791624959725239000.safe.json",
+          "sha256": "0d214ac5651b4ea3d8cef06ac98e9f54569579f95fe5ee54e9d52384e43b78de",
+          "phase": "live-before-stop",
+          "runs": 8,
+          "checkpointPayloadBytesHashed": 312304
+        },
+        {
+          "receipt": "/Users/chenqiang/Library/Application Support/CMBDevClaw-development/2026-10-08/presentation/cold-ui-output-plan/pins-live-before-stop-1791624959822134000.safe.json",
+          "sha256": "bc78dc0d4aa379dd2aaa48f9833cc6b190a4ecf469f4d259353e5eac9455cfd3",
+          "phase": "live-before-stop",
+          "runs": 8,
+          "checkpointPayloadBytesHashed": 742745
+        },
+        {
+          "receipt": "/Users/chenqiang/Library/Application Support/CMBDevClaw-development/2026-10-08/presentation/cold-ui-output-plan/pins-live-before-stop-1791624959921986000.safe.json",
+          "sha256": "3092e32df393c3d013080a3391b1ad86b9416235514e8a84798e3e234457f42f",
+          "phase": "live-before-stop",
+          "runs": 8,
+          "checkpointPayloadBytesHashed": 793414
+        },
+        {
+          "receipt": "/Users/chenqiang/Library/Application Support/CMBDevClaw-development/2026-10-08/presentation/cold-ui-output-plan/pins-live-before-stop-1791624960014943000.safe.json",
+          "sha256": "885cf372a6ad4844d10ab01a48bd56c1f4fbf366f97e7b6f71d8255da65839ed",
+          "phase": "live-before-stop",
+          "runs": 8,
+          "checkpointPayloadBytesHashed": 382204
+        },
+        {
+          "receipt": "/Users/chenqiang/Library/Application Support/CMBDevClaw-development/2026-10-08/presentation/cold-ui-output-plan/pins-live-before-stop-1791624960132471000.safe.json",
+          "sha256": "0b8663eb3574f91485c70d01c71f4b10a8a18c0a2433f7f3aa7b7ab6c7aea994",
+          "phase": "live-before-stop",
+          "runs": 8,
+          "checkpointPayloadBytesHashed": 2780846
+        },
+        {
+          "receipt": "/Users/chenqiang/Library/Application Support/CMBDevClaw-development/2026-10-08/presentation/cold-ui-output-plan/pins-live-before-stop-1791624960224728000.safe.json",
+          "sha256": "89f51cc7efe974b6dccb17a9ac953bf456789ba028472a8e038c1ef579a34058",
+          "phase": "live-before-stop",
+          "runs": 8,
+          "checkpointPayloadBytesHashed": 321306
+        },
+        {
+          "receipt": "/Users/chenqiang/Library/Application Support/CMBDevClaw-development/2026-10-08/presentation/cold-ui-output-plan/pins-live-before-stop-1791624960316469000.safe.json",
+          "sha256": "7c6781db65e75449b3bd41473096ff9905d5f788e2d1ee9fedb3e5b8f8d39ec9",
+          "phase": "live-before-stop",
+          "runs": 8,
+          "checkpointPayloadBytesHashed": 418590
+        },
+        {
+          "receipt": "/Users/chenqiang/Library/Application Support/CMBDevClaw-development/2026-10-08/presentation/cold-ui-output-plan/pins-live-before-stop-1791624960433282000.safe.json",
+          "sha256": "7311fd93a04c0c1939077d44d59c8fcf916df764d409b199476559cfcb38c410",
+          "phase": "live-before-stop",
+          "runs": 8,
+          "checkpointPayloadBytesHashed": 4641637
+        },
+        {
+          "receipt": "/Users/chenqiang/Library/Application Support/CMBDevClaw-development/2026-10-08/presentation/cold-ui-output-plan/pins-live-before-stop-1791624960529968000.safe.json",
+          "sha256": "4d7b9abd1a437412fc080ab9ec3e24f8fd67d9c5695e1acd32752d41bd428744",
+          "phase": "live-before-stop",
+          "runs": 8,
+          "checkpointPayloadBytesHashed": 357514
+        },
+        {
+          "receipt": "/Users/chenqiang/Library/Application Support/CMBDevClaw-development/2026-10-08/presentation/cold-ui-output-plan/pins-live-before-stop-1791624960628924000.safe.json",
+          "sha256": "b38c39d59225a8794f76c9fce7cf9c7670891c4423ad6329ea7462045dcb9350",
+          "phase": "live-before-stop",
+          "runs": 8,
+          "checkpointPayloadBytesHashed": 589891
+        },
+        {
+          "receipt": "/Users/chenqiang/Library/Application Support/CMBDevClaw-development/2026-10-08/presentation/cold-ui-output-plan/pins-live-before-stop-1791624960729579000.safe.json",
+          "sha256": "647523e96a3d94f79b1b4ac95bc7645ee2f4953c4e76b70f1eb7fb05c6a4de47",
+          "phase": "live-before-stop",
+          "runs": 8,
+          "checkpointPayloadBytesHashed": 298402
+        },
+        {
+          "receipt": "/Users/chenqiang/Library/Application Support/CMBDevClaw-development/2026-10-08/presentation/cold-ui-output-plan/pins-live-before-stop-1791624960822492000.safe.json",
+          "sha256": "2b6641b44ba1b4926f01079a13032724de9492626bf19238142410c558041565",
+          "phase": "live-before-stop",
+          "runs": 8,
+          "checkpointPayloadBytesHashed": 653823
+        },
+        {
+          "receipt": "/Users/chenqiang/Library/Application Support/CMBDevClaw-development/2026-10-08/presentation/cold-ui-output-plan/pins-live-before-stop-1791624960915418000.safe.json",
+          "sha256": "574c3fa2dc9fb15b6aeb6de75f11160e614204f02fc8a93bf650d8c55f1a199d",
+          "phase": "live-before-stop",
+          "runs": 8,
+          "checkpointPayloadBytesHashed": 568756
+        },
+        {
+          "receipt": "/Users/chenqiang/Library/Application Support/CMBDevClaw-development/2026-10-08/presentation/cold-ui-output-plan/pins-live-before-stop-1791624961008216000.safe.json",
+          "sha256": "52786834c0df69c11ad3835b8af0d1a8eba4c80b093c427e075b90db8c8486b9",
+          "phase": "live-before-stop",
+          "runs": 8,
+          "checkpointPayloadBytesHashed": 547153
+        },
+        {
+          "receipt": "/Users/chenqiang/Library/Application Support/CMBDevClaw-development/2026-10-08/presentation/cold-ui-output-plan/pins-live-before-stop-1791624961098829000.safe.json",
+          "sha256": "cb1f6c495bde7b7bae2b7c76fa8d55a4b4407fa78463e595857773924660527b",
+          "phase": "live-before-stop",
+          "runs": 8,
+          "checkpointPayloadBytesHashed": 268854
+        },
+        {
+          "receipt": "/Users/chenqiang/Library/Application Support/CMBDevClaw-development/2026-10-08/presentation/cold-ui-output-plan/pins-live-before-stop-1791624961186362000.safe.json",
+          "sha256": "0aff32f3d36ae8e16e8d58a5b48498d901f736e785a2d0621706ad7175b5a837",
+          "phase": "live-before-stop",
+          "runs": 8,
+          "checkpointPayloadBytesHashed": 184821
+        },
+        {
+          "receipt": "/Users/chenqiang/Library/Application Support/CMBDevClaw-development/2026-10-08/presentation/cold-ui-output-plan/pins-live-before-stop-1791624961277032000.safe.json",
+          "sha256": "09fa9722304aeb0f5226fc1225771dafae36ef45aea10c99cd4282fa3039034c",
+          "phase": "live-before-stop",
+          "runs": 7,
+          "checkpointPayloadBytesHashed": 601125
+        }
+      ],
+      "quiesced-before-start": [
+        {
+          "receipt": "/Users/chenqiang/Library/Application Support/CMBDevClaw-development/2026-10-08/presentation/cold-ui-output-plan/pins-quiesced-before-start-1791624997371159000.safe.json",
+          "sha256": "36604b90c2d215d97b9dc85cff5d41ded0a25f59a9e066afd066acc83e3f93dd",
+          "phase": "quiesced-before-start",
+          "runs": 8,
+          "checkpointPayloadBytesHashed": 300217
+        },
+        {
+          "receipt": "/Users/chenqiang/Library/Application Support/CMBDevClaw-development/2026-10-08/presentation/cold-ui-output-plan/pins-quiesced-before-start-1791624997491899000.safe.json",
+          "sha256": "ae4a965dca3abb3808c83d40a8a0add57a2b7d4ce63972f0e21b186aa6ca96ff",
+          "phase": "quiesced-before-start",
+          "runs": 8,
+          "checkpointPayloadBytesHashed": 396996
+        },
+        {
+          "receipt": "/Users/chenqiang/Library/Application Support/CMBDevClaw-development/2026-10-08/presentation/cold-ui-output-plan/pins-quiesced-before-start-1791624997621552000.safe.json",
+          "sha256": "51ed7222ba7130c558da5e2f68a99b5a313167901252bb8cd417df50bbc848ec",
+          "phase": "quiesced-before-start",
+          "runs": 8,
+          "checkpointPayloadBytesHashed": 476086
+        },
+        {
+          "receipt": "/Users/chenqiang/Library/Application Support/CMBDevClaw-development/2026-10-08/presentation/cold-ui-output-plan/pins-quiesced-before-start-1791624997739039000.safe.json",
+          "sha256": "4e140f1167b3548f56daf14a3deca7716d546f98b33550eafa9df091725d56d2",
+          "phase": "quiesced-before-start",
+          "runs": 8,
+          "checkpointPayloadBytesHashed": 481337
+        },
+        {
+          "receipt": "/Users/chenqiang/Library/Application Support/CMBDevClaw-development/2026-10-08/presentation/cold-ui-output-plan/pins-quiesced-before-start-1791624997856419000.safe.json",
+          "sha256": "04ea894b3fdfe2eb8c30303ad33b27093e25492368f286daf88e16acbf576903",
+          "phase": "quiesced-before-start",
+          "runs": 8,
+          "checkpointPayloadBytesHashed": 1212726
+        },
+        {
+          "receipt": "/Users/chenqiang/Library/Application Support/CMBDevClaw-development/2026-10-08/presentation/cold-ui-output-plan/pins-quiesced-before-start-1791624997974364000.safe.json",
+          "sha256": "ddd940abed74f6fdd3a2bc066ebf8cd9cb6ff0d6609f271b55b3c49ed49dc74e",
+          "phase": "quiesced-before-start",
+          "runs": 8,
+          "checkpointPayloadBytesHashed": 961461
+        },
+        {
+          "receipt": "/Users/chenqiang/Library/Application Support/CMBDevClaw-development/2026-10-08/presentation/cold-ui-output-plan/pins-quiesced-before-start-1791624998087751000.safe.json",
+          "sha256": "512d70c305c2ca678aa49ae628b36aab40d7ef42f519d791c13ee4ba786fe402",
+          "phase": "quiesced-before-start",
+          "runs": 8,
+          "checkpointPayloadBytesHashed": 351596
+        },
+        {
+          "receipt": "/Users/chenqiang/Library/Application Support/CMBDevClaw-development/2026-10-08/presentation/cold-ui-output-plan/pins-quiesced-before-start-1791624998203349000.safe.json",
+          "sha256": "2304a7c618b4cce84a635bf33be133de4d3764855744dcdbc1459476fd04c00f",
+          "phase": "quiesced-before-start",
+          "runs": 8,
+          "checkpointPayloadBytesHashed": 312304
+        },
+        {
+          "receipt": "/Users/chenqiang/Library/Application Support/CMBDevClaw-development/2026-10-08/presentation/cold-ui-output-plan/pins-quiesced-before-start-1791624998323886000.safe.json",
+          "sha256": "c87c7bb27d827a6a6edc823f4d2d92d816af14e1228385a675fa4162bc697671",
+          "phase": "quiesced-before-start",
+          "runs": 8,
+          "checkpointPayloadBytesHashed": 742745
+        },
+        {
+          "receipt": "/Users/chenqiang/Library/Application Support/CMBDevClaw-development/2026-10-08/presentation/cold-ui-output-plan/pins-quiesced-before-start-1791624998443384000.safe.json",
+          "sha256": "7175321c695265b0de22f25b340e7ae32bcd559e1e1c23fb804d39570db3d329",
+          "phase": "quiesced-before-start",
+          "runs": 8,
+          "checkpointPayloadBytesHashed": 793414
+        },
+        {
+          "receipt": "/Users/chenqiang/Library/Application Support/CMBDevClaw-development/2026-10-08/presentation/cold-ui-output-plan/pins-quiesced-before-start-1791624998552654000.safe.json",
+          "sha256": "7fc4c10423dc366303ac9d0b45784c348be06879f1c2aeeec3897752dc645c9e",
+          "phase": "quiesced-before-start",
+          "runs": 8,
+          "checkpointPayloadBytesHashed": 382204
+        },
+        {
+          "receipt": "/Users/chenqiang/Library/Application Support/CMBDevClaw-development/2026-10-08/presentation/cold-ui-output-plan/pins-quiesced-before-start-1791624998669184000.safe.json",
+          "sha256": "c2248496f016cd21081675d98dfeb96a3636a0b9cf5d89ed872d1b1e32000d0a",
+          "phase": "quiesced-before-start",
+          "runs": 8,
+          "checkpointPayloadBytesHashed": 2780846
+        },
+        {
+          "receipt": "/Users/chenqiang/Library/Application Support/CMBDevClaw-development/2026-10-08/presentation/cold-ui-output-plan/pins-quiesced-before-start-1791624998793432000.safe.json",
+          "sha256": "e9518d9efbe03fe28ea67b167054a83367094ab924f9facb2e1b65d1736f8789",
+          "phase": "quiesced-before-start",
+          "runs": 8,
+          "checkpointPayloadBytesHashed": 321306
+        },
+        {
+          "receipt": "/Users/chenqiang/Library/Application Support/CMBDevClaw-development/2026-10-08/presentation/cold-ui-output-plan/pins-quiesced-before-start-1791624998910320000.safe.json",
+          "sha256": "85679d97bc30a4c4d3de3cff239c8269f014e7bdb3cde0ee86d4f90f6eec7057",
+          "phase": "quiesced-before-start",
+          "runs": 8,
+          "checkpointPayloadBytesHashed": 418590
+        },
+        {
+          "receipt": "/Users/chenqiang/Library/Application Support/CMBDevClaw-development/2026-10-08/presentation/cold-ui-output-plan/pins-quiesced-before-start-1791624999029883000.safe.json",
+          "sha256": "fe8234db00547e2dc2f5ad732281a7ffac185cf47683f296475c418ed929032e",
+          "phase": "quiesced-before-start",
+          "runs": 8,
+          "checkpointPayloadBytesHashed": 4641637
+        },
+        {
+          "receipt": "/Users/chenqiang/Library/Application Support/CMBDevClaw-development/2026-10-08/presentation/cold-ui-output-plan/pins-quiesced-before-start-1791624999141569000.safe.json",
+          "sha256": "28e56bbab9340cf86a8531e3687efb768e91887a02ce9c15764d0508b1022d2a",
+          "phase": "quiesced-before-start",
+          "runs": 8,
+          "checkpointPayloadBytesHashed": 357514
+        },
+        {
+          "receipt": "/Users/chenqiang/Library/Application Support/CMBDevClaw-development/2026-10-08/presentation/cold-ui-output-plan/pins-quiesced-before-start-1791624999255437000.safe.json",
+          "sha256": "ae85bf2296e14cc2487913a614c817334e5979b6f8c8c1634b99c1d97a898dc8",
+          "phase": "quiesced-before-start",
+          "runs": 8,
+          "checkpointPayloadBytesHashed": 589891
+        },
+        {
+          "receipt": "/Users/chenqiang/Library/Application Support/CMBDevClaw-development/2026-10-08/presentation/cold-ui-output-plan/pins-quiesced-before-start-1791624999364562000.safe.json",
+          "sha256": "d8cce965d773ab9a04e255a2d7306e921ce77b1d8349f7997882251a46faa39b",
+          "phase": "quiesced-before-start",
+          "runs": 8,
+          "checkpointPayloadBytesHashed": 298402
+        },
+        {
+          "receipt": "/Users/chenqiang/Library/Application Support/CMBDevClaw-development/2026-10-08/presentation/cold-ui-output-plan/pins-quiesced-before-start-1791624999473862000.safe.json",
+          "sha256": "31ec29071f03fdd190446c7987a8d4d4b114e01e2d9cdf5aec10c4327b0f1008",
+          "phase": "quiesced-before-start",
+          "runs": 8,
+          "checkpointPayloadBytesHashed": 653823
+        },
+        {
+          "receipt": "/Users/chenqiang/Library/Application Support/CMBDevClaw-development/2026-10-08/presentation/cold-ui-output-plan/pins-quiesced-before-start-1791624999581946000.safe.json",
+          "sha256": "5c1f12a72f2681a68288b76d60e14452ab97bd0ffafd9420fc89b3eb5fad1db5",
+          "phase": "quiesced-before-start",
+          "runs": 8,
+          "checkpointPayloadBytesHashed": 568756
+        },
+        {
+          "receipt": "/Users/chenqiang/Library/Application Support/CMBDevClaw-development/2026-10-08/presentation/cold-ui-output-plan/pins-quiesced-before-start-1791624999689903000.safe.json",
+          "sha256": "05f2cd563f4d481bac8da7ba0208594ac59155ed3c8ec9b1719e704bccad7bb4",
+          "phase": "quiesced-before-start",
+          "runs": 8,
+          "checkpointPayloadBytesHashed": 547153
+        },
+        {
+          "receipt": "/Users/chenqiang/Library/Application Support/CMBDevClaw-development/2026-10-08/presentation/cold-ui-output-plan/pins-quiesced-before-start-1791624999797163000.safe.json",
+          "sha256": "15269f107428c0de63d8cd5804331402bcd1c3354482bfe2fdf72417f58751c4",
+          "phase": "quiesced-before-start",
+          "runs": 8,
+          "checkpointPayloadBytesHashed": 268854
+        },
+        {
+          "receipt": "/Users/chenqiang/Library/Application Support/CMBDevClaw-development/2026-10-08/presentation/cold-ui-output-plan/pins-quiesced-before-start-1791624999903805000.safe.json",
+          "sha256": "fb5fe28f9e71905b3abeab5afd3d760c2d05313fa07c5f5ceeb89984279beab2",
+          "phase": "quiesced-before-start",
+          "runs": 8,
+          "checkpointPayloadBytesHashed": 184821
+        },
+        {
+          "receipt": "/Users/chenqiang/Library/Application Support/CMBDevClaw-development/2026-10-08/presentation/cold-ui-output-plan/pins-quiesced-before-start-1791625000013156000.safe.json",
+          "sha256": "8ec4f61879917a6cfbf4ff1c9eccd9ee5f08b646230aa4b7d8cfca3aa480c453",
+          "phase": "quiesced-before-start",
+          "runs": 7,
+          "checkpointPayloadBytesHashed": 601125
+        }
+      ],
+      "post-start-pre-review": [
+        {
+          "receipt": "/Users/chenqiang/Library/Application Support/CMBDevClaw-development/2026-10-08/presentation/cold-ui-output-plan/pins-post-start-pre-review-1791625035981790000.safe.json",
+          "sha256": "549f8aa32f52b5b151918e91b8da32bc0ac22d25d5317ee1fa39b6c37f8e067f",
+          "phase": "post-start-pre-review",
+          "runs": 8,
+          "checkpointPayloadBytesHashed": 300217
+        },
+        {
+          "receipt": "/Users/chenqiang/Library/Application Support/CMBDevClaw-development/2026-10-08/presentation/cold-ui-output-plan/pins-post-start-pre-review-1791625036069310000.safe.json",
+          "sha256": "6c4871b15fc490a247228ab7cfa9bd8d44e20e31272c9090b324960ea31ce7b3",
+          "phase": "post-start-pre-review",
+          "runs": 8,
+          "checkpointPayloadBytesHashed": 396996
+        },
+        {
+          "receipt": "/Users/chenqiang/Library/Application Support/CMBDevClaw-development/2026-10-08/presentation/cold-ui-output-plan/pins-post-start-pre-review-1791625036155999000.safe.json",
+          "sha256": "00a66ff9f0dc18f20f0e35c8a9e1891dfb9be81fd2f6a44f70eaff1fc383811b",
+          "phase": "post-start-pre-review",
+          "runs": 8,
+          "checkpointPayloadBytesHashed": 476086
+        },
+        {
+          "receipt": "/Users/chenqiang/Library/Application Support/CMBDevClaw-development/2026-10-08/presentation/cold-ui-output-plan/pins-post-start-pre-review-1791625036244789000.safe.json",
+          "sha256": "7329317e09864573d8d0337e71e6035e7feca9386285344daa2e7428991f1b53",
+          "phase": "post-start-pre-review",
+          "runs": 8,
+          "checkpointPayloadBytesHashed": 481337
+        },
+        {
+          "receipt": "/Users/chenqiang/Library/Application Support/CMBDevClaw-development/2026-10-08/presentation/cold-ui-output-plan/pins-post-start-pre-review-1791625036337619000.safe.json",
+          "sha256": "8b1768f990ca551f015a4e466869977015edc272ae13fd9f74102ddf03d09f11",
+          "phase": "post-start-pre-review",
+          "runs": 8,
+          "checkpointPayloadBytesHashed": 1212726
+        },
+        {
+          "receipt": "/Users/chenqiang/Library/Application Support/CMBDevClaw-development/2026-10-08/presentation/cold-ui-output-plan/pins-post-start-pre-review-1791625036430483000.safe.json",
+          "sha256": "7d05c3063f97a417cd1fca9a897d172b96896cf6cbefdac21355f4a51558f4e2",
+          "phase": "post-start-pre-review",
+          "runs": 8,
+          "checkpointPayloadBytesHashed": 961461
+        },
+        {
+          "receipt": "/Users/chenqiang/Library/Application Support/CMBDevClaw-development/2026-10-08/presentation/cold-ui-output-plan/pins-post-start-pre-review-1791625036518525000.safe.json",
+          "sha256": "5628dbef8e1a1214c3c68da4ca4d3db8e96bef5c4e4efe2f47fcdcc1eeef16a0",
+          "phase": "post-start-pre-review",
+          "runs": 8,
+          "checkpointPayloadBytesHashed": 351596
+        },
+        {
+          "receipt": "/Users/chenqiang/Library/Application Support/CMBDevClaw-development/2026-10-08/presentation/cold-ui-output-plan/pins-post-start-pre-review-1791625036606314000.safe.json",
+          "sha256": "b887f6ff5c7de864d3518347af142d154eb074ed86c41f4b6c87cbbd100971af",
+          "phase": "post-start-pre-review",
+          "runs": 8,
+          "checkpointPayloadBytesHashed": 312304
+        },
+        {
+          "receipt": "/Users/chenqiang/Library/Application Support/CMBDevClaw-development/2026-10-08/presentation/cold-ui-output-plan/pins-post-start-pre-review-1791625036695528000.safe.json",
+          "sha256": "3ec2d173f34e352cfd909ecd73189110a7bf260b2a12896925ec1d709237635a",
+          "phase": "post-start-pre-review",
+          "runs": 8,
+          "checkpointPayloadBytesHashed": 742745
+        },
+        {
+          "receipt": "/Users/chenqiang/Library/Application Support/CMBDevClaw-development/2026-10-08/presentation/cold-ui-output-plan/pins-post-start-pre-review-1791625036785115000.safe.json",
+          "sha256": "a0c7fd75bbfdf681c8ca187371e39591d77ab42e0aa6a1bf815d0e387ebf062a",
+          "phase": "post-start-pre-review",
+          "runs": 8,
+          "checkpointPayloadBytesHashed": 793414
+        },
+        {
+          "receipt": "/Users/chenqiang/Library/Application Support/CMBDevClaw-development/2026-10-08/presentation/cold-ui-output-plan/pins-post-start-pre-review-1791625036875420000.safe.json",
+          "sha256": "58f15797592f7917da60bda379a01051a1ccdedbcd269c6175d04787c33086a2",
+          "phase": "post-start-pre-review",
+          "runs": 8,
+          "checkpointPayloadBytesHashed": 382204
+        },
+        {
+          "receipt": "/Users/chenqiang/Library/Application Support/CMBDevClaw-development/2026-10-08/presentation/cold-ui-output-plan/pins-post-start-pre-review-1791625036974714000.safe.json",
+          "sha256": "45ea2c2567592728c909b487f5cdc9cf86c111910c636c156b6b580497272be1",
+          "phase": "post-start-pre-review",
+          "runs": 8,
+          "checkpointPayloadBytesHashed": 2780846
+        },
+        {
+          "receipt": "/Users/chenqiang/Library/Application Support/CMBDevClaw-development/2026-10-08/presentation/cold-ui-output-plan/pins-post-start-pre-review-1791625037063944000.safe.json",
+          "sha256": "5a024fc6d55c85a969c2340ba030eaa0090cd49ecbf3be8a0a4eafef0a8172d2",
+          "phase": "post-start-pre-review",
+          "runs": 8,
+          "checkpointPayloadBytesHashed": 321306
+        },
+        {
+          "receipt": "/Users/chenqiang/Library/Application Support/CMBDevClaw-development/2026-10-08/presentation/cold-ui-output-plan/pins-post-start-pre-review-1791625037152849000.safe.json",
+          "sha256": "0e5aed831d24e2004f5f8b751e1941e4ef859304b66cda9320838f6d693283e7",
+          "phase": "post-start-pre-review",
+          "runs": 8,
+          "checkpointPayloadBytesHashed": 418590
+        },
+        {
+          "receipt": "/Users/chenqiang/Library/Application Support/CMBDevClaw-development/2026-10-08/presentation/cold-ui-output-plan/pins-post-start-pre-review-1791625037248546000.safe.json",
+          "sha256": "fcb902a39f006446ae56ebd1b994b0f101097abddc6eed673310fff9413ed833",
+          "phase": "post-start-pre-review",
+          "runs": 8,
+          "checkpointPayloadBytesHashed": 4641637
+        },
+        {
+          "receipt": "/Users/chenqiang/Library/Application Support/CMBDevClaw-development/2026-10-08/presentation/cold-ui-output-plan/pins-post-start-pre-review-1791625037342855000.safe.json",
+          "sha256": "6cf993ab9917bfcf239c1fd257221b056129d8e041e85cfda1ef6cde9586132e",
+          "phase": "post-start-pre-review",
+          "runs": 8,
+          "checkpointPayloadBytesHashed": 357514
+        },
+        {
+          "receipt": "/Users/chenqiang/Library/Application Support/CMBDevClaw-development/2026-10-08/presentation/cold-ui-output-plan/pins-post-start-pre-review-1791625037441955000.safe.json",
+          "sha256": "3279a0ed25da2da91a2d72fadd6ace74d252376c17086afd7ed33bfa07ae0a82",
+          "phase": "post-start-pre-review",
+          "runs": 8,
+          "checkpointPayloadBytesHashed": 589891
+        },
+        {
+          "receipt": "/Users/chenqiang/Library/Application Support/CMBDevClaw-development/2026-10-08/presentation/cold-ui-output-plan/pins-post-start-pre-review-1791625037530900000.safe.json",
+          "sha256": "dbaed0679327ea32fca4f5d6a5fa5f67e35a4c4fe734bcaecd3ec909cd66b5e5",
+          "phase": "post-start-pre-review",
+          "runs": 8,
+          "checkpointPayloadBytesHashed": 298402
+        },
+        {
+          "receipt": "/Users/chenqiang/Library/Application Support/CMBDevClaw-development/2026-10-08/presentation/cold-ui-output-plan/pins-post-start-pre-review-1791625037620947000.safe.json",
+          "sha256": "ccf3c61af2d9abe1316685950e2cea263b63142d51ef0dfe64c4493ad307f33f",
+          "phase": "post-start-pre-review",
+          "runs": 8,
+          "checkpointPayloadBytesHashed": 653823
+        },
+        {
+          "receipt": "/Users/chenqiang/Library/Application Support/CMBDevClaw-development/2026-10-08/presentation/cold-ui-output-plan/pins-post-start-pre-review-1791625037709199000.safe.json",
+          "sha256": "33bec1682c30d86a8af670b94029b6e4c55a7e54c962450b189cf979a1e04a49",
+          "phase": "post-start-pre-review",
+          "runs": 8,
+          "checkpointPayloadBytesHashed": 568756
+        },
+        {
+          "receipt": "/Users/chenqiang/Library/Application Support/CMBDevClaw-development/2026-10-08/presentation/cold-ui-output-plan/pins-post-start-pre-review-1791625037799961000.safe.json",
+          "sha256": "50c9dea9d6e0bc1cd6ae0c6141d868d15483179436a4a28dead178471e5e4ad0",
+          "phase": "post-start-pre-review",
+          "runs": 8,
+          "checkpointPayloadBytesHashed": 547153
+        },
+        {
+          "receipt": "/Users/chenqiang/Library/Application Support/CMBDevClaw-development/2026-10-08/presentation/cold-ui-output-plan/pins-post-start-pre-review-1791625037890237000.safe.json",
+          "sha256": "c4327140eb3b0c436a9057d52cb2c1703cad9fa6ee864debce2e6e92462a9ead",
+          "phase": "post-start-pre-review",
+          "runs": 8,
+          "checkpointPayloadBytesHashed": 268854
+        },
+        {
+          "receipt": "/Users/chenqiang/Library/Application Support/CMBDevClaw-development/2026-10-08/presentation/cold-ui-output-plan/pins-post-start-pre-review-1791625037984940000.safe.json",
+          "sha256": "5c13078ecb0ea04b0b283f97d22b24e70e301496c3cb054f817f3c733a98676d",
+          "phase": "post-start-pre-review",
+          "runs": 8,
+          "checkpointPayloadBytesHashed": 184821
+        },
+        {
+          "receipt": "/Users/chenqiang/Library/Application Support/CMBDevClaw-development/2026-10-08/presentation/cold-ui-output-plan/pins-post-start-pre-review-1791625038072284000.safe.json",
+          "sha256": "95f5028649d671ebbc00ea243e6715d958a9e0ac7fc72f6fdfe2902871eb9dde",
+          "phase": "post-start-pre-review",
+          "runs": 7,
+          "checkpointPayloadBytesHashed": 601125
+        }
+      ]
+    },
+    "normalExits": [
+      {
+        "role": "main",
+        "method": "SIGTERM-normal-Electron-quit",
+        "exited": true,
+        "verifiedAppProcessesGone": true,
+        "hostBrowserLifecycleRetained": true
+      },
+      {
+        "role": "host",
+        "pid": 23886,
+        "signal": "SIGTERM",
+        "exited": true,
+        "seconds": 0.08
+      }
+    ],
+    "forceKillUsed": false,
+    "coreParityComplete": false
+  },
+  "gates": {
+    "promptAuthorityAndRoutineOutcomes": 42,
+    "actualGraphContractChecks": 3,
+    "nodeTypes": true,
+    "strictLint": true,
+    "messagesRegression": true,
+    "build": true
+  },
+  "originalFailureRetained": "current-background-once-delivery-failure.safe.json",
+  "comparison": {
+    "officialOriginalMarkerObserved": true,
+    "officialSecondMarkerObserved": false,
+    "officialSecondRoutineSeenEnabled": true,
+    "officialSecondPendingNotAssumedFailed": true,
+    "deliveryContentAlignedFiniteSample": true,
+    "rawFormatFullyAligned": false
+  },
+  "followup": {
+    "sourceSeparatorAndOnceUiFixed": true,
+    "notYetInstalledOrNativeRetested": true,
+    "rawProviderAndCheckpointNeverModified": true
+  },
+  "coreParityComplete": false
+}

@@ -12,6 +12,11 @@
 import { readFile } from "fs/promises"
 import { join, resolve } from "path"
 import { isCoordinatorWorkerStreamChunk } from "../src/main/agent/main-turn-stream"
+import {
+  getRuntimeTimeContext,
+  renderRuntimeTimeContextLines
+} from "../src/main/agent/runtime-time-context"
+import { normalizeHarnessAgentConfig } from "../src/main/harness-board/agent-context-core"
 
 const PROJECT_ROOT = resolve(__dirname, "..")
 
@@ -188,7 +193,7 @@ async function testRendererSendsAgentMode(): Promise<void> {
     'conciseModeEnabled: nextStyle === "concise"',
     "new output style writes preserve legacy concise compatibility"
   )
-  const runtime = await readProjectFile("src/main/agent/runtime.ts")
+  const runtime = (await readProjectFile("src/main/agent/runtime.ts")) + "\n" + (await readProjectFile("src/main/agent/deep-agent-core.ts"))
   assertIncludes(
     runtime,
     'agentMode === "normal"',
@@ -2327,6 +2332,9 @@ async function testMainResolvesAndPersistsMode(): Promise<void> {
     "src/main/agent/coordinator-worker-manager.ts"
   )
   const harnessBoardService = await readProjectFile("src/main/harness-board/service.ts")
+  const harnessAgentContextCore = await readProjectFile(
+    "src/main/harness-board/agent-context-core.ts"
+  )
   const threadsListHandler = threadsIpc.slice(
     threadsIpc.indexOf('ipcMain.handle("threads:list"'),
     threadsIpc.indexOf("// Get a single thread")
@@ -2337,15 +2345,30 @@ async function testMainResolvesAndPersistsMode(): Promise<void> {
     "listing threads never runs full Harness context resolution or plugin session injection"
   )
   assertIncludes(
-    harnessBoardService,
+    harnessAgentContextCore,
     'HarnessRuntimeAgentMode = "solo" | "multi" | "agent_team" | "workflow"',
     "Harness agent configuration can select workflow mode"
   )
   assertIncludes(
-    harnessBoardService,
-    'value.agentMode === "workflow"',
-    "session_context_inject normalization accepts workflow mode"
+    sliceBetween(harnessBoardService, "import {", '} from "./agent-context-core"'),
+    "normalizeHarnessAgentConfig",
+    "Harness service imports the shared agent configuration parser"
   )
+  assertIncludes(
+    harnessBoardService,
+    "const agentConfig = normalizeHarnessAgentConfig(result.agentConfig)",
+    "session_context_inject delegates its returned configuration to the shared parser"
+  )
+  for (const agentMode of ["solo", "multi", "agent_team", "workflow"] as const)
+    assert(
+      normalizeHarnessAgentConfig({ agentMode })?.agentMode === agentMode,
+      `shared session_context_inject normalization accepts ${agentMode} mode`
+    )
+  for (const agentMode of ["normal", "coordinator", "unknown", " workflow ", 0, null])
+    assert(
+      normalizeHarnessAgentConfig({ agentMode }) === undefined,
+      `shared session_context_inject normalization rejects invalid mode ${String(agentMode)}`
+    )
   assertIncludes(
     threadService,
     'if (initialAgentMode === "multi")',
@@ -2565,7 +2588,7 @@ async function testWorkspaceSwitchGuardsRunningCoordinatorWorkers(): Promise<voi
 }
 
 async function testRuntimeKeepsNormalAndCoordinatorSeparate(): Promise<void> {
-  const runtime = await readProjectFile("src/main/agent/runtime.ts")
+  const runtime = (await readProjectFile("src/main/agent/runtime.ts")) + "\n" + (await readProjectFile("src/main/agent/deep-agent-core.ts"))
   const coordinatorMode = await readProjectFile("src/main/agent/coordinator-mode.ts")
   const workerManager = await readProjectFile("src/main/agent/coordinator-worker-manager.ts")
   const workerAccess = await readProjectFile("src/main/agent/coordinator-worker-access.ts")
@@ -2598,6 +2621,13 @@ async function testRuntimeKeepsNormalAndCoordinatorSeparate(): Promise<void> {
   assertIncludes(runtime, "getRuntimeTimeContext()", "runtime creates shared time context")
   assertIncludes(
     runtime,
+    "renderRuntimeTimeContextLines(timeContext",
+    "runtime renders the shared time context"
+  )
+  assertIncludes(
+    renderRuntimeTimeContextLines(getRuntimeTimeContext(new Date("2026-10-04T00:00:00Z"), "UTC"), {
+      includeTimestampRule: true
+    }),
     "Timestamp rule: Do not invent dates or timestamps",
     "runtime subagent prompt time rule"
   )
@@ -2988,30 +3018,28 @@ async function testRuntimeKeepsNormalAndCoordinatorSeparate(): Promise<void> {
     "runtimeTool.invoke(input, config)",
     "owned_files write-tool wrapper preserves LangChain tool runtime/config"
   )
-  const localSandbox = await readProjectFile("src/main/agent/local-sandbox.ts")
-  assertIncludes(
-    localSandbox,
+  const localSandbox = await readProjectFile("src/main/agent/local-sandbox-core.ts")
+  const assertSandboxIncludes = (expected: string, label: string) =>
+    assertIncludes(localSandbox.replace(/\s+/g, " "), expected.replace(/\s+/g, " "), label)
+  assertSandboxIncludes(
     'if (this.isAborted) {\n      return { error: "文件写入已取消。" }',
     "local sandbox rechecks cancellation after write approval before writing"
   )
-  assertIncludes(
-    localSandbox,
+  assertSandboxIncludes(
     'if (preResult?.blocked) {\n      return { error: `[Hook blocked] ${preResult.stdout || "write_file was blocked by a hook"}` }\n    }\n    if (this.isAborted) {\n      return { error: "文件写入已取消。" }\n    }',
     "local sandbox checks cancellation after write PreToolUse hook before resolving/writing"
   )
-  assertIncludes(
-    localSandbox,
+  assertSandboxIncludes(
     'if (this.isAborted) {\n      return { error: "文件编辑已取消。" }',
     "local sandbox rechecks cancellation after edit approval before editing"
   )
-  assertIncludes(
-    localSandbox,
+  assertSandboxIncludes(
     'if (preResult?.blocked) {\n      return { error: `[Hook blocked] ${preResult.stdout || "edit_file was blocked by a hook"}` }\n    }\n    if (this.isAborted) {\n      return { error: "文件编辑已取消。" }\n    }',
     "local sandbox checks cancellation after edit PreToolUse hook before reading/writing"
   )
   assertSourceOrder(
-    localSandbox,
-    'if (this.isAborted) {\n          return { error: "文件编辑已取消。" }',
+    localSandbox.replace(/\s+/g, " "),
+    'if (this.isAborted) { return { error: "文件编辑已取消。" }',
     "await this.writeFileEncoded(resolvedPath, expectedContent, encoding)",
     "local sandbox checks cancellation immediately before encoded edit write"
   )
@@ -3302,8 +3330,8 @@ async function testRuntimeKeepsNormalAndCoordinatorSeparate(): Promise<void> {
     "runtime passes current time into coordinator prompt"
   )
   assertIncludes(
-    runtime,
-    "Current time: ${timeContext.currentTime}",
+    renderRuntimeTimeContextLines(getRuntimeTimeContext(new Date("2026-10-04T00:00:00Z"), "UTC")),
+    "Current time: 2026-10-04T00:00:00+00:00",
     "runtime keeps subagent time format aligned with normal mode"
   )
   assertIncludes(
@@ -3446,7 +3474,7 @@ async function testRuntimeKeepsNormalAndCoordinatorSeparate(): Promise<void> {
 }
 
 async function testHookAgentIdentityPlumbing(): Promise<void> {
-  const runtime = await readProjectFile("src/main/agent/runtime.ts")
+  const runtime = (await readProjectFile("src/main/agent/runtime.ts")) + "\n" + (await readProjectFile("src/main/agent/deep-agent-core.ts"))
   const workflowSubagent = await readProjectFile("src/main/agent/workflow/subagent.ts")
   const agentIpc = await readProjectFile("src/main/ipc/agent.ts")
   const subagentContext = await readProjectFile("src/main/hooks/subagent-context.ts")

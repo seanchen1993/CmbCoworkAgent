@@ -5,12 +5,21 @@ import { Button } from "@/components/ui/button"
 interface PDFViewerProps {
   filePath: string
   sourceUrl: string
+  /** Attachment dialogs already own the file title and authenticated save action. */
+  embedded?: boolean
+  onDownload?: () => void
 }
 
-export function PDFViewer({ filePath, sourceUrl }: PDFViewerProps): React.JSX.Element {
-  const fileName = filePath.split("/").pop() || filePath
+export function PDFViewer({
+  filePath,
+  sourceUrl,
+  embedded,
+  onDownload
+}: PDFViewerProps): React.JSX.Element {
+  const fileName = filePath.split(/[\\/]/).pop() || filePath
 
   const handleOpenExternal = (): void => {
+    if (onDownload) return onDownload()
     // Open in system default PDF viewer
     const link = document.createElement("a")
     link.href = sourceUrl
@@ -20,19 +29,20 @@ export function PDFViewer({ filePath, sourceUrl }: PDFViewerProps): React.JSX.El
 
   return (
     <div className="flex flex-1 flex-col min-h-0 overflow-hidden">
-      {/* Header */}
-      <div className="flex items-center justify-between gap-2 px-4 py-2 border-b border-border bg-background/50 shrink-0">
-        <div className="flex items-center gap-2 text-xs text-muted-foreground overflow-hidden">
-          <span className="truncate">{fileName}</span>
-          <span className="text-muted-foreground/50">•</span>
-          <span>PDF Document</span>
-        </div>
+      {!embedded && (
+        <div className="flex items-center justify-between gap-2 px-4 py-2 border-b border-border bg-background/50 shrink-0">
+          <div className="flex items-center gap-2 text-xs text-muted-foreground overflow-hidden">
+            <span className="truncate">{fileName}</span>
+            <span className="text-muted-foreground/50">•</span>
+            <span>PDF 文档</span>
+          </div>
 
-        <Button variant="ghost" size="sm" onClick={handleOpenExternal} className="h-7 px-2 gap-1">
-          <ExternalLink className="size-3" />
-          <span className="text-xs">Download</span>
-        </Button>
-      </div>
+          <Button variant="ghost" size="sm" onClick={handleOpenExternal} className="h-7 px-2 gap-1">
+            <ExternalLink className="size-3" />
+            <span className="text-xs">保存原文件</span>
+          </Button>
+        </div>
+      )}
 
       {/* PDF embed */}
       <ScrollArea className="flex-1 min-h-0">
@@ -44,11 +54,11 @@ export function PDFViewer({ filePath, sourceUrl }: PDFViewerProps): React.JSX.El
               <div className="text-center">
                 <div className="font-medium text-foreground mb-2">{fileName}</div>
                 <div className="text-sm text-muted-foreground mb-4">
-                  PDF preview not available in this browser
+                  此文件无法预览，请保存原文件查看
                 </div>
                 <Button onClick={handleOpenExternal} variant="outline">
                   <ExternalLink className="size-4 mr-2" />
-                  Download PDF
+                  保存原文件
                 </Button>
               </div>
             </div>

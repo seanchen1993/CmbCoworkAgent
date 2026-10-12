@@ -4,6 +4,11 @@ import { ModCommandJobs } from "./ModCommandJobs"
 import { FunctionPanes } from "./FunctionPanes"
 import { useFunctionTurnNotices } from "@/lib/use-function-turn-notices"
 import { ModCards } from "./ModCards"
+import {
+  createModsThreadScope,
+  modsWorkspaceKey,
+  provideModsThreadScope
+} from "@/lib/mods-thread-scope"
 import { useHarnessNotifications } from "@/lib/harness-notifications"
 import { BizRetryDecisionCard } from "@/components/harness-board/BizRetryNotice"
 import React, {
@@ -256,8 +261,14 @@ import {
 } from "@/lib/chat-search-matches"
 import { createChatMessageProjector } from "@/lib/chat-message-projection"
 import { createChatSearchIndexer } from "@/lib/chat-search-indexer"
-import { createChatSearchPlan, appendChatSearchToolSummaries } from "../../../../shared/chat-search-plan"
-import { areChatSearchPlansEqual, type ChatSearchReveal } from "../../../../shared/chat-search-types"
+import {
+  createChatSearchPlan,
+  appendChatSearchToolSummaries
+} from "../../../../shared/chat-search-plan"
+import {
+  areChatSearchPlansEqual,
+  type ChatSearchReveal
+} from "../../../../shared/chat-search-types"
 import { getChatThreadProjectionRuntime } from "@/lib/chat-thread-projection-cache"
 import {
   chatScrollTailMessageIdentity,
@@ -1270,9 +1281,7 @@ function getHarnessFeatureBinding(thread: Thread | null | undefined): HarnessFea
   const projectId = typeof metadata.projectId === "string" ? metadata.projectId.trim() : ""
   const slug = typeof metadata.slug === "string" ? metadata.slug.trim() : ""
   const runId = typeof metadata.runId === "string" ? metadata.runId.trim() : ""
-  return projectId && slug
-    ? { projectId, slug, ...(runId ? { runId } : {}) }
-    : null
+  return projectId && slug ? { projectId, slug, ...(runId ? { runId } : {}) } : null
 }
 
 type HarnessPreferredPlugin = { id?: string; name?: string } | null
@@ -1669,10 +1678,15 @@ export function ChatContainer({
   readOnlyReason = null,
   onHarnessSessionCreated
 }: ChatContainerProps): React.JSX.Element {
-  const functionTurnNotices = useFunctionTurnNotices(threadId)
   const remoteThread = useAppStore(
     (state) => state.threads.find((thread) => thread.thread_id === threadId) ?? null
   )
+  const modsWorkspace = modsWorkspaceKey(remoteThread?.metadata?.workspacePath)
+  const modsScope = useMemo(
+    () => createModsThreadScope(threadId, modsWorkspace),
+    [threadId, modsWorkspace]
+  )
+  const functionTurnNotices = useFunctionTurnNotices(threadId, modsScope)
   const setGitWorkspaceStatus = useAppStore((state) => state.setGitWorkspaceStatus)
   const remoteThreadInfo = useMemo(() => getRemoteThreadDisplayInfo(remoteThread), [remoteThread])
   const resolvedReadOnlyReason =
@@ -1957,18 +1971,20 @@ export function ChatContainer({
   const bizRetryPending = Boolean(bizRetry)
   const bizRetryHumanGatePending = Boolean(
     bizRetry &&
-      appNotifications.some(
-        (item) =>
-          item.type === "human_gate" &&
-          item.status === "pending" &&
-          item.projectId === bizRetry.projectId &&
-          item.featureId === bizRetry.featureId
-      )
+    appNotifications.some(
+      (item) =>
+        item.type === "human_gate" &&
+        item.status === "pending" &&
+        item.projectId === bizRetry.projectId &&
+        item.featureId === bizRetry.featureId
+    )
   )
-  const humanGate = projectHumanGate(appNotifications.find(
-    (item) =>
-      item.type === "human_gate" && item.status === "pending" && item.sourceThreadId === threadId
-  ))
+  const humanGate = projectHumanGate(
+    appNotifications.find(
+      (item) =>
+        item.type === "human_gate" && item.status === "pending" && item.sourceThreadId === threadId
+    )
+  )
   const [humanGateDecisionBusy, setHumanGateDecisionBusy] = useState<"approve" | "reject" | null>(
     null
   )
@@ -1981,7 +1997,9 @@ export function ChatContainer({
     }
 
     let cancelled = false
-    const applyManagedRunStatus = (managedRun: HarnessRunDetailViewModel["run"]["managedRun"]): void => {
+    const applyManagedRunStatus = (
+      managedRun: HarnessRunDetailViewModel["run"]["managedRun"]
+    ): void => {
       if (cancelled) return
       setIsManagedRunSessionActive(
         managedRun?.status === "running" &&
@@ -2040,15 +2058,13 @@ export function ChatContainer({
     PROJECT_MODE_AGENT_TEAM_ENABLED
   )
   const disableWorkflowModeOption = false
-  const pendingHarnessNextActionVersion = useSyncExternalStore(
+  // The scalar store snapshot triggers renders; the per-thread Map lookup is cheap and pure.
+  useSyncExternalStore(
     subscribePendingHarnessNextActions,
     getPendingHarnessNextActionVersion,
     getPendingHarnessNextActionVersion
   )
-  const pendingHarnessNextAction = useMemo(
-    () => getPendingHarnessNextAction(threadId),
-    [pendingHarnessNextActionVersion, threadId]
-  )
+  const pendingHarnessNextAction = getPendingHarnessNextAction(threadId)
   const pendingHarnessDialogTips = pendingHarnessNextAction?.dialogTips?.trim() || null
 
   const resolveAgentMode = useCallback(
@@ -2297,8 +2313,7 @@ export function ChatContainer({
     draftBuiltinBrowser: selectedBuiltinBrowser,
     setDraftBuiltinBrowser: setSelectedBuiltinBrowser
   } = useCurrentThread(threadId)
-  const autoApproveGitPush =
-    pendingApproval?.operation === "git_push" && yoloModeLoaded && yoloMode
+  const autoApproveGitPush = pendingApproval?.operation === "git_push" && yoloModeLoaded && yoloMode
   const workspacePathRef = useRef(workspacePath)
   workspacePathRef.current = workspacePath
 
@@ -2310,8 +2325,7 @@ export function ChatContainer({
   const systemConstraintsPromptPreview = harnessAgentmdLoadStatus?.promptPreview?.trim()
   const showSystemConstraintsButton = surface === "harness-project"
   const showSystemPromptPreviewButton = Boolean(threadId) && systemPromptPreviewAllowed
-  const showComposerPromptSection =
-    showSystemPromptPreviewButton || showSystemConstraintsButton
+  const showComposerPromptSection = showSystemPromptPreviewButton || showSystemConstraintsButton
   const systemConstraintsTitle = systemConstraintsLoadFailed
     ? `系统约束未加载 ${systemConstraintCounts.loaded}/${systemConstraintCounts.total}，点击查看详情`
     : systemConstraintCounts.total > 0
@@ -2564,13 +2578,16 @@ export function ChatContainer({
       disableWorkflowModeOption,
       historyLoading,
       historyConversationPresence,
+      submitInFlightRef,
       threadId,
       threadMessages,
       patchThreadMetadata
     ]
   )
+  const userInputDialogHeight = userInputDialogLayout?.height
+  const userInputDialogTop = userInputDialogLayout?.top
   const userInputScrollPadding = pendingUserInput
-    ? Math.ceil((userInputDialogLayout?.height ?? 320) + 24)
+    ? Math.ceil((userInputDialogHeight ?? 320) + 24)
     : undefined
 
   const handleUserInputDialogLayoutChange = useCallback(
@@ -3437,13 +3454,7 @@ export function ChatContainer({
     return visibleBoundaryIndex === undefined
       ? null
       : (displayMessages[visibleBoundaryIndex]?.id ?? null)
-  }, [
-    displayMessageProjection.indexById,
-    displayMessages,
-    displayMessagesStructureVersion,
-    historyWindowGap,
-    visibleMessageIndexes
-  ])
+  }, [displayMessageProjection.indexById, displayMessages, historyWindowGap, visibleMessageIndexes])
   const lastVisibleMessageIndex = visibleMessageIndexes[visibleMessageIndexes.length - 1]
   const lastContentMessageId =
     lastVisibleMessageIndex === undefined
@@ -3863,9 +3874,9 @@ export function ChatContainer({
     },
     [
       buildSearchDocument,
+      displayMessageProjection.changedMessages,
       displayMessageProjection.indexById,
       displayMessages,
-      displayMessagesContentVersion,
       liveDisplayProjection,
       liveDisplayMessages,
       historyWindowGap,
@@ -4024,7 +4035,7 @@ export function ChatContainer({
       if (message) indexById.set(message.id, visibleIndex)
     })
     return indexById
-  }, [displayMessages, displayMessagesStructureVersion, visibleMessageIndexes])
+  }, [displayMessages, visibleMessageIndexes])
   const isMessageVirtualizationEnabled = shouldVirtualizeChatMessageList(
     visibleMessageIndexes.length
   )
@@ -4897,7 +4908,12 @@ export function ChatContainer({
 
   useEffect(() => {
     const state = chatScrollStateRef.current
-    if (!pendingUserInput || !userInputDialogLayout || !state || !shouldFollowChatOutput(state)) {
+    if (
+      !pendingUserInput ||
+      userInputDialogTop === undefined ||
+      !state ||
+      !shouldFollowChatOutput(state)
+    ) {
       return
     }
     const viewport = getViewport()
@@ -4919,7 +4935,7 @@ export function ChatContainer({
         ? contentMessageRefs.current.get(lastContentMessageId)
         : null
       const viewportRect = viewport.getBoundingClientRect()
-      const targetBottom = Math.max(viewportRect.top + 24, userInputDialogLayout.top - 12)
+      const targetBottom = Math.max(viewportRect.top + 24, userInputDialogTop - 12)
 
       if (targetElement) {
         const targetRect = targetElement.getBoundingClientRect()
@@ -4942,8 +4958,8 @@ export function ChatContainer({
     getViewport,
     lastContentMessageId,
     pendingUserInput,
-    userInputDialogLayout?.height,
-    userInputDialogLayout?.top
+    userInputDialogHeight,
+    userInputDialogTop
   ])
   // Focus input on mount
   useEffect(() => {
@@ -5018,7 +5034,7 @@ export function ChatContainer({
     threadMessages.length
   ])
 
-  const modCommands = useModCommands(threadId)
+  const modCommands = useModCommands(threadId, modsScope)
   const isModCommandInput = modCommands.handles(input.trim())
   const slash = useSlashCommands({
     input,
@@ -5130,7 +5146,6 @@ export function ChatContainer({
     goalUi.goal,
     hasPendingFilePayload,
     hasActiveGoalRunning,
-    goalControlAllowedWhileLoading,
     isLoading,
     resolvedReadOnlyReason,
     scheduledTaskLoading,
@@ -5335,6 +5350,7 @@ export function ChatContainer({
     setInput,
     setSelectedSkill,
     appendVisibleUserMessageWithTime,
+    submitInFlightRef,
     stream,
     threadError,
     threadId,
@@ -5426,6 +5442,7 @@ export function ChatContainer({
       setError,
       setPendingApproval,
       showGoalControlNotice,
+      submitInFlightRef,
       submitGoalResumeCommand,
       scheduledTaskLoading,
       threadError,
@@ -5453,11 +5470,13 @@ export function ChatContainer({
           if (hasPendingFilePayload || selectedSkill || selectedBuiltinBrowser)
             throw new Error("Mods 命令接收文本参数，请先移除附件、技能和浏览器选择。")
         })
+        if (!modCommands.isCurrent()) return
         if (handled) {
           setInput("")
           return
         }
       } catch (error) {
+        if (!modCommands.isCurrent()) return
         setError(error instanceof Error ? error.message : "Mods 命令提交失败")
         return
       }
@@ -7677,7 +7696,8 @@ export function ChatContainer({
     </div>
   )
 
-  return (
+  return provideModsThreadScope(
+    modsScope,
     <div
       ref={chatRootRef}
       data-chat-thread-id={threadId}
@@ -8343,7 +8363,9 @@ export function ChatContainer({
               )}
             >
               <GitChangeNotice threadId={threadId} />
-              <div className="max-w-3xl mx-auto"><ModCards threadId={threadId} slot="turn.summary" /></div>
+              <div className="max-w-3xl mx-auto">
+                <ModCards threadId={threadId} slot="turn.summary" />
+              </div>
               <ModCommandJobs key={threadId} threadId={threadId} />
               <FunctionPanes key={`panes:${threadId}`} threadId={threadId} />
               <form onSubmit={handleSubmit} className="max-w-3xl mx-auto relative">
@@ -9017,8 +9039,14 @@ export function ChatContainer({
                               {(canSubmitGoalCommandWhileLoading || isModCommandInput) && (
                                 <button
                                   type="submit"
-                                  disabled={isModCommandInput ? slash.mode.kind === "slash" : goalSendButtonDisabledWhileLoading}
-                                  aria-label={isModCommandInput ? "执行 Mods 命令" : "发送 goal 命令"}
+                                  disabled={
+                                    isModCommandInput
+                                      ? slash.mode.kind === "slash"
+                                      : goalSendButtonDisabledWhileLoading
+                                  }
+                                  aria-label={
+                                    isModCommandInput ? "执行 Mods 命令" : "发送 goal 命令"
+                                  }
                                   className="flex size-8 shrink-0 items-center justify-center rounded-full bg-button text-button-foreground transition-colors hover:bg-button/90 disabled:cursor-not-allowed disabled:opacity-40"
                                 >
                                   <ArrowUp className="size-5" strokeWidth={1.75} />

@@ -1,0 +1,63 @@
+{
+  "kind": "owned-synthetic-workspace-post-export-browser-crash",
+  "recordedAt": "2026-10-10T06:43:57.632085+00:00",
+  "events": [
+    {
+      "kind": "export-post",
+      "at": 1791614267552
+    },
+    {
+      "kind": "page-close",
+      "at": 1791614267966,
+      "url": "http://127.0.0.1:39174/export-review"
+    },
+    {
+      "kind": "context-close",
+      "at": 1791614267967
+    }
+  ],
+  "crashes": [
+    {
+      "name": "Google Chrome-2026-10-10-143752.ips",
+      "fileSha256": "5a7776e35eb1548274165d5bb31ede768e78dacbdf0dbeb8e42244553b22ffa1",
+      "pid": 6581,
+      "capturedAt": "2026-10-10 14:37:47.9813 +0800",
+      "exceptionType": "EXC_BAD_ACCESS",
+      "signal": "SIGSEGV",
+      "terminationIndicator": "Segmentation fault: 11",
+      "faultingThread": 0,
+      "mainThreadName": "CrBrowserMain",
+      "firstFrameworkOffsets": [
+        6449120,
+        61625076,
+        128791716,
+        128799592,
+        14276864
+      ]
+    },
+    {
+      "name": "Google Chrome-2026-10-10-143013.ips",
+      "fileSha256": "91d2b347fc8be88e4b2ab6a92c58aa1ed972c8e750e655d08d977293d3393a43",
+      "pid": 5438,
+      "capturedAt": "2026-10-10 14:30:09.7903 +0800",
+      "exceptionType": "EXC_BAD_ACCESS",
+      "signal": "SIGSEGV",
+      "terminationIndicator": "Segmentation fault: 11",
+      "faultingThread": 0,
+      "mainThreadName": "CrBrowserMain",
+      "firstFrameworkOffsets": [
+        6449120,
+        61625076,
+        128791716,
+        128799592,
+        14276864
+      ]
+    }
+  ],
+  "applicationCloseCallTracing": true,
+  "tracedCloseRequestObserved": false,
+  "narrowReviewedPostUiPass": true,
+  "completeWorkspacePass": false,
+  "uncertainPostAutomaticallyReplayed": false,
+  "rootCauseClaim": "Chromium browser-process SIGSEGV is observed; precise trigger still under investigation"
+}

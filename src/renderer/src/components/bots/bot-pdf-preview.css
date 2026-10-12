@@ -1,0 +1,123 @@
+.bot-pdf-preview {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-height: 0;
+  overflow: hidden;
+}
+.bot-pdf-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 6px 14px;
+  border-bottom: 1px solid var(--border);
+  background: var(--background);
+  flex-shrink: 0;
+}
+.bot-pdf-body {
+  flex: 1;
+  min-height: 0;
+  background: color-mix(in srgb, var(--muted), var(--background) 30%);
+}
+.bot-pdf-status {
+  display: flex;
+  height: 100%;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  padding: 24px;
+  color: var(--muted-foreground);
+  font-size: 13px;
+  text-align: center;
+}
+.bot-pdf-row {
+  display: flex;
+  justify-content: center;
+  width: 100%;
+  padding: 10px 16px;
+}
+.bot-pdf-page {
+  position: relative;
+  flex-shrink: 0;
+  overflow: hidden;
+  background: white;
+  color: #222;
+  box-shadow: 0 1px 6px #0002;
+}
+.bot-pdf-stage {
+  position: absolute;
+  inset: 0;
+}
+.bot-pdf-stage > canvas {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+.bot-pdf-page-status {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-content: center;
+  padding: 16px;
+  color: #777;
+  font-size: 12px;
+}
+.bot-pdf-page-number {
+  position: absolute;
+  bottom: 8px;
+  right: 8px;
+  padding: 2px 6px;
+  border-radius: 4px;
+  background: #ffffffc9;
+  color: #666;
+  font-size: 10px;
+  pointer-events: none;
+}
+/* PDF.js 6 text-layer geometry, scoped to this viewer. Apache-2.0, Mozilla. */
+.bot-pdf-text {
+  position: absolute;
+  inset: 0;
+  overflow: clip;
+  line-height: 1;
+  text-align: initial;
+  letter-spacing: normal;
+  word-spacing: normal;
+  -webkit-text-size-adjust: none;
+  text-size-adjust: none;
+  forced-color-adjust: none;
+  transform-origin: 0 0;
+  caret-color: CanvasText;
+  --min-font-size: 1;
+  --text-scale-factor: calc(var(--total-scale-factor) * var(--min-font-size));
+  --min-font-size-inv: calc(1 / var(--min-font-size));
+}
+.bot-pdf-text :is(span, br) {
+  position: absolute;
+  color: transparent;
+  white-space: pre;
+  cursor: text;
+  transform-origin: 0 0;
+  user-select: text;
+}
+.bot-pdf-text > :not(.markedContent),
+.bot-pdf-text .markedContent span:not(.markedContent) {
+  --font-height: 0;
+  --scale-x: 1;
+  --rotate: 0deg;
+  z-index: 1;
+  font-size: calc(var(--text-scale-factor) * var(--font-height));
+  transform: rotate(var(--rotate)) scaleX(var(--scale-x)) scale(var(--min-font-size-inv));
+}
+.bot-pdf-text .markedContent {
+  display: contents;
+}
+.bot-pdf-text span[role="img"] {
+  user-select: none;
+  cursor: default;
+}
+.bot-pdf-text ::selection {
+  background: color-mix(in srgb, AccentColor, transparent 65%);
+  color: transparent;
+}

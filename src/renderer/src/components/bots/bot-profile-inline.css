@@ -1,0 +1,57 @@
+.bot-profile-inline-value {
+  max-width: 100%;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: inherit;
+  font: inherit;
+  padding: 0 4px;
+  border-radius: 5px;
+  background: transparent;
+  text-align: inherit;
+}
+.bot-profile-inline-value:enabled:hover {
+  background: var(--muted);
+}
+.bot-profile-inline-value:disabled {
+  cursor: default;
+}
+.bot-profile-inline-label,
+.bot-profile-inline-input-wrap[data-field="title"] {
+  font-size: 13px;
+  line-height: 20px;
+  color: var(--muted-foreground);
+}
+.bot-profile-inline-input-wrap {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 100%;
+  min-width: 0;
+  vertical-align: middle;
+  text-align: inherit;
+}
+.bot-profile-inline-input {
+  width: 100%;
+  min-width: 0;
+  font: inherit;
+  color: inherit;
+  text-align: inherit;
+  padding: 0;
+  background: transparent;
+  border: 0;
+  border-bottom: 1px solid var(--border);
+  outline: none;
+}
+.bot-profile-inline-input:focus-visible {
+  border-bottom-color: var(--foreground);
+}
+.bot-profile-inline-input:disabled {
+  opacity: 0.65;
+}
+@media (prefers-reduced-motion: reduce) {
+  .bot-profile-inline-input-wrap .animate-spin {
+    animation: none;
+  }
+}

@@ -1,0 +1,119 @@
+{
+  "schemaVersion": 1,
+  "kind": "Root-J7-same-frozen-task-after-shared-policy-independent-review",
+  "reviewedAt": "2026-10-07T17:45:20.932435+00:00",
+  "formal": {
+    "path": "/Users/chenqiang/Desktop/projects/CmbCoworkAgent/docs/cmbcowork-bot-parity-plan/evidence/2026-10-07-current-delivery/current-j7-quality-policy-minimax-formal.safe.json",
+    "bytes": 38635,
+    "sha256": "113948cdb16ec2125061204a156f6b32b1a81eacd8f793de6b311069a08e1b21"
+  },
+  "priorFormal": {
+    "path": "/Users/chenqiang/Desktop/projects/CmbCoworkAgent/docs/cmbcowork-bot-parity-plan/evidence/2026-10-07-current-delivery/current-j7-minimax-group-formal.safe.json",
+    "bytes": 37968,
+    "sha256": "a6f0e228a6bc0d650336aa4e5fbb199d8881da40587ddd9446457d35be230760"
+  },
+  "compiledBuildId": "a61f41784e20c7199366f8d6",
+  "compiledSchema": 66,
+  "actualUI": false,
+  "realModel": true,
+  "overallDeliveryQualityPassed": false,
+  "mechanicalPassed": true,
+  "frozenCoreVerificationPassed": true,
+  "expectedInputUnchanged": true,
+  "sourceConfigurationUnchanged": true,
+  "expected": {
+    "versionRule": "largest numeric version per project_id",
+    "projects": {
+      "P101": {
+        "version": 2,
+        "amountWan": "12.40"
+      },
+      "P102": {
+        "version": 2,
+        "amountWan": "8.55"
+      },
+      "P105": {
+        "version": 1,
+        "amountWan": "-2.50"
+      },
+      "P106": {
+        "version": 1,
+        "amountWan": "0.00"
+      }
+    },
+    "count": 4,
+    "amountWan": "18.45",
+    "draftExcessWan": "20.00",
+    "draftCauseProvable": false
+  },
+  "actual": {
+    "publicReplies": [
+      {
+        "id": "b3538612-3c0d-413b-a294-f06d7e6e906d",
+        "sender": "bot",
+        "botId": "789336c4-182a-42ba-917a-ab0d28398cb4",
+        "runId": "bd6aa6ae-e4a8-4e3f-991d-5dcf5d03f977",
+        "text": "我读取的两份原件：\n• review-policy.txt（核对规则）\n• project-records.csv（项目台账）\n\n按策略\"状态=已验收 且 区域=北区 → 同 project_id 只保留版本号最大的一条\"过滤与去重后：\n\n| 保留项目 | 版本 | 金额(万元) | 依据 |\n|---|---|---|---|\n| P101 | v2 | 12.40 | 策略第4条：保留最大版本，覆盖 v1 的 15.40 |\n| P102 | v2 | 8.55  | 策略第4条：保留最大版本，覆盖 v1 的 7.05 |\n| P105 | v1 | -2.50 | 策略第3条：负数冲销计入总额 |\n| P106 | v1 |  0.00 | 策略第3条：零金额计入条数 |\n\n被剔除：P103（南区）、P104（待验收）、P101 v1、P102 v1。\n\n合计：4 个项目，金额 = 12.40 + 8.55 + (−2.50) + 0.00 = **18.45 万元**。\n\n与草案对照（草案：北区已验收 4 个项目，38.45 万元）：\n• 项目数：4 vs 4，一致。\n• 金额：18.45 vs 38.45，**差额 20.00 万元**（草案高出 20.00 万元）。\n\n草案如何形成：从原件可验证的组合中（北区已验收的 6 条汇总 40.90；选 P101 v1+P102 v1+P105+P106 = 19.95；选 P101 v1+P102 v2+P105+P106 = 21.45；P101 取高金额 v1=15.40 时合计 21.45 等）均无法推出 38.45，也无法对应到一条可重建的规则。**材料不足以确定草案 38.45 万元的形成方式**，疑似口径错误或来自其它数据源，需向起草方回溯确认。@核算Bot 请独立核验。",
+        "attachments": [],
+        "replyTo": "f924e0c1-9692-441b-aa04-41c6cbff599f",
+        "recipientReferences": [],
+        "createdAt": 1791394714330
+      },
+      {
+        "id": "90d08856-ea9a-422a-af2c-086c35e526f5",
+        "sender": "bot",
+        "botId": "fbd205a8-6308-43fb-85c1-df30acad5127",
+        "runId": "e16875b6-5f07-42f1-b994-6f2fed9f2f3b",
+        "text": "已独立读取两份原附件（review-policy.txt、project-records.csv），核验结果与计算Bot一致：\n\n**纳入项目（按策略过滤+按最大版本号去重后）**\n\n| 项目 | 保留版本 | 金额(万元) | 依据 |\n|---|---|---|---|\n| P101 | v2 | 12.40 | 策略第4条：保留最大版本号，覆盖 v1（15.40） |\n| P102 | v2 | 8.55  | 策略第4条：保留最大版本号，覆盖 v1（7.05） |\n| P105 | v1 | -2.50 | 策略第2、3条：北区已验收，负数冲销计入总额 |\n| P106 | v1 |  0.00 | 策略第3条：北区已验收，零金额计入条数 |\n\n剔除：P103（南区，不符\"北区\"条件）、P104（待验收，不符\"已验收\"条件）、P101 v1、P102 v1（按策略被高版本覆盖）。\n\n**合计：4 个项目，金额 = 12.40 + 8.55 + (−2.50) + 0.00 = 18.45 万元**。\n\n**与草案对照（草案：北区已验收 4 个项目，38.45 万元）**\n- 项目数：4 vs 4，**一致**。\n- 金额：18.45 vs 38.45，**差额 20.00 万元（草案高出）**。\n\n**草案 38.45 万元形成方式：材料无法确定**。我把 4 项目和 5、6 条记录的所有合理组合都试了一遍——包括 P101 v1、P101 v2、P102 v1、P102 v2、P105、P106 的各种取法——最大合计是 6 条全计的 40.90，4 条组合的合计落在 16.95–21.45 区间，没有任何一种自然组合能凑出 38.45。差额 20.00 万元也无法由原件中任何单笔或可识别冲销项解释。**仅凭现有原附件无法重建草案 38.45 万元的口径**，建议回起草方核对口径（疑似非源于本份台账，或存在单位/录入错误）。",
+        "attachments": [],
+        "replyTo": "f924e0c1-9692-441b-aa04-41c6cbff599f",
+        "recipientReferences": [],
+        "createdAt": 1791394753759
+      }
+    ],
+    "bothFullOriginalsReadBeforeOwnPublication": true,
+    "eachAuthorPublicOnce": true,
+    "correctProjectsValuesCountTotalAndUnit": true,
+    "correctDraftDifferenceAndDirection": true,
+    "draftCauseExplicitlyUnknown": true,
+    "unconfirmedInvestigationDirectionsNotAssertedAsProvenCause": true,
+    "noOutsideOrChildRun": true
+  },
+  "remainingQualityDefect": {
+    "author": "fbd205a8-6308-43fb-85c1-df30acad5127",
+    "text": "核算Bot claims it tried all reasonable four-project and five/six-row combinations; then calls40.90 the maximum and16.95–21.45 the four-row range without defining a domain.",
+    "evidence": "40.90 is the sum of all six qualifying raw rows. Removing the -2.50 reversal gives43.40; the four positive rows also sum43.40. A one-version-per-project selection including the reversal does have16.95–21.45, but cannot simultaneously have five/six rows.",
+    "scope": "The primary required result is correct; the additional exhaustive claim is ambiguous/incorrect under its literal broad scope and is not proven by a tool or stated derivation. Full-report quality remains open.",
+    "oracleUnchanged": true
+  },
+  "usage": {
+    "requests": 9,
+    "unknownRequests": 3,
+    "inputTokens": 114795,
+    "outputTokens": 4457,
+    "reservedOutputTokens": 24576
+  },
+  "unknownIsNotZero": true,
+  "moneyCostClaimed": false,
+  "cleanup": {
+    "cancelRequested": false,
+    "cancelSettled": false,
+    "idleShutdownAccepted": true,
+    "forcedTermination": false,
+    "processExited": true,
+    "exit": {
+      "code": 0,
+      "signal": null,
+      "spawnFailed": false
+    },
+    "privateCredentialSnapshotRemoved": true,
+    "transportClosed": true
+  },
+  "limits": [
+    "One new frozen-input sample; no retry, gold-answer injection or artifact rewrite.",
+    "The frozen core comparator does not forbid clearly marked unconfirmed investigation directions; no new all-hypotheses failure rule was added.",
+    "Correct primary figures do not excuse the additional unsupported exhaustive assertion.",
+    "Single before/after samples do not prove the policy caused improvement or quality equivalence.",
+    "Not actual App UI or an official Grok same-task sample; no whole-project completion inferred."
+  ]
+}

@@ -1,0 +1,901 @@
+{
+  "product": "Grok Bot",
+  "version": "0.18.0",
+  "origin": "User-provided reconstruction",
+  "license": "No upstream source-code license implied by reconstruction; redistribution rights not established",
+  "files": [
+    {
+      "source": "source/host/runner/tools/sand-browser-driver-source.ts",
+      "sha256": "8db9bd9bc12ac026a544e358aec1bd09ba74da7ec7c1e87dcbb737cc75f28eee",
+      "destination": "src/main/bots/upstream/grok-browser-actions.js",
+      "changes": "Adapted original page actions and snapshot to the exact Bot-owned target registry, input fencing and deterministic handle release. Native select snapshots additionally expose the actual selected values and labels (first four; 40/80 characters), including empty placeholders; the original driver omitted this state. Observation does not dispatch input or read the complete option list. Explicit Chromium HTTP errors and terminal DNS/refused/closed/reset/empty-response navigation failures now retain the known browser error outcome without retrying or claiming successful page load; uncertain deadline/abort, automation transport and target/authority failures remain fenced. The original input owner is revalidated before returning the outcome."
+    },
+    {
+      "source": "source/host/extensions/transcript/run-scheduler.ts",
+      "sha256": "f4b22c1eeff33f4d6ca6e2daf38592e89f902e68916f2e2b3bd41a0a9de1768a"
+    },
+    {
+      "source": "source/shared/automation-schedule.ts",
+      "sha256": "92378aae786c64aa794be54efd3ce2b73b72ac5867cec1de900d1011a81203c5"
+    },
+    {
+      "source": "source/host/groups/group-chat.ts",
+      "sha256": "acc0e97d40f264d553b063751044b9c796ef0b7238a17ddc1f8901b92408f4fb"
+    },
+    {
+      "source": "source/host/extensions/transcript/group-chat-orchestrator.ts",
+      "sha256": "5ff5626a9234be5ab0ca4cc94490e96c55f3ca2f7f886eaf1e0f381ae7f209a1"
+    },
+    {
+      "source": "source/shared/media/attachment-open-policy.ts",
+      "sha256": "f3d7c738e479f53d682ee767067b45f9899170538268a73f333d253866d40837",
+      "destination": "src/shared/upstream/grok-attachment-open-policy.ts",
+      "changes": "Copied original extension/preview classification helpers; adapted relative imports and formatting. Cmb artifact preview applies narrower rendering and existing isolated viewers."
+    },
+    {
+      "source": "source/shared/media/attachment-preview.ts",
+      "sha256": "2862c2b239cdab0f6bab624640155517ed836f45786220314d4214d0ce683924",
+      "destination": "src/shared/upstream/grok-attachment-preview.ts",
+      "changes": "Copied original extension/preview classification helpers; adapted relative imports and formatting. Cmb artifact preview applies narrower rendering and existing isolated viewers."
+    },
+    {
+      "source": "source/shared/media/media-extensions.ts",
+      "sha256": "fd8d49be18e932f6b274032749987da615d5e4fcc7cd4bc827ce6abd5d80c689",
+      "destination": "src/shared/upstream/grok-media-extensions.ts",
+      "changes": "Copied original extension/preview classification helpers; adapted relative imports and formatting. Cmb artifact preview applies narrower rendering and existing isolated viewers."
+    },
+    {
+      "source": "source/shared/media/file-preview-kind.ts",
+      "sha256": "c4ee83e80b73baa02ccd49b8f251de1326dbc014f86dceac9d4e891db5dd7df6",
+      "destination": "src/shared/upstream/grok-file-preview-kind.ts",
+      "changes": "Copied original extension/preview classification helpers; adapted relative imports and formatting. Cmb artifact preview applies narrower rendering and existing isolated viewers."
+    },
+    {
+      "source": "source/host/runner/tools/sand-secret-request.ts",
+      "sha256": "b45eeff967c1a0b343003454e579da9cb7a6791dcbd0538693fbce5a163ca84e",
+      "destination": "src/main/bots/upstream/grok-secret-request.ts",
+      "changes": "Copied secret label/description clamping and acknowledgement helpers; adapted imports. Values are delivered through the exact scoped Cmb browser destination, never a transcript answer."
+    },
+    {
+      "source": "source/shared/sand-text.ts",
+      "sha256": "8e36a9f4547107feff40a03fe5857f2bb4ec240bd0a76dccd7517368acc2e91e",
+      "destination": "src/shared/upstream/grok-sand-text.ts",
+      "changes": "Copied secret label/description clamping and acknowledgement helpers; adapted imports. Values are delivered through the exact scoped Cmb browser destination, never a transcript answer."
+    },
+    {
+      "source": "source/host/runner/system-prompt.ts",
+      "sha256": "94cc0388d303118721e210be951b075bc8926a7472282683a084ad57afff2627",
+      "destination": "src/main/bots/upstream/grok-reply-context.ts",
+      "changes": "Extracted original ReplyContext and buildReplyContextNote. Cmb resolves quote server-side within the current conversation, bounds its size and keeps it in the user-data message rather than a system instruction."
+    },
+    {
+      "source": "source/host/extensions/content-search/agent-content-search.ts",
+      "sha256": "9893c3b51dcf4f7ce15211333033d2d7cd29bf4e5ba9a342f9eb4481f0db8993",
+      "destination": "src/main/bots/upstream/grok-content-search.ts",
+      "changes": "Extracted original whitespace normalization and 30/60-character surrounding-context snippet helper. Cmb searches bounded, permission-filtered SQLite pages instead of loading every transcript into memory."
+    },
+    {
+      "source": "source/shared/deep-link.ts",
+      "sha256": "a0303646038bfb062a1410185089e21023f2a31cef3d283d2ed26d0447b4783f",
+      "destination": "src/shared/bot-deep-link.ts",
+      "changes": "Reused raw URL validation helpers; replaced Grok routes with versioned local Cmb message addresses. No command, permission, plugin installation, HTTPS activation or cross-machine resolution."
+    },
+    {
+      "source": "source/electron-main/deep-link/deep-link-controller.ts",
+      "sha256": "5a8d0635574fa9ef7920282b0fe3a14578cf157fce60d14efc8c381460ab783c",
+      "destination": "src/main/bots/upstream/grok-deep-link-controller.ts",
+      "changes": "Reused bounded queue, deduplication and renderer-ready lifecycle; changed scheme/parser/types and removed unsupported HTTPS candidate prefix."
+    },
+    {
+      "source": "source/host/runner/tools/sand-agent-management-tools.ts",
+      "sha256": "60365b6976c9b1c469d1e0a952c8c58cbc50c66b7db204f9ca4f531e661482c4",
+      "destination": "src/main/bots/upstream/grok-agent-profiles.ts",
+      "changes": "Extracted create/update profile schemas and non-empty patch rules; added Cmb existing name/instruction/ID bounds. No original communicate-tool runtime or agent management backend imported."
+    },
+    {
+      "source": "source/host/extensions/memory/memory-synthesis-service.ts",
+      "sha256": "827de2d86ea95ec3df48bfff2ab91507426a81dc58dd40e2f36711a8a722f671",
+      "destination": "src/main/bots/upstream/grok-memory-synthesis.ts",
+      "changes": "Extracted original synthesis/verification prompts, output parser, evidence constraints and normalization helpers. Cmb uses its configured model factory and durable SQLite evidence queue, transactional compare-and-swap, explicit-memory protection and correction barriers instead of the original in-memory queue and file writes."
+    },
+    {
+      "source": "source/host/runner/sand-memory.ts",
+      "sha256": "66737c3c3612836b8a6ec601461bfeea64632e4b4c27c9e29555ffcc90fe0f99",
+      "destination": "src/main/bots/upstream/grok-memory-synthesis.ts",
+      "changes": "Extracted original synthesis/verification prompts, output parser, evidence constraints and normalization helpers. Cmb uses its configured model factory and durable SQLite evidence queue, transactional compare-and-swap, explicit-memory protection and correction barriers instead of the original in-memory queue and file writes."
+    },
+    {
+      "source": "source/host/extensions/forever-box/disk-pressure-guard.ts",
+      "sha256": "e54ab9831c0d7bbc089929f99cc7f0ef72cf1a1b8c961185e74f0af7c4be0bde",
+      "destination": "src/main/bots/upstream/grok-disk-pressure.ts",
+      "changes": "Extracted original thresholds, hysteresis classification and volume stat sampling; formatting only. Cmb monitors its local data and explicitly configured project volumes instead of cloud-only paths; no automatic deletion or disk-saver provisioning."
+    },
+    {
+      "source": "source/packages/local-exec/background-shell-lifecycle.ts",
+      "sha256": "19a82e405664c6f674d7769a0f79f0f0e2cf103894e692955f5acf90f63fd7c5",
+      "destinations": ["src/main/bots/shell-services.ts", "src/main/bots/shell-services-store.ts"],
+      "changes": "Behavioral reference: Host-owned shell lifetime, scoped completion wakeup and explicit cancellation. Cmb retains its original native sandbox/process-tree executor; the in-memory upstream registry is replaced by existing SQLite approvals, job/effect receipts and durable conversation queue. Cross-turn services retain the native two-hour bound; stdin and automatic restart are not implemented."
+    },
+    {
+      "source": "source/packages/agent-exec/background-work-registry.ts",
+      "sha256": "ca082bbbacb1b0928aed30e9f9b9524ab95089da67a00db61d3a49eed1102cdd",
+      "destinations": ["src/main/bots/shell-services.ts", "src/main/bots/shell-services-store.ts"],
+      "changes": "Behavioral reference: Host-owned shell lifetime, scoped completion wakeup and explicit cancellation. Cmb retains its original native sandbox/process-tree executor; the in-memory upstream registry is replaced by existing SQLite approvals, job/effect receipts and durable conversation queue. Cross-turn services retain the native two-hour bound; stdin and automatic restart are not implemented."
+    },
+    {
+      "source": "source/host/runner/sand-shell-auto-review-enrichment.ts",
+      "sha256": "8213543838f713d4dd43866006cf03b0e1e920bcc1ffadba27d71e301eabc2fe",
+      "destination": "src/main/bots/upstream/grok-shell-review-candidate.ts",
+      "changes": "Copied candidate types, unquote and command candidate parser; removed remote protobuf readers. Bot adapter reads definitions through its stable, project-scoped file handles and checks content hashes again before dispatch."
+    },
+    {
+      "source": "source/shared/sand-auto-review-instructions.ts",
+      "sha256": "5e4db22c253f860b94929930016ee0389c9fc4088a04c66bef07652e6d95bc06",
+      "destination": "src/shared/bot-auto-review-instructions.ts",
+      "changes": "Copied limits, default and normalization. Cmb validates user input strictly before normalization and opts new installations out until explicitly enabled."
+    },
+    {
+      "source": "source/host/runner/sand-browser-auto-review.ts",
+      "sha256": "91924c69a22ac4f50bd19db2f489593d712f20ad9fde737083ee3ac5381c38b6",
+      "destination": "src/main/bots/upstream/grok-browser-review-bounds.ts",
+      "changes": "Copied pure bounds, normalization and mutation classification helpers; omitted cloud classifier and protobuf dependencies. Cmb captures owned page identities, actual DOM targets and document lifetime, and rechecks them at dispatch through the existing approval boundary."
+    },
+    {
+      "source": "source/shared/os-notification.ts",
+      "sha256": "a69f372941e3a56d9718b41982dba659083bf3e958b77444c2f4df3409f99f45",
+      "destination": "src/shared/upstream/grok-os-notification.ts",
+      "changes": "Copied original transition, baseline, foreground/hidden/mute gates, five-second per-Bot/type throttle and accounted message deduplication. Adapted Cmb labels and explicit array typing. Local feed uses durable events for fast tasks and generic content to avoid exposing task/approval details on OS toasts."
+    },
+    {
+      "source": "source/electron-main/notifications/os-notification-manager.ts",
+      "sha256": "4e38a83e7549712796e22fa7fc43415df3a981e44f3ae5d4f3c9fc445e72ecaa",
+      "destination": "src/main/bots/desktop-notifications.ts",
+      "changes": "Referenced native lifecycle, silent completion versus critical input, and click activation. Cmb uses a read-only Host observer, existing validated message/branch navigation, bounded active notifications and withdrawal on resolved gates, mute, hide, restore or shutdown."
+    },
+    {
+      "source": "source/electron-main/secrets/user-secrets-store.ts",
+      "sha256": "b802a84ceeead297ca5409747c5c10e2ea1554f782eaa1eda8ea54a54f1031cc",
+      "destinations": [
+        "src/main/bots/mac-secret-helper.ts",
+        "src/main/bots/mac-secret-protection.ts",
+        "src/main/bots/secret-vault.ts"
+      ],
+      "changes": "Behavioral reference for Electron safeStorage and atomic encrypted persistence. Cmb keeps its existing per-Bot versioned Vault, scoped approvals and bounded store. The Node Host launches the same installed Electron app through an isolated one-request helper before desktop imports; Keychain denial never becomes a plaintext or empty-store fallback. No upstream account service or UI lifecycle copied."
+    },
+    {
+      "source": "frontend/src/recovered/features/conversation/workspace/spreadsheet-viewer-model.ts",
+      "sha256": "c94ac91716708871ec5dde0a9026f881eb4c2f2804b80f5912e927f47355e37c",
+      "destination": "src/main/bots/upstream/grok-delimited-table.ts",
+      "changes": "Adapted CSV/TSV quote, newline and escaped quote parsing. Count rows in one pass while retaining only a requested 50-row/20-column window and bounded cell text. Existing Cmb worker and encoding/archive validation own execution and lifecycle. No original vendor parser copied."
+    },
+    {
+      "source": "frontend/src/recovered/features/conversation/workspace/spreadsheet-viewer.tsx",
+      "sha256": "ddebe4a41adfc4c037787848dd398a187dcae7e5fc722fc2aa86af1caee8dd26",
+      "destination": "src/renderer/src/components/bots/BotTablePreview.tsx",
+      "changes": "Adapted sheet switcher, table projection and selected cell detail interaction using Cmb primitives. Added bidirectional paging, real worksheet coordinates, keyboard cell movement and bounded DOM. No upstream CSS bundle, byte bridge or dynamic vendor asset loader copied."
+    }
+  ],
+  "changes": [
+    "Extracted browser action bodies and snapshot/ref handling; replaced Linux invocation and implicit URL recovery with an injected scoped context and strict target lookup.",
+    "Browser inputs reuse the copied driver with an injected Host-only two-phase guard: asynchronous exact review preparation, then synchronous page/control/run-lease assertion immediately before each real input. Drag always attempts mouse release after a pressed-button failure or revocation, preserves the original error, and reviewed drag uses already-visible approved geometry. Coordinate reviews bind bounded viewport pixels, scroll and element boxes; highlight projects its existing page through the same screenshot image path. Clear failures stop typing/submission; selectOption uses installed Playwright value-or-label matching once without replaying an ambiguous selection response.",
+    "Copied takeNextUserTask selection unchanged.",
+    "Copied cron, interval, timezone and schedule description logic; omitted unrelated trigger-list description import. Callers validate stricter syntax and explicit timezone.",
+    "Copied group-chat.ts routing, mention, pass, history and prompt helpers; adapted the original bounded rotating round-robin orchestration to SQLite epochs, cursors, delivery receipts and restart recovery. Replaced SendMessage with the scoped Bot tool name. Group publishing never forwards scratch text or private peer results automatically.",
+    "Cmb history adaptation: completed Bot replies enter a new task as attributed message/file references, with exact text available through the existing bounded read_message tool and unchanged conversation/branch authorization. Current room-cycle progress, imported references, plugin transcripts and the live graph retain their contents. The accepted human group message owns selected skill versions throughout its cycle; each member receives only its own references, and revisions remain fenced. No stored history, memory, skill acceptance or permission is rewritten.",
+    "Browser snapshot callback is kept as a static source string invoked with JSON-encoded options, preventing tsx keepNames helpers from leaking into the page execution context. Password values are excluded from accessible-name fallback; refHandle is exported for exact DOM-handle secret destination binding.",
+    "Ref actions dispose their own acquired DOM handles in finally; stale non-element references are disposed before rejection. Cleanup failures preserve the original action outcome, and direct refHandle callers retain explicit lifetime ownership. Broker new-tab navigation supplies no existing or model-chosen view identity, preserving each registered page's target."
+  ],
+  "additionalSources": [
+    {
+      "product": "Rakazo",
+      "repository": "https://github.com/elie222/rakazo",
+      "commit": "60ac790cd9a1bb9560b489c0535deb5db2e1e39f",
+      "license": "Apache-2.0",
+      "source": "packages/core/src/bot-messages.ts",
+      "sha256": "7f5a2bba9acbf3def6c720e5dbb3492c9abee36b91a53e91b2d894d365ea8cee"
+    },
+    {
+      "product": "Rakazo",
+      "repository": "https://github.com/elie222/rakazo",
+      "commit": "60ac790cd9a1bb9560b489c0535deb5db2e1e39f",
+      "license": "Apache-2.0",
+      "source": "packages/core/src/teach-recording.ts",
+      "sha256": "6e4d30814fc90b3893a3c304cd760954f7f9eb5c33f2a6827100698786b7f1f0",
+      "destination": "src/shared/upstream/rakazo-teach-pointer.ts",
+      "changes": "Extracted clamp/mapTeachPointer unchanged with original four geometry tests; reused in Bot computer input."
+    },
+    {
+      "product": "Rakazo",
+      "repository": "https://github.com/elie222/rakazo",
+      "commit": "60ac790cd9a1bb9560b489c0535deb5db2e1e39f",
+      "license": "Apache-2.0",
+      "source": "packages/core/src/teach-playbook.ts",
+      "sha256": "1e94f113dac087c5dada9b065f2bdc26553ab9f89c18f74e97838be09168cf01",
+      "destination": "src/main/bots/upstream/rakazo-skill-prompt.ts",
+      "changes": "Extracted SkillPlaybook and formatSkillRunPrompt unchanged. Used for explicit version-pinned skill trials, not coordinate-to-text learning."
+    }
+  ],
+  "designReferences": [
+    {
+      "source": "/Users/chenqiang/Desktop/AI/grok-bot-0.18-reconstructed-main/source/host/extensions/teach-recording/teach-recording-service.ts",
+      "sha256": "b72f9bd4c7967ea00dafb51cda7b42413d8139fa74622c0665894519f6b4710a",
+      "use": "Teach lifecycle reference only, not source transplantation. Replaced Linux shell capture and signed file queues with native Chromium encoding and transactional SQLite queue/nonce. Video encoding has no existing Cmb implementation."
+    },
+    {
+      "source": "/Users/chenqiang/Desktop/AI/grok-bot-0.18-reconstructed-main/source/host/agents/agent-clone.ts",
+      "sha256": "345d35642793b117da53cb3c58aa07df77f7107bb82f1f4d8c68353daab50959",
+      "use": "Clone configuration, visibility reset and automation configuration reference. Reused the Cmb Bot insert/store/schedule implementations with a single SQLite transaction and fresh IDs, not directory copying."
+    },
+    {
+      "source": "/Users/chenqiang/Desktop/AI/grok-bot-0.18-reconstructed-main/source/host/extensions/transcript/agent-lifecycle.ts",
+      "sha256": "844bf7c98d1e6af767f32d384b7206f3bbdc51a1c29ce9444459c7a0bd20f0c9",
+      "use": "Read clone identity and transient-state clearing; Cmb copy clears conversation/memory/attachments and keeps model/connector configuration references. Newly copied skills have no trial verification."
+    },
+    {
+      "source": "/Users/chenqiang/Desktop/AI/grok-bot-0.18-reconstructed-main/source/host/extensions/session/agent-db.ts",
+      "sha256": "12af2f89ce305d24f199ca8abb936fa077a418eff89fe8cef1a8570cb0cf9f5c",
+      "use": "Read manual unread and clearConversation semantics. Cmb uses monotonic message sequence watermarks, independent manual reminders and optimistic revisions to reject stale acknowledgements."
+    },
+    {
+      "source": "/Users/chenqiang/Desktop/AI/grok-bot-0.18-reconstructed-main/source/electron-main/secrets/user-secrets-store.ts",
+      "sha256": "b802a84ceeead297ca5409747c5c10e2ea1554f782eaa1eda8ea54a54f1031cc",
+      "use": "Reference for encrypted persistence, metadata listing and explicit session-only fallback. Cmb uses the existing model-snapshot DPAPI helper in its independent Host, adds per-Bot ownership, exact origin and revision-bound use. No reveal/export API is exposed."
+    },
+    {
+      "source": "/Users/chenqiang/Desktop/AI/grok-bot-0.18-reconstructed-main/source/host/runner/tools/sand-reaction-tool.ts",
+      "sha256": "f1856a04e614b6c55b85bcffdd01d5b276a8bb03cc64d793cca0cea1a28f2071",
+      "use": "Bot reaction tool semantics: only user messages, attributed to the Bot, sparse natural acknowledgements. Cmb binds to run/conversation/message identity and tool receipt; adds/removes an explicit state rather than toggling on uncertain replay. Does not approve or enqueue work."
+    }
+  ],
+  "sharedCmbModules": [
+    {
+      "source": "src/main/mcp/capability-service.ts",
+      "revision": "0ba63bd2f6a1eb48066882e94bd81c7fdda9c0ee",
+      "sha256": "9e3984afc38537496105c0964e3ae8d673c74fe6add9003ff158d626c26ca0b9",
+      "destinations": [
+        "src/main/mcp/capability-core.ts",
+        "src/main/mcp/desktop-sources.ts",
+        "src/main/mcp/capability-service.ts"
+      ],
+      "changes": "Extracted the existing source configuration, discovery, alias/schema cache, connection generation and invocation implementation. Desktop supplies existing Mods authorization/result hooks and legacy retry; Bot supplies per-run scope/cancellation, exact-action approval and durable receipts, with no uncertain transport retries. Both consumers use the shared core. Added stale-connection, close-during-initialize and discovery pagination bounds."
+    },
+    {
+      "source": "src/main/ipc/mcp.ts",
+      "destination": "src/main/mcp/server-config.ts",
+      "changes": "Moved buildMcpServerConfig unchanged and re-exported it at the existing IPC path; reused by desktop configuration snapshot."
+    },
+    {
+      "sources": [
+        "src/main/agent/tools/tool-search/search-strategy.ts",
+        "src/main/mcp/result-utils.ts",
+        "src/main/services/stable-file-handle.ts",
+        "src/main/agent/replace.ts"
+      ],
+      "changes": "Imported existing implementations for connector search/result handling and safe project file reads/edits; no separate copy."
+    },
+    {
+      "source": "src/main/agent/local-sandbox.ts",
+      "revision": "0ba63bd2f6a1eb48066882e94bd81c7fdda9c0ee",
+      "sha256": "0b4f5ab02a1742298901efcebf51a016703e93c0d553571d04778a93e0915f74",
+      "destinations": [
+        "src/main/agent/local-sandbox-core.ts",
+        "src/main/agent/local-sandbox-services.ts",
+        "src/main/agent/local-sandbox.ts"
+      ],
+      "changes": "Moved the existing LocalSandbox implementation behind injected desktop services. The desktop wrapper still supplies real Mods authorization, Hooks, telemetry and Windows setup. The Bot Shell worker uses the same executor with per-call approval, cancellation, output bounds, no uncertain spawn retries, preserved Windows sandbox mode and process-tree fencing. Background jobs reuse executeBackground/getTaskOutput and the original two-hour process cap; a structured task-start callback avoids parsing human-readable output. Cmb Bot adds durable job receipts and graph result delivery; cross-turn persistent services and full standard-turn integration remain separate work."
+    },
+    {
+      "source": "src/main/ipc/sandbox.ts",
+      "revision": "0ba63bd2f6a1eb48066882e94bd81c7fdda9c0ee",
+      "sha256": "aa2ae9a91b1198656f165247051865da70e3f9a49a9a98ba14a5e7dbfd99781b",
+      "destinations": ["src/main/agent/windows-sandbox-state.ts", "src/main/ipc/sandbox.ts"],
+      "changes": "Extracted existing setup-marker/workspace-state/path validation code without Electron. Kept UAC/setup and IPC handlers in the desktop adapter."
+    },
+    {
+      "source": "src/main/agent/failover.ts",
+      "revision": "0ba63bd2f6a1eb48066882e94bd81c7fdda9c0ee",
+      "sha256": "51f3ce974640da0808eb4a4aee480b614aac1bd748ce3a1580b67a8ba010b6b7",
+      "destinations": ["src/main/agent/api-errors.ts", "src/main/agent/failover.ts"],
+      "changes": "Moved existing pure error classification and message extraction functions. The desktop failover entry still assembles registered model chains; headless hook failure formatting imports only the pure module."
+    },
+    {
+      "source": "src/main/agent/runtime.ts",
+      "revision": "0ba63bd2f6a1eb48066882e94bd81c7fdda9c0ee",
+      "sha256": "b41439de38549a18800c5a5d71b4bb79e541b5f38cf8bbe6441bf9d26f90c529",
+      "destinations": [
+        "src/main/agent/deep-agent-core.ts",
+        "src/main/agent/deep-agent-services.ts",
+        "src/main/agent/runtime.ts"
+      ],
+      "changes": "Moved the actual Cmb graph assembler and helper closure into the common headless core; desktop injects its existing Mods, task-memory, preview and lifecycle services. Bot uses the same graph with durable approval tools, checkpointed completion verdicts, todos, malformed-call recovery, action stationarity and compaction. This is graph reuse, not completion of standard turn preparation, Mods or workflow integration."
+    },
+    {
+      "source": "src/main/file-parser.ts",
+      "revision": "0ba63bd2f6a1eb48066882e94bd81c7fdda9c0ee",
+      "sha256": "331582456aa4fc8b135a7f53582bcc8ff7c24c794e6fd01cde2813140c7264f5",
+      "destinations": ["src/main/file-parser.ts", "src/main/bots/document-worker-entry.ts"],
+      "changes": "Reuses existing mammoth/SheetJS/encoding and bounded Office archive parsers. Adds explicit character paging without changing desktop truncation defaults; Bot calls it in a disposable child process. PDF.js and PPTX support are additional implementations, not recovered Grok PDF worker code."
+    },
+    {
+      "source": "src/main/mods/manager.ts",
+      "revision": "0ba63bd2f6a1eb48066882e94bd81c7fdda9c0ee",
+      "sha256": "d1202556a91553f4c877eb74cb409ed09f7a9ddbef8474b15a97de39ac6bcf0c",
+      "destinations": [
+        "src/main/mods/manager-core.ts",
+        "src/main/mods/manager-context.ts",
+        "src/main/mods/manager.ts"
+      ],
+      "changes": "Moved the actual manager behind injected process launchers. Desktop keeps its constructor and singleton. Bot supplies per-Bot persistent grants, isolated async context, lease/configuration fences, and reviewed code-digest authorization."
+    },
+    {
+      "source": "src/main/mods/policy.ts",
+      "revision": "0ba63bd2f6a1eb48066882e94bd81c7fdda9c0ee",
+      "sha256": "ad629f88ff8ccfee254265404ec9762fea84df928f19454b58bb28ed39de91ee",
+      "destinations": ["src/main/mods/policy-core.ts", "src/main/mods/policy.ts"],
+      "changes": "Reuses the original required deployment policy and publication filtering with a Node process transport. Bot applies mandatory policy even when no optional work plugin is selected."
+    },
+    {
+      "source": "src/main/mods/runtime-client.ts",
+      "revision": "0ba63bd2f6a1eb48066882e94bd81c7fdda9c0ee",
+      "sha256": "46fc44e8a97706b6c7e892e46e6f304d2996fa16c765d627a1540fa5bb605040",
+      "destinations": [
+        "src/main/mods/runtime-client-core.ts",
+        "src/main/mods/runtime-client.ts",
+        "src/main/mods/desktop-process.ts",
+        "src/main/mods/node-process.ts"
+      ],
+      "changes": "Moved existing RPC, capacity, cancellation and child lifecycle implementation behind a transport interface. Desktop retains Electron utilityProcess; Bot uses a bounded Node IPC channel to the same QuickJS guest worker."
+    },
+    {
+      "source": "src/main/mods/v2/runtime-client.ts",
+      "revision": "0ba63bd2f6a1eb48066882e94bd81c7fdda9c0ee",
+      "sha256": "1945ca574f5ad36f76a481a0e6664699d0d30e7c720f1351b1de3c4f62ee9dff",
+      "destinations": [
+        "src/main/mods/v2/runtime-client-core.ts",
+        "src/main/mods/v2/runtime-client.ts"
+      ],
+      "changes": "Reuses Function Mods worker protocol, timeout, heartbeat, cancellation and generation fences with the injected transport."
+    },
+    {
+      "source": "src/main/mods/v2/manager.ts",
+      "revision": "0ba63bd2f6a1eb48066882e94bd81c7fdda9c0ee",
+      "sha256": "5917d8e2b2eb3e418ec4c5d1cd65baeb5d2a6f37bb072211bf48333b4281f921",
+      "destinations": ["src/main/mods/v2/manager-core.ts", "src/main/mods/v2/manager.ts"],
+      "changes": "Moved actual Function Mods manager; Bot reuses registration, authority/grants, tool interception, scoped files and model completion. Bot command/pane UI and complete standard-turn integration remain unfinished."
+    },
+    {
+      "source": "src/main/agent/tool-hooks.ts",
+      "revision": "0ba63bd2f6a1eb48066882e94bd81c7fdda9c0ee",
+      "sha256": "ac233f63ec6efcebeb46226767b9c8b1a7d540e14a82507b468ef63accd3865e",
+      "destinations": ["src/main/mods/model-middleware.ts", "src/main/agent/tool-hooks.ts"],
+      "changes": "Extracted original Mods model wrapper and dynamic tool catalog without changing desktop tool middleware. Bot tool ingress explicitly dispatches native names because its backend is not wrapped by the desktop Mods adapter."
+    },
+    {
+      "source": "src/main/mods/v2/model-provider.ts",
+      "revision": "0ba63bd2f6a1eb48066882e94bd81c7fdda9c0ee",
+      "sha256": "4bc373e3ccf7c4fa378d3d5d81d62a98e197f792d9147d7a7f44831365bebe36",
+      "destinations": [
+        "src/main/mods/v2/model-provider-core.ts",
+        "src/main/mods/v2/model-provider.ts"
+      ],
+      "changes": "Reuses model completion and streaming observer behavior with an injected configured Cmb model factory; no credentials or Node APIs enter the guest VM."
+    },
+    {
+      "source": "src/main/mods/v2/session-read-host.ts",
+      "revision": "0ba63bd2f6a1eb48066882e94bd81c7fdda9c0ee",
+      "sha256": "6c204dfb88ddedddae2803c534c337f628ffb6466c2118115f634df3f0d25702",
+      "destinations": [
+        "src/main/mods/v2/session-read-core.ts",
+        "src/main/mods/v2/session-read-host.ts"
+      ],
+      "changes": "Extracted session view/query/compaction implementation; desktop retains cold checkpoint reader, Bot supplies its live scoped view and rejects unsupported cold reads."
+    },
+    {
+      "source": "src/main/mods/v2/tool-permission-host.ts",
+      "revision": "0ba63bd2f6a1eb48066882e94bd81c7fdda9c0ee",
+      "sha256": "d78f875f05f6dc2bfec4f8ab4b88b0201f2347bbfbd72c6140332a515e1bf133",
+      "destinations": [
+        "src/main/mods/v2/tool-permission-core.ts",
+        "src/main/mods/v2/tool-permission-host.ts"
+      ],
+      "changes": "Extracted the existing SDK permission query and exact MCP metadata resolution behind scoped cached-metadata and permission-probe services. Desktop retains its original sandbox/global-cache fallback; Bot uses only its own selected connectors and project/child-role authority. Discovery does not grant SDK write or command authority."
+    },
+    {
+      "source": "src/main/logging.ts",
+      "snapshot": "Workspace index before Host logging extraction, 2026-10-03",
+      "sha256": "361457745cf78ce5ca252f1738e319512d1ef809657143335b59c926d8ff125e",
+      "destinations": [
+        "src/main/log-format.ts",
+        "src/main/logging.ts",
+        "src/main/bots/host-log.ts"
+      ],
+      "changes": "Extracted the existing bounded console value projection unchanged; desktop and standalone Host reuse it with the original log-redaction module. The Host owns its file after taking the process lifetime lock, keeps two rotated generations, validates file identity and never grows an overflow queue. A small bootstrap installs diagnostics before loading the runtime. This is local diagnostic logging, not a replacement for durable task/action receipts."
+    },
+    {
+      "source": "src/main/agent/runtime.ts",
+      "snapshot": "Workspace before shared context compaction configuration extraction, 2026-10-03",
+      "sha256": "ae801781c3ddda210f81cd861c6ca9b19e3f4e60d0858560fd94dcbe6279f760",
+      "destinations": [
+        "src/main/agent/context-compaction-config.ts",
+        "src/main/agent/runtime.ts",
+        "src/main/bots/agent-runtime.ts"
+      ],
+      "changes": "Extracted original output-aware input budget, token-based retained context, summary overflow recovery target, tool result eviction and argument truncation parameters, plus the exact original handoff prompt. Desktop graph parameters are unchanged; the Bot graph now reuses the same configuration instead of a fixed 70% trigger and twelve-message tail. Existing Cmb graph and summarization middleware continue to own estimates, overflow recovery, cancellation and checkpoint state; no provider token counts or tokenizer accuracy are implied by local fixture tests. The existing transient tool-result compaction shortcut now checks the same reserved input budget before dispatch; otherwise it follows the original summary path.",
+      "sharedDependencies": [
+        {
+          "source": "src/shared/model-token-budget.ts",
+          "sha256": "ff012520edb9c112d99bb537035e68938d9ca5eb89bc6c5f867e68e69394175c"
+        }
+      ]
+    }
+  ],
+  "documentDependencies": [
+    {
+      "package": "pdfjs-dist",
+      "version": "6.3.289",
+      "license": "Apache-2.0",
+      "upstream": "https://github.com/mozilla/pdf.js",
+      "usage": "Official ESM text extractor and worker with local CMaps/fonts; byte inputs only, no arbitrary URLs/paths or PDF action execution."
+    },
+    {
+      "package": "@xmldom/xmldom",
+      "version": "0.9.12",
+      "license": "MIT",
+      "upstream": "https://github.com/xmldom/xmldom",
+      "usage": "Parse bounded PPTX package XML and slide relationships; reject external relationships and XML entities."
+    },
+    {
+      "package": "@napi-rs/canvas",
+      "version": "1.0.9",
+      "purpose": "Byte-only image decode, bounded resize and region crop in the disposable document worker; original artifact unchanged."
+    },
+    {
+      "package": "image-size",
+      "version": "2.0.4",
+      "purpose": "Inspect supported raster headers and cap dimensions before native decode."
+    }
+  ],
+  "webhookAdaptation": {
+    "source": "/Users/chenqiang/Desktop/AI/cmb-bot-reference-sources/rakazo/apps/api/src/webhook-inbound.ts",
+    "sha256": "dd107b0659b591017d019451794a4bd711f2a11a0b1587aa53c07af70f299ad7",
+    "license": "Apache-2.0; RAKAZO-LICENSE",
+    "destination": "src/main/bots/upstream/rakazo-webhook.ts",
+    "changes": "Extracted original untrusted payload framing and hashed inbound nonce. Cmb supplies routine scope, SQLite atomic acceptance, loopback transport, strict size/schema/rate checks and independent human-managed key rotation."
+  },
+  "localSearchExtraction": {
+    "source": "src/main/agent/local-sandbox-core.ts",
+    "sha256BeforeExtraction": "1f833bc188e11ff358d358f2f431631f21e76d90d9798eb9d902895f9731cbad",
+    "destinations": [
+      "src/main/agent/file-text-encoding.ts",
+      "src/main/agent/literal-search-results.ts",
+      "src/main/bots/project-search.ts"
+    ],
+    "changes": "Extracted existing binary-extension checks, jschardet/iconv file decoding, line truncation and literal-match accumulator into shared desktop/Bot modules. Desktop retains traversal, ripgrep and fallback behavior; Bot supplies authorized stable file handles, traversal restrictions and explicit scan limits. The accumulator uses a null-prototype map so relative file names cannot collide with Object properties."
+  },
+  "pluginCommandIntegration": {
+    "sources": [
+      {
+        "source": "src/main/mods/v2/manager-core.ts",
+        "sha256": "b6b227dc47b3fe99b6425110a32a4a84ec536a2d7a5b738fabda67217f3d94f8"
+      },
+      {
+        "source": "src/main/mods/v2/mcp-tool-routing.ts",
+        "sha256": "7166f4f291a6acf5cb6c9dfaca9e48d5f177e78412d557b67aeacb67dddb4a24"
+      },
+      {
+        "source": "src/main/mods/v2/mcp-sdk.ts",
+        "sha256": "b115e34ca9dcb4d8722c1154fa3ff95bb3709b882418519fc7f3af16f6398bb7"
+      },
+      {
+        "source": "src/main/mods/v2/execution-context.ts",
+        "sha256": "1f7a9dd7a0de744ebdc725337a78f28d4f737dad1db8fdefe435c2adee5aa20d"
+      },
+      {
+        "source": "src/main/mods/manager-core.ts",
+        "sha256": "ee0b810d88630b7aa5905941590f1382fb982fa204340b222b1caf0336ac7ceb"
+      }
+    ],
+    "changes": "Reuses the existing Function Mods command registry, QuickJS execution, source grants, scoped SDK MCP routing, concrete tool hooks, policy and publication. Bot adds explicit composer commands, durable command/effect receipts, per-action approvals, cancellation and exact connection fences. User commands are separate queued runs; background callbacks retain non-user authority. Model and SDK MCP share the same Bot approval/invocation/artifact pipeline. Native SDK writes and execution are covered by pluginNativeToolIntegration. Command panels and the remaining standard-turn preparation are still separate work."
+  },
+  "pluginNativeToolIntegration": {
+    "sources": [
+      {
+        "source": "src/main/mods/v2/tool-sdk.ts",
+        "sha256": "5ca322a3ee201b0a87e511543e0563ffc8194b0d3d348cd02b894261b7963124"
+      },
+      {
+        "source": "src/main/agent/replace.ts",
+        "sha256": "4cb2a934c5190a0c76741363e29183dfc0e408b1053ea46dd667e7b3309e5537"
+      },
+      {
+        "source": "src/main/agent/exec-policy.ts",
+        "sha256": "23e9a18c2040848fc096a4ca9cf037d5f5c9d48f88e0067f5db52d5ac7c2c8de"
+      },
+      {
+        "source": "src/main/services/stable-file-handle.ts",
+        "sha256": "21693e5a9d5e010dce26feb414ded3fa539d86b1c582188bd514746735fe0f80"
+      }
+    ],
+    "adapters": [
+      "src/main/bots/plugin-native-tools.ts",
+      "src/main/bots/project-tools.ts",
+      "src/main/bots/shell-tools.ts"
+    ],
+    "changes": "Reuses Cmb SDK argument validation, edit matching, stable file handles, original native executor and existing Bot project/shell tools. SDK calls retain stable tool identities, approvals, patch/backup artifacts, CAS, cancellation, configured Pre/PostToolUse checks and error flags. The shared Function file reader records hashes only after successful read/publication; permission-only probes never grant an observed version. Existing files require an actual read by the same plugin. Commands are foreground, use the configured project root and inherit the original SDK 60-second limit; desktop singletons, arbitrary cwd and background authority are not exposed."
+  },
+  "approvalRulesIntegration": {
+    "source": "src/main/agent/exec-policy.ts",
+    "sha256": "23e9a18c2040848fc096a4ca9cf037d5f5c9d48f88e0067f5db52d5ac7c2c8de",
+    "adapter": "src/main/bots/approval-rules.ts",
+    "changes": "Reuses original permanent-command eligibility. Persists exact command/cwd/timeout/sandbox/definition identity with Bot and configuration scope, not a prefix; ask-first and rule revision are rechecked before dispatch. Grok approval settings/actions informed UX, but remote smart-mode classifier is not yet integrated."
+  },
+  "independentReviewIntegration": {
+    "references": [
+      {
+        "source": "source/host/runner/sand-auto-review-classifier-run.ts",
+        "sha256": "47986454a4ad50bdb48f0438076ffa7bc7ce45dea29a995cf516503d4671df46"
+      },
+      {
+        "source": "source/host/runner/auto-review-gate.ts",
+        "sha256": "cec5376d44762961648176aa45997d50f97a7a7dfa25590d0777ba615bd86353"
+      },
+      {
+        "source": "source/host/extensions/auto-review/sand-backend-smart-mode-classifier-exec.ts",
+        "sha256": "f5c995df7f9719b83156cb147cc25a08ff2046bbc6f53bd5609edd8a35d20952"
+      }
+    ],
+    "adapters": ["src/main/bots/auto-review.ts", "src/main/bots/auto-review-store.ts"],
+    "changes": "Original Grok delegates classification to DashboardService; the remote classifier implementation is absent. Cmb supplies its own tool-less, single-attempt configured-model adapter, bounded request/output, shared model metering, exact-action durable decisions, current-user evidence, settings/lease/task checks and manual fallback. Prompt is Cmb-authored, not recovered Grok classifier logic. Actual browser/download targets, workflow delegation, persisted routine standing assignments and bounded cross-Bot handoffs now supply review context. Cross-Bot execution keeps original private task data in the original owner's reviewer model, with policy/profile/revocation checks. Advanced native desktop actions remain incomplete."
+  },
+  "subagentLifecycleIntegration": {
+    "source": [
+      "src/main/hooks/subagent-context.ts",
+      "src/main/hooks/runner-core.ts",
+      "src/main/agent/workflow/engine.ts"
+    ],
+    "destination": [
+      "src/main/bots/subagent-lifecycle.ts",
+      "src/main/bots/session-lifecycle.ts",
+      "src/main/bots/skill-failure.ts"
+    ],
+    "changes": "Reuses existing Cmb lifecycle context builders, Hook executor and SubagentStop halt semantics. Adds per-child durable start/stop receipts and a parent halt fence; execution stays inside each child lease, role and workspace. Workflow transports the resolved registry role name. Parent task review uses the parent configured model, with model-authored delegation distinguished from actual human input; no parent private context enters the child executor model."
+  },
+  "notificationHookIntegration": {
+    "source": [
+      "src/main/agent/runtime.ts",
+      "src/main/agent/tool-hooks-core.ts",
+      "src/main/hooks/runner-core.ts"
+    ],
+    "adapters": [
+      "src/main/bots/hook-notifications.ts",
+      "src/main/bots/skill-hooks.ts",
+      "src/main/bots/secret-requests.ts"
+    ],
+    "changes": "Reuses Cmb permission_prompt event matching, command/HTTP/prompt Hook execution and the existing tool middleware. Bot adds a durable notification stage, lease-bound asynchronous capability and an independent secondary approval gate; only exact registered Notification actions can consume it. Completed Hook receipts survive Host recovery, nested notifications are suppressed, and secret values stay in the original secure-input channel. This is Cmb execution integration, not copied Grok cloud infrastructure."
+  },
+  "persistentFunctionSurfaces": {
+    "source": [
+      "src/main/mods/v2/manager-core.ts",
+      "src/main/mods/v2/session.ts",
+      "src/main/mods/v2/host-call.ts",
+      "src/main/mods/v2/clients.ts",
+      "src/renderer/src/components/chat/FunctionPanes.tsx",
+      "src/renderer/src/components/chat/FunctionClient.tsx"
+    ],
+    "adapters": [
+      "src/main/bots/function-sessions.ts",
+      "src/main/bots/function-presentation.ts",
+      "src/main/bots/mods-control-stores.ts",
+      "src/main/bots/plugin-pane-actions.ts",
+      "src/renderer/src/components/bots/BotPluginPanes.tsx"
+    ],
+    "changes": "Reuses the existing Cmb QuickJS guest, Function Mods sessions, pane and client controls, grant validation and execution contexts. Bot Host adds scoped resident guest ownership with expiring per-run capabilities, a separately restricted idle presentation host and shared ModControlStore leases. Business gestures use durable Bot queue intents; response retries preserve exact intent identities, and Host restarts invalidate closures while retaining plugin data and completed receipts. No Grok cloud service or additional plugin engine is claimed."
+  },
+  "workspaceSetupIntegration": {
+    "source": [
+      "src/main/hooks/session-lifecycle.ts",
+      "src/main/services/setup-state.ts",
+      "src/main/hooks/runner-core.ts"
+    ],
+    "adapters": [
+      "src/main/bots/workspace-setup.ts",
+      "src/main/bots/session-lifecycle.ts",
+      "src/main/bots/skill-hooks.ts"
+    ],
+    "changes": "Reuse Cmb Setup init semantics and original command/HTTP/prompt Hook runner before SessionStart. Bot Host owns SQLite initialization records keyed to real directory identity and active Hook configuration, serializes shared-project initialization without consuming a model slot while waiting, and resumes existing per-Hook effect receipts. Workspace marker files cannot attest Host checks. Explicit zero-exit block/stop results now veto Setup in both original and synchronous runner branches. Windows execution remains unverified."
+  },
+  "messagePublicationIntegration": {
+    "sources": [
+      {
+        "source": "/Users/chenqiang/Desktop/AI/grok-bot-0.18-reconstructed-main/source/host/runner/tools/send-message-tool.ts",
+        "sha256": "6912a09072253f6034fea43876cf3c644e1276e676bc06c4a561c07177a5ba6a",
+        "version": "0.18.0 reconstructed"
+      }
+    ],
+    "destinations": [
+      "src/main/bots/send-message-tool.ts",
+      "src/main/bots/store.ts",
+      "src/main/bots/agent-runtime.ts",
+      "src/shared/bot-send-message.ts"
+    ],
+    "changes": "References intermediate user-directed SendMessage behavior; reuses Cmb original graph, toolOnce transaction, transcript, lease, thread scope, artifact reader and action receipts. Meaningful publications continue the same task; final delivery stays unchanged. Direct Teach learning gains content-only progress after original learning-run/epoch checks inside the existing transaction before replay. Group learning keeps its original five tools; images and quotes are not granted to learning.",
+    "liveReference": {
+      "product": "Grok Bot",
+      "version": "0.66.0",
+      "observation": "Official client direct service: existing Teach chat displayed receipt, review and learned stages. Read-only AX observation, no new learning task submitted."
+    }
+  },
+  "computerTaskIntegration": {
+    "sources": [
+      {
+        "source": "/Users/chenqiang/Desktop/AI/grok-bot-0.18-reconstructed-main/source/host/runner/tools/sand-computer-use-subagent.ts",
+        "sha256": "ed393a251bc58d4ea886611e55f8062c20506d1fd40e4c38d2ac2894fb9e4627",
+        "version": "0.18.0 reconstructed"
+      },
+      {
+        "source": "/Users/chenqiang/Desktop/AI/grok-bot-0.18-reconstructed-main/source/host/runner/computer-use.ts",
+        "sha256": "b0b2aac05808d3b9bf41653daa6ba53a0c0e26801d50b88cef469ca965af1843",
+        "version": "0.18.0 reconstructed"
+      },
+      {
+        "source": "/Users/chenqiang/Desktop/AI/grok-bot-0.18-reconstructed-main/source/host/runner/subagent-runtime.ts",
+        "sha256": "6125663b5efe5ac2679350ab0594d378d5e1c34ba27846d714d0ae7bb3374336",
+        "version": "0.18.0 reconstructed"
+      }
+    ],
+    "destinations": [
+      "src/main/bots/computer-task-profile.ts",
+      "src/main/bots/native-task-scope.ts",
+      "src/main/bots/workflow-child-runner.ts",
+      "src/main/bots/native-desktop-broker.ts"
+    ],
+    "changes": "References one background computerUse child sharing the existing Bot desktop while its parent continues non-GUI work. Reuses Cmb workflow child identity, SQLite reservation/effect records, model graph, action approvals, task controls and completion inbox; no extra desktop, Job, owner queue or child surface. The exact Host-created profile excludes shell/project/browser/admin access. Awaited observation invalidation before entry and settlement retains original control owner; unknown actions and cancellation remain reserved for review.",
+    "adaptation": "Cmb keeps the original child waiting through authenticated same-screen human help and fresh handback observation; reconstructed Grok instead reports human steps to its parent for redispatch. Windows accessibility/window-message subset only, not arbitrary physical input or Mac application support.",
+    "verificationBoundary": "Real CmbRuntime/SQLite/workflow process/framed broker with controlled native process admission/capture. Not Windows kernel execution acceptance."
+  },
+  "ordinaryUserFormIntegration": {
+    "product": "Grok Bot",
+    "version": "0.66.0",
+    "origin": "Actual installed official renderer user-form view and submit entry; not a reconstruction of the proprietary backend",
+    "asset": "dist/renderer/assets/chunk-view-B0nrWtCh.js",
+    "sha256": "415defea91401ff0b96c6fc803eb63c686747fc262793434e07b1ef33da5b766",
+    "formattedReferenceSha256": "bcbb76bdc531bfc189a0e05b951ebcf5a8f2d72ab4cb88166d4a5fc677e89bf8",
+    "referenceRanges": [
+      "78–105 typed ordinary controls",
+      "222–411 text/select/textarea",
+      "1076–1125 required fields and original entryId/agentId string-value submit"
+    ],
+    "reuse": "Existing question interaction table, Store answer transaction and revision receipt, original runtime wait, graph, readable user acknowledgement and authenticated answer RPC. Host stamps original epoch; no new table or dispatch queue.",
+    "changes": "Adds a strict ordinary request_user_form tool; shared seven-type validation, real dates and finite decimals retained as strings, exact declared selects, optional fields, cancellation and 24 KiB UTF-8 bounds. Existing secure-input/help flow handles secrets. Typed answer checks original epoch before receipt replay and at RPC admission/ACK; legacy questions retain their contract and Teach catalogs are unchanged.",
+    "boundaries": "Current frontend source was read; no new official form was submitted. Local controlled-model/runtime/UI tests verify Cmb behavior, not external model task quality or Windows native execution."
+  },
+  "browserKeyboardRecoveryIntegration": {
+    "source": "source/host/runner/tools/sand-browser-driver-source.ts",
+    "sourceSha256": "8db9bd9bc12ac026a544e358aec1bd09ba74da7ec7c1e87dcbb737cc75f28eee",
+    "version": "0.18.0 reconstructed",
+    "referenceBoundary": "The provided Grok browser driver delegates keyboard.press directly. This is not source for the current proprietary server.",
+    "dependency": "Locked Playwright 1.58.2 chord press and keyboard RPC lifecycle were read and a failed modifier chord was reproduced in actual Chrome.",
+    "destinations": [
+      "src/main/bots/upstream/grok-browser-actions.js",
+      "src/main/bots/browser-broker.ts",
+      "src/main/bots/computer-provider.ts"
+    ],
+    "changes": "Retains one normal delegated press. On failure releases original potentially pressed tokens in reverse without replacing the original error. Original press and failed-release watchdogs fence the captured Broker and join the original browser transport shutdown before the serialized input can settle. Uses existing action timeout, ownership, approvals, observations and effect receipts; no input replay or retarget.",
+    "boundaries": "Closing the shared browser can discard other live DOM. Unknown effects remain unknown. Shutdown is initiated at the watchdog deadline but final OS/transport cleanup has no absolute wall-clock bound; unavailable ownership remains fenced until settlement. No Windows native or real-model acceptance inferred."
+  },
+  "nativeTextSelectionIntegration": {
+    "grokReference": {
+      "version": "0.18.0 reconstructed",
+      "source": "source/electron-preload/preload-vnc.ts",
+      "sha256": "c5cc9d3b17bdbb504d78c7e1526f62315b4f6af60b1cdeb99dada23f5aced2b9",
+      "range": "355–392 remote RFB modifier/key input"
+    },
+    "reuse": "Existing Cmb Windows observed provider, approval/control/epoch, original framed native worker, effect receipt and UI action list. Existing pinned Microsoft WinApp UIA/WGC code remains the platform base.",
+    "changes": "Adds bounded UIA select_all_text for complete non-secret Value plus supported TextPattern, binding the reviewed original document range and rechecking text/identity before a single Select. Unknown outcome is not replayed. Generated COM acquisitions use owned unique wrappers with deterministic release; Windows native build checks nine exact generated caller bodies. WinRT projections keep their original separate ownership domain.",
+    "nativeSourceManifestSha256": "8c2f0cac51932c6c1d3629758fd6d59361faa67f76f2c54eb6d1199a5f57feda",
+    "boundaries": "UIA text selection does not implement arbitrary Ctrl+A, full modifier input, IME or Mac application support. Locked strict Windows-target publish and actual non-Windows IUnknown ownership counter verify separate contracts, not Windows UIA/WGC behavior or installation."
+  },
+  "groupAssignmentAndHistoryIntegration": {
+    "sources": [
+      "source/host/groups/group-chat.ts",
+      "source/host/extensions/transcript/group-chat-orchestrator.ts",
+      "source/host/extensions/transcript/group-chat-glue.ts",
+      "src/main/agent/context-history-path.ts",
+      "src/main/mods/v2/session-transcript.ts"
+    ],
+    "destinations": [
+      "src/main/bots/group-store.ts",
+      "src/main/bots/prompt-preparation.ts",
+      "src/main/bots/skill-references.ts"
+    ],
+    "changes": "Reuses Grok rotating group turns, public delivery and explicit pass semantics, plus Cmb conversation-scoped historical reads and fixed skill revisions. Validates the original human assignment and carries its member-specific skill bindings through later turns. Earlier Bot replies remain attributed lazy source references, with up to four 2000-character excerpts from the latest exchange that actually has public replies; an intervening unanswered input does not hide that outcome. As in Grok's persistent member session and Cmb's existing transcript, each room member's own public replies retain their assistant role; other speakers and imported references remain quoted human data. The original current progress, plugin transcript and durable records remain intact. This bounded Cmb adaptation does not replay prior tool calls, import private sessions or make historical claims evidence of current work. A designated reviewer waits for the actual current producer result before publishing its independent judgment. Contextual follow-ups explain previous deliveries instead of automatically repeating old roles or skill selections; full or truncated source details use the existing read_message tool. Peers pass after an adequate unassigned reply unless they have substantive additions; explicit new work still requires current evidence. These adaptations use no role or punctuation regex, result rewriting, permission grant or proprietary backend claim."
+  },
+  "humanMemoryRetentionIntegration": {
+    "sources": [
+      "source/host/extensions/memory/memory-synthesis-service.ts",
+      "source/host/runner/sand-memory.ts"
+    ],
+    "destinations": [
+      "src/main/bots/memory-retention.ts",
+      "src/main/bots/memory-store.ts",
+      "src/main/bots/memory-synthesis.ts"
+    ],
+    "changes": "Retains original extracted synthesis and independent verification prompts, existing durable evidence queue, compare-and-swap and explicit-memory protection. Cmb adds conservative bounded opt-out recognition from actual original human input and accepted human steering at enqueue, legacy queue preparation and commit; both model requests also receive a semantic retention policy. Excluded legacy evidence is marked skipped for audit, not deleted. No new memory authorization, private text disclosure, old memory deletion or proprietary Grok backend parity claim."
+  },
+  "createdBotResultNavigationIntegration": {
+    "grokReference": {
+      "product": "Grok Bot",
+      "origin": "Official native App, natural-language Bot creation on 2026-10-10",
+      "observedBehavior": "Successful creation reply links directly to the created Bot; the new chat automatically greets and offers one optional work question."
+    },
+    "sources": [
+      "src/main/bots/upstream/grok-agent-profiles.ts",
+      "src/main/bots/profile-tools.ts",
+      "src/main/bots/entity-references.ts",
+      "src/main/bots/store.ts",
+      "src/renderer/src/components/bots/BotWorkspace.tsx",
+      "source/shared/agents/onboarding.ts",
+      "src/main/bots/introduction-runtime.ts",
+      "src/main/bots/introduction-store.test.ts"
+    ],
+    "destinations": [
+      "src/main/bots/profile-tools.ts",
+      "src/main/bots/entity-references.ts",
+      "src/main/bots/store.ts",
+      "src/main/bots/introduction-runtime.ts"
+    ],
+    "changes": "Reuses the approved create tool, atomic receipt, original indexed event table and existing message entity references and renderer navigation. The actual creation transaction records its leased origin; only successful public final delivery attaches bounded references to still-existing created Bots. Recovery and receipt replay retain the same identities without extra messages. No prose parsing, private history or memory copying, connector permission expansion, new schema or polling. After successful creator configuration, a still-idle newly created Bot reuses the existing persisted introduction graph with only one optional-question preparation tool, hidden Host cue, quota accounting and first-task suppression. Existing work, failed creator completion, legacy creates and clones do not receive this opening; no new queue, poller or memory permissions. Auto language uses the supplied profile language.",
+    "verificationBoundary": "Original Store and actual SDK gates cover approved creation and update followed by a finite hello with no action permissions, denial, rollback, replay, reopen, deletion, stopped leases, genuine work taking priority and failed creator completion. Real MiniMax/native creation, exact navigation and finite hello passed on ecb in the recorded sample; the optional-question candidate requires its own native validation.",
+    "adaptation": "Unlike the reconstructed onboarding prompt, this hello cannot act on a profile as an assignment. A genuine user or peer task uses the existing normal task and authorization path.",
+    "onboardingSourceSha256": "ed6d111669baae8136e371c19a60453e00855157cee101a0124bf14ad98fd2b6"
+  },
+  "optionalIntroductionQuestion": {
+    "sources": [
+      "source/shared/agents/onboarding.ts",
+      "src/renderer/src/components/chat/UserInputRequestDialog.tsx",
+      "src/renderer/src/lib/use-bot-epoch-operation.ts",
+      "src/renderer/src/lib/bot-protected-save-pending.ts",
+      "src/shared/bot-questions.ts"
+    ],
+    "destinations": [
+      "src/main/bots/introduction-runtime.ts",
+      "src/main/bots/introduction-questions.ts",
+      "src/shared/bot-introduction-question.ts",
+      "src/renderer/src/components/bots/BotIntroductionQuestion.tsx"
+    ],
+    "changes": "Adapts Grok first-conversation choice and ignore behavior using the existing Cmb graph, question schema, UI and exact-nonce lifecycle. The single limited tool only stages a question. Successful introduction atomically publishes the actual greeting and question, releases the run lease, and grants no actions or memory access. Ignoring queues nothing; a human answer uses the ordinary scoped send path. Real work supersedes the optional question. Schema72 adds one bounded question record per introduction; public history retains the actual question text. No extra execution engine, poller, queue or approval bypass.",
+    "verificationBoundary": "Store, actual SDK graph and isolated React/SQLite gates cover finite lifecycle and lost-ack recovery. Installed ba207 native App with actual MiniMax M3 and official Grok passed ignore-then-work and custom-answer-then-work comparisons. Installed 67c native first work superseded a pending optional question with one genuine task and no new memory. Cancellation of an in-flight introduction, every model and whole UI parity remain unclaimed."
+  },
+  "peerOriginalFileHandoffIntegration": {
+    "references": [
+      {
+        "source": "/Users/chenqiang/Desktop/AI/grok-bot-0.18-reconstructed-main/source/host/agents/agent-messaging.ts",
+        "sha256": "4c9fe82afe95c3c7f92e9fb26b67f96f25544fc3240ae88d40b9a3f2ee5991fc",
+        "version": "0.18.0 reconstructed"
+      },
+      {
+        "source": "/Users/chenqiang/Desktop/AI/grok-bot-0.18-reconstructed-main/source/host/cloud-agents/cloud-agent-images.ts",
+        "sha256": "f9762450dc0e2643c0c5dd307a5ef0bc72f7882516678bc9fc42f601fc3fb14d",
+        "version": "0.18.0 reconstructed"
+      }
+    ],
+    "referenceBoundary": "Provided image/shared-workspace messaging source and official 0.68.1 native observations. No current proprietary backend or redistribution license is claimed.",
+    "reuse": [
+      "Original approval/revision checks, peer dispatch transaction and durable receipts",
+      "Scoped artifact reads, immutable object storage, existing file lifecycle and byte policy",
+      "Existing message file cards, preview/focus handling and bounded exchange read queue",
+      "Existing botUserMessageContent prompt preparation"
+    ],
+    "changes": [
+      "Explicit files artifact IDs create approved same-byte aliases scoped to recipient conversation/run; no source transcript or unrestricted file paths are granted.",
+      "Integrity verification streams a bounded 512 KiB buffer under sorted object locks outside human approval waits; existing bytes are not copied.",
+      "Original transaction includes aliases, messages, receipt and child dispatch. Replay returns original receipt. Chained handoff and source deletion retain authorized originals.",
+      "Only known preflight image-format mismatch is recoverable. Actual peer prompt now preserves attachment IDs.",
+      "peer-files-v1 and explicit includeFiles preserve legacy backend/client exchange contracts."
+    ],
+    "verificationBoundary": "14 domain and 9 actual React/Chrome/SQLite checks passed for built f3d. Controlled-model actual graph test passed. Video limit correction raises domain coverage to 15 but is not yet built. Real MiniMax original handoff reached C and correct private review; final group two-file delivery remains pending.",
+    "evidence": "docs/cmbcowork-bot-parity-plan/evidence/2026-10-08-integration69/current-peer-original-files-candidate.safe.json"
+  },
+  "versionedLatestStateEvents": {
+    "requirement": "CJ04: explicitly versioned object-state events must not allow an older task to dispatch after a newer accepted source state.",
+    "origin": "CMBDevClaw integration using the original Cmb durable receipt, task ownership, approval, lease, drain and effect lifecycle. This is not copied or inferred proprietary Grok backend code.",
+    "reuse": [
+      "Original inbound event transaction and immutable request receipt",
+      "Existing root_run_id ownership for peer/workflow descendants",
+      "Existing cancellation/drain, final assertDispatch/beginEffect and unknown-effect recovery"
+    ],
+    "boundary": "Opt-in per-routine source epoch and entity sequence. Ordinary events keep every-event behavior. Host dispatch fencing cannot retract an issued request; arbitrary external atomic updates require target-side CAS/ETag. Real provider/MiniMax CJ04 and frozen App remain separately unverified.",
+    "documentation": "docs/cmbcowork-bot-parity-plan/18-webhook-latest-state.md",
+    "changes": [
+      "Schema74 durable source identities/high water and acceptance receipts are committed with task creation and old-task draining.",
+      "Final dispatch and inherited task authority reject superseded versions; outstanding/unknown old effects block successors and retain reconciliation.",
+      "Active-run and unresolved-effect partial indexes avoid scanning complete history during dispatch."
+    ]
+  },
+  "reviewedGroupPublicationIntegration": {
+    "references": [
+      {
+        "path": "source/host/agents/agent-messaging.ts",
+        "bytes": 11451,
+        "sha256": "4c9fe82afe95c3c7f92e9fb26b67f96f25544fc3240ae88d40b9a3f2ee5991fc",
+        "reviewedLines": [36, 47],
+        "observedBehavior": "Directory explains asynchronous delivery to an agent or an existing group the sender belongs to; outbound group publication is a side effect requiring user intent, not an automatic relay of private words."
+      },
+      {
+        "path": "source/host/extensions/transcript/agent-to-agent-messaging.ts",
+        "bytes": 12439,
+        "sha256": "453d97db38543aaf087ca54a9dc6ade7491e7907083cc713c10249b6d7fa249f",
+        "reviewedLines": [69, 86],
+        "observedBehavior": "A group target routes through postToGroup. This reconstructed version explicitly states group messages are text-only and does not deliver its image arguments to groups."
+      },
+      {
+        "path": "source/host/extensions/transcript/shared-rooms.ts",
+        "bytes": 24208,
+        "sha256": "17959d3834e0c7c041f0711d041ce9a158dd0cc3f4ea2b8511dd3f04af14c96f",
+        "reviewedLines": [51, 113],
+        "observedBehavior": "postToGroup rejects missing/non-group targets, non-members and pass text; records a public member message and schedules a bounded group turn on the agent lane."
+      },
+      {
+        "path": "source/host/extensions/transcript/group-chat-orchestrator.ts",
+        "bytes": 3372,
+        "sha256": "5ff5626a9234be5ab0ca4cc94490e96c55f3ca2f7f886eaf1e0f381ae7f209a1",
+        "reviewedLines": [41, 107],
+        "observedBehavior": "Existing bounded round-robin/member routing, pass semantics and message limits; this orchestration was already adapted by CMB to durable group epochs."
+      }
+    ],
+    "referenceBoundary": "Behavior/protocol reference only for this new integration. The 0.18 reconstruction proves text publication to own groups, not generic binary group attachments or the current proprietary cloud backend. CMB reuses its own original-file storage/approval/file-card interfaces to support explicit originals.",
+    "origin": "New CMB integration over existing approval, immutable artifact and durable scheduler interfaces; no new proprietary Grok backend/runtime imported.",
+    "destinations": [
+      "src/shared/bot-group-post.ts",
+      "src/main/bots/group-post-tool.ts",
+      "src/main/bots/group-store.ts",
+      "src/main/bots/store.ts",
+      "src/main/bots/agent-runtime.ts",
+      "src/main/bots/auto-review.ts",
+      "src/main/bots/activity.ts",
+      "src/main/bots/schema.ts",
+      "src/renderer/src/components/bots/BotApprovalContent.tsx"
+    ],
+    "reuse": [
+      {
+        "paths": [
+          "src/main/bots/peer-approval.ts",
+          "src/main/bots/profile-tools.ts",
+          "src/main/bots/store.ts"
+        ],
+        "behavior": "Existing exact approval, run lease and atomic toolOnce/approvedToolOnce receipts."
+      },
+      {
+        "paths": [
+          "src/main/bots/artifacts.ts",
+          "src/shared/bot-peer-files.ts",
+          "src/shared/bot-files.ts"
+        ],
+        "behavior": "Existing task-visible original selectors, immutable object aliases, per-type file limits and streaming integrity verification under sorted object locks; no extra whole-file copy or locks while waiting on human approval."
+      },
+      {
+        "paths": ["src/main/bots/upstream/grok-group-chat.ts", "src/main/bots/group-store.ts"],
+        "behavior": "Previously adapted Grok group routing/pass and bounded round robin; existing durable queue, cycle and recovery machinery."
+      },
+      {
+        "paths": [
+          "src/shared/bot-message-attachments.ts",
+          "src/renderer/src/components/bots/BotApprovalContent.tsx"
+        ],
+        "behavior": "Existing message file cards and approval rendering, retaining original names, sizes, hashes and exact destination context."
+      }
+    ],
+    "changes": [
+      "Only list existing member groups; do not create guessed targets. Original public group assignment may be visible through verified parent lineage, but private transcript/history is not shared.",
+      "Freeze group identity/revision, named member identities/revisions, original route and latest cycle/cancellation status; recheck these with run ownership and selected file metadata at commit.",
+      "Commit exact public text, explicitly selected same-byte file aliases, provenance, tool receipt and any scheduler admission in one SQLite transaction. Lost acknowledgement replays the receipt without re-reading source bytes or waking again.",
+      "An active room continues without cancelling its original task. An idle public-origin cycle uses agent priority, never becomes human auto-review authority, and excludes the publisher from its initial recipients.",
+      "The active room turn may read explicitly published same-cycle originals even after its original trigger; unrelated/private/same-Bot artifacts, other branches and obsolete turns gain no broader access.",
+      "Late same-origin public continuation is verified through the publication source run parent chain. New human tasks, cancelled continuations and unrelated publications are not treated as the old task.",
+      "First public post counts toward both round and global message budgets. Its presence alone does not start another round when every recipient passes. Existing two-per-turn, ten-message and three-round limits remain bounded.",
+      "Room prompt contains this member's own same-cycle delivered peer receipt metadata (recipient, status, intent, original file names), not private bodies or returned content. This provides actual phase state; it is not proof that a real model will never duplicate work."
+    ],
+    "verificationBoundary": "18 domain cases, 35 group/private-peer neighbors, 15 peer-file cases, one controlled-model actual graph, one typed review gate and 6 static-render approval/neighbor cases passed. The new post_to_group feature is not in live f3d and has not passed native MiniMax acceptance. Unified integration/build/native checks remain separate.",
+    "evidence": "docs/cmbcowork-bot-parity-plan/evidence/2026-10-08-integration69/current-group-post-candidate.safe.json"
+  }
+}

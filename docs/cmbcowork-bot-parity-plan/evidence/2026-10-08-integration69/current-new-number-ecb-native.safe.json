@@ -1,0 +1,99 @@
+{
+  "kind": "new-input-group-dependency-formal-native-comparison",
+  "recordedAt": "2026-10-10T05:14:02.841106+00:00",
+  "nativeBuildId": "ecbff0f576b74a71097bc25c",
+  "schema": 71,
+  "formalVia": "CUA native Apps, real configured MiniMax M3 and official Grok",
+  "input": "@月报示范核验 独立计算 419+68；@报价工具编程核验 等待其公开结果后独立核对。每个 Bot 各只回复一条结果，不访问外部服务。这是新任务，不引用上一题的结果。",
+  "cycle": {
+    "id": "2dfbf476-2a8d-4157-a8c3-a62b930bc033",
+    "conversation_id": "7f08d20f-73d8-4507-a26f-dfbc64d6529e",
+    "status": "completed",
+    "round": 2,
+    "total_messages": 2
+  },
+  "publicMessages": [
+    {
+      "id": "48297622-a94f-48f5-8b94-d40c3a98ce60",
+      "bot_id": "e1d81813-1ff0-4fca-9948-d966e1a77189",
+      "run_id": "53fb4d23-74d3-485b-9271-678aee16e704",
+      "text": "独立计算 419+68=487。"
+    },
+    {
+      "id": "3927e4e5-060b-4d6c-aa4c-ce1e26daa9e6",
+      "bot_id": "924e1689-7b6d-411c-a429-28decb91b179",
+      "run_id": "4e5f5046-cbeb-4fb6-b31b-adf024c32f5b",
+      "text": "独立核对：419+68=487，与 @月报示范核验 结果一致，核对通过。"
+    }
+  ],
+  "runs": [
+    {
+      "id": "8cfaf057-2cb1-4b0d-89ea-03bb51a49303",
+      "bot_id": "924e1689-7b6d-411c-a429-28decb91b179",
+      "status": "succeeded",
+      "sent_count": 0,
+      "modelRequests": 1,
+      "unknownUsage": 0
+    },
+    {
+      "id": "53fb4d23-74d3-485b-9271-678aee16e704",
+      "bot_id": "e1d81813-1ff0-4fca-9948-d966e1a77189",
+      "status": "succeeded",
+      "sent_count": 1,
+      "modelRequests": 2,
+      "unknownUsage": 0
+    },
+    {
+      "id": "7bf1f166-1985-4fbb-ae8d-6f576966ba7b",
+      "bot_id": "e1d81813-1ff0-4fca-9948-d966e1a77189",
+      "status": "succeeded",
+      "sent_count": 0,
+      "modelRequests": 1,
+      "unknownUsage": 0
+    },
+    {
+      "id": "4e5f5046-cbeb-4fb6-b31b-adf024c32f5b",
+      "bot_id": "924e1689-7b6d-411c-a429-28decb91b179",
+      "status": "succeeded",
+      "sent_count": 1,
+      "modelRequests": 2,
+      "unknownUsage": 0
+    },
+    {
+      "id": "506e7894-18a8-4c84-9388-27c24550369e",
+      "bot_id": "924e1689-7b6d-411c-a429-28decb91b179",
+      "status": "succeeded",
+      "sent_count": 0,
+      "modelRequests": 2,
+      "unknownUsage": 0
+    },
+    {
+      "id": "2f84366a-ffc2-4ee7-aaf5-6eecad9c804b",
+      "bot_id": "e1d81813-1ff0-4fca-9948-d966e1a77189",
+      "status": "succeeded",
+      "sent_count": 0,
+      "modelRequests": 2,
+      "unknownUsage": 0
+    }
+  ],
+  "officialObserved": {
+    "inputSameExceptBotNamesAndMentionWhitespace": true,
+    "actualMentionsSelectedInUI": true,
+    "producer": "419 + 68 = 487",
+    "reviewer": "核对完毕：419+68 = 487，New Bot 的结果正确。",
+    "observedVia": "CUA AX after completion",
+    "count": 2,
+    "producerBeforeReviewer": true
+  },
+  "finiteCriteriaPassed": {
+    "newNumberUsed": true,
+    "old333NotReused": true,
+    "oneReplyEach": true,
+    "producerBeforeReviewer": true,
+    "allRunsEnded": true,
+    "allUsageSettled": true
+  },
+  "comparisonBoundary": "Finite synthetic task with two selected roles; official room also has an unaddressed primary Bot. Model, identities and prior failed history differ. No whole-core or general workload quality claim.",
+  "privateTextNotCopied": true,
+  "coreParityComplete": false
+}

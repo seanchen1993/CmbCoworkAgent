@@ -1,4 +1,4 @@
-import { cp, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises"
+import { cp, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises"
 import { join, resolve } from "node:path"
 import { tmpdir } from "node:os"
 import { afterEach, expect, it } from "vitest"
@@ -17,7 +17,7 @@ afterEach(async () => {
 async function fixture(
   readSession?: ConstructorParameters<typeof FunctionModsManager>[1]["readSession"]
 ) {
-  const root = await mkdtemp(join(tmpdir(), "function-manager-"))
+  const root = await realpath(await mkdtemp(join(tmpdir(), "function-manager-")))
   const plugin = join(root, "plugin")
   await cp(resolve("resources/mods/function-commands"), plugin, { recursive: true })
   const store = new ModControlStore(join(root, "control.sqlite"))

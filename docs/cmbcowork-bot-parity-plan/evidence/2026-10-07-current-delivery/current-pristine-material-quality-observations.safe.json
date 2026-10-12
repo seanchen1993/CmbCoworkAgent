@@ -1,0 +1,25 @@
+{
+  "status": "material math correct; quality not passed",
+  "runId": "5e60d287-a072-4288-b6c8-db16e9708733",
+  "modelRef": "custom:minimax-m3",
+  "liveBuild": "3586cdee11d28a971028e875",
+  "cleanConversation": "only initial welcome before this material task; no previous material conclusions",
+  "input": "same exact 2 original files and exact task prompt as official Grok",
+  "observed": {
+    "originalNamedAttachmentCards": true,
+    "count": 4,
+    "projectIds": [
+      "P101",
+      "P102",
+      "P105",
+      "P106"
+    ],
+    "amount": "18.45万元",
+    "draftOverstatement": "20.00万元",
+    "unsupportedCauseStillPresent": true,
+    "causalSpeculationCannotExplainDifference": true,
+    "tableDifferenceDirectionAmbiguous": true
+  },
+  "correctionPending": "generic grounded delivery contract review; no fixture-specific expected result injected",
+  "originalFilesUnchanged": true
+}

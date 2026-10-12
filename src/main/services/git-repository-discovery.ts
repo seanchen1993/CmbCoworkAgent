@@ -48,7 +48,8 @@ export interface DiscoveredGitRepository {
 }
 
 function normalizePathKey(input: string): string {
-  return path.resolve(input).replace(/\\/g, "/").replace(/\/+$/, "").toLowerCase()
+  const key = path.resolve(input).replace(/\\/g, "/").replace(/\/+$/, "")
+  return process.platform === "win32" ? key.toLowerCase() : key
 }
 
 function normalizeDisplayPath(input: string): string {
@@ -112,7 +113,13 @@ export async function discoverWorkspaceGitRepositories(
   options?: { maxDepth?: number; maxDirectories?: number }
 ): Promise<DiscoveredGitRepository[]> {
   throwIfGitReadCancelled()
-  const workspaceRoot = path.resolve(workspacePath)
+  let workspaceRoot: string
+  try {
+    workspaceRoot = await fs.realpath(path.resolve(workspacePath))
+  } catch {
+    throwIfGitReadCancelled()
+    return []
+  }
   const workspaceGitRoot = await getGitRootForPath(workspaceRoot)
   if (workspaceGitRoot) {
     return [toRepository(workspaceRoot, workspaceRoot, workspaceGitRoot, true)]
@@ -176,7 +183,9 @@ export async function resolveGitOperationPath(
   const workspaceRoot = path.resolve(workspacePath)
   const hasRequestedPath = typeof requestedPath === "string" && requestedPath.length > 0
   const candidatePath = path.resolve(hasRequestedPath ? requestedPath : workspaceRoot)
-  const relativeToWorkspace = path.relative(workspaceRoot, candidatePath)
+  const lexicalPath = (value: string) =>
+    process.platform === "darwin" ? value.replace(/^\/private\/var\//, "/var/") : value
+  const relativeToWorkspace = path.relative(lexicalPath(workspaceRoot), lexicalPath(candidatePath))
   if (
     relativeToWorkspace === ".." ||
     relativeToWorkspace.startsWith(`..${path.sep}`) ||

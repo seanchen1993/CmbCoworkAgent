@@ -143,7 +143,7 @@ export function GeneralPanel({
         toast.success("工具使用策略已保存，对新启动或重新创建的 Agent 运行生效")
       } catch (saveError) {
         console.error("[GeneralPanel] Failed to save tool strategy:", saveError)
-        setRuntimeSettingsError("工具使用策略保存失败，原设置未改变，请重试。")
+        setRuntimeSettingsError("未能确认工具使用策略已生效，请重试。")
       } finally {
         setToolStrategySaving(false)
       }
@@ -206,7 +206,7 @@ export function GeneralPanel({
       toast.success("任务运行上限已保存，将从下一次任务开始生效")
     } catch (saveError) {
       console.error("[GeneralPanel] Failed to save agent runtime settings:", saveError)
-      setRuntimeSettingsError("保存失败，设置未更改。")
+      setRuntimeSettingsError("未能确认设置已生效，请重试。")
     } finally {
       setRuntimeSettingsSaving(false)
     }
@@ -231,7 +231,7 @@ export function GeneralPanel({
       toast.success("动态工作区等待时间已保存，对后续操作生效")
     } catch (saveError) {
       console.error("[GeneralPanel] Failed to save workflow worktree timeout:", saveError)
-      setWorktreeSettingsError("保存失败，设置未更改。")
+      setWorktreeSettingsError("未能确认工作区超时设置已生效，请重试。")
     } finally {
       setWorktreeTimeoutSaving(false)
     }
@@ -256,7 +256,7 @@ export function GeneralPanel({
       toast.success("Worktree 删除等待时间已保存，对后续删除操作生效")
     } catch (saveError) {
       console.error("[GeneralPanel] Failed to save workflow worktree removal timeout:", saveError)
-      setWorktreeSettingsError("保存失败，设置未更改。")
+      setWorktreeSettingsError("未能确认工作区超时设置已生效，请重试。")
     } finally {
       setWorktreeRemoveTimeoutSaving(false)
     }
@@ -309,7 +309,7 @@ export function GeneralPanel({
             </div>
             <div className="flex w-full shrink-0 items-center gap-2 sm:w-[250px]">
               <Select
-                value={closeBehavior ?? undefined}
+                value={closeBehavior ?? ""}
                 onValueChange={(value) => void handleCloseBehaviorChange(value)}
                 disabled={loading || saving || closeBehavior === null}
               >

@@ -1,0 +1,147 @@
+{
+  "kind": "attributed-history-current-assignment-formal-failure",
+  "recordedAt": "2026-10-10T01:10:41.107400+00:00",
+  "nativeBuildId": "172f7894ad17ffc0640fe084",
+  "formalVia": "CUA native App UI, configured real MiniMax M3",
+  "group": {
+    "cycle": {
+      "id": "1085e273-cf81-405b-ac1e-b3973a7a40ca",
+      "status": "completed",
+      "round": 1,
+      "total_messages": 3
+    },
+    "runs": [
+      {
+        "id": "8ad9392d-02a2-44b2-b3bc-c3e6ebd4445f",
+        "bot_id": "4002cdce-8149-4dfc-9c4b-28abd67d30c1",
+        "status": "succeeded",
+        "error": null,
+        "sent_count": 1,
+        "modelRequests": 2,
+        "unknownUsage": 0
+      },
+      {
+        "id": "bf3bff90-e624-42c3-8015-8a3d9ffca084",
+        "bot_id": "924e1689-7b6d-411c-a429-28decb91b179",
+        "status": "succeeded",
+        "error": null,
+        "sent_count": 1,
+        "modelRequests": 2,
+        "unknownUsage": 0
+      },
+      {
+        "id": "c50445a0-390a-4ec2-9d19-43447c8f7778",
+        "bot_id": "e1d81813-1ff0-4fca-9948-d966e1a77189",
+        "status": "succeeded",
+        "error": null,
+        "sent_count": 1,
+        "modelRequests": 2,
+        "unknownUsage": 0
+      },
+      {
+        "id": "ff68759c-17b5-496d-823f-7cf7b250885a",
+        "bot_id": "924e1689-7b6d-411c-a429-28decb91b179",
+        "status": "succeeded",
+        "error": null,
+        "sent_count": 0,
+        "modelRequests": 3,
+        "unknownUsage": 0
+      },
+      {
+        "id": "11125576-8e57-43c1-b6f1-095cf57c11ca",
+        "bot_id": "e1d81813-1ff0-4fca-9948-d966e1a77189",
+        "status": "succeeded",
+        "error": null,
+        "sent_count": 0,
+        "modelRequests": 2,
+        "unknownUsage": 0
+      },
+      {
+        "id": "09bf23c6-5c6d-4d0a-be9d-f242c3ab29ce",
+        "bot_id": "4002cdce-8149-4dfc-9c4b-28abd67d30c1",
+        "status": "succeeded",
+        "error": null,
+        "sent_count": 0,
+        "modelRequests": 2,
+        "unknownUsage": 0
+      }
+    ],
+    "publicMessages": [
+      {
+        "bot_id": "4002cdce-8149-4dfc-9c4b-28abd67d30c1",
+        "text": "本轮分工：\n• 报价工具编程核验：独立计算 17+25，发结果（1 条）。\n• 月报示范核验：核对上述结果是否正确，给判断（1 条）。\n各发一条后停止，不访问外部服务。",
+        "run_id": "8ad9392d-02a2-44b2-b3bc-c3e6ebd4445f"
+      },
+      {
+        "bot_id": "924e1689-7b6d-411c-a429-28decb91b179",
+        "text": "独立计算：17+25 = 42。",
+        "run_id": "bf3bff90-e624-42c3-8015-8a3d9ffca084"
+      },
+      {
+        "bot_id": "e1d81813-1ff0-4fca-9948-d966e1a77189",
+        "text": "核对：17+25 = 42，与独立计算结果一致，正确。",
+        "run_id": "c50445a0-390a-4ec2-9d19-43447c8f7778"
+      }
+    ],
+    "modelRequests": 13,
+    "unknownUsage": 0,
+    "wholeScenarioPassed": false
+  },
+  "memory": {
+    "id": "b1f52548-84fb-45e4-9e34-5504657e58b8",
+    "status": "succeeded",
+    "error": null,
+    "bot_id": "954dd5e0-e2e7-4247-9303-276c8111c870",
+    "result": "\n\n已读取项目偏好（记忆 ID `62b23ea9-c2b2-4b14-b8d7-628348d47e67`，revision 2），未新增记忆。按「蓝桥-314」项目偏好输出工作摘要如下：\n\n---\n\n**【蓝桥-314】工作摘要**\n\n**依据**\n1. 检查执行情况：本日推进 3 项检查任务，均已执行完成。\n2. 问题识别情况：在上述 3 项检查范围内，发现 1 项与页面输入相关的问题。\n3. 后续安排：该问题已登记处理计划，安排在明天修复。\n\n**结论**\n- 今日共完成 3 项检查；\n- 其中发现 1 项页面输入问题；\n- 该问题计划明天修复。\n\n---\n\n备注：摘要严格依据用户提供的三项事实产出，未引入未经验证的额外信息；按项目偏好采用简体中文，并按「先写依据、再写结论」结构呈现。",
+    "modelRequests": 1,
+    "unknownUsage": 0,
+    "noInternalIds": false,
+    "noUnobservedRegistrationClaim": false,
+    "qualityPassed": false,
+    "originalMemory": {
+      "id": "62b23ea9-c2b2-4b14-b8d7-628348d47e67",
+      "revision": 2,
+      "text": "项目偏好（适用于用户说「按项目偏好」时）：\n\n1. 测试项目代号：蓝桥-314\n2. 工作摘要格式：先写依据，再写结论\n3. 语言：使用简体中文\n\n触发条件：用户明确说「按项目偏好」时，必须按上述三条要求产出工作摘要。"
+    }
+  },
+  "cold": {
+    "descriptor": {
+      "version": 1,
+      "pid": 48164,
+      "hostId": "f17967ff-4954-4633-bc56-83ca0e5a811d",
+      "buildId": "172f7894ad17ffc0640fe084",
+      "socketPath": "/private/tmp/cmb-bot-501-4b987f56222e7e971f75407b/rpc.sock"
+    },
+    "selectedRuns": 99,
+    "checkpointPayloadBytesHashed": 13848850,
+    "logicalGroupsEqual": {
+      "runs": true,
+      "effects": true,
+      "interactions": true,
+      "artifacts": true,
+      "artifactObjects": true,
+      "peerDispatch": true,
+      "peerWaits": true,
+      "checkpoints": true,
+      "skills": true,
+      "project": true
+    },
+    "extraTablesEqual": {
+      "bot_memories": true,
+      "bot_memory_metadata": true,
+      "bot_model_usage": true,
+      "bot_group_cycles": true,
+      "bot_group_runs": true
+    },
+    "schemaBefore": 71,
+    "schemaAfter": 71,
+    "legacyMemberOrderEqual": true,
+    "modelNormalizedFingerprintMatched": true,
+    "forceKillUsed": false
+  },
+  "candidateNotLive": [
+    "Group selected skill versions follow the accepted cycle human assignment; member and revision boundaries retained",
+    "Past completed Bot replies are message/file references, exact history read through existing bounded read_message; current room progress and stored records unchanged"
+  ],
+  "coreParityComplete": false
+}

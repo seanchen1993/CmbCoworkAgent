@@ -1,0 +1,76 @@
+{
+  "kind": "native-final63-startup-and-three-bot-grok-comparison",
+  "recordedAt": "2026-10-10T19:42:46.278272+00:00",
+  "compiledOutputIdentity": "63f35a4f83867a90acec439b",
+  "formalMacStartup": {
+    "exactAppPath": "/Users/chenqiang/Library/Application Support/CMBDevClaw-development/2026-10-10/standalone-mac-63f35a4/mac-arm64/CMBDevClaw.app",
+    "mainPid": 26911,
+    "keychainConfirmationHandledByUser": true,
+    "actualNativeWindowTitle": "招商银行 · 招乎统一认证中心",
+    "actualNativeSsoPageObserved": true,
+    "formalAuthBypass": false,
+    "authenticatedProductionTaskTested": false
+  },
+  "cmbNativeTranscript": {
+    "conversationId": "221b4a41-095a-4836-b7df-954a50e18798",
+    "userMessageId": "7cd8c630-5c0a-42c6-ad36-2acee83c56f4",
+    "allThreeActualPublicStagesVisible": true,
+    "currentWorkingBannerAbsent": true,
+    "composerEmptyAndSendDisabled": true,
+    "selectionWasExplicitlyRefreshed": true,
+    "spontaneousLivePushWhileOccludedVerified": false
+  },
+  "officialGrok": {
+    "version": "0.68.1",
+    "nativeEntry": "新建聊天 → 创建群聊 → 三个已有 Bot → 原生输入粘贴及核对 → 发送",
+    "actualPrompt": "请三位按顺序完成本轮合成数据核验，每人只交付自己负责的阶段，不替别人作答。数据为31、9、24、16，草稿声称总和82、平均数20。\n结果核对助手：先算实际总和和平均数，发布“阶段A”及算式。\n记忆核验助手：等实际阶段A出现后，核对草稿的两INPUT_CHECK项结论，发布“阶段B”，明确哪项有误、差多少。\n资料校对助手：等阶段A和阶段B都出现后，再发布“阶段C”，用两行给出最终正确总和、平均数和草稿问题。\n按真实成员回复完成交接，不能把尚未出现的阶段说成已收到；不要调用文件、浏览器或命令，不保存记忆、不创建技能和例程。",
+    "roleMapping": {
+      "核心旅程核验": "结果核对助手",
+      "月报示范核验": "记忆核验助手",
+      "报价工具编程核验": "资料校对助手"
+    },
+    "userMessageDisplayedLocalTime": "2026-10-11 03:32:41",
+    "publicStages": [
+      {
+        "sender": "结果核对助手",
+        "displayedLocalTime": "03:32:35",
+        "text": "阶段A\n实际总和：31 + 9 + 24 + 16 = 80\n实际平均数：80 ÷ 4 = 20\n阶段A已发布，请记忆核验助手接着做阶段B。"
+      },
+      {
+        "sender": "记忆核验助手",
+        "displayedLocalTime": "03:32:42",
+        "text": "阶段B\n我按阶段A的结果核对了草稿的两项结论（阶段A的算式我也复算过，31 + 9 + 24 + 16 = 80 没问题）：\n总和有误：草稿写的是 82，实际是 80，多算了 2。\n平均数正确：草稿写的是 20，实际 80 ÷ 4 = 20，一致。另外要提醒一下，如果按草稿自己的总和 82 来算，平均数应该是 20.5，所以草稿里的总和和平均数本身就对不上。\n阶段B已发布，请资料校对助手接着做阶段C。"
+      },
+      {
+        "sender": "资料校对助手",
+        "displayedLocalTime": "03:32:46",
+        "text": "阶段C\n正确总和是 80，平均数是 20。草稿的总和多算了 2（写成 82），平均数 20 是对的，但跟它自己写的总和 82 对不上，按 82 算应该是 20.5。"
+      }
+    ],
+    "vendorExecutionReceiptsAvailable": false,
+    "serverAndClientTimestampsDiffer": true,
+    "endToEndLatencyComparisonClaimed": false,
+    "originalMeiyongDraftVisibleUnsentAfterReturn": true
+  },
+  "finiteComparison": {
+    "sameInputsExceptMappedBotNames": true,
+    "originalInputMarkerPreservedBothSides": true,
+    "orderedAssignedMembersPassed": true,
+    "sumMeanAndErrorPassed": true,
+    "sameWording": false,
+    "officialAdditionalCorrectObservation": "82/4=20.5 reveals the draft's internal inconsistency",
+    "fullCoreParityClaimed": false
+  },
+  "newGapObserved": {
+    "singleExistingBotInIndependentRoom": true,
+    "nativeProof": "Official newly selected existing Bot opened an empty group; Members tab showed the same Bot, last member removal disabled; opening member returned to original history and retained unsent draft.",
+    "source": "/tmp/cmb-grok-current-static-source/index-ByKx0M82.js.formatted.js",
+    "sourceFunctions": [
+      "b2",
+      "FS"
+    ],
+    "sourceBundleSha256": "df12e610a991666f90081984460c22636409f4a80a7c690ef94f1b327092c8df",
+    "singleVsGroupLaunchIsFeatureFlagDependent": true,
+    "cmbCandidateImplementationNotYetLive": true
+  }
+}

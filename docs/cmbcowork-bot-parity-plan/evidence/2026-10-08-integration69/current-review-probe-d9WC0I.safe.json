@@ -1,0 +1,51 @@
+{
+  "kind": "configured-real-model-production-review-probe",
+  "appAcceptance": false,
+  "liveDatabaseReadOnly": true,
+  "model": "MiniMax-M3",
+  "originalRunId": "c8340c02-ce4d-40c7-a31c-de9a89e34293",
+  "taskSha256": "2c6d12eaee44151464c74b88d86cc55782ee4301971a0540041d11a867860684",
+  "sources": [
+    {
+      "name": "project-records.csv",
+      "size": 279,
+      "sha256": "dbc20dad04f59df0d704601fdd6559ab33fd1722283496a2092215a387695ac8"
+    },
+    {
+      "name": "review-policy.txt",
+      "size": 537,
+      "sha256": "f8b581c7338cc60fa4b02adaa7a22a89465daf675c991856bf8114069d54da60"
+    }
+  ],
+  "verdicts": [
+    {
+      "sha256": "7832fed246384d78f42ef6064d7a001e9340cb9521d97fd2c79663445da42bcb",
+      "verdict": {
+        "decision": "uncertain",
+        "findings": [
+          "独立原件核验未返回有效结论，未发布该候选文件。"
+        ],
+        "diagnostic": {
+          "stage": "stream",
+          "reason": "invalid_tool_call",
+          "finish": "missing",
+          "toolCall": {
+            "source": "raw",
+            "field": "type",
+            "typeClass": "empty",
+            "valueType": "string"
+          }
+        }
+      }
+    },
+    {
+      "sha256": "abbeebd5407d4025f4dbe4b3d8bbadddf325d05b18ba420f64294c294de7aac8",
+      "verdict": {
+        "decision": "pass",
+        "findings": [
+          "候选result.csv与review-policy.txt及project-records.csv核对一致：仅纳入status=已验收且region=北区；P101保留version=1的15.40（数值最大版本），P102保留version=2的8.55（数值最大版本），P105=-2.50（冲销计入），P106=0.00（计入条数）；条数4、合计21.45万元，与周报草案4个项目38.45万元的差额为17.00万元，差额源于P101旧版金额选择及P102版本选择，并非附件可证明的归因。"
+        ]
+      }
+    }
+  ]
+}

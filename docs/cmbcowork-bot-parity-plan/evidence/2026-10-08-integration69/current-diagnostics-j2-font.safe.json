@@ -1,0 +1,94 @@
+{
+  "capturedAt": "2026-10-08T01:59:06.097205+00:00",
+  "completePlanClaimed": false,
+  "coreParityClaimed": false,
+  "currentCompiledHost": {
+    "buildId": "3c57fe8f8daf706a5c9d7e72",
+    "schema": 69,
+    "manifest": {
+      "path": "/Users/chenqiang/Desktop/projects/CmbCoworkAgent/out/main/bot-native-build.json",
+      "bytes": 23633,
+      "sha256": "47d944dffbb52b852d9e32c8aa742403428db4717a74a05e0105014857b82f8c"
+    },
+    "productionBuildExit": 0,
+    "nodeTypesExit": 0,
+    "webTypesExit": 0,
+    "finiteLintExit": 0
+  },
+  "actualGuiApp": {
+    "schema": 67,
+    "buildId": "972493a6e2324e9fc3042534",
+    "currentSchema69GuiAccepted": false
+  },
+  "realJ2": {
+    "runId": "ee2bf308-33e9-4171-9367-441da406dd42",
+    "status": "succeeded",
+    "originalTaskSingleSend": true,
+    "formalCompiledHost": true,
+    "requests": 3,
+    "unknownUsageRequests": 0,
+    "providerOutputTokens": 5025,
+    "exactHeadersPassed": true,
+    "businessQualityPassed": false,
+    "actualP101": "15.40",
+    "expectedP101": "12.40",
+    "actualSumWan": "21.45",
+    "expectedSumWan": "18.45",
+    "actualDifferenceWan": "17.00",
+    "expectedDifferenceWan": "20.00",
+    "failure": "Latest numerical version rule misread as maximum amount; original read coverage later independently confirmed.",
+    "runEvidence": {
+      "path": "/Users/chenqiang/Library/Application Support/CMBDevClaw-development/2026-10-08/output-contract/real-j2-69/run.safe.json",
+      "bytes": 1141,
+      "sha256": "f237f986e89a2adb3680ffda8a5e96e11d965374823ad6face2382bdbcfdefb9"
+    },
+    "initialEvaluation": {
+      "path": "/Users/chenqiang/Library/Application Support/CMBDevClaw-development/2026-10-08/output-contract/real-j2-69/evaluation.safe.json",
+      "bytes": 1419,
+      "sha256": "a3e4d9ac464aaebcb9a2d67df50d823b00c5bb7e6698beb934f6719d2a96a4a7"
+    },
+    "offlineReview": {
+      "path": "/Users/chenqiang/Library/Application Support/CMBDevClaw-development/2026-10-08/output-contract/real-j2-69/offline-review-20261008/evaluation.safe.json",
+      "bytes": 2230,
+      "sha256": "2790659ea7b4346867151d8b348502deb64592dc717faa86da57cc82039169c6"
+    },
+    "interpretation": "Task status succeeded and structure checks are not semantic pass. Original initial evaluator DB-open error preserved; subsequent independent offline check reads unchanged original DB."
+  },
+  "fontsAndDependencyClosure": {
+    "actualCompiledWorker": true,
+    "newCompiledFontFixIncluded": true,
+    "finiteMacArm64DependencyClosureCleanNpmCiPassed": true,
+    "registryLockPinMissing": 0,
+    "realMinimaxPptx": false,
+    "officeRenderAccepted": false,
+    "result": {
+      "path": "/Users/chenqiang/Library/Application Support/CMBDevClaw-development/2026-10-08/presentation/deployment-review/clean-worker-integrity-fixed/verified-font-fixed/result.safe.json",
+      "bytes": 3567,
+      "sha256": "fcd222109300aff5a3fa916531c8610eda5e4c5e82932aaff70cbfc218c335ac"
+    }
+  },
+  "realProgramming": {
+    "runId": "3c6bc0d6-cc9e-4e1a-ba26-5c9bb2b22bba",
+    "status": "failed",
+    "completeNineFilesJourney": false,
+    "cause": "write-file permission request naturally expired; four parallel domain errors masked by aggregate exception. Candidate repair pending."
+  },
+  "workspaceBrowser": {
+    "status": "running_not_final",
+    "modernSkillEntryAndPendingCardFixtureUpdated": true,
+    "routineDropdownAccessibleMenuFixed": true,
+    "originalFailuresPreserved": true
+  },
+  "fullNpmGate": {
+    "status": "running_not_final",
+    "logPath": "/Users/chenqiang/Library/Application Support/CMBDevClaw-development/2026-10-08/root-gates/integration69-full-npm-test.log"
+  },
+  "remaining": [
+    "Real long programming complete deliverable and UI journey",
+    "Real MiniMax correct material analysis and editable PPTX interaction",
+    "Whole core and UI actual side-by-side acceptance",
+    "Windows generic independent native input implementation and platform acceptance",
+    "Release installation and later Linux/K8s acceptance"
+  ],
+  "newPercentageClaimed": false
+}

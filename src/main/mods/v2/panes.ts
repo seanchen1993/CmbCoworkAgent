@@ -114,7 +114,9 @@ export class FunctionPanes {
       return
     }
     this.retired.delete(generation)
-    await Promise.allSettled(this.host.plugins.map((plugin) => plugin.guest.releaseUi(generation)))
+    await Promise.allSettled(
+      this.host.plugins.map(async (plugin) => plugin.guest.releaseUi(generation))
+    )
   }
 
   private enqueue<T>(fn: () => Promise<T>): Promise<T> {

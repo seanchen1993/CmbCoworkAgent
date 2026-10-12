@@ -222,14 +222,21 @@ function isAbsoluteLikePath(input: string): boolean {
   return path.isAbsolute(input) || /^[a-zA-Z]:[\\/]/.test(input)
 }
 
+/** Git resolves macOS /var to /private/var. Compare in one spelling without
+ * resolving a deleted file or weakening the realpath checks before mutation. */
+function gitComparisonPath(...parts: string[]): string {
+  const absolute = path.resolve(...parts)
+  return process.platform === "darwin" ? absolute.replace(/^\/private\/var\//, "/var/") : absolute
+}
+
 function resolveWorktreeRelativeCandidate(worktreePath: string, rawPath: string): string | null {
   const trimmed = normalizeTrackedPath(rawPath)
   if (!trimmed) return null
 
-  const worktreeAbs = path.resolve(worktreePath)
+  const worktreeAbs = gitComparisonPath(worktreePath)
   const candidateAbs = isAbsoluteLikePath(trimmed)
-    ? path.resolve(trimmed)
-    : path.resolve(worktreeAbs, trimmed)
+    ? gitComparisonPath(trimmed)
+    : gitComparisonPath(worktreeAbs, trimmed)
   const rel = path.relative(worktreeAbs, candidateAbs)
   if (
     !rel ||
@@ -252,7 +259,7 @@ function toWorktreeRelativePath(worktreePath: string, rawPath: string): string[]
   const result = new Set<string>()
   const trimmed = normalizeTrackedPath(rawPath)
   if (!trimmed) return []
-  const worktreeAbs = path.resolve(worktreePath)
+  const worktreeAbs = gitComparisonPath(worktreePath)
 
   if (!isAbsoluteLikePath(trimmed)) {
     const direct = resolveWorktreeRelativeCandidate(worktreeAbs, trimmed)
@@ -260,8 +267,8 @@ function toWorktreeRelativePath(worktreePath: string, rawPath: string): string[]
   }
 
   const candidateAbs = isAbsoluteLikePath(trimmed)
-    ? path.resolve(trimmed)
-    : path.resolve(worktreeAbs, trimmed)
+    ? gitComparisonPath(trimmed)
+    : gitComparisonPath(worktreeAbs, trimmed)
   const absoluteCandidate = resolveWorktreeRelativeCandidate(worktreeAbs, candidateAbs)
   if (absoluteCandidate) result.add(absoluteCandidate)
 
@@ -275,7 +282,7 @@ function worktreeBasenamePrefixedPathToRelativePath(
   const normalized = normalizeGitRelativePath(rawPath)
   if (!normalized || isAbsoluteLikePath(rawPath)) return null
 
-  const worktreeName = normalizeGitRelativePath(path.basename(path.resolve(worktreePath)))
+  const worktreeName = normalizeGitRelativePath(path.basename(gitComparisonPath(worktreePath)))
   if (!worktreeName || worktreeName === ".") return null
 
   const normalizedKey = process.platform === "win32" ? normalized.toLowerCase() : normalized
@@ -294,13 +301,13 @@ function metadataPathToWorktreeRelativePaths(
 ): string[] {
   const normalized = normalizeTrackedPath(rawPath)
   if (!normalized) return []
-  const workspaceAbs = path.resolve(workspacePath)
-  const worktreeAbs = path.resolve(worktreePath)
+  const workspaceAbs = gitComparisonPath(workspacePath)
+  const worktreeAbs = gitComparisonPath(worktreePath)
   const candidates = new Set<string>()
 
   const workspaceCandidate = isAbsoluteLikePath(normalized)
-    ? path.resolve(normalized)
-    : path.resolve(workspaceAbs, normalized)
+    ? gitComparisonPath(normalized)
+    : gitComparisonPath(workspaceAbs, normalized)
   for (const rel of toWorktreeRelativePath(worktreeAbs, workspaceCandidate)) {
     candidates.add(rel)
   }
@@ -350,7 +357,7 @@ function explicitPathToWorktreeRelativePath(
     metadataPathToWorktreeRelativePaths(workspacePath, worktreePath, rawPath)
   )
 
-  if (path.resolve(workspacePath) !== path.resolve(worktreePath)) {
+  if (gitComparisonPath(workspacePath) !== gitComparisonPath(worktreePath)) {
     return workspaceRelativeCandidate ?? basenamePrefixedCandidate ?? directCandidate
   }
   return directCandidate ?? workspaceRelativeCandidate ?? basenamePrefixedCandidate
@@ -378,7 +385,7 @@ function getWorkspaceRelativePathForWorktreeFile(
 ): string {
   const normalizedRel = normalizeGitRelativePath(relPath)
   const worktreePrefix = normalizeGitRelativePath(
-    path.relative(path.resolve(workspacePath), path.resolve(worktreePath))
+    path.relative(gitComparisonPath(workspacePath), gitComparisonPath(worktreePath))
   )
   if (!worktreePrefix || worktreePrefix === ".") return normalizedRel
   return normalizeGitRelativePath(path.join(worktreePrefix, normalizedRel))
@@ -391,8 +398,8 @@ function gitRootRelativePathToWorktreeRelativePath(
 ): string | null {
   const normalized = normalizeGitRelativePath(relPath)
   if (!normalized || normalized === ".") return normalized || null
-  const absPath = path.resolve(gitRoot, normalized)
-  const relativeToWorktree = path.relative(path.resolve(worktreePath), absPath)
+  const absPath = gitComparisonPath(gitRoot, normalized)
+  const relativeToWorktree = path.relative(gitComparisonPath(worktreePath), absPath)
   if (
     !relativeToWorktree ||
     relativeToWorktree === ".." ||

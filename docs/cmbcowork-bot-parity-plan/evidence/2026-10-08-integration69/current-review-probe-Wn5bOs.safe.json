@@ -1,0 +1,41 @@
+{
+  "kind": "configured-real-model-production-review-probe",
+  "appAcceptance": false,
+  "liveDatabaseReadOnly": true,
+  "model": "MiniMax-M3",
+  "originalRunId": "c8340c02-ce4d-40c7-a31c-de9a89e34293",
+  "taskSha256": "2c6d12eaee44151464c74b88d86cc55782ee4301971a0540041d11a867860684",
+  "sources": [
+    {
+      "name": "project-records.csv",
+      "size": 279,
+      "sha256": "dbc20dad04f59df0d704601fdd6559ab33fd1722283496a2092215a387695ac8"
+    },
+    {
+      "name": "review-policy.txt",
+      "size": 537,
+      "sha256": "f8b581c7338cc60fa4b02adaa7a22a89465daf675c991856bf8114069d54da60"
+    }
+  ],
+  "shapeObservations": [],
+  "verdicts": [
+    {
+      "sha256": "7832fed246384d78f42ef6064d7a001e9340cb9521d97fd2c79663445da42bcb",
+      "verdict": {
+        "decision": "revise",
+        "findings": [
+          "依据 review-policy.txt 规则\"同一project_id有多个版本时只保留数值最大版本\"，P101 有两个版本：v1=15.40、v2=12.40，数值最大版本为 v1（15.40）。源文件 project-records.csv 第3行 P101,1,北区,已验收,15.40 应被保留。候选 result.csv 将 P101 记为 12.40（v2），与 review-policy.txt 的\"最大版本\"规则及源数据冲突。应改为 P101,15.40。其他记录 P102=8.55、P105=-2.50、P106=0.00 正确。最终正确合计为 15.40+8.55+(-2.50)+0.00=21.45 万元，与周报草案 38.45 万元的差额需在 review.md 中说明，且差额不得归因到 P101 旧版本。"
+        ]
+      }
+    },
+    {
+      "sha256": "abbeebd5407d4025f4dbe4b3d8bbadddf325d05b18ba420f64294c294de7aac8",
+      "verdict": {
+        "decision": "revise",
+        "findings": [
+          "依据 review-policy.txt 规则\"同一project_id有多个版本时只保留数值最大版本\"，P101 有 v1=15.40 和 v2=12.40 两条北区已验收记录，应按版本号大小比较版本列保留 v2（版本号2>1），金额为12.40。候选 result.csv 中 P101 取了15.40（对应 v1），属于把\"最大版本\"误解为\"最大金额\"，字段判断与数值比较对象均错。正确保留应为 P101=12.40、P102=8.55（v2）、P105=-2.50、P106=0.00，合计 18.45 万元，4 条；候选错算合计 21.45 万元。请按 project-records.csv 修正 P101 金额为 12.40 并重算合计。"
+        ]
+      }
+    }
+  ]
+}

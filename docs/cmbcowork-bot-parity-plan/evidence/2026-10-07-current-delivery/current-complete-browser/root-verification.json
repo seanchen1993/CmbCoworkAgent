@@ -1,0 +1,55 @@
+{
+  "verifiedAt": "2026-10-07T08:50:27.910815+00:00",
+  "status": "FAIL",
+  "actualResult": {
+    "phase": "actual-opening-metadata-guard-output-original-complete-browser49",
+    "startedAt": "2026-10-07T08:36:48.819139+00:00",
+    "completedAt": "2026-10-07T08:49:58.110157+00:00",
+    "seconds": 789.2910505830077,
+    "exitCode": 1,
+    "inputCount": 3834,
+    "sourceDrift": [],
+    "logSHA256": "e72e4a67f8f296126117186c839794730777b2071db1300bd430a25813f25b50",
+    "automaticRetries": 0,
+    "wrapperOverridesOriginalTimeouts": false
+  },
+  "nativeBuildId": "aa183a16dd2d22fe8ad060e4",
+  "outputRevisionSHA256": "0ce3e79902f8ee8bedfaead445890c67cc96fb08a40e12252ec30743d7b05dcc",
+  "rendererChunk": "BotWorkspace-D-23g-nQ.js",
+  "firstOriginalFiles": 27,
+  "firstActualPassedTests": 166,
+  "firstPendingAndFailedTests": 0,
+  "originalStagesCompleted": 47,
+  "failedStage": 48,
+  "failure": "tests/bot-workspace-browser.spec.ts:5774 routineClickCalls.length actual31 expected30",
+  "finalNewChatStarted": false,
+  "failureRootCauseProven": false,
+  "originalAssertionsAndTimeoutsPreserved": true,
+  "failureArtifacts": [
+    {
+      "file": "failure-drafts.json",
+      "bytes": 12779,
+      "sha256": "cc7f06e9fc720dae16fc1291b12c03d21d983b18285595f6d4c0a9ebb2a35f28"
+    },
+    {
+      "file": "failure-state.json",
+      "bytes": 118382,
+      "sha256": "30123aa0c812007df9290c71fe96162de57b75f36ea0e6b4355acddf0eb9f9c0"
+    },
+    {
+      "file": "failure.html",
+      "bytes": 9299133,
+      "sha256": "e71292b3ea331b237a3151f2628c67244173a3e3a395f4f21d03d01bd25c6da3"
+    },
+    {
+      "file": "failure.png",
+      "bytes": 114907,
+      "sha256": "3c96ae1dbd7c6b5e3d6d505887ac245f7b18343c7c949e2f22a3e3a0d614e915"
+    },
+    {
+      "file": "failure-transcript.json",
+      "bytes": 1332,
+      "sha256": "afb2b788d73b50bc0d76a6f49cf4c6d67479dd329a17aba7bfb1a22ba1568d43"
+    }
+  ]
+}

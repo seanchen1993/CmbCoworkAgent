@@ -1,0 +1,14 @@
+{
+  "integratedAt": "2026-10-07T08:21:42.824172+00:00",
+  "productionChange": "one guard: do not acknowledge metadata for an unreadable/opening transcript",
+  "source": "/Users/chenqiang/Desktop/projects/CmbCoworkAgent/src/renderer/src/lib/bot-workspace-store.ts",
+  "beforeSourceSHA256": "b9f3b3f59a03e96539db4d2a33c1839710cc5ac23542a220fb1dd0b2a2dafbd6",
+  "afterSourceSHA256": "6b2d52601397a6b1d7a3640adf4ab13450e16d9176024f05a30c77e024c57fc0",
+  "addedCanonicalRegression": "/Users/chenqiang/Desktop/projects/CmbCoworkAgent/src/renderer/src/lib/bot-thread-state.test.ts",
+  "afterTestSHA256": "e90ff88239d2b5a3c863bfb001167ea5b647ae35a13849961d2e64c318d679dc",
+  "actualBaselineProof": "/tmp/cmb-root-opening-metadata-race-reproduction-v1/actual-baseline/root-verification.json",
+  "independentStaticReview": "windows_cross_compile review of guard asynchronous boundaries",
+  "addedPollingTimersConcurrency": false,
+  "original4318RootCauseClaimed": false,
+  "originalMacWindowsScopeChanged": false
+}

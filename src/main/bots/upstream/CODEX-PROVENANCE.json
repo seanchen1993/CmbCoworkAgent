@@ -1,0 +1,28 @@
+{
+  "repository": "https://github.com/openai/codex",
+  "revision": "afb436df8b70bb5bc57b86d9a3e829968988cd21",
+  "license": "Apache-2.0",
+  "files": [
+    {
+      "source": "codex-rs/sandboxing/src/seatbelt_base_policy.sbpl",
+      "sha256": "5103332ddb8885ee5e1926de6c0ef23a61f4e55e31297506ae05fa4e0b24ba74",
+      "symbol": "CODEX_SEATBELT_BASE",
+      "destination": "codex-seatbelt-policy.ts",
+      "changes": "Unmodified policy text exported as a TypeScript string. Cmb grants filesystem and network scope in mac-shell-sandbox.ts."
+    },
+    {
+      "source": "codex-rs/sandboxing/src/seatbelt_read_only_platform_defaults.sbpl",
+      "sha256": "6c5c0ae4361e738053f172b635f4e1ab6287087f3d9b6e5882b0bc06922a7199",
+      "symbol": "CODEX_SEATBELT_PLATFORM",
+      "destination": "codex-seatbelt-policy.ts",
+      "changes": "Unmodified policy text exported as a TypeScript string. Cmb grants filesystem and network scope in mac-shell-sandbox.ts."
+    },
+    {
+      "source": "codex-rs/sandboxing/src/seatbelt_network_policy.sbpl",
+      "sha256": "eb2bf67e7a697d954f05fbd563e5888402fde3a279ecf383832473d44831ad0a",
+      "symbol": "CODEX_SEATBELT_NETWORK",
+      "destination": "codex-seatbelt-policy.ts",
+      "changes": "Unmodified policy text exported as a TypeScript string. Cmb grants filesystem and network scope in mac-shell-sandbox.ts."
+    }
+  ]
+}

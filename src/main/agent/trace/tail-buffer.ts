@@ -19,6 +19,89 @@ export interface TailContentEntry {
   key: string
   value: unknown
   bytes: number
+  keys: Set<string>
+}
+
+/** Keep complete, detached JSON values only. Budget before serialization so
+ * rejected tool payloads cannot run getters/toJSON or allocate their full JSON.
+ * Partial data must not be restored as a complete tool argument at finish(). */
+function snapshotTailValue(
+  value: unknown,
+  maxBytes: number
+): { value: unknown; serialized: string; bytes: number } | undefined {
+  let remaining = maxBytes
+  let entries = 1024
+  const ancestors = new WeakSet<object>()
+  const reject = () => {
+    throw new Error("tail snapshot limit")
+  }
+  const visit = (input: unknown, depth: number): unknown => {
+    if (--entries < 0 || depth > 6) return reject()
+    if (input === null || typeof input === "boolean" || typeof input === "number") {
+      remaining -= 16
+      if (remaining < 0) return reject()
+      return typeof input === "number" && !Number.isFinite(input) ? null : input
+    }
+    if (typeof input === "string") {
+      if (input.length > remaining) return reject()
+      remaining -= Buffer.byteLength(input, "utf8") + 2
+      if (remaining < 0) return reject()
+      return input
+    }
+    if (typeof input !== "object" || ancestors.has(input)) return reject()
+    const array = Array.isArray(input)
+    if (
+      !array &&
+      Object.getPrototypeOf(input) !== Object.prototype &&
+      Object.getPrototypeOf(input) !== null
+    )
+      return reject()
+    ancestors.add(input)
+    try {
+      if (array) {
+        if (input.length > 64) return reject()
+        const output: unknown[] = []
+        for (let index = 0; index < input.length; index += 1) {
+          const descriptor = Object.getOwnPropertyDescriptor(input, String(index))
+          if (descriptor && !("value" in descriptor)) return reject()
+          output.push(visit(descriptor?.value ?? null, depth + 1))
+        }
+        return output
+      }
+      const output: Record<string, unknown> = Object.create(null)
+      let count = 0
+      for (const key in input) {
+        if (!Object.prototype.hasOwnProperty.call(input, key)) continue
+        if (++count > 64) return reject()
+        const descriptor = Object.getOwnPropertyDescriptor(input, key)
+        if (!descriptor || !("value" in descriptor)) return reject()
+        // JSON omits undefined object properties. Never invoke accessors or
+        // serialization hooks; ordinary tool arguments are already JSON data.
+        if (descriptor.value === undefined) continue
+        if (key.length > remaining) return reject()
+        remaining -= Buffer.byteLength(key, "utf8") + 4
+        if (remaining < 0) return reject()
+        output[key] = visit(descriptor.value, depth + 1)
+      }
+      return output
+    } finally {
+      ancestors.delete(input)
+    }
+  }
+  try {
+    // Strings are the common case, and remain raw text in the content pool.
+    if (typeof value === "string") {
+      if (value.length > maxBytes) return undefined
+      const bytes = Buffer.byteLength(value, "utf8")
+      return bytes <= maxBytes ? { value, serialized: value, bytes } : undefined
+    }
+    const snapshot = visit(value, 0)
+    const serialized = JSON.stringify(snapshot)
+    const bytes = Buffer.byteLength(serialized, "utf8")
+    return bytes <= maxBytes ? { value: snapshot, serialized, bytes } : undefined
+  } catch {
+    return undefined
+  }
 }
 
 export class TraceTailContentBuffer {
@@ -50,39 +133,55 @@ export class TraceTailContentBuffer {
    * most recent survive to be written back.
    */
   remember(key: string, value: unknown): void {
-    if (this.maxBytes <= 0 || value === undefined || value === null) return
-    let bytes: number
-    try {
-      bytes = Buffer.byteLength(typeof value === "string" ? value : JSON.stringify(value), "utf8")
-    } catch {
-      // Unserializable values cannot be written back, so there is no point
-      // holding them.
-      return
-    }
-    // A single value larger than the whole reserve would evict everything and
-    // still not fit; skip it rather than emptying the tail for one entry.
-    if (bytes > this.maxBytes) return
-
-    const serialized = typeof value === "string" ? value : JSON.stringify(value)
-    const contentId = createHash("sha1").update(serialized).digest("hex").slice(0, 16)
-    this.keyToContent.set(key, contentId)
-
+    this.forget(key)
+    if (this.maxBytes <= 0 || key.length > 512 || value === undefined || value === null) return
+    const snapshot = snapshotTailValue(value, this.maxBytes)
+    if (!snapshot) return
+    const { serialized, bytes } = snapshot
+    const contentId = createHash("sha1")
+      .update(typeof value === "string" ? "text\0" : "json\0")
+      .update(serialized)
+      .digest("hex")
+      .slice(0, 16)
     const existing = this.entries.get(contentId)
     if (existing) {
-      // Move it to the end so a value still being referenced stays recent.
       this.entries.delete(contentId)
       this.entries.set(contentId, existing)
-      return
+      existing.keys.add(key)
+    } else {
+      while (this.bytes + bytes > this.maxBytes && this.entries.size > 0) {
+        const oldest = this.entries.keys().next().value
+        if (typeof oldest !== "string") break
+        this.dropContent(oldest)
+      }
+      this.entries.set(contentId, { key, value: snapshot.value, bytes, keys: new Set([key]) })
+      this.bytes += bytes
     }
-    while (this.bytes + bytes > this.maxBytes && this.entries.size > 0) {
-      const oldest = this.entries.keys().next().value
-      if (typeof oldest !== "string") break
-      const dropped = this.entries.get(oldest)
-      this.entries.delete(oldest)
-      this.bytes -= dropped?.bytes ?? 0
+    this.keyToContent.set(key, contentId)
+    // Many identical values must not turn a bounded content pool into an
+    // unbounded reference index. Positional keys are local trace metadata.
+    while (this.keyToContent.size > 4096) {
+      const oldestKey = this.keyToContent.keys().next().value
+      if (oldestKey === undefined) break
+      this.forget(oldestKey)
     }
-    this.entries.set(contentId, { key, value, bytes })
-    this.bytes += bytes
+  }
+
+  private forget(key: string): void {
+    const contentId = this.keyToContent.get(key)
+    if (contentId === undefined) return
+    this.keyToContent.delete(key)
+    const entry = this.entries.get(contentId)
+    entry?.keys.delete(key)
+    if (entry?.keys.size === 0) this.dropContent(contentId)
+  }
+
+  private dropContent(contentId: string): void {
+    const entry = this.entries.get(contentId)
+    if (!entry) return
+    for (const key of entry.keys) this.keyToContent.delete(key)
+    this.entries.delete(contentId)
+    this.bytes -= entry.bytes
   }
 
   /** Read back a remembered value, if it survived eviction. */

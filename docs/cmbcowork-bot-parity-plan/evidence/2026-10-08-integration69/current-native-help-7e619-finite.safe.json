@@ -1,0 +1,185 @@
+{
+  "kind": "native-manual-help-and-first-tracked-read-finite",
+  "recordedAt": "2026-10-10T06:43:57.632085+00:00",
+  "nativeBuildId": "67c7cdcf69158c96cf8bbb7b",
+  "compiledOutputIdentity": "7e61964ff5e0bdfb6246f8a7",
+  "schema": 72,
+  "via": "CUA native App and configured real MiniMax M3",
+  "run": {
+    "id": "d4c977ea-a5dd-4f53-aa79-86f77484c0ab",
+    "bot_id": "37e011ed-107d-4c0b-92d7-151b478972d6",
+    "conversation_id": "08e830cb-bee2-4b73-bd3e-93273ab9899d",
+    "status": "succeeded",
+    "error": null
+  },
+  "interactions": [
+    {
+      "id": "9f724b07-7fc9-46c4-a6ad-74c9ff75b402",
+      "kind": "approval",
+      "status": "answered",
+      "revision": 2,
+      "answer": "approve"
+    },
+    {
+      "id": "bf3c2d5f-5c8b-4cd6-9c1e-24196c01c66f",
+      "kind": "question",
+      "status": "answered",
+      "revision": 2,
+      "answer": "done"
+    }
+  ],
+  "publicSyntheticMessages": [
+    {
+      "id": "28b7c6d9-0455-4ac6-8197-9319766a303d",
+      "sender": "user",
+      "text": "这是人工接管验收任务：用你的专用浏览器打开 http://127.0.0.1:57685/manual。本页“已确认”必须由我手动填写并提交，你不能代填或代点。请通过电脑人工帮助流程让我接管；我归还之后重新观察页面，报告页面标题、已完成项数与验收标记。不要保存记忆，不创建例程，不修改其他项目文件。",
+      "run_id": null,
+      "reply_to": null
+    },
+    {
+      "id": "db7e198a-54c7-45f9-831f-f17628338117",
+      "sender": "user",
+      "text": "请在当前页面（http://127.0.0.1:57685/manual）上找到\"已确认\"复选框或表单，手动勾选并提交，然后交还浏览器给我。\n\n人工操作已完成，已归还 Bot 控制权。",
+      "run_id": "d4c977ea-a5dd-4f53-aa79-86f77484c0ab",
+      "reply_to": "28b7c6d9-0455-4ac6-8197-9319766a303d"
+    },
+    {
+      "id": "c415d33b-c2df-4852-8d85-666093ff95ad",
+      "sender": "bot",
+      "text": "\n\n页面已由您完成人工接管并交还，当前浏览器页面观察结果如下：\n\n- 页面标题：**确认完成**\n- 已完成项数：**3 项**（本批需要核对 3 项，已完成 3 项）\n- 验收标记：**MANUAL_HANDOFF_20261010**\n\n未保存记忆，未创建例程，未修改任何项目文件。",
+      "run_id": "d4c977ea-a5dd-4f53-aa79-86f77484c0ab",
+      "reply_to": "28b7c6d9-0455-4ac6-8197-9319766a303d"
+    }
+  ],
+  "usage": [
+    {
+      "model": "MiniMax-M3",
+      "purpose": "task",
+      "requests": 4,
+      "settled": 4
+    }
+  ],
+  "botMemoryCountAfter": 0,
+  "nativeJourney": [
+    "request_help",
+    "open_fullscreen",
+    "take_control",
+    "type_synthetic_confirmation",
+    "submit_with_Enter",
+    "return_and_continue",
+    "observe_completed_page"
+  ],
+  "expected": {
+    "title": "确认完成",
+    "completedChecks": 3,
+    "marker": "MANUAL_HANDOFF_20261010"
+  },
+  "ownedLoopbackSite": {
+    "kind": "loopback-synthetic-manual-help-site",
+    "startedAt": 1791613007.877158,
+    "requests": [
+      {
+        "method": "GET",
+        "path": "/manual",
+        "time": 1791613103.8716218
+      },
+      {
+        "method": "GET",
+        "path": "/favicon.ico",
+        "time": 1791613103.890966
+      },
+      {
+        "method": "POST",
+        "path": "/confirm",
+        "validSyntheticConfirmation": true,
+        "time": 1791613208.0949829
+      },
+      {
+        "method": "GET",
+        "path": "/complete",
+        "time": 1791613208.099288
+      },
+      {
+        "method": "GET",
+        "path": "/favicon.ico",
+        "time": 1791613208.120408
+      }
+    ],
+    "confirmed": 1,
+    "port": 57685
+  },
+  "officialGrok": {
+    "via": "official native App CUA",
+    "helpCard": true,
+    "takeoverAndReturn": true,
+    "continuedAfterReturn": true,
+    "observedResult": "Chrome error page example.com ERR_CONNECTION_CLOSED; Bot explicitly reported website not loaded",
+    "sameWebsiteComparison": false,
+    "reason": "Official cloud cannot access the owned loopback fixture; no successful website parity claim"
+  },
+  "productionFix": {
+    "file": "src/renderer/src/components/bots/BotComputerHelp.tsx",
+    "issue": "Initial unobserved tracked-work projection was treated as terminal and prematurely closed the viewer",
+    "fix": "Retain viewer while exact projection is loading; input and answer still require live matching authority",
+    "noNewPollingLoop": true,
+    "installedAndNativeVerified": true
+  },
+  "coldPreservation": {
+    "receipt": "/Users/chenqiang/Library/Application Support/CMBDevClaw-development/2026-10-08/presentation/cold-ui-output-plan/help-ui-output-cold-preservation-1791613047120674000.safe.json",
+    "selectedRuns": 185,
+    "checkpointPayloadBytesHashed": 17999237,
+    "logicalGroupsEqual": {
+      "runs": true,
+      "effects": true,
+      "interactions": true,
+      "artifacts": true,
+      "artifactObjects": true,
+      "peerDispatch": true,
+      "peerWaits": true,
+      "checkpoints": true,
+      "skills": true,
+      "project": true
+    },
+    "extraTablesEqual": {
+      "bot_memories": true,
+      "bot_memory_metadata": true,
+      "bot_model_usage": true,
+      "bot_group_cycles": true,
+      "bot_group_runs": true,
+      "bot_introduction_questions": true
+    },
+    "normalExitsOnly": true,
+    "forceKillUsed": false,
+    "manualHelpTaskOccurredAfterPreservationCapture": true
+  },
+  "gates": {
+    "computerUi27": {
+      "status": "PASS",
+      "log": "/tmp/cmb-computer-ui-final-20261010.log",
+      "beforeLaterSafeAreaCssEdit": true
+    },
+    "safeAreaFocused2": {
+      "status": "PASS",
+      "log": "/tmp/cmb-fullscreen-insets-20261010.log",
+      "sourceOnlyAtRecording": true
+    },
+    "reviewedPostExportFocused": {
+      "status": "PASS",
+      "log": "/tmp/cmb-reviewed-export-focused-20261010.log",
+      "notCompleteWorkspaceRegression": true
+    },
+    "fullWorkspace": {
+      "status": "FAIL",
+      "log": "/tmp/cmb-workspace-close-owner-20261010.log",
+      "externalChromeSigsegvObserved": true,
+      "causeWithinChromiumNotYetIdentified": true
+    }
+  },
+  "limitations": [
+    "One genuine model task, not all help or model scenarios",
+    "Model help instructions mentioned a checkbox although actual fixture uses text input; task result correctly reobserved",
+    "Full UI parity and complete core acceptance remain unproven",
+    "Windows generic native input, final standalone installers and actual cross-platform acceptance remain pending"
+  ],
+  "coreParityComplete": false
+}

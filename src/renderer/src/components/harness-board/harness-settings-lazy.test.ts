@@ -11,6 +11,9 @@ const asyncStoreSource = readFileSync(
   "utf8"
 )
 
+const configSource = readFileSync(new URL("../../../../main/harness-board/config-v2.ts", import.meta.url), "utf8")
+const limitSource = readFileSync(new URL("../../../../main/harness-board/store-limits.ts", import.meta.url), "utf8")
+const integritySource = readFileSync(new URL("../../../../main/harness-board/context-integrity.ts", import.meta.url), "utf8")
 describe("Harness settings lazy loading", () => {
   it("does not invoke mapping or Lean Token reads on the initial projects tab", () => {
     const start = boardSource.indexOf("const loadDeployUnitMappings = useCallback")
@@ -30,13 +33,12 @@ describe("Harness settings lazy loading", () => {
   })
 
   it("hard-bounds deploy-unit mapping storage before parsing or writing", () => {
-    expect(serviceSource).toContain("HARNESS_DEPLOY_UNIT_MAPPING_MAX_ENTRIES = 512")
-    expect(serviceSource).toContain("HARNESS_DEPLOY_UNIT_MAPPING_MAX_BYTES = 2 * 1024 * 1024")
+    expect(integritySource).toContain("HARNESS_DEPLOY_UNIT_MAPPING_MAX_ENTRIES = 512")
+    expect(limitSource).toContain("HARNESS_CONFIG_V2_STORE_MAX_BYTES = 2 * 1024 * 1024")
+    expect(serviceSource).toContain("readHarnessConfigV2File(HARNESS_DEPLOY_UNIT_MAPPING_FILE)")
+    expect(configSource).toContain("readHarnessJsonFileBounded(path, HARNESS_CONFIG_V2_STORE_MAX_BYTES, path)")
     expect(serviceSource).toMatch(
-      /readHarnessJsonFileBounded\(\s*HARNESS_DEPLOY_UNIT_MAPPING_FILE,\s*HARNESS_DEPLOY_UNIT_MAPPING_MAX_BYTES/
-    )
-    expect(serviceSource).toMatch(
-      /writeHarnessJsonFileAtomic\(\s*HARNESS_DEPLOY_UNIT_MAPPING_FILE,[\s\S]*?HARNESS_DEPLOY_UNIT_MAPPING_MAX_BYTES/
+      /writeHarnessJsonFileAtomic\(\s*HARNESS_DEPLOY_UNIT_MAPPING_FILE,[\s\S]*?HARNESS_CONFIG_V2_STORE_MAX_BYTES/
     )
     expect(asyncStoreSource).toContain("initialSize > maxBytes")
     expect(asyncStoreSource).toContain("final.size > BigInt(maxBytes)")

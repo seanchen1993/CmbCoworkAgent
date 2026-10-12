@@ -1,0 +1,153 @@
+{
+  "kind": "historical-context-closed-diagnostic-and-attachment-contrast-gates",
+  "recordedAt": "2026-10-09T03:43:17.016299+00:00",
+  "compiledBackendBuildId": "bd964743316fdbdca8574863",
+  "attachmentSourceIncludedInLiveRenderer": false,
+  "logs": {
+    "historical_context_7_files_25_pass_1_skip": {
+      "path": "/private/tmp/cmb-historical-task-runtime-20261009.log",
+      "bytes": 123337,
+      "sha256": "f52f6a830508b51ba1cbceb5ccf1893384e9ea7f0abb62c3b52e2c858718fe75",
+      "exitCode": 0
+    },
+    "review_transport_2_files_104_pass": {
+      "path": "/private/tmp/cmb-review-type-diagnostic-tests-20261009.log",
+      "bytes": 733,
+      "sha256": "db0c53f1bd8b15786f22340ccc6a6b61527dcf52ecfbc439c6ba62adb38719dd",
+      "exitCode": 0
+    },
+    "node_types": {
+      "path": "/private/tmp/cmb-historical-task-final-node-20261009.log",
+      "bytes": 91,
+      "sha256": "546c7bfd36ecac14793f941add6251c16a729819d1b744cccbaf256a91e1b42c",
+      "exitCode": 0
+    },
+    "strict_lint": {
+      "path": "/private/tmp/cmb-historical-task-final-lint-20261009.log",
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "exitCode": 0
+    },
+    "format": {
+      "path": "/private/tmp/cmb-historical-task-final-format-20261009.log",
+      "bytes": 66,
+      "sha256": "17aa973d3f004560237d9a95171210b0671deff23d61628eecf7322ff5938f20",
+      "exitCode": 0
+    },
+    "production_build": {
+      "path": "/private/tmp/cmb-historical-task-production-build-20261009.log",
+      "bytes": 56263,
+      "sha256": "e38010cf74c2bc2c4f29761f041b6e4496313111fc68b9e5632dce2e9cc468cc",
+      "exitCode": 0
+    },
+    "workflow_followup": {
+      "path": "/private/tmp/cmb-reviewed-feedback-workflow-20261009.log",
+      "bytes": 164174,
+      "sha256": "c793631daeeff6fe4cff7da2611b51a4dc8f88f32e9c39580c5924ac24cb27a8",
+      "exitCode": 0
+    },
+    "attachment_nearest_2_files_4_pass": {
+      "path": "/private/tmp/cmb-attachment-contrast-nearest-20261009.log",
+      "bytes": 399,
+      "sha256": "cd8c561b9a23300f0515d56b3693d74fbc1ca34ae9b891989d0fd0cd1a05d7d5",
+      "exitCode": 0
+    },
+    "attachment_browser_8_scenarios": {
+      "path": "/private/tmp/cmb-attachment-contrast-browser-solid-20261009.log",
+      "bytes": 101,
+      "sha256": "1d00e3528c1097ddb7db1527e18ecd8425b746d4e62a10c21c1ab0b18cf2a30a",
+      "exitCode": 0
+    },
+    "web_types": {
+      "path": "/private/tmp/cmb-attachment-contrast-web-20261009.log",
+      "bytes": 89,
+      "sha256": "aba1d996409180225c6f720bd909b367ee8681e710f7b8537e5a1d7f6d07f2ac",
+      "exitCode": 0
+    }
+  },
+  "sources": [
+    {
+      "path": "/Users/chenqiang/Desktop/projects/CmbCoworkAgent/src/main/bots/prompt-preparation.ts",
+      "bytes": 7394,
+      "sha256": "5708161ae3ed50432230c2669a9dce943d5ee8b0ebba7c53c40b742141ad9585"
+    },
+    {
+      "path": "/Users/chenqiang/Desktop/projects/CmbCoworkAgent/src/main/bots/prompt-preparation.test.ts",
+      "bytes": 8166,
+      "sha256": "81c4a4e8e70c926f2a05a116581fc16fcc13d7f32fda8a7bebd2cef06fa4fbb5"
+    },
+    {
+      "path": "/Users/chenqiang/Desktop/projects/CmbCoworkAgent/src/main/bots/agent-runtime.ts",
+      "bytes": 113209,
+      "sha256": "36b123f04ec739e82a5da5f79403bb76fdc32db3aa0245a09f2029d935454117"
+    },
+    {
+      "path": "/Users/chenqiang/Desktop/projects/CmbCoworkAgent/src/main/bots/delivery-evidence-review.ts",
+      "bytes": 25167,
+      "sha256": "5567f5ee6e42ded5d37e2bf71b54d39ca606dfb3d907a2ac950a77c79143886f"
+    },
+    {
+      "path": "/Users/chenqiang/Desktop/projects/CmbCoworkAgent/src/main/bots/delivery-evidence-store.ts",
+      "bytes": 14158,
+      "sha256": "dc99371d3462b98b9e547e9f9cf2056b51f37df0fe499b83ab3b1245699489ba"
+    },
+    {
+      "path": "/Users/chenqiang/Desktop/projects/CmbCoworkAgent/src/main/bots/delivery-evidence-transport.test.ts",
+      "bytes": 32310,
+      "sha256": "b5770cd22b4330d581f094a09c6f099540e8f919b4ab772b17f4cc874c1c80a4"
+    },
+    {
+      "path": "/Users/chenqiang/Desktop/projects/CmbCoworkAgent/src/renderer/src/components/bots/BotMessageAttachments.tsx",
+      "bytes": 3517,
+      "sha256": "e513d2b464451219724f01fe4f3bbbb6b8b01312a7c32aa59de4ffbc52a33e67"
+    },
+    {
+      "path": "/Users/chenqiang/Desktop/projects/CmbCoworkAgent/tests/bot-skill-trial-contrast-browser.spec.ts",
+      "bytes": 12257,
+      "sha256": "41fb917635fd39d2cab3743f1df8e802955e11f2b2149458e162c471e1067956"
+    }
+  ],
+  "attachmentContrast": {
+    "receipt": {
+      "path": "/Users/chenqiang/Desktop/projects/CmbCoworkAgent/output/skill-trial-contrast/result.safe.json",
+      "bytes": 22921,
+      "sha256": "c5f9eb659c3d9fcd454423a2c77f1599438e6dcff0fd2e8d547009be9010f2a8"
+    },
+    "scenarios": 8,
+    "minimumTextRatio": 6.81,
+    "keyboardOpenObserved": true,
+    "screenshotsInspected": [
+      {
+        "path": "/Users/chenqiang/Desktop/projects/CmbCoworkAgent/output/skill-trial-contrast/light-blue.png",
+        "bytes": 47496,
+        "sha256": "5b1de5bc94e10e14c250cc6cc88a68304a90baa86a6dc807e5a62d56947e97fd"
+      },
+      {
+        "path": "/Users/chenqiang/Desktop/projects/CmbCoworkAgent/output/skill-trial-contrast/dark-cyan.png",
+        "bytes": 45121,
+        "sha256": "827d2d571e004204aac6ce5fa1b119ae6463c60a1942899908a4744199516ec7"
+      }
+    ]
+  },
+  "preservedFirstAttachmentFailures": [
+    {
+      "path": "/private/tmp/cmb-attachment-contrast-browser-20261009.log",
+      "bytes": 2134,
+      "sha256": "56f942f29e22c53a23d33780233a3182a8b963ca33bef56ee793c07d17da3a62"
+    },
+    {
+      "path": "/private/tmp/cmb-attachment-contrast-browser-final-20261009.log",
+      "bytes": 2714,
+      "sha256": "f82b0386c1cec51b5129710e59722823109a867942b2e9d89890958a330c21e5"
+    }
+  ],
+  "reviewRawTypeGuardRelaxed": false,
+  "realMiniMaxHistoricalContextFixAccepted": false,
+  "fullAuditOrTaskParityPassed": false,
+  "boundaries": [
+    "Selected test sets overlap and are not summed.",
+    "Actual Chromium uses synthetic content with the production React components and CSS, not an App/model journey.",
+    "Historical workflow-running statement is superseded by the retained completed log.",
+    "The attachment hover failure and test worker loading failure remain recorded."
+  ]
+}

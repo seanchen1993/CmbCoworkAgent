@@ -1,6 +1,11 @@
-import { useEffect, useState } from "react"
+import { useEffect, useLayoutEffect, useMemo, useState } from "react"
 import type { ModCommandJob } from "../../../../shared/mods/types"
 import { Button } from "@/components/ui/button"
+import {
+  createModsScopeLifetime,
+  useModsThreadScope,
+  type ModsThreadScope
+} from "@/lib/mods-thread-scope"
 
 const labels = {
   queued: "等待会话空闲",
@@ -34,6 +39,21 @@ const errorMessages: Record<string, string> = {
   MODS_COMMAND_TURN_HELD: "当前命令不能等待另一条命令，请调整插件实现。"
 }
 export function ModCommandJobs({ threadId }: { threadId: string }): React.JSX.Element | null {
+  const scope = useModsThreadScope(threadId)
+  return scope ? (
+    <ScopedModCommandJobs
+      key={JSON.stringify([scope.threadId, scope.workspaceKey])}
+      scope={scope}
+    />
+  ) : null
+}
+function ScopedModCommandJobs({ scope }: { scope: ModsThreadScope }): React.JSX.Element | null {
+  const { threadId } = scope
+  const lifetime = useMemo(createModsScopeLifetime, [scope])
+  useLayoutEffect(() => {
+    lifetime.activate()
+    return () => lifetime.dispose()
+  }, [lifetime])
   const [jobs, setJobs] = useState<ModCommandJob[]>([])
   const [error, setError] = useState("")
   useEffect(() => {
@@ -42,6 +62,7 @@ export function ModCommandJobs({ threadId }: { threadId: string }): React.JSX.El
     setJobs([])
     setError("")
     const refresh = (): void => {
+      if (!live) return
       const current = ++sequence
       void window.api.mods.jobs(threadId).then(
         (rows) => {
@@ -60,7 +81,7 @@ export function ModCommandJobs({ threadId }: { threadId: string }): React.JSX.El
       stop()
       window.removeEventListener("mods:configuration-changed", refresh)
     }
-  }, [threadId])
+  }, [threadId, scope])
   if (!jobs.length) return null
   return (
     <details
@@ -92,9 +113,13 @@ export function ModCommandJobs({ threadId }: { threadId: string }): React.JSX.El
               <Button
                 size="sm"
                 variant="outline"
-                onClick={() =>
-                  void window.api.mods.cancelJob(threadId, job.id).catch((e) => setError(String(e)))
-                }
+                onClick={() => {
+                  const token = lifetime.capture()
+                  if (token === null) return
+                  void window.api.mods.cancelJob(threadId, job.id).catch((error) => {
+                    if (lifetime.isCurrent(token)) setError(String(error))
+                  })
+                }}
               >
                 {job.state === "queued" ? "取消排队" : "停止命令"}
               </Button>

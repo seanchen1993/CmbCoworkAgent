@@ -1,0 +1,301 @@
+{
+  "kind": "optional-introduction-question-formal-native-and-source-gates",
+  "recordedAt": "2026-10-10T05:22:55.120465+00:00",
+  "nativeBuildId": "ba207df96930c3031f9aacca",
+  "schema": 72,
+  "hostId": "538fc8d1-f459-4353-b19d-9ce9d07856c5",
+  "formalVia": "CUA native App, real configured MiniMax M3 and official Grok",
+  "cases": [
+    {
+      "botId": "bb4f9d2e-36ec-450b-8fbc-dd59225f2e48",
+      "question": {
+        "run_id": "6faa2dae-629c-4369-87dc-45504f1aa841",
+        "message_id": "0394f589-6b01-44b8-aa9a-50321ca48ebe",
+        "input": {
+          "questions": [
+            {
+              "header": "开始方向",
+              "id": "start_direction",
+              "question": "你希望我从哪类工作开始协助你？",
+              "options": [
+                {
+                  "label": "写作与编辑",
+                  "description": "帮助起草、润色、翻译或改写文档、邮件、文章等。"
+                },
+                {
+                  "label": "编程与开发",
+                  "description": "协助代码编写、调试、解释或技术方案设计。"
+                },
+                {
+                  "label": "学习与研究",
+                  "description": "整理资料、解释概念、总结要点或制定学习计划。"
+                },
+                {
+                  "label": "日常规划与思路整理",
+                  "description": "梳理待办、规划项目、头脑风暴或做决策分析。"
+                }
+              ]
+            }
+          ]
+        },
+        "data_epoch": "initial",
+        "status": "skipped",
+        "revision": 2
+      },
+      "runs": [
+        {
+          "id": "6faa2dae-629c-4369-87dc-45504f1aa841",
+          "conversation_id": "c74b846a-0f65-411f-be14-8c6bdb3e9ccb",
+          "source": "bot-introduction",
+          "status": "succeeded",
+          "checkpointStructure": {
+            "toolNamesOnly": [
+              "offer_introduction_question"
+            ],
+            "messageContentsNotCopied": true
+          },
+          "modelRequests": 2,
+          "unknownUsage": 0
+        },
+        {
+          "id": "124d8dce-e8cc-4068-920f-93969f25590e",
+          "conversation_id": "c74b846a-0f65-411f-be14-8c6bdb3e9ccb",
+          "source": "user",
+          "status": "succeeded",
+          "checkpointStructure": {
+            "toolNamesOnly": [],
+            "messageContentsNotCopied": true
+          },
+          "modelRequests": 1,
+          "unknownUsage": 0
+        }
+      ],
+      "publicMessages": [
+        {
+          "id": "11fb46a9-753e-4908-adff-9ff3aa7ec2af",
+          "run_id": "6faa2dae-629c-4369-87dc-45504f1aa841",
+          "sender": "bot",
+          "text": "你好！有什么我可以帮你开始的吗？",
+          "reply_to": null
+        },
+        {
+          "id": "0394f589-6b01-44b8-aa9a-50321ca48ebe",
+          "run_id": "6faa2dae-629c-4369-87dc-45504f1aa841",
+          "sender": "bot",
+          "text": "你希望我从哪类工作开始协助你？",
+          "reply_to": null
+        },
+        {
+          "id": "486d4db5-1c17-4bf7-b709-dc98ed8d8aa0",
+          "run_id": null,
+          "sender": "user",
+          "text": "只核对这组数字：甲75、乙26、丙19，草稿合计写成122。请给出实际合计、草稿差额和结论，各一行。不要访问外部服务，也不要保存记忆。",
+          "reply_to": null
+        },
+        {
+          "id": "87d868ba-7cb7-4050-9304-1cf0c0eff6b4",
+          "run_id": "124d8dce-e8cc-4068-920f-93969f25590e",
+          "sender": "bot",
+          "text": "\n\n实际合计：75 + 26 + 19 = 120\n草稿差额：122 − 120 = 2（草稿多报 2）\n结论：草稿合计 122 不正确，应为 120",
+          "reply_to": "486d4db5-1c17-4bf7-b709-dc98ed8d8aa0"
+        }
+      ],
+      "newMemoryCount": 0,
+      "finiteLeaseReleasedBeforeHumanReply": true,
+      "oneUserTaskOnly": true
+    },
+    {
+      "botId": "37e011ed-107d-4c0b-92d7-151b478972d6",
+      "question": {
+        "run_id": "f1088694-5646-4aaa-8afa-6ee24d4b15ff",
+        "message_id": "e2f0bae9-fcad-4804-8301-4784d7e79421",
+        "input": {
+          "questions": [
+            {
+              "header": "工作方向",
+              "id": "starting_direction",
+              "question": "你希望我先帮你处理哪类工作？",
+              "options": [
+                {
+                  "label": "代码与开发",
+                  "description": "比如编写、调试、重构代码，或解答技术问题。"
+                },
+                {
+                  "label": "写作与翻译",
+                  "description": "比如起草文档、润色文章、中英文互译等。"
+                },
+                {
+                  "label": "分析与研究",
+                  "description": "比如梳理资料、总结要点、对比方案等。"
+                }
+              ]
+            }
+          ]
+        },
+        "data_epoch": "initial",
+        "status": "answered",
+        "revision": 2
+      },
+      "runs": [
+        {
+          "id": "f1088694-5646-4aaa-8afa-6ee24d4b15ff",
+          "conversation_id": "08e830cb-bee2-4b73-bd3e-93273ab9899d",
+          "source": "bot-introduction",
+          "status": "succeeded",
+          "checkpointStructure": {
+            "toolNamesOnly": [
+              "offer_introduction_question"
+            ],
+            "messageContentsNotCopied": true
+          },
+          "modelRequests": 2,
+          "unknownUsage": 0
+        },
+        {
+          "id": "2db5a865-c7d7-4fca-849a-b0d580535928",
+          "conversation_id": "08e830cb-bee2-4b73-bd3e-93273ab9899d",
+          "source": "user",
+          "status": "succeeded",
+          "checkpointStructure": {
+            "toolNamesOnly": [],
+            "messageContentsNotCopied": true
+          },
+          "modelRequests": 1,
+          "unknownUsage": 0
+        }
+      ],
+      "publicMessages": [
+        {
+          "id": "ec76d38c-8f1a-4a02-ad66-c03d61528aa1",
+          "run_id": "f1088694-5646-4aaa-8afa-6ee24d4b15ff",
+          "sender": "bot",
+          "text": "等你告诉我具体想做的事，我就可以开始了。",
+          "reply_to": null
+        },
+        {
+          "id": "e2f0bae9-fcad-4804-8301-4784d7e79421",
+          "run_id": "f1088694-5646-4aaa-8afa-6ee24d4b15ff",
+          "sender": "bot",
+          "text": "你希望我先帮你处理哪类工作？",
+          "reply_to": null
+        },
+        {
+          "id": "5cac3f64-b294-42d3-9ec0-c42e8fecc322",
+          "run_id": null,
+          "sender": "user",
+          "text": "补充信息\n\n你希望我先帮你处理哪类工作？\n先核对这组数字：12、8、15，草稿合计36。只回复实际合计、差额、结论三行，不访问外部服务，不保存记忆。",
+          "reply_to": "e2f0bae9-fcad-4804-8301-4784d7e79421"
+        },
+        {
+          "id": "8d3dedd0-d5f9-4b45-b43b-d8dd8fe23c4f",
+          "run_id": "2db5a865-c7d7-4fca-849a-b0d580535928",
+          "sender": "bot",
+          "text": "\n\n实际合计：35\n差额：1（草稿多1）\n结论：草稿\"合计36\"不正确",
+          "reply_to": "5cac3f64-b294-42d3-9ec0-c42e8fecc322"
+        }
+      ],
+      "newMemoryCount": 0,
+      "finiteLeaseReleasedBeforeHumanReply": true,
+      "oneUserTaskOnly": true
+    }
+  ],
+  "officialObserved": {
+    "ignoreThenTask": {
+      "status": "已忽略",
+      "inputSameExceptPriorRoleQuestion": true,
+      "result": "实际合计：75 + 26 + 19 = 120\n草稿差额：122 − 120 = 2，草稿多写了 2\n结论：草稿合计有误，应改为 120"
+    },
+    "customAnswer": {
+      "emptyBotCreatedInOfficialUI": true,
+      "inputSameExceptGeneratedQuestion": true,
+      "result": "实际合计：35\n差额：草稿多算了 1（36 − 35）\n结论：草稿合计有误，应改为 35"
+    }
+  },
+  "quality": {
+    "owningFiles": 9,
+    "owningCases": 148,
+    "actualSdkCases": 6,
+    "sdkUnselected": 329,
+    "isolatedReactSqliteJourneys": 5,
+    "nodeTypes": "PASS",
+    "webTypes": "PASS",
+    "messageGate": "PASS",
+    "strictLint": "PASS",
+    "productionBuild": "PASS",
+    "logs": [
+      {
+        "path": "/tmp/cmb-introduction-question-owning3-20261010.log",
+        "sha256": "f0b9b7b1c7c83f81f3e8cf8ab73b866536f2d5cec3b37d6c208802c09c509fff"
+      },
+      {
+        "path": "/tmp/cmb-introduction-question-sdk3-20261010.log",
+        "sha256": "e6d52a04ef0d780c751ebc54f1712fd75885b426fe8e7531d2d7e690b6d8896c"
+      },
+      {
+        "path": "/tmp/cmb-introduction-question-messages-20261010.log",
+        "sha256": "07e2f675a357db15a60fa0715f5a4c40f7f427d6804a39101b6729b0ee295875"
+      },
+      {
+        "path": "/tmp/cmb-introduction-question-node3-20261010.log",
+        "sha256": "546c7bfd36ecac14793f941add6251c16a729819d1b744cccbaf256a91e1b42c"
+      },
+      {
+        "path": "/tmp/cmb-introduction-question-web-final-20261010.log",
+        "sha256": "aba1d996409180225c6f720bd909b367ee8681e710f7b8537e5a1d7f6d07f2ac"
+      },
+      {
+        "path": "/tmp/cmb-introduction-question-lint-final-20261010.log",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      {
+        "path": "/tmp/cmb-introduction-question-ui-lint-20261010.log",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      {
+        "path": "/tmp/cmb-introduction-question-build-final-20261010.log",
+        "sha256": "040eac6237208469fef24f1e5b3aafc3d357c774dc48e04af81fe2a91eeb8fe5"
+      },
+      {
+        "path": "/tmp/cmb-introduction-question-browser-grouped-20261010.log",
+        "sha256": "d5b685f967c1ced8fdbb99844c6dfdf0681f18c6b2896aea22cbd2c06d83aa8d"
+      }
+    ]
+  },
+  "coldPreservation": {
+    "receiptPath": "/Users/chenqiang/Library/Application Support/CMBDevClaw-development/2026-10-08/presentation/cold-unique-upgrade-plan/intro-question-cold-preservation-1791609327770036000.safe.json",
+    "selectedRuns": 177,
+    "checkpointPayloadBytesHashed": 17862631,
+    "schemaBefore": 71,
+    "schemaAfter": 72,
+    "logicalGroupsEqual": {
+      "runs": true,
+      "effects": true,
+      "interactions": true,
+      "artifacts": true,
+      "artifactObjects": true,
+      "peerDispatch": true,
+      "peerWaits": true,
+      "checkpoints": true,
+      "skills": true,
+      "project": true
+    },
+    "extraTablesEqual": {
+      "bot_memories": true,
+      "bot_memory_metadata": true,
+      "bot_model_usage": true,
+      "bot_group_cycles": true,
+      "bot_group_runs": true
+    },
+    "legacyMemberOrderEqual": true,
+    "modelNormalizedFingerprintMatched": true,
+    "forceKillUsed": false
+  },
+  "realFirstWorkSuppressionNativeTested": false,
+  "boundary": "Finite generated questions, ignore and custom-answer tasks; no arbitrary onboarding or whole-core/UI parity claim. Private frozen development auth exception only, shared dependencies, not an independent production installer.",
+  "uiPolishAfterNativeObservation": {
+    "pendingCardNestedBubbleRemovedInSource": true,
+    "notYetInNativeBuild": true
+  },
+  "privateTextNotCopied": true,
+  "coreParityComplete": false
+}

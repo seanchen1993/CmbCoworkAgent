@@ -1,0 +1,66 @@
+{
+  "kind": "formal-ui-configured-minimax-original-reuse-and-generated-file-delivery",
+  "buildId": "d83a01a9b33434377e0f6dd7",
+  "recordedAt": "2026-10-09T07:54:15.535426+00:00",
+  "sourceDatabaseReadOnly": true,
+  "formalRun": {
+    "id": "2ba0d4e7-48c4-466b-a836-45d0980cd614",
+    "status": "succeeded",
+    "error": null,
+    "revision": 37,
+    "message_id": "76e39216-ea7a-4bcc-bd31-1ef7cd218fc5",
+    "created_at": 1791530938238,
+    "updated_at": 1791531007099
+  },
+  "inputOriginalArtifactIds": [
+    "result:c8340c02-ce4d-40c7-a31c-de9a89e34293:call_function_6xb5nzz9kgt8_1",
+    "result:c8340c02-ce4d-40c7-a31c-de9a89e34293:call_function_vwqed5lp5aeu_2"
+  ],
+  "files": [
+    {
+      "messageId": "7a953277-9e09-4ac7-9d0e-eed9f617b46f",
+      "sender": "system",
+      "artifactId": "result:c8340c02-ce4d-40c7-a31c-de9a89e34293:call_function_6xb5nzz9kgt8_1",
+      "name": "result.csv",
+      "size": 66,
+      "sha256": "7f49376f9672cf7362ea26ea0ce624c881d3c9250f3b7207024ca5870bc8903f",
+      "originalObjectByteHashVerified": true
+    },
+    {
+      "messageId": "be94fb73-1cad-43d4-80c9-5faf84952721",
+      "sender": "system",
+      "artifactId": "result:c8340c02-ce4d-40c7-a31c-de9a89e34293:call_function_vwqed5lp5aeu_2",
+      "name": "review.md",
+      "size": 3469,
+      "sha256": "aaa7a52e32b888e5dddd721497c7161cb97cd44611c8be11dbb527c4f320504f",
+      "originalObjectByteHashVerified": true
+    },
+    {
+      "messageId": "01a5508d-4623-4884-915d-d056ab4bf7f4",
+      "sender": "system",
+      "artifactId": "result:2ba0d4e7-48c4-466b-a836-45d0980cd614:call_01a11f90f9447e43b5310e60",
+      "name": "delivery-note.md",
+      "size": 1447,
+      "sha256": "3eef4cb51f2ada1ddbf5fc16f00b47e24de66100d70c939158d0896a063c17e6",
+      "originalObjectByteHashVerified": true
+    }
+  ],
+  "formalUiObserved": {
+    "fileLibraryOriginalsAddedToDraft": true,
+    "duplicateAddDisabled": true,
+    "formalMessageSentWithTwoOriginals": true,
+    "threeInlineFileCardsPresent": true,
+    "newMarkdownPreviewOpened": true,
+    "numberVsUnknownCauseCorrectlySeparated": true,
+    "responseInChinese": true
+  },
+  "originalFilesRewritten": false,
+  "oldReportAmbiguousCauseWordingRetained": true,
+  "originalMaterialCsvBytesAndValuesVerified": true,
+  "sourceCardScope": [
+    "deliver_file",
+    "existing-original-files"
+  ],
+  "projectPublishCardSourceFixNotYetLive": true,
+  "wholeCoreParityComplete": false
+}

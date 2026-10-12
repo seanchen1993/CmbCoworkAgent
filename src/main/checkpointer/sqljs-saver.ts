@@ -1,3 +1,16 @@
+import {
+  type CheckpointMessageWriteState,
+  type CheckpointMessageChunk,
+  buildExternalMessagesReference,
+  isExternalMessagesReference,
+  captureCheckpointMessageSentinels,
+  commonMessageReferencePrefix,
+  serializedPayloadBytes,
+  truncateCheckpointMessageChunks,
+  materializeCheckpointMessageChunks,
+  MAX_CHECKPOINT_MESSAGE_SNAPSHOT_DEPTH,
+  MAX_CHECKPOINT_MESSAGE_DELTA_BYTES
+} from "./message-snapshot-codec"
 import { NativeSqliteAdapter, openNativeSqliteDatabase } from "../db/native-sqlite-adapter"
 import {
   ensureMessageSnapshotGeneration,
@@ -15,12 +28,7 @@ import {
 const DEFAULT_MAX_DB_SIZE_BYTES = 100 * 1024 * 1024
 const DEFAULT_MAX_ROOT_FORK_BOUNDARY_CHECKPOINTS = 0
 const DEFAULT_MAX_ROOT_FORK_BOUNDARY_BYTES = 48 * 1024 * 1024
-const MAX_CHECKPOINT_MESSAGE_SNAPSHOT_DEPTH = 128
-const MAX_CHECKPOINT_MESSAGE_DELTA_BYTES = 8 * 1024 * 1024
 const MESSAGE_SNAPSHOT_DELETE_BATCH_SIZE = 400
-const MESSAGE_PREFIX_SENTINEL_COUNT = 24
-const MESSAGE_PREFIX_TAIL_WINDOW = 16
-const MESSAGE_PREFIX_MIN_SHARED_TAIL = 4
 const CHECKPOINT_SCHEMA_MIGRATION_ID = "checkpoint-columns-and-fork-boundary-v1"
 import type { RunnableConfig } from "@langchain/core/runnables"
 import {
@@ -56,23 +64,6 @@ interface CheckpointMessageSnapshotRow {
   suffix: string | Uint8Array
 }
 
-interface CheckpointMessageWriteState {
-  checkpointId: string
-  messages: unknown[]
-  messageCount: number
-  prefixSentinels: CheckpointMessageSentinel[]
-  tailSentinels: CheckpointMessageSentinel[]
-  hasExternalSnapshot: boolean
-  snapshotDepth: number
-  deltaBytes: number
-  snapshotGeneration: string | null
-}
-
-interface CheckpointMessageSentinel {
-  index: number
-  value: unknown
-}
-
 interface HydratedCheckpointMessages {
   messages: unknown[]
   snapshotDepth: number
@@ -101,8 +92,7 @@ export interface CheckpointMessageRecoveryResult {
   boundedByHistory?: boolean
 }
 
-export const LOCAL_CHECKPOINT_MESSAGE_RECOVERY_ERROR =
-  "LOCAL_CHECKPOINT_MESSAGE_RECOVERY_FAILED"
+export const LOCAL_CHECKPOINT_MESSAGE_RECOVERY_ERROR = "LOCAL_CHECKPOINT_MESSAGE_RECOVERY_FAILED"
 
 export class CheckpointMessageSnapshotRecoveryError extends Error {
   readonly code = LOCAL_CHECKPOINT_MESSAGE_RECOVERY_ERROR
@@ -125,7 +115,6 @@ class MissingCheckpointMessageSnapshotError extends Error {
   }
 }
 
-const EXTERNAL_MESSAGES_MARKER = "__cmb_sqljs_external_messages_v1"
 const MAX_HYDRATED_MESSAGE_SNAPSHOTS = 8
 
 /**
@@ -176,24 +165,6 @@ interface CheckpointForkBoundaryBackfill {
   metadataPayload: string | Uint8Array
 }
 
-interface ExternalMessagesReference {
-  [EXTERNAL_MESSAGES_MARKER]: true
-  messageCount: number
-}
-
-function buildExternalMessagesReference(messageCount: number): ExternalMessagesReference {
-  return {
-    [EXTERNAL_MESSAGES_MARKER]: true,
-    messageCount
-  }
-}
-
-function isExternalMessagesReference(value: unknown): value is ExternalMessagesReference {
-  if (!value || typeof value !== "object" || Array.isArray(value)) return false
-  const candidate = value as Partial<ExternalMessagesReference>
-  return candidate[EXTERNAL_MESSAGES_MARKER] === true && Number.isInteger(candidate.messageCount)
-}
-
 function checkpointMessageCacheKey(
   threadId: string,
   checkpointNs: string,
@@ -204,134 +175,6 @@ function checkpointMessageCacheKey(
 
 function checkpointMessageNamespaceKey(threadId: string, checkpointNs: string): string {
   return `${threadId}\u0000${checkpointNs}`
-}
-
-function captureCheckpointMessageSentinels(messages: unknown[]): {
-  messageCount: number
-  prefixSentinels: CheckpointMessageSentinel[]
-  tailSentinels: CheckpointMessageSentinel[]
-} {
-  const messageCount = messages.length
-  const tailStart = Math.max(0, messageCount - MESSAGE_PREFIX_TAIL_WINDOW)
-  const prefixSentinels: CheckpointMessageSentinel[] = []
-  if (tailStart > 0) {
-    const sentinelCount = Math.min(MESSAGE_PREFIX_SENTINEL_COUNT, tailStart)
-    const indices = new Set<number>()
-    for (let offset = 0; offset < sentinelCount; offset += 1) {
-      const index =
-        sentinelCount === 1
-          ? 0
-          : Math.floor((offset * (tailStart - 1)) / (sentinelCount - 1))
-      indices.add(index)
-    }
-    for (const index of indices) prefixSentinels.push({ index, value: messages[index] })
-  }
-
-  const tailSentinels: CheckpointMessageSentinel[] = []
-  for (let index = tailStart; index < messageCount; index += 1) {
-    tailSentinels.push({ index, value: messages[index] })
-  }
-  return { messageCount, prefixSentinels, tailSentinels }
-}
-
-/**
- * Return a trusted common prefix for the append/replace-tail shapes emitted by
- * LangGraph's messages reducer. Distributed sentinels guard the stable history,
- * while the final window identifies an exact changed suffix without rescanning
- * a long transcript. Shapes that do not prove that structural sharing fall
- * back to the exact reference scan below.
- */
-function trustedMessageReferencePrefix(
-  previous: CheckpointMessageWriteState,
-  next: unknown[]
-): number | null {
-  const previousCount = previous.messageCount
-  if (previousCount === 0) return 0
-  if (next.length < previousCount) return null
-
-  for (const sentinel of previous.prefixSentinels) {
-    if (next[sentinel.index] !== sentinel.value) {
-      // If the same array was mutated in place, it no longer contains the
-      // persisted prefix needed by the exact fallback. Rebase safely instead.
-      return next === previous.messages ? 0 : null
-    }
-  }
-
-  let sharedTail = 0
-  for (const sentinel of previous.tailSentinels) {
-    if (next[sentinel.index] !== sentinel.value) {
-      return sharedTail >= Math.min(MESSAGE_PREFIX_MIN_SHARED_TAIL, sentinel.index)
-        ? sentinel.index
-        : next === previous.messages
-          ? 0
-          : null
-    }
-    sharedTail += 1
-  }
-
-  if (next === previous.messages || next.length > previousCount) return previousCount
-  // A cloned, equal-length array could contain an unsampled replacement in the
-  // middle. Treat it as ambiguous and retain the exact fallback.
-  return null
-}
-
-function commonMessageReferencePrefix(
-  previous: CheckpointMessageWriteState,
-  next: unknown[]
-): number {
-  const trustedPrefix = trustedMessageReferencePrefix(previous, next)
-  if (trustedPrefix !== null) return trustedPrefix
-  if (previous.messages.length !== previous.messageCount) return 0
-
-  const limit = Math.min(previous.messageCount, next.length)
-  let index = 0
-  while (index < limit && previous.messages[index] === next[index]) index += 1
-  return index
-}
-
-function serializedPayloadBytes(payload: string | Uint8Array): number {
-  return typeof payload === "string" ? Buffer.byteLength(payload, "utf8") : payload.byteLength
-}
-
-interface CheckpointMessageChunk {
-  messages: unknown[]
-  start: number
-  end: number
-}
-
-function truncateCheckpointMessageChunks(
-  chunks: CheckpointMessageChunk[],
-  currentLength: number,
-  length: number
-): void {
-  let retainedLength = currentLength
-  while (retainedLength > length) {
-    const chunk = chunks.at(-1)
-    if (!chunk) break
-    const chunkLength = chunk.end - chunk.start
-    const removeCount = Math.min(chunkLength, retainedLength - length)
-    chunk.end -= removeCount
-    retainedLength -= removeCount
-    if (chunk.start === chunk.end) chunks.pop()
-  }
-}
-
-function materializeCheckpointMessageChunks(
-  chunks: readonly CheckpointMessageChunk[],
-  messageCount: number
-): unknown[] {
-  const messages = new Array<unknown>(messageCount)
-  let outputIndex = 0
-  for (const chunk of chunks) {
-    for (let sourceIndex = chunk.start; sourceIndex < chunk.end; sourceIndex += 1) {
-      messages[outputIndex] = chunk.messages[sourceIndex]
-      outputIndex += 1
-    }
-  }
-  if (outputIndex !== messageCount) {
-    throw new Error("[SqlJsSaver] Checkpoint message chunk count mismatch")
-  }
-  return messages
 }
 
 interface RootCheckpointRetentionRow {
@@ -431,10 +274,7 @@ export class SqlJsSaver extends BaseCheckpointSaver {
    * every transcript in a long-lived saver. */
   private hydratedCheckpointMessages = new Map<string, HydratedCheckpointMessages>()
   /** Coalesce concurrent readers of the same broken checkpoint into one Worker/CAS repair. */
-  private checkpointMessageRecoveryRequests = new Map<
-    string,
-    Promise<HydratedCheckpointMessages>
-  >()
+  private checkpointMessageRecoveryRequests = new Map<string, Promise<HydratedCheckpointMessages>>()
 
   /** Root checkpoints are for runtime state and recent fork boundaries. User-visible
    * transcript history lives in the main database, so checkpoint retention can stay small.
@@ -452,10 +292,7 @@ export class SqlJsSaver extends BaseCheckpointSaver {
     this.dbPath = dbPath
     this.checkpointDatabaseKey = canonicalCheckpointDatabaseKey(dbPath)
     const legacyMax = options.maxCheckpointsPerNamespace
-    this.maxRootCheckpoints = normalizePositiveInteger(
-      options.maxRootCheckpoints ?? legacyMax,
-      1
-    )
+    this.maxRootCheckpoints = normalizePositiveInteger(options.maxRootCheckpoints ?? legacyMax, 1)
     this.maxRootForkBoundaryCheckpoints = normalizeNonNegativeInteger(
       options.maxRootForkBoundaryCheckpoints,
       DEFAULT_MAX_ROOT_FORK_BOUNDARY_CHECKPOINTS
@@ -709,10 +546,7 @@ export class SqlJsSaver extends BaseCheckpointSaver {
     }
   }
 
-  private compactOversizedLiveDatabase(
-    database: NativeSqliteAdapter,
-    liveSize: number
-  ): boolean {
+  private compactOversizedLiveDatabase(database: NativeSqliteAdapter, liveSize: number): boolean {
     try {
       this.pruneAllCheckpointNamespaces(database)
       this.pruneAllUnreachableMessageSnapshots(database)
@@ -1053,7 +887,9 @@ export class SqlJsSaver extends BaseCheckpointSaver {
     }
     const messages = hydrated.messages
     if (messages.length !== expectedHydratedMessageCount) {
-      throw new Error(`[SqlJsSaver] External checkpoint message count mismatch: ${row.checkpoint_id}`)
+      throw new Error(
+        `[SqlJsSaver] External checkpoint message count mismatch: ${row.checkpoint_id}`
+      )
     }
     checkpoint.channel_values = {
       ...checkpoint.channel_values,
@@ -1077,10 +913,7 @@ export class SqlJsSaver extends BaseCheckpointSaver {
     return Boolean(result[0]?.values.length)
   }
 
-  private isExactLatestCheckpointRow(
-    row: CheckpointRow,
-    database: NativeSqliteAdapter
-  ): boolean {
+  private isExactLatestCheckpointRow(row: CheckpointRow, database: NativeSqliteAdapter): boolean {
     const result = database.exec(
       `SELECT 1
        FROM checkpoints AS source
@@ -1316,9 +1149,7 @@ export class SqlJsSaver extends BaseCheckpointSaver {
           [threadId, checkpointNs]
         )
         const reachable = new Set<string>(
-          (checkpointResult[0]?.values ?? [])
-            .map((row) => String(row[0] ?? ""))
-            .filter(Boolean)
+          (checkpointResult[0]?.values ?? []).map((row) => String(row[0] ?? "")).filter(Boolean)
         )
 
         const snapshotResult = database.exec(
@@ -2547,7 +2378,6 @@ export class SqlJsSaver extends BaseCheckpointSaver {
     for (const key of this.hydratedCheckpointMessages.keys()) {
       if (key.startsWith(cachePrefix)) this.hydratedCheckpointMessages.delete(key)
     }
-
   }
 
   /**

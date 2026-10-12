@@ -1,0 +1,5670 @@
+{
+  "schema_version": 3,
+  "date": "2026-10-07",
+  "scope": "macos-windows-native-local-first-core",
+  "status": "implementation_in_progress_not_fully_accepted",
+  "source": "requirements.json",
+  "review_document": "12-windows-local-first.md",
+  "note": "原全量260项保留；依据2026-10-02用户要求，当前macOS与Windows原生本机均支持，用户自行配置模型；Linux K8s为后续扩展。Windows无WSL2/Linux容器依赖，已有Windows测试机，代码完成后实测。本文件条目中的planned/not_run保留施工与目标平台验收基线，不代替实施记录中的逐次代码及验证证据。 2026-10-07按用户明确决定补充Mac纯原生范围覆写：仅专用浏览器、文件、浏览器示范和接管；任意命令及独立通用原生桌面不属Mac首版。原条目、分母及planned状态保留，平台覆写不表示原完整能力已实现；Windows与后续Linux目标不缩减。",
+  "summary": {
+    "core": 124,
+    "deferred": 73,
+    "core_subset": 53,
+    "conditional": 10
+  },
+  "requirements": [
+    {
+      "id": "ACC-01",
+      "feature": "统一身份",
+      "disposition": "core",
+      "source_test_id": "T-ACC-01",
+      "core_test_id": "TC-ACC-01",
+      "reason": "完整纳入原验收条目。",
+      "implementation_status": "planned"
+    },
+    {
+      "id": "ACC-02",
+      "feature": "首次引导",
+      "disposition": "core",
+      "source_test_id": "T-ACC-02",
+      "core_test_id": "TC-ACC-02",
+      "reason": "完整纳入原验收条目。",
+      "implementation_status": "planned"
+    },
+    {
+      "id": "ACC-03",
+      "feature": "多账号",
+      "disposition": "deferred",
+      "source_test_id": "T-ACC-03",
+      "core_test_id": null,
+      "reason": "暂不新增多账号切换或商业订阅；单账号登出/重登及基本用量控制仍保留。",
+      "implementation_status": "planned"
+    },
+    {
+      "id": "ACC-04",
+      "feature": "多端同账号",
+      "disposition": "core_subset",
+      "source_test_id": "T-ACC-04",
+      "core_test_id": "TC-ACC-04",
+      "reason": "依据用户 2026-09-30 确认的纯 Windows 本机首版范围调整；保留完整远端目标。",
+      "implementation_status": "planned",
+      "core_acceptance": "同一 Windows Host 的受认证连接及退出重开看到同一 Bot 和持久记录，窗口关闭不停止 Host；连接状态与运行状态分开。",
+      "deferred_part": "跨机器同步、手机访问及多端账号服务。"
+    },
+    {
+      "id": "ACC-05",
+      "feature": "访问受限",
+      "disposition": "core_subset",
+      "source_test_id": "T-ACC-05",
+      "core_test_id": "TC-ACC-05",
+      "reason": "依据用户 2026-09-30 确认的纯 Windows 本机首版范围调整；保留完整远端目标。",
+      "implementation_status": "planned",
+      "core_acceptance": "沿用 Cmb 现有身份/访问策略；身份过期、有效策略禁用、模型额度不足分别显示真实原因。",
+      "deferred_part": "新增云端开通和集中组织管理产品。"
+    },
+    {
+      "id": "ACC-06",
+      "feature": "设备与会话撤销",
+      "disposition": "core_subset",
+      "source_test_id": "T-ACC-06",
+      "core_test_id": "TC-ACC-06",
+      "reason": "依据用户 2026-09-30 确认的纯 Windows 本机首版范围调整；保留完整远端目标。",
+      "implementation_status": "planned",
+      "core_acceptance": "本机 UI/Host 会话撤销后旧命令、画面及控制凭据失效；重新连接重新认证。",
+      "deferred_part": "云端多设备注册、远端设备撤销门户。"
+    },
+    {
+      "id": "ACC-07",
+      "feature": "账户注销",
+      "disposition": "core_subset",
+      "source_test_id": "T-ACC-07",
+      "core_test_id": "TC-ACC-07",
+      "reason": "原条目同时包含核心与可选内容，按当前核心验收分开处理。",
+      "implementation_status": "planned",
+      "core_acceptance": "退出清理当前客户端敏感缓存；员工账号停用与 Bot 数据删除分开，提供受控数据删除路径和状态。",
+      "deferred_part": "仿原版商业账号自助注销门户；可复用企业现有流程。"
+    },
+    {
+      "id": "ACC-08",
+      "feature": "试用和权益关联",
+      "disposition": "deferred",
+      "source_test_id": "T-ACC-08",
+      "core_test_id": null,
+      "reason": "暂不新增多账号切换或商业订阅；单账号登出/重登及基本用量控制仍保留。",
+      "implementation_status": "planned"
+    },
+    {
+      "id": "ACC-09",
+      "feature": "默认模型体验",
+      "disposition": "core_subset",
+      "source_test_id": "T-ACC-09",
+      "core_test_id": "TC-ACC-09",
+      "reason": "依据用户 2026-09-30 确认的纯 Windows 本机首版范围调整；保留完整远端目标。",
+      "implementation_status": "planned",
+      "core_acceptance": "默认继承用户配置的 Cmb 模型，Bot 可选择已有模型；缺配置或缺视觉/工具能力明确提示，记录实际模型和路由。",
+      "deferred_part": "原版托管模型透明路由；本产品按用户要求允许配置模型，不强制建设集中模型服务。"
+    },
+    {
+      "id": "BOT-01",
+      "feature": "自然语言建立职责",
+      "disposition": "core",
+      "source_test_id": "T-BOT-01",
+      "core_test_id": "TC-BOT-01",
+      "reason": "完整纳入原验收条目。",
+      "implementation_status": "planned"
+    },
+    {
+      "id": "BOT-02",
+      "feature": "资料维护",
+      "disposition": "core_subset",
+      "source_test_id": "T-BOT-02",
+      "core_test_id": "TC-BOT-02",
+      "reason": "原条目同时包含核心与可选内容，按当前核心验收分开处理。",
+      "implementation_status": "planned",
+      "core_acceptance": "姓名、标签、描述和用户选择的头像可编辑保存，重开一致。",
+      "deferred_part": "模型生成头像。"
+    },
+    {
+      "id": "BOT-03",
+      "feature": "稳定身份",
+      "disposition": "core_subset",
+      "source_test_id": "T-BOT-03",
+      "core_test_id": "TC-BOT-03",
+      "reason": "依据用户 2026-09-30 确认的纯 Windows 本机首版范围调整；保留完整远端目标。",
+      "implementation_status": "planned",
+      "core_acceptance": "连续任务、Host 重启、界面重开仍为同一 Bot，改名不改 ID；数据包含未来迁移所需稳定身份。",
+      "deferred_part": "跨机器自动同步。"
+    },
+    {
+      "id": "BOT-04",
+      "feature": "Bot 创建 Bot",
+      "disposition": "core",
+      "source_test_id": "T-BOT-04",
+      "core_test_id": "TC-BOT-04",
+      "reason": "完整纳入原验收条目。",
+      "implementation_status": "planned"
+    },
+    {
+      "id": "BOT-05",
+      "feature": "置顶与排序",
+      "disposition": "core",
+      "source_test_id": "T-BOT-05",
+      "core_test_id": "TC-BOT-05",
+      "reason": "完整纳入原验收条目。",
+      "implementation_status": "planned"
+    },
+    {
+      "id": "BOT-06",
+      "feature": "自定义分区",
+      "disposition": "deferred",
+      "source_test_id": "T-BOT-06",
+      "core_test_id": null,
+      "reason": "侧边栏自定义分区和批量组织操作不是核心工作闭环前提。",
+      "implementation_status": "planned"
+    },
+    {
+      "id": "BOT-07",
+      "feature": "隐藏与恢复",
+      "disposition": "core",
+      "source_test_id": "T-BOT-07",
+      "core_test_id": "TC-BOT-07",
+      "reason": "完整纳入原验收条目。",
+      "implementation_status": "planned"
+    },
+    {
+      "id": "BOT-08",
+      "feature": "手动已读未读",
+      "disposition": "core",
+      "source_test_id": "T-BOT-08",
+      "core_test_id": "TC-BOT-08",
+      "reason": "完整纳入原验收条目。",
+      "implementation_status": "planned"
+    },
+    {
+      "id": "BOT-09",
+      "feature": "复制 Bot",
+      "disposition": "core",
+      "source_test_id": "T-BOT-09",
+      "core_test_id": "TC-BOT-09",
+      "reason": "完整纳入原验收条目。",
+      "implementation_status": "planned"
+    },
+    {
+      "id": "BOT-10",
+      "feature": "复制例程状态",
+      "disposition": "core",
+      "source_test_id": "T-BOT-10",
+      "core_test_id": "TC-BOT-10",
+      "reason": "完整保留复制例程状态验收；未核实行为不能归为延期功能。",
+      "implementation_status": "planned",
+      "design_notes": "复制保存 desiredEnabled 与配置；新触发身份/授权单独绑定，缺依赖显示 needs_setup。不得未经原版证据把全部副本一律 paused；首次触发/游标规则须完成基线观测。",
+      "verification_blocker": "需要原版 0.57.1 复制后启用状态/首个触发时点和外部订阅的真机基准。"
+    },
+    {
+      "id": "BOT-11",
+      "feature": "删除 Bot",
+      "disposition": "core",
+      "source_test_id": "T-BOT-11",
+      "core_test_id": "TC-BOT-11",
+      "reason": "完整纳入原验收条目。",
+      "implementation_status": "planned"
+    },
+    {
+      "id": "BOT-12",
+      "feature": "删除正在运行的 Bot",
+      "disposition": "core",
+      "source_test_id": "T-BOT-12",
+      "core_test_id": "TC-BOT-12",
+      "reason": "完整纳入原验收条目。",
+      "implementation_status": "planned"
+    },
+    {
+      "id": "BOT-13",
+      "feature": "Bot 数量上限",
+      "disposition": "core",
+      "source_test_id": "T-BOT-13",
+      "core_test_id": "TC-BOT-13",
+      "reason": "完整纳入原验收条目。",
+      "implementation_status": "planned"
+    },
+    {
+      "id": "BOT-14",
+      "feature": "批量组织操作",
+      "disposition": "deferred",
+      "source_test_id": "T-BOT-14",
+      "core_test_id": null,
+      "reason": "侧边栏自定义分区和批量组织操作不是核心工作闭环前提。",
+      "implementation_status": "planned"
+    },
+    {
+      "id": "MSG-01",
+      "feature": "消息收发",
+      "disposition": "core",
+      "source_test_id": "T-MSG-01",
+      "core_test_id": "TC-MSG-01",
+      "reason": "完整纳入原验收条目。",
+      "implementation_status": "planned"
+    },
+    {
+      "id": "MSG-02",
+      "feature": "发送接收回执",
+      "disposition": "core",
+      "source_test_id": "T-MSG-02",
+      "core_test_id": "TC-MSG-02",
+      "reason": "完整纳入原验收条目。",
+      "implementation_status": "planned"
+    },
+    {
+      "id": "MSG-03",
+      "feature": "重复发送",
+      "disposition": "core",
+      "source_test_id": "T-MSG-03",
+      "core_test_id": "TC-MSG-03",
+      "reason": "完整纳入原验收条目。",
+      "implementation_status": "planned"
+    },
+    {
+      "id": "MSG-04",
+      "feature": "执行中补充指令",
+      "disposition": "core",
+      "source_test_id": "T-MSG-04",
+      "core_test_id": "TC-MSG-04",
+      "reason": "完整纳入原验收条目。",
+      "implementation_status": "planned"
+    },
+    {
+      "id": "MSG-05",
+      "feature": "停止任务",
+      "disposition": "core",
+      "source_test_id": "T-MSG-05",
+      "core_test_id": "TC-MSG-05",
+      "reason": "完整纳入原验收条目。",
+      "implementation_status": "planned"
+    },
+    {
+      "id": "MSG-06",
+      "feature": "回复分支",
+      "disposition": "core",
+      "source_test_id": "T-MSG-06",
+      "core_test_id": "TC-MSG-06",
+      "reason": "完整纳入原验收条目。",
+      "implementation_status": "planned"
+    },
+    {
+      "id": "MSG-07",
+      "feature": "表情回应",
+      "disposition": "core",
+      "source_test_id": "T-MSG-07",
+      "core_test_id": "TC-MSG-07",
+      "reason": "完整纳入原验收条目。",
+      "implementation_status": "planned"
+    },
+    {
+      "id": "MSG-08",
+      "feature": "技能命令",
+      "disposition": "core",
+      "source_test_id": "T-MSG-08",
+      "core_test_id": "TC-MSG-08",
+      "reason": "完整纳入原验收条目。",
+      "implementation_status": "planned"
+    },
+    {
+      "id": "MSG-09",
+      "feature": "对象提及",
+      "disposition": "core",
+      "source_test_id": "T-MSG-09",
+      "core_test_id": "TC-MSG-09",
+      "reason": "完整纳入原验收条目。",
+      "implementation_status": "planned"
+    },
+    {
+      "id": "MSG-10",
+      "feature": "活动流",
+      "disposition": "core",
+      "source_test_id": "T-MSG-10",
+      "core_test_id": "TC-MSG-10",
+      "reason": "完整纳入原验收条目。",
+      "implementation_status": "planned"
+    },
+    {
+      "id": "MSG-11",
+      "feature": "问题卡片",
+      "disposition": "core",
+      "source_test_id": "T-MSG-11",
+      "core_test_id": "TC-MSG-11",
+      "reason": "完整纳入原验收条目。",
+      "implementation_status": "planned"
+    },
+    {
+      "id": "MSG-12",
+      "feature": "审批卡片",
+      "disposition": "core",
+      "source_test_id": "T-MSG-12",
+      "core_test_id": "TC-MSG-12",
+      "reason": "完整纳入原验收条目。",
+      "implementation_status": "planned"
+    },
+    {
+      "id": "MSG-13",
+      "feature": "本地权限卡片",
+      "disposition": "core",
+      "source_test_id": "T-MSG-13",
+      "core_test_id": "TC-MSG-13",
+      "reason": "纯 Windows 本机执行已纳入，权限卡片随实际执行身份完整保留。",
+      "implementation_status": "planned"
+    },
+    {
+      "id": "MSG-14",
+      "feature": "安全输入卡片",
+      "disposition": "core",
+      "source_test_id": "T-MSG-14",
+      "core_test_id": "TC-MSG-14",
+      "reason": "完整纳入原验收条目。",
+      "implementation_status": "planned"
+    },
+    {
+      "id": "MSG-15",
+      "feature": "普通表单卡片",
+      "disposition": "core",
+      "source_test_id": "T-MSG-15",
+      "core_test_id": "TC-MSG-15",
+      "reason": "完整纳入原验收条目。",
+      "implementation_status": "planned"
+    },
+    {
+      "id": "MSG-16",
+      "feature": "邮件草稿",
+      "disposition": "conditional",
+      "source_test_id": "T-MSG-16",
+      "core_test_id": "TC-MSG-16",
+      "reason": "首版本机核心未选择这一专用通道/代理；以后启用时连同依赖验收，不默认编造内部系统接入。",
+      "implementation_status": "planned",
+      "activation_condition": "交付配置包含邮件起草和发送工作流；验收最终确认版本、发送/丢弃、凭据及效果收据。",
+      "selection_status": "not_enabled_for_local_release"
+    },
+    {
+      "id": "MSG-17",
+      "feature": "消息草稿",
+      "disposition": "conditional",
+      "source_test_id": "T-MSG-17",
+      "core_test_id": "TC-MSG-17",
+      "reason": "首版本机核心未选择这一专用通道/代理；以后启用时连同依赖验收，不默认编造内部系统接入。",
+      "implementation_status": "planned",
+      "activation_condition": "交付配置包含招乎/Slack 等消息发送工作流；验收选定通道的编辑/发送/丢弃和去重。",
+      "selection_status": "not_enabled_for_local_release"
+    },
+    {
+      "id": "MSG-18",
+      "feature": "附件与成果卡",
+      "disposition": "core",
+      "source_test_id": "T-MSG-18",
+      "core_test_id": "TC-MSG-18",
+      "reason": "完整纳入原验收条目。",
+      "implementation_status": "planned"
+    },
+    {
+      "id": "MSG-19",
+      "feature": "错误通知",
+      "disposition": "core",
+      "source_test_id": "T-MSG-19",
+      "core_test_id": "TC-MSG-19",
+      "reason": "完整纳入原验收条目。",
+      "implementation_status": "planned"
+    },
+    {
+      "id": "MSG-20",
+      "feature": "全局搜索",
+      "disposition": "core",
+      "source_test_id": "T-MSG-20",
+      "core_test_id": "TC-MSG-20",
+      "reason": "完整纳入原验收条目。",
+      "implementation_status": "planned"
+    },
+    {
+      "id": "MSG-21",
+      "feature": "长历史与滚动",
+      "disposition": "core",
+      "source_test_id": "T-MSG-21",
+      "core_test_id": "TC-MSG-21",
+      "reason": "完整纳入原验收条目。",
+      "implementation_status": "planned"
+    },
+    {
+      "id": "MSG-22",
+      "feature": "未知卡片兼容",
+      "disposition": "core",
+      "source_test_id": "T-MSG-22",
+      "core_test_id": "TC-MSG-22",
+      "reason": "完整纳入原验收条目。",
+      "implementation_status": "planned"
+    },
+    {
+      "id": "FIL-01",
+      "feature": "上传限制",
+      "disposition": "core",
+      "source_test_id": "T-FIL-01",
+      "core_test_id": "TC-FIL-01",
+      "reason": "完整纳入原验收条目。",
+      "implementation_status": "planned"
+    },
+    {
+      "id": "FIL-02",
+      "feature": "格式处理",
+      "disposition": "core_subset",
+      "source_test_id": "T-FIL-02",
+      "core_test_id": "TC-FIL-02",
+      "reason": "原条目同时包含核心与可选内容，按当前核心验收分开处理。",
+      "implementation_status": "planned",
+      "core_acceptance": "核心支持图片、PDF、文本、Office、CSV/JSON/YAML、代码和受控 HTML；具体格式表/大小/加密和解析失败可验收。",
+      "deferred_part": "普通音视频语义理解、邮件专用容器和 ipynb 等额外格式；Teach 视频处理另属核心。"
+    },
+    {
+      "id": "FIL-03",
+      "feature": "上传完成再发送",
+      "disposition": "core",
+      "source_test_id": "T-FIL-03",
+      "core_test_id": "TC-FIL-03",
+      "reason": "完整纳入原验收条目。",
+      "implementation_status": "planned"
+    },
+    {
+      "id": "FIL-04",
+      "feature": "多端访问产物",
+      "disposition": "core_subset",
+      "source_test_id": "T-FIL-04",
+      "core_test_id": "TC-FIL-04",
+      "reason": "依据用户 2026-09-30 确认的纯 Windows 本机首版范围调整；保留完整远端目标。",
+      "implementation_status": "planned",
+      "core_acceptance": "本机 ArtifactStore 完整写入及校验后发布引用；同一 Host 的受认证连接可读取同版本，拒绝其他身份及越界路径。",
+      "deferred_part": "云端对象存储与跨设备下载。"
+    },
+    {
+      "id": "FIL-05",
+      "feature": "文件预览",
+      "disposition": "core",
+      "source_test_id": "T-FIL-05",
+      "core_test_id": "TC-FIL-05",
+      "reason": "完整纳入原验收条目。",
+      "implementation_status": "planned"
+    },
+    {
+      "id": "FIL-06",
+      "feature": "产物修订",
+      "disposition": "core",
+      "source_test_id": "T-FIL-06",
+      "core_test_id": "TC-FIL-06",
+      "reason": "完整纳入原验收条目。",
+      "implementation_status": "planned"
+    },
+    {
+      "id": "FIL-07",
+      "feature": "共享工作盘",
+      "disposition": "core_subset",
+      "source_test_id": "T-FIL-07",
+      "core_test_id": "TC-FIL-07",
+      "reason": "依据用户 2026-09-30 确认的纯 Windows 本机首版范围调整；保留完整远端目标。",
+      "implementation_status": "planned",
+      "core_acceptance": "同一用户 Bots 使用受控 Windows 工作根及授权项目，重启文件仍在；并发写入有锁/版本冲突，路径不假定 Linux /workspace。",
+      "deferred_part": "云端共享持久盘与跨节点挂载。"
+    },
+    {
+      "id": "FIL-08",
+      "feature": "外部链接",
+      "disposition": "core",
+      "source_test_id": "T-FIL-08",
+      "core_test_id": "TC-FIL-08",
+      "reason": "完整纳入原验收条目。",
+      "implementation_status": "planned"
+    },
+    {
+      "id": "FIL-09",
+      "feature": "文件来源与清理",
+      "disposition": "core",
+      "source_test_id": "T-FIL-09",
+      "core_test_id": "TC-FIL-09",
+      "reason": "完整纳入原验收条目。",
+      "implementation_status": "planned"
+    },
+    {
+      "id": "CPU-01",
+      "feature": "按用户持久电脑",
+      "disposition": "core_subset",
+      "source_test_id": "T-CPU-01",
+      "core_test_id": "TC-CPU-01",
+      "reason": "依据用户 2026-09-30 确认的纯 Windows 本机首版范围调整；保留完整远端目标。",
+      "implementation_status": "planned",
+      "core_acceptance": "原生 Worker 按有效用户身份使用独立数据根、浏览器 Session 和授权范围；同用户 Bots 共用工作文件/登录。验证 OS 用户与应用数据访问边界，不宣称提供独立 VM。",
+      "deferred_part": "云端用户级 VM/microVM 与集群租户隔离。"
+    },
+    {
+      "id": "CPU-02",
+      "feature": "Bot 独立屏幕",
+      "disposition": "core",
+      "source_test_id": "T-CPU-02",
+      "core_test_id": "TC-CPU-02",
+      "reason": "完整纳入原验收条目。",
+      "implementation_status": "planned",
+      "verification_blocker": "Windows G2A/G2B 未实测；现查 Child Session 单活动连接、UFO PiP 未核实、WinApp 桌面仲裁均不足以证明多 Bot 独立桌面并行。保留完整目标。",
+      "platform_scope_overrides": {
+        "macos": {
+          "scope": "browser_screens_only",
+          "acceptance": "不同Bot使用各自专用浏览器目标与画面；同一目标控制权排他，不抢其他目标；独立通用原生应用桌面不进入Mac首版。",
+          "basis": "platform_contract.macos_scope_override",
+          "original_disposition_and_implementation_status_preserved": true
+        }
+      }
+    },
+    {
+      "id": "CPU-03",
+      "feature": "共享浏览器登录",
+      "disposition": "core",
+      "source_test_id": "T-CPU-03",
+      "core_test_id": "TC-CPU-03",
+      "reason": "完整纳入原验收条目。",
+      "implementation_status": "planned",
+      "verification_blocker": "Windows G2A/G2B 未实测；现查 Child Session 单活动连接、UFO PiP 未核实、WinApp 桌面仲裁均不足以证明多 Bot 独立桌面并行。保留完整目标。"
+    },
+    {
+      "id": "CPU-04",
+      "feature": "浏览器与桌面应用",
+      "disposition": "core",
+      "source_test_id": "T-CPU-04",
+      "core_test_id": "TC-CPU-04",
+      "reason": "完整纳入原验收条目。",
+      "implementation_status": "planned",
+      "verification_blocker": "Windows G2A/G2B 未实测；现查 Child Session 单活动连接、UFO PiP 未核实、WinApp 桌面仲裁均不足以证明多 Bot 独立桌面并行。保留完整目标。",
+      "platform_scope_overrides": {
+        "macos": {
+          "scope": "browser_and_files_only",
+          "acceptance": "按目标提供浏览器语义操作、截图、点击、输入、滚动和拖拽，以及受控文件；Mac首版不开放通用原生应用桌面。",
+          "basis": "platform_contract.macos_scope_override",
+          "original_disposition_and_implementation_status_preserved": true
+        }
+      }
+    },
+    {
+      "id": "CPU-05",
+      "feature": "Shell 与后台命令",
+      "disposition": "core",
+      "source_test_id": "T-CPU-05",
+      "core_test_id": "TC-CPU-05",
+      "reason": "完整纳入原验收条目。",
+      "implementation_status": "planned",
+      "platform_scope_overrides": {
+        "macos": {
+          "scope": "arbitrary_commands_excluded",
+          "acceptance": "Mac Bot不提供任意Shell、后台命令或跨任务命令服务；正式能力声明与入口明确不可用，旧任务历史可读，未确认效果与维护护栏保留。该范围调整不禁用浏览器和文件的固定内部工具。",
+          "basis": "platform_contract.macos_scope_override",
+          "original_disposition_and_implementation_status_preserved": true
+        }
+      }
+    },
+    {
+      "id": "CPU-06",
+      "feature": "观看电脑",
+      "disposition": "core",
+      "source_test_id": "T-CPU-06",
+      "core_test_id": "TC-CPU-06",
+      "reason": "完整纳入原验收条目。",
+      "implementation_status": "planned"
+    },
+    {
+      "id": "CPU-07",
+      "feature": "人工接管",
+      "disposition": "core",
+      "source_test_id": "T-CPU-07",
+      "core_test_id": "TC-CPU-07",
+      "reason": "完整纳入原验收条目。",
+      "implementation_status": "planned"
+    },
+    {
+      "id": "CPU-08",
+      "feature": "登录与人工步骤",
+      "disposition": "core",
+      "source_test_id": "T-CPU-08",
+      "core_test_id": "TC-CPU-08",
+      "reason": "完整纳入原验收条目。",
+      "implementation_status": "planned"
+    },
+    {
+      "id": "CPU-09",
+      "feature": "查看器故障",
+      "disposition": "core",
+      "source_test_id": "T-CPU-09",
+      "core_test_id": "TC-CPU-09",
+      "reason": "完整纳入原验收条目。",
+      "implementation_status": "planned"
+    },
+    {
+      "id": "CPU-10",
+      "feature": "电脑休眠唤醒",
+      "disposition": "core_subset",
+      "source_test_id": "T-CPU-10",
+      "core_test_id": "TC-CPU-10",
+      "reason": "依据用户 2026-09-30 确认的纯 Windows 本机首版范围调整；保留完整远端目标。",
+      "implementation_status": "planned",
+      "core_acceptance": "本机 Worker 空闲挂起及恢复保留数据；宿主 Windows 休眠/关机时不承诺执行，唤醒后重新核对在途效果与漏跑。",
+      "deferred_part": "远端电脑独立于员工电脑的休眠/唤醒。"
+    },
+    {
+      "id": "CPU-11",
+      "feature": "电脑更新",
+      "disposition": "core_subset",
+      "source_test_id": "T-CPU-11",
+      "core_test_id": "TC-CPU-11",
+      "reason": "依据用户 2026-09-30 确认的纯 Windows 本机首版范围调整；保留完整远端目标。",
+      "implementation_status": "planned",
+      "core_acceptance": "更新本机电脑 Worker/浏览器组件前停止准入并安全交接，失败保留可恢复版本；模型与其他非冲突任务按依赖决定是否继续。",
+      "deferred_part": "云端 VM 镜像滚动更换。"
+    },
+    {
+      "id": "CPU-12",
+      "feature": "电脑恢复",
+      "disposition": "core_subset",
+      "source_test_id": "T-CPU-12",
+      "core_test_id": "TC-CPU-12",
+      "reason": "依据用户 2026-09-30 确认的纯 Windows 本机首版范围调整；保留完整远端目标。",
+      "implementation_status": "planned",
+      "core_acceptance": "从明确的本机恢复 manifest 恢复 Worker 数据、工作文件与浏览器状态；显示恢复点及可能丢失，不从旧文件推断外部动作未执行。",
+      "deferred_part": "云端持久盘恢复与异机恢复。"
+    },
+    {
+      "id": "CPU-13",
+      "feature": "电脑重置",
+      "disposition": "core_subset",
+      "source_test_id": "T-CPU-13",
+      "core_test_id": "TC-CPU-13",
+      "reason": "依据用户 2026-09-30 确认的纯 Windows 本机首版范围调整；保留完整远端目标。",
+      "implementation_status": "planned",
+      "core_acceptance": "工作环境/profile 重置与更新/恢复独立，确认影响后操作；不能把重置 Bot 工作环境扩大为重置用户 Windows 或其他项目。",
+      "deferred_part": "云电脑整机重建。"
+    },
+    {
+      "id": "CPU-14",
+      "feature": "软件安装与配置",
+      "disposition": "core_subset",
+      "source_test_id": "T-CPU-14",
+      "core_test_id": "TC-CPU-14",
+      "reason": "原条目同时包含核心与可选内容，按当前核心验收分开处理。",
+      "implementation_status": "planned",
+      "core_acceptance": "可授权安装任务所需工具，重建时由版本镜像/受控配置恢复；临时与持久数据边界明确。",
+      "deferred_part": "完整 Team Setup 产品及其管理界面。"
+    },
+    {
+      "id": "CPU-15",
+      "feature": "磁盘容量和 Disk Saver",
+      "disposition": "core_subset",
+      "source_test_id": "T-CPU-15",
+      "core_test_id": "TC-CPU-15",
+      "reason": "原条目同时包含核心与可选内容，按当前核心验收分开处理。",
+      "implementation_status": "planned",
+      "core_acceptance": "容量可查，盘满有告警及可审核清理路径，不静默删用户数据。",
+      "deferred_part": "专用 Disk Saver Bot 自动诊断产品。"
+    },
+    {
+      "id": "CPU-16",
+      "feature": "电脑状态诊断",
+      "disposition": "core",
+      "source_test_id": "T-CPU-16",
+      "core_test_id": "TC-CPU-16",
+      "reason": "完整纳入原验收条目。",
+      "implementation_status": "planned"
+    },
+    {
+      "id": "CPU-17",
+      "feature": "分辨率与输入映射",
+      "disposition": "core",
+      "source_test_id": "T-CPU-17",
+      "core_test_id": "TC-CPU-17",
+      "reason": "完整纳入原验收条目。",
+      "implementation_status": "planned",
+      "platform_scope_overrides": {
+        "macos": {
+          "scope": "browser_input_mapping_only",
+          "acceptance": "Mac首版验收专用浏览器画面缩放、DPI、全屏、中文输入与浏览器快捷键映射；不包含通用原生应用的键盘或IME输入。",
+          "basis": "platform_contract.macos_scope_override",
+          "original_disposition_and_implementation_status_preserved": true
+        }
+      }
+    },
+    {
+      "id": "CPU-18",
+      "feature": "跨端接管竞争",
+      "disposition": "core_subset",
+      "source_test_id": "T-CPU-18",
+      "core_test_id": "TC-CPU-18",
+      "reason": "依据用户 2026-09-30 确认的纯 Windows 本机首版范围调整；保留完整远端目标。",
+      "implementation_status": "planned",
+      "core_acceptance": "同一本机 Host 的两个受认证连接同时接管，仅一个有效 lease；旧连接、错误 surface 或旧 frame 不可输入。",
+      "deferred_part": "跨机器/手机接管。"
+    },
+    {
+      "id": "DEV-01",
+      "feature": "本地设备注册",
+      "disposition": "core_subset",
+      "source_test_id": "T-DEV-01",
+      "core_test_id": "TC-DEV-01",
+      "reason": "依据用户 2026-09-30 确认的纯 Windows 本机首版范围调整；保留完整远端目标。",
+      "implementation_status": "planned",
+      "core_acceptance": "本机 Host 与 Windows Worker 有稳定安装/会话身份、当前 OS 用户验证和撤销机制；不因回环地址而信任任意请求。",
+      "deferred_part": "远程设备注册目录、跨机器执行代理。"
+    },
+    {
+      "id": "DEV-02",
+      "feature": "本地执行策略",
+      "disposition": "core_subset",
+      "source_test_id": "T-DEV-02",
+      "core_test_id": "TC-DEV-02",
+      "reason": "依据用户 2026-09-30 确认的纯 Windows 本机首版范围调整；保留完整远端目标。",
+      "implementation_status": "planned",
+      "core_acceptance": "原生文件、Shell 和电脑操作按 Cmb 本机策略与任务授权执行，一次/始终/拒绝范围准确；不以本机部署默认获得整机权限。",
+      "deferred_part": "云端按远程设备下发策略。"
+    },
+    {
+      "id": "DEV-03",
+      "feature": "本地执行生命周期",
+      "disposition": "core_subset",
+      "source_test_id": "T-DEV-03",
+      "core_test_id": "TC-DEV-03",
+      "reason": "依据用户 2026-09-30 确认的纯 Windows 本机首版范围调整；保留完整远端目标。",
+      "implementation_status": "planned",
+      "core_acceptance": "Windows 锁屏/注销、Worker 崩溃、控制连接断开后相关任务等待或失败；恢复先核对未知效果，不重复动作。",
+      "deferred_part": "服务端到员工设备的远程桥与跨网络恢复。"
+    },
+    {
+      "id": "DEV-04",
+      "feature": "设备出口代理",
+      "disposition": "conditional",
+      "source_test_id": "T-DEV-04",
+      "core_test_id": "TC-DEV-04",
+      "reason": "首版本机核心未选择这一专用通道/代理；以后启用时连同依赖验收，不默认编造内部系统接入。",
+      "implementation_status": "planned",
+      "activation_condition": "目标网络要求通过员工设备出网，且选定此路径；基础预算未包含，启用后设备/策略撤销必须真正终止 tunnel。",
+      "selection_status": "not_enabled_for_local_release",
+      "requires_when_enabled": [
+        "DEV-01",
+        "DEV-03",
+        "DEV-05"
+      ]
+    },
+    {
+      "id": "DEV-05",
+      "feature": "管理员禁止出口",
+      "disposition": "conditional",
+      "source_test_id": "T-DEV-05",
+      "core_test_id": "TC-DEV-05",
+      "reason": "首版本机核心未选择这一专用通道/代理；以后启用时连同依赖验收，不默认编造内部系统接入。",
+      "implementation_status": "planned",
+      "activation_condition": "目标网络要求通过员工设备出网，且选定此路径；基础预算未包含，启用后设备/策略撤销必须真正终止 tunnel。",
+      "selection_status": "not_enabled_for_local_release",
+      "requires_when_enabled": [
+        "DEV-01",
+        "DEV-03"
+      ]
+    },
+    {
+      "id": "DEV-06",
+      "feature": "WebAuthn 代理",
+      "disposition": "conditional",
+      "source_test_id": "T-DEV-06",
+      "core_test_id": "TC-DEV-06",
+      "reason": "首版本机核心未选择这一专用通道/代理；以后启用时连同依赖验收，不默认编造内部系统接入。",
+      "implementation_status": "planned",
+      "activation_condition": "所选业务系统必须通过员工设备 passkey/硬件密钥登录，且没有可用的独立远端授权路径。",
+      "selection_status": "not_enabled_for_local_release",
+      "requires_when_enabled": [
+        "DEV-01",
+        "DEV-03"
+      ]
+    },
+    {
+      "id": "DEV-07",
+      "feature": "私有网络接入",
+      "disposition": "conditional",
+      "source_test_id": "T-DEV-07",
+      "core_test_id": "TC-DEV-07",
+      "reason": "首版本机核心未选择这一专用通道/代理；以后启用时连同依赖验收，不默认编造内部系统接入。",
+      "implementation_status": "planned",
+      "activation_condition": "目标系统的 Windows 受限执行身份、代理、证书或专用网络确实需要额外适配时纳入；当前未指定专用内网系统。",
+      "selection_status": "not_enabled_for_local_release"
+    },
+    {
+      "id": "DEV-08",
+      "feature": "本地 Bot 运行位置",
+      "disposition": "deferred",
+      "source_test_id": "T-DEV-08",
+      "core_test_id": null,
+      "reason": "当前首版默认由用户本机 Host 运行，macOS/Windows 本机能力仍属核心；此条延期的是新增运行位置选择、跨宿主迁移及完整 Local Bots 切换产品，不表示本机 Bot 延期。",
+      "implementation_status": "planned"
+    },
+    {
+      "id": "COL-01",
+      "feature": "Bot 直接通信",
+      "disposition": "core",
+      "source_test_id": "T-COL-01",
+      "core_test_id": "TC-COL-01",
+      "reason": "完整纳入原验收条目。",
+      "implementation_status": "planned"
+    },
+    {
+      "id": "COL-02",
+      "feature": "交接与结果返回",
+      "disposition": "core",
+      "source_test_id": "T-COL-02",
+      "core_test_id": "TC-COL-02",
+      "reason": "完整纳入原验收条目。",
+      "implementation_status": "planned"
+    },
+    {
+      "id": "COL-03",
+      "feature": "重复与失败投递",
+      "disposition": "core",
+      "source_test_id": "T-COL-03",
+      "core_test_id": "TC-COL-03",
+      "reason": "完整纳入原验收条目。",
+      "implementation_status": "planned"
+    },
+    {
+      "id": "COL-04",
+      "feature": "循环控制",
+      "disposition": "core",
+      "source_test_id": "T-COL-04",
+      "core_test_id": "TC-COL-04",
+      "reason": "完整纳入原验收条目。",
+      "implementation_status": "planned"
+    },
+    {
+      "id": "COL-05",
+      "feature": "创建群聊",
+      "disposition": "core",
+      "source_test_id": "T-COL-05",
+      "core_test_id": "TC-COL-05",
+      "reason": "完整纳入原验收条目。",
+      "implementation_status": "planned"
+    },
+    {
+      "id": "COL-06",
+      "feature": "群聊路由",
+      "disposition": "core",
+      "source_test_id": "T-COL-06",
+      "core_test_id": "TC-COL-06",
+      "reason": "完整纳入原验收条目。",
+      "implementation_status": "planned"
+    },
+    {
+      "id": "COL-07",
+      "feature": "发言范围",
+      "disposition": "core",
+      "source_test_id": "T-COL-07",
+      "core_test_id": "TC-COL-07",
+      "reason": "完整纳入原验收条目。",
+      "implementation_status": "planned"
+    },
+    {
+      "id": "COL-08",
+      "feature": "群聊停止与改口",
+      "disposition": "core",
+      "source_test_id": "T-COL-08",
+      "core_test_id": "TC-COL-08",
+      "reason": "完整纳入原验收条目。",
+      "implementation_status": "planned"
+    },
+    {
+      "id": "COL-09",
+      "feature": "协作附件",
+      "disposition": "core",
+      "source_test_id": "T-COL-09",
+      "core_test_id": "TC-COL-09",
+      "reason": "完整纳入原验收条目。",
+      "implementation_status": "planned"
+    },
+    {
+      "id": "COL-10",
+      "feature": "并行工作与资源冲突",
+      "disposition": "core",
+      "source_test_id": "T-COL-10",
+      "core_test_id": "TC-COL-10",
+      "reason": "完整纳入原验收条目。",
+      "implementation_status": "planned"
+    },
+    {
+      "id": "COL-11",
+      "feature": "任务型子代理",
+      "disposition": "core",
+      "source_test_id": "T-COL-11",
+      "core_test_id": "TC-COL-11",
+      "reason": "完整纳入原验收条目。",
+      "implementation_status": "planned"
+    },
+    {
+      "id": "COL-12",
+      "feature": "编码任务委托",
+      "disposition": "core_subset",
+      "source_test_id": "T-COL-12",
+      "core_test_id": "TC-COL-12",
+      "reason": "原条目同时包含核心与可选内容，按当前核心验收分开处理。",
+      "implementation_status": "planned",
+      "core_acceptance": "复用 Cmb 隔离工作区及 Coordinator/Workflow，执行/查询/补充/取消研发任务，返回 diff 和验证证据。",
+      "deferred_part": "独立云编码代理供应商产品；PR 外发按选定仓库连接器授权。"
+    },
+    {
+      "id": "MEM-01",
+      "feature": "长期职责记忆",
+      "disposition": "core",
+      "source_test_id": "T-MEM-01",
+      "core_test_id": "TC-MEM-01",
+      "reason": "完整纳入原验收条目。",
+      "implementation_status": "planned"
+    },
+    {
+      "id": "MEM-02",
+      "feature": "记忆作用域",
+      "disposition": "core_subset",
+      "source_test_id": "T-MEM-02",
+      "core_test_id": "TC-MEM-02",
+      "reason": "原条目同时包含核心与可选内容，按当前核心验收分开处理。",
+      "implementation_status": "planned",
+      "core_acceptance": "个人 Bot、用户共享和项目 scope 显式区分，跨用户检索隔离；共享电脑文件不虚称 Bot 级安全隔离。",
+      "deferred_part": "Team Bot 公共/成员私聊作用域产品。"
+    },
+    {
+      "id": "MEM-03",
+      "feature": "显式记忆",
+      "disposition": "core",
+      "source_test_id": "T-MEM-03",
+      "core_test_id": "TC-MEM-03",
+      "reason": "完整纳入原验收条目。",
+      "implementation_status": "planned"
+    },
+    {
+      "id": "MEM-04",
+      "feature": "自动整理",
+      "disposition": "core",
+      "source_test_id": "T-MEM-04",
+      "core_test_id": "TC-MEM-04",
+      "reason": "完整纳入原验收条目。",
+      "implementation_status": "planned"
+    },
+    {
+      "id": "MEM-05",
+      "feature": "纠错与删除",
+      "disposition": "core",
+      "source_test_id": "T-MEM-05",
+      "core_test_id": "TC-MEM-05",
+      "reason": "完整纳入原验收条目。",
+      "implementation_status": "planned"
+    },
+    {
+      "id": "MEM-06",
+      "feature": "时效管理",
+      "disposition": "core",
+      "source_test_id": "T-MEM-06",
+      "core_test_id": "TC-MEM-06",
+      "reason": "完整纳入原验收条目。",
+      "implementation_status": "planned"
+    },
+    {
+      "id": "MEM-07",
+      "feature": "协作上下文",
+      "disposition": "core",
+      "source_test_id": "T-MEM-07",
+      "core_test_id": "TC-MEM-07",
+      "reason": "完整纳入原验收条目。",
+      "implementation_status": "planned"
+    },
+    {
+      "id": "MEM-08",
+      "feature": "记忆更新冲突",
+      "disposition": "core",
+      "source_test_id": "T-MEM-08",
+      "core_test_id": "TC-MEM-08",
+      "reason": "完整纳入原验收条目。",
+      "implementation_status": "planned"
+    },
+    {
+      "id": "SKL-01",
+      "feature": "私有技能库",
+      "disposition": "core",
+      "source_test_id": "T-SKL-01",
+      "core_test_id": "TC-SKL-01",
+      "reason": "完整纳入原验收条目。",
+      "implementation_status": "planned"
+    },
+    {
+      "id": "SKL-02",
+      "feature": "技能定义",
+      "disposition": "core",
+      "source_test_id": "T-SKL-02",
+      "core_test_id": "TC-SKL-02",
+      "reason": "完整纳入原验收条目。",
+      "implementation_status": "planned"
+    },
+    {
+      "id": "SKL-03",
+      "feature": "插件技能同步",
+      "disposition": "core",
+      "source_test_id": "T-SKL-03",
+      "core_test_id": "TC-SKL-03",
+      "reason": "完整纳入原验收条目。",
+      "implementation_status": "planned"
+    },
+    {
+      "id": "SKL-04",
+      "feature": "开始教学",
+      "disposition": "core",
+      "source_test_id": "T-SKL-04",
+      "core_test_id": "TC-SKL-04",
+      "reason": "完整纳入原验收条目。",
+      "implementation_status": "planned"
+    },
+    {
+      "id": "SKL-05",
+      "feature": "录制行为",
+      "disposition": "core",
+      "source_test_id": "T-SKL-05",
+      "core_test_id": "TC-SKL-05",
+      "reason": "完整纳入原验收条目。",
+      "implementation_status": "planned",
+      "platform_scope_overrides": {
+        "macos": {
+          "scope": "browser_recording_only",
+          "acceptance": "Mac首版记录专用浏览器可见画面和操作事件，最多10分钟，不录麦克风，中途可保存或丢弃；不包含通用原生应用录制。",
+          "basis": "platform_contract.macos_scope_override",
+          "original_disposition_and_implementation_status_preserved": true
+        }
+      }
+    },
+    {
+      "id": "SKL-06",
+      "feature": "教学隐私",
+      "disposition": "core",
+      "source_test_id": "T-SKL-06",
+      "core_test_id": "TC-SKL-06",
+      "reason": "完整纳入原验收条目。",
+      "implementation_status": "planned"
+    },
+    {
+      "id": "SKL-07",
+      "feature": "生成技能草稿",
+      "disposition": "core",
+      "source_test_id": "T-SKL-07",
+      "core_test_id": "TC-SKL-07",
+      "reason": "完整纳入原验收条目。",
+      "implementation_status": "planned"
+    },
+    {
+      "id": "SKL-08",
+      "feature": "技能审阅与修改",
+      "disposition": "core",
+      "source_test_id": "T-SKL-08",
+      "core_test_id": "TC-SKL-08",
+      "reason": "完整纳入原验收条目。",
+      "implementation_status": "planned"
+    },
+    {
+      "id": "SKL-09",
+      "feature": "技能真实验证",
+      "disposition": "core",
+      "source_test_id": "T-SKL-09",
+      "core_test_id": "TC-SKL-09",
+      "reason": "完整纳入原验收条目。",
+      "implementation_status": "planned"
+    },
+    {
+      "id": "SKL-10",
+      "feature": "学习任务恢复",
+      "disposition": "core",
+      "source_test_id": "T-SKL-10",
+      "core_test_id": "TC-SKL-10",
+      "reason": "完整纳入原验收条目。",
+      "implementation_status": "planned"
+    },
+    {
+      "id": "SKL-11",
+      "feature": "技能转例程",
+      "disposition": "core",
+      "source_test_id": "T-SKL-11",
+      "core_test_id": "TC-SKL-11",
+      "reason": "完整纳入原验收条目。",
+      "implementation_status": "planned"
+    },
+    {
+      "id": "SKL-12",
+      "feature": "团队技能发布",
+      "disposition": "deferred",
+      "source_test_id": "T-SKL-12",
+      "core_test_id": null,
+      "reason": "团队发布与高级复合触发延期；用户技能复用及单一定时/事件机制必须。",
+      "implementation_status": "planned"
+    },
+    {
+      "id": "AUT-01",
+      "feature": "自然语言创建",
+      "disposition": "core",
+      "source_test_id": "T-AUT-01",
+      "core_test_id": "TC-AUT-01",
+      "reason": "完整纳入原验收条目。",
+      "implementation_status": "planned"
+    },
+    {
+      "id": "AUT-02",
+      "feature": "编辑入口",
+      "disposition": "core",
+      "source_test_id": "T-AUT-02",
+      "core_test_id": "TC-AUT-02",
+      "reason": "完整纳入原验收条目。",
+      "implementation_status": "planned"
+    },
+    {
+      "id": "AUT-03",
+      "feature": "计划与时区",
+      "disposition": "core",
+      "source_test_id": "T-AUT-03",
+      "core_test_id": "TC-AUT-03",
+      "reason": "完整纳入原验收条目。",
+      "implementation_status": "planned"
+    },
+    {
+      "id": "AUT-04",
+      "feature": "创建不立即执行",
+      "disposition": "core",
+      "source_test_id": "T-AUT-04",
+      "core_test_id": "TC-AUT-04",
+      "reason": "完整纳入原验收条目。",
+      "implementation_status": "planned"
+    },
+    {
+      "id": "AUT-05",
+      "feature": "暂停与恢复",
+      "disposition": "core",
+      "source_test_id": "T-AUT-05",
+      "core_test_id": "TC-AUT-05",
+      "reason": "完整纳入原验收条目。",
+      "implementation_status": "planned"
+    },
+    {
+      "id": "AUT-06",
+      "feature": "测试例程",
+      "disposition": "core",
+      "source_test_id": "T-AUT-06",
+      "core_test_id": "TC-AUT-06",
+      "reason": "完整纳入原验收条目。",
+      "implementation_status": "planned"
+    },
+    {
+      "id": "AUT-07",
+      "feature": "执行历史",
+      "disposition": "core",
+      "source_test_id": "T-AUT-07",
+      "core_test_id": "TC-AUT-07",
+      "reason": "完整纳入原验收条目。",
+      "implementation_status": "planned"
+    },
+    {
+      "id": "AUT-08",
+      "feature": "删除例程",
+      "disposition": "core",
+      "source_test_id": "T-AUT-08",
+      "core_test_id": "TC-AUT-08",
+      "reason": "完整纳入原验收条目。",
+      "implementation_status": "planned"
+    },
+    {
+      "id": "AUT-09",
+      "feature": "例程数量",
+      "disposition": "core",
+      "source_test_id": "T-AUT-09",
+      "core_test_id": "TC-AUT-09",
+      "reason": "完整纳入原验收条目。",
+      "implementation_status": "planned"
+    },
+    {
+      "id": "AUT-10",
+      "feature": "Slack 触发",
+      "disposition": "conditional",
+      "source_test_id": "T-AUT-10",
+      "core_test_id": "TC-AUT-10",
+      "reason": "首版本机核心未选择这一专用通道/代理；以后启用时连同依赖验收，不默认编造内部系统接入。",
+      "implementation_status": "planned",
+      "activation_condition": "交付配置包含 Slack 事件源。",
+      "selection_status": "not_enabled_for_local_release"
+    },
+    {
+      "id": "AUT-11",
+      "feature": "GitHub 触发",
+      "disposition": "conditional",
+      "source_test_id": "T-AUT-11",
+      "core_test_id": "TC-AUT-11",
+      "reason": "首版本机核心未选择这一专用通道/代理；以后启用时连同依赖验收，不默认编造内部系统接入。",
+      "implementation_status": "planned",
+      "activation_condition": "交付配置包含 GitHub 事件源。",
+      "selection_status": "not_enabled_for_local_release"
+    },
+    {
+      "id": "AUT-12",
+      "feature": "Linear/Sentry/PagerDuty 触发",
+      "disposition": "conditional",
+      "source_test_id": "T-AUT-12",
+      "core_test_id": "TC-AUT-12",
+      "reason": "首版本机核心未选择这一专用通道/代理；以后启用时连同依赖验收，不默认编造内部系统接入。",
+      "implementation_status": "planned",
+      "activation_condition": "交付配置包含 Linear、Sentry 或 PagerDuty；只对实际选中的 provider 完整验收。",
+      "selection_status": "not_enabled_for_local_release"
+    },
+    {
+      "id": "AUT-13",
+      "feature": "邮件触发",
+      "disposition": "conditional",
+      "source_test_id": "T-AUT-13",
+      "core_test_id": "TC-AUT-13",
+      "reason": "首版本机核心未选择这一专用通道/代理；以后启用时连同依赖验收，不默认编造内部系统接入。",
+      "implementation_status": "planned",
+      "activation_condition": "交付配置包含邮件事件触发；只读邮件或起草邮件不自动纳入邮件触发。",
+      "selection_status": "not_enabled_for_local_release"
+    },
+    {
+      "id": "AUT-14",
+      "feature": "Webhook 触发",
+      "disposition": "core_subset",
+      "source_test_id": "T-AUT-14",
+      "core_test_id": "TC-AUT-14",
+      "reason": "依据用户 2026-09-30 确认的纯 Windows 本机首版范围调整；保留完整远端目标。",
+      "implementation_status": "planned",
+      "core_acceptance": "通用 Webhook 提供回环 URL 与鉴权，落盘、去重、触发和限流可验收；200 仅表示接收；明确外部系统默认不可访问。",
+      "deferred_part": "公网/LAN 入口、自动隧道和远端接收服务。"
+    },
+    {
+      "id": "AUT-15",
+      "feature": "触发密钥管理",
+      "disposition": "core",
+      "source_test_id": "T-AUT-15",
+      "core_test_id": "TC-AUT-15",
+      "reason": "完整纳入原验收条目。",
+      "implementation_status": "planned"
+    },
+    {
+      "id": "AUT-16",
+      "feature": "复合触发",
+      "disposition": "deferred",
+      "source_test_id": "T-AUT-16",
+      "core_test_id": null,
+      "reason": "团队发布与高级复合触发延期；用户技能复用及单一定时/事件机制必须。",
+      "implementation_status": "planned"
+    },
+    {
+      "id": "AUT-17",
+      "feature": "断电与漏触发恢复",
+      "disposition": "core",
+      "source_test_id": "T-AUT-17",
+      "core_test_id": "TC-AUT-17",
+      "reason": "完整纳入原验收条目。",
+      "implementation_status": "planned"
+    },
+    {
+      "id": "AUT-18",
+      "feature": "用户久未使用",
+      "disposition": "core_subset",
+      "source_test_id": "T-AUT-18",
+      "core_test_id": "TC-AUT-18",
+      "reason": "原条目同时包含核心与可选内容，按当前核心验收分开处理。",
+      "implementation_status": "planned",
+      "core_acceptance": "本机 Host 不因窗口关闭停止；宿主不可用时不执行，恢复按漏跑策略；长期无人使用的暂停策略可解释。",
+      "deferred_part": "完全照搬原版未公开的闲置期限；具体期限在部署配置冻结。"
+    },
+    {
+      "id": "AUT-19",
+      "feature": "触发风暴与用量",
+      "disposition": "core",
+      "source_test_id": "T-AUT-19",
+      "core_test_id": "TC-AUT-19",
+      "reason": "完整纳入原验收条目。",
+      "implementation_status": "planned"
+    },
+    {
+      "id": "PLG-01",
+      "feature": "插件发现",
+      "disposition": "core_subset",
+      "source_test_id": "T-PLG-01",
+      "core_test_id": "TC-PLG-01",
+      "reason": "原条目同时包含核心与可选内容，按当前核心验收分开处理。",
+      "implementation_status": "planned",
+      "core_acceptance": "在 Cmb 现有目录/插件管理中发现、配置、安装、移除选定插件，支持查看能力及禁用状态。",
+      "deferred_part": "公开市场、精选、作者发现及全部原版连接器。"
+    },
+    {
+      "id": "PLG-02",
+      "feature": "授权生命周期",
+      "disposition": "core",
+      "source_test_id": "T-PLG-02",
+      "core_test_id": "TC-PLG-02",
+      "reason": "完整纳入原验收条目。",
+      "implementation_status": "planned"
+    },
+    {
+      "id": "PLG-03",
+      "feature": "账号范围",
+      "disposition": "core_subset",
+      "source_test_id": "T-PLG-03",
+      "core_test_id": "TC-PLG-03",
+      "reason": "原条目同时包含核心与可选内容，按当前核心验收分开处理。",
+      "implementation_status": "planned",
+      "core_acceptance": "连接器安装属于用户账户，可供该用户 Bots 在有效权限内使用；不跨用户混用。",
+      "deferred_part": "Team Bot 成员个人账号 Allow 授权。"
+    },
+    {
+      "id": "PLG-04",
+      "feature": "多账号差异",
+      "disposition": "core_subset",
+      "source_test_id": "T-PLG-04",
+      "core_test_id": "TC-PLG-04",
+      "reason": "原条目同时包含核心与可选内容，按当前核心验收分开处理。",
+      "implementation_status": "planned",
+      "core_acceptance": "所选 provider 按实际账号能力显示入口，账号归属、撤销和切换不串用。",
+      "deferred_part": "全供应商多账号组合覆盖。"
+    },
+    {
+      "id": "PLG-05",
+      "feature": "工具级控制",
+      "disposition": "core",
+      "source_test_id": "T-PLG-05",
+      "core_test_id": "TC-PLG-05",
+      "reason": "完整纳入原验收条目。",
+      "implementation_status": "planned"
+    },
+    {
+      "id": "PLG-06",
+      "feature": "远程与 stdio MCP",
+      "disposition": "core_subset",
+      "source_test_id": "T-PLG-06",
+      "core_test_id": "TC-PLG-06",
+      "reason": "依据用户 2026-09-30 确认的纯 Windows 本机首版范围调整；保留完整远端目标。",
+      "implementation_status": "planned",
+      "core_acceptance": "HTTP MCP 和本机 stdio MCP 均经 Host 授权调用并可在 UI 关闭后运行；执行身份和工作路径明确。",
+      "deferred_part": "云端托管/跨设备 stdio 路由。"
+    },
+    {
+      "id": "PLG-07",
+      "feature": "凭据保管",
+      "disposition": "core_subset",
+      "source_test_id": "T-PLG-07",
+      "core_test_id": "TC-PLG-07",
+      "reason": "依据用户 2026-09-30 确认的纯 Windows 本机首版范围调整；保留完整远端目标。",
+      "implementation_status": "planned",
+      "core_acceptance": "插件凭据通过本机受限 SecretProvider 保存、刷新和撤回，模型与普通 Shell 环境不取得无关密钥。",
+      "deferred_part": "服务端 KMS/Vault 与集群密钥托管。"
+    },
+    {
+      "id": "PLG-08",
+      "feature": "插件依赖变量",
+      "disposition": "core",
+      "source_test_id": "T-PLG-08",
+      "core_test_id": "TC-PLG-08",
+      "reason": "完整纳入原验收条目。",
+      "implementation_status": "planned"
+    },
+    {
+      "id": "PLG-09",
+      "feature": "第三方权限限制",
+      "disposition": "core",
+      "source_test_id": "T-PLG-09",
+      "core_test_id": "TC-PLG-09",
+      "reason": "完整纳入原验收条目。",
+      "implementation_status": "planned"
+    },
+    {
+      "id": "PLG-10",
+      "feature": "技能与资源",
+      "disposition": "core",
+      "source_test_id": "T-PLG-10",
+      "core_test_id": "TC-PLG-10",
+      "reason": "完整纳入原验收条目。",
+      "implementation_status": "planned"
+    },
+    {
+      "id": "PLG-11",
+      "feature": "断开与卸载",
+      "disposition": "core",
+      "source_test_id": "T-PLG-11",
+      "core_test_id": "TC-PLG-11",
+      "reason": "完整纳入原验收条目。",
+      "implementation_status": "planned"
+    },
+    {
+      "id": "APR-01",
+      "feature": "自动审核",
+      "disposition": "core",
+      "source_test_id": "T-APR-01",
+      "core_test_id": "TC-APR-01",
+      "reason": "完整纳入原验收条目。",
+      "implementation_status": "planned"
+    },
+    {
+      "id": "APR-02",
+      "feature": "允许一次/始终/拒绝",
+      "disposition": "core",
+      "source_test_id": "T-APR-02",
+      "core_test_id": "TC-APR-02",
+      "reason": "完整纳入原验收条目。",
+      "implementation_status": "planned"
+    },
+    {
+      "id": "APR-03",
+      "feature": "规则优先级",
+      "disposition": "core",
+      "source_test_id": "T-APR-03",
+      "core_test_id": "TC-APR-03",
+      "reason": "完整纳入原验收条目。",
+      "implementation_status": "planned"
+    },
+    {
+      "id": "APR-04",
+      "feature": "精确动作绑定",
+      "disposition": "core",
+      "source_test_id": "T-APR-04",
+      "core_test_id": "TC-APR-04",
+      "reason": "完整纳入原验收条目。",
+      "implementation_status": "planned"
+    },
+    {
+      "id": "APR-05",
+      "feature": "多端竞争",
+      "disposition": "core_subset",
+      "source_test_id": "T-APR-05",
+      "core_test_id": "TC-APR-05",
+      "reason": "原条目同时包含核心与可选内容，按当前核心验收分开处理。",
+      "implementation_status": "planned",
+      "core_acceptance": "同一本机 Host 两个受认证连接竞争审批，CAS 只接受一个结果，另一连接显示已处理。",
+      "deferred_part": "手机卡片交互。"
+    },
+    {
+      "id": "APR-06",
+      "feature": "过期与改口",
+      "disposition": "core",
+      "source_test_id": "T-APR-06",
+      "core_test_id": "TC-APR-06",
+      "reason": "完整纳入原验收条目。",
+      "implementation_status": "planned"
+    },
+    {
+      "id": "APR-07",
+      "feature": "动作结果不明",
+      "disposition": "core",
+      "source_test_id": "T-APR-07",
+      "core_test_id": "TC-APR-07",
+      "reason": "完整纳入原验收条目。",
+      "implementation_status": "planned"
+    },
+    {
+      "id": "APR-08",
+      "feature": "真实目标解析",
+      "disposition": "core",
+      "source_test_id": "T-APR-08",
+      "core_test_id": "TC-APR-08",
+      "reason": "完整纳入原验收条目。",
+      "implementation_status": "planned"
+    },
+    {
+      "id": "APR-09",
+      "feature": "接管互斥",
+      "disposition": "core",
+      "source_test_id": "T-APR-09",
+      "core_test_id": "TC-APR-09",
+      "reason": "完整纳入原验收条目。",
+      "implementation_status": "planned"
+    },
+    {
+      "id": "APR-10",
+      "feature": "秘密录入",
+      "disposition": "core",
+      "source_test_id": "T-APR-10",
+      "core_test_id": "TC-APR-10",
+      "reason": "完整纳入原验收条目。",
+      "implementation_status": "planned"
+    },
+    {
+      "id": "APR-11",
+      "feature": "Bot 秘密管理",
+      "disposition": "core",
+      "source_test_id": "T-APR-11",
+      "core_test_id": "TC-APR-11",
+      "reason": "完整纳入原验收条目。",
+      "implementation_status": "planned"
+    },
+    {
+      "id": "APR-12",
+      "feature": "安全页面填充",
+      "disposition": "core",
+      "source_test_id": "T-APR-12",
+      "core_test_id": "TC-APR-12",
+      "reason": "完整纳入原验收条目。",
+      "implementation_status": "planned"
+    },
+    {
+      "id": "APR-13",
+      "feature": "模板与复制秘密",
+      "disposition": "core_subset",
+      "source_test_id": "T-APR-13",
+      "core_test_id": "TC-APR-13",
+      "reason": "原条目同时包含核心与可选内容，按当前核心验收分开处理。",
+      "implementation_status": "planned",
+      "core_acceptance": "复制 Bot/导出配置不包含秘密；共享电脑已有登录与新 Bot 凭据复制清楚区分。",
+      "deferred_part": "模板市场与 Team Bot 资源发布。"
+    },
+    {
+      "id": "APR-14",
+      "feature": "规则不是权限",
+      "disposition": "core",
+      "source_test_id": "T-APR-14",
+      "core_test_id": "TC-APR-14",
+      "reason": "完整纳入原验收条目。",
+      "implementation_status": "planned"
+    },
+    {
+      "id": "APR-15",
+      "feature": "权限撤回",
+      "disposition": "core",
+      "source_test_id": "T-APR-15",
+      "core_test_id": "TC-APR-15",
+      "reason": "完整纳入原验收条目。",
+      "implementation_status": "planned"
+    },
+    {
+      "id": "APR-16",
+      "feature": "审计前置",
+      "disposition": "core",
+      "source_test_id": "T-APR-16",
+      "core_test_id": "TC-APR-16",
+      "reason": "完整纳入原验收条目。",
+      "implementation_status": "planned"
+    },
+    {
+      "id": "SHR-01",
+      "feature": "创建模板",
+      "disposition": "deferred",
+      "source_test_id": "T-SHR-01",
+      "core_test_id": null,
+      "reason": "可独立选择的端、共享产品或未确认扩展，不纳入桌面核心。",
+      "implementation_status": "planned"
+    },
+    {
+      "id": "SHR-02",
+      "feature": "分享范围",
+      "disposition": "deferred",
+      "source_test_id": "T-SHR-02",
+      "core_test_id": null,
+      "reason": "可独立选择的端、共享产品或未确认扩展，不纳入桌面核心。",
+      "implementation_status": "planned"
+    },
+    {
+      "id": "SHR-03",
+      "feature": "模板预览",
+      "disposition": "deferred",
+      "source_test_id": "T-SHR-03",
+      "core_test_id": null,
+      "reason": "可独立选择的端、共享产品或未确认扩展，不纳入桌面核心。",
+      "implementation_status": "planned"
+    },
+    {
+      "id": "SHR-04",
+      "feature": "从模板创建",
+      "disposition": "deferred",
+      "source_test_id": "T-SHR-04",
+      "core_test_id": null,
+      "reason": "可独立选择的端、共享产品或未确认扩展，不纳入桌面核心。",
+      "implementation_status": "planned"
+    },
+    {
+      "id": "SHR-05",
+      "feature": "模板更新",
+      "disposition": "deferred",
+      "source_test_id": "T-SHR-05",
+      "core_test_id": null,
+      "reason": "可独立选择的端、共享产品或未确认扩展，不纳入桌面核心。",
+      "implementation_status": "planned"
+    },
+    {
+      "id": "SHR-06",
+      "feature": "撤回与链接失效",
+      "disposition": "deferred",
+      "source_test_id": "T-SHR-06",
+      "core_test_id": null,
+      "reason": "可独立选择的端、共享产品或未确认扩展，不纳入桌面核心。",
+      "implementation_status": "planned"
+    },
+    {
+      "id": "SHR-07",
+      "feature": "市场浏览",
+      "disposition": "deferred",
+      "source_test_id": "T-SHR-07",
+      "core_test_id": null,
+      "reason": "可独立选择的端、共享产品或未确认扩展，不纳入桌面核心。",
+      "implementation_status": "planned"
+    },
+    {
+      "id": "SHR-08",
+      "feature": "依赖补齐",
+      "disposition": "deferred",
+      "source_test_id": "T-SHR-08",
+      "core_test_id": null,
+      "reason": "可独立选择的端、共享产品或未确认扩展，不纳入桌面核心。",
+      "implementation_status": "planned"
+    },
+    {
+      "id": "TEAM-01",
+      "feature": "创建团队 Bot",
+      "disposition": "deferred",
+      "source_test_id": "T-TEAM-01",
+      "core_test_id": null,
+      "reason": "可独立选择的端、共享产品或未确认扩展，不纳入桌面核心。",
+      "implementation_status": "planned"
+    },
+    {
+      "id": "TEAM-02",
+      "feature": "个人转团队副本",
+      "disposition": "deferred",
+      "source_test_id": "T-TEAM-02",
+      "core_test_id": null,
+      "reason": "可独立选择的端、共享产品或未确认扩展，不纳入桌面核心。",
+      "implementation_status": "planned"
+    },
+    {
+      "id": "TEAM-03",
+      "feature": "发布与撤回",
+      "disposition": "deferred",
+      "source_test_id": "T-TEAM-03",
+      "core_test_id": null,
+      "reason": "可独立选择的端、共享产品或未确认扩展，不纳入桌面核心。",
+      "implementation_status": "planned"
+    },
+    {
+      "id": "TEAM-04",
+      "feature": "发现与链接",
+      "disposition": "deferred",
+      "source_test_id": "T-TEAM-04",
+      "core_test_id": null,
+      "reason": "可独立选择的端、共享产品或未确认扩展，不纳入桌面核心。",
+      "implementation_status": "planned"
+    },
+    {
+      "id": "TEAM-05",
+      "feature": "成员私聊",
+      "disposition": "deferred",
+      "source_test_id": "T-TEAM-05",
+      "core_test_id": null,
+      "reason": "可独立选择的端、共享产品或未确认扩展，不纳入桌面核心。",
+      "implementation_status": "planned"
+    },
+    {
+      "id": "TEAM-06",
+      "feature": "团队共同记忆",
+      "disposition": "deferred",
+      "source_test_id": "T-TEAM-06",
+      "core_test_id": null,
+      "reason": "可独立选择的端、共享产品或未确认扩展，不纳入桌面核心。",
+      "implementation_status": "planned"
+    },
+    {
+      "id": "TEAM-07",
+      "feature": "发布者资源",
+      "disposition": "deferred",
+      "source_test_id": "T-TEAM-07",
+      "core_test_id": null,
+      "reason": "可独立选择的端、共享产品或未确认扩展，不纳入桌面核心。",
+      "implementation_status": "planned"
+    },
+    {
+      "id": "TEAM-08",
+      "feature": "个人连接器授权",
+      "disposition": "deferred",
+      "source_test_id": "T-TEAM-08",
+      "core_test_id": null,
+      "reason": "可独立选择的端、共享产品或未确认扩展，不纳入桌面核心。",
+      "implementation_status": "planned"
+    },
+    {
+      "id": "TEAM-09",
+      "feature": "凭据选择",
+      "disposition": "deferred",
+      "source_test_id": "T-TEAM-09",
+      "core_test_id": null,
+      "reason": "可独立选择的端、共享产品或未确认扩展，不纳入桌面核心。",
+      "implementation_status": "planned"
+    },
+    {
+      "id": "TEAM-10",
+      "feature": "电脑选择",
+      "disposition": "deferred",
+      "source_test_id": "T-TEAM-10",
+      "core_test_id": null,
+      "reason": "可独立选择的端、共享产品或未确认扩展，不纳入桌面核心。",
+      "implementation_status": "planned"
+    },
+    {
+      "id": "TEAM-11",
+      "feature": "团队场景审批",
+      "disposition": "deferred",
+      "source_test_id": "T-TEAM-11",
+      "core_test_id": null,
+      "reason": "可独立选择的端、共享产品或未确认扩展，不纳入桌面核心。",
+      "implementation_status": "planned"
+    },
+    {
+      "id": "TEAM-12",
+      "feature": "Slack 接入",
+      "disposition": "deferred",
+      "source_test_id": "T-TEAM-12",
+      "core_test_id": null,
+      "reason": "可独立选择的端、共享产品或未确认扩展，不纳入桌面核心。",
+      "implementation_status": "planned"
+    },
+    {
+      "id": "TEAM-13",
+      "feature": "成员群聊",
+      "disposition": "deferred",
+      "source_test_id": "T-TEAM-13",
+      "core_test_id": null,
+      "reason": "可独立选择的端、共享产品或未确认扩展，不纳入桌面核心。",
+      "implementation_status": "planned"
+    },
+    {
+      "id": "TEAM-14",
+      "feature": "用量归属",
+      "disposition": "deferred",
+      "source_test_id": "T-TEAM-14",
+      "core_test_id": null,
+      "reason": "可独立选择的端、共享产品或未确认扩展，不纳入桌面核心。",
+      "implementation_status": "planned"
+    },
+    {
+      "id": "TEAM-15",
+      "feature": "管理权限",
+      "disposition": "deferred",
+      "source_test_id": "T-TEAM-15",
+      "core_test_id": null,
+      "reason": "可独立选择的端、共享产品或未确认扩展，不纳入桌面核心。",
+      "implementation_status": "planned"
+    },
+    {
+      "id": "TEAM-16",
+      "feature": "删除影响",
+      "disposition": "deferred",
+      "source_test_id": "T-TEAM-16",
+      "core_test_id": null,
+      "reason": "可独立选择的端、共享产品或未确认扩展，不纳入桌面核心。",
+      "implementation_status": "planned"
+    },
+    {
+      "id": "TEAM-17",
+      "feature": "手机使用",
+      "disposition": "deferred",
+      "source_test_id": "T-TEAM-17",
+      "core_test_id": null,
+      "reason": "可独立选择的端、共享产品或未确认扩展，不纳入桌面核心。",
+      "implementation_status": "planned"
+    },
+    {
+      "id": "TEAM-18",
+      "feature": "管理员分发",
+      "disposition": "deferred",
+      "source_test_id": "T-TEAM-18",
+      "core_test_id": null,
+      "reason": "可独立选择的端、共享产品或未确认扩展，不纳入桌面核心。",
+      "implementation_status": "planned"
+    },
+    {
+      "id": "VOC-01",
+      "feature": "听写",
+      "disposition": "deferred",
+      "source_test_id": "T-VOC-01",
+      "core_test_id": null,
+      "reason": "可独立选择的端、共享产品或未确认扩展，不纳入桌面核心。",
+      "implementation_status": "planned"
+    },
+    {
+      "id": "VOC-02",
+      "feature": "实时语音",
+      "disposition": "deferred",
+      "source_test_id": "T-VOC-02",
+      "core_test_id": null,
+      "reason": "可独立选择的端、共享产品或未确认扩展，不纳入桌面核心。",
+      "implementation_status": "planned"
+    },
+    {
+      "id": "VOC-03",
+      "feature": "语音设置",
+      "disposition": "deferred",
+      "source_test_id": "T-VOC-03",
+      "core_test_id": null,
+      "reason": "可独立选择的端、共享产品或未确认扩展，不纳入桌面核心。",
+      "implementation_status": "planned"
+    },
+    {
+      "id": "VOC-04",
+      "feature": "跨页面通话",
+      "disposition": "deferred",
+      "source_test_id": "T-VOC-04",
+      "core_test_id": null,
+      "reason": "可独立选择的端、共享产品或未确认扩展，不纳入桌面核心。",
+      "implementation_status": "planned"
+    },
+    {
+      "id": "VOC-05",
+      "feature": "通话转写",
+      "disposition": "deferred",
+      "source_test_id": "T-VOC-05",
+      "core_test_id": null,
+      "reason": "可独立选择的端、共享产品或未确认扩展，不纳入桌面核心。",
+      "implementation_status": "planned"
+    },
+    {
+      "id": "VOC-06",
+      "feature": "通话后续任务",
+      "disposition": "deferred",
+      "source_test_id": "T-VOC-06",
+      "core_test_id": null,
+      "reason": "可独立选择的端、共享产品或未确认扩展，不纳入桌面核心。",
+      "implementation_status": "planned"
+    },
+    {
+      "id": "VOC-07",
+      "feature": "语音便笺",
+      "disposition": "deferred",
+      "source_test_id": "T-VOC-07",
+      "core_test_id": null,
+      "reason": "可独立选择的端、共享产品或未确认扩展，不纳入桌面核心。",
+      "implementation_status": "planned"
+    },
+    {
+      "id": "VOC-08",
+      "feature": "通话限制与故障",
+      "disposition": "deferred",
+      "source_test_id": "T-VOC-08",
+      "core_test_id": null,
+      "reason": "可独立选择的端、共享产品或未确认扩展，不纳入桌面核心。",
+      "implementation_status": "planned"
+    },
+    {
+      "id": "UI-01",
+      "feature": "Bot 工作区入口",
+      "disposition": "core",
+      "source_test_id": "T-UI-01",
+      "core_test_id": "TC-UI-01",
+      "reason": "完整纳入原验收条目。",
+      "implementation_status": "planned"
+    },
+    {
+      "id": "UI-02",
+      "feature": "Bot 详情",
+      "disposition": "core_subset",
+      "source_test_id": "T-UI-02",
+      "core_test_id": "TC-UI-02",
+      "reason": "原条目同时包含核心与可选内容，按当前核心验收分开处理。",
+      "implementation_status": "planned",
+      "core_acceptance": "Bot 设置、电脑/例程、私有技能和文件/秘密的真实入口及返回路径按观察与能力组织；不强制把逻辑能力全部堆成详情页签。",
+      "deferred_part": "公开分享和 Team Bot 入口。"
+    },
+    {
+      "id": "UI-03",
+      "feature": "状态区分",
+      "disposition": "core",
+      "source_test_id": "T-UI-03",
+      "core_test_id": "TC-UI-03",
+      "reason": "完整纳入原验收条目。",
+      "implementation_status": "planned"
+    },
+    {
+      "id": "UI-04",
+      "feature": "通知行为",
+      "disposition": "core",
+      "source_test_id": "T-UI-04",
+      "core_test_id": "TC-UI-04",
+      "reason": "完整纳入原验收条目。",
+      "implementation_status": "planned"
+    },
+    {
+      "id": "UI-05",
+      "feature": "全局快捷键",
+      "disposition": "core_subset",
+      "source_test_id": "T-UI-05",
+      "core_test_id": "TC-UI-05",
+      "reason": "原条目同时包含核心与可选内容，按当前核心验收分开处理。",
+      "implementation_status": "planned",
+      "core_acceptance": "发送/换行、切换、查找、聚焦、设置及选定桌面平台必要快捷键可用，不抢中文输入法/远程电脑按键。",
+      "deferred_part": "全部边缘快捷键和已延期入口的键位。"
+    },
+    {
+      "id": "UI-06",
+      "feature": "主题与语言",
+      "disposition": "core_subset",
+      "source_test_id": "T-UI-06",
+      "core_test_id": "TC-UI-06",
+      "reason": "原条目同时包含核心与可选内容，按当前核心验收分开处理。",
+      "implementation_status": "planned",
+      "core_acceptance": "继承 Cmb 主题、语言及字体；中文/英文长文案、时区、浅深主题布局可用。",
+      "deferred_part": "复刻原版完整多语言目录。"
+    },
+    {
+      "id": "UI-07",
+      "feature": "焦点和可访问性",
+      "disposition": "core",
+      "source_test_id": "T-UI-07",
+      "core_test_id": "TC-UI-07",
+      "reason": "完整纳入原验收条目。",
+      "implementation_status": "planned"
+    },
+    {
+      "id": "UI-08",
+      "feature": "菜单细节",
+      "disposition": "core",
+      "source_test_id": "T-UI-08",
+      "core_test_id": "TC-UI-08",
+      "reason": "完整纳入原验收条目。",
+      "implementation_status": "planned"
+    },
+    {
+      "id": "UI-09",
+      "feature": "错误与离线态",
+      "disposition": "core",
+      "source_test_id": "T-UI-09",
+      "core_test_id": "TC-UI-09",
+      "reason": "完整纳入原验收条目。",
+      "implementation_status": "planned"
+    },
+    {
+      "id": "UI-10",
+      "feature": "视觉一致性",
+      "disposition": "core_subset",
+      "source_test_id": "T-UI-10",
+      "core_test_id": "TC-UI-10",
+      "reason": "原条目同时包含核心与可选内容，按当前核心验收分开处理。",
+      "implementation_status": "planned",
+      "core_acceptance": "对选定桌面平台的核心页面、卡片、空态、loading/error/recovery 做原版路径和截图对照；品牌差异记录。",
+      "deferred_part": "所有可选页面及像素级全量复制。"
+    },
+    {
+      "id": "UI-11",
+      "feature": "应用更新",
+      "disposition": "core_subset",
+      "source_test_id": "T-UI-11",
+      "core_test_id": "TC-UI-11",
+      "reason": "依据用户 2026-09-30 确认的纯 Windows 本机首版范围调整；保留完整远端目标。",
+      "implementation_status": "planned",
+      "core_acceptance": "Windows UI 与 Host 更新有协议兼容及安全交接，无法热切换时明确等待；不丢任务/审批、不启动两个 owner。",
+      "deferred_part": "云服务保持运行的客户端独立升级体验。"
+    },
+    {
+      "id": "UI-12",
+      "feature": "关于与帮助",
+      "disposition": "core",
+      "source_test_id": "T-UI-12",
+      "core_test_id": "TC-UI-12",
+      "reason": "完整纳入原验收条目。",
+      "implementation_status": "planned"
+    },
+    {
+      "id": "MOB-01",
+      "feature": "平台与登录",
+      "disposition": "deferred",
+      "source_test_id": "T-MOB-01",
+      "core_test_id": null,
+      "reason": "可独立选择的端、共享产品或未确认扩展，不纳入桌面核心。",
+      "implementation_status": "planned"
+    },
+    {
+      "id": "MOB-02",
+      "feature": "Bot 与群聊",
+      "disposition": "deferred",
+      "source_test_id": "T-MOB-02",
+      "core_test_id": null,
+      "reason": "可独立选择的端、共享产品或未确认扩展，不纳入桌面核心。",
+      "implementation_status": "planned"
+    },
+    {
+      "id": "MOB-03",
+      "feature": "消息草稿",
+      "disposition": "deferred",
+      "source_test_id": "T-MOB-03",
+      "core_test_id": null,
+      "reason": "可独立选择的端、共享产品或未确认扩展，不纳入桌面核心。",
+      "implementation_status": "planned"
+    },
+    {
+      "id": "MOB-04",
+      "feature": "照片和文件",
+      "disposition": "deferred",
+      "source_test_id": "T-MOB-04",
+      "core_test_id": null,
+      "reason": "可独立选择的端、共享产品或未确认扩展，不纳入桌面核心。",
+      "implementation_status": "planned"
+    },
+    {
+      "id": "MOB-05",
+      "feature": "系统分享",
+      "disposition": "deferred",
+      "source_test_id": "T-MOB-05",
+      "core_test_id": null,
+      "reason": "可独立选择的端、共享产品或未确认扩展，不纳入桌面核心。",
+      "implementation_status": "planned"
+    },
+    {
+      "id": "MOB-06",
+      "feature": "电脑观看和接管",
+      "disposition": "deferred",
+      "source_test_id": "T-MOB-06",
+      "core_test_id": null,
+      "reason": "可独立选择的端、共享产品或未确认扩展，不纳入桌面核心。",
+      "implementation_status": "planned"
+    },
+    {
+      "id": "MOB-07",
+      "feature": "审批与安全输入",
+      "disposition": "deferred",
+      "source_test_id": "T-MOB-07",
+      "core_test_id": null,
+      "reason": "可独立选择的端、共享产品或未确认扩展，不纳入桌面核心。",
+      "implementation_status": "planned"
+    },
+    {
+      "id": "MOB-08",
+      "feature": "草稿发送",
+      "disposition": "deferred",
+      "source_test_id": "T-MOB-08",
+      "core_test_id": null,
+      "reason": "可独立选择的端、共享产品或未确认扩展，不纳入桌面核心。",
+      "implementation_status": "planned"
+    },
+    {
+      "id": "MOB-09",
+      "feature": "听写/语音/便笺",
+      "disposition": "deferred",
+      "source_test_id": "T-MOB-09",
+      "core_test_id": null,
+      "reason": "可独立选择的端、共享产品或未确认扩展，不纳入桌面核心。",
+      "implementation_status": "planned"
+    },
+    {
+      "id": "MOB-10",
+      "feature": "例程管理",
+      "disposition": "deferred",
+      "source_test_id": "T-MOB-10",
+      "core_test_id": null,
+      "reason": "可独立选择的端、共享产品或未确认扩展，不纳入桌面核心。",
+      "implementation_status": "planned"
+    },
+    {
+      "id": "MOB-11",
+      "feature": "插件和设置",
+      "disposition": "deferred",
+      "source_test_id": "T-MOB-11",
+      "core_test_id": null,
+      "reason": "可独立选择的端、共享产品或未确认扩展，不纳入桌面核心。",
+      "implementation_status": "planned"
+    },
+    {
+      "id": "MOB-12",
+      "feature": "推送与深链接",
+      "disposition": "deferred",
+      "source_test_id": "T-MOB-12",
+      "core_test_id": null,
+      "reason": "可独立选择的端、共享产品或未确认扩展，不纳入桌面核心。",
+      "implementation_status": "planned"
+    },
+    {
+      "id": "MOB-13",
+      "feature": "退出与账号删除",
+      "disposition": "deferred",
+      "source_test_id": "T-MOB-13",
+      "core_test_id": null,
+      "reason": "可独立选择的端、共享产品或未确认扩展，不纳入桌面核心。",
+      "implementation_status": "planned"
+    },
+    {
+      "id": "MOB-14",
+      "feature": "电脑维护限制",
+      "disposition": "deferred",
+      "source_test_id": "T-MOB-14",
+      "core_test_id": null,
+      "reason": "可独立选择的端、共享产品或未确认扩展，不纳入桌面核心。",
+      "implementation_status": "planned"
+    },
+    {
+      "id": "ADM-01",
+      "feature": "启用与访问范围",
+      "disposition": "core_subset",
+      "source_test_id": "T-ADM-01",
+      "core_test_id": "TC-ADM-01",
+      "reason": "依据用户 2026-09-30 确认的纯 Windows 本机首版范围调整；保留完整远端目标。",
+      "implementation_status": "planned",
+      "core_acceptance": "沿用现有 Cmb 用户/组织有效策略，禁用阻止新任务和动作，保留数据；不新增集中管理平台。",
+      "deferred_part": "新建组织开通和分发管理。"
+    },
+    {
+      "id": "ADM-02",
+      "feature": "SSO/SCIM",
+      "disposition": "core_subset",
+      "source_test_id": "T-ADM-02",
+      "core_test_id": "TC-ADM-02",
+      "reason": "依据用户 2026-09-30 确认的纯 Windows 本机首版范围调整；保留完整远端目标。",
+      "implementation_status": "planned",
+      "core_acceptance": "复用已有 Cmb 身份及过期/退出处理，绑定本机 OS 会话；工作浏览器业务登录独立。",
+      "deferred_part": "新建 SSO/SCIM 及集中生命周期服务。"
+    },
+    {
+      "id": "ADM-03",
+      "feature": "成员和组织角色",
+      "disposition": "core_subset",
+      "source_test_id": "T-ADM-03",
+      "core_test_id": "TC-ADM-03",
+      "reason": "依据用户 2026-09-30 确认的纯 Windows 本机首版范围调整；保留完整远端目标。",
+      "implementation_status": "planned",
+      "core_acceptance": "限定本机 Host/Worker 的用户身份和控制范围，UI/工具不得访问另一用户的数据；当前不新增运营管理员跨机权限。",
+      "deferred_part": "集群运营角色与多租户管理。"
+    },
+    {
+      "id": "ADM-04",
+      "feature": "能力策略",
+      "disposition": "core_subset",
+      "source_test_id": "T-ADM-04",
+      "core_test_id": "TC-ADM-04",
+      "reason": "依据用户 2026-09-30 确认的纯 Windows 本机首版范围调整；保留完整远端目标。",
+      "implementation_status": "planned",
+      "core_acceptance": "Host capability manifest 区分已实现/未就绪/不支持的能力，协议及 UI 一致；原生多屏未通过不能报告可用。",
+      "deferred_part": "云端管理策略分发。"
+    },
+    {
+      "id": "ADM-05",
+      "feature": "团队/组规则",
+      "disposition": "deferred",
+      "source_test_id": "T-ADM-05",
+      "core_test_id": null,
+      "reason": "高级组/网络策略、Team Setup/Secrets、批量管理、闲置回收、内容遥测及独立 Admin API 延期；基础身份/网络路径/审计/维护另行保留。",
+      "implementation_status": "planned"
+    },
+    {
+      "id": "ADM-06",
+      "feature": "Auto-review 强制",
+      "disposition": "core_subset",
+      "source_test_id": "T-ADM-06",
+      "core_test_id": "TC-ADM-06",
+      "reason": "原条目同时包含核心与可选内容，按当前核心验收分开处理。",
+      "implementation_status": "planned",
+      "core_acceptance": "复用当前 Cmb 有效强制审核与个人更严格规则；本机 Host 同样执行，审核失败不默认放行。",
+      "deferred_part": "完整企业规则分发门户。"
+    },
+    {
+      "id": "ADM-07",
+      "feature": "连接器策略",
+      "disposition": "core_subset",
+      "source_test_id": "T-ADM-07",
+      "core_test_id": "TC-ADM-07",
+      "reason": "依据用户 2026-09-30 确认的纯 Windows 本机首版范围调整；保留完整远端目标。",
+      "implementation_status": "planned",
+      "core_acceptance": "现有插件在 Host 有启停/撤权及执行前复核，禁用插件不等于阻断网站；新专用连接器尚未选择。",
+      "deferred_part": "新建集中连接器策略服务。"
+    },
+    {
+      "id": "ADM-08",
+      "feature": "网络策略",
+      "disposition": "deferred",
+      "source_test_id": "T-ADM-08",
+      "core_test_id": null,
+      "reason": "高级组/网络策略、Team Setup/Secrets、批量管理、闲置回收、内容遥测及独立 Admin API 延期；基础身份/网络路径/审计/维护另行保留。",
+      "implementation_status": "planned"
+    },
+    {
+      "id": "ADM-09",
+      "feature": "TLS/代理兼容",
+      "disposition": "core_subset",
+      "source_test_id": "T-ADM-09",
+      "core_test_id": "TC-ADM-09",
+      "reason": "依据用户 2026-09-30 确认的纯 Windows 本机首版范围调整；保留完整远端目标。",
+      "implementation_status": "planned",
+      "core_acceptance": "用户配置的模型/MCP/目标网页的 TLS、代理及证书链可检查；回环画面和命名管道独立诊断。",
+      "deferred_part": "K8s Ingress、集群 WS/SSE 与服务网格接入。"
+    },
+    {
+      "id": "ADM-10",
+      "feature": "Team Setup 清单",
+      "disposition": "deferred",
+      "source_test_id": "T-ADM-10",
+      "core_test_id": null,
+      "reason": "高级组/网络策略、Team Setup/Secrets、批量管理、闲置回收、内容遥测及独立 Admin API 延期；基础身份/网络路径/审计/维护另行保留。",
+      "implementation_status": "planned"
+    },
+    {
+      "id": "ADM-11",
+      "feature": "Setup 超时和失败",
+      "disposition": "deferred",
+      "source_test_id": "T-ADM-11",
+      "core_test_id": null,
+      "reason": "高级组/网络策略、Team Setup/Secrets、批量管理、闲置回收、内容遥测及独立 Admin API 延期；基础身份/网络路径/审计/维护另行保留。",
+      "implementation_status": "planned"
+    },
+    {
+      "id": "ADM-12",
+      "feature": "Team Secrets",
+      "disposition": "deferred",
+      "source_test_id": "T-ADM-12",
+      "core_test_id": null,
+      "reason": "高级组/网络策略、Team Setup/Secrets、批量管理、闲置回收、内容遥测及独立 Admin API 延期；基础身份/网络路径/审计/维护另行保留。",
+      "implementation_status": "planned"
+    },
+    {
+      "id": "ADM-13",
+      "feature": "多团队秘密边界",
+      "disposition": "deferred",
+      "source_test_id": "T-ADM-13",
+      "core_test_id": null,
+      "reason": "高级组/网络策略、Team Setup/Secrets、批量管理、闲置回收、内容遥测及独立 Admin API 延期；基础身份/网络路径/审计/维护另行保留。",
+      "implementation_status": "planned"
+    },
+    {
+      "id": "ADM-14",
+      "feature": "批量电脑操作",
+      "disposition": "deferred",
+      "source_test_id": "T-ADM-14",
+      "core_test_id": null,
+      "reason": "高级组/网络策略、Team Setup/Secrets、批量管理、闲置回收、内容遥测及独立 Admin API 延期；基础身份/网络路径/审计/维护另行保留。",
+      "implementation_status": "planned"
+    },
+    {
+      "id": "ADM-15",
+      "feature": "批量操作幂等",
+      "disposition": "deferred",
+      "source_test_id": "T-ADM-15",
+      "core_test_id": null,
+      "reason": "高级组/网络策略、Team Setup/Secrets、批量管理、闲置回收、内容遥测及独立 Admin API 延期；基础身份/网络路径/审计/维护另行保留。",
+      "implementation_status": "planned"
+    },
+    {
+      "id": "ADM-16",
+      "feature": "空闲电脑回收",
+      "disposition": "deferred",
+      "source_test_id": "T-ADM-16",
+      "core_test_id": null,
+      "reason": "高级组/网络策略、Team Setup/Secrets、批量管理、闲置回收、内容遥测及独立 Admin API 延期；基础身份/网络路径/审计/维护另行保留。",
+      "implementation_status": "planned"
+    },
+    {
+      "id": "ADM-17",
+      "feature": "控制面审计",
+      "disposition": "core_subset",
+      "source_test_id": "T-ADM-17",
+      "core_test_id": "TC-ADM-17",
+      "reason": "依据用户 2026-09-30 确认的纯 Windows 本机首版范围调整；保留完整远端目标。",
+      "implementation_status": "planned",
+      "core_acceptance": "本机控制操作有 actor/time/requestId，可由当前授权用户查询、导出脱敏诊断。",
+      "deferred_part": "集中运维审计门户与跨节点汇聚。"
+    },
+    {
+      "id": "ADM-18",
+      "feature": "动作记录",
+      "disposition": "core",
+      "source_test_id": "T-ADM-18",
+      "core_test_id": "TC-ADM-18",
+      "reason": "完整纳入原验收条目。",
+      "implementation_status": "planned"
+    },
+    {
+      "id": "ADM-19",
+      "feature": "OTel 与内容导出",
+      "disposition": "deferred",
+      "source_test_id": "T-ADM-19",
+      "core_test_id": null,
+      "reason": "高级组/网络策略、Team Setup/Secrets、批量管理、闲置回收、内容遥测及独立 Admin API 延期；基础身份/网络路径/审计/维护另行保留。",
+      "implementation_status": "planned"
+    },
+    {
+      "id": "ADM-20",
+      "feature": "用量和预算",
+      "disposition": "core_subset",
+      "source_test_id": "T-ADM-20",
+      "core_test_id": "TC-ADM-20",
+      "reason": "原条目同时包含核心与可选内容，按当前核心验收分开处理。",
+      "implementation_status": "planned",
+      "core_acceptance": "模型/任务/Bot/用户用量可归因，准入和运行中预算、并发及磁盘限制生效。",
+      "deferred_part": "商业周额度/额外购买及 Team Bot 频道计费。"
+    },
+    {
+      "id": "ADM-21",
+      "feature": "Admin API",
+      "disposition": "deferred",
+      "source_test_id": "T-ADM-21",
+      "core_test_id": null,
+      "reason": "高级组/网络策略、Team Setup/Secrets、批量管理、闲置回收、内容遥测及独立 Admin API 延期；基础身份/网络路径/审计/维护另行保留。",
+      "implementation_status": "planned"
+    },
+    {
+      "id": "ADM-22",
+      "feature": "数据保留与删除",
+      "disposition": "core_subset",
+      "source_test_id": "T-ADM-22",
+      "core_test_id": "TC-ADM-22",
+      "reason": "依据用户 2026-09-30 确认的纯 Windows 本机首版范围调整；保留完整远端目标。",
+      "implementation_status": "planned",
+      "core_acceptance": "本机退出、账号停用、Bot 删除、工作环境重置和数据清理各有明确范围；恢复不复活已删除数据。",
+      "deferred_part": "集群成员生命周期及云电脑 terminate/delete-data 管理。"
+    },
+    {
+      "id": "OPS-01",
+      "feature": "无客户端执行",
+      "disposition": "core_subset",
+      "source_test_id": "T-OPS-01",
+      "core_test_id": "TC-OPS-01",
+      "reason": "依据用户 2026-09-30 确认的纯 Windows 本机首版范围调整；保留完整远端目标。",
+      "implementation_status": "planned",
+      "core_acceptance": "本机 Host 独立于窗口，UI 关闭后已接收任务/计划/协作继续；关机、休眠、注销明确不可持续，恢复按持久状态处理。",
+      "deferred_part": "员工本机关闭后由远程服务器继续执行。"
+    },
+    {
+      "id": "OPS-02",
+      "feature": "原子任务接收",
+      "disposition": "core",
+      "source_test_id": "T-OPS-02",
+      "core_test_id": "TC-OPS-02",
+      "reason": "完整纳入原验收条目。",
+      "implementation_status": "planned"
+    },
+    {
+      "id": "OPS-03",
+      "feature": "跨进程租约",
+      "disposition": "core_subset",
+      "source_test_id": "T-OPS-03",
+      "core_test_id": "TC-OPS-03",
+      "reason": "依据用户 2026-09-30 确认的纯 Windows 本机首版范围调整；保留完整远端目标。",
+      "implementation_status": "planned",
+      "core_acceptance": "同一本机 Host 的单一数据权威、持久 lease/fence 与最终执行校验防双启动；时钟跳变和休眠增加代次并核对在途动作。",
+      "deferred_part": "跨节点数据库时间和分布式 worker 租约。"
+    },
+    {
+      "id": "OPS-04",
+      "feature": "故障恢复",
+      "disposition": "core_subset",
+      "source_test_id": "T-OPS-04",
+      "core_test_id": "TC-OPS-04",
+      "reason": "依据用户 2026-09-30 确认的纯 Windows 本机首版范围调整；保留完整远端目标。",
+      "implementation_status": "planned",
+      "core_acceptance": "本机进程崩溃、模型/连接器断网及 Worker 失联后按 checkpoint/收据恢复，unknown 不盲重放。",
+      "deferred_part": "K8s 节点迁移和远端控制网络分区演练。"
+    },
+    {
+      "id": "OPS-05",
+      "feature": "备份与恢复演练",
+      "disposition": "core",
+      "source_test_id": "T-OPS-05",
+      "core_test_id": "TC-OPS-05",
+      "reason": "完整纳入原验收条目。",
+      "implementation_status": "planned"
+    },
+    {
+      "id": "OPS-06",
+      "feature": "升级与回滚",
+      "disposition": "core",
+      "source_test_id": "T-OPS-06",
+      "core_test_id": "TC-OPS-06",
+      "reason": "完整纳入原验收条目。",
+      "implementation_status": "planned"
+    },
+    {
+      "id": "OPS-07",
+      "feature": "容量与公平调度",
+      "disposition": "core_subset",
+      "source_test_id": "T-OPS-07",
+      "core_test_id": "TC-OPS-07",
+      "reason": "依据用户 2026-09-30 确认的纯 Windows 本机首版范围调整；保留完整远端目标。",
+      "implementation_status": "planned",
+      "core_acceptance": "同用户 Bot 公平调度，模型、原生输入桌面、页面、内存、磁盘分别限额；资源等待不得死锁。",
+      "deferred_part": "多租户公平调度与集群容量治理。"
+    },
+    {
+      "id": "OPS-08",
+      "feature": "端到端可观测",
+      "disposition": "core",
+      "source_test_id": "T-OPS-08",
+      "core_test_id": "TC-OPS-08",
+      "reason": "完整纳入原验收条目。",
+      "implementation_status": "planned"
+    },
+    {
+      "id": "OPS-09",
+      "feature": "全平台分发",
+      "disposition": "core_subset",
+      "source_test_id": "T-OPS-09",
+      "core_test_id": "TC-OPS-09",
+      "reason": "依据用户 2026-09-30 确认的纯 Windows 本机首版范围调整；保留完整远端目标。",
+      "implementation_status": "planned",
+      "core_acceptance": "纯 Windows 原生安装、运行、升级及恢复；无 WSL2/Linux 容器依赖，公共 Host 内核可独立构建；现有 Cmb 平台不回归。",
+      "deferred_part": "新增其他客户端平台及生产 K8s 发布。"
+    },
+    {
+      "id": "OPS-10",
+      "feature": "任务能力评测",
+      "disposition": "core",
+      "source_test_id": "T-OPS-10",
+      "core_test_id": "TC-OPS-10",
+      "reason": "完整纳入原验收条目。",
+      "implementation_status": "planned"
+    },
+    {
+      "id": "OPS-11",
+      "feature": "现有功能回归",
+      "disposition": "core",
+      "source_test_id": "T-OPS-11",
+      "core_test_id": "TC-OPS-11",
+      "reason": "完整纳入原验收条目。",
+      "implementation_status": "planned"
+    },
+    {
+      "id": "OPS-12",
+      "feature": "数据迁移",
+      "disposition": "core",
+      "source_test_id": "T-OPS-12",
+      "core_test_id": "TC-OPS-12",
+      "reason": "完整纳入原验收条目。",
+      "implementation_status": "planned"
+    },
+    {
+      "id": "OBS-01",
+      "feature": "跨用户共享房间",
+      "disposition": "deferred",
+      "source_test_id": "T-OBS-01",
+      "core_test_id": null,
+      "reason": "可独立选择的端、共享产品或未确认扩展，不纳入桌面核心。",
+      "implementation_status": "planned"
+    },
+    {
+      "id": "OBS-02",
+      "feature": "Agent Network 图",
+      "disposition": "deferred",
+      "source_test_id": "T-OBS-02",
+      "core_test_id": null,
+      "reason": "可独立选择的端、共享产品或未确认扩展，不纳入桌面核心。",
+      "implementation_status": "planned"
+    },
+    {
+      "id": "OBS-03",
+      "feature": "广播消息",
+      "disposition": "deferred",
+      "source_test_id": "T-OBS-03",
+      "core_test_id": null,
+      "reason": "可独立选择的端、共享产品或未确认扩展，不纳入桌面核心。",
+      "implementation_status": "planned"
+    },
+    {
+      "id": "OBS-04",
+      "feature": "侧边栏异步任务入口",
+      "disposition": "core_subset",
+      "source_test_id": "T-OBS-04",
+      "core_test_id": "TC-OBS-04",
+      "reason": "原条目同时包含核心与可选内容，按当前核心验收分开处理。",
+      "implementation_status": "planned",
+      "core_acceptance": "所有后台 Shell/子任务的状态、停止和结果必须可追踪，从会话活动流可以进入。",
+      "deferred_part": "原版未冻结的独立侧边栏异步任务入口；不据此宣称其界面已观察。"
+    },
+    {
+      "id": "OBS-05",
+      "feature": "技能发布目标管理",
+      "disposition": "deferred",
+      "source_test_id": "T-OBS-05",
+      "core_test_id": null,
+      "reason": "可独立选择的端、共享产品或未确认扩展，不纳入桌面核心。",
+      "implementation_status": "planned"
+    },
+    {
+      "id": "OBS-06",
+      "feature": "当前 Local Bots",
+      "disposition": "deferred",
+      "source_test_id": "T-OBS-06",
+      "core_test_id": null,
+      "reason": "可独立选择的端、共享产品或未确认扩展，不纳入桌面核心。",
+      "implementation_status": "planned"
+    },
+    {
+      "id": "OBS-07",
+      "feature": "Team Bot 私聊资源混用",
+      "disposition": "deferred",
+      "source_test_id": "T-OBS-07",
+      "core_test_id": null,
+      "reason": "可独立选择的端、共享产品或未确认扩展，不纳入桌面核心。",
+      "implementation_status": "planned"
+    },
+    {
+      "id": "OBS-08",
+      "feature": "模型生成媒体工具",
+      "disposition": "deferred",
+      "source_test_id": "T-OBS-08",
+      "core_test_id": null,
+      "reason": "可独立选择的端、共享产品或未确认扩展，不纳入桌面核心。",
+      "implementation_status": "planned"
+    }
+  ],
+  "supplemental_requirements": [
+    {
+      "id": "CORE-01",
+      "feature": "范围与能力闭合",
+      "acceptance": "260 项、混合条目、条件选择与延期入口按 capability manifest 一致；服务端拒绝延期调用。",
+      "related_requirements": [
+        "ACC-04",
+        "UI-02",
+        "OPS-09"
+      ],
+      "finding": "R01",
+      "journey": "CJ11",
+      "test_id": "T-CORE-01",
+      "status": "planned"
+    },
+    {
+      "id": "CORE-02",
+      "feature": "checkpoint 权威存储",
+      "acceptance": "跨 Host 恢复 checkpoint/pending writes/interrupt，重复输入不重复进入模型；完成消息与产物持久。 严格提交屏障与维护 flush 分开，恢复保留精确 checkpoint 与分支 headRevision。 首版本机 SQLite 单一事务权威；跨节点适配延期。",
+      "related_requirements": [
+        "OPS-02",
+        "OPS-03",
+        "OPS-04",
+        "MSG-02"
+      ],
+      "finding": "R02",
+      "journey": "CJ07",
+      "test_id": "T-CORE-02",
+      "status": "planned"
+    },
+    {
+      "id": "CORE-03",
+      "feature": "Bot 级并发和等待",
+      "acceptance": "同 Bot 跨私聊/群/例程不双运行；等待释放资源且回答无丢失；协作等待循环可收束。 等待保留执行分支的 continuation 所有权；群聊各参与 Bot 使用独立 graph，共用 transcript 顺序。",
+      "related_requirements": [
+        "COL-04",
+        "COL-10",
+        "OPS-07"
+      ],
+      "finding": "R03",
+      "journey": "CJ02",
+      "test_id": "T-CORE-03",
+      "status": "planned"
+    },
+    {
+      "id": "CORE-04",
+      "feature": "取消与效果结算",
+      "acceptance": "排队/等待也可取消；只取消所属委托；未知效果未核对前不能换 ID 重做。 directionRevision 按目标运行/分支绑定，不因无关会话新消息一律废止批准。",
+      "related_requirements": [
+        "MSG-05",
+        "COL-02",
+        "APR-07"
+      ],
+      "finding": "R03",
+      "journey": "CJ07",
+      "test_id": "T-CORE-04",
+      "status": "planned"
+    },
+    {
+      "id": "CORE-05",
+      "feature": "最终动作 fence 与接管",
+      "acceptance": "旧 Host/自动化连接不能继续派发；接管排空同屏输入、暂停敏感观察，再发控制票据。 Windows 按实际输入域校验，而非仅 Bot 逻辑屏幕；覆盖前台截图回退和隐式输入，见 WIN-04/05。",
+      "related_requirements": [
+        "OPS-03",
+        "CPU-07",
+        "APR-09"
+      ],
+      "finding": "R04",
+      "journey": "CJ06",
+      "test_id": "T-CORE-05",
+      "status": "planned"
+    },
+    {
+      "id": "CORE-06",
+      "feature": "共享电脑真实边界",
+      "acceptance": "用户间隔离，个人 Bots 共享登录/文件；控制凭据不在 Agent Shell；跨工具限制有真实执行边界。 本机按OS/应用身份核验数据与进程权限，不宣称独立VM；原生通用多屏仍为G2B必过门槛。 本机 Shell 不可读 Host 控制状态/密钥或冒充高权限管道客户端，沙箱回退不突破该边界，见 WIN-06。",
+      "related_requirements": [
+        "CPU-01",
+        "CPU-03",
+        "APR-14",
+        "ADM-07"
+      ],
+      "finding": "R07",
+      "journey": "CJ08",
+      "test_id": "T-CORE-06",
+      "status": "planned"
+    },
+    {
+      "id": "CORE-07",
+      "feature": "同步水位与身份撤销",
+      "acceptance": "snapshot S 与事件 >S 无缝；乱序提交、重连及撤销不漏状态、不产生新 Run。 回答早于等待登记或晚于登记均不得丢唤醒；snapshot 水位不代替 checkpoint headRevision。",
+      "related_requirements": [
+        "MSG-03",
+        "MSG-21",
+        "ACC-06"
+      ],
+      "finding": "R05",
+      "journey": "CJ11",
+      "test_id": "T-CORE-07",
+      "status": "planned"
+    },
+    {
+      "id": "CORE-08",
+      "feature": "自动化确定语义",
+      "acceptance": "DST/漏跑/暂停/更新/复制规则固定；发生去重且旧事件不能覆盖新业务状态。",
+      "related_requirements": [
+        "AUT-03",
+        "AUT-17",
+        "BOT-10"
+      ],
+      "finding": "R06",
+      "journey": "CJ04",
+      "test_id": "T-CORE-08",
+      "status": "planned"
+    },
+    {
+      "id": "CORE-09",
+      "feature": "共享技能库及版本",
+      "acceptance": "私有技能为用户库；Run 固定版本，升级不扩大权限，撤回与在途执行有明示结算。",
+      "related_requirements": [
+        "SKL-01",
+        "SKL-09",
+        "SKL-11"
+      ],
+      "finding": "R09",
+      "journey": "CJ03",
+      "test_id": "T-CORE-09",
+      "status": "planned"
+    },
+    {
+      "id": "CORE-10",
+      "feature": "Teach 敏感采集",
+      "acceptance": "安全输入前停止多路采集；未上传完成不开始学习；预览/丢弃可用，异输入验证有真实产物。",
+      "related_requirements": [
+        "SKL-06",
+        "SKL-07",
+        "SKL-10"
+      ],
+      "finding": "R08",
+      "journey": "CJ03",
+      "test_id": "T-CORE-10",
+      "status": "planned"
+    },
+    {
+      "id": "CORE-11",
+      "feature": "文件和删除生命周期",
+      "acceptance": "上传 ready 后引用；SSRF/预览/路径限制；备份恢复后删除记录不复活。",
+      "related_requirements": [
+        "FIL-03",
+        "FIL-05",
+        "FIL-09",
+        "ADM-22"
+      ],
+      "finding": "R10",
+      "journey": "CJ09",
+      "test_id": "T-CORE-11",
+      "status": "planned"
+    },
+    {
+      "id": "CORE-12",
+      "feature": "移植依赖与运行时",
+      "acceptance": "Windows原生Host与工具依赖闭包、原测试、Node/原生ABI及授权记录齐全；公共执行内核无Electron依赖，原生Browser Worker经端口单独提供。",
+      "related_requirements": [
+        "OPS-11",
+        "OPS-06"
+      ],
+      "finding": "R11",
+      "journey": "CJ12",
+      "test_id": "T-CORE-12",
+      "status": "planned"
+    },
+    {
+      "id": "CORE-13",
+      "feature": "交付配置冻结",
+      "acceptance": "已确认Windows原生/本机优先/K8s扩展/用户配模型；运行前检查实际模型及工具能力、网络、磁盘与权限，专用连接器未启用不阻断通用平台。",
+      "related_requirements": [
+        "ACC-01",
+        "PLG-02",
+        "OPS-05",
+        "OPS-07"
+      ],
+      "finding": "R01",
+      "journey": "CJ01",
+      "test_id": "T-CORE-13",
+      "status": "planned"
+    },
+    {
+      "id": "CORE-14",
+      "feature": "核心端到端验收",
+      "acceptance": "CJ01～CJ12、四项原型、适用故障和条件能力均保存证据；无真机原版不能宣称体验/能力等效。 原版Mac样本不是Windows验收，也不是Cmb实现通过证据。",
+      "related_requirements": [
+        "OPS-10",
+        "OPS-11"
+      ],
+      "finding": "R12",
+      "journey": "CJ12",
+      "test_id": "T-CORE-14",
+      "status": "planned"
+    }
+  ],
+  "prototype_gates": [
+    {
+      "id": "G1",
+      "status": "not_run",
+      "deployment": "macos-windows-native-local-first"
+    },
+    {
+      "id": "G2",
+      "status": "not_run",
+      "deployment": "macos-windows-native-local-first",
+      "subgates": [
+        {
+          "id": "G2A",
+          "subject": "多Bot原生浏览器/共享登录/目标输入与看屏",
+          "status": "not_run"
+        },
+        {
+          "id": "G2B",
+          "subject": "Windows通用原生桌面应用独立屏幕与并行操作",
+          "status": "not_run",
+          "platform_scope": {
+            "windows": "原完整目标保留，输入范围调整尚待用户答复；not_run不改为通过。",
+            "macos": "已由用户明确移出首版范围，不作为Mac首版门槛，不标为原能力实现。",
+            "linux": "后续服务端目标保留，实际集群交付仍延期。"
+          }
+        }
+      ],
+      "critical_unknown": "Windows单活动输入桌面约束下，通用独立多屏方案未闭合。",
+      "candidate_evidence_document": "14-windows-computer-feasibility.md",
+      "native_checks": [
+        "WIN-01",
+        "WIN-02",
+        "WIN-03",
+        "WIN-04",
+        "WIN-05",
+        "WIN-06",
+        "WIN-07",
+        "WIN-08"
+      ]
+    },
+    {
+      "id": "G3",
+      "status": "not_run",
+      "deployment": "macos-windows-native-local-first"
+    },
+    {
+      "id": "G4",
+      "status": "not_run",
+      "deployment": "macos-windows-native-local-first"
+    }
+  ],
+  "delivery_profile": [
+    {
+      "id": "desktop_platform",
+      "decision": "macOS与纯Windows原生均支持；Windows禁止WSL2/Linux容器依赖。当前macOS已有临时签名包和桌面流程验证，Windows版本/架构、签名和实机验收仍待完成。",
+      "must_resolve_by": "before_platform_integration",
+      "status": "frozen"
+    },
+    {
+      "id": "computer_provider",
+      "decision": "本机原生浏览器进程与按目标绑定的Browser Broker；Mac首版按2026-10-07用户决定仅提供专用浏览器、文件、浏览器示范和接管，不开放任意命令或独立通用原生桌面。Windows通用原生应用的G2B目标保留，组合键、真实IME/Raw Input仍有实现缺口；是否缩减Windows首版范围待用户答复。不得把浏览器隔离等同于通用桌面多屏。",
+      "must_resolve_by": "before_G2",
+      "status": "design_validation_required"
+    },
+    {
+      "id": "identity",
+      "decision": "复用Cmb身份，绑定当前macOS或Windows用户及本机Host会话；集中身份扩建延期。",
+      "must_resolve_by": "before_identity_integration",
+      "status": "frozen"
+    },
+    {
+      "id": "model",
+      "decision": "用户配置现有 Cmb 模型，默认继承；Host 记录配置 revision，按任务校验视觉/工具能力，允许另配视觉模型。",
+      "must_resolve_by": "before_G1_G4",
+      "status": "frozen"
+    },
+    {
+      "id": "connectors",
+      "decision": "不预设新增内部系统；现有工具/MCP与浏览器为基础，定时与本机鉴权 Webhook 必做；专用事件源未启用。",
+      "must_resolve_by": "before_connector_integration",
+      "status": "frozen"
+    },
+    {
+      "id": "network",
+      "decision": "按macOS/Windows分别验证模型及所选插件连通性、代理和证书；当前连接诊断不代表已新增代理或企业SSO支持。本机入口不自动公网暴露。",
+      "must_resolve_by": "before_target_integration",
+      "status": "runtime_preflight"
+    },
+    {
+      "id": "capacity",
+      "decision": "用户、Bot、并发任务、屏幕、模型和磁盘限额",
+      "must_resolve_by": "before_load_and_release",
+      "status": "not_frozen"
+    },
+    {
+      "id": "retention_recovery",
+      "decision": "保留时间、备份、删除、RPO/RTO 与恢复演练环境",
+      "must_resolve_by": "before_release",
+      "status": "not_frozen"
+    },
+    {
+      "id": "original_baseline",
+      "decision": "原版版本/平台/账户开关、核心路径截图和任务样本",
+      "must_resolve_by": "before_parity_claim",
+      "status": "partially_verified_official_online",
+      "observed_app_version": "0.57.1",
+      "observation": "用户确认官方客户端直连官方服务；已实际完成浏览器/直接协作/群聊/示范生成技能和更换网址复用；完整 Windows 基准未完成。",
+      "evidence_document": "13-original-app-observations.md"
+    },
+    {
+      "id": "deployment_mode",
+      "status": "frozen",
+      "decision": "首版macOS与纯Windows本机独立后台Host；后续Linux节点K8s。公共内核跨平台，OS/基础设施适配分离；端口和跨OS迁移契约继续落实，集群实施延期。",
+      "must_resolve_by": "before_implementation"
+    }
+  ],
+  "core_journeys": [
+    {
+      "id": "CJ01",
+      "status": "planned",
+      "deployment_adaptation": "按12-windows-local-first.md第8节及本机scope验收，原远端/多机器部分延期。"
+    },
+    {
+      "id": "CJ02",
+      "status": "planned",
+      "deployment_adaptation": "按12-windows-local-first.md第8节及本机scope验收，原远端/多机器部分延期。"
+    },
+    {
+      "id": "CJ03",
+      "status": "planned",
+      "deployment_adaptation": "按12-windows-local-first.md第8节及本机scope验收，原远端/多机器部分延期。"
+    },
+    {
+      "id": "CJ04",
+      "status": "planned",
+      "deployment_adaptation": "按12-windows-local-first.md第8节及本机scope验收，原远端/多机器部分延期。"
+    },
+    {
+      "id": "CJ05",
+      "status": "planned",
+      "deployment_adaptation": "按12-windows-local-first.md第8节及本机scope验收，原远端/多机器部分延期。"
+    },
+    {
+      "id": "CJ06",
+      "status": "planned",
+      "deployment_adaptation": "按12-windows-local-first.md第8节及本机scope验收，原远端/多机器部分延期。"
+    },
+    {
+      "id": "CJ07",
+      "status": "planned",
+      "deployment_adaptation": "按12-windows-local-first.md第8节及本机scope验收，原远端/多机器部分延期。"
+    },
+    {
+      "id": "CJ08",
+      "status": "planned",
+      "deployment_adaptation": "按12-windows-local-first.md第8节及本机scope验收，原远端/多机器部分延期。"
+    },
+    {
+      "id": "CJ09",
+      "status": "planned",
+      "deployment_adaptation": "按12-windows-local-first.md第8节及本机scope验收，原远端/多机器部分延期。"
+    },
+    {
+      "id": "CJ10",
+      "status": "planned",
+      "deployment_adaptation": "按12-windows-local-first.md第8节及本机scope验收，原远端/多机器部分延期。"
+    },
+    {
+      "id": "CJ11",
+      "status": "planned",
+      "deployment_adaptation": "按12-windows-local-first.md第8节及本机scope验收，原远端/多机器部分延期。"
+    },
+    {
+      "id": "CJ12",
+      "status": "planned",
+      "deployment_adaptation": "按12-windows-local-first.md第8节及本机scope验收，原远端/多机器部分延期。"
+    }
+  ],
+  "original_journey_mapping": [
+    {
+      "id": "J01",
+      "disposition": "core",
+      "related_core_journeys": [
+        "CJ01"
+      ],
+      "note": "关联不表示延期的原完整旅程已完成。"
+    },
+    {
+      "id": "J02",
+      "disposition": "core",
+      "related_core_journeys": [
+        "CJ02"
+      ],
+      "note": "关联不表示延期的原完整旅程已完成。"
+    },
+    {
+      "id": "J03",
+      "disposition": "core",
+      "related_core_journeys": [
+        "CJ03"
+      ],
+      "note": "关联不表示延期的原完整旅程已完成。"
+    },
+    {
+      "id": "J04",
+      "disposition": "core_adapted",
+      "related_core_journeys": [
+        "CJ04",
+        "CJ10"
+      ],
+      "note": "关联不表示延期的原完整旅程已完成。"
+    },
+    {
+      "id": "J05",
+      "disposition": "core_adapted",
+      "related_core_journeys": [
+        "CJ05",
+        "CJ06"
+      ],
+      "note": "关联不表示延期的原完整旅程已完成。"
+    },
+    {
+      "id": "J06",
+      "disposition": "deferred",
+      "related_core_journeys": [
+        "CJ08"
+      ],
+      "note": "关联不表示延期的原完整旅程已完成。"
+    },
+    {
+      "id": "J07",
+      "disposition": "deferred",
+      "related_core_journeys": [],
+      "note": "关联不表示延期的原完整旅程已完成。"
+    },
+    {
+      "id": "J08",
+      "disposition": "core",
+      "related_core_journeys": [
+        "CJ07",
+        "CJ12"
+      ],
+      "note": "关联不表示延期的原完整旅程已完成。"
+    },
+    {
+      "id": "J09",
+      "disposition": "core_adapted",
+      "related_core_journeys": [
+        "CJ08",
+        "CJ12"
+      ],
+      "note": "关联不表示延期的原完整旅程已完成。"
+    },
+    {
+      "id": "J10",
+      "disposition": "deferred",
+      "related_core_journeys": [],
+      "note": "关联不表示延期的原完整旅程已完成。"
+    }
+  ],
+  "fault_mapping": [
+    {
+      "id": "F01",
+      "disposition": "core",
+      "note": "沿用原故障预期。"
+    },
+    {
+      "id": "F02",
+      "disposition": "core",
+      "note": "沿用原故障预期。"
+    },
+    {
+      "id": "F03",
+      "disposition": "core",
+      "note": "沿用原故障预期。"
+    },
+    {
+      "id": "F04",
+      "disposition": "core",
+      "note": "沿用原故障预期。"
+    },
+    {
+      "id": "F05",
+      "disposition": "core",
+      "note": "沿用原故障预期。"
+    },
+    {
+      "id": "F06",
+      "disposition": "core_adapted",
+      "note": "同一本机 Host 两个受认证连接/桌面通知竞争；重登、过期对象和撤销不越权。"
+    },
+    {
+      "id": "F07",
+      "disposition": "core",
+      "note": "沿用原故障预期。"
+    },
+    {
+      "id": "F08",
+      "disposition": "core",
+      "note": "沿用原故障预期。"
+    },
+    {
+      "id": "F09",
+      "disposition": "core_adapted",
+      "note": "本机 Windows Worker/控制链断开或授权撤回，停发相关动作并核对效果；云端设备出口代理延期。"
+    },
+    {
+      "id": "F10",
+      "disposition": "core",
+      "note": "沿用原故障预期。"
+    },
+    {
+      "id": "F11",
+      "disposition": "core",
+      "note": "沿用原故障预期。"
+    },
+    {
+      "id": "F12",
+      "disposition": "core",
+      "note": "沿用原故障预期。"
+    },
+    {
+      "id": "F13",
+      "disposition": "core",
+      "note": "沿用原故障预期。"
+    },
+    {
+      "id": "F14",
+      "disposition": "core",
+      "note": "沿用原故障预期。"
+    },
+    {
+      "id": "F15",
+      "disposition": "core",
+      "note": "沿用原故障预期。"
+    },
+    {
+      "id": "F16",
+      "disposition": "core",
+      "note": "沿用原故障预期。"
+    },
+    {
+      "id": "F17",
+      "disposition": "core",
+      "note": "沿用原故障预期。"
+    },
+    {
+      "id": "F18",
+      "disposition": "deferred",
+      "note": "Team Bots、语音、批量管理或 Team Setup 专用场景延期；个人/跨用户隔离另有核心用例。"
+    },
+    {
+      "id": "F19",
+      "disposition": "deferred",
+      "note": "Team Bots、语音、批量管理或 Team Setup 专用场景延期；个人/跨用户隔离另有核心用例。"
+    },
+    {
+      "id": "F20",
+      "disposition": "deferred",
+      "note": "Team Bots、语音、批量管理或 Team Setup 专用场景延期；个人/跨用户隔离另有核心用例。"
+    },
+    {
+      "id": "F21",
+      "disposition": "deferred",
+      "note": "Team Bots、语音、批量管理或 Team Setup 专用场景延期；个人/跨用户隔离另有核心用例。"
+    },
+    {
+      "id": "F22",
+      "disposition": "core",
+      "note": "沿用原故障预期。"
+    },
+    {
+      "id": "F23",
+      "disposition": "core",
+      "note": "受控秘密输入前暂停采集；未知敏感内容可暂停/丢弃，标记含敏感段时学习前核对；普通示范保持停止后自动学习的已观察流程。"
+    },
+    {
+      "id": "F24",
+      "disposition": "core",
+      "note": "沿用原故障预期。"
+    },
+    {
+      "id": "F25",
+      "disposition": "core",
+      "note": "增加 Windows 休眠/关机、系统时间跳变和恢复后漏跑，不承诺离线时执行。"
+    },
+    {
+      "id": "F26",
+      "disposition": "core",
+      "note": "沿用原故障预期。"
+    },
+    {
+      "id": "F27",
+      "disposition": "core",
+      "note": "沿用原故障预期。"
+    },
+    {
+      "id": "F28",
+      "disposition": "core",
+      "note": "沿用原故障预期。"
+    },
+    {
+      "id": "F29",
+      "disposition": "conditional",
+      "note": "分别在本机设备桥或具体消息/邮件发送通道纳入后执行。"
+    },
+    {
+      "id": "F30",
+      "disposition": "deferred",
+      "note": "Team Bots、语音、批量管理或 Team Setup 专用场景延期；个人/跨用户隔离另有核心用例。"
+    },
+    {
+      "id": "F31",
+      "disposition": "deferred",
+      "note": "Team Bots、语音、批量管理或 Team Setup 专用场景延期；个人/跨用户隔离另有核心用例。"
+    },
+    {
+      "id": "F32",
+      "disposition": "core",
+      "note": "沿用原故障预期。"
+    },
+    {
+      "id": "F33",
+      "disposition": "core_adapted",
+      "note": "同一本机 Host 两个受认证连接/桌面通知竞争；重登、过期对象和撤销不越权。"
+    },
+    {
+      "id": "F34",
+      "disposition": "core",
+      "note": "沿用原故障预期。"
+    },
+    {
+      "id": "F35",
+      "disposition": "core",
+      "note": "沿用原故障预期。"
+    },
+    {
+      "id": "F36",
+      "disposition": "deferred",
+      "note": "Team Bots、语音、批量管理或 Team Setup 专用场景延期；个人/跨用户隔离另有核心用例。"
+    },
+    {
+      "id": "F37",
+      "disposition": "core_adapted",
+      "note": "验证有效强制策略与个人更严格规则，复杂多组例外延期。"
+    },
+    {
+      "id": "F38",
+      "disposition": "deferred",
+      "note": "Team Bots、语音、批量管理或 Team Setup 专用场景延期；个人/跨用户隔离另有核心用例。"
+    },
+    {
+      "id": "F39",
+      "disposition": "core",
+      "note": "沿用原故障预期。"
+    },
+    {
+      "id": "F40",
+      "disposition": "core",
+      "note": "沿用原故障预期。"
+    },
+    {
+      "id": "F41",
+      "disposition": "core_adapted",
+      "note": "关键动作意图写入失败阻止执行，一般遥测失败可恢复；高级 OTel 内容导出延期。"
+    },
+    {
+      "id": "F42",
+      "disposition": "core_adapted",
+      "note": "验证个人用户/Bot/任务预算和实际用量，Team Bot 频道计费延期。"
+    }
+  ],
+  "rpc_scope_mapping": [
+    {
+      "surface": "coordinator",
+      "method": "getAgentTranscriptWindow",
+      "requirements": [
+        "MSG-06",
+        "MSG-21"
+      ],
+      "scope_decision": "core_behavior",
+      "note": "实现当前 core/core_subset 的等价行为；远端/其他平台部分延期，不照搬私有 RPC。",
+      "deployment_scope": "windows-native-local-first"
+    },
+    {
+      "surface": "coordinator",
+      "method": "getAgentThread",
+      "requirements": [
+        "MSG-06",
+        "MSG-21"
+      ],
+      "scope_decision": "core_behavior",
+      "note": "实现当前 core/core_subset 的等价行为；远端/其他平台部分延期，不照搬私有 RPC。",
+      "deployment_scope": "windows-native-local-first"
+    },
+    {
+      "surface": "coordinator",
+      "method": "getAgentTranscriptTail",
+      "requirements": [
+        "MSG-06",
+        "MSG-21"
+      ],
+      "scope_decision": "core_behavior",
+      "note": "实现当前 core/core_subset 的等价行为；远端/其他平台部分延期，不照搬私有 RPC。",
+      "deployment_scope": "windows-native-local-first"
+    },
+    {
+      "surface": "coordinator",
+      "method": "openAgentTail",
+      "requirements": [
+        "MSG-06",
+        "MSG-21"
+      ],
+      "scope_decision": "core_behavior",
+      "note": "实现当前 core/core_subset 的等价行为；远端/其他平台部分延期，不照搬私有 RPC。",
+      "deployment_scope": "windows-native-local-first"
+    },
+    {
+      "surface": "coordinator",
+      "method": "sendPrompt",
+      "requirements": [
+        "MSG-02",
+        "MSG-03",
+        "MSG-04",
+        "OPS-02"
+      ],
+      "scope_decision": "core_behavior",
+      "note": "实现当前 core/core_subset 的等价行为；远端/其他平台部分延期，不照搬私有 RPC。",
+      "deployment_scope": "windows-native-local-first"
+    },
+    {
+      "surface": "coordinator",
+      "method": "promptAcceptanceStatus",
+      "requirements": [
+        "MSG-02",
+        "MSG-03",
+        "MSG-04",
+        "OPS-02"
+      ],
+      "scope_decision": "core_behavior",
+      "note": "实现当前 core/core_subset 的等价行为；远端/其他平台部分延期，不照搬私有 RPC。",
+      "deployment_scope": "windows-native-local-first"
+    },
+    {
+      "surface": "coordinator",
+      "method": "respondToWidget",
+      "requirements": [
+        "MSG-11",
+        "MSG-15"
+      ],
+      "scope_decision": "core_behavior",
+      "note": "实现当前 core/core_subset 的等价行为；远端/其他平台部分延期，不照搬私有 RPC。",
+      "deployment_scope": "windows-native-local-first"
+    },
+    {
+      "surface": "coordinator",
+      "method": "resolveAutoReviewApproval",
+      "requirements": [
+        "MSG-12",
+        "APR-01",
+        "APR-04",
+        "APR-06"
+      ],
+      "scope_decision": "core_behavior",
+      "note": "实现当前 core/core_subset 的等价行为；远端/其他平台部分延期，不照搬私有 RPC。",
+      "deployment_scope": "windows-native-local-first"
+    },
+    {
+      "surface": "coordinator",
+      "method": "resolveLocalToolPermission",
+      "requirements": [
+        "MSG-13",
+        "DEV-02"
+      ],
+      "scope_decision": "conditional_behavior",
+      "note": "仅实现当前 scope 的等价行为，不复制私有 RPC。",
+      "deployment_scope": "windows-native-local-first"
+    },
+    {
+      "surface": "coordinator",
+      "method": "dismissWidget",
+      "requirements": [
+        "MSG-11",
+        "MSG-15"
+      ],
+      "scope_decision": "core_behavior",
+      "note": "实现当前 core/core_subset 的等价行为；远端/其他平台部分延期，不照搬私有 RPC。",
+      "deployment_scope": "windows-native-local-first"
+    },
+    {
+      "surface": "coordinator",
+      "method": "submitSecret",
+      "requirements": [
+        "MSG-14",
+        "APR-10",
+        "APR-12"
+      ],
+      "scope_decision": "core_behavior",
+      "note": "实现当前 core/core_subset 的等价行为；远端/其他平台部分延期，不照搬私有 RPC。",
+      "deployment_scope": "windows-native-local-first"
+    },
+    {
+      "surface": "coordinator",
+      "method": "reactToMessage",
+      "requirements": [
+        "MSG-07"
+      ],
+      "scope_decision": "core_behavior",
+      "note": "实现当前 core/core_subset 的等价行为；远端/其他平台部分延期，不照搬私有 RPC。",
+      "deployment_scope": "windows-native-local-first"
+    },
+    {
+      "surface": "coordinator",
+      "method": "listAgents",
+      "requirements": [
+        "BOT-13",
+        "MSG-20"
+      ],
+      "scope_decision": "core_behavior",
+      "note": "实现当前 core/core_subset 的等价行为；远端/其他平台部分延期，不照搬私有 RPC。",
+      "deployment_scope": "windows-native-local-first"
+    },
+    {
+      "surface": "coordinator",
+      "method": "countAgents",
+      "requirements": [
+        "BOT-13",
+        "MSG-20"
+      ],
+      "scope_decision": "core_behavior",
+      "note": "实现当前 core/core_subset 的等价行为；远端/其他平台部分延期，不照搬私有 RPC。",
+      "deployment_scope": "windows-native-local-first"
+    },
+    {
+      "surface": "coordinator",
+      "method": "searchAgents",
+      "requirements": [
+        "BOT-13",
+        "MSG-20"
+      ],
+      "scope_decision": "core_behavior",
+      "note": "实现当前 core/core_subset 的等价行为；远端/其他平台部分延期，不照搬私有 RPC。",
+      "deployment_scope": "windows-native-local-first"
+    },
+    {
+      "surface": "coordinator",
+      "method": "searchMedia",
+      "requirements": [
+        "BOT-13",
+        "MSG-20"
+      ],
+      "scope_decision": "core_behavior",
+      "note": "实现当前 core/core_subset 的等价行为；远端/其他平台部分延期，不照搬私有 RPC。",
+      "deployment_scope": "windows-native-local-first"
+    },
+    {
+      "surface": "coordinator",
+      "method": "createAgent",
+      "requirements": [
+        "BOT-01",
+        "BOT-04"
+      ],
+      "scope_decision": "core_behavior",
+      "note": "实现当前 core/core_subset 的等价行为；远端/其他平台部分延期，不照搬私有 RPC。",
+      "deployment_scope": "windows-native-local-first"
+    },
+    {
+      "surface": "coordinator",
+      "method": "createGroup",
+      "requirements": [
+        "COL-05",
+        "COL-06"
+      ],
+      "scope_decision": "core_behavior",
+      "note": "实现当前 core/core_subset 的等价行为；远端/其他平台部分延期，不照搬私有 RPC。",
+      "deployment_scope": "windows-native-local-first"
+    },
+    {
+      "surface": "coordinator",
+      "method": "setGroupMembers",
+      "requirements": [
+        "COL-05",
+        "COL-06"
+      ],
+      "scope_decision": "core_behavior",
+      "note": "实现当前 core/core_subset 的等价行为；远端/其他平台部分延期，不照搬私有 RPC。",
+      "deployment_scope": "windows-native-local-first"
+    },
+    {
+      "surface": "coordinator",
+      "method": "updateAgent",
+      "requirements": [
+        "BOT-02"
+      ],
+      "scope_decision": "core_behavior",
+      "note": "实现当前 core/core_subset 的等价行为；远端/其他平台部分延期，不照搬私有 RPC。",
+      "deployment_scope": "windows-native-local-first"
+    },
+    {
+      "surface": "coordinator",
+      "method": "deleteAgents",
+      "requirements": [
+        "BOT-11",
+        "BOT-12",
+        "BOT-14"
+      ],
+      "scope_decision": "core_behavior",
+      "note": "实现当前 core/core_subset 的等价行为；远端/其他平台部分延期，不照搬私有 RPC。",
+      "deployment_scope": "windows-native-local-first"
+    },
+    {
+      "surface": "coordinator",
+      "method": "duplicateAgent",
+      "requirements": [
+        "BOT-09",
+        "BOT-10"
+      ],
+      "scope_decision": "core_behavior",
+      "note": "实现当前 core/core_subset 的等价行为；远端/其他平台部分延期，不照搬私有 RPC。",
+      "deployment_scope": "windows-native-local-first"
+    },
+    {
+      "surface": "coordinator",
+      "method": "kickstartAgent",
+      "requirements": [
+        "BOT-01",
+        "BOT-04"
+      ],
+      "scope_decision": "core_behavior",
+      "note": "实现当前 core/core_subset 的等价行为；远端/其他平台部分延期，不照搬私有 RPC。",
+      "deployment_scope": "windows-native-local-first"
+    },
+    {
+      "surface": "coordinator",
+      "method": "requestDiskSaverAudit",
+      "requirements": [
+        "CPU-15"
+      ],
+      "scope_decision": "core_behavior",
+      "note": "实现当前 core/core_subset 的等价行为；远端/其他平台部分延期，不照搬私有 RPC。",
+      "deployment_scope": "windows-native-local-first"
+    },
+    {
+      "surface": "coordinator",
+      "method": "broadcastToAgents",
+      "requirements": [
+        "OBS-03"
+      ],
+      "scope_decision": "deferred",
+      "note": "不随源码接口存在而开启当前范围外能力。",
+      "deployment_scope": "windows-native-local-first"
+    },
+    {
+      "surface": "coordinator",
+      "method": "getCloudAgentInfo",
+      "requirements": [
+        "COL-12",
+        "OBS-04"
+      ],
+      "scope_decision": "core_behavior",
+      "note": "实现当前 core/core_subset 的等价行为；远端/其他平台部分延期，不照搬私有 RPC。",
+      "deployment_scope": "windows-native-local-first"
+    },
+    {
+      "surface": "coordinator",
+      "method": "getListenerIntegrations",
+      "requirements": [
+        "AUT-10",
+        "AUT-11",
+        "AUT-12",
+        "AUT-13",
+        "AUT-14",
+        "PLG-02"
+      ],
+      "scope_decision": "core_behavior",
+      "note": "实现当前 core/core_subset 的等价行为；远端/其他平台部分延期，不照搬私有 RPC。",
+      "deployment_scope": "windows-native-local-first"
+    },
+    {
+      "surface": "coordinator",
+      "method": "getListenerConnectUrl",
+      "requirements": [
+        "AUT-10",
+        "AUT-11",
+        "AUT-12",
+        "AUT-13",
+        "AUT-14",
+        "PLG-02"
+      ],
+      "scope_decision": "core_behavior",
+      "note": "实现当前 core/core_subset 的等价行为；远端/其他平台部分延期，不照搬私有 RPC。",
+      "deployment_scope": "windows-native-local-first"
+    },
+    {
+      "surface": "coordinator",
+      "method": "setAgentUnread",
+      "requirements": [
+        "BOT-08"
+      ],
+      "scope_decision": "core_behavior",
+      "note": "实现当前 core/core_subset 的等价行为；远端/其他平台部分延期，不照搬私有 RPC。",
+      "deployment_scope": "windows-native-local-first"
+    },
+    {
+      "surface": "coordinator",
+      "method": "setAgentHiddenFromSidebar",
+      "requirements": [
+        "BOT-07"
+      ],
+      "scope_decision": "core_behavior",
+      "note": "实现当前 core/core_subset 的等价行为；远端/其他平台部分延期，不照搬私有 RPC。",
+      "deployment_scope": "windows-native-local-first"
+    },
+    {
+      "surface": "coordinator",
+      "method": "setAgentNotificationsEnabled",
+      "requirements": [
+        "UI-04"
+      ],
+      "scope_decision": "core_behavior",
+      "note": "实现当前 core/core_subset 的等价行为；远端/其他平台部分延期，不照搬私有 RPC。",
+      "deployment_scope": "windows-native-local-first"
+    },
+    {
+      "surface": "coordinator",
+      "method": "setAgentNotifyOnUpdates",
+      "requirements": [
+        "UI-04"
+      ],
+      "scope_decision": "core_behavior",
+      "note": "实现当前 core/core_subset 的等价行为；远端/其他平台部分延期，不照搬私有 RPC。",
+      "deployment_scope": "windows-native-local-first"
+    },
+    {
+      "surface": "coordinator",
+      "method": "setAgentAvatarBytes",
+      "requirements": [
+        "BOT-02"
+      ],
+      "scope_decision": "core_behavior",
+      "note": "实现当前 core/core_subset 的等价行为；远端/其他平台部分延期，不照搬私有 RPC。",
+      "deployment_scope": "windows-native-local-first"
+    },
+    {
+      "surface": "coordinator",
+      "method": "getAgentAvatar",
+      "requirements": [
+        "BOT-02"
+      ],
+      "scope_decision": "core_behavior",
+      "note": "实现当前 core/core_subset 的等价行为；远端/其他平台部分延期，不照搬私有 RPC。",
+      "deployment_scope": "windows-native-local-first"
+    },
+    {
+      "surface": "coordinator",
+      "method": "getAgentWorkflows",
+      "requirements": [
+        "SKL-01",
+        "SKL-02",
+        "SKL-09"
+      ],
+      "scope_decision": "core_behavior",
+      "note": "实现当前 core/core_subset 的等价行为；远端/其他平台部分延期，不照搬私有 RPC。",
+      "deployment_scope": "windows-native-local-first"
+    },
+    {
+      "surface": "coordinator",
+      "method": "createAgentWorkflow",
+      "requirements": [
+        "SKL-01",
+        "SKL-02",
+        "SKL-09"
+      ],
+      "scope_decision": "core_behavior",
+      "note": "实现当前 core/core_subset 的等价行为；远端/其他平台部分延期，不照搬私有 RPC。",
+      "deployment_scope": "windows-native-local-first"
+    },
+    {
+      "surface": "coordinator",
+      "method": "updateAgentWorkflow",
+      "requirements": [
+        "SKL-01",
+        "SKL-02",
+        "SKL-09"
+      ],
+      "scope_decision": "core_behavior",
+      "note": "实现当前 core/core_subset 的等价行为；远端/其他平台部分延期，不照搬私有 RPC。",
+      "deployment_scope": "windows-native-local-first"
+    },
+    {
+      "surface": "coordinator",
+      "method": "setAgentWorkflowEnabled",
+      "requirements": [
+        "SKL-01",
+        "SKL-02",
+        "SKL-09"
+      ],
+      "scope_decision": "core_behavior",
+      "note": "实现当前 core/core_subset 的等价行为；远端/其他平台部分延期，不照搬私有 RPC。",
+      "deployment_scope": "windows-native-local-first"
+    },
+    {
+      "surface": "coordinator",
+      "method": "deleteAgentWorkflow",
+      "requirements": [
+        "SKL-01",
+        "SKL-02",
+        "SKL-09"
+      ],
+      "scope_decision": "core_behavior",
+      "note": "实现当前 core/core_subset 的等价行为；远端/其他平台部分延期，不照搬私有 RPC。",
+      "deployment_scope": "windows-native-local-first"
+    },
+    {
+      "surface": "coordinator",
+      "method": "runAgentWorkflowNow",
+      "requirements": [
+        "SKL-01",
+        "SKL-02",
+        "SKL-09"
+      ],
+      "scope_decision": "core_behavior",
+      "note": "实现当前 core/core_subset 的等价行为；远端/其他平台部分延期，不照搬私有 RPC。",
+      "deployment_scope": "windows-native-local-first"
+    },
+    {
+      "surface": "coordinator",
+      "method": "importAgentWorkflowText",
+      "requirements": [
+        "SKL-01",
+        "SKL-02"
+      ],
+      "scope_decision": "core_behavior",
+      "note": "实现当前 core/core_subset 的等价行为；远端/其他平台部分延期，不照搬私有 RPC。",
+      "deployment_scope": "windows-native-local-first"
+    },
+    {
+      "surface": "coordinator",
+      "method": "importAgentWorkflowUrl",
+      "requirements": [
+        "SKL-01",
+        "SKL-02"
+      ],
+      "scope_decision": "core_behavior",
+      "note": "实现当前 core/core_subset 的等价行为；远端/其他平台部分延期，不照搬私有 RPC。",
+      "deployment_scope": "windows-native-local-first"
+    },
+    {
+      "surface": "coordinator",
+      "method": "portAgentLocalSkills",
+      "requirements": [
+        "SKL-01",
+        "SKL-02"
+      ],
+      "scope_decision": "core_behavior",
+      "note": "实现当前 core/core_subset 的等价行为；远端/其他平台部分延期，不照搬私有 RPC。",
+      "deployment_scope": "windows-native-local-first"
+    },
+    {
+      "surface": "coordinator",
+      "method": "getConversationOutline",
+      "requirements": [
+        "MSG-21"
+      ],
+      "scope_decision": "observation_required",
+      "note": "相关核心需求保留，但该原版表面尚未真机核实；不能自动生成用户入口。",
+      "deployment_scope": "windows-native-local-first"
+    },
+    {
+      "surface": "coordinator",
+      "method": "skillsCatalog",
+      "requirements": [
+        "SKL-01",
+        "PLG-10"
+      ],
+      "scope_decision": "core_behavior",
+      "note": "实现当前 core/core_subset 的等价行为；远端/其他平台部分延期，不照搬私有 RPC。",
+      "deployment_scope": "windows-native-local-first"
+    },
+    {
+      "surface": "coordinator",
+      "method": "syncPluginSkills",
+      "requirements": [
+        "SKL-01",
+        "PLG-10"
+      ],
+      "scope_decision": "core_behavior",
+      "note": "实现当前 core/core_subset 的等价行为；远端/其他平台部分延期，不照搬私有 RPC。",
+      "deployment_scope": "windows-native-local-first"
+    },
+    {
+      "surface": "coordinator",
+      "method": "getPluginSyncStatus",
+      "requirements": [
+        "SKL-01",
+        "PLG-10"
+      ],
+      "scope_decision": "core_behavior",
+      "note": "实现当前 core/core_subset 的等价行为；远端/其他平台部分延期，不照搬私有 RPC。",
+      "deployment_scope": "windows-native-local-first"
+    },
+    {
+      "surface": "coordinator",
+      "method": "listRoutedMcpTools",
+      "requirements": [
+        "PLG-05",
+        "PLG-06",
+        "APR-14"
+      ],
+      "scope_decision": "core_behavior",
+      "note": "实现当前 core/core_subset 的等价行为；远端/其他平台部分延期，不照搬私有 RPC。",
+      "deployment_scope": "windows-native-local-first"
+    },
+    {
+      "surface": "coordinator",
+      "method": "executeRoutedMcpTool",
+      "requirements": [
+        "PLG-05",
+        "PLG-06",
+        "APR-14"
+      ],
+      "scope_decision": "core_behavior",
+      "note": "实现当前 core/core_subset 的等价行为；远端/其他平台部分延期，不照搬私有 RPC。",
+      "deployment_scope": "windows-native-local-first"
+    },
+    {
+      "surface": "coordinator",
+      "method": "getSkillPublishTargets",
+      "requirements": [
+        "OBS-05"
+      ],
+      "scope_decision": "deferred",
+      "note": "不随源码接口存在而开启当前范围外能力。",
+      "deployment_scope": "windows-native-local-first"
+    },
+    {
+      "surface": "coordinator",
+      "method": "publishSkill",
+      "requirements": [
+        "OBS-05"
+      ],
+      "scope_decision": "deferred",
+      "note": "不随源码接口存在而开启当前范围外能力。",
+      "deployment_scope": "windows-native-local-first"
+    },
+    {
+      "surface": "coordinator",
+      "method": "resyncPublishedSkill",
+      "requirements": [
+        "OBS-05"
+      ],
+      "scope_decision": "deferred",
+      "note": "不随源码接口存在而开启当前范围外能力。",
+      "deployment_scope": "windows-native-local-first"
+    },
+    {
+      "surface": "coordinator",
+      "method": "unpublishSkill",
+      "requirements": [
+        "OBS-05"
+      ],
+      "scope_decision": "deferred",
+      "note": "不随源码接口存在而开启当前范围外能力。",
+      "deployment_scope": "windows-native-local-first"
+    },
+    {
+      "surface": "coordinator",
+      "method": "getSubagents",
+      "requirements": [
+        "COL-11",
+        "OBS-04"
+      ],
+      "scope_decision": "core_behavior",
+      "note": "实现当前 core/core_subset 的等价行为；远端/其他平台部分延期，不照搬私有 RPC。",
+      "deployment_scope": "windows-native-local-first"
+    },
+    {
+      "surface": "coordinator",
+      "method": "getAsyncTasks",
+      "requirements": [
+        "COL-11",
+        "OBS-04"
+      ],
+      "scope_decision": "core_behavior",
+      "note": "实现当前 core/core_subset 的等价行为；远端/其他平台部分延期，不照搬私有 RPC。",
+      "deployment_scope": "windows-native-local-first"
+    },
+    {
+      "surface": "coordinator",
+      "method": "getForeverBoxStatus",
+      "requirements": [
+        "CPU-01",
+        "CPU-09",
+        "CPU-10"
+      ],
+      "scope_decision": "core_behavior",
+      "note": "实现当前 core/core_subset 的等价行为；远端/其他平台部分延期，不照搬私有 RPC。",
+      "deployment_scope": "windows-native-local-first"
+    },
+    {
+      "surface": "coordinator",
+      "method": "ensureForeverBox",
+      "requirements": [
+        "CPU-01",
+        "CPU-09",
+        "CPU-10"
+      ],
+      "scope_decision": "core_behavior",
+      "note": "实现当前 core/core_subset 的等价行为；远端/其他平台部分延期，不照搬私有 RPC。",
+      "deployment_scope": "windows-native-local-first"
+    },
+    {
+      "surface": "coordinator",
+      "method": "handBackForeverBox",
+      "requirements": [
+        "CPU-07"
+      ],
+      "scope_decision": "core_behavior",
+      "note": "实现当前 core/core_subset 的等价行为；远端/其他平台部分延期，不照搬私有 RPC。",
+      "deployment_scope": "windows-native-local-first"
+    },
+    {
+      "surface": "coordinator",
+      "method": "startTeachRecording",
+      "requirements": [
+        "SKL-04",
+        "SKL-05",
+        "SKL-06",
+        "SKL-07",
+        "SKL-08",
+        "SKL-09",
+        "SKL-10"
+      ],
+      "scope_decision": "core_behavior",
+      "note": "实现当前 core/core_subset 的等价行为；远端/其他平台部分延期，不照搬私有 RPC。",
+      "deployment_scope": "windows-native-local-first"
+    },
+    {
+      "surface": "coordinator",
+      "method": "stopTeachRecording",
+      "requirements": [
+        "SKL-04",
+        "SKL-05",
+        "SKL-06",
+        "SKL-07",
+        "SKL-08",
+        "SKL-09",
+        "SKL-10"
+      ],
+      "scope_decision": "core_behavior",
+      "note": "实现当前 core/core_subset 的等价行为；远端/其他平台部分延期，不照搬私有 RPC。",
+      "deployment_scope": "windows-native-local-first"
+    },
+    {
+      "surface": "coordinator",
+      "method": "getTeachRecordingStatus",
+      "requirements": [
+        "SKL-04",
+        "SKL-05",
+        "SKL-06",
+        "SKL-07",
+        "SKL-08",
+        "SKL-09",
+        "SKL-10"
+      ],
+      "scope_decision": "core_behavior",
+      "note": "实现当前 core/core_subset 的等价行为；远端/其他平台部分延期，不照搬私有 RPC。",
+      "deployment_scope": "windows-native-local-first"
+    },
+    {
+      "surface": "coordinator",
+      "method": "getTrays",
+      "requirements": [
+        "MSG-19"
+      ],
+      "scope_decision": "core_behavior",
+      "note": "实现当前 core/core_subset 的等价行为；远端/其他平台部分延期，不照搬私有 RPC。",
+      "deployment_scope": "windows-native-local-first"
+    },
+    {
+      "surface": "coordinator",
+      "method": "dismissTray",
+      "requirements": [
+        "MSG-19"
+      ],
+      "scope_decision": "core_behavior",
+      "note": "实现当前 core/core_subset 的等价行为；远端/其他平台部分延期，不照搬私有 RPC。",
+      "deployment_scope": "windows-native-local-first"
+    },
+    {
+      "surface": "coordinator",
+      "method": "clearTrays",
+      "requirements": [
+        "MSG-19"
+      ],
+      "scope_decision": "core_behavior",
+      "note": "实现当前 core/core_subset 的等价行为；远端/其他平台部分延期，不照搬私有 RPC。",
+      "deployment_scope": "windows-native-local-first"
+    },
+    {
+      "surface": "coordinator",
+      "method": "getAgentChannels",
+      "requirements": [
+        "TEAM-12",
+        "OBS-07"
+      ],
+      "scope_decision": "deferred",
+      "note": "不随源码接口存在而开启当前范围外能力。",
+      "deployment_scope": "windows-native-local-first"
+    },
+    {
+      "surface": "coordinator",
+      "method": "connectChannel",
+      "requirements": [
+        "TEAM-12",
+        "OBS-07"
+      ],
+      "scope_decision": "deferred",
+      "note": "不随源码接口存在而开启当前范围外能力。",
+      "deployment_scope": "windows-native-local-first"
+    },
+    {
+      "surface": "coordinator",
+      "method": "disconnectChannel",
+      "requirements": [
+        "TEAM-12",
+        "OBS-07"
+      ],
+      "scope_decision": "deferred",
+      "note": "不随源码接口存在而开启当前范围外能力。",
+      "deployment_scope": "windows-native-local-first"
+    },
+    {
+      "surface": "coordinator",
+      "method": "refreshChannel",
+      "requirements": [
+        "TEAM-12",
+        "OBS-07"
+      ],
+      "scope_decision": "deferred",
+      "note": "不随源码接口存在而开启当前范围外能力。",
+      "deployment_scope": "windows-native-local-first"
+    },
+    {
+      "surface": "coordinator",
+      "method": "getBoxSecretsStatus",
+      "requirements": [
+        "MSG-14",
+        "APR-10",
+        "APR-12"
+      ],
+      "scope_decision": "core_behavior",
+      "note": "实现当前 core/core_subset 的等价行为；远端/其他平台部分延期，不照搬私有 RPC。",
+      "deployment_scope": "windows-native-local-first"
+    },
+    {
+      "surface": "coordinator",
+      "method": "getAgentAutomations",
+      "requirements": [
+        "AUT-01",
+        "AUT-02",
+        "AUT-03",
+        "AUT-04",
+        "AUT-05",
+        "AUT-06",
+        "AUT-07",
+        "AUT-08"
+      ],
+      "scope_decision": "core_behavior",
+      "note": "实现当前 core/core_subset 的等价行为；远端/其他平台部分延期，不照搬私有 RPC。",
+      "deployment_scope": "windows-native-local-first"
+    },
+    {
+      "surface": "coordinator",
+      "method": "listAllAutomations",
+      "requirements": [
+        "AUT-01",
+        "AUT-02",
+        "AUT-03",
+        "AUT-04",
+        "AUT-05",
+        "AUT-06",
+        "AUT-07",
+        "AUT-08"
+      ],
+      "scope_decision": "core_behavior",
+      "note": "实现当前 core/core_subset 的等价行为；远端/其他平台部分延期，不照搬私有 RPC。",
+      "deployment_scope": "windows-native-local-first"
+    },
+    {
+      "surface": "coordinator",
+      "method": "isAgentNetworkEnabled",
+      "requirements": [
+        "OBS-02"
+      ],
+      "scope_decision": "deferred",
+      "note": "不随源码接口存在而开启当前范围外能力。",
+      "deployment_scope": "windows-native-local-first"
+    },
+    {
+      "surface": "coordinator",
+      "method": "isGlobalSearchEnabled",
+      "requirements": [
+        "MSG-20"
+      ],
+      "scope_decision": "core_behavior",
+      "note": "实现当前 core/core_subset 的等价行为；远端/其他平台部分延期，不照搬私有 RPC。",
+      "deployment_scope": "windows-native-local-first"
+    },
+    {
+      "surface": "coordinator",
+      "method": "isEgressTunnelAvailable",
+      "requirements": [
+        "DEV-04"
+      ],
+      "scope_decision": "conditional_behavior",
+      "note": "仅实现当前 scope 的等价行为，不复制私有 RPC。",
+      "deployment_scope": "windows-native-local-first"
+    },
+    {
+      "surface": "coordinator",
+      "method": "getSharingState",
+      "requirements": [
+        "OBS-01"
+      ],
+      "scope_decision": "deferred",
+      "note": "不随源码接口存在而开启当前范围外能力。",
+      "deployment_scope": "windows-native-local-first"
+    },
+    {
+      "surface": "coordinator",
+      "method": "createRoomFromAgent",
+      "requirements": [
+        "OBS-01"
+      ],
+      "scope_decision": "deferred",
+      "note": "不随源码接口存在而开启当前范围外能力。",
+      "deployment_scope": "windows-native-local-first"
+    },
+    {
+      "surface": "coordinator",
+      "method": "createRoomInvite",
+      "requirements": [
+        "OBS-01"
+      ],
+      "scope_decision": "deferred",
+      "note": "不随源码接口存在而开启当前范围外能力。",
+      "deployment_scope": "windows-native-local-first"
+    },
+    {
+      "surface": "coordinator",
+      "method": "joinSharedRoom",
+      "requirements": [
+        "OBS-01"
+      ],
+      "scope_decision": "deferred",
+      "note": "不随源码接口存在而开启当前范围外能力。",
+      "deployment_scope": "windows-native-local-first"
+    },
+    {
+      "surface": "coordinator",
+      "method": "respondToRoomJoinRequest",
+      "requirements": [
+        "OBS-01"
+      ],
+      "scope_decision": "deferred",
+      "note": "不随源码接口存在而开启当前范围外能力。",
+      "deployment_scope": "windows-native-local-first"
+    },
+    {
+      "surface": "coordinator",
+      "method": "createSharedRoom",
+      "requirements": [
+        "OBS-01"
+      ],
+      "scope_decision": "deferred",
+      "note": "不随源码接口存在而开启当前范围外能力。",
+      "deployment_scope": "windows-native-local-first"
+    },
+    {
+      "surface": "coordinator",
+      "method": "addOwnAgentToSharedRoom",
+      "requirements": [
+        "OBS-01"
+      ],
+      "scope_decision": "deferred",
+      "note": "不随源码接口存在而开启当前范围外能力。",
+      "deployment_scope": "windows-native-local-first"
+    },
+    {
+      "surface": "coordinator",
+      "method": "removeOwnAgentFromSharedRoom",
+      "requirements": [
+        "OBS-01"
+      ],
+      "scope_decision": "deferred",
+      "note": "不随源码接口存在而开启当前范围外能力。",
+      "deployment_scope": "windows-native-local-first"
+    },
+    {
+      "surface": "coordinator",
+      "method": "setSharedRoomTyping",
+      "requirements": [
+        "OBS-01"
+      ],
+      "scope_decision": "deferred",
+      "note": "不随源码接口存在而开启当前范围外能力。",
+      "deployment_scope": "windows-native-local-first"
+    },
+    {
+      "surface": "coordinator",
+      "method": "leaveSharedRoom",
+      "requirements": [
+        "OBS-01"
+      ],
+      "scope_decision": "deferred",
+      "note": "不随源码接口存在而开启当前范围外能力。",
+      "deployment_scope": "windows-native-local-first"
+    },
+    {
+      "surface": "coordinator",
+      "method": "setAgentAutomationEnabled",
+      "requirements": [
+        "AUT-01",
+        "AUT-02",
+        "AUT-03",
+        "AUT-04",
+        "AUT-05",
+        "AUT-06",
+        "AUT-07",
+        "AUT-08"
+      ],
+      "scope_decision": "core_behavior",
+      "note": "实现当前 core/core_subset 的等价行为；远端/其他平台部分延期，不照搬私有 RPC。",
+      "deployment_scope": "windows-native-local-first"
+    },
+    {
+      "surface": "coordinator",
+      "method": "createAgentAutomation",
+      "requirements": [
+        "AUT-01",
+        "AUT-02",
+        "AUT-03",
+        "AUT-04",
+        "AUT-05",
+        "AUT-06",
+        "AUT-07",
+        "AUT-08"
+      ],
+      "scope_decision": "core_behavior",
+      "note": "实现当前 core/core_subset 的等价行为；远端/其他平台部分延期，不照搬私有 RPC。",
+      "deployment_scope": "windows-native-local-first"
+    },
+    {
+      "surface": "coordinator",
+      "method": "updateAgentAutomation",
+      "requirements": [
+        "AUT-01",
+        "AUT-02",
+        "AUT-03",
+        "AUT-04",
+        "AUT-05",
+        "AUT-06",
+        "AUT-07",
+        "AUT-08"
+      ],
+      "scope_decision": "core_behavior",
+      "note": "实现当前 core/core_subset 的等价行为；远端/其他平台部分延期，不照搬私有 RPC。",
+      "deployment_scope": "windows-native-local-first"
+    },
+    {
+      "surface": "coordinator",
+      "method": "deleteAgentAutomation",
+      "requirements": [
+        "AUT-01",
+        "AUT-02",
+        "AUT-03",
+        "AUT-04",
+        "AUT-05",
+        "AUT-06",
+        "AUT-07",
+        "AUT-08"
+      ],
+      "scope_decision": "core_behavior",
+      "note": "实现当前 core/core_subset 的等价行为；远端/其他平台部分延期，不照搬私有 RPC。",
+      "deployment_scope": "windows-native-local-first"
+    },
+    {
+      "surface": "coordinator",
+      "method": "runAgentAutomationNow",
+      "requirements": [
+        "AUT-01",
+        "AUT-02",
+        "AUT-03",
+        "AUT-04",
+        "AUT-05",
+        "AUT-06",
+        "AUT-07",
+        "AUT-08"
+      ],
+      "scope_decision": "core_behavior",
+      "note": "实现当前 core/core_subset 的等价行为；远端/其他平台部分延期，不照搬私有 RPC。",
+      "deployment_scope": "windows-native-local-first"
+    },
+    {
+      "surface": "main",
+      "method": "openExternal",
+      "requirements": [
+        "FIL-08"
+      ],
+      "scope_decision": "core_behavior",
+      "note": "实现当前 core/core_subset 的等价行为；远端/其他平台部分延期，不照搬私有 RPC。",
+      "deployment_scope": "windows-native-local-first"
+    },
+    {
+      "surface": "main",
+      "method": "submitFeedback",
+      "requirements": [
+        "UI-12",
+        "VOC-05"
+      ],
+      "scope_decision": "core_behavior",
+      "note": "实现当前 core/core_subset 的等价行为；远端/其他平台部分延期，不照搬私有 RPC。",
+      "deployment_scope": "windows-native-local-first"
+    },
+    {
+      "surface": "main",
+      "method": "getDesktopEnvironment",
+      "requirements": [
+        "UI-01",
+        "UI-07"
+      ],
+      "scope_decision": "core_behavior",
+      "note": "实现当前 core/core_subset 的等价行为；远端/其他平台部分延期，不照搬私有 RPC。",
+      "deployment_scope": "windows-native-local-first"
+    },
+    {
+      "surface": "main",
+      "method": "getWindowState",
+      "requirements": [
+        "UI-01",
+        "UI-07"
+      ],
+      "scope_decision": "core_behavior",
+      "note": "实现当前 core/core_subset 的等价行为；远端/其他平台部分延期，不照搬私有 RPC。",
+      "deployment_scope": "windows-native-local-first"
+    },
+    {
+      "surface": "main",
+      "method": "minimizeWindow",
+      "requirements": [
+        "UI-01",
+        "UI-07"
+      ],
+      "scope_decision": "core_behavior",
+      "note": "实现当前 core/core_subset 的等价行为；远端/其他平台部分延期，不照搬私有 RPC。",
+      "deployment_scope": "windows-native-local-first"
+    },
+    {
+      "surface": "main",
+      "method": "toggleMaximizeWindow",
+      "requirements": [
+        "UI-01",
+        "UI-07"
+      ],
+      "scope_decision": "core_behavior",
+      "note": "实现当前 core/core_subset 的等价行为；远端/其他平台部分延期，不照搬私有 RPC。",
+      "deployment_scope": "windows-native-local-first"
+    },
+    {
+      "surface": "main",
+      "method": "closeWindow",
+      "requirements": [
+        "UI-01",
+        "UI-07"
+      ],
+      "scope_decision": "core_behavior",
+      "note": "实现当前 core/core_subset 的等价行为；远端/其他平台部分延期，不照搬私有 RPC。",
+      "deployment_scope": "windows-native-local-first"
+    },
+    {
+      "surface": "main",
+      "method": "resizeWindowWidth",
+      "requirements": [
+        "UI-01",
+        "UI-07"
+      ],
+      "scope_decision": "core_behavior",
+      "note": "实现当前 core/core_subset 的等价行为；远端/其他平台部分延期，不照搬私有 RPC。",
+      "deployment_scope": "windows-native-local-first"
+    },
+    {
+      "surface": "main",
+      "method": "setTitleBarOverlayTone",
+      "requirements": [
+        "UI-01",
+        "UI-07"
+      ],
+      "scope_decision": "core_behavior",
+      "note": "实现当前 core/core_subset 的等价行为；远端/其他平台部分延期，不照搬私有 RPC。",
+      "deployment_scope": "windows-native-local-first"
+    },
+    {
+      "surface": "main",
+      "method": "getThemeState",
+      "requirements": [
+        "UI-06"
+      ],
+      "scope_decision": "core_behavior",
+      "note": "实现当前 core/core_subset 的等价行为；远端/其他平台部分延期，不照搬私有 RPC。",
+      "deployment_scope": "windows-native-local-first"
+    },
+    {
+      "surface": "main",
+      "method": "setThemePreference",
+      "requirements": [
+        "UI-06"
+      ],
+      "scope_decision": "core_behavior",
+      "note": "实现当前 core/core_subset 的等价行为；远端/其他平台部分延期，不照搬私有 RPC。",
+      "deployment_scope": "windows-native-local-first"
+    },
+    {
+      "surface": "main",
+      "method": "getEgressTunnelEnabled",
+      "requirements": [
+        "DEV-04",
+        "DEV-05"
+      ],
+      "scope_decision": "conditional_behavior",
+      "note": "仅实现当前 scope 的等价行为，不复制私有 RPC。",
+      "deployment_scope": "windows-native-local-first"
+    },
+    {
+      "surface": "main",
+      "method": "setEgressTunnelEnabled",
+      "requirements": [
+        "DEV-04",
+        "DEV-05"
+      ],
+      "scope_decision": "conditional_behavior",
+      "note": "仅实现当前 scope 的等价行为，不复制私有 RPC。",
+      "deployment_scope": "windows-native-local-first"
+    },
+    {
+      "surface": "main",
+      "method": "getEgressTunnelStatus",
+      "requirements": [
+        "DEV-04",
+        "DEV-05"
+      ],
+      "scope_decision": "conditional_behavior",
+      "note": "仅实现当前 scope 的等价行为，不复制私有 RPC。",
+      "deployment_scope": "windows-native-local-first"
+    },
+    {
+      "surface": "main",
+      "method": "getWebauthnProxyEnabled",
+      "requirements": [
+        "DEV-06"
+      ],
+      "scope_decision": "conditional_behavior",
+      "note": "仅实现当前 scope 的等价行为，不复制私有 RPC。",
+      "deployment_scope": "windows-native-local-first"
+    },
+    {
+      "surface": "main",
+      "method": "setWebauthnProxyEnabled",
+      "requirements": [
+        "DEV-06"
+      ],
+      "scope_decision": "conditional_behavior",
+      "note": "仅实现当前 scope 的等价行为，不复制私有 RPC。",
+      "deployment_scope": "windows-native-local-first"
+    },
+    {
+      "surface": "main",
+      "method": "getUpdateStatus",
+      "requirements": [
+        "UI-11",
+        "OPS-09"
+      ],
+      "scope_decision": "core_behavior",
+      "note": "实现当前 core/core_subset 的等价行为；远端/其他平台部分延期，不照搬私有 RPC。",
+      "deployment_scope": "windows-native-local-first"
+    },
+    {
+      "surface": "main",
+      "method": "checkForUpdates",
+      "requirements": [
+        "UI-11",
+        "OPS-09"
+      ],
+      "scope_decision": "core_behavior",
+      "note": "实现当前 core/core_subset 的等价行为；远端/其他平台部分延期，不照搬私有 RPC。",
+      "deployment_scope": "windows-native-local-first"
+    },
+    {
+      "surface": "main",
+      "method": "setUpdateTrack",
+      "requirements": [
+        "UI-11",
+        "OPS-09"
+      ],
+      "scope_decision": "core_behavior",
+      "note": "实现当前 core/core_subset 的等价行为；远端/其他平台部分延期，不照搬私有 RPC。",
+      "deployment_scope": "windows-native-local-first"
+    },
+    {
+      "surface": "main",
+      "method": "quitAndInstallUpdate",
+      "requirements": [
+        "UI-11",
+        "OPS-09"
+      ],
+      "scope_decision": "core_behavior",
+      "note": "实现当前 core/core_subset 的等价行为；远端/其他平台部分延期，不照搬私有 RPC。",
+      "deployment_scope": "windows-native-local-first"
+    },
+    {
+      "surface": "main",
+      "method": "setAutoUpdateWhenIdleOptIn",
+      "requirements": [
+        "UI-11",
+        "OPS-09"
+      ],
+      "scope_decision": "core_behavior",
+      "note": "实现当前 core/core_subset 的等价行为；远端/其他平台部分延期，不照搬私有 RPC。",
+      "deployment_scope": "windows-native-local-first"
+    },
+    {
+      "surface": "main",
+      "method": "getBoxMigrationStatus",
+      "requirements": [
+        "CPU-11",
+        "CPU-12",
+        "CPU-13"
+      ],
+      "scope_decision": "core_behavior",
+      "note": "实现当前 core/core_subset 的等价行为；远端/其他平台部分延期，不照搬私有 RPC。",
+      "deployment_scope": "windows-native-local-first"
+    },
+    {
+      "surface": "main",
+      "method": "markDeepLinksReady",
+      "requirements": [
+        "MOB-12",
+        "UI-01"
+      ],
+      "scope_decision": "core_behavior",
+      "note": "实现当前 core/core_subset 的等价行为；远端/其他平台部分延期，不照搬私有 RPC。",
+      "deployment_scope": "windows-native-local-first"
+    },
+    {
+      "surface": "main",
+      "method": "getOnboardingSeen",
+      "requirements": [
+        "ACC-02"
+      ],
+      "scope_decision": "core_behavior",
+      "note": "实现当前 core/core_subset 的等价行为；远端/其他平台部分延期，不照搬私有 RPC。",
+      "deployment_scope": "windows-native-local-first"
+    },
+    {
+      "surface": "main",
+      "method": "setOnboardingSeen",
+      "requirements": [
+        "ACC-02"
+      ],
+      "scope_decision": "core_behavior",
+      "note": "实现当前 core/core_subset 的等价行为；远端/其他平台部分延期，不照搬私有 RPC。",
+      "deployment_scope": "windows-native-local-first"
+    },
+    {
+      "surface": "main",
+      "method": "getTimeZone",
+      "requirements": [
+        "AUT-03",
+        "UI-06"
+      ],
+      "scope_decision": "core_behavior",
+      "note": "实现当前 core/core_subset 的等价行为；远端/其他平台部分延期，不照搬私有 RPC。",
+      "deployment_scope": "windows-native-local-first"
+    },
+    {
+      "surface": "main",
+      "method": "setTimeZoneOverride",
+      "requirements": [
+        "AUT-03",
+        "UI-06"
+      ],
+      "scope_decision": "core_behavior",
+      "note": "实现当前 core/core_subset 的等价行为；远端/其他平台部分延期，不照搬私有 RPC。",
+      "deployment_scope": "windows-native-local-first"
+    },
+    {
+      "surface": "main",
+      "method": "getAutoReviewInstructions",
+      "requirements": [
+        "APR-01",
+        "APR-03",
+        "ADM-06"
+      ],
+      "scope_decision": "core_behavior",
+      "note": "实现当前 core/core_subset 的等价行为；远端/其他平台部分延期，不照搬私有 RPC。",
+      "deployment_scope": "windows-native-local-first"
+    },
+    {
+      "surface": "main",
+      "method": "setAutoReviewInstructions",
+      "requirements": [
+        "APR-01",
+        "APR-03",
+        "ADM-06"
+      ],
+      "scope_decision": "core_behavior",
+      "note": "实现当前 core/core_subset 的等价行为；远端/其他平台部分延期，不照搬私有 RPC。",
+      "deployment_scope": "windows-native-local-first"
+    },
+    {
+      "surface": "main",
+      "method": "getLocalToolPermission",
+      "requirements": [
+        "DEV-01",
+        "DEV-02",
+        "DEV-03",
+        "APR-15"
+      ],
+      "scope_decision": "core_behavior",
+      "note": "实现当前 core/core_subset 的等价行为；远端/其他平台部分延期，不照搬私有 RPC。",
+      "deployment_scope": "windows-native-local-first"
+    },
+    {
+      "surface": "main",
+      "method": "getLocalToolPermissionCeiling",
+      "requirements": [
+        "DEV-01",
+        "DEV-02",
+        "DEV-03",
+        "APR-15"
+      ],
+      "scope_decision": "core_behavior",
+      "note": "实现当前 core/core_subset 的等价行为；远端/其他平台部分延期，不照搬私有 RPC。",
+      "deployment_scope": "windows-native-local-first"
+    },
+    {
+      "surface": "main",
+      "method": "setLocalToolPermission",
+      "requirements": [
+        "DEV-01",
+        "DEV-02",
+        "DEV-03",
+        "APR-15"
+      ],
+      "scope_decision": "core_behavior",
+      "note": "实现当前 core/core_subset 的等价行为；远端/其他平台部分延期，不照搬私有 RPC。",
+      "deployment_scope": "windows-native-local-first"
+    },
+    {
+      "surface": "main",
+      "method": "recordLocalToolApproval",
+      "requirements": [
+        "DEV-01",
+        "DEV-02",
+        "DEV-03",
+        "APR-15"
+      ],
+      "scope_decision": "core_behavior",
+      "note": "实现当前 core/core_subset 的等价行为；远端/其他平台部分延期，不照搬私有 RPC。",
+      "deployment_scope": "windows-native-local-first"
+    },
+    {
+      "surface": "main",
+      "method": "clearLocalToolApprovals",
+      "requirements": [
+        "DEV-01",
+        "DEV-02",
+        "DEV-03",
+        "APR-15"
+      ],
+      "scope_decision": "core_behavior",
+      "note": "实现当前 core/core_subset 的等价行为；远端/其他平台部分延期，不照搬私有 RPC。",
+      "deployment_scope": "windows-native-local-first"
+    },
+    {
+      "surface": "main",
+      "method": "getSidebarCollapsed",
+      "requirements": [
+        "UI-05"
+      ],
+      "scope_decision": "core_behavior",
+      "note": "实现当前 core/core_subset 的等价行为；远端/其他平台部分延期，不照搬私有 RPC。",
+      "deployment_scope": "windows-native-local-first"
+    },
+    {
+      "surface": "main",
+      "method": "setSidebarCollapsed",
+      "requirements": [
+        "UI-05"
+      ],
+      "scope_decision": "core_behavior",
+      "note": "实现当前 core/core_subset 的等价行为；远端/其他平台部分延期，不照搬私有 RPC。",
+      "deployment_scope": "windows-native-local-first"
+    },
+    {
+      "surface": "main",
+      "method": "pickAvatarSource",
+      "requirements": [
+        "BOT-02"
+      ],
+      "scope_decision": "core_behavior",
+      "note": "实现当前 core/core_subset 的等价行为；远端/其他平台部分延期，不照搬私有 RPC。",
+      "deployment_scope": "windows-native-local-first"
+    },
+    {
+      "surface": "main",
+      "method": "pickAvatarFile",
+      "requirements": [
+        "BOT-02"
+      ],
+      "scope_decision": "core_behavior",
+      "note": "实现当前 core/core_subset 的等价行为；远端/其他平台部分延期，不照搬私有 RPC。",
+      "deployment_scope": "windows-native-local-first"
+    },
+    {
+      "surface": "main",
+      "method": "generateAgentAvatarImage",
+      "requirements": [
+        "BOT-02"
+      ],
+      "scope_decision": "core_behavior",
+      "note": "实现当前 core/core_subset 的等价行为；远端/其他平台部分延期，不照搬私有 RPC。",
+      "deployment_scope": "windows-native-local-first"
+    },
+    {
+      "surface": "main",
+      "method": "resolveAttachmentMedia",
+      "requirements": [
+        "FIL-01",
+        "FIL-02",
+        "FIL-03",
+        "FIL-04",
+        "FIL-05"
+      ],
+      "scope_decision": "core_behavior",
+      "note": "实现当前 core/core_subset 的等价行为；远端/其他平台部分延期，不照搬私有 RPC。",
+      "deployment_scope": "windows-native-local-first"
+    },
+    {
+      "surface": "main",
+      "method": "readAttachmentText",
+      "requirements": [
+        "FIL-01",
+        "FIL-02",
+        "FIL-03",
+        "FIL-04",
+        "FIL-05"
+      ],
+      "scope_decision": "core_behavior",
+      "note": "实现当前 core/core_subset 的等价行为；远端/其他平台部分延期，不照搬私有 RPC。",
+      "deployment_scope": "windows-native-local-first"
+    },
+    {
+      "surface": "main",
+      "method": "readAttachmentBytes",
+      "requirements": [
+        "FIL-01",
+        "FIL-02",
+        "FIL-03",
+        "FIL-04",
+        "FIL-05"
+      ],
+      "scope_decision": "core_behavior",
+      "note": "实现当前 core/core_subset 的等价行为；远端/其他平台部分延期，不照搬私有 RPC。",
+      "deployment_scope": "windows-native-local-first"
+    },
+    {
+      "surface": "main",
+      "method": "stageAttachmentBytes",
+      "requirements": [
+        "FIL-01",
+        "FIL-02",
+        "FIL-03",
+        "FIL-04",
+        "FIL-05"
+      ],
+      "scope_decision": "core_behavior",
+      "note": "实现当前 core/core_subset 的等价行为；远端/其他平台部分延期，不照搬私有 RPC。",
+      "deployment_scope": "windows-native-local-first"
+    },
+    {
+      "surface": "main",
+      "method": "downloadAttachment",
+      "requirements": [
+        "FIL-01",
+        "FIL-02",
+        "FIL-03",
+        "FIL-04",
+        "FIL-05"
+      ],
+      "scope_decision": "core_behavior",
+      "note": "实现当前 core/core_subset 的等价行为；远端/其他平台部分延期，不照搬私有 RPC。",
+      "deployment_scope": "windows-native-local-first"
+    },
+    {
+      "surface": "main",
+      "method": "commitStagedAttachments",
+      "requirements": [
+        "FIL-01",
+        "FIL-02",
+        "FIL-03",
+        "FIL-04",
+        "FIL-05"
+      ],
+      "scope_decision": "core_behavior",
+      "note": "实现当前 core/core_subset 的等价行为；远端/其他平台部分延期，不照搬私有 RPC。",
+      "deployment_scope": "windows-native-local-first"
+    },
+    {
+      "surface": "main",
+      "method": "discardStagedAttachment",
+      "requirements": [
+        "FIL-01",
+        "FIL-02",
+        "FIL-03",
+        "FIL-04",
+        "FIL-05"
+      ],
+      "scope_decision": "core_behavior",
+      "note": "实现当前 core/core_subset 的等价行为；远端/其他平台部分延期，不照搬私有 RPC。",
+      "deployment_scope": "windows-native-local-first"
+    },
+    {
+      "surface": "main",
+      "method": "forceRecreateComputer",
+      "requirements": [
+        "CPU-11",
+        "CPU-12",
+        "CPU-13"
+      ],
+      "scope_decision": "core_behavior",
+      "note": "实现当前 core/core_subset 的等价行为；远端/其他平台部分延期，不照搬私有 RPC。",
+      "deployment_scope": "windows-native-local-first"
+    },
+    {
+      "surface": "main",
+      "method": "updateComputer",
+      "requirements": [
+        "CPU-11",
+        "CPU-12",
+        "CPU-13"
+      ],
+      "scope_decision": "core_behavior",
+      "note": "实现当前 core/core_subset 的等价行为；远端/其他平台部分延期，不照搬私有 RPC。",
+      "deployment_scope": "windows-native-local-first"
+    },
+    {
+      "surface": "main",
+      "method": "forceReconnectGateway",
+      "requirements": [
+        "UI-09",
+        "CPU-09"
+      ],
+      "scope_decision": "core_behavior",
+      "note": "实现当前 core/core_subset 的等价行为；远端/其他平台部分延期，不照搬私有 RPC。",
+      "deployment_scope": "windows-native-local-first"
+    },
+    {
+      "surface": "main",
+      "method": "getExperimentsSnapshot",
+      "requirements": [
+        "UI-12",
+        "OPS-08"
+      ],
+      "scope_decision": "internal_or_review_only",
+      "note": "内部诊断、重建扩展或共享账户接口，不能因关联核心需求而全部公开。",
+      "deployment_scope": "windows-native-local-first"
+    },
+    {
+      "surface": "main",
+      "method": "applyFeatureFlagOverride",
+      "requirements": [
+        "UI-12",
+        "OPS-08"
+      ],
+      "scope_decision": "internal_or_review_only",
+      "note": "内部诊断、重建扩展或共享账户接口，不能因关联核心需求而全部公开。",
+      "deployment_scope": "windows-native-local-first"
+    },
+    {
+      "surface": "main",
+      "method": "refreshFeatureFlags",
+      "requirements": [
+        "UI-12",
+        "OPS-08"
+      ],
+      "scope_decision": "internal_or_review_only",
+      "note": "内部诊断、重建扩展或共享账户接口，不能因关联核心需求而全部公开。",
+      "deployment_scope": "windows-native-local-first"
+    },
+    {
+      "surface": "main",
+      "method": "startRpcTraceWindow",
+      "requirements": [
+        "UI-12",
+        "OPS-08"
+      ],
+      "scope_decision": "internal_or_review_only",
+      "note": "内部诊断、重建扩展或共享账户接口，不能因关联核心需求而全部公开。",
+      "deployment_scope": "windows-native-local-first"
+    },
+    {
+      "surface": "main",
+      "method": "getAgentDefaultModel",
+      "requirements": [
+        "ACC-09",
+        "DEV-08"
+      ],
+      "scope_decision": "internal_or_review_only",
+      "note": "内部诊断、重建扩展或共享账户接口，不能因关联核心需求而全部公开。",
+      "deployment_scope": "windows-native-local-first"
+    },
+    {
+      "surface": "main",
+      "method": "setAgentDefaultModel",
+      "requirements": [
+        "ACC-09",
+        "DEV-08"
+      ],
+      "scope_decision": "internal_or_review_only",
+      "note": "内部诊断、重建扩展或共享账户接口，不能因关联核心需求而全部公开。",
+      "deployment_scope": "windows-native-local-first"
+    },
+    {
+      "surface": "main",
+      "method": "getComputerUseModel",
+      "requirements": [
+        "ACC-09",
+        "DEV-08"
+      ],
+      "scope_decision": "internal_or_review_only",
+      "note": "内部诊断、重建扩展或共享账户接口，不能因关联核心需求而全部公开。",
+      "deployment_scope": "windows-native-local-first"
+    },
+    {
+      "surface": "main",
+      "method": "setComputerUseModel",
+      "requirements": [
+        "ACC-09",
+        "DEV-08"
+      ],
+      "scope_decision": "internal_or_review_only",
+      "note": "内部诊断、重建扩展或共享账户接口，不能因关联核心需求而全部公开。",
+      "deployment_scope": "windows-native-local-first"
+    },
+    {
+      "surface": "main",
+      "method": "getHostPinnedAgents",
+      "requirements": [
+        "BOT-05"
+      ],
+      "scope_decision": "core_behavior",
+      "note": "实现当前 core/core_subset 的等价行为；远端/其他平台部分延期，不照搬私有 RPC。",
+      "deployment_scope": "windows-native-local-first"
+    },
+    {
+      "surface": "main",
+      "method": "setHostPinnedAgents",
+      "requirements": [
+        "BOT-05"
+      ],
+      "scope_decision": "core_behavior",
+      "note": "实现当前 core/core_subset 的等价行为；远端/其他平台部分延期，不照搬私有 RPC。",
+      "deployment_scope": "windows-native-local-first"
+    },
+    {
+      "surface": "main",
+      "method": "getHostSidebarSections",
+      "requirements": [
+        "BOT-06"
+      ],
+      "scope_decision": "deferred",
+      "note": "仅实现当前 scope 的等价行为，不复制私有 RPC。",
+      "deployment_scope": "windows-native-local-first"
+    },
+    {
+      "surface": "main",
+      "method": "setHostSidebarSections",
+      "requirements": [
+        "BOT-06"
+      ],
+      "scope_decision": "deferred",
+      "note": "仅实现当前 scope 的等价行为，不复制私有 RPC。",
+      "deployment_scope": "windows-native-local-first"
+    },
+    {
+      "surface": "main",
+      "method": "getAvailableModels",
+      "requirements": [
+        "ACC-09",
+        "DEV-08"
+      ],
+      "scope_decision": "internal_or_review_only",
+      "note": "内部诊断、重建扩展或共享账户接口，不能因关联核心需求而全部公开。",
+      "deployment_scope": "windows-native-local-first"
+    },
+    {
+      "surface": "main",
+      "method": "getInferenceRouter",
+      "requirements": [
+        "ACC-09",
+        "DEV-08"
+      ],
+      "scope_decision": "internal_or_review_only",
+      "note": "内部诊断、重建扩展或共享账户接口，不能因关联核心需求而全部公开。",
+      "deployment_scope": "windows-native-local-first"
+    },
+    {
+      "surface": "main",
+      "method": "setInferenceRouter",
+      "requirements": [
+        "ACC-09",
+        "DEV-08"
+      ],
+      "scope_decision": "internal_or_review_only",
+      "note": "内部诊断、重建扩展或共享账户接口，不能因关联核心需求而全部公开。",
+      "deployment_scope": "windows-native-local-first"
+    },
+    {
+      "surface": "main",
+      "method": "getBoxRuntime",
+      "requirements": [
+        "ACC-09",
+        "DEV-08"
+      ],
+      "scope_decision": "internal_or_review_only",
+      "note": "内部诊断、重建扩展或共享账户接口，不能因关联核心需求而全部公开。",
+      "deployment_scope": "windows-native-local-first"
+    },
+    {
+      "surface": "main",
+      "method": "setBoxRuntime",
+      "requirements": [
+        "ACC-09",
+        "DEV-08"
+      ],
+      "scope_decision": "internal_or_review_only",
+      "note": "内部诊断、重建扩展或共享账户接口，不能因关联核心需求而全部公开。",
+      "deployment_scope": "windows-native-local-first"
+    },
+    {
+      "surface": "main",
+      "method": "transcribeAudio",
+      "requirements": [
+        "VOC-01"
+      ],
+      "scope_decision": "deferred",
+      "note": "仅实现当前 scope 的等价行为，不复制私有 RPC。",
+      "deployment_scope": "windows-native-local-first"
+    },
+    {
+      "surface": "main",
+      "method": "getCursorAuthStatus",
+      "requirements": [
+        "ACC-01",
+        "ACC-03",
+        "ACC-04"
+      ],
+      "scope_decision": "core_behavior",
+      "note": "实现当前 core/core_subset 的等价行为；远端/其他平台部分延期，不照搬私有 RPC。",
+      "deployment_scope": "windows-native-local-first"
+    },
+    {
+      "surface": "main",
+      "method": "loginCursor",
+      "requirements": [
+        "ACC-01",
+        "ACC-03",
+        "ACC-04"
+      ],
+      "scope_decision": "core_behavior",
+      "note": "实现当前 core/core_subset 的等价行为；远端/其他平台部分延期，不照搬私有 RPC。",
+      "deployment_scope": "windows-native-local-first"
+    },
+    {
+      "surface": "main",
+      "method": "cancelCursorLogin",
+      "requirements": [
+        "ACC-01",
+        "ACC-03",
+        "ACC-04"
+      ],
+      "scope_decision": "core_behavior",
+      "note": "实现当前 core/core_subset 的等价行为；远端/其他平台部分延期，不照搬私有 RPC。",
+      "deployment_scope": "windows-native-local-first"
+    },
+    {
+      "surface": "main",
+      "method": "logoutCursor",
+      "requirements": [
+        "ACC-01",
+        "ACC-03",
+        "ACC-04"
+      ],
+      "scope_decision": "core_behavior",
+      "note": "实现当前 core/core_subset 的等价行为；远端/其他平台部分延期，不照搬私有 RPC。",
+      "deployment_scope": "windows-native-local-first"
+    },
+    {
+      "surface": "main",
+      "method": "updateCursorAccountName",
+      "requirements": [
+        "ACC-01",
+        "ACC-03",
+        "ACC-04"
+      ],
+      "scope_decision": "core_behavior",
+      "note": "实现当前 core/core_subset 的等价行为；远端/其他平台部分延期，不照搬私有 RPC。",
+      "deployment_scope": "windows-native-local-first"
+    },
+    {
+      "surface": "main",
+      "method": "getCursorAvatar",
+      "requirements": [
+        "ACC-01",
+        "ACC-03",
+        "ACC-04"
+      ],
+      "scope_decision": "core_behavior",
+      "note": "实现当前 core/core_subset 的等价行为；远端/其他平台部分延期，不照搬私有 RPC。",
+      "deployment_scope": "windows-native-local-first"
+    },
+    {
+      "surface": "main",
+      "method": "getCursorWeeklyUsage",
+      "requirements": [
+        "ADM-20",
+        "ACC-08"
+      ],
+      "scope_decision": "core_behavior",
+      "note": "实现当前 core/core_subset 的等价行为；远端/其他平台部分延期，不照搬私有 RPC。",
+      "deployment_scope": "windows-native-local-first"
+    },
+    {
+      "surface": "main",
+      "method": "getCursorUsageSummary",
+      "requirements": [
+        "ADM-20",
+        "ACC-08"
+      ],
+      "scope_decision": "core_behavior",
+      "note": "实现当前 core/core_subset 的等价行为；远端/其他平台部分延期，不照搬私有 RPC。",
+      "deployment_scope": "windows-native-local-first"
+    },
+    {
+      "surface": "main",
+      "method": "getCursorPrReviewPreferences",
+      "requirements": [
+        "ACC-09"
+      ],
+      "scope_decision": "internal_or_review_only",
+      "note": "内部诊断、重建扩展或共享账户接口，不能因关联核心需求而全部公开。",
+      "deployment_scope": "windows-native-local-first"
+    },
+    {
+      "surface": "main",
+      "method": "getCursorPrivacyModeEnabled",
+      "requirements": [
+        "APR-14",
+        "ADM-22"
+      ],
+      "scope_decision": "core_behavior",
+      "note": "实现当前 core/core_subset 的等价行为；远端/其他平台部分延期，不照搬私有 RPC。",
+      "deployment_scope": "windows-native-local-first"
+    },
+    {
+      "surface": "main",
+      "method": "getSandAccess",
+      "requirements": [
+        "ACC-05",
+        "ACC-08"
+      ],
+      "scope_decision": "core_behavior",
+      "note": "实现当前 core/core_subset 的等价行为；远端/其他平台部分延期，不照搬私有 RPC。",
+      "deployment_scope": "windows-native-local-first"
+    },
+    {
+      "surface": "main",
+      "method": "getSandAccessFresh",
+      "requirements": [
+        "ACC-05",
+        "ACC-08"
+      ],
+      "scope_decision": "core_behavior",
+      "note": "实现当前 core/core_subset 的等价行为；远端/其他平台部分延期，不照搬私有 RPC。",
+      "deployment_scope": "windows-native-local-first"
+    },
+    {
+      "surface": "main",
+      "method": "invokeCursorDashboardAction",
+      "requirements": [
+        "ACC-05",
+        "ACC-08"
+      ],
+      "scope_decision": "core_behavior",
+      "note": "实现当前 core/core_subset 的等价行为；远端/其他平台部分延期，不照搬私有 RPC。",
+      "deployment_scope": "windows-native-local-first"
+    },
+    {
+      "surface": "main",
+      "method": "cancelCursorSandTrial",
+      "requirements": [
+        "ACC-05",
+        "ACC-08"
+      ],
+      "scope_decision": "core_behavior",
+      "note": "实现当前 core/core_subset 的等价行为；远端/其他平台部分延期，不照搬私有 RPC。",
+      "deployment_scope": "windows-native-local-first"
+    },
+    {
+      "surface": "main",
+      "method": "reportAgentLoad",
+      "requirements": [
+        "OPS-08",
+        "UI-12"
+      ],
+      "scope_decision": "internal_or_review_only",
+      "note": "内部诊断、重建扩展或共享账户接口，不能因关联核心需求而全部公开。",
+      "deployment_scope": "windows-native-local-first"
+    },
+    {
+      "surface": "main",
+      "method": "reportAccessBlocked",
+      "requirements": [
+        "OPS-08",
+        "UI-12"
+      ],
+      "scope_decision": "internal_or_review_only",
+      "note": "内部诊断、重建扩展或共享账户接口，不能因关联核心需求而全部公开。",
+      "deployment_scope": "windows-native-local-first"
+    },
+    {
+      "surface": "main",
+      "method": "reportAgentsUnreachable",
+      "requirements": [
+        "OPS-08",
+        "UI-12"
+      ],
+      "scope_decision": "internal_or_review_only",
+      "note": "内部诊断、重建扩展或共享账户接口，不能因关联核心需求而全部公开。",
+      "deployment_scope": "windows-native-local-first"
+    },
+    {
+      "surface": "main",
+      "method": "reportRecoveryAction",
+      "requirements": [
+        "OPS-08",
+        "UI-12"
+      ],
+      "scope_decision": "internal_or_review_only",
+      "note": "内部诊断、重建扩展或共享账户接口，不能因关联核心需求而全部公开。",
+      "deployment_scope": "windows-native-local-first"
+    },
+    {
+      "surface": "main",
+      "method": "reportRebuildLifecycle",
+      "requirements": [
+        "OPS-08",
+        "UI-12"
+      ],
+      "scope_decision": "internal_or_review_only",
+      "note": "内部诊断、重建扩展或共享账户接口，不能因关联核心需求而全部公开。",
+      "deployment_scope": "windows-native-local-first"
+    },
+    {
+      "surface": "main",
+      "method": "reportReconciliation",
+      "requirements": [
+        "OPS-08",
+        "UI-12"
+      ],
+      "scope_decision": "internal_or_review_only",
+      "note": "内部诊断、重建扩展或共享账户接口，不能因关联核心需求而全部公开。",
+      "deployment_scope": "windows-native-local-first"
+    },
+    {
+      "surface": "main",
+      "method": "reportBoxVisibility",
+      "requirements": [
+        "OPS-08",
+        "UI-12"
+      ],
+      "scope_decision": "internal_or_review_only",
+      "note": "内部诊断、重建扩展或共享账户接口，不能因关联核心需求而全部公开。",
+      "deployment_scope": "windows-native-local-first"
+    },
+    {
+      "surface": "main",
+      "method": "reportSendLatency",
+      "requirements": [
+        "OPS-08",
+        "UI-12"
+      ],
+      "scope_decision": "internal_or_review_only",
+      "note": "内部诊断、重建扩展或共享账户接口，不能因关联核心需求而全部公开。",
+      "deployment_scope": "windows-native-local-first"
+    },
+    {
+      "surface": "main",
+      "method": "reportSendAck",
+      "requirements": [
+        "OPS-08",
+        "UI-12"
+      ],
+      "scope_decision": "internal_or_review_only",
+      "note": "内部诊断、重建扩展或共享账户接口，不能因关联核心需求而全部公开。",
+      "deployment_scope": "windows-native-local-first"
+    },
+    {
+      "surface": "main",
+      "method": "reportReactionAck",
+      "requirements": [
+        "OPS-08",
+        "UI-12"
+      ],
+      "scope_decision": "internal_or_review_only",
+      "note": "内部诊断、重建扩展或共享账户接口，不能因关联核心需求而全部公开。",
+      "deployment_scope": "windows-native-local-first"
+    },
+    {
+      "surface": "main",
+      "method": "reportRenderTtfr",
+      "requirements": [
+        "OPS-08",
+        "UI-12"
+      ],
+      "scope_decision": "internal_or_review_only",
+      "note": "内部诊断、重建扩展或共享账户接口，不能因关联核心需求而全部公开。",
+      "deployment_scope": "windows-native-local-first"
+    },
+    {
+      "surface": "main",
+      "method": "reportRenderStream",
+      "requirements": [
+        "OPS-08",
+        "UI-12"
+      ],
+      "scope_decision": "internal_or_review_only",
+      "note": "内部诊断、重建扩展或共享账户接口，不能因关联核心需求而全部公开。",
+      "deployment_scope": "windows-native-local-first"
+    },
+    {
+      "surface": "main",
+      "method": "reportVncSession",
+      "requirements": [
+        "OPS-08",
+        "UI-12"
+      ],
+      "scope_decision": "internal_or_review_only",
+      "note": "内部诊断、重建扩展或共享账户接口，不能因关联核心需求而全部公开。",
+      "deployment_scope": "windows-native-local-first"
+    },
+    {
+      "surface": "main",
+      "method": "reportVncLiveness",
+      "requirements": [
+        "OPS-08",
+        "UI-12"
+      ],
+      "scope_decision": "internal_or_review_only",
+      "note": "内部诊断、重建扩展或共享账户接口，不能因关联核心需求而全部公开。",
+      "deployment_scope": "windows-native-local-first"
+    },
+    {
+      "surface": "main",
+      "method": "reportOpenComputer",
+      "requirements": [
+        "OPS-08",
+        "UI-12"
+      ],
+      "scope_decision": "internal_or_review_only",
+      "note": "内部诊断、重建扩展或共享账户接口，不能因关联核心需求而全部公开。",
+      "deployment_scope": "windows-native-local-first"
+    },
+    {
+      "surface": "main",
+      "method": "reportUpdatePrompt",
+      "requirements": [
+        "OPS-08",
+        "UI-12"
+      ],
+      "scope_decision": "internal_or_review_only",
+      "note": "内部诊断、重建扩展或共享账户接口，不能因关联核心需求而全部公开。",
+      "deployment_scope": "windows-native-local-first"
+    },
+    {
+      "surface": "main",
+      "method": "reportSigninGate",
+      "requirements": [
+        "OPS-08",
+        "UI-12"
+      ],
+      "scope_decision": "internal_or_review_only",
+      "note": "内部诊断、重建扩展或共享账户接口，不能因关联核心需求而全部公开。",
+      "deployment_scope": "windows-native-local-first"
+    },
+    {
+      "surface": "main",
+      "method": "reportOnboardingStep",
+      "requirements": [
+        "OPS-08",
+        "UI-12"
+      ],
+      "scope_decision": "internal_or_review_only",
+      "note": "内部诊断、重建扩展或共享账户接口，不能因关联核心需求而全部公开。",
+      "deployment_scope": "windows-native-local-first"
+    },
+    {
+      "surface": "main",
+      "method": "reportClientFailure",
+      "requirements": [
+        "OPS-08",
+        "UI-12"
+      ],
+      "scope_decision": "internal_or_review_only",
+      "note": "内部诊断、重建扩展或共享账户接口，不能因关联核心需求而全部公开。",
+      "deployment_scope": "windows-native-local-first"
+    },
+    {
+      "surface": "main",
+      "method": "openCloudAgent",
+      "requirements": [
+        "COL-12",
+        "OBS-04"
+      ],
+      "scope_decision": "core_behavior",
+      "note": "实现当前 core/core_subset 的等价行为；远端/其他平台部分延期，不照搬私有 RPC。",
+      "deployment_scope": "windows-native-local-first"
+    },
+    {
+      "surface": "main",
+      "method": "getLinkMetadata",
+      "requirements": [
+        "FIL-08"
+      ],
+      "scope_decision": "core_behavior",
+      "note": "实现当前 core/core_subset 的等价行为；远端/其他平台部分延期，不照搬私有 RPC。",
+      "deployment_scope": "windows-native-local-first"
+    },
+    {
+      "surface": "main",
+      "method": "listSecrets",
+      "requirements": [
+        "APR-10",
+        "APR-11"
+      ],
+      "scope_decision": "core_behavior",
+      "note": "实现当前 core/core_subset 的等价行为；远端/其他平台部分延期，不照搬私有 RPC。",
+      "deployment_scope": "windows-native-local-first"
+    },
+    {
+      "surface": "main",
+      "method": "revealSecret",
+      "requirements": [
+        "APR-11"
+      ],
+      "scope_decision": "do_not_expose",
+      "note": "当前秘密只写契约，不开放读旧值。",
+      "deployment_scope": "windows-native-local-first"
+    },
+    {
+      "surface": "main",
+      "method": "upsertSecrets",
+      "requirements": [
+        "APR-10",
+        "APR-11"
+      ],
+      "scope_decision": "core_behavior",
+      "note": "实现当前 core/core_subset 的等价行为；远端/其他平台部分延期，不照搬私有 RPC。",
+      "deployment_scope": "windows-native-local-first"
+    },
+    {
+      "surface": "main",
+      "method": "removeSecrets",
+      "requirements": [
+        "APR-10",
+        "APR-11"
+      ],
+      "scope_decision": "core_behavior",
+      "note": "实现当前 core/core_subset 的等价行为；远端/其他平台部分延期，不照搬私有 RPC。",
+      "deployment_scope": "windows-native-local-first"
+    },
+    {
+      "surface": "main",
+      "method": "getMcpState",
+      "requirements": [
+        "PLG-01",
+        "PLG-09"
+      ],
+      "scope_decision": "core_behavior",
+      "note": "实现当前 core/core_subset 的等价行为；远端/其他平台部分延期，不照搬私有 RPC。",
+      "deployment_scope": "windows-native-local-first"
+    },
+    {
+      "surface": "main",
+      "method": "getEffectivePlugins",
+      "requirements": [
+        "PLG-01",
+        "PLG-09"
+      ],
+      "scope_decision": "core_behavior",
+      "note": "实现当前 core/core_subset 的等价行为；远端/其他平台部分延期，不照搬私有 RPC。",
+      "deployment_scope": "windows-native-local-first"
+    },
+    {
+      "surface": "main",
+      "method": "getMcpCatalog",
+      "requirements": [
+        "PLG-01",
+        "PLG-09"
+      ],
+      "scope_decision": "core_behavior",
+      "note": "实现当前 core/core_subset 的等价行为；远端/其他平台部分延期，不照搬私有 RPC。",
+      "deployment_scope": "windows-native-local-first"
+    },
+    {
+      "surface": "main",
+      "method": "getMcpTeamPopularity",
+      "requirements": [
+        "PLG-01",
+        "PLG-09"
+      ],
+      "scope_decision": "core_behavior",
+      "note": "实现当前 core/core_subset 的等价行为；远端/其他平台部分延期，不照搬私有 RPC。",
+      "deployment_scope": "windows-native-local-first"
+    },
+    {
+      "surface": "main",
+      "method": "getMcpPluginLogo",
+      "requirements": [
+        "PLG-01",
+        "PLG-09"
+      ],
+      "scope_decision": "core_behavior",
+      "note": "实现当前 core/core_subset 的等价行为；远端/其他平台部分延期，不照搬私有 RPC。",
+      "deployment_scope": "windows-native-local-first"
+    },
+    {
+      "surface": "main",
+      "method": "installEntry",
+      "requirements": [
+        "PLG-01",
+        "PLG-08",
+        "PLG-11"
+      ],
+      "scope_decision": "core_behavior",
+      "note": "实现当前 core/core_subset 的等价行为；远端/其他平台部分延期，不照搬私有 RPC。",
+      "deployment_scope": "windows-native-local-first"
+    },
+    {
+      "surface": "main",
+      "method": "updatePluginInstall",
+      "requirements": [
+        "PLG-01",
+        "PLG-08",
+        "PLG-11"
+      ],
+      "scope_decision": "core_behavior",
+      "note": "实现当前 core/core_subset 的等价行为；远端/其他平台部分延期，不照搬私有 RPC。",
+      "deployment_scope": "windows-native-local-first"
+    },
+    {
+      "surface": "main",
+      "method": "removeMcpServer",
+      "requirements": [
+        "PLG-01",
+        "PLG-08",
+        "PLG-11"
+      ],
+      "scope_decision": "core_behavior",
+      "note": "实现当前 core/core_subset 的等价行为；远端/其他平台部分延期，不照搬私有 RPC。",
+      "deployment_scope": "windows-native-local-first"
+    },
+    {
+      "surface": "main",
+      "method": "uninstallPlugin",
+      "requirements": [
+        "PLG-01",
+        "PLG-08",
+        "PLG-11"
+      ],
+      "scope_decision": "core_behavior",
+      "note": "实现当前 core/core_subset 的等价行为；远端/其他平台部分延期，不照搬私有 RPC。",
+      "deployment_scope": "windows-native-local-first"
+    },
+    {
+      "surface": "main",
+      "method": "authenticateMcpServer",
+      "requirements": [
+        "PLG-02",
+        "PLG-04"
+      ],
+      "scope_decision": "core_behavior",
+      "note": "实现当前 core/core_subset 的等价行为；远端/其他平台部分延期，不照搬私有 RPC。",
+      "deployment_scope": "windows-native-local-first"
+    },
+    {
+      "surface": "main",
+      "method": "renameMcpAccount",
+      "requirements": [
+        "PLG-02",
+        "PLG-04"
+      ],
+      "scope_decision": "core_behavior",
+      "note": "实现当前 core/core_subset 的等价行为；远端/其他平台部分延期，不照搬私有 RPC。",
+      "deployment_scope": "windows-native-local-first"
+    },
+    {
+      "surface": "main",
+      "method": "removeMcpAccount",
+      "requirements": [
+        "PLG-02",
+        "PLG-04"
+      ],
+      "scope_decision": "core_behavior",
+      "note": "实现当前 core/core_subset 的等价行为；远端/其他平台部分延期，不照搬私有 RPC。",
+      "deployment_scope": "windows-native-local-first"
+    },
+    {
+      "surface": "main",
+      "method": "setMcpCustomInstructions",
+      "requirements": [
+        "PLG-05"
+      ],
+      "scope_decision": "core_behavior",
+      "note": "实现当前 core/core_subset 的等价行为；远端/其他平台部分延期，不照搬私有 RPC。",
+      "deployment_scope": "windows-native-local-first"
+    },
+    {
+      "surface": "main",
+      "method": "listMcpServerTools",
+      "requirements": [
+        "PLG-05"
+      ],
+      "scope_decision": "core_behavior",
+      "note": "实现当前 core/core_subset 的等价行为；远端/其他平台部分延期，不照搬私有 RPC。",
+      "deployment_scope": "windows-native-local-first"
+    },
+    {
+      "surface": "main",
+      "method": "toggleMcpToolDisabled",
+      "requirements": [
+        "PLG-05"
+      ],
+      "scope_decision": "core_behavior",
+      "note": "实现当前 core/core_subset 的等价行为；远端/其他平台部分延期，不照搬私有 RPC。",
+      "deployment_scope": "windows-native-local-first"
+    }
+  ],
+  "general_contract_document": "11-core-final-review.md",
+  "platform_contract": {
+    "local_native_only": true,
+    "local_disallowed_prerequisites": [
+      "wsl2",
+      "linux_containers"
+    ],
+    "future_server_os": "linux",
+    "future_orchestrator": "kubernetes",
+    "future_windows_nodes_required": false,
+    "common_core": [
+      "bot_identity",
+      "messages",
+      "runs",
+      "collaboration",
+      "memory",
+      "skills",
+      "approvals",
+      "model_routing"
+    ],
+    "os_adapters": [
+      "computer",
+      "browser",
+      "shell",
+      "process",
+      "capture",
+      "credentials",
+      "filesystem"
+    ],
+    "linux_core_build_gate": "G1",
+    "cross_os_migration_document": "12-windows-local-first.md",
+    "cross_os_execution_state_portability": "validate_capabilities_and_checkpoint_schema; never assume executable/profile/credentials portability",
+    "future_cluster_implementation_status": "planned_deferred",
+    "current_review_machine": "macOS",
+    "local_operating_systems": [
+      "macos",
+      "windows"
+    ],
+    "macos_scope_override": {
+      "decision_date": "2026-10-07",
+      "basis": "用户明确答复：Mac 必须纯原生，调整电脑能力范围",
+      "evidence_document": "12-windows-local-first.md#2026-10-07-补充mac-纯原生范围",
+      "applies_to": "macOS Bot first release only; existing regular CmbCowork tasks unchanged",
+      "included_capabilities": [
+        "dedicated_work_browser",
+        "files",
+        "browser_teach",
+        "manual_browser_takeover"
+      ],
+      "excluded_capabilities": [
+        "arbitrary_os_commands",
+        "independent_generic_native_desktop",
+        "command_background_jobs",
+        "command_cross_task_services",
+        "command_hooks",
+        "executable_skill_dependency_checks"
+      ],
+      "virtual_machine_allowed": false,
+      "fixed_internal_tools": "浏览器、文件及其固定内部工具仍可使用受控OS子进程；不是Mac零OS子进程的承诺。",
+      "saved_state": "已保存绑定、配置和历史可读，不能据旧配置恢复命令权限；HTTP及提示类Hook按原授权执行。",
+      "legacy_effects": "既有closure-unproven等未确认收据与恢复/维护护栏保留，不删除或改为成功。",
+      "acceptance_precedence": "requirements中的platform_scope_overrides覆盖对应Mac验收部分；其他条目、旅程和技术门槛按本平台可用能力验收，依赖被排除能力时明确不可用。",
+      "original_capability_completion": "未实现的原任意命令和独立通用桌面不因范围调整计为实现或验收通过。",
+      "other_platforms": "Windows目标与后续Linux/K8s目标保留；Windows输入范围待用户答复，不能从Mac批准推导Windows缩减。",
+      "counting": "保留原260项、124 core＋53 core_subset基线；不重算完成率。",
+      "scope_dimension": "仅调整Mac Bot的电脑与命令能力；身份、消息、调度、协作、记忆、技能、审批和用户模型配置等公共核心目标保留。"
+    }
+  },
+  "windows_computer_review_document": "14-windows-computer-feasibility.md",
+  "implementation_evidence_document": "15-implementation-status.md"
+}

@@ -1,0 +1,60 @@
+{
+  "kind": "quoted-reply-finite-native-comparison",
+  "recordedAt": "2026-10-10T05:35:13.084985+00:00",
+  "nativeBuildId": "ba207df96930c3031f9aacca",
+  "schema": 72,
+  "via": "CUA native App / configured real MiniMax M3 / official Grok service",
+  "run": {
+    "id": "024e33cb-b6d6-4420-8df1-03aeca1037f6",
+    "bot_id": "37e011ed-107d-4c0b-92d7-151b478972d6",
+    "message_id": "2f41eee2-cc6c-4fa5-b722-85e5f998ec66",
+    "source": "user",
+    "status": "succeeded",
+    "lease_owner": null,
+    "lease_until": null
+  },
+  "usage": {
+    "requests": 1,
+    "unknown": 0
+  },
+  "publicSyntheticMessages": [
+    {
+      "id": "2f41eee2-cc6c-4fa5-b722-85e5f998ec66",
+      "sender": "user",
+      "text": "差额的正负方向是什么？只解释上一条结果，不重新计算，不访问外部服务，也不要保存记忆。",
+      "reply_to": "8d3dedd0-d5f9-4b45-b43b-d8dd8fe23c4f"
+    },
+    {
+      "id": "1d1fd132-8c02-49a0-aa61-1babdae64f5d",
+      "sender": "bot",
+      "text": "\n\n差额方向为正（草稿 − 实际 = 36 − 35 = +1），即草稿比实际合计多 1。",
+      "reply_to": "2f41eee2-cc6c-4fa5-b722-85e5f998ec66"
+    }
+  ],
+  "newBotMemoryCount": 0,
+  "officialObserved": {
+    "composerQuoteAndCancel": true,
+    "reply": "差额是正 1。我是用草稿合计减实际合计算的（36 − 35 = +1），意思是草稿比实际多了 1。如果反过来用实际减草稿，就是 −1，说的是同一件事。"
+  },
+  "finitePass": [
+    "Explicit reply anchors prior actual 35 result",
+    "Both explain positive draft-minus-actual difference",
+    "Single genuine CMB run and settled request; no new memory"
+  ],
+  "sourceOnlyUIPolish": {
+    "quoteAboveBubble": "adapted to Grok native screenshot and original reply-preview.tsx",
+    "pendingQuestionNoNestedBubble": true,
+    "installed": false,
+    "webTypecheckExit": 0,
+    "lintExit": 0,
+    "nearbyTests": {
+      "files": 2,
+      "passed": 7
+    }
+  },
+  "boundaries": [
+    "Time-limited jump highlight not captured; do not claim verified",
+    "No native branch discussion test in this receipt",
+    "No claim of all workload, all UI or cross-platform parity"
+  ]
+}

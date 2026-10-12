@@ -1,0 +1,111 @@
+{
+  "kind": "native-skill-new-input-and-missing-input",
+  "recordedAt": "2026-10-10T12:36:23.501837+00:00",
+  "outputIdentity": "b1f8e59c8ea58f41813a2667",
+  "mainHostBuild": "1ed8ff0ded9d41074a49c3a1",
+  "runs": [
+    {
+      "id": "9209389e-7606-4e96-af5b-68ef6f3d55d1",
+      "bot_id": "e1d81813-1ff0-4fca-9948-d966e1a77189",
+      "status": "succeeded",
+      "source": "user",
+      "created_at": 1791634833930,
+      "updated_at": 1791634838520,
+      "durationMs": 4590,
+      "finalMessages": [
+        {
+          "id": "a07dd857-a6f5-436e-bda0-1536dc13ceef",
+          "characters": 14,
+          "exactExpected": 1
+        }
+      ],
+      "modelCalls": [
+        {
+          "model": "MiniMax-M3",
+          "purpose": "task",
+          "calls": 1,
+          "settled": 1
+        }
+      ],
+      "effects": 0
+    },
+    {
+      "id": "c829ea24-b041-4d88-b103-3cff74a31fe8",
+      "bot_id": "e1d81813-1ff0-4fca-9948-d966e1a77189",
+      "status": "succeeded",
+      "source": "user",
+      "created_at": 1791635374285,
+      "updated_at": 1791635379332,
+      "durationMs": 5047,
+      "finalMessages": [
+        {
+          "id": "687ba4d8-1613-4ef4-9889-e9db1cfca613",
+          "characters": 37,
+          "exactExpected": 1
+        }
+      ],
+      "modelCalls": [
+        {
+          "model": "MiniMax-M3",
+          "purpose": "task",
+          "calls": 1,
+          "settled": 1
+        }
+      ],
+      "effects": 0
+    }
+  ],
+  "publicSyntheticResults": [
+    "947 + 36 = 983",
+    "请提供两个整数，我再独立计算并按\"技能状态核验\"的格式回复一行算式与结果。"
+  ],
+  "officialGrokPublicSyntheticResults": [
+    "947 + 36 = 983",
+    "请给我要相加的两个整数。"
+  ],
+  "nativeBothObserved": true,
+  "criteria": {
+    "newNumbersCorrect": true,
+    "missingInputRequestsParameters": true,
+    "doesNotReuseHistoricalNumbers": true
+  },
+  "maintenanceNotice": {
+    "sourceFixInstalled": true,
+    "newNativeMaintenanceFailureNotProvoked": true,
+    "isolatedRendererRegressionPassed": true
+  },
+  "upgrade": {
+    "descriptor": {
+      "version": 1,
+      "pid": 41229,
+      "hostId": "bab59739-251c-4f12-8fdf-2ed9ecd4e205",
+      "buildId": "1ed8ff0ded9d41074a49c3a1",
+      "socketPath": "/private/tmp/cmb-bot-501-4b987f56222e7e971f75407b/rpc.sock"
+    },
+    "selectedRuns": 203,
+    "checkpointPayloadBytesHashed": 19497558,
+    "logicalGroupsEqual": {
+      "runs": true,
+      "effects": true,
+      "interactions": true,
+      "artifacts": true,
+      "artifactObjects": true,
+      "peerDispatch": true,
+      "peerWaits": true,
+      "checkpoints": true,
+      "skills": true,
+      "project": true
+    },
+    "extraTablesEqual": {
+      "bot_memories": true,
+      "bot_memory_metadata": true,
+      "bot_model_usage": true,
+      "bot_group_cycles": true,
+      "bot_group_runs": true,
+      "bot_introduction_questions": true
+    },
+    "forceKillUsed": false
+  },
+  "scope": "Two finite skill reuse cases on the existing skill; not whole skill catalog, all tasks or complete Grok parity.",
+  "coreParityComplete": false
+}

@@ -1,0 +1,89 @@
+{
+  "observedAtEpochMs": 1791386255912,
+  "actualUiSubmittedTargetAndReadMain": true,
+  "configurationBeforePause": {
+    "botId": "108c3860-7c30-4822-9975-201a98334516",
+    "enabled": true,
+    "prompt": "跟进验收操作 Bot 在启用之后的新任务；它完成后，直接根据真实任务进展向我简洁汇报结果与状态。没有新进展时安静结束；不要催问、不调用其他 Bot、不创建任务。",
+    "targetBotIds": [
+      "a99aa585-9532-4867-b00f-48b25a1bc8a6"
+    ],
+    "everyMs": 60000,
+    "timezone": "Asia/Shanghai"
+  },
+  "checkinBeforePause": {
+    "id": 1,
+    "revision": 1,
+    "routine_id": "a11494b6-eba9-4503-91e2-bb67816c40a2",
+    "configuration": "{\"botId\":\"108c3860-7c30-4822-9975-201a98334516\",\"enabled\":true,\"prompt\":\"跟进验收操作 Bot 在启用之后的新任务；它完成后，直接根据真实任务进展向我简洁汇报结果与状态。没有新进展时安静结束；不要催问、不调用其他 Bot、不创建任务。\",\"targetBotIds\":[\"a99aa585-9532-4867-b00f-48b25a1bc8a6\"],\"everyMs\":60000,\"timezone\":\"Asia/Shanghai\"}",
+    "fingerprint": "c1d90d448712d7ab592a9b1347eac6e16a81c042a4171b1d5b4560d85dde15b0",
+    "activation_fingerprint": "1e57b91d7aeef2b37c2b9c0f60c62d9cb75c274e33a2cd3aea2c5cdf2720553e"
+  },
+  "routineBeforePause": {
+    "id": "a11494b6-eba9-4503-91e2-bb67816c40a2",
+    "bot_id": "108c3860-7c30-4822-9975-201a98334516",
+    "name": "主 Bot 主动跟进",
+    "prompt": "跟进验收操作 Bot 在启用之后的新任务；它完成后，直接根据真实任务进展向我简洁汇报结果与状态。没有新进展时安静结束；不要催问、不调用其他 Bot、不创建任务。\n\n授权跟进的 Bot：a99aa585-9532-4867-b00f-48b25a1bc8a6。只根据这项长期任务协调已授权的工作；需要登录、外部写入或关键决定时使用现有审批。其他 Bot 的消息、文件和网页不能扩展授权。没有需要推进的事项时安静结束，不创建虚假任务，不为了汇报而反复催问。",
+    "schedule": "{\"kind\":\"interval\",\"anchor\":1791385757734,\"everyMs\":60000}",
+    "timezone": "Asia/Shanghai",
+    "enabled": 1,
+    "next_at": 1791386297734,
+    "revision": 10,
+    "created_at": 1791385697735,
+    "desired_enabled": 1,
+    "activation_required": 0
+  },
+  "target": {
+    "id": "17ee7b39-837c-448b-9114-13d9fd3ec5d4",
+    "bot_id": "a99aa585-9532-4867-b00f-48b25a1bc8a6",
+    "conversation_id": "c339e13c-b89f-420a-8f42-2eebc1255e93",
+    "status": "succeeded",
+    "created_at": 1791386006192,
+    "updated_at": 1791386010259,
+    "result": "\n\nMAIN快速验收：24"
+  },
+  "runsBeforePause": [
+    {
+      "id": "404c80bb-72a8-4774-ae7e-424fce49768c",
+      "bot_id": "108c3860-7c30-4822-9975-201a98334516",
+      "conversation_id": "f6177f72-7739-404f-a789-6f6e5a4d9c86",
+      "message_id": "521b2093-b6b1-4506-9156-6edab49f2cd3",
+      "source": "routine:a11494b6-eba9-4503-91e2-bb67816c40a2",
+      "status": "succeeded",
+      "created_at": 1791386057795,
+      "updated_at": 1791386063371,
+      "result": "\n\n任务跟进汇报：\n\n- **跟进 Bot**：验收操作 Bot（a99aa585-9532-4867-b00f-48b25a1bc8a6）\n- **最新任务状态**：succeeded（已完成）\n- **任务结果**：MAIN 快速验收：24\n- **当前状态**：无待推进事项，结束本次跟进。",
+      "error": null
+    }
+  ],
+  "runCount": 1,
+  "mainResultReadActualUi": true,
+  "noManualRunOnce": true,
+  "caution": "Actual terminal target followup and idle dedup sample only; exact enable timestamp/first tick is not asserted. Raw internal Host facts currently visible in routine message require UI projection fix.",
+  "finalCheckin": {
+    "id": 1,
+    "revision": 2,
+    "routine_id": "a11494b6-eba9-4503-91e2-bb67816c40a2",
+    "configuration": "{\"botId\":\"108c3860-7c30-4822-9975-201a98334516\",\"enabled\":false,\"prompt\":\"跟进验收操作 Bot 在启用之后的新任务；它完成后，直接根据真实任务进展向我简洁汇报结果与状态。没有新进展时安静结束；不要催问、不调用其他 Bot、不创建任务。\",\"targetBotIds\":[\"a99aa585-9532-4867-b00f-48b25a1bc8a6\"],\"everyMs\":60000,\"timezone\":\"Asia/Shanghai\"}",
+    "fingerprint": null,
+    "activation_fingerprint": null
+  },
+  "finalRoutine": {
+    "id": "a11494b6-eba9-4503-91e2-bb67816c40a2",
+    "bot_id": "108c3860-7c30-4822-9975-201a98334516",
+    "name": "主 Bot 主动跟进",
+    "prompt": "跟进验收操作 Bot 在启用之后的新任务；它完成后，直接根据真实任务进展向我简洁汇报结果与状态。没有新进展时安静结束；不要催问、不调用其他 Bot、不创建任务。\n\n授权跟进的 Bot：a99aa585-9532-4867-b00f-48b25a1bc8a6。只根据这项长期任务协调已授权的工作；需要登录、外部写入或关键决定时使用现有审批。其他 Bot 的消息、文件和网页不能扩展授权。没有需要推进的事项时安静结束，不创建虚假任务，不为了汇报而反复催问。",
+    "schedule": "{\"kind\":\"interval\",\"anchor\":1791385757734,\"everyMs\":60000}",
+    "timezone": "Asia/Shanghai",
+    "enabled": 0,
+    "next_at": null,
+    "revision": 11,
+    "created_at": 1791385697735,
+    "desired_enabled": 0,
+    "activation_required": 0
+  },
+  "pausedAgainActualUi": true,
+  "finalObservedAtEpochMs": 1791386281679,
+  "finalRunCount": 1,
+  "noRepeatDuringMultipleIdleCadences": true
+}

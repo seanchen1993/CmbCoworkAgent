@@ -1,0 +1,3021 @@
+{
+  "baseline": "Grok Bot 0.18 reconstruction",
+  "note": "静态方法表完整映射，不表示每个处理函数已经端到端验证；并非要求兼容其私有网络 API。",
+  "methods": [
+    {
+      "surface": "coordinator",
+      "method": "getAgentTranscriptWindow",
+      "args_shape": "object",
+      "reply_shape": "transcript-window",
+      "source_file": "/Users/chenqiang/Desktop/AI/grok-bot-0.18-reconstructed-main/source/shared/rpc/coordinator.ts",
+      "source_line": 93,
+      "requirements": [
+        "MSG-06",
+        "MSG-21"
+      ],
+      "classification": "mapped",
+      "note": "实现等价行为；不要求沿用原接口名"
+    },
+    {
+      "surface": "coordinator",
+      "method": "getAgentThread",
+      "args_shape": "object",
+      "reply_shape": "agent-thread",
+      "source_file": "/Users/chenqiang/Desktop/AI/grok-bot-0.18-reconstructed-main/source/shared/rpc/coordinator.ts",
+      "source_line": 94,
+      "requirements": [
+        "MSG-06",
+        "MSG-21"
+      ],
+      "classification": "mapped",
+      "note": "实现等价行为；不要求沿用原接口名"
+    },
+    {
+      "surface": "coordinator",
+      "method": "getAgentTranscriptTail",
+      "args_shape": "object",
+      "reply_shape": "transcript-page",
+      "source_file": "/Users/chenqiang/Desktop/AI/grok-bot-0.18-reconstructed-main/source/shared/rpc/coordinator.ts",
+      "source_line": 95,
+      "requirements": [
+        "MSG-06",
+        "MSG-21"
+      ],
+      "classification": "mapped",
+      "note": "实现等价行为；不要求沿用原接口名"
+    },
+    {
+      "surface": "coordinator",
+      "method": "openAgentTail",
+      "args_shape": "object",
+      "reply_shape": "transcript-page",
+      "source_file": "/Users/chenqiang/Desktop/AI/grok-bot-0.18-reconstructed-main/source/shared/rpc/coordinator.ts",
+      "source_line": 96,
+      "requirements": [
+        "MSG-06",
+        "MSG-21"
+      ],
+      "classification": "mapped",
+      "note": "实现等价行为；不要求沿用原接口名"
+    },
+    {
+      "surface": "coordinator",
+      "method": "sendPrompt",
+      "args_shape": "object",
+      "reply_shape": "send-result",
+      "source_file": "/Users/chenqiang/Desktop/AI/grok-bot-0.18-reconstructed-main/source/shared/rpc/coordinator.ts",
+      "source_line": 97,
+      "requirements": [
+        "MSG-02",
+        "MSG-03",
+        "MSG-04",
+        "OPS-02"
+      ],
+      "classification": "mapped",
+      "note": "实现等价行为；不要求沿用原接口名"
+    },
+    {
+      "surface": "coordinator",
+      "method": "promptAcceptanceStatus",
+      "args_shape": "object",
+      "reply_shape": "acceptance-lookup",
+      "source_file": "/Users/chenqiang/Desktop/AI/grok-bot-0.18-reconstructed-main/source/shared/rpc/coordinator.ts",
+      "source_line": 98,
+      "requirements": [
+        "MSG-02",
+        "MSG-03",
+        "MSG-04",
+        "OPS-02"
+      ],
+      "classification": "mapped",
+      "note": "实现等价行为；不要求沿用原接口名"
+    },
+    {
+      "surface": "coordinator",
+      "method": "respondToWidget",
+      "args_shape": "object",
+      "reply_shape": "record-or-null",
+      "source_file": "/Users/chenqiang/Desktop/AI/grok-bot-0.18-reconstructed-main/source/shared/rpc/coordinator.ts",
+      "source_line": 99,
+      "requirements": [
+        "MSG-11",
+        "MSG-15"
+      ],
+      "classification": "mapped",
+      "note": "实现等价行为；不要求沿用原接口名"
+    },
+    {
+      "surface": "coordinator",
+      "method": "resolveAutoReviewApproval",
+      "args_shape": "object",
+      "reply_shape": "void",
+      "source_file": "/Users/chenqiang/Desktop/AI/grok-bot-0.18-reconstructed-main/source/shared/rpc/coordinator.ts",
+      "source_line": 100,
+      "requirements": [
+        "MSG-12",
+        "APR-01",
+        "APR-04",
+        "APR-06"
+      ],
+      "classification": "mapped",
+      "note": "实现等价行为；不要求沿用原接口名"
+    },
+    {
+      "surface": "coordinator",
+      "method": "resolveLocalToolPermission",
+      "args_shape": "object",
+      "reply_shape": "void",
+      "source_file": "/Users/chenqiang/Desktop/AI/grok-bot-0.18-reconstructed-main/source/shared/rpc/coordinator.ts",
+      "source_line": 101,
+      "requirements": [
+        "MSG-13",
+        "DEV-02"
+      ],
+      "classification": "mapped",
+      "note": "实现等价行为；不要求沿用原接口名"
+    },
+    {
+      "surface": "coordinator",
+      "method": "dismissWidget",
+      "args_shape": "object",
+      "reply_shape": "record",
+      "source_file": "/Users/chenqiang/Desktop/AI/grok-bot-0.18-reconstructed-main/source/shared/rpc/coordinator.ts",
+      "source_line": 102,
+      "requirements": [
+        "MSG-11",
+        "MSG-15"
+      ],
+      "classification": "mapped",
+      "note": "实现等价行为；不要求沿用原接口名"
+    },
+    {
+      "surface": "coordinator",
+      "method": "submitSecret",
+      "args_shape": "object",
+      "reply_shape": "void",
+      "source_file": "/Users/chenqiang/Desktop/AI/grok-bot-0.18-reconstructed-main/source/shared/rpc/coordinator.ts",
+      "source_line": 103,
+      "requirements": [
+        "MSG-14",
+        "APR-10",
+        "APR-12"
+      ],
+      "classification": "mapped",
+      "note": "实现等价行为；不要求沿用原接口名"
+    },
+    {
+      "surface": "coordinator",
+      "method": "reactToMessage",
+      "args_shape": "object",
+      "reply_shape": "void",
+      "source_file": "/Users/chenqiang/Desktop/AI/grok-bot-0.18-reconstructed-main/source/shared/rpc/coordinator.ts",
+      "source_line": 104,
+      "requirements": [
+        "MSG-07"
+      ],
+      "classification": "mapped",
+      "note": "实现等价行为；不要求沿用原接口名"
+    },
+    {
+      "surface": "coordinator",
+      "method": "listAgents",
+      "args_shape": "none",
+      "reply_shape": "array",
+      "source_file": "/Users/chenqiang/Desktop/AI/grok-bot-0.18-reconstructed-main/source/shared/rpc/coordinator.ts",
+      "source_line": 105,
+      "requirements": [
+        "BOT-13",
+        "MSG-20"
+      ],
+      "classification": "mapped",
+      "note": "实现等价行为；不要求沿用原接口名"
+    },
+    {
+      "surface": "coordinator",
+      "method": "countAgents",
+      "args_shape": "none",
+      "reply_shape": "count",
+      "source_file": "/Users/chenqiang/Desktop/AI/grok-bot-0.18-reconstructed-main/source/shared/rpc/coordinator.ts",
+      "source_line": 106,
+      "requirements": [
+        "BOT-13",
+        "MSG-20"
+      ],
+      "classification": "mapped",
+      "note": "实现等价行为；不要求沿用原接口名"
+    },
+    {
+      "surface": "coordinator",
+      "method": "searchAgents",
+      "args_shape": "object",
+      "reply_shape": "array",
+      "source_file": "/Users/chenqiang/Desktop/AI/grok-bot-0.18-reconstructed-main/source/shared/rpc/coordinator.ts",
+      "source_line": 107,
+      "requirements": [
+        "BOT-13",
+        "MSG-20"
+      ],
+      "classification": "mapped",
+      "note": "实现等价行为；不要求沿用原接口名"
+    },
+    {
+      "surface": "coordinator",
+      "method": "searchMedia",
+      "args_shape": "object",
+      "reply_shape": "array",
+      "source_file": "/Users/chenqiang/Desktop/AI/grok-bot-0.18-reconstructed-main/source/shared/rpc/coordinator.ts",
+      "source_line": 108,
+      "requirements": [
+        "BOT-13",
+        "MSG-20"
+      ],
+      "classification": "mapped",
+      "note": "实现等价行为；不要求沿用原接口名"
+    },
+    {
+      "surface": "coordinator",
+      "method": "createAgent",
+      "args_shape": "object",
+      "reply_shape": "record",
+      "source_file": "/Users/chenqiang/Desktop/AI/grok-bot-0.18-reconstructed-main/source/shared/rpc/coordinator.ts",
+      "source_line": 109,
+      "requirements": [
+        "BOT-01",
+        "BOT-04"
+      ],
+      "classification": "mapped",
+      "note": "创建及首次启动；kickstart 的具体欢迎/初始化路径需真机冻结"
+    },
+    {
+      "surface": "coordinator",
+      "method": "createGroup",
+      "args_shape": "object",
+      "reply_shape": "record",
+      "source_file": "/Users/chenqiang/Desktop/AI/grok-bot-0.18-reconstructed-main/source/shared/rpc/coordinator.ts",
+      "source_line": 110,
+      "requirements": [
+        "COL-05",
+        "COL-06"
+      ],
+      "classification": "mapped",
+      "note": "实现等价行为；不要求沿用原接口名"
+    },
+    {
+      "surface": "coordinator",
+      "method": "setGroupMembers",
+      "args_shape": "object",
+      "reply_shape": "record-or-null",
+      "source_file": "/Users/chenqiang/Desktop/AI/grok-bot-0.18-reconstructed-main/source/shared/rpc/coordinator.ts",
+      "source_line": 111,
+      "requirements": [
+        "COL-05",
+        "COL-06"
+      ],
+      "classification": "mapped",
+      "note": "实现等价行为；不要求沿用原接口名"
+    },
+    {
+      "surface": "coordinator",
+      "method": "updateAgent",
+      "args_shape": "object",
+      "reply_shape": "record-or-null",
+      "source_file": "/Users/chenqiang/Desktop/AI/grok-bot-0.18-reconstructed-main/source/shared/rpc/coordinator.ts",
+      "source_line": 112,
+      "requirements": [
+        "BOT-02"
+      ],
+      "classification": "mapped",
+      "note": "实现等价行为；不要求沿用原接口名"
+    },
+    {
+      "surface": "coordinator",
+      "method": "deleteAgents",
+      "args_shape": "object",
+      "reply_shape": "record",
+      "source_file": "/Users/chenqiang/Desktop/AI/grok-bot-0.18-reconstructed-main/source/shared/rpc/coordinator.ts",
+      "source_line": 113,
+      "requirements": [
+        "BOT-11",
+        "BOT-12",
+        "BOT-14"
+      ],
+      "classification": "mapped",
+      "note": "实现等价行为；不要求沿用原接口名"
+    },
+    {
+      "surface": "coordinator",
+      "method": "duplicateAgent",
+      "args_shape": "object",
+      "reply_shape": "record",
+      "source_file": "/Users/chenqiang/Desktop/AI/grok-bot-0.18-reconstructed-main/source/shared/rpc/coordinator.ts",
+      "source_line": 114,
+      "requirements": [
+        "BOT-09",
+        "BOT-10"
+      ],
+      "classification": "mapped",
+      "note": "实现等价行为；不要求沿用原接口名"
+    },
+    {
+      "surface": "coordinator",
+      "method": "kickstartAgent",
+      "args_shape": "object",
+      "reply_shape": "record-or-null",
+      "source_file": "/Users/chenqiang/Desktop/AI/grok-bot-0.18-reconstructed-main/source/shared/rpc/coordinator.ts",
+      "source_line": 115,
+      "requirements": [
+        "BOT-01",
+        "BOT-04"
+      ],
+      "classification": "mapped",
+      "note": "创建及首次启动；kickstart 的具体欢迎/初始化路径需真机冻结"
+    },
+    {
+      "surface": "coordinator",
+      "method": "requestDiskSaverAudit",
+      "args_shape": "object",
+      "reply_shape": "record-or-null",
+      "source_file": "/Users/chenqiang/Desktop/AI/grok-bot-0.18-reconstructed-main/source/shared/rpc/coordinator.ts",
+      "source_line": 116,
+      "requirements": [
+        "CPU-15"
+      ],
+      "classification": "mapped",
+      "note": "实现等价行为；不要求沿用原接口名"
+    },
+    {
+      "surface": "coordinator",
+      "method": "broadcastToAgents",
+      "args_shape": "object",
+      "reply_shape": "record",
+      "source_file": "/Users/chenqiang/Desktop/AI/grok-bot-0.18-reconstructed-main/source/shared/rpc/coordinator.ts",
+      "source_line": 117,
+      "requirements": [
+        "OBS-03"
+      ],
+      "classification": "needs_observation",
+      "note": "仅协议不证明当前公开可用"
+    },
+    {
+      "surface": "coordinator",
+      "method": "getCloudAgentInfo",
+      "args_shape": "object",
+      "reply_shape": "record-or-null",
+      "source_file": "/Users/chenqiang/Desktop/AI/grok-bot-0.18-reconstructed-main/source/shared/rpc/coordinator.ts",
+      "source_line": 118,
+      "requirements": [
+        "COL-12",
+        "OBS-04"
+      ],
+      "classification": "mapped",
+      "note": "实现等价行为；不要求沿用原接口名"
+    },
+    {
+      "surface": "coordinator",
+      "method": "getListenerIntegrations",
+      "args_shape": "none",
+      "reply_shape": "record",
+      "source_file": "/Users/chenqiang/Desktop/AI/grok-bot-0.18-reconstructed-main/source/shared/rpc/coordinator.ts",
+      "source_line": 119,
+      "requirements": [
+        "AUT-10",
+        "AUT-11",
+        "AUT-12",
+        "AUT-13",
+        "AUT-14",
+        "PLG-02"
+      ],
+      "classification": "mapped",
+      "note": "实现等价行为；不要求沿用原接口名"
+    },
+    {
+      "surface": "coordinator",
+      "method": "getListenerConnectUrl",
+      "args_shape": "object",
+      "reply_shape": "connect-url",
+      "source_file": "/Users/chenqiang/Desktop/AI/grok-bot-0.18-reconstructed-main/source/shared/rpc/coordinator.ts",
+      "source_line": 120,
+      "requirements": [
+        "AUT-10",
+        "AUT-11",
+        "AUT-12",
+        "AUT-13",
+        "AUT-14",
+        "PLG-02"
+      ],
+      "classification": "mapped",
+      "note": "实现等价行为；不要求沿用原接口名"
+    },
+    {
+      "surface": "coordinator",
+      "method": "setAgentUnread",
+      "args_shape": "object",
+      "reply_shape": "void",
+      "source_file": "/Users/chenqiang/Desktop/AI/grok-bot-0.18-reconstructed-main/source/shared/rpc/coordinator.ts",
+      "source_line": 121,
+      "requirements": [
+        "BOT-08"
+      ],
+      "classification": "mapped",
+      "note": "实现等价行为；不要求沿用原接口名"
+    },
+    {
+      "surface": "coordinator",
+      "method": "setAgentHiddenFromSidebar",
+      "args_shape": "object",
+      "reply_shape": "void",
+      "source_file": "/Users/chenqiang/Desktop/AI/grok-bot-0.18-reconstructed-main/source/shared/rpc/coordinator.ts",
+      "source_line": 122,
+      "requirements": [
+        "BOT-07"
+      ],
+      "classification": "mapped",
+      "note": "实现等价行为；不要求沿用原接口名"
+    },
+    {
+      "surface": "coordinator",
+      "method": "setAgentNotificationsEnabled",
+      "args_shape": "object",
+      "reply_shape": "void",
+      "source_file": "/Users/chenqiang/Desktop/AI/grok-bot-0.18-reconstructed-main/source/shared/rpc/coordinator.ts",
+      "source_line": 123,
+      "requirements": [
+        "UI-04"
+      ],
+      "classification": "mapped",
+      "note": "通知开关与是否报告中间进展分开核实，不影响后台执行"
+    },
+    {
+      "surface": "coordinator",
+      "method": "setAgentNotifyOnUpdates",
+      "args_shape": "object",
+      "reply_shape": "void",
+      "source_file": "/Users/chenqiang/Desktop/AI/grok-bot-0.18-reconstructed-main/source/shared/rpc/coordinator.ts",
+      "source_line": 124,
+      "requirements": [
+        "UI-04"
+      ],
+      "classification": "mapped",
+      "note": "通知开关与是否报告中间进展分开核实，不影响后台执行"
+    },
+    {
+      "surface": "coordinator",
+      "method": "setAgentAvatarBytes",
+      "args_shape": "object",
+      "reply_shape": "record-or-null",
+      "source_file": "/Users/chenqiang/Desktop/AI/grok-bot-0.18-reconstructed-main/source/shared/rpc/coordinator.ts",
+      "source_line": 125,
+      "requirements": [
+        "BOT-02"
+      ],
+      "classification": "mapped",
+      "note": "实现等价行为；不要求沿用原接口名"
+    },
+    {
+      "surface": "coordinator",
+      "method": "getAgentAvatar",
+      "args_shape": "object",
+      "reply_shape": "record",
+      "source_file": "/Users/chenqiang/Desktop/AI/grok-bot-0.18-reconstructed-main/source/shared/rpc/coordinator.ts",
+      "source_line": 126,
+      "requirements": [
+        "BOT-02"
+      ],
+      "classification": "mapped",
+      "note": "实现等价行为；不要求沿用原接口名"
+    },
+    {
+      "surface": "coordinator",
+      "method": "getAgentWorkflows",
+      "args_shape": "object",
+      "reply_shape": "array",
+      "source_file": "/Users/chenqiang/Desktop/AI/grok-bot-0.18-reconstructed-main/source/shared/rpc/coordinator.ts",
+      "source_line": 127,
+      "requirements": [
+        "SKL-01",
+        "SKL-02",
+        "SKL-09"
+      ],
+      "classification": "mapped",
+      "note": "旧源码 workflow 命名对应技能流程，不能与定时 automation 混为一张表"
+    },
+    {
+      "surface": "coordinator",
+      "method": "createAgentWorkflow",
+      "args_shape": "object",
+      "reply_shape": "array",
+      "source_file": "/Users/chenqiang/Desktop/AI/grok-bot-0.18-reconstructed-main/source/shared/rpc/coordinator.ts",
+      "source_line": 128,
+      "requirements": [
+        "SKL-01",
+        "SKL-02",
+        "SKL-09"
+      ],
+      "classification": "mapped",
+      "note": "旧源码 workflow 命名对应技能流程，不能与定时 automation 混为一张表"
+    },
+    {
+      "surface": "coordinator",
+      "method": "updateAgentWorkflow",
+      "args_shape": "object",
+      "reply_shape": "array",
+      "source_file": "/Users/chenqiang/Desktop/AI/grok-bot-0.18-reconstructed-main/source/shared/rpc/coordinator.ts",
+      "source_line": 129,
+      "requirements": [
+        "SKL-01",
+        "SKL-02",
+        "SKL-09"
+      ],
+      "classification": "mapped",
+      "note": "旧源码 workflow 命名对应技能流程，不能与定时 automation 混为一张表"
+    },
+    {
+      "surface": "coordinator",
+      "method": "setAgentWorkflowEnabled",
+      "args_shape": "object",
+      "reply_shape": "array",
+      "source_file": "/Users/chenqiang/Desktop/AI/grok-bot-0.18-reconstructed-main/source/shared/rpc/coordinator.ts",
+      "source_line": 130,
+      "requirements": [
+        "SKL-01",
+        "SKL-02",
+        "SKL-09"
+      ],
+      "classification": "mapped",
+      "note": "旧源码 workflow 命名对应技能流程，不能与定时 automation 混为一张表"
+    },
+    {
+      "surface": "coordinator",
+      "method": "deleteAgentWorkflow",
+      "args_shape": "object",
+      "reply_shape": "array",
+      "source_file": "/Users/chenqiang/Desktop/AI/grok-bot-0.18-reconstructed-main/source/shared/rpc/coordinator.ts",
+      "source_line": 131,
+      "requirements": [
+        "SKL-01",
+        "SKL-02",
+        "SKL-09"
+      ],
+      "classification": "mapped",
+      "note": "旧源码 workflow 命名对应技能流程，不能与定时 automation 混为一张表"
+    },
+    {
+      "surface": "coordinator",
+      "method": "runAgentWorkflowNow",
+      "args_shape": "object",
+      "reply_shape": "void",
+      "source_file": "/Users/chenqiang/Desktop/AI/grok-bot-0.18-reconstructed-main/source/shared/rpc/coordinator.ts",
+      "source_line": 132,
+      "requirements": [
+        "SKL-01",
+        "SKL-02",
+        "SKL-09"
+      ],
+      "classification": "mapped",
+      "note": "旧源码 workflow 命名对应技能流程，不能与定时 automation 混为一张表"
+    },
+    {
+      "surface": "coordinator",
+      "method": "importAgentWorkflowText",
+      "args_shape": "object",
+      "reply_shape": "import-result",
+      "source_file": "/Users/chenqiang/Desktop/AI/grok-bot-0.18-reconstructed-main/source/shared/rpc/coordinator.ts",
+      "source_line": 133,
+      "requirements": [
+        "SKL-01",
+        "SKL-02"
+      ],
+      "classification": "mapped",
+      "note": "文本、URL 与本地技能迁移分别校验依赖、内容和权限"
+    },
+    {
+      "surface": "coordinator",
+      "method": "importAgentWorkflowUrl",
+      "args_shape": "object",
+      "reply_shape": "import-result",
+      "source_file": "/Users/chenqiang/Desktop/AI/grok-bot-0.18-reconstructed-main/source/shared/rpc/coordinator.ts",
+      "source_line": 134,
+      "requirements": [
+        "SKL-01",
+        "SKL-02"
+      ],
+      "classification": "mapped",
+      "note": "文本、URL 与本地技能迁移分别校验依赖、内容和权限"
+    },
+    {
+      "surface": "coordinator",
+      "method": "portAgentLocalSkills",
+      "args_shape": "object",
+      "reply_shape": "import-result",
+      "source_file": "/Users/chenqiang/Desktop/AI/grok-bot-0.18-reconstructed-main/source/shared/rpc/coordinator.ts",
+      "source_line": 135,
+      "requirements": [
+        "SKL-01",
+        "SKL-02"
+      ],
+      "classification": "mapped",
+      "note": "文本、URL 与本地技能迁移分别校验依赖、内容和权限"
+    },
+    {
+      "surface": "coordinator",
+      "method": "getConversationOutline",
+      "args_shape": "object",
+      "reply_shape": "array",
+      "source_file": "/Users/chenqiang/Desktop/AI/grok-bot-0.18-reconstructed-main/source/shared/rpc/coordinator.ts",
+      "source_line": 136,
+      "requirements": [
+        "MSG-21"
+      ],
+      "classification": "needs_observation",
+      "note": "对话提纲/定位入口需按实际原版界面核实，不等同于已经看到公开 UI"
+    },
+    {
+      "surface": "coordinator",
+      "method": "skillsCatalog",
+      "args_shape": "none",
+      "reply_shape": "array",
+      "source_file": "/Users/chenqiang/Desktop/AI/grok-bot-0.18-reconstructed-main/source/shared/rpc/coordinator.ts",
+      "source_line": 137,
+      "requirements": [
+        "SKL-01",
+        "PLG-10"
+      ],
+      "classification": "mapped",
+      "note": "实现等价行为；不要求沿用原接口名"
+    },
+    {
+      "surface": "coordinator",
+      "method": "syncPluginSkills",
+      "args_shape": "none",
+      "reply_shape": "array",
+      "source_file": "/Users/chenqiang/Desktop/AI/grok-bot-0.18-reconstructed-main/source/shared/rpc/coordinator.ts",
+      "source_line": 138,
+      "requirements": [
+        "SKL-01",
+        "PLG-10"
+      ],
+      "classification": "mapped",
+      "note": "实现等价行为；不要求沿用原接口名"
+    },
+    {
+      "surface": "coordinator",
+      "method": "getPluginSyncStatus",
+      "args_shape": "none",
+      "reply_shape": "record",
+      "source_file": "/Users/chenqiang/Desktop/AI/grok-bot-0.18-reconstructed-main/source/shared/rpc/coordinator.ts",
+      "source_line": 139,
+      "requirements": [
+        "SKL-01",
+        "PLG-10"
+      ],
+      "classification": "mapped",
+      "note": "实现等价行为；不要求沿用原接口名"
+    },
+    {
+      "surface": "coordinator",
+      "method": "listRoutedMcpTools",
+      "args_shape": "none",
+      "reply_shape": "array",
+      "source_file": "/Users/chenqiang/Desktop/AI/grok-bot-0.18-reconstructed-main/source/shared/rpc/coordinator.ts",
+      "source_line": 140,
+      "requirements": [
+        "PLG-05",
+        "PLG-06",
+        "APR-14"
+      ],
+      "classification": "mapped",
+      "note": "实现等价行为；不要求沿用原接口名"
+    },
+    {
+      "surface": "coordinator",
+      "method": "executeRoutedMcpTool",
+      "args_shape": "object",
+      "reply_shape": "record",
+      "source_file": "/Users/chenqiang/Desktop/AI/grok-bot-0.18-reconstructed-main/source/shared/rpc/coordinator.ts",
+      "source_line": 141,
+      "requirements": [
+        "PLG-05",
+        "PLG-06",
+        "APR-14"
+      ],
+      "classification": "mapped",
+      "note": "实现等价行为；不要求沿用原接口名"
+    },
+    {
+      "surface": "coordinator",
+      "method": "getSkillPublishTargets",
+      "args_shape": "none",
+      "reply_shape": "record",
+      "source_file": "/Users/chenqiang/Desktop/AI/grok-bot-0.18-reconstructed-main/source/shared/rpc/coordinator.ts",
+      "source_line": 142,
+      "requirements": [
+        "OBS-05"
+      ],
+      "classification": "needs_observation",
+      "note": "确认发布目标、权限及版本"
+    },
+    {
+      "surface": "coordinator",
+      "method": "publishSkill",
+      "args_shape": "object",
+      "reply_shape": "record",
+      "source_file": "/Users/chenqiang/Desktop/AI/grok-bot-0.18-reconstructed-main/source/shared/rpc/coordinator.ts",
+      "source_line": 143,
+      "requirements": [
+        "OBS-05"
+      ],
+      "classification": "needs_observation",
+      "note": "确认发布目标、权限及版本"
+    },
+    {
+      "surface": "coordinator",
+      "method": "resyncPublishedSkill",
+      "args_shape": "object",
+      "reply_shape": "record",
+      "source_file": "/Users/chenqiang/Desktop/AI/grok-bot-0.18-reconstructed-main/source/shared/rpc/coordinator.ts",
+      "source_line": 144,
+      "requirements": [
+        "OBS-05"
+      ],
+      "classification": "needs_observation",
+      "note": "确认发布目标、权限及版本"
+    },
+    {
+      "surface": "coordinator",
+      "method": "unpublishSkill",
+      "args_shape": "object",
+      "reply_shape": "record",
+      "source_file": "/Users/chenqiang/Desktop/AI/grok-bot-0.18-reconstructed-main/source/shared/rpc/coordinator.ts",
+      "source_line": 145,
+      "requirements": [
+        "OBS-05"
+      ],
+      "classification": "needs_observation",
+      "note": "确认发布目标、权限及版本"
+    },
+    {
+      "surface": "coordinator",
+      "method": "getSubagents",
+      "args_shape": "object",
+      "reply_shape": "array",
+      "source_file": "/Users/chenqiang/Desktop/AI/grok-bot-0.18-reconstructed-main/source/shared/rpc/coordinator.ts",
+      "source_line": 146,
+      "requirements": [
+        "COL-11",
+        "OBS-04"
+      ],
+      "classification": "mapped",
+      "note": "实现等价行为；不要求沿用原接口名"
+    },
+    {
+      "surface": "coordinator",
+      "method": "getAsyncTasks",
+      "args_shape": "object",
+      "reply_shape": "array",
+      "source_file": "/Users/chenqiang/Desktop/AI/grok-bot-0.18-reconstructed-main/source/shared/rpc/coordinator.ts",
+      "source_line": 147,
+      "requirements": [
+        "COL-11",
+        "OBS-04"
+      ],
+      "classification": "mapped",
+      "note": "实现等价行为；不要求沿用原接口名"
+    },
+    {
+      "surface": "coordinator",
+      "method": "getForeverBoxStatus",
+      "args_shape": "object",
+      "reply_shape": "box-status",
+      "source_file": "/Users/chenqiang/Desktop/AI/grok-bot-0.18-reconstructed-main/source/shared/rpc/coordinator.ts",
+      "source_line": 148,
+      "requirements": [
+        "CPU-01",
+        "CPU-09",
+        "CPU-10"
+      ],
+      "classification": "mapped",
+      "note": "实现等价行为；不要求沿用原接口名"
+    },
+    {
+      "surface": "coordinator",
+      "method": "ensureForeverBox",
+      "args_shape": "object",
+      "reply_shape": "box-status",
+      "source_file": "/Users/chenqiang/Desktop/AI/grok-bot-0.18-reconstructed-main/source/shared/rpc/coordinator.ts",
+      "source_line": 149,
+      "requirements": [
+        "CPU-01",
+        "CPU-09",
+        "CPU-10"
+      ],
+      "classification": "mapped",
+      "note": "实现等价行为；不要求沿用原接口名"
+    },
+    {
+      "surface": "coordinator",
+      "method": "handBackForeverBox",
+      "args_shape": "object",
+      "reply_shape": "void",
+      "source_file": "/Users/chenqiang/Desktop/AI/grok-bot-0.18-reconstructed-main/source/shared/rpc/coordinator.ts",
+      "source_line": 150,
+      "requirements": [
+        "CPU-07"
+      ],
+      "classification": "mapped",
+      "note": "实现等价行为；不要求沿用原接口名"
+    },
+    {
+      "surface": "coordinator",
+      "method": "startTeachRecording",
+      "args_shape": "object",
+      "reply_shape": "record",
+      "source_file": "/Users/chenqiang/Desktop/AI/grok-bot-0.18-reconstructed-main/source/shared/rpc/coordinator.ts",
+      "source_line": 151,
+      "requirements": [
+        "SKL-04",
+        "SKL-05",
+        "SKL-06",
+        "SKL-07",
+        "SKL-08",
+        "SKL-09",
+        "SKL-10"
+      ],
+      "classification": "mapped",
+      "note": "实现等价行为；不要求沿用原接口名"
+    },
+    {
+      "surface": "coordinator",
+      "method": "stopTeachRecording",
+      "args_shape": "object",
+      "reply_shape": "record",
+      "source_file": "/Users/chenqiang/Desktop/AI/grok-bot-0.18-reconstructed-main/source/shared/rpc/coordinator.ts",
+      "source_line": 152,
+      "requirements": [
+        "SKL-04",
+        "SKL-05",
+        "SKL-06",
+        "SKL-07",
+        "SKL-08",
+        "SKL-09",
+        "SKL-10"
+      ],
+      "classification": "mapped",
+      "note": "实现等价行为；不要求沿用原接口名"
+    },
+    {
+      "surface": "coordinator",
+      "method": "getTeachRecordingStatus",
+      "args_shape": "none",
+      "reply_shape": "record",
+      "source_file": "/Users/chenqiang/Desktop/AI/grok-bot-0.18-reconstructed-main/source/shared/rpc/coordinator.ts",
+      "source_line": 153,
+      "requirements": [
+        "SKL-04",
+        "SKL-05",
+        "SKL-06",
+        "SKL-07",
+        "SKL-08",
+        "SKL-09",
+        "SKL-10"
+      ],
+      "classification": "mapped",
+      "note": "实现等价行为；不要求沿用原接口名"
+    },
+    {
+      "surface": "coordinator",
+      "method": "getTrays",
+      "args_shape": "none",
+      "reply_shape": "array",
+      "source_file": "/Users/chenqiang/Desktop/AI/grok-bot-0.18-reconstructed-main/source/shared/rpc/coordinator.ts",
+      "source_line": 154,
+      "requirements": [
+        "MSG-19"
+      ],
+      "classification": "mapped",
+      "note": "实现等价行为；不要求沿用原接口名"
+    },
+    {
+      "surface": "coordinator",
+      "method": "dismissTray",
+      "args_shape": "object",
+      "reply_shape": "void",
+      "source_file": "/Users/chenqiang/Desktop/AI/grok-bot-0.18-reconstructed-main/source/shared/rpc/coordinator.ts",
+      "source_line": 155,
+      "requirements": [
+        "MSG-19"
+      ],
+      "classification": "mapped",
+      "note": "实现等价行为；不要求沿用原接口名"
+    },
+    {
+      "surface": "coordinator",
+      "method": "clearTrays",
+      "args_shape": "none",
+      "reply_shape": "void",
+      "source_file": "/Users/chenqiang/Desktop/AI/grok-bot-0.18-reconstructed-main/source/shared/rpc/coordinator.ts",
+      "source_line": 156,
+      "requirements": [
+        "MSG-19"
+      ],
+      "classification": "mapped",
+      "note": "实现等价行为；不要求沿用原接口名"
+    },
+    {
+      "surface": "coordinator",
+      "method": "getAgentChannels",
+      "args_shape": "object",
+      "reply_shape": "channels-view",
+      "source_file": "/Users/chenqiang/Desktop/AI/grok-bot-0.18-reconstructed-main/source/shared/rpc/coordinator.ts",
+      "source_line": 157,
+      "requirements": [
+        "TEAM-12",
+        "OBS-07"
+      ],
+      "classification": "needs_observation",
+      "note": "0.18 的 Bot channel 协议与当前 Team Bot Slack 接入分别核实"
+    },
+    {
+      "surface": "coordinator",
+      "method": "connectChannel",
+      "args_shape": "object",
+      "reply_shape": "channels-view",
+      "source_file": "/Users/chenqiang/Desktop/AI/grok-bot-0.18-reconstructed-main/source/shared/rpc/coordinator.ts",
+      "source_line": 158,
+      "requirements": [
+        "TEAM-12",
+        "OBS-07"
+      ],
+      "classification": "needs_observation",
+      "note": "0.18 的 Bot channel 协议与当前 Team Bot Slack 接入分别核实"
+    },
+    {
+      "surface": "coordinator",
+      "method": "disconnectChannel",
+      "args_shape": "object",
+      "reply_shape": "channels-view",
+      "source_file": "/Users/chenqiang/Desktop/AI/grok-bot-0.18-reconstructed-main/source/shared/rpc/coordinator.ts",
+      "source_line": 159,
+      "requirements": [
+        "TEAM-12",
+        "OBS-07"
+      ],
+      "classification": "needs_observation",
+      "note": "0.18 的 Bot channel 协议与当前 Team Bot Slack 接入分别核实"
+    },
+    {
+      "surface": "coordinator",
+      "method": "refreshChannel",
+      "args_shape": "object",
+      "reply_shape": "channels-view",
+      "source_file": "/Users/chenqiang/Desktop/AI/grok-bot-0.18-reconstructed-main/source/shared/rpc/coordinator.ts",
+      "source_line": 160,
+      "requirements": [
+        "TEAM-12",
+        "OBS-07"
+      ],
+      "classification": "needs_observation",
+      "note": "0.18 的 Bot channel 协议与当前 Team Bot Slack 接入分别核实"
+    },
+    {
+      "surface": "coordinator",
+      "method": "getBoxSecretsStatus",
+      "args_shape": "none",
+      "reply_shape": "box-secrets",
+      "source_file": "/Users/chenqiang/Desktop/AI/grok-bot-0.18-reconstructed-main/source/shared/rpc/coordinator.ts",
+      "source_line": 161,
+      "requirements": [
+        "MSG-14",
+        "APR-10",
+        "APR-12"
+      ],
+      "classification": "mapped",
+      "note": "实现等价行为；不要求沿用原接口名"
+    },
+    {
+      "surface": "coordinator",
+      "method": "getAgentAutomations",
+      "args_shape": "object",
+      "reply_shape": "array",
+      "source_file": "/Users/chenqiang/Desktop/AI/grok-bot-0.18-reconstructed-main/source/shared/rpc/coordinator.ts",
+      "source_line": 162,
+      "requirements": [
+        "AUT-01",
+        "AUT-02",
+        "AUT-03",
+        "AUT-04",
+        "AUT-05",
+        "AUT-06",
+        "AUT-07",
+        "AUT-08"
+      ],
+      "classification": "mapped",
+      "note": "实现等价行为；不要求沿用原接口名"
+    },
+    {
+      "surface": "coordinator",
+      "method": "listAllAutomations",
+      "args_shape": "none",
+      "reply_shape": "array",
+      "source_file": "/Users/chenqiang/Desktop/AI/grok-bot-0.18-reconstructed-main/source/shared/rpc/coordinator.ts",
+      "source_line": 163,
+      "requirements": [
+        "AUT-01",
+        "AUT-02",
+        "AUT-03",
+        "AUT-04",
+        "AUT-05",
+        "AUT-06",
+        "AUT-07",
+        "AUT-08"
+      ],
+      "classification": "mapped",
+      "note": "实现等价行为；不要求沿用原接口名"
+    },
+    {
+      "surface": "coordinator",
+      "method": "isAgentNetworkEnabled",
+      "args_shape": "none",
+      "reply_shape": "boolean",
+      "source_file": "/Users/chenqiang/Desktop/AI/grok-bot-0.18-reconstructed-main/source/shared/rpc/coordinator.ts",
+      "source_line": 164,
+      "requirements": [
+        "OBS-02"
+      ],
+      "classification": "needs_observation",
+      "note": "功能开关不是功能已发布的证据"
+    },
+    {
+      "surface": "coordinator",
+      "method": "isGlobalSearchEnabled",
+      "args_shape": "none",
+      "reply_shape": "boolean",
+      "source_file": "/Users/chenqiang/Desktop/AI/grok-bot-0.18-reconstructed-main/source/shared/rpc/coordinator.ts",
+      "source_line": 165,
+      "requirements": [
+        "MSG-20"
+      ],
+      "classification": "mapped",
+      "note": "实现等价行为；不要求沿用原接口名"
+    },
+    {
+      "surface": "coordinator",
+      "method": "isEgressTunnelAvailable",
+      "args_shape": "none",
+      "reply_shape": "boolean",
+      "source_file": "/Users/chenqiang/Desktop/AI/grok-bot-0.18-reconstructed-main/source/shared/rpc/coordinator.ts",
+      "source_line": 166,
+      "requirements": [
+        "DEV-04"
+      ],
+      "classification": "mapped",
+      "note": "实现等价行为；不要求沿用原接口名"
+    },
+    {
+      "surface": "coordinator",
+      "method": "getSharingState",
+      "args_shape": "none",
+      "reply_shape": "record",
+      "source_file": "/Users/chenqiang/Desktop/AI/grok-bot-0.18-reconstructed-main/source/shared/rpc/coordinator.ts",
+      "source_line": 167,
+      "requirements": [
+        "OBS-01"
+      ],
+      "classification": "needs_observation",
+      "note": "跨用户房间不能直接复用 Team Bot 私聊数据模型"
+    },
+    {
+      "surface": "coordinator",
+      "method": "createRoomFromAgent",
+      "args_shape": "object",
+      "reply_shape": "record",
+      "source_file": "/Users/chenqiang/Desktop/AI/grok-bot-0.18-reconstructed-main/source/shared/rpc/coordinator.ts",
+      "source_line": 168,
+      "requirements": [
+        "OBS-01"
+      ],
+      "classification": "needs_observation",
+      "note": "跨用户房间不能直接复用 Team Bot 私聊数据模型"
+    },
+    {
+      "surface": "coordinator",
+      "method": "createRoomInvite",
+      "args_shape": "object",
+      "reply_shape": "record",
+      "source_file": "/Users/chenqiang/Desktop/AI/grok-bot-0.18-reconstructed-main/source/shared/rpc/coordinator.ts",
+      "source_line": 169,
+      "requirements": [
+        "OBS-01"
+      ],
+      "classification": "needs_observation",
+      "note": "跨用户房间不能直接复用 Team Bot 私聊数据模型"
+    },
+    {
+      "surface": "coordinator",
+      "method": "joinSharedRoom",
+      "args_shape": "object",
+      "reply_shape": "record",
+      "source_file": "/Users/chenqiang/Desktop/AI/grok-bot-0.18-reconstructed-main/source/shared/rpc/coordinator.ts",
+      "source_line": 170,
+      "requirements": [
+        "OBS-01"
+      ],
+      "classification": "needs_observation",
+      "note": "跨用户房间不能直接复用 Team Bot 私聊数据模型"
+    },
+    {
+      "surface": "coordinator",
+      "method": "respondToRoomJoinRequest",
+      "args_shape": "object",
+      "reply_shape": "record",
+      "source_file": "/Users/chenqiang/Desktop/AI/grok-bot-0.18-reconstructed-main/source/shared/rpc/coordinator.ts",
+      "source_line": 171,
+      "requirements": [
+        "OBS-01"
+      ],
+      "classification": "needs_observation",
+      "note": "跨用户房间不能直接复用 Team Bot 私聊数据模型"
+    },
+    {
+      "surface": "coordinator",
+      "method": "createSharedRoom",
+      "args_shape": "object",
+      "reply_shape": "record",
+      "source_file": "/Users/chenqiang/Desktop/AI/grok-bot-0.18-reconstructed-main/source/shared/rpc/coordinator.ts",
+      "source_line": 172,
+      "requirements": [
+        "OBS-01"
+      ],
+      "classification": "needs_observation",
+      "note": "跨用户房间不能直接复用 Team Bot 私聊数据模型"
+    },
+    {
+      "surface": "coordinator",
+      "method": "addOwnAgentToSharedRoom",
+      "args_shape": "object",
+      "reply_shape": "record",
+      "source_file": "/Users/chenqiang/Desktop/AI/grok-bot-0.18-reconstructed-main/source/shared/rpc/coordinator.ts",
+      "source_line": 173,
+      "requirements": [
+        "OBS-01"
+      ],
+      "classification": "needs_observation",
+      "note": "跨用户房间不能直接复用 Team Bot 私聊数据模型"
+    },
+    {
+      "surface": "coordinator",
+      "method": "removeOwnAgentFromSharedRoom",
+      "args_shape": "object",
+      "reply_shape": "record",
+      "source_file": "/Users/chenqiang/Desktop/AI/grok-bot-0.18-reconstructed-main/source/shared/rpc/coordinator.ts",
+      "source_line": 174,
+      "requirements": [
+        "OBS-01"
+      ],
+      "classification": "needs_observation",
+      "note": "跨用户房间不能直接复用 Team Bot 私聊数据模型"
+    },
+    {
+      "surface": "coordinator",
+      "method": "setSharedRoomTyping",
+      "args_shape": "object",
+      "reply_shape": "void",
+      "source_file": "/Users/chenqiang/Desktop/AI/grok-bot-0.18-reconstructed-main/source/shared/rpc/coordinator.ts",
+      "source_line": 175,
+      "requirements": [
+        "OBS-01"
+      ],
+      "classification": "needs_observation",
+      "note": "跨用户房间不能直接复用 Team Bot 私聊数据模型"
+    },
+    {
+      "surface": "coordinator",
+      "method": "leaveSharedRoom",
+      "args_shape": "object",
+      "reply_shape": "record",
+      "source_file": "/Users/chenqiang/Desktop/AI/grok-bot-0.18-reconstructed-main/source/shared/rpc/coordinator.ts",
+      "source_line": 176,
+      "requirements": [
+        "OBS-01"
+      ],
+      "classification": "needs_observation",
+      "note": "跨用户房间不能直接复用 Team Bot 私聊数据模型"
+    },
+    {
+      "surface": "coordinator",
+      "method": "setAgentAutomationEnabled",
+      "args_shape": "object",
+      "reply_shape": "array",
+      "source_file": "/Users/chenqiang/Desktop/AI/grok-bot-0.18-reconstructed-main/source/shared/rpc/coordinator.ts",
+      "source_line": 177,
+      "requirements": [
+        "AUT-01",
+        "AUT-02",
+        "AUT-03",
+        "AUT-04",
+        "AUT-05",
+        "AUT-06",
+        "AUT-07",
+        "AUT-08"
+      ],
+      "classification": "mapped",
+      "note": "实现等价行为；不要求沿用原接口名"
+    },
+    {
+      "surface": "coordinator",
+      "method": "createAgentAutomation",
+      "args_shape": "object",
+      "reply_shape": "array",
+      "source_file": "/Users/chenqiang/Desktop/AI/grok-bot-0.18-reconstructed-main/source/shared/rpc/coordinator.ts",
+      "source_line": 178,
+      "requirements": [
+        "AUT-01",
+        "AUT-02",
+        "AUT-03",
+        "AUT-04",
+        "AUT-05",
+        "AUT-06",
+        "AUT-07",
+        "AUT-08"
+      ],
+      "classification": "mapped",
+      "note": "实现等价行为；不要求沿用原接口名"
+    },
+    {
+      "surface": "coordinator",
+      "method": "updateAgentAutomation",
+      "args_shape": "object",
+      "reply_shape": "array",
+      "source_file": "/Users/chenqiang/Desktop/AI/grok-bot-0.18-reconstructed-main/source/shared/rpc/coordinator.ts",
+      "source_line": 179,
+      "requirements": [
+        "AUT-01",
+        "AUT-02",
+        "AUT-03",
+        "AUT-04",
+        "AUT-05",
+        "AUT-06",
+        "AUT-07",
+        "AUT-08"
+      ],
+      "classification": "mapped",
+      "note": "实现等价行为；不要求沿用原接口名"
+    },
+    {
+      "surface": "coordinator",
+      "method": "deleteAgentAutomation",
+      "args_shape": "object",
+      "reply_shape": "array",
+      "source_file": "/Users/chenqiang/Desktop/AI/grok-bot-0.18-reconstructed-main/source/shared/rpc/coordinator.ts",
+      "source_line": 180,
+      "requirements": [
+        "AUT-01",
+        "AUT-02",
+        "AUT-03",
+        "AUT-04",
+        "AUT-05",
+        "AUT-06",
+        "AUT-07",
+        "AUT-08"
+      ],
+      "classification": "mapped",
+      "note": "实现等价行为；不要求沿用原接口名"
+    },
+    {
+      "surface": "coordinator",
+      "method": "runAgentAutomationNow",
+      "args_shape": "object",
+      "reply_shape": "void",
+      "source_file": "/Users/chenqiang/Desktop/AI/grok-bot-0.18-reconstructed-main/source/shared/rpc/coordinator.ts",
+      "source_line": 181,
+      "requirements": [
+        "AUT-01",
+        "AUT-02",
+        "AUT-03",
+        "AUT-04",
+        "AUT-05",
+        "AUT-06",
+        "AUT-07",
+        "AUT-08"
+      ],
+      "classification": "mapped",
+      "note": "实现等价行为；不要求沿用原接口名"
+    },
+    {
+      "surface": "main",
+      "method": "openExternal",
+      "args_shape": "object",
+      "reply_shape": null,
+      "source_file": "/Users/chenqiang/Desktop/AI/grok-bot-0.18-reconstructed-main/source/shared/rpc/main.ts",
+      "source_line": 5,
+      "requirements": [
+        "FIL-08"
+      ],
+      "classification": "mapped",
+      "note": "实现等价行为；不要求沿用原接口名"
+    },
+    {
+      "surface": "main",
+      "method": "submitFeedback",
+      "args_shape": "object",
+      "reply_shape": null,
+      "source_file": "/Users/chenqiang/Desktop/AI/grok-bot-0.18-reconstructed-main/source/shared/rpc/main.ts",
+      "source_line": 6,
+      "requirements": [
+        "UI-12",
+        "VOC-05"
+      ],
+      "classification": "mapped",
+      "note": "实现等价行为；不要求沿用原接口名"
+    },
+    {
+      "surface": "main",
+      "method": "getDesktopEnvironment",
+      "args_shape": "none",
+      "reply_shape": null,
+      "source_file": "/Users/chenqiang/Desktop/AI/grok-bot-0.18-reconstructed-main/source/shared/rpc/main.ts",
+      "source_line": 7,
+      "requirements": [
+        "UI-01",
+        "UI-07"
+      ],
+      "classification": "mapped",
+      "note": "复用 Electron 窗口；平台特有标题栏和关闭行为需要对照"
+    },
+    {
+      "surface": "main",
+      "method": "getWindowState",
+      "args_shape": "none",
+      "reply_shape": null,
+      "source_file": "/Users/chenqiang/Desktop/AI/grok-bot-0.18-reconstructed-main/source/shared/rpc/main.ts",
+      "source_line": 8,
+      "requirements": [
+        "UI-01",
+        "UI-07"
+      ],
+      "classification": "mapped",
+      "note": "复用 Electron 窗口；平台特有标题栏和关闭行为需要对照"
+    },
+    {
+      "surface": "main",
+      "method": "minimizeWindow",
+      "args_shape": "none",
+      "reply_shape": null,
+      "source_file": "/Users/chenqiang/Desktop/AI/grok-bot-0.18-reconstructed-main/source/shared/rpc/main.ts",
+      "source_line": 9,
+      "requirements": [
+        "UI-01",
+        "UI-07"
+      ],
+      "classification": "mapped",
+      "note": "复用 Electron 窗口；平台特有标题栏和关闭行为需要对照"
+    },
+    {
+      "surface": "main",
+      "method": "toggleMaximizeWindow",
+      "args_shape": "none",
+      "reply_shape": null,
+      "source_file": "/Users/chenqiang/Desktop/AI/grok-bot-0.18-reconstructed-main/source/shared/rpc/main.ts",
+      "source_line": 10,
+      "requirements": [
+        "UI-01",
+        "UI-07"
+      ],
+      "classification": "mapped",
+      "note": "复用 Electron 窗口；平台特有标题栏和关闭行为需要对照"
+    },
+    {
+      "surface": "main",
+      "method": "closeWindow",
+      "args_shape": "none",
+      "reply_shape": null,
+      "source_file": "/Users/chenqiang/Desktop/AI/grok-bot-0.18-reconstructed-main/source/shared/rpc/main.ts",
+      "source_line": 11,
+      "requirements": [
+        "UI-01",
+        "UI-07"
+      ],
+      "classification": "mapped",
+      "note": "复用 Electron 窗口；平台特有标题栏和关闭行为需要对照"
+    },
+    {
+      "surface": "main",
+      "method": "resizeWindowWidth",
+      "args_shape": "object",
+      "reply_shape": null,
+      "source_file": "/Users/chenqiang/Desktop/AI/grok-bot-0.18-reconstructed-main/source/shared/rpc/main.ts",
+      "source_line": 12,
+      "requirements": [
+        "UI-01",
+        "UI-07"
+      ],
+      "classification": "mapped",
+      "note": "复用 Electron 窗口；平台特有标题栏和关闭行为需要对照"
+    },
+    {
+      "surface": "main",
+      "method": "setTitleBarOverlayTone",
+      "args_shape": "object",
+      "reply_shape": null,
+      "source_file": "/Users/chenqiang/Desktop/AI/grok-bot-0.18-reconstructed-main/source/shared/rpc/main.ts",
+      "source_line": 13,
+      "requirements": [
+        "UI-01",
+        "UI-07"
+      ],
+      "classification": "mapped",
+      "note": "复用 Electron 窗口；平台特有标题栏和关闭行为需要对照"
+    },
+    {
+      "surface": "main",
+      "method": "getThemeState",
+      "args_shape": "none",
+      "reply_shape": null,
+      "source_file": "/Users/chenqiang/Desktop/AI/grok-bot-0.18-reconstructed-main/source/shared/rpc/main.ts",
+      "source_line": 14,
+      "requirements": [
+        "UI-06"
+      ],
+      "classification": "mapped",
+      "note": "实现等价行为；不要求沿用原接口名"
+    },
+    {
+      "surface": "main",
+      "method": "setThemePreference",
+      "args_shape": "object",
+      "reply_shape": null,
+      "source_file": "/Users/chenqiang/Desktop/AI/grok-bot-0.18-reconstructed-main/source/shared/rpc/main.ts",
+      "source_line": 15,
+      "requirements": [
+        "UI-06"
+      ],
+      "classification": "mapped",
+      "note": "实现等价行为；不要求沿用原接口名"
+    },
+    {
+      "surface": "main",
+      "method": "getEgressTunnelEnabled",
+      "args_shape": "none",
+      "reply_shape": null,
+      "source_file": "/Users/chenqiang/Desktop/AI/grok-bot-0.18-reconstructed-main/source/shared/rpc/main.ts",
+      "source_line": 16,
+      "requirements": [
+        "DEV-04",
+        "DEV-05"
+      ],
+      "classification": "mapped",
+      "note": "实现等价行为；不要求沿用原接口名"
+    },
+    {
+      "surface": "main",
+      "method": "setEgressTunnelEnabled",
+      "args_shape": "object",
+      "reply_shape": null,
+      "source_file": "/Users/chenqiang/Desktop/AI/grok-bot-0.18-reconstructed-main/source/shared/rpc/main.ts",
+      "source_line": 17,
+      "requirements": [
+        "DEV-04",
+        "DEV-05"
+      ],
+      "classification": "mapped",
+      "note": "实现等价行为；不要求沿用原接口名"
+    },
+    {
+      "surface": "main",
+      "method": "getEgressTunnelStatus",
+      "args_shape": "none",
+      "reply_shape": null,
+      "source_file": "/Users/chenqiang/Desktop/AI/grok-bot-0.18-reconstructed-main/source/shared/rpc/main.ts",
+      "source_line": 18,
+      "requirements": [
+        "DEV-04",
+        "DEV-05"
+      ],
+      "classification": "mapped",
+      "note": "实现等价行为；不要求沿用原接口名"
+    },
+    {
+      "surface": "main",
+      "method": "getWebauthnProxyEnabled",
+      "args_shape": "none",
+      "reply_shape": null,
+      "source_file": "/Users/chenqiang/Desktop/AI/grok-bot-0.18-reconstructed-main/source/shared/rpc/main.ts",
+      "source_line": 19,
+      "requirements": [
+        "DEV-06"
+      ],
+      "classification": "mapped",
+      "note": "实现等价行为；不要求沿用原接口名"
+    },
+    {
+      "surface": "main",
+      "method": "setWebauthnProxyEnabled",
+      "args_shape": "object",
+      "reply_shape": null,
+      "source_file": "/Users/chenqiang/Desktop/AI/grok-bot-0.18-reconstructed-main/source/shared/rpc/main.ts",
+      "source_line": 20,
+      "requirements": [
+        "DEV-06"
+      ],
+      "classification": "mapped",
+      "note": "实现等价行为；不要求沿用原接口名"
+    },
+    {
+      "surface": "main",
+      "method": "getUpdateStatus",
+      "args_shape": "none",
+      "reply_shape": null,
+      "source_file": "/Users/chenqiang/Desktop/AI/grok-bot-0.18-reconstructed-main/source/shared/rpc/main.ts",
+      "source_line": 21,
+      "requirements": [
+        "UI-11",
+        "OPS-09"
+      ],
+      "classification": "mapped",
+      "note": "更新渠道、空闲安装、强制最低版本均纳入"
+    },
+    {
+      "surface": "main",
+      "method": "checkForUpdates",
+      "args_shape": "none",
+      "reply_shape": null,
+      "source_file": "/Users/chenqiang/Desktop/AI/grok-bot-0.18-reconstructed-main/source/shared/rpc/main.ts",
+      "source_line": 22,
+      "requirements": [
+        "UI-11",
+        "OPS-09"
+      ],
+      "classification": "mapped",
+      "note": "更新渠道、空闲安装、强制最低版本均纳入"
+    },
+    {
+      "surface": "main",
+      "method": "setUpdateTrack",
+      "args_shape": "object",
+      "reply_shape": null,
+      "source_file": "/Users/chenqiang/Desktop/AI/grok-bot-0.18-reconstructed-main/source/shared/rpc/main.ts",
+      "source_line": 23,
+      "requirements": [
+        "UI-11",
+        "OPS-09"
+      ],
+      "classification": "mapped",
+      "note": "更新渠道、空闲安装、强制最低版本均纳入"
+    },
+    {
+      "surface": "main",
+      "method": "quitAndInstallUpdate",
+      "args_shape": "none",
+      "reply_shape": null,
+      "source_file": "/Users/chenqiang/Desktop/AI/grok-bot-0.18-reconstructed-main/source/shared/rpc/main.ts",
+      "source_line": 24,
+      "requirements": [
+        "UI-11",
+        "OPS-09"
+      ],
+      "classification": "mapped",
+      "note": "更新渠道、空闲安装、强制最低版本均纳入"
+    },
+    {
+      "surface": "main",
+      "method": "setAutoUpdateWhenIdleOptIn",
+      "args_shape": "object",
+      "reply_shape": null,
+      "source_file": "/Users/chenqiang/Desktop/AI/grok-bot-0.18-reconstructed-main/source/shared/rpc/main.ts",
+      "source_line": 25,
+      "requirements": [
+        "UI-11",
+        "OPS-09"
+      ],
+      "classification": "mapped",
+      "note": "更新渠道、空闲安装、强制最低版本均纳入"
+    },
+    {
+      "surface": "main",
+      "method": "getBoxMigrationStatus",
+      "args_shape": "none",
+      "reply_shape": null,
+      "source_file": "/Users/chenqiang/Desktop/AI/grok-bot-0.18-reconstructed-main/source/shared/rpc/main.ts",
+      "source_line": 26,
+      "requirements": [
+        "CPU-11",
+        "CPU-12",
+        "CPU-13"
+      ],
+      "classification": "mapped",
+      "note": "实现等价行为；不要求沿用原接口名"
+    },
+    {
+      "surface": "main",
+      "method": "markDeepLinksReady",
+      "args_shape": "none",
+      "reply_shape": null,
+      "source_file": "/Users/chenqiang/Desktop/AI/grok-bot-0.18-reconstructed-main/source/shared/rpc/main.ts",
+      "source_line": 27,
+      "requirements": [
+        "MOB-12",
+        "UI-01"
+      ],
+      "classification": "mapped",
+      "note": "实现等价行为；不要求沿用原接口名"
+    },
+    {
+      "surface": "main",
+      "method": "getOnboardingSeen",
+      "args_shape": "none",
+      "reply_shape": null,
+      "source_file": "/Users/chenqiang/Desktop/AI/grok-bot-0.18-reconstructed-main/source/shared/rpc/main.ts",
+      "source_line": 28,
+      "requirements": [
+        "ACC-02"
+      ],
+      "classification": "mapped",
+      "note": "实现等价行为；不要求沿用原接口名"
+    },
+    {
+      "surface": "main",
+      "method": "setOnboardingSeen",
+      "args_shape": "object",
+      "reply_shape": null,
+      "source_file": "/Users/chenqiang/Desktop/AI/grok-bot-0.18-reconstructed-main/source/shared/rpc/main.ts",
+      "source_line": 29,
+      "requirements": [
+        "ACC-02"
+      ],
+      "classification": "mapped",
+      "note": "实现等价行为；不要求沿用原接口名"
+    },
+    {
+      "surface": "main",
+      "method": "getTimeZone",
+      "args_shape": "none",
+      "reply_shape": null,
+      "source_file": "/Users/chenqiang/Desktop/AI/grok-bot-0.18-reconstructed-main/source/shared/rpc/main.ts",
+      "source_line": 30,
+      "requirements": [
+        "AUT-03",
+        "UI-06"
+      ],
+      "classification": "mapped",
+      "note": "实现等价行为；不要求沿用原接口名"
+    },
+    {
+      "surface": "main",
+      "method": "setTimeZoneOverride",
+      "args_shape": "object",
+      "reply_shape": null,
+      "source_file": "/Users/chenqiang/Desktop/AI/grok-bot-0.18-reconstructed-main/source/shared/rpc/main.ts",
+      "source_line": 31,
+      "requirements": [
+        "AUT-03",
+        "UI-06"
+      ],
+      "classification": "mapped",
+      "note": "实现等价行为；不要求沿用原接口名"
+    },
+    {
+      "surface": "main",
+      "method": "getAutoReviewInstructions",
+      "args_shape": "none",
+      "reply_shape": null,
+      "source_file": "/Users/chenqiang/Desktop/AI/grok-bot-0.18-reconstructed-main/source/shared/rpc/main.ts",
+      "source_line": 32,
+      "requirements": [
+        "APR-01",
+        "APR-03",
+        "ADM-06"
+      ],
+      "classification": "mapped",
+      "note": "实现等价行为；不要求沿用原接口名"
+    },
+    {
+      "surface": "main",
+      "method": "setAutoReviewInstructions",
+      "args_shape": "object",
+      "reply_shape": null,
+      "source_file": "/Users/chenqiang/Desktop/AI/grok-bot-0.18-reconstructed-main/source/shared/rpc/main.ts",
+      "source_line": 33,
+      "requirements": [
+        "APR-01",
+        "APR-03",
+        "ADM-06"
+      ],
+      "classification": "mapped",
+      "note": "实现等价行为；不要求沿用原接口名"
+    },
+    {
+      "surface": "main",
+      "method": "getLocalToolPermission",
+      "args_shape": "none",
+      "reply_shape": null,
+      "source_file": "/Users/chenqiang/Desktop/AI/grok-bot-0.18-reconstructed-main/source/shared/rpc/main.ts",
+      "source_line": 34,
+      "requirements": [
+        "DEV-01",
+        "DEV-02",
+        "DEV-03",
+        "APR-15"
+      ],
+      "classification": "mapped",
+      "note": "实现等价行为；不要求沿用原接口名"
+    },
+    {
+      "surface": "main",
+      "method": "getLocalToolPermissionCeiling",
+      "args_shape": "none",
+      "reply_shape": null,
+      "source_file": "/Users/chenqiang/Desktop/AI/grok-bot-0.18-reconstructed-main/source/shared/rpc/main.ts",
+      "source_line": 35,
+      "requirements": [
+        "DEV-01",
+        "DEV-02",
+        "DEV-03",
+        "APR-15"
+      ],
+      "classification": "mapped",
+      "note": "实现等价行为；不要求沿用原接口名"
+    },
+    {
+      "surface": "main",
+      "method": "setLocalToolPermission",
+      "args_shape": "object",
+      "reply_shape": null,
+      "source_file": "/Users/chenqiang/Desktop/AI/grok-bot-0.18-reconstructed-main/source/shared/rpc/main.ts",
+      "source_line": 36,
+      "requirements": [
+        "DEV-01",
+        "DEV-02",
+        "DEV-03",
+        "APR-15"
+      ],
+      "classification": "mapped",
+      "note": "实现等价行为；不要求沿用原接口名"
+    },
+    {
+      "surface": "main",
+      "method": "recordLocalToolApproval",
+      "args_shape": "object",
+      "reply_shape": null,
+      "source_file": "/Users/chenqiang/Desktop/AI/grok-bot-0.18-reconstructed-main/source/shared/rpc/main.ts",
+      "source_line": 37,
+      "requirements": [
+        "DEV-01",
+        "DEV-02",
+        "DEV-03",
+        "APR-15"
+      ],
+      "classification": "mapped",
+      "note": "实现等价行为；不要求沿用原接口名"
+    },
+    {
+      "surface": "main",
+      "method": "clearLocalToolApprovals",
+      "args_shape": "none",
+      "reply_shape": null,
+      "source_file": "/Users/chenqiang/Desktop/AI/grok-bot-0.18-reconstructed-main/source/shared/rpc/main.ts",
+      "source_line": 38,
+      "requirements": [
+        "DEV-01",
+        "DEV-02",
+        "DEV-03",
+        "APR-15"
+      ],
+      "classification": "mapped",
+      "note": "实现等价行为；不要求沿用原接口名"
+    },
+    {
+      "surface": "main",
+      "method": "getSidebarCollapsed",
+      "args_shape": "none",
+      "reply_shape": null,
+      "source_file": "/Users/chenqiang/Desktop/AI/grok-bot-0.18-reconstructed-main/source/shared/rpc/main.ts",
+      "source_line": 39,
+      "requirements": [
+        "UI-05"
+      ],
+      "classification": "mapped",
+      "note": "实现等价行为；不要求沿用原接口名"
+    },
+    {
+      "surface": "main",
+      "method": "setSidebarCollapsed",
+      "args_shape": "object",
+      "reply_shape": null,
+      "source_file": "/Users/chenqiang/Desktop/AI/grok-bot-0.18-reconstructed-main/source/shared/rpc/main.ts",
+      "source_line": 40,
+      "requirements": [
+        "UI-05"
+      ],
+      "classification": "mapped",
+      "note": "实现等价行为；不要求沿用原接口名"
+    },
+    {
+      "surface": "main",
+      "method": "pickAvatarSource",
+      "args_shape": "none",
+      "reply_shape": null,
+      "source_file": "/Users/chenqiang/Desktop/AI/grok-bot-0.18-reconstructed-main/source/shared/rpc/main.ts",
+      "source_line": 41,
+      "requirements": [
+        "BOT-02"
+      ],
+      "classification": "mapped",
+      "note": "实现等价行为；不要求沿用原接口名"
+    },
+    {
+      "surface": "main",
+      "method": "pickAvatarFile",
+      "args_shape": "none",
+      "reply_shape": null,
+      "source_file": "/Users/chenqiang/Desktop/AI/grok-bot-0.18-reconstructed-main/source/shared/rpc/main.ts",
+      "source_line": 42,
+      "requirements": [
+        "BOT-02"
+      ],
+      "classification": "mapped",
+      "note": "实现等价行为；不要求沿用原接口名"
+    },
+    {
+      "surface": "main",
+      "method": "generateAgentAvatarImage",
+      "args_shape": "object",
+      "reply_shape": null,
+      "source_file": "/Users/chenqiang/Desktop/AI/grok-bot-0.18-reconstructed-main/source/shared/rpc/main.ts",
+      "source_line": 43,
+      "requirements": [
+        "BOT-02"
+      ],
+      "classification": "mapped",
+      "note": "实现等价行为；不要求沿用原接口名"
+    },
+    {
+      "surface": "main",
+      "method": "resolveAttachmentMedia",
+      "args_shape": "object",
+      "reply_shape": null,
+      "source_file": "/Users/chenqiang/Desktop/AI/grok-bot-0.18-reconstructed-main/source/shared/rpc/main.ts",
+      "source_line": 44,
+      "requirements": [
+        "FIL-01",
+        "FIL-02",
+        "FIL-03",
+        "FIL-04",
+        "FIL-05"
+      ],
+      "classification": "mapped",
+      "note": "实现等价行为；不要求沿用原接口名"
+    },
+    {
+      "surface": "main",
+      "method": "readAttachmentText",
+      "args_shape": "object",
+      "reply_shape": null,
+      "source_file": "/Users/chenqiang/Desktop/AI/grok-bot-0.18-reconstructed-main/source/shared/rpc/main.ts",
+      "source_line": 45,
+      "requirements": [
+        "FIL-01",
+        "FIL-02",
+        "FIL-03",
+        "FIL-04",
+        "FIL-05"
+      ],
+      "classification": "mapped",
+      "note": "实现等价行为；不要求沿用原接口名"
+    },
+    {
+      "surface": "main",
+      "method": "readAttachmentBytes",
+      "args_shape": "object",
+      "reply_shape": null,
+      "source_file": "/Users/chenqiang/Desktop/AI/grok-bot-0.18-reconstructed-main/source/shared/rpc/main.ts",
+      "source_line": 46,
+      "requirements": [
+        "FIL-01",
+        "FIL-02",
+        "FIL-03",
+        "FIL-04",
+        "FIL-05"
+      ],
+      "classification": "mapped",
+      "note": "实现等价行为；不要求沿用原接口名"
+    },
+    {
+      "surface": "main",
+      "method": "stageAttachmentBytes",
+      "args_shape": "object",
+      "reply_shape": null,
+      "source_file": "/Users/chenqiang/Desktop/AI/grok-bot-0.18-reconstructed-main/source/shared/rpc/main.ts",
+      "source_line": 47,
+      "requirements": [
+        "FIL-01",
+        "FIL-02",
+        "FIL-03",
+        "FIL-04",
+        "FIL-05"
+      ],
+      "classification": "mapped",
+      "note": "实现等价行为；不要求沿用原接口名"
+    },
+    {
+      "surface": "main",
+      "method": "downloadAttachment",
+      "args_shape": "object",
+      "reply_shape": null,
+      "source_file": "/Users/chenqiang/Desktop/AI/grok-bot-0.18-reconstructed-main/source/shared/rpc/main.ts",
+      "source_line": 48,
+      "requirements": [
+        "FIL-01",
+        "FIL-02",
+        "FIL-03",
+        "FIL-04",
+        "FIL-05"
+      ],
+      "classification": "mapped",
+      "note": "实现等价行为；不要求沿用原接口名"
+    },
+    {
+      "surface": "main",
+      "method": "commitStagedAttachments",
+      "args_shape": "object",
+      "reply_shape": null,
+      "source_file": "/Users/chenqiang/Desktop/AI/grok-bot-0.18-reconstructed-main/source/shared/rpc/main.ts",
+      "source_line": 49,
+      "requirements": [
+        "FIL-01",
+        "FIL-02",
+        "FIL-03",
+        "FIL-04",
+        "FIL-05"
+      ],
+      "classification": "mapped",
+      "note": "实现等价行为；不要求沿用原接口名"
+    },
+    {
+      "surface": "main",
+      "method": "discardStagedAttachment",
+      "args_shape": "object",
+      "reply_shape": null,
+      "source_file": "/Users/chenqiang/Desktop/AI/grok-bot-0.18-reconstructed-main/source/shared/rpc/main.ts",
+      "source_line": 50,
+      "requirements": [
+        "FIL-01",
+        "FIL-02",
+        "FIL-03",
+        "FIL-04",
+        "FIL-05"
+      ],
+      "classification": "mapped",
+      "note": "实现等价行为；不要求沿用原接口名"
+    },
+    {
+      "surface": "main",
+      "method": "forceRecreateComputer",
+      "args_shape": "none",
+      "reply_shape": null,
+      "source_file": "/Users/chenqiang/Desktop/AI/grok-bot-0.18-reconstructed-main/source/shared/rpc/main.ts",
+      "source_line": 51,
+      "requirements": [
+        "CPU-11",
+        "CPU-12",
+        "CPU-13"
+      ],
+      "classification": "mapped",
+      "note": "实现等价行为；不要求沿用原接口名"
+    },
+    {
+      "surface": "main",
+      "method": "updateComputer",
+      "args_shape": "object",
+      "reply_shape": null,
+      "source_file": "/Users/chenqiang/Desktop/AI/grok-bot-0.18-reconstructed-main/source/shared/rpc/main.ts",
+      "source_line": 52,
+      "requirements": [
+        "CPU-11",
+        "CPU-12",
+        "CPU-13"
+      ],
+      "classification": "mapped",
+      "note": "实现等价行为；不要求沿用原接口名"
+    },
+    {
+      "surface": "main",
+      "method": "forceReconnectGateway",
+      "args_shape": "none",
+      "reply_shape": null,
+      "source_file": "/Users/chenqiang/Desktop/AI/grok-bot-0.18-reconstructed-main/source/shared/rpc/main.ts",
+      "source_line": 53,
+      "requirements": [
+        "UI-09",
+        "CPU-09"
+      ],
+      "classification": "mapped",
+      "note": "实现等价行为；不要求沿用原接口名"
+    },
+    {
+      "surface": "main",
+      "method": "getExperimentsSnapshot",
+      "args_shape": "none",
+      "reply_shape": null,
+      "source_file": "/Users/chenqiang/Desktop/AI/grok-bot-0.18-reconstructed-main/source/shared/rpc/main.ts",
+      "source_line": 54,
+      "requirements": [
+        "UI-12",
+        "OPS-08"
+      ],
+      "classification": "internal",
+      "note": "诊断/开发开关，按管理员或开发模式约束；不作为普通用户必须出现的产品入口"
+    },
+    {
+      "surface": "main",
+      "method": "applyFeatureFlagOverride",
+      "args_shape": "object",
+      "reply_shape": null,
+      "source_file": "/Users/chenqiang/Desktop/AI/grok-bot-0.18-reconstructed-main/source/shared/rpc/main.ts",
+      "source_line": 55,
+      "requirements": [
+        "UI-12",
+        "OPS-08"
+      ],
+      "classification": "internal",
+      "note": "诊断/开发开关，按管理员或开发模式约束；不作为普通用户必须出现的产品入口"
+    },
+    {
+      "surface": "main",
+      "method": "refreshFeatureFlags",
+      "args_shape": "none",
+      "reply_shape": null,
+      "source_file": "/Users/chenqiang/Desktop/AI/grok-bot-0.18-reconstructed-main/source/shared/rpc/main.ts",
+      "source_line": 56,
+      "requirements": [
+        "UI-12",
+        "OPS-08"
+      ],
+      "classification": "internal",
+      "note": "诊断/开发开关，按管理员或开发模式约束；不作为普通用户必须出现的产品入口"
+    },
+    {
+      "surface": "main",
+      "method": "startRpcTraceWindow",
+      "args_shape": "none",
+      "reply_shape": null,
+      "source_file": "/Users/chenqiang/Desktop/AI/grok-bot-0.18-reconstructed-main/source/shared/rpc/main.ts",
+      "source_line": 57,
+      "requirements": [
+        "UI-12",
+        "OPS-08"
+      ],
+      "classification": "internal",
+      "note": "诊断/开发开关，按管理员或开发模式约束；不作为普通用户必须出现的产品入口"
+    },
+    {
+      "surface": "main",
+      "method": "getAgentDefaultModel",
+      "args_shape": "none",
+      "reply_shape": null,
+      "source_file": "/Users/chenqiang/Desktop/AI/grok-bot-0.18-reconstructed-main/source/shared/rpc/main.ts",
+      "source_line": 58,
+      "requirements": [
+        "ACC-09",
+        "DEV-08"
+      ],
+      "classification": "reconstruction_or_unverified",
+      "note": "含重建项目模型路由/本地 Docker 扩展；不能据此声称官方有相同设置。当前原版的模型/Local Bot 路径另核实"
+    },
+    {
+      "surface": "main",
+      "method": "setAgentDefaultModel",
+      "args_shape": "object",
+      "reply_shape": null,
+      "source_file": "/Users/chenqiang/Desktop/AI/grok-bot-0.18-reconstructed-main/source/shared/rpc/main.ts",
+      "source_line": 59,
+      "requirements": [
+        "ACC-09",
+        "DEV-08"
+      ],
+      "classification": "reconstruction_or_unverified",
+      "note": "含重建项目模型路由/本地 Docker 扩展；不能据此声称官方有相同设置。当前原版的模型/Local Bot 路径另核实"
+    },
+    {
+      "surface": "main",
+      "method": "getComputerUseModel",
+      "args_shape": "none",
+      "reply_shape": null,
+      "source_file": "/Users/chenqiang/Desktop/AI/grok-bot-0.18-reconstructed-main/source/shared/rpc/main.ts",
+      "source_line": 60,
+      "requirements": [
+        "ACC-09",
+        "DEV-08"
+      ],
+      "classification": "reconstruction_or_unverified",
+      "note": "含重建项目模型路由/本地 Docker 扩展；不能据此声称官方有相同设置。当前原版的模型/Local Bot 路径另核实"
+    },
+    {
+      "surface": "main",
+      "method": "setComputerUseModel",
+      "args_shape": "object",
+      "reply_shape": null,
+      "source_file": "/Users/chenqiang/Desktop/AI/grok-bot-0.18-reconstructed-main/source/shared/rpc/main.ts",
+      "source_line": 61,
+      "requirements": [
+        "ACC-09",
+        "DEV-08"
+      ],
+      "classification": "reconstruction_or_unverified",
+      "note": "含重建项目模型路由/本地 Docker 扩展；不能据此声称官方有相同设置。当前原版的模型/Local Bot 路径另核实"
+    },
+    {
+      "surface": "main",
+      "method": "getHostPinnedAgents",
+      "args_shape": "none",
+      "reply_shape": null,
+      "source_file": "/Users/chenqiang/Desktop/AI/grok-bot-0.18-reconstructed-main/source/shared/rpc/main.ts",
+      "source_line": 62,
+      "requirements": [
+        "BOT-05"
+      ],
+      "classification": "mapped",
+      "note": "实现等价行为；不要求沿用原接口名"
+    },
+    {
+      "surface": "main",
+      "method": "setHostPinnedAgents",
+      "args_shape": "object",
+      "reply_shape": null,
+      "source_file": "/Users/chenqiang/Desktop/AI/grok-bot-0.18-reconstructed-main/source/shared/rpc/main.ts",
+      "source_line": 63,
+      "requirements": [
+        "BOT-05"
+      ],
+      "classification": "mapped",
+      "note": "实现等价行为；不要求沿用原接口名"
+    },
+    {
+      "surface": "main",
+      "method": "getHostSidebarSections",
+      "args_shape": "none",
+      "reply_shape": null,
+      "source_file": "/Users/chenqiang/Desktop/AI/grok-bot-0.18-reconstructed-main/source/shared/rpc/main.ts",
+      "source_line": 64,
+      "requirements": [
+        "BOT-06"
+      ],
+      "classification": "mapped",
+      "note": "实现等价行为；不要求沿用原接口名"
+    },
+    {
+      "surface": "main",
+      "method": "setHostSidebarSections",
+      "args_shape": "object",
+      "reply_shape": null,
+      "source_file": "/Users/chenqiang/Desktop/AI/grok-bot-0.18-reconstructed-main/source/shared/rpc/main.ts",
+      "source_line": 65,
+      "requirements": [
+        "BOT-06"
+      ],
+      "classification": "mapped",
+      "note": "实现等价行为；不要求沿用原接口名"
+    },
+    {
+      "surface": "main",
+      "method": "getAvailableModels",
+      "args_shape": "none",
+      "reply_shape": null,
+      "source_file": "/Users/chenqiang/Desktop/AI/grok-bot-0.18-reconstructed-main/source/shared/rpc/main.ts",
+      "source_line": 66,
+      "requirements": [
+        "ACC-09",
+        "DEV-08"
+      ],
+      "classification": "reconstruction_or_unverified",
+      "note": "含重建项目模型路由/本地 Docker 扩展；不能据此声称官方有相同设置。当前原版的模型/Local Bot 路径另核实"
+    },
+    {
+      "surface": "main",
+      "method": "getInferenceRouter",
+      "args_shape": "none",
+      "reply_shape": null,
+      "source_file": "/Users/chenqiang/Desktop/AI/grok-bot-0.18-reconstructed-main/source/shared/rpc/main.ts",
+      "source_line": 67,
+      "requirements": [
+        "ACC-09",
+        "DEV-08"
+      ],
+      "classification": "reconstruction_or_unverified",
+      "note": "含重建项目模型路由/本地 Docker 扩展；不能据此声称官方有相同设置。当前原版的模型/Local Bot 路径另核实"
+    },
+    {
+      "surface": "main",
+      "method": "setInferenceRouter",
+      "args_shape": "object",
+      "reply_shape": null,
+      "source_file": "/Users/chenqiang/Desktop/AI/grok-bot-0.18-reconstructed-main/source/shared/rpc/main.ts",
+      "source_line": 68,
+      "requirements": [
+        "ACC-09",
+        "DEV-08"
+      ],
+      "classification": "reconstruction_or_unverified",
+      "note": "含重建项目模型路由/本地 Docker 扩展；不能据此声称官方有相同设置。当前原版的模型/Local Bot 路径另核实"
+    },
+    {
+      "surface": "main",
+      "method": "getBoxRuntime",
+      "args_shape": "none",
+      "reply_shape": null,
+      "source_file": "/Users/chenqiang/Desktop/AI/grok-bot-0.18-reconstructed-main/source/shared/rpc/main.ts",
+      "source_line": 69,
+      "requirements": [
+        "ACC-09",
+        "DEV-08"
+      ],
+      "classification": "reconstruction_or_unverified",
+      "note": "含重建项目模型路由/本地 Docker 扩展；不能据此声称官方有相同设置。当前原版的模型/Local Bot 路径另核实"
+    },
+    {
+      "surface": "main",
+      "method": "setBoxRuntime",
+      "args_shape": "object",
+      "reply_shape": null,
+      "source_file": "/Users/chenqiang/Desktop/AI/grok-bot-0.18-reconstructed-main/source/shared/rpc/main.ts",
+      "source_line": 70,
+      "requirements": [
+        "ACC-09",
+        "DEV-08"
+      ],
+      "classification": "reconstruction_or_unverified",
+      "note": "含重建项目模型路由/本地 Docker 扩展；不能据此声称官方有相同设置。当前原版的模型/Local Bot 路径另核实"
+    },
+    {
+      "surface": "main",
+      "method": "transcribeAudio",
+      "args_shape": "object",
+      "reply_shape": null,
+      "source_file": "/Users/chenqiang/Desktop/AI/grok-bot-0.18-reconstructed-main/source/shared/rpc/main.ts",
+      "source_line": 71,
+      "requirements": [
+        "VOC-01"
+      ],
+      "classification": "mapped",
+      "note": "只能证明听写接口，实时通话另建"
+    },
+    {
+      "surface": "main",
+      "method": "getCursorAuthStatus",
+      "args_shape": "none",
+      "reply_shape": null,
+      "source_file": "/Users/chenqiang/Desktop/AI/grok-bot-0.18-reconstructed-main/source/shared/rpc/main.ts",
+      "source_line": 72,
+      "requirements": [
+        "ACC-01",
+        "ACC-03",
+        "ACC-04"
+      ],
+      "classification": "mapped",
+      "note": "映射 Cmb 身份与资料，不调用假的官方订阅身份"
+    },
+    {
+      "surface": "main",
+      "method": "loginCursor",
+      "args_shape": "none",
+      "reply_shape": null,
+      "source_file": "/Users/chenqiang/Desktop/AI/grok-bot-0.18-reconstructed-main/source/shared/rpc/main.ts",
+      "source_line": 73,
+      "requirements": [
+        "ACC-01",
+        "ACC-03",
+        "ACC-04"
+      ],
+      "classification": "mapped",
+      "note": "映射 Cmb 身份与资料，不调用假的官方订阅身份"
+    },
+    {
+      "surface": "main",
+      "method": "cancelCursorLogin",
+      "args_shape": "none",
+      "reply_shape": null,
+      "source_file": "/Users/chenqiang/Desktop/AI/grok-bot-0.18-reconstructed-main/source/shared/rpc/main.ts",
+      "source_line": 74,
+      "requirements": [
+        "ACC-01",
+        "ACC-03",
+        "ACC-04"
+      ],
+      "classification": "mapped",
+      "note": "映射 Cmb 身份与资料，不调用假的官方订阅身份"
+    },
+    {
+      "surface": "main",
+      "method": "logoutCursor",
+      "args_shape": "none",
+      "reply_shape": null,
+      "source_file": "/Users/chenqiang/Desktop/AI/grok-bot-0.18-reconstructed-main/source/shared/rpc/main.ts",
+      "source_line": 75,
+      "requirements": [
+        "ACC-01",
+        "ACC-03",
+        "ACC-04"
+      ],
+      "classification": "mapped",
+      "note": "映射 Cmb 身份与资料，不调用假的官方订阅身份"
+    },
+    {
+      "surface": "main",
+      "method": "updateCursorAccountName",
+      "args_shape": "object",
+      "reply_shape": null,
+      "source_file": "/Users/chenqiang/Desktop/AI/grok-bot-0.18-reconstructed-main/source/shared/rpc/main.ts",
+      "source_line": 76,
+      "requirements": [
+        "ACC-01",
+        "ACC-03",
+        "ACC-04"
+      ],
+      "classification": "mapped",
+      "note": "映射 Cmb 身份与资料，不调用假的官方订阅身份"
+    },
+    {
+      "surface": "main",
+      "method": "getCursorAvatar",
+      "args_shape": "none",
+      "reply_shape": null,
+      "source_file": "/Users/chenqiang/Desktop/AI/grok-bot-0.18-reconstructed-main/source/shared/rpc/main.ts",
+      "source_line": 77,
+      "requirements": [
+        "ACC-01",
+        "ACC-03",
+        "ACC-04"
+      ],
+      "classification": "mapped",
+      "note": "映射 Cmb 身份与资料，不调用假的官方订阅身份"
+    },
+    {
+      "surface": "main",
+      "method": "getCursorWeeklyUsage",
+      "args_shape": "none",
+      "reply_shape": null,
+      "source_file": "/Users/chenqiang/Desktop/AI/grok-bot-0.18-reconstructed-main/source/shared/rpc/main.ts",
+      "source_line": 78,
+      "requirements": [
+        "ADM-20",
+        "ACC-08"
+      ],
+      "classification": "mapped",
+      "note": "实现等价行为；不要求沿用原接口名"
+    },
+    {
+      "surface": "main",
+      "method": "getCursorUsageSummary",
+      "args_shape": "none",
+      "reply_shape": null,
+      "source_file": "/Users/chenqiang/Desktop/AI/grok-bot-0.18-reconstructed-main/source/shared/rpc/main.ts",
+      "source_line": 79,
+      "requirements": [
+        "ADM-20",
+        "ACC-08"
+      ],
+      "classification": "mapped",
+      "note": "实现等价行为；不要求沿用原接口名"
+    },
+    {
+      "surface": "main",
+      "method": "getCursorPrReviewPreferences",
+      "args_shape": "none",
+      "reply_shape": null,
+      "source_file": "/Users/chenqiang/Desktop/AI/grok-bot-0.18-reconstructed-main/source/shared/rpc/main.ts",
+      "source_line": 80,
+      "requirements": [
+        "ACC-09"
+      ],
+      "classification": "internal_or_shared",
+      "note": "共用账户偏好接口；需检查真实 UI/调用者，不能因名称存在把整个 Cursor PR Review 列为 Bot 功能"
+    },
+    {
+      "surface": "main",
+      "method": "getCursorPrivacyModeEnabled",
+      "args_shape": "none",
+      "reply_shape": null,
+      "source_file": "/Users/chenqiang/Desktop/AI/grok-bot-0.18-reconstructed-main/source/shared/rpc/main.ts",
+      "source_line": 81,
+      "requirements": [
+        "APR-14",
+        "ADM-22"
+      ],
+      "classification": "mapped",
+      "note": "继承账户隐私属性并影响授权/placement；不是跨成员数据读取许可"
+    },
+    {
+      "surface": "main",
+      "method": "getSandAccess",
+      "args_shape": "none",
+      "reply_shape": null,
+      "source_file": "/Users/chenqiang/Desktop/AI/grok-bot-0.18-reconstructed-main/source/shared/rpc/main.ts",
+      "source_line": 82,
+      "requirements": [
+        "ACC-05",
+        "ACC-08"
+      ],
+      "classification": "mapped",
+      "note": "映射 Cmb 开通/用量/停用；商业购买属于显式适配"
+    },
+    {
+      "surface": "main",
+      "method": "getSandAccessFresh",
+      "args_shape": "none",
+      "reply_shape": null,
+      "source_file": "/Users/chenqiang/Desktop/AI/grok-bot-0.18-reconstructed-main/source/shared/rpc/main.ts",
+      "source_line": 83,
+      "requirements": [
+        "ACC-05",
+        "ACC-08"
+      ],
+      "classification": "mapped",
+      "note": "映射 Cmb 开通/用量/停用；商业购买属于显式适配"
+    },
+    {
+      "surface": "main",
+      "method": "invokeCursorDashboardAction",
+      "args_shape": "object",
+      "reply_shape": null,
+      "source_file": "/Users/chenqiang/Desktop/AI/grok-bot-0.18-reconstructed-main/source/shared/rpc/main.ts",
+      "source_line": 84,
+      "requirements": [
+        "ACC-05",
+        "ACC-08"
+      ],
+      "classification": "mapped",
+      "note": "映射 Cmb 开通/用量/停用；商业购买属于显式适配"
+    },
+    {
+      "surface": "main",
+      "method": "cancelCursorSandTrial",
+      "args_shape": "none",
+      "reply_shape": null,
+      "source_file": "/Users/chenqiang/Desktop/AI/grok-bot-0.18-reconstructed-main/source/shared/rpc/main.ts",
+      "source_line": 85,
+      "requirements": [
+        "ACC-05",
+        "ACC-08"
+      ],
+      "classification": "mapped",
+      "note": "映射 Cmb 开通/用量/停用；商业购买属于显式适配"
+    },
+    {
+      "surface": "main",
+      "method": "reportAgentLoad",
+      "args_shape": "object",
+      "reply_shape": null,
+      "source_file": "/Users/chenqiang/Desktop/AI/grok-bot-0.18-reconstructed-main/source/shared/rpc/main.ts",
+      "source_line": 86,
+      "requirements": [
+        "OPS-08",
+        "UI-12"
+      ],
+      "classification": "internal",
+      "note": "实现 Cmb 自有诊断/遥测，不连接原版私有采集服务"
+    },
+    {
+      "surface": "main",
+      "method": "reportAccessBlocked",
+      "args_shape": "object",
+      "reply_shape": null,
+      "source_file": "/Users/chenqiang/Desktop/AI/grok-bot-0.18-reconstructed-main/source/shared/rpc/main.ts",
+      "source_line": 87,
+      "requirements": [
+        "OPS-08",
+        "UI-12"
+      ],
+      "classification": "internal",
+      "note": "实现 Cmb 自有诊断/遥测，不连接原版私有采集服务"
+    },
+    {
+      "surface": "main",
+      "method": "reportAgentsUnreachable",
+      "args_shape": "object",
+      "reply_shape": null,
+      "source_file": "/Users/chenqiang/Desktop/AI/grok-bot-0.18-reconstructed-main/source/shared/rpc/main.ts",
+      "source_line": 88,
+      "requirements": [
+        "OPS-08",
+        "UI-12"
+      ],
+      "classification": "internal",
+      "note": "实现 Cmb 自有诊断/遥测，不连接原版私有采集服务"
+    },
+    {
+      "surface": "main",
+      "method": "reportRecoveryAction",
+      "args_shape": "object",
+      "reply_shape": null,
+      "source_file": "/Users/chenqiang/Desktop/AI/grok-bot-0.18-reconstructed-main/source/shared/rpc/main.ts",
+      "source_line": 89,
+      "requirements": [
+        "OPS-08",
+        "UI-12"
+      ],
+      "classification": "internal",
+      "note": "实现 Cmb 自有诊断/遥测，不连接原版私有采集服务"
+    },
+    {
+      "surface": "main",
+      "method": "reportRebuildLifecycle",
+      "args_shape": "object",
+      "reply_shape": null,
+      "source_file": "/Users/chenqiang/Desktop/AI/grok-bot-0.18-reconstructed-main/source/shared/rpc/main.ts",
+      "source_line": 90,
+      "requirements": [
+        "OPS-08",
+        "UI-12"
+      ],
+      "classification": "internal",
+      "note": "实现 Cmb 自有诊断/遥测，不连接原版私有采集服务"
+    },
+    {
+      "surface": "main",
+      "method": "reportReconciliation",
+      "args_shape": "object",
+      "reply_shape": null,
+      "source_file": "/Users/chenqiang/Desktop/AI/grok-bot-0.18-reconstructed-main/source/shared/rpc/main.ts",
+      "source_line": 91,
+      "requirements": [
+        "OPS-08",
+        "UI-12"
+      ],
+      "classification": "internal",
+      "note": "实现 Cmb 自有诊断/遥测，不连接原版私有采集服务"
+    },
+    {
+      "surface": "main",
+      "method": "reportBoxVisibility",
+      "args_shape": "object",
+      "reply_shape": null,
+      "source_file": "/Users/chenqiang/Desktop/AI/grok-bot-0.18-reconstructed-main/source/shared/rpc/main.ts",
+      "source_line": 92,
+      "requirements": [
+        "OPS-08",
+        "UI-12"
+      ],
+      "classification": "internal",
+      "note": "实现 Cmb 自有诊断/遥测，不连接原版私有采集服务"
+    },
+    {
+      "surface": "main",
+      "method": "reportSendLatency",
+      "args_shape": "object",
+      "reply_shape": null,
+      "source_file": "/Users/chenqiang/Desktop/AI/grok-bot-0.18-reconstructed-main/source/shared/rpc/main.ts",
+      "source_line": 93,
+      "requirements": [
+        "OPS-08",
+        "UI-12"
+      ],
+      "classification": "internal",
+      "note": "实现 Cmb 自有诊断/遥测，不连接原版私有采集服务"
+    },
+    {
+      "surface": "main",
+      "method": "reportSendAck",
+      "args_shape": "object",
+      "reply_shape": null,
+      "source_file": "/Users/chenqiang/Desktop/AI/grok-bot-0.18-reconstructed-main/source/shared/rpc/main.ts",
+      "source_line": 94,
+      "requirements": [
+        "OPS-08",
+        "UI-12"
+      ],
+      "classification": "internal",
+      "note": "实现 Cmb 自有诊断/遥测，不连接原版私有采集服务"
+    },
+    {
+      "surface": "main",
+      "method": "reportReactionAck",
+      "args_shape": "object",
+      "reply_shape": null,
+      "source_file": "/Users/chenqiang/Desktop/AI/grok-bot-0.18-reconstructed-main/source/shared/rpc/main.ts",
+      "source_line": 95,
+      "requirements": [
+        "OPS-08",
+        "UI-12"
+      ],
+      "classification": "internal",
+      "note": "实现 Cmb 自有诊断/遥测，不连接原版私有采集服务"
+    },
+    {
+      "surface": "main",
+      "method": "reportRenderTtfr",
+      "args_shape": "object",
+      "reply_shape": null,
+      "source_file": "/Users/chenqiang/Desktop/AI/grok-bot-0.18-reconstructed-main/source/shared/rpc/main.ts",
+      "source_line": 96,
+      "requirements": [
+        "OPS-08",
+        "UI-12"
+      ],
+      "classification": "internal",
+      "note": "实现 Cmb 自有诊断/遥测，不连接原版私有采集服务"
+    },
+    {
+      "surface": "main",
+      "method": "reportRenderStream",
+      "args_shape": "object",
+      "reply_shape": null,
+      "source_file": "/Users/chenqiang/Desktop/AI/grok-bot-0.18-reconstructed-main/source/shared/rpc/main.ts",
+      "source_line": 97,
+      "requirements": [
+        "OPS-08",
+        "UI-12"
+      ],
+      "classification": "internal",
+      "note": "实现 Cmb 自有诊断/遥测，不连接原版私有采集服务"
+    },
+    {
+      "surface": "main",
+      "method": "reportVncSession",
+      "args_shape": "object",
+      "reply_shape": null,
+      "source_file": "/Users/chenqiang/Desktop/AI/grok-bot-0.18-reconstructed-main/source/shared/rpc/main.ts",
+      "source_line": 98,
+      "requirements": [
+        "OPS-08",
+        "UI-12"
+      ],
+      "classification": "internal",
+      "note": "实现 Cmb 自有诊断/遥测，不连接原版私有采集服务"
+    },
+    {
+      "surface": "main",
+      "method": "reportVncLiveness",
+      "args_shape": "object",
+      "reply_shape": null,
+      "source_file": "/Users/chenqiang/Desktop/AI/grok-bot-0.18-reconstructed-main/source/shared/rpc/main.ts",
+      "source_line": 99,
+      "requirements": [
+        "OPS-08",
+        "UI-12"
+      ],
+      "classification": "internal",
+      "note": "实现 Cmb 自有诊断/遥测，不连接原版私有采集服务"
+    },
+    {
+      "surface": "main",
+      "method": "reportOpenComputer",
+      "args_shape": "object",
+      "reply_shape": null,
+      "source_file": "/Users/chenqiang/Desktop/AI/grok-bot-0.18-reconstructed-main/source/shared/rpc/main.ts",
+      "source_line": 100,
+      "requirements": [
+        "OPS-08",
+        "UI-12"
+      ],
+      "classification": "internal",
+      "note": "实现 Cmb 自有诊断/遥测，不连接原版私有采集服务"
+    },
+    {
+      "surface": "main",
+      "method": "reportUpdatePrompt",
+      "args_shape": "object",
+      "reply_shape": null,
+      "source_file": "/Users/chenqiang/Desktop/AI/grok-bot-0.18-reconstructed-main/source/shared/rpc/main.ts",
+      "source_line": 101,
+      "requirements": [
+        "OPS-08",
+        "UI-12"
+      ],
+      "classification": "internal",
+      "note": "实现 Cmb 自有诊断/遥测，不连接原版私有采集服务"
+    },
+    {
+      "surface": "main",
+      "method": "reportSigninGate",
+      "args_shape": "object",
+      "reply_shape": null,
+      "source_file": "/Users/chenqiang/Desktop/AI/grok-bot-0.18-reconstructed-main/source/shared/rpc/main.ts",
+      "source_line": 102,
+      "requirements": [
+        "OPS-08",
+        "UI-12"
+      ],
+      "classification": "internal",
+      "note": "实现 Cmb 自有诊断/遥测，不连接原版私有采集服务"
+    },
+    {
+      "surface": "main",
+      "method": "reportOnboardingStep",
+      "args_shape": "object",
+      "reply_shape": null,
+      "source_file": "/Users/chenqiang/Desktop/AI/grok-bot-0.18-reconstructed-main/source/shared/rpc/main.ts",
+      "source_line": 103,
+      "requirements": [
+        "OPS-08",
+        "UI-12"
+      ],
+      "classification": "internal",
+      "note": "实现 Cmb 自有诊断/遥测，不连接原版私有采集服务"
+    },
+    {
+      "surface": "main",
+      "method": "reportClientFailure",
+      "args_shape": "object",
+      "reply_shape": null,
+      "source_file": "/Users/chenqiang/Desktop/AI/grok-bot-0.18-reconstructed-main/source/shared/rpc/main.ts",
+      "source_line": 104,
+      "requirements": [
+        "OPS-08",
+        "UI-12"
+      ],
+      "classification": "internal",
+      "note": "实现 Cmb 自有诊断/遥测，不连接原版私有采集服务"
+    },
+    {
+      "surface": "main",
+      "method": "openCloudAgent",
+      "args_shape": "object",
+      "reply_shape": null,
+      "source_file": "/Users/chenqiang/Desktop/AI/grok-bot-0.18-reconstructed-main/source/shared/rpc/main.ts",
+      "source_line": 105,
+      "requirements": [
+        "COL-12",
+        "OBS-04"
+      ],
+      "classification": "mapped",
+      "note": "实现等价行为；不要求沿用原接口名"
+    },
+    {
+      "surface": "main",
+      "method": "getLinkMetadata",
+      "args_shape": "object",
+      "reply_shape": null,
+      "source_file": "/Users/chenqiang/Desktop/AI/grok-bot-0.18-reconstructed-main/source/shared/rpc/main.ts",
+      "source_line": 106,
+      "requirements": [
+        "FIL-08"
+      ],
+      "classification": "mapped",
+      "note": "实现等价行为；不要求沿用原接口名"
+    },
+    {
+      "surface": "main",
+      "method": "listSecrets",
+      "args_shape": "none",
+      "reply_shape": null,
+      "source_file": "/Users/chenqiang/Desktop/AI/grok-bot-0.18-reconstructed-main/source/shared/rpc/main.ts",
+      "source_line": 107,
+      "requirements": [
+        "APR-10",
+        "APR-11"
+      ],
+      "classification": "mapped",
+      "note": "实现等价行为；不要求沿用原接口名"
+    },
+    {
+      "surface": "main",
+      "method": "revealSecret",
+      "args_shape": "object",
+      "reply_shape": null,
+      "source_file": "/Users/chenqiang/Desktop/AI/grok-bot-0.18-reconstructed-main/source/shared/rpc/main.ts",
+      "source_line": 108,
+      "requirements": [
+        "APR-11"
+      ],
+      "classification": "superseded_or_unverified",
+      "note": "旧接口与当前只写秘密帮助冲突；当前产品不暴露读取旧值，按版本差异处理"
+    },
+    {
+      "surface": "main",
+      "method": "upsertSecrets",
+      "args_shape": "object",
+      "reply_shape": null,
+      "source_file": "/Users/chenqiang/Desktop/AI/grok-bot-0.18-reconstructed-main/source/shared/rpc/main.ts",
+      "source_line": 109,
+      "requirements": [
+        "APR-10",
+        "APR-11"
+      ],
+      "classification": "mapped",
+      "note": "实现等价行为；不要求沿用原接口名"
+    },
+    {
+      "surface": "main",
+      "method": "removeSecrets",
+      "args_shape": "object",
+      "reply_shape": null,
+      "source_file": "/Users/chenqiang/Desktop/AI/grok-bot-0.18-reconstructed-main/source/shared/rpc/main.ts",
+      "source_line": 110,
+      "requirements": [
+        "APR-10",
+        "APR-11"
+      ],
+      "classification": "mapped",
+      "note": "实现等价行为；不要求沿用原接口名"
+    },
+    {
+      "surface": "main",
+      "method": "getMcpState",
+      "args_shape": "none",
+      "reply_shape": null,
+      "source_file": "/Users/chenqiang/Desktop/AI/grok-bot-0.18-reconstructed-main/source/shared/rpc/main.ts",
+      "source_line": 111,
+      "requirements": [
+        "PLG-01",
+        "PLG-09"
+      ],
+      "classification": "mapped",
+      "note": "包含团队热门排序与图标降级，不只列工具名"
+    },
+    {
+      "surface": "main",
+      "method": "getEffectivePlugins",
+      "args_shape": "none",
+      "reply_shape": null,
+      "source_file": "/Users/chenqiang/Desktop/AI/grok-bot-0.18-reconstructed-main/source/shared/rpc/main.ts",
+      "source_line": 112,
+      "requirements": [
+        "PLG-01",
+        "PLG-09"
+      ],
+      "classification": "mapped",
+      "note": "包含团队热门排序与图标降级，不只列工具名"
+    },
+    {
+      "surface": "main",
+      "method": "getMcpCatalog",
+      "args_shape": "none",
+      "reply_shape": null,
+      "source_file": "/Users/chenqiang/Desktop/AI/grok-bot-0.18-reconstructed-main/source/shared/rpc/main.ts",
+      "source_line": 113,
+      "requirements": [
+        "PLG-01",
+        "PLG-09"
+      ],
+      "classification": "mapped",
+      "note": "包含团队热门排序与图标降级，不只列工具名"
+    },
+    {
+      "surface": "main",
+      "method": "getMcpTeamPopularity",
+      "args_shape": "none",
+      "reply_shape": null,
+      "source_file": "/Users/chenqiang/Desktop/AI/grok-bot-0.18-reconstructed-main/source/shared/rpc/main.ts",
+      "source_line": 114,
+      "requirements": [
+        "PLG-01",
+        "PLG-09"
+      ],
+      "classification": "mapped",
+      "note": "包含团队热门排序与图标降级，不只列工具名"
+    },
+    {
+      "surface": "main",
+      "method": "getMcpPluginLogo",
+      "args_shape": "object",
+      "reply_shape": null,
+      "source_file": "/Users/chenqiang/Desktop/AI/grok-bot-0.18-reconstructed-main/source/shared/rpc/main.ts",
+      "source_line": 115,
+      "requirements": [
+        "PLG-01",
+        "PLG-09"
+      ],
+      "classification": "mapped",
+      "note": "包含团队热门排序与图标降级，不只列工具名"
+    },
+    {
+      "surface": "main",
+      "method": "installEntry",
+      "args_shape": "object",
+      "reply_shape": null,
+      "source_file": "/Users/chenqiang/Desktop/AI/grok-bot-0.18-reconstructed-main/source/shared/rpc/main.ts",
+      "source_line": 116,
+      "requirements": [
+        "PLG-01",
+        "PLG-08",
+        "PLG-11"
+      ],
+      "classification": "mapped",
+      "note": "实现等价行为；不要求沿用原接口名"
+    },
+    {
+      "surface": "main",
+      "method": "updatePluginInstall",
+      "args_shape": "object",
+      "reply_shape": null,
+      "source_file": "/Users/chenqiang/Desktop/AI/grok-bot-0.18-reconstructed-main/source/shared/rpc/main.ts",
+      "source_line": 117,
+      "requirements": [
+        "PLG-01",
+        "PLG-08",
+        "PLG-11"
+      ],
+      "classification": "mapped",
+      "note": "实现等价行为；不要求沿用原接口名"
+    },
+    {
+      "surface": "main",
+      "method": "removeMcpServer",
+      "args_shape": "object",
+      "reply_shape": null,
+      "source_file": "/Users/chenqiang/Desktop/AI/grok-bot-0.18-reconstructed-main/source/shared/rpc/main.ts",
+      "source_line": 118,
+      "requirements": [
+        "PLG-01",
+        "PLG-08",
+        "PLG-11"
+      ],
+      "classification": "mapped",
+      "note": "实现等价行为；不要求沿用原接口名"
+    },
+    {
+      "surface": "main",
+      "method": "uninstallPlugin",
+      "args_shape": "object",
+      "reply_shape": null,
+      "source_file": "/Users/chenqiang/Desktop/AI/grok-bot-0.18-reconstructed-main/source/shared/rpc/main.ts",
+      "source_line": 119,
+      "requirements": [
+        "PLG-01",
+        "PLG-08",
+        "PLG-11"
+      ],
+      "classification": "mapped",
+      "note": "实现等价行为；不要求沿用原接口名"
+    },
+    {
+      "surface": "main",
+      "method": "authenticateMcpServer",
+      "args_shape": "object",
+      "reply_shape": null,
+      "source_file": "/Users/chenqiang/Desktop/AI/grok-bot-0.18-reconstructed-main/source/shared/rpc/main.ts",
+      "source_line": 120,
+      "requirements": [
+        "PLG-02",
+        "PLG-04"
+      ],
+      "classification": "mapped",
+      "note": "实现等价行为；不要求沿用原接口名"
+    },
+    {
+      "surface": "main",
+      "method": "renameMcpAccount",
+      "args_shape": "object",
+      "reply_shape": null,
+      "source_file": "/Users/chenqiang/Desktop/AI/grok-bot-0.18-reconstructed-main/source/shared/rpc/main.ts",
+      "source_line": 121,
+      "requirements": [
+        "PLG-02",
+        "PLG-04"
+      ],
+      "classification": "mapped",
+      "note": "实现等价行为；不要求沿用原接口名"
+    },
+    {
+      "surface": "main",
+      "method": "removeMcpAccount",
+      "args_shape": "object",
+      "reply_shape": null,
+      "source_file": "/Users/chenqiang/Desktop/AI/grok-bot-0.18-reconstructed-main/source/shared/rpc/main.ts",
+      "source_line": 122,
+      "requirements": [
+        "PLG-02",
+        "PLG-04"
+      ],
+      "classification": "mapped",
+      "note": "实现等价行为；不要求沿用原接口名"
+    },
+    {
+      "surface": "main",
+      "method": "setMcpCustomInstructions",
+      "args_shape": "object",
+      "reply_shape": null,
+      "source_file": "/Users/chenqiang/Desktop/AI/grok-bot-0.18-reconstructed-main/source/shared/rpc/main.ts",
+      "source_line": 123,
+      "requirements": [
+        "PLG-05"
+      ],
+      "classification": "mapped",
+      "note": "实现等价行为；不要求沿用原接口名"
+    },
+    {
+      "surface": "main",
+      "method": "listMcpServerTools",
+      "args_shape": "object",
+      "reply_shape": null,
+      "source_file": "/Users/chenqiang/Desktop/AI/grok-bot-0.18-reconstructed-main/source/shared/rpc/main.ts",
+      "source_line": 124,
+      "requirements": [
+        "PLG-05"
+      ],
+      "classification": "mapped",
+      "note": "实现等价行为；不要求沿用原接口名"
+    },
+    {
+      "surface": "main",
+      "method": "toggleMcpToolDisabled",
+      "args_shape": "object",
+      "reply_shape": null,
+      "source_file": "/Users/chenqiang/Desktop/AI/grok-bot-0.18-reconstructed-main/source/shared/rpc/main.ts",
+      "source_line": 125,
+      "requirements": [
+        "PLG-05"
+      ],
+      "classification": "mapped",
+      "note": "实现等价行为；不要求沿用原接口名"
+    }
+  ]
+}

@@ -1,0 +1,35 @@
+{
+  "schemaVersion": 1,
+  "kind": "inspector-production-react-authenticated-rpc-navigation-contracts",
+  "observedAt": "2026-10-07T16:05:09.040626+00:00",
+  "exitCode": 0,
+  "existingCasesPassed": 3,
+  "newNavigationCasesPassed": 5,
+  "sourcePins": [
+    {
+      "path": "src/renderer/src/components/bots/BotWorkspace.tsx",
+      "bytes": 164075,
+      "sha256": "7b07e1ac69f9d6115176af851afe5a6c83e8dffd1596b8e95850cd7c3bb2ab60"
+    },
+    {
+      "path": "tests/bot-composer-teach-menu-browser.spec.ts",
+      "bytes": 46152,
+      "sha256": "c4e8eb2d9b9bdc0e3c087c6c25e6c1085d67ae42d5bcb1145b1f4fed858aa0d2"
+    }
+  ],
+  "gate": {
+    "path": "/tmp/cmb-inspector-five-navigation-browser.log",
+    "bytes": 1110,
+    "sha256": "b57e7fc7a650d78377c6b591dfa4e09ce3d340f7763449fe7e13e35b1b32f936"
+  },
+  "actualUI": false,
+  "realModel": false,
+  "cases": [
+    "closed pane stays closed",
+    "same Bot branch takes exact conversation and thread target",
+    "late actual frame reply cannot overwrite selected Bot or route input to old Bot",
+    "accepted routine mutation holds original owner while pending and releases to selected Bot once",
+    "fixture durable replacement epoch retires old surface and rejects stale actual input ticket"
+  ],
+  "scope": "Production React plus real authenticated SQLite/browser RPC in owned isolated fixture. Only post-RPC delays and durable fixture epoch marker controlled. Not full backup restore, actual app/Grok UI parity, real provider or Windows kernel acceptance."
+}

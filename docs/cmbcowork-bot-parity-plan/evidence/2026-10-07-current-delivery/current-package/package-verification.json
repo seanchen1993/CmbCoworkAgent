@@ -1,0 +1,16 @@
+{
+  "at": "2026-10-07T08:34:24.046Z",
+  "app": "/private/var/folders/r4/m2gmdyyn06z9488ghc1044zh0000gn/T/cmb-current-opening-metadata-pack-4dikgfi6/mac-arm64/CMBDevClaw.app",
+  "archive": "/private/var/folders/r4/m2gmdyyn06z9488ghc1044zh0000gn/T/cmb-current-opening-metadata-pack-4dikgfi6/mac-arm64/CMBDevClaw.app/Contents/Resources/app.asar",
+  "buildId": "aa183a16dd2d22fe8ad060e4",
+  "nativeBuildId": "aa183a16dd2d22fe8ad060e4",
+  "outputRevisionSHA256": "0ce3e79902f8ee8bedfaead445890c67cc96fb08a40e12252ec30743d7b05dcc",
+  "rendererChunk": "BotWorkspace-D-23g-nQ.js",
+  "mainMembers": 180,
+  "verifiedCompiledFiles": 426,
+  "rendererAndPreloadAlsoVerified": true,
+  "allMembersPhysicallyUnpacked": true,
+  "nativeDistribution": null,
+  "archiveSha256": "1c47eeabbeea11bd8c9768e3b8dd55804c375c1b528bec913cb80f4ace0a4509",
+  "notNotarizedProductionRelease": true
+}

@@ -289,9 +289,9 @@ export function registerUpdaterHandlers(): void {
         downloadedFilePath
       })
       if (lastCheckResult.updateType === "asar") {
-        installAsarUpdate(downloadedFilePath, lastCheckResult.version)
+        await installAsarUpdate(downloadedFilePath, lastCheckResult.version)
       } else {
-        installFullUpdate(
+        await installFullUpdate(
           downloadedFilePath,
           lastCheckResult.version,
           lastCheckResult.targetVersion,

@@ -1,4 +1,12 @@
-import { useCallback, useEffect, useRef, useState, type CSSProperties } from "react"
+import {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+  type CSSProperties
+} from "react"
 import { Button } from "@/components/ui/button"
 import {
   validateFunctionTree,
@@ -9,6 +17,20 @@ import {
 } from "../../../../shared/mods/v2/ui"
 import type { ModObject } from "../../../../shared/mods/types"
 import { FunctionClient } from "./FunctionClient"
+import { createModsScopeLifetime, useModsThreadScope } from "@/lib/mods-thread-scope"
+
+export interface FunctionPaneTransport {
+  panes: Window["api"]["mods"]["panes"]
+  paneAct: Window["api"]["mods"]["paneAct"]
+  clientAct: Window["api"]["mods"]["clientAct"]
+  onCardsChanged: Window["api"]["mods"]["onCardsChanged"]
+}
+const desktopTransport: FunctionPaneTransport = {
+  panes: (...args) => window.api.mods.panes(...args),
+  paneAct: (...args) => window.api.mods.paneAct(...args),
+  clientAct: (...args) => window.api.mods.clientAct(...args),
+  onCardsChanged: (...args) => window.api.mods.onCardsChanged(...args)
+}
 
 type Act = (
   node: FunctionUiElement | undefined,
@@ -17,7 +39,13 @@ type Act = (
 ) => Promise<void>
 
 function Field({ node, busy, act }: { node: FunctionUiElement; busy: boolean; act: Act }) {
-  const [value, setValue] = useState(String(node.props.value ?? ""))
+  const source = String(node.props.value ?? ""),
+    key = String(node.props.key)
+  const [draft, setDraft] = useState({ source, key, value: source })
+  const changed = draft.source !== source || draft.key !== key
+  if (changed) setDraft({ source, key, value: source })
+  const value = changed ? source : draft.value
+  const setValue = (value: string) => setDraft({ source, key, value })
   const label = String(node.props.label ?? node.props.key)
   if (node.type === "Select")
     return (
@@ -188,7 +216,33 @@ function Element({
   return node.type === "Client" ? (renderClient?.(node) ?? null) : null
 }
 
-export function FunctionPanes({ threadId }: { threadId: string }): React.JSX.Element | null {
+type FunctionPanesProps = {
+  threadId: string
+  transport?: FunctionPaneTransport
+  disabled?: boolean
+}
+export function FunctionPanes(props: FunctionPanesProps): React.JSX.Element | null {
+  const scope = useModsThreadScope(props.threadId)
+  // BotPluginPanes supplies its own Host authority; only native desktop reads need a Thread workspace.
+  if (props.transport) return <ScopedFunctionPanes {...props} transport={props.transport} />
+  return scope ? (
+    <ScopedFunctionPanes
+      key={JSON.stringify([scope.threadId, scope.workspaceKey])}
+      {...props}
+      transport={desktopTransport}
+    />
+  ) : null
+}
+function ScopedFunctionPanes({
+  threadId,
+  transport,
+  disabled = false
+}: FunctionPanesProps & { transport: FunctionPaneTransport }): React.JSX.Element | null {
+  const lifetime = useMemo(createModsScopeLifetime, [threadId, transport])
+  useLayoutEffect(() => {
+    lifetime.activate()
+    return () => lifetime.dispose()
+  }, [lifetime])
   const [panes, setPanes] = useState<FunctionPaneSnapshot[]>([])
   const [busy, setBusy] = useState(false)
   const pending = useRef(0)
@@ -198,8 +252,9 @@ export function FunctionPanes({ threadId }: { threadId: string }): React.JSX.Ele
     let live = true
     let sequence = 0
     const refresh = (): void => {
+      if (!live || !lifetime.isActive()) return
       const request = ++sequence
-      void window.api.mods
+      void transport
         .panes(threadId)
         .then((rows) => {
           if (!live || request !== sequence) return
@@ -214,17 +269,18 @@ export function FunctionPanes({ threadId }: { threadId: string }): React.JSX.Ele
         })
     }
     refreshRef.current = refresh
-    const stop = window.api.mods.onCardsChanged((event) => {
+    const stop = transport.onCardsChanged((event) => {
       if (event.threadId === threadId) refresh()
     })
     window.addEventListener("mods:configuration-changed", refresh)
     refresh()
     return () => {
       live = false
+      if (refreshRef.current === refresh) refreshRef.current = () => {}
       stop()
       window.removeEventListener("mods:configuration-changed", refresh)
     }
-  }, [threadId])
+  }, [threadId, transport, lifetime])
   const act = useCallback(
     async (
       pane: FunctionPaneSnapshot,
@@ -232,11 +288,13 @@ export function FunctionPanes({ threadId }: { threadId: string }): React.JSX.Ele
       kind: FunctionUiAction["kind"],
       value?: string
     ) => {
+      const token = lifetime.capture()
+      if (token === null) return
       pending.current++
       if (kind !== "change") setBusy(true)
       setError("")
       try {
-        await window.api.mods.paneAct(threadId, {
+        await transport.paneAct(threadId, {
           pane: pane.key,
           generation: pane.generation,
           intentId: crypto.randomUUID(),
@@ -245,8 +303,9 @@ export function FunctionPanes({ threadId }: { threadId: string }): React.JSX.Ele
           kind,
           ...(value === undefined ? {} : { value })
         })
-        if (kind !== "change") refreshRef.current()
+        if (lifetime.isCurrent(token) && kind !== "change") refreshRef.current()
       } catch (cause) {
+        if (!lifetime.isCurrent(token)) return
         setError(
           String(cause).includes("MODS_UI_STALE_ACTION")
             ? "面板已更新，请在当前面板重新操作。"
@@ -255,10 +314,10 @@ export function FunctionPanes({ threadId }: { threadId: string }): React.JSX.Ele
         refreshRef.current()
       } finally {
         pending.current--
-        if (pending.current === 0) setBusy(false)
+        if (lifetime.isCurrent(token) && pending.current === 0) setBusy(false)
       }
     },
-    [threadId]
+    [threadId, transport, lifetime]
   )
   if (!panes.length && !error) return null
   return (
@@ -272,9 +331,9 @@ export function FunctionPanes({ threadId }: { threadId: string }): React.JSX.Ele
         <section
           key={pane.key}
           data-function-pane={pane.id}
-          className="rounded-lg border bg-background p-3"
+          className="rounded-xl border border-border/70 bg-background p-4 shadow-sm"
           onKeyDown={(event) => {
-            if (event.key === "Escape" && pane.closeOnEscape) {
+            if (event.key === "Escape" && pane.closeOnEscape && !disabled && !busy) {
               event.stopPropagation()
               void act(pane, undefined, "close")
             }
@@ -286,6 +345,7 @@ export function FunctionPanes({ threadId }: { threadId: string }): React.JSX.Ele
               size="sm"
               variant="ghost"
               aria-label={`关闭 ${pane.title}`}
+              disabled={disabled || busy}
               onClick={() => void act(pane, undefined, "close")}
             >
               关闭
@@ -297,7 +357,7 @@ export function FunctionPanes({ threadId }: { threadId: string }): React.JSX.Ele
           >
             <Element
               node={pane.tree}
-              busy={busy}
+              busy={busy || disabled}
               act={(node, kind, value) => act(pane, node, kind, value)}
               renderClient={(node) => {
                 const client = pane.clients?.find(
@@ -310,6 +370,8 @@ export function FunctionPanes({ threadId }: { threadId: string }): React.JSX.Ele
                     pane={pane.key}
                     node={node}
                     snapshot={client}
+                    disabled={disabled}
+                    dispatch={transport.clientAct}
                     refresh={() => refreshRef.current()}
                     render={(tree, busy, act) => <Element node={tree} busy={busy} act={act} />}
                   />

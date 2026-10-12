@@ -15,6 +15,9 @@ export interface FailureFuseInput {
 }
 
 export interface FailureFuseDecision {
+  /** Optional policy captured by a detached runtime; ordinary callers use process settings. */
+  userNoticeEnabled?: boolean
+  modelFeedbackEnabled?: boolean
   action: FailureFuseAction
   fingerprint: string
   count: number
@@ -411,13 +414,19 @@ function isFailureFuseReminderDecision(
 export function shouldSendFailureFuseNotice(
   decision: FailureFuseDecision | null | undefined | void
 ): decision is FailureFuseDecision {
-  return isFailureFuseUserNoticeEnabled() && isFailureFuseReminderDecision(decision)
+  return (
+    (decision?.userNoticeEnabled ?? isFailureFuseUserNoticeEnabled()) &&
+    isFailureFuseReminderDecision(decision)
+  )
 }
 
 export function shouldAttachFailureFuseFeedback(
   decision: FailureFuseDecision | null | undefined | void
 ): decision is FailureFuseDecision {
-  return isFailureFuseModelFeedbackEnabled() && isFailureFuseReminderDecision(decision)
+  return (
+    (decision?.modelFeedbackEnabled ?? isFailureFuseModelFeedbackEnabled()) &&
+    isFailureFuseReminderDecision(decision)
+  )
 }
 
 export function formatFailureFuseWarning(decision: FailureFuseDecision): string {

@@ -72,6 +72,8 @@
     "dev": "electron-vite dev",
     "dev:mock-task-cards": "node -e \"const { spawnSync } = require('child_process'); process.env.CMB_TASK_CARDS_MOCK = '1'; const result = spawnSync('electron-vite', ['dev'], { stdio: 'inherit', shell: true, env: process.env }); process.exit(result.status ?? 1)\"",
     "build": "electron-vite build",
+    "build:bot-service": "tsx scripts/build-bot-host.ts",
+    "test:bot:service": "tsx tests/bot-service.spec.ts",
     "clean:win-code-exe": "node -e \"require('fs').rmSync('resources/bin/win32/codex.exe', { force: true })\"",
     "predist": "npm run clean:win-code-exe",
     "predist:win": "npm run clean:win-code-exe",
@@ -92,7 +94,9 @@
     "test:mods:e2e": "node tests/run-mods-e2e.mjs",
     "test:mods:settings:e2e": "npm run build && tsx tests/mods-settings-e2e.spec.ts",
     "test:mods:function": "vitest run src/main/mods/v2 src/shared/mods/v2",
-    "test:mods:function:process": "node tests/run-function-mods-process.mjs"
+    "test:mods:function:process": "node tests/run-function-mods-process.mjs",
+    "test:bot:host": "npm run build && node tests/run-bot-host-native.mjs",
+    "test:bot:browser": "node tests/run-bot-browser.mjs"
   },
   "build": {
     "appId": "com.cmbdevclaw.com",
@@ -103,13 +107,17 @@
     },
     "files": [
       "out/",
+      "!out/resources/bot-native-sandbox/**",
       "node_modules/",
       "package.json"
     ],
     "asarUnpack": [
+      "out/main/**",
+      "node_modules/**",
       "node_modules/@jitl/**/*.wasm",
       "node_modules/@esbuild/**",
       "node_modules/esbuild/**",
+      "node_modules/@napi-rs/canvas*/**",
       "out/main/pty-host.js",
       "node_modules/node-pty/**"
     ],
@@ -136,6 +144,22 @@
     },
     "extraResources": [
       {
+        "from": "out/resources/bot-native-sandbox",
+        "to": "bot-native-sandbox"
+      },
+      {
+        "from": "src/main/bots/upstream",
+        "to": "licenses/bot-upstream",
+        "filter": [
+          "CODEX-LICENSE",
+          "CODEX-NOTICE",
+          "CODEX-PROVENANCE.json",
+          "RAKAZO-LICENSE",
+          "HERMES-LICENSE",
+          "HERMES-PROVENANCE.json"
+        ]
+      },
+      {
         "from": "resources/bin",
         "to": "bin"
       },
@@ -152,11 +176,17 @@
         ]
       }
     ],
-    "electronVersion": "39.8.10"
+    "electronVersion": "39.8.10",
+    "protocols": [
+      {
+        "name": "CMBDevClaw Bot messages",
+        "schemes": [
+          "cmbcowork"
+        ]
+      }
+    ]
   },
   "dependencies": {
-    "esbuild": "0.25.12",
-    "quickjs-emscripten": "0.32.0",
     "@fontsource/inter": "^5.2.8",
     "@fontsource/rajdhani": "^5.2.7",
     "@langchain/core": "^1.1.29",
@@ -167,9 +197,11 @@
     "@langchain/mcp-adapters": "^1.1.3",
     "@langchain/openai": "^1.2.11",
     "@modelcontextprotocol/sdk": "^1.27.1",
+    "@napi-rs/canvas": "1.0.9",
     "@radix-ui/react-context-menu": "^2.2.16",
     "@radix-ui/react-dialog": "^1.1.15",
     "@radix-ui/react-dropdown-menu": "^2.1.16",
+    "@radix-ui/react-focus-scope": "1.1.7",
     "@radix-ui/react-label": "^2.1.8",
     "@radix-ui/react-popover": "^1.1.15",
     "@radix-ui/react-progress": "^1.1.8",
@@ -180,18 +212,33 @@
     "@radix-ui/react-switch": "^1.2.6",
     "@radix-ui/react-tabs": "^1.1.13",
     "@radix-ui/react-tooltip": "^1.2.8",
+    "@tiptap/core": "3.14.0",
+    "@tiptap/extension-bubble-menu": "3.14.0",
+    "@tiptap/extension-document": "3.14.0",
+    "@tiptap/extension-floating-menu": "3.14.0",
+    "@tiptap/extension-hard-break": "3.14.0",
+    "@tiptap/extension-link": "3.14.0",
+    "@tiptap/extension-paragraph": "3.14.0",
+    "@tiptap/extension-text": "3.14.0",
+    "@tiptap/extensions": "3.14.0",
+    "@tiptap/pm": "3.14.0",
+    "@tiptap/react": "3.14.0",
+    "@xmldom/xmldom": "0.9.12",
     "@xterm/addon-fit": "^0.11.0",
     "@xterm/addon-webgl": "^0.19.0",
     "@xterm/xterm": "^6.0.0",
     "acorn": "^8.16.0",
     "adm-zip": "^0.5.16",
+    "aria-hidden": "1.2.6",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
     "deepagents": "^1.8.1",
     "diff": "^8.0.4",
     "electron-store": "^8.2.0",
+    "esbuild": "0.25.12",
     "fast-glob": "^3.3.3",
     "iconv-lite": "^0.7.2",
+    "image-size": "2.0.4",
     "jschardet": "^3.1.4",
     "jszip": "^3.10.1",
     "langchain": "^1.2.28",
@@ -201,7 +248,10 @@
     "micromatch": "^4.0.8",
     "node-diff3": "^3.2.1",
     "node-pty": "^1.1.0",
+    "parse5": "7.3.0",
+    "pdfjs-dist": "6.3.289",
     "playwright": "^1.58.2",
+    "quickjs-emscripten": "0.32.0",
     "react-diff-viewer-continued": "^4.1.2",
     "react-markdown": "^10.1.0",
     "react-resizable-panels": "^4.4.0",
@@ -214,23 +264,28 @@
     "remark-breaks": "^4.0.0",
     "remark-gfm": "^4.0.1",
     "remark-math": "^6.0.0",
+    "remark-parse": "11.0.0",
+    "remark-rehype": "11.1.2",
     "segment": "^0.1.3",
     "shiki": "^3.21.0",
     "sonner": "^2.0.7",
     "sql.js": "^1.12.0",
     "tailwind-merge": "^2.6.0",
+    "undici": "7.30.0",
+    "unified": "11.0.5",
     "uuid": "^11.0.5",
     "vscode-jsonrpc": "^8.2.1",
     "ws": "^8.19.0",
     "xlsx": "0.18.5",
     "yaml": "^2.8.4",
-    "zustand": "^5.0.3"
+    "zustand": "^5.0.3",
+    "pptxgenjs": "4.0.1"
   },
   "devDependencies": {
-    "@electron/asar": "^3.4.1",
     "@electron-toolkit/eslint-config-prettier": "^3.0.0",
     "@electron-toolkit/eslint-config-ts": "^3.1.0",
     "@electron-toolkit/tsconfig": "^2.0.0",
+    "@electron/asar": "^3.4.1",
     "@tailwindcss/vite": "^4.0.0",
     "@types/micromatch": "^4.0.10",
     "@types/node": "^22.19.1",

@@ -56,6 +56,13 @@ function isBrightSurfaceColor(red: number, green: number, blue: number, alpha = 
   return alpha >= 0.25 && red >= 215 && green >= 215 && blue >= 215
 }
 
+function isTranslucentWhiteOverlay(value: string): boolean {
+  const opacity = /^bg-white\/(\d+|\[\d*\.?\d+\])$/.exec(value)?.[1]
+  if (opacity === undefined) return false
+  const alpha = opacity.startsWith("[") ? Number(opacity.slice(1, -1)) : Number(opacity) / 100
+  return alpha >= 0 && alpha < 0.25
+}
+
 describe("theme surface policy", () => {
   it("pairs legacy light status surfaces with a dark override", () => {
     const lightSurface =
@@ -135,21 +142,29 @@ describe("theme surface policy", () => {
   it("rejects fixed light canvases in renderer components", () => {
     const componentRoots = [join(RENDERER_ROOT, "components"), join(RENDERER_ROOT, "features")]
     const fixedLightCanvas =
-      /useDarkTheme=\{false\}|theme:\s*["']github-light["']|\bbg-\[rgba\(255,255,255|\bbg-white\b|\btext-black\b|background(?:Color)?:\s*["'](?:white|#fff(?:fff)?)["']/gi
+      /useDarkTheme=\{false\}|theme:\s*["']github-light["']|\bbg-\[rgba\(255,255,255|\bbg-white\b(?:\/(?:\d+|\[[^\]]+\]))?|\btext-black\b|background(?:Color)?:\s*["'](?:white|#fff(?:fff)?)["']/gi
     const violations = componentRoots.flatMap((root) =>
       rendererSourceFiles(root).flatMap((file) => {
         const source = readFileSync(file, "utf8").replace(
           /dark:(?:hover:)?bg-white(?:\/(?:\[[^\]]+\]|\d+))?/g,
           ""
         )
-        return [...source.matchAll(fixedLightCanvas)].map((match) => ({
-          file,
-          value: match[0]
-        }))
+        // Match the CSS brightness rule: low-opacity white is a media overlay,
+        // not a light canvas. Opaque, bright and dynamic opacity stay rejected.
+        return [...source.matchAll(fixedLightCanvas)]
+          .filter((match) => !isTranslucentWhiteOverlay(match[0]))
+          .map((match) => ({ file, value: match[0] }))
       })
     )
 
     expect(violations).toEqual([])
+  })
+
+  it("distinguishes translucent white media controls from fixed light canvases", () => {
+    for (const value of ["bg-white/10", "bg-white/20", "bg-white/[0.1]"])
+      expect(isTranslucentWhiteOverlay(value), value).toBe(true)
+    for (const value of ["bg-white", "bg-white/25", "bg-white/100", "bg-white/[var(--opacity)]"])
+      expect(isTranslucentWhiteOverlay(value), value).toBe(false)
   })
 
   it("prevents new fixed-color application surfaces", () => {

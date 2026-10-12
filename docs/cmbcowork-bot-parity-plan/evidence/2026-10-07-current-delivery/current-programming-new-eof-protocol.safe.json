@@ -1,0 +1,224 @@
+{
+  "schemaVersion": 1,
+  "kind": "exact-run-model-protocol-safe",
+  "runId": "5d219477-5620-42be-97ef-b9bb7561e887",
+  "filesRead": 1,
+  "parseErrors": 0,
+  "matchedEntries": 29,
+  "calls": [
+    {
+      "callId": "b150600a-fb4f-462f-92cb-976ed07f898a",
+      "phases": [
+        "started",
+        "response",
+        "stream_ended"
+      ],
+      "httpStatus": 200,
+      "protocolComplete": true,
+      "format": "sse",
+      "inputTokensReported": 19277,
+      "outputTokensReported": 142,
+      "bytes": 7029,
+      "doneEvents": 1,
+      "errorEvents": 0,
+      "uninspectedEvents": 0,
+      "terminalFinishEvents": 1,
+      "eofCompleted": true,
+      "terminalFinishReasons": [
+        "tool_calls"
+      ]
+    },
+    {
+      "callId": "9316933f-6910-483d-9d88-13167bcd5534",
+      "phases": [
+        "started",
+        "response",
+        "stream_ended"
+      ],
+      "httpStatus": 200,
+      "protocolComplete": true,
+      "format": "sse",
+      "inputTokensReported": 20188,
+      "outputTokensReported": 221,
+      "bytes": 3884,
+      "doneEvents": 1,
+      "errorEvents": 0,
+      "uninspectedEvents": 0,
+      "terminalFinishEvents": 1,
+      "eofCompleted": true,
+      "terminalFinishReasons": [
+        "tool_calls"
+      ]
+    },
+    {
+      "callId": "f9e9aa82-0fb7-4c90-a46f-95f325e1596d",
+      "phases": [
+        "started",
+        "response",
+        "stream_ended"
+      ],
+      "httpStatus": 200,
+      "protocolComplete": true,
+      "format": "sse",
+      "inputTokensReported": 21246,
+      "outputTokensReported": 279,
+      "bytes": 4547,
+      "doneEvents": 1,
+      "errorEvents": 0,
+      "uninspectedEvents": 0,
+      "terminalFinishEvents": 1,
+      "eofCompleted": true,
+      "terminalFinishReasons": [
+        "tool_calls"
+      ]
+    },
+    {
+      "callId": "91637e71-5dfa-43eb-80e7-74ceb6862fd3",
+      "phases": [
+        "started",
+        "response",
+        "stream_ended"
+      ],
+      "httpStatus": 200,
+      "protocolComplete": true,
+      "format": "sse",
+      "inputTokensReported": 24261,
+      "outputTokensReported": 101,
+      "bytes": 4775,
+      "doneEvents": 1,
+      "errorEvents": 0,
+      "uninspectedEvents": 0,
+      "terminalFinishEvents": 1,
+      "eofCompleted": true,
+      "terminalFinishReasons": [
+        "tool_calls"
+      ]
+    },
+    {
+      "callId": "38970dfb-3b40-4872-8514-1ca86c0f3f1b",
+      "phases": [
+        "started",
+        "response",
+        "stream_ended"
+      ],
+      "httpStatus": 200,
+      "protocolComplete": true,
+      "format": "sse",
+      "inputTokensReported": 24491,
+      "outputTokensReported": 38,
+      "bytes": 1205,
+      "doneEvents": 1,
+      "errorEvents": 0,
+      "uninspectedEvents": 0,
+      "terminalFinishEvents": 1,
+      "eofCompleted": true,
+      "terminalFinishReasons": [
+        "tool_calls"
+      ]
+    },
+    {
+      "callId": "d4391c8a-9562-4a80-8f1d-ded4c8ccf52c",
+      "phases": [
+        "started",
+        "response",
+        "stream_ended"
+      ],
+      "httpStatus": 200,
+      "protocolComplete": true,
+      "format": "sse",
+      "inputTokensReported": 24705,
+      "outputTokensReported": 54,
+      "bytes": 1282,
+      "doneEvents": 1,
+      "errorEvents": 0,
+      "uninspectedEvents": 0,
+      "terminalFinishEvents": 1,
+      "eofCompleted": true,
+      "terminalFinishReasons": [
+        "tool_calls"
+      ]
+    },
+    {
+      "callId": "d35d579a-9c46-4326-a3e3-c2f1e9a5887a",
+      "phases": [
+        "started",
+        "response",
+        "stream_ended"
+      ],
+      "httpStatus": 200,
+      "protocolComplete": true,
+      "format": "sse",
+      "inputTokensReported": 24877,
+      "outputTokensReported": 38,
+      "bytes": 1207,
+      "doneEvents": 1,
+      "errorEvents": 0,
+      "uninspectedEvents": 0,
+      "terminalFinishEvents": 1,
+      "eofCompleted": true,
+      "terminalFinishReasons": [
+        "tool_calls"
+      ]
+    },
+    {
+      "callId": "01f7ea5f-90d8-40ce-b710-e5aa05535372",
+      "phases": [
+        "started",
+        "response",
+        "stream_ended"
+      ],
+      "httpStatus": 200,
+      "protocolComplete": true,
+      "format": "sse",
+      "inputTokensReported": 26270,
+      "outputTokensReported": 74,
+      "bytes": 3260,
+      "doneEvents": 1,
+      "errorEvents": 0,
+      "uninspectedEvents": 0,
+      "terminalFinishEvents": 1,
+      "eofCompleted": true,
+      "terminalFinishReasons": [
+        "tool_calls"
+      ]
+    },
+    {
+      "callId": "852e10ac-297a-4557-9b0e-7f417ce37d83",
+      "phases": [
+        "started",
+        "response",
+        "stream_ended"
+      ],
+      "httpStatus": 200,
+      "protocolComplete": true,
+      "format": "sse",
+      "inputTokensReported": 26465,
+      "outputTokensReported": 38,
+      "bytes": 1207,
+      "doneEvents": 1,
+      "errorEvents": 0,
+      "uninspectedEvents": 0,
+      "terminalFinishEvents": 1,
+      "eofCompleted": true,
+      "terminalFinishReasons": [
+        "tool_calls"
+      ]
+    },
+    {
+      "callId": "60d22913-73d9-4ed6-ac0e-4a22b0b82dfa",
+      "phases": [
+        "started",
+        "response"
+      ],
+      "httpStatus": 200
+    }
+  ],
+  "summary": {
+    "calls": 10,
+    "streamEnded": 9,
+    "protocolComplete": 9,
+    "completeWithoutOutputUsage": 0,
+    "outputUsageReported": 9
+  },
+  "coverage": "Best-effort rotating logger only; not a durable usage receipt, and absence cannot prove an event did not occur."
+}

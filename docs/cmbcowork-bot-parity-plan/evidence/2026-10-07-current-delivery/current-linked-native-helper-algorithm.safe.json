@@ -1,0 +1,96 @@
+{
+  "scope": "private macOS arm64 compilation/execution of actual linked production helper only; not Windows/kernel/application acceptance",
+  "rootWrites": false,
+  "archive": "/tmp/cmb-windows-g2b-net10-sdk-resume-10.0.401-actual2/dotnet-sdk-10.0.401-osx-arm64.tar.gz",
+  "commands": [
+    {
+      "label": "sdk-version",
+      "argv": [
+        "/private/var/folders/r4/m2gmdyyn06z9488ghc1044zh0000gn/T/cmb-current-core-progress-finite-g5wxzpnp/windows-scoped-input-ci-gate/algorithm-run-epn0xcig/sdk/dotnet",
+        "--version"
+      ],
+      "cwd": "/private/var/folders/r4/m2gmdyyn06z9488ghc1044zh0000gn/T/cmb-current-core-progress-finite-g5wxzpnp/windows-scoped-input-ci-gate/algorithm-run-epn0xcig",
+      "timeoutSeconds": 20,
+      "log": "/private/var/folders/r4/m2gmdyyn06z9488ghc1044zh0000gn/T/cmb-current-core-progress-finite-g5wxzpnp/windows-scoped-input-ci-gate/algorithm-run-epn0xcig/sdk-version.log",
+      "exitCode": 0,
+      "elapsedSeconds": 1.063,
+      "logSha256": "93c11b5221b72e0032ab2d9f93d28c2c9b7a0bb2557effffcdfef45ab739a0da"
+    },
+    {
+      "label": "locked-restore",
+      "argv": [
+        "/private/var/folders/r4/m2gmdyyn06z9488ghc1044zh0000gn/T/cmb-current-core-progress-finite-g5wxzpnp/windows-scoped-input-ci-gate/algorithm-run-epn0xcig/sdk/dotnet",
+        "restore",
+        "/private/var/folders/r4/m2gmdyyn06z9488ghc1044zh0000gn/T/cmb-current-core-progress-finite-g5wxzpnp/windows-scoped-input-ci-gate/source/scripts/bot-native-sandbox/native-desktop/tests/keyboard-sequence/WindowKeyboardSequence.Tests.csproj",
+        "--locked-mode",
+        "--configfile",
+        "/private/var/folders/r4/m2gmdyyn06z9488ghc1044zh0000gn/T/cmb-current-core-progress-finite-g5wxzpnp/windows-scoped-input-ci-gate/algorithm-run-epn0xcig/NuGet.Config",
+        "--artifacts-path",
+        "/private/var/folders/r4/m2gmdyyn06z9488ghc1044zh0000gn/T/cmb-current-core-progress-finite-g5wxzpnp/windows-scoped-input-ci-gate/algorithm-run-epn0xcig/artifacts",
+        "--property:Configuration=Release",
+        "--disable-build-servers"
+      ],
+      "cwd": "/private/var/folders/r4/m2gmdyyn06z9488ghc1044zh0000gn/T/cmb-current-core-progress-finite-g5wxzpnp/windows-scoped-input-ci-gate/algorithm-run-epn0xcig",
+      "timeoutSeconds": 60,
+      "log": "/private/var/folders/r4/m2gmdyyn06z9488ghc1044zh0000gn/T/cmb-current-core-progress-finite-g5wxzpnp/windows-scoped-input-ci-gate/algorithm-run-epn0xcig/locked-restore.log",
+      "exitCode": 0,
+      "elapsedSeconds": 0.675,
+      "logSha256": "28ed151258254b0eb01438cd1e7b9f450bc10f53cfbbc32295a594c331053f8f"
+    },
+    {
+      "label": "single-worker-build",
+      "argv": [
+        "/private/var/folders/r4/m2gmdyyn06z9488ghc1044zh0000gn/T/cmb-current-core-progress-finite-g5wxzpnp/windows-scoped-input-ci-gate/algorithm-run-epn0xcig/sdk/dotnet",
+        "build",
+        "/private/var/folders/r4/m2gmdyyn06z9488ghc1044zh0000gn/T/cmb-current-core-progress-finite-g5wxzpnp/windows-scoped-input-ci-gate/source/scripts/bot-native-sandbox/native-desktop/tests/keyboard-sequence/WindowKeyboardSequence.Tests.csproj",
+        "--no-restore",
+        "--configuration",
+        "Release",
+        "--artifacts-path",
+        "/private/var/folders/r4/m2gmdyyn06z9488ghc1044zh0000gn/T/cmb-current-core-progress-finite-g5wxzpnp/windows-scoped-input-ci-gate/algorithm-run-epn0xcig/artifacts",
+        "--output",
+        "/private/var/folders/r4/m2gmdyyn06z9488ghc1044zh0000gn/T/cmb-current-core-progress-finite-g5wxzpnp/windows-scoped-input-ci-gate/algorithm-run-epn0xcig/output",
+        "--disable-build-servers",
+        "--property:UseSharedCompilation=false",
+        "--maxcpucount:1"
+      ],
+      "cwd": "/private/var/folders/r4/m2gmdyyn06z9488ghc1044zh0000gn/T/cmb-current-core-progress-finite-g5wxzpnp/windows-scoped-input-ci-gate/algorithm-run-epn0xcig",
+      "timeoutSeconds": 60,
+      "log": "/private/var/folders/r4/m2gmdyyn06z9488ghc1044zh0000gn/T/cmb-current-core-progress-finite-g5wxzpnp/windows-scoped-input-ci-gate/algorithm-run-epn0xcig/single-worker-build.log",
+      "exitCode": 0,
+      "elapsedSeconds": 1.862,
+      "logSha256": "a49d9dba9e9ca525b4097279a4a62dd4d489f5116300f1a9aa3e3548d89701ff"
+    },
+    {
+      "label": "actual-linked-helper-run",
+      "argv": [
+        "/private/var/folders/r4/m2gmdyyn06z9488ghc1044zh0000gn/T/cmb-current-core-progress-finite-g5wxzpnp/windows-scoped-input-ci-gate/algorithm-run-epn0xcig/sdk/dotnet",
+        "/private/var/folders/r4/m2gmdyyn06z9488ghc1044zh0000gn/T/cmb-current-core-progress-finite-g5wxzpnp/windows-scoped-input-ci-gate/algorithm-run-epn0xcig/output/WindowKeyboardSequence.Tests.dll"
+      ],
+      "cwd": "/private/var/folders/r4/m2gmdyyn06z9488ghc1044zh0000gn/T/cmb-current-core-progress-finite-g5wxzpnp/windows-scoped-input-ci-gate/algorithm-run-epn0xcig",
+      "timeoutSeconds": 20,
+      "log": "/private/var/folders/r4/m2gmdyyn06z9488ghc1044zh0000gn/T/cmb-current-core-progress-finite-g5wxzpnp/windows-scoped-input-ci-gate/algorithm-run-epn0xcig/actual-linked-helper-run.log",
+      "exitCode": 0,
+      "elapsedSeconds": 0.041,
+      "logSha256": "70b751d6f48028c3c7bab4d783262faeff2071898190049347146deedef90d3a"
+    }
+  ],
+  "status": "passed",
+  "diskFreeBefore": 82743054336,
+  "actualArchiveSha512": "69f64eb00dc045398755c440b152225d544301a345a146a16e86a56a0c52b7c94b2c331520e976dbb821f18d31930aafbd25bb85961e3517e0665414ce0cbcff",
+  "runDirectory": "/private/var/folders/r4/m2gmdyyn06z9488ghc1044zh0000gn/T/cmb-current-core-progress-finite-g5wxzpnp/windows-scoped-input-ci-gate/algorithm-run-epn0xcig",
+  "sdkDirectory": "/private/var/folders/r4/m2gmdyyn06z9488ghc1044zh0000gn/T/cmb-current-core-progress-finite-g5wxzpnp/windows-scoped-input-ci-gate/algorithm-run-epn0xcig/sdk",
+  "archiveMembers": 5630,
+  "archiveExpandedBytes": 669592547,
+  "archiveLinks": 0,
+  "extracted": true,
+  "sdkVersion": "10.0.401",
+  "actualSourceSha256": {
+    "worker/WindowKeyboardSequence.cs": "f876bbd17b1e2b27815dd901685337c399daaa370f5daaef86caeddf70d6e463",
+    "tests/keyboard-sequence/Program.cs": "944b30a09e39acd38b5770c1596de6832802a0338780d7c7f737ec91d78d13e4",
+    "tests/keyboard-sequence/WindowKeyboardSequence.Tests.csproj": "a6300718c1175085fe1a525b0ce6bebd3f8570e023a16d42526e13947dd837ca",
+    "tests/keyboard-sequence/packages.lock.json": "98540f8c8005e000cc83cffb4598281f61900a13426b470f1d1114c62b54a63d"
+  },
+  "kernelAcceptance": "not-tested",
+  "elapsedSeconds": 7.675
+}

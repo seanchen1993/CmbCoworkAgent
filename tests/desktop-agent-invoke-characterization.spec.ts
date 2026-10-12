@@ -58,6 +58,7 @@ function sliceBetween(source: string, start: string, end: string, label: string)
 const agentIpc = read("src/main/ipc/agent.ts")
 const runtime = read("src/main/agent/runtime.ts")
 const standardTurn = read("src/main/agent/standard-thread-turn.ts")
+const promptCore = read("src/main/agent/prompt-preparation.ts")
 const sandboxIpc = read("src/main/ipc/sandbox.ts")
 const approvalBroker = read("src/main/agent/approval-decision-broker.ts")
 
@@ -163,12 +164,24 @@ function testPromptSkillHookAndHarnessPreparation(): void {
     "export interface StandardTurnRoutingInput",
     "desktop prompt preparation"
   )
-  assertSourceOrder(
+  assertIncludes(preparation, "return prepareUserPromptCore({", "desktop uses the common lifecycle")
+  assertIncludes(
     preparation,
+    "activateExplicitSkillFromMessage({",
+    "desktop supplies real skill activation"
+  )
+  assertIncludes(
+    preparation,
+    '"UserPromptSubmit",\n        context,',
+    "desktop executes the real submit hooks"
+  )
+  const sequence = promptCore.slice(promptCore.indexOf("const explicitSkillActivation = await"))
+  assertSourceOrder(
+    sequence,
     [
-      "activateExplicitSkillFromMessage({",
+      "options.activateExplicitSkill?.()",
       "isPreparationCurrent && !isPreparationCurrent()",
-      '"UserPromptSubmit"',
+      "options.submit?.(hookVisibleMessage)",
       "promptSubmitResult?.blocked || promptSubmitResult?.continue === false",
       "updatedInput?.message",
       "onExplicitSkillActivated?.(explicitSkillActivation.skill)"
@@ -176,12 +189,12 @@ function testPromptSkillHookAndHarnessPreparation(): void {
     "explicit Skill and UserPromptSubmit lifecycle"
   )
   assertIncludes(
-    preparation,
+    promptCore,
     "applyPromptRewritePreservingGoalMarker",
     "hook rewrites preserve goal markers"
   )
   assertIncludes(
-    preparation,
+    promptCore,
     "explicitSkillActivation.parsed.block",
     "hook rewrites retain the explicit Skill block"
   )
@@ -201,7 +214,7 @@ function testPromptSkillHookAndHarnessPreparation(): void {
     [
       "await resolveHarnessFeatureBindingContext(bindingMetadata)",
       "createStandardTurnTrace({",
-      "const harnessAgentContext = await getHarnessAgentContext(metadata",
+      "harnessAgentContext = await getHarnessAgentContext(metadata",
       "await fireSessionStartOnce(",
       "const preparedPrompt = await prepareUserPromptForCurrentRun"
     ],

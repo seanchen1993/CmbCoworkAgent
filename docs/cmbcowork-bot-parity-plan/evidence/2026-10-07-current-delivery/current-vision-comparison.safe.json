@@ -1,0 +1,37 @@
+{
+  "schemaVersion": 1,
+  "kind": "real-ui-single-image-task-comparison",
+  "observedAt": "2026-10-07T11:59:20.185518+00:00",
+  "input": {
+    "bytes": 259,
+    "sha256": "cb55a2f4137cb53f5d6b7f10d0f655c770b05a829e038f135ce83622282dd123",
+    "synthetic": true,
+    "file": "sample.png",
+    "width": 128,
+    "height": 64,
+    "expected": "左：蓝色；右：黄色"
+  },
+  "cmb": {
+    "model": "MiniMax-M3",
+    "runId": "7a67620c-cf2e-4438-b0df-21a7dff60213",
+    "formalOutcome": "succeeded",
+    "result": {
+      "bytes": 29,
+      "sha256": "2365acca831f003c17cfb21eaabe29e6c366e23e124bdb15e19082c34e0e033d"
+    },
+    "actualUiReply": "左：蓝色；右：黄色",
+    "sampleOutcome": "PASS",
+    "uiDifference": "Original image upload renders only generic Attachment 1 button, whereas Grok displays the image inline."
+  },
+  "grok": {
+    "version": "0.68.1",
+    "officialService": true,
+    "actualUiReply": "左：蓝色；右：黄色",
+    "sampleOutcome": "PASS"
+  },
+  "scope": [
+    "Actual native UI upload and send in both apps.",
+    "Only this single-image task is verified; six-image diagnostics previously failed and Teach image learning remains unverified.",
+    "No full-function or model-quality pass claimed."
+  ]
+}

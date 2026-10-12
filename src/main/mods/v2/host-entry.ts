@@ -1,3 +1,4 @@
+import { modParentPort } from "../node-process"
 import { randomUUID } from "node:crypto"
 import type { ModJson } from "../../../shared/mods/types"
 import { encodeModJson, parseModJson } from "../../../shared/mods/validation"
@@ -6,14 +7,7 @@ import type { FunctionRequest, FunctionResponse } from "../../../shared/mods/v2/
 import { FunctionGuestRuntime } from "./guest-runtime"
 import { fromWireError, wireError } from "./wire"
 
-const port = (
-  process as NodeJS.Process & {
-    parentPort: {
-      on(event: "message", listener: (event: { data: FunctionRequest }) => void): void
-      postMessage(value: FunctionResponse): void
-    }
-  }
-).parentPort
+const port = modParentPort<FunctionRequest, FunctionResponse>()
 
 const runtimes = new Map<string, FunctionGuestRuntime>()
 const loading = new Set<string>()

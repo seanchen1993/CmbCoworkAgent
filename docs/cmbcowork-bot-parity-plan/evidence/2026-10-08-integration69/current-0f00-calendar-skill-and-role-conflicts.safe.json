@@ -1,0 +1,373 @@
+{
+  "kind": "formal-0f00-calendar-skill-and-historical-outputs",
+  "recordedAt": "2026-10-09T22:38:03.212959+00:00",
+  "nativeBuildId": "0f00c3d0338812a9d03510c2",
+  "hostId": "c8c92c37-afe7-42ba-917d-ade704d51cf9",
+  "model": "MiniMax-M3",
+  "actualNativeUi": true,
+  "wholeCoreParityComplete": false,
+  "coldPreservation": {
+    "descriptor": {
+      "version": 1,
+      "pid": 57823,
+      "hostId": "c8c92c37-afe7-42ba-917d-ade704d51cf9",
+      "buildId": "0f00c3d0338812a9d03510c2",
+      "socketPath": "/private/tmp/cmb-bot-501-4b987f56222e7e971f75407b/rpc.sock"
+    },
+    "selectedRuns": 57,
+    "checkpointPayloadBytesHashed": 10882280,
+    "logicalGroupsEqual": {
+      "runs": true,
+      "effects": true,
+      "interactions": true,
+      "artifacts": true,
+      "artifactObjects": true,
+      "peerDispatch": true,
+      "peerWaits": true,
+      "checkpoints": true,
+      "skills": true,
+      "project": true
+    },
+    "extraTablesEqual": {
+      "bot_memories": true,
+      "bot_memory_metadata": true,
+      "bot_model_usage": true,
+      "bot_group_cycles": true,
+      "bot_group_runs": true
+    },
+    "modelNormalizedFingerprintMatched": true,
+    "otherConfigurationEqual": {
+      "custom-models.json": true,
+      ".env": true,
+      "userinfo-models.json": true,
+      "bot-host/workspace.private.json": true
+    },
+    "normalExits": [
+      {
+        "role": "main",
+        "pid": 66418,
+        "signal": "SIGTERM",
+        "exited": true,
+        "seconds": 0.364
+      },
+      {
+        "role": "host",
+        "pid": 66467,
+        "signal": "SIGTERM",
+        "exited": true,
+        "seconds": 0.086
+      }
+    ],
+    "forceKillUsed": false
+  },
+  "memory": {
+    "run": {
+      "id": "0d670256-c615-4582-877a-4a29a0a0eeff",
+      "status": "succeeded",
+      "result": "\n已读取项目偏好（记忆 ID `62b23ea9-c2b2-4b14-b8d7-628348d47e67`，revision 2），未新增记忆。按「蓝桥-314」项目偏好输出工作摘要如下：\n\n---\n\n**【蓝桥-314】工作摘要**\n\n**依据**\n1. 检查执行情况：本日推进 3 项检查任务，均已执行完成。\n2. 问题识别情况：在上述 3 项检查范围内，发现 1 项与页面输入相关的问题。\n3. 后续安排：该问题已登记处理计划，安排在明天修复。\n\n**结论**\n- 今日共完成 3 项检查；\n- 其中发现 1 项页面输入问题；\n- 该问题计划明天修复。\n\n---\n\n备注：摘要严格依据用户提供的三项事实产出，未引入未经验证的额外信息；按项目偏好采用简体中文，并按「先写依据、再写结论」结构呈现。",
+      "error": null
+    },
+    "usage": {
+      "runs": [
+        {
+          "run_id": "0d670256-c615-4582-877a-4a29a0a0eeff",
+          "model": "MiniMax-M3",
+          "requests": 2,
+          "unknown_requests": 0
+        }
+      ],
+      "requests": 2,
+      "unknown": 0
+    },
+    "verdict": "failed_reply_quality",
+    "failureReasons": [
+      "Exposes internal memory ID/revision",
+      "Claims unobserved plan registration",
+      "Repeats old verbose reply despite current concise policy"
+    ],
+    "storedMemory": {
+      "id": "62b23ea9-c2b2-4b14-b8d7-628348d47e67",
+      "bot_id": "954dd5e0-e2e7-4247-9303-276c8111c870",
+      "text": "项目偏好（适用于用户说「按项目偏好」时）：\n\n1. 测试项目代号：蓝桥-314\n2. 工作摘要格式：先写依据，再写结论\n3. 语言：使用简体中文\n\n触发条件：用户明确说「按项目偏好」时，必须按上述三条要求产出工作摘要。",
+      "revision": 2,
+      "source_message_id": "de9010ae-3735-4a52-871e-9c24a2cee24a",
+      "deleted_at": null,
+      "updated_at": 1791551650445
+    }
+  },
+  "historicalGroup": {
+    "cycle": {
+      "id": "9ff967bb-2725-480b-8410-7ad9a9259423",
+      "conversation_id": "221b4a41-095a-4836-b7df-954a50e18798",
+      "member_ids": "[\"4002cdce-8149-4dfc-9c4b-28abd67d30c1\",\"924e1689-7b6d-411c-a429-28decb91b179\",\"e1d81813-1ff0-4fca-9948-d966e1a77189\"]",
+      "round": 1,
+      "speakers": "[\"924e1689-7b6d-411c-a429-28decb91b179\",\"e1d81813-1ff0-4fca-9948-d966e1a77189\",\"4002cdce-8149-4dfc-9c4b-28abd67d30c1\"]",
+      "speaker_index": 2,
+      "round_messages": 0,
+      "total_messages": 3,
+      "current_run_id": "beac80cf-727f-45f1-a3fe-6d9323d2af04",
+      "status": "completed",
+      "created_at": 1791584975460,
+      "updated_at": 1791585008747,
+      "thread_root": ""
+    },
+    "runs": [
+      {
+        "id": "e0525120-dc32-40a7-a8db-3cbd1b9e77c8",
+        "bot_id": "4002cdce-8149-4dfc-9c4b-28abd67d30c1",
+        "status": "succeeded",
+        "error": null,
+        "sent_count": 1
+      },
+      {
+        "id": "7ddd0326-6018-4647-9a12-3532c14793a3",
+        "bot_id": "924e1689-7b6d-411c-a429-28decb91b179",
+        "status": "succeeded",
+        "error": null,
+        "sent_count": 1
+      },
+      {
+        "id": "fabaced3-719c-4d00-8418-a69ad1933e10",
+        "bot_id": "e1d81813-1ff0-4fca-9948-d966e1a77189",
+        "status": "succeeded",
+        "error": null,
+        "sent_count": 1
+      },
+      {
+        "id": "b011dd2e-0d0f-4beb-9e2b-c3b595898653",
+        "bot_id": "924e1689-7b6d-411c-a429-28decb91b179",
+        "status": "succeeded",
+        "error": null,
+        "sent_count": 0
+      },
+      {
+        "id": "a47952f8-5753-4f4d-b754-caadb20ad07c",
+        "bot_id": "e1d81813-1ff0-4fca-9948-d966e1a77189",
+        "status": "succeeded",
+        "error": null,
+        "sent_count": 0
+      },
+      {
+        "id": "beac80cf-727f-45f1-a3fe-6d9323d2af04",
+        "bot_id": "4002cdce-8149-4dfc-9c4b-28abd67d30c1",
+        "status": "succeeded",
+        "error": null,
+        "sent_count": 0
+      }
+    ],
+    "usage": {
+      "runs": [
+        {
+          "run_id": "7ddd0326-6018-4647-9a12-3532c14793a3",
+          "model": "MiniMax-M3",
+          "requests": 2,
+          "unknown_requests": 0
+        },
+        {
+          "run_id": "a47952f8-5753-4f4d-b754-caadb20ad07c",
+          "model": "MiniMax-M3",
+          "requests": 2,
+          "unknown_requests": 0
+        },
+        {
+          "run_id": "b011dd2e-0d0f-4beb-9e2b-c3b595898653",
+          "model": "MiniMax-M3",
+          "requests": 2,
+          "unknown_requests": 0
+        },
+        {
+          "run_id": "beac80cf-727f-45f1-a3fe-6d9323d2af04",
+          "model": "MiniMax-M3",
+          "requests": 2,
+          "unknown_requests": 0
+        },
+        {
+          "run_id": "e0525120-dc32-40a7-a8db-3cbd1b9e77c8",
+          "model": "MiniMax-M3",
+          "requests": 2,
+          "unknown_requests": 0
+        },
+        {
+          "run_id": "fabaced3-719c-4d00-8418-a69ad1933e10",
+          "model": "MiniMax-M3",
+          "requests": 2,
+          "unknown_requests": 0
+        }
+      ],
+      "requests": 12,
+      "unknown": 0
+    },
+    "publicReplies": [
+      {
+        "bot_id": "4002cdce-8149-4dfc-9c4b-28abd67d30c1",
+        "text": "本轮分工：\n• 报价工具编程核验：独立计算 17+25，发结果（1 条）。\n• 月报示范核验：核对上述结果是否正确，给判断（1 条）。\n各发一条后停止，不访问外部服务。",
+        "run_id": "e0525120-dc32-40a7-a8db-3cbd1b9e77c8"
+      },
+      {
+        "bot_id": "924e1689-7b6d-411c-a429-28decb91b179",
+        "text": "独立计算：17+25 = 42。",
+        "run_id": "7ddd0326-6018-4647-9a12-3532c14793a3"
+      },
+      {
+        "bot_id": "e1d81813-1ff0-4fca-9948-d966e1a77189",
+        "text": "核对：17+25 = 42，正确。",
+        "run_id": "fabaced3-719c-4d00-8418-a69ad1933e10"
+      }
+    ],
+    "verdict": "failed_requested_message_count",
+    "failureReason": "Primary member sent extra allocation message before calculation and verification"
+  },
+  "calendar": {
+    "before": {
+      "id": "a09cef8a-5e2f-44be-a831-a08341e67c59",
+      "bot_id": "4002cdce-8149-4dfc-9c4b-28abd67d30c1",
+      "name": "复刻核验-每周空任务",
+      "prompt": "在本对话回复恰好一行：ROUTINE_PARITY_CHECK。不访问网页、不调用外部服务、不修改文件、不向其他人发消息。",
+      "schedule": "{\"kind\":\"cron\",\"expression\":\"0 12 * * 0\"}",
+      "timezone": "Asia/Shanghai",
+      "enabled": 0,
+      "next_at": 1791691200000,
+      "revision": 1,
+      "created_at": 1791585038577,
+      "desired_enabled": 0,
+      "activation_required": 0
+    },
+    "after": {
+      "id": "a09cef8a-5e2f-44be-a831-a08341e67c59",
+      "bot_id": "4002cdce-8149-4dfc-9c4b-28abd67d30c1",
+      "name": "复刻核验-每周空任务",
+      "prompt": "在本对话回复恰好一行：ROUTINE_PARITY_CHECK。不访问网页、不调用外部服务、不修改文件、不向其他人发消息。",
+      "schedule": "{\"kind\":\"cron\",\"expression\":\"0 10 * * 4\"}",
+      "timezone": "Asia/Shanghai",
+      "enabled": 0,
+      "next_at": 1792029600000,
+      "revision": 2,
+      "created_at": 1791585038577,
+      "desired_enabled": 0,
+      "activation_required": 0
+    },
+    "sameIdAndPromptPreserved": true,
+    "sameInputOfficialGrokObserved": true,
+    "usage": {
+      "runs": [
+        {
+          "run_id": "6b2dc898-27ee-4871-bd21-2bfb95e15626",
+          "model": "MiniMax-M3",
+          "requests": 4,
+          "unknown_requests": 0
+        },
+        {
+          "run_id": "e0170575-45ac-4f64-a000-dd5bfa3b880c",
+          "model": "MiniMax-M3",
+          "requests": 3,
+          "unknown_requests": 0
+        }
+      ],
+      "requests": 7,
+      "unknown": 0
+    },
+    "verdict": "finite_functional_sample_pass",
+    "replyQualityAligned": false,
+    "officialGrokUi": {
+      "savedId": "automation-1790700071172",
+      "savedTrigger": "每星期四 10:00",
+      "savedPaused": true,
+      "savedInstruction": "在本对话回复恰好一行：ROUTINE_PARITY_CHECK。除此之外什么都不做：不访问网页、不调用外部服务、不修改文件、不向其他人发消息。",
+      "sameNameAndIdentityRetained": true,
+      "detailOpenedAfterReply": true
+    },
+    "runs": [
+      {
+        "id": "6b2dc898-27ee-4871-bd21-2bfb95e15626",
+        "status": "succeeded",
+        "result": "\n已按要求更新同一条例行任务，未新增第二条、未执行。下面是实际保存的配置（取自 update 回执）：\n\n**例程：复刻核验-每周空任务**\n- **ID**：`a09cef8a-5e2f-44be-a831-a08341e67c59`（与原任务相同，未替换）\n- **触发方式**：`cron`（已更新为 `0 10 * * 4`）\n- **时区**：Asia/Shanghai\n- **下一次预定时间**：`nextAt = 1792029600000`（Unix 毫秒）= **2026-10-15（周四）10:00:00 Asia/Shanghai**\n- **启用状态**：`enabled = false`，回执 `effectiveState = paused`（保持暂停）\n- **任务内容（未变）**：到时在本对话回复恰好一行 `ROUTINE_PARITY_CHECK`，不访问网页、不调用外部服务、不修改文件、不向其他人发消息\n- **版本**：1 → 2\n\n本次仅调用了一次 update_routine；未新增例程、未立即执行、未触碰其他 Bot、技能或本机项目。",
+        "error": null
+      },
+      {
+        "id": "e0170575-45ac-4f64-a000-dd5bfa3b880c",
+        "status": "succeeded",
+        "result": "已按要求创建，未测试或执行。下面是实际保存的计划（取自创建回执）：\n\n**例程：复刻核验-每周空任务**\n- **ID**：`a09cef8a-5e2f-44be-a831-a08341e67c59`\n- **触发方式**：`cron`（每周日 12:00 Asia/Shanghai）\n- **下一次预定时间**：`nextAt = 1791691200000`（Unix 毫秒）= **2026-10-11 12:00:00 Asia/Shanghai**（本周日）\n- **时区**：Asia/Shanghai\n- **启用状态**：`enabled = false`，回执 `effectiveState = paused`（保持暂停）\n- **任务内容**：到时在本对话回复恰好一行 `ROUTINE_PARITY_CHECK`，不访问网页、不调用外部服务、不修改文件、不向其他人发消息\n- **版本**：1（创建于本次，未做后续修改）\n\n本次仅调用了一次创建例程；未触碰其他 Bot、技能、例程或本机项目；未访问网页、未调用任何外部服务、未向其他人发消息。",
+        "error": null
+      }
+    ]
+  },
+  "skill": {
+    "trial": {
+      "id": "2c7d2755-5f7d-445e-a70f-0627186ef19a",
+      "bot_id": "e1d81813-1ff0-4fca-9948-d966e1a77189",
+      "skill_id": "2a50a207-f562-4348-9a90-4b38a827bca3",
+      "version": 1,
+      "inputs": "两个整数是239和17。",
+      "criteria": "正确独立计算，结果为256，仅输出一行算式。不得沿用历史数字，不访问网页或修改文件。",
+      "run_id": "32ea4c5f-1dd2-4c0d-977c-fe849210d7d6",
+      "verdict": "failed",
+      "note": "算式239 + 17 = 256正确，但额外添加了执行报告与验证状态，未满足只输出一行的验收条件。",
+      "created_at": 1791585228914
+    },
+    "run": {
+      "id": "32ea4c5f-1dd2-4c0d-977c-fe849210d7d6",
+      "status": "succeeded",
+      "result": "\n239 + 17 = 256\n\n依据:仅用本次输入 239 与 17,未访问网页/文件/记忆/例程/外部消息,未沿用任何历史数字,未向其他 Bot 发消息。\n未完成:技能 `技能状态核验`(v1)状态仍为未验证,标记动作需你显式完成。",
+      "error": null
+    },
+    "usage": {
+      "runs": [
+        {
+          "run_id": "32ea4c5f-1dd2-4c0d-977c-fe849210d7d6",
+          "model": "MiniMax-M3",
+          "requests": 1,
+          "unknown_requests": 0
+        }
+      ],
+      "requests": 1,
+      "unknown": 0
+    },
+    "versions": [
+      {
+        "id": "2a50a207-f562-4348-9a90-4b38a827bca3",
+        "bot_id": "e1d81813-1ff0-4fca-9948-d966e1a77189",
+        "name": "技能状态核验",
+        "instructions": "用户提供两个整数时，独立计算它们的和，只回复一行算式与结果。仅使用用户本次输入；不访问网页，不操作文件，不新增记忆，不创建例程，不向其他人发消息。输入缺失时先询问，不沿用历史数字。",
+        "version": 1,
+        "enabled": 1,
+        "verified": 0,
+        "created_at": 1791585212931
+      },
+      {
+        "id": "2a50a207-f562-4348-9a90-4b38a827bca3",
+        "bot_id": "e1d81813-1ff0-4fca-9948-d966e1a77189",
+        "name": "技能状态核验",
+        "instructions": "用户提供两个整数时，独立计算它们的和，只回复一行算式与结果。仅使用用户本次输入；不访问网页，不操作文件，不新增记忆，不创建例程，不向其他人发消息。输入缺失时先询问，不沿用历史数字。",
+        "version": 2,
+        "enabled": 0,
+        "verified": 0,
+        "created_at": 1791585372239
+      },
+      {
+        "id": "2a50a207-f562-4348-9a90-4b38a827bca3",
+        "bot_id": "e1d81813-1ff0-4fca-9948-d966e1a77189",
+        "name": "技能状态核验",
+        "instructions": "用户提供两个整数时，独立计算它们的和，只回复一行算式与结果。仅使用用户本次输入；不访问网页，不操作文件，不新增记忆，不创建例程，不向其他人发消息。输入缺失时先询问，不沿用历史数字。",
+        "version": 3,
+        "enabled": 1,
+        "verified": 0,
+        "created_at": 1791585375975
+      }
+    ],
+    "manualReviewVerdictPreserved": true,
+    "disabledUiTrialButtonBlocked": true,
+    "enabledAfterRestore": true,
+    "oldTrialNotPromotedToNewVersion": true,
+    "verdict": "failed_output_format",
+    "currentVersion": 3,
+    "officialComparisonPending": true
+  },
+  "candidate": {
+    "notYetLive": true,
+    "changes": [
+      "Remove implicit primary coordinator role in group; use current room assignment",
+      "Honor skill-trial output format while retaining real failures and human review"
+    ],
+    "scope": "No permission, repair limit, stored prior prompt or output changed"
+  }
+}

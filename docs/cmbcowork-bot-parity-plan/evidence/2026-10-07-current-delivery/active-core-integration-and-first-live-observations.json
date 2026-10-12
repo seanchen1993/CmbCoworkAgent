@@ -1,0 +1,72 @@
+{
+  "kind": "active-core-integration-before-live-fixes",
+  "updatedAt": "2026-10-07T10:50:23.975549+00:00",
+  "sequence": [
+    "finish core features",
+    "real MiniMax tasks and Grok comparison",
+    "broad issue fixes"
+  ],
+  "integrated": [
+    "primary Bot",
+    "real model introduction",
+    "multi-source selection quotes"
+  ],
+  "tests": {
+    "mainAndWelcome": {
+      "files": 6,
+      "cases": 37,
+      "exitCode": 0
+    },
+    "selectionQuotes": {
+      "files": 3,
+      "cases": 10,
+      "exitCode": 0
+    },
+    "quotePendingSend": {
+      "files": 1,
+      "cases": 14,
+      "exitCode": 0
+    },
+    "hiddenCueReplyAfterPurge": {
+      "files": 1,
+      "cases": 11,
+      "exitCode": 0
+    },
+    "welcomeProviderContract": {
+      "files": 1,
+      "cases": 3,
+      "exitCode": 0
+    },
+    "typecheckNode": 0,
+    "typecheckWeb": 0,
+    "messages": 0,
+    "targetedLint": 0,
+    "build": 0
+  },
+  "runtime": {
+    "parserCjsStartupIssue": "fixed by bundling ESM parser stack; actual UI now opens",
+    "welcomeMiniMaxIssue": "actual MiniMax 400 empty chat; provider correction integrated, not yet built or reverified live",
+    "normalTask": {
+      "model": "MiniMax-M2.7",
+      "input": "A budget80 duration12; B budget100 duration10",
+      "correctResultObserved": true,
+      "rawThinkingDisplayed": true,
+      "acceptedAsAligned": false
+    },
+    "browserTask": {
+      "model": "MiniMax-M3",
+      "status": "running through actual work browser with local synthetic fixture; approvals by CUA"
+    },
+    "modelChecks": {
+      "model": "MiniMax-M3",
+      "text": "failed",
+      "tools": "passed",
+      "vision": "failed",
+      "note": "Observed UI exact-response failures; raw thinking projection suspected and under correction; no inference of lack of vision support"
+    },
+    "grok": "official client restarted; still Connecting, no fresh task result"
+  },
+  "formalAuthenticationSourceModified": false,
+  "localDevelopmentBypass": true,
+  "fullParityAccepted": false
+}

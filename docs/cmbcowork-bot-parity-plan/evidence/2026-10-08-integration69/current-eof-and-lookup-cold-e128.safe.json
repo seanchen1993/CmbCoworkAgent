@@ -1,0 +1,91 @@
+{
+  "kind": "minimax-eof-and-project-cards-lookup-current-cold-start",
+  "recordedAt": "2026-10-09T08:38:25.216405+00:00",
+  "live": {
+    "version": 1,
+    "pid": 16523,
+    "hostId": "7d9af62b-9aa1-477b-bc8d-508465631bbf",
+    "buildId": "e128507cae60bbc1635cc350",
+    "socketPath": "/private/tmp/cmb-bot-501-4b987f56222e7e971f75407b/rpc.sock"
+  },
+  "pre": {
+    "path": "/Users/chenqiang/Library/Application Support/CMBDevClaw-development/2026-10-08/presentation/cold-upgrade-plan/pins-quiesced-before-start-1791534983167948000.safe.json",
+    "bytes": 418343,
+    "sha256": "839cc695609ff9e4c757f9a7b0d9c6787be0a9c4fbe2b785ef56e663216c1098"
+  },
+  "post": {
+    "path": "/Users/chenqiang/Library/Application Support/CMBDevClaw-development/2026-10-08/presentation/cold-upgrade-plan/pins-post-start-pre-review-1791535044823131000.safe.json",
+    "bytes": 419453,
+    "sha256": "6db222bf1c571520a6163bd65e64572cd7baa33ae04bbe6397cf7eafd535194d"
+  },
+  "selectedRuns": 10,
+  "preserved": {
+    "schema": true,
+    "checkpoints": true,
+    "effects": true,
+    "interactions": true,
+    "artifacts": true,
+    "artifactObjects": true,
+    "peerDispatch": true,
+    "peerWaits": true,
+    "skills": true,
+    "project": true
+  },
+  "checkpointPayloadBytesHashed": 9126676,
+  "modelSnapshotOnlyTwoRuntimeDirectoryStringsChanged": true,
+  "otherConfigurationFingerprintsEqual": true,
+  "normalSigtermPinnedMainThenHost": true,
+  "priorTaskHistoriesRewritten": false,
+  "finalGates": {
+    "productionBuild": {
+      "exit": 0,
+      "path": "/tmp/cmb-read-lookup-recovery-production-build-20261009.log",
+      "bytes": 56263,
+      "sha256": "a9425df182ab4a1e66be0d845b1fba12065208a30e0a021e8607cf6f0d9fc2f7"
+    },
+    "workflow": {
+      "exit": 0,
+      "path": "/tmp/cmb-read-lookup-recovery-workflow-20261009.log",
+      "bytes": 164126,
+      "sha256": "1dc560163f83080ec5940610c03b9690d357eca74ffb08541e11c90e672aaac6"
+    },
+    "format": {
+      "exit": 0,
+      "path": "/tmp/cmb-read-lookup-recovery-final-format-20261009.log",
+      "bytes": 66,
+      "sha256": "17aa973d3f004560237d9a95171210b0671deff23d61628eecf7322ff5938f20"
+    },
+    "nodeTypes": {
+      "exit": 0,
+      "path": "/tmp/cmb-read-lookup-recovery-node-20261009.log",
+      "bytes": 91,
+      "sha256": "546c7bfd36ecac14793f941add6251c16a729819d1b744cccbaf256a91e1b42c"
+    },
+    "strictLint": {
+      "exit": 0,
+      "path": "/tmp/cmb-read-lookup-recovery-lint-retry1-20261009.log",
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    }
+  },
+  "grokSameMaterialCsv": {
+    "path": "/Users/chenqiang/Library/Application Support/CMBDevClaw-development/2026-10-08/output-contract/grok-result-core-parity-20261009-1610.csv",
+    "bytes": 66,
+    "sha256": "7f49376f9672cf7362ea26ea0ce624c881d3c9250f3b7207024ca5870bc8903f",
+    "officialClientUiSaveCompleted": true,
+    "sameAsCmbCsvByteForByte": true,
+    "csvValuesVerified": true
+  },
+  "grokFiniteUiObservations": {
+    "oneTimeRoutineReplyAt": "2026-10-09 14:58:52 Asia/Shanghai",
+    "routineDeletedNoticePresent": true,
+    "noRunOnceClicked": true,
+    "standaloneFileCardsWithPreviewAndDirectSave": true,
+    "oldMarkdownPreviewDisplayedCannotRead": true,
+    "markdownSaveOpenedButNotCompletedBeforeMacLock": true,
+    "allGrokFileAvailabilityClaimed": false
+  },
+  "macLockedAwaitingUnlock": true,
+  "newFormalProgrammingContinuationPending": true,
+  "coreParityComplete": false
+}

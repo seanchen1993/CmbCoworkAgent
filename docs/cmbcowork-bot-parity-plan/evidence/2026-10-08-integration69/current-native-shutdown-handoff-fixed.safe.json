@@ -1,0 +1,241 @@
+{
+  "kind": "independent-finite-native-shutdown-handoff-verification",
+  "verifiedAt": "2026-10-08T22:03:45.798839+00:00",
+  "testedBuildId": "18567d7fda0e97e783e927d7",
+  "schemaVersion": 69,
+  "sourceReceipt": {
+    "name": "host-shutdown-nested.safe.json",
+    "sha256": "6e509ce94633fd771af51f5599e67d2243d6c9157de8e08f034912ab36787d07",
+    "completedAt": "2026-10-08T22:00:48.988Z",
+    "sourceFrozenAtReceipt": true
+  },
+  "sourceAndCompiledFiles": {
+    "productionFiles": [
+      {
+        "path": "src/main/bots/host.ts",
+        "sha256": "7904975a216c049ff87d939f3cde773ad1ee117b6203f056e57e6cb43ca1b632",
+        "matchesReceipt": true
+      },
+      {
+        "path": "src/main/bots/host-runtime-entry.ts",
+        "sha256": "47a2ca885bf9ed67e6a3b814b81091083e28dc53f16f2bf91ca56962ddad4af0",
+        "matchesReceipt": true
+      }
+    ],
+    "testFiles": [
+      {
+        "path": "src/main/bots/host-supervision.test.ts",
+        "sha256": "ee9d3cd005ad9530c5c4798fe0cea09ad98a024e32ae6c5810118a2d79c62a02",
+        "matchesReceipt": true
+      },
+      {
+        "path": "src/main/bots/host-process.test.ts",
+        "sha256": "28459a532faaede42527e0841db1c4a59b8987b3cc91c601c0cadaa215db8530",
+        "matchesReceipt": true
+      }
+    ],
+    "compiledHost": [
+      {
+        "path": "out/main/bot-host.js",
+        "sha256": "f250f871aef597299780271c451466bf20e00c800ca9fc8b7cb83c80c90e30f2",
+        "matchesReceipt": true
+      },
+      {
+        "path": "out/main/host-runtime-entry-wtaTgdzg.js",
+        "sha256": "a84fa84e6c3b83de055eb7d5f064b058f34aada80e9d8b26b1bcb33f82e467d2",
+        "matchesReceipt": true
+      }
+    ]
+  },
+  "sourceIdentity": {
+    "buildId": "18567d7fda0e97e783e927d7",
+    "checkedBy": "Pure existing botBuildIdentity function reading source inputs; no Host or model started.",
+    "exitCode": 0,
+    "matchesCompiledSeal": true,
+    "checkedBeforeDocumentWrite": true
+  },
+  "compiledSeal": {
+    "path": "out/main/bot-native-build.json",
+    "sha256": "dc175ef46d85a591108bd7031d670eda582584ba02add2a83ef1f5d62c0238f3",
+    "buildId": "18567d7fda0e97e783e927d7",
+    "nativeDistribution": null,
+    "declaredMembers": 183,
+    "independentlyHashAndSizeMatchedMembers": 183
+  },
+  "currentFiniteGates": {
+    "nestedInitial": {
+      "exitCode": 1,
+      "passed": 9,
+      "failed": 1,
+      "failure": "Test helper added unconditional await of optional undefined barrier, delaying original ownership receipt assertion by one microtask; helper corrected only to await an actual provided barrier",
+      "productionChangedAfterThisFailure": false,
+      "sha256": "09a529b05dea621592b26bf5e3be74f25bc5bccd5574420106b31524ed2f747a",
+      "logName": "host-shutdown-nested.log",
+      "logHashIndependentlyVerified": true
+    },
+    "nestedFinal": {
+      "exitCode": 0,
+      "passed": 10,
+      "failed": 0,
+      "sha256": "a631693ac11c0fbf1ff375d2f5fca04f748dd103e5b004dd357ff874e20fd631",
+      "logName": "host-shutdown-nested-after.log",
+      "logHashIndependentlyVerified": true
+    },
+    "strictLint": {
+      "exitCode": 0,
+      "maxWarnings": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "logName": "host-shutdown-nested-eslint-after.log",
+      "logHashIndependentlyVerified": true
+    },
+    "compiledElectronNode": {
+      "exitCode": 0,
+      "passed": 1,
+      "failed": 0,
+      "skipped": 65,
+      "sha256": "9a2439067ce11cb04a89485f8b607155901d2e64cac8bd92d4c913bdf793e4a4",
+      "logName": "host-shutdown-nested-compiled-electron.log",
+      "logHashIndependentlyVerified": true
+    },
+    "prettier": {
+      "exitCode": 0
+    },
+    "diffCheck": {
+      "exitCode": 0
+    },
+    "finalNodeTypecheck": {
+      "owner": "Root",
+      "exitCode": 0,
+      "session": 24104,
+      "reportedLog": "core-shutdown-child-final-20261009-node.log",
+      "provenance": "Root tool verified natural completion",
+      "logName": "core-shutdown-child-final-20261009-node.log",
+      "logSha256": "546c7bfd36ecac14793f941add6251c16a729819d1b744cccbaf256a91e1b42c",
+      "processExitEvidence": "Root tool reported natural completion, independently read log hash; a header-only typecheck log alone does not prove exit code."
+    },
+    "productionBuild": {
+      "owner": "Root",
+      "exitCode": 0,
+      "session": 72762,
+      "reportedLog": "core-shutdown-child-final-20261009-build.log",
+      "provenance": "Root tool verified natural completion",
+      "logName": "core-shutdown-child-final-20261009-build.log",
+      "logSha256": "d4718e2ed33d2eceb3c65a51fea042d444e176a55dbcfd48c06088b1ad854bea",
+      "processExitEvidence": "Root tool reported natural completion; independent log read also ends in successful renderer build."
+    }
+  },
+  "testScope": {
+    "neighborFinal": "Actual Host, Store, SQLite and production workflow child runner. 10 selected tests, not a whole project gate.",
+    "compiledElectronNode": "Actual compiled Host, production graph, authenticated RPC, SQLite, OS SIGTERM and restart; controlled fixture HTTP model only. One selected case, 65 skipped.",
+    "countsAreNotSummedIntoWholeProjectTotal": true,
+    "realMiniMaxAppOrGrokUiRetestClaimed": false
+  },
+  "concreteFailurePath": {
+    "productionChildAbort": "src/main/bots/workflow-child-runner.ts:29-43: assertLease then store.cancel(child)",
+    "productionChildSettlement": "src/main/bots/workflow-child-runner.ts:103-123: own lease/fence then workflowChildren.settle(cancelled)",
+    "cause": "One durable fence write refusal leaves old child lease SQL-valid; parent shutdown abort restores writable DB before child cancellation and settlement callbacks",
+    "fix": "Existing Host owner lease guard rejects after stop-only monotonic shutdownRevision was incremented; covers all same-owner executors, including production child runner",
+    "scope": "No global Store/settleEffect/runner recovery contract changed; stop same-instance start explicitly rejects"
+  },
+  "proof": [
+    "Actual Host, BotStore, SQLite and production botWorkflowChildRunner, not a mocked cancel/fence call",
+    "query_only=ON rejects only the durable shutdown transaction; first parent-abort listener restores query_only=OFF and successfully commits createBot before production child abort/catch handlers run",
+    "Parent and child remain original waiting_input with original checkpoints/pending cards despite writable database; no cancel_requested event",
+    "Old same-owner child lease cannot write or settle after stop; stopped same Host cannot start",
+    "New Host applies ordinary startup interruption recovery, expires old cards, and after individual review resumes same parent/child IDs and original child checkpoint to success",
+    "Explicit user cancel control with the same production child runner cancels both parent and child normally",
+    "Existing non-stop ownership-loss receipt settlement, physical effect unknown-before-abort and durable root handoff tests pass",
+    "Latest compiled production Host using actual Electron Node runtime completes real SIGTERM waiting-approval handoff, natural exit 0, stopped read-only SQLite verification, same-run restart/new approval/delivery and explicit cancel retention"
+  ],
+  "normalHandoffContract": [
+    "A waiting approval has an actual checkpoint before SIGTERM.",
+    "Before startup recovery the same run is needs_review, owner and lease are cleared, fence advanced, and checkpoint hash unchanged.",
+    "Old approval cannot be reused; explicit review and a new approval resume the same run/message, committed remember is not replayed, and the queued same-Bot task delivers afterwards.",
+    "Started external effects require reconciliation after interruption.",
+    "Explicit user cancellation and denied work stay cancelled across restart."
+  ],
+  "historicalEvidence": {
+    "priorReceipt": {
+      "name": "host-shutdown-handoff.safe.json",
+      "sha256": "b4823479e04e35750ea52ef9a3463212ead625bd2412dff9e4a7917437a5d070",
+      "buildId": "21290c091a0ff1a60b0185fd"
+    },
+    "priorSelectedGatesAndFailuresRetained": {
+      "neighborInitial": {
+        "exitCode": 1,
+        "passed": 7,
+        "failed": 1,
+        "reason": "Initial this.stopping guard wrongly also blocked existing ownership-loss effect settlement; fixed by stop-only monotonic shutdownRevision",
+        "sha256": "37fd738a15345080e400878c11d9821dca61fdf009e6206ae8e28f8e9c7ae357",
+        "logName": "host-shutdown-neighbor.log",
+        "logHashIndependentlyVerified": true
+      },
+      "neighborFinal": {
+        "exitCode": 0,
+        "passed": 8,
+        "failed": 0,
+        "sha256": "87e5dccb2c45cead0e62bf8c8586b503ef097a13e3479e8dc533f8af35145e1e",
+        "logName": "host-shutdown-neighbor-after.log",
+        "logHashIndependentlyVerified": true
+      },
+      "compiledOrdinaryNode": {
+        "exitCode": 1,
+        "passed": 0,
+        "failed": 1,
+        "skipped": 65,
+        "reason": "Bootstrap dependency original-fs requires actual Electron Node runtime; did not reach task",
+        "sha256": "e402fbc27c314840d96bc947d5a3bd3ce512204e16a46632bb8b3ae930480cf1",
+        "logName": "host-shutdown-compiled.log",
+        "logHashIndependentlyVerified": true
+      },
+      "compiledElectronNode": {
+        "exitCode": 0,
+        "passed": 1,
+        "failed": 0,
+        "skipped": 65,
+        "sha256": "3604227c0a6db8e0839e72b8fe573d0e1d82eae6b5bb9ef8d8d57275b0201db0",
+        "logName": "host-shutdown-compiled-electron.log",
+        "logHashIndependentlyVerified": true
+      }
+    },
+    "latestFirstAttemptFailureRetained": {
+      "exitCode": 1,
+      "passed": 9,
+      "failed": 1,
+      "failure": "Test helper added unconditional await of optional undefined barrier, delaying original ownership receipt assertion by one microtask; helper corrected only to await an actual provided barrier",
+      "productionChangedAfterThisFailure": false,
+      "sha256": "09a529b05dea621592b26bf5e3be74f25bc5bccd5574420106b31524ed2f747a",
+      "logName": "host-shutdown-nested.log",
+      "logHashIndependentlyVerified": true
+    },
+    "actualOwnedAppFailure": {
+      "name": "current-native-shutdown-handoff-failure.safe.json",
+      "sha256": "68ac5b1f196b39290162466db8f428e60b263e76ebbe40151623389583fac8f2",
+      "originalCancelledRunId": "3c1c4efb-8ff1-43c0-94a6-a35698c0eb7c",
+      "terminalHistoryRewritten": false,
+      "silentCancelledRunRestorePerformed": false,
+      "sameHistoricalCancelledRunRecoveryClaimed": false,
+      "requiresExplicitUiContinuation": true
+    }
+  },
+  "limits": [
+    "The new tests cover transient durable fence refusal followed by writable SQLite and nested child abort, plus successful normal handoff; they do not prove every possible shutdown or external-effect boundary.",
+    "Models in these tests are controlled fixture responses; real MiniMax task quality and full Grok functional/UI parity remain separate.",
+    "Historical real programming mis-cancellation is retained and not automatically rolled back.",
+    "Latest owned App cold-start data preservation has separate public evidence; no new UI journey is asserted here.",
+    "No Windows signal behavior or real machine installation is claimed."
+  ],
+  "constraints": {
+    "noPersonalDatabaseModified": true,
+    "noHistoricalCancelledRunRestored": true,
+    "browserUiTeachProductionUnchanged": true,
+    "modelsAreControlledFixtureOnly": true,
+    "WindowsSignalBehaviorNotClaimed": true
+  },
+  "redaction": {
+    "personalAbsolutePathsIncluded": false,
+    "tokensOrConfigurationValuesIncluded": false,
+    "rawModelPayloadIncluded": false,
+    "privateDatabaseCopied": false
+  }
+}
