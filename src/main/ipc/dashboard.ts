@@ -70,6 +70,18 @@ import {
   resolveKnowledgeCommitRateScope
 } from "./dashboard-knowledge-commit-rate"
 import type { DashboardKnowledgeCommitRate } from "../../shared/dashboard-knowledge-commit-rate"
+import {
+  buildKnowledgeProjectQueries,
+  emptyKnowledgeAccumulation,
+  fetchKnowledgeAccumulation,
+  parseKnowledgeDistribution,
+  parseKnowledgeProjectStats,
+  resolveKnowledgeOverviewScope
+} from "./dashboard-knowledge-overview"
+import type {
+  KnowledgeAccumulationData,
+  KnowledgeProjectStats
+} from "../../shared/dashboard-knowledge-overview"
 import { countDevAssociatedFeatures, countDevStageConversations } from "./project-mode-metrics"
 import {
   matchesProjectModeCreatedAtRange,
@@ -14125,7 +14137,81 @@ async function fetchProjectModeCodeStatsBySource(
   return { codeStats: code.overall, skillCodeStats: code.skillOverall }
 }
 
-/** 知识文档入库率。只看时间范围和室，不受「来源」「仅精益项目」「仅本期新建」影响。 */
+async function fetchKnowledgeOverviewProjects(
+  range: TimeRange,
+  opts: OrgFilterOptions | undefined
+): Promise<KnowledgeProjectStats> {
+  const access = requireDashboardProjectModeAccess()
+  const orgFilter = buildProjectModeOrgFilter(opts, access)
+  const queries = buildKnowledgeProjectQueries(projectModeSnapshotFilters(orgFilter), [
+    { term: { eventName: SYSTEM_CONSTRAINT_READ_SUMMARY_EVENT } },
+    timeRangeFilter("eventTime", range),
+    { exists: { field: "properties.harnessProjectId" } },
+    { range: { "properties.successfulReadCount": { gt: 0 } } },
+    ...(orgFilter ? [orgFilter] : [])
+  ])
+  const [snapshot, reads] = await Promise.all(
+    queries.map((body) => esQuery(getEsIndex("event"), body))
+  )
+  return parseKnowledgeProjectStats(snapshot, reads)
+}
+
+async function fetchKnowledgeOverviewAccumulation(
+  opts: OrgFilterOptions | undefined
+): Promise<KnowledgeAccumulationData> {
+  const access = import.meta.env.DEV
+    ? getDashboardAccessContext()
+    : requireDashboardProjectModeAccess()
+  const scope = resolveKnowledgeOverviewScope(
+    {
+      requestedRooms: normalizeUpperOrgLv1List(opts?.upperOrgLv1),
+      admin: isDashboardProjectModeAdmin(access),
+      ownRoom: access.upperOrgLv1,
+      unclassifiedRoom: DASHBOARD_UNCLASSIFIED_ORG
+    },
+    getKnowledgeRoomOrgIds
+  )
+  if (scope.unavailableReason) {
+    return { ...emptyKnowledgeAccumulation(), unavailableReason: scope.unavailableReason }
+  }
+  if (import.meta.env.DEV) {
+    const scale = scope.orgIds ? Math.min(1, scope.orgIds.length / 3) : 1
+    const distribution = (rows: Array<[string | null, number]>) =>
+      parseKnowledgeDistribution(
+        rows.map(([name, value]) => ({ name, value: Math.round(value * scale) }))
+      )
+    return {
+      totals: {
+        totalNum: Math.round(806 * scale),
+        abandonedNum: 0,
+        activeNum: Math.round(25 * scale)
+      },
+      users: distribution(
+        [
+          114, 110, 97, 91, 70, 52, 38, 26, 22, 22, 18, 18, 18, 17, 16, 13, 9, 8, 7, 7, 6, 6, 5, 5,
+          3, 2, 2, 2, 1, 1
+        ].map((value, index) => ["用户" + (index + 1), value])
+      ),
+      orgs: distribution([
+        [null, 805],
+        ["零售基础客群经营开发室(成都)", 1]
+      ]),
+      systems: distribution([
+        [null, 287],
+        ["LF39.18", 182],
+        ["LF39.05", 151],
+        ["LF39.03", 132],
+        ["LB47.02", 32],
+        ["LA64.06", 22]
+      ]),
+      errors: {}
+    }
+  }
+  const url = (import.meta.env.VITE_KNOWLEDGE_OVERVIEW_BASE_URL as string | undefined)?.trim() ?? ""
+  return fetchKnowledgeAccumulation(url, scope.orgIds, getDashboardRequestSignal())
+}
+
+/** 技能修改采纳率。只看时间范围和室，不受「来源」「仅精益项目」「仅本期新建」影响。 */
 async function fetchKnowledgeCommitRate(
   range: TimeRange,
   opts: OrgFilterOptions | undefined
@@ -15381,6 +15467,40 @@ export function registerDashboardHandlers(_ipcMain: typeof ipcMain): void {
         return { success: true, data }
       } catch (e) {
         logDashboardRequestError("knowledgeCommitRate", e)
+        return { success: false, error: e instanceof Error ? e.message : String(e) }
+      }
+    }
+  )
+
+  registerLatestDashboardHandler(
+    _ipcMain,
+    "dashboard:knowledgeAccumulation",
+    async (_, opts: OrgFilterOptions | undefined) => {
+      try {
+        return { success: true, data: await fetchKnowledgeOverviewAccumulation(opts) }
+      } catch (e) {
+        logDashboardRequestError("knowledgeAccumulation", e)
+        return { success: false, error: e instanceof Error ? e.message : String(e) }
+      }
+    }
+  )
+
+  registerLatestDashboardHandler(
+    _ipcMain,
+    "dashboard:knowledgeProjectStats",
+    async (_, range: TimeRange, opts: OrgFilterOptions | undefined) => {
+      try {
+        const data = import.meta.env.DEV
+          ? {
+              projectCount: 1284,
+              loadedProjectCount: 856,
+              readProjectCount: 642,
+              successfulReadCount: 12400
+            }
+          : await fetchKnowledgeOverviewProjects(range, opts)
+        return { success: true, data }
+      } catch (e) {
+        logDashboardRequestError("knowledgeProjectStats", e)
         return { success: false, error: e instanceof Error ? e.message : String(e) }
       }
     }

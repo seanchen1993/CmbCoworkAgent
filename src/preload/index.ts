@@ -1,3 +1,7 @@
+import type {
+  KnowledgeAccumulationData,
+  KnowledgeProjectStats
+} from "../shared/dashboard-knowledge-overview"
 import type { EfficiencyPluginFilter } from "../shared/dashboard-efficiency-compute"
 import type { DashboardThreadTraceScope } from "../shared/dashboard-thread-trace-scope"
 import type {
@@ -3933,6 +3937,23 @@ const api = {
       source: string | null
     ): Promise<{ success: boolean; data?: unknown; error?: string }> =>
       ipcRenderer.invoke("dashboard:projectModeCodeStats", range, opts, source),
+    knowledgeAccumulation: (opts?: {
+      upperOrgLv1?: string | string[] | null
+    }): Promise<{
+      success: boolean
+      data?: KnowledgeAccumulationData
+      error?: string
+      cancelled?: boolean
+    }> => ipcRenderer.invoke("dashboard:knowledgeAccumulation", opts),
+    knowledgeProjectStats: (
+      range: { from: string; to: string },
+      opts?: { upperOrgLv1?: string | string[] | null }
+    ): Promise<{
+      success: boolean
+      data?: KnowledgeProjectStats
+      error?: string
+      cancelled?: boolean
+    }> => ipcRenderer.invoke("dashboard:knowledgeProjectStats", range, opts),
     knowledgeCommitRate: (
       range: { from: string; to: string },
       opts?: { upperOrgLv1?: string | string[] | null }

@@ -1,4 +1,8 @@
 import type {
+  KnowledgeAccumulationData,
+  KnowledgeProjectStats
+} from "../shared/dashboard-knowledge-overview"
+import type {
   EfficiencyDevComputeResult,
   EfficiencyPluginFilter
 } from "../shared/dashboard-efficiency-compute"
@@ -2661,6 +2665,23 @@ interface CustomAPI {
       success: boolean
       data?: { codeStats: DashboardCodeStats | null; skillCodeStats: DashboardCodeStats | null }
       error?: string
+    }>
+    knowledgeAccumulation: (opts?: {
+      upperOrgLv1?: string | string[] | null
+    }) => Promise<{
+      success: boolean
+      data?: KnowledgeAccumulationData
+      error?: string
+      cancelled?: boolean
+    }>
+    knowledgeProjectStats: (
+      range: { from: string; to: string },
+      opts?: { upperOrgLv1?: string | string[] | null }
+    ) => Promise<{
+      success: boolean
+      data?: KnowledgeProjectStats
+      error?: string
+      cancelled?: boolean
     }>
     knowledgeCommitRate: (
       range: { from: string; to: string },

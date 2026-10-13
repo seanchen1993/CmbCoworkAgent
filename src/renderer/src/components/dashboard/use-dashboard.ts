@@ -2881,14 +2881,18 @@ export function useDashboard() {
     setRange({ from, to })
   }, [])
 
-  const refresh = useCallback(() => {
-    const nextRange = getRefreshRange(range, granularity)
-    if (nextRange.from !== range.from || nextRange.to !== range.to) {
-      setRange(nextRange)
-      return
-    }
-    fetchAll(range, granularity, selectedOrgLv1List)
-  }, [fetchAll, range, granularity, selectedOrgLv1List])
+  const refresh = useCallback(
+    (reloadPlatform = true): TimeRange => {
+      const nextRange = getRefreshRange(range, granularity)
+      if (nextRange.from !== range.from || nextRange.to !== range.to) {
+        setRange(nextRange)
+      } else if (reloadPlatform) {
+        void fetchAll(range, granularity, selectedOrgLv1List)
+      }
+      return nextRange
+    },
+    [fetchAll, range, granularity, selectedOrgLv1List]
+  )
 
   const clearSkillEval = useCallback(() => {
     ++skillEvalFetchIdRef.current
