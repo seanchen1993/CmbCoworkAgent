@@ -3,6 +3,8 @@
  *
  * Operations overview and skill evaluation dashboard.
  */
+import { KnowledgeOverviewPanel } from "./panels/KnowledgeOverviewPanel"
+import { useKnowledgeOverview } from "./use-knowledge-overview"
 import {
   isValidElement,
   memo,
@@ -1112,7 +1114,13 @@ type DashboardSubPage =
       projectMode?: boolean
     }
 
-type DashboardMainTab = "overview" | "skill-eval" | "project-mode" | "efficiency" | "awards"
+type DashboardMainTab =
+  | "overview"
+  | "skill-eval"
+  | "project-mode"
+  | "knowledge"
+  | "efficiency"
+  | "awards"
 
 function formatNumber(value: number): string {
   return Math.round(value).toLocaleString("zh-CN")
@@ -1987,6 +1995,7 @@ function DashboardTabBar({
   const tabs: Array<{ id: DashboardMainTab; label: string }> = [
     { id: "overview", label: "平台运营概览" },
     ...(projectModeAllowed ? ([{ id: "project-mode", label: "项目运营概览" }] as const) : []),
+    ...(projectModeAllowed ? ([{ id: "knowledge", label: "知识沉淀运营概览" }] as const) : []),
     // 研发效能沿用项目模式的可见性：两者统计范围同源（项目模式 + 精益项目）。
     ...(projectModeAllowed ? ([{ id: "efficiency", label: "研发效能" }] as const) : []),
     // 评奖辅助看板仅对管理员名单可见。
@@ -2804,6 +2813,13 @@ export function DashboardView(): React.JSX.Element {
   const [groupOptions, setGroupOptions] = useState<string[]>([])
   const [groupOptionsLoading, setGroupOptionsLoading] = useState(false)
   const [groupOptionsError, setGroupOptionsError] = useState<string | null>(null)
+  const [knowledgeRefreshKey, setKnowledgeRefreshKey] = useState(0)
+  const knowledgeOverview = useKnowledgeOverview(
+    activeMainTab === "knowledge" && projectModeAllowed,
+    range,
+    selectedOrgLv1List,
+    knowledgeRefreshKey
+  )
   useEffect(() => {
     setSelectedGroupNames([])
     setGroupOptions([])
@@ -2926,7 +2942,9 @@ export function DashboardView(): React.JSX.Element {
     // 否则停在已经不再渲染的 tab 上会看到一片空白。
     const leaveProjectModeGatedTabs = (): void => {
       setActiveMainTab((current) =>
-        current === "project-mode" || current === "efficiency" ? "overview" : current
+        current === "project-mode" || current === "knowledge" || current === "efficiency"
+          ? "overview"
+          : current
       )
     }
 
@@ -3190,10 +3208,15 @@ export function DashboardView(): React.JSX.Element {
     createdInRangeProjectsOnly
   ])
 
-  // 「知识文档入库率」只随时间范围 / 室筛选变化，不挂「仅精益项目」「仅本期新建」开关。
+  // 技能修改采纳率随知识面板的时间范围和室筛选变化。
   useEffect(() => {
-    if (activeMainTab !== "project-mode" || !projectModeAllowed) return
+    if (activeMainTab !== "knowledge" || !projectModeAllowed) return
     void fetchKnowledgeCommitRate(range, selectedOrgLv1List)
+    return () => {
+      void window.api.dashboard
+        .cancelRequests(["dashboard:knowledgeCommitRate"])
+        .catch(() => undefined)
+    }
   }, [activeMainTab, fetchKnowledgeCommitRate, projectModeAllowed, range, selectedOrgLv1List])
 
   // 研发效能 tab 懒加载：进入 tab 时拉取，时间范围 / 室筛选变化时重拉。
@@ -3786,7 +3809,7 @@ export function DashboardView(): React.JSX.Element {
   }, [])
 
   const handleRefresh = useCallback(() => {
-    refresh()
+    const refreshedRange = refresh(activeMainTab !== "knowledge")
     if (activeMainTab === "skill-eval") {
       setSkillEvalSelectedSkillKey(undefined)
       clearSkillEval()
@@ -3799,7 +3822,12 @@ export function DashboardView(): React.JSX.Element {
         fromLeanProjectsOnly,
         createdInRangeProjectsOnly
       )
-      void fetchKnowledgeCommitRate(range, selectedOrgLv1List)
+    }
+    if (activeMainTab === "knowledge") {
+      setKnowledgeRefreshKey((current) => current + 1)
+      if (refreshedRange.from === range.from && refreshedRange.to === range.to) {
+        void fetchKnowledgeCommitRate(range, selectedOrgLv1List)
+      }
     }
     if (activeMainTab === "efficiency") {
       void fetchEfficiency(range, selectedOrgLv1List)
@@ -5213,7 +5241,7 @@ export function DashboardView(): React.JSX.Element {
         }
       />
 
-      {error && (
+      {error && (activeMainTab !== "knowledge" || subPage.kind !== "main") && (
         <div className="mx-6 mt-4 flex items-center gap-2 rounded-lg border border-destructive/50 bg-destructive/5 px-4 py-3 text-sm text-destructive">
           <AlertCircle className="size-4 shrink-0" />
           <span>{error}</span>
@@ -5357,6 +5385,15 @@ export function DashboardView(): React.JSX.Element {
                 onSelectedSkillKeyChange={setSkillEvalSelectedSkillKey}
               />
             </div>
+          ) : activeMainTab === "knowledge" && projectModeAllowed ? (
+            <div className="p-6">
+              <KnowledgeOverviewPanel
+                {...knowledgeOverview}
+                rate={knowledgeCommitRate}
+                rateLoading={knowledgeCommitRateLoading}
+                rateError={knowledgeCommitRateError}
+              />
+            </div>
           ) : activeMainTab === "project-mode" && projectModeAllowed ? (
             <div className="space-y-6 p-6">
               <ProjectModePanel
@@ -5367,9 +5404,6 @@ export function DashboardView(): React.JSX.Element {
                 codeStatsOverride={projectModeCodeStatsOverride}
                 codeStatsLoading={projectModeCodeStatsLoading}
                 onCodeSourceChange={selectProjectModeCodeSource}
-                knowledgeCommitRate={knowledgeCommitRate}
-                knowledgeCommitRateLoading={knowledgeCommitRateLoading}
-                knowledgeCommitRateError={knowledgeCommitRateError}
                 headerAction={
                   <div className="flex items-center gap-2">
                     <Button
