@@ -2,6 +2,7 @@ import type {
   EfficiencyDevComputeResult,
   EfficiencyPluginFilter
 } from "../../../../shared/dashboard-efficiency-compute"
+import type { ProjectAttentionSortKey } from "../../../../shared/project-attention"
 import {
   parseToolUsageAggs,
   type DashboardToolUsageCoverage
@@ -726,6 +727,7 @@ export interface DashboardProjectModeProject {
   conversationCount: number
   /** Forward-only count of main-Agent turns matching the technical-detail heuristic. */
   suspectedTechnicalDetailConversationCount?: number
+  attentionMetric?: number | null
   /** Conversations attributed to a workflow node in the Dev group. */
   devStageConversationCount: number
   /** Distinct bound Features that contributed a Dev-stage conversation in the range. */
@@ -763,6 +765,7 @@ export interface DashboardProjectModeProjectCounts {
 }
 
 export type DashboardProjectModeProjectSortKey =
+  | ProjectAttentionSortKey
   | "featureCount"
   | "createdAt"
   | "conversationCount"
@@ -2336,8 +2339,8 @@ export function useDashboard() {
   // 项目运营概览「仅精益项目」全局开关：仅统计绑定了企业（精益）项目的项目。
   const [fromLeanProjectsOnly, setFromLeanProjectsOnly] = useState(false)
   // 项目运营概览「仅本期新建」全局开关：仅统计创建时间落在当前所选时间范围内的项目。
-  // 和「仅精益项目」互相独立，可叠加。
-  const [createdInRangeProjectsOnly, setCreatedInRangeProjectsOnly] = useState(false)
+  // 默认开启以收窄查询范围，和「仅精益项目」互相独立，可叠加，也可手动关闭。
+  const [createdInRangeProjectsOnly, setCreatedInRangeProjectsOnly] = useState(true)
   const [loading, setLoading] = useState(false)
   const [userStatsLoading, setUserStatsLoading] = useState(false)
   const [skillEvalLoading, setSkillEvalLoading] = useState(false)

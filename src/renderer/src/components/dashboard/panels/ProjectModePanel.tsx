@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react"
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react"
 import { PieChart, Pie, Cell, Tooltip as RechartsTooltip, ResponsiveContainer } from "recharts"
 import {
   Boxes,
@@ -42,6 +42,11 @@ import {
   DialogTitle
 } from "@/components/ui/dialog"
 import { cn } from "@/lib/utils"
+import {
+  PROJECT_ATTENTION_SORTS,
+  isProjectAttentionSortKey,
+  type ProjectAttentionSortKey
+} from "../../../../../shared/project-attention"
 import { marketApi, type MarketItem } from "@/api/market"
 import { buildUploaderIdCandidates } from "@/lib/skill-data-service"
 import codeEfficiencyModel from "@/assets/code-efficiency-model.png"
@@ -1398,6 +1403,7 @@ function FeatureStageBreakdown({
 function ProjectRow({
   project,
   showSuspectedTechnicalDetailMetric,
+  attentionSort,
   expanded,
   onToggle,
   onOpenTraces,
@@ -1409,6 +1415,7 @@ function ProjectRow({
 }: {
   project: DashboardProjectModeProject
   showSuspectedTechnicalDetailMetric: boolean
+  attentionSort?: ProjectAttentionSortKey
   expanded: boolean
   onToggle: () => void
   onOpenTraces: (
@@ -1426,6 +1433,8 @@ function ProjectRow({
   loadOperationalDetails: DashboardProjectModeOperationalDetailsLoader
 }): React.JSX.Element {
   const codeStats = project.codeStats
+  const attention = PROJECT_ATTENTION_SORTS.find((item) => item.key === attentionSort)
+  const attentionValue = project.attentionMetric ?? null
   const hasCommitAdoption = Boolean(codeStats && codeStats.effectiveGeneratedLines > 0)
   const hasPushedAdoption = Boolean(codeStats && codeStats.pushedEffectiveGeneratedLines > 0)
   const adopted = codeStats ? formatLineCount(codeStats.adoptedLines) : "—"
@@ -1472,6 +1481,19 @@ function ProjectRow({
                   {project.name}
                 </span>
               </div>
+              {attention && (
+                <div
+                  className="mt-1 truncate text-[10px] text-amber-700 dark:text-amber-400"
+                  title={attention.hint}
+                >
+                  {attention.metricLabel}：
+                  {attentionValue === null
+                    ? "暂无数据"
+                    : attention.key === "suspectedTechnicalDetailConversationCount"
+                      ? `${formatNumber(attentionValue)} 轮`
+                      : formatPercent(attentionValue)}
+                </div>
+              )}
               {(project.systemName ||
                 project.systemConstraintEverLoadedSuccessfully ||
                 project.managedRunEverStarted) && (
@@ -2044,6 +2066,10 @@ function ProjectListSection({
   // null = 用所在 tab 的默认排序；非空 = 用户显式选择。
   const [sortBy, setSortBy] = useState<DashboardProjectModeProjectSortKey | null>(null)
   const [sortOrder, setSortOrder] = useState<DashboardProjectModeProjectSortOrder>("desc")
+  const lastAutomaticPageRequest = useRef<{
+    key: string
+    loader: typeof onPageChange
+  } | null>(null)
 
   const trimmed = query.trim()
   const creatorKeyword = creatorQuery.trim()
@@ -2062,7 +2088,7 @@ function ProjectListSection({
     order: DashboardProjectModeProjectSortOrder
   } = { key: "createdAt", order: "desc" }
   const sortKeyApplicable = (key: DashboardProjectModeProjectSortKey): boolean =>
-    key === "featureCount" || key === "createdAt"
+    isProjectAttentionSortKey(key) || key === "featureCount" || key === "createdAt"
       ? true
       : key === "archivedAt"
         ? tab === "archived"
@@ -2072,6 +2098,7 @@ function ProjectListSection({
   const effectiveSortOrder = useExplicitSort ? sortOrder : tabDefaultSort.order
   const pageData = projectPages[tab]
   const showSuspectedTechnicalDetailMetric = pageData?.showSuspectedTechnicalDetailMetric === true
+  const attentionSort = isProjectAttentionSortKey(effectiveSortBy) ? effectiveSortBy : undefined
   const tableColumnCount = showSuspectedTechnicalDetailMetric ? 20 : 19
   const currentError = pageError[tab]
   const tabCount =
@@ -2096,8 +2123,8 @@ function ProjectListSection({
   const effectiveLoading =
     loading ||
     pageLoading[tab] ||
-    (!pageData && tabCount > 0) ||
-    Boolean(pageData && !pageMatchesFilter)
+    (!currentError && !pageData && tabCount > 0) ||
+    Boolean(!currentError && pageData && !pageMatchesFilter)
   const hasTextFilter = Boolean(trimmed || creatorKeyword || creatorOrgKeyword)
   const emptyText = hasTextFilter
     ? "未找到匹配的项目"
@@ -2122,9 +2149,30 @@ function ProjectListSection({
     ) {
       return
     }
-    if (pageLoading[tab]) return
+    // The overview replaces the initial list page when it settles. Starting
+    // ranking before that would be overwritten and trigger the same work again.
+    if (loading || pageLoading[tab]) return
+    const requestKey = JSON.stringify([
+      tab,
+      trimmed,
+      selectedAdapter,
+      creatorKeyword,
+      creatorOrgKeyword,
+      effectiveSortBy,
+      effectiveSortOrder
+    ])
+    // A failed global ranking must not automatically burst the same ES queries
+    // every time loading flips to false. New filters or a new range can retry.
+    if (
+      currentError &&
+      lastAutomaticPageRequest.current?.key === requestKey &&
+      lastAutomaticPageRequest.current.loader === onPageChange
+    ) {
+      return
+    }
     const timer = window.setTimeout(() => {
       setExpandedId(null)
+      lastAutomaticPageRequest.current = { key: requestKey, loader: onPageChange }
       onPageChange(
         tab,
         1,
@@ -2139,10 +2187,12 @@ function ProjectListSection({
     }, 250)
     return () => window.clearTimeout(timer)
   }, [
+    currentError,
     creatorKeyword,
     creatorOrgKeyword,
     effectiveSortBy,
     effectiveSortOrder,
+    loading,
     onPageChange,
     pageData,
     pageLoading,
@@ -2255,6 +2305,42 @@ function ProjectListSection({
             </SelectContent>
           </Select>
         )}
+        <div className="flex shrink-0 items-center gap-1.5">
+          <span className="text-xs text-muted-foreground">快速定位</span>
+          <Select
+            value={attentionSort ?? "default"}
+            onValueChange={(value) => {
+              const selected = PROJECT_ATTENTION_SORTS.find((item) => item.key === value)
+              setExpandedId(null)
+              setSortBy(selected?.key ?? null)
+              setSortOrder(selected?.order ?? "desc")
+            }}
+          >
+            <SelectTrigger
+              aria-label="异常项目快速定位"
+              className="h-7 w-[190px] rounded-md border-border bg-background text-xs"
+            >
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="default">默认排序</SelectItem>
+              {PROJECT_ATTENTION_SORTS.filter(
+                (item) =>
+                  item.key !== "suspectedTechnicalDetailConversationCount" ||
+                  showSuspectedTechnicalDetailMetric
+              ).map((item) => (
+                <SelectItem key={item.key} value={item.key}>
+                  {item.label}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+          <InfoHint
+            hint={attentionSort
+              ? PROJECT_ATTENTION_SORTS.find((item) => item.key === attentionSort)?.hint
+              : "按所选时间范围的指标对全部匹配项目排序，帮助定位需要关注的项目；缺少统计数据的项目排在末尾。"}
+          />
+        </div>
         <div className="ml-auto flex shrink-0 items-center gap-2">
           <ProjectListSearchInput
             value={query}
@@ -2355,7 +2441,7 @@ function ProjectListSection({
                 <th className="whitespace-nowrap px-3 py-2 text-right font-medium">
                   <div className="ml-auto flex w-fit items-center gap-1">
                     <span>疑似技术细节补充</span>
-                    <InfoHint hint="统计用户实际输入中累计包含 10 个及以上英文字母的轮次数，用于识别疑似补充技术细节的轮次；所选技能、附件等自动附加内容不计入。结果基于规则估算，仅供参考。" />
+                    <InfoHint hint="统计用户实际输入中累计包含 10 个及以上英文字母的轮次数，用于识别疑似补充技术细节的轮次；首次通过技能启动的会话轮次不计入，所选技能、附件等自动附加内容不计入。结果基于规则估算，仅供参考。" />
                   </div>
                 </th>
               ) : null}
@@ -2432,6 +2518,7 @@ function ProjectListSection({
                 key={project.projectId}
                 project={project}
                 showSuspectedTechnicalDetailMetric={showSuspectedTechnicalDetailMetric}
+                attentionSort={attentionSort}
                 expanded={expandedId === project.projectId}
                 onToggle={() =>
                   setExpandedId((prev) => (prev === project.projectId ? null : project.projectId))
