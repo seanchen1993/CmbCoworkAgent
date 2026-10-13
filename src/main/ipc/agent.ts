@@ -12617,6 +12617,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
         }
         const cancelled = Boolean(controller && !cancelWorkers)
         if (cancelled) handleAutoModeAgentCancelled(threadId)
+        else if (workers.length > 0) handleAutoModeAgentCancelled(threadId, "background")
         return cancelled
       })
     }

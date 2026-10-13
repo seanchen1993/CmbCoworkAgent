@@ -1434,25 +1434,34 @@ export async function handleAutoModeAgentTurnEnd(input: AutoModeAgentTurnEndInpu
   })
 }
 
-export function handleAutoModeAgentCancelled(threadId: string): void {
+export function handleAutoModeAgentCancelled(
+  threadId: string,
+  source: "agent" | "background" = "agent"
+): void {
   if (hasPendingHumanGateForThread(threadId)) return
   const feature = readHarnessFeatureContext(threadId)
   if (!feature?.runId) return
   void featureLocks
     .withKey(featureKey(feature.projectId, feature.featureId), async () => {
+      if (source === "background" && hasActiveTopLevelAgentRun(threadId)) return
       const record = managedRunStore.getRun({
         projectId: feature.projectId,
         featureId: feature.featureId,
         runId: feature.runId!
       })
       if (!record.snapshot || record.corrupt || record.snapshot.status !== "running") return
+      if (record.snapshot.currentSession?.threadId !== threadId) return
       const sourceEvent = managedRunStore.appendEvent(record.snapshot, {
         type: "session_run_aborted",
         scope: "stage",
         nodeId: record.snapshot.decisionBaseline?.nodeId,
         threadId,
-        reasonCode: "user_aborted_agent_run",
-        summary: "用户终止当前托管会话的 Agent Run"
+        reasonCode:
+          source === "background" ? "user_aborted_background_work" : "user_aborted_agent_run",
+        summary:
+          source === "background"
+            ? "用户终止当前托管会话的后台任务"
+            : "用户终止当前托管会话的 Agent Run"
       })
       const decision = recordManagedRunDecision({
         run: record.snapshot,

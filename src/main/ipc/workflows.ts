@@ -1,5 +1,6 @@
 import { ipcMain, type IpcMain } from "electron"
 import { pendingNotificationScheduler } from "../agent/pending-notification-scheduler"
+import { handleAutoModeAgentCancelled } from "../harness-board/auto-mode-controller"
 import { setWorkflowAgentStreamInterest, workflowRunManager } from "../agent/workflow/run-manager"
 import {
   hasUndeliveredWorkflowRunAsync,
@@ -342,7 +343,9 @@ export function registerWorkflowHandlers(ipc: IpcMain = ipcMain): void {
     "workflow:cancel-run",
     (_event, { threadId, runId }: { threadId: string; runId?: string }): boolean => {
       console.log("[Workflow] Cancel requested:", { threadId, runId })
-      return workflowRunManager.cancel(threadId, runId)
+      const cancelled = workflowRunManager.cancel(threadId, runId)
+      if (cancelled) handleAutoModeAgentCancelled(threadId, "background")
+      return cancelled
     }
   )
 
