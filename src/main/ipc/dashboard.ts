@@ -18,6 +18,7 @@ import {
 } from "./project-attention-ranking"
 import { isNestedMappingError } from "./dashboard-es-nested-mapping"
 import { queryWithToolUsageMappingFallback } from "./dashboard-tool-usage-query"
+import { buildUserProfileIdFilter } from "./dashboard-user-profile-query"
 import {
   buildToolUsageAggs,
   parseToolUsageAggs,
@@ -35,6 +36,8 @@ import type { DashboardThreadTraceScope } from "../../shared/dashboard-thread-tr
 
 import { ipcMain, dialog, BrowserWindow, type IpcMainInvokeEvent } from "electron"
 import { serialize } from "node:v8"
+import { prepareDashboardFieldCapsRequest } from "../services/dashboard-es-field-caps-request"
+import { readDashboardEsErrorDetail } from "../services/dashboard-es-error-body"
 import { getUserInfo } from "../storage"
 import { deriveUpperOrgLv1FromPath } from "../org-levels"
 import * as fs from "fs"
@@ -344,13 +347,15 @@ async function esQuery(
   const orderedNodes = nodes.map((_, offset) => nodes[(startIdx + offset) % nodes.length])
   nodeIndex = (startIdx + 1) % nodes.length
   const signal = getDashboardRequestSignal()
-  const path = `/${index}/${options?.operation === "field_caps" ? "_field_caps" : "_search"}`
-  const bodyText = JSON.stringify(body)
+  const { method, path, bodyText } =
+    options?.operation === "field_caps"
+      ? prepareDashboardFieldCapsRequest(index, body)
+      : { method: "POST" as const, path: `/${index}/_search`, bodyText: JSON.stringify(body) }
 
   try {
     return await queryDashboardEsInWorker({
       nodes: orderedNodes,
-      method: "POST",
+      method,
       path,
       headers,
       bodyText,
@@ -372,7 +377,7 @@ async function esQuery(
     const raw = await esQuerySmallFallback(
       orderedNodes,
       path,
-      "POST",
+      method,
       headers,
       bodyText,
       options?.timeoutMs ?? 15_000,
@@ -468,10 +473,14 @@ async function esQuerySmallFallback(
         signal: controller.signal
       })
       if (!response.ok) {
-        const bytes = await readBoundedFallbackBytes(response, 4 * 1024, signal).catch(
-          () => new Uint8Array()
-        )
-        throw new Error(`ES ${response.status}: ${new TextDecoder().decode(bytes).slice(0, 200)}`)
+        const detail = await readDashboardEsErrorDetail(response, () => {
+          if (signal?.aborted) throw new DashboardRequestCancelledError()
+        }).catch(() => "")
+        const error = new Error(`ES ${response.status}${detail ? `: ${detail}` : ""}`) as Error & {
+          code?: string
+        }
+        error.code = "DASHBOARD_ES_HTTP_ERROR"
+        throw error
       }
       const bytes = await readBoundedFallbackBytes(
         response,
@@ -5878,30 +5887,12 @@ async function fetchUserProfilesBySapIds(sapIds: string[]): Promise<unknown> {
     }
   }
 
-  const includeShouldFilters = sanitizedSapIds.flatMap((id) => {
-    const escaped = escapeWildcard(id)
-    const wildcardPattern = `*${escaped}*`
-    return [
-      { term: { sapId: id } },
-      { term: { "sapId.keyword": id } },
-      { wildcard: { sapId: wildcardPattern } },
-      { wildcard: { "sapId.keyword": wildcardPattern } }
-    ]
-  })
-
   // 用户资料查询属于目录/统计数据，不做组织级数据权限过滤。
   const body = {
     size: 0,
     query: {
       bool: {
-        filter: [
-          {
-            bool: {
-              should: includeShouldFilters,
-              minimum_should_match: 1
-            }
-          }
-        ]
+        filter: [buildUserProfileIdFilter(sanitizedSapIds)]
       }
     },
     aggs: {
