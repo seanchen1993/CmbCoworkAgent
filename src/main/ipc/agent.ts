@@ -9897,9 +9897,15 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
                     isWorkflowNotificationInvoke &&
                     workflowNotificationTerminalEligibleForManaged &&
                     isActiveManagedRunSession(threadId)
+                  const shouldReportCoordinatorNotificationTerminal =
+                    isTrustedCoordinatorNotificationInvoke &&
+                    isCoordinatorNotificationTurn &&
+                    Boolean(autoModeTerminal) &&
+                    isActiveManagedRunSession(threadId)
                   if (
                     abortController.signal.aborted ||
-                    isTrustedCoordinatorNotificationInvoke ||
+                    (isTrustedCoordinatorNotificationInvoke &&
+                      !shouldReportCoordinatorNotificationTerminal) ||
                     (isWorkflowNotificationInvoke && !shouldReportWorkflowNotificationTerminal) ||
                     (managedExecution !== true && !isActiveManagedRunSession(threadId))
                   ) {

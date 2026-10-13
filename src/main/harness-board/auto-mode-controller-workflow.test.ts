@@ -7,6 +7,9 @@ import type {
 
 const dependencies = vi.hoisted(() => ({
   isWorkflowBusy: vi.fn(),
+  hasRunningWorkers: vi.fn(),
+  hasFinalizingWorkers: vi.fn(),
+  hasWorkerNotifications: vi.fn(),
   inspectFeature: vi.fn(),
   requestBizRetry: vi.fn(),
   createSession: vi.fn(),
@@ -26,6 +29,13 @@ vi.mock("../db", () => ({
 vi.mock("../agent/agent-run-service", () => ({ hasActiveTopLevelAgentRun: () => false }))
 vi.mock("../agent/workflow/run-manager", () => ({
   workflowRunManager: { isBusyForThreadAsync: dependencies.isWorkflowBusy }
+}))
+vi.mock("../agent/coordinator-worker-manager", () => ({
+  coordinatorWorkerManager: {
+    hasRunningWorkersForThread: dependencies.hasRunningWorkers,
+    hasTerminalWorkerAwaitingNotificationForThread: dependencies.hasFinalizingWorkers,
+    hasAutoRunnableNotifications: dependencies.hasWorkerNotifications
+  }
 }))
 vi.mock("../app-attention-events", () => ({ emitAppAttention: dependencies.emitAttention }))
 vi.mock("./service", () => ({
@@ -126,8 +136,137 @@ beforeEach(() => {
     return next
   })
   dependencies.isWorkflowBusy.mockResolvedValue(false)
+  dependencies.hasRunningWorkers.mockReturnValue(false)
+  dependencies.hasFinalizingWorkers.mockReturnValue(false)
+  dependencies.hasWorkerNotifications.mockReturnValue(false)
   dependencies.inspectFeature.mockResolvedValue(feature)
   dependencies.requestBizRetry.mockReturnValue(true)
+})
+
+const workerBusyStates = [
+  { state: "running", query: dependencies.hasRunningWorkers },
+  { state: "saving its result", query: dependencies.hasFinalizingWorkers },
+  { state: "awaiting result delivery", query: dependencies.hasWorkerNotifications }
+]
+
+describe("managed turn-end decisions with background workers", () => {
+  describe.each(workerBusyStates)("worker $state", ({ query }) => {
+    it.each([
+      turnEnd(),
+      turnEnd({ outcome: "error", endReason: { code: "provider_error" } }),
+      turnEnd({ outcome: "error", endReason: { code: "unknown" } })
+    ])("defers $outcome/$endReason.code without requesting a decision or retry", async (input) => {
+      query.mockReturnValue(true)
+
+      await handleAutoModeAgentTurnEnd(input)
+
+      expect(query).toHaveBeenCalledWith("thread")
+      expect(dependencies.inspectFeature).not.toHaveBeenCalled()
+      expect(dependencies.requestBizRetry).not.toHaveBeenCalled()
+      expect(dependencies.createSession).not.toHaveBeenCalled()
+      expect(dependencies.emitAttention).not.toHaveBeenCalled()
+      expect(dependencies.appendEvent).not.toHaveBeenCalled()
+      expect(dependencies.updateSnapshot).not.toHaveBeenCalled()
+      expect(vi.getTimerCount()).toBe(0)
+      expect(run.status).toBe("running")
+    })
+
+    it.each([
+      { action: "Biz Retry", snapshot: feature },
+      {
+        action: "completion",
+        snapshot: {
+          ...feature,
+          featureStatus: "done" as const,
+          currentNodeStatus: "done" as const,
+          isFinalNode: true
+        }
+      },
+      { action: "failure", snapshot: { ...feature, featureStatus: "error" as const } }
+    ])("defers $action if worker work appears during feature inspection", async ({ snapshot }) => {
+      dependencies.inspectFeature.mockImplementation(async () => {
+        query.mockReturnValue(true)
+        return snapshot
+      })
+
+      await handleAutoModeAgentTurnEnd(turnEnd())
+
+      expect(dependencies.inspectFeature).toHaveBeenCalledOnce()
+      expect(dependencies.requestBizRetry).not.toHaveBeenCalled()
+      expect(dependencies.createSession).not.toHaveBeenCalled()
+      expect(dependencies.updateSnapshot).not.toHaveBeenCalled()
+      expect(dependencies.appendEvent.mock.calls.map(([, event]) => event.type)).toEqual([
+        "managed_agent_turn_ended"
+      ])
+      expect(run.status).toBe("running")
+    })
+  })
+
+  it("waits through worker completion until the main agent has processed the result", async () => {
+    dependencies.hasRunningWorkers.mockReturnValue(true)
+    await handleAutoModeAgentTurnEnd(turnEnd())
+
+    dependencies.hasRunningWorkers.mockReturnValue(false)
+    dependencies.hasFinalizingWorkers.mockReturnValue(true)
+    await handleAutoModeAgentTurnEnd(turnEnd())
+
+    dependencies.hasFinalizingWorkers.mockReturnValue(false)
+    dependencies.hasWorkerNotifications.mockReturnValue(true)
+    await handleAutoModeAgentTurnEnd(turnEnd())
+    expect(dependencies.requestBizRetry).not.toHaveBeenCalled()
+
+    dependencies.hasWorkerNotifications.mockReturnValue(false)
+    await handleAutoModeAgentTurnEnd(turnEnd())
+
+    expect(dependencies.inspectFeature).toHaveBeenCalledOnce()
+    expect(dependencies.requestBizRetry).toHaveBeenCalledExactlyOnceWith(
+      expect.objectContaining({
+        run,
+        policyResult: expect.objectContaining({ reasonCode: "biz_retry_no_progress" })
+      })
+    )
+  })
+
+  it("completes the feature after the last worker result has been processed", async () => {
+    dependencies.inspectFeature.mockResolvedValue({
+      ...feature,
+      featureStatus: "done",
+      currentNodeStatus: "done",
+      isFinalNode: true
+    })
+    dependencies.hasWorkerNotifications.mockReturnValue(true)
+    await handleAutoModeAgentTurnEnd(turnEnd())
+    expect(run.status).toBe("running")
+
+    dependencies.hasWorkerNotifications.mockReturnValue(false)
+    await handleAutoModeAgentTurnEnd(turnEnd())
+
+    expect(run.status).toBe("completed")
+    expect(dependencies.requestBizRetry).not.toHaveBeenCalled()
+  })
+
+  it("does not defer for workers belonging to another thread", async () => {
+    for (const { query } of workerBusyStates) {
+      query.mockImplementation((threadId) => threadId === "other-thread")
+    }
+
+    await handleAutoModeAgentTurnEnd(turnEnd())
+
+    expect(dependencies.requestBizRetry).toHaveBeenCalledOnce()
+    for (const { query } of workerBusyStates) {
+      expect(query).toHaveBeenCalledWith("thread")
+    }
+  })
+
+  it("does not inspect worker state for an old managed session", async () => {
+    run.currentSession = { threadId: "new-thread" }
+
+    await handleAutoModeAgentTurnEnd(turnEnd())
+
+    for (const { query } of workerBusyStates) {
+      expect(query).not.toHaveBeenCalled()
+    }
+  })
 })
 
 afterEach(() => {
