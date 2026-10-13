@@ -6,6 +6,11 @@ import { createRequire } from "node:module"
 import { build } from "esbuild"
 import { _electron } from "playwright"
 import type { PartnerDevStatus, PartnerDevRunView } from "../../src/shared/bot/partner-dev"
+import type {
+  GroupMemory,
+  GroupMemorySource,
+  GroupMemoryList
+} from "../../src/shared/bot/group-memory"
 
 /** Actual React component in Chromium, deterministic fake IPC for UI only.
  * Backend/actual graph acceptance is the separate partner-http-journey. */
@@ -77,10 +82,29 @@ async function main() {
         result: null
       },
       sends = 0,
-      analyses = 0
+      analyses = 0,
+      memoryPublishes = 0,
+      memoryUpdates = 0
+    const memoryList: GroupMemoryList = {
+      revision: 0,
+      memories: [],
+      canManage: true,
+      botPolicies: [{ botId: "expert-ui", botVersionId: "expert-ui-v1", memoryPolicy: "disabled" }]
+    }
     await page.exposeFunction(
       "partnerFixtureCall",
-      async (method: string, value?: { mentioned?: boolean; text?: string }) => {
+      async (
+        method: string,
+        value?: {
+          mentioned?: boolean
+          text?: string
+          useMemory?: boolean
+          source?: GroupMemorySource
+          memoryId?: string
+          expectedVersion?: number
+          status?: "active" | "disabled"
+        }
+      ) => {
         if (method === "getStatus") return structuredClone(status)
         if (method === "importConnection")
           Object.assign(status, {
@@ -97,8 +121,54 @@ async function main() {
           status.connected = false
           status.nodeEnabled = false
         }
-        if (method === "createTeam")
+        if (method === "createTeam") {
+          assert.equal(value?.useMemory, false)
           Object.assign(status, { groupId: "group-ui", botId: "expert-ui" })
+        }
+        if (method === "listMemories") return structuredClone(memoryList)
+        if (method === "enableTeamMemory") {
+          memoryList.botPolicies[0].memoryPolicy = "explicit_only"
+          memoryList.botPolicies[0].botVersionId = "expert-ui-v2"
+          status.nodeEnabled = false
+        }
+        if (method === "createMemory") {
+          memoryPublishes++
+          assert.equal(value?.source?.kind, "task")
+          assert.deepEqual(value?.source, { kind: "task", taskId: "task-ui", taskVersion: 2 })
+          const memory: GroupMemory = {
+            id: "memory-ui",
+            spaceId: "A",
+            groupId: "group-ui",
+            version: 1,
+            text: value!.text!,
+            status: "active",
+            source: value!.source!,
+            createdBy: "owner",
+            updatedBy: "owner",
+            createdAt: new Date().toISOString(),
+            updatedAt: new Date().toISOString()
+          }
+          memoryList.memories = [memory]
+          memoryList.revision++
+          return structuredClone(memoryList)
+        }
+        if (method === "updateMemory") {
+          memoryUpdates++
+          assert.equal(value?.expectedVersion, 1)
+          Object.assign(memoryList.memories[0], {
+            text: value!.text,
+            version: 2,
+            status: value!.status
+          })
+          memoryList.revision++
+          return structuredClone(memoryList)
+        }
+        if (method === "disableMemory") {
+          assert.equal(value?.expectedVersion, 2)
+          Object.assign(memoryList.memories[0], { status: "disabled", version: 3 })
+          memoryList.revision++
+          return structuredClone(memoryList)
+        }
         if (method === "sendMessage") {
           sends++
           if (!value?.mentioned)
@@ -142,6 +212,10 @@ async function main() {
               outcome: "succeeded",
               text: "[模拟模型返回｜非真实分析]\nTASK-1 需求说明书草稿：权限与范围待确认。",
               settledAt: new Date().toISOString()
+            },
+            memorySnapshot: {
+              revision: memoryList.revision,
+              memories: structuredClone(memoryList.memories.filter((m) => m.status === "active"))
             }
           }
         }
@@ -174,7 +248,12 @@ async function main() {
             "sendMessage",
             "analyzeTask",
             "inspectRun",
-            "cancelPending"
+            "cancelPending",
+            "listMemories",
+            "enableTeamMemory",
+            "createMemory",
+            "updateMemory",
+            "disableMemory"
           ].map((name) => [name, (value?: unknown) => target.partnerFixtureCall(name, value)])
         )
       }
@@ -190,12 +269,34 @@ async function main() {
     assert.equal(analyses, 0)
     await page.getByRole("button", { name: "发送消息", exact: true }).click()
     assert.equal(sends, 2)
+    await page.getByRole("button", { name: "发布并采用允许记忆的新专家版本", exact: true }).click()
+    await page.getByText("当前专家：允许显式记忆", { exact: true }).waitFor()
+    await page
+      .getByRole("button", {
+        name: "从本次澄清准备团队记忆（预填前512字，须编辑确认）",
+        exact: true
+      })
+      .click()
+    await page.getByLabel("团队记忆正文").fill("业务日统一采用交易系统日切日")
+    assert.equal(memoryPublishes, 0)
+    await page.getByRole("button", { name: "确认发布到本团队", exact: true }).click()
+    await page.getByTestId("group-memory-entry").waitFor()
+    assert.equal(memoryPublishes, 1)
+    await page.getByRole("button", { name: "编辑", exact: true }).click()
+    await page.getByLabel("团队记忆正文").fill("交易系统采用T+1数据")
+    await page.getByRole("button", { name: "确认修改", exact: true }).click()
+    assert.equal(memoryUpdates, 1)
     await page.getByRole("button", { name: "分析需求", exact: true }).click()
     await page.getByText("等待负责人节点", { exact: true }).waitFor()
     assert.equal(analyses, 1)
     await page.getByRole("button", { name: "启用本地节点", exact: true }).click()
     await page.getByTestId("partner-result").waitFor()
     assert.ok((await page.getByTestId("partner-result").innerText()).includes("非真实分析"))
+    await page.getByTestId("run-memory-snapshot").waitFor()
+    assert.match(await page.getByTestId("run-memory-snapshot").innerText(), /修订 2/)
+    await page.getByRole("button", { name: "停用", exact: true }).click()
+    assert.equal(memoryList.memories[0].status, "disabled")
+    assert.match(await page.getByTestId("run-memory-snapshot").innerText(), /v2/)
     await page.getByRole("button", { name: "停止节点并等待清理", exact: true }).click()
     assert.equal(status.nodeEnabled, false)
     await page.getByRole("button", { name: "断开", exact: true }).click()
@@ -215,6 +316,10 @@ async function main() {
         offlineWaiting: true,
         simulatedResultVisible: true,
         stopAndReconnect: true,
+        explicitMemoryPolicy: true,
+        taskToMemoryConfirmation: true,
+        memoryEditAndDisable: true,
+        historicalSnapshotVisible: true,
         autoModelCalls: 0,
         errors: 0
       })

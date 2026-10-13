@@ -45,6 +45,7 @@ export function inputFixture(): PartnerRequirementInput {
   const createdAt = "2026-10-11T08:00:00Z"
   return {
     messages: [],
+    memorySnapshot: null,
     bot: {
       id: "expert",
       spaceId: "A",

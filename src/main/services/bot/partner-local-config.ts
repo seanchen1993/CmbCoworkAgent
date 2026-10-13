@@ -8,14 +8,67 @@ import {
   PartnerLocalFault,
   partnerId,
   partnerObject,
+  partnerSchema,
   type PartnerConnectionDescriptor
 } from "./partner-local-client"
+import type {
+  BotConfig,
+  GroupBot,
+  GroupMember,
+  UpdateGroupMembersRequest
+} from "../../../shared/bot/contracts.generated"
+import { memoryVersion } from "./group-memory-validation"
+
+export interface PartnerMemoryEnablePlan {
+  botId: string
+  groupId: string
+  botVersion: number
+  groupVersion: number
+  config: BotConfig
+  bots: GroupBot[]
+  members: GroupMember[]
+}
+export function parseMemoryEnablePlan(value: unknown): PartnerMemoryEnablePlan {
+  const p = partnerObject(value, [
+    "botId",
+    "groupId",
+    "botVersion",
+    "groupVersion",
+    "config",
+    "bots",
+    "members"
+  ])
+  const config = partnerSchema<BotConfig>("BotConfig", p.config)
+  const groupVersion = memoryVersion(p.groupVersion)
+  const group = partnerSchema<UpdateGroupMembersRequest>("UpdateGroupMembersRequest", {
+    commandId: "validation",
+    expectedVersion: groupVersion,
+    bots: p.bots,
+    members: p.members
+  })
+  if (
+    config.memoryPolicy !== "explicit_only" ||
+    group.bots.length !== 1 ||
+    group.bots[0].botId !== p.botId
+  )
+    throw new PartnerLocalFault("STORAGE_FAILURE")
+  return {
+    botId: partnerId(p.botId),
+    groupId: partnerId(p.groupId),
+    botVersion: memoryVersion(p.botVersion),
+    groupVersion,
+    config,
+    bots: group.bots,
+    members: group.members
+  }
+}
 
 export interface PartnerPendingAction {
   kind: string
   fingerprint: string
   commandId: string
   deadline: string
+  plan?: PartnerMemoryEnablePlan
 }
 export interface PartnerLocalConfig {
   descriptor: PartnerConnectionDescriptor
@@ -39,20 +92,20 @@ function privateStat(s: import("node:fs").Stats, directory = false): void {
 }
 /** Imported launch descriptor must be a private, regular, owned file. Check
  * both handle and pathname identity; refuse symlinks rather than following. */
-export async function readPartnerPrivateJson(path: string): Promise<unknown> {
+export async function readPartnerPrivateJson(path: string, maximum = 32768): Promise<unknown> {
   let handle: fs.FileHandle | undefined
   try {
     const parent = await fs.lstat(dirname(path))
     privateStat(parent, true)
     const before = await fs.lstat(path)
     privateStat(before)
-    if (before.size > 32768) throw Error()
+    if (before.size > maximum) throw Error()
     handle = await fs.open(path, constants.O_RDONLY | constants.O_NOFOLLOW)
     const opened = await handle.stat()
     privateStat(opened)
     if (opened.ino !== before.ino || opened.dev !== before.dev) throw Error()
     const bytes = await handle.readFile()
-    if (bytes.length > 32768) throw Error()
+    if (bytes.length > maximum) throw Error()
     const after = await fs.lstat(path),
       afterParent = await fs.lstat(dirname(path))
     if (
@@ -96,7 +149,14 @@ export function parsePartnerLocalConfig(raw: unknown): PartnerLocalConfig {
   )
     throw new PartnerLocalFault("STORAGE_FAILURE")
   if (v.pending !== null) {
-    const a = partnerObject(v.pending, ["kind", "fingerprint", "commandId", "deadline"])
+    const hasPlan = !!v.pending && typeof v.pending === "object" && Object.hasOwn(v.pending, "plan")
+    const a = partnerObject(v.pending, [
+      "kind",
+      "fingerprint",
+      "commandId",
+      "deadline",
+      ...(hasPlan ? ["plan"] : [])
+    ])
     partnerId(a.commandId)
     if (
       typeof a.kind !== "string" ||
@@ -106,6 +166,12 @@ export function parsePartnerLocalConfig(raw: unknown): PartnerLocalConfig {
       !Number.isFinite(Date.parse(a.deadline))
     )
       throw new PartnerLocalFault("STORAGE_FAILURE")
+    if (hasPlan) {
+      if (a.kind !== "enableMemory") throw new PartnerLocalFault("STORAGE_FAILURE")
+      const plan = parseMemoryEnablePlan(a.plan)
+      if (plan.groupId !== v.groupId || plan.botId !== v.botId)
+        throw new PartnerLocalFault("STORAGE_FAILURE")
+    } else if (a.kind === "enableMemory") throw new PartnerLocalFault("STORAGE_FAILURE")
   }
   return { ...v, descriptor: parsePartnerDescriptor(v.descriptor) } as unknown as PartnerLocalConfig
 }
@@ -136,10 +202,10 @@ export class PartnerLocalConfigStore {
     try {
       this.secure()
       const v = partnerObject(
-        await readPartnerPrivateJson(join(this.directory, "connection.enc.json")),
+        await readPartnerPrivateJson(join(this.directory, "connection.enc.json"), 262144),
         ["version", "ciphertext"]
       )
-      if (v.version !== 1 || typeof v.ciphertext !== "string" || v.ciphertext.length > 32000)
+      if (v.version !== 1 || typeof v.ciphertext !== "string" || v.ciphertext.length > 250000)
         throw Error()
       return parsePartnerLocalConfig(
         JSON.parse(this.storage.decryptString(Buffer.from(v.ciphertext, "base64")))
@@ -168,6 +234,7 @@ export class PartnerLocalConfigStore {
       const plain = JSON.stringify(config),
         ciphertext = this.storage.encryptString(plain)
       if (this.storage.decryptString(ciphertext) !== plain) throw Error()
+      if (ciphertext.toString("base64").length > 250000) throw Error()
       const handle = await fs.open(temp, "wx", 0o600)
       created = true
       try {

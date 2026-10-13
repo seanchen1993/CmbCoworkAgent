@@ -23,10 +23,11 @@ import javax.sql.DataSource;
  * one another; node/space/owner come ONLY from the authenticated Session. */
 final class PartnerHttpHandler {
     static final String CONTROL="/api/bot/local/v1/control",NODE="/api/bot/local/v1/node";
-    private final PartnerLaunchConfig config;private final RequirementRunApplication runs;private final RuntimeNodeApplication nodes;private final LocalAuthenticatedNodeAdapter adapter;
+    private final PartnerLaunchConfig config;private final RequirementRunApplication runs;private final RuntimeNodeApplication nodes;private final LocalAuthenticatedNodeAdapter adapter;private final GroupMemoryApplication memories;
     private final Semaphore admission=new Semaphore(4);private final ObjectMapper json=CompatibilityProbe.strictMapper();private final ContractBoundary boundary=new ContractBoundary();
     PartnerHttpHandler(PartnerLaunchConfig config,DataSource source){
         this.config=config;nodes=new RuntimeNodeApplication(source,config.legacy.identity,config.access,TransactionObserver.NONE);runs=new RequirementRunApplication(source,config.legacy.identity,config.access,TransactionObserver.NONE);adapter=new LocalAuthenticatedNodeAdapter(config.credentials,nodes,runs);
+        memories=new GroupMemoryApplication(source,config.legacy.identity,TransactionObserver.NONE);
         json.getFactory().setStreamReadConstraints(StreamReadConstraints.builder().maxNestingDepth(16).maxStringLength(65536).maxNumberLength(128).build());
     }
     boolean accepts(String path){return path!=null&&path.startsWith("/api/bot/local/");}
@@ -53,6 +54,11 @@ final class PartnerHttpHandler {
     private Object control(JsonNode body,TrustedContext actor){
         String op=text(body,"operation");switch(op){
             case "identity":exact(body,"operation");return json.createObjectNode().put("spaceId",actor.spaceId).put("principalId",actor.principalId);
+            case "listGroupMemories":exact(body,"operation","groupId");return memories.listGroupMemories(actor,id(body,"groupId"));
+            case "createGroupMemory":exact(body,"operation","groupId","commandId","text","source");return memories.createGroupMemory(actor,id(body,"groupId"),id(body,"commandId"),text(body,"text"),GroupMemoryValues.source(body.get("source")));
+            case "updateGroupMemory":exact(body,"operation","groupId","memoryId","commandId","expectedVersion","text","source","status");return memories.updateGroupMemory(actor,id(body,"groupId"),id(body,"memoryId"),id(body,"commandId"),number(body,"expectedVersion",1),text(body,"text"),GroupMemoryValues.source(body.get("source")),text(body,"status"));
+            case "disableGroupMemory":exact(body,"operation","groupId","memoryId","commandId","expectedVersion");return memories.disableGroupMemory(actor,id(body,"groupId"),id(body,"memoryId"),id(body,"commandId"),number(body,"expectedVersion",1));
+            case "inspectMemorySnapshot":exact(body,"operation","runId");return memories.inspectMemorySnapshot(actor,id(body,"runId"));
             case "authorization":exact(body,"operation","groupId");return envelope("grant",nodes.getRequirementNodeAuthorization(actor,id(body,"groupId")));
             case "authorize":exact(body,"operation","groupId","nodeId","workspaceRef","expectedVersion","expiresAt");return envelope("grant",nodes.authorizeRequirementNode(actor,id(body,"groupId"),id(body,"nodeId"),id(body,"workspaceRef"),number(body,"expectedVersion",0),date(body,"expiresAt")));
             case "revoke":exact(body,"operation","groupId","expectedVersion");return envelope("grant",nodes.revokeRequirementNode(actor,id(body,"groupId"),number(body,"expectedVersion",0)));

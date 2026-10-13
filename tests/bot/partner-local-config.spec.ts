@@ -7,9 +7,11 @@ import { createCipheriv, createDecipheriv, randomBytes } from "node:crypto"
 import {
   PartnerLocalConfigStore,
   readPartnerPrivateJson,
+  parsePartnerLocalConfig,
   type PartnerLocalConfig
 } from "../../src/main/services/bot/partner-local-config"
 import { descriptor } from "./partner-local-fixture"
+import { inputFixture } from "./requirement-execution-fixture"
 const key = randomBytes(32)
 const storage = {
   isEncryptionAvailable: () => true,
@@ -55,6 +57,65 @@ test("main-only encrypted config persists exact connection; no plaintext secrets
       new PartnerLocalConfigStore(dir, { ...storage, isEncryptionAvailable: () => false }).load(),
       /STORAGE_UNAVAILABLE/
     )
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+test("memory enable plan is encrypted and bound to the configured expert/team across restart", async () => {
+  const root = await mkdtemp(join(tmpdir(), "devclaw-partner-memory-config-")),
+    dir = join(root, "partner")
+  const input = inputFixture()
+  const config: PartnerLocalConfig = {
+    descriptor: descriptor(),
+    workspacePath: "/explicit-workspace",
+    botId: input.bot.id,
+    botVersionId: input.botVersion.id,
+    groupId: input.group.id,
+    lastRunId: null,
+    lastTaskNumber: null,
+    pending: {
+      kind: "enableMemory",
+      commandId: "enable-memory",
+      fingerprint: `sha256:${"a".repeat(64)}`,
+      deadline: new Date(Date.now() + 60000).toISOString(),
+      plan: {
+        botId: input.bot.id,
+        groupId: input.group.id,
+        botVersion: 1,
+        groupVersion: 1,
+        config: { ...input.botVersion.config, memoryPolicy: "explicit_only" },
+        bots: input.group.bots,
+        members: input.group.members
+      }
+    }
+  }
+  try {
+    const store = new PartnerLocalConfigStore(dir, storage)
+    await store.save(config)
+    assert.deepEqual(await new PartnerLocalConfigStore(dir, storage).load(), config)
+    assert.ok(
+      !(await readFile(join(dir, "connection.enc.json"), "utf8")).includes(
+        config.pending!.plan!.config.instructions
+      )
+    )
+    for (const change of [
+      { ...config, groupId: "different" },
+      { ...config, botId: "different" },
+      { ...config, pending: { ...config.pending, kind: "other" } },
+      {
+        ...config,
+        pending: {
+          ...config.pending,
+          plan: {
+            ...config.pending!.plan,
+            config: { ...config.pending!.plan!.config, memoryPolicy: "disabled" }
+          }
+        }
+      },
+      { ...config, pending: { ...config.pending, plan: undefined } }
+    ])
+      assert.throws(() => parsePartnerLocalConfig(change), /(STORAGE_FAILURE|INVALID_PAYLOAD)/)
+    assert.deepEqual(await store.load(), config)
   } finally {
     await rm(root, { recursive: true, force: true })
   }

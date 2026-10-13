@@ -13,8 +13,20 @@ import {
   partnerId,
   type PartnerConnectionDescriptor
 } from "./partner-local-client"
-import { parsePartnerLocalConfig, type PartnerLocalConfig } from "./partner-local-config"
+import {
+  parsePartnerLocalConfig,
+  parseMemoryEnablePlan,
+  type PartnerLocalConfig,
+  type PartnerMemoryEnablePlan
+} from "./partner-local-config"
 import { PartnerLocalWorker, type PartnerWorkerExecutor } from "./partner-local-worker"
+import type {
+  GroupMemoryList,
+  GroupMemoryWrite,
+  GroupMemoryUpdate
+} from "../../../shared/bot/group-memory"
+import { memorySource, memoryText, memoryVersion } from "./group-memory-validation"
+import { partnerObject } from "./partner-local-boundary"
 
 export interface PartnerConfigPersistence {
   load(): Promise<PartnerLocalConfig | null>
@@ -218,7 +230,8 @@ export class PartnerDevController {
     kind: string,
     input: unknown,
     action: (command: string, deadline: string) => Promise<T>,
-    apply?: (value: T) => void
+    apply?: (value: T) => void,
+    plan?: PartnerMemoryEnablePlan
   ): Promise<T> {
     const c = this.requireConfig(),
       fingerprint =
@@ -233,7 +246,8 @@ export class PartnerDevController {
         kind,
         fingerprint,
         commandId: randomUUID(),
-        deadline: new Date(Date.now() + 600000).toISOString()
+        deadline: new Date(Date.now() + 600000).toISOString(),
+        ...(plan ? { plan: structuredClone(plan) } : {})
       }
     await this.persist() // Retry also requires a durable receipt before any write.
     const value = await action(c.pending.commandId, c.pending.deadline)
@@ -243,7 +257,7 @@ export class PartnerDevController {
     this.error = null
     return value
   }
-  createTeam(name: string, instructions: string): Promise<PartnerDevStatus> {
+  createTeam(name: string, instructions: string, useMemory = false): Promise<PartnerDevStatus> {
     return this.exclusive(async () => {
       if (
         typeof name !== "string" ||
@@ -251,7 +265,8 @@ export class PartnerDevController {
         name.length > 256 ||
         typeof instructions !== "string" ||
         !instructions.trim() ||
-        instructions.length > 16384
+        instructions.length > 16384 ||
+        typeof useMemory !== "boolean"
       )
         throw new PartnerLocalFault("INVALID_PAYLOAD")
       const c = this.requireConfig(),
@@ -259,7 +274,8 @@ export class PartnerDevController {
       if (c.groupId) throw new PartnerLocalFault("INPUT_CHANGED")
       await this.mutation(
         "createTeam",
-        { name, instructions },
+        // Keep the original disabled-policy fingerprint for pending A7 commands.
+        useMemory ? { name, instructions, useMemory } : { name, instructions },
         async (command) => {
           const { bot, botVersion } = await client.createBot({
             commandId: command + ":bot",
@@ -273,7 +289,7 @@ export class PartnerDevController {
               repositoryRefs: [],
               skillAllowlist: [],
               capabilityCeiling: ["requirements.analyze"],
-              memoryPolicy: "disabled"
+              memoryPolicy: useMemory ? "explicit_only" : "disabled"
             }
           })
           const group = await client.createGroup({
@@ -342,6 +358,118 @@ export class PartnerDevController {
       await client.revoke(groupId, version)
       await this.worker?.stop()
       this.error = null
+      return this.view()
+    })
+  }
+  listMemories(): Promise<GroupMemoryList> {
+    return this.exclusive(() => this.requireClient().listGroupMemories(this.team().groupId))
+  }
+  createMemory(input: GroupMemoryWrite): Promise<GroupMemoryList> {
+    return this.exclusive(async () => {
+      const v = partnerObject(input, ["text", "source"])
+      const { groupId } = this.team(),
+        client = this.requireClient()
+      const body = { text: memoryText(v.text), source: memorySource(v.source) }
+      return this.mutation("createMemory", { groupId, ...body }, async (command) => {
+        await client.createGroupMemory(groupId, body, command)
+        // A failed refresh keeps the original command, avoiding duplicate publication.
+        return client.listGroupMemories(groupId)
+      })
+    })
+  }
+  updateMemory(input: GroupMemoryUpdate): Promise<GroupMemoryList> {
+    return this.exclusive(async () => {
+      const v = partnerObject(input, ["memoryId", "expectedVersion", "text", "source", "status"])
+      if (v.status !== "active" && v.status !== "disabled")
+        throw new PartnerLocalFault("INVALID_PAYLOAD")
+      const { groupId } = this.team(),
+        client = this.requireClient()
+      const body: GroupMemoryUpdate = {
+        memoryId: partnerId(v.memoryId),
+        expectedVersion: memoryVersion(v.expectedVersion),
+        text: memoryText(v.text),
+        source: memorySource(v.source),
+        status: v.status
+      }
+      return this.mutation("updateMemory", { groupId, ...body }, async (command) => {
+        await client.updateGroupMemory(groupId, body, command)
+        return client.listGroupMemories(groupId)
+      })
+    })
+  }
+  disableMemory(memoryId: string, expectedVersion: number): Promise<GroupMemoryList> {
+    return this.exclusive(async () => {
+      const { groupId } = this.team(),
+        client = this.requireClient()
+      const body = {
+        groupId,
+        memoryId: partnerId(memoryId),
+        expectedVersion: memoryVersion(expectedVersion)
+      }
+      return this.mutation("disableMemory", body, async (command) => {
+        await client.disableGroupMemory(groupId, body.memoryId, body.expectedVersion, command)
+        return client.listGroupMemories(groupId)
+      })
+    })
+  }
+  enableTeamMemory(): Promise<PartnerDevStatus> {
+    return this.exclusive(async () => {
+      const { groupId, botId, config: c } = this.team(),
+        client = this.requireClient()
+      let plan: PartnerMemoryEnablePlan
+      if (c.pending) {
+        if (c.pending.kind !== "enableMemory") throw new PartnerLocalFault("INPUT_CHANGED")
+        plan = parseMemoryEnablePlan(c.pending.plan)
+      } else {
+        const group = await client.getGroup(groupId),
+          { bot, botVersion } = await client.getBot(botId)
+        if (
+          group.bots.length !== 1 ||
+          group.bots[0].botId !== botId ||
+          group.bots[0].botVersionId !== c.botVersionId ||
+          botVersion.id !== c.botVersionId
+        )
+          throw new PartnerLocalFault("INPUT_CHANGED")
+        if (botVersion.config.memoryPolicy === "explicit_only") {
+          this.error = null
+          return this.view()
+        }
+        plan = parseMemoryEnablePlan({
+          botId,
+          groupId,
+          botVersion: bot.version,
+          groupVersion: group.version,
+          config: { ...botVersion.config, memoryPolicy: "explicit_only" },
+          bots: group.bots,
+          members: group.members
+        })
+      }
+      await this.worker?.stop()
+      await this.mutation(
+        "enableMemory",
+        plan,
+        async (command) => {
+          const version = await client.createBotVersion(botId, {
+            commandId: command + ":version",
+            expectedVersion: plan.botVersion,
+            config: plan.config
+          })
+          await client.updateGroupMembers(groupId, {
+            commandId: command + ":adopt",
+            expectedVersion: plan.groupVersion,
+            bots: plan.bots.map((b) => ({ ...b, botVersionId: version.botVersion.id })),
+            members: plan.members
+          })
+          const current = await client.getGroup(groupId)
+          if (current.bots.length !== 1 || current.bots[0].botVersionId !== version.botVersion.id)
+            throw new PartnerLocalFault("INPUT_CHANGED")
+          return version.botVersion.id
+        },
+        (id) => {
+          c.botVersionId = id
+        },
+        plan
+      )
       return this.view()
     })
   }
@@ -436,10 +564,22 @@ export class PartnerDevController {
     const value = await this.requireClient().inspect(partnerId(runId))
     if (value.result?.runId !== runId && value.result !== null)
       throw new PartnerLocalFault("INVALID_PAYLOAD")
+    const { groupId } = this.team()
+    if (value.run.groupId !== groupId) throw new PartnerLocalFault("FORBIDDEN")
+    let memorySnapshot: PartnerDevRunView["memorySnapshot"]
+    if (!["queued", "waiting_node", "starting", "cancelled"].includes(String(value.run.status))) {
+      try {
+        memorySnapshot = await this.requireClient().inspectMemorySnapshot(runId, groupId)
+      } catch (error) {
+        if (!(error instanceof PartnerLocalFault) || error.code !== "NOT_FOUND") throw error
+        // Pre-start and pre-V6 history must not be mislabeled as memory disabled.
+      }
+    }
     return {
       runId,
       status: String(value.run.status),
       version: Number(value.run.version),
+      memorySnapshot,
       result: value.result
         ? {
             outcome: value.result.outcome,

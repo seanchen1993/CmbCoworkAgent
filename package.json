@@ -58,6 +58,8 @@
     "test:bot-partner-app": "node --import tsx --test tests/bot/partner-local-client.spec.ts tests/bot/partner-local-config.spec.ts tests/bot/partner-local-worker.spec.ts tests/bot/partner-dev-controller.spec.ts && vitest run src/main/ipc/partner-dev.test.ts",
     "demo:bot-partner-http": "node --import tsx tests/bot/partner-http-journey.ts",
     "test:bot-partner-panel": "node --import tsx tests/bot/partner-panel-browser.ts",
+    "test:bot-memory": "node --import tsx --test tests/bot/group-memory-validation.spec.ts tests/bot/group-memory-controller.spec.ts tests/bot/requirement-executor.spec.ts",
+    "demo:bot-memory": "node --import tsx tests/bot/group-memory-http-journey.ts",
     "dev:bot-doctor": "node deploy/dev/cli.mjs doctor",
     "test:bot-dev": "node deploy/dev/cli.mjs mock --profile dev",
     "test:bot-dev-real": "node deploy/dev/cli.mjs real --profile dev",

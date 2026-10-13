@@ -25,6 +25,8 @@ import {
   runFixture,
   withSqlite
 } from "./requirement-execution-fixture"
+import type { GroupMemorySnapshot } from "../../src/shared/bot/group-memory"
+import { memoryFixture } from "./group-memory-fixture"
 
 test("uninitialized restricted profile never falls back to personal execution; default callers unchanged", async () => {
   let personalCalls = 0
@@ -53,6 +55,10 @@ function setup(
     leaseMs?: number
     renewFails?: boolean
     loseSettlement?: boolean
+    memory?: GroupMemorySnapshot | null
+    memoryPolicy?: "disabled" | "explicit_only"
+    renewMemoryChanged?: boolean
+    settleMemoryChanged?: boolean
   } = {}
 ) {
   const run = runFixture(),
@@ -60,6 +66,8 @@ function setup(
     threads = new PartnerTaskThreadStore(db),
     attempts = new PartnerRequirementAttemptStore(db)
   if (options.leaseMs) run.leaseExpiresAt = new Date(Date.now() + options.leaseMs).toISOString()
+  input.memorySnapshot = options.memory ?? null
+  input.botVersion.config.memoryPolicy = options.memoryPolicy ?? "disabled"
   const stats = {
     models: 0,
     starts: 0,
@@ -121,11 +129,13 @@ function setup(
     },
     async renew(value) {
       stats.renews++
+      if (options.renewMemoryChanged) throw Error("INPUT_CHANGED")
       if (options.renewFails) throw Error("AUTH_REVOKED")
       return { ...value, leaseExpiresAt: new Date(Date.now() + 30_000).toISOString() }
     },
     async settle(value, outcome, text) {
       stats.settles++
+      if (options.settleMemoryChanged) throw Error("INPUT_CHANGED")
       if (persisted) {
         assert.equal(persisted.outcome, outcome)
         assert.equal(persisted.text, text)
@@ -140,6 +150,9 @@ function setup(
       }
       if (options.loseSettlement) throw Error("LOST_RECEIPT")
       return persisted
+    },
+    async memoryChanged() {
+      return !!options.renewMemoryChanged || !!options.settleMemoryChanged
     }
   }
   const dependencies = {
@@ -448,4 +461,71 @@ test("server denial, frozen input drift, wrong node and malformed IDs cannot cal
     await assert.rejects(f.executor.execute(f.run), /FORBIDDEN/)
     assert.equal(f.stats.models, 0)
     assert.equal(db.exec("SELECT COUNT(*) FROM threads")[0].values[0][0], 0)
+  }))
+
+test("server Group snapshot is injected into the actual zero-tool graph with versions and no personal memory", () =>
+  withSqlite(async (db) => {
+    const f = setup(db, {
+      memoryPolicy: "explicit_only",
+      memory: { revision: 3, memories: [memoryFixture()] }
+    })
+    await f.executor.execute(f.run)
+    assert.match(f.stats.prompts[0], /交易查询仅提供T\+1数据/)
+    assert.match(f.stats.prompts[0], /memory:memory-a:v1/)
+    assert.equal(f.stats.tools.length, 0)
+    assert.equal(f.stats.models, 1)
+    await f.executor.execute(f.run)
+    assert.equal(f.stats.models, 1)
+  }))
+
+test("disabled and explicit-only policies require corresponding server snapshots, no implicit fallback", () =>
+  withSqlite(async (db) => {
+    const disabled = setup(db, { memory: { revision: 1, memories: [memoryFixture()] } })
+    await assert.rejects(disabled.executor.execute(disabled.run), /INPUT_CHANGED/)
+    assert.equal(disabled.stats.models, 0)
+    const enabled = setup(db, { memoryPolicy: "explicit_only" })
+    await assert.rejects(enabled.executor.execute(enabled.run), /INPUT_CHANGED/)
+    assert.equal(enabled.stats.models, 0)
+  }))
+
+test("cross-Group, duplicate and inactive snapshot entries are refused before model or Thread allocation", () =>
+  withSqlite(async (db) => {
+    for (const memories of [
+      [memoryFixture({ groupId: "other" })],
+      [memoryFixture(), memoryFixture()],
+      [memoryFixture({ status: "disabled" })]
+    ]) {
+      const f = setup(db, { memoryPolicy: "explicit_only", memory: { revision: 1, memories } })
+      await assert.rejects(f.executor.execute(f.run))
+      assert.equal(f.stats.models, 0)
+    }
+    assert.equal(db.exec("SELECT COUNT(*) FROM threads")[0].values[0][0], 0)
+  }))
+
+test("confirmed memory revision invalidation aborts the actual graph and does not settle or rerun", () =>
+  withSqlite(async (db) => {
+    const f = setup(db, {
+      wait: true,
+      renewMemoryChanged: true,
+      memoryPolicy: "explicit_only",
+      memory: { revision: 1, memories: [memoryFixture()] }
+    })
+    await assert.rejects(f.executor.execute(f.run), /PARTNER_MEMORY_CHANGED/)
+    assert.equal(f.stats.models, 1)
+    assert.equal(f.stats.settles, 0)
+    await assert.rejects(f.executor.execute(f.run), /OUTCOME_UNKNOWN/)
+    assert.equal(f.stats.models, 1)
+  }))
+
+test("revision change at settlement keeps unpublished local result and retry never calls a model again", () =>
+  withSqlite(async (db) => {
+    const f = setup(db, {
+      settleMemoryChanged: true,
+      memoryPolicy: "explicit_only",
+      memory: { revision: 1, memories: [memoryFixture()] }
+    })
+    await assert.rejects(f.executor.execute(f.run), /PARTNER_MEMORY_CHANGED/)
+    await assert.rejects(f.executor.execute(f.run), /PARTNER_MEMORY_CHANGED/)
+    assert.equal(f.stats.models, 1)
+    assert.equal(f.stats.settles, 2)
   }))

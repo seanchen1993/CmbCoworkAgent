@@ -147,7 +147,7 @@ async function start(entry, signal) {
     rt = await runtime(entry)
     const dbConfig = { mode: "local-dev", host: "127.0.0.1", port: db.port, schema: "devclaw", user: "devclaw_app", password }
     const migrate = JSON.parse(await run(rt.java, ["-Duser.timezone=UTC", "-cp", rt.classpath, "com.devclaw.botcontrol.persistence.DatabaseCommand", "migrate"], { cwd: rt.dir, env: rt.env, input: JSON.stringify(dbConfig), timeoutMs: 60000, signal }))
-    check(migrate.status === "verified" && [0, 5].includes(migrate.migrations))
+    check(migrate.status === "verified" && [0, 1, 6].includes(migrate.migrations))
     await partnerWrite(join(entry.dir, "server.log"), ""); await partnerWrite(join(entry.dir, "server-error.log"), "")
     const out = await open(join(entry.dir, "server.log"), constants.O_WRONLY | constants.O_NOFOLLOW), error = await open(join(entry.dir, "server-error.log"), constants.O_WRONLY | constants.O_NOFOLLOW)
     const args = ["-Xmx256m", "-Duser.timezone=UTC", `-Ddevclaw.partner.owner=${entry.nonce}`, "-cp", rt.classpath, "com.devclaw.botcontrol.http.PartnerHttpMain"]

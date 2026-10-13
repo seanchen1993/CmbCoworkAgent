@@ -80,8 +80,11 @@ export async function audit() {
     const nodeMigration = "BOOT-INF/classes/db/bot-migration/V3__runtime_node_authorization.sql"
     const runMigration = "BOOT-INF/classes/db/bot-migration/V4__requirement_run_queue.sql"
     const resultMigration = "BOOT-INF/classes/db/bot-migration/V5__requirement_run_results.sql"
-    if (contents.filter(name => name.startsWith("BOOT-INF/classes/db/bot-migration/") && name.endsWith(".sql")).sort().join() !== [migrationResource, taskMigration, nodeMigration, runMigration, resultMigration].sort().join()) throw new Error("B01_PACKAGED_MIGRATIONS")
-    await run(join(jdk, "bin/jar"), ["xf", jar, ...classes, ...resources, migrationResource, taskMigration, nodeMigration, runMigration, resultMigration, "BOOT-INF/classes/log4j2.xml"], { env, cwd: temp })
+    const memoryMigration = "BOOT-INF/classes/db/bot-migration/V6__group_explicit_memory.sql"
+    if (contents.filter(name => name.startsWith("BOOT-INF/classes/db/bot-migration/") && name.endsWith(".sql")).sort().join() !== [migrationResource, taskMigration, nodeMigration, runMigration, resultMigration, memoryMigration].sort().join()) throw new Error("B01_PACKAGED_MIGRATIONS")
+    await run(join(jdk, "bin/jar"), ["xf", jar, ...classes, ...resources, migrationResource, taskMigration, nodeMigration, runMigration, resultMigration, memoryMigration, "BOOT-INF/classes/log4j2.xml"], { env, cwd: temp })
+    const memoryMigrationBytes = await readFile(join(temp, memoryMigration))
+    if (!memoryMigrationBytes.equals(await readFile(join(project, "src/main/resources/db/bot-migration/V6__group_explicit_memory.sql")))) throw new Error("B01_PACKAGED_MIGRATIONS")
     if (!(await readFile(join(temp, resultMigration))).equals(await readFile(join(project, "src/main/resources/db/bot-migration/V5__requirement_run_results.sql")))) throw new Error("B01_PACKAGED_MIGRATIONS")
     const runMigrationBytes = await readFile(join(temp, runMigration))
     if (!runMigrationBytes.equals(await readFile(join(project, "src/main/resources/db/bot-migration/V4__requirement_run_queue.sql")))) throw new Error("B01_PACKAGED_MIGRATIONS")
@@ -111,6 +114,7 @@ export async function audit() {
     suites["application.RequirementRunUnitTest"] = 8
     suites["adapters.local.NodeCredentialUnitTest"] = 6
     suites["adapters.local.PartnerConfigUnitTest"] = 4
+    suites["application.GroupMemoryUnitTest"] = 5
     let tests = 0
     for (const [name, count] of Object.entries(suites)) {
       const xml = await readFile(join(project, `target/surefire-reports/TEST-com.devclaw.botcontrol.${name}.xml`), "utf8")

@@ -9,6 +9,8 @@ import { assemblePartnerPrompt } from "./prompt-assembly"
 import { REQUIREMENT_INPUT_ONLY_PROMPT } from "./input-only-requirement-run"
 import { PartnerRequirementAttemptStore } from "./requirement-attempt-store"
 import { PartnerTaskThreadStore, type PartnerTaskThreadContext } from "./task-thread-store"
+import { parseMemorySnapshot } from "./group-memory-validation"
+import { groupMemorySourceRef } from "../../../shared/bot/group-memory"
 import {
   samePartnerAttempt,
   validatePartnerRun,
@@ -82,13 +84,24 @@ function prepared(run: PartnerRequirementRun, raw: PartnerRequirementInput) {
     messageIds.add(value.id)
     previousVersion = entry.taskVersion
   }
+  const snapshot = parseMemorySnapshot(input.memorySnapshot, run.spaceId, run.groupId)
+  if ((botVersion.config.memoryPolicy === "disabled") !== (snapshot === null))
+    throw new Error("PARTNER_EXECUTION_INPUT_CHANGED")
   const prompt = assemblePartnerPrompt({
     ...input,
     baseSystemPrompt: "你是DevClaw编程伙伴。只使用本次明确提供的材料，不执行工具或扩大权限。",
     modeSystemPrompt: REQUIREMENT_INPUT_ONLY_PROMPT,
     mode: { id: "requirement", version: 1 },
     delivery: "app",
-    memories: []
+    memories:
+      snapshot?.memories.map((memory) => ({
+        spaceId: memory.spaceId,
+        scope: "group" as const,
+        ownerId: memory.groupId,
+        sourceRef: groupMemorySourceRef(memory),
+        origin: "explicit" as const,
+        text: memory.text
+      })) ?? []
   })
   const message = JSON.stringify({
     taskNumber: task.taskNumber,
@@ -101,7 +114,7 @@ function prepared(run: PartnerRequirementRun, raw: PartnerRequirementInput) {
     }))
   })
   if (message.length > 60_000) throw new Error("PARTNER_EXECUTION_INPUT_TOO_LARGE")
-  return { systemPrompt: prompt.systemPrompt, message }
+  return { systemPrompt: prompt.systemPrompt, message, memoryRevision: snapshot?.revision ?? null }
 }
 
 /** Manually supplied authenticated control seam. Not polling, IPC registration
@@ -159,7 +172,18 @@ export class PartnerRequirementExecutor {
     return true
   }
   private async settle(run: PartnerRequirementRun, outcome: RequirementOutcome, text: string) {
-    const result = await this.deps.control.settle(run, outcome, text)
+    let result: PartnerRequirementResult
+    try {
+      result = await this.deps.control.settle(run, outcome, text)
+    } catch (error) {
+      if (
+        error instanceof Error &&
+        ["INPUT_CHANGED", "COMMAND_CONFLICT"].includes(error.message) &&
+        (await this.deps.control.memoryChanged?.(run))
+      )
+        throw new Error("PARTNER_MEMORY_CHANGED")
+      throw error
+    }
     if (
       result.runId !== run.id ||
       result.attemptId !== run.attemptId ||
@@ -213,6 +237,7 @@ export class PartnerRequirementExecutor {
       throw new Error("PARTNER_THREAD_BUSY")
     let alive = true,
       leaseLost = false,
+      memoryChanged = false,
       expiryTimer: ReturnType<typeof setTimeout> | undefined
     let renewTimer: ReturnType<typeof setTimeout> | undefined
     const loseLease = () => {
@@ -241,7 +266,18 @@ export class PartnerRequirementExecutor {
         renewTimer = setTimeout(() => {
           void renew()
         }, this.deps.renewalIntervalMs ?? 5000)
-      } catch {
+      } catch (error) {
+        if (
+          alive &&
+          error instanceof Error &&
+          ["INPUT_CHANGED", "COMMAND_CONFLICT"].includes(error.message)
+        ) {
+          try {
+            memoryChanged = (await control.memoryChanged?.(run)) ?? false
+          } catch {
+            /* never guess from the error alone */
+          }
+        }
         if (alive) loseLease()
       }
     }
@@ -292,6 +328,7 @@ export class PartnerRequirementExecutor {
       // no tools, and its durable attempt can never launch a second model turn.
       releaseLocalThreadRunLease(binding.localThreadId, "im", run.attemptId)
     }
+    if (memoryChanged) throw new Error("PARTNER_MEMORY_CHANGED")
     if (leaseLost || Date.now() >= Date.parse(run.leaseExpiresAt))
       throw new Error("PARTNER_EXECUTION_LEASE_LOST")
     const outcome: RequirementOutcome =

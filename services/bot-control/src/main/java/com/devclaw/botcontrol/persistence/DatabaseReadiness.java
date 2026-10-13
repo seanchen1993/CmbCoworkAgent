@@ -5,7 +5,7 @@ import java.util.*;
 import javax.sql.DataSource;
 
 public final class DatabaseReadiness {
-    public static final List<String> TABLES = Collections.unmodifiableList(Arrays.asList("bots", "bot_versions", "bot_maintainers", "groups", "group_members", "group_bots", "command_scope", "command_receipts", "mutation_outbox", "tasks", "task_messages", "task_space_head", "task_event_cursors", "desktop_runtime_nodes", "group_runtime_grants", "requirement_run_queue", "requirement_run_results", "bot_schema_history"));
+    public static final List<String> TABLES = Collections.unmodifiableList(Arrays.asList("bots", "bot_versions", "bot_maintainers", "groups", "group_members", "group_bots", "command_scope", "command_receipts", "mutation_outbox", "tasks", "task_messages", "task_space_head", "task_event_cursors", "desktop_runtime_nodes", "group_runtime_grants", "requirement_run_queue", "requirement_run_results", "group_memory_revisions", "group_memories", "group_memory_commands", "requirement_run_memory_snapshots", "bot_schema_history"));
     private DatabaseReadiness() {}
     public static void requireConnection(DataSource source) {
         try (Connection c = source.getConnection()) { requireConnection(c); }

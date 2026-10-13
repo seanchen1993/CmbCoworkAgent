@@ -5,6 +5,7 @@ import type {
   Task,
   TaskMessageResult
 } from "../../../shared/bot/contracts.generated"
+import type { GroupMemorySnapshot } from "../../../shared/bot/group-memory"
 
 /** Internal adapter DTO, not the frozen public RunSpec or a client authorization. */
 export interface PartnerRequirementRun {
@@ -34,6 +35,7 @@ export interface PartnerRequirementInput {
   task: Task
   /** Bounded explicit Task messages, not ambient group/Thread history. */
   messages: TaskMessageResult[]
+  memorySnapshot: GroupMemorySnapshot | null
 }
 export type RequirementOutcome = "succeeded" | "failed"
 export interface PartnerRequirementResult {
@@ -45,6 +47,8 @@ export interface PartnerRequirementResult {
 }
 /** A trusted node transport supplies these. Never build one from IM/body IDs. */
 export interface PartnerRequirementControl {
+  /** Only an authenticated inspection may classify a failed revision check. */
+  memoryChanged?(run: PartnerRequirementRun): Promise<boolean>
   start(run: PartnerRequirementRun): Promise<{
     run: PartnerRequirementRun
     input: PartnerRequirementInput

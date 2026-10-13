@@ -6,19 +6,24 @@ import type {
   PartnerDevRunView,
   PartnerDevStatus
 } from "../../../../shared/bot/partner-dev"
+import type { GroupMemoryList, GroupMemoryWrite } from "../../../../shared/bot/group-memory"
+import { GroupMemoryPanel, memorySourceLabel } from "./GroupMemoryPanel"
 
 const ERRORS: Record<string, string> = {
   FORBIDDEN: "当前身份或授权不允许此操作。",
   UNAUTHENTICATED: "凭据已失效，请重新导入本地连接文件。",
   VERSION_CONFLICT: "版本已变化，请刷新后重试。",
-  INPUT_CHANGED: "尚有结果未知的写入，请以完全相同的内容重试，不能直接换新指令。",
+  INPUT_CHANGED:
+    "任务、来源或专家版本已变化，或有结果未知写入。请核对；未知写入须以相同内容重试，不能盲换指令。",
   OUTCOME_UNKNOWN: "上次执行结果不确定，不会自动重跑。",
   NODE_OFFLINE: "请先连接本地控制服务。",
   NOT_CONFIGURED: "请完成连接、工作区与团队配置。",
   STORAGE_FAILURE: "连接文件须为私有、当前用户拥有的普通文件；请检查启动说明。",
   STORAGE_UNAVAILABLE: "系统安全存储不可用，未保存明文凭据。",
   DEPENDENCY_UNAVAILABLE: "本地服务不可用或连接中断，请检查启动状态。",
-  INVALID_PAYLOAD: "参数不符合当前文本开发版约束。"
+  INVALID_PAYLOAD: "参数不符合当前文本开发版约束。",
+  MEMORY_CHANGED: "团队记忆已变化，上次分析失效。请查看结果，是否重新分析由你决定。",
+  PAYLOAD_TOO_LARGE: "记忆超过条数或装配预算，请先整理或停用条目。"
 }
 function errorText(error: unknown): string {
   const text = error instanceof Error ? error.message : String(error)
@@ -47,12 +52,20 @@ export function PartnerDevPanel(): React.JSX.Element {
   const [groupId, setGroupId] = useState(""),
     [mentioned, setMentioned] = useState(true),
     [text, setText] = useState("新任务：增加按日期查询交易的能力，先梳理权限与边界。")
+  const [useMemory, setUseMemory] = useState(false)
+  const [memories, setMemories] = useState<GroupMemoryList | null>(null)
+  const [memoryDraft, setMemoryDraft] = useState<GroupMemoryWrite | null>(null)
+  const [lastTask, setLastTask] = useState<{ id: string; version: number; text: string } | null>(
+    null
+  )
   const [taskNumber, setTaskNumber] = useState(""),
     [runId, setRunId] = useState(""),
     [run, setRun] = useState<PartnerDevRunView | null>(null),
     [messages, setMessages] = useState<string[]>([])
   const busyRef = useRef(false),
-    selection = useRef({ runId: "", taskNumber: "" })
+    selection = useRef({ runId: "", taskNumber: "" }),
+    requestEpoch = useRef(0),
+    currentTeam = useRef<string | null>(null)
   useEffect(() => {
     selection.current = { runId, taskNumber }
   }, [runId, taskNumber])
@@ -60,20 +73,43 @@ export function PartnerDevPanel(): React.JSX.Element {
     let alive = true,
       timer: ReturnType<typeof setTimeout> | undefined
     const refresh = async () => {
+      const epoch = requestEpoch.current
+      const currentRequest = () => alive && epoch === requestEpoch.current
       try {
         const current = await window.api.partnerDev.getStatus()
-        if (!alive) return
+        if (!currentRequest()) return
+        if (currentTeam.current !== current.groupId) {
+          currentTeam.current = current.groupId
+          setMemories(null)
+          setMemoryDraft(null)
+          setLastTask(null)
+          setRun(null)
+        }
         setStatus(current)
+        if (current.connected && current.groupId) {
+          const list = await window.api.partnerDev.listMemories()
+          if (!currentRequest()) return
+          setMemories(list)
+        } else if (alive) {
+          setMemories(null)
+          setMemoryDraft(null)
+          setLastTask(null)
+        }
         if (!selection.current.taskNumber && current.lastTaskNumber)
           setTaskNumber(current.lastTaskNumber)
         const id = selection.current.runId || current.lastRunId
         if (!selection.current.runId && id) setRunId(id)
         if (current.connected && id) {
           const inspected = await window.api.partnerDev.inspectRun({ runId: id })
-          if (alive) setRun(inspected)
+          if (currentRequest() && (!selection.current.runId || selection.current.runId === id))
+            setRun(inspected)
         }
       } catch (e) {
-        if (alive) setError(errorText(e))
+        if (currentRequest()) {
+          setError(errorText(e))
+          setMemories(null)
+          setRun(null)
+        }
       } finally {
         if (alive)
           timer = setTimeout(() => {
@@ -89,12 +125,21 @@ export function PartnerDevPanel(): React.JSX.Element {
   }, [])
   const action = async (fn: () => Promise<unknown>): Promise<void> => {
     if (busyRef.current) return
+    requestEpoch.current++
     busyRef.current = true
     setBusy(true)
     setError(null)
     try {
       await fn()
-      setStatus(await window.api.partnerDev.getStatus())
+      const current = await window.api.partnerDev.getStatus()
+      if (currentTeam.current !== current.groupId) {
+        currentTeam.current = current.groupId
+        setMemories(null)
+        setMemoryDraft(null)
+        setLastTask(null)
+        setRun(null)
+      }
+      setStatus(current)
     } catch (e) {
       setError(errorText(e))
     } finally {
@@ -102,12 +147,18 @@ export function PartnerDevPanel(): React.JSX.Element {
       setBusy(false)
     }
   }
-  const reply = (value: PartnerDevMessageReply) => {
+  const reply = (value: PartnerDevMessageReply, submitted?: string) => {
     setMessages((old) => [...old.slice(-19), value.notice])
     if (value.taskNumber) {
       setTaskNumber(value.taskNumber)
       setText(`${value.taskNumber}：补充业务规则：仅允许查询本人有权限的交易。`)
     }
+    if (submitted !== undefined)
+      setLastTask(
+        value.taskId && value.taskVersion
+          ? { id: value.taskId, version: value.taskVersion, text: submitted }
+          : null
+      )
     if (value.runId) {
       setRunId(value.runId)
       setRun(null)
@@ -205,10 +256,21 @@ export function PartnerDevPanel(): React.JSX.Element {
                   onChange={(e) => setInstructions(e.target.value)}
                 />
               </label>
+              <label className="flex items-center gap-2 text-sm">
+                <input
+                  type="checkbox"
+                  aria-label="新专家使用团队记忆"
+                  checked={useMemory}
+                  onChange={(e) => setUseMemory(e.target.checked)}
+                />
+                允许此专家使用本团队已确认的显式记忆（不自动记住聊天）
+              </label>
               <Button
                 disabled={busy || !connected}
                 onClick={() =>
-                  void action(() => window.api.partnerDev.createTeam({ name, instructions }))
+                  void action(() =>
+                    window.api.partnerDev.createTeam({ name, instructions, useMemory })
+                  )
                 }
               >
                 创建单专家团队
@@ -290,12 +352,26 @@ export function PartnerDevPanel(): React.JSX.Element {
             disabled={busy || !connected || !status?.groupId || !text.trim()}
             onClick={() =>
               void action(async () =>
-                reply(await window.api.partnerDev.sendMessage({ mentioned, text }))
+                reply(await window.api.partnerDev.sendMessage({ mentioned, text }), text)
               )
             }
           >
             发送消息
           </Button>
+          {lastTask && (
+            <Button
+              variant="outline"
+              disabled={busy || !connected || !memories?.canManage}
+              onClick={() =>
+                setMemoryDraft({
+                  text: lastTask.text.slice(0, 512),
+                  source: { kind: "task", taskId: lastTask.id, taskVersion: lastTask.version }
+                })
+              }
+            >
+              从本次澄清准备团队记忆（预填前512字，须编辑确认）
+            </Button>
+          )}
           <div className="flex gap-2">
             <Input
               aria-label="任务编号"
@@ -343,6 +419,42 @@ export function PartnerDevPanel(): React.JSX.Element {
                   {run.result.text}
                 </pre>
               )}
+              {run.result?.text === "MEMORY_CHANGED" && (
+                <p className="text-sm text-destructive">
+                  记忆变更使此次分析失效；未发布旧结果，也不会自动重跑。可明确点击分析需求重新执行。
+                </p>
+              )}
+              {run.result?.outcome === "succeeded" && (
+                <Button
+                  variant="outline"
+                  disabled={busy || !memories?.canManage}
+                  onClick={() =>
+                    setMemoryDraft({
+                      text: run.result!.text.slice(0, 512),
+                      source: { kind: "result", runId: run.runId }
+                    })
+                  }
+                >
+                  从结果准备团队记忆（模拟内容须核实）
+                </Button>
+              )}
+              {run.memorySnapshot !== undefined && (
+                <div
+                  className="space-y-1 border-t pt-2 text-xs text-muted-foreground"
+                  data-testid="run-memory-snapshot"
+                >
+                  <p>
+                    {run.memorySnapshot === null
+                      ? "此次专家未启用记忆"
+                      : `此次使用记忆修订 ${run.memorySnapshot.revision} · ${run.memorySnapshot.memories.length}条`}
+                  </p>
+                  {run.memorySnapshot?.memories.map((m) => (
+                    <p key={m.id} className="break-all">
+                      v{m.version} · {m.text} · {memorySourceLabel(m.source)}
+                    </p>
+                  ))}
+                </div>
+              )}
               {["queued", "waiting_node"].includes(run.status) && (
                 <Button
                   variant="outline"
@@ -364,6 +476,15 @@ export function PartnerDevPanel(): React.JSX.Element {
             </div>
           )}
         </section>
+        <GroupMemoryPanel
+          connected={connected}
+          groupId={status?.groupId ?? null}
+          busy={busy}
+          memories={memories}
+          draft={memoryDraft}
+          onChange={setMemories}
+          action={action}
+        />
       </div>
     </div>
   )

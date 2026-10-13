@@ -13,12 +13,13 @@ import com.zaxxer.hikari.HikariDataSource;
 import org.flywaydb.core.api.configuration.FluentConfiguration;
 
 class PersistenceBoundaryTest {
-    @Test void taskFactsProbeCoversEveryV5TableWithItsActualPrimaryKeyOrder() throws Exception {
+    @Test void taskFactsProbeCoversEveryV6TableWithItsActualPrimaryKeyOrder() throws Exception {
         java.lang.reflect.Field tables = TaskDatabaseProbe.class.getDeclaredField("TABLES"), order = TaskDatabaseProbe.class.getDeclaredField("ORDER");
         tables.setAccessible(true); order.setAccessible(true);
         String[] names = (String[])tables.get(null), keys = (String[])order.get(null);
-        assertEquals(17, names.length); assertEquals(names.length, keys.length);
-        assertEquals("requirement_run_results", names[names.length - 1]); assertEquals("space_id,run_id", keys[keys.length - 1]);
+        assertEquals(21, names.length); assertEquals(names.length, keys.length);
+        assertEquals("requirement_run_results", names[16]); assertEquals("space_id,run_id", keys[16]);
+        assertEquals("requirement_run_memory_snapshots", names[names.length - 1]); assertEquals("space_id,run_id", keys[keys.length - 1]);
     }
     static final String PASSWORD = String.join("", Collections.nCopies(64, "a"));
     static ObjectNode input() { return new ObjectMapper().createObjectNode().put("mode", "local-dev").put("host", "127.0.0.1").put("port", 32881).put("schema", "devclaw").put("user", "devclaw_app").put("password", PASSWORD); }

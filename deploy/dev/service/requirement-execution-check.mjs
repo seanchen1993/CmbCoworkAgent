@@ -60,7 +60,7 @@ async function withDatabase(callback, signal, upgrade = false) {
     console.log(JSON.stringify({ stage: "execution-database-ready", ...(await startTestDatabase(entry, signal)) }))
     const previous = upgrade ? await probe(runtime, entry, "seed-v4", {}, signal) : null
     const migration = await javaDatabase(runtime, entry, "migrate", { signal })
-    check(migration.exitCode === 0 && migration.proof.migrations === (upgrade ? 1 : 5))
+    check(migration.exitCode === 0 && migration.proof.migrations === (upgrade ? 2 : 6))
     const noop = await javaDatabase(runtime, entry, "migrate", { signal })
     check(noop.exitCode === 0 && noop.proof.migrations === 0)
     if (upgrade) check((await probe(runtime, entry, "verify-v4", { v4Facts: previous.v4Facts }, signal)).v4Preserved)

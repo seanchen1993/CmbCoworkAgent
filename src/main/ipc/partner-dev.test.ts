@@ -1,6 +1,13 @@
 import { beforeEach, expect, it, vi } from "vitest"
 import type { IpcMain, IpcMainInvokeEvent, BrowserWindow } from "electron"
-const mock = vi.hoisted(() => ({ getStatus: vi.fn(), sendMessage: vi.fn(), dialog: vi.fn() }))
+const mock = vi.hoisted(() => ({
+  getStatus: vi.fn(),
+  sendMessage: vi.fn(),
+  createMemory: vi.fn(),
+  updateMemory: vi.fn(),
+  disableMemory: vi.fn(),
+  dialog: vi.fn()
+}))
 vi.mock("electron", () => ({
   app: { getPath: () => "/unread-test-user-data" },
   BrowserWindow: class {},
@@ -22,6 +29,9 @@ vi.mock("../services/bot/partner-dev-controller", () => ({
   PartnerDevController: class {
     getStatus = mock.getStatus
     sendMessage = mock.sendMessage
+    createMemory = mock.createMemory
+    updateMemory = mock.updateMemory
+    disableMemory = mock.disableMemory
   }
 }))
 import { registerPartnerDevHandlers } from "./partner-dev"
@@ -52,11 +62,31 @@ beforeEach(() => {
 })
 const call = (name: string, ...args: unknown[]) =>
   handlers.get("partnerDev:" + name)!(event, ...args)
-it("registration alone does not read config, connect, or execute; 15 fixed handlers only", async () => {
-  expect(handlers.size).toBe(15)
+it("registration alone does not read config, connect, or execute; 20 fixed handlers only", async () => {
+  expect(handlers.size).toBe(20)
   expect(mock.getStatus).not.toHaveBeenCalled()
   expect(await call("getStatus")).toEqual({ configured: false })
   expect(mock.getStatus).toHaveBeenCalledTimes(1)
+})
+it("memory IPC has no arbitrary identities, paths, policies or actor-supplied author fields", async () => {
+  for (const extra of [
+    { groupId: "other" },
+    { spaceId: "B" },
+    { ownerId: "expert" },
+    { author: "owner" },
+    { url: "https://example.com" },
+    { memoryPolicy: "auto" }
+  ])
+    await expect(
+      call("createMemory", { text: "团队约定", source: { kind: "manual" }, ...extra })
+    ).rejects.toThrow("INVALID_PAYLOAD")
+  await expect(call("listMemories", { groupId: "other" })).rejects.toThrow("INVALID_PAYLOAD")
+  await expect(call("enableTeamMemory", { botId: "expert" })).rejects.toThrow("INVALID_PAYLOAD")
+  expect(mock.createMemory).not.toHaveBeenCalled()
+  mock.createMemory.mockResolvedValue({ revision: 1 })
+  expect(await call("createMemory", { text: "团队约定", source: { kind: "manual" } })).toEqual({
+    revision: 1
+  })
 })
 it.each(["other-window", "subframe", "missing-frame", "remote-frame", "remote-main-window"])(
   "rejects %s before privileged controller work",

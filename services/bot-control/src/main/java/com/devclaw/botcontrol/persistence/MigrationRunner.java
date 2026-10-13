@@ -13,6 +13,7 @@ public final class MigrationRunner {
     static final String NODE_SCRIPT = "V3__runtime_node_authorization.sql";
     static final String RUN_SCRIPT = "V4__requirement_run_queue.sql";
     static final String RESULT_SCRIPT = "V5__requirement_run_results.sql";
+    static final String MEMORY_SCRIPT = "V6__group_explicit_memory.sql";
     private final Flyway flyway;
     public MigrationRunner(DataSource source) { flyway = configuration(source).load(); }
     static FluentConfiguration configuration(DataSource source) {
@@ -21,7 +22,7 @@ public final class MigrationRunner {
             .cleanDisabled(true).cleanOnValidationError(false).baselineOnMigrate(false).createSchemas(false)
             .validateOnMigrate(true).validateMigrationNaming(true).failOnMissingLocations(true)
             // Pending source migrations are legitimate for explicit migrate;
-            // readiness additionally requires the exact five applied successes.
+            // readiness additionally requires the exact six applied successes.
             .ignorePendingMigrations(true).ignoreFutureMigrations(false)
             .ignoreMissingMigrations(false).ignoreIgnoredMigrations(false)
             .outOfOrder(false).placeholderReplacement(false)
@@ -35,8 +36,8 @@ public final class MigrationRunner {
         try {
             flyway.validate();
             MigrationInfo[] all = flyway.info().all();
-            if (all.length != 5) throw new IllegalStateException();
-            String[] scripts = {SCRIPT, TASK_SCRIPT, NODE_SCRIPT, RUN_SCRIPT, RESULT_SCRIPT};
+            if (all.length != 6) throw new IllegalStateException();
+            String[] scripts = {SCRIPT, TASK_SCRIPT, NODE_SCRIPT, RUN_SCRIPT, RESULT_SCRIPT, MEMORY_SCRIPT};
             for (int i = 0; i < scripts.length; i++) if (all[i].getVersion() == null || !String.valueOf(i + 1).equals(all[i].getVersion().getVersion()) ||
                 !scripts[i].equals(all[i].getScript()) || all[i].getChecksum() == null || all[i].getState() != MigrationState.SUCCESS) throw new IllegalStateException();
         } catch (RuntimeException e) { throw new DatabaseFailure(DatabaseFailure.Category.MIGRATION_INVALID); }

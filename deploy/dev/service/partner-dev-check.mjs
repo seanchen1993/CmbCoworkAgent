@@ -32,6 +32,9 @@ export async function partnerDevCheck(signal) {
     check((await call(descriptor, "/api/bot/local/v1/control", { operation: "identity" })).principalId === descriptor.ownerPrincipalId)
     check((await call(descriptor, "/api/bot/local/v1/node", { operation: "identity" }, true)).nodeId === descriptor.nodeId)
     const persisted = await call(descriptor, "/api/bot/v1/bots", { commandId: "persistent-bot", name: "Persistent partner fixture", maintainerIds: ["owner"], config: { description: "Persistent control DB proof", instructions: "Analyze only", knowledgeRefs: [], repositoryRefs: [], skillAllowlist: [], capabilityCeiling: ["requirements.analyze"], memoryPolicy: "disabled" } }, false, "POST", 201)
+    const group = await call(descriptor, "/api/bot/v1/groups", { commandId: "persistent-memory-group", name: "Persistent memory team", members: [{ principalId: "owner", role: "admin" }, { principalId: "business", role: "participant" }], bots: [{ botId: persisted.bot.id, botVersionId: persisted.botVersion.id, role: "specialist" }], limits: { maxRuns: 1, maxHandoffs: 1, maxTokens: 1000 } }, false, "POST", 201)
+    await call(descriptor, "/api/bot/local/v1/control", { operation: "createGroupMemory", groupId: group.group.id, commandId: "persistent-memory", text: "MYSQL_RESTART_MEMORY_SENTINEL", source: { kind: "manual" } })
+    const memories = await call(descriptor, "/api/bot/local/v1/control", { operation: "listGroupMemories", groupId: group.group.id })
     phase = "idempotent-start"; const duplicate = await partnerDevStart(entry, signal), status = await partnerDevStatus(entry)
     check(duplicate.pid === first.pid && duplicate.port === first.port && status.status === "running")
     phase = "stop-owned-process"; const stopped = await partnerDevStop(entry)
@@ -42,9 +45,10 @@ export async function partnerDevCheck(signal) {
     check(restarted.pid !== first.pid && restartedResources.containers[0].Id === container && restartedResources.volume.Name === volume)
     const restored = JSON.parse(await partnerPrivateFile(restarted.connectionFile)); check(restored.nodeToken === descriptor.nodeToken && restored.ownerToken === descriptor.ownerToken && (await call(restored, "/api/bot/local/v1/node", { operation: "identity" }, true)).ownerPrincipalId === "owner")
     check(isDeepStrictEqual(persisted, await call(restored, `/api/bot/v1/bots/${persisted.bot.id}`, null, false, "GET")))
+    check(isDeepStrictEqual(memories, await call(restored, "/api/bot/local/v1/control", { operation: "listGroupMemories", groupId: group.group.id })))
     await partnerDevStop(entry)
     for (const name of ["partner.json", "connection.json", "process.json", "server.log", "server-error.log"]) { const stat = await lstat(join(entry.dir, name)); check(stat.isFile() && !stat.isSymbolicLink() && stat.uid === process.getuid() && stat.nlink === 1 && (stat.mode & 0o777) === 0o600) }
-    return { status: "verified", explicitStartStop: true, realPartnerMain: true, separatePersistentControlDatabase: true, identicalDatabaseAndVolumeAcrossRestart: true, credentialsPreserved: true, privateConnectionWithoutDatabaseSecret: true }
+    return { status: "verified", explicitStartStop: true, realPartnerMain: true, separatePersistentControlDatabase: true, identicalDatabaseAndVolumeAcrossRestart: true, credentialsPreserved: true, privateConnectionWithoutDatabaseSecret: true, groupMemoryAcrossRestart: true }
   } finally {
     if (entry) { try { await partnerDevStop(entry) } finally { await cleanupPartnerTest(entry); console.log(JSON.stringify({ stage: "partner-dev-cleanup", project: entry.project, status: "removed", resources: "exact-test-only" })) } }
     check(isDeepStrictEqual(original, await httpDevProof())); console.log(JSON.stringify({ stage: "partner-dev-original", sameIdentityHealthy: true, credentialsRead: false }))

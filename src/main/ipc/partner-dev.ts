@@ -106,7 +106,9 @@ export function registerPartnerDevHandlers(
     enableNode: () => current.enableNode(),
     stopNode: () => current.stopNode(),
     authorizeTeam: () => current.authorizeTeam(),
-    revokeTeam: () => current.revokeTeam()
+    revokeTeam: () => current.revokeTeam(),
+    listMemories: () => current.listMemories(),
+    enableTeamMemory: () => current.enableTeamMemory()
   }))
     register(name, async (_event, args) => {
       none(args)
@@ -134,8 +136,29 @@ export function registerPartnerDevHandlers(
     return current.setWorkspace(path)
   })
   register("createTeam", async (_event, args) => {
-    const v = input(args, ["name", "instructions"])
-    return current.createTeam(v.name as string, v.instructions as string)
+    const hasPolicy =
+      args.length === 1 &&
+      !!args[0] &&
+      typeof args[0] === "object" &&
+      Object.hasOwn(args[0], "useMemory")
+    const v = input(args, ["name", "instructions", ...(hasPolicy ? ["useMemory"] : [])])
+    return current.createTeam(
+      v.name as string,
+      v.instructions as string,
+      hasPolicy ? (v.useMemory as boolean) : false
+    )
+  })
+  register("createMemory", async (_event, args) => {
+    const v = input(args, ["text", "source"])
+    return current.createMemory(v as unknown as Parameters<PartnerDevController["createMemory"]>[0])
+  })
+  register("updateMemory", async (_event, args) => {
+    const v = input(args, ["memoryId", "expectedVersion", "text", "source", "status"])
+    return current.updateMemory(v as unknown as Parameters<PartnerDevController["updateMemory"]>[0])
+  })
+  register("disableMemory", async (_event, args) => {
+    const v = input(args, ["memoryId", "expectedVersion"])
+    return current.disableMemory(v.memoryId as string, v.expectedVersion as number)
   })
   register("bindTeam", async (_event, args) => {
     const v = input(args, ["groupId"])

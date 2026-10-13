@@ -111,7 +111,10 @@ export class PartnerLocalWorker {
           this.finished.add(run.id)
         } catch (error) {
           const code = error instanceof Error ? error.message : ""
-          if (
+          if (code === "PARTNER_MEMORY_CHANGED") {
+            this.finished.add(run.id)
+            this.report("MEMORY_CHANGED")
+          } else if (
             ["PARTNER_EXECUTION_OUTCOME_UNKNOWN", "PARTNER_EXECUTION_LEASE_LOST"].includes(code)
           ) {
             this.finished.add(run.id)

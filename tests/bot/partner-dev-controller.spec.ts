@@ -1,5 +1,6 @@
 import assert from "node:assert/strict"
 import test from "node:test"
+import { createHash } from "node:crypto"
 import type {
   BotResult,
   CreateBotRequest,
@@ -114,6 +115,37 @@ async function setup() {
   await controller.createTeam("领域专家", "固定领域指令")
   return { controller, client, store, deps, stored: () => stored, executors: () => executors }
 }
+test("a pending disabled A7 team creation reuses its old fingerprint and commands after upgrade", async () => {
+  const f = await setup()
+  await f.controller.disconnect()
+  const input = { name: "领域专家", instructions: "固定领域指令" }
+  const config = f.stored()!
+  config.groupId = config.botId = config.botVersionId = null
+  config.pending = {
+    kind: "createTeam",
+    fingerprint:
+      "sha256:" +
+      createHash("sha256")
+        .update(JSON.stringify(["createTeam", input]))
+        .digest("hex"),
+    commandId: "old-a7-team",
+    deadline: new Date(Date.now() + 60000).toISOString()
+  }
+  await f.store.save(config)
+  const reopened = new PartnerDevController(f.deps)
+  try {
+    await reopened.connect()
+    await assert.rejects(reopened.createTeam(input.name, input.instructions, true), /INPUT_CHANGED/)
+    await reopened.createTeam(input.name, input.instructions, false)
+    assert.deepEqual(f.client.writes.slice(-2), [
+      { kind: "bot", command: "old-a7-team:bot" },
+      { kind: "group", command: "old-a7-team:group" }
+    ])
+    assert.equal(f.stored()?.pending, null)
+  } finally {
+    await reopened.disconnect()
+  }
+})
 test("explicit owner configuration is redacted and reload never connects or borrows a Thread", async () => {
   const f = await setup()
   try {

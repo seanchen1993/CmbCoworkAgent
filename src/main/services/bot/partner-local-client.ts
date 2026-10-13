@@ -5,11 +5,13 @@ import schemas from "../../../../contracts/bot/v1/schemas.json"
 import states from "../../../../contracts/bot/v1/state-transitions.json"
 import type {
   BotResult,
+  CreateBotVersionRequest,
   CreateBotRequest,
   CreateGroupRequest,
   Group,
   Task,
-  TaskMessageResult
+  TaskMessageResult,
+  UpdateGroupMembersRequest
 } from "../../../shared/bot/contracts.generated"
 import type {
   PartnerRequirementInput,
@@ -17,30 +19,25 @@ import type {
   PartnerRequirementRun,
   RequirementOutcome
 } from "./requirement-execution-types"
-import { validatePartnerRun } from "./requirement-execution-types"
+import { validatePartnerRun, samePartnerAttempt } from "./requirement-execution-types"
+import { PartnerLocalFault, partnerId, partnerObject } from "./partner-local-boundary"
+export { PartnerLocalFault, partnerId, partnerObject } from "./partner-local-boundary"
+import type {
+  GroupMemoryList,
+  GroupMemoryWrite,
+  GroupMemoryUpdate,
+  GroupMemoryReceipt,
+  GroupMemorySnapshot
+} from "../../../shared/bot/group-memory"
+import {
+  memorySource,
+  memoryText,
+  memoryVersion,
+  parseMemoryList,
+  parseMemoryReceipt,
+  parseMemorySnapshot
+} from "./group-memory-validation"
 
-const ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/
-export class PartnerLocalFault extends Error {
-  constructor(readonly code: string) {
-    super(code)
-  }
-}
-export function partnerId(value: unknown): string {
-  if (typeof value !== "string" || !ID.test(value) || /[\r\n]/.test(value))
-    throw new PartnerLocalFault("INVALID_PAYLOAD")
-  return value
-}
-export function partnerObject(value: unknown, keys: readonly string[]): Record<string, unknown> {
-  if (
-    !value ||
-    typeof value !== "object" ||
-    Array.isArray(value) ||
-    Object.keys(value).length !== keys.length ||
-    keys.some((k) => !Object.hasOwn(value, k))
-  )
-    throw new PartnerLocalFault("INVALID_PAYLOAD")
-  return value as Record<string, unknown>
-}
 export interface PartnerConnectionDescriptor {
   version: 1
   url: string
@@ -130,7 +127,7 @@ export class PartnerLocalClient {
   private call(
     path: string,
     role: "owner" | "business" | "node",
-    method: "GET" | "POST",
+    method: "GET" | "POST" | "PUT",
     body?: unknown
   ): Promise<unknown> {
     if (this.closed || this.requests.size >= 8)
@@ -290,7 +287,14 @@ export class PartnerLocalClient {
     run: PartnerRequirementRun
   ): Promise<{ run: PartnerRequirementRun; input: PartnerRequirementInput }> {
     const v = partnerObject(await this.node("start", this.attempt(run)), ["run", "input"]),
-      raw = partnerObject(v.input, ["bot", "botVersion", "group", "task", "messages"])
+      raw = partnerObject(v.input, [
+        "bot",
+        "botVersion",
+        "group",
+        "task",
+        "messages",
+        "memorySnapshot"
+      ])
     if (!Array.isArray(raw.messages) || raw.messages.length > 50)
       throw new PartnerLocalFault("INVALID_PAYLOAD")
     return {
@@ -300,7 +304,12 @@ export class PartnerLocalClient {
         botVersion: partnerSchema("BotVersion", raw.botVersion),
         group: partnerSchema("Group", raw.group),
         task: partnerSchema("Task", raw.task),
-        messages: raw.messages.map((m) => partnerSchema<TaskMessageResult>("TaskMessageResult", m))
+        messages: raw.messages.map((m) => partnerSchema<TaskMessageResult>("TaskMessageResult", m)),
+        memorySnapshot: parseMemorySnapshot(
+          raw.memorySnapshot,
+          this.descriptor.spaceId,
+          partnerId((raw.group as Group).id)
+        )
       }
     }
   }
@@ -434,6 +443,118 @@ export class PartnerLocalClient {
       )
     )
     return v.group
+  }
+  async getBot(botId: string): Promise<BotResult> {
+    return partnerSchema(
+      "BotResult",
+      await this.call(`/api/bot/v1/bots/${partnerId(botId)}`, "owner", "GET")
+    )
+  }
+  async createBotVersion(botId: string, body: CreateBotVersionRequest): Promise<BotResult> {
+    return partnerSchema(
+      "BotResult",
+      await this.call(
+        `/api/bot/v1/bots/${partnerId(botId)}/versions`,
+        "owner",
+        "POST",
+        partnerSchema("CreateBotVersionRequest", body)
+      )
+    )
+  }
+  async updateGroupMembers(groupId: string, body: UpdateGroupMembersRequest): Promise<Group> {
+    const v = partnerSchema<{ group: Group }>(
+      "GroupResult",
+      await this.call(
+        `/api/bot/v1/groups/${partnerId(groupId)}/members`,
+        "owner",
+        "PUT",
+        partnerSchema("UpdateGroupMembersRequest", body)
+      )
+    )
+    return v.group
+  }
+  async listGroupMemories(groupId: string): Promise<GroupMemoryList> {
+    return parseMemoryList(
+      await this.control("owner", "listGroupMemories", { groupId: partnerId(groupId) }),
+      this.descriptor.spaceId,
+      groupId
+    )
+  }
+  async createGroupMemory(
+    groupId: string,
+    input: GroupMemoryWrite,
+    commandId: string
+  ): Promise<GroupMemoryReceipt> {
+    return parseMemoryReceipt(
+      await this.control("owner", "createGroupMemory", {
+        groupId: partnerId(groupId),
+        commandId: partnerId(commandId),
+        text: memoryText(input.text),
+        source: memorySource(input.source)
+      }),
+      this.descriptor.spaceId,
+      groupId
+    )
+  }
+  async updateGroupMemory(
+    groupId: string,
+    input: GroupMemoryUpdate,
+    commandId: string
+  ): Promise<GroupMemoryReceipt> {
+    return parseMemoryReceipt(
+      await this.control("owner", "updateGroupMemory", {
+        groupId: partnerId(groupId),
+        commandId: partnerId(commandId),
+        memoryId: partnerId(input.memoryId),
+        expectedVersion: memoryVersion(input.expectedVersion),
+        text: memoryText(input.text),
+        source: memorySource(input.source),
+        status: input.status
+      }),
+      this.descriptor.spaceId,
+      groupId
+    )
+  }
+  async disableGroupMemory(
+    groupId: string,
+    memoryId: string,
+    expectedVersion: number,
+    commandId: string
+  ): Promise<GroupMemoryReceipt> {
+    return parseMemoryReceipt(
+      await this.control("owner", "disableGroupMemory", {
+        groupId: partnerId(groupId),
+        memoryId: partnerId(memoryId),
+        expectedVersion: memoryVersion(expectedVersion),
+        commandId: partnerId(commandId)
+      }),
+      this.descriptor.spaceId,
+      groupId
+    )
+  }
+  async inspectMemorySnapshot(runId: string, groupId: string): Promise<GroupMemorySnapshot | null> {
+    const v = partnerObject(
+      await this.control("business", "inspectMemorySnapshot", { runId: partnerId(runId) }),
+      ["memorySnapshot"]
+    )
+    return parseMemorySnapshot(v.memorySnapshot, this.descriptor.spaceId, groupId)
+  }
+  async memoryChanged(run: PartnerRequirementRun): Promise<boolean> {
+    const v = partnerObject(await this.node("inspect", { runId: partnerId(run.id) }), [
+      "run",
+      "result"
+    ])
+    const r = validatePartnerRun(v.run as PartnerRequirementRun),
+      result = this.result(v.result)
+    if (!samePartnerAttempt(r, run))
+      throw new PartnerLocalFault("FORBIDDEN")
+    return (
+      r.status === "failed" &&
+      result?.runId === run.id &&
+      result.attemptId === run.attemptId &&
+      result.outcome === "failed" &&
+      result.text === "MEMORY_CHANGED"
+    )
   }
   async getGroup(groupId: string): Promise<Group> {
     return partnerSchema<{ group: Group }>(

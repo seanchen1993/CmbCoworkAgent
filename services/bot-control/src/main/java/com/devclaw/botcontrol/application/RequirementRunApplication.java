@@ -132,11 +132,13 @@ public final class RequirementRunApplication {
     public static final class Input {
         public final Bot bot; public final BotVersion botVersion; public final Group group; public final Task task;
         public final java.util.List<TaskMessageResult> messages;
+        public final GroupMemoryValues.Snapshot memorySnapshot;
         private Input(Connection c, JdbcApplicationStore db, Run run) throws SQLException {
             bot=db.bot(run.botId);botVersion=db.version(run.botVersionId);group=db.group(run.groupId);task=new JdbcTaskStore(c,run.spaceId).task(run.taskId);
             if(bot==null||botVersion==null||group==null||task==null)throw JdbcApplicationStore.corrupt();
             if(task.version!=run.taskVersion)throw new ApplicationFault(ErrorCode.INPUT_CHANGED);
             messages=new JdbcTaskStore(c,run.spaceId).requirementMessages(task,run.botId);
+            memorySnapshot=new JdbcGroupMemoryStore(c,run.spaceId).freeze(run,botVersion.config.memoryPolicy.wire());
         }
     }
     public static final class Started {
@@ -181,19 +183,24 @@ public final class RequirementRunApplication {
                 Instant now=db.now().toInstant();if(!now.isBefore(old.leaseExpiresAt)||!now.isBefore(old.deadline))return runs.expiredClaim(old,now);
                 RequirementDispatch d=dispatch(c,db,old);now=db.now().toInstant();
                 if(!now.isBefore(old.leaseExpiresAt)||!now.isBefore(old.deadline))return runs.expiredClaim(old,now);
+                boolean memoryChanged=new JdbcGroupMemoryStore(c,old.spaceId).changed(old);now=db.now().toInstant();
+                if(!now.isBefore(old.leaseExpiresAt)||!now.isBefore(old.deadline))return runs.expiredClaim(old,now);
                 if(!now.isBefore(d.validUntil))throw new ApplicationFault(ErrorCode.NODE_OFFLINE);
+                if(memoryChanged){
+                    runs.settle(old,now,"failed","MEMORY_CHANGED");return runs.run(old.id);
+                }
                 Instant expiry=now.plusMillis(LEASE_MILLIS);
                 if(expiry.isAfter(d.validUntil))expiry=d.validUntil;if(expiry.isAfter(old.deadline))expiry=old.deadline;
                 return runs.renew(old,now,expiry);
-            });if(result.status==Status.OUTCOME_UNKNOWN)throw new ApplicationFault(ErrorCode.OUTCOME_UNKNOWN);return result;
+            });if(result.status==Status.OUTCOME_UNKNOWN)throw new ApplicationFault(ErrorCode.OUTCOME_UNKNOWN);if(result.status==Status.FAILED)throw new ApplicationFault(ErrorCode.INPUT_CHANGED);return result;
         });
     }
     private static void resultText(String outcome,String text){
         if(!"succeeded".equals(outcome)&&!"failed".equals(outcome)||text==null||text.trim().isEmpty()||text.codePointCount(0,text.length())>16384)throw new ApplicationFault(ErrorCode.INVALID_PAYLOAD);
         for(int i=0;i<text.length();i++){char ch=text.charAt(i);if(Character.isHighSurrogate(ch)){if(++i>=text.length()||!Character.isLowSurrogate(text.charAt(i)))throw new ApplicationFault(ErrorCode.INVALID_PAYLOAD);}else if(Character.isLowSurrogate(ch)||ch==0)throw new ApplicationFault(ErrorCode.INVALID_PAYLOAD);}
-        if("failed".equals(outcome)&&!java.util.Arrays.asList("EXECUTION_FAILED","CANCELLED","LEASE_LOST","EMPTY_OUTPUT","TOOL_CALL_REJECTED").contains(text))throw new ApplicationFault(ErrorCode.INVALID_PAYLOAD);
+        if("failed".equals(outcome)&&!java.util.Arrays.asList("EXECUTION_FAILED","CANCELLED","LEASE_LOST","EMPTY_OUTPUT","TOOL_CALL_REJECTED","MEMORY_CHANGED").contains(text))throw new ApplicationFault(ErrorCode.INVALID_PAYLOAD);
     }
-    private static void storedResult(Run run,Result result){
+    static void storedResult(Run run,Result result){
         if(result==null){if(run.status==Status.SUCCEEDED||run.status==Status.FAILED)throw JdbcApplicationStore.corrupt();return;}
         if(!run.id.equals(result.runId)||run.attemptId==null||!run.attemptId.equals(result.attemptId)||!run.status.name().equalsIgnoreCase(result.outcome)||
             !run.updatedAt.equals(result.settledAt)||result.settledAt.isBefore(run.createdAt)||!result.settledAt.isBefore(run.leaseExpiresAt)||!result.settledAt.isBefore(run.deadline))throw JdbcApplicationStore.corrupt();
@@ -210,9 +217,12 @@ public final class RequirementRunApplication {
                 Instant now=db.now().toInstant();if(!now.isBefore(old.leaseExpiresAt)||!now.isBefore(old.deadline)){runs.expiredClaim(old,now);return null;}
                 RequirementDispatch d=dispatch(c,db,old);now=db.now().toInstant();
                 if(!now.isBefore(old.leaseExpiresAt)||!now.isBefore(old.deadline)){runs.expiredClaim(old,now);return null;}
+                boolean memoryChanged=new JdbcGroupMemoryStore(c,old.spaceId).changed(old);now=db.now().toInstant();
+                if(!now.isBefore(old.leaseExpiresAt)||!now.isBefore(old.deadline)){runs.expiredClaim(old,now);return null;}
                 if(!now.isBefore(d.validUntil))throw new ApplicationFault(ErrorCode.NODE_OFFLINE);
+                if(memoryChanged)return runs.settle(old,now,"failed","MEMORY_CHANGED");
                 return runs.settle(old,now,outcome,text);
-            });if(result==null)throw new ApplicationFault(ErrorCode.OUTCOME_UNKNOWN);return result;
+            });if(result==null)throw new ApplicationFault(ErrorCode.OUTCOME_UNKNOWN);if("failed".equals(result.outcome)&&"MEMORY_CHANGED".equals(result.text)&&!("failed".equals(outcome)&&"MEMORY_CHANGED".equals(text)))throw new ApplicationFault(ErrorCode.INPUT_CHANGED);return result;
         });
     }
     public Result getRequirementResult(TrustedContext reader,String runId){

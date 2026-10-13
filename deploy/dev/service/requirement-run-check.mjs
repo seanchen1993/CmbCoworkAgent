@@ -142,7 +142,7 @@ export async function requirementRunCheck(signal) {
           fixture = { ...selectFixture(seed), v3Facts: seed.v3Facts, migrations: 3 }
         }
         const migration = await javaDatabase(runtime, entry, "migrate", { signal })
-        check(migration.exitCode === 0 && migration.proof.migrations === (iteration === 1 ? 5 : 2))
+        check(migration.exitCode === 0 && migration.proof.migrations === (iteration === 1 ? 6 : 3))
         const noop = await javaDatabase(runtime, entry, "migrate", { signal })
         check(noop.exitCode === 0 && noop.proof.migrations === 0)
         const exercised = await requirementRunProbe(runtime, entry, "exercise", fixture, signal)
@@ -190,7 +190,7 @@ export async function requirementRunCheck(signal) {
             project: entry.project,
             denials: exercised.denials,
             emptyOrActualV3Upgrade:
-              iteration === 1 ? "empty-V1-V2-V3-V4" : "all-V3-bytes-and-history-preserved",
+              iteration === 1 ? "empty-V1-V2-V3-V4-V5-V6" : "all-V3-bytes-and-history-preserved",
             designatedOnly: true,
             authenticatedNodeAdmission: true,
             credentialDenials: exercised.credentialDenials,

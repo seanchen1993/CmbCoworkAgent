@@ -135,7 +135,7 @@ export async function runtimeNodeCheck(signal) {
           fixture = { ...selectFixture(seed), v2Facts: seed.v2Facts, migrations: seed.migrations }
         }
         const migration = await javaDatabase(runtime, entry, "migrate", { signal })
-        check(migration.exitCode === 0 && migration.proof.migrations === (iteration === 1 ? 5 : 3))
+        check(migration.exitCode === 0 && migration.proof.migrations === (iteration === 1 ? 6 : 4))
         const noop = await javaDatabase(runtime, entry, "migrate", { signal })
         check(noop.exitCode === 0 && noop.proof.migrations === 0)
         const exercised = await runtimeNodeProbe(runtime, entry, "exercise", fixture, signal)
@@ -171,7 +171,7 @@ export async function runtimeNodeCheck(signal) {
             iteration,
             project: entry.project,
             emptyOrV2Upgrade:
-              iteration === 1 ? "empty-V1-V2-V3-V4" : "actual-V2-bytes-and-history-preserved",
+              iteration === 1 ? "empty-V1-V2-V3-V4-V5-V6" : "actual-V2-bytes-and-history-preserved",
             denials: exercised.denials,
             designatedNodeOnly: true,
             staleHeartbeatWait: true,
