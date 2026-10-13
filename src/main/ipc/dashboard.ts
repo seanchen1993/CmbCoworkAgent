@@ -89,8 +89,14 @@ import {
 } from "./dashboard-knowledge-overview"
 import type {
   KnowledgeAccumulationData,
-  KnowledgeProjectStats
+  KnowledgeProjectStats,
+  KnowledgeRecentConstraintFiles
 } from "../../shared/dashboard-knowledge-overview"
+import {
+  fetchRecentConstraintFiles,
+  resolveRecentConstraintFields,
+  type RecentConstraintFields
+} from "./dashboard-recent-constraint-files"
 import { countDevAssociatedFeatures, countDevStageConversations } from "./project-mode-metrics"
 import {
   matchesProjectModeCreatedAtRange,
@@ -318,6 +324,7 @@ async function esQuery(
     timeoutMs?: number
     outputByteLimit?: number
     projection?: DashboardEsProjection
+    operation?: "search" | "field_caps"
   }
 ): Promise<unknown> {
   const nodes = getEsNodes()
@@ -337,7 +344,7 @@ async function esQuery(
   const orderedNodes = nodes.map((_, offset) => nodes[(startIdx + offset) % nodes.length])
   nodeIndex = (startIdx + 1) % nodes.length
   const signal = getDashboardRequestSignal()
-  const path = `/${index}/_search`
+  const path = `/${index}/${options?.operation === "field_caps" ? "_field_caps" : "_search"}`
   const bodyText = JSON.stringify(body)
 
   try {
@@ -14249,6 +14256,51 @@ async function fetchKnowledgeOverviewProjects(
   return parseKnowledgeProjectStats(snapshot, reads)
 }
 
+const recentConstraintFieldCache = new Map<
+  string,
+  { expiresAt: number; fields: RecentConstraintFields }
+>()
+
+async function fetchKnowledgeRecentConstraintFiles(
+  opts: OrgFilterOptions | undefined
+): Promise<KnowledgeRecentConstraintFiles> {
+  const access = requireDashboardProjectModeAccess()
+  const orgFilter = buildProjectModeOrgFilter(opts, access)
+  const index = getEsIndex("event")
+  const cacheKey = JSON.stringify([getEsNodes(), index])
+  let fields = recentConstraintFieldCache.get(cacheKey)
+  if (!fields || fields.expiresAt <= Date.now()) {
+    const caps = await esQuery(
+      index,
+      {
+        fields: [
+          "properties.constraintFiles",
+          "properties.constraintFiles.keyword",
+          "properties.pluginId",
+          "properties.pluginId.keyword",
+          "properties.pluginName",
+          "properties.pluginName.keyword",
+          "properties.harnessAdapterName",
+          "properties.harnessAdapterName.keyword",
+          "properties.lastReadAt"
+        ]
+      },
+      { operation: "field_caps" }
+    )
+    fields = { expiresAt: Date.now() + 5 * 60_000, fields: resolveRecentConstraintFields(caps) }
+    recentConstraintFieldCache.set(cacheKey, fields)
+    while (recentConstraintFieldCache.size > 8) {
+      recentConstraintFieldCache.delete(recentConstraintFieldCache.keys().next().value!)
+    }
+  }
+  return fetchRecentConstraintFiles(
+    fields.fields,
+    orgFilter ? [orgFilter] : [],
+    (body) => esQuery(index, body),
+    getDashboardRequestSignal()
+  )
+}
+
 async function fetchKnowledgeOverviewAccumulation(
   opts: OrgFilterOptions | undefined
 ): Promise<KnowledgeAccumulationData> {
@@ -15594,6 +15646,22 @@ export function registerDashboardHandlers(_ipcMain: typeof ipcMain): void {
         return { success: true, data }
       } catch (e) {
         logDashboardRequestError("knowledgeProjectStats", e)
+        return { success: false, error: e instanceof Error ? e.message : String(e) }
+      }
+    }
+  )
+
+  registerLatestDashboardHandler(
+    _ipcMain,
+    "dashboard:knowledgeRecentConstraintFiles",
+    async (_, opts: OrgFilterOptions | undefined) => {
+      try {
+        const data: KnowledgeRecentConstraintFiles = import.meta.env.DEV
+          ? { fileCount: 286, complete: true }
+          : await fetchKnowledgeRecentConstraintFiles(opts)
+        return { success: true, data }
+      } catch (e) {
+        logDashboardRequestError("knowledgeRecentConstraintFiles", e)
         return { success: false, error: e instanceof Error ? e.message : String(e) }
       }
     }

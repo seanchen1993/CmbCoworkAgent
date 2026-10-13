@@ -28,3 +28,9 @@ export interface KnowledgeProjectStats {
   readProjectCount: number
   successfulReadCount: number
 }
+
+export interface KnowledgeRecentConstraintFiles {
+  fileCount: number
+  /** False when old records have missing/ambiguous file identity or truncated lists. */
+  complete: boolean
+}
