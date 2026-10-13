@@ -10,6 +10,7 @@ import {
 } from "react"
 import { ArrowLeft, Loader2, Workflow } from "lucide-react"
 import { MessageBubble } from "./MessageBubble"
+import { SubagentSessionExportButton } from "./SubagentSessionExportButton"
 import { HookLogChip, HookLogModal } from "./HookLogViews"
 import { ScrollArea } from "@/components/ui/scroll-area"
 import { Button } from "@/components/ui/button"
@@ -1323,6 +1324,13 @@ export function WorkerStreamPanel(): React.JSX.Element {
             </span>
           </div>
         </div>
+        <SubagentSessionExportButton
+          target={{
+            kind: "worker",
+            threadId: workerFocusView.threadId,
+            workerThreadId: workerFocusView.workerThreadId
+          }}
+        />
         <span
           className={cn(
             "shrink-0 rounded-full border px-2 py-0.5 text-[11px] leading-none",

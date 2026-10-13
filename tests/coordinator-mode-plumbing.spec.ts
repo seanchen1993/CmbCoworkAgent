@@ -3350,8 +3350,8 @@ async function testRuntimeKeepsNormalAndCoordinatorSeparate(): Promise<void> {
   )
   assertIncludes(
     runtime,
-    "callbacks: [],\n        signal: workerInput.abortSignal",
-    "async worker stream clears inherited callbacks before listening to background output"
+    "callbacks: subagentSessionCallbacks([]),\n        signal: workerInput.abortSignal",
+    "async worker stream uses only session capture callbacks without inherited callbacks"
   )
   assertSourceOrder(
     runtime,

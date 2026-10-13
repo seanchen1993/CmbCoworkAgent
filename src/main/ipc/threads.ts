@@ -4039,7 +4039,7 @@ export function registerThreadHandlers(ipcMain: IpcMain): void {
       if (!row) return { success: false, error: "Thread not found" }
       if (
         target &&
-        (target.threadId !== threadId || !["multi", "workflow"].includes(target.kind))
+        (target.threadId !== threadId || !["multi", "workflow", "worker"].includes(target.kind))
       ) {
         return { success: false, error: "无效的子代理导出目标" }
       }

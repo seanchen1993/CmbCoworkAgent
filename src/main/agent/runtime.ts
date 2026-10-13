@@ -6013,6 +6013,18 @@ The workspace root is: ${fileRoot}`
   }
 
   const coordinatorWorkerRunner: CoordinatorWorkerRunner = async (workerInput) => {
+    return withSubagentSessionCapture(
+      {
+        kind: "worker",
+        threadId: workerInput.parentThreadId,
+        workerThreadId: workerInput.workerThreadId
+      },
+      workerInput.description,
+      () => runCoordinatorWorkerTurn(workerInput)
+    )
+  }
+
+  const runCoordinatorWorkerTurn: CoordinatorWorkerRunner = async (workerInput) => {
     const workerActionStationarityTurnId = `${workerInput.workerThreadId}:turn:${workerInput.workerTurn}`
     const workerSubagent = buildCoordinatorWorkerSubagents(
       coordinatorWorkerProjectInstructions || undefined,
@@ -6234,7 +6246,7 @@ Use the same worker thread context for follow-up instructions. ${scratchpadGuida
         : undefined
       const streamConfig = {
         configurable: { thread_id: workerInput.workerThreadId },
-        callbacks: [],
+        callbacks: subagentSessionCallbacks([]),
         signal: workerInput.abortSignal,
         streamMode: ["messages", "values"] as ("messages" | "values")[],
         recursionLimit: getAgentGraphRecursionLimit()
