@@ -1,6 +1,7 @@
 import { createStageUsageMiddleware } from "./trace/stage-usage-middleware"
 import { randomUUID } from "crypto"
 import { TurnTraceRecorder } from "./trace/turn-trace-recorder"
+import { validateWorkspaceDirectory } from "../services/workspace-validation"
 /* eslint-disable @typescript-eslint/no-unused-vars */
 // Runtime: agent lifecycle and middleware orchestration
 import {
@@ -1481,6 +1482,7 @@ export function createScopedMcpCapabilityService(
         pluginWorkspace: baseContext.pluginWorkspace,
         featureId: baseContext.featureId,
         harnessProjectId: baseContext.harnessProjectId,
+        harnessAdapterId: baseContext.harnessAdapterId,
         harnessAdapterName: baseContext.harnessAdapterName,
         harnessAdapterVersion: baseContext.harnessAdapterVersion,
         harnessNodeName: baseContext.harnessNodeName,
@@ -2906,7 +2908,7 @@ export function createDeepAgent(params: Record<string, any> = {}): ReactAgent<an
   // common exit so general-purpose, registry, and custom string-prompt agents
   // receive the same guidance exactly once. Opaque Runnable agents own their
   // prompt assembly and cannot be safely rewritten here.
-  const availableSubagents = unresolvedSubagents.map((subagent: any) => {
+  const availableSubagents = unresolvedSubagents.map((subagent) => {
     if (
       Runnable.isRunnable(subagent) ||
       !subagent ||
@@ -4696,6 +4698,10 @@ export interface RuntimeInteractionWaitHooks {
 export type AgentRuntime = ReturnType<typeof createAgent>
 
 export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Promise<DeepAgent> {
+  // Old sessions can retain workspace paths from another machine or deleted directories.
+  await validateWorkspaceDirectory(options.workspacePath)
+  options.abortSignal?.throwIfAborted()
+
   // Snapshot once per runtime. Nested runtimes inherit this preference, NOT the
   // parent's role-filtered effective value. Rebuilt top-level runtimes read anew.
   const toolStrategy = normalizeAgentToolStrategy(options.toolStrategy ?? getAgentToolStrategy())

@@ -13,6 +13,7 @@ import {
   Plug,
   Puzzle,
   Sparkles,
+  Webhook,
   Shield,
   Cpu,
   CircleUser,

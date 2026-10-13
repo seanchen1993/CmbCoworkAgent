@@ -8466,10 +8466,7 @@ function ProjectFeatureSidebar({
                                       disabled={creatingSession}
                                       onClick={(event) => {
                                         event.stopPropagation()
-                                        void onCreateSession(
-                                          group.project,
-                                          featureGroup.slug
-                                        )
+                                        void onCreateSession(group.project, featureGroup.slug)
                                       }}
                                     >
                                       {creatingSession ? (
