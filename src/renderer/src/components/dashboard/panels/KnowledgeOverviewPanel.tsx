@@ -14,7 +14,8 @@ import { Cell, Pie, PieChart, ResponsiveContainer, Tooltip as ChartTooltip } fro
 import type {
   KnowledgeAccumulationData,
   KnowledgeDistributionItem,
-  KnowledgeProjectStats
+  KnowledgeProjectStats,
+  KnowledgeRecentConstraintFiles
 } from "../../../../../shared/dashboard-knowledge-overview"
 import type {
   DashboardKnowledgeCommitRate,
@@ -184,6 +185,9 @@ export function KnowledgeOverviewPanel({
   projects,
   projectsLoading,
   projectsError,
+  recentConstraintFiles,
+  recentConstraintFilesLoading,
+  recentConstraintFilesError,
   rate,
   rateLoading,
   rateError
@@ -194,6 +198,9 @@ export function KnowledgeOverviewPanel({
   projects: KnowledgeProjectStats | null
   projectsLoading: boolean
   projectsError: string | null
+  recentConstraintFiles: KnowledgeRecentConstraintFiles | null
+  recentConstraintFilesLoading: boolean
+  recentConstraintFilesError: string | null
   rate: DashboardKnowledgeCommitRate | null
   rateLoading: boolean
   rateError: string | null
@@ -214,14 +221,14 @@ export function KnowledgeOverviewPanel({
       <section className="space-y-3">
         <div className="flex items-center gap-1.5 text-sm font-semibold">
           项目系统约束阅读情况
-          <InfoHint content="项目数和加载情况按当前项目状态统计；读取情况按所选日期统计。" />
+          <InfoHint content="项目数和加载情况按当前项目状态统计；读取项目数和次数按所选日期统计；近期活跃文件固定统计近14天。" />
         </div>
         {projectsError && (
           <div role="alert" className="text-xs text-destructive">
             {projectsError}
           </div>
         )}
-        <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-4">
+        <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-5">
           <StatCard
             label="项目总数"
             value={number(projects?.projectCount)}
@@ -252,6 +259,22 @@ export function KnowledgeOverviewPanel({
             icon={BookOpen}
             color="bg-violet-600"
             hint="所选日期内成功读取系统约束的次数。"
+          />
+          <StatCard
+            label="近期活跃读取约束文件数"
+            value={
+              recentConstraintFilesLoading || recentConstraintFilesError || !recentConstraintFiles
+                ? "—"
+                : `${recentConstraintFiles.complete ? "" : "≥"}${number(recentConstraintFiles.fileCount)}`
+            }
+            sub={
+              recentConstraintFilesLoading
+                ? "加载中…"
+                : (recentConstraintFilesError ?? "个 · 近14天")
+            }
+            icon={FileText}
+            color="bg-amber-500"
+            hint={`按近14天有效读取记录去重统计，同一插件的同一文件只计一次；不随日期筛选变化。${recentConstraintFiles && !recentConstraintFiles.complete ? "部分旧记录信息不完整，显示已确认的文件数。" : ""}`}
           />
         </div>
       </section>

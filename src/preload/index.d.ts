@@ -1,6 +1,7 @@
 import type {
   KnowledgeAccumulationData,
-  KnowledgeProjectStats
+  KnowledgeProjectStats,
+  KnowledgeRecentConstraintFiles
 } from "../shared/dashboard-knowledge-overview"
 import type { ProjectAttentionSortKey } from "../shared/project-attention"
 import type {
@@ -2713,6 +2714,14 @@ interface CustomAPI {
     ) => Promise<{
       success: boolean
       data?: KnowledgeProjectStats
+      error?: string
+      cancelled?: boolean
+    }>
+    knowledgeRecentConstraintFiles: (opts?: {
+      upperOrgLv1?: string | string[] | null
+    }) => Promise<{
+      success: boolean
+      data?: KnowledgeRecentConstraintFiles
       error?: string
       cancelled?: boolean
     }>

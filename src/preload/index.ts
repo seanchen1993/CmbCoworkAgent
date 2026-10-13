@@ -1,6 +1,7 @@
 import type {
   KnowledgeAccumulationData,
-  KnowledgeProjectStats
+  KnowledgeProjectStats,
+  KnowledgeRecentConstraintFiles
 } from "../shared/dashboard-knowledge-overview"
 import type { EfficiencyPluginFilter } from "../shared/dashboard-efficiency-compute"
 import type { DashboardThreadTraceScope } from "../shared/dashboard-thread-trace-scope"
@@ -3998,6 +3999,14 @@ const api = {
       error?: string
       cancelled?: boolean
     }> => ipcRenderer.invoke("dashboard:knowledgeProjectStats", range, opts),
+    knowledgeRecentConstraintFiles: (opts?: {
+      upperOrgLv1?: string | string[] | null
+    }): Promise<{
+      success: boolean
+      data?: KnowledgeRecentConstraintFiles
+      error?: string
+      cancelled?: boolean
+    }> => ipcRenderer.invoke("dashboard:knowledgeRecentConstraintFiles", opts),
     knowledgeCommitRate: (
       range: { from: string; to: string },
       opts?: { upperOrgLv1?: string | string[] | null }
