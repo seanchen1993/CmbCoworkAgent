@@ -1,5 +1,17 @@
 # DevClaw Bot 当前交接点
 
+**2026-10-13 最终出口：R01-A8 accepted，源代码f1067cc3，全部句柄闭合。** Group显式团队记忆/MySQL5.7+JDK8无FK/当前成员读admin写/Task-result受限来源/手工编辑确认与停用/独立revision与持久Run快照/在途变更failed-MEMORY_CHANGED释放容量/不自动重跑/App维护及不可变专家版本明确采用已交付。原个人Runtime/机器人独立，模拟模型零工具、无自动总结或跨团队学习。
+
+root实际读diff、独立首轮49main+23test新编及最终J2 23test重编，67JUnit/1884parity0/class52/34libs；93App、58service、10IPC、F03全24、main+affectedtest/web类型零、全Appbuild、真实ReactChromiumfakeIPC及最终91341实际JavaHTTP/MySQL/AppWorker/SQLite/DeepAgent fake4tools0通过。26816真实V5upgrade42/empty41权限-source-CAS-故障-快照-失效-capacity-disabled-expiredunknown-budget-reopen全部过，目录历史两库、持久Java+MySQL重启、旧Partner25回归通过。新jar76e6447e；验收reviews/R01-A8-acceptance.md，使用local-partner-app.md。
+
+终末a8013c无Java，59f87a仅原3sameIDhealthy/3卷/devnetwork/runtimeonlydev，临时容器/网络/卷/目录0，默认Partner未创建。原MySQL曾OOM，在完整owner/volume核对后只重启原ID保留卷，当前回环33063（ES32877/S332876不变）；不删数据/读原秘密或扩VM。原15任务对象SHA0fbb3532保留，定时实际PAUSED，不push/deploy/intranet/付费。旧samehigh quotaerrored已确认停止；root按人类串行策略收尾，不创建替代代理或绕限。历史92097/18056原因仍未知，后续通过不等于原因证明，所有已知编译/fixture/环境失败均保留。
+
+此片没有待完成工作；等待用户下一范围，不自动真实模型/招乎/WSS/源码/云/自动记忆或后续路线。下方implementing/review_pending/ready/live为已闭合历史，不能据此重建代理或重播资源操作。
+
+**2026-10-12 当前：R01-A8 implementing，用户明确按Astra建议实施团队长期记忆。** 基线HEAD2f914995/源0a711b31，task R01-A8.md ready。仅Group显式共享记忆/MySQL权威存储/服务端当前成员与admin权限/受限Task-result来源/start持久快照与revision/保守在途失效及容量释放/App手工维护与版本显式采用；继续模拟模型、不跨团队学习、不自动总结/过期调度/真实模型招乎/源码/云/审批。旧A7 accepted不重做；下方等待下一人类授权是历史，不能覆盖本条。
+
+准确实施树为integration，不误在d12a。root App与同原gpt-6.1-sol/high a6_java_execution Java文件范围隔离（见task）；Java builder/DB首轮子代理独占，root不竞争。起点只有Astra报告未跟踪，原15任务对象保留；旧writer completed/进程空、专用daemon原三sameIDhealthy无test/Partner容器，实际定时PAUSED。普通调用允许，未购买/reset/换模型账号。私有DTO已冻结，暂无A8代码验收；具体下一步与命令记attempts/R01-A8-root.md，Java仅本人报告。主代理独占state/HANDOFF。完成此片不自动进入后续。
+
 **2026-10-12 最终出口：R01-A7 accepted，代码0a711b31。** 可操作本地模拟模型版：独立DevClaw伙伴页/主进程加密配置与三identity核对/明确工作区和单专家团队授权/常驻node单poll+heartbeat/stop等图清理/假招乎新任务及TASK澄清/明确分析与持久结果，薄接现有Java单体和DeepAgent，不替换旧机器人/个人Runtime。真实AppControllerWorker+JavaHTTP+MySQL+SQLite+DeepAgent fakeModel1/tools0/真实60s离线等待/取消/重开不重跑已过；62JUnit1884parity0/55serviceNode/71App9IPC/ReactChromium fakeIPC/main+test+web0/全Appbuild、新HTTP25、最终持久launcher、两库旧defaultHTTP均root独立通过。PIDexit-race只确认ESRCH修及4确定性测、V5旧test-only探针17表/实际PK排序修已复验，失败历史保留。
 
 所有句柄/测试资源精确闭合，child completed，原3sameIDhealthy/3卷/devnetwork保留，oldlocal e54d3fb0clean，原14accepted任务对象exact。默认持久Partner未创建/未自启动；用户按local-partner-app.md与npm dev:bot-partner明确启动，App重开默认不连接不执行，定时实际PAUSED。不push/deploy/intranet/真实模型/读已有APIkey/付费；生产WSS/真实招乎/附件源码/上传搜索/正式PRD审批/长期记忆/云/完整unknown恢复未交付。本轮里程碑完成，下一范围需人类明确，不自动派后续。下方implementing/review_pending/live为历史，不重复已闭合命令。
