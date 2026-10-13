@@ -16,6 +16,9 @@ const sessions = new Map<string, CapturedSession>()
 const context = new AsyncLocalStorage<{ key: string; session: CapturedSession }>()
 
 export function subagentExportKey(target: SubagentExportTarget): string {
+  if (target.kind === "worker") {
+    return JSON.stringify([target.kind, target.threadId, target.workerThreadId])
+  }
   return JSON.stringify(
     target.kind === "multi"
       ? [target.kind, target.threadId, target.subagentId]
@@ -40,13 +43,14 @@ export function withSubagentSessionCapture<T>(
 ): T {
   const key = subagentExportKey(target)
   const timestamp = now()
-  const session: CapturedSession = {
+  const session: CapturedSession = (target.kind === "worker" ? sessions.get(key) : undefined) ?? {
     title,
     createdAt: timestamp,
     updatedAt: timestamp,
     messages: new Map(),
     rawApiCall: ""
   }
+  session.updatedAt = timestamp
   sessions.delete(key)
   sessions.set(key, session)
   while (sessions.size > 10) {
