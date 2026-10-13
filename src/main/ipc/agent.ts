@@ -87,6 +87,7 @@ import {
   appendThreadMessageTextDelta,
   flushStrict,
   getThreadCore,
+  isFirstThreadUserMessage,
   getThreadMessageIdentityContext,
   getThreadMessageProviderOccurrencesBeforeUser,
   getThreadMessagesByIds,
@@ -6525,6 +6526,12 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           rawMessage: rootUserPrompt,
           requestedModelId: modelId,
           options: {
+            // The visible user message is already persisted at this point.
+            // Read only indexed message IDs, not the full conversation body.
+            isFirstProjectTurn: Boolean(
+              harnessFeatureBinding && isFirstThreadUserMessage(threadId, userMessageId)
+            ),
+            hasExplicitSkill: Boolean(runExecutionContext.trustedExplicitSkill),
             triggerSource: isInternalNotificationTrace
               ? INTERNAL_NOTIFICATION_TRIGGER_SOURCE
               : "chat",

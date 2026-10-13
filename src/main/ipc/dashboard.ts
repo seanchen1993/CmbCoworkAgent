@@ -7,6 +7,15 @@ import {
   readCompleteAwardAggregation
 } from "./dashboard-awards-skill"
 import { buildSkillUsageMatchFilter } from "./dashboard-skill-usage"
+import {
+  compareProjectAttentionValues,
+  isProjectAttentionSortKey,
+  type ProjectAttentionSortKey
+} from "../../shared/project-attention"
+import {
+  fetchProjectAttentionRanking,
+  ProjectAttentionRankingCache
+} from "./project-attention-ranking"
 import { isNestedMappingError } from "./dashboard-es-nested-mapping"
 import { queryWithToolUsageMappingFallback } from "./dashboard-tool-usage-query"
 import {
@@ -11418,6 +11427,8 @@ interface ProjectModeProjectView {
   conversationCount: number
   /** Forward-only count of main-Agent turns matching the technical-detail heuristic. */
   suspectedTechnicalDetailConversationCount?: number
+  /** The selected ranking value, kept consistent with its complete ranking snapshot. */
+  attentionMetric?: number | null
   /** Conversations whose current workflow node belongs to the Dev group. */
   devStageConversationCount: number
   /** Distinct bound Features that contributed a Dev-stage conversation in the range. */
@@ -11445,6 +11456,7 @@ type ProjectModeProjectStatus = "active" | "archived"
  *   for the「进行中」(active) tab (archived projects accumulate; active are few).
  */
 type ProjectModeProjectSortKey =
+  | ProjectAttentionSortKey
   | "featureCount"
   | "createdAt"
   | "conversationCount"
@@ -11674,6 +11686,7 @@ function normalizeProjectModeProjectSort(
 ): { sortBy: ProjectModeProjectSortKey | null; sortOrder: ProjectModeProjectSortOrder } {
   const sortOrder: ProjectModeProjectSortOrder = options?.sortOrder === "asc" ? "asc" : "desc"
   const key = options?.sortBy
+  if (isProjectAttentionSortKey(key)) return { sortBy: key, sortOrder }
   if (key === "featureCount") return { sortBy: "featureCount", sortOrder }
   if (key === "createdAt") return { sortBy: "createdAt", sortOrder }
   if (key === "archivedAt" && status === "archived") return { sortBy: "archivedAt", sortOrder }
@@ -11874,7 +11887,17 @@ function buildProjectModeMockAnalytics(projects: ProjectModeProjectView[]): Proj
 function projectModeProjectSortValue(
   project: ProjectModeProjectView,
   sortBy: ProjectModeProjectSortKey
-): number {
+): number | null {
+  if (sortBy === "inclusiveAdoptionRate") return project.codeStats?.inclusiveAdoptionRate ?? null
+  if (sortBy === "suspectedTechnicalDetailConversationCount") {
+    return project.suspectedTechnicalDetailConversationCount ?? null
+  }
+  if (sortBy === "vibecodingShare") {
+    const buckets = project.stageBuckets
+    const attributed =
+      buckets.pluginConstrained.conversationCount + buckets.vibecoding.conversationCount
+    return attributed > 0 ? buckets.vibecoding.conversationCount / attributed : null
+  }
   if (sortBy === "conversationCount") return project.conversationCount
   if (sortBy === "generatedLines") return project.codeStats?.generatedLines ?? 0
   if (sortBy === "createdAt") {
@@ -11912,14 +11935,20 @@ function sliceProjectModeProjects(
     ? [...filtered].sort((a, b) => {
         const av = projectModeProjectSortValue(a, sortBy)
         const bv = projectModeProjectSortValue(b, sortBy)
-        if (av !== bv) return sortOrder === "asc" ? av - bv : bv - av
+        const compared = compareProjectAttentionValues(av, bv, sortOrder)
+        if (compared) return compared
         return compareProjectByName(a, b)
       })
     : filtered.sort(compareProjectByName)
   const total = sorted.length
   const start = (page - 1) * pageSize
   return {
-    projects: sorted.slice(start, start + pageSize),
+    projects: sorted.slice(start, start + pageSize).map((project) => ({
+      ...project,
+      ...(sortBy && isProjectAttentionSortKey(sortBy)
+        ? { attentionMetric: projectModeProjectSortValue(project, sortBy) }
+        : {})
+    })),
     total,
     page,
     pageSize,
@@ -13665,7 +13694,68 @@ async function enrichProjectModeProjectViews(
   }))
 }
 
-/** One list page: ES-paginated snapshot projects enriched with this-range usage / code. */
+const projectAttentionRankingCache = new ProjectAttentionRankingCache()
+
+async function fetchProjectModeAttentionPage(
+  range: TimeRange,
+  options: ProjectModeProjectPageOptions | undefined,
+  access: DashboardAccessContext,
+  sortBy: ProjectAttentionSortKey,
+  sortOrder: ProjectModeProjectSortOrder
+): Promise<Omit<ProjectModeProjectPageData, "sortBy" | "sortOrder" | "showSuspectedTechnicalDetailMetric">> {
+  if (
+    sortBy === "suspectedTechnicalDetailConversationCount" &&
+    !isDashboardSuspectedTechnicalDetailAllowed(access)
+  ) {
+    throw new Error("无权查看疑似技术细节补充统计")
+  }
+  const { filters, status, keyword, adapterName, creatorKeyword, creatorOrgKeyword } =
+    buildProjectModeProjectListFilters(range, options, access)
+  const orgFilter = buildProjectModeOrgFilter(options, access)
+  const code = buildProjectModeCodeAggs(null, range, orgFilter ? [orgFilter] : [])
+  const scope = {
+    snapshotFilters: filters,
+    traceFilters: projectModeTraceFilters(range, orgFilter),
+    codeGenFilters: code.codeGenFilters,
+    codeAdoptFilters: code.codeAdoptFilters,
+    codeAggs: code.perBucketAggs,
+    eventIndex: getEsIndex("event"),
+    traceIndex: getEsIndex("trace")
+  }
+  const cacheKey = JSON.stringify([scope, sortBy])
+  let metrics = projectAttentionRankingCache.get(cacheKey)
+  if (!metrics) {
+    metrics = await fetchProjectAttentionRanking(scope, sortBy, esQuery)
+    projectAttentionRankingCache.set(cacheKey, metrics)
+  }
+  const ordered = [...metrics.keys()].sort(
+    (a, b) =>
+      compareProjectAttentionValues(metrics.get(a) ?? null, metrics.get(b) ?? null, sortOrder) ||
+      a.localeCompare(b)
+  )
+  const pageSize = clampLimit(options?.pageSize, 10, 100)
+  const page = clampLimit(options?.page, 1, Math.max(1, Math.ceil(ordered.length / pageSize)))
+  const pageIds = ordered.slice((page - 1) * pageSize, page * pageSize)
+  const views = await fetchProjectModeProjectViewsByIds(pageIds, filters)
+  const projects = pageIds.flatMap((id) => {
+    const project = views.get(id)
+    return project ? [{ ...project, attentionMetric: metrics.get(id) ?? null }] : []
+  })
+  return {
+    projects,
+    total: ordered.length,
+    page,
+    pageSize,
+    status,
+    keyword,
+    adapterName,
+    creatorKeyword,
+    creatorOrgKeyword,
+    truncated: false
+  }
+}
+
+/** One list page: current snapshots enriched with this-range usage / code. */
 async function fetchProjectModeProjectPage(
   range: TimeRange,
   options?: ProjectModeProjectPageOptions,
@@ -13675,11 +13765,13 @@ async function fetchProjectModeProjectPage(
   const { sortBy, sortOrder } = normalizeProjectModeProjectSort(options, status)
   const metricSort = sortBy === "conversationCount" || sortBy === "generatedLines"
 
-  // featureCount / default sort paginate the snapshot index directly; metric
-  // sorts (active tab only) rank the full set first, then page.
-  const sliced = metricSort
-    ? await fetchProjectModeProjectPageMetricSorted(range, options, access, sortBy, sortOrder)
-    : await fetchProjectModeProjectPageHits(range, options, access)
+  // Attention ranking enumerates all matching IDs before pagination. Existing
+  // conversation/line sorts retain their active-only path; snapshot sorts stay cheap.
+  const sliced = isProjectAttentionSortKey(sortBy)
+    ? await fetchProjectModeAttentionPage(range, options, access, sortBy, sortOrder)
+    : metricSort
+      ? await fetchProjectModeProjectPageMetricSorted(range, options, access, sortBy, sortOrder)
+      : await fetchProjectModeProjectPageHits(range, options, access)
   return {
     ...sliced,
     sortBy,
@@ -13999,6 +14091,7 @@ async function fetchProjectMode(
   opts?: OrgFilterOptions
 ): Promise<DashboardProjectModeData> {
   const access = requireDashboardProjectModeAccess()
+  projectAttentionRankingCache.clear()
 
   // 「仅精益项目」/「仅本期新建」：这两个条件都只存在于自愈快照上（projectFromLean、
   // lifecycleCreatedAt），trace / code 事件里没有，所以先把命中的项目 id 集解析出来，用于圈定

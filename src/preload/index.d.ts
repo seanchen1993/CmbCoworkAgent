@@ -2,6 +2,7 @@ import type {
   KnowledgeAccumulationData,
   KnowledgeProjectStats
 } from "../shared/dashboard-knowledge-overview"
+import type { ProjectAttentionSortKey } from "../shared/project-attention"
 import type {
   EfficiencyDevComputeResult,
   EfficiencyPluginFilter
@@ -775,6 +776,7 @@ interface DashboardProjectModeProject {
   featureCount: number
   conversationCount: number
   suspectedTechnicalDetailConversationCount?: number
+  attentionMetric?: number | null
   devStageConversationCount: number
   devAssociatedFeatureCount: number
   hasError: boolean
@@ -808,6 +810,7 @@ interface DashboardProjectModeProjectCounts {
 }
 
 type DashboardProjectModeProjectSortKey =
+  | ProjectAttentionSortKey
   | "featureCount"
   | "createdAt"
   | "conversationCount"
