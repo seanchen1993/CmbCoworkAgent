@@ -80,7 +80,7 @@ export function useKnowledgeOverview(
     }
   }, [enabled, range, rooms, refreshKey])
 
-  // Rolling 14-day metric is independent of the top date selector.
+  // Rolling 30-day metric is independent of the top date selector.
   useEffect(() => {
     if (!enabled) return
     let cancelled = false
