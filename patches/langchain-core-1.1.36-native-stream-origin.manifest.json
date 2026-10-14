@@ -1,0 +1,57 @@
+{
+  "name": "@langchain/core",
+  "version": "1.1.36",
+  "upstreamTarball": "https://registry.npmjs.org/@langchain/core/-/core-1.1.36.tgz",
+  "upstreamIntegrity": "sha512-9NWsdzU3uZD13lJwunXK0t6SIwew+UwcbHggW5yUdaiMmzKeNkDpp1lRD6p49N8+D0Vv4qmQBEKB4Ukh2jfnvw==",
+  "upstreamSha1": "672d758e50e09fe402db2919ceb98b82cbca901b",
+  "license": "MIT",
+  "licenseSha256": "4ec67e4ca6e6721dba849b2ca82261597c86a61ee214bbf21416006b7b2d0478",
+  "patchSha256": "d1a44205e65705c20c45c93fc749790a17dc16b996a82211302cd97a502576ee",
+  "files": [
+    {
+      "path": "dist/runnables/base.js",
+      "beforeSha256": "d638764da6211151e90fe9140797f815bac4fa769785d03b154ec8a1c9cef3f3",
+      "afterSha256": "0842ccc161511346935801afa6d29da81a72d81b174eb898731139e79a7d8645"
+    },
+    {
+      "path": "dist/runnables/base.cjs",
+      "beforeSha256": "c413e618ebfbecbdf58bbda9c0fe3e2ae3a347b871c009eae565d141a13c2bb0",
+      "afterSha256": "f97eefc940ce3fa6ce9a3bb81e6b48ce81f00165dc74772f304df85406bdf7ba"
+    },
+    {
+      "path": "package.json",
+      "beforeSha256": "c6b4e79c586ae63c51a51e44b4b693e34e3615b2c701235dd513b5f6407f2773",
+      "afterSha256": "d4f1a6abbe83b097f22fc5a8fefa6c7845a6ac14342714c2f53aab2157e027c7"
+    },
+    {
+      "path": "dist/native-stream-origin.js",
+      "beforeSha256": null,
+      "afterSha256": "2d9d2013a1c79e59d2768f8c80a4e444c8aa670f135929df608c715fa3d21c64"
+    },
+    {
+      "path": "dist/native-stream-origin.cjs",
+      "beforeSha256": null,
+      "afterSha256": "55f10df0a0b1a2f64ec273b17055a54b259a6d826ccefddb4b1a6b52a5ba18d9"
+    },
+    {
+      "path": "dist/native-stream-origin.d.ts",
+      "beforeSha256": null,
+      "afterSha256": "dd0d0cf0b2d4b9c5bcae7d366b994ef9cece3d6cac5d152111d199a93b6454c4"
+    },
+    {
+      "path": "dist/native-stream-origin.d.cts",
+      "beforeSha256": null,
+      "afterSha256": "dd0d0cf0b2d4b9c5bcae7d366b994ef9cece3d6cac5d152111d199a93b6454c4"
+    }
+  ],
+  "templates": [
+    {
+      "path": "langchain-core-native-stream-runtime.js.inc",
+      "sha256": "1e6e4a1b8a04c050ba3896210f5fda6be502cc8b76007b954a22b7198868912c"
+    },
+    {
+      "path": "langchain-core-native-stream.d.ts",
+      "sha256": "dd0d0cf0b2d4b9c5bcae7d366b994ef9cece3d6cac5d152111d199a93b6454c4"
+    }
+  ]
+}

@@ -1,9 +1,15 @@
 # 函数 Mods 开发与当前支持范围
 
-当前分支实现了标准函数插件的加载、授权、直接命令、交互 Pane/Client、原生工具调用、自定义工具注册、独立文本模型请求与主 Agent 流式控制，以及应用项目完成规则。目标兼容版本固定为 Claude Code
-v2.1.280（官方声明文件头为 2.1.277，与 v2.1.278 声明相同）；这不是全部 Mods API 已经可用的声明。实现和验证状态见
-[参考复核](mods-v2-claude-reference-2026-09-24.md)及[兼容差异表](mods-v2-compatibility-matrix.json)。
-本轮优先完成常用能力，复杂边界兼容暂缓，范围见[核心交付说明](mods-v2-core-delivery-scope-2026-09-24.md)。
+当前分支实现了标准函数插件的加载、授权、直接命令、交互 Pane/Client、原生工具调用、自定义工具注册、独立模型请求、主 Agent 流式控制，以及应用项目完成规则。最近实际核验的参考版本是 Claude Code 2.1.289，范围见[最新发布复核](mods-latest-289-audit-2026-10-04.md)和[兼容差异表](mods-v2-compatibility-matrix.json)；它们区分已实现、桌面适配和仍有差距，不表示全部官方 API 可用。
+后续按[持续迭代计划](mods-continuous-alignment-plan-2026-10-03.md)推进。旧版本参考与[核心交付说明](mods-v2-core-delivery-scope-2026-09-24.md)是历史记录，新能力以当前说明及阶段实测为准。
+
+原回答、工具记录和提问控件进入自定义布局的最新用法见
+[原生内容组合说明](mods-native-engine-usage-2026-10-05.md)。跨插件替换构造器仍在实施，
+不要将下面较早阶段的说明理解为所有官方能力已支持。
+
+当前开发版本的分组行为见[透明分组迁移说明](mods-transparent-fragment-migration-2026-10-05.md)：
+`Fragment` 不再自动上下排列，需要布局时请明确写 `Box flexDirection="column"`。
+本轮运行版本已更新为 v88，旧授权需要在界面重新检查并批准，不能自动沿用旧授权。
 
 ## 在应用里使用
 
@@ -366,10 +372,11 @@ on("ui.render", { component: "Pane", requestId: "board" }, ($, e) => {
 旧绘制、关闭、撤权、运行时替换后的句柄不能执行；卸载清理资源。重绘通知按 100 ms 合并。
 普通 `next` 始终绑定原分发；SDK 使用异步延续自己的调用身份，失效调用不能借用新回调。
 
-**当前仍是桌面 Pane 子集**：仅 inline 位置与 Box/Text/Button/Input/Select/Link/Code 的
-明确属性白名单及下述 Client。Code 支持源代码高亮、行号、折行和统一 diff；路径仅作语言
-推断，不读文件。Pane/Client 提供有界焦点和滚动事件。其余 13 个渲染位置、Svg、自定义
-构造器 hook、实际尺寸上报、快捷键及 hover 仍未交付；`holdToasts` 明确报不支持。
+**当前是本工程桌面适配范围**：Pane 与十三个既有位置，使用
+Box/Text/Button/Input/Select/Link/Code/Svg 和下述 Client 的明确属性白名单。
+Code 支持源代码高亮、行号、折行和统一 diff；路径仅作语言推断，不读文件。
+Pane/Client 提供有界焦点和滚动事件；`holdToasts:true` 已支持，详见下文阅读面板说明。
+跨插件构造器 hook、完整尺寸上报、快捷键及 hover 仍有差距，不宣称已完整支持。
 `ui.invalidate` 目前仅支持 `ui.render`。面板回调可以 `await $.command.run({ command, args })`：
 普通命令等待统一会话队列，`immediate: true` 命令可以在模型运行时查询。返回值保持 SDK 原样，
 任务栏保留执行记录。回调等待期间仍可重绘进度；用户关闭面板或撤销授权会取消其未执行任务。
@@ -508,3 +515,169 @@ hook 中嵌套 SDK 读取复用当前执行权，写入仍需要存活的用户�
 hooks与Client可用只读全局 `atob` / `btoa`；示例 `atob(btoa("hello"))` 返回 `hello`。btoa只接受Latin1字节字符串，中文应先由业务明确编码，不能把它当作UTF-8转换器。512 Ki字符上限、原VM计算/内存预算及InvalidCharacterError类型差异见[Base64使用范围](mods-v2-base64-2026-09-24.md)。这不会开放Node/Buffer或二进制文件读取权限。
 
 文件读取可显式指定 `{as:"text"}`，操作事件含as字段；非法选项或尚未支持的bytes模式明确拒绝，详见[读取模式与差异](mods-v2-file-read-options-2026-09-24.md)。
+
+## 慢请求、启动分析和剩余时间
+
+普通处理函数有10秒自身时间，恢复处理有独立1秒；等待模型、文件或 `next(e)` 时暂停自身计时。主动 `$.clock.sleep` 仍占自身时间。仍有宿主总等待和模型上限，用户取消和权限检查继续有效，不保证无限等待。
+
+`next.budget` 每次读取都返回新的只读 `{ms, remainingMs}`，不用发请求。恢复时 `next.error.kind` 区分异常与超时，`next.error.budget` 和 `next.budget.ms` 均为1000。引擎组装不计自身时间，读到0和Infinity，但仍受整次启动上限。
+
+逐段回答也支持自身时间：`turn.step` 的10秒累计整段回答，`process.spawn` 每次拉取重新获得10秒。等待下一段、交给界面显示及实际SDK资源读取不扣自身时间。恢复每次使用1秒。组件出错时保留尚未交付的原输出，继续实际下游，不重新请求模型或启动进程；总期限与用户取消仍会结束整次处理。
+
+```ts
+on("turn.step", async function* ($, e, next) {
+  // 可先调整本次规则或模型；yield* 让回答逐段显示并保留原最终结果。
+  return yield* next(e)
+})
+on("process.spawn", async function* ($, e, next) {
+  return yield* next(e)
+})
+```
+
+在普通聊天运行任务时自动触发回答规则；组件调用 `$.process.spawn` 时触发进程规则。安装、批准、加入组合并应用之后才生效；组件重新批准提醒出现时，按新版本重新确认后再应用。详见[真实慢回答与进程验收](mods-stream-budget-stage-2026-10-04.md)。
+
+```ts
+on("session.start", async ($, e, next) => {
+  const answer = await $.model.complete({ prompt: "按本项目规则给出检查要点" })
+  await $.store.set("review-notes", answer)
+  await $.command.register({ name: "review-notes", description: "查看已准备的检查要点", immediate: true })
+  return next(e)
+})
+on("command.run", { command: "review-notes" }, async ($, e, next) => {
+  if (next.budget.remainingMs < 2000) return next(e)
+  const answer = await $.store.get("review-notes")
+  return { text: typeof answer === "string" ? answer : answer?.text ?? "尚未准备" }
+})
+```
+
+启动分析看到新组合的实际规则；普通保存不发模型请求，明确“重新加载当前组合”才按新参数再分析。示例注册 `/review-notes`，安装批准后在聊天输入该命令读取已有分析。数据匹配器写成 `{command: "review-notes"}`，不能把判断函数作为数据匹配器。既有 Plugin、技能及项目模式仍按原入口使用。
+
+## 删除对话与退出应用
+
+组件已经在这个对话运行过，删除对话时会收到 `session.end`，原因是 `clear`；退出应用时原因是 `logout`。原来配置的退出脚本先执行，再通知 Mods。未启动的组件不会因为关闭应用而首次运行，切换页面、重新加载组合和撤销批准也不会触发这个通知。
+
+```ts
+on("session.end", async ($, e, next) => {
+  await $.store.set("last-ended", { sessionId: e.sessionId, reason: e.reason })
+  return next(e)
+})
+```
+
+安装、批准并应用后，在对话中实际使用组件，再删除对话或退出应用即可触发；无须新增按钮或输入退出命令。通知适合快速整理组件自身的状态。所有组件共同使用1.5秒，等待模型、文件和下游也扣除这段时间；后面的组件只剩前面留下的时间。不要在这里安排长时间检视或测试，任务回答结束后的处理应放在完成规则中。
+
+重复删除与退出重叠时，同一实例只通知一次。`sessionId` 和 `resume.id` 是实际对话标识，组件不能改写；删除操作最终仍可能因远端撤权等失败，所以通知不等于数据库已删除。`resume.id` 也不承诺删除后的记录可以恢复。已经通知的旧实例会退出；若删除失败后继续显式使用存活对话，按原流程建立新的组件实例。
+
+本阶段按 DevClaw 的实际删除、退出入口适配，并没有增加 Claude CLI 的原地 `/clear` 或恢复命令。完整验证见[结束通知验收](mods-session-end-stage-2026-10-04.md)。
+
+## 定期检查偶尔失败也能继续
+
+后台检查用 `$.clock.every`，只执行一次用 `$.clock.after`。周期回调一次出错会写调试记录，下一周期重新检查；不立即重试失败的那一次，也不会自动开启聊天。下面是一个无需网络或模型的演示：
+
+```ts
+export function register(on) {
+  on("session.start", async ($, e, next) => {
+    let count = 0
+    const timer = $.clock.every(2000, () => {
+      count++
+      if (count === 1) throw new Error("演示：第一次检查失败")
+      $.ui.status("下一次检查正常：" + count)
+      if (count === 3) timer.cancel()
+    })
+    return next(e)
+  })
+}
+```
+
+安装、批准、应用到一个对话后，实际使用该对话启动组件。约四秒看到第二次正常，约六秒看到第三次，之后停止。切换到其他对话不是取消；明确重载组合、撤销批准、结束对话会清理原定时器。新实例启动时会重新执行启动规则。
+
+真实 HTTP 或命令检查也可采用这个结构；每个周期仍复核原权限和内容保护，不能因上次成功而跳过。八个同时运行的回调上限继续生效，组件应取消不再使用的定时器。只运行一次的回调失败不会重复。宿主总期限和 CPU/内存限制保持有效；普通回调不等于注册 Hook，不将每次异步等待误算为 Hook 自身十秒。
+# 组件出错时显示备用内容
+
+桌面 Pane 内的 Client 加载、绘制或点击处理失败，所属组件会收到 `ui.fault`。可在通知里记录状态，让下一次 `ui.render` 显示备用内容。系统自动重画一次；恢复过程中刚创建的 Client 再次失败会通知，但不会无限重画。使用已有的安装、选择、批准和面板命令即可，不需新增手动“运行恢复”的按钮。
+
+```tsx
+export function register(on) {
+  let failed = false
+  on("ui.fault", { component: "Pane", requestId: "my-board" }, ($, e, next) => {
+    failed = true
+    $.ui.log(e.reason)
+    return next(e)
+  })
+  on("ui.render", { component: "Pane", requestId: "my-board" }, ($, e) => {
+    const { Client, Text } = $.ui.resolve(e)
+    return failed
+      ? <Text>暂时无法加载，请稍后重新打开。</Text>
+      : <Client key="board" module="./surface.tsx" />
+  })
+}
+```
+
+`reason` 已经过内容保护，但仍是来自组件的错误文字，只用于显示或记录。不要解析它来执行命令。`phase` 是实际加载、绘制或运行步骤，不能改写。异步点击可以 `await` 再更新本地状态；绘制函数本身仍需同步返回。保留同一个 key/module 不会复活已停止的实例；真正移除再加入、使用新 key 或重载，才建立新实例。现有十三个聊天绘制位置也沿用这一恢复方式。
+
+### 链接不能打开时，其它内容继续显示
+
+作者继续使用 `Link({ href: "https://example.com", label: "查看说明" })`，不需要为每个地址手写备用显示。安全的 HTTPS 和 localhost HTTP 地址可以点击，无尾斜线也可使用；空地址或不适合打开的地址显示为普通文字，旁边的按钮与组件状态继续工作。
+
+`href` 在构造器里必须是字符串。超过 2048 字、含控制字符或其它不合格树仍会拒绝；这不是放宽执行或文件访问权限。`javascript:`、`file:`、远程 `http:`、带账号、空格、反斜线等不会交给系统打开。显示文字优先使用 children，其次 label，再次字符串地址。现适配的是 DevClaw 桌面；终端任意协议不属于这里的打开方式。
+
+### 阅读面板时，先把短提示留下
+
+打开面板设置 `holdToasts:true`。用户阅读时，本会话其它组件的短提示和聊天核心短提示会等待；关闭面板或收起侧栏后才显示，从真正显示开始计时。状态行和审批问题始终保留。用户只需按原方法在对话运行已安装批准组件的命令，不要再手动运行一个“暂存队列”。
+
+```tsx
+export function register(on) {
+  on("session.start", async ($, e, next) => {
+    await $.command.register({ name: "read-report", description: "阅读报告" })
+    return next(e)
+  })
+  on("command.run", { command: "read-report" }, async ($) => {
+    await $.ui.open({ id: "report", title: "报告", holdToasts: true })
+    $.ui.toast("报告已经准备好")
+    return {}
+  })
+  on("ui.render", { component: "Pane", requestId: "report" }, ($, e) => {
+    const { Box, Text, Button } = $.ui.resolve(e)
+    return <Box>
+      <Text>在这里展示报告内容。</Text>
+      <Button key="finish" onPress={() => $.ui.close({ id: "report" })}>读完了</Button>
+    </Box>
+  })
+}
+```
+
+再次 `$.ui.open({id:"report"})` 会清除暂存设置；仅省略其它字段不会保留旧 `holdToasts`。它只接受 true 或省略，不能传 false。短提示默认显示4秒，未显示不消耗时间；鼠标停留或窗口隐藏时暂停，回来继续剩余时间。点击提示正文即可关闭，取消的提示不会因刷新重新显示。重载或撤权丢弃原实例提示，不在新会话回放。
+
+它不能隐藏批准控件、替代任务状态、修改模型回答或控制其它窗口的全局通知。作者不需要获取私有显示回执；这是 DevClaw 宿主负责的边界。完整检视和实测见 mods-hold-toasts-stage-2026-10-04.md。
+
+### 在聊天里直接放自己的交互组件
+
+同一个 Client 文件可以放进输入框上方、消息或工具记录。用户仍按原方法安装、批准、应用到对话，然后正常聊天；不需要另外打开面板才能使用。下面在输入框上方增加一个按钮，点击次数保存在该位置自己的组件里。
+
+`hooks/register.tsx`：
+
+```tsx
+export function register(on) {
+  on("ui.render", { component: "AbovePrompt" }, ($, e) => {
+    const { Client } = $.ui.resolve(e)
+    return <Client key="counter" module="./counter.tsx" />
+  })
+}
+```
+
+`hooks/counter.tsx`：
+
+```tsx
+export default function Counter(props, surface) {
+  const { Button } = surface.elements
+  if (surface.state === undefined) surface.setState({ count: 0 })
+  return <Button key="count" label={`点击：${surface.state.count}`} onPress={() => {
+    surface.setState({ count: surface.state.count + 1 })
+  }} />
+}
+```
+
+也可以把匹配位置改成 AssistantMessage，或者在两个绘制规则里引用同一文件。不同位置各自计数，重新绘制保留同一个 key/module 的状态。整个对话与独立面板共用八个活动组件上限；超过上限会明确拒绝，移除组件后释放名额。
+
+支持的位置为 AbovePrompt、PromptHint、InfoNotice、Spinner、TurnDuration、SessionMode、UserMessage、AssistantMessage、CommandOutput、ToolUse、ToolResult、ToolGroup、AskUserQuestion。原生画面现在可经 next(e) 进入自己的布局；问答保留唯一原控件并放在组合末尾。完整步骤与边界见[原生内容组合说明](mods-native-engine-usage-2026-10-05.md)。本工程没有终端或移动端绘制入口，跨插件构造器替换仍在实施。
+
+旧画面中的点击和消息不能在新的画面继续执行；重载或撤销批准会清理原实例。页面刷新只更新相关位置，不重新加载所有聊天信息。真实安装、问答和恢复示例及验证记录见 mods-site-clients-stage-2026-10-04.md。

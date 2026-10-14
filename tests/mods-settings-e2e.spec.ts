@@ -1,12 +1,14 @@
-/** Production Electron/React/IPC: settings password, uninstall and restart, no external model. */
+/** Production Electron/React/IPC: password-free settings, grants, uninstall and restart. */
 import assert from "node:assert/strict"
-import { mkdtempSync, mkdirSync, writeFileSync, existsSync } from "node:fs"
+import { mkdtempSync, mkdirSync, writeFileSync, existsSync, readFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join, resolve } from "node:path"
 import { createRequire } from "node:module"
 import { _electron, type ElectronApplication, type Page } from "playwright"
 import AdmZip from "adm-zip"
 import { verifyApplicationCompletionSettings } from "./support/mods-application-policy-e2e"
+import { verifyPolicyUsability } from "./support/mods-policy-usability-e2e"
+import { MODS_STARTER_FILES } from "../src/shared/mods/v2/starter-template"
 
 const root = resolve(__dirname, "..")
 const localRequire = createRequire(join(root, "package.json"))
@@ -15,7 +17,7 @@ const binary = packagedDir
   ? join(resolve(packagedDir), "CMBDevClaw.exe")
   : (localRequire("electron") as string)
 const isolated = mkdtempSync(join(tmpdir(), "cmb-mods-settings-e2e-"))
-const artifacts = join(root, "output/mods-validation", "settings-e2e")
+const artifacts = resolve(process.env.CMB_MODS_SETTINGS_ARTIFACTS ?? join(root, "output/mods-validation", `settings-e2e-${Date.now()}`))
 mkdirSync(artifacts, { recursive: true })
 const workspace = join(isolated, "workspace")
 mkdirSync(workspace)
@@ -95,7 +97,8 @@ async function boot() {
   page = app.windows()[0]
   await page.waitForFunction(() => Boolean(window.api?.mods))
   await page.getByRole("button", { name: "自定义设置", exact: true }).click()
-  await page.getByRole("button", { name: "Function Mods", exact: true }).click()
+  await page.getByRole("button", { name: "添加功能", exact: true }).click()
+  await page.getByRole("navigation", { name: "灵件工作区" }).getByRole("button", { name: "我已添加", exact: true }).click()
   await page.locator("[data-mods-settings]").waitFor()
 }
 async function main() {
@@ -105,32 +108,21 @@ async function main() {
   try {
     await boot()
     assert.equal(await page!.evaluate(() => window.api.mods.globalEnabled()), false)
-    assert.equal(await page!.evaluate(() => window.api.mods.functionUnlocked()), false)
-    assert(await page!.getByRole("checkbox", { name: "启用 Mods 功能（应用级）" }).isDisabled())
-    assert(await page!.getByRole("button", { name: "安装示范 Mods" }).isDisabled())
-    assert(await page!.getByRole("button", { name: "上传 Mods（ZIP）" }).isDisabled())
-    assert(await page!.getByRole("button", { name: "从文件夹安装" }).isDisabled())
-    assert.equal(await page!.locator("[data-installed-mods]").count(), 0)
-    await page!.screenshot({ path: join(artifacts, "locked.png") })
-    await assert.rejects(
-      page!.evaluate(() => window.api.mods.configureGlobal(true)),
-      /MODS_FUNCTION_LOCKED/
-    )
-    await assert.rejects(
-      page!.evaluate(() => window.api.mods.installExamples()),
-      /MODS_FUNCTION_LOCKED/
-    )
-    await page!.getByLabel("输入管理口令解锁 Function Mods 设置").fill("wrong")
-    await page!.getByRole("button", { name: "解锁设置" }).click()
-    await page!.getByText("管理口令错误，请重试。", { exact: true }).waitFor()
-    assert.equal(await page!.evaluate(() => window.api.mods.functionUnlocked()), false)
-    pass("locked UI, wrong password and direct IPC cannot enable or install Mods")
-    await page!.getByLabel("输入管理口令解锁 Function Mods 设置").fill("admin123456")
-    await page!.getByRole("button", { name: "解锁设置" }).click()
+    assert.equal(await page!.evaluate(() => window.api.mods.functionUnlocked()), true)
     await page!.locator("[data-installed-mods]").waitFor()
+    assert.equal(await page!.locator('input[type="password"]').count(), 0)
+    assert.equal(await page!.locator("[data-mods-locked]").count(), 0)
+    assert(await page!.getByRole("checkbox", { name: "允许使用灵件" }).isEnabled())
+    assert(await page!.getByRole("button", { name: "上传插件（ZIP）" }).isEnabled())
+    assert(await page!.getByRole("button", { name: "从文件夹安装" }).isEnabled())
+    await page!.evaluate(() => window.api.mods.configureGlobal(true))
+    assert.equal(await page!.evaluate(() => window.api.mods.globalEnabled()), true)
+    await page!.evaluate(() => window.api.mods.configureGlobal(false))
     assert.equal(await page!.evaluate(() => window.api.mods.globalEnabled()), false)
+    await page!.screenshot({ path: join(artifacts, "settings-accessible.png") })
+    pass("settings and trusted IPC work without a management password; runtime starts disabled")
     const getPlugins = () => page!.evaluate(() => window.api.plugins.list())
-    const input = page!.getByLabel("选择 Mods ZIP 文件")
+    const input = page!.getByLabel("选择插件 ZIP 文件")
     await input.setInputFiles({
       name: "broken.zip",
       mimeType: "application/zip",
@@ -146,11 +138,14 @@ async function main() {
       mimeType: "application/zip",
       buffer: ordinary.toBuffer()
     })
-    await page!
-      .getByText("未检测到 Mods 模块，请选择包含 Mods 的插件包。普通插件请在“插件”页面安装。", {
-        exact: true
-      })
-      .waitFor()
+    const ordinaryCard = page!.getByRole("article", { name: "ordinary-skill", exact: true })
+    await ordinaryCard.waitFor()
+    const ordinaryInstalled = (await getPlugins()).find((plugin) => plugin.name === "ordinary-skill")
+    assert(ordinaryInstalled)
+    assert.equal(ordinaryInstalled.enabled, false)
+    await ordinaryCard.getByRole("button", { name: "卸载", exact: true }).click()
+    await page!.getByRole("button", { name: "确认卸载", exact: true }).click()
+    await ordinaryCard.waitFor({ state: "hidden" })
     assert.equal((await getPlugins()).length, 0)
     const zip = new AdmZip()
     zip.addLocalFolder(join(root, "resources/mods/function-commands"))
@@ -160,15 +155,15 @@ async function main() {
       buffer: zip.toBuffer()
     }
     await input.setInputFiles(upload)
-    await page!.getByRole("status").waitFor()
+    await page!.getByRole("status", { name: "灵件操作结果" }).waitFor()
     const first = (await getPlugins())[0]
     assert(first && first.name === "function-commands")
     await input.setInputFiles(upload)
-    await page!.getByRole("status").waitFor()
+    await page!.getByRole("status", { name: "灵件操作结果" }).waitFor()
     assert.equal((await getPlugins()).length, 1)
     assert.equal((await getPlugins())[0].id, first.id)
     pass(
-      "ZIP upload rejects corrupt/non-Mod packages, installs and updates a Mod without duplicates"
+      "ZIP rejects corrupt packages, accepts native packages disabled, and updates modules without duplicates"
     )
     await app!.evaluate(({ dialog }) => {
       dialog.showOpenDialog = (async () => ({
@@ -194,7 +189,7 @@ async function main() {
       join(root, "resources/mods/project-quality")
     )
     await page!.getByRole("button", { name: "从文件夹安装" }).click()
-    await page!.getByRole("status").waitFor()
+    await page!.getByRole("status", { name: "灵件操作结果" }).waitFor()
     assert.equal((await getPlugins()).length, 2)
     assert.equal(await page!.evaluate(() => window.api.mods.globalEnabled()), false)
     await page!.waitForFunction(() => {
@@ -212,11 +207,11 @@ async function main() {
     assert(plugin)
     const row = page!.locator('[data-installed-mod-id="' + plugin.id + '"]')
     await row.getByRole("button", { name: "卸载", exact: true }).click()
-    const dialog = page!.getByRole("dialog", { name: "卸载 Mods 插件", exact: true })
+    const dialog = page!.getByRole("dialog", { name: "卸载插件", exact: true })
     await dialog.getByRole("button", { name: "取消", exact: true }).click()
     assert((await getPlugins()).some((p) => p.id === plugin.id))
     pass(
-      "unlock does not enable runtime; installed Mods and cancel uninstall work without a project"
+      "opening settings does not enable runtime; installed Mods and cancel uninstall work without a project"
     )
     const threadId = await page!.evaluate(async (workspace) => {
       const t = await window.api.threads.create({
@@ -228,7 +223,7 @@ async function main() {
       await window.api.workspace.set(id, workspace)
       return id
     }, workspace)
-    await page!.getByRole("checkbox", { name: "启用 Mods 功能（应用级）" }).check()
+    await page!.getByRole("checkbox", { name: "允许使用灵件" }).check()
     const status = await page!.evaluate((id) => window.api.mods.status(id), threadId)
     const mod = status.functionMods!.find((m) => m.pluginId === plugin.id)!
     await page!.evaluate(
@@ -243,6 +238,7 @@ async function main() {
     )!
     assert(descriptor)
     await verifyApplicationCompletionSettings(page!, threadId, artifacts, pass)
+    await verifyPolicyUsability(page!, pass)
     await row.getByRole("button", { name: "卸载", exact: true }).click()
     await page!.screenshot({ path: join(artifacts, "uninstall-confirm.png") })
     await dialog.getByRole("button", { name: "确认卸载", exact: true }).click()
@@ -271,7 +267,7 @@ async function main() {
     pass(
       "uninstall removes disk files, registry and live commands; stale descriptors fail and other plugins remain"
     )
-    await page!.getByRole("checkbox", { name: "启用 Mods 功能（应用级）" }).uncheck()
+    await page!.getByRole("checkbox", { name: "允许使用灵件" }).uncheck()
     const other = (await getPlugins()).find((p) => (p.modCount ?? 0) > 0)!
     const otherRow = page!.locator('[data-installed-mod-id="' + other.id + '"]')
     await otherRow.getByRole("button", { name: "卸载", exact: true }).click()
@@ -283,14 +279,11 @@ async function main() {
     await app!.close()
     app = undefined
     await boot()
-    assert.equal(await page!.evaluate(() => window.api.mods.functionUnlocked()), false)
+    assert.equal(await page!.evaluate(() => window.api.mods.functionUnlocked()), true)
     assert.equal(await page!.evaluate(() => window.api.mods.globalEnabled()), false)
-    await page!.locator("[data-mods-locked]").waitFor()
-    await assert.rejects(
-      page!.evaluate(() => window.api.mods.configureGlobal(true)),
-      /MODS_FUNCTION_LOCKED/
-    )
-    pass("restart restores settings lock and retains the disabled runtime switch")
+    await page!.locator("[data-installed-mods]").waitFor()
+    assert.equal(await page!.locator('input[type="password"]').count(), 0)
+    pass("restart retains accessible settings and the disabled runtime switch")
     const savedPolicy = await page!.evaluate(
       (id) => window.api.mods.completionPolicy(id, "function-commands"),
       threadId
@@ -298,15 +291,89 @@ async function main() {
     assert.equal(savedPolicy.source, "application")
     assert.equal(savedPolicy.policy.mode, "off")
     assert.equal(savedPolicy.policy.modelTokenBudget, 4096)
-    await assert.rejects(
-      page!.evaluate(
-        ({ id, policy }) => window.api.mods.setCompletionPolicy(id, "function-commands", policy),
-        { id: threadId, policy: savedPolicy.policy }
-      ),
-      /MODS_FUNCTION_LOCKED/
+    await page!.evaluate(
+      ({ id, policy }) => window.api.mods.setCompletionPolicy(id, "function-commands", policy),
+      { id: threadId, policy: savedPolicy.policy }
     )
+    assert.equal(await page!.evaluate(() => window.api.mods.globalEnabled()), false)
+    pass("restart retains completion rules and permits scoped edits without a password")
+    const downloadedStarter = join(isolated, "my-claw.zip")
+    await app!.evaluate(({ session }, target) => {
+      process.env.CMB_MODS_TEST_DOWNLOAD_STATUS = "pending"
+      session.defaultSession.once("will-download", (_event, item) => {
+        item.setSavePath(target)
+        item.once("done", (_event, state) => {
+          process.env.CMB_MODS_TEST_DOWNLOAD_STATUS = state
+        })
+      })
+    }, downloadedStarter)
+    await page!.getByText("安装下载好的插件", { exact: false }).first().click()
+    await page!.getByRole("button", { name: "下载插件示例（ZIP）", exact: true }).click()
+    const downloadDeadline = Date.now() + 10000
+    while (Date.now() < downloadDeadline) {
+      const state = await app!.evaluate(() => process.env.CMB_MODS_TEST_DOWNLOAD_STATUS)
+      if (state !== "pending") {
+        assert.equal(state, "completed")
+        break
+      }
+      await new Promise((done) => setTimeout(done, 100))
+    }
+    assert.equal(await app!.evaluate(() => process.env.CMB_MODS_TEST_DOWNLOAD_STATUS), "completed")
+    const starterBuffer = readFileSync(downloadedStarter)
+    const starter = new AdmZip(starterBuffer)
+    for (const [name, contents] of Object.entries(MODS_STARTER_FILES))
+      assert.equal(starter.readAsText(name), contents)
+    await page!.getByLabel("选择插件 ZIP 文件").setInputFiles({
+      name: "my-claw.zip",
+      mimeType: "application/zip",
+      buffer: starterBuffer
+    })
+    await page!.getByRole("status", { name: "灵件操作结果" }).waitFor()
+    const own = (await getPlugins()).find((item) => item.name === "my-claw")!
+    assert(own, "The downloaded starter is accepted by the real installer")
+    assert.equal(await page!.evaluate(() => window.api.mods.globalEnabled()), false)
+    await page!.evaluate(() => window.api.mods.configureGlobal(true))
+    const starterStatus = await page!.evaluate((id) => window.api.mods.status(id), threadId)
+    const ownMod = starterStatus.functionMods!.find((item) => item.pluginId === own.id)!
+    assert.equal(ownMod.state, "needs-approval")
+    await page!.evaluate(
+      async ({ id, pluginId, digest }) => {
+        await window.api.mods.approveFunction(id, pluginId, digest)
+        await window.api.mods.configure(id, true, false)
+      },
+      { id: threadId, pluginId: own.id, digest: ownMod.digest! }
+    )
+    const ownCommand = (await page!.evaluate((id) => window.api.mods.commands(id), threadId)).find(
+      (item) => item.command === "my-claw-info"
+    )!
+    assert(ownCommand)
+    const job = await page!.evaluate(
+      ({ id, command }) => window.api.mods.enqueue(id, command, { text: "" }),
+      { id: threadId, command: ownCommand }
+    )
+    await page!.waitForFunction(
+      async ({ id, jobId }) =>
+        (await window.api.mods.jobs(id)).some(
+          (item) => item.id === jobId && item.state === "succeeded"
+        ),
+      { id: threadId, jobId: job.id }
+    )
+    const completed = (await page!.evaluate((id) => window.api.mods.jobs(id), threadId)).find(
+      (item) => item.id === job.id
+    )!
+    const resultDiagnostic = {
+      enqueued: job,
+      completed,
+      subsequentJobs: await page!.evaluate((id) => window.api.mods.jobs(id), threadId)
+    }
+    writeFileSync(
+      join(artifacts, "starter-result-diagnostic.json"),
+      JSON.stringify(resultDiagnostic, null, 2)
+    )
+    assert(completed.result?.text.includes("我的 Claw 已就绪"))
+    assert(completed.result?.text.toLowerCase().includes(workspace.toLowerCase()))
     pass(
-      "real Electron restart retains project completion rules and restores the native write lock"
+      "downloadable starter installs through upload, requires approval and executes its documented project command"
     )
   } catch (error) {
     await page?.screenshot({ path: join(artifacts, "failure.png") }).catch(() => {})
@@ -321,3 +388,4 @@ void main().catch((error) => {
   console.error(error)
   process.exitCode = 1
 })
+

@@ -259,8 +259,14 @@ async function testRendererSendsAgentMode(): Promise<void> {
   assertSourceOrder(
     liveSubmitModeGate,
     "await pendingModeSave",
-    'setInput("")',
+    'applyPromptDraft(submittedDraft.revision, "")',
     "live submit waits for mode persistence before claiming the composer"
+  )
+  assertSourceOrder(
+    liveSubmitModeGate,
+    'applyPromptDraft(submittedDraft.revision, "")',
+    "await resolveAtFileAttachments({",
+    "live submit claims exactly its draft revision before attachment reads"
   )
   assertIncludes(
     liveSubmitModeGate,
@@ -1830,7 +1836,7 @@ async function testMainResolvesAndPersistsMode(): Promise<void> {
   assertSourceOrder(
     streamSerialization,
     "messages.slice(currentTurnBoundary)",
-    'serializeProjectedStreamData(projected.data, projected.valuesMessageIndexOffset, "full")',
+    'serializeProjectedStreamData(mode, projected.data, projected.valuesMessageIndexOffset, "full")',
     "values-mode history is projected before LangChain data is serialized"
   )
   assertIncludes(
@@ -3487,6 +3493,16 @@ async function testHookAgentIdentityPlumbing(): Promise<void> {
     runtime,
     "agentId: subagentOptions.agentId",
     "workflow leaf runtime receives the stable agent id"
+  )
+  assertIncludes(
+    runtime,
+    "onFileMutation: worktreeIsolation ? undefined : onFileMutation",
+    "shared workflow leaves report file mutations without polluting parent scope with isolated worktree paths"
+  )
+  assertIncludes(
+    runtime,
+    "agentId: workerInput.workerId,\n      onFileMutation,",
+    "coordinator runtime rebuilds retain the parent file mutation sink"
   )
   assertIncludes(
     agentIpc,

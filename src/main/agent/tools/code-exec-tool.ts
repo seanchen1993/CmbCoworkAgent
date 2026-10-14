@@ -1,3 +1,5 @@
+import { traceCodeExecCalls } from "../trace/live-tool-evidence"
+import type { TraceContext } from "../trace/types"
 import { createHash, randomUUID } from "crypto"
 import { tool } from "langchain"
 import { z } from "zod"
@@ -34,6 +36,7 @@ interface CodeExecToolContext {
   workspacePath: string
   threadId?: string
   modelId?: string
+  traceContext?: TraceContext
   readYoloMode: () => boolean
   capabilityService: McpCapabilityService
   approvalStore?: ApprovalStore
@@ -193,15 +196,16 @@ function maybePromoteCodeExecAsTool(
 }
 
 export function createCodeExecTool(context: CodeExecToolContext) {
-  const engine = new CodeExecEngine(new LocalProcessRunner(context.capabilityService))
 
   return tool(
-    async (input) => {
+    async (input, config) => {
       const approved = await requestCodeExecApproval(context, input)
       if (!approved) {
         return "Code execution rejected by user."
       }
 
+      const traced = traceCodeExecCalls(context.capabilityService, context.traceContext, config?.toolCall?.id)
+      const engine = new CodeExecEngine(new LocalProcessRunner(traced))
       const result = await engine.execute({
         code: input.code,
         timeoutMs: DEFAULT_TIMEOUT_MS,

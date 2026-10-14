@@ -181,4 +181,40 @@ describe("app store thread-directory loading", () => {
       useAppStore.getState().loadThreads({ selectInitialThread: true })
     ).rejects.toThrow("latest refresh failed")
   })
+  it("publishes a confirmed workspace to new-thread summaries without host writes or navigation", () => {
+    const thread = { ...createThread("workspace-new"), metadata: { model: "keep-model" } }
+    useAppStore.setState({ threads: [thread], currentThreadId: thread.thread_id, showCustomizeView: true })
+    vi.stubGlobal("window", { api: {} })
+    useAppStore.getState().syncThreadWorkspaceSummary(thread.thread_id, "C:/owned/project")
+    const state = useAppStore.getState()
+    expect(state.threads[0].metadata).toEqual({ model: "keep-model", workspacePath: "C:/owned/project" })
+    expect(state.currentThreadId).toBe(thread.thread_id)
+    expect(state.showCustomizeView).toBe(true)
+    const rows = state.threads
+    state.syncThreadWorkspaceSummary(thread.thread_id, "C:/owned/project")
+    expect(useAppStore.getState().threads).toBe(rows)
+  })
+
+  it("does not let an older directory page erase a newly confirmed workspace", async () => {
+    const thread = createThread("workspace-pending")
+    useAppStore.setState({ threads: [thread], currentThreadId: thread.thread_id })
+    const page = Promise.withResolvers<ThreadSummaryPage>()
+    vi.stubGlobal("window", { api: { threads: { listPage: vi.fn(() => page.promise) } } })
+    const loading = useAppStore.getState().loadThreads()
+    useAppStore.getState().syncThreadWorkspaceSummary(thread.thread_id, "C:/owned/new")
+    page.resolve(createPage([thread]))
+    await loading
+    expect(useAppStore.getState().threads[0].metadata?.workspacePath).toBe("C:/owned/new")
+  })
+
+  it("never recreates missing or deleted summaries from late workspace observations", () => {
+    useAppStore.getState().syncThreadWorkspaceSummary("workspace-missing", "C:/owned/late")
+    expect(useAppStore.getState().threads).toEqual([])
+    const thread = createThread("workspace-retired")
+    useAppStore.setState({ threads: [thread], currentThreadId: thread.thread_id })
+    useAppStore.getState().finalizeThreadDeletions([thread.thread_id])
+    useAppStore.getState().syncThreadWorkspaceSummary(thread.thread_id, "C:/owned/late")
+    expect(useAppStore.getState().threads).toEqual([])
+  })
+
 })

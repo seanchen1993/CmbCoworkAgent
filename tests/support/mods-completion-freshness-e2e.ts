@@ -1,3 +1,4 @@
+import { openModsResults } from "./mods-sidebar-navigation"
 import assert from "node:assert/strict"
 import { mkdirSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
@@ -85,6 +86,7 @@ export async function verifyCompletionFreshness(
     assert.equal(await rail.count(), 0)
     pass("off completes the original model turn without a completion gate or evidence UI")
     await page.evaluate(() => window.api.mods.configureGlobal(true))
+    await openModsResults(page)
     await run("请确认任务状态。[freshness-on]")
     await until(
       async () =>
@@ -142,6 +144,7 @@ export async function verifyCompletionFreshness(
     )
     await page.reload({ waitUntil: "domcontentloaded" })
     await page.getByText("Evidence freshness E2E", { exact: true }).first().click()
+    await openModsResults(page)
     await until(
       async () => (await rail.locator(":scope > summary").innerText()).includes("证据已失效"),
       "stale evidence survives renderer restart"

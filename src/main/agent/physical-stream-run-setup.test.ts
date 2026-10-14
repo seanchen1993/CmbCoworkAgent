@@ -272,3 +272,160 @@ describe("physical stream run setup guard", () => {
     expect(cleanup).not.toHaveBeenCalled()
   })
 })
+
+describe("file preparation cancellation terminal", () => {
+  it("reports cancellation only after the actual held operation and cleanup finish", async () => {
+    const controller = new AbortController()
+    const gate = Promise.withResolvers<void>()
+    const events: string[] = []
+    const onActiveError = vi.fn()
+    let ownsOriginal = true
+    const options = {
+      isActive: () => !controller.signal.aborted && ownsOriginal,
+      ownsLease: () => ownsOriginal,
+      release: () => { events.push("release"); ownsOriginal = false },
+      onActiveError,
+      onOwnedCancellation: () => events.push("done")
+    }
+    const guard = createPhysicalStreamRunSetupGuard(options)
+    guard.addCleanup(() => events.push("signal-cleanup"))
+    guard.addCleanup((wasActive, wasOwner) => {
+      expect(wasActive).toBe(false)
+      expect(wasOwner).toBe(true)
+      events.push("owner-cleanup")
+    })
+    const actual = (async () => {
+      try {
+        await gate.promise
+        controller.signal.throwIfAborted()
+      } finally {
+        events.push("physical-finally")
+      }
+    })()
+    const observed = actual.then(() => guard.abandon(), error => guard.fail(error))
+    try {
+      controller.abort()
+      expect(events).toEqual([])
+      expect(ownsOriginal).toBe(true)
+    } finally {
+      gate.resolve()
+      await observed
+    }
+    expect(events).toEqual([
+      "physical-finally", "release", "signal-cleanup", "owner-cleanup", "done"
+    ])
+    expect(onActiveError).not.toHaveBeenCalled()
+    guard.abandon()
+    guard.fail(new Error("late completion"))
+    expect(events.filter(event => event === "done")).toHaveLength(1)
+  })
+
+  it.each([undefined, null])("uses original ownership rather than the rejection value %s", reason => {
+    const controller = new AbortController()
+    controller.abort()
+    const release = vi.fn()
+    const cleanup = vi.fn()
+    const onActiveError = vi.fn()
+    const onOwnedCancellation = vi.fn()
+    const options = {
+      isActive: () => !controller.signal.aborted,
+      ownsLease: () => true,
+      release,
+      onActiveError,
+      onOwnedCancellation
+    }
+    const guard = createPhysicalStreamRunSetupGuard(options)
+    guard.addCleanup(cleanup)
+    guard.fail(reason)
+    guard.abandon()
+    expect(release).toHaveBeenCalledOnce()
+    expect(cleanup).toHaveBeenCalledWith(false, true)
+    expect(onActiveError).not.toHaveBeenCalled()
+    expect(onOwnedCancellation).toHaveBeenCalledOnce()
+  })
+
+  it("does not notify after a replacement takes the original controller and owner", async () => {
+    const originalController = new AbortController()
+    let controller = originalController
+    const originalOwner = Object.freeze({})
+    let owner = originalOwner
+    const gate = Promise.withResolvers<void>()
+    const events: string[] = []
+    const options = {
+      isActive: () => !originalController.signal.aborted && owner === originalOwner,
+      ownsLease: () => controller === originalController && owner === originalOwner,
+      release: () => events.push("original-release"),
+      onActiveError: vi.fn(),
+      onOwnedCancellation: () => events.push("done")
+    }
+    const guard = createPhysicalStreamRunSetupGuard(options)
+    const actual = (async () => {
+      try {
+        await gate.promise
+        originalController.signal.throwIfAborted()
+      } finally {
+        events.push("physical-finally")
+      }
+    })()
+    const observed = actual.then(() => guard.abandon(), error => guard.fail(error))
+    try {
+      originalController.abort()
+      controller = new AbortController()
+      owner = Object.freeze({})
+      expect(events).toEqual([])
+    } finally {
+      gate.resolve()
+      await observed
+    }
+    expect(events).toEqual(["physical-finally", "original-release"])
+    expect(controller.signal.aborted).toBe(false)
+    expect(options.onActiveError).not.toHaveBeenCalled()
+  })
+
+  it("leaves the cancellation terminal with the lifecycle after handoff", () => {
+    const controller = new AbortController()
+    const release = vi.fn()
+    const cleanup = vi.fn()
+    const options = {
+      isActive: () => !controller.signal.aborted,
+      ownsLease: () => true,
+      release,
+      onActiveError: vi.fn(),
+      onOwnedCancellation: vi.fn()
+    }
+    const guard = createPhysicalStreamRunSetupGuard(options)
+    guard.addCleanup(cleanup)
+    guard.handoff()
+    controller.abort()
+    guard.fail(undefined)
+    guard.abandon()
+    expect(release).not.toHaveBeenCalled()
+    expect(cleanup).not.toHaveBeenCalled()
+    expect(options.onActiveError).not.toHaveBeenCalled()
+    expect(options.onOwnedCancellation).not.toHaveBeenCalled()
+  })
+
+  it("does not add a cancellation terminal to an active drop or active failure", () => {
+    for (const failed of [false, true]) {
+      const events: string[] = []
+      const error = new Error("actual active failure")
+      const options = {
+        isActive: () => true,
+        ownsLease: () => true,
+        release: () => events.push("release"),
+        onActiveError: (reason: unknown) => {
+          expect(reason).toBe(error)
+          events.push("error", "original-done")
+        },
+        onOwnedCancellation: () => events.push("cancel-done")
+      }
+      const guard = createPhysicalStreamRunSetupGuard(options)
+      guard.addCleanup(() => events.push("cleanup"))
+      if (failed) guard.fail(error)
+      else guard.abandon()
+      expect(events).toEqual(failed
+        ? ["release", "cleanup", "error", "original-done"]
+        : ["release", "cleanup"])
+    }
+  })
+})

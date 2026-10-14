@@ -5,6 +5,9 @@
 import type { FileAttachment, FileInfo } from "@/types"
 import type { WorkspaceFilePreviewReadResult } from "../../../../shared/workspace-file-preview"
 import { normalizeWorkspacePathKey } from "../../../../shared/workspace-path"
+import type { ComposerPendingMention } from "../../../../shared/mods/v2/composer-mentions"
+import { resolveWorkspaceMentionAbsolutePath, stripHandledAtFileMentions } from
+  "../../../../shared/at-file-mention-text"
 import {
   isSupportedWorkspaceMentionFilePath,
   extractAtFileMentions,
@@ -21,6 +24,7 @@ interface WorkspaceReadFileResult {
 
 const MENTION_READ_TIMEOUT_MS = 3000
 const MENTION_MAX_PREVIEW_PAGES = 64
+export { resolveWorkspaceMentionAbsolutePath } from "../../../../shared/at-file-mention-text"
 
 // 输入框里已经选中的 @文件项。相比 suggestion，多带一个绝对路径，
 // 方便在“显式添加的 @文件”和“用户直接输入的 @路径”之间统一去重。
@@ -59,17 +63,6 @@ export type ResolveAtFileSelectionResult =
   | { kind: "limit" }
   | { kind: "unsupported"; filename: string }
   | { kind: "success"; mentionedFile: MentionedWorkspaceFile }
-
-// workspace.readFile 读取的是工作区相对路径，这里统一补成绝对路径，
-// 便于在 UI 展示、附件 payload 和去重集合中都使用同一种 key。
-export function resolveWorkspaceMentionAbsolutePath(
-  workspacePath: string,
-  workspaceFilePath: string
-): string {
-  const workspaceRoot = workspacePath.replace(/\\/g, "/").replace(/\/+$/, "")
-  const relativePath = workspaceFilePath.replace(/\\/g, "/").replace(/^\/+/, "")
-  return `${workspaceRoot}/${relativePath}`
-}
 
 // 把弹窗候选项提升成输入框里真正选中的 mention 文件实体，
 // 这样发送前和渲染 chip 都能复用同一种结构。
@@ -113,6 +106,50 @@ export function retainMentionedWorkspaceFilesForWorkspace(
 ): MentionedWorkspaceFile[] {
   if (!workspacePath) return []
   return files.filter((file) => isMentionedWorkspaceFileForWorkspace(file, workspacePath))
+}
+
+/** Collect this real draft's unresolved references without opening any file. */
+export function collectPendingAtFileMentions(params: {
+  rawMessage: string
+  attachments: readonly Pick<FileAttachment, "filePath">[]
+  mentionedFiles: readonly MentionedWorkspaceFile[]
+  workspacePath?: string | null
+  maxAttachments: number
+}): { pendingMentions: ComposerPendingMention[]; countLimitHit: boolean; staleWorkspace: boolean } {
+  const { workspacePath } = params
+  if (!workspacePath) return { pendingMentions: [], countLimitHit: false, staleWorkspace: params.mentionedFiles.length > 0 }
+  const pendingMentions: ComposerPendingMention[] = []
+  const seen = new Set(params.attachments.map(file => normalizeWorkspacePathKey(file.filePath)))
+  let countLimitHit = false, staleWorkspace = false
+  const add = (mention: string, relativePath: string, filename: string, source: "typed" | "chip",
+    lines?: { offset: number; limit?: number }) => {
+    const key = normalizeWorkspacePathKey(resolveWorkspaceMentionAbsolutePath(workspacePath, relativePath))
+    if (seen.has(key)) return
+    if (params.attachments.length + pendingMentions.length >= params.maxAttachments) {
+      countLimitHit = true
+      return
+    }
+    seen.add(key)
+    pendingMentions.push({ mention, workspacePath, relativePath, filename, source, ...lines })
+  }
+  for (const file of params.mentionedFiles) {
+    if (!isMentionedWorkspaceFileForWorkspace(file, workspacePath)) { staleWorkspace = true; continue }
+    add(file.displayPath, file.workspaceFilePath, file.filename, "chip")
+  }
+  for (const mention of extractAtFileMentions(params.rawMessage)) {
+    const fragment = /#L([1-9]\d*)(?:-([1-9]\d*))?$/u.exec(mention)
+    const spelling = fragment ? mention.slice(0, fragment.index) : mention
+    const relativePath = normalizeAtFileMentionPath(spelling)
+    if (!relativePath || !isSupportedWorkspaceMentionFilePath(relativePath)) continue
+    let lines: { offset: number; limit?: number } | undefined
+    if (fragment) {
+      const offset = Number(fragment[1]), end = fragment[2] ? Number(fragment[2]) : undefined
+      if (!Number.isSafeInteger(offset) || (end !== undefined && (!Number.isSafeInteger(end) || end < offset))) continue
+      lines = { offset, ...(end === undefined ? {} : { limit: end - offset + 1 }) }
+    }
+    add(mention, relativePath, relativePath.split("/").pop() || relativePath, "typed", lines)
+  }
+  return { pendingMentions, countLimitHit, staleWorkspace }
 }
 
 // 选择 @文件时的校验也统一放到这里：
@@ -214,25 +251,6 @@ export async function readBoundedWorkspaceMentionFile(params: {
   }
 
   return { success: true, content, size, truncated: truncated || !finished }
-}
-
-// 发送前把 @文件语法替换回普通路径文本：
-// 1. 只有真正被转换成附件（或已由现有附件覆盖）的 mention 才会被消费；
-// 2. 失败/不支持/未命中的 @文本 会保留原样，避免功能异常时悄悄吞掉用户输入。
-function stripHandledAtFileMentions(rawMessage: string, handledMentionPaths: ReadonlySet<string>): string {
-  if (handledMentionPaths.size === 0) return rawMessage
-
-  const replaceHandledMention = (match: string, pathValue: string): string => {
-    const normalized = normalizeAtFileMentionPath(pathValue)
-    if (!normalized || !handledMentionPaths.has(normalized)) {
-      return match
-    }
-    return `${/^\s/u.test(match) ? " " : ""}${normalized}`
-  }
-
-  return rawMessage
-    .replace(/(?:^|\s)@"([^"]+)"/gu, replaceHandledMention)
-    .replace(/(?:^|\s)@([^\s"]+)/gu, replaceHandledMention)
 }
 
 // 这里把“用户输入的 @文件”统一折算成最终附件列表：

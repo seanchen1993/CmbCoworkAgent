@@ -40,6 +40,7 @@ export interface AgentInvokeParams {
   coordinatorInternalNotification?: boolean
   /** Renderer user message id for the turn, used to group hook log events. */
   userMessageId?: string
+  composerSubmission?: import("../shared/mods/v2/composer-mentions").ComposerSubmission
 }
 
 export interface AgentResumeParams {
@@ -217,6 +218,11 @@ export type StreamEvent =
   | { type: "error"; error: string; message?: string }
 
 export interface Message {
+  /** Host-produced durable data, never execution or recovery authorization. */
+  function_row?: import("../shared/mods/v2/conversation-transcript").FunctionConversationTranscriptStamp
+  function_row_invalid?: true
+  /** Host-stamped submission provenance; renderer write payloads cannot set this field in DB. */
+  prompt_origin?: import("../shared/mods/v2/plugin-prompt").FunctionPluginPromptOrigin
   id: string
   /** Durable transcript order. Present on messages read from thread_messages pages. */
   ordinal?: number
@@ -375,6 +381,8 @@ export interface ThreadMessagesPage {
   legacyCheckpointMigrationStatus?: "migrating" | "complete" | null
   /** Older completed imports may still need the worker's one-time timing backfill. */
   legacyMessageTimesPending?: boolean
+  /** Ephemeral bootstrap proof: every checkpoint row passed native membership and projection checks. */
+  canonicalCheckpointVerified?: boolean
   /** Durable rows represented by bounded previews because their payload exceeded the page budget. */
   truncatedMessageIds?: string[]
   /** Present only on recovery reads, after checking every returned row's storage provenance. */
@@ -797,6 +805,8 @@ export interface PluginManifest {
 }
 
 export interface PluginMetadata {
+  /** Display-only installed-file hint; project entry still validates the real adapter. */
+  hasProjectMode?: boolean
   id: string
   name: string
   version: string
@@ -1187,6 +1197,7 @@ export interface UserInputQuestion {
   id: string
   question: string
   options: UserInputOption[]
+  multiSelect?: boolean
 }
 
 export interface UserInputRequest {
@@ -1198,6 +1209,13 @@ export interface UserInputRequest {
 }
 
 export type UserInputAnswer =
+  | {
+      type: "options"
+      questionId: string
+      optionIndices: number[]
+      labels: string[]
+      descriptions: string[]
+    }
   | {
       type: "option"
       questionId: string

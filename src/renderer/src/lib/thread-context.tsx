@@ -9,12 +9,17 @@ import {
   useEffect,
   useLayoutEffect,
   useSyncExternalStore,
+  type Context,
   type ReactNode
 } from "react"
 
 /* eslint-disable react-refresh/only-export-components */
 import { useElectronStream } from "./use-electron-stream"
 import { ElectronIPCTransport, type StreamFallbackIndexBaselines } from "./electron-transport"
+import {
+  ThreadStreamHolderLifetime,
+  type ThreadStreamHolderIdentity
+} from "./thread-stream-holder-lifetime"
 import {
   fallbackIndexBaselinesFromMessages,
   updateFallbackIndexBaselineCache,
@@ -26,8 +31,17 @@ import {
   parseContextCompactionLifecycleEvent,
   type ContextCompactionLifecycleEvent
 } from "../../../shared/context-compaction-events"
-import { resolveHydratedThreadModel } from "../../../shared/thread-model-selection"
+import {
+  resolveHydratedThreadModel,
+  type ModelRoutingMode
+} from "../../../shared/thread-model-selection"
 import { LatestRequestGate } from "../../../shared/latest-request-gate"
+import {
+  ModelSelectionIntentRegistry,
+  type ModelSelectionIntent,
+  type RoutingModeChangeTicket
+} from "./model-selection-intent"
+import { functionConversationNoticeForThread } from "./function-conversation-notice"
 import { isExplicitNormalModeMetadata, isWorkflowModeMetadata } from "./coordinator-mode-helpers"
 import {
   applyWorkflowProgressEvent,
@@ -235,6 +249,7 @@ import {
 import { mergeSubagentSnapshotWithHistory } from "./subagent-state"
 import { disableChatReportUploadForThread } from "./chat-report-upload-cache"
 import { queueStorageKey } from "./queued-message-content"
+import { normalizeQueuedMessage } from "./queued-message-restore"
 
 const MESSAGE_TIMES_THREAD_VALUE_KEY = "messageTimes"
 const MESSAGE_TIME_ORDER_THREAD_VALUE_KEY = "messageTimeOrder"
@@ -681,6 +696,7 @@ export interface ThreadState {
   contextReminder: ContextReminderState
   harnessAgentmdLoadStatus: HarnessAgentmdLoadStatusState | null
   draftInput: string
+  draftRevision: number
   harnessNextActionDialogTips: string | null
   /**
    * Skill chip the user has selected for the next send. Kept alongside
@@ -901,6 +917,10 @@ export interface ThreadActions {
   /** Restore the effective model for display/runtime use without touching persisted metadata. */
   restoreCurrentModel: (modelId: string) => void
   setCurrentModel: (modelId: string) => void
+  captureModelSelectionIntent: () => ModelSelectionIntent
+  isModelSelectionIntentCurrent: (receipt: ModelSelectionIntent) => boolean
+  beginRoutingModeChange?: () => RoutingModeChangeTicket
+  finishRoutingModeChange?: (ticket: RoutingModeChangeTicket, mode?: ModelRoutingMode) => void
   openFile: (path: string, name: string) => void
   closeFile: (path: string) => void
   setActiveTab: (tab: "agent" | string) => void
@@ -909,6 +929,8 @@ export interface ThreadActions {
     update: ContextReminderState | ((prev: ContextReminderState) => ContextReminderState)
   ) => void
   setDraftInput: (input: string) => void
+  readPromptDraft: () => { text: string; revision: number }
+  applyPromptDraft: (expectedRevision: number, text: string) => boolean
   setHarnessNextActionDialogTips: (tips: string | null) => void
   setDraftSkill: (skill: SkillMetadata | null) => void
   setDraftBuiltinBrowser: (selected: boolean) => void
@@ -948,33 +970,6 @@ interface ThreadContextValue {
 // ── Draft-queue persistence (per-thread, localStorage) ────────────────────────
 // Best-effort: the in-memory ThreadState.queuedMessages is authoritative; this
 // only survives reloads/view-switches. Keyed by threadId.
-
-function normalizeQueuedMessage(raw: unknown): QueuedMessage | null {
-  if (!raw || typeof raw !== "object") return null
-  const item = raw as Partial<QueuedMessage>
-  if (typeof item.id !== "string" || !item.id) return null
-  if (typeof item.text !== "string") return null
-  const createdAt = item.created_at ? new Date(item.created_at) : new Date()
-  const updatedAt = item.updated_at ? new Date(item.updated_at) : createdAt
-  const handoffRequestedAt = item.handoffRequestedAt ? new Date(item.handoffRequestedAt) : null
-  return {
-    id: item.id,
-    text: item.text,
-    attachmentModelBlocks:
-      typeof item.attachmentModelBlocks === "string" ? item.attachmentModelBlocks : undefined,
-    attachmentDisplayPrefix:
-      typeof item.attachmentDisplayPrefix === "string" ? item.attachmentDisplayPrefix : undefined,
-    skillBlock: typeof item.skillBlock === "string" ? item.skillBlock : undefined,
-    builtinBrowser: item.builtinBrowser === true,
-    modelId: typeof item.modelId === "string" ? item.modelId : undefined,
-    handoffRequestedAt:
-      handoffRequestedAt && !Number.isNaN(handoffRequestedAt.getTime())
-        ? handoffRequestedAt
-        : undefined,
-    created_at: Number.isNaN(createdAt.getTime()) ? new Date() : createdAt,
-    updated_at: Number.isNaN(updatedAt.getTime()) ? new Date() : updatedAt
-  }
-}
 
 function loadQueuedMessages(threadId: string): QueuedMessage[] {
   try {
@@ -1045,6 +1040,7 @@ const createDefaultThreadState = (): ThreadState => ({
   contextReminder: createDefaultContextReminderState(),
   harnessAgentmdLoadStatus: null,
   draftInput: "",
+  draftRevision: 0,
   harnessNextActionDialogTips: null,
   draftSkill: null,
   draftBuiltinBrowser: false,
@@ -1467,11 +1463,17 @@ function retainResidentToolCallStates(
   return changed ? retained : states
 }
 
-const ThreadContext = createContext<ThreadContextValue | null>(null)
+// Fast Refresh may retain a memoized consumer from the previous module generation.
+// Preserve the Context identity (not its value) so it still reads the live Provider.
+const ThreadContext: Context<ThreadContextValue | null> =
+  import.meta.hot?.data.devclawThreadContext ?? createContext<ThreadContextValue | null>(null)
+if (import.meta.hot) import.meta.hot.data.devclawThreadContext = ThreadContext
 
 // Custom event types from the stream
 interface CustomEventData {
   type?: string
+  userMessageId?: string
+  text?: string
   compaction?: unknown
   request?: HITLRequest
   toolName?: string
@@ -1582,17 +1584,28 @@ interface CustomEventData {
   agentmdPromptPreview?: string
 }
 
+interface CommittedThreadStreamHolder extends ThreadStreamHolderIdentity {
+  readonly token: object
+  readonly transport: ElectronIPCTransport
+  readonly getSnapshot: StreamInstance["getSnapshot"]
+}
+
 interface ThreadStreamHolderProps {
   threadId: string
+  holderKey: string
+  actor: object
   managedAutoSendRun?: ManagedAutoSendStreamStartEvent
   onManagedAutoSendRunTerminal: (threadId: string, runId: string) => void
   messages: readonly Message[]
   checkpointFallbackIndexBaselines?: StreamFallbackIndexBaselines
   subagentTranscriptBaseline: Record<string, Message[]>
+  subagentTranscriptBaselineReady: boolean
   onStreamUpdate: (threadId: string, data: StreamData) => void
-  onCustomEvent: (threadId: string, data: CustomEventData) => void
+  onCustomEvent: (threadId: string, data: CustomEventData, receipt?: ModelSelectionIntent) => void
+  captureModelSelectionIntent: (threadId: string) => ModelSelectionIntent
   onError: (threadId: string, error: Error) => void
-  onDispose: (threadId: string) => void
+  onHolderCommitted: (record: CommittedThreadStreamHolder) => () => void
+  isHolderCurrent: (record: CommittedThreadStreamHolder) => boolean
 }
 
 const DEFAULT_THREAD_STATE = normalizeThreadState(createDefaultThreadState())
@@ -1606,15 +1619,20 @@ type ManagedAutoSendRunState = {
 // to thread A from re-running useStream for every previously opened thread.
 const ThreadStreamHolder = memo(function ThreadStreamHolder({
   threadId,
+  holderKey,
+  actor,
   managedAutoSendRun,
   onManagedAutoSendRunTerminal,
   messages,
   checkpointFallbackIndexBaselines,
   subagentTranscriptBaseline,
+  subagentTranscriptBaselineReady,
   onStreamUpdate,
   onCustomEvent,
+  captureModelSelectionIntent,
   onError,
-  onDispose
+  onHolderCommitted,
+  isHolderCurrent
 }: ThreadStreamHolderProps): null {
   const [getMessageFallbackIndexBaselines] = useState(() => {
     let cache: FallbackIndexBaselineCache | undefined
@@ -1665,16 +1683,60 @@ const ThreadStreamHolder = memo(function ThreadStreamHolder({
   const stream = useElectronStream({
     transport,
     threadId,
-    onCustomEvent: (data) => {
-      onCustomEventRef.current(threadId, data as CustomEventData)
+    captureModelSelectionIntent: () => captureModelSelectionIntent(threadId),
+    onCustomEvent: (data, receipt) => {
+      onCustomEventRef.current(threadId, data as CustomEventData, receipt)
     },
     onError: (error: unknown) => {
       onErrorRef.current(threadId, error instanceof Error ? error : new Error(String(error)))
     }
   })
+  const committedHolderRef = useRef<CommittedThreadStreamHolder | null>(null)
+  const seededBaselineRef = useRef(subagentTranscriptBaseline)
+  // Commit the actual seeded instance before a managed run can submit work.
+  useEffect(() => {
+    const record: CommittedThreadStreamHolder = Object.freeze({
+      threadId,
+      key: holderKey,
+      actor,
+      token: Object.freeze({}),
+      transport,
+      getSnapshot: stream.getSnapshot
+    })
+    committedHolderRef.current = record
+    const retire = onHolderCommitted(record)
+    return () => {
+      if (committedHolderRef.current === record) committedHolderRef.current = null
+      retire()
+    }
+  }, [actor, holderKey, onHolderCommitted, stream.getSnapshot, threadId, transport])
+
+  useEffect(() => {
+    const record = committedHolderRef.current
+    if (
+      !record ||
+      !subagentTranscriptBaselineReady ||
+      seededBaselineRef.current === subagentTranscriptBaseline ||
+      !isHolderCurrent(record) ||
+      record.getSnapshot().isLoading
+    ) {
+      return
+    }
+    transport.seedSubagentTranscriptBaseline(threadId, subagentTranscriptBaseline)
+    seededBaselineRef.current = subagentTranscriptBaseline
+  }, [
+    isHolderCurrent,
+    stream.isLoading,
+    subagentTranscriptBaseline,
+    subagentTranscriptBaselineReady,
+    threadId,
+    transport
+  ])
   const submittedManagedRunIdRef = useRef<string | null>(null)
 
   useEffect(() => {
+    const record = committedHolderRef.current
+    if (!record || !isHolderCurrent(record)) return
     if (!managedAutoSendRun || submittedManagedRunIdRef.current === managedAutoSendRun.runId) {
       return
     }
@@ -1691,7 +1753,7 @@ const ThreadStreamHolder = memo(function ThreadStreamHolder({
       .catch((error: unknown) => {
         onErrorRef.current(threadId, error instanceof Error ? error : new Error(String(error)))
       })
-  }, [managedAutoSendRun, stream, threadId])
+  }, [isHolderCurrent, managedAutoSendRun, stream, threadId])
 
   const latestStreamRef = useRef(stream)
   useEffect(() => {
@@ -1704,8 +1766,6 @@ const ThreadStreamHolder = memo(function ThreadStreamHolder({
   useEffect(() => {
     onStreamUpdateRef.current = onStreamUpdate
   }, [onStreamUpdate])
-
-  useEffect(() => () => onDispose(threadId), [onDispose, threadId])
 
   // Emit exactly once per observable snapshot. useStream returns a fresh wrapper
   // object on render, so depending on the wrapper itself doubles work and lets an
@@ -1749,12 +1809,25 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
       return { ...previous, [threadId]: { ...current, terminal: true } }
     })
   }, [])
+  const managedAutoSendRunsRef = useRef(managedAutoSendRuns)
+  managedAutoSendRunsRef.current = managedAutoSendRuns
+  const [holderLifetime] = useState(
+    () => new ThreadStreamHolderLifetime<CommittedThreadStreamHolder>()
+  )
   const [loadingStates, setLoadingStates] = useState<Record<string, boolean>>({})
   const initializedThreadsRef = useRef<Set<string>>(new Set())
   const previousCurrentThreadIdRef = useRef<string | null>(null)
   const actionsCache = useRef<Record<string, ThreadActions>>({})
   const threadStatesRef = useRef<Record<string, ThreadState>>({})
   const modelSelectionGateRef = useRef(new LatestRequestGate())
+  const [modelSelectionIntents] = useState(() => new ModelSelectionIntentRegistry())
+  const captureModelSelectionIntent = useCallback(
+    (threadId: string) => modelSelectionIntents.capture(threadId),
+    [modelSelectionIntents]
+  )
+  useEffect(() => window.api.mods.onConfigurationChanged(() => {
+    modelSelectionIntents.onModsConfigurationChanged()
+  }), [modelSelectionIntents])
   const threadRegistryRevisionRef = useRef(0)
   const allThreadStatesSnapshotRef = useRef<{
     revision: number
@@ -1887,6 +1960,8 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
   const hookLogBucketsRef = useRef<Record<string, HookLogBucket[]>>({})
   const hookLogsSubscribersRef = useRef<Record<string, Set<() => void>>>({})
   const pendingHookLogBucketOpensRef = useRef<Record<string, Set<string>>>({})
+  const droppedComposerPresenceQueries = useRef(new Map<string, symbol>())
+  const confirmedEmptyComposerSubmissions = useRef(new Map<string, string>())
   const pendingVisibleMessageCommitsRef = useRef<Record<string, PendingVisibleMessageCommit[]>>({})
   const [pendingVisibleMessageCommitVersion, setPendingVisibleMessageCommitVersion] = useState(0)
 
@@ -2035,6 +2110,8 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
     []
   )
 
+  const workspaceStateGenerationRef = useRef<Record<string, number>>({})
+
   const updateThreadState = useCallback(
     (threadId: string, updater: (previous: ThreadState) => Partial<ThreadState>): void => {
       if (isThreadRetired(threadId)) return
@@ -2042,6 +2119,13 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
         threadStatesRef.current[threadId] ?? createDefaultThreadState()
       )
       const updates = updater(current)
+      if (updates.workspacePath !== undefined) {
+        workspaceStateGenerationRef.current[threadId] =
+          (workspaceStateGenerationRef.current[threadId] ?? 0) + 1
+        useAppStore.getState().syncThreadWorkspaceSummary(threadId, updates.workspacePath)
+      }
+      if (updates.draftInput !== undefined && updates.draftInput !== current.draftInput)
+        updates.draftRevision = (current.draftRevision ?? 0) + 1
       const updateKeys = Object.keys(updates) as Array<keyof ThreadState>
       if (
         updateKeys.length === 0 ||
@@ -3604,6 +3688,7 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
     threadProviderMountedRef.current = true
     return () => {
       threadProviderMountedRef.current = false
+      modelSelectionIntents.clear()
       for (const timer of Object.values(subagentTranscriptHydrationRetryTimersRef.current)) {
         window.clearTimeout(timer)
       }
@@ -3626,7 +3711,7 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
       subagentTranscriptPersistRetryTimersRef.current = {}
       subagentTranscriptPersistRecoveryRequestsRef.current.clear()
     }
-  }, [saveSubagentTranscripts])
+  }, [modelSelectionIntents, saveSubagentTranscripts])
 
   /**
    * Hands a possible coordinator summary to the main process, like the workflow
@@ -4142,7 +4227,7 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
 
   // Handle custom events from ThreadStreamHolder (interrupts, workspace updates, etc.)
   const handleCustomEvent = useCallback(
-    (threadId: string, data: CustomEventData) => {
+    (threadId: string, data: CustomEventData, modelSelectionIntent?: ModelSelectionIntent) => {
       if (import.meta.env.DEV && data.type !== "coordinator_ai_snapshot_message") {
         console.debug("[ThreadContext] Custom event received:", {
           threadId,
@@ -4153,6 +4238,46 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
         })
       }
       switch (data.type) {
+        case "mods_prompt_admitted":
+        case "mods_prompt_dropped": {
+          if (!data.userMessageId) break
+          const id = data.userMessageId
+          const dropped = data.type === "mods_prompt_dropped"
+          const wasConfirmedEmpty = confirmedEmptyComposerSubmissions.current.get(threadId) === id
+          if (wasConfirmedEmpty) confirmedEmptyComposerSubmissions.current.delete(threadId)
+          updateThreadState(threadId, (state) => {
+            const messages = dropped
+              ? state.messages.filter((message) => message.id !== id || message.role !== "user")
+              : state.messages.map((message) => message.id === id && message.role === "user" &&
+                typeof data.text === "string" ? { ...message, content: data.text } : message)
+            return { messages, ...(dropped && wasConfirmedEmpty &&
+              !messages.some(isVisibleCheckpointTranscriptMessage)
+              ? { historyConversationPresence: "empty" as const } : {}) }
+          })
+          if (dropped) {
+            pendingHookLogBucketOpensRef.current[threadId]?.delete(id)
+            toast.warning(typeof data.reason === "string" ? data.reason : "模组没有接收这条消息")
+            if (wasConfirmedEmpty) break
+            const query = Symbol()
+            droppedComposerPresenceQueries.current.set(threadId, query)
+            void window.api.threads.getMessagesPage(threadId, {
+              limit: 1, includeVisibleMessagePresence: true
+            }).then((page) => {
+              if (droppedComposerPresenceQueries.current.get(threadId) !== query ||
+                !threadStatesRef.current[threadId]) return
+              updateThreadState(threadId, (state) => ({
+                historyConversationPresence: state.messages.some(isVisibleCheckpointTranscriptMessage)
+                  ? "nonempty" : resolveConversationPresenceFromPage(page, { legacyFallbackPending: true })
+              }))
+            }).catch(() => {
+              // Unconfirmed durable history remains locked until normal hydration can retry.
+            }).finally(() => {
+              if (droppedComposerPresenceQueries.current.get(threadId) === query)
+                droppedComposerPresenceQueries.current.delete(threadId)
+            })
+          }
+          break
+        }
         case "message_id_alias":
           applyMessageIdAlias(
             threadId,
@@ -4374,6 +4499,10 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
         }
         case "routing_result":
           if (data.resolvedModelId && data.resolvedTier) {
+            if (modelSelectionIntent && (modelSelectionIntent.threadId !== threadId ||
+              !modelSelectionIntents.isLifetimeCurrent(modelSelectionIntent))) break
+            const canUpdateModel = !modelSelectionIntent ||
+              modelSelectionIntents.isCurrent(modelSelectionIntent)
             updateThreadState(threadId, () => ({
               routingResult: {
                 resolvedModelId: data.resolvedModelId!,
@@ -4385,7 +4514,7 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
               // Note: only update in-memory state, do NOT persist to thread
               // metadata — that stays as the user's manual selection for
               // pinned mode fallback.
-              currentModel: data.resolvedModelId!
+              ...(canUpdateModel ? { currentModel: data.resolvedModelId! } : {})
             }))
           }
           break
@@ -4916,6 +5045,7 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
       appendSubagentTranscriptMessages,
       refreshGoalUi,
       scheduleCoordinatorNotificationTurn,
+      modelSelectionIntents,
       updateThreadState
     ]
   )
@@ -4927,6 +5057,12 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
       }
 
       const actions: ThreadActions = {
+        captureModelSelectionIntent: () => modelSelectionIntents.capture(threadId),
+        isModelSelectionIntentCurrent: (receipt) => receipt.threadId === threadId &&
+          modelSelectionIntents.isCurrent(receipt),
+        beginRoutingModeChange: () => modelSelectionIntents.beginRoutingModeChange(),
+        finishRoutingModeChange: (ticket, mode) =>
+          modelSelectionIntents.finishRoutingModeChange(ticket, mode),
         syncDurableTranscript: async (requiredMessageIds: string[] = []) => {
           const seq = durableTranscriptSyncGateRef.current.begin(threadId)
           return applyDurableTranscriptSnapshot(threadId, seq, requiredMessageIds)
@@ -4940,6 +5076,10 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
           // Old buckets stay around (up to HOOK_LOG_BUCKET_RING_SIZE) so a
           // user can scroll back and inspect what hooks ran in earlier turns.
           if (normalizedMessage.role === "user") {
+            const stateBeforeSubmit = threadStatesRef.current[threadId]
+            if (stateBeforeSubmit?.historyConversationPresence === "empty" &&
+              !stateBeforeSubmit.messages.some(isVisibleCheckpointTranscriptMessage))
+              confirmedEmptyComposerSubmissions.current.set(threadId, normalizedMessage.id)
             // A new user message lifts the hold Stop put on the summary.
             void window.api.workflows
               .suppressPendingNotification(threadId, false)
@@ -5605,9 +5745,11 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
           updateThreadState(threadId, () => ({ hookInterruption: null }))
         },
         restoreCurrentModel: (modelId: string) => {
+          modelSelectionIntents.advance(threadId)
           updateThreadState(threadId, () => ({ currentModel: modelId }))
         },
         setCurrentModel: (modelId: string) => {
+          modelSelectionIntents.advance(threadId)
           updateThreadState(threadId, () => ({ currentModel: modelId }))
           if (isThreadDeletionPending(threadId)) return
           // Only intentional model selection changes should touch metadata.model.
@@ -5686,6 +5828,19 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
         setDraftInput: (input: string) => {
           updateThreadState(threadId, () => ({ draftInput: input }))
         },
+        readPromptDraft: () => {
+          const state = threadStatesRef.current[threadId]
+          return { text: state?.draftInput ?? "", revision: state?.draftRevision ?? 0 }
+        },
+        applyPromptDraft: (expectedRevision: number, text: string) => {
+          let applied = false
+          updateThreadState(threadId, (state) => {
+            if ((state.draftRevision ?? 0) !== expectedRevision) return {}
+            applied = true
+            return { draftInput: text }
+          })
+          return applied
+        },
         setHarnessNextActionDialogTips: (tips: string | null) => {
           const normalizedTips = tips?.trim() || null
           updateThreadState(threadId, () => ({ harnessNextActionDialogTips: normalizedTips }))
@@ -5704,6 +5859,7 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
     [
       applyDurableTranscriptSnapshot,
       cancelThreadHistoryHydrationRetry,
+      modelSelectionIntents,
       messageWindowIntentCoordinator,
       openHookLogBucket,
       rememberDurableMessageIds,
@@ -5750,7 +5906,9 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
           pageWindows.some((window) => window.reloadCursor !== null)
         const disposition = getThreadHistoryHydrationRetryDisposition(
           messageWindowIntentCoordinator.activeKind(threadId),
-          hasHistoricalWindow
+          hasHistoricalWindow,
+          streamDataRef.current[threadId]?.stream?.getSnapshot().isLoading === true ||
+            state?.activeTurnStartTime != null
         )
         if (disposition === "wait") {
           threadHistoryHydrationRetryTimersRef.current[threadId] = window.setTimeout(
@@ -5778,6 +5936,7 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
   const loadThreadHistory = useCallback(
     async (threadId: string) => {
       if (isThreadDeletionPending(threadId)) return
+      const modelSelectionIntent = modelSelectionIntents.capture(threadId)
       const hadPublishedTranscript = firstTranscriptPublishedThreadIdsRef.current.has(threadId)
       const transcriptHydrationIntent = messageWindowIntentCoordinator.begin(threadId, "hydrate")
       if (!hadPublishedTranscript) {
@@ -5967,13 +6126,19 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
           return { succeeded: false as const, error, legacyMessagePage: null }
         }
       })()
-      const routingModeLoad = window.api.routing.getMode().catch((error) => {
+      const routingModeRead = modelSelectionIntents.beginRoutingModeRead()
+      const routingModeLoad = window.api.routing.getMode().then((mode) => {
+        if (isCurrentLoad() && modelSelectionIntents.isLifetimeCurrent(modelSelectionIntent))
+          modelSelectionIntents.confirmRoutingModeRead(routingModeRead, mode)
+        return mode
+      }).catch((error) => {
         console.warn(
           `[ThreadContext] Failed to load routing mode for thread ${threadId}; using pinned:`,
           error
         )
         return "pinned" as const
       })
+      const workspaceHydrationGeneration = workspaceStateGenerationRef.current[threadId] ?? 0
       const threadDetailsLoad = Promise.all([
         window.api.threads.get(
           threadId,
@@ -5999,14 +6164,15 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
           persistedMessageTimeOrder = getMessageTimeOrder(thread.thread_values)
           const metadata = thread.metadata || {}
           actions.setGitContext(getGitContextFromMetadata(metadata))
-          if (metadata.workspacePath) {
+          if (metadata.workspacePath &&
+            (workspaceStateGenerationRef.current[threadId] ?? 0) === workspaceHydrationGeneration) {
             const workspacePath = metadata.workspacePath as string
             actions.setWorkspacePath(workspacePath)
           }
           // Pinned mode restores the user's explicit selection; auto mode restores the
           // model that routing actually used for the previous turn.
           const hydratedModel = resolveHydratedThreadModel(metadata, routingMode)
-          if (hydratedModel.modelId) {
+          if (hydratedModel.modelId && modelSelectionIntents.isCurrent(modelSelectionIntent)) {
             updateThreadState(threadId, () => ({
               currentModel: hydratedModel.modelId,
               routingResult: hydratedModel.routingResult
@@ -6618,6 +6784,7 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
     [
       flushGoalSubturnComplete,
       foregroundHydrationGeneration,
+      modelSelectionIntents,
       getThreadActions,
       handleStreamUpdate,
       messageWindowIntentCoordinator,
@@ -6649,6 +6816,7 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
   const approvalListenerCleanups = useRef<Record<string, Array<() => void>>>({})
   // Track queued-message-injection listeners per thread.
   const queueListenerCleanups = useRef<Record<string, () => void>>({})
+  const conversationNoticeListenerCleanups = useRef<Record<string, () => void>>({})
   // Track request_user_input listeners per thread.
   const userInputListenerCleanups = useRef<Record<string, Array<() => void>>>({})
   // Cleanup can race with an already queued callback and an immediate reopen.
@@ -7342,6 +7510,18 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
         cleanupCancel
       ]
 
+      const noticeCleanup = window.api.mods?.onConversationNotice?.((event) => {
+        if (event.threadId !== threadId || !isCurrentListenerEpoch()) return
+        const thread = useAppStore.getState().threads.find(item => item.thread_id === threadId)
+        const message = functionConversationNoticeForThread(event, thread)
+        if (!message) return
+        // This native system row is already saved. It has no user submission side effects.
+        updateThreadState(threadId, state => ({
+          messages: mergePersistedMessagesIntoTranscript(state.messages, [message])
+        }))
+      })
+      if (noticeCleanup) conversationNoticeListenerCleanups.current[threadId] = noticeCleanup
+
       // When the main process injects steered messages into the running turn,
       // drop them from the draft queue and surface them as committed user turns
       // (the model already received them; the transcript should match).
@@ -7562,6 +7742,8 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
       delete approvalListenerCleanups.current[threadId]
       queueListenerCleanups.current[threadId]?.()
       delete queueListenerCleanups.current[threadId]
+      conversationNoticeListenerCleanups.current[threadId]?.()
+      delete conversationNoticeListenerCleanups.current[threadId]
       userInputListenerCleanups.current[threadId]?.forEach((cleanup) => cleanup())
       delete userInputListenerCleanups.current[threadId]
     },
@@ -7570,6 +7752,7 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
 
   const cleanupThread = useCallback(
     (threadId: string) => {
+      modelSelectionIntents.release(threadId)
       // Invalidate a model read started by the deleted row. Reusing the same id
       // later must not let that old continuation patch the replacement row.
       const modelGateGeneration = modelSelectionGateRef.current.begin(threadId)
@@ -7637,6 +7820,8 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
       delete streamDataRef.current[threadId]
       delete streamSubscribersRef.current[threadId]
       delete hookLogBucketsRef.current[threadId]
+      confirmedEmptyComposerSubmissions.current.delete(threadId)
+      droppedComposerPresenceQueries.current.delete(threadId)
       delete pendingHookLogBucketOpensRef.current[threadId]
       delete pendingVisibleMessageCommitsRef.current[threadId]
       delete liveStreamAccumulatorsRef.current[threadId]
@@ -7668,6 +7853,7 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
       clearSchedulerMainStreamingForThread,
       coordinatorWorkerRequestCache,
       deleteThreadState,
+      modelSelectionIntents,
       messageWindowIntentCoordinator,
       releaseThreadListeners
     ]
@@ -7692,6 +7878,38 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
     if (!accumulator?.active) delete liveStreamAccumulatorsRef.current[threadId]
     delete transitionalLiveMessagesRef.current[threadId]
   }, [])
+
+  const isHolderCurrent = useCallback(
+    (record: CommittedThreadStreamHolder): boolean => {
+      const actor = threadListenerEpochRef.current[record.threadId]
+      if (!initializedThreadsRef.current.has(record.threadId) || !actor) return false
+      const key = holderLifetime.keyFor(
+        record.threadId,
+        actor,
+        managedAutoSendRunsRef.current[record.threadId]?.start.runId
+      )
+      return holderLifetime.isCurrent(record, actor, key)
+    },
+    [holderLifetime]
+  )
+
+  const handleHolderCommitted = useCallback(
+    (record: CommittedThreadStreamHolder): (() => void) => {
+      const actor = threadListenerEpochRef.current[record.threadId]
+      if (!initializedThreadsRef.current.has(record.threadId) || !actor) return () => undefined
+      const key = holderLifetime.keyFor(
+        record.threadId,
+        actor,
+        managedAutoSendRunsRef.current[record.threadId]?.start.runId
+      )
+      if (!holderLifetime.commit(record, actor, key)) return () => undefined
+      return () => {
+        // A stale cleanup must neither retire nor clear a successor snapshot.
+        if (holderLifetime.retire(record)) handleStreamHolderDispose(record.threadId)
+      }
+    },
+    [handleStreamHolderDispose, holderLifetime]
+  )
 
   const canDehydrateThread = useCallback(
     (threadId: string): boolean => {
@@ -7774,6 +7992,7 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
       // selected it; in that case retaining the hydrated state is the only safe
       // choice.
       if (!canDehydrateThread(threadId)) return
+      modelSelectionIntents.release(threadId)
 
       // Fence every async path before releasing listeners or scheduling React
       // state. Reopening the thread allocates a fresh generation/actions object
@@ -7807,6 +8026,8 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
       delete latestDurableMessagePageIdentitiesRef.current[threadId]
       delete checkpointFallbackIndexBaselinesRef.current[threadId]
       delete subagentTranscriptsRef.current[threadId]
+      confirmedEmptyComposerSubmissions.current.delete(threadId)
+      droppedComposerPresenceQueries.current.delete(threadId)
       delete pendingHookLogBucketOpensRef.current[threadId]
       delete pendingVisibleMessageCommitsRef.current[threadId]
       delete subagentTranscriptDirtyIdsRef.current[threadId]
@@ -7841,6 +8062,7 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
       canDehydrateThread,
       clearSchedulerStreamingForThread,
       coordinatorWorkerRequestCache,
+      modelSelectionIntents,
       messageWindowIntentCoordinator,
       releaseThreadListeners,
       updateThreadState
@@ -7982,25 +8204,46 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
       {/* Render stream holders for all active threads */}
       {Array.from(activeThreadIds).map((threadId) => {
         const state = threadStatesRef.current[threadId]
-        if (!state?.subagentTranscriptBaselineReady) return null
+        const actor = threadListenerEpochRef.current[threadId]
+        if (!state || !actor || !initializedThreadsRef.current.has(threadId)) return null
         const managedAutoSendRunState = managedAutoSendRuns[threadId]
         const managedAutoSendRun = managedAutoSendRunState?.terminal
           ? undefined
           : managedAutoSendRunState?.start
-        // Keep the holder mounted on terminal; a later remount must not replay the old run.
+        // Preserve the run key on terminal so the same holder cannot replay the old run.
+        const holderKey = holderLifetime.keyFor(
+          threadId,
+          actor,
+          managedAutoSendRunState?.start.runId
+        )
+        if (
+          !holderLifetime.canRender(
+            threadId,
+            actor,
+            holderKey,
+            state.subagentTranscriptBaselineReady
+          )
+        ) {
+          return null
+        }
         return (
           <ThreadStreamHolder
-            key={`${threadId}:${managedAutoSendRunState?.start.runId ?? "standard"}`}
+            key={holderKey}
             threadId={threadId}
+            holderKey={holderKey}
+            actor={actor}
             managedAutoSendRun={managedAutoSendRun}
             onManagedAutoSendRunTerminal={handleManagedAutoSendRunTerminal}
             messages={state.messages}
             checkpointFallbackIndexBaselines={checkpointFallbackIndexBaselinesRef.current[threadId]}
             subagentTranscriptBaseline={state.subagentTranscripts}
+            subagentTranscriptBaselineReady={state.subagentTranscriptBaselineReady}
             onStreamUpdate={handleStreamUpdate}
             onCustomEvent={handleCustomEvent}
+            captureModelSelectionIntent={captureModelSelectionIntent}
             onError={handleError}
-            onDispose={handleStreamHolderDispose}
+            onHolderCommitted={handleHolderCommitted}
+            isHolderCurrent={isHolderCurrent}
           />
         )
       })}

@@ -1,0 +1,5 @@
+{
+  "apiVersion": "cmb.mods/v2",
+  "id": "my-first-spark",
+  "entry": "hello.ts"
+}

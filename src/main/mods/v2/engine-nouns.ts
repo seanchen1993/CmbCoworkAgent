@@ -4,7 +4,8 @@ import {
   MOD_TIERS,
   ModFunctionError,
   isModObject,
-  matchesEventPattern
+  matchesEventPattern,
+  type FunctionInvocation
 } from "../../../shared/mods/v2/contracts"
 import { encodeModJson } from "../../../shared/mods/validation"
 import type { FunctionPlugin } from "./dispatcher"
@@ -13,14 +14,22 @@ const validName = (name: string): boolean =>
   /^[a-z][a-zA-Z0-9_-]{0,79}$/.test(name) &&
   !["plugin", "__proto__", "constructor", "prototype"].includes(name)
 
+export interface FunctionEngineProviderBinding {
+  readonly plugin: FunctionPlugin
+  readonly handle: string
+  readonly method: string
+}
+
 /** Handles are meaningful only in the owning guest and this session's immutable fold. */
 export class FunctionEngineNouns {
   private table?: ModObject
+  private readonly providers = new Map<string, FunctionEngineProviderBinding>()
   private readonly delegates = new AsyncLocalStorage<readonly FunctionPlugin[]>()
 
   constructor(
     private readonly plugins: readonly FunctionPlugin[],
-    private readonly assertLive: (plugin?: FunctionPlugin) => void
+    private readonly assertLive: (plugin?: FunctionPlugin) => void,
+    private readonly invocationContext: () => Pick<FunctionInvocation, "dispatchCutNs"> = () => ({})
   ) {}
 
   async build(signal: AbortSignal): Promise<void> {
@@ -68,7 +77,10 @@ export class FunctionEngineNouns {
           origin: { plugin: "engine", tier: "core" },
           capabilities: [],
           plugin: { name: plugin.name, root: plugin.root },
-          signal
+          modelProtocol: plugin.modelProtocol ?? "result-v1",
+          signal,
+          ownBudgetMs: 0,
+          ...this.invocationContext()
         }
       )
       const inherited = beneath ? await beneath : {}
@@ -102,7 +114,24 @@ export class FunctionEngineNouns {
       return result
     }
     // Never publish half a build. Runtime replacement creates an entirely new table.
-    this.table = await fold(0)
+    const table = await fold(0)
+    const providers = new Map<string, FunctionEngineProviderBinding>()
+    for (const [noun, descriptor] of Object.entries(table)) {
+      if (!isModObject(descriptor) || descriptor.provider === "") continue
+      const plugin = this.plugins.find(plugin => plugin.name === descriptor.provider)
+      if (!plugin || !isModObject(descriptor.methods))
+        throw new ModFunctionError("MODS_ENGINE_PROVIDER_UNAVAILABLE")
+      for (const [name, handle] of Object.entries(descriptor.methods)) {
+        if (typeof handle !== "string") throw new ModFunctionError("MODS_ENGINE_PROVIDER_UNAVAILABLE")
+        const method = `${noun}.${name}`
+        providers.set(method, Object.freeze({ plugin, handle, method }))
+      }
+    }
+    this.assertLive()
+    signal.throwIfAborted()
+    this.table = table
+    this.providers.clear()
+    for (const [method, binding] of providers) this.providers.set(method, binding)
   }
 
   capabilities(plugin: FunctionPlugin): string[] {
@@ -125,7 +154,7 @@ export class FunctionEngineNouns {
     }
   }
 
-  provider(method: string): { plugin: FunctionPlugin; handle: string } | undefined {
+  provider(method: string): FunctionEngineProviderBinding | undefined {
     const [noun, name] = method.split(".")
     const descriptor = this.table?.[noun]
     if (!isModObject(descriptor) || descriptor.provider === "") return undefined
@@ -133,7 +162,10 @@ export class FunctionEngineNouns {
     const handle = (descriptor.methods as ModObject)[name]
     if (!plugin || typeof handle !== "string")
       throw new ModFunctionError("MODS_ENGINE_PROVIDER_UNAVAILABLE")
-    return { plugin, handle }
+    const binding = this.providers.get(method)
+    if (!binding || binding.plugin !== plugin || binding.handle !== handle)
+      throw new ModFunctionError("MODS_ENGINE_PROVIDER_UNAVAILABLE")
+    return binding
   }
 
   async delegated<T>(caller: FunctionPlugin, run: () => Promise<T>): Promise<T> {
@@ -151,7 +183,8 @@ export class FunctionEngineNouns {
       plugin: FunctionPlugin,
       method: string,
       args: ModJson,
-      signal: AbortSignal
+      signal: AbortSignal,
+      provider: FunctionEngineProviderBinding
     ) => Promise<ModJson | undefined>
   ): Promise<ModJson | undefined> {
     const provider = this.provider(method)
@@ -163,7 +196,7 @@ export class FunctionEngineNouns {
       input,
       async (nestedMethod, args, nestedSignal) => {
         this.assertAccess(provider.plugin, nestedMethod)
-        const value = await capability(provider.plugin, nestedMethod, args, nestedSignal)
+        const value = await capability(provider.plugin, nestedMethod, args, nestedSignal, provider)
         return value === undefined ? {} : { value }
       },
       {
@@ -172,8 +205,10 @@ export class FunctionEngineNouns {
         provider: provider.handle,
         capabilities: this.capabilities(provider.plugin),
         plugin: { name: provider.plugin.name, root: provider.plugin.root },
+        modelProtocol: provider.plugin.modelProtocol ?? "result-v1",
         signal,
-        timeoutMs: 120000
+        timeoutMs: 120000,
+        ...this.invocationContext()
       }
     )
     this.assertAccess(caller, method)

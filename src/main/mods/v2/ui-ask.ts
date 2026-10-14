@@ -1,7 +1,7 @@
 import { isModObject, ModFunctionError } from "../../../shared/mods/v2/contracts"
 import { requestUserInputSchema } from "../../agent/tools/user-input-schema"
 
-/** The desktop host currently exposes the original single-selection native question tool. */
+/** Reuse the original native question tool, including its optional multiple selection. */
 export function functionAskInput(args: unknown[]) {
   const fail = (): never => {
     throw new ModFunctionError("MODS_UI_ASK_ARGUMENTS")
@@ -14,8 +14,7 @@ export function functionAskInput(args: unknown[]) {
     Object.keys(options).some((k) => !["options", "header", "multiSelect"].includes(k))
   )
     return fail()
-  if (options.multiSelect !== undefined)
-    throw new ModFunctionError("MODS_UI_ASK_MULTISELECT_UNSUPPORTED")
+  if (options.multiSelect !== undefined && typeof options.multiSelect !== "boolean") return fail()
   if (options.options !== undefined && !Array.isArray(options.options)) return fail()
   const labels = [...((options.options as unknown[]) ?? [])]
   if (
@@ -32,6 +31,7 @@ export function functionAskInput(args: unknown[]) {
         id: "mod_question",
         header: Object.hasOwn(options, "header") ? options.header : "Question",
         question: args[0],
+        ...(options.multiSelect === undefined ? {} : { multiSelect: options.multiSelect }),
         options: labels.map((label) => ({ label, description: label }))
       }
     ]
@@ -60,7 +60,16 @@ export function functionAskAnswer(value: unknown): string {
   const answer = result.answers.mod_question
   if (!isModObject(answer)) return fail()
   const text =
-    answer.type === "option" ? answer.label : answer.type === "other" ? answer.text : undefined
+    answer.type === "option"
+      ? answer.label
+      : answer.type === "other"
+        ? answer.text
+        : answer.type === "options" &&
+            Array.isArray(answer.labels) &&
+            answer.labels.length > 0 &&
+            answer.labels.every((label) => typeof label === "string" && label.length > 0)
+          ? answer.labels.join(", ")
+          : undefined
   if (typeof text !== "string" || !text || text.length > 10000) return fail()
   return text
 }

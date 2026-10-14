@@ -15,9 +15,9 @@ import { resolveAgentStreamRequestChannel } from "../../shared/agent-stream-chan
 import { formatSkillUseBlock } from "../../shared/skill-use-block"
 import {
   isSkillOwnedByBoundPlugin,
-  isSkillVisibleForProjectMode,
   type ProjectModeSkillScope
 } from "../../shared/skill-visibility"
+import { isSkillVisibleForProjectMode } from "../plugins/derivation-skill-visibility"
 import {
   AUTO_MODE_MANAGED_STREAM_STARTED_CHANNEL,
   HARNESS_SOURCE,

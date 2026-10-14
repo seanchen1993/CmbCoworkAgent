@@ -28,7 +28,10 @@ const keywords = new Set([
 ])
 
 /** A bounded, non-executable JSON Schema profile. Unsupported keywords fail at registration. */
-export function validateToolSchema(schema: ModObject): void {
+export function validateToolSchema(
+  schema: ModObject,
+  options: { allowReservedKeys?: boolean } = {}
+): void {
   if (
     encodeModJson(schema).length > 16000 ||
     (schema.type !== undefined && schema.type !== "object")
@@ -63,6 +66,7 @@ export function validateToolSchema(schema: ModObject): void {
       if (!isModObject(value.properties)) throw new ModFunctionError("MODS_TOOL_SCHEMA")
       if (
         root &&
+        !options.allowReservedKeys &&
         ["tool", "tool_use_id", "agentId"].some((key) =>
           Object.hasOwn(value.properties as ModObject, key)
         )
@@ -102,6 +106,7 @@ export function validateToolSchema(schema: ModObject): void {
       throw new ModFunctionError("MODS_TOOL_SCHEMA")
     if (
       root &&
+      !options.allowReservedKeys &&
       Array.isArray(value.required) &&
       value.required.some((key) => ["tool", "tool_use_id", "agentId"].includes(String(key)))
     )
@@ -137,6 +142,7 @@ export function validateToolSchema(schema: ModObject): void {
   visit(schema, 0, new Set(), true)
   const properties = schema.properties
   if (
+    !options.allowReservedKeys &&
     ["tool", "tool_use_id", "agentId"].some(
       (key) =>
         (isModObject(properties) && Object.hasOwn(properties, key)) ||

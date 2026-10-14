@@ -3,6 +3,7 @@ import { join } from "node:path"
 import { tmpdir } from "node:os"
 import { afterEach, expect, it, vi } from "vitest"
 import { FUNCTION_READ_LIMIT, ProjectFunctionFiles } from "./file-access"
+import { filterModData } from "../publication"
 
 const roots: string[] = []
 afterEach(async () => {
@@ -39,8 +40,8 @@ it("reads UTF-8 files, sorts directory entries and returns real metadata", async
   await mkdir(join(f.project, "a"))
   expect(await f.files.run("fs.read", "b.txt", f.signal)).toBe("你好")
   expect(await f.files.run("fs.list", ".", f.signal)).toEqual([
-    { name: "a", kind: "dir", size: 0, isLink: false },
-    { name: "b.txt", kind: "file", size: 6, isLink: false }
+    { name: "a", kind: "dir", size: 0, mtimeMs: 0, isLink: false },
+    { name: "b.txt", kind: "file", size: 6, mtimeMs: expect.any(Number), isLink: false }
   ])
   expect(await f.files.run("fs.stat", join(f.project, "b.txt"), f.signal)).toMatchObject({
     kind: "file",
@@ -51,6 +52,38 @@ it("reads UTF-8 files, sorts directory entries and returns real metadata", async
   await expect(f.files.run("fs.read", "absent", f.signal)).rejects.toMatchObject({
     code: "MODS_FS_NOT_FOUND"
   })
+})
+
+it("publishes exact binary bytes and explicitly refuses policy suppression", async () => {
+  const f = await fixture()
+  const bytes = Buffer.from([0, 255, 192, 128, 10])
+  await writeFile(join(f.project, "data.bin"), bytes)
+  expect(await f.files.run("fs.read", "data.bin", f.signal, { as: "bytes" }))
+    .toEqual({ base64: bytes.toString("base64") })
+  const protectedFiles = new ProjectFunctionFiles(f.project, () => {},
+    async value => filterModData(value, true))
+  await expect(protectedFiles.run("fs.read", "data.bin", f.signal, { as: "bytes" }))
+    .rejects.toThrow("MODS_FS_BYTES_POLICY")
+})
+
+it("keeps byte reads behind path, size, cancellation and publication revocation checks", async () => {
+  const f = await fixture()
+  const options = { as: "bytes" as const }
+  await writeFile(join(f.project, "data.bin"), Buffer.from([0, 255]))
+  await writeFile(join(f.project, "large"), Buffer.alloc(FUNCTION_READ_LIMIT + 1))
+  await expect(f.files.run("fs.read", "../outside", f.signal, options))
+    .rejects.toThrow("MODS_FS_OUTSIDE_PROJECT")
+  await expect(f.files.run("fs.read", "large", f.signal, options))
+    .rejects.toThrow("MODS_FS_READ_LIMIT")
+  const controller = new AbortController()
+  const files = new ProjectFunctionFiles(f.project, () => {}, async value => {
+    controller.abort(Error("revoked during bytes publication"))
+    return value
+  })
+  await expect(files.run("fs.read", "data.bin", controller.signal, options))
+    .rejects.toThrow("revoked during bytes publication")
+  await expect(files.run("fs.read", "data.bin", controller.signal, options))
+    .rejects.toThrow("revoked during bytes publication")
 })
 
 it("refuses traversal, outside junctions, ADS and device paths", async () => {
@@ -66,7 +99,7 @@ it("refuses traversal, outside junctions, ADS and device paths", async () => {
   for (const path of ["file:secret", "NUL", "aux.txt", "name. ", "\\\\?\\C:\\private.txt"])
     await expect(f.files.run("fs.read", path, f.signal)).rejects.toThrow("MODS_FS_PATH")
   expect(await f.files.run("fs.list", ".", f.signal)).toEqual([
-    { name: "link", kind: "other", size: 0, isLink: true }
+    { name: "link", kind: "other", size: 0, mtimeMs: 0, isLink: true }
   ])
 })
 
@@ -157,7 +190,7 @@ it("applies real backend path policy before reading and hides denied directory e
   )
   expect(await files.run("fs.exists", "private.txt", f.signal)).toBe(false)
   expect(await files.run("fs.list", ".", f.signal)).toEqual([
-    { name: "public.txt", kind: "file", size: 6, isLink: false }
+    { name: "public.txt", kind: "file", size: 6, mtimeMs: expect.any(Number), isLink: false }
   ])
   expect(query).toHaveBeenCalledWith("host:read_file", { file_path: join(f.project, "public.txt") })
 })

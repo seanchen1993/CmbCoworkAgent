@@ -106,7 +106,7 @@ it("skips the calling tool registration when it asks inside a tool hook", async 
   const { session, callTool } = await fixture(`
     on("command.run",{command:"ask"},async($)=>({text:(await $.tool.call({tool:"read_file",file_path:"x"})).result}));
     on("tool.call",async($,e)=> {
-      if(e.tool!=="read_file") throw Error("recursive question");
+      if(e.tool!=="Read") throw Error("recursive question");
       return {result:await $.ui.ask("Continue?")}
     });
   `)

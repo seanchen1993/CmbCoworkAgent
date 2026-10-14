@@ -84,12 +84,14 @@ export function createPhysicalStreamRunSetupGuard({
   isActive,
   ownsLease = isActive,
   release,
-  onActiveError
+  onActiveError,
+  onOwnedCancellation
 }: {
   isActive: () => boolean
   ownsLease?: () => boolean
   release: () => void
   onActiveError: (error: unknown) => void
+  onOwnedCancellation?: () => void
 }): PhysicalStreamRunSetupGuard {
   let closed = false
   const cleanups: Array<(wasActive: boolean, wasOwner: boolean) => void> = []
@@ -106,6 +108,7 @@ export function createPhysicalStreamRunSetupGuard({
         console.warn("[Agent] Physical stream setup cleanup failed:", cleanupError)
       }
     }
+    if (!wasActive && wasOwner) onOwnedCancellation?.()
     if (error && wasActive) onActiveError(error.value)
   }
   return {

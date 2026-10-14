@@ -1,11 +1,19 @@
 import { useEffect, useState } from "react"
+import { isModSiteChangeScope } from "../../../shared/mods/types"
 import type { FunctionTurnNotice } from "../../../shared/mods/v2/turn"
 
 const EMPTY_NOTICES: readonly FunctionTurnNotice[] = []
 
-export function useFunctionTurnNotices(threadId: string): readonly FunctionTurnNotice[] {
+export function useFunctionTurnNotices(
+  threadId: string,
+  enabled: boolean
+): readonly FunctionTurnNotice[] {
   const [snapshot, setSnapshot] = useState<{ threadId: string; notices: FunctionTurnNotice[] }>()
   useEffect(() => {
+    if (!enabled) {
+      setSnapshot(undefined)
+      return
+    }
     let live = true
     let sequence = 0
     const refresh = () => {
@@ -20,7 +28,7 @@ export function useFunctionTurnNotices(threadId: string): readonly FunctionTurnN
       )
     }
     const stop = window.api.mods.onCardsChanged((event) => {
-      if (event.threadId === threadId) refresh()
+      if (event.threadId === threadId && !isModSiteChangeScope(event.scope)) refresh()
     })
     window.addEventListener("mods:configuration-changed", refresh)
     refresh()
@@ -29,6 +37,6 @@ export function useFunctionTurnNotices(threadId: string): readonly FunctionTurnN
       stop()
       window.removeEventListener("mods:configuration-changed", refresh)
     }
-  }, [threadId])
-  return snapshot?.threadId === threadId ? snapshot.notices : EMPTY_NOTICES
+  }, [threadId, enabled])
+  return enabled && snapshot?.threadId === threadId ? snapshot.notices : EMPTY_NOTICES
 }

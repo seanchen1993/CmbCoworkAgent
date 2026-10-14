@@ -49,6 +49,11 @@ import {
 } from "../../../shared/subagent-transcript-storage"
 import { projectSubagentTranscriptBoundaries } from "./subagent-transcripts"
 import { CursorQueue } from "./cursor-queue"
+import { functionConversationTranscriptFields,
+  isFunctionConversationHiddenNote,
+  type FunctionConversationTranscriptStamp } from "../../../shared/mods/v2/conversation-transcript"
+import { resolveFunctionConversationToolErrorPresentation } from
+  "../../../shared/mods/v2/tool-error-presentation"
 
 export type StreamFallbackIndexBaselines = {
   ai: number
@@ -149,6 +154,8 @@ export interface SerializedMessageChunk {
 }
 
 export type TransformedValuesMessage = {
+  function_row?: FunctionConversationTranscriptStamp
+  function_row_invalid?: true
   id: string
   type: "ai" | "tool" | "system" | "human"
   content: string
@@ -304,7 +311,8 @@ export function transformSerializedValuesMessages(
           : className.includes("Human") || kwargs.type === "human" || kwargs.type === "user"
             ? "human"
             : "ai"
-    if (type === "human") {
+    const functionFields = functionConversationTranscriptFields(msg, kwargs.id, type)
+    if (type === "human" && !functionFields.function_row && !functionFields.function_row_invalid) {
       // Local user bubbles are appended before stream submit. Internal goal
       // prompts are hidden, but still need timing for transcript restore anchors.
       if (
@@ -319,11 +327,8 @@ export function transformSerializedValuesMessages(
 
     const content = extractSerializedContent(kwargs.content)
     const reasoning = type === "ai" ? extractVisibleReasoning(kwargs) : ""
-    const isToolError =
-      type === "tool" &&
-      (kwargs.status === "error" ||
-        kwargs.is_error === true ||
-        kwargs.additional_kwargs?.is_error === true)
+    const toolErrorPresentation = type === "tool"
+      ? resolveFunctionConversationToolErrorPresentation(msg) : undefined
     const providerTuple =
       type === "ai"
         ? getMessageProviderTupleFromMetadata(kwargs.additional_kwargs)
@@ -352,6 +357,8 @@ export function transformSerializedValuesMessages(
 
     transformed.push({
       id,
+      // The display fallback is not the native UUID that was validated above.
+      ...functionFields,
       type,
       content,
       ...providerTuple,
@@ -360,7 +367,7 @@ export function transformSerializedValuesMessages(
       ...(type === "tool" && kwargs.tool_call_id && { tool_call_id: kwargs.tool_call_id }),
       ...(type === "tool" && kwargs.name && { name: kwargs.name }),
       ...(type === "tool" && kwargs.status && { status: kwargs.status }),
-      ...(isToolError && { is_error: true })
+      ...(toolErrorPresentation !== undefined ? { is_error: toolErrorPresentation } : {})
     })
   }
 
@@ -906,6 +913,7 @@ export class ElectronIPCTransport implements UseStreamTransport {
       agentMode,
       coordinatorInternalNotification,
       userMessageId,
+      payload.config?.configurable?.composer_submission as import("../../../shared/mods/v2/composer-mentions").ComposerSubmission | undefined,
       managedAutoSendRunId
     )
   }
@@ -1055,7 +1063,6 @@ export class ElectronIPCTransport implements UseStreamTransport {
     }
 
     if (className.includes("ToolMessage") && kwargs.tool_call_id) {
-      const isError = this.isToolMessageError(kwargs)
       this.staleWorkerCurrentMessageIdByTurn.delete(staleTurnKey)
       this.staleWorkerCurrentProviderSourceIdByTurn.delete(staleTurnKey)
       this.staleWorkerAssistantBoundaryByTurn.add(staleTurnKey)
@@ -1076,7 +1083,7 @@ export class ElectronIPCTransport implements UseStreamTransport {
           tool_call_id: kwargs.tool_call_id,
           ...(kwargs.name && { name: kwargs.name }),
           ...(kwargs.status && { status: kwargs.status }),
-          ...(isError && { is_error: true }),
+          ...this.toolMessageErrorFields(kwargs),
           created_at: new Date()
         }
       ]
@@ -1346,6 +1353,7 @@ export class ElectronIPCTransport implements UseStreamTransport {
     agentMode?: TransportAgentMode,
     coordinatorInternalNotification = false,
     userMessageId?: string,
+    composerSubmission?: import("../../../shared/mods/v2/composer-mentions").ComposerSubmission,
     managedAutoSendRunId?: string
   ): AsyncGenerator<StreamEvent> {
     // Create a queue to buffer events from IPC
@@ -1436,7 +1444,8 @@ export class ElectronIPCTransport implements UseStreamTransport {
             modelId,
             agentMode,
             coordinatorInternalNotification,
-            userMessageId
+            userMessageId,
+            composerSubmission
           )
     const cleanup = subscribeToIPCEvents((ipcEvent) => {
       if (terminalReceived) return
@@ -1734,6 +1743,7 @@ export class ElectronIPCTransport implements UseStreamTransport {
     agentMode: TransportAgentMode = "normal"
   ): StreamEvent[] {
     const events: StreamEvent[] = []
+    let injectedUserEvents: { start: number; end: number } | undefined
 
     switch (event.type) {
       // Raw stream events from LangGraph - parse and convert
@@ -1939,6 +1949,7 @@ export class ElectronIPCTransport implements UseStreamTransport {
           }
           this.sealCurrentRunCompletedAssistant(Boolean(completedAssistantId))
           const injectedMessages = Array.isArray(data.messages) ? data.messages : []
+          const injectedUserEventsStart = events.length
           for (const injectedMessage of injectedMessages) {
             if (
               !injectedMessage ||
@@ -1961,6 +1972,7 @@ export class ElectronIPCTransport implements UseStreamTransport {
               ]
             })
           }
+          injectedUserEvents = { start: injectedUserEventsStart, end: events.length }
           events.push({ event: "custom", data })
           break
         }
@@ -2026,10 +2038,16 @@ export class ElectronIPCTransport implements UseStreamTransport {
 
     const resetRoleCollisionBaseline =
       event.type === "custom" && event.data?.type === "stream_retry_reset"
-    return this.normalizeMainMessageRoleCollisionEvents(
+    const normalizedEvents = this.normalizeMainMessageRoleCollisionEvents(
       events,
       resetRoleCollisionBaseline
     )
+    const injectedRange = injectedUserEvents
+    return injectedRange
+      ? normalizedEvents.filter(
+          (_event, index) => index < injectedRange.start || index >= injectedRange.end
+        )
+      : normalizedEvents
   }
 
   private normalizeMainMessageRoleCollisionEvents(
@@ -2122,6 +2140,8 @@ export class ElectronIPCTransport implements UseStreamTransport {
     const visibleHumanCount = messages.filter(
       (message) =>
         this.isSerializedHumanMessage(message) &&
+        !isFunctionConversationHiddenNote(message) &&
+        !functionConversationTranscriptFields(message, message.kwargs?.id, "human").function_row_invalid &&
         message.kwargs?.additional_kwargs?.cmb_internal_coordinator_notification !== true
     ).length
     const firstVisibleWorkerTurn =
@@ -2155,9 +2175,20 @@ export class ElectronIPCTransport implements UseStreamTransport {
       const kwargs = message.kwargs || {}
       const className = this.getSerializedMessageClassName(message)
       const additionalKwargs = kwargs.additional_kwargs
-      if (additionalKwargs?.cmb_internal_coordinator_notification === true) continue
-      if (className.includes("System") || kwargs.type === "system") continue
-      if (this.isSerializedHumanMessage(message)) {
+      const functionFields = functionConversationTranscriptFields(message, kwargs.id,
+        this.isSerializedHumanMessage(message) ? "user" :
+          this.isSerializedToolMessage(message) ? "tool" :
+            className.includes("System") || kwargs.type === "system" ? "system" : "assistant")
+      const native = !!functionFields.function_row || !!functionFields.function_row_invalid
+      if (!native && additionalKwargs?.cmb_internal_coordinator_notification === true) continue
+      if (className.includes("System") || kwargs.type === "system") {
+        if (functionFields.function_row?.messageType === "system" || functionFields.function_row_invalid)
+          converted.push({ id: kwargs.id ?? `invalid-native-${index}`, role: "system",
+            content: this.extractContent(kwargs.content), ...functionFields, created_at: new Date() })
+        continue
+      }
+      if (this.isSerializedHumanMessage(message) && !isFunctionConversationHiddenNote(functionFields) &&
+        !functionFields.function_row_invalid) {
         messageWorkerTurn = nextHumanWorkerTurn
         nextHumanWorkerTurn += 1
       }
@@ -2192,11 +2223,13 @@ export class ElectronIPCTransport implements UseStreamTransport {
         this.isSerializedAIMessage(message) && index === latestAiIndex
           ? this.workerCurrentMessageIds.get(workerThreadId)
           : undefined
-      const rawId = providerMessageId || liveAssistantId || scopedSnapshotFallbackId
+      const rawId = native ? kwargs.id ?? `invalid-native-${index}` :
+        providerMessageId || liveAssistantId || scopedSnapshotFallbackId
       if (this.isSerializedHumanMessage(message)) {
         converted.push({
           id: rawId,
           role: "user",
+          ...functionFields,
           content,
           created_at: new Date()
         })
@@ -2207,6 +2240,7 @@ export class ElectronIPCTransport implements UseStreamTransport {
         converted.push({
           id: rawId,
           role: "assistant",
+          ...functionFields,
           content,
           ...(reasoning && { reasoning }),
           ...(toolCalls.length && { tool_calls: toolCalls as Message["tool_calls"] }),
@@ -2216,15 +2250,15 @@ export class ElectronIPCTransport implements UseStreamTransport {
       }
 
       if (this.isSerializedToolMessage(message) && kwargs.tool_call_id) {
-        const isError = this.isToolMessageError(kwargs)
         converted.push({
           id: rawId,
           role: "tool",
+          ...functionFields,
           content: this.extractContent(kwargs.content),
           tool_call_id: kwargs.tool_call_id,
           ...(kwargs.name && { name: kwargs.name }),
           ...(kwargs.status && { status: kwargs.status }),
-          ...(isError && { is_error: true }),
+          ...this.toolMessageErrorFields(kwargs),
           created_at: new Date()
         })
       }
@@ -3624,7 +3658,7 @@ export class ElectronIPCTransport implements UseStreamTransport {
             visibleToolCalls.length
           ) {
             if (visibleToolCalls.length) {
-              this.rememberCompletedToolCallsForMessage(msgId, visibleToolCalls)
+              this.rememberCompletedToolCallsForMessage(msgId, visibleToolCalls, true)
             }
             this.rememberEmittedMessage(msgId)
             if (contentSnapshotUpdate?.kind === "replace") {
@@ -3651,7 +3685,6 @@ export class ElectronIPCTransport implements UseStreamTransport {
                         }
                       : {}),
                     ...(reasoningUpdate !== undefined && { reasoning: reasoningUpdate }),
-                    ...(visibleToolCalls.length && { tool_calls: visibleToolCalls })
                   },
                   {
                     langgraph_node: metadata?.langgraph_node || "agent",
@@ -3660,6 +3693,23 @@ export class ElectronIPCTransport implements UseStreamTransport {
                   }
                 ]
               })
+              if (visibleToolCalls.length && msgId) {
+                const completeCalls = new Map<string, (typeof visibleToolCalls)[number]>(
+                  this.getCompletedToolCallsForMessage(msgId).map(call => [call.id, call])
+                )
+                // An explicit empty object is a valid zero-argument call. The
+                // partial-argument cache intentionally omits it, but presentation must not.
+                const idlessCalls: typeof visibleToolCalls = []
+                for (const call of visibleToolCalls) {
+                  if (call.id === undefined) idlessCalls.push(call)
+                  else completeCalls.set(call.id, call)
+                }
+                events.push(this.createCoordinatorAssistantSnapshotEvent({
+                  id: msgId,
+                  toolCalls: [...completeCalls.values(), ...idlessCalls],
+                  providerIdentity
+                }))
+              }
               if (reasoningUpdate !== undefined) {
                 events.push(
                   this.createCoordinatorAssistantSnapshotEvent({
@@ -3688,22 +3738,12 @@ export class ElectronIPCTransport implements UseStreamTransport {
                 completedChunkToolCalls
               )
               const completedToolCalls = this.getCompletedToolCallsForMessage(this.currentMessageId)
-              events.push({
-                event: "messages",
-                data: [
-                  {
-                    id: this.currentMessageId,
-                    type: "ai",
-                    content: "",
-                    tool_calls: completedToolCalls
-                  },
-                  {
-                    langgraph_node: metadata?.langgraph_node || "agent",
-                    langgraph_checkpoint_ns: metadata?.langgraph_checkpoint_ns,
-                    checkpoint_ns: metadata?.checkpoint_ns
-                  }
-                ]
-              })
+              // These are complete accumulated arguments, not another SDK delta.
+              events.push(this.createCoordinatorAssistantSnapshotEvent({
+                id: this.currentMessageId,
+                toolCalls: completedToolCalls,
+                providerIdentity
+              }))
             }
 
             events.push({
@@ -3779,7 +3819,8 @@ export class ElectronIPCTransport implements UseStreamTransport {
             {
               id: msgId,
               type: "system",
-              content
+              content,
+              ...functionConversationTranscriptFields(msgChunk, kwargs.id, "system")
             },
             {
               langgraph_node: metadata?.langgraph_node || "agent",
@@ -3817,7 +3858,6 @@ export class ElectronIPCTransport implements UseStreamTransport {
           )
           if (subagentToolCallId) {
             events.push(...this.createSubagentAssistantLosslessEvents(subagentToolCallId))
-            const isError = this.isToolMessageError(kwargs)
             events.push({
               event: "custom",
               data: {
@@ -3837,7 +3877,7 @@ export class ElectronIPCTransport implements UseStreamTransport {
                   tool_call_id: kwargs.tool_call_id,
                   name: kwargs.name,
                   ...(kwargs.status && { status: kwargs.status }),
-                  ...(isError && { is_error: true }),
+                  ...this.toolMessageErrorFields(kwargs),
                   created_at: new Date()
                 }
               }
@@ -3849,7 +3889,6 @@ export class ElectronIPCTransport implements UseStreamTransport {
           // Main agent tool message
           this.resetCurrentAssistantMessage()
           const content = this.extractContent(kwargs.content)
-          const isError = this.isToolMessageError(kwargs)
           const msgId =
             kwargs.id ||
             this.createStableFallbackMessageId({
@@ -3867,11 +3906,12 @@ export class ElectronIPCTransport implements UseStreamTransport {
               {
                 id: msgId,
                 type: "tool",
+                ...functionConversationTranscriptFields(msgChunk, kwargs.id, "tool"),
                 content,
                 tool_call_id: kwargs.tool_call_id,
                 name: kwargs.name,
                 ...(kwargs.status && { status: kwargs.status }),
-                ...(isError && { is_error: true })
+                ...this.toolMessageErrorFields(kwargs)
               },
               {
                 langgraph_node: metadata?.langgraph_node || "tools",
@@ -3890,7 +3930,7 @@ export class ElectronIPCTransport implements UseStreamTransport {
                   taskResultMessageId,
                   content,
                   kwargs.status,
-                  isError
+                  taskResultIsError
                 ),
                 taskResultExecutionId
               )
@@ -3904,7 +3944,7 @@ export class ElectronIPCTransport implements UseStreamTransport {
               toolCallId: taskResultExecutionId,
               content,
               status: kwargs.status,
-              isError
+              isError: taskResultIsError
             })
             events.push(...completionEvents)
           }
@@ -4674,7 +4714,7 @@ export class ElectronIPCTransport implements UseStreamTransport {
         tool_call_id: kwargs.tool_call_id,
         ...(kwargs.name && { name: kwargs.name }),
         ...(kwargs.status && { status: kwargs.status }),
-        ...(isError && { is_error: true }),
+        ...this.toolMessageErrorFields(kwargs),
         created_at: new Date()
       }
       const currentAmbiguousReplay = this.workerAmbiguousReplayPins.get(
@@ -4792,6 +4832,7 @@ export class ElectronIPCTransport implements UseStreamTransport {
     content?: string
     reasoning?: string
     toolCalls?: Array<{ id?: string; name?: string; args?: Record<string, unknown> }>
+    providerIdentity?: { providerSourceId: string; providerOccurrence: number }
   }): StreamEvent {
     return {
       event: "custom",
@@ -4800,6 +4841,10 @@ export class ElectronIPCTransport implements UseStreamTransport {
         assistantMessage: {
           id: input.id,
           type: "ai",
+          ...(input.providerIdentity && {
+            provider_source_id: input.providerIdentity.providerSourceId,
+            provider_occurrence: input.providerIdentity.providerOccurrence
+          }),
           ...(input.content !== undefined && { content: input.content }),
           ...(input.reasoning !== undefined && { reasoning: input.reasoning }),
           ...(input.toolCalls !== undefined && { tool_calls: input.toolCalls })
@@ -5782,7 +5827,7 @@ export class ElectronIPCTransport implements UseStreamTransport {
           toolCallId: message.tool_call_id,
           name: message.name,
           status: message.status,
-          isError: message.is_error === true || message.status === "error"
+          isError: resolveFunctionConversationToolErrorPresentation(message) ?? false
         })
       )
       knownToolMessageSignatures.set(message.id, signatures)
@@ -6274,6 +6319,7 @@ export class ElectronIPCTransport implements UseStreamTransport {
     const snapshotIndexes = this.resolveMainAssistantSnapshotIndexes(transformedMessages)
 
     const messages = transformedMessages.map((message, snapshotIndex) => {
+      if (message.function_row || message.function_row_invalid) return message
       if (message.type !== "ai") return message
 
       const messageIndex = snapshotIndexes[snapshotIndex]
@@ -7239,12 +7285,13 @@ export class ElectronIPCTransport implements UseStreamTransport {
   }
 
   private isToolMessageError(kwargs: SerializedMessageChunk["kwargs"]): boolean {
-    if (!kwargs) return false
-    return (
-      kwargs.status === "error" ||
-      kwargs.is_error === true ||
-      kwargs.additional_kwargs?.is_error === true
-    )
+    return resolveFunctionConversationToolErrorPresentation(kwargs) ?? false
+  }
+
+  private toolMessageErrorFields(kwargs: SerializedMessageChunk["kwargs"]):
+    { is_error?: boolean } {
+    const presentation = resolveFunctionConversationToolErrorPresentation(kwargs)
+    return presentation === undefined ? {} : { is_error: presentation }
   }
 
   /**
@@ -7394,7 +7441,8 @@ export class ElectronIPCTransport implements UseStreamTransport {
 
   private rememberCompletedToolCallsForMessage(
     messageId: string,
-    toolCalls: Array<{ id?: string; name?: string; args?: Record<string, unknown> }>
+    toolCalls: Array<{ id?: string; name?: string; args?: Record<string, unknown> }>,
+    retainEmpty = false
   ): void {
     let byToolId = this.completedToolCallsByMessageId.get(messageId)
     if (!byToolId) {
@@ -7403,7 +7451,9 @@ export class ElectronIPCTransport implements UseStreamTransport {
     }
 
     for (const toolCall of toolCalls) {
-      if (!toolCall.id || !toolCall.name || !this.hasToolArgs(toolCall.args)) continue
+      if (!toolCall.id || !toolCall.name) continue
+      if (!this.hasToolArgs(toolCall.args) &&
+        (!retainEmpty || !toolCall.args || byToolId.has(toolCall.id))) continue
       byToolId.set(toolCall.id, {
         id: toolCall.id,
         name: toolCall.name,

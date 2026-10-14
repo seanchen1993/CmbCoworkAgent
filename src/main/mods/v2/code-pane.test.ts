@@ -3,8 +3,10 @@ import { expect, it } from "vitest"
 import { compileFunctionPlugin } from "./loader"
 import { FunctionGuestRuntime } from "./guest-runtime"
 import { FunctionSession, SESSION_CAPABILITIES } from "./session"
-import { functionCodeRows } from "../../../shared/mods/v2/code"
-import type { FunctionUiElement } from "../../../shared/mods/v2/ui"
+import { functionCodeRows, functionCodeView } from "../../../shared/mods/v2/code"
+import type { ModJson } from "../../../shared/mods/types"
+import type { FunctionUiNode } from "../../../shared/mods/v2/ui"
+import { ordinaryFunctionNode } from "../../../../tests/support/function-ui-node"
 
 it("compiles real JSX Code into a validated session pane and releases it on close", async () => {
   const compiled = await compileFunctionPlugin(resolve("tests/fixtures/mods-v2/code-pane"))
@@ -21,8 +23,8 @@ it("compiles real JSX Code into a validated session pane and releases it on clos
   try {
     expect(await session.run("code-pane", "")).toEqual({ text: "CODE_PREVIEW_OPEN" })
     const [pane] = await session.panes.snapshot()
-    const nodes = pane.tree.children!.filter(
-      (node): node is FunctionUiElement => typeof node !== "string" && node.type === "Code"
+    const nodes = ordinaryFunctionNode(pane.tree).children!.filter(
+      (node): node is FunctionUiNode => typeof node !== "string" && node.type === "Code"
     )
     expect(nodes).toHaveLength(2)
     expect(functionCodeRows(nodes[0].props)[0].newLine).toBe(42)
@@ -31,6 +33,44 @@ it("compiles real JSX Code into a validated session pane and releases it on clos
       text: "new value",
       newLine: 1
     })
+    await session.panes.closePane(pane.plugin, pane.id)
+    expect(await session.panes.snapshot()).toEqual([])
+  } finally {
+    await session.close()
+  }
+})
+
+it("keeps real JSX long source complete through protection and only bounds the display copy", async () => {
+  const compiled = await compileFunctionPlugin(resolve("tests/fixtures/mods-v2/code-pane"))
+  const guest = await FunctionGuestRuntime.create(compiled.code, compiled.options)
+  const observedSources: string[] = []
+  function protect(value: ModJson): ModJson {
+    if (Array.isArray(value)) return value.map(protect)
+    if (value && typeof value === "object") {
+      if (typeof value.source === "string") observedSources.push(value.source)
+      return Object.fromEntries(Object.entries(value).map(([key, entry]) => [key, protect(entry)]))
+    }
+    return typeof value === "string"
+      ? value.replace("synthetic-secret-tail", "[redacted-tail]")
+      : value
+  }
+  const session = new FunctionSession(
+    [{ ...compiled, guest, tier: "user", capabilities: [...SESSION_CAPABILITIES] }],
+    {
+      workspace: "/project",
+      threadId: "thread",
+      assertLive: () => undefined,
+      publish: async (value) => protect(value)
+    }
+  )
+  try {
+    expect(await session.run("code-long-pane", "")).toEqual({ text: "LONG_CODE_PREVIEW_OPEN" })
+    const [pane] = await session.panes.snapshot()
+    const nodes = ordinaryFunctionNode(pane.tree).children! as FunctionUiNode[]
+    expect(observedSources).toContain("x".repeat(120000) + "synthetic-secret-tail")
+    expect(nodes[0].props.source).toBe("x".repeat(120000) + "[redacted-tail]")
+    expect(functionCodeView(nodes[0].props).source).toBe("x".repeat(100000))
+    expect(functionCodeView(nodes[1].props).diffFallback).toBe(true)
     await session.panes.closePane(pane.plugin, pane.id)
     expect(await session.panes.snapshot()).toEqual([])
   } finally {

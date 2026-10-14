@@ -23,6 +23,7 @@ const MESSAGE_PREFIX_TAIL_WINDOW = 16
 const MESSAGE_PREFIX_MIN_SHARED_TAIL = 4
 const CHECKPOINT_SCHEMA_MIGRATION_ID = "checkpoint-columns-and-fork-boundary-v1"
 import type { RunnableConfig } from "@langchain/core/runnables"
+import type { BaseMessage } from "@langchain/core/messages"
 import {
   BaseCheckpointSaver,
   type Checkpoint,
@@ -33,6 +34,47 @@ import {
   type CheckpointMetadata,
   copyCheckpoint
 } from "@langchain/langgraph-checkpoint"
+
+const committedCheckpointReceiptBrand = Symbol("sqljs-saver-committed-checkpoint")
+
+/** Host-only, callback-local identity; its visible shape is never a commit proof. */
+export interface SqlJsSaverCommittedCheckpointReceipt {
+  readonly [committedCheckpointReceiptBrand]: true
+}
+
+export type SqlJsSaverCommitObserver = (
+  receipt: SqlJsSaverCommittedCheckpointReceipt
+) => void | Promise<void>
+
+interface CommittedCheckpointRecord {
+  database: NativeSqliteAdapter
+  generation: number
+  config: RunnableConfig
+  tuple: CheckpointTuple
+  active: boolean
+}
+
+const functionRecoveryReceiptBrand = Symbol("sqljs-saver-function-recovery")
+/** Exact existing native row, valid only during its original recovery and repair. */
+export interface SqlJsSaverFunctionConversationRecoveryReceipt {
+  readonly [functionRecoveryReceiptBrand]: true
+}
+export interface SqlJsSaverFunctionConversationRecoveryCheckpoint {
+  readonly config: RunnableConfig
+  readonly checkpoint: Checkpoint
+  readonly parentCheckpointId: string | null
+  readonly expectedMessageCount: number
+}
+interface FunctionRecoveryRecord {
+  readonly database: NativeSqliteAdapter
+  readonly generation: number
+  readonly row: CheckpointRow
+  readonly checkpoint: Checkpoint
+  readonly expectedMessageCount: number
+  readonly verifications: Set<(messages?: readonly BaseMessage[]) => void>
+  repairedRow?: CheckpointRow
+  active: boolean
+}
 
 interface CheckpointRow {
   thread_id: string
@@ -370,6 +412,10 @@ export interface SqlJsSaverOptions {
   recoverMissingCheckpointMessages?: (
     context: CheckpointMessageRecoveryContext
   ) => Promise<CheckpointMessageRecoveryResult | null>
+  /** Native conversation recovery only; never falls back to a UI transcript or latest ID. */
+  recoverFunctionConversationMessages?: (
+    receipt: SqlJsSaverFunctionConversationRecoveryReceipt
+  ) => Promise<readonly BaseMessage[]>
 }
 
 interface CheckpointRuntimeProjectionRow {
@@ -417,6 +463,13 @@ export class SqlJsSaver extends BaseCheckpointSaver {
   private initializePromise: Promise<void> | null = null
   private flushPromise: Promise<unknown | null> | null = null
   private closePromise: Promise<void> | null = null
+  private commitObserverGeneration = 0
+  private readonly committedCheckpointReceipts = new WeakMap<
+    SqlJsSaverCommittedCheckpointReceipt, CommittedCheckpointRecord
+  >()
+  private readonly functionRecoveryReceipts = new WeakMap<
+    SqlJsSaverFunctionConversationRecoveryReceipt, FunctionRecoveryRecord
+  >()
   /** Permanently dead (thread deleted). Unlike close(), this survives
    * initialize(): a held reference in a writer that outlived deletion (hung
    * subagent, evicted-then-reused instance) must never reopen the db and
@@ -445,6 +498,7 @@ export class SqlJsSaver extends BaseCheckpointSaver {
   private maxNonRootCheckpoints = 1
   private maxDatabaseBytes = DEFAULT_MAX_DB_SIZE_BYTES
   private recoverMissingCheckpointMessages?: SqlJsSaverOptions["recoverMissingCheckpointMessages"]
+  private recoverFunctionConversationMessages?: SqlJsSaverOptions["recoverFunctionConversationMessages"]
   private readonly checkpointDatabaseKey: string
 
   constructor(dbPath: string, serde?: SerializerProtocol, options: SqlJsSaverOptions = {}) {
@@ -473,6 +527,7 @@ export class SqlJsSaver extends BaseCheckpointSaver {
       DEFAULT_MAX_DB_SIZE_BYTES
     )
     this.recoverMissingCheckpointMessages = options.recoverMissingCheckpointMessages
+    this.recoverFunctionConversationMessages = options.recoverFunctionConversationMessages
   }
 
   private async acquireCheckpointNamespace(
@@ -1140,6 +1195,136 @@ export class SqlJsSaver extends BaseCheckpointSaver {
     return request
   }
 
+  private isExactFunctionRecoveryRow(row: CheckpointRow, database: NativeSqliteAdapter): boolean {
+    return Boolean(database.exec(`SELECT 1 FROM checkpoints
+      WHERE thread_id=? AND checkpoint_ns=? AND checkpoint_id=? AND parent_checkpoint_id IS ?
+      AND type IS ? AND checkpoint=? AND metadata=? AND COALESCE(fork_boundary_marker,0)=?`, [
+      row.thread_id, row.checkpoint_ns, row.checkpoint_id, row.parent_checkpoint_id,
+      row.type, row.checkpoint, row.metadata, Number(row.fork_boundary_marker) === 1 ? 1 : 0
+    ])[0]?.values.length)
+  }
+
+  private assertFunctionRecoveryRecord(receipt: SqlJsSaverFunctionConversationRecoveryReceipt):
+    FunctionRecoveryRecord {
+    const record = this.functionRecoveryReceipts.get(receipt)
+    if (!record) throw new Error("SQLJS_SAVER_RECOVERY_RECEIPT_INVALID")
+    if (!record.active || this.retired || this.closePromise || this.db !== record.database ||
+      this.commitObserverGeneration !== record.generation ||
+      !this.isExactFunctionRecoveryRow(record.repairedRow ?? record.row, record.database))
+      throw new Error("SQLJS_SAVER_RECOVERY_RECEIPT_EXPIRED")
+    return record
+  }
+
+  /** Data copy from the original selected row; never getTuple, initialize or a latest selection. */
+  readFunctionConversationRecoveryCheckpoint(receipt: SqlJsSaverFunctionConversationRecoveryReceipt):
+    SqlJsSaverFunctionConversationRecoveryCheckpoint {
+    const record = this.assertFunctionRecoveryRecord(receipt)
+    return { config: { configurable: { thread_id: record.row.thread_id,
+      checkpoint_ns: record.row.checkpoint_ns, checkpoint_id: record.row.checkpoint_id } },
+      checkpoint: structuredClone(record.checkpoint), parentCheckpointId: record.row.parent_checkpoint_id,
+      expectedMessageCount: record.expectedMessageCount }
+  }
+
+  /** Native helper's original binding/full-content guard remains live through serde and repair. */
+  bindFunctionConversationRecoveryVerification(receipt: SqlJsSaverFunctionConversationRecoveryReceipt,
+    verify: (messages?: readonly BaseMessage[]) => void): void {
+    const record = this.assertFunctionRecoveryRecord(receipt)
+    if (typeof verify !== "function") throw new Error("SQLJS_SAVER_RECOVERY_VERIFICATION_INVALID")
+    const returned: unknown = verify()
+    if (returned && typeof (returned as { then?: unknown }).then === "function")
+      throw new Error("SQLJS_SAVER_RECOVERY_VERIFICATION_ASYNC")
+    record.verifications.add(verify)
+    this.assertFunctionRecoveryRecord(receipt)
+  }
+
+  private async performFunctionConversationMessageRecovery(row: CheckpointRow, checkpoint: Checkpoint,
+    expectedMessageCount: number, missing: MissingCheckpointMessageSnapshotError
+  ): Promise<HydratedCheckpointMessages> {
+    const recover = this.recoverFunctionConversationMessages, database = this.db
+    const state = checkpoint.channel_values.cmbFunctionConversation
+    if (!recover || !database || !state || typeof state !== "object" || Array.isArray(state))
+      throw new CheckpointMessageSnapshotRecoveryError(row.checkpoint_id, { cause: missing })
+    const data = state as Record<string, unknown>
+    if (Object.keys(data).some(key => !["version", "logicalSessionId", "conversationId", "branchId", "frontier"].includes(key)) ||
+      data.version !== 1 || [data.logicalSessionId, data.conversationId, data.branchId].some(value =>
+        typeof value !== "string" || !value) || typeof data.frontier !== "number" ||
+      !Number.isSafeInteger(data.frontier) || data.frontier < 0 || !Number.isSafeInteger(expectedMessageCount) ||
+      expectedMessageCount < 0 || checkpoint.id !== row.checkpoint_id || typeof checkpoint.ts !== "string")
+      throw new CheckpointMessageSnapshotRecoveryError(row.checkpoint_id, { cause: missing })
+    const receipt = Object.freeze({ [functionRecoveryReceiptBrand]: true as const })
+    const record: FunctionRecoveryRecord = { database, generation: this.commitObserverGeneration,
+      row: { ...row, checkpoint: typeof row.checkpoint === "string" ? row.checkpoint : row.checkpoint.slice(),
+        metadata: typeof row.metadata === "string" ? row.metadata : row.metadata.slice() },
+      checkpoint: structuredClone(checkpoint), expectedMessageCount, verifications: new Set(), active: true }
+    this.functionRecoveryReceipts.set(receipt, record)
+    let verifiedMessages: readonly BaseMessage[] | undefined
+    const verify = () => {
+      this.assertFunctionRecoveryRecord(receipt)
+      if (record.verifications.size === 0) throw new Error("SQLJS_SAVER_RECOVERY_VERIFICATION_REQUIRED")
+      for (const guard of record.verifications) {
+        const returned: unknown = guard(verifiedMessages)
+        if (returned && typeof (returned as { then?: unknown }).then === "function")
+          throw new Error("SQLJS_SAVER_RECOVERY_VERIFICATION_ASYNC")
+      }
+      this.assertFunctionRecoveryRecord(receipt)
+    }
+    try {
+      this.assertFunctionRecoveryRecord(receipt)
+      const returned = await recover(receipt)
+      if (!Array.isArray(returned) || returned.length !== expectedMessageCount)
+        throw new CheckpointMessageSnapshotRecoveryError(row.checkpoint_id, { cause: missing })
+      const messages = Array.from(returned)
+      verifiedMessages = messages
+      verify()
+      const preparedCheckpoint = { ...record.checkpoint, channel_values: {
+        ...record.checkpoint.channel_values, messages: buildExternalMessagesReference(messages.length)
+      } }
+      const [[messageType, serializedMessages], [checkpointType, serializedCheckpoint]] = await Promise.all([
+        this.serde.dumpsTyped(messages), this.serde.dumpsTyped(preparedCheckpoint)
+      ])
+      verify()
+      const recoveryGeneration = randomUUID()
+      try {
+        database.run("BEGIN IMMEDIATE")
+        verify()
+        database.run(`INSERT INTO checkpoint_message_snapshots
+          (thread_id,checkpoint_ns,checkpoint_id,parent_checkpoint_id,prefix_length,message_count,generation,type,suffix)
+          VALUES (?,?,?,NULL,0,?,?,?,?) ON CONFLICT(thread_id,checkpoint_ns,checkpoint_id) DO UPDATE SET
+          parent_checkpoint_id=NULL,prefix_length=0,message_count=excluded.message_count,
+          generation=excluded.generation,type=excluded.type,suffix=excluded.suffix`, [
+          row.thread_id, row.checkpoint_ns, row.checkpoint_id, messages.length,
+          recoveryGeneration, messageType, serializedMessages
+        ])
+        database.run(`UPDATE checkpoints SET type=?,checkpoint=?
+          WHERE thread_id=? AND checkpoint_ns=? AND checkpoint_id=? AND parent_checkpoint_id IS ?
+          AND type IS ? AND checkpoint=? AND metadata=? AND COALESCE(fork_boundary_marker,0)=?`, [
+          checkpointType, serializedCheckpoint, row.thread_id, row.checkpoint_ns, row.checkpoint_id,
+          record.row.parent_checkpoint_id, record.row.type, record.row.checkpoint, record.row.metadata,
+          Number(record.row.fork_boundary_marker) === 1 ? 1 : 0
+        ])
+        if (database.getRowsModified() !== 1) throw new Error("SQLJS_SAVER_RECOVERY_ROW_CHANGED")
+        record.repairedRow = { ...record.row, type: checkpointType, checkpoint: serializedCheckpoint }
+        verify()
+        database.run("COMMIT")
+      } catch (error) {
+        try { database.run("ROLLBACK") } catch { /* Preserve the original repair failure. */ }
+        throw error
+      }
+      verify()
+      const hydrated = { messages, snapshotDepth: 1, deltaBytes: 0, snapshotGeneration: recoveryGeneration }
+      this.rememberHydratedCheckpointMessages(
+        checkpointMessageCacheKey(row.thread_id, row.checkpoint_ns, row.checkpoint_id), hydrated)
+      this.pruneUnreachableMessageSnapshots(row.thread_id, row.checkpoint_ns, database)
+      return hydrated
+    } catch (error) {
+      if (error instanceof CheckpointMessageSnapshotRecoveryError) throw error
+      throw new CheckpointMessageSnapshotRecoveryError(row.checkpoint_id, { cause: error })
+    } finally {
+      record.active = false
+      this.functionRecoveryReceipts.delete(receipt)
+    }
+  }
+
   private async performMissingCheckpointMessageRecovery(
     row: CheckpointRow,
     checkpoint: Checkpoint,
@@ -1147,6 +1332,9 @@ export class SqlJsSaver extends BaseCheckpointSaver {
     missing: MissingCheckpointMessageSnapshotError,
     allowBoundedHistoryRecovery: boolean
   ): Promise<HydratedCheckpointMessages> {
+    if (checkpoint.channel_values.cmbFunctionConversation !== undefined) {
+      return this.performFunctionConversationMessageRecovery(row, checkpoint, expectedMessageCount, missing)
+    }
     const recover = this.recoverMissingCheckpointMessages
     const database = this.db
     // The durable transcript represents the current conversation. Applying it
@@ -2026,6 +2214,107 @@ export class SqlJsSaver extends BaseCheckpointSaver {
     }
   }
 
+  /**
+   * One native namespace admission through COMMIT, exact read and actual observer finally.
+   * Ordinary put intentionally keeps its existing path and cost.
+   */
+  async putWithCommitObserver(
+    config: RunnableConfig,
+    checkpoint: Checkpoint,
+    metadata: CheckpointMetadata,
+    observer: SqlJsSaverCommitObserver
+  ): Promise<RunnableConfig> {
+    const configurable = { ...config.configurable }
+    const threadId = configurable.thread_id
+    const namespace = configurable.checkpoint_ns ?? ""
+    const parentId = configurable.checkpoint_id
+    const snapshot = copyCheckpoint(checkpoint)
+    const checkpointId = snapshot.id
+    if (typeof threadId !== "string" || !threadId || typeof namespace !== "string" ||
+      (parentId !== undefined && (typeof parentId !== "string" || !parentId)) ||
+      typeof checkpointId !== "string" || !checkpointId || typeof observer !== "function")
+      throw new Error("SQLJS_SAVER_COMMIT_SCOPE_INVALID")
+    // Preserve native message objects while fixing channel containers before the first await.
+    for (const [key, value] of Object.entries(snapshot.channel_values)) {
+      if (Array.isArray(value)) snapshot.channel_values[key] = value.slice()
+      else if (value && typeof value === "object" &&
+        (Object.getPrototypeOf(value) === Object.prototype || Object.getPrototypeOf(value) === null))
+        snapshot.channel_values[key] = { ...value }
+    }
+    const fixedConfig: RunnableConfig = { ...config, configurable: {
+      ...configurable, thread_id: threadId, checkpoint_ns: namespace
+    } }
+    const fixedMetadata = { ...metadata, parents: { ...metadata.parents } }
+    const generation = this.commitObserverGeneration
+    const release = await this.acquireCheckpointNamespace(threadId, namespace)
+    let receipt: SqlJsSaverCommittedCheckpointReceipt | undefined
+    let record: CommittedCheckpointRecord | undefined
+    const assertDatabase = (database?: NativeSqliteAdapter) => {
+      if (this.retired || this.closePromise || generation !== this.commitObserverGeneration ||
+        (database && this.db !== database))
+        throw new Error("SQLJS_SAVER_COMMIT_RECEIPT_EXPIRED")
+    }
+    try {
+      assertDatabase()
+      await this.initialize()
+      assertDatabase()
+      const database = this.db
+      if (!database) throw new Error("SQLJS_SAVER_COMMIT_RECEIPT_EXPIRED")
+      const result = await this.putUnlocked(fixedConfig, snapshot, fixedMetadata)
+      assertDatabase(database)
+      if (result.configurable?.thread_id !== threadId ||
+        (result.configurable?.checkpoint_ns ?? "") !== namespace ||
+        result.configurable?.checkpoint_id !== checkpointId)
+        throw new Error("SQLJS_SAVER_COMMIT_SCOPE_INVALID")
+      const exact: RunnableConfig = Object.freeze({ configurable: Object.freeze({
+        thread_id: threadId, checkpoint_ns: namespace, checkpoint_id: checkpointId
+      }) })
+      // Public getTuple would acquire our own held gate and deadlock.
+      const tuple = await this.getTupleUnlocked(exact)
+      assertDatabase(database)
+      if (!tuple || tuple.checkpoint.id !== checkpointId ||
+        tuple.config.configurable?.thread_id !== threadId ||
+        (tuple.config.configurable?.checkpoint_ns ?? "") !== namespace ||
+        tuple.config.configurable?.checkpoint_id !== checkpointId)
+        throw new Error("SQLJS_SAVER_COMMIT_CHECKPOINT_MISSING")
+      receipt = Object.freeze({ [committedCheckpointReceiptBrand]: true as const })
+      record = { database, generation, config: exact, tuple, active: true }
+      this.committedCheckpointReceipts.set(receipt, record)
+      await observer(receipt)
+      SqlJsSaver.prototype.readCommittedCheckpoint.call(this, receipt)
+      return result
+    } finally {
+      if (record) record.active = false
+      if (receipt) this.committedCheckpointReceipts.delete(receipt)
+      release()
+    }
+  }
+
+  /** Exact cached tuple only; never accepts an ID/config or borrows a later database. */
+  readCommittedCheckpoint(receipt: SqlJsSaverCommittedCheckpointReceipt): CheckpointTuple {
+    const record = this.committedCheckpointReceipts.get(receipt)
+    if (!record) throw new Error("SQLJS_SAVER_COMMIT_RECEIPT_INVALID")
+    if (!record.active || this.retired || this.closePromise || this.db !== record.database ||
+      this.commitObserverGeneration !== record.generation)
+      throw new Error("SQLJS_SAVER_COMMIT_RECEIPT_EXPIRED")
+    if (record.tuple.checkpoint.id !== record.config.configurable?.checkpoint_id ||
+      record.tuple.config !== record.config)
+      throw new Error("SQLJS_SAVER_COMMIT_SCOPE_INVALID")
+    return record.tuple
+  }
+
+  /** Host-only read lifecycle. Never initializes or borrows a replacement database. */
+  captureReadLifetime(): () => void {
+    const database = this.db, generation = this.commitObserverGeneration
+    if (!database || !this.isSetup || this.retired || this.closePromise)
+      throw new Error("SQLJS_SAVER_READ_LIFETIME_EXPIRED")
+    return () => {
+      if (this.db !== database || !this.isSetup || this.retired || this.closePromise ||
+        this.commitObserverGeneration !== generation)
+        throw new Error("SQLJS_SAVER_READ_LIFETIME_EXPIRED")
+    }
+  }
+
   private async putUnlocked(
     config: RunnableConfig,
     checkpoint: Checkpoint,
@@ -2566,6 +2855,8 @@ export class SqlJsSaver extends BaseCheckpointSaver {
   /** Close the database after a final WAL checkpoint. */
   async close(): Promise<void> {
     if (this.closePromise) return this.closePromise
+    // A still-live observer may not borrow this Saver's next initialized DB incarnation.
+    this.commitObserverGeneration += 1
     const closePromise = (async () => {
       const pendingInitialize = this.initializePromise
       if (pendingInitialize) {

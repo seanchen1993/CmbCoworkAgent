@@ -1,3 +1,6 @@
+import { isCreatorVersionSource } from "../plugins/creator-path"
+import { isProjectModePluginRoot } from "../harness-board/plugin-mode"
+import { isPluginInstallMode, type PluginInstallMode, type PluginInstallResult } from "../../shared/plugin-install"
 import AdmZip from "adm-zip"
 import { IpcMain, dialog } from "electron"
 import * as fs from "fs/promises"
@@ -18,7 +21,8 @@ import {
   invalidateEnabledSkillsCache,
   parseMcpJsonFile
 } from "../storage"
-import { copyDirRecursive, createAsyncMutex } from "../utils/fs"
+import { copyDirRecursive } from "../utils/fs"
+import { pluginCatalogMutex as pluginMutex, withPluginCatalogMutation } from "../plugins/catalog-mutation"
 import type {
   PluginHookMetadata,
   PluginDetail,
@@ -291,16 +295,98 @@ function formatAuthor(author: PluginManifest["author"]): string {
   return author.name || ""
 }
 
-export async function installPluginFromDir(
+/** Static complete-package inspection; never executes Skills, Hooks or connectors. */
+export async function inspectCompletePluginDirectory(directory: string): Promise<void> {
+  const parsed = await parsePluginDir(directory)
+  if (!parsed.skillNames.length && !Object.keys(parsed.mcpConfigs).length &&
+    !parsed.hookCount && !parsed.modCount) throw Error("插件没有可识别的技能、Hooks、MCP 或模块")
+}
+
+/** External callers share the same writer queue as the Plugin IPC handlers. */
+export function installPluginFromDir(
+  ...args: Parameters<typeof installPluginFromDirLocked>
+): ReturnType<typeof installPluginFromDirLocked> {
+  return withPluginCatalogMutation(() => installPluginFromDirLocked(...args))
+}
+
+/** Derivation is never an update, even if a name appeared after its preview. */
+export function installDerivedPluginDirectory(
+  directory: string,
+  name: string,
+  pluginId: string,
+  assertCurrent: () => void,
+  verifyCopied: (directory: string) => Promise<void>
+): Promise<{ success: boolean; pluginName?: string; error?: string }> {
+  return withPluginCatalogMutation(() => installPluginFromDirLocked(
+    directory, name, "local", undefined, false, assertCurrent,
+    { name, pluginId, verifyCopied }
+  ))
+}
+
+/** A bundled example must never turn the ordinary same-name update path into an overwrite. */
+export function installBundledCommunityPlugin(
+  directory: string,
+  name: string,
+  verify: (directory: string) => Promise<unknown>,
+  assertCurrent: () => void
+): Promise<{ pluginId: string; pluginName: string; alreadyInstalled: boolean; requiresApproval: true }> {
+  return withPluginCatalogMutation(async () => {
+    assertCurrent()
+    await verify(directory)
+    const existing = getPlugins().filter(plugin => plugin.name === name)
+    if (existing.length) {
+      if (existing.length !== 1) throw Error("MODS_COMMUNITY_EXISTING_CONFLICT")
+      try { await verify(existing[0].path) }
+      catch { throw Error("MODS_COMMUNITY_EXISTING_CONFLICT") }
+      assertCurrent()
+      return { pluginId: existing[0].id, pluginName: name,
+        alreadyInstalled: true, requiresApproval: true }
+    }
+    assertCurrent()
+    const result = await installPluginFromDirLocked(directory, name, "local", undefined, true,
+      assertCurrent)
+    if (!result.success) throw Error(result.error ?? "MODS_COMMUNITY_INSTALL_FAILED")
+    const installed = getPlugins().find(plugin => plugin.name === name)
+    if (!installed) throw Error("MODS_COMMUNITY_INSTALL_FAILED")
+    return { pluginId: installed.id, pluginName: name,
+      alreadyInstalled: false, requiresApproval: true }
+  })
+}
+
+/** Windows readers/scanners can transiently deny a directory rename. Keep the same atomic
+ * backup/restore protocol, and never copy over a directory whose rename did not succeed. */
+async function renamePluginDirectory(source: string, destination: string): Promise<void> {
+  const delays = [40, 80, 160]
+  for (let attempt = 0; ; attempt++) {
+    try {
+      await fs.rename(source, destination)
+      return
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code
+      if (process.platform !== "win32" ||
+          (code !== "EPERM" && code !== "EBUSY") || attempt >= delays.length) throw error
+      await new Promise<void>(resolve => setTimeout(resolve, delays[attempt]))
+    }
+  }
+}
+
+async function installPluginFromDirLocked(
   dirPath: string,
   fallbackName?: string,
   origin?: "market" | "local",
   versionOverride?: string,
-  requireMods = false
-): Promise<{ success: boolean; pluginName?: string; error?: string }> {
+  requireMods: PluginInstallMode = false,
+  beforeWrite?: () => void,
+  createOnly?: { name: string; pluginId: string; verifyCopied: (directory: string) => Promise<void> }
+): Promise<PluginInstallResult> {
   try {
+    if (!isPluginInstallMode(requireMods))
+      return { success: false, error: "无效的插件安装方式" }
     const parsed = await parsePluginDir(dirPath, fallbackName)
-    if (requireMods && parsed.modCount === 0) {
+    if (createOnly && (parsed.name !== createOnly.name || getPlugins().some(plugin =>
+      plugin.name.trim().toLowerCase() === parsed.name.trim().toLowerCase() ||
+      plugin.id === createOnly.pluginId))) throw Error("独立插件名称已存在，请修改名称后重新创建")
+    if (requireMods === true && parsed.modCount === 0) {
       return {
         success: false,
         error: "未检测到 Mods 模块，请选择包含 Mods 的插件包。普通插件请在“插件”页面安装。"
@@ -315,6 +401,7 @@ export async function installPluginFromDir(
       return { success: false, error: "未检测到有效的 skills、MCP 配置、hooks 或 CMB Mods 清单" }
     }
 
+    beforeWrite?.()
     const pluginsDir = getPluginsDir()
 
     // Check for existing plugin with same name AND author (update scenario)
@@ -340,7 +427,15 @@ export async function installPluginFromDir(
       // Reuse the existing plugin's directory basename
       pluginDirName = path.basename(existing.path)
     }
+    if (existing && isCreatorVersionSource(pluginsDir, existing.path))
+      return { success: false, error: "此插件由创作者版本库管理，请在创作者模式中更新版本。" }
     const destDir = path.join(pluginsDir, pluginDirName)
+    const installedPluginId = existing?.id ?? createOnly?.pluginId ?? uuid()
+    const associateCopiedSource = async (): Promise<void> => {
+      if (createOnly) return
+      const { observeDerivationInstallation } = await import("../plugins/derivation-scope")
+      await observeDerivationInstallation(installedPluginId, destDir, parsed.name)
+    }
     const resolvedVersion = resolvePluginInstallVersion(parsed.manifest?.version, versionOverride)
     const shouldSyncManifestVersion = Boolean(normalizePluginVersion(versionOverride))
     const syncCopiedManifestVersion = async (): Promise<void> => {
@@ -358,18 +453,19 @@ export async function installPluginFromDir(
       // Update existing: backup old directory, then copy new, restore on failure
       const backupDir = existing.path + `_backup_${Date.now()}`
       if (existsSync(existing.path)) {
-        await fs.rename(existing.path, backupDir)
+        await renamePluginDirectory(existing.path, backupDir)
       }
       try {
         await copyDirRecursive(dirPath, destDir)
         await syncCopiedManifestVersion()
+        await associateCopiedSource()
       } catch (copyErr) {
         // Restore from backup
         if (existsSync(backupDir)) {
           if (existsSync(destDir)) {
             rmSync(destDir, { recursive: true, force: true })
           }
-          await fs.rename(backupDir, existing.path)
+          await renamePluginDirectory(backupDir, existing.path)
         }
         throw copyErr
       }
@@ -382,6 +478,8 @@ export async function installPluginFromDir(
       try {
         await copyDirRecursive(dirPath, destDir)
         await syncCopiedManifestVersion()
+        if (createOnly) { await createOnly.verifyCopied(destDir); beforeWrite?.() }
+        await associateCopiedSource()
       } catch (copyErr) {
         if (existsSync(destDir)) {
           rmSync(destDir, { recursive: true, force: true })
@@ -396,14 +494,16 @@ export async function installPluginFromDir(
     // otherwise inherit from the existing record, defaulting to "local".
     const resolvedOrigin: "market" | "local" = origin ?? existing?.origin ?? "local"
     const meta: PluginMetadata = {
-      id: existing?.id ?? uuid(),
+      id: installedPluginId,
       name: parsed.name,
       version: resolvedVersion,
       description: parsed.manifest?.description ?? "",
       ...(parsed.manifest?.useScenario ? { useScenario: parsed.manifest.useScenario } : {}),
       author: formatAuthor(parsed.manifest?.author),
       path: destDir,
-      enabled: true,
+      enabled: createOnly ? false : requireMods === "capabilities"
+        ? existing?.enabled ?? parsed.modCount > 0
+        : true,
       skillCount: parsed.skillNames.length,
       mcpServerCount: Object.keys(parsed.mcpConfigs).length,
       hookCount: parsed.hookCount,
@@ -420,7 +520,8 @@ export async function installPluginFromDir(
     notifyHooksChanged("plugin-installed")
     getModsManager()?.pluginsChanged()
 
-    return { success: true, pluginName: parsed.name }
+    return { success: true, pluginName: parsed.name, pluginId: meta.id,
+      kind: parsed.modCount > 0 ? "modules" : "plugin", enabled: meta.enabled }
   } catch (e) {
     return { success: false, error: e instanceof Error ? e.message : "安装失败" }
   }
@@ -651,8 +752,8 @@ async function installPluginFromZip(
   fileName?: string,
   origin?: "market" | "local",
   versionOverride?: string,
-  requireMods = false
-): Promise<{ success: boolean; pluginName?: string; error?: string }> {
+  requireMods: PluginInstallMode = false
+): Promise<PluginInstallResult> {
   try {
     const extracted = await extractZipToTemp(buffer, getPluginsDir(), "_temp_")
     if (!extracted.success) {
@@ -669,7 +770,7 @@ async function installPluginFromZip(
           : rootName
 
       // Parse and install (the real copy lands in getPluginsDir() via installPluginFromDir)
-      return await installPluginFromDir(
+      return await installPluginFromDirLocked(
         pluginRoot, fallbackName, origin, versionOverride, requireMods
       )
     } finally {
@@ -702,10 +803,11 @@ export async function exportPluginForMarketZip(
 
 export function registerPluginHandlers(ipcMain: IpcMain): void {
   console.log("[Plugins] Registering plugin handlers...")
-  const pluginMutex = createAsyncMutex()
 
   ipcMain.handle("plugins:list", async (): Promise<PluginMetadata[]> => {
-    return getPlugins()
+    return getPlugins().map(plugin => ({
+      ...plugin, hasProjectMode: isProjectModePluginRoot(plugin.path)
+    }))
   })
 
   ipcMain.handle(
@@ -751,9 +853,11 @@ export function registerPluginHandlers(ipcMain: IpcMain): void {
         fileName: string
         origin?: "market" | "local"
         version?: string
-        requireMods?: boolean
+        requireMods?: PluginInstallMode
       }
-    ): Promise<{ success: boolean; pluginName?: string; error?: string }> => {
+    ): Promise<PluginInstallResult> => {
+      if (!isPluginInstallMode(payload?.requireMods))
+        return { success: false, error: "无效的插件安装方式" }
       const { buffer, fileName, origin, version } = payload
       if (!buffer || !fileName) {
         return { success: false, error: "无效的文件" }
@@ -771,7 +875,7 @@ export function registerPluginHandlers(ipcMain: IpcMain): void {
       await pluginMutex.acquire()
       try {
         return await installPluginFromZip(
-          buffer, fileName, sanitizedOrigin, version, payload.requireMods === true
+          buffer, fileName, sanitizedOrigin, version, payload.requireMods
         )
       } finally {
         pluginMutex.release()
@@ -782,11 +886,14 @@ export function registerPluginHandlers(ipcMain: IpcMain): void {
   ipcMain.handle(
     "plugins:installFromDir",
     async (
-      _event, requireMods?: boolean
-    ): Promise<{ success: boolean; pluginName?: string; error?: string }> => {
+      _event, requireMods?: PluginInstallMode
+    ): Promise<PluginInstallResult> => {
+      if (!isPluginInstallMode(requireMods))
+        return { success: false, error: "无效的插件安装方式" }
       const result = await dialog.showOpenDialog({
         properties: ["openDirectory"],
-        title: requireMods === true ? "选择 Mods 插件目录" : "选择 Plugin 目录"
+        title: requireMods === "capabilities" ? "选择插件文件夹"
+          : requireMods === true ? "选择 Mods 插件目录" : "选择 Plugin 目录"
       })
       if (result.canceled || result.filePaths.length === 0) {
         return { success: false, error: "已取消" }
@@ -796,8 +903,8 @@ export function registerPluginHandlers(ipcMain: IpcMain): void {
         // Both settings pages select a local folder. Pass "local" explicitly so
         // it can override any sticky "market" tag from a prior install of
         // the same plugin.
-        return await installPluginFromDir(
-          result.filePaths[0], undefined, "local", undefined, requireMods === true
+        return await installPluginFromDirLocked(
+          result.filePaths[0], undefined, "local", undefined, requireMods
         )
       } finally {
         pluginMutex.release()
@@ -819,7 +926,7 @@ export function registerPluginHandlers(ipcMain: IpcMain): void {
           return { success: false, error: "Plugin 不存在" }
         }
         try {
-          if (existsSync(plugin.path)) {
+          if (!isCreatorVersionSource(getPluginsDir(), plugin.path) && existsSync(plugin.path)) {
             rmSync(plugin.path, { recursive: true, force: true })
           }
           deletePluginStorage(id)

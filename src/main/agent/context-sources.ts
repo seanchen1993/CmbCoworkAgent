@@ -4,6 +4,8 @@ import type { McpCapabilityTool } from "../mcp/capability-types"
 export interface FunctionSessionContextSourceInput {
   memorySources?: readonly string[]
   skillSources?: readonly string[]
+  /** Exact host-selected documents; absent preserves inherited catalog behavior. */
+  skillDocuments?: readonly string[]
   pluginSkillSources?: readonly { sourceDir: string; pluginName?: string }[]
   mcpTools?: readonly Pick<McpCapabilityTool, "toolId" | "toolName" | "providerAlias">[]
   agents?: readonly { name: string; source: string; description: string }[]
@@ -77,6 +79,8 @@ export function buildFunctionSessionContextSources(
       typeof skill?.name !== "string" ||
       typeof skill.path !== "string" ||
       typeof skill.description !== "string" ||
+      (input.skillDocuments !== undefined &&
+        !input.skillDocuments.some((document) => pathKey(document) === pathKey(String(skill.path)))) ||
       !input.skillSources?.some((source) => isInside(String(skill.path), source))
     )
       return []

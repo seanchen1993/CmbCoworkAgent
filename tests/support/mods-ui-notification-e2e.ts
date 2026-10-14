@@ -1,3 +1,4 @@
+import { openModsResults } from "./mods-sidebar-navigation"
 import assert from "node:assert/strict"
 import { mkdirSync } from "node:fs"
 import { join } from "node:path"
@@ -69,6 +70,7 @@ export async function verifyUiNotification(
   )
   await page.reload({ waitUntil: "domcontentloaded" })
   await page.getByText("UI notifications", { exact: true }).first().click()
+  await openModsResults(page)
   const run = async (command: string) => {
     const descriptor = (await page.evaluate((id) => window.api.mods.commands(id), id)).find(
       (row) => row.command === command
@@ -139,6 +141,7 @@ export async function verifyUiNotification(
   )
   await page.reload({ waitUntil: "domcontentloaded" })
   await page.getByText("UI notifications", { exact: true }).first().click()
+  await openModsResults(page)
   await pane().getByText("LOCAL_COUNT_3", { exact: true }).waitFor()
   await until(
     async () => (await composer.getAttribute("placeholder")) === "SCOPED_HINT_1",

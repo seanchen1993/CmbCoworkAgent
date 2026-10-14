@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from "vitest"
-import type { ModJson } from "../../../shared/mods/types"
+import type { ModJson, ModObject } from "../../../shared/mods/types"
 import { FunctionGuestRuntime } from "./guest-runtime"
 import { dispatchFunctionStream, type FunctionStreamOptions } from "./stream-dispatcher"
 
@@ -22,6 +22,75 @@ async function* core(): AsyncGenerator<ModJson, ModJson> {
 afterEach(() => guests.splice(0).forEach((guest) => guest.dispose()))
 
 describe("function stream bridge", () => {
+  it("routes streaming SDK calls with the actual plugin and handler before selecting a model", async () => {
+    const guest = await FunctionGuestRuntime.create(`var __cmbFunctionMod={register(on){
+      on("turn.step",async function*($,e,next){
+        const id=await $.session.id();return yield* next({...e,model:id})
+      })
+    }}`)
+    guests.push(guest)
+    const calls: Array<{ plugin: string; method: string; registration: string }> = []
+    let received: ModObject | undefined
+    const stream = dispatchFunctionStream(
+      [{ guest, name: "chooser", root: "/chooser", tier: "user", capabilities: ["session.id"] }],
+      input,
+      {
+        capabilities: plugin => plugin.capabilities,
+        sdk: async (plugin, method, _args, signal, source) => {
+          signal.throwIfAborted()
+          calls.push({ plugin: plugin.name, method, registration: source.registration })
+          return { value: "selected-model" }
+        },
+        core: async function* (value) { received = value; return yield* core() }
+      }
+    )
+    for await (const value of stream) expect(value).toHaveProperty("text")
+    expect(received?.model).toBe("selected-model")
+    expect(calls).toEqual([{
+      plugin: "chooser", method: "session.id", registration: guest.registrations[0].id
+    }])
+    expect(await stream.result).toEqual({ answer: "onetwo" })
+  })
+
+  it("skips only the recorded creator, keeping its other handler and another plugin", async () => {
+    const make = async (code: string) => {
+      const guest = await FunctionGuestRuntime.create(`var __cmbFunctionMod={register(on){${code}}}`)
+      guests.push(guest)
+      return guest
+    }
+    const creator = await make(`
+      on("turn.step",{index:0},async function*($,e,next){
+        await $.session.id();return yield* next(e)
+      });
+      on("turn.step",{model:"fixture"},async function*($,e,next){
+        await $.session.id();return yield* next(e)
+      })`)
+    const other = await make(`on("turn.step",async function*($,e,next){
+      await $.session.id();return yield* next(e)
+    })`)
+    const calls: string[] = []
+    const stream = dispatchFunctionStream(
+      [
+        { guest: creator, name: "creator", root: "/a", tier: "user", capabilities: ["session.id"] },
+        { guest: other, name: "other", root: "/b", tier: "user", capabilities: ["session.id"] }
+      ],
+      { ...input, agentId: "actual-child" },
+      {
+        skip: { plugin: "creator", registration: creator.registrations[0].id },
+        capabilities: plugin => plugin.capabilities,
+        sdk: async (plugin, _method, _args, _signal, source) => {
+          calls.push(`${plugin.name}:${source.registration}`)
+          return { value: "child-session" }
+        },
+        core
+      }
+    )
+    for await (const value of stream) expect(value).toHaveProperty("text")
+    expect(calls).toEqual([
+      `creator:${creator.registrations[1].id}`, `other:${other.registrations[0].id}`
+    ])
+    expect(await stream.result).toEqual({ answer: "onetwo" })
+  })
   it("closing an unread stream rejects result without starting a provider", async () => {
     let requests = 0
     const stream = await run(

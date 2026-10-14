@@ -70,6 +70,19 @@ it("does not read application settings repeatedly for an already disabled unprot
   expect(f.manager.isEnabled(f.root)).toBe(false)
 })
 
+it("rechecks the displayed settings scope after legacy plugin preparation before granting", async () => {
+  const f = await fixture()
+  const digest = (await f.manager.status(f.root)).mods[0].digest!
+  let checks = 0
+  const guard = () => {
+    if (++checks > 1) throw Error("MODS_SCOPE_CHANGED")
+  }
+  await expect(f.manager.approve(f.root, "plugin", digest, guard))
+    .rejects.toThrow("MODS_SCOPE_CHANGED")
+  expect(f.manager.store.getGrant(f.manager.workspaceKey(f.root), "review")?.enabled)
+    .not.toBe(true)
+})
+
 it("does not lend a main backend to a model-raised unbound child through a legacy Mod", async () => {
   const f = await fixture()
   const manifestPath = join(f.plugin, "manifest.json")
@@ -241,6 +254,23 @@ async function fixture(
 }
 
 describe("project Mods lifecycle and UI authority", () => {
+  it("scopes legacy card publication and consumption without weakening configure invalidation", async () => {
+    const f = await fixture()
+    await f.enable()
+    f.notify.mockClear()
+    await f.dispatch()
+    expect(f.notify).toHaveBeenCalledWith("thread", "cards")
+    expect(f.notify.mock.calls.every(([, scope]) => scope === "cards")).toBe(true)
+    const id = f.button().actionId!
+    f.notify.mockClear()
+    await f.manager.act(7, "thread", id)
+    expect(f.notify).toHaveBeenCalledWith("thread", "cards")
+    await expect(f.manager.act(7, "thread", id)).rejects.toThrow()
+    f.notify.mockClear()
+    f.manager.configure(f.root, false, false)
+    expect(f.notify).toHaveBeenCalledWith("thread")
+  })
+
   it("binds completion checks to the live main turn and rejects replacement during a check", async () => {
     const f = await fixture()
     expect(
@@ -369,6 +399,8 @@ describe("project Mods lifecycle and UI authority", () => {
       const checked = vi.fn(async (_binding, input, _core, origin) => {
         expect(input).toMatchObject({ tool: "read_file", input: { file_path: "final.txt" } })
         expect(typeof input.tool_use_id).toBe("string")
+        expect(Object.hasOwn(input, "agentId")).toBe(false)
+        expect(Object.hasOwn(input, "ceiling")).toBe(false)
         expect(origin).toEqual({ plugin: "engine", tier: "core" })
         return { decision, reason: "permission explanation" }
       })
@@ -1174,6 +1206,38 @@ describe("project Mods lifecycle and UI authority", () => {
       policyDigest: f.manager.policy.digest
     })
   })
+
+  it.each([false, true])(
+    "keeps mandatory policy when the global switch is off (initially enabled: %s)",
+    async (initiallyEnabled) => {
+      let globallyEnabled = initiallyEnabled
+      const f = await fixture(
+        {
+          ...DEFAULT_MOD_POLICY,
+          required: true,
+          denyTools: ["host:write_file"],
+          redactLiterals: ["private-value"]
+        },
+        () => globallyEnabled
+      )
+      if (initiallyEnabled) {
+        await f.manager.approve(f.root, "plugin", f.digest)
+        f.manager.configure(f.root, true, true)
+      }
+      globallyEnabled = false
+      f.manager.invalidateAll()
+      expect(f.manager.isEnabled(f.root)).toBe(false)
+      expect(f.manager.isActive(f.root)).toBe(true)
+      expect(f.manager.protects(f.root)).toBe(true)
+      expect(await f.manager.commands(f.root, f.scope.threadId)).toEqual([])
+      const core = vi.fn(async () => "private-value")
+      await expect(f.manager.dispatch(f.scope, "host:write_file", {}, core)).rejects.toThrow(
+        "POLICY_TOOL_DENIED"
+      )
+      expect(core).not.toHaveBeenCalled()
+      expect(await f.manager.dispatch(f.scope, "host:read_file", {}, core)).toBe("[REDACTED]")
+    }
+  )
   it("keeps the disabled path unchanged and injects context only after approval", async () => {
     const f = await fixture()
     expect(await f.dispatch()).toBe("text")

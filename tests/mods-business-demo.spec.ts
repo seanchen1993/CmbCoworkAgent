@@ -161,7 +161,6 @@ async function main() {
     })
     await page!.evaluate(
       async ({ url, modelName }) => {
-        await window.api.mods.unlockFunction("admin123456")
         await window.api.mods.configureGlobal(true)
         await window.api.models.setCustomConfig({
           id: "business-demo",

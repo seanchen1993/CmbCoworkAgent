@@ -1,5 +1,8 @@
 {
   "name": "function-commands",
   "version": "1.0.0",
-  "description": "使用标准 Function Hooks 注册项目命令，展示会话内常驻状态。"
+  "description": "使用标准 Function Hooks 注册项目命令，展示会话内常驻状态。",
+  "cmbCompatibility": {
+    "modelProtocol": "legacy-v1"
+  }
 }

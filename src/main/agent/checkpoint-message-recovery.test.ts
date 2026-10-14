@@ -2,6 +2,7 @@ import { mkdtempSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { DatabaseSync } from "node:sqlite"
+import { BaseMessage, HumanMessage } from "@langchain/core/messages"
 import { afterEach, describe, expect, it, vi } from "vitest"
 import type { Message, ThreadMessagesPage } from "../types"
 import { readThreadMessagesPage } from "../thread-message-hydration/page-reader"
@@ -13,6 +14,7 @@ vi.mock("../thread-message-hydration/client", () => ({
 }))
 
 import { recoverMainCheckpointMessages } from "./checkpoint-message-recovery"
+import type { FunctionConversationTranscriptStamp } from "../../shared/mods/v2/conversation-transcript"
 
 const temporaryDirectories: string[] = []
 const databases: DatabaseSync[] = []
@@ -62,6 +64,54 @@ function recoveryContext(options: { interrupt?: boolean; expected?: number } = {
     checkpointTs: "2026-08-28T00:00:00.000Z"
   }
 }
+
+it("restores already-consumed hidden notes through native admission without adding provider notices", async () => {
+  const stamp: FunctionConversationTranscriptStamp = { conversationId: "actual", branchId: "branch",
+    uuid: "note", sequence: 1, door: "note", messageType: "user", isMeta: true,
+    origin: { kind: "plugin", name: "P" } }
+  const note = { ...persistedMessage("note"), content: "UI-clamped", function_row: stamp }
+  const notice = { ...persistedMessage("notice", "system"), function_row: { ...stamp,
+    uuid: "notice", messageType: "system" as const } }
+  delete notice.function_row.isMeta
+  readPageMock.mockResolvedValue(page([note, notice, persistedMessage("typed-user")]))
+  const resolveFunctionRow = vi.fn(() => new HumanMessage({ id: "note",
+    content: "full original consumed note", additional_kwargs: { function_row: stamp } }))
+  const sourceGuard = vi.fn(() => undefined)
+  const result = await recoverMainCheckpointMessages(recoveryContext({ expected: 2, interrupt: true }),
+    { resolveFunctionRow, sourceGuard })
+  expect(result).not.toBeNull()
+  if (!result) throw Error("ACTUAL_RECOVERY_MESSAGES_REQUIRED")
+  const messages = result.messages.map((message) => {
+    expect(BaseMessage.isInstance(message)).toBe(true)
+    if (!BaseMessage.isInstance(message)) throw Error("ACTUAL_NATIVE_MESSAGE_REQUIRED")
+    return message
+  })
+  expect(messages.map((message) => message.id)).toEqual(["note", "typed-user"])
+  expect(messages[0].content).toBe("full original consumed note")
+  expect(resolveFunctionRow).toHaveBeenCalledTimes(1)
+  expect(sourceGuard).toHaveBeenCalledTimes(3)
+})
+
+it("rejects Function recovery with no actual resolver and propagates revoked actual source", async () => {
+  const note = { ...persistedMessage("note"), function_row: { conversationId: "actual",
+    branchId: "branch", uuid: "note", sequence: 1, door: "note" as const,
+    messageType: "user" as const, isMeta: true as const, origin: { kind: "plugin" as const, name: "P" } } }
+  readPageMock.mockResolvedValue(page([note]))
+  await expect(recoverMainCheckpointMessages(recoveryContext({ expected: 1 })))
+    .rejects.toThrow("RECOVERY_REQUIRED")
+  const expired = Error("actual source expired")
+  await expect(recoverMainCheckpointMessages(recoveryContext({ expected: 1 }), {
+    sourceGuard: () => { throw expired }, resolveFunctionRow: () => new HumanMessage("fake")
+  })).rejects.toThrow(expired)
+})
+
+it("retains original loss/exact-count gates and refuses malformed native markers", async () => {
+  readPageMock.mockResolvedValue(page([{ ...persistedMessage("bad"), function_row_invalid: true }]))
+  await expect(recoverMainCheckpointMessages(recoveryContext({ expected: 1 })))
+    .rejects.toThrow("TRANSCRIPT_INVALID")
+  readPageMock.mockResolvedValue(page([persistedMessage("old")], { truncatedMessageIds: ["old"] }))
+  expect(await recoverMainCheckpointMessages(recoveryContext({ expected: 1 }))).toBeNull()
+})
 
 function createHydrationDatabase(): { database: DatabaseSync; path: string } {
   const directory = mkdtempSync(join(tmpdir(), "cmb-recovery-boundary-"))

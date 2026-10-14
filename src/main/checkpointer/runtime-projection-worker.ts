@@ -117,7 +117,8 @@ workerPort.on("message", (request: CheckpointRuntimeProjectionWorkerRequest) => 
           {
             messageLimit: request.messageLimit,
             messageByteBudget: request.messageByteBudget,
-            cancellationBuffer: request.cancellationBuffer
+            cancellationBuffer: request.cancellationBuffer,
+            nativeDisplay: request.nativeDisplay
           }
         )
       } satisfies CheckpointRuntimeProjectionWorkerResponse)

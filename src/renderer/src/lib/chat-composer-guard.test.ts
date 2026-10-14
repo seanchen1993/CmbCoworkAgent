@@ -37,6 +37,10 @@ function renderComposer(overrides: Record<string, unknown> = {}): string {
     input: "",
     inputPlaceholder: "输入消息",
     functionHint: null,
+    modsChatState: { ready: true, enabled: false },
+    modsChatEnabled: false,
+    promptComposer: {suggestion:null,decorations:[]},
+    flowIntent: { threadId: "thread", mode: "chat" },
     inputRef: { current: null },
     handleKeyDown: () => undefined,
     handleAttachClick: () => undefined,
@@ -125,6 +129,9 @@ function expectAvailability(markup: string, blocked: boolean): void {
 }
 
 describe("Chat composer rendered decision guards", () => {
+  it("keeps decision guards while a suggestion and decorations are displayed",()=>{
+    expectAvailability(renderComposer({readOnly:true,promptComposer:{suggestion:"Next",decorations:[{start:0,end:1}]}}),true)
+  })
   it("disables both controls for a pending Biz Retry and releases them when it disappears", () => {
     const notifications = [{ type: "biz_retry", status: "pending", sourceThreadId: "thread" }]
     expectAvailability(renderComposer({ useHarnessNotifications: () => notifications }), true)
@@ -156,6 +163,27 @@ describe("Chat composer rendered decision guards", () => {
     expect(controls.match(/<textarea\b[^>]*>/u)?.[0]).not.toContain('disabled=""')
     expect(controls.match(/<button\b[^>]*aria-label="添加文件"[^>]*>/u)?.[0]).toContain(
       'aria-disabled="true"'
+    )
+  })
+
+  it("keeps decision guards active in flow mode and restores chat intent on another thread", () => {
+    const flowIntent = { threadId: "thread", mode: "flow" }
+    const markup = renderComposer({ flowIntent })
+    expect(markup).toContain("输入本次流程任务")
+    expectAvailability(markup, false)
+    expectAvailability(renderComposer({ flowIntent, readOnly: true }), true)
+    expectAvailability(renderComposer({ flowIntent, contextReminderPending: true }), true)
+    expectAvailability(
+      renderComposer({
+        flowIntent,
+        useHarnessNotifications: () => [
+          { type: "biz_retry", status: "pending", sourceThreadId: "thread" }
+        ]
+      }),
+      true
+    )
+    expect(renderComposer({ flowIntent, threadId: "other-thread" })).toContain(
+      'placeholder="输入消息"'
     )
   })
 })

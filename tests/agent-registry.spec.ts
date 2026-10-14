@@ -1,6 +1,8 @@
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync, readFileSync } from "fs"
 import { homedir, tmpdir } from "os"
 import { join } from "path"
+import { runInNewContext } from "node:vm"
+import ts from "typescript"
 import {
   loadAgentProfiles,
   loadAgentProfilesAsync,
@@ -517,9 +519,20 @@ function testLevel2AvailableToMultiAndWorkflowMainAgents(): void {
   // Multi (normal + task enabled) and Workflow expose the same registry-backed
   // inline task types. Coordinator and leaf runtimes remain excluded.
   assert(
-    RUNTIME_SRC.includes("const mainSubagentsEnabled = !isCoordinatorMode && !disableSubagents") &&
-      RUNTIME_SRC.includes("const registrySubagentSpecs = mainSubagentsEnabled"),
+    RUNTIME_SRC.includes("const mainSubagentsEnabled = !isCoordinatorMode && !disableSubagents"),
     "registry task subagents follow the task tool's Multi/Workflow availability"
+  )
+  assert(
+    /let registryProfiles = mainSubagentsEnabled\s*\? await loadAgentProfilesAsync\(workspacePath, projectModeTaskSubagentConfig\)\s*:\s*\[\]/.test(
+      RUNTIME_SRC
+    ),
+    "coordinator and leaf runtimes must not load registry profiles"
+  )
+  assert(
+    /if \(functionMods && registryProfiles\.length > 0\) \{[\s\S]*?for \(const profile of registryProfiles\) \{[\s\S]*?const decision = await functionMods\.offerAgent\([\s\S]*?if \(decision\.isOffered\) offered\.push\(profile\)\s*\}\s*registryProfiles = offered\s*\}\s*const registrySubagentSpecs = registryProfiles\.map\(\(profile\) => \(\{/.test(
+      RUNTIME_SRC
+    ),
+    "Mods may filter loaded registry profiles before task specs are created"
   )
   assert(
     RUNTIME_SRC.includes(
@@ -1556,15 +1569,48 @@ function testDeferredInventoryGatedOnBridge(): void {
     "inventory ids are sorted (alpha before beta)"
   )
   assert(renderAvailableDeferredToolsPrompt([]) === "", "empty ids → no inventory block")
-  // (b) wiring: the runtime gates the inventory render on hasInvokeDeferredTool so
-  //     a bridge-less restricted leaf never sees IDs it can't use.
-  assert(
-    RUNTIME_SRC.includes(
-      "if (runtimePolicy.includeDeferredToolInventoryPrompt && hasInvokeDeferredTool) {"
-    ) &&
-      RUNTIME_SRC.includes("systemPrompt += renderAvailableDeferredToolsPrompt(deferredToolIds)"),
-    "runtime gates the deferred-tool inventory on the invoke bridge being available"
-  )
+  // Evaluate the actual producer call across both gates rather than require an if/string layout.
+  const source = ts.createSourceFile("runtime.ts", RUNTIME_SRC, ts.ScriptTarget.Latest, true)
+  const calls: ts.CallExpression[] = []
+  const visit = (node: ts.Node): void => {
+    if (
+      ts.isCallExpression(node) &&
+      ts.isIdentifier(node.expression) &&
+      node.expression.text === "appendSystemContribution" &&
+      node.arguments[0] &&
+      ts.isStringLiteral(node.arguments[0]) &&
+      node.arguments[0].text === "cmb:deferred-tools"
+    )
+      calls.push(node)
+    ts.forEachChild(node, visit)
+  }
+  visit(source)
+  assert(calls.length === 1, "one actual deferred inventory producer must be wired")
+  for (const enabled of [false, true]) {
+    for (const bridge of [false, true]) {
+      const contributions: Array<{ id: string; text: string | null }> = []
+      let renders = 0
+      runInNewContext(calls[0].getText(source), {
+        runtimePolicy: { includeDeferredToolInventoryPrompt: enabled },
+        hasInvokeDeferredTool: bridge,
+        deferredToolIds: ["beta", "alpha"],
+        appendSystemContribution: (id: string, text: string | null) =>
+          contributions.push({ id, text }),
+        renderAvailableDeferredToolsPrompt: (ids: string[]) => {
+          renders++
+          return renderAvailableDeferredToolsPrompt(ids)
+        }
+      }, { timeout: 1000 })
+      const active = enabled && bridge
+      assert(contributions.length === 1, "each request contributes exactly one current slot")
+      assert(contributions[0].id === "cmb:deferred-tools", "inventory keeps its producer name")
+      assert(
+        contributions[0].text === (active ? block : null),
+        `deferred inventory respects policy=${enabled} and bridge=${bridge}`
+      )
+      assert(renders === (active ? 1 : 0), "inactive inventory does not invoke its renderer")
+    }
+  }
 }
 
 function testReadOnlyBuildToolInvocationShared(): void {

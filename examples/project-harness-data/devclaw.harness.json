@@ -1,0 +1,61 @@
+{
+  "apiVersion": "devclaw.harness/v1",
+  "nodes": [
+    {
+      "id": "source",
+      "title": "数据口径",
+      "skill": "skills/source/SKILL.md",
+      "approval": "none",
+      "artifacts": [
+        {
+          "id": "source",
+          "path": "source.md",
+          "example": "# 数据口径\n隔离样例\n"
+        }
+      ]
+    },
+    {
+      "id": "transform",
+      "title": "数据开发",
+      "skill": "skills/transform/SKILL.md",
+      "approval": "none",
+      "artifacts": [
+        {
+          "id": "transform",
+          "path": "transformation.md",
+          "example": "# 数据开发\n隔离样例\n"
+        }
+      ]
+    },
+    {
+      "id": "review",
+      "title": "结果确认",
+      "skill": "skills/review/SKILL.md",
+      "approval": "human",
+      "artifacts": [
+        {
+          "id": "review",
+          "path": "review.json",
+          "example": "{\n  \"summary\": \"仅验证样例结构；未执行业务\",\n  \"checked\": true\n}\n",
+          "schema": {
+            "type": "object",
+            "required": [
+              "summary",
+              "checked"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "summary": {
+                "type": "string",
+                "minLength": 1
+              },
+              "checked": {
+                "const": true
+              }
+            }
+          }
+        }
+      ]
+    }
+  ]
+}

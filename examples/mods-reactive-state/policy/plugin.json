@@ -1,0 +1,5 @@
+{
+  "name": "state-policy",
+  "version": "1.0.0",
+  "description": "Optional state.set hook doubles increments"
+}

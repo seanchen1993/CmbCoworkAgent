@@ -1,5 +1,6 @@
 import { resolveWorkerSnapshotContent } from "./worker-message-content"
 import { create } from "zustand"
+import { gitNoticeSettingPatch } from "./git-notice-setting"
 import type { EvolutionCandidate } from "@/api/evolution"
 import type {
   Thread,
@@ -913,7 +914,7 @@ export interface RightPanelWorkRequest {
   threadId: string
 }
 
-export type RightModule = "work" | "preview" | "git" | "browser"
+export type RightModule = "work" | "preview" | "git" | "browser" | "claw"
 
 /** Focus on one dynamic-workflow subagent's live tool stream. Keyed by the PARENT
  * threadId (the live panel's thread) + the run's agentIndex. Display-only. */
@@ -1017,6 +1018,7 @@ interface AppState {
   // Thread actions
   loadThreads: (options?: ThreadDirectoryLoadOptions) => Promise<void>
   addThreadSummary: (thread: Thread) => void
+  syncThreadWorkspaceSummary: (threadId: string, workspacePath: string | null) => void
   loadMoreThreads: () => Promise<void>
   touchThreadSummaries: (threadIds: Iterable<string>, updatedAt: Date) => void
   createThread: (
@@ -1050,6 +1052,8 @@ interface AppState {
   setGitChangeNoticeEnabled: (enabled: boolean) => Promise<void>
   loadGitChangeNoticeEnabled: () => Promise<void>
   gitChangeNoticeEnabled: boolean
+  gitChangeNoticeRevision: number
+  applyGitChangeNoticeSetting: (current: { value: boolean; revision: string }) => void
   gitChangeNoticePendingByThread: Record<string, boolean>
   gitWorkspaceByThread: Record<string, boolean>
   setGitChangeNoticePending: (threadId: string, pending: boolean) => void
@@ -1158,6 +1162,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   settingsOpen: false,
   browserCdpConfig: DEFAULT_BROWSER_CDP_CONFIG,
   gitChangeNoticeEnabled: true,
+  gitChangeNoticeRevision: -1,
   gitChangeNoticePendingByThread: {},
   gitWorkspaceByThread: {},
   sidebarCollapsed: false,
@@ -1338,6 +1343,24 @@ export const useAppStore = create<AppState>((set, get) => ({
         ...state.threads.filter((item) => item.thread_id !== thread.thread_id)
       ])
     }))
+  },
+
+  // The host already persisted this workspace. Update display metadata only, never write it back.
+  syncThreadWorkspaceSummary: (threadId, workspacePath) => {
+    if (isThreadRetired(threadId)) return
+    set((state) => {
+      const index = getThreadDirectoryIndex(state.threads).get(threadId)
+      if (index === undefined) return state
+      const thread = state.threads[index]
+      if ((thread.metadata?.workspacePath ?? null) === workspacePath) return state
+      markThreadDirectoryMutation(threadId)
+      const threads = [...state.threads]
+      threads[index] = {
+        ...thread,
+        metadata: { ...(thread.metadata ?? {}), workspacePath }
+      }
+      return { threads: adoptThreadDirectorySnapshot(threads) }
+    })
   },
 
   createThread: async (metadata?: Record<string, unknown>, options?: ThreadNavigationOptions) => {
@@ -1610,20 +1633,24 @@ export const useAppStore = create<AppState>((set, get) => ({
   },
 
   setGitChangeNoticeEnabled: async (enabled: boolean) => {
-    await window.electron.setGitChangeNoticeEnabled(enabled)
-    set({
-      gitChangeNoticeEnabled: enabled,
-      ...(enabled ? {} : { gitChangeNoticePendingByThread: {} })
-    })
+    const threadId = get().currentThreadId
+    const metadata = get().threads.find(thread => thread.thread_id === threadId)?.metadata
+    const hasWorkspace = typeof metadata?.workspacePath === "string" && !!metadata.workspacePath &&
+      metadata.remoteState !== "historical" && metadata.remoteReadOnly !== true
+    if (threadId && hasWorkspace) {
+      const result = await window.api.mods.configSet(threadId, "gitChangeNoticeEnabled", enabled)
+      if ("deny" in result) throw Error(result.deny || "组件拒绝了这次修改")
+    } else await window.electron.setGitChangeNoticeEnabled(enabled)
+    const actual = await window.electron.getGitChangeNoticeSetting()
+    set(state => gitNoticeSettingPatch(state, actual))
   },
+
+  applyGitChangeNoticeSetting: (current) => set(state => gitNoticeSettingPatch(state, current)),
 
   loadGitChangeNoticeEnabled: async () => {
     try {
-      const enabled = await window.electron.getGitChangeNoticeEnabled()
-      set({
-        gitChangeNoticeEnabled: enabled,
-        ...(enabled ? {} : { gitChangeNoticePendingByThread: {} })
-      })
+      const actual = await window.electron.getGitChangeNoticeSetting()
+      set(state => gitNoticeSettingPatch(state, actual))
     } catch (error) {
       console.warn("[Store] Failed to load Git change notice setting; using enabled:", error)
     }

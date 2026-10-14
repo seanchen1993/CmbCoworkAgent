@@ -143,17 +143,50 @@ it.each(["answer", "cancel", "error"])(
       isBusy: (threadId) => !!getLocalThreadRunLease(threadId),
       onIdle: (listener) => onLocalThreadRunLeaseReleased((lease) => listener(lease.threadId))
     })
+    let runtimeOptions: CreateAgentRuntimeOptions | undefined
+    let runtimeAuthority: Parameters<ModsManager["measureFunctionSession"]>[0] | undefined
+    let modelCalls = 0
+    let measured = 0
+    const updateFunctionSessionMessages = vi.fn<ModsManager["updateFunctionSessionMessages"]>()
+    const measureFunctionSession = vi.fn<ModsManager["measureFunctionSession"]>(
+      async (authority, signal) => {
+        expect(authority).toBe(runtimeAuthority)
+        authority.assertLive()
+        expect(signal).toBeInstanceOf(AbortSignal)
+        if (!signal) throw new Error("ACTUAL_GRAPH_SIGNAL_REQUIRED")
+        signal.throwIfAborted()
+        const update = updateFunctionSessionMessages.mock.calls.at(-1)
+        if (!update) throw new Error("ACTUAL_GRAPH_STATE_REQUIRED")
+        expect(update[0]).toBe(authority)
+        const answer = update[1].at(-1)
+        if (!(answer instanceof AIMessage)) throw new Error("ACTUAL_GRAPH_ANSWER_REQUIRED")
+        expect(answer.content).toBe("actual graph answer")
+        expect(answer.usage_metadata).toEqual({
+          input_tokens: 7,
+          output_tokens: 3,
+          total_tokens: 10
+        })
+        expect(getLocalThreadRunLease(currentThreadId())).toMatchObject({
+          owner: "scheduler",
+          runId: runtimeOptions?.modTurnRunId
+        })
+        expect(modelCalls).toBe(1)
+        expect(start).toHaveBeenCalledTimes(1)
+        expect(complete).not.toHaveBeenCalled()
+        expect(fixture.close).not.toHaveBeenCalled()
+        measured++
+      }
+    )
     const manager = {
       startFunctionTurn: lifecycle.start.bind(lifecycle),
       functionTurns: lifecycle,
       releaseExpiredRuntimeBindings: vi.fn(),
       bindFunctionSession: vi.fn(),
-      updateFunctionSessionMessages: vi.fn(),
-      updateFunctionSessionRequest: vi.fn()
+      updateFunctionSessionMessages,
+      updateFunctionSessionRequest: vi.fn(),
+      measureFunctionSession
     }
     fixture.manager = manager
-    let runtimeOptions: CreateAgentRuntimeOptions | undefined
-    let modelCalls = 0
     class ScheduledModel extends BaseChatModel {
       bindTools(): this {
         return this
@@ -186,6 +219,7 @@ it.each(["answer", "cancel", "error"])(
         threadId: options.threadId!,
         turnId: options.hookTurnId!
       })
+      runtimeAuthority = authority
       return createAgent({
         model: new ScheduledModel({}),
         tools: [],
@@ -203,6 +237,8 @@ it.each(["answer", "cancel", "error"])(
       await runTaskNow(fixture.task.id)
       await vi.waitFor(() => expect(complete).toHaveBeenCalledTimes(1))
       expect(modelCalls).toBe(1)
+      expect(measureFunctionSession).toHaveBeenCalledTimes(ending === "answer" ? 1 : 0)
+      expect(measured).toBe(ending === "answer" ? 1 : 0)
       const facts = complete.mock.calls[0][1]
       expect(facts.reason).toBe(ending === "cancel" ? "aborted" : ending)
       expect(facts.turnId).toBe(db.getThreadMessages(currentThreadId())[0].id)

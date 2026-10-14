@@ -1,4 +1,7 @@
 import { resolve } from "node:path"
+import { currentRuntimePluginSource, captureRuntimePluginSourceThreadGuard } from "../plugins/runtime-source-scope"
+import { assertLegacyProjectEntry } from "../harness-board/project-runtime/legacy-entry-gate"
+import { createClawSkillPolicy } from "../mods/claw-skills"
 import type {
   HarnessAgentmdLoadStatusItem,
   HarnessDeployUnitMapping,
@@ -19,9 +22,9 @@ import {
   getGlobalRoutingMode
 } from "../storage"
 import {
-  isSkillVisibleForProjectMode,
   type ProjectModeSkillScope
 } from "../../shared/skill-visibility"
+import { isSkillVisibleForProjectMode } from "../plugins/derivation-skill-visibility"
 import { runHooksEnriched } from "../hooks/required-skill"
 import type { HookContext, HookResultCallback } from "../hooks/runner"
 import {
@@ -51,7 +54,7 @@ import {
   type SkillUseBlockMetadata
 } from "../../shared/skill-use-block"
 
-export type StandardTurnSource = "desktop" | "im" | "scheduler" | "heartbeat"
+export type StandardTurnSource = "desktop" | "im" | "scheduler" | "heartbeat" | "mods"
 
 export interface StandardThreadMetadata {
   metadata: Record<string, unknown>
@@ -208,6 +211,35 @@ export async function getHarnessAgentContext(
     purpose?: "execution" | "plugin-identity"
   } = {}
 ): Promise<HarnessAgentContext> {
+  const source = currentRuntimePluginSource()
+  const legacyFeature = readHarnessFeatureMetadata(metadata)
+  if (legacyFeature) assertLegacyProjectEntry(legacyFeature.projectId, legacyFeature.slug,
+    resolve(options.workspacePath ?? String(metadata.workspacePath ?? "")), source)
+  else if (metadata.harnessProjectSession && typeof metadata.harnessProjectSession === "object" &&
+      typeof (metadata.harnessProjectSession as Record<string, unknown>).projectId === "string")
+    assertLegacyProjectEntry(String((metadata.harnessProjectSession as Record<string, unknown>).projectId), "",
+      resolve(options.workspacePath ?? String(metadata.workspacePath ?? "")), source)
+  if (!source && metadata.hostProjectRuntime !== undefined)
+    throw new Error("PROJECT_HOST_RUN_ENTRY_REQUIRED: 请从项目操作入口继续此阶段。")
+  if (source && source.mode !== "legacy") {
+    const binding = metadata.hostProjectRuntime as Record<string, unknown> | undefined
+    if (!binding || binding.projectId !== source.projectId || binding.operationId !== source.operationId ||
+        resolve(options.workspacePath ?? String(metadata.workspacePath ?? "")) !== source.workspace)
+      throw new Error("PROJECT_PLUGIN_SOURCE_SCOPE_CHANGED")
+    return {
+      isHarnessProjectSession: true,
+      pluginId: source.plugin.id,
+      pluginName: source.plugin.name,
+      pluginRoot: source.plugin.path,
+      pluginWorkspace: source.workspace,
+      pluginPromptInject: source.stagePrompt,
+      harnessProjectId: source.projectId,
+      harnessAdapterName: source.plugin.name,
+      harnessAdapterVersion: source.plugin.version,
+      harnessNodeName: source.stageId,
+      harnessNodeStatus: "in_progress"
+    }
+  }
   const harnessProjectSession =
     metadata.harnessProjectSession &&
     typeof metadata.harnessProjectSession === "object" &&
@@ -388,16 +420,38 @@ async function buildSkillLifecycleRegistryForHooks(
 
 export async function validateExplicitSkillReference(
   input: { name: string; path: string },
-  visibilityScope?: ProjectModeSkillScope
+  scope?: Partial<ProjectModeSkillScope> & { workspacePath?: string; threadId?: string }
 ): Promise<string | null> {
+  const visibilityScope = scope?.projectMode === undefined ? undefined : {
+    projectMode: scope.projectMode,
+    boundPluginId: scope.boundPluginId,
+    boundPluginName: scope.boundPluginName
+  }
   const registry = await buildSkillLifecycleRegistryForHooks(visibilityScope)
   const skill = registry?.resolveExplicit({ skillName: input.name, skillPath: input.path })
-  return !skill || isDisabledSkillMatch(skill)
-    ? `显式选择的技能不存在或已禁用：${input.name}`
-    : null
+  if (!skill || isDisabledSkillMatch(skill)) return `显式选择的技能不存在或已禁用：${input.name}`
+  if (typeof scope?.workspacePath === "string" && typeof scope.threadId === "string") {
+    try {
+      const { getModsManager } = await import("../mods/manager")
+      const profile = getModsManager()?.clawProfile?.(scope.workspacePath, scope.threadId)
+      const policy = await createClawSkillPolicy(
+        profile?.skills,
+        undefined,
+        visibilityScope?.projectMode
+          ? (source) => isSkillVisibleForProjectMode(source, visibilityScope)
+          : undefined
+      )
+      policy?.assertSkillReference(input)
+    } catch (error) {
+      return error instanceof Error ? error.message : String(error)
+    }
+  }
+  return null
 }
 
 async function activateExplicitSkillFromMessage({
+  signal,
+  agentId,
   message,
   workspacePath,
   pluginOutputDir,
@@ -423,6 +477,8 @@ async function activateExplicitSkillFromMessage({
   isPreparationCurrent,
   skillVisibility
 }: {
+  signal?: AbortSignal
+  agentId?: string
   originalPrompt: string
   isPreparationCurrent?: () => boolean
   message: string
@@ -465,9 +521,29 @@ async function activateExplicitSkillFromMessage({
     }
   }
 
+  // The message can contain a stale or forged path even when the slash menu is cached.
+  // Resolve the trusted thread binding before any expansion or lifecycle Hook executes.
+  let clawSkillPolicy: Awaited<ReturnType<typeof createClawSkillPolicy>>
+  try {
+    const { getModsManager } = await import("../mods/manager")
+    const profile = getModsManager()?.clawProfile?.(workspacePath, sessionId)
+    clawSkillPolicy = await createClawSkillPolicy(
+      profile?.skills,
+      undefined,
+      skillVisibility?.projectMode
+        ? (source) => isSkillVisibleForProjectMode(source, skillVisibility)
+        : undefined
+    )
+    clawSkillPolicy?.assertSkillReference({ name: parsed.skillName, path: parsed.skillPath })
+  } catch (error) {
+    return { parsed, blocked: true, reason: error instanceof Error ? error.message : String(error) }
+  }
+
   if (isPreparationCurrent && !isPreparationCurrent())
     return { parsed, blocked: true, reason: "当前运行已结束或被替换" }
   const expansionContext: HookContext = {
+    signal,
+    agentId,
     workspacePath,
     sessionId,
     turnId,
@@ -511,12 +587,22 @@ async function activateExplicitSkillFromMessage({
       blocked: true,
       blockedEvent: "UserPromptExpansion",
       reason:
-        expansion.stopReason || expansion.reason || expansion.stderr || expansion.stdout ||
+        expansion.stopReason ||
+        expansion.reason ||
+        expansion.stderr ||
+        expansion.stdout ||
         "显式技能展开被 Hook 拦截"
     }
   }
 
+  try {
+    clawSkillPolicy?.assertSkillReference({ name: parsed.skillName, path: parsed.skillPath })
+  } catch (error) {
+    return { parsed, blocked: true, reason: error instanceof Error ? error.message : String(error) }
+  }
   const result = await activateSkillLifecycle({
+    signal,
+    agentId,
     skill,
     trigger: "explicit",
     toolName: "skill_select",
@@ -573,6 +659,8 @@ async function activateExplicitSkillFromMessage({
 }
 
 export async function prepareStandardUserPrompt({
+  signal,
+  agentId,
   rawMessage,
   initialModelInput,
   trustedExplicitSkill,
@@ -587,6 +675,8 @@ export async function prepareStandardUserPrompt({
   onSystemMessage,
   isPreparationCurrent
 }: {
+  signal?: AbortSignal
+  agentId?: string
   rawMessage: string
   initialModelInput: string
   /**
@@ -625,6 +715,8 @@ export async function prepareStandardUserPrompt({
     boundPluginName: harnessAgentContext.pluginName
   }
   const explicitSkillActivation = await activateExplicitSkillFromMessage({
+    signal,
+    agentId,
     message: explicitSkillActivationMessage,
     originalPrompt: rawMessage,
     isPreparationCurrent,
@@ -661,6 +753,8 @@ export async function prepareStandardUserPrompt({
     initialModelInput.startsWith("[Continuing active goal]")
   const hookVisibleMessage = isInternalGoalModelInput ? initialModelInput : rawMessage
   const promptSubmitContext: HookContext = {
+    signal,
+    agentId,
     toolArgs: { message: hookVisibleMessage, rawMessage },
     userPrompt: hookVisibleMessage,
     workspacePath,
@@ -721,8 +815,11 @@ export async function prepareStandardUserPrompt({
   if (
     !isInternalGoalModelInput &&
     explicitSkillActivation?.parsed &&
-    !parseSkillUseBlock(preparedMessage)
+    (trustedExplicitSkillBlock || !parseSkillUseBlock(preparedMessage))
   ) {
+    // A saved task or Hook rewrite cannot replace the host-resolved Skill identity.
+    if (trustedExplicitSkillBlock)
+      preparedMessage = parseSkillUseBlock(preparedMessage)?.rest ?? preparedMessage
     preparedMessage = [preparedMessage.trimEnd(), explicitSkillActivation.parsed.block]
       .filter(Boolean)
       .join("\n\n")
@@ -876,6 +973,8 @@ export function prepareStandardThreadRuntimeFactory(
   const optionsForModel = (modelId?: string): CreateAgentRuntimeOptions => {
     const callerOptions =
       typeof input.baseOptions === "function" ? input.baseOptions() : input.baseOptions
+    if (callerOptions.flowPromptOnly && input.harnessContext)
+      throw Error("FLOW_PROMPT_HARNESS_UNVERIFIED")
     return {
       ...applyRemoteTurnPolicy(
         {
@@ -894,7 +993,12 @@ export function prepareStandardThreadRuntimeFactory(
     create: (modelId?: string) => {
       const options = optionsForModel(modelId)
       assertLocalThreadRunLease(options.threadId, input.runLease.owner, input.runLease.runId)
-      return createAgentRuntime(options)
+      const assertSource = captureRuntimePluginSourceThreadGuard(options.threadId, options.workspacePath)
+      const previousBoundary = options.onModelBoundary
+      return createAgentRuntime({ ...options, onModelBoundary: () => {
+        assertSource()
+        return previousBoundary?.()
+      } })
     }
   }
 }

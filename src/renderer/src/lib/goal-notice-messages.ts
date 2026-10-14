@@ -5,6 +5,8 @@ import {
 } from "../../../shared/goal-events"
 import { splitGoalTransportPayload } from "../../../shared/goal-slash"
 import { stripLegacyGoalTransportSummary } from "./goal-transport-summary"
+import { hasInvalidFunctionConversationTranscriptStamp,
+  readFunctionConversationTranscriptStamp } from "../../../shared/mods/v2/conversation-transcript"
 
 export interface GoalNoticeEvent {
   event_id: number
@@ -149,7 +151,10 @@ export function goalEventToDisplayMessages(event: GoalNoticeEvent): Message[] {
   ]
 }
 
-export function isInternalGoalPromptMessage(message: Pick<Message, "role" | "content">): boolean {
+export function isInternalGoalPromptMessage(message: Pick<Message,
+  "role" | "content" | "function_row" | "function_row_invalid">): boolean {
+  if (readFunctionConversationTranscriptStamp(message) ||
+    hasInvalidFunctionConversationTranscriptStamp(message)) return false
   if (message.role !== "user" || typeof message.content !== "string") return false
   const content = message.content.trimStart()
   const hasInternalMarker =

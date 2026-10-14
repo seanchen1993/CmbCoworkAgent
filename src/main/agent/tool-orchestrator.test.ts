@@ -15,6 +15,18 @@ vi.mock("electron", () => ({
 }))
 
 describe("ToolOrchestrator YOLO git behavior", () => {
+  it("notifies a native flow when a command is denied before interactive approval", async () => {
+    const raw = vi.fn<RawExecuteFn>()
+    const request = vi.fn<RequestApprovalFn>()
+    const rejected = vi.fn()
+    const orchestrator = new ToolOrchestrator(new ApprovalStore(), raw, request, () => true,
+      false, true, process.cwd(), rejected)
+    const result = await orchestrator.execute("wsl git commit -m x -- package.json", process.cwd(), "none", "posix")
+    expect(result.exitCode).toBe(1)
+    expect(rejected).toHaveBeenCalledExactlyOnceWith("command-forbidden")
+    expect(raw).not.toHaveBeenCalled()
+    expect(request).not.toHaveBeenCalled()
+  })
   function initRepository(repoPath: string): void {
     mkdirSync(repoPath, { recursive: true })
     const git = (args: string[]): void => {

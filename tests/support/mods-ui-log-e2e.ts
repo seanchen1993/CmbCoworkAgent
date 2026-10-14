@@ -1,5 +1,5 @@
 import assert from "node:assert/strict"
-import { mkdirSync, readFileSync } from "node:fs"
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
 import AdmZip from "adm-zip"
 import type { Page } from "playwright"
@@ -40,6 +40,7 @@ export async function verifyUiLog(
     on("session.start", async ($, e, next) => {
       await $.command.register({name:"ui-log-show",description:"Log channels",immediate:true});
       await $.command.register({name:"ui-log-nested",description:"Nested log",immediate:true});
+      await $.command.register({name:"ui-log-long",description:"Full protected long log",immediate:true});
       await $.command.register({name:"ui-log-flood",description:"Bounded log",immediate:true}); return next(e);
     });
     on("command.run", {command:"ui-log-show"}, ($) => {
@@ -50,7 +51,16 @@ export async function verifyUiLog(
     on("command.run", {command:"ui-log-flood"}, ($) => {
       for(let i=0;i<20;i++) $.ui.log("UI_LOG_LONG "+"x".repeat(9000)); return {text:"bounded"};
     });
+    on("command.run", {command:"ui-log-long"}, ($) => {
+      const prefix="UI_LOG_LONG_INPUT:", tail=":UI_LOG_LONG_END";
+      $.ui.log(prefix+"x".repeat(30000-prefix.length-tail.length)+tail);
+      return {text:"long logged"};
+    });
     on("ui.log", ($, e, next) => {
+      if(e.text.startsWith("UI_LOG_LONG_INPUT:")) {
+        if(e.text.length!==30000 || !e.text.endsWith(":UI_LOG_LONG_END")) throw Error("UI_LOG_LONG_HOOK_FULL_REQUIRED");
+        return next({...e,text:"UI_LOG_LONG_HOOK:sk-ui-long-fixture-token-123456789:"+e.text});
+      }
       if(e.text==="UI_LOG_OUTER") $.ui.log("UI_LOG_NESTED", {to:"debug"});
       return next({...e,to:e.text==="UI_LOG_REDIRECT"?"debug":e.to});
     });
@@ -147,6 +157,65 @@ export async function verifyUiLog(
     assert(bounds && bounds.height <= 192)
     await composer.fill("native composer usable")
     assert.equal(await composer.inputValue(), "native composer usable")
+    const longBefore = await page.evaluate((id) => window.api.threads.getMessages(id), threadId)
+    const longRequests = requests.length
+    await run("/ui-log-long now")
+    await until(
+      async () => (await page.evaluate((id) => window.api.mods.logs(id), threadId)).length === 23,
+      "full protected long log settles after the original flood"
+    )
+    const longSnapshot = await page.evaluate((id) => window.api.mods.logs(id), threadId)
+    const longRow = longSnapshot.find(row => row.text.startsWith("UI_LOG_LONG_HOOK:"))
+    assert(longRow)
+    const rawPrefix = "UI_LOG_LONG_INPUT:", rawTail = ":UI_LOG_LONG_END"
+    const raw = rawPrefix + "x".repeat(30000 - rawPrefix.length - rawTail.length) + rawTail
+    const expected = (`UI_LOG_LONG_HOOK:[REDACTED]:${raw}`).slice(0, 10000)
+    assert.equal(longRow.plugin, "ui-log")
+    assert.equal(longRow.text, expected)
+    assert.equal(longRow.text.length, 10000)
+    const renderedLong = rail.locator(`[data-function-log="${longRow.id}"]`)
+    await until(async () => await renderedLong.count() === 1, "the actual long log row is rendered")
+    const displayText = await renderedLong.evaluate(element => element.lastChild?.textContent ?? "")
+    assert.equal(displayText, expected.slice(0, 2000))
+    const debugChunks = () => readFileSync(logPath, "utf8").split(/\r?\n/).flatMap(line => {
+      const match = /^\[[^\]\r\n]+\] \[INFO\] \[Function Mods chunk\] (.+)$/.exec(line)
+      if (!match) return []
+      const value: unknown = JSON.parse(match[1])
+      assert(value && typeof value === "object" && !Array.isArray(value))
+      const row = value as Record<string, unknown>
+      assert.deepEqual(Object.keys(row), ["recordId", "index", "count", "plugin", "text"])
+      assert(typeof row.recordId === "string" && typeof row.plugin === "string" &&
+        typeof row.text === "string" && typeof row.index === "number" &&
+        Number.isInteger(row.index) && typeof row.count === "number" && Number.isInteger(row.count))
+      assert(row.count >= 1 && row.count <= 6 && row.index >= 1 && row.index <= row.count)
+      assert(row.text.length <= 2000)
+      assert(match[0].length < 16384)
+      return [row as { recordId: string; index: number; count: number; plugin: string; text: string }]
+    })
+    await until(async () => {
+      const rows = debugChunks()
+      const head = rows.find(row => row.plugin === "ui-log" && row.index === 1 &&
+        row.text.startsWith("UI_LOG_LONG_HOOK:"))
+      return !!head && rows.filter(row => row.recordId === head.recordId).length === head.count
+    }, "the real debug log flushes every protected long-text chunk")
+    const rows = debugChunks()
+    const heads = rows.filter(row => row.plugin === "ui-log" && row.index === 1 &&
+      row.text.startsWith("UI_LOG_LONG_HOOK:"))
+    assert.equal(heads.length, 1)
+    const group = rows.filter(row => row.recordId === heads[0].recordId)
+    assert.deepEqual(group.map(row => row.index), group.map((_, index) => index + 1))
+    assert(group.every(row => row.plugin === "ui-log" && row.count === group.length))
+    assert.equal(group.map(row => row.text).join(""), expected)
+    assert.equal(requests.length, longRequests)
+    assert.deepEqual(await page.evaluate((id) => window.api.threads.getMessages(id), threadId), longBefore)
+    await page.screenshot({ path: join(artifacts, "ui-log-long-protected.png") })
+    writeFileSync(join(artifacts, "ui-log-long-evidence.json"), JSON.stringify({
+      method: "ui.log", inputLength: 30000, snapshotLength: longRow.text.length,
+      displayLength: displayText.length, debugEqualsSnapshot: true,
+      protectedBeforeTruncation: true, transcriptUnchanged: true,
+      screenshot: "ui-log-long-protected.png"
+    }, null, 2))
+    pass("30k real Guest log reaches the full Hook and protection before exact 10k debug/snapshot and 2k desktop projection")
     await page.evaluate(() => window.api.mods.configureGlobal(false))
     await until(async () => (await rail.count()) === 0, "off removes log rows")
     assert.deepEqual(await page.evaluate((id) => window.api.mods.logs(id), threadId), [])

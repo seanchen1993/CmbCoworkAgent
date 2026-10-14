@@ -71,6 +71,19 @@ export async function verifyToolSites(
     pass(
       "ToolGroup expansion unfolds native ToolUse/ToolResult automatically without requiring a manual click"
     )
+    const innerToggle = page.getByRole("button", { name: /claw-notes/ }).nth(1)
+    assert.equal(await page.getByRole("button", { name: /claw-notes/ }).count(), 2)
+    await innerToggle.click()
+    await until(
+      async () => !(await uses.allInnerTexts()).join("\n").includes("DISPLAY_TOOL_INPUT"),
+      "inner details remain manually collapsible after automatic expansion"
+    )
+    await innerToggle.click()
+    await until(
+      async () => (await uses.allInnerTexts()).join("\n").includes("DISPLAY_TOOL_INPUT"),
+      "inner details reopen with protected fields"
+    )
+    pass("automatic Mods expansion preserves the original inner detail toggle")
     const nativeToggle = page.getByRole("button", { name: /claw-notes/ }).first()
     await nativeToggle.click()
     await until(
@@ -127,6 +140,23 @@ export async function verifyToolSites(
     pass(
       "disabling tool render hooks restores native details and keeps the original tool result visible"
     )
+  } catch (error) {
+    await page.screenshot({ path: join(artifacts, "tool-sites-before-cleanup.png") })
+    writeFileSync(
+      join(artifacts, "tool-sites-failure-dom.json"),
+      JSON.stringify(
+        await page.evaluate(() => ({
+          text: document.body.innerText,
+          sites: [...document.querySelectorAll("[data-function-site]")].map((node) => ({
+            component: node.getAttribute("data-function-site"),
+            text: (node as HTMLElement).innerText
+          }))
+        })),
+        null,
+        2
+      )
+    )
+    throw error
   } finally {
     await page.evaluate(() => window.api.mods.configureGlobal(true))
   }

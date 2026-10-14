@@ -11,6 +11,9 @@ import { functionToolTarget, isNativeFunctionTool } from "./tool-sdk"
 import { functionToolCheckInput } from "./tool-check"
 import { isModObject } from "../../../shared/mods/v2/contracts"
 import { modErrorCode } from "../errors"
+import { restrictClawMcpService } from "../claw-mcp"
+import { createClawSkillPolicy } from "../claw-skills"
+import { SkillLifecycleRegistry } from "../../agent/skill-lifecycle/registry"
 
 /** Queries reuse an active adapter or an inert plain-project probe. No tool discovery is run. */
 export async function queryFunctionToolPermission(
@@ -45,7 +48,10 @@ export async function queryFunctionToolPermission(
       tools = manager.peekFunctionMcpTools(workspace, threadId)
       if (tools === undefined) {
         assertPlainThread(threadId)
-        const cached = getGlobalMcpCapabilityService().peekTools?.()
+        const cached = restrictClawMcpService(
+          getGlobalMcpCapabilityService(),
+          manager.clawProfile(workspace, threadId)?.mcp
+        ).peekTools?.()
         tools = cached ? scopedMcpTools(cached, new Set()) : null
       }
     } catch (error) {
@@ -73,14 +79,24 @@ export async function queryFunctionToolPermission(
       assertPlainThread(threadId)
       // The standalone host provides this native UI tool; permission queries never open it.
       if (tool === "host:request_user_input") return { decision: "allow" }
-      const query = LocalSandbox.createPermissionProbe({
-        rootDir: workspace,
-        runId: threadId,
-        virtualMode: false,
-        windowsSandbox: process.platform === "win32" ? getWindowsSandboxMode() : "none",
-        abortSignal: signal
-      })
-      return query(tool.slice(5), value)
+      try {
+        const policy = await createClawSkillPolicy(manager.clawProfile(workspace, threadId)?.skills)
+        signal.throwIfAborted()
+        const query = LocalSandbox.createPermissionProbe({
+          rootDir: workspace,
+          runId: threadId,
+          virtualMode: false,
+          windowsSandbox: process.platform === "win32" ? getWindowsSandboxMode() : "none",
+          abortSignal: signal,
+          clawSkillPolicy: policy,
+          skillLifecycleRegistry: policy
+            ? new SkillLifecycleRegistry(policy.lifecycleSources)
+            : undefined
+        })
+        return query(tool.slice(5), value)
+      } catch (error) {
+        return { decision: "deny", reason: modErrorCode(error) }
+      }
     },
     toolNames
   )

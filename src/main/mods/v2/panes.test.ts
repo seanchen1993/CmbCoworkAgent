@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto"
 import { resolve } from "node:path"
-import { afterEach, describe, expect, it } from "vitest"
+import { afterEach, describe, expect, it, vi } from "vitest"
 import { compileFunctionPlugin } from "./loader"
 import { FunctionGuestRuntime } from "./guest-runtime"
 import { FunctionSession, SESSION_CAPABILITIES } from "./session"
@@ -8,6 +8,7 @@ import type { ModJson } from "../../../shared/mods/types"
 import type {
   FunctionPaneSnapshot,
   FunctionUiElement,
+  FunctionUiNode,
   FunctionUiAction
 } from "../../../shared/mods/v2/ui"
 import { ModFunctionError } from "../../../shared/mods/v2/contracts"
@@ -17,9 +18,30 @@ afterEach(async () => {
   await Promise.all(sessions.splice(0).map((session) => session.close()))
 })
 
+it("returns placement to unchanged community callers so their finally block closes the pane", async () => {
+  const guest = await FunctionGuestRuntime.create(`var __cmbFunctionMod={register(on){
+    on("session.start",async $=>{await $.command.register({name:"probe",description:"Probe"})});
+    on("command.run",{command:"probe"},async $=>{
+      const opened=await $.ui.open({id:"test",title:"Test"});
+      try {return {text:JSON.stringify(opened)}}
+      finally {if(opened.isPlaced) await $.ui.close({id:"test"})}
+    });
+  }}`)
+  const session = new FunctionSession([
+    { name: "open-result", root: "/open-result", tier: "user", guest,
+      capabilities: [...SESSION_CAPABILITIES] }
+  ], { workspace: "/project", threadId: "open-result", assertLive() {
+    // This isolated pane-placement fixture has no external lifecycle to validate.
+  }, publish: async v => v })
+  sessions.push(session)
+  expect(JSON.parse(String((await session.run("probe", "")).text))).toEqual({ isPlaced: true })
+  expect(await session.panes.snapshot()).toEqual([])
+})
+
 async function fixture(
   extra = "",
-  publish: (value: ModJson) => Promise<ModJson> = async (value) => value
+  publish: (value: ModJson) => Promise<ModJson> = async (value) => value,
+  changed?: (scope?: import("../../../shared/mods/types").ModUiChangeScope) => void
 ) {
   const compiled = await compileFunctionPlugin(resolve("resources/mods/function-commands"))
   const guest = await FunctionGuestRuntime.create(
@@ -48,6 +70,7 @@ async function fixture(
         if (!live) throw new ModFunctionError("MODS_SCOPE_CHANGED")
       },
       publish,
+      uiChanged: changed,
       state: () => ({
         get: async (key) => state.get(key),
         keys: async () => [...state.keys()],
@@ -78,10 +101,10 @@ function action(
   kind: FunctionUiAction["kind"] = "press",
   value?: ModJson
 ): FunctionUiAction {
-  let found: FunctionUiElement | undefined
+  let found: FunctionUiNode | undefined
   const visit = (node: FunctionUiElement | string): void => {
-    if (typeof node === "string") return
-    if (node.props.key === key) found = node
+    if (typeof node === "string" || node.type === "engine") return
+    if (node.type !== "fragment" && node.type !== "Markdown" && node.props.key === key) found = node
     node.children?.forEach(visit)
   }
   visit(pane.tree)
@@ -98,6 +121,45 @@ function action(
 }
 
 describe("desktop function panes through the production session", () => {
+  it("publishes pane collection changes without revoking unrelated native drawings", async () => {
+    const changed = vi.fn()
+    const { session, state } = await fixture("", undefined, changed)
+    await vi.waitFor(() => expect(changed).toHaveBeenCalled())
+    expect(changed.mock.calls).toEqual([["panes"]])
+    changed.mockClear()
+    let [pane] = await session.panes.snapshot()
+    await session.panes.act(action(pane, "count"))
+    await vi.waitFor(() => expect(changed).toHaveBeenCalled())
+    expect(changed.mock.calls).toEqual([["panes"]])
+    expect(state.get("board-count")).toBe(1)
+    ;[pane] = await session.panes.snapshot()
+    changed.mockClear()
+    await session.panes.act({ ...action(pane, "count"), kind: "close" })
+    await vi.waitFor(() => expect(changed).toHaveBeenCalled())
+    expect(changed.mock.calls).toEqual([["panes"]])
+    expect(await session.panes.snapshot()).toEqual([])
+    changed.mockClear()
+    session.panes.invalidate()
+    await vi.waitFor(() => expect(changed).toHaveBeenCalled())
+    expect(changed.mock.calls).toEqual([[undefined]])
+  })
+  it("metadata is pure, owned and only trusts the current clean drawing", async () => {
+    const { session, state } = await fixture(`on("ui.render", async ($,e,next)=>{await $.store.set("renders", (await $.store.get("renders")??0)+1);return next(e)});`)
+    const [pane] = await session.panes.snapshot()
+    const renders = state.get("renders")
+    const drawings = [{ key: pane.key, generation: pane.generation,
+      isShown: true, isPlaced: true, isFocused: true }]
+    expect(session.panes.metadata("another-plugin", drawings)).toEqual([])
+    expect(session.panes.metadata(pane.plugin, drawings)).toEqual([
+      {id:pane.id,title:pane.title,isShown:true,isPlaced:true,isFocused:true}
+    ])
+    expect(session.panes.metadata(pane.plugin, [{...drawings[0],generation:"old"}])[0].isShown).toBe(false)
+    session.panes.invalidate()
+    expect(session.panes.metadata(pane.plugin, drawings)[0].isShown).toBe(false)
+    expect(state.get("renders")).toBe(renders)
+    // Querying the metadata cannot trigger the pending redraw.
+    expect(session.panes.metadata(pane.plugin, drawings)[0].isShown).toBe(false)
+  })
   it("protects pane titles as well as rendered content at publication", async () => {
     const { session } = await fixture("", async (value) =>
       JSON.parse(
@@ -232,14 +294,68 @@ describe("desktop function panes through the production session", () => {
   })
 
   it("reclaims callback generations through hundreds of redraws", async () => {
-    const { session } = await fixture()
+    const { session, guest } = await fixture()
+    const failures: string[] = []
+    const generations = new Set<string>()
+    const invoke = guest.invoke.bind(guest)
+    const releases = vi.spyOn(guest, "releaseUi")
+    vi.spyOn(guest, "invoke").mockImplementation(async (...args) => {
+      try { return await invoke(...args) }
+      catch (error) {
+        failures.push(error instanceof ModFunctionError ? JSON.stringify({ code: error.code,
+          downstream: error.downstream, stack: error.stack, event: args[3].event }) : String(error))
+        throw error
+      }
+    })
     for (let index = 0; index < 260; index++) {
       const [pane] = await session.panes.snapshot()
-      expect(JSON.stringify(pane.tree)).toContain("加一")
+      generations.add(pane.generation)
+      const tree = JSON.stringify(pane.tree)
+      const diagnostic = tree.includes("加一") ? undefined : JSON.stringify({
+        index, pane, guest: guest.stats, failures, logs: await session.logSnapshot()
+      })
+      expect(tree, diagnostic).toContain("加一")
+      expect(failures).toEqual([])
       session.panes.invalidate()
       // Production invalidations coalesce for 100 ms. This is a handle-retention test,
       // not an attempt to exceed the separate guest CPU budget with a busy render loop.
       await new Promise((resolve) => setTimeout(resolve, 100))
     }
+    expect(generations.size).toBe(260)
+    expect(releases).toHaveBeenCalledTimes(260)
+    expect(guest.stats).toMatchObject({ frames: 0, replies: 0, disposed: false })
   }, 45000)
+})
+
+it("keeps explicit pane open identity across redraws but replaces it on reopen", async () => {
+  const { session } = await fixture()
+  const [initial] = await session.panes.snapshot()
+  expect(initial.openRequestId).toBeTruthy()
+  session.panes.invalidate()
+  const [redrawn] = await session.panes.snapshot()
+  expect(redrawn.generation).not.toBe(initial.generation)
+  expect(redrawn.openRequestId).toBe(initial.openRequestId)
+  session.panes.open(initial.plugin, { id: initial.id, title: initial.title })
+  const [openedAgain] = await session.panes.snapshot()
+  expect(openedAgain.openRequestId).not.toBe(initial.openRequestId)
+  await session.panes.closePane(initial.plugin, initial.id)
+  session.panes.open(initial.plugin, { id: initial.id, title: initial.title })
+  const [reopened] = await session.panes.snapshot()
+  expect(reopened.openRequestId).not.toBe(openedAgain.openRequestId)
+})
+
+it.each(["replace", "delete"])("rejects publication attempting to %s native pane open identity", async mode => {
+  const { session } = await fixture("", async value => {
+    if (!Array.isArray(value)) return value
+    return value.map(row => {
+      if (!row || typeof row !== "object" || Array.isArray(row) || !("openRequestId" in row)) return row
+      const copy = { ...row }
+      if (mode === "delete") delete copy.openRequestId
+      else copy.openRequestId = "changed-open-identity"
+      return copy
+    })
+  })
+  await expect(session.panes.snapshot()).rejects.toThrow(
+    mode === "delete" ? "MODS_JSON_TYPE" : "MODS_UI_PUBLICATION"
+  )
 })

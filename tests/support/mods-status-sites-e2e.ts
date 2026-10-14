@@ -115,16 +115,18 @@ export async function verifyStatusSites(
 
     await style(true)
     await until(
-      async () => (await mode.innerText()).includes("STATUS_MODE"),
-      "custom mode label is drawn beside the original control"
+      async () => (await modeButton.innerText()).includes("STATUS_MODE"),
+      "custom inline mode label is drawn inside the original control"
     )
     assert.equal(await modeButton.count(), 1)
     assert.equal(
       await modeButton
         .locator("span.font-medium")
         .evaluate((element) => element.classList.contains("sr-only")),
-      true
+      false
     )
+    assert.equal(await mode.innerText(), "")
+    assert.equal(await modeButton.locator("button").count(), 0)
     await until(
       async () =>
         (await durations.allInnerTexts()).filter((text) => text.includes("STATUS_DURATION"))
@@ -150,6 +152,7 @@ export async function verifyStatusSites(
     await until(
       async () =>
         (await mode.innerText()) === "" &&
+        !(await modeButton.innerText()).includes("STATUS_MODE") &&
         !(await modeButton
           .locator("span.font-medium")
           .evaluate((element) => element.classList.contains("sr-only"))),

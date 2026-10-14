@@ -8,8 +8,11 @@ import { hookMatchesRunCriteria, type HookContext } from "./runner"
 import type { HookConfig, HookEvent } from "./types"
 import {
   isSkillVisibleForProjectMode,
+  isDerivationVisibleForProjectMode,
   type ProjectModeSkillScope
 } from "../../shared/skill-visibility"
+import { derivationVisibility, derivationFamilyFor } from "../plugins/derivation-scope"
+const frozenDerivationBindings = new WeakMap<HookScopeController, ProjectModeSkillScope>()
 export { normalizePathKey } from "./path-key"
 import { normalizePathKey } from "./path-key"
 
@@ -235,6 +238,8 @@ export function mergeHookScopeSnapshot(
 export function createInheritedHookScope(parent: HookScopeController): HookScopeController {
   const child = createHookScope()
   mergeHookScopeSnapshot(child, parent.snapshot())
+  const binding = frozenDerivationBindings.get(parent)
+  if (binding) frozenDerivationBindings.set(child, { ...binding })
   return child
 }
 
@@ -328,11 +333,15 @@ export function filterScopedHooks(
 ): HookConfig[] {
   const { baseHooks, pluginHooks, skillHooks } = candidates
   if (!scope) return baseHooks
-  const visibilityScope: ProjectModeSkillScope = {
+  const currentVisibilityScope: ProjectModeSkillScope = {
     projectMode: Boolean(context.featureId || context.harnessProjectId),
     boundPluginId: context.harnessAdapterId,
     boundPluginName: context.harnessAdapterName
   }
+  if (!frozenDerivationBindings.has(scope) &&
+    derivationFamilyFor(context.harnessAdapterId ?? ""))
+    frozenDerivationBindings.set(scope, currentVisibilityScope)
+  const visibilityScope = frozenDerivationBindings.get(scope) ?? currentVisibilityScope
 
   const allowedPluginIds = new Set(scope.activePluginIds)
   const currentPluginId = normalizePluginId(context.pluginId)
@@ -369,6 +378,11 @@ export function filterScopedHooks(
 
   const filteredPluginHooks: typeof pluginHooks = []
   for (const hook of pluginHooks) {
+    if (!isDerivationVisibleForProjectMode({ ...hook,
+      ...derivationVisibility(hook.pluginId ?? "") }, visibilityScope)) {
+      notifySkipped(hook, "plugin-not-active")
+      continue
+    }
     if (shouldIncludePersistentHook(hook)) {
       filteredPluginHooks.push(hook)
       continue
@@ -384,6 +398,11 @@ export function filterScopedHooks(
 
   const filteredSkillHooks: typeof skillHooks = []
   for (const hook of skillHooks) {
+    if (!isDerivationVisibleForProjectMode({ ...hook,
+      ...derivationVisibility(hook.pluginId ?? "") }, visibilityScope)) {
+      notifySkipped(hook, "skill-not-in-scope")
+      continue
+    }
     if (!isSkillVisibleForProjectMode(hook, visibilityScope)) {
       notifySkipped(hook, "skill-not-in-scope")
       continue

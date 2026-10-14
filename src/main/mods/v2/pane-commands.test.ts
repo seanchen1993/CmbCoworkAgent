@@ -7,6 +7,7 @@ import { scheduleFunctionCommand } from "./command-scheduler"
 import { claimLocalThreadRunLease, releaseLocalThreadRunLease } from "../../agent/thread-run-lease"
 import type { ModCommandJob } from "../../../shared/mods/types"
 import type { FunctionPaneSnapshot, FunctionUiAction } from "../../../shared/mods/v2/ui"
+import { ordinaryFunctionNode } from "../../../../tests/support/function-ui-node"
 
 const cleanups: Array<() => Promise<void>> = []
 afterEach(async () => {
@@ -78,8 +79,8 @@ async function fixture(immediate = false, hooks = "") {
 }
 
 function click(pane: FunctionPaneSnapshot): FunctionUiAction {
-  const button = pane.tree.children![1]
-  if (typeof button === "string" || !button.press) throw Error("missing button")
+  const button = ordinaryFunctionNode(pane.tree).children![1]
+  if (typeof button === "string" || button.type === "engine" || button.type === "fragment" || !button.press) throw Error("missing button")
   return {
     pane: pane.key,
     generation: pane.generation,

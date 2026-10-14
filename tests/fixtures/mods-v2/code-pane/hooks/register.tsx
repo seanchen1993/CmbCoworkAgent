@@ -5,7 +5,25 @@ export function register(on) {
       description: "Show source and diff",
       immediate: true
     })
+    await $.command.register({
+      name: "code-long-pane",
+      description: "Show long source",
+      immediate: true
+    })
     return next(e)
+  })
+  on("command.run", { command: "code-long-pane" }, async ($) => {
+    await $.ui.open({ id: "code-long-preview", title: "Long Code", rows: 12, closeOnEscape: true })
+    return { text: "LONG_CODE_PREVIEW_OPEN" }
+  })
+  on("ui.render", { component: "Pane", requestId: "code-long-preview" }, ($, e) => {
+    const { Box, Code } = $.ui.resolve(e)
+    return (
+      <Box flexDirection="column">
+        <Code source={"x".repeat(120000) + "synthetic-secret-tail"} language="typescript" />
+        <Code source={"<script>malformed diff</script>"} format="diff" startLine={17} />
+      </Box>
+    )
   })
   on("command.run", { command: "code-pane" }, async ($) => {
     await $.ui.open({ id: "code-preview", title: "Code E2E", rows: 12, closeOnEscape: true })

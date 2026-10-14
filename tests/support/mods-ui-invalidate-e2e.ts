@@ -1,3 +1,4 @@
+import { openModsResults } from "./mods-sidebar-navigation"
 import assert from "node:assert/strict"
 import { mkdirSync } from "node:fs"
 import { join } from "node:path"
@@ -74,6 +75,7 @@ export async function verifyUiInvalidate(
   )
   await page.reload({ waitUntil: "domcontentloaded" })
   await page.getByText("UI invalidation", { exact: true }).first().click()
+  await openModsResults(page)
   const jobs = () => page.evaluate((id) => window.api.mods.jobs(id), id)
   const enqueue = async (command: string, text = "") => {
     const descriptor = (await page.evaluate((id) => window.api.mods.commands(id), id)).find(

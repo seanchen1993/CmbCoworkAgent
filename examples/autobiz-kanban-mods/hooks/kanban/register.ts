@@ -8,7 +8,6 @@ async function readRows($) {
 
 export function register(on) {
   on("session.start", async ($, e, next) => {
-    await $.command.register({ name: "kanban", description: "打开 Autobiz 项目看板" })
     await $.command.register({ name: "kanban-check", description: "检查 Feature 当前阶段产物", argumentHint: "[Feature ID]" })
     return next(e)
   })

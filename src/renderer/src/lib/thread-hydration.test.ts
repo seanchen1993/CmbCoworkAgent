@@ -12,6 +12,15 @@ import {
 } from "./thread-hydration"
 
 describe("thread history hydration retry", () => {
+  it("uses a verified complete native bootstrap without marking legacy migration complete", () => {
+    const page = { total: 20, hasVisibleMessages: true, legacyCheckpointMigrationStatus: null,
+      canonicalCheckpointVerified: true }
+    expect(shouldBootstrapLegacyCheckpointTranscript(page)).toBe(false)
+    expect(shouldAwaitCheckpointConversationPresence(page)).toBe(false)
+    expect(shouldKeepMainTranscriptLoadingAfterPage({ succeeded: true, page })).toBe(false)
+    expect(shouldBootstrapLegacyCheckpointTranscript({ ...page,
+      canonicalCheckpointVerified: false })).toBe(true)
+  })
   it("backs off failed initial pages without growing past 30 seconds", () => {
     expect(getThreadHistoryHydrationRetryDelay(0)).toBe(500)
     expect(getThreadHistoryHydrationRetryDelay(3)).toBe(4_000)
@@ -25,6 +34,15 @@ describe("thread history hydration retry", () => {
     expect(getThreadHistoryHydrationRetryDisposition("target", false)).toBe("cancel")
     expect(getThreadHistoryHydrationRetryDisposition(null, true)).toBe("cancel")
     expect(getThreadHistoryHydrationRetryDisposition(null, false)).toBe("run")
+  })
+
+  it("waits for a foreground run without changing user intent or hydration precedence", () => {
+    expect(getThreadHistoryHydrationRetryDisposition(null, false, true)).toBe("wait")
+    expect(getThreadHistoryHydrationRetryDisposition(null, false, false)).toBe("run")
+    expect(getThreadHistoryHydrationRetryDisposition("hydrate", false, true)).toBe("wait")
+    expect(getThreadHistoryHydrationRetryDisposition("older", false, true)).toBe("cancel")
+    expect(getThreadHistoryHydrationRetryDisposition("target", false, true)).toBe("cancel")
+    expect(getThreadHistoryHydrationRetryDisposition(null, true, true)).toBe("cancel")
   })
 
   it("stops a permanently failing hydration after the bounded automatic budget", async () => {

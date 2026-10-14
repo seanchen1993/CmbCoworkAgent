@@ -1,0 +1,41 @@
+{
+  "schemaVersion": 1,
+  "upstream": "claude-code/2.1.283 embedded declaration and extracted host behavior",
+  "baseMatrix": "mods-v2-compatibility-matrix.json",
+  "status": "incremental-coverage-not-full-parity",
+  "note": "The older matrix is a pinned historical catalog. These additions do not turn its counts into 2.1.283 coverage percentages. Runtime profile remains claude-code/2.1.278 with reviewed extensions.",
+  "additions": [
+    {
+      "names": ["state.get", "state.set"],
+      "status": "partial",
+      "availability": "bounded",
+      "implemented": "Session values, snapshots refreshed on set/CAS miss, owner-only writes, hookable operations, pinned identity/previous/ifVersion, content publication, render-chain write prohibition, generation subscriptions, runtime replacement retention.",
+      "remaining": "Complete upstream PluginState contract registry, literal source analysis and generated authoring types; complete non-desktop surface compatibility.",
+      "evidence": ["src/main/mods/v2/named-state.test.ts", "tests/support/mods-named-state-e2e.ts"]
+    },
+    {
+      "names": ["atom", "derive", "memberOf", "read", "update"],
+      "status": "partial",
+      "availability": "bounded",
+      "implemented": "Static named imports from claude-code, frozen descriptions/initial, shape defaulting, family members, nested version caches, dependency reads on cache hits, 64 bounded CAS attempts.",
+      "remaining": "Complete upstream module exports and authoring type registry. Helpers are session-VM scoped; cross-session VM reuse is not supported.",
+      "evidence": ["src/main/mods/v2/state-library.test.ts", "tests/support/mods-named-state-e2e.ts"]
+    },
+    {
+      "names": ["TextEncoder", "TextDecoder"],
+      "status": "partial",
+      "availability": "bounded",
+      "implemented": "Guest-local UTF-8 encode/encodeInto/decode; standard UTF-8 aliases, streaming, BOM, fatal, BufferSource offsets and intrinsic brand checks.",
+      "remaining": "TextDecoder encoding labels other than UTF-8. Explicit input limits apply.",
+      "evidence": ["src/main/mods/v2/guest-encoding.test.ts", "tests/support/function-encoding-process.ts", "tests/support/mods-encoding-e2e.ts"]
+    }
+  ],
+  "stillNotImplementedOrNotFullyVerified": [
+    "session.send and process.spawn exact upstream contracts",
+    "URL, URLSearchParams, AbortController/Signal public globals, structuredClone, crypto, performance",
+    "Production triggers for all metadata-only classic events in the base matrix",
+    "Full JSX, terminal Raster, non-desktop surfaces and all focus/scroll behaviors",
+    "Upstream PluginState static contract discovery and automatic type generation",
+    "Full 2.1.283 runtime conformance, formal TTFT budget and long-duration memory acceptance"
+  ]
+}

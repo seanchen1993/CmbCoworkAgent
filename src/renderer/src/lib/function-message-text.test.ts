@@ -10,10 +10,12 @@ it.each(["user", "assistant"] as const)(
     const html = renderToStaticMarkup(
       createElement(FunctionMessageText, {
         threadId: "thread",
+        messageId: "message",
         role,
         text: "actual text",
         isExpanded: true,
         isFirstOfReply: true,
+        renderText: (text) => createElement("span", {}, text),
         fallback: createElement(
           "a",
           { href: "#original", "data-chat-search-text": true },
@@ -35,10 +37,12 @@ it("does not serialize or mount a guest for oversized transcript text", () => {
   const html = renderToStaticMarkup(
     createElement(FunctionMessageText, {
       threadId: "thread",
+      messageId: "message",
       role: "user",
       text: "x".repeat(10001),
       isExpanded: false,
       isFirstOfReply: false,
+      renderText: (text) => createElement("span", {}, text),
       fallback: createElement("span", {}, "original rich content")
     })
   )
@@ -48,10 +52,12 @@ it("does not serialize or mount a guest for oversized transcript text", () => {
 it("never infers a message's author from its user role", () => {
   const node = FunctionMessageText({
     threadId: "thread",
+    messageId: "message",
     role: "user",
     text: "task notification",
     isExpanded: false,
     isFirstOfReply: false,
+    renderText: (text) => createElement("span", {}, text),
     fallback: null
   })
   if (!isValidElement<{ facts: unknown }>(node)) throw Error("Missing message site")

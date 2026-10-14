@@ -11,20 +11,21 @@ import type { ResolvedModelConfig } from "../../models/registry"
 import type { FunctionModelReply, FunctionModelRequest } from "./model-sdk"
 import { DEFAULT_COMPLETION_POLICY } from "../../../shared/mods/v2/completion-policy"
 import type { ModJson } from "../../../shared/mods/types"
+import type { ClawProfile } from "../../../shared/mods/claw"
 
 const cleanups: Array<() => Promise<void>> = []
 afterEach(async () => {
   for (const close of cleanups.splice(0)) await close()
 })
 
-async function fixture(specs: Array<{ hook?: string; setup?: string; policy?: object }>) {
+async function fixture(specs: Array<{ hook?: string; setup?: string; policy?: object }>, modern = true) {
   const root = await mkdtemp(join(tmpdir(), "mods-policy-"))
   const sources = await Promise.all(
     specs.map(async (spec, index) => {
       const name = `policy${index}`
       const path = join(root, name)
       await mkdir(join(path, "hooks"), { recursive: true })
-      await writeFile(join(path, "plugin.json"), JSON.stringify({ name, version: "1.0.0" }))
+      await writeFile(join(path, "plugin.json"), JSON.stringify({ name, version: "1.0.0", ...(modern ? {} : {cmbCompatibility:{modelProtocol:"legacy-v1"}}) }))
       await writeFile(
         join(path, "hooks/hooks.json"),
         JSON.stringify({ modules: ["./register.ts"] })
@@ -64,7 +65,9 @@ async function fixture(specs: Array<{ hook?: string; setup?: string; policy?: ob
     admit: async () => {},
     publish: async (_identity, text) => text
   })
-  const model = vi.fn(models.complete.bind(models))
+  const legacyModel = vi.fn(models.complete.bind(models))
+  const modernModel = vi.fn(models.completeResult.bind(models))
+  const model = modern ? modernModel : legacyModel
   const invocations: string[] = []
   let enabled = true
   const manager = new FunctionModsManager(
@@ -76,7 +79,8 @@ async function fixture(specs: Array<{ hook?: string; setup?: string; policy?: ob
       enabled: () => enabled,
       changed: () => {},
       publish: async (_workspace, value) => value,
-      completeModel: model
+      completeModel: legacyModel,
+      completeModelResult: modernModel
     },
     () => {
       const guests: FunctionGuestRuntime[] = []
@@ -142,6 +146,169 @@ async function fixture(specs: Array<{ hook?: string; setup?: string; policy?: ob
     }
   }
 }
+
+it("native flow temporary policy runs only its selected plugin and preserves saved rules", async () => {
+  const f = await fixture([
+    { hook: '() => ({decision:"pass"})', policy: { mode: "off" } },
+    { hook: '() => ({decision:"block",reason:"mandatory"})', policy: { mode: "check", checks: ["code-review"] } }
+  ])
+  const before = f.store.functionState.get(JSON.stringify([f.root, "policy0"]), "completion-config")
+  const gate = await f.manager.completionGate(f.root, "thread", () => ({ turnId: "flow", runId: "flow" }), {
+    temporaryPolicy: { plugin: "policy0", policy: { ...DEFAULT_COMPLETION_POLICY, mode: "check", checks: ["code-review"] },
+      context: { digest: "definition", executionId: "step-1" } }, checkOnly: true, strictErrors: true
+  })
+  expect(await gate!({ signal: new AbortController().signal, revisionAttempts: 0, maxRevisionAttempts: 0 }))
+    .toEqual({ decision: "pass" })
+  expect(f.invocations).toEqual(["policy0"])
+  expect(f.store.functionState.get(JSON.stringify([f.root, "policy0"]), "completion-config")).toEqual(before)
+  expect(await f.run()).toMatchObject({ decision: "block", reason: "policy1: mandatory" })
+})
+
+it("Claw additional checks use one real gate, tighten repair and pin the effective policy", async () => {
+  const f = await fixture([
+    {
+      hook: '() => ({decision:"revise",reason:"defect"})',
+      policy: { mode: "repair", checks: ["code-review"] }
+    }
+  ])
+  const [status] = await f.manager.status(f.root)
+  const identity = { pluginId: status.pluginId, name: status.name, digest: status.digest! }
+  const profile: ClawProfile = {
+    id: "claw",
+    name: "Claw",
+    capabilities: [identity],
+    completionRules: [
+      {
+        ...identity,
+        policy: {
+          ...DEFAULT_COMPLETION_POLICY,
+          mode: "report",
+          maxRepairs: 0,
+          checks: ["code-review"]
+        }
+      }
+    ]
+  }
+  vi.spyOn(f.manager, "clawSelection").mockImplementation(() => profile)
+  expect(await f.run()).toMatchObject({ decision: "block" })
+  expect(f.invocations).toEqual(["policy0"])
+  const scope = await f.manager.prepareFlowScope(
+    f.root,
+    "thread",
+    undefined,
+    "run",
+    "digest",
+    new AbortController().signal
+  )
+  profile.completionRules![0].policy.timeoutMs = 1000
+  expect(() => scope.assertLive()).toThrow("CONFIG_CHANGED")
+  scope.dispose()
+})
+
+it("Claw checks enable an off project without adding stage authority and reject conflicting project scope", async () => {
+  const f = await fixture([
+    { hook: '() => ({decision:"block",reason:"extra required"})', policy: { mode: "off" } }
+  ])
+  const [status] = await f.manager.status(f.root)
+  const identity = { pluginId: status.pluginId, name: status.name, digest: status.digest! }
+  const profile: ClawProfile = {
+    id: "claw",
+    name: "Claw",
+    capabilities: [identity],
+    completionRules: [
+      {
+        ...identity,
+        policy: {
+          ...DEFAULT_COMPLETION_POLICY,
+          mode: "check",
+          scope: "diff",
+          maxRepairs: 0,
+          checks: ["code-review"]
+        }
+      }
+    ]
+  }
+  vi.spyOn(f.manager, "clawSelection").mockReturnValue(profile)
+  expect(f.manager.clawSelectionIssues(f.root, profile, [status])).toEqual([])
+  expect(await f.run()).toMatchObject({ decision: "block", reason: "policy0: extra required" })
+  const scope = await f.manager.prepareFlowScope(
+    f.root,
+    "thread",
+    undefined,
+    "run",
+    "digest",
+    new AbortController().signal
+  )
+  expect(scope.stages).toEqual([])
+  scope.dispose()
+  f.manager.setCompletionPolicy(f.root, "thread", status.name, {
+    ...DEFAULT_COMPLETION_POLICY,
+    mode: "check",
+    scope: "project"
+  })
+  expect(f.manager.clawSelectionIssues(f.root, profile, [status]).join(" ")).toContain("范围")
+  await expect(f.gate()).rejects.toThrow("CONFIG_INVALID")
+})
+
+it("native flow errors and unavailable handlers cannot become business failure routes", async () => {
+  const f = await fixture([{ hook: '() => {throw Error("provider unavailable")}', policy: { mode: "off" } }, {}])
+  for (const plugin of ["policy0", "policy1"]) {
+    const gate = await f.manager.completionGate(f.root, "thread", () => ({ turnId: "flow" }), {
+      temporaryPolicy: { plugin, policy: { ...DEFAULT_COMPLETION_POLICY, mode: "check" }, context: { executionId: plugin } },
+      checkOnly: true, strictErrors: true
+    })
+    await expect(gate!({ signal: new AbortController().signal, revisionAttempts: 0, maxRevisionAttempts: 0 })).rejects.toThrow()
+  }
+  await expect(f.manager.completionGate(f.root, "thread", () => ({}), {
+    temporaryPolicy: { plugin: "missing", policy: { mode: "check" }, context: {} }
+  })).rejects.toThrow("MODS_FLOW_POLICY_INVALID")
+})
+
+it("native flow scope tracks artifact changes and expires immediately on configuration changes", async () => {
+  const f = await fixture([{ hook: '() => ({decision:"pass"})', policy: { mode: "off" } }])
+  const signal = new AbortController().signal
+  const scope = await f.manager.prepareFlowScope(f.root, "thread", "policy0", "run", "digest", signal)
+  const first = await scope.fingerprint(signal)
+  await writeFile(join(f.root, "product.txt"), "changed")
+  expect(await scope.fingerprint(signal)).not.toEqual(first)
+  f.manager.setCompletionPolicy(f.root, "thread", "policy0", { ...DEFAULT_COMPLETION_POLICY, mode: "check" })
+  expect(scope.signal.aborted).toBe(true)
+  expect(() => scope.assertLive()).toThrow()
+  scope.dispose()
+})
+
+it("native flow scope requires a loaded approved plugin and never revives after reload", async () => {
+  const f = await fixture([{ hook: '() => ({decision:"pass"})', policy: { mode: "off" } }])
+  const signal = new AbortController().signal
+  await expect(f.manager.prepareFlowScope(f.root, "thread", "missing", "run", "digest", signal))
+    .rejects.toThrow("MODS_PLUGIN_UNAPPROVED")
+  const scope = await f.manager.prepareFlowScope(f.root, "thread", "policy0", "run", "digest", signal)
+  f.manager.invalidate(f.root)
+  expect(scope.signal.aborted).toBe(true)
+  await f.manager.commands(f.root, "thread")
+  expect(() => scope.assertLive()).toThrow()
+  scope.dispose()
+})
+
+it("native flow lends only its owner grant and rejects results after scope revocation", async () => {
+  const f = await fixture([
+    { hook: '() => ({decision:"pass"})', policy: { mode: "off" } },
+    { hook: '() => ({decision:"pass"})', policy: { mode: "off" } }
+  ])
+  const scope = await f.manager.prepareFlowScope(
+    f.root, "thread", "policy0", "run", "digest", new AbortController().signal
+  )
+  const owner = await scope.withOwnerGrant(async (grant) => grant.modId)
+  expect(owner).toBe("function:policy0")
+  await expect(scope.withOwnerGrant(async () => {
+    f.manager.invalidate(f.root)
+    return "stale result"
+  })).rejects.toThrow()
+  const run = vi.fn(async () => "unreachable")
+  await expect(scope.withOwnerGrant(run)).rejects.toThrow()
+  expect(run).not.toHaveBeenCalled()
+  scope.dispose()
+})
 
 it("fully removes an off gate even beside a loaded plugin with no completion handler", async () => {
   const f = await fixture([
@@ -237,7 +404,7 @@ it("enforces configured guest timeouts and preserves report mode on timeout", as
   }
 }, 10000)
 
-it("counts actual native input and output and cannot catch budget exhaustion into a PASS", async () => {
+it.each([false,true])("counts actual native input and output and cannot catch budget exhaustion into a PASS, modern=%s", async modern => {
   const f = await fixture([
     {
       hook: `async $ => {
@@ -247,7 +414,7 @@ it("counts actual native input and output and cannot catch budget exhaustion int
   }`,
       policy: { mode: "check", checks: ["code-review"], modelTokenBudget: 400 }
     }
-  ])
+  ], modern)
   expect(await f.run()).toMatchObject({
     decision: "block",
     reason: expect.stringContaining("MODS_COMPLETION_MODEL_BUDGET")
@@ -258,7 +425,7 @@ it("counts actual native input and output and cannot catch budget exhaustion int
   expect(evidence).toContain('"outputTokens":100')
 })
 
-it("does not accept a PASS when the actual native provider omits input usage", async () => {
+it.each([false,true])("does not accept a PASS when the actual native provider omits input usage, modern=%s", async modern => {
   const f = await fixture([
     {
       hook: `async $ => {
@@ -267,7 +434,7 @@ it("does not accept a PASS when the actual native provider omits input usage", a
   }`,
       policy: { mode: "check", checks: ["code-review"], modelTokenBudget: 400 }
     }
-  ])
+  ], modern)
   f.provider.mockResolvedValueOnce({ text: "answer", outputTokens: 3 })
   expect(await f.run()).toMatchObject({
     decision: "block",
@@ -275,14 +442,14 @@ it("does not accept a PASS when the actual native provider omits input usage", a
   })
 })
 
-it("caps an observer-expanded output request at the remaining native total budget", async () => {
+it.each([false,true])("caps an observer-expanded output request at the remaining native total budget, modern=%s", async modern => {
   const f = await fixture([
     {
       hook: 'async $ => { await $.model.complete({model:"default",prompt:"x",maxTokens:100}); return {decision:"pass"} }',
       policy: { mode: "check", checks: ["code-review"], modelTokenBudget: 400 }
     },
     { setup: 'on("model.complete", ($,e,next) => next({...e,maxTokens:4096}))' }
-  ])
+  ], modern)
   expect(await f.run()).toEqual({ decision: "pass" })
   expect(f.provider).toHaveBeenCalledOnce()
   expect(f.provider.mock.calls[0][1]).toMatchObject({ maxTokens: 271 })
@@ -459,4 +626,49 @@ it("journals capture identity before the first asynchronous read and settles bot
       .filter((row) => row.phase.endsWith(".started"))
       .every((row) => row.status === "completed")
   ).toBe(true)
+})
+
+
+it("prepares host Flow scope with zero plugins but never issues a fake owner grant", async () => {
+  const f = await fixture([])
+  const signal = new AbortController().signal
+  const scope = await f.manager.prepareFlowScope(
+    f.root,
+    "thread",
+    undefined,
+    "run",
+    "digest",
+    signal
+  )
+  expect((await scope.captureBinding(signal)).pluginDigests).toEqual({})
+  expect(await scope.fingerprint(signal)).toMatch(/^[a-f0-9]{64}$/)
+  await expect(scope.withOwnerGrant(async () => "forbidden")).rejects.toThrow(
+    "FLOW_PLUGIN_OWNER_REQUIRED"
+  )
+  f.setEnabled(false)
+  expect(() => scope.assertLive()).toThrow("MODS_SCOPE_CHANGED")
+  scope.dispose()
+})
+
+it("host Flow scope still freezes selected plugins and mandatory configuration", async () => {
+  const f = await fixture([
+    {
+      hook: '() => ({decision:"block",reason:"mandatory"})',
+      policy: { mode: "check", checks: ["code-review"] }
+    }
+  ])
+  const signal = new AbortController().signal
+  const scope = await f.manager.prepareFlowScope(
+    f.root,
+    "thread",
+    undefined,
+    "run",
+    "digest",
+    signal
+  )
+  expect(Object.keys((await scope.captureBinding(signal)).pluginDigests)).toEqual(["policy0"])
+  expect(await f.run()).toMatchObject({ decision: "block", reason: "policy0: mandatory" })
+  f.store.functionState.set(JSON.stringify([f.root, "policy0"]), "review-mode", "changed")
+  expect(() => scope.assertLive()).toThrow("MODS_COMPLETION_CONFIG_CHANGED")
+  scope.dispose()
 })

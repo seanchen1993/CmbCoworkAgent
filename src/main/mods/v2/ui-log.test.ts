@@ -65,3 +65,18 @@ it("rechecks a buffered line's live authority before a previous line releases it
   expect(debug).not.toHaveBeenCalled()
   logs.close()
 })
+
+it("bounds long protected logs for both sinks before buffering them", () => {
+  const debug = vi.fn()
+  const logs = new FunctionUiLog(vi.fn(), debug)
+  const input = { text: `${"x".repeat(9999)}🙂${"界".repeat(20000)}`, to: "transcript" }
+  const first = logs.reserve("first")
+  logs.settle(logs.reserve("second"), input)
+  expect(logs.snapshot()).toEqual([])
+  logs.settle(first)
+  const expected = `${"x".repeat(9999)}\uFFFD`
+  expect(logs.snapshot().map(row => row.text)).toEqual([expected])
+  expect(debug.mock.calls).toEqual([["second", expected]])
+  expect(input.text).toHaveLength(30001)
+  logs.close()
+})

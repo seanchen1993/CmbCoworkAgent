@@ -1,6 +1,8 @@
 import { getGlobalMcpCapabilityService } from "../../mcp/capability-service"
 import { createHookScope, resolveEnabledHooksForRun } from "../../hooks/scope"
 import { withFunctionCommandBinding } from "./command-binding"
+import { getModsManager } from "../manager"
+import { restrictClawMcpService } from "../claw-mcp"
 
 /** Writes share the thread lease, but concurrent SDK calls must not replace each other's adapter. */
 export async function withFunctionMcpCommand<T>(
@@ -32,7 +34,10 @@ async function bindFunctionMcpCommand(
   const scope = createHookScope()
   let release = () => {}
   createScopedMcpCapabilityService(
-    getGlobalMcpCapabilityService(),
+    restrictClawMcpService(
+      getGlobalMcpCapabilityService(),
+      getModsManager()?.clawProfile(workspace, threadId)?.mcp
+    ),
     scope,
     (event, context) => resolveEnabledHooksForRun(workspace, event, context, scope),
     undefined,

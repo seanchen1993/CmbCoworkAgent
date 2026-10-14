@@ -9,6 +9,11 @@ import {
   readStableFileHandleBounded,
   StableBoundedReadError
 } from "../../services/stable-file-handle"
+import {
+  readFunctionAncestors,
+  validateFunctionAncestorsResult,
+  type FunctionAncestorsRequest
+} from "./file-ancestors"
 
 export const FUNCTION_READ_LIMIT = 512 * 1024
 const ENTRY_LIMIT = 1024
@@ -16,11 +21,12 @@ export const FILE_CAPABILITIES = ["fs.read", "fs.list", "fs.exists", "fs.stat"] 
 export type FunctionFileMethod = (typeof FILE_CAPABILITIES)[number]
 
 export interface FunctionFileAccess {
+  ancestors?(request: FunctionAncestorsRequest, signal: AbortSignal): Promise<ModJson>
   run(
     method: FunctionFileMethod,
     path: string,
     signal: AbortSignal,
-    options?: { resolve?: boolean }
+    options?: { resolve?: boolean; as?: "bytes" }
   ): Promise<ModJson>
 }
 
@@ -58,6 +64,48 @@ export class ProjectFunctionFiles implements FunctionFileAccess {
     private readonly publish: (value: ModJson, signal: AbortSignal) => Promise<ModJson>,
     private readonly queryTool?: FunctionFileScope["queryTool"]
   ) {}
+
+  async ancestors(request: FunctionAncestorsRequest, signal: AbortSignal): Promise<ModJson> {
+    const paths = new Map<string, string>()
+    const check = () => {
+      signal.throwIfAborted()
+      this.assertLive()
+    }
+    const canonical = async (input: string): Promise<string> => {
+      check()
+      const target = await this.path(input)
+      check()
+      if (
+        !(await this.allowed("fs.read", resolve(this.workspace, input))) ||
+        !(await this.allowed("fs.read", target.path))
+      )
+        throw new ModFunctionError("MODS_FS_ACCESS_DENIED")
+      check()
+      if (paths.has(input) && paths.get(input) !== target.path)
+        throw new ModFunctionError("MODS_FS_CHANGED")
+      paths.set(input, target.path)
+      return target.path
+    }
+    const value = await readFunctionAncestors(request, {
+      workspace: this.workspace,
+      signal,
+      assertLive: this.assertLive,
+      canonical,
+      read: async (path) => {
+        const content = await this.run("fs.read", path, signal)
+        await canonical(path)
+        if (typeof content !== "string") throw new ModFunctionError("MODS_FS_ANCESTORS_RESULT")
+        return content
+      }
+    })
+    check()
+    const published = await this.publish(value, signal)
+    check()
+    for (const path of paths.keys()) await canonical(path)
+    check()
+    validateFunctionAncestorsResult(published)
+    return published
+  }
 
   private async allowed(method: FunctionFileMethod, path: string): Promise<boolean> {
     if (!this.queryTool) return true
@@ -106,7 +154,7 @@ export class ProjectFunctionFiles implements FunctionFileAccess {
     method: FunctionFileMethod,
     input: string,
     signal: AbortSignal,
-    options?: { resolve?: boolean }
+    options?: { resolve?: boolean; readText?: boolean; as?: "bytes" }
   ): Promise<ModJson> {
     const check = (): void => {
       signal.throwIfAborted()
@@ -128,7 +176,27 @@ export class ProjectFunctionFiles implements FunctionFileAccess {
         const opened = await openStableFileHandle(target.root, target.path)
         try {
           check()
-          result = (await readStableFileHandleBounded(opened, FUNCTION_READ_LIMIT)).toString("utf8")
+          const bytes = await readStableFileHandleBounded(opened, FUNCTION_READ_LIMIT)
+          if (options?.readText) {
+            try { result = new TextDecoder("utf-8", { fatal: true }).decode(bytes) }
+            catch { throw new ModFunctionError("MODS_FS_NOT_TEXT") }
+            // eslint-disable-next-line no-control-regex -- Text preview excludes binary controls.
+            if (/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f]/.test(result))
+              throw new ModFunctionError("MODS_FS_NOT_TEXT")
+            const metadata = await opened.handle.stat({ bigint: true })
+            check()
+            verifyMetadata = async () => {
+              check()
+              const current = await this.path(input)
+              check()
+              const currentMetadata = await stat(current.path, { bigint: true })
+              check()
+              if (current.path !== target.path || !sameMetadata(metadata, currentMetadata))
+                throw new ModFunctionError("MODS_FS_CHANGED")
+            }
+          } else result = options?.as === "bytes"
+            ? { base64: bytes.toString("base64") }
+            : bytes.toString("utf8")
           const resolved = await this.path(input)
           if (resolved.path !== target.path) throw new ModFunctionError("MODS_FS_CHANGED")
         } finally {
@@ -137,7 +205,13 @@ export class ProjectFunctionFiles implements FunctionFileAccess {
       } else if (method === "fs.list") {
         const before = await stat(target.path, { bigint: true })
         if (!before.isDirectory()) throw new ModFunctionError("ENOTDIR")
-        const entries: Array<{ name: string; kind: string; size: number; isLink: boolean }> = []
+        const entries: Array<{
+          name: string
+          kind: string
+          size: number
+          mtimeMs: number
+          isLink: boolean
+        }> = []
         const directory = await opendir(target.path)
         let visited = 0
         for await (const entry of directory) {
@@ -146,7 +220,7 @@ export class ProjectFunctionFiles implements FunctionFileAccess {
           if (!(await this.allowed("fs.stat", join(target.path, entry.name)))) continue
           check()
           // Inspect the entry itself; never follow a child link to obtain listing metadata.
-          const child = await lstat(join(target.path, entry.name)).catch(
+          const child = await lstat(join(target.path, entry.name), { bigint: true }).catch(
             (error: NodeJS.ErrnoException) => {
               if (error.code === "ENOENT") return undefined
               throw error
@@ -154,10 +228,15 @@ export class ProjectFunctionFiles implements FunctionFileAccess {
           )
           check()
           if (!child) continue
+          const size = child.isFile() ? Number(child.size) : 0
+          const mtimeMs = child.isFile() ? Number(child.mtimeMs) : 0
+          if (!Number.isSafeInteger(size) || size < 0 || !Number.isFinite(mtimeMs))
+            throw new ModFunctionError("MODS_FS_METADATA")
           entries.push({
             name: entry.name,
             kind: kind(child),
-            size: child.isFile() ? child.size : 0,
+            size,
+            mtimeMs,
             isLink: child.isSymbolicLink()
           })
         }
@@ -232,8 +311,17 @@ export class ProjectFunctionFiles implements FunctionFileAccess {
     }
     check()
     // No optional hook receives the raw host result before mandatory publication.
+    const expectedBytes = method === "fs.read" && options?.as === "bytes" &&
+      typeof result === "object" && result !== null && !Array.isArray(result)
+      ? result.base64 : undefined
     const published = await this.publish(result, signal)
     check()
+    // Encoded data must cross the same mandatory publisher as text. A policy that
+    // suppresses binary output must fail explicitly, never return corrupt bytes.
+    if (method === "fs.read" && options?.as === "bytes" &&
+      (typeof published !== "object" || published === null || Array.isArray(published) ||
+        published.base64 !== expectedBytes))
+      throw new ModFunctionError("MODS_FS_BYTES_POLICY")
     if (!(await this.allowed(method, resolve(this.workspace, input)))) {
       check()
       if (method === "fs.exists") return false

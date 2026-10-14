@@ -1,3 +1,4 @@
+import { completionEvidenceOverview } from "../components/chat/function-completion-summary"
 import { createElement } from "react"
 import { renderToStaticMarkup } from "react-dom/server"
 import { expect, it } from "vitest"
@@ -32,6 +33,64 @@ const record = (
     requirementVersion: "requirements-v2",
     files: [{ path: "src/main.ts", size: 21, sha256: "fingerprint" }]
   }
+})
+
+it("puts a confirmed transition in the collapsed summary without counting earlier runs", () => {
+  const html = renderToStaticMarkup(
+    createElement(FunctionCompletionEvidenceContent, {
+      records: [
+        { ...record("repair.attempt", "revise", { revisionAttempts: 5 }), runId: "old" },
+        record("repair.attempt", "revise", { revisionAttempts: 1 }),
+        { ...record("state.transition", "pass", { from: "A", to: "B", duplicate: true }), at: 2 }
+      ]
+    })
+  )
+  const summary = html.split("</summary>")[0]
+  expect(summary).toContain("阶段此前已推进，本次未重复写入：A → B")
+  expect(summary).toContain("本轮已请求修复 1 轮")
+  expect(summary).not.toContain("5 轮")
+})
+
+it("does not present a guest opinion as the final successful outcome", () => {
+  const html = renderToStaticMarkup(
+    createElement(FunctionCompletionEvidenceContent, {
+      records: [record("validator.result", "pass", { source: "guest-opinion" })]
+    })
+  )
+  expect(html.split("</summary>")[0]).toContain("单项检查已返回结果")
+  expect(html).not.toContain("本轮所选检查已通过")
+  expect(
+    completionEvidenceOverview([record("validator.result", "pass", { source: "guest-opinion" })])
+      ?.notice
+  ).toBe("单项检查已返回，完整结论待确认")
+  expect(completionEvidenceOverview([record("state.transition", "pass", {})])?.notice).toBe(
+    "项目阶段：已确认推进"
+  )
+})
+
+it("explains report-only completion without implying failed checks passed", () => {
+  const html = renderToStaticMarkup(
+    createElement(FunctionCompletionEvidenceContent, {
+      records: [
+        record("validator.result", "block", { kind: "unit-test", reason: "assertion failed" }),
+        { ...record("check.result", "pass", { source: "guest-opinion-report" }), at: 2 }
+      ]
+    })
+  )
+  const summary = html.split("</summary>")[0]
+  expect(summary).toContain("报告已记录")
+  expect(summary).toContain("报告中仍可能存在未通过项")
+  expect(summary).not.toContain("完成检查证据 · 通过")
+  expect(
+    completionEvidenceOverview([record("check.result", "pass", { source: "guest-opinion-report" })])
+      ?.notice
+  ).toBe("检查报告已记录，查看未通过项")
+})
+
+it("uses the same stale outcome in the notification and displayed summary", () => {
+  const pass = record("check.result", "pass", {})
+  const invalidated = { ...record("invalidated", "stale", {}), at: 2 }
+  expect(completionEvidenceOverview([pass, invalidated])?.notice).toBe("完成检查：需要重新检查")
 })
 
 it("offers explicit read-only checkpoint recovery inspection only for host transition records", () => {
@@ -85,7 +144,7 @@ it("separates host test evidence from guest opinion and gives a concrete next ac
     })
   )
   expect(html).toContain("插件评审意见")
-  expect(html).toContain("宿主单元测试")
+  expect(html).toContain("实际单元测试")
   expect(html).toContain("不代表业务验收")
   expect(html).toContain("assertion failed &lt;script&gt;")
   expect(html).toContain("调整模型总预算")
@@ -167,7 +226,8 @@ it("does not let late invalidation of an old runtime replace a newer check summa
     })
   )
   expect(html).toMatch(/完成检查证据 · 通过/)
-  expect(html).toContain("证据已失效")
+  expect(html).toContain("需要重新检查")
+  expect(completionEvidenceOverview([stale, current, old])?.notice).toBe("完成检查：通过")
 })
 
 it("identifies an uncertain checkpoint commit and requires reconciliation before retry", () => {
@@ -193,7 +253,7 @@ it("limits history while preserving stale and cancelled outcomes instead of call
     at: index
   }))
   const html = renderToStaticMarkup(createElement(FunctionCompletionEvidenceContent, { records }))
-  expect(html).toContain("证据已失效")
+  expect(html).toContain("需要重新检查")
   expect(html.match(/data-completion-record=/g)).toHaveLength(24)
   expect(html).not.toContain("changed-0<")
 })

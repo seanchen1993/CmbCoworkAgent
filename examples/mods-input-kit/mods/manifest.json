@@ -1,0 +1,14 @@
+{
+  "apiVersion": "cmb.mods/v2",
+  "id": "input-claw-kit",
+  "claw": {
+    "componentsVersion": 1,
+    "components": [
+      { "id": "editor", "name": "输入整理", "kind": "module", "entry": "editor.ts",
+        "description": "将输入中的英文转为大写；只标记输入框，不自动发送。", "dependsOn": [], "actionIds": [] },
+      { "id": "suggestion", "name": "下一步建议", "kind": "module", "entry": "suggestion.ts",
+        "description": "使用 /input-next 显示一条需自己接受的建议。", "dependsOn": [], "actionIds": [] }
+    ],
+    "actions": []
+  }
+}

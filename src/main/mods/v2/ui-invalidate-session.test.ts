@@ -108,7 +108,7 @@ it("does not redraw while a delayed invalidation hook is cancelled", async () =>
   expect(await settled).toMatchObject({ error: expect.any(Error) })
   expect((await f.session.panes.snapshot())[0].generation).toBe(f.initial.generation)
 })
-it.each(["prompt.context", "extra-args"])(
+it.each(["prompt.compose", "extra-args"])(
   "rejects invalid SDK target/arguments %s before operation hooks",
   async (args) => {
     const f = await fixture(
@@ -139,7 +139,7 @@ it("does not roll back a real invalidation when a hook denies after next", async
 })
 it("rejects a rewritten unsupported target before the invalidation core", async () => {
   const f = await fixture(`on("ui.invalidate",async($,e,next)=>{
-    await $.store.set("entered",true);return next({event:"prompt.context"})
+    await $.store.set("entered",true);return next({event:"prompt.compose"})
   });`)
   await f.session.run("redraw", "")
   expect(f.state.get("entered")).toBe(true)

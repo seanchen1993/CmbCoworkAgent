@@ -11,7 +11,6 @@ export function validateFunctionLog(input: ModObject): void {
   if (
     Object.keys(input).some((key) => !["text", "to"].includes(key)) ||
     typeof input.text !== "string" ||
-    input.text.length > 10000 ||
     !["transcript", "debug"].includes(String(input.to))
   )
     throw new ModFunctionError("MODS_UI_LOG_ARGUMENTS")

@@ -6,6 +6,7 @@ import { build } from "esbuild"
 import { chromium } from "playwright"
 import { compile } from "@tailwindcss/node"
 import { Scanner } from "@tailwindcss/oxide"
+import { browserWorkerPlugin } from "./support/browser-worker-plugin.mjs"
 
 const project = process.cwd()
 const renderer = join(project, "src/renderer/src")
@@ -33,6 +34,7 @@ const bundle = await build({
   define: { "process.env.NODE_ENV": '"production"', "import.meta.env.DEV": "false" },
   alias: { "@": renderer },
   plugins: [
+    browserWorkerPlugin(),
     {
       name: "fixture-isolation",
       setup(builder) {

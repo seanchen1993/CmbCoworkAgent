@@ -76,6 +76,19 @@ export function currentFunctionExecution() {
   const scope = context.getStore()
   return scope && functionExecutionScope(scope.workspace, scope.threadId)
 }
+/** Private continuation guard usable from renderer IPC without borrowing its ambient context. */
+export function captureFunctionExecutionGuard(workspace: string, threadId: string): () => void {
+  const scope = functionExecutionScope(workspace, threadId)
+  if (!scope) throw new ModFunctionError("MODS_CALL_SCOPE_REQUIRED")
+  const lease = physicalLeases.get(scope as FunctionExecution)
+  return () => {
+    if (!scope.active) throw new ModFunctionError("MODS_CALL_SCOPE_EXPIRED")
+    if (scope.runtimeAuthority) assertModRuntimeAuthority(scope.runtimeAuthority, {
+      workspace, threadId, agentId: scope.agentId,
+      turnId: scope.turnId ?? scope.runtimeAuthority.turnId })
+    if (scope.leased && (!lease || !lease())) throw new ModFunctionError("MODS_CALL_SCOPE_CHANGED")
+  }
+}
 
 /** Only explicit host task creation may start a different agent's execution scope. */
 export function withFreshFunctionExecution<T>(
@@ -83,6 +96,33 @@ export function withFreshFunctionExecution<T>(
   run: () => Promise<T>
 ): Promise<T> {
   return context.exit(() => withFunctionExecution(input, run))
+}
+
+/** A real model transport captures its own lease; a caller's file-write fence is not its owner. */
+export function withFreshFunctionTransport<T>(
+  input: Omit<FunctionExecution, "active">,
+  run: () => Promise<T>
+): Promise<T> {
+  return writeLease.exit(() => withFreshFunctionExecution(input, run))
+}
+
+/** Host-owned durable lifecycle: inherits neither a finished turn nor its write lease. */
+export function withoutFunctionExecution<T>(run: () => Promise<T>): Promise<T> {
+  return writeLease.exit(() => context.exit(run))
+}
+
+/** Expired host transport may close resources, but may not execute any further SDK work. */
+export function withClosedFunctionExecution<T>(
+  input: Omit<FunctionExecution, "active">,
+  run: () => Promise<T>
+): Promise<T> {
+  return writeLease.exit(() => context.run({
+    ...input,
+    active: false,
+    userInitiated: false,
+    leased: false,
+    immediate: false
+  }, run))
 }
 
 /** An inherited but expired scope must never silently become the main agent. */

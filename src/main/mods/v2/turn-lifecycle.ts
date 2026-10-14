@@ -15,15 +15,19 @@ export interface FunctionTurnBinding {
   signal: AbortSignal
   cancel(): void
   assertCurrent(): void
+  /** Main-only actual logical registration receipt, before optional start hooks run. */
+  onStarted?(): void
 }
 
 export interface FunctionChildTurnBinding extends Omit<FunctionTurnBinding, "text" | "cancel"> {
   agentId: string
   parentRunId?: string
+  streamSource?: "authority"
 }
 
 export interface FunctionChildTurnObserver {
   observe(response: unknown): void
+  observeStream(payload: unknown, mode: "delta" | "snapshot"): void
   finish(reason: "answer" | "error"): void
 }
 
@@ -63,6 +67,7 @@ export class FunctionTurnLifecycle {
   private readonly entries = new Map<string, TurnEntry>()
   private readonly running = new Map<string, TurnEntry>()
   private readonly children = new Map<string, TurnEntry>()
+  private readonly settled = new Set<(threadId: string) => void>()
   private readonly unsubscribe: () => void
   private closed = false
 
@@ -75,6 +80,20 @@ export class FunctionTurnLifecycle {
 
   private key(threadId: string, runId: string): string {
     return JSON.stringify([threadId, runId])
+  }
+
+  hasUnsettled(threadId: string): boolean {
+    return [...this.entries.values()].some((entry) => entry.binding.threadId === threadId)
+  }
+
+  onSettled(listener: (threadId: string) => void): () => void {
+    this.settled.add(listener)
+    return () => this.settled.delete(listener)
+  }
+
+  private notifySettled(threadId: string): void {
+    if (this.closed || this.hasUnsettled(threadId)) return
+    for (const listener of this.settled) listener(threadId)
   }
 
   start(binding: FunctionTurnBinding): Promise<void> {
@@ -118,6 +137,14 @@ export class FunctionTurnLifecycle {
     }
     this.entries.set(key, entry)
     this.running.set(binding.threadId, entry)
+    try { binding.onStarted?.() }
+    catch (error) {
+      if (this.entries.get(key) === entry) this.entries.delete(key)
+      if (this.running.get(binding.threadId) === entry) this.running.delete(binding.threadId)
+      entry.controller.abort(error)
+      this.notifySettled(binding.threadId)
+      return Promise.reject(error)
+    }
     // Set identity before any hook runs; retries reuse this start even if an optional hook failed.
     entry.starting = Promise.resolve().then(() => {
       entry.controller.signal.throwIfAborted()
@@ -157,6 +184,11 @@ export class FunctionTurnLifecycle {
         binding.assertCurrent()
         entry.observation.observe(response)
       },
+      observeStream: (payload, mode) => {
+        if (this.entries.get(key) !== entry || entry.terminal) return
+        binding.assertCurrent()
+        entry.observation.observeStream(payload, mode)
+      },
       finish: (reason) => {
         if (this.entries.get(key) === entry) this.finishEntry(entry, { reason })
       }
@@ -175,6 +207,7 @@ export class FunctionTurnLifecycle {
       !entry ||
       entry.terminal ||
       !("agentId" in entry.binding) ||
+      entry.binding.streamSource === "authority" ||
       entry.binding.parentRunId !== parentRunId
     )
       return
@@ -241,7 +274,11 @@ export class FunctionTurnLifecycle {
       this.entries.delete(this.key(threadId, runId))
       this.clearActive(entry)
       entry.controller.abort(error)
-      this.host.error(error)
+      try {
+        this.host.error(error)
+      } finally {
+        this.notifySettled(threadId)
+      }
       return
     }
     const { refusal, ...facts } = observation
@@ -305,6 +342,7 @@ export class FunctionTurnLifecycle {
       .finally(() => {
         entry.dispatching = false
         this.drain(threadId)
+        this.notifySettled(threadId)
       })
   }
 
@@ -315,6 +353,7 @@ export class FunctionTurnLifecycle {
       entry.controller.abort(new ModFunctionError("MODS_TURN_SCOPE_CHANGED"))
       this.entries.delete(key)
       this.clearActive(entry)
+      this.notifySettled(entry.binding.threadId)
     }
   }
 
@@ -322,6 +361,7 @@ export class FunctionTurnLifecycle {
     this.closed = true
     this.unsubscribe()
     this.invalidate()
+    this.settled.clear()
   }
 
   get stats() {

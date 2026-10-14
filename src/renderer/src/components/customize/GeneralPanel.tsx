@@ -38,6 +38,7 @@ import {
   WORKFLOW_WORKTREE_TIMEOUT_MINUTES_MIN
 } from "../../../../shared/agent-runtime-limits"
 import { useAppStore } from "@/lib/store"
+import type { FunctionConfigRow } from "../../../../shared/mods/v2/config"
 
 export function GeneralPanel({
   targetSection
@@ -68,6 +69,35 @@ export function GeneralPanel({
   const trayAreaName = window.electron.process.platform === "darwin" ? "菜单栏" : "系统托盘"
   const gitChangeNoticeEnabled = useAppStore((state) => state.gitChangeNoticeEnabled)
   const setGitChangeNoticeEnabled = useAppStore((state) => state.setGitChangeNoticeEnabled)
+  const threadId = useAppStore(state => state.currentThreadId)
+  const hasWorkspace = useAppStore(state =>
+    typeof state.threads.find(thread => thread.thread_id === threadId)?.metadata?.workspacePath === "string")
+  const [gitRow, setGitRow] = useState<FunctionConfigRow | null>(null)
+  const [gitRowLoaded, setGitRowLoaded] = useState(false)
+  const [gitSaving, setGitSaving] = useState(false)
+  const [gitSaveError, setGitSaveError] = useState("")
+
+  useEffect(() => {
+    setGitRow(null)
+    setGitRowLoaded(false)
+    if (!threadId || !hasWorkspace) return
+    let mounted = true
+    let request = 0
+    const load = () => {
+      const current = ++request
+      void window.api.mods.configList(threadId).then(rows => {
+        if (mounted && current === request) {
+          setGitRow(rows.find(row => row.key === "gitChangeNoticeEnabled") ?? null)
+          setGitRowLoaded(true)
+        }
+      }).catch(() => {
+        if (mounted && current === request) { setGitRow(null); setGitRowLoaded(false) }
+      })
+    }
+    load()
+    const stop = window.api.mods.onConfigurationChanged(load)
+    return () => { mounted = false; stop() }
+  }, [hasWorkspace, threadId])
 
   useEffect(() => {
     if (targetSection !== "git-change-notice") return
@@ -262,18 +292,21 @@ export function GeneralPanel({
     }
   }, [worktreeRemoveTimeoutDraft, worktreeRemoveTimeoutMinutes])
 
-  const handleGitChangeNoticeChange = useCallback(
-    async (enabled: boolean): Promise<void> => {
-      try {
-        await setGitChangeNoticeEnabled(enabled)
-        toast.success(enabled ? "Git 变更提示已开启" : "Git 变更提示已关闭")
-      } catch (saveError) {
-        console.error("[GeneralPanel] Failed to save git change notice setting:", saveError)
-        toast.error("Git 变更提示设置保存失败")
-      }
-    },
-    [setGitChangeNoticeEnabled]
-  )
+  const handleGitChangeNoticeChange = useCallback(async (enabled: boolean): Promise<void> => {
+    setGitSaving(true)
+    setGitSaveError("")
+    try {
+      await setGitChangeNoticeEnabled(enabled)
+      const actual = useAppStore.getState().gitChangeNoticeEnabled
+      toast.success(actual ? "Git 变更提示已开启" : "Git 变更提示已关闭")
+    } catch (saveError) {
+      console.error("[GeneralPanel] Failed to save git change notice setting:", saveError)
+      setGitSaveError(String(saveError))
+      toast.error(String(saveError))
+    } finally {
+      setGitSaving(false)
+    }
+  }, [setGitChangeNoticeEnabled])
 
   return (
     <div className="min-h-0 flex-1 overflow-y-auto p-6 sm:p-8">
@@ -463,7 +496,8 @@ export function GeneralPanel({
           )}
         </section>
 
-        <section className="overflow-hidden rounded-xl border border-border/70 bg-muted/20">
+        <section style={gitRowLoaded && !gitRow ? { display: "none" } : undefined}
+          className="overflow-hidden rounded-xl border border-border/70 bg-muted/20">
           <div className="border-b border-border/60 bg-muted/35 px-5 py-4">
             <h2 className="text-sm font-semibold text-foreground">Git</h2>
           </div>
@@ -473,10 +507,11 @@ export function GeneralPanel({
                 <AlertCircle className="size-4" />
               </div>
               <div className="min-w-0">
-                <div className="text-sm font-medium text-foreground">Git 变更提示</div>
+                <div className="text-sm font-medium text-foreground">{gitRow?.label ?? "Git 变更提示"}</div>
                 <p className="mt-1 text-xs leading-5 text-muted-foreground">
-                  检测到会话中有 Git 文件变更时，在会话顶部显示提示条。默认开启，关闭后将不再提示。
+                  {gitRow?.description ?? "检测到会话中有 Git 文件变更时，在会话顶部显示提示条。默认开启，关闭后将不再提示。"}
                 </p>
+                {gitSaveError && <p role="alert" className="mt-2 text-xs text-destructive">{gitSaveError}</p>}
               </div>
             </div>
             <div className="flex shrink-0 items-center gap-2.5">
@@ -485,8 +520,9 @@ export function GeneralPanel({
               </span>
               <Switch
                 checked={gitChangeNoticeEnabled}
+                disabled={gitSaving || gitRow?.isLocked === true}
                 onCheckedChange={handleGitChangeNoticeChange}
-                aria-label="Git 变更提示"
+                aria-label={gitRow?.label ?? "Git 变更提示"}
               />
             </div>
           </div>

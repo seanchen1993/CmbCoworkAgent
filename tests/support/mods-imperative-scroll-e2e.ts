@@ -1,3 +1,4 @@
+import { openModsResults } from "./mods-sidebar-navigation"
 import assert from "node:assert/strict"
 import { mkdirSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
@@ -83,6 +84,7 @@ export async function verifyImperativeScroll(
   )
   await page.reload({ waitUntil: "domcontentloaded" })
   await page.getByText("Imperative scroll E2E", { exact: true }).first().click()
+  await openModsResults(page)
   const composer = page.locator("textarea.composer-textarea")
   const submit = page.locator("form").filter({ has: composer }).locator('button[type="submit"]')
   const send = async (text: string) => {
@@ -189,6 +191,7 @@ export async function verifyImperativeScroll(
   await page.getByText("Imperative scroll E2E", { exact: true }).first().click()
   assert.equal(typeof (await result("reload")).deny, "string")
   pass("a renderer reload cannot reuse a previous scroll measurement")
+  await openModsResults(page)
   await page.screenshot({ path: join(artifacts, "imperative-scroll-on.png") })
   await send("/scroll-go revoke")
   await until(

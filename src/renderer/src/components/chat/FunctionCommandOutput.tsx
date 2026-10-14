@@ -7,13 +7,15 @@ export function FunctionCommandOutput({
   command,
   text,
   isErrored,
-  fallback
+  fallback,
+  renderText
 }: {
   threadId: string
   command: string
   text: string
   isErrored: boolean
   fallback: ReactNode
+  renderText(text: string): ReactNode
 }): ReactNode {
   if (!text.trim() || text.length > 10000) return fallback
   return (
@@ -24,6 +26,7 @@ export function FunctionCommandOutput({
       // Jobs intentionally do not persist raw command arguments. Never infer them or expose secrets.
       facts={{ command, args: "***", text, isErrored }}
       fallback={fallback}
+      renderNative={(safe) => (typeof safe.text === "string" ? renderText(safe.text) : null)}
     />
   )
 }

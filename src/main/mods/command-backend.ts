@@ -7,6 +7,10 @@ import { getEnabledHooks, getWindowsSandboxMode } from "../storage"
 import { ModError } from "./errors"
 import { functionUserInputInvoker } from "./v2/native-user-input"
 import { ensureCodexExe } from "../agent/codex-sandbox-binary"
+import { getModsManager } from "./manager"
+import { createClawSkillPolicy } from "./claw-skills"
+import { SkillLifecycleRegistry } from "../agent/skill-lifecycle/registry"
+import { createHookScope, resolveEnabledHooksForRun } from "../hooks/scope"
 
 /** Plain project sessions can run explicit native-tool commands without invoking a model. */
 export async function bindStandaloneModCommand(
@@ -15,6 +19,10 @@ export async function bindStandaloneModCommand(
   turnId: string,
   signal: AbortSignal
 ): Promise<() => Promise<void>> {
+  const profile = getModsManager()?.clawProfile?.(workspace, threadId)
+  const clawSkillPolicy = await createClawSkillPolicy(profile?.skills)
+  signal.throwIfAborted()
+  const hookScope = clawSkillPolicy ? createHookScope() : undefined
   const windowsSandbox = process.platform === "win32" ? getWindowsSandboxMode() : "none"
   const codexExePath = join(
     app.isPackaged ? process.resourcesPath : join(app.getAppPath(), "resources"),
@@ -34,6 +42,15 @@ export async function bindStandaloneModCommand(
     hookTurnId: turnId,
     aclOwnerId,
     modCommandOnly: true,
+    clawSkillPolicy,
+    ...(clawSkillPolicy
+      ? {
+          skillLifecycleRegistry: new SkillLifecycleRegistry(clawSkillPolicy.lifecycleSources),
+          hookScope,
+          hookResolver: (event, context) =>
+            resolveEnabledHooksForRun(workspace, event, context, hookScope)
+        }
+      : {}),
     modUserInput: functionUserInputInvoker({ threadId }),
     onModBinding: (dispose) => {
       release = dispose

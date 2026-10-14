@@ -1,12 +1,20 @@
 import type {
   FunctionSessionReadMethod,
-  FunctionSessionUsageArgs
+  FunctionSessionUsageArgs,
+  FunctionSessionVersion
 } from "../../../shared/mods/v2/session"
 import type { ModJson, ModObject } from "../../../shared/mods/types"
 import type { FunctionCommand } from "../../../shared/mods/v2/commands"
 import { isModObject, ModFunctionError } from "../../../shared/mods/v2/contracts"
 import type { FunctionStateAccess } from "./state-store"
 import { FILE_CAPABILITIES, type FunctionFileAccess, type FunctionFileMethod } from "./file-access"
+import { functionAncestorsRequest, validateFunctionAncestorsResult } from "./file-ancestors"
+import {
+  normalizeFunctionSessionMessagesArgs,
+  validateFunctionSessionMessagesArgs,
+  validateFunctionSessionApiMessages,
+  type FunctionSessionMessagesArgs
+} from "../../../shared/mods/v2/session-append"
 
 export const SESSION_CAPABILITIES = [
   "command.register",
@@ -14,6 +22,8 @@ export const SESSION_CAPABILITIES = [
   "command.run",
   "session.id",
   "session.cwd",
+  "session.root",
+  "session.version",
   "session.surface",
   "session.surfaces",
   "session.repo",
@@ -29,17 +39,24 @@ export const SESSION_CAPABILITIES = [
   "store.set",
   "store.delete",
   "store.keys",
+  "fs.ancestors",
   ...FILE_CAPABILITIES
 ] as const
 
 function validateReadMode(mode: ModJson | undefined): void {
-  // Byte publication needs its own mandatory filtering contract; never substitute UTF-8 text.
-  if (mode === "bytes") throw new ModFunctionError("MODS_FS_BYTES_UNSUPPORTED")
-  if (mode !== undefined && mode !== "text") throw new ModFunctionError("MODS_FS_OPTIONS")
+  if (mode !== undefined && mode !== "text" && mode !== "bytes") throw new ModFunctionError("MODS_FS_OPTIONS")
 }
 
 /** SDK positional arguments become the same structured input a hook receives in Claude. */
 export function basicSdkInput(method: string, args: ModJson[]): ModObject {
+  if (method === "session.messages") {
+    if (args.length > 1) throw new ModFunctionError("MODS_SESSION_MESSAGES_ARGUMENT")
+    return normalizeFunctionSessionMessagesArgs(args[0])
+  }
+  if (method === "fs.ancestors") {
+    if (args.length !== 1) throw new ModFunctionError("MODS_FS_ANCESTORS_ARGUMENT")
+    return { ...functionAncestorsRequest(args[0]) }
+  }
   if (method === "session.compact") {
     if (args[0] === undefined) return {}
     if (!isModObject(args[0])) throw new ModFunctionError("MODS_CONTEXT_COMPACTION_INSTRUCTIONS")
@@ -59,7 +76,7 @@ export function basicSdkInput(method: string, args: ModJson[]): ModObject {
     )
       throw new ModFunctionError("MODS_FS_OPTIONS")
     validateReadMode(isModObject(options) ? options.as : undefined)
-    return { path: args[0], as: "text" }
+    return { path: args[0], as: isModObject(options) && options.as === "bytes" ? "bytes" : "text" }
   }
   if (method === "fs.stat") {
     const options = args[1]
@@ -86,10 +103,12 @@ export function basicSdkInput(method: string, args: ModJson[]): ModObject {
 }
 
 export function validateBasicInput(name: string, value: ModObject): void {
+  if (name === "session.messages") validateFunctionSessionMessagesArgs(value)
+  if (name === "fs.ancestors") functionAncestorsRequest(value)
   if (
     name === "session.compact" &&
-    (value.instructions !== undefined &&
-      (typeof value.instructions !== "string" || value.instructions.length > 32000))
+    value.instructions !== undefined &&
+    (typeof value.instructions !== "string" || value.instructions.length > 32000)
   )
     throw new ModFunctionError("MODS_CONTEXT_COMPACTION_INSTRUCTIONS")
   if (
@@ -138,7 +157,35 @@ export function validateBasicInput(name: string, value: ModObject): void {
   }
 }
 
-export function validateBasicResult(name: string, value: ModJson | undefined): void {
+export function validateBasicResult(name: string, value: ModJson | undefined, input?: ModObject): void {
+  if (name === "session.messages") {
+    if (isModObject(value) && typeof value.deny === "string" &&
+      typeof input?.agentId === "string" && Object.keys(value).length === 1) return
+    if (input?.as === "api") {
+      validateFunctionSessionApiMessages(value)
+      return
+    }
+  }
+  if (name === "fs.ancestors") {
+    validateFunctionAncestorsResult(value)
+    return
+  }
+  if (name === "session.version") {
+    if (
+      !isModObject(value) ||
+      typeof value.version !== "string" ||
+      !value.version ||
+      value.version.length > 256 ||
+      (value.base !== undefined &&
+        (typeof value.base !== "string" || !value.base || value.base.length > 256)) ||
+      (value.builtAt !== undefined &&
+        (typeof value.builtAt !== "string" ||
+          !/^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d+)?Z$/.test(value.builtAt) ||
+          !Number.isFinite(Date.parse(value.builtAt))))
+    )
+      throw new ModFunctionError("MODS_SDK_RESULT", "MODS_SDK_RESULT: session.version")
+    return
+  }
   if (name === "session.compact") {
     const count = (candidate: unknown): candidate is number =>
       typeof candidate === "number" && Number.isSafeInteger(candidate) && candidate >= 0
@@ -310,7 +357,11 @@ export function validateBasicResult(name: string, value: ModJson | undefined): v
     entry.size >= 0 &&
     (entry.isLink === undefined || typeof entry.isLink === "boolean")
   if (
-    (name === "fs.read" && typeof value !== "string") ||
+    (name === "fs.read" && (input?.as === "bytes"
+      ? !isModObject(value) || Object.keys(value).length !== 1 ||
+        typeof value.base64 !== "string" || value.base64.length > 4 * Math.ceil(512 * 1024 / 3) ||
+        !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(value.base64)
+      : typeof value !== "string")) ||
     (name === "fs.exists" && typeof value !== "boolean") ||
     (name === "fs.stat" &&
       (!fileStat(value) ||
@@ -322,7 +373,12 @@ export function validateBasicResult(name: string, value: ModJson | undefined): v
     (name === "fs.list" &&
       (!Array.isArray(value) ||
         value.some(
-          (entry) => !fileStat(entry) || !isModObject(entry) || typeof entry.name !== "string"
+          (entry) =>
+            !fileStat(entry) ||
+            !isModObject(entry) ||
+            typeof entry.name !== "string" ||
+            (entry.mtimeMs !== undefined &&
+              (typeof entry.mtimeMs !== "number" || !Number.isFinite(entry.mtimeMs)))
         ))) ||
     (name === "session.authorize" &&
       value !== null &&
@@ -336,7 +392,10 @@ export function validateBasicResult(name: string, value: ModJson | undefined): v
         (value.remote !== null && typeof value.remote !== "string") ||
         typeof value.internal !== "boolean" ||
         (value.name !== null && typeof value.name !== "string"))) ||
-    ((name === "session.id" || name === "session.cwd" || name === "session.model") &&
+    ((name === "session.id" ||
+      name === "session.cwd" ||
+      name === "session.root" ||
+      name === "session.model") &&
       typeof value !== "string") ||
     (name === "session.turns" &&
       (typeof value !== "number" || !Number.isSafeInteger(value) || value < 0)) ||
@@ -359,7 +418,9 @@ export function validateBasicResult(name: string, value: ModJson | undefined): v
     (name === "session.surfaces" &&
       (!Array.isArray(value) || value.some((surface) => surface !== "desktop"))) ||
     (name === "clock.now" && (typeof value !== "number" || !Number.isFinite(value))) ||
-    (["clock.sleep", "ui.open", "ui.close", "fs.write"].includes(name) && value !== undefined) ||
+    (name === "ui.open" && (!isModObject(value) || Object.keys(value).length !== 1 ||
+      typeof value.isPlaced !== "boolean")) ||
+    (["clock.sleep", "ui.close", "fs.write"].includes(name) && value !== undefined) ||
     ((name === "store.set" || name === "store.delete") && value !== undefined) ||
     (name === "store.keys" &&
       (!Array.isArray(value) || value.some((key) => typeof key !== "string"))) ||
@@ -383,6 +444,7 @@ export async function runBasicSdk(
   context: {
     threadId: string
     workspace: string
+    version?: FunctionSessionVersion
     plugin: string
     registry: Map<string, FunctionCommand>
     signal: AbortSignal
@@ -392,6 +454,7 @@ export async function runBasicSdk(
       signal: AbortSignal,
       usageArgs?: FunctionSessionUsageArgs
     ): Promise<ModJson>
+    readConversation?(args: FunctionSessionMessagesArgs, signal: AbortSignal): Promise<ModJson>
     compactSession?(instructions: string, signal: AbortSignal): Promise<ModJson>
     files?: FunctionFileAccess
   }
@@ -399,13 +462,22 @@ export async function runBasicSdk(
   const { registry, signal } = context
   signal.throwIfAborted()
   validateBasicInput(method, input)
+  if (method === "session.messages" && context.readConversation)
+    return context.readConversation(normalizeFunctionSessionMessagesArgs(input), signal)
+  if (method === "session.messages" && (input.as !== undefined || input.agentId !== undefined))
+    throw new ModFunctionError("MODS_CONVERSATION_UNAVAILABLE")
+  if (method === "fs.ancestors") {
+    if (!context.files?.ancestors) throw new ModFunctionError("MODS_CAPABILITY_UNAVAILABLE")
+    return context.files.ancestors(functionAncestorsRequest(input), signal)
+  }
   if (FILE_CAPABILITIES.some((name) => name === method)) {
     if (!context.files) throw new ModFunctionError("MODS_CAPABILITY_UNAVAILABLE")
     return context.files.run(
       method as FunctionFileMethod,
       input.path as string,
       signal,
-      method === "fs.stat" ? { resolve: input.resolve === true } : undefined
+      method === "fs.stat" ? { resolve: input.resolve === true }
+        : method === "fs.read" && input.as === "bytes" ? { as: "bytes" } : undefined
     )
   }
   if (method.startsWith("store.")) {
@@ -443,6 +515,13 @@ export async function runBasicSdk(
   }
   if (method === "session.id") return context.threadId
   if (method === "session.cwd") return context.workspace
+  if (method === "session.root") return context.workspace
+  if (method === "session.version") {
+    if (!context.version) throw new ModFunctionError("MODS_SESSION_UNAVAILABLE")
+    const version = { ...context.version }
+    validateBasicResult(method, version)
+    return version
+  }
   if (method === "session.surface") return "desktop"
   if (method === "session.surfaces") return ["desktop"]
   if (method === "clock.now") return Date.now()

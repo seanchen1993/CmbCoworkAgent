@@ -1,5 +1,5 @@
 import assert from "node:assert/strict"
-import { mkdirSync } from "node:fs"
+import { mkdirSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
 import AdmZip from "adm-zip"
 import type { ElectronApplication, Page } from "playwright"
@@ -39,7 +39,7 @@ export async function verifyUiAsk(
     Buffer.from(`export function register(on){
     on("session.start",async($,e,next)=>{await $.command.register({name:"ui-ask",description:"Native question"});return next(e)});
     on("command.run",{command:"ui-ask"},async($,e)=>{
-      try {return {text:"UI_ASK_ANSWER:"+await $.ui.ask(e.args==="blocked"?"UI_ASK_BLOCKED?":"UI_ASK_QUESTION?",{header:"Approach",options:["Careful","Fast"]})}}
+      try {return {text:"UI_ASK_ANSWER:"+await $.ui.ask(e.args==="blocked"?"UI_ASK_BLOCKED?":"UI_ASK_QUESTION?",{header:"Approach",options:["Careful","Fast"],multiSelect:e.args==="multi"})}}
       catch(e){return {text:"UI_ASK_ERROR:"+e.message}}
     });
     on("classic.PreToolUse",($,e,next)=>e.tool==="request_user_input" &&
@@ -69,6 +69,8 @@ export async function verifyUiAsk(
     await composer.press("Enter")
   }
   const dialog = page.getByRole("dialog", { name: "需要用户输入" })
+  const questionVisible = async (expected = "UI_ASK_FILTERED?"): Promise<boolean> =>
+    (await dialog.count()) === 1 && (await dialog.innerText()).includes(expected)
   const jobs = () => page.evaluate((id) => window.api.mods.jobs(id), threadId)
   const modelBefore = requests.length
   await app.evaluate(({ dialog }) => {
@@ -88,10 +90,16 @@ export async function verifyUiAsk(
   try {
     await run()
     await until(
-      async () => (await dialog.count()) === 1,
+      () => questionVisible(),
       "native question opens from cold command through the actual tool chain"
     )
-    assert((await dialog.innerText()).includes("UI_ASK_FILTERED?"))
+    const firstQuestionText = await dialog.innerText()
+    writeFileSync(
+      join(artifacts, "ui-ask-opening.json"),
+      JSON.stringify({ text: firstQuestionText, jobs: await jobs() }, null, 2)
+    )
+    await page.screenshot({ path: join(artifacts, "ui-ask-opening.png") })
+    assert(firstQuestionText.includes("UI_ASK_FILTERED?"))
     await dialog.getByRole("radio", { name: /Careful/ }).click()
     await page.screenshot({ path: join(artifacts, "ui-ask-native.png") })
     await dialog.getByRole("button", { name: "提交", exact: true }).click()
@@ -106,8 +114,47 @@ export async function verifyUiAsk(
     pass(
       "real ui.ask goes through tool.call rewrite, original native dialog and queued command without a model call"
     )
+    await run("multi")
+    await until(() => questionVisible(), "multiple-choice native question")
+    assert.equal(await dialog.getByRole("radio").count(), 0)
+    assert.equal(await dialog.getByRole("checkbox").count(), 2)
+    assert((await dialog.innerText()).includes("可多选"))
+    const submit = dialog.getByRole("button", { name: "提交", exact: true })
+    const careful = dialog.getByRole("checkbox", { name: /Careful/ })
+    const fast = dialog.getByRole("checkbox", { name: /Fast/ })
+    assert(await submit.isDisabled())
+    await careful.click()
+    await fast.click()
+    await careful.click()
+    assert.equal(await careful.getAttribute("aria-checked"), "false")
+    assert.equal(await fast.getAttribute("aria-checked"), "true")
+    await fast.click()
+    assert(await submit.isDisabled())
+    await fast.click()
+    await careful.click()
+    await page.screenshot({ path: join(artifacts, "ui-ask-multiple.png") })
+    await submit.click()
+    await until(
+      async () => (await jobs()).some((job) => job.result?.text === "UI_ASK_ANSWER:Careful, Fast"),
+      "multiple selections return in original option order to the actual guest"
+    )
+    assert.equal(requests.length, modelBefore)
+    pass(
+      "native multiple selection can toggle both choices, refuses zero choices and returns both labels"
+    )
+    await run("multi")
+    await until(() => questionVisible(), "multiple-choice custom answer")
+    await dialog.getByRole("textbox", { name: "自定义回答" }).fill("Multiple custom answer")
+    await dialog.getByRole("button", { name: "提交", exact: true }).click()
+    await until(
+      async () =>
+        (await jobs()).some((job) => job.result?.text === "UI_ASK_ANSWER:Multiple custom answer"),
+      "multiple-choice question keeps the original independent free-text answer"
+    )
+    assert.equal(requests.length, modelBefore)
+    pass("multiple-choice questions preserve independent free-text answers without a model request")
     await run()
-    await until(async () => (await dialog.count()) === 1, "second native question")
+    await until(() => questionVisible(), "second native question")
     await dialog.getByRole("textbox", { name: "自定义回答" }).fill("Custom answer")
     await dialog.getByRole("button", { name: "提交", exact: true }).click()
     await until(
@@ -115,7 +162,7 @@ export async function verifyUiAsk(
       "native free text returns exactly"
     )
     await run()
-    await until(async () => (await dialog.count()) === 1, "dismissible native question")
+    await until(() => questionVisible(), "dismissible native question")
     await dialog.getByRole("button", { name: "跳过全部问题", exact: true }).click()
     await until(
       async () => (await jobs()).some((j) => j.result?.text?.includes("MODS_UI_ASK_DISMISSED")),
@@ -132,8 +179,8 @@ export async function verifyUiAsk(
     assert.equal((await approvals()).length, approvalsBeforeDenial)
     pass("classic PreToolUse denial prevents final approval and the native SDK dialog")
 
-    await run()
-    await until(async () => (await dialog.count()) === 1, "pending question before global off")
+    await run("multi")
+    await until(() => questionVisible(), "pending question before global off")
     await page.evaluate(() => window.api.mods.configureGlobal(false))
     await until(
       async () => (await dialog.count()) === 0,
@@ -155,7 +202,7 @@ export async function verifyUiAsk(
     await composer.fill("[mods-native-question]")
     await composer.press("Enter")
     await until(
-      async () => (await dialog.count()) === 1,
+      () => questionVisible("ORIGINAL_NATIVE_QUESTION?"),
       "original model-raised native question with Mods off"
     )
     assert((await dialog.innerText()).includes("ORIGINAL_NATIVE_QUESTION?"))
@@ -192,10 +239,7 @@ export async function verifyUiAsk(
     await page.evaluate(() => window.api.mods.configureGlobal(true))
     await page.evaluate((id) => window.api.mods.commands(id), threadId)
     await run()
-    await until(
-      async () => (await dialog.count()) === 1,
-      "pending question after runtime replacement"
-    )
+    await until(() => questionVisible(), "pending question after runtime replacement")
     await page.evaluate((id) => window.api.mods.revokeFunction(id, "ui-ask"), threadId)
     await until(async () => (await dialog.count()) === 0, "revocation cancels the native request")
     pass("fresh runtime can ask again and revocation cancels the pending native dialog")

@@ -27,7 +27,7 @@ it("uses the official desktop-pane fixture through our operation and rendering p
     expect(await session.run("pane-retained", "")).toEqual({ text: "thread" })
     expect(await session.run("pane-retained", "")).toEqual({ text: "thread" })
     expect(JSON.parse(String((await session.run("pane-probe", "")).text))).toEqual({
-      opened: "undefined",
+      opened: "object",
       closed: "undefined"
     })
     expect(await session.panes.snapshot()).toEqual([])

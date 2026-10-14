@@ -1,0 +1,21 @@
+{
+  "apiVersion": "devclaw.project-runtime/v1",
+  "plugin": {
+    "id": "AutobizDevOps_Plugin_Kanban_Fullstack0920_Mods",
+    "version": "1.0.87-mods.3"
+  },
+  "mode": "legacy",
+  "stateOwner": "plugin",
+  "stages": [],
+  "actions": [],
+  "artifacts": [],
+  "checks": [],
+  "environment": [],
+  "capabilities": {
+    "execution": false,
+    "conditionalTransition": false,
+    "idempotency": false,
+    "reconciliation": false,
+    "cancellation": false
+  }
+}

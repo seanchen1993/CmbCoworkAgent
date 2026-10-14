@@ -13,8 +13,10 @@ const { probe, query, peek, discover } = vi.hoisted(() => ({
 vi.mock("../../agent/local-sandbox", () => ({ LocalSandbox: { createPermissionProbe: probe } }))
 vi.mock("../../storage", () => ({ getWindowsSandboxMode: () => "readonly" }))
 vi.mock("../../mcp/capability-service", () => ({
-  getGlobalMcpCapabilityService: () => ({ peekTools: peek, listTools: discover })
+  getGlobalMcpCapabilityService: () => ({ peekTools: peek, listTools: discover }),
+  readConfiguredClawMcpSources: () => [{ id: "a", name: "a", digest: "a".repeat(64) }]
 }))
+vi.mock("../claw-skills", () => ({ createClawSkillPolicy: async () => undefined }))
 const grant = {
   workspace: "/project",
   modId: "function:demo",
@@ -24,6 +26,7 @@ const grant = {
 } as ModGrant
 const plain = vi.fn()
 const manager = {
+  clawProfile: vi.fn<ModsManager["clawProfile"]>(),
   peekFunctionMcpTools: vi.fn<ModsManager["peekFunctionMcpTools"]>(),
   queryFunctionTool: vi.fn<ModsManager["queryFunctionTool"]>(
     async (_w, _t, _g, tool, args, _signal, fallback) => fallback(tool, args)
@@ -45,6 +48,7 @@ beforeEach(() => {
   query.mockResolvedValue({ decision: "allow" })
   peek.mockReturnValue(null)
   manager.peekFunctionMcpTools.mockReturnValue(undefined)
+  manager.clawProfile.mockReturnValue(null)
 })
 
 it("uses only an inert native probe with the current sandbox mode", async () => {
@@ -134,5 +138,28 @@ it("queries a cold native question without constructing a filesystem probe or op
   expect(await call("request_user_input", { questions })).toEqual({ decision: "allow" })
   expect(plain).toHaveBeenCalledWith("thread")
   expect(probe).not.toHaveBeenCalled()
+  expect(discover).not.toHaveBeenCalled()
+})
+
+it("does not approve an unselected provider from the global permission metadata cache", async () => {
+  manager.clawProfile.mockReturnValue({
+    id: "selected",
+    name: "selected",
+    capabilities: [],
+    mcp: { mode: "selected", items: [{ id: "a", name: "a", digest: "a".repeat(64) }] }
+  })
+  peek.mockReturnValue([
+    {
+      toolId: "mcp__b__echo",
+      canonicalToolId: "mcp__b__echo",
+      capabilityId: "b:echo",
+      providerKey: "b",
+      toolName: "echo",
+      visibility: "eager",
+      sourceKind: "connector"
+    }
+  ])
+  expect(await call("mcp__b__echo")).toEqual({ decision: "deny", reason: "MODS_TOOL_UNAVAILABLE" })
+  expect(manager.queryFunctionTool).not.toHaveBeenCalled()
   expect(discover).not.toHaveBeenCalled()
 })

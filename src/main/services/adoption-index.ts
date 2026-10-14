@@ -325,7 +325,7 @@ function scheduleSave(): void {
 export interface GenIndexRow {
   event_id: string
   file_path: string
-  /** Tool that produced this generation ("write_file" | "edit_file"); null on legacy rows. */
+  /** Tool that produced this generation ("write_file" | "edit_file" | "execute"); null on legacy rows. */
   tool: string | null
   content_fingerprint: string | null
   shard_file: string

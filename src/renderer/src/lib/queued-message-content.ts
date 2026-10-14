@@ -7,6 +7,7 @@ import {
   formatBuiltinBrowserTranscriptMessage,
   formatBuiltinBrowserTransportMessage
 } from "../features/builtin-browser/chat-integration"
+import type { ComposerSubmission } from "../../../shared/mods/v2/composer-mentions"
 
 // ── Queued-message content builders ───────────────────────────────────────────
 // A QueuedMessage stores its parts (text / attachment XML / display prefix / skill
@@ -19,6 +20,21 @@ export function getQueuedModelContent(message: QueuedMessage): string {
   const text = formatBuiltinBrowserTransportMessage(message.text, message.builtinBrowser === true)
   const primary = `${text}${message.attachmentModelBlocks ?? ""}`.trim()
   return [primary, message.skillBlock].filter((part) => part && part.trim()).join("\n\n")
+}
+
+/** Capture the same transport parts as this exact draft; Main recomputes its attachment budget. */
+export function getQueuedComposerSubmission(message: QueuedMessage): ComposerSubmission | undefined {
+  const text = getQueuedModelContent(message)
+  if (message.pendingMentions?.length) return {
+    kind: "file-mentions", text, pendingMentions: message.pendingMentions.map(item => ({ ...item })),
+    existingUploads: (message.existingUploads ?? []).map(item => ({ ...item })),
+    messageParts: {
+      text: formatBuiltinBrowserTransportMessage(message.text, message.builtinBrowser === true),
+      skillBlock: message.skillBlock ?? "", fileOnly: message.fileOnly === true
+    }
+  }
+  return !message.attachmentModelBlocks && !message.skillBlock && !message.builtinBrowser
+    ? { kind: "plain-text", text } : undefined
 }
 
 export function getQueuedDisplayContent(message: QueuedMessage): string {

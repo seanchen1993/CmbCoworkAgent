@@ -7,6 +7,8 @@ import type { SkillLifecycleMatch } from "./registry"
 import { getSkillUseKey, type SkillActivationTrigger, type SkillUseTracker } from "./tracker"
 
 export interface SkillActivationOptions {
+  signal?: AbortSignal
+  agentId?: string
   skill: SkillLifecycleMatch
   trigger: SkillActivationTrigger
   toolName: string
@@ -69,6 +71,8 @@ function getBlockReason(result: HookResult | null, skillName: string): string | 
 
 function buildSkillContext(options: SkillActivationOptions): HookContext {
   return {
+    signal: options.signal,
+    agentId: options.agentId,
     toolName: options.toolName,
     toolArgs: options.toolArgs,
     toolResult: options.toolResult,

@@ -1,9 +1,12 @@
+import { withModsChatScope } from "../../lib/mods-chat-scope"
 import { useCallback, useState, useSyncExternalStore } from "react"
 import type { ModUiNode } from "../../../../shared/mods/types"
 import { Button } from "@/components/ui/button"
 import { getModCards, subscribeModCards } from "@/lib/mod-cards-store"
 
-export function ModCards({
+export const ModCards = withModsChatScope(ModCardsSurface)
+
+function ModCardsSurface({
   threadId,
   callId,
   slot

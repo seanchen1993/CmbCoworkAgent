@@ -86,6 +86,9 @@ import {
   type OpenResourcePreviewDetail
 } from "@/lib/resource-preview-events"
 import { useResourcePreviewRequest } from "@/lib/use-resource-preview-request"
+import { useProtectedFunctionPreview } from "@/lib/use-protected-function-preview"
+import type { ProtectedFunctionPreviewRequest } from "@/lib/protected-function-preview"
+import { ProtectedFunctionPreview } from "./ProtectedFunctionPreview"
 import { marketApi, type MarketItem } from "@/api/market"
 import type { Todo, SkillMetadata, PluginMetadata, LspConfig, LspStatus } from "@/types"
 import { SubagentCard } from "@/components/panels/SubagentPanel"
@@ -355,6 +358,8 @@ interface RightPanelProps {
   moduleMode: "work" | "preview" | "git" | "browser"
   showSystemConstraints?: boolean
   resourcePreviewRequest?: OpenResourcePreviewDetail | null
+  protectedFunctionPreviewRequest?: ProtectedFunctionPreviewRequest | null
+  onProtectedFunctionPreviewClosed?: () => void
   onResourcePreviewRequestHandled?: () => void
   listenForResourcePreview?: boolean
   onRequestPreviewMode?: () => void
@@ -527,6 +532,8 @@ export function RightPanel({
   moduleMode,
   showSystemConstraints = false,
   resourcePreviewRequest = null,
+  protectedFunctionPreviewRequest = null,
+  onProtectedFunctionPreviewClosed,
   onResourcePreviewRequestHandled,
   listenForResourcePreview = true,
   onRequestPreviewMode,
@@ -556,6 +563,15 @@ export function RightPanel({
   const { request: localPreviewRequest, clear: clearLocalPreviewRequest } =
     useResourcePreviewRequest(currentThreadId, listenForResourcePreview)
   const activeResourcePreviewRequest = resourcePreviewRequest ?? localPreviewRequest
+  const { request: localProtectedPreview, clear: clearProtectedPreview } =
+    useProtectedFunctionPreview(currentThreadId, listenForResourcePreview, onRequestPreviewMode)
+  const protectedPreview = protectedFunctionPreviewRequest ?? localProtectedPreview
+  const currentProtectedPreview = protectedPreview?.threadId === currentThreadId
+    ? protectedPreview : null
+  const closeProtectedPreview = useCallback(() => {
+    clearProtectedPreview()
+    onProtectedFunctionPreviewClosed?.()
+  }, [clearProtectedPreview, onProtectedFunctionPreviewClosed])
   const handleResourcePreviewRequestHandled = useCallback(() => {
     clearLocalPreviewRequest()
     onResourcePreviewRequestHandled?.()
@@ -1430,6 +1446,7 @@ export function RightPanel({
       return
     }
     latestPreviewIntentIdRef.current = intentId
+    closeProtectedPreview()
     const shouldUseExternalAuthorization = Boolean(
       externalPreviewGrant &&
         !resolveResourcePreviewPaths(
@@ -1465,8 +1482,16 @@ export function RightPanel({
     activeResourcePreviewRequest,
     handleResourcePreviewRequestHandled,
     replacePreviewExternalAuthorization,
-    workspacePath
+    workspacePath,
+    closeProtectedPreview
   ])
+
+  useEffect(() => {
+    if (!currentProtectedPreview) return
+    // A protected snapshot must never fall back to this panel's older raw file reader.
+    setPreviewPath(null)
+    replacePreviewExternalAuthorization(null)
+  }, [currentProtectedPreview, replacePreviewExternalAuthorization])
 
   useEffect(() => {
     if (moduleMode !== "preview" || !previewPathForCurrentThread) {
@@ -2070,7 +2095,10 @@ export function RightPanel({
             data-testid="resource-preview-surface"
             className="flex min-h-0 flex-1 flex-col bg-background-elevated"
           >
-            {previewPathForCurrentThread ? (
+            {currentProtectedPreview ? (
+              <ProtectedFunctionPreview key={`${currentProtectedPreview.threadId}:${currentProtectedPreview.preview.receipt}`}
+                request={currentProtectedPreview} onClose={closeProtectedPreview} />
+            ) : previewPathForCurrentThread ? (
               <ResourcePreview
                 filePath={previewPathForCurrentThread}
                 workspacePathKind={previewWorkspacePathKind}

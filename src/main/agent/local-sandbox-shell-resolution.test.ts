@@ -38,8 +38,10 @@ beforeEach(() => {
     _sandboxShellPromise: null
   })
   Object.defineProperty(process, "platform", { value: "win32", configurable: true })
-  vi.spyOn(path, "join").mockImplementation(path.win32.join)
-  vi.spyOn(path, "basename").mockImplementation(path.win32.basename)
+  const originalJoin = path.win32.join
+  const originalBasename = path.win32.basename
+  vi.spyOn(path, "join").mockImplementation(originalJoin)
+  vi.spyOn(path, "basename").mockImplementation(originalBasename)
   vi.stubEnv("SHELL", "")
   vi.stubEnv("GIT_BASH_PATH", "")
   vi.stubEnv("COMSPEC", cmd)

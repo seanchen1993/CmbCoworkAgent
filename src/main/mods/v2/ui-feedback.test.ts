@@ -3,6 +3,15 @@ import { FunctionUiFeedback } from "./ui-feedback"
 
 afterEach(() => vi.useRealTimers())
 
+it("keeps an unpresented toast queued beyond its duration", () => {
+  vi.useFakeTimers()
+  const feedback = new FunctionUiFeedback(() => {})
+  feedback.set("one", "ui.toast", { text: "not yet seen", timeoutMs: 200 })
+  vi.advanceTimersByTime(1000)
+  expect(feedback.snapshot().map((row) => row.text)).toEqual(["not yet seen"])
+  feedback.close()
+})
+
 it("replaces and clears only the caller status while preserving other plugins", () => {
   const feedback = new FunctionUiFeedback(() => {})
   feedback.set("one", "ui.status", { text: "first" })
@@ -20,10 +29,67 @@ it("expires toasts without polling and never expires pinned status", () => {
   const feedback = new FunctionUiFeedback(changed)
   feedback.set("one", "ui.status", { text: "pinned" })
   feedback.set("one", "ui.toast", { text: "temporary", timeoutMs: 200 })
+  feedback.present(
+    feedback
+      .snapshot()
+      .filter((row) => row.kind === "toast")
+      .map((row) => row.id),
+    [],
+    [],
+    false
+  )
   vi.advanceTimersByTime(250)
   expect(feedback.snapshot().map((row) => row.text)).toEqual(["pinned"])
   expect(changed).toHaveBeenCalled()
   expect(vi.getTimerCount()).toBe(0)
+  feedback.close()
+})
+
+it("pauses all callers for hold, hiding and hovering without resetting remaining time", () => {
+  vi.useFakeTimers()
+  const feedback = new FunctionUiFeedback(() => {})
+  feedback.set("one", "ui.toast", { text: "first", timeoutMs: 200 })
+  feedback.set("two", "ui.toast", { text: "second", timeoutMs: 200 })
+  const ids = feedback.snapshot().map((row) => row.id)
+  feedback.present(ids, [], [], false)
+  vi.advanceTimersByTime(50)
+  feedback.present(ids, [], [], true)
+  vi.advanceTimersByTime(1000)
+  expect(feedback.snapshot()).toHaveLength(2)
+  feedback.present(ids, [ids[0]], [], false)
+  vi.advanceTimersByTime(151)
+  expect(feedback.snapshot().map((row) => row.text)).toEqual(["first"])
+  feedback.present([ids[0]], [], [], false)
+  vi.advanceTimersByTime(100)
+  feedback.pause()
+  vi.advanceTimersByTime(1000)
+  expect(feedback.snapshot()).toHaveLength(1)
+  feedback.present([ids[0]], [], [], false)
+  vi.advanceTimersByTime(51)
+  expect(feedback.snapshot()).toEqual([])
+  feedback.close()
+})
+
+it("dismisses only transient ids and never removes pinned status", () => {
+  const feedback = new FunctionUiFeedback(() => {})
+  feedback.set("one", "ui.status", { text: "pinned" })
+  feedback.set("one", "ui.toast", { text: "first" })
+  feedback.set("two", "ui.toast", { text: "second" })
+  const rows = feedback.snapshot()
+  feedback.present([], [], [rows[0].id, rows[1].id], true)
+  expect(feedback.snapshot().map((row) => row.text)).toEqual(["pinned", "second"])
+  feedback.close()
+})
+
+it("zero duration waits until its first presentation and expires without polling", () => {
+  vi.useFakeTimers()
+  const feedback = new FunctionUiFeedback(() => {})
+  feedback.set("one", "ui.toast", { text: "zero", timeoutMs: 0 })
+  vi.advanceTimersByTime(100)
+  expect(feedback.snapshot()).toHaveLength(1)
+  feedback.present([feedback.snapshot()[0].id], [], [], false)
+  vi.advanceTimersByTime(1)
+  expect(feedback.snapshot()).toEqual([])
   feedback.close()
 })
 
@@ -49,7 +115,7 @@ it.each([
   ["ui.toast", { text: "x", timeoutMs: 60001 }],
   ["ui.status", { text: 1 }],
   ["ui.status", { text: "x", plugin: "victim" }],
-  ["ui.toast", { text: "x".repeat(10001) }]
+  ["ui.toast", { text: [] }]
 ])("rejects invalid %s output without modifying the snapshot", (method, value) => {
   const feedback = new FunctionUiFeedback(() => {})
   expect(() => feedback.set("one", method as "ui.toast", value)).toThrow()
@@ -67,5 +133,18 @@ it("bounds UTF-8 publication size while retaining pinned status under a multibyt
   const rows = feedback.snapshot()
   expect(Buffer.byteLength(JSON.stringify(rows))).toBeLessThanOrEqual(512 * 1024)
   expect(rows.filter((row) => row.kind === "status")).toHaveLength(8)
+  feedback.close()
+})
+
+it("accepts long feedback and stores a bounded well-formed display copy", () => {
+  const feedback = new FunctionUiFeedback(() => {})
+  const text = `${"x".repeat(9999)}🙂${"界".repeat(20000)}`
+  feedback.set("one", "ui.status", { text })
+  feedback.set("two", "ui.toast", { text })
+  expect(feedback.snapshot().map(row => row.text))
+    .toEqual([`${"x".repeat(9999)}\uFFFD`, `${"x".repeat(9999)}\uFFFD`])
+  expect(text).toHaveLength(30001)
+  feedback.set("one", "ui.status", {})
+  expect(feedback.snapshot()).toHaveLength(1)
   feedback.close()
 })

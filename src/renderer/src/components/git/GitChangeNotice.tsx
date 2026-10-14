@@ -36,6 +36,9 @@ export function useGitChangeNoticeListener(
 ): void {
   const enabled = useAppStore((state) => state.gitChangeNoticeEnabled)
   const setPending = useAppStore((state) => state.setGitChangeNoticePending)
+  const applySetting = useAppStore(state => state.applyGitChangeNoticeSetting)
+
+  useEffect(() => window.electron.onGitChangeNoticeSetting?.(applySetting), [applySetting])
 
   useEffect(() => {
     if (!enabled) return

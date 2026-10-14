@@ -21,6 +21,18 @@ afterEach(() => {
   vi.restoreAllMocks()
 })
 
+it("a held admission ACK cannot enter guest after its monotonic deadline", async () => {
+  const runtime = await guest('on("command.run",async($)=>({text:await $.session.id()}))')
+  const methods: string[] = []
+  await expect(runtime.invoke("0", {}, async method => {
+    methods.push(method)
+    if (method === "invoke.admitted") await new Promise(resolve => setTimeout(resolve, 12))
+    return { value: "wrong" }
+  }, { ...options, admission: true, timeoutMs: 2 })).rejects.toThrow("MODS_BUDGET_EXCEEDED")
+  expect(methods).toEqual(["invoke.admitted"])
+  expect(runtime.stats.frames).toBe(0)
+})
+
 it("expires a pending guest even when the wall clock stops advancing", async () => {
   const runtime = await guest(`on("command.run", async () => new Promise(()=>{}))`)
   vi.spyOn(Date, "now").mockReturnValue(1)

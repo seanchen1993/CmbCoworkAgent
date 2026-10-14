@@ -6,6 +6,7 @@ import type {
 } from "../../shared/harness-board-types"
 import type { HarnessSessionContextInjectionSource } from "../../shared/harness-board-types"
 import type { PluginMetadata } from "../types"
+import type { CatalogRuntimeSource } from "./project-runtime/catalog-source"
 
 export const HARNESS_CATALOG_DEFAULT_PAGE_SIZE = 24
 export const HARNESS_CATALOG_MAX_PAGE_SIZE = 64
@@ -72,6 +73,7 @@ export interface HarnessCatalogReadRequest {
 }
 
 export interface HarnessProjectContextReadRequest {
+  runtimeSource?: CatalogRuntimeSource
   type: "read-project-contexts"
   requestId: number
   projectStorePath: string
@@ -85,6 +87,7 @@ export interface HarnessProjectContextReadRequest {
 }
 
 export interface HarnessDialogTipsReadRequest {
+  runtimeSource?: CatalogRuntimeSource
   type: "read-dialog-tips"
   requestId: number
   projectStorePath: string

@@ -142,17 +142,46 @@ it.each(["answer", "cancel", "parent-cancel", "error", "retry", "revision", "ref
       isBusy: (threadId) => !!getLocalThreadRunLease(threadId),
       onIdle: (listener) => onLocalThreadRunLeaseReleased((lease) => listener(lease.threadId))
     })
+    let runtimeAuthority: Parameters<ModsManager["measureFunctionSession"]>[0] | undefined
+    let calls = 0
+    let measured = 0
+    const updateFunctionSessionMessages = vi.fn<ModsManager["updateFunctionSessionMessages"]>()
+    const measureFunctionSession = vi.fn<ModsManager["measureFunctionSession"]>(
+      async (authority, signal) => {
+        expect(authority).toBe(runtimeAuthority)
+        authority.assertLive()
+        expect(signal).toBeInstanceOf(AbortSignal)
+        if (!signal) throw new Error("ACTUAL_GRAPH_SIGNAL_REQUIRED")
+        signal.throwIfAborted()
+        const update = updateFunctionSessionMessages.mock.calls.at(-1)
+        if (!update) throw new Error("ACTUAL_GRAPH_STATE_REQUIRED")
+        expect(update[0]).toBe(authority)
+        const answer = update[1].at(-1)
+        if (!(answer instanceof AIMessage)) throw new Error("ACTUAL_GRAPH_ANSWER_REQUIRED")
+        expect(answer.content).toBe(`actual remote answer ${calls}`)
+        expect(answer.usage_metadata).toEqual({
+          input_tokens: 8,
+          output_tokens: 2,
+          total_tokens: 10
+        })
+        expect(getLocalThreadRunLease("remote")).toMatchObject({ owner: "im", runId: "physical" })
+        expect(start).toHaveBeenCalledTimes(1)
+        expect(complete).not.toHaveBeenCalled()
+        expect(fixture.close).not.toHaveBeenCalled()
+        measured++
+      }
+    )
     const manager = {
       startFunctionTurn: lifecycle.start.bind(lifecycle),
       functionTurns: lifecycle,
       releaseExpiredRuntimeBindings: vi.fn(),
       bindFunctionSession: vi.fn(),
-      updateFunctionSessionMessages: vi.fn(),
-      updateFunctionSessionRequest: vi.fn()
+      updateFunctionSessionMessages,
+      updateFunctionSessionRequest: vi.fn(),
+      measureFunctionSession
     }
     fixture.manager = manager
     fixture.revision = ending === "revision"
-    let calls = 0
     const options: CreateAgentRuntimeOptions[] = []
     class RemoteModel extends BaseChatModel {
       bindTools(): this {
@@ -192,6 +221,7 @@ it.each(["answer", "cancel", "parent-cancel", "error", "retry", "revision", "ref
         },
         input.abortSignal
       )
+      runtimeAuthority = authority
       return createAgent({
         model: new RemoteModel({}),
         tools: [],
@@ -228,6 +258,12 @@ it.each(["answer", "cancel", "parent-cancel", "error", "retry", "revision", "ref
       else
         await expect(promise).resolves.toBe(`actual remote answer ${ending === "answer" ? 1 : 2}`)
       expect(calls).toBe(ending === "retry" || ending === "revision" ? 2 : 1)
+      expect(measureFunctionSession).toHaveBeenCalledTimes(
+        ending === "revision" ? 2 : ["cancel", "parent-cancel", "error"].includes(ending) ? 0 : 1
+      )
+      expect(measured).toBe(
+        ending === "revision" ? 2 : ["cancel", "parent-cancel", "error"].includes(ending) ? 0 : 1
+      )
       expect(options.every((option) => option.modTurnRunId === "physical")).toBe(true)
       expect(options.every((option) => option.currentRunMessageQueueOwnerToken === undefined)).toBe(
         true

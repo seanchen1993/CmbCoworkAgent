@@ -162,7 +162,7 @@ describe("theme surface policy", () => {
         const source = readFileSync(file, "utf8").replace(/\{\/\*[\s\S]*?\*\/\}/g, (comment) =>
           comment.replace(/[^\n]/g, " ")
         )
-        const relativeFile = relative(RENDERER_ROOT, file)
+        const relativeFile = relative(RENDERER_ROOT, file).replace(/\\/g, "/")
 
         return source.split("\n").flatMap((line, index) =>
           [...line.matchAll(fixedSourceSurface)].flatMap((match) => {

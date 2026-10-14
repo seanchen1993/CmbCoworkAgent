@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback, useRef, memo } from "react"
+import React, { useState, useEffect, useLayoutEffect, useCallback, useRef, memo } from "react"
 import { GitBranch, Check, Loader2, RefreshCw, AlertCircle, ChevronDown } from "lucide-react"
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover"
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip"
@@ -56,8 +56,13 @@ function GitBranchSwitcherImpl({
   const [loadingBranches, setLoadingBranches] = useState(false)
   const searchInputRef = useRef<HTMLInputElement>(null)
   const selectedRepositoryPathRef = useRef<string | null>(null)
+  const detectionRequestRef = useRef(0)
+  const workspaceGenerationRef = useRef(0)
+  const workspacePathRef = useRef(workspacePath)
+  const branchListRequestRef = useRef(0)
 
   const setSelectedRepositoryPath = useCallback((repoPath: string | null): void => {
+    branchListRequestRef.current++
     selectedRepositoryPathRef.current = repoPath
     setSelectedRepositoryPathState(repoPath)
     setBranches([])
@@ -67,9 +72,13 @@ function GitBranchSwitcherImpl({
 
   // 检测是否是 git 仓库并获取当前分支
   const detectBranch = useCallback(async () => {
+    if (workspacePathRef.current !== workspacePath) return
+    const request = ++detectionRequestRef.current
+    const isCurrent = () => request === detectionRequestRef.current
     setGitRepoChecked(false)
     try {
       const result = await window.api.git.currentBranch(workspacePath ?? undefined)
+      if (!isCurrent()) return
       setIsGitRepo(result.isGitRepo)
       setIsMultiRepo(Boolean(result.isMultiRepo))
       setGitStatusError(result.error ?? null)
@@ -94,6 +103,7 @@ function GitBranchSwitcherImpl({
             }
           })
         )
+        if (!isCurrent()) return
         const previousSelected = selectedRepositoryPathRef.current
         const nextSelected =
           previousSelected && nextRepositories.some((repo) => repo.path === previousSelected)
@@ -113,6 +123,7 @@ function GitBranchSwitcherImpl({
       setCurrentBranch(result.branch)
       setIsWorktree(result.isWorktree)
     } catch (error) {
+      if (!isCurrent()) return
       setIsGitRepo(false)
       setCurrentBranch(null)
       setIsWorktree(false)
@@ -122,12 +133,17 @@ function GitBranchSwitcherImpl({
       setSelectedRepositoryPathState(null)
       setGitStatusError(error instanceof Error ? error.message : null)
     } finally {
-      setGitRepoChecked(true)
+      if (isCurrent()) setGitRepoChecked(true)
     }
   }, [workspacePath])
 
   // 加载所有分支
   const loadBranches = useCallback(async (refreshRemote = false) => {
+    if (workspacePathRef.current !== workspacePath) return
+    const generation = workspaceGenerationRef.current
+    const request = ++branchListRequestRef.current
+    const isCurrent = () => generation === workspaceGenerationRef.current &&
+      request === branchListRequestRef.current
     setLoadingBranches(true)
     setSwitchError(null)
     try {
@@ -138,6 +154,7 @@ function GitBranchSwitcherImpl({
         return
       }
       const result = await window.api.git.listBranches(targetCwd, { refreshRemote })
+      if (!isCurrent()) return
       if (result.branches.length > 0) {
         setBranches(result.branches)
       } else {
@@ -147,15 +164,20 @@ function GitBranchSwitcherImpl({
         setSwitchError(result.error || "刷新分支列表失败")
       }
     } catch {
+      if (!isCurrent()) return
       setBranches([])
       setSwitchError("刷新分支列表失败")
     } finally {
-      setLoadingBranches(false)
+      if (isCurrent()) setLoadingBranches(false)
     }
   }, [isMultiRepo, selectedRepositoryPath, workspacePath])
 
   // 挂载时检测分支，工作区路径变化时重新检测
-  useEffect(() => {
+  useLayoutEffect(() => {
+    const requests = detectionRequestRef
+    const workspaceGeneration = workspaceGenerationRef
+    const branchListRequests = branchListRequestRef
+    workspacePathRef.current = workspacePath
     setGitRepoChecked(false)
     setIsGitRepo(false)
     setCurrentBranch(null)
@@ -166,8 +188,16 @@ function GitBranchSwitcherImpl({
     setSelectedRepositoryPathState(null)
     setGitStatusError(null)
     setBranches([])
+    setSwitching(false)
+    setLoadingBranches(false)
+    setSwitchError(null)
     setOpen(false)
     detectBranch()
+    return () => {
+      requests.current++
+      workspaceGeneration.current++
+      branchListRequests.current++
+    }
   }, [workspacePath, detectBranch])
 
   useEffect(() => {
@@ -190,6 +220,7 @@ function GitBranchSwitcherImpl({
 
   const handleSwitchBranch = useCallback(
     async (branch: string) => {
+      if (workspacePathRef.current !== workspacePath) return
       if (branch === activeBranch || switching) return
       const targetCwd = isMultiRepo ? selectedRepositoryPath : workspacePath
       if (!targetCwd) {
@@ -202,8 +233,14 @@ function GitBranchSwitcherImpl({
       }
       setSwitching(true)
       setSwitchError(null)
+      const generation = workspaceGenerationRef.current
+      const isCurrent = () => generation === workspaceGenerationRef.current &&
+        (!isMultiRepo || selectedRepositoryPathRef.current === targetCwd)
       try {
         const result = await window.api.git.switchBranch(branch, targetCwd)
+        // The operation happened in its original workspace even if this view moved on.
+        if (result.success) notifyGitPanelBranchSwitched(workspacePath, branch)
+        if (!isCurrent()) return
         if (result.success) {
           if (isMultiRepo) {
             setRepositories((prev) =>
@@ -217,15 +254,15 @@ function GitBranchSwitcherImpl({
               ? `${selectedRepository.displayPath} 已切换到分支 ${branch}`
               : `已切换到分支 ${branch}`
           )
-          notifyGitPanelBranchSwitched(workspacePath, branch)
           void detectBranch()
         } else {
           setSwitchError(result.error || "切换分支失败")
         }
       } catch (err) {
+        if (!isCurrent()) return
         setSwitchError(err instanceof Error ? err.message : "切换分支失败")
       } finally {
-        setSwitching(false)
+        if (isCurrent()) setSwitching(false)
       }
     },
     [
@@ -367,6 +404,7 @@ function GitBranchSwitcherImpl({
             <label className="block text-[11px] font-medium text-muted-foreground">
               子仓库
               <select
+                disabled={busy}
                 value={selectedRepositoryPath ?? ""}
                 onChange={(event) => setSelectedRepositoryPath(event.target.value || null)}
                 className={cn(

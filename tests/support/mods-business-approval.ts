@@ -20,7 +20,9 @@ export async function approveBusinessOperation(page: Page, project: string): Pro
     )
     await fileButton.click()
   }
-  const runButton = page.getByRole("button", { name: "运行", exact: true })
+  const runButton = page
+    .getByRole("button", { name: "运行", exact: true })
+    .and(page.locator("button:not(nav button)"))
   if (await runButton.count()) {
     const command = await runButton.locator("../..").locator("pre").innerText()
     assert(

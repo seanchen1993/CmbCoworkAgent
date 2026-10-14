@@ -231,8 +231,32 @@ async function testThreadStateStoresAggregateToolCount(): Promise<void> {
   )
   assertIncludes(
     threadContext,
-    "if (!state?.subagentTranscriptBaselineReady) return null",
-    "thread context mounts the stream transport only after transcript hydration"
+    "if (!state || !actor || !initializedThreadsRef.current.has(threadId)) return null",
+    "thread context requires the original current actor before retaining a stream holder"
+  )
+  assertIncludes(
+    threadContext,
+    "!holderLifetime.canRender(",
+    "thread context retains only an initialized or actually committed stream holder"
+  )
+  assertIncludes(
+    threadContext,
+    "holderKey,\n            state.subagentTranscriptBaselineReady",
+    "thread context passes actual baseline readiness into the holder lifetime gate"
+  )
+  const holderLifetime = await readProjectFile(
+    "src/renderer/src/lib/thread-stream-holder-lifetime.ts"
+  )
+  assertIncludes(holderLifetime, "if (!actor) return false", "an absent actor cannot retain a holder")
+  assertIncludes(
+    holderLifetime,
+    "if (baselineReady) return true",
+    "the first holder still requires its actual hydrated baseline"
+  )
+  assertIncludes(
+    holderLifetime,
+    "return record?.actor === actor && record.key === key",
+    "an unknown retry baseline only retains the exact committed actor and key"
   )
   assertSourceOrder(
     threadContext,
@@ -916,8 +940,18 @@ async function testWorkerToolFlowPreservesToolErrorStatus(): Promise<void> {
   )
   assertIncludes(
     transport,
-    "...(isError && { is_error: true })",
+    "...this.toolMessageErrorFields(kwargs)",
     "focused worker transport forwards failed tool results as is_error"
+  )
+  assertIncludes(
+    transport,
+    "const presentation = resolveFunctionConversationToolErrorPresentation(kwargs)",
+    "worker tool error fields use the existing conversation error projection"
+  )
+  assertIncludes(
+    transport,
+    "return presentation === undefined ? {} : { is_error: presentation }",
+    "worker tool error fields preserve an explicit false and omit only absent status"
   )
   assertIncludes(
     workerStreamPanel,

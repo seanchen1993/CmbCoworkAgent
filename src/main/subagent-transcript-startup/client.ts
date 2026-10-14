@@ -6,7 +6,7 @@ import {
   type SubagentTranscriptStartupWorkerResponse
 } from "./protocol"
 
-type SubagentTranscriptStartupWorkerFactory = () => Promise<Worker>
+type SubagentTranscriptStartupWorkerFactory = (signal?: AbortSignal) => Promise<Worker>
 
 export const SUBAGENT_TRANSCRIPT_STARTUP_WORKER_RESOURCE_LIMITS: ResourceLimits = {
   maxOldGenerationSizeMb: 128,
@@ -32,8 +32,9 @@ export class SubagentTranscriptStartupCancelledError extends Error {
   }
 }
 
-async function createBundledWorker(): Promise<Worker> {
+async function createBundledWorker(signal?: AbortSignal): Promise<Worker> {
   const module = await import("./worker?nodeWorker")
+  if (signal?.aborted) throw new SubagentTranscriptStartupCancelledError()
   return module.default({
     name: "subagent-transcript-startup",
     resourceLimits: SUBAGENT_TRANSCRIPT_STARTUP_WORKER_RESOURCE_LIMITS
@@ -63,7 +64,7 @@ export class SubagentTranscriptStartupClient {
     if (threadId.length > 32_768 || (options.scope?.length ?? 0) > 1_024) {
       return Promise.reject(new Error("Subagent transcript startup request exceeds its string limit"))
     }
-    if (options.scope) this.activeScopes.get(options.scope)?.controller.abort()
+    if (options.scope) this.cancelScope(options.scope)
     if (
       this.workerAdmission.admittedCount >=
       SUBAGENT_TRANSCRIPT_STARTUP_MAX_WORKERS + SUBAGENT_TRANSCRIPT_STARTUP_MAX_WAITERS
@@ -92,6 +93,13 @@ export class SubagentTranscriptStartupClient {
     return active.promise
   }
 
+  cancelScope(scope: string): void {
+    if (scope.length > 1_024) {
+      throw new Error("Subagent transcript startup request exceeds its string limit")
+    }
+    this.activeScopes.get(scope)?.controller.abort()
+  }
+
   cancelThread(threadId: string): void {
     for (const active of this.activeReads) {
       if (active.threadId === threadId) active.controller.abort()
@@ -114,7 +122,8 @@ export class SubagentTranscriptStartupClient {
       () => new SubagentTranscriptStartupCancelledError()
     )
     try {
-      const worker = await this.workerFactory()
+      if (signal.aborted) throw new SubagentTranscriptStartupCancelledError()
+      const worker = await this.workerFactory(signal)
       if (signal.aborted) {
         await worker.terminate().catch(() => undefined)
         throw new SubagentTranscriptStartupCancelledError()
@@ -193,6 +202,10 @@ export function readSubagentTranscriptStartupInWorker(
 
 export function cancelSubagentTranscriptStartupRead(threadId: string): void {
   defaultClient.cancelThread(threadId)
+}
+
+export function cancelSubagentTranscriptStartupScope(scope: string): void {
+  defaultClient.cancelScope(scope)
 }
 
 export function isSubagentTranscriptStartupCancelled(error: unknown): boolean {

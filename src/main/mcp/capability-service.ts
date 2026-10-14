@@ -1,5 +1,6 @@
 import { createHash, randomUUID } from "crypto"
-import { join } from "path"
+import { realpathSync } from "node:fs"
+import { join, resolve } from "path"
 import { MultiServerMCPClient } from "@langchain/mcp-adapters"
 import { shouldSuppressInAppBrowserMcpTool } from "../browser/cdp/in-app-browser-mcp-tools"
 import { buildMcpServerConfig } from "../ipc/mcp"
@@ -12,8 +13,11 @@ import type {
   McpFallbackPolicy,
   McpCapabilityService,
   McpCapabilityTool,
-  McpInvocationResult
+  McpInvocationResult,
+  McpConnectOwner,
+  McpConnectAdmission
 } from "./capability-types"
+import { mcpConnectRefusal } from "./capability-types"
 import { resolveMcpHeaders } from "./headers"
 import { normalizeMcpInvocationResult } from "./result-utils"
 import { SchemaCache } from "./schema-cache"
@@ -24,6 +28,9 @@ import { authorizeCurrentModInput } from "../mods/manager"
 import { invokeMcpToolWithRetry } from "./invocation-retry"
 import { ModError } from "../mods/errors"
 import { beforeModToolExecution } from "../mods/execution-error"
+import type { ClawSourceEntry } from "../../shared/mods/claw"
+import { derivationVisibility, isDerivedPlugin } from "../plugins/derivation-scope"
+import { isDerivationVisibleForProjectMode } from "../../shared/skill-visibility"
 
 interface CapabilitySource {
   kind: "connector" | "plugin"
@@ -33,6 +40,7 @@ interface CapabilitySource {
   priority: number
   scope: "global" | "plugin-active" | "plugin-installed"
   pluginId?: string
+  ownerName?: string
   fallback?: McpFallbackPolicy
   serverConfig: Record<string, unknown>
 }
@@ -63,6 +71,7 @@ function toPluginSources(): CapabilitySource[] {
         priority: serverConfig.priority ?? 50,
         scope: serverConfig.scope ?? "plugin-active",
         pluginId: plugin.id,
+        ownerName: plugin.name,
         fallback: normalizeFallbackPolicy(serverConfig.fallback),
         serverConfig: buildPluginServerConfig(serverConfig, userInfo)
       })
@@ -170,6 +179,19 @@ function buildFingerprint(sources: CapabilitySource[]): string {
   return createHash("sha256").update(payload).digest("hex")
 }
 
+/** Configuration metadata only: never creates a client or projects credentials. */
+export function readConfiguredClawMcpSources(): ClawSourceEntry[] {
+  const sources = [...toConnectorSources(), ...toPluginSources()]
+  if (new Set(sources.map((source) => source.providerKey)).size !== sources.length)
+    throw new ModError("CLAW_MCP_SOURCE_AMBIGUOUS")
+  return sources.map((source) => ({
+    id: source.providerKey,
+    name: source.providerDisplayName,
+    digest: buildFingerprint([source]),
+    ...(source.pluginId ? { owner: source.ownerName ?? source.pluginId } : { owner: "全局连接器" })
+  }))
+}
+
 async function listServerTools(
   client: MultiServerMCPClient,
   providerKey: string
@@ -197,9 +219,11 @@ async function listServerTools(
 }
 
 class ManagedMcpCapabilityService implements McpCapabilityService {
+  constructor(private readonly boundDerivedPluginId?: string) {}
   private cache: CapabilityCache | null = null
   private initPromise: Promise<void> | null = null
   private readonly schemaCache = new SchemaCache()
+  private revision = 0
 
   configuredServerNames(): string[] {
     return this.readSources().map((source) => source.providerDisplayName)
@@ -229,8 +253,105 @@ class ManagedMcpCapabilityService implements McpCapabilityService {
     return this.resolveTool(idOrAlias)
   }
 
-  async invoke(idOrAlias: string, args: Record<string, unknown>): Promise<McpInvocationResult> {
+  async connectPluginServer(
+    owner: McpConnectOwner,
+    server: string,
+    signal: AbortSignal,
+    assertCurrent: () => void
+  ): Promise<McpConnectAdmission> {
+    const pluginId = owner.pluginId
+    const sourcePath = owner.sourcePath
+    const root = owner.root
+    const check = () => {
+      signal.throwIfAborted()
+      assertCurrent()
+    }
+    const refused = (reason: "unlisted" | "disabled" | "failed"): McpConnectAdmission => ({
+      value: mcpConnectRefusal(reason),
+      assertCurrent: check
+    })
+    const readOwner = () => {
+      const plugin = getPlugins().find((entry) => entry.id === pluginId)
+      if (!plugin || plugin.path !== sourcePath) return null
+      const actual = realpathSync(plugin.path)
+      const expected = resolve(root)
+      if (process.platform === "win32" ? actual.toLowerCase() !== expected.toLowerCase() : actual !== expected)
+        return null
+      return plugin
+    }
+    check()
+    let plugin: ReturnType<typeof readOwner>
+    try {
+      plugin = readOwner()
+    } catch {
+      check()
+      return refused("failed")
+    }
+    if (!plugin) return refused("unlisted")
+    if (!plugin.enabled) return refused("disabled")
+    const servers = parseMcpJsonFile(join(plugin.path, ".mcp.json"))
+    if (!servers || !Object.hasOwn(servers, server)) return refused("unlisted")
+    const providerKey = `plugin:${pluginId}/${server}`
+    const source = this.readSources().find((entry) => entry.providerKey === providerKey)
+    if (!source || source.kind !== "plugin" || source.pluginId !== pluginId)
+      return refused("failed")
+    const expectedSource = buildFingerprint([source])
+    const checkSource = () => {
+      check()
+      const currentOwner = readOwner()
+      const current = this.readSources().find((entry) => entry.providerKey === providerKey)
+      if (
+        !currentOwner?.enabled ||
+        !current ||
+        current.kind !== "plugin" ||
+        current.pluginId !== pluginId ||
+        buildFingerprint([current]) !== expectedSource
+      )
+        throw new ModError("MODS_MCP_CONTEXT_EXPIRED")
+    }
+    checkSource()
+    try {
+      await this.ensureInitialized()
+    } catch (error) {
+      checkSource()
+      if (error instanceof ModError) throw error
+      return refused("failed")
+    }
+    checkSource()
+    const connection = this.cache
+    if (!connection) return refused("failed")
+    let client: Awaited<ReturnType<MultiServerMCPClient["getClient"]>>
+    try {
+      client = await connection.client.getClient(providerKey)
+    } catch {
+      checkSource()
+      return refused("failed")
+    }
+    checkSource()
+    const transport = client?.transport
+    if (!client || !transport) return refused("failed")
+    const connectedClient = client
+    const current = () => {
+      checkSource()
+      if (
+        this.cache !== connection ||
+        buildFingerprint(this.readSources()) !== connection.fingerprint ||
+        connectedClient.transport !== transport
+      )
+        throw new ModError("MODS_MCP_CONTEXT_EXPIRED")
+    }
+    current()
+    return { value: { isConnected: true, server: providerKey }, assertCurrent: current }
+  }
+
+  async invoke(
+    idOrAlias: string,
+    args: Record<string, unknown>,
+    assertCurrent?: () => void
+  ): Promise<McpInvocationResult> {
+    assertCurrent?.()
     await this.ensureInitialized()
+    assertCurrent?.()
 
     const tool = this.resolveTool(idOrAlias)
     if (!tool) {
@@ -251,6 +372,7 @@ class ManagedMcpCapabilityService implements McpCapabilityService {
     return withRawModMcp(tool, args, async (args) => {
       await authorizeCurrentModInput(`mcp:${tool.capabilityId}`, args)
       await beforeModToolExecution(() => {
+        assertCurrent?.()
         getModCallContext()?.assertMcpTool?.(tool)
         // Approval can await UI while settings change. Never send to a replaced connection,
         // even when the server still advertises the same name and schema.
@@ -270,19 +392,23 @@ class ManagedMcpCapabilityService implements McpCapabilityService {
       }
       const signal = getModCallContext()?.signal
       const raw = await invokeMcpToolWithRetry(
-        (request) =>
-          signal
+        (request) => {
+          assertCurrent?.()
+          return signal
             ? callClient.callTool(request, undefined, { signal })
-            : callClient.callTool(request),
+            : callClient.callTool(request)
+        },
         {
           name: tool.toolName,
           arguments: args
         }
       )
+      assertCurrent?.()
 
       const result = await publishCurrentModResult(
         normalizeMcpInvocationResult(tool.capabilityId, raw)
       )
+      assertCurrent?.()
 
       try {
         if (!getModCallContext()) recordSuccessfulToolExample(tool, result)
@@ -299,6 +425,7 @@ class ManagedMcpCapabilityService implements McpCapabilityService {
       console.log(`[MCP] invalidate requested: ${reason}`)
     }
 
+    this.revision++
     const previous = this.cache
     this.cache = null
     this.schemaCache.clear()
@@ -339,7 +466,11 @@ class ManagedMcpCapabilityService implements McpCapabilityService {
   }
 
   private readSources(): CapabilitySource[] {
-    return [...toConnectorSources(), ...toPluginSources()]
+    return [...toConnectorSources(), ...toPluginSources().filter(source =>
+      isDerivationVisibleForProjectMode({ pluginId: source.pluginId,
+        ...derivationVisibility(source.pluginId ?? "") }, {
+        projectMode: Boolean(this.boundDerivedPluginId), boundPluginId: this.boundDerivedPluginId
+      }))]
   }
 
   private resolveTool(idOrAlias: string): McpCapabilityTool | null {
@@ -356,6 +487,7 @@ class ManagedMcpCapabilityService implements McpCapabilityService {
   }
 
   private async rebuild(): Promise<void> {
+    const revision = this.revision
     const sources = this.readSources()
     const fingerprint = buildFingerprint(sources)
 
@@ -429,6 +561,11 @@ class ManagedMcpCapabilityService implements McpCapabilityService {
       })
 
       const previous = this.cache
+      if (
+        this.revision !== revision ||
+        buildFingerprint(this.readSources()) !== fingerprint
+      )
+        throw new ModError("MODS_MCP_CONTEXT_EXPIRED")
       const connectionGeneration = randomUUID()
       for (const tool of tools) tool.connectionGeneration = connectionGeneration
       this.cache = {
@@ -459,6 +596,18 @@ class ManagedMcpCapabilityService implements McpCapabilityService {
 }
 
 let globalCapabilityService: ManagedMcpCapabilityService | null = null
+const derivedCapabilityServices = new Map<string, ManagedMcpCapabilityService>()
+
+/** Native project binding, captured before discovery; unbound global discovery never starts copies. */
+export function getProjectMcpCapabilityService(boundPluginId?: string): McpCapabilityService {
+  if (!boundPluginId || !isDerivedPlugin(boundPluginId)) return getGlobalMcpCapabilityService()
+  let service = derivedCapabilityServices.get(boundPluginId)
+  if (!service) {
+    service = new ManagedMcpCapabilityService(boundPluginId)
+    derivedCapabilityServices.set(boundPluginId, service)
+  }
+  return service
+}
 
 export function getGlobalMcpCapabilityService(): McpCapabilityService {
   if (!globalCapabilityService) {
@@ -468,12 +617,13 @@ export function getGlobalMcpCapabilityService(): McpCapabilityService {
 }
 
 export async function invalidateGlobalMcpCapabilityService(reason?: string): Promise<void> {
-  if (!globalCapabilityService) return
-  await globalCapabilityService.invalidate(reason)
+  await Promise.all([...derivedCapabilityServices.values(),
+    ...(globalCapabilityService ? [globalCapabilityService] : [])].map(service => service.invalidate(reason)))
 }
 
 export async function closeGlobalMcpCapabilityService(): Promise<void> {
-  if (!globalCapabilityService) return
-  await globalCapabilityService.close()
+  await Promise.all([...derivedCapabilityServices.values(),
+    ...(globalCapabilityService ? [globalCapabilityService] : [])].map(service => service.close()))
+  derivedCapabilityServices.clear()
   globalCapabilityService = null
 }

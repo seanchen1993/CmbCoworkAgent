@@ -1,0 +1,44 @@
+{
+  "actions": [
+    {
+      "id": "prepare-review",
+      "name": "Autobiz：准备单文件检视输入",
+      "description": "读取项目真实 Feature 阶段和指定文件，交给其他插件检视；不运行测试、不推进阶段。文件最多 4000 字符。",
+      "command": "kanban-prepare-review",
+      "inputSchema": {
+        "type": "object",
+        "required": ["path"],
+        "additionalProperties": false,
+        "properties": {
+          "path": {
+            "type": "string",
+            "title": "项目文件路径",
+            "description": "项目内的相对路径，例如 order-export.cjs；文件非空且不超过 4000 字符。",
+            "minLength": 1,
+            "maxLength": 240
+          },
+          "feature": {
+            "type": "string",
+            "title": "Feature ID",
+            "description": "真实 Feature 标识；项目只有一个 Feature 时可不设置。",
+            "minLength": 1,
+            "maxLength": 160
+          }
+        }
+      },
+      "outputSchema": {
+        "type": "object",
+        "required": ["feature", "checkpoint", "stage", "path", "source", "context"],
+        "additionalProperties": false,
+        "properties": {
+          "feature": { "type": "string" },
+          "checkpoint": { "type": "string" },
+          "stage": { "type": "string" },
+          "path": { "type": "string" },
+          "source": { "type": "string", "maxLength": 4000 },
+          "context": { "type": "string" }
+        }
+      }
+    }
+  ]
+}

@@ -6,6 +6,7 @@ import { FunctionPanes } from "./panes"
 import type { FunctionPaneSnapshot, FunctionUiAction } from "../../../shared/mods/v2/ui"
 import type { ModJson } from "../../../shared/mods/types"
 import { isModObject } from "../../../shared/mods/v2/contracts"
+import { ordinaryFunctionNode } from "../../../../tests/support/function-ui-node"
 
 const sessions: FunctionSession[] = []
 afterEach(async () => {
@@ -236,8 +237,8 @@ it("settles a callback awaiting focus without putting the renderer ack behind th
     'async()=>{$.ui.log(JSON.stringify(await $.ui.focus({requestId:"focus",key:"second"})))}'
   )
   const [pane] = await session.panes.snapshot()
-  const node = pane.tree.children![0]
-  if (typeof node === "string" || !node.press) throw Error("missing callback")
+  const node = ordinaryFunctionNode(pane.tree).children![0]
+  if (typeof node === "string" || node.type === "engine" || node.type === "fragment" || !node.press) throw Error("missing callback")
   const result = session.panes.act({
     pane: pane.key,
     generation: pane.generation,

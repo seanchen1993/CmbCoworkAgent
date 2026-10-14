@@ -805,6 +805,39 @@ async function testAdditionalOutputStyleContracts(): Promise<void> {
   )
 }
 
+async function testModAttachmentReminderContract(): Promise<void> {
+  const original = new ToolMessage({ content: [{ type: "text", text: "TOOL_BODY" },
+    { type: "image_url", image_url: { url: "data:image/png;base64,fixture" } }],
+    tool_call_id: "ACTUAL_CALL", id: "ACTUAL_RESULT", artifact: { source: "native" },
+    status: "success", additional_kwargs: { keep: true } })
+  const request = { messages: [original], systemMessage: new SystemMessage("BASE"),
+    runtime: { signal: new AbortController().signal } }
+  for (const body of [null, "MOD_REMINDER"] as const) {
+    const middleware = createOutputStyleTurnReminderMiddleware("concise", async text => {
+      assert(!text.includes("<system-reminder>"), "hook receives body before host framing")
+      return body
+    })
+    let sent: typeof request | undefined
+    await middleware.wrapModelCall!(request as never, async received => {
+      sent = received as unknown as typeof request
+      return {} as never
+    })
+    assert(!!sent, "native request must still reach the model")
+    const message = sent!.messages[0]
+    assert(message.tool_call_id === original.tool_call_id, "tool association survives")
+    assert(message.id === original.id && message.artifact === original.artifact,
+      "native result identity/artifact survive")
+    assert(JSON.stringify(message.content).includes("data:image/png;base64,fixture"),
+      "non-text block survives")
+    if (body === null) assert(sent === request && message === original,
+      "null removes only the new reminder and preserves the native request")
+    else assert(JSON.stringify(message.content).includes("<system-reminder>\\nMOD_REMINDER"),
+      "host wraps transformed body")
+    assert(!JSON.stringify(original.content).includes("MOD_REMINDER"),
+      "transformation never changes persistent source history")
+  }
+}
+
 function printFinalPrompt(label: string, prompt: string): void {
   console.log(`\n===== ${label} FINAL SYSTEM PROMPT BEGIN =====`)
   console.log(prompt)
@@ -1441,6 +1474,8 @@ async function run(): Promise<void> {
       await testToolStrategySubagentRequests(toolStrategy, true)
     }
     console.log("PASS tool strategy per-role task subagent requests")
+    await testModAttachmentReminderContract()
+    console.log("PASS Mods attachment preserves native tool result and history")
   })
 }
 

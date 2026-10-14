@@ -2,7 +2,9 @@ import { constants as fsConstants, type Stats } from "fs"
 import { lstat, open, realpath, stat } from "fs/promises"
 import { homedir } from "os"
 import { basename, dirname, isAbsolute, join, relative, resolve } from "path"
+import type { FunctionInstructionFile } from "../../shared/mods/v2/prompt-context"
 import type { HarnessAgentmdLoadStatusItem } from "../../shared/harness-board-types"
+import type { BuiltinInstructionEntry } from "../../shared/mods/builtin-instructions"
 
 export const DEFAULT_AGENTS_FILENAME = "AGENTS.md"
 export const LOCAL_AGENTS_OVERRIDE_FILENAME = "AGENTS.override.md"
@@ -41,6 +43,17 @@ export interface LoadedInstructionSource {
   memory_type: "User" | "Project" | "Local"
 }
 
+function instructionFiles(globalEntries: AgentsPromptEntry[],
+  projectEntries: AgentsPromptEntry[]): FunctionInstructionFile[] {
+  return [
+    ...globalEntries.map(entry => ({ path: entry.path, kind: "user" as const,
+      content: entry.content })),
+    ...projectEntries.map(entry => ({ path: entry.path,
+      kind: basename(entry.path) === LOCAL_AGENTS_OVERRIDE_FILENAME ? "local" as const :
+        "project" as const, content: entry.content }))
+  ]
+}
+
 function instructionSources(
   globalEntries: readonly AgentsPromptEntry[],
   projectEntries: readonly AgentsPromptEntry[]
@@ -63,7 +76,35 @@ interface BaseAgentsPromptResult {
   loadedPaths: string[]
   /** Actual budget-fitted content only; omitted-file placeholders are not injected instructions. */
   instructionSources?: LoadedInstructionSource[]
+  instructionFiles?: FunctionInstructionFile[]
+  /** Observes this loader's assembly only; never triggers additional discovery or reads. */
+  instructionProjection?: BuiltinInstructionEntry[]
   truncated: boolean
+}
+
+function projectInstructionAssembly(
+  workspace: string,
+  files: readonly AgentsFileReference[],
+  original: readonly AgentsPromptEntry[],
+  fitted: readonly AgentsPromptEntry[],
+  global = false
+): BuiltinInstructionEntry[] {
+  const paths = new Set([...files.map((file) => file.path), ...original.map((entry) => entry.path)])
+  return [...paths].map((path) => {
+    const entry = fitted.find((item) => item.path === path)
+    const loaded = original.some((item) => item.path === path)
+    return {
+      path,
+      layer: global ? "user" : basename(path) === LOCAL_AGENTS_OVERRIDE_FILENAME ? "local" : "project",
+      scope: global ? "当前运行的所有工作区" : dirname(path),
+      workspace,
+      delivery: entry ? entry.truncated ? "truncated" : "injected" : loaded ? "omitted" : "unknown",
+      reason: entry
+        ? entry.truncated ? "正文因读取或提示预算截断。" : "正文已加入宿主装配的上下文。"
+        : loaded ? "正文因总提示预算未加入；占位提示不等于正文。"
+          : "已发现候选来源，但未保留正文；可能为空、不可读、重复或预算不足，原因未记录。"
+    }
+  })
 }
 
 export interface AgentsPromptResult extends BaseAgentsPromptResult {
@@ -1003,6 +1044,15 @@ export async function loadAgentsPromptForWorkspace(
       totalBudgetResult.globalEntries,
       totalBudgetResult.projectEntries
     ),
+    instructionFiles: instructionFiles(
+      totalBudgetResult.globalEntries, totalBudgetResult.projectEntries
+    ),
+    instructionProjection: [
+      ...projectInstructionAssembly(cwd, globalPaths, globalResult.entries,
+        totalBudgetResult.globalEntries, true),
+      ...projectInstructionAssembly(cwd, projectPaths, projectResult.entries,
+        totalBudgetResult.projectEntries)
+    ],
     truncated: globalResult.truncated || projectResult.truncated || totalBudgetResult.truncated
   }
 }
@@ -1026,12 +1076,14 @@ export async function loadAgentsPromptForWorkspaces(
   )
   const workspacePaths = Array.from(new Set([primaryCwd, ...normalizedAdditionalWorkspacePaths]))
   const workspaceSections: WorkspaceAgentsPromptEntries[] = []
+  const discoveredWorkspaceFiles: AgentsFileReference[][] = []
+  const globalPaths = options.includeGlobal === false ? [] : await discoverGlobalAgentsFiles()
 
   const globalResult =
     options.includeGlobal === false
       ? { entries: [], truncated: false }
       : await readAgentsFilesInternal(
-          await discoverGlobalAgentsFiles(),
+          globalPaths,
           globalMaxBytes,
           GLOBAL_AGENTS_SECTION_TITLE,
           seenReadPaths
@@ -1041,6 +1093,7 @@ export async function loadAgentsPromptForWorkspaces(
   for (const cwd of workspacePaths) {
     const projectRoot = await findProjectRootByGitMarker(cwd)
     const projectPaths = await discoverAgentsFiles(projectRoot, cwd)
+    discoveredWorkspaceFiles.push(projectPaths)
     const projectResult = await readAgentsFilesInternal(
       projectPaths,
       projectMaxBytes,
@@ -1080,6 +1133,18 @@ export async function loadAgentsPromptForWorkspaces(
       totalBudgetResult.globalEntries,
       totalBudgetResult.workspaceSections.flatMap((section) => section.entries)
     ),
+    instructionFiles: instructionFiles(totalBudgetResult.globalEntries,
+      totalBudgetResult.workspaceSections.flatMap(section => section.entries)),
+    instructionProjection: [
+      ...projectInstructionAssembly(primaryCwd, globalPaths, globalResult.entries,
+        totalBudgetResult.globalEntries, true),
+      ...workspaceSections.flatMap((section, index) => projectInstructionAssembly(
+        section.cwd,
+        discoveredWorkspaceFiles[index],
+        section.entries,
+        totalBudgetResult.workspaceSections[index]?.entries ?? []
+      ))
+    ],
     loadedPaths: [
       ...promptGlobalEntries,
       ...promptWorkspaceSections.flatMap((section) => section.entries)

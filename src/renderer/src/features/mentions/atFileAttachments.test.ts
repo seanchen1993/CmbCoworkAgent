@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest"
 import {
+  collectPendingAtFileMentions,
   isMentionedWorkspaceFileForWorkspace,
   readBoundedWorkspaceMentionFile,
   retainMentionedWorkspaceFilesForWorkspace,
@@ -9,6 +10,40 @@ import {
 
 afterEach(() => {
   vi.useRealTimers()
+})
+
+describe("unread Main composer mention collection", () => {
+  it("keeps the actual typed fragment and inclusive line range without reading bytes", () => {
+    expect(collectPendingAtFileMentions({ rawMessage: "read @src/file.txt#L10-20", attachments: [],
+      mentionedFiles: [], workspacePath: "/project", maxAttachments: 3 })).toEqual({
+      pendingMentions: [{ mention: "src/file.txt#L10-20", workspacePath: "/project",
+        relativePath: "src/file.txt", filename: "file.txt", source: "typed", offset: 10, limit: 11 }],
+      countLimitHit: false, staleWorkspace: false
+    })
+  })
+  it("deduplicates a genuine selected chip against typed text and existing uploads", () => {
+    const selected = toMentionedWorkspaceFile({ id: "file.txt", displayPath: "file.txt",
+      workspaceFilePath: "/file.txt", filename: "file.txt" }, "/project")
+    const result = collectPendingAtFileMentions({ rawMessage: "@file.txt @uploaded.txt",
+      attachments: [{ filePath: "/project/uploaded.txt" }], mentionedFiles: [selected],
+      workspacePath: "/project", maxAttachments: 3 })
+    expect(result.pendingMentions).toEqual([{ mention: "file.txt", workspacePath: "/project",
+      relativePath: "/file.txt", filename: "file.txt", source: "chip" }])
+  })
+  it("rejects a stale selected workspace and preserves the shared three-file limit", () => {
+    const selected = toMentionedWorkspaceFile({ id: "file.txt", displayPath: "file.txt",
+      workspaceFilePath: "/file.txt", filename: "file.txt" }, "/old")
+    const result = collectPendingAtFileMentions({ rawMessage: "@a.txt @b.txt @c.txt",
+      attachments: [{ filePath: "/project/uploaded.txt" }], mentionedFiles: [selected],
+      workspacePath: "/project", maxAttachments: 3 })
+    expect(result.pendingMentions.map(item => item.mention)).toEqual(["a.txt", "b.txt"])
+    expect(result.staleWorkspace).toBe(true)
+    expect(result.countLimitHit).toBe(true)
+  })
+  it("leaves an invalid line range and binary mention outside the unread request", () => {
+    expect(collectPendingAtFileMentions({ rawMessage: "@a.txt#L20-10 @image.png", attachments: [],
+      mentionedFiles: [], workspacePath: "/project", maxAttachments: 3 }).pendingMentions).toEqual([])
+  })
 })
 
 describe("bounded @file attachment reads", () => {

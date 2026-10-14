@@ -1,16 +1,19 @@
-import { AIMessageChunk, HumanMessage } from "@langchain/core/messages"
+import { AIMessageChunk, HumanMessage, SystemMessage } from "@langchain/core/messages"
 import { FakeStreamingChatModel } from "@langchain/core/utils/testing"
 import { MemorySaver } from "@langchain/langgraph"
 import { createAgent } from "langchain"
 import { afterEach, expect, it, vi } from "vitest"
 import { tool } from "@langchain/core/tools"
 import { z } from "zod"
+import { ChatGenerationChunk } from "@langchain/core/outputs"
+import type { HandleLLMNewTokenCallbackFields } from "@langchain/core/callbacks/base"
 import { FunctionGuestRuntime } from "../mods/v2/guest-runtime"
 import { dispatchFunctionStream, type FunctionStreamOptions } from "../mods/v2/stream-dispatcher"
 import type { ModJson, ModObject } from "../../shared/mods/types"
-import { createModModelBoundary } from "./mods-model-boundary"
+import { createModModelBoundary, type FunctionModelStreamHost } from "./mods-model-boundary"
 import { createFunctionStepModelResolver, getModelInstance } from "./runtime"
 import { ModsManager } from "../mods/manager"
+import { ModRuntimeAuthorities } from "../mods/runtime-instance"
 import { createFunctionSessionViewMiddleware } from "./mods-session-view"
 import { queryFunctionSessionRead } from "../mods/v2/session-read-host"
 import { mkdtempSync, rmSync } from "node:fs"
@@ -22,7 +25,39 @@ afterEach(() => {
   vi.unstubAllGlobals()
 })
 
-const testAuthority = { turnId: "turn", assertLive: () => undefined } as never
+const testAuthority = { turnId: "turn", agentId: "main", assertLive: () => undefined } as never
+
+it("pins model boundary identity to the actual independent child authority", async () => {
+  const owners = new ModRuntimeAuthorities()
+  const { authority } = owners.create({
+    workspace: "/boundary-workspace",
+    threadId: "thread",
+    agentId: "flow:actual:agent:0",
+    turnId: "actual-child-turn"
+  })
+  const input = vi.fn()
+  const manager: FunctionModelStreamHost = {
+    functionModelStream: async (owner, value, core, signal) => {
+      expect(owner).toBe(authority)
+      input(value)
+      return dispatchFunctionStream([], value, { signal, core })
+    }
+  }
+  try {
+    const boundary = createModModelBoundary(
+      new FakeStreamingChatModel({ chunks: [new AIMessageChunk("actual request")] }),
+      manager,
+      authority,
+      { turnId: "wrong-turn", agentId: "main", model: "fixture" }
+    )
+    await boundary.invoke([new HumanMessage("probe")])
+    expect(input).toHaveBeenCalledWith(expect.objectContaining({
+      turnId: "actual-child-turn", agentId: "flow:actual:agent:0"
+    }))
+  } finally {
+    owners.close()
+  }
+})
 
 async function createFixture() {
   const guest = await FunctionGuestRuntime.create(`var __cmbFunctionMod={register(on){
@@ -57,7 +92,12 @@ it("routes the real createAgent model stream through Mods before callbacks and c
   const { guest, manager } = await createFixture()
   try {
     const provider = new FakeStreamingChatModel({
-      chunks: [new AIMessageChunk({ content: "RAW_MARKER" })]
+      chunks: [
+        new AIMessageChunk({
+          content: "RAW_MARKER",
+          additional_kwargs: { reasoning_content: "host reasoning" }
+        })
+      ]
     })
     const model = createModModelBoundary(provider, manager as never, testAuthority, {
       turnId: "turn",
@@ -65,6 +105,7 @@ it("routes the real createAgent model stream through Mods before callbacks and c
       agentId: "main"
     })
     const tokens: string[] = []
+    const callbackChunks: unknown[] = []
     const ends: string[] = []
     const inspect = tool(async () => "unused", {
       name: "inspect",
@@ -78,8 +119,16 @@ it("routes the real createAgent model stream through Mods before callbacks and c
         configurable: { thread_id: "mods-boundary" },
         callbacks: [
           {
-            handleLLMNewToken(token: string) {
+            handleLLMNewToken(
+              token: string,
+              _indices: unknown,
+              _runId: string,
+              _parentRunId?: string,
+              _tags?: string[],
+              fields?: HandleLLMNewTokenCallbackFields
+            ) {
               tokens.push(token)
+              callbackChunks.push(fields?.chunk)
             },
             handleLLMEnd(output: unknown) {
               ends.push(JSON.stringify(output))
@@ -97,6 +146,16 @@ it("routes the real createAgent model stream through Mods before callbacks and c
       values: unknown
     }
     expect(tokens.join("")).toBe("SAFE")
+    expect(callbackChunks).toEqual([
+      expect.objectContaining({
+        text: "SAFE",
+        message: expect.objectContaining({
+          content: "SAFE",
+          id: expect.any(String),
+          additional_kwargs: { reasoning_content: "host reasoning" }
+        })
+      })
+    ])
     expect(JSON.stringify(visible)).toContain("SAFE")
     expect(JSON.stringify(visible)).not.toContain("RAW_MARKER")
     expect(JSON.stringify(state.values)).toContain("SAFE")
@@ -106,6 +165,200 @@ it("routes the real createAgent model stream through Mods before callbacks and c
   } finally {
     guest.dispose()
   }
+})
+
+it("preserves reused provider IDs in live graph packets across empty-Mods model calls", async () => {
+  const manager = {
+    functionModelStream: (
+      _authority: unknown,
+      input: ModObject,
+      core: FunctionStreamOptions["core"],
+      signal: AbortSignal
+    ) => Promise.resolve(dispatchFunctionStream([], input, { signal, core }))
+  }
+  let invocation = 0
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async () => {
+      invocation += 1
+      const data = {
+        id: "provider-reused-741",
+        object: "chat.completion.chunk",
+        model: "fixture",
+        choices: [
+          {
+            index: 0,
+            delta: { role: "assistant", content: `checking${invocation}` },
+            finish_reason: "stop"
+          }
+        ]
+      }
+      return new Response(`data: ${JSON.stringify(data)}\n\ndata: [DONE]\n\n`, {
+        headers: { "content-type": "text/event-stream" }
+      })
+    })
+  )
+  const provider = getModelInstance(defaultModelConfig, undefined, 1)
+  const model = createModModelBoundary(provider, manager, testAuthority, {
+    turnId: "turn",
+    model: "fixture"
+  })
+  const agent = createAgent({ model, tools: [], checkpointer: new MemorySaver() })
+  const observed: Array<{ id?: string; content: unknown }> = []
+  for (const step of [1, 2]) {
+    const stream = await agent.stream(
+      { messages: [new HumanMessage(`turn ${step}`)] },
+      {
+        configurable: { thread_id: "empty-mods-reused-provider" },
+        streamMode: ["messages", "values"]
+      }
+    )
+    const live: AIMessageChunk[] = []
+    for await (const [mode, packet] of stream) {
+      if (mode === "messages" && packet[0] instanceof AIMessageChunk) live.push(packet[0])
+    }
+    const content = live.filter((chunk) => chunk.content === `checking${step}`)
+    expect(content).toHaveLength(1)
+    expect(content[0].id).toBe("provider-reused-741")
+    observed.push({ id: content[0].id, content: content[0].content })
+  }
+  expect(observed.map((row) => row.content)).toEqual(["checking1", "checking2"])
+})
+
+it.each([false, true])(
+  "keeps usage-tail identity in one provider message when text rewrite is %s",
+  async (rewrite) => {
+    const { guest, manager } = await createFixture()
+    let invocation = 0
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => {
+        invocation++
+        const common = {
+          id: `provider-usage-${invocation}`,
+          object: "chat.completion.chunk",
+          model: "fixture"
+        }
+        const events = [
+          {
+            ...common,
+            choices: [
+              {
+                index: 0,
+                delta: { role: "assistant", content: "RAW_MARKER" },
+                finish_reason: "stop"
+              }
+            ]
+          },
+          {
+            ...common,
+            choices: [],
+            usage: { prompt_tokens: 13, completion_tokens: 7, total_tokens: 20 }
+          }
+        ]
+        return new Response(
+          events.map((event) => `data: ${JSON.stringify(event)}\n\n`).join("") + "data: [DONE]\n\n",
+          { headers: { "content-type": "text/event-stream" } }
+        )
+      })
+    )
+    const passThrough: FunctionModelStreamHost = {
+      functionModelStream: (_owner, input, core, signal) =>
+        Promise.resolve(dispatchFunctionStream([], input, { core, signal }))
+    }
+    try {
+      const provider = getModelInstance(defaultModelConfig, undefined, 1)
+      const model = createModModelBoundary(
+        provider,
+        rewrite ? manager : passThrough,
+        testAuthority,
+        { turnId: "turn", model: "fixture" }
+      )
+      const agent = createAgent({ model, tools: [], checkpointer: new MemorySaver() })
+      const config = { configurable: { thread_id: `usage-tail-${rewrite}` } }
+      for (const step of [1, 2]) {
+        const stream = await agent.stream(
+          { messages: [new HumanMessage(`turn ${step}`)] },
+          {
+            ...config,
+            streamMode: ["messages", "values"]
+          }
+        )
+        const live: AIMessageChunk[] = []
+        for await (const [mode, packet] of stream) {
+          if (mode === "messages" && packet[0] instanceof AIMessageChunk) live.push(packet[0])
+        }
+        expect(new Set(live.map((chunk) => chunk.id))).toEqual(new Set([`provider-usage-${step}`]))
+        expect(live.map((chunk) => chunk.content).join("")).toBe(rewrite ? "SAFE" : "RAW_MARKER")
+        const state = (await agent.getState(config)) as unknown as {
+          values: { messages: AIMessageChunk[] }
+        }
+        const assistants = state.values.messages.filter((message) => message.getType() === "ai")
+        expect(assistants).toHaveLength(step)
+        expect(assistants.at(-1)?.id).toBe(`provider-usage-${step}`)
+        expect(assistants.at(-1)?.usage_metadata).toMatchObject({
+          input_tokens: 13,
+          output_tokens: 7,
+          total_tokens: 20
+        })
+      }
+    } finally {
+      guest.dispose()
+    }
+  }
+)
+
+it("preserves fully ID-less requests and explicitly different provider IDs", async () => {
+  const manager: FunctionModelStreamHost = {
+    functionModelStream: (_owner, input, core, signal) =>
+      Promise.resolve(dispatchFunctionStream([], input, { core, signal }))
+  }
+  const usage = { input_tokens: 13, output_tokens: 7, total_tokens: 20 }
+  const provider = (explicit: boolean) => {
+    const model = new FakeStreamingChatModel({})
+    // FakeStreamingChatModel itself discards IDs and usage; retain native chunks here.
+    vi.spyOn(model, "_streamResponseChunks").mockImplementation(async function* () {
+      const chunks = explicit
+        ? [
+            new AIMessageChunk({ content: "first", id: "provider-first" }),
+            new AIMessageChunk({ content: "second", id: "run-explicit-provider" })
+          ]
+        : [new AIMessageChunk({ content: "same answer" })]
+      chunks.push(new AIMessageChunk({ content: "", usage_metadata: usage }))
+      for (const message of chunks)
+        yield new ChatGenerationChunk({ text: String(message.content), message })
+    })
+    return model
+  }
+  const idless = createModModelBoundary(provider(false), manager, testAuthority, {
+    turnId: "turn",
+    model: "fixture"
+  })
+  const requestIds: string[] = []
+  for (const step of [1, 2]) {
+    const chunks: AIMessageChunk[] = []
+    for await (const chunk of await idless.stream([new HumanMessage(`request ${step}`)]))
+      chunks.push(chunk as AIMessageChunk)
+    expect(new Set(chunks.map((chunk) => chunk.id)).size).toBe(1)
+    expect(chunks[0].id).toMatch(/^run-/)
+    expect(chunks.at(-1)?.usage_metadata).toEqual(usage)
+    requestIds.push(chunks[0].id!)
+  }
+  expect(new Set(requestIds).size).toBe(2)
+
+  const explicit = createModModelBoundary(provider(true), manager, testAuthority, {
+    turnId: "turn",
+    model: "fixture"
+  })
+  const chunks: AIMessageChunk[] = []
+  for await (const chunk of await explicit.stream([new HumanMessage("explicit IDs")]))
+    chunks.push(chunk as AIMessageChunk)
+  expect(chunks.map((chunk) => chunk.id)).toEqual([
+    "provider-first",
+    "run-explicit-provider",
+    "run-explicit-provider"
+  ])
+  expect(chunks.at(-1)?.usage_metadata).toEqual(usage)
 })
 
 it("propagates cancellation into the provider and bypasses a disabled boundary", async () => {
@@ -427,6 +680,80 @@ function providerReply(model: string, toolCall: boolean): Response {
   )
 }
 
+it("sends changed tool descriptions to the provider while preserving execution and schemas", async () => {
+  const seen: Array<{ tools: Array<{ function: unknown }> }> = []
+  vi.stubGlobal("fetch", vi.fn(async (_url, init) => {
+    const body = JSON.parse(String(init?.body))
+    seen.push(body)
+    return providerReply(defaultModelConfig.model, seen.length === 1)
+  }))
+  const execute = vi.fn(async ({path}: {path:string}) => `read ${path}`)
+  const inspect = tool(execute, {name:"inspect",description:"original",schema:z.object({path:z.string()})})
+  const manager = {
+    ...stepManager(),
+    presentationEvent: vi.fn(async (_w, _t, _event, input) => ({description:`DIY ${input.description}`}))
+  }
+  const model = createModModelBoundary(getModelInstance(defaultModelConfig,undefined,1), manager,
+    {workspace:"/project",threadId:"thread",turnId:"turn",assertLive: () => undefined} as never,
+    {turnId:"turn",model:defaultModelConfig.model})
+  const agent = createAgent({model,tools:[inspect]})
+  await agent.invoke({messages:[new HumanMessage("inspect")]})
+  expect(execute).toHaveBeenCalledOnce()
+  expect(execute.mock.calls[0][0]).toEqual({path:"a.txt"})
+  expect(seen).toHaveLength(2)
+  for (const body of seen) {
+    expect(body.tools[0].function).toMatchObject({name:"inspect",description:"DIY original",
+      parameters:{type:"object",properties:{path:{type:"string"}},required:["path"]}})
+  }
+  expect(inspect.description).toBe("original")
+})
+
+it("sends composed sections to the real HTTP transport and previews that exact final system text", async () => {
+  const seen: Array<{ messages: Array<{ role: string; content: string }> }> = []
+  vi.stubGlobal("fetch", vi.fn(async (_url, init) => {
+    seen.push(JSON.parse(String(init?.body)))
+    return providerReply(defaultModelConfig.model, false)
+  }))
+  const preview = vi.fn()
+  const manager: FunctionModelStreamHost = { ...stepManager(), promptComposition: async (_w, _t, event, input, signal, core): Promise<ModObject> => {
+    if (event === "prompt.section") return { text: "SECTION_CHANGED" }
+    expect(input.tools).toContain("nested")
+    const out = await core(input, signal)
+    return { sections: [{ id: "policy", text: "COMPOSE_POLICY", scope: "shared" }, ...(out.sections as ModObject[])] }
+  } }
+  const model = createModModelBoundary(getModelInstance(defaultModelConfig, undefined, 1), manager,
+    { workspace: "/project", threadId: "thread", turnId: "turn", assertLive: () => {} } as never,
+    { turnId: "turn", model: defaultModelConfig.model, onFinalPrompt: preview })
+    .bindTools!([{ type: "function", function: { name: "nested", description: "Nested tool",
+      parameters: { type: "object", properties: {} } } }])
+  await model.invoke([new SystemMessage("OLD_BODY"), new HumanMessage("keep-user")])
+  expect(seen).toHaveLength(1)
+  expect(seen[0].messages[0].content).toBe("COMPOSE_POLICY\n\nSECTION_CHANGED")
+  expect(JSON.stringify(seen[0].messages)).not.toContain("OLD_BODY")
+  expect(seen[0].messages[1].content).toBe("keep-user")
+  expect(preview).toHaveBeenCalledWith("COMPOSE_POLICY\n\nSECTION_CHANGED")
+})
+
+it("checks the final composed prompt budget before activating or sending the selected model", async () => {
+  const provider = new FakeStreamingChatModel({ responses: [new AIMessageChunk("unused")] })
+  const send = vi.spyOn(provider, "stream")
+  const activate = vi.fn(() => () => {})
+  const preview = vi.fn()
+  const manager: FunctionModelStreamHost = { ...stepManager(), promptComposition: async () => ({ sections: [
+    { id: "large", text: "large ".repeat(300), scope: "session" }
+  ] }) }
+  const model = createModModelBoundary(provider, manager,
+    { workspace: "/project", threadId: "thread", turnId: "turn", assertLive: () => {} } as never,
+    { turnId: "turn", model: "small", onFinalPrompt: preview }, {
+      resolve: async () => ({ provider, model: "small", contextWindow: 2048, inputBudget: 10 }), activate
+    })
+  await expect(model.invoke([new SystemMessage("short"), new HumanMessage("hi")]))
+    .rejects.toThrow("MODS_MODEL_INPUT_BUDGET")
+  expect(send).not.toHaveBeenCalled()
+  expect(activate).not.toHaveBeenCalled()
+  expect(preview).not.toHaveBeenCalled()
+})
+
 it("selects a real provider for one createAgent tool step and restores the default with truthful session usage", async () => {
   const guest = await FunctionGuestRuntime.create(`var __cmbFunctionMod={register(on){
     on("turn.step",async function*($,e,next){
@@ -638,8 +965,9 @@ it.each(["gpt-fixture", "minimax-fixture", "unknown-provider"])(
       expect(chunk).toBeInstanceOf(AIMessageChunk)
     expect(fetch).toHaveBeenCalledOnce()
     fetch.mockClear()
-    await expect(resolve({ model: modelName, effort: "high" }, new AbortController().signal))
-      .rejects.toThrow("MODS_MODEL_EFFORT_UNSUPPORTED")
+    await expect(
+      resolve({ model: modelName, effort: "high" }, new AbortController().signal)
+    ).rejects.toThrow("MODS_MODEL_EFFORT_UNSUPPORTED")
     expect(fetch).not.toHaveBeenCalled()
   }
 )

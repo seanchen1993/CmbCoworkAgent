@@ -1,4 +1,8 @@
 import type { ContentBlock, Message } from "@/types"
+import { conflictingFunctionConversationTranscriptStamps, functionConversationTranscriptFields,
+  mergeFunctionConversationTranscriptStamp, readFunctionConversationTranscriptStamp,
+  type FunctionConversationTranscriptStamp
+} from "../../../shared/mods/v2/conversation-transcript"
 import { mergeCheckpointAuthorityTranscriptMessages } from "../../../shared/checkpoint-transcript"
 import {
   areMessageReplayContentsCompatible,
@@ -7,6 +11,7 @@ import {
   getMessageProviderOccurrence,
   getMessageProviderOccurrenceIdentity,
   getMessageProviderSourceId,
+  hasIndependentProviderRenderId,
   normalizeAppendedMessageIds,
   normalizeCompleteMessageIds,
   normalizeCompleteSnapshotMessageIds,
@@ -16,6 +21,8 @@ import {
 } from "../../../shared/message-role-collision"
 
 export interface LiveStreamMessage {
+  function_row?: FunctionConversationTranscriptStamp
+  function_row_invalid?: true
   id?: string
   provider_source_id?: string
   provider_occurrence?: number
@@ -224,6 +231,20 @@ function mergeLiveStreamMessageFields(
   existing: LiveStreamMessage | undefined,
   incoming: LiveStreamMessage
 ): LiveStreamMessage {
+  const incomingFields = functionConversationTranscriptFields(incoming, incoming.id,
+    liveStreamMessageRole(incoming.type))
+  const existingFields = functionConversationTranscriptFields(existing, existing?.id,
+    liveStreamMessageRole(existing?.type))
+  if (existing && conflictingFunctionConversationTranscriptStamps(existing, incoming))
+    return existing
+  if (incomingFields.function_row_invalid || existingFields.function_row_invalid)
+    return { ...(existing ?? incoming), function_row_invalid: true }
+  const stamp = mergeFunctionConversationTranscriptStamp(existing, incoming)
+  if (existing && stamp && (!existing.id || !incoming.id || existing.id !== incoming.id ||
+    liveStreamMessageRole(existing.type) !== liveStreamMessageRole(incoming.type) ||
+    getMessageProviderOccurrenceIdentity({ ...existing, id: existing.id }) !==
+      getMessageProviderOccurrenceIdentity({ ...incoming, id: incoming.id })))
+    return existing
   const existingContentPriority = existing?.content_priority ?? 0
   const incomingContentPriority = incoming.content_priority ?? 0
   const hasToolCallsField = Object.prototype.hasOwnProperty.call(incoming, "tool_calls")
@@ -236,6 +257,7 @@ function mergeLiveStreamMessageFields(
   return {
     ...existing,
     ...incoming,
+    ...(stamp ? { function_row: stamp } : {}),
     content: shouldUseIncomingContent
       ? incoming.content
       : (existing?.content ?? incoming.content),
@@ -627,6 +649,7 @@ export function messageToLiveStreamIdentity(
 ): LiveStreamMessage & { id: string } {
   return {
     id: message.id,
+    ...functionConversationTranscriptFields(message, message.id, message.role),
     ...(message.provider_source_id ? { provider_source_id: message.provider_source_id } : {}),
     ...(message.provider_occurrence
       ? { provider_occurrence: message.provider_occurrence }
@@ -678,7 +701,43 @@ export function normalizeAppendedLiveStreamMessageIds(
   const baseline = normalizeCompleteMessageIds(
     previous.filter(hasLiveStreamMessageId) as Array<LiveStreamMessage & { id: string }>
   )
-  const identifiedIncoming = incoming.filter(hasLiveStreamMessageId)
+  const baselineById = new Map<string, Array<LiveStreamMessage & { id: string }>>()
+  for (const message of previous.filter(hasLiveStreamMessageId)) {
+    const matches = baselineById.get(message.id) ?? []
+    matches.push(message)
+    baselineById.set(message.id, matches)
+  }
+  const identifiedIncoming = incoming.filter(hasLiveStreamMessageId).map((message) => {
+    // The SDK can echo a saved UUID without its provider tuple after append ACK.
+    // Recover only missing tuple fields from that exact, unambiguous native row.
+    // This is display identity recovery, never native provenance or content promotion.
+    if (message.function_row !== undefined || message.function_row_invalid !== undefined) {
+      return message
+    }
+    const matches = baselineById.get(message.id)
+    if (matches?.length !== 1) return message
+    const candidate = matches[0]
+    const role = liveStreamMessageRole(message.type)
+    if (
+      liveStreamMessageRole(candidate.type) !== role ||
+      !functionConversationTranscriptFields(candidate, candidate.id, role).function_row
+    ) {
+      return message
+    }
+    const source = getMessageProviderSourceId(candidate)
+    const occurrence = getMessageProviderOccurrence(candidate) ?? 1
+    if (
+      (message.provider_source_id !== undefined && message.provider_source_id !== source) ||
+      (message.provider_occurrence !== undefined && message.provider_occurrence !== occurrence)
+    ) {
+      return message
+    }
+    return {
+      ...message,
+      provider_source_id: message.provider_source_id ?? source,
+      provider_occurrence: message.provider_occurrence ?? occurrence
+    }
+  })
   const completeIncoming = normalizeCompleteMessageIds(
     normalizeMessageRoleCollisionIds(baseline, identifiedIncoming)
   )
@@ -766,6 +825,15 @@ export function normalizeAppendedLiveStreamMessageIds(
       ? getMessageProviderOccurrence(rawIncomingMessage)
       : undefined
     const canUseCandidate = (currentCandidate: (typeof candidates)[number]): boolean => {
+      const candidateMessage = currentCandidate.message
+      const native = readFunctionConversationTranscriptStamp(candidateMessage) ??
+        readFunctionConversationTranscriptStamp(message)
+      if (functionConversationTranscriptFields(candidateMessage, candidateMessage.id,
+        liveStreamMessageRole(candidateMessage.type)).function_row_invalid ||
+        functionConversationTranscriptFields(message, message.id,
+          liveStreamMessageRole(message.type)).function_row_invalid ||
+        (native && (candidateMessage.id !== message.id || native.uuid !== message.id ||
+          conflictingFunctionConversationTranscriptStamps(candidateMessage, message)))) return false
       if (liveStreamMessageRole(message.type) === "tool") {
         if (
           currentCandidate.message.tool_call_id &&
@@ -880,7 +948,9 @@ export function normalizeAppendedLiveStreamMessageIds(
         (appendedCountByIdentity.get(key) ?? 0) +
         1
     let renderId = message.id
-    if (occurrence > 1 || occupiedIds.has(renderId)) {
+    const independentNewOccurrence = hasIndependentProviderRenderId(message) &&
+      !allCandidates.some((currentCandidate) => currentCandidate.occurrence === occurrence)
+    if ((occurrence > 1 && !independentNewOccurrence) || occupiedIds.has(renderId)) {
       renderId =
         occurrence === 1
           ? buildMessageRoleCollisionId(sourceId, role)
@@ -905,6 +975,74 @@ export function normalizeAppendedLiveStreamMessageIds(
 }
 
 export function mergeLiveStreamCommitMessagesDetailed(
+  previous: readonly Message[],
+  incoming: readonly Message[]
+): LiveStreamCommitMergeResult {
+  const nativeFields = (message: Message) =>
+    functionConversationTranscriptFields(message, message.id, message.role)
+  if ([...previous, ...incoming].some(message => {
+    const fields = nativeFields(message)
+    return fields.function_row || fields.function_row_invalid
+  })) {
+    let messages = [...previous]
+    const resolvedIncoming: Message[] = []
+    let ordinary: Message[] = []
+    const flushOrdinary = (): void => {
+      if (!ordinary.length) return
+      const result = mergeOrdinaryLiveStreamCommitMessagesDetailed(messages, ordinary)
+      messages = result.messages
+      resolvedIncoming.push(...result.resolvedIncoming)
+      ordinary = []
+    }
+    for (const message of incoming) {
+      const fields = nativeFields(message)
+      if (fields.function_row || fields.function_row_invalid) flushOrdinary()
+      const keptExact = messages.find(candidate => candidate.id === message.id &&
+        (nativeFields(candidate).function_row || nativeFields(candidate).function_row_invalid))
+      if (keptExact && (nativeFields(keptExact).function_row_invalid ||
+        getMessageProviderOccurrenceIdentity(keptExact) !==
+          getMessageProviderOccurrenceIdentity(message))) {
+        flushOrdinary()
+        resolvedIncoming.push({ ...message, function_row_invalid: true })
+        continue
+      }
+      const matches = messages.filter(candidate =>
+        getMessageProviderOccurrenceIdentity(candidate) ===
+          getMessageProviderOccurrenceIdentity(message))
+      const canonical = matches.filter(candidate => nativeFields(candidate).function_row)
+      if (fields.function_row || fields.function_row_invalid) {
+        const exact = messages.find(candidate => candidate.id === message.id)
+        const conflict = fields.function_row_invalid || (exact &&
+          (exact.role !== message.role ||
+            getMessageProviderOccurrenceIdentity(exact) !==
+              getMessageProviderOccurrenceIdentity(message) ||
+            conflictingFunctionConversationTranscriptStamps(exact, message)))
+        if (conflict) {
+          // Preserve the rejected input for the durable fence; never repair its identity.
+          resolvedIncoming.push({ ...message, function_row_invalid: true })
+          continue
+        }
+        const replace = exact ?? (matches.length === 1 && canonical.length === 0 &&
+          !nativeFields(matches[0]).function_row_invalid ? matches[0] : undefined)
+        const kept = exact && nativeFields(exact).function_row ? exact : message
+        if (replace) messages[messages.indexOf(replace)] = kept
+        else messages.push(kept)
+        resolvedIncoming.push(kept)
+      } else if (matches.length === 1 && canonical.length === 1) {
+        flushOrdinary()
+        // A live echo resolves to the kept row, never overwrites it or creates a DB alias.
+        resolvedIncoming.push(canonical[0])
+      } else {
+        ordinary.push(message)
+      }
+    }
+    flushOrdinary()
+    return { messages, resolvedIncoming }
+  }
+  return mergeOrdinaryLiveStreamCommitMessagesDetailed(previous, incoming)
+}
+
+function mergeOrdinaryLiveStreamCommitMessagesDetailed(
   previous: readonly Message[],
   incoming: readonly Message[]
 ): LiveStreamCommitMergeResult {
@@ -1030,6 +1168,17 @@ export function resolveCommittedLiveStreamMessages(
   const unresolved: Message[] = []
   for (const pendingMessage of pending) {
     const exact = exactByRoleId.get(`${pendingMessage.role}\u0000${pendingMessage.id}`)
+    const native = functionConversationTranscriptFields(
+      pendingMessage, pendingMessage.id, pendingMessage.role
+    )
+    if (native.function_row_invalid || (exact &&
+      getMessageProviderOccurrenceIdentity(exact) !==
+        getMessageProviderOccurrenceIdentity(pendingMessage)) || (native.function_row &&
+      (!exact || conflictingFunctionConversationTranscriptStamps(exact, pendingMessage) ||
+        !functionConversationTranscriptFields(exact, exact.id, exact.role).function_row))) {
+      unresolved.push(pendingMessage)
+      continue
+    }
     const providerMatch = byProviderOccurrence.get(
       getMessageProviderOccurrenceIdentity(pendingMessage)
     )

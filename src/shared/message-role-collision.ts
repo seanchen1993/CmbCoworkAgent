@@ -1,4 +1,6 @@
 import { mergeContent, type MessageContent } from "@langchain/core/messages"
+import { conflictingFunctionConversationTranscriptStamps, functionConversationTranscriptFields,
+  readFunctionConversationTranscriptStamp } from "./mods/v2/conversation-transcript"
 
 export interface RoleCollisionMessage {
   id: string
@@ -384,6 +386,20 @@ function isInternalMessageIdForRole(message: RoleCollisionMessage): boolean {
   )
 }
 
+/** A separate supplied display ID is data, not a native provenance or append proof. */
+export function hasIndependentProviderRenderId(message: RoleCollisionMessage): boolean {
+  const source = Object.getOwnPropertyDescriptor(message, "provider_source_id")
+  const occurrence = Object.getOwnPropertyDescriptor(message, "provider_occurrence")
+  const id = message.id.trim()
+  return Boolean(
+    source && "value" in source && typeof source.value === "string" && source.value.trim() &&
+    occurrence && "value" in occurrence && typeof occurrence.value === "number" &&
+    Number.isInteger(occurrence.value) && occurrence.value >= 1 && id &&
+    id !== source.value.trim() && !parseMessageRoleCollisionId(id) &&
+    !parseMessageSameRoleDuplicateId(id)
+  )
+}
+
 function messageHasToolCallId(
   message: RoleCollisionMessage,
   toolCallId: string | undefined
@@ -456,6 +472,15 @@ export function normalizeCompleteMessageIds<T extends RoleCollisionMessage>(
 
   return crossRoleNormalized.map((message) => {
     const role = normalizedMessageRole(message)
+    const nativeFields = functionConversationTranscriptFields(message, message.id, role)
+    if (nativeFields.function_row_invalid) return { ...message, function_row_invalid: true }
+    if (nativeFields.function_row) {
+      // A host UUID already identifies one exact native occurrence; provider replay aliases
+      // must not manufacture a second occurrence or alter its captured provider tuple.
+      if (occupiedIds.has(message.id)) return { ...message, function_row_invalid: true }
+      occupiedIds.add(message.id)
+      return message
+    }
     const sourceId = getMessageProviderSourceId(message)
     const identity = providerRoleIdentity(message)
     const declaredOccurrence = getMessageProviderOccurrence(message)
@@ -730,6 +755,16 @@ export function normalizeAppendedMessageIds<T extends RoleCollisionMessage>(
       candidateIndexes.indexOf(candidateIndex) + 1
 
     const canUpdateCandidate = (candidateIndex: number): boolean => {
+      const candidate = transcript[candidateIndex]
+      const native = readFunctionConversationTranscriptStamp(candidate) ??
+        readFunctionConversationTranscriptStamp(rawMessage)
+      if (native && (candidate.id !== rawMessage.id ||
+        native.uuid !== rawMessage.id ||
+        conflictingFunctionConversationTranscriptStamps(candidate, rawMessage) ||
+        functionConversationTranscriptFields(candidate, candidate.id,
+          normalizedMessageRole(candidate)).function_row_invalid ||
+        functionConversationTranscriptFields(rawMessage, rawMessage.id, role).function_row_invalid))
+        return false
       if (role !== "tool") return true
       const candidateToolCallId = transcript[candidateIndex].tool_call_id
       if (
@@ -939,12 +974,18 @@ export function normalizeAppendedMessageIds<T extends RoleCollisionMessage>(
         )
         const declaredOccurrence = getMessageProviderOccurrence(rawMessage)
         providerOccurrence = declaredOccurrence ?? highestExistingOccurrence + 1
-        renderId = buildAvailableProviderOccurrenceId(
-          sourceId,
-          role,
-          providerOccurrence,
-          occupiedIds
-        )
+        const independentNewOccurrence = hasIndependentProviderRenderId(rawMessage) &&
+          !occupiedIds.has(renderId) &&
+          !candidateIndexes.some((index) =>
+            candidateProviderOccurrence(index) === getMessageProviderOccurrence(rawMessage))
+        if (!independentNewOccurrence) {
+          renderId = buildAvailableProviderOccurrenceId(
+            sourceId,
+            role,
+            providerOccurrence,
+            occupiedIds
+          )
+        }
       } else if (occupiedIds.has(renderId)) {
         providerOccurrence ??= 1
         renderId = buildAvailableProviderOccurrenceId(
@@ -980,16 +1021,24 @@ export function preserveAssistantReasoningByRoleCollisionIdentity<
         (message) => normalizedMessageRole(message) === "assistant" && Boolean(message.reasoning)
       )
       .map(
-        (message) => [getMessageProviderOccurrenceIdentity(message), message.reasoning!] as const
+        (message) => [getMessageProviderOccurrenceIdentity(message), message] as const
       )
   )
 
   return incomingMessages.map((message) => {
     if (normalizedMessageRole(message) !== "assistant" || message.reasoning) return message
-    const existingReasoning = existingReasoningByIdentity.get(
+    const existing = existingReasoningByIdentity.get(
       getMessageProviderOccurrenceIdentity(message)
     )
-    return existingReasoning ? ({ ...message, reasoning: existingReasoning } as T) : message
+    if (!existing || conflictingFunctionConversationTranscriptStamps(existing, message)) return message
+    const stamp = readFunctionConversationTranscriptStamp(existing) ??
+      readFunctionConversationTranscriptStamp(message)
+    if (stamp && (existing.id !== message.id || stamp.uuid !== message.id ||
+      functionConversationTranscriptFields(existing, existing.id,
+        normalizedMessageRole(existing)).function_row_invalid ||
+      functionConversationTranscriptFields(message, message.id,
+        normalizedMessageRole(message)).function_row_invalid)) return message
+    return { ...message, reasoning: existing.reasoning } as T
   })
 }
 
@@ -1006,9 +1055,16 @@ export function normalizeMessageRoleCollisionIds<T extends RoleCollisionMessage>
 
   const roleByRenderId = new Map<string, string>()
   const renderIdBySourceRole = new Map<string, string>()
+  const nativeById = new Map<string, RoleCollisionMessage>()
 
   const register = (message: RoleCollisionMessage): void => {
     const role = normalizedMessageRole(message)
+    const fields = functionConversationTranscriptFields(message, message.id, role)
+    if (fields.function_row || fields.function_row_invalid) {
+      nativeById.set(message.id, message)
+      roleByRenderId.set(message.id, role)
+      return
+    }
     const sourceId = getMessageRoleCollisionSourceId(message)
     const identity = collisionIdentity(sourceId, role)
     if (renderIdBySourceRole.has(identity)) return
@@ -1035,6 +1091,16 @@ export function normalizeMessageRoleCollisionIds<T extends RoleCollisionMessage>
 
   return incomingMessages.map((message) => {
     const role = normalizedMessageRole(message)
+    const fields = functionConversationTranscriptFields(message, message.id, role)
+    if (fields.function_row || fields.function_row_invalid) {
+      const existing = nativeById.get(message.id)
+      const invalid = fields.function_row_invalid ||
+        (existing && conflictingFunctionConversationTranscriptStamps(existing, message)) ||
+        (roleByRenderId.has(message.id) && roleByRenderId.get(message.id) !== role)
+      const result = invalid ? { ...message, function_row_invalid: true as const } : message
+      register(result)
+      return result as T
+    }
     const messageId = message.id.trim()
     if (
       isInternalMessageIdForRole(message) &&

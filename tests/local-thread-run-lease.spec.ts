@@ -276,8 +276,12 @@ function testRuntimeEntryPointArchitecture(): void {
   )
   assertSourceOrder(
     standardTurn,
-    ["assertLocalThreadRunLease(", "return createAgentRuntime(options)"],
-    "shared Runtime creation follows the lease assertion"
+    [
+      "assertLocalThreadRunLease(",
+      "captureRuntimePluginSourceThreadGuard(options.threadId",
+      "return createAgentRuntime({ ...options, onModelBoundary:"
+    ],
+    "shared Runtime creation follows the physical lease and opaque source assertions"
   )
 
   for (const [label, source, owner, runId] of [

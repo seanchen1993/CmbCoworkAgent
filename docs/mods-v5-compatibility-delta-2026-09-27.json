@@ -1,0 +1,40 @@
+{
+  "reference": "Claude Code 2.1.283 embedded declarations and previously extracted implementation",
+  "profileClaim": "Bounded desktop adapters; not complete upstream parity",
+  "plan": "mods-v5-full-parity-feasibility-plan-2026-09-27.md",
+  "implemented": [
+    {
+      "name": "registration-provider-diagnostics",
+      "scope": "registration-events-only",
+      "behavior": "Distinguishes package validity from installed production event providers. Exact metadata-only or missing events are unsupported. Broad observers report partial coverage without disabling working events. Unknown custom providers and empty registrations remain unverified.",
+      "limits": "Does not analyze all SDK calls, matcher reachability, cross-plugin engine availability, business outcome or complete 2.1.283 declarations.",
+      "files": ["src/shared/mods/v2/compatibility.ts", "src/shared/mods/v2/compatibility-catalog.ts", "src/main/mods/devtools/check.ts"]
+    },
+    {
+      "name": "explicit-desktop-compatibility-check",
+      "behavior": "Checks immutable source digest in an isolated registration VM on explicit request. Does not grant authority or invoke handlers. Serializes checks and rejects stale source/workspace; invalidation and shutdown stop the probe.",
+      "limits": "Module initialization and register functions are evaluated under the existing VM limits. No automatic probe runs while polling status.",
+      "files": ["src/main/mods/v2/manager.ts", "src/main/ipc/mods.ts", "src/renderer/src/components/customize/FunctionCompatibilityCheck.tsx"]
+    },
+    {
+      "name": "URL-and-URLSearchParams",
+      "availability": "bounded",
+      "implementationStatus": "partial",
+      "behavior": "Locked whatwg-url 14.2.0 pure guest implementation, same-VM lazy initialization and reproducibly generated resource with dependency licenses. Hooks and Client share standard URL parsing, mutable properties and live iterable parameters, with existing CPU and memory limits.",
+      "limits": [
+        "Blob/object URLs are unavailable.",
+        "Not a complete WPT run or differential run against Claude.",
+        "Library rejects leading digit plus RTL IDNA hostname accepted by Node 22/24; the difference is explicitly tested.",
+        "Very large inputs remain subject to existing VM and UTF-8 budgets."
+      ],
+      "files": ["src/main/mods/v2/guest-url.ts", "src/main/mods/v2/guest-url-source.ts", "scripts/generate-mods-url.mjs"]
+    }
+  ],
+  "remaining": [
+    "Remaining standard globals: AbortController/Signal, structuredClone, crypto, performance and managed timers",
+    "Module-owned resource lifetimes and independent stream protocol before process.run/spawn, clock.after/every and http.fetch",
+    "Real inbox-based session.send/receive, agent.spawn and missing native prompt/config/classic event providers",
+    "Type registry, manifest.types, supported declaration generation and further JSX/client surfaces",
+    "Pinned upstream black-box conformance, packaging across platforms, full desktop latency and long-soak acceptance"
+  ]
+}

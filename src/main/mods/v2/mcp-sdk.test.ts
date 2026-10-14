@@ -1,8 +1,15 @@
 import { afterEach, expect, it, vi } from "vitest"
-import { functionMcpInput, functionMcpResult, resolveFunctionMcpTool } from "./mcp-sdk"
+import {
+  functionMcpInput,
+  functionMcpResult,
+  functionMcpConnectInput,
+  validateFunctionMcpConnectResult,
+  resolveFunctionMcpTool
+} from "./mcp-sdk"
 import { FunctionSession, SESSION_CAPABILITIES, type FunctionSessionHost } from "./session"
 import { FunctionGuestRuntime } from "./guest-runtime"
 import type { McpCapabilityTool } from "../../mcp/capability-types"
+import type { ModJson, ModObject } from "../../../shared/mods/types"
 
 const tool: McpCapabilityTool = {
   capabilityId: "cap",
@@ -51,10 +58,11 @@ it("bounds plain arguments and keeps raw content order, structured data and actu
   expect(() => functionMcpResult({ raw: {}, contentBlocks: content, isError: false })).toThrow()
 })
 
-async function session(body: string, host: Partial<FunctionSessionHost> = {}) {
+async function session(body: string, host: Partial<FunctionSessionHost> = {},
+  operation = '$.mcp.call("mail","send",JSON.parse(e.args||"{}"))', experimentalConnect = false) {
   const guest = await FunctionGuestRuntime.create(`var __cmbFunctionMod={register(on){
     on("session.start",async($,e,next)=>{await $.command.register({name:"mcp",description:"MCP"});return next(e)});
-    on("command.run",{command:"mcp"},async($,e)=>({text:JSON.stringify(await $.mcp.call("mail","send",JSON.parse(e.args||"{}")))}));
+    on("command.run",{command:"mcp"},async($,e)=>({text:JSON.stringify(await ${operation})}));
     ${body}
   }}`)
   const value = new FunctionSession(
@@ -64,7 +72,7 @@ async function session(body: string, host: Partial<FunctionSessionHost> = {}) {
         root: "/plugin",
         tier: "user",
         guest,
-        capabilities: [...SESSION_CAPABILITIES]
+        capabilities: [...SESSION_CAPABILITIES, ...(experimentalConnect ? ["mcp.connect"] : [])]
       }
     ],
     {
@@ -132,4 +140,110 @@ it("does not retry a lost host reply after next or accept malformed result envel
   expect(callMcp).toHaveBeenCalledOnce()
   const invalid = await session("", { callMcp: async () => ({ content: [], isError: "false" }) })
   await expect(invalid.run("mcp", "{}")).rejects.toThrow("MODS_MCP_RESULT")
+})
+
+it("validates connect data without accepting configurations or invented success fields", () => {
+  expect(functionMcpConnectInput({ server: "own" })).toEqual({ server: "own" })
+  const invalidInputs: ModObject[] = [
+    { server: "" }, { server: "x".repeat(257) }, { server: "own", url: "https://other" }
+  ]
+  for (const value of invalidInputs)
+    expect(() => functionMcpConnectInput(value)).toThrow("MODS_MCP_CONNECT_ARGUMENTS")
+  const validResults: ModJson[] = [
+    { isConnected: true, server: "plugin:id/own" },
+    { isConnected: false, reason: "policy", message: "not selected" }
+  ]
+  for (const value of validResults)
+    expect(() => validateFunctionMcpConnectResult(value)).not.toThrow()
+  const invalidResults: ModJson[] = [
+    { isConnected: true }, { isConnected: true, server: "own", client: {} },
+    { isConnected: false, reason: ["auth"], message: "invalid" },
+    { isConnected: false, reason: "unknown", message: "invalid" }
+  ]
+  for (const value of invalidResults)
+    expect(() => validateFunctionMcpConnectResult(value)).toThrow("MODS_MCP_CONNECT_RESULT")
+})
+
+it("uses canonical server keys without falling through to another display-name provider", () => {
+  const owned = { ...tool, providerKey: "plugin:own/server", toolName: "read" }
+  const disguised = { ...tool, providerKey: "plugin:other/server",
+    providerAlias: "plugin:own/server", providerDisplayName: "plugin:own/server" }
+  expect(resolveFunctionMcpTool([owned, disguised], "plugin:own/server", "read")).toEqual(owned)
+  expect(() => resolveFunctionMcpTool([owned, disguised], "plugin:own/server", "send"))
+    .toThrow("MODS_MCP_TOOL_UNAVAILABLE")
+  expect(() => resolveFunctionMcpTool([disguised], "plugin:own/server", "send"))
+    .toThrow("MODS_MCP_TOOL_UNAVAILABLE")
+  const legacy = { ...tool, providerAlias: "plugin:mail", providerDisplayName: "plugin:mail" }
+  expect(resolveFunctionMcpTool([legacy], "plugin:mail", "send")).toEqual(legacy)
+  expect(resolveFunctionMcpTool([legacy], "plugin_mail", "send")).toEqual(legacy)
+})
+
+it("keeps connect middleware, nested SDK work and the final guard in one host scope", async () => {
+  let inside = false
+  const guards = vi.fn(() => { expect(inside).toBe(true) })
+  const queries: string[] = []
+  const connectMcp: NonNullable<FunctionSessionHost["connectMcp"]> = async (_, signal, run) => {
+    inside = true
+    try {
+      return await run(async input => {
+        signal.throwIfAborted()
+        queries.push(String(input.server))
+        return { value: { isConnected: true, server: "plugin:demo/own" }, assertCurrent: guards }
+      })
+    } finally { inside = false }
+  }
+  const callMcp: NonNullable<FunctionSessionHost["callMcp"]> = async () => {
+    expect(inside).toBe(true)
+    return { content: [], isError: false }
+  }
+  const value = await session(`on("mcp.connect",async($,e,next)=>{
+    if(next.origin.plugin!=="demo")throw Error("wrong origin");
+    const result=await next(e);await $.mcp.call("mail","send",{});return result
+  });`, { connectMcp, callMcp }, '$.mcp.connect("own")', true)
+  expect(JSON.parse(String((await value.run("mcp", "{}")).text)))
+    .toEqual({ isConnected: true, server: "plugin:demo/own" })
+  expect(queries).toEqual(["own"])
+  expect(guards).toHaveBeenCalled()
+  expect(inside).toBe(false)
+})
+
+it("rejects a connect hook's success when the actual connection core never ran", async () => {
+  const query = vi.fn(async () => ({
+    value: { isConnected: true as const, server: "plugin:demo/own" }, assertCurrent: () => {}
+  }))
+  const value = await session(
+    'on("mcp.connect",()=>({value:{isConnected:true,server:"plugin:demo/own"}}));',
+    { connectMcp: async (_, _signal, run) => run(query) },
+    '(async()=>{try{return await $.mcp.connect("own")}catch(error){return {error:String(error)}}})()',
+    true
+  )
+  expect(JSON.parse(String((await value.run("mcp", "{}")).text)).error)
+    .toContain("MODS_MCP_CONNECT_RESULT")
+  expect(query).not.toHaveBeenCalled()
+})
+
+it("checks connection invalidation after middleware finishes, without publishing late success", async () => {
+  let live = true
+  const check = () => { if (!live) throw Error("MODS_MCP_CONTEXT_EXPIRED") }
+  const value = await session('on("mcp.connect",async(_,e,next)=>{const r=await next(e);return r});', {
+    connectMcp: async (_, _signal, run) => {
+      const result = await run(async () => ({
+        value: { isConnected: true, server: "plugin:demo/own" },
+        assertCurrent: () => { check(); live = false }
+      }))
+      return result
+    }
+  }, '(async()=>{try{return await $.mcp.connect("own")}catch(error){return {error:String(error)}}})()', true)
+  expect(JSON.parse(String((await value.run("mcp", "{}")).text)).error)
+    .toContain("MODS_MCP_CONTEXT_EXPIRED")
+})
+
+it("keeps the unverified connection SDK out of the main release default guest", async () => {
+  const connectMcp = vi.fn<NonNullable<FunctionSessionHost["connectMcp"]>>()
+  const value = await session("", { connectMcp },
+    '(async()=>{try{return await $.mcp.connect("own")}catch(error){return {error:String(error)}}})()')
+  expect(JSON.parse(String((await value.run("mcp", "{}")).text)).error).toContain("not a function")
+  expect(connectMcp).not.toHaveBeenCalled()
+  expect(SESSION_CAPABILITIES).not.toContain("mcp.connect")
+  expect(SESSION_CAPABILITIES).toContain("mcp.call")
 })

@@ -16,6 +16,10 @@ const windowsSafeCommandsSource = readFileSync(
   "utf8"
 )
 const runtimeSource = readFileSync(new URL("../src/main/agent/runtime.ts", import.meta.url), "utf8")
+const codexSandboxBinarySource = readFileSync(
+  new URL("../src/main/agent/codex-sandbox-binary.ts", import.meta.url),
+  "utf8"
+)
 const workflowEngineSource = readFileSync(
   new URL("../src/main/agent/workflow/engine.ts", import.meta.url),
   "utf8"
@@ -1546,8 +1550,8 @@ test("sandbox execute safety checks do not synchronously spawn helper processes"
 test("sandbox-adjacent runtime startup avoids synchronous filesystem probes", () => {
   const runtimeResourceSection = sectionBetween(
     runtimeSource,
-    "async function ensureCodexExe(",
-    "  const enabledHooks = getEnabledHooks(workspacePath)"
+    "  let resourceBase: string",
+    "  const baseHooks = getEnabledHooks(workspacePath)"
   )
   const codeExecHelperSection = sectionBetween(
     codeExecRunnerSource,
@@ -1566,6 +1570,21 @@ test("sandbox-adjacent runtime startup avoids synchronous filesystem probes", ()
     runtimeResourceSection,
     forbiddenSyncFs,
     "sandbox runtime resource/codex.exe checks should use async fs APIs"
+  )
+  assert.doesNotMatch(
+    codexSandboxBinarySource,
+    forbiddenSyncFs,
+    "the extracted codex.exe helper must keep asynchronous filesystem access"
+  )
+  assert.match(
+    runtimeSource,
+    /import \{ ensureCodexExe \} from "\.\/codex-sandbox-binary"/,
+    "runtime must use the extracted executable helper"
+  )
+  assert.match(
+    runtimeResourceSection,
+    /if \(process\.platform === "win32"\) await ensureCodexExe\(codexExePath\)/,
+    "Windows runtime must await executable extraction before starting the sandbox"
   )
   assert.doesNotMatch(
     codeExecRunnerSource,
@@ -1840,7 +1859,7 @@ test("workflow notification backlog drains: ack kicks the next pending run", () 
   )
   assert.match(
     workflowRunManagerSource,
-    /kickNextPendingNotificationAsync[\s\S]*?await this\.findPendingNotificationAsync\(workspacePath, threadId\)[\s\S]*?broadcast\(threadId, \{ type: "workflow_notification"/,
+    /kickNextPendingNotificationAsync[\s\S]*?await this\.findPendingNotificationAsync\(workspacePath, threadId\)[\s\S]*?broadcast\(threadId, \{\s*type: "workflow_notification"/,
     "the async kick re-broadcasts the next undelivered run's notification"
   )
   assert.match(
@@ -2061,8 +2080,13 @@ test("user-pasted V1 workflow marker is de-weaponized, not swallowed (#5)", () =
   )
   assert.match(
     agentIpcSource,
-    /displayContent: neutralizeWorkflowPlumbingUserText\(/,
+    /displayContent: allowExplicitSkillFromMessage\s*\? neutralizeWorkflowPlumbingUserText\(visibleText\) : visibleText/,
     "current-run guided messages apply the same visible transcript guard"
+  )
+  assert.match(
+    agentIpcSource,
+    /!allowExplicitSkillFromMessage[\s\S]{0,120}isWorkflowPlumbingTranscriptContent\(submittedText\)/,
+    "Mods literal admission rejects internal plumbing before bypassing legacy neutralization"
   )
 })
 
@@ -2724,7 +2748,7 @@ test("workflow notification is at-least-once: delivered persisted only on SUCCES
   )
   assert.match(
     agentIpcSource,
-    /await workflowRunManager\.claimPendingNotificationAsync\(\s*workspacePath,\s*threadId\s*\)/,
+    /await workflowRunManager\.claimPendingNotificationAsync\(\s*workspacePath,\s*threadId,\s*\{ owner: backgroundNotificationOwner \}\s*\)/,
     "notification turn uses the atomic async claim"
   )
   const notificationClaimStart = agentIpcSource.indexOf(
@@ -2941,8 +2965,8 @@ test("workflow state gates switch-to-normal, and thread delete clears tool-concu
   )
   assert.match(
     workflowSubagentSource,
-    /if \(\(!retryable && !schemaRetry\) \|\| attempt >= WORKFLOW_SUBAGENT_MAX_RUNS\) break/,
-    "schema retry shares the bounded MAX_RUNS budget (one extra attempt)"
+    /const maxRuns = request\.singleAttempt \? 1 : WORKFLOW_SUBAGENT_MAX_RUNS[\s\S]*?if \(\(!retryable && !schemaRetry\) \|\| attempt >= maxRuns\) break/,
+    "schema retry retains the legacy bounded budget; native flows explicitly request one attempt"
   )
   // #9: thread delete drops the thread's tool-concurrency locks so the module-level
   // map doesn't keep one idle lock per deleted thread for the process lifetime.

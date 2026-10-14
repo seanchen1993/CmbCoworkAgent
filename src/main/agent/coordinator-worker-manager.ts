@@ -1,5 +1,6 @@
 import { mkdir, open, readFile, readdir, rename, rm, writeFile } from "fs/promises"
-import { statSync } from "fs"
+import { realpathSync, statSync } from "fs"
+import { AsyncLocalStorage } from "node:async_hooks"
 import path from "path"
 import {
   coordinatorFileMatchKey,
@@ -15,6 +16,45 @@ import type { CoordinatorSelectedSkill } from "./coordinator-mode"
 import { emitAppAttention } from "../app-attention-events"
 import { getWorkflowRunWallClockMs } from "./workflow/types"
 import type { BackgroundNotificationOwner } from "../../shared/internal-notification-turn"
+import { getThreadCore } from "../db"
+import {
+  captureThreadIncarnation,
+  matchesThreadIncarnation,
+  type ThreadIncarnation
+} from "../services/thread-incarnation"
+import { ModError } from "../mods/errors"
+import { withFunctionTransportExecution } from "../mods/v2/host-call"
+import type { CoordinatorWorkerModsContext } from "./coordinator-worker-mods-context"
+
+interface WorkerModsEntry {
+  readonly view: CoordinatorWorkerModsContext
+  active: boolean
+}
+
+const workerModsEntries = new AsyncLocalStorage<WorkerModsEntry>()
+
+/** Only the matching actual run may expose its read-only attribution. */
+export function readCoordinatorWorkerModsContext(
+  threadId: string
+): CoordinatorWorkerModsContext | undefined {
+  const entry = workerModsEntries.getStore()
+  if (!entry || entry.view.workerThreadId !== threadId) return undefined
+  entry.view.assertCurrent()
+  return entry.view
+}
+
+function workerModsWorkspace(workspace: string): string {
+  const actual = realpathSync(workspace)
+  return process.platform === "win32" ? actual.toLowerCase() : actual
+}
+
+function workerModsParentWorkspace(row: NonNullable<ReturnType<typeof getThreadCore>>): string | undefined {
+  const metadata = row.metadata ? JSON.parse(row.metadata) : undefined
+  if (!metadata || typeof metadata.workspacePath !== "string" ||
+    metadata.remoteState === "historical" ||
+    (metadata.targetKind === "inbox" && metadata.remoteReadOnly === true)) return undefined
+  return workerModsWorkspace(metadata.workspacePath)
+}
 
 export type CoordinatorWorkerRole = "implementer" | "verifier"
 export type CoordinatorWorkerStatus = "running" | "completed" | "failed" | "cancelled"
@@ -1631,6 +1671,36 @@ export class CoordinatorWorkerManager {
     const normalized = normalizeThreadId(parentThreadId)
     this.pruneInMemoryWorkerHistory(normalized)
     return Array.from(this.getParentMap(normalized)?.values() ?? []).map(toSnapshot)
+  }
+
+  /** Read attribution for a retained worker, including terminal and restored records. */
+  captureWorkerCheckpointRead(workerThreadId: string): {
+    readonly parentThreadId: string
+    readonly workerThreadId: string
+    readonly workspacePath: string
+    readonly assertCurrent: () => void
+  } | undefined {
+    for (const [parentThreadId, records] of this.workersByParent) {
+      for (const [workerId, record] of records) {
+        if (record.workerThreadId !== workerThreadId) continue
+        const workspacePath = record.workspacePath
+        const directory = record.restoreDirectoryIncarnation
+        const runVersion = record.runVersion
+        const currentRun = record.currentRun
+        const assertCurrent = () => {
+          if (record.discarded || this.workersByParent.get(parentThreadId) !== records ||
+            records.get(workerId) !== record || record.parentThreadId !== parentThreadId ||
+            record.workerId !== workerId || record.workerThreadId !== workerThreadId ||
+            record.workspacePath !== workspacePath || record.restoreDirectoryIncarnation !== directory ||
+            record.runVersion !== runVersion || record.currentRun !== currentRun)
+            throw Error("MODS_CONVERSATION_DISPLAY_SOURCE_INVALID")
+          this.assertCurrentRestoreDirectoryIncarnation(record)
+        }
+        assertCurrent()
+        return Object.freeze({ parentThreadId, workerThreadId, workspacePath, assertCurrent })
+      }
+    }
+    return undefined
   }
 
   hasRunningWorkers(): boolean {
@@ -3501,6 +3571,31 @@ export class CoordinatorWorkerManager {
     }
     parentSignal?.addEventListener("abort", onParentAbort, { once: true })
 
+    const original = {
+      parentThreadId: record.parentThreadId,
+      workerId: record.workerId,
+      workerThreadId: record.workerThreadId,
+      workspacePath: record.workspacePath,
+      restoreDirectoryIncarnation: record.restoreDirectoryIncarnation,
+      parentMap: this.workersByParent.get(record.parentThreadId)
+    }
+    let parentIncarnation: ThreadIncarnation | undefined = undefined
+    let workspace: string | undefined = undefined
+    try {
+      const parent = getThreadCore(original.parentThreadId)
+      const actualWorkspace = workerModsWorkspace(original.workspacePath)
+      if (parent && workerModsParentWorkspace(parent) === actualWorkspace) {
+        const incarnation = captureThreadIncarnation(parent)
+        if (Number.isFinite(incarnation.legacyCreatedAt) &&
+          matchesThreadIncarnation(parent, incarnation)) {
+          parentIncarnation = incarnation
+          workspace = actualWorkspace
+        }
+      }
+    } catch {
+      // Standalone worker callers need no AppDB or Mods directory; preserve their runner.
+    }
+
     const runPromise = (async () => {
       const isCurrentRun = (): boolean =>
         record.runVersion === runVersion && record.currentRun === runPromise
@@ -3510,7 +3605,7 @@ export class CoordinatorWorkerManager {
         if (abortController.signal.aborted || record.status !== "running") {
           throw abortController.signal.reason ?? new DOMException("Worker cancelled.", "AbortError")
         }
-        const result = await runner({
+        const input: CoordinatorWorkerRunInput = {
           parentThreadId: record.parentThreadId,
           workerId: record.workerId,
           workerThreadId: record.workerThreadId,
@@ -3526,7 +3621,54 @@ export class CoordinatorWorkerManager {
             if (!isCurrentRun()) return
             this.recordProgress(record, event)
           }
-        })
+        }
+        let result: CoordinatorWorkerRunResult
+        if (!parentIncarnation || workspace === undefined) {
+          result = await runner(input)
+        } else {
+          const incarnation = parentIncarnation
+          const actualWorkspace = workspace
+          let entry: WorkerModsEntry
+          const view: CoordinatorWorkerModsContext = Object.freeze({
+            workerThreadId: original.workerThreadId,
+            parentThreadId: original.parentThreadId,
+            workspace: actualWorkspace,
+            signal: abortController.signal,
+            assertCurrent: () => {
+              if (!entry.active) throw new ModError("MODS_CALL_SCOPE_EXPIRED")
+              abortController.signal.throwIfAborted()
+              if (!isCurrentRun() || record.discarded || record.status !== "running" ||
+                record.abortController !== abortController ||
+                record.parentThreadId !== original.parentThreadId ||
+                record.workerId !== original.workerId ||
+                record.workerThreadId !== original.workerThreadId ||
+                record.workspacePath !== original.workspacePath ||
+                record.restoreDirectoryIncarnation !== original.restoreDirectoryIncarnation ||
+                this.workersByParent.get(original.parentThreadId) !== original.parentMap ||
+                original.parentMap?.get(original.workerId) !== record)
+                throw new ModError("MODS_CALL_SCOPE_CHANGED")
+              this.assertCurrentRestoreDirectoryIncarnation(record)
+              const parent = getThreadCore(original.parentThreadId)
+              if (!matchesThreadIncarnation(parent, incarnation) || !parent ||
+                workerModsParentWorkspace(parent) !== actualWorkspace ||
+                workerModsWorkspace(original.workspacePath) !== actualWorkspace)
+                throw new ModError("MODS_CALL_SCOPE_CHANGED")
+            }
+          })
+          entry = { view, active: true }
+          try {
+            view.assertCurrent()
+            result = await workerModsEntries.run(entry, () => withFunctionTransportExecution({
+              workspace: actualWorkspace,
+              threadId: original.workerThreadId,
+              userInitiated: false,
+              leased: false,
+              immediate: false
+            }, () => runner(input)))
+          } finally {
+            entry.active = false
+          }
+        }
 
         if (!isCurrentRun()) return
         const timestamp = nowIso()

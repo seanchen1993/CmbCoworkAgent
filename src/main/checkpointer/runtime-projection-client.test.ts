@@ -946,6 +946,34 @@ describe("checkpoint runtime projection worker", () => {
     )
   })
 
+  it("keeps valid and malformed Function source facts through real oversized SQL/worker projection", async () => {
+    const stamp = { conversationId: "actual", branchId: "branch", uuid: "note", sequence: 1,
+      door: "note", messageType: "user", isMeta: true, origin: { kind: "plugin", name: "P" } }
+    const threadId = "function-oversized-projection"
+    const { databasePath } = await seedLegacyInlineFixture({ threadId, messages: [
+      { id: ["langchain_core", "messages", "HumanMessage"], kwargs: { id: "note",
+        content: "[Starting active goal]\n" + "x".repeat(128 * 1024),
+        additional_kwargs: { function_row: stamp } } },
+      { id: ["langchain_core", "messages", "HumanMessage"], kwargs: { id: "corrupt",
+        content: "x".repeat(128 * 1024), additional_kwargs: { function_row: null } } },
+      { id: ["langchain_core", "messages", "HumanMessage"], kwargs: { id: "conflicting",
+        content: "x".repeat(128 * 1024), additional_kwargs: {
+          function_row: { ...stamp, uuid: "conflicting", branchId: "different" }
+        } }, additional_kwargs: { function_row: { ...stamp, uuid: "conflicting" } } }
+    ] })
+    const tuple = await createClient().readLatestTuple(databasePath, threadId, "", {
+      messageLimit: 10, messageByteBudget: 1024 * 1024
+    }) as { checkpoint: { channel_values: { messages: Array<{
+      id: string; additional_kwargs: Record<string, unknown>
+    }> } } }
+    const messages = tuple.checkpoint.channel_values.messages
+    expect(messages).toHaveLength(3)
+    expect(messages[0].additional_kwargs.function_row).toEqual(stamp)
+    expect(messages[1].additional_kwargs.function_row_invalid).toBe(true)
+    expect(messages[2].additional_kwargs.function_row_invalid).toBe(true)
+    expect(messages[1].additional_kwargs).not.toHaveProperty("function_row")
+  })
+
   it("rejects an external checkpoint until its snapshot schema is published", async () => {
     const directory = mkdtempSync(join(tmpdir(), "cmb-runtime-projection-missing-snapshot-"))
     temporaryDirectories.push(directory)

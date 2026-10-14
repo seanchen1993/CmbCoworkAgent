@@ -456,7 +456,13 @@ function coordinatorWorkerRestoreIndexWorkerMain(): void {
 }
 
 async function createRestoreIndexWorker(): Promise<Worker> {
-  return new Worker(`(${coordinatorWorkerRestoreIndexWorkerMain.toString()})()`, {
+  // tsx keepNames adds this helper inside the scanner; toString omits the module helper.
+  const source = [
+    "const __name = (target, value) =>",
+    "  Object.defineProperty(target, 'name', { value, configurable: true });",
+    `(${coordinatorWorkerRestoreIndexWorkerMain.toString()})()`
+  ].join("\n")
+  return new Worker(source, {
     eval: true,
     name: "coordinator-worker-restore-index",
     resourceLimits: COORDINATOR_WORKER_RESTORE_WORKER_RESOURCE_LIMITS

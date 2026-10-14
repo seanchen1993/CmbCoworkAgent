@@ -363,7 +363,7 @@ async function testWorkspaceApprovalIsSingleUseAndAudited(): Promise<void> {
       "approval outbox drain"
     )
     const text = context.deliveryText(request.id)
-    assert(text.includes("写入文件：src/billing.ts"))
+    assert(text.includes(`写入文件：${join("src", "billing.ts")}`))
     assert(text.includes("/批准 A1B2C3"))
     assert(text.includes("/拒绝 A1B2C3"))
     // The prompt is the only thing the person holding it can go on. It must not
@@ -393,7 +393,7 @@ async function testWorkspaceApprovalIsSingleUseAndAudited(): Promise<void> {
     assert(result.includes("一次性批准"))
     assert.deepEqual(decisions, [{ type: "approve", tool_call_id: request.tool_call.id }])
     assert.equal(context.audits.getByRequestId(request.id)?.decision, "approve")
-    assert.deepEqual(context.desktopAuditNotices, ["approve:写入文件 src/billing.ts"])
+    assert.deepEqual(context.desktopAuditNotices, [`approve:写入文件 ${join("src", "billing.ts")}`])
     assert.equal(
       await context.service.resolveCode({ code: "A1B2C3", decision: "approve", ...ROUTE }),
       "审批短码不存在、已使用，或该审批已不在等待中。"
@@ -844,7 +844,7 @@ async function testAHeldBackApprovalIsResentOnceAsText(): Promise<void> {
       failed: 0
     })
     const text = context.deliveryText(request.id)
-    assert(text.includes("写入文件：src/billing.ts"), text)
+    assert(text.includes(`写入文件：${join("src", "billing.ts")}`), text)
     assert(text.includes("/批准 A1B2C3"), "the resent text carries the card's own code")
     assert(text.includes("短码单次有效"), text)
 

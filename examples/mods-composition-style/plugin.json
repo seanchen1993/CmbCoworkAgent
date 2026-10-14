@@ -1,0 +1,5 @@
+{
+  "name": "mods-composition-style",
+  "version": "1.0.0",
+  "description": "为其它插件的面板文字和按钮增加说明，原按钮动作仍由原插件执行"
+}

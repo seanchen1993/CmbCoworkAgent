@@ -4,14 +4,16 @@ import { FunctionGuestRuntime } from "./guest-runtime"
 import { CLIENT_BOOTSTRAP } from "./client-bootstrap"
 import { FunctionSession, SESSION_CAPABILITIES } from "./session"
 import type { ModJson } from "../../../shared/mods/types"
-import type { FunctionClientAction, FunctionUiElement } from "../../../shared/mods/v2/ui"
+import type { FunctionClientAction, FunctionUiElement, FunctionUiNode } from "../../../shared/mods/v2/ui"
 
 const sessions: FunctionSession[] = []
 afterEach(async () => {
   for (const session of sessions.splice(0)) await session.close()
 })
-function control(tree: FunctionUiElement, key: string): FunctionUiElement | undefined {
-  if (tree.props.key === key && tree.press) return tree
+function control(tree: FunctionUiElement, key: string): FunctionUiNode | undefined {
+  if (tree.type === "engine") return undefined
+  if (tree.type !== "fragment" && tree.type !== "Markdown" && tree.props.key === key && tree.press)
+    return tree
   for (const child of tree.children ?? []) {
     if (typeof child === "string") continue
     const found = control(child, key)
@@ -100,6 +102,7 @@ async function fixture(hook = "") {
     return session.clients.act({
       pane: pane.key,
       instance: client.id,
+      generation: client.generation,
       intentId: randomUUID(),
       kind,
       ...(value === undefined ? {} : { value }),

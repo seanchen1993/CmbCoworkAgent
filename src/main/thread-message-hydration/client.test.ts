@@ -128,6 +128,60 @@ function createWorkerClient(path: string): ThreadMessageHydrationClient {
   return client
 }
 
+it("refuses public native stamps without their original stored receipts through the real worker", async () => {
+  const { database, path } = createDatabase()
+  database.exec("ALTER TABLE thread_messages ADD COLUMN function_row_json TEXT")
+  const insert = database.prepare(`INSERT INTO thread_messages
+    (thread_id, message_id, role, content_json, function_row_json, created_at, ordinal)
+    VALUES (?, ?, ?, ?, ?, 1700000000000, ?)`)
+  const stamp = (id: string, messageType: "user" | "system") => ({
+    conversationId: "actual", branchId: "actual", uuid: id, sequence: 1, door: "note",
+    messageType, ...(messageType === "user" ? { isMeta: true } : {}),
+    origin: { kind: "plugin", name: "P" }
+  })
+  insert.run("native-notes", "note", "user", JSON.stringify("[Starting active goal] literal"),
+    JSON.stringify(stamp("note", "user")), 0)
+  insert.run("native-notices", "notice", "system", JSON.stringify("Goal 已暂停：literal"),
+    JSON.stringify(stamp("notice", "system")), 0)
+  for (const [index, value] of ["{", "null", "", JSON.stringify(stamp("other", "user"))].entries())
+    insert.run("native-corrupt", `bad-${index}`, "user", JSON.stringify("unsafe"), value, index)
+  const client = createWorkerClient(path)
+  for (const threadId of ["native-notes", "native-notices", "native-corrupt"])
+    await expect(client.readPage(threadId, { limit: 10, includeVisibleMessagePresence: true }))
+      .rejects.toThrow("MODS_CONVERSATION_MIGRATION_REQUIRED")
+  insert.run("actual-old", "ordinary", "user", JSON.stringify("original ordinary old body"), null, 0)
+  const ordinary = await client.readPage("actual-old", { limit: 10, includeVisibleMessagePresence: true })
+  expect(ordinary.messages).toHaveLength(1)
+  expect(ordinary.messages[0].content).toBe("original ordinary old body")
+  expect(ordinary.messages[0].function_row).toBeUndefined()
+  expect(ordinary.hasVisibleMessages).toBe(true)
+})
+
+it("keeps a bounded host plugin source through actual worker paging and rejects invalid stamps", async () => {
+  const { database, path } = createDatabase()
+  database.exec("ALTER TABLE thread_messages ADD COLUMN prompt_origin_json TEXT")
+  const insert = database.prepare(`INSERT INTO thread_messages
+    (thread_id, message_id, role, content_json, prompt_origin_json, created_at, ordinal)
+    VALUES ('plugin-source', ?, ?, ?, ?, 1700000000000, ?)`)
+  const origin = { kind: "plugin", name: "actual", asUser: true }
+  const rows = [
+    ["human", "user", JSON.stringify(origin)],
+    ["old", "user", null],
+    ["broken", "user", "{"],
+    ["assistant", "assistant", JSON.stringify(origin)],
+    ["unknown", "user", JSON.stringify({ kind: "user" })],
+    ["oversized", "user", JSON.stringify({ kind: "plugin", name: "x".repeat(3000) })]
+  ] as const
+  rows.forEach(([id, role, source], ordinal) =>
+    insert.run(id, role, JSON.stringify("/goal literal words"), source, ordinal))
+  const client = createWorkerClient(path)
+  const result = await client.readPage("plugin-source", { limit: 10 })
+  expect(result.messages.find((row) => row.id === "human")?.prompt_origin).toEqual(origin)
+  expect(result.messages.filter((row) => row.id !== "human").every((row) =>
+    row.prompt_origin === undefined)).toBe(true)
+  expect(result.messages).toHaveLength(rows.length)
+})
+
 function insertShapeFixture(database: DatabaseSync): void {
   const insert = database.prepare(`
     INSERT INTO thread_messages (

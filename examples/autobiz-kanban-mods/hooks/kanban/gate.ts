@@ -10,6 +10,21 @@ const defaults = {
 }
 
 export function register(on) {
+  const applicationHelp = {
+    text: "规则由应用设置管理。请到自定义 → Function Mods → 完成检查规则修改，再刷新看板。"
+  }
+  async function saveConfig($, policy, patch, alias, value) {
+    if (policy._cmbPolicySource === "application") return applicationHelp
+    try {
+      await $.store.set("completion-config", { ...policy, ...patch })
+    } catch (error) {
+      if (String(error.message).includes("MODS_COMPLETION_POLICY_HOST_OWNED"))
+        return applicationHelp
+      throw error
+    }
+    await $.store.set(alias, value)
+    return undefined
+  }
   async function config($) {
     const stored = await $.store.get("completion-config")
     if (stored) return { ...defaults, ...stored }
@@ -51,17 +66,25 @@ export function register(on) {
       return {
         text: "用法：/kanban-mode off|report|check|repair。report 仅报告，check 阻止完成，repair 要求原 Agent 修复后复检。"
       }
-    await $.store.set("completion-config", { ...(await config($)), mode })
-    await $.store.set("review-mode", mode)
+    const managed = await saveConfig($, await config($), { mode }, "review-mode", mode)
+    if (managed) return managed
     return {
       text: `自动评审模式已设为 ${mode}。范围与组合检查可在看板中配置；非 off 模式会产生模型用量。`
     }
   })
   on("command.run", { command: "kanban-target" }, async ($, e) => {
+    const policy = await config($)
+    if (policy._cmbPolicySource === "application") return applicationHelp
     const path = relativePath(e.args.trim())
     await $.fs.read(path)
-    await $.store.set("completion-config", { ...(await config($)), scope: "file", target: path })
-    await $.store.set("review-target", path)
+    const managed = await saveConfig(
+      $,
+      policy,
+      { scope: "file", target: path },
+      "review-target",
+      path
+    )
+    if (managed) return managed
     return { text: `后续任务完成前自动评审：${path}。这是单文件评审，不是完整 Feature 验收。` }
   })
   on("command.run", { command: "kanban-last" }, async ($) => ({

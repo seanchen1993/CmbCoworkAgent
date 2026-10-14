@@ -1,0 +1,61 @@
+{
+  "apiVersion": "devclaw.harness/v1",
+  "nodes": [
+    {
+      "id": "design",
+      "title": "需求与接口设计",
+      "skill": "skills/design/SKILL.md",
+      "approval": "none",
+      "artifacts": [
+        {
+          "id": "design",
+          "path": "design.md",
+          "example": "# 需求与接口设计\n隔离样例\n"
+        }
+      ]
+    },
+    {
+      "id": "implement",
+      "title": "实现与验证",
+      "skill": "skills/implement/SKILL.md",
+      "approval": "none",
+      "artifacts": [
+        {
+          "id": "implement",
+          "path": "implementation.md",
+          "example": "# 实现与验证\n隔离样例\n"
+        }
+      ]
+    },
+    {
+      "id": "review",
+      "title": "交付确认",
+      "skill": "skills/review/SKILL.md",
+      "approval": "human",
+      "artifacts": [
+        {
+          "id": "review",
+          "path": "review.json",
+          "example": "{\n  \"summary\": \"仅验证样例结构；未执行业务\",\n  \"checked\": true\n}\n",
+          "schema": {
+            "type": "object",
+            "required": [
+              "summary",
+              "checked"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "summary": {
+                "type": "string",
+                "minLength": 1
+              },
+              "checked": {
+                "const": true
+              }
+            }
+          }
+        }
+      ]
+    }
+  ]
+}

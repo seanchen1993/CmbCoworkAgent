@@ -1,7 +1,13 @@
+import {
+  parseFunctionModelProtocol,
+  type FunctionModelProtocol
+} from "../../../shared/mods/v2/model-protocol"
 import { createHash } from "node:crypto"
-import { realpathSync, statSync } from "node:fs"
+import { bindFunctionSourceProofs, sourceProof, type FunctionSourceProof } from "./source-adoption-fence"
+import { lstatSync, realpathSync, statSync } from "node:fs"
 import { dirname, extname, relative, resolve } from "node:path"
 import type { ModObject } from "../../../shared/mods/types"
+import { parseFunctionUserConfig, type FunctionUserConfig } from "../../../shared/mods/v2/user-config"
 import {
   isModObject,
   CLAUDE_MODS_PROFILE,
@@ -15,37 +21,78 @@ import {
 } from "../../services/stable-file-handle"
 import { modCompiler, resolveModFile } from "../loader"
 import { normalizePluginRelativePath, readPluginManifest } from "../../plugins/manifest"
-import { resolveClientModules } from "./client-loader"
+import { parseFunctionModule, resolveClientModules } from "./client-loader"
+import { FUNCTION_STATE_LIBRARY } from "./state-library"
+import { discoverFunctionEnvironment, type FunctionEnvironmentDeclaration } from "./environment-sdk"
+import type { FunctionAuthorTypes } from "./author-types"
+import { parseClawActionExports, type ClawActionExport } from "../../../shared/mods/claw-actions"
+import { validateToolSchema } from "./tool-schema"
+import {
+  parseClawComponentExports,
+  type ClawComponentExport
+} from "../../../shared/mods/claw-components"
+import { assembleFunctionComponents, type CompiledFunctionComponent } from "./component-projection"
+export { projectFunctionComponents, type FunctionComponentProjection } from "./component-projection"
 
 export interface CompiledFunctionPlugin {
   name: string
+  modelProtocol: FunctionModelProtocol
   root: string
   profile: typeof CLAUDE_MODS_PROFILE
   digest: string
   code: string
   options: ModObject
+  userConfig?: FunctionUserConfig
   sources: string[]
   clients: Record<string, string>
+  environment: FunctionEnvironmentDeclaration
+  authorTypes?: FunctionAuthorTypes
+  authoringSources?: Record<string, string>
+  authoringEntries?: string[]
+  actions?: ClawActionExport[]
+  components?: ClawComponentExport[]
+  componentModules?: Record<string, CompiledFunctionComponent>
 }
 
-async function read(root: string, path: string, limit: number): Promise<Buffer> {
+async function read(root: string, path: string, limit: number) {
   const file = await openStableFileHandle(root, path)
   try {
-    return await readStableFileHandleBounded(file, limit)
+    const bytes = await readStableFileHandleBounded(file, limit)
+    return { bytes, identity: { device: file.identity.device, inode: file.identity.inode } }
   } finally {
     await file.handle.close()
   }
 }
 
 /** Inspect and build an immutable snapshot; never executes the plugin or an install script. */
-export async function compileFunctionPlugin(directory: string): Promise<CompiledFunctionPlugin> {
+export async function compileFunctionPlugin(
+  directory: string,
+  tooling?: { captureSources: boolean }
+): Promise<CompiledFunctionPlugin> {
   const root = realpathSync(directory)
+  const rootIdentity = lstatSync(root, { bigint: true })
   const captured = new Map<string, string>()
+  const sourceProofs = new Map<string, FunctionSourceProof>()
+  const missingSources = new Set<string>()
+  let adoptableSources = true
+  const readSource = async (path: string, limit: number) => {
+    const { bytes, identity } = await read(root, path, limit)
+    const key = relative(root, path).replace(/\\/g, "/")
+    sourceProofs.set(key, sourceProof(key, bytes, identity))
+    missingSources.delete(key)
+    return bytes
+  }
   const readJson = async (path: string): Promise<ModObject> => {
     const clean = normalizePluginRelativePath(path)
     if (!clean) throw Error("MODS_PATH_INVALID")
-    const file = resolveModFile(root, clean)
-    const text = (await read(root, file, 32768)).toString("utf8")
+    let file: string
+    try { file = resolveModFile(root, clean) }
+    catch (error) {
+      if (error && typeof error === "object" && "code" in error && error.code === "ENOENT")
+        missingSources.add(clean)
+      throw error
+    }
+    const text = (await readSource(file, 32768)).toString("utf8")
     captured.set(clean, text)
     const result = parseModJson(text)
     if (!isModObject(result)) throw Error("MODS_MANIFEST_INVALID")
@@ -55,6 +102,17 @@ export async function compileFunctionPlugin(directory: string): Promise<Compiled
   let modules: string[]
   let options: ModObject = {}
   const packageInfo = readPluginManifest(root)
+  for (const path of [".codex-plugin/plugin.json", ".claude-plugin/plugin.json", "plugin.json"]) {
+    if (packageInfo && path === packageInfo.relPath) break
+    try { await readSource(resolveModFile(root, path), 32768) }
+    catch (error) {
+      if (error && typeof error === "object" && "code" in error && error.code === "ENOENT")
+        missingSources.add(path)
+      // The existing package reader deliberately ignores unusable higher priority files.
+      // Preserve cold loading; only private adoption requires a complete bounded proof.
+      else adoptableSources = false
+    }
+  }
   const packageManifest = packageInfo ? await readJson(packageInfo.relPath) : undefined
   const nativePath =
     typeof packageManifest?.mods === "string" ? packageManifest.mods : "mods/manifest.json"
@@ -64,6 +122,17 @@ export async function compileFunctionPlugin(directory: string): Promise<Compiled
   } catch (error) {
     if (!(error instanceof Error) || !("code" in error) || error.code !== "ENOENT") throw error
   }
+  const components = parseClawComponentExports(native?.claw)
+  if (packageManifest?.userConfig !== undefined && native?.userConfig !== undefined)
+    throw Error("MODS_USER_CONFIG_DECLARATION_CONFLICT")
+  const userConfig = parseFunctionUserConfig(packageManifest?.userConfig !== undefined
+    ? packageManifest.userConfig : native?.userConfig)
+  if (components.length && userConfig && Object.hasOwn(userConfig, "claw"))
+    throw Error("MODS_USER_CONFIG_RESERVED_FIELD")
+  if (parseClawComponentExports(packageManifest?.claw).length)
+    throw Error("CLAW_COMPONENTS_NATIVE_ONLY")
+  if (components.length && (native?.apiVersion !== MODS_V2_API || native.entry !== undefined))
+    throw Error("CLAW_COMPONENT_ENTRY_CONFLICT")
   if (packageManifest && native?.apiVersion !== MODS_V2_API) {
     if (typeof packageManifest.name !== "string") throw Error("MODS_PLUGIN_NAME")
     name = packageManifest.name
@@ -80,23 +149,72 @@ export async function compileFunctionPlugin(directory: string): Promise<Compiled
     if (
       manifest?.apiVersion !== MODS_V2_API ||
       typeof manifest.id !== "string" ||
-      typeof manifest.entry !== "string"
+      (!components.length && typeof manifest.entry !== "string")
     )
       throw Error("MODS_MANIFEST_INVALID")
     name = manifest.id
-    modules = [relative(root, resolve(root, dirname(nativePath), manifest.entry))]
+    modules = components.length
+      ? components.map((entry) => relative(root, resolve(root, dirname(nativePath), entry.entry)))
+      : [relative(root, resolve(root, dirname(nativePath), manifest.entry as string))]
     if (manifest.options !== undefined) {
       if (!isModObject(manifest.options)) throw Error("MODS_OPTIONS_INVALID")
       options = manifest.options
     }
   }
   if (!/^[a-zA-Z0-9][\w.-]{0,99}$/.test(name)) throw Error("MODS_PLUGIN_NAME")
-  if (modules.length === 0 || modules.length > 16) throw Error("MODS_MODULES_LIMIT")
-  for (const path of modules) resolveModFile(root, path)
+  if (packageManifest?.claw !== undefined && native?.claw !== undefined)
+    throw Error("CLAW_ACTION_DECLARATION_CONFLICT")
+  if (packageManifest?.cmbCompatibility !== undefined && native?.cmbCompatibility !== undefined)
+    throw Error("MODS_MODEL_PROTOCOL_CONFLICT")
+  const modelProtocol = parseFunctionModelProtocol(
+    packageManifest?.cmbCompatibility !== undefined
+      ? packageManifest.cmbCompatibility
+      : native?.cmbCompatibility
+  )
+  const actions = parseClawActionExports(
+    packageManifest?.claw !== undefined ? packageManifest.claw : native?.claw
+  )
+  for (const action of actions) {
+    validateToolSchema(action.inputSchema)
+    if (action.configSchema !== undefined) validateToolSchema(action.configSchema)
+    if (action.outputSchema) validateToolSchema(action.outputSchema)
+  }
+  if (modules.length === 0 || modules.length > (components.length ? 32 : 16))
+    throw Error("MODS_MODULES_LIMIT")
+  if (components.length) {
+    const actionIds = components.flatMap((entry) => entry.actionIds)
+    if (
+      new Set(actionIds).size !== actionIds.length ||
+      actionIds.length !== actions.length ||
+      actions.some((action) => !actionIds.includes(action.id))
+    )
+      throw Error("CLAW_COMPONENT_ACTION_OWNERSHIP")
+    for (const entry of components) if (entry.configSchema) validateToolSchema(entry.configSchema)
+  }
+  let authorTypes: FunctionAuthorTypes | undefined
+  if (packageManifest?.types !== undefined) {
+    const { readFunctionAuthorTypes } = await import("./author-types")
+    const declaration = await readFunctionAuthorTypes(
+      root,
+      packageManifest.types,
+      packageManifest.dependencies
+    )
+    authorTypes = declaration.metadata
+    captured.set(authorTypes.entry, declaration.source)
+    const bytes = await readSource(resolveModFile(root, authorTypes.entry), 262144)
+    if (bytes.toString("utf8") !== declaration.source) throw Error("MODS_CONFIG_SOURCE_CHANGED")
+  }
+  const entryPaths = modules.map((path) => resolveModFile(root, path))
+  const pathKey = (path: string) => (process.platform === "win32" ? path.toLowerCase() : path)
+  const componentEntries = new Set(components.length ? entryPaths.map(pathKey) : [])
+  if (components.length && componentEntries.size !== components.length)
+    throw Error("CLAW_COMPONENT_ENTRY_DUPLICATE")
   const { build, version } = modCompiler()
   let bytes = 0
   let files = 0
-  const clientModules = new Set<string>()
+  let clientModules = new Set<string>()
+  let environmentNames = { read: new Set<string>(), write: new Set<string>() }
+  let activeComponentEntry: string | undefined
   const buildModule = (contents: string, globalName: string, surface = false) =>
     build({
       stdin: {
@@ -117,8 +235,14 @@ export async function compileFunctionPlugin(directory: string): Promise<Compiled
         {
           name: "mods-v2-snapshot",
           setup(builder) {
+            builder.onLoad({ filter: /.*/, namespace: "function-state-library" }, () => ({
+              contents: FUNCTION_STATE_LIBRARY,
+              loader: "js"
+            }))
             builder.onResolve({ filter: /.*/ }, (args) => {
-              if (args.kind === "dynamic-import" || !args.path.startsWith("."))
+              if (args.path === "claude-code" && args.kind === "import-statement")
+                return { path: "claude-code", namespace: "function-state-library" }
+              if (args.kind !== "import-statement" || !args.path.startsWith("."))
                 throw Error("MODS_IMPORT_DENIED")
               const requested = resolve(
                 args.importer && args.importer !== "<stdin>" ? dirname(args.importer) : root,
@@ -126,14 +250,19 @@ export async function compileFunctionPlugin(directory: string): Promise<Compiled
               )
               const candidates = extname(requested)
                 ? [requested]
-                : [".ts", ".tsx", ".js", ".jsx", "/index.ts"].map((s) => requested + s)
+                : [".ts", ".tsx", ".js", ".jsx", ".mts", ".mjs", ".cts", ".cjs", "/index.ts"].map((s) => requested + s)
               for (const candidate of candidates) {
                 try {
+                  const path = resolveModFile(root, relative(root, candidate))
+                  if (componentEntries.has(pathKey(path)) && pathKey(path) !== activeComponentEntry)
+                    throw Error("CLAW_COMPONENT_CROSS_ENTRY_IMPORT")
                   return {
-                    path: resolveModFile(root, relative(root, candidate)),
+                    path,
                     namespace: "function-mod"
                   }
                 } catch (error) {
+                  if (error instanceof Error && "code" in error && error.code === "ENOENT")
+                    missingSources.add(relative(root, candidate).replace(/\\/g, "/"))
                   if (!(error instanceof Error) || !("code" in error) || error.code !== "ENOENT")
                     throw error
                 }
@@ -142,7 +271,7 @@ export async function compileFunctionPlugin(directory: string): Promise<Compiled
             })
             builder.onLoad({ filter: /.*/, namespace: "function-mod" }, async (args) => {
               const extension = extname(args.path)
-              if (![".ts", ".tsx", ".mts", ".js", ".jsx", ".mjs"].includes(extension))
+              if (![".ts", ".tsx", ".mts", ".cts", ".js", ".jsx", ".mjs", ".cjs"].includes(extension))
                 throw Error("MODS_IMPORT_TYPE")
               const file = resolveModFile(root, relative(root, args.path))
               const key = relative(root, file).replace(/\\/g, "/")
@@ -151,7 +280,7 @@ export async function compileFunctionPlugin(directory: string): Promise<Compiled
                 const size = statSync(file).size
                 bytes += size
                 if (++files > 128 || bytes > 2 * 1024 * 1024) throw Error("MODS_SOURCE_LIMIT")
-                content = (await read(root, file, size)).toString("utf8")
+                content = (await readSource(file, size)).toString("utf8")
                 captured.set(key, content)
               }
               const loader =
@@ -164,32 +293,97 @@ export async function compileFunctionPlugin(directory: string): Promise<Compiled
                       : "js"
               if (!surface) {
                 const result = resolveClientModules(content, loader, file, root)
+                const declaration = discoverFunctionEnvironment(result.code)
+                for (const name of declaration.read) environmentNames.read.add(name)
+                for (const name of declaration.write) environmentNames.write.add(name)
+                if (environmentNames.read.size + environmentNames.write.size > 128)
+                  throw Error("MODS_ENV_DECLARATION_LIMIT")
                 for (const module of result.modules) clientModules.add(module)
                 return { contents: result.code, loader: "js" }
               }
               return {
-                contents: content,
-                loader
+                contents: parseFunctionModule(content, loader, file, root).code,
+                loader: "js"
               }
             })
           }
         }
       ]
     })
-  const output = await buildModule(
-    modules
+  const registerSource = (paths: string[]) =>
+    paths
       .map(
         (path, i) =>
           `import { register as r${i} } from ${JSON.stringify("./" + path.replace(/\\/g, "/"))}`
       )
       .join("\n") +
-      `\nexport function register(on, options) { ${modules.map((_, i) => `const v${i} = r${i}(on, options); if (v${i} && typeof v${i}.then === "function") throw Error("MODS_ASYNC_REGISTER");`).join(" ")} }`,
-    "__cmbFunctionMod"
-  )
-  const code = output.outputFiles[0]?.text
+    `\nexport function register(on, options) { ${paths.map((_, i) => `const v${i} = r${i}(on, options); if (v${i} && typeof v${i}.then === "function") throw Error("MODS_ASYNC_REGISTER");`).join(" ")} }`
+  const componentModules: Record<string, CompiledFunctionComponent> = Object.create(null)
+  let componentBundleBytes = 0
+  if (components.length) {
+    for (const [index, entry] of components.entries()) {
+      clientModules = new Set()
+      environmentNames = { read: new Set(), write: new Set() }
+      activeComponentEntry = pathKey(entryPaths[index])
+      const globalName = `__cmbComponent${index}`
+      const result = await buildModule(registerSource([modules[index]]), globalName)
+      const code = result.outputFiles[0]?.text
+      if (!code || (componentBundleBytes += Buffer.byteLength(code)) > 2 * 1024 * 1024)
+        throw Error("MODS_BUNDLE_LIMIT")
+      const clients: Record<string, string> = Object.create(null)
+      if (clientModules.size > 16) throw Error("MODS_CLIENT_MODULE_LIMIT")
+      for (const module of [...clientModules].sort()) {
+        const output = await buildModule(
+          `import * as surface from ${JSON.stringify("./" + module)}; export default surface.default; export * from ${JSON.stringify("./" + module)}`,
+          "__cmbSurfaceMod",
+          true
+        )
+        const source = output.outputFiles[0]?.text
+        if (!source || (componentBundleBytes += Buffer.byteLength(source)) > 2 * 1024 * 1024)
+          throw Error("MODS_BUNDLE_LIMIT")
+        clients[module] = source
+      }
+      componentModules[entry.id] = {
+        code,
+        globalName,
+        clients,
+        environment: {
+          read: [...environmentNames.read].sort(),
+          write: [...environmentNames.write].sort()
+        }
+      }
+    }
+    environmentNames = { read: new Set(), write: new Set() }
+    for (const module of Object.values(componentModules)) {
+      module.environment.read.forEach((name) => environmentNames.read.add(name))
+      module.environment.write.forEach((name) => environmentNames.write.add(name))
+    }
+    if (environmentNames.read.size + environmentNames.write.size > 128)
+      throw Error("MODS_ENV_DECLARATION_LIMIT")
+  }
+  const output = components.length
+    ? undefined
+    : await buildModule(
+        modules
+          .map(
+            (path, i) =>
+              `import { register as r${i} } from ${JSON.stringify("./" + path.replace(/\\/g, "/"))}`
+          )
+          .join("\n") +
+          `\nexport function register(on, options) { ${modules.map((_, i) => `const v${i} = r${i}(on, options); if (v${i} && typeof v${i}.then === "function") throw Error("MODS_ASYNC_REGISTER");`).join(" ")} }`,
+        "__cmbFunctionMod"
+      )
+  const code = components.length
+    ? assembleFunctionComponents(components, componentModules, {})
+    : output?.outputFiles[0]?.text
   if (!code || Buffer.byteLength(code) > 2 * 1024 * 1024) throw Error("MODS_BUNDLE_LIMIT")
   const clients: Record<string, string> = Object.create(null)
-  if (clientModules.size > 16) throw Error("MODS_CLIENT_MODULE_LIMIT")
+  if (components.length) {
+    for (const module of Object.values(componentModules)) Object.assign(clients, module.clients)
+    clientModules = new Set()
+  }
+  if (clientModules.size > 16 || Object.keys(clients).length > 16)
+    throw Error("MODS_CLIENT_MODULE_LIMIT")
   let bundleBytes = Buffer.byteLength(code)
   for (const module of [...clientModules].sort()) {
     const output = await buildModule(
@@ -207,22 +401,45 @@ export async function compileFunctionPlugin(directory: string): Promise<Compiled
       JSON.stringify({
         name,
         profile: CLAUDE_MODS_PROFILE,
+        ...(modelProtocol === "result-v1" ? { modelProtocol } : {}),
         hostRevision: FUNCTION_HOST_REVISION,
         version,
         code,
         clients,
+        environment: {
+          read: [...environmentNames.read].sort(),
+          write: [...environmentNames.write].sort()
+        },
         sources: [...captured].sort(([a], [b]) => a.localeCompare(b))
       })
     )
     .digest("hex")
-  return {
+  const compiled: CompiledFunctionPlugin = {
     name,
+    modelProtocol,
+    actions,
+    ...(components.length ? { components, componentModules } : {}),
     root,
     profile: CLAUDE_MODS_PROFILE,
     digest,
     code,
     clients,
+    environment: {
+      read: [...environmentNames.read].sort(),
+      write: [...environmentNames.write].sort()
+    },
     options,
-    sources: [...captured.keys()].sort()
+    ...(userConfig === undefined ? {} : { userConfig }),
+    sources: [...captured.keys()].sort(),
+    ...(authorTypes ? { authorTypes } : {}),
+    ...(tooling?.captureSources
+      ? {
+          authoringSources: Object.fromEntries(captured),
+          authoringEntries: modules.map((path) => path.replace(/\\/g, "/"))
+        }
+      : {})
   }
+  bindFunctionSourceProofs(compiled, [...sourceProofs.values()], [...missingSources], adoptableSources,
+    { device: rootIdentity.dev, inode: rootIdentity.ino })
+  return compiled
 }

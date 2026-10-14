@@ -8,7 +8,7 @@ import { compileFunctionPlugin } from "./loader"
 import { FunctionGuestRuntime } from "./guest-runtime"
 import { FunctionSession, SESSION_CAPABILITIES, type FunctionSessionHost } from "./session"
 import { ProjectFunctionFiles } from "./file-access"
-import type { FunctionUiElement } from "../../../shared/mods/v2/ui"
+import type { FunctionUiElement, FunctionUiNode } from "../../../shared/mods/v2/ui"
 
 const cleanup: Array<() => Promise<void>> = []
 afterEach(async () => {
@@ -48,7 +48,7 @@ async function fixture(initialState: Record<string, ModJson> = {}) {
   )
   await writeFile(
     join(root, "plugin.json"),
-    JSON.stringify({ name: "autobiz-gate", version: "1.0.0" })
+    JSON.stringify({ name: "autobiz-gate", version: "1.0.0", cmbCompatibility: { modelProtocol: "legacy-v1" } })
   )
   await writeFile(join(root, "example.ts"), "export const total = amount + taxRate")
   const compiled = await compileFunctionPlugin(root)
@@ -63,7 +63,7 @@ async function fixture(initialState: Record<string, ModJson> = {}) {
     async (value) => value
   )
   const session = new FunctionSession(
-    [{ name: compiled.name, root, tier: "user", guest, capabilities: [...SESSION_CAPABILITIES] }],
+    [{ name: compiled.name, modelProtocol: compiled.modelProtocol, root, tier: "user", guest, capabilities: [...SESSION_CAPABILITIES] }],
     {
       workspace: root,
       threadId: "thread",
@@ -258,10 +258,11 @@ it("configures the automatic gate using real pane callbacks and rejects an unsaf
   await session.run("kanban", "")
   async function change(key: string, kind: "select" | "submit", value: string) {
     const [pane] = await session.panes.snapshot()
-    let control: FunctionUiElement | undefined
+    let control: FunctionUiNode | undefined
     const visit = (node: FunctionUiElement | string): void => {
-      if (typeof node === "string") return
-      if (node.props.key === key) control = node
+      if (typeof node === "string" || node.type === "engine") return
+      if (node.type !== "fragment" && node.type !== "Markdown" && node.props.key === key)
+        control = node
       node.children?.forEach(visit)
     }
     visit(pane.tree)

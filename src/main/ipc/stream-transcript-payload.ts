@@ -1,10 +1,14 @@
 import type { Message } from "../types"
+import { readNativeConversationStreamProjection } from
+  "../agent/native-conversation-stream-projection"
 import { serializedMessageClassName } from "./stream-data-serialization"
 import {
   readStreamTranscriptReasoning,
   type QueuedStreamTranscriptMessage
 } from "./stream-transcript-flush"
 import { getMessageProviderTupleFromMetadata } from "../../shared/message-role-collision"
+import { resolveFunctionConversationToolErrorPresentation } from
+  "../../shared/mods/v2/tool-error-presentation"
 import {
   streamToolCallContentModeFromMessageMode,
   type StreamToolCallChunk
@@ -74,6 +78,8 @@ export function persistedMessageFromStreamPayload(
 ): QueuedStreamTranscriptMessage | null {
   if (!Array.isArray(payload)) return null
   const [msgChunk] = payload
+  const canonical = readNativeConversationStreamProjection(msgChunk)
+  if (canonical) return { ...canonical, streamContentMode: "snapshot", streamToolCallChunks: [] }
   if (!msgChunk || typeof msgChunk !== "object" || Array.isArray(msgChunk)) return null
   const role = getSerializedMessageRole(msgChunk)
   if (!role || role === "user") return null
@@ -128,8 +134,7 @@ export function persistedMessageFromStreamPayload(
   const status = typeof kwargs.status === "string" ? kwargs.status : undefined
   const additionalKwargs = asPlainRecord(kwargs.additional_kwargs)
   const providerTuple = getMessageProviderTupleFromMetadata(additionalKwargs)
-  const isError =
-    kwargs.is_error === true || additionalKwargs?.is_error === true || status === "error"
+  const isError = resolveFunctionConversationToolErrorPresentation(msgChunk)
 
   const message: QueuedStreamTranscriptMessage = {
     id,
@@ -144,9 +149,9 @@ export function persistedMessageFromStreamPayload(
         ? { tool_calls_mode: "delta" as const }
         : {}),
     ...(role === "tool" && toolCallId ? { tool_call_id: toolCallId } : {}),
-    ...(role === "tool" && name ? { name } : {}),
+    ...(role === "assistant" && name !== undefined || role === "tool" && name ? { name } : {}),
     ...(role === "tool" && status ? { status } : {}),
-    ...(role === "tool" && isError ? { is_error: true } : {}),
+    ...(role === "tool" && isError !== undefined ? { is_error: isError } : {}),
     created_at: new Date(),
     streamContentMode,
     streamToolCallChunks

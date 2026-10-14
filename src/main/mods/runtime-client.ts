@@ -1,3 +1,4 @@
+import { pluginCatalogGate } from "../plugins/catalog-gate"
 import { randomUUID } from "node:crypto"
 import { join } from "node:path"
 import { utilityProcess, type UtilityProcess } from "electron"
@@ -26,6 +27,10 @@ export class ModRuntimeClient {
   private ready: Promise<void> | null = null
   private rejectReady?: (error: Error) => void
   private heartbeatAt = 0
+  private watchdogTickAt = 0
+  private watchdogGapMs = 0
+  private heartbeatRecheck?: ReturnType<typeof setImmediate>
+  private heartbeatGraceUntil?: number
   private timer?: ReturnType<typeof setInterval>
   private generation = 0
   private rssBytes = 0
@@ -47,6 +52,9 @@ export class ModRuntimeClient {
       if (process.env[key]) env[key] = process.env[key]!
     }
     this.heartbeatAt = Date.now() + 8000
+    this.watchdogTickAt = Date.now()
+    this.watchdogGapMs = 0
+    this.heartbeatGraceUntil = undefined
     this.ready = new Promise<void>((resolve, reject) => {
       this.rejectReady = reject
       const child = utilityProcess.fork(this.entry, [], {
@@ -61,6 +69,7 @@ export class ModRuntimeClient {
         if (this.child !== child) return
         if (message.type === "ready") {
           this.heartbeatAt = Date.now()
+          this.heartbeatGraceUntil = undefined
           this.rejectReady = undefined
           resolve()
         } else {
@@ -73,15 +82,49 @@ export class ModRuntimeClient {
       child.on("error", () => this.stop("MODS_HOST_ERROR"))
     })
     this.timer = setInterval(() => {
-      if (Date.now() - this.heartbeatAt > 2000) this.stop("MODS_HOST_UNRESPONSIVE")
+      const now = Date.now()
+      this.watchdogGapMs = now - this.watchdogTickAt
+      this.watchdogTickAt = now
+      if (Date.now() - this.heartbeatAt > 2000) this.recheckHeartbeat()
     }, 250)
     this.timer.unref()
     return this.ready
   }
 
+  private recheckHeartbeat(): void {
+    const child = this.child
+    if (!child || this.heartbeatRecheck) return
+    const generation = this.generation
+    const scheduledAt = Date.now()
+    const hostGapAtSchedule = this.watchdogGapMs
+    const recheck = setImmediate(() => {
+      if (
+        this.child !== child ||
+        this.generation !== generation ||
+        this.heartbeatRecheck !== recheck
+      )
+        return
+      this.heartbeatRecheck = undefined
+      const now = Date.now()
+      if (now - this.heartbeatAt > 2000) {
+        // A paused Main cannot consume heartbeats. Give this silence one fixed grace period.
+        if (
+          this.heartbeatGraceUntil === undefined &&
+          (hostGapAtSchedule > 2000 || now - scheduledAt > 2000)
+        )
+          this.heartbeatGraceUntil = now + 2000
+        if (this.heartbeatGraceUntil === undefined || now >= this.heartbeatGraceUntil)
+          this.stop("MODS_HOST_UNRESPONSIVE")
+      }
+    })
+    this.heartbeatRecheck = recheck
+    recheck.unref()
+  }
+
   private onMessage(message: ModRuntimeResponse): void {
     if (message.type === "heartbeat") {
       this.heartbeatAt = Date.now()
+      this.heartbeatGraceUntil = undefined
       const rss = (message.value as { rss?: unknown } | undefined)?.rss
       if (typeof rss === "number") this.rssBytes = rss
       if (typeof rss === "number" && rss > 384 * 1024 * 1024) this.stop("MODS_HOST_MEMORY")
@@ -99,11 +142,10 @@ export class ModRuntimeClient {
         return
       }
       const child = this.child
-      Promise.resolve()
-        .then(async () => {
+      pluginCatalogGate.run(() => Promise.resolve().then(async () => {
           const value = parseModJson(encodeModJson(message.value ?? null)) as ModJson
           return pending.hostCall!(message.method ?? "", value)
-        })
+        }))
         .then(
           (value) => {
             if (child && this.child === child)
@@ -140,11 +182,12 @@ export class ModRuntimeClient {
     }
   }
 
-  private async request(
+  private request(
     data: Omit<ModRuntimeRequest, "id">,
     hostCall?: ModHostCall,
     signal?: AbortSignal
   ): Promise<ModJson> {
+    return pluginCatalogGate.run(async () => {
     if (signal?.aborted) throw new ModError("MODS_CANCELLED")
     await this.start()
     if (signal?.aborted) throw new ModError("MODS_CANCELLED")
@@ -163,6 +206,8 @@ export class ModRuntimeClient {
         disposeSignal: () => signal?.removeEventListener("abort", cancel)
       })
       this.child!.postMessage({ ...data, id })
+    })
+  
     })
   }
 
@@ -187,6 +232,33 @@ export class ModRuntimeClient {
 
   stop(code = "MODS_HOST_STOPPED"): void {
     const child = this.child
+    if (child && code !== "MODS_HOST_STOPPED") {
+      try {
+        const diagnosticCode = [
+          "MODS_HOST_EXITED",
+          "MODS_HOST_ERROR",
+          "MODS_HOST_UNRESPONSIVE",
+          "MODS_HOST_MEMORY",
+          "MODS_POLICY_FAILURE"
+        ].includes(code)
+          ? code
+          : "OTHER"
+        console.warn("[ModRuntimeClient] Lifecycle diagnostic", {
+          kind: "host-stop",
+          code: diagnosticCode,
+          generation: this.generation,
+          pending: this.pending.size,
+          heartbeatAgeMs: Date.now() - this.heartbeatAt,
+          watchdogGapMs: this.watchdogGapMs,
+          deadlineAgeMs: null
+        })
+      } catch {
+        // Diagnostic failure must not interrupt the original retirement.
+      }
+    }
+    if (this.heartbeatRecheck) clearImmediate(this.heartbeatRecheck)
+    this.heartbeatRecheck = undefined
+    this.heartbeatGraceUntil = undefined
     this.child = null
     this.ready = null
     this.generation++

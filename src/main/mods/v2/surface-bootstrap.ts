@@ -1,3 +1,5 @@
+import { CLIENT_MARKDOWN_FACTORY } from "./client-markdown-bootstrap"
+
 /** Client code executes in a separate VM. Its only outputs are trees and messages. */
 export const SURFACE_BOOTSTRAP = String.raw`
 (() => {
@@ -43,6 +45,7 @@ export const SURFACE_BOOTSTRAP = String.raw`
       return freeze({type:name,props:freeze(data),children:freeze(children([value.children]))});
     };
   }
+  ${CLIENT_MARKDOWN_FACTORY}
   freeze(elements);
   const surface=freeze({
     elements,

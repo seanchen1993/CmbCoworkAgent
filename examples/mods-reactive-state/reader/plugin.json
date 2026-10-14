@@ -1,0 +1,5 @@
+{
+  "name": "state-reader",
+  "version": "1.0.0",
+  "description": "Another plugin derives a value without manual invalidation"
+}

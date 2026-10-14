@@ -150,13 +150,15 @@ function explainUnsupportedWindowMembers<T extends object>(shim: T): T {
  */
 export function announceManagedTurnUserMessage(
   threadId: string,
-  message: { id: string; content: string },
+  message: { id: string; content: string;
+    prompt_origin?: import("../../shared/mods/v2/plugin-prompt").FunctionPluginPromptOrigin },
   mirror: typeof mirrorStandardTurnStreamToRenderer = mirrorStandardTurnStreamToRenderer
 ): void {
   if (!message.content.trim()) return
   mirror(threadId, {
     type: "turn-messages",
-    messages: [{ id: message.id, role: "user", content: message.content }]
+    messages: [{ id: message.id, role: "user", content: message.content,
+      ...(message.prompt_origin ? { prompt_origin: message.prompt_origin } : {}) }]
   })
 }
 

@@ -1,0 +1,84 @@
+{
+  "name": "review-agent",
+  "version": "1.2.0",
+  "description": "Choose a review role, inspect Git diffs, or compose a synchronous single-file review action",
+  "claw": {
+    "actions": [
+      {
+        "id": "review-input",
+        "name": "独立 Review：检视前一步文件",
+        "description": "实际调用已配置模型，等待单文件检视完成；不运行测试、不修改项目、不推进业务阶段。config.model 可指定宿主模型引用。",
+        "command": "claw-review-input",
+        "inputSchema": {
+          "type": "object",
+          "required": [
+            "path",
+            "source"
+          ],
+          "properties": {
+            "path": {
+              "type": "string",
+              "title": "文件路径",
+              "description": "通常由前一步提供，无需重复填写。",
+              "minLength": 1,
+              "maxLength": 240
+            },
+            "source": {
+              "type": "string",
+              "title": "文件内容",
+              "description": "由前一步传入，最多 4000 字符。",
+              "minLength": 1,
+              "maxLength": 4000
+            },
+            "context": {
+              "type": "string",
+              "title": "业务背景",
+              "maxLength": 2000
+            }
+          }
+        },
+        "configSchema": {
+          "type": "object",
+          "properties": {
+            "model": {
+              "type": "string",
+              "title": "检视模型引用",
+              "description": "不设置时使用 Claw 默认模型。指定时填写宿主模型引用，并在 Claw 中允许该模型。",
+              "minLength": 1,
+              "maxLength": 256
+            }
+          }
+        },
+        "outputSchema": {
+          "type": "object",
+          "required": [
+            "path",
+            "review",
+            "model",
+            "scope"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "path": {
+              "type": "string"
+            },
+            "review": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 5000
+            },
+            "model": {
+              "type": "string"
+            },
+            "scope": {
+              "const": "single-file-no-tests"
+            }
+          }
+        }
+      }
+    ]
+  },
+  "cmbCompatibility": {
+    "modelProtocol": "legacy-v1"
+  }
+}

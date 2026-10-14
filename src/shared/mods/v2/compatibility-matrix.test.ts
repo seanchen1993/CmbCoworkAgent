@@ -19,7 +19,10 @@ it("marks every compatibility declaration with an honest implementation status",
   const declarations: Array<Record<string, unknown>> = []
   collect(matrix, declarations)
   expect(declarations.length).toBeGreaterThan(100)
-  expect(declarations.every((item) => allowed.has(item.implementationStatus as string))).toBe(true)
+  const invalid = declarations
+    .filter((item) => !allowed.has(item.implementationStatus as string))
+    .map((item) => ({ name: item.name, status: item.implementationStatus }))
+  expect(invalid).toEqual([])
 })
 
 it("inventories every render site in the pinned v2.1.278 declaration, including ToolProgress", () => {
@@ -108,6 +111,16 @@ it("keeps implemented feedback SDK members consistent with their operation rows"
   const ui = sdk.find((group) => group.namespace === "ui")!
   for (const name of ["ui.toast", "ui.status"])
     expect(ui.members.find((member) => member.name === name)?.implementationStatus).toBe("adapted")
+})
+it("records desktop operations with real evidence and the native clipboard test limitation",()=>{
+  const ui=(matrix.sdk as Array<{namespace:string;members:Array<Record<string,unknown>>}>).find(group=>group.namespace==="ui")!
+  for(const name of ["ui.copy","ui.selection","ui.panes"]){
+    const operation=(matrix.operationEvents as Array<Record<string,unknown>>).find(row=>row.name===name)!
+    expect(operation.implementationStatus).toBe("adapted")
+    expect(ui.members.find(row=>row.name===name)?.implementationStatus).toBe("adapted")
+    expect(operation.evidence).toContain("tests/support/mods-desktop-actions-e2e.ts")
+  }
+  expect((matrix.operationEvents as Array<Record<string,unknown>>).find(row=>row.name==="ui.copy")?.note).toContain("positive native copy")
 })
 
 it("describes ui.log as a bounded desktop log adaptation in both operation and SDK inventories", () => {

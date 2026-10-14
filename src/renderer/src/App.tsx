@@ -1,3 +1,5 @@
+import { openClawSidebar } from "@/lib/claw-sidebar"
+import { ClawSidebarHost } from "@/components/panels/ClawSidebarHost"
 import {
   useCallback,
   useDeferredValue,
@@ -11,6 +13,7 @@ import {
   Suspense
 } from "react"
 import {
+  Sparkles,
   Briefcase,
   Eye,
   GitBranch,
@@ -745,7 +748,7 @@ function App(): React.JSX.Element {
   }, [rightPanelWorkRequest, setRightModule])
 
   useEffect(() => {
-    if (rightModule === "work") {
+    if (rightModule === "work" || rightModule === "claw") {
       handlePreviewCollapse()
       return
     }
@@ -1149,6 +1152,21 @@ function App(): React.JSX.Element {
               !rightPanelCollapsed &&
               !isAgentFocusActive && (
                 <>
+                  {((renderedMainView === "thread" && renderedThreadId) ||
+                    (renderedMainView === "harness" && renderedHarnessSessionThreadId)) && (
+                    <button
+                      type="button"
+                      onClick={() => openClawSidebar("configuration")}
+                      aria-label="当前助手"
+                      aria-pressed={rightModule === "claw"}
+                      className={`${panelToggleBaseClass} ${
+                        rightModule === "claw" ? moduleActiveClass : moduleInactiveClass
+                      }`}
+                    >
+                      <Sparkles size={16} aria-hidden="true" />
+                      <span>当前助手</span>
+                    </button>
+                  )}
                   <button
                     type="button"
                     className={`${panelToggleBaseClass} ${
@@ -1349,7 +1367,32 @@ function App(): React.JSX.Element {
                   </>
                 )}
 
-                {renderedMainView === "thread" && !rightPanelCollapsed && !isAgentFocusActive && (
+                {renderedMainView === "thread" &&
+                  rightModule === "claw" &&
+                  !rightPanelCollapsed &&
+                  !isAgentFocusActive && (
+                    <div className="max-[1050px]:hidden">
+                      <ResizeHandle onDrag={handleRightResize} />
+                    </div>
+                  )}
+                {renderedMainView === "thread" && renderedThreadId && (
+                  <div
+                    hidden={rightPanelCollapsed || rightModule !== "claw" || isAgentFocusActive}
+                    inert={rightPanelCollapsed || rightModule !== "claw" || isAgentFocusActive}
+                    data-claw-sidebar-shell
+                    className="h-full min-h-0 shrink-0 border-l bg-background max-[1050px]:absolute max-[1050px]:inset-y-0 max-[1050px]:right-0 max-[1050px]:z-40 max-[1050px]:shadow-2xl"
+                    style={{
+                      width: Math.max(340, Math.min(rightWidth, 480)),
+                      maxWidth: "calc(100vw - 24px)"
+                    }}
+                  >
+                    <ClawSidebarHost key={renderedThreadId} threadId={renderedThreadId} />
+                  </div>
+                )}
+                {renderedMainView === "thread" &&
+                  !rightPanelCollapsed &&
+                  !isAgentFocusActive &&
+                  rightModule !== "claw" && (
                   <>
                     {showRightResizeHandle && <ResizeHandle onDrag={handleRightResize} />}
                     {/* Right Panel - floating style */}
@@ -1457,8 +1500,26 @@ function App(): React.JSX.Element {
                     </section>
                   </>
                 )}
+                {renderedHarnessSessionThreadId && (
+                  <div
+                    hidden={rightPanelCollapsed || rightModule !== "claw" || isHarnessAgentFocusActive}
+                    inert={rightPanelCollapsed || rightModule !== "claw" || isHarnessAgentFocusActive}
+                    data-claw-sidebar-shell
+                    className="h-full min-h-0 shrink-0 border-l bg-background max-[1050px]:absolute max-[1050px]:inset-y-0 max-[1050px]:right-0 max-[1050px]:z-40 max-[1050px]:shadow-2xl"
+                    style={{
+                      width: Math.max(340, Math.min(rightWidth, 480)),
+                      maxWidth: "calc(100vw - 24px)"
+                    }}
+                  >
+                    <ClawSidebarHost
+                      key={renderedHarnessSessionThreadId}
+                      threadId={renderedHarnessSessionThreadId}
+                    />
+                  </div>
+                )}
                 {renderedHarnessSessionThreadId &&
                   !rightPanelCollapsed &&
+                  rightModule !== "claw" &&
                   !isHarnessAgentFocusActive && (
                     <>
                       {showRightResizeHandle && <ResizeHandle onDrag={handleRightResize} />}

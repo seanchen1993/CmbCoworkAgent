@@ -1,4 +1,6 @@
+import { windowPresentation } from "@/lib/window-presentation"
 import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react"
+import { startInitialChatPresentation, sampleInitialChatPresentation, isFirstLiveChatUserRow } from "@/lib/chat-initial-presentation"
 import { Loader2 } from "lucide-react"
 import {
   Virtuoso,
@@ -406,6 +408,47 @@ export const ChatMessageVirtualList = React.memo(function ChatMessageVirtualList
     [messages, visibleMessageIndexes, functionTurnNotices, historyGapBeforeMessageId]
   )
   const shouldVirtualize = shouldVirtualizeChatMessageList(visibleMessageIndexes.length)
+  const presentationRoot = useRef<HTMLDivElement>(null)
+  const [presentedThread, setPresentedThread] = useState<string | null>(null)
+  // Only a first live user row bypasses history settling. A running history still needs the barrier.
+  const firstLiveUserRow = isFirstLiveChatUserRow(isLoading, canLoadReleasedHistory,
+    visibleMessageIndexes.length, messages[visibleMessageIndexes[0]]?.role)
+  const presentationReady = presentedThread === threadId || firstLiveUserRow
+  if (firstLiveUserRow && presentedThread !== threadId) setPresentedThread(threadId)
+  useLayoutEffect(() => {
+    if (!shouldVirtualize || !customScrollParent || !presentationRoot.current || presentationReady) return
+    const root = presentationRoot.current
+    const viewport = customScrollParent
+    const gate = startInitialChatPresentation({
+      sample: () => sampleInitialChatPresentation(root, viewport),
+      reveal: () => setPresentedThread(threadId),
+      requestFrame: callback => window.requestAnimationFrame(callback),
+      cancelFrame: id => window.cancelAnimationFrame(id),
+      setDeadline: (callback, milliseconds) => setTimeout(callback, milliseconds),
+      clearDeadline: id => clearTimeout(id),
+      now: () => performance.now(),
+      isVisible: () => windowPresentation.isPresentable(root.ownerDocument.visibilityState === "visible")
+    })
+    // Do not hold the user's scroll/focus intent behind the initial presentation barrier.
+    const reveal = (): void => gate.reveal()
+    const visibilityChanged = (): void => gate.visibilityChanged()
+    root.ownerDocument.addEventListener("visibilitychange", visibilityChanged)
+    const unsubscribePresentation = windowPresentation.subscribe(visibilityChanged)
+    viewport.addEventListener("wheel", reveal, { passive: true })
+    viewport.addEventListener("touchstart", reveal, { passive: true })
+    viewport.addEventListener("pointerdown", reveal)
+    viewport.addEventListener("keydown", reveal)
+    return () => {
+      gate.dispose()
+      root.ownerDocument.removeEventListener("visibilitychange", visibilityChanged)
+      unsubscribePresentation()
+      viewport.removeEventListener("wheel", reveal)
+      viewport.removeEventListener("touchstart", reveal)
+      viewport.removeEventListener("pointerdown", reveal)
+      viewport.removeEventListener("keydown", reveal)
+    }
+  }, [threadId, shouldVirtualize, customScrollParent, presentationReady])
+
   const reasoningExpansion = useMemo<{
     threadId: string
     choices: NonNullable<React.ContextType<typeof ReasoningExpansionContext>>
@@ -668,8 +711,13 @@ export const ChatMessageVirtualList = React.memo(function ChatMessageVirtualList
 
   return (
     <ReasoningExpansionContext.Provider value={reasoningExpansion.choices}>
+      <div ref={presentationRoot} className="relative" data-chat-initial-presentation={presentationReady ? "ready" : "pending"}>
       <Virtuoso<number, ChatVirtualListContext>
         key={threadId}
+        // Clip paint only; keep authorized site scheduling, geometry and scroll measurement live.
+        style={presentationReady ? undefined : { clipPath: "inset(50%)" }}
+        inert={!presentationReady}
+        aria-hidden={!presentationReady || undefined}
         ref={virtuosoRef}
         data={visibleMessageIndexes}
         customScrollParent={customScrollParent}
@@ -691,6 +739,11 @@ export const ChatMessageVirtualList = React.memo(function ChatMessageVirtualList
         components={chatVirtualListComponents}
         itemContent={(visibleIndex, messageIndex) => renderMessage(visibleIndex, messageIndex)}
       />
+      {!presentationReady && <div aria-hidden="true" className="pointer-events-none absolute inset-x-3 top-3 space-y-3">
+        <div className="h-3 w-1/2 rounded bg-muted" />
+        <div className="h-3 w-1/3 rounded bg-muted" />
+      </div>}
+      </div>
     </ReasoningExpansionContext.Provider>
   )
 })

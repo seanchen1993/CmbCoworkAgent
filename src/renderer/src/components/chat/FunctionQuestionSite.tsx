@@ -1,14 +1,15 @@
+import type { ReactNode } from "react"
 import type { UserInputRequest } from "@/types"
-import { functionSiteProps } from "../../../../shared/mods/v2/sites"
+import { functionQuestionPresentation, functionSiteProps } from "../../../../shared/mods/v2/sites"
 import { FunctionSite } from "./FunctionSite"
 
-/** This slot has no submit callback. Original native controls own every answer. */
+/** The original request owns all controls and answers; the engine only selects their position. */
 export function FunctionQuestionSite({
   request,
-  onQuestions
+  renderQuestions
 }: {
   request: UserInputRequest
-  onQuestions(questions: UserInputRequest["questions"] | null | undefined): void
+  renderQuestions(questions: UserInputRequest["questions"]): ReactNode
 }): React.JSX.Element | null {
   let facts
   try {
@@ -24,9 +25,20 @@ export function FunctionQuestionSite({
       threadId={request.threadId}
       component="AskUserQuestion"
       facts={facts}
-      onQuestions={onQuestions}
-      fallback={null}
-      className="max-h-28 shrink-0 overflow-y-auto text-xs"
+      expectedRequestId={request.requestId}
+      renderNative={(safe) => {
+        try {
+          return (
+            <div className="flex min-h-0 w-full min-w-0 flex-col">
+              {renderQuestions(functionQuestionPresentation(request.questions, safe.questions))}
+            </div>
+          )
+        } catch {
+          return null
+        }
+      }}
+      fallback={renderQuestions(request.questions)}
+      className="contents"
     />
   )
 }

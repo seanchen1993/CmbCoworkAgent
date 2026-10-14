@@ -131,6 +131,7 @@ function isUserInterruptedForkBoundary(marker: ForkBoundaryMarker | null): boole
 }
 
 export function isForkableCheckpointForMessage(tuple: CheckpointTuple, messageId: string): boolean {
+  if (deriveCheckpointTranscriptIndex(tuple.checkpoint).hasInvalidFunctionRows) return false
   const targetMessageId = messageId.trim()
   const status = describeCheckpointMessageForkTarget(tuple.checkpoint, targetMessageId)
   if (!status.isForkableMessageBoundary) return false
@@ -163,6 +164,9 @@ export function describeCheckpointForkability(
   const hasPendingWrites = (tuple.pendingWrites?.length ?? 0) > 0
   const marker = getForkBoundaryMarker(tuple)
 
+  if (deriveCheckpointTranscriptIndex(tuple.checkpoint).hasInvalidFunctionRows) {
+    return { isStableTurnBoundary: false, unstableReason: "unknown", hasInterrupt, hasPendingWrites }
+  }
   if (getCheckpointNamespace(tuple) !== "") {
     return {
       isStableTurnBoundary: false,

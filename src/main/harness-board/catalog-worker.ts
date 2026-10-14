@@ -24,7 +24,8 @@ workerPort.on("message", (request: HarnessCatalogWorkerRequest) => {
         request.projectId,
         request.slug,
         request.maxResponseBytes,
-        new Int32Array(request.cancelBuffer)
+        new Int32Array(request.cancelBuffer),
+        request.runtimeSource
       )
       workerPort.postMessage({
         type: "read-dialog-tips-result",
@@ -61,7 +62,8 @@ workerPort.on("message", (request: HarnessCatalogWorkerRequest) => {
               featureBindingStorePath: request.featureBindingStorePath
             }
           : undefined,
-        request.leanTokenStorePath
+        request.leanTokenStorePath,
+        request.runtimeSource
       )
       workerPort.postMessage({
         type: "read-project-contexts-result",

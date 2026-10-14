@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it } from "vitest"
 import { FunctionGuestRuntime } from "./guest-runtime"
 import type { FunctionInvocation } from "../../../shared/mods/v2/contracts"
 import type { ModObject } from "../../../shared/mods/types"
+import { validateFunctionTree } from "../../../shared/mods/v2/ui"
 
 const guests: FunctionGuestRuntime[] = []
 const metadata: FunctionInvocation = {
@@ -36,6 +37,80 @@ async function prepare(body: string) {
 afterEach(() => guests.splice(0).forEach((guest) => guest.dispose()))
 
 describe("function UI callback lifecycle", () => {
+  it("passes a bare native ref through the real guest without producing action handles", async () => {
+    const guest = await FunctionGuestRuntime.create(`var __cmbFunctionMod={register(on){
+      on("ui.render",()=>({type:"engine",ref:0}));
+    }}`)
+    guests.push(guest)
+    const result = await guest.invoke("0", render, async () => ({}), metadata)
+    expect(result.value).toEqual({ type: "engine", ref: 0 })
+    expect(() => validateFunctionTree(result.value)).not.toThrow()
+    expect(guest.stats).toMatchObject({ frames: 0, replies: 0 })
+  })
+
+  it("wraps the actual next ref while preserving an owned live button callback", async () => {
+    const guest = await FunctionGuestRuntime.create(`var __cmbFunctionMod={register(on){
+      on("ui.render",async($,e,next)=>{
+        const {Box,Button}=$.ui.resolve(e);
+        return Box({children:[await next(e),Button({key:"button",label:"Review",
+          onPress:()=>$.session.id()})]});
+      });
+    }}`)
+    guests.push(guest)
+    let coreCalls = 0
+    const result = await guest.invoke("0", render, async (method) => {
+      expect(method).toBe("next")
+      coreCalls++
+      return { value: { type: "engine", ref: 9 } }
+    }, metadata)
+    expect(() => validateFunctionTree(result.value)).not.toThrow()
+    const children = (result.value as ModObject).children as ModObject[]
+    expect(children[0]).toEqual({ type: "engine", ref: 9 })
+    const handle = (children[1].press as ModObject).handle as number
+    let sdkCalls = 0
+    await guest.invoke("callback", press, async (method) => {
+      expect(method).toBe("session.id")
+      sdkCalls++
+      return { value: "actual-session" }
+    }, { ...metadata, event: "ui.press",
+      callback: { handle, generation: "drawing-1", kind: "onPress" } })
+    expect(coreCalls).toBe(1)
+    expect(sdkCalls).toBe(1)
+    guest.releaseUi("drawing-1")
+    await expect(guest.invoke("callback", press, async () => ({}), {
+      ...metadata, event: "ui.press",
+      callback: { handle, generation: "drawing-1", kind: "onPress" }
+    })).rejects.toThrow("MODS_UI_STALE_ACTION")
+  })
+
+  it("never inherits fabricated actions or Client metadata from an engine leaf", async () => {
+    const guest = await FunctionGuestRuntime.create(`var __cmbFunctionMod={register(on){
+      on("ui.render",async($,e,next)=>{
+        await next(e);
+        return {type:"Button",props:{key:"forged",label:"Forged"},
+          press:{plugin:"other",handle:27}};
+      });
+    }}`)
+    guests.push(guest)
+    await expect(guest.invoke("0", render, async () => ({ value: {
+      type: "engine", ref: 0,
+      press: { plugin: "other", handle: 27 },
+      client: { plugin: "other" }, props: { module: "other.ts", key: "forged" },
+      children: [{ type: "Button", props: { key: "forged", label: "Forged" },
+        press: { plugin: "other", handle: 27 } }]
+    }
+    }), metadata)).rejects.toThrow("MODS_UI_ACTION_OWNER")
+  })
+
+  it("leaves malformed engine metadata to the shared tree validator, not provenance", async () => {
+    const guest = await FunctionGuestRuntime.create(`var __cmbFunctionMod={register(on){
+      on("ui.render",()=>({type:"engine",ref:0,press:{plugin:"other",handle:27}}));
+    }}`)
+    guests.push(guest)
+    const result = await guest.invoke("0", render, async () => ({}), metadata)
+    expect(() => validateFunctionTree(result.value)).toThrow("MODS_UI_TREE_INVALID")
+  })
+
   it("refuses fabricated callback provenance", async () => {
     const guest = await FunctionGuestRuntime.create(`var __cmbFunctionMod={register(on){
       on("ui.render",()=>({type:"Button",props:{key:"stolen",label:"Stolen"},press:{plugin:"other",handle:1}}));
@@ -157,4 +232,20 @@ describe("function UI callback lifecycle", () => {
     guest.releaseUi("drawing-1")
     await expect(invoke(async () => ({}))).rejects.toThrow("MODS_UI_STALE_ACTION")
   })
+})
+
+
+it("retains official Button hotkeys in guest drawings and rejects invalid keys", async () => {
+  for (const hotkey of ["w", "1", "Enter", "W", "ctrl+w"]) {
+    const guest = await FunctionGuestRuntime.create(`var __cmbFunctionMod={register(on){
+      on("ui.render",($,e)=>$.ui.resolve(e).Button({key:"button",label:"Go",
+        hotkey:${JSON.stringify(hotkey)},onPress:()=>{}}));
+    }}`)
+    guests.push(guest)
+    if (/^[a-z0-9]$/.test(hotkey)) {
+      const result = await guest.invoke("0",render,async()=>({}),metadata)
+      expect((result.value as ModObject).props).toMatchObject({hotkey})
+      expect(()=>validateFunctionTree(result.value)).not.toThrow()
+    } else await expect(guest.invoke("0",render,async()=>({}),metadata)).rejects.toThrow("MODS_UI_HOTKEY")
+  }
 })

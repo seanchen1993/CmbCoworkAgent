@@ -1,5 +1,8 @@
 import { clearOnceStateForSession, runHooks, type HookResultCallback } from "./runner"
 import type { HookContext } from "./runner"
+import { captureRuntimePluginSourceToken, withRuntimePluginSource,
+  type RuntimePluginSourceToken } from "../plugins/runtime-source-scope"
+import { derivationFamilyFor } from "../plugins/derivation-scope"
 import {
   resolveEnabledHooksForRun,
   type HookScopeController,
@@ -15,6 +18,8 @@ import {
 //   - fireSessionEndAll()       ← before-quit drains everything
 // As long as both call sites stay wired, this Map is bounded by live thread count.
 interface StartedSession {
+  derivationBinding?: boolean
+  pluginSourceSnapshot?: RuntimePluginSourceToken
   workspacePath?: string
   pluginOutputDir?: string
   systemId?: string
@@ -64,7 +69,23 @@ export async function fireSessionStartOnce(
 ): Promise<void> {
   const existing = startedSessions.get(threadId)
   if (existing) {
+    const derivationBinding = Boolean(existing.derivationBinding ||
+      derivationFamilyFor(existing.harnessAdapterId ?? "") ||
+      derivationFamilyFor(harnessContext?.harnessAdapterId ?? ""))
+    if (derivationBinding && (
+      existing.harnessAdapterId !== harnessContext?.harnessAdapterId ||
+      existing.harnessProjectId !== harnessContext?.harnessProjectId ||
+      existing.workspacePath !== (workspacePath ?? existing.workspacePath) ||
+      existing.pluginOutputDir !== (pluginOutputDir ?? existing.pluginOutputDir) ||
+      existing.systemId !== (systemId ?? existing.systemId) ||
+      existing.pluginWorkspace !== (harnessContext?.pluginWorkspace ?? existing.pluginWorkspace) ||
+      existing.projectDir !== (harnessContext?.projectDir ?? existing.projectDir) ||
+      existing.projectCode !== (harnessContext?.projectCode ?? existing.projectCode) ||
+      existing.featureId !== (harnessContext?.featureId ?? existing.featureId)
+    )) throw Error("插件谱系会话绑定或目录已变化，请在新会话中开始项目")
     startedSessions.set(threadId, {
+      derivationBinding,
+      pluginSourceSnapshot: captureRuntimePluginSourceToken() ?? existing.pluginSourceSnapshot,
       workspacePath: workspacePath ?? existing.workspacePath,
       pluginOutputDir: pluginOutputDir ?? existing.pluginOutputDir,
       systemId: systemId ?? existing.systemId,
@@ -84,6 +105,8 @@ export async function fireSessionStartOnce(
     return
   }
   startedSessions.set(threadId, {
+    derivationBinding: Boolean(derivationFamilyFor(harnessContext?.harnessAdapterId ?? "")),
+    pluginSourceSnapshot: captureRuntimePluginSourceToken(),
     workspacePath,
     pluginOutputDir,
     systemId,
@@ -202,8 +225,10 @@ export async function fireSessionEnd(
   const started = startedSessions.get(threadId)
   if (!started) return
   startedSessions.delete(threadId)
-  const effectiveWorkspacePath = workspacePath ?? started.workspacePath
-  const effectivePluginOutputDir = pluginOutputDir ?? started.pluginOutputDir
+  const frozen = started.derivationBinding ||
+    Boolean(derivationFamilyFor(started.harnessAdapterId ?? ""))
+  const effectiveWorkspacePath = frozen ? started.workspacePath : workspacePath ?? started.workspacePath
+  const effectivePluginOutputDir = frozen ? started.pluginOutputDir : pluginOutputDir ?? started.pluginOutputDir
   const context: HookContext = {
     workspacePath: effectiveWorkspacePath,
     pluginOutputDir: effectivePluginOutputDir,
@@ -221,12 +246,12 @@ export async function fireSessionEnd(
     sessionId: threadId,
     sessionEndReason: reason
   }
-  await runHooks(
+  await Promise.resolve().then(() => withRuntimePluginSource(started.pluginSourceSnapshot, () => runHooks(
     resolveEnabledHooksForRun(effectiveWorkspacePath, "SessionEnd", context, started.hookScope),
     "SessionEnd",
     context,
     onHookResult
-  ).catch((e) => console.warn("[Hooks] SessionEnd hook error:", e))
+  ))).catch((e) => console.warn("[Hooks] SessionEnd hook error:", e))
   // Drop this thread's `once` fired-state so a future thread with the same id
   // (re-import / re-create) starts fresh. Bounded — runs after SessionEnd hooks
   // complete so `once` SessionEnd hooks themselves still fire correctly.
@@ -266,12 +291,12 @@ export async function fireSessionEndAll(
         // PR-16 follow-up — before-quit drain → CC `reason: "logout"`.
         sessionEndReason: "logout"
       }
-      return runHooks(
+      return Promise.resolve().then(() => withRuntimePluginSource(session.pluginSourceSnapshot, () => runHooks(
         resolveEnabledHooksForRun(session.workspacePath, "SessionEnd", context, session.hookScope),
         "SessionEnd",
         context,
         getOnHookResult?.(id)
-      ).finally(() => clearOnceStateForSession(id))
+      ))).finally(() => clearOnceStateForSession(id))
     })
   )
   const timeout = new Promise<void>((resolve) => setTimeout(resolve, timeoutMs))

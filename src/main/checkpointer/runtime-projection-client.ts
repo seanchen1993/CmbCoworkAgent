@@ -1,4 +1,5 @@
 import type { Worker } from "node:worker_threads"
+import type { CanonicalCheckpointDisplaySelection } from "./function-conversation-canonical-display-worker"
 import { existsSync } from "node:fs"
 import type { FunctionSessionCheckpoint } from "../../shared/mods/v2/session"
 import type {
@@ -14,11 +15,14 @@ import {
 type RuntimeProjectionWorkerFactory = () => Promise<Worker>
 
 interface PendingRequest {
+  worker: Worker
   resolve: (value: unknown) => void
   reject: (error: Error) => void
   cancellation?: Int32Array
   bootstrapThreadId?: string
   foregroundKey?: string
+  assertSource?: () => void
+  verifyDisplay?: (tuple: unknown) => unknown
 }
 
 export interface LegacyCheckpointTranscriptBootstrapResult {
@@ -90,14 +94,15 @@ export class CheckpointRuntimeProjectionClient {
     private readonly workerFactory: RuntimeProjectionWorkerFactory = createBundledWorker
   ) {}
 
-  private handleResponse = (response: CheckpointRuntimeProjectionWorkerResponse): void => {
+  private handleResponse = (response: CheckpointRuntimeProjectionWorkerResponse, worker: Worker): void => {
     if (response.type === "shutdown-complete") {
+      if (this.worker !== worker) return
       this.shutdownResolve?.()
       this.shutdownResolve = null
       return
     }
     const pending = this.pending.get(response.requestId)
-    if (!pending) return
+    if (!pending || pending.worker !== worker) return
     this.pending.delete(response.requestId)
     if (
       pending.foregroundKey &&
@@ -112,11 +117,22 @@ export class CheckpointRuntimeProjectionClient {
       pending.reject(error)
       return
     }
+    try {
+      if (pending.assertSource && pending.assertSource() !== undefined)
+        throw new Error("MODS_CONVERSATION_ASYNC_DISPLAY_SOURCE")
+    } catch (error) {
+      pending.reject(error instanceof Error ? error : new Error("MODS_CONVERSATION_DISPLAY_SOURCE_INVALID"))
+      return
+    }
     if (
       response.type === "read-latest-tuple-result" ||
       response.type === "read-latest-runtime-tuple-result"
     ) {
-      pending.resolve(response.tuple)
+      try {
+        pending.resolve(pending.verifyDisplay ? pending.verifyDisplay(response.tuple) : response.tuple)
+      } catch (error) {
+        pending.reject(error instanceof Error ? error : Error("MODS_CONVERSATION_DISPLAY_SOURCE_INVALID"))
+      }
     } else if (response.type === "read-session-transcript-result") {
       pending.resolve(response.transcript)
     } else if (response.type === "inspect-transcript-presence-result") {
@@ -151,7 +167,7 @@ export class CheckpointRuntimeProjectionClient {
       )
     }
     this.worker = worker
-    worker.on("message", this.handleResponse)
+    worker.on("message", response => this.handleResponse(response, worker))
     worker.on("error", (error) => this.handleWorkerFailure(worker, error))
     worker.on("exit", (code) => {
       if (!this.closing) {
@@ -193,6 +209,7 @@ export class CheckpointRuntimeProjectionClient {
           checkpointNs: string
           messageLimit?: number
           messageByteBudget?: number
+          nativeDisplay?: CanonicalCheckpointDisplaySelection
         }
       | {
           type: "read-latest-runtime-tuple"
@@ -225,9 +242,13 @@ export class CheckpointRuntimeProjectionClient {
       bootstrapThreadId?: string
       foregroundKey?: string
       signal?: AbortSignal
+      assertSource?: () => void
+      verifyDisplay?: (tuple: unknown) => unknown
     } = {}
   ): Promise<unknown> {
     options.signal?.throwIfAborted()
+    if (options.assertSource && options.assertSource() !== undefined)
+      throw new Error("MODS_CONVERSATION_ASYNC_DISPLAY_SOURCE")
     if (this.closing) {
       throw new CheckpointRuntimeProjectionWorkerUnavailableError(
         "Checkpoint runtime projection client is closing"
@@ -235,6 +256,8 @@ export class CheckpointRuntimeProjectionClient {
     }
     const worker = await this.getWorker()
     options.signal?.throwIfAborted()
+    if (options.assertSource && options.assertSource() !== undefined)
+      throw new Error("MODS_CONVERSATION_ASYNC_DISPLAY_SOURCE")
     if (request.type === "read-session-transcript" && this.pending.size >= 128)
       throw new Error("CHECKPOINT_QUERY_CAPACITY")
     // close() can start while getWorker() yields, even when the Worker was
@@ -285,6 +308,7 @@ export class CheckpointRuntimeProjectionClient {
         reject(signal?.reason ?? new Error(CHECKPOINT_RUNTIME_PROJECTION_CANCELLED))
       }
       this.pending.set(requestId, {
+        worker,
         resolve: (value) => {
           cleanup()
           resolve(value)
@@ -295,7 +319,9 @@ export class CheckpointRuntimeProjectionClient {
         },
         ...(cancellation ? { cancellation } : {}),
         ...(options.bootstrapThreadId ? { bootstrapThreadId: options.bootstrapThreadId } : {}),
-        ...(options.foregroundKey ? { foregroundKey: options.foregroundKey } : {})
+        ...(options.foregroundKey ? { foregroundKey: options.foregroundKey } : {}),
+        ...(options.assertSource ? { assertSource: options.assertSource } : {}),
+        ...(options.verifyDisplay ? { verifyDisplay: options.verifyDisplay } : {})
       })
       signal?.addEventListener("abort", abort, { once: true })
       if (signal?.aborted) {
@@ -357,10 +383,14 @@ export class CheckpointRuntimeProjectionClient {
       messageLimit?: number
       messageByteBudget?: number
       foregroundKey?: string | number
+      nativeDisplay?: CanonicalCheckpointDisplaySelection
+      assertSource?: () => void
+      verifyDisplay?: (tuple: unknown) => unknown
     } = {}
   ): Promise<unknown | null> {
     const key = `${databasePath}\u0000${threadId}\u0000${checkpointNs}\u0000${options.messageLimit ?? ""}\u0000${options.messageByteBudget ?? ""}`
-    const existing = options.foregroundKey === undefined ? this.tupleRequests.get(key) : undefined
+    const existing = options.foregroundKey === undefined && !options.nativeDisplay
+      ? this.tupleRequests.get(key) : undefined
     if (existing) return existing
     const request = this.request(
       {
@@ -369,17 +399,20 @@ export class CheckpointRuntimeProjectionClient {
         threadId,
         checkpointNs,
         messageLimit: options.messageLimit,
-        messageByteBudget: options.messageByteBudget
+        messageByteBudget: options.messageByteBudget,
+        nativeDisplay: options.nativeDisplay
       },
-      options.foregroundKey === undefined
-        ? {}
-        : { cancellable: true, foregroundKey: String(options.foregroundKey) }
+      { ...(options.foregroundKey === undefined ? {} : {
+          foregroundKey: String(options.foregroundKey), cancellable: true
+        }),
+        ...(options.nativeDisplay ? { cancellable: true, assertSource: options.assertSource,
+          verifyDisplay: options.verifyDisplay } : {}) }
     )
       .then((value) => value ?? null)
       .finally(() => {
         if (this.tupleRequests.get(key) === request) this.tupleRequests.delete(key)
       })
-    if (options.foregroundKey === undefined) this.tupleRequests.set(key, request)
+    if (options.foregroundKey === undefined && !options.nativeDisplay) this.tupleRequests.set(key, request)
     return request
   }
 
@@ -534,6 +567,9 @@ export function readLatestCheckpointTupleInWorker(
     messageLimit?: number
     messageByteBudget?: number
     foregroundKey?: string | number
+    nativeDisplay?: CanonicalCheckpointDisplaySelection
+    assertSource?: () => void
+    verifyDisplay?: (tuple: unknown) => unknown
   } = {}
 ): Promise<unknown | null> {
   // A task does not get a checkpoint database until its first persisted run.

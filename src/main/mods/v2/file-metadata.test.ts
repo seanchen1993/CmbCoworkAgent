@@ -1,4 +1,14 @@
-import { mkdir, mkdtemp, realpath, rename, rm, symlink, writeFile } from "node:fs/promises"
+import {
+  lstat,
+  mkdir,
+  mkdtemp,
+  realpath,
+  rename,
+  rm,
+  symlink,
+  utimes,
+  writeFile
+} from "node:fs/promises"
 import { basename, dirname, join } from "node:path"
 import { tmpdir } from "node:os"
 import { afterEach, expect, it } from "vitest"
@@ -78,8 +88,8 @@ it("reports the real input link and canonical target without changing default me
   )
   expect(await f.files.run("fs.stat", "alias", f.signal)).not.toHaveProperty("realPath")
   expect(await f.files.run("fs.list", ".", f.signal)).toEqual([
-    { name: "alias", kind: "other", size: 0, isLink: true },
-    { name: "target", kind: "dir", size: 0, isLink: false }
+    { name: "alias", kind: "other", size: 0, mtimeMs: 0, isLink: true },
+    { name: "target", kind: "dir", size: 0, mtimeMs: 0, isLink: false }
   ])
 })
 
@@ -99,6 +109,7 @@ it("keeps canonical resolution inside the project and does not follow listed out
     name: "outside",
     kind: "other",
     size: 0,
+    mtimeMs: 0,
     isLink: true
   })
 })
@@ -131,6 +142,30 @@ it("validates added metadata fields while retaining legacy hook result shapes", 
   expect(() =>
     validateBasicResult("fs.list", [{ name: "x", kind: "file", size: 1, isLink: 0 }])
   ).toThrow("MODS_SDK_RESULT")
+})
+
+it("lists each file's own timestamp at the same precision as stat without following links", async () => {
+  const f = await fixture()
+  const file = join(f.project, "target", "note.txt")
+  // Sub-millisecond precision must not accidentally use Stats while stat uses BigIntStats.
+  await utimes(file, 1_700_000_000.123456, 1_700_000_000.123456)
+  const own = await lstat(file, { bigint: true })
+  const entries = await f.files.run("fs.list", "target", f.signal)
+  expect(entries).toEqual([
+    { name: "note.txt", kind: "file", size: 5, mtimeMs: Number(own.mtimeMs), isLink: false }
+  ])
+  expect(await f.files.run("fs.stat", "target/note.txt", f.signal)).toMatchObject({
+    mtimeMs: Number(own.mtimeMs)
+  })
+})
+
+it("accepts legacy listings and finite historical timestamps but rejects invalid timestamps", () => {
+  const entry = { name: "x", kind: "file", size: 1, isLink: false }
+  expect(() => validateBasicResult("fs.list", [entry])).not.toThrow()
+  for (const mtimeMs of [-1, -0.5, 0, 123.456])
+    expect(() => validateBasicResult("fs.list", [{ ...entry, mtimeMs }])).not.toThrow()
+  for (const mtimeMs of [NaN, Infinity, -Infinity, "123", null])
+    expect(() => validateBasicResult("fs.list", [{ ...entry, mtimeMs }])).toThrow("MODS_SDK_RESULT")
 })
 
 it.each(["cancel", "revoke"])(

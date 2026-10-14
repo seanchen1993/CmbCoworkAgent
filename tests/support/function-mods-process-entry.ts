@@ -3,7 +3,7 @@ import { AsyncLocalStorage } from "node:async_hooks"
 import { EventEmitter, once } from "node:events"
 import { join, resolve } from "node:path"
 import { app } from "electron"
-import { mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises"
+import { mkdir, mkdtemp, realpath, rm, stat, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { ProjectFunctionFiles } from "../../src/main/mods/v2/file-access"
 import type { ModJson, ModObject } from "../../src/shared/mods/types"
@@ -20,6 +20,12 @@ import { checkEngineNouns } from "./function-engine-nouns-process"
 import { CODEGEN_PROBE_COUNT, CODEGEN_PROBE_SOURCE } from "../fixtures/mods-v2/codegen-probes"
 import { checkGlobalAvailability } from "./function-global-availability-process"
 import { checkBase64Globals } from "./function-base64-process"
+import { checkEncodingGlobals } from "./function-encoding-process"
+import { checkUrlGlobals } from "./function-url-process"
+import { checkStandardGlobals } from "./function-standard-globals-process"
+import { checkModuleChannel } from "./function-module-process"
+import { checkPullStream } from "./function-pull-stream-process"
+import { checkSleepCancellation } from "./function-sleep-process"
 
 const root = resolve(process.argv[2])
 const client = new FunctionRuntimeClient(join(__dirname, "function-mod-host.cjs"))
@@ -30,6 +36,12 @@ void app.whenReady().then(async () => {
   try {
     checks.push(...(await checkGlobalAvailability(client, root)))
     checks.push(...(await checkBase64Globals(client)))
+    checks.push(...(await checkEncodingGlobals(client)))
+    checks.push(...(await checkUrlGlobals(client)))
+    checks.push(...(await checkStandardGlobals(client)))
+    checks.push(...(await checkModuleChannel(client)))
+    checks.push(...(await checkPullStream(client)))
+    checks.push(...(await checkSleepCancellation(client)))
     const codegenGuest = await client.load(`${CODEGEN_PROBE_SOURCE}
       var __cmbFunctionMod={register(on){on("command.run",()=>codegenProbe())}}`)
     const codegenResult = await codegenGuest.invoke("0", {}, async () => ({}), {
@@ -560,6 +572,9 @@ void app.whenReady().then(async () => {
     temporaryProject = await realpath(await mkdtemp(join(tmpdir(), "function-process-files-")))
     await mkdir(join(temporaryProject, "fixture"))
     await writeFile(join(temporaryProject, "fixture/hello.txt"), "hi")
+    const listingMtime = Number(
+      (await stat(join(temporaryProject, "fixture/hello.txt"), { bigint: true })).mtimeMs
+    )
     const fileTimes: number[] = []
     for (const [fixture, command, expected] of [
       ["command-held", "held-probe", { direct: true, indirect: true, calls: 0 }],
@@ -569,7 +584,10 @@ void app.whenReady().then(async () => {
         {
           text: "HI",
           absolute: true,
-          entries: [{ name: "hello.txt", kind: "file", size: 2, isLink: false }],
+          entries: [{
+            name: "hello.txt", kind: "file", size: 2,
+            mtimeMs: listingMtime, isLink: false
+          }],
           exists: true,
           missing: false,
           stat: { kind: "file", size: 2, modified: true }
@@ -738,6 +756,7 @@ void app.whenReady().then(async () => {
         surfaceSession.clients.act({
           pane: pane.key,
           instance: surface.id,
+          generation: surface.generation,
           intentId: randomUUID(),
           kind: "press",
           handle: button.press!.handle

@@ -1,9 +1,11 @@
+import { BUILTIN_NAVIGATION_COMMANDS } from "./builtin-commands"
 import { useCallback, useMemo, useState } from "react"
 import type { SkillMetadata } from "@/types"
 import { isGoalClearAlias, splitGoalTransportPayload } from "../../../../shared/goal-slash"
 import { BUILTIN_BROWSER_COMMAND } from "../builtin-browser/builtin-browser"
 
 export type SlashCommandItem = {
+  kind?: "builtin-navigation"
   id: string
   title: string
   command: string
@@ -32,7 +34,8 @@ const GENERAL_SLASH_COMMANDS: SlashCommandItem[] = [
     insertText: "/goal ",
     keywords: ["goal", "目标", "长期任务", "自动续跑", "完成条件"]
   },
-  BUILTIN_BROWSER_COMMAND
+  BUILTIN_BROWSER_COMMAND,
+  ...BUILTIN_NAVIGATION_COMMANDS
 ]
 
 export function isGoalSlashCommandInput(input: string): boolean {

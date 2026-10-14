@@ -33,6 +33,7 @@ export interface ClaimLocalThreadRunLeaseInput {
 }
 
 const activeLeases = new Map<string, LocalThreadRunLease>()
+const capturedLeaseGet = Map.prototype.get
 const releaseListeners = new Set<LocalThreadRunLeaseReleasedListener>()
 
 function requireIdentifier(value: string, label: string): string {
@@ -69,10 +70,16 @@ export function getLocalThreadRunLease(threadId: string): LocalThreadRunLease | 
   return lease ? copyLease(lease) : undefined
 }
 
+/** Read-only snapshot for project configuration changes; never releases ownership. */
+export function listLocalThreadRunLeases(): LocalThreadRunLease[] {
+  return [...activeLeases.values()].map(copyLease)
+}
+
 /** Capture physical ownership without allowing release/reacquire to revive an old continuation. */
 export function captureLocalThreadRunLease(threadId: string): (() => boolean) | undefined {
-  const lease = activeLeases.get(threadId)
-  return lease ? () => activeLeases.get(threadId) === lease : undefined
+  const lease = Reflect.apply(capturedLeaseGet, activeLeases, [threadId]) as
+    LocalThreadRunLease | undefined
+  return lease ? () => Reflect.apply(capturedLeaseGet, activeLeases, [threadId]) === lease : undefined
 }
 
 export function claimLocalThreadRunLease(

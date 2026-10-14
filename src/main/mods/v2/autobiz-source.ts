@@ -5,7 +5,7 @@ import { dirname, join, relative, resolve, isAbsolute } from "node:path"
 import { promisify } from "node:util"
 import AdmZip from "adm-zip"
 
-export const AUTOBIZ_KANBAN_SOURCE = "C:\\ai\\autobiz_kanban"
+export const AUTOBIZ_KANBAN_SOURCE = process.env.CMB_AUTOBIZ_SOURCE || "C:\\ai\\autobiz_kanban"
 export const AUTOBIZ_KANBAN_COMMIT = "8db1ec937d6ed3d271cb9dc540310d6633c91e70"
 const execute = promisify(execFile)
 

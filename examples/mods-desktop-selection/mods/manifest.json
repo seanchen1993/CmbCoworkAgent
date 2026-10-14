@@ -1,0 +1,11 @@
+{
+  "apiVersion": "cmb.mods/v2",
+  "id": "desktop-selection",
+  "claw": {
+    "componentsVersion": 1,
+    "components": [{ "id": "selection", "name": "使用所选文字", "kind": "module",
+      "entry": "selection.tsx", "description": "选中当前聊天文字，在右侧组件面板复制；以真实剪贴板回执为准。",
+      "dependsOn": [], "actionIds": [] }],
+    "actions": []
+  }
+}

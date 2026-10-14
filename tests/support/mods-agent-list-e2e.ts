@@ -5,6 +5,9 @@ import AdmZip from "adm-zip"
 import type { Page } from "playwright"
 import type { FunctionAgentInfo } from "../../src/shared/mods/v2/agent-list"
 
+const actualChildId =
+  /^mod-task:[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/
+
 export async function verifyAgentList(
   page: Page,
   workspace: string,
@@ -137,7 +140,7 @@ export async function verifyAgentList(
   await task()
   const completed = await inspect()
   assert.equal(completed.current.length, 1)
-  assert.equal(completed.current[0].id, "mods-child-task")
+  assert.match(completed.current[0].id, actualChildId)
   assert.equal(completed.current[0].type, "Explore")
   assert.equal(completed.current[0].status, "completed")
   assert.equal(completed.current[0].parentId, undefined)
@@ -156,12 +159,20 @@ export async function verifyAgentList(
     JSON.stringify({ completed, audit }, null, 2)
   )
   pass("actual shared child queries its running instance and the same native id settles completed")
+  const previousIds = new Set(completed.current.map((agent) => agent.id))
   await task("[child-refusal]")
-  assert.equal((await inspect()).current[0].status, "failed")
+  const refused = (await inspect()).current
+  assert.equal(refused.length, 2)
+  const failed = refused.filter((agent) => !previousIds.has(agent.id))
+  assert.equal(failed.length, 1)
+  assert.match(failed[0].id, actualChildId)
+  assert.equal(failed[0].status, "failed")
+  assert.deepEqual(refused.find((agent) => agent.id === completed.current[0].id), completed.current[0])
   pass(
     "a real child provider refusal is listed failed while the parent retains its normal completion"
   )
   const beforeStall = requests.length
+  const beforeStallIds = new Set(refused.map((agent) => agent.id))
   await send("[mods-child] [mods-agent-list] [child-stall]")
   await until(
     async () =>
@@ -174,13 +185,26 @@ export async function verifyAgentList(
       }),
     "actual child stream is pending"
   )
-  assert.equal((await inspect()).current[0].status, "running")
+  const active = (await inspect()).current
+  assert.equal(active.length, 3)
+  const pending = active.filter((agent) => !beforeStallIds.has(agent.id))
+  assert.equal(pending.length, 1)
+  assert.match(pending[0].id, actualChildId)
+  assert.equal(pending[0].status, "running")
   await page.getByRole("button", { name: "停止生成", exact: true }).click()
   await until(idle, "original stop settles child")
-  assert.equal((await inspect()).current[0].status, "killed")
+  const stopped = (await inspect()).current
+  assert.equal(stopped.length, 3)
+  assert.equal(stopped.find((agent) => agent.id === pending[0].id)?.status, "killed")
+  assert.deepEqual(stopped.find((agent) => agent.id === failed[0].id), failed[0])
+  assert.deepEqual(stopped.find((agent) => agent.id === completed.current[0].id), completed.current[0])
   pass("original cancellation marks the live child killed and permits a later metadata query")
   await page.reload({ waitUntil: "domcontentloaded" })
-  assert.equal((await inspect()).current[0].status, "killed")
+  const restored = (await inspect()).current
+  assert.equal(restored.length, 3)
+  assert.equal(restored.find((agent) => agent.id === pending[0].id)?.status, "killed")
+  assert.deepEqual(restored.find((agent) => agent.id === failed[0].id), failed[0])
+  assert.deepEqual(restored.find((agent) => agent.id === completed.current[0].id), completed.current[0])
   pass("renderer reload reads host task facts without fabricating a resumed running task")
   const delayedJob = await enqueue("delay")
   await until(

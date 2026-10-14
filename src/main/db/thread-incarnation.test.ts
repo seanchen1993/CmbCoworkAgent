@@ -36,6 +36,54 @@ afterAll(async () => {
 })
 
 describe("thread incarnation", () => {
+  it("requires an existing native transaction for an imported thread identity", () => {
+    expect(() => threadDb.createThreadInTransaction("outside-import"))
+      .toThrow("THREAD_CREATE_TRANSACTION_REQUIRED")
+    expect(threadDb.getThreadCore("outside-import")).toBeNull()
+  })
+
+  it("rolls back a preparing import and its actual new thread together", () => {
+    const database = threadDb.getDb()
+    database.run("CREATE TABLE native_import_probe(thread_id TEXT PRIMARY KEY,token TEXT)")
+    database.run("BEGIN IMMEDIATE")
+    try {
+      const row = threadDb.createThreadInTransaction("rolled-back-import", { workspacePath: "C:/repo" })
+      const token = captureThreadIncarnation(row).token
+      expect(token).toBeTruthy()
+      database.run("INSERT INTO native_import_probe VALUES (?,?)", [row.thread_id, token])
+      expect(database.inTransaction).toBe(true)
+    } finally {
+      database.run("ROLLBACK")
+    }
+    expect(threadDb.getThreadCore("rolled-back-import")).toBeNull()
+    expect(database.exec("SELECT * FROM native_import_probe")[0].values).toEqual([])
+  })
+
+  it("persists the joined import identity once and keeps its fresh token across restart", async () => {
+    const source = threadDb.createThread("import-source", { workspacePath: "C:/repo" })
+    const database = threadDb.getDb()
+    database.run("CREATE TABLE IF NOT EXISTS native_import_probe(thread_id TEXT PRIMARY KEY,token TEXT)")
+    database.run("BEGIN IMMEDIATE")
+    let expected: ReturnType<typeof captureThreadIncarnation>
+    try {
+      const row = threadDb.createThreadInTransaction("committed-import", {
+        workspacePath: "C:/repo", [THREAD_INCARNATION_METADATA_KEY]: captureThreadIncarnation(source).token
+      })
+      expected = captureThreadIncarnation(row)
+      expect(expected.token).not.toBe(captureThreadIncarnation(source).token)
+      database.run("INSERT INTO native_import_probe VALUES (?,?)", [row.thread_id, expected.token])
+      database.run("COMMIT")
+    } catch (error) {
+      database.run("ROLLBACK")
+      throw error
+    }
+    await threadDb.closeDatabase()
+    await threadDb.initializeDatabase()
+    expect(matchesThreadIncarnation(threadDb.getThreadCore("committed-import"), expected)).toBe(true)
+    expect(threadDb.getDb().exec("SELECT token FROM native_import_probe WHERE thread_id=?",
+      ["committed-import"])[0].values).toEqual([[expected.token]])
+  })
+
   it("survives process restart because the creation token is persisted", async () => {
     const created = threadDb.createThread("restart-stable", {
       workspacePath: "C:/repo",

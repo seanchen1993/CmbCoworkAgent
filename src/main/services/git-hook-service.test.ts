@@ -23,7 +23,9 @@
 import { execFileSync } from "child_process"
 import { createHash } from "crypto"
 import {
+  cpSync,
   existsSync,
+  lstatSync,
   mkdtempSync,
   mkdirSync,
   readFileSync,
@@ -32,10 +34,10 @@ import {
   statSync,
   writeFileSync
 } from "fs"
-import { readFile, readdir, stat } from "fs/promises"
+import { readFile, readdir, rm, stat } from "fs/promises"
 import { tmpdir } from "os"
-import { join } from "path"
-import { afterAll, describe, expect, it, vi } from "vitest"
+import { dirname, join, relative, resolve } from "path"
+import { afterAll, beforeEach, describe, expect, it, vi } from "vitest"
 
 const openworkDir = mkdtempSync(join(tmpdir(), "cmbdevclaw-hook-test-"))
 
@@ -112,6 +114,27 @@ function makeRepo(): { repoRoot: string; sha: string } {
   git(repoRoot, "add", ".")
   git(repoRoot, "commit", "-q", "-m", "init")
   return { repoRoot, sha: git(repoRoot, "rev-parse", "HEAD") }
+}
+
+function copyIndependentRepo(template: string): string {
+  const gitDir = join(template, ".git")
+  expect(lstatSync(gitDir).isDirectory()).toBe(true)
+  for (const file of ["gitdir", "commondir", "objects/info/alternates"]) {
+    expect(existsSync(join(gitDir, file))).toBe(false)
+  }
+  const repoRoot = mkdtempSync(join(tmpdir(), "cmbdevclaw-repo-copy-"))
+  tempRoots.push(repoRoot)
+  cpSync(template, repoRoot, {
+    recursive: true,
+    force: false,
+    errorOnExist: true,
+    filter: (source) => {
+      expect(lstatSync(source).isSymbolicLink()).toBe(false)
+      return true
+    }
+  })
+  expect(lstatSync(join(repoRoot, ".git")).isDirectory()).toBe(true)
+  return repoRoot
 }
 
 const eventsDir = join(openworkDir, "git-hooks", "events")
@@ -515,6 +538,15 @@ describe("失效注册清理的缓存和并发保护", () => {
     return join(parent, "wt")
   }
 
+  async function removeOwnedRecreatedRoot(root: string): Promise<void> {
+    const target = resolve(root)
+    const parent = dirname(target)
+    expect(tempRoots).toContain(parent)
+    expect(relative(parent, target)).toBe("wt")
+    await rm(target, { recursive: true, force: true, maxRetries: 5, retryDelay: 30 })
+    expect(existsSync(target)).toBe(false)
+  }
+
   function recreate(root: string): void {
     mkdirSync(root, { recursive: true })
     git(root, "init", "-q")
@@ -522,16 +554,35 @@ describe("失效注册清理的缓存和并发保护", () => {
   }
 
   async function autoRegister(root: string): Promise<void> {
-    scheduleAutoInstallGitHooksForPath(root, "generated.ts")
-    await vi.waitFor(
-      async () => {
-        const registered = readRegistry().find((repo) => repo.gitRoot === root)
-        expect(registered).toBeDefined()
-        expect(registered?.updatedAt).not.toBe(oldUpdatedAt)
-        expect((await getGitHookStatus(root)).installed).toBe(true)
-      },
-      { timeout: 3000 }
-    )
+    // This serial fixture is the only auto-install caller in the file. Await the
+    // actual installer rather than polling an intermediate installed marker.
+    // Its 100 ms reconciliation is tested by explicit sync calls below; cancel
+    // only those newly created handles before they can spawn git in the fixture.
+    // Other delays, pre-existing timers and ongoing paused sweeps stay untouched.
+    const schedule = globalThis.setTimeout
+    const ownedTimers: ReturnType<typeof setTimeout>[] = []
+    const timerSpy = vi.spyOn(globalThis, "setTimeout").mockImplementation(((
+      callback: (...args: unknown[]) => void,
+      delay?: number,
+      ...args: unknown[]
+    ) => {
+      const timer = schedule(callback, delay, ...args)
+      if (delay === 100) {
+        ownedTimers.push(timer)
+        clearTimeout(timer)
+      }
+      return timer
+    }) as typeof setTimeout)
+    try {
+      await scheduleAutoInstallGitHooksForPath(root, "generated.ts")
+      const registered = readRegistry().find((repo) => repo.gitRoot === root)
+      expect(registered).toBeDefined()
+      expect(registered?.updatedAt).not.toBe(oldUpdatedAt)
+      expect((await getGitHookStatus(root)).installed).toBe(true)
+      expect(ownedTimers.length).toBeGreaterThan(0)
+    } finally {
+      timerSpy.mockRestore()
+    }
   }
 
   // Hold the second repository after the first has produced a forget outcome.
@@ -605,7 +656,7 @@ describe("失效注册清理的缓存和并发保护", () => {
       recreate(root)
       await autoRegister(root)
       updatedAt = readRegistry().find((repo) => repo.gitRoot === root)?.updatedAt
-      if (removeAgain) rmSync(root, { recursive: true, force: true })
+      if (removeAgain) await removeOwnedRecreatedRoot(root)
     })
 
     expect(readRegistry().find((repo) => repo.gitRoot === root)?.updatedAt).toBe(updatedAt)
@@ -637,19 +688,27 @@ describe("失效注册清理的缓存和并发保护", () => {
     expect(readRegistry().map((repo) => repo.gitRoot)).toContain(root)
   })
 
-  it("清理后立即重建的路径可重新注册，不受旧的安装 TTL 阻挡", async () => {
-    const root = missingRoot()
-    writeRegistry([])
-    recreate(root)
-    await autoRegister(root)
-    await syncRegisteredGitHookEvents()
-    rmSync(root, { recursive: true, force: true })
-    await syncRegisteredGitHookEvents()
-    expect(readRegistry()).toEqual([])
+  describe("已完整安装的可重建仓库", () => {
+    let root: string
+    beforeEach(async () => {
+      // Fixture setup finishes the first real installation before the lifecycle
+      // under test starts. Both setup and test retain the default time budget.
+      root = missingRoot()
+      writeRegistry([])
+      recreate(root)
+      await autoRegister(root)
+      await syncRegisteredGitHookEvents()
+    })
 
-    recreate(root)
-    await autoRegister(root)
-    expect(readRegistry().map((repo) => repo.gitRoot)).toContain(root)
+    it("清理后立即重建的路径可重新注册，不受旧的安装 TTL 阻挡", async () => {
+      await removeOwnedRecreatedRoot(root)
+      await syncRegisteredGitHookEvents()
+      expect(readRegistry()).toEqual([])
+
+      recreate(root)
+      await autoRegister(root)
+      expect(readRegistry().map((repo) => repo.gitRoot)).toContain(root)
+    })
   })
 
   it.each(["EACCES", "EBUSY"])("目录检查遇到 %s 时保留注册并记录失败", async (code) => {
@@ -730,7 +789,9 @@ describe("registered repo housekeeping", () => {
 
   it("keeps a registration whose directory is gone while its bucket still has work", async () => {
     const gone = join(mkdtempSync(join(tmpdir(), "cmbdevclaw-gone-kept-")), "removed")
-    const key = createHash("sha1").update(gone.toLowerCase()).digest("hex")
+    const key = createHash("sha1")
+      .update(gone.trim().replace(/\\/g, "/").toLowerCase())
+      .digest("hex")
     // An UNCONSUMED snapshot keeps the entry alive so it still gets its chance.
     // An empty `ready` directory would not: the test is "is there work", not
     // "does the bucket exist", precisely because a consumed bucket keeps its
@@ -814,12 +875,10 @@ describe("snapshots whose repository disappeared entirely", () => {
  */
 describe("concurrent hook helper installs", () => {
   it("installs every repository when many install at once", async () => {
-    const repos = Array.from({ length: 20 }, () => {
-      const root = mkdtempSync(join(tmpdir(), "cmbdevclaw-parallel-"))
-      tempRoots.push(root)
-      git(root, "init", "-q")
-      return root
-    })
+    const template = mkdtempSync(join(tmpdir(), "cmbdevclaw-parallel-template-"))
+    tempRoots.push(template)
+    git(template, "init", "-q")
+    const repos = Array.from({ length: 20 }, () => copyIndependentRepo(template))
 
     const results = await Promise.allSettled(repos.map((repo) => installGitHooks(repo)))
 
@@ -890,7 +949,8 @@ describe("hook helper writes", () => {
 describe("注册表扫描的写放大", () => {
   it("一轮扫描只写一次 repos.json，与仓库数无关", async () => {
     const reposPath = join(openworkDir, "git-hooks", "repos.json")
-    const repos = Array.from({ length: 12 }, () => makeRepo().repoRoot)
+    const template = makeRepo().repoRoot
+    const repos = Array.from({ length: 12 }, () => copyIndependentRepo(template))
     mkdirSync(join(openworkDir, "git-hooks"), { recursive: true })
     writeFileSync(
       reposPath,
@@ -916,14 +976,18 @@ describe("注册表扫描的写放大", () => {
     }>
     expect(saved).toHaveLength(repos.length)
     expect(saved.every((repo) => !!repo.lastSyncedAt)).toBe(true)
-  })
+    // Twelve cold repos spawn 48 real Git commands; the measured full case took 5.96s.
+    // This correctness budget preserves the cold workload and is not a product latency target.
+  }, 12_000)
 
   it("目录已删且桶里没有待处理事件的注册会被清掉", async () => {
     const reposPath = join(openworkDir, "git-hooks", "repos.json")
     const alive = makeRepo().repoRoot
     const gone = join(mkdtempSync(join(tmpdir(), "cmbdevclaw-consumed-")), "removed")
     // 消费完成的桶：只剩归档和去重账本，ready / push-intents 都是空的。
-    const key = createHash("sha1").update(gone.toLowerCase()).digest("hex")
+    const key = createHash("sha1")
+      .update(gone.trim().replace(/\\/g, "/").toLowerCase())
+      .digest("hex")
     mkdirSync(join(eventsDir, key, "processed", "snap-1"), { recursive: true })
     writeFileSync(join(eventsDir, key, "processed-commits.json"), JSON.stringify(["a".repeat(40)]))
     writeFileSync(
@@ -950,7 +1014,9 @@ describe("注册表扫描的写放大", () => {
   it("桶里还有 ready 快照时不清，哪怕目录已经删了", async () => {
     const reposPath = join(openworkDir, "git-hooks", "repos.json")
     const gone = join(mkdtempSync(join(tmpdir(), "cmbdevclaw-unconsumed-")), "removed")
-    const key = createHash("sha1").update(gone.toLowerCase()).digest("hex")
+    const key = createHash("sha1")
+      .update(gone.trim().replace(/\\/g, "/").toLowerCase())
+      .digest("hex")
     mkdirSync(join(eventsDir, key, "ready", "snap-1"), { recursive: true })
     writeFileSync(
       reposPath,

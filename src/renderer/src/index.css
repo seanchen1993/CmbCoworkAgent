@@ -1,4 +1,5 @@
 @import "tailwindcss";
+@import "./assets/mods-ansi-colors.css";
 @import "@fontsource/inter/400.css";
 @import "@fontsource/inter/500.css";
 @import "@fontsource/inter/600.css";
@@ -406,6 +407,9 @@
 /* Keep the composer scrollbar inset from the rounded input shell. */
 .composer-textarea::-webkit-scrollbar {
   width: 6px;
+}
+.mods-decorated-composer::selection {
+  color: var(--foreground);
 }
 
 .composer-textarea::-webkit-scrollbar-track {
@@ -1260,4 +1264,13 @@
 
 button {
   cursor: pointer;
+}
+
+/* Frame authored content without remounting it or reserving space for an empty slot. */
+.sparks-inline-surface:has(span:not(:empty), p:not(:empty), button, input, select, textarea, svg, canvas, pre, img) {
+  margin-bottom: 0.5rem;
+  padding: 0.625rem;
+  border: 1px solid var(--border);
+  border-radius: 0.75rem;
+  background: var(--muted);
 }

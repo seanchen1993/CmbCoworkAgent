@@ -5,8 +5,9 @@ export function functionFocusHandle(
   tree: FunctionUiElement | undefined,
   target: Pick<FunctionFocusTarget, "plugin" | "element">
 ): number | undefined {
-  if (!tree) return undefined
+  if (!tree || tree.type === "engine") return undefined
   if (
+    tree.type !== "fragment" &&
     ["Button", "Input", "Select"].includes(tree.type) &&
     tree.press?.plugin === target.plugin &&
     tree.props.key === target.element
@@ -26,8 +27,8 @@ export function functionFocusTargets(
 ): { target: FunctionFocusTarget; autoFocus: boolean }[] {
   const targets: { target: FunctionFocusTarget; autoFocus: boolean }[] = []
   const visit = (node: FunctionUiElement | string, client?: string): void => {
-    if (typeof node === "string") return
-    if (node.press && ["Button", "Input", "Select"].includes(node.type))
+    if (typeof node === "string" || node.type === "engine") return
+    if (node.type !== "fragment" && node.press && ["Button", "Input", "Select"].includes(node.type))
       targets.push({
         target: {
           plugin: node.press.plugin,

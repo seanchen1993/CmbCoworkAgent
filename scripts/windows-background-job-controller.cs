@@ -65,6 +65,61 @@ internal static class WindowsBackgroundJobController
     [return: MarshalAs(UnmanagedType.Bool)]
     private static extern bool AssignProcessToJobObject(IntPtr job, IntPtr process);
 
+    [DllImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool QueryInformationJobObject(
+        IntPtr job, int informationClass, IntPtr information, uint informationLength,
+        out uint returnLength);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool IsProcessInJob(IntPtr process, IntPtr job, out bool result);
+
+    private static bool StopRemainingJobChildren()
+    {
+        // The controller itself owns the kill-on-close Job. Keep it alive to drain output, but
+        // reap descendants holding inherited pipe writers after the direct executable exits.
+        const int capacity = 65536;
+        int size = 8 + capacity * IntPtr.Size;
+        IntPtr buffer = Marshal.AllocHGlobal(size);
+        try
+        {
+            int self = Process.GetCurrentProcess().Id;
+            for (int attempt = 0; attempt < 32; attempt++)
+            {
+                uint returned;
+                if (!QueryInformationJobObject(jobHandle, 3, buffer, (uint)size, out returned))
+                    return false;
+                int count = Marshal.ReadInt32(buffer, 4);
+                if (count < 0 || count > capacity) return false;
+                bool found = false;
+                for (int index = 0; index < count; index++)
+                {
+                    long raw = Marshal.ReadIntPtr(buffer, 8 + index * IntPtr.Size).ToInt64();
+                    if (raw == self || raw <= 0 || raw > int.MaxValue) continue;
+                    found = true;
+                    try
+                    {
+                        using (Process descendant = Process.GetProcessById((int)raw))
+                        {
+                            bool belongs;
+                            // A process id can be reused after the Job enumeration.
+                            if (IsProcessInJob(descendant.Handle, jobHandle, out belongs) && belongs)
+                                descendant.Kill();
+                        }
+                    }
+                    catch (ArgumentException) { }
+                    catch (InvalidOperationException) { }
+                    catch (System.ComponentModel.Win32Exception) { }
+                }
+                if (!found) return true;
+                System.Threading.Thread.Sleep(10);
+            }
+            return false;
+        }
+        finally { Marshal.FreeHGlobal(buffer); }
+    }
+
     private static bool InitializeKillOnCloseJob(out string error)
     {
         jobHandle = CreateJobObject(IntPtr.Zero, null);
@@ -186,7 +241,8 @@ internal static class WindowsBackgroundJobController
 
     private static int Main(string[] args)
     {
-        if (args.Length != 2 || string.IsNullOrWhiteSpace(args[0]))
+        bool isArgv = args.Length >= 2 && args[1] == "argv";
+        if ((!isArgv && args.Length != 2) || args.Length < (isArgv ? 3 : 2) || string.IsNullOrWhiteSpace(args[0]))
         {
             Console.Error.WriteLine("[LocalSandbox] Background shell path is missing");
             return 126;
@@ -200,6 +256,8 @@ internal static class WindowsBackgroundJobController
                 "started: " + jobError);
             return 125;
         }
+
+        if (isArgv && !WatchHostLifetime(args[2])) return 125;
 
         bool isCmdShell = IsCmdShell(args[1]);
 
@@ -228,7 +286,7 @@ internal static class WindowsBackgroundJobController
             }
         }
 
-        string shellArguments = ShellArguments(args[1], cmdCommand);
+        string shellArguments = isArgv ? DirectArguments(args) : ShellArguments(args[1], cmdCommand);
         if (isCmdShell &&
             WindowsCommandLineLength(args[0], shellArguments) > CmdMaximumArgumentsLength)
         {
@@ -286,6 +344,15 @@ internal static class WindowsBackgroundJobController
                 return 126;
             }
 
+            if (isArgv)
+            {
+                // Private protocol prefix: distinguish executable startup failure from exit 126.
+                // Write before pumping either child stream; the Mods host removes this prefix.
+                byte[] ready = Encoding.ASCII.GetBytes("MODS_PROCESS_STARTED_V1\n");
+                Stream output = Console.OpenStandardOutput();
+                output.Write(ready, 0, ready.Length);
+                output.Flush();
+            }
             Task outputPump = child.StandardOutput.BaseStream.CopyToAsync(
                 Console.OpenStandardOutput());
             Task errorPump = child.StandardError.BaseStream.CopyToAsync(
@@ -301,6 +368,14 @@ internal static class WindowsBackgroundJobController
 
             child.WaitForExit();
             int exitCode = child.ExitCode;
+            if (isArgv)
+            {
+                // A paused consumer can take arbitrarily long to drain. Do not apply the legacy
+                // shell drain deadline to the argv stream; cancellation closes this Job instead.
+                if (!StopRemainingJobChildren()) return 125;
+                try { Task.WaitAll(new[] { outputPump, errorPump }); } catch { return 125; }
+                return exitCode;
+            }
             // A daemon may inherit the shell's stdout/stderr writers. Waiting
             // for EOF without a bound would keep this controller (and therefore
             // its Job handle) alive forever. Preserve a short normal drain, then
@@ -309,5 +384,60 @@ internal static class WindowsBackgroundJobController
             try { inputPump.Wait(100); } catch { }
             return exitCode;
         }
+    }
+
+    private static string DirectArguments(string[] args)
+    {
+        StringBuilder result = new StringBuilder();
+        for (int index = 3; index < args.Length; index++)
+        {
+            if (index > 3) result.Append(' ');
+            // Windows CRT argv quoting, never a shell command. Backslashes only need doubling
+            // before a quote and before the closing quote; empty arguments stay explicit.
+            result.Append('"');
+            int slashes = 0;
+            foreach (char character in args[index])
+            {
+                if (character == '\\') { slashes++; continue; }
+                if (character == '"')
+                {
+                    result.Append('\\', slashes * 2 + 1);
+                    result.Append('"');
+                }
+                else
+                {
+                    result.Append('\\', slashes);
+                    result.Append(character);
+                }
+                slashes = 0;
+            }
+            result.Append('\\', slashes * 2);
+            result.Append('"');
+        }
+        return result.ToString();
+    }
+
+    private static bool WatchHostLifetime(string value)
+    {
+        int parentId;
+        if (!int.TryParse(value, out parentId) || parentId <= 0 ||
+            parentId == Process.GetCurrentProcess().Id) return false;
+        Process owner;
+        try
+        {
+            owner = Process.GetProcessById(parentId);
+            // Acquire and retain the actual kernel process handle now, never reopen by PID later.
+            if (owner.Handle == IntPtr.Zero || owner.HasExited) { owner.Dispose(); return false; }
+        }
+        catch { return false; }
+        Task.Run(delegate
+        {
+            using (owner)
+            {
+                try { owner.WaitForExit(); }
+                finally { Environment.Exit(125); }
+            }
+        });
+        return true;
     }
 }

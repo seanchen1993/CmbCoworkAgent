@@ -1,0 +1,113 @@
+{
+  "apiVersion": "devclaw.project-runtime/v1",
+  "plugin": {
+    "id": "project-harness-fullstack",
+    "version": "0.1.0"
+  },
+  "mode": "host",
+  "stateOwner": "host",
+  "stages": [
+    {
+      "id": "design",
+      "title": "需求与接口设计",
+      "actionIds": [],
+      "artifactIds": [
+        "design"
+      ],
+      "checkIds": [
+        "design-check"
+      ],
+      "approval": "none",
+      "skill": "skills/design/SKILL.md"
+    },
+    {
+      "id": "implement",
+      "title": "实现与验证",
+      "actionIds": [],
+      "artifactIds": [
+        "implement"
+      ],
+      "checkIds": [
+        "implement-check"
+      ],
+      "approval": "none",
+      "skill": "skills/implement/SKILL.md"
+    },
+    {
+      "id": "review",
+      "title": "交付确认",
+      "actionIds": [],
+      "artifactIds": [
+        "review"
+      ],
+      "checkIds": [
+        "review-check"
+      ],
+      "approval": "human",
+      "skill": "skills/review/SKILL.md"
+    }
+  ],
+  "actions": [],
+  "artifacts": [
+    {
+      "id": "design",
+      "path": "design.md",
+      "required": true
+    },
+    {
+      "id": "implement",
+      "path": "implementation.md",
+      "required": true
+    },
+    {
+      "id": "review",
+      "path": "review.json",
+      "required": true
+    }
+  ],
+  "checks": [
+    {
+      "id": "design-check",
+      "kind": "file-exists",
+      "artifactId": "design",
+      "sideEffect": "read"
+    },
+    {
+      "id": "implement-check",
+      "kind": "file-exists",
+      "artifactId": "implement",
+      "sideEffect": "read"
+    },
+    {
+      "id": "review-check",
+      "kind": "json-schema",
+      "artifactId": "review",
+      "sideEffect": "read",
+      "schema": {
+        "type": "object",
+        "required": [
+          "summary",
+          "checked"
+        ],
+        "additionalProperties": false,
+        "properties": {
+          "summary": {
+            "type": "string",
+            "minLength": 1
+          },
+          "checked": {
+            "const": true
+          }
+        }
+      }
+    }
+  ],
+  "environment": [],
+  "capabilities": {
+    "execution": true,
+    "conditionalTransition": true,
+    "idempotency": true,
+    "reconciliation": false,
+    "cancellation": true
+  }
+}

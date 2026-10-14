@@ -5,6 +5,8 @@ import type { AgentInvokeParams } from "../types"
 import type { RuntimeInteractionWaitHooks } from "./runtime"
 import type { RemoteTurnPolicy, StandardTurnSource } from "./standard-thread-turn"
 import type { LocalThreadRunOwner } from "./thread-run-lease"
+import { withRuntimePluginSource, type RuntimePluginSourceToken } from "../plugins/runtime-source-scope"
+import { prepareAgentRunAdmission } from "./agent-run-admission"
 
 export type AgentRunRequest = AgentInvokeParams
 
@@ -87,6 +89,13 @@ export interface AgentGoalControlResult {
  * that their lease or security policy belongs to the desktop.
  */
 export interface AgentRunExecutionContext {
+  /** Host-issued opaque retained-package source scope; never accepted from renderer request fields. */
+  pluginSourceSnapshot?: RuntimePluginSourceToken
+  /** Only a resident native plugin-prompt queue can provide this private receipt. */
+  pluginPrompt?: import("./mods-plugin-prompt-entry").NativePluginPromptRun
+  /** Only the actual BrowserWindow invoke adapter stamps this user entry. */
+  plainComposerSubmission?: import("../../shared/mods/v2/prompt-submission").PlainComposerSubmission
+  fileComposerSubmission?: import("../../shared/mods/v2/composer-mentions").ComposerMentionSubmission
   source: StandardTurnSource
   localRunLease?: {
     owner: LocalThreadRunOwner
@@ -175,6 +184,31 @@ let agentRunImplementation: AgentRunImplementation | null = null
 let agentGoalControlImplementation: AgentGoalControlImplementation | null = null
 let activeAgentRunInspector: ActiveAgentRunInspector = () => false
 let activeAgentRunCanceller: ActiveAgentRunCanceller = () => false
+let agentRunSettlingInspector: ActiveAgentRunInspector = () => false
+const settledListeners = new Set<(threadId: string) => void>()
+
+export function registerAgentRunSettlingInspector(inspector: ActiveAgentRunInspector): void {
+  agentRunSettlingInspector = inspector
+}
+
+export function isAgentRunBusy(threadId: string): boolean {
+  return activeAgentRunInspector(threadId) || agentRunSettlingInspector(threadId)
+}
+
+export function onAgentRunSettled(listener: (threadId: string) => void): () => void {
+  settledListeners.add(listener)
+  return () => settledListeners.delete(listener)
+}
+
+/** Called only after the actual settlement registration is removed. */
+export function notifyAgentRunSettled(threadId: string): void {
+  queueMicrotask(() => {
+    for (const listener of settledListeners) {
+      try { listener(threadId) }
+      catch (error) { console.error("[Agent] Settlement listener failed:", error) }
+    }
+  })
+}
 
 export function registerAgentRunImplementation(implementation: AgentRunImplementation): void {
   agentRunImplementation = implementation
@@ -237,8 +271,13 @@ export async function startAgentRun(
   if (!delivery.isAvailable()) {
     throw new Error("Agent run delivery is unavailable")
   }
-  const completion = agentRunImplementation(request, delivery, context).finally(() => {
-    delivery.finish?.(request.threadId)
+  const implementation = agentRunImplementation
+  const admission = await prepareAgentRunAdmission(request, context)
+  if (admission) context = admission.context
+  const completion = Promise.resolve().then(() => withRuntimePluginSource(context.pluginSourceSnapshot,
+    () => implementation(request, delivery, context))).finally(async () => {
+    try { await admission?.settle() }
+    finally { delivery.finish?.(request.threadId) }
   })
   return {
     threadId: request.threadId,

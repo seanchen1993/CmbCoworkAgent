@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto"
 import type { ModObject } from "../../../shared/mods/types"
 import { ModFunctionError } from "../../../shared/mods/v2/contracts"
 import { validateFunctionLog, type FunctionLogEntry } from "../../../shared/mods/v2/ui-log"
+import { functionUiTextProjection } from "../../../shared/mods/v2/ui-text"
 
 interface PendingLog {
   plugin: string
@@ -37,6 +38,8 @@ export class FunctionUiLog {
     if (value) validateFunctionLog(value)
     slot.done = true
     slot.value = value
+      ? { ...value, text: functionUiTextProjection(value.text as string, 10000) }
+      : undefined
     slot.live = live
     for (const [key, next] of this.pending) {
       if (!next.done) break

@@ -1,0 +1,113 @@
+{
+  "apiVersion": "devclaw.project-runtime/v1",
+  "plugin": {
+    "id": "project-harness-data",
+    "version": "0.1.0"
+  },
+  "mode": "host",
+  "stateOwner": "host",
+  "stages": [
+    {
+      "id": "source",
+      "title": "数据口径",
+      "actionIds": [],
+      "artifactIds": [
+        "source"
+      ],
+      "checkIds": [
+        "source-check"
+      ],
+      "approval": "none",
+      "skill": "skills/source/SKILL.md"
+    },
+    {
+      "id": "transform",
+      "title": "数据开发",
+      "actionIds": [],
+      "artifactIds": [
+        "transform"
+      ],
+      "checkIds": [
+        "transform-check"
+      ],
+      "approval": "none",
+      "skill": "skills/transform/SKILL.md"
+    },
+    {
+      "id": "review",
+      "title": "结果确认",
+      "actionIds": [],
+      "artifactIds": [
+        "review"
+      ],
+      "checkIds": [
+        "review-check"
+      ],
+      "approval": "human",
+      "skill": "skills/review/SKILL.md"
+    }
+  ],
+  "actions": [],
+  "artifacts": [
+    {
+      "id": "source",
+      "path": "source.md",
+      "required": true
+    },
+    {
+      "id": "transform",
+      "path": "transformation.md",
+      "required": true
+    },
+    {
+      "id": "review",
+      "path": "review.json",
+      "required": true
+    }
+  ],
+  "checks": [
+    {
+      "id": "source-check",
+      "kind": "file-exists",
+      "artifactId": "source",
+      "sideEffect": "read"
+    },
+    {
+      "id": "transform-check",
+      "kind": "file-exists",
+      "artifactId": "transform",
+      "sideEffect": "read"
+    },
+    {
+      "id": "review-check",
+      "kind": "json-schema",
+      "artifactId": "review",
+      "sideEffect": "read",
+      "schema": {
+        "type": "object",
+        "required": [
+          "summary",
+          "checked"
+        ],
+        "additionalProperties": false,
+        "properties": {
+          "summary": {
+            "type": "string",
+            "minLength": 1
+          },
+          "checked": {
+            "const": true
+          }
+        }
+      }
+    }
+  ],
+  "environment": [],
+  "capabilities": {
+    "execution": true,
+    "conditionalTransition": true,
+    "idempotency": true,
+    "reconciliation": false,
+    "cancellation": true
+  }
+}

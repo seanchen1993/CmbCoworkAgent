@@ -1,3 +1,5 @@
+import { ModToolLoading, MODS_TOOL_SEARCH } from "./mods-tool-loading"
+import type { RegisteredFunctionTool } from "../../shared/mods/v2/tools"
 import { collectRuntimeToolCatalog } from "./runtime-tool-catalog"
 import { applyClassicToolOutput } from "../hooks/tool-output"
 import { ToolMessage } from "@langchain/core/messages"
@@ -258,17 +260,35 @@ function mergeUpdatedInput(
 
 export function createToolHookMiddleware(options: ToolHookMiddlewareOptions) {
   const skipToolNames = options.skipToolNames ?? new Set<string>()
+  const loadingScopes: Array<{
+    key: string
+    authority: ModRuntimeAuthority | undefined
+    loading: ModToolLoading
+  }> = []
+  const loadingFor = (authority: ModRuntimeAuthority | undefined, turnId: string, agentId: string) => {
+    const key = JSON.stringify([options.workspacePath, options.threadId, turnId, agentId])
+    let scope = loadingScopes.find(entry => entry.key === key && entry.authority === authority)
+    if (!scope) {
+      scope = { key, authority, loading: new ModToolLoading() }
+      loadingScopes.push(scope)
+      if (loadingScopes.length > 32) loadingScopes.shift()?.loading.clear()
+    }
+    return scope.loading
+  }
 
   return createMiddleware({
     name: "toolHookMiddleware",
     wrapModelCall: async (request, handler) => {
       const manager = getModsManager()
-      if (!manager?.isActive(options.workspacePath)) return handler(request)
+      if (!manager?.isActive(options.workspacePath)) {
+        for (const scope of loadingScopes) scope.loading.clear()
+        return handler(request)
+      }
       const execution = currentFunctionExecution()
       const runtimeAuthority = execution ? execution.runtimeAuthority : options.runtimeAuthority
       const turnId = execution?.turnId ?? options.hookTurnId ?? options.threadId
       const agentId =
-        getHookAgentIdFromRequest(request) ?? execution?.agentId ?? options.agentId ?? "main"
+        runtimeAuthority?.agentId ?? execution?.agentId ?? options.agentId ?? "main"
       const nativeTools = collectRuntimeToolCatalog(request.tools)
       manager.bindFunctionToolCatalog(
         {
@@ -280,40 +300,56 @@ export function createToolHookMiddleware(options: ToolHookMiddlewareOptions) {
         },
         nativeTools
       )
-      // Only known host-bound subagents may receive guest tools under their role policy.
-      const registered = await withFunctionExecution(
+      const signal = (request as unknown as { runtime?: { signal?: AbortSignal } }).runtime?.signal
+        ?? new AbortController().signal
+      const loading = loadingFor(runtimeAuthority, turnId, agentId)
+      const projection = await withFunctionExecution(
         {
-          workspace: manager.workspaceKey(options.workspacePath),
-          runtimeAuthority,
-          threadId: options.threadId,
-          agentId,
-          userInitiated: false,
-          turnId,
-          leased: true,
-          immediate: false
+          workspace: manager.workspaceKey(options.workspacePath), runtimeAuthority,
+          threadId: options.threadId, agentId, userInitiated: false, turnId,
+          leased: true, immediate: false
         },
-        () =>
-          agentId === "main" || runtimeAuthority
-            ? manager.registeredFunctionTools(options.workspacePath, options.threadId)
-            : Promise.resolve([])
+        async () => {
+          signal.throwIfAborted()
+          const guard = manager.captureFunctionToolCatalogGuard(options.workspacePath, options.threadId)
+          const registered = agentId === "main" || runtimeAuthority
+            ? await manager.registeredFunctionTools(options.workspacePath, options.threadId) : []
+          if (registered.some(tool => nativeTools.some(native => native.name === tool.name)))
+            throw new Error("MODS_TOOL_NAME_COLLISION")
+          const described: RegisteredFunctionTool[] = []
+          for (const tool of registered) {
+            const output = await manager.presentationEvent(options.workspacePath, options.threadId,
+              "tool.describe", {
+                tool: tool.name, description: tool.description,
+                provider: { plugin: tool.plugin, tier: tool.tier ?? "user" },
+                isDeferred: tool.isDeferred !== false
+              }, signal)
+            signal.throwIfAborted()
+            guard()
+            if (typeof output.description !== "string" ||
+                (output.isDeferred !== undefined && typeof output.isDeferred !== "boolean"))
+              throw Error("MODS_TOOL_DESCRIPTION_UNSUPPORTED")
+            described.push({ ...tool, registrationId: tool.registrationId ?? JSON.stringify(tool),
+              description: output.description,
+              isDeferred: output.isDeferred === undefined ? tool.isDeferred !== false : output.isDeferred })
+          }
+          // A description hook may register/replace a tool. Never publish the stale schema.
+          const current = agentId === "main" || runtimeAuthority
+            ? await manager.registeredFunctionTools(options.workspacePath, options.threadId) : []
+          signal.throwIfAborted()
+          guard()
+          if (JSON.stringify(current) !== JSON.stringify(registered))
+            throw Error("MODS_TOOL_CATALOG_CHANGED")
+          const assertLive = () => { signal.throwIfAborted(); guard() }
+          const placement = loading.prepare(described, assertLive)
+          if (loading.ownsSearch() && nativeTools.some(tool => tool.name === MODS_TOOL_SEARCH)) {
+            loading.clear()
+            throw new Error("MODS_TOOL_NAME_COLLISION")
+          }
+          return { ...placement, assertLive }
+        }
       )
-      if (registered.some((tool) => nativeTools.some((native) => native.name === tool.name)))
-        throw new Error("MODS_TOOL_NAME_COLLISION")
-      const tools = registered.length
-        ? [
-            ...request.tools,
-            // Dynamic client Runnable instances are rejected by AgentNode. Advertise schemas;
-            // wrapToolCall serves them through the same grant-checked FunctionSession.
-            ...registered.map((tool) => ({
-              type: "function" as const,
-              function: {
-                name: tool.name,
-                description: tool.description,
-                parameters: tool.inputSchema
-              }
-            }))
-          ]
-        : request.tools
+      const tools = [...request.tools, ...projection.tools]
       const blocks = [
         ...(await manager.context({
           runtimeAuthority,
@@ -323,8 +359,10 @@ export function createToolHookMiddleware(options: ToolHookMiddlewareOptions) {
           agentId,
           activePluginIds: options.hookScope.activePluginIds
         })),
-        ...functionToolContexts(request.messages)
+        ...functionToolContexts(request.messages),
+        ...(projection.context ? [projection.context] : [])
       ]
+      projection.assertLive()
       return handler({
         ...request,
         tools,
@@ -337,6 +375,39 @@ export function createToolHookMiddleware(options: ToolHookMiddlewareOptions) {
     wrapToolCall: async (request: any, handler: any): Promise<any> => {
       const execution = currentFunctionExecution()
       const runtimeAuthority = execution ? execution.runtimeAuthority : options.runtimeAuthority
+      const toolName = request.toolCall?.name
+      const manager = getModsManager()
+      const turnId = execution?.turnId ?? options.hookTurnId ?? options.threadId
+      const agentId = runtimeAuthority?.agentId ?? execution?.agentId ?? options.agentId ?? "main"
+      const loading = loadingFor(runtimeAuthority, turnId, agentId)
+      const ownsSearch = toolName === MODS_TOOL_SEARCH && loading.ownsSearch()
+      if (ownsSearch || (typeof toolName === "string" && toolName.startsWith("mcp__"))) {
+        const signal = request.runtime?.signal as AbortSignal | undefined
+        try {
+          const searchResult = await withFunctionExecution({
+            workspace: manager?.workspaceKey(options.workspacePath) ?? options.workspacePath,
+            runtimeAuthority, threadId: options.threadId, agentId, userInitiated: false,
+            turnId, leased: true, immediate: false
+          }, async () => {
+            signal?.throwIfAborted()
+            const current = manager && (agentId === "main" || runtimeAuthority)
+              ? await manager.registeredFunctionTools(options.workspacePath, options.threadId) : []
+            if (ownsSearch) return loading.search(request.toolCall.args, current, signal)
+            // Native MCP tools still follow their normal adapter path. Only registered Mods
+            // definitions are subject to this model-publication check.
+            if (loading.has(toolName) || current.some(tool => tool.name === toolName))
+              loading.assertCallable(toolName, current, signal)
+            return undefined
+          })
+          if (searchResult) return new ToolMessage({ name: toolName,
+            tool_call_id: request.toolCall.id ?? "", status: "success",
+            content: JSON.stringify(searchResult) })
+        } catch (error) {
+          signal?.throwIfAborted()
+          return new ToolMessage({ name: toolName, tool_call_id: request.toolCall.id ?? "",
+            status: "error", content: error instanceof Error ? error.message : "MODS_TOOL_NOT_LOADED" })
+        }
+      }
       return withModToolCall(
         {
           runtimeAuthority,

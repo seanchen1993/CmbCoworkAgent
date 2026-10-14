@@ -32,6 +32,8 @@ function removeFreeformOptions(questions: UserInputQuestion[]): UserInputQuestio
 }
 
 export interface RequestUserInputToolContext {
+  /** A native flow may treat rejected/cancelled interactions as terminal. */
+  onRejected?: (reason: string) => void
   threadId: string
   abortSignal?: AbortSignal
   allowDeferredRenderer?: boolean
@@ -125,6 +127,11 @@ export function createRequestUserInputTool(context: RequestUserInputToolContext)
           2
         )
       } catch (error) {
+        context.onRejected?.(
+          error instanceof UserInputRequestRejectedError
+            ? "user-input-rejected"
+            : "user-input-cancelled"
+        )
         if (error instanceof UserInputRequestRejectedError) {
           return JSON.stringify(
             {

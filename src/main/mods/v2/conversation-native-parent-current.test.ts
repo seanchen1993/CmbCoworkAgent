@@ -1,0 +1,475 @@
+import { randomUUID } from "node:crypto"
+import { mkdtempSync, rmSync } from "node:fs"
+import { tmpdir } from "node:os"
+import { join } from "node:path"
+import { DatabaseSync } from "node:sqlite"
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest"
+import { ModsManager } from "../manager"
+import { FunctionConversationStore, readFunctionConversationStoreCurrentExecution } from
+  "../../db/function-conversation-store"
+import { NativeSqliteAdapter, openNativeSqliteDatabase,
+  readFunctionConversationNativeSqliteCurrentExecution } from "../../db/native-sqlite-adapter"
+import { claimLocalThreadRunLease, releaseLocalThreadRunLease } from "../../agent/thread-run-lease"
+import { FunctionConversationCoordinator, readFunctionConversationNativeParentCurrent,
+  type FunctionConversationCoordinatorHost } from "./conversation-coordinator"
+import { FunctionConversationChildFamilies, type FunctionConversationChildParent,
+  type FunctionConversationChildParentCapture } from "./conversation-child-family"
+import { FunctionConversationRegistry } from "./conversation-registry"
+import { projectFunctionSessionApiMessages } from "./session-api-transcript"
+import { THREAD_INCARNATION_METADATA_KEY } from "../../services/thread-incarnation"
+import type { FunctionConversationCallContext } from "./session-conversation-host"
+import type { FunctionPlugin } from "./dispatcher"
+
+const paths = vi.hoisted(() => ({ database: "" }))
+vi.mock("../../storage", () => ({ getDbPath: () => paths.database,
+  getMemorySessionOptInMigrationState: () => ({ migrated: true }),
+  markMemorySessionOptInMigrated: vi.fn() }))
+vi.mock("electron", () => ({ app: { getPath: () => "", getName: () => "test",
+  getVersion: () => "0" }, BrowserWindow: { getAllWindows: () => [] },
+  dialog: {}, ipcMain: { handle: () => {} } }))
+import * as appDb from "../../db"
+
+let directory = ""
+beforeAll(async () => {
+  directory = mkdtempSync(join(tmpdir(), "cmb-native-parent-current-"))
+  paths.database = join(directory, "actual.sqlite")
+  await appDb.initializeDatabase()
+})
+afterAll(async () => {
+  await appDb.closeDatabase()
+  rmSync(directory, { recursive: true, force: true })
+})
+
+function ownValue(value: object, key: string): unknown {
+  const field = Object.getOwnPropertyDescriptor(value, key)
+  if (!field || !("value" in field)) throw Error("ACTUAL_OWN_DATA_REQUIRED")
+  return field.value
+}
+
+class GenericStore extends FunctionConversationStore {}
+
+async function fixture(options: { genericStore?: boolean; wrappedBackend?: boolean;
+  inheritedScope?: boolean; beforeCoordinator?(): void; firstSelection?(): void;
+  bind?(input: FunctionConversationChildParentCapture<object>): void } = {}) {
+  const manager = new ModsManager(join(directory, `${randomUUID()}.control.sqlite`),
+    () => [], async () => true, () => {})
+  manager.configure(directory, true, false)
+  const workspace = manager.workspaceKey(directory), threadId = randomUUID(), runId = randomUUID()
+  const controller = new AbortController()
+  appDb.createThread(threadId, { workspacePath: workspace })
+  expect(claimLocalThreadRunLease({ threadId, runId, owner: "desktop" }).acquired).toBe(true)
+  const runtime = manager.createRuntimeAuthority({ workspace, threadId, turnId: runId,
+    signal: controller.signal })
+  const unbind = manager.bindThread({ workspace, threadId, turnId: runId,
+    signal: controller.signal, runtimeAuthority: runtime.authority })
+  const originalGuard = manager.captureFunctionRuntimeGuard(runtime.authority)
+  const database = appDb.getDb()
+  const store = options.genericStore ? new GenericStore(database) : new FunctionConversationStore(database)
+  let observing = false, sourceCalls = 0, scopeCalls = 0, factoryCalls = 0
+  let totalSources = 0, totalScopes = 0
+  let afterSource: (() => void) | undefined, afterScope: (() => void) | undefined
+  let selecting = false, selectionStarted = false
+  const receiverWitness: { source?: unknown; scope?: unknown } = {
+    source: undefined,
+    scope: undefined
+  }
+  const context: FunctionConversationCallContext = { owner: {},
+    plugin: { name: "actual-parent-current-plugin" } as FunctionPlugin,
+    workspace, threadId, signal: controller.signal, readOnly: false,
+    assertCurrent: function () {
+      totalSources++
+      if (observing) { sourceCalls++; receiverWitness.source = this }
+      originalGuard()
+      if (selecting && !selectionStarted) {
+        selectionStarted = true
+        options.firstSelection?.()
+      }
+      if (observing) afterSource?.()
+    } }
+  const host: FunctionConversationCoordinatorHost = {
+    authorities: { get: authority => manager.getFunctionConversationAuthority(authority) },
+    assertScope: function () {
+      totalScopes++
+      if (observing) { scopeCalls++; receiverWitness.scope = this }
+      originalGuard()
+      if (observing) afterScope?.()
+    }, readCurrentCheckpoint: async () => null,
+    protect: async (_context, value, signal, guard) => {
+      signal.throwIfAborted(); guard(); return value
+    }, apiMessages: projectFunctionSessionApiMessages, changed: () => {} }
+  if (options.inheritedScope) {
+    const originalScope = ownValue(host, "assertScope")
+    Reflect.deleteProperty(host, "assertScope")
+    Object.setPrototypeOf(host, { assertScope: originalScope })
+  }
+  let closeOwner: (() => void) | undefined
+  const shutdown = async () => {
+    observing = false; afterSource = afterScope = undefined
+    controller.abort()
+    const results = await Promise.allSettled([
+      Promise.resolve().then(() => closeOwner?.()), Promise.resolve().then(() => unbind()),
+      Promise.resolve().then(() => runtime.release()), Promise.resolve().then(() => manager.close()),
+      Promise.resolve().then(() => releaseLocalThreadRunLease(threadId, "desktop", runId))
+    ])
+    for (let index = 0; index < results.length; index++) {
+      const result = results[index]
+      if (result.status === "rejected") throw result.reason
+    }
+  }
+  try {
+    options.beforeCoordinator?.()
+    const coordinator = new FunctionConversationCoordinator(store, host)
+    manager.setFunctionConversations(coordinator)
+    closeOwner = coordinator.openConversationOwner(context)
+    const registerMain = FunctionConversationRegistry.prototype.registerMain
+    const backendSpy = options.wrappedBackend
+      ? vi.spyOn(FunctionConversationRegistry.prototype, "registerMain")
+        .mockImplementation(function (this: FunctionConversationRegistry, owner, backend) {
+          return Reflect.apply(registerMain, this, [owner, { ...backend,
+            assertCurrent: () => Reflect.apply(backend.assertCurrent, backend, []) }])
+        }) : undefined
+    let prepared: Awaited<ReturnType<FunctionConversationCoordinator["prepareRuntime"]>>
+    try { prepared = await coordinator.prepareRuntime(workspace, threadId) }
+    finally { backendSpy?.mockRestore() }
+    const families = ownValue(coordinator, "families")
+    if (!(families instanceof FunctionConversationChildFamilies)) throw Error("ACTUAL_FAMILY_REQUIRED")
+    let input: FunctionConversationChildParentCapture<object> | undefined
+    const originalCapture = FunctionConversationChildFamilies.prototype.captureParent
+    const captureSpy = vi.spyOn(FunctionConversationChildFamilies.prototype, "captureParent")
+      .mockImplementation(function (this: FunctionConversationChildFamilies<object>, actual) {
+        input = actual
+        options.bind?.(actual)
+        return Reflect.apply(originalCapture, this, [actual])
+      })
+    let proof: FunctionConversationChildParent | undefined
+    try {
+      selecting = true
+      proof = coordinator.captureChildParent(workspace, threadId, {
+        target: prepared.target.ref, checkpointThreadId: threadId, runtimeCheckpointNamespace: "",
+        signal: controller.signal, initialState: prepared.state,
+        assertCurrent: () => runtime.authority.assertLive()
+      }, () => { factoryCalls++; runtime.authority.assertLive() })
+    } finally { selecting = false; captureSpy.mockRestore() }
+    if (!proof || !input) throw Error("ACTUAL_PARENT_REQUIRED")
+    const actualInput = input, parent = families.readParent(proof)
+    const restored: Array<() => void> = []
+    const replace = (value: object, key: string, field: PropertyDescriptor) => {
+      const original = Object.getOwnPropertyDescriptor(value, key)
+      restored[restored.length] = () => {
+        if (original) Object.defineProperty(value, key, original)
+        else Reflect.deleteProperty(value, key)
+      }
+      Object.defineProperty(value, key, field)
+    }
+    return { manager, coordinator, store, database, controller, runtime, families, proof,
+      input: actualInput, parent, threadId, runId, context, host, prepared, replace,
+      source: (hook: () => void) => { afterSource = hook },
+      scope: (hook: () => void) => { afterScope = hook },
+      run: () => {
+        sourceCalls = scopeCalls = 0; observing = true
+        try { parent.assertCurrent(); return { source: sourceCalls, scope: scopeCalls } }
+        finally { observing = false }
+      }, receivers: () => ({ source: receiverWitness.source, scope: receiverWitness.scope }),
+      factoryCalls: () => factoryCalls,
+      totals: () => ({ source: totalSources, scope: totalScopes }),
+      close: async () => {
+        observing = false; afterSource = afterScope = undefined
+        for (let index = restored.length - 1; index >= 0; index--) restored[index]()
+        await shutdown()
+      } }
+  } catch (error) {
+    try { await shutdown() } catch { /* The original setup failure remains the test failure. */ }
+    throw error
+  }
+}
+
+describe("actual native parent current execution", () => {
+  it("runs original Owner G/P once with the original receivers and fresh Store facts", async () => {
+    const f = await fixture()
+    try {
+      expect(readFunctionConversationNativeParentCurrent(f.input)).toBeDefined()
+      expect(f.run()).toEqual({ source: 1, scope: 1 })
+      expect(f.receivers().source).toBe(f.context)
+      expect(f.receivers().scope).toBe(f.host)
+      expect(f.run()).toEqual({ source: 1, scope: 1 })
+      f.store.assertCurrent(f.prepared.target.ref)
+      expect(f.store.readRows(f.prepared.target.ref)).toEqual([])
+    } finally { await f.close() }
+  })
+
+  it.each(["generic-store", "wrapped-backend"])("keeps old two Owner calls for %s", async mode => {
+    const f = await fixture({ genericStore: mode === "generic-store",
+      wrappedBackend: mode === "wrapped-backend" })
+    try {
+      expect(readFunctionConversationNativeParentCurrent(f.input)).toBeUndefined()
+      expect(f.run()).toEqual({ source: 2, scope: 2 })
+    } finally { await f.close() }
+  })
+
+  it.each(["getter", "fake"])("does not inherit Store execution during first selection (%s)", async mode => {
+    const original = Object.getOwnPropertyDescriptor(Object.prototype, "execution")
+    let reads = 0, fakeCalls = 0, selections = 0
+    let f: Awaited<ReturnType<typeof fixture>> | undefined
+    try {
+      f = await fixture({ firstSelection: () => {
+        selections++
+        const fake = { assertCurrent() { fakeCalls++ }, assertDataCurrent() { fakeCalls++ } }
+        Object.defineProperty(Object.prototype, "execution", mode === "getter" ? {
+          configurable: true, get() { reads++; return fake }
+        } : { configurable: true, value: fake })
+      } })
+      const actual = f
+      expect(selections).toBe(1)
+      expect(readFunctionConversationNativeParentCurrent(f.input)).toBeDefined()
+      expect(f.run()).toEqual({ source: 1, scope: 1 })
+      f.database.run("UPDATE function_conversations SET checkpoint_namespace = ? WHERE conversation_id = ?",
+        ["actual changed first-selection scope", f.prepared.target.ref.conversationId])
+      expect(() => actual.run()).toThrow()
+      expect(reads).toBe(0); expect(fakeCalls).toBe(0)
+    } finally {
+      if (original) Object.defineProperty(Object.prototype, "execution", original)
+      else Reflect.deleteProperty(Object.prototype, "execution")
+      await f?.close()
+    }
+  })
+
+  it("keeps an inherited host scope generic without reading inherited private qualification fields", async () => {
+    const originalScope = Object.getOwnPropertyDescriptor(Object.prototype, "scope")
+    const originalFields = Object.getOwnPropertyDescriptor(Object.prototype, "scopeFields")
+    let reads = 0, fakeCalls = 0
+    let f: Awaited<ReturnType<typeof fixture>> | undefined
+    try {
+      f = await fixture({ inheritedScope: true, beforeCoordinator: () => {
+        Object.defineProperty(Object.prototype, "scope", { configurable: true,
+          get() { reads++; return () => { fakeCalls++ } } })
+        Object.defineProperty(Object.prototype, "scopeFields", { configurable: true,
+          get() { reads++; return [] } })
+      } })
+      const actual = f
+      expect(Object.getOwnPropertyDescriptor(f.host, "assertScope")).toBeUndefined()
+      expect(readFunctionConversationNativeParentCurrent(f.input)).toBeUndefined()
+      expect(f.run()).toEqual({ source: 2, scope: 2 })
+      expect(f.receivers().scope).toBe(f.host)
+      expect(reads).toBe(0); expect(fakeCalls).toBe(0)
+      f.database.run("UPDATE function_conversations SET checkpoint_namespace = ? WHERE conversation_id = ?",
+        ["actual changed generic scope", f.prepared.target.ref.conversationId])
+      expect(() => actual.run()).toThrow()
+      expect(reads).toBe(0); expect(fakeCalls).toBe(0)
+    } finally {
+      if (originalScope) Object.defineProperty(Object.prototype, "scope", originalScope)
+      else Reflect.deleteProperty(Object.prototype, "scope")
+      if (originalFields) Object.defineProperty(Object.prototype, "scopeFields", originalFields)
+      else Reflect.deleteProperty(Object.prototype, "scopeFields")
+      await f?.close()
+    }
+  })
+
+  it("rejects borrowed function tuples, wrappers and Proxy without reading traps", async () => {
+    const f = await fixture()
+    let traps = 0
+    try {
+      expect(readFunctionConversationNativeParentCurrent({ ...f.input })).toBeUndefined()
+      expect(readFunctionConversationNativeParentCurrent({ ...f.input, physicalParentThreadId: randomUUID() }))
+        .toBeUndefined()
+      expect(readFunctionConversationNativeParentCurrent({ ...f.input,
+        assertCurrent: () => f.input.assertCurrent() })).toBeUndefined()
+      expect(readFunctionConversationNativeParentCurrent(new Proxy(f.input, {
+        getOwnPropertyDescriptor() { traps++; throw Error("UNEXPECTED_PROXY_TRAP") },
+        getPrototypeOf() { traps++; throw Error("UNEXPECTED_PROXY_TRAP") }
+      }))).toBeUndefined()
+      expect(traps).toBe(0)
+      expect(f.run()).toEqual({ source: 1, scope: 1 })
+    } finally { await f.close() }
+  })
+
+  it.each(["getter", "replacement"])("binds the real parent function despite own bind %s", async mode => {
+    let reads = 0, fakeCalls = 0
+    const f = await fixture({ bind: input => {
+      Object.defineProperty(input.assertCurrent, "bind", mode === "getter" ? {
+        get() { reads++; return () => { fakeCalls++; return () => {} } }, configurable: true
+      } : { value: () => { fakeCalls++; return () => {} }, configurable: true })
+    } })
+    try {
+      expect(f.run()).toEqual({ source: 1, scope: 1 })
+      expect(reads).toBe(0); expect(fakeCalls).toBe(0)
+    } finally { await f.close() }
+  })
+
+  it("keeps the original independent factory function outside the current binding", async () => {
+    const f = await fixture()
+    try {
+      const before = f.factoryCalls()
+      f.parent.assertFactory()
+      expect(f.factoryCalls()).toBe(before + 1)
+      expect(f.families.readParent(f.proof)).toBe(f.parent)
+      expect(f.run()).toEqual({ source: 1, scope: 1 })
+      expect(f.factoryCalls()).toBe(before + 1)
+    } finally { await f.close() }
+  })
+
+  it.each(["assertEntry", "assertResident", "assertBackend"])(
+    "executes the fixed complete Registry dispatch despite late %s", async method => {
+      const f = await fixture(), registry = f.coordinator.registry
+      let reads = 0
+      try {
+        f.source(() => f.replace(registry, method, { configurable: true,
+          get() { reads++; return () => {} } }))
+        expect(f.run()).toEqual({ source: 1, scope: 1 })
+        expect(reads).toBe(0)
+      } finally { await f.close() }
+    })
+
+  it.each(["assertCurrent", "assertThread"])("executes complete SQL despite late Store %s", async method => {
+    const f = await fixture()
+    let reads = 0
+    try {
+      f.source(() => f.replace(f.store, method, { configurable: true,
+        get() { reads++; return () => {} } }))
+      expect(f.run()).toEqual({ source: 1, scope: 1 })
+      expect(reads).toBe(0)
+      f.database.run("UPDATE function_conversations SET checkpoint_namespace = ? WHERE conversation_id = ?",
+        ["actual changed scope", f.prepared.target.ref.conversationId])
+      expect(() => f.run()).toThrow()
+      expect(reads).toBe(0)
+    } finally { await f.close() }
+  })
+
+  it.each(["getter", "replacement"])("does not use a late native prepare %s", async mode => {
+    const f = await fixture(), native = ownValue(f.database, "native")
+    if (!native || typeof native !== "object") throw Error("ACTUAL_NATIVE_DATABASE_REQUIRED")
+    let reads = 0
+    try {
+      f.source(() => f.replace(native, "prepare", mode === "getter" ? {
+        configurable: true, get() { reads++; throw Error("UNEXPECTED_PREPARE") }
+      } : { configurable: true, value() { reads++; throw Error("UNEXPECTED_PREPARE") } }))
+      expect(f.run()).toEqual({ source: 1, scope: 1 })
+      expect(reads).toBe(0)
+    } finally { await f.close() }
+  })
+
+  it("rejects a last P thread incarnation change and remains failed after SQL is restored", async () => {
+    const f = await fixture()
+    const row = appDb.getThreadCore(f.threadId)
+    if (!row) throw Error("ACTUAL_THREAD_REQUIRED")
+    try {
+      f.scope(() => f.database.run("UPDATE threads SET metadata = ? WHERE thread_id = ?",
+        [JSON.stringify({ [THREAD_INCARNATION_METADATA_KEY]: randomUUID() }), f.threadId]))
+      expect(() => f.run()).toThrow()
+      f.database.run("UPDATE threads SET metadata = ? WHERE thread_id = ?", [row.metadata, f.threadId])
+      f.scope(() => {})
+      expect(() => f.run()).toThrow()
+      expect(f.store.readRows(f.prepared.target.ref)).toEqual([])
+    } finally { await f.close() }
+  })
+
+  it.each([false, true])("rejects last P lease retirement (reacquire=%s)", async reacquire => {
+    const f = await fixture()
+    try {
+      f.scope(() => {
+        expect(releaseLocalThreadRunLease(f.threadId, "desktop", f.runId)).toBe(true)
+        if (reacquire) expect(claimLocalThreadRunLease({ threadId: f.threadId,
+          runId: f.runId, owner: "desktop" }).acquired).toBe(true)
+      })
+      expect(() => f.run()).toThrow()
+      f.scope(() => {})
+      if (!reacquire) expect(claimLocalThreadRunLease({ threadId: f.threadId,
+        runId: f.runId, owner: "desktop" }).acquired).toBe(true)
+      expect(() => f.run()).toThrow()
+      expect(f.store.readRows(f.prepared.target.ref)).toEqual([])
+    } finally { await f.close() }
+  })
+
+  it("rejects an Owner incarnation getter before its database side effect is called", async () => {
+    const f = await fixture()
+    let reads = 0
+    try {
+      f.source(() => f.replace(f.input.owner, "incarnation", { configurable: true,
+        get() { reads++; f.database.run("DELETE FROM threads WHERE thread_id = ?", [f.threadId])
+          return f.prepared.target.ref.incarnation } }))
+      expect(() => f.run()).toThrow()
+      expect(reads).toBe(0)
+      expect(appDb.getThreadCore(f.threadId)).not.toBeNull()
+    } finally { await f.close() }
+  })
+
+  it("poisons a caught first G reentry even after the nested error is caught", async () => {
+    const f = await fixture()
+    let nested = 0
+    try {
+      f.source(() => { try { f.parent.assertCurrent() } catch { nested++ } })
+      expect(() => f.run()).toThrow()
+      expect(nested).toBe(1)
+      f.source(() => {})
+      expect(() => f.run()).toThrow()
+      expect(f.store.readRows(f.prepared.target.ref)).toEqual([])
+    } finally { await f.close() }
+  })
+
+  it("rejects a changed actual input tuple without running its getter or Source", async () => {
+    const f = await fixture()
+    let reads = 0
+    try {
+      f.replace(f.input, "signal", { configurable: true, get() { reads++; return f.controller.signal } })
+      expect(() => readFunctionConversationNativeParentCurrent(f.input)).toThrow()
+      expect(reads).toBe(0)
+      expect(() => f.run()).toThrow()
+    } finally { await f.close() }
+  })
+
+  it("does not read a replaced actual Registry entry target at the pure tail", async () => {
+    const f = await fixture(), targets = ownValue(f.coordinator.registry, "targets")
+    if (!(targets instanceof WeakMap)) throw Error("ACTUAL_TARGET_TABLE_REQUIRED")
+    const entry: unknown = Reflect.apply(WeakMap.prototype.get, targets, [f.prepared.target])
+    if (!entry || typeof entry !== "object") throw Error("ACTUAL_REGISTRY_ENTRY_REQUIRED")
+    let reads = 0
+    try {
+      f.scope(() => f.replace(entry, "target", { configurable: true,
+        get() { reads++; f.database.run("DELETE FROM threads WHERE thread_id = ?", [f.threadId])
+          return f.prepared.target } }))
+      expect(() => f.run()).toThrow()
+      expect(reads).toBe(0)
+      expect(appDb.getThreadCore(f.threadId)).not.toBeNull()
+    } finally { await f.close() }
+  })
+
+  it("keeps the exact-input reader and data tail free of Source callbacks", async () => {
+    const f = await fixture()
+    try {
+      const native = readFunctionConversationNativeParentCurrent(f.input)
+      if (!native) throw Error("ACTUAL_PARENT_CURRENT_REQUIRED")
+      expect(f.run()).toEqual({ source: 1, scope: 1 })
+      const before = f.totals()
+      native.assertDataCurrent()
+      expect(readFunctionConversationNativeParentCurrent(f.input)).toBe(native)
+      native.assertDataCurrent()
+      expect(f.totals()).toEqual(before)
+    } finally { await f.close() }
+  })
+
+  it("uses only original private open-factory resources for Adapter and Store execution", async () => {
+    const actual = openNativeSqliteDatabase(join(directory, `${randomUUID()}.origin.sqlite`)).database
+    const direct = new NativeSqliteAdapter(new DatabaseSync(":memory:"))
+    const native = ownValue(actual, "native")
+    if (!(native instanceof DatabaseSync)) throw Error("ACTUAL_NATIVE_DATABASE_REQUIRED")
+    const alias = new NativeSqliteAdapter(native)
+    try {
+      const execution = readFunctionConversationNativeSqliteCurrentExecution(actual)
+      if (!execution) throw Error("ACTUAL_FACTORY_ORIGIN_REQUIRED")
+      expect(readFunctionConversationNativeSqliteCurrentExecution(direct)).toBeUndefined()
+      expect(readFunctionConversationNativeSqliteCurrentExecution(alias)).toBeUndefined()
+      expect(readFunctionConversationNativeSqliteCurrentExecution(Object.create(NativeSqliteAdapter.prototype)))
+        .toBeUndefined()
+      const store = new FunctionConversationStore(actual)
+      expect(readFunctionConversationStoreCurrentExecution(store, actual)).toBeDefined()
+      expect(readFunctionConversationStoreCurrentExecution(store, direct)).toBeUndefined()
+      expect(readFunctionConversationStoreCurrentExecution(Object.create(FunctionConversationStore.prototype), actual))
+        .toBeUndefined()
+      actual.close()
+      expect(() => execution.assertDataCurrent()).toThrow("Database is closed")
+      expect(() => readFunctionConversationNativeSqliteCurrentExecution(actual))
+        .toThrow(new Error("[NativeSqlite] Read-one adapter changed"))
+      expect(() => execution.assertDataCurrent())
+        .toThrow(new Error("[NativeSqlite] Read-one adapter changed"))
+    } finally { actual.close(); direct.close() }
+  })
+})

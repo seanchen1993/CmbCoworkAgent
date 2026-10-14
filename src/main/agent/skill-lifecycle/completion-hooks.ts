@@ -147,6 +147,7 @@ export function mergePostSkillUseResults(results: HookResult[]): HookResult | nu
 
 export async function runPostSkillUseHooksForActivatedSkills({
   signal,
+  agentId,
   threadId,
   workspacePath,
   turnId,
@@ -171,6 +172,7 @@ export async function runPostSkillUseHooksForActivatedSkills({
   resolveHooks
 }: {
   signal?: AbortSignal
+  agentId?: string
   threadId: string
   workspacePath?: string
   turnId?: string
@@ -201,6 +203,7 @@ export async function runPostSkillUseHooksForActivatedSkills({
   for (const skill of pending) {
     const context: HookContext = {
       signal,
+      agentId,
       toolName: skill.triggerToolName,
       toolArgs: {
         trigger: skill.trigger,

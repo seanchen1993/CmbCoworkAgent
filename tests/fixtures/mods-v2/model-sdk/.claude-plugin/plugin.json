@@ -1,1 +1,6 @@
-{"name":"model-sdk"}
+{
+  "name": "model-sdk",
+  "cmbCompatibility": {
+    "modelProtocol": "legacy-v1"
+  }
+}

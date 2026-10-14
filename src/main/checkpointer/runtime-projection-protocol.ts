@@ -1,4 +1,5 @@
 import type { FunctionSessionCheckpoint } from "../../shared/mods/v2/session"
+import type { CanonicalCheckpointDisplaySelection } from "./function-conversation-canonical-display-worker"
 
 export interface CheckpointRuntimeProjectionStats {
   sourceBytes: number
@@ -37,6 +38,8 @@ export interface CheckpointLatestTupleReadRequest {
   messageLimit?: number
   messageByteBudget?: number
   cancellationBuffer?: SharedArrayBuffer
+  /** Supplied only by the native display client inside its original Saver read lifetime. */
+  nativeDisplay?: CanonicalCheckpointDisplaySelection
 }
 
 export interface CheckpointLatestRuntimeTupleReadRequest {

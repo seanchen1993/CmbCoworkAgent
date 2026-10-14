@@ -25,6 +25,10 @@
 
 PR-B 后直接调用点基线为 8：共享 standard-turn factory 1、Scheduler 1、Heartbeat 1、Legacy ChatX 1、Runtime 内部子执行 4。Desktop 的 7 个模型/failover 执行点全部汇入同一个受控 factory。`createAgentRuntime()` 内部通过 `getCheckpointer(threadId)` 取得同名 Checkpointer，因此任何新增的裸 Runtime 入口也是潜在的并发 Checkpoint 写入口。
 
+### 2026-10-12 固定项目来源补充
+
+共享 `prepareStandardThreadRuntimeFactory` 仍只有一个 `createAgentRuntime` 构造点。它先验证原 owner/runId 物理租约，再捕获可选的固定项目来源守卫，将 `onModelBoundary` 与调用方既有 callback 组合后传给原 Runtime；对象展开不构成新的运行入口。未启用项目固定来源时该守卫为空操作。旧项目 Flow 子会话必须由 NativeFlowHost 创建并占有真实子线程租约，再登记宿主 opaque 父子关联；metadata 自报不足以获得准入。Host 项目 Skill 通过 `startAgentRun` 原入口执行，没有新增模型流或 checkpoint owner。
+
 ## 非 Runtime、但会直接访问 Checkpoint 的入口
 
 下列路径不创建 Agent Runtime，但同样会读取、写入、关闭或删除 Checkpoint；PR-C 不能把它们误当成新的执行 owner：

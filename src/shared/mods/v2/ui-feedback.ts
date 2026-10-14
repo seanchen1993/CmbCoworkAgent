@@ -8,6 +8,7 @@ export interface FunctionFeedbackEntry {
   kind: "toast" | "status" | "notice"
   text: string
   expiresAt?: number
+  timeoutMs?: number
   requestId?: string
   toolUseId?: string
 }
@@ -18,7 +19,7 @@ export function validateFunctionFeedback(method: FunctionFeedbackMethod, input: 
     Object.keys(input).some((key) => !keys.includes(key)) ||
     (input.text === undefined
       ? method !== "ui.status"
-      : typeof input.text !== "string" || input.text.length > 10000) ||
+      : typeof input.text !== "string") ||
     (input.timeoutMs !== undefined &&
       (typeof input.timeoutMs !== "number" ||
         !Number.isSafeInteger(input.timeoutMs) ||
@@ -36,7 +37,7 @@ export function functionFeedbackSnapshot(
   if (!Array.isArray(value) || value.length > original.length)
     throw new ModFunctionError("MODS_UI_FEEDBACK_SNAPSHOT")
   const rows = new Map<string, string>()
-  const fixed = ["id", "plugin", "kind", "expiresAt", "requestId", "toolUseId"] as const
+  const fixed = ["id", "plugin", "kind", "expiresAt", "timeoutMs", "requestId", "toolUseId"] as const
   for (const row of value) {
     const before = isModObject(row) ? original.find((entry) => entry.id === row.id) : undefined
     if (

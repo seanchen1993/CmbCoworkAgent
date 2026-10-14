@@ -2,7 +2,6 @@ import { AsyncLocalStorage } from "node:async_hooks"
 import { randomUUID } from "node:crypto"
 import { setTimeout as delay } from "node:timers/promises"
 import type { ModObject } from "../../shared/mods/types"
-import { getHookAgentIdFromRequest } from "../hooks/execution-context"
 import { getModCallContext, modCallContext } from "./context"
 import { getModsManager, type ModThreadBinding } from "./manager"
 import { filterModData, filterModResult } from "./publication"
@@ -36,16 +35,33 @@ export function withModToolCall<T, R extends ToolRequest>(
   handler: (request: R) => Promise<T>
 ): Promise<T | ToolMessage> {
   const manager = getModsManager()
-  if (!manager || !manager.isActive(binding.workspace) || !request.toolCall?.name)
-    return handler(request)
-  const tool = request.toolCall
-  const agentId = getHookAgentIdFromRequest(request) ?? binding.agentId ?? "main"
-  if (binding.runtimeAuthority)
-    assertModRuntimeAuthority(binding.runtimeAuthority, {
-      ...binding,
-      workspace: manager.workspaceKey(binding.workspace),
-      agentId
+  let assertRuntime: (() => void) | undefined
+  const assertLive = (): void => {
+    if (!binding.runtimeAuthority) return
+    binding.signal?.throwIfAborted()
+    binding.runtimeAuthority.assertLive()
+    binding.assertLive?.()
+    if (manager)
+      assertModRuntimeAuthority(binding.runtimeAuthority, {
+        ...binding,
+        workspace: manager.workspaceKey(binding.workspace)
+      })
+    assertRuntime?.()
+  }
+  const native = (): Promise<T> => {
+    if (!binding.runtimeAuthority) return handler(request)
+    return handler(request).then(value => {
+      assertLive()
+      return value
     })
+  }
+  assertLive()
+  if (manager && binding.runtimeAuthority)
+    assertRuntime = manager.captureFunctionRuntimeGuard(binding.runtimeAuthority)
+  if (!manager || !request.toolCall?.name || !manager.isActive(binding.workspace)) return native()
+  const tool = request.toolCall
+  // Tool-call metadata belongs to renderer/trace attribution, never SDK authority.
+  const agentId = binding.runtimeAuthority?.agentId ?? binding.agentId ?? "main"
   const callId = tool.id ?? randomUUID()
   const identity = {
     callId: `${binding.threadId}:${binding.turnId}:${agentId}:${callId}`,
@@ -59,6 +75,7 @@ export function withModToolCall<T, R extends ToolRequest>(
   }
   let executions = 0
   const execute = (args: Record<string, unknown>, signal = binding.signal): Promise<T> => {
+    assertLive()
     const currentIdentity =
       executions++ === 0
         ? identity
@@ -76,6 +93,7 @@ export function withModToolCall<T, R extends ToolRequest>(
       protectedOutput: manager.protects(binding.workspace),
       readOnly: binding.readOnly ?? false,
       signal,
+      assertLive,
       protectData: manager.protects(binding.workspace)
         ? <V>(value: V): V => manager.policy.observer(value)
         : undefined,
@@ -92,7 +110,10 @@ export function withModToolCall<T, R extends ToolRequest>(
         : await manager.dispatch(currentBinding, `host:${tool.name}`, args, (args) =>
             handler({ ...request, toolCall: { ...tool, args } })
           )
-      return manager.publish(binding.workspace, value, callId, signal)
+      assertLive()
+      const published = await manager.publish(binding.workspace, value, callId, signal)
+      assertLive()
+      return published
     })
   }
   const intercept = manager.getFunctionToolHandler(binding.workspace)
@@ -141,9 +162,14 @@ export function withModToolCall<T, R extends ToolRequest>(
         }
       throw error
     })
-    .then((answer) =>
-      manager.publish(binding.workspace, results.resolve(answer), callId, binding.signal)
-    )
+    .then(async (answer) => {
+      assertLive()
+      const published = await manager.publish(
+        binding.workspace, results.resolve(answer), callId, binding.signal
+      )
+      assertLive()
+      return published
+    })
 }
 
 interface MethodSpec {

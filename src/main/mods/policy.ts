@@ -1,3 +1,4 @@
+import { observeBuiltinPolicyDecision } from "./builtins/policy-decisions"
 import { createHash } from "node:crypto"
 import { readFileSync, statSync } from "node:fs"
 import type { ModIdentity, ModJson, ModObject } from "../../shared/mods/types"
@@ -199,6 +200,9 @@ export class ManagedModPolicy {
       },
       signal
     )
+    observeBuiltinPolicyDecision({ threadId: identity.threadId, workspace: identity.workspace, id: identity.callId,
+      source: "managed-policy", event: toolId, decision: result.allow === true ? "allow" : "deny",
+      code: result.allow === true ? "MODS_POLICY_ALLOWED" : "MODS_POLICY_TOOL_DENIED", policyDigest: this.digest })
     if (result.allow !== true) throw new ModError("MODS_POLICY_TOOL_DENIED")
   }
 

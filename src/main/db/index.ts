@@ -5,7 +5,8 @@ import {
   getMemorySessionOptInMigrationState,
   markMemorySessionOptInMigrated
 } from "../storage"
-import { type NativeSqliteAdapter, openNativeSqliteDatabase } from "./native-sqlite-adapter"
+import { type NativeSqliteAdapter, type NativeSqliteReadOne, type NativeSqliteValue,
+  openNativeSqliteDatabase } from "./native-sqlite-adapter"
 import { mergeThreadValueObjects } from "../../shared/thread-values"
 import { ensureLegacyMessageTimeArchive } from "../checkpointer/legacy-message-times"
 import {
@@ -41,6 +42,14 @@ import {
 } from "../../shared/checkpoint-transcript"
 import { projectCoordinatorTranscriptNoise } from "../../shared/internal-notification-turn"
 import { cleanUserAttachmentContentForDisplay } from "../../shared/user-attachment-display"
+import { isFunctionPluginPromptOrigin, type FunctionPluginPromptOrigin } from
+  "../../shared/mods/v2/plugin-prompt"
+import {
+  isFunctionConversationTranscriptStamp,
+  sameFunctionConversationTranscriptStamp,
+  validateFunctionConversationTranscriptStamp,
+  type FunctionConversationTranscriptStamp
+} from "../../shared/mods/v2/conversation-transcript"
 import { createChatSearchPlan, appendChatSearchToolSummaries } from "../../shared/chat-search-plan"
 import { iterateChatSearchLocations, projectChatSearchPlan } from "../../shared/chat-search-index"
 import type { ChatSearchLocation } from "../../shared/chat-search-types"
@@ -65,8 +74,28 @@ import {
 import { createHash } from "crypto"
 import {
   attachFreshThreadIncarnation,
+  captureThreadIncarnation,
+  matchesThreadIncarnation,
   preserveThreadIncarnationMetadata
 } from "../services/thread-incarnation"
+import { assertFunctionConversationForkReady } from "./function-conversation-fork-gate"
+import { deleteFunctionConversationThreadDataInTransaction } from "./function-conversation-cleanup"
+import { FUNCTION_CONVERSATION_PROJECTION_COLUMNS,
+  type FunctionConversationProjectionColumns } from "./function-conversation-projection-receipt"
+import type { FunctionConversationRef, FunctionConversationRow } from "./function-conversation-store"
+import type { createFunctionConversationNativeProjectionAccess,
+  FunctionNativeProjectionReceipt, FunctionNativeProjectionPreparation } from
+  "./function-conversation-native-projection"
+import { assertStoredProjectionReceipt } from "./function-conversation-projection-seal"
+import { withFunctionConversationProjectionReadScope, runFunctionConversationProjectionGuard,
+  assertFunctionConversationProjectionReadScope, hasFunctionConversationProjectionMarker,
+  findFunctionConversationProjectionMarkers, hasFunctionConversationProjectionReceiptSchema,
+  readSealedFunctionConversationProjectionPresentation,
+  readStoredFunctionConversationProjectionPresentationSummary,
+  type FunctionConversationProjectionPresentationSummary,
+  type FunctionConversationProjectionReadScope } from "./function-conversation-projection-read"
+import type { FunctionConversationPresentationDisposition } from
+  "./function-conversation-presentation-disposition"
 import {
   legacySubagentMigrationBatchTransactionBytes,
   LEGACY_SUBAGENT_MIGRATION_BATCH_BYTES,
@@ -556,6 +585,8 @@ export async function initializeDatabase(): Promise<NativeSqliteAdapter> {
       provider_occurrence INTEGER,
       role TEXT NOT NULL CHECK(role IN ('user', 'assistant', 'system', 'tool')),
       content_json TEXT NOT NULL,
+      prompt_origin_json TEXT,
+      function_row_json TEXT,
       reasoning TEXT,
       tool_calls_json TEXT,
       tool_call_id TEXT,
@@ -871,6 +902,10 @@ export async function initializeDatabase(): Promise<NativeSqliteAdapter> {
   }
 
   const threadMessageColumns = db.exec("PRAGMA table_info(thread_messages)")?.[0]?.values ?? []
+  if (!threadMessageColumns.some((row) => row[1] === "prompt_origin_json"))
+    db.run("ALTER TABLE thread_messages ADD COLUMN prompt_origin_json TEXT")
+  if (!threadMessageColumns.some((row) => row[1] === "function_row_json"))
+    db.run("ALTER TABLE thread_messages ADD COLUMN function_row_json TEXT")
   const hasThreadMessageGoalId = threadMessageColumns.some((row) => row[1] === "goal_id")
   if (!hasThreadMessageGoalId) {
     db.run("ALTER TABLE thread_messages ADD COLUMN goal_id TEXT")
@@ -987,6 +1022,8 @@ export interface ThreadRow {
 export type ThreadSummaryRow = Omit<ThreadRow, "thread_values">
 
 interface ThreadMessageRow {
+  prompt_origin_json: string | null
+  function_row_json: string | null
   thread_id: string
   message_id: string
   provider_source_id: string | null
@@ -1018,6 +1055,11 @@ interface ThreadMessageBucketRow {
 }
 
 export interface UpsertThreadMessagesOptions {
+  /** Main-only atomic source stamp, never accepted from a Message/renderer snapshot. */
+  hostPromptOrigin?: { messageId: string; text: string; origin: FunctionPluginPromptOrigin }
+  /** Native-only provenance, deliberately ignored on incoming renderer Message objects. */
+  hostFunctionRow?: { messageId: string; stamp: FunctionConversationTranscriptStamp;
+    storageRole?: "tool"; toolCallId?: string }
   touchThreadUpdatedAt?: boolean
   /**
    * Streaming deltas are already in durable append order. Keep existing ordinals
@@ -1031,7 +1073,7 @@ function isMessageRole(value: unknown): value is Message["role"] {
   return value === "user" || value === "assistant" || value === "system" || value === "tool"
 }
 
-function normalizeThreadMessageInput(
+export function normalizeThreadMessageInput(
   message: ThreadMessageWrite,
   fallbackTime: number
 ): ThreadMessageWrite | null {
@@ -1098,6 +1140,39 @@ function normalizeThreadMessageInput(
   }
 }
 
+/** One immutable native row projection. Never applies streaming aliases, merging or reclamping. */
+export function projectFunctionConversationThreadMessageStorageColumns(
+  message: ThreadMessageWrite,
+  fallbackTime: number
+): Record<string, NativeSqliteValue> {
+  const value = normalizeThreadMessageInput(message, fallbackTime)
+  if (!value || value.id !== message.id) throw Error("MODS_CONVERSATION_TRANSCRIPT_INVALID")
+  return {
+    message_id: value.id,
+    provider_source_id: value.provider_source_id ?? null,
+    provider_occurrence: value.provider_occurrence ?? null,
+    role: value.role,
+    content_json: safeJsonStringify(value.content),
+    reasoning: value.reasoning ?? null,
+    tool_calls_json: value.tool_calls ? safeJsonStringify(value.tool_calls) : null,
+    tool_call_id: value.tool_call_id ?? null,
+    name: value.name ?? null,
+    status: value.status ?? null,
+    is_error: value.is_error === undefined ? null : value.is_error ? 1 : 0,
+    content_priority: value.content_priority ?? null,
+    recovery_integrity: value.recovery_integrity === "verified" ? 1 : 0,
+    stream_authority: (value.content_mode === "snapshot" ? 1 : 0) |
+      (value.reasoning_mode === "snapshot" ? 2 : 0) |
+      (value.tool_calls_mode === "snapshot" ? 4 : 0),
+    created_at: normalizeTimestamp(value.created_at),
+    start_at: normalizeTimestamp(value.start_at),
+    end_at: normalizeTimestamp(value.end_at),
+    goal_id: value.goal_id ?? null,
+    active_window_id: value.active_window_id ?? null,
+    prompt_origin_json: null
+  }
+}
+
 function coalesceNormalizedThreadMessages(
   messages: readonly ThreadMessageWrite[],
   fallbackTime: number
@@ -1153,6 +1228,87 @@ function resolveThreadMessageIdAliasEntry(
     current = next.toId
   }
   return { id: current, role }
+}
+
+/** Native cold-copy identity check; this read does not grant a writer or select a target. */
+export function getThreadMessageCanonicalId(threadId: string, messageId: string): string {
+  return resolveThreadMessageIdAliasEntry(threadId, messageId).id
+}
+
+/** Host-only original alias driver. Its opaque handles are neither writer nor target authority. */
+export function captureFunctionConversationMessageAliasAccess(input: {
+  readonly threadId: string
+  readonly incarnation: ReturnType<typeof captureThreadIncarnation>
+  readonly uuid: string
+  readonly providerSourceId: string
+  assertCurrent(): void
+}) {
+  const database = getDb(), threadId = input.threadId, uuid = input.uuid
+  const provider = input.providerSourceId, incarnation = Object.freeze({ ...input.incarnation })
+  const nativeGuard = input.assertCurrent.bind(input)
+  if (!threadId || !uuid || !provider) throw Error("MODS_CONVERSATION_PROJECTION_CONFLICT")
+  let aliases = threadMessageIdAliases.get(threadId)
+  if (!aliases) {
+    aliases = new Map<string, ThreadMessageIdAlias>()
+    threadMessageIdAliases.set(threadId, aliases)
+  }
+  const originalMap = aliases
+  const guards = () => {
+    const returned: unknown = nativeGuard()
+    if (returned && typeof (returned as { then?: unknown }).then === "function")
+      throw Error("MODS_CONVERSATION_ASYNC_TRANSACTION")
+    if (getDb() !== database || !matchesThreadIncarnation(getThreadCore(threadId), incarnation) ||
+      threadMessageIdAliases.get(threadId) !== originalMap)
+      throw Error("MODS_CONVERSATION_PROJECTION_CONFLICT")
+  }
+  const relevant = () => {
+    const keys = new Set<string>([uuid, provider])
+    const walk = (start: string) => {
+      const visited = new Set<string>()
+      let key = start
+      while (true) {
+        if (visited.has(key)) throw Error("MODS_CONVERSATION_PROJECTION_CONFLICT")
+        visited.add(key)
+        const entry = originalMap.get(key)
+        if (!entry || entry.toId === key) return key
+        key = entry.toId
+      }
+    }
+    if (walk(uuid) !== uuid) throw Error("MODS_CONVERSATION_PROJECTION_CONFLICT")
+    for (const key of originalMap.keys()) if (walk(key) === uuid) keys.add(key)
+    for (const start of [...keys]) {
+      let key = start
+      while (originalMap.has(key)) {
+        keys.add(key)
+        const next = originalMap.get(key)!.toId
+        if (next === key) break
+        key = next
+      }
+    }
+    return [...keys].sort().map(key => {
+      const entry = originalMap.get(key)
+      return Object.freeze({ key, entry, toId: entry?.toId, role: entry?.role })
+    })
+  }
+  const receipts = new WeakMap<object, ReturnType<typeof relevant>>()
+  guards()
+  return Object.freeze({
+    captureAliases(): object {
+      guards()
+      const facts = relevant(), token = Object.freeze({})
+      guards()
+      receipts.set(token, facts)
+      return token
+    },
+    assertAliases(token: object): void {
+      guards()
+      const facts = receipts.get(token), current = relevant()
+      if (!facts || facts.length !== current.length || facts.some((fact, index) =>
+        fact.key !== current[index].key || fact.entry !== current[index].entry ||
+        fact.toId !== current[index].toId || fact.role !== current[index].role))
+        throw Error("MODS_CONVERSATION_PROJECTION_CONFLICT")
+    }
+  })
 }
 
 function rememberThreadMessageIdAlias(
@@ -1235,7 +1391,28 @@ function getThreadMessageTextFragments(
   return new Map([...fragments].map(([messageId, values]) => [messageId, values.join("")]))
 }
 
+function parseFunctionConversationTranscriptStamp(raw: unknown):
+  FunctionConversationTranscriptStamp | undefined {
+  if (typeof raw !== "string" || !raw) return undefined
+  try {
+    const value: unknown = JSON.parse(raw)
+    return isFunctionConversationTranscriptStamp(value) ? value : undefined
+  } catch {
+    return undefined
+  }
+}
+
 function threadMessageRowToMessage(row: ThreadMessageRow, appendedText = ""): Message {
+  const functionRow = parseFunctionConversationTranscriptStamp(row.function_row_json)
+  const invalidFunctionRow = row.function_row_json !== null &&
+    row.function_row_json !== undefined && (!functionRow || functionRow.uuid !== row.message_id)
+  let promptOrigin: FunctionPluginPromptOrigin | undefined
+  if (row.role === "user" && row.prompt_origin_json) {
+    try {
+      const parsed: unknown = JSON.parse(row.prompt_origin_json)
+      if (isFunctionPluginPromptOrigin(parsed)) promptOrigin = parsed
+    } catch { /* Legacy/corrupt data does not invent an author. */ }
+  }
   const createdAt = dateFromTimestamp(row.created_at) ?? new Date()
   const startAt = dateFromTimestamp(row.start_at)
   const endAt = dateFromTimestamp(row.end_at)
@@ -1250,12 +1427,16 @@ function threadMessageRowToMessage(row: ThreadMessageRow, appendedText = ""): Me
   return {
     id: row.message_id,
     ordinal: row.ordinal,
-    recovery_integrity: decodeTranscriptRecoveryIntegrity(row.recovery_integrity),
+    recovery_integrity: invalidFunctionRow ? "unverified" :
+      decodeTranscriptRecoveryIntegrity(row.recovery_integrity),
     ...(row.provider_source_id ? { provider_source_id: row.provider_source_id } : {}),
     ...(typeof row.provider_occurrence === "number" && row.provider_occurrence >= 1
       ? { provider_occurrence: row.provider_occurrence }
       : {}),
     role: row.role,
+    ...(invalidFunctionRow ? { function_row_invalid: true } :
+      functionRow ? { function_row: functionRow } : {}),
+    ...(promptOrigin ? { prompt_origin: promptOrigin } : {}),
     content,
     ...(row.reasoning ? { reasoning: normalizeTranscriptReasoning(row.reasoning) } : {}),
     ...(toolCalls ? { tool_calls: toolCalls } : {}),
@@ -3925,6 +4106,25 @@ export function getThreadMessagesByIds(threadId: string, messageIds: readonly st
   return threadMessageRowsToMessages(database, threadId, orderedRows)
 }
 
+/** Source-only lookup for a mounted user row; it never hydrates transcript contents. */
+export function getUserMessagePromptOrigin(
+  threadId: string,
+  messageId: string
+): FunctionPluginPromptOrigin | undefined {
+  const statement = getDb().prepare(
+    "SELECT prompt_origin_json FROM thread_messages WHERE thread_id = ? AND message_id = ? AND role = 'user'"
+  )
+  try {
+    statement.bind([threadId, messageId])
+    if (!statement.step()) return undefined
+    const value = statement.getAsObject().prompt_origin_json
+    if (typeof value !== "string") return undefined
+    const parsed: unknown = JSON.parse(value)
+    return isFunctionPluginPromptOrigin(parsed) ? parsed : undefined
+  } catch { return undefined }
+  finally { statement.free() }
+}
+
 export interface ThreadMessageIdentityContextSelector {
   messageId?: string
   providerSourceId?: string
@@ -4320,13 +4520,45 @@ function mergeThreadMessageOrdinalsWithIncomingOrder(
   }
   currentIds.forEach(emit)
   if (orderedIds.every((id, index) => id === currentIds[index])) return
+  const fixed = findFunctionConversationProjectionMarkers(database, threadId, rows.map(row => row.message_id))
+  for (const id of fixed) assertCanonicalThreadMessageSeal(database, threadId, id)
+  const currentFixed = findFunctionConversationProjectionMarkers(database, threadId,
+    rows.map(row => row.message_id))
+  if (JSON.stringify([...fixed].sort()) !== JSON.stringify([...currentFixed].sort()))
+    throw Error("MODS_CONVERSATION_PROJECTION_CONFLICT")
+  const ordinaryPredicate = "function_row_json IS NULL" +
+    (hasFunctionConversationProjectionReceiptSchema(database)
+      ? ` AND NOT EXISTS (SELECT 1 FROM function_conversation_projection_receipts AS receipt
+          WHERE receipt.thread_id=thread_messages.thread_id
+            AND receipt.uuid=thread_messages.message_id)` : "")
+  const verifyFixed = () => {
+    for (const id of fixed) assertCanonicalThreadMessageSeal(database, threadId, id)
+    const current = findFunctionConversationProjectionMarkers(database, threadId,
+      rows.map(row => row.message_id))
+    if (JSON.stringify([...fixed].sort()) !== JSON.stringify([...current].sort()))
+      throw Error("MODS_CONVERSATION_PROJECTION_CONFLICT")
+  }
+  if (fixed.size) {
+    const slots = rows.filter(row => !fixed.has(row.message_id)).map(row => row.ordinal)
+    orderedIds.filter(id => !fixed.has(id)).forEach((id, index) => {
+      const ordinal = slots[index]
+      if (rowById.get(id)?.ordinal !== ordinal)
+        database.run(`UPDATE thread_messages SET ordinal=? WHERE thread_id=? AND message_id=?
+          AND ${ordinaryPredicate}`,
+          [ordinal, threadId, id])
+    })
+    verifyFixed()
+    return
+  }
   orderedIds.forEach((id, ordinal) => {
-    database.run("UPDATE thread_messages SET ordinal = ? WHERE thread_id = ? AND message_id = ?", [
+    database.run(`UPDATE thread_messages SET ordinal = ? WHERE thread_id = ? AND message_id = ?
+      AND ${ordinaryPredicate}`, [
       ordinal,
       threadId,
       id
     ])
   })
+  verifyFixed()
 }
 
 function threadMessageRowHasProviderIdentityConflict(
@@ -4458,25 +4690,45 @@ function applyThreadMessageIdAliases(
  * tuple; structural snapshots/tool boundaries continue through full upsert.
  */
 export function appendThreadMessageTextDelta(threadId: string, message: Message): boolean {
+  assertThreadMessageForkReady(threadId)
   const messageId = typeof message.id === "string" ? message.id.trim() : ""
+  const existing = getThreadMessageRows(getDb(), threadId, [messageId]).get(messageId)
+  if (messageId && hasFunctionConversationProjectionMarker(getDb(), threadId, messageId)) {
+    assertCanonicalThreadMessageSeal(getDb(), threadId, messageId)
+    if (!existing) throw Error("MODS_CONVERSATION_PROJECTION_CONFLICT")
+    assertCanonicalThreadMessageEcho(getDb(), threadId, existing, message)
+    return true
+  }
+  // Complete incoming field reads before the second durable-presence check. A caller getter
+  // cannot publish a kept occurrence and then reuse an earlier ordinary observation.
   const providerSourceId = message.provider_source_id?.trim()
   const providerOccurrence = getMessageProviderOccurrence(message)
+  const role = message.role, content = message.content, toolCallId = message.tool_call_id
+  const toolCallCount = message.tool_calls?.length ?? 0
+  const contentPriority = message.content_priority ?? 0, reasoning = message.reasoning
+  const database = getDb()
+  if (messageId && hasFunctionConversationProjectionMarker(database, threadId, messageId)) {
+    assertCanonicalThreadMessageSeal(database, threadId, messageId)
+    const current = getThreadMessageRows(database, threadId, [messageId]).get(messageId)
+    if (!current) throw Error("MODS_CONVERSATION_PROJECTION_CONFLICT")
+    assertCanonicalThreadMessageEcho(database, threadId, current, message)
+    return true
+  }
   if (
     !messageId ||
-    message.role !== "assistant" ||
-    typeof message.content !== "string" ||
-    !message.content ||
+    role !== "assistant" ||
+    typeof content !== "string" ||
+    !content ||
     !providerSourceId ||
     providerOccurrence === undefined ||
-    message.tool_call_id ||
-    (message.tool_calls?.length ?? 0) > 0 ||
-    (message.content_priority ?? 0) > 0 ||
-    message.reasoning !== undefined
+    toolCallId ||
+    toolCallCount > 0 ||
+    contentPriority > 0 ||
+    reasoning !== undefined
   ) {
     return false
   }
 
-  const database = getDb()
   const stmt = database.prepare(
     `SELECT
        m.role,
@@ -4542,20 +4794,28 @@ export function appendThreadMessageTextDelta(threadId: string, message: Message)
   }
 
   const remainingChars = Math.max(0, THREAD_MESSAGE_TEXT_LIMIT - totalChars)
-  const delta = message.content.slice(0, remainingChars)
-  if (delta.length !== message.content.length && row.recovery_integrity !== 0) {
-    database.run(
-      "UPDATE thread_messages SET recovery_integrity = 0 WHERE thread_id = ? AND message_id = ?",
-      [threadId, messageId]
-    )
+  const delta = content.slice(0, remainingChars)
+  const ordinaryPredicate = "function_row_json IS NULL" +
+    (hasFunctionConversationProjectionReceiptSchema(database)
+      ? ` AND NOT EXISTS (SELECT 1 FROM function_conversation_projection_receipts AS receipt
+          WHERE receipt.thread_id=thread_messages.thread_id
+            AND receipt.uuid=thread_messages.message_id)` : "")
+  const assertOrdinary = () => {
+    if (hasFunctionConversationProjectionMarker(database, threadId, messageId))
+      throw Error("MODS_CONVERSATION_PROJECTION_CONFLICT")
   }
-  if (!delta) return true
+  assertOrdinary()
+  if (!delta && (delta.length === content.length || row.recovery_integrity === 0)) return true
   const updatedTotalChars = totalChars + delta.length
   const tailFragmentId = Number(row?.tail_fragment_id)
   const tailContentText = typeof row?.tail_content_text === "string" ? row.tail_content_text : ""
   let deltaOffset = 0
   database.run("BEGIN")
   try {
+    assertOrdinary()
+    if (delta.length !== content.length && row.recovery_integrity !== 0) database.run(
+      `UPDATE thread_messages SET recovery_integrity = 0 WHERE thread_id=? AND message_id=?
+        AND ${ordinaryPredicate}`, [threadId, messageId])
     if (
       Number.isSafeInteger(tailFragmentId) &&
       tailFragmentId > 0 &&
@@ -4571,8 +4831,10 @@ export function appendThreadMessageTextDelta(threadId: string, message: Message)
         database.run(
           `UPDATE thread_message_fragments
            SET content_text = content_text || ?
-           WHERE fragment_id = ? AND thread_id = ? AND message_id = ?`,
-          [tailDelta, tailFragmentId, threadId, messageId]
+           WHERE fragment_id = ? AND thread_id = ? AND message_id = ?
+             AND EXISTS (SELECT 1 FROM thread_messages WHERE thread_id=? AND message_id=?
+               AND ${ordinaryPredicate})`,
+          [tailDelta, tailFragmentId, threadId, messageId, threadId, messageId]
         )
         deltaOffset = tailDelta.length
       }
@@ -4584,20 +4846,23 @@ export function appendThreadMessageTextDelta(threadId: string, message: Message)
       database.run(
         `INSERT INTO thread_message_fragments (
            thread_id, message_id, content_text, created_at
-         ) VALUES (?, ?, ?, ?)`,
-        [threadId, messageId, fragment, Date.now()]
+         ) SELECT ?, ?, ?, ? FROM thread_messages WHERE thread_id=? AND message_id=?
+           AND ${ordinaryPredicate}`,
+        [threadId, messageId, fragment, Date.now(), threadId, messageId]
       )
       deltaOffset += fragment.length
     }
     database.run(
       `INSERT INTO thread_message_fragment_states (
          thread_id, message_id, total_chars, updated_at
-       ) VALUES (?, ?, ?, ?)
+       ) SELECT ?, ?, ?, ? FROM thread_messages WHERE thread_id=? AND message_id=?
+         AND ${ordinaryPredicate}
        ON CONFLICT(thread_id, message_id) DO UPDATE SET
          total_chars = excluded.total_chars,
          updated_at = excluded.updated_at`,
-      [threadId, messageId, updatedTotalChars, Date.now()]
+      [threadId, messageId, updatedTotalChars, Date.now(), threadId, messageId]
     )
+    assertOrdinary()
     database.run("COMMIT")
   } catch (error) {
     try {
@@ -4616,9 +4881,559 @@ export function upsertThreadMessages(
   messages: readonly ThreadMessageWrite[],
   options: UpsertThreadMessagesOptions = {}
 ): number {
+  if (options.hostFunctionRow) throw Error("THREAD_MESSAGE_TRANSACTION_REQUIRED")
+  assertThreadMessageForkReady(threadId)
+  return upsertThreadMessagesCore(threadId, messages, options, true)
+}
+
+function assertThreadMessageForkReady(threadId: string): void {
+  const thread = getThreadCore(threadId)
+  if (thread) assertFunctionConversationForkReady(getDb(), {
+    threadId, incarnation: captureThreadIncarnation(thread)
+  })
+}
+
+function canonicalThreadMessageSealInput(database: NativeSqliteAdapter, threadId: string,
+  messageId: string) {
+  const thread = getThreadCore(threadId)
+  if (!thread) throw Error("MODS_CONVERSATION_THREAD_CHANGED")
+  const incarnation = captureThreadIncarnation(thread)
+  return { threadId, messageId, incarnation,
+    assertCurrent: () => {
+      const actual = getThreadCore(threadId)
+      const current = actual && captureThreadIncarnation(actual)
+      if (getDb() !== database || !current || current.token !== incarnation.token ||
+        (current.token === null && current.legacyCreatedAt !== incarnation.legacyCreatedAt))
+        throw Error("MODS_CONVERSATION_THREAD_CHANGED")
+    } }
+}
+
+function assertCanonicalThreadMessageSeal(database: NativeSqliteAdapter, threadId: string,
+  messageId: string, scope?: FunctionConversationProjectionReadScope) {
+  return assertStoredProjectionReceipt(database,
+    canonicalThreadMessageSealInput(database, threadId, messageId), scope)
+}
+
+function assertCanonicalThreadMessageEcho(database: NativeSqliteAdapter, threadId: string,
+  row: ThreadMessageRow, message: Message, scope?: FunctionConversationProjectionReadScope): void {
+  assertCanonicalThreadMessageSeal(database, threadId, row.message_id, scope)
+  if (getThreadMessageCanonicalId(threadId, message.id.trim()) !== row.message_id)
+    throwCanonicalThreadMessageEchoConflict("canonical_id")
+  if (row.role !== message.role) throwCanonicalThreadMessageEchoConflict("role")
+  if (message.provider_source_id !== undefined &&
+    message.provider_source_id !== (row.provider_source_id ?? row.message_id))
+    throwCanonicalThreadMessageEchoConflict("provider_source_id")
+  if (message.provider_occurrence !== undefined &&
+    message.provider_occurrence !== (row.provider_occurrence ?? 1))
+    throwCanonicalThreadMessageEchoConflict("provider_occurrence")
+}
+
+function throwCanonicalThreadMessageEchoConflict(field:
+  "canonical_id" | "role" | "provider_source_id" | "provider_occurrence"): never {
+  const error = Error("MODS_CONVERSATION_PROJECTION_CONFLICT")
+  error.stack += `\nCanonicalTranscriptEcho.${field}`
+  throw error
+}
+
+/** Data fence only: a stale rendering can never replace an already kept native occurrence. */
+function withoutCanonicalThreadMessageEchoes(database: NativeSqliteAdapter, threadId: string,
+  messages: readonly ThreadMessageWrite[], consumedIds: string[],
+  scope?: FunctionConversationProjectionReadScope): readonly ThreadMessageWrite[] {
+  const ids = messages.flatMap(message => {
+    const id = typeof message.id === "string" ? message.id.trim() : ""
+    const sourceId = getMessageRoleCollisionSourceId(message)
+    return [id, getThreadMessageCanonicalId(threadId, id), sourceId,
+      buildMessageRoleCollisionId(sourceId, message.role)]
+  })
+  const rows = getThreadMessageRows(database, threadId, ids)
+  for (const row of getThreadMessageProviderOccurrenceRows(database, threadId, messages))
+    rows.set(row.message_id, row)
+  const canonicalRows = findFunctionConversationProjectionMarkers(database, threadId, [...ids, ...rows.keys()])
+  for (const id of canonicalRows) {
+    // A missing display row with a durable receipt must fail before an ordinary writer inserts it.
+    if (!rows.has(id)) assertCanonicalThreadMessageSeal(database, threadId, id, scope)
+  }
+  const markedByProvider = new Map<string, ThreadMessageRow>()
+  const providerKey = (message: Message) => JSON.stringify([message.role,
+    getMessageProviderSourceId(message), getMessageProviderOccurrence(message) ?? 1])
+  for (const row of rows.values()) if (canonicalRows.has(row.message_id))
+    markedByProvider.set(providerKey({ id: row.message_id, role: row.role, content: "",
+      created_at: new Date(row.created_at),
+      provider_source_id: row.provider_source_id ?? undefined,
+      provider_occurrence: row.provider_occurrence ?? undefined }), row)
+  return messages.filter(message => {
+    const id = typeof message.id === "string" ? message.id.trim() : ""
+    const sourceId = getMessageRoleCollisionSourceId(message)
+    const canonicalIds = [id, getThreadMessageCanonicalId(threadId, id), sourceId,
+      buildMessageRoleCollisionId(sourceId, message.role)]
+    const matches = canonicalIds.flatMap(id => {
+      const row = rows.get(id)
+      return row && canonicalRows.has(row.message_id) ? [row] : []
+    })
+    const provider = markedByProvider.get(providerKey(message))
+    if (provider) matches.push(provider)
+    const marked = [...new Map(matches.map(row => [row.message_id, row])).values()]
+    if (!marked.length) return true
+    if (marked.length !== 1) throw Error("MODS_CONVERSATION_PROJECTION_CONFLICT")
+    assertCanonicalThreadMessageEcho(database, threadId, marked[0], message, scope)
+    consumedIds.push(marked[0].message_id)
+    return false
+  })
+}
+
+export interface CanonicalThreadMessageEchoPartition {
+  readonly ordinary: readonly ThreadMessageWrite[]
+  readonly canonical: readonly ThreadMessageWrite[]
+  readonly canonicalIds: readonly string[]
+  readonly canonicalCount: number
+}
+
+export interface CanonicalThreadMessageReadScope {
+  readColumns(messageId: string): FunctionConversationProjectionColumns | undefined
+  readPresentation(messageId: string): FunctionConversationPresentationDisposition | undefined
+  readPresentationSummary(messageId: string): FunctionConversationProjectionPresentationSummary | undefined
+  readSnapshot(messageId: string): ThreadMessageWrite | undefined
+  readSnapshotAndPresentation(messageId: string): {
+    snapshot: ThreadMessageWrite
+    presentation: FunctionConversationPresentationDisposition
+  } | undefined
+  requireSnapshotAndPresentation(messageId: string): {
+    snapshot: ThreadMessageWrite
+    presentation: FunctionConversationPresentationDisposition
+  }
+  partition(messages: readonly ThreadMessageWrite[]): CanonicalThreadMessageEchoPartition
+  runGuard<T>(guard: () => T): T
+}
+const canonicalReadScopes = new WeakMap<CanonicalThreadMessageReadScope, {
+  database: NativeSqliteAdapter; threadId: string; scope: FunctionConversationProjectionReadScope
+  finalChecks: Array<() => void>
+}>()
+function canonicalReadScope(reader: CanonicalThreadMessageReadScope) {
+  const record = canonicalReadScopes.get(reader)
+  if (!record) throw Error("MODS_CONVERSATION_PROJECTION_CONFLICT")
+  assertFunctionConversationProjectionReadScope(record.scope, record.database)
+  if (getDb() !== record.database) throw Error("MODS_CONVERSATION_THREAD_CHANGED")
+  return record
+}
+
+/** Explicit private composition only. Standalone public calls always obtain a fresh operation. */
+export function withCanonicalThreadMessageReadScope<T>(threadId: string,
+  run: (reader: CanonicalThreadMessageReadScope) => T): T {
+  const database = getDb(), thread = getThreadCore(threadId)
+  if (!thread) throw Error("MODS_CONVERSATION_THREAD_CHANGED")
+  const incarnation = captureThreadIncarnation(thread)
+  const guard = () => {
+    if (getDb() !== database || !matchesThreadIncarnation(getThreadCore(threadId), incarnation))
+      throw Error("MODS_CONVERSATION_THREAD_CHANGED")
+    assertThreadMessageForkReady(threadId)
+  }
+  return withFunctionConversationProjectionReadScope(database, scope => {
+    const reader: CanonicalThreadMessageReadScope = Object.freeze({
+      readColumns(messageId: string) {
+        const actual = canonicalReadScope(this)
+        if (!hasFunctionConversationProjectionMarker(actual.database, actual.threadId, messageId)) {
+          actual.finalChecks.push(() => {
+            if (hasFunctionConversationProjectionMarker(actual.database, actual.threadId, messageId))
+              throw Error("MODS_CONVERSATION_PROJECTION_CONFLICT")
+          })
+          return undefined
+        }
+        return assertCanonicalThreadMessageSeal(actual.database, actual.threadId, messageId, actual.scope)
+      },
+      readSnapshot(messageId: string) {
+        canonicalReadScope(this)
+        const columns = this.readColumns(messageId)
+        return columns ? canonicalThreadMessageSnapshot(columns) : undefined
+      },
+      readSnapshotAndPresentation(messageId: string) {
+        const actual = canonicalReadScope(this), columns = this.readColumns(messageId)
+        if (!columns) return undefined
+        // Both values derive from this exact seal. No source callback separates them; the
+        // scope still re-reads every observed row after its last callback before returning.
+        return { snapshot: canonicalThreadMessageSnapshot(columns),
+          presentation: readSealedFunctionConversationProjectionPresentation(actual.database,
+            actual.scope, columns) }
+      },
+      requireSnapshotAndPresentation(messageId: string) {
+        const actual = canonicalReadScope(this)
+        // The caller requires a canonical row. The complete seal rejects absent stamps,
+        // receipts and rows itself; no ordinary-message classification is needed here.
+        const columns = assertCanonicalThreadMessageSeal(actual.database, actual.threadId,
+          messageId, actual.scope)
+        return { snapshot: canonicalThreadMessageSnapshot(columns),
+          presentation: readSealedFunctionConversationProjectionPresentation(actual.database,
+            actual.scope, columns) }
+      },
+      readPresentation(messageId: string) {
+        const actual = canonicalReadScope(this), columns = this.readColumns(messageId)
+        return columns ? readSealedFunctionConversationProjectionPresentation(actual.database,
+          actual.scope, columns) : undefined
+      },
+      readPresentationSummary(messageId: string) {
+        const actual = canonicalReadScope(this)
+        if (!hasFunctionConversationProjectionMarker(actual.database, actual.threadId, messageId)) {
+          actual.finalChecks.push(() => {
+            if (hasFunctionConversationProjectionMarker(actual.database, actual.threadId, messageId))
+              throw Error("MODS_CONVERSATION_PROJECTION_CONFLICT")
+          })
+          return undefined
+        }
+        return readStoredFunctionConversationProjectionPresentationSummary(actual.database,
+          canonicalThreadMessageSealInput(actual.database, actual.threadId, messageId), actual.scope)
+      },
+      partition(messages: readonly ThreadMessageWrite[]) {
+        const actual = canonicalReadScope(this)
+        return partitionCanonicalThreadMessageEchoesInScope(actual.threadId, messages, actual.scope,
+          actual.finalChecks)
+      },
+      runGuard<TGuard>(callback: () => TGuard): TGuard {
+        const actual = canonicalReadScope(this)
+        return runFunctionConversationProjectionGuard(actual.scope, callback)
+      }
+    })
+    const finalChecks: Array<() => void> = []
+    canonicalReadScopes.set(reader, { database, threadId, scope, finalChecks })
+    runFunctionConversationProjectionGuard(scope, guard)
+    const result = run(reader)
+    runFunctionConversationProjectionGuard(scope, guard)
+    // Internal SQL/Map comparisons only; no source callback follows these checks or fresh B.
+    for (const check of finalChecks) check()
+    return result
+  })
+}
+
+function canonicalThreadMessageSnapshot(columns: FunctionConversationProjectionColumns):
+  ThreadMessageWrite {
+  const content: unknown = JSON.parse(String(columns.content_json))
+  const calls: unknown = columns.tool_calls_json === null ? undefined :
+    JSON.parse(String(columns.tool_calls_json))
+  const stamp = parseFunctionConversationTranscriptStamp(columns.function_row_json)
+  if (!(typeof content === "string" || Array.isArray(content)) ||
+    (calls !== undefined && !Array.isArray(calls)) || !stamp)
+    throw Error("MODS_CONVERSATION_PROJECTION_CONFLICT")
+  const role = columns.role
+  if (role !== "user" && role !== "assistant" && role !== "system" && role !== "tool")
+    throw Error("MODS_CONVERSATION_PROJECTION_CONFLICT")
+  let promptOrigin: FunctionPluginPromptOrigin | undefined
+  if (columns.prompt_origin_json !== null) {
+    const value: unknown = JSON.parse(String(columns.prompt_origin_json))
+    if (!isFunctionPluginPromptOrigin(value)) throw Error("MODS_CONVERSATION_PROJECTION_CONFLICT")
+    promptOrigin = value
+  }
+  // The original writer already bounded its display projection. Do not clamp that data again.
+  return Object.freeze({ id: String(columns.message_id), role,
+    content: content as Message["content"], function_row: stamp, ordinal: Number(columns.ordinal),
+    recovery_integrity: decodeTranscriptRecoveryIntegrity(columns.recovery_integrity),
+    ...(columns.provider_source_id !== null ? { provider_source_id: String(columns.provider_source_id) } : {}),
+    ...(columns.provider_occurrence !== null ? { provider_occurrence: Number(columns.provider_occurrence) } : {}),
+    ...(promptOrigin ? { prompt_origin: promptOrigin } : {}),
+    ...(columns.reasoning !== null ? { reasoning: String(columns.reasoning) } : {}),
+    ...(calls !== undefined ? { tool_calls: calls as Message["tool_calls"] } : {}),
+    ...(columns.tool_call_id !== null ? { tool_call_id: String(columns.tool_call_id) } : {}),
+    ...(columns.name !== null ? { name: String(columns.name) } : {}),
+    ...(columns.status !== null ? { status: String(columns.status) } : {}),
+    ...(columns.is_error !== null ? { is_error: columns.is_error === 1 } : {}),
+    ...(columns.content_priority !== null ? { content_priority: Number(columns.content_priority) } : {}),
+    ...(columns.goal_id !== null ? { goal_id: String(columns.goal_id) } : {}),
+    ...(columns.active_window_id !== null ? { active_window_id: String(columns.active_window_id) } : {}),
+    created_at: new Date(Number(columns.created_at)),
+    ...(columns.start_at !== null ? { start_at: new Date(Number(columns.start_at)) } : {}),
+    ...(columns.end_at !== null ? { end_at: new Date(Number(columns.end_at)) } : {}),
+    ...((Number(columns.stream_authority) & 1) ? { content_mode: "snapshot" as const } : {}),
+    ...((Number(columns.stream_authority) & 2) ? { reasoning_mode: "snapshot" as const } : {}),
+    ...((Number(columns.stream_authority) & 4) ? { tool_calls_mode: "snapshot" as const } : {}) })
+}
+
+/** Full safe projection data only; the caller must retain its actual native owner guard. */
+export function readCanonicalThreadMessageSnapshot(threadId: string,
+  messageId: string): ThreadMessageWrite | undefined {
+  if (!hasFunctionConversationProjectionMarker(getDb(), threadId, messageId)) return undefined
+  return withCanonicalThreadMessageReadScope(threadId, reader => reader.readSnapshot(messageId))
+}
+
+/**
+ * Strict, read-only acknowledgement of complete, already kept projections. This is separate
+ * from the ordinary upsert's stale-echo fence: it never grants a write or certifies a new COMMIT.
+ */
+export function partitionCanonicalThreadMessageEchoes(threadId: string,
+  messages: readonly ThreadMessageWrite[]): CanonicalThreadMessageEchoPartition {
+  return withCanonicalThreadMessageReadScope(threadId, reader => reader.partition(messages))
+}
+
+function partitionCanonicalThreadMessageEchoesInScope(threadId: string,
+  messages: readonly ThreadMessageWrite[], scope: FunctionConversationProjectionReadScope,
+  finalChecks: Array<() => void>):
+  CanonicalThreadMessageEchoPartition {
+  const database = getDb(), thread = getThreadCore(threadId)
+  if (!thread) throw Error("MODS_CONVERSATION_THREAD_CHANGED")
+  const incarnation = captureThreadIncarnation(thread)
+  const assertCurrent = () => runFunctionConversationProjectionGuard(scope, () => {
+    const actual = getThreadCore(threadId)
+    if (getDb() !== database || !actual || !matchesThreadIncarnation(actual, incarnation))
+      throw Error("MODS_CONVERSATION_THREAD_CHANGED")
+  })
+  assertCurrent()
+  assertThreadMessageForkReady(threadId)
+  const discovery = messages.map(message => Object.freeze({
+    id: typeof message.id === "string" ? message.id.trim() : "", role: message.role,
+    sourceId: getMessageRoleCollisionSourceId(message),
+    providerSourceId: getMessageProviderSourceId(message),
+    providerOccurrence: getMessageProviderOccurrence(message)
+  }))
+  const discoveryFingerprint = () => {
+    const candidates = discovery.flatMap(message => [message.id,
+      getThreadMessageCanonicalId(threadId, message.id), message.sourceId,
+      buildMessageRoleCollisionId(message.sourceId, message.role)])
+    const rows = getThreadMessageRows(database, threadId, candidates)
+    const providerInputs: Message[] = discovery.map(message => ({ id: message.id, role: message.role,
+      content: "", created_at: new Date(0), provider_source_id: message.providerSourceId,
+      ...(message.providerOccurrence !== undefined ? { provider_occurrence: message.providerOccurrence } : {}) }))
+    for (const row of getThreadMessageProviderOccurrenceRows(database, threadId, providerInputs))
+      rows.set(row.message_id, row)
+    const presence = findFunctionConversationProjectionMarkers(database, threadId,
+      [...candidates, ...rows.keys()])
+    return JSON.stringify({ aliases: discovery.map(message =>
+      getThreadMessageCanonicalId(threadId, message.id)),
+    presence: [...presence].sort(),
+    marked: [...rows.values()]
+      .filter(row => presence.has(row.message_id))
+      .map(row => [row.message_id, row.role,
+        row.provider_source_id, row.provider_occurrence, row.function_row_json])
+      .sort((a, b) => String(a[0]).localeCompare(String(b[0]))) })
+  }
+  const initialDiscovery = discoveryFingerprint()
+  finalChecks.push(() => {
+    if (discoveryFingerprint() !== initialDiscovery) throw Error("MODS_CONVERSATION_PROJECTION_CONFLICT")
+  })
+  const consumedIds: string[] = []
+  const ordinary = withoutCanonicalThreadMessageEchoes(database, threadId, messages, consumedIds, scope)
+  if (ordinary.some(message => message.function_row !== undefined || message.function_row_invalid))
+    throw Error("MODS_CONVERSATION_PROJECTION_CONFLICT")
+  const ordinarySet = new Set(ordinary)
+  const rows = getThreadMessageRows(database, threadId, consumedIds)
+  const canonical: ThreadMessageWrite[] = []
+  let consumed = 0
+  const allowed = new Set(["id", "role", "content", "ordinal", "provider_source_id",
+    "provider_occurrence", "function_row", "function_row_invalid", "prompt_origin",
+    "recovery_integrity", "reasoning", "reasoning_mode", "tool_calls", "tool_calls_mode",
+    "tool_call_id", "name", "status", "is_error", "content_priority", "content_mode",
+    "goal_id", "active_window_id", "created_at", "start_at", "end_at"])
+  for (const message of messages) {
+    if (ordinarySet.has(message)) continue
+    const id = consumedIds[consumed++]
+    const row = rows.get(id)
+    if (!row || message.function_row_invalid || message.content_mode === "delta" ||
+      message.reasoning_mode === "delta" || message.tool_calls_mode === "delta" ||
+      Reflect.ownKeys(message).some(key => typeof key !== "string" || !allowed.has(key)))
+      throw Error("MODS_CONVERSATION_PROJECTION_CONFLICT")
+    const columns = assertCanonicalThreadMessageSeal(database, threadId, id, scope)
+    const stamp = parseFunctionConversationTranscriptStamp(columns.function_row_json)
+    if (!stamp || (message.function_row &&
+      !sameFunctionConversationTranscriptStamp(message.function_row, stamp)) ||
+      JSON.stringify(message.content) !== columns.content_json ||
+      (message.tool_calls === undefined ? null : JSON.stringify(message.tool_calls)) !==
+        columns.tool_calls_json)
+      throw Error("MODS_CONVERSATION_PROJECTION_CONFLICT")
+    const scalar: Record<string, NativeSqliteValue> = { message_id: id, role: message.role,
+      provider_source_id: message.provider_source_id ?? null,
+      provider_occurrence: message.provider_occurrence ?? null,
+      reasoning: message.reasoning ?? (columns.reasoning === "" ? "" : null),
+      tool_call_id: message.tool_call_id ?? null, name: message.name ?? null,
+      status: message.status ?? null, is_error: message.is_error === undefined ? null : message.is_error ? 1 : 0,
+      content_priority: message.content_priority ?? null,
+      recovery_integrity: message.recovery_integrity === "verified" ? 1 : 0,
+      goal_id: message.goal_id ?? null, active_window_id: message.active_window_id ?? null,
+      created_at: normalizeTimestamp(message.created_at), start_at: normalizeTimestamp(message.start_at),
+      end_at: normalizeTimestamp(message.end_at) }
+    for (const name of Object.keys(scalar)) {
+      if (scalar[name] !== columns[name as keyof FunctionConversationProjectionColumns])
+        throw Error("MODS_CONVERSATION_PROJECTION_CONFLICT")
+    }
+    if ((message.ordinal !== undefined && message.ordinal !== columns.ordinal) ||
+      (message.prompt_origin === undefined ? null : JSON.stringify(message.prompt_origin)) !==
+        columns.prompt_origin_json)
+      throw Error("MODS_CONVERSATION_PROJECTION_CONFLICT")
+    canonical.push(canonicalThreadMessageSnapshot(columns))
+    assertCurrent()
+  }
+  assertCurrent()
+  return Object.freeze({ ordinary: Object.freeze([...ordinary]),
+    canonical: Object.freeze(canonical), canonicalIds: Object.freeze([...new Set(consumedIds)]),
+    canonicalCount: canonical.length })
+}
+
+/** Host-only atomic row writer. The caller owns commit/rollback and post-commit durability. */
+export function upsertThreadMessagesInTransaction(
+  threadId: string,
+  messages: readonly ThreadMessageWrite[],
+  options: UpsertThreadMessagesOptions = {}
+): number {
+  if (!getDb().inTransaction) throw Error("THREAD_MESSAGE_TRANSACTION_REQUIRED")
+  if (options.hostFunctionRow)
+    return insertFunctionConversationThreadMessage(threadId, messages, options)
+  assertThreadMessageForkReady(threadId)
+  return upsertThreadMessagesCore(threadId, messages, options, false)
+}
+
+function insertFunctionConversationThreadMessage(
+  threadId: string,
+  messages: readonly ThreadMessageWrite[],
+  options: UpsertThreadMessagesOptions
+): number {
+  const actual = validateFunctionConversationThreadMessageInput(messages, options)
+  const database = getDb()
+  if (!database.inTransaction || !threadExists(threadId))
+    throw Error("MODS_CONVERSATION_TRANSCRIPT_NOT_COMMITTED")
+  const input = messages[0]
+  const columns = projectFunctionConversationThreadMessageStorageColumns(input, Date.now())
+  if (getThreadMessageRows(database, threadId, [actual.messageId]).has(actual.messageId))
+    throw Error("MODS_CONVERSATION_TRANSCRIPT_CONFLICT")
+  const provider = columns.provider_source_id ?? actual.messageId
+  const occurrence = columns.provider_occurrence ?? 1
+  const conflict = database.exec(
+    `SELECT message_id FROM thread_messages WHERE thread_id = ? AND role = ? AND
+      (provider_source_id = ? OR (provider_source_id IS NULL AND message_id = ?)) AND
+      (provider_occurrence = ? OR (provider_occurrence IS NULL AND ? = 1)) LIMIT 1`,
+    [threadId, input.role, provider, provider, occurrence, occurrence]
+  )[0]?.values.length
+  if (conflict) throw Error("MODS_CONVERSATION_TRANSCRIPT_CONFLICT")
+  const repaired = getOrRepairThreadMessageBucket(database, threadId)
+  const ordinal = repaired.bucket.next_ordinal
+  if (repaired.create) database.run(
+    `INSERT INTO thread_message_buckets (thread_id, message_count, next_ordinal, updated_at)
+     VALUES (?, ?, ?, ?)`,
+    [threadId, repaired.bucket.message_count, ordinal, repaired.bucket.updated_at]
+  )
+  const fields = { thread_id: threadId, ...columns, ordinal,
+    function_row_json: JSON.stringify(actual.stamp) }
+  const names = Object.keys(fields)
+  database.run(
+    `INSERT INTO thread_messages (${names.join(", ")}) VALUES (${names.map(() => "?").join(", ")})`,
+    Object.values(fields)
+  )
+  const now = Date.now()
+  database.run(
+    `UPDATE thread_message_buckets SET message_count = ?, next_ordinal = ?, updated_at = ?
+     WHERE thread_id = ?`,
+    [repaired.bucket.message_count + 1, ordinal + 1, now, threadId]
+  )
+  if (options.touchThreadUpdatedAt === true)
+    database.run("UPDATE threads SET updated_at = ? WHERE thread_id = ?", [now, threadId])
+  if (!database.inTransaction) throw Error("THREAD_MESSAGE_TRANSACTION_REQUIRED")
+  return 1
+}
+
+function validateFunctionConversationThreadMessageInput(
+  messages: readonly ThreadMessageWrite[], options: UpsertThreadMessagesOptions
+) {
+  const actual = options.hostFunctionRow!
+  validateFunctionConversationTranscriptStamp(actual.stamp)
+  const nativeTool = actual.storageRole === "tool"
+  if (nativeTool && (actual.stamp.messageType !== "user" || actual.stamp.isMeta === true ||
+    !["tool-result", "tool-message"].includes(actual.stamp.door) ||
+    typeof actual.toolCallId !== "string" || !actual.toolCallId ||
+    messages[0]?.tool_call_id !== actual.toolCallId))
+    throw Error("MODS_CONVERSATION_TRANSCRIPT_INVALID")
+  if (!nativeTool && actual.toolCallId !== undefined)
+    throw Error("MODS_CONVERSATION_TRANSCRIPT_INVALID")
+  const expectedRole = nativeTool ? "tool" :
+    actual.stamp.messageType === "attachment" ? "user" : actual.stamp.messageType
+  if (options.hostPromptOrigin || messages.length !== 1 ||
+    messages[0].id !== actual.messageId || actual.stamp.uuid !== actual.messageId ||
+    messages[0].role !== expectedRole)
+    throw Error("MODS_CONVERSATION_TRANSCRIPT_INVALID")
+  return actual
+}
+
+/** Actual native capture only, sharing the Keeper's original connection and transaction. */
+export function writeFunctionConversationNativeProjectionInTransaction(input: {
+  readonly database: NativeSqliteAdapter
+  readonly threadId: string
+  readonly message: ThreadMessageWrite
+  readonly target: FunctionConversationRef
+  readonly row: FunctionConversationRow
+  readonly hostFunctionRow: NonNullable<UpsertThreadMessagesOptions["hostFunctionRow"]>
+  readonly access: Pick<ReturnType<typeof createFunctionConversationNativeProjectionAccess>,
+    "prepare" | "claim" | "assertPrepared" | "verify">
+  readonly receipt: FunctionNativeProjectionReceipt
+}): FunctionNativeProjectionPreparation {
+  const database = getDb(), threadId = input.threadId
+  if (input.database !== database || !database.inTransaction || !threadExists(threadId))
+    throw Error("MODS_CONVERSATION_TRANSCRIPT_NOT_COMMITTED")
+  const actual = validateFunctionConversationThreadMessageInput([input.message], {
+    hostFunctionRow: input.hostFunctionRow
+  })
+  const columns = projectFunctionConversationThreadMessageStorageColumns(input.message,
+    input.row.createdAt)
+  const existing = getThreadMessageRows(database, threadId, [actual.messageId]).get(actual.messageId)
+  const repaired = getOrRepairThreadMessageBucket(database, threadId)
+  if (repaired.create) database.run(`INSERT INTO thread_message_buckets
+    (thread_id,message_count,next_ordinal,updated_at) VALUES (?,?,?,?)`,
+  [threadId, repaired.bucket.message_count, repaired.bucket.next_ordinal, repaired.bucket.updated_at])
+  const fields = { thread_id: threadId, ...columns,
+    ordinal: existing?.ordinal ?? repaired.bucket.next_ordinal,
+    function_row_json: JSON.stringify(actual.stamp) }
+  const protectedColumns = Object.freeze(Object.fromEntries(
+    FUNCTION_CONVERSATION_PROJECTION_COLUMNS.map(name =>
+      [name, Object.getOwnPropertyDescriptor(fields, name)?.value]))) as FunctionConversationProjectionColumns
+  const prepared = input.access.prepare(input.receipt, {
+    database, target: input.target, row: input.row, protectedColumns
+  })
+  input.access.claim(prepared.claim)
+  input.access.assertPrepared(prepared.claim)
+  const names = FUNCTION_CONVERSATION_PROJECTION_COLUMNS
+  if (prepared.kind === "insert") database.run(
+    `INSERT INTO thread_messages (${names.join(",")}) VALUES (${names.map(() => "?").join(",")})`,
+    names.map(name => prepared.expected[name]))
+  else database.run(`UPDATE thread_messages SET ${names.map(name => `${name}=?`).join(",")}
+    WHERE thread_id=? AND message_id=?`,
+  [...names.map(name => prepared.expected[name]), threadId, actual.messageId])
+  database.run("DELETE FROM thread_message_fragments WHERE thread_id=? AND message_id=?",
+    [threadId, actual.messageId])
+  database.run("DELETE FROM thread_message_fragment_states WHERE thread_id=? AND message_id=?",
+    [threadId, actual.messageId])
+  if (prepared.kind === "insert") database.run(`UPDATE thread_message_buckets
+    SET message_count=?,next_ordinal=?,updated_at=? WHERE thread_id=?`,
+  [repaired.bucket.message_count + 1, repaired.bucket.next_ordinal + 1, Date.now(), threadId])
+  input.access.assertPrepared(prepared.claim)
+  if (!database.inTransaction) throw Error("THREAD_MESSAGE_TRANSACTION_REQUIRED")
+  return prepared
+}
+
+function upsertThreadMessagesCore(
+  threadId: string,
+  messages: readonly ThreadMessageWrite[],
+  options: UpsertThreadMessagesOptions,
+  ownsTransaction: boolean
+): number {
   if (messages.length === 0) return 0
+  const hostOrigin = options.hostPromptOrigin
+  if (hostOrigin && (messages.length !== 1 || messages[0].id !== hostOrigin.messageId ||
+    messages[0].role !== "user" || messages[0].content !== hostOrigin.text ||
+    !isFunctionPluginPromptOrigin(hostOrigin.origin)))
+    throw Error("MODS_PLUGIN_PROMPT_ORIGIN_INVALID")
   const database = getDb()
   if (!threadExists(threadId)) return 0
+  const consumedCanonicalIds: string[] = []
+  messages = withoutCanonicalThreadMessageEchoes(database, threadId, messages, consumedCanonicalIds)
+  if (!messages.length) return 0
+  const sourceKey = (message: Message) => JSON.stringify([message.role,
+    getMessageProviderSourceId(message), getMessageProviderOccurrence(message) ?? 1])
+  const originalByProvider = new Map<string, ThreadMessageWrite[]>()
+  for (const message of messages) {
+    const key = sourceKey(message), list = originalByProvider.get(key) ?? []
+    list.push(message)
+    originalByProvider.set(key, list)
+  }
+  const consumeCanonical = (row: ThreadMessageRow, normalized: Message): void => {
+    const originals = originalByProvider.get(sourceKey(normalized))
+    if (!originals?.length || originals.some(message =>
+      getThreadMessageCanonicalId(threadId, message.id.trim()) !== row.message_id))
+      throw Error("MODS_CONVERSATION_PROJECTION_CONFLICT")
+    assertCanonicalThreadMessageEcho(database, threadId, row,
+      { ...normalized, id: originals[0].id })
+    consumedCanonicalIds.push(row.message_id)
+  }
   const persistedBaselineMessages = options.preserveExistingOrder
     ? undefined
     : getThreadMessages(threadId)
@@ -4690,8 +5505,15 @@ export function upsertThreadMessages(
     threadId,
     normalizedMessages.map((message) => message.id)
   )
+  if (hostOrigin) {
+    const previous = existingRows.get(hostOrigin.messageId)
+    if (previous && (previous.role !== "user" ||
+      previous.content_json !== JSON.stringify(hostOrigin.text) ||
+      previous.prompt_origin_json !== JSON.stringify(hostOrigin.origin)))
+      throw Error("MODS_PLUGIN_PROMPT_ORIGIN_CONFLICT")
+  }
 
-  database.run("BEGIN")
+  if (ownsTransaction) database.run("BEGIN")
   try {
     if (createMessageBucket) {
       database.run(
@@ -4708,6 +5530,12 @@ export function upsertThreadMessages(
       const startAt = normalizeTimestamp(normalized.start_at)
       const endAt = normalizeTimestamp(normalized.end_at)
       let existing = existingRows.get(normalized.id)
+      if (hasFunctionConversationProjectionMarker(database, threadId, normalized.id)) {
+        assertCanonicalThreadMessageSeal(database, threadId, normalized.id)
+        if (!existing) throw Error("MODS_CONVERSATION_PROJECTION_CONFLICT")
+        consumeCanonical(existing, normalized)
+        continue
+      }
       if (existing && existing.role !== normalized.role) {
         const aliasSourceId = findAliasSourceForCanonicalCollision(
           threadId,
@@ -4758,6 +5586,13 @@ export function upsertThreadMessages(
           const collisionRow = getThreadMessageRows(database, threadId, [collisionId]).get(
             collisionId
           )
+          if (hasFunctionConversationProjectionMarker(database, threadId, collisionId)) {
+            assertCanonicalThreadMessageSeal(database, threadId, collisionId)
+            if (!collisionRow) throw Error("MODS_CONVERSATION_PROJECTION_CONFLICT")
+            consumeCanonical(collisionRow, normalized)
+            existing = collisionRow
+            break
+          }
           if (!collisionRow) {
             existing = undefined
             break
@@ -4775,6 +5610,12 @@ export function upsertThreadMessages(
           provider_source_id: sourceId,
           provider_occurrence: occurrence
         }
+      }
+      if (hasFunctionConversationProjectionMarker(database, threadId, normalized.id)) {
+        assertCanonicalThreadMessageSeal(database, threadId, normalized.id)
+        if (!existing) throw Error("MODS_CONVERSATION_PROJECTION_CONFLICT")
+        consumeCanonical(existing, normalized)
+        continue
       }
       resolvedIncomingIds.push(normalized.id)
 
@@ -4959,7 +5800,7 @@ export function upsertThreadMessages(
         database,
         threadId,
         persistedBaselineMessages,
-        resolvedIncomingIds
+        [...resolvedIncomingIds, ...consumedCanonicalIds]
       )
     }
 
@@ -4970,20 +5811,32 @@ export function upsertThreadMessages(
       [messageCount, nextOrdinal, Date.now(), threadId]
     )
 
+    if (hostOrigin) {
+      const stored = getThreadMessageRows(database, threadId, [hostOrigin.messageId])
+        .get(hostOrigin.messageId)
+      if (!stored || stored.role !== "user" || stored.content_json !== JSON.stringify(hostOrigin.text))
+        throw Error("MODS_PLUGIN_PROMPT_ORIGIN_NOT_COMMITTED")
+      database.run(
+        "UPDATE thread_messages SET prompt_origin_json = ? WHERE thread_id = ? AND message_id = ?",
+        [JSON.stringify(hostOrigin.origin), threadId, hostOrigin.messageId]
+      )
+    }
     if (changed > 0 && options.touchThreadUpdatedAt === true) {
       database.run("UPDATE threads SET updated_at = ? WHERE thread_id = ?", [Date.now(), threadId])
     }
-    database.run("COMMIT")
+    if (ownsTransaction) database.run("COMMIT")
   } catch (error) {
-    try {
-      database.run("ROLLBACK")
-    } catch {
-      // Preserve the original transaction error.
+    if (ownsTransaction) {
+      try {
+        database.run("ROLLBACK")
+      } catch {
+        // Preserve the original transaction error.
+      }
     }
     throw error
   }
 
-  if (changed > 0) saveToDisk()
+  if (ownsTransaction && changed > 0) saveToDisk()
   return changed
 }
 
@@ -5001,6 +5854,11 @@ function moveThreadMessageBlockAfterOrdinal(
       throw new Error("Cannot order durable messages: one or more block messages are missing")
     }
     return false
+  }
+  const movedCanonical = findFunctionConversationProjectionMarkers(database, threadId, orderedIds)
+  for (const id of movedCanonical) {
+    assertCanonicalThreadMessageSeal(database, threadId, id)
+    throw Error("MODS_CONVERSATION_PROJECTION_CONFLICT")
   }
 
   // Fast no-op check: only inspect the next k rows, never the whole transcript.
@@ -5027,6 +5885,54 @@ function moveThreadMessageBlockAfterOrdinal(
     return false
   }
 
+  const hasReceipts = hasFunctionConversationProjectionReceiptSchema(database)
+  const fixed = database.exec(`SELECT p.message_id FROM thread_messages p
+    WHERE p.thread_id=? AND p.ordinal>? AND (p.function_row_json IS NOT NULL${hasReceipts ? `
+      OR EXISTS(SELECT 1 FROM function_conversation_projection_receipts r
+        WHERE r.thread_id=p.thread_id AND r.uuid=p.message_id)` : ""})`,
+  [threadId, anchorOrdinal])[0]?.values ?? []
+  if (fixed.length) {
+    if ([...movedRows.values()].some(row =>
+      row.ordinal <= anchorOrdinal)) throw Error("MODS_CONVERSATION_PROJECTION_CONFLICT")
+    const fixedIds = fixed.map(row => String(row[0]))
+    for (const id of fixedIds) assertCanonicalThreadMessageSeal(database, threadId, id)
+    const ordinary = database.exec(`SELECT p.message_id,p.ordinal FROM thread_messages p
+      WHERE p.thread_id=? AND p.ordinal>? AND p.function_row_json IS NULL${hasReceipts ? `
+        AND NOT EXISTS(SELECT 1 FROM function_conversation_projection_receipts r
+          WHERE r.thread_id=p.thread_id AND r.uuid=p.message_id)` : ""}
+      ORDER BY ordinal,created_at,message_id`, [threadId, anchorOrdinal])[0]?.values ?? []
+    const moving = new Set(orderedIds)
+    const desired = [...orderedIds, ...ordinary.map(row => String(row[0]))
+      .filter(id => !moving.has(id))]
+    if (desired.length !== ordinary.length) throw Error("MODS_CONVERSATION_PROJECTION_CONFLICT")
+    const oldOrdinals = new Map(ordinary.map(row => [String(row[0]), Number(row[1])]))
+    const changed = desired.some((id, index) => oldOrdinals.get(id) !== Number(ordinary[index][1]))
+    if (!changed) return false
+    database.run("BEGIN")
+    try {
+      desired.forEach((id, index) => {
+        const ordinal = Number(ordinary[index][1])
+        if (oldOrdinals.get(id) !== ordinal)
+          database.run(`UPDATE thread_messages SET ordinal=? WHERE thread_id=? AND message_id=?
+            AND function_row_json IS NULL${hasReceipts ? `
+            AND NOT EXISTS(SELECT 1 FROM function_conversation_projection_receipts r
+              WHERE r.thread_id=thread_messages.thread_id AND r.uuid=thread_messages.message_id)` : ""}`,
+          [ordinal, threadId, id])
+      })
+      for (const id of fixedIds) assertCanonicalThreadMessageSeal(database, threadId, id)
+      const currentFixed = findFunctionConversationProjectionMarkers(database, threadId,
+        [...fixedIds, ...ordinary.map(row => String(row[0]))])
+      if (JSON.stringify([...currentFixed].sort()) !== JSON.stringify([...fixedIds].sort()))
+        throw Error("MODS_CONVERSATION_PROJECTION_CONFLICT")
+      database.run("COMMIT")
+    } catch (error) {
+      try { database.run("ROLLBACK") } catch { /* Keep the original write failure. */ }
+      throw error
+    }
+    saveToDisk()
+    return true
+  }
+
   const { bucket, create: createBucket } = getOrRepairThreadMessageBucket(database, threadId)
 
   database.run("BEGIN")
@@ -5045,12 +5951,17 @@ function moveThreadMessageBlockAfterOrdinal(
       `UPDATE thread_messages
        SET ordinal = ordinal + ?
        WHERE thread_id = ? AND ordinal > ?
-         AND message_id NOT IN (${placeholders})`,
+         AND message_id NOT IN (${placeholders}) AND function_row_json IS NULL${hasReceipts ? `
+         AND NOT EXISTS(SELECT 1 FROM function_conversation_projection_receipts r
+           WHERE r.thread_id=thread_messages.thread_id AND r.uuid=thread_messages.message_id)` : ""}`,
       [orderedIds.length, threadId, anchorOrdinal, ...orderedIds]
     )
     orderedIds.forEach((messageId, index) => {
       database.run(
-        "UPDATE thread_messages SET ordinal = ? WHERE thread_id = ? AND message_id = ?",
+        `UPDATE thread_messages SET ordinal = ? WHERE thread_id = ? AND message_id = ?
+          AND function_row_json IS NULL${hasReceipts ? `
+          AND NOT EXISTS(SELECT 1 FROM function_conversation_projection_receipts r
+            WHERE r.thread_id=thread_messages.thread_id AND r.uuid=thread_messages.message_id)` : ""}`,
         [anchorOrdinal + index + 1, threadId, messageId]
       )
     })
@@ -5060,6 +5971,13 @@ function moveThreadMessageBlockAfterOrdinal(
        WHERE thread_id = ?`,
       [orderedIds.length, Date.now(), threadId]
     )
+    const introduced = database.exec(`SELECT p.message_id FROM thread_messages p
+      WHERE p.thread_id=? AND p.ordinal>? AND (p.function_row_json IS NOT NULL${hasReceipts ? `
+        OR EXISTS(SELECT 1 FROM function_conversation_projection_receipts r
+          WHERE r.thread_id=p.thread_id AND r.uuid=p.message_id)` : ""})`,
+    [threadId, anchorOrdinal])[0]?.values ?? []
+    if (introduced.length || findFunctionConversationProjectionMarkers(database, threadId, orderedIds).size)
+      throw Error("MODS_CONVERSATION_PROJECTION_CONFLICT")
     database.run("COMMIT")
   } catch (error) {
     try {
@@ -5084,6 +6002,7 @@ export function moveThreadMessagesAfterLastNonAssistant(
   threadId: string,
   messageIds: readonly string[]
 ): boolean {
+  assertThreadMessageForkReady(threadId)
   const orderedIds = Array.from(new Set(messageIds.map((id) => id.trim()).filter(Boolean)))
   if (orderedIds.length === 0) return false
 
@@ -5121,6 +6040,7 @@ export function moveThreadMessagesAfterAnchor(
   anchorMessageId: string,
   messageIds: readonly string[]
 ): boolean {
+  assertThreadMessageForkReady(threadId)
   const anchorId = anchorMessageId.trim()
   const orderedIds = Array.from(
     new Set(messageIds.map((id) => id.trim()).filter((id) => id && id !== anchorId))
@@ -5148,6 +6068,7 @@ export function replaceThreadMessageId(
   toMessageId: string,
   role?: ThreadMessageRole
 ): boolean {
+  assertThreadMessageForkReady(threadId)
   // 注意：调用方传入的 ID 可能包含前后空格，此处统一 trim。
   // upsertThreadMessages 在写入时也会 trim message.id，因此数据库中存储的 ID 均为 trim 后的值。
   // 两处 trim 逻辑保持一致，确保别名解析时不会因空格导致不一致。
@@ -5159,12 +6080,15 @@ export function replaceThreadMessageId(
   const toAlias = resolveThreadMessageIdAliasEntry(threadId, requestedToId)
   const fromId = fromAlias.id
   const toId = toAlias.id
-  if (fromId === toId) return true
-
   const database = getDb()
   const rows = getThreadMessageRows(database, threadId, [fromId, toId])
   const source = rows.get(fromId)
   const target = rows.get(toId)
+  const canonical = findFunctionConversationProjectionMarkers(database, threadId, [fromId, toId])
+  for (const id of canonical) assertCanonicalThreadMessageSeal(database, threadId, id)
+  if (canonical.size)
+    throw Error("MODS_CONVERSATION_PROJECTION_CONFLICT")
+  if (fromId === toId) return true
   if (role && source && source.role !== role) {
     console.warn(
       `[DB] Refusing to remember message id alias with mismatched source role for thread ${threadId}: ` +
@@ -5544,19 +6468,30 @@ export function getPersistedThreadWorkspaceBindings(): PersistedThreadWorkspaceB
 }
 
 /** Metadata/status projection for hot main-process paths. */
+const THREAD_CORE_QUERY = `SELECT thread_id, created_at, updated_at, metadata, status, title
+  FROM threads WHERE thread_id = ?`
+const threadCoreStatements = new WeakMap<NativeSqliteAdapter, NativeSqliteReadOne>()
+const threadCoreQueriesInUse = new WeakSet<NativeSqliteAdapter>()
+
 export function getThreadCore(threadId: string): ThreadSummaryRow | null {
   const database = getDb()
-  const stmt = database.prepare(
-    `SELECT thread_id, created_at, updated_at, metadata, status, title
-     FROM threads
-     WHERE thread_id = ?`
-  )
-  stmt.bind([threadId])
+  const temporary = threadCoreQueriesInUse.has(database)
+  if (!temporary) threadCoreQueriesInUse.add(database)
+  let read: NativeSqliteReadOne | undefined
   try {
-    if (!stmt.step()) return null
-    return stmt.getAsObject() as unknown as ThreadSummaryRow
+    read = temporary ? database.prepareReadOne(THREAD_CORE_QUERY) : threadCoreStatements.get(database)
+    if (!read) {
+      read = database.prepareReadOne(THREAD_CORE_QUERY)
+      threadCoreStatements.set(database, read)
+    }
+    const row = read([threadId])
+    return row ? row as unknown as ThreadSummaryRow : null
+  } catch (error) {
+    if (!temporary && threadCoreStatements.get(database) === read)
+      threadCoreStatements.delete(database)
+    throw error
   } finally {
-    stmt.free()
+    if (!temporary) threadCoreQueriesInUse.delete(database)
   }
 }
 
@@ -5816,6 +6751,23 @@ export function getThread(threadId: string): ThreadRow | null {
 
 export function createThread(threadId: string, metadata?: Record<string, unknown>): ThreadRow {
   const database = getDb()
+  const row = insertThread(database, threadId, metadata)
+  saveToDisk()
+  return row
+}
+
+/** Native fork import joins thread identity and its preparing journal in the same app DB commit. */
+export function createThreadInTransaction(
+  threadId: string,
+  metadata?: Record<string, unknown>
+): ThreadRow {
+  const database = getDb()
+  if (!database.inTransaction) throw new Error("THREAD_CREATE_TRANSACTION_REQUIRED")
+  return insertThread(database, threadId, metadata)
+}
+
+function insertThread(database: NativeSqliteAdapter, threadId: string,
+  metadata?: Record<string, unknown>): ThreadRow {
   const now = Date.now()
   const storedMetadata = attachFreshThreadIncarnation(metadata)
   const title = (storedMetadata.title as string) || null
@@ -5826,8 +6778,6 @@ export function createThread(threadId: string, metadata?: Record<string, unknown
      VALUES (?, ?, ?, ?, ?, ?)`,
     [threadId, now, now, serializedMetadata, "idle", title]
   )
-
-  saveToDisk()
 
   return {
     thread_id: threadId,
@@ -5922,9 +6872,20 @@ export function mergeThreadValues(
 
 export function deleteThread(threadId: string): void {
   const database = getDb()
-  threadMessageIdAliases.delete(threadId)
+  const original = getThreadCore(threadId)
+  const incarnation = original ? captureThreadIncarnation(original) : undefined
   database.run("BEGIN")
   try {
+    if (original && incarnation) deleteFunctionConversationThreadDataInTransaction(database, {
+      threadId, incarnation,
+      assertCurrent: () => {
+        const current = getThreadCore(threadId)
+        if (getDb() !== database || !matchesThreadIncarnation(current, incarnation) ||
+          current?.metadata !== original.metadata) throw Error("MODS_CONVERSATION_THREAD_CHANGED")
+      }
+    })
+    else if (getDb() !== database || getThreadCore(threadId))
+      throw Error("MODS_CONVERSATION_THREAD_CHANGED")
     database.run("DELETE FROM thread_subagent_text_fragments WHERE thread_id = ?", [threadId])
     database.run("DELETE FROM thread_subagent_text_fragment_states WHERE thread_id = ?", [threadId])
     database.run("DELETE FROM thread_subagent_messages WHERE thread_id = ?", [threadId])
@@ -5949,6 +6910,7 @@ export function deleteThread(threadId: string): void {
     }
     throw error
   }
+  threadMessageIdAliases.delete(threadId)
   saveToDisk()
 }
 

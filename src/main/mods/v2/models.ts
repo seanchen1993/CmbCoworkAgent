@@ -1,13 +1,25 @@
+import type {
+  FunctionModelResult,
+  FunctionForkResult
+} from "../../../shared/mods/v2/model-protocol"
 import { randomUUID } from "node:crypto"
 import type { ModControlStore, ModGrant } from "../control-store"
 import type { ModIdentity, ModObject } from "../../../shared/mods/types"
 import type { ResolvedModelConfig } from "../../models/registry"
 import { ModFunctionError } from "../../../shared/mods/v2/contracts"
 import { ModError } from "../errors"
-import { currentCompletionBudget, reserveCompletionModelUsage, type CompletionReservation } from "./completion-budget"
+import { assertIndependentModelEntry, withIndependentPromptFrame } from "./model-prompt-frame"
+import {
+  currentCompletionBudget,
+  reserveCompletionModelUsage,
+  type CompletionReservation
+} from "./completion-budget"
 import { assertFunctionGrant, functionCallIdentity, runFunctionHostCall } from "./host-call"
 import {
   functionModelRequest,
+  assertFunctionModelEffort,
+  functionModelResult,
+  FunctionModelProviderFailure,
   validateFunctionModelText,
   type FunctionModelRequest,
   type FunctionModelReply
@@ -22,7 +34,26 @@ import {
 
 interface FunctionModelHost {
   assertScope(workspace: string, threadId: string): void
-  resolve(name: string): Promise<ResolvedModelConfig>
+  captureStartup?(workspace: string, threadId: string): (() => void) | undefined
+  resolve(name: string, workspace: string, threadId: string): Promise<ResolvedModelConfig>
+  captureModel?(
+    workspace: string,
+    threadId: string,
+    config: ResolvedModelConfig
+  ): Promise<() => void>
+  prepare?(
+    config: ResolvedModelConfig,
+    request: FunctionModelRequest,
+    snapshot: FunctionModelForkSnapshot | undefined,
+    identity: ModIdentity,
+    signal: AbortSignal,
+    assertLive: () => void
+  ): Promise<{
+    input: ModObject
+    inputUpperBound: number
+    assertBudget(maxTokens: number): void
+    invoke(request: FunctionModelRequest, signal: AbortSignal): Promise<FunctionModelReply>
+  }>
   invoke(
     config: ResolvedModelConfig,
     request: FunctionModelRequest,
@@ -73,6 +104,87 @@ export class FunctionModels {
     return result.text
   }
 
+  async completeResult(
+    workspace: string,
+    threadId: string,
+    grant: ModGrant,
+    input: ModObject,
+    callerSignal: AbortSignal
+  ): Promise<FunctionModelResult> {
+    const request = functionModelRequest(input, "result-v1")
+    return functionModelResult(
+      await this.runModel(
+        workspace,
+        threadId,
+        grant,
+        input,
+        request,
+        callerSignal,
+        (config, resolved, signal) => this.host.invoke(config, resolved, signal),
+        undefined,
+        undefined,
+        true
+      )
+    )
+  }
+
+  async forkResult(
+    workspace: string,
+    threadId: string,
+    grant: ModGrant,
+    input: ModObject,
+    callerSignal: AbortSignal
+  ): Promise<FunctionForkResult> {
+    assertIndependentModelEntry()
+    const request = functionModelForkRequest(input, "result-v1")
+    assertFunctionGrant(this.store, workspace, threadId, grant, callerSignal)
+    this.host.assertScope(workspace, threadId)
+    if (!this.host.captureForkSnapshot || !this.host.invokeFork)
+      throw new ModFunctionError("MODS_MODEL_OPERATION_UNSUPPORTED")
+    const snapshot = this.host.captureForkSnapshot(workspace, threadId)
+    if (!snapshot) return { isAnswered: false, reason: "nothing-to-fork" }
+    try {
+      snapshot.assertLive?.()
+      const result = await this.runModel(
+        workspace,
+        threadId,
+        grant,
+        input,
+        { model: snapshot.modelRef ?? snapshot.model, prompt: request.prompt },
+        callerSignal,
+        async (config, resolved, signal) => {
+          snapshot.assertLive?.()
+          const reply = await this.host.invokeFork!(config, resolved, snapshot, signal)
+          snapshot.assertLive?.()
+          return (
+            reply.accounting ?? {
+              text: reply.text,
+              inputTokens: reply.usage?.input_tokens,
+              outputTokens: reply.usage?.output_tokens,
+              cacheReadInputTokens: reply.usage?.cache_read_input_tokens,
+              cacheCreationInputTokens: reply.usage?.cache_creation_input_tokens
+            }
+          )
+        },
+        () => snapshot.assertLive?.(),
+        Buffer.byteLength(
+          JSON.stringify({
+            messages: snapshot.messages,
+            system: snapshot.system,
+            prompt: request.prompt
+          }),
+          "utf8"
+        ) +
+          128 * (snapshot.messages.length + 2),
+        true,
+        snapshot
+      )
+      return functionModelResult(result)
+    } finally {
+      snapshot.release?.()
+    }
+  }
+
   async classify(
     workspace: string,
     threadId: string,
@@ -108,6 +220,7 @@ export class FunctionModels {
     input: ModObject,
     callerSignal: AbortSignal
   ): Promise<FunctionModelForkReply | null> {
+    assertIndependentModelEntry()
     const request = functionModelForkRequest(input)
     if (!this.host.captureForkSnapshot || !this.host.invokeFork) return null
     assertFunctionGrant(this.store, workspace, threadId, grant, callerSignal)
@@ -122,7 +235,7 @@ export class FunctionModels {
         grant,
         input,
         {
-          model: snapshot.model,
+          model: snapshot.modelRef ?? snapshot.model,
           prompt: request.prompt,
           ...(request.maxTokens === undefined ? {} : { maxTokens: request.maxTokens })
         },
@@ -138,8 +251,17 @@ export class FunctionModels {
           }
         },
         () => snapshot.assertLive?.(),
-        Buffer.byteLength(JSON.stringify({ messages: snapshot.messages, system: snapshot.system,
-          prompt: request.prompt }), "utf8") + 128 * (snapshot.messages.length + 2)
+        Buffer.byteLength(
+          JSON.stringify({
+            messages: snapshot.messages,
+            system: snapshot.system,
+            prompt: request.prompt
+          }),
+          "utf8"
+        ) +
+          128 * (snapshot.messages.length + 2),
+        false,
+        snapshot
       )
       return {
         text: result.text,
@@ -172,38 +294,60 @@ export class FunctionModels {
       signal: AbortSignal
     ) => Promise<FunctionModelReply>,
     assertCapturedScope?: () => void,
-    inputUpperBound = Buffer.byteLength(request.prompt + (request.system ?? ""), "utf8") + 128
+    inputUpperBound = Buffer.byteLength(request.prompt + (request.system ?? ""), "utf8") + 128,
+    structured = false,
+    snapshot?: FunctionModelForkSnapshot
   ): Promise<FunctionModelReply> {
+    assertIndependentModelEntry()
     const timer = new AbortController()
     const timeout = setTimeout(() => timer.abort(), 60000)
     const signal = AbortSignal.any([callerSignal, timer.signal])
+    let assertModel: (() => void) | undefined
+    let assertStartup: (() => void) | undefined
     const assertLive = (): void => {
       assertFunctionGrant(this.store, workspace, threadId, grant, signal)
       this.host.assertScope(workspace, threadId)
       assertCapturedScope?.()
+      assertModel?.()
+      assertStartup?.()
     }
     const key = JSON.stringify([workspace, grant.modId])
     let reserved = false
     try {
+      assertStartup = this.host.captureStartup?.(workspace, threadId)
       assertLive()
       if (this.pending >= 4 || (this.active.get(key) ?? 0) >= 2)
         throw new ModFunctionError("MODS_MODEL_CAPACITY")
       this.pending++
       this.active.set(key, (this.active.get(key) ?? 0) + 1)
       reserved = true
-      const config = await this.host.resolve(request.model)
+      const config = await this.host.resolve(request.model, workspace, threadId)
+      assertFunctionModelEffort(config.model, request.effort)
+      assertModel = await this.host.captureModel?.(workspace, threadId, config)
       assertLive()
-      const completionBudget = currentCompletionBudget()
-      const availableOutput = completionBudget
-        ? completionBudget.availableTokens() - inputUpperBound : Infinity
-      // A too-large observer rewrite may reduce the output cap, but cannot spend past the budget.
-      if (availableOutput < 1) completionBudget!.reserve(inputUpperBound, 1)
-      const maxTokens = Math.min(request.maxTokens ?? 256, config.maxOutputTokens ?? 4096, availableOutput)
       const identity = functionCallIdentity(workspace, threadId, grant, {
         fallbackTurnId: `function-model:${randomUUID()}`,
         origin: "mod"
       })
-      const finalInput = { ...input, model: config.ref, maxTokens }
+      const prepared = this.host.prepare
+        ? await withIndependentPromptFrame(() =>
+            this.host.prepare!(config, request, snapshot, identity, signal, assertLive), identity)
+        : undefined
+      assertLive()
+      if (prepared) inputUpperBound = prepared.inputUpperBound
+      const completionBudget = currentCompletionBudget()
+      const availableOutput = completionBudget
+        ? completionBudget.availableTokens() - inputUpperBound
+        : Infinity
+      // A too-large observer rewrite may reduce the output cap, but cannot spend past the budget.
+      if (availableOutput < 1) completionBudget!.reserve(inputUpperBound, 1)
+      const maxTokens = Math.min(
+        request.maxTokens ?? 256,
+        config.maxOutputTokens ?? 4096,
+        availableOutput
+      )
+      prepared?.assertBudget(maxTokens)
+      const finalInput = { ...(prepared?.input ?? input), model: config.ref, maxTokens }
       let providerResult: FunctionModelReply | undefined
       let completionReservation: CompletionReservation | undefined
       const published = await runFunctionHostCall({
@@ -216,15 +360,25 @@ export class FunctionModels {
         invoke: async () => {
           completionReservation = reserveCompletionModelUsage(inputUpperBound, maxTokens)
           try {
-            providerResult = await invoke(config, { ...request, maxTokens }, signal)
+            providerResult = prepared
+              ? await prepared.invoke({ ...request, maxTokens }, signal)
+              : await invoke(config, { ...request, maxTokens }, signal)
           } catch (error) {
-            // Preserve the provider failure, but a caller cannot catch it and invent known usage.
-            try { completionReservation?.settle() } catch { /* budget keeps the failure */ }
-            throw error
+            if (structured && error instanceof FunctionModelProviderFailure) {
+              providerResult = { text: "", failure: error.failure }
+            } else {
+              // Missing provider usage remains unknown, including aborted network requests.
+              try {
+                completionReservation?.settle()
+              } catch {
+                /* budget keeps the failure */
+              }
+              throw error
+            }
           }
           return providerResult
         },
-        status: () => "succeeded",
+        status: (result) => (result.failure ? "failed" : "succeeded"),
         recordResult: (result) => {
           this.store.recordFunctionModelUsage(
             identity.callId,
@@ -234,6 +388,7 @@ export class FunctionModels {
           completionReservation?.settle(result.inputTokens, result.outputTokens)
         },
         publish: async (result) => {
+          if (result.failure) return ""
           validateFunctionModelText(result.text)
           // Complete provider text is protected before any guest after-hook can observe it.
           const published = await this.host.publish(identity, result.text, signal)
@@ -242,6 +397,16 @@ export class FunctionModels {
         }
       })
       return {
+        ...(providerResult?.failure ? { failure: providerResult.failure } : {}),
+        ...(providerResult?.cacheReadInputTokens === undefined
+          ? {}
+          : { cacheReadInputTokens: providerResult.cacheReadInputTokens }),
+        ...(providerResult?.cacheCreationInputTokens === undefined
+          ? {}
+          : { cacheCreationInputTokens: providerResult.cacheCreationInputTokens }),
+        ...(providerResult?.uncachedInputTokens === undefined
+          ? {}
+          : { uncachedInputTokens: providerResult.uncachedInputTokens }),
         text: published,
         ...(providerResult?.inputTokens === undefined
           ? {}

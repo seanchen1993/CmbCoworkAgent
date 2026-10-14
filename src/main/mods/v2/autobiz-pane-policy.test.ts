@@ -5,8 +5,9 @@ import { join, resolve } from "node:path"
 import { afterEach, expect, it } from "vitest"
 import type { ModJson } from "../../../shared/mods/types"
 import type { CompletionPolicy } from "../../../shared/mods/v2/completion-policy"
-import type { FunctionUiAction, FunctionUiElement } from "../../../shared/mods/v2/ui"
+import type { FunctionUiAction, FunctionUiElement, FunctionUiNode } from "../../../shared/mods/v2/ui"
 import { ModControlStore } from "../control-store"
+import { ApplicationCompletionPolicies } from "./application-completion-policy"
 import { ProjectFunctionFiles } from "./file-access"
 import { FunctionGuestRuntime } from "./guest-runtime"
 import { compileFunctionPlugin } from "./loader"
@@ -53,6 +54,7 @@ async function fixture() {
   let store = new ModControlStore(join(root, "control.sqlite"))
   let session: FunctionSession
   async function start() {
+    const policies = new ApplicationCompletionPolicies(store)
     const guest = await FunctionGuestRuntime.create(compiled.code)
     const files = new ProjectFunctionFiles(
       workspace,
@@ -76,9 +78,18 @@ async function fixture() {
         publish: async (value) => value,
         files: () => files,
         state: () => ({
-          get: async (key) => store.functionState.get(namespace, key),
-          set: async (key, value) => store.functionState.set(namespace, key, value),
-          delete: (key) => store.functionState.delete(namespace, key),
+          get: async (key) =>
+            key === "completion-config"
+              ? policies.guestValue(workspace, compiled.name)
+              : store.functionState.get(namespace, key),
+          set: async (key, value) => {
+            policies.assertGuestWritable(workspace, compiled.name, key)
+            store.functionState.set(namespace, key, value)
+          },
+          delete: (key) => {
+            policies.assertGuestWritable(workspace, compiled.name, key)
+            store.functionState.delete(namespace, key)
+          },
           keys: async () => store.functionState.keys(namespace)
         })
       }
@@ -93,16 +104,18 @@ async function fixture() {
   })
   const snapshot = async () => (await session.panes.snapshot())[0]
   const nodes = async () => {
-    const output: FunctionUiElement[] = []
+    const output: FunctionUiNode[] = []
     const visit = (node: FunctionUiElement | string) => {
-      if (typeof node === "string") return
-      output.push(node)
+      if (typeof node === "string" || node.type === "engine") return
+      if (node.type !== "fragment" && node.type !== "Markdown") output.push(node)
       node.children?.forEach(visit)
     }
     visit((await snapshot()).tree)
     return output
   }
   return {
+    saveApplication: (value: CompletionPolicy) =>
+      new ApplicationCompletionPolicies(store).save(workspace, compiled.name, value),
     get: (key: string) => store.functionState.get(namespace, key),
     set: (key: string, value: ModJson) => store.functionState.set(namespace, key, value),
     policy: () =>
@@ -131,6 +144,52 @@ async function fixture() {
     }
   }
 }
+
+it("shows application-owned rules as read-only while retaining refresh and browsing", async () => {
+  const f = await fixture()
+  f.saveApplication({
+    mode: "repair",
+    scope: "file",
+    target: "example.ts",
+    checks: ["code-review"],
+    maxRepairs: 2,
+    timeoutMs: 120000,
+    modelTokenBudget: 8192
+  })
+  await f.act("refresh")
+  expect(await f.text()).toContain("由应用设置管理（只读）")
+  for (const key of [
+    "review-mode",
+    "review-scope",
+    "review-check-code-review",
+    "review-target",
+    "review-feature",
+    "review-budget",
+    "review-timeout",
+    "review-tokens"
+  ])
+    expect(await f.control(key)).toBeUndefined()
+  expect(await f.text()).toContain("自动修复并复检")
+  expect((await f.control("refresh"))?.props.disabled).not.toBe(true)
+})
+
+it("explains an application ownership change after the pane was opened and preserves the native rule", async () => {
+  const f = await fixture()
+  f.saveApplication({
+    mode: "repair",
+    scope: "file",
+    target: "example.ts",
+    checks: ["code-review"],
+    maxRepairs: 2,
+    timeoutMs: 120000,
+    modelTokenBudget: 8192
+  })
+  await f.act("review-mode", "select", "off")
+  expect(await f.text()).toContain("规则已由应用设置接管")
+  expect(await f.text()).not.toContain("MODS_COMPLETION_POLICY_HOST_OWNED")
+  await f.act("refresh")
+  expect(await f.text()).toContain("自动修复并复检")
+})
 
 it("combines check selections and persists all scopes, target and feature through real pane actions", async () => {
   const f = await fixture()

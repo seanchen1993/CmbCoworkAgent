@@ -5,8 +5,24 @@ import type { SupportedIde } from "../types"
 const testState = vi.hoisted(() => ({
   mockExecFileSync: vi.fn(),
   mockSpawn: vi.fn(),
-  configuredPaths: {} as Partial<Record<SupportedIde, string>>
+  configuredPaths: {} as Partial<Record<SupportedIde, string>>,
+  macPaths: new Set<string>()
 }))
+
+vi.mock("fs", async importOriginal => {
+  const actual = await importOriginal<typeof import("fs")>()
+  return { ...actual, existsSync: (path: import("fs").PathLike) =>
+    typeof path === "string" && testState.macPaths.has(path) || actual.existsSync(path) }
+})
+
+vi.mock("path", async importOriginal => {
+  const actual = await importOriginal<typeof import("path")>()
+  return { ...actual,
+    join: (...paths: string[]) => process.platform === "darwin"
+      ? actual.posix.join(...paths) : actual.join(...paths),
+    normalize: (path: string) => process.platform === "darwin"
+      ? actual.posix.normalize(path) : actual.normalize(path) }
+})
 
 vi.mock("child_process", () => ({
   execFileSync: testState.mockExecFileSync,
@@ -45,6 +61,9 @@ function createMockChildProcess(): MockChildProcess {
 describe("openIde", () => {
   beforeEach(() => {
     testState.configuredPaths = {}
+    testState.macPaths = new Set([
+      "/Applications/WebStorm.app", "/Applications/WebStorm.app/Contents/MacOS/webstorm"
+    ])
     mockSpawn.mockReset()
     mockExecFileSync.mockReset()
   })
@@ -298,4 +317,15 @@ describe("openIde", () => {
 
     expect(mockSpawn).toHaveBeenCalledTimes(1)
   })
+
+  it.each(["/Applications/WebStorm.app", "/Applications/WebStorm.app/Contents/MacOS/webstorm"])(
+    "rejects a missing macOS launcher resource %s without spawning", async missing => {
+      setPlatform("darwin")
+      testState.configuredPaths.webstorm = "/Applications/WebStorm.app"
+      testState.macPaths.delete(missing)
+      await expect(openIde({ ide: "webstorm", workspacePath: "/repo" }))
+        .rejects.toThrow("应用路径无效")
+      expect(mockSpawn).not.toHaveBeenCalled()
+    }
+  )
 })

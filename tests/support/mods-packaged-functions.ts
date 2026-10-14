@@ -67,6 +67,7 @@ export async function verifyPackagedFunctions(
   pass("packaged Function Mods compile two isolated guests and compose a live engine noun")
 
   await run("code-pane")
+  await page.getByRole("button", { name: "1 个插件面板 · 查看", exact: true }).click()
   const code = page.locator("section").filter({ hasText: "Code E2E" }).last()
   await code.locator(".shiki").waitFor()
   assert.deepEqual(await code.locator('[data-code-kind="remove"] > span').allTextContents(), [

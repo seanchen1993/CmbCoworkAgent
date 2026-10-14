@@ -1,5 +1,8 @@
 import type { Message } from "../types"
 import { reconcileMessageDisplayOrder } from "./message-display-order"
+import { getMessageProviderOccurrenceIdentity } from "../../../shared/message-role-collision"
+import { functionConversationTranscriptFields } from
+  "../../../shared/mods/v2/conversation-transcript"
 
 export interface ChatMessageProjection {
   /**
@@ -26,7 +29,9 @@ function liveStructureKey(messages: readonly Message[]): string {
       (message) =>
         `${message.id}\u0000${message.role}\u0000${message.tool_call_id ?? ""}\u0000${
           message.provider_occurrence ?? ""
-        }`
+        }\u0000${message.provider_source_id ?? ""}\u0000${JSON.stringify(
+          functionConversationTranscriptFields(message, message.id, message.role)
+        )}`
     )
     .join("\u0001")
 }
@@ -48,6 +53,9 @@ function orderHintStructureKey(
 }
 
 function resolveBaselineLiveMessage(baseline: Message, live: Message): Message {
+  const native = functionConversationTranscriptFields(baseline, baseline.id, baseline.role)
+  // A kept host projection is authoritative, including deliberately omitted reasoning.
+  if (native.function_row || native.function_row_invalid) return baseline
   if (baseline.role !== "assistant" || live.role !== "assistant") return baseline
 
   const reasoning =
@@ -134,7 +142,8 @@ export function createChatMessageProjector(): (
         displayIndex !== undefined &&
         nextTail.id === previousTail.id &&
         nextTail.role === previousTail.role &&
-        nextTail.tool_call_id === previousTail.tool_call_id
+        nextTail.tool_call_id === previousTail.tool_call_id &&
+        liveStructureKey([nextTail]) === liveStructureKey([previousTail])
       ) {
         const liveIndex = liveIndexById.get(nextTail.id)
         const live = liveIndex === undefined ? undefined : liveMessages[liveIndex]
@@ -150,13 +159,27 @@ export function createChatMessageProjector(): (
     if (structureChanged) {
       baselineIndexById = new Map(baseline.map((message, index) => [message.id, index]))
       liveIndexById = new Map(liveMessages.map((message, index) => [message.id, index]))
+      const canonicalByIdentity = new Map<string, Message | null>()
+      for (const message of baseline) {
+        const native = functionConversationTranscriptFields(message, message.id, message.role)
+        if (!native.function_row) continue
+        const identity = getMessageProviderOccurrenceIdentity(message)
+        canonicalByIdentity.set(identity, canonicalByIdentity.has(identity) ? null : message)
+      }
       const merged = baseline.map((message) => {
         const liveIndex = liveIndexById.get(message.id)
         const live = liveIndex === undefined ? undefined : liveMessages[liveIndex]
         return live ? resolveBaselineLiveMessage(message, live) : message
       })
       for (const live of liveMessages) {
-        if (!baselineIndexById.has(live.id)) merged.push(live)
+        if (baselineIndexById.has(live.id)) continue
+        const native = functionConversationTranscriptFields(live, live.id, live.role)
+        // The same raw occurrence can remain in the transitional layer until append ACK.
+        // Suppress only its unique host-kept counterpart; distinct native rows and damaged
+        // markers are never conflated merely because a provider reused an identifier.
+        if (!native.function_row && !native.function_row_invalid &&
+          canonicalByIdentity.get(getMessageProviderOccurrenceIdentity(live))) continue
+        merged.push(live)
       }
 
       messages = reconcileMessageDisplayOrder(merged, orderHintMessages)

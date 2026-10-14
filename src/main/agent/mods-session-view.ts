@@ -7,6 +7,7 @@ import type { ModRuntimeAuthority } from "../mods/runtime-instance"
 import type { ModJson } from "../../shared/mods/types"
 import type { FunctionSessionContextSources } from "../../shared/mods/v2/session"
 import type { FunctionSessionContextSourceResolver } from "./context-sources"
+import type { FunctionPeerConsumer } from "../mods/v2/peer-inbox"
 
 export type FunctionSessionCompactor = (
   instructions: string,
@@ -34,9 +35,14 @@ export function createFunctionSessionViewMiddleware(
   runId?: string,
   contextWindow?: number,
   compact?: FunctionSessionCompactor,
-  contextSources?: FunctionSessionContextSources | FunctionSessionContextSourceResolver
+  contextSources?: FunctionSessionContextSources | FunctionSessionContextSourceResolver,
+  openPeer?: () => FunctionPeerConsumer,
+  includeLifecycle = true,
+  modelRef?: string
 ) {
-  if (compact) manager.bindFunctionSession(authority, model, contextWindow, compact)
+  let peer: FunctionPeerConsumer | undefined
+  if (modelRef) manager.bindFunctionSession(authority, model, contextWindow, compact, modelRef)
+  else if (compact) manager.bindFunctionSession(authority, model, contextWindow, compact)
   else manager.bindFunctionSession(authority, model, contextWindow)
   const capture = (
     state: { messages: readonly unknown[]; _summarizationEvent?: unknown },
@@ -49,7 +55,7 @@ export function createFunctionSessionViewMiddleware(
           : { ...(state._summarizationEvent ?? {}), usageStartIndex: pendingStartIndex }
     })
   }
-  return createMiddleware({
+  const middleware = createMiddleware({
     name: "functionSessionView",
     // LangChain filters each middleware's request.state to its declared keys.
     // This observer follows the loading middleware; the original graph fields
@@ -60,11 +66,21 @@ export function createFunctionSessionViewMiddleware(
       skillsMetadata: z.array(z.unknown()).optional()
     }),
     beforeAgent: (state) => {
+      if (peer) throw new Error("MODS_PEER_CONCURRENT_MAIN_RUN")
+      peer = openPeer?.()
       capture(state)
       return undefined
     },
-    afterAgent: (state) => {
-      capture(state)
+    afterAgent: async (state, runtime) => {
+      const current = peer
+      peer = undefined
+      try {
+        capture(state)
+        await manager.measureFunctionSession(authority, runtime.signal)
+        runtime.signal?.throwIfAborted()
+      } finally {
+        current?.close()
+      }
       return undefined
     },
     afterModel: (state) => {
@@ -78,13 +94,28 @@ export function createFunctionSessionViewMiddleware(
         messages: request.messages,
         systemMessage: request.systemMessage,
         tools: request.tools,
-        contextSources: typeof contextSources === "function" ? contextSources(request) : contextSources
+        contextSources:
+          typeof contextSources === "function" ? contextSources(request) : contextSources
       })
-      return handler(request)
+      try {
+        return await handler(request)
+      } catch (error) {
+        const current = peer
+        current?.close()
+        throw error
+      }
     },
     wrapToolCall: async (request, handler) => {
       capture(request.state)
       return handler(request)
     }
   })
+  if (includeLifecycle) return middleware
+  // Model selection and tool wrappers still need the real host view. Only
+  // lifecycle callbacks add graph nodes, so omit those for an unapproved run.
+  const { beforeAgent, afterAgent, afterModel, ...hostView } = middleware
+  void beforeAgent
+  void afterAgent
+  void afterModel
+  return hostView
 }

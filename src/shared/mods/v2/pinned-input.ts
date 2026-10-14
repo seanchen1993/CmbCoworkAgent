@@ -2,15 +2,37 @@ import type { ModObject } from "../types"
 import { encodeModJson } from "../validation"
 import { ModFunctionError } from "./contracts"
 import { functionQuestionPresentation, functionSiteProps } from "./sites"
+import { validateFunctionUiPressedLink } from "./ui"
 
 /** Host-owned fields in the pinned v2.1.278 contracts; required identity fields cannot be omitted. */
 const pinned: Record<string, readonly string[]> = {
+  "agent.spawn": ["tool_use_id", "name", "fork", "parentModel", "permissionMode", "parentAgentId", "provider"],
+  "prompt.fill": ["origin"],
+  "prompt.edit": ["origin", "key"],
+  "prompt.suggest": ["origin"],
+  "prompt.submit": ["origin", "wait", "turnId"],
+  "prompt.attachment": ["type", "origin", "agentId", "detail"],
+  "prompt.mention": ["mention", "agentId"],
+  "prompt.compose": ["model"],
+  "prompt.section": ["name"],
+  "env.get": ["name"],
+  "session.send": ["origin", "agentId"],
+  "session.receive": ["origin", "agentId"],
+  "session.measure": ["context", "rateLimits", "cost", "changed"],
+  "session.end": ["reason", "sessionId", "resume"],
+  "session.append": ["uuid", "door", "origin", "agentId"],
+  "state.get": ["plugin", "key", "id"],
+  "state.set": ["plugin", "key", "id", "ifVersion", "previous"],
   "command.run": ["command", "origin", "presentation"],
   "command.describe": ["command", "immediate", "provider"],
   "config.describe": ["key", "provider"],
+  "config.set": ["key", "previous", "provider", "origin"],
   "tool.call": ["tool", "tool_use_id", "agentId"],
+  "tool.describe": ["tool", "provider"],
+  "skill.prompt": ["skill"],
   "classic.PreToolUse": ["tool", "tool_use_id"],
-  "tool.check": ["tool", "input", "tool_use_id"],
+  "tool.check": ["tool", "input", "tool_use_id", "agentId", "ceiling"],
+  "mcp.connect": ["server"],
   "turn.step": ["turnId", "index", "messageCount", "agentId"],
   "turn.complete": ["agentId"],
   "ui.open": ["id"],
@@ -21,12 +43,14 @@ const pinned: Record<string, readonly string[]> = {
   "ui.input": ["plugin", "element", "component", "requestId", "surface", "kind"],
   "ui.select": ["plugin", "element", "component", "requestId", "surface"],
   "ui.focus": ["plugin", "component", "requestId", "surface", "origin", "focused"],
-  "ui.message": ["surface", "component", "requestId", "element", "module"]
+  "ui.message": ["surface", "component", "requestId", "element", "module"],
+  "ui.fault": ["surface", "component", "requestId", "element", "module", "phase", "reason"]
 }
 const required: Record<string, readonly string[]> = {
   "command.run": ["command", "origin"],
   "command.describe": ["command", "immediate"],
   "config.describe": ["key"],
+  "config.set": ["key", "previous", "provider", "origin"],
   "turn.step": ["turnId", "index", "messageCount"]
 }
 const classicIdentity = [
@@ -94,6 +118,11 @@ export function normalizeFunctionInput(
   original: ModObject
 ): ModObject {
   encodeModJson(received)
+  if (event === "ui.press") {
+    if (Object.hasOwn(received, "link") !== Object.hasOwn(original, "link"))
+      throw new ModFunctionError("MODS_PINNED_INPUT", "MODS_PINNED_INPUT: ui.press.link")
+    if (Object.hasOwn(received, "link")) validateFunctionUiPressedLink(received.link)
+  }
   if (event === "ui.scroll" && Object.hasOwn(original, "offset")) {
     for (const key of Object.keys(received)) {
       if (

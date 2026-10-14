@@ -5,6 +5,18 @@ import { persistedMessageFromStreamPayload } from "./stream-transcript-payload"
 import { resolveStreamTranscriptFlush } from "./stream-transcript-flush"
 
 describe("transcript payload field presence", () => {
+  it.each(["actual_completed_agent", ""])(
+    "keeps an assistant string name %j through the real serializer and parser", name => {
+      const message = new AIMessageChunk({ id: "actual-assistant", content: "actual text", name })
+      const serialized = createStreamDataSerializer({ projectMessageChunks: true })(
+        "messages", [message, {}])
+      expect(persistedMessageFromStreamPayload(serialized.data)).toMatchObject({
+        id: "actual-assistant", role: "assistant", content: "actual text", name
+      })
+      expect(message.name).toBe(name)
+      expect(message.additional_kwargs.function_row).toBeUndefined()
+    })
+
   it("keeps an explicit content clear through serialization, parsing and flush", () => {
     const serialize = createStreamDataSerializer()
     const queued = [

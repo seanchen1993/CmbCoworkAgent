@@ -6,11 +6,13 @@ import { FunctionGuestRuntime } from "./guest-runtime"
 import type {
   FunctionPaneSnapshot,
   FunctionUiAction,
-  FunctionUiElement
+  FunctionUiElement,
+  FunctionUiNode
 } from "../../../shared/mods/v2/ui"
 import type { ModJson, ModObject } from "../../../shared/mods/types"
 import type { FunctionUiSite } from "../../../shared/mods/v2/sites"
 import { compileFunctionPlugin } from "./loader"
+import type { UserInputRequest } from "../../types"
 
 const sessions: FunctionSession[] = []
 afterEach(async () => {
@@ -21,9 +23,17 @@ async function fixture(
   compiled?: { code: string; name: string; root: string },
   publish = async (value: ModJson): Promise<ModJson> => value,
   changed = () => {}
+  , userMessageOrigin: import("./session").FunctionSessionHost["userMessageOrigin"] = () => undefined,
+  otherHooks?: string
 ) {
   let live = true
   const state = new Map<string, ModJson>()
+  const request: Readonly<UserInputRequest> = {
+    requestId: "sites-question",
+    threadId: "thread",
+    createdAt: "2026-10-04T00:00:00.000Z",
+    questions: questionFacts.questions
+  }
   const guest = await FunctionGuestRuntime.create(
     compiled?.code ?? `var __cmbFunctionMod={register(on){${hooks}}}`
   )
@@ -35,12 +45,17 @@ async function fixture(
         tier: "user",
         guest,
         capabilities: [...SESSION_CAPABILITIES]
-      }
+      },
+      ...(otherHooks ? [{ name: "other", root: "/other", tier: "user" as const,
+        guest: await FunctionGuestRuntime.create(`var __cmbFunctionMod={register(on){${otherHooks}}}`),
+        capabilities: [...SESSION_CAPABILITIES] }] : [])
     ],
     {
       workspace: "/project",
       threadId: "thread",
       uiChanged: changed,
+      userMessageOrigin,
+      pendingQuestion: () => request,
       publish,
       assertLive() {
         if (!live) throw Error("revoked")
@@ -68,7 +83,170 @@ async function fixture(
   }
 }
 const hint = { isDraft: false, isWorking: false, hint: "Enter to send" }
-function button(tree: FunctionUiElement): FunctionUiElement {
+function dispatchTest(session: FunctionSession, event: string, input: ModObject) {
+  return (session as unknown as {
+    dispatch(event: string, input: ModObject): Promise<ModJson>
+  }).dispatch(event, input)
+}
+it("keeps unrelated transcript generations when an AbovePrompt-only guest invalidates", async () => {
+  const changes: unknown[] = []
+  const { session } = await fixture(`
+    on("ui.render", {component:"AbovePrompt"}, ($,e,next)=>next(e));
+    on("turn.complete", ($)=>{ $.ui.invalidate("ui.render"); return {text:"done"} });
+  `, undefined, async value => value, (...args) => changes.push(...args))
+  const above = await session.sites.mount("AbovePrompt")
+  const message = await session.sites.mount("AssistantMessage")
+  const aboveFacts = { isWorking: false, bodyColumns: 80, maxRows: 8 }
+  const messageFacts = { text: "retained", isFirstOfReply: true }
+  const firstAbove = await session.sites.render(above, aboveFacts)
+  const firstMessage = await session.sites.render(message, messageFacts)
+  await dispatchTest(session, "turn.complete", { turnId: "refresh-test", answer: "done",
+    durationMs: 1, isAborted: false, reason: "answer" })
+  expect((await session.sites.render(message, messageFacts)).generation).toBe(firstMessage.generation)
+  expect((await session.sites.render(above, aboveFacts)).generation).not.toBe(firstAbove.generation)
+  expect(changes).toContain(`site-redraw:${above}`)
+  expect(changes).not.toContain(`site-invalidated:${above}`)
+  changes.length = 0
+  session.sites.invalidate(new Set(["AbovePrompt"]))
+  expect(changes).toContain(`site-invalidated:${above}`)
+  expect(changes).not.toContain(`site-redraw:${above}`)
+  expect(changes).not.toContain(undefined)
+})
+const invalidationTurn = { turnId: "refresh-test", answer: "done", durationMs: 1,
+  isAborted: false, reason: "answer" }
+it("redraws all broad dependencies without global clearing and rejects old actions before redraw", async () => {
+  const changes: unknown[] = []
+  let hold = false
+  let entered = false
+  let release!: () => void
+  const gate = new Promise<void>(resolve => { release = resolve })
+  const { session, revoke } = await fixture(`
+    let count=0;
+    on("ui.render", ($,e,next)=>e.component!=="AbovePrompt"?next(e):
+      $.ui.resolve(e).Button({key:"button",label:"Click",onPress(){count++}}));
+    on("turn.complete", ($)=>{$.ui.invalidate("ui.render");return {text:"done"}});
+  `, undefined, async value => {
+    if (hold) { entered = true; await gate }
+    return value
+  }, (...args) => changes.push(...args))
+  const above = await session.sites.mount("AbovePrompt")
+  const message = await session.sites.mount("AssistantMessage")
+  const first = await session.sites.render(above, { isWorking: false, bodyColumns: 80, maxRows: 8 })
+  await session.sites.render(message, { text: "history", isFirstOfReply: true })
+  const completed = press(first)
+  await session.sites.act(above, completed)
+  await dispatchTest(session, "turn.complete", invalidationTurn)
+  await session.sites.act(above, completed)
+  await expect(session.sites.act(above, { ...completed, intentId: randomUUID() }))
+    .rejects.toThrow("MODS_UI_STALE_ACTION")
+  await new Promise(resolve => setTimeout(resolve, 130))
+  expect(changes).toContain(`site-redraw:${above}`)
+  expect(changes).toContain(`site-redraw:${message}`)
+  expect(changes).not.toContain(undefined)
+  hold = true
+  const pending = session.sites.render(above, { isWorking: false, bodyColumns: 80, maxRows: 8 })
+  await vi.waitFor(() => expect(entered).toBe(true))
+  await expect(session.sites.act(above, { ...completed, intentId: randomUUID() }))
+    .rejects.toThrow("MODS_UI_STALE_ACTION")
+  release()
+  const fresh = await pending
+  await session.sites.act(above, press(fresh))
+  revoke()
+  await expect(session.sites.act(above, completed)).rejects.toThrow("revoked")
+})
+it("rejects a guest-supplied second invalidate argument instead of trusting its scope", async () => {
+  const { session } = await fixture(`
+    on("ui.render", ($,e,next)=>next(e));
+    on("turn.complete", ($)=>{
+      try { $.ui.invalidate("ui.render",{components:["AbovePrompt"]});return {text:"accepted"} }
+      catch(error) { return {text:error.message} }
+    });
+  `)
+  await expect(dispatchTest(session, "turn.complete", invalidationTurn))
+    .resolves.toEqual({ text: "MODS_UI_INVALIDATE_UNAVAILABLE" })
+})
+it.each([
+  'on("ui.render", ($,e,next)=>next(e));',
+  'on("ui.*", ($,e,next)=>next(e));',
+  'on("ui.render", {component:/AbovePrompt/}, ($,e,next)=>next(e));',
+  'on("ui.render", {get component(){return "AbovePrompt"}}, ($,e,next)=>next(e));',
+  'on("ui.render", Object.defineProperty({},"component",{value:"AbovePrompt",enumerable:false}), ($,e,next)=>next(e));',
+  'on("ui.render", new Proxy({component:"AbovePrompt"},{get(target,key){return key==="component"?"AssistantMessage":target[key]}}), ($,e,next)=>next(e));',
+  'on("ui.render", {component:"AbovePrompt",text:/dynamic/}, ($,e,next)=>next(e));',
+  'on("ui.render", {component:"AbovePrompt"}, ($,e,next)=>next(e)); on("ui.resolve",($,e,next)=>next(e));',
+  'on("ui.render", {component:"AbovePrompt"}, ($,e,next)=>next(e)); on("ui.invalidate",($,e,next)=>next(e));'
+])("retains global invalidation for unknown or broad render dependencies: %s", async hooks => {
+  const { session } = await fixture(`${hooks}
+    on("turn.complete", ($)=>{ $.ui.invalidate("ui.render"); return {text:"done"} });`)
+  const owner = await session.sites.mount("AssistantMessage")
+  const facts = { text: "retained", isFirstOfReply: true }
+  const first = await session.sites.render(owner, facts)
+  await dispatchTest(session, "turn.complete", invalidationTurn)
+  expect((await session.sites.render(owner, facts)).generation).not.toBe(first.generation)
+})
+it("includes previous actual components when a mutable matcher changes to a new component", async () => {
+  const { session } = await fixture(`
+    const matcher={component:"AssistantMessage"};
+    on("ui.render", matcher, ($,e,next)=>next(e));
+    on("turn.complete", ($)=>{matcher.component="AbovePrompt";$.ui.invalidate("ui.render");return {text:"done"}});
+  `)
+  const message = await session.sites.mount("AssistantMessage")
+  const above = await session.sites.mount("AbovePrompt")
+  const facts = { text: "retained", isFirstOfReply: true }
+  const aboveFacts = { isWorking: false, bodyColumns: 80, maxRows: 8 }
+  const first = await session.sites.render(message, facts)
+  const firstAbove = await session.sites.render(above, aboveFacts)
+  await dispatchTest(session, "turn.complete", invalidationTurn)
+  expect((await session.sites.render(message, facts)).generation).not.toBe(first.generation)
+  expect((await session.sites.render(above, aboveFacts)).generation).not.toBe(firstAbove.generation)
+})
+it("falls back when a Proxy newly matches a component its descriptor does not declare", async () => {
+  const { session } = await fixture(`
+    let component="AbovePrompt";
+    const matcher=new Proxy({component:"AbovePrompt"},{get(target,key){
+      return key==="component"?component:target[key]
+    }});
+    on("ui.render",matcher,($,e,next)=>next(e));
+    on("turn.complete",($)=>{component="AssistantMessage";
+      $.ui.invalidate("ui.render");return {text:"done"}});
+  `)
+  const owner = await session.sites.mount("AssistantMessage")
+  const facts = { text: "retained", isFirstOfReply: true }
+  const first = await session.sites.render(owner, facts)
+  await dispatchTest(session, "turn.complete", invalidationTurn)
+  expect((await session.sites.render(owner, facts)).generation).not.toBe(first.generation)
+})
+it("keeps multi-plugin render rewriting conservative", async () => {
+  const { session } = await fixture(`
+    on("ui.render", {component:"AbovePrompt"}, ($,e,next)=>next(e));
+    on("turn.complete", ($)=>{$.ui.invalidate("ui.render");return {text:"done"}});
+  `, undefined, async value => value, () => {}, () => undefined,
+  'on("ui.render", ($,e,next)=>next(e));')
+  const owner = await session.sites.mount("AssistantMessage")
+  const facts = { text: "retained", isFirstOfReply: true }
+  const first = await session.sites.render(owner, facts)
+  await dispatchTest(session, "turn.complete", invalidationTurn)
+  expect((await session.sites.render(owner, facts)).generation).not.toBe(first.generation)
+})
+it("retains global semantics for legacy one-argument invalidate calls", async () => {
+  const { session } = await fixture(`
+    on("ui.render", {component:"AbovePrompt"}, ($,e,next)=>next(e));
+    on("turn.complete", ($)=>{$.ui.invalidate("ui.render");return {text:"done"}});
+  `)
+  const guest = session.plugins[0].guest
+  const invoke = guest.invoke.bind(guest)
+  guest.invoke = (id, event, host, options) => invoke(id, event,
+    (method, args, signal, context) => host(method,
+      method === "ui.invalidate" && Array.isArray(args) ? args.slice(0, 1) : args,
+      signal, context), options)
+  const owner = await session.sites.mount("AssistantMessage")
+  const facts = { text: "retained", isFirstOfReply: true }
+  const first = await session.sites.render(owner, facts)
+  await dispatchTest(session, "turn.complete", invalidationTurn)
+  expect((await session.sites.render(owner, facts)).generation).not.toBe(first.generation)
+})
+function button(tree: FunctionUiElement): FunctionUiNode {
+  if (tree.type === "engine") throw Error("button missing")
   if (tree.type === "Button") return tree
   for (const node of tree.children ?? []) {
     if (typeof node !== "string") {
@@ -94,7 +272,20 @@ function press(pane: FunctionPaneSnapshot): FunctionUiAction {
 }
 
 function drawnText(tree: FunctionUiElement | string): string {
-  return typeof tree === "string" ? tree : (tree.children ?? []).map(drawnText).join("")
+  return typeof tree === "string" ? tree : tree.type === "engine" ? "" : (tree.children ?? []).map(drawnText).join("")
+}
+
+/** These are the actual protected delegate props, not a synthesized replacement Text tree. */
+function nativeProps(pane: FunctionPaneSnapshot): ModObject {
+  expect(pane.tree.type).toBe("engine")
+  if (pane.tree.type !== "engine") throw Error("expected the actual native delegate")
+  const ref = pane.tree.ref
+  const content = pane.nativeContent
+  expect(content).toBeDefined()
+  expect(content!.entries.some((entry) => entry.ref === 0)).toBe(true)
+  const entry = content!.entries.find((entry) => entry.ref === ref) ??
+    content!.entries.find((entry) => entry.ref === 0)!
+  return entry.props
 }
 
 it("does not broadcast host-driven site mounting, rendering and unmounting back to every renderer owner", async () => {
@@ -128,20 +319,18 @@ it("rewrites tool detail presentation in independent owners while preserving ori
   const owner = await session.sites.mount("ToolUse" as FunctionUiSite)
   const other = await session.sites.mount("ToolUse" as FunctionUiSite)
   await session.sites.render(other, { ...call, tool_use_id: "other" })
-  expect(drawnText((await session.sites.render(owner, call)).tree)).toContain("display")
+  expect(nativeProps(await session.sites.render(owner, call)).input).toEqual({ path: "display" })
   expect(call.input.path).toBe("original")
   const result = await session.sites.mount("ToolResult" as FunctionUiSite)
   expect(
-    drawnText(
-      (
+    nativeProps(
         await session.sites.render(result, {
           tool_use_id: "actual",
           tool: "read_file",
           output: "original result",
           isErrored: false
         })
-      ).tree
-    )
+    ).output
   ).toBe("visible result")
 })
 
@@ -194,11 +383,11 @@ it("rewrites CommandOutput presentation while retaining command identity and err
   `)
   const owner = await session.sites.mount("CommandOutput" as FunctionUiSite)
   const facts = { command: "echo", args: "***", text: "original", isErrored: false }
-  expect(drawnText((await session.sites.render(owner, facts)).tree)).toBe("visible:original")
+  expect(nativeProps(await session.sites.render(owner, facts)).text).toBe("visible:original")
   expect(facts.text).toBe("original")
   const second = await session.sites.mount("CommandOutput" as FunctionUiSite)
   await session.sites.render(second, { ...facts, text: "second" })
-  expect(drawnText((await session.sites.render(owner, facts)).tree)).toBe("visible:original")
+  expect(nativeProps(await session.sites.render(owner, facts)).text).toBe("visible:original")
 })
 
 it.each(["command", "args", "isErrored", "onScreen"])(
@@ -230,7 +419,7 @@ it("redraws cached message owners when the installed message fixture changes pre
   expect((await session.sites.render(owner, facts)).nativeFallback).toBe(true)
   await session.run("message-style", "custom")
   const custom = await session.sites.render(owner, facts)
-  expect(drawnText(custom.tree)).toBe("DISPLAY_ONLY_AssistantMessage: original")
+  expect(nativeProps(custom).text).toBe("DISPLAY_ONLY_AssistantMessage: original")
   await session.run("message-style", "native")
   expect((await session.sites.render(owner, facts)).nativeFallback).toBe(true)
 })
@@ -267,14 +456,14 @@ it.each(["UserMessage", "AssistantMessage"])(
         ? { text: "original", origin: { kind: "unclassified" }, isExpanded: true }
         : { text: "original", isFirstOfReply: true }
     const before = JSON.stringify(facts)
-    expect(drawnText((await session.sites.render(first, facts)).tree)).toBe("visible:original")
-    expect(drawnText((await session.sites.render(second, { ...facts, text: "second" })).tree)).toBe(
+    expect(nativeProps(await session.sites.render(first, facts)).text).toBe("visible:original")
+    expect(nativeProps(await session.sites.render(second, { ...facts, text: "second" })).text).toBe(
       "visible:second"
     )
     expect(JSON.stringify(facts)).toBe(before)
     await session.sites.unmount(first)
     expect(
-      drawnText((await session.sites.render(second, { ...facts, text: "updated" })).tree)
+      nativeProps(await session.sites.render(second, { ...facts, text: "updated" })).text
     ).toBe("visible:updated")
     await expect(session.sites.render(first, facts)).rejects.toThrow("MODS_UI_SITE_CLOSED")
   }
@@ -295,10 +484,42 @@ it.each(["origin", "isExpanded", "onScreen"])(
       origin: { kind: "unclassified" },
       isExpanded: true
     })
-    expect(drawnText(result.tree)).toBe("original")
+    expect(nativeProps(result).text).toBe("original")
     expect(result.nativeFallback).toBe(true)
   }
 )
+
+it("hydrates UserMessage source only from its mounted durable ID, ignoring renderer origins", async () => {
+  const origin = { kind: "plugin" as const, name: "actual", asUser: true as const }
+  const rows = new Map([["actual-message", origin]])
+  const { session } = await fixture(`
+    on("ui.render",{component:"UserMessage"},($,e)=>({type:"Text",props:{},
+      children:[e.props.origin.kind+":"+(e.props.origin.name||"unknown")]}))
+  `, undefined, async value => value, () => {}, id => rows.get(id))
+  const actual = await session.sites.mount("UserMessage", "actual-message")
+  const unstamped = await session.sites.mount("UserMessage")
+  const facts = { text: "words", isExpanded: false,
+    origin: { kind: "plugin", name: "renderer-forgery" } }
+  expect(drawnText((await session.sites.render(actual, facts)).tree)).toBe("plugin:actual")
+  expect(drawnText((await session.sites.render(unstamped, facts)).tree))
+    .toBe("unclassified:unknown")
+  rows.clear()
+  expect(drawnText((await session.sites.render(actual, facts)).tree))
+    .toBe("unclassified:unknown")
+})
+
+it("pins a durable plugin origin while allowing UserMessage text presentation changes", async () => {
+  const origin = { kind: "plugin" as const, name: "actual" }
+  const { session } = await fixture(`
+    on("ui.render",{component:"UserMessage"},($,e,next)=>next({...e,props:{...e.props,
+      origin:{kind:"plugin",name:"forged"},text:"forged"}}))
+  `, undefined, async value => value, () => {}, () => origin)
+  const owner = await session.sites.mount("UserMessage", "actual-message")
+  const rendered = await session.sites.render(owner, { text: "original",
+    origin: { kind: "unclassified" }, isExpanded: true })
+  expect(nativeProps(rendered).text).toBe("original")
+  expect(rendered.nativeFallback).toBe(true)
+})
 
 it("bounds message owners and rejects oversized text without truncating it into a false complete row", async () => {
   const { session } = await fixture("")
@@ -323,19 +544,17 @@ it("draws default content through next, preserves read-only site props and cache
   `)
   const owner = await session.sites.mount("PromptHint")
   const first = await session.sites.render(owner, hint)
-  expect(JSON.stringify(first.tree)).toContain("Enter to send:1")
+  expect(nativeProps(first).hint).toBe("Enter to send:1")
   expect((await session.sites.render(owner, hint)).generation).toBe(first.generation)
   for (let index = 0; index < 100; index++) {
     const cached = await session.sites.render(owner, hint)
     expect(cached.generation).toBe(first.generation)
-    expect(drawnText(cached.tree)).toBe("Enter to send:1")
+    expect(nativeProps(cached).hint).toBe("Enter to send:1")
   }
   const notice = await session.sites.mount("InfoNotice")
   expect(
-    JSON.stringify(
-      (await session.sites.render(notice, { text: "model source", command: "/model" })).tree
-    )
-  ).toContain("notice rewritten /model")
+    nativeProps(await session.sites.render(notice, { text: "model source", command: "/model" }))
+  ).toMatchObject({ text: "notice rewritten", command: "/model" })
 })
 
 it("invokes only drawn plugin callbacks once, invalidates old generations and keeps the site in events", async () => {
@@ -364,7 +583,7 @@ it("invokes only drawn plugin callbacks once, invalidates old generations and ke
   await expect(session.sites.act(owner, press(fresh))).rejects.toThrow("MODS_UI_SITE_CLOSED")
 })
 
-it("rejects replaced owners and revoked sessions, and explicitly rejects Client trees", async () => {
+it("rejects replaced owners and revoked sessions, and refuses to run unapproved Client modules", async () => {
   const { session, revoke } = await fixture(`
     on("ui.render",{component:"AbovePrompt"},($,e)=>$.ui.resolve(e).Client({key:"local",module:"surface.tsx",props:{}}));
   `)
@@ -372,9 +591,8 @@ it("rejects replaced owners and revoked sessions, and explicitly rejects Client 
   const current = await session.sites.mount("PromptHint")
   await expect(session.sites.render(previous, hint)).rejects.toThrow("MODS_UI_SITE_CLOSED")
   const owner = await session.sites.mount("AbovePrompt")
-  await expect(
-    session.sites.render(owner, { isWorking: false, bodyColumns: 80, maxRows: 8 })
-  ).rejects.toThrow("MODS_UI_SITE_CLIENT_UNSUPPORTED")
+  const pane = await session.sites.render(owner, { isWorking: false, bodyColumns: 80, maxRows: 8 })
+  expect(pane.clients![0].error).toBe("MODS_CLIENT_FAILED")
   revoke()
   await expect(session.sites.render(current, hint)).rejects.toThrow("revoked")
 })
@@ -384,8 +602,9 @@ it("refuses rewritten host facts while allowing hint rewrites", async () => {
     on("ui.render",{component:"PromptHint"},($,e,next)=>next({...e,props:{...e.props,isWorking:true,hint:"forged"}}));
   `)
   const owner = await session.sites.mount("PromptHint")
-  expect(JSON.stringify((await session.sites.render(owner, hint)).tree)).toContain("Enter to send")
-  expect(JSON.stringify((await session.sites.render(owner, hint)).tree)).not.toContain("forged")
+  const safe = nativeProps(await session.sites.render(owner, hint))
+  expect(safe).toEqual(hint)
+  expect(JSON.stringify(safe)).not.toContain("forged")
 })
 
 it("rejects malformed mutable site props and keeps the original host text", async () => {
@@ -394,11 +613,11 @@ it("rejects malformed mutable site props and keeps the original host text", asyn
     on("ui.render",{component:"InfoNotice"},($,e,next)=>next({...e,props:{...e.props,command:{forged:true}}}));
   `)
   const owner = await session.sites.mount("PromptHint")
-  expect(drawnText((await session.sites.render(owner, hint)).tree)).toBe("Enter to send")
+  expect(nativeProps(await session.sites.render(owner, hint))).toEqual(hint)
   const notice = await session.sites.mount("InfoNotice")
   expect(
-    drawnText((await session.sites.render(notice, { text: "Actual notice", command: null })).tree)
-  ).toBe("Actual notice")
+    nativeProps(await session.sites.render(notice, { text: "Actual notice", command: null }))
+  ).toEqual({ text: "Actual notice", command: null })
 })
 
 it("rejects a forged render component before allocating constructors", async () => {
@@ -467,13 +686,11 @@ it("loads the installation fixture and runs its real AbovePrompt controls, hint 
   await session.sites.act(owner, press(drawing))
   expect(drawnText((await session.sites.render(owner, props)).tree)).toContain("SITE_ABOVE count:1")
   const hintOwner = await session.sites.mount("PromptHint")
-  expect(JSON.stringify((await session.sites.render(hintOwner, hint)).tree)).toContain("SITE_HINT")
+  expect(nativeProps(await session.sites.render(hintOwner, hint)).hint).toContain("SITE_HINT")
   const noticeOwner = await session.sites.mount("InfoNotice")
   expect(
-    JSON.stringify(
-      (await session.sites.render(noticeOwner, { text: "SITE_HOST_BLOCK", command: null })).tree
-    )
-  ).toContain("SITE_NOTICE SITE_HOST_BLOCK")
+    nativeProps(await session.sites.render(noticeOwner, { text: "SITE_HOST_BLOCK", command: null })).text
+  ).toBe("SITE_NOTICE SITE_HOST_BLOCK")
 })
 
 it("preserves native rich status UI through unrelated and pass-through guest hooks", async () => {
@@ -502,16 +719,14 @@ it("renders validated status rewrites while preserving renderer-owned viewport f
     suffix: "…",
     mode: "requesting"
   })
-  expect(drawnText(spin.tree)).toBe("Baking ~")
+  expect(nativeProps(spin)).toEqual({ word: "Baking", message: null, suffix: " ~", mode: "requesting" })
   expect(spin.nativeFallback).toBe(false)
   const duration = await session.sites.mount("TurnDuration")
   expect(
-    drawnText((await session.sites.render(duration, { word: "Took", durationMs: 2000 })).tree)
-  ).toBe("Baked 6s")
+    nativeProps(await session.sites.render(duration, { word: "Took", durationMs: 2000 }))
+  ).toEqual({ word: "Baked", durationMs: 6000 })
   const mode = await session.sites.mount("SessionMode")
-  expect(drawnText((await session.sites.render(mode, { modes: ["Solo"] })).tree)).toBe(
-    "Solo & Review"
-  )
+  expect(nativeProps(await session.sites.render(mode, { modes: ["Solo"] })).modes).toEqual(["Solo", "Review"])
 })
 
 it("keeps independently mounted duration callbacks alive and refuses cross-owner/stale actions", async () => {
@@ -572,26 +787,30 @@ it("rejects malformed status props and forged onScreen facts instead of publishi
     const owner = await session.sites.mount(component)
     const result = await session.sites.render(owner, { ...props })
     expect(result.nativeFallback).toBe(true)
-    expect(JSON.stringify(result.tree)).not.toContain("forged")
+    expect(nativeProps(result)).toEqual(props)
+    expect(JSON.stringify(result.nativeContent)).not.toContain("forged")
   }
 })
 
 it("derives native fallback after publication and refuses plugin assertions of native ownership", async () => {
+  let inject = true
   const { session } = await fixture(
     `
     on("ui.render",{component:"SessionMode"},($,e)=>$.ui.resolve(e).Text({children:"custom label"}));
   `,
     undefined,
     async (value) =>
-      Array.isArray(value)
+      inject && Array.isArray(value)
         ? value.map((entry) =>
-            typeof entry === "object" && entry !== null && !Array.isArray(entry)
+            typeof entry === "object" && entry !== null && !Array.isArray(entry) && entry.tree
               ? { ...entry, nativeFallback: true }
               : entry
           )
         : value
   )
   const owner = await session.sites.mount("SessionMode")
+  await expect(session.sites.render(owner, { modes: ["Solo"] })).rejects.toThrow("MODS_UI_PUBLICATION")
+  inject = false
   const drawing = await session.sites.render(owner, { modes: ["Solo"] })
   expect(drawing.nativeFallback).toBe(false)
   expect(drawnText(drawing.tree)).toBe("custom label")
@@ -605,24 +824,22 @@ it("runs the installed status fixture across native, custom and restored drawing
   expect(await session.run("status-sites-style", "custom")).toEqual({ text: '{"custom":true}' })
   const custom = await session.sites.render(owner, { modes: ["Solo"] })
   expect(custom.nativeFallback).toBe(false)
-  expect(drawnText(custom.tree)).toBe("STATUS_MODE & Solo")
+  expect(nativeProps(custom).modes).toEqual(["STATUS_MODE", "Solo"])
   const spinner = await session.sites.mount("Spinner")
   expect(
-    drawnText(
-      (
+    nativeProps(
         await session.sites.render(spinner, {
           word: "Working",
           message: null,
           suffix: "",
           mode: "requesting"
         })
-      ).tree
     )
-  ).toBe("STATUS_SPINNER ~")
+  ).toEqual({ word: "STATUS_SPINNER", message: null, suffix: " ~", mode: "requesting" })
   const duration = await session.sites.mount("TurnDuration")
   expect(
-    drawnText((await session.sites.render(duration, { word: "Took", durationMs: 2000 })).tree)
-  ).toBe("STATUS_DURATION 2s")
+    nativeProps(await session.sites.render(duration, { word: "Took", durationMs: 2000 }))
+  ).toEqual({ word: "STATUS_DURATION", durationMs: 2000 })
   await session.run("status-sites-style", "native")
   expect((await session.sites.render(owner, { modes: ["Solo"] })).nativeFallback).toBe(true)
 })
@@ -669,7 +886,8 @@ it("ToolGroup expansion reaches the native rows without changing execution facts
     ($, e, next) => next({...e, props:{...e.props, isExpanded:true}}))`)
   const owner = await session.sites.mount("ToolGroup" as FunctionUiSite)
   const result = await session.sites.render(owner, groupFacts)
-  expect(result.nativeFallback).toBe(true)
+  expect(result.nativeFallback).toBe(false)
+  expect(nativeProps(result)).toEqual({ ...groupFacts, isExpanded: true })
   expect(result.nativeExpansion).toBe(true)
   expect(groupFacts.isExpanded).toBe(false)
   const second = await session.sites.mount("ToolGroup" as FunctionUiSite)
@@ -717,13 +935,18 @@ it("ToolGroup rejects duplicate, oversized and excessive call inventories", asyn
   }
 })
 it("publication cannot forge the native group expansion flag", async () => {
+  let inject = true
   const { session } = await fixture("", undefined, async (value) =>
-    Array.isArray(value)
-      ? value.map((row) => ({ ...(row as ModObject), nativeExpansion: true }))
+    inject && Array.isArray(value)
+      ? value.map((row) => (row as ModObject).tree ? ({ ...(row as ModObject), nativeExpansion: true }) : row)
       : value
   )
   const owner = await session.sites.mount("ToolGroup")
-  expect((await session.sites.render(owner, groupFacts)).nativeExpansion).toBe(false)
+  await expect(session.sites.render(owner, groupFacts)).rejects.toThrow("MODS_UI_PUBLICATION")
+  inject = false
+  const native = await session.sites.render(owner, groupFacts)
+  expect(native.nativeExpansion).toBe(false)
+  expect(nativeProps(native)).toEqual(groupFacts)
 })
 
 const questionFacts = {
@@ -744,9 +967,10 @@ it("AskUserQuestion rewrites native wording while preserving answer identities",
   const { session } = await fixture(`on("ui.render",{component:"AskUserQuestion"},
     ($,e,next)=>next({...e,props:{...e.props,questions:e.props.questions.map(q=>({...q,
       header:"Review",question:"Rewritten question?",options:q.options.map(o=>({...o,description:"Rewritten description"}))}))}}))`)
-  const owner = await session.sites.mount("AskUserQuestion" as FunctionUiSite)
+  const owner = await session.sites.mount("AskUserQuestion" as FunctionUiSite, undefined, "sites-question")
   const result = await session.sites.render(owner, questionFacts)
-  expect(result.nativeFallback).toBe(true)
+  expect(result.nativeFallback).toBe(false)
+  expect(result.nativeContent?.requestId).toBe("sites-question")
   expect((result as unknown as ModObject).nativeQuestions).toMatchObject([
     {
       id: "choice",
@@ -769,33 +993,39 @@ it.each([
 ])("AskUserQuestion rejects unsafe or invalid presentation changes: %s", async (change) => {
   const { session } = await fixture(`on("ui.render",{component:"AskUserQuestion"},
     ($,e,next)=>next({...e,props:{...e.props,${change}}}))`)
-  const owner = await session.sites.mount("AskUserQuestion" as FunctionUiSite)
+  const owner = await session.sites.mount("AskUserQuestion" as FunctionUiSite, undefined, "sites-question")
   const result = await session.sites.render(owner, questionFacts)
   expect(result.nativeFallback).toBe(true)
   expect((result as unknown as ModObject).nativeQuestions).toEqual(questionFacts.questions)
 })
 it("question custom content and publication cannot carry stale or forged native answers", async () => {
+  let inject = false
   const { session, state } = await fixture(
     `on("ui.render",{component:"AskUserQuestion"},
     async($,e,next)=>(await $.store.get("custom"))?{type:"Text",props:{},children:["Context"]}:
       next({...e,props:{...e.props,questions:e.props.questions.map(q=>({...q,question:"Rewrite?"}))}}))`,
     undefined,
     async (value) =>
-      Array.isArray(value)
-        ? value.map((row) => ({
+      inject && Array.isArray(value)
+        ? value.map((row) => (row as ModObject).tree ? ({
             ...(row as ModObject),
             nativeQuestions: [{ id: "forged", question: "Forged answer" }]
-          }))
+          }) : row)
         : value
   )
-  const owner = await session.sites.mount("AskUserQuestion" as FunctionUiSite)
+  const owner = await session.sites.mount("AskUserQuestion" as FunctionUiSite, undefined, "sites-question")
   const first = await session.sites.render(owner, questionFacts)
   expect((first as unknown as ModObject).nativeQuestions).toMatchObject([{ question: "Rewrite?" }])
   state.set("custom", true)
   session.sites.invalidate()
+  inject = true
+  await expect(session.sites.render(owner, questionFacts)).rejects.toThrow("MODS_UI_PUBLICATION")
+  inject = false
   const second = await session.sites.render(owner, questionFacts)
   expect(second.nativeFallback).toBe(false)
   expect((second as unknown as ModObject).nativeQuestions).toBeUndefined()
+  expect(second.nativeContent?.requestId).toBe("sites-question")
+  expect(second.nativeContent?.entries).toEqual([{ ref: 0, props: questionFacts }])
 })
 
 it("publishes native question wording through host policy before exposing it", async () => {
@@ -803,18 +1033,15 @@ it("publishes native question wording through host policy before exposing it", a
     `on("ui.render",{component:"AskUserQuestion"},
     ($,e,next)=>next({...e,props:{...e.props,questions:e.props.questions.map(q=>({...q,question:"Private wording"}))}}))`,
     undefined,
-    async (value) =>
-      value && !Array.isArray(value) && typeof value === "object" && Array.isArray(value.questions)
-        ? {
-            ...value,
-            questions: value.questions.map((q) => ({
-              ...(q as ModObject),
-              question: "Filtered wording"
-            }))
-          }
-        : value
+    async (value) => !Array.isArray(value) ? value : value.map((entry) => {
+      const row = entry as ModObject
+      const props = row.props as ModObject | undefined
+      return props && Array.isArray(props.questions) ? { ...row, props: {
+        ...props, questions: props.questions.map((q) => ({ ...(q as ModObject), question: "Filtered wording" }))
+      }} : entry
+    })
   )
-  const owner = await session.sites.mount("AskUserQuestion")
+  const owner = await session.sites.mount("AskUserQuestion", undefined, "sites-question")
   const result = await session.sites.render(owner, questionFacts)
   expect(result.nativeQuestions?.[0].question).toBe("Filtered wording")
 })
@@ -825,7 +1052,8 @@ it.each(["ToolGroup", "AskUserQuestion"] as const)(
     const { session, state } = await fixture(`on("ui.render",{component:"${component}"},($,e)=>{
     const {Button}=$.ui.resolve(e);return Button({label:"Context control",onPress:async()=>{$.store.set("clicked",true)}})
   })`)
-    const owner = await session.sites.mount(component)
+    const owner = await session.sites.mount(component, undefined,
+      component === "AskUserQuestion" ? "sites-question" : undefined)
     const snapshot = await session.sites.render(
       owner,
       component === "ToolGroup" ? groupFacts : questionFacts
@@ -850,7 +1078,7 @@ it("renders both output blocks for the entire retained command history without e
       text: `entry-${index}`,
       isErrored: index % 2 === 1
     })
-    expect(drawnText(result.tree)).toContain(`entry-${index}`)
+    expect(nativeProps(result).text).toBe(`entry-${index}`)
   }
   await expect(session.sites.mount("CommandOutput")).rejects.toThrow("MODS_UI_SITE_LIMIT")
   await session.sites.unmount(owners[0])

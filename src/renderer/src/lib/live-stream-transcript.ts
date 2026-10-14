@@ -1,4 +1,5 @@
 import type { Message } from "@/types"
+import { functionConversationTranscriptFields } from "../../../shared/mods/v2/conversation-transcript"
 import { mergeCheckpointAuthorityTranscriptMessages } from "../../../shared/checkpoint-transcript"
 import {
   getMessageProviderOccurrenceIdentity,
@@ -19,6 +20,7 @@ export function liveStreamMessageToStoreMessage(
   const role = liveStreamMessageRole(streamMessage.type)
   return {
     id: streamMessage.id,
+    ...functionConversationTranscriptFields(streamMessage, streamMessage.id, role),
     ...(streamMessage.provider_source_id
       ? { provider_source_id: streamMessage.provider_source_id }
       : {}),

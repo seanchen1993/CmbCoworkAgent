@@ -79,6 +79,7 @@ export function register(on) {
   let text = "点击刷新读取项目状态。"
   let policy = { ...defaults }
   let configError = ""
+  let applicationOwned = false
   let review = null
   const pane = "autobiz-kanban"
 
@@ -87,6 +88,7 @@ export function register(on) {
     review = record(value) ? value : null
   }
   async function save($, updates) {
+    if (applicationOwned) throw Error("请到自定义 → Function Mods → 完成检查规则修改应用规则")
     const next = normalized({ ...policy, ...updates })
     // The structured project policy is authoritative; aliases support older commands only.
     await $.store.set("completion-config", next)
@@ -103,7 +105,10 @@ export function register(on) {
     try {
       await operation()
     } catch (error) {
-      text = `未保存：${error.message}`
+      if (String(error.message).includes("MODS_COMPLETION_POLICY_HOST_OWNED")) {
+        applicationOwned = true
+        text = "规则已由应用设置接管。请到自定义 → Function Mods → 完成检查规则修改，再刷新看板。"
+      } else text = `未保存：${error.message}`
     }
     await $.ui.invalidate("ui.render")
   }
@@ -111,6 +116,7 @@ export function register(on) {
     configError = ""
     try {
       const saved = await $.store.get("completion-config")
+      applicationOwned = saved?._cmbPolicySource === "application"
       if (saved !== undefined) policy = normalized(saved)
       else {
         const mode = (await $.store.get("review-mode")) || "off"
@@ -147,7 +153,10 @@ export function register(on) {
     }
   }
 
-  on("session.start", {}, async ($, e, next) => next(e))
+  on("session.start", {}, async ($, e, next) => {
+    await $.command.register({ name: "kanban", description: "打开 Autobiz 项目看板" })
+    return next(e)
+  })
   on("command.run", { command: "kanban" }, async ($) => {
     await refresh($)
     await $.ui.open({ id: pane, title: "Autobiz · 项目交付看板", rows: 32, closeOnEscape: true })
@@ -166,96 +175,107 @@ export function register(on) {
       <Box flexDirection="column" gap={1}>
         <Text bold>Autobiz · 项目交付看板</Text>
         <Text>
+          {applicationOwned
+            ? "由应用设置管理（只读）。修改入口：自定义 → Function Mods → 完成检查规则。修改后点击刷新真实状态。"
+            : "规则由此插件管理；在应用设置保存后，将统一由应用管理。"}
+        </Text>
+        <Text>
           {configError ||
             `已保存规则：${modes[policy.mode]} · 范围：${scopes[policy.scope]} · 检查：${policy.checks.map((check) => checks[check]).join("、") || "未选择"}`}
         </Text>
         <Text>{`文件：${policy.target || "未设置"} · Feature：${policy.feature || "未设置"} · 最多修复 ${policy.maxRepairs} 次 · 最长 ${policy.timeoutMs} 毫秒`}</Text>
-        <Select
-          key="review-mode"
-          label="完成行为"
-          value={policy.mode}
-          options={options(modes)}
-          onSelect={(value) => edit($, () => save($, { mode: value }))}
-        />
-        <Select
-          key="review-scope"
-          label="检查范围"
-          value={policy.scope}
-          options={options(scopes)}
-          onSelect={(value) => edit($, () => save($, { scope: value }))}
-        />
-        <Text>检查项（可组合选择）：</Text>
-        {Object.entries(checks).map(([value, label]) => (
-          <Button
-            key={`review-check-${value}`}
-            label={`${policy.checks.includes(value) ? "已选" : "未选"} · ${label}`}
-            onPress={() =>
-              edit($, () =>
-                save($, {
-                  checks: policy.checks.includes(value)
-                    ? policy.checks.filter((check) => check !== value)
-                    : [...policy.checks, value]
+        {!applicationOwned ? (
+          <Box flexDirection="column" gap={1}>
+            <Select
+              key="review-mode"
+              label="完成行为"
+              value={policy.mode}
+              options={options(modes)}
+              onSelect={(value) => edit($, () => save($, { mode: value }))}
+            />
+            <Select
+              key="review-scope"
+              label="检查范围"
+              value={policy.scope}
+              options={options(scopes)}
+              onSelect={(value) => edit($, () => save($, { scope: value }))}
+            />
+            <Text>检查项（可组合选择）：</Text>
+            {Object.entries(checks).map(([value, label]) => (
+              <Button
+                key={`review-check-${value}`}
+                label={`${policy.checks.includes(value) ? "已选" : "未选"} · ${label}`}
+                onPress={() =>
+                  edit($, () =>
+                    save($, {
+                      checks: policy.checks.includes(value)
+                        ? policy.checks.filter((check) => check !== value)
+                        : [...policy.checks, value]
+                    })
+                  )
+                }
+              />
+            ))}
+            <Input
+              key="review-target"
+              label="评审文件（项目相对路径）"
+              value={policy.target || ""}
+              onSubmit={(value) =>
+                edit($, async () => {
+                  const target = relativePath(value.trim())
+                  await $.fs.read(target)
+                  await save($, { target })
                 })
-              )
-            }
-          />
-        ))}
-        <Input
-          key="review-target"
-          label="评审文件（项目相对路径）"
-          value={policy.target || ""}
-          onSubmit={(value) =>
-            edit($, async () => {
-              const target = relativePath(value.trim())
-              await $.fs.read(target)
-              await save($, { target })
-            })
-          }
-        />
-        <Select
-          key="review-feature"
-          label="验收 Feature"
-          value={policy.feature || ""}
-          options={featureOptions}
-          onSelect={(value) =>
-            edit($, async () => {
-              if (!rows.some((item) => item.feature === value))
-                throw Error("请选择当前项目状态中的 Feature")
-              await save($, { feature: value })
-            })
-          }
-        />
-        <Input
-          key="review-budget"
-          label="最大修复次数"
-          value={String(policy.maxRepairs)}
-          onSubmit={(value) =>
-            edit($, () => save($, { maxRepairs: numberValue(value, 0, 10, "最大修复次数", true) }))
-          }
-        />
-        <Input
-          key="review-timeout"
-          label="最长时间（毫秒）"
-          value={String(policy.timeoutMs)}
-          onSubmit={(value) =>
-            edit($, () =>
-              save($, { timeoutMs: numberValue(value, 1000, 3600000, "最长时间毫秒", true) })
-            )
-          }
-        />
-        <Input
-          key="review-tokens"
-          label="模型 Token 总预算（输入 + 输出）"
-          value={String(policy.modelTokenBudget)}
-          onSubmit={(value) =>
-            edit($, () =>
-              save($, {
-                modelTokenBudget: numberValue(value, 256, 1000000, "模型 Token 总预算", true)
-              })
-            )
-          }
-        />
-        <Text>模型输入、输出均计入预算；实际用量和耗尽原因以宿主执行证据为准。</Text>
+              }
+            />
+            <Select
+              key="review-feature"
+              label="验收 Feature"
+              value={policy.feature || ""}
+              options={featureOptions}
+              onSelect={(value) =>
+                edit($, async () => {
+                  if (!rows.some((item) => item.feature === value))
+                    throw Error("请选择当前项目状态中的 Feature")
+                  await save($, { feature: value })
+                })
+              }
+            />
+            <Input
+              key="review-budget"
+              label="最大修复次数"
+              value={String(policy.maxRepairs)}
+              onSubmit={(value) =>
+                edit($, () =>
+                  save($, { maxRepairs: numberValue(value, 0, 10, "最大修复次数", true) })
+                )
+              }
+            />
+            <Input
+              key="review-timeout"
+              label="最长时间（毫秒）"
+              value={String(policy.timeoutMs)}
+              onSubmit={(value) =>
+                edit($, () =>
+                  save($, { timeoutMs: numberValue(value, 1000, 3600000, "最长时间毫秒", true) })
+                )
+              }
+            />
+            <Input
+              key="review-tokens"
+              label="模型 Token 总预算（输入 + 输出）"
+              value={String(policy.modelTokenBudget)}
+              onSubmit={(value) =>
+                edit($, () =>
+                  save($, {
+                    modelTokenBudget: numberValue(value, 256, 1000000, "模型 Token 总预算", true)
+                  })
+                )
+              }
+            />
+            <Text>模型输入、输出均计入预算；实际用量和耗尽原因以宿主执行证据为准。</Text>
+          </Box>
+        ) : null}
         <Button
           key="review-last"
           label="最近自动评审结果"

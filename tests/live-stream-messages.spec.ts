@@ -975,8 +975,8 @@ function testExplicitProviderOccurrenceCannotRetargetEarlierAlias(): void {
 
   assertEqual(
     sharedNormalized[0]?.id,
-    buildMessageSameRoleDuplicateId(sourceId, "assistant", 2),
-    "shared append normalization must not retarget an explicit second occurrence"
+    "explicit-occurrence-alias-two",
+    "shared append normalization must preserve the independent second occurrence id"
   )
   assertEqual(
     sharedNormalized[0]?.provider_occurrence,
@@ -985,8 +985,8 @@ function testExplicitProviderOccurrenceCannotRetargetEarlierAlias(): void {
   )
   assertEqual(
     liveNormalized[0]?.id,
-    buildMessageSameRoleDuplicateId(sourceId, "assistant", 2),
-    "live append normalization must not retarget an explicit second occurrence"
+    "explicit-occurrence-alias-two",
+    "live append normalization must preserve the independent second occurrence id"
   )
   assertEqual(
     liveNormalized[0]?.provider_occurrence,
@@ -995,8 +995,8 @@ function testExplicitProviderOccurrenceCannotRetargetEarlierAlias(): void {
   )
   assertEqual(
     liveNormalized[1]?.id,
-    buildMessageSameRoleDuplicateId(sourceId, "assistant", 3),
-    "id-less entries must not shift a later declared occurrence"
+    "explicit-occurrence-alias-three",
+    "id-less entries must not change a later independent occurrence id"
   )
   assertEqual(
     liveNormalized[1]?.provider_occurrence,

@@ -45,6 +45,15 @@ vi.mock("./im/card-publisher", () => ({
     }
   }
 }))
+// The command roundtrip exercises the real router and gate; unrelated command
+// destinations must not initialize an agent runtime or external delivery service.
+vi.mock("../agent/standard-thread-turn", () => ({ parseStandardThreadMetadata: vi.fn() }))
+vi.mock("../agent/runtime", () => ({ hasPendingApprovalForRuntimeThread: vi.fn() }))
+vi.mock("./user-input", () => ({ hasPendingUserInputForThread: vi.fn() }))
+vi.mock("./im/inbox-service", () => ({ imInboxService: {} }))
+vi.mock("./im/selection-context", () => ({ imSelectionContextStore: {} }))
+vi.mock("./im/remote-approval-service", () => ({ imRemoteApprovalService: {} }))
+vi.mock("./im/remote-user-input-service", () => ({ imRemoteUserInputService: {} }))
 
 let sqlite: DatabaseSync
 let service: (typeof import("./notification-service"))["notificationService"]
@@ -452,6 +461,47 @@ for (const source of ["human_gate", "biz_retry"] as const) {
       )?.[1]
       expect(code).toBeDefined()
       return { code: code!, resolve, handler, adapter }
+    }
+    if (source === "human_gate") {
+      it.each(["approve", "reject"] as const)(
+        "routes the published %s command to the real gate with owner and single-use checks",
+        async (decision) => {
+          const { handler } = await setup()
+          const { ImCommandRouter, parseImCommand } = await import("./im/command-router")
+          const toolApproval = vi.fn(async () => "unexpected tool approval")
+          const router = new ImCommandRouter({ approvals: { resolveCode: toolApproval } })
+          const sent = JSON.stringify(dependencies.enqueue.mock.calls[0])
+          expect(sent).toContain("项目模式需要审批")
+          expect(sent).toContain("来源会话")
+          const commandText = sent.match(
+            decision === "approve" ? /\/门禁批准 [A-F0-9]{6}/ : /\/门禁拒绝 [A-F0-9]{6}/
+          )?.[0]
+          expect(commandText).toBeDefined()
+          const command = parseImCommand(commandText!)
+          expect(command?.name).toBe(`human_gate_${decision}`)
+          if (!command) throw new Error("Published human gate command must be routable")
+          for (const owner of [
+            { principalId: "intruder", conversationKey: "chat" },
+            { principalId: "user", conversationKey: "other-chat" }
+          ]) {
+            expect(await router.handle({ command, ...owner })).toContain("不属于")
+          }
+          expect(handler).not.toHaveBeenCalled()
+          const owner = { principalId: "user", conversationKey: "chat" }
+          expect(await router.handle({ command, ...owner })).toBe(
+            decision === "approve" ? "Human Gate 已批准。" : "Human Gate 已拒绝。"
+          )
+          expect(handler).toHaveBeenCalledTimes(1)
+          expect(service.get("message")).toMatchObject({
+            status: "resolved",
+            action: decision,
+            channel: "im"
+          })
+          expect(await router.handle({ command, ...owner })).toContain("已失效或已使用")
+          expect(handler).toHaveBeenCalledTimes(1)
+          expect(toolApproval).not.toHaveBeenCalled()
+        }
+      )
     }
     it("APP completion invalidates the IM code and prevents a second action", async () => {
       const { code, resolve, handler } = await setup()

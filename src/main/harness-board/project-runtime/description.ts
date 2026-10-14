@@ -1,0 +1,98 @@
+import { constants } from "node:fs"
+import { lstat, open, realpath } from "node:fs/promises"
+import { isAbsolute, join, resolve } from "node:path"
+import { createHash } from "node:crypto"
+import {
+  parseProjectRuntimeManifest,
+  PROJECT_RUNTIME_MAX_BYTES,
+  type ProjectRuntimeDescription
+} from "../../../shared/project-runtime"
+
+export const PROJECT_RUNTIME_FILE = "devclaw.project-runtime.json"
+
+function diagnostic(
+  message = "无法读取项目能力声明；原项目模式仍可使用"
+): ProjectRuntimeDescription {
+  return { status: "invalid", message }
+}
+
+function checkCancelled(signal?: AbortSignal): void {
+  signal?.throwIfAborted()
+}
+
+/** Reads only the fixed static declaration in the already resolved, bound plugin root. */
+export async function readProjectRuntimeDescription(
+  pluginRoot: string | undefined,
+  signal?: AbortSignal
+): Promise<ProjectRuntimeDescription | undefined> {
+  checkCancelled(signal)
+  if (!pluginRoot) return undefined
+  try {
+    if (!isAbsolute(pluginRoot)) return diagnostic()
+    const root = await realpath(pluginRoot)
+    checkCancelled(signal)
+    const path = join(root, PROJECT_RUNTIME_FILE)
+    const before = await lstat(path, { bigint: true }).catch((error: NodeJS.ErrnoException) => {
+      if (error.code === "ENOENT") return null
+      throw error
+    })
+    checkCancelled(signal)
+    if (!before) return undefined
+    if (!before.isFile() || before.isSymbolicLink()) return diagnostic()
+    if ((await realpath(path)) !== resolve(path)) return diagnostic()
+    const handle = await open(path, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0))
+    try {
+      checkCancelled(signal)
+      const initial = await handle.stat({ bigint: true })
+      if (
+        !initial.isFile() ||
+        initial.dev !== before.dev ||
+        initial.ino !== before.ino ||
+        initial.size > BigInt(PROJECT_RUNTIME_MAX_BYTES)
+      )
+        return diagnostic()
+      const bytes = Buffer.alloc(Number(initial.size))
+      let offset = 0
+      while (offset < bytes.length) {
+        checkCancelled(signal)
+        const result = await handle.read(bytes, offset, bytes.length - offset, offset)
+        if (!result.bytesRead) break
+        offset += result.bytesRead
+      }
+      const final = await handle.stat({ bigint: true })
+      const after = await lstat(path, { bigint: true })
+      checkCancelled(signal)
+      if (
+        offset !== bytes.length ||
+        !after.isFile() ||
+        after.isSymbolicLink() ||
+        final.dev !== initial.dev ||
+        final.ino !== initial.ino ||
+        final.size !== initial.size ||
+        final.mtimeNs !== initial.mtimeNs ||
+        final.ctimeNs !== initial.ctimeNs ||
+        after.dev !== initial.dev ||
+        after.ino !== initial.ino ||
+        after.size !== final.size ||
+        after.mtimeNs !== final.mtimeNs ||
+        after.ctimeNs !== final.ctimeNs ||
+        (await realpath(pluginRoot)) !== root ||
+        (await realpath(path)) !== resolve(path)
+      ) {
+        return diagnostic()
+      }
+      const value: unknown = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes))
+      checkCancelled(signal)
+      return {
+        status: "ready",
+        manifest: parseProjectRuntimeManifest(value),
+        declarationDigest: createHash("sha256").update(bytes).digest("hex")
+      }
+    } finally {
+      await handle.close()
+    }
+  } catch {
+    checkCancelled(signal)
+    return diagnostic()
+  }
+}

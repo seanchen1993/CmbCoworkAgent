@@ -1,3 +1,4 @@
+import { AsyncLocalStorage } from "node:async_hooks"
 import { afterEach, describe, expect, it, vi } from "vitest"
 import { PendingNotificationScheduler } from "./pending-notification-scheduler"
 import { coordinatorWorkerManager } from "./coordinator-worker-manager"
@@ -5,6 +6,7 @@ import { workflowRunManager } from "./workflow/run-manager"
 import { claimLocalThreadRunLease, releaseLocalThreadRunLease } from "./thread-run-lease"
 import type { AgentRunExecutionContext, AgentRunTerminal } from "./agent-run-service"
 import type { PersistedWorkflowRun } from "./workflow/types"
+import { FunctionSessionActivity } from "../mods/v2/session-activity"
 
 /**
  * The regression these cover is a combination, not a single side: the desktop
@@ -180,6 +182,85 @@ afterEach(() => {
 })
 
 describe("pending notification scheduler", () => {
+  it("starts an independent summary after its publisher's actual activity token expires", async () => {
+    coordinatorOwnedBy("desktop")
+    const activity = new FunctionSessionActivity()
+    const publisher = new AsyncLocalStorage<object>()
+    const marker = { publisher: "completed original Hook" }
+    const wake = Promise.withResolvers<void>()
+    const oldEffect = vi.fn(async () => undefined)
+    const { scheduler, startRun } = createHarness({
+      agentMode: "coordinator",
+      runBody: async () => {
+        expect(publisher.getStore()).toBeUndefined()
+        expect(activity.withinEntry).toBe(false)
+        await Promise.resolve()
+        expect(publisher.getStore()).toBeUndefined()
+        expect(activity.withinEntry).toBe(false)
+        await activity.run(async () => {
+          expect(activity.withinEntry).toBe(true)
+          expect(activity.size).toBe(1)
+          expect(publisher.getStore()).toBeUndefined()
+        })
+      }
+    })
+    let late = Promise.resolve()
+    await publisher.run(marker, () =>
+      activity.run(async () => {
+        expect(activity.withinEntry).toBe(true)
+        late = wake.promise.then(async () => {
+          expect(publisher.getStore()).toBe(marker)
+          await expect(activity.run(oldEffect)).rejects.toThrow("MODS_ENTRY_EXPIRED")
+          expect(oldEffect).not.toHaveBeenCalled()
+          expect(await scheduler.check(THREAD)).toEqual({ started: true })
+          expect(publisher.getStore()).toBe(marker)
+          expect(() => activity.withinEntry).toThrow("MODS_ENTRY_EXPIRED")
+        })
+      })
+    )
+    expect(activity.size).toBe(0)
+    wake.resolve()
+    await late
+    expect(startRun).toHaveBeenCalledTimes(1)
+    expect(activity.size).toBe(0)
+    expect(publisher.getStore()).toBeUndefined()
+  })
+
+  it("does not lend a live publisher's activity or ALS data to an independent summary", async () => {
+    coordinatorOwnedBy("desktop")
+    const activity = new FunctionSessionActivity()
+    const publisher = new AsyncLocalStorage<object>()
+    const marker = { publisher: "still active original Hook" }
+    const { scheduler, startRun } = createHarness({
+      agentMode: "coordinator",
+      runBody: async () => {
+        expect(publisher.getStore()).toBeUndefined()
+        expect(activity.withinEntry).toBe(false)
+        expect(activity.size).toBe(1)
+        await Promise.resolve()
+        expect(publisher.getStore()).toBeUndefined()
+        expect(activity.withinEntry).toBe(false)
+        await activity.run(async () => {
+          expect(activity.withinEntry).toBe(true)
+          expect(activity.size).toBe(2)
+          expect(publisher.getStore()).toBeUndefined()
+        })
+      }
+    })
+    await publisher.run(marker, () =>
+      activity.run(async () => {
+        expect(activity.withinEntry).toBe(true)
+        expect(await scheduler.check(THREAD)).toEqual({ started: true })
+        expect(publisher.getStore()).toBe(marker)
+        expect(activity.withinEntry).toBe(true)
+        expect(activity.size).toBe(1)
+      })
+    )
+    expect(startRun).toHaveBeenCalledTimes(1)
+    expect(activity.size).toBe(0)
+    expect(publisher.getStore()).toBeUndefined()
+  })
+
   it("leaves the notification for the run body to claim", async () => {
     const runs = pendingRuns(persistedRun({ notificationOwner: "desktop" }))
     let claimedByBody: PersistedWorkflowRun | null | undefined

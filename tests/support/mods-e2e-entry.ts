@@ -1,11 +1,16 @@
 // Compiled only by CMB_MODS_E2E=1. No IPC handler or production test backdoor.
 import { LocalSandbox } from "../../src/main/agent/local-sandbox"
+import { getCheckpointer } from "../../src/main/agent/runtime"
+import type { CheckpointTuple } from "@langchain/langgraph-checkpoint"
 import { getModsManager, setModsManager, ModsManager } from "../../src/main/mods/manager"
 import { DEFAULT_MOD_POLICY } from "../../src/main/mods/policy"
 import {
   claimLocalThreadRunLease,
+  getLocalThreadRunLease,
   releaseLocalThreadRunLease
 } from "../../src/main/agent/thread-run-lease"
+import { FunctionModsManager } from "../../src/main/mods/v2/manager"
+import type { FunctionSessionActivity } from "../../src/main/mods/v2/session-activity"
 import { withModToolCall, withScopedModMcp } from "../../src/main/mods/adapters"
 import { upsertMcpConnector, deleteMcpConnector } from "../../src/main/storage"
 import { getGlobalMcpCapabilityService } from "../../src/main/mcp/capability-service"
@@ -14,6 +19,389 @@ import { ModRuntimeClient } from "../../src/main/mods/runtime-client"
 import { ModControlStore } from "../../src/main/mods/control-store"
 import { ModEngine, type ModDispatchRequest } from "../../src/main/mods/engine"
 import { join } from "node:path"
+import { ipcMain, type BrowserWindow, type IpcMainEvent, type WebContents } from "electron"
+import { resolveAgentStreamRequestChannel } from "../../src/shared/agent-stream-channel"
+import { types } from "node:util"
+import { FunctionConversationNativeKeeper } from "../../src/main/agent/function-conversation-native-keeper"
+import { FunctionConversationNativeRetainer } from "../../src/main/agent/function-conversation-native-retainer"
+import { FunctionSessionAppendTicket } from "../../src/main/mods/v2/session-append-ticket"
+
+type NativeLifecycleStage =
+  | "keeper.run"
+  | "keeper.guard"
+  | "keeper.whenDrained"
+  | "retainer.run"
+  | "retainer.protectedNative"
+  | "retainer.prepare"
+  | "retainer.verified"
+  | "ticket.commit"
+  | "ticket.acceptResult"
+  | "manager.appendConversation-operation"
+interface NativeLifecycleEvent {
+  stage: NativeLifecycleStage
+  instance: number
+  call: number
+  phase: "begin" | "return" | "throw" | "fulfilled" | "rejected"
+  atMs: number
+  elapsedMs?: number
+  saved?: boolean | null
+  commitStarted?: boolean | null
+}
+let nativeLifecycleObserver:
+  | {
+      read(): unknown
+      dispose(): void
+    }
+  | undefined
+
+/** Test-only method observations. A fulfilled Keeper.run is not a business-success or drain ACK. */
+export function observeNativeAppendLifecycle(): void {
+  if (nativeLifecycleObserver) throw Error("Native lifecycle observer already installed")
+  const then = Promise.prototype.then
+  const setSize = Object.getOwnPropertyDescriptor(Set.prototype, "size")!.get!
+  const mapSize = Object.getOwnPropertyDescriptor(Map.prototype, "size")!.get!
+  const mapForEach = Map.prototype.forEach
+  const started = performance.now()
+  const events: NativeLifecycleEvent[] = []
+  const pending = new Map<number, { stage: NativeLifecycleStage; instance: number; atMs: number }>()
+  const managers = new Set<object>()
+  let identities = new WeakMap<object, number>()
+  let nextInstance = 0,
+    nextCall = 0,
+    overflow = 0,
+    failed = false,
+    active = true
+  const guards = { count: 0, throws: 0, totalMs: 0, maxMs: 0 }
+  const restores: Array<() => void> = []
+  const data = (value: object, key: string): unknown => {
+    const field = Object.getOwnPropertyDescriptor(value, key)
+    return field && "value" in field ? field.value : undefined
+  }
+  const size = (value: unknown, kind: "set" | "map"): number | null => {
+    if (kind === "set" ? !types.isSet(value) : !types.isMap(value)) return null
+    return Reflect.apply(kind === "set" ? setSize : mapSize, value, []) as number
+  }
+  const observe = (operation: () => void): void => {
+    if (!active) return
+    try {
+      operation()
+    } catch {
+      failed = true
+    }
+  }
+  const push = (event: NativeLifecycleEvent): void => {
+    if (events.length < 512) events.push(event)
+    else overflow++
+  }
+  const settled = (
+    stage: NativeLifecycleStage,
+    instance: number,
+    call: number,
+    atMs: number,
+    phase: "fulfilled" | "rejected"
+  ): void => {
+    observe(() => {
+      const now = performance.now() - started
+      pending.delete(call)
+      push({ stage, instance, call, phase, atMs: now, elapsedMs: now - atMs })
+    })
+  }
+  // These callbacks retain only numeric observation facts, never the method's receiver or args.
+  const watch = (
+    promise: Promise<unknown>,
+    stage: NativeLifecycleStage,
+    instance: number,
+    call: number,
+    atMs: number
+  ): void => {
+    try {
+      Reflect.apply(then, promise, [
+        () => settled(stage, instance, call, atMs, "fulfilled"),
+        () => settled(stage, instance, call, atMs, "rejected")
+      ])
+    } catch {
+      observe(() => {
+        failed = true
+      })
+    }
+  }
+  const install = (target: object, key: string, stage: NativeLifecycleStage): void => {
+    const descriptor = Object.getOwnPropertyDescriptor(target, key)
+    if (!descriptor || !("value" in descriptor) || typeof descriptor.value !== "function")
+      throw Error("Native lifecycle method is unavailable")
+    const original = descriptor.value
+    const wrapper = function (this: object, ...args: unknown[]): unknown {
+      if (
+        !active ||
+        (stage === "manager.appendConversation-operation" && args[2] !== "appendConversation")
+      )
+        return Reflect.apply(original, this, args)
+      const atMs = performance.now() - started
+      let instance = 0,
+        call = 0
+      observe(() => {
+        instance = identities.get(this) ?? ++nextInstance
+        identities.set(this, instance)
+        call = ++nextCall
+        if (stage === "manager.appendConversation-operation") {
+          if (managers.size < 16 || managers.has(this)) managers.add(this)
+          else overflow++
+        }
+        if (stage !== "keeper.guard") {
+          if (pending.size < 512) pending.set(call, { stage, instance, atMs })
+          else overflow++
+          const saved = data(this, "saved"),
+            commitStarted = data(this, "commitStarted")
+          push({
+            stage,
+            instance,
+            call,
+            phase: "begin",
+            atMs,
+            ...(stage === "ticket.acceptResult"
+              ? {
+                  saved: saved === undefined ? false : saved !== null && typeof saved === "object",
+                  commitStarted: typeof commitStarted === "boolean" ? commitStarted : null
+                }
+              : {})
+          })
+        }
+      })
+      const finish = (phase: "return" | "throw"): void =>
+        observe(() => {
+          const now = performance.now() - started,
+            elapsedMs = now - atMs
+          if (stage === "keeper.guard") {
+            guards.count++
+            if (phase === "throw") guards.throws++
+            guards.totalMs += elapsedMs
+            guards.maxMs = Math.max(guards.maxMs, elapsedMs)
+          } else {
+            pending.delete(call)
+            push({ stage, instance, call, phase, atMs: now, elapsedMs })
+          }
+        })
+      let returned: unknown
+      try {
+        returned = Reflect.apply(original, this, args)
+      } catch (reason) {
+        finish("throw")
+        throw reason
+      }
+      if (types.isPromise(returned) && stage !== "keeper.guard")
+        watch(returned, stage, instance, call, atMs)
+      else finish("return")
+      return returned
+    }
+    Object.defineProperty(target, key, { ...descriptor, value: wrapper })
+    restores.push(() => Object.defineProperty(target, key, descriptor))
+  }
+  const restore = (): void => {
+    active = false
+    const errors: unknown[] = []
+    for (const undo of restores.splice(0).reverse()) {
+      try {
+        undo()
+      } catch (error) {
+        errors.push(error)
+      }
+    }
+    managers.clear()
+    pending.clear()
+    identities = new WeakMap()
+    nativeLifecycleObserver = undefined
+    if (errors.length === 1) throw errors[0]
+    if (errors.length) throw new AggregateError(errors, "Native lifecycle restore failed")
+  }
+  try {
+    install(FunctionConversationNativeKeeper.prototype, "run", "keeper.run")
+    install(FunctionConversationNativeKeeper.prototype, "guard", "keeper.guard")
+    install(FunctionConversationNativeKeeper.prototype, "whenDrained", "keeper.whenDrained")
+    install(FunctionConversationNativeRetainer.prototype, "run", "retainer.run")
+    install(
+      FunctionConversationNativeRetainer.prototype,
+      "protectedNative",
+      "retainer.protectedNative"
+    )
+    install(FunctionConversationNativeRetainer.prototype, "prepare", "retainer.prepare")
+    install(FunctionConversationNativeRetainer.prototype, "verified", "retainer.verified")
+    install(FunctionSessionAppendTicket.prototype, "commit", "ticket.commit")
+    install(FunctionSessionAppendTicket.prototype, "acceptResult", "ticket.acceptResult")
+    // Existing instances captured appendConversation itself, but invoke this boundary dynamically.
+    install(FunctionModsManager.prototype, "withOperation", "manager.appendConversation-operation")
+  } catch (reason) {
+    try {
+      restore()
+    } catch (cleanup) {
+      throw new AggregateError([reason, cleanup], "Native lifecycle install failed", {
+        cause: reason
+      })
+    }
+    throw reason
+  }
+  nativeLifecycleObserver = {
+    read() {
+      const activities: Array<{
+        instance: number
+        sessions: number | null
+        paused: boolean | null
+        closed: boolean | null
+        tokens: number | null
+        waiters: number | null
+      }> = []
+      observe(() => {
+        for (const manager of managers) {
+          const sessions = data(manager, "sessions"),
+            count = size(sessions, "map")
+          if (count === null) continue
+          Reflect.apply(mapForEach, sessions, [
+            (entry: object) => {
+              if (activities.length >= 16) return
+              const activity = data(entry, "activity")
+              if (!activity || typeof activity !== "object") return
+              const paused = data(activity, "paused"),
+                closed = data(activity, "closed")
+              activities.push({
+                instance: identities.get(manager) ?? 0,
+                sessions: count,
+                paused: typeof paused === "boolean" ? paused : null,
+                closed: typeof closed === "boolean" ? closed : null,
+                tokens: size(data(activity, "tokens"), "set"),
+                waiters: size(data(activity, "waiters"), "set")
+              })
+            }
+          ])
+        }
+      })
+      return {
+        events: events.map((event) => ({ ...event })),
+        pending: [...pending.entries()].map(([call, value]) => ({ call, ...value })),
+        guards: { ...guards },
+        activities,
+        overflow,
+        observationFailed: failed
+      }
+    },
+    dispose: restore
+  }
+}
+
+export function readNativeAppendLifecycle(): unknown {
+  if (!nativeLifecycleObserver) throw Error("Native lifecycle observer is not installed")
+  return nativeLifecycleObserver.read()
+}
+
+export function stopNativeAppendLifecycle(): void {
+  nativeLifecycleObserver?.dispose()
+}
+
+interface NativeAppendTerminalObservation {
+  requestId: string
+  channel: string
+  operation: "agent:invoke" | "agent:resume" | "agent:interrupt"
+  terminals: Array<"done" | "error">
+}
+let nativeAppendTerminalObserver: {
+  read(): NativeAppendTerminalObservation[]
+  dispose(): void
+} | undefined
+
+/** Observes only the current window's real requests and successfully sent terminal events. */
+export function observeNativeAppendTerminals(window: BrowserWindow, threadId: string): void {
+  if (nativeAppendTerminalObserver) throw Error("Native append observer already installed")
+  const contents = window.webContents
+  const originalSend = contents.send
+  const originalDescriptor = Object.getOwnPropertyDescriptor(contents, "send")
+  const requests: NativeAppendTerminalObservation[] = []
+  const byChannel = new Map<string, NativeAppendTerminalObservation>()
+  let observationFailed = false
+  const listeners = (["agent:invoke", "agent:resume", "agent:interrupt"] as const).map(
+    operation => {
+      const listener = (event: IpcMainEvent, value: unknown) => {
+        try {
+          if (event.sender !== contents || !value || typeof value !== "object") return
+          const request = value as Record<string, unknown>
+          if (request.threadId !== threadId || typeof request.streamRequestId !== "string" ||
+            !request.streamRequestId.trim()) return
+          const ambient = `agent:stream:${threadId}${request.coordinatorInternalNotification === true
+            ? ":coordinator-internal" : ""}`
+          const channel = resolveAgentStreamRequestChannel(ambient, request.streamRequestId)
+          if (byChannel.has(channel)) { observationFailed = true; return }
+          const row: NativeAppendTerminalObservation = {
+            requestId: request.streamRequestId, channel, operation, terminals: []
+          }
+          requests.push(row)
+          byChannel.set(channel, row)
+        } catch { observationFailed = true }
+      }
+      ipcMain.prependListener(operation, listener)
+      return { operation, listener }
+    }
+  )
+  const observedSend = function (this: WebContents, channel: string, ...args: unknown[]): void {
+    const result = Reflect.apply(originalSend, this, [channel, ...args])
+    try {
+      if (this === contents) {
+        const row = byChannel.get(channel), event = args[0]
+        if (row && event && typeof event === "object") {
+          const type = (event as { type?: unknown }).type
+          if (type === "done" || type === "error") row.terminals.push(type)
+        }
+      }
+    } catch { observationFailed = true }
+    return result
+  }
+  try {
+    Object.defineProperty(contents, "send", {
+      configurable: true, writable: true, value: observedSend
+    })
+  } catch (error) {
+    for (const { operation, listener } of listeners) ipcMain.removeListener(operation, listener)
+    if (originalDescriptor) Object.defineProperty(contents, "send", originalDescriptor)
+    else Reflect.deleteProperty(contents, "send")
+    throw error
+  }
+  nativeAppendTerminalObserver = {
+    read: () => {
+      if (observationFailed) throw Error("Native append terminal observation failed")
+      return requests.map(row => ({ ...row, terminals: [...row.terminals] }))
+    },
+    dispose: () => {
+      for (const { operation, listener } of listeners) ipcMain.removeListener(operation, listener)
+      try {
+        if (originalDescriptor) Object.defineProperty(contents, "send", originalDescriptor)
+        else Reflect.deleteProperty(contents, "send")
+      } finally { nativeAppendTerminalObserver = undefined }
+    }
+  }
+}
+
+export function readNativeAppendTerminals(): NativeAppendTerminalObservation[] {
+  if (!nativeAppendTerminalObserver) throw Error("Native append observer is not installed")
+  return nativeAppendTerminalObserver.read()
+}
+
+/** Read-only physical occupancy, from the same lease map as the application. */
+export function readNativeAppendThreadBusy(threadId: string): boolean {
+  return getLocalThreadRunLease(threadId) !== undefined
+}
+
+/** Actual stored engine data for E2E assertions; public history is a protected display copy. */
+export async function readNativeAppendCheckpoints(threadId: string): Promise<CheckpointTuple[]> {
+  const saver = await getCheckpointer(threadId)
+  const checkpoints: CheckpointTuple[] = []
+  for await (const checkpoint of saver.list(
+    { configurable: { thread_id: threadId, checkpoint_ns: "" } },
+    { limit: 50 }
+  )) {
+    checkpoints.push(checkpoint)
+  }
+  return checkpoints
+}
+
+export function stopNativeAppendTerminalObserver(): void {
+  nativeAppendTerminalObserver?.dispose()
+}
 
 interface Scope {
   workspace: string
@@ -22,6 +410,101 @@ interface Scope {
 }
 const backends = new Map<string, LocalSandbox>()
 const executionScopes = new Map<string, () => void>()
+
+interface UiResolveConfigurationProbeManager {
+  sessions: Map<string, {
+    threadId: string
+    workspace: string
+    activity: FunctionSessionActivity
+    session?: { uiResolve?: {
+      closed: boolean
+      preparing: boolean
+      calls: Map<string, unknown>
+      scopes: Map<string, {
+        pending: number
+        quiescent: boolean
+        drained: boolean
+        releaseAttempted: boolean
+        controller: AbortController
+        drawing: { drawing: { signal: AbortSignal } }
+      }>
+    } }
+  }>
+  applying: Map<string, unknown>
+  host: { configurationBusy?(threadId: string): boolean }
+}
+
+let observedFunctionManager: FunctionModsManager | undefined
+let restoreUiResolveConfigurationObserver: (() => void) | undefined
+
+function recordObservedFunctionManager(manager: FunctionModsManager): void {
+  observedFunctionManager = manager
+}
+
+/** Read-only observation of the real instance; does not enter a scope or change a promise. */
+export function observeUiResolveConfiguration(): void {
+  if (restoreUiResolveConfigurationObserver) throw Error("Configuration observer already installed")
+  // installOperationGuards captures userConfig at construction, but dynamically looks up
+  // this.withOperation. Observe that actual entry without replacing its guarded method.
+  type Operation = (this: FunctionModsManager, workspace: string, threadId: string,
+    method: PropertyKey, applyBefore: boolean, run: () => Promise<unknown>) => Promise<unknown>
+  const prototype = FunctionModsManager.prototype as unknown as { withOperation: Operation }
+  const original = prototype.withOperation
+  if (typeof original !== "function") throw Error("Actual operation entry unavailable")
+  function observed(
+    this: FunctionModsManager,
+    ...args: Parameters<Operation>
+  ): ReturnType<Operation> {
+    if (!(this instanceof FunctionModsManager)) throw Error("Expected actual FunctionModsManager")
+    if (args[2] === "userConfig") recordObservedFunctionManager(this)
+    return original.apply(this, args)
+  }
+  prototype.withOperation = observed
+  restoreUiResolveConfigurationObserver = () => {
+    const replaced = prototype.withOperation !== observed
+    prototype.withOperation = original
+    observedFunctionManager = undefined
+    restoreUiResolveConfigurationObserver = undefined
+    if (replaced) throw Error("Configuration observer was replaced")
+  }
+}
+
+export function readUiResolveConfigurationFacts(threadId: string) {
+  if (typeof threadId !== "string" || !threadId || threadId.length > 200)
+    throw Error("Expected actual configuration thread ID")
+  if (!restoreUiResolveConfigurationObserver || !observedFunctionManager)
+    throw Error("Actual configuration manager has not been observed")
+  const actual = observedFunctionManager as unknown as UiResolveConfigurationProbeManager
+  const rows = [...actual.sessions.entries()].filter(([, entry]) => entry.threadId === threadId)
+  if (rows.length !== 1) throw Error(`Expected one actual thread entry, got ${rows.length}`)
+  const [key, entry] = rows[0]
+  const assembly = entry.session?.uiResolve
+  if (!assembly) throw Error("Expected actual native UI resolver assembly")
+  const scopes = [...assembly.scopes.values()].map((scope) => ({
+    pending: scope.pending,
+    quiescent: scope.quiescent,
+    drained: scope.drained,
+    releaseAttempted: scope.releaseAttempted,
+    aborted: scope.controller.signal.aborted,
+    drawingClosed: scope.drawing.drawing.signal.aborted
+  }))
+  return {
+    size: entry.activity.size,
+    foregroundSize: entry.activity.foregroundSize,
+    applying: actual.applying.has(key),
+    configurationBusy: actual.host.configurationBusy?.(threadId) === true,
+    physicalThreadBusy: getLocalThreadRunLease(threadId) !== undefined,
+    logicalThreadBusy: getModsManager()!.functionTurns.hasUnsettled(threadId),
+    assemblyClosed: assembly.closed,
+    assemblyPreparing: assembly.preparing,
+    calls: assembly.calls.size,
+    scopes
+  }
+}
+
+export function stopUiResolveConfigurationObserver(): void {
+  restoreUiResolveConfigurationObserver?.()
+}
 export function bindExecutionScope(scope: Scope, executionWorkspace: string): void {
   releaseExecutionScope(scope.threadId)
   const controller = new AbortController()

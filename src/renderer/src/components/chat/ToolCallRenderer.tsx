@@ -46,6 +46,8 @@ function tryRender(fn: () => React.ReactNode): React.ReactNode | typeof THROWN {
 interface ToolCallRendererProps {
   toolCall: ToolCall
   result?: string | unknown
+  /** Safe display data never selects a tool, approval or preview target. */
+  presentation?: { input: unknown; output?: unknown }
   isError?: boolean
   status?: ToolCallStatus
   needsApproval?: boolean
@@ -61,6 +63,11 @@ interface ToolCallRendererProps {
   threadId: string
   /** Whether the stream is still active — used to distinguish RUNNING vs INTERRUPTED. Defaults to true (prefer RUNNING over INTERRUPTED when unknown). */
   isStreaming?: boolean
+  /** A Mods-expanded parent opens details once; later user toggles stay local. */
+  initialExpanded?: boolean
+  /** A surviving message owner can retain the user's disclosure choice across safe redraws. */
+  expanded?: boolean
+  onExpandedChange?(expanded: boolean): void
 }
 
 const TOOL_ICONS: Record<string, React.ComponentType<{ className?: string }>> = {
@@ -397,7 +404,8 @@ function TaskDisplay({
 
 export function ToolCallRenderer({
   toolCall,
-  result,
+  result: actualResult,
+  presentation,
   isError,
   status,
   needsApproval,
@@ -407,12 +415,25 @@ export function ToolCallRenderer({
   retryReason,
   approvalTypes = ["approve", "approve_session", "approve_permanent", "reject"],
   threadId,
-  isStreaming = true
+  isStreaming = true,
+  initialExpanded = false,
+  expanded,
+  onExpandedChange
 }: ToolCallRendererProps) {
-  const [isExpanded, setIsExpanded] = useState(false)
+  const [localExpanded, setLocalExpanded] = useState(initialExpanded)
+  const isExpanded = expanded !== undefined ? expanded : localExpanded
+  const setIsExpanded = (value: boolean): void => {
+    if (expanded === undefined) setLocalExpanded(value)
+    onExpandedChange?.(value)
+  }
+  const result = presentation && !needsApproval ? presentation.output : actualResult
 
   // Defensive: ensure args is always an object
-  const args = toolCall?.args || {}
+  const normalizeDisplayArgs = (input: unknown): Record<string, unknown> =>
+    input && typeof input === "object" && !Array.isArray(input)
+      ? input as Record<string, unknown> : input === undefined ? {} : { value: input }
+  const args = presentation && !needsApproval
+    ? normalizeDisplayArgs(presentation.input) : toolCall?.args || {}
 
   // Bail out if no toolCall
   if (!toolCall) {
@@ -420,13 +441,13 @@ export function ToolCallRenderer({
   }
 
   const Icon = TOOL_ICONS[toolCall.name] || Terminal
-  const label = getToolLabel(toolCall.name, { args: toolCall.args })
+  const label = getToolLabel(toolCall.name, { args })
   const isPanelSynced = PANEL_SYNCED_TOOLS.has(toolCall.name)
   const resolvedStatus =
     status ||
       (needsApproval
         ? "awaiting_approval"
-        : result !== undefined
+        : actualResult !== undefined
           ? "completed"
           : isStreaming
             ? "running"
@@ -466,19 +487,19 @@ export function ToolCallRenderer({
   // Shared across execute's content/result formatters so we don't pay
   // safeStringify's deep-JSON cost twice for the same non-string result
   // (can matter for large stdout from git log / npm test / etc).
-  const executeOutput: string | undefined =
-    toolCall.name === "execute"
-      ? typeof result === "string"
-        ? result
-        : result === undefined
-          ? undefined
-          : result === null
-            ? ""
-            : safeStringify(result)
+  const commandOutput = (output: unknown): string | undefined =>
+    toolCall.name === "execute" ? typeof output === "string" ? output
+      : output === undefined ? undefined : output === null ? "" : safeStringify(output)
       : undefined
+  const executeOutput = commandOutput(result)
+  const formatterDefaults = { args, result, executeOutput }
 
   // Render formatted content based on tool type
-  const renderFormattedContent = (): React.ReactNode => {
+  const renderFormattedContent = (
+    shown: { args: Record<string, unknown>; executeOutput?: string } = formatterDefaults
+  ): React.ReactNode => {
+    const args = shown.args
+    const executeOutput = shown.executeOutput
     if (!args) return null
 
     switch (toolCall.name) {
@@ -520,7 +541,11 @@ export function ToolCallRenderer({
   }
 
   // Render result based on tool type
-  const renderFormattedResult = (): React.ReactNode => {
+  const renderFormattedResult = (
+    shown: { result: unknown; executeOutput?: string } = formatterDefaults
+  ): React.ReactNode => {
+    const result = shown.result
+    const executeOutput = shown.executeOutput
     if (result === undefined) return null
 
     // Handle errors
@@ -809,14 +834,81 @@ export function ToolCallRenderer({
     </ToolCallErrorBoundary>
   ) : null
 
+  const rawDetail = (component: "ToolUse" | "ToolResult", input: unknown, output: unknown) => {
+    if (!isExpanded) return null
+    const args = input
+    const result = output
+    return component === "ToolUse" ? (
+      <div className="overflow-hidden w-full">
+        <div className="text-section-header mb-1">RAW ARGUMENTS</div>
+        <pre className="text-xs font-mono bg-background p-2 rounded-sm overflow-auto max-h-48 w-full whitespace-pre-wrap break-all">
+          {safeStringify(args)}
+        </pre>
+      </div>
+    ) : (
+      <>
+        {result !== undefined && (
+          <div className="overflow-hidden w-full">
+            <div className="text-section-header mb-1">RAW RESULT</div>
+            <pre
+              className={cn(
+                "text-xs font-mono p-2 rounded-sm overflow-auto max-h-48 w-full whitespace-pre-wrap break-all",
+                isError ? "bg-status-critical/10 text-status-critical" : "bg-background"
+              )}
+            >
+              {typeof result === "string" ? result : safeStringify(result)}
+            </pre>
+          </div>
+        )}
+      </>
+    )
+  }
   const detail = (component: "ToolUse" | "ToolResult", fallback: React.ReactNode) => (
-    <FunctionToolDisplay threadId={threadId} component={component} toolCall={toolCall}
-      result={result} status={resolvedStatus} isError={isError} needsApproval={needsApproval}
-      fallback={fallback}/>
+    <FunctionToolDisplay
+      threadId={threadId}
+      component={component}
+      toolCall={toolCall}
+      result={result}
+      status={resolvedStatus}
+      isError={isError}
+      needsApproval={needsApproval}
+      presentation={presentation}
+      fallback={
+        <>
+          {fallback}
+          {rawDetail(component, args, result)}
+        </>
+      }
+      renderDetails={(safe) => {
+        const format = () =>
+          component === "ToolUse"
+            ? renderFormattedContent({
+                args: normalizeDisplayArgs(safe.input),
+                executeOutput: commandOutput(safe.output)
+              })
+            : renderFormattedResult({
+                result: safe.output,
+                executeOutput: commandOutput(safe.output)
+              })
+        const node = tryRender(format)
+        const safeResetKey = safeStringify([safe.input, safe.output, isExpanded])
+        return (
+          <>
+            {node === THROWN || node != null ? (
+              <ToolCallErrorBoundary toolName={toolCall.name} resetKey={safeResetKey}>
+                {node === THROWN ? <RenderProbe render={format} /> : node}
+              </ToolCallErrorBoundary>
+            ) : null}
+            {rawDetail(component, safe.input, safe.output)}
+          </>
+        )
+      }}
+    />
   )
 
   return (
     <div
+      data-function-request-id={toolCall.id || undefined}
       className={cn(
         "rounded-sm border overflow-hidden",
         needsApproval
@@ -827,6 +919,7 @@ export function ToolCallRenderer({
       {/* Header */}
       <button
         onClick={() => setIsExpanded(!isExpanded)}
+        aria-expanded={isExpanded}
         className="flex w-full items-center gap-2 px-3 py-2 hover:bg-background-interactive transition-colors"
       >
         {isExpanded ? (
@@ -967,28 +1060,6 @@ export function ToolCallRenderer({
           {detail("ToolUse", formattedContent)}
           {detail("ToolResult", formattedResult)}
 
-          {/* Raw Arguments */}
-          <div className="overflow-hidden w-full">
-            <div className="text-section-header mb-1">RAW ARGUMENTS</div>
-            <pre className="text-xs font-mono bg-background p-2 rounded-sm overflow-auto max-h-48 w-full whitespace-pre-wrap break-all">
-              {safeStringify(args)}
-            </pre>
-          </div>
-
-          {/* Raw Result */}
-          {result !== undefined && (
-            <div className="overflow-hidden w-full">
-              <div className="text-section-header mb-1">RAW RESULT</div>
-              <pre
-                className={cn(
-                  "text-xs font-mono p-2 rounded-sm overflow-auto max-h-48 w-full whitespace-pre-wrap break-all",
-                  isError ? "bg-status-critical/10 text-status-critical" : "bg-background"
-                )}
-              >
-                {typeof result === "string" ? result : safeStringify(result)}
-              </pre>
-            </div>
-          )}
         </div>
       )}
     </div>

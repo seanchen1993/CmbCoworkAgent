@@ -82,6 +82,40 @@ function largeLegacyValue(): string {
 }
 
 describe("legacy subagent migration parser worker", () => {
+  it("does not create a worker after synchronous cancellation and releases admission", async () => {
+    const workers: FakeMigrationWorker[] = []
+    const parser = new LegacySubagentMigrationParserClient(async () => {
+      const worker = new FakeMigrationWorker()
+      workers.push(worker)
+      return worker as unknown as Worker
+    })
+    for (let index = 0; index < 40; index++) {
+      const controller = new AbortController()
+      const cancelled = parser.parse(`cancel-${index}`, async () => undefined, controller.signal)
+      controller.abort()
+      await expect(cancelled).rejects.toBeInstanceOf(LegacySubagentMigrationCancelledError)
+    }
+    expect(workers).toHaveLength(0)
+
+    const retries = Array.from(
+      { length: LEGACY_SUBAGENT_MIGRATION_MAX_WORKERS },
+      (_, index) => parser.parse(`retry-after-cancel-${index}`, async () => undefined)
+    )
+    for (let attempt = 0; attempt < 10 && workers.length !== retries.length; attempt++) {
+      await new Promise<void>((resolve) => setImmediate(resolve))
+    }
+    expect(workers).toHaveLength(retries.length)
+    workers.forEach((worker, index) => {
+      worker.emit("message", {
+        type: "complete",
+        requestId: index + 1,
+        stats: { rowCount: 0 }
+      })
+    })
+    await expect(Promise.all(retries)).resolves.toEqual([{ rowCount: 0 }, { rowCount: 0 }])
+    expect(workers.every((worker) => worker.terminated)).toBe(true)
+  })
+
   it("bounds worker heaps, concurrent workers, and retained migration waiters", async () => {
     expect(LEGACY_SUBAGENT_MIGRATION_WORKER_RESOURCE_LIMITS.maxOldGenerationSizeMb).toBe(256)
     const workers: FakeMigrationWorker[] = []

@@ -1,0 +1,57 @@
+{
+  "name": "langchain",
+  "version": "1.2.37",
+  "upstreamTarball": "https://registry.npmjs.org/langchain/-/langchain-1.2.37.tgz",
+  "upstreamIntegrity": "sha512-zjd0TpMfX8V440XJVavRmzLSvojVv5WZ7M9LWNtgYo0MDFTiWlCdnFNdHo1sZlNoI+8aSdLsVl/WXKtucyhwEA==",
+  "upstreamSha1": "58a7c4ad408cd478b606f0d7f6ef802c00bf6fa9",
+  "license": "MIT",
+  "licenseSha256": "4ec67e4ca6e6721dba849b2ca82261597c86a61ee214bbf21416006b7b2d0478",
+  "patchSha256": "0155242ca1c6b44e793f19c86f1e71cb56c43156ccda05dcac733e1a481378f7",
+  "files": [
+    {
+      "path": "dist/agents/ReactAgent.js",
+      "beforeSha256": "d60c4c3634016c3d0ce8d0fbd053c1c4a981493041d1cab499a288b2d6f7dcfc",
+      "afterSha256": "ceb92e21943ce13e4454db3100326c093b2f5ffef874b4cdcafdb58ce4105e82"
+    },
+    {
+      "path": "dist/agents/ReactAgent.cjs",
+      "beforeSha256": "8ea735e2f6ff797d884a041e299548d6d0d82424fde516688b40cf6513a837cc",
+      "afterSha256": "2f4d539b7a1114683ff561d7cac64e33da6f4daf9e1ad4cad8c512a834fa8e90"
+    },
+    {
+      "path": "package.json",
+      "beforeSha256": "55718baae214b1957f27f57ba16bb49e99fb94df99e13c2335f3f469cc7b34c6",
+      "afterSha256": "8591a5177e7f519623d66100b612e1286cfb9448a90a551d958e9a4b0268dea6"
+    },
+    {
+      "path": "dist/native-stream-origin.js",
+      "beforeSha256": null,
+      "afterSha256": "7c2613e70d7eda65888d382fccc5a5770e5a3fd3f458dac376067f567db6c4a9"
+    },
+    {
+      "path": "dist/native-stream-origin.cjs",
+      "beforeSha256": null,
+      "afterSha256": "67dfd2a24dbabed9c027e375970d647628d1876012d3da190c7a0789cc5290b1"
+    },
+    {
+      "path": "dist/native-stream-origin.d.ts",
+      "beforeSha256": null,
+      "afterSha256": "4608b4d6457c32073f4028e062ed6787cbe49fe842d41cb65fde978ebed7658f"
+    },
+    {
+      "path": "dist/native-stream-origin.d.cts",
+      "beforeSha256": null,
+      "afterSha256": "4608b4d6457c32073f4028e062ed6787cbe49fe842d41cb65fde978ebed7658f"
+    }
+  ],
+  "templates": [
+    {
+      "sha256": "de8c42718a002b91781093bbcc7f35c2c58e9c9e601e42a8cc138a44e440a721",
+      "path": "langchain-native-stream-origin-runtime.js.inc"
+    },
+    {
+      "sha256": "4608b4d6457c32073f4028e062ed6787cbe49fe842d41cb65fde978ebed7658f",
+      "path": "langchain-native-stream-origin.d.ts"
+    }
+  ]
+}

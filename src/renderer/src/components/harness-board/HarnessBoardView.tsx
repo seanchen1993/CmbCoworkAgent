@@ -1,3 +1,10 @@
+import { useNativeNodeIntent, dismissNativeNodePlan, type NativeNodeIntent } from "@/lib/node-composition-intent"
+import { isSameWorkspacePath } from "../../../../shared/workspace-path"
+import type { NativeNodePlan } from "../../../../shared/node-composition"
+import type { HarnessFeatureCreateInput } from "../../../../shared/harness-board-types"
+import { useDerivedProjectIntent, dismissDerivedProject } from "@/lib/derived-project-intent"
+import type { PluginDerivationScope } from "../../../../shared/plugin-derivation"
+import { NativeNodeComposer } from "../customize/NativeNodeComposer"
 import { RepositoryBranchHint, RepositoryPathsField } from "./RepositoryPathField"
 import {
   resolveFeatureWorkspace,
@@ -7,6 +14,10 @@ import { projectHumanGate } from "../../../../shared/harness-notifications"
 import { useHarnessNotifications } from "@/lib/harness-notifications"
 import { BizRetryNotice } from "./BizRetryNotice"
 import { ProjectWorkspaceField } from "./ProjectWorkspaceField"
+import { ProjectCapabilityPanel } from "./ProjectCapabilityPanel"
+import { LocalProjectsPanel } from "./LocalProjectsPanel"
+import { ProjectPlatformEntry } from "./ProjectPlatformEntry"
+import { prepareProjectCapabilitySession } from "./project-capability-session"
 import {
   Fragment,
   startTransition,
@@ -3518,6 +3529,8 @@ function FeatureCreateTabTrigger({
 }
 
 function FeatureCreateDialog({
+  nodePlan,
+  onRecheckNodes,
   workspace,
   onWorkspaceChange,
   catalogUnits,
@@ -3547,6 +3560,8 @@ function FeatureCreateDialog({
   onSyncPublicConstraints,
   onSubmit
 }: {
+  nodePlan?: NativeNodePlan
+  onRecheckNodes?: () => void
   workspace: HarnessSessionWorkspace
   onWorkspaceChange: (value: HarnessSessionWorkspace) => void
   catalogUnits: HarnessDeployUnitConfig[]
@@ -3626,14 +3641,17 @@ function FeatureCreateDialog({
   }
   const rowClassName =
     "grid min-w-[calc(41.5rem+var(--feature-extra-width))] grid-cols-[1rem_minmax(0,1fr)_19rem_var(--feature-actions-width)] items-center gap-2 rounded-sm border border-transparent px-2 py-2 text-sm transition-colors hover:bg-muted/60"
-  const defaultTab = "deploy-units"
+  const defaultTab = nodePlan ? "workflow" : "deploy-units"
   const workflowPanel = workflowLoading ? (
     <div className="flex min-h-32 items-center justify-center rounded-md border border-border bg-background text-sm text-muted-foreground">
       <Loader2 className="mr-2 size-4 animate-spin" />
       加载工作流
     </div>
   ) : workflowConfig ? (
-    <section className="grid gap-3 rounded-md border border-border bg-muted/30 p-3">
+    <div className="space-y-3">
+    {nodePlan && <Button variant="outline" disabled={creating} onClick={onRecheckNodes}>重新检查节点（保留当前输入）</Button>}
+    <fieldset disabled={Boolean(nodePlan)} className="grid gap-3 rounded-md border border-border bg-muted/30 p-3">
+      {nodePlan && <p className="text-sm">已带入检查通过的项目步骤，前置步骤已补齐。填写需求名称和工作目录后创建；创建后仍需按原流程开始执行。</p>}
       <div className="grid gap-2 sm:grid-cols-3" role="radiogroup" aria-label="选择要使用的工作流">
         {workflowConfig.templates.map((template) => (
           <WorkflowTemplateCard
@@ -3653,7 +3671,7 @@ function FeatureCreateDialog({
         <WorkflowNodeSelector
           config={workflowConfig}
           title={customWorkflowSelected ? "节点选择（自定义）" : "包含节点"}
-          readOnly={!customWorkflowSelected}
+          readOnly={Boolean(nodePlan) || !customWorkflowSelected}
           requiredNodeIds={customWorkflowSelected ? customRequiredNodeIds : new Set()}
           selectedNodeIds={
             customWorkflowSelected ? selectedWorkflowNodeIds : selectedTemplateNodeIds
@@ -3661,7 +3679,8 @@ function FeatureCreateDialog({
           onToggleNode={onWorkflowNodeToggle}
         />
       )}
-    </section>
+    </fieldset>
+    </div>
   ) : (
     <div className="rounded-md border border-dashed border-border bg-background px-3 py-4 text-sm text-muted-foreground">
       插件暂不支持动态工作流。
@@ -6560,6 +6579,8 @@ function FeatureDetailPage({
   }, [detail])
   const detailKey = detail ? `${detail.project.projectId}:${detail.run.slug}` : ""
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null)
+  const capabilityHumanGateRef = useRef<HTMLElement | null>(null)
+  const capabilityThreadContext = useThreadContext()
   const groupButtonRefs = useRef<Record<string, HTMLButtonElement | null>>({})
 
   useEffect(() => {
@@ -7479,7 +7500,7 @@ function FeatureDetailPage({
               onViewThread={handleHookSessionSelect}
             />
             {pendingHumanGate && (
-              <section className="mb-4 flex flex-col gap-3 rounded-xl border border-status-warning/35 bg-status-warning/10 p-4 shadow-sm sm:flex-row sm:items-center">
+              <section ref={capabilityHumanGateRef} tabIndex={-1} className="mb-4 flex flex-col gap-3 rounded-xl border border-status-warning/35 bg-status-warning/10 p-4 shadow-sm sm:flex-row sm:items-center">
                 <div className="flex min-w-0 flex-1 items-start gap-3">
                   <PauseCircle className="mt-0.5 size-5 shrink-0 text-status-warning" />
                   <div className="min-w-0">
@@ -7573,6 +7594,56 @@ function FeatureDetailPage({
               </div>
             </section>
 
+            <ProjectCapabilityPanel
+              key={detailKey}
+              detail={detail}
+              selectedNodeId={selectedNode?.id}
+              disabledReason={projectInteractionDisabled ? "项目已删除或未绑定，无法准备阶段会话。" : undefined}
+              loadLatest={async (initial) => {
+                const latestDetail = await window.api.harnessBoard.getRunDetail(
+                  initial.project.projectId, initial.run.slug
+                )
+                const latestNotifications = await window.api.appNotifications.list()
+                return { detail: latestDetail, notifications: latestNotifications }
+              }}
+              readActivity={(latest) => {
+                const streamStates = capabilityThreadContext.getAllStreamLoadingStates()
+                const threadStates = capabilityThreadContext.getThreadStateSummaries()
+                const sessionIds = new Set([
+                  ...featureSessionThreadIds,
+                  ...latest.sessions.map((session) => session.threadId)
+                ])
+                const runningThreadId = [...sessionIds].find((threadId) =>
+                  streamStates[threadId] === true || threadStates[threadId]?.workflowRunning === true
+                )
+                return {
+                  known: !projectInteractionDisabled && managedRun?.status !== "corrupt",
+                  runningThreadId: runningThreadId || (managedRunIsRunning ? managedRunSessionThreadId : undefined),
+                  managedRunning: managedRunIsRunning,
+                  gatePending: Boolean(pendingHumanGate),
+                  gateThreadId: pendingHumanGate?.sourceThreadId
+                }
+              }}
+              createSession={async (latest) => {
+                return prepareProjectCapabilitySession({
+                  projectId: latest.project.projectId,
+                  slug: latest.run.slug,
+                  workspacePath: latest.run.resolvedSessionWorkspacePath ?? null,
+                  nextAction: getHarnessRunNextAction(latest),
+                  createThread
+                }, (message) => { toast.error(message) })
+              }}
+              onOpenSession={handleHookSessionSelect}
+              onShowApproval={(threadId) => {
+                if (capabilityHumanGateRef.current) {
+                  capabilityHumanGateRef.current.scrollIntoView({ block: "center" })
+                  capabilityHumanGateRef.current.focus()
+                } else if (threadId) {
+                  handleHookSessionSelect(threadId)
+                }
+              }}
+              onSelectCurrent={setSelectedNodeId}
+            />
             <div className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_340px]">
               <div className="min-w-0 space-y-3">
                 <section className={cn(harnessSurfaceClassName, "space-y-3 p-3")}>
@@ -7582,7 +7653,7 @@ function FeatureDetailPage({
                       <div className="mt-1 text-sm font-semibold">阶段流程</div>
                     </div>
                     <div className="rounded-full border border-border/70 bg-background/70 px-2.5 py-1 text-[11px] text-muted-foreground">
-                      当前：{selectedNode?.label ?? "暂无阶段"}
+                      正在查看：{selectedNode?.label ?? "暂无阶段"}
                     </div>
                   </div>
                   {renderStageNodeStrip()}
@@ -8557,7 +8628,13 @@ interface HarnessBoardViewProps {
   onActiveSessionThreadChange?: (threadId: string | null) => void
 }
 
-export function HarnessBoardView({
+export function HarnessBoardView(props: HarnessBoardViewProps = {}): React.JSX.Element {
+  return <ProjectPlatformEntry onActiveSessionThreadChange={props.onActiveSessionThreadChange}>
+    <EnterpriseHarnessBoardView {...props} />
+  </ProjectPlatformEntry>
+}
+
+function EnterpriseHarnessBoardView({
   onActiveSessionThreadChange
 }: HarnessBoardViewProps = {}): React.JSX.Element {
   const [initialCatalogSnapshot] = useState(readHarnessBoardCatalogCache)
@@ -8616,6 +8693,26 @@ export function HarnessBoardView({
   const [loadingProjects, setLoadingProjects] = useState(!initialCatalogSnapshot)
   const [loadingRun, setLoadingRun] = useState(false)
   const [dialogOpen, setDialogOpen] = useState(false)
+  const derivedProjectIntent = useDerivedProjectIntent()
+  const [derivedCreationSource, setDerivedCreationSource] = useState<{
+    pluginId: string
+    scope: PluginDerivationScope
+  } | null>(null)
+  const [createdDerivedProject, setCreatedDerivedProject] = useState<{
+    projectId: string
+    name: string
+    pluginId: string
+    workspacePath: string
+    scope: PluginDerivationScope
+  } | null>(null)
+  const [openingCreatedProject, setOpeningCreatedProject] = useState(false)
+  const [createdProjectError, setCreatedProjectError] = useState<string | null>(null)
+  const openingCreatedProjectRef = useRef(false)
+  const createdDerivedProjectRef = useRef(createdDerivedProject)
+  createdDerivedProjectRef.current = createdDerivedProject
+  const [createdProjectNodesOpen, setCreatedProjectNodesOpen] = useState(false)
+  const nativeNodeIntent = useNativeNodeIntent()
+  const [featureNativePlan, setFeatureNativePlan] = useState<NativeNodeIntent | null>(null)
   const [creating, setCreating] = useState(false)
   const [form, setForm] = useState<HarnessProjectCreateInput>(() => createEmptyProjectForm())
   const [formError, setFormError] = useState<string | null>(null)
@@ -10090,11 +10187,15 @@ export function HarnessBoardView({
   const visibleProjectCount = catalogSummary.matchedProjects
 
   const resetCreateForm = useCallback(() => {
+    setDerivedCreationSource(null)
     setForm(createEmptyProjectForm())
     setFormError(null)
   }, [])
 
   const openCreateDialog = useCallback(() => {
+    setDerivedCreationSource(null)
+    setCreatedDerivedProject(null)
+    setCreatedProjectNodesOpen(false)
     setForm(createEmptyProjectForm())
     setFormError(null)
     openProjectDialogAdapterSession()
@@ -10141,9 +10242,18 @@ export function HarnessBoardView({
       setFormError(compatibilityMessage)
       return
     }
+    if (derivedCreationSource && form.adapterId !== derivedCreationSource.pluginId) {
+      setFormError("请保留刚创建的新插件；要使用其他插件，请取消后从普通新建项目入口开始。")
+      return
+    }
+    const source = derivedCreationSource
     setCreating(true)
     try {
-      await window.api.harnessBoard.createProject(form)
+      const project = await window.api.harnessBoard.createProject(form)
+      if (source && project["harness-adapter"].id === source.pluginId) {
+        setCreatedProjectError(null)
+        setCreatedDerivedProject({ projectId: project.projectId, name: project.name, pluginId: source.pluginId, workspacePath: project.workspacePath, scope: source.scope })
+      }
       setDialogOpen(false)
       closeProjectDialogAdapterSession()
       resetCreateForm()
@@ -10152,6 +10262,40 @@ export function HarnessBoardView({
       setFormError(cleanIpcError(error))
     } finally {
       setCreating(false)
+    }
+  }
+
+  const openCreatedProjectNodes = async (): Promise<void> => {
+    const completed = createdDerivedProject
+    if (!completed || openingCreatedProjectRef.current) return
+    openingCreatedProjectRef.current = true
+    setOpeningCreatedProject(true)
+    setCreatedProjectError(null)
+    try {
+      const project = (await window.api.harnessBoard.listProjects()).find(
+        (item) => item.projectId === completed.projectId
+      )
+      if (createdDerivedProjectRef.current?.projectId !== completed.projectId) return
+      if (!project || project.harnessAdapter.id !== completed.pluginId ||
+        !isSameWorkspacePath(project.workspacePath, completed.workspacePath)) {
+        throw new Error("项目目录或绑定插件已改变，请重新打开项目。")
+      }
+      let scope = completed.scope
+      if (!isSameWorkspacePath(scope.expectedWorkspace, completed.workspacePath)) {
+        const thread = await createThread({
+          workspacePath: completed.workspacePath
+        }, { preserveView: true })
+        if (createdDerivedProjectRef.current?.projectId !== completed.projectId) return
+        scope = { threadId: thread.thread_id, expectedWorkspace: completed.workspacePath }
+        setCreatedDerivedProject((current) => current?.projectId === completed.projectId
+          ? { ...current, scope } : current)
+      }
+      setCreatedProjectNodesOpen(true)
+    } catch (error) {
+      setCreatedProjectError(cleanIpcError(error))
+    } finally {
+      openingCreatedProjectRef.current = false
+      setOpeningCreatedProject(false)
     }
   }
 
@@ -10304,13 +10448,14 @@ export function HarnessBoardView({
   }, [confirmingProjectAction, handleArchiveProject, handleDeleteProject, pendingProjectAction])
 
   const openFeatureCreateDialog = useCallback(
-    (project: HarnessProjectListItem): void => {
+    (project: HarnessProjectListItem, nodeIntent?: NativeNodeIntent): void => {
       const compatibilityMessage = boardCompatibilityMessage(project.boardCompatibility)
       if (compatibilityMessage) {
         toast.warning(compatibilityMessage)
         return
       }
       const requestId = ++featureWorkflowRequestIdRef.current
+      setFeatureNativePlan(nodeIntent ?? null)
       setFeatureWorkspace({ source: "directory", path: "" })
       setFeatureMappingDrafts({})
       setFeatureDialogMode("create")
@@ -10325,14 +10470,14 @@ export function HarnessBoardView({
       setSelectedDeployUnitIds(new Set())
       setFeatureWorkflowLoading(true)
 
-      void window.api.harnessBoard
-        .getDynamicWorkflowConfig(project.projectId)
+      const configRequest = nodeIntent ? Promise.resolve(nodeIntent.plan.config) : window.api.harnessBoard.getDynamicWorkflowConfig(project.projectId)
+      void configRequest
         .then((config) => {
           if (requestId !== featureWorkflowRequestIdRef.current) return
-          const templateId = defaultWorkflowTemplateId(config)
+          const templateId = nodeIntent?.plan.templateId ?? defaultWorkflowTemplateId(config)
           setFeatureWorkflowConfig(config)
           setFeatureWorkflowTemplate(templateId)
-          setSelectedWorkflowNodeIds(requiredWorkflowNodeIds(config, templateId))
+          setSelectedWorkflowNodeIds(nodeIntent ? new Set(nodeIntent.plan.ordered) : requiredWorkflowNodeIds(config, templateId))
         })
         .catch(() => {
           if (requestId !== featureWorkflowRequestIdRef.current) return
@@ -10350,10 +10495,47 @@ export function HarnessBoardView({
     [refreshFeaturePublicConstraints]
   )
 
+  useEffect(() => {
+    if (!nativeNodeIntent) return
+    const state = useAppStore.getState()
+    const thread = state.threads.find((item) => item.thread_id === state.currentThreadId)
+    if (state.currentThreadId !== nativeNodeIntent.scope.threadId ||
+      !isSameWorkspacePath(typeof thread?.metadata?.workspacePath === "string" ? thread.metadata.workspacePath : null, nativeNodeIntent.scope.expectedWorkspace)) {
+      dismissNativeNodePlan(nativeNodeIntent.id)
+      return
+    }
+    // Preserve any existing project/feature form. The handoff resumes when the user closes it.
+    if (featureDialogProject || dialogOpen || createdProjectNodesOpen) return
+    openFeatureCreateDialog(nativeNodeIntent.plan.project, nativeNodeIntent)
+    dismissNativeNodePlan(nativeNodeIntent.id)
+  }, [nativeNodeIntent, currentThreadId, threads, featureDialogProject, dialogOpen, createdProjectNodesOpen, openFeatureCreateDialog])
+
+  const handleRecheckNativeNodes = useCallback(() => {
+    if (!featureNativePlan || creatingFeatureRef.current) return
+    const current = featureNativePlan
+    const request = ++featureWorkflowRequestIdRef.current
+    setFeatureWorkflowLoading(true)
+    setFeatureError(null)
+    void window.api.nodeComposition.preview({ ...current.scope,
+      projectId: current.plan.project.projectId, templateId: current.plan.templateId,
+      selected: current.plan.selected }).then((plan) => {
+        if (request !== featureWorkflowRequestIdRef.current) return
+        setFeatureNativePlan({ ...current, plan })
+        setFeatureWorkflowConfig(plan.config)
+        setFeatureWorkflowTemplate(plan.templateId)
+        setSelectedWorkflowNodeIds(new Set(plan.ordered))
+      }).catch((cause) => {
+        if (request === featureWorkflowRequestIdRef.current) setFeatureError(cleanIpcError(cause))
+      }).finally(() => {
+        if (request === featureWorkflowRequestIdRef.current) setFeatureWorkflowLoading(false)
+      })
+  }, [featureNativePlan])
+
   const handleFeatureDialogOpenChange = useCallback(
     (open: boolean): void => {
       if (!open && !creatingFeatureProjectId && !updatingFeatureDeployUnits) {
         featureWorkflowRequestIdRef.current += 1
+        setFeatureNativePlan(null)
         setFeatureWorkspace({ source: "directory", path: "" })
         setFeatureMappingDrafts({})
         setFeatureDialogMode("create")
@@ -10539,15 +10721,25 @@ export function HarnessBoardView({
                 : {})
             }
           : {}
-      const result = await window.api.harnessBoard.createFeature({
+      const featureInput: HarnessFeatureCreateInput = {
         projectId: featureDialogProject.projectId,
         feature,
         sessionWorkspace: featureWorkspace,
         sessionContextInjectionSource,
         ...(hasSelectedDeployUnits ? { selectedDeployUnits } : {}),
         ...workflowInput
-      })
-
+      }
+      if (featureNativePlan) {
+        const state = useAppStore.getState()
+        const sourceThread = state.threads.find((item) => item.thread_id === state.currentThreadId)
+        if (state.currentThreadId !== featureNativePlan.scope.threadId ||
+          !isSameWorkspacePath(typeof sourceThread?.metadata?.workspacePath === "string" ? sourceThread.metadata.workspacePath : null, featureNativePlan.scope.expectedWorkspace))
+          throw Error("会话已切换，请回到原聊天后创建需求。")
+      }
+      const result = featureNativePlan
+        ? await window.api.nodeComposition.create({ ...featureNativePlan.scope, planId: featureNativePlan.plan.planId, feature: featureInput })
+        : await window.api.harnessBoard.createFeature(featureInput)
+      setFeatureNativePlan(null)
       setFeatureDialogProject(null)
       setFeatureName("")
       setSelectedDeployUnitIds(new Set())
@@ -10569,6 +10761,7 @@ export function HarnessBoardView({
   }, [
     featureDialogProject,
     featureName,
+    featureNativePlan,
     featureWorkflowConfig,
     featureWorkflowTemplate,
     selectedWorkflowNodeIds,
@@ -11923,6 +12116,8 @@ export function HarnessBoardView({
           onActiveSessionThreadChange={onActiveSessionThreadChange}
         />
         <FeatureCreateDialog
+          nodePlan={featureNativePlan?.plan}
+          onRecheckNodes={handleRecheckNativeNodes}
           mode={featureDialogMode}
           project={featureDialogProject}
           featureName={featureName}
@@ -12006,6 +12201,8 @@ export function HarnessBoardView({
           onOpenFeature={openFeatureDetail}
         />
         <FeatureCreateDialog
+          nodePlan={featureNativePlan?.plan}
+          onRecheckNodes={handleRecheckNativeNodes}
           mode={featureDialogMode}
           project={featureDialogProject}
           featureName={featureName}
@@ -12108,6 +12305,7 @@ export function HarnessBoardView({
 
       <ScrollArea className="min-h-0 flex-1">
         <main className="w-full space-y-7 p-2">
+          <LocalProjectsPanel />
           {loadError && (
             <div className="flex items-start gap-2 rounded-xl border border-status-critical/30 bg-status-critical/10 px-4 py-3 text-sm text-status-critical shadow-sm">
               <AlertCircle className="mt-0.5 size-4 shrink-0" />
@@ -12340,6 +12538,8 @@ export function HarnessBoardView({
       </ScrollArea>
 
       <FeatureCreateDialog
+          nodePlan={featureNativePlan?.plan}
+          onRecheckNodes={handleRecheckNativeNodes}
         mode={featureDialogMode}
         project={featureDialogProject}
         featureName={featureName}
@@ -12369,6 +12569,59 @@ export function HarnessBoardView({
         onSyncPublicConstraints={() => void handleSyncFeaturePublicConstraints()}
         onSubmit={handleSubmitFeatureDialog}
       />
+      {nativeNodeIntent && <div role="status" className="fixed bottom-4 right-4 z-50 max-w-sm rounded-lg border bg-background p-4 shadow-lg">
+        <p className="text-sm">节点组合已准备好。请先完成或关闭当前项目表单，现有输入会保留。</p>
+        <Button variant="ghost" onClick={() => dismissNativeNodePlan(nativeNodeIntent.id)}>暂不打开节点组合</Button>
+      </div>}
+      {createdDerivedProject && (
+        <>
+          <section role="region" aria-label="新项目已创建"
+            className="fixed bottom-6 right-6 z-40 max-w-sm space-y-2 rounded-xl border bg-background p-4 shadow-lg">
+            <p className="font-medium">{createdDerivedProject.name} · 项目已创建</p>
+            <p className="text-sm">接下来选择这个项目的步骤，核对后创建需求。</p>
+            <Button disabled={openingCreatedProject || dialogOpen || !!editingProject || !!featureDialogProject}
+              onClick={() => void openCreatedProjectNodes()}>选择这个项目的步骤</Button>
+            {createdProjectError && <p role="alert" className="text-sm text-destructive">{createdProjectError}</p>}
+            <Button variant="ghost" disabled={openingCreatedProject} onClick={() => setCreatedDerivedProject(null)}>稍后再选</Button>
+          </section>
+          <Dialog open={createdProjectNodesOpen} onOpenChange={setCreatedProjectNodesOpen}>
+            <DialogContent className="max-h-[85vh] overflow-y-auto sm:max-w-3xl">
+              <DialogHeader>
+                <DialogTitle>选择新项目步骤</DialogTitle>
+                <DialogDescription>为 {createdDerivedProject.name} 选择原生节点，原检查与人工确认继续生效。</DialogDescription>
+              </DialogHeader>
+              <NativeNodeComposer
+                threadId={createdDerivedProject.scope.threadId}
+                workspace={createdDerivedProject.scope.expectedWorkspace}
+                initialProjectId={createdDerivedProject.projectId}
+                initialOpen
+                onContinue={() => {
+                  setCreatedProjectNodesOpen(false)
+                  setCreatedDerivedProject(null)
+                }}
+              />
+            </DialogContent>
+          </Dialog>
+        </>
+      )}
+      {derivedProjectIntent && <div role="region" aria-label="为新插件创建项目"
+        className="fixed bottom-6 right-6 z-40 max-w-sm space-y-2 rounded-xl border bg-background p-4 shadow-lg">
+        <p className="text-sm">为 {derivedProjectIntent.name} 新建项目，使用独立的项目目录。</p>
+        {(dialogOpen || editingProject) && <p className="text-xs text-muted-foreground">请先完成或取消当前项目表单，现有输入不会被覆盖。</p>}
+        <Button disabled={dialogOpen || !!editingProject || creating} onClick={() => {
+          setCreatedDerivedProject(null)
+          setCreatedProjectNodesOpen(false)
+          setDerivedCreationSource(derivedProjectIntent.scope ? {
+            pluginId: derivedProjectIntent.pluginId, scope: derivedProjectIntent.scope
+          } : null)
+          setForm(createEmptyProjectForm(derivedProjectIntent.pluginId))
+          setFormError(null)
+          openProjectDialogAdapterSession()
+          setDialogOpen(true)
+          dismissDerivedProject(derivedProjectIntent.id)
+        }}>填写新项目</Button>
+        <Button variant="ghost" onClick={() => dismissDerivedProject(derivedProjectIntent.id)}>稍后设置</Button>
+      </div>}
       <ProjectFormDialog
         open={dialogOpen}
         creating={creating}

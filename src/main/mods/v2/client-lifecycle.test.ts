@@ -7,6 +7,7 @@ import { compileFunctionPlugin } from "./loader"
 import { CLIENT_BOOTSTRAP } from "./client-bootstrap"
 import type { ModJson } from "../../../shared/mods/types"
 import type { FunctionClientSnapshot } from "../../../shared/mods/v2/ui"
+import { ordinaryFunctionNode } from "../../../../tests/support/function-ui-node"
 
 const cleanup: Array<() => Promise<void>> = []
 async function frame(ms = 16): Promise<void> {
@@ -75,8 +76,9 @@ async function fixture(
     session.clients.act({
       pane: "client-board:client-board",
       instance: current.id,
+      generation: current.generation,
       kind: "press",
-      handle: current.tree.press!.handle,
+      handle: ordinaryFunctionNode(current.tree).press!.handle,
       intentId: randomUUID()
     })
   return { session, clients, messages, snapshot, client, press }
@@ -87,9 +89,9 @@ it("unmounts exactly on the third uninterrupted render setState and releases its
     if(s.state===undefined)s.every(1000,()=>{});
     s.setState((s.state||0)+1);return s.elements.Text({children:String(s.state)});
   }}`)
-  expect(f.client.tree.children).toEqual(["1"])
+  expect(ordinaryFunctionNode(f.client.tree).children).toEqual(["1"])
   await frame()
-  expect((await f.snapshot()).tree.children).toEqual(["2"])
+  expect(ordinaryFunctionNode((await f.snapshot()).tree).children).toEqual(["2"])
   await frame()
   expect((await f.snapshot()).error).toBe("MODS_CLIENT_RENDER_LOOP")
   expect(f.clients[0].stats.disposed).toBe(true)
@@ -108,6 +110,7 @@ it("resets render-loop accounting on real pointer input and timer ticks", async 
   await f.session.clients.act({
     pane: "client-board:client-board",
     instance: f.client.id,
+    generation: f.client.generation,
     intentId: randomUUID(),
     kind: "pointer",
     value: { type: "down", x: 1, y: 1 }
@@ -159,14 +162,14 @@ it("copies posted data immediately and coalesces repeated setState into one redr
     }});
   }}`)
   await f.press()
-  expect((await f.snapshot()).tree.props.label).toBe("2")
+  expect(ordinaryFunctionNode((await f.snapshot()).tree).props.label).toBe("2")
   await frame()
-  expect((await f.snapshot()).tree.props.label).toBe("3")
+  expect(ordinaryFunctionNode((await f.snapshot()).tree).props.label).toBe("3")
   expect(f.messages).toEqual([{ count: 1 }])
   await frame()
-  expect((await f.snapshot()).tree.props.label).toBe("4") // The owner answered with new props.
+  expect(ordinaryFunctionNode((await f.snapshot()).tree).props.label).toBe("4") // The owner answered with new props.
   await frame()
-  expect((await f.snapshot()).tree.props.label).toBe("4")
+  expect(ordinaryFunctionNode((await f.snapshot()).tree).props.label).toBe("4")
 })
 
 it.each([28, 29, 30])(

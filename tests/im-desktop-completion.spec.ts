@@ -251,6 +251,7 @@ async function testInboundConfirmedRouteRebindsGrantAndRejectedProactiveReply():
 
 function testDesktopEntrypointsUseNarrowCompletionSeam(): void {
   const source = readFileSync(resolve(__dirname, "../src/main/ipc/agent.ts"), "utf8")
+    .replace(/\r\n/g, "\n")
   assert.equal(
     (source.match(/captureStreamAssistantCursor\(threadId\)/gu) ?? []).length,
     3,

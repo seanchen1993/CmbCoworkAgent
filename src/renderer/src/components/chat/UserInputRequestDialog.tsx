@@ -4,6 +4,8 @@ import {
   ChevronDown,
   ChevronUp,
   Circle,
+  CheckSquare,
+  Square,
   MessageSquareText,
   PencilLine
 } from "lucide-react"
@@ -15,6 +17,7 @@ import { useAppStore } from "@/lib/store"
 import type { UserInputAnswer, UserInputRequest, UserInputResponse } from "@/types"
 
 type DraftAnswer =
+  | { type: "options"; optionIndices: number[] }
   | {
       type: "option"
       optionIndex: number
@@ -48,13 +51,7 @@ export function UserInputRequestDialog(
     if (!request) onLayoutChange?.(null)
   }, [request, onLayoutChange])
   if (!request) return null
-  return (
-    <ActiveUserInputRequestDialog
-      key={request.requestId}
-      {...props}
-      request={request}
-    />
-  )
+  return <ActiveUserInputRequestDialog key={request.requestId} {...props} request={request} />
 }
 
 /** Request identity resets drafts before rendering, rather than an effect clearing a previous answer. */
@@ -78,18 +75,6 @@ function ActiveUserInputRequestDialog({
         )
       )
     : null
-
-  const [presentation, setPresentation] = useState<{
-    requestId: string
-    questions: UserInputRequest["questions"]
-  } | null>(null)
-  const requestId = request?.requestId
-  const updateQuestions = useCallback(
-    (questions: UserInputRequest["questions"] | null | undefined) => {
-      setPresentation(questions && requestId ? { requestId, questions } : null)
-    },
-    [requestId]
-  )
 
   useEffect(() => {
     if (!request.autoResolutionMs) return
@@ -166,21 +151,27 @@ function ActiveUserInputRequestDialog({
       const answer = draftAnswers[question.id]
       if (!answer) return false
       if (answer.type === "other") return answer.text.length > 0
+      if (answer.type === "options")
+        return (
+          question.multiSelect === true &&
+          answer.optionIndices.length > 0 &&
+          answer.optionIndices.every((index) => question.options[index] !== undefined)
+        )
       return question.options[answer.optionIndex] !== undefined
     })
   }, [draftAnswers, request])
 
   if (!request) return null
-  const shownQuestions =
-    presentation?.requestId === request.requestId ? presentation.questions : request.questions
-  const activeQuestion = shownQuestions[Math.min(activeIndex, request.questions.length - 1)]
-  if (!activeQuestion) return null
-
-  const activeDraft = draftAnswers[activeQuestion.id]
   const answeredCount = request.questions.filter((question) => {
     const answer = draftAnswers[question.id]
     if (!answer) return false
     if (answer.type === "other") return answer.text.length > 0
+    if (answer.type === "options")
+      return (
+        question.multiSelect === true &&
+        answer.optionIndices.length > 0 &&
+        answer.optionIndices.every((index) => question.options[index] !== undefined)
+      )
     return question.options[answer.optionIndex] !== undefined
   }).length
 
@@ -189,15 +180,29 @@ function ActiveUserInputRequestDialog({
   }
 
   const selectOption = (questionId: string, optionIndex: number): void => {
+    const multiple = request.questions.find((question) => question.id === questionId)?.multiSelect
     setDraftAnswers((prev) => {
       const current = prev[questionId]
+      if (multiple === true) {
+        const indices = current?.type === "options" ? current.optionIndices : []
+        return {
+          ...prev,
+          [questionId]: {
+            type: "options",
+            optionIndices: indices.includes(optionIndex)
+              ? indices.filter((index) => index !== optionIndex)
+              : [...indices, optionIndex].sort((a, b) => a - b)
+          }
+        }
+      }
       const answer =
         current?.type === "option" && current.optionIndex === optionIndex
           ? current
           : { type: "option" as const, optionIndex }
       return { ...prev, [questionId]: answer }
     })
-    setActiveIndex((prev) => Math.min(request.questions.length - 1, prev + 1))
+    if (multiple !== true)
+      setActiveIndex((prev) => Math.min(request.questions.length - 1, prev + 1))
   }
 
   const openAdditionalText = (questionId: string, optionIndex: number): void => {
@@ -251,6 +256,18 @@ function ActiveUserInputRequestDialog({
         continue
       }
 
+      if (answer.type === "options") {
+        const optionIndices = [...answer.optionIndices].sort((a, b) => a - b)
+        answers[question.id] = {
+          type: "options",
+          questionId: question.id,
+          optionIndices,
+          labels: optionIndices.map((index) => question.options[index].label),
+          descriptions: optionIndices.map((index) => question.options[index].description)
+        }
+        continue
+      }
+
       const option = question.options[answer.optionIndex]
       if (!option) continue
       const additionalText = answer.additionalText?.trim()
@@ -269,6 +286,173 @@ function ActiveUserInputRequestDialog({
       answers,
       submittedAt: new Date().toISOString()
     })
+  }
+
+  const renderQuestions = (shownQuestions: UserInputRequest["questions"]): React.ReactNode => {
+    if (collapsed) return null
+    const activeQuestion = shownQuestions[Math.min(activeIndex, request.questions.length - 1)]
+    if (!activeQuestion) return null
+    const activeDraft = draftAnswers[activeQuestion.id]
+    return (
+      <>
+        <div className="min-h-0 flex-1 overflow-y-auto px-4 py-3">
+          <section className="space-y-3">
+            <div className="flex items-start gap-3">
+              <span className="mt-0.5 shrink-0 rounded-sm bg-muted px-2 py-1 text-[11px] font-medium text-muted-foreground">
+                {activeQuestion.header || `Q${activeIndex + 1}`}
+              </span>
+              <div className="min-w-0">
+                <div className="break-words text-sm font-medium leading-5">
+                  {activeQuestion.question}
+                </div>
+                <div className="mt-1 font-mono text-[11px] text-muted-foreground">
+                  {activeQuestion.multiSelect === true
+                    ? "可多选 · 至少选择一项"
+                    : activeQuestion.id}
+                </div>
+              </div>
+            </div>
+
+            <div className="space-y-2">
+              <div
+                className="space-y-2"
+                role={activeQuestion.multiSelect ? "group" : "radiogroup"}
+                aria-label={activeQuestion.question}
+              >
+                {activeQuestion.options.map((option, optionIndex) => {
+                  const selected =
+                    (activeDraft?.type === "option" && activeDraft.optionIndex === optionIndex) ||
+                    (activeDraft?.type === "options" &&
+                      activeDraft.optionIndices.includes(optionIndex))
+                  return (
+                    <div
+                      key={`${activeQuestion.id}-${optionIndex}`}
+                      className={cn(
+                        "overflow-hidden rounded-md border transition-colors",
+                        selected
+                          ? "border-primary bg-primary/10"
+                          : "border-border bg-background hover:bg-background-interactive"
+                      )}
+                    >
+                      <button
+                        type="button"
+                        role={activeQuestion.multiSelect ? "checkbox" : "radio"}
+                        aria-checked={selected}
+                        className="flex w-full items-start gap-3 px-3 py-2 text-left"
+                        onClick={() => selectOption(activeQuestion.id, optionIndex)}
+                      >
+                        {activeQuestion.multiSelect ? (
+                          selected ? (
+                            <CheckSquare className="mt-0.5 size-4 shrink-0 text-primary" />
+                          ) : (
+                            <Square className="mt-0.5 size-4 shrink-0 text-muted-foreground" />
+                          )
+                        ) : selected ? (
+                          <CheckCircle2 className="mt-0.5 size-4 shrink-0 text-primary" />
+                        ) : (
+                          <Circle className="mt-0.5 size-4 shrink-0 text-muted-foreground" />
+                        )}
+                        <span className="min-w-0">
+                          <span className="block break-words text-sm font-medium">
+                            {option.label}
+                          </span>
+                          <span className="mt-0.5 block break-words text-xs leading-5 text-muted-foreground">
+                            {option.description}
+                          </span>
+                        </span>
+                      </button>
+                      {!activeQuestion.multiSelect &&
+                        (selected &&
+                        activeDraft?.type === "option" &&
+                        activeDraft.additionalTextOpen ? (
+                          <div className="flex items-center gap-2 border-t border-primary/20 px-3 py-2">
+                            <PencilLine className="size-3.5 shrink-0 text-muted-foreground" />
+                            <input
+                              autoFocus
+                              type="text"
+                              className="min-w-0 flex-1 bg-transparent text-sm outline-none placeholder:text-muted-foreground"
+                              value={activeDraft.additionalText ?? ""}
+                              aria-label={`${option.label}的补充说明`}
+                              onChange={(event) =>
+                                updateAdditionalText(
+                                  activeQuestion.id,
+                                  optionIndex,
+                                  event.target.value
+                                )
+                              }
+                            />
+                          </div>
+                        ) : (
+                          <div className="px-3 pb-2 pl-10">
+                            <button
+                              type="button"
+                              className="inline-flex items-center gap-1.5 rounded-md border border-border/80 bg-muted/40 px-2 py-1 text-[11px] font-medium text-muted-foreground/80 transition-colors hover:border-border hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                              aria-label={`为${option.label}添加补充说明`}
+                              onClick={() => openAdditionalText(activeQuestion.id, optionIndex)}
+                            >
+                              <PencilLine className="size-3 shrink-0" />
+                              <span>补充说明</span>
+                            </button>
+                          </div>
+                        ))}
+                    </div>
+                  )
+                })}
+              </div>
+
+              <div className="flex items-center gap-3 rounded-md border border-border bg-background px-3 py-2 transition-colors hover:bg-background-interactive focus-within:border-primary focus-within:bg-primary/10">
+                <PencilLine className="size-4 shrink-0 text-muted-foreground" />
+                <input
+                  type="text"
+                  className="min-w-0 flex-1 bg-transparent text-sm outline-none placeholder:text-muted-foreground"
+                  value={activeDraft?.type === "other" ? activeDraft.text : ""}
+                  aria-label="自定义回答"
+                  placeholder="以上都不是我想要的，我希望："
+                  onFocus={() => {
+                    if (activeDraft?.type !== "other") {
+                      updateDraft(activeQuestion.id, { type: "other", text: "" })
+                    }
+                  }}
+                  onChange={(event) =>
+                    updateDraft(activeQuestion.id, {
+                      type: "other",
+                      text: event.target.value
+                    })
+                  }
+                />
+              </div>
+            </div>
+          </section>
+        </div>
+
+        <div className="flex items-center justify-between gap-2 border-t border-border px-4 py-3">
+          <nav className="flex items-center gap-1" aria-label="问题导航">
+            {shownQuestions.map((question, questionIndex) => (
+              <Button
+                key={question.id}
+                type="button"
+                variant={questionIndex === activeIndex ? "default" : "outline"}
+                size="icon-sm"
+                className="size-8"
+                aria-label={`切换到第 ${questionIndex + 1} 题：${question.header}`}
+                aria-current={questionIndex === activeIndex ? "step" : undefined}
+                onClick={() => setActiveIndex(questionIndex)}
+              >
+                {questionIndex + 1}
+              </Button>
+            ))}
+          </nav>
+          <div className="flex items-center gap-2">
+            <Button type="button" variant="outline" size="sm" onClick={handleIgnore}>
+              跳过全部问题
+            </Button>
+            <Button type="button" size="sm" onClick={handleSubmit} disabled={!canSubmit}>
+              提交
+            </Button>
+          </div>
+        </div>
+      </>
+    )
   }
 
   return (
@@ -328,152 +512,9 @@ function ActiveUserInputRequestDialog({
           <FunctionQuestionSite
             key={request.requestId}
             request={request}
-            onQuestions={updateQuestions}
+            renderQuestions={renderQuestions}
           />
         </div>
-        {!collapsed && (
-          <>
-            <div className="min-h-0 flex-1 overflow-y-auto px-4 py-3">
-              <section className="space-y-3">
-                <div className="flex items-start gap-3">
-                  <span className="mt-0.5 shrink-0 rounded-sm bg-muted px-2 py-1 text-[11px] font-medium text-muted-foreground">
-                    {activeQuestion.header || `Q${activeIndex + 1}`}
-                  </span>
-                  <div className="min-w-0">
-                    <div className="break-words text-sm font-medium leading-5">
-                      {activeQuestion.question}
-                    </div>
-                    <div className="mt-1 font-mono text-[11px] text-muted-foreground">
-                      {activeQuestion.id}
-                    </div>
-                  </div>
-                </div>
-
-                <div className="space-y-2">
-                  <div className="space-y-2" role="radiogroup" aria-label={activeQuestion.question}>
-                    {activeQuestion.options.map((option, optionIndex) => {
-                      const selected =
-                        activeDraft?.type === "option" && activeDraft.optionIndex === optionIndex
-                      return (
-                        <div
-                          key={`${activeQuestion.id}-${optionIndex}`}
-                          className={cn(
-                            "overflow-hidden rounded-md border transition-colors",
-                            selected
-                              ? "border-primary bg-primary/10"
-                              : "border-border bg-background hover:bg-background-interactive"
-                          )}
-                        >
-                          <button
-                            type="button"
-                            role="radio"
-                            aria-checked={selected}
-                            className="flex w-full items-start gap-3 px-3 py-2 text-left"
-                            onClick={() => selectOption(activeQuestion.id, optionIndex)}
-                          >
-                            {selected ? (
-                              <CheckCircle2 className="mt-0.5 size-4 shrink-0 text-primary" />
-                            ) : (
-                              <Circle className="mt-0.5 size-4 shrink-0 text-muted-foreground" />
-                            )}
-                            <span className="min-w-0">
-                              <span className="block break-words text-sm font-medium">
-                                {option.label}
-                              </span>
-                              <span className="mt-0.5 block break-words text-xs leading-5 text-muted-foreground">
-                                {option.description}
-                              </span>
-                            </span>
-                          </button>
-                          {selected && activeDraft.additionalTextOpen ? (
-                            <div className="flex items-center gap-2 border-t border-primary/20 px-3 py-2">
-                              <PencilLine className="size-3.5 shrink-0 text-muted-foreground" />
-                              <input
-                                autoFocus
-                                type="text"
-                                className="min-w-0 flex-1 bg-transparent text-sm outline-none placeholder:text-muted-foreground"
-                                value={activeDraft.additionalText ?? ""}
-                                aria-label={`${option.label}的补充说明`}
-                                onChange={(event) =>
-                                  updateAdditionalText(
-                                    activeQuestion.id,
-                                    optionIndex,
-                                    event.target.value
-                                  )
-                                }
-                              />
-                            </div>
-                          ) : (
-                            <div className="px-3 pb-2 pl-10">
-                              <button
-                                type="button"
-                                className="inline-flex items-center gap-1.5 rounded-md border border-border/80 bg-muted/40 px-2 py-1 text-[11px] font-medium text-muted-foreground/80 transition-colors hover:border-border hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-                                aria-label={`为${option.label}添加补充说明`}
-                                onClick={() => openAdditionalText(activeQuestion.id, optionIndex)}
-                              >
-                                <PencilLine className="size-3 shrink-0" />
-                                <span>补充说明</span>
-                              </button>
-                            </div>
-                          )}
-                        </div>
-                      )
-                    })}
-                  </div>
-
-                  <div className="flex items-center gap-3 rounded-md border border-border bg-background px-3 py-2 transition-colors hover:bg-background-interactive focus-within:border-primary focus-within:bg-primary/10">
-                    <PencilLine className="size-4 shrink-0 text-muted-foreground" />
-                    <input
-                      type="text"
-                      className="min-w-0 flex-1 bg-transparent text-sm outline-none placeholder:text-muted-foreground"
-                      value={activeDraft?.type === "other" ? activeDraft.text : ""}
-                      aria-label="自定义回答"
-                      placeholder="以上都不是我想要的，我希望："
-                      onFocus={() => {
-                        if (activeDraft?.type !== "other") {
-                          updateDraft(activeQuestion.id, { type: "other", text: "" })
-                        }
-                      }}
-                      onChange={(event) =>
-                        updateDraft(activeQuestion.id, {
-                          type: "other",
-                          text: event.target.value
-                        })
-                      }
-                    />
-                  </div>
-                </div>
-              </section>
-            </div>
-
-            <div className="flex items-center justify-between gap-2 border-t border-border px-4 py-3">
-              <nav className="flex items-center gap-1" aria-label="问题导航">
-                {request.questions.map((question, questionIndex) => (
-                  <Button
-                    key={question.id}
-                    type="button"
-                    variant={questionIndex === activeIndex ? "default" : "outline"}
-                    size="icon-sm"
-                    className="size-8"
-                    aria-label={`切换到第 ${questionIndex + 1} 题：${question.header}`}
-                    aria-current={questionIndex === activeIndex ? "step" : undefined}
-                    onClick={() => setActiveIndex(questionIndex)}
-                  >
-                    {questionIndex + 1}
-                  </Button>
-                ))}
-              </nav>
-              <div className="flex items-center gap-2">
-                <Button type="button" variant="outline" size="sm" onClick={handleIgnore}>
-                  跳过全部问题
-                </Button>
-                <Button type="button" size="sm" onClick={handleSubmit} disabled={!canSubmit}>
-                  提交
-                </Button>
-              </div>
-            </div>
-          </>
-        )}
       </div>
     </div>
   )

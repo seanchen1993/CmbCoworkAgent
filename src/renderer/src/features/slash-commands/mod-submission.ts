@@ -21,3 +21,22 @@ export async function resolveModSubmission(
   if (!descriptor) throw new Error("此命令尚未授权或已变更，请在项目 Mods 设置中检查权限。")
   return { descriptor, args: legacy.args }
 }
+
+/** Submission uses fresh host facts even while the UI switch/catalog is still refreshing. */
+export async function resolveScopedModSubmission(
+  text: string,
+  scope: {
+    enabled(): Promise<boolean>
+    load(): Promise<ModCommandDescriptor[]>
+    assertCurrent(): void
+  }
+): ReturnType<typeof resolveModSubmission> {
+  if (!mayBeModCommand(text)) return null
+  scope.assertCurrent()
+  const enabled = await scope.enabled()
+  scope.assertCurrent()
+  if (!enabled) return null
+  const result = await resolveModSubmission(text, scope.load)
+  scope.assertCurrent()
+  return result
+}

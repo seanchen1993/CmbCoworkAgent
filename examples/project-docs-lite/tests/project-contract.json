@@ -1,0 +1,52 @@
+{
+  "apiVersion": "devclaw.project-contract/v1",
+  "cases": [
+    {
+      "id": "missing-draft",
+      "stageId": "draft",
+      "files": [],
+      "expected": "failed"
+    },
+    {
+      "id": "draft-present",
+      "stageId": "draft",
+      "files": [
+        {
+          "path": "draft.md",
+          "text": "# 示例草稿\n"
+        }
+      ],
+      "expected": "passed"
+    },
+    {
+      "id": "invalid-review",
+      "stageId": "review",
+      "files": [
+        {
+          "path": "draft.md",
+          "text": "# 示例草稿\n"
+        },
+        {
+          "path": "review.json",
+          "text": "{\"checked\":false}"
+        }
+      ],
+      "expected": "failed"
+    },
+    {
+      "id": "review-present",
+      "stageId": "review",
+      "files": [
+        {
+          "path": "draft.md",
+          "text": "# 示例草稿\n"
+        },
+        {
+          "path": "review.json",
+          "text": "{\"summary\":\"仅验证测试数据结构\",\"checked\":true}"
+        }
+      ],
+      "expected": "passed"
+    }
+  ]
+}

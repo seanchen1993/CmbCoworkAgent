@@ -43,6 +43,23 @@ export interface ThreadMessageHydrationReadSuccess {
   ok: true
   page: ThreadMessagesPage
   stats: ThreadMessageHydrationWorkerStats
+  /** Native Worker evidence, stripped by the client before returning a page. */
+  canonicalWitnesses?: readonly CanonicalThreadDisplayWitness[]
+}
+
+export interface CanonicalThreadDisplayWitness {
+  readonly messageId: string
+  readonly columnsDigest: string
+  readonly presentation?: Readonly<{
+    kind: "visible" | "blank" | "plumbing"
+    fingerprint: string
+  }>
+  readonly display?: Readonly<{
+    kind: "page" | "checkpoint"
+    digest: string
+    byteBudget?: number
+    rawIndex?: number
+  }>
 }
 
 export interface ThreadMessageHydrationReadFailure {

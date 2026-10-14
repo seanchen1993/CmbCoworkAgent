@@ -731,6 +731,7 @@ async function main(): Promise<void> {
   await testAQuestionBeingAnsweredIsNotResent()
   await testTextModeAsksInText()
   await testASwitchDuringTheCardSendStillHandsTheQuestionOver()
+  await testMultipleSelectionKeepsCodesAndUsesTextFallback()
   await testPromptAndSingleUseOptionAnswer()
   await testARefusedCardStillDeliversTheWholeQuestion()
   await testMultipleQuestionsRotateCodeAndAcceptCustomText()
@@ -740,6 +741,66 @@ async function main(): Promise<void> {
   await testConcurrentThreadsUseIndependentCodes()
   await testAnsweringClosesTheCardAsAnsweredNotAsDesktopHandled()
   console.log("IM remote user-input tests passed")
+}
+
+async function testMultipleSelectionKeepsCodesAndUsesTextFallback(): Promise<void> {
+  const context = await createContext()
+  try {
+    const choices = [
+      { label: "Review", description: "Inspect code" },
+      { label: "Test", description: "Run tests" }
+    ]
+    const request = userInputRequest({
+      requestId: "request-multi",
+      questions: [
+        { id: "first", header: "First", question: "Single first", options: choices },
+        {
+          id: "steps",
+          header: "Steps",
+          question: "Multiple steps",
+          options: choices,
+          multiSelect: true
+        },
+        { id: "last", header: "Last", question: "Single last", options: choices }
+      ]
+    })
+    context.emit(request)
+    await waitFor(() => context.deliveryText(request.requestId).length > 0, "multi text fallback")
+    assert.equal(
+      context.cardSends.sent,
+      0,
+      "single-value cards must not misrepresent multiple selection"
+    )
+    assert(context.deliveryText(request.requestId).includes("Single first"))
+    assert(context.deliveryText(request.requestId).includes("A1B2C3"))
+    const answer = (argument: string) => context.service.resolveAnswer({ argument, ...ROUTE })
+    assert((await answer("A1B2C3 1,2")).includes("请回复选项编号"))
+    assert.equal(context.responses.length, 0)
+    const second = await answer("A1B2C3 1")
+    assert(second.includes("可多选"))
+    assert(second.includes("D4E5F6 1,2"))
+    assert((await answer("D4E5F6 1,1")).includes("无效或重复"))
+    assert((await answer("D4E5F6 1,3")).includes("无效或重复"))
+    assert.equal(context.responses.length, 0)
+    assert((await answer("D4E5F6 2，1")).includes("012ABC"))
+    assert.equal(await answer("012ABC 2"), "已从招乎提交回答，任务将继续执行。")
+    assert.equal(context.responses.length, 1)
+    assert.deepEqual(context.responses[0].answers.steps, {
+      type: "options",
+      questionId: "steps",
+      optionIndices: [0, 1],
+      labels: ["Review", "Test"],
+      descriptions: ["Inspect code", "Run tests"]
+    })
+    assert.equal(context.responses[0].answers.first.type, "option")
+    assert.equal(context.responses[0].answers.last.type, "option")
+    assert((await answer("D4E5F6 1")).includes("已使用"))
+    assert.equal(context.cardSends.sent, 0)
+  } finally {
+    context.service.dispose()
+    context.database.close()
+    await rm(context.root, { recursive: true, force: true })
+  }
 }
 
 void main().catch((error) => {

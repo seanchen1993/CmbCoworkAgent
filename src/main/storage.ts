@@ -103,6 +103,9 @@ import {
 } from "../shared/model-token-budget"
 import { getHookDateKey } from "../shared/hook-time"
 import { isProjectModePluginRoot } from "./harness-board/plugin-mode"
+import { derivationVisibility } from "./plugins/derivation-scope"
+import { isDerivationVisibleForProjectMode } from "../shared/skill-visibility"
+import { currentRuntimePluginSource, projectRuntimePluginSources } from "./plugins/runtime-source-scope"
 
 const OPENWORK_DIR = getCmbCoworkAgentDataRoot()
 const ENV_FILE = join(OPENWORK_DIR, ".env")
@@ -2022,6 +2025,7 @@ export function setStoredDefaultModelId(modelId: string): void {
 
 const WINDOW_CLOSE_BEHAVIOR_KEY = "windowCloseBehavior"
 const GIT_CHANGE_NOTICE_ENABLED_KEY = "gitChangeNoticeEnabled"
+const GIT_CHANGE_NOTICE_REVISION_KEY = "gitChangeNoticeRevision"
 const MODS_GLOBAL_ENABLED_KEY = "modsGlobalEnabled"
 let modsGlobalSwitch: ReturnType<typeof createDisabledSwitchReader> | undefined
 
@@ -2056,10 +2060,31 @@ export function getGitChangeNoticeEnabled(): boolean {
   }
 }
 
+/** Strict reads prove a configuration commit; tolerant UI defaults cannot do that. */
+export function getGitChangeNoticeSetting(): { value: boolean; revision: string } {
+  const store = getSettingsStore()
+  const value = store.get(GIT_CHANGE_NOTICE_ENABLED_KEY, true)
+  const revision = store.get(GIT_CHANGE_NOTICE_REVISION_KEY, 0)
+  if (typeof value !== "boolean" || !Number.isSafeInteger(revision) || Number(revision) < 0)
+    throw new Error("Invalid stored Git change notice setting")
+  return { value, revision: String(revision) }
+}
+
 export function setGitChangeNoticeEnabled(enabled: boolean): boolean {
   const normalized = Boolean(enabled)
-  getSettingsStore().set(GIT_CHANGE_NOTICE_ENABLED_KEY, normalized)
-  return normalized
+  const before = getGitChangeNoticeSetting()
+  if (before.value === normalized) return before.value
+  const revision = Number(before.revision) + 1
+  if (!Number.isSafeInteger(revision)) throw new Error("Git change notice revision exhausted")
+  // electron-store writes this object together; no await or guest call splits the CAS/write.
+  getSettingsStore().set({
+    [GIT_CHANGE_NOTICE_ENABLED_KEY]: normalized,
+    [GIT_CHANGE_NOTICE_REVISION_KEY]: revision
+  })
+  const actual = getGitChangeNoticeSetting()
+  if (actual.value !== normalized || actual.revision !== String(revision))
+    throw new Error("Git change notice setting commit unconfirmed")
+  return actual.value
 }
 
 export function getWindowCloseBehavior(): WindowCloseBehavior {
@@ -3298,6 +3323,7 @@ export function setPluginOriginsBatch(
 }
 
 export function getEnabledPluginSkillsSources(): string[] {
+  if (currentRuntimePluginSource()) return getEnabledPluginSkillSourceMetadata().map(source => source.sourceDir)
   if (_pluginSkillsCache) return _pluginSkillsCache
   _pluginSkillsCache = getEnabledPluginSkillSourceMetadata().map((source) => source.sourceDir)
   return _pluginSkillsCache
@@ -3321,17 +3347,20 @@ export interface PluginSkillSourceMetadata {
   pluginName: string
   pluginRoot: string
   isProjectModePlugin: boolean
+  derivationFamilyMembers?: readonly string[]
+  isDerivedPlugin?: boolean
   maxDepth?: number
 }
 
 export function getEnabledPluginSkillSourceMetadata(): PluginSkillSourceMetadata[] {
-  if (_pluginSkillSourcesCache) return _pluginSkillSourcesCache
+  const scoped = Boolean(currentRuntimePluginSource())
+  if (!scoped && _pluginSkillSourcesCache) return _pluginSkillSourcesCache
   // Don't gate on the stored `skillCount` — that value is computed once at
   // install time and stays stale if the in-tree layout shifts (or was wrong
   // to begin with). The downstream discovery walks the filesystem live, so
   // an over-broad enabled-only filter is harmless and catches plugins whose
   // install-time count was 0 due to manifest/layout mismatch.
-  const plugins = getPlugins().filter((p) => p.enabled)
+  const plugins = projectRuntimePluginSources(getPlugins()).filter((p) => p.enabled)
   const sources: PluginSkillSourceMetadata[] = []
   for (const plugin of plugins) {
     const manifest = readPluginManifest(plugin.path)?.manifest ?? null
@@ -3341,18 +3370,20 @@ export function getEnabledPluginSkillSourceMetadata(): PluginSkillSourceMetadata
         sourceDir: source.sourceDir,
         pluginId: plugin.id,
         pluginName: plugin.name,
+        ...derivationVisibility(plugin.id),
         pluginRoot: plugin.path,
         isProjectModePlugin,
         maxDepth: source.maxDepth
       })
     }
   }
-  _pluginSkillSourcesCache = sources
+  if (!scoped) _pluginSkillSourcesCache = sources
   return sources
 }
 
 export function getEnabledPluginMcpConfigs(): Record<string, PluginMcpServerConfig> {
-  if (_pluginMcpCache) return _pluginMcpCache
+  const scoped = Boolean(currentRuntimePluginSource())
+  if (!scoped && _pluginMcpCache) return _pluginMcpCache
   // Same rationale as getEnabledPluginSkillSourceMetadata: don't gate on the
   // stored mcpServerCount. The path here (.mcp.json at plugin root) is fixed
   // so the manifest-mismatch failure mode that bites skills doesn't apply,
@@ -3360,9 +3391,13 @@ export function getEnabledPluginMcpConfigs(): Record<string, PluginMcpServerConf
   // count-free means a plugin that didn't ship MCP at install time can grow
   // one without needing to be re-registered. parseMcpJsonFile fast-fails on
   // missing/invalid files so the extra reads cost effectively nothing.
-  const plugins = getPlugins().filter((p) => p.enabled)
+  const plugins = projectRuntimePluginSources(getPlugins()).filter((p) => p.enabled)
   const configs: Record<string, PluginMcpServerConfig> = {}
   for (const plugin of plugins) {
+    const bound = currentRuntimePluginSource()?.plugin.id
+    if (!isDerivationVisibleForProjectMode({ pluginId: plugin.id,
+      ...derivationVisibility(plugin.id) }, { projectMode: Boolean(bound), boundPluginId: bound }))
+      continue
     const mcpJsonPath = join(plugin.path, ".mcp.json")
     const servers = parseMcpJsonFile(mcpJsonPath)
     if (!servers) continue
@@ -3370,7 +3405,7 @@ export function getEnabledPluginMcpConfigs(): Record<string, PluginMcpServerConf
       configs[`plugin:${plugin.id}/${name}`] = cfg
     }
   }
-  _pluginMcpCache = configs
+  if (!scoped) _pluginMcpCache = configs
   return configs
 }
 
@@ -3673,6 +3708,34 @@ function updateSandboxSettings(
 
 export function getWindowsSandboxMode(): SandboxMode {
   return readSandboxSettings().mode
+}
+
+/** Only facts from this module's actual settings cache; it grants no filesystem authority. */
+export function captureWindowsSandboxModeData(): Readonly<{
+  mode: SandboxMode
+  assertDataCurrent(): void
+}> {
+  const original = sandboxSettingsCache ?? readSandboxSettings()
+  const prototype = Object.getPrototypeOf(original)
+  const expected = Object.getOwnPropertyDescriptor(original, "mode")
+  if (!expected || !("value" in expected)) throw Error("MODS_CALL_SCOPE_CHANGED")
+  const mode: SandboxMode = expected.value
+  if (mode !== "none" && mode !== "unelevated" && mode !== "readonly" && mode !== "elevated")
+    throw Error("MODS_CALL_SCOPE_CHANGED")
+  let failed = false
+  const assertDataCurrent = () => {
+    const current = sandboxSettingsCache
+    const field = current && Object.getOwnPropertyDescriptor(current, "mode")
+    if (failed || !current || Object.getPrototypeOf(current) !== prototype ||
+      !field || !("value" in field) || field.value !== mode ||
+      field.enumerable !== expected.enumerable || field.configurable !== expected.configurable ||
+      field.writable !== expected.writable) {
+      failed = true
+      throw Error("MODS_CALL_SCOPE_CHANGED")
+    }
+  }
+  assertDataCurrent()
+  return Object.freeze({ mode, assertDataCurrent })
 }
 
 export function setWindowsSandboxMode(mode: SandboxMode): void {
@@ -4221,6 +4284,7 @@ function parsePluginHooks(plugin: PluginMetadata): PluginHookMetadata[] {
       ...c,
       pluginId: plugin.id,
       pluginName: plugin.name,
+      ...derivationVisibility(plugin.id),
       pluginRoot: plugin.path,
       pluginEnabled: plugin.enabled,
       hookPath: hooksRelPath,
@@ -4310,6 +4374,9 @@ export function invalidatePluginHooksCache(): void {
 }
 
 export function getEnabledPluginHooks(): HookConfig[] {
+  if (currentRuntimePluginSource()) return projectRuntimePluginSources(getPlugins())
+    .filter(plugin => plugin.enabled && (plugin.hookCount ?? 0) > 0)
+    .flatMap(plugin => parsePluginHooks(plugin))
   if (_pluginHooksCache) return _pluginHooksCache
   const plugins = getPlugins().filter((p) => p.enabled && (p.hookCount ?? 0) > 0)
   _pluginHooksCache = plugins.flatMap((plugin) => parsePluginHooks(plugin))
@@ -4317,6 +4384,7 @@ export function getEnabledPluginHooks(): HookConfig[] {
 }
 
 export function getEnabledPluginHookMetadata(): PluginHookMetadata[] {
+  if (currentRuntimePluginSource()) return getEnabledPluginHooks() as PluginHookMetadata[]
   if (_pluginHooksCache) return _pluginHooksCache
   void getEnabledPluginHooks()
   return _pluginHooksCache ?? []
@@ -4571,6 +4639,7 @@ function buildEnabledSkillHookMetadata(): SkillHookMetadata[] {
 }
 
 export function getEnabledSkillHookMetadata(): SkillHookMetadata[] {
+  if (currentRuntimePluginSource()) return buildEnabledSkillHookMetadata()
   const catalogGlobalRevision = getHookCatalogGlobalRevision()
   const topologyBusy = isSkillCatalogTopologyMutationBusy()
   if (

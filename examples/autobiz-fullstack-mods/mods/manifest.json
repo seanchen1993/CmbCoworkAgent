@@ -1,0 +1,86 @@
+{
+  "apiVersion": "cmb.mods/v2",
+  "id": "AutobizDevOps_Plugin_Kanban_Fullstack0920_Mods",
+  "cmbCompatibility": { "modelProtocol": "legacy-v1" },
+  "claw": {
+    "componentsVersion": 1,
+    "components": [
+      {
+        "id": "status",
+        "name": "真实状态与来源",
+        "description": "显示来源，使用原分支只读脚本查询规范状态；不运行验证、不推进阶段。",
+        "kind": "module",
+        "entry": "status.ts",
+        "dependsOn": [],
+        "actionIds": []
+      },
+      {
+        "id": "board",
+        "name": "项目真实状态看板",
+        "description": "明确选择 Feature，显示真实 checkpoint、阶段和选定节点，刷新保留执行审批。",
+        "kind": "module",
+        "entry": "board.ts",
+        "dependsOn": ["status"],
+        "actionIds": []
+      },
+      {
+        "id": "review",
+        "name": "真实单文件模型检视",
+        "description": "只读取一个项目相对文件，等待默认模型回复；不执行项目测试。",
+        "kind": "module",
+        "entry": "review.ts",
+        "dependsOn": [],
+        "actionIds": []
+      },
+      {
+        "id": "review-input",
+        "name": "跨插件检视输入",
+        "description": "明确 Feature 和文件，核对读前后规范记录，供独立 Review 插件使用。",
+        "kind": "module",
+        "entry": "review-input.ts",
+        "dependsOn": [],
+        "actionIds": ["prepare-review"]
+      }
+    ],
+    "actions": [
+      {
+        "id": "prepare-review",
+        "name": "Autobiz：准备真实单文件检视输入",
+        "description": "经原状态入口和宿主文件权限读取当前项目，明确 Feature，最多 4000 字符；不后台执行。",
+        "command": "autobiz-fullstack-prepare-review",
+        "inputSchema": {
+          "type": "object",
+          "required": ["feature", "path"],
+          "additionalProperties": false,
+          "properties": {
+            "feature": {
+              "type": "string",
+              "title": "真实 Feature ID",
+              "minLength": 1,
+              "maxLength": 160
+            },
+            "path": {
+              "type": "string",
+              "title": "项目相对文件路径",
+              "minLength": 1,
+              "maxLength": 240
+            }
+          }
+        },
+        "outputSchema": {
+          "type": "object",
+          "required": ["feature", "checkpoint", "stage", "path", "source", "context"],
+          "additionalProperties": false,
+          "properties": {
+            "feature": { "type": "string", "minLength": 1, "maxLength": 160 },
+            "checkpoint": { "type": "string", "minLength": 1, "maxLength": 240 },
+            "stage": { "type": "string", "minLength": 1, "maxLength": 240 },
+            "path": { "type": "string", "minLength": 1, "maxLength": 240 },
+            "source": { "type": "string", "minLength": 1, "maxLength": 4000 },
+            "context": { "type": "string", "minLength": 1, "maxLength": 2000 }
+          }
+        }
+      }
+    ]
+  }
+}

@@ -4,6 +4,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react"
 import { isBinaryFile } from "@/lib/file-types"
 import type { FileInfo } from "@/types"
+import { normalizeAtFileMentionPath } from "../../../../shared/at-file-mention-text"
 import {
   searchWorkspaceMentionFilesProgressively,
   type WorkspaceMentionSearchPage,
@@ -11,6 +12,7 @@ import {
 } from "./at-file-mention-index"
 
 export type { AtFileSuggestion } from "./at-file-mention-index"
+export { normalizeAtFileMentionPath } from "../../../../shared/at-file-mention-text"
 
 export type AtFilePopoverMode =
   | { kind: "closed" }
@@ -148,12 +150,6 @@ export function extractAtFileMentions(input: string): string[] {
   return results
 }
 
-// 进入发送阶段前，把路径中的多余斜杠和空格规范掉，
-// 让后续匹配、去重和展示都使用同一种路径格式。
-export function normalizeAtFileMentionPath(value: string): string {
-  return value.trim().replace(/\\/g, "/").replace(/^\/+/, "")
-}
-
 // 用户从候选列表确认某个 @文件 后，输入框里原来的 @token 会被消费掉，
 // 已选文件改为通过独立 chip 展示，因此这里统一计算移除 token 后的新文本和光标位置。
 export function removeAtFileTokenFromInput(
@@ -195,7 +191,7 @@ export function useAtFileMentions(params: {
   const [selectedIdx, setSelectedIdx] = useState(0)
   const [dismissedKey, setDismissedKey] = useState<string | null>(null)
 
-  const activeToken = useMemo<ActiveAtFileToken>(() => {
+  const rawToken = useMemo<ActiveAtFileToken>(() => {
     if (disabled) return { kind: "closed" }
 
     const token = extractAtFileToken(input, cursorOffset)
@@ -203,7 +199,6 @@ export function useAtFileMentions(params: {
 
     const query = normalizeAtFileMentionPath(token.query)
     const modeKey = `${token.startPos}:${token.endPos}:${token.quoted ? "q" : "p"}:${query}`
-    if (dismissedKey === modeKey) return { kind: "closed" }
     return {
       kind: "at-file",
       key: modeKey,
@@ -212,7 +207,12 @@ export function useAtFileMentions(params: {
       endPos: token.endPos,
       quoted: token.quoted
     }
-  }, [cursorOffset, disabled, dismissedKey, input])
+  }, [cursorOffset, disabled, input])
+
+  const activeToken = useMemo<ActiveAtFileToken>(() => {
+    if (rawToken.kind === "closed" || rawToken.key === dismissedKey) return { kind: "closed" }
+    return rawToken
+  }, [dismissedKey, rawToken])
 
   const [suggestionResult, setSuggestionResult] = useState<{
     key: string
@@ -274,11 +274,8 @@ export function useAtFileMentions(params: {
     }
   }, [activeToken, suggestionResult, workspaceFiles])
 
-  // mode 变化后重置选中项，避免用户切换到新的 @文件 片段时还停留在旧索引。
-  const currentKey = useMemo(() => {
-    if (mode.kind !== "at-file") return "closed"
-    return `${mode.startPos}:${mode.endPos}:${mode.quoted ? "q" : "p"}:${mode.query}`
-  }, [mode])
+  // Only a changed input token resets dismissal; closing the popover keeps its token identity.
+  const currentKey = rawToken.kind === "at-file" ? rawToken.key : "closed"
   const [previousKey, setPreviousKey] = useState(currentKey)
   if (currentKey !== previousKey) {
     setPreviousKey(currentKey)

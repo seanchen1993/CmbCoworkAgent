@@ -2,6 +2,40 @@ import { expect, it } from "vitest"
 import { basicSdkInput, runBasicSdk, validateBasicInput, validateBasicResult } from "./basic-sdk"
 import type { ModObject } from "../../../shared/mods/types"
 
+it("preserves strict messages selectors and validates the original API return format", async () => {
+  const input = basicSdkInput("session.messages", [{ as: "api", agentId: "actual-child" }])
+  expect(input).toEqual({ as: "api", agentId: "actual-child" })
+  for (const args of [[null], [{ as: "summary" }], [{ agentId: "" }], [{ extra: true }], [{}, {}]])
+    expect(() => basicSdkInput("session.messages", args)).toThrow()
+  const controller = new AbortController()
+  const calls: unknown[] = []
+  const value = await runBasicSdk("session.messages", input, {
+    threadId: "main", workspace: "/project", plugin: "P", registry: new Map(),
+    signal: controller.signal,
+    readConversation: async (received, signal) => {
+      calls.push(received, signal)
+      return [{ role: "user", content: [{ type: "image", source: { data: "pixel" } }] }]
+    }
+  })
+  expect(calls).toEqual([input, controller.signal])
+  expect(() => validateBasicResult("session.messages", value, input)).not.toThrow()
+  expect(() => validateBasicResult("session.messages", value, {})).toThrow("MODS_SDK_RESULT")
+  expect(() => validateBasicResult("session.messages", { deny: "closed" }, input)).not.toThrow()
+  expect(() => validateBasicResult("session.messages", { deny: "closed" }, {})).toThrow()
+})
+
+it("keeps the legacy summary backend and honestly rejects selectors without a real backend", async () => {
+  const calls: string[] = []
+  const context = { threadId: "main", workspace: "/project", plugin: "P", registry: new Map(),
+    signal: new AbortController().signal,
+    readSession: async (method: string) => { calls.push(method); return [] }
+  }
+  expect(await runBasicSdk("session.messages", {}, context)).toEqual([])
+  await expect(runBasicSdk("session.messages", { as: "api" }, context))
+    .rejects.toMatchObject({ code: "MODS_CONVERSATION_UNAVAILABLE" })
+  expect(calls).toEqual(["session.messages"])
+})
+
 it("preserves usage options and rejects invalid breakdowns and grid widths", () => {
   expect(basicSdkInput("session.usage", [])).toEqual({})
   expect(basicSdkInput("session.usage", [{ breakdown: "full", columns: 60 }])).toEqual({

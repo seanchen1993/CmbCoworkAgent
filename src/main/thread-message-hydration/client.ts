@@ -1,9 +1,11 @@
 import type { ResourceLimits, Worker } from "node:worker_threads"
 import { getDbPath } from "../storage"
+import { canonicalDisplayValueDigest } from "../checkpointer/function-conversation-canonical-display-worker"
 import type { ThreadMessagesPage, ThreadMessagesPageOptions } from "../types"
 import type {
   ThreadMessageHydrationWorkerResponse,
-  ThreadMessageHydrationWorkerStats
+  ThreadMessageHydrationWorkerStats,
+  CanonicalThreadDisplayWitness
 } from "./protocol"
 import { THREAD_MESSAGE_HYDRATION_CANCELLED } from "./protocol"
 
@@ -17,11 +19,19 @@ export const THREAD_MESSAGE_HYDRATION_WORKER_RESOURCE_LIMITS: ResourceLimits = {
 export const THREAD_MESSAGE_HYDRATION_MAX_ACTIVE_REQUESTS = 32
 
 interface PendingRequest {
+  worker: Worker
+  source?: ThreadMessageHydrationNativeSource
   resolve: (page: ThreadMessagesPage) => void
   reject: (error: Error) => void
   cancellation: Int32Array
   foregroundKey: string | null
   startedAt: number
+}
+
+/** Supplied by the native IPC admission, never by request JSON. */
+export interface ThreadMessageHydrationNativeSource {
+  assertCurrent(): void
+  verify(witnesses: readonly CanonicalThreadDisplayWitness[]): void
 }
 
 export interface ThreadMessageHydrationDiagnostics {
@@ -96,14 +106,15 @@ export class ThreadMessageHydrationClient {
     private readonly databasePath: () => string = getDbPath
   ) {}
 
-  private handleResponse = (response: ThreadMessageHydrationWorkerResponse): void => {
+  private handleResponse = (response: ThreadMessageHydrationWorkerResponse, worker: Worker): void => {
     if (response.type === "shutdown-complete") {
+      if (this.worker !== worker) return
       this.shutdownResolve?.()
       this.shutdownResolve = null
       return
     }
     const pending = this.pending.get(response.requestId)
-    if (!pending) return
+    if (!pending || pending.worker !== worker) return
     this.pending.delete(response.requestId)
     if (
       pending.foregroundKey &&
@@ -113,6 +124,30 @@ export class ThreadMessageHydrationClient {
     }
 
     if (response.ok) {
+      try {
+        const fingerprint = canonicalDisplayValueDigest(response.page)
+        for (const witness of response.canonicalWitnesses ?? []) {
+          const message = response.page.messages.find(message => message.id === witness.messageId)
+          if (witness.presentation && witness.presentation.kind !== "visible") {
+            if (message || witness.display) throw Error("MODS_CONVERSATION_DISPLAY_SOURCE_INVALID")
+            continue
+          }
+          if (!message || witness.display?.kind !== "page" ||
+            canonicalDisplayValueDigest(message) !== witness.display.digest)
+            throw Error("MODS_CONVERSATION_DISPLAY_SOURCE_INVALID")
+        }
+        if (pending.source) {
+          if (pending.source.verify(response.canonicalWitnesses ?? []) !== undefined)
+            throw Error("MODS_CONVERSATION_ASYNC_DISPLAY_SOURCE")
+        } else if (response.canonicalWitnesses?.length) {
+          throw Error("MODS_CONVERSATION_DISPLAY_SOURCE_INVALID")
+        }
+        if (Atomics.load(pending.cancellation, 0) || canonicalDisplayValueDigest(response.page) !== fingerprint)
+          throw new ThreadMessageHydrationRequestCancelledError()
+      } catch (error) {
+        pending.reject(error instanceof Error ? error : Error("MODS_CONVERSATION_DISPLAY_SOURCE_INVALID"))
+        return
+      }
       this.diagnostics.completedRequests += 1
       this.diagnostics.lastStats = response.stats
       const elapsedMs = performance.now() - pending.startedAt
@@ -163,7 +198,7 @@ export class ThreadMessageHydrationClient {
       )
     }
     this.worker = worker
-    worker.on("message", this.handleResponse)
+    worker.on("message", response => this.handleResponse(response, worker))
     worker.on("error", (error) => this.handleWorkerFailure(worker, error))
     worker.on("exit", (code) => {
       if (!this.closing) {
@@ -193,7 +228,8 @@ export class ThreadMessageHydrationClient {
   async readPage(
     threadId: string,
     options: ThreadMessagesPageOptions = {},
-    webContentsId?: number
+    webContentsId?: number,
+    source?: ThreadMessageHydrationNativeSource
   ): Promise<ThreadMessagesPage> {
     if (this.closing) {
       throw new ThreadMessageHydrationWorkerUnavailableError(
@@ -222,6 +258,8 @@ export class ThreadMessageHydrationClient {
         ? String(webContentsId)
         : null
     try {
+      if (source && source.assertCurrent() !== undefined)
+        throw Error("MODS_CONVERSATION_ASYNC_DISPLAY_SOURCE")
       if (foregroundKey) {
         const previousId = this.foregroundRequests.get(foregroundKey)
         const previous = previousId === undefined ? undefined : this.pending.get(previousId)
@@ -236,6 +274,8 @@ export class ThreadMessageHydrationClient {
       const cancellationBuffer = new SharedArrayBuffer(Int32Array.BYTES_PER_ELEMENT)
       const cancellation = new Int32Array(cancellationBuffer)
       const worker = await this.getWorker()
+      if (source && source.assertCurrent() !== undefined)
+        throw Error("MODS_CONVERSATION_ASYNC_DISPLAY_SOURCE")
       if (this.closing) {
         throw new ThreadMessageHydrationWorkerUnavailableError(
           "Thread message hydration client is closing"
@@ -247,6 +287,7 @@ export class ThreadMessageHydrationClient {
 
       return await new Promise<ThreadMessagesPage>((resolve, reject) => {
         this.pending.set(requestId, {
+          worker, source,
           resolve,
           reject,
           cancellation,
@@ -357,9 +398,10 @@ function getDefaultClient(): ThreadMessageHydrationClient {
 export function readThreadMessagesPageInWorker(
   threadId: string,
   options: ThreadMessagesPageOptions = {},
-  webContentsId?: number
+  webContentsId?: number,
+  source?: ThreadMessageHydrationNativeSource
 ): Promise<ThreadMessagesPage> {
-  return getDefaultClient().readPage(threadId, options, webContentsId)
+  return getDefaultClient().readPage(threadId, options, webContentsId, source)
 }
 
 export function getThreadMessageHydrationDiagnostics(): ThreadMessageHydrationDiagnostics {

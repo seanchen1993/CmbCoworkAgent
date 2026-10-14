@@ -1,0 +1,9 @@
+{
+  "name": "component-review-kit",
+  "version": "1.0.0",
+  "description": "可选的代码检视与汇报组件示例",
+  "mods": "mods/manifest.json",
+  "cmbCompatibility": {
+    "modelProtocol": "legacy-v1"
+  }
+}

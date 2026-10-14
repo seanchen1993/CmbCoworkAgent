@@ -135,7 +135,9 @@ function renderQuestion(session: RemoteUserInputSession): string {
       (option, index) => `${index + 1}. ${option.label} — ${option.description}`
     ),
     "",
-    `回复 /回答 ${session.code} <编号>`,
+    question.multiSelect === true
+      ? `可多选，回复 /回答 ${session.code} 1,2（用逗号分隔编号）`
+      : `回复 /回答 ${session.code} <编号>`,
     `如以上选项都不合适：/回答 ${session.code} 其他 <你的回答>`,
     `短码在本轮等待期间一直有效；普通文本不会被当作回答。`
   ].join("\n")
@@ -146,6 +148,26 @@ function answerFor(
   rawAnswer: string
 ): { answer: UserInputAnswer } | { message: string } {
   const normalized = rawAnswer.trim()
+  if (question.multiSelect === true && /^\d+(?:\s*[,，]\s*\d+)*$/u.test(normalized)) {
+    const indices = normalized.split(/[,，]/u).map((value) => Number(value.trim()) - 1)
+    if (
+      new Set(indices).size !== indices.length ||
+      indices.some(
+        (index) => !Number.isSafeInteger(index) || index < 0 || index >= question.options.length
+      )
+    )
+      return { message: `选项编号无效或重复，请输入 1-${question.options.length}，用逗号分隔。` }
+    indices.sort((a, b) => a - b)
+    return {
+      answer: {
+        type: "options",
+        questionId: question.id,
+        optionIndices: indices,
+        labels: indices.map((index) => question.options[index].label),
+        descriptions: indices.map((index) => question.options[index].description)
+      }
+    }
+  }
   const optionMatch = normalized.match(/^(\d+)$/u)
   if (optionMatch) {
     const optionIndex = Number(optionMatch[1]) - 1
@@ -348,7 +370,12 @@ export class ImRemoteUserInputService {
           return [
             {
               header: question.header,
-              answer: answer.type === "option" ? answer.label : answer.text
+              answer:
+                answer.type === "option"
+                  ? answer.label
+                  : answer.type === "options"
+                    ? answer.labels.join(", ")
+                    : answer.text
             }
           ]
         })
@@ -509,7 +536,10 @@ export class ImRemoteUserInputService {
     // waiting on an answer has no timeout. The card earns a shorter notice.
     let carded = false
     try {
-      carded = await this.publishCard(session)
+      // The current card transport is single selection. Multi-choice requests use the
+      // established numbered text path until that platform's multi-value receipt is verified.
+      if (!request.questions.some((question) => question.multiSelect === true))
+        carded = await this.publishCard(session)
     } catch (error) {
       this.dependencies.warn("Remote user-input card could not be published.", error)
     }
@@ -587,9 +617,11 @@ export class ImRemoteUserInputService {
         answeredLabel:
           recorded?.type === "option"
             ? recorded.label
-            : recorded?.type === "other"
-              ? recorded.text
-              : undefined
+            : recorded?.type === "options"
+              ? recorded.labels.join(", ")
+              : recorded?.type === "other"
+                ? recorded.text
+                : undefined
       }
     })
   }

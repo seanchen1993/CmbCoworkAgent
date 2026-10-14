@@ -12,6 +12,18 @@ import {
   MESSAGE_PROVIDER_SOURCE_ID_METADATA_KEY
 } from "../../shared/message-role-collision"
 import { isWorkflowPlumbingTranscriptContent } from "../../shared/checkpoint-transcript"
+import {
+  functionConversationTranscriptFields,
+  isFunctionConversationHiddenNote,
+  isFunctionConversationNotice,
+  type FunctionConversationTranscriptStamp
+} from "../../shared/mods/v2/conversation-transcript"
+import { ModFunctionError } from "../../shared/mods/v2/contracts"
+
+export interface PersistedRuntimeMessageOptions {
+  /** A native resolver captured from the actual conversation/checkpoint admission. */
+  resolveFunctionRow?: (message: Message, stamp: FunctionConversationTranscriptStamp) => BaseMessage
+}
 
 export function stringifyPersistedMessageContent(content: Message["content"]): string {
   if (typeof content === "string") return content
@@ -26,11 +38,26 @@ export function stringifyPersistedMessageContent(content: Message["content"]): s
 }
 
 export function isRuntimeVisiblePersistedMessage(message: Message): boolean {
+  const fields = functionConversationTranscriptFields(message, message.id, message.role)
+  if (fields.function_row_invalid) return true // Let recovery reject, never erase this fact.
+  if (fields.function_row) return !isFunctionConversationHiddenNote(fields) &&
+    !isFunctionConversationNotice(fields)
   return !isWorkflowPlumbingTranscriptContent(stringifyPersistedMessageContent(message.content))
 }
 
 /** Convert one durable transcript row back to the LangChain message used by the graph. */
-export function persistedMessageToRuntimeMessage(message: Message): BaseMessage | null {
+export function persistedMessageToRuntimeMessage(message: Message,
+  options: PersistedRuntimeMessageOptions = {}
+): BaseMessage | null {
+  const fields = functionConversationTranscriptFields(message, message.id, message.role)
+  if (fields.function_row_invalid)
+    throw new ModFunctionError("MODS_CONVERSATION_TRANSCRIPT_INVALID")
+  if (fields.function_row) {
+    if (isFunctionConversationNotice(fields)) return null
+    if (!options.resolveFunctionRow)
+      throw new ModFunctionError("MODS_CONVERSATION_RECOVERY_REQUIRED")
+    return options.resolveFunctionRow(message, fields.function_row)
+  }
   const content = message.content as BaseMessage["content"]
   if (message.role === "user") {
     return new HumanMessage({ id: message.id, content })

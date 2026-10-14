@@ -5,9 +5,20 @@
  *   npx -y tsx tests/coordinator-worker-manager.spec.ts
  */
 
-import { access, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "fs/promises"
+import {
+  access,
+  mkdir,
+  mkdtemp,
+  readFile,
+  realpath,
+  rm,
+  rmdir,
+  symlink,
+  unlink,
+  writeFile
+} from "fs/promises"
 import { tmpdir } from "os"
-import { join } from "path"
+import { basename, dirname, join, resolve } from "path"
 import {
   CoordinatorWorkerManager,
   MAX_COORDINATOR_PRUNED_SNAPSHOTS_IN_MEMORY,
@@ -2517,375 +2528,416 @@ async function testStaleProgressFromInterruptedRunIsIgnored(): Promise<void> {
 }
 
 async function testWorkerWriteSafetyAndReadOnlyParallelism(): Promise<void> {
-  await withTempDir("coordinator-worker-manager", async (workspace) => {
-    const manager = new CoordinatorWorkerManager()
-    let invalidOwnedFilesRejected = false
-    try {
-      manager.startWorker({
-        parentThreadId: "thread-owned-files",
-        workspacePath: workspace,
-        role: "implementer",
-        workload: "write",
-        ownedFiles: ["/etc/passwd", "../secret.txt", "nested/../bad.ts"],
-        description: "Reject unsafe owned files",
-        prompt: "reject unsafe",
-        runner: async () => ({ summary: "bad" })
-      })
-    } catch (error) {
-      invalidOwnedFilesRejected = String(error).includes("Invalid owned_files path")
-    }
-    assert(
-      invalidOwnedFilesRejected,
-      "unsafe owned_files should be rejected instead of becoming whole-workspace write access"
-    )
-
-    const normalizedOwnedFilesWorker = manager.startWorker({
-      parentThreadId: "thread-owned-files",
-      workspacePath: workspace,
-      role: "implementer",
-      workload: "write",
-      ownedFiles: ["./src/app.ts", "src/app.ts"],
-      description: "Normalize owned files",
-      prompt: "normalize",
-      runner: async () => ({ summary: "normalized" })
-    })
-    assert(
-      normalizedOwnedFilesWorker.owned_files.join(",") === "src/app.ts",
-      "owned_files should drop absolute paths and parent-directory traversal"
-    )
-
-    const caseVariantOwnedFilesWorker = manager.startWorker({
-      parentThreadId: "thread-owned-case-variants",
-      workspacePath: workspace,
-      role: "implementer",
-      workload: "write",
-      ownedFiles: ["src/Foo.ts", "src/foo.ts"],
-      description: "Normalize case variants",
-      prompt: "normalize case variants",
-      runner: async () => ({ summary: "case variants normalized" })
-    })
-    const expectedCaseVariantCount = usesCaseInsensitiveCoordinatorPathMatching(workspace) ? 1 : 2
-    assert(
-      caseVariantOwnedFilesWorker.owned_files.length === expectedCaseVariantCount,
-      "owned_files case-variant dedupe should follow the actual workspace filesystem"
-    )
-
-    const externalOwnedRoot = await mkdtemp(join(tmpdir(), "coordinator-owned-files-external-"))
-    try {
-      await mkdir(join(workspace, "src"), { recursive: true })
-      await symlink(externalOwnedRoot, join(workspace, "src", "escape"), "dir")
-      let symlinkOwnedFilesRejected = false
+  const failures: unknown[] = []
+  try {
+    await withTempDir("coordinator-worker-manager", async (workspace) => {
+      const manager = new CoordinatorWorkerManager()
+      const realDir = deferred<CoordinatorWorkerRunResult>()
+      const holdWrite = deferred<CoordinatorWorkerRunResult>()
+      const holdVerify = deferred<CoordinatorWorkerRunResult>()
+      const parentThreadIds: string[] = []
       try {
-        manager.startWorker({
-          parentThreadId: "thread-owned-files-symlink",
+        let invalidOwnedFilesRejected = false
+        try {
+          manager.startWorker({
+            parentThreadId: "thread-owned-files",
+            workspacePath: workspace,
+            role: "implementer",
+            workload: "write",
+            ownedFiles: ["/etc/passwd", "../secret.txt", "nested/../bad.ts"],
+            description: "Reject unsafe owned files",
+            prompt: "reject unsafe",
+            runner: async () => ({ summary: "bad" })
+          })
+        } catch (error) {
+          invalidOwnedFilesRejected = String(error).includes("Invalid owned_files path")
+        }
+        assert(
+          invalidOwnedFilesRejected,
+          "unsafe owned_files should be rejected instead of becoming whole-workspace write access"
+        )
+
+        const normalizedOwnedFilesWorker = manager.startWorker({
+          parentThreadId: "thread-owned-files",
           workspacePath: workspace,
           role: "implementer",
           workload: "write",
-          ownedFiles: ["src/escape"],
-          description: "Reject symlinked owned files that escape workspace",
-          prompt: "reject symlink escape",
-          runner: async () => ({ summary: "bad symlink" })
+          ownedFiles: ["./src/app.ts", "src/app.ts"],
+          description: "Normalize owned files",
+          prompt: "normalize",
+          runner: async () => ({ summary: "normalized" })
         })
-      } catch (error) {
-        symlinkOwnedFilesRejected = String(error).includes("Invalid owned_files path")
-      }
-      assert(
-        symlinkOwnedFilesRejected,
-        "owned_files should reject symlinked paths that escape the workspace root"
-      )
-    } finally {
-      await rm(externalOwnedRoot, { recursive: true, force: true })
-    }
+        parentThreadIds.push("thread-owned-files")
+        assert(
+          normalizedOwnedFilesWorker.owned_files.join(",") === "src/app.ts",
+          "owned_files should drop absolute paths and parent-directory traversal"
+        )
 
-    await mkdir(join(workspace, "src", "real-dir"), { recursive: true })
-    await symlink(join(workspace, "src", "real-dir"), join(workspace, "src", "alias-dir"), "dir")
-    const realDirWriter = manager.startWorker({
-      parentThreadId: "thread-owned-files-alias-conflict",
-      workspacePath: workspace,
-      role: "implementer",
-      workload: "write",
-      ownedFiles: ["src/real-dir"],
-      description: "Own the real directory",
-      prompt: "own real dir",
-      runner: async () => deferred<CoordinatorWorkerRunResult>().promise
-    })
-    let symlinkAliasConflictRejected = false
-    try {
-      manager.startWorker({
-        parentThreadId: "thread-owned-files-alias-conflict",
-        workspacePath: workspace,
-        role: "implementer",
-        workload: "write",
-        ownedFiles: ["src/alias-dir"],
-        description: "Alias directory should conflict",
-        prompt: "own alias dir",
-        runner: async () => ({ summary: "alias conflict should reject" })
-      })
-    } catch (error) {
-      symlinkAliasConflictRejected = String(error).includes(realDirWriter.worker_id)
-    }
-    assert(
-      symlinkAliasConflictRejected,
-      "owned_files overlap checks should treat symlink aliases as conflicting file ownership"
-    )
+        const caseVariantOwnedFilesWorker = manager.startWorker({
+          parentThreadId: "thread-owned-case-variants",
+          workspacePath: workspace,
+          role: "implementer",
+          workload: "write",
+          ownedFiles: ["src/Foo.ts", "src/foo.ts"],
+          description: "Normalize case variants",
+          prompt: "normalize case variants",
+          runner: async () => ({ summary: "case variants normalized" })
+        })
+        parentThreadIds.push("thread-owned-case-variants")
+        const expectedCaseVariantCount = usesCaseInsensitiveCoordinatorPathMatching(workspace) ? 1 : 2
+        assert(
+          caseVariantOwnedFilesWorker.owned_files.length === expectedCaseVariantCount,
+          "owned_files case-variant dedupe should follow the actual workspace filesystem"
+        )
 
-    const holdWrite = deferred<CoordinatorWorkerRunResult>()
-    const firstWrite = manager.startWorker({
-      parentThreadId: "thread-concurrency",
-      workspacePath: workspace,
-      role: "implementer",
-      workload: "write",
-      ownedFiles: ["src/a.ts"],
-      description: "Edit a",
-      prompt: "edit a",
-      runner: async () => holdWrite.promise
-    })
+        const externalOwnedRoot = await mkdtemp(join(tmpdir(), "coordinator-owned-files-external-"))
+        try {
+          await mkdir(join(workspace, "src"), { recursive: true })
+          await symlink(
+            externalOwnedRoot,
+            join(workspace, "src", "escape"),
+            process.platform === "win32" ? "junction" : "dir"
+          )
+          let symlinkOwnedFilesRejected = false
+          try {
+            manager.startWorker({
+              parentThreadId: "thread-owned-files-symlink",
+              workspacePath: workspace,
+              role: "implementer",
+              workload: "write",
+              ownedFiles: ["src/escape"],
+              description: "Reject symlinked owned files that escape workspace",
+              prompt: "reject symlink escape",
+              runner: async () => ({ summary: "bad symlink" })
+            })
+          } catch (error) {
+            symlinkOwnedFilesRejected = String(error).includes("Invalid owned_files path")
+          }
+          assert(
+            symlinkOwnedFilesRejected,
+            "owned_files should reject symlinked paths that escape the workspace root"
+          )
+        } finally {
+          await rm(externalOwnedRoot, { recursive: true, force: true })
+        }
 
-    const readOnly = manager.startWorker({
-      parentThreadId: "thread-concurrency",
-      workspacePath: workspace,
-      role: "verifier",
-      workload: "read_only",
-      description: "Inspect while writer runs",
-      prompt: "inspect",
-      runner: async () => ({ summary: "read only done" })
-    })
-    assert(readOnly.status === "running", "read-only worker should start beside writer")
+        await mkdir(join(workspace, "src", "real-dir"), { recursive: true })
+        await symlink(
+          join(workspace, "src", "real-dir"),
+          join(workspace, "src", "alias-dir"),
+          process.platform === "win32" ? "junction" : "dir"
+        )
+        const realDirWriter = manager.startWorker({
+          parentThreadId: "thread-owned-files-alias-conflict",
+          workspacePath: workspace,
+          role: "implementer",
+          workload: "write",
+          ownedFiles: ["src/real-dir"],
+          description: "Own the real directory",
+          prompt: "own real dir",
+          runner: async () => realDir.promise
+        })
+        parentThreadIds.push("thread-owned-files-alias-conflict")
+        let symlinkAliasConflictRejected = false
+        try {
+          manager.startWorker({
+            parentThreadId: "thread-owned-files-alias-conflict",
+            workspacePath: workspace,
+            role: "implementer",
+            workload: "write",
+            ownedFiles: ["src/alias-dir"],
+            description: "Alias directory should conflict",
+            prompt: "own alias dir",
+            runner: async () => ({ summary: "alias conflict should reject" })
+          })
+        } catch (error) {
+          symlinkAliasConflictRejected = String(error).includes(realDirWriter.worker_id)
+        }
+        assert(
+          symlinkAliasConflictRejected,
+          "owned_files overlap checks should treat symlink aliases as conflicting file ownership"
+        )
 
-    let verifyDuringWriteRejected = false
-    try {
-      manager.startWorker({
-        parentThreadId: "thread-concurrency",
-        workspacePath: workspace,
-        role: "verifier",
-        workload: "verify",
-        description: "Verify while writer runs",
-        prompt: "verify",
-        runner: async () => ({ summary: "bad" })
-      })
-    } catch (error) {
-      verifyDuringWriteRejected = String(error).includes("Cannot start verify worker yet")
-    }
-    assert(
-      verifyDuringWriteRejected,
-      "verify worker should wait for active write workers before running commands"
-    )
-
-    let verifierWriteRejected = false
-    try {
-      manager.startWorker({
-        parentThreadId: "thread-verifier-write",
-        workspacePath: workspace,
-        role: "verifier",
-        workload: "write",
-        description: "Verifier should not write",
-        prompt: "try to write",
-        runner: async () => ({ summary: "bad" })
-      })
-    } catch (error) {
-      verifierWriteRejected = String(error).includes("Verifier workers cannot use")
-    }
-    assert(verifierWriteRejected, "verifier workers should not be allowed write workload")
-
-    let overlapRejected = false
-    try {
-      manager.startWorker({
-        parentThreadId: "thread-concurrency",
-        workspacePath: workspace,
-        role: "implementer",
-        workload: "write",
-        ownedFiles: ["src/a.ts"],
-        description: "Edit same file",
-        prompt: "edit same",
-        runner: async () => ({ summary: "bad" })
-      })
-    } catch (error) {
-      overlapRejected = String(error).includes("Cannot start write worker yet")
-    }
-    assert(overlapRejected, "overlapping write workers should be rejected")
-
-    let dotSegmentOverlapRejected = false
-    try {
-      manager.startWorker({
-        parentThreadId: "thread-concurrency",
-        workspacePath: workspace,
-        role: "implementer",
-        workload: "write",
-        ownedFiles: ["src/./a.ts"],
-        description: "Edit same file with dot segment",
-        prompt: "edit same via dot segment",
-        runner: async () => ({ summary: "bad" })
-      })
-    } catch (error) {
-      dotSegmentOverlapRejected = String(error).includes("Cannot start write worker yet")
-    }
-    assert(
-      dotSegmentOverlapRejected,
-      "owned_files should normalize dot segments before write-conflict checks"
-    )
-
-    let repeatedSlashOverlapRejected = false
-    try {
-      manager.startWorker({
-        parentThreadId: "thread-concurrency",
-        workspacePath: workspace,
-        role: "implementer",
-        workload: "write",
-        ownedFiles: ["src//a.ts"],
-        description: "Edit same file with repeated slash",
-        prompt: "edit same via repeated slash",
-        runner: async () => ({ summary: "bad" })
-      })
-    } catch (error) {
-      repeatedSlashOverlapRejected = String(error).includes("Cannot start write worker yet")
-    }
-    assert(
-      repeatedSlashOverlapRejected,
-      "owned_files should normalize repeated slashes before write-conflict checks"
-    )
-
-    if (usesCaseInsensitiveCoordinatorPathMatching(workspace)) {
-      let caseVariantOverlapRejected = false
-      try {
-        manager.startWorker({
+        const firstWrite = manager.startWorker({
           parentThreadId: "thread-concurrency",
           workspacePath: workspace,
           role: "implementer",
           workload: "write",
-          ownedFiles: ["SRC/A.ts"],
-          description: "Edit same file with case variant",
-          prompt: "edit same via case variant",
-          runner: async () => ({ summary: "bad" })
+          ownedFiles: ["src/a.ts"],
+          description: "Edit a",
+          prompt: "edit a",
+          runner: async () => holdWrite.promise
         })
+        parentThreadIds.push("thread-concurrency")
+
+        const readOnly = manager.startWorker({
+          parentThreadId: "thread-concurrency",
+          workspacePath: workspace,
+          role: "verifier",
+          workload: "read_only",
+          description: "Inspect while writer runs",
+          prompt: "inspect",
+          runner: async () => ({ summary: "read only done" })
+        })
+        assert(readOnly.status === "running", "read-only worker should start beside writer")
+
+        let verifyDuringWriteRejected = false
+        try {
+          manager.startWorker({
+            parentThreadId: "thread-concurrency",
+            workspacePath: workspace,
+            role: "verifier",
+            workload: "verify",
+            description: "Verify while writer runs",
+            prompt: "verify",
+            runner: async () => ({ summary: "bad" })
+          })
+        } catch (error) {
+          verifyDuringWriteRejected = String(error).includes("Cannot start verify worker yet")
+        }
+        assert(
+          verifyDuringWriteRejected,
+          "verify worker should wait for active write workers before running commands"
+        )
+
+        let verifierWriteRejected = false
+        try {
+          manager.startWorker({
+            parentThreadId: "thread-verifier-write",
+            workspacePath: workspace,
+            role: "verifier",
+            workload: "write",
+            description: "Verifier should not write",
+            prompt: "try to write",
+            runner: async () => ({ summary: "bad" })
+          })
+        } catch (error) {
+          verifierWriteRejected = String(error).includes("Verifier workers cannot use")
+        }
+        assert(verifierWriteRejected, "verifier workers should not be allowed write workload")
+
+        let overlapRejected = false
+        try {
+          manager.startWorker({
+            parentThreadId: "thread-concurrency",
+            workspacePath: workspace,
+            role: "implementer",
+            workload: "write",
+            ownedFiles: ["src/a.ts"],
+            description: "Edit same file",
+            prompt: "edit same",
+            runner: async () => ({ summary: "bad" })
+          })
+        } catch (error) {
+          overlapRejected = String(error).includes("Cannot start write worker yet")
+        }
+        assert(overlapRejected, "overlapping write workers should be rejected")
+
+        let dotSegmentOverlapRejected = false
+        try {
+          manager.startWorker({
+            parentThreadId: "thread-concurrency",
+            workspacePath: workspace,
+            role: "implementer",
+            workload: "write",
+            ownedFiles: ["src/./a.ts"],
+            description: "Edit same file with dot segment",
+            prompt: "edit same via dot segment",
+            runner: async () => ({ summary: "bad" })
+          })
+        } catch (error) {
+          dotSegmentOverlapRejected = String(error).includes("Cannot start write worker yet")
+        }
+        assert(
+          dotSegmentOverlapRejected,
+          "owned_files should normalize dot segments before write-conflict checks"
+        )
+
+        let repeatedSlashOverlapRejected = false
+        try {
+          manager.startWorker({
+            parentThreadId: "thread-concurrency",
+            workspacePath: workspace,
+            role: "implementer",
+            workload: "write",
+            ownedFiles: ["src//a.ts"],
+            description: "Edit same file with repeated slash",
+            prompt: "edit same via repeated slash",
+            runner: async () => ({ summary: "bad" })
+          })
+        } catch (error) {
+          repeatedSlashOverlapRejected = String(error).includes("Cannot start write worker yet")
+        }
+        assert(
+          repeatedSlashOverlapRejected,
+          "owned_files should normalize repeated slashes before write-conflict checks"
+        )
+
+        if (usesCaseInsensitiveCoordinatorPathMatching(workspace)) {
+          let caseVariantOverlapRejected = false
+          try {
+            manager.startWorker({
+              parentThreadId: "thread-concurrency",
+              workspacePath: workspace,
+              role: "implementer",
+              workload: "write",
+              ownedFiles: ["SRC/A.ts"],
+              description: "Edit same file with case variant",
+              prompt: "edit same via case variant",
+              runner: async () => ({ summary: "bad" })
+            })
+          } catch (error) {
+            caseVariantOverlapRejected = String(error).includes("Cannot start write worker yet")
+          }
+          assert(
+            caseVariantOverlapRejected,
+            "owned_files should treat case variants as overlapping on case-insensitive filesystems"
+          )
+        }
+
+        let directoryOverlapRejected = false
+        try {
+          manager.startWorker({
+            parentThreadId: "thread-concurrency",
+            workspacePath: workspace,
+            role: "implementer",
+            workload: "write",
+            ownedFiles: ["src"],
+            description: "Edit parent directory",
+            prompt: "edit src",
+            runner: async () => ({ summary: "bad" })
+          })
+        } catch {
+          directoryOverlapRejected = true
+        }
+        assert(
+          directoryOverlapRejected,
+          "write worker owning a parent directory should conflict with active file writers"
+        )
+
+        const disjoint = manager.startWorker({
+          parentThreadId: "thread-concurrency",
+          workspacePath: workspace,
+          role: "implementer",
+          workload: "write",
+          ownedFiles: ["src/b.ts"],
+          description: "Edit b",
+          prompt: "edit b",
+          runner: async () => ({ summary: "disjoint done" })
+        })
+        assert(disjoint.status === "running", "disjoint write worker should be allowed")
+
+        let unknownScopeRejected = false
+        try {
+          manager.startWorker({
+            parentThreadId: "thread-concurrency",
+            workspacePath: workspace,
+            role: "implementer",
+            workload: "write",
+            description: "Edit unknown files",
+            prompt: "edit unknown",
+            runner: async () => ({ summary: "bad" })
+          })
+        } catch {
+          unknownScopeRejected = true
+        }
+        assert(
+          unknownScopeRejected,
+          "write worker without owned_files should conflict with active writers"
+        )
+
+        let rootOwnedFileRejected = false
+        try {
+          manager.startWorker({
+            parentThreadId: "thread-concurrency-root",
+            workspacePath: workspace,
+            role: "implementer",
+            workload: "write",
+            ownedFiles: ["."],
+            description: "Edit root",
+            prompt: "edit root",
+            runner: async () => ({ summary: "bad" })
+          })
+        } catch (error) {
+          rootOwnedFileRejected = String(error).includes("Invalid owned_files path")
+        }
+        assert(rootOwnedFileRejected, "owned_files should reject ambiguous workspace-root paths")
+
+        const activeVerifier = manager.startWorker({
+          parentThreadId: "thread-verify-gate",
+          workspacePath: workspace,
+          role: "verifier",
+          workload: "verify",
+          description: "Verify current workspace",
+          prompt: "verify",
+          runner: async () => holdVerify.promise
+        })
+        parentThreadIds.push("thread-verify-gate")
+        assert(activeVerifier.status === "running", "verify worker should start when no writer runs")
+        let writeDuringVerifyRejected = false
+        try {
+          manager.startWorker({
+            parentThreadId: "thread-verify-gate",
+            workspacePath: workspace,
+            role: "implementer",
+            workload: "write",
+            ownedFiles: ["src/c.ts"],
+            description: "Edit during verification",
+            prompt: "edit c",
+            runner: async () => ({ summary: "bad" })
+          })
+        } catch (error) {
+          writeDuringVerifyRejected = String(error).includes("Cannot start write worker yet")
+        }
+        assert(
+          writeDuringVerifyRejected,
+          "write worker should wait for active verifier before changing files"
+        )
+        holdVerify.resolve({ summary: "verify done" })
+        await manager.waitForWorkers("thread-verify-gate", {
+          timeoutMs: 1_000,
+          pollIntervalMs: 10
+        })
+
+        holdWrite.resolve({ summary: "write a done" })
+        await manager.waitForWorkers("thread-concurrency", {
+          timeoutMs: 1_000,
+          pollIntervalMs: 10
+        })
+        const workers = manager.readWorkers("thread-concurrency")
+        assert(
+          workers.filter((worker) => worker.status === "completed").length === 3,
+          "allowed parallel workers should all complete"
+        )
+        assert(
+          workers.find((worker) => worker.worker_id === firstWrite.worker_id)?.owned_files[0] ===
+            "src/a.ts",
+          "owned files should remain attached to writer"
+        )
       } catch (error) {
-        caseVariantOverlapRejected = String(error).includes("Cannot start write worker yet")
+        failures.push(error)
+      } finally {
+        realDir.resolve({ summary: "real dir done" })
+        holdWrite.resolve({ summary: "write a done" })
+        holdVerify.resolve({ summary: "verify done" })
+        const results = await Promise.allSettled(
+          parentThreadIds.map((parentThreadId) =>
+            manager.waitForWorkerCleanup(parentThreadId, undefined, 1_000)
+          )
+        )
+        for (const result of results) {
+          if (result.status === "rejected") failures.push(result.reason)
+        }
       }
-      assert(
-        caseVariantOverlapRejected,
-        "owned_files should treat case variants as overlapping on case-insensitive filesystems"
-      )
-    }
-
-    let directoryOverlapRejected = false
-    try {
-      manager.startWorker({
-        parentThreadId: "thread-concurrency",
-        workspacePath: workspace,
-        role: "implementer",
-        workload: "write",
-        ownedFiles: ["src"],
-        description: "Edit parent directory",
-        prompt: "edit src",
-        runner: async () => ({ summary: "bad" })
-      })
-    } catch {
-      directoryOverlapRejected = true
-    }
-    assert(
-      directoryOverlapRejected,
-      "write worker owning a parent directory should conflict with active file writers"
-    )
-
-    const disjoint = manager.startWorker({
-      parentThreadId: "thread-concurrency",
-      workspacePath: workspace,
-      role: "implementer",
-      workload: "write",
-      ownedFiles: ["src/b.ts"],
-      description: "Edit b",
-      prompt: "edit b",
-      runner: async () => ({ summary: "disjoint done" })
     })
-    assert(disjoint.status === "running", "disjoint write worker should be allowed")
-
-    let unknownScopeRejected = false
-    try {
-      manager.startWorker({
-        parentThreadId: "thread-concurrency",
-        workspacePath: workspace,
-        role: "implementer",
-        workload: "write",
-        description: "Edit unknown files",
-        prompt: "edit unknown",
-        runner: async () => ({ summary: "bad" })
-      })
-    } catch {
-      unknownScopeRejected = true
-    }
-    assert(
-      unknownScopeRejected,
-      "write worker without owned_files should conflict with active writers"
-    )
-
-    let rootOwnedFileRejected = false
-    try {
-      manager.startWorker({
-        parentThreadId: "thread-concurrency-root",
-        workspacePath: workspace,
-        role: "implementer",
-        workload: "write",
-        ownedFiles: ["."],
-        description: "Edit root",
-        prompt: "edit root",
-        runner: async () => ({ summary: "bad" })
-      })
-    } catch (error) {
-      rootOwnedFileRejected = String(error).includes("Invalid owned_files path")
-    }
-    assert(rootOwnedFileRejected, "owned_files should reject ambiguous workspace-root paths")
-
-    const holdVerify = deferred<CoordinatorWorkerRunResult>()
-    const activeVerifier = manager.startWorker({
-      parentThreadId: "thread-verify-gate",
-      workspacePath: workspace,
-      role: "verifier",
-      workload: "verify",
-      description: "Verify current workspace",
-      prompt: "verify",
-      runner: async () => holdVerify.promise
+  } catch (error) {
+    failures.push(error)
+  }
+  if (failures.length === 1) throw failures[0]
+  if (failures.length > 1)
+    throw new AggregateError(failures, "Worker write safety cleanup failed", {
+      cause: failures[0]
     })
-    assert(activeVerifier.status === "running", "verify worker should start when no writer runs")
-    let writeDuringVerifyRejected = false
-    try {
-      manager.startWorker({
-        parentThreadId: "thread-verify-gate",
-        workspacePath: workspace,
-        role: "implementer",
-        workload: "write",
-        ownedFiles: ["src/c.ts"],
-        description: "Edit during verification",
-        prompt: "edit c",
-        runner: async () => ({ summary: "bad" })
-      })
-    } catch (error) {
-      writeDuringVerifyRejected = String(error).includes("Cannot start write worker yet")
-    }
-    assert(
-      writeDuringVerifyRejected,
-      "write worker should wait for active verifier before changing files"
-    )
-    holdVerify.resolve({ summary: "verify done" })
-    await manager.waitForWorkers("thread-verify-gate", {
-      timeoutMs: 1_000,
-      pollIntervalMs: 10
-    })
-
-    holdWrite.resolve({ summary: "write a done" })
-    await manager.waitForWorkers("thread-concurrency", {
-      timeoutMs: 1_000,
-      pollIntervalMs: 10
-    })
-    const workers = manager.readWorkers("thread-concurrency")
-    assert(
-      workers.filter((worker) => worker.status === "completed").length === 3,
-      "allowed parallel workers should all complete"
-    )
-    assert(
-      workers.find((worker) => worker.worker_id === firstWrite.worker_id)?.owned_files[0] ===
-        "src/a.ts",
-      "owned files should remain attached to writer"
-    )
-  })
 }
 
 async function testNotificationAcknowledgement(): Promise<void> {
@@ -2963,102 +3015,124 @@ async function testNotificationAcknowledgement(): Promise<void> {
 }
 
 async function testInMemoryWorkerHistoryIsPruned(): Promise<void> {
-  await withTempDir("coordinator-worker-prune", async (workspace) => {
-    const manager = new CoordinatorWorkerManager()
-    const threadId = "thread-prune"
-    const workerIds: string[] = []
+  const failures: unknown[] = []
+  try {
+    await withTempDir("coordinator-worker-prune", async (workspace) => {
+      const manager = new CoordinatorWorkerManager()
+      const threadId = "thread-prune"
+      const running = deferred<CoordinatorWorkerRunResult>()
+      try {
+        const workerIds: string[] = []
 
-    for (let index = 0; index < MAX_COORDINATOR_WORKERS_IN_MEMORY + 8; index += 1) {
-      const started = await manager.startWorkerAndPersist({
-        parentThreadId: threadId,
-        workspacePath: workspace,
-        role: "implementer",
-        workload: "read_only",
-        description: `Historical worker ${index}`,
-        prompt: "read only task",
-        runner: async () => ({ summary: `done ${index}` })
-      })
-      workerIds.push(started.worker_id)
-    }
+        for (let index = 0; index < MAX_COORDINATOR_WORKERS_IN_MEMORY + 8; index += 1) {
+          const started = await manager.startWorkerAndPersist({
+            parentThreadId: threadId,
+            workspacePath: workspace,
+            role: "implementer",
+            workload: "read_only",
+            description: `Historical worker ${index}`,
+            prompt: "read only task",
+            runner: async () => ({ summary: `done ${index}` })
+          })
+          workerIds.push(started.worker_id)
+          await manager.waitForWorkerCleanup(threadId, [started.worker_id])
+          await manager.acknowledgeNotificationMessages(threadId, manager.drainNotifications(threadId))
+        }
 
-    await manager.waitForTerminalPersistence(threadId, workerIds)
-    await manager.acknowledgeNotificationMessages(threadId, manager.drainNotifications(threadId))
+        await manager.waitForTerminalPersistence(threadId, workerIds)
+        await manager.acknowledgeNotificationMessages(threadId, manager.drainNotifications(threadId))
 
-    const running = deferred<CoordinatorWorkerRunResult>()
-    const runningWorker = await manager.startWorkerAndPersist({
-      parentThreadId: threadId,
-      workspacePath: workspace,
-      role: "implementer",
-      workload: "read_only",
-      description: "Running worker",
-      prompt: "stay running",
-      runner: async () => running.promise
+        const runningWorker = await manager.startWorkerAndPersist({
+          parentThreadId: threadId,
+          workspacePath: workspace,
+          role: "implementer",
+          workload: "read_only",
+          description: "Running worker",
+          prompt: "stay running",
+          runner: async () => running.promise
+        })
+
+        const workers = manager.readWorkers(threadId)
+        assert(
+          workers.length === MAX_COORDINATOR_WORKERS_IN_MEMORY,
+          "manager should cap in-memory worker history"
+        )
+        assert(
+          workers.some((worker) => worker.worker_id === runningWorker.worker_id),
+          "manager should never prune running workers"
+        )
+        assert(
+          workers.every(
+            (worker) => worker.status === "running" || worker.notification_acknowledged === true
+          ),
+          "manager should only prune acknowledged terminal workers"
+        )
+
+        const oldWorkerId = workerIds[0]
+        const secondPrunedWorkerId = workerIds[1]
+        assert(
+          !workers.some((worker) => worker.worker_id === oldWorkerId),
+          "old acknowledged worker should be pruned from list views"
+        )
+        assert(
+          !workers.some((worker) => worker.worker_id === secondPrunedWorkerId),
+          "second old acknowledged worker should also be pruned from list views"
+        )
+        const oldResult = await manager.readWorkerResult(threadId, oldWorkerId)
+        assert(
+          oldResult.result_text?.includes("done 0"),
+          "pruned worker result should remain readable from disk"
+        )
+        await rm(workerStatePath(workspace, threadId, secondPrunedWorkerId), { force: true })
+        const prunedSnapshotState = await manager.waitForWorkers(threadId, {
+          workerId: secondPrunedWorkerId,
+          block: false
+        })
+        assert(
+          prunedSnapshotState[0]?.worker_id === secondPrunedWorkerId,
+          "non-blocking reads should restore pruned workers from the in-memory snapshot cache"
+        )
+        const continuedFromSnapshot = await manager.continueWorker({
+          parentThreadId: threadId,
+          workerId: secondPrunedWorkerId,
+          prompt: "continue pruned worker from snapshot",
+          runner: async () => ({ summary: "continued via snapshot cache" })
+        })
+        assert(
+          continuedFromSnapshot.status === "running",
+          "pruned worker should continue without needing a synchronous state-file reload"
+        )
+        await manager.waitForTerminalPersistence(threadId, [secondPrunedWorkerId])
+        const continued = await manager.continueWorker({
+          parentThreadId: threadId,
+          workerId: oldWorkerId,
+          prompt: "continue old worker",
+          runner: async () => ({ summary: "continued old worker" })
+        })
+        assert(continued.status === "running", "pruned worker should still be continuable by id")
+        await manager.waitForTerminalPersistence(threadId, [oldWorkerId])
+
+        running.resolve({ summary: "done running" })
+        await manager.waitForTerminalPersistence(threadId, [runningWorker.worker_id])
+      } catch (error) {
+        failures.push(error)
+      } finally {
+        running.resolve({ summary: "done running" })
+        try {
+          await manager.waitForWorkerCleanup(threadId)
+        } catch (error) {
+          failures.push(error)
+        }
+      }
     })
-
-    const workers = manager.readWorkers(threadId)
-    assert(
-      workers.length === MAX_COORDINATOR_WORKERS_IN_MEMORY,
-      "manager should cap in-memory worker history"
-    )
-    assert(
-      workers.some((worker) => worker.worker_id === runningWorker.worker_id),
-      "manager should never prune running workers"
-    )
-    assert(
-      workers.every(
-        (worker) => worker.status === "running" || worker.notification_acknowledged === true
-      ),
-      "manager should only prune acknowledged terminal workers"
-    )
-
-    const oldWorkerId = workerIds[0]
-    const secondPrunedWorkerId = workerIds[1]
-    assert(
-      !workers.some((worker) => worker.worker_id === oldWorkerId),
-      "old acknowledged worker should be pruned from list views"
-    )
-    assert(
-      !workers.some((worker) => worker.worker_id === secondPrunedWorkerId),
-      "second old acknowledged worker should also be pruned from list views"
-    )
-    const oldResult = await manager.readWorkerResult(threadId, oldWorkerId)
-    assert(
-      oldResult.result_text?.includes("done 0"),
-      "pruned worker result should remain readable from disk"
-    )
-    await rm(workerStatePath(workspace, threadId, secondPrunedWorkerId), { force: true })
-    const prunedSnapshotState = await manager.waitForWorkers(threadId, {
-      workerId: secondPrunedWorkerId,
-      block: false
+  } catch (error) {
+    failures.push(error)
+  }
+  if (failures.length === 1) throw failures[0]
+  if (failures.length > 1)
+    throw new AggregateError(failures, "Worker prune cleanup failed", {
+      cause: failures[0]
     })
-    assert(
-      prunedSnapshotState[0]?.worker_id === secondPrunedWorkerId,
-      "non-blocking reads should restore pruned workers from the in-memory snapshot cache"
-    )
-    const continuedFromSnapshot = await manager.continueWorker({
-      parentThreadId: threadId,
-      workerId: secondPrunedWorkerId,
-      prompt: "continue pruned worker from snapshot",
-      runner: async () => ({ summary: "continued via snapshot cache" })
-    })
-    assert(
-      continuedFromSnapshot.status === "running",
-      "pruned worker should continue without needing a synchronous state-file reload"
-    )
-    await manager.waitForTerminalPersistence(threadId, [secondPrunedWorkerId])
-    const continued = await manager.continueWorker({
-      parentThreadId: threadId,
-      workerId: oldWorkerId,
-      prompt: "continue old worker",
-      runner: async () => ({ summary: "continued old worker" })
-    })
-    assert(continued.status === "running", "pruned worker should still be continuable by id")
-    await manager.waitForTerminalPersistence(threadId, [oldWorkerId])
-
-    running.resolve({ summary: "done running" })
-    await manager.waitForTerminalPersistence(threadId, [runningWorker.worker_id])
-    await manager.waitForWorkerCleanup(threadId)
-  })
 }
 
 async function testPrunedSnapshotCacheIsBounded(): Promise<void> {
@@ -3078,6 +3152,8 @@ async function testPrunedSnapshotCacheIsBounded(): Promise<void> {
         runner: async () => ({ summary: `done ${index}` })
       })
       workerIds.push(started.worker_id)
+      await manager.waitForWorkerCleanup(threadId, [started.worker_id])
+      await manager.acknowledgeNotificationMessages(threadId, manager.drainNotifications(threadId))
     }
 
     await manager.waitForTerminalPersistence(threadId, workerIds)
@@ -3146,6 +3222,11 @@ async function testActiveRestoreSkipsAcknowledgedTerminalHistory(): Promise<void
         runner: async () => ({ summary: `done ${index}` })
       })
       workerIds.push(started.worker_id)
+      await firstManager.waitForWorkerCleanup(threadId, [started.worker_id])
+      await firstManager.acknowledgeNotificationMessages(
+        threadId,
+        firstManager.drainNotifications(threadId)
+      )
     }
 
     await firstManager.waitForTerminalPersistence(threadId, workerIds)
@@ -3472,114 +3553,210 @@ async function testRestoreTruncatesPersistedNotificationRawText(): Promise<void>
 }
 
 async function testRestoreHydratedRawTextRejectsSymlinkOutsideWorkspace(): Promise<void> {
-  await withTempDir("coordinator-worker-manager", async (workspace) => {
-    const threadId = "thread-restore-raw-text-symlink-escape"
-    const firstManager = new CoordinatorWorkerManager()
-    const started = firstManager.startWorker({
-      parentThreadId: threadId,
-      workspacePath: workspace,
-      role: "implementer",
-      description: "Symlinked result path should not escape workspace during restore",
-      prompt: "work",
-      runner: async () => ({
-        summary: "summary text",
-        rawText: "RAW HANDOFF BODY"
-      })
+  const failures: unknown[] = []
+  try {
+    await withTempDir("coordinator-worker-manager", async (workspace) => {
+      let outsideDir: string | undefined
+      let ownedLink: string | undefined
+      try {
+        const threadId = "thread-restore-raw-text-symlink-escape"
+        const firstManager = new CoordinatorWorkerManager()
+        const started = firstManager.startWorker({
+          parentThreadId: threadId,
+          workspacePath: workspace,
+          role: "implementer",
+          description: "Symlinked result path should not escape workspace during restore",
+          prompt: "work",
+          runner: async () => ({
+            summary: "summary text",
+            rawText: "RAW HANDOFF BODY"
+          })
+        })
+
+        await firstManager.waitForWorkers(threadId, {
+          workerId: started.worker_id,
+          timeoutMs: 1_000,
+          pollIntervalMs: 10
+        })
+        const [originalNotification] = firstManager.drainNotifications(threadId)
+        assert(originalNotification, "completed worker should queue a notification before restart")
+
+        const statePath = workerStatePath(workspace, threadId, started.worker_id)
+        const state = (await readJson(statePath)) as Record<string, unknown>
+        delete state.notification_raw_text
+        await writeFile(statePath, JSON.stringify(state, null, 2), "utf8")
+
+        const resultPath = workerResultPath(workspace, threadId, started.worker_id)
+        await rm(resultPath, { force: true })
+        outsideDir = await mkdtemp(join(tmpdir(), "coordinator-worker-outside-"))
+        const outsideJsonPath = join(
+          outsideDir,
+          process.platform === "win32" ? basename(resultPath) : "outside-result.json"
+        )
+        await writeFile(
+          outsideJsonPath,
+          JSON.stringify({ raw_text: "SECRET_FROM_OUTSIDE_WORKSPACE" }),
+          "utf8"
+        )
+        if (process.platform === "win32") {
+          const linkPath = dirname(resultPath)
+          await rmdir(linkPath)
+          await symlink(outsideDir, linkPath, "junction")
+          ownedLink = linkPath
+        } else {
+          await symlink(outsideJsonPath, resultPath)
+          ownedLink = resultPath
+        }
+        assert(
+          (await realpath(resultPath)) === (await realpath(outsideJsonPath)),
+          "the actual result path must resolve to the outside fixture file"
+        )
+
+        const secondManager = new CoordinatorWorkerManager()
+        await secondManager.restoreWorkersForThread({
+          parentThreadId: threadId,
+          workspacePath: workspace
+        })
+        const [restoredNotification] = secondManager.drainNotifications(threadId)
+        assert(restoredNotification, "restore should still replay the pending notification")
+        const restoredResult = extractXmlTagValue(restoredNotification, "result")
+        assert(
+          typeof restoredResult === "string" &&
+            !restoredResult.includes("SECRET_FROM_OUTSIDE_WORKSPACE"),
+          "restore should not read raw handoff content through symlinks that escape the workspace"
+        )
+      } catch (error) {
+        failures.push(error)
+      } finally {
+        if (ownedLink) {
+          try {
+            await unlink(ownedLink)
+          } catch (error) {
+            failures.push(error)
+          }
+        }
+        if (outsideDir) {
+          try {
+            const target = resolve(outsideDir)
+            if (
+              dirname(target) !== resolve(tmpdir()) ||
+              !basename(target).startsWith("coordinator-worker-outside-")
+            )
+              throw new Error("Outside fixture cleanup must stay inside its own temporary directory")
+            await rm(target, { recursive: true, force: true })
+          } catch (error) {
+            failures.push(error)
+          }
+        }
+      }
     })
-
-    await firstManager.waitForWorkers(threadId, {
-      workerId: started.worker_id,
-      timeoutMs: 1_000,
-      pollIntervalMs: 10
+  } catch (error) {
+    failures.push(error)
+  }
+  if (failures.length === 1) throw failures[0]
+  if (failures.length > 1)
+    throw new AggregateError(failures, "Worker restore escape cleanup failed", {
+      cause: failures[0]
     })
-    const [originalNotification] = firstManager.drainNotifications(threadId)
-    assert(originalNotification, "completed worker should queue a notification before restart")
-
-    const statePath = workerStatePath(workspace, threadId, started.worker_id)
-    const state = (await readJson(statePath)) as Record<string, unknown>
-    delete state.notification_raw_text
-    await writeFile(statePath, JSON.stringify(state, null, 2), "utf8")
-
-    const resultPath = workerResultPath(workspace, threadId, started.worker_id)
-    await rm(resultPath, { force: true })
-    const outsideDir = await mkdtemp(join(tmpdir(), "coordinator-worker-outside-"))
-    try {
-      const outsideJsonPath = join(outsideDir, "outside-result.json")
-      await writeFile(
-        outsideJsonPath,
-        JSON.stringify({ raw_text: "SECRET_FROM_OUTSIDE_WORKSPACE" }),
-        "utf8"
-      )
-      await symlink(outsideJsonPath, resultPath)
-
-      const secondManager = new CoordinatorWorkerManager()
-      await secondManager.restoreWorkersForThread({
-        parentThreadId: threadId,
-        workspacePath: workspace
-      })
-      const [restoredNotification] = secondManager.drainNotifications(threadId)
-      assert(restoredNotification, "restore should still replay the pending notification")
-      const restoredResult = extractXmlTagValue(restoredNotification, "result")
-      assert(
-        typeof restoredResult === "string" &&
-          !restoredResult.includes("SECRET_FROM_OUTSIDE_WORKSPACE"),
-        "restore should not read raw handoff content through symlinks that escape the workspace"
-      )
-    } finally {
-      await rm(outsideDir, { recursive: true, force: true })
-    }
-  })
 }
 
 async function testReadWorkerResultRejectsSymlinkOutsideWorkspace(): Promise<void> {
-  await withTempDir("coordinator-worker-manager", async (workspace) => {
-    const threadId = "thread-read-worker-result-symlink-escape"
-    const manager = new CoordinatorWorkerManager()
-    const started = manager.startWorker({
-      parentThreadId: threadId,
-      workspacePath: workspace,
-      role: "implementer",
-      description: "readWorkerResult should reject symlink escapes",
-      prompt: "work",
-      runner: async () => ({
-        summary: "summary text",
-        rawText: "RAW HANDOFF BODY"
-      })
-    })
-
-    await manager.waitForWorkers(threadId, {
-      workerId: started.worker_id,
-      timeoutMs: 1_000,
-      pollIntervalMs: 10
-    })
-
-    const resultPath = workerResultPath(workspace, threadId, started.worker_id)
-    await rm(resultPath, { force: true })
-    const outsideDir = await mkdtemp(join(tmpdir(), "coordinator-worker-read-outside-"))
-    try {
-      const outsideJsonPath = join(outsideDir, "outside-result.json")
-      await writeFile(
-        outsideJsonPath,
-        JSON.stringify({ raw_text: "SECRET_OUTSIDE_WORKSPACE" }),
-        "utf8"
-      )
-      await symlink(outsideJsonPath, resultPath)
-
-      let rejected = false
+  const failures: unknown[] = []
+  try {
+    await withTempDir("coordinator-worker-manager", async (workspace) => {
+      let outsideDir: string | undefined
+      let ownedLink: string | undefined
       try {
-        await manager.readWorkerResult(threadId, started.worker_id, { maxChars: 5_000 })
-      } catch (error) {
-        rejected = true
-        assert(
-          String(error).includes("escapes workspace"),
-          "readWorkerResult should reject result paths that escape through workspace symlinks"
+        const threadId = "thread-read-worker-result-symlink-escape"
+        const manager = new CoordinatorWorkerManager()
+        const started = manager.startWorker({
+          parentThreadId: threadId,
+          workspacePath: workspace,
+          role: "implementer",
+          description: "readWorkerResult should reject symlink escapes",
+          prompt: "work",
+          runner: async () => ({
+            summary: "summary text",
+            rawText: "RAW HANDOFF BODY"
+          })
+        })
+
+        await manager.waitForWorkers(threadId, {
+          workerId: started.worker_id,
+          timeoutMs: 1_000,
+          pollIntervalMs: 10
+        })
+
+        const resultPath = workerResultPath(workspace, threadId, started.worker_id)
+        await rm(resultPath, { force: true })
+        outsideDir = await mkdtemp(join(tmpdir(), "coordinator-worker-read-outside-"))
+        const outsideJsonPath = join(
+          outsideDir,
+          process.platform === "win32" ? basename(resultPath) : "outside-result.json"
         )
+        await writeFile(
+          outsideJsonPath,
+          JSON.stringify({ raw_text: "SECRET_OUTSIDE_WORKSPACE" }),
+          "utf8"
+        )
+        if (process.platform === "win32") {
+          const linkPath = dirname(resultPath)
+          await rmdir(linkPath)
+          await symlink(outsideDir, linkPath, "junction")
+          ownedLink = linkPath
+        } else {
+          await symlink(outsideJsonPath, resultPath)
+          ownedLink = resultPath
+        }
+        assert(
+          (await realpath(resultPath)) === (await realpath(outsideJsonPath)),
+          "the actual result path must resolve to the outside fixture file"
+        )
+
+        let rejected = false
+        try {
+          await manager.readWorkerResult(threadId, started.worker_id, { maxChars: 5_000 })
+        } catch (error) {
+          rejected = true
+          assert(
+            String(error).includes("escapes workspace"),
+            "readWorkerResult should reject result paths that escape through workspace symlinks"
+          )
+        }
+        assert(rejected, "readWorkerResult should reject symlink escapes instead of reading them")
+      } catch (error) {
+        failures.push(error)
+      } finally {
+        if (ownedLink) {
+          try {
+            await unlink(ownedLink)
+          } catch (error) {
+            failures.push(error)
+          }
+        }
+        if (outsideDir) {
+          try {
+            const target = resolve(outsideDir)
+            if (
+              dirname(target) !== resolve(tmpdir()) ||
+              !basename(target).startsWith("coordinator-worker-read-outside-")
+            )
+              throw new Error("Outside fixture cleanup must stay inside its own temporary directory")
+            await rm(target, { recursive: true, force: true })
+          } catch (error) {
+            failures.push(error)
+          }
+        }
       }
-      assert(rejected, "readWorkerResult should reject symlink escapes instead of reading them")
-    } finally {
-      await rm(outsideDir, { recursive: true, force: true })
-    }
-  })
+    })
+  } catch (error) {
+    failures.push(error)
+  }
+  if (failures.length === 1) throw failures[0]
+  if (failures.length > 1)
+    throw new AggregateError(failures, "Worker result escape cleanup failed", {
+      cause: failures[0]
+    })
 }
 
 async function testRestoreReplaysUnacknowledgedTerminalPersistenceFailureNotificationWithRawText(): Promise<void> {

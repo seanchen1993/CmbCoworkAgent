@@ -3,14 +3,16 @@
  * Run after npm run build: node --import tsx tests/stream-snapshot-e2e.spec.ts
  */
 import assert from "node:assert/strict"
-import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs"
+import { mkdirSync, mkdtempSync, realpathSync, writeFileSync } from "node:fs"
 import { createRequire } from "node:module"
 import { tmpdir } from "node:os"
-import { join, resolve } from "node:path"
+import { dirname, join, resolve } from "node:path"
 import { _electron, type ElectronApplication } from "playwright"
 import type { WebContents, MessageBoxOptions } from "electron"
 import { createStreamDataSerializer } from "../src/main/ipc/stream-data-serialization"
 import { createManagedTransportAgentRunDelivery } from "../src/main/agent/managed-transport-delivery"
+import { installSnapshotWorkerTrace, type SnapshotTraceGlobal } from
+  "./support/stream-snapshot-worker-trace"
 
 interface MainFixture {
   fixtureWindowId: number
@@ -52,17 +54,27 @@ async function until(check: () => Promise<boolean>, label: string, timeout = 30_
 }
 
 async function main() {
-  const env: Record<string, string> = Object.fromEntries(
-    Object.entries(process.env).filter(
-      (entry): entry is [string, string] => typeof entry[1] === "string"
+  const env: Record<string, string> = {}
+  for (const [key, value] of Object.entries(process.env)) {
+    if (
+      value &&
+      /^(path|systemroot|windir|comspec|pathext|os|processor_architecture|number_of_processors|programfiles.*|lang)$/i.test(
+        key
+      )
     )
-  )
+      env[key] = value
+  }
   env.CMB_TASK_CARDS_MOCK = "1"
   env.CMB_E2E_DISABLE_GPU = "1"
   env.CMB_E2E_ELECTRON_BIN = require("electron") as string
-  delete env.ELECTRON_RUN_AS_NODE
-  delete env.NODE_OPTIONS
+  env.CMB_MODS_E2E = "0"
+  env.HTTP_PROXY = "http://127.0.0.1:9"
+  env.HTTPS_PROXY = "http://127.0.0.1:9"
+  env.ALL_PROXY = "http://127.0.0.1:9"
+  env.NO_PROXY = "127.0.0.1,localhost"
+  env.NODE_USE_ENV_PROXY = "1"
   for (const key of [
+    "HOME",
     "USERPROFILE",
     "APPDATA",
     "LOCALAPPDATA",
@@ -74,7 +86,9 @@ async function main() {
     mkdirSync(env[key], { recursive: true })
   }
   const packaged = process.env.STREAM_SNAPSHOT_PACKAGED_EXE
+  const traceWorkers = process.env.STREAM_SNAPSHOT_WORKER_TRACE === "1"
   let app: ElectronApplication | undefined
+  let packageIdentity: Record<string, unknown> | undefined
   const errors: string[] = []
   const results: string[] = []
   try {
@@ -89,8 +103,33 @@ async function main() {
       cwd: root,
       timeout: 45_000
     })
+    if (packaged) {
+      const identity = await app.evaluate(({ app }) => ({
+        packaged: app.isPackaged,
+        executable: process.execPath,
+        asar: app.getAppPath(),
+        mainPid: process.pid,
+        userData: app.getPath("userData"),
+        privateHome: process.env.HOME,
+        settingsRoot: process.env.CMB_COWORK_AGENT_HOME
+      }))
+      packageIdentity = { ...identity, launcherPid: app.process().pid }
+      assert.equal(identity.packaged, true)
+      assert.equal(realpathSync(identity.executable), realpathSync(packaged))
+      assert.equal(
+        realpathSync(identity.asar),
+        realpathSync(join(dirname(packaged), "resources/app.asar"))
+      )
+    }
     await app.context().route(/^https?:/, (route) => route.abort())
     const page = await app.firstWindow()
+    if (traceWorkers) {
+      const traceFile = join(artifacts, "worker-lifecycle.ndjson")
+      writeFileSync(traceFile, JSON.stringify({ event: "runner-start", runnerPid: process.pid,
+        scope: "Observed workers after launch/firstWindow until detach; not all startup or app-close workers",
+        synchronousDiagnosticIO: true }) + "\n", { flag: "wx" })
+      await app.evaluate(installSnapshotWorkerTrace, traceFile)
+    }
     page.setDefaultTimeout(15_000)
     page.on("pageerror", (error) => errors.push(error.stack || error.message))
     await app.evaluate(async ({ app, BrowserWindow, ipcMain }) => {
@@ -312,6 +351,14 @@ async function main() {
       "production serializer preserves repeated deltas, interior snapshot corrections and subsequent growth in React"
     )
     const independentSerializer = createStreamDataSerializer()
+    const independentBody = async () => {
+      // IPC delivery precedes React's commit. Expand any newly mounted reasoning
+      // panel while polling, rather than assuming it exists immediately after send.
+      for (const button of await page.getByRole("button", { name: "思考", exact: true }).all()) {
+        if ((await button.getAttribute("aria-expanded")) !== "true") await button.click()
+      }
+      return page.locator("body").innerText()
+    }
     const independentMessage = async (kind: string, fields: Record<string, unknown>) => {
       await send({
         type: "stream",
@@ -333,7 +380,7 @@ async function main() {
       additional_kwargs: { reasoning_content: "独立思考更正" }
     })
     await until(async () => {
-      const body = await page.locator("body").innerText()
+      const body = await independentBody()
       return (
         body.includes("独立正文旧草稿") &&
         body.includes("独立思考更正") &&
@@ -342,7 +389,7 @@ async function main() {
     }, "reasoning-only snapshot preserves existing body")
     await independentMessage("AIMessage", { content: "" })
     await until(async () => {
-      const body = await page.locator("body").innerText()
+      const body = await independentBody()
       return !body.includes("独立正文旧草稿") && body.includes("独立思考更正")
     }, "explicit empty body preserves reasoning")
     await independentMessage("AIMessage", {
@@ -350,7 +397,7 @@ async function main() {
       additional_kwargs: { reasoning_content: "" }
     })
     await until(async () => {
-      const body = await page.locator("body").innerText()
+      const body = await independentBody()
       return body.includes("独立正文恢复") && !body.includes("独立思考更正")
     }, "explicit empty reasoning preserves body")
     for (let index = 0; index < 2; index += 1) {
@@ -360,7 +407,7 @@ async function main() {
       })
     }
     await until(async () => {
-      const body = await page.locator("body").innerText()
+      const body = await independentBody()
       return (
         body.includes("独立正文恢复重复重复") &&
         body.includes("独立思考重复独立思考重复") &&
@@ -603,11 +650,13 @@ async function main() {
       )
     })
     await app.context().unrouteAll()
+    if (traceWorkers) await app.evaluate(() =>
+      (globalThis as unknown as SnapshotTraceGlobal).snapshotWorkerTrace?.mark("before-first-crash"))
     // UAT recovers the first renderer process crash once. Exercise that policy
     // before checking that a second crash still allows a native close prompt.
-    await app.evaluate(async ({ app, BrowserWindow }) => {
+    await app.evaluate(async ({ app, BrowserWindow }, rendererPath) => {
       const w = BrowserWindow.fromId((globalThis as unknown as MainFixture).fixtureWindowId)!
-      await w.loadFile(`${app.getAppPath()}/out/renderer/index.html`)
+      await w.loadFile(rendererPath ?? `${app.getAppPath()}/out/renderer/index.html`)
       await new Promise<void>((resolve, reject) => {
         const timeout = setTimeout(() => reject(new Error("Renderer did not recover")), 15_000)
         w.webContents.once("did-finish-load", () => {
@@ -616,7 +665,7 @@ async function main() {
         })
         w.webContents.forcefullyCrashRenderer()
       })
-    })
+    }, packaged ? null : join(root, "out/renderer/index.html"))
     // Playwright retains the old Page's crashed flag after Electron recovers
     // the process. Verify the recovered DOM through the surviving webContents,
     // without issuing a second/manual reload that would mask recovery failure.
@@ -652,6 +701,10 @@ async function main() {
       "recovered DOM restores saved answer and reasoning"
     )
     results.push("first renderer crash reloads once and restores saved answer and reasoning")
+    if (traceWorkers) await app.evaluate(() =>
+      (globalThis as unknown as SnapshotTraceGlobal).snapshotWorkerTrace?.mark("first-restored"))
+    if (traceWorkers) await app.evaluate(() =>
+      (globalThis as unknown as SnapshotTraceGlobal).snapshotWorkerTrace?.mark("before-second-crash"))
     await app.evaluate(({ BrowserWindow }) =>
       BrowserWindow.fromId(
         (globalThis as unknown as MainFixture).fixtureWindowId
@@ -675,10 +728,20 @@ async function main() {
       3_000
     )
     results.push("crashed renderer immediately offers native close; cancel preserves window")
+    if (traceWorkers) await app.evaluate(() =>
+      (globalThis as unknown as SnapshotTraceGlobal).snapshotWorkerTrace?.mark("checks-complete"))
     writeFileSync(
       join(artifacts, "result.json"),
       JSON.stringify(
-        { results, errors, metrics, responsiveness, isolated, packaged: Boolean(packaged) },
+        {
+          results,
+          errors,
+          metrics,
+          responsiveness,
+          isolated,
+          packaged: Boolean(packaged),
+          packageIdentity
+        },
         null,
         2
       )
@@ -698,10 +761,31 @@ async function main() {
     }
     writeFileSync(
       join(artifacts, "failure.json"),
-      JSON.stringify({ error: String(error), results, errors, isolated }, null, 2)
+      JSON.stringify({ error: String(error), results, errors, isolated, packageIdentity }, null, 2)
     )
     throw error
   } finally {
+    if (traceWorkers && app) {
+      let deadline: ReturnType<typeof setTimeout> | undefined
+      try {
+        const summary = await Promise.race([
+          app.evaluate(() =>
+            (globalThis as unknown as SnapshotTraceGlobal).snapshotWorkerTrace?.close() ?? null),
+          new Promise<never>((_resolve, reject) => {
+            deadline = setTimeout(() => reject(Error("Snapshot trace detach unavailable")), 2_000)
+          })
+        ])
+        writeFileSync(join(artifacts, "worker-trace-summary.json"),
+          JSON.stringify({ available: summary !== null, summary }, null, 2))
+      } catch {
+        try {
+          writeFileSync(join(artifacts, "worker-trace-summary.json"),
+            JSON.stringify({ available: false, scope: "Diagnostic detach unavailable" }, null, 2))
+        } catch { /* Diagnostic failure cannot replace the original scenario failure. */ }
+      } finally {
+        if (deadline) clearTimeout(deadline)
+      }
+    }
     if (app) await app.close()
   }
 }

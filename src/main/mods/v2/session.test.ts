@@ -3,6 +3,7 @@ import { resolve } from "node:path"
 import { compileFunctionPlugin } from "./loader"
 import { FunctionGuestRuntime } from "./guest-runtime"
 import { FunctionSession, SESSION_CAPABILITIES, type FunctionSessionHost } from "./session"
+import { FunctionDispatchDeadline } from "./dispatch-deadline"
 import { AsyncLocalStorage } from "node:async_hooks"
 import { ModError } from "../errors"
 import { ModFunctionError } from "../../../shared/mods/v2/contracts"
@@ -11,6 +12,82 @@ import { ModRuntimeAuthorities } from "../runtime-instance"
 import { withFunctionExecution, recordFunctionCancellationReceipt } from "./execution-context"
 
 const sessions: FunctionSession[] = []
+
+it("uses the new end budget after the native quit drain has expired", async () => {
+  let calls = 0
+  const s = await session('on("session.end",async($,e,next)=>{await $.session.messages();return next(e)})', {
+    readSession: async () => { calls++; return [] }
+  })
+  await s.start()
+  const drain = new FunctionDispatchDeadline(20)
+  s.prepareQuitDrain(drain)
+  await new Promise(resolve => setTimeout(resolve, 35))
+  expect(() => s.assertTransportLive()).toThrow("总等待期限")
+  await s.end("logout")
+  expect(calls).toBe(1)
+  drain.close()
+})
+
+it("does not start a quiet component just to notify its end", async () => {
+  const seen: unknown[] = []
+  const s = await session('on("session.end",async($,e,next)=>next(e))', {
+    publish: async value => { seen.push(value); return value }
+  })
+  await s.end("clear")
+  expect(s.hasStarted).toBe(false)
+  expect(seen).toEqual([])
+})
+
+it("notifies a started session once with real identity and fixed observer facts", async () => {
+  const events: unknown[] = []
+  const s = await session(`on("session.end",async($,e,next)=>{
+    await $.session.messages();return next({...e,sessionId:"forged"});
+  })`, { readSession: async () => { events.push("end"); return [] } })
+  await s.start()
+  expect(s.hasCompletedStartup).toBe(true)
+  const first = s.end("clear")
+  expect(s.end("logout")).toBe(first)
+  await first
+  expect(events).toEqual(["end"])
+  await expect(s.commands()).rejects.toMatchObject({ code: "MODS_SESSION_ENDING" })
+})
+
+it("charges nested actual SDK wait to the same whole-chain end budget", async () => {
+  const budgets: number[] = []
+  const s = await session(`
+    on("session.end",async($,e,next)=>{await $.session.messages();return next(e)});
+    on("session.messages",async($,e,next)=>{
+      const before=next.budget;const result=await next(e);
+      return {value:[{role:"user",text:String(before.ms)+":"+String(next.budget.remainingMs),toolUses:[]}]};
+    });
+  `, { readSession: async () => { await new Promise(resolve => setTimeout(resolve, 80)); return [] },
+    publish: async value => {
+      if (value && typeof value === "object" && !Array.isArray(value) && Array.isArray(value.value)) {
+        const row = value.value[0] as { text?: string }
+        if (row?.text) budgets.push(...row.text.split(":").map(Number))
+      }
+      return value
+    } })
+  await s.start()
+  await s.end("logout")
+  expect(budgets[0]).toBeLessThanOrEqual(1500)
+  expect(budgets[0]).toBeGreaterThan(1200)
+  expect(budgets[0] - budgets[1]).toBeGreaterThan(60)
+})
+
+it("bounds a hanging session end to 1.5 seconds and never starts its recovery", async () => {
+  let calls = 0
+  const s = await session(`on("session.end",()=>new Promise(()=>{}))
+    .catch(async($)=>{await $.session.messages();return {sessionId:"wrong"}})`, {
+    readSession: async () => { calls++; return [] }
+  })
+  await s.start()
+  const started = performance.now()
+  await expect(s.end("logout")).rejects.toMatchObject({ code: "MODS_DISPATCH_TIMEOUT", downstream: true })
+  expect(performance.now() - started).toBeGreaterThan(1300)
+  expect(performance.now() - started).toBeLessThan(2400)
+  expect(calls).toBe(0)
+})
 
 it("returns a successful cancellation receipt without reauthorizing later SDK calls", async () => {
   const authorities = new ModRuntimeAuthorities()
@@ -63,6 +140,7 @@ it("runs the same upstream turn fixture with real session dispatch and abort ope
     [
       {
         name: compiled.name,
+        modelProtocol: compiled.modelProtocol,
         root: compiled.root,
         tier: "user",
         guest,
@@ -144,6 +222,7 @@ it("runs the identical model SDK fixture with independent next results and local
     [
       {
         name: compiled.name,
+        modelProtocol: compiled.modelProtocol,
         root: compiled.root,
         tier: "user",
         guest,
@@ -180,7 +259,7 @@ it("does not run denied model requests or fall back after a provider failure", a
     on("model.complete",{prompt:"fail"},async($,e,next)=>{await next(e);return {value:"fake"}});
   `,
     {
-      completeModel: async () => {
+      completeModelResult: async () => {
         calls++
         throw new ModFunctionError("MODS_MODEL_FAILED")
       }
@@ -323,6 +402,7 @@ it("rejects command SDK waits through both direct and nested operation hooks", a
     [
       {
         name: compiled.name,
+        modelProtocol: compiled.modelProtocol,
         root: compiled.root,
         tier: "user",
         guest,
@@ -473,6 +553,7 @@ it("executes the identical SDK fixture used in Claude's plugin test against the 
     [
       {
         name: compiled.name,
+        modelProtocol: compiled.modelProtocol,
         root: compiled.root,
         tier: "user",
         guest,
@@ -642,6 +723,7 @@ it("runs the identical session metadata fixture used in Claude's plugin test", a
     const plugins = [
       {
         name: compiled.name,
+        modelProtocol: compiled.modelProtocol,
         root: compiled.root,
         tier: "user" as const,
         guest,

@@ -1,0 +1,5 @@
+{
+  "name": "queued-review",
+  "version": "1.0.0",
+  "description": "点击后完成当前需求，再在真实完成通知中安排一次代码检视。"
+}

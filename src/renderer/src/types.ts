@@ -284,6 +284,11 @@ export type StreamEvent =
   | { type: "error"; error: string; message?: string }
 
 export interface Message {
+  /** Durable host provenance; damaged records remain explicitly invalid. */
+  function_row?: import("../../shared/mods/v2/conversation-transcript").FunctionConversationTranscriptStamp
+  function_row_invalid?: true
+  /** Main-process durable source; presentation only, never an execution permission. */
+  prompt_origin?: import("../../shared/mods/v2/plugin-prompt").FunctionPluginPromptOrigin
   id: string
   /** Durable transcript order. Present on messages read from thread_messages pages. */
   ordinal?: number
@@ -371,6 +376,9 @@ export interface QueuedMessage {
   attachmentModelBlocks?: string
   attachmentDisplayPrefix?: string
   skillBlock?: string
+  pendingMentions?: import("../../shared/mods/v2/composer-mentions").ComposerPendingMention[]
+  existingUploads?: import("../../shared/mods/v2/composer-mentions").ComposerFileAttachment[]
+  fileOnly?: boolean
   builtinBrowser?: boolean
   modelId?: string
   handoffRequestedAt?: Date

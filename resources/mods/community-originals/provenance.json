@@ -1,0 +1,92 @@
+{
+  "repository": "https://github.com/anthropics/claude-code-playground",
+  "commit": "569c5283d9a0a7ee7938df85bb32e4f48cbb8c86",
+  "commitDate": "2026-10-01T16:11:57Z",
+  "retrievedAt": "2026-10-10T09:37:00.420120+00:00",
+  "license": "Apache-2.0",
+  "archive": {
+    "file": "claude-code-playground-569c5283d9a0a7ee7938df85bb32e4f48cbb8c86.zip",
+    "url": "https://codeload.github.com/anthropics/claude-code-playground/zip/569c5283d9a0a7ee7938df85bb32e4f48cbb8c86",
+    "bytes": 724349,
+    "sha256": "4bb7e9a7e65dc84fa98d77a0cb8f6573f87db27072ae7e792a14bc73bae1ff6a"
+  },
+  "packages": [
+    "claude-code/mods/token-weather",
+    "claude-code/mods/blast-radius",
+    "claude-code/mods/replay-theater"
+  ],
+  "files": [
+    {
+      "path": "LICENSE",
+      "bytes": 11358,
+      "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30",
+      "sourceUrl": "https://github.com/anthropics/claude-code-playground/blob/569c5283d9a0a7ee7938df85bb32e4f48cbb8c86/LICENSE",
+      "fixturePath": "LICENSE"
+    },
+    {
+      "path": "claude-code/mods/blast-radius/.claude-plugin/plugin.json",
+      "bytes": 336,
+      "sha256": "652995f76363ac13da67cddf3fce1eece065cb0fca1c4130eec8cc75896ef873",
+      "sourceUrl": "https://github.com/anthropics/claude-code-playground/blob/569c5283d9a0a7ee7938df85bb32e4f48cbb8c86/claude-code/mods/blast-radius/.claude-plugin/plugin.json",
+      "fixturePath": "blast-radius/.claude-plugin/plugin.json"
+    },
+    {
+      "path": "claude-code/mods/blast-radius/hooks/blast-radius.mjs",
+      "bytes": 22555,
+      "sha256": "b19dedca1b8c5c246cfe05bd00da08246b210369c18c906152de02fdc2fb8b09",
+      "sourceUrl": "https://github.com/anthropics/claude-code-playground/blob/569c5283d9a0a7ee7938df85bb32e4f48cbb8c86/claude-code/mods/blast-radius/hooks/blast-radius.mjs",
+      "fixturePath": "blast-radius/hooks/blast-radius.mjs"
+    },
+    {
+      "path": "claude-code/mods/blast-radius/hooks/hooks.json",
+      "bytes": 173,
+      "sha256": "50286f405f3d7b9db469f7e435b0fb6f3476dbc4e873a921e5548d5bdd450ba4",
+      "sourceUrl": "https://github.com/anthropics/claude-code-playground/blob/569c5283d9a0a7ee7938df85bb32e4f48cbb8c86/claude-code/mods/blast-radius/hooks/hooks.json",
+      "fixturePath": "blast-radius/hooks/hooks.json"
+    },
+    {
+      "path": "claude-code/mods/replay-theater/.claude-plugin/plugin.json",
+      "bytes": 219,
+      "sha256": "a03e0733ae37089e6137f3dbecdd4ce1b3a353fe17a6963e60bc3baf86b75adc",
+      "sourceUrl": "https://github.com/anthropics/claude-code-playground/blob/569c5283d9a0a7ee7938df85bb32e4f48cbb8c86/claude-code/mods/replay-theater/.claude-plugin/plugin.json",
+      "fixturePath": "replay-theater/.claude-plugin/plugin.json"
+    },
+    {
+      "path": "claude-code/mods/replay-theater/hooks/hooks.json",
+      "bytes": 50,
+      "sha256": "2ed2d30c67873e39e903329968d80a5e10dee6a454154ae510fd8942275f5f33",
+      "sourceUrl": "https://github.com/anthropics/claude-code-playground/blob/569c5283d9a0a7ee7938df85bb32e4f48cbb8c86/claude-code/mods/replay-theater/hooks/hooks.json",
+      "fixturePath": "replay-theater/hooks/hooks.json"
+    },
+    {
+      "path": "claude-code/mods/replay-theater/hooks/replay-theater.mjs",
+      "bytes": 10061,
+      "sha256": "66f6a9591a5c354391db1bd0d5182bbecd1274bc3d91751d0794c779bf4209aa",
+      "sourceUrl": "https://github.com/anthropics/claude-code-playground/blob/569c5283d9a0a7ee7938df85bb32e4f48cbb8c86/claude-code/mods/replay-theater/hooks/replay-theater.mjs",
+      "fixturePath": "replay-theater/hooks/replay-theater.mjs"
+    },
+    {
+      "path": "claude-code/mods/token-weather/.claude-plugin/plugin.json",
+      "bytes": 255,
+      "sha256": "fee0ce40e337e524da9f8fe51d7569f5a34615af63c0a95c429175e0cc771a96",
+      "sourceUrl": "https://github.com/anthropics/claude-code-playground/blob/569c5283d9a0a7ee7938df85bb32e4f48cbb8c86/claude-code/mods/token-weather/.claude-plugin/plugin.json",
+      "fixturePath": "token-weather/.claude-plugin/plugin.json"
+    },
+    {
+      "path": "claude-code/mods/token-weather/hooks/hooks.json",
+      "bytes": 49,
+      "sha256": "a395403b07ddf4dddc07657145783cfe40363449540ecba033a7b7d9fe55e075",
+      "sourceUrl": "https://github.com/anthropics/claude-code-playground/blob/569c5283d9a0a7ee7938df85bb32e4f48cbb8c86/claude-code/mods/token-weather/hooks/hooks.json",
+      "fixturePath": "token-weather/hooks/hooks.json"
+    },
+    {
+      "path": "claude-code/mods/token-weather/hooks/token-weather.mjs",
+      "bytes": 4246,
+      "sha256": "547cadbeaa2f9a662ce27cf9935d7963fc7833c377a938d2b872afe9f7fba3af",
+      "sourceUrl": "https://github.com/anthropics/claude-code-playground/blob/569c5283d9a0a7ee7938df85bb32e4f48cbb8c86/claude-code/mods/token-weather/hooks/token-weather.mjs",
+      "fixturePath": "token-weather/hooks/token-weather.mjs"
+    }
+  ],
+  "execution": "Not executed; byte-preserving extraction of complete selected directories from original commit archive.",
+  "selection": "Original runtime source, manifests/hooks and root LICENSE only; README/screenshots omitted, runtime files byte-identical."
+}

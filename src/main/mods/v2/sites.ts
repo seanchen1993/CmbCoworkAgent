@@ -1,10 +1,10 @@
 import { randomUUID } from "node:crypto"
-import type { ModJson, ModObject } from "../../../shared/mods/types"
+import type { ModObject } from "../../../shared/mods/types"
 import { encodeModJson } from "../../../shared/mods/validation"
-import { isModObject, ModFunctionError } from "../../../shared/mods/v2/contracts"
+import { ModFunctionError } from "../../../shared/mods/v2/contracts"
+import { functionLogicalEngine } from "../../../shared/mods/v2/engine"
 import {
   functionQuestionPresentation,
-  functionSiteDefault,
   functionSiteProps,
   functionUiSite,
   FUNCTION_DURATION_SITE_LIMIT,
@@ -18,14 +18,16 @@ import type {
   FunctionUiAction
 } from "../../../shared/mods/v2/ui"
 import { FunctionPanes, type PaneHost } from "./panes"
+import type { FunctionPluginPromptOrigin } from "../../../shared/mods/v2/plugin-prompt"
+import type { UserInputRequest } from "../../types"
 
 interface Site {
   owner: string
   component: FunctionUiSite
+  messageId?: string
   props?: ModObject
   fingerprint?: string
-  nativeExpansion?: boolean
-  nativeQuestions?: FunctionPaneSnapshot["nativeQuestions"]
+  nativeRequest?: Readonly<UserInputRequest>
   drawings: FunctionPanes
 }
 
@@ -34,30 +36,33 @@ export class FunctionUiSites {
   private readonly slots = new Map<string, Site>()
   private serial: Promise<unknown> = Promise.resolve()
 
-  constructor(private readonly host: PaneHost) {}
+  constructor(private readonly host: PaneHost & {
+    userMessageOrigin?(messageId: string): FunctionPluginPromptOrigin | undefined
+    pendingQuestion?(): Readonly<UserInputRequest> | null
+  }) {}
 
-  private drawings(): FunctionPanes {
+  private drawings(owner: string, component: FunctionUiSite): FunctionPanes {
     return new FunctionPanes({
       ...this.host,
       // Host-driven mount/prop updates already have an awaiting renderer. Broadcasting them
       // back invalidates every in-flight owner and turns a transcript mount into a redraw storm.
-      changed: () => {},
-      clients: undefined,
+      changed: (scope) => {
+        if (scope === "panes" && this.slots.has(owner)) this.host.changed(`site:${owner}`)
+      },
+      component,
+      markdownSiteOwner: owner,
+      localNotificationsOnly: true,
+      assertNativeCurrent: () => { this.native(owner) },
+      captureNativeIntent: () => {
+        const site = this.native(owner)
+        return () => {
+          if (this.native(owner) !== site) throw new ModFunctionError("MODS_UI_SITE_CLOSED")
+        }
+      },
       site: (pane) => {
         const site = this.get(pane.id)
-        site.nativeExpansion = undefined
-        site.nativeQuestions = undefined
-        return { component: site.component, props: site.props! }
-      },
-      renderCore: async (input) => {
-        const site = this.get(input.requestId as string)
-        const props = input.props as ModObject
-        if (site.component === "ToolGroup")
-          site.nativeExpansion = functionSiteProps(site.component, props).isExpanded as boolean
-        if (site.component === "AskUserQuestion")
-          site.nativeQuestions = functionSiteProps(site.component, props)
-            .questions as FunctionPaneSnapshot["nativeQuestions"]
-        return functionSiteDefault(site.component, props) as unknown as ModJson
+        return { component: site.component, props: site.props!,
+          ...(site.nativeRequest ? { requestId: site.nativeRequest.requestId } : {}) }
       },
       validateTree: validateFunctionSiteTree
     })
@@ -74,14 +79,31 @@ export class FunctionUiSites {
 
   private get(owner: string): Site {
     this.host.assertLive()
+    return this.native(owner)
+  }
+
+  /** No Session recursion: this private native fact also guards SDK drawing receipts. */
+  private native(owner: string): Site {
     const site = this.slots.get(owner)
     if (!site) throw new ModFunctionError("MODS_UI_SITE_CLOSED")
+    if (site.component === "AskUserQuestion" &&
+      (!site.nativeRequest || this.host.pendingQuestion?.() !== site.nativeRequest))
+      throw new ModFunctionError("MODS_UI_QUESTION_STALE")
     return site
   }
 
-  mount(component: FunctionUiSite): Promise<string> {
+  mount(component: FunctionUiSite, messageId?: string, expectedRequestId?: string): Promise<string> {
     return this.enqueue(async () => {
       functionUiSite(component)
+      const nativeRequest = component === "AskUserQuestion" ? this.host.pendingQuestion?.() : undefined
+      if (component === "AskUserQuestion" && (!nativeRequest ||
+        typeof expectedRequestId !== "string" || nativeRequest.requestId !== expectedRequestId))
+        throw new ModFunctionError("MODS_UI_QUESTION_STALE")
+      if (component !== "AskUserQuestion" && expectedRequestId !== undefined)
+        throw new ModFunctionError("MODS_UI_SITE_PROPS")
+      if (messageId !== undefined && (component !== "UserMessage" ||
+        typeof messageId !== "string" || !messageId || messageId.length > 512))
+        throw new ModFunctionError("MODS_UI_SITE_PROPS")
       if (
         [
           "TurnDuration",
@@ -105,7 +127,8 @@ export class FunctionUiSites {
         if (previous) await this.unmount(previous.owner)
       }
       const owner = randomUUID()
-      this.slots.set(owner, { component, owner, drawings: this.drawings() })
+      this.slots.set(owner, { component, messageId, owner, nativeRequest: nativeRequest ?? undefined,
+        drawings: this.drawings(owner, component) })
       return owner
     })
   }
@@ -113,7 +136,14 @@ export class FunctionUiSites {
   render(owner: string, props: ModObject): Promise<FunctionPaneSnapshot> {
     return this.enqueue(async () => {
       const site = this.get(owner)
-      const value = functionSiteProps(site.component, props)
+      // Only the mounted, immutable message ID can select a main-process durable source.
+      if (site.nativeRequest)
+        functionQuestionPresentation(site.nativeRequest.questions, props.questions)
+      const value = functionSiteProps(site.component, site.nativeRequest
+        ? { ...props, questions: site.nativeRequest.questions }
+        : site.component === "UserMessage"
+        ? { ...props, origin: site.messageId && this.host.userMessageOrigin?.(site.messageId)
+          || { kind: "unclassified" } } : props)
       const fingerprint = encodeModJson(value)
       if (fingerprint !== site.fingerprint) {
         site.props = value
@@ -124,24 +154,19 @@ export class FunctionUiSites {
       this.get(owner)
       const snapshot = snapshots.find((pane) => pane.id === owner)
       if (!snapshot) throw new ModFunctionError("MODS_UI_SITE_CLOSED")
-      // Recompute after plugin publication: a guest cannot assert native ownership via metadata.
-      const nativeFallback =
-        encodeModJson(snapshot.tree as unknown as ModJson) ===
-        encodeModJson(functionSiteDefault(site.component, value) as unknown as ModJson)
-      let nativeQuestions: FunctionPaneSnapshot["nativeQuestions"]
-      if (nativeFallback && site.nativeQuestions) {
-        const published = await this.host.publish({ questions: site.nativeQuestions })
-        if (this.get(owner) !== site) throw new ModFunctionError("MODS_UI_SITE_CLOSED")
-        nativeQuestions = functionQuestionPresentation(
-          value.questions,
-          isModObject(published) ? published.questions : undefined
-        )
-      }
+      const nativeEngine = functionLogicalEngine(snapshot.tree)
+      const nativeFallback = nativeEngine !== undefined &&
+        snapshot.nativeContent?.nativeUnchanged === true
+      const nativeRef = nativeEngine?.ref
+      const native = nativeEngine ?
+        snapshot.nativeContent?.entries.find((entry) => entry.ref === nativeRef) ??
+          snapshot.nativeContent?.entries.find((entry) => entry.ref === 0) : undefined
       return {
         ...snapshot,
         nativeFallback,
-        nativeExpansion: nativeFallback ? site.nativeExpansion : undefined,
-        nativeQuestions
+        nativeExpansion: site.component === "ToolGroup" ? native?.props.isExpanded as boolean : undefined,
+        nativeQuestions: site.component === "AskUserQuestion" ?
+          native?.props.questions as FunctionPaneSnapshot["nativeQuestions"] : undefined
       }
     })
   }
@@ -154,8 +179,14 @@ export class FunctionUiSites {
       ((action.kind === "focus" || action.kind === "scroll") && site.component !== "AbovePrompt")
     )
       throw new ModFunctionError("MODS_UI_ACTION_INVALID")
-    const result = await site.drawings.act(action)
-    if (this.slots.get(owner) === site) this.host.changed()
+    const guard = () => {
+      if (this.native(owner) !== site) throw new ModFunctionError("MODS_UI_SITE_CLOSED")
+    }
+    guard()
+    const run = () => site.drawings.act(action)
+    const result = await (this.host.withNativeIntent ? this.host.withNativeIntent(guard, run) : run())
+    guard()
+    if (this.slots.get(owner) === site) site.drawings.notify()
     return result
   }
 
@@ -170,9 +201,52 @@ export class FunctionUiSites {
     }
   }
 
-  invalidate(): void {
-    // The session invalidates its Pane registry in the same SDK call, emitting one shared notice.
-    for (const site of this.slots.values()) site.drawings.invalidate()
+  /** Private cleanup for an allocated owner that was never delivered; no Hook or SDK runs. */
+  retire(owner: string): void {
+    const site = this.slots.get(owner)
+    if (!site) return
+    this.slots.delete(owner)
+    site.drawings.close()
+  }
+
+  invalidate(components?: ReadonlySet<string>, sdkRedraw = false): void {
+    // SDK redraw retains no action authority, but is distinct from source/permission revocation.
+    // Notify every affected owner, including global dependency sets, without clearing unrelated UI.
+    for (const site of this.slots.values()) {
+      if (components && !components.has(site.component)) continue
+      site.drawings.invalidate(undefined, true)
+      if (components || sdkRedraw) this.host.changed(sdkRedraw
+        ? `site-redraw:${site.owner}` : `site-invalidated:${site.owner}`)
+    }
+  }
+
+  /** Route through the real registry; a string prefix alone grants no drawing authority. */
+  private drawing(key: string): FunctionPanes | undefined {
+    for (const site of this.slots.values())
+      if (key === `engine:${site.owner}`) return site.drawings
+    return undefined
+  }
+
+  notifyClient(key: string): boolean {
+    const drawing = this.drawing(key)
+    if (!drawing) return false
+    drawing.notify()
+    return true
+  }
+
+  captureClientDrawing(key: string, generation: string) {
+    return this.drawing(key)?.captureClientDrawing(key, generation)
+  }
+
+  captureClientFault(key: string, generation: string) {
+    return this.drawing(key)?.captureClientFault(key, generation)
+  }
+
+  invalidateGeneration(generation: string): boolean {
+    let changed = false
+    for (const site of this.slots.values())
+      changed = site.drawings.invalidateGeneration(generation) || changed
+    return changed
   }
   close(): void {
     for (const site of this.slots.values()) site.drawings.close()

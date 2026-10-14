@@ -1,3 +1,4 @@
+import { assertCurrentRuntimePluginSourceContent } from "../plugins/runtime-source-scope"
 import type { ModObject } from "../../shared/mods/types"
 import { beforeModToolExecution } from "../mods/execution-error"
 import { ModPermissionError } from "../mods/errors"
@@ -99,6 +100,9 @@ import {
 } from "./failure-fuse"
 import type { HookScopeController } from "../hooks/scope"
 import type { SkillLifecycleMatch, SkillLifecycleRegistry } from "./skill-lifecycle/registry"
+import { SkillPromptSnapshots } from "./skill-lifecycle/prompt-snapshot"
+import { FUNCTION_PRESENTATION_MAX_BYTES } from "../../shared/mods/v2/presentation-events"
+import type { ClawSkillPolicy } from "../mods/claw-skills"
 import { getSkillActivationKey } from "./skill-lifecycle/activation"
 import type { SkillUseTracker } from "./skill-lifecycle/tracker"
 import type { AgentFileMutationKind } from "../services/agent-auto-commit"
@@ -107,8 +111,15 @@ import { isMemoryStoragePath } from "../memory/paths"
 import {
   isCodeFile,
   recordGen as recordAdoptionGen,
+  recordShellEdit as recordAdoptionShellEdit,
   recordShellFileOps as recordAdoptionShellFileOps
 } from "../services/adoption-tracker"
+import {
+  beginShellFileCapture,
+  noteFileToolWrite,
+  type ShellFileCapture
+} from "./shell-file-effects"
+import { extractShellCommandReadPaths } from "./shell-command-profile"
 import {
   openStableWritableFileHandle,
   type StableWritableFileHandle
@@ -355,6 +366,7 @@ export interface LocalSandboxOptions {
   modWorkspace?: string
   /** Runtime capabilities must also constrain SDK calls that bypass model middleware. */
   modBlockedToolNames?: ReadonlySet<string>
+  modAllowedToolNames?: ReadonlySet<string>
   modDelegatedBlockedToolNames?: ReadonlySet<string>
   modReadOnly?: boolean
   /** Match the runtime's foreground-only shell behavior for SDK calls too. */
@@ -434,8 +446,11 @@ export interface LocalSandboxOptions {
   internalArtifactRoots?: string[]
   /** Records successful agent-owned file mutations for post-run automation. */
   onFileMutation?: (filePath: string, kind: AgentFileMutationKind) => void
+  /** Bash First file telemetry only; never changes execution permissions. */
+  shellFileTelemetry?: boolean
   /** Detects reads of skill files so skill lifecycle hooks can wrap the load. */
   skillLifecycleRegistry?: SkillLifecycleRegistry
+  clawSkillPolicy?: ClawSkillPolicy
   /** Shared run-scoped set used to avoid firing skill lifecycle hooks twice. */
   skillHookKeys?: Set<string>
   /** Records skills activated this turn so PostSkillUse can run at turn completion. */
@@ -674,6 +689,8 @@ export const readOnlyShellExecutionContext = new AsyncLocalStorage<boolean>()
  * logical /large_tool_results directory.
  */
 export const agentFileWriteContext = new AsyncLocalStorage<boolean>()
+const shellFileCaptureContext = new AsyncLocalStorage<boolean>()
+export const executeTraceContext = new AsyncLocalStorage<TraceContext>()
 
 export class LocalSandbox
   extends FilesystemBackend
@@ -756,7 +773,13 @@ export class LocalSandbox
   /** mtime recorded after each successful read/write, for external-modification detection */
   private readonly _fileReadTimes = new Map<string, number>()
   private readonly _onFileMutation?: (filePath: string, kind: AgentFileMutationKind) => void
+  private readonly _shellFileTelemetry: boolean
   private _skillLifecycleRegistry?: SkillLifecycleRegistry
+  private readonly skillPromptSnapshots = new SkillPromptSnapshots()
+  private skillPromptActive = false
+  private skillPromptWorkspace?: string
+  private skillPromptAuthority?: ModRuntimeAuthority
+  private _clawSkillPolicy?: ClawSkillPolicy
   private readonly _skillHooksFired: Set<string>
   private readonly _skillUseTracker?: SkillUseTracker
   private readonly _pendingSkillHookContexts: PendingSkillHookContext[] = []
@@ -2092,7 +2115,9 @@ export class LocalSandbox
     this._humanGateThreadId = options.humanGateThreadId?.trim() || this.runId
     this._hookTurnId = options.hookTurnId
     this._onFileMutation = options.onFileMutation
+    this._shellFileTelemetry = options.shellFileTelemetry === true
     this._skillLifecycleRegistry = options.skillLifecycleRegistry
+    this._clawSkillPolicy = options.clawSkillPolicy
     this._skillHooksFired = options.skillHookKeys ?? new Set<string>()
     this._skillUseTracker = options.skillUseTracker
     this._sandboxCacheRoot = LocalSandbox.buildSandboxCacheRootFromCanonical(
@@ -2108,6 +2133,8 @@ export class LocalSandbox
           })
     this._sharedSandboxCacheRoot = LocalSandbox.buildSharedSandboxCacheRoot(baseEnv)
     this.abortSignal = options.abortSignal
+    this.skillPromptWorkspace = options.modWorkspace ?? this.workingDir
+    this.skillPromptAuthority = options.modRuntimeAuthority
 
     // Prewarm sandbox state during construction so command execution avoids
     // kicking off expensive setup work on the hot path.
@@ -2132,6 +2159,7 @@ export class LocalSandbox
         workspace: options.modWorkspace ?? this.workingDir,
         executionWorkspace: this.workingDir,
         blockedToolNames: options.modBlockedToolNames,
+        allowedToolNames: options.modAllowedToolNames,
         delegatedBlockedToolNames: options.modDelegatedBlockedToolNames,
         threadId: this.runId,
         turnId: this._hookTurnId ?? this.runId,
@@ -2873,6 +2901,9 @@ export class LocalSandbox
 
   private validateExecutionCwd(cwd: string): string | null {
     const realpathCache = new Map<string, string | null>()
+    if (this._clawSkillPolicy?.isPathHidden(cwd)) {
+      return `Invalid cwd: '${cwd}' is excluded by the current Claw skill selection.`
+    }
     if (this.isMemoryStorageWritePath(cwd, realpathCache)) {
       return `Invalid cwd: '${cwd}' is inside managed memory storage.`
     }
@@ -2912,6 +2943,10 @@ export class LocalSandbox
     this._skillLifecycleRegistry = registry
   }
 
+  setClawSkillPolicy(policy: ClawSkillPolicy | undefined): void {
+    this._clawSkillPolicy = policy
+  }
+
   setHiddenSkillDirs(skillDirs: string[]): void {
     this._hiddenSkillDirKeys.clear()
     const realpathCache = new Map<string, string | null>()
@@ -2935,7 +2970,7 @@ export class LocalSandbox
     filePath: string,
     realpathCache: Map<string, string | null> = new Map()
   ): boolean {
-    if (this._hiddenSkillDirKeys.size === 0) return false
+    if (this._hiddenSkillDirKeys.size === 0 && !this._clawSkillPolicy) return false
     const candidates = new Set<string>()
     let resolved: string
     try {
@@ -2944,6 +2979,7 @@ export class LocalSandbox
       resolved = filePath
     }
     candidates.add(resolved)
+    if (this._clawSkillPolicy?.isPathHidden(resolved, { traverse: true })) return true
     const realResolved = this.realpathDeepestExistingCached(resolved, realpathCache)
     if (realResolved) candidates.add(realResolved)
 
@@ -3483,7 +3519,7 @@ export class LocalSandbox
     )
 
     // Filter out matches inside disabled skills so their content cannot leak via grep.
-    if (this._hiddenSkillDirKeys.size > 0) {
+    if (this._hiddenSkillDirKeys.size > 0 || this._clawSkillPolicy) {
       results = results.filter((m) => !this.isHiddenSkillPath(m.path, realpathCache))
     }
 
@@ -3581,7 +3617,7 @@ export class LocalSandbox
     }
     let infos = await super.globInfo(effectivePattern, effectivePath)
     // Hide files that fall inside any disabled skill so the agent cannot list them.
-    if (this._hiddenSkillDirKeys.size > 0) {
+    if (this._hiddenSkillDirKeys.size > 0 || this._clawSkillPolicy) {
       infos = infos.filter((f) => !this.isHiddenSkillPath(f.path, realpathCache))
     }
     // Filter out any results that fall within sensitive directories
@@ -3632,7 +3668,7 @@ export class LocalSandbox
     if (this.isHiddenSkillPath(path, realpathCache)) {
       return [
         {
-          path: `Error listing '${path}': skill is disabled`,
+          path: `Error listing '${path}': skill is disabled or excluded by the current Claw selection`,
           is_dir: false
         } as FileInfo
       ]
@@ -3658,7 +3694,7 @@ export class LocalSandbox
     if (this.isHiddenSkillPath(effectivePath, realpathCache)) {
       return [
         {
-          path: `Error listing '${effectivePath}': skill is disabled`,
+          path: `Error listing '${effectivePath}': skill is disabled or excluded by the current Claw selection`,
           is_dir: false
         } as FileInfo
       ]
@@ -4186,6 +4222,49 @@ export class LocalSandbox
     }
   }
 
+  private async formatSkillReadRange(
+    skill: SkillLifecycleMatch | null,
+    filePath: string,
+    offset: number,
+    limit: number,
+    options: LocalSandboxReadFileOptions
+  ): Promise<ReadRangeFormatResult> {
+    const manager = getModsManager()
+    const workspace = this.skillPromptWorkspace ?? this.workingDir
+    this.skillPromptAuthority?.assertLive()
+    this.abortSignal?.throwIfAborted()
+    if (this.skillPromptActive && (!manager || !manager.isEnabled(workspace)))
+      throw Error("MODS_SCOPE_CHANGED")
+    if (!skill || !isSameMarkdownDocumentPath(this._resolvePath(filePath), skill.path) ||
+      !manager?.presentationEvent || !manager.isEnabled(workspace))
+      return this.formatReadRange(filePath, offset, limit, options)
+    this.skillPromptActive = true
+    const assertLive = () => {
+      if (getModsManager() !== manager || !manager.isEnabled(workspace)) throw Error("MODS_SCOPE_CHANGED")
+      this.abortSignal?.throwIfAborted()
+      this.skillPromptAuthority?.assertLive()
+      if (this._clawSkillPolicy?.isPathHidden(this._resolvePath(filePath)))
+        throw Error("MODS_SKILL_SOURCE_CHANGED")
+    }
+    assertLive()
+    const { buffer, resolvedPath } = await this.readFileBuffer(filePath, FUNCTION_PRESENTATION_MAX_BYTES)
+    const content = iconv.decode(buffer, this.detectEncoding(buffer, path.extname(resolvedPath)))
+    const text = await this.skillPromptSnapshots.expand(
+      JSON.stringify([resolvedPath, skill.name]), content,
+      async (text) => {
+        const output = await manager.presentationEvent(workspace, this.runId, "skill.prompt",
+          { skill: skill.name, text }, this.abortSignal ?? new AbortController().signal)
+        if (typeof output.text !== "string") throw Error("MODS_SKILL_PROMPT_RESULT")
+        return output.text
+      }, assertLive
+    )
+    // The first read is also checked after asynchronous hooks, before publishing any page.
+    const current = await this.readFileBuffer(filePath, FUNCTION_PRESENTATION_MAX_BYTES)
+    if (!current.buffer.equals(buffer)) throw Error("MODS_SKILL_SOURCE_CHANGED")
+    assertLive()
+    return this.formatReadRangeFromContent(text, offset, limit, resolvedPath, options)
+  }
+
   private async formatReadRange(
     filePath: string,
     offset: number,
@@ -4267,7 +4346,7 @@ export class LocalSandbox
     options: LocalSandboxReadFileOptions = {}
   ): Promise<string> {
     if (this.isHiddenSkillPath(filePath)) {
-      return `Error reading file '${filePath}': skill is disabled`
+      return `Error reading file '${filePath}': skill is disabled or excluded by the current Claw selection`
     }
     if (this.isBlockedBySandbox(filePath)) {
       return `Error: Access denied — '${filePath}' is restricted by sandbox policy.`
@@ -4301,7 +4380,7 @@ export class LocalSandbox
       throw error
     }
     if (this.isHiddenSkillPath(effectiveFilePath)) {
-      return `Error reading file '${effectiveFilePath}': skill is disabled`
+      return `Error reading file '${effectiveFilePath}': skill is disabled or excluded by the current Claw selection`
     }
     if (this.isBlockedBySandbox(effectiveFilePath)) {
       return `Error: Access denied — '${effectiveFilePath}' is restricted by sandbox policy.`
@@ -4320,8 +4399,11 @@ export class LocalSandbox
     try {
       try {
         const resolvedForSkill = this._resolvePath(effectiveFilePath)
+        const canonicalForSkill = this._clawSkillPolicy
+          ? this.realpathDeepestExistingCached(resolvedForSkill, new Map()) ?? resolvedForSkill
+          : resolvedForSkill
         skillMatch =
-          this._skillLifecycleRegistry?.resolveRead(effectiveFilePath, resolvedForSkill) ?? null
+          this._skillLifecycleRegistry?.resolveRead(effectiveFilePath, canonicalForSkill) ?? null
         const skillHookKey = skillMatch ? this.getSkillHookKey(skillMatch) : ""
         if (skillMatch && !this._skillHooksFired.has(skillHookKey)) {
           fireSkillHooks = true
@@ -4371,6 +4453,10 @@ export class LocalSandbox
         console.warn("[Hooks] PreSkillUse error:", hookError)
       }
 
+      if (this._clawSkillPolicy?.isPathHidden(this._resolvePath(effectiveFilePath))) {
+        return `Error reading file '${effectiveFilePath}': skill changed or is excluded by the current Claw selection`
+      }
+      if (skillMatch) assertCurrentRuntimePluginSourceContent()
       const {
         formattedLines,
         totalLines,
@@ -4380,7 +4466,13 @@ export class LocalSandbox
         truncatedWithinLine,
         truncatedBeforeLine,
         lastVisibleSourceLine
-      } = await this.formatReadRange(effectiveFilePath, effectiveOffset, effectiveLimit, options)
+      } = await this.formatSkillReadRange(
+        skillMatch, effectiveFilePath, effectiveOffset, effectiveLimit, options
+      )
+      if (skillMatch) assertCurrentRuntimePluginSourceContent()
+      if (this._clawSkillPolicy?.isPathHidden(this._resolvePath(effectiveFilePath))) {
+        return `Error reading file '${effectiveFilePath}': skill changed or is excluded by the current Claw selection`
+      }
       await this.recordReadTime(resolvedPath)
 
       if (!hasNonWhitespace) {
@@ -5025,7 +5117,10 @@ export class LocalSandbox
       }
       getModCallContext()?.assertLive?.()
       const r = await super.write(effectiveFilePath, effectiveContent)
-      if (!r.error) await this.recordReadTime(resolvedPath)
+      if (!r.error) {
+        await this.recordReadTime(resolvedPath)
+        await noteFileToolWrite(resolvedPath, effectiveContent)
+      }
       return r
     })
     if (!result.error) {
@@ -5333,6 +5428,7 @@ export class LocalSandbox
             await this.writeFileEncoded(resolvedPath, expectedContent, encoding)
             await this.recordReadTime(resolvedPath)
           }
+          await noteFileToolWrite(resolvedPath, () => iconv.encode(expectedContent, encoding))
           return { path: effectiveFilePath, filesUpdate: null, occurrences }
         } finally {
           await managedCapability?.handle.close().catch(() => undefined)
@@ -5604,7 +5700,7 @@ export class LocalSandbox
           !micromatch.isMatch(globPath, includeGlob, { matchBase: !includeGlobUsesPath })
         )
           continue
-        if (this._hiddenSkillDirKeys.size > 0 && this.isHiddenSkillPath(fp, realpathCache)) {
+        if ((this._hiddenSkillDirKeys.size > 0 || this._clawSkillPolicy) && this.isHiddenSkillPath(fp, realpathCache)) {
           continue
         }
         if (this.windowsSandbox === "elevated" && this.isSensitiveSandboxPath(fp, realpathCache)) {
@@ -7062,12 +7158,14 @@ export class LocalSandbox
       (isGitCommitCommand(effectiveCommand, shellSyntax) ||
         isGitPushCommand(effectiveCommand, shellSyntax))
     ) {
-      const result = await this.orchestrator.execute(
-        effectiveCommand,
-        effectiveCwd,
-        this.windowsSandbox,
-        shellSyntax,
-        outsideShellSyntax
+      const result = await shellFileCaptureContext.run(true, () =>
+        this.orchestrator!.execute(
+          effectiveCommand,
+          effectiveCwd,
+          this.windowsSandbox,
+          shellSyntax,
+          outsideShellSyntax
+        )
       )
       if (this.commandMayMutateHarnessState(effectiveCommand, effectiveCwd)) {
         this.markHarnessStageAttributionDirty()
@@ -7529,19 +7627,22 @@ export class LocalSandbox
     // The orchestrator calls back into executeRaw() for actual execution.
     await authorizeCurrentModInput("host:execute", { command: effectiveCommand, cwd: effectiveCwd })
     if (this.orchestrator) {
-      const result = await this.orchestrator.execute(
-        effectiveCommand,
-        effectiveCwd,
-        this.windowsSandbox,
-        shellSyntax,
-        outsideShellSyntax
+      const result = await shellFileCaptureContext.run(true, () =>
+        this.orchestrator!.execute(
+          effectiveCommand,
+          effectiveCwd,
+          this.windowsSandbox,
+          shellSyntax,
+          outsideShellSyntax
+        )
       )
       if (this.commandMayMutateHarnessState(effectiveCommand, effectiveCwd)) {
         this.markHarnessStageAttributionDirty()
       }
       // Adoption tracking: react to agent rm/mv of generated files (side-effect
       // only, never throws). Only successful commands act (exitCode === 0).
-      recordAdoptionShellFileOps(effectiveCommand, this.workingDir, result.exitCode)
+      recordAdoptionShellFileOps(effectiveCommand, effectiveCwd, result.exitCode)
+      this.recordShellReadTelemetry(effectiveCommand, effectiveCwd, result, shellSyntax)
       const postResult = await this.runHooks("PostToolUse", {
         toolName: "execute",
         toolArgs: { command: effectiveCommand, cwd: effectiveCwd },
@@ -7552,13 +7653,16 @@ export class LocalSandbox
       return LocalSandbox.applyPostHookToExecResult(result, postResult)
     }
 
-    const result = await this.executeRaw(effectiveCommand, undefined, undefined, undefined, {
-      cwd: effectiveCwd
-    })
+    const result = await shellFileCaptureContext.run(true, () =>
+      this.executeRaw(effectiveCommand, undefined, undefined, undefined, {
+        cwd: effectiveCwd
+      })
+    )
     if (this.commandMayMutateHarnessState(effectiveCommand, effectiveCwd)) {
       this.markHarnessStageAttributionDirty()
     }
-    recordAdoptionShellFileOps(effectiveCommand, this.workingDir, result.exitCode)
+    recordAdoptionShellFileOps(effectiveCommand, effectiveCwd, result.exitCode)
+    this.recordShellReadTelemetry(effectiveCommand, effectiveCwd, result, shellSyntax)
     const postResult = await this.runHooks("PostToolUse", {
       toolName: "execute",
       toolArgs: { command: effectiveCommand, cwd: effectiveCwd },
@@ -7842,19 +7946,30 @@ export class LocalSandbox
         truncated: false
       }
     }
+    // Read the request flag here, in the caller's async context; the capture
+    // window itself starts after any Windows sandbox queue wait, right before
+    // the process starts.
+    const captureFileEffects =
+      this._shellFileTelemetry &&
+      !backgroundExecution &&
+      shellFileCaptureContext.getStore() === true
+    const runUnserialized = (): Promise<LocalExecuteResponse> =>
+      this.runWithShellFileCapture(command, effectiveCwd, captureFileEffects, shellSyntax, () =>
+        this.executeRawUnserialized(
+          command,
+          sandboxModeOverride,
+          timeoutMs,
+          overrideAbortSignal,
+          effectiveCwd,
+          options
+        )
+      )
     if (
       process.platform !== "win32" ||
       effectiveSandboxMode === "none" ||
       (backgroundExecution && !this.worktreeIsolation)
     ) {
-      return this.executeRawUnserialized(
-        command,
-        sandboxModeOverride,
-        timeoutMs,
-        overrideAbortSignal,
-        effectiveCwd,
-        options
-      )
+      return runUnserialized()
     }
 
     const sandboxWorkspaceRoot = path.resolve(this.workingDir)
@@ -7865,27 +7980,119 @@ export class LocalSandbox
     )
     const commandConcurrency = classifyCommandConcurrency(command)
     if (commandConcurrency === "parallel_safe") {
-      return LocalSandbox.runParallelSafeExecution(queueKey, () =>
-        this.executeRawUnserialized(
-          command,
-          sandboxModeOverride,
-          timeoutMs,
-          overrideAbortSignal,
-          effectiveCwd,
-          options
-        )
-      )
+      return LocalSandbox.runParallelSafeExecution(queueKey, runUnserialized)
     }
 
-    return LocalSandbox.runSerializedExecution(queueKey, () =>
-      this.executeRawUnserialized(
+    return LocalSandbox.runSerializedExecution(queueKey, runUnserialized)
+  }
+
+  /**
+   * Bash First telemetry: compare the workspace around a foreground agent
+   * command and report the file effects the way write_file/edit_file report
+   * theirs. Commands that cannot write are not captured; capture failures never
+   * reach the command result.
+   */
+  private async runWithShellFileCapture(
+    command: string,
+    cwd: string,
+    captureFileEffects: boolean,
+    shellSyntax: CommandShellSyntax,
+    run: () => Promise<LocalExecuteResponse>
+  ): Promise<LocalExecuteResponse> {
+    if (!captureFileEffects) return run()
+    let capture: ShellFileCapture | null = null
+    try {
+      capture = await beginShellFileCapture({
+        workspaceRoot: this.workingDir,
         command,
-        sandboxModeOverride,
-        timeoutMs,
-        overrideAbortSignal,
-        effectiveCwd,
-        options
-      )
+        cwd,
+        shellSyntax,
+        isCodeFile
+      })
+    } catch (error) {
+      console.warn("[LocalSandbox] shell file capture unavailable:", error)
+    }
+    if (!capture) return run()
+    // Stage at command start, like write/edit capture it right before mutating.
+    const harnessStage = this.captureHarnessStageForShellEdit()
+    try {
+      return await run()
+    } finally {
+      await this.applyShellFileCapture(capture, harnessStage)
+    }
+  }
+
+  private captureHarnessStageForShellEdit(): Promise<HarnessStageAttribution | undefined> {
+    if (!this.harnessProjectId || !this.featureId) return Promise.resolve(undefined)
+    return getHarnessStageAttributionForCodeGeneration(this.harnessProjectId, this.featureId).catch(
+      () => undefined
+    )
+  }
+
+  private async applyShellFileCapture(
+    capture: ShellFileCapture,
+    harnessStagePromise: Promise<HarnessStageAttribution | undefined>
+  ): Promise<void> {
+    try {
+      const { changes } = await capture.finish()
+      for (const change of changes) {
+        if (change.decision !== "unattributed") this._onFileMutation?.(change.absPath, "shell")
+      }
+      const counted = changes.filter((change) => change.decision === "counted")
+      if (changes.length) {
+        console.info("[LocalSandbox] Shell file capture completed", {
+          threadId: executeTraceContext.getStore()?.threadId || this.runId,
+          counted: counted.length,
+          attributed: changes.filter((change) => change.decision === "attributed").length,
+          unattributed: changes.filter((change) => change.decision === "unattributed").length
+        })
+      }
+      if (counted.length > 0) {
+        const threadId = executeTraceContext.getStore()?.threadId || this.runId
+        for (const change of counted) {
+          void recordAdoptionShellEdit({
+            threadId,
+            filePath: change.absPath,
+            beforeContent: change.before ?? "",
+            afterContent: change.after ?? "",
+            workspacePath: this.workingDir,
+            harnessStagePromise
+          })
+        }
+      }
+    } catch (error) {
+      console.warn("[LocalSandbox] shell file capture failed:", error)
+    }
+  }
+
+  /**
+   * read_file reports constraint-file reads itself; a Bash First `cat` of the
+   * same file reports here once the command succeeded with output.
+   */
+  private recordShellReadTelemetry(
+    command: string,
+    cwd: string,
+    result: ExecuteResponse,
+    shellSyntax: CommandShellSyntax
+  ): void {
+    if (!this._shellFileTelemetry || !this.pluginRoot || result.exitCode !== 0) return
+    if (!LocalSandbox.hasStdoutContent(result.output)) return
+    const traceContext = executeTraceContext.getStore()
+    for (const readPath of extractShellCommandReadPaths(command, cwd, shellSyntax)) {
+      void this.recordPluginSystemConstraintRead(readPath, traceContext)
+    }
+  }
+
+  /** True when an execute result carries real stdout, not only markers or stderr. */
+  private static hasStdoutContent(output: string | undefined): boolean {
+    if (!output) return false
+    return (
+      output
+        .replace(/<execute_metadata>[\s\S]*?<\/execute_metadata>/g, "")
+        .split("\n")
+        .filter((line) => !line.startsWith("[stderr] ") && line.trim() !== "<no output>")
+        .join("\n")
+        .trim().length > 0
     )
   }
 

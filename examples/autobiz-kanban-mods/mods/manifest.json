@@ -1,0 +1,51 @@
+{
+  "apiVersion": "cmb.mods/v2",
+  "cmbCompatibility": { "modelProtocol": "legacy-v1" },
+  "id": "AutobizDevOps_Plugin_Kanban_Mods",
+  "claw": {
+    "componentsVersion": 1,
+    "components": [
+      {
+        "id": "status",
+        "name": "状态与产物检查",
+        "kind": "module",
+        "entry": "status.ts",
+        "dependsOn": [],
+        "actionIds": []
+      },
+      {
+        "id": "board",
+        "name": "项目看板",
+        "kind": "module",
+        "entry": "board.ts",
+        "dependsOn": ["status"],
+        "actionIds": []
+      },
+      {
+        "id": "review",
+        "name": "单文件模型检视",
+        "kind": "module",
+        "entry": "review.ts",
+        "dependsOn": [],
+        "actionIds": []
+      },
+      {
+        "id": "completion",
+        "name": "完成前检查意见",
+        "kind": "module",
+        "entry": "completion.ts",
+        "dependsOn": [],
+        "actionIds": []
+      },
+      {
+        "id": "review-input",
+        "name": "跨插件检视输入",
+        "kind": "module",
+        "entry": "review-input.ts",
+        "dependsOn": [],
+        "actionIds": ["prepare-review"]
+      }
+    ],
+    "actions": []
+  }
+}

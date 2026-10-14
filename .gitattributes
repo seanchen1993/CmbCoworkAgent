@@ -1,1 +1,2 @@
 .env filter=envcrypt
+resources/mods/community-originals/** -text

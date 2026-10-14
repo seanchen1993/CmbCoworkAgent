@@ -99,6 +99,41 @@ export async function verifyUiFeedback(
     assert.equal(await rail.locator("script").count(), 0)
     await page.screenshot({path:join(artifacts,"ui-feedback-bounded.png")})
     pass("large plugin feedback stays scrollable within a bounded rail and leaves composer visible")
+    const longBefore = await page.evaluate((id) => window.api.threads.getMessages(id), threadId)
+    await run("feedback-long")
+    await until(async () => {
+      const rows = await page.evaluate((id) => window.api.mods.feedback(id), threadId)
+      return rows.filter(row => row.text.startsWith("FEEDBACK_LONG_HOOK:")).length === 2
+    }, "the actual long status and toast settle")
+    const longSnapshot = await page.evaluate((id) => window.api.mods.feedback(id), threadId)
+    const longRows = longSnapshot.filter(row => row.text.startsWith("FEEDBACK_LONG_HOOK:"))
+    const rawPrefix = "FEEDBACK_LONG_INPUT:", rawTail = ":FEEDBACK_LONG_END"
+    const raw = rawPrefix + "x".repeat(30000 - rawPrefix.length - rawTail.length) + rawTail
+    const expected = (`FEEDBACK_LONG_HOOK:[REDACTED]:${raw}`).slice(0, 10000)
+    assert.equal(longRows.length, 2)
+    assert.deepEqual(longRows.map(row => row.kind).sort(), ["status", "toast"])
+    for (const row of longRows) {
+      assert.equal(row.plugin, "ui-feedback")
+      assert.equal(row.text, expected)
+      assert.equal(row.text.length, 10000)
+    }
+    const longToast = longRows.find(row => row.kind === "toast")
+    assert(longToast)
+    assert.equal(longToast.timeoutMs, 60000)
+    const toast = rail.locator(`[data-feedback-id="${longToast.id}"]`)
+    const status = rail.locator('[data-feedback-kind="status"]')
+    await until(async () => await toast.count() === 1 &&
+      await status.locator("span.min-w-0").textContent() === expected.slice(0, 2000),
+      "the actual long feedback desktop projection is rendered")
+    for (const element of [toast, status])
+      assert.equal(await element.locator("span.min-w-0").textContent(), expected.slice(0, 2000))
+    assert.equal(await toast.getAttribute("aria-label"), "关闭提示")
+    assert.deepEqual(await page.evaluate((id) => window.api.threads.getMessages(id), threadId), longBefore)
+    await page.screenshot({ path: join(artifacts, "ui-feedback-long-protected.png") })
+    await toast.click()
+    await until(async () => !(await page.evaluate((id) => window.api.mods.feedback(id), threadId))
+      .some(row => row.id === longToast.id), "the actual native long toast is dismissed")
+    pass("30k real Guest status/toast reaches full Hooks and protection before exact 10k snapshots and 2k desktop projection")
     await run("feedback-show")
     await until(async () => (await rail.count()) === 1, "restored command feedback")
     await page.evaluate((id) => window.api.mods.revokeFunction(id, "ui-feedback"), threadId)
@@ -114,7 +149,14 @@ export async function verifyUiFeedback(
           clear: true,
           off: true,
           noStaleRestoration: true,
-          revoke: true
+          revoke: true,
+          longText: {
+            methods: ["ui.status", "ui.toast"], inputLength: 30000,
+            snapshotLengths: longRows.map(row => row.text.length), displayLength: 2000,
+            protectedBeforeTruncation: true, transcriptUnchanged: true,
+            toastTimeoutMs: longToast.timeoutMs, nativeDismissed: true,
+            screenshot: "ui-feedback-long-protected.png"
+          }
         },
         null,
         2

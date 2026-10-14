@@ -1,4 +1,7 @@
+// Load the real matcher framework during collection, outside each playback test budget.
+import "playwright/test"
 import { beforeEach, describe, expect, it, vi } from "vitest"
+import { resolve } from "node:path"
 
 const cdpMocks = vi.hoisted(() => ({
   getCurrentBrowserCdpPort: vi.fn()
@@ -321,6 +324,6 @@ test("recorded script flow", async ({ page }) => {
     })
 
     expect(page.locator).toHaveBeenCalledWith("#avatar")
-    expect(setInputFiles).toHaveBeenCalledWith("/tmp/workspace/think.webp")
+    expect(setInputFiles).toHaveBeenCalledWith(resolve("/tmp/workspace", "think.webp"))
   })
 })

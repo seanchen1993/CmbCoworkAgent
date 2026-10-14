@@ -1,17 +1,25 @@
+import { publishClawNotice, revealClawPanes, ClawResultsVisibility } from "@/lib/claw-sidebar"
+import { withModsChatScope } from "../../lib/mods-chat-scope"
+import { isModSiteChangeScope } from "../../../../shared/mods/types"
 import { useFunctionPaneScroll } from "../../lib/function-pane-scroll"
-import { useCallback, useEffect, useRef, useState, type CSSProperties } from "react"
+import { createContext, useContext, Fragment, useCallback, useEffect, useRef, useState } from "react"
+import { pressFunctionHotkey } from "../../lib/function-ui-hotkey"
+import { functionUiStyle } from "../../lib/function-ui-style"
 import { Button } from "@/components/ui/button"
 import {
   validateFunctionTree,
   validFunctionLink,
   type FunctionPaneSnapshot,
   type FunctionUiElement,
+  type FunctionUiNode,
   type FunctionUiAction
 } from "../../../../shared/mods/v2/ui"
 import type { ModJson, ModObject } from "../../../../shared/mods/types"
 import { FunctionClient } from "./FunctionClient"
 import { FunctionCode } from "./FunctionCode"
+import { functionCodeDrawing } from "../../lib/function-code-drawing"
 import { FunctionSvg } from "./FunctionSvg"
+import { FunctionMarkdown, type FunctionMarkdownContext } from "./FunctionMarkdown"
 import {
   desktopAllowsPaneFocus,
   desktopOwnsPaneFocus,
@@ -30,7 +38,7 @@ function Field({
   act,
   retainFocusWhileBusy
 }: {
-  node: FunctionUiElement
+  node: FunctionUiNode
   busy: boolean
   act: Act
   retainFocusWhileBusy?: boolean
@@ -123,91 +131,83 @@ function Field({
   )
 }
 
-function style(node: FunctionUiElement): CSSProperties {
-  const p = node.props
-  if (node.type === "Text")
-    return {
-      color: typeof p.color === "string" ? p.color : undefined,
-      backgroundColor: typeof p.backgroundColor === "string" ? p.backgroundColor : undefined,
-      fontWeight: p.bold ? "bold" : undefined,
-      fontStyle: p.italic ? "italic" : undefined,
-      textDecoration: [p.underline && "underline", p.strikethrough && "line-through"]
-        .filter(Boolean)
-        .join(" "),
-      opacity: p.dimColor ? 0.65 : undefined,
-      whiteSpace: p.wrap === "truncate-end" ? "nowrap" : "pre-wrap",
-      textOverflow: p.wrap === "truncate-end" ? "ellipsis" : undefined,
-      overflow: p.wrap === "truncate-end" ? "hidden" : undefined,
-      overflowWrap: "anywhere"
-    }
-  const dimension = (key: string): number | undefined =>
-    typeof p[key] === "number" ? (p[key] as number) * 8 : undefined
-  return {
-    display: "flex",
-    flexDirection: p.flexDirection === "column" ? "column" : "row",
-    flexWrap: "wrap",
-    gap: dimension("gap"),
-    padding: dimension("padding"),
-    paddingInline: dimension("paddingX"),
-    paddingBlock: dimension("paddingY"),
-    margin: dimension("margin"),
-    marginInline: dimension("marginX"),
-    marginBlock: dimension("marginY"),
-    alignItems: ["flex-start", "center", "flex-end", "stretch"].includes(String(p.alignItems))
-      ? String(p.alignItems)
-      : undefined,
-    justifyContent: ["flex-start", "center", "flex-end", "space-between", "space-around"].includes(
-      String(p.justifyContent)
-    )
-      ? String(p.justifyContent)
-      : undefined,
-    border: p.borderStyle ? "1px solid var(--border)" : undefined,
-    width:
-      typeof p.width === "number"
-        ? `${p.width}ch`
-        : typeof p.width === "string"
-          ? p.width
-          : undefined,
-    height:
-      typeof p.height === "number"
-        ? `${p.height}lh`
-        : typeof p.height === "string"
-          ? p.height
-          : undefined
-  }
-}
+// Local text backgrounds also apply across fragments, boxes and client subtrees.
+const FunctionTextBackground = createContext<string | undefined>(undefined)
 
 export function Element({
   node,
   busy,
   act,
   renderClient,
-  retainFocusWhileBusy
+  renderEngine,
+  retainFocusWhileBusy,
+  markdown,
+  nodePath = [],
+  codeDrawing
 }: {
   node: FunctionUiElement | string
   busy: boolean
   act: Act
-  renderClient?(node: FunctionUiElement): React.ReactNode
+  renderClient?(node: FunctionUiNode): React.ReactNode
+  renderEngine?(ref: number): React.ReactNode
   retainFocusWhileBusy?: boolean
+  markdown?: FunctionMarkdownContext
+  nodePath?: readonly number[]
+  codeDrawing?: ReadonlyMap<string, string>
 }): React.ReactNode {
+  const inheritedBackground = useContext(FunctionTextBackground)
+  const drawing = codeDrawing ?? functionCodeDrawing(node, nodePath)
   if (typeof node === "string") return node
-  const p = node.props
-  if (node.type === "Svg") return <FunctionSvg props={p} />
-  if (node.type === "Box" || node.type === "Text") {
-    const Tag = node.type === "Box" ? "div" : "span"
+  if (node.type === "engine") return renderEngine?.(node.ref) ?? null
+  if (node.type === "fragment")
     return (
-      <Tag style={style(node)}>
-        {node.children?.map((child, index) => (
+      <Fragment>
+        {node.children.map((child, index) => (
           <Element
             key={index}
             node={child}
             busy={busy}
             act={act}
             renderClient={renderClient}
+            renderEngine={renderEngine}
             retainFocusWhileBusy={retainFocusWhileBusy}
+            markdown={markdown}
+            nodePath={[...nodePath, index]}
+            codeDrawing={drawing}
           />
         ))}
-      </Tag>
+      </Fragment>
+    )
+  if (node.type === "Markdown") return <FunctionMarkdown props={node.props}
+    context={markdown} nodePath={nodePath} busy={busy} />
+  const p = node.props
+  if (node.type === "Svg") return <FunctionSvg props={p} />
+  if (node.type === "Box" || node.type === "Text") {
+    const Tag = node.type === "Box" ? "div" : "span"
+    const content = node.children?.map((child, index) => (
+      <Element
+        key={index}
+        node={child}
+        busy={busy}
+        act={act}
+        renderClient={renderClient}
+        renderEngine={renderEngine}
+        retainFocusWhileBusy={retainFocusWhileBusy}
+        markdown={markdown}
+        nodePath={[...nodePath, index]}
+        codeDrawing={drawing}
+      />
+    ))
+    const style = functionUiStyle(node, inheritedBackground)
+    const background = node.type === "Text" ? style.backgroundColor : undefined
+    return (
+      <FunctionTextBackground.Provider value={background ?? inheritedBackground}>
+        <Tag style={style}>
+          {node.type === "Text" && p.wrap === "truncate-start"
+            ? <span dir="ltr" style={{ unicodeBidi: "isolate" }}>{content}</span>
+            : content}
+        </Tag>
+      </FunctionTextBackground.Provider>
     )
   }
   if (node.type === "Button")
@@ -216,6 +216,8 @@ export function Element({
         data-function-control={String(node.props.key)}
         data-function-plugin={node.press?.plugin}
         data-function-handle={node.press?.handle}
+        data-function-hotkey={typeof p.hotkey === "string" ? p.hotkey : undefined}
+        aria-keyshortcuts={typeof p.hotkey === "string" ? p.hotkey : undefined}
         size="sm"
         variant="outline"
         disabled={busy && !retainFocusWhileBusy}
@@ -238,7 +240,24 @@ export function Element({
         act={act}
       />
     )
-  if (node.type === "Link")
+  if (node.type === "Link") {
+    const content = node.children?.length
+      ? node.children.map((child, index) => (
+          <Element
+            key={index}
+            node={child}
+            busy={busy}
+            act={act}
+            renderClient={renderClient}
+            renderEngine={renderEngine}
+            retainFocusWhileBusy={retainFocusWhileBusy}
+            markdown={markdown}
+            nodePath={[...nodePath, index]}
+            codeDrawing={drawing}
+          />
+        ))
+      : typeof p.label === "string" ? p.label : typeof p.href === "string" ? p.href : ""
+    if (!validFunctionLink(p.href)) return <span>{content}</span>
     return (
       <a
         href={String(p.href)}
@@ -248,29 +267,27 @@ export function Element({
           if (validFunctionLink(p.href)) void window.electron.openExternal(p.href)
         }}
       >
-        {node.children?.length
-          ? node.children.map((child, index) => (
-              <Element
-                key={index}
-                node={child}
-                busy={busy}
-                act={act}
-                renderClient={renderClient}
-                retainFocusWhileBusy={retainFocusWhileBusy}
-              />
-            ))
-          : String(p.label ?? p.href)}
+        {content}
       </a>
     )
-  if (node.type === "Code") return <FunctionCode props={p} />
+  }
+  if (node.type === "Code")
+    return <FunctionCode props={{ ...p, source: drawing.get(nodePath.join(".")) ?? "" }} />
   return node.type === "Client" ? (renderClient?.(node) ?? null) : null
 }
 
-export function FunctionPanes({ threadId }: { threadId: string }): React.JSX.Element | null {
+export const FunctionPanes = withModsChatScope(FunctionPanesSurface)
+
+function FunctionPanesSurface({ threadId }: { threadId: string }): React.JSX.Element | null {
+  const resultsVisible = useContext(ClawResultsVisibility)
   const [panes, setPanes] = useState<FunctionPaneSnapshot[]>([])
   const [busy, setBusy] = useState(false)
   const pending = useRef(0)
   const [error, setError] = useState("")
+  useEffect(() => {
+    publishClawNotice(threadId, "panes", panes.length ? `${panes.length} 个插件面板` : "")
+    return () => publishClawNotice(threadId, "panes", "")
+  }, [threadId, panes.length])
   const refreshRef = useRef<() => void>(() => {})
   const panesRef = useRef(panes)
   panesRef.current = panes
@@ -331,7 +348,7 @@ export function FunctionPanes({ threadId }: { threadId: string }): React.JSX.Ele
       if (focusSteps.current.has(step)) continue
       focusSteps.current.add(step)
       const ready = (): HTMLElement | undefined => {
-        if (loadedThread.current !== threadId) return undefined
+        if (loadedThread.current !== threadId || !resultsVisible) return undefined
         const current = panesRef.current.find((row) => row.key === pane.key)
         if (
           current?.generation !== request.generation ||
@@ -379,9 +396,9 @@ export function FunctionPanes({ threadId }: { threadId: string }): React.JSX.Ele
           .finally(() => refreshRef.current())
       }
     }
-  }, [panes, threadId])
+  }, [panes, threadId, resultsVisible])
   useEffect(() => {
-    if (loadedThread.current !== threadId) return
+    if (loadedThread.current !== threadId || !resultsVisible) return
     const currentIds = new Set(
       panes.flatMap((pane) => (pane.focusRequest ? [pane.focusRequest.id] : []))
     )
@@ -392,7 +409,7 @@ export function FunctionPanes({ threadId }: { threadId: string }): React.JSX.Ele
       if (!request?.pending || attemptedFocus.current.has(request.id)) continue
       attemptedFocus.current.add(request.id)
       const epoch = focusEpoch.current
-      const allowed = desktopAllowsPaneFocus()
+      const allowed = desktopAllowsPaneFocus() && Boolean(sections.current.get(pane.key)?.getClientRects().length)
       void window.api.mods
         .paneAct(threadId, {
           pane: pane.key,
@@ -421,7 +438,7 @@ export function FunctionPanes({ threadId }: { threadId: string }): React.JSX.Ele
         .catch(() => {})
         .finally(() => refreshRef.current())
     }
-  }, [panes, threadId])
+  }, [panes, threadId, resultsVisible])
   useEffect(() => {
     let live = true
     let sequence = 0
@@ -435,6 +452,8 @@ export function FunctionPanes({ threadId }: { threadId: string }): React.JSX.Ele
             validateFunctionTree(row.tree)
             for (const client of row.clients ?? []) validateFunctionTree(client.tree)
           }
+          // Host-owned consumption survives temporary scope remounts; focus waits for visibility.
+          revealClawPanes(threadId, rows)
           loadedThread.current = threadId
           setPanes(rows)
         })
@@ -444,7 +463,7 @@ export function FunctionPanes({ threadId }: { threadId: string }): React.JSX.Ele
     }
     refreshRef.current = refresh
     const stop = window.api.mods.onCardsChanged((event) => {
-      if (event.threadId === threadId) refresh()
+      if (event.threadId === threadId && event.scope !== "records" && !isModSiteChangeScope(event.scope)) refresh()
     })
     const stopConfiguration = window.api.mods.onConfigurationChanged(() => {
       focusEpoch.current++
@@ -474,8 +493,8 @@ export function FunctionPanes({ threadId }: { threadId: string }): React.JSX.Ele
           pane: pane.key,
           generation: pane.generation,
           intentId: crypto.randomUUID(),
-          plugin: node?.press?.plugin ?? pane.plugin,
-          handle: node?.press?.handle ?? 0,
+          plugin: node && node.type !== "engine" && node.type !== "fragment" ? node.press?.plugin ?? pane.plugin : pane.plugin,
+          handle: node && node.type !== "engine" && node.type !== "fragment" ? node.press?.handle ?? 0 : 0,
           kind,
           ...(value === undefined ? {} : { value })
         })
@@ -509,7 +528,12 @@ export function FunctionPanes({ threadId }: { threadId: string }): React.JSX.Ele
             if (element) sections.current.set(pane.key, element)
             else sections.current.delete(pane.key)
           }}
+          data-function-hotkey-scope
+          data-function-plugin={pane.plugin}
           data-function-pane={pane.id}
+          data-function-pane-key={pane.key}
+          data-function-pane-generation={pane.generation}
+          data-function-hold-toasts={pane.holdToasts === true ? "true" : undefined}
           tabIndex={0}
           className="rounded-lg border bg-background p-3"
           onFocus={(event) => {
@@ -555,6 +579,7 @@ export function FunctionPanes({ threadId }: { threadId: string }): React.JSX.Ele
             void act(pane, undefined, "focus", { focused: false }).catch(() => {})
           }}
           onKeyDown={(event) => {
+            if (pressFunctionHotkey(event)) return
             if (event.key === "Escape" && pane.closeOnEscape) {
               event.stopPropagation()
               void act(pane, undefined, "close")
@@ -592,6 +617,9 @@ export function FunctionPanes({ threadId }: { threadId: string }): React.JSX.Ele
               busy={busy}
               retainFocusWhileBusy
               act={(node, kind, value) => act(pane, node, kind, value)}
+              markdown={{ threadId, address: { kind: "pane", pane: pane.key,
+                generation: pane.generation }, links: pane.markdownLinks ?? [],
+                refresh: () => refreshRef.current() }}
               renderClient={(node) => {
                 const client = pane.clients?.find(
                   (c) => c.plugin === node.client?.plugin && c.element === node.props.key
@@ -604,8 +632,9 @@ export function FunctionPanes({ threadId }: { threadId: string }): React.JSX.Ele
                     node={node}
                     snapshot={client}
                     refresh={() => refreshRef.current()}
-                    render={(tree, busy, act) => (
-                      <Element node={tree} busy={busy} act={act} retainFocusWhileBusy />
+                    render={(tree, busy, act, markdown) => (
+                      <Element node={tree} busy={busy} act={act} markdown={markdown}
+                        retainFocusWhileBusy />
                     )}
                   />
                 ) : null

@@ -11,9 +11,9 @@ import {
 import type { SkillMetadata } from "../../types"
 import { normalizeSkillId } from "../../skills/ids"
 import {
-  isSkillVisibleForProjectMode,
   type ProjectModeSkillScope
 } from "../../../shared/skill-visibility"
+import { isSkillVisibleForProjectMode } from "../../plugins/derivation-skill-visibility"
 import {
   imConversationStateStore,
   type ImConversationStateStore,

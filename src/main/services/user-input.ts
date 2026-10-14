@@ -278,6 +278,34 @@ export function submitUserInputResponse(
   response: UserInputResponse,
   options: { notifyRenderer?: boolean; reason?: string } = {}
 ): boolean {
+  const current = pendingUserInputs.get(response.requestId)
+  if (!current) return false
+  const answers = { ...response.answers }
+  for (const [questionId, answer] of Object.entries(answers)) {
+    if (answer?.type !== "options") continue
+    const question = current.request.questions.find((item) => item.id === questionId)
+    if (
+      question?.multiSelect !== true ||
+      answer.questionId !== questionId ||
+      !Array.isArray(answer.optionIndices) ||
+      !answer.optionIndices.length ||
+      answer.optionIndices.length > question.options.length ||
+      new Set(answer.optionIndices).size !== answer.optionIndices.length ||
+      Array.from(answer.optionIndices).some(
+        (index) => !Number.isSafeInteger(index) || index < 0 || index >= question.options.length
+      )
+    )
+      return false
+    const optionIndices = [...answer.optionIndices].sort((a, b) => a - b)
+    answers[questionId] = {
+      type: "options",
+      questionId,
+      optionIndices,
+      labels: optionIndices.map((index) => question.options[index].label),
+      descriptions: optionIndices.map((index) => question.options[index].description)
+    }
+  }
+  // Invalid multiple selection leaves the original request and all waiting state intact.
   const pending = cleanupPending(response.requestId)
   if (!pending) return false
   if (options.notifyRenderer) {
@@ -288,6 +316,7 @@ export function submitUserInputResponse(
   }
   pending.resolve({
     ...response,
+    answers,
     submittedAt: response.submittedAt ?? new Date().toISOString()
   })
   return true

@@ -6,7 +6,7 @@ import { FunctionSiteContent } from "../components/chat/FunctionSite"
 import { AgentModeSwitcher } from "../components/chat/AgentModeSwitcher"
 import type { FunctionPaneSnapshot } from "../../../shared/mods/v2/ui"
 
-it("renders the actual site tree as safe interactive controls and restores host fallback when absent", () => {
+it("renders actual site controls while absent publications wait until host confirms inactive", () => {
   const snapshot: FunctionPaneSnapshot = {
     key: "engine:owner",
     id: "owner",
@@ -15,6 +15,11 @@ it("renders the actual site tree as safe interactive controls and restores host 
     title: "PromptHint",
     rows: 12,
     closeOnEscape: false,
+    nativeContent: {
+      component: "PromptHint",
+      entries: [{ ref: 0, props: { hint: "Host hint" } }],
+      nativeUnchanged: false
+    },
     tree: {
       type: "Box",
       props: {},
@@ -36,6 +41,7 @@ it("renders the actual site tree as safe interactive controls and restores host 
   const html = renderToStaticMarkup(
     createElement(FunctionSiteContent, {
       snapshot,
+      component: "PromptHint",
       fallback: "Host hint",
       busy: false,
       act: async () => {}
@@ -56,6 +62,17 @@ it("renders the actual site tree as safe interactive controls and restores host 
         act: async () => {}
       })
     )
+  ).toBe("")
+  expect(
+    renderToStaticMarkup(
+      createElement(FunctionSiteContent, {
+        snapshot: null,
+        fallback: "Host hint",
+        inactive: true,
+        busy: false,
+        act: async () => {}
+      })
+    )
   ).toBe("Host hint")
 })
 
@@ -68,12 +85,17 @@ it("retains rich host fallback when the host confirms a pass-through drawing", (
     generation: "generation",
     rows: 12,
     closeOnEscape: false,
-    nativeFallback: true,
-    tree: { type: "Text", props: {}, children: ["plain fallback"] }
+    nativeContent: {
+      component: "Spinner",
+      entries: [{ ref: 0, props: { word: "Working…" } }],
+      nativeUnchanged: true
+    },
+    tree: { type: "engine", ref: 0 }
   }
   const html = renderToStaticMarkup(
     createElement(FunctionSiteContent, {
       snapshot,
+      component: "Spinner",
       fallback: createElement(
         "span",
         { className: "thinking-shimmer-text", "data-host": "original" },

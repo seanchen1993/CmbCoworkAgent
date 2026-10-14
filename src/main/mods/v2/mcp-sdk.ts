@@ -1,16 +1,20 @@
 import type { ModJson, ModObject } from "../../../shared/mods/types"
 import { isModObject, ModFunctionError } from "../../../shared/mods/v2/contracts"
 import { encodeModJson, parseModJson } from "../../../shared/mods/validation"
-import type { McpCapabilityTool } from "../../mcp/capability-types"
+import type { McpCapabilityTool, McpConnectAdmission } from "../../mcp/capability-types"
 import { projectModResult } from "../publication"
 import { validateFunctionToolResult } from "./tool-sdk"
+
+export type FunctionMcpConnectRun = (
+  connect: (input: ModObject, signal: AbortSignal) => Promise<McpConnectAdmission>
+) => Promise<ModObject>
 
 /** SDK arguments are data, never a connection, credential or executable supplied by a guest. */
 export function functionMcpInput(input: ModObject): ModObject {
   if (
     typeof input.server !== "string" ||
     !input.server.trim() ||
-    input.server.length > 256 ||
+    input.server.length > 1024 ||
     typeof input.tool !== "string" ||
     !input.tool.trim() ||
     input.tool.length > 256 ||
@@ -22,12 +26,55 @@ export function functionMcpInput(input: ModObject): ModObject {
   return parseModJson(encodeModJson(input)) as ModObject
 }
 
+export function functionMcpConnectInput(input: ModObject): ModObject {
+  if (
+    typeof input.server !== "string" ||
+    !input.server.trim() ||
+    input.server.length > 256 ||
+    Object.keys(input).some((key) => key !== "server")
+  )
+    throw new ModFunctionError("MODS_MCP_CONNECT_ARGUMENTS")
+  return { server: input.server }
+}
+
+export function validateFunctionMcpConnectResult(value: ModJson): void {
+  if (!isModObject(value)) throw new ModFunctionError("MODS_MCP_CONNECT_RESULT")
+  if (value.isConnected === true) {
+    if (
+      typeof value.server !== "string" ||
+      !value.server.trim() ||
+      value.server.length > 1024 ||
+      Object.keys(value).some((key) => !["isConnected", "server"].includes(key))
+    )
+      throw new ModFunctionError("MODS_MCP_CONNECT_RESULT")
+    return
+  }
+  if (
+    value.isConnected !== false ||
+    typeof value.reason !== "string" ||
+    !["unlisted", "unapproved", "disabled", "policy", "auth", "failed"].includes(
+      String(value.reason)
+    ) ||
+    typeof value.message !== "string" ||
+    value.message.length > 1000 ||
+    Object.keys(value).some((key) => !["isConnected", "reason", "message"].includes(key))
+  )
+    throw new ModFunctionError("MODS_MCP_CONNECT_RESULT")
+}
+
 /** Match actual provider identities, not the mcp__ prefix also used by registered tools. */
 export function resolveFunctionMcpTool(
   tools: readonly McpCapabilityTool[],
   server: string,
   name: string
 ): McpCapabilityTool {
+  const exactProvider = tools.filter((tool) => tool.providerKey === server)
+  if (exactProvider.length || /^plugin:[^/]+\/.+/.test(server)) {
+    const exact = exactProvider.filter((tool) => tool.toolName === name)
+    if (!exact.length) throw new ModFunctionError("MODS_MCP_TOOL_UNAVAILABLE")
+    if (exact.length > 1) throw new ModFunctionError("MODS_MCP_TOOL_AMBIGUOUS")
+    return structuredClone(exact[0])
+  }
   // A provider can advertise hundreds of tools. Normalize each distinct server name once,
   // without caching authority or allowing a previous discovery snapshot to survive a reload.
   const names = new Map<string, boolean>()

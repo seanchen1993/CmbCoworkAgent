@@ -52,6 +52,63 @@ export async function startModsModelServer() {
       body.messages?.findLast((message: { role: string }) => message.role === "user")?.content
     )
     const lifecyclePrompt = JSON.stringify(body.messages)
+    if (userPrompt.includes("[mods-presentation-skill]")) {
+      const afterRead = body.messages?.at(-1)?.role === "tool"
+      const selected = body.messages?.findLast((message: { role: string }) => message.role === "user")
+      const skillPath = String(selected?.content).match(/<path>([^<]+)<\/path>/)?.[1]
+      if (!skillPath) throw Error("Presentation fixture requires an explicit installed Skill")
+      event([
+        {
+          index: 0,
+          delta: afterRead
+            ? { role: "assistant", content: "PRESENTATION_SKILL_READ_DONE" }
+            : {
+                role: "assistant",
+                tool_calls: [
+                  {
+                    index: 0,
+                    id: "presentation-read",
+                    type: "function",
+                    function: {
+                      name: "read_file",
+                      arguments: JSON.stringify({ file_path: skillPath })
+                    }
+                  }
+                ]
+              },
+          finish_reason: afterRead ? "stop" : "tool_calls"
+        }
+      ])
+      event([], { prompt_tokens: 20, completion_tokens: 5, total_tokens: 25 })
+      response.end("data: [DONE]\n\n")
+      return
+    }
+    if (userPrompt.includes("[mods-spawn-parent]")) {
+      const tool = body.messages?.at(-1)?.role !== "tool"
+      event([{ index: 0, delta: tool ? { role: "assistant", tool_calls: [{ index: 0, id: "spawn-launch", type: "function", function: { name: "mcp__spawn-e2e__launch", arguments: "{}" } }] } : { role: "assistant", content: "SPAWN_PARENT_DONE" }, finish_reason: tool ? "tool_calls" : "stop" }])
+      event([], { prompt_tokens: 20, completion_tokens: 5, total_tokens: 25 })
+      response.end("data: [DONE]\n\n")
+      return
+    }
+    if (userPrompt.includes("[mods-spawn-cold]")) {
+      event([{ index: 0, delta: { role: "assistant", content: "SPAWN_COLD_DONE" }, finish_reason: "stop" }])
+      response.end("data: [DONE]\n\n")
+      return
+    }
+    if (userPrompt.includes("[mods-spawn-limit]")) {
+      event([{ index: 0, delta: { role: "assistant", tool_calls: [{ index: 0, id: "limit-read", type: "function", function: { name: "read_file", arguments: JSON.stringify({ file_path: "notes.txt" }) } }] }, finish_reason: "tool_calls" }])
+      response.end("data: [DONE]\n\n")
+      return
+    }
+    if (userPrompt.includes("[mods-spawn-child]")) {
+      const first = body.messages?.at(-1)?.role !== "tool"
+      if (first) await new Promise((resolve) => setTimeout(resolve, 10000))
+      const read = !first && !lifecyclePrompt.includes('spawn-read')
+      event([{ index: 0, delta: first || read ? { role: "assistant", tool_calls: [{ index: 0, id: first ? "spawn-write" : "spawn-read", type: "function", function: { name: first ? "write_file" : "read_file", arguments: JSON.stringify(first ? { file_path: "unauthorized.txt", content: "must not write" } : { file_path: "notes.txt" }) } }] } : { role: "assistant", content: "SPAWN_CHILD_DONE" }, finish_reason: first || read ? "tool_calls" : "stop" }])
+      event([], { prompt_tokens: 20, completion_tokens: 5, total_tokens: 25 })
+      response.end("data: [DONE]\n\n")
+      return
+    }
     if (isCompactionSummaryRequest(body)) {
       event([{ index: 0, delta: { role: "assistant", content: COMPACTION_SUMMARY }, finish_reason: "stop" }])
       event([], { prompt_tokens: 4000, completion_tokens: 350, total_tokens: 4350 })

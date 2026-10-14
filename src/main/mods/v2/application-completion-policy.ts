@@ -48,6 +48,14 @@ export class ApplicationCompletionPolicies {
     )
   }
 
+  /** UI hint on our dedicated config overlay, never part of stored policy or authority. */
+  guestValue(workspace: string, plugin: string): ModJson | undefined {
+    const host = this.hostValue(workspace, plugin)
+    if (host && typeof host === "object" && !Array.isArray(host))
+      return { ...host, _cmbPolicySource: "application" }
+    return this.store.functionState.get(JSON.stringify([workspace, plugin]), "completion-config")
+  }
+
   view(workspace: string, plugin: string): CompletionPolicyView {
     const host = this.hostValue(workspace, plugin)
     const raw = host ?? this.value(workspace, plugin)

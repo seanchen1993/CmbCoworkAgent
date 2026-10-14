@@ -1,6 +1,53 @@
 import { expect, it, vi } from "vitest"
 import { createFunctionSiteQueue } from "./function-site-queue"
 
+it("admits composer work ahead of a transcript backlog without increasing concurrency", async () => {
+  const queue = createFunctionSiteQueue()
+  const releases: Array<() => void> = []
+  const started: string[] = []
+  const work = (name: string) => async () => {
+    started.push(name)
+    await new Promise<void>((resolve) => releases.push(resolve))
+    return name
+  }
+  const jobs = Array.from({ length: 12 }, (_, index) => queue.run(() => true, work(`row-${index}`)))
+  jobs.push(queue.run(() => true, work("composer"), "interactive"))
+  releases.shift()!()
+  await new Promise((resolve) => setImmediate(resolve))
+  expect(started.slice(0, 5)).toEqual(["row-0", "row-1", "row-2", "row-3", "composer"])
+  while (releases.length) {
+    releases.splice(0).forEach((release) => release())
+    await new Promise((resolve) => setImmediate(resolve))
+  }
+  await Promise.all(jobs)
+})
+
+it("bounds interactive bursts so history progresses and skips revoked queued work", async () => {
+  const queue = createFunctionSiteQueue()
+  const releases: Array<() => void> = []
+  const started: string[] = []
+  const work = (name: string) => async () => {
+    started.push(name)
+    await new Promise<void>((resolve) => releases.push(resolve))
+    return name
+  }
+  const jobs = Array.from({ length: 5 }, (_, index) => queue.run(() => true, work(`row-${index}`)))
+  jobs.push(
+    ...Array.from({ length: 5 }, (_, index) =>
+      queue.run(() => true, work(`composer-${index}`), "interactive")
+    )
+  )
+  const revoked = queue.run(() => false, work("revoked"), "interactive")
+  while (releases.length) {
+    releases.shift()!()
+    await new Promise((resolve) => setImmediate(resolve))
+  }
+  await Promise.all(jobs)
+  expect(await revoked).toBeNull()
+  expect(started.slice(4, 7)).toEqual(["composer-0", "composer-1", "row-4"])
+  expect(started).not.toContain("revoked")
+})
+
 it("bounds a transcript burst while keeping cancelled owners out of host IPC", async () => {
   const queue = createFunctionSiteQueue()
   const releases: Array<() => void> = []
@@ -77,4 +124,39 @@ it("rejects overload without evicting already accepted visible rows", async () =
   ).rejects.toThrow("MODS_UI_SITE_QUEUE_LIMIT")
   release()
   expect(await Promise.all(jobs)).toEqual(Array(260).fill("kept"))
+})
+
+it("restores a visible history row ahead of overscan without starving either queue", async () => {
+  const queue = createFunctionSiteQueue()
+  const releases: Array<() => void> = []
+  const started: string[] = []
+  const work = (name: string) => async () => {
+    started.push(name)
+    await new Promise<void>((resolve) => releases.push(resolve))
+    return name
+  }
+  const jobs = Array.from({ length: 8 }, (_, index) =>
+    queue.run(() => true, work(`overscan-${index}`))
+  )
+  jobs.push(
+    ...Array.from({ length: 4 }, (_, index) =>
+      queue.run(() => true, work(`visible-${index}`), "visible")
+    )
+  )
+  releases.shift()!()
+  await new Promise((resolve) => setImmediate(resolve))
+  expect(started[4]).toBe("visible-0")
+  while (releases.length) {
+    releases.shift()!()
+    await new Promise((resolve) => setImmediate(resolve))
+  }
+  await Promise.all(jobs)
+  expect(started.slice(4, 10)).toEqual([
+    "visible-0",
+    "visible-1",
+    "overscan-4",
+    "visible-2",
+    "visible-3",
+    "overscan-5"
+  ])
 })

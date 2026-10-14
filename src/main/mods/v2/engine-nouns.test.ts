@@ -7,6 +7,28 @@ import { resolve } from "node:path"
 
 const sessions: FunctionSession[] = []
 const guests: FunctionGuestRuntime[] = []
+
+it("keeps delegated noun frames on the actual end cut", async () => {
+  const consumer = await plugin("end-consumer", `
+    on("session.end",async($,e,next)=>{await $.company.read({text:"end"});return next(e)});
+  `)
+  const provider = await plugin("end-provider", `
+    on("engine.create",async($,e,next)=>{
+      const built=await next(e);return {...built,company:{read:async()=>await built.session.id()}};
+    });
+  `)
+  const frames: Array<{ event: string; cut?: string }> = []
+  const invoke = provider.guest.invoke.bind(provider.guest)
+  provider.guest.invoke = (id, input, host, options) => {
+    frames.push({ event: options.event, cut: options.dispatchCutNs })
+    return invoke(id, input, host, options)
+  }
+  const value = session([consumer, provider])
+  await value.start()
+  await value.end("logout")
+  expect(frames.find(frame => frame.event === "company.read")?.cut).toMatch(/^[0-9]+$/)
+  expect(frames.find(frame => frame.event === "engine.create")?.cut).toBeUndefined()
+})
 afterEach(async () => {
   await Promise.all(sessions.splice(0).map((session) => session.close()))
   guests.splice(0).forEach((guest) => guest.dispose())

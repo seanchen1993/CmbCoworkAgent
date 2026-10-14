@@ -7,6 +7,7 @@ import { join, resolve } from "node:path"
 import { build } from "esbuild"
 import { _electron } from "playwright"
 import type { WhiteScreenFixture } from "./support/stream-white-screen-fixture"
+import { browserWorkerPlugin } from "./support/browser-worker-plugin.mjs"
 
 type FixtureWindow = Window & { whiteScreenFixture: WhiteScreenFixture }
 
@@ -24,7 +25,8 @@ async function main() {
     write: false,
     jsx: "automatic",
     define: { "process.env.NODE_ENV": '"production"' },
-    alias: { "@": join(root, "src/renderer/src") }
+    alias: { "@": join(root, "src/renderer/src") },
+    plugins: [browserWorkerPlugin()]
   })
   const html = join(isolated, "index.html")
   writeFileSync(

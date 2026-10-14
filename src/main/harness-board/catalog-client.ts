@@ -189,6 +189,7 @@ export class HarnessCatalogClient {
       try {
         worker.postMessage({
           type: "read-project-contexts",
+          runtimeSource: captureCatalogRuntimeSource(projectIds),
           requestId,
           projectStorePath: join(openworkDir, "harness-board-projects.json"),
           pluginStorePath: join(openworkDir, "plugins.json"),
@@ -240,6 +241,7 @@ export class HarnessCatalogClient {
       try {
         worker.postMessage({
           type: "read-dialog-tips",
+          runtimeSource: captureCatalogRuntimeSource([projectId]),
           requestId,
           projectStorePath: join(openworkDir, "harness-board-projects.json"),
           pluginStorePath: join(openworkDir, "plugins.json"),
@@ -351,3 +353,4 @@ export async function closeHarnessCatalogWorker(): Promise<void> {
   defaultClient = null
   await client?.close()
 }
+import { captureCatalogRuntimeSource } from "./project-runtime/catalog-source"

@@ -1,6 +1,18 @@
 import { expect, it } from "vitest"
 import { normalizeFunctionInput } from "./pinned-input"
 
+it("pins Markdown link presence before admitting next while allowing href business rewrites", () => {
+  const original = { plugin: "Q", element: "report", component: "Pane", requestId: "report",
+    surface: "desktop", link: { href: "https://example.test/original" } }
+  const changed = { ...original, link: { href: "business-data" } }
+  expect(normalizeFunctionInput("ui.press", changed, original)).toEqual(changed)
+  const { link: _link, ...button } = original
+  expect(() => normalizeFunctionInput("ui.press", button, original)).toThrow("MODS_PINNED_INPUT")
+  expect(() => normalizeFunctionInput("ui.press", original, button)).toThrow("MODS_PINNED_INPUT")
+  expect(() => normalizeFunctionInput("ui.press", { ...original, link: { href: "x", authority: true } },
+    original)).toThrow("MODS_UI_TREE_INVALID")
+})
+
 it("pins model call identity while allowing model selection", () => {
   const original = { turnId: "a", index: 2, messageCount: 5, model: "one" }
   expect(normalizeFunctionInput("turn.step", { ...original, model: "two" }, original)).toEqual({

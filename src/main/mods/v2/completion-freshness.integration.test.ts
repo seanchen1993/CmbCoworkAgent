@@ -112,6 +112,20 @@ it("a real guest PASS becomes stale after a workspace file change, without rerun
   expect(f.stale()).toHaveLength(1)
 })
 
+it("reads stable evidence only once per request", async () => {
+  const f = await fixture()
+  await f.approve()
+  await f.pass()
+  const reads = vi.spyOn(f.store, "completionEvidence")
+  expect(
+    f.manager.completionEvidence(f.root, "thread").some((row) => row.phase === "check.result")
+  ).toBe(true)
+  expect(reads).toHaveBeenCalledTimes(1)
+  reads.mockClear()
+  f.manager.completionEvidence(f.root, "thread")
+  expect(reads).toHaveBeenCalledTimes(1)
+})
+
 it.each(["replaced", "off", "revoked"])(
   "invalidates existing proof on %s and removes background work",
   async (mode) => {
@@ -213,10 +227,14 @@ it("reopens a durable ledger in a new manager without reviving the previous PASS
     load
   )
   try {
+    const reads = vi.spyOn(reopened, "completionEvidence")
     const rows = manager.completionEvidence(f.root, "thread")
+    expect(reads).toHaveBeenCalledTimes(2)
     expect(rows).toContainEqual(expect.objectContaining({ id: prior.id, status: "pass" }))
     expect(rows).toContainEqual(expect.objectContaining({ phase: "invalidated", status: "stale" }))
+    reads.mockClear()
     expect(manager.completionEvidence(f.root, "thread")).toHaveLength(rows.length)
+    expect(reads).toHaveBeenCalledTimes(1)
     expect(load).not.toHaveBeenCalled()
   } finally {
     manager.close()

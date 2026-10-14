@@ -1,8 +1,12 @@
 import { readThreadMessagesPageInWorker } from "../thread-message-hydration/client"
 import {
   isRuntimeVisiblePersistedMessage,
-  persistedMessageToRuntimeMessage
+  persistedMessageToRuntimeMessage,
+  type PersistedRuntimeMessageOptions
 } from "../ipc/persisted-runtime-message"
+import { functionConversationTranscriptFields, isFunctionConversationNotice
+} from "../../shared/mods/v2/conversation-transcript"
+import { ModFunctionError } from "../../shared/mods/v2/contracts"
 import type {
   CheckpointMessageRecoveryContext,
   CheckpointMessageRecoveryResult
@@ -17,12 +21,16 @@ const RECOVERY_BYTE_BUDGET = 4 * 1024 * 1024
  * receives only the already-bounded page and constructs at most 1,000 messages.
  */
 export async function recoverMainCheckpointMessages(
-  context: CheckpointMessageRecoveryContext
+  context: CheckpointMessageRecoveryContext,
+  options: PersistedRuntimeMessageOptions & { sourceGuard?: () => void } = {}
 ): Promise<CheckpointMessageRecoveryResult | null> {
+  const sourceGuard = options.sourceGuard
+  const captured = { resolveFunctionRow: options.resolveFunctionRow }
   if (context.checkpointNs !== "") return null
   const checkpointCreatedAt = new Date(context.checkpointTs).getTime()
   if (!Number.isFinite(checkpointCreatedAt)) return null
 
+  sourceGuard?.()
   const page = await readThreadMessagesPageInWorker(context.threadId, {
     limit: RECOVERY_MESSAGE_LIMIT,
     byteBudget: RECOVERY_BYTE_BUDGET,
@@ -30,6 +38,15 @@ export async function recoverMainCheckpointMessages(
     notAfterCreatedAt: checkpointCreatedAt,
     recoveryCheckpointId: context.checkpointId
   })
+  sourceGuard?.()
+  for (const message of page.messages) {
+    const fields = functionConversationTranscriptFields(message, message.id, message.role)
+    if (fields.function_row_invalid)
+      throw new ModFunctionError("MODS_CONVERSATION_TRANSCRIPT_INVALID")
+    if (fields.function_row && !isFunctionConversationNotice(fields) &&
+      (!sourceGuard || !captured.resolveFunctionRow))
+      throw new ModFunctionError("MODS_CONVERSATION_RECOVERY_REQUIRED")
+  }
   // A partially migrated legacy checkpoint is not an authoritative durable
   // source yet, even when the rows copied so far fit into one page.
   if (page.legacyCheckpointMigrationStatus === "migrating") return null
@@ -39,13 +56,17 @@ export async function recoverMainCheckpointMessages(
   if (page.recoveryIntegrity !== "verified") return null
   const seenMessageIds = new Set<string>()
   const messages = page.messages
-    .filter(isRuntimeVisiblePersistedMessage)
+    .filter((message) => {
+      const fields = functionConversationTranscriptFields(message, message.id, message.role)
+      return fields.function_row ? !isFunctionConversationNotice(fields) :
+        isRuntimeVisiblePersistedMessage(message)
+    })
     .filter((message) => {
       if (!message.id || seenMessageIds.has(message.id)) return false
       seenMessageIds.add(message.id)
       return true
     })
-    .map(persistedMessageToRuntimeMessage)
+    .map((message) => persistedMessageToRuntimeMessage(message, captured))
     .filter((message): message is NonNullable<typeof message> => message !== null)
 
   const complete = !page.hasMore
@@ -73,5 +94,6 @@ export async function recoverMainCheckpointMessages(
     durableMessages: page.total,
     complete
   })
+  sourceGuard?.()
   return { messages, complete, boundedByHistory: page.hasMore }
 }

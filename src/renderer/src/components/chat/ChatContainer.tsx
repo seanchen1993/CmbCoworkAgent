@@ -1,3 +1,22 @@
+import { sameSimpleAuthoringScope } from "@/lib/simple-authoring-intent"
+import { useSimpleAuthoringTask, dismissSimpleAuthoringTask } from "@/lib/simple-authoring-composer"
+import { selectChatFlow } from "@/lib/chat-flow-choice"
+import { BuiltinNavigationPanel } from "./BuiltinNavigationPanel"
+import { openBuiltinNavigation } from "@/lib/builtin-navigation"
+import { builtinTargetFromItem, parseBuiltinNavigation, builtinNavigationPrefix, builtinCommandConflicts } from "@/features/slash-commands/builtin-commands"
+import { ModsDevelopmentPanel } from "../customize/ModsDevelopmentPanel"
+import { usePromptComposer } from "@/lib/use-prompt-composer"
+import { useFunctionDesktop } from "@/lib/use-function-desktop"
+import { useChatTransientToasts } from "@/lib/use-chat-transient-toasts"
+import { submitAfterPromptEdit } from "@/lib/prompt-edit-submission"
+import { PromptDecorations } from "./PromptDecorations"
+import { useChatFlow } from "@/lib/use-chat-flow"
+import { ClawSidebar, ClawComposerBar } from "./ClawSidebar"
+import { ProjectRunDetails } from "./ProjectRunDetails"
+import { openClawSidebar } from "@/lib/claw-sidebar"
+import { isOrdinaryFlowMetadata } from "../../../../shared/mods/flows/scope"
+import { isDevelopmentThreadMetadata } from "../../../../shared/mods/development-scope"
+import { ModsChatScope, useModsChatState } from "../../lib/mods-chat-scope"
 import { projectHumanGate } from "../../../../shared/harness-notifications"
 import { useModCommands } from "../../features/slash-commands/useModCommands"
 import { ModCommandJobs } from "./ModCommandJobs"
@@ -9,6 +28,7 @@ import { FunctionSite } from "./FunctionSite"
 import { functionSpinnerFacts } from "../../lib/function-status-site"
 import { useFunctionTurnNotices } from "@/lib/use-function-turn-notices"
 import { ModCards } from "./ModCards"
+import { FunctionPeerMessages } from "./FunctionPeerMessages"
 import { useHarnessNotifications } from "@/lib/harness-notifications"
 import { BizRetryDecisionCard } from "@/components/harness-board/BizRetryNotice"
 import React, {
@@ -16,6 +36,7 @@ import React, {
   useEffect,
   useLayoutEffect,
   useMemo,
+  createElement,
   useCallback,
   useState,
   useSyncExternalStore
@@ -64,7 +85,7 @@ import {
   SlidersHorizontal
 } from "lucide-react"
 import type { FileAttachment, HarnessRunDetailViewModel, QueuedMessage } from "@/types"
-import { ScrollArea } from "@/components/ui/scroll-area"
+import { ChatMessageScrollArea } from "./ChatMessageScrollArea"
 import { Button } from "@/components/ui/button"
 import {
   Dialog,
@@ -111,6 +132,7 @@ import {
   isWorkflowModeMetadata
 } from "@/lib/coordinator-mode-helpers"
 import { ModelSwitcher } from "./ModelSwitcher"
+import { chatClawDefaultModel } from "@/lib/chat-claw-state"
 import { AgentModeSwitcher, type ChatAgentMode } from "./AgentModeSwitcher"
 import { WorkflowRunPanel, WorkflowHistoryButton } from "./WorkflowRunPanel"
 import { SandboxModeSwitcher } from "./SandboxModeSwitcher"
@@ -143,7 +165,6 @@ import {
   type ChatApprovalDecision
 } from "./ChatMessageVirtualList"
 import { ChatScrollNavigator } from "./ChatScrollNavigator"
-import { ChatScrollToBottomButton } from "./ChatScrollToBottomButton"
 import {
   ChatSearchOverlay,
   type DurableChatSearchOptions,
@@ -180,6 +201,8 @@ import {
   type SlashCommandItem
 } from "@/features/slash-commands/useSlashCommands"
 import {
+  extractAtFileMentions,
+  isSupportedWorkspaceMentionFilePath,
   removeAtFileTokenFromInput,
   useAtFileMentions,
   type AtFileSuggestion
@@ -189,6 +212,7 @@ import {
   readBoundedWorkspaceMentionFile,
   retainMentionedWorkspaceFilesForWorkspace,
   resolveAtFileAttachments,
+  collectPendingAtFileMentions,
   resolveAtFileSelection,
   type MentionedWorkspaceFile
 } from "@/features/mentions/atFileAttachments"
@@ -196,6 +220,7 @@ import { MentionFileChip } from "@/features/mentions/MentionFileChip"
 import { DEFAULT_IM_CHANNEL_ID } from "../../../../shared/im-gateway-contract"
 import { splitGoalTransportPayload } from "../../../../shared/goal-slash"
 import { normalizeWorkspacePathKey } from "../../../../shared/workspace-path"
+import { captureComposerMentionRoute } from "@/lib/composer-mention-route"
 import {
   MAX_ATTACHMENT_FILE_BYTES,
   type SelectedAttachmentFileGrant
@@ -220,12 +245,15 @@ import {
 import { readHarnessBoardCatalogCache } from "@/components/harness-board/harness-board-cache"
 import {
   getQueuedModelContent,
+  getQueuedComposerSubmission,
   getQueuedDisplayContent,
   getQueuedPreview,
   guardCoordinatorPlainText,
   canClaimQueuedMessage,
   classifyGuidedMessage
 } from "@/lib/queued-message-content"
+import { editQueuedComposerMentionText } from "@/lib/queued-composer-mentions"
+import { assertQueuedComposerMentionWorkspace } from "@/lib/queued-message-restore"
 import { getSkillMetadataId, isSkillDisabled } from "@/lib/skill-ids"
 import { formatGoalEventMessage, isVisibleCheckpointTranscriptMessage } from "@/lib/goal-transcript"
 import { buildGoalPanelViewModel, goalVerdictTone } from "@/lib/goal-panel-view"
@@ -248,6 +276,7 @@ import {
   tryAcquireSubmitInFlightLock,
   type SubmitInFlightLockRef
 } from "@/lib/submit-in-flight-lock"
+import { captureComposerSubmissionState, hasComposerSubmissionStateChanged } from "@/lib/composer-submission-state"
 import { GitBranchSwitcher } from "./GitBranchSwitcher"
 import { ProcessingDuration } from "./ProcessingDuration"
 import { ContextCompactionCard } from "./ContextCompactionCard"
@@ -1007,21 +1036,11 @@ const liveSubmitPreparingThreads = new Set<string>()
 // payload while @file attachments are being resolved.
 const queuedDraftPreparingThreads = new Set<string>()
 /**
- * Temporarily hide the current-run "引导" action from the queue UI.
- *
- * The underlying main-process queue, durable acknowledgement, reconciliation,
- * and IPC plumbing are intentionally retained so the implementation can be
- * repaired without rebuilding the feature. The action remains disabled because
- * a guided message can currently produce incorrect live transcript boundaries
- * in Team/Coordinator mode (for example, duplicating or attaching assistant
- * output to the wrong visible turn). Ordinary FIFO queueing and automatic
- * post-run draining do not depend on this control and remain available.
- *
- * Re-enable only after the guided user turn and its following assistant turn are
- * rendered as separate, non-duplicated messages in Solo, Team, and Workflow,
- * including persistence/reload verification for the same transcript.
+ * Guide hands the existing queued draft to the current foreground run at its
+ * next model boundary. Background-only work keeps the original queue-priority
+ * fallback; approvals, active Goals and task ownership retain their own checks.
  */
-const CURRENT_RUN_GUIDE_UI_ENABLED = false
+const CURRENT_RUN_GUIDE_UI_ENABLED = true
 const QUEUE_MODEL_REQUIRED_ERROR = "请先在下方选择模型后再发送消息。"
 const QUEUE_MODEL_MISSING_ERROR = "当前线程模型不存在，请重新选择模型。"
 const QUEUE_MODEL_UNAVAILABLE_ERROR = "当前模型不可用，请先在模型配置中设置 API 密钥。"
@@ -1674,7 +1693,6 @@ export function ChatContainer({
   readOnlyReason = null,
   onHarnessSessionCreated
 }: ChatContainerProps): React.JSX.Element {
-  const functionTurnNotices = useFunctionTurnNotices(threadId)
   const [functionHint, setFunctionHint] = useState<{ threadId: string; text: string | null } | null>(null)
   const updateFunctionHint = useCallback((text: string | null) => {
     setFunctionHint((old) => old?.threadId === threadId && old.text === text ? old : { threadId, text })
@@ -1686,6 +1704,9 @@ export function ChatContainer({
   const remoteThreadInfo = useMemo(() => getRemoteThreadDisplayInfo(remoteThread), [remoteThread])
   const resolvedReadOnlyReason =
     readOnlyReason ??
+    (remoteThread?.metadata?.hostProjectRuntime
+      ? "此会话由项目阶段创建。查看过程后，请返回项目任务执行下一步或重试。"
+      : null) ??
     (remoteThreadInfo?.historical
       ? "设备接管前的远程历史 Thread 仅可查看"
       : remoteThreadInfo?.kind === "inbox"
@@ -1878,6 +1899,8 @@ export function ChatContainer({
   const [draggingQueueId, setDraggingQueueId] = useState<string | null>(null)
   const queuedEditRequestRef = useRef(0)
   const guidingQueuedMessageIdsRef = useRef(new Set<string>())
+  const [guidingQueuedMessageIds, setGuidingQueuedMessageIds] =
+    useState<ReadonlySet<string>>(() => new Set())
   const [queuePumpTick, setQueuePumpTick] = useState(0)
   const subscribeToSubmitRelease = useCallback(
     (listener: () => void) => subscribeSubmitInFlightRelease(submitInFlightRef, threadId, listener),
@@ -1942,6 +1965,10 @@ export function ChatContainer({
     () => getForkWorkspacePath(currentThread),
     [currentThread]
   )
+  const modsChatState = useModsChatState(threadId, currentForkWorkspacePath)
+  const modsChatEnabled = modsChatState.enabled
+  const chatToasts = useChatTransientToasts(threadId, modsChatEnabled && !readOnly)
+  const toast = chatToasts.toast
   const [messageForkTarget, setMessageForkTarget] = useState<MessageForkDialogTarget | null>(null)
   const currentThreadIdRef = useRef(threadId)
   const messageForkRequestIdRef = useRef(0)
@@ -2041,7 +2068,7 @@ export function ChatContainer({
         setHumanGateDecisionBusy(null)
       }
     },
-    [humanGate, humanGateDecisionBusy]
+    [toast, humanGate, humanGateDecisionBusy]
   )
   const disableCoordinatorModeOption = isProjectModeAgentTeamSelectionDisabled(
     currentThread?.metadata,
@@ -2252,7 +2279,7 @@ export function ChatContainer({
     tokenUsage,
     contextReminder,
     harnessAgentmdLoadStatus,
-    currentModel,
+    currentModel: threadModel,
     draftInput: input,
     harnessNextActionDialogTips,
     draftSkill: selectedSkill,
@@ -2301,11 +2328,34 @@ export function ChatContainer({
     clearHookInterruption,
     setContextReminder,
     setDraftInput: setInput,
+    readPromptDraft,
+    applyPromptDraft,
+    captureModelSelectionIntent,
+    isModelSelectionIntentCurrent,
     setHarnessNextActionDialogTips,
     setDraftSkill: setSelectedSkill,
     draftBuiltinBrowser: selectedBuiltinBrowser,
     setDraftBuiltinBrowser: setSelectedBuiltinBrowser
   } = useCurrentThread(threadId)
+  const chatFlow = useChatFlow(threadId, currentForkWorkspacePath, modsChatEnabled && !readOnly && isOrdinaryFlowMetadata(currentThread?.metadata))
+  const clawDefaultModel = chatClawDefaultModel(
+    chatFlow.enabled,
+    "binding" in chatFlow ? chatFlow.binding : undefined
+  )
+  const currentModel = clawDefaultModel ?? threadModel
+  const modsChatScope = useMemo(
+    () => ({
+      threadId,
+      ...modsChatState,
+      // A missing directory entry is still loading; a loaded entry without workspace is an error.
+      error: currentThread ? modsChatState.error : undefined,
+      retry: currentForkWorkspacePath ? modsChatState.retry : () => {
+        void useAppStore.getState().loadThreads().catch(() => {})
+      }
+    }),
+    [threadId, modsChatState, currentThread, currentForkWorkspacePath]
+  )
+  const functionTurnNotices = useFunctionTurnNotices(threadId, modsChatEnabled)
   const autoApproveGitPush =
     pendingApproval?.operation === "git_push" && yoloModeLoaded && yoloMode
   const workspacePathRef = useRef(workspacePath)
@@ -2568,7 +2618,7 @@ export function ChatContainer({
           }
         })
     },
-    [
+    [toast, 
       disableCoordinatorModeOption,
       disableWorkflowModeOption,
       historyLoading,
@@ -2892,7 +2942,7 @@ export function ChatContainer({
         setYoloModePending(false)
       }
     },
-    [fetchYoloMode, yoloModeLoaded, yoloModePending]
+    [toast, fetchYoloMode, yoloModeLoaded, yoloModePending]
   )
 
   const handleToggleYoloMode = useCallback((): void => {
@@ -3188,7 +3238,9 @@ export function ChatContainer({
       try {
         const legacyDecision =
           decision === "approve_session" || decision === "approve_permanent" ? "approve" : decision
+        const modelSelectionIntent = captureModelSelectionIntent()
         await stream.submit(null, {
+          modelSelectionIntent,
           command: {
             resume: {
               decision: legacyDecision,
@@ -3210,6 +3262,7 @@ export function ChatContainer({
       }
     },
     [
+      captureModelSelectionIntent,
       currentModel,
       agentMode,
       pendingApproval,
@@ -4216,7 +4269,7 @@ export function ChatContainer({
       }
       dispatchChatScrollEvent({ type: "RETURN_TO_BOTTOM" })
     })()
-  }, [
+  }, [toast, 
     cancelMessageWindowLoad,
     dispatchChatScrollEvent,
     historyPageLoading,
@@ -4705,7 +4758,7 @@ export function ChatContainer({
       dispatchChatScrollEvent({ type: "RESTORE_END", generation })
       toast.error(error instanceof Error ? error.message : "加载更早消息失败")
     }
-  }, [
+  }, [toast, 
     dispatchChatScrollEvent,
     displayMessages.length,
     getViewport,
@@ -4746,7 +4799,7 @@ export function ChatContainer({
         toast.error(error instanceof Error ? error.message : "继续加载中间消息失败")
       }
     }
-  }, [
+  }, [toast, 
     dispatchChatScrollEvent,
     historyPageLoading,
     historyWindowGap?.reloadTargetMessageId,
@@ -5027,8 +5080,65 @@ export function ChatContainer({
     threadMessages.length
   ])
 
-  const modCommands = useModCommands(threadId)
+  const [flowIntent, setFlowIntent] = useState<{ threadId: string; mode: "chat" | "flow" }>({ threadId, mode: "chat" })
+  const composerMode = flowIntent.threadId === threadId ? flowIntent.mode : "chat"
+  const firstTask = useSimpleAuthoringTask(threadId, currentForkWorkspacePath ?? null)
+  const [preparingFirstTask, setPreparingFirstTask] = useState(false)
+  const firstTaskScope = useRef("")
+  firstTaskScope.current = JSON.stringify([threadId, currentForkWorkspacePath, firstTask?.id])
+  const prepareFirstTask = async () => {
+    if (!firstTask || preparingFirstTask || isLoading || chatFlow.active || chatFlow.busy) return
+    const captured = firstTaskScope.current
+    const draft = readPromptDraft()
+    if (firstTask.kind === "command" && draft.text.trim()) {
+      setError("请先保存或处理当前输入，再填入插件命令。原草稿已保留，命令不会追加到正文中。")
+      return
+    }
+    if ((firstTask.flow || firstTask.kind === "command") &&
+        (hasPendingFilePayload || selectedSkill || selectedBuiltinBrowser)) {
+      setError("请先处理输入框中已有的附件和技能，再准备此任务；当前内容已保留。")
+      return
+    }
+    const admitted = submissionStateRef.current
+    setPreparingFirstTask(true)
+    try {
+      const current = await window.api.mods.clawView(threadId)
+      if (firstTaskScope.current !== captured) return
+      if (hasComposerSubmissionStateChanged(admitted, submissionStateRef.current))
+        throw Error("聊天状态已变化，请重新准备任务；输入已保留。")
+      if (!current.enabled || current.active?.id !== firstTask.profileId ||
+          !sameSimpleAuthoringScope(firstTask.scope, { threadId, workspace: current.workspace }) ||
+          JSON.stringify(current.active.flow ?? null) !== JSON.stringify(firstTask.flow ?? null))
+        throw Error("助手设置已变化，请返回组合页面核对后再准备任务。")
+      const text = [draft.text, firstTask.suggestedText].filter(Boolean).join("\n\n")
+      if (!applyPromptDraft(draft.revision, text))
+        throw Error("输入已变化，请重新点击准备；当前内容已保留。")
+      if (firstTask.flow) selectChatFlow(threadId, {
+        workspace: current.workspace, id: firstTask.flow.definition.id,
+        name: firstTask.flow.definition.name, revision: firstTask.flow.revision,
+        bindingRevision: current.bindingRevision
+      })
+      setFlowIntent({ threadId, mode: firstTask.flow ? "flow" : "chat" })
+      dismissSimpleAuthoringTask(firstTask.id)
+      inputRef.current?.focus()
+    } catch (cause) { setError(cause instanceof Error ? cause.message : String(cause)) }
+    finally { setPreparingFirstTask(false) }
+  }
+
+  const modCommands = useModCommands(threadId, modsChatEnabled, currentForkWorkspacePath)
   const isModCommandInput = modCommands.handles(input.trim())
+  const localCommandTarget = parseBuiltinNavigation(input)
+  const explicitPluginCommand = useRef<string | null>(null)
+  const explicitMenuSelection = useRef<{ text: string; revision: number } | null>(null)
+  const commandScope = JSON.stringify([threadId, currentForkWorkspacePath])
+  const selectedCommandScope = useRef(commandScope)
+  if (selectedCommandScope.current !== commandScope) {
+    selectedCommandScope.current = commandScope
+    explicitPluginCommand.current = null
+    explicitMenuSelection.current = null
+  }
+  if (explicitPluginCommand.current && !input.startsWith(`${explicitPluginCommand.current} `))
+    explicitPluginCommand.current = null
   const slash = useSlashCommands({
     input,
     skills: enabledSkillsForSlash,
@@ -5110,6 +5220,12 @@ export function ChatContainer({
     inputDisabled || contextReminderPending || readOnly || bizRetryPending
   const effectiveComposerControlsDisabled =
     composerControlsDisabled || contextReminderPending || readOnly || bizRetryPending
+  const promptComposer = usePromptComposer({ threadId,
+    enabled: modsChatEnabled && !effectiveInputDisabled, textarea: inputRef,
+    read: readPromptDraft, apply: applyPromptDraft, onError: setError,
+    working: isLoading || chatFlow.active || chatFlow.busy || Boolean(pendingApproval) || approvalQueue.length > 0 })
+  useFunctionDesktop(threadId, modsChatEnabled && !readOnly, chatRootRef,
+    isLoading || chatFlow.active || chatFlow.busy)
   const inputPlaceholder = useMemo(() => {
     if (bizRetryPending) return "请在决策入口操作"
     if (resolvedReadOnlyReason) return resolvedReadOnlyReason
@@ -5167,8 +5283,19 @@ export function ChatContainer({
     [setInput, setSelectedBuiltinBrowser, setSelectedSkill, slashResetSelection]
   )
 
+  const dispatchBuiltinCommand = useCallback((target: NonNullable<ReturnType<typeof parseBuiltinNavigation>>) => {
+    const draft = readPromptDraft()
+    openBuiltinNavigation(target, { threadId, workspace: currentForkWorkspacePath ?? null })
+    // Selecting a menu entry may consume a slash query, but never a sentence or attachments.
+    if (/^\/[a-z_-]*$/i.test(draft.text.trim())) applyPromptDraft(draft.revision, "")
+    explicitPluginCommand.current = null
+  }, [threadId, currentForkWorkspacePath, readPromptDraft, applyPromptDraft])
+
   const applySlashCommand = useCallback(
     (command: SlashCommandItem) => {
+      const localTarget = builtinTargetFromItem(command)
+      if (localTarget) { dispatchBuiltinCommand(localTarget); return }
+      explicitPluginCommand.current = command.id.startsWith("mod:") ? command.command : null
       if (isBuiltinBrowserCommandSelection(command)) {
         setSelectedSkill(null)
         setSelectedBuiltinBrowser(true)
@@ -5187,7 +5314,7 @@ export function ChatContainer({
         textarea.setSelectionRange(cursor, cursor)
       })
     },
-    [setInput, setSelectedBuiltinBrowser, setSelectedSkill, slashResetSelection]
+    [dispatchBuiltinCommand, setInput, setSelectedBuiltinBrowser, setSelectedSkill, slashResetSelection]
   )
 
   const applyAtFileMention = useCallback(
@@ -5281,11 +5408,12 @@ export function ChatContainer({
       return
     }
     toast.info(message)
-  }, [])
+  }, [toast])
 
   const submitGoalResumeCommand = useCallback(async (): Promise<void> => {
     if (!stream || historyLoading || isLoading || scheduledTaskLoading) return
     if (!tryAcquireSubmitInFlightLock(submitInFlightRef, true, threadId)) return
+    const modelSelectionIntent = captureModelSelectionIntent()
     try {
       const pendingApprovalRecord = pendingApproval as unknown as Record<string, unknown> | null
       if (pendingApproval && !pendingApprovalRecord?._orchestratorRequestId) {
@@ -5323,6 +5451,7 @@ export function ChatContainer({
           messages: [{ type: "human", content: "/goal resume" }]
         },
         {
+          modelSelectionIntent,
           config: {
             configurable: { thread_id: threadId, model_id: currentModel }
           }
@@ -5332,6 +5461,7 @@ export function ChatContainer({
       releaseSubmitInFlightLock(submitInFlightRef, true, threadId)
     }
   }, [
+    captureModelSelectionIntent,
     clearError,
     currentModel,
     historyLoading,
@@ -5424,7 +5554,7 @@ export function ChatContainer({
         }
       })()
     },
-    [
+    [toast, 
       clearError,
       hasActiveGoalRunning,
       goalControlAllowedWhileLoading,
@@ -5442,9 +5572,92 @@ export function ChatContainer({
     ]
   )
 
+  const startChatFlow = async (goal: string): Promise<boolean> => {
+    if (readOnly || historyLoading || contextReminderPending || isLoading || pendingApproval ||
+      approvalQueue.length || hasActiveGoalRunning || chatFlow.active)
+      throw Error("当前会话有任务、审批或上下文确认未完成，请处理后再启动流程。")
+    if (!tryAcquireSubmitInFlightLock(submitInFlightRef, true, threadId))
+      throw Error("当前正在准备发送消息，请稍后再启动流程。")
+    try { return await chatFlow.submit(goal) }
+    finally { releaseSubmitInFlightLock(submitInFlightRef, true, threadId) }
+  }
+
+  const preparedSubmitRef = useRef<{ threadId: string; submit: (
+    e: React.FormEvent, defaultText: string, draft: { text: string; revision: number }
+  ) => Promise<void> } | null>(null)
+  const submissionState = { threadId, readOnly, contextReminderPending, effectiveInputDisabled,
+    composerMode, selectedSkill, selectedBuiltinBrowser, attachments, mentionedFiles,
+    isLoading, pendingApproval, approvalQueue, currentModel, workspacePath }
+  const submissionStateRef = useRef(submissionState)
+  submissionStateRef.current = submissionState
   const handleSubmit = async (e: React.FormEvent, defaultText = ""): Promise<void> => {
     e.preventDefault()
-    const trimmedInput = defaultText || input.trim()
+    if (isComposingRef.current) return
+    const localText = readPromptDraft().text.trim()
+    const localTarget = !defaultText ? parseBuiltinNavigation(localText) : null
+    const localPrefix = !defaultText ? builtinNavigationPrefix(localText) : null
+    if (localPrefix && explicitPluginCommand.current !== `/${localPrefix}` && !localTarget) {
+      setError("这项内置入口不接收任务正文。输入已保留，请从命令菜单选择要打开的功能；插件命令请先选择插件条目。")
+      return
+    }
+    if (localTarget && explicitPluginCommand.current !== localText) {
+      if (selectedSkill || selectedBuiltinBrowser) {
+        setError("输入已保留。请通过命令菜单中的“内置”入口打开此功能，或先取消已选技能。")
+        return
+      }
+      if (skillsLoading || !modCommands.catalogReady ||
+          builtinCommandConflicts(localText, modCommands.items, enabledSkillsForSlash)) {
+        setError("请在命令菜单中选择“内置”或对应插件，确定要打开的功能；输入已保留。")
+        return
+      }
+      dispatchBuiltinCommand(localTarget)
+      return
+    }
+    if (!modsChatEnabled || defaultText) return submitPreparedInput(e, defaultText, readPromptDraft())
+    const modelSelectionIntent = captureModelSelectionIntent()
+    const assertPromptSubmissionState = captureComposerSubmissionState(
+      () => submissionStateRef.current,
+      () => isModelSelectionIntentCurrent(modelSelectionIntent)
+    )
+    try {
+      await submitAfterPromptEdit(threadId, { flush: promptComposer.flushSubmission, read: readPromptDraft,
+        isConfirmed: promptComposer.isSubmissionConfirmed,
+        assertCurrent: assertPromptSubmissionState,
+        submit: draft => {
+          if (preparedSubmitRef.current?.threadId !== threadId) throw Error("会话已切换，请重新发送")
+          return preparedSubmitRef.current.submit(e, defaultText, draft)
+        } })
+    } catch (cause) {
+      setError(`消息未发送，输入已保留。${cause instanceof Error ? cause.message : String(cause)}`)
+    }
+  }
+
+  const submitPreparedInput = async (e: React.FormEvent, defaultText: string,
+    submittedDraft: { text: string; revision: number }): Promise<void> => {
+    e.preventDefault()
+    const admittedState = submissionStateRef.current
+    const submitModelId = admittedState.currentModel
+    const modelSelectionIntent = captureModelSelectionIntent()
+    const assertSubmissionState = () => {
+      const latest = submissionStateRef.current
+      if (hasComposerSubmissionStateChanged(admittedState, latest) ||
+        !isModelSelectionIntentCurrent(modelSelectionIntent))
+        throw Error("准备发送期间会话、附件、技能或任务状态已变化，请重新发送；当前输入已保留。")
+    }
+    const trimmedInput = defaultText || submittedDraft.text.trim()
+    if (composerMode === "flow" && !defaultText) {
+      if (!trimmedInput) return
+      try {
+        if (hasPendingFilePayload || selectedSkill || selectedBuiltinBrowser)
+          throw Error("流程目标暂只接收文本，请移除附件、技能和浏览器选择，或切回聊天；你的输入已保留。")
+        if (!chatFlow.choice) throw Error("请先在右侧选择一个已保存流程，再发送本次任务。")
+        if (await startChatFlow(trimmedInput)) {
+          if (applyPromptDraft(submittedDraft.revision, "")) promptComposer.reset()
+          openClawSidebar("results")
+        }
+      } catch (cause) { setError(cause instanceof Error ? cause.message : String(cause)) }
+      return
+    }
     const isGoalSlashInput = /^\/goal(?:\s|$)/i.test(trimmedInput)
     const shouldOpenGoalDetailsForStatus = /^\/goal(?:\s+status)?\s*$/i.test(trimmedInput)
     // Defense-in-depth: every current trigger already short-circuits while the
@@ -5459,15 +5672,16 @@ export function ChatContainer({
       if (historyLoading) return
       try {
         const handled = await modCommands.submit(trimmedInput, () => {
+          assertSubmissionState()
           if (hasPendingFilePayload || selectedSkill || selectedBuiltinBrowser)
-            throw new Error("Mods 命令接收文本参数，请先移除附件、技能和浏览器选择。")
+            throw new Error("这项灵件操作只接收文字，请先移除附件、技能和浏览器选择。")
         })
         if (handled) {
-          setInput("")
+          if (applyPromptDraft(submittedDraft.revision, "")) promptComposer.reset()
           return
         }
       } catch (error) {
-        setError(error instanceof Error ? error.message : "Mods 命令提交失败")
+        setError(error instanceof Error ? error.message : "灵件操作提交失败")
         return
       }
     }
@@ -5486,7 +5700,7 @@ export function ChatContainer({
     })
     const willEnqueueWhileBusy =
       !isGoalSlashInput &&
-      (isLoading || Boolean(pendingApproval) || approvalQueue.length > 0 || shouldQueueBehindSubmit)
+      (isLoading || chatFlow.active || chatFlow.busy || Boolean(pendingApproval) || approvalQueue.length > 0 || shouldQueueBehindSubmit)
     if (
       (!trimmedInput && !hasPendingFilePayload && !selectedSkill && !selectedBuiltinBrowser) ||
       historyLoading ||
@@ -5530,7 +5744,7 @@ export function ChatContainer({
         if (threadError) {
           clearError()
         }
-        setInput("")
+        if (applyPromptDraft(submittedDraft.revision, "")) promptComposer.reset()
         if (shouldOpenGoalDetailsForStatus) {
           setGoalDetailsOpen(true)
         }
@@ -5597,12 +5811,12 @@ export function ChatContainer({
       }
 
       if (!bypassGoalControlValidation) {
-        if (!currentModel) {
+        if (!submitModelId) {
           setError("请先在下方选择模型后再发送消息。")
           return
         }
 
-        const selectedModel = models.find((m) => m.id === currentModel)
+        const selectedModel = models.find((m) => m.id === submitModelId)
         if (!selectedModel) {
           setError("当前线程模型不存在，请重新选择模型。")
           return
@@ -5628,6 +5842,25 @@ export function ChatContainer({
       } catch {
         toast.error("Agent 模式保存失败，消息未发送；再次发送将使用原模式")
         return
+      }
+      try {
+        assertSubmissionState()
+      } catch (error) {
+        setError(error instanceof Error ? error.message : "准备发送期间状态已变化，请重新发送")
+        return
+      }
+      let deferMentionReads = modsChatEnabled && (agentMode === "normal" || agentMode === "multi") &&
+        !/^\s*\//.test(trimmedInput) && !/^\s*(?:\[coordinator\]|#coordinator)/i.test(trimmedInput)
+      const hasMentionCandidate = deferMentionReads && (mentionedFiles.length > 0 ||
+        extractAtFileMentions(trimmedInput).some(mention =>
+          isSupportedWorkspaceMentionFilePath(mention.replace(/#L[1-9]\d*(?:-[1-9]\d*)?$/u, ""))))
+      if (deferMentionReads && hasMentionCandidate) {
+        const route = await window.api.mods.composerEnabled(threadId)
+        assertSubmissionState()
+        const currentWorkspace = workspacePathRef.current
+        if (normalizeWorkspacePathKey(currentWorkspace) !== normalizeWorkspacePathKey(workspacePath))
+          throw Error("工作区已变化，消息未发送；当前输入和附件已保留。")
+        deferMentionReads = captureComposerMentionRoute(route, currentWorkspace ?? "") === "defer"
       }
       // Reset both the error message and its structured detail at turn start so
       // no stale diagnostics linger into the new turn.
@@ -5664,7 +5897,7 @@ export function ChatContainer({
       const claimedAttachments = attachments
       const claimedMentionedFiles = mentionedFiles
       let rawMessage = trimmedInput
-      setInput("")
+      if (!defaultText && applyPromptDraft(submittedDraft.revision, "")) promptComposer.reset()
       setAttachments([])
       setMentionedFiles([])
       if (skill) setSelectedSkill(null)
@@ -5684,8 +5917,15 @@ export function ChatContainer({
         })
       }
       let atFileResolution: Awaited<ReturnType<typeof resolveAtFileAttachments>>
+      const pending = deferMentionReads ? collectPendingAtFileMentions({ rawMessage,
+        attachments: claimedAttachments, mentionedFiles: claimedMentionedFiles,
+        workspacePath, maxAttachments: MAX_ATTACHMENTS }) : undefined
       try {
-        atFileResolution = await resolveAtFileAttachments({
+        atFileResolution = pending ? {
+          cleanedMessage: rawMessage, attachments: [...claimedAttachments],
+          mentionCountLimitHit: pending.countLimitHit, mentionAttachmentLimitHit: false,
+          ...(pending.staleWorkspace ? { warningMessage: "工作区已变化，旧的 @文件已忽略" } : {})
+        } : await resolveAtFileAttachments({
           rawMessage,
           attachments: claimedAttachments,
           mentionedFiles: claimedMentionedFiles,
@@ -5743,10 +5983,11 @@ export function ChatContainer({
       // A stale chip may have been the only composer payload. Once it is
       // rejected, do not emit an empty user turn merely because the pre-read
       // validation originally saw a pending file chip.
-      if (!rawMessage && resolvedAttachments.length === 0 && !skill && !browser) return
+      if (!rawMessage && resolvedAttachments.length === 0 && !pending?.pendingMentions.length && !skill && !browser) return
 
       const attachmentPayload = resolvedAttachments.length > 0 ? resolvedAttachments : undefined
-      const fallbackUserText = attachmentPayload && !skill ? "请分析以下文件内容。" : ""
+      const hasFiles = !!attachmentPayload || !!pending?.pendingMentions.length
+      const fallbackUserText = hasFiles && !skill ? "请分析以下文件内容。" : ""
       const visibleUserText = resolveBuiltinBrowserVisibleUserText({
         browserSelected: browser,
         fallbackUserText,
@@ -5759,7 +6000,7 @@ export function ChatContainer({
       // When a skill is active we also skip the default prompt: the skill's own
       // instruction will tell the model what to do with the attachment, and a
       // generic "请分析以下文件内容" would compete with it.
-      const userText = rawMessage || (attachmentPayload && !skill ? "请分析以下文件内容。" : "")
+      const userText = rawMessage || (hasFiles && !skill ? "请分析以下文件内容。" : "")
       if (browser) setSelectedBuiltinBrowser(false)
       if (shouldOpenGoalDetailsForStatus) {
         setGoalDetailsOpen(true)
@@ -5792,6 +6033,10 @@ export function ChatContainer({
         attachmentModelBlocks = attachmentTexts.join("")
         attachmentDisplayPrefix = attachmentPayload.map((a) => `📎 ${a.filename}`).join("\n")
       }
+      if (pending?.pendingMentions.length) {
+        const pendingNames = pending.pendingMentions.map(item => `📎 ${item.filename}`).join("\n")
+        attachmentDisplayPrefix = [attachmentDisplayPrefix, pendingNames].filter(Boolean).join("\n")
+      }
 
       // Skill-use block, appended last. The model is told to `read` the SKILL.md
       // itself — we don't inline the body. Hooks/routing/memory see it verbatim.
@@ -5812,7 +6057,12 @@ export function ChatContainer({
         attachmentDisplayPrefix,
         skillBlock,
         builtinBrowser: browser,
-        modelId: currentModel,
+        modelId: submitModelId,
+        ...(pending?.pendingMentions.length ? {
+          pendingMentions: pending.pendingMentions,
+          existingUploads: resolvedAttachments.map(item => ({ ...item })),
+          fileOnly: !rawMessage && !skill && !browser
+        } : {}),
         created_at: new Date(),
         updated_at: new Date()
       }
@@ -5946,12 +6196,15 @@ export function ChatContainer({
             messages: [{ type: "human", content: fullMessage }]
           },
           {
+            modelSelectionIntent,
             config: {
               configurable: {
                 thread_id: threadId,
-                model_id: currentModel,
+                model_id: submitModelId,
                 agent_mode: submitAgentMode === "multi" ? "normal" : submitAgentMode,
-                ...(visibleUserMessage?.id ? { hook_turn_id: visibleUserMessage.id } : {})
+                ...(visibleUserMessage?.id ? { hook_turn_id: visibleUserMessage.id } : {}),
+                ...(getQueuedComposerSubmission(composedDraft)
+                  ? { composer_submission: getQueuedComposerSubmission(composedDraft) } : {})
               }
             }
           }
@@ -5969,6 +6222,8 @@ export function ChatContainer({
       releaseSubmitInFlightLock(submitInFlightRef, shouldLockSubmit, threadId)
     }
   }
+
+  preparedSubmitRef.current = { threadId, submit: submitPreparedInput }
 
   const startEditingQueuedMessage = useCallback((message: QueuedMessage): void => {
     setEditingQueueId(message.id)
@@ -5996,7 +6251,8 @@ export function ChatContainer({
     // Allow an empty text only when the draft still carries an attachment or skill
     // block; otherwise a blank save would produce an unsendable empty message.
     const hasNonTextPayload =
-      Boolean(message.attachmentModelBlocks?.trim()) || Boolean(message.skillBlock?.trim())
+      Boolean(message.attachmentModelBlocks?.trim()) || Boolean(message.skillBlock?.trim()) ||
+      Boolean(message.pendingMentions?.some(item => item.source === "chip"))
     if (!nextText && !hasNonTextPayload) return
     // Mirror handleSubmit's hard cap. A freshly-composed draft is already checked
     // there before it can enter the queue, but the edit textarea has no length
@@ -6014,12 +6270,22 @@ export function ChatContainer({
       )
       return
     }
-    const updatedMessage = { ...message, text: nextText }
+    let updatedMessage: QueuedMessage
+    try {
+      updatedMessage = editQueuedComposerMentionText(message, nextText, workspacePathRef.current)
+      assertQueuedComposerMentionWorkspace(updatedMessage, workspacePathRef.current)
+    }
+    catch (error) {
+      toast.error(error instanceof Error ? error.message : "文件提及草稿无法更新")
+      return
+    }
+    const editedParts = { text: updatedMessage.text, pendingMentions: updatedMessage.pendingMentions,
+      fileOnly: updatedMessage.fileOnly, attachmentDisplayPrefix: updatedMessage.attachmentDisplayPrefix }
     setEditingQueueId(null)
     setEditingQueueText("")
 
     if (!message.handoffRequestedAt) {
-      updateQueuedMessage(message.id, { text: nextText })
+      updateQueuedMessage(message.id, editedParts)
       return
     }
 
@@ -6056,20 +6322,25 @@ export function ChatContainer({
       const beforeEdit = await reconcile()
       if (!isCurrentRequest() || !getUnchangedGuidedMessage()) return
       if (finishDurable(beforeEdit.durableIds)) return
+      assertQueuedComposerMentionWorkspace(updatedMessage, workspacePathRef.current)
 
       if (classifyGuidedMessage(message.id, beforeEdit) === "unconsumed") {
-        updateQueuedMessage(message.id, { text: nextText, handoffRequestedAt: undefined })
+        updateQueuedMessage(message.id, { ...editedParts, handoffRequestedAt: undefined })
         return
       }
 
       const result = await window.api.agent.queueCurrentRunMessage(threadId, {
         id: message.id,
         content: getQueuedModelContent(updatedMessage),
-        displayContent: guardCoordinatorPlainText(getQueuedDisplayContent(updatedMessage))
+        displayContent: guardCoordinatorPlainText(getQueuedDisplayContent(updatedMessage)),
+        ...(getQueuedComposerSubmission(updatedMessage)
+          ? { composerSubmission: getQueuedComposerSubmission(updatedMessage) } : {})
       })
       if (!isCurrentRequest() || !getUnchangedGuidedMessage()) return
       if (result.queued) {
-        updateQueuedMessage(message.id, { text: nextText })
+        updateQueuedMessage(message.id, { ...editedParts,
+          text: updatedMessage.pendingMentions?.length ? updatedMessage.text :
+            result.visibleText ?? updatedMessage.text })
         return
       }
 
@@ -6080,7 +6351,7 @@ export function ChatContainer({
       if (!isCurrentRequest() || !getUnchangedGuidedMessage()) return
       if (finishDurable(afterRejection.durableIds)) return
       if (classifyGuidedMessage(message.id, afterRejection) === "unconsumed") {
-        updateQueuedMessage(message.id, { text: nextText, handoffRequestedAt: undefined })
+        updateQueuedMessage(message.id, { ...editedParts, handoffRequestedAt: undefined })
       } else {
         toast.error("该引导消息正在提交，暂时无法编辑")
       }
@@ -6092,7 +6363,7 @@ export function ChatContainer({
         toast.error("无法确认引导消息状态，原消息保持不变")
       }
     }
-  }, [
+  }, [toast, 
     appendMessage,
     deleteQueuedMessage,
     editingQueueId,
@@ -6100,6 +6371,7 @@ export function ChatContainer({
     getQueuedMessage,
     threadId,
     threadMessages,
+    workspacePath,
     updateQueuedMessage
   ])
 
@@ -6142,18 +6414,28 @@ export function ChatContainer({
       }
       const current = getQueuedMessage(message.id)
       if (!current || current.handoffRequestedAt) return
+      try { assertQueuedComposerMentionWorkspace(current, workspacePathRef.current) }
+      catch (error) {
+        toast.error(error instanceof Error ? error.message : "文件提及草稿无法提交")
+        return
+      }
       // Claim ownership before crossing the IPC boundary. This synchronously
       // blocks local editing, reordering, and auto-drain while main is deciding
       // whether it can accept the steer.
       guidingQueuedMessageIdsRef.current.add(current.id)
       updateQueuedMessage(current.id, { handoffRequestedAt: new Date() })
       try {
+        setGuidingQueuedMessageIds(ids => new Set([...ids, current.id]))
         const result = await window.api.agent.queueCurrentRunMessage(threadId, {
           id: current.id,
           content: getQueuedModelContent(current),
-          displayContent: guardCoordinatorPlainText(getQueuedDisplayContent(current))
+          displayContent: guardCoordinatorPlainText(getQueuedDisplayContent(current)),
+          ...(getQueuedComposerSubmission(current)
+            ? { composerSubmission: getQueuedComposerSubmission(current) } : {})
         })
         if (result.queued) {
+          if (result.visibleText !== undefined && !current.pendingMentions?.length)
+            updateQueuedMessage(current.id, { text: result.visibleText })
           toast.success("已提交给当前运行，会在下一次模型调用前接收")
           return
         }
@@ -6223,9 +6505,14 @@ export function ChatContainer({
         toast.error("插队失败，已提到队首")
       } finally {
         guidingQueuedMessageIdsRef.current.delete(current.id)
+        setGuidingQueuedMessageIds(ids => {
+          const next = new Set(ids)
+          next.delete(current.id)
+          return next
+        })
       }
     },
-    [
+    [toast, 
       appendMessage,
       deleteQueuedMessage,
       getQueuedMessage,
@@ -6241,6 +6528,7 @@ export function ChatContainer({
   const submitQueuedMessage = useCallback(
     async (queued: QueuedMessage): Promise<void> => {
       if (!stream) return
+      const modelSelectionIntent = captureModelSelectionIntent()
       const fullMessage = getQueuedModelContent(queued)
       if (!fullMessage.trim()) {
         deleteQueuedMessage(queued.id)
@@ -6256,11 +6544,13 @@ export function ChatContainer({
       const currentSelectedModel = currentModel
         ? models.find((model) => model.id === currentModel)
         : undefined
-      const selectedModel = queuedModel?.available
-        ? queuedModel
-        : currentSelectedModel?.available
-          ? currentSelectedModel
-          : undefined
+      const selectedModel = clawDefaultModel
+        ? (currentSelectedModel?.available ? currentSelectedModel : undefined)
+        : queuedModel?.available
+          ? queuedModel
+          : currentSelectedModel?.available
+            ? currentSelectedModel
+            : undefined
       if (!selectedModel) {
         if (!queued.modelId && !currentModel) {
           setError(QUEUE_MODEL_REQUIRED_ERROR)
@@ -6281,6 +6571,11 @@ export function ChatContainer({
           updateQueuedMessage(queued.id, { modelId: queuedModelId })
         }
         setError(QUEUE_WORKSPACE_REQUIRED_ERROR)
+        return
+      }
+      try { assertQueuedComposerMentionWorkspace(queued, workspacePathRef.current) }
+      catch (error) {
+        setError(error instanceof Error ? error.message : "文件提及草稿无法提交")
         return
       }
       const displayContent = guardCoordinatorPlainText(getQueuedDisplayContent(queued))
@@ -6348,6 +6643,11 @@ export function ChatContainer({
       // check and deletion, so the claim is atomic on the renderer event loop.
       const currentQueued = getQueuedMessage(queued.id)
       if (!canClaimQueuedMessage(queued, currentQueued)) return
+      try { assertQueuedComposerMentionWorkspace(queued, workspacePathRef.current) }
+      catch (error) {
+        setError(error instanceof Error ? error.message : "文件提及草稿无法提交")
+        return
+      }
       const isFirstMessage = threadMessages.length === 0
       deleteQueuedMessage(queued.id)
       // Reuse the draft's own id for the optimistic bubble. If stream.submit below
@@ -6375,12 +6675,15 @@ export function ChatContainer({
             messages: [{ type: "human", content: fullMessage }]
           },
           {
+            modelSelectionIntent,
             config: {
               configurable: {
                 thread_id: threadId,
                 model_id: queuedModelId,
                 agent_mode: submitAgentMode === "multi" ? "normal" : submitAgentMode,
-                ...(visibleUserMessage?.id ? { hook_turn_id: visibleUserMessage.id } : {})
+                ...(visibleUserMessage?.id ? { hook_turn_id: visibleUserMessage.id } : {}),
+                ...(getQueuedComposerSubmission(queued)
+                  ? { composer_submission: getQueuedComposerSubmission(queued) } : {})
               }
             }
           }
@@ -6393,8 +6696,10 @@ export function ChatContainer({
       agentMode,
       appendVisibleUserMessageWithTime,
       canChangeAgentMode,
+      captureModelSelectionIntent,
       clearFinishedWorkflowRun,
       currentModel,
+      clawDefaultModel,
       deleteQueuedMessage,
       disableCoordinatorModeOption,
       disableWorkflowModeOption,
@@ -6523,7 +6828,7 @@ export function ChatContainer({
   // sits there looking "sent." Failing fast here avoids that. The shared release
   // version forces a re-check after each settle, including across component remounts.
   useEffect(() => {
-    if (queueAutoDrainSuppressed) return
+    if (queueAutoDrainSuppressed || chatFlow.active || chatFlow.busy) return
     if (submitInFlightRef.current.has(threadId)) return
     if (isLoading || pendingApproval || threadError || !stream) return
     if (historyLoading || readOnly || contextReminderPending || bizRetryPending) return
@@ -6591,6 +6896,8 @@ export function ChatContainer({
     models,
     pendingApproval,
     prependQueuedMessage,
+    chatFlow.active,
+    chatFlow.busy,
     queueAutoDrainSuppressed,
     queuePumpTick,
     queuedMessages,
@@ -6609,7 +6916,18 @@ export function ChatContainer({
     // IME composing (Chinese/Japanese/Korean) should not trigger submit on Enter
     const isComposing = e.nativeEvent.isComposing || isComposingRef.current
     if (isComposing) return
+    if ((e.key === "Tab" || e.key === "ArrowRight") && !e.shiftKey && !e.ctrlKey &&
+      !e.metaKey && !e.altKey && promptComposer.acceptSuggestion()) {
+      e.preventDefault()
+      return
+    }
 
+    if (e.key === "Enter" && !e.shiftKey && localCommandTarget &&
+        explicitPluginCommand.current !== input.trim() && (explicitMenuSelection.current?.text !== input || explicitMenuSelection.current?.revision !== readPromptDraft().revision)) {
+      e.preventDefault()
+      void handleSubmit(e)
+      return
+    }
     // Slash popover nav takes over keys while open.
     if (slash.mode.kind === "slash") {
       if (e.key === "Enter" && !e.shiftKey && isBareGoalSlashCommandInput(input)) {
@@ -6620,11 +6938,13 @@ export function ChatContainer({
       }
       if (e.key === "ArrowDown") {
         e.preventDefault()
+        explicitMenuSelection.current = { text: input, revision: readPromptDraft().revision }
         slash.moveSelection(1)
         return
       }
       if (e.key === "ArrowUp") {
         e.preventDefault()
+        explicitMenuSelection.current = { text: input, revision: readPromptDraft().revision }
         slash.moveSelection(-1)
         return
       }
@@ -7234,7 +7554,7 @@ export function ChatContainer({
         toast.success("已填充到输入框，编辑后可重新发送")
       }
     },
-    [extractMessageText, setInput, setSelectedBuiltinBrowser, skills, setSelectedSkill]
+    [toast, extractMessageText, setInput, setSelectedBuiltinBrowser, skills, setSelectedSkill]
   )
 
   const handleSetGoalFromMessage = useCallback(
@@ -7254,7 +7574,7 @@ export function ChatContainer({
       })
       toast.success("已填入 Goal 草稿，确认后发送")
     },
-    [setInput]
+    [toast, setInput]
   )
 
   const handleForkFromMessage = useCallback(
@@ -7311,7 +7631,7 @@ export function ChatContainer({
         }
       }
     },
-    [currentForkWorkspacePath, forkingMessageId, isLoading, threadId]
+    [toast, currentForkWorkspacePath, forkingMessageId, isLoading, threadId]
   )
 
   const handleSelectForkWorkspace = useCallback(async (): Promise<string | null> => {
@@ -7330,7 +7650,7 @@ export function ChatContainer({
     } finally {
       setSelectingForkWorkspace(false)
     }
-  }, [forkWorkspacePath, selectingForkWorkspace])
+  }, [toast, forkWorkspacePath, selectingForkWorkspace])
 
   const resetMessageForkDialog = useCallback((): void => {
     messageForkRequestIdRef.current += 1
@@ -7394,7 +7714,7 @@ export function ChatContainer({
     } finally {
       setForkingMessageId(null)
     }
-  }, [
+  }, [toast, 
     forkDestinationMode,
     forkThread,
     forkWorkspacePath,
@@ -7419,7 +7739,7 @@ export function ChatContainer({
       textarea.setSelectionRange(nextInput.length, nextInput.length)
     })
     toast.success("已填入当前 Goal，可编辑后重新设置")
-  }, [goalUi.goal?.objective, setInput])
+  }, [toast, goalUi.goal?.objective, setInput])
   // Inlined as JSX (not components) to avoid React remounting on every parent render —
   // declaring a component inside the parent creates a new function reference each render,
   // which causes children to lose focus/animation state.
@@ -7598,7 +7918,7 @@ export function ChatContainer({
       className="space-y-4 pt-4 pb-4"
       style={userInputScrollPadding ? { paddingBottom: `${userInputScrollPadding}px` } : undefined}
     >
-      <FunctionLogs key={`logs:${threadId}`} threadId={threadId} />
+      {!isOrdinaryFlowMetadata(currentThread?.metadata) && <FunctionLogs key={`logs:${threadId}`} threadId={threadId} />}
       {contextCompaction && <ContextCompactionCard compaction={contextCompaction} />}
       {modelRetry && (
         <div className="flex items-start gap-2 rounded-md border border-status-warning/30 bg-status-warning/10 px-3 py-2 text-xs text-status-warning-foreground">
@@ -7636,6 +7956,10 @@ export function ChatContainer({
                   Object.values(toolCallStates).some((tool) => tool.status === "running")
                 )}
                 className="text-sm"
+                renderNative={(safe) => {
+                  const text = `${safe.message ?? safe.word}${safe.suffix}`
+                  return <span className="thinking-shimmer-text" data-text={text}>{text}</span>
+                }}
                 fallback={
                   <span
                     className="thinking-shimmer-text"
@@ -7676,6 +8000,7 @@ export function ChatContainer({
             <div className="mt-2 break-words text-sm text-status-warning-foreground">
               <FunctionSite key={`notice:${threadId}:${hookInterruption.timestamp}`}
                 threadId={threadId} component="InfoNotice" className="contents"
+                renderNative={(safe) => <>{String(safe.text)}{safe.command ? ` ${safe.command}` : ""}</>}
                 facts={{ text: hookInterruption.reason, command: null }} fallback={hookInterruption.reason} />
             </div>
             {hookInterruption.systemMessage && (
@@ -7702,7 +8027,9 @@ export function ChatContainer({
     </div>
   )
 
-  return (
+  return createElement(
+    ModsChatScope.Provider,
+    { value: modsChatScope },
     <div
       ref={chatRootRef}
       data-chat-thread-id={threadId}
@@ -7923,7 +8250,13 @@ export function ChatContainer({
       >
         {({ reserveLeftSpace, setMessageRef, virtualRangeRef }) => (
           <>
-            <ScrollArea className="flex-1 min-h-0" ref={scrollRef}>
+            <ChatMessageScrollArea
+              scrollRef={scrollRef}
+              showScrollToBottom={chatScrollUiState.mode === "detached"}
+              hasUnread={chatScrollUiState.hasUnread}
+              unreadCount={chatScrollUiState.unreadCount}
+              onScrollToBottom={scrollToConversationBottom}
+            >
               <div className={cn("px-4 pt-4", reserveLeftSpace && "md:pl-[20px]")}>
                 <div className="max-w-3xl mx-auto space-y-4">
                   {historyLoading && displayMessages.length === 0 && (
@@ -8014,7 +8347,7 @@ export function ChatContainer({
                   />
                 </div>
               </div>
-            </ScrollArea>
+            </ChatMessageScrollArea>
             {bizRetry && (
               <div className={cn("px-4 pb-2", reserveLeftSpace && "md:pl-[20px]")}>
                 <div className="mx-auto w-full max-w-3xl">
@@ -8367,20 +8700,55 @@ export function ChatContainer({
                 reserveLeftSpace && "md:pl-[20px]"
               )}
             >
+              {firstTask && <section aria-label="准备首次任务" className="mx-auto mb-3 max-w-3xl space-y-2 rounded-xl border p-3 text-sm">
+                <p>助手已应用。把任务填入输入框，检查后再发送。</p>
+                {input.trim() && <p className="text-muted-foreground">{firstTask.kind === "command" ? "请先保存或处理原输入，再填入插件命令。" : "你的原输入会保留，新任务附加在后面。"}</p>}
+                <button type="button" className="mr-4 underline" disabled={preparingFirstTask || isLoading || chatFlow.active || chatFlow.busy}
+                  onClick={() => void prepareFirstTask()}>{preparingFirstTask ? "正在核对…" : firstTask.kind === "command" ? "填入插件命令" : input.trim() ? "保留原输入并添加任务" : "填入首次任务"}</button>
+                <button type="button" className="underline" onClick={() => dismissSimpleAuthoringTask(firstTask.id)}>稍后再用</button>
+              </section>}
+              <BuiltinNavigationPanel threadId={threadId} workspace={currentForkWorkspacePath ?? null} />
               <GitChangeNotice threadId={threadId} />
+              {Boolean(currentThread?.metadata?.hostProjectRuntime) && <ProjectRunDetails key={`project-run:${threadId}`}
+                threadId={threadId} workspace={currentForkWorkspacePath} />}
               <div className="max-w-3xl mx-auto"><ModCards threadId={threadId} slot="turn.summary" /></div>
-              <ModCommandJobs key={threadId} threadId={threadId} />
-              <FunctionPanes key={`panes:${threadId}`} threadId={threadId} />
-              <FunctionCompletionEvidence key={`evidence:${threadId}`} threadId={threadId} isWorking={isLoading} />
+              <FunctionPeerMessages key={`peers:${threadId}`} threadId={threadId} />
+              {isOrdinaryFlowMetadata(currentThread?.metadata) ? <ClawSidebar key={`claw:${threadId}`} threadId={threadId} flow={chatFlow}
+                workspace={currentForkWorkspacePath}
+                disabled={readOnly || isLoading || historyLoading || hasActiveGoalRunning || Boolean(pendingApproval)}
+                records={<>
+                  <ModCommandJobs key={threadId} threadId={threadId} />
+                  <FunctionCompletionEvidence key={`evidence:${threadId}`} threadId={threadId} isWorking={isLoading} />
+                  <details className="rounded-lg border p-3 text-xs">
+                    <summary className="cursor-pointer">灵件日志 · 查看补充说明</summary>
+                    <FunctionLogs key={`logs:${threadId}`} threadId={threadId} showEmpty />
+                  </details>
+                </>}
+                onFollowUp={(text) => {
+                  setFlowIntent({ threadId, mode: "chat" })
+                  setInput([inputRef.current?.value ?? input, text].filter(Boolean).join("\n\n"))
+                }}>
+                <FunctionPanes key={`panes:${threadId}`} threadId={threadId} />
+              </ClawSidebar> : <>
+                <ModCommandJobs key={threadId} threadId={threadId} />
+                <FunctionPanes key={`panes:${threadId}`} threadId={threadId} />
+                <FunctionCompletionEvidence key={`evidence:${threadId}`} threadId={threadId} isWorking={isLoading} />
+              </>}
               <FunctionSite key={`above:${threadId}`} threadId={threadId} component="AbovePrompt"
-                facts={{ isWorking: isLoading }} />
+                facts={{ isWorking: isLoading }}
+                className="sparks-inline-surface mx-auto w-full max-w-3xl overflow-auto text-xs text-muted-foreground" />
               <form onSubmit={handleSubmit} className="max-w-3xl mx-auto relative">
-                <ChatScrollToBottomButton
-                  visible={chatScrollUiState.mode === "detached"}
-                  hasUnread={chatScrollUiState.hasUnread}
-                  unreadCount={chatScrollUiState.unreadCount}
-                  onScrollToBottom={scrollToConversationBottom}
-                />
+                <ClawComposerBar threadId={threadId} flow={chatFlow} mode={composerMode}
+                  onModeChange={(mode) => setFlowIntent({ threadId, mode })}>
+                  {!readOnly && isDevelopmentThreadMetadata(currentThread?.metadata) && (
+                    <ModsDevelopmentPanel threadId={threadId} workspaceHint={currentForkWorkspacePath}
+                      mode="chat" onReturnToChat={() => inputRef.current?.focus()}
+                      onOpenWorkbench={() => {
+                        inputRef.current?.focus({ preventScroll: true })
+                        useAppStore.getState().setShowCustomizeView(true, "mods")
+                      }} />
+                  )}
+                </ClawComposerBar>
                 <SlashCommandPopover
                   mode={slash.mode}
                   selectedIdx={slash.selectedIdx}
@@ -8406,6 +8774,7 @@ export function ChatContainer({
                         {queuedMessages.map((queued) => {
                           const isEditing = editingQueueId === queued.id
                           const isGuided = Boolean(queued.handoffRequestedAt)
+                          const isGuiding = guidingQueuedMessageIds.has(queued.id)
                           return (
                             <div
                               key={queued.id}
@@ -8485,14 +8854,16 @@ export function ChatContainer({
                                     <button
                                       type="button"
                                       onClick={() => void handleGuideQueuedMessage(queued)}
-                                      disabled={isGuided}
-                                      aria-disabled={isGuided || hasActiveGoalRunning}
+                                      disabled={isGuided || isGuiding}
+                                      aria-disabled={isGuided || isGuiding || hasActiveGoalRunning}
                                       title={
-                                        isGuided
-                                          ? "已提交给当前运行"
+                                        isGuiding
+                                          ? "正在提交给当前任务"
+                                          : isGuided
+                                          ? "已追加到当前任务"
                                           : hasActiveGoalRunning
-                                            ? "Active Goal 运行中，请先暂停 Goal 再引导消息"
-                                            : "提交给当前运行，下次模型调用前接收"
+                                            ? "自动目标运行中，请先暂停目标再追加要求"
+                                            : "把这条要求交给当前任务，下次生成回复前接收"
                                       }
                                       className={cn(
                                         "flex h-7 shrink-0 items-center gap-1 rounded-md px-2 text-xs text-muted-foreground hover:bg-muted hover:text-foreground disabled:cursor-default disabled:opacity-60",
@@ -8500,7 +8871,7 @@ export function ChatContainer({
                                       )}
                                     >
                                       <CornerDownRight className="size-3.5" />
-                                      {isGuided ? "已引导" : "引导"}
+                                      {isGuiding ? "正在追加…" : isGuided ? "已追加" : "追加到本轮"}
                                     </button>
                                   )}
                                   <button
@@ -8964,29 +9335,48 @@ export function ChatContainer({
                         </div>
                       )}
                       {/* Textarea */}
+                      <div className="relative">
+                      {promptComposer.suggestion && !input && <div aria-hidden="true"
+                        data-prompt-suggestion className={cn(
+                          "pointer-events-none absolute inset-0 mr-2 overflow-hidden whitespace-pre-wrap break-words p-4 text-sm text-muted-foreground/60",
+                          hasPendingFilePayload && "pt-1.5", composerRightClearanceClass)}>
+                        {promptComposer.suggestion}
+                      </div>}
+                      <PromptDecorations text={input} decorations={promptComposer.decorations}
+                        textarea={inputRef} className={cn(
+                          "composer-textarea mr-2 w-[calc(100%-0.5rem)] p-4 text-sm text-foreground",
+                          hasPendingFilePayload && "pt-1.5", composerRightClearanceClass)} />
                       <textarea
                         ref={inputRef}
                         value={input}
-                        onChange={(e) => setInput(e.target.value)}
+                        onChange={(e) => { setInput(e.target.value); promptComposer.changed() }}
                         onCompositionStart={() => {
                           isComposingRef.current = true
+                          promptComposer.composition(true)
                         }}
                         onCompositionEnd={() => {
                           isComposingRef.current = false
+                          promptComposer.composition(false)
                         }}
                         onKeyDown={handleKeyDown}
-                        placeholder={functionHint?.threadId === threadId ? functionHint.text ?? inputPlaceholder : inputPlaceholder}
+                        placeholder={promptComposer.suggestion ? "" : composerMode === "flow" ? "输入本次流程任务，发送后按右侧所选步骤执行" : !modsChatState.ready ? "" : !modsChatEnabled ? inputPlaceholder : functionHint?.threadId === threadId ? functionHint.text ?? "" : ""}
                         disabled={effectiveInputDisabled}
                         className={cn(
                           "composer-textarea relative z-[1] mr-2 w-[calc(100%-0.5rem)] resize-none overflow-y-auto bg-transparent",
                           "p-4 text-sm placeholder:text-muted-foreground",
                           "focus:outline-none disabled:opacity-70",
+                          promptComposer.decorations.length > 0 && "mods-decorated-composer text-transparent caret-foreground",
                           hasPendingFilePayload && "pt-1.5",
                           composerRightClearanceClass
                         )}
                         rows={2}
-                        style={{ minHeight: "44px", maxHeight: "200px" }}
+                        style={{ minHeight: "44px", maxHeight: "200px",
+                          ...(promptComposer.decorations.length ? { fontFamily: "ui-monospace, monospace" } : {}) }}
                       />
+                      </div>
+                      {promptComposer.suggestion && !input && <div className="px-4 pb-1 text-xs text-muted-foreground">
+                        按 Tab 或 → 接受建议，确认后再发送
+                      </div>}
                       {/* Bottom bar: primary execution controls left, send button right */}
                       <div className="flex items-center justify-between px-3 pb-2 w-full">
                         <div className="flex min-w-0 flex-1 items-center gap-1 overflow-x-auto">
@@ -9005,7 +9395,14 @@ export function ChatContainer({
                             onClick={handleAttachClick}
                           />
                           <SandboxModeSwitcher onOpenSettings={handleOpenSandboxSettings} />
-                          <ModelSwitcher threadId={threadId} />
+                          <ModelSwitcher
+                            threadId={threadId}
+                            composerMode={composerMode}
+                            clawDefaultModel={clawDefaultModel}
+                            bindingRevision={"binding" in chatFlow ? chatFlow.binding?.bindingRevision : undefined}
+                            modsEnabled={chatFlow.enabled}
+                            readOnly={readOnly}
+                          />
                           <AgentModeSwitcher
                             threadId={threadId}
                             showWorkflow
@@ -9043,11 +9440,11 @@ export function ChatContainer({
                         <div className="ml-auto flex shrink-0 items-center justify-end gap-1.5">
                           {isLoading ? (
                             <>
-                              {(canSubmitGoalCommandWhileLoading || isModCommandInput) && (
+                              {(canSubmitGoalCommandWhileLoading || isModCommandInput || localCommandTarget) && (
                                 <button
                                   type="submit"
-                                  disabled={isModCommandInput ? slash.mode.kind === "slash" : goalSendButtonDisabledWhileLoading}
-                                  aria-label={isModCommandInput ? "执行 Mods 命令" : "发送 goal 命令"}
+                                  disabled={!localCommandTarget && (isModCommandInput ? slash.mode.kind === "slash" : goalSendButtonDisabledWhileLoading)}
+                                  aria-label={localCommandTarget ? "打开内置功能" : isModCommandInput ? "执行灵件操作" : "发送 goal 命令"}
                                   className="flex size-8 shrink-0 items-center justify-center rounded-full bg-button text-button-foreground transition-colors hover:bg-button/90 disabled:cursor-not-allowed disabled:opacity-40"
                                 >
                                   <ArrowUp className="size-5" strokeWidth={1.75} />
@@ -9089,7 +9486,10 @@ export function ChatContainer({
                               )}
                               <button
                                 type="submit"
+                                aria-label={composerMode === "flow" ? "发送并执行流程" : "发送消息"}
+                                title={composerMode === "flow" ? "发送并执行流程" : "发送消息"}
                                 disabled={
+                                  !localCommandTarget && ((composerMode === "flow" && (chatFlow.busy || chatFlow.active || !chatFlow.enabled)) ||
                                   !stream ||
                                   effectiveInputDisabled ||
                                   (!input.trim() &&
@@ -9097,7 +9497,7 @@ export function ChatContainer({
                                     !selectedSkill &&
                                     !selectedBuiltinBrowser) ||
                                   (slash.mode.kind === "slash" &&
-                                    !isBareGoalSlashCommandInput(input))
+                                    !isBareGoalSlashCommandInput(input)))
                                 }
                                 className="flex size-8 shrink-0 items-center justify-center rounded-full bg-button text-button-foreground transition-colors hover:bg-button/90 disabled:cursor-not-allowed disabled:opacity-40"
                               >
@@ -9142,6 +9542,7 @@ export function ChatContainer({
           </>
         )}
       </ChatScrollNavigator>
+      {chatToasts.toaster}
       <HookLogModal
         bucket={openHookLogBucket}
         open={openHookLogBucketId !== null}

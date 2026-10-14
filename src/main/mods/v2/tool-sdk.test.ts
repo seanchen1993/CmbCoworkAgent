@@ -1,5 +1,5 @@
 import { expect, it } from "vitest"
-import { functionToolTarget, validateFunctionToolResult } from "./tool-sdk"
+import { functionToolTarget, validateFunctionToolResult, publicFunctionToolInput, nativeFunctionToolInput } from "./tool-sdk"
 import type { ModObject } from "../../../shared/mods/types"
 
 it("removes host identity fields without permitting arbitrary adapter arguments", () => {
@@ -99,4 +99,25 @@ it("validates the same native question schema and forbids SDK timeout or scope i
     expect(() => functionToolTarget({ tool: "request_user_input", ...args })).toThrow(
       "MODS_TOOL_ARGUMENTS"
     )
+})
+
+
+it("maps official native names and Read offsets without widening native arguments", () => {
+  expect(functionToolTarget({tool:"Read",file_path:"a",offset:1,limit:2})).toEqual({
+    target:"host:read_file",args:{file_path:"a",offset:0,limit:2}
+  })
+  expect(functionToolTarget({tool:"Edit",file_path:"a",old_string:"x",new_string:"y"}).target)
+    .toBe("host:edit_file")
+  expect(functionToolTarget({tool:"Write",file_path:"a",content:"x"}).target).toBe("host:write_file")
+  expect(functionToolTarget({tool:"Bash",command:"echo ok"}).target).toBe("host:execute")
+  const invalidInputs: ModObject[] = [{tool:"Read",file_path:"a",offset:0},
+    {tool:"Read",file_path:"a",pages:"1-2"},{tool:"Bash",command:"echo",timeout:100},
+    {tool:"Bash",command:"echo",dangerouslyDisableSandbox:true}]
+  for (const input of invalidInputs)
+    expect(()=>functionToolTarget(input)).toThrow("MODS_TOOL_ARGUMENTS")
+  for (const tool of ["Glob","Grep"])
+    expect(()=>functionToolTarget({tool,pattern:"*"})).toThrow("MODS_TOOL_UNAVAILABLE")
+  const question = {tool:"read_file",input:{file_path:"a",offset:0},tool_use_id:"host",agentId:"worker"}
+  expect(publicFunctionToolInput(question)).toEqual({...question,tool:"Read",input:{file_path:"a",offset:1}})
+  expect(nativeFunctionToolInput(publicFunctionToolInput(question))).toEqual(question)
 })

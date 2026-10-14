@@ -295,6 +295,27 @@ describe("checkpoint transcript presence", () => {
     expect(migration.status).toBe("complete")
   })
 
+  it.each([false, true])("does not reconstruct marked/corrupt native rows with the legacy UI-clamp writer: invalid=%s", (invalid) => {
+    const threadId = "marked-legacy-" + invalid
+    const checkpointPath = createCheckpointDatabase(threadId, [
+      { id: "old", type: "human", content: "old history" },
+      { id: "native", type: "human", content: "[Starting active goal] literal",
+        additional_kwargs: invalid ? { function_row_invalid: true } : { function_row: {
+          conversationId: "actual", branchId: "branch", uuid: "native", sequence: 1,
+          door: "note", messageType: "user", isMeta: true, origin: { kind: "plugin", name: "P" }
+        } } }
+    ])
+    const messagePath = createMessageDatabase(threadId)
+    const before = new DatabaseSync(messagePath, { readOnly: true })
+    const count = before.prepare("SELECT COUNT(*) AS count FROM thread_messages").get()?.count
+    before.close()
+    expect(() => bootstrapLegacyCheckpointTranscript(checkpointPath, messagePath, threadId, "",
+      new SharedArrayBuffer(Int32Array.BYTES_PER_ELEMENT))).toThrow("MIGRATION_REQUIRED")
+    const after = new DatabaseSync(messagePath, { readOnly: true })
+    expect(after.prepare("SELECT COUNT(*) AS count FROM thread_messages").get()?.count).toBe(count)
+    after.close()
+  })
+
   it("treats an absent checkpoint database as a confirmed empty legacy source", async () => {
     const directory = mkdtempSync(join(tmpdir(), "checkpoint-presence-missing-"))
     temporaryDirectories.push(directory)

@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto"
+import { AsyncResource } from "node:async_hooks"
 import { afterEach, expect, it, vi } from "vitest"
 import { ModCommandQueue } from "../command-queue"
 import type { ModCommandJob } from "../../../shared/mods/types"
@@ -10,13 +11,37 @@ import {
   functionExecutionScope,
   assertFunctionPublicationScope,
   recordFunctionCancellationReceipt,
-  withFreshFunctionExecution
+  withFreshFunctionExecution,
+  captureFunctionExecutionGuard
 } from "./execution-context"
 import { scheduleFunctionCommand } from "./command-scheduler"
 import { functionCallIdentity, runFunctionHostCall } from "./host-call"
 import { ModRuntimeAuthorities } from "../runtime-instance"
 
 const cleanups: Array<() => void> = []
+it("captures a real cold UI command for IPC without inventing a resident runtime", async () => {
+  const external = new AsyncResource("renderer-reply")
+  let guard!: () => void
+  await withFunctionExecution({ workspace: "/guard", threadId: "cold", userInitiated: true,
+    leased: false, immediate: true }, async () => {
+    guard = captureFunctionExecutionGuard("/guard", "cold")
+    expect(() => external.runInAsyncScope(guard)).not.toThrow()
+  })
+  expect(() => external.runInAsyncScope(guard)).toThrow("MODS_CALL_SCOPE_EXPIRED")
+  expect(() => captureFunctionExecutionGuard("/guard", "cold")).toThrow("MODS_CALL_SCOPE_REQUIRED")
+  external.emitDestroy()
+})
+it("a captured cold command cannot borrow a replacement physical lease", async () => {
+  const f = fixture()
+  expect(claimLocalThreadRunLease({ threadId: f.threadId, owner: "desktop", runId: "model" }).acquired).toBe(true)
+  await withFunctionExecution({ ...f.scope, leased: true }, async () => {
+    const guard = captureFunctionExecutionGuard(f.scope.workspace, f.threadId)
+    expect(() => guard()).not.toThrow()
+    releaseLocalThreadRunLease(f.threadId, "desktop", "model")
+    expect(claimLocalThreadRunLease({ threadId: f.threadId, owner: "desktop", runId: "model" }).acquired).toBe(true)
+    expect(() => guard()).toThrow("MODS_CALL_SCOPE_CHANGED")
+  })
+})
 
 it("limits cancellation receipts to their live publication scope, never a new SDK authority", async () => {
   const f = fixture()

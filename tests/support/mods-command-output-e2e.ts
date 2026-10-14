@@ -1,3 +1,4 @@
+import { openModsResults } from "./mods-sidebar-navigation"
 import assert from "node:assert/strict"
 import { mkdirSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
@@ -45,6 +46,7 @@ export async function verifyCommandOutput(
   )
   await page.reload({ waitUntil: "domcontentloaded" })
   await page.getByText("Output sites E2E", { exact: true }).first().click()
+  await openModsResults(page)
   const composer = page.locator("textarea.composer-textarea")
   const submit = page.locator("form").filter({ has: composer }).locator('button[type="submit"]')
   try {
@@ -63,6 +65,7 @@ export async function verifyCommandOutput(
     await page.screenshot({ path: join(artifacts, "command-output-custom.png") })
     await page.reload({ waitUntil: "domcontentloaded" })
     await page.getByText("Output sites E2E", { exact: true }).first().click()
+    await openModsResults(page)
     await until(
       async () => (await rows.allInnerTexts()).includes("DISPLAY_OUTPUT ***"),
       "durable command result redraws after reload"

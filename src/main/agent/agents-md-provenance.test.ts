@@ -23,6 +23,11 @@ it("retains actual User, Project and Local provenance without rediscovering path
   await writeFile(join(project, "AGENTS.md"), "PROJECT_RULE")
   await writeFile(join(nested, "AGENTS.override.md"), "LOCAL_RULE")
   const loaded = await loadAgentsPromptForWorkspace(nested)
+  expect(loaded.instructionFiles).toEqual([
+    { path: join(home, "AGENTS.md"), kind: "user", content: "USER_RULE" },
+    { path: join(project, "AGENTS.md"), kind: "project", content: "PROJECT_RULE" },
+    { path: join(nested, "AGENTS.override.md"), kind: "local", content: "LOCAL_RULE" }
+  ])
   expect(loaded.instructionSources).toEqual([
     { file_path: join(home, "AGENTS.md"), memory_type: "User" },
     { file_path: join(project, "AGENTS.md"), memory_type: "Project" },
@@ -37,6 +42,9 @@ it("retains actual User, Project and Local provenance without rediscovering path
     multi.instructionSources?.length
   )
   expect(multi.instructionSources).toEqual(expect.arrayContaining(loaded.instructionSources!))
+  expect(multi.instructionFiles).toEqual(expect.arrayContaining(loaded.instructionFiles!))
+  expect(new Set(multi.instructionFiles?.map(file => file.path)).size)
+    .toBe(multi.instructionFiles?.length)
 })
 
 it("does not label omitted placeholders as injected instructions", async () => {
@@ -49,4 +57,5 @@ it("does not label omitted placeholders as injected instructions", async () => {
     { totalMaxBytes: 1, projectMaxBytes: 1000, globalMaxBytes: 1 }
   )
   expect(loaded.instructionSources).toEqual([])
+  expect(loaded.instructionFiles).toEqual([])
 })

@@ -77,7 +77,17 @@ assert(!allSource.includes("请先在招乎中向内置机器人发送一条消�
 assert(!panel.includes("inbox-and-features"), "global Feature access toggle is retired")
 assert(panel.includes("同一用户只保留一个活动桌面连接"))
 assert(!allSource.includes("deviceEpoch"), "device routing epochs must stay retired")
-assert(!allSource.toLowerCase().includes("takeover"), "device takeover must stay retired")
+const imSourcePaths = sourceFiles.map(path => path.replace(/\\/g, "/")).filter(path =>
+  path.startsWith("main/services/im/") || path.startsWith("shared/im-") ||
+  path.startsWith("main/ipc/builtin-robot") || path.startsWith("renderer/src/lib/im") ||
+  ["renderer/src/components/customize/BuiltinRobotPanel.tsx", "preload/index.ts", "main/types.ts"]
+    .includes(path)
+)
+assert(imSourcePaths.length > 0, "the complete IM source scope must be present")
+for (const required of ["manager.ts", "gateway-client.ts", "remote-runner.ts"])
+  assert(imSourcePaths.includes(`main/services/im/${required}`), `${required} must be scanned`)
+const imSource = imSourcePaths.map(path => read(join("src", path))).join("\n")
+assert(!imSource.toLowerCase().includes("takeover"), "device takeover must stay retired")
 
 const preload = read("src/preload/index.ts")
 assert(preload.includes("builtinRobot:"))
@@ -87,7 +97,13 @@ assert(main.includes("builtinRobotManager.start(app.getVersion())"))
 assert(main.includes("builtinRobotManager.stop()"))
 const robotManager = read("src/main/services/im/manager.ts")
 assert(
-  /listGrantableFeatures\(\)[\s\S]*Promise\.all\([\s\S]*listRemoteFeatures/u.test(robotManager),
+  /listGrantableFeatures\(\)[\s\S]*listRemoteFeatureCatalog/u.test(robotManager),
+  "Robot management and IM selections should use the same current Feature catalog"
+)
+assert(
+  /listRemoteFeatureCatalog\([\s\S]*Promise\.all\(/u.test(
+    read("src/main/services/im/feature-binding-service.ts")
+  ),
   "Feature details should load concurrently after the first robot paint"
 )
 

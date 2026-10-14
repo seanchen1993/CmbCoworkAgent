@@ -23,6 +23,7 @@ import {
   HeartPulse,
   Clock,
   ShoppingBag,
+  Sparkles,
   Settings
 } from "lucide-react"
 import { toast } from "sonner"
@@ -50,7 +51,6 @@ import {
   useThreadContext
 } from "@/lib/thread-context"
 import { cn, truncate } from "@/lib/utils"
-import { useFeatureGate } from "@/lib/feature-gates"
 import {
   cleanupDeletedThreadIfResident,
   deleteThreadGroupSequentially,
@@ -64,7 +64,6 @@ import {
 } from "@/lib/thread-group-selection"
 import { isHarnessFeatureThread, isHarnessProjectModeThread } from "@/lib/thread-classification"
 import { isRemoteInboxThread, REMOTE_INBOX_WORKSPACE_NAME } from "@/lib/remote-thread-display"
-import { FEATURE_GATES } from "../../../../shared/feature-gates"
 import {
   ContextMenu,
   ContextMenuContent,
@@ -630,12 +629,6 @@ export const ThreadSidebar = memo(function ThreadSidebar(): React.JSX.Element {
   threadStateSummariesRef.current = threadStateSummaries
   const activeSidebarTab: SidebarTab =
     showHarnessBoardView || mainView === "harness" ? "project" : "chat"
-  const {
-    enabled: projectModeEnabled,
-    loading: projectModeLoading,
-    refresh: refreshProjectModeGate
-  } = useFeatureGate(FEATURE_GATES.projectMode)
-  const projectModeForceRefreshRef = useRef<Promise<unknown> | null>(null)
 
   const handleSelectChatTab = useCallback(async (): Promise<void> => {
     if (mainView === "harness" || showHarnessBoardView) {
@@ -665,21 +658,8 @@ export const ThreadSidebar = memo(function ThreadSidebar(): React.JSX.Element {
   ])
 
   const handleSelectProjectTab = useCallback(async (): Promise<void> => {
-    if (projectModeEnabled) {
-      setShowHarnessBoardView(true)
-      return
-    }
-
-    toast.info("敬请期待")
-    if (!projectModeForceRefreshRef.current) {
-      const refreshPromise = refreshProjectModeGate({ refresh: true }).finally(() => {
-        if (projectModeForceRefreshRef.current === refreshPromise) {
-          projectModeForceRefreshRef.current = null
-        }
-      })
-      projectModeForceRefreshRef.current = refreshPromise
-    }
-  }, [projectModeEnabled, refreshProjectModeGate, setShowHarnessBoardView])
+    setShowHarnessBoardView(true)
+  }, [setShowHarnessBoardView])
 
   const persistUnread = useCallback((ids: Set<string>) => {
     localStorage.setItem("threads:unreadIds", JSON.stringify([...ids]))
@@ -1233,15 +1213,11 @@ export const ThreadSidebar = memo(function ThreadSidebar(): React.JSX.Element {
                   type="button"
                   role="tab"
                   aria-selected={activeSidebarTab === "project"}
-                  aria-disabled={!projectModeEnabled}
                   className={cn(
                     "flex min-w-0  items-center justify-center gap-1.5 rounded px-2 text-sm font-semibold transition-all focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring",
-                    projectModeEnabled
-                      ? activeSidebarTab === "project"
+                    activeSidebarTab === "project"
                         ? "shadow border border-border/70 bg-background text-foreground"
                         : "text-muted-foreground hover:text-foreground"
-                      : "cursor-not-allowed text-muted-foreground/50 opacity-60 hover:text-muted-foreground/60",
-                    projectModeLoading && !projectModeEnabled && "opacity-55"
                   )}
                   onClick={() => void handleSelectProjectTab()}
                 >
@@ -1249,11 +1225,7 @@ export const ThreadSidebar = memo(function ThreadSidebar(): React.JSX.Element {
                   <span className="min-w-0 truncate">项目模式</span>
                 </button>
               </TooltipTrigger>
-              {!projectModeEnabled && (
-                <TooltipContent side="bottom" sideOffset={6}>
-                  敬请期待
-                </TooltipContent>
-              )}
+              <TooltipContent side="bottom" sideOffset={6}>本地项目任务与已开通的项目功能</TooltipContent>
             </Tooltip>
           </TooltipProvider>
         </div>
@@ -1273,6 +1245,20 @@ export const ThreadSidebar = memo(function ThreadSidebar(): React.JSX.Element {
             </Button>
           </>
         ) : null}
+      </div>
+
+      <div className="px-1 pb-1">
+        <Button
+          variant="ghost"
+          size="sm"
+          className="w-full justify-start gap-2 text-sm font-semibold"
+          onClick={() => useAppStore.getState().setShowCustomizeView(true, "assistant")}
+        >
+          <div className="flex size-5 items-center justify-center rounded-full bg-muted-foreground/15">
+            <Sparkles className="size-3" />
+          </div>
+          <span className="text-muted-foreground">自定义助手</span>
+        </Button>
       </div>
 
       {activeSidebarTab === "project" ? (

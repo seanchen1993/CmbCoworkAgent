@@ -1,27 +1,42 @@
 import { createHash, randomUUID } from "node:crypto"
+import { AsyncLocalStorage } from "node:async_hooks"
 import type { ModJson, ModObject } from "../../../shared/mods/types"
 import {
   isModObject,
   ModFunctionError,
   type FunctionGuest
 } from "../../../shared/mods/v2/contracts"
-import { encodeModJson } from "../../../shared/mods/validation"
+import { encodeModJson, parseModJson } from "../../../shared/mods/validation"
+import { validateFunctionClientTree } from "../../../shared/mods/v2/engine"
+import { normalizeFunctionLinks } from "../../../shared/mods/v2/link-fallback"
 import { functionFocusHandle } from "../../../shared/mods/v2/focus"
 import type { FunctionFocusAddress } from "../../../shared/mods/v2/ui-focus"
+import { functionUiFaultReason, type FunctionUiFaultPhase } from "../../../shared/mods/v2/ui-fault"
+import { nativeMarkdownLeaves, type FunctionMarkdownLinkRegistry } from "./markdown-link-registry"
+import { captureFunctionMarkdownDisplay, type FunctionMarkdownDisplayScope } from "./markdown-display-scope"
+import { isFunctionGuestLoadFailure } from "./client-load-failure"
+import { isFunctionGuestInvokeFailure } from "./guest-invoke-failure"
 import {
   validateFunctionTree,
   type FunctionClientAction,
   type FunctionClientSnapshot,
-  type FunctionUiElement
+  type FunctionUiElement,
+  type FunctionUiNode
 } from "../../../shared/mods/v2/ui"
 
 interface ClientHost {
-  assertLive(): void
+  markdownLinks?: FunctionMarkdownLinkRegistry
+  assertLive(plugin?: string): void
   background<T>(run: () => Promise<T>): Promise<T>
   load(plugin: string, module: string): Promise<FunctionGuest>
-  changed(): void
+  checkModule?(plugin: string, module: string): void
+  changed(pane: string): void
   publish(value: ModJson): Promise<ModJson>
   message(plugin: string, input: ModObject, signal: AbortSignal): Promise<ModJson>
+  captureFault?(pane: string, generation: string): FunctionClientFaultReceipt | undefined
+  captureDrawing?(pane: string, generation: string): FunctionClientDrawingReceipt | undefined
+  withDrawing?<T>(receipt: FunctionClientDrawingReceipt, run: () => Promise<T>): Promise<T>
+  fault?(plugin: string, input: ModObject, signal: AbortSignal, assertLive: () => void): Promise<void>
   control(
     event: string,
     input: ModObject,
@@ -29,44 +44,98 @@ interface ClientHost {
     signal: AbortSignal
   ): Promise<ModJson>
 }
+export interface FunctionClientDrawingReceipt {
+  component?: string
+  assertCurrent(): void
+  signal: AbortSignal
+  release(): void
+}
+export interface FunctionClientFaultReceipt extends FunctionClientDrawingReceipt {
+  redraw(): Promise<void>
+}
 interface Instance {
   key: string
   pane: string
   requestId: string
+  component: string
   snapshot: FunctionClientSnapshot
+  markdownDisplay?: FunctionMarkdownDisplayScope
+  markdownEpoch?: { frame: object; parent: string; identity: object }
+  markdownTreeEpoch?: object
   sourceProps: string
   rawTree?: string
   parentGeneration: string
   props: ModJson | undefined
+  propsEpoch: object
   columns: number
   rows: number
   serial: Promise<unknown>
   loading: Promise<FunctionGuest>
   guest?: FunctionGuest
   stopped: boolean
+  faultBorn: boolean
+  faultController?: AbortController
+  needsDraw?: boolean
   controller: AbortController
   pending: number
   backgroundRunning: boolean
-  backgroundEvents: Map<string, ModObject>
+  backgroundEvents: Map<string, { input: ModObject; generation: string }>
   renderStreak: number
-  pendingMessage?: { data: ModJson }
+  pendingMessage?: { data: ModJson; generation: string }
+  pendingDrawResult?: { dirty: boolean; message?: { data: ModJson; generation: string } }
   frame?: ReturnType<typeof setTimeout>
   timers: Map<string, { ms: number; timer: ReturnType<typeof setInterval> }>
 }
-function visit(tree: FunctionUiElement, fn: (node: FunctionUiElement) => void): void {
-  fn(tree)
+function visit(tree: FunctionUiElement, fn: (node: FunctionUiNode) => void): void {
+  if (tree.type === "engine" || tree.type === "Markdown") return
+  if (tree.type !== "fragment") fn(tree)
   for (const child of tree.children ?? []) if (typeof child !== "string") visit(child, fn)
+}
+
+declare const clientReconcilePlan: unique symbol
+/** Host-only receipt. A cloned/serialized object is never an admitted plan. */
+export interface FunctionClientReconcilePlan {
+  readonly [clientReconcilePlan]: true
+}
+interface PreparedReconcile {
+  pane: string
+  requestId: string
+  generation: string
+  component: string
+  faultRedraw: boolean
+  nodes: readonly FunctionUiNode[]
+  expected: Map<string, {
+    instance: Instance; generation: string; sourceProps: string; props: string;
+    propsEpoch: object; stopped: boolean
+  }>
+  epoch: object
+  assertPreparation?: () => void
+  reserved: number
+  phase: "prepared" | "committed" | "adopting" | "done" | "discarded"
 }
 
 /** Mounted Client identity survives parent redraws; only approved surface code enters its VM. */
 export class FunctionClients {
   private readonly instances = new Map<string, Instance>()
   private readonly intents = new Map<string, { input: string; result: Promise<void> }>()
+  private readonly faults = new Map<Instance, Promise<void>>()
+  private readonly refusals = new WeakSet<Error>()
+  private readonly drawings = new AsyncLocalStorage<FunctionClientDrawingReceipt | undefined>()
+  private readonly plans = new WeakMap<FunctionClientReconcilePlan, PreparedReconcile>()
+  private readonly reservations = new Set<PreparedReconcile>()
+  private readonly paneEpochs = new Map<string, object>()
+  // A stopped VM still occupies its slot until its real disposal has settled successfully.
+  private readonly occupied = new Set<Instance>()
   private closed = false
   constructor(private readonly host: ClientHost) {}
 
   private assert(instance?: Instance): void {
-    this.host.assertLive()
+    try { this.drawings.getStore()?.assertCurrent() }
+    catch (error) {
+      if (error instanceof Error) this.refusals.add(error)
+      throw error
+    }
+    this.host.assertLive(instance?.snapshot.plugin)
     if (
       this.closed ||
       (instance && (instance.stopped || this.instances.get(instance.key) !== instance))
@@ -75,6 +144,8 @@ export class FunctionClients {
   }
 
   private stop(instance: Instance): void {
+    this.host.markdownLinks?.retire(instance)
+    instance.faultController?.abort(new ModFunctionError("MODS_CLIENT_UNMOUNTED"))
     instance.stopped = true
     instance.controller.abort(new ModFunctionError("MODS_CLIENT_UNMOUNTED"))
     clearTimeout(instance.frame)
@@ -82,10 +153,17 @@ export class FunctionClients {
     instance.timers.clear()
     instance.backgroundEvents.clear()
     instance.pendingMessage = undefined
-    void instance.loading.then((guest) => guest.dispose()).catch(() => {})
+    instance.pendingDrawResult = undefined
+    void instance.loading.then(async (guest) => {
+      await guest.dispose()
+      this.occupied.delete(instance)
+    }, () => { this.occupied.delete(instance) }).catch(() => {})
   }
 
   closePane(pane: string): void {
+    this.paneEpochs.set(pane, {})
+    for (const plan of this.reservations)
+      if (plan.pane === pane) this.discardPrepared(plan)
     for (const [key, instance] of this.instances)
       if (instance.pane === pane) {
         this.instances.delete(key)
@@ -136,6 +214,7 @@ export class FunctionClients {
 
   close(): void {
     this.closed = true
+    for (const plan of this.reservations) this.discardPrepared(plan)
     for (const instance of this.instances.values()) this.stop(instance)
     this.instances.clear()
     this.intents.clear()
@@ -143,21 +222,68 @@ export class FunctionClients {
 
   private enqueue<T>(instance: Instance, run: () => Promise<T>): Promise<T> {
     if (instance.pending >= 64) return Promise.reject(new ModFunctionError("MODS_CLIENT_BUSY"))
+    let receipt: FunctionClientDrawingReceipt | undefined
+    try {
+      this.assert(instance)
+      receipt = this.host.captureDrawing?.(instance.pane, instance.parentGeneration)
+      if (this.host.captureDrawing && !receipt) throw new ModFunctionError("MODS_UI_FAULT_STALE")
+      if (receipt) {
+        const parent = receipt
+        const signal = AbortSignal.any([parent.signal, instance.controller.signal])
+        receipt = {
+          component: parent.component,
+          signal,
+          release: () => parent.release(),
+          assertCurrent: () => {
+            signal.throwIfAborted()
+            parent.assertCurrent()
+            if (this.instances.get(instance.key) !== instance || instance.stopped)
+              throw new ModFunctionError("MODS_CLIENT_UNMOUNTED")
+          }
+        }
+      }
+    } catch (error) {
+      if (error instanceof Error) this.refusals.add(error)
+      return Promise.reject(error)
+    }
     instance.pending++
     const task = instance.serial
       .then(() => {
-        this.assert(instance)
-        return run()
+        const enter = async () => {
+          this.assert(instance)
+          let value: T
+          try { value = await run() }
+          catch (error) {
+            // Dispatcher cancellation can reject before its caller's post-await guard.
+            // Classify a retired parent as native refusal, preserving the retained VM.
+            this.assert(instance)
+            throw error
+          }
+          this.assert(instance)
+          return value
+        }
+        return receipt
+          ? this.drawings.run(receipt, () => this.host.withDrawing
+            ? this.host.withDrawing(receipt, enter) : enter())
+          : enter()
       })
       .finally(() => {
+        receipt?.release()
         instance.pending--
       })
     instance.serial = task.catch(() => {})
     return task
   }
 
-  private fail(instance: Instance, error?: unknown): void {
+  private fail(instance: Instance, error?: unknown, phase?: FunctionUiFaultPhase): void {
+    if (error instanceof Error && this.refusals.has(error)) return
     if (instance.stopped) return
+    let receipt: FunctionClientFaultReceipt | undefined
+    if (phase && this.host.fault && this.faults.size < 16) {
+      // Capture before stopping: the active drawing scope also guards this exact instance.
+      try { receipt = this.host.captureFault?.(instance.pane, instance.parentGeneration) }
+      catch { /* A native retirement cannot produce a module notification. */ }
+    }
     this.stop(instance)
     instance.snapshot = {
       ...instance.snapshot,
@@ -171,32 +297,63 @@ export class FunctionClients {
         children: [`${instance.snapshot.plugin}/${instance.snapshot.module}：组件已停止`]
       }
     }
-    if (!this.closed) this.host.changed()
+    if (!this.closed) this.host.changed(instance.pane)
+    if (!phase || !this.host.fault || this.faults.size >= 16) return
+    if (!receipt) return
+    const controller = (instance.faultController = new AbortController())
+    const signal = AbortSignal.any([controller.signal, receipt.signal])
+    const assertCurrent = (): void => {
+      signal.throwIfAborted()
+      if (this.closed || this.instances.get(instance.key) !== instance)
+        throw new ModFunctionError("MODS_CLIENT_UNMOUNTED")
+      receipt!.assertCurrent()
+    }
+    const input: ModObject = {
+      surface: "desktop", component: receipt.component ?? instance.component, requestId: instance.requestId,
+      element: instance.snapshot.element, module: instance.snapshot.module, phase,
+      reason: functionUiFaultReason(error instanceof Error ? error.message : undefined)
+    }
+    // This task is never awaited from the failing Client or its parent snapshot.
+    const task = Promise.resolve().then(() => this.host.background(async () => {
+      this.host.assertLive(instance.snapshot.plugin)
+      assertCurrent()
+      await this.host.fault!(instance.snapshot.plugin, input, signal, assertCurrent)
+      this.host.assertLive(instance.snapshot.plugin)
+      assertCurrent()
+      if (!instance.faultBorn) await receipt!.redraw()
+    })).catch(() => {}).finally(() => {
+      receipt!.release()
+      this.faults.delete(instance)
+    })
+    this.faults.set(instance, task)
   }
 
   private background(instance: Instance, input: ModObject): void {
     if (instance.stopped || this.closed) return
     // A slow frame coalesces timer ticks instead of accumulating unbounded pending work.
-    instance.backgroundEvents.set(`${input.kind}:${input.handle ?? ""}`, input)
+    instance.backgroundEvents.set(`${input.kind}:${input.handle ?? ""}`, {
+      input, generation: instance.parentGeneration
+    })
     if (instance.frame || instance.backgroundRunning) return
     instance.frame = setTimeout(() => {
       instance.frame = undefined
       instance.backgroundRunning = true
       void this.host
-        .background(() =>
+        .background(() => this.drawings.run(undefined, () =>
           this.enqueue(instance, async () => {
             const events = [...instance.backgroundEvents.values()]
             instance.backgroundEvents.clear()
             for (const event of events)
-              if (event.kind !== "post") await this.update(instance, event)
+              if (event.generation === instance.parentGeneration && event.input.kind !== "post")
+                await this.update(instance, event.input)
             await this.flushMessage(instance)
           })
-        )
+        ))
         .catch((error) => this.fail(instance, error))
         .finally(() => {
           instance.backgroundRunning = false
           const pending = instance.backgroundEvents.values().next().value
-          if (pending) this.background(instance, pending)
+          if (pending?.generation === instance.parentGeneration) this.background(instance, pending.input)
         })
     }, 16)
     instance.frame.unref()
@@ -206,7 +363,7 @@ export class FunctionClients {
     try {
       await this.render(instance, input)
     } catch (error) {
-      this.fail(instance, error)
+      if (!(error instanceof Error && this.refusals.has(error))) this.fail(instance, error)
       throw error
     }
   }
@@ -220,24 +377,84 @@ export class FunctionClients {
         columns: instance.columns,
         rows: instance.rows
       }
-    const guest = (instance.guest ??= await instance.loading)
+    let guest: FunctionGuest
+    try { guest = (instance.guest ??= await instance.loading) }
+    catch (error) {
+      this.assert(instance)
+      if (isFunctionGuestLoadFailure(error)) this.fail(instance, error, "load")
+      throw error
+    }
     this.assert(instance)
-    const result = await guest.invoke(
-      "0",
-      input,
+    const invoke = (registration: string, event: string, value: ModObject) => guest.invoke(
+      registration,
+      value,
       async () => {
         throw new ModFunctionError("MODS_CLIENT_CAPABILITY_DENIED")
       },
       {
-        event: "surface.update",
+        event,
         signal: instance.controller.signal,
         origin: { plugin: "engine", tier: "core" },
         capabilities: [],
         plugin: { name: instance.snapshot.plugin, root: "" }
       }
     )
+    if (!["render", "frame"].includes(String(input.kind))) {
+      let ran = false
+      try {
+        const value = (await invoke("0", "surface.update", input)).value
+        ran = true
+        this.assert(instance)
+        if (!isModObject(value) || typeof value.dirty !== "boolean")
+          throw new ModFunctionError("MODS_CLIENT_RESULT")
+        instance.pendingDrawResult = {
+          dirty: value.dirty || instance.pendingDrawResult?.dirty === true,
+          ...(Object.hasOwn(value, "message") ? { message: { data: value.message, generation: instance.parentGeneration } }
+            : instance.pendingDrawResult?.message ? { message: instance.pendingDrawResult.message } : {})
+        }
+      }
+      catch (error) {
+        this.assert(instance)
+        if (ran || isFunctionGuestInvokeFailure(error)) this.fail(instance, error, "run")
+        else if (error instanceof Error && !guest.stats.disposed) {
+          this.refusals.add(error)
+          instance.needsDraw = true
+        }
+        throw error
+      }
+      this.assert(instance)
+    }
+    let value: ModJson | undefined
+    let drawn = false
+    try {
+      value = (await invoke("1", "surface.draw", input)).value
+      drawn = true
+      this.assert(instance)
+      if (!isModObject(value) || typeof value.dirty !== "boolean" ||
+        typeof value.renderSetState !== "boolean" || !Array.isArray(value.timers) ||
+        value.timers.length > 16) throw new ModFunctionError("MODS_CLIENT_RESULT")
+      validateFunctionClientTree(value.tree)
+      visit(value.tree, (node) => {
+        if (node.type === "Client" || (node.press && node.press.plugin !== instance.snapshot.plugin))
+          throw new ModFunctionError("MODS_CLIENT_RESULT")
+      })
+      const timerIds = new Set<string>()
+      for (const timer of value.timers) {
+        if (!isModObject(timer) || typeof timer.id !== "string" || typeof timer.ms !== "number" ||
+          !Number.isFinite(timer.ms) || timer.ms < 0 || timer.ms > 2147483647 || timerIds.has(timer.id))
+          throw new ModFunctionError("MODS_CLIENT_TIMER")
+        timerIds.add(timer.id)
+      }
+    } catch (error) {
+      this.assert(instance)
+      if (drawn || isFunctionGuestInvokeFailure(error)) this.fail(instance, error, "render")
+      else if (error instanceof Error && !guest.stats.disposed) {
+        this.refusals.add(error)
+        instance.needsDraw = true
+      }
+      throw error
+    }
     this.assert(instance)
-    const value = result.value
     if (
       !isModObject(value) ||
       typeof value.dirty !== "boolean" ||
@@ -248,20 +465,27 @@ export class FunctionClients {
       throw new ModFunctionError("MODS_CLIENT_RESULT")
     if (input.kind !== "frame") instance.renderStreak = 0
     instance.renderStreak = value.renderSetState ? instance.renderStreak + 1 : 0
-    if (instance.renderStreak >= 3) throw new ModFunctionError("MODS_CLIENT_RENDER_LOOP")
-    validateFunctionTree(value.tree)
+    if (instance.renderStreak >= 3) {
+      const error = new ModFunctionError("MODS_CLIENT_RENDER_LOOP")
+      this.fail(instance, error, "run")
+      throw error
+    }
+    validateFunctionClientTree(value.tree)
     const rawTree = encodeModJson(value.tree)
-    const tree =
+    const protectedTree =
       rawTree === instance.rawTree ? instance.snapshot.tree : await this.host.publish(value.tree)
     this.assert(instance)
-    validateFunctionTree(tree)
+    validateFunctionClientTree(protectedTree)
+    const tree = normalizeFunctionLinks(protectedTree)
     visit(tree, (node) => {
       if (node.type === "Client" || (node.press && node.press.plugin !== instance.snapshot.plugin))
         throw new ModFunctionError("MODS_CLIENT_RESULT")
     })
     const changed = encodeModJson(instance.snapshot.tree) !== encodeModJson(tree)
+    if (changed) instance.markdownTreeEpoch = {}
     instance.rawTree = rawTree
     instance.snapshot = { ...instance.snapshot, tree }
+    instance.needsDraw = false
     const timers = new Set<string>()
     for (const entry of value.timers) {
       if (
@@ -290,12 +514,15 @@ export class FunctionClients {
         clearInterval(entry.timer)
         instance.timers.delete(id)
       }
-    if (Object.hasOwn(value, "message")) {
-      instance.pendingMessage = { data: value.message }
+    const message = Object.hasOwn(value, "message") ? { data: value.message, generation: instance.parentGeneration }
+      : instance.pendingDrawResult?.message
+    if (message) {
+      instance.pendingMessage = message
       this.background(instance, { kind: "post" })
     }
-    if (value.dirty) this.background(instance, { kind: "frame" })
-    if (changed) this.host.changed()
+    if (value.dirty || instance.pendingDrawResult?.dirty) this.background(instance, { kind: "frame" })
+    instance.pendingDrawResult = undefined
+    if (changed) this.host.changed(instance.pane)
   }
 
   private async flushMessage(instance: Instance): Promise<void> {
@@ -304,13 +531,14 @@ export class FunctionClients {
     if (!pending) return
     instance.pendingMessage = undefined
     instance.backgroundEvents.delete("post:")
+    if (pending.generation !== instance.parentGeneration) return
     const data = await this.host.publish(pending.data)
     this.assert(instance)
     const answer = await this.host.message(
       instance.snapshot.plugin,
       {
         surface: "desktop",
-        component: "Pane",
+        component: instance.component,
         requestId: instance.requestId,
         element: instance.snapshot.element,
         module: instance.snapshot.module,
@@ -322,23 +550,193 @@ export class FunctionClients {
     if (!isModObject(answer)) throw new ModFunctionError("MODS_CLIENT_MESSAGE_RESULT")
     if (Object.hasOwn(answer, "props")) {
       instance.props = answer.props
+      instance.propsEpoch = {}
       this.background(instance, { kind: "render" })
     }
+  }
+
+  private planRecord(plan: FunctionClientReconcilePlan): PreparedReconcile {
+    const record = this.plans.get(plan)
+    if (!record) throw new ModFunctionError("MODS_CLIENT_PLAN_INVALID")
+    return record
+  }
+
+  private reservedCount(): number {
+    let count = 0
+    for (const plan of this.reservations) count += plan.reserved
+    return count
+  }
+
+  private assertPrepared(record: PreparedReconcile): void {
+    this.host.assertLive()
+    if (this.closed || !["prepared", "committed"].includes(record.phase) ||
+      this.paneEpochs.get(record.pane) !== record.epoch)
+      throw new ModFunctionError("MODS_CLIENT_PLAN_STALE")
+    if (record.phase === "prepared") record.assertPreparation?.()
+    const current = [...this.instances.values()].filter((instance) => instance.pane === record.pane)
+    if (current.length !== record.expected.size) throw new ModFunctionError("MODS_CLIENT_PLAN_STALE")
+    for (const instance of current) {
+      const expected = record.expected.get(instance.key)
+      if (!expected || expected.instance !== instance || expected.generation !== instance.parentGeneration ||
+        expected.sourceProps !== instance.sourceProps || expected.stopped !== instance.stopped ||
+        expected.propsEpoch !== instance.propsEpoch ||
+        expected.props !== encodeModJson(instance.props === undefined ? {} : { props: instance.props }))
+        throw new ModFunctionError("MODS_CLIENT_PLAN_STALE")
+    }
+    for (const node of record.nodes) {
+      const plugin = node.client!.plugin
+      this.host.assertLive(plugin)
+      this.host.checkModule?.(plugin, node.props.module as string)
+    }
+    if (this.occupied.size + this.reservedCount() > 8)
+      throw new ModFunctionError("MODS_CLIENT_LIMIT")
+  }
+
+  /** Pure preflight: no VM execution, instance mutation or retirement before parent commit. */
+  prepareReconcile(
+    pane: string,
+    requestId: string,
+    parentGeneration: string,
+    tree: FunctionUiElement,
+    faultRedraw = false,
+    component = "Pane",
+    assertPreparation?: () => void
+  ): FunctionClientReconcilePlan {
+    this.host.assertLive()
+    if (this.closed) throw new ModFunctionError("MODS_CLIENT_UNMOUNTED")
+    assertPreparation?.()
+    validateFunctionTree(tree)
+    // The final protected descriptor must not remain a caller-mutable object across an await.
+    const copy = parseModJson(encodeModJson(tree)) as FunctionUiElement
+    const nodes: FunctionUiNode[] = []
+    visit(copy, (node) => { if (node.type === "Client") nodes.push(node) })
+    if (nodes.length > 8) throw new ModFunctionError("MODS_CLIENT_LIMIT")
+    const expected: PreparedReconcile["expected"] = new Map()
+    for (const [key, instance] of this.instances)
+      if (instance.pane === pane) expected.set(key, {
+        instance, generation: instance.parentGeneration, sourceProps: instance.sourceProps,
+        props: encodeModJson(instance.props === undefined ? {} : { props: instance.props }),
+        propsEpoch: instance.propsEpoch,
+        stopped: instance.stopped
+      })
+    let reserved = 0
+    for (const node of nodes) {
+      const plugin = node.client!.plugin
+      this.host.assertLive(plugin)
+      this.host.checkModule?.(plugin, node.props.module as string)
+      const prior = this.instances.get(JSON.stringify([pane, plugin, node.props.key]))
+      if (!prior || prior.snapshot.module !== node.props.module) reserved++
+    }
+    if (this.occupied.size + this.reservedCount() + reserved > 8)
+      throw new ModFunctionError("MODS_CLIENT_LIMIT")
+    const epoch = this.paneEpochs.get(pane) ?? {}
+    this.paneEpochs.set(pane, epoch)
+    const record: PreparedReconcile = {
+      pane, requestId, generation: parentGeneration, component, faultRedraw,
+      nodes, expected, epoch, assertPreparation, reserved, phase: "prepared"
+    }
+    const plan = Object.freeze({}) as FunctionClientReconcilePlan
+    this.plans.set(plan, record)
+    this.reservations.add(record)
+    return plan
+  }
+
+  assertReconcileCurrent(plan: FunctionClientReconcilePlan): void {
+    const record = this.planRecord(plan)
+    if (record.phase !== "prepared") throw new ModFunctionError("MODS_CLIENT_PLAN_STALE")
+    this.assertPrepared(record)
+  }
+
+  /** Called in the host's synchronous parent commit. Still does not touch any live Client VM. */
+  commitReconcile(plan: FunctionClientReconcilePlan): void {
+    this.assertReconcileCurrent(plan)
+    const record = this.planRecord(plan)
+    const epoch = {}
+    this.paneEpochs.set(record.pane, epoch)
+    record.epoch = epoch
+    record.phase = "committed"
+  }
+
+  private discardPrepared(record: PreparedReconcile): void {
+    this.reservations.delete(record)
+    record.reserved = 0
+    if (record.phase !== "done") record.phase = "discarded"
+  }
+
+  discardReconcile(plan: FunctionClientReconcilePlan): void {
+    this.discardPrepared(this.planRecord(plan))
+  }
+
+  async reconcilePrepared(plan: FunctionClientReconcilePlan): Promise<FunctionClientSnapshot[]> {
+    const record = this.planRecord(plan)
+    if (record.phase !== "committed") throw new ModFunctionError("MODS_CLIENT_PLAN_STALE")
+    let receipt: FunctionClientDrawingReceipt | undefined
+    const enter = () => this.adoptPrepared(record)
+    try {
+      this.assertPrepared(record)
+      receipt = this.host.captureDrawing?.(record.pane, record.generation)
+      if (this.host.captureDrawing && !receipt) throw new ModFunctionError("MODS_UI_FAULT_STALE")
+      const activeReceipt = receipt
+      return await (activeReceipt
+        ? this.drawings.run(activeReceipt, () => this.host.withDrawing
+          ? this.host.withDrawing(activeReceipt, enter) : enter())
+        : enter())
+    } finally {
+      receipt?.release()
+      this.reservations.delete(record)
+      record.reserved = 0
+      // Adoption or an external discard can update this property across the awaited work.
+      if ((record.phase as PreparedReconcile["phase"]) !== "discarded") record.phase = "done"
+    }
+  }
+
+  private adoptPrepared(record: PreparedReconcile): Promise<FunctionClientSnapshot[]> {
+    this.assert()
+    this.assertPrepared(record)
+    record.phase = "adopting"
+    return this.reconcileDrawing(record)
   }
 
   async reconcile(
     pane: string,
     requestId: string,
     parentGeneration: string,
-    tree: FunctionUiElement
+    tree: FunctionUiElement,
+    faultRedraw = false,
+    component = "Pane"
+  ): Promise<FunctionClientSnapshot[]> {
+    const receipt = this.host.captureDrawing?.(pane, parentGeneration)
+    if (this.host.captureDrawing && !receipt) throw new ModFunctionError("MODS_UI_FAULT_STALE")
+    let plan: FunctionClientReconcilePlan | undefined
+    try {
+      plan = this.prepareReconcile(pane, requestId, parentGeneration, tree, faultRedraw, component,
+        receipt ? () => receipt.assertCurrent() : undefined)
+      this.commitReconcile(plan)
+      const record = this.planRecord(plan)
+      const enter = () => this.adoptPrepared(record)
+      // Preserve the original committed adapter's single receipt and async return boundary.
+      return await (receipt
+        ? this.drawings.run(receipt, () => this.host.withDrawing
+          ? this.host.withDrawing(receipt, enter) : enter())
+        : enter())
+    } finally {
+      receipt?.release()
+      if (plan) {
+        const record = this.planRecord(plan)
+        if (record.phase === "adopting") record.phase = "done"
+        this.discardReconcile(plan)
+      }
+    }
+  }
+
+  private async reconcileDrawing(
+    plan: PreparedReconcile
   ): Promise<FunctionClientSnapshot[]> {
     this.assert()
+    const { pane, requestId, generation: parentGeneration, faultRedraw, component, nodes } = plan
+    const markdownDisplay = captureFunctionMarkdownDisplay()
     const wanted = new Set<string>()
-    const nodes: FunctionUiElement[] = []
-    visit(tree, (node) => {
-      if (node.type === "Client") nodes.push(node)
-    })
-    if (nodes.length > 8) throw new ModFunctionError("MODS_CLIENT_LIMIT")
+    const renders: Instance[] = []
     for (const node of nodes)
       wanted.add(JSON.stringify([pane, node.client!.plugin, node.props.key]))
     for (const [key, instance] of this.instances)
@@ -361,10 +759,8 @@ export class FunctionClients {
       const props = node.props.props
       const sourceProps = encodeModJson(props === undefined ? {} : { props })
       if (!instance) {
-        const atCapacity = [...this.instances.values()].filter((i) => !i.stopped).length >= 8
         const loading = Promise.resolve().then(() => {
-          this.assert()
-          if (atCapacity) throw new ModFunctionError("MODS_CLIENT_LIMIT")
+          this.assert(instance)
           return this.host.load(plugin, module)
         })
         void loading.catch(() => {})
@@ -372,9 +768,11 @@ export class FunctionClients {
           key,
           pane,
           requestId,
+          component,
           sourceProps,
           parentGeneration,
           props,
+          propsEpoch: {},
           columns: 0,
           rows: 0,
           serial: Promise.resolve(),
@@ -384,35 +782,51 @@ export class FunctionClients {
           renderStreak: 0,
           loading,
           stopped: false,
+          faultBorn: faultRedraw,
           controller: new AbortController(),
           timers: new Map(),
           snapshot: {
             id: randomUUID(),
+            generation: parentGeneration,
             plugin,
             element,
             module,
             tree: { type: "Box", props: {}, children: [] }
           }
         }
+        if (plan.reserved < 1) throw new ModFunctionError("MODS_CLIENT_PLAN_STALE")
+        plan.reserved--
+        this.occupied.add(instance)
         this.instances.set(key, instance)
-        const current = instance
-        await this.enqueue(current, () => this.update(current, { kind: "render" })).catch(() =>
-          this.fail(current)
-        )
+        instance.markdownDisplay = markdownDisplay
+        renders.push(instance)
       } else if (
         !instance.stopped &&
-        (instance.sourceProps !== sourceProps || instance.parentGeneration !== parentGeneration)
+        (instance.needsDraw || instance.sourceProps !== sourceProps || instance.parentGeneration !== parentGeneration)
       ) {
-        instance.sourceProps = sourceProps
-        instance.props = props
+        if (instance.sourceProps !== sourceProps) {
+          instance.sourceProps = sourceProps
+          instance.props = props
+          instance.propsEpoch = {}
+        }
+        if (instance.parentGeneration !== parentGeneration) {
+          instance.pendingMessage = undefined
+          instance.pendingDrawResult = undefined
+          instance.backgroundEvents.clear()
+        }
         instance.parentGeneration = parentGeneration
-        const current = instance
-        await this.enqueue(current, () =>
-          this.update(current, {
-            kind: "render"
-          })
-        ).catch(() => this.fail(current))
+        instance.snapshot = { ...instance.snapshot, generation: parentGeneration }
+        renders.push(instance)
       }
+    }
+    if (markdownDisplay)
+      for (const instance of this.instances.values())
+        if (instance.pane === pane) instance.markdownDisplay = markdownDisplay
+    // All parent identities are adopted synchronously before the first async render.
+    for (const current of renders) {
+      await this.enqueue(current, () => this.update(current, { kind: "render" })).catch((error) =>
+        this.fail(current, error)
+      )
     }
     for (const [key, instance] of this.instances)
       if (instance.pane === pane && !wanted.has(key)) {
@@ -422,7 +836,11 @@ export class FunctionClients {
     this.assert()
     const snapshots = [...this.instances.values()]
       .filter((i) => i.pane === pane)
-      .map((i) => i.snapshot)
+      .map((i) => {
+        const snapshot = { ...i.snapshot }
+        delete snapshot.markdownLinks
+        return snapshot
+      })
     if (!snapshots.length) return []
     const published = await this.host.publish(snapshots as unknown as ModJson)
     this.assert()
@@ -431,14 +849,64 @@ export class FunctionClients {
     published.forEach((item, index) => {
       if (
         !isModObject(item) ||
-        ["id", "plugin", "element", "module", "error"].some(
+        Object.keys(item).some(key =>
+          !["id", "generation", "plugin", "element", "module", "tree", "error"].includes(key)) ||
+        ["id", "generation", "plugin", "element", "module", "error"].some(
           (key) => item[key] !== (snapshots[index] as unknown as ModObject)[key]
         )
       )
         throw new ModFunctionError("MODS_CLIENT_PUBLICATION")
-      validateFunctionTree(item.tree)
+      validateFunctionClientTree(item.tree)
     })
-    return published as unknown as FunctionClientSnapshot[]
+    const visible = published.map((item) => ({
+      ...(item as ModObject),
+      tree: normalizeFunctionLinks((item as ModObject).tree as unknown as FunctionUiElement)
+    })) as unknown as FunctionClientSnapshot[]
+    if (this.host.markdownLinks) {
+      const plans: import("./markdown-link-registry").FunctionMarkdownPublicationPlan[] = []
+      try {
+        for (const snapshot of visible) {
+          const instance = [...this.instances.values()].find(row => row.pane === pane &&
+            row.snapshot.id === snapshot.id)
+          const display = instance?.markdownDisplay
+          if (!instance || !display || instance.stopped) continue
+          display.assertCurrent()
+          const parent = this.host.captureDrawing?.(pane, instance.parentGeneration)
+          if (this.host.captureDrawing && !parent)
+            throw new ModFunctionError("MODS_UI_DRAWING_STALE")
+          try {
+            const parentGeneration = instance.parentGeneration
+            const propsEpoch = instance.propsEpoch
+            const treeEpoch = instance.markdownTreeEpoch
+            const epoch = instance.markdownEpoch?.frame === display.epoch &&
+              instance.markdownEpoch.parent === parentGeneration ? instance.markdownEpoch :
+              { frame: display.epoch, parent: parentGeneration, identity: {} }
+            const publication = this.host.markdownLinks.prepare({ owner: instance,
+              epoch: epoch.identity,
+              contentFingerprint: createHash("sha256").update(encodeModJson(snapshot.tree)).digest("hex"),
+              address: { kind: "client", pane, instance: snapshot.id,
+                generation: snapshot.generation },
+              assertCurrent: () => {
+                display.assertCurrent()
+                this.host.assertLive(instance.snapshot.plugin)
+                parent?.assertCurrent()
+                if (this.closed || instance.stopped || this.instances.get(instance.key) !== instance ||
+                  instance.parentGeneration !== parentGeneration || instance.propsEpoch !== propsEpoch ||
+                  instance.markdownTreeEpoch !== treeEpoch)
+                  throw new ModFunctionError("MODS_UI_MARKDOWN_STALE")
+              }
+            }, nativeMarkdownLeaves(snapshot.tree))
+            plans.push(publication)
+            snapshot.markdownLinks = publication.markdownLinks
+            instance.markdownEpoch = epoch
+          } finally { parent?.release() }
+        }
+        this.host.markdownLinks.commit(plans)
+      } finally {
+        for (const publication of plans) this.host.markdownLinks.discard(publication)
+      }
+    }
+    return visible
   }
 
   act(action: FunctionClientAction): Promise<void> {
@@ -449,6 +917,8 @@ export class FunctionClients {
       action.pane.length > 200 ||
       typeof action.instance !== "string" ||
       !/^[a-f0-9-]{36}$/.test(action.instance) ||
+      typeof action.generation !== "string" ||
+      !/^[a-f0-9-]{36}$/.test(action.generation) ||
       typeof action.intentId !== "string" ||
       !/^[\w-]{16,100}$/.test(action.intentId) ||
       ![
@@ -469,6 +939,8 @@ export class FunctionClients {
     )
     if (!instance || instance.stopped)
       return Promise.reject(new ModFunctionError("MODS_CLIENT_UNMOUNTED"))
+    if (action.generation !== instance.parentGeneration)
+      return Promise.reject(new ModFunctionError("MODS_UI_STALE_ACTION"))
     const encoded = encodeModJson(action)
     if (encoded.length > 20000) return Promise.reject(new ModFunctionError("MODS_CLIENT_ACTION"))
     const input = createHash("sha256").update(encoded).digest("hex")
@@ -567,11 +1039,11 @@ export class FunctionClients {
         await this.update(instance, { kind: action.kind, value })
         return
       }
-      let control: FunctionUiElement | undefined
+      let control: FunctionUiNode | undefined
       visit(instance.snapshot.tree, (node) => {
         if (node.press?.handle === action.handle) control = node
       })
-      const node = control as FunctionUiElement | undefined
+      const node = control as FunctionUiNode | undefined
       if (
         !node ||
         node.type !==
@@ -587,7 +1059,7 @@ export class FunctionClients {
         action.kind === "press" ? "ui.press" : action.kind === "select" ? "ui.select" : "ui.input"
       const value: ModObject = {
         surface: "desktop",
-        component: "Pane",
+        component: instance.component,
         requestId: instance.requestId,
         plugin: instance.snapshot.plugin,
         element: node.props.key,

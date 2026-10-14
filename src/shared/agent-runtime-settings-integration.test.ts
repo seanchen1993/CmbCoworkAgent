@@ -9,7 +9,7 @@ import {
 } from "./agent-runtime-limits"
 
 const readRepositoryFile = (path: string): string =>
-  readFileSync(resolve(process.cwd(), path), "utf8")
+  readFileSync(resolve(process.cwd(), path), "utf8").replace(/\r\n/g, "\n")
 
 const sourceBetween = (source: string, start: string, end: string): string => {
   const startIndex = source.indexOf(start)

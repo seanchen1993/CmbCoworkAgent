@@ -1,0 +1,81 @@
+{
+  "name": "@langchain/langgraph",
+  "version": "1.2.5",
+  "upstreamTarball": "https://registry.npmjs.org/@langchain/langgraph/-/langgraph-1.2.5.tgz",
+  "upstreamIntegrity": "sha512-O/ROF1oaXN7VK6+WTpXsDvJp7L+YyTOHa9rt3L85jrvwxBqQQRIlRLOWT8ehB/ywE3M1K7WAWOAXbmorCYzviQ==",
+  "upstreamSha1": "f4285b77baee945092795c2989bdd6589dc5b142",
+  "license": "MIT",
+  "licenseSha256": "dbeab89f4ab409184f943dd1b882c3ece706b365eabc3569844e095cea247cde",
+  "patchSha256": "245e732b6ec9a9bbb1bf17270d08e0bd4ffaa712bd5669801b21ce028970879a",
+  "files": [
+    {
+      "path": "dist/pregel/index.js",
+      "beforeSha256": "afeb36cdae00f2e32f78001961909562189621fc3e57922946d334a9042fa63c",
+      "afterSha256": "7d7f6a815e5acff2ad9181b5cf6ece1d8fe134749e324353210c554fbfbfcd4a"
+    },
+    {
+      "path": "dist/pregel/index.cjs",
+      "beforeSha256": "aaa0f408a24ecf58e2c0410503b86d366f2e7dd735ea375e1910346fdd0d9949",
+      "afterSha256": "48220df7bb77d67dd6ba9163d48ec661eff785cc43cf48dc858c94618319f15c"
+    },
+    {
+      "path": "package.json",
+      "beforeSha256": "c0c31f93b425c37d0c906801758f822b682e841bf33bb442946f4fc7bd1422e2",
+      "afterSha256": "ec1bee35d9a764fc8f4ccdc3c79d889652548df1549582e5d0c05a662a151d92"
+    },
+    {
+      "path": "dist/native-stream-origin.js",
+      "beforeSha256": null,
+      "afterSha256": "610f3bb1603a6d1987295576a89a844be4ebc476204e0c163b991d30652ff25a"
+    },
+    {
+      "path": "dist/native-stream-origin.cjs",
+      "beforeSha256": null,
+      "afterSha256": "ad7f86d56928aaddfaaa0016b8b4d650eba172fc853cab9ae934570b96e44f5e"
+    },
+    {
+      "path": "dist/native-stream-origin.d.ts",
+      "beforeSha256": null,
+      "afterSha256": "552e60383257f4ff1d7fb6d4f30fe47c3633636dada20b952bf0e65ccf6339fa"
+    },
+    {
+      "path": "dist/native-stream-origin.d.cts",
+      "beforeSha256": null,
+      "afterSha256": "552e60383257f4ff1d7fb6d4f30fe47c3633636dada20b952bf0e65ccf6339fa"
+    },
+    {
+      "path": "dist/pregel/loop.js",
+      "beforeSha256": "c7c0b58507d214e09f6a8cfe0fac9f485a1811e19a42aee9eaf5b5c566a85366",
+      "afterSha256": "47309c55bdda604dbd3c00139ae3dbd11bd7955bcd7006b4432111c16284e11a"
+    },
+    {
+      "path": "dist/pregel/loop.cjs",
+      "beforeSha256": "62730c465066f861299f3ad5a70efc1da22db295b52557995f8fe12f4f90cfaa",
+      "afterSha256": "bd239441b2fce530a65659b9fdc0720c246f214c7c14d6f806ec0b73363d4053"
+    },
+    {
+      "path": "dist/pregel/runner.js",
+      "beforeSha256": "b4859fe9aa953273324f5d9210072f51cded818ccc383ab2885780abfd5f15f2",
+      "afterSha256": "2be91aebdf47169cc0ac80efbc2fc45206964a956678f59c39b3c32c4c61cb62"
+    },
+    {
+      "path": "dist/pregel/runner.cjs",
+      "beforeSha256": "0b1f125ee7e92df3a629d5993131fc90bc464ce548c826809e97cf673bc6efdb",
+      "afterSha256": "ca03e0168a18a4955441ddeece6ee63f2c4bf425bfbe2bcbef1ff8d3fe414942"
+    }
+  ],
+  "templates": [
+    {
+      "path": "langgraph-native-stream-runtime.js.inc",
+      "sha256": "7b5349f014e77e012447a9b49e29d39f6558502a7a3b96b9929cf723ae5e09f0"
+    },
+    {
+      "path": "langgraph-native-stream.d.ts",
+      "sha256": "552e60383257f4ff1d7fb6d4f30fe47c3633636dada20b952bf0e65ccf6339fa"
+    },
+    {
+      "path": "langgraph-native-checkpoint-loop-runtime.js.inc",
+      "sha256": "8599565f12a1d0fc0c7f9833735ee5b4825d9f696a8f88b327e0e44ee9390e77"
+    }
+  ]
+}

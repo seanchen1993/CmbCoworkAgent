@@ -15,12 +15,18 @@ interface FeatureGateState extends FeatureGateCheckResult {
   loading: boolean
 }
 
-export function useFeatureGate(name: FeatureGateKey): FeatureGateState & {
+export function useFeatureGate(
+  name: FeatureGateKey,
+  options: { verifyDisabled?: boolean } = {}
+): FeatureGateState & {
   refresh: (options?: FeatureGateCheckOptions) => Promise<FeatureGateCheckResult>
 } {
+  const verifyDisabled = options.verifyDisabled === true
   const [state, setState] = useState<FeatureGateState>(() => {
     const cached = featureGateResultCache.get(name)
-    return cached ? { ...cached, loading: false } : { ...DISABLED_RESULT, loading: true }
+    return cached
+      ? { ...cached, loading: verifyDisabled && !cached.enabled }
+      : { ...DISABLED_RESULT, loading: true }
   })
 
   const refresh = useCallback(
@@ -43,7 +49,13 @@ export function useFeatureGate(name: FeatureGateKey): FeatureGateState & {
   useEffect(() => {
     let canceled = false
     const cached = featureGateResultCache.get(name)
-    setState((prev) => (cached ? { ...cached, loading: false } : { ...prev, loading: true }))
+    // Synchronize this subscription with the external gate cache before the IPC result arrives.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    setState((prev) =>
+      cached
+        ? { ...cached, loading: verifyDisabled && !cached.enabled }
+        : { ...prev, loading: true }
+    )
     window.api.featureGates
       .isEnabled(name)
       .then((result) => {
@@ -58,7 +70,7 @@ export function useFeatureGate(name: FeatureGateKey): FeatureGateState & {
     return () => {
       canceled = true
     }
-  }, [name])
+  }, [name, verifyDisabled])
 
   return { ...state, refresh }
 }

@@ -1,0 +1,52 @@
+{
+  "apiVersion": "cmb.mods/v2",
+  "id": "project-public-action-provider",
+  "claw": {
+    "componentsVersion": 1,
+    "components": [
+      {
+        "id": "main",
+        "name": "公开文本整理步骤",
+        "description": "整理结果：",
+        "kind": "module",
+        "entry": "main.ts",
+        "dependsOn": [],
+        "actionIds": [
+          "format"
+        ]
+      }
+    ],
+    "actions": [
+      {
+        "id": "format",
+        "name": "公开文本整理步骤",
+        "command": "project-public-action-provider",
+        "inputSchema": {
+          "type": "object",
+          "required": [
+            "text"
+          ],
+          "properties": {
+            "text": {
+              "type": "string",
+              "maxLength": 8000
+            }
+          },
+          "additionalProperties": false
+        },
+        "outputSchema": {
+          "type": "object",
+          "required": [
+            "text"
+          ],
+          "properties": {
+            "text": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false
+        }
+      }
+    ]
+  }
+}

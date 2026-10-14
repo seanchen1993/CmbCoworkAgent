@@ -1,0 +1,6 @@
+{
+  "name": "typed-counter",
+  "version": "1.0.0",
+  "description": "Typed authoring example: a per-session counter command",
+  "types": "contract.d.ts"
+}

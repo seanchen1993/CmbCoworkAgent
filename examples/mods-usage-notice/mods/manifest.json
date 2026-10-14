@@ -1,0 +1,19 @@
+{
+  "apiVersion": "cmb.mods/v2",
+  "id": "usage-notice",
+  "claw": {
+    "componentsVersion": 1,
+    "components": [
+      {
+        "id": "usage",
+        "name": "任务用量提示",
+        "kind": "module",
+        "entry": "usage.tsx",
+        "description": "任务结束后自动显示真实输入量；不查询订阅额度或推算费用。",
+        "dependsOn": [],
+        "actionIds": []
+      }
+    ],
+    "actions": []
+  }
+}

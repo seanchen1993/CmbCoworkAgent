@@ -4,6 +4,8 @@ import { basename, dirname, join, resolve } from "node:path"
 import { AIMessage, ToolMessage, type BaseMessage } from "@langchain/core/messages"
 import { FakeChatModel } from "@langchain/core/utils/testing"
 import { createAgent } from "langchain"
+import { tool } from "@langchain/core/tools"
+import { z } from "zod"
 import { createToolHookMiddleware } from "../../agent/tool-hooks"
 import { createHookScope } from "../../hooks/scope"
 import { afterEach, expect, it, vi } from "vitest"
@@ -96,6 +98,8 @@ async function fixture(code: string, denyTools: string[] = []) {
   )
   manager.attachFunctions({
     registeredTools: () => session.registeredTools(),
+    presentationEvent: (_workspace, _threadId, event, input, signal) =>
+      session.presentationEvent(event, input, signal),
     invalidate: () => {
       void session.close()
     },
@@ -202,13 +206,13 @@ it("reports invalid dynamic tool input and missing handlers as model tool errors
   expect(f.manager.store.audit(f.workspace)).toEqual([])
 })
 
-it("advertises dynamic schemas through the real AgentNode, serves calls, refreshes replacements and hides revoked tools", async () => {
+it.each([",isDeferred:false"])("advertises eager dynamic schemas through the real AgentNode (%s), serves calls, refreshes replacements and hides revoked tools", async (placement) => {
   const f = await fixture(`
     on("session.start",async($,e,next)=>{
-      await $.tool.register({name:"probe",description:"First",inputSchema:{type:"object",properties:{count:{type:"integer"}},required:["count"]}});
+      await $.tool.register({name:"probe",description:"First"${placement},inputSchema:{type:"object",properties:{count:{type:"integer"}},required:["count"]}});
       await $.command.register({name:"replace",description:"Replace"}); return next(e)
     });
-    on("command.run",{command:"replace"},async($)=>{await $.tool.register({name:"probe",description:"Replaced"});return {text:"ok"}});
+    on("command.run",{command:"replace"},async($)=>{await $.tool.register({name:"probe",description:"Replaced"${placement}});return {text:"ok"}});
     on("tool.call",{tool:"mcp__demo__probe"},($,e)=>({result:{count:e.count},context:["custom context"]}));
   `)
   const definitions: unknown[][] = []
@@ -268,6 +272,106 @@ it("advertises dynamic schemas through the real AgentNode, serves calls, refresh
   await agent.invoke({ messages: [{ role: "user", content: "revoked" }] })
   expect(definitions.at(-1)).toEqual([])
 })
+
+it.each(["", ",isDeferred:true"])("loads default deferred tools through real AgentNode search and the next provider step (%s)", async placement => {
+  const f = await fixture(`
+    on("session.start",async($,e,next)=>{
+      await $.tool.register({name:"probe",description:"Private description"${placement},inputSchema:{type:"object",properties:{count:{type:"integer"}},required:["count"]}});
+      return next(e)
+    });
+    on("tool.call",{tool:"mcp__demo__probe"},($,e)=>({result:{count:e.count}}));
+  `)
+  const definitions: unknown[][] = []
+  const messagesSeen: BaseMessage[][] = []
+  let phase = 0
+  class Model extends FakeChatModel {
+    bindTools(tools: unknown[]) { definitions.push(tools); return this }
+    async _generate(messages: BaseMessage[]) {
+      messagesSeen.push(messages)
+      const calls = [
+        { name: "mods_tool_search", id: "search", args: { query: "probe" }, type: "tool_call" as const },
+        { name: "mcp__demo__probe", id: "probe", args: { count: 7 }, type: "tool_call" as const }
+      ]
+      const call = calls[phase++]
+      const message = call ? new AIMessage({ content: "", tool_calls: [call] }) : new AIMessage("done")
+      return { generations: [{ text: call ? "" : "done", message }] }
+    }
+  }
+  const agent = createAgent({ model: new Model({}), tools: [], middleware: [createToolHookMiddleware({
+    workspacePath: f.workspace, threadId: "thread", hookScope: createHookScope(), resolveHooksForContext: () => []
+  })] })
+  const result = await agent.invoke({ messages: [{ role: "user", content: "probe" }] })
+  expect(JSON.stringify(definitions[0])).toContain("mods_tool_search")
+  expect(JSON.stringify(definitions[0])).not.toContain("mcp__demo__probe")
+  expect(JSON.stringify(messagesSeen[0])).toContain("mcp__demo__probe")
+  expect(JSON.stringify(messagesSeen[0])).not.toContain("Private description")
+  expect(JSON.stringify(definitions[1])).toContain('"description":"Private description"')
+  expect(JSON.stringify(definitions[1])).toContain('"count":{"type":"integer"}')
+  expect(result.messages.filter(ToolMessage.isInstance)).toMatchObject([
+    { status: "success", name: "mods_tool_search" },
+    { status: "success", name: "mcp__demo__probe", content: '{"count":7}' }
+  ])
+  f.manager.configure(f.workspace, false, true)
+  await agent.invoke({ messages: [{ role: "user", content: "revoked" }] })
+  expect(definitions.at(-1)).toEqual([])
+})
+
+it.each([
+  { placement: true, override: false, visible: true },
+  { placement: false, override: true, visible: false }
+])("gives tool.describe placement precedence over registration ($placement -> $override)", async ({ placement, override, visible }) => {
+  const f = await fixture(`
+    on("session.start",async($,e,next)=>{await $.tool.register({name:"probe",description:"Original",isDeferred:${placement}});return next(e)});
+    on("tool.describe",{tool:"mcp__demo__probe"},async($,e)=>({description:"Override",isDeferred:${override}}));
+  `)
+  let definitions: unknown[] = []
+  class Model extends FakeChatModel {
+    bindTools(tools: unknown[]) { definitions = tools; return this }
+  }
+  const agent = createAgent({ model: new Model({}), tools: [], middleware: [createToolHookMiddleware({
+    workspacePath: f.workspace, threadId: "thread", hookScope: createHookScope(), resolveHooksForContext: () => []
+  })] })
+  await agent.invoke({ messages: [{ role: "user", content: "inspect" }] })
+  expect(JSON.stringify(definitions).includes("mcp__demo__probe")).toBe(visible)
+  expect(JSON.stringify(definitions).includes("Override")).toBe(visible)
+})
+
+it.each(["absent", "disabled", "empty", "eager", "collision"])(
+  "retains native search ownership when Mods state is %s", async state => {
+    const f = await fixture(state === "eager" || state === "collision" ? `
+      on("session.start",async($,e,next)=>{await $.tool.register({name:"probe",description:"Probe",isDeferred:${state === "collision"}});return next(e)});
+    ` : "")
+    if (state === "absent") setModsManager(undefined)
+    if (state === "disabled") f.manager.configure(f.workspace, false, false)
+    const native = vi.fn(async () => "native result")
+    const search = tool(native, { name: "mods_tool_search", description: "Native search",
+      schema: z.object({ query: z.string() }) })
+    class Model extends FakeChatModel {
+      bindTools() { return this }
+      async _generate(messages: BaseMessage[]) {
+        const done = ToolMessage.isInstance(messages.at(-1))
+        const message = done ? new AIMessage("done") : new AIMessage({ content: "", tool_calls: [
+          { name: "mods_tool_search", id: "native-search", args: { query: "hello" }, type: "tool_call" }
+        ] })
+        return { generations: [{ text: done ? "done" : "", message }] }
+      }
+    }
+    const agent = createAgent({ model: new Model({}), tools: [search], middleware: [createToolHookMiddleware({
+      workspacePath: f.workspace, threadId: "thread", hookScope: createHookScope(), resolveHooksForContext: () => []
+    })] })
+    const pending = agent.invoke({ messages: [{ role: "user", content: "search" }] })
+    if (state === "collision") {
+      await expect(pending).rejects.toThrow("MODS_TOOL_NAME_COLLISION")
+      expect(native).not.toHaveBeenCalled()
+    } else {
+      const result = await pending
+      expect(native).toHaveBeenCalledTimes(1)
+      expect(result.messages.find(ToolMessage.isInstance)).toMatchObject({
+        name: "mods_tool_search", status: "success", content: "native result"
+      })
+    }
+  }
+)
 
 it("does not execute denied or locally answered calls", async () => {
   const f = await fixture(`
@@ -419,3 +523,49 @@ it.each([
     await expect(call(AbortSignal.abort())).rejects.toThrow()
   }
 )
+
+
+it("keeps a searched tool callable across real AgentNode steps with invalidated dynamic descriptions", async () => {
+  const f = await fixture(`
+    let descriptions=0,executions=0;
+    on("session.start",async($,e,next)=>{
+      await $.tool.register({name:"probe",description:"Base",inputSchema:{type:"object"}});
+      await $.command.register({name:"refresh",description:"Refresh tool presentation"});
+      return next(e)
+    });
+    on("command.run",{command:"refresh"},async($)=>{await $.ui.invalidate("tool.describe");return {text:"refreshed"}});
+    on("tool.describe",{tool:"mcp__demo__probe"},()=>({description:"Description "+(++descriptions),isDeferred:true}));
+    on("tool.call",{tool:"mcp__demo__probe"},()=>({result:++executions,text:"executed "+executions}));
+  `)
+  const definitions: unknown[][] = []
+  let phase = 0
+  class Model extends FakeChatModel {
+    bindTools(tools: unknown[]) { definitions.push(tools); return this }
+    async _generate() {
+      // Exercise the real source of changing presentation, not a fabricated registration.
+      if (phase < 3) await f.session.run("refresh","")
+      const calls = [
+        {name:"mods_tool_search",id:"search-dynamic",args:{query:"probe"},type:"tool_call" as const},
+        {name:"mcp__demo__probe",id:"call-dynamic",args:{},type:"tool_call" as const}
+      ]
+      const call=calls[phase++]
+      return {generations:[{text:call?"":"done",message:call
+        ?new AIMessage({content:"",tool_calls:[call]}):new AIMessage("done")}]}
+    }
+  }
+  const agent=createAgent({model:new Model({}),tools:[],middleware:[createToolHookMiddleware({
+    workspacePath:f.workspace,threadId:"thread",hookScope:createHookScope(),resolveHooksForContext:()=>[]
+  })]})
+  const result=await agent.invoke({messages:[{role:"user",content:"dynamic description"}]})
+  expect(JSON.stringify(definitions[0])).toContain("mods_tool_search")
+  expect(JSON.stringify(definitions[1])).toContain('"description":"Description 2"')
+  expect(JSON.stringify(definitions[2])).toContain('"description":"Description 3"')
+  expect(JSON.stringify(definitions[1])).not.toContain("mods_tool_search")
+  expect(result.messages.filter(ToolMessage.isInstance)).toMatchObject([
+    {status:"success",name:"mods_tool_search"},
+    {status:"success",name:"mcp__demo__probe",content:"1"}
+  ])
+  f.manager.configure(f.workspace,false,true)
+  await agent.invoke({messages:[{role:"user",content:"revoked"}]})
+  expect(definitions.at(-1)).toEqual([])
+})

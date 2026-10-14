@@ -1,3 +1,6 @@
+import type { ClawActionExport } from "../claw-actions"
+import type { ClawComponentExport } from "../claw-components"
+
 export interface FunctionCommand {
   name: string
   description: string
@@ -19,4 +22,7 @@ export interface FunctionPluginStatus {
   state: "disabled" | "needs-approval" | "ready" | "invalid"
   error?: string
   capabilities: string[]
+  actions?: ClawActionExport[]
+  components?: ClawComponentExport[]
+  userConfigFieldCount?: number
 }

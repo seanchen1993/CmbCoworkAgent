@@ -23,6 +23,13 @@ export interface FunctionSessionUsageArgs {
   columns?: number
 }
 
+/** Actual host engine identity, never the claimed Claude compatibility profile. */
+export interface FunctionSessionVersion {
+  version: string
+  base?: string
+  builtAt?: string
+}
+
 export type FunctionSessionContextCategoryKind = "used" | "free" | "buffer" | "deferred"
 
 export type FunctionSessionContextCategory = ModObject & {

@@ -3,7 +3,7 @@ import { resolve } from "node:path"
 import { afterEach, expect, it } from "vitest"
 import type { ModJson } from "../../../shared/mods/types"
 import type { FunctionTurnComplete } from "../../../shared/mods/v2/turn"
-import type { FunctionPaneSnapshot, FunctionUiAction, FunctionUiElement } from "../../../shared/mods/v2/ui"
+import type { FunctionPaneSnapshot, FunctionUiAction, FunctionUiElement, FunctionUiNode } from "../../../shared/mods/v2/ui"
 import { compileFunctionPlugin } from "./loader"
 import { FunctionGuestRuntime } from "./guest-runtime"
 import { FunctionSession, SESSION_CAPABILITIES } from "./session"
@@ -50,10 +50,10 @@ function completion(overrides: Partial<FunctionTurnComplete> = {}): FunctionTurn
 }
 
 function control(pane: FunctionPaneSnapshot, key: string, kind: FunctionUiAction["kind"], value?: string) {
-  let found: FunctionUiElement | undefined
+  let found: FunctionUiNode | undefined
   function visit(node: FunctionUiElement | string): void {
-    if (typeof node === "string") return
-    if (node.props.key === key) found = node
+    if (typeof node === "string" || node.type === "engine") return
+    if (node.type !== "fragment" && node.type !== "Markdown" && node.props.key === key) found = node
     node.children?.forEach(visit)
   }
   visit(pane.tree)

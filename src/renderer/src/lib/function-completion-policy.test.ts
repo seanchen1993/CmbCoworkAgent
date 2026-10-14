@@ -24,14 +24,14 @@ it("offers all application completion modes, scopes, checks and bounded budgets 
     "仅报告",
     "阻止完成",
     "自动修复并复检",
-    "当前文件",
-    "当前 diff",
+    "指定文件或目录",
+    "本次代码改动",
     "Feature",
     "整个项目",
     "代码评审",
     "单元测试",
     "E2E",
-    "Autobiz validator",
+    "Autobiz 业务验收",
     "最大修复次数",
     "最长时间（秒）",
     "模型总预算（tokens）",
@@ -75,6 +75,30 @@ it("offers an explicit stage input and explains that only the compiler chooses i
   )
   expect(html).toContain("自动推进阶段起点")
   expect(html).toContain('value="requirements_eval_in_progress"')
-  expect(html).toContain("固定版本 workflow compiler 推导终点")
+  expect(html).toContain("应用根据项目工作流确定下一阶段")
   expect(html).toContain("留空只检查，不推进")
+})
+
+it("blocks unavailable Autobiz selections while keeping ordinary templates and off available", () => {
+  const html = renderToStaticMarkup(
+    createElement(FunctionCompletionPolicyForm, {
+      value: { ...DEFAULT_COMPLETION_POLICY, mode: "repair" },
+      source: "application",
+      disabled: false,
+      environment: {
+        ready: false,
+        source: "D:/source",
+        issues: ["请安装 Python 3"],
+        stageSupported: false
+      },
+      onChange: () => {},
+      onSave: () => {}
+    })
+  )
+  expect(html).toContain("普通代码检查仍可使用")
+  expect(html).toContain("请安装 Python 3")
+  expect(html).toContain("修复后再完成")
+  expect(html).toContain("只给检查报告")
+  expect(html).toContain("取消该检查后保存")
+  expect(html).not.toContain("相对文件或目录")
 })

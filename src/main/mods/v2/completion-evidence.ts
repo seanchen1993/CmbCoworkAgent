@@ -4,6 +4,7 @@ import { lstat, opendir, realpath } from "node:fs/promises"
 import { isAbsolute, join, relative, resolve } from "node:path"
 import { promisify } from "node:util"
 import type { ModJson } from "../../../shared/mods/types"
+import { readProjectCheckConfig } from "./project-check-config"
 import {
   openStableFileHandle,
   readStableFileHandleBounded
@@ -252,6 +253,7 @@ export async function captureCompletionBinding(
   }
   input.signal?.throwIfAborted()
   input.assertLive?.()
+  const projectChecks = await readProjectCheckConfig(input.workspace, input.signal)
   return {
     workspace: resolve(input.workspace),
     threadId: input.threadId,
@@ -272,7 +274,13 @@ export async function captureCompletionBinding(
         )
       )
     ),
-    configFingerprint: sha256(JSON.stringify(input.config ?? null)),
+    configFingerprint: sha256(
+      JSON.stringify(
+        projectChecks.digest === "missing"
+          ? input.config ?? null
+          : { policy: input.config ?? null, projectChecks: projectChecks.digest }
+      )
+    ),
     files
   }
 }

@@ -12,7 +12,7 @@ import {
 
 export { LegacySubagentMigrationCancelledError } from "./protocol"
 
-type LegacySubagentMigrationWorkerFactory = () => Promise<Worker>
+type LegacySubagentMigrationWorkerFactory = (signal?: AbortSignal) => Promise<Worker>
 const LEGACY_SUBAGENT_MIGRATION_ABORT_GRACE_MS = 2_000
 export const LEGACY_SUBAGENT_MIGRATION_WORKER_RESOURCE_LIMITS: ResourceLimits = {
   maxOldGenerationSizeMb: 256,
@@ -22,8 +22,9 @@ export const LEGACY_SUBAGENT_MIGRATION_WORKER_RESOURCE_LIMITS: ResourceLimits = 
 export const LEGACY_SUBAGENT_MIGRATION_MAX_WORKERS = 2
 export const LEGACY_SUBAGENT_MIGRATION_MAX_WAITERS = 30
 
-async function createBundledWorker(): Promise<Worker> {
+async function createBundledWorker(signal?: AbortSignal): Promise<Worker> {
   const module = await import("./legacy-subagent-migration-worker?nodeWorker")
+  if (signal?.aborted) throw new LegacySubagentMigrationCancelledError()
   return module.default({
     name: "legacy-subagent-migration",
     resourceLimits: LEGACY_SUBAGENT_MIGRATION_WORKER_RESOURCE_LIMITS
@@ -58,7 +59,8 @@ export class LegacySubagentMigrationParserClient {
       () => new LegacySubagentMigrationCancelledError()
     )
     try {
-      const worker = await this.workerFactory()
+      if (signal?.aborted) throw new LegacySubagentMigrationCancelledError()
+      const worker = await this.workerFactory(signal)
       if (signal?.aborted) {
         await worker.terminate().catch(() => undefined)
         throw new LegacySubagentMigrationCancelledError()

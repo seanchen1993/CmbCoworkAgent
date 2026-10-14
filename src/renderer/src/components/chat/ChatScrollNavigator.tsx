@@ -352,6 +352,12 @@ function parseUserInputRequestResponse(
           if (answer.type === "other" && typeof answer.text === "string") {
             return [[questionId, answer.text]]
           }
+          if (
+            answer.type === "options" &&
+            Array.isArray(answer.labels) &&
+            answer.labels.every((label) => typeof label === "string")
+          )
+            return [[questionId, answer.labels.join(", ")]]
           if (answer.type === "option" && typeof answer.label === "string") {
             const additionalText =
               typeof answer.additionalText === "string" ? answer.additionalText.trim() : ""

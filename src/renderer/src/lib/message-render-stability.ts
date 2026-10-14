@@ -1,4 +1,6 @@
 import type { Message, ToolCallState } from "../types"
+import { functionConversationTranscriptFields, isFunctionConversationHiddenNote,
+  isFunctionConversationNotice } from "../../../shared/mods/v2/conversation-transcript"
 import { getWorkerToolUiKey, type ToolResultAssociation } from "./worker-tool-result-key"
 
 function areStructuredValuesEqual(left: unknown, right: unknown): boolean {
@@ -53,6 +55,9 @@ export function areMessageRenderFieldsEqual(
     left.id === right.id &&
     left.role === right.role &&
     left.reasoning === right.reasoning &&
+    left.function_row_invalid === right.function_row_invalid &&
+    areStructuredValuesEqual(left.function_row, right.function_row) &&
+    areStructuredValuesEqual(left.prompt_origin, right.prompt_origin) &&
     areStructuredValuesEqual(left.content, right.content) &&
     areToolCallsEqual(left.tool_calls, right.tool_calls)
   )
@@ -64,6 +69,9 @@ export function areMessageRenderFieldsEqual(
  * this projection so their high-frequency stream snapshots cannot invalidate tool maps.
  */
 export function isToolDerivationMessage(message: Message): boolean {
+  const fields = functionConversationTranscriptFields(message, message.id, message.role)
+  if (fields.function_row_invalid || isFunctionConversationHiddenNote(fields) ||
+    isFunctionConversationNotice(fields)) return false
   return (
     message.role === "user" ||
     (message.role === "assistant" && Boolean(message.tool_calls?.length)) ||

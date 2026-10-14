@@ -1,10 +1,11 @@
+import { AGENT_GRAPH_RECURSION_LIMIT_MIN } from "../../shared/agent-runtime-limits"
 import { queryFunctionAgentList } from "./v2/agent-list-host"
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs"
 import { basename, dirname, join, resolve } from "node:path"
 import { tmpdir } from "node:os"
 import { afterEach, expect, it, vi } from "vitest"
 import { LocalSandbox } from "../agent/local-sandbox"
-import { ModsManager, getModsManager, setModsManager } from "./manager"
+import { ModsManager, authorizeCurrentModInput, getModsManager, setModsManager } from "./manager"
 import { withFunctionExecution } from "./v2/execution-context"
 import { ProjectFunctionFiles } from "./v2/file-access"
 import { FunctionRegisteredTools } from "./v2/registered-tools"
@@ -13,6 +14,7 @@ import { getModCallContext, modCallContext } from "./context"
 import type { ModRuntimeAuthority } from "./runtime-instance"
 import {
   createDeepAgent,
+  createAgentRuntime,
   wrapTaskToolWithOwnerMetadata,
   SUBAGENT_OWNER_METADATA_KEY
 } from "../agent/runtime"
@@ -24,8 +26,13 @@ import { AIMessage, ToolMessage, type BaseMessage } from "@langchain/core/messag
 import { FakeChatModel } from "@langchain/core/utils/testing"
 import { FunctionGuestRuntime } from "./v2/guest-runtime"
 import { FunctionSession, SESSION_CAPABILITIES } from "./v2/session"
+import { FunctionModsManager } from "./v2/manager"
 import { currentFunctionExecution } from "./v2/execution-context"
+import { getHookAgentIdFromRequest } from "../hooks/execution-context"
 import { functionSdkToolInput } from "./v2/tool-sdk"
+import { queryFunctionToolPermission } from "./v2/tool-permission-host"
+import type { ModObject } from "../../shared/mods/types"
+import type { FunctionTaskModel } from "../agent/mods-task-model"
 import type { FunctionTurnComplete } from "../../shared/mods/v2/turn"
 import {
   claimLocalThreadRunLease,
@@ -40,8 +47,40 @@ vi.mock("electron", () => ({
   ipcMain: { handle: () => {} }
 }))
 const cleanup: Array<() => void> = []
+const TASK_AUTHORITY_ID = /^mod-task:[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/
 afterEach(() => {
   for (const run of cleanup.splice(0).reverse()) run()
+})
+
+it("rejects a stale session workspace before allocating Mods authority or starting a model", async () => {
+  const f = fixture()
+  const createAuthority = vi.spyOn(f.manager, "createRuntimeAuthority")
+  try {
+    await expect(
+      createAgentRuntime({
+        workspacePath: join(f.workspace, "missing"),
+        threadId: "invalid-workspace"
+      })
+    ).rejects.toMatchObject({ code: "invalid_workspace_path" })
+    expect(createAuthority).not.toHaveBeenCalled()
+  } finally {
+    createAuthority.mockRestore()
+  }
+})
+
+it("validates a stale workspace when no Mods manager is installed", async () => {
+  const previous = getModsManager()
+  setModsManager(undefined)
+  try {
+    await expect(
+      createAgentRuntime({
+        workspacePath: join(tmpdir(), "missing-workspace", "Users", "demo"),
+        threadId: "invalid-workspace-no-mods"
+      })
+    ).rejects.toMatchObject({ code: "invalid_workspace_path" })
+  } finally {
+    setModsManager(previous)
+  }
 })
 
 function fixture(blockedToolNames = new Set<string>(), readOnly = false) {
@@ -846,19 +885,30 @@ it("uses the constructor's fixed owner even when a backend is created inside a p
   })
 })
 
-it("serves a registered tool and nested file SDK inside a real deepagents task with the role's authority", async () => {
+it.each(["eager", "deferred"] as const)("serves a registered tool and nested file SDK inside a real deepagents task with the role's authority (%s)", async placement => {
+  const deferred = placement === "deferred"
+  const childSteps = deferred ? 3 : 2
   const f = fixture()
   const runtimeAuthority = f.manager.functionUserScope(f.workspace, "thread").runtimeAuthority!
+  const permissionQuestions: ModObject[] = [], callQuestions: ModObject[] = []
+  const queryQuestions: ModObject[] = []
   const guest = await FunctionGuestRuntime.create(`var __cmbFunctionMod={register(on){
     on("session.start",async($,e,next)=>{
-      await $.tool.register({name:"inspect",description:"Inspect actual files"});
-      await $.tool.register({name:"forbidden",description:"Hidden from Explore"});
+      await $.tool.register({name:"inspect",description:"Inspect actual files"${deferred ? "" : ",isDeferred:false"}});
+      await $.tool.register({name:"forbidden",description:"Hidden from Explore",isDeferred:false});
       return next(e);
     });
     on("tool.call",{tool:"mcp__demo__inspect"},async($,e)=>{
+      const permission=await $.tool.check({tool:"read_file",input:{file_path:"name.txt"},
+        tool_use_id:e.tool_use_id,agentId:e.agentId,ceiling:"deny"});
       const read=await $.tool.call({tool:"read_file",file_path:"name.txt"});
       return {result:{agent:e.agentId,read:read.text,cwd:await $.session.cwd(),
-        file:await $.fs.read("name.txt"),tools:await $.tool.list(),agents:await $.agent.list()}};
+        file:await $.fs.read("name.txt"),tools:await $.tool.list(),agents:await $.agent.list(),permission}};
+    });
+    on("tool.check",async($,e,next)=>{
+      const result=await next(e);
+      if(result.ceiling!==undefined)throw Error("no connector ceiling source");
+      return {...result,hook:"OtherHook"};
     });
   }}`)
   const registered = new FunctionRegisteredTools(f.manager.store, {
@@ -899,7 +949,15 @@ it("serves a registered tool and nested file SDK inside a real deepagents task w
       filterTools: (tools) => f.manager.filterFunctionTools(f.workspace, "thread", tools),
       registeredTool: (_, input, origin, signal, run, caller) =>
         registered.call(f.scope.workspace, "thread", f.grant, input, origin, signal, run, caller),
+      checkTool: (_plugin, input, signal) => {
+        queryQuestions.push(JSON.parse(JSON.stringify(input)))
+        return queryFunctionToolPermission(f.manager, () => {
+          throw Error("unexpected cold permission fallback")
+        }, f.workspace, "thread", f.grant, input, signal)
+      },
       callTool: async (_, input, signal) => {
+        callQuestions.push(JSON.parse(JSON.stringify(input)))
+        if (typeof input.tool_use_id !== "string") throw Error("actual SDK tool.call id missing")
         const { target, args } = functionSdkToolInput(input)
         return f.manager.invokeFunctionTool(
           f.workspace,
@@ -909,7 +967,8 @@ it("serves a registered tool and nested file SDK inside a real deepagents task w
           args,
           signal,
           false,
-          false
+          false,
+          input.tool_use_id
         )
       }
     }
@@ -937,10 +996,13 @@ it("serves a registered tool and nested file SDK inside a real deepagents task w
     },
     registeredTools: () => session.registeredTools(),
     hasToolCheck: () => true,
-    toolCheck: (binding, input, core, origin) =>
-      session.checkTool(input, binding.signal, core, origin),
-    toolCall: (binding, input, core) =>
-      withFunctionExecution(
+    toolCheck: (binding, input, core, origin) => {
+      permissionQuestions.push(JSON.parse(JSON.stringify(input)))
+      return session.checkTool(input, binding.signal, core, origin)
+    },
+    toolCall: (binding, input, core) => {
+      callQuestions.push(JSON.parse(JSON.stringify(input)))
+      return withFunctionExecution(
         {
           ...binding,
           userInitiated: false,
@@ -949,29 +1011,44 @@ it("serves a registered tool and nested file SDK inside a real deepagents task w
         },
         () => session.interceptTool(input, binding.signal, core)
       )
+    }
   })
   const initialCatalogs = new Map<string, string[]>()
   const definitions = new Map<string, string>()
   const replies: BaseMessage[] = []
   const childAuthorities: ModRuntimeAuthority[] = []
+  const childDefinitions: string[] = []
+  const childMessages: string[] = []
+  let modelCalls = 0
   class Model extends FakeChatModel {
     bindTools(tools: unknown[]) {
       definitions.set(currentFunctionExecution()?.agentId ?? "main", JSON.stringify(tools))
       return this
     }
     async _generate(messages: BaseMessage[]) {
+      modelCalls++
       const scope = currentFunctionExecution()
-      const child = scope?.agentId === "task-child"
-      if (child) childAuthorities.push(scope.runtimeAuthority!)
-      const done = ToolMessage.isInstance(messages.at(-1))
-      if (done) replies.push(messages.at(-1)!)
+      const child = !!scope?.runtimeAuthority && scope.runtimeAuthority !== runtimeAuthority
+      if (child) {
+        childAuthorities.push(scope.runtimeAuthority!)
+        childDefinitions.push(definitions.get(scope.runtimeAuthority!.agentId) ?? "")
+        childMessages.push(JSON.stringify(messages))
+      }
+      const last = messages.at(-1)
+      const toolReply = ToolMessage.isInstance(last)
+      const searched = toolReply && last.name === "mods_tool_search"
+      const done = toolReply && !searched
+      if (toolReply) replies.push(last)
+      const search = child && deferred && !toolReply
       const message = done
         ? new AIMessage(child ? "inspected" : "done")
         : new AIMessage({
             content: "",
             tool_calls: [
               child
-                ? { name: "mcp__demo__inspect", id: "inspect-child", args: {}, type: "tool_call" }
+                ? search
+                  ? { name: "mods_tool_search", id: "search-child", args: { query: "inspect" }, type: "tool_call" }
+                  : { name: "mcp__demo__inspect", id: "inspect-child", args: {}, type: "tool_call" }
                 : {
                     name: "task",
                     id: "task-child",
@@ -980,7 +1057,7 @@ it("serves a registered tool and nested file SDK inside a real deepagents task w
                   }
             ]
           })
-      message.id = `${child ? "child" : "main"}-${done ? "answer" : "tool"}`
+      message.id = `${child ? "child" : "main"}-${done ? "answer" : search ? "search" : "tool"}`
       message.response_metadata = { model_name: child ? "child-provider" : "main-provider" }
       message.usage_metadata = {
         input_tokens: child ? 5 : 100,
@@ -992,8 +1069,18 @@ it("serves a registered tool and nested file SDK inside a real deepagents task w
   }
   claimLocalThreadRunLease({ threadId: "thread", runId: "parent-graph", owner: "desktop" })
   try {
+    const model = new Model({})
+    const modTaskModels = new WeakMap<object, FunctionTaskModel>()
+    modTaskModels.set(model, {
+      model: "fixture-model",
+      resolve: async () => ({
+        provider: model, model: "fixture-model", contextWindow: 64000, inputBudget: 32000
+      })
+    })
     const agent = createDeepAgent({
-      model: new Model({}),
+      modFunctionRuntimeReady: true,
+      model,
+      modTaskModels,
       backend: f.sandbox,
       tools: [],
       threadId: "thread",
@@ -1040,39 +1127,91 @@ it("serves a registered tool and nested file SDK inside a real deepagents task w
     })
     const result = await agent.invoke(
       { messages: [{ role: "user", content: "Explore" }] },
-      { recursionLimit: 12 }
+      // Discovery adds a graph round; exercise it within the supported minimum budget.
+      { recursionLimit: deferred ? AGENT_GRAPH_RECURSION_LIMIT_MIN : 12 }
     )
+    const taskReply = replies.find(
+      message => ToolMessage.isInstance(message) && message.tool_call_id === "task-child"
+    )
+    expect(taskReply).toMatchObject({ name: "task", status: undefined, content: "inspected" })
     expect(result.messages.at(-1).content).toBe("done")
+    expect(modelCalls).toBe(deferred ? 5 : 4)
+    expect(childAuthorities).toHaveLength(childSteps)
+    const childId = childAuthorities[0].agentId
+    expect(childId).toMatch(TASK_AUTHORITY_ID)
+    for (const authority of childAuthorities) expect(authority).toBe(childAuthorities[0])
+    expect(childDefinitions).toHaveLength(childSteps)
+    for (const definition of childDefinitions)
+      expect(definition).not.toContain("mcp__demo__forbidden")
+    for (const messages of childMessages)
+      expect(messages).not.toContain("mcp__demo__forbidden")
+    if (deferred) {
+      expect(childDefinitions[0]).toContain("mods_tool_search")
+      expect(childDefinitions[0]).not.toContain("mcp__demo__inspect")
+      expect(childMessages[0]).toContain("mcp__demo__inspect")
+      expect(childDefinitions[1]).toContain("mcp__demo__inspect")
+      expect(childDefinitions[1]).toContain("Inspect actual files")
+      expect(childDefinitions[1]).not.toContain("mods_tool_search")
+      const searched = replies.find(
+        message => ToolMessage.isInstance(message) && message.name === "mods_tool_search"
+      )
+      expect(searched).toMatchObject({ status: "success", tool_call_id: "search-child" })
+      expect(JSON.parse(String(searched!.content))).toEqual({
+        loaded: ["mcp__demo__inspect"], nextStep: true
+      })
+    } else {
+      expect(childDefinitions[0]).toContain("mcp__demo__inspect")
+      expect(childDefinitions[0]).not.toContain("mods_tool_search")
+      expect(replies.some(message => ToolMessage.isInstance(message) &&
+        message.name === "mods_tool_search")).toBe(false)
+    }
     expect(initialCatalogs.get("main")).toContain("task")
-    expect(initialCatalogs.get("task-child")).toContain("read_file")
-    expect(initialCatalogs.get("task-child")).not.toContain("write_file")
-    expect(initialCatalogs.get("task-child")).not.toContain("task")
-    expect(definitions.get("task-child")).toContain("mcp__demo__inspect")
-    expect(definitions.get("task-child")).not.toContain("mcp__demo__forbidden")
+    expect(initialCatalogs.get(childId)).toContain("read_file")
+    expect(initialCatalogs.get(childId)).not.toContain("write_file")
+    expect(initialCatalogs.get(childId)).not.toContain("task")
+    expect(definitions.get(childId)).toContain("mcp__demo__inspect")
+    expect(definitions.get(childId)).not.toContain("mcp__demo__forbidden")
     const reply = replies.find(
       (message) => ToolMessage.isInstance(message) && message.name === "mcp__demo__inspect"
     )!
     expect(reply).toBeDefined()
     const value = JSON.parse(String(reply.content))
     expect(value).toMatchObject({
-      agent: "task-child",
+      agent: childId,
       file: "isolated checkout",
       cwd: f.manager.workspaceKey(f.executionWorkspace)
     })
     expect(value.agents).toEqual([
-      { id: "task-child", description: "Inspect the checkout", type: "Explore", status: "running" }
+      { id: childId, description: "Inspect the checkout", type: "Explore", status: "running" }
     ])
     expect(
       f.manager.listFunctionAgents(f.workspace, "thread", new AbortController().signal)
     ).toEqual([
       {
-        id: "task-child",
+        id: childId,
         description: "Inspect the checkout",
         type: "Explore",
         status: "completed"
       }
     ])
     expect(value.read).toContain("isolated checkout")
+    expect(value.permission).toEqual({ decision: "allow", hook: "OtherHook" })
+    expect(queryQuestions).toHaveLength(2)
+    expect(queryQuestions).toEqual(Array.from({ length: 2 }, () => ({
+      tool: "read_file", input: { file_path: "name.txt" }
+    })))
+    expect(permissionQuestions).toHaveLength(3)
+    expect(callQuestions).toHaveLength(3)
+    for (const question of permissionQuestions) {
+      const call = callQuestions.find(entry => entry.tool_use_id === question.tool_use_id)
+      expect(call).toBeDefined()
+      if (!call) throw Error("actual tool.check has no matching real tool.call")
+      expect(question.tool).toBe(call.tool)
+      expect(question.agentId).toBe(call.agentId)
+      expect(question.ceiling).toBeUndefined()
+      if (question.tool === "task") expect(Object.hasOwn(question, "agentId")).toBe(false)
+      else expect(question.agentId).toBe(childId)
+    }
     expect(value.tools.map((tool: { name: string }) => tool.name)).not.toContain(
       "mcp__demo__forbidden"
     )
@@ -1082,27 +1221,27 @@ it("serves a registered tool and nested file SDK inside a real deepagents task w
     expect(audit).toHaveLength(3)
     const task = audit.find((row) => row.identity?.agentId === "main")!
     const custom = audit.find((row) => row.identity?.toolCallId === "inspect-child")!
-    expect(task.identity).toMatchObject({ agentId: "main" })
+    expect(task.identity).toMatchObject({ agentId: "main", toolCallId: "task-child" })
     expect(custom.identity?.parentCallId).toBe(task.identity!.callId)
     expect(custom.identity?.turnId).not.toBe(task.identity?.turnId)
     await vi.waitFor(() => expect(childCompletions).toHaveLength(1))
     expect(turnStarts).not.toHaveBeenCalled()
     expect(childCompletions[0]).toMatchObject({
-      agentId: "task-child",
+      agentId: childId,
       turnId: custom.identity!.turnId,
       reason: "answer",
       answer: "inspected",
       isAborted: false,
       usage: {
         model: "child-provider",
-        input_tokens: 10,
-        output_tokens: 6,
+        input_tokens: childSteps * 5,
+        output_tokens: childSteps * 3,
         cache_read_input_tokens: 0,
         cache_creation_input_tokens: 0
       }
     })
-    expect(audit.filter((row) => row.identity?.agentId === "task-child")).toHaveLength(2)
-    expect(() => f.manager.functionToolCatalog(f.workspace, "thread", "task-child")).toThrow(
+    expect(audit.filter((row) => row.identity?.agentId === childId)).toHaveLength(2)
+    expect(() => f.manager.functionToolCatalog(f.workspace, "thread", childId)).toThrow(
       "MODS_TOOL_CONTEXT_REQUIRED"
     )
   } finally {
@@ -1110,6 +1249,53 @@ it("serves a registered tool and nested file SDK inside a real deepagents task w
     await session.close()
   }
 })
+
+it.each(["allow", "release", "replace"] as const)(
+  "pins the genuine main permission authority through a %s hook without importing event identity",
+  async mode => {
+    const f = fixture()
+    const actualScope = f.manager.functionUserScope(f.workspace, "thread")
+    if (!actualScope.runtimeAuthority) throw Error("actual main runtime missing")
+    const binding = { ...f.scope, ...actualScope, runtimeAuthority: actualScope.runtimeAuthority,
+      signal: f.controller.signal }
+    const foreign = mode === "replace" ? f.manager.createRuntimeAuthority({
+      workspace: f.workspace, threadId: "foreign-thread", turnId: "foreign-turn",
+      signal: f.controller.signal
+    }) : undefined
+    const checked = vi.fn(async (actualBinding, input) => {
+      expect(input.tool).toBe("read_file")
+      expect(input.input).toEqual({ file_path: "name.txt" })
+      expect(typeof input.tool_use_id).toBe("string")
+      expect(Object.hasOwn(input, "agentId")).toBe(false)
+      expect(Object.hasOwn(input, "ceiling")).toBe(false)
+      if (mode === "release") f.release()
+      if (foreign) {
+        expect(actualBinding).not.toBe(binding)
+        actualBinding.runtimeAuthority = foreign.authority
+      }
+      return { decision: "allow" as const, hook: "OtherHook", ceiling: "deny" as const }
+    })
+    f.manager.attachFunctions({ invalidate: () => {}, closeThread: () => {}, close: () => {},
+      hasToolCheck: () => true, toolCheck: checked })
+    const effect = vi.fn(async () => "actual body")
+    const call = f.manager.dispatch(binding, "host:read_file", { file_path: "name.txt" },
+      async input => {
+        await authorizeCurrentModInput("host:read_file", input)
+        return effect()
+      })
+    if (mode === "allow") {
+      await expect(call).resolves.toBe("actual body")
+      expect(effect).toHaveBeenCalledOnce()
+    } else {
+      await expect(call).rejects.toThrow(mode === "release"
+        ? "MODS_RUNTIME_INSTANCE_EXPIRED" : "MODS_RUNTIME_SCOPE_CHANGED")
+      expect(effect).not.toHaveBeenCalled()
+      expect(f.manager.store.audit(f.scope.workspace).some(row => row.status === "succeeded"))
+        .toBe(false)
+    }
+    expect(checked).toHaveBeenCalledOnce()
+  }
+)
 
 it.each(["error", "cancel", "refusal"])(
   "reports a real shared graph's %s even when the main graph can recover",
@@ -1127,12 +1313,15 @@ it.each(["error", "cancel", "refusal"])(
       }
     })
     let childCalls = 0
+    let childAgentId: string | undefined
     class Model extends FakeChatModel {
       bindTools() {
         return this
       }
       async _generate(messages: BaseMessage[]) {
-        if (currentFunctionExecution()?.agentId === "failing-child") {
+        const authority = currentFunctionExecution()?.runtimeAuthority
+        if (authority && authority !== parent) {
+          childAgentId = authority.agentId
           childCalls++
           if (ending === "cancel") {
             f.controller.abort()
@@ -1166,8 +1355,18 @@ it.each(["error", "cancel", "refusal"])(
         return { generations: [{ message, text: String(message.content) }] }
       }
     }
+    const model = new Model({})
+    const modTaskModels = new WeakMap<object, FunctionTaskModel>()
+    modTaskModels.set(model, {
+      model: "fixture-model",
+      resolve: async () => ({
+        provider: model, model: "fixture-model", contextWindow: 64000, inputBudget: 32000
+      })
+    })
     const agent = createDeepAgent({
-      model: new Model({}),
+      modFunctionRuntimeReady: true,
+      model,
+      modTaskModels,
       backend: f.sandbox,
       tools: [],
       threadId: "thread",
@@ -1195,10 +1394,11 @@ it.each(["error", "cancel", "refusal"])(
       )
       .catch((error: unknown) => error)
     expect(childCalls).toBe(1)
+    expect(childAgentId).toMatch(TASK_AUTHORITY_ID)
     if (ending === "cancel") expect(result).toBeInstanceOf(Error)
     await vi.waitFor(() => expect(completions).toHaveLength(1))
     expect(completions[0]).toMatchObject({
-      agentId: "failing-child",
+      agentId: childAgentId,
       answer: "",
       reason: ending === "cancel" ? "aborted" : ending,
       isAborted: ending === "cancel"
@@ -1237,7 +1437,7 @@ it("clears inherited renderer ownership for an id-less task while assigning a fr
   await wrapped.invoke({ description: "first child" }, parent)
   await wrapped.invoke({ description: "second child" }, parent)
   expect(new Set(agents).size).toBe(2)
-  for (const agent of agents) expect(agent).toMatch(/^mod-task:idless-task-/)
+  for (const agent of agents) expect(agent).toMatch(TASK_AUTHORITY_ID)
   for (const config of seen) {
     expect(config.metadata).not.toHaveProperty(SUBAGENT_OWNER_METADATA_KEY)
     expect(config.configurable).not.toHaveProperty(SUBAGENT_OWNER_METADATA_KEY)
@@ -1247,18 +1447,76 @@ it("clears inherited renderer ownership for an id-less task while assigning a fr
   expect(parent.metadata[SUBAGENT_OWNER_METADATA_KEY]).toBe("parent-task")
 })
 
+it("keeps repeated renderer id main out of two concurrent task authorities", async () => {
+  const f = fixture()
+  const parent = f.manager.functionUserScope(f.workspace, "thread").runtimeAuthority!
+  const spawned: string[] = []
+  const seen: ModRuntimeAuthority[] = []
+  const raw = tool(async (input, config) => {
+    const authority = currentFunctionExecution()!.runtimeAuthority!
+    expect(authority).not.toBe(parent)
+    expect(authority.agentId).not.toBe("main")
+    expect(config.metadata?.[SUBAGENT_OWNER_METADATA_KEY]).toBe("main")
+    expect(config.configurable?.[SUBAGENT_OWNER_METADATA_KEY]).toBe("main")
+    expect(getHookAgentIdFromRequest({ runtime: config })).toBe("main")
+    expect(config.toolCall?.id).toBe("main")
+    seen.push(authority)
+    await Promise.resolve()
+    authority.assertLive()
+    return new ToolMessage({
+      content: `task:${input.description}`, name: "task", tool_call_id: config.toolCall!.id!
+    })
+  }, {
+    name: "task", description: "Concurrent task contract",
+    schema: z.object({ description: z.string(), subagent_type: z.string() })
+  })
+  const wrapped = wrapTaskToolWithOwnerMetadata(raw, undefined, undefined, (input, run) => {
+    spawned.push(input.agentId)
+    return f.manager.withSharedAgent(
+      parent, input.agentId, input.signal, { blockedToolNames: new Set(), readOnly: false },
+      run, undefined, { type: input.subagentType!, description: input.description! }
+    )
+  })
+  const inherited = {
+    metadata: { [SUBAGENT_OWNER_METADATA_KEY]: "forged-authority", marker: "keep" },
+    configurable: { [SUBAGENT_OWNER_METADATA_KEY]: "forged-authority" }
+  }
+  const results = await Promise.all(["A", "B"].map(description => wrapped.invoke({
+    name: "task", type: "tool_call", id: "main",
+    args: { description, subagent_type: "general-purpose" }
+  }, inherited)))
+  expect(new Set(spawned).size).toBe(2)
+  for (const id of spawned) expect(id).toMatch(TASK_AUTHORITY_ID)
+  expect(new Set(seen).size).toBe(2)
+  expect(seen.map(authority => authority.agentId).sort()).toEqual([...spawned].sort())
+  expect(results).toEqual(["A", "B"].map(description => expect.objectContaining({
+    name: "task", tool_call_id: "main", content: `task:${description}`
+  })))
+  expect(inherited.metadata).toEqual({
+    [SUBAGENT_OWNER_METADATA_KEY]: "forged-authority", marker: "keep"
+  })
+  expect(inherited.configurable).toEqual({ [SUBAGENT_OWNER_METADATA_KEY]: "forged-authority" })
+  for (const authority of seen)
+    expect(() => authority.assertLive()).toThrow("MODS_RUNTIME_INSTANCE_EXPIRED")
+  parent.assertLive()
+})
+
 it("does not lend built-in authority to a custom agent that overrides general-purpose", async () => {
   const f = fixture()
   const parent = f.manager.functionUserScope(f.workspace, "thread").runtimeAuthority!
   const entered: Array<ReturnType<typeof currentFunctionExecution>> = []
+  let modelCalls = 0
   class Model extends FakeChatModel {
     bindTools() {
       return this
     }
     async _generate(messages: BaseMessage[]) {
+      modelCalls++
       const scope = currentFunctionExecution()
-      if (scope?.agentId === "custom-child") entered.push(scope)
-      const done = scope?.agentId === "custom-child" || ToolMessage.isInstance(messages.at(-1))
+      const custom = messages.some(message => message.type === "system" &&
+        message.text.includes("Custom overridden general-purpose role"))
+      if (custom) entered.push(scope)
+      const done = custom || ToolMessage.isInstance(messages.at(-1))
       const message = done
         ? new AIMessage("done")
         : new AIMessage({
@@ -1276,13 +1534,17 @@ it("does not lend built-in authority to a custom agent that overrides general-pu
     }
   }
   const agent = createDeepAgent({
+    modFunctionRuntimeReady: true,
     model: new Model({}),
     backend: f.sandbox,
     tools: [],
     threadId: "thread",
     modRuntimeAuthority: parent,
     mainTodosEnabled: false,
-    subagents: [{ name: "general-purpose", description: "Custom role", systemPrompt: "Inspect" }],
+    subagents: [{
+      name: "general-purpose", description: "Custom role",
+      systemPrompt: "Custom overridden general-purpose role"
+    }],
     summarizationTrigger: { type: "messages", value: 200 }
   })
   const result = await agent.invoke(
@@ -1290,7 +1552,9 @@ it("does not lend built-in authority to a custom agent that overrides general-pu
     { recursionLimit: 12 }
   )
   expect(result.messages.at(-1).content).toBe("done")
+  expect(modelCalls).toBe(3)
   expect(entered).toHaveLength(1)
+  expect(entered[0]?.agentId).toMatch(TASK_AUTHORITY_ID)
   expect(entered[0]?.runtimeAuthority).toBeUndefined()
   parent.assertLive()
 })
@@ -1336,6 +1600,7 @@ it("captures actual native and middleware tools at graph construction without a 
     schema: z.object({})
   })
   createDeepAgent({
+    modFunctionRuntimeReady: true,
     model: new Model({}),
     backend: f.sandbox,
     threadId: "thread",
@@ -1507,3 +1772,156 @@ it.each(["cancel", "disable", "revoke", "replace", "workspace"])(
     await rejected
   }
 )
+it.each(["off", "no-source", "unapproved"] as const)(
+  "preserves the existing graph budget with Mods %s",
+  async (mode) => {
+    const f = fixture()
+    const parent = f.manager.functionUserScope(f.workspace, "thread").runtimeAuthority!
+    const plugin = join(f.root, "unapproved")
+    mkdirSync(join(plugin, "hooks"), { recursive: true })
+    writeFileSync(join(plugin, "plugin.json"), '{"name":"unapproved","version":"1.0.0"}')
+    writeFileSync(join(plugin, "hooks/hooks.json"), '{"modules":["./register.ts"]}')
+    writeFileSync(
+      join(plugin, "hooks/register.ts"),
+      'export function register(on){on("session.start",()=>{})}'
+    )
+    const createClient = vi.fn(() => {
+      throw Error("Readiness must not create a VM")
+    })
+    const functions = new FunctionModsManager(
+      f.manager.store,
+      {
+        enabled: () => f.manager.isEnabled(f.workspace),
+        plugins: () =>
+          mode === "unapproved"
+            ? [{ id: "unapproved", name: "unapproved", path: plugin, enabled: true }]
+            : [],
+        publish: async (_workspace, value) => value,
+        changed: () => {}
+      },
+      createClient
+    )
+    f.manager.attachFunctions({
+      runtimeReady: (...args) => functions.runtimeReady(...args),
+      invalidate: (workspace) => functions.invalidate(workspace),
+      closeThread: (threadId) => functions.closeThread(threadId),
+      close: () => functions.close()
+    })
+    if (mode === "off") f.manager.configure(f.workspace, false, false)
+    const ready = await f.manager.prepareFunctionRuntime(f.workspace, "thread")
+    expect(ready).toBe(false)
+    expect(createClient).not.toHaveBeenCalled()
+    let calls = 0
+    class Model extends FakeChatModel {
+      bindTools() {
+        return this
+      }
+      async _generate() {
+        const index = ++calls
+        const message = new AIMessage(
+          index < 3
+            ? {
+                content: `step-${index}`,
+                tool_calls: [{ name: "probe", id: `call-${index}`, args: {}, type: "tool_call" }]
+              }
+            : { content: "done" }
+        )
+        message.id = `model-${index}`
+        return { generations: [{ text: index < 3 ? `step-${index}` : "done", message }] }
+      }
+    }
+    const notify = vi.fn(async () => undefined)
+    const model = new Model({})
+    const activate = vi.fn(() => {
+      f.manager.updateFunctionSessionModel(parent, "configured", 64000)
+      return () => f.manager.updateFunctionSessionModel(parent, "configured", 64000)
+    })
+    const agent = createDeepAgent({
+      model,
+      backend: f.sandbox,
+      tools: [
+        tool(async () => "ok", { name: "probe", description: "probe", schema: z.object({}) })
+      ],
+      threadId: "thread",
+      ...(mode !== "off" ? { modRuntimeAuthority: parent } : {}),
+      modSessionModel: "configured",
+      modFunctionRuntimeReady: ready,
+      modStepModel: {
+        resolve: async () => ({ model: "configured", provider: model, contextWindow: 64000, inputBudget: 32000 }),
+        activate
+      },
+      mainTodosEnabled: false,
+      mainFilesystemEnabled: false,
+      mainSubagentsEnabled: false,
+      modInstructions: {
+        sources: [{ path: "AGENTS.md", content: "instructions" }],
+        enabled: () => ready,
+        assertLive: () => {},
+        notify,
+        failed: () => {}
+      },
+      modToolBatch: { enabled: () => ready, assertLive: () => {}, notify },
+      summarizationTrigger: { type: "messages", value: 200 }
+    })
+    const graph = (await agent.getGraphAsync()) as unknown as { nodes: Record<string, unknown> }
+    const nodes = Object.keys(graph.nodes)
+    expect(nodes).toHaveLength(8)
+    expect(
+      nodes.some((name) => /functionSessionView|instructionsLoaded|functionToolBatch/.test(name))
+    ).toBe(false)
+    const result = await agent.invoke(
+      { messages: [{ role: "user", content: "probe twice" }] },
+      { recursionLimit: 20 }
+    )
+    expect(result.messages.at(-1).content).toBe("done")
+    expect(calls).toBe(3)
+    expect(activate).toHaveBeenCalledTimes(mode === "off" ? 0 : 3)
+    expect(notify).not.toHaveBeenCalled()
+  }
+)
+it("retains native instruction and batch observers without an authorized Function Mods graph", async () => {
+  const f = fixture()
+  const parent = f.manager.functionUserScope(f.workspace, "thread").runtimeAuthority!
+  class Model extends FakeChatModel {
+    bindTools() {
+      return this
+    }
+    async _generate() {
+      return { generations: [{ text: "done", message: new AIMessage("done") }] }
+    }
+  }
+  const instruction = vi.fn(async () => {})
+  const batch = vi.fn(async () => undefined)
+  const agent = createDeepAgent({
+    model: new Model({}),
+    backend: f.sandbox,
+    tools: [],
+    threadId: "thread",
+    modRuntimeAuthority: parent,
+    modSessionModel: "configured",
+    modFunctionRuntimeReady: false,
+    mainTodosEnabled: false,
+    mainFilesystemEnabled: false,
+    mainSubagentsEnabled: false,
+    modInstructions: {
+      sources: [{ path: "AGENTS.md", content: "native instructions" }],
+      enabled: () => true,
+      assertLive: () => {},
+      notify: instruction,
+      failed: () => {}
+    },
+    modToolBatch: { enabled: () => true, assertLive: () => {}, notify: batch },
+    summarizationTrigger: { type: "messages", value: 200 }
+  })
+  const graph = (await agent.getGraphAsync()) as unknown as { nodes: Record<string, unknown> }
+  expect(Object.keys(graph.nodes)).toContain("instructionsLoaded.before_model")
+  expect(Object.keys(graph.nodes)).toContain("functionToolBatch.after_model")
+  expect(Object.keys(graph.nodes)).not.toContain("functionSessionView.before_agent")
+  const result = await agent.invoke(
+    { messages: [{ role: "user", content: "finish" }] },
+    { recursionLimit: 20 }
+  )
+  expect(result.messages.at(-1).content).toBe("done")
+  expect(instruction).toHaveBeenCalledOnce()
+  expect(batch).not.toHaveBeenCalled()
+})

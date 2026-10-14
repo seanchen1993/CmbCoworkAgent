@@ -1,3 +1,4 @@
+import type { FunctionModelProtocol } from "../../../shared/mods/v2/model-protocol"
 import type { ModObject } from "../../../shared/mods/types"
 import { ModFunctionError } from "../../../shared/mods/v2/contracts"
 
@@ -19,6 +20,8 @@ export interface FunctionModelForkSnapshot {
   /** Optional host policy supplied separately from the captured transcript. */
   system?: string
   model: string
+  /** Host-only configured provider identity; public model names can be ambiguous. */
+  modelRef?: string
   assertLive?(): void
   release?(): void
 }
@@ -33,6 +36,8 @@ export interface FunctionModelUsage {
 export interface FunctionModelForkReply {
   text: string
   usage?: FunctionModelUsage
+  /** Host-only provider accounting keeps total and uncached input separate. */
+  accounting?: import("./model-sdk").FunctionModelReply
 }
 
 function modelName(value: unknown, field: string): string {
@@ -91,10 +96,22 @@ export function functionModelClassifyRequest(input: ModObject): FunctionModelCla
 }
 
 /** Validate the object passed through the model.fork capability boundary. */
-export function functionModelForkRequest(input: ModObject): FunctionModelForkRequest {
-  if (Object.keys(input).some((key) => !["prompt", "maxTokens"].includes(key)))
+export function functionModelForkRequest(
+  input: ModObject,
+  protocol: FunctionModelProtocol = "legacy-v1"
+): FunctionModelForkRequest {
+  if (
+    Object.keys(input).some(
+      (key) => !(protocol === "result-v1" ? ["prompt"] : ["prompt", "maxTokens"]).includes(key)
+    )
+  )
     throw new ModFunctionError("MODS_MODEL_ARGUMENTS")
-  if (typeof input.prompt !== "string" || !input.prompt.length || input.prompt.length > 32000)
+  if (
+    typeof input.prompt !== "string" ||
+    !input.prompt.length ||
+    input.prompt.length > 32000 ||
+    (protocol === "result-v1" && !input.prompt.trim())
+  )
     throw new ModFunctionError("MODS_MODEL_ARGUMENTS")
   const tokens = maxTokens(input.maxTokens)
   return {

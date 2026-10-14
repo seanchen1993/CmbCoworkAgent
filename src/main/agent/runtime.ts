@@ -1,8 +1,52 @@
+import { observeBuiltinPolicyDecision } from "../mods/builtins/policy-decisions"
+import { captureRuntimePluginSourceContentGuard } from "../plugins/runtime-source-scope"
+import type { FlowPromptOnlyRuntimeOptions } from "./flow-prompt-runtime-contract"
+import { builtinInstructionsStore, type InstructionScope } from "../mods/builtins/instructions"
+import { builtinChangeReviewService } from "../mods/builtins/change-review"
+import { readBuiltinProjectFacts } from "../mods/builtins/project-facts"
+import { compareInstructionRequest } from "../mods/builtins/instruction-request"
+import { createClawSkillPolicy } from "../mods/claw-skills"
+import { captureFunctionConversationTaskBinding,
+  createFunctionConversationMiddleware } from "./mods-conversation"
+import { wrapFunctionConversationInvocation } from "./mods-conversation-invocation"
+import { createFunctionConversationNativeHost } from "./function-conversation-native-host"
+import type { FunctionConversationNativeInputReceipt } from "./function-conversation-native-input"
+import { wrapFunctionConversationNativeInvocation } from "./function-conversation-native-invocation"
+import { createFunctionConversationNativeAgent } from "./native-agent-factory"
+import { captureFunctionConversationNativeTaskConfig,
+  createFunctionConversationSharedAgent } from "./mods-conversation-shared-invocation"
+import { FunctionConversationDeliveryBridge } from "../checkpointer/function-conversation-delivery"
+import { assertFunctionConversationForkReady } from "../db/function-conversation-fork-gate"
+import { captureThreadIncarnation, matchesThreadIncarnation } from "../services/thread-incarnation"
+import { sameFunctionConversationTranscriptStamp } from
+  "../../shared/mods/v2/conversation-transcript"
+import { recoverMissingFunctionConversationMessages } from
+  "../checkpointer/function-conversation-recovery"
+import { createMainFunctionConversationRecoveryCapture, nativeFunctionConversationWorkspace } from
+  "../checkpointer/function-conversation-main-recovery"
+import { createHostRuntimeLifecycle, type HostRuntimeLifecycle } from "./runtime-host-lifecycle"
+import { createClawSkillsMiddleware } from "./claw-skills-middleware"
+import { randomUUID } from "node:crypto"
+import { createModAttachmentTransform, type ModAttachmentTransform } from "./mods-prompt-attachment"
+import {
+  createFunctionTaskModelMiddleware,
+  type FunctionTaskModel
+} from "./mods-task-model"
+import {
+  createPromptSourceMiddleware,
+  observePromptSourceMiddleware,
+  type PromptContribution
+} from "./mods-prompt-sources"
+import { restrictClawMcpService } from "../mods/claw-mcp"
 import { createFunctionToolBatchMiddleware, type FunctionToolBatchOptions } from "./mods-tool-batch"
-import { createInstructionsLoadedMiddleware, type InstructionsLoadedOptions } from "./mods-instructions-loaded"
+import { createFunctionPeerMiddleware } from "./mods-peer-inbox"
+import { createModAgentRoleLimits } from "./mods-agent-role-limits"
+import {
+  createInstructionsLoadedMiddleware,
+  type InstructionsLoadedOptions
+} from "./mods-instructions-loaded"
 import { applyClassicToolOutput } from "../hooks/tool-output"
 import { createStageUsageMiddleware } from "./trace/stage-usage-middleware"
-import { randomUUID } from "crypto"
 import { TurnTraceRecorder } from "./trace/turn-trace-recorder"
 import { foregroundToolPolicy } from "./foreground-tool-policy"
 import { createTaskModelOutcomeMiddleware, withTaskModelOutcome } from "./task-model-outcome"
@@ -21,6 +65,7 @@ import {
   type FunctionStepModelHost
 } from "./mods-model-boundary"
 import { authorizeCurrentModInput, getModsManager } from "../mods/manager"
+import { validateWorkspaceDirectory } from "../services/workspace-validation"
 import { getModCallContext } from "../mods/context"
 import type { ModRuntimeAuthority } from "../mods/runtime-instance"
 import { ModError } from "../mods/errors"
@@ -71,6 +116,7 @@ import {
   getGlobalRoutingMode
 } from "../storage"
 import { getAvailableModelConfigOrDefault, getModelConfigByRef } from "../models/registry"
+import { createClawModelGuard } from "./claw-model-policy"
 import { samplingFields, topKModelKwargs } from "../models/sampling-params"
 import {
   createCmbContextController,
@@ -93,10 +139,12 @@ import { runWithTrustedToolFilePreviewContext } from "../services/trusted-tool-f
 import { ChatOpenAI, ChatOpenAICompletions } from "@langchain/openai"
 import { DynamicStructuredTool, ToolInputParsingException, tool } from "@langchain/core/tools"
 import { SqlJsSaver } from "../checkpointer/sqljs-saver"
+import { wrapNativeLegacyHistory } from "../checkpointer/native-legacy-history"
 import { recoverMainCheckpointMessages } from "./checkpoint-message-recovery"
 import {
   LocalSandbox,
   agentFileWriteContext,
+  executeTraceContext,
   readOnlyShellExecutionContext,
   type SkillHookContextProvider
 } from "./local-sandbox"
@@ -109,9 +157,10 @@ import {
 } from "./context-sources"
 import type { SkillUseTracker } from "./skill-lifecycle/tracker"
 import {
-  isSkillVisibleForProjectMode,
   type ProjectModeSkillScope
 } from "../../shared/skill-visibility"
+import { isSkillVisibleForProjectMode } from "../plugins/derivation-skill-visibility"
+import { isDerivedPlugin } from "../plugins/derivation-scope"
 import type { AgentFileMutationKind } from "../services/agent-auto-commit"
 import type { HookResultCallback } from "../hooks/runner"
 import type { HookResult } from "../hooks/types"
@@ -141,6 +190,7 @@ import {
   getToolStrategyReminder,
   resolveEffectiveToolStrategy,
   resolveFilesystemToolStrategy,
+  resolveShellFileTelemetry,
   resolveWorkflowToolStrategy,
   SHELL_FIRST_TOOL_DESCRIPTIONS
 } from "./tool-strategy"
@@ -162,7 +212,7 @@ import {
   tool as lcTool
 } from "langchain"
 import { BaseMessage, HumanMessage, RemoveMessage, ToolMessage } from "@langchain/core/messages"
-import { Runnable, RunnableLambda } from "@langchain/core/runnables"
+import { Runnable, RunnableLambda, type RunnableConfig } from "@langchain/core/runnables"
 import { Command, isGraphBubbleUp } from "@langchain/langgraph"
 import { z } from "zod"
 
@@ -191,10 +241,15 @@ import { createMemorySearchTool, createMemoryGetTool } from "../memory/tools"
 import { resolveWorkspaceMemoryDirs } from "../memory/paths"
 import { createSchedulerTool } from "./tools/scheduler-tool"
 import { createSkillEvolutionTool } from "./tools/skill-evolution-tool"
+import { createModAuthoringTool } from "./tools/mod-authoring-tool"
+import { getModDevelopmentService } from "../mods/devtools/development-service"
 import {
   flushStrict,
+  getDb,
   getThreadCore,
   getThreadMessageIdentityContext,
+  partitionCanonicalThreadMessageEchoes,
+  readCanonicalThreadMessageSnapshot,
   moveThreadMessagesAfterAnchor,
   moveThreadMessagesAfterLastNonAssistant,
   replaceThreadMessageId,
@@ -249,10 +304,14 @@ import {
   type HookScopeController
 } from "../hooks/scope"
 import { ApprovalStore } from "./approval-store"
+import { createModelMessageIdentityMiddleware } from "./model-message-identity"
 import {
   assertCurrentRunMessagesDurablyPersisted,
+  captureCurrentRunMessageQueueOwner,
   createCurrentRunMessageQueueMiddleware,
   isCurrentRunMessageQueueOwner,
+  readCurrentRunCanonicalAssistantCompletion,
+  registerCurrentRunCanonicalAssistantCompletion,
   registerCurrentRunCompletedAssistantRoute,
   resolveCurrentRunCompletedAssistantIdentity,
   resolveCurrentRunInjectionAnchorId,
@@ -261,6 +320,7 @@ import {
 // Re-exported so existing importers (ipc/agent.ts) keep resolving these from
 // runtime; the implementation now lives in the electron-free queue module.
 export {
+  captureCurrentRunMessageQueueOwner,
   clearCurrentRunMessageQueue,
   deleteCurrentRunQueuedMessage,
   getCurrentRunInjectedMessageIds,
@@ -268,6 +328,7 @@ export {
   isCurrentRunMessageWithdrawn,
   peekCurrentRunMessageQueue,
   queueCurrentRunMessage,
+  registerCurrentRunCanonicalAssistantCompletion,
   routeCurrentRunCompletedAssistantMessage,
   setCurrentRunMessageQueueOwner
 } from "./current-run-message-queue"
@@ -294,6 +355,8 @@ import type {
   ScheduledTaskImDeliveryContext
 } from "../types"
 import { approvalDecisionBroker } from "./approval-decision-broker"
+import { notifyExplicitToolRejection } from "./approval-rejection"
+import { runtimeErrorDiagnostic } from "../utils/runtime-error-diagnostic"
 import { emitAppAttention } from "../app-attention-events"
 import {
   isTraceReasoningTruncated,
@@ -311,6 +374,7 @@ import { buildAliasMaps } from "../mcp/aliasing"
 import { scopedMcpTools } from "../mcp/scoped-tools"
 import {
   closeGlobalMcpCapabilityService,
+  getProjectMcpCapabilityService,
   getGlobalMcpCapabilityService
 } from "../mcp/capability-service"
 import { createEagerMcpTool } from "../mcp/langchain-tool"
@@ -395,7 +459,7 @@ import {
 import { syncSubagentSkillAttribution } from "./turn-attribution"
 import { buildOrderedChain, isRetryableApiError } from "./failover"
 import { resolveModel } from "../routing"
-import { patchRuntimeReadFileTool } from "./read-file-tool"
+import { patchRuntimeReadFileTool, resolveReadFileTraceContext } from "./read-file-tool"
 import { createWorkflowTool } from "./workflow/tool"
 import { workflowRunManager } from "./workflow/run-manager"
 import { WORKFLOW_MODE_SYSTEM_PROMPT } from "./workflow/prompts"
@@ -895,7 +959,28 @@ setCurrentRunInjectionNotifier(async (threadId, messages, context) => {
   if (!context?.runToken) {
     throw new Error("Current-run transcript flush is missing its physical run token")
   }
+  const assertQueueOwner = captureCurrentRunMessageQueueOwner(threadId, context.runToken)
   flushTranscriptBeforeCurrentRunInjection(threadId, context.runToken)
+  assertQueueOwner()
+  const canonicalCompletion = readCurrentRunCanonicalAssistantCompletion(
+    context.completedAssistantMessage, threadId, context.runToken)
+  let canonicalAssistant: Message | undefined
+  if (canonicalCompletion) {
+    canonicalCompletion.assertCurrent()
+    const canonicalId = canonicalCompletion.stamp.uuid
+    if (canonicalCompletion.message.id !== canonicalId)
+      throw new Error("MODS_CONVERSATION_COMPLETION_INVALID")
+    const stored = readCanonicalThreadMessageSnapshot(threadId, canonicalId)
+    if (!stored || stored.role !== "assistant" || !stored.function_row ||
+      !sameFunctionConversationTranscriptStamp(stored.function_row, canonicalCompletion.stamp))
+      throw new Error("MODS_CONVERSATION_COMPLETION_INVALID")
+    const accepted = partitionCanonicalThreadMessageEchoes(threadId, [stored])
+    if (accepted.ordinary.length || accepted.canonicalCount !== 1 ||
+      accepted.canonical[0]?.id !== canonicalId)
+      throw new Error("MODS_CONVERSATION_COMPLETION_INVALID")
+    canonicalAssistant = accepted.canonical[0]
+    canonicalCompletion.assertCurrent()
+  }
   // afterModel runs before the outer stream consumer receives the final AI
   // message. Resolve and migrate the exact provider occurrence before writing
   // the completed reply so a reused raw provider id cannot overwrite history.
@@ -932,10 +1017,14 @@ setCurrentRunInjectionNotifier(async (threadId, messages, context) => {
         context.anchorMessage
       )
     : undefined
-  if (context.anchorMessage && !durableAnchorMessageId) {
+  if (!canonicalAssistant && context.anchorMessage && !durableAnchorMessageId) {
     throw new Error("Cannot resolve current-run injection predecessor in durable transcript")
   }
-  const completedAssistantIdentity = completedAssistantMessage
+  const completedAssistantIdentity = canonicalAssistant ? {
+    sourceId: canonicalAssistant.id,
+    providerSourceId: canonicalAssistant.provider_source_id ?? canonicalAssistant.id,
+    providerOccurrence: canonicalAssistant.provider_occurrence ?? 1
+  } : completedAssistantMessage
     ? resolveCurrentRunCompletedAssistantIdentity(
         durableMessagesBeforeCompletedAssistant,
         completedAssistantMessage
@@ -948,7 +1037,7 @@ setCurrentRunInjectionNotifier(async (threadId, messages, context) => {
       )?.content
     : undefined
   if (
-    completedAssistantMessage &&
+    !canonicalAssistant && completedAssistantMessage &&
     completedAssistantIdentity?.sourceId &&
     completedAssistantIdentity.sourceId !== completedAssistantMessage.id &&
     !replaceThreadMessageId(
@@ -961,7 +1050,7 @@ setCurrentRunInjectionNotifier(async (threadId, messages, context) => {
     throw new Error("Failed to migrate the completed assistant provider occurrence")
   }
   const transcriptMessages: Message[] = [
-    ...(completedAssistantMessage
+    ...(canonicalAssistant ? [canonicalAssistant] : completedAssistantMessage
       ? [
           {
             id: completedAssistantMessage.id,
@@ -988,16 +1077,24 @@ setCurrentRunInjectionNotifier(async (threadId, messages, context) => {
       created_at: new Date()
     }))
   ]
-  const persistedCount = upsertThreadMessages(threadId, transcriptMessages, {
+  // A complete canonical echo is a verified read, not an ordinary UPDATE count. No canonical
+  // row may be reordered or migrated merely because the renderer has handed off a user draft.
+  const partition = partitionCanonicalThreadMessageEchoes(threadId, transcriptMessages)
+  const persistedCount = upsertThreadMessages(threadId, partition.ordinary, {
     preserveExistingOrder: true
   })
-  assertCurrentRunMessagesDurablyPersisted(transcriptMessages.length, persistedCount)
-  const transcriptMessageIds = transcriptMessages.map((message) => message.id)
-  if (durableAnchorMessageId) {
-    moveThreadMessagesAfterAnchor(threadId, durableAnchorMessageId, transcriptMessageIds)
-  } else {
-    moveThreadMessagesAfterLastNonAssistant(threadId, transcriptMessageIds)
+  assertCurrentRunMessagesDurablyPersisted(
+    transcriptMessages.length, persistedCount + partition.canonicalCount)
+  const transcriptMessageIds = partition.ordinary.map((message) => message.id)
+  const orderingAnchor = canonicalAssistant?.id ?? durableAnchorMessageId
+  if (transcriptMessageIds.length) {
+    if (orderingAnchor) {
+      moveThreadMessagesAfterAnchor(threadId, orderingAnchor, transcriptMessageIds)
+    } else {
+      moveThreadMessagesAfterLastNonAssistant(threadId, transcriptMessageIds)
+    }
   }
+  canonicalCompletion?.assertCurrent()
   await flushStrict()
   // Persistence above is still valid if a replacement run took ownership while
   // fsync was in flight, but old-run stream events are not: they would append the
@@ -1009,8 +1106,10 @@ setCurrentRunInjectionNotifier(async (threadId, messages, context) => {
     ownershipError.name = "AbortError"
     throw ownershipError
   }
+  assertQueueOwner()
+  canonicalCompletion?.assertCurrent()
   if (
-    completedAssistantMessage?.sourceId &&
+    !canonicalAssistant && completedAssistantMessage?.sourceId &&
     completedAssistantMessage.sourceId !== completedAssistantMessage.id &&
     context?.runToken &&
     completedAssistantIdentity?.providerSourceId &&
@@ -1028,7 +1127,7 @@ setCurrentRunInjectionNotifier(async (threadId, messages, context) => {
     })
   }
   const assistantIdAlias =
-    completedAssistantMessage &&
+    !canonicalAssistant && completedAssistantMessage &&
     completedAssistantIdentity?.sourceId &&
     completedAssistantIdentity.sourceId !== completedAssistantMessage.id
       ? {
@@ -1078,7 +1177,7 @@ setCurrentRunInjectionNotifier(async (threadId, messages, context) => {
           ...(completedAssistantMessage
             ? {
                 completedAssistantId: completedAssistantMessage.id,
-                completedAssistantContent: completedAssistantMessage.content,
+                completedAssistantContent: canonicalAssistant?.content ?? completedAssistantMessage.content,
                 completedAssistantProviderIdless: !completedAssistantMessage.sourceId
               }
             : {}),
@@ -1263,9 +1362,12 @@ export function createScopedMcpCapabilityService(
     signal?: AbortSignal
     readOnly?: boolean
     blockedToolNames?: ReadonlySet<string>
+    allowedToolNames?: ReadonlySet<string>
     executionWorkspace?: string
     runtimeAuthority?: ModRuntimeAuthority
     onModBinding?: (release: () => void) => void
+    /** Host-owned flow nodes execute exactly the selected MCP operation, without browser helpers. */
+    directMcpInvocation?: boolean
     agentId?: string
     turnId?: string
     pluginOutputDir?: string
@@ -1484,6 +1586,26 @@ export function createScopedMcpCapabilityService(
       }
     },
     getTool: resolveScopedTool,
+    connectPluginServer: service.connectPluginServer
+      ? async (owner, server, signal, callerAssertCurrent) => {
+          const assertCurrent = () => {
+            signal.throwIfAborted()
+            baseContext.signal?.throwIfAborted()
+            callerAssertCurrent()
+          }
+          assertCurrent()
+          const result = await service.connectPluginServer!(owner, server, signal, assertCurrent)
+          assertCurrent()
+          result.assertCurrent()
+          return {
+            value: result.value,
+            assertCurrent: () => {
+              assertCurrent()
+              result.assertCurrent()
+            }
+          }
+        }
+      : undefined,
     invoke: async (idOrAlias, args) => {
       const snapshot = await getScopedToolSnapshot()
       const tool =
@@ -1512,6 +1634,7 @@ export function createScopedMcpCapabilityService(
               ? modExecution.runtimeAuthority
               : baseContext.runtimeAuthority,
           blockedToolNames: baseContext.blockedToolNames,
+          allowedToolNames: baseContext.allowedToolNames,
           permissionToolName: tool.toolId,
           permissionToolAliases: [tool.toolId, tool.canonicalToolId ?? tool.toolId],
           activePluginIds: hookScope.activePluginIds,
@@ -1584,41 +1707,47 @@ export function createScopedMcpCapabilityService(
                     candidate.toolName === "browser_tabs"
                 ) ?? null)
 
-          await autoSelectPlaywrightInAppBrowserTab({
-            tool,
-            tabsTool,
-            capabilityService: service,
-            workspacePath: baseContext.workspacePath,
-            threadId: baseContext.threadId
-          })
+          if (!baseContext.directMcpInvocation)
+            await autoSelectPlaywrightInAppBrowserTab({
+              tool,
+              tabsTool,
+              capabilityService: service,
+              workspacePath: baseContext.workspacePath,
+              threadId: baseContext.threadId
+            })
 
           if (pluginId) hookScope.activatePlugin(pluginId)
           // Time only the actual adapter invocation; authorization, tab selection,
           // hooks and result publication occur outside this interval.
           const toolStartedAt = performance.now()
-          const nativeResult = await invokeMcpToolWithPlaywrightInAppBrowserSupport({
-            tool,
-            workspacePath: baseContext.workspacePath,
-            threadId: baseContext.threadId,
-            args: effectiveArgs,
-            prepareBeforeInvoke: false,
-            invoke: async () => {
-              try {
-                return await service.invoke(tool.capabilityId, effectiveArgs)
-              } catch (error) {
-                const fallbackTool =
-                  !getModCallContext() && shouldFallbackMcpError(error)
-                    ? findFallbackTool(tool, snapshot.tools)
-                    : null
-                if (!fallbackTool) throw error
-                return appendFallbackNotice(
-                  await service.invoke(fallbackTool.capabilityId, effectiveArgs),
-                  tool,
-                  fallbackTool
-                )
-              }
+          const invoke = async () => {
+            try {
+              return await service.invoke(tool.capabilityId, effectiveArgs)
+            } catch (error) {
+              const fallbackTool =
+                !baseContext.directMcpInvocation &&
+                !getModCallContext() &&
+                shouldFallbackMcpError(error)
+                  ? findFallbackTool(tool, snapshot.tools)
+                  : null
+              if (!fallbackTool) throw error
+              return appendFallbackNotice(
+                await service.invoke(fallbackTool.capabilityId, effectiveArgs),
+                tool,
+                fallbackTool
+              )
             }
-          })
+          }
+          const nativeResult = baseContext.directMcpInvocation
+            ? await invoke()
+            : await invokeMcpToolWithPlaywrightInAppBrowserSupport({
+                tool,
+                workspacePath: baseContext.workspacePath,
+                threadId: baseContext.threadId,
+                args: effectiveArgs,
+                prepareBeforeInvoke: false,
+                invoke
+              })
           const toolDurationMs = performance.now() - toolStartedAt
           const result = await publishCurrentModResult(nativeResult)
           const postContext: HookContext = {
@@ -1721,6 +1850,7 @@ export function createScopedMcpCapabilityService(
       runtimeAuthority: baseContext.runtimeAuthority,
       executionWorkspace: baseContext.executionWorkspace,
       blockedToolNames: baseContext.blockedToolNames,
+      allowedToolNames: baseContext.allowedToolNames,
       threadId: baseContext.threadId,
       turnId: baseContext.turnId ?? baseContext.threadId,
       agentId: baseContext.agentId,
@@ -1729,7 +1859,11 @@ export function createScopedMcpCapabilityService(
     },
     (id, args) => scopedService.invoke(id, args),
     () => scopedService.listTools(),
-    () => scopedService.peekTools!()
+    () => scopedService.peekTools!(),
+    scopedService.connectPluginServer
+      ? (owner, server, signal, assertCurrent) =>
+          scopedService.connectPluginServer!(owner, server, signal, assertCurrent)
+      : undefined
   )
   if (releaseModBinding) baseContext.onModBinding?.(releaseModBinding)
   return scopedService
@@ -1806,11 +1940,14 @@ export function createSkillHookContextMiddleware(
 }
 
 export function createOutputStyleTurnReminderMiddleware(
-  outputStyle: AgentOutputStyle
+  outputStyle: AgentOutputStyle,
+  transform?: ModAttachmentTransform
 ): ReturnType<typeof createMiddleware> {
   return createTurnReminderMiddleware(
     "outputStyleTurnReminder",
-    getOutputStyleTurnReminder(outputStyle)
+    getOutputStyleTurnReminder(outputStyle),
+    undefined,
+    transform
   )
 }
 
@@ -1829,15 +1966,9 @@ function createTurnReminderMiddleware(
   name: string,
   reminder: string | null,
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  shouldRemind: (request: any) => boolean = () => true
+  shouldRemind: (request: any) => boolean = () => true,
+  transform?: ModAttachmentTransform
 ): ReturnType<typeof createMiddleware> {
-  const reminderContent = reminder ? `<system-reminder>\n${reminder}\n</system-reminder>` : null
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const appendReminder = (content: any): any =>
-    typeof content === "string"
-      ? `${content}\n\n${reminderContent}`
-      : [...content, { type: "text" as const, text: reminderContent }]
-
   return createMiddleware({
     name,
     // Mirror Claude Code's output-style attachment normalization without
@@ -1847,8 +1978,19 @@ function createTurnReminderMiddleware(
     // stop the agent loop. Unexpected message shapes use an ephemeral system
     // fallback so the reminder remains model-visible without changing history.
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    wrapModelCall: (request: any, handler: any) => {
-      if (!reminderContent || !shouldRemind(request)) return handler(request)
+    wrapModelCall: async (request: any, handler: any) => {
+      if (!reminder || !shouldRemind(request)) return handler(request)
+      const body = transform
+        ? await transform(
+            reminder, request.runtime?.signal, request.messages?.at(-1) ?? request.systemMessage
+          )
+        : reminder
+      if (body === null) return handler(request)
+      const reminderContent = `<system-reminder>\n${body}\n</system-reminder>`
+      const appendReminder = (content: HumanMessage["content"]): HumanMessage["content"] =>
+        typeof content === "string"
+          ? `${content}\n\n${reminderContent}`
+          : [...content, { type: "text" as const, text: reminderContent }]
       const messages = Array.isArray(request.messages) ? request.messages : []
       const lastMessage = messages[messages.length - 1]
       const lastType = lastMessage?._getType?.()
@@ -2137,7 +2279,8 @@ function taskInvocationOwnerId(config: { toolCall?: { id?: unknown }; toolCallId
  * @langchain/core tools `invoke`), preserving its Command/result contract.
  */
 export type ModTaskExecution = <T>(
-  input: { agentId: string; subagentType?: string; description?: string; signal?: AbortSignal },
+  input: { agentId: string; subagentType?: string; description?: string; signal?: AbortSignal
+    nativeTask?: { readonly invocation: object; readonly config: RunnableConfig } },
   run: () => Promise<T>
 ) => Promise<T>
 
@@ -2207,12 +2350,14 @@ export function wrapTaskToolWithOwnerMetadata(
         const result = await (runModTask
           ? runModTask(
               {
-                agentId: ownerId ?? `mod-task:${invocationOwner.stationarity}`,
+                agentId: `mod-task:${randomUUID()}`,
                 subagentType:
                   typeof taskInput.subagent_type === "string" ? taskInput.subagent_type : undefined,
                 description:
                   typeof taskInput.description === "string" ? taskInput.description : undefined,
-                signal: config?.signal
+                signal: config?.signal,
+                nativeTask: Object.freeze({ invocation: Object.freeze({}),
+                  config: captureFunctionConversationNativeTaskConfig(patchedConfig) })
               },
               execute
             )
@@ -2377,15 +2522,25 @@ function assembleDeepAgent(
     mainSubagentsEnabled = true,
     filesystemAccess,
     mainBlockedToolNames = [],
+    mainAllowedToolNames,
     managedExecution = false,
     registrySubagentSpecs = [],
     modRuntimeAuthority,
+    modFunctionRuntimeReady = false,
     modSessionModel,
+    modSessionModelRef,
     modSessionEffort,
     modStepModel,
+    modTaskModels,
+    modSystemContributions,
+    modTaskProjectContributions,
     modSessionCompact,
     modContextSources,
     modTurnRunId,
+    onNativeConversationTranscriptFlush,
+    onBuiltinInstructionRequest,
+    onBuiltinTaskInstructionRequest,
+    nativeConversationInput,
     completionCancellation,
     // Windows shell kind the runtime's commands execute in (derived from the
     // sandbox). Threaded into the read-only execute gate so Windows PowerShell
@@ -2412,7 +2567,8 @@ function assembleDeepAgent(
     turnCompletionTodoGateEnabled = true,
     outputStyle,
     toolStrategy = "standard",
-    conciseModeEnabled = false
+    conciseModeEnabled = false,
+    clawSkillPolicy
   }: {
     onFinalSystemPrompt?: (prompt: string) => void
     onTaskSubagentPromptsResolved?: (prompts: Array<{ name: string; systemPrompt: string }>) => void
@@ -2440,6 +2596,13 @@ function assembleDeepAgent(
   })
   const effectiveOutputStyle = resolveAgentOutputStyle(outputStyle, conciseModeEnabled)
   const outputStylePrompt = getOutputStylePrompt(effectiveOutputStyle)
+  const promptSourceIds = new WeakMap<object, string>()
+  const namedSource = <T extends object>(middleware: T, id: string): T => {
+    promptSourceIds.set(middleware, id)
+    return middleware
+  }
+  const contribution = (id: string, text: string | null): PromptContribution =>
+    ({ id, text, scope: "session" })
 
   // Preserve the existing assembled prompt exactly when the default style is selected.
   const assembledSystemPrompt = systemPrompt
@@ -2467,6 +2630,17 @@ function assembleDeepAgent(
           ]
         })
     : assembledSystemPrompt
+  const mainPromptContributions: PromptContribution[] = typeof systemPrompt === "string"
+    ? (modSystemContributions as PromptContribution[] | undefined) ??
+      [contribution("cmb:system", systemPrompt)]
+    : []
+  const finalPromptContributions = [
+    contribution("cmb:output-style-identity",
+      outputStylePrompt ? `${OUTPUT_STYLE_IDENTITY_PROMPT}\n\n` : null),
+    ...mainPromptContributions,
+    contribution("cmb:base", systemPrompt ? `\n\n${BASE_PROMPT}` : BASE_PROMPT),
+    contribution("cmb:output-style", outputStylePrompt ? `\n\n${outputStylePrompt}` : null)
+  ]
   if (typeof finalSystemPrompt === "string") {
     onFinalSystemPrompt?.(finalSystemPrompt)
   }
@@ -2475,12 +2649,21 @@ function assembleDeepAgent(
   const filesystemBackend = backend ? backend : (config: any) => new StateBackend(config)
   const skillsMiddlewareArray =
     skills != null && skills.length > 0
-      ? [createRefreshingSkillsMiddleware({ backend: filesystemBackend, sources: skills })]
+      ? [namedSource(
+          clawSkillPolicy
+            ? createClawSkillsMiddleware(
+                { backend: filesystemBackend, sources: skills }, clawSkillPolicy
+              )
+            : createRefreshingSkillsMiddleware({ backend: filesystemBackend, sources: skills }),
+          "cmb:skills"
+        )]
       : []
 
   const memoryMiddlewareArray =
     memory != null && memory.length > 0
-      ? [createMemoryMiddleware({ backend: filesystemBackend, sources: memory })]
+      ? [namedSource(
+          createMemoryMiddleware({ backend: filesystemBackend, sources: memory }), "cmb:memory"
+        )]
       : []
 
   // Process subagents: auto-inject SkillsMiddleware for subagents with their own skills
@@ -2488,10 +2671,13 @@ function assembleDeepAgent(
   const processedSubagents = subagents.map((subagent: any) => {
     if (Runnable.isRunnable(subagent)) return subagent
     if (!("skills" in subagent) || subagent.skills?.length === 0) return subagent
-    const subagentSkillsMiddleware = createRefreshingSkillsMiddleware({
-      backend: filesystemBackend,
-      sources: subagent.skills ?? []
-    })
+    const subagentSkillsMiddleware = clawSkillPolicy
+      ? createClawSkillsMiddleware(
+          { backend: filesystemBackend, sources: subagent.skills ?? [] }, clawSkillPolicy
+        )
+      : createRefreshingSkillsMiddleware({
+          backend: filesystemBackend, sources: subagent.skills ?? []
+        })
     return {
       ...subagent,
       middleware: [subagentSkillsMiddleware, ...(subagent.middleware || [])]
@@ -2613,50 +2799,65 @@ function assembleDeepAgent(
         if (result.truncated) parts.push("\n[Output was truncated due to size limits]")
         return parts.join("")
       }
-      const customExecute = lcTool(
-        async (input: {
-          command: string
-          cwd?: string
-          run_in_background?: boolean
-        }): Promise<string> => {
-          const sandbox = filesystemBackend as LocalSandbox
-          // Read-only runtimes keep execute but may only run PROVABLY read-only
-          // commands — gated per command by isReadOnlyShellCommand. Covers both
-          // the registry path (shellAccess "read_only", e.g. Explore) and the
-          // coordinator read-only worker (workload "read_only"). Stronger than
-          // CC's prompt-only constraint AND stronger than plain "safe": "safe" is
-          // the auto-approve tier (so this never surfaces an extra prompt) but it
-          // also auto-approves build/install/codegen (npm install, cargo build,
-          // make, go run, javac …), which WRITE the tree / run arbitrary code.
-          // isReadOnlyShellCommand additionally rejects those while keeping the
-          // tools' inspection subcommands (npm ls, go list, mvn dependency:tree).
-          const readOnlyShell =
-            filesystemAccess?.shellAccess === "read_only" ||
-            filesystemAccess?.workload === "read_only"
-          if (
-            readOnlyShell &&
-            !isReadOnlyShellCommand(input.command, input.cwd ?? "", windowsShellKind)
-          ) {
-            return readOnlyExecuteBlockMessage(windowsShellKind)
-          }
-          if (input.run_in_background) {
-            if (managedExecution || currentCompletionBudget()) {
-              return formatExecuteResponse(await sandbox.execute(input.command, input.cwd))
-            }
-            return sandbox.executeBackground(input.command, input.cwd)
-          }
-          if (input.cwd?.trim()) {
+      const runExecute = async (input: {
+        command: string
+        cwd?: string
+        run_in_background?: boolean
+      }): Promise<string> => {
+        const sandbox = filesystemBackend as LocalSandbox
+        // Read-only runtimes keep execute but may only run PROVABLY read-only
+        // commands — gated per command by isReadOnlyShellCommand. Covers both
+        // the registry path (shellAccess "read_only", e.g. Explore) and the
+        // coordinator read-only worker (workload "read_only"). Stronger than
+        // CC's prompt-only constraint AND stronger than plain "safe": "safe" is
+        // the auto-approve tier (so this never surfaces an extra prompt) but it
+        // also auto-approves build/install/codegen (npm install, cargo build,
+        // make, go run, javac …), which WRITE the tree / run arbitrary code.
+        // isReadOnlyShellCommand additionally rejects those while keeping the
+        // tools' inspection subcommands (npm ls, go list, mvn dependency:tree).
+        const readOnlyShell =
+          filesystemAccess?.shellAccess === "read_only" ||
+          filesystemAccess?.workload === "read_only"
+        if (
+          readOnlyShell &&
+          !isReadOnlyShellCommand(input.command, input.cwd ?? "", windowsShellKind)
+        ) {
+          return readOnlyExecuteBlockMessage(windowsShellKind)
+        }
+        if (input.run_in_background) {
+          if (managedExecution || currentCompletionBudget()) {
             return formatExecuteResponse(await sandbox.execute(input.command, input.cwd))
           }
-          // Delegate to original execute handler for foreground execution
-          // eslint-disable-next-line @typescript-eslint/no-explicit-any
-          const result = await (oldExecute as any).invoke(input)
-          if (typeof result === "string") return result
-          try {
-            return JSON.stringify(result) ?? String(result)
-          } catch {
-            return String(result)
-          }
+          return sandbox.executeBackground(input.command, input.cwd)
+        }
+        if (input.cwd?.trim()) {
+          return formatExecuteResponse(await sandbox.execute(input.command, input.cwd))
+        }
+        // Delegate to original execute handler for foreground execution
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const result = await (oldExecute as any).invoke(input)
+        if (typeof result === "string") return result
+        try {
+          return JSON.stringify(result) ?? String(result)
+        } catch {
+          return String(result)
+        }
+      }
+      const customExecute = lcTool(
+        async (
+          input: { command: string; cwd?: string; run_in_background?: boolean },
+          config?: unknown
+        ): Promise<string> => {
+          // Task subagents share this sandbox: their shell reads report to their
+          // own trace, resolved the way read_file resolves it.
+          const traceContext = soloTaskTraceManager
+            ? resolveReadFileTraceContext(config, (agentId) =>
+                soloTaskTraceManager.getTraceContextForOwner(agentId)
+              )
+            : undefined
+          return traceContext
+            ? executeTraceContext.run(traceContext, () => runExecute(input))
+            : runExecute(input)
         },
         {
           name: "execute",
@@ -2799,7 +3000,7 @@ function assembleDeepAgent(
     mw.tools = guardedTools as typeof mw.tools
     console.log("[Runtime] task_output tool added")
 
-    return mw
+    return namedSource(mw, "cmb:filesystem")
   }
 
   // Once any wrapToolCall middleware is attached, ToolNode's
@@ -2944,6 +3145,16 @@ function assembleDeepAgent(
   )
 
   const modManager = getModsManager()
+  const taskBoundaryEnabled = !metadataOnly && modRuntimeAuthority &&
+    modManager?.isActive(modRuntimeAuthority.workspace)
+  const taskModels = (modTaskModels as WeakMap<object, FunctionTaskModel> | undefined) ??
+    new WeakMap<object, FunctionTaskModel>()
+  if (!modTaskModels && model && typeof model === "object" && modStepModel && modSessionModel)
+    taskModels.set(model, {
+      model: modSessionModel,
+      ...(modSessionEffort ? { effort: modSessionEffort } : {}),
+      resolve: modStepModel.resolve
+    })
   const completionToolBudgetMiddleware = completionCancellation
     ? [
         createCompletionToolBudgetMiddleware(
@@ -2968,10 +3179,11 @@ function assembleDeepAgent(
         ]
       : []),
     ...(threadId ? [createTrustedToolFilePreviewContextMiddleware(threadId)] : []),
-    todoListMiddleware(),
+    namedSource(todoListMiddleware(), "cmb:todos"),
     createFsMiddleware(),
-    ...(threadId ? [createTaskMmdMiddleware({ threadId, scope: "subagent" })] : []),
-    createSkillHookContextMiddleware(filesystemBackend),
+    ...(threadId ? [namedSource(
+      createTaskMmdMiddleware({ threadId, scope: "subagent" }), "cmb:task-state")] : []),
+    namedSource(createSkillHookContextMiddleware(filesystemBackend), "cmb:skill-hook-context"),
     subagentToolConcurrencyMiddleware,
     ...(toolHookMiddleware ? [toolHookMiddleware] : []),
     toolErrorMiddleware,
@@ -2982,8 +3194,23 @@ function assembleDeepAgent(
     createMalformedToolCallRecoveryMiddleware(),
     createPatchToolCallsMiddleware(),
     createTaskModelOutcomeMiddleware(),
-    ...(modRuntimeAuthority && modManager?.isActive(modRuntimeAuthority.workspace)
-      ? [createFunctionChildTurnMiddleware(modManager)]
+    ...(modFunctionRuntimeReady &&
+    modRuntimeAuthority &&
+    modManager?.isActive(modRuntimeAuthority.workspace)
+      ? [
+          createFunctionChildTurnMiddleware(modManager),
+          createFunctionPeerMiddleware(
+            () => {
+              const authority = currentFunctionExecution()?.runtimeAuthority
+              return modManager.functionPeerEndpoint(authority)
+            },
+            () =>
+              currentFunctionExecution()?.runtimeAuthority ??
+              currentFunctionExecution() ??
+              modRuntimeAuthority,
+            true
+          )
+        ]
       : [])
   ]
 
@@ -3093,6 +3320,8 @@ function assembleDeepAgent(
   const unresolvedSubagents = includeGeneralPurposeSubagent
     ? [generalPurposeSubagent, ...processedSubagents, ...registrySubagents]
     : [...processedSubagents, ...registrySubagents]
+  const taskPromptContributions = new Map<string, PromptContribution[]>()
+  const nativeConversationAgents = new Set<string>()
   const runModTask: ModTaskExecution | undefined =
     modRuntimeAuthority && modManager
       ? (input, run) => {
@@ -3113,7 +3342,10 @@ function assembleDeepAgent(
             modTurnRunId,
             input.subagentType
               ? { type: input.subagentType, description: input.description ?? "" }
-              : undefined
+              : undefined,
+            input.nativeTask && input.subagentType &&
+              nativeConversationAgents.has(input.subagentType) && checkpointer instanceof SqlJsSaver
+              ? { ...input.nativeTask, saver: checkpointer } : undefined
           )
         }
       : undefined
@@ -3131,26 +3363,87 @@ function assembleDeepAgent(
     ) {
       return subagent
     }
+    const completedPrompt = appendTaskCompletionAndRepetitionPrompt(subagent.systemPrompt)
+    if (modAgentAccess.has(subagent.name)) {
+      const spec = subagent.name === GENERAL_PURPOSE_SUBAGENT.name
+        ? generalPurposeSubagent
+        : registrySubagents.find((candidate) => candidate.name === subagent.name)
+      const base = subagent.name === GENERAL_PURPOSE_SUBAGENT.name
+        ? GENERAL_PURPOSE_SUBAGENT.systemPrompt
+        : registrySubagentSpecs.find((candidate) => candidate.name === subagent.name)?.systemPrompt
+      if (spec && typeof base === "string") {
+        const hasProject = spec.systemPrompt !== base
+        const project = hasProject
+          ? (modTaskProjectContributions as PromptContribution[] | undefined) ??
+            [contribution("cmb:project-context", subagentExtraSystemPrompt)]
+          : []
+        const projectWithPrefix = project.map((item, index) => ({
+          ...item,
+          text: item.text === null ? null :
+            `${index === 0 ? "\n\n## Project Instructions\n\n" : ""}${item.text}`
+        }))
+        taskPromptContributions.set(subagent.name, [
+          contribution("cmb:agent", base),
+          ...projectWithPrefix,
+          contribution("cmb:task-completion", completedPrompt.slice(subagent.systemPrompt.length))
+        ])
+      }
+    }
     return {
       ...subagent,
-      systemPrompt: appendTaskCompletionAndRepetitionPrompt(subagent.systemPrompt),
-      ...(toolStrategy !== "standard" && !("runnable" in subagent)
+      systemPrompt: completedPrompt,
+      ...((toolStrategy !== "standard" && !("runnable" in subagent)) ||
+        (taskBoundaryEnabled && modManager && modAgentAccess.has(subagent.name))
         ? {
             middleware: [
               ...(subagent.middleware ?? []),
               // Per-role tail: the shared filesystem tools are never mutated,
               // and the guard has already removed unavailable tools by this point.
-              createToolStrategyTurnReminderMiddleware(
-                toolStrategy,
-                modAgentAccess.get(subagent.name)?.readOnly
-                  ? { ...filesystemAccess, shellAccess: "read_only" }
-                  : filesystemAccess
-              )
+              ...(toolStrategy !== "standard" && !("runnable" in subagent)
+                ? [createToolStrategyTurnReminderMiddleware(
+                    toolStrategy,
+                    modAgentAccess.get(subagent.name)?.readOnly
+                      ? { ...filesystemAccess, shellAccess: "read_only" }
+                      : filesystemAccess
+                  )]
+                : []),
+              ...(taskBoundaryEnabled && modManager && modAgentAccess.has(subagent.name)
+                ? [createFunctionTaskModelMiddleware({
+                    manager: modManager,
+                    root: modRuntimeAuthority,
+                    role: subagent.name,
+                    models: taskModels,
+                    onFinalPrompt: (text, childAgentId, childTurnId) => {
+                      if (typeof onBuiltinTaskInstructionRequest === "function")
+                        onBuiltinTaskInstructionRequest(text, childAgentId, childTurnId,
+                          taskPromptContributions.get(subagent.name)?.find(item => item.id === "cmb:agents")?.text ?? "")
+                    }
+                  })]
+                : [])
             ]
           }
         : {})
     }
   })
+
+  if (taskBoundaryEnabled && modManager) {
+    subagentMiddleware.splice(0, subagentMiddleware.length,
+      ...subagentMiddleware.map((middleware) =>
+        observePromptSourceMiddleware(middleware, promptSourceIds.get(middleware))))
+    subagentMiddleware.unshift(createPromptSourceMiddleware({
+      authority: () => currentFunctionExecution()?.runtimeAuthority
+        ? modManager.functionSharedModelAuthority(modRuntimeAuthority)
+        : undefined,
+      seed: () => taskPromptContributions.get(
+        modManager.functionSharedModelRole(modRuntimeAuthority))
+    }))
+    for (const subagent of availableSubagents) {
+      if (modAgentAccess.has(subagent?.name)) {
+        subagent.middleware = (subagent.middleware ?? []).map((middleware) =>
+          observePromptSourceMiddleware(middleware, promptSourceIds.get(middleware)))
+      }
+    }
+  }
 
   // Capture each known graph's own tool sources before its first model request.
   // The execution binding below still owns filtering and the child's private lifetime.
@@ -3212,7 +3505,8 @@ function assembleDeepAgent(
       ? [createRuntimeToolDenylistMiddleware(mainBlockedToolNames)]
       : []
   const systemPromptPreviewCaptureMiddleware =
-    threadId && typeof threadId === "string"
+    threadId && typeof threadId === "string" &&
+    (!modRuntimeAuthority || modRuntimeAuthority.agentId === "main")
       ? [
           createMiddleware({
             name: "systemPromptPreviewCapture",
@@ -3229,15 +3523,22 @@ function assembleDeepAgent(
         ]
       : []
   const outputStyleTurnReminderMiddleware = outputStylePrompt
-    ? [createOutputStyleTurnReminderMiddleware(effectiveOutputStyle)]
+    ? [createOutputStyleTurnReminderMiddleware(effectiveOutputStyle, modManager &&
+        modRuntimeAuthority ? createModAttachmentTransform({
+          type: "output_style",
+          origin: { kind: "engine" },
+          enabled: () => modManager.isActive(modRuntimeAuthority.workspace),
+          authority: () => currentFunctionExecution()?.runtimeAuthority ?? modRuntimeAuthority,
+          captureRuntime: authority => modManager.captureFunctionRuntimeGuard(authority),
+          dispatch: (...args) => modManager.promptComposition(...args)
+        }) : undefined)]
     : []
 
-  // Install the function-mod stream boundary only on the real main runtime.
-  // Metadata/catalogue assembly and child agents retain their original model;
-  // the host authority and generation are what make this wrapper eligible.
+  // Real independent child runtimes compose their prompts through their own authority.
+  // Main turn.step Hooks remain restricted by the host stream boundary.
   const modelForAgent =
     !metadataOnly &&
-    modRuntimeAuthority?.agentId === "main" &&
+    modRuntimeAuthority &&
     modManager?.isActive(modRuntimeAuthority.workspace) &&
     typeof (modManager as unknown as Partial<FunctionModelStreamHost>).functionModelStream ===
       "function" &&
@@ -3250,18 +3551,119 @@ function assembleDeepAgent(
           modRuntimeAuthority,
           {
             turnId: modRuntimeAuthority.turnId,
+            agentId: modRuntimeAuthority.agentId,
             model: typeof modSessionModel === "string" ? modSessionModel : "configured",
+            outputStyle: outputStylePrompt
+              ? { name: effectiveOutputStyle, isKeepingCodingInstructions: true } : null,
+            onFinalPrompt: text => {
+              modRuntimeAuthority.assertLive()
+              try {
+                if (typeof onBuiltinInstructionRequest === "function") onBuiltinInstructionRequest(text)
+              } catch { /* Missing observation must not change the original model execution. */ }
+              if (threadId && modRuntimeAuthority.agentId === "main") setCapturedSystemPromptPreview({
+                threadId, prompt: text, updatedAt: Date.now()
+              })
+            },
             ...(typeof modSessionEffort === "string" ? { effort: modSessionEffort } : {})
           },
           modStepModel as FunctionStepModelHost | undefined
         )
       : model
 
+  const conversation = !metadataOnly && modRuntimeAuthority
+    ? modManager?.captureFunctionConversationRuntime(modRuntimeAuthority) : undefined
+  const conversationStore = conversation?.store ??
+    (!metadataOnly && modRuntimeAuthority?.agentId === "main"
+      ? modManager?.captureFunctionConversationStore() : undefined)
+  const nativeConversationRuntime = !metadataOnly && modRuntimeAuthority &&
+    typeof onNativeConversationTranscriptFlush === "function"
+    ? modManager?.captureFunctionNativeConversationRuntime(modRuntimeAuthority) : undefined
+  const nativeConversationHost = nativeConversationRuntime && conversationStore
+    ? createFunctionConversationNativeHost({
+        runtime: nativeConversationRuntime,
+        store: conversationStore,
+        agentId: modRuntimeAuthority.agentId,
+        model: typeof modSessionModel === "string" ? modSessionModel : "configured",
+        nativeInput: nativeConversationInput as FunctionConversationNativeInputReceipt | undefined,
+        flush: onNativeConversationTranscriptFlush,
+        completed: message => {
+          if (typeof threadId !== "string" ||
+            typeof currentRunMessageQueueOwnerToken !== "string")
+            throw new ModError("MODS_CONVERSATION_NATIVE_SOURCE_INVALID")
+          registerCurrentRunCanonicalAssistantCompletion(threadId,
+            currentRunMessageQueueOwnerToken, message,
+            nativeConversationRuntime.assertCurrent.bind(nativeConversationRuntime))
+        }
+      }) : undefined
+  const conversationBinding = conversation && nativeConversationRuntime
+    ? Object.freeze({ ...conversation.binding, target: nativeConversationRuntime.target.ref,
+        assertCurrent: nativeConversationRuntime.assertCurrent.bind(nativeConversationRuntime) })
+    : conversation?.binding
+  const conversationMiddleware = conversationStore ? createFunctionConversationMiddleware({
+    store: conversationStore,
+    capture: runtime => conversationBinding
+      ? captureFunctionConversationTaskBinding(runtime, conversationBinding) : undefined,
+    ...(nativeConversationHost ? {
+      onIntakeNotes: nativeConversationHost.registerIntake
+    } : {})
+  }) : undefined
+  const deliveredCheckpointer = conversation && checkpointer instanceof SqlJsSaver
+    ? new FunctionConversationDeliveryBridge(conversation.store,
+      () => conversation.binding).wrap(checkpointer) : checkpointer
+  const conversationCheckpointer = nativeConversationHost && nativeConversationRuntime &&
+    checkpointer instanceof SqlJsSaver && deliveredCheckpointer instanceof SqlJsSaver && conversationBinding
+    ? wrapNativeLegacyHistory(checkpointer, deliveredCheckpointer, {
+        threadId: conversationBinding.checkpointThreadId,
+        namespace: conversationBinding.runtimeCheckpointNamespace,
+        assertCurrent: nativeConversationRuntime.assertCurrent.bind(nativeConversationRuntime)
+      }) : deliveredCheckpointer
+  const nativeSubagents = !metadataOnly && conversationStore && modManager &&
+    checkpointer instanceof SqlJsSaver ? availableSubagents.map(subagent => {
+      // Only this factory's known string-prompt recipe has a native invocation adapter.
+      if (!subagent || typeof subagent !== "object" || Runnable.isRunnable(subagent) ||
+        "runnable" in subagent || typeof subagent.systemPrompt !== "string" ||
+        !modAgentAccess.has(subagent.name)) return subagent
+      const capture = () => {
+        const authority = currentFunctionExecution()?.runtimeAuthority
+        return authority ? modManager.captureFunctionConversationSharedScope(authority) : undefined
+      }
+      const childConversation = createFunctionConversationMiddleware({ store: conversationStore,
+        capture: runtime => capture()?.captureNode(runtime) })
+      const middleware = [childConversation, ...subagentMiddleware, ...(subagent.middleware ?? [])]
+      if (subagent.interruptOn) middleware.push(humanInTheLoopMiddleware({
+        interruptOn: subagent.interruptOn
+      }))
+      const graph = createFunctionConversationSharedAgent({ model: subagent.model ?? model,
+        systemPrompt: subagent.systemPrompt, tools: subagent.tools ?? subagentDefaultTools ?? tools,
+        middleware, name: subagent.name,
+        ...(subagent.responseFormat != null ? { responseFormat: subagent.responseFormat } : {})
+      } as unknown as Parameters<typeof createAgent>[0], capture, {
+        store: conversationStore, agentId: subagent.name,
+        model: typeof modSessionModel === "string" ? modSessionModel : "configured",
+        captureRuntime: authority => modManager.captureFunctionNativeConversationRuntime(authority),
+        // This recipe uses child.invoke and has no IPC stream buffer of its own. Projection
+        // capture still checks complete original fragment/state absence before writing.
+        flush: (runtime, _uuid) => runtime.assertCurrent()
+      })
+      nativeConversationAgents.add(subagent.name)
+      return { name: subagent.name, description: subagent.description,
+        runnable: graph }
+    }) : availableSubagents
+  const ordinarySubagents = nativeSubagents.map((subagent) => {
+    if (!subagent || typeof subagent !== "object" || Runnable.isRunnable(subagent) ||
+      "runnable" in subagent || typeof subagent.systemPrompt !== "string") return subagent
+    return {
+      ...subagent,
+      middleware: [...(subagent.middleware ?? []), createModelMessageIdentityMiddleware()]
+    }
+  })
   const agentOptions = {
     model: modelForAgent,
     systemPrompt: finalSystemPrompt,
     tools,
     middleware: [
+      ...(nativeConversationHost ? [nativeConversationHost.middleware] : []),
+      ...(conversationMiddleware ? [conversationMiddleware] : []),
       // FIRST (outermost wrapToolCall): reject recovered-malformed calls before
       // ANY tool lifecycle — PreToolUse hooks must not block/rewrite them (that
       // would replace the diagnosis with a misleading message), and the fuse/
@@ -3281,29 +3683,32 @@ function assembleDeepAgent(
             })
           ]
         : []),
-      ...(!metadataOnly && modRuntimeAuthority?.agentId === "main" &&
-        modInstructions?.sources.length && modInstructions.enabled()
+      ...(!metadataOnly &&
+      modRuntimeAuthority?.agentId === "main" &&
+      modInstructions?.sources.length &&
+      modInstructions.enabled()
         ? [createInstructionsLoadedMiddleware(modInstructions as InstructionsLoadedOptions)]
         : []),
       ...(!metadataOnly && modRuntimeAuthority?.agentId === "main" && modToolBatch?.enabled()
         ? [createFunctionToolBatchMiddleware(modToolBatch as FunctionToolBatchOptions)]
         : []),
       ...(threadId ? [createTrustedToolFilePreviewContextMiddleware(threadId)] : []),
-      ...(mainTodosEnabled ? [todoListMiddleware()] : []),
+      ...(mainTodosEnabled ? [namedSource(todoListMiddleware(), "cmb:todos")] : []),
       ...(mainFilesystemEnabled ? [createFsMiddleware("\n", mainToolStrategy)] : []),
       ...postFsToolDocStripMiddleware,
       // The filesystem middleware appends execute documentation dynamically;
       // run the transport denylist after it so the docs and tool disappear
       // together.
       ...mainToolDenylistMiddleware,
-      ...(threadId ? [createTaskMmdMiddleware({ threadId, scope: "main" })] : []),
-      createSkillHookContextMiddleware(filesystemBackend),
+      ...(threadId ? [namedSource(
+        createTaskMmdMiddleware({ threadId, scope: "main" }), "cmb:task-state")] : []),
+      namedSource(createSkillHookContextMiddleware(filesystemBackend), "cmb:skill-hook-context"),
       gradedToolConcurrencyMiddleware,
       ...(toolHookMiddleware ? [toolHookMiddleware] : []),
       toolErrorMiddleware,
       ...(mainSubagentsEnabled
         ? [
-            stampSubagentOwnerMetadata(
+            namedSource(stampSubagentOwnerMetadata(
               createSubAgentMiddleware({
                 defaultModel: model,
                 defaultTools: subagentDefaultTools ?? tools,
@@ -3317,14 +3722,14 @@ function assembleDeepAgent(
                         throw new ModError("MODS_TOOL_METADATA_ONLY")
                       })
                     }))
-                  : availableSubagents,
+                  : ordinarySubagents,
                 generalPurposeAgent: false,
                 systemPrompt: taskSystemPrompt
               } as Parameters<typeof createSubAgentMiddleware>[0]),
               soloTaskTraceManager,
               threadId,
               runModTask
-            )
+            ), "cmb:task-guide")
           ]
         : []),
       // Refuse to END the turn on an invalid final message (empty reply after a
@@ -3340,6 +3745,20 @@ function assembleDeepAgent(
         todoGateEnabled: mainTodosEnabled && turnCompletionTodoGateEnabled,
         onRecovery: onTurnCompletionRecovery
       }),
+      ...(!metadataOnly &&
+      modRuntimeAuthority &&
+      modManager?.isActive(modRuntimeAuthority.workspace)
+        ? [
+            createFunctionPeerMiddleware(
+              () =>
+                modManager.functionPeerEndpoint(
+                  currentFunctionExecution()?.runtimeAuthority ?? modRuntimeAuthority
+                ),
+              () => currentFunctionExecution()?.runtimeAuthority ?? modRuntimeAuthority,
+              true
+            )
+          ]
+        : []),
       // Inject user messages steered into the running turn. Placed BEFORE
       // summarization (injected turns should participate in context management)
       // and BEFORE humanInTheLoop (a steered message must never race a pending
@@ -3385,30 +3804,59 @@ function assembleDeepAgent(
                       signal
                     )
                 : undefined,
-              modContextSources
+              modContextSources,
+              () => modManager.bindFunctionPeerEndpoint(modRuntimeAuthority),
+              modFunctionRuntimeReady === true,
+              modSessionModelRef
             )
           ]
-        : [])
+        : []),
+      ...(!nativeConversationHost ? [createModelMessageIdentityMiddleware()] : [])
     ],
     ...(responseFormat != null && { responseFormat }),
     contextSchema,
-    checkpointer: mainSummarizationController.wrapCheckpointer(checkpointer),
+    checkpointer: mainSummarizationController.wrapCheckpointer(conversationCheckpointer),
     store,
     name
   }
   if (metadataOnly) return collectRuntimeToolCatalog(agentOptions.tools, agentOptions.middleware)
-  const agent = createAgent(agentOptions as unknown as Parameters<typeof createAgent>[0])
+  if (modRuntimeAuthority && modManager?.isActive(modRuntimeAuthority.workspace)) {
+    agentOptions.middleware = [
+      createPromptSourceMiddleware({
+        authority: () => modRuntimeAuthority,
+        seed: () => finalPromptContributions
+      }),
+      ...agentOptions.middleware.map((middleware) =>
+        observePromptSourceMiddleware(middleware, promptSourceIds.get(middleware)))
+    ]
+  }
+  const create = nativeConversationHost ? createFunctionConversationNativeAgent : createAgent
+  const agent = create(agentOptions as unknown as Parameters<typeof createAgent>[0])
   if (modRuntimeAuthority && modManager?.isActive(modRuntimeAuthority.workspace)) {
     modManager.bindFunctionToolCatalog(
       {
         ...modRuntimeAuthority,
         runtimeAuthority: modRuntimeAuthority,
-        blockedToolNames: new Set(mainBlockedToolNames)
+        blockedToolNames: new Set(mainBlockedToolNames),
+        allowedToolNames: mainAllowedToolNames && new Set(mainAllowedToolNames)
       },
       collectRuntimeToolCatalog(agentOptions.tools, agentOptions.middleware)
     )
   }
-  return agent
+  nativeConversationHost?.install(agent.graph)
+  const conversationAgent = conversation && conversationBinding
+    ? wrapFunctionConversationInvocation(agent, { store: conversation.store,
+        binding: conversationBinding,
+        ...(nativeConversationHost && nativeConversationRuntime && checkpointer instanceof SqlJsSaver ? {
+          history: { saver: checkpointer,
+            assertCurrent: nativeConversationRuntime.assertCurrent.bind(nativeConversationRuntime),
+            register: nativeConversationHost.registerHistorical },
+          onIntakeNotes: nativeConversationHost.registerIntake
+        } : {}) }) : agent
+  return nativeConversationHost && nativeConversationRuntime
+    ? wrapFunctionConversationNativeInvocation(conversationAgent, nativeConversationHost,
+        nativeConversationRuntime)
+    : conversationAgent
 }
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -3558,6 +4006,7 @@ export function getSystemPrompt(
     filesystemAccess?: CoordinatorWorkerFilesystemAccess
     blockedToolNames?: Iterable<string>
     filesystemEnabled?: boolean
+    onContributions?: (contributions: PromptContribution[]) => void
   } = {}
 ): string {
   const effectiveToolStrategy = resolveFilesystemToolStrategy(
@@ -3670,14 +4119,22 @@ ${effectiveToolStrategy !== "standard" ? "- Inspect the workspace root with tool
         : ""
 
   const memorySection = options.includeMemory !== false ? MEMORY_SYSTEM_PROMPT : ""
+  const baseSection = renderBaseSystemPrompt({
+    includeSubagents: options.includeSubagents,
+    toolStrategy: effectiveToolStrategy
+  })
+  options.onContributions?.([
+    { id: "cmb:environment", text: workingDirSection, scope: "session" },
+    { id: "cmb:background-execution", text: backgroundExecSection || null, scope: "session" },
+    { id: "cmb:sandbox", text: sandboxSection || null, scope: "session" },
+    { id: "cmb:agent", text: baseSection, scope: "session" },
+    { id: "cmb:memory-guidance", text: memorySection || null, scope: "session" }
+  ])
   return (
     workingDirSection +
     backgroundExecSection +
     sandboxSection +
-    renderBaseSystemPrompt({
-      includeSubagents: options.includeSubagents,
-      toolStrategy: effectiveToolStrategy
-    }) +
+    baseSection +
     memorySection
   )
 }
@@ -3931,6 +4388,10 @@ async function getCheckpointerInternal(
   threadId: string,
   waitForPendingClose: boolean
 ): Promise<SqlJsSaver> {
+  const entryThread = getThreadCore(threadId)
+  if (entryThread) assertFunctionConversationForkReady(getDb(), {
+    threadId, incarnation: captureThreadIncarnation(entryThread)
+  })
   // Tombstone gate: never create (or hand out) a checkpointer for a deleted
   // thread — SqlJsSaver.setup() persists an empty snapshot, so a late caller
   // would materialize an orphan .sqlite for a thread that no longer exists.
@@ -3945,6 +4406,11 @@ async function getCheckpointerInternal(
   if (waitForPendingClose && !isCheckpointerPinned(threadId)) {
     await waitForCheckpointerClose(threadId)
   }
+  const originalThread = getThreadCore(threadId)
+  const originalDatabase = originalThread ? getDb() : undefined
+  if (originalThread) assertFunctionConversationForkReady(originalDatabase!, {
+    threadId, incarnation: captureThreadIncarnation(originalThread)
+  })
   const cached = checkpointers.get(threadId)
   if (cached) {
     // Refresh LRU recency: move to the most-recently-used (end) position.
@@ -3954,6 +4420,7 @@ async function getCheckpointerInternal(
   }
   const dbPath = getThreadCheckpointPath(threadId)
   const bornRetireEpoch = retireEpochOf(threadId)
+  const recoveryLifetime = new AbortController()
   const isSubThreadCheckpoint = threadId.includes("__")
   const checkpointer = new SqlJsSaver(dbPath, undefined, {
     maxRootCheckpoints: isSubThreadCheckpoint ? 1 : MAIN_THREAD_MAX_ROOT_CHECKPOINTS,
@@ -3964,7 +4431,27 @@ async function getCheckpointerInternal(
     maxNonRootCheckpoints: 1,
     recoverMissingCheckpointMessages: isSubThreadCheckpoint
       ? undefined
-      : recoverMainCheckpointMessages
+      : recoverMainCheckpointMessages,
+    recoverFunctionConversationMessages: async receipt => {
+      const manager = getModsManager()
+      const store = manager?.captureFunctionConversationStore()
+      const workspacePath = originalThread && nativeFunctionConversationWorkspace(originalThread.metadata)
+      if (!manager || !store || !originalThread || !originalDatabase || !workspacePath)
+        throw new ModError("MODS_CONVERSATION_RECOVERY_REQUIRED")
+      const capture = createMainFunctionConversationRecoveryCapture({
+        database: originalDatabase, store, threadId,
+        workspace: manager.workspaceKey(workspacePath), originalThread,
+        signal: recoveryLifetime.signal, currentDatabase: getDb,
+        readThread: () => getThreadCore(threadId),
+        assertCurrent: () => {
+          if (isRetiredThreadId(threadId) || retireEpochOf(threadId) !== bornRetireEpoch) {
+            recoveryLifetime.abort(new ModError("MODS_CONVERSATION_THREAD_CHANGED"))
+            recoveryLifetime.signal.throwIfAborted()
+          }
+        }
+      })
+      return recoverMissingFunctionConversationMessages({ store, saver: checkpointer, receipt, capture })
+    }
   })
   await checkpointer.initialize()
   // Re-check AFTER the awaits above: a deletion landing while this instance
@@ -4675,12 +5162,13 @@ export function getModelInstance(
   // Compaction needs a final-text handoff, not a reasoning trace. Allowing a
   // thinking model here can spend the entire output budget on reasoning and
   // return empty content, so keep thinking exclusive to normal agent calls.
-  const enableThinking = purpose === "agent" && thinkingConfigured
+  const enableThinking = thinkingConfigured && (purpose === "agent" ||
+    (purpose === "function-completion" && customConfig.enableThinkingEffort === true))
   const enableThinkingEffort = enableThinking && customConfig.enableThinkingEffort === true
   const modelFetch =
     purpose === "function-completion"
-      // SDK complete/classify/fork already reserve and settle at FunctionModels.
-      ? createRetryingFetch(retryHooks, maxRetryAttempts, undefined, false)
+      ? // SDK complete/classify/fork already reserve and settle at FunctionModels.
+        createRetryingFetch(retryHooks, maxRetryAttempts, undefined, false)
       : purpose === "agent"
         ? createRetryingFetch(retryHooks, maxRetryAttempts, { threadId: captureThreadId })
         : retryHooks || maxRetryAttempts !== undefined
@@ -4768,7 +5256,10 @@ export function createFunctionStepModelResolver(
     retryHooks?: ModelRetryHooks
     maxRetryAttempts?: number
     threadId?: string
-    lookup?: (name: string) => (Parameters<typeof getModelInstance>[0] & { maxTokens?: number }) | null
+    assertModel?: (model: Parameters<typeof getModelInstance>[0]) => void
+    lookup?: (
+      name: string
+    ) => (Parameters<typeof getModelInstance>[0] & { maxTokens?: number }) | null
   } = {}
 ): FunctionStepModelHost["resolve"] {
   // Capture the selected runtime configuration, including its endpoint identity.
@@ -4776,35 +5267,52 @@ export function createFunctionStepModelResolver(
   const baseline = { ...configured }
   return async (selection, signal) => {
     signal.throwIfAborted()
-    if (selection.effort !== undefined &&
-        selection.effort !== "low" && selection.effort !== "high" && selection.effort !== "max")
+    if (
+      selection.effort !== undefined &&
+      selection.effort !== "low" &&
+      selection.effort !== "high" &&
+      selection.effort !== "max"
+    )
       throw new ModError("MODS_MODEL_EFFORT_UNSUPPORTED")
-    const selected = selection.model === baseline.model
-      ? baseline
-      : (options.lookup ?? getModelConfigByRef)(selection.model)
+    const selected =
+      selection.model === baseline.model
+        ? baseline
+        : (options.lookup ?? getModelConfigByRef)(selection.model)
     if (!selected?.apiKey) throw new ModError("MODS_MODEL_NOT_CONFIGURED")
+    options.assertModel?.(selected)
     // Only this existing host adapter has an explicit top-level effort protocol.
     // Generic chat_template_kwargs are not evidence that a provider honors effort.
     if (selection.effort !== undefined && !/deepseek/i.test(selected.model))
       throw new ModError("MODS_MODEL_EFFORT_UNSUPPORTED")
     const config: typeof baseline = {
       ...selected,
-      ...(selection.effort !== undefined ? {
-        enableThinking: true,
-        enableThinkingEffort: true,
-        thinkingEffort: selection.effort
-      } : {})
+      ...(selection.effort !== undefined
+        ? {
+            enableThinking: true,
+            enableThinkingEffort: true,
+            thinkingEffort: selection.effort
+          }
+        : {})
     }
     const contextWindow = config.maxTokens ?? DEFAULT_MAX_TOKENS
     const inputBudget = calculateModelInputBudgetTokens(
-      contextWindow, config.maxOutputTokens ?? DEFAULT_MAX_OUTPUT_TOKENS
+      contextWindow,
+      config.maxOutputTokens ?? DEFAULT_MAX_OUTPUT_TOKENS
     )
     signal.throwIfAborted()
     return {
-      provider: getModelInstance(config, options.retryHooks, options.maxRetryAttempts, "agent", options.threadId),
+      provider: getModelInstance(
+        config,
+        options.retryHooks,
+        options.maxRetryAttempts,
+        "agent",
+        options.threadId
+      ),
       model: config.model,
+      modelRef: "ref" in config && typeof config.ref === "string" ? config.ref : undefined,
       ...(/deepseek/i.test(config.model) && config.enableThinking && config.enableThinkingEffort
-        ? { effort: config.thinkingEffort ?? DEFAULT_THINKING_EFFORT } : {}),
+        ? { effort: config.thinkingEffort ?? DEFAULT_THINKING_EFFORT }
+        : {}),
       contextWindow,
       inputBudget
     }
@@ -4842,8 +5350,28 @@ function applyDeployUnitMappingsToAgentmdLoadStatus(
 }
 
 export interface CreateAgentRuntimeOptions {
+  /** Host-only observation receipt captured by the parent before dispatch; never renderer authority. */
+  instructionParentObservation?: { scope: InstructionScope; sequence: number }
+  /** Host-only closed Flow profile. Ordinary runtime assembly remains unchanged. */
+  flowPromptOnly?: FlowPromptOnlyRuntimeOptions
+  /** Host-only virtual file profile; ordinary assembly stays unchanged when absent. */
+  flowFiles?: import("./flow-file-runtime").FlowFileRuntimeProfile
   /** Internal inheritance override; absent on top-level runs to capture the global setting. */
   toolStrategy?: AgentToolStrategy
+  /** Original host-owned buffer flush for one native occurrence in this physical run. */
+  onNativeConversationTranscriptFlush?: (uuid: string) => void | Promise<void>
+  /** Exact original physical input proof, captured by the host before candidate creation. */
+  nativeConversationInput?: FunctionConversationNativeInputReceipt
+  /** Delivers an opaque host lifecycle entry bound to this exact physical runtime. */
+  onHostLifecycleReady?: (run: HostRuntimeLifecycle) => void
+  /** Host-only source guard, checked before and after every main model invocation. */
+  onModelBoundary?: () => void
+  /** Host-only snapshot propagated to registry subagents and coordinator workers. */
+  inheritedClawSources?: Pick<import("../../shared/mods/claw").ClawProfile, "skills" | "mcp">
+  /** Host-only readiness observer for independently owned Mods child runtimes. */
+  onModAgentStarted?: () => void
+  /** Host-owned deterministic flows stop on refusal instead of following a model business branch. */
+  onToolRejected?: (reason: string) => void
   /** Thread ID - REQUIRED for per-thread checkpointing */
   threadId: string
   /** Per-thread output style. Applied only to the foreground normal-mode main agent. */
@@ -4980,6 +5508,10 @@ export interface CreateAgentRuntimeOptions {
   disableMcpTools?: boolean
   /** Exact main-agent tool names hidden and hard-blocked by a transport policy. */
   blockedToolNames?: string[]
+  /** Host-approved explicit tool universe of an independent Mods child. */
+  allowedToolNames?: string[]
+  modAgentMaxTurns?: number
+  modAgentSystemPrompt?: string
   /** AbortSignal — when signalled, any running child process is killed immediately. */
   abortSignal?: AbortSignal
   /** Optional hooks invoked when the model fetch layer retries / resolves. */
@@ -5083,7 +5615,8 @@ function createRuntimeBaseTools(
         abortSignal: options.abortSignal,
         allowDeferredRenderer: options.allowDeferredUserInputRenderer,
         interactionWaitHooks: options.interactionWaitHooks,
-        requestUserInputConfig: options.requestUserInputConfig
+        requestUserInputConfig: options.requestUserInputConfig,
+        onRejected: options.onToolRejected
       })
     )
   }
@@ -5099,6 +5632,12 @@ function createRuntimeBaseTools(
   }
   if (!options.noSkillEvolutionTool) {
     extraTools.push(createSkillEvolutionTool({ threadId: options.threadId }))
+  }
+
+  if (!runtimePolicy.isProjectMode && (!options.agentId || options.agentId === "main") && options.threadId &&
+    getModDevelopmentService()?.isEnabled(options.threadId, workspacePath)) {
+    extraTools.push(createModAuthoringTool({ threadId: options.threadId,
+      workspace: workspacePath, signal: options.abortSignal }))
   }
 
   // Conditionally inject Java LSP tool
@@ -5142,7 +5681,10 @@ export async function prepareForegroundRuntimeToolCatalog(
     agentMode: "normal",
     memoryEnabled: isThreadMemoryEnabled(metadata)
   })
-  const service = getGlobalMcpCapabilityService()
+  const service = restrictClawMcpService(
+    getGlobalMcpCapabilityService(),
+    getModsManager()?.clawProfile?.(workspacePath, threadId)?.mcp
+  )
   const snapshot = await service.getSnapshot!()
   signal.throwIfAborted()
   const scoped = scopedMcpTools(snapshot.tools, new Set())
@@ -5198,6 +5740,21 @@ export async function prepareForegroundRuntimeToolCatalog(
 }
 
 export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Promise<DeepAgent> {
+  const assertFixedSourceContent = captureRuntimePluginSourceContentGuard()
+  if (options.flowFiles) {
+    if (options.flowPromptOnly) throw Error("FLOW_RUNTIME_PROFILE_CONFLICT")
+    const capturedOptions = { ...options, additionalTools: options.additionalTools?.slice() }
+    const profile = Object.freeze({
+      ...options.flowFiles,
+      binding: Object.freeze({ ...options.flowFiles.binding })
+    })
+    const { createFlowFileRuntime } = await import("./flow-file-runtime")
+    return createFlowFileRuntime(capturedOptions, profile) as Promise<DeepAgent>
+  }
+  if (options.flowPromptOnly) {
+    const { createFlowPromptRuntime } = await import("./flow-prompt-runtime")
+    return createFlowPromptRuntime(options) as Promise<DeepAgent>
+  }
   const completionCancellation = createCompletionRuntimeCancellation(options.abortSignal)
   options = { ...options, abortSignal: completionCancellation.signal }
   // Snapshot once per runtime. Nested runtimes inherit this preference, NOT the
@@ -5294,7 +5851,63 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
     )
   }
 
-  const modRuntimeAuthority = getModsManager()?.createRuntimeAuthority({
+  // Observations are admitted before asynchronous loading so an old runtime cannot replace a new one.
+  // Child runtimes sharing the parent thread do not overwrite the parent's assembly facts.
+  const instructionRunId = (!agentId || agentId === "main") ? hookTurnId ?? randomUUID() : randomUUID()
+  const modManager = getModsManager()
+  let instructionScope: InstructionScope | undefined
+  let instructionSequence: number | undefined
+  let instructionParent: { scope: InstructionScope; sequence: number } | undefined
+  const instructionIncarnation = (() => {
+    try { const row = getThreadCore(threadId); return row ? captureThreadIncarnation(row) : undefined }
+    catch { return undefined }
+  })()
+  const instructionIdentityCurrent = () => {
+    try {
+      if (!instructionIncarnation || !matchesThreadIncarnation(getThreadCore(threadId), instructionIncarnation)) return false
+      if (instructionParent) {
+        const parent = getThreadCore(instructionParent.scope.threadId)
+        if (!parent || JSON.stringify(captureThreadIncarnation(parent)) !== instructionParent.scope.incarnationKey) return false
+      }
+      return true
+    } catch { return false }
+  }
+  if (!agentId || agentId === "main") {
+    try {
+      const row = getThreadCore(threadId)
+      if (row) {
+        instructionScope = { threadId, workspace: modManager?.workspaceKey(workspacePath) ?? workspacePath,
+          incarnationKey: JSON.stringify(captureThreadIncarnation(row)) }
+        instructionSequence = builtinInstructionsStore.begin(instructionScope, instructionRunId)
+      }
+    } catch {
+      // Missing observational storage must not change the original runtime behavior.
+    }
+  }
+
+  if (agentId && agentId !== "main" && options.instructionParentObservation) {
+    const parent = options.instructionParentObservation
+    if (builtinInstructionsStore.currentSequence(parent.scope) === parent.sequence)
+      instructionParent = parent
+  }
+  const childInstructionParent = instructionScope && instructionSequence !== undefined
+    ? { scope: instructionScope, sequence: instructionSequence } : instructionParent
+
+
+  // Validate even when Mods is off/uninstalled; old sessions can retain foreign or deleted paths.
+  if (instructionScope) {
+    const reviewScope = { ...instructionScope, runId: instructionRunId }
+    const reviewToken = builtinChangeReviewService.begin(reviewScope)
+    // Project task baseline precedes tools/hooks. Ordinary chat pays no filesystem scan cost.
+    if (harnessProjectId || featureId ||
+      readBuiltinProjectFacts(threadId, instructionScope.workspace).facts.state === "observed")
+      await builtinChangeReviewService.capture(reviewScope, reviewToken, options.abortSignal)
+  }
+  if (modManager) await modManager.prepareWorkspace(workspacePath)
+  else await validateWorkspaceDirectory(workspacePath)
+  options.abortSignal?.throwIfAborted()
+
+  const modRuntimeAuthority = modManager?.createRuntimeAuthority({
     workspace: workspacePath,
     threadId,
     agentId,
@@ -5352,6 +5965,15 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
       `[Runtime] Project mode memory enabled: ${isProjectModeMemoryEnabled()} (${PROJECT_MODE_MEMORY_ENV}=${memoryEnvValue})`
     )
   }
+  const clawProfile = getModsManager()?.clawProfile?.(workspacePath, threadId) ?? null
+  const clawSources = options.inheritedClawSources ?? clawProfile ?? {}
+  const clawSkillPolicy = await createClawSkillPolicy(
+    clawSources.skills,
+    undefined,
+    skillVisibility.projectMode
+      ? (source) => isSkillVisibleForProjectMode(source, skillVisibility)
+      : undefined
+  )
   const hookScope = providedHookScope ?? createHookScope()
   // Coordinator mode: the coordinator never "uses" a skill itself (it has no
   // filesystem/tools and only delegates to workers), so a user's explicit
@@ -5362,6 +5984,7 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
   // Only the explicit slash selection counts, not auto-routed skills.
   if (isCoordinatorMode && options.coordinatorExplicitSelectedSkill) {
     const sel = options.coordinatorExplicitSelectedSkill
+    clawSkillPolicy?.assertSkillReference({ name: sel.skillName, path: sel.skillPath })
     if (isSkillPathVisibleForProjectMode(sel.skillPath, skillVisibility)) {
       const ownerPluginId = resolvePluginIdForSkillPath(sel.skillPath)
       hookScope.activateSkill(sel.skillName, ownerPluginId, sel.skillPath)
@@ -5376,12 +5999,41 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
       onHookSkippedFactory?.(event)
     )
 
-  const customConfig = modelId ? getModelConfigByRef(modelId) : getAvailableModelConfigOrDefault()
+  const clawModelId = getModsManager()?.clawDefaultModel?.(workspacePath, threadId)
+  const requestedModelId = clawModelId ?? modelId
+  const customConfig = requestedModelId
+    ? getModelConfigByRef(requestedModelId)
+    : getAvailableModelConfigOrDefault()
   if (!customConfig) {
     throw new Error("Custom model not configured. Please configure a model in Settings.")
   }
+  const assertClawModel = createClawModelGuard(
+    clawProfile,
+    customConfig,
+    getModelConfigByRef
+  )
 
   const model = getModelInstance(customConfig, retryHooks, maxRetryAttempts, "agent", threadId)
+  const modTaskModels = new WeakMap<object, FunctionTaskModel>()
+  const registerTaskModel = (
+    provider: ReturnType<typeof getModelInstance>,
+    config: Parameters<typeof getModelInstance>[0]
+  ) => {
+    modTaskModels.set(provider, {
+      model: config.model,
+      ...(/deepseek/i.test(config.model) && config.enableThinking && config.enableThinkingEffort
+        ? { effort: config.thinkingEffort ?? DEFAULT_THINKING_EFFORT }
+        : {}),
+      resolve: createFunctionStepModelResolver(config, {
+        retryHooks,
+        maxRetryAttempts,
+        threadId,
+        assertModel: assertClawModel
+      })
+    })
+    return provider
+  }
+  registerTaskModel(model, customConfig)
   const contextCompactionModel = getModelInstance(
     customConfig,
     retryHooks,
@@ -5424,8 +6076,13 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
       )
       return undefined
     }
+    // A denied Claw choice must not be swallowed by the legacy init fallback.
+    assertClawModel?.(cfg)
     try {
-      return getModelInstance(cfg, retryHooks, maxRetryAttempts)
+      return registerTaskModel(
+        getModelInstance(cfg, retryHooks, maxRetryAttempts, "agent", threadId),
+        cfg
+      )
     } catch (error) {
       console.warn(
         `[Runtime] Registry agent model "${profileModel}" failed to init; inheriting main model:`,
@@ -5533,6 +6190,7 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
     modWorkspace: workspacePath,
     modRuntimeAuthority,
     modBlockedToolNames,
+    modAllowedToolNames: options.allowedToolNames && new Set(options.allowedToolNames),
     modDelegatedBlockedToolNames: new Set([
       ...runtimeBlockedToolNames,
       ...(options.filesystemAccess ? blockedToolNamesForAccess(options.filesystemAccess) : [])
@@ -5543,7 +6201,8 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
       ? functionUserInputInvoker({
           threadId: options.threadId,
           interactionWaitHooks: options.interactionWaitHooks,
-          requestUserInputConfig: options.requestUserInputConfig
+          requestUserInputConfig: options.requestUserInputConfig,
+          onRejected: options.onToolRejected
         })
       : undefined,
     worktreeIsolation: options.worktreeIsolation,
@@ -5584,6 +6243,18 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
     projectCode,
     projectDir,
     onFileMutation,
+    // Shell file telemetry follows Bash First exactly where the prompts apply
+    // it (same snapshot, readonly-sandbox downgrade and role limits); standard
+    // keeps the old file-tool-only path.
+    shellFileTelemetry: resolveShellFileTelemetry(
+      windowsSandbox === "readonly" ? "standard" : toolStrategy,
+      {
+        filesystemAccess: options.filesystemAccess,
+        blockedToolNames: runtimeBlockedToolNames,
+        filesystemEnabled: !isCoordinatorMode,
+        taskSubagentsEnabled: mainSubagentsEnabled
+      }
+    ),
     abortSignal: options.abortSignal,
     runId: threadId,
     // Foreground turns on the same thread can overlap briefly during bounded
@@ -5628,6 +6299,8 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
   // decision, or by the run abort signal when the user stops/cancels the turn.
   const APPROVAL_TIMEOUT_MS: number | null = null
   const requestApproval = async (req: ApprovalRequest): Promise<ApprovalDecision> => {
+    observeBuiltinPolicyDecision({ threadId: approvalThreadId, workspace: workspacePath, id: req.id,
+      source: "tool-approval", event: "tool-approval", decision: "ask", code: "HUMAN_APPROVAL_PENDING" })
     // IPC fires immediately; the renderer owns the queue (pendingApprovals[]).
     // Multiple concurrent tool calls each register their own resolver here —
     // the renderer shows them one at a time, but the events are not serialized
@@ -5732,6 +6405,7 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
         toolArgs: { command: req.command, reason: req.reason, filePath: req.filePath },
         workspacePath,
         sessionId: approvalThreadId,
+        functionSessionId: threadId,
         agentId,
         turnId: hookTurnId,
         pluginOutputDir,
@@ -5756,19 +6430,32 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
         // fire path today, so the value is always "permission_prompt".
         notificationType: "permission_prompt"
       }
-      runHooks(
-        resolveHooksForContext("Notification", notificationContext),
-        "Notification",
-        notificationContext,
-        onHookResult
-      ).catch((e) => console.warn("[Hooks] Notification hook error:", e))
-      for (const win of BrowserWindow.getAllWindows()) {
-        win.webContents.send(`approval:request:${approvalThreadId}`, req)
+      try {
+        runHooks(
+          resolveHooksForContext("Notification", notificationContext),
+          "Notification",
+          notificationContext,
+          onHookResult
+        ).catch((e) => console.warn("[Hooks] Notification hook error:", e))
+        for (const win of BrowserWindow.getAllWindows()) {
+          win.webContents.send(`approval:request:${approvalThreadId}`, req)
+        }
+      } catch (error) {
+        console.warn("[Orchestrator] Approval dispatch diagnostic", {
+          stage: "notification-and-renderer-dispatch",
+          error: runtimeErrorDiagnostic(error)
+        })
+        throw error
       }
     })
     if (!options.abortSignal?.aborted) {
       await options.interactionWaitHooks?.onWaitEnd(waitEvent)
     }
+    observeBuiltinPolicyDecision({ threadId: approvalThreadId, workspace: workspacePath, id: req.id,
+      source: "tool-approval", event: "tool-approval",
+      decision: options.abortSignal?.aborted ? "unknown" : ["approve", "approve_session", "approve_permanent"].includes(decision.type) ? "allow" : "deny",
+      code: options.abortSignal?.aborted ? "HUMAN_APPROVAL_CANCELLED" : ["approve", "approve_session", "approve_permanent"].includes(decision.type) ? "HUMAN_APPROVAL_ALLOWED" : "HUMAN_APPROVAL_DENIED" })
+    notifyExplicitToolRejection(decision, options.abortSignal, options.onToolRejected)
     return decision
   }
 
@@ -5789,7 +6476,12 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
     getYoloMode,
     options.autoApproveFileEdits === true,
     !options.worktreeIsolation,
-    workspacePath
+    workspacePath,
+    (reason) => {
+      if (reason === "command-forbidden") observeBuiltinPolicyDecision({ threadId: approvalThreadId, workspace: workspacePath,
+        source: "tool-policy", event: "execute", decision: "deny", code: "COMMAND_FORBIDDEN" })
+      options.onToolRejected?.(reason)
+    }
   )
   backend.setOrchestrator(orchestrator)
 
@@ -5812,6 +6504,11 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
   // The prompt must name the directory the agent actually works in, or an isolated
   // agent would be told the host workspace is its root and write outside its
   // worktree (the sandbox would refuse, so it would just fail confusingly).
+  let modSystemContributions: PromptContribution[] = []
+  const appendSystemContribution = (id: string, text: string | null) => {
+    modSystemContributions.push({ id, text, scope: "session" })
+    if (text !== null) systemPrompt += text
+  }
   let systemPrompt = getSystemPrompt(fileRoot, windowsSandbox, {
     toolStrategy: windowsSandbox === "readonly" ? "standard" : toolStrategy,
     filesystemAccess: options.filesystemAccess,
@@ -5821,7 +6518,8 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
     managedForegroundExec: managedExecution,
     includeSubagents: mainSubagentsEnabled,
     includeMemory: runtimePolicy.includeMemory,
-    includeCurrentTime: runtimePolicy.includeCurrentTime
+    includeCurrentTime: runtimePolicy.includeCurrentTime,
+    onContributions: (contributions) => { modSystemContributions = contributions }
   })
   let agentsPrompt: AgentsPromptRuntimeResult = {
     type: "workspace",
@@ -5891,16 +6589,41 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
   }
   const rawCombinedAgentsPrompt =
     [agentsPrompt.prompt, normalizedHarnessAgentsPrompt].filter(Boolean).join("\n\n") || undefined
+  if ((instructionScope && instructionSequence !== undefined) || instructionParent) {
+    const observation = {
+      schemaVersion: 1 as const, threadId, runId: instructionRunId, workspace: instructionScope?.workspace ?? fileRoot,
+      capturedAt: Date.now(), observation: "host-context-assembly" as const,
+      origin: (normalizedHarnessAgentsPrompt ? "plugin" : enableAgentsPrompt ? "host" : "disabled") as "plugin" | "host" | "disabled",
+      status: "observed" as const,
+      entries: normalizedHarnessAgentsPrompt ? normalizedHarnessAgentmdLoadStatus.map(item => ({
+        path: item.path, layer: "plugin" as const, scope: "原项目插件提供的上下文",
+        workspace: fileRoot, delivery: "unknown" as const,
+        reason: "插件提供了组合上下文，宿主无法逐文件确认最终注入范围。"
+      })) : agentsPrompt.instructionProjection ?? [],
+      limitations: ["这是本次宿主装载记录；后续灵件可能继续处理提示，不能据此认定最终请求保持原文。",
+        "自然语言规范冲突需要人工核对；宿主未自动裁定语义优先级。"]
+    }
+    if (instructionParent && instructionIdentityCurrent()) builtinInstructionsStore.captureChild(
+      instructionParent.scope, instructionParent.sequence,
+      { ...observation, agentId, childSource: "independent-runtime" })
+    else if (instructionScope && instructionSequence !== undefined)
+      builtinInstructionsStore.capture(instructionScope, instructionSequence, observation)
+  }
   const renderedPluginPromptInject = renderPluginPromptInject(pluginPromptInject)
   const combinedAgentsPrompt = rawCombinedAgentsPrompt
     ? renderAgentsInstructionsPrompt(rawCombinedAgentsPrompt)
     : undefined
-  if (renderedPluginPromptInject) {
-    systemPrompt += "\n\n" + renderedPluginPromptInject
+  appendSystemContribution("cmb:plugin-context",
+    renderedPluginPromptInject ? `\n\n${renderedPluginPromptInject}` : null)
+  appendSystemContribution("cmb:agents",
+    combinedAgentsPrompt ? `\n\n${combinedAgentsPrompt}` : null)
+  const modInstructionContext: NonNullable<PromptContribution["context"]> = {
+    name: "claudeMd",
+    ...(normalizedHarnessAgentsPrompt ? {} : {
+      instructionFiles: agentsPrompt.instructionFiles ?? []
+    })
   }
-  if (combinedAgentsPrompt) {
-    systemPrompt += "\n\n" + combinedAgentsPrompt
-  }
+  modSystemContributions.at(-1)!.context = modInstructionContext
   const resolvedProjectContextPrompt =
     [renderedPluginPromptInject, combinedAgentsPrompt].filter(Boolean).join("\n\n") || undefined
   if (
@@ -5914,9 +6637,7 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
       promptPreview: resolvedProjectContextPrompt
     })
   }
-  if (extraSystemPrompt) {
-    systemPrompt += "\n\n" + extraSystemPrompt
-  }
+  appendSystemContribution("cmb:extra-context", extraSystemPrompt ? `\n\n${extraSystemPrompt}` : null)
 
   const isWindows = process.platform === "win32"
   const platform = isWindows ? "Windows" : process.platform === "darwin" ? "macOS" : "Linux"
@@ -5956,8 +6677,10 @@ ${subagentShellGuidance}
 - grep: search for literal text within files (NOT regex). Do NOT use "|", ".*" or other regex syntax — call grep once per term instead.
 The workspace root is: ${fileRoot}`
 
-  const skillLifecycleRootSources = await getEnabledSkillsSources()
-  const skillsSources = await getEnabledSkillMiddlewareSources()
+  const skillLifecycleRootSources = clawSkillPolicy ? [] : await getEnabledSkillsSources()
+  const skillsSources = clawSkillPolicy
+    ? clawSkillPolicy.middlewareSources
+    : await getEnabledSkillMiddlewareSources()
   console.log(
     "[Runtime] Raw skills sources from getEnabledSkillsSources():",
     skillLifecycleRootSources
@@ -5970,18 +6693,28 @@ The workspace root is: ${fileRoot}`
   console.log("[Runtime] Skill middleware sources:", skillsSources)
 
   // Merge plugin skills sources
-  const allPluginSkillSourceMetadata = getEnabledPluginSkillSourceMetadata()
-  const pluginSkillSourceMetadata = allPluginSkillSourceMetadata.filter((source) =>
-    isSkillVisibleForProjectMode(source, skillVisibility)
-  )
-  const pluginSkillsSources =
-    await getEnabledPluginSkillMiddlewareSources(pluginSkillSourceMetadata)
+  const defaultPluginSkillSourceMetadata = clawSkillPolicy
+    ? []
+    : getEnabledPluginSkillSourceMetadata().filter((source) =>
+        isSkillVisibleForProjectMode(source, skillVisibility)
+      )
+  const pluginSkillSourceMetadata = clawSkillPolicy
+    ? clawSkillPolicy.lifecycleSources.filter((source) =>
+        Boolean(source.pluginId) && isSkillVisibleForProjectMode(source, skillVisibility)
+      )
+    : defaultPluginSkillSourceMetadata
+  const pluginSkillsSources = clawSkillPolicy
+    ? []
+    : await getEnabledPluginSkillMiddlewareSources(defaultPluginSkillSourceMetadata)
   console.log("[Runtime] Plugin skills sources:", pluginSkillsSources)
   console.log("[Runtime] Plugin skills sources count:", pluginSkillsSources.length)
 
   const allSkillsSources = combineSkillMiddlewareSources(skillsSources, pluginSkillsSources)
-  const skillLifecycleSources = [...skillLifecycleRootSources, ...pluginSkillSourceMetadata]
+  const skillLifecycleSources = clawSkillPolicy
+    ? clawSkillPolicy.lifecycleSources
+    : [...skillLifecycleRootSources, ...pluginSkillSourceMetadata]
   backend.setHiddenSkillDirs(getDisabledSkillDirs())
+  backend.setClawSkillPolicy(clawSkillPolicy)
   backend.setSkillLifecycleRegistry(
     skillLifecycleSources.length > 0 ? new SkillLifecycleRegistry(skillLifecycleSources) : undefined
   )
@@ -6014,7 +6747,12 @@ The workspace root is: ${fileRoot}`
   }
 
   const capabilityService = createScopedMcpCapabilityService(
-    getGlobalMcpCapabilityService(),
+    restrictClawMcpService(
+      runtimePolicy.isProjectMode && pluginId && isDerivedPlugin(pluginId)
+        ? getProjectMcpCapabilityService(pluginId)
+        : getGlobalMcpCapabilityService(),
+      clawSources.mcp
+    ),
     hookScope,
     resolveHooksForContext,
     onHookResult,
@@ -6024,6 +6762,7 @@ The workspace root is: ${fileRoot}`
       executionWorkspace: fileRoot,
       runtimeAuthority: modRuntimeAuthority,
       blockedToolNames: modBlockedToolNames,
+      allowedToolNames: options.allowedToolNames && new Set(options.allowedToolNames),
       readOnly: modReadOnly,
       signal: options.abortSignal,
       threadId,
@@ -6218,9 +6957,11 @@ The workspace root is: ${fileRoot}`
             const worktreeIsolation = subagentOptions.worktreeIsolation
             const subagentFileRoot = worktreeIsolation?.workspaceRoot ?? workspacePath
             const subagentRuntime = await createAgentRuntime({
+              instructionParentObservation: childInstructionParent,
               // Snapshot at leaf creation: approved file edits should not be steered
               // into separately gated shell writes. YOLO leaves keep the preference.
               toolStrategy: resolveWorkflowToolStrategy(toolStrategy, getYoloMode()),
+              inheritedClawSources: clawSources,
               threadId: subagentOptions.threadId,
               agentId: subagentOptions.agentId,
               actionStationarityTurnId: subagentOptions.threadId,
@@ -6303,6 +7044,9 @@ The workspace root is: ${fileRoot}`
               // its background subagents must not re-prompt per file edit
               // (shell execution stays gated).
               autoApproveFileEdits: true,
+              // Only shared-workspace mutations belong to the parent's commit
+              // scope. Isolated worktrees retain their own generation records.
+              onFileMutation: worktreeIsolation ? undefined : onFileMutation,
               managedExecution
             })
             if (worktreeIsolation) worktreeSubagentThreads.add(subagentOptions.threadId)
@@ -6371,6 +7115,7 @@ The workspace root is: ${fileRoot}`
         workspacePath,
         threadId: options.threadId,
         modelId: options.modelId,
+        traceContext,
         readYoloMode: getYoloMode,
         capabilityService,
         approvalStore,
@@ -6642,6 +7387,7 @@ Use the same worker thread context for follow-up instructions. ${scratchpadGuida
     // stays the worker thread id and is not part of this bundle.
     const workerHarnessContext = {
       agentId: workerInput.workerId,
+      onFileMutation,
       systemId,
       pluginRoot,
       pluginId,
@@ -6850,6 +7596,8 @@ Use the same worker thread context for follow-up instructions. ${scratchpadGuida
         if (workerInput.abortSignal.aborted) break
         try {
           workerAgent = await createAgentRuntime({
+              instructionParentObservation: childInstructionParent,
+            inheritedClawSources: clawSources,
             threadId: workerInput.workerThreadId,
             toolStrategy,
             actionStationarityTurnId: workerActionStationarityTurnId,
@@ -6923,6 +7671,8 @@ Use the same worker thread context for follow-up instructions. ${scratchpadGuida
 
           const nextCandidate = remainingWorkerCandidates.shift()!
           workerAgent = await createAgentRuntime({
+              instructionParentObservation: childInstructionParent,
+            inheritedClawSources: clawSources,
             threadId: workerInput.workerThreadId,
             toolStrategy,
             actionStationarityTurnId: workerActionStationarityTurnId,
@@ -6980,7 +7730,9 @@ Use the same worker thread context for follow-up instructions. ${scratchpadGuida
 
 Access limits: read-only handoff continuation. Do not modify files, run commands, or call tools. Return only the concise final handoff covering files changed or inspected, commands run and results, remaining risks, and any verification still needed.`
           const handoffAgent = await createAgentRuntime({
+              instructionParentObservation: childInstructionParent,
             toolStrategy,
+            inheritedClawSources: clawSources,
             threadId: workerInput.workerThreadId,
             actionStationarityTurnId: workerActionStationarityTurnId,
             approvalThreadId: workerInput.parentThreadId,
@@ -7125,6 +7877,7 @@ Access limits: read-only handoff continuation. Do not modify files, run commands
       workerInput.abortSignal.removeEventListener("abort", cancelWorkerBackgroundTasks)
       const cleanupResults = await Promise.allSettled([
         Promise.resolve().then(cancelWorkerBackgroundTasks),
+        Promise.resolve().then(() => getModsManager()?.closeFunctionThread(workerInput.workerThreadId)),
         LocalSandbox.revokeGrantedAclsForRun(workerInput.workerThreadId),
         closeCheckpointer(workerInput.workerThreadId)
       ])
@@ -7272,29 +8025,27 @@ Access limits: read-only handoff continuation. Do not modify files, run commands
       hasCodeExecTool,
       deferredToolIds
     })
+    modSystemContributions = [{ id: "cmb:coordinator", text: systemPrompt, scope: "session" }]
   } else {
-    if (runtimePolicy.includeInjectedToolUsagePrompt) {
-      systemPrompt += renderInjectedToolUsagePrompt({
+    appendSystemContribution("cmb:tool-routing", runtimePolicy.includeInjectedToolUsagePrompt
+      ? renderInjectedToolUsagePrompt({
         hasSearchTool,
         hasInspectTool,
         hasInvokeDeferredTool,
         hasCodeExecTool
-      })
-    }
+      }) : null)
     // Only advertise the deferred-tool inventory when the invoke bridge is
     // actually present. A restricted leaf (read_only/none registry agent — e.g. a
     // workflow Explore/Plan) has search/inspect/invoke_deferred removed, yet it is
     // NOT an isConstrainedCoordinatorWorker, so lazy MCP / saved tools still fill
     // deferredToolIds. Listing IDs it can't invoke is misleading noise, so gate on
     // the invoke capability (the bridge tools are cut as a set for read_only/none).
-    if (runtimePolicy.includeDeferredToolInventoryPrompt && hasInvokeDeferredTool) {
-      systemPrompt += renderAvailableDeferredToolsPrompt(deferredToolIds)
-    }
-    if (isWorkflowMode) {
-      systemPrompt += WORKFLOW_MODE_SYSTEM_PROMPT
-    }
+    appendSystemContribution("cmb:deferred-tools",
+      runtimePolicy.includeDeferredToolInventoryPrompt && hasInvokeDeferredTool
+        ? renderAvailableDeferredToolsPrompt(deferredToolIds) : null)
+    appendSystemContribution("cmb:workflow", isWorkflowMode ? WORKFLOW_MODE_SYSTEM_PROMPT : null)
   }
-  systemPrompt += "\n\n" + userInfoPrompt
+  appendSystemContribution("cmb:user-identity", `\n\n${userInfoPrompt}`)
   console.log("[Runtime] System prompt summary:", {
     chars: systemPrompt.length,
     hasAgentsPrompt: Boolean(agentsPrompt.prompt),
@@ -7384,14 +8135,18 @@ Access limits: read-only handoff continuation. Do not modify files, run commands
   // request, without extra file reads or MCP discovery. Disabled main sources
   // cannot reappear through state retained from an earlier runtime.
   const functionSessionContextSources: FunctionSessionContextSourceResolver = (request) =>
-    buildFunctionSessionContextSources({
-      memorySources: mainMemorySources,
-      skillSources: mainSkillSources,
-      pluginSkillSources: pluginSkillSourceMetadata,
-      mcpTools: [...eagerMcpMetadata, ...lazyMcpMetadata],
-      agents: registryProfiles,
-      autoCompactThreshold: triggerTokens
-    }, request)
+    buildFunctionSessionContextSources(
+      {
+        memorySources: mainMemorySources,
+        skillSources: mainSkillSources,
+        skillDocuments: clawSkillPolicy?.skillPaths,
+        pluginSkillSources: pluginSkillSourceMetadata,
+        mcpTools: [...eagerMcpMetadata, ...lazyMcpMetadata],
+        agents: registryProfiles,
+        autoCompactThreshold: triggerTokens
+      },
+      request
+    )
   const projectModeTaskSubagentsInheritFullContext =
     runtimePolicy.isProjectMode && mainSubagentsEnabled
   const taskSubagentExtraSystemPrompt = projectModeTaskSubagentsInheritFullContext
@@ -7437,8 +8192,7 @@ Access limits: read-only handoff continuation. Do not modify files, run commands
     signal: AbortSignal
   ): Promise<ModJson> => {
     signal.throwIfAborted()
-    if (getLocalThreadRunLease(threadId))
-      throw new ModError("MODS_CONTEXT_COMPACTION_ACTIVE")
+    if (getLocalThreadRunLease(threadId)) throw new ModError("MODS_CONTEXT_COMPACTION_ACTIVE")
     const agentToUpdate = runtimeAgentRef.current
     if (!agentToUpdate) throw new ModError("MODS_SESSION_UNAVAILABLE")
     const lease = captureThreadMutationLease(threadId)
@@ -7450,21 +8204,15 @@ Access limits: read-only handoff continuation. Do not modify files, run commands
     }
     const expectedCheckpointId = beforePrepare.config?.configurable?.checkpoint_id
     if (!Array.isArray(beforePrepare.values?.messages)) throw new ModError("MODS_CONTEXT_CHANGED")
-    const liveMessages = messages.filter(
-      (message): message is BaseMessage => BaseMessage.isInstance(message)
+    const liveMessages = messages.filter((message): message is BaseMessage =>
+      BaseMessage.isInstance(message)
     )
     if (liveMessages.length !== messages.length) throw new ModError("MODS_CONTEXT_CHANGED")
-    const plan = await controller.prepareLatest(
-      liveMessages,
-      state,
-      instructions,
-      signal
-    )
+    const plan = await controller.prepareLatest(liveMessages, state, instructions, signal)
     if ("skip" in plan) return { skip: plan.skip } as ModJson
     signal.throwIfAborted()
     return withThreadMutationLeaseLock(lease, async () => {
-      if (getLocalThreadRunLease(threadId))
-        throw new ModError("MODS_CONTEXT_COMPACTION_ACTIVE")
+      if (getLocalThreadRunLease(threadId)) throw new ModError("MODS_CONTEXT_COMPACTION_ACTIVE")
       const current = (await agentToUpdate.getState(config)) as unknown as {
         values?: { messages?: readonly unknown[] }
         config?: { configurable?: { checkpoint_id?: string } }
@@ -7526,11 +8274,9 @@ Access limits: read-only handoff continuation. Do not modify files, run commands
       }
       const compactManager = getModsManager()
       if (compactManager && modRuntimeAuthority) {
-        compactManager.updateFunctionSessionMessages(
-          modRuntimeAuthority,
-          messagesToCommit,
-          { _summarizationEvent: updateToCommit._summarizationEvent }
-        )
+        compactManager.updateFunctionSessionMessages(modRuntimeAuthority, messagesToCommit, {
+          _summarizationEvent: updateToCommit._summarizationEvent
+        })
         const currentSession = compactManager.captureFunctionSession(workspacePath, threadId)
         try {
           currentSession.assertLive()
@@ -7557,9 +8303,110 @@ Access limits: read-only handoff continuation. Do not modify files, run commands
     })
   }
 
+  const modFunctionRuntimeReady =
+    (await getModsManager()?.prepareFunctionRuntime(
+      workspacePath,
+      threadId,
+      options.abortSignal
+    )) ?? false
+  modRuntimeAuthority?.assertLive()
+  if (modRuntimeAuthority)
+    await getModsManager()?.prepareFunctionConversationRuntime(modRuntimeAuthority,
+      options.abortSignal ?? new AbortController().signal,
+      options.onNativeConversationTranscriptFlush
+        ? options.modTurnRunId ?? options.currentRunMessageQueueOwnerToken : undefined)
+  const nativeObserverEnabled = (event: HookEvent) =>
+    resolveHooksForContext(event, {
+      workspacePath,
+      sessionId: threadId,
+      agentId,
+      turnId: hookTurnId,
+      pluginOutputDir,
+      systemId,
+      pluginWorkspace,
+      featureId,
+      harnessProjectId,
+      harnessAdapterId: pluginId,
+      harnessAdapterName,
+      harnessAdapterVersion,
+      harnessNodeName,
+      harnessNodeStatus,
+      projectCode,
+      projectDir,
+      ...isolatedWorkspaceHookContext
+    }).length > 0
   const agent = createDeepAgent({
+    modFunctionRuntimeReady,
+    onBuiltinTaskInstructionRequest: (text: string, childAgentId: string, childTurnId: string, expected: string) => {
+      if (!childInstructionParent || !instructionIdentityCurrent()) return
+      const { scope: ownerScope, sequence: ownerSequence } = childInstructionParent
+      const childRun = JSON.stringify([instructionRunId, childAgentId, childTurnId])
+      builtinInstructionsStore.captureChild(ownerScope, ownerSequence, {
+        schemaVersion: 1, threadId, workspace: fileRoot, runId: childRun,
+        capturedAt: Date.now(), origin: expected ? "host" : "disabled", status: "observed",
+        observation: "host-context-assembly", agentId: childAgentId, childSource: "task-model-boundary",
+        entries: expected ? (agentsPrompt.instructionProjection ?? []).map(entry => ({ ...entry,
+          delivery: "unknown" as const, reason: "继承父运行的规范贡献；仅整段请求核对，未重新加载文件。" })) : [],
+        limitations: ["原Task角色决定是否继承规范；不更改角色提示。自然语言冲突需人工核对。"]
+      })
+      builtinInstructionsStore.observeChildFinal(ownerScope, ownerSequence, childRun, {
+        requestId: randomUUID(), observedAt: Date.now(), ...compareInstructionRequest(expected, text)
+      })
+    },
+    onBuiltinInstructionRequest: (text: string) => {
+      if (instructionParent && instructionIdentityCurrent())
+        builtinInstructionsStore.observeChildFinal(instructionParent.scope, instructionParent.sequence, instructionRunId, {
+          requestId: randomUUID(), observedAt: Date.now(), ...compareInstructionRequest(rawCombinedAgentsPrompt ?? "", text)
+        })
+      if (instructionScope && instructionSequence !== undefined && instructionIdentityCurrent())
+        builtinInstructionsStore.observeFinal(instructionScope, instructionSequence, instructionRunId, {
+          requestId: randomUUID(), observedAt: Date.now(),
+          ...compareInstructionRequest(rawCombinedAgentsPrompt ?? "", text)
+        })
+    },
+    onNativeConversationTranscriptFlush: options.onNativeConversationTranscriptFlush,
+    nativeConversationInput: options.nativeConversationInput,
+    middleware: [
+      ...(options.onModelBoundary || assertFixedSourceContent
+        ? [
+            createMiddleware({
+              name: "hostSourceBoundary",
+              beforeModel: () => {
+                assertFixedSourceContent?.()
+                options.onModelBoundary?.()
+                return undefined
+              },
+              afterModel: () => {
+                assertFixedSourceContent?.()
+                options.onModelBoundary?.()
+                return undefined
+              }
+            })
+          ]
+        : []),
+      ...(options.onModAgentStarted
+        ? [
+            createTaskModelOutcomeMiddleware(),
+            createMiddleware({
+              name: "functionAgentStarted",
+              beforeAgent: () => {
+                options.onModAgentStarted!()
+                return undefined
+              }
+            })
+          ]
+        : []),
+      ...(options.allowedToolNames || options.modAgentMaxTurns !== undefined
+        ? [
+            createModAgentRoleLimits({
+              allowedToolNames: options.allowedToolNames,
+              maxTurns: options.modAgentMaxTurns
+            })
+          ]
+        : []),
+      ...(traceContext?.harnessFeature ? [createStageUsageMiddleware(traceContext)] : [])
+    ],
     completionCancellation,
-    middleware: traceContext?.harnessFeature ? [createStageUsageMiddleware(traceContext)] : [],
     model,
     summarizationModel: contextCompactionModel,
     tools: mainTools,
@@ -7567,7 +8414,31 @@ Access limits: read-only handoff continuation. Do not modify files, run commands
     subagents: coordinatorSubagents,
     checkpointer,
     backend,
-    systemPrompt,
+    systemPrompt: options.modAgentSystemPrompt
+      ? [options.modAgentSystemPrompt, combinedAgentsPrompt].filter(Boolean).join("\n\n")
+      : systemPrompt,
+    modSystemContributions: options.modAgentSystemPrompt
+      ? [
+          { id: "cmb:agent", text: options.modAgentSystemPrompt, scope: "session" },
+          { id: "cmb:agents", text: combinedAgentsPrompt ? `\n\n${combinedAgentsPrompt}` : null,
+            scope: "session", context: modInstructionContext }
+        ]
+      : modSystemContributions,
+    modTaskProjectContributions: projectModeTaskSubagentsInheritFullContext
+      ? [
+          ...(renderedPluginPromptInject ? [
+            { id: "cmb:plugin-context", text: renderedPluginPromptInject, scope: "session" }
+          ] : []),
+          ...(combinedAgentsPrompt ? [
+            { id: "cmb:agents", text:
+              `${renderedPluginPromptInject ? "\n\n" : ""}${combinedAgentsPrompt}`, scope: "session",
+              context: modInstructionContext }
+          ] : [])
+        ]
+      : combinedAgentsPrompt
+        ? [{ id: "cmb:agents", text: combinedAgentsPrompt, scope: "session",
+            context: modInstructionContext }]
+        : [],
     outputStyle,
     toolStrategy: windowsSandbox === "readonly" ? "standard" : toolStrategy,
     onFinalSystemPrompt,
@@ -7579,6 +8450,7 @@ Access limits: read-only handoff continuation. Do not modify files, run commands
     mainSubagentsEnabled,
     filesystemAccess: options.filesystemAccess,
     mainBlockedToolNames: [...runtimeBlockedToolNames],
+    mainAllowedToolNames: options.allowedToolNames,
     managedExecution,
     registrySubagentSpecs,
     // The runtime's commands execute via the sandbox; on Windows with a sandbox
@@ -7591,6 +8463,7 @@ Access limits: read-only handoff continuation. Do not modify files, run commands
     includeGeneralPurposeSubagent:
       !isCoordinatorMode && isGeneralPurposeSubagentEnabled(projectModeTaskSubagentConfig),
     skills: mainSkillSources,
+    clawSkillPolicy,
     memory: mainMemorySources,
     // The orchestrator handles execute/file approval internally via IPC. In YOLO
     // mode it skips initial approvals but still prompts before sandbox escape.
@@ -7625,23 +8498,42 @@ Access limits: read-only handoff continuation. Do not modify files, run commands
     onFailureFuseNotice,
     modRuntimeAuthority,
     modSessionModel: customConfig.model,
-    modSessionEffort: /deepseek/i.test(customConfig.model) && customConfig.enableThinking && customConfig.enableThinkingEffort
-      ? customConfig.thinkingEffort ?? DEFAULT_THINKING_EFFORT : undefined,
-    modStepModel: modRuntimeAuthority ? {
-      resolve: createFunctionStepModelResolver(customConfig, { retryHooks, maxRetryAttempts, threadId }),
-      activate: (selection: import("./mods-model-boundary").FunctionStepModel) => {
-        const manager = getModsManager()
-        if (!manager) throw new ModError("MODS_SESSION_UNAVAILABLE")
-        manager.updateFunctionSessionModel(modRuntimeAuthority, selection.model, selection.contextWindow)
-        return () => manager.updateFunctionSessionModel(modRuntimeAuthority, customConfig.model, maxTokens)
-      }
-    } satisfies FunctionStepModelHost : undefined,
+    modSessionModelRef: customConfig.ref,
+    modTaskModels,
+    modSessionEffort:
+      /deepseek/i.test(customConfig.model) &&
+      customConfig.enableThinking &&
+      customConfig.enableThinkingEffort
+        ? (customConfig.thinkingEffort ?? DEFAULT_THINKING_EFFORT)
+        : undefined,
+    modStepModel: modRuntimeAuthority
+      ? ({
+          resolve: createFunctionStepModelResolver(customConfig, {
+            retryHooks,
+            maxRetryAttempts,
+            threadId,
+            assertModel: assertClawModel
+          }),
+          activate: (selection: import("./mods-model-boundary").FunctionStepModel) => {
+            if (modRuntimeAuthority.agentId !== "main") return () => {}
+            const manager = getModsManager()
+            if (!manager) throw new ModError("MODS_SESSION_UNAVAILABLE")
+            manager.updateFunctionSessionModel(
+              modRuntimeAuthority,
+              selection.model,
+              selection.contextWindow,
+              selection.modelRef
+            )
+            return () =>
+              manager.updateFunctionSessionModel(modRuntimeAuthority, customConfig.model, maxTokens,
+                customConfig.ref)
+          }
+        } satisfies FunctionStepModelHost)
+      : undefined,
     modInstructions: {
       sources: agentsPrompt.instructionSources ?? [],
       signal: options.abortSignal,
-      enabled: () =>
-        getModsManager()?.isEnabled(workspacePath) === true ||
-        getEnabledHooks(workspacePath).some((hook) => hook.event === "InstructionsLoaded"),
+      enabled: () => modFunctionRuntimeReady || nativeObserverEnabled("InstructionsLoaded"),
       assertLive: () => modRuntimeAuthority?.assertLive(),
       failed: () => console.warn("[Hooks] InstructionsLoaded observer failed"),
       notify: async (source, signal) => {
@@ -7678,9 +8570,7 @@ Access limits: read-only handoff continuation. Do not modify files, run commands
     } satisfies InstructionsLoadedOptions,
     modToolBatch: {
       signal: options.abortSignal,
-      enabled: () =>
-        getModsManager()?.isEnabled(workspacePath) === true ||
-        getEnabledHooks(workspacePath).some((hook) => hook.event === "PostToolBatch"),
+      enabled: () => modFunctionRuntimeReady || nativeObserverEnabled("PostToolBatch"),
       assertLive: () => modRuntimeAuthority?.assertLive(),
       notify: async (calls, signal) => {
         const context: HookContext = {
@@ -7876,6 +8766,9 @@ Access limits: read-only handoff continuation. Do not modify files, run commands
     JSON.stringify(mainSkillSources, null, 2)
   )
   console.log("[Runtime] Agent created with LocalSandbox at:", fileRoot)
+  options.onHostLifecycleReady?.(
+    createHostRuntimeLifecycle(modRuntimeAuthority, options.abortSignal)
+  )
   return agent
 }
 

@@ -2,7 +2,18 @@
 export const MOD_COMMAND_HISTORY_LIMIT = 50
 
 /** Missing scope retains the original global notification, including legacy Mods. */
-export type ModUiChangeScope = "panes"
+// Records change retained evidence/notices only; they do not revoke UI drawings.
+export type ModUiChangeScope = "panes" | "records" | "cards" | "feedback" | `source-replaced:${number}` | `source-retiring:${number}` | `site:${string}` | `site-invalidated:${string}` | `site-redraw:${string}`
+
+export function isModSiteChangeScope(scope: unknown): scope is `site:${string}` | `site-invalidated:${string}` | `site-redraw:${string}` {
+  return typeof scope === "string" &&
+    ((scope.startsWith("site:") && scope.length > 5) ||
+      (scope.startsWith("site-invalidated:") && scope.length > 17) ||
+      (scope.startsWith("site-redraw:") && scope.length > 12))
+}
+/** Only a configuration form schema refresh; missing/unknown payload still revokes display authority. */
+export interface ModConfigurationChangeEvent { scope: "schema" }
+
 export interface ModUiChangeEvent {
   threadId: string
   scope?: ModUiChangeScope
@@ -44,6 +55,10 @@ export interface ModIdentity {
   agentId: string
   workspace: string
   origin: "model" | "mod" | "user-action"
+  /** Audit attribution only; execution authority remains a host-only object. */
+  flow?: { runId: string; definitionDigest: string }
+  /** Effective package components, captured by the host; not a component permission grant. */
+  components?: { ids: string[]; selectionDigest: string }
   modId?: string
   grantEpoch: number
 }

@@ -1,4 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react"
+import { PluginDetailOwner } from "@/lib/plugin-detail-owner"
+import { usePluginSettingsRequest, consumePluginSettings } from "@/lib/plugin-settings-intent"
 import { notifyMarketPublished } from "@/lib/market-change-events"
 import {
   ExternalLink,
@@ -30,7 +32,11 @@ import {
 } from "@/components/ui/dialog"
 import { cn } from "@/lib/utils"
 import { useAppStore } from "@/lib/store"
-import { revalidatePluginCatalog } from "@/lib/app-catalog-cache"
+import {
+  invalidatePluginCatalog,
+  revalidatePluginCatalog,
+  subscribePluginCatalogInvalidation
+} from "@/lib/app-catalog-cache"
 import { SKILL_PLUGIN_CATALOG_RENDER_BATCH } from "@/lib/skill-plugin-catalog"
 import type { PluginMetadata, PluginManifest } from "@/types"
 import { marketApi, type MarketItem } from "../../api/market"
@@ -412,9 +418,11 @@ function UploadPluginDialog(props: {
 }
 
 export function PluginsPanel(): React.JSX.Element {
+  const requestedPlugin = usePluginSettingsRequest()
   const bumpPluginVersion = useAppStore((s) => s.bumpPluginVersion)
   const setShowCustomizeView = useAppStore((s) => s.setShowCustomizeView)
   const [plugins, setPlugins] = useState<PluginMetadata[]>([])
+  const [catalogStatus, setCatalogStatus] = useState<"loading" | "ready" | "error">("loading")
   const [selectedPlugin, setSelectedPlugin] = useState<PluginMetadata | null>(null)
   const [detail, setDetail] = useState<PluginDetail | null>(null)
   const [uploadDialogOpen, setUploadDialogOpen] = useState(false)
@@ -445,6 +453,13 @@ export function PluginsPanel(): React.JSX.Element {
   const [deleteTarget, setDeleteTarget] = useState<PluginMetadata | null>(null)
   const [errorMsg, setErrorMsg] = useState<string | null>(null)
   const [fileEditorOpen, setFileEditorOpen] = useState(false)
+  const pluginsMountedRef = useRef(false)
+  const pluginsRequestIdRef = useRef(0)
+  const detailOwner = useRef(new PluginDetailOwner())
+  useEffect(() => {
+    detailOwner.current.mount()
+    return () => detailOwner.current.unmount()
+  }, [])
 
   // 市场下载的 Plugin 不再隐藏 Skill/Hook/MCP 详情，统一展示组件详情。
   // 历史上这里会对 origin === "market" 的插件隐藏详情；现按需求恒为可见。
@@ -453,6 +468,18 @@ export function PluginsPanel(): React.JSX.Element {
     void plugin
     return false
   }, [])
+
+  const loadDetail = useCallback(async (plugin: PluginMetadata) => {
+    setSelectedPlugin(plugin)
+    setDetail(null)
+    if (shouldHidePluginDetails(plugin)) {
+      detailOwner.current.select(plugin.id)
+      return
+    }
+    await detailOwner.current.read(plugin.id,
+      () => window.api.plugins.getDetail(plugin.id), setDetail,
+      () => setDetail(getEmptyPluginDetail()))
+  }, [shouldHidePluginDetails])
 
   // Clean up debounce timer on unmount
   useEffect(() => {
@@ -469,9 +496,21 @@ export function PluginsPanel(): React.JSX.Element {
   }, [])
 
   const refreshPlugins = useCallback(async (): Promise<PluginMetadata[]> => {
-    const snapshot = await revalidatePluginCatalog(useAppStore.getState().pluginVersion)
-    setPlugins(snapshot.plugins)
-    return snapshot.plugins
+    const requestId = ++pluginsRequestIdRef.current
+    setCatalogStatus("loading")
+    try {
+      const snapshot = await revalidatePluginCatalog(useAppStore.getState().pluginVersion)
+      if (pluginsMountedRef.current && requestId === pluginsRequestIdRef.current) {
+        setPlugins(snapshot.plugins)
+        setCatalogStatus("ready")
+      }
+      return snapshot.plugins
+    } catch (error) {
+      if (pluginsMountedRef.current && requestId === pluginsRequestIdRef.current) {
+        setCatalogStatus("error")
+      }
+      throw error
+    }
   }, [])
 
   const loadMarketPlugins = useCallback(async () => {
@@ -507,28 +546,18 @@ export function PluginsPanel(): React.JSX.Element {
       bumpPluginVersion()
       void refreshPlugins()
         .then((list) => {
-          if (selectedPlugin) {
+          if (selectedPlugin && detailOwner.current.isSelected(selectedPlugin.id)) {
             const updated = list.find(
               (p) => p.id === selectedPlugin.id || p.name === selectedPlugin.name
             )
             if (updated) {
-              setSelectedPlugin(updated)
-              if (shouldHidePluginDetails(updated)) {
-                setDetail(null)
-              } else {
-                window.api.plugins
-                  .getDetail(updated.id)
-                  .then(setDetail)
-                  .catch(() => {
-                    setDetail(getEmptyPluginDetail())
-                  })
-              }
+              void loadDetail(updated)
             }
           }
         })
         .catch(console.error)
     },
-    [bumpPluginVersion, refreshPlugins, selectedPlugin, shouldHidePluginDetails]
+    [bumpPluginVersion, refreshPlugins, selectedPlugin, loadDetail]
   )
 
   const shouldHideSelectedPluginDetails = shouldHidePluginDetails(selectedPlugin)
@@ -540,7 +569,17 @@ export function PluginsPanel(): React.JSX.Element {
   }, [fileEditorOpen, selectedPlugin, shouldHideSelectedPluginDetails])
 
   useEffect(() => {
+    pluginsMountedRef.current = true
+    invalidatePluginCatalog()
+    const unsubscribe = subscribePluginCatalogInvalidation(() => {
+      void refreshPlugins().catch(console.error)
+    })
     void refreshPlugins().catch(console.error)
+    return () => {
+      pluginsMountedRef.current = false
+      pluginsRequestIdRef.current += 1
+      unsubscribe()
+    }
   }, [refreshPlugins])
 
   useEffect(() => {
@@ -598,23 +637,6 @@ export function PluginsPanel(): React.JSX.Element {
     bumpPluginVersion
   ])
 
-  const loadDetail = useCallback(
-    async (plugin: PluginMetadata) => {
-      setSelectedPlugin(plugin)
-      setDetail(null)
-      if (shouldHidePluginDetails(plugin)) {
-        return
-      }
-      try {
-        const d = await window.api.plugins.getDetail(plugin.id)
-        setDetail(d)
-      } catch {
-        setDetail(getEmptyPluginDetail())
-      }
-    },
-    [shouldHidePluginDetails]
-  )
-
   useEffect(() => {
     if (!marketPluginsLoaded || !selectedPlugin || detail || shouldHideSelectedPluginDetails) return
     void loadDetail(selectedPlugin)
@@ -661,15 +683,30 @@ export function PluginsPanel(): React.JSX.Element {
     [selectedPlugin, loadDetail]
   )
 
+  useEffect(() => {
+    if (!requestedPlugin || catalogStatus === "loading") return
+    const plugin = plugins.find((item) => item.id === requestedPlugin.pluginId)
+    if (catalogStatus === "error") {
+      setErrorMsg("暂时无法读取插件列表，请重新打开插件管理。")
+    } else if (!plugin) {
+      setErrorMsg("此插件已不在已安装列表中，可能已被卸载。")
+    } else {
+      setErrorMsg(null)
+      handleSelectPlugin(plugin)
+    }
+    consumePluginSettings(requestedPlugin.id)
+  }, [requestedPlugin, plugins, catalogStatus, handleSelectPlugin])
+
   const handleToggleEnabled = useCallback(
     async (plugin: PluginMetadata) => {
       try {
         const newEnabled = !plugin.enabled
-        await window.api.plugins.setEnabled(plugin.id, newEnabled)
+        const result = await window.api.plugins.setEnabled(plugin.id, newEnabled)
+        if (!result.success) throw Error(result.error || "启用/禁用插件失败")
         bumpPluginVersion()
         void refreshPlugins().catch(console.error)
-        if (selectedPlugin?.id === plugin.id) {
-          setSelectedPlugin((prev) => (prev ? { ...prev, enabled: newEnabled } : prev))
+        if (detailOwner.current.isSelected(plugin.id)) {
+          setSelectedPlugin((prev) => (prev?.id === plugin.id ? { ...prev, enabled: newEnabled } : prev))
         }
       } catch (e) {
         setErrorMsg(e instanceof Error ? e.message : "启用/禁用插件失败")
@@ -687,7 +724,7 @@ export function PluginsPanel(): React.JSX.Element {
           return
         }
         bumpPluginVersion()
-        await loadDetail(plugin)
+        if (detailOwner.current.isSelected(plugin.id)) await loadDetail(plugin)
       } catch (e) {
         setErrorMsg(e instanceof Error ? e.message : "启用/禁用插件 Hook 失败")
       }
@@ -703,12 +740,13 @@ export function PluginsPanel(): React.JSX.Element {
     if (!deleteTarget) return
     const plugin = deleteTarget
     setDeleteTarget(null)
+    detailOwner.current.invalidate(plugin.id)
     try {
       const res = await window.api.plugins.delete(plugin.id)
       if (res.success) {
         removeLocalUploadedPluginNameFromStorage(plugin.name)
         setLocalUploadedPluginNames(readLocalUploadedPluginNamesFromStorage())
-        if (selectedPlugin?.id === plugin.id) {
+        if (detailOwner.current.clear(plugin.id)) {
           setSelectedPlugin(null)
           setDetail(null)
         }
@@ -716,11 +754,13 @@ export function PluginsPanel(): React.JSX.Element {
         void refreshPlugins().catch(console.error)
       } else {
         setErrorMsg(res.error || "卸载失败")
+        await detailOwner.current.recover(plugin.id, () => loadDetail(plugin))
       }
     } catch (e) {
       setErrorMsg(e instanceof Error ? e.message : "卸载插件失败")
+      await detailOwner.current.recover(plugin.id, () => loadDetail(plugin))
     }
-  }, [bumpPluginVersion, deleteTarget, selectedPlugin, refreshPlugins])
+  }, [bumpPluginVersion, deleteTarget, selectedPlugin, refreshPlugins, loadDetail])
 
   const openPublishDialog = useCallback(
     (plugin: PluginMetadata) => {
@@ -1062,7 +1102,7 @@ export function PluginDetailPanel(props: {
               <p className="mt-1 text-sm text-muted-foreground leading-relaxed">
                 插件是一个可分发的功能包，可以把技能、MCP 服务、Hooks 和静态资源放在一起安装、启用、禁用和卸载。
                 适合把一套完整工作流交给团队复用，而不是让每个人分别添加技能、连接器和 Hook 规则。
-                如果插件包含 Function Mods，安装完成后请到“Function Mods”页面单独授权和控制其运行能力。
+                如果插件包含灵件，安装后请到“自定义助手 → 添加功能”核对权限并启用。
               </p>
             </div>
           </div>

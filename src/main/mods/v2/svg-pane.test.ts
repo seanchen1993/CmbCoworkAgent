@@ -4,6 +4,7 @@ import { compileFunctionPlugin } from "./loader"
 import { FunctionGuestRuntime } from "./guest-runtime"
 import { FunctionSession, SESSION_CAPABILITIES } from "./session"
 import { CLIENT_BOOTSTRAP } from "./client-bootstrap"
+import { ordinaryFunctionNode } from "../../../../tests/support/function-ui-node"
 
 it("compiles Svg in a real pane and isolated Client and releases both on close", async () => {
   const compiled = await compileFunctionPlugin(resolve("tests/fixtures/mods-v2/svg-pane"))
@@ -23,7 +24,7 @@ it("compiles Svg in a real pane and isolated Client and releases both on close",
     expect(await session.run("svg-pane", "")).toEqual({ text: "VECTOR_OPEN" })
     const [pane] = await session.panes.snapshot()
     expect(
-      pane.tree.children?.slice(0, 2).map((node) => (typeof node === "string" ? null : node.type))
+      ordinaryFunctionNode(pane.tree).children?.slice(0, 2).map((node) => (typeof node === "string" ? null : node.type))
     ).toEqual(["Svg", "Svg"])
     expect(pane.clients?.[0].error).toBeUndefined()
     expect(pane.clients?.[0].tree.type).toBe("Svg")

@@ -14,12 +14,14 @@ import { appendFileSync } from "fs"
 import { app } from "electron"
 import { dirname, join } from "path"
 import { types as nodeUtilTypes } from "node:util"
+import { randomUUID } from "node:crypto"
 import { withHookLogMaintenance } from "./hooks/persistence"
 import { getLogsDir, getMainLogPath, getRendererLogPath, resolveHookLogDir } from "./storage"
 import {
   redactAndTruncateSensitiveText,
   redactLogValues,
-  redactPossiblyTruncatedSensitiveText
+  redactPossiblyTruncatedSensitiveText,
+  redactSensitiveText
 } from "./log-redaction"
 
 const MAX_LOG_BYTES = 5 * 1024 * 1024
@@ -766,6 +768,61 @@ export function writeMainLog(level: string, args: unknown[]): unknown[] {
     enqueueLine(getMainLogPath(), level, joinArgs(boundedArgs), true)
   }
   return boundedArgs
+}
+
+function boundedFunctionDebugText(text: string, limit: number): string {
+  return text
+    .slice(0, limit)
+    .replace(/[\uD800-\uDBFF][\uDC00-\uDFFF]|[\uD800-\uDFFF]/g, (part) =>
+      part.length === 2 ? part : "\uFFFD"
+    )
+}
+
+/** Function-only diagnostics; ordinary console limits and model messages are unchanged. */
+export function writeFunctionModDebugLog(plugin: string, text: string): void {
+  if (typeof plugin !== "string" || typeof text !== "string" || text.length > 10000)
+    throw new TypeError("MODS_DEBUG_LOG_ARGUMENTS")
+  if (text.length <= 2000) {
+    console.info(`[Function Mods] [${plugin}]`, text)
+    return
+  }
+  if (!isLevelEnabled("INFO")) return
+  // Redact the entire bounded input before splitting, including secrets across a cut point.
+  // Replacement text can expand, so apply the original presentation budget again afterwards.
+  const safePlugin = boundedFunctionDebugText(redactAndTruncateSensitiveText(plugin, 128, ""), 128)
+  const safeText = boundedFunctionDebugText(redactSensitiveText(text), 10000)
+  const parts: string[] = []
+  for (let offset = 0; offset < safeText.length; ) {
+    let end = Math.min(offset + 2000, safeText.length)
+    if (
+      end < safeText.length &&
+      safeText.charCodeAt(end - 1) >= 0xd800 &&
+      safeText.charCodeAt(end - 1) <= 0xdbff &&
+      safeText.charCodeAt(end) >= 0xdc00 &&
+      safeText.charCodeAt(end) <= 0xdfff
+    )
+      end--
+    parts.push(safeText.slice(offset, end))
+    offset = end
+  }
+  if (!parts.length) parts.push("")
+  const recordId = randomUUID(),
+    count = parts.length,
+    path = getMainLogPath()
+  for (let index = 0; index < count; index++) {
+    const line =
+      "[Function Mods chunk] " +
+      JSON.stringify({
+        recordId,
+        index: index + 1,
+        count,
+        plugin: safePlugin,
+        text: parts[index]
+      })
+    // All user text was redacted above; every remaining field is fixed host diagnostic data.
+    // UTF16 JSON escaping plus the fixed envelope remains below the ordinary 16k line limit.
+    enqueueLine(path, "INFO", line, true)
+  }
 }
 
 export function writeRendererLog(

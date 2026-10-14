@@ -7,6 +7,7 @@ import { build } from "esbuild"
 import { chromium } from "playwright"
 import { compile } from "@tailwindcss/node"
 import { Scanner } from "@tailwindcss/oxide"
+import { browserWorkerPlugin } from "./support/browser-worker-plugin.mjs"
 
 const project = process.cwd()
 const output = resolve("output/message-timestamps")
@@ -29,12 +30,23 @@ const bundle = await build({
   write: false,
   jsx: "automatic",
   loader: { ".png": "dataurl" },
-  define: { "process.env.NODE_ENV": '"production"' },
+  define: { "process.env.NODE_ENV": '"production"', "import.meta.env.DEV": "false" },
   alias: { "@": renderer },
   plugins: [
+    browserWorkerPlugin(),
     {
       name: "fixture-isolation",
       setup(builder) {
+        // This fixture owns message timestamps, not a running Electron thread store.
+        // Match the existing chat-layout fixture's empty authoritative workspace.
+        builder.onResolve({ filter: /^@\/lib\/thread-context$/ }, () => ({
+          path: "thread-context",
+          namespace: "fixture-context"
+        }))
+        builder.onLoad({ filter: /.*/, namespace: "fixture-context" }, () => ({
+          contents: "export const useThreadStateSelector=(_threadId, selector)=>selector({})",
+          loader: "tsx"
+        }))
         builder.onResolve(
           { filter: /^\.\/(ToolCallRenderer|MessageFeedbackDialog|HookLogViews)$/ },
           (args) => ({ path: args.path, namespace: "fixture" })
@@ -71,7 +83,10 @@ try {
   })
   const page = await context.newPage()
   const errors = []
-  page.on("pageerror", (error) => errors.push(error.message))
+  page.on("pageerror", (error) => {
+    errors.push(error.message)
+    console.error(error.stack)
+  })
   await page.setContent(
     '<style>body{margin:0}#viewport{height:100vh;overflow:auto}#root{max-width:760px;margin:auto;padding:24px}</style><div id="viewport"><div id="root"></div></div>'
   )

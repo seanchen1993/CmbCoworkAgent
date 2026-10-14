@@ -35,6 +35,25 @@ const state = {
 }
 
 describe("buildFunctionSessionContextSources", () => {
+  it("excludes retained unselected sibling metadata under a shared middleware parent", () => {
+    const result = buildFunctionSessionContextSources(
+      { ...config, skillDocuments: ["/workspace/skills/allowed/SKILL.md"] },
+      {
+        state: {
+          ...state,
+          skillsMetadata: [
+            ...state.skillsMetadata,
+            { name: "allowed", path: "/workspace/skills/allowed/SKILL.md", description: "Selected" }
+          ]
+        }
+      }
+    )
+    expect(result.skills?.skillFrontmatter.map((skill) => skill.name)).toEqual(["allowed"])
+    expect(
+      buildFunctionSessionContextSources({ ...config, skillDocuments: [] }, { state }).skills
+        ?.skillFrontmatter
+    ).toEqual([])
+  })
   it("uses loaded memory and skill metadata, registered MCP identity and current request tools", () => {
     const result = buildFunctionSessionContextSources(config, {
       state,

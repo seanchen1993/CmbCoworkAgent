@@ -1,3 +1,5 @@
+import type { PluginInstallMode, PluginInstallResult } from "../shared/plugin-install"
+import type { WindowPresentationBridge } from "../shared/window-presentation"
 import type { DashboardToolUsageCoverage } from "../shared/dashboard-tool-usage"
 import type { DashboardThreadTraceScope } from "../shared/dashboard-thread-trace-scope"
 import type { DashboardKnowledgeCommitRate } from "../shared/dashboard-knowledge-commit-rate"
@@ -232,6 +234,8 @@ interface ElectronAPI {
   setWindowCloseBehavior: (behavior: WindowCloseBehavior) => Promise<WindowCloseBehavior>
   onWindowCloseBehaviorChanged: (callback: (behavior: WindowCloseBehavior) => void) => () => void
   getGitChangeNoticeEnabled: () => Promise<boolean>
+  getGitChangeNoticeSetting: () => Promise<{ value: boolean; revision: string }>
+  onGitChangeNoticeSetting: (callback: (current: { value: boolean; revision: string }) => void) => () => void
   setGitChangeNoticeEnabled: (enabled: boolean) => Promise<boolean>
   getAgentRuntimeSettings: () => Promise<AgentRuntimeSettings>
   setAgentToolStrategy: (value: AgentToolStrategy) => Promise<AgentRuntimeSettings>
@@ -1024,10 +1028,33 @@ interface DashboardPluginAggregate {
 }
 
 interface CustomAPI {
+  pluginDerivation: import("../shared/plugin-derivation").PluginDerivationApi
+  nodeComposition: import("../shared/node-composition").NodeCompositionApi
+  // Presentation receipts are native renderer-only and cannot be called through the Mods SDK.
   mods: {
+    development: import("../shared/mods/development").DevelopmentApi
+    skillEvaluation: import("../shared/mods/skill-evaluation").SkillEvaluationApi
+    evaluation: import("../shared/mods/evaluation-api").EvaluationApi
+    communityExamples: import("../shared/mods/community-examples").CommunityExamplesApi
+    authoringInstall: import("../shared/mods/authoring-install").AuthoringInstallApi; authoringPreview: import("../shared/mods/authoring-preview").AuthoringPreviewApi; authoring: import("../shared/mods/authoring").AuthoringApi } & import("../shared/mods/flows/types").FlowApi & import("../shared/mods/claw").ClawApi & import("../shared/mods/v2/prompt-composer").PromptComposerApi & import("../shared/mods/v2/desktop-actions").DesktopApi & import("../shared/mods/v2/presentation").FunctionPresentationApi & import("../shared/mods/v2/config-api").FunctionConfigApi & {
+    peerMessages(threadId: string): Promise<import("../shared/mods/v2/peer").FunctionPeerRecord[]>
+    onPeerMessagesChanged(callback: (event: { threadId: string }) => void): () => void
+    onConversationNotice(callback: (event: import("../shared/mods/v2/conversation-notice")
+      .FunctionConversationNoticeEvent) => void): () => void
+    chatDisplayCapability(threadId: string, expectedWorkspace: string): Promise<boolean>
+    builtinCatalog(): Promise<import("../shared/mods/builtins").DevClawBuiltinStatus[]>
+    builtinAdvisor(threadId: string, expectedWorkspace: string,
+      action: "view" | "enable" | "disable" | "analyze" | "cancel" | "dismiss"):
+      Promise<import("../shared/mods/builtin-advisor").BuiltinAdvisorView>
+    builtinChangeReview(threadId: string, expectedWorkspace: string,
+      baseline: import("../shared/mods/builtin-change-review").BuiltinChangeReviewBaseline):
+      Promise<import("../shared/mods/builtin-change-review").BuiltinChangeReview>
+    builtinOverview(threadId: string, expectedWorkspace: string):
+      Promise<import("../shared/mods/builtins").BuiltinRunOverview>
     globalEnabled(): Promise<boolean>
+    composerEnabled(threadId: string): Promise<{ workspace: string; enabled: boolean }>
     configureGlobal(enabled: boolean): Promise<boolean>
-    onConfigurationChanged(callback: () => void): () => void
+    onConfigurationChanged(callback: (event?: import("../shared/mods/types").ModConfigurationChangeEvent) => void): () => void
     inspectCheckpointRecovery(
       threadId: string,
       recordId: string
@@ -1035,12 +1062,18 @@ interface CustomAPI {
     completionEvidence(threadId: string): Promise<import("../main/mods/v2/completion-evidence").CompletionEvidenceRecord[]>
     completionPolicy(
       threadId: string,
-      plugin: string
+      plugin: string,
+      expectedWorkspace?: string
     ): Promise<import("../shared/mods/v2/completion-policy-values").CompletionPolicyView>
+    autobizEnvironment(
+      threadId: string,
+      expectedWorkspace?: string
+    ): Promise<import("../shared/mods/v2/completion-policy-values").AutobizEnvironment>
     setCompletionPolicy(
       threadId: string,
       plugin: string,
-      policy: import("../shared/mods/v2/completion-policy-values").CompletionPolicy
+      policy: import("../shared/mods/v2/completion-policy-values").CompletionPolicy,
+      expectedWorkspace?: string
     ): Promise<import("../shared/mods/v2/completion-policy-values").CompletionPolicyView>
     functionUnlocked(): Promise<boolean>
     unlockFunction(password: string): Promise<boolean>
@@ -1048,7 +1081,17 @@ interface CustomAPI {
     feedback(threadId: string): Promise<import("../shared/mods/v2/ui-feedback").FunctionFeedbackEntry[]>
     turnNotices(threadId: string): Promise<import("../shared/mods/v2/turn").FunctionTurnNotice[]>
     panes(threadId: string): Promise<import("../shared/mods/v2/ui").FunctionPaneSnapshot[]>
-    siteMount(threadId: string, component: import("../shared/mods/v2/sites").FunctionUiSite): Promise<string | null>
+    markdownLink(threadId: string,
+      action: import("../shared/mods/v2/markdown-links").FunctionMarkdownLinkAction
+    ): Promise<import("../shared/mods/v2/markdown-links").FunctionMarkdownLinkOutcome>
+    markdownPreview(threadId: string, receipt: string
+    ): Promise<import("../shared/mods/v2/markdown-links").FunctionMarkdownProtectedPreview | null>
+    markdownPreviewClose(threadId: string, receipt: string): Promise<void>
+    onMarkdownPreviewInvalidated(
+      callback: (event: { threadId: string; receipt: string }) => void
+    ): () => void
+    siteMount(threadId: string, component: import("../shared/mods/v2/sites").FunctionUiSite, messageId?: string): Promise<string | null>
+    siteMountOutcome(threadId: string, component: import("../shared/mods/v2/sites").FunctionUiSite, messageId?: string, expectedRequestId?: string): Promise<import("../shared/mods/v2/sites").FunctionSiteMountOutcome>
     siteRender(threadId: string, owner: string, props: import("../shared/mods/types").ModObject): Promise<import("../shared/mods/v2/ui").FunctionPaneSnapshot | null>
     siteUnmount(threadId: string, owner: string): Promise<void>
     siteAct(threadId: string, owner: string, action: import("../shared/mods/v2/ui").FunctionUiAction): Promise<void | import("../shared/mods/v2/ui").FunctionFocusResult>
@@ -1068,17 +1111,22 @@ interface CustomAPI {
       threadId: string,
       action: import("../shared/mods/v2/ui").FunctionClientAction
     ): Promise<void>
-    approveFunction(threadId: string, pluginId: string, digest: string): Promise<void>
-    revokeFunction(threadId: string, name: string): Promise<void>
+    checkFunctionCompatibility(threadId: string, pluginId: string, digest: string, expectedWorkspace?: string): Promise<{
+      digest: string
+      compatibility: import("../shared/mods/v2/compatibility").FunctionCompatibilityReport
+      sdkCompatibility: import("../shared/mods/v2/compatibility").FunctionSdkCompatibilitySummary
+    }>
+    approveFunction(threadId: string, pluginId: string, digest: string, expectedWorkspace?: string): Promise<void>
+    revokeFunction(threadId: string, name: string, expectedWorkspace?: string): Promise<void>
     status(threadId: string): Promise<import("../shared/mods/types").ModWorkspaceStatus>
-    configure(threadId: string, enabled: boolean, outputPolicy: boolean): Promise<void>
-    approve(threadId: string, pluginId: string, digest: string): Promise<void>
-    revoke(threadId: string, modId: string): Promise<void>
+    configure(threadId: string, enabled: boolean, outputPolicy: boolean, expectedWorkspace?: string): Promise<void>
+    approve(threadId: string, pluginId: string, digest: string, expectedWorkspace?: string): Promise<void>
+    revoke(threadId: string, modId: string, expectedWorkspace?: string): Promise<void>
     cards(threadId: string, callId: string): Promise<import("../shared/mods/types").ModCard[]>
     act(threadId: string, actionId: string): Promise<import("../shared/mods/types").ModProjection>
     installExamples(): Promise<void>
-    audit(threadId: string, before?: number): Promise<import("../shared/mods/types").ModAuditEntry[]>
-    reconcile(threadId: string, callId: string, resolution: "confirmed-success" | "confirmed-failure"): Promise<void>
+    audit(threadId: string, before?: number, expectedWorkspace?: string): Promise<import("../shared/mods/types").ModAuditEntry[]>
+    reconcile(threadId: string, callId: string, resolution: "confirmed-success" | "confirmed-failure", expectedWorkspace?: string): Promise<void>
     backup(): Promise<boolean>
     artifact(threadId: string, id: string): Promise<{ label: string; text: string }>
     saveArtifact(threadId: string, id: string): Promise<boolean>
@@ -1099,7 +1147,8 @@ interface CustomAPI {
       modelId?: string,
       agentMode?: "normal" | "coordinator" | "workflow",
       coordinatorInternalNotification?: boolean,
-      userMessageId?: string
+      userMessageId?: string,
+      composerSubmission?: import("../shared/mods/v2/composer-mentions").ComposerSubmission
     ) => () => void
     streamAgent: (
       threadId: string,
@@ -1109,7 +1158,8 @@ interface CustomAPI {
       modelId?: string,
       agentMode?: "normal" | "coordinator" | "workflow",
       coordinatorInternalNotification?: boolean,
-      userMessageId?: string
+      userMessageId?: string,
+      composerSubmission?: import("../shared/mods/v2/composer-mentions").ComposerSubmission
     ) => () => void
     interrupt: (
       threadId: string,
@@ -1140,8 +1190,8 @@ interface CustomAPI {
     cancel: (threadId: string, options?: { cancelWorkers?: boolean }) => Promise<void>
     queueCurrentRunMessage: (
       threadId: string,
-      message: { id: string; content: string; displayContent?: string }
-    ) => Promise<{ queued: boolean; reason?: string; message?: string }>
+      message: { id: string; content: string; displayContent?: string; composerSubmission?: import("../shared/mods/v2/composer-mentions").ComposerSubmission }
+    ) => Promise<{ queued: boolean; reason?: string; message?: string; visibleText?: string }>
     deleteCurrentRunQueuedMessage: (threadId: string, messageId: string) => Promise<void>
     reconcileCurrentRunQueuedMessages: (
       threadId: string,
@@ -2268,15 +2318,15 @@ interface CustomAPI {
       fileName: string,
       origin?: "market" | "local",
       version?: string,
-      requireMods?: boolean
-    ) => Promise<{ success: boolean; pluginName?: string; error?: string }>
-    installFromDir: (requireMods?: boolean) => Promise<{ success: boolean; pluginName?: string; error?: string }>
+      requireMods?: PluginInstallMode
+    ) => Promise<PluginInstallResult>
+    installFromDir: (requireMods?: PluginInstallMode) => Promise<PluginInstallResult>
     exportForMarket: (
       id: string,
       options?: { version?: string | null }
     ) => Promise<{ success: boolean; fileName?: string; buffer?: ArrayBuffer; error?: string }>
     delete: (id: string) => Promise<{ success: boolean; error?: string }>
-    setEnabled: (id: string, enabled: boolean) => Promise<void>
+    setEnabled: (id: string, enabled: boolean) => Promise<{ success: boolean; error?: string }>
     setOriginsBatch: (
       updates: Array<{ id: string; origin: "market" | "local" }>
     ) => Promise<{ success: boolean; error?: string }>
@@ -3007,12 +3057,15 @@ interface CustomAPI {
       genEventIds: string[]
     ) => Promise<{ success: boolean; data?: LocalGenAdoptionLines[]; error?: string }>
   }
+  windowPresentation?: WindowPresentationBridge
   appNotifications: {
     list: () => Promise<AppNotification[]>
     decide: (input: AppDecisionInput) => Promise<AppDecisionResult>
     onChanged: (callback: () => void) => () => void
   }
   harnessBoard: {
+    localProjects: import("../shared/project-runtime/platform-api").LocalProjectApi
+    legacyProjects: import("../shared/project-runtime/legacy-operations").LegacyProjectRuntimeApi
     catalogPage: (input: HarnessBoardCatalogPageInput) => Promise<HarnessBoardCatalogPageResult>
     cancelCatalogRequests: (
       scope?: "board" | "board-registry" | "board-sidebar" | "board-settings" | "chat-binding"

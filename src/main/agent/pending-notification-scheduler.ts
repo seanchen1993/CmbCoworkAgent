@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto"
+import { AsyncLocalStorage } from "node:async_hooks"
 import { WORKFLOW_NOTIFICATION_TURN_PROMPT } from "../../shared/checkpoint-transcript"
 import { COORDINATOR_NOTIFICATION_PROMPT } from "../../shared/internal-notification-turn"
 import {
@@ -117,6 +118,7 @@ const defaultDependencies: SchedulerDependencies = {
 
 export class PendingNotificationScheduler {
   private readonly dependencies: SchedulerDependencies
+  private readonly runInHostContext: ReturnType<typeof AsyncLocalStorage.snapshot>
   /** Threads with a check in flight, so concurrent asks collapse into one. */
   private readonly checking = new Set<string>()
   /**
@@ -142,6 +144,7 @@ export class PendingNotificationScheduler {
   private unsubscribeCoordinatorNotification: (() => void) | null = null
 
   constructor(overrides: Partial<SchedulerDependencies> = {}) {
+    this.runInHostContext = AsyncLocalStorage.snapshot()
     this.dependencies = { ...defaultDependencies, ...overrides }
   }
 
@@ -237,7 +240,11 @@ export class PendingNotificationScheduler {
    * idle — is a fresh reason to try, and clears the failure budget so a run of
    * bad luck cannot disable the summary for the life of the process.
    */
-  async check(
+  check(threadId: string, options: { retry?: boolean } = {}): Promise<PendingNotificationOutcome> {
+    return this.runInHostContext(() => this.checkInHostContext(threadId, options))
+  }
+
+  private async checkInHostContext(
     threadId: string,
     options: { retry?: boolean } = {}
   ): Promise<PendingNotificationOutcome> {

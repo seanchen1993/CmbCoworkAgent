@@ -8,6 +8,7 @@ import type { ResolvedModelConfig } from "../../models/registry"
 import { ModFunctionError } from "../../../shared/mods/v2/contracts"
 import {
   functionModelRequest,
+  FunctionModelProviderFailure,
   type FunctionModelRequest,
   type FunctionModelReply
 } from "./model-sdk"
@@ -15,6 +16,7 @@ import type { ModIdentity, ModObject } from "../../../shared/mods/types"
 import { withFunctionExecution } from "./execution-context"
 import { CompletionBudget, withCompletionBudget } from "./completion-budget"
 import { FunctionRegisteredTools } from "./registered-tools"
+import { independentPromptFrame } from "./model-prompt-frame"
 import type {
   FunctionModelForkReply,
   FunctionModelForkRequest,
@@ -133,6 +135,57 @@ it("records final selection and provider usage without storing prompts or host c
   })
   expect(JSON.stringify(audit)).not.toMatch(/private prompt|private-host-key/)
   expect(f.models.stats).toEqual({ pending: 0, scopes: 0 })
+})
+
+it("checks a captured Claw model policy before requests and again before publishing", async () => {
+  const f = fixture()
+  let valid = true
+  Object.assign(f.host, { captureModel: async () => () => {
+    if (!valid) throw new ModFunctionError("CLAW_MODEL_CONFIGURATION_CHANGED")
+  } })
+  f.host.invoke.mockImplementationOnce(async () => {
+    valid = false
+    return { text: "stale provider result", inputTokens: 1, outputTokens: 1 }
+  })
+  await expect(f.call()).rejects.toThrow("CLAW_MODEL_CONFIGURATION_CHANGED")
+  expect(f.host.publish).not.toHaveBeenCalled()
+  f.host.invoke.mockClear()
+  await expect(f.call()).rejects.toThrow("CLAW_MODEL_CONFIGURATION_CHANGED")
+  expect(f.host.invoke).not.toHaveBeenCalled()
+})
+
+it("keeps the captured startup guard active after its preparation frame and rejects a stale provider result", async () => {
+  const f = fixture()
+  let valid = true
+  Object.assign(f.host, { captureStartup: () => () => {
+    if (!valid) throw new ModFunctionError("MODS_CONFIG_SOURCE_CHANGED")
+  }, prepare: async (_config: unknown, request: FunctionModelRequest) => {
+    expect(independentPromptFrame()?.active).toBe(true)
+    expect(independentPromptFrame()?.request).toMatchObject({workspace:f.folder,threadId:"thread"})
+    return {input:{prompt:request.prompt},inputUpperBound:128,assertBudget:()=>{},
+      invoke: async () => {
+        expect(independentPromptFrame()).toBeUndefined()
+        valid=false
+        return {text:"stale provider result",inputTokens:1,outputTokens:1}
+      }}
+  } })
+  await expect(f.call()).rejects.toThrow("MODS_CONFIG_SOURCE_CHANGED")
+  expect(f.host.publish).not.toHaveBeenCalled()
+  expect(f.models.stats).toEqual({pending:0,scopes:0})
+})
+
+it("rejects startup invalidation during preparation before admission or provider invocation", async () => {
+  const f = fixture()
+  let valid = true
+  Object.assign(f.host, { captureStartup: () => () => {
+    if (!valid) throw new ModFunctionError("MODS_CONFIG_SOURCE_CHANGED")
+  }, prepare: async () => {
+    valid=false
+    return {input:{prompt:"prepared"},inputUpperBound:128,assertBudget:()=>{},invoke:f.host.invoke}
+  } })
+  await expect(f.call()).rejects.toThrow("MODS_CONFIG_SOURCE_CHANGED")
+  expect(f.host.admit).not.toHaveBeenCalled()
+  expect(f.host.invoke).not.toHaveBeenCalled()
 })
 
 it("keeps the persisted budget across service reload and does not call the provider after exhaustion", async () => {
@@ -523,4 +576,121 @@ it("rejects a fork whose captured runtime is replaced during output publication"
   ).rejects.toThrow("MODS_CALL_SCOPE_CHANGED")
   expect(snapshot.release).toHaveBeenCalledOnce()
   expect(f.store.audit(f.folder)[0]).toMatchObject({ status: "succeeded", publication: "blocked" })
+})
+
+
+it("publishes modern success with real usage while retaining unknown accounting and protected text", async () => {
+  const f = fixture()
+  f.host.invoke.mockResolvedValueOnce({ text: "provider answer", inputTokens: 20, outputTokens: 4,
+    cacheReadInputTokens: 8, cacheCreationInputTokens: 2, uncachedInputTokens: 10 })
+  expect(await f.models.completeResult(f.folder, "thread", f.grant,
+    { model: "chosen", prompt: "hi", timeoutMs: 321 }, new AbortController().signal)).toEqual({
+      isAnswered: true, text: "protected answer", usage: { input_tokens: 10, output_tokens: 4,
+        cache_read_input_tokens: 8, cache_creation_input_tokens: 2 } })
+  expect(f.host.invoke.mock.calls[0][1].timeoutMs).toBe(321)
+  f.host.invoke.mockResolvedValueOnce({ text: "ok" })
+  expect(await f.models.completeResult(f.folder, "thread", f.grant,
+    { model: "chosen", prompt: "hi" }, new AbortController().signal)).toMatchObject({
+      isAnswered: true, usage: { input_tokens: 0, output_tokens: 0, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 } })
+  expect(f.models.stats.pending).toBe(0)
+})
+
+it("modern model converts only tagged provider outcomes and never host rejection or revocation", async () => {
+  const f = fixture()
+  const call = () => f.models.completeResult(f.folder, "thread", f.grant,
+    { model: "chosen", prompt: "hi" }, new AbortController().signal)
+  f.host.invoke.mockRejectedValueOnce(new FunctionModelProviderFailure({ reason: "api-error", status: 429, error: "rate_limit" }))
+  expect(await call()).toMatchObject({ isAnswered: false, reason: "api-error", status: 429, error: "rate_limit" })
+  expect(f.host.publish).not.toHaveBeenCalled()
+  f.host.invoke.mockRejectedValueOnce(new FunctionModelProviderFailure({ reason: "aborted" }))
+  expect(await call()).toMatchObject({ isAnswered: false, reason: "aborted" })
+  f.host.invoke.mockResolvedValueOnce({ text: "" })
+  expect(await call()).toMatchObject({ isAnswered: false, reason: "empty-reply" })
+  f.host.admit.mockRejectedValueOnce(new ModFunctionError("POLICY_DENIED"))
+  await expect(call()).rejects.toThrow("POLICY_DENIED")
+  f.host.publish.mockRejectedValueOnce(new ModFunctionError("CONTENT_DENIED"))
+  await expect(call()).rejects.toThrow("CONTENT_DENIED")
+  f.host.invoke.mockImplementationOnce(async () => {
+    f.store.grant(f.folder, "function:demo", "different-digest", true)
+    throw new FunctionModelProviderFailure({ reason: "api-error", status: 500, error: "server_error" })
+  })
+  await expect(call()).rejects.toThrow()
+  expect(f.models.stats.pending).toBe(0)
+})
+
+it("modern fork reports a cold transcript without a provider call and rejects extended inputs", async () => {
+  const f = fixture()
+  const invokeFork = vi.fn(async () => ({ text: "answer" }))
+  Object.assign(f.host, { captureForkSnapshot: () => null, invokeFork })
+  expect(await f.models.forkResult(f.folder, "thread", f.grant, { prompt: "hi" }, new AbortController().signal))
+    .toEqual({ isAnswered: false, reason: "nothing-to-fork" })
+  expect(invokeFork).not.toHaveBeenCalled()
+  await expect(f.models.forkResult(f.folder, "thread", f.grant,
+    { prompt: "hi", maxTokens: 2 }, new AbortController().signal)).rejects.toThrow("MODS_MODEL_ARGUMENTS")
+  await expect(f.models.completeResult(f.folder, "thread", f.grant,
+    { model: "chosen", prompt: "hi", effort: "high" }, new AbortController().signal)).rejects.toThrow("MODS_MODEL_EFFORT_UNSUPPORTED")
+})
+
+
+it("never treats modern display zeros as known usage in a real completion budget or ledger", async () => {
+  const f = fixture()
+  f.host.invoke.mockResolvedValueOnce({ text: "unmetered" })
+  const record = vi.spyOn(f.store, "recordFunctionModelUsage")
+  const budget = new CompletionBudget(2000, 10000)
+  await expect(withCompletionBudget(budget, () => f.models.completeResult(f.folder, "thread", f.grant,
+    { model: "chosen", prompt: "hi" }, new AbortController().signal))).rejects.toThrow("MODS_COMPLETION_USAGE_UNAVAILABLE")
+  expect(record).toHaveBeenCalledWith(expect.any(String), undefined, undefined)
+  expect(f.host.publish).not.toHaveBeenCalled()
+  expect(() => budget.assert()).toThrow("MODS_COMPLETION_USAGE_UNAVAILABLE")
+  expect(f.store.audit(f.folder)[0]).toMatchObject({ status: "succeeded", publication: "blocked" })
+})
+
+it("modern warm forks protect text, preserve cached usage and release the snapshot on every outcome", async () => {
+  const f = fixture()
+  const release = vi.fn()
+  const snapshot: FunctionModelForkSnapshot = { model: "chosen", messages: [{ role: "user", text: "history" }], release }
+  const invokeFork = vi.fn(async () => ({ text: "provider fork", accounting: {
+    text: "provider fork", inputTokens: 20, outputTokens: 3, uncachedInputTokens: 8,
+    cacheReadInputTokens: 10, cacheCreationInputTokens: 2 } }))
+  Object.assign(f.host, { captureForkSnapshot: () => snapshot, invokeFork })
+  const call = () => f.models.forkResult(f.folder, "thread", f.grant, {prompt:"continue"}, new AbortController().signal)
+  expect(await call()).toEqual({isAnswered:true,text:"protected fork",usage:{input_tokens:8,output_tokens:3,
+    cache_read_input_tokens:10,cache_creation_input_tokens:2}})
+  expect(release).toHaveBeenCalledOnce()
+  f.host.publish.mockRejectedValueOnce(new ModFunctionError("CONTENT_DENIED"))
+  await expect(call()).rejects.toThrow("CONTENT_DENIED")
+  expect(release).toHaveBeenCalledTimes(2)
+  invokeFork.mockRejectedValueOnce(new FunctionModelProviderFailure({reason:"api-error",status:503,error:"server_error"}))
+  expect(await call()).toMatchObject({isAnswered:false,reason:"api-error",status:503})
+  expect(release).toHaveBeenCalledTimes(3)
+})
+
+
+it("budgets the whole prepared call before claiming and rejects recursive preparation", async () => {
+  const f = fixture()
+  const invoke = vi.fn(async () => ({ text: "prepared answer", inputTokens: 1, outputTokens: 1 }))
+  Object.assign(f.host, { prepare: async () => {
+    await expect(f.call()).rejects.toThrow("MODS_MODEL_COMPOSE_REENTRANT")
+    return { input: { messages: [{ role: "system", text: "expanded rules" }] },
+      inputUpperBound: 1200, assertBudget: vi.fn(), invoke }
+  } })
+  const budget = new CompletionBudget(1000, 10000)
+  await expect(withCompletionBudget(budget, () => f.call())).rejects.toThrow("MODS_COMPLETION_MODEL_BUDGET")
+  expect(invoke).not.toHaveBeenCalled()
+  expect(f.host.invoke).not.toHaveBeenCalled()
+  expect(f.store.audit(f.folder)).toEqual([])
+  expect(f.models.stats.pending).toBe(0)
+})
+
+it("uses the captured configured ref for a fork even when the public name is ambiguous", async () => {
+  const f = fixture()
+  const release = vi.fn()
+  Object.assign(f.host, {
+    captureForkSnapshot: () => ({ model: "gpt-4", modelRef: "custom:second-provider",
+      messages: [{ role: "user", text: "history" }], release }),
+    invokeFork: vi.fn(async () => ({ text: "fork result", usage: { input_tokens: 1, output_tokens: 1 } }))
+  })
+  await f.models.fork(f.folder, "thread", f.grant, { prompt: "question" }, new AbortController().signal)
+  expect(f.host.resolve).toHaveBeenCalledWith("custom:second-provider", f.folder, "thread")
+  expect(release).toHaveBeenCalledTimes(1)
 })

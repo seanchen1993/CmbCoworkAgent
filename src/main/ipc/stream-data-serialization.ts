@@ -1,3 +1,4 @@
+import { serializeWithNativePartialReceipt } from "../agent/native-partial-persistence"
 import {
   STREAM_MESSAGE_CONTENT_MODE_KEY,
   STREAM_MESSAGE_REASONING_MODE_KEY,
@@ -5,6 +6,10 @@ import {
   readStreamMessageWireMode,
   type StreamMessageWireMode
 } from "../../shared/stream-message-wire-mode"
+import { projectNativeConversationMessageForStream, serializeNativeConversationStreamData,
+  requiresFullNativeConversationValuesProjection, isPrivateNativeConversationStreamMessage,
+  privateNativeConversationStreamMessageRole, privateNativeConversationStreamLayout }
+  from "../agent/native-conversation-stream-projection"
 
 const WORKER_SNAPSHOT_INDEX_MESSAGE_KEY = "cmb_worker_snapshot_index"
 
@@ -58,6 +63,21 @@ interface StreamMessageShape {
   content: string
   reasoning: string
   hasToolCalls: boolean
+}
+
+type StreamMessageView = (message: unknown) => unknown
+
+function createStreamMessageView(): StreamMessageView {
+  // Views last for this synchronous serialization only. The final serializer still checks
+  // the actual message and sealed DB row; this map does not preserve authority across frames.
+  const views = new Map<unknown, unknown>()
+  return (message) => {
+    if (!views.has(message)) {
+      views.set(message, privateNativeConversationStreamLayout(message) ??
+        projectNativeConversationMessageForStream(message) ?? message)
+    }
+    return views.get(message)
+  }
 }
 
 interface StreamTextProjectionState {
@@ -209,7 +229,8 @@ export function serializedMessageClassName(message: unknown): string {
   return typeof last === "string" ? last : ""
 }
 
-function isHumanMessage(message: unknown): boolean {
+function isHumanMessage(message: unknown, view?: StreamMessageView): boolean {
+  message = view ? view(message) : message
   const record = asRecord(message)
   if (!record) return false
   const kwargs = asRecord(record.kwargs)
@@ -261,7 +282,8 @@ function messageReasoning(message: unknown): string | null {
   return typeof reasoning === "string" ? reasoning : null
 }
 
-function streamMessageShape(message: unknown): StreamMessageShape | null {
+function streamMessageShape(message: unknown, view?: StreamMessageView): StreamMessageShape | null {
+  message = view ? view(message) : message
   const record = asRecord(message)
   const values = messageRecord(message)
   if (!record || !values) return null
@@ -281,7 +303,8 @@ function streamMessageShape(message: unknown): StreamMessageShape | null {
   }
 }
 
-function hasUnsafeIncrementalBoundary(message: unknown): boolean {
+function hasUnsafeIncrementalBoundary(message: unknown, view?: StreamMessageView): boolean {
+  message = view ? view(message) : message
   const record = asRecord(message)
   const values = messageRecord(message)
   if (!record || !values) return true
@@ -295,7 +318,8 @@ function hasUnsafeIncrementalBoundary(message: unknown): boolean {
 
 function createStreamSerializationSnapshot(
   messages: unknown[],
-  currentTurnBoundary: number
+  currentTurnBoundary: number,
+  view: StreamMessageView
 ): StreamSerializationSnapshot {
   const lastIndex = messages.length - 1
   return {
@@ -305,7 +329,7 @@ function createStreamSerializationSnapshot(
     // detected. LangGraph's reducer keeps unchanged message objects immutable.
     messageReferences: messages.slice(currentTurnBoundary),
     tailMessage: lastIndex >= currentTurnBoundary ? messages[lastIndex] : undefined,
-    tail: lastIndex >= currentTurnBoundary ? streamMessageShape(messages[lastIndex]) : null
+    tail: lastIndex >= currentTurnBoundary ? streamMessageShape(messages[lastIndex], view) : null
   }
 }
 
@@ -323,7 +347,8 @@ function hasStableStreamPrefix(
   return true
 }
 
-function canSerializeTailOnly(previous: StreamSerializationSnapshot, messages: unknown[]): boolean {
+function canSerializeTailOnly(previous: StreamSerializationSnapshot, messages: unknown[],
+  view: StreamMessageView): boolean {
   if (
     messages.length !== previous.messageCount ||
     messages.length <= previous.currentTurnBoundary ||
@@ -331,7 +356,7 @@ function canSerializeTailOnly(previous: StreamSerializationSnapshot, messages: u
   ) {
     return false
   }
-  const tail = streamMessageShape(messages.at(-1))
+  const tail = streamMessageShape(messages.at(-1), view)
   return Boolean(
     tail &&
     previous.tail &&
@@ -346,7 +371,8 @@ function canSerializeTailOnly(previous: StreamSerializationSnapshot, messages: u
 
 function canSerializeAppendedSuffix(
   previous: StreamSerializationSnapshot,
-  messages: unknown[]
+  messages: unknown[],
+  view: StreamMessageView
 ): boolean {
   if (
     messages.length <= previous.messageCount ||
@@ -356,7 +382,7 @@ function canSerializeAppendedSuffix(
     return false
   }
   for (let index = previous.messageCount; index < messages.length; index += 1) {
-    if (isHumanMessage(messages[index]) || hasUnsafeIncrementalBoundary(messages[index]))
+    if (isHumanMessage(messages[index], view) || hasUnsafeIncrementalBoundary(messages[index], view))
       return false
   }
   return true
@@ -369,7 +395,8 @@ function canSerializeAppendedSuffix(
  */
 function projectStreamDataForSerialization(
   mode: string,
-  data: unknown
+  data: unknown,
+  view: StreamMessageView
 ): {
   data: unknown
   valuesMessageIndexOffset: number
@@ -384,7 +411,10 @@ function projectStreamDataForSerialization(
 
   let currentTurnBoundary = 0
   for (let index = messages.length - 1; index >= 0; index -= 1) {
-    if (isHumanMessage(messages[index])) {
+    // Only find the layout boundary here. Every scanned native, including the boundary,
+    // remains in the slice and receives its complete source/data seal in the serializer.
+    const role = privateNativeConversationStreamMessageRole(messages[index])
+    if (role === "user" || (role === undefined && isHumanMessage(messages[index], view))) {
       currentTurnBoundary = index
       break
     }
@@ -408,6 +438,9 @@ function projectMessageChunkForSerialization(
   snapshotEpoch: number
 ): unknown {
   if (!Array.isArray(data) || data.length === 0) return data
+  // The final native serializer already creates the canonical wire and performs its complete
+  // source/data/fresh-B seal. Do not create another unpublished wire with an independent seal.
+  if (isPrivateNativeConversationStreamMessage(data[0])) return data
   const sourceMessage = asRecord(data[0])
   if (!sourceMessage) return data
 
@@ -573,12 +606,13 @@ function projectMessageChunkForSerialization(
 }
 
 function serializeProjectedStreamData(
+  mode: string,
   data: unknown,
   valuesMessageIndexOffset: number,
   valuesSnapshotKind: SerializedStreamData["valuesSnapshotKind"]
 ): SerializedStreamData {
   return {
-    data: JSON.parse(JSON.stringify(data)),
+    data: serializeNativeConversationStreamData(mode, data),
     valuesMessageIndexOffset,
     valuesSnapshotKind
   }
@@ -590,8 +624,8 @@ function serializeProjectedStreamData(
  * the lifetime of the thread.
  */
 export function serializeStreamData(mode: string, data: unknown): SerializedStreamData {
-  const projected = projectStreamDataForSerialization(mode, data)
-  return serializeProjectedStreamData(projected.data, projected.valuesMessageIndexOffset, "full")
+  const projected = projectStreamDataForSerialization(mode, data, createStreamMessageView())
+  return serializeProjectedStreamData(mode, projected.data, projected.valuesMessageIndexOffset, "full")
 }
 
 /**
@@ -604,12 +638,15 @@ export function createStreamDataSerializer(
   options: StreamDataSerializerOptions = {}
 ): StreamDataSerializer {
   let previous: StreamSerializationSnapshot | undefined
+  let fullNativeValues = false
   let messageSnapshotEpoch = 0
   const messageProjectionScopes = new Map<string, StreamMessageProjectionScope>()
 
   return (mode, data) => {
+    const view = createStreamMessageView()
     if (mode === "messages" && options.projectMessageChunks !== false) {
-      return serializeProjectedStreamData(
+      return serializeWithNativePartialReceipt(data, () => serializeProjectedStreamData(
+        mode,
         projectMessageChunkForSerialization(
           data,
           messageProjectionScopes,
@@ -618,36 +655,39 @@ export function createStreamDataSerializer(
         ),
         0,
         "full"
-      )
+      ))
     }
     if (mode !== "values") {
-      return serializeProjectedStreamData(data, 0, "full")
+      return serializeProjectedStreamData(mode, data, 0, "full")
     }
 
     const state = asRecord(data)
     const messages = state?.messages
     if (!state || !Array.isArray(messages)) {
       previous = undefined
-      return serializeProjectedStreamData(data, 0, "full")
+      return serializeProjectedStreamData(mode, data, 0, "full")
     }
 
     let kind: SerializedStreamData["valuesSnapshotKind"] = "full"
     let messageIndexOffset = 0
     let currentTurnBoundary = 0
     let projectedMessages: unknown[] = messages
+    // Physical graph offsets include hidden native messages. Keep this run on complete current
+    // turn snapshots after one is observed, so visible array lengths never reinterpret offsets.
+    fullNativeValues ||= requiresFullNativeConversationValuesProjection(messages)
 
-    if (previous && canSerializeTailOnly(previous, messages)) {
+    if (!fullNativeValues && previous && canSerializeTailOnly(previous, messages, view)) {
       kind = "tail"
       currentTurnBoundary = previous.currentTurnBoundary
       messageIndexOffset = messages.length - 1
       projectedMessages = [messages[messages.length - 1]]
-    } else if (previous && canSerializeAppendedSuffix(previous, messages)) {
+    } else if (!fullNativeValues && previous && canSerializeAppendedSuffix(previous, messages, view)) {
       kind = "append"
       currentTurnBoundary = previous.currentTurnBoundary
       messageIndexOffset = previous.messageCount
       projectedMessages = messages.slice(previous.messageCount)
     } else {
-      const projected = projectStreamDataForSerialization(mode, data)
+      const projected = projectStreamDataForSerialization(mode, data, view)
       currentTurnBoundary = projected.currentTurnBoundary ?? 0
       messageIndexOffset = projected.valuesMessageIndexOffset
       projectedMessages =
@@ -656,11 +696,16 @@ export function createStreamDataSerializer(
           : messages
     }
 
+    // Snapshot discovery can invoke native source guards. Complete it before the final full
+    // serialization seal, then retain only the successful frame's private bookkeeping.
+    const nextSnapshot = fullNativeValues
+      ? undefined
+      : createStreamSerializationSnapshot(messages, currentTurnBoundary, view)
     const projectedState = { ...state, messages: projectedMessages }
-    const serialized = serializeProjectedStreamData(projectedState, messageIndexOffset, kind)
+    const serialized = serializeProjectedStreamData(mode, projectedState, messageIndexOffset, kind)
     // Advance only after successful serialization. A throwing getter/toJSON
     // must not poison provenance for the following frame.
-    previous = createStreamSerializationSnapshot(messages, currentTurnBoundary)
+    previous = nextSnapshot
     // Do not scan/rebuild values text. Invalidate each field lazily; an empty
     // messages array is authoritative too, whereas metadata-only values are not.
     messageSnapshotEpoch += 1

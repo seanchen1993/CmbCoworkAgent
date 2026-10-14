@@ -21,12 +21,13 @@ const questionSchema = z.object({
     .regex(/^[a-z][a-z0-9_]*$/)
     .describe("Stable identifier for mapping answers, snake_case."),
   question: z.string().min(1).max(500).describe("Single-sentence prompt shown to the user."),
+  multiSelect: z.boolean().optional().describe("Allow selecting several options together."),
   options: z
     .array(optionSchema)
     .min(2)
     .max(5)
     .describe(
-      "Provide 2-5 mutually exclusive choices. Put the recommended option first and suffix its label with '(Recommended)'. Do not include a free-form choice such as 'Other', 'I want to add more', or 'Custom answer'; the client adds a text entry automatically."
+      "Provide 2-5 choices, mutually exclusive unless multiSelect is true. Put the recommended option first and suffix its label with '(Recommended)'. Do not include a free-form choice such as 'Other', 'I want to add more', or 'Custom answer'; the client adds a text entry automatically."
     )
 })
 

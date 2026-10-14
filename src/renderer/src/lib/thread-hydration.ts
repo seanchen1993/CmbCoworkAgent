@@ -58,6 +58,7 @@ interface ConversationPresencePageSummary {
   hasVisibleMessages?: boolean
   legacyCheckpointMigrationStatus?: "migrating" | "complete" | null
   legacyMessageTimesPending?: boolean
+  canonicalCheckpointVerified?: boolean
 }
 
 export const THREAD_HISTORY_HYDRATION_MAX_AUTO_RETRIES = 6
@@ -157,10 +158,12 @@ export type ThreadHistoryHydrationRetryDisposition = "run" | "wait" | "cancel"
  */
 export function getThreadHistoryHydrationRetryDisposition(
   activeIntent: ThreadMessageWindowIntentKind | null,
-  hasHistoricalWindow: boolean
+  hasHistoricalWindow: boolean,
+  foregroundBusy = false
 ): ThreadHistoryHydrationRetryDisposition {
   if (activeIntent === "hydrate") return "wait"
   if (activeIntent !== null || hasHistoricalWindow) return "cancel"
+  if (foregroundBusy) return "wait"
   return "run"
 }
 
@@ -168,6 +171,7 @@ export function shouldBootstrapLegacyCheckpointTranscript(
   page: ConversationPresencePageSummary | null | undefined
 ): boolean {
   if (!page) return false
+  if (page.canonicalCheckpointVerified === true) return false
   // A visible durable row or goal sidecar proves only that the conversation is
   // non-empty; it does not prove that an older checkpoint prefix was copied.
   // The durable table becomes the full transcript authority only after the
@@ -180,7 +184,8 @@ export function shouldBootstrapLegacyCheckpointTranscript(
 export function shouldAwaitCheckpointConversationPresence(
   page: ConversationPresencePageSummary | null | undefined
 ): boolean {
-  return Boolean(page && page.legacyCheckpointMigrationStatus !== "complete")
+  return Boolean(page && !page.canonicalCheckpointVerified &&
+    page.legacyCheckpointMigrationStatus !== "complete")
 }
 
 export function shouldKeepMainTranscriptLoadingAfterPage(

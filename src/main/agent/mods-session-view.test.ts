@@ -53,7 +53,8 @@ it("observes real model/tool/final graph states and preserves completion recover
     updateFunctionSessionMessages: vi.fn((_authority, messages: readonly unknown[]) => {
       current = messages
     }),
-    updateFunctionSessionRequest: vi.fn()
+    updateFunctionSessionRequest: vi.fn(),
+    measureFunctionSession: vi.fn(async () => undefined)
   }
   const model = new ScriptedModel([
     new AIMessage({ content: "", response_metadata: { finish_reason: "stop" } }),
@@ -95,6 +96,7 @@ it("observes real model/tool/final graph states and preserves completion recover
     expect(current.some((message) => (message as BaseMessage).getType() === "tool")).toBe(true)
     expect(manager.bindFunctionSession).toHaveBeenCalledWith(authority, "actual-model", 32000)
     expect(manager.functionTurns.observe).toHaveBeenCalledTimes(3)
+    expect(manager.measureFunctionSession).toHaveBeenCalledExactlyOnceWith(authority, expect.any(AbortSignal))
     expect(manager.functionTurns.observe.mock.calls.map((call) => call.slice(0, 2))).toEqual([
       ["thread", "physical-run"],
       ["thread", "physical-run"],
@@ -132,7 +134,8 @@ it("observes the private compaction boundary through real graph middleware state
         observedState = state
       }
     ),
-    updateFunctionSessionRequest: vi.fn()
+    updateFunctionSessionRequest: vi.fn(),
+    measureFunctionSession: vi.fn(async () => undefined)
   }
   try {
     const agent = createAgent({
@@ -194,7 +197,8 @@ it("publishes the host context-source snapshot with each model request", async (
     functionTurns: { observe: vi.fn() },
     bindFunctionSession: vi.fn(),
     updateFunctionSessionMessages: vi.fn(),
-    updateFunctionSessionRequest: vi.fn()
+    updateFunctionSessionRequest: vi.fn(),
+    measureFunctionSession: vi.fn(async () => undefined)
   }
   const contextSources = {
     memoryFiles: [{ path: "/root/MEMORY.md", type: "memory", tokens: 2 }],
@@ -238,7 +242,8 @@ it("captures actual skill frontmatter and loaded memory from production middlewa
     functionTurns: { observe: vi.fn() },
     bindFunctionSession: vi.fn(),
     updateFunctionSessionMessages: vi.fn(),
-    updateFunctionSessionRequest: vi.fn()
+    updateFunctionSessionRequest: vi.fn(),
+    measureFunctionSession: vi.fn(async () => undefined)
   }
   try {
     await mkdir(join(root, "skills", "folder-name"), { recursive: true })

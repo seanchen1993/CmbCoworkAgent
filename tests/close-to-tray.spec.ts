@@ -182,9 +182,19 @@ describe("close behavior UI integration", () => {
     expect(mainProcess.includes("stopSchedulerAndWait(5_000)")).toBe(true)
     expect(mainProcess.includes("stopHeartbeatAndWait(5_000)")).toBe(true)
     expect(mainProcess.includes("builtinRobotManager.stop()")).toBe(true)
-    expect(mainProcess.indexOf("shutdownAllAgentTasks(5_000)")).toBeLessThan(
-      mainProcess.indexOf("await fireSessionEndAll(5_000")
-    )
+    const shutdown = mainProcess.indexOf("const shutdownResults = await Promise.allSettled([")
+    const classic = mainProcess.indexOf("const classic = () => fireSessionEndAll(5_000", shutdown)
+    const modsClassic = mainProcess.indexOf("await modsEnd.classic(classic)", classic)
+    const nativeClassic = mainProcess.indexOf("else await classic()", modsClassic)
+    const notify = mainProcess.indexOf("await modsEnd?.notify()", nativeClassic)
+    const finish = mainProcess.indexOf("modsEnd?.finish()", notify)
+    for (const position of [shutdown, classic, modsClassic, nativeClassic, notify, finish])
+      expect(position).toBeGreaterThanOrEqual(0)
+    expect(shutdown).toBeLessThan(classic)
+    expect(classic).toBeLessThan(modsClassic)
+    expect(modsClassic).toBeLessThan(nativeClassic)
+    expect(nativeClassic).toBeLessThan(notify)
+    expect(notify).toBeLessThan(finish)
   })
 
   it("blocks quit re-entry and rechecks work after an asynchronous warning", () => {

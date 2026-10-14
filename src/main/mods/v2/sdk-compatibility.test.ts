@@ -3,6 +3,11 @@ import { resolve } from "node:path"
 import { expect, it } from "vitest"
 import { FunctionGuestRuntime } from "./guest-runtime"
 import { SESSION_CAPABILITIES } from "./session"
+import { FUNCTION_SDK_METHODS } from "./sdk-capabilities"
+
+it("keeps the static SDK catalogue equal to actual built-in session exposure", () => {
+  expect([...FUNCTION_SDK_METHODS].sort()).toEqual([...new Set(SESSION_CAPABILITIES)].sort())
+})
 
 it("never presents an event-only adapter as a callable guest SDK method", async () => {
   const matrix = JSON.parse(

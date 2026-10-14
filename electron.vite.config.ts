@@ -30,6 +30,14 @@ function copyResources(): { name: string; closeBundle: () => void } {
       mirrorRequiredDirectorySync(srcSkills, destSkills)
       mirrorRequiredDirectorySync(resolve("resources/mods"), resolve("out/resources/mods"))
       copyFileSync(resolve("resources/mods-policy.json"), resolve("out/resources/mods-policy.json"))
+      // Authoring checks use a fixed ES-only library set even in packaged builds without dev deps.
+      const authoringLibs = resolve("out/resources/mods-authoring/typescript")
+      mkdirSync(authoringLibs, { recursive: true })
+      copyFileSync(resolve("node_modules/typescript/LICENSE.txt"), resolve(authoringLibs, "LICENSE.txt"))
+      for (const name of readdirSync(resolve("node_modules/typescript/lib"))) {
+        if (/^lib\.(?:es[\w.]*|decorators(?:\.legacy)?)\.d\.ts$/.test(name))
+          copyFileSync(resolve("node_modules/typescript/lib", name), resolve(authoringLibs, name))
+      }
 
       // Playwright vendored 录制器生成文件在主进程 bundle 中仍通过
       // require("./generated/*.js") 加载，因此这里把源码副本同步到
@@ -89,6 +97,11 @@ export default defineConfig({
   main: {
     // Bundle all dependencies into the main process
     build: {
+      // These parser entry points are ESM-only. Keep their real default plugins in the
+      // CJS bundle instead of passing require(ESM) namespaces to unified.use().
+      externalizeDeps: {
+        exclude: ["unified", "remark-parse", "remark-gfm", "remark-rehype"]
+      },
       lib: {
         entry: {
           index: "src/main/index.ts",
@@ -98,6 +111,7 @@ export default defineConfig({
           "mod-host": "src/main/mods/host-entry.ts",
           "function-mod-host": "src/main/mods/v2/host-entry.ts",
           "mods-cli": "src/main/mods/devtools/cli-entry.ts",
+          "mods-authoring-preflight": "src/main/mods/devtools/authoring-preflight-entry.ts",
           // Test-only exports share the production module instances. Absent in normal builds.
           ...(process.env.CMB_MODS_E2E === "1" ? { "mods-e2e": "tests/support/mods-e2e-entry.ts" } : {})
         },

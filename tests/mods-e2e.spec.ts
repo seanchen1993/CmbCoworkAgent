@@ -1,14 +1,37 @@
 import { verifyDesktopLatencyDiagnostics } from "./support/mods-desktop-latency-e2e"
+import { openModsResults } from "./support/mods-sidebar-navigation"
 import { verifyClientBusy } from "./support/mods-client-busy-e2e"
 import { verifyBase64 } from "./support/mods-base64-e2e"
+import { verifyEncoding } from "./support/mods-encoding-e2e"
+import { verifyUrl } from "./support/mods-url-e2e"
+import { verifyStandardGlobals } from "./support/mods-standard-globals-e2e"
+import { verifyResources } from "./support/mods-resources-e2e"
+import { verifyCompatibility } from "./support/mods-compatibility-e2e"
+import { verifyNamedState } from "./support/mods-named-state-e2e"
 import { verifyGuestCodegen } from "./support/mods-guest-codegen-e2e"
 import { verifyPublicJsx } from "./support/mods-public-jsx-e2e"
 import { verifyUiNotification } from "./support/mods-ui-notification-e2e"
 import { verifyClientFocus } from "./support/mods-client-focus-e2e"
+import { verifyClientFault } from "./support/mods-client-fault-e2e"
+import { verifyLinkFallback } from "./support/mods-link-fallback-e2e"
+import { verifyHoldToasts } from "./support/mods-hold-toasts-e2e"
+import { verifySiteClients } from "./support/mods-site-clients-e2e"
+import { verifyPluginPrompt } from "./support/mods-plugin-prompt-e2e"
+import { verifyNativeEngine } from "./support/mods-native-engine-e2e"
+import { verifyUiResolve } from "./support/mods-ui-resolve-e2e"
+import { verifyMarkdown } from "./support/mods-markdown-e2e"
+import { verifySessionAppend } from "./support/mods-session-append-e2e"
+import { readNativeAppendEchoConflicts, verifyNativeAppend } from "./support/mods-native-append-e2e"
+import { verifySessionAppendShared } from "./support/mods-session-append-shared-e2e"
+import { withModsMainCpuProfile } from "./support/mods-main-cpu-profile-diagnostic"
+import { attemptModsE2eCleanup, runModsE2eWithFailures } from "./support/mods-e2e-failures"
+import { verifySessionAppendFork } from "./support/mods-session-append-fork-e2e"
 import { verifyUiInvalidate } from "./support/mods-ui-invalidate-e2e"
 import { verifyAgentList } from "./support/mods-agent-list-e2e"
+import { verifyAgentSpawn } from "./support/mods-agent-spawn-e2e"
 import { verifyFileWrite } from "./support/mods-file-write-e2e"
 import { verifyFileMetadata } from "./support/mods-file-metadata-e2e"
+import { verifyModelHttp284 } from "./support/mods-model-http-284-e2e"
 import { verifyFileReadOptions } from "./support/mods-file-read-options-e2e"
 import { verifyPaneFocusLifecycle } from "./support/mods-pane-focus-lifecycle-e2e"
 import { verifyBackgroundTimeout } from "./support/mods-background-timeout-e2e"
@@ -20,6 +43,20 @@ import { verifyStopFailure } from "./support/mods-stop-failure-e2e"
 import { verifyStopFeedback } from "./support/mods-stop-feedback-e2e"
 import { verifySessionTitle } from "./support/mods-session-title-e2e"
 import { verifyPromptExpansion } from "./support/mods-prompt-expansion-e2e"
+import { verifyPresentation } from "./support/mods-presentation-e2e"
+import { verifyTaskModelComposition } from "./support/mods-task-model-e2e"
+import { verifyContinuity } from "./support/mods-continuity-e2e"
+import { verifyPromptContext } from "./support/mods-prompt-context-e2e"
+import { verifyPromptEdit } from "./support/mods-prompt-edit-e2e"
+import { verifyDesktopActions } from "./support/mods-desktop-actions-e2e"
+import { verifySessionMeasure } from "./support/mods-session-measure-e2e"
+import { verifyConfiguration } from "./support/mods-config-e2e"
+import { verifySensitiveConfiguration } from "./support/mods-sensitive-config-e2e"
+import { verifyStartupModel } from "./support/mods-startup-model-e2e"
+import { verifyStreamBudget } from "./support/mods-stream-budget-e2e"
+import { verifySharedClock } from "./support/mods-shared-clock-e2e"
+import { verifySessionEnd } from "./support/mods-session-end-e2e"
+import { verifyBuiltinContextMeter } from "./support/mods-builtin-context-meter-e2e"
 import { verifyInstructionsLoaded } from "./support/mods-instructions-loaded-e2e"
 /** Real Electron, production IPC/React, SQLite, QuickJS utility process and LocalSandbox.
  * Tool probes use the real ingress; model scenarios use a local HTTP producer and real agent loop.
@@ -40,6 +77,8 @@ import { createRequire } from "node:module"
 import { _electron, type ElectronApplication, type Page } from "playwright"
 import { startModsModelServer } from "./support/mods-model-server"
 import { verifyPackagedFunctions } from "./support/mods-packaged-functions"
+import { verifyPackagedRuntime } from "./support/mods-packaged-runtime"
+import { createModsCoreLauncher } from "./support/mods-core-packaged-launch"
 import { verifyFunctionSites } from "./support/mods-function-sites-e2e"
 import { verifyCompactionHooks } from "./support/mods-compaction-e2e"
 import { verifyStatusSites } from "./support/mods-status-sites-e2e"
@@ -54,6 +93,11 @@ import { verifyQuestionSite } from "./support/mods-question-site-e2e"
 import { verifyUiAsk } from "./support/mods-ui-ask-e2e"
 import { verifyUiLog } from "./support/mods-ui-log-e2e"
 import { verifyUiFeedback } from "./support/mods-ui-feedback-e2e"
+import { verifyCodeLong } from "./support/mods-code-long-e2e"
+import { verifyThemeColors } from "./support/mods-theme-color-e2e"
+import { verifyPromptMention } from "./support/mods-prompt-mention-e2e"
+import { verifyPendingMentionReload } from "./support/mods-pending-mention-reload-e2e"
+import { verifyGuideBoundaries } from "./support/mods-guide-boundary-e2e"
 import { verifyToolSites } from "./support/mods-tool-sites-e2e"
 import AdmZip from "adm-zip"
 
@@ -65,15 +109,45 @@ const binary = packagedDir
   : (localRequire("electron") as string)
 const isolated = mkdtempSync(join(tmpdir(), "cmb-mods-e2e-"))
 const requestedFocus = process.env.CMB_MODS_E2E_FOCUS ?? ""
+const packagedFocuses = new Set(["session-append-shared", "ui-ask", "continuity", "task-model-288"])
 const focus = [
+  "config",
+  "sensitive-config",
+  "startup-model",
+  "hook-budget",
+  "stream-budget",
+  "shared-clock",
+  "session-end",
+  "session-measure",
+  "desktop-actions",
+  "prompt-edit",
+  "prompt-context",
+  "continuity",
+  "task-model-288",
+  "builtin-context-meter",
+  "presentation",
+  "model-http-284",
   "client-busy",
   "desktop-latency",
   "guest-codegen",
   "public-jsx",
   "ui-notification",
   "client-focus",
+  "client-fault",
+  "link-fallback",
+  "hold-toasts",
+  "site-clients",
+  "plugin-prompt",
+  "native-engine",
+  "ui-resolve",
+  "markdown",
+  "session-append",
+  "native-append",
+  "session-append-shared",
+  "session-append-fork",
   "ui-invalidate",
   "agent-list",
+  "agent-spawn",
   "file-metadata",
   "file-read-options",
   "pane-focus-lifecycle",
@@ -90,8 +164,20 @@ const focus = [
   "command-output",
   "tool-sites",
   "ui-feedback",
+  "code-long",
+  "theme-colors",
+  "prompt-mention",
+  "prompt-mention-workspace-off",
+  "pending-mention-reload",
+  "guide-current-run",
   "classic-output",
   "base64",
+  "encoding",
+  "url",
+  "standard-globals",
+  "resources",
+  "compatibility",
+  "named-state",
   "completion-freshness",
   "ui-log",
   "ui-ask",
@@ -105,6 +191,8 @@ const focus = [
   "stop-failure"
 ].includes(requestedFocus)
   ? requestedFocus : undefined
+if (packagedDir !== undefined && requestedFocus && !packagedFocuses.has(requestedFocus))
+  throw Error("MODS_PACKAGED_FOCUS_UNSUPPORTED")
 const artifacts = process.env.CMB_MODS_E2E_ARTIFACTS ?? join(
   root, "output/mods-validation",
   packagedDir ? "packaged-e2e" : focus ? `e2e-${focus}` : "e2e"
@@ -151,6 +239,10 @@ Object.assign(env, {
   HTTPS_PROXY: "http://127.0.0.1:9",
   NO_PROXY: "127.0.0.1,localhost"
 })
+const launchPackaged =
+  packagedDir === undefined
+    ? undefined
+    : createModsCoreLauncher(root, isolated, env, artifacts)
 const checks: string[] = []
 const startedAt = Date.now()
 const timings: Record<string, unknown> = {}
@@ -169,7 +261,7 @@ async function until(check: () => Promise<boolean>, label: string): Promise<void
   }
   throw Error(`Timeout: ${label}`)
 }
-async function main(): Promise<void> {
+async function runMain(failures: unknown[]): Promise<void> {
   const functionalDeadline = !focus && !packagedDir ? 1_200_000 : 900_000
   // The full suite combines dozens of installed projects and lifecycle scenarios.
   // Individual waits, packaged checks and formal performance/soak deadlines remain independent.
@@ -186,16 +278,18 @@ async function main(): Promise<void> {
   )
   try {
     console.log("STEP launch")
-    app = await _electron.launch({
-      executablePath: join(root, "tests/support/electron-launcher.cmd"),
-      args: [
-        ...(packagedDir ? [] : [process.env.CMB_MODS_E2E_APP_DIR ?? join(root, "out/main/index.js")]),
-        `--user-data-dir=${join(isolated, "electron")}`
-      ],
-      cwd: root,
-      env,
-      timeout: 60_000
-    })
+    app = launchPackaged
+      ? await launchPackaged(60_000)
+      : await _electron.launch({
+          executablePath: join(root, "tests/support/electron-launcher.cmd"),
+          args: [
+            ...(packagedDir ? [] : [process.env.CMB_MODS_E2E_APP_DIR ?? join(root, "out/main/index.js")]),
+            `--user-data-dir=${join(isolated, "electron")}`
+          ],
+          cwd: root,
+          env,
+          timeout: 60_000
+        })
     // Match existing Electron suites: prevent corporate SSO navigation in an
     // isolated offline test profile. Mods IPC and runtime remain production code.
     // Production registers its IPC handlers before creating the main window.
@@ -217,11 +311,7 @@ async function main(): Promise<void> {
     page!.setDefaultTimeout(15_000)
     console.log("STEP preload ready")
     assert.equal(await page!.evaluate(() => window.api.mods.globalEnabled()), false)
-    await assert.rejects(
-      page!.evaluate(() => window.api.mods.configureGlobal(true)),
-      /MODS_FUNCTION_LOCKED/
-    )
-    await page!.evaluate(() => window.api.mods.unlockFunction("admin123456"))
+    assert.equal(await page!.evaluate(() => window.api.mods.functionUnlocked()), true)
     await page!.evaluate(() => window.api.mods.configureGlobal(true))
     assert.equal(await page!.evaluate(() => window.api.mods.globalEnabled()), true)
     pass("Mods application switch defaults to off and requires explicit opt-in")
@@ -237,7 +327,7 @@ async function main(): Promise<void> {
       await window.api.workspace.set(id, workspace)
       return id
     }, workspace)
-    if (focus && !packagedDir) {
+    if (focus && (!packagedDir || packagedFocuses.has(focus))) {
       if (focus === "desktop-latency") {
         timings.scope = "Trusted DOM measurement regression; not guest or business acceptance"
         await page!.reload()
@@ -275,7 +365,73 @@ async function main(): Promise<void> {
         })
         await window.api.models.setDefault("custom:mods-model-fixture")
       }, modelServer.url)
-      timings.scope = "Focused site Electron regression; not the full integrated suite"
+      timings.scope = packagedDir
+        ? "Production package focused core regression; isolated offline profile, original checks"
+        : "Focused site Electron regression; not the full integrated suite"
+      if (focus === "prompt-edit") {
+        await verifyPromptEdit(page!, workspace, artifacts, until, pass)
+        return
+      }
+      if (focus === "desktop-actions") {
+        await verifyDesktopActions(app!, page!, workspace, artifacts, until, pass)
+        return
+      }
+      if (focus === "session-measure") {
+        await verifySessionMeasure(page!, workspace, artifacts, until, pass)
+        return
+      }
+      if (focus === "config") {
+        await verifyConfiguration(page!, workspace, artifacts, until, pass)
+        return
+      }
+      if (focus === "sensitive-config") {
+        await verifySensitiveConfiguration(app!, page!, workspace, join(isolated, "data/mods-control.sqlite"), artifacts, until, pass)
+        return
+      }
+      if (focus === "startup-model") {
+        await verifyStartupModel(page!, workspace, artifacts, until, pass)
+        return
+      }
+      if (focus === "hook-budget") {
+        await verifyStartupModel(page!, workspace, artifacts, until, pass, 11200)
+        return
+      }
+      if (focus === "stream-budget") {
+        await verifyStreamBudget(page!, workspace, artifacts, until, pass)
+        return
+      }
+      if (focus === "shared-clock") {
+        await verifySharedClock(app!, workspace, artifacts, pass)
+        return
+      }
+      if (focus === "session-end") {
+        await verifySessionEnd(app!, page!, workspace, join(isolated, "data/mods-control.sqlite"), artifacts, until, pass)
+        return
+      }
+      if (focus === "prompt-context") {
+        await verifyPromptContext(page!, workspace, artifacts, until, pass)
+        return
+      }
+      if (focus === "continuity") {
+        await verifyContinuity(page!, workspace, artifacts, until, pass)
+        return
+      }
+      if (focus === "task-model-288") {
+        await verifyTaskModelComposition(page!, workspace, artifacts, until, pass)
+        return
+      }
+      if (focus === "presentation") {
+        await verifyPresentation(page!, workspace, artifacts, modelServer.requests, until, pass)
+        return
+      }
+      if (focus === "builtin-context-meter") {
+        await verifyBuiltinContextMeter(page!, workspace, artifacts, modelServer.requests, until, pass)
+        return
+      }
+      if (focus === "model-http-284") {
+        await verifyModelHttp284(app!, page!, workspace, artifacts, until, pass)
+        return
+      }
       if (focus === "file-read-options") {
         await verifyFileReadOptions(page!, workspace, artifacts, modelServer.requests, until, pass)
         return
@@ -284,7 +440,19 @@ async function main(): Promise<void> {
         await verifyPaneFocusLifecycle(page!, until, pass)
         return
       }
-      if (focus === "base64") {
+      if (focus === "named-state") {
+        await verifyNamedState(page!, root, workspace, artifacts, until, pass)
+      } else if (focus === "encoding") {
+        await verifyEncoding(page!, workspace, artifacts, until, pass)
+      } else if (focus === "url") {
+        await verifyUrl(page!, workspace, artifacts, until, pass)
+      } else if (focus === "standard-globals") {
+        await verifyStandardGlobals(page!, workspace, artifacts, until, pass)
+      } else if (focus === "resources") {
+        await verifyResources(page!, workspace, artifacts, until, pass, app!)
+      } else if (focus === "compatibility") {
+        await verifyCompatibility(page!, workspace, artifacts, pass)
+      } else if (focus === "base64") {
         await verifyBase64(page!, workspace, artifacts, until, pass)
       } else if (focus === "client-busy") {
         await verifyClientBusy(page!, workspace, artifacts, until, pass)
@@ -296,10 +464,51 @@ async function main(): Promise<void> {
         await verifyUiNotification(page!, workspace, artifacts, until, pass)
       } else if (focus === "client-focus") {
         await verifyClientFocus(page!, workspace, artifacts, modelServer.requests, until, pass)
+      } else if (focus === "client-fault") {
+        await verifyClientFault(page!, workspace, artifacts, modelServer.requests, until, pass)
+      } else if (focus === "link-fallback") {
+        await verifyLinkFallback(page!, workspace, artifacts, modelServer.requests, until, pass)
+      } else if (focus === "hold-toasts") {
+        await verifyHoldToasts(app!, page!, workspace, artifacts, modelServer.requests, until, pass)
+      } else if (focus === "site-clients") {
+        await verifySiteClients(app!, page!, workspace, artifacts, modelServer.requests, until, pass)
+      } else if (focus === "plugin-prompt") {
+        await verifyPluginPrompt(page!, workspace, artifacts, until, pass)
+      } else if (focus === "native-engine") {
+        await verifyNativeEngine(app!, page!, workspace, artifacts, modelServer.requests, until, pass)
+      } else if (focus === "ui-resolve") {
+        await verifyUiResolve(app!, page!, workspace, artifacts, until, pass)
+      } else if (focus === "markdown") {
+        await verifyMarkdown(page!, workspace, artifacts, until, pass)
+      } else if (focus === "session-append") {
+        await verifySessionAppend(page!, workspace, artifacts, until, pass)
+      } else if (focus === "native-append") {
+        await verifyNativeAppend(app!, page!, workspace, artifacts, until, pass,
+          join(isolated, "data/logs/main.log"))
+      } else if (focus === "session-append-shared") {
+        if (packagedDir)
+          timings.scope = "Production package Shared regression without a private lifecycle observer"
+        await withModsMainCpuProfile(app!, artifacts, () =>
+          verifySessionAppendShared(
+            page!,
+            workspace,
+            join(isolated, "data/cmbcoworkagent.sqlite"),
+            artifacts,
+            until,
+            pass,
+            app!,
+            packagedDir === undefined
+          )
+        )
+      } else if (focus === "session-append-fork") {
+        await verifySessionAppendFork(page!, workspace,
+          join(isolated, "data/cmbcoworkagent.sqlite"), artifacts, until, pass)
       } else if (focus === "ui-invalidate") {
         await verifyUiInvalidate(page!, workspace, artifacts, until, pass)
       } else if (focus === "agent-list") {
         await verifyAgentList(page!, workspace, artifacts, modelServer.requests, until, pass)
+      } else if (focus === "agent-spawn") {
+        await verifyAgentSpawn(app!, page!, workspace, artifacts, modelServer.requests, until, pass)
       } else if (focus === "file-write") {
         await verifyFileWrite(app!, page!, workspace, artifacts, modelServer.requests, until, pass)
       } else if (focus === "file-metadata") {
@@ -344,6 +553,22 @@ async function main(): Promise<void> {
         await verifyClassicOutput(page!, root, workspace, artifacts, modelServer.requests, until, pass, app!, modelServer.closedStalls)
       else if (focus === "ui-feedback")
         await verifyUiFeedback(page!, root, workspace, artifacts, until, pass)
+      else if (focus === "code-long")
+        await verifyCodeLong(page!, workspace, artifacts, modelServer.requests, until, pass)
+      else if (focus === "theme-colors")
+        await verifyThemeColors(page!, workspace, artifacts, modelServer.requests, until, pass)
+      else if (focus === "prompt-mention")
+        await verifyPromptMention(app!, page!, workspace, artifacts, until, pass,
+          join(isolated, "data/logs/main.log"))
+      else if (focus === "prompt-mention-workspace-off")
+        await verifyPromptMention(app!, page!, workspace, artifacts, until, pass,
+          join(isolated, "data/logs/main.log"), "workspace")
+      else if (focus === "pending-mention-reload")
+        await verifyPendingMentionReload(app!, page!, workspace, artifacts, until, pass,
+          join(isolated, "data/logs/main.log"))
+      else if (focus === "guide-current-run")
+        await verifyGuideBoundaries(app!, page!, workspace, artifacts, until, pass,
+          join(isolated, "data/logs/main.log"))
       else if (focus === "tool-sites")
         await verifyToolSites(page!, root, workspace, artifacts, modelServer.requests, until, pass)
       else if (focus === "command-output")
@@ -407,6 +632,7 @@ async function main(): Promise<void> {
       })
       await page!.reload({ waitUntil: "domcontentloaded" })
       await page!.getByText("Mods E2E", { exact: true }).first().click()
+      await openModsResults(page!)
       await page!.locator("textarea.composer-textarea").fill("/mod project-quality:verify {}")
       await page!.locator("textarea.composer-textarea").press("Enter")
       await until(
@@ -445,6 +671,32 @@ async function main(): Promise<void> {
         "packaged cold session executes a real approved command and previews/exports its report without a model or test bridge"
       )
       await verifyPackagedFunctions(page!, root, threadId, artifacts, until, pass)
+      const originalProject = await page!.evaluate((id) => window.api.mods.status(id), threadId)
+      const originalMods = originalProject.mods.filter((mod) => mod.state === "ready")
+      const originalFunctions = originalProject.functionMods!.filter((mod) => mod.state === "ready")
+      assert(originalMods.length > 0)
+      assert(originalFunctions.length > 0)
+      await verifyPackagedRuntime(app, page!, workspace, artifacts, until, pass)
+      const originalThread = page!.getByText("Mods E2E", { exact: true })
+      assert.equal(await originalThread.count(), 1)
+      await originalThread.click()
+      const restoredProject = await page!.evaluate((id) => window.api.mods.status(id), threadId)
+      assert.equal(restoredProject.workspace, originalProject.workspace)
+      assert.equal(restoredProject.globalEnabled, originalProject.globalEnabled)
+      assert.equal(restoredProject.enabled, originalProject.enabled)
+      assert.equal(restoredProject.outputPolicy, originalProject.outputPolicy)
+      for (const mod of originalMods) {
+        const restored = restoredProject.mods.find((entry) => entry.pluginId === mod.pluginId)
+        assert(restored)
+        assert.equal(restored.digest, mod.digest)
+        assert.equal(restored.state, "ready")
+      }
+      for (const mod of originalFunctions) {
+        const restored = restoredProject.functionMods!.find((entry) => entry.pluginId === mod.pluginId)
+        assert(restored)
+        assert.equal(restored.digest, mod.digest)
+        assert.equal(restored.state, "ready")
+      }
       await page!.getByRole("button", { name: "自定义设置", exact: true }).click()
       await page!.getByRole("button", { name: "Function Mods", exact: true }).click()
       await page!.locator("[data-mods-settings]").waitFor()
@@ -568,6 +820,7 @@ async function main(): Promise<void> {
     assert(publishedCards.some((card) => card.modId === "project-quality"))
     await page!.reload({ waitUntil: "domcontentloaded" })
     await page!.getByText("Mods E2E", { exact: true }).first().click()
+    await openModsResults(page!)
     const card = page!.locator('[data-mod-card="project-quality"]').first()
     await card.waitFor({ timeout: 30_000 })
     await card.getByRole("button", { name: "运行项目测试" }).click()
@@ -590,6 +843,7 @@ async function main(): Promise<void> {
     await page!.screenshot({ path: join(artifacts, "card-command.png") })
     await page!.reload({ waitUntil: "domcontentloaded" })
     await page!.getByText("Mods E2E", { exact: true }).first().click()
+    await openModsResults(page!)
     await page!.locator('[data-mod-card="project-quality"]').first().waitFor()
     assert(
       await page!
@@ -613,6 +867,7 @@ async function main(): Promise<void> {
     await page!.getByText("project-quality:verify", { exact: true }).first().waitFor()
     await composer.fill("/mod project-quality:verify {}")
     await composer.press("Enter")
+    await page!.getByRole("button", { name: "插件命令执行中 · 查看", exact: true }).click()
     await page!.locator('[data-mod-job-state="queued"]').waitFor()
     assert.equal(readFileSync(join(workspace, "verified.txt"), "utf8"), "once\n")
     await app.evaluate(
@@ -741,6 +996,7 @@ async function main(): Promise<void> {
     assert.equal(readFileSync(join(workspace, "verified.txt"), "utf8"), "once\nonce\nonce\n")
     await page!.screenshot({ path: join(artifacts, "cold-command.png") })
     await page!.getByText("Mods E2E", { exact: true }).first().click()
+    await openModsResults(page!)
     pass(
       "fresh project session runs native Mods commands with inherited sandbox settings and explicit approval"
     )
@@ -842,6 +1098,7 @@ async function main(): Promise<void> {
     await page!.screenshot({ path: join(artifacts, "function-grant.png") })
     await page!.getByRole("button", { name: "返回应用", exact: true }).click()
     await page!.getByText("Mods E2E", { exact: true }).first().click()
+    await openModsResults(page!)
     const functionComposer = page!.locator("textarea.composer-textarea")
     await functionComposer.fill("/claw")
     await page!.getByText("claw-info", { exact: true }).first().waitFor()
@@ -886,6 +1143,7 @@ async function main(): Promise<void> {
     const functionResult = page!
       .locator("[data-mod-jobs] pre")
       .filter({ hasText: "本次会话查询：2" })
+    await openModsResults(page!)
     await functionResult.waitFor({ state: "visible" })
     await functionResult.scrollIntoViewIfNeeded()
     await page!.screenshot({ path: join(artifacts, "function-command.png") })
@@ -1158,6 +1416,7 @@ async function main(): Promise<void> {
       "cold function SDK read rebinds expired command context"
     )
     await page!.getByText("Mods E2E", { exact: true }).first().click()
+    await openModsResults(page!)
     pass(
       "function SDK creates and refreshes native tool context in a cold session with no model turn"
     )
@@ -1193,6 +1452,7 @@ async function main(): Promise<void> {
     )
     await page!.reload({ waitUntil: "domcontentloaded" })
     await page!.getByText("Mods E2E", { exact: true }).first().click()
+    await openModsResults(page!)
     const lifecycleComposer = page!.locator("textarea.composer-textarea")
     await until(async () => (await lifecycleComposer.count()) > 0 && await lifecycleComposer.isEnabled(), "lifecycle composer ready")
     const lifecycleBefore = modelServer.requests.length
@@ -1275,6 +1535,7 @@ async function main(): Promise<void> {
     }
     await page!.reload({ waitUntil: "domcontentloaded" })
     await page!.getByText("Mods E2E", { exact: true }).first().click()
+    await openModsResults(page!)
     const nounComposer = page!.locator("textarea.composer-textarea")
     const nounRequestsBefore = modelServer.requests.length
     await nounComposer.fill("/")
@@ -1334,6 +1595,7 @@ async function main(): Promise<void> {
     await page!.evaluate(() => window.api.mods.configureGlobal(true))
     await page!.reload({ waitUntil: "domcontentloaded" })
     await page!.getByText("Mods E2E", { exact: true }).first().click()
+    await openModsResults(page!)
     const restoredNounDescriptor = (
       await page!.evaluate((id) => window.api.mods.commands(id), threadId)
     ).find((command) => command.command === "noun-identity")!
@@ -1391,6 +1653,7 @@ async function main(): Promise<void> {
     )
     await page!.reload({ waitUntil: "domcontentloaded" })
     await page!.getByText("Mods E2E", { exact: true }).first().click()
+    await openModsResults(page!)
     await nounComposer.fill("/")
     await page!.getByText("code-pane", { exact: true }).first().waitFor()
     await nounComposer.fill("/code-pane ")
@@ -1432,6 +1695,7 @@ async function main(): Promise<void> {
     await page!.reload({ waitUntil: "domcontentloaded" })
     await page!.bringToFront()
     await page!.getByText("Mods E2E", { exact: true }).first().click()
+    await openModsResults(page!)
     await nounComposer.fill("/")
     await page!.getByText("focus-board", { exact: true }).first().waitFor()
     await nounComposer.fill("/focus-board ")
@@ -2668,11 +2932,12 @@ async function main(): Promise<void> {
     const childReply = childRequests.find(
       (request) =>
         request.messages.at(-1)?.role === "tool" &&
-        String(request.messages.at(-1)?.content).includes('"agentId":"mods-child-task"')
+        String(request.messages.at(-1)?.content).includes('"agentId":"mod-task:')
     )
     assert.ok(childReply, "real child model receives its registered-tool result")
     const childValue = JSON.parse(String(childReply.messages.at(-1)!.content))
-    assert.equal(childValue.agentId, "mods-child-task")
+    assert.match(childValue.agentId, /^mod-task:[0-9a-f-]{36}$/)
+    assert.notEqual(childValue.agentId, "mods-child-task", "provider tool id is not runtime authority")
     assert.equal(resolve(childValue.cwd).toLowerCase(), resolve(workspace).toLowerCase())
     assert.match(childValue.file, /REDACTED/)
     assert.match(childValue.native.text, /REDACTED/)
@@ -2692,7 +2957,7 @@ async function main(): Promise<void> {
       (row) => row.identity?.toolCallId === "mods-child-inspect"
     )!
     assert.ok(taskReceipt?.identity && registeredReceipt?.identity)
-    assert.equal(registeredReceipt.identity.agentId, "mods-child-task")
+    assert.equal(registeredReceipt.identity.agentId, childValue.agentId)
     assert.equal(registeredReceipt.identity.parentCallId, taskReceipt.identity.callId)
     const sdkReceipts = childAudit.filter(
       (row) => row.identity?.parentCallId === registeredReceipt.identity!.callId
@@ -2700,7 +2965,7 @@ async function main(): Promise<void> {
     assert.equal(sdkReceipts.length, 1)
     assert.equal(sdkReceipts[0].toolId, "host:read_file")
     for (const row of [registeredReceipt, ...sdkReceipts]) {
-      assert.equal(row.identity?.agentId, "mods-child-task")
+      assert.equal(row.identity?.agentId, childValue.agentId)
       assert.equal(row.identity?.turnId, registeredReceipt.identity.turnId)
       assert.notEqual(row.identity?.turnId, taskReceipt.identity.turnId)
       assert.equal(row.status, "succeeded")
@@ -2727,7 +2992,7 @@ async function main(): Promise<void> {
       childTurnFacts.lastChild as Record<string, unknown>
     assert.ok(Number(childDuration) > 0)
     assert.deepEqual(completedChildEvent, {
-      agentId: "mods-child-task",
+      agentId: childValue.agentId,
       turnId: registeredReceipt.identity.turnId,
       answer: "MODS_CHILD_WORKER_OK",
       reason: "answer",
@@ -2764,6 +3029,19 @@ async function main(): Promise<void> {
               JSON.stringify(request.messages).includes("[mods-child-worker] [stall]")
           ),
       "child is streaming through its actual provider connection"
+    )
+    await until(
+      async () => page!.evaluate(async (id) => {
+        const transcripts = await window.api.threads.getSubagentTranscripts(id)
+        for (const [executionId, value] of Object.entries(transcripts)) {
+          if (!executionId.startsWith("mods-child-task::invocation-")) continue
+          if (!JSON.stringify(value).includes("[mods-child-worker] [stall]")) continue
+          const transcript = await window.api.threads.getSubagentTranscript(id, executionId)
+          if (JSON.stringify(transcript.messages).includes("MODS_CHILD_PARTIAL")) return true
+        }
+        return false
+      }, registryThread),
+      "the real child partial answer reaches the transcript before cancellation"
     )
     assert.equal(typeof (await inspectTurn()).active, "string")
     assert.equal(await backgroundCommand(registryThread, "abort"), "已请求停止当前轮次。")
@@ -2877,6 +3155,7 @@ async function main(): Promise<void> {
     }
     await page!.screenshot({ path: join(artifacts, "function-turn-refusal.png") })
     await page!.getByText("Mods E2E", { exact: true }).first().click()
+    await openModsResults(page!)
     for (const path of ["secret.txt", "../outside.txt"]) {
       await functionComposer.fill(`/claw-files ${path}`)
       await functionComposer.press("Enter")
@@ -2992,6 +3271,7 @@ async function main(): Promise<void> {
             await window.api.mods.clientAct(threadId, {
               pane: "function-commands:claw-client",
               instance: client.id,
+              generation: client.generation,
               intentId: crypto.randomUUID(),
               kind: "key",
               value: { key: "up" }
@@ -3033,6 +3313,7 @@ async function main(): Promise<void> {
     }, "capture live session counter before renderer reload")
     await page!.reload({ waitUntil: "domcontentloaded" })
     await page!.getByText("Mods E2E", { exact: true }).first().click()
+    await openModsResults(page!)
     await page!
       .locator('[data-function-pane="claw-board"]')
       .getByText("点击次数：2", { exact: true })
@@ -3075,6 +3356,7 @@ async function main(): Promise<void> {
     await page!.addInitScript("window.__name = value => value")
     page!.setDefaultTimeout(15_000)
     await page!.getByText("Mods E2E", { exact: true }).first().click()
+    await openModsResults(page!)
     assert.equal(
       await page!.evaluate(
         async ({ id, descriptor }) => {
@@ -3121,8 +3403,6 @@ async function main(): Promise<void> {
     pass("pane preferences survive renderer reload and complete application restart")
     await page!.getByRole("button", { name: "自定义设置", exact: true }).click()
     await page!.getByRole("button", { name: "Function Mods", exact: true }).click()
-    await page!.getByLabel("输入管理口令解锁 Function Mods 设置").fill("admin123456")
-    await page!.getByRole("button", { name: "解锁设置", exact: true }).click()
     await page!
       .locator('[data-function-mod-id="function-commands"]')
       .getByRole("button", { name: "撤销权限", exact: true })
@@ -3142,6 +3422,7 @@ async function main(): Promise<void> {
     )
     await page!.getByRole("button", { name: "返回应用", exact: true }).click()
     await page!.getByText("Registered tools", { exact: true }).first().click()
+    await openModsResults(page!)
     assert.deepEqual(
       await page!.evaluate((id) => window.api.mods.turnNotices(id), registryThread),
       []
@@ -3281,17 +3562,56 @@ async function main(): Promise<void> {
     await verifyStopFailure(page!, workspace, artifacts, modelServer.requests, until, pass, modelServer.closedStalls)
     console.log(JSON.stringify({ checks, timings, isolated }, null, 2))
   } catch (error) {
-    await page?.screenshot({ path: join(artifacts, "failure.png") }).catch(() => {})
-    throw error
+    failures.push(error)
+    await attemptModsE2eCleanup(failures, () =>
+      page?.screenshot({ path: join(artifacts, "failure.png") })
+    )
   } finally {
     clearTimeout(watchdog)
-    writeFileSync(
-      join(artifacts, "result.json"),
-      JSON.stringify({ checks, timings, isolated }, null, 2)
+    await attemptModsE2eCleanup(failures, () =>
+      writeFileSync(
+        join(artifacts, "result.json"),
+        JSON.stringify({ checks, timings, isolated }, null, 2)
+      )
     )
-    await app?.close()
-    await modelServer?.close()
+    let shutdownFailed = false
+    if (!(await attemptModsE2eCleanup(failures, () => app?.close()))) shutdownFailed = true
+    if (!(await attemptModsE2eCleanup(failures, () => modelServer?.close()))) shutdownFailed = true
+    await attemptModsE2eCleanup(failures, async () => {
+      const evidenceFile = focus === "native-append"
+        ? "native-append-results.json"
+        : focus === "prompt-mention" ? "prompt-mention-results.json"
+        : focus === "prompt-mention-workspace-off" ? "prompt-mention-workspace-off-results.json"
+        : focus === "pending-mention-reload" ? "pending-mention-reload-results.json"
+        : focus === "guide-current-run" ? "guide-current-run-results.json"
+        : undefined
+      const evidencePath = evidenceFile ? join(artifacts, evidenceFile) : undefined
+      if (!evidencePath || !existsSync(evidencePath)) return
+      const evidence = JSON.parse(readFileSync(evidencePath, "utf8"))
+      let conflicts: number | undefined = undefined
+      const echoRead = await attemptModsE2eCleanup(failures, () => {
+        conflicts = readNativeAppendEchoConflicts(join(isolated, "data/logs/main.log"))
+      })
+      if (!echoRead) {
+        evidence.complete = false
+        evidence.postCloseEchoReadFailed = true
+        await attemptModsE2eCleanup(failures, () =>
+          writeFileSync(evidencePath, JSON.stringify(evidence, null, 2))
+        )
+        return
+      }
+      evidence.postCloseEchoConflicts = conflicts
+      evidence.complete = evidence.complete === true && conflicts === 0 &&
+        !shutdownFailed && failures.length === 0
+      await attemptModsE2eCleanup(failures, () =>
+        writeFileSync(evidencePath, JSON.stringify(evidence, null, 2))
+      )
+      assert.equal(conflicts, 0, "no renderer echo conflict may arrive before actual app shutdown")
+    })
   }
+}
+async function main(): Promise<void> {
+  await runModsE2eWithFailures(runMain)
 }
 void main().catch((error) => {
   console.error(error)

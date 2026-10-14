@@ -2,10 +2,17 @@ import { beforeEach, describe, expect, it, vi } from "vitest"
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
 import { tmpdir } from "node:os"
-const mocks = vi.hoisted(() => ({ roots: [] as string[], hooks: vi.fn(), activate: vi.fn() }))
+import type { ClawSourceSelection } from "../../shared/mods/claw"
+const mocks = vi.hoisted(() => ({
+  roots: [] as string[],
+  hooks: vi.fn(),
+  activate: vi.fn(),
+  selection: undefined as ClawSourceSelection | undefined
+}))
 vi.mock("../storage", async (original) => ({
   ...(await original<typeof import("../storage")>()),
   getEnabledSkillsSources: async () => mocks.roots,
+  getSkillsSources: () => mocks.roots,
   getEnabledPluginSkillSourceMetadata: () => [],
   getDisabledSkillDirs: () => []
 }))
@@ -17,12 +24,17 @@ vi.mock("./skill-lifecycle/activation", () => ({
   formatSkillHookContext: (_skill: unknown, notes: string[]) => notes.join("\n") || null
 }))
 vi.mock("./runtime", () => ({ createAgentRuntime: vi.fn() }))
-import { prepareStandardUserPrompt } from "./standard-thread-turn"
+vi.mock("../mods/manager", () => ({
+  getModsManager: () => ({ clawProfile: () => ({ skills: mocks.selection }) })
+}))
+import { prepareStandardUserPrompt, validateExplicitSkillReference } from "./standard-thread-turn"
+import { listClawSkillSources } from "../mods/claw-skills"
 import { formatSkillUseBlock } from "./skill-lifecycle/marker"
 import { createHookScope } from "../hooks/scope"
 import { createSkillUseTracker } from "./skill-lifecycle/tracker"
 
 beforeEach(() => {
+  mocks.selection = undefined
   mocks.hooks.mockReset().mockResolvedValue(null)
   mocks.activate.mockReset().mockResolvedValue({ blocked: false, notes: [], skipped: false })
 })
@@ -67,6 +79,59 @@ async function fixture(
 }
 
 describe("real explicit skill prompt expansion", () => {
+  it.each(["adapter-one", "adapter-two"])(
+    "keeps plugin identity %s through prompt expansion and activation",
+    async (pluginId) => {
+      await fixture(async (prepare) => {
+        expect(await prepare({
+          harnessAgentContext: { pluginId, pluginName: "Shared adapter" }
+        })).toMatchObject({ accepted: true })
+        const expansion = mocks.hooks.mock.calls.find((call) => call[1] === "UserPromptExpansion")
+        expect(expansion?.[2]).toMatchObject({ harnessAdapterId: pluginId })
+        expect(mocks.activate.mock.calls[0]?.[0]).toMatchObject({ harnessAdapterId: pluginId })
+      })
+    }
+  )
+  it("rejects an unselected real explicit skill before any expansion, activation or submit Hook", async () => {
+    await fixture(async (prepare) => {
+      mocks.selection = { mode: "selected", items: [] }
+      expect(await prepare()).toMatchObject({
+        accepted: false,
+        blockedBy: "explicit_skill",
+        reason: expect.stringContaining("NOT_SELECTED")
+      })
+      expect(mocks.hooks).not.toHaveBeenCalled()
+      expect(mocks.activate).not.toHaveBeenCalled()
+      const reference = { name: "review", path: join(mocks.roots[0], "review", "SKILL.md") }
+      expect(
+        await validateExplicitSkillReference(reference, {
+          threadId: "thread",
+          workspacePath: mocks.roots[0]
+        })
+      ).toContain("NOT_SELECTED")
+      expect(await validateExplicitSkillReference(reference)).toBeNull()
+    })
+  })
+  it("allows selected real skills but rechecks digest after asynchronous expansion", async () => {
+    await fixture(async (prepare) => {
+      mocks.selection = { mode: "selected", items: await listClawSkillSources() }
+      expect(await prepare()).toMatchObject({ accepted: true })
+      mocks.activate.mockClear()
+      mocks.hooks.mockImplementation(async (_hooks, event) => {
+        if (event === "UserPromptExpansion")
+          writeFileSync(
+            join(mocks.roots[0], "review", "SKILL.md"),
+            "---\nname: review\n---\nchanged"
+          )
+        return null
+      })
+      expect(await prepare()).toMatchObject({
+        accepted: false,
+        reason: expect.stringContaining("CHANGED")
+      })
+      expect(mocks.activate).not.toHaveBeenCalled()
+    })
+  })
   it("checks the resolved skill before activation and passes added context to the model input", async () => {
     await fixture(async (prepare) => {
       mocks.hooks.mockImplementation(async (_hooks, event, context) => {

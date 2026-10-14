@@ -394,7 +394,9 @@ describeOnWindows("Windows background Job controller fallback shells", () => {
       expect(result.stderr).toContain("Background shell bootstrap is missing")
       expect(result.stderr).not.toContain("Background shell failed to start")
     } finally {
-      await rm(isolatedDirectory, { recursive: true, force: true })
+      await rm(isolatedDirectory, {
+        recursive: true, force: true, maxRetries: 5, retryDelay: 100
+      })
     }
   })
 })

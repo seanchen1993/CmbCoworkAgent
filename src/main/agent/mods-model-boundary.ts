@@ -3,11 +3,16 @@ import { BaseChatModel } from "@langchain/core/language_models/chat_models"
 import { ChatGenerationChunk, type ChatResult } from "@langchain/core/outputs"
 import type { CallbackManagerForLLMRun } from "@langchain/core/callbacks/manager"
 import { AsyncLocalStorageProviderSingleton } from "@langchain/core/singletons"
+import { randomUUID } from "node:crypto"
+import { setImmediate as yieldToIo } from "node:timers/promises"
 import { countTokensApproximately, createMiddleware } from "langchain"
 import type { ModJson, ModObject } from "../../shared/mods/types"
 import type { ModRuntimeAuthority } from "../mods/runtime-instance"
 import type { ModHookStream, FunctionStreamOptions } from "../mods/v2/stream-dispatcher"
 import { currentCompletionBudget, reserveCompletionModelUsage } from "../mods/v2/completion-budget"
+import { composeModPrompt } from "./mods-prompt-composition"
+import { promptContributionsFor } from "./mods-prompt-sources"
+import type { FunctionPromptCore, FunctionPromptEvent } from "../../shared/mods/v2/prompt-composition"
 
 export interface CompletionRuntimeCancellation {
   signal: AbortSignal
@@ -259,6 +264,15 @@ export function withCompletionModelBudget(delegate: typeof fetch): typeof fetch 
 /** The small host surface needed by the model boundary.  Keeping this structural
  * avoids making the LangChain wrapper depend on the concrete Mods manager. */
 export interface FunctionModelStreamHost {
+  observeFunctionModelStream?(authority: ModRuntimeAuthority, message: BaseMessage): void
+  promptComposition?(
+    workspace: string, threadId: string, event: FunctionPromptEvent,
+    input: ModObject, signal: AbortSignal, core: FunctionPromptCore
+  ): Promise<ModObject>
+  presentationEvent?(
+    workspace: string, threadId: string, event: "tool.describe",
+    input: ModObject, signal: AbortSignal
+  ): Promise<ModObject>
   functionModelStream(
     authority: ModRuntimeAuthority,
     input: ModObject,
@@ -272,6 +286,8 @@ interface BoundaryInput {
   model: string
   effort?: string | number
   agentId?: string
+  outputStyle?: ModObject | null
+  onFinalPrompt?(text: string): void
 }
 
 export interface FunctionStepModelSelection {
@@ -282,6 +298,7 @@ export interface FunctionStepModelSelection {
 export interface FunctionStepModel {
   provider: BaseChatModel
   model: string
+  modelRef?: string
   effort?: "low" | "high" | "max"
   contextWindow: number
   inputBudget: number
@@ -362,10 +379,12 @@ export function createModModelBoundary(
   manager: FunctionModelStreamHost | undefined,
   authority: ModRuntimeAuthority | undefined,
   input: BoundaryInput,
-  stepModel?: FunctionStepModelHost
+  stepModel?: FunctionStepModelHost,
+  stepCounter: { value: number } = { value: 0 }
 ): BaseChatModel {
   if (!manager || !authority) return delegate
-  return new ModAwareChatModel(delegate, manager, authority, input, { value: 0 }, stepModel)
+  const actualInput = { ...input, turnId: authority.turnId, agentId: authority.agentId }
+  return new ModAwareChatModel(delegate, manager, authority, actualInput, stepCounter, stepModel)
 }
 
 class ModAwareChatModel extends BaseChatModel {
@@ -376,7 +395,8 @@ class ModAwareChatModel extends BaseChatModel {
     private readonly boundaryInput: BoundaryInput,
     private readonly stepCounter: { value: number } = { value: 0 },
     private readonly stepModel?: FunctionStepModelHost,
-    private readonly boundTools?: BoundTools
+    private readonly boundTools?: BoundTools,
+    private readonly toolBindingBase?: BaseChatModel
   ) {
     super({})
   }
@@ -399,7 +419,8 @@ class ModAwareChatModel extends BaseChatModel {
       this.boundaryInput,
       this.stepCounter,
       this.stepModel,
-      { tools: [...tools], kwargs }
+      { tools: [...tools], kwargs },
+      this.toolBindingBase ?? this.delegate
     ) as this
   }
 
@@ -431,6 +452,10 @@ class ModAwareChatModel extends BaseChatModel {
     const authority = this.authority
     const stepModel = this.stepModel
     const boundTools = this.boundTools
+    const presentation = this.manager.presentationEvent?.bind(this.manager)
+    const promptComposition = this.manager.promptComposition?.bind(this.manager)
+    const boundaryInput = this.boundaryInput
+    const toolBindingBase = this.toolBindingBase ?? delegate
     let activeRequest = false
     const runProvider = <T>(operation: () => Promise<T>): Promise<T> =>
       AsyncLocalStorageProviderSingleton.getInstance().run(undefined, () =>
@@ -452,8 +477,15 @@ class ModAwareChatModel extends BaseChatModel {
       activeRequest = true
       let release: (() => void) | undefined
       let raw: Awaited<ReturnType<BaseChatModel["stream"]>> | undefined
+      const providerRunId = randomUUID()
+      const fallbackMessageId = `run-${providerRunId}`
+      let providerMessageId: string | undefined
       try {
         let provider = delegate
+        let selection: FunctionStepModel | undefined
+        let providerTools = boundTools?.tools
+        let providerMessages = messages
+        let finalPromptText: string | undefined
         if (stepModel) {
           if (typeof received.model !== "string" || !received.model.trim())
             throw new Error("MODS_MODEL_NOT_CONFIGURED")
@@ -463,7 +495,7 @@ class ModAwareChatModel extends BaseChatModel {
             typeof received.effort !== "number"
           )
             throw new Error("MODS_MODEL_EFFORT_UNSUPPORTED")
-          const selection = await stepModel.resolve(
+          selection = await stepModel.resolve(
             {
               model: received.model,
               ...(received.effort !== undefined ? { effort: received.effort } : {})
@@ -472,34 +504,71 @@ class ModAwareChatModel extends BaseChatModel {
           )
           assertActive()
           context.signal.throwIfAborted()
-          // This is the host's existing local estimator, including system messages
-          // and current tools. It prevents a known overflow, not a tokenizer guarantee.
-          const inputTokens = countTokensApproximately(messages, boundTools?.tools)
-          if (
-            !Number.isFinite(inputTokens) ||
-            !Number.isFinite(selection.inputBudget) ||
-            selection.inputBudget <= 0 ||
-            inputTokens > selection.inputBudget
-          )
-            throw new Error("MODS_MODEL_INPUT_BUDGET")
           provider = selection.provider
-          if (boundTools) {
+          if (boundTools && !presentation) {
             if (!provider.bindTools) throw new Error("MODS_MODEL_TOOLS_UNSUPPORTED")
             provider = provider.bindTools(boundTools.tools, boundTools.kwargs) as BaseChatModel
           }
-          release = stepModel.activate?.(selection)
           assertActive()
           context.signal.throwIfAborted()
         }
+        if (boundTools && presentation) {
+          const { describeModTools } = await import("./mods-tool-descriptions")
+          const tools = await describeModTools(boundTools.tools, (input) =>
+            presentation(authority.workspace, authority.threadId, "tool.describe", input, context.signal),
+            assertActive)
+          providerTools = tools
+          const base = stepModel ? provider : toolBindingBase
+          if (!base.bindTools) throw new Error("MODS_MODEL_TOOLS_UNSUPPORTED")
+          provider = base.bindTools(tools, boundTools.kwargs) as BaseChatModel
+        }
+        if (promptComposition) {
+          const model = selection?.model ?? String(received.model)
+          const composed = await composeModPrompt(
+            messages,
+            {
+              model,
+              promptModel: model,
+              surfaces: ["desktop"],
+              tools: (providerTools ?? []).flatMap((tool) => {
+                const described = tool as { name?: unknown; function?: { name?: unknown } }
+                const name = described.name ?? described.function?.name
+                return typeof name === "string" ? [name] : []
+              }),
+              outputStyle: boundaryInput.outputStyle ?? null,
+              traits: []
+            },
+            context.signal,
+            (event, facts, signal, core) =>
+              promptComposition(authority.workspace, authority.threadId, event, facts, signal, core),
+            assertActive,
+            promptContributionsFor(messages, authority)
+          )
+          providerMessages = composed.messages
+          assertActive()
+          finalPromptText = composed.text
+        }
+        // Budget the actual composed text and described tools, not the pre-Hook snapshot.
+        if (selection) {
+          const inputTokens = countTokensApproximately(providerMessages, providerTools)
+          if (!Number.isFinite(inputTokens) || !Number.isFinite(selection.inputBudget) ||
+            selection.inputBudget <= 0 || inputTokens > selection.inputBudget)
+            throw new Error("MODS_MODEL_INPUT_BUDGET")
+          release = stepModel?.activate?.(selection)
+        }
+        assertActive()
+        context.signal.throwIfAborted()
+        if (finalPromptText !== undefined) boundaryInput.onFinalPrompt?.(finalPromptText)
         // Do not pass the graph callback manager to the raw provider.  It is
         // deliberately reattached below only after a transformed chunk returns.
         // Use the public stream API with an empty callback list.  Calling the
         // protected provider method directly is not stable across LangChain
         // releases (and some providers do not expose it at runtime).
         raw = await runProvider(() =>
-          provider.stream(messages, {
+          provider.stream(providerMessages, {
             ...options,
             callbacks: [],
+            runId: providerRunId,
             signal: context.signal
           })
         )
@@ -513,6 +582,20 @@ class ModAwareChatModel extends BaseChatModel {
           if (refs.size >= MAX_MODEL_FRAMES) throw new Error("MODS_MODEL_STREAM_LIMIT")
           const ref = `${authority.turnId}:${sequence++}`
           const message = item.value
+          // The provider's public stream gives an ID-less usage tail its own run ID.
+          // Keep that tail on the actual reply before forwarding it to the graph.
+          // Explicit provider IDs (including run-* IDs) and fully ID-less streams stay intact.
+          if (message.id && message.id !== fallbackMessageId) providerMessageId = message.id
+          else if (
+            providerMessageId &&
+            message.id === fallbackMessageId &&
+            message instanceof AIMessageChunk &&
+            message.content === "" &&
+            message.usage_metadata &&
+            !message.tool_calls?.length &&
+            !message.tool_call_chunks?.length
+          )
+            message._updateId(providerMessageId)
           const text =
             typeof message.content === "string"
               ? message.content
@@ -550,8 +633,16 @@ class ModAwareChatModel extends BaseChatModel {
     }
     assertActive()
     const stream = await this.manager.functionModelStream(this.authority, input, core, signal)
+    let sliceStarted = performance.now()
     for await (const value of stream) {
       assertActive()
+      // Already-buffered providers can otherwise form an unbroken promise microtask chain.
+      // Yield only scheduling time: every frame still crosses all original guards and hooks.
+      if (performance.now() - sliceStarted >= 8) {
+        await yieldToIo(undefined, { signal })
+        assertActive()
+        sliceStarted = performance.now()
+      }
       if (!isFrame(value)) throw new Error("MODS_MODEL_FRAME")
       if (consumedRefs.has(value.ref)) throw new Error("MODS_MODEL_REF_REPLAY")
       const source = refs.get(value.ref)
@@ -567,7 +658,13 @@ class ModAwareChatModel extends BaseChatModel {
       refs.delete(value.ref)
       refIndexes.delete(value.ref)
       lastOutputIndex = value.index
-      await runManager?.handleLLMNewToken(chunk.text)
+      // LangGraph needs the same transformed message for live packets and final values.
+      // Text-only callbacks invent a run ID and discard provider/tool/reasoning metadata.
+      await runManager?.handleLLMNewToken(chunk.text, undefined, undefined, undefined, undefined, {
+        chunk
+      })
+      assertActive()
+      this.manager.observeFunctionModelStream?.(this.authority, chunk.message)
       yield chunk
     }
     assertActive()

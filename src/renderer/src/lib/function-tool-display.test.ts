@@ -11,6 +11,7 @@ const props = {
   toolCall: { id: "call", name: "read_file", args: { file_path: "original" } },
   status: "completed" as const,
   result: "original result",
+  renderDetails: () => createElement("pre", {}, "safe native details"),
   fallback: createElement("pre", {}, "native details")
 }
 it("keeps native details with no layout changes until a guest changes presentation", () => {

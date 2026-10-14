@@ -1,6 +1,10 @@
 import { describe, expect, it, vi } from "vitest"
 
 vi.mock("../db", () => ({
+  // Attribution-only fixture has no native database; never qualify it for native facts.
+  getDb: () => {
+    throw new Error("ATTRIBUTION_FIXTURE_NO_NATIVE_DB")
+  },
   flushStrict: async () => undefined,
   upsertThreadMessages: () => 1
 }))

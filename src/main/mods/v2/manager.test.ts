@@ -1,19 +1,446 @@
+import { ClawStore } from "../claw-store"
 import { cp, mkdir, mkdtemp, readFile, realpath, rm, symlink, writeFile } from "node:fs/promises"
 import { join, resolve } from "node:path"
 import { tmpdir } from "node:os"
 import { afterEach, expect, it, vi } from "vitest"
 import { ModControlStore } from "../control-store"
 import { FunctionGuestRuntime } from "./guest-runtime"
+import { FunctionSession } from "./session"
+import { FunctionDispatchDeadline } from "./dispatch-deadline"
+import { FunctionNamedState } from "./named-state"
 import { FunctionModsManager } from "./manager"
-import type { ModJson } from "../../../shared/mods/types"
+import * as functionLoader from "./loader"
+import type { ModJson, ModUiChangeScope } from "../../../shared/mods/types"
 import { randomUUID } from "node:crypto"
-import type { FunctionUiElement } from "../../../shared/mods/v2/ui"
+import type { FunctionUiNode } from "../../../shared/mods/v2/ui"
 import { captureCompletionBinding } from "./completion-evidence"
 import { FakeStreamingChatModel } from "@langchain/core/utils/testing"
 import { AIMessageChunk, HumanMessage } from "@langchain/core/messages"
 import { createModModelBoundary } from "../../agent/mods-model-boundary"
 
 const cleanups: Array<() => Promise<void>> = []
+
+it("shares only in-flight status compilation while reading each workspace grant afresh", async () => {
+  const f = await fixture()
+  const digest = await f.approve()
+  const compile = functionLoader.compileFunctionPlugin
+  const gate = Promise.withResolvers<void>()
+  const spy = vi.spyOn(functionLoader, "compileFunctionPlugin").mockImplementation(async (...args) => {
+    await gate.promise
+    return compile(...args)
+  })
+  try {
+    const local = f.manager.status(f.root)
+    const other = f.manager.status(join(f.root, "other-workspace"))
+    expect(spy).toHaveBeenCalledTimes(1)
+    gate.resolve()
+    expect((await local)[0].state).toBe("ready")
+    expect((await other)[0].state).toBe("needs-approval")
+    f.control.grant(f.root, "function:function-commands", digest, false)
+    expect((await f.manager.status(f.root))[0].state).toBe("needs-approval")
+    expect(spy).toHaveBeenCalledTimes(2)
+    expect(f.loads()).toBe(1)
+  } finally {
+    gate.resolve()
+    spy.mockRestore()
+  }
+})
+
+it("does not let an old status compile completion remove a new invalidation generation", async () => {
+  const f = await fixture()
+  const compile = functionLoader.compileFunctionPlugin
+  const old = Promise.withResolvers<void>(), next = Promise.withResolvers<void>()
+  let count = 0
+  const spy = vi.spyOn(functionLoader, "compileFunctionPlugin").mockImplementation(async (...args) => {
+    await (++count === 1 ? old.promise : next.promise)
+    return compile(...args)
+  })
+  try {
+    const before = f.manager.status(f.root)
+    f.manager.invalidate(f.root)
+    const after = f.manager.status(f.root)
+    expect(spy).toHaveBeenCalledTimes(2)
+    old.resolve()
+    await before
+    const joining = f.manager.status(f.root)
+    expect(spy).toHaveBeenCalledTimes(2)
+    next.resolve()
+    await Promise.all([after, joining])
+  } finally {
+    old.resolve()
+    next.resolve()
+    spy.mockRestore()
+  }
+})
+
+it("releases failed status compilations so the next read can inspect repaired source", async () => {
+  const f = await fixture()
+  const compile = functionLoader.compileFunctionPlugin
+  const gate = Promise.withResolvers<void>()
+  const spy = vi.spyOn(functionLoader, "compileFunctionPlugin").mockImplementation(async () => {
+    await gate.promise
+    throw Error("owned-source-unavailable")
+  })
+  try {
+    const first = f.manager.status(f.root), second = f.manager.status(f.root)
+    expect(spy).toHaveBeenCalledTimes(1)
+    gate.resolve()
+    for (const result of await Promise.all([first, second]))
+      expect(result[0]).toMatchObject({ state: "invalid", error: "owned-source-unavailable" })
+    spy.mockImplementation(compile)
+    expect((await f.manager.status(f.root))[0].state).toBe("needs-approval")
+    expect(spy).toHaveBeenCalledTimes(2)
+  } finally {
+    gate.resolve()
+    spy.mockRestore()
+  }
+})
+
+it("does not publish an uninitialized entry when operation admission rejects construction", async () => {
+  const f = await fixture()
+  await f.approve()
+  const admission = vi.spyOn(
+    f.manager as unknown as { captureOperation(entry: unknown): void },
+    "captureOperation"
+  )
+  admission.mockImplementationOnce(() => { throw Error("MODS_SCOPE_CHANGED") })
+  await expect(f.manager.commands(f.root, "admission-failure")).rejects.toThrow("MODS_SCOPE_CHANGED")
+  admission.mockRestore()
+  await expect(f.manager.commands(f.root, "admission-failure")).resolves.toBeInstanceOf(Array)
+})
+
+async function endingFixture(endBody = 'await $.store.set("ended",e);return next(e)') {
+  const f = await fixture()
+  await writeFile(join(f.plugin, "hooks/register.ts"), `export function register(on) {
+    on("session.start",async($,e,next)=>{
+      await $.store.set("starts",(await $.store.get("starts")??0)+1);
+      await $.command.register({name:"end-state",description:"State"});return next(e)
+    });
+    on("command.run",{command:"end-state"},async($)=>({text:JSON.stringify(await $.store.get("ended")??null)}));
+    on("classic.SessionEnd",async($,e,next)=>{await $.store.set("classic",true);return next(e)});
+    on("session.end",async($,e,next)=>{${endBody}});
+  }`)
+  await f.approve()
+  const namespace = JSON.stringify([f.root, "function-commands"])
+  return { ...f, initialLoads: f.loads(), saved: (key: string) => f.control.functionState.get(namespace, key) }
+}
+
+it("gates new entries synchronously, preserves the original classic chain, then notifies once", async () => {
+  const f = await endingFixture('await $.store.set("ended",{...e,classic:await $.store.get("classic")});return next(e)')
+  await f.manager.commands(f.root, "thread")
+  const end = f.manager.prepareEnd("clear", "thread")
+  expect(end.count).toBe(1)
+  await expect(f.manager.commands(f.root, "thread")).rejects.toMatchObject({ code: "MODS_SESSION_ENDING" })
+  await end.classic(() => f.manager.classicEvent(f.root, "thread", "classic.SessionEnd", {
+    hook_event_name: "SessionEnd", session_id: "thread", cwd: f.root, transcript_path: "", reason: "clear"
+  }, new AbortController().signal))
+  const repeated = f.manager.prepareEnd("logout", "thread")
+  await Promise.all([end.notify(), end.notify(), repeated.notify()])
+  expect(f.saved("ended")).toEqual({ reason: "clear", sessionId: "thread", resume: { id: "thread" }, classic: true })
+  expect(f.saved("starts")).toBe(1)
+  end.finish()
+  end.finish()
+  repeated.finish()
+  const before = f.loads()
+  await f.manager.commands(f.root, "thread")
+  expect(f.loads()).toBeGreaterThan(before)
+  expect(f.saved("starts")).toBe(2)
+})
+
+it.each(["remote-revocation-failed", "late-incarnation-CAS-failed"])(
+  "retires only the notified instance after %s and preserves later explicit use", async failure => {
+    const f = await endingFixture()
+    await f.manager.commands(f.root, "thread")
+    const end = f.manager.prepareEnd("clear", "thread")
+    await expect((async () => {
+      try { await end.classic(async () => {}); await end.notify(); throw Error(failure) }
+      finally { end.finish() }
+    })()).rejects.toThrow(failure)
+    expect(f.saved("starts")).toBe(1)
+    expect(f.saved("ended")).toMatchObject({ reason: "clear", sessionId: "thread" })
+    const loads = f.loads()
+    await new Promise(resolve => setTimeout(resolve, 30))
+    expect(f.loads()).toBe(loads)
+    await f.manager.commands(f.root, "thread")
+    expect(f.saved("starts")).toBe(2)
+  }
+)
+
+it("releases a rejected pre-notification intent without retiring or replaying startup", async () => {
+  const f = await endingFixture()
+  await f.manager.commands(f.root, "thread")
+  const loads = f.loads(), end = f.manager.prepareEnd("clear", "thread")
+  end.finish()
+  await end.notify()
+  await f.manager.commands(f.root, "thread")
+  expect(f.loads()).toBe(loads)
+  expect(f.saved("starts")).toBe(1)
+  expect(f.saved("ended")).toBeUndefined()
+})
+
+it("does not cold-load or start quiet discovery for session end", async () => {
+  const f = await endingFixture()
+  const cold = f.manager.prepareEnd("clear", "cold")
+  expect(cold.count).toBe(0)
+  cold.finish()
+  expect(f.loads()).toBe(f.initialLoads)
+  await f.manager.hasEventHandler(f.root, "quiet", "session.end")
+  const loads = f.loads(), end = f.manager.prepareEnd("logout")
+  expect(end.count).toBe(1)
+  await end.classic(() => f.manager.classicEvent(f.root, "quiet", "classic.SessionEnd", {}, new AbortController().signal))
+  await end.notify()
+  end.finish()
+  expect(f.loads()).toBe(loads)
+  expect(f.saved("starts")).toBeUndefined()
+  expect(f.saved("ended")).toBeUndefined()
+})
+
+it("does not notify on grant revoke or replace a new instance through an old ending receipt", async () => {
+  const f = await endingFixture()
+  await f.manager.commands(f.root, "thread")
+  const end = f.manager.prepareEnd("clear", "thread")
+  f.manager.revoke(f.root, "function-commands")
+  await end.notify()
+  end.finish()
+  expect(f.saved("ended")).toBeUndefined()
+  await f.approve()
+  await f.manager.commands(f.root, "thread")
+  const loads = f.loads()
+  end.finish()
+  await f.manager.commands(f.root, "thread")
+  expect(f.loads()).toBe(loads)
+})
+
+it("ends several real instances concurrently instead of adding one timeout per thread", async () => {
+  const f = await endingFixture('await $.clock.sleep(1100);return next(e)')
+  await f.manager.commands(f.root, "one")
+  await f.manager.commands(f.root, "two")
+  const end = f.manager.prepareEnd("logout"), began = performance.now()
+  expect(end.count).toBe(2)
+  try { await end.notify() } finally { end.finish() }
+  expect(performance.now() - began).toBeGreaterThan(950)
+  expect(performance.now() - began).toBeLessThan(2000)
+})
+
+it("runs original SessionEnd core without loading approved sources for a cold deleting thread", async () => {
+  const f = await endingFixture(), end = f.manager.prepareEnd("clear", "cold")
+  const core = vi.fn(async () => ({ original: true }))
+  await expect(f.manager.commands(f.root, "cold")).rejects.toMatchObject({ code: "MODS_SESSION_ENDING" })
+  await expect(end.classic(() => f.manager.classicEvent(f.root, "cold", "classic.SessionEnd", {},
+    new AbortController().signal, core))).resolves.toEqual({ original: true })
+  expect(core).toHaveBeenCalledTimes(1)
+  await end.notify()
+  end.finish()
+  expect(f.loads()).toBe(f.initialLoads)
+  expect(f.saved("starts")).toBeUndefined()
+  await f.manager.commands(f.root, "cold")
+  expect(f.loads()).toBeGreaterThan(0)
+})
+
+it("keeps whole-app admission closed for cold threads and throughout final trace cleanup", async () => {
+  const f = await endingFixture(), end = f.manager.prepareEnd("logout")
+  expect(end.count).toBe(0)
+  const core = vi.fn(async () => ({}))
+  await end.classic(() => f.manager.classicEvent(f.root, "unknown", "classic.SessionEnd", {},
+    new AbortController().signal, core))
+  expect(core).toHaveBeenCalledTimes(1)
+  for (const phase of ["classic-complete", "trace-pending"]) {
+    if (phase === "trace-pending") { await end.notify(); end.finish() }
+    await expect(f.manager.commands(f.root, phase)).rejects.toMatchObject({ code: "MODS_SESSION_ENDING" })
+    await expect(f.manager.hasEventHandler(f.root, phase, "prompt.edit")).rejects.toMatchObject({ code: "MODS_SESSION_ENDING" })
+  }
+  expect(f.loads()).toBe(f.initialLoads)
+})
+
+it("preserves original SessionEnd core when the captured actual guest fails during shutdown", async () => {
+  const f = await endingFixture()
+  await f.manager.commands(f.root, "thread")
+  const loads = f.loads(), end = f.manager.prepareEnd("clear", "thread")
+  f.kill()
+  const core = vi.fn(async () => ({ original: true }))
+  await expect(end.classic(() => f.manager.classicEvent(f.root, "thread", "classic.SessionEnd", {},
+    new AbortController().signal, core))).resolves.toEqual({ original: true })
+  await end.notify()
+  end.finish()
+  expect(core).toHaveBeenCalledTimes(1)
+  expect(f.loads()).toBe(loads)
+  expect(f.saved("ended")).toBeUndefined()
+})
+
+it("preserves original core once when the captured guest fails during actual publication", async () => {
+  const f = await endingFixture()
+  await f.manager.commands(f.root, "thread")
+  const end = f.manager.prepareEnd("clear", "thread"), loads = f.loads()
+  const entered = Promise.withResolvers<void>(), gate = Promise.withResolvers<void>()
+  f.setPublication(async value => { entered.resolve(); await gate.promise; return value })
+  const core = vi.fn(async () => ({ original: true }))
+  const running = end.classic(() => f.manager.classicEvent(f.root, "thread", "classic.SessionEnd", {},
+    new AbortController().signal, core))
+  await entered.promise
+  f.kill()
+  gate.resolve()
+  expect(await running).toEqual({ original: true })
+  await end.notify()
+  end.finish()
+  expect(core).toHaveBeenCalledTimes(1)
+  expect(f.loads()).toBe(loads)
+})
+
+it("waits for the already-entered delete classic stage when application quit overlaps", async () => {
+  const f = await endingFixture()
+  await f.manager.commands(f.root, "thread")
+  const deleting = f.manager.prepareEnd("clear", "thread")
+  const entered = Promise.withResolvers<void>(), gate = Promise.withResolvers<void>()
+  const original = deleting.classic(async () => { entered.resolve(); await gate.promise })
+  await entered.promise
+  const quitting = f.manager.prepareEnd("logout")
+  await quitting.classic(async () => {})
+  const notifying = quitting.notify()
+  await new Promise(resolve => setTimeout(resolve, 30))
+  expect(f.saved("ended")).toBeUndefined()
+  gate.resolve()
+  await original
+  await Promise.all([notifying, deleting.notify()])
+  expect(f.saved("ended")).toMatchObject({ reason: "clear", sessionId: "thread" })
+  deleting.finish()
+  quitting.finish()
+})
+
+it("bounds overlapping quit while retaining an abort-ignoring original core to actual finally", async () => {
+  const f = await endingFixture()
+  await f.manager.commands(f.root, "thread")
+  const resident = (f.manager as unknown as {
+    sessions: Map<string, { activity: import("./session-activity").FunctionSessionActivity }>
+  }).sessions.get(JSON.stringify([f.root, "thread"]))!
+  const deleting = f.manager.prepareEnd("clear", "thread")
+  const entered = Promise.withResolvers<void>(), gate = Promise.withResolvers<void>()
+  const finished = Promise.withResolvers<void>()
+  let calls = 0, lateCalls = 0
+  const original = deleting.classic(() => f.manager.classicEvent(f.root, "thread", "classic.SessionEnd", {
+    hook_event_name: "SessionEnd", session_id: "thread", cwd: f.root, transcript_path: "", reason: "clear"
+  }, new AbortController().signal, async () => {
+    calls++
+    entered.resolve()
+    try {
+      await gate.promise
+      await expect(f.manager.classicEvent(f.root, "thread", "classic.SessionEnd", {},
+        new AbortController().signal, async () => { lateCalls++; return {} })).rejects.toThrow()
+      return {}
+    } finally { finished.resolve() }
+  }))
+  const rejection = expect(original).rejects.toMatchObject({ code: "MODS_DISPATCH_TIMEOUT" })
+  await entered.promise
+  const quitting = f.manager.prepareEnd("logout"), began = performance.now()
+  await quitting.classic(async () => {})
+  const notifying = quitting.notify()
+  await rejection
+  await notifying
+  expect(performance.now() - began).toBeGreaterThanOrEqual(4800)
+  expect(performance.now() - began).toBeLessThan(7000)
+  expect(f.saved("ended")).toMatchObject({ reason: "clear", sessionId: "thread" })
+  expect(calls).toBe(1)
+  expect(resident.activity.foregroundSize).toBeGreaterThan(0)
+  gate.resolve()
+  await finished.promise
+  const deadline = performance.now() + 1000
+  while (resident.activity.foregroundSize && performance.now() < deadline)
+    await new Promise(resolve => setTimeout(resolve, 10))
+  expect(resident.activity.foregroundSize).toBe(0)
+  expect(lateCalls).toBe(0)
+  deleting.finish()
+  quitting.finish()
+}, 12000)
+
+it("attaches the active native quit fence when an existing resident finishes loading late", async () => {
+  const f = await endingFixture('await $.clock.sleep(600);await $.store.set("ended",e);return next(e)')
+  await f.manager.commands(f.root, "warm")
+  const entered = Promise.withResolvers<void>(), gate = Promise.withResolvers<void>()
+  f.setLoadingGate(async () => { entered.resolve(); await gate.promise })
+  const pending = f.manager.commands(f.root, "loading")
+  const rejected = expect(pending).rejects.toMatchObject({ code: "MODS_DISPATCH_TIMEOUT" })
+  await entered.promise
+  const quit = f.manager.prepareEnd("logout")
+  // The production 5s path is covered above; a real short native cut isolates this load race.
+  const drain = new FunctionDispatchDeadline(25)
+  const nativeManager = f.manager as unknown as { classicEndDrain?: FunctionDispatchDeadline }
+  nativeManager.classicEndDrain = drain
+  await quit.classic(async () => {})
+  await new Promise(resolve => setTimeout(resolve, 40))
+  const notification = quit.notify()
+  gate.resolve()
+  await rejected
+  expect(f.saved("starts")).toBe(1)
+  await notification
+  quit.finish()
+}, 10000)
+
+it("pins real registered-tool and MCP origins at the production description ingress", async () => {
+  const f = await fixture()
+  await writeFile(join(f.plugin, "hooks/register.ts"), `export function register(on) {
+    on("session.start",async($,e,next)=>{
+      await $.tool.register({name:"probe",description:"registered"}); return next(e)
+    });
+    on("tool.describe",($,e)=>({description:JSON.stringify(e.provider)}));
+  }`)
+  await f.approve()
+  const check = async (tool: string) => JSON.parse(String((await f.manager.presentationEvent(
+    f.root,"thread","tool.describe",{tool,description:"original",provider:{plugin:"forged",tier:"core"}},
+    new AbortController().signal)).description))
+  expect(await check("mcp__function-commands__probe")).toEqual({plugin:"function-commands",tier:"user"})
+  expect(await check("mcp__fixture__inspect")).toEqual({plugin:"mcp:fixture",tier:"user"})
+  expect(await check("read_file")).toEqual({plugin:"engine",tier:"core"})
+})
+it("discovers approved editing registrations quietly without executing session.start", async () => {
+  const f = await fixture()
+  await writeFile(join(f.plugin, "hooks/register.ts"), `export function register(on) {
+    on("session.start",async()=>{throw Error("STARTED_TOO_EARLY")});
+    on("prompt.edit",async($,e,next)=>next(e));
+  }`)
+  const start = vi.spyOn(FunctionSession.prototype, "start")
+  cleanups.push(async () => { start.mockRestore() })
+  expect(await f.manager.hasEventHandler(f.root, "editor", "prompt.edit")).toBe(false)
+  expect(f.loads()).toBe(0)
+  await f.approve()
+  expect(await f.manager.hasEventHandler(f.root, "editor", "prompt.edit")).toBe(true)
+  const loaded = f.loads()
+  expect(loaded).toBeGreaterThan(0)
+  expect(start).not.toHaveBeenCalled()
+  expect(await f.manager.hasEventHandler(f.root, "editor", "prompt.context")).toBe(false)
+  expect(f.loads()).toBe(loaded)
+})
+it("routes actual editing through the production session provider", async () => {
+  const f = await fixture()
+  await writeFile(join(f.plugin, "hooks/register.ts"), `export function register(on) {
+    on("prompt.edit",async($,e,next)=>next({...e,inputText:e.inputText.toUpperCase()}));
+  }`)
+  await f.approve()
+  const result = await f.manager.classicEvent(f.root, "editor", "prompt.edit", {
+    text: "old", cursor: 3, start: 3, end: 3, inputText: "hi", origin: { kind: "composer" }
+  }, new AbortController().signal, async input => ({ text: String(input.text) + input.inputText,
+    cursor: String(input.text).length + String(input.inputText).length }))
+  expect(result).toEqual({ text: "oldHI", cursor: 5 })
+})
+it("disposes a quiet entry whose first actual startup fails, without replaying that operation", async () => {
+  const f = await fixture()
+  await writeFile(join(f.plugin, "hooks/register.ts"), `export function register(on) {
+    on("prompt.edit",async($,e,next)=>next(e));
+  }`)
+  await f.approve()
+  expect(await f.manager.hasEventHandler(f.root, "editor", "prompt.edit")).toBe(true)
+  const loaded = f.loads()
+  const startup = vi.spyOn(FunctionSession.prototype, "start").mockRejectedValueOnce(Error("STARTUP_FAILED"))
+  const core = vi.fn(async () => ({ text: "OK", cursor: 2 }))
+  const run = () => f.manager.classicEvent(f.root, "editor", "prompt.edit", {
+    text: "", cursor: 0, start: 0, end: 0, inputText: "OK", origin: { kind: "composer" }
+  }, new AbortController().signal, core)
+  try {
+    await expect(run()).rejects.toThrow("STARTUP_FAILED")
+    expect(core).not.toHaveBeenCalled()
+  } finally { startup.mockRestore() }
+  expect(await run()).toEqual({ text: "OK", cursor: 2 })
+  expect(f.loads()).toBeGreaterThan(loaded)
+  expect(core).toHaveBeenCalledOnce()
+})
 
 it.each(["consumer-close", "publication-failure"])(
   "closes the actual model core and restores its selection after %s through turnStep",
@@ -103,10 +530,15 @@ it("pins mandatory completion checks to the loaded grant and rejects revocation"
   await f.manager.turnStart(f.root, "thread", { turnId: "turn", text: "implement" }, signal)
   const gate = await f.manager.completionGate(f.root, "thread", () => ({ turnId: "turn" }))
   expect(gate).toBeDefined()
+  f.changed.mockClear()
   expect(await gate!({ signal, revisionAttempts: 0, maxRevisionAttempts: 2 })).toMatchObject({
     decision: "revise"
   })
+  expect(f.changed).toHaveBeenCalled()
+  expect(f.changed.mock.calls.every(([, scope]) => scope === "records")).toBe(true)
+  f.changed.mockClear()
   f.manager.revoke(f.root, "function-commands")
+  expect(f.changed).toHaveBeenCalledWith("thread")
   await expect(gate!({ signal, revisionAttempts: 1, maxRevisionAttempts: 2 })).rejects.toThrow()
 })
 
@@ -240,6 +672,25 @@ afterEach(async () => {
   for (const cleanup of cleanups.splice(0)) await cleanup()
 })
 
+it("rejects formal approval before granting when its caller expires during guest preparation", async () => {
+  const f = await fixture()
+  const status = await f.manager.status(f.root)
+  const entered = Promise.withResolvers<void>(), resume = Promise.withResolvers<void>()
+  let current = true
+  f.setLoadingGate(async () => { entered.resolve(); await resume.promise })
+  const granting = vi.spyOn(f.control, "grant")
+  const pending = f.manager.approve(f.root, "source", status[0].digest!, () => {
+    if (!current) throw Error("MODS_APPROVAL_SCOPE_CHANGED")
+  })
+  await entered.promise
+  current = false
+  resume.resolve()
+  await expect(pending).rejects.toThrow("MODS_APPROVAL_SCOPE_CHANGED")
+  expect(granting).not.toHaveBeenCalled()
+  f.setLoadingGate(async () => {})
+  expect((await f.manager.status(f.root))[0].state).toBe("needs-approval")
+})
+
 async function fixture(
   readSession?: ConstructorParameters<typeof FunctionModsManager>[1]["readSession"],
   sourceFixture = "resources/mods/function-commands",
@@ -252,7 +703,9 @@ async function fixture(
   let enabled = true
   let pluginEnabled = true
   let loads = 0
+  let loadingGate: () => Promise<void> = async () => {}
   let publish = async (value: ModJson): Promise<ModJson> => value
+  const changed = vi.fn<(threadId: string, scope?: ModUiChangeScope) => void>()
   const allGuests = new Set<FunctionGuestRuntime>()
   const manager = new FunctionModsManager(
     store,
@@ -261,17 +714,19 @@ async function fixture(
         { id: "source", name: "function-commands", path: plugin, enabled: pluginEnabled }
       ],
       enabled: () => enabled,
+      clawApplicable: (threadId) => threadId !== "harness",
       readSession,
       prepareSessionTitle,
       registeredTool: async (_workspace, _threadId, _grant, _input, _origin, _signal, run) => run(),
       publish: async (_, value) => publish(value),
-      changed: () => undefined
+      changed
     },
     () => {
       const guests = new Set<FunctionGuestRuntime>()
       return {
         async load(code, options) {
           loads++
+          await loadingGate()
           const guest = await FunctionGuestRuntime.create(code, options)
           guests.add(guest)
           allGuests.add(guest)
@@ -279,6 +734,9 @@ async function fixture(
         },
         stop() {
           for (const guest of guests) guest.dispose()
+        },
+        async stopAndDrain() {
+          await Promise.all([...guests].map(guest => guest.dispose()))
         }
       }
     }
@@ -293,10 +751,12 @@ async function fixture(
     plugin,
     manager,
     control: store,
+    changed,
     setPublication(value: typeof publish) {
       publish = value
     },
     loads: () => loads,
+    setLoadingGate(run: () => Promise<void>) { loadingGate = run },
     kill() {
       for (const guest of allGuests) guest.dispose()
     },
@@ -315,6 +775,39 @@ async function fixture(
     }
   }
 }
+
+it("native presentation reads only resident sessions and retains actual instance revocation", async () => {
+  const f = await fixture()
+  expect(await f.manager.feedbackPresentation(f.root, "cold")).toBeUndefined()
+  expect(f.loads()).toBe(0)
+  await f.approve()
+  const approvedLoads = f.loads()
+  expect(await f.manager.feedbackPresentation(f.root, "cold")).toBeUndefined()
+  expect(f.loads()).toBe(approvedLoads)
+  await f.manager.commands(f.root, "thread")
+  const before = f.loads()
+  const binding = await f.manager.feedbackPresentation(f.root, "thread")
+  expect(binding).toBeDefined()
+  binding!.assertLive()
+  f.setEnabled(false)
+  expect(() => binding!.assertLive()).toThrow()
+  expect(binding!.signal.aborted).toBe(true)
+  expect(await f.manager.feedbackPresentation(f.root, "thread")).toBeUndefined()
+  expect(f.loads()).toBe(before)
+})
+
+it("native presentation rejects a new entry after prepareEnd before publication or guest effects", async () => {
+  const f = await fixture()
+  await f.approve()
+  await f.manager.commands(f.root, "thread")
+  const loads = f.loads()
+  const publish = vi.fn(async (value: ModJson) => value)
+  f.setPublication(publish)
+  f.manager.prepareEnd("clear", "thread")
+  await expect(f.manager.feedbackPresentation(f.root, "thread")).rejects.toMatchObject({ code: "MODS_SESSION_ENDING" })
+  expect(publish).not.toHaveBeenCalled()
+  expect(f.loads()).toBe(loads)
+})
 
 it("does not load sessions for unmounted or disabled render sites and invalidates old site actions", async () => {
   const f = await fixture()
@@ -378,6 +871,10 @@ it("cold-mounts approved UI sites without command warmup and rebuilds after relo
   await expect(f.manager.siteRender(f.root, "thread", above!, {})).rejects.toThrow(
     "MODS_UI_SITE_CLOSED"
   )
+  await expect(f.manager.siteRender(f.root, "other-thread", reloaded!, {})).rejects.toThrow(
+    "MODS_UI_SITE_CLOSED"
+  )
+  expect(f.loads()).toBe(approvalLoads + 2)
   f.setEnabled(false)
   expect(await f.manager.siteMount(f.root, "thread", "AbovePrompt")).toBeNull()
   expect(f.loads()).toBe(approvalLoads + 2)
@@ -552,6 +1049,68 @@ it("unapproved plugin queries do not consume the limited session pool", async ()
   )
 })
 
+it("does not retain named-state capacity for legacy sessions after invalidation", async () => {
+  const f = await fixture()
+  await f.approve()
+  for (let i = 0; i < 8; i++) {
+    expect((await f.manager.commands(f.root, `legacy-${i}`)).length).toBeGreaterThan(0)
+    f.manager.invalidateAll()
+  }
+  expect((await f.manager.commands(f.root, "after-reloads")).length).toBeGreaterThan(0)
+})
+
+it("closes named-state listeners after failed session initialization without reserving slots", async () => {
+  const f = await fixture()
+  await f.approve()
+  let listeners = 0
+  const original = FunctionNamedState.prototype.listen
+  const spy = vi.spyOn(FunctionNamedState.prototype, "listen").mockImplementation(function (this: FunctionNamedState, listener) {
+    listeners++
+    const release = original.call(this, listener)
+    let active = true
+    return () => { if (active) listeners--; active = false; release() }
+  })
+  try {
+    f.setPublication(async (value) => {
+      if (value && typeof value === "object" && !Array.isArray(value) && typeof value.cwd === "string")
+        throw Error("START_PUBLICATION_FAILED")
+      return value
+    })
+    for (let i = 0; i < 7; i++) {
+      await expect(f.manager.commands(f.root, `failed-${i}`)).rejects.toThrow("START_PUBLICATION_FAILED")
+      expect(listeners).toBe(0)
+    }
+    f.setPublication(async (value) => value)
+    expect((await f.manager.commands(f.root, "recovered")).length).toBeGreaterThan(0)
+    f.manager.closeThread("recovered")
+    expect(listeners).toBe(0)
+  } finally { spy.mockRestore() }
+})
+
+it("retains named state on reload but clears it on disable and thread closure", async () => {
+  const f = await fixture()
+  await writeFile(join(f.plugin, "hooks/register.ts"), `export function register(on) {
+    on("session.start",async($,e,next)=>{await $.command.register({name:"named",description:"Named"});return next(e)});
+    on("command.run",{command:"named"},async($)=>{const ref={plugin:"function-commands",key:"count"};
+      const count=(await $.state.get(ref)).value??0;await $.state.set(ref,count+1);return {text:String(count+1)}})
+  }`)
+  await f.approve()
+  const run = async () => {
+    const command = (await f.manager.commands(f.root, "named-thread")).find((row) => row.command === "named")!
+    return (await f.manager.runCommand(f.root, "named-thread", command, "", new AbortController().signal)).text
+  }
+  expect(await run()).toBe("1")
+  f.manager.invalidateAll()
+  expect(await run()).toBe("2")
+  f.manager.invalidateAll()
+  f.setEnabled(false)
+  f.manager.invalidateAll()
+  f.setEnabled(true)
+  expect(await run()).toBe("1")
+  f.manager.closeThread("named-thread")
+  expect(await run()).toBe("1")
+})
+
 it("model tools bypass unapproved plugins without allocating sessions and stop intercepting after revocation", async () => {
   const f = await fixture()
   await writeFile(
@@ -599,14 +1158,19 @@ it("reclaims deleted sessions and rejects descriptors from the previous incarnat
   expect(await f.manager.commands(f.root, "overflow")).not.toHaveLength(0)
 })
 
-it("rebuilds a crashed approved VM only for a later call and refuses the old descriptor", async () => {
+it("requires explicit reload after a crashed approved VM and refuses the old descriptor", async () => {
   const f = await fixture()
   await f.approve()
   const [old] = await f.manager.commands(f.root, "thread")
   f.kill()
   await expect(
     f.manager.runCommand(f.root, "thread", old, "", new AbortController().signal)
-  ).rejects.toThrow("MODS_COMMAND_STALE")
+  ).rejects.toMatchObject({ code: "MODS_CONFIG_RELOAD_STOPPED" })
+  await expect(f.manager.commands(f.root, "thread")).resolves.toEqual([])
+  const signal = new AbortController().signal
+  const view = await f.manager.userConfig(f.root, "thread", "source", signal, () => {})
+  await f.manager.reloadUserConfig(f.root, "thread", "source", view.digest,
+    view.savedRevision, signal, () => {})
   const [current] = await f.manager.commands(f.root, "thread")
   expect(current.workspaceEpoch).toBeGreaterThan(old.workspaceEpoch)
   expect(
@@ -762,7 +1326,7 @@ it("runs the official file fixture through the project filesystem and normalizes
   expect(JSON.parse(answer.text)).toEqual({
     text: "HI",
     absolute: true,
-    entries: [{ name: "hello.txt", kind: "file", size: 2, isLink: false }],
+    entries: [{ name: "hello.txt", kind: "file", size: 2, isLink: false, mtimeMs: expect.any(Number) }],
     exists: true,
     missing: false,
     stat: { kind: "file", size: 2, modified: true }
@@ -808,7 +1372,7 @@ it("preserves canonical stat options through a real guest rewrite and the projec
   })
   expect(value.plain).toMatchObject({ kind: "file", size: 5, isLink: false })
   expect(value.plain).not.toHaveProperty("realPath")
-  expect(value.entries).toContainEqual({ name: "alias", kind: "other", size: 0, isLink: true })
+  expect(value.entries).toContainEqual({ name: "alias", kind: "other", size: 0, isLink: true, mtimeMs: 0 })
 })
 
 it("runs the shipped board's file-list command from its captured callback", async () => {
@@ -820,9 +1384,10 @@ it("runs the shipped board's file-list command from its captured callback", asyn
   )!
   await f.manager.runCommand(f.root, "thread", command, "", new AbortController().signal)
   const [pane] = await f.manager.panes(f.root, "thread")
+  if (pane.tree.type === "engine") throw Error("board button tree required")
   const button = pane.tree.children!.find(
-    (node) => typeof node !== "string" && node.props.key === "project-files"
-  ) as FunctionUiElement
+    (node) => typeof node !== "string" && node.type !== "engine" && node.type !== "fragment" && node.props.key === "project-files"
+  ) as FunctionUiNode
   await f.manager.act(f.root, "thread", {
     pane: pane.key,
     generation: pane.generation,
@@ -924,6 +1489,7 @@ it("protects real turn facts before observers and notices after hooks, including
   await f.approve()
   const signal = new AbortController().signal
   await f.manager.turnStart(f.root, "thread", { turnId: "turn", text: "SECRET" }, signal)
+  f.changed.mockClear()
   expect(
     await f.manager.turnComplete(
       f.root,
@@ -939,6 +1505,7 @@ it("protects real turn facts before observers and notices after hooks, including
       "actual-message"
     )
   ).toEqual({ text: "HIDDEN:HIDDEN:HIDDEN" })
+  expect(f.changed.mock.calls).toEqual([["thread", "records"]])
   expect(await f.manager.turnNotices(f.root, "thread")).toEqual([
     expect.objectContaining({
       turnId: "turn",
@@ -1151,4 +1718,57 @@ it("aborts a host title write waiting outside the guest when the session is repl
     controller.abort()
     await result
   }
+})
+
+
+it("applies Claw intersections to real commands/tools/UI while leaving Harness unchanged", async () => {
+  const f = await fixture()
+  const digest = await f.approve()
+  const [old] = await f.manager.commands(f.root, "thread")
+  const store = new ClawStore(f.control)
+  const profile = { id: "empty", name: "Empty", capabilities: [] }
+  store.write(f.root, { revision: 0, profiles: [profile], active: profile }, 0)
+  f.manager.invalidate(f.root)
+  const before = f.loads()
+  expect(await f.manager.runtimeReady(f.root, "thread")).toBe(false)
+  expect(await f.manager.commands(f.root, "thread")).toEqual([])
+  expect(await f.manager.registeredTools(f.root, "thread")).toEqual([])
+  expect(await f.manager.siteMount(f.root, "thread", "AbovePrompt")).toBeNull()
+  const core = vi.fn(async () => ({ value: "native" }))
+  expect(await f.manager.interceptTool(f.root, "thread", {}, undefined, core)).toEqual({ value: "native" })
+  expect(core).toHaveBeenCalledOnce()
+  expect(f.loads()).toBe(before)
+  await expect(f.manager.runCommand(f.root, "thread", old, "", new AbortController().signal)).rejects.toThrow()
+  expect(await f.manager.commands(f.root, "harness")).not.toHaveLength(0)
+  const selected = { ...profile, capabilities: [{ pluginId: "source", name: "function-commands", digest }] }
+  store.write(f.root, { revision: 1, profiles: [selected], active: selected }, 1)
+  f.manager.invalidate(f.root)
+  const [current] = await f.manager.commands(f.root, "thread")
+  expect((await f.manager.runCommand(f.root, "thread", current, "selected", new AbortController().signal)).text).toContain("selected")
+  f.manager.revoke(f.root, "function-commands")
+  await expect(f.manager.runtimeReady(f.root, "thread")).rejects.toThrow("未授权")
+})
+
+it("does not let an empty Claw bypass host mandatory completion rules", async () => {
+  const f = await fixture()
+  await f.approve()
+  f.manager.setCompletionPolicy(f.root, "thread", "function-commands", {
+    mode: "check", scope: "diff", checks: ["code-review"], maxRepairs: 0,
+    timeoutMs: 120000, modelTokenBudget: 4096
+  })
+  const available = await f.manager.status(f.root)
+  expect(f.manager.clawSelectionIssues(f.root, { id: "empty", name: "Empty", capabilities: [] }, available).join(" ")).toContain("强制完成规则")
+})
+
+it("rejects new mandatory rules for an excluded capability even with a warm session", async () => {
+  const f = await fixture()
+  await f.approve()
+  await f.manager.commands(f.root, "thread")
+  const profile = { id: "empty", name: "Empty", capabilities: [] }
+  new ClawStore(f.control).write(f.root, { revision: 0, profiles: [profile], active: profile }, 0)
+  expect(() => f.manager.setCompletionPolicy(f.root, "thread", "function-commands", {
+    mode: "check", scope: "diff", checks: ["code-review"], maxRepairs: 0,
+    timeoutMs: 120000, modelTokenBudget: 4096
+  })).toThrow("先将此能力加入")
+  expect(f.manager.completionPolicy(f.root, "thread", "function-commands").source).toBe("default")
 })

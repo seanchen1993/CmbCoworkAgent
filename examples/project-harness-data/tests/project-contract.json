@@ -1,0 +1,56 @@
+{
+  "apiVersion": "devclaw.project-contract/v1",
+  "cases": [
+    {
+      "id": "missing-0",
+      "stageId": "source",
+      "files": [],
+      "expected": "failed"
+    },
+    {
+      "id": "source-present",
+      "stageId": "source",
+      "files": [
+        {
+          "path": "source.md",
+          "text": "# 数据口径\n隔离样例\n"
+        }
+      ],
+      "expected": "passed"
+    },
+    {
+      "id": "missing-1",
+      "stageId": "transform",
+      "files": [],
+      "expected": "failed"
+    },
+    {
+      "id": "transform-present",
+      "stageId": "transform",
+      "files": [
+        {
+          "path": "transformation.md",
+          "text": "# 数据开发\n隔离样例\n"
+        }
+      ],
+      "expected": "passed"
+    },
+    {
+      "id": "missing-2",
+      "stageId": "review",
+      "files": [],
+      "expected": "failed"
+    },
+    {
+      "id": "review-present",
+      "stageId": "review",
+      "files": [
+        {
+          "path": "review.json",
+          "text": "{\n  \"summary\": \"仅验证样例结构；未执行业务\",\n  \"checked\": true\n}\n"
+        }
+      ],
+      "expected": "passed"
+    }
+  ]
+}

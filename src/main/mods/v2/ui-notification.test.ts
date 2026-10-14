@@ -4,6 +4,7 @@ import { FunctionGuestRuntime } from "./guest-runtime"
 import { FunctionSession, SESSION_CAPABILITIES } from "./session"
 import { CLIENT_BOOTSTRAP } from "./client-bootstrap"
 import { randomUUID } from "node:crypto"
+import { ordinaryFunctionNode } from "../../../../tests/support/function-ui-node"
 
 const panes: FunctionPanes[] = []
 const sessions: FunctionSession[] = []
@@ -63,7 +64,7 @@ it("does not publish a queued scoped update after closing", async () => {
   await vi.advanceTimersByTimeAsync(100)
   expect(changed).not.toHaveBeenCalled()
 })
-it("carries actual Client redraw scope through FunctionSession while SDK invalidation remains global", async () => {
+it("carries Client and Pane-only SDK redraw scopes through FunctionSession", async () => {
   const changes: unknown[] = []
   const guest = await FunctionGuestRuntime.create(`var __cmbFunctionMod={register(on){
     on("session.start",async($,e,next)=>{for(const name of ["open","redraw"])await $.command.register({name,description:name});return next(e)});
@@ -108,13 +109,14 @@ it("carries actual Client redraw scope through FunctionSession while SDK invalid
   await session.clients.act({
     pane: snapshot.key,
     instance: client.id,
+    generation: client.generation,
     intentId: randomUUID(),
     kind: "press",
-    handle: client.tree.press!.handle
+    handle: ordinaryFunctionNode(client.tree).press!.handle
   })
   await expect.poll(() => changes).toEqual(["panes"])
-  expect((await session.panes.snapshot())[0].clients![0].tree.props.label).toBe("1")
+  expect(ordinaryFunctionNode((await session.panes.snapshot())[0].clients![0].tree).props.label).toBe("1")
   changes.length = 0
   await session.run("redraw", "")
-  await expect.poll(() => changes).toEqual([undefined])
+  await expect.poll(() => changes).toEqual(["panes"])
 })

@@ -1,9 +1,9 @@
-import { useState, type ReactNode } from "react"
+import type { ReactNode } from "react"
 import type { ModObject } from "../../../../shared/mods/types"
 import { functionSiteProps } from "../../../../shared/mods/v2/sites"
 import { FunctionSite } from "./FunctionSite"
 
-/** Group presentation augments native rows; approval controls never enter this site. */
+/** Native rows are rendered only at the protected engine position; approvals stay host-owned. */
 export function FunctionToolGroup({
   threadId,
   calls,
@@ -15,7 +15,7 @@ export function FunctionToolGroup({
   calls: unknown[]
   blocked: boolean
   isActive: boolean
-  children(expanded: boolean): ReactNode
+  children(expanded: boolean, safeCalls?: ModObject[]): ReactNode
 }): ReactNode {
   let facts: ModObject
   try {
@@ -25,33 +25,34 @@ export function FunctionToolGroup({
     return children(false)
   }
   return (
-    <GroupSite threadId={threadId} facts={facts}>
-      {children}
-    </GroupSite>
-  )
-}
-
-function GroupSite({
-  threadId,
-  facts,
-  children
-}: {
-  threadId: string
-  facts: ModObject
-  children(expanded: boolean): ReactNode
-}): ReactNode {
-  const [expanded, setExpanded] = useState(false)
-  return (
-    <>
-      <FunctionSite
-        threadId={threadId}
-        component="ToolGroup"
-        facts={facts}
-        onExpansion={setExpanded}
-        fallback={null}
-        className="contents"
-      />
-      {children(expanded)}
-    </>
+    <FunctionSite
+      threadId={threadId}
+      component="ToolGroup"
+      facts={facts}
+      fallback={children(false)}
+      renderNative={(safe) => {
+        let checked: ModObject
+        try {
+          checked = functionSiteProps("ToolGroup", safe)
+        } catch {
+          return null
+        }
+        const pinned = (value: ModObject) =>
+          (value.calls as ModObject[]).map((call) => [
+            call.tool_use_id,
+            call.tool,
+            call.isRunning,
+            call.isErrored,
+            call.isInterrupted
+          ])
+        if (
+          checked.isActive !== facts.isActive ||
+          JSON.stringify(pinned(checked)) !== JSON.stringify(pinned(facts))
+        )
+          return null
+        return children(checked.isExpanded === true, checked.calls as ModObject[])
+      }}
+      className="contents"
+    />
   )
 }

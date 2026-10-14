@@ -1,3 +1,4 @@
+import { openModsResults } from "./mods-sidebar-navigation"
 import assert from "node:assert/strict"
 import { mkdirSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
@@ -71,6 +72,7 @@ export async function verifyBase64(
   const select = async () => {
     await page.reload({ waitUntil: "domcontentloaded" })
     await page.getByText("Guest Base64", { exact: true }).first().click()
+    await openModsResults(page)
   }
   await select()
   const run = async (command: string) => {

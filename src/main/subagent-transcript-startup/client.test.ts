@@ -5,7 +5,7 @@ import { DatabaseSync } from "node:sqlite"
 import { fileURLToPath } from "node:url"
 import { Worker } from "node:worker_threads"
 import { build } from "esbuild"
-import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest"
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest"
 import { SUBAGENT_TRANSCRIPT_STARTUP_TOTAL_BYTES } from "../../shared/subagent-transcript-storage"
 import {
   SUBAGENT_TRANSCRIPT_STARTUP_MAX_WAITERS,
@@ -125,6 +125,106 @@ function createClient(databasePath: string): SubagentTranscriptStartupClient {
 }
 
 describe("subagent transcript startup worker", () => {
+  it("does not create a worker after synchronous cancellation and releases admission", async () => {
+    const workers: FakeStartupWorker[] = []
+    const client = new SubagentTranscriptStartupClient(async () => {
+      const worker = new FakeStartupWorker()
+      workers.push(worker)
+      return worker as unknown as Worker
+    })
+    for (let index = 0; index < 40; index++) {
+      const controller = new AbortController()
+      const cancelled = client.read(`cancel-${index}`, { signal: controller.signal })
+      controller.abort()
+      await expect(cancelled).rejects.toBeInstanceOf(SubagentTranscriptStartupCancelledError)
+    }
+    expect(workers).toHaveLength(0)
+
+    const retries = Array.from(
+      { length: SUBAGENT_TRANSCRIPT_STARTUP_MAX_WORKERS },
+      (_, index) => client.read(`retry-after-cancel-${index}`)
+    )
+    for (
+      let attempt = 0;
+      attempt < 10 && workers.filter((worker) => worker.postCount === 1).length !== retries.length;
+      attempt++
+    ) {
+      await new Promise<void>((resolve) => setImmediate(resolve))
+    }
+    expect(workers).toHaveLength(retries.length)
+    workers.forEach((worker, index) => {
+      expect(worker.postCount).toBe(1)
+      worker.emit("message", {
+        requestId: index + 1,
+        ok: true,
+        manifests: { retained: [index] }
+      })
+    })
+    await expect(Promise.all(retries)).resolves.toEqual([{ retained: [0] }, { retained: [1] }])
+    expect(workers.every((worker) => worker.terminated)).toBe(true)
+    await client.close()
+  })
+
+  it("creates only the latest worker when a scope is superseded in the same tick", async () => {
+    const workers: FakeStartupWorker[] = []
+    const client = new SubagentTranscriptStartupClient(async () => {
+      const worker = new FakeStartupWorker()
+      workers.push(worker)
+      return worker as unknown as Worker
+    })
+    const first = client.read("superseded", { scope: "window:latest" })
+    const second = client.read("latest", { scope: "window:latest" })
+    await expect(first).rejects.toBeInstanceOf(SubagentTranscriptStartupCancelledError)
+    for (let attempt = 0; attempt < 10 && workers[0]?.postCount !== 1; attempt++) {
+      await new Promise<void>((resolve) => setImmediate(resolve))
+    }
+    expect(workers).toHaveLength(1)
+    workers[0].emit("message", { requestId: 1, ok: true, manifests: { latest: [] } })
+    await expect(second).resolves.toEqual({ latest: [] })
+    expect(workers[0].terminated).toBe(true)
+    await client.close()
+  })
+
+  it("cancels exactly one scope without constructing or terminating another window's read", async () => {
+    const workers: FakeStartupWorker[] = []
+    const client = new SubagentTranscriptStartupClient(async () => {
+      const worker = new FakeStartupWorker()
+      workers.push(worker)
+      return worker as unknown as Worker
+    })
+    const foreground = client.read("same-thread", { scope: "webContents:1:foreground" })
+    const cancelled = expect(foreground).rejects.toBeInstanceOf(
+      SubagentTranscriptStartupCancelledError
+    )
+    const otherWindow = client.read("same-thread", { scope: "webContents:2:foreground" })
+    void otherWindow.catch(() => undefined)
+    try {
+      await vi.waitFor(() =>
+        expect(workers.filter((worker) => worker.postCount === 1)).toHaveLength(2)
+      )
+      client.cancelScope("webContents:1:foreground")
+      await cancelled
+      expect(workers).toHaveLength(2)
+      expect(workers[0].terminated).toBe(true)
+      expect(workers[1].terminated).toBe(false)
+      workers[1].emit("message", { requestId: 2, ok: true, manifests: { retained: [] } })
+      await expect(otherWindow).resolves.toEqual({ retained: [] })
+      expect(workers[1].terminated).toBe(true)
+    } finally {
+      await client.close()
+      await Promise.allSettled([foreground, cancelled, otherWindow])
+    }
+  })
+
+  it("ignores absent scopes without work and preserves the scope string limit", () => {
+    const factory = vi.fn(async () => new FakeStartupWorker() as unknown as Worker)
+    const client = new SubagentTranscriptStartupClient(factory)
+    client.cancelScope("missing")
+    client.cancelScope("")
+    expect(() => client.cancelScope("x".repeat(1_025))).toThrow("string limit")
+    expect(factory).not.toHaveBeenCalled()
+  })
+
   it("bounds worker creation/waiters and rejects a clean exit with pending work", async () => {
     expect(SUBAGENT_TRANSCRIPT_STARTUP_WORKER_RESOURCE_LIMITS.maxOldGenerationSizeMb).toBe(128)
     const workers: FakeStartupWorker[] = []

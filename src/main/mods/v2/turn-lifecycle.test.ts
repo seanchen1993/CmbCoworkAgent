@@ -65,6 +65,54 @@ function fixture() {
 }
 
 describe("function turn lifecycle", () => {
+  it("reports real registered start before its hook and clears a rejected private start receipt", async () => {
+    const f = fixture()
+    const bad = f.binding()
+    bad.onStarted = () => {
+      expect(f.lifecycle.stats).toEqual({ entries: 1, running: 1 })
+      expect(f.starts).toEqual([])
+      throw Error("ACTUAL_RECEIPT_EXPIRED")
+    }
+    await expect(f.lifecycle.start(bad)).rejects.toThrow("ACTUAL_RECEIPT_EXPIRED")
+    expect(f.lifecycle.stats).toEqual({ entries: 0, running: 0 })
+    expect(f.starts).toEqual([])
+    const next = f.binding("next-run", "next-turn")
+    next.onStarted = () => {
+      expect(f.lifecycle.hasUnsettled("thread")).toBe(true)
+      expect(f.starts).toEqual([])
+    }
+    await f.lifecycle.start(next)
+    expect(f.starts).toEqual(["next-turn"])
+    f.lifecycle.finish("thread", "next-run", { reason: "answer" })
+    await tick()
+    f.lifecycle.close()
+  })
+  it("configuration stays busy after the physical task ends until actual terminal dispatch settles", async () => {
+    const entered = Promise.withResolvers<void>(),
+      finish = Promise.withResolvers<void>()
+    const settled = vi.fn()
+    const f = fixture()
+    const original = f.lifecycle["host"].complete
+    f.lifecycle["host"].complete = async (...args) => {
+      entered.resolve()
+      await finish.promise
+      return original(...args)
+    }
+    const stop = f.lifecycle.onSettled(settled)
+    await f.lifecycle.start(f.binding())
+    expect(f.lifecycle.hasUnsettled("thread")).toBe(true)
+    f.lifecycle.finish("thread", "run", { reason: "answer" })
+    await entered.promise
+    expect(f.busy.size).toBe(0)
+    expect(f.lifecycle.hasUnsettled("thread")).toBe(true)
+    expect(settled).not.toHaveBeenCalled()
+    finish.resolve()
+    await tick()
+    expect(f.lifecycle.hasUnsettled("thread")).toBe(false)
+    expect(settled).toHaveBeenCalledWith("thread")
+    stop()
+    f.lifecycle.close()
+  })
   it("dispatches a host message anchor separately from the public hook event", async () => {
     const f = fixture()
     await f.lifecycle.start(f.binding())
@@ -241,6 +289,62 @@ describe("function turn lifecycle", () => {
     f.lifecycle.close()
   })
 
+  it("keeps authority-owned child output isolated from reused public tool labels", async () => {
+    const f = fixture()
+    const binding = f.binding("private-run", "private-turn")
+    const child = f.lifecycle.startChild({
+      ...binding,
+      agentId: "mod-task:private",
+      parentRunId: "run",
+      streamSource: "authority"
+    })
+    const payload = (content: string) => [{ type: "ai", id: "response", content }]
+    // Even a public label equal to the private id is not the stream's authority.
+    f.lifecycle.observeChildStream("thread", "run", "mod-task:private", payload("spoof"), "delta")
+    child.observeStream(payload("partial"), "delta")
+    f.lifecycle.observeChildStream(
+      "thread",
+      "run",
+      "mod-task:private",
+      payload("duplicate"),
+      "delta"
+    )
+    binding.cancel()
+    child.finish("error")
+    child.observeStream(payload("late"), "delta")
+    await tick()
+    expect(f.ends).toHaveLength(1)
+    expect(f.ends[0]).toMatchObject({
+      agentId: "mod-task:private",
+      answer: "partial",
+      reason: "aborted"
+    })
+    f.lifecycle.close()
+  })
+
+  it("rejects an expired authority observer and ignores it after replacement", async () => {
+    const f = fixture()
+    let current = true
+    const child = f.lifecycle.startChild({
+      ...f.binding("private-run", "private-turn"),
+      agentId: "mod-task:private",
+      streamSource: "authority",
+      assertCurrent: () => {
+        if (!current) throw Error("expired")
+      }
+    })
+    current = false
+    expect(() => child.observeStream([{ type: "ai", id: "r", content: "late" }], "delta")).toThrow(
+      "expired"
+    )
+    f.lifecycle.invalidate("/workspace", "thread")
+    expect(() =>
+      child.observeStream([{ type: "ai", id: "r", content: "late" }], "delta")
+    ).not.toThrow()
+    expect(f.ends).toEqual([])
+    f.lifecycle.close()
+  })
+
   it("shares the main/child capacity bound and invalidates pending child callbacks", async () => {
     const f = fixture()
     const children = Array.from({ length: 100 }, (_, index) =>
@@ -279,10 +383,13 @@ describe("function turn lifecycle", () => {
     f.lifecycle.suspend("thread", "run")
     f.lifecycle.observeStream("thread", "run", part("paused"), "delta")
     await f.lifecycle.start(f.binding("resumed"))
+    const settled = vi.fn()
+    f.lifecycle.onSettled(settled)
     f.lifecycle.observeStream("thread", "resumed", part("x".repeat(1024 * 1024 + 1)), "delta")
     f.lifecycle.finish("thread", "resumed", { reason: "answer" })
     expect(f.lifecycle.stats).toEqual({ entries: 0, running: 0 })
     expect(f.error).toHaveBeenCalledOnce()
+    expect(settled).toHaveBeenCalledWith("thread")
     expect(f.ends).toEqual([])
     f.lifecycle.close()
   })

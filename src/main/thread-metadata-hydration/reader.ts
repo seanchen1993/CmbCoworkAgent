@@ -95,6 +95,12 @@ const THREAD_LIST_PAGE_MAX_ROWS = 128
 const THREAD_LIST_PAGE_MAX_BYTES = 512 * 1024
 const THREAD_GROUP_ID_MAX_ROWS = 10_000
 const THREAD_GROUP_ID_MAX_RESPONSE_BYTES = 2 * 1024 * 1024
+// Only this explicit host marker hides execution plumbing. Legacy workflow/subagent
+// metadata is still public. Apply before LIMIT/cursors and destructive group selection.
+const PUBLIC_THREAD_PREDICATE = `COALESCE(json_type(
+  CASE WHEN metadata IS NOT NULL AND json_valid(metadata) THEN metadata ELSE '{}' END,
+  '$.isInternalFlowRuntime'
+), '') <> 'true'`
 const GIT_CONTEXT_TRACKED_FILE_LIMIT = 512
 const GIT_CONTEXT_TRACKED_FILE_CHAR_BUDGET = 256 * 1024
 const GIT_CONTEXT_PATH_CHAR_LIMIT = 4_096
@@ -576,12 +582,14 @@ export function readThreadSummaryPage(
       ? `SELECT thread_id, created_at, updated_at, ${metadataProjection} AS metadata,
                 status, title
          FROM threads
-         WHERE updated_at < ? OR (updated_at = ? AND thread_id < ?)
+         WHERE (${PUBLIC_THREAD_PREDICATE})
+           AND (updated_at < ? OR (updated_at = ? AND thread_id < ?))
          ORDER BY updated_at DESC, thread_id DESC
          LIMIT ?`
       : `SELECT thread_id, created_at, updated_at, ${metadataProjection} AS metadata,
                 status, title
          FROM threads
+         WHERE (${PUBLIC_THREAD_PREDICATE})
          ORDER BY updated_at DESC, thread_id DESC
          LIMIT ?`
   )
@@ -691,7 +699,7 @@ export function readThreadGroupIds(
               ELSE NULL
             END AS incarnation_token
      FROM threads
-     WHERE (${selectorSql})
+     WHERE (${selectorSql}) AND (${PUBLIC_THREAD_PREDICATE})
      ORDER BY thread_id
      LIMIT ?`
   )

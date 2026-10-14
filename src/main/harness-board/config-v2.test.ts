@@ -6,10 +6,33 @@ import {
   DEPLOY_UNIT_V2_FILE,
   FEATURE_V2_FILE,
   initializeHarnessConfigV2,
-  parseFeatureV2
+  parseFeatureV2,
+  validateDeployUnitConfigs
 } from "./config-v2"
 
 const roots: string[] = []
+
+function deployUnitConfigs(count: number) {
+  return Array.from({ length: count }, (_, index) => ({
+    deployUnitIdMapping: `mapping-${index}`,
+    deployUnitId: `unit-${index}`,
+    description: `Description ${index}`,
+    repositoryPaths: [{ pathId: `path-${index}`, localRepoPath: `/repo/${index}` }]
+  }))
+}
+
+describe("deploy unit configuration entry boundary", () => {
+  it("retains all 512 valid entries without truncating identities or paths", () => {
+    const input = deployUnitConfigs(512)
+    expect(validateDeployUnitConfigs(input)).toEqual(input)
+  })
+
+  it("rejects a complete otherwise valid 513-entry configuration", () => {
+    expect(() => validateDeployUnitConfigs(deployUnitConfigs(513))).toThrow(
+      "发布单元配置格式无效"
+    )
+  })
+})
 afterEach(async () => {
   await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })))
 })

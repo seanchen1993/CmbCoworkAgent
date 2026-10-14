@@ -18,7 +18,7 @@
 | 技能系统 | 内置与自定义技能加载、启停、上传（`.md/.zip`）、删除；在线技能提案与确认 |
 | MCP 扩展 | MCP 连接器管理、连通性测试、懒加载工具检索 |
 | 插件系统 | 插件安装（ZIP/目录）、启停、卸载；插件内 `skills` 与 `.mcp.json` 自动注册 |
-| Function Mods | 项目授权的隔离函数插件、命令、工具、交互面板与完成检查规则；默认关闭，按版本摘要明确授权 |
+| Sparks 灵件 | 项目授权的可编程扩展、命令、工具、交互面板与完成检查规则；默认关闭，按版本摘要明确授权；见[官方说明](docs/sparks/README.md) |
 | Hook 系统 | 全局、工作区、插件、技能 Hook；支持 Claude Code hooks settings、`SKILL.md` frontmatter、`once`、`onBlock` 与强制修订/停止 |
 | 自优化 | Trace 收集与回放、候选技能生成、审批后写回技能目录 |
 | 定时任务 | 按频率自动触发 Agent 执行（once/manual/hourly/daily/weekdays/weekly/interval） |
@@ -27,17 +27,45 @@
 | ChatX 机器人 | WebSocket 收消息、Agent 处理、HTTP 回传结果，支持多机器人并发配置 |
 | 可视化视图 | Thread 视图、Kanban 视图、自定义中心（技能/MCP/插件/沙箱/自优化等） |
 
-## Function Mods 使用
+## Sparks 灵件使用
 
-打开项目会话，进入「自定义 → Function Mods」，解锁管理设置并明确开启后安装、批准插件。
-命令与面板示例见[使用和开发指南](docs/mods-v2-authoring.md)；自动检查、修复次数及预算配置见
-[项目完成检查规则](docs/mods-v2-application-completion-rules.md)。可选的
-[Autobiz 真实任务演示](docs/mods-v2-real-business-demo.md)使用原 Agent 修复循环和固定版本 validator。
+新的对外名称为 **DevClaw Sparks（灵件）**。完整的概览、对话创作、开发示例、安装复用和排障，
+请从 [Sparks 官方说明](docs/sparks/README.md)开始。当前部分界面仍显示旧名称，协议和配置字段保持兼容。
+下方保留历史版本操作说明；新构建入口及能力范围以官方说明为准。
 
-Claude Mods 的逐项支持范围见[兼容矩阵](docs/mods-v2-compatibility-matrix.json)，
-本轮优先交付常用能力，复杂边界按[核心范围](docs/mods-v2-core-delivery-scope-2026-09-24.md)延期。
-测试结果、性能欠账与限制见[实施状态](docs/mods-v2-status-2026-09-24.md)。安装包由 GitHub Actions
-构建，Windows 上传前运行[真实包内验证](docs/mods-v2-actions-package-validation.md)。
+操作说明更新于 2026 年 10 月 7 日。
+
+打开已关联项目目录的会话，配置可用模型，进入「自定义 → Function Mods」明确开启应用级和
+项目级 Mods；当前不需要管理口令或解锁步骤。需要插件能力时再安装插件，并核对摘要、批准能力。
+
+先选你需要的使用方式：
+
+- **直接跑步骤**：「DIY 流程」→ 新建流程或选择「Autobiz 实际项目预设」→ 保存流程 →
+  「运行已保存版本」。无需上传插件，就能体验只检视、检视与测试、修复与复检的区别。
+- **让普通聊天按你的组合工作**：「我的 Claw」→ 选择组件和模型 → 保存能力组合 → 应用到
+  当前对话并确认 → 照常聊天。组件在它支持的环节自动参与；要启动组合中的整套流程，
+  切到「执行流程」再发送目标。
+
+项目测试需要已有真实脚本，仍遵守原审批。最少操作见[DIY Claw 上手](docs/mods-diy-claw-quickstart.md)。
+
+聊天可用 `@文件` 引用项目中的文本文件，也可与上传附件一起发送。任务忙时，新消息先入队；
+需要交给当前任务时，点「追加到本轮」，等待「正在追加…」变为「已追加」。点「停止生成」
+停止当前前台任务；尚未接纳的队列草稿可保留、刷新恢复和编辑。关闭 Mods 后，未读取的
+`@文件` 引用仍在实际发送时按普通附件读取最新正文。文件权限、附件额度和审批仍生效。
+
+DIY 组合当前用于普通本地会话，已选组件只在其支持的环节参与；协调模式使用项目 Mods 设置。
+协调子任务暂不支持 `session.append` 会话追加接口；可通过主协调任务的追加入口补充要求。
+
+插件组件如何组合、保存和应用见[使用与迁移说明](docs/mods-devclaw-continuity-delivery-2026-10-03.md)；
+命令与面板示例见[使用和开发指南](docs/mods-v2-authoring.md)。普通聊天的自动完成检查、修复次数
+及预算配置见[项目完成检查规则](docs/mods-v2-application-completion-rules.md)。可选的
+[Autobiz 真实任务演示](docs/mods-v2-real-business-demo.md)另需固定版本 validator 等演示依赖。
+
+当前交付范围、实测结果、性能欠账与尚未完成的整体验收见
+[当前能力与后续工作](docs/mods-official-features-and-roadmap-plain-2026-10-03.md)，逐项接口范围见
+[兼容矩阵](docs/mods-v2-compatibility-matrix.json)。上述使用路径不代表当前开发版本已完成合并后的
+全面验收。安装包由 GitHub Actions 构建，Windows 上传前运行
+[真实包内验证](docs/mods-v2-actions-package-validation.md)。
 
 ## 技术架构
 
@@ -133,8 +161,7 @@ tests/                # 测试用例（当前示例：diff panel）
 
 ### 环境要求
 
-- Node.js `>=18 <24`
-- Windows 环境必须使用 Node.js `20.x`
+- Node.js `22.x`（与当前 `.nvmrc` 一致，Windows 同样使用此版本）
 - npm `>=10`
 
 ### 本地开发

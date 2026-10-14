@@ -37,12 +37,18 @@ const metadata = {
 } as CheckpointMetadata
 
 async function main(): Promise<void> {
-  const home = await mkdtemp(join(tmpdir(), "checkpointer-lru-"))
-  process.env.HOME = home
-  process.env.USERPROFILE = home
-
-  const runtime = await import("../src/main/agent/runtime")
+  const fixtureDirectory = await mkdtemp(join(tmpdir(), "checkpointer-lru-"))
+  const previousDataRoot = process.env.CMB_COWORK_AGENT_HOME
+  process.env.CMB_COWORK_AGENT_HOME = join(fixtureDirectory, ".cmbcoworkagent")
+  let closeRuntime: (() => Promise<void>) | undefined
+  let closeDatabase: (() => Promise<void>) | undefined
+  const failures: unknown[] = []
   try {
+    const database = await import("../src/main/db/index")
+    closeDatabase = database.closeDatabase
+    await database.initializeDatabase()
+    const runtime = await import("../src/main/agent/runtime")
+    closeRuntime = runtime.closeRuntime
     await runtime.withCheckpointer("pinned-thread", async (pinned) => {
       await pinned.put(config("pinned-thread"), checkpoint("pinned-cp"), metadata)
 
@@ -236,12 +242,12 @@ async function main(): Promise<void> {
     // into initialize (running the recovery write) and then hit the ACTIVE
     // tombstone at the post-init check — refusal + re-sweep, no timing luck.
     const recoveryId = "recovery-mid-init"
-    const threadsDir = join(home, ".cmbcoworkagent", "threads")
+    const threadsDir = join(fixtureDirectory, ".cmbcoworkagent", "threads")
     await mkdir(threadsDir, { recursive: true })
     {
       // Craft a valid sqlite file and plant it as the .bak recovery candidate
       // (no live file → initialize WILL select it and write live back).
-      const fixturePath = join(home, "recovery-fixture.sqlite")
+      const fixturePath = join(fixtureDirectory, "recovery-fixture.sqlite")
       const fixture = new SqlJsSaver(fixturePath)
       await fixture.put(config(recoveryId), checkpoint("recovered-cp"), metadata)
       await fixture.flush()
@@ -328,8 +334,8 @@ async function main(): Promise<void> {
     // leaving zero on-disk artifacts for the still-tombstoned id.
     {
       const checkpointDirCandidates = [
-        join(home, ".cmbcoworkagent", "threads"),
-        join(home, ".cmbcoworkagent")
+        join(fixtureDirectory, ".cmbcoworkagent", "threads"),
+        join(fixtureDirectory, ".cmbcoworkagent")
       ]
       const { readdirSync, existsSync: existsSyncFs } = await import("fs")
       const leftovers: string[] = []
@@ -469,11 +475,21 @@ async function main(): Promise<void> {
       "the revived incarnation's fresh saver is fully usable"
     )
 
-    console.log("checkpointer LRU lease tests passed")
+  } catch (error) {
+    failures.push(error)
   } finally {
-    await runtime.closeRuntime()
-    await rm(home, { recursive: true, force: true })
+    try { await closeRuntime?.() } catch (error) { failures.push(error) }
+    try { await closeDatabase?.() } catch (error) { failures.push(error) }
+    try { await rm(fixtureDirectory, { recursive: true, force: true }) }
+    catch (error) { failures.push(error) }
+    finally {
+      if (previousDataRoot === undefined) delete process.env.CMB_COWORK_AGENT_HOME
+      else process.env.CMB_COWORK_AGENT_HOME = previousDataRoot
+    }
   }
+  if (failures.length === 1) throw failures[0]
+  if (failures.length > 1) throw new AggregateError(failures, "Checkpointer fixture cleanup failed")
+  console.log("checkpointer LRU lease tests passed")
 }
 
 main().catch((error) => {

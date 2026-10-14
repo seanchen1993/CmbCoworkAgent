@@ -1,3 +1,4 @@
+import { registerWindowPresentation } from "./window-presentation"
 import { initializeHarnessConfigV2 } from "./harness-board/config-v2"
 import { initializeNotificationRuntime } from "./notification-runtime"
 import { notificationService } from "./services/notification-service"
@@ -365,6 +366,8 @@ import { closeMemoryCatalogWorker } from "./memory-catalog/client"
 import { registerTaskMmdHandlers } from "./ipc/task-mmd"
 import { registerGitHandlers } from "./ipc/git"
 import { registerPluginHandlers } from "./ipc/plugins"
+import { registerPluginDerivationHandlers } from "./ipc/plugin-derivation"
+import { registerNodeCompositionHandlers } from "./ipc/node-composition"
 import { registerModsHandlers } from "./ipc/mods"
 import { registerPluginFileHandlers } from "./ipc/plugin-files"
 import { registerSandboxHandlers } from "./ipc/sandbox"
@@ -380,6 +383,7 @@ import { closeDashboardEsWorker } from "./services/dashboard-es-client"
 import { registerAdoptionTraceHandlers } from "./ipc/adoption-trace"
 import { registerFeatureGateHandlers } from "./ipc/feature-gates"
 import { registerHarnessBoardHandlers } from "./ipc/harness-board"
+import { registerProjectRuntimeHandlers } from "./ipc/project-runtime"
 import { recoverManagedRunsAtStartup } from "./harness-board/managed-run-recovery"
 import { configureManagedRunProjectDirectories } from "./harness-board/managed-run-store"
 import {
@@ -450,11 +454,13 @@ import { LocalSandbox } from "./agent/local-sandbox"
 import { closeRuntime } from "./agent/runtime"
 import { makeBroadcastHookResultCallback } from "./hooks/result-callback"
 import { fireSessionEndAll, hasActiveSessions } from "./hooks/session-lifecycle"
+import { getModsManager } from "./mods/manager"
 import { registerUpdaterHandlers, startUpdateChecker, stopUpdateChecker } from "./updater"
 import { startBuiltinModelCatalogRefresh, stopBuiltinModelCatalogRefresh } from "./models/registry"
 import { markFullBackupCleanupReady, runStartupSelfCheck } from "./updater/rollback"
 import {
   getGitChangeNoticeEnabled,
+  getGitChangeNoticeSetting,
   getOpenworkDir,
   getStoredAgentGraphRecursionLimit,
   getStoredAgentToolStrategy,
@@ -740,6 +746,8 @@ function createWindow(): void {
       getLocalIP().includes(ip)
     ) // 自动隐藏菜单栏
   })
+
+  registerWindowPresentation(ipcMain, mainWindow)
 
   mainWindow.on("ready-to-show", () => {
     mainWindow?.show()
@@ -1160,6 +1168,8 @@ if (browserNativeMessagingHostLaunch) {
     registerTaskMmdHandlers(ipcMain)
     registerGitHandlers()
     registerPluginHandlers(ipcMain)
+    registerPluginDerivationHandlers(ipcMain, () => mainWindow)
+    registerNodeCompositionHandlers(ipcMain, () => mainWindow)
     registerModsHandlers(ipcMain, () => mainWindow)
     registerPluginFileHandlers(ipcMain)
     registerSandboxHandlers(ipcMain)
@@ -1175,6 +1185,7 @@ if (browserNativeMessagingHostLaunch) {
     registerFeatureGateHandlers(ipcMain)
     registerNotificationHandlers(ipcMain)
     registerHarnessBoardHandlers(ipcMain)
+    registerProjectRuntimeHandlers(ipcMain, () => mainWindow)
     registerUpdaterHandlers()
     registerLspHandlers(ipcMain)
     registerPathOpenersHandlers(ipcMain)
@@ -1233,6 +1244,12 @@ if (browserNativeMessagingHostLaunch) {
       return getGitChangeNoticeEnabled()
     })
 
+    ipcMain.handle("app:get-git-change-notice-setting", (event) => {
+      if (!mainWindow || mainWindow.isDestroyed() || event.sender.id !== mainWindow.webContents.id)
+        throw new Error("Git change notice settings are only available to the main window")
+      return getGitChangeNoticeSetting()
+    })
+
     ipcMain.handle(GIT_CHANGE_NOTICE_SET_CHANNEL, (event, enabled: unknown) => {
       if (
         !mainWindow ||
@@ -1242,7 +1259,9 @@ if (browserNativeMessagingHostLaunch) {
         throw new Error("Git change notice settings are only available to the main window")
       }
       if (typeof enabled !== "boolean") throw new Error("Invalid Git change notice setting")
-      return setGitChangeNoticeEnabled(enabled)
+      const actual = setGitChangeNoticeEnabled(enabled)
+      mainWindow.webContents.send("settings:git-change-notice-updated", getGitChangeNoticeSetting())
+      return actual
     })
 
     ipcMain.handle(AGENT_RUNTIME_SETTINGS_GET_CHANNEL, (event): AgentRuntimeSettings => {
@@ -1629,7 +1648,10 @@ if (browserNativeMessagingHostLaunch) {
       event.preventDefault()
       return
     }
-    if (!activeSessions && !activeTasks && !pendingTraceReports) {
+    // Capture resident Mods and gate new entries before any asynchronous teardown.
+    const modsEnd = getModsManager()?.prepareFunctionEnd("logout")
+    if (!activeSessions && !activeTasks && !pendingTraceReports && !modsEnd?.count) {
+      modsEnd?.finish()
       sessionEndDone = true
       setAppQuitting(true)
       return
@@ -1649,12 +1671,17 @@ if (browserNativeMessagingHostLaunch) {
             console.warn("[Main] Active task shutdown error:", result.reason)
           }
         }
-        await fireSessionEndAll(5_000, (threadId) =>
-          makeBroadcastHookResultCallback(`agent:stream:${threadId}`)
-        )
+        const classic = () => fireSessionEndAll(5_000, (threadId) =>
+          makeBroadcastHookResultCallback(`agent:stream:${threadId}`))
+        try {
+          if (modsEnd) await modsEnd.classic(classic)
+          else await classic()
+        } catch (error) { console.warn("[Main] Original SessionEnd hooks error:", error) }
+        await modsEnd?.notify()
       } catch (error) {
         console.warn("[Main] SessionEnd hooks error:", error)
       } finally {
+        modsEnd?.finish()
         await flushPendingTraceReports(5_000).catch((error) => {
           console.warn("[Main] Pending trace report flush error:", error)
         })

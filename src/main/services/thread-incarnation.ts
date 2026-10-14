@@ -13,6 +13,16 @@ export interface ThreadIncarnation {
   legacyCreatedAt: number
 }
 
+const capturedMetadataGet = WeakMap.prototype.get
+const capturedMetadataSet = WeakMap.prototype.set
+const capturedMetadata = new WeakMap<
+  ThreadIncarnation,
+  {
+    rawMetadata: string | null
+    token: string | null
+  }
+>()
+
 export function createThreadIncarnationToken(): string {
   return randomUUID()
 }
@@ -34,10 +44,16 @@ export function readThreadIncarnationToken(rawMetadata: string | null): string |
  * row always receives a UUID, so even a same-millisecond delete/recreate cannot compare equal.
  */
 export function captureThreadIncarnation(row: ThreadIncarnationRow): ThreadIncarnation {
-  return {
-    token: readThreadIncarnationToken(row.metadata),
+  const rawMetadata = row.metadata
+  const token = readThreadIncarnationToken(rawMetadata)
+  const incarnation = {
+    token,
     legacyCreatedAt: Number(row.created_at)
   }
+  if (typeof rawMetadata === "string" || rawMetadata === null) {
+    Reflect.apply(capturedMetadataSet, capturedMetadata, [incarnation, { rawMetadata, token }])
+  }
+  return incarnation
 }
 
 export function matchesThreadIncarnation(
@@ -45,7 +61,18 @@ export function matchesThreadIncarnation(
   expected: ThreadIncarnation
 ): boolean {
   if (!row) return false
-  const latest = captureThreadIncarnation(row)
+  const rawMetadata = row.metadata
+  const captured = Reflect.apply(capturedMetadataGet, capturedMetadata, [expected]) as
+    | { rawMetadata: string | null; token: string | null }
+    | undefined
+  // Reuse only an interpretation of the exact initial text, never a row or match result.
+  const latest = {
+    token:
+      captured && rawMetadata === captured.rawMetadata
+        ? captured.token
+        : readThreadIncarnationToken(rawMetadata),
+    legacyCreatedAt: Number(row.created_at)
+  }
   if (expected.token !== null || latest.token !== null) {
     return expected.token !== null && latest.token === expected.token
   }

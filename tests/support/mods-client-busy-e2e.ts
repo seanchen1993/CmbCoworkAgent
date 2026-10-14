@@ -1,3 +1,4 @@
+import { openModsResults } from "./mods-sidebar-navigation"
 import assert from "node:assert/strict"
 import { mkdirSync } from "node:fs"
 import { join } from "node:path"
@@ -79,6 +80,7 @@ export async function verifyClientBusy(
   )
   await page.reload({ waitUntil: "domcontentloaded" })
   await page.getByText("Client busy", { exact: true }).first().click()
+  await openModsResults(page)
   const open = async () => {
     const command = (await page.evaluate((id) => window.api.mods.commands(id), id)).find(
       (row) => row.command === "busy-open"

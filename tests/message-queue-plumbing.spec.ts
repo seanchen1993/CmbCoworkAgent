@@ -278,8 +278,13 @@ function testGuideUsesCurrentRunPromptPipeline(): void {
   )
   assertIncludes(
     agentIpc,
-    "displayContent: neutralizeWorkflowPlumbingUserText(",
+    "neutralizeWorkflowPlumbingUserText(visibleText) : visibleText",
     "steered workflow marker aliases remain visible after persistence and restore"
+  )
+  assertIncludes(
+    agentIpc,
+    "isWorkflowPlumbingTranscriptContent(submittedText)",
+    "Mods literal submissions reject plumbing before accepting visible content"
   )
   assertIncludes(
     agentIpc,
@@ -513,8 +518,39 @@ function testClearOnEveryRunExit(): void {
     3,
     "every pre-publication strict flush failure reports a terminal renderer outcome"
   )
+  const desktopAdapterStart = agentIpc.indexOf('ipcMain.on("agent:invoke",')
+  const desktopAdapterEnd = agentIpc.indexOf("// Handle agent resume", desktopAdapterStart)
+  assert(desktopAdapterStart >= 0 && desktopAdapterEnd > desktopAdapterStart,
+    "desktop invocation adapter has complete ordered source boundaries")
+  const desktopAdapterBody = agentIpc.slice(desktopAdapterStart, desktopAdapterEnd)
+  const malformedSubmissionCatch = desktopAdapterBody.indexOf("catch (error)")
+  const desktopStartRun = desktopAdapterBody.indexOf("void startAgentRun(")
+  assert(malformedSubmissionCatch >= 0 && desktopStartRun > malformedSubmissionCatch,
+    "malformed composer submissions are rejected before starting a physical run")
+  const malformedSubmissionBody = desktopAdapterBody.slice(malformedSubmissionCatch, desktopStartRun)
+  assertSourceOrder(desktopAdapterBody,
+    "captureComposerMentionSubmission(request.composerSubmission, request.message)",
+    "catch (error)", "desktop submission capture precedes its terminal rejection")
+  assertIncludes(malformedSubmissionBody,
+    "resolveAgentStreamRequestChannel(`agent:stream:${request.threadId}`, request.streamRequestId)",
+    "malformed submissions use their real thread and stream request channel")
+  assertSourceOrder(malformedSubmissionBody,
+    "const channel = resolveAgentStreamRequestChannel(",
+    "safeSendToWindow(window, channel, { type: \"error\",",
+    "malformed submission error uses the selected request channel")
+  assertSourceOrder(malformedSubmissionBody,
+    "safeSendToWindow(window, channel, { type: \"error\",",
+    "safeSendToWindow(window, channel, { type: \"done\" })",
+    "malformed submission error precedes completion on the same request channel")
+  assertSourceOrder(malformedSubmissionBody,
+    "safeSendToWindow(window, channel, { type: \"done\" })", "return",
+    "malformed submission completes and returns before starting a run")
+  assertOccurrences(desktopAdapterBody, "const channel = resolveAgentStreamRequestChannel(",
+    1, "the desktop adapter has exactly one malformed-submission terminal channel")
+  const physicalLifecycleSource = agentIpc.slice(0, desktopAdapterStart) +
+    agentIpc.slice(desktopAdapterEnd)
   assertOccurrences(
-    agentIpc,
+    physicalLifecycleSource,
     "const channel = resolveAgentStreamRequestChannel(",
     3,
     "invoke, resume, and interrupt isolate terminal events on request-scoped channels"
@@ -667,7 +703,11 @@ function testClearOnEveryRunExit(): void {
 function testInvokeWiresBoundedCheckpointRecoveryThroughSettlementFence(): void {
   const replacementStart = agentIpc.indexOf("const replacement = await withThreadRunMutationLock")
   assert(replacementStart >= 0, "new invoke replacement block exists")
-  const replacementBody = agentIpc.slice(replacementStart, replacementStart + 5000)
+  const replacementEnd = agentIpc.indexOf(
+    'if ("startRejectedDuringShutdown" in replacement)', replacementStart
+  )
+  assert(replacementEnd > replacementStart, "invoke replacement semantic boundary exists")
+  const replacementBody = agentIpc.slice(replacementStart, replacementEnd)
 
   assertIncludes(
     replacementBody,
@@ -694,9 +734,9 @@ function testInvokeWiresBoundedCheckpointRecoveryThroughSettlementFence(): void 
     "allowBoundedCheckpointRecovery: canUseBoundedCheckpointRecovery(",
     "invoke uses the shared bounded-recovery settlement gate"
   )
-  assertIncludes(
+  assertMatches(
     replacementBody,
-    "predecessorSettlement,\n                timedOutPredecessorFence.hasPending(threadId)",
+    /allowBoundedCheckpointRecovery:\s*canUseBoundedCheckpointRecovery\(\s*predecessorSettlement,\s*timedOutPredecessorFence\.hasPending\(threadId\)\s*\)/,
     "bounded recovery requires both immediate settlement and no older timed-out predecessor"
   )
 
@@ -1065,7 +1105,11 @@ function testStreamTranscriptBuffersArePhysicalRunScoped(): void {
   )
   const transcriptFlushStart = agentIpc.indexOf("function flushPendingStreamTranscriptMessages(")
   assert(transcriptFlushStart >= 0, "stream transcript flush helper exists")
-  const transcriptFlushBody = agentIpc.slice(transcriptFlushStart, transcriptFlushStart + 5000)
+  const transcriptFlushEnd = agentIpc.indexOf(
+    "export function captureNativeConversationTranscriptFlush(", transcriptFlushStart
+  )
+  assert(transcriptFlushEnd > transcriptFlushStart, "stream transcript flush boundary exists")
+  const transcriptFlushBody = agentIpc.slice(transcriptFlushStart, transcriptFlushEnd)
   assertSourceOrder(
     transcriptFlushBody,
     "try {",
@@ -1085,13 +1129,35 @@ function testStreamTranscriptBuffersArePhysicalRunScoped(): void {
   )
   assertSourceOrder(
     transcriptFlushBody,
-    "appendThreadMessageTextDelta(threadId, messages[0])",
-    "upsertThreadMessages(threadId, messages, { preserveExistingOrder })",
+    "appendThreadMessageTextDelta(threadId, partition.ordinary[0])",
+    "upsertThreadMessages(threadId, partition.ordinary, { preserveExistingOrder })",
     "content-only batches append fragments before the structural fallback"
   )
   assertSourceOrder(
     transcriptFlushBody,
-    "upsertThreadMessages(threadId, messages, { preserveExistingOrder })",
+    "partitionCanonicalThreadMessageEchoes(threadId, messages)",
+    "appendThreadMessageTextDelta(threadId, partition.ordinary[0])",
+    "canonical echoes are checked before ordinary delta persistence"
+  )
+  assertIncludes(
+    transcriptFlushBody,
+    "if (partition.ordinary.length === 0) persistedCount = partition.canonicalCount",
+    "canonical-only echoes do not write ordinary transcript rows"
+  )
+  assertMatches(
+    transcriptFlushBody,
+    /persistedCount = partition\.canonicalCount \+\s*upsertThreadMessages\(threadId, partition\.ordinary, \{ preserveExistingOrder \}\)/,
+    "mixed batches count canonical echoes and persist only ordinary messages"
+  )
+  assertSourceOrder(
+    transcriptFlushBody,
+    "upsertThreadMessages(threadId, partition.ordinary, { preserveExistingOrder })",
+    "if (persistedCount !== messages.length)",
+    "persistence still accounts for every message in the complete batch"
+  )
+  assertSourceOrder(
+    transcriptFlushBody,
+    "upsertThreadMessages(threadId, partition.ordinary, { preserveExistingOrder })",
     "} catch (error) {",
     "both incremental persistence paths run inside the buffer-restoration boundary"
   )
@@ -1251,10 +1317,14 @@ function testStreamTranscriptBuffersArePhysicalRunScoped(): void {
     "function releaseAbandonedPhysicalStreamRunSetup(",
     "cancelled post-replacement setup has one idempotent lease release"
   )
-  assertIncludes(
-    agentIpc,
-    "if (activeRunSettled.get(threadId) === settledPromise) activeRunSettled.delete(threadId)",
-    "abandoned setup releases only its own settlement lease"
+  const abandonedSetupStart = agentIpc.indexOf("function releaseAbandonedPhysicalStreamRunSetup(")
+  const abandonedSetupEnd = agentIpc.indexOf("type PhysicalStreamRunSetupResult<T>", abandonedSetupStart)
+  assert(abandonedSetupStart >= 0 && abandonedSetupEnd > abandonedSetupStart,
+    "abandoned setup release boundary exists")
+  assertMatches(
+    agentIpc.slice(abandonedSetupStart, abandonedSetupEnd),
+    /if \(activeRunSettled\.get\(threadId\) === settledPromise\) \{\s*activeRunSettled\.delete\(threadId\)\s*notifyAgentRunSettled\(threadId\)\s*\}\s*resolveSettled\(\)/,
+    "abandoned setup releases and announces only its own settlement before resolving it"
   )
   assertIncludes(
     agentIpc,
@@ -1420,12 +1490,12 @@ function testStreamTranscriptBuffersArePhysicalRunScoped(): void {
     "stale SessionStart completion cannot emit into a replacement run"
   )
   const promptPreparation = agentIpc.indexOf(
-    "const preparedPrompt = await prepareUserPromptForCurrentRun(message, modelInputMessage)"
+    "const preparedPrompt = await prepareUserPromptForCurrentRun("
   )
   const promptPreparationBody = agentIpc.slice(promptPreparation, promptPreparation + 1000)
   assertSourceOrder(
     promptPreparationBody,
-    "const preparedPrompt = await prepareUserPromptForCurrentRun(message, modelInputMessage)",
+    "const preparedPrompt = await prepareUserPromptForCurrentRun(",
     "throwIfInvokeAborted()",
     "invoke setup revalidates ownership after UserPromptSubmit hooks"
   )
@@ -1646,7 +1716,9 @@ function testStreamTranscriptBuffersArePhysicalRunScoped(): void {
 
 function testPreparingGuidesParticipateInReconciliation(): void {
   const queueStart = agentIpc.indexOf('"agent:queueCurrentRunMessage"')
-  const queueBody = agentIpc.slice(queueStart, queueStart + 7500)
+  const queueEnd = agentIpc.indexOf("  ipcMain.handle(", queueStart)
+  assert(queueStart >= 0 && queueEnd > queueStart, "guide handler has an explicit boundary")
+  const queueBody = agentIpc.slice(queueStart, queueEnd)
   assertSourceOrder(
     queueBody,
     "trackCurrentRunMessagePreparation(preparationLockKey, messageId, 1)",
@@ -1881,10 +1953,10 @@ function testCancelSuppressesAutoDrain(): void {
     "setQueueAutoDrainSuppressed(true)",
     "cancel sets the auto-drain suppression flag"
   )
-  assertIncludes(
+  assertMatches(
     chat,
-    "if (queueAutoDrainSuppressed) return",
-    "pump effect checks the auto-drain suppression flag"
+    /if \(queueAutoDrainSuppressed \|\| chatFlow\.active \|\| chatFlow\.busy\) return/,
+    "pump effect preserves stop suppression and cannot drain ordinary chat during a Claw flow"
   )
   // Cleared at the two send paths that represent unambiguous renewed intent — an
   // actual enqueue and a validated live send — plus both guide-to-normal-queue
@@ -1901,7 +1973,9 @@ function testCancelSuppressesAutoDrain(): void {
 function testGuideFallbackResumesStopPausedQueue(): void {
   const guideStart = chat.indexOf("const handleGuideQueuedMessage = useCallback(")
   assert(guideStart >= 0, "handleGuideQueuedMessage not found")
-  const guideBody = chat.slice(guideStart, guideStart + 4000)
+  const guideEnd = chat.indexOf("\n  const ", guideStart + 1)
+  assert(guideEnd > guideStart, "guide callback has an explicit boundary")
+  const guideBody = chat.slice(guideStart, guideEnd)
   assertOccurrences(
     guideBody,
     "setQueueAutoDrainSuppressed(false)",
@@ -1960,10 +2034,10 @@ function testQueuedSendRevalidatesModelAndWorkspace(): void {
     submitQueuedMessageStart,
     submitQueuedMessageStart + 8000
   )
-  assertIncludes(
+  assertMatches(
     submitQueuedMessageBody,
-    "const selectedModel = queuedModel?.available",
-    "queued send prefers its saved model only while it remains available"
+    /const selectedModel = clawDefaultModel\s*\?\s*\(currentSelectedModel\?\.available \? currentSelectedModel : undefined\)\s*:\s*queuedModel\?\.available\s*\?\s*queuedModel/,
+    "queued send honors the bound Claw model without fallback; unbound drafts prefer their available saved model"
   )
   assertIncludes(
     submitQueuedMessageBody,
@@ -2112,7 +2186,7 @@ function testBusyDraftPreparationIsAtomic(): void {
   )
   assertSourceOrder(
     claimBody,
-    'setInput("")',
+    'applyPromptDraft(submittedDraft.revision, "")',
     "await resolveAtFileAttachments({",
     "the claimed composer input is cleared before asynchronous attachment resolution"
   )
@@ -2186,14 +2260,25 @@ function testSteerAcknowledgementIsDurableAndReconciled(): void {
     "flushPendingStreamTranscriptMessages(threadId, runToken, { throwOnError: true })",
     "injection uses a strict transcript flush boundary"
   )
-  assertIncludes(
+  const durableCountCall = runtime.match(
+    /assertCurrentRunMessagesDurablyPersisted\(\s*transcriptMessages\.length,\s*persistedCount \+ partition\.canonicalCount\s*\)/
+  )?.[0]
+  assert(durableCountCall, "durable acknowledgement accounts for ordinary writes and canonical echoes")
+  assertSourceOrder(
     runtime,
-    "assertCurrentRunMessagesDurablyPersisted(transcriptMessages.length, persistedCount)",
-    "zero/partial DB writes fail the durable acknowledgement boundary"
+    "partitionCanonicalThreadMessageEchoes(threadId, transcriptMessages)",
+    "const persistedCount = upsertThreadMessages(threadId, partition.ordinary, {",
+    "canonical echoes are checked before persisting ordinary injected messages"
   )
   assertSourceOrder(
     runtime,
-    "assertCurrentRunMessagesDurablyPersisted(transcriptMessages.length, persistedCount)",
+    "const persistedCount = upsertThreadMessages(threadId, partition.ordinary, {",
+    durableCountCall!,
+    "the complete batch count is checked after ordinary writes"
+  )
+  assertSourceOrder(
+    runtime,
+    durableCountCall!,
     "await flushStrict()",
     "injected user turns are flushed to disk after row-count validation"
   )
@@ -2217,8 +2302,13 @@ function testSteerAcknowledgementIsDurableAndReconciled(): void {
     runtime,
     "await flushStrict()",
     "if (!isCurrentRunMessageQueueOwner(threadId, context.runToken))",
+    "old physical runs are fenced after the asynchronous flush"
+  )
+  assertSourceOrder(
+    runtime,
+    "if (!isCurrentRunMessageQueueOwner(threadId, context.runToken))",
     "registerCurrentRunCompletedAssistantRoute(",
-    "old physical runs are fenced after the async flush and before any renderer or route side effect"
+    "completed reply routes are updated only after the physical owner is rechecked"
   )
   assertIncludes(
     runtime,
@@ -2237,7 +2327,17 @@ function testSteerAcknowledgementIsDurableAndReconciled(): void {
   )
   assertIncludes(
     runtime,
-    "moveThreadMessagesAfterAnchor(threadId, durableAnchorMessageId, transcriptMessageIds)",
+    "const transcriptMessageIds = partition.ordinary.map((message) => message.id)",
+    "only ordinary injected messages participate in transcript reordering"
+  )
+  assertIncludes(
+    runtime,
+    "const orderingAnchor = canonicalAssistant?.id ?? durableAnchorMessageId",
+    "canonical predecessors retain their stored IDs and ordinary predecessors retain the original anchor"
+  )
+  assertMatches(
+    runtime,
+    /if \(transcriptMessageIds\.length\) \{\s*if \(orderingAnchor\) \{\s*moveThreadMessagesAfterAnchor\(threadId, orderingAnchor, transcriptMessageIds\)\s*\} else \{\s*moveThreadMessagesAfterLastNonAssistant\(threadId, transcriptMessageIds\)/,
     "durable steering order is anchored to the physical run instead of the latest global user"
   )
   const reconcileStart = agentIpc.indexOf('"agent:reconcileCurrentRunQueuedMessages"')
@@ -2347,9 +2447,39 @@ function testAfterModelSteerPersistsPrecedingAssistantReply(): void {
   assertSourceOrder(
     notifierBody,
     "!replaceThreadMessageId(",
-    "const persistedCount = upsertThreadMessages(threadId, transcriptMessages, {",
+    "const partition = partitionCanonicalThreadMessageEchoes(threadId, transcriptMessages)",
     "the exact provider occurrence is rekeyed before the stable final row is persisted"
   )
+  assertSourceOrder(notifierBody,
+    "const partition = partitionCanonicalThreadMessageEchoes(threadId, transcriptMessages)",
+    "const persistedCount = upsertThreadMessages(threadId, partition.ordinary, {",
+    "completed canonical echoes are verified before only ordinary rows are written")
+  assertSourceOrder(notifierBody,
+    "const persistedCount = upsertThreadMessages(threadId, partition.ordinary, {",
+    "assertCurrentRunMessagesDurablyPersisted(",
+    "ordinary writes finish before the complete batch acknowledgement")
+  assertIncludes(notifierBody,
+    "transcriptMessages.length, persistedCount + partition.canonicalCount)",
+    "the complete batch count includes every verified canonical echo")
+  assertSourceOrder(notifierBody, "assertCurrentRunMessagesDurablyPersisted(",
+    "const transcriptMessageIds = partition.ordinary.map((message) => message.id)",
+    "ordering considers only ordinary rows after complete durable acknowledgement")
+  assertSourceOrder(notifierBody,
+    "const transcriptMessageIds = partition.ordinary.map((message) => message.id)",
+    "const orderingAnchor = canonicalAssistant?.id ?? durableAnchorMessageId",
+    "a canonical completed assistant supplies the exact ordering anchor")
+  assertSourceOrder(notifierBody,
+    "const orderingAnchor = canonicalAssistant?.id ?? durableAnchorMessageId",
+    "if (transcriptMessageIds.length) {",
+    "an empty ordinary partition never changes canonical row order")
+  assertSourceOrder(notifierBody, "if (transcriptMessageIds.length) {",
+    "moveThreadMessagesAfterAnchor(threadId, orderingAnchor, transcriptMessageIds)",
+    "only nonempty ordinary rows move after their exact predecessor")
+  assertIncludes(notifierBody,
+    "!canonicalAssistant && completedAssistantMessage &&",
+    "only ordinary completed provider occurrences may be rekeyed")
+  assertSourceOrder(notifierBody, "canonicalCompletion?.assertCurrent()", "await flushStrict()",
+    "the original canonical completion is still current before strict persistence flush")
   assertIncludes(
     notifierBody,
     "completedAssistantIdentity.sourceId",
@@ -2421,8 +2551,8 @@ function testAfterModelSteerPersistsPrecedingAssistantReply(): void {
   )
   assertIncludes(
     notifierBody,
-    "completedAssistantContent: completedAssistantMessage.content",
-    "the user boundary carries completed content for id-less fragment routing"
+    "completedAssistantContent: canonicalAssistant?.content ?? completedAssistantMessage.content",
+    "the user boundary carries the full canonical or ordinary content for id-less routing"
   )
   assertIncludes(
     notifierBody,
@@ -2430,7 +2560,50 @@ function testAfterModelSteerPersistsPrecedingAssistantReply(): void {
     "the renderer alias carries the exact provider occurrence"
   )
   const streamPersistStart = agentIpc.indexOf("function persistStreamTranscriptChunk(")
-  const streamPersistBody = agentIpc.slice(streamPersistStart, streamPersistStart + 1200)
+  const streamPersistEnd = agentIpc.indexOf("function isPhysicalStreamRunActive(", streamPersistStart)
+  assert(
+    streamPersistStart >= 0 && streamPersistEnd > streamPersistStart,
+    "the stream persistence function has a complete and ordered source boundary"
+  )
+  const streamPersistBody = agentIpc.slice(streamPersistStart, streamPersistEnd)
+  const canonicalPersistStart = streamPersistBody.indexOf("if (canonical) {")
+  const canonicalPersistEnd = streamPersistBody.indexOf(
+    "const message = persistedMessageFromStreamPayload(payload)",
+    canonicalPersistStart
+  )
+  assert(
+    canonicalPersistStart >= 0 && canonicalPersistEnd > canonicalPersistStart,
+    "the canonical branch ends before ordinary message conversion"
+  )
+  const canonicalPersistBody = streamPersistBody.slice(canonicalPersistStart, canonicalPersistEnd)
+  assertSourceOrder(
+    canonicalPersistBody,
+    "captureCurrentRunMessageQueueOwner(threadId, runToken)",
+    "partitionCanonicalThreadMessageEchoes(threadId, [canonical])",
+    "the canonical stream projection captures its real queue owner before partitioning"
+  )
+  assertSourceOrder(
+    canonicalPersistBody,
+    "partition.canonicalCount !== 1 || partition.ordinary.length !== 0",
+    "guardOwner()",
+    "the canonical stream projection requires one canonical echo and no ordinary messages"
+  )
+  assertSourceOrder(
+    canonicalPersistBody,
+    "guardOwner()",
+    "return canonical.id",
+    "the canonical stream projection returns its original id after the owner check"
+  )
+  for (const ordinaryWrite of [
+    "routeCurrentRunCompletedAssistantMessage(",
+    "setSerializedMessageIdentity(",
+    "queueStreamTranscriptMessage("
+  ]) {
+    assert(
+      !canonicalPersistBody.includes(ordinaryWrite),
+      "canonical stream projections must not enter ordinary routing or persistence"
+    )
+  }
   assertSourceOrder(
     streamPersistBody,
     "routeCurrentRunCompletedAssistantMessage(threadId, message, runToken)",
@@ -2440,8 +2613,20 @@ function testAfterModelSteerPersistsPrecedingAssistantReply(): void {
   assertSourceOrder(
     streamPersistBody,
     "setSerializedMessageIdentity(payload, completedRoute)",
-    "queueStreamTranscriptMessage(threadId, runToken, { ...message, streamContentMode }, options)",
-    "the delayed completed event is rewritten before transcript persistence"
+    "const queuedMessage = { ...message, streamContentMode }",
+    "the delayed completed event is rewritten before its queued snapshot is created"
+  )
+  assertSourceOrder(
+    streamPersistBody,
+    "const queuedMessage = { ...message, streamContentMode }",
+    "bindNativePartialQueuedMessage(payload, queuedMessage, threadId, runToken)",
+    "the queued snapshot receives its native partial receipt before persistence"
+  )
+  assertSourceOrder(
+    streamPersistBody,
+    "bindNativePartialQueuedMessage(payload, queuedMessage, threadId, runToken)",
+    "queueStreamTranscriptMessage(threadId, runToken, queuedMessage, options)",
+    "transcript persistence queues the same object whose native partial receipt was bound"
   )
   assertIncludes(
     agentIpc,
@@ -2479,15 +2664,40 @@ function testTransportSupportsEveryAgentMode(): void {
 }
 
 function testPreparedLiveSubmitAcceptsTheNextEnter(): void {
+  const intentStart = chat.indexOf("const handleSubmit = async")
+  const intentEnd = chat.indexOf("const submitPreparedInput = async", intentStart)
+  const intentBody = chat.slice(intentStart, intentEnd)
+  assertSourceOrder(intentBody, "captureModelSelectionIntent()",
+    "await submitAfterPromptEdit", "model selection intent is captured before asynchronous prompt rules")
+  assertSourceOrder(intentBody, "captureComposerSubmissionState(",
+    "await submitAfterPromptEdit", "non-text payload intent is captured before asynchronous prompt rules")
+  assertIncludes(intentBody, "assertCurrent: assertPromptSubmissionState",
+    "the validated prompt handoff still checks the original payload admission")
   const claimStart = chat.indexOf("// Claim the current composer payload before @file IO")
-  assert(claimStart >= 0, "composer payload claim not found")
-  const claimBody = chat.slice(claimStart, claimStart + 1800)
+  const claimEnd = chat.indexOf("const {\n        cleanedMessage,", claimStart)
+  assert(claimStart >= 0 && claimEnd > claimStart,
+    "composer payload claim has complete ordered resolution boundaries")
+  const claimBody = chat.slice(claimStart, claimEnd)
   assertSourceOrder(
     claimBody,
-    'setInput("")',
+    'applyPromptDraft(submittedDraft.revision, "")',
     "liveSubmitPreparingThreads.delete(threadId)",
+    "the exact composer revision is claimed before new input becomes queueable"
+  )
+  assertIncludes(claimBody,
+    'if (!defaultText && applyPromptDraft(submittedDraft.revision, "")) promptComposer.reset()',
+    "only the matching draft revision is cleared and reset; newer input remains editable")
+  assertNotIncludes(claimBody,
+    "准备发送期间输入已变化",
+    "a newer composer draft does not cancel the already validated send intent")
+  assertSourceOrder(claimBody, "liveSubmitPreparingThreads.delete(threadId)",
+    "collectPendingAtFileMentions({ rawMessage,",
+    "newly typed input is queueable before structured file references are collected")
+  assertSourceOrder(
+    claimBody,
+    "collectPendingAtFileMentions({ rawMessage,",
     "await resolveAtFileAttachments({",
-    "new input becomes queueable as soon as the original composer payload is claimed"
+    "both structured collection and legacy file IO follow the atomic draft claim"
   )
 }
 
@@ -2653,7 +2863,9 @@ function testPumpHoldsSharedSubmitInFlightLock(): void {
     "queueSubmittingRef",
     "the separate pump-only lock was removed; submitInFlightRef is the single source of truth"
   )
-  const pumpEffectStart = chat.indexOf("if (queueAutoDrainSuppressed) return")
+  const pumpEffectStart = chat.indexOf(
+    "if (queueAutoDrainSuppressed || chatFlow.active || chatFlow.busy) return"
+  )
   assert(pumpEffectStart >= 0, "pump effect not found")
   const pumpEffectBody = chat.slice(pumpEffectStart, pumpEffectStart + 2800)
   assertIncludes(

@@ -27,6 +27,14 @@ import { AIMessage, HumanMessage } from "@langchain/core/messages"
 import { createMiddleware } from "langchain"
 import { randomUUID } from "crypto"
 import type { Message } from "../types"
+import { captureNativeMessage } from "./native-message-capture"
+import { ModFunctionError } from "../../shared/mods/v2/contracts"
+import {
+  hasInvalidFunctionConversationTranscriptStamp,
+  readFunctionConversationTranscriptStamp,
+  sameFunctionConversationTranscriptStamp,
+  type FunctionConversationTranscriptStamp
+} from "../../shared/mods/v2/conversation-transcript"
 import {
   advanceCompletedMessageContentRoute,
   getMessageProviderOccurrence,
@@ -276,7 +284,103 @@ function currentRunInjectionAnchorForMessage(value: unknown): CurrentRunInjectio
 
 const currentRunMessageQueues = new Map<string, CurrentRunQueuedMessage[]>()
 const currentRunMessageQueueOwners = new Map<string, string>()
+const currentRunMessageQueueOwnerIdentities = new Map<string, object>()
+const queueOwnerMapGet = Map.prototype.get
 const completedAssistantMessagesByRun = new Map<string, CurrentRunCompletedAssistantMessage>()
+
+interface CanonicalAssistantCompletion {
+  readonly threadId: string
+  readonly runToken: string
+  readonly owner: object
+  readonly message: AIMessage
+  readonly stamp: FunctionConversationTranscriptStamp
+  readonly digest: string
+  readonly completed: CurrentRunCompletedAssistantMessage
+  assertCurrent(): void
+}
+
+// Only the actual post-Keeper AI instance is handed to afterModel. Neither its data stamp nor
+// a copied notifier payload can mint this host-only handoff.
+const canonicalAssistantCompletions = new WeakMap<AIMessage, CanonicalAssistantCompletion>()
+const canonicalAssistantRecords = new WeakMap<object, CanonicalAssistantCompletion>()
+
+function completionInvalid(): never {
+  throw new ModFunctionError("MODS_CONVERSATION_COMPLETION_INVALID")
+}
+
+function assertCanonicalCompletion(completion: CanonicalAssistantCompletion): void {
+  if (currentRunMessageQueueOwnerIdentities.get(completion.threadId) !== completion.owner ||
+    !isCurrentRunMessageQueueOwner(completion.threadId, completion.runToken)) completionInvalid()
+  const result: unknown = completion.assertCurrent()
+  if (result !== undefined) completionInvalid()
+  const digest = captureNativeMessage(completion.message).digest
+  const stamp = readFunctionConversationTranscriptStamp(completion.message)
+  if (!stamp || hasInvalidFunctionConversationTranscriptStamp(completion.message) ||
+    completion.message.id !== completion.completed.id ||
+    !sameFunctionConversationTranscriptStamp(stamp, completion.stamp) ||
+    digest !== completion.digest ||
+    currentRunMessageQueueOwnerIdentities.get(completion.threadId) !== completion.owner ||
+    !isCurrentRunMessageQueueOwner(completion.threadId, completion.runToken)) completionInvalid()
+}
+
+/** Native factory only, after actual Keeper/DB commit; this does not authenticate a DB row. */
+export function registerCurrentRunCanonicalAssistantCompletion(
+  threadId: string, runToken: string, message: AIMessage, assertCurrent: () => void
+): void {
+  const owner = currentRunMessageQueueOwnerIdentities.get(threadId)
+  if (!owner || !isCurrentRunMessageQueueOwner(threadId, runToken)) completionInvalid()
+  const guarded: unknown = assertCurrent()
+  if (guarded !== undefined) completionInvalid()
+  const snapshot = captureNativeMessage(message)
+  const stamp = readFunctionConversationTranscriptStamp(message)
+  if (!owner || !AIMessage.isInstance(message) || !stamp || stamp.messageType !== "assistant" ||
+    stamp.uuid !== message.id || hasInvalidFunctionConversationTranscriptStamp(message) ||
+    !isCurrentRunMessageQueueOwner(threadId, runToken)) completionInvalid()
+  const existing = canonicalAssistantCompletions.get(message)
+  if (existing) {
+    if (existing.threadId !== threadId || existing.runToken !== runToken ||
+      existing.owner !== owner) completionInvalid()
+    assertCanonicalCompletion(existing)
+    return
+  }
+  const completed = Object.freeze({ id: stamp.uuid, content: message.content as Message["content"],
+    sourceId: stamp.uuid })
+  const completion = Object.freeze({ threadId, runToken, owner, message, completed,
+    digest: snapshot.digest,
+    stamp: Object.freeze({ ...stamp, origin: Object.freeze({ ...stamp.origin }) }), assertCurrent })
+  assertCanonicalCompletion(completion)
+  canonicalAssistantCompletions.set(message, completion)
+  canonicalAssistantRecords.set(completed, completion)
+}
+
+/** Only the original private notifier record can retrieve its fixed native completion. */
+export function readCurrentRunCanonicalAssistantCompletion(
+  completed: CurrentRunCompletedAssistantMessage | undefined, threadId: string, runToken: string
+): Readonly<{ message: AIMessage; stamp: FunctionConversationTranscriptStamp;
+  assertCurrent(): void }> | undefined {
+  if (!completed) return undefined
+  const completion = canonicalAssistantRecords.get(completed)
+  if (!completion) return undefined
+  if (completion.threadId !== threadId || completion.runToken !== runToken) completionInvalid()
+  assertCanonicalCompletion(completion)
+  return Object.freeze({ message: completion.message, stamp: completion.stamp,
+    assertCurrent: () => assertCanonicalCompletion(completion) })
+}
+
+function canonicalAssistantMessageForTranscript(
+  message: AIMessage, threadId: string, runToken: string
+): CurrentRunCompletedAssistantMessage | undefined {
+  const completion = canonicalAssistantCompletions.get(message)
+  if (completion) {
+    if (completion.threadId !== threadId || completion.runToken !== runToken) completionInvalid()
+    assertCanonicalCompletion(completion)
+    return completion.completed
+  }
+  // A marked but unproven/reconstructed instance must not enter the legacy renumbering path.
+  if (readFunctionConversationTranscriptStamp(message) ||
+    hasInvalidFunctionConversationTranscriptStamp(message)) completionInvalid()
+  return undefined
+}
 const VISIBLE_USER_MESSAGE_KEY = "cmb_visible_user_message"
 // A renderer can withdraw a handoff while its async UserPromptSubmit/skill hooks
 // are still running, before queueCurrentRunMessage has inserted anything. Keep a
@@ -356,6 +460,8 @@ export function setCurrentRunMessageQueueOwner(threadId: string, runToken: strin
   if (pendingRoute && pendingRoute.runToken !== runToken) {
     completedAssistantRoutes.delete(threadId)
   }
+  if (currentRunMessageQueueOwners.get(threadId) !== runToken)
+    currentRunMessageQueueOwnerIdentities.set(threadId, Object.freeze({}))
   currentRunMessageQueueOwners.set(threadId, runToken)
 }
 
@@ -365,6 +471,30 @@ function runScopedKey(threadId: string, runToken: string): string {
 
 export function isCurrentRunMessageQueueOwner(threadId: string, runToken: string): boolean {
   return currentRunMessageQueueOwners.get(threadId) === runToken
+}
+
+/** Main-only snapshot of this queue owner; equal public tokens cannot revive a retired owner. */
+export function captureCurrentRunMessageQueueOwner(threadId: string, runToken: string): () => void {
+  const owner = currentRunMessageQueueOwnerIdentities.get(threadId)
+  const assertCurrent = () => {
+    if (!owner || currentRunMessageQueueOwnerIdentities.get(threadId) !== owner ||
+      !isCurrentRunMessageQueueOwner(threadId, runToken)) completionInvalid()
+  }
+  assertCurrent()
+  return assertCurrent
+}
+
+/** Data-only revocation for a previously admitted IPC owner; equal tokens cannot survive ABA. */
+export function captureCurrentRunMessageQueueOwnerData(threadId: string, runToken: string): () => void {
+  const owner: object | undefined =
+    Reflect.apply(queueOwnerMapGet, currentRunMessageQueueOwnerIdentities, [threadId])
+  const assertDataCurrent = () => {
+    if (!owner || Reflect.apply(queueOwnerMapGet, currentRunMessageQueueOwnerIdentities, [threadId]) !== owner ||
+      Reflect.apply(queueOwnerMapGet, currentRunMessageQueueOwners, [threadId]) !== runToken)
+      completionInvalid()
+  }
+  assertDataCurrent()
+  return assertDataCurrent
 }
 
 /** Enqueue (or replace by id) a steered message for the thread's current run.
@@ -411,6 +541,7 @@ export function clearCurrentRunMessageQueue(threadId: string, runToken?: string)
   }
   currentRunMessageQueues.delete(threadId)
   currentRunMessageQueueOwners.delete(threadId)
+  currentRunMessageQueueOwnerIdentities.delete(threadId)
   injectedMessageIds.delete(threadId)
   withdrawnMessageIds.delete(threadId)
   completedAssistantRoutes.delete(threadId)
@@ -454,6 +585,7 @@ async function drainCurrentRunMessagesForInjection(
     }
   | undefined
 > {
+  const owner = currentRunMessageQueueOwnerIdentities.get(threadId)
   const queued = drainCurrentRunMessageQueue(threadId, runToken).filter((message) =>
     message.content.trim()
   )
@@ -470,10 +602,18 @@ async function drainCurrentRunMessagesForInjection(
   } catch (error) {
     // The run can be replaced while durable persistence is in flight. Never
     // restore an old owner's messages into the replacement run's shared queue.
-    if (isCurrentRunMessageQueueOwner(threadId, runToken)) {
+    if (isCurrentRunMessageQueueOwner(threadId, runToken) &&
+      currentRunMessageQueueOwnerIdentities.get(threadId) === owner) {
       const arrivalsDuringNotification = currentRunMessageQueues.get(threadId) ?? []
       currentRunMessageQueues.set(threadId, [...queued, ...arrivalsDuringNotification])
     }
+    throw error
+  }
+
+  if (!owner || currentRunMessageQueueOwnerIdentities.get(threadId) !== owner ||
+    !isCurrentRunMessageQueueOwner(threadId, runToken)) {
+    const error = new Error("Current-run injection owner changed during persistence")
+    error.name = "AbortError"
     throw error
   }
 
@@ -605,7 +745,14 @@ export function createCurrentRunMessageQueueMiddleware(
           completedAssistantMessagesByRun.delete(completedKey)
           return undefined
         }
-        const completedAssistantMessage =
+        if (!isCurrentRunMessageQueueOwner(threadId, ownerRunToken) ||
+          !currentRunMessageQueues.get(threadId)?.length) {
+          completedAssistantMessagesByRun.delete(completedKey)
+          return undefined
+        }
+        const canonicalCompletion = canonicalAssistantMessageForTranscript(
+          lastMessage, threadId, ownerRunToken)
+        const completedAssistantMessage = canonicalCompletion ??
           completedAssistantMessagesByRun.get(completedKey) ??
           completedAssistantMessageForTranscript(lastMessage)
         completedAssistantMessagesByRun.delete(completedKey)
@@ -617,12 +764,14 @@ export function createCurrentRunMessageQueueMiddleware(
           "afterModel",
           { completedAssistantMessage, anchorMessage }
         )
+        if (injection && canonicalCompletion)
+          readCurrentRunCanonicalAssistantCompletion(canonicalCompletion, threadId, ownerRunToken)
         // The preceding reply is persisted with a fresh id so providers that
         // reuse AI message ids cannot overwrite it with the guided reply. Keep
         // LangGraph state on that same id before the next values snapshot is
         // emitted; otherwise the renderer sees the provider id and the durable
         // id as two separate assistant messages after a reload.
-        if (injection && completedAssistantMessage) {
+        if (injection && completedAssistantMessage && !canonicalCompletion) {
           if (lastMessage.id !== completedAssistantMessage.id) {
             lastMessage.id = completedAssistantMessage.id
           }

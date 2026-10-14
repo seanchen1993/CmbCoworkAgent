@@ -119,7 +119,17 @@ async function expectVisibleMatch(page: Page, text: string, messageId: string): 
 
 async function expectMessageTime(page: Page, messageId: string, expected: string): Promise<void> {
   const timestamp = page.locator(`[data-chat-message-id="${messageId}"] time`)
-  await timestamp.waitFor({ state: "attached" })
+  // Virtuoso attaches rows while its initial scroll target is still visibility:hidden.
+  // Measure the painted timestamp, not that intermediate layout's empty innerText.
+  await timestamp.waitFor({ state: "visible" })
+  let readyChecks = 0
+  await until(async () => {
+    readyChecks =
+      (await timestamp.isVisible()) && (await timestamp.innerText()).trim() === expected
+        ? readyChecks + 1
+        : 0
+    return readyChecks >= 2
+  }, `painted timestamp for ${messageId}`, 1000)
   assert.equal((await timestamp.innerText()).trim(), expected)
   assert.equal(await timestamp.getAttribute("datetime"), expected.replace(/^开始于 /, ""))
   const opacity = await timestamp.evaluate((element) => {

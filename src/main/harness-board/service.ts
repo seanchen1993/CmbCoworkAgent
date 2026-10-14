@@ -1,4 +1,10 @@
 import { markHarnessStageAttributionDirty } from "../services/harness-stage-attribution"
+import { derivationDigest, snapshotDerivationSource } from "../plugins/derivation-source"
+import { isSameWorkspacePath } from "../../shared/workspace-path"
+import type { NativeNodeContext } from "./node-composition"
+import { assertDerivedProjectDirectory } from "../plugins/derivation-project"
+import { isDerivedPlugin } from "../plugins/derivation-scope"
+import { projectRuntimePluginSources } from "../plugins/runtime-source-scope"
 import {
   assertHarnessConfigAvailable,
   readHarnessConfigV2File,
@@ -32,6 +38,8 @@ import type { PluginMetadata } from "../types"
 import type { HarnessConfigReadSnapshot } from "./service-read-snapshot"
 import { normalizeHarnessAgentmdLoadStatus } from "../../shared/harness-board-types"
 import { resolveHarnessNextAction } from "../../shared/harness-run-next-action"
+import { attachProjectCapability, readProjectCapability } from "./project-capability"
+import { readProjectRuntimeDescription, projectLegacyRuntimeSnapshot } from "./project-runtime"
 import {
   cancelHarnessAdapterDetailScope,
   HarnessAdapterDetailWorkerResultError,
@@ -514,7 +522,7 @@ function pluginMatchesAdapterId(plugin: PluginMetadata, adapterId: string): bool
 
 function findPluginForAdapterSnapshot(adapter: HarnessAdapterSnapshot): PluginMetadata | null {
   if (adapter.type !== "plugin") return null
-  const plugins = getPlugins()
+  const plugins = projectRuntimePluginSources(getPlugins())
   const adapterId = normalizeText(adapter.id).trim()
   if (adapterId) {
     const plugin = plugins.find((item) => pluginAdapterId(item) === adapterId)
@@ -629,7 +637,7 @@ async function resolveHarnessAdapter(
   if (adapterType !== "plugin") {
     throw new Error(`Unsupported harness adapter type: ${adapterType}`)
   }
-  const plugin = getPlugins().find((item) => pluginMatchesAdapterId(item, adapterId))
+  const plugin = projectRuntimePluginSources(getPlugins()).find((item) => pluginMatchesAdapterId(item, adapterId))
   if (!plugin) {
     throw new Error(
       "Selected plugin is not installed or does not provide board_core/board_config.json"
@@ -1238,11 +1246,14 @@ async function runHarnessInvocationAsync(
   configured: ConfiguredHarnessInvocation,
   logOptions: HarnessInvocationLogOptions | undefined,
   timeoutMs: number,
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  beforeSpawn?: () => void | Promise<void>
 ): Promise<Buffer> {
   const release = await harnessInvocationSemaphore.acquire()
 
   try {
+    if (signal?.aborted) throw harnessDetailCancelledError()
+    if (beforeSpawn) await beforeSpawn()
     if (signal?.aborted) throw harnessDetailCancelledError()
     const { cwd, invocation } = configured
     if (logOptions) logHarnessInvocationStart(configured, logOptions)
@@ -3284,6 +3295,9 @@ export async function createHarnessProject(
   }
   normalizeProject(project)
 
+  const derivedPlugin = findAdapterPlugin(project)
+  if (derivedPlugin) assertDerivedProjectDirectory(derivedPlugin.id,
+    project.workspacePath, project.projectDir)
   await initializeHarnessProject(project)
   await mutateProjectStore((latest) => {
     validateProjectCodeUnique(input.projectCode, latest)
@@ -3294,7 +3308,8 @@ export async function createHarnessProject(
 }
 
 export async function createHarnessFeature(
-  input: HarnessFeatureCreateInput
+  input: HarnessFeatureCreateInput,
+  guard?: () => void | Promise<void>
 ): Promise<HarnessFeatureCreateResult> {
   validateFeatureCreateInput(input)
   await readFeatureDeployUnitBindingStore()
@@ -3329,7 +3344,9 @@ export async function createHarnessFeature(
     await runHarnessInvocationAsync(
       configured,
       harnessCommandLogOptions("createFeature"),
-      HARNESS_ADAPTER_TIMEOUT_MS
+      HARNESS_ADAPTER_TIMEOUT_MS,
+      undefined,
+      guard
     )
   } catch (error) {
     const raw = error instanceof Error ? error.message : String(error)
@@ -3418,6 +3435,79 @@ export async function skipHarnessRunNode(
   }
 }
 
+export function projectMatchesNodeWorkspace(
+  project: Pick<HarnessProjectMetadata, "workspacePath" | "projectDir">,
+  workspace: string
+): boolean {
+  return isSameWorkspacePath(project.workspacePath, workspace) ||
+    isSameWorkspacePath(resolve(project.workspacePath, project.projectDir), workspace)
+}
+
+export async function listNativeNodeProjects(workspace: string) {
+  return (await listHarnessProjects()).filter((project) => project.lifecycle.status === "active" &&
+    project.boardCompatibility.compatible && projectMatchesNodeWorkspace(project, workspace))
+}
+
+async function readNativeNodeIdentity(projectId: string, workspace: string) {
+  const project = await requireProject(projectId)
+  if (project.lifecycle.status !== "active" || !projectMatchesNodeWorkspace(project, workspace))
+    throw Error("请在这个项目所属的工作区中选择节点。")
+  const plugin = findAdapterPlugin(project)
+  if (!plugin?.enabled || !getPlugins().some((item) => item.id === plugin.id && item.path === plugin.path && item.enabled))
+    throw Error("请先安装并启用项目使用的插件。")
+  const before = await snapshotDerivationSource(plugin.path)
+  const invocation = await buildOptionalConfiguredHarnessInvocation(project, "dynamicWorkflow")
+  if (!invocation) throw Error("这个项目插件尚未提供节点选择，请使用原项目入口。")
+  const after = await snapshotDerivationSource(plugin.path)
+  // Python may create excluded __pycache__ directories during ordinary inspection. Only retained
+  // package bytes/modes define execution identity; mutable excluded-path observations do not.
+  const sourceDigest = derivationDigest(before.files, [])
+  if (sourceDigest !== derivationDigest(after.files, [])) throw Error("插件已变化，请重新读取节点。")
+  const latestProject = await requireProject(projectId)
+  const latestPlugin = findAdapterPlugin(latestProject)
+  if (JSON.stringify(project) !== JSON.stringify(latestProject) || !latestPlugin?.enabled ||
+    latestPlugin.id !== plugin.id || latestPlugin.path !== plugin.path)
+    throw Error("项目或插件已变化，请重新读取节点。")
+  const sourceIdentity = createHash("sha256").update(JSON.stringify([
+    project, plugin.id, plugin.path, sourceDigest, invocation
+  ])).digest("hex")
+  return { project, invocation, sourceIdentity }
+}
+
+/** No adapter execution: safe even while holding the process invocation semaphore. */
+export async function verifyNativeNodeIdentity(context: NativeNodeContext, workspace: string) {
+  const current = await readNativeNodeIdentity(context.project.projectId, workspace)
+  if (current.sourceIdentity !== context.sourceIdentity)
+    throw Error("项目或插件已变化，请重新检查节点。")
+}
+
+export async function readNativeNodeContext(projectId: string, workspace: string): Promise<NativeNodeContext> {
+  const identity = await readNativeNodeIdentity(projectId, workspace)
+  const { invocation, sourceIdentity } = identity
+  const raw = await runHarnessJsonInvocation(invocation, "dynamicWorkflow")
+  const config = normalizeDynamicWorkflowConfigSnapshot(raw)
+  if (raw.ok !== true || !config || config.nodes.length > 128) throw Error("无法读取项目节点。")
+  if ((await readNativeNodeIdentity(projectId, workspace)).sourceIdentity !== sourceIdentity)
+    throw Error("插件已变化，请重新读取节点。")
+  const visible = (await listNativeNodeProjects(workspace)).find((item) => item.projectId === projectId)
+  if (!visible) throw Error("项目已变化，请重新选择。")
+  const artifactNames = (value: unknown): string[] => Array.isArray(value)
+    ? value.slice(0, 64).flatMap((item) => isObject(item) && typeof item.path === "string" ? [item.path.slice(0, 500)] : []) : []
+  const rawNodes = Array.isArray(raw.nodes) ? raw.nodes : []
+  const nodes = config.nodes.map((node) => {
+    const source = rawNodes.find((item) => isObject(item) && item.id === node.id)
+    return { ...node, inputs: artifactNames(source?.inputs),
+      optionalInputs: artifactNames(Array.isArray(source?.inputs) ? source.inputs.filter((item) => isObject(item) && item.required === false) : []),
+      outputs: artifactNames(source?.outputs) }
+  })
+  return { project: visible, config, nodes, invocation, sourceIdentity,
+    fingerprint: createHash("sha256").update(JSON.stringify([sourceIdentity, config, nodes])).digest("hex") }
+}
+
+export async function runNativeNodeClosure(invocation: NativeNodeContext["invocation"]) {
+  return runHarnessJsonInvocation(invocation, "dynamicWorkflow")
+}
+
 export async function getHarnessDynamicWorkflowConfig(
   projectId: string
 ): Promise<HarnessDynamicWorkflowConfig | null> {
@@ -3498,6 +3588,9 @@ export async function updateHarnessProjectMetadata(
       existingAdapter.type === input.adapterType && existingAdapter.id === input.adapterId.trim()
         ? await resolveHarnessAdapterSnapshot(existingAdapter)
         : await resolveHarnessAdapter(input.adapterId, input.adapterType)
+    if (harnessAdapter.id !== existingAdapter.id &&
+      (isDerivedPlugin(harnessAdapter.id) || isDerivedPlugin(existingAdapter.id)))
+      throw new Error("衍生插件必须新建独立项目，不能更换已有项目的插件绑定")
     if (input.workspacePath.trim() !== existing.workspacePath.trim()) {
       throw new Error("项目工作区路径不允许修改")
     }
@@ -4023,6 +4116,31 @@ async function loadHarnessRunDetail(
       ...(featureBinding?.imManagementEnabled ? { imManagementEnabled: true } : {})
     },
     sessions: []
+  }
+  const projectCapability = await readProjectCapability(context.plugin?.path, signal)
+  throwIfHarnessDetailCancelled(signal)
+  attachProjectCapability(detail, projectCapability)
+  if (context.plugin) {
+    const description = await readProjectRuntimeDescription(context.plugin.path, signal)
+    throwIfHarnessDetailCancelled(signal)
+    try {
+      detail.projectRuntime = {
+        ...(description ? { description } : {}),
+        snapshot: projectLegacyRuntimeSnapshot(detail, {
+          projectId: project.projectId, featureId: slug,
+          workspace: detail.run.resolvedSessionWorkspacePath || detail.project.workspacePath,
+          pluginId: context.plugin.id, pluginDigest: null
+        })
+      }
+    } catch {
+      detail.projectRuntime = { ...(description ? { description } : {}),
+        diagnostic: "无法核对增强项目记录；仍可查看原项目详情。" }
+    }
+    if (serialize(detail).byteLength > HARNESS_ADAPTER_DETAIL_MAX_IPC_BYTES) {
+      detail.projectRuntime = { diagnostic: "增强记录超过显示限额；原项目详情保持可用。" }
+      if (serialize(detail).byteLength > HARNESS_ADAPTER_DETAIL_MAX_IPC_BYTES)
+        delete detail.projectRuntime
+    }
   }
   const responseBytes = serialize(detail).byteLength
   if (responseBytes > HARNESS_ADAPTER_DETAIL_MAX_IPC_BYTES) {

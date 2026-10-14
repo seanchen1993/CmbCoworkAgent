@@ -1,4 +1,5 @@
 import type { ModCard } from "../../../shared/mods/types"
+import { isModSiteChangeScope } from "../../../shared/mods/types"
 
 const empty: ModCard[] = []
 interface Entry {
@@ -54,11 +55,13 @@ export function subscribeModCards(threadId: string, listener: () => void): () =>
         })
     }
     const stopCards = window.api.mods.onCardsChanged((event) => {
-      if (event.threadId === threadId) value.refresh()
+      if (event.threadId === threadId && event.scope !== "panes" && event.scope !== "records" && !isModSiteChangeScope(event.scope)) value.refresh()
     })
+    const stopConfiguration = window.api.mods.onConfigurationChanged(value.refresh)
     window.addEventListener("mods:configuration-changed", value.refresh)
     value.stop = () => {
       stopCards()
+      stopConfiguration()
       window.removeEventListener("mods:configuration-changed", value.refresh)
     }
     threads.set(threadId, value)

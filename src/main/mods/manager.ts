@@ -1,8 +1,62 @@
+import { guardPluginCatalogOperations } from "../plugins/catalog-gate"
 import { FunctionAgentInstances } from "./v2/agent-instances"
+import type { FunctionConversationCoordinator } from "./v2/conversation-coordinator"
+import { readCoordinatorWorkerModsContext } from "../agent/coordinator-worker-mods-context"
+import type { FunctionConversationGraphBinding } from "../agent/mods-conversation"
+import type { FunctionSessionAppendTicket } from "./v2/session-append-ticket"
+import type { FunctionSessionAppendResult } from "../../shared/mods/v2/session-append"
+import {
+  captureFunctionConversationNativeRun,
+  readFunctionConversationNativeRun,
+  type FunctionConversationNativeRun,
+  type FunctionConversationNativeRunProof
+} from "./native-conversation-run"
+import type { FunctionNativeProtectionPolicy } from "../agent/native-message-protector"
+import { captureFunctionConversationNativePolicyData,
+  registerFunctionConversationNativePolicySource,
+  registerFunctionConversationSharedNativePolicySource } from "./native-conversation-policy-source"
+import type { FunctionConversationTarget } from "./v2/conversation-registry"
+import type { FunctionConversationTranscriptProjection } from
+  "../db/function-conversation-transcript"
+import type { FunctionConversationNativeTask } from "./v2/conversation-shared-native-host"
+import type { FunctionConversationSharedCheckpointScope } from "./v2/conversation-shared-checkpointer"
+import { admitFunctionConversationSharedNativeInvocation } from
+  "../agent/mods-conversation-shared-invocation"
+import { readFunctionConversationSharedProducer,
+  type FunctionConversationSharedProducer } from "./v2/conversation-shared-restore"
+import type { FunctionConversationChildParent, FunctionConversationIndependentChildInput
+} from "./v2/conversation-child-family"
+import { protectFunctionStreamCore } from "./v2/protected-stream-core"
+import { closeHostStreamActual, FUNCTION_STREAM_TERMINAL } from "./v2/host-stream-lifetime"
+import { synchronizePromptContext, validatePromptContext } from "../../shared/mods/v2/prompt-context"
+import { validatePromptCompositionInput, validatePromptCompositionResult } from "../../shared/mods/v2/prompt-composition"
+import { validatePromptAttachmentInput, validatePromptAttachmentResult } from "../../shared/mods/v2/prompt-attachment"
+import { publishPromptAttachmentInput } from "./v2/prompt-attachment-publication"
+import { bindHostPromptGuard, bindHostPromptOccurrence, hostPromptOccurrence, isCachedPromptEvent } from "./v2/prompt-cache"
+import {
+  HostFlowAuthorities,
+  type HostFlowAuthority,
+  type HostFlowAuthorityInput
+} from "./flow-authority"
+import { AsyncLocalStorage } from "node:async_hooks"
+import { FunctionPeerInbox, type FunctionPeerConsumer } from "./v2/peer-inbox"
+import { FunctionPeerLedger } from "./v2/peer-ledger"
+import type {
+  FunctionPeerInput,
+  FunctionPeerRecord,
+  FunctionPeerSend
+} from "../../shared/mods/v2/peer"
+import { prepareFunctionAgentPlan, runFunctionAgentChild } from "./v2/agent-spawn-host"
+import { functionAgentToolName, type RegisteredFunctionAgent } from "./v2/agent-registry"
 import type { FunctionAgentInfo } from "../../shared/mods/v2/agent-list"
 import { createHash, randomUUID } from "node:crypto"
 import { existsSync, realpathSync, writeFileSync } from "node:fs"
+import {
+  validateWorkspaceDirectory,
+  WorkspaceValidationError
+} from "../services/workspace-validation"
 import { basename } from "node:path"
+import { types } from "node:util"
 import type {
   ModCard,
   ModCommandDescriptor,
@@ -23,13 +77,14 @@ import { ModEngine, classifyModTool, type ApprovedMod, type ModDispatchRequest }
 import { ModError, ModPermissionError, modErrorCode } from "./errors"
 import { autobizCheckpointRequest } from "./v2/autobiz-checkpoint-request"
 import type { AutobizCheckpointTransition } from "./v2/autobiz-validation"
-import { planProjectCheck } from "./v2/project-check-plan"
+import { assertProjectCheckPlanCurrent, planProjectCheck } from "./v2/project-check-plan"
 import { assertProjectCheckInput, withProjectCheckInput } from "./v2/project-check-input"
 import type { ProjectCheckKind, ProjectCheckResult } from "./v2/project-checks"
 import { bindCompletionGateBudget, completionGateBudget } from "./v2/completion-budget"
 import { validateModRegistrations } from "./registrations"
 import { filterModData, projectModResult } from "./publication"
 import { getModCallContext, modCallContext } from "./context"
+import { independentPromptFrame } from "./v2/model-prompt-frame"
 import { ManagedModPolicy, DEFAULT_MOD_POLICY, type ManagedModDeployment } from "./policy"
 import { orderApprovedMods } from "./order"
 import type { FunctionToolInfo, RegisteredFunctionTool } from "../../shared/mods/v2/tools"
@@ -40,9 +95,12 @@ import {
   functionCallTurn,
   functionCallAgent,
   functionCallAuthority,
-  withFunctionAgentExecution
+  withFunctionAgentExecution,
+  withFunctionTransportExecution,
+  withFunctionAgentCleanup
 } from "./v2/host-call"
 import { currentFunctionExecution, functionExecutionScope } from "./v2/execution-context"
+import { withFreshFunctionSessionActivity } from "./v2/session-activity"
 import type { FunctionSessionCompactor } from "../agent/mods-session-view"
 import {
   FunctionTurnLifecycle,
@@ -54,8 +112,13 @@ import type {
   FunctionTurnComplete,
   FunctionTurnResult
 } from "../../shared/mods/v2/turn"
-import { getLocalThreadRunLease, onLocalThreadRunLeaseReleased } from "../agent/thread-run-lease"
-import type { McpCapabilityTool } from "../mcp/capability-types"
+import {
+  captureLocalThreadRunLease,
+  getLocalThreadRunLease,
+  onLocalThreadRunLeaseReleased
+} from "../agent/thread-run-lease"
+import type { McpCapabilityTool, McpCapabilityService, McpConnectOwner, McpConnectAdmission } from "../mcp/capability-types"
+import { mcpConnectRefusal } from "../mcp/capability-types"
 import { constrainToolPermission, type ToolPermissionResult } from "../../shared/tool-permission"
 import { beforeModToolExecution } from "./execution-error"
 import {
@@ -67,6 +130,10 @@ import {
   resolveFunctionMcpToolName
 } from "./v2/mcp-sdk"
 import { functionSdkToolInput, isNativeFunctionTool } from "./v2/tool-sdk"
+import { createToolCheckResultParser } from "./v2/tool-check"
+import { captureComposerMentionSubmission, type ComposerMentionSubmission } from "../../shared/mods/v2/composer-mentions"
+import type { FunctionFileScope } from "./v2/file-access"
+import { createComposerPreparationActivity } from "./v2/composer-preparation-activity"
 import {
   dispatchFunctionStream,
   type FunctionStreamOptions,
@@ -76,8 +143,148 @@ import { queryModRuntimeToolAccess, type ModRuntimeToolAccess } from "./runtime-
 import {
   assertModRuntimeAuthority,
   ModRuntimeAuthorities,
+  isModRuntimeAuthorityDataCurrentForRegistry,
+  isModRuntimeAuthorityCallbackFreeForRegistry,
+  captureModNativeSignalShape,
   type ModRuntimeAuthority
 } from "./runtime-instance"
+
+const nativePolicyThrowIfAborted = AbortSignal.prototype.throwIfAborted
+const nativePolicyMapGet = Map.prototype.get, nativePolicyWeakGet = WeakMap.prototype.get
+const composerOwnerWeakSet = WeakMap.prototype.set
+interface NativePolicySettings { enabled: boolean; policy: boolean; epoch: number }
+interface NativePolicyManagerData {
+  readonly registry: ModRuntimeAuthorities
+  readonly policy: ManagedModPolicy
+  assertFields(): void
+  readBinding(key: string): ModThreadBinding | undefined
+  readSettings(workspace: string): NativePolicySettings | undefined
+  readRuntime(authority: ModRuntimeAuthority): FunctionNativeConversationRuntime | undefined
+  readNativeRun(authority: ModRuntimeAuthority): {
+    proof: FunctionConversationNativeRunProof; binding: FunctionConversationGraphBinding; close(): void
+  } | undefined
+  readBindingRuntime(authority: ModRuntimeAuthority): FunctionConversationGraphBinding | undefined
+  readSharedScope(authority: ModRuntimeAuthority): FunctionConversationSharedCheckpointScope | undefined
+  readSharedProducer(authority: ModRuntimeAuthority): {
+    readonly proof: FunctionConversationSharedProducer
+    readonly binding: FunctionConversationGraphBinding
+  } | undefined
+}
+const nativePolicyManagers = new WeakMap<ModsManager, NativePolicyManagerData>()
+interface NativePhysicalBindingData {
+  readonly manager: ModsManager
+  readonly registry: ModRuntimeAuthorities
+  readonly authority: ModRuntimeAuthority
+  eligible(): boolean
+  assertDataCurrent(): void
+}
+const nativePhysicalBindings = new WeakMap<object, NativePhysicalBindingData>()
+const nativePhysicalGuards = new WeakMap<() => void, NativePhysicalBindingData>()
+const nativeBindingDescriptor = Object.getOwnPropertyDescriptor
+const nativeBindingPrototype = Object.getPrototypeOf
+const nativeBindingApply = Reflect.apply
+const nativeBindingKeys = ["workspace", "threadId", "turnId", "agentId", "runtimeAuthority",
+  "signal", "assertLive", "commandOnly"] as const
+function unchangedNativeBindingFields(value: object): (() => boolean) | undefined {
+  if (types.isProxy(value) || nativeBindingPrototype(value) !== Object.prototype) return undefined
+  const fields: Array<PropertyDescriptor | undefined> = []
+  for (let index = 0; index < nativeBindingKeys.length; index++) {
+    const key = nativeBindingKeys[index], field = nativeBindingDescriptor(value, key)
+    if ((field && !("value" in field)) || nativeBindingDescriptor(Object.prototype, key)) return undefined
+    fields[index] = field
+  }
+  return () => {
+    if (types.isProxy(value) || nativeBindingPrototype(value) !== Object.prototype) return false
+    for (let index = 0; index < nativeBindingKeys.length; index++) {
+      const key = nativeBindingKeys[index], field = nativeBindingDescriptor(value, key)
+      const original = fields[index]
+      if (nativeBindingDescriptor(Object.prototype, key)) return false
+      if (!field || !original) { if (field !== original) return false; continue }
+      if (!("value" in field) || field.value !== original.value ||
+        field.writable !== original.writable || field.enumerable !== original.enumerable ||
+        field.configurable !== original.configurable) return false
+    }
+    return true
+  }
+}
+/** Reader only: bindThread/prepare publish the exact self-built guard; callers cannot register one. */
+export function readFunctionConversationNativeBindingDataCurrent(guard: () => void,
+  authority: ModRuntimeAuthority, registry: Pick<ModRuntimeAuthorities, "get">):
+  Readonly<{ assertDataCurrent(): void }> | undefined {
+  const record = nativeBindingApply(nativePolicyWeakGet, nativePhysicalGuards, [guard]) as
+    NativePhysicalBindingData | undefined
+  return record?.authority === authority && record.registry === registry && record.eligible()
+    ? record : undefined
+}
+function nativePolicyChanged(): never { throw new ModError("MODS_CALL_SCOPE_CHANGED") }
+function captureNativePolicyFields(value: object, keys: readonly string[]): () => void {
+  if (types.isProxy(value)) nativePolicyChanged()
+  const prototype = Object.getPrototypeOf(value)
+  const fields = keys.map(key => {
+    const field = Object.getOwnPropertyDescriptor(value, key)
+    if (!field || !("value" in field)) nativePolicyChanged()
+    return [key, Object.freeze(field)] as const
+  })
+  return () => {
+    if (types.isProxy(value) || Object.getPrototypeOf(value) !== prototype) nativePolicyChanged()
+    for (let index = 0; index < fields.length; index++) {
+      const key = fields[index][0], expected = fields[index][1]
+      const field = Object.getOwnPropertyDescriptor(value, key)
+      if (!field || !("value" in field) || field.value !== expected.value ||
+        field.enumerable !== expected.enumerable || field.writable !== expected.writable ||
+        field.configurable !== expected.configurable) nativePolicyChanged()
+    }
+  }
+}
+function nativePolicyManager(manager: ModsManager): NativePolicyManagerData {
+  const original: NativePolicyManagerData | undefined =
+    Reflect.apply(nativePolicyWeakGet, nativePolicyManagers, [manager])
+  if (!original) nativePolicyChanged()
+  original.assertFields()
+  return original
+}
+function captureNativePolicyEpoch(settings: NativePolicySettings): {
+  readonly epoch: number; assertCurrent(): void
+} {
+  if (types.isProxy(settings)) nativePolicyChanged()
+  const assertFields = captureNativePolicyFields(settings, ["epoch"])
+  const field = Object.getOwnPropertyDescriptor(settings, "epoch")
+  if (!field || !("value" in field) || typeof field.value !== "number") nativePolicyChanged()
+  return Object.freeze({ epoch: field.value, assertCurrent: assertFields })
+}
+
+declare const composerMentionOwnerBrand: unique symbol
+/** Main-only preparation identity; it is never serialized or accepted from a guest. */
+export interface ComposerMentionOwner { readonly [composerMentionOwnerBrand]: true }
+export interface ComposerMentionOwnerView {
+  readonly workspace: string
+  readonly logicalWorkspace: string
+  readonly mode: "mods" | "native"
+  readonly signal: AbortSignal
+  assertCurrent(): void
+  assertDataCurrent(): void
+  sealAndDrain(): Promise<void>
+  queryTool: FunctionFileScope["queryTool"]
+  dispatch(event: "prompt.mention" | "prompt.attachment", input: ModObject,
+    core: (input: ModObject, signal: AbortSignal) => Promise<ModObject>): Promise<ModObject>
+}
+interface ComposerMentionOwnerRecord {
+  closed: boolean
+  failed: boolean
+  reading: boolean
+  readonly view: ComposerMentionOwnerView
+}
+const composerMentionOwners = new WeakMap<object, ComposerMentionOwnerRecord>()
+function composerMentionOwnerInvalid(): never { throw new ModError("MODS_CALL_SCOPE_CHANGED") }
+/** Only the original setup can publish an owner. This reader performs no source callback. */
+export function readComposerMentionOwner(owner: unknown): ComposerMentionOwnerView {
+  if (!owner || typeof owner !== "object" || types.isProxy(owner)) composerMentionOwnerInvalid()
+  const original: ComposerMentionOwnerRecord | undefined =
+    Reflect.apply(nativePolicyWeakGet, composerMentionOwners, [owner])
+  if (!original || original.closed || original.failed) composerMentionOwnerInvalid()
+  original.view.assertDataCurrent()
+  return original.view
+}
 
 export interface ModPluginSource {
   id: string
@@ -131,17 +338,610 @@ interface StoredCard {
   turnId: string
 }
 
+/** Captured by the actual graph owner; never reconstructed from a public run id. */
+export interface FunctionNativeConversationRuntime {
+  readonly owner: object
+  readonly target: FunctionConversationTarget
+  readonly destination: FunctionConversationTranscriptProjection
+  readonly run: object
+  readonly database: FunctionConversationNativeRun["database"]
+  readonly signal: AbortSignal
+  readonly binding: FunctionConversationGraphBinding
+  assertCurrent(): void
+  close(): void
+  runMutation<T>(producer: object, occurrence: object,
+    run: (signal: AbortSignal, guard: () => void) => Promise<T>): Promise<T>
+  capturePolicy(): Readonly<{
+    value: FunctionNativeProtectionPolicy
+    assertCurrent(): void
+  }>
+  dispatch(ticket: FunctionSessionAppendTicket): Promise<FunctionSessionAppendResult>
+}
+
 export class ModsManager {
+  private readonly composerFileQueries = new WeakMap<
+    ModRuntimeAuthority,
+    (id: string, args: Record<string, unknown>) => Promise<ToolPermissionResult>
+  >()
+  private readonly runtimeEpochs = new WeakMap<ModRuntimeAuthority, number>()
+  private readonly functionCreators = new WeakMap<
+    ModRuntimeAuthority,
+    Readonly<import("./v2/dispatcher").FunctionHookSource>
+  >()
+
+  /** Bound by the native child's startup callback, never by a guest argument. */
+  bindFunctionCreator(
+    authority: ModRuntimeAuthority,
+    source: import("./v2/dispatcher").FunctionHookSource
+  ): void {
+    this.captureFunctionRuntimeGuard(authority)()
+    if (this.functionCreators.has(authority)) throw new ModError("MODS_AGENT_CREATOR_CHANGED")
+    this.functionCreators.set(authority, Object.freeze({ ...source }))
+  }
+
+  functionModelHookSource(authority?: ModRuntimeAuthority) {
+    if (!authority) return undefined
+    this.captureFunctionRuntimeGuard(authority)()
+    return this.functionCreators.get(authority)
+  }
+
+  private readonly peerLedger: FunctionPeerLedger
+  private readonly peerInbox: FunctionPeerInbox
+  private readonly peerListeners = new Set<(workspace: string, threadId: string) => void>()
+  private readonly peerConsumers = new WeakMap<ModRuntimeAuthority, FunctionPeerConsumer>()
+  private readonly peerLogicalSources = new Map<
+    string,
+    { workspace: string; sessionId: string; agentId: string }
+  >()
+  private readonly spawningAgents = new Map<
+    AbortController,
+    { workspace: string; threadId: string }
+  >()
+
+  functionAgentRuntimeAuthority(
+    workspace: string,
+    threadId: string,
+    agentId: string
+  ): ModRuntimeAuthority {
+    const authority = this.runtimeAuthorities.get({
+      workspace: this.workspaceKey(workspace),
+      threadId,
+      agentId
+    })
+    if (!authority) throw new ModError("MODS_RUNTIME_SCOPE_REQUIRED")
+    return authority
+  }
+
+  async prepareFunctionAgentSpawn(
+    workspace: string,
+    threadId: string,
+    grant: ModGrant,
+    args: ModObject,
+    signal: AbortSignal
+  ): Promise<ModObject> {
+    workspace = this.workspaceKey(workspace)
+    assertFunctionGrant(this.store, workspace, threadId, grant, signal)
+    const authority = functionCallAuthority(workspace, threadId)
+    if (!authority) throw new ModError("MODS_RUNTIME_SCOPE_REQUIRED")
+    const main = this.runtimeAuthorities.get({ workspace, threadId, agentId: "main" })
+    const mainSession = main && this.functionSessions.get(main)
+    let model = mainSession && (mainSession.modelRef ?? mainSession.model)
+    if (!model && authority.agentId === "main") {
+      const { getThreadCore } = await import("../db")
+      const { getModelConfigByRef, getDefaultModelConfig } = await import("../models/registry")
+      const row = getThreadCore(threadId)
+      const metadata = row && JSON.parse(row.metadata ?? "{}")
+      const selected =
+        typeof metadata?.model === "string"
+          ? getModelConfigByRef(metadata.model)
+          : getDefaultModelConfig()
+      assertFunctionGrant(this.store, workspace, threadId, grant, signal)
+      authority.assertLive()
+      if (selected?.apiKey) model = selected.ref
+    }
+    if (!model) throw new ModError("MODS_AGENT_SPAWN_MODEL_UNAVAILABLE")
+    if (
+      Object.keys(args).some(
+        (key) => !["prompt", "description", "subagentType", "model", "name", "cwd"].includes(key)
+      )
+    )
+      throw new ModError("MODS_AGENT_SPAWN_ARGUMENTS")
+    if (
+      args.name !== undefined &&
+      (typeof args.name !== "string" || !args.name || args.name.length > 128)
+    )
+      throw new ModError("MODS_AGENT_SPAWN_ARGUMENTS")
+    return {
+      ...args,
+      description: args.description ?? "Plugin agent",
+      subagentType: args.subagentType ?? "general-purpose",
+      tool_use_id: randomUUID(),
+      parentModel: model,
+      provider: { plugin: "engine", tier: "core" },
+      ...(authority.agentId === "main" ? {} : { parentAgentId: authority.agentId }),
+      background: true,
+      fork: false
+    }
+  }
+
+  async spawnFunctionAgent(
+    workspace: string,
+    threadId: string,
+    grant: ModGrant,
+    input: ModObject,
+    signal: AbortSignal,
+    lifetime: AbortSignal,
+    creator?: import("./v2/dispatcher").FunctionHookSource
+  ): Promise<{ value: ModObject; completion: Promise<FunctionTurnComplete> }> {
+    workspace = this.workspaceKey(workspace)
+    assertFunctionGrant(this.store, workspace, threadId, grant, signal)
+    const caller = functionCallAuthority(workspace, threadId)
+    if (!caller) throw new ModError("MODS_RUNTIME_SCOPE_REQUIRED")
+    if (
+      typeof input.tool_use_id !== "string" ||
+      !input.tool_use_id ||
+      input.tool_use_id.length > 256
+    )
+      throw new ModError("MODS_AGENT_SPAWN_ARGUMENTS")
+    const receiptId = `agent-spawn:${createHash("sha256")
+      .update(JSON.stringify([workspace, threadId, grant.modId, grant.epoch, input.tool_use_id]))
+      .digest("hex")}`
+    if (this.store.status(receiptId)) throw new ModError("MODS_CALL_ALREADY_STARTED")
+    const identity = {
+      ...functionCallIdentity(workspace, threadId, grant, {
+        origin: "mod",
+        fallbackTurnId: caller.turnId,
+        toolCallId: input.tool_use_id
+      }),
+      callId: receiptId
+    }
+    const callerBinding = this.bindings.get(`${threadId}:${caller.agentId}`)
+    if (!callerBinding || callerBinding.runtimeAuthority !== caller)
+      throw new ModError("MODS_THREAD_CONTEXT_REQUIRED")
+    if (
+      callerBinding.executionWorkspace &&
+      this.workspaceKey(callerBinding.executionWorkspace) !== workspace
+    )
+      throw new ModError("MODS_AGENT_SPAWN_SCOPE_UNSUPPORTED")
+    if (queryModRuntimeToolAccess(callerBinding, "host:task").decision === "deny")
+      throw new ModError("MODS_RUNTIME_TOOL_DENIED")
+    if (
+      this.spawningAgents.size >= 32 ||
+      [...this.spawningAgents.values()].filter(
+        (item) => item.workspace === workspace && item.threadId === threadId
+      ).length >= 8
+    )
+      throw new ModError("MODS_AGENT_SPAWN_LIMIT")
+    const epoch = this.config(workspace).epoch
+    const controller = new AbortController()
+    const ownedSignal = AbortSignal.any([controller.signal, lifetime])
+    const startupSignal = AbortSignal.any([ownedSignal, signal])
+    const cancelStartup = () => controller.abort(signal.reason)
+    signal.addEventListener("abort", cancelStartup, { once: true })
+    const assertOwned = () => {
+      ownedSignal.throwIfAborted()
+      this.store.assertGrant(grant)
+      if (!this.isEnabled(workspace) || this.config(workspace).epoch !== epoch)
+        throw new ModError("MODS_SCOPE_CHANGED")
+    }
+    // Native child startup enters a different execution scope. Revalidate the
+    // creator's physical lease in its captured scope only until ownership moves.
+    let startupScope: ReturnType<typeof AsyncLocalStorage.snapshot> | undefined =
+      AsyncLocalStorage.snapshot()
+    const assertStartup = () => {
+      startupSignal.throwIfAborted()
+      caller.assertLive()
+      if (!startupScope) throw new ModError("MODS_CALL_SCOPE_EXPIRED")
+      startupScope(() => callerBinding.assertLive?.())
+      assertOwned()
+    }
+    this.spawningAgents.set(controller, { workspace, threadId })
+    this.activeActions.set(controller, workspace)
+    let ownershipTransferred = false
+    try {
+      assertStartup()
+      // Capture the original family before model/protection/approval awaits; never look it up later.
+      const conversationParent = this.captureFunctionConversationChildParent(caller)
+      const main = this.runtimeAuthorities.get({ workspace, threadId, agentId: "main" })
+      const inherited =
+        typeof input.parentModel === "string"
+          ? input.parentModel
+          : main && (this.functionSessions.get(main)?.modelRef ??
+            this.functionSessions.get(main)?.model)
+      const registered = this.functionLifecycle?.registeredAgent?.(
+        workspace,
+        threadId,
+        String(input.subagentType)
+      )
+      const plan = await prepareFunctionAgentPlan(input, workspace, inherited, registered)
+      assertStartup()
+      const protectedText = (await this.publish(
+        workspace,
+        {
+          prompt: plan.prompt,
+          description: plan.description,
+          ...(registered ? { rolePrompt: plan.role!.systemPrompt } : {})
+        },
+        undefined,
+        startupSignal
+      )) as ModObject
+      assertStartup()
+      if (typeof protectedText.prompt !== "string" || typeof protectedText.description !== "string")
+        throw new ModError("MODS_AGENT_SPAWN_ARGUMENTS")
+      const allowedTools = registered
+        ? (Array.isArray(registered.spec.tools) && registered.spec.tools.length === 0
+            ? []
+            : this.functionToolCatalog(workspace, threadId, caller.agentId)
+          )
+            .map((tool) => tool.name)
+            .filter(
+              (name) =>
+                !registered.spec.tools ||
+                (registered.spec.tools as string[]).map(functionAgentToolName).includes(name)
+            )
+            .filter((name) => !plan.role!.disallowedTools.includes(name))
+        : undefined
+      if (registered && typeof protectedText.rolePrompt !== "string")
+        throw new ModError("MODS_AGENT_SPEC")
+      const approvedPlan = Object.freeze({
+        ...plan,
+        prompt: protectedText.prompt,
+        description: protectedText.description,
+        ...(registered
+          ? {
+              role: { ...plan.role!, systemPrompt: String(protectedText.rolePrompt) },
+              allowedToolNames: allowedTools
+            }
+          : {}),
+        blockedToolNames: [
+          ...(callerBinding.delegatedBlockedToolNames ?? callerBinding.blockedToolNames ?? [])
+        ],
+        readOnly: callerBinding.readOnly === true || registered?.spec.permissionMode === "plan"
+      })
+      if (
+        Buffer.byteLength(approvedPlan.prompt) > 64 * 1024 ||
+        approvedPlan.description.length > 4000
+      )
+        throw new ModError("MODS_AGENT_SPAWN_ARGUMENTS")
+      const approvedArgs = {
+        prompt: approvedPlan.prompt,
+        description: approvedPlan.description,
+        model: plan.model,
+        subagentType: plan.type,
+        cwd: workspace,
+        background: true,
+        readOnly: approvedPlan.readOnly,
+        blockedTools: approvedPlan.blockedToolNames,
+        ...(registered
+          ? {
+              rolePrompt: approvedPlan.role!.systemPrompt,
+              allowedTools: allowedTools!,
+              maxTurns: approvedPlan.maxTurns ?? null,
+              omitClaudeMd: approvedPlan.omitClaudeMd === true
+            }
+          : {})
+      }
+      if (this.protects(workspace))
+        await this.policy.admit(identity, "host:agent.spawn", approvedArgs, startupSignal)
+      assertStartup()
+      const approved = await this.confirmOperation(
+        threadId,
+        grant.modId,
+        "host:agent.spawn",
+        approvedArgs,
+        startupSignal,
+        "启动独立后台智能体；工具操作仍需原生授权"
+      )
+      assertStartup()
+      if (!approved) throw new ModPermissionError("MODS_OPERATION_REJECTED")
+      this.store.claim(receiptId, "agent.spawn", input, identity, approvedArgs)
+      const agentId = `mods-agent:${randomUUID()}`
+      const ready = Promise.withResolvers<ModObject>()
+      void ready.promise.catch(() => {})
+      let started = false
+      let removeAlias: (() => void) | undefined
+      let physicalThreadId: string | undefined
+      let finishAgent: ((status: "completed" | "failed" | "killed") => void) | undefined
+      const completion = runFunctionAgentChild(this, approvedPlan, {
+        parentThreadId: threadId,
+        agentId,
+        creator,
+        conversationParent,
+        signal: ownedSignal,
+        assertLive: assertOwned,
+        started: (physical) => {
+          assertStartup()
+          physicalThreadId = physical
+          removeAlias = this.peerInbox.alias(
+            { workspace, sessionId: threadId, agentId },
+            { workspace, sessionId: physical, agentId }
+          )
+          this.peerLogicalSources.set(physical, { workspace, sessionId: threadId, agentId })
+          finishAgent = this.agentInstances.start(
+            { workspace, threadId },
+            {
+              id: agentId,
+              description: plan.description,
+              type: plan.type,
+              spawnedBy: grant.modId.replace(/^function:/, ""),
+              ...(caller.agentId === "main" ? {} : { parentId: caller.agentId })
+            }
+          )
+          started = true
+          startupScope = undefined
+          signal.removeEventListener("abort", cancelStartup)
+          ready.resolve({ agentId, model: plan.model })
+        }
+      })
+        .then(
+          (result) => {
+            this.store.settle(
+              receiptId,
+              !started
+                ? "not_started"
+                : result.reason === "answer"
+                  ? "succeeded"
+                  : result.reason === "aborted"
+                    ? "unknown"
+                    : "failed"
+            )
+            finishAgent?.(
+              result.reason === "answer"
+                ? "completed"
+                : result.reason === "aborted"
+                  ? "killed"
+                  : "failed"
+            )
+            if (!started) ready.reject(new ModError("MODS_AGENT_START_FAILED"))
+            return result
+          },
+          (error) => {
+            this.store.settle(receiptId, started ? "unknown" : "not_started")
+            finishAgent?.(ownedSignal.aborted ? "killed" : "failed")
+            ready.reject(error)
+            throw error
+          }
+        )
+        .finally(() => {
+          signal.removeEventListener("abort", cancelStartup)
+          removeAlias?.()
+          if (physicalThreadId) this.peerLogicalSources.delete(physicalThreadId)
+          this.spawningAgents.delete(controller)
+          this.activeActions.delete(controller)
+        })
+      void completion.catch(() => {})
+      ownershipTransferred = true
+      const value = await ready.promise
+      await this.publish(workspace, value, receiptId, startupSignal)
+      if (!this.protects(workspace)) this.store.publication(receiptId, "", [], "published")
+      return { value, completion }
+    } catch (error) {
+      controller.abort(error)
+      throw error
+    } finally {
+      startupScope = undefined
+      if (!ownershipTransferred) {
+        controller.abort()
+        signal.removeEventListener("abort", cancelStartup)
+        this.spawningAgents.delete(controller)
+        this.activeActions.delete(controller)
+      }
+    }
+  }
+
+  onFunctionPeerMessagesChanged(
+    listener: (workspace: string, threadId: string) => void
+  ): () => void {
+    this.peerListeners.add(listener)
+    return () => this.peerListeners.delete(listener)
+  }
+
+  async listFunctionPeerMessages(
+    workspace: string,
+    threadId: string
+  ): Promise<FunctionPeerRecord[]> {
+    const key = this.workspaceKey(workspace)
+    if (!this.isEnabled(key)) return []
+    const epoch = this.config(key).epoch
+    const records = this.peerInbox.list(key, threadId)
+    const result: FunctionPeerRecord[] = []
+    for (const record of records) {
+      const value = await this.publish(key, { text: record.text, plugin: record.plugin })
+      if (!this.isEnabled(key) || this.config(key).epoch !== epoch)
+        throw new ModError("MODS_SCOPE_CHANGED")
+      result.push({
+        ...record,
+        text: String((value as ModObject).text),
+        plugin: String((value as ModObject).plugin)
+      })
+    }
+    return result
+  }
+
+  bindFunctionPeerEndpoint(authority: ModRuntimeAuthority): FunctionPeerConsumer {
+    this.peerConsumers.get(authority)?.close()
+    const epoch = this.config(authority.workspace).epoch
+    const assertLive = () => {
+      authority.assertLive()
+      if (
+        !this.isEnabled(authority.workspace) ||
+        this.config(authority.workspace).epoch !== epoch ||
+        this.runtimeAuthorities.get(authority) !== authority
+      )
+        throw new ModError("MODS_PEER_STALE_ENDPOINT")
+    }
+    assertLive()
+    const consumer = this.peerInbox.register({
+      workspace: authority.workspace,
+      sessionId: authority.threadId,
+      agentId: authority.agentId,
+      assertLive,
+      receive: (input, commit, signal) =>
+        withFunctionAgentExecution(
+          {
+            workspace: authority.workspace,
+            threadId: authority.threadId,
+            turnId: authority.turnId,
+            agentId: authority.agentId,
+            runtimeAuthority: authority,
+            userInitiated: false,
+            leased: false,
+            immediate: false
+          },
+          async () => {
+            assertLive()
+            const receive = this.functionLifecycle?.receivePeer
+            return receive
+              ? receive(authority.workspace, authority.threadId, input, signal, commit)
+              : commit(input)
+          }
+        )
+    })
+    let detach = () => {}
+    const owned = {
+      claim: consumer.claim,
+      settle: consumer.settle,
+      close: () => {
+        detach()
+        try {
+          consumer.close()
+        } finally {
+          if (this.peerConsumers.get(authority) === owned) this.peerConsumers.delete(authority)
+        }
+      }
+    }
+    try {
+      detach = this.runtimeAuthorities.registerResource(authority, () => owned.close())
+    } catch (error) {
+      consumer.close()
+      throw error
+    }
+    this.peerConsumers.set(authority, owned)
+    return owned
+  }
+
+  functionPeerEndpoint(
+    authority: ModRuntimeAuthority | undefined
+  ): FunctionPeerConsumer | undefined {
+    return authority && this.peerConsumers.get(authority)
+  }
+
+  async sendFunctionPeer(
+    workspace: string,
+    threadId: string,
+    grant: ModGrant,
+    input: FunctionPeerSend,
+    signal: AbortSignal
+  ): Promise<{ isDelivered: boolean; reason?: string }> {
+    workspace = this.workspaceKey(workspace)
+    const authority = functionCallAuthority(workspace, threadId)
+    if (!authority) throw new ModError("MODS_RUNTIME_SCOPE_REQUIRED")
+    const epoch = this.config(workspace).epoch
+    const sourceScope = AsyncLocalStorage.snapshot()
+    const assertLive = () =>
+      sourceScope(() => {
+        signal.throwIfAborted()
+        authority.assertLive()
+        assertFunctionGrant(this.store, workspace, threadId, grant, signal)
+        if (!this.isEnabled(workspace) || this.config(workspace).epoch !== epoch)
+          throw new ModError("MODS_CALL_SCOPE_CHANGED")
+      })
+    assertLive()
+    const logical = this.peerLogicalSources.get(threadId)
+    return this.peerInbox.send(input, {
+      workspace,
+      sessionId: logical?.sessionId ?? threadId,
+      agentId: authority.agentId,
+      plugin: grant.modId.replace(/^function:/, ""),
+      signal,
+      assertLive,
+      publish: async (text, publicationSignal) => {
+        const value = await this.publish(workspace, { text }, undefined, publicationSignal)
+        assertLive()
+        if (typeof (value as ModObject).text !== "string") throw new ModError("MODS_PEER_TEXT")
+        return (value as ModObject).text as string
+      }
+    })
+  }
+
   private readonly agentInstances = new FunctionAgentInstances()
   private readonly childTurnObservers = new WeakMap<
     ModRuntimeAuthority,
     FunctionChildTurnObserver
   >()
+  private readonly sharedAgentOwners = new WeakMap<
+    ModRuntimeAuthority,
+    { parent: ModRuntimeAuthority; role?: string; epoch: number }
+  >()
+
+  /** Only a live, known task invocation can enter its role's actual model transport. */
+  functionSharedModelAuthority(root: ModRuntimeAuthority, role?: string): ModRuntimeAuthority {
+    root.assertLive()
+    const authority = currentFunctionExecution()?.runtimeAuthority
+    const entry = authority && this.sharedAgentOwners.get(authority)
+    if (!authority || !entry || !entry.role || (role !== undefined && entry.role !== role))
+      throw new ModError("MODS_TASK_OWNER_REQUIRED")
+    authority.assertLive()
+    if (this.config(authority.workspace).epoch !== entry.epoch)
+      throw new ModError("MODS_CALL_SCOPE_CHANGED")
+    let ancestor: ModRuntimeAuthority | undefined = entry.parent
+    while (ancestor && ancestor !== root) ancestor = this.sharedAgentOwners.get(ancestor)?.parent
+    const binding = this.bindings.get(`${authority.threadId}:${authority.agentId}`)
+    if (
+      ancestor !== root ||
+      authority.workspace !== root.workspace ||
+      authority.threadId !== root.threadId ||
+      this.runtimeAuthorities.get(authority) !== authority ||
+      binding?.runtimeAuthority !== authority
+    )
+      throw new ModError("MODS_RUNTIME_SCOPE_CHANGED")
+    this.assertFunctionBinding(binding)
+    if (!this.isActive(authority.workspace)) throw new ModError("MODS_DISABLED")
+    return authority
+  }
+
+  functionSharedModelRole(root: ModRuntimeAuthority): string {
+    const authority = this.functionSharedModelAuthority(root)
+    return this.sharedAgentOwners.get(authority)!.role!
+  }
+
+  /** Pin the registered host binding, including a task's creation epoch, across awaits. */
+  captureFunctionRuntimeGuard(authority: ModRuntimeAuthority): () => void {
+    const key = `${authority.threadId}:${authority.agentId}`
+    const binding = this.bindings.get(key)
+    const shared = this.sharedAgentOwners.get(authority)
+    const epoch = this.runtimeEpochs.get(authority)
+    const assertCurrent = (): void => {
+      authority.assertLive()
+      if (this.runtimeAuthorities.get(authority) !== authority ||
+        (epoch !== undefined && this.config(authority.workspace).epoch !== epoch) ||
+        (shared && (this.sharedAgentOwners.get(authority) !== shared ||
+          this.config(authority.workspace).epoch !== shared.epoch)) ||
+        (shared && !binding) ||
+        (binding && (binding.runtimeAuthority !== authority || this.bindings.get(key) !== binding)))
+        throw new ModError("MODS_CALL_SCOPE_CHANGED")
+      if (binding) {
+        this.assertRuntimeBinding(binding)
+        binding.signal?.throwIfAborted()
+        binding.assertLive?.()
+      }
+    }
+    assertCurrent()
+    return assertCurrent
+  }
 
   observeSharedAgentTurn(response: unknown): void {
     const authority = currentFunctionExecution()?.runtimeAuthority
     if (!authority) return
     this.childTurnObservers.get(authority)?.observe(response)
+  }
+
+  /** Stream facts belong to the captured runtime, never to a public tool-call label. */
+  observeFunctionModelStream(authority: ModRuntimeAuthority, message: unknown): void {
+    const observer = this.childTurnObservers.get(authority)
+    if (!observer) return
+    this.captureFunctionRuntimeGuard(authority)()
+    observer.observeStream([message], "delta")
   }
 
   readonly functionTurns = new FunctionTurnLifecycle({
@@ -167,7 +967,7 @@ export class ModsManager {
         }
       ),
     complete: (binding, input, signal, anchorMessageId) =>
-      withFunctionAgentExecution(
+      withFreshFunctionSessionActivity(() => withFunctionTransportExecution(
         {
           workspace: binding.workspace,
           threadId: binding.threadId,
@@ -184,7 +984,7 @@ export class ModsManager {
             anchorMessageId
           )
         }
-      )
+      ))
   })
 
   async startFunctionTurn(binding: FunctionTurnBinding): Promise<void> {
@@ -192,10 +992,428 @@ export class ModsManager {
     await this.functionTurns.start({ ...binding, workspace: this.workspaceKey(binding.workspace) })
   }
   private readonly runtimeAuthorities = new ModRuntimeAuthorities()
+  private functionConversations?: FunctionConversationCoordinator
+  private readonly functionConversationRuntimes = new WeakMap<
+    ModRuntimeAuthority, FunctionConversationGraphBinding
+  >()
+  private readonly functionConversationSharedScopes = new WeakMap<
+    ModRuntimeAuthority, FunctionConversationSharedCheckpointScope
+  >()
+  private readonly functionConversationSharedProducers = new WeakMap<ModRuntimeAuthority, {
+    readonly proof: FunctionConversationSharedProducer
+    readonly binding: FunctionConversationGraphBinding
+  }>()
+  private readonly functionConversationNativeRuns = new WeakMap<ModRuntimeAuthority, {
+    proof: FunctionConversationNativeRunProof
+    binding: FunctionConversationGraphBinding
+    close(): void
+  }>()
+  private readonly functionNativeConversationRuntimes = new WeakMap<
+    ModRuntimeAuthority, FunctionNativeConversationRuntime
+  >()
+  private readonly preparingFunctionConversations = new WeakSet<ModRuntimeAuthority>()
+
+  captureFunctionConversationSharedScope(authority: ModRuntimeAuthority) {
+    this.captureFunctionRuntimeGuard(authority)()
+    return this.functionConversationSharedScopes.get(authority)
+  }
+
+  setFunctionConversations(coordinator: FunctionConversationCoordinator): void {
+    if (this.functionConversations) throw new ModError("MODS_CONVERSATION_REGISTRATION_CONFLICT")
+    this.functionConversations = coordinator
+  }
+
+  /** Already-created native store only; ordinary graph checks must not open a cold Saver. */
+  captureFunctionConversationStore() {
+    return this.functionConversations?.store
+  }
+
+  getFunctionConversationAuthority(scope: Parameters<ModRuntimeAuthorities["get"]>[0]) {
+    return this.runtimeAuthorities.get(scope)
+  }
+
+  async prepareFunctionConversationRuntime(authority: ModRuntimeAuthority,
+    signal: AbortSignal, physicalRunId?: string): Promise<void> {
+    const worker = readCoordinatorWorkerModsContext(authority.threadId)
+    if (worker) {
+      signal.throwIfAborted()
+      if (this.workspaceKey(worker.workspace) !== authority.workspace)
+        throw new ModError("MODS_CALL_SCOPE_CHANGED")
+      this.captureFunctionRuntimeGuard(authority)()
+      // These native workers own no canonical append adapter or parent checkpoint.
+      return
+    }
+    const coordinator = this.functionConversations
+    if (!coordinator) return
+    if (this.preparingFunctionConversations.has(authority) ||
+      this.functionConversationNativeRuns.has(authority) ||
+      this.functionNativeConversationRuntimes.has(authority))
+      throw new ModError("MODS_CONVERSATION_REGISTRATION_CONFLICT")
+    this.preparingFunctionConversations.add(authority)
+    const physicalBinding = this.bindings.get(`${authority.threadId}:${authority.agentId}`)
+    let native: ReturnType<typeof captureFunctionConversationNativeRun> | undefined
+    let adopted = false
+    try {
+      const assertBinding = () => {
+        if (!physicalBinding || physicalBinding.commandOnly ||
+          physicalBinding.runtimeAuthority !== authority ||
+          this.bindings.get(`${authority.threadId}:${authority.agentId}`) !== physicalBinding)
+          throw new ModError("MODS_CALL_SCOPE_CHANGED")
+        this.assertRuntimeBinding(physicalBinding)
+        physicalBinding.signal?.throwIfAborted()
+        physicalBinding.assertLive?.()
+      }
+      const bindingData = physicalBinding && nativeBindingApply(nativePolicyWeakGet,
+        nativePhysicalBindings, [physicalBinding]) as NativePhysicalBindingData | undefined
+      if (bindingData?.manager === this && bindingData.authority === authority && bindingData.eligible())
+        nativeBindingApply(composerOwnerWeakSet, nativePhysicalGuards, [assertBinding, bindingData])
+      native = physicalRunId !== undefined && authority.agentId === "main"
+        ? captureFunctionConversationNativeRun({ authority, authorities: this.runtimeAuthorities,
+          physicalRunId, signal, assertBinding }) : undefined
+      const actualRun = native ? readFunctionConversationNativeRun(native.proof, authority) : undefined
+      const runtimeGuard = actualRun?.assertCurrent ?? this.captureFunctionRuntimeGuard(authority)
+      runtimeGuard()
+      const prepared = authority.agentId === "main"
+        ? await coordinator.prepareNativeRuntime(authority.workspace, authority.threadId,
+            actualRun?.signal ?? signal, runtimeGuard)
+        : coordinator.prepareIndependentRuntime(authority, signal, runtimeGuard)
+      runtimeGuard()
+      if (!prepared) return
+      const binding = Object.freeze({ target: prepared.ref,
+        checkpointThreadId: authority.threadId, runtimeCheckpointNamespace: "",
+        checkpointIncarnation: prepared.checkpointIncarnation,
+        signal: prepared.signal, initialState: prepared.state,
+        assertCurrent: prepared.assertCurrent })
+      binding.assertCurrent()
+      this.functionConversationRuntimes.set(authority, binding)
+      if (native) {
+        const nativeRun = native
+        let detach = () => {}
+        const close = () => {
+          detach()
+          nativeRun.retire()
+          if (this.functionConversationNativeRuns.get(authority)?.proof === nativeRun.proof)
+            this.functionConversationNativeRuns.delete(authority)
+        }
+        detach = this.runtimeAuthorities.registerResource(authority, close)
+        this.functionConversationNativeRuns.set(authority, { proof: native.proof, binding, close })
+        adopted = true
+      }
+    } finally {
+      if (native && !adopted) native.retire()
+      this.preparingFunctionConversations.delete(authority)
+    }
+  }
+
+  /** The graph owns this registration independently of a resident Guest's approval epoch. */
+  captureFunctionNativeConversationRuntime(authority: ModRuntimeAuthority):
+    FunctionNativeConversationRuntime | undefined {
+    const original = nativePolicyManager(this)
+    const existing = original.readRuntime(authority)
+    if (existing) {
+      existing.assertCurrent()
+      return existing
+    }
+    if (authority.agentId !== "main")
+      return this.captureFunctionSharedNativeConversationRuntime(authority)
+    const captured = original.readNativeRun(authority)
+    if (!captured) return undefined
+    const assertCoordinator = captureNativePolicyFields(this, ["functionConversations"])
+    const coordinator = this.functionConversations
+    if (!captured || !coordinator || authority.agentId !== "main") return undefined
+    const assertRecord = captureNativePolicyFields(captured, ["proof", "binding"])
+    const actual = readFunctionConversationNativeRun(captured.proof, authority)
+    original.assertFields()
+    assertCoordinator()
+    assertRecord()
+    const binding = captured.binding
+    const physicalKey = `${authority.threadId}:${authority.agentId}`
+    const physicalBinding = original.readBinding(physicalKey)
+    const assertCaptured = () => {
+      original.assertFields()
+      assertRecord()
+      assertCoordinator()
+      if (original.readNativeRun(authority) !== captured ||
+        original.readBindingRuntime(authority) !== binding)
+        throw new ModError("MODS_CALL_SCOPE_CHANGED")
+    }
+    const guard = () => {
+      assertCaptured()
+      // prepareNativeRuntime fixed this binding to the original physical-run guard, including
+      // its before/after facts. Check our own maps again if that synchronous guard reenters.
+      binding.assertCurrent()
+      assertCaptured()
+    }
+    guard()
+    const owner = Object.freeze({}), identity = Object.freeze({})
+    const target = coordinator.registry.registerMain(owner, { identity, ref: binding.target,
+      authority, checkpointThreadId: binding.checkpointThreadId,
+      signal: actual.signal, assertCurrent: guard })
+    let closed = false
+    let detach = () => {}
+    const assertCurrent = () => {
+      if (closed) throw new ModError("MODS_CALL_SCOPE_CHANGED")
+      // This private target checks the exact backend guard above, then Store and authority.
+      target.assertCurrent()
+      if (closed) throw new ModError("MODS_CALL_SCOPE_CHANGED")
+    }
+    const close = () => {
+      if (closed) return
+      closed = true
+      detach()
+      try {
+        coordinator.registry.closeOwner(owner)
+      } finally {
+        captured.close()
+      }
+    }
+    try { detach = this.runtimeAuthorities.registerResource(authority, close) }
+    catch (error) { close(); throw error }
+    const lifecycle = this.functionLifecycle
+    const append = lifecycle?.appendConversation?.bind(lifecycle)
+    const creationEpoch = this.runtimeEpochs.get(authority)
+    const destination = Object.freeze({ conversation: target.ref,
+      threadId: authority.threadId, incarnation: actual.incarnation, assertCurrent })
+    const runtime: FunctionNativeConversationRuntime = Object.freeze({
+      owner, target, destination, run: actual.run,
+      database: actual.database, signal: actual.signal, binding, assertCurrent, close,
+      runMutation: <T>(producer: object, occurrence: object,
+        run: (signal: AbortSignal, guard: () => void) => Promise<T>) =>
+        coordinator.registry.runMutation({ owner, plugin: producer, registration: occurrence,
+          signal: actual.signal, assertCurrent }, target, "native", run),
+      capturePolicy: () => {
+        assertCurrent()
+        original.assertFields()
+        const policy = original.policy
+        // Inspect the actual deployment before config/protects can read its required flag.
+        const initial = captureFunctionConversationNativePolicyData(policy)
+        const settings = this.config(authority.workspace)
+        const settingEpoch = captureNativePolicyEpoch(settings), epoch = settingEpoch.epoch
+        const protectedOutput = this.protects(authority.workspace)
+        const value: FunctionNativeProtectionPolicy = Object.freeze({ identity: policy,
+          protected: protectedOutput, digest: initial.digest, epoch, deployment: initial.deployment })
+        const assertTail = () => {
+          if (closed) throw new ModError("MODS_CALL_SCOPE_CHANGED")
+          Reflect.apply(nativePolicyThrowIfAborted, actual.signal, [])
+          Reflect.apply(nativePolicyThrowIfAborted, target.signal, [])
+          assertCaptured()
+          if (original.readRuntime(authority) !== runtime ||
+            original.readBinding(physicalKey) !== physicalBinding || !physicalBinding ||
+            !isModRuntimeAuthorityDataCurrentForRegistry(original.registry, authority) ||
+            original.policy !== policy || original.readSettings(authority.workspace) !== settings)
+            throw new ModError("MODS_CALL_SCOPE_CHANGED")
+          settingEpoch.assertCurrent()
+          const current = captureFunctionConversationNativePolicyData(policy)
+          if (current.digest !== initial.digest || current.signature !== initial.signature)
+            throw new ModError("MODS_CALL_SCOPE_CHANGED")
+        }
+        const assertPolicy = () => {
+          assertCurrent()
+          // No original policy data enters JSON.stringify or a capability callback.
+          assertTail()
+          if (this.protects(authority.workspace) !== protectedOutput)
+            throw new ModError("MODS_CALL_SCOPE_CHANGED")
+          // The configured global switch can synchronously retire the original owner.
+          assertTail()
+        }
+        assertPolicy()
+        const admission = Object.freeze({ value, assertCurrent: assertPolicy })
+        registerFunctionConversationNativePolicySource({ admission, runtime,
+          proof: captured.proof, authority, assertTail })
+        return admission
+      },
+      dispatch: async (ticket: FunctionSessionAppendTicket): Promise<FunctionSessionAppendResult> => {
+        assertCurrent()
+        ticket.assertCurrent()
+        const eligible = creationEpoch === this.config(authority.workspace).epoch &&
+          this.isEnabled(authority.workspace) && append !== undefined
+        let result: FunctionSessionAppendResult
+        if (eligible) {
+          const assertGuest = this.captureFunctionRuntimeGuard(authority)
+          assertGuest()
+          if (this.functionLifecycle !== lifecycle) throw new ModError("MODS_CALL_SCOPE_CHANGED")
+          result = await append!(authority.workspace, authority.threadId, ticket)
+          assertGuest()
+          if (this.functionLifecycle !== lifecycle) throw new ModError("MODS_CALL_SCOPE_CHANGED")
+        } else result = await ticket.core(ticket.input)
+        assertCurrent()
+        ticket.assertCurrent()
+        return result
+      }
+    })
+    this.functionNativeConversationRuntimes.set(authority, runtime)
+    return runtime
+  }
+
+  /** Reuses the actual shared child registration; it cannot register or close a parent owner. */
+  private captureFunctionSharedNativeConversationRuntime(authority: ModRuntimeAuthority):
+    FunctionNativeConversationRuntime | undefined {
+    const original = nativePolicyManager(this)
+    const captured = original.readSharedProducer(authority)
+    if (!captured) return undefined
+    const assertCoordinator = captureNativePolicyFields(this, ["functionConversations"])
+    const coordinator = this.functionConversations
+    if (!captured || !coordinator) return undefined
+    const assertRecord = captureNativePolicyFields(captured, ["proof", "binding"])
+    const actual = readFunctionConversationSharedProducer(captured.proof, authority)
+    original.assertFields()
+    assertCoordinator()
+    assertRecord()
+    const binding = captured.binding, physicalKey = `${authority.threadId}:${authority.agentId}`
+    const physicalBinding = original.readBinding(physicalKey)
+    if (actual.coordinator !== coordinator || actual.binding !== binding ||
+      actual.scope !== original.readSharedScope(authority) || !physicalBinding)
+      throw new ModError("MODS_CALL_SCOPE_CHANGED")
+    let closed = false, detach = () => {}
+    const assertCaptured = () => {
+      original.assertFields()
+      assertRecord()
+      assertCoordinator()
+      if (closed || original.readSharedProducer(authority) !== captured ||
+        original.readBindingRuntime(authority) !== binding ||
+        original.readSharedScope(authority) !== actual.scope ||
+        original.readBinding(physicalKey) !== physicalBinding ||
+        !isModRuntimeAuthorityDataCurrentForRegistry(original.registry, authority))
+        throw new ModError("MODS_CALL_SCOPE_CHANGED")
+    }
+    const assertCurrent = () => {
+      assertCaptured()
+      actual.assertCurrent()
+      assertCaptured()
+      actual.assertDataCurrent()
+    }
+    assertCurrent()
+    const close = () => {
+      if (closed) return
+      closed = true
+      detach()
+      // Retire immediately. The invocation's real finally still owns drain and reservation release.
+      actual.scope.close()
+      coordinator.registry.retire(actual.target)
+      if (this.functionNativeConversationRuntimes.get(authority) === runtime)
+        this.functionNativeConversationRuntimes.delete(authority)
+    }
+    const lifecycle = this.functionLifecycle, append = lifecycle?.appendConversation?.bind(lifecycle)
+    const creationEpoch = this.runtimeEpochs.get(authority)
+    const destination = Object.freeze({ conversation: actual.target.ref,
+      threadId: actual.destination.destinationThreadId,
+      incarnation: actual.destination.destinationIncarnation, assertCurrent })
+    const runtime: FunctionNativeConversationRuntime = Object.freeze({
+      owner: actual.owner, target: actual.target, binding, destination,
+      run: actual.invocation, database: actual.database, signal: actual.signal,
+      assertCurrent, close,
+      runMutation: <T>(producer: object, occurrence: object,
+        run: (signal: AbortSignal, guard: () => void) => Promise<T>) =>
+        coordinator.registry.runMutation({ owner: actual.owner, plugin: producer,
+          registration: occurrence, signal: actual.signal, assertCurrent }, actual.target, "native", run),
+      capturePolicy: () => {
+        assertCurrent()
+        original.assertFields()
+        const policy = original.policy, initial = captureFunctionConversationNativePolicyData(policy)
+        const settings = this.config(authority.workspace)
+        const settingEpoch = captureNativePolicyEpoch(settings), epoch = settingEpoch.epoch
+        const protectedOutput = this.protects(authority.workspace)
+        const value: FunctionNativeProtectionPolicy = Object.freeze({ identity: policy,
+          protected: protectedOutput, digest: initial.digest, epoch, deployment: initial.deployment })
+        const assertPolicyData = () => {
+          assertCaptured()
+          if (original.readRuntime(authority) !== runtime || original.policy !== policy ||
+            original.readSettings(authority.workspace) !== settings)
+            throw new ModError("MODS_CALL_SCOPE_CHANGED")
+          settingEpoch.assertCurrent()
+          const current = captureFunctionConversationNativePolicyData(policy)
+          if (current.digest !== initial.digest || current.signature !== initial.signature)
+            throw new ModError("MODS_CALL_SCOPE_CHANGED")
+        }
+        const assertTail = () => {
+          assertPolicyData()
+          actual.assertDataCurrent()
+        }
+        const assertPolicy = () => {
+          assertCurrent()
+          assertTail()
+          if (this.protects(authority.workspace) !== protectedOutput)
+            throw new ModError("MODS_CALL_SCOPE_CHANGED")
+          assertTail()
+        }
+        assertPolicy()
+        const admission = Object.freeze({ value, assertCurrent: assertPolicy })
+        registerFunctionConversationSharedNativePolicySource({ admission, runtime,
+          proof: captured.proof, authority, assertTail: assertPolicyData })
+        return admission
+      },
+      dispatch: async (ticket: FunctionSessionAppendTicket) => {
+        assertCurrent()
+        ticket.assertCurrent()
+        const eligible = creationEpoch === this.config(authority.workspace).epoch &&
+          this.isEnabled(authority.workspace) && append !== undefined
+        let result: FunctionSessionAppendResult
+        if (eligible) {
+          const guestGuard = this.captureFunctionRuntimeGuard(authority)
+          guestGuard()
+          if (this.functionLifecycle !== lifecycle) throw new ModError("MODS_CALL_SCOPE_CHANGED")
+          result = await append!(authority.workspace, authority.threadId, ticket)
+          guestGuard()
+          if (this.functionLifecycle !== lifecycle) throw new ModError("MODS_CALL_SCOPE_CHANGED")
+        } else result = await ticket.core(ticket.input)
+        assertCurrent()
+        ticket.assertCurrent()
+        return result
+      }
+    })
+    this.functionNativeConversationRuntimes.set(authority, runtime)
+    try { detach = this.runtimeAuthorities.registerResource(authority, close) }
+    catch (error) { close(); throw error }
+    return runtime
+  }
+
+  captureFunctionConversationChildParent(authority: ModRuntimeAuthority):
+    FunctionConversationChildParent | undefined {
+    const guard = this.captureFunctionRuntimeGuard(authority)
+    guard()
+    const binding = this.functionConversationRuntimes.get(authority)
+    if (!binding || !this.functionConversations) return undefined
+    return this.functionConversations.captureChildParent(authority.workspace, authority.threadId,
+      binding, () => { guard(); binding.assertCurrent() }, authority)
+  }
+
+  registerFunctionConversationChild(parent: FunctionConversationChildParent,
+    input: FunctionConversationIndependentChildInput): () => void {
+    if (!this.functionConversations) throw new ModError("MODS_CONVERSATION_UNAVAILABLE")
+    return this.functionConversations.registerIndependentChild(parent, input)
+  }
+
+  captureFunctionConversationRuntime(authority: ModRuntimeAuthority) {
+    const binding = this.functionConversationRuntimes.get(authority)
+    if (!binding || !this.functionConversations) return undefined
+    const runtimeGuard = this.captureFunctionRuntimeGuard(authority)
+    const lifecycle = this.functionLifecycle
+    const append = lifecycle?.appendConversation?.bind(lifecycle)
+    const assertCurrent = () => {
+      runtimeGuard()
+      binding.assertCurrent()
+      if (this.functionConversationRuntimes.get(authority) !== binding ||
+        this.functionLifecycle !== lifecycle)
+        throw new ModError("MODS_CALL_SCOPE_CHANGED")
+    }
+    assertCurrent()
+    return { binding, store: this.functionConversations.store,
+      dispatch: async (ticket: FunctionSessionAppendTicket): Promise<FunctionSessionAppendResult> => {
+        assertCurrent()
+        ticket.assertCurrent()
+        const result = this.isEnabled(authority.workspace) && append
+          ? await append(authority.workspace, authority.threadId, ticket)
+          : await ticket.core(ticket.input)
+        assertCurrent()
+        ticket.assertCurrent()
+        return result
+      } }
+  }
   private readonly functionSessions = new WeakMap<
     ModRuntimeAuthority,
     {
       model: string
+      modelRef?: string
       contextWindow?: number
       compact?: FunctionSessionCompactor
       contextState?: { _summarizationEvent?: unknown }
@@ -213,26 +1431,29 @@ export class ModsManager {
     authority: ModRuntimeAuthority,
     model: string,
     contextWindow?: number,
-    compact?: FunctionSessionCompactor
+    compact?: FunctionSessionCompactor,
+    modelRef?: string
   ): void {
     authority.assertLive()
     if (authority.agentId !== "main" || this.runtimeAuthorities.get(authority) !== authority)
       throw new ModError("MODS_RUNTIME_SCOPE_CHANGED")
-    this.functionSessions.set(authority, { model, contextWindow, compact })
+    this.functionSessions.set(authority, { model, modelRef, contextWindow, compact })
   }
 
   updateFunctionSessionModel(
     authority: ModRuntimeAuthority,
     model: string,
-    contextWindow: number
+    contextWindow: number,
+    modelRef?: string
   ): void {
     authority.assertLive()
     const view = this.functionSessions.get(authority)
     if (!view || this.runtimeAuthorities.get(authority) !== authority)
       throw new ModError("MODS_SESSION_UNAVAILABLE")
-    if (view.model !== model || view.contextWindow !== contextWindow)
+    if (view.model !== model || view.contextWindow !== contextWindow || view.modelRef !== modelRef)
       this.invalidateFunctionReads(authority.threadId)
     view.model = model
+    view.modelRef = modelRef
     view.contextWindow = contextWindow
   }
 
@@ -248,6 +1469,25 @@ export class ModsManager {
     // Graph message reducers replace the array; retain that exact engine snapshot.
     view.messages = messages
     view.contextState = contextState
+  }
+
+  /** Called before the original main graph releases its physical runtime and lease. */
+  async measureFunctionSession(authority: ModRuntimeAuthority, signal?: AbortSignal): Promise<void> {
+    if (authority.agentId !== "main" || !this.isEnabled(authority.workspace) ||
+      !this.functionLifecycle?.measure) return
+    try {
+      const guard = this.captureFunctionRuntimeGuard(authority)
+      const bindingSignal = this.bindings.get(`${authority.threadId}:${authority.agentId}`)?.signal
+      const parent = AbortSignal.any([signal, bindingSignal].filter((value): value is AbortSignal => !!value))
+      await withFunctionAgentExecution({
+      workspace: authority.workspace, threadId: authority.threadId,
+      turnId: authority.turnId, agentId: authority.agentId, runtimeAuthority: authority,
+      userInitiated: false, leased: true, immediate: false
+    }, () => this.functionLifecycle!.measure!(authority.workspace, authority.threadId,
+        parent, guard))
+    } catch {
+      // Notification failures do not alter graph routing; the caller still checks task cancellation.
+    }
   }
 
   updateFunctionSessionRequest(
@@ -324,6 +1564,7 @@ export class ModsManager {
     this.functionReadQueries.add(query)
     return {
       model: view?.model,
+      modelRef: view?.modelRef,
       messages: view?.messages,
       contextWindow: view?.contextWindow,
       compact: view?.compact,
@@ -346,6 +1587,24 @@ export class ModsManager {
     { tools: FunctionToolInfo[]; binding: ModThreadBinding }
   >()
   private functionLifecycle?: {
+    appendConversation?(workspace: string, threadId: string,
+      ticket: FunctionSessionAppendTicket): Promise<FunctionSessionAppendResult>
+    hasEventHandler?(workspace: string, threadId: string, event: string): Promise<boolean>
+    clawDefaultModel?(workspace: string, threadId: string): string | undefined
+    clawProfile?(workspace: string, threadId: string): import("../../shared/mods/claw").ClawProfile | null
+    runtimeReady?(workspace: string, threadId: string, signal?: AbortSignal): Promise<boolean>
+    registeredAgent?(
+      workspace: string,
+      threadId: string,
+      name: string
+    ): RegisteredFunctionAgent | undefined
+    receivePeer?(
+      workspace: string,
+      threadId: string,
+      input: FunctionPeerInput,
+      signal: AbortSignal,
+      commit: (input: FunctionPeerInput) => Promise<{ text: string }>
+    ): Promise<unknown>
     completionGate?(
       workspace: string,
       threadId: string,
@@ -364,9 +1623,13 @@ export class ModsManager {
       signal: AbortSignal,
       anchorMessageId?: string
     ): Promise<FunctionTurnResult>
+    measure?(workspace: string, threadId: string, signal: AbortSignal,
+      assertOriginal: () => void): Promise<void>
     invalidate(workspace: string): void
     invalidateAll?(): void
     closeThread(threadId: string): void
+    prepareEnd?(reason: import("./v2/session-end").FunctionSessionEndReason,
+      threadId?: string): import("./v2/session-end").FunctionSessionEndReceipt
     close(): void
     registeredTools?(workspace: string, threadId: string): Promise<RegisteredFunctionTool[]>
     hasToolCheck?(workspace: string, threadId: string): boolean
@@ -386,13 +1649,22 @@ export class ModsManager {
       threadId: string,
       input: ModObject,
       core: FunctionStreamOptions["core"],
-      signal: AbortSignal
+      signal: AbortSignal,
+      dispatchHooks?: boolean,
+      skip?: import("./v2/dispatcher").FunctionHookSource,
+      transport?: FunctionStreamOptions["transport"]
     ): Promise<ModHookStream>
     offerAgent?(
       workspace: string,
       threadId: string,
       input: ModObject,
       signal: AbortSignal
+    ): Promise<ModObject>
+    independentModelPrompt?(
+      workspace: string, threadId: string,
+      event: import("../../shared/mods/v2/prompt-composition").FunctionPromptEvent,
+      input: ModObject, signal: AbortSignal,
+      core: import("../../shared/mods/v2/prompt-composition").FunctionPromptCore
     ): Promise<ModObject>
     classicEvent?(
       workspace: string,
@@ -402,13 +1674,111 @@ export class ModsManager {
       signal: AbortSignal,
       core?: (input: ModObject, signal: AbortSignal) => Promise<ModObject>
     ): Promise<ModObject>
+    presentationEvent?(
+      workspace: string,
+      threadId: string,
+      event: import("../../shared/mods/v2/presentation-events").FunctionPresentationEvent,
+      input: ModObject,
+      signal: AbortSignal
+    ): Promise<ModObject>
   }
 
   attachFunctions(lifecycle: NonNullable<ModsManager["functionLifecycle"]>): void {
     this.functionLifecycle = lifecycle
   }
 
+  async hasFunctionEvent(workspace: string, threadId: string, event: string): Promise<boolean> {
+    const key = this.workspaceKey(workspace)
+    return this.isEnabled(key) &&
+      (await this.functionLifecycle?.hasEventHandler?.(key, threadId, event) ?? false)
+  }
+
+  /** Editing is preparation, with no physical run lease or ancestor's user action. */
+  async editComposerPrompt(workspace: string, threadId: string, input: ModObject,
+    signal: AbortSignal, assertOwner: () => void, nativeCursor?: number): Promise<ModObject> {
+    const { applyPromptEdit, validatePromptEditInput, validatePromptEditResult } =
+      await import("../../shared/mods/v2/prompt-edit")
+    validatePromptEditInput(input)
+    const key = this.workspaceKey(workspace)
+    assertOwner()
+    signal.throwIfAborted()
+    const applyNative = (value: ModObject): ModObject => {
+      const result = applyPromptEdit(value as import("../../shared/mods/v2/prompt-edit").FunctionPromptEditInput)
+      if (nativeCursor !== undefined && ["text", "cursor", "start", "end", "inputText"].every(
+        field => value[field] === input[field])) result.cursor = nativeCursor
+      validatePromptEditResult(result)
+      return result as ModObject
+    }
+    if (!this.isEnabled(key)) return applyNative(input)
+    const epoch = this.config(key).epoch
+    const assertLive = () => {
+      signal.throwIfAborted()
+      assertOwner()
+      if (!this.isEnabled(key) || this.config(key).epoch !== epoch)
+        throw new ModError("MODS_CALL_SCOPE_CHANGED")
+    }
+    const instance = this.runtimeAuthorities.create({ workspace: key, threadId,
+      turnId: `editor:${randomUUID()}`, agentId: `editor:${randomUUID()}` }, signal)
+    const authority = instance.authority
+    this.runtimeEpochs.set(authority, epoch)
+    let unbind: (() => void) | undefined
+    try {
+      const { createComposerPermissionScope } = await import("./v2/composer-permission-scope")
+      const files = await createComposerPermissionScope(key, threadId, assertLive, signal,
+        this.clawProfile(key, threadId)?.skills)
+      assertLive()
+      unbind = this.bindThread({ workspace: key, threadId, turnId: authority.turnId,
+        agentId: authority.agentId, runtimeAuthority: authority, signal,
+        assertLive: files.assertLive, queryTool: files.queryTool, commandOnly: true,
+        readOnly: true, allowedToolNames: new Set() })
+      this.composerFileQueries.set(authority, files.queryTool)
+      const assertRuntime = this.captureFunctionRuntimeGuard(authority)
+      const result = await withFunctionAgentExecution({ workspace: key, threadId,
+        turnId: authority.turnId, agentId: authority.agentId, runtimeAuthority: authority,
+        userInitiated: false, leased: false, immediate: true }, () => this.classicEvent(
+          key, threadId, "prompt.edit", input, signal, async (value, active) => {
+            assertLive()
+            assertRuntime()
+            active.throwIfAborted()
+            validatePromptEditInput(value)
+            return applyNative(value)
+          }))
+      assertLive()
+      assertRuntime()
+      validatePromptEditResult(result)
+      return result
+    } finally {
+      this.composerFileQueries.delete(authority)
+      unbind?.()
+      instance.release()
+    }
+  }
+
+  clawDefaultModel(workspace: string, threadId: string): string | undefined {
+    const key = this.workspaceKey(workspace)
+    return this.isEnabled(key) ? this.functionLifecycle?.clawDefaultModel?.(key, threadId) : undefined
+  }
+  clawProfile(workspace: string, threadId: string): import("../../shared/mods/claw").ClawProfile | null {
+    const key = this.workspaceKey(workspace)
+    return this.isEnabled(key) ? this.functionLifecycle?.clawProfile?.(key, threadId) ?? null : null
+  }
+
+  async prepareFunctionRuntime(workspace: string, threadId: string, signal?: AbortSignal) {
+    signal?.throwIfAborted()
+    const key = this.workspaceKey(workspace)
+    if (!this.isEnabled(key)) return false
+    const epoch = this.config(key).epoch
+    const ready = (await this.functionLifecycle?.runtimeReady?.(key, threadId, signal)) ?? false
+    signal?.throwIfAborted()
+    if (!this.isEnabled(key) || this.config(key).epoch !== epoch)
+      throw new ModError("MODS_SCOPE_CHANGED")
+    return ready
+  }
+
   closeFunctionThread(threadId: string): void {
+    for (const [controller, owner] of this.spawningAgents)
+      if (owner.threadId === threadId) controller.abort()
+    this.peerInbox.close(undefined, threadId)
     this.agentInstances.clear(undefined, threadId)
     this.functionTurns.invalidate(undefined, threadId)
     this.invalidateFunctionReads(threadId)
@@ -420,6 +1790,11 @@ export class ModsManager {
       if (entry.binding.threadId === threadId) this.mcpBindings.delete(key)
     for (const key of this.functionToolCatalogs.keys())
       if (JSON.parse(key)[1] === threadId) this.functionToolCatalogs.delete(key)
+  }
+
+  prepareFunctionEnd(reason: import("./v2/session-end").FunctionSessionEndReason,
+    threadId?: string): import("./v2/session-end").FunctionSessionEndReceipt | undefined {
+    return this.functionLifecycle?.prepareEnd?.(reason, threadId)
   }
 
   bindFunctionToolCatalog(binding: ModThreadBinding, tools: FunctionToolInfo[]): void {
@@ -544,7 +1919,7 @@ export class ModsManager {
   ): T[] {
     const binding = this.bindings.get(`${threadId}:${agentId}`)
     if (binding) this.assertFunctionBinding(binding)
-    if (!binding?.blockedToolNames?.size) return [...tools]
+    if (!binding?.blockedToolNames?.size && !binding?.allowedToolNames) return [...tools]
     const mcp = this.mcpBindings.get(this.mcpBindingKey({ workspace, threadId, agentId }))
     const aliases = new Map<string, readonly string[]>()
     if (mcp) {
@@ -567,6 +1942,25 @@ export class ModsManager {
     )
   }
 
+  /** Pin a model's tool catalogue across search, description hooks and provider awaits. */
+  captureFunctionToolCatalogGuard(workspace: string, threadId: string): () => void {
+    workspace = this.workspaceKey(workspace)
+    const enabled = this.isEnabled(workspace)
+    const agentId = functionCallAgent(workspace, threadId)
+    const key = `${threadId}:${agentId}`
+    const binding = this.bindings.get(key)
+    const epoch = this.config(workspace).epoch
+    const authority = functionCallAuthority(workspace, threadId)
+    const runtimeGuard = authority ? this.captureFunctionRuntimeGuard(authority) : () => {}
+    return () => {
+      runtimeGuard()
+      if (this.isEnabled(workspace) !== enabled || this.config(workspace).epoch !== epoch ||
+          this.bindings.get(key) !== binding)
+        throw new ModError("MODS_CALL_SCOPE_CHANGED")
+      if (binding) this.assertFunctionBinding(binding)
+    }
+  }
+
   async registeredFunctionTools(
     workspace: string,
     threadId: string
@@ -587,16 +1981,47 @@ export class ModsManager {
     return this.isEnabled(workspace) ? this.functionLifecycle?.toolCall : undefined
   }
 
-  /** Main-agent model streams enter the same host-owned FunctionSession boundary as hooks. */
+  /** Main and supported children dispatch with their own protected transport identity. */
   async functionModelStream(
     authority: ModRuntimeAuthority,
     input: ModObject,
     core: FunctionStreamOptions["core"],
     signal: AbortSignal
   ): Promise<ModHookStream> {
-    authority.assertLive()
-    if (authority.agentId !== "main" || !this.isEnabled(authority.workspace))
+    const assertRuntime = this.captureFunctionRuntimeGuard(authority)
+    if (!this.isActive(authority.workspace))
       throw new ModError("MODS_MODEL_OPERATION_UNSUPPORTED")
+    const epoch = this.config(authority.workspace).epoch
+    const assertCurrent = (): void => {
+      assertRuntime()
+      if (
+        !this.isActive(authority.workspace) ||
+        this.config(authority.workspace).epoch !== epoch ||
+        this.runtimeAuthorities.get(authority) !== authority
+      )
+        throw new ModError("MODS_CALL_SCOPE_CHANGED")
+    }
+    const ownerScope = {
+      workspace: authority.workspace,
+      threadId: authority.threadId,
+      agentId: authority.agentId,
+      turnId: authority.turnId,
+      runtimeAuthority: authority,
+      userInitiated: false,
+      leased: true,
+      immediate: false
+    }
+    const inOwnerScope = <T>(run: () => Promise<T>): Promise<T> =>
+      withFunctionTransportExecution(ownerScope, run)
+    const cleanupInOwnerScope = <T>(run: () => Promise<T>): Promise<T> => {
+      try {
+        assertCurrent()
+      } catch {
+        return withFunctionAgentCleanup(ownerScope, run)
+      }
+      return inOwnerScope(run)
+    }
+    assertCurrent()
     signal.throwIfAborted()
     const controller = new AbortController()
     const activeSignal = AbortSignal.any([signal, controller.signal])
@@ -605,7 +2030,9 @@ export class ModsManager {
     )
     let output: ModHookStream | undefined
     let released = false
-    const close = () => { void output?.return(null).catch(() => {}) }
+    const close = () => {
+      if (output) void cleanupInOwnerScope(() => output!.return(null)).catch(() => {})
+    }
     const release = () => {
       if (released) return
       released = true
@@ -614,39 +2041,92 @@ export class ModsManager {
     }
     activeSignal.addEventListener("abort", close, { once: true })
     const protectedCore: FunctionStreamOptions["core"] = async function* (received, context) {
-      authority.assertLive()
+      assertCurrent()
       context.signal.throwIfAborted()
-      const stream = core(received, context)
+      const stream = await inOwnerScope(async () => core(received, context))
       try {
         while (true) {
-          authority.assertLive()
+          assertCurrent()
           context.signal.throwIfAborted()
-          const item = await stream.next()
-          authority.assertLive()
+          const item = await inOwnerScope(() => stream.next())
+          assertCurrent()
           context.signal.throwIfAborted()
           if (item.done) return item.value
           yield item.value
         }
       } finally {
-        await stream.return(null)
+        await cleanupInOwnerScope(() => closeHostStreamActual(stream))
       }
     }
+    const transport: NonNullable<FunctionStreamOptions["transport"]> = {
+      run: async (operation) => {
+        assertCurrent()
+        activeSignal.throwIfAborted()
+        return inOwnerScope(async () => {
+          assertCurrent()
+          activeSignal.throwIfAborted()
+          const result = await operation()
+          assertCurrent()
+          activeSignal.throwIfAborted()
+          return result
+        })
+      },
+      cleanup: cleanupInOwnerScope
+    }
     try {
-      const lifecycle = this.functionLifecycle?.turnStep
-      output = lifecycle
-        ? await lifecycle(authority.workspace, authority.threadId, input, protectedCore, activeSignal)
-        : dispatchFunctionStream([], input, { signal: activeSignal, core: protectedCore })
+      const lifecycle = this.isEnabled(authority.workspace) ? this.functionLifecycle?.turnStep : undefined
+      const safeInput = lifecycle ? input : await inOwnerScope(async () => {
+        assertCurrent()
+        const value = await this.publish(authority.workspace, input, undefined, activeSignal)
+        assertCurrent()
+        activeSignal.throwIfAborted()
+        return value
+      })
+      output = await inOwnerScope(async () =>
+        lifecycle
+          ? lifecycle(
+              authority.workspace,
+              authority.threadId,
+              input,
+              protectedCore,
+              activeSignal,
+              true,
+              this.functionModelHookSource(authority),
+              transport
+            )
+          : dispatchFunctionStream([], safeInput, {
+              signal: activeSignal,
+              core: protectFunctionStreamCore(protectedCore,
+                (value, signal) => transport.run(() => this.publish(authority.workspace, value, undefined, signal)),
+                assertCurrent),
+              transport
+            })
+      )
       activeSignal.throwIfAborted()
-      authority.assertLive()
+      assertCurrent()
       const next = output.next.bind(output)
-      output.next = async (...args) => {
+      const guardedNext: ModHookStream["next"] = async (...args) => {
         // Automatic cleanup must not make a cancelled stream appear successfully done.
         activeSignal.throwIfAborted()
-        authority.assertLive()
-        return next(...args)
+        assertCurrent()
+        return inOwnerScope(() => next(...args))
       }
-      void output.result.then(release, release)
-      return output
+      const actualTerminal = Object.getOwnPropertyDescriptor(output, FUNCTION_STREAM_TERMINAL)?.value as
+        Promise<void> | undefined
+      void (actualTerminal ?? output.result).then(release, release)
+      // The dispatcher's return is deliberately non-writable; a host facade keeps its cleanup.
+      const stream = output
+      const facade: ModHookStream = {
+        next: guardedNext,
+        return: value => cleanupInOwnerScope(() => stream.return(value)),
+        throw: error => cleanupInOwnerScope(() => stream.throw(error)),
+        result: stream.result,
+        [Symbol.asyncIterator]() { return this },
+        async [Symbol.asyncDispose]() { await this.return(null) }
+      }
+      if (actualTerminal)
+        Object.defineProperty(facade, FUNCTION_STREAM_TERMINAL, { value: actualTerminal })
+      return facade
     } catch (error) {
       close()
       release()
@@ -670,6 +2150,33 @@ export class ModsManager {
     )
   }
 
+  async presentationEvent(
+    workspace: string,
+    threadId: string,
+    event: import("../../shared/mods/v2/presentation-events").FunctionPresentationEvent,
+    input: ModObject,
+    signal: AbortSignal
+  ): Promise<ModObject> {
+    workspace = this.workspaceKey(workspace)
+    const authority = functionCallAuthority(workspace, threadId)
+    const epoch = this.config(workspace).epoch
+    const assertRuntime = authority ? this.captureFunctionRuntimeGuard(authority) : () => {}
+    const guard = () => {
+      signal.throwIfAborted()
+      assertRuntime()
+      getModCallContext()?.assertLive?.()
+      if (this.config(workspace).epoch !== epoch) throw new ModError("MODS_CALL_SCOPE_CHANGED")
+    }
+    guard()
+    const result = this.isEnabled(workspace) && this.functionLifecycle?.presentationEvent
+      ? await this.functionLifecycle.presentationEvent(workspace, threadId, event, input, signal)
+      : event === "skill.prompt" ? { text: input.text } : { description: input.description }
+    guard()
+    const safe = await this.publish(workspace, result, undefined, signal)
+    guard()
+    return safe
+  }
+
   async classicEvent(
     workspace: string,
     threadId: string,
@@ -684,6 +2191,342 @@ export class ModsManager {
     if (!this.isEnabled(workspace) || !this.functionLifecycle?.classicEvent)
       return core(input, signal)
     return this.functionLifecycle.classicEvent(workspace, threadId, event, input, signal, core)
+  }
+
+  async promptComposition(
+    workspace: string,
+    threadId: string,
+    event: import("../../shared/mods/v2/prompt-composition").FunctionPromptEvent,
+    input: ModObject,
+    signal: AbortSignal,
+    core: import("../../shared/mods/v2/prompt-composition").FunctionPromptCore
+  ): Promise<ModObject> {
+    const key = this.workspaceKey(workspace)
+    const authority = functionCallAuthority(key, threadId)
+    const originalGuard = authority ? this.captureFunctionRuntimeGuard(authority) : () => {}
+    const epoch = this.config(key).epoch
+    const assertRuntime = () => {
+      signal.throwIfAborted()
+      originalGuard()
+      if (this.config(key).epoch !== epoch) throw new ModError("MODS_CALL_SCOPE_CHANGED")
+    }
+    assertRuntime()
+    const publishPrompt = async (value: ModObject, active: AbortSignal, incoming: boolean) => {
+      assertRuntime()
+      active.throwIfAborted()
+      if (!this.protects(key)) return value
+      const validate = (item: ModObject) => {
+        if (event === "prompt.context") validatePromptContext(item)
+        if (incoming) {
+          validatePromptCompositionInput(event, item)
+          if (event === "prompt.attachment") validatePromptAttachmentInput(item)
+        } else {
+          validatePromptCompositionResult(event, item)
+          if (event === "prompt.attachment") validatePromptAttachmentResult(item)
+        }
+      }
+      validate(value)
+      const published = await (incoming && event === "prompt.attachment"
+        ? publishPromptAttachmentInput(value,
+            payload => this.publish(key, payload, undefined, active))
+        : this.publish(key, value, undefined, active))
+      assertRuntime()
+      active.throwIfAborted()
+      const safe = event === "prompt.context"
+        ? synchronizePromptContext(published, value) : published
+      validate(safe)
+      return safe
+    }
+    const guardedCore: typeof core = async (received, active) => {
+      assertRuntime()
+      active.throwIfAborted()
+      const prepared = await publishPrompt(received, active, true)
+      assertRuntime()
+      active.throwIfAborted()
+      const result = await core(prepared, active)
+      assertRuntime()
+      active.throwIfAborted()
+      return publishPrompt(result, active, false)
+    }
+    bindHostPromptGuard(guardedCore, assertRuntime)
+    if (isCachedPromptEvent(event)) {
+      const source = hostPromptOccurrence(core, event)
+      if (source) bindHostPromptOccurrence(guardedCore, event, source)
+    }
+    const prepared = await publishPrompt(input, signal, true)
+    assertRuntime()
+    signal.throwIfAborted()
+    const result = independentPromptFrame()?.active && this.functionLifecycle?.independentModelPrompt
+      ? await this.functionLifecycle.independentModelPrompt(key, threadId, event, prepared, signal, guardedCore)
+      : await this.classicEvent(key, threadId, event, prepared, signal, guardedCore)
+    assertRuntime()
+    signal.throwIfAborted()
+    return publishPrompt(result, signal, false)
+  }
+
+  /** Plugin submission prepares read-only context under its own non-user runtime authority. */
+  async withPluginPromptPreparation<T>(
+    workspace: string,
+    threadId: string,
+    signal: AbortSignal,
+    assertResident: () => void,
+    onInvalid: (error: unknown) => void,
+    run: (assertPreparation: () => void) => Promise<T>
+  ): Promise<T> {
+    const key = this.workspaceKey(workspace)
+    const epoch = this.config(key).epoch
+    const assertLive = () => {
+      signal.throwIfAborted()
+      assertResident()
+      if (!this.isEnabled(key) || this.config(key).epoch !== epoch)
+        throw new ModError("MODS_CALL_SCOPE_CHANGED")
+    }
+    assertLive()
+    const instance = this.runtimeAuthorities.create({ workspace: key, threadId,
+      turnId: `plugin-prompt:${randomUUID()}`, agentId: `plugin-prompt:${randomUUID()}` }, signal)
+    const authority = instance.authority
+    this.runtimeEpochs.set(authority, epoch)
+    let unbind: (() => void) | undefined
+    try {
+      const { createComposerPermissionScope } = await import("./v2/composer-permission-scope")
+      const files = await createComposerPermissionScope(key, threadId, assertLive, signal,
+        this.clawProfile(key, threadId)?.skills)
+      assertLive()
+      unbind = this.bindThread({ workspace: key, threadId, turnId: authority.turnId,
+        agentId: authority.agentId, runtimeAuthority: authority, signal,
+        assertLive: files.assertLive, queryTool: files.queryTool, commandOnly: true,
+        readOnly: true, allowedToolNames: new Set() })
+      this.composerFileQueries.set(authority, files.queryTool)
+      const assertRuntime = this.captureFunctionRuntimeGuard(authority)
+      const assertPreparation = () => {
+        try { assertLive(); files.assertLive(); assertRuntime() }
+        catch (error) { onInvalid(error); throw error }
+      }
+      const result = await withFunctionTransportExecution({ workspace: key, threadId,
+        turnId: authority.turnId, agentId: authority.agentId, runtimeAuthority: authority,
+        userInitiated: false, leased: false, immediate: true }, () => run(assertPreparation))
+      assertPreparation()
+      return result
+    } finally {
+      this.composerFileQueries.delete(authority)
+      unbind?.()
+      instance.release()
+    }
+  }
+
+  /** Real renderer admission owns a short-lived runtime before the native agent is created. */
+  async submitComposerPrompt(
+    workspace: string,
+    threadId: string,
+    turnId: string,
+    input: ModObject,
+    signal: AbortSignal,
+    assertOwner: () => void,
+    core: (input: ModObject, signal: AbortSignal) => Promise<ModObject>,
+    runningAuthority?: ModRuntimeAuthority
+  ): Promise<ModObject> {
+    return this.withComposerPreparation(workspace, threadId, turnId, signal, assertOwner, false,
+      async preparation => {
+        if (!preparation) return core(input, signal)
+        return this.classicEvent(preparation.workspace, threadId, "prompt.submit", input, signal,
+          async (received, active) => {
+            preparation.assertCurrent()
+            return core(received, active)
+          })
+      }, runningAuthority)
+  }
+
+  /** File handles and the real preparation authority remain live through actual acceptance. */
+  async prepareComposerMentions<T>(
+    workspace: string, threadId: string, turnId: string,
+    submission: ComposerMentionSubmission, signal: AbortSignal, assertOwner: () => void,
+    accept: (input: ModObject, assertFilesCurrent: () => Promise<void>) => Promise<T>,
+    runningAuthority?: ModRuntimeAuthority
+  ): Promise<T | { drop: string }> {
+    if (types.isProxy(submission)) composerMentionOwnerInvalid()
+    const text = Object.getOwnPropertyDescriptor(submission, "text")
+    if (!text || !("value" in text) || typeof text.value !== "string") composerMentionOwnerInvalid()
+    const snapshot = captureComposerMentionSubmission(submission, text.value)
+    if (!snapshot) composerMentionOwnerInvalid()
+    // The Main-only dependency is settled before any final file/data phase.
+    const { prepareComposerMentionFiles } = await import("./v2/composer-mention-reader")
+    return this.withComposerPreparation(workspace, threadId, turnId, signal, assertOwner, true,
+      async preparation => {
+        if (!preparation?.owner) composerMentionOwnerInvalid()
+        const prepared = await prepareComposerMentionFiles(snapshot, preparation.owner)
+        let failed = false
+        try {
+          if (prepared.empty) return { drop: "没有可读取的文件或任务文字" }
+          preparation.assertCurrent()
+          return await accept({ text: prepared.message, origin: { kind: "composer" },
+            ...(prepared.context.length ? { context: prepared.context } : {}) }, prepared.assertFilesCurrent)
+        } catch (error) { failed = true; throw error }
+        finally {
+          if (failed) {
+            try { await prepared.close() } catch { /* all real cleanup outcomes were observed */ }
+          } else await prepared.close()
+        }
+      }, runningAuthority)
+  }
+
+  private async withComposerPreparation<T>(
+    workspace: string, threadId: string, turnId: string, signal: AbortSignal,
+    assertOwner: () => void, needFiles: boolean,
+    run: (preparation: { workspace: string; assertCurrent(): void;
+      owner?: ComposerMentionOwner } | undefined) => Promise<T>,
+    runningAuthority?: ModRuntimeAuthority
+  ): Promise<T> {
+    const logicalWorkspace = workspace
+    const key = this.workspaceKey(workspace)
+    assertOwner()
+    signal.throwIfAborted()
+    const enabled = this.isEnabled(key)
+    if (!needFiles && (!enabled || !this.functionLifecycle?.classicEvent)) return run(undefined)
+    const epoch = this.config(key).epoch
+    const leaseCurrent = captureLocalThreadRunLease(threadId)
+    const assertLive = () => {
+      signal.throwIfAborted()
+      assertOwner()
+      if (!leaseCurrent?.() || this.isEnabled(key) !== enabled || this.config(key).epoch !== epoch)
+        throw new ModError("MODS_CALL_SCOPE_CHANGED")
+    }
+    assertLive()
+    if (runningAuthority && (runningAuthority.workspace !== key ||
+      runningAuthority.threadId !== threadId || runningAuthority.turnId !== turnId ||
+      runningAuthority.agentId !== "main")) throw new ModError("MODS_RUNTIME_SCOPE_CHANGED")
+    let assertRuntime = runningAuthority
+      ? this.captureFunctionRuntimeGuard(runningAuthority) : undefined
+    // Admission is temporary preparation, not replacement of the resident main runtime.
+    const instance = runningAuthority ? undefined : this.runtimeAuthorities.create({
+      workspace: key, threadId, turnId, agentId: `composer:${randomUUID()}`
+    }, signal)
+    const authority = runningAuthority ?? instance!.authority
+    if (instance) this.runtimeEpochs.set(authority, epoch)
+    authority.assertLive()
+    let unbind: (() => void) | undefined
+    let ownerRecord: ComposerMentionOwnerRecord | undefined
+    const activity = needFiles ? createComposerPreparationActivity() : undefined
+    const previousQuery = needFiles ? this.composerFileQueries.get(authority) : undefined
+    try {
+      let files: FunctionFileScope | undefined
+      let fileDataCurrent: (() => void) | undefined
+      if (instance || needFiles) {
+        const { createComposerPermissionScope, readComposerPermissionScopeData } =
+          await import("./v2/composer-permission-scope")
+        files = await createComposerPermissionScope(key, threadId, assertLive, signal,
+          this.clawProfile(key, threadId)?.skills)
+        if (needFiles) {
+          fileDataCurrent = readComposerPermissionScopeData(files)
+          if (!fileDataCurrent) composerMentionOwnerInvalid()
+        }
+        authority.assertLive()
+      }
+      if (instance && files) {
+        unbind = this.bindThread({
+          workspace: key, threadId, turnId, signal, runtimeAuthority: authority,
+          agentId: authority.agentId,
+          assertLive: files.assertLive, queryTool: files.queryTool,
+          commandOnly: true, readOnly: true, allowedToolNames: new Set()
+        })
+        this.composerFileQueries.set(authority, files.queryTool)
+        assertRuntime = this.captureFunctionRuntimeGuard(authority)
+      }
+      if (files && !instance) this.composerFileQueries.set(authority, files.queryTool)
+      assertRuntime?.()
+      const assertPreparation = () => {
+        assertLive()
+        assertRuntime?.()
+        authority.assertLive()
+      }
+      let owner: ComposerMentionOwner | undefined
+      if (needFiles && files) {
+        assertPreparation()
+        const original = nativePolicyManager(this), bindingKey = `${threadId}:${authority.agentId}`
+        const binding = original.readBinding(bindingKey), settings = original.readSettings(key)
+        if (!binding || !settings || binding.runtimeAuthority !== authority || !leaseCurrent)
+          composerMentionOwnerInvalid()
+        const bindingFields = captureNativePolicyFields(binding, Object.getOwnPropertyNames(binding))
+        const settingsFields = captureNativePolicyFields(settings, ["enabled", "policy", "epoch"])
+        const bindingSignal = Object.getOwnPropertyDescriptor(binding, "signal")?.value
+        const assertDataCurrent = () => {
+          const record = ownerRecord
+          if (!record || record.closed || record.failed) composerMentionOwnerInvalid()
+          try {
+            activity?.assertDataCurrent()
+            original.assertFields()
+            bindingFields()
+            settingsFields()
+            fileDataCurrent?.()
+            if (original.readBinding(bindingKey) !== binding || original.readSettings(key) !== settings ||
+              !leaseCurrent() || !isModRuntimeAuthorityDataCurrentForRegistry(original.registry, authority))
+              composerMentionOwnerInvalid()
+            Reflect.apply(nativePolicyThrowIfAborted, signal, [])
+            if (bindingSignal) Reflect.apply(nativePolicyThrowIfAborted, bindingSignal, [])
+          } catch (error) { record.failed = true; throw error }
+        }
+        const assertCurrent = () => {
+          const record = ownerRecord
+          if (!record || record.reading || record.closed || record.failed) {
+            if (record) record.failed = true
+            composerMentionOwnerInvalid()
+          }
+          record.reading = true
+          try { assertDataCurrent(); assertPreparation(); assertDataCurrent() }
+          catch (error) { record.failed = true; throw error }
+          finally { record.reading = false }
+        }
+        const queryTool = files.queryTool
+        const view: ComposerMentionOwnerView = Object.freeze({ workspace: key, logicalWorkspace,
+          mode: enabled ? "mods" : "native", signal,
+          assertCurrent, assertDataCurrent,
+          sealAndDrain: async () => { await activity!.sealAndDrain(); assertDataCurrent() },
+          queryTool: async (tool, input) => {
+            try {
+              assertCurrent()
+              const result = await queryTool(tool, input)
+              assertCurrent()
+              return result
+            } catch (error) { if (ownerRecord) ownerRecord.failed = true; throw error }
+          },
+          dispatch: async (event, input, core) => {
+            try {
+              assertCurrent()
+              const result = await this.classicEvent(key, threadId, event, input, signal, core)
+              assertCurrent()
+              return result
+            } catch (error) { if (ownerRecord) ownerRecord.failed = true; throw error }
+          } })
+        ownerRecord = { closed: false, failed: false, reading: false, view }
+        owner = Object.freeze({}) as ComposerMentionOwner
+        Reflect.apply(composerOwnerWeakSet, composerMentionOwners, [owner, ownerRecord])
+        assertCurrent()
+      }
+      const result = await withFunctionAgentExecution({
+        workspace: key, threadId, turnId: authority.turnId, agentId: authority.agentId,
+        runtimeAuthority: authority, userInitiated: true, leased: true, immediate: false
+      }, () => {
+        const enter = () => run({ workspace: key,
+          assertCurrent: ownerRecord?.view.assertCurrent ?? assertPreparation, ...(owner ? { owner } : {}) })
+        return activity ? activity.run(enter) : enter()
+      })
+      if (needFiles) ownerRecord?.view.assertDataCurrent()
+      else { assertLive(); assertRuntime?.() }
+      return result
+    } finally {
+      if (ownerRecord) ownerRecord.closed = true
+      try { await activity?.close() }
+      finally {
+        try {
+          if (instance || needFiles) {
+            if (previousQuery) this.composerFileQueries.set(authority, previousQuery)
+            else this.composerFileQueries.delete(authority)
+          }
+        } finally {
+          try { unbind?.() }
+          finally { instance?.release() }
+        }
+      }
+    }
   }
 
   isEnabled(workspace: string): boolean {
@@ -703,7 +2546,9 @@ export class ModsManager {
     if (!binding || binding.workspace !== key || binding.turnId !== context().turnId)
       throw new ModError("MODS_THREAD_CONTEXT_REQUIRED")
     this.assertFunctionBinding(binding)
-    const wrapped = (input: import("../agent/skill-lifecycle/completion-gate").CompletionGateInput) =>
+    const wrapped = (
+      input: import("../agent/skill-lifecycle/completion-gate").CompletionGateInput
+    ) =>
       withFunctionAgentExecution(
         {
           workspace: key,
@@ -743,6 +2588,7 @@ export class ModsManager {
 
   /** Abort and discard all legacy Mod runtime state after the application switch changes. */
   invalidateAll(): void {
+    this.peerInbox.close()
     this.agentInstances.clear()
     this.functionTurns.invalidate()
     this.invalidateFunctionReads()
@@ -773,6 +2619,7 @@ export class ModsManager {
       assertLive(): void
       listTools?: () => Promise<McpCapabilityTool[]>
       peekTools?: () => McpCapabilityTool[] | null
+      connect?: McpCapabilityService["connectPluginServer"]
       invoke: (id: string, args: ModObject) => Promise<unknown>
     }
   >()
@@ -794,32 +2641,143 @@ export class ModsManager {
       signal?: AbortSignal,
       reason?: string
     ) => Promise<boolean>,
-    private readonly notifyCards: (threadId: string) => void,
+    private readonly notifyCards: (threadId: string, scope?: "cards") => void,
     private readonly hostEntry?: string,
     deployment: ManagedModDeployment = DEFAULT_MOD_POLICY,
     private readonly globalEnabled: () => boolean = () => true
   ) {
+    guardPluginCatalogOperations(this, [
+      "prepareFunctionAgentSpawn",
+      "spawnFunctionAgent",
+      "listFunctionPeerMessages",
+      "sendFunctionPeer",
+      "startFunctionTurn",
+      "prepareFunctionConversationRuntime",
+      "measureFunctionSession",
+      "hasFunctionEvent",
+      "editComposerPrompt",
+      "prepareFunctionRuntime",
+      "registeredFunctionTools",
+      "functionModelStream",
+      "offerAgent",
+      "presentationEvent",
+      "classicEvent",
+      "promptComposition",
+      "withPluginPromptPreparation",
+      "submitComposerPrompt",
+      "prepareComposerMentions",
+      "createCompletionGate",
+      "publish",
+      "publishedCards",
+      "status",
+      "approve",
+      "invokeHostFlowMcp",
+      "runHostFlowProjectCheck",
+      "withSharedAgent",
+      "queryFunctionTool",
+      "authorizeRegisteredTool",
+      "runCompletionCheckpoint",
+      "runCompletionProjectCheck",
+      "invokeFunctionTool",
+      "invokeFunctionMcp",
+      "connectFunctionMcp",
+      "invokeFunctionMcpTool",
+      "resolveFunctionMcp",
+      "dispatch",
+      "context",
+      "commands",
+      "artifact",
+      "runCommand",
+      "finishTurn",
+      "act"
+    ])
     const marker = `${controlPath}.initialized`
     if (existsSync(marker) && !existsSync(controlPath))
       throw new ModError("MODS_CONTROL_RECOVERY_REQUIRED")
     this.policy = new ManagedModPolicy(deployment, hostEntry)
     this.store = new ModControlStore(controlPath)
     try {
-      writeFileSync(marker, "cmb.mods/v1\n", { flag: "w" })
+      this.peerLedger = new FunctionPeerLedger(`${controlPath}.peer.sqlite`)
+      this.peerInbox = new FunctionPeerInbox(this.peerLedger, (workspace, threadId) => {
+        for (const listener of this.peerListeners) {
+          try {
+            listener(workspace, threadId)
+          } catch {
+            /* Delivery survives renderer teardown. */
+          }
+        }
+      })
     } catch (error) {
       this.store.close()
       throw error
     }
+    try {
+      writeFileSync(marker, "cmb.mods/v1\n", { flag: "w" })
+    } catch (error) {
+      this.peerLedger.close()
+      this.store.close()
+      throw error
+    }
+    const assertFields = captureNativePolicyFields(this, ["runtimeAuthorities", "bindings",
+      "settings", "functionNativeConversationRuntimes", "functionConversationNativeRuns",
+      "functionConversationRuntimes", "functionConversationSharedScopes",
+      "functionConversationSharedProducers", "policy"])
+    const registry = this.runtimeAuthorities, bindings = this.bindings, settings = this.settings
+    const runtimes = this.functionNativeConversationRuntimes
+    const nativeRuns = this.functionConversationNativeRuns
+    const bindingRuntimes = this.functionConversationRuntimes
+    const sharedScopes = this.functionConversationSharedScopes
+    const sharedProducers = this.functionConversationSharedProducers
+    nativePolicyManagers.set(this, Object.freeze({ registry, policy: this.policy, assertFields,
+      readBinding: (key: string) => Reflect.apply(nativePolicyMapGet, bindings, [key]),
+      readSettings: (key: string) => Reflect.apply(nativePolicyMapGet, settings, [key]),
+      readRuntime: (key: ModRuntimeAuthority) => Reflect.apply(nativePolicyWeakGet, runtimes, [key]),
+      readNativeRun: (key: ModRuntimeAuthority) => Reflect.apply(nativePolicyWeakGet, nativeRuns, [key]),
+      readBindingRuntime: (key: ModRuntimeAuthority) =>
+        Reflect.apply(nativePolicyWeakGet, bindingRuntimes, [key]),
+      readSharedScope: (key: ModRuntimeAuthority) =>
+        Reflect.apply(nativePolicyWeakGet, sharedScopes, [key]),
+      readSharedProducer: (key: ModRuntimeAuthority) =>
+        Reflect.apply(nativePolicyWeakGet, sharedProducers, [key])
+    }))
+  }
+
+
+  /** Resources retained outside requests must also finish before a creator version switch. */
+  assertCatalogIdle(): void {
+    if (this.activeActions.size || this.spawningAgents.size || this.functionReadQueries.size ||
+      [...this.clients.values()].some(client => client.stats.pending))
+      throw new ModError("PLUGIN_CATALOG_BUSY")
+  }
+
+  /** Prime without blocking Electron, and reject stale canonical grants before a new runtime. */
+  async prepareWorkspace(workspace: string): Promise<void> {
+    const real = await validateWorkspaceDirectory(workspace)
+    const key = process.platform === "win32" ? real.toLowerCase() : real
+    const cached = this.canonical.get(workspace)
+    if (cached && cached !== key) {
+      throw new WorkspaceValidationError(workspace, "实际路径已变化，请重启应用并重新选择工作区")
+    }
+    this.cacheWorkspaceKey(workspace, key)
+  }
+
+  private cacheWorkspaceKey(workspace: string, key: string): void {
+    if (this.canonical.size >= 100) this.canonical.clear()
+    this.canonical.set(workspace, key)
+    this.canonical.set(key, key)
   }
 
   workspaceKey(workspace: string): string {
     const cached = this.canonical.get(workspace)
     if (cached) return cached
-    const real = realpathSync(workspace)
+    let real: string
+    try {
+      real = realpathSync(workspace)
+    } catch {
+      throw new WorkspaceValidationError(workspace, "不存在或不可访问")
+    }
     const key = process.platform === "win32" ? real.toLowerCase() : real
-    if (this.canonical.size >= 100) this.canonical.clear()
-    this.canonical.set(workspace, key)
-    this.canonical.set(key, key)
+    this.cacheWorkspaceKey(workspace, key)
     return key
   }
 
@@ -837,6 +2795,7 @@ export class ModsManager {
   }
 
   isActive(workspace: string): boolean {
+    if (this.policy.required) return true
     const cached = this.settings.get(this.canonical.get(workspace) ?? workspace)
     if (cached && !cached.enabled && !cached.policy) return false
     if (!this.globalEnabled()) return false
@@ -845,6 +2804,7 @@ export class ModsManager {
   }
 
   protects(workspace: string): boolean {
+    if (this.policy.required) return true
     const cached = this.settings.get(this.canonical.get(workspace) ?? workspace)
     if (cached?.policy === false) return false
     if (!this.globalEnabled()) return false
@@ -876,6 +2836,7 @@ export class ModsManager {
   configure(workspace: string, enabled: boolean, outputPolicy: boolean): void {
     if (this.policy.required && !outputPolicy) throw new ModError("MODS_POLICY_REQUIRED")
     const key = this.workspaceKey(workspace)
+    this.peerInbox.close(key)
     const previous = this.config(key)
     const next = { enabled, policy: outputPolicy, epoch: previous.epoch + 1 }
     this.store.setSettings({
@@ -897,6 +2858,12 @@ export class ModsManager {
   pluginsChanged(): void {
     for (const [workspace, config] of this.settings)
       this.configure(workspace, config.enabled, config.policy)
+  }
+
+  pluginsChangedForWorkspace(workspace: string): void {
+    const key = this.workspaceKey(workspace)
+    const config = this.config(key)
+    this.configure(key, config.enabled, config.policy)
   }
 
   private diagnose(modId: string, code: string): void {
@@ -975,7 +2942,9 @@ export class ModsManager {
     }
   }
 
-  async approve(workspace: string, pluginId: string, digest: string): Promise<void> {
+  async approve(workspace: string, pluginId: string, digest: string,
+    assertCurrent: () => void = () => {}): Promise<void> {
+    assertCurrent()
     const key = this.workspaceKey(workspace)
     const candidate = (await this.candidates(key)).find(
       (value) => value.status.pluginId === pluginId
@@ -993,6 +2962,7 @@ export class ModsManager {
     } finally {
       await client.unload(runtimeId).catch(() => {})
     }
+    assertCurrent()
     this.store.grant(key, candidate.compiled.manifest.id, digest, true)
     const config = this.config(key)
     this.configure(key, config.enabled, config.policy)
@@ -1038,6 +3008,56 @@ export class ModsManager {
       }
     }
     this.bindings.set(key, entry)
+    // The ordinary LocalSandbox owner has no host callback. Certify only that actual factory
+    // input; an arbitrary supplied assertLive (including an empty function) keeps both fences.
+    const authority = binding.runtimeAuthority
+    const inputFields = unchangedNativeBindingFields(binding)
+    const entryFields = unchangedNativeBindingFields(entry)
+    if (authority && inputFields && entryFields &&
+      !nativeBindingDescriptor(binding, "assertLive") && authority.agentId === "main") {
+      const original = nativePolicyManager(this), canonical = this.canonical, bindings = this.bindings
+      const canonicalField = nativeBindingDescriptor(this, "canonical")!
+      const inputWorkspace = binding.workspace, signal = binding.signal
+      const signalShape = signal && captureModNativeSignalShape(signal)
+      const registryEntries = nativeBindingDescriptor(original.registry, "entries")?.value as object | undefined
+      const plainMap = (value: object | undefined) => !!value && !types.isProxy(value) &&
+        nativeBindingPrototype(value) === Map.prototype && !nativeBindingDescriptor(value, "get")
+      const eligible = () => {
+        const field = nativeBindingDescriptor(this, "canonical")
+        if (!isModRuntimeAuthorityCallbackFreeForRegistry(original.registry, authority) ||
+          (signalShape && !signalShape()) ||
+          !inputFields() || !entryFields() || !field || !("value" in field) ||
+          field.value !== canonical || field.writable !== canonicalField.writable ||
+          field.enumerable !== canonicalField.enumerable || field.configurable !== canonicalField.configurable ||
+          !plainMap(canonical) || !plainMap(bindings) || !plainMap(registryEntries) ||
+          nativeBindingDescriptor(Map.prototype, "get")?.value !== nativePolicyMapGet ||
+          nativeBindingDescriptor(AbortSignal.prototype, "throwIfAborted")?.value !== nativePolicyThrowIfAborted ||
+          (signal && (nativeBindingPrototype(signal) !== AbortSignal.prototype ||
+            nativeBindingDescriptor(signal, "throwIfAborted"))) ||
+          nativeBindingApply(nativePolicyMapGet, canonical, [inputWorkspace]) !== authority.workspace)
+          return false
+        for (let index = 0; index < nativeBindingOriginalMethods.length; index++) {
+          const item = nativeBindingOriginalMethods[index]
+          const prototype = item[0], name = item[1], receiver = item[2], method = item[3]
+          if (nativeBindingPrototype(receiver === "manager" ? this : original.registry) !== prototype ||
+            nativeBindingDescriptor(receiver === "manager" ? this : original.registry, name) ||
+            nativeBindingDescriptor(prototype, name)?.value !== method) return false
+        }
+        return true
+      }
+      const record: NativePhysicalBindingData = Object.freeze({ manager: this, registry: original.registry,
+        authority, eligible, assertDataCurrent: () => {
+          original.assertFields()
+          if (!eligible() || original.readBinding(key) !== entry || entry.commandOnly ||
+            entry.runtimeAuthority !== authority || entry.workspace !== authority.workspace ||
+            binding.threadId !== authority.threadId || binding.turnId !== authority.turnId ||
+            (binding.agentId ?? "main") !== authority.agentId ||
+            !isModRuntimeAuthorityDataCurrentForRegistry(original.registry, authority))
+            nativePolicyChanged()
+          if (signal) nativeBindingApply(nativePolicyThrowIfAborted, signal, [])
+        } })
+      if (eligible()) nativeBindingApply(composerOwnerWeakSet, nativePhysicalBindings, [entry, record])
+    }
     return () => {
       if (this.bindings.get(key) === entry) this.bindings.delete(key)
     }
@@ -1072,10 +3092,253 @@ export class ModsManager {
     this.invalidateFunctionReads(binding.threadId)
     const scope = { ...binding, workspace: this.workspaceKey(binding.workspace) }
     const instance = this.runtimeAuthorities.create(scope, binding.signal)
+    this.runtimeEpochs.set(instance.authority, this.config(scope.workspace).epoch)
     this.functionToolCatalogs.delete(
       JSON.stringify([scope.workspace, scope.threadId, scope.agentId ?? "main"])
     )
     return instance
+  }
+
+  private readonly hostFlowAuthorities = new HostFlowAuthorities()
+
+  createHostFlowAuthority(input: HostFlowAuthorityInput): HostFlowAuthority {
+    input = { ...input }
+    const workspace = this.workspaceKey(input.workspace)
+    const epoch = this.config(workspace).epoch
+    const lease = getLocalThreadRunLease(input.threadId)
+    const leaseCurrent = captureLocalThreadRunLease(input.threadId)
+    if (lease?.owner !== "mods" || lease.runId !== input.runId || !leaseCurrent)
+      throw new ModError("FLOW_LEASE_REQUIRED")
+    return this.hostFlowAuthorities.create({
+      ...input,
+      workspace,
+      assertLive: () => {
+        input.signal.throwIfAborted()
+        input.assertLive()
+        assertModRuntimeAuthority(input.runtimeAuthority, {
+          workspace,
+          threadId: input.threadId,
+          turnId: input.runId
+        })
+        if (
+          this.runtimeAuthorities.get(input.runtimeAuthority) !== input.runtimeAuthority ||
+          !leaseCurrent() ||
+          !this.isEnabled(workspace) ||
+          this.config(workspace).epoch !== epoch
+        )
+          throw new ModError("FLOW_AUTHORITY_EXPIRED")
+      }
+    })
+  }
+
+  private hostFlowBinding(authority: HostFlowAuthority, signal: AbortSignal) {
+    this.hostFlowAuthorities.assert(authority)
+    signal.throwIfAborted()
+    const execution = functionExecutionScope(authority.workspace, authority.threadId)
+    if (
+      !execution?.leased ||
+      !execution.userInitiated ||
+      execution.immediate ||
+      execution.turnId !== authority.runId ||
+      execution.runtimeAuthority !== authority.runtimeAuthority ||
+      (execution.agentId ?? "main") !== "main" ||
+      getModCallContext()?.identity.modId
+    )
+      throw new ModError("FLOW_AUTHORITY_SCOPE_CHANGED")
+    const binding = this.bindings.get(`${authority.threadId}:main`)
+    if (
+      !binding ||
+      binding.workspace !== authority.workspace ||
+      binding.turnId !== authority.runId ||
+      binding.runtimeAuthority !== authority.runtimeAuthority
+    )
+      throw new ModError("MODS_THREAD_CONTEXT_REQUIRED")
+    this.assertRuntimeBinding(binding)
+    binding.assertLive?.()
+    return binding
+  }
+
+  /** Host capabilities enter the same adapter and engine as normal native tool calls. */
+  private async invokeHostFlowCapability(
+    authority: HostFlowAuthority,
+    binding: ModThreadBinding,
+    toolId: string,
+    args: ModObject,
+    signal: AbortSignal,
+    invoke: () => Promise<unknown>,
+    identity?: ModIdentity
+  ): Promise<{ value: unknown; identity: ModIdentity }> {
+    const current = this.hostFlowBinding(authority, signal)
+    const execution = functionExecutionScope(authority.workspace, authority.threadId)!
+    const combined = AbortSignal.any([
+      authority.signal,
+      signal,
+      ...(binding.signal ? [binding.signal] : [])
+    ])
+    const assertLive = () => {
+      combined.throwIfAborted()
+      this.hostFlowAuthorities.assert(authority)
+      // A nested, separately authorized plugin call must not change the parent's owner.
+      // Check the captured physical scope, rather than re-admitting the ambient caller.
+      if (!execution.active || this.bindings.get(`${authority.threadId}:main`) !== current)
+        throw new ModError("MODS_THREAD_CONTEXT_EXPIRED")
+      this.assertRuntimeBinding(binding)
+      binding.assertLive?.()
+    }
+    const call: ModIdentity = identity ?? this.hostFlowIdentity(authority)
+    assertLive()
+    try {
+      const value = await modCallContext.run(
+        {
+          runtimeAuthority: authority.runtimeAuthority,
+          identity: call,
+          toolId,
+          effectiveArgs: args,
+          routeClaimed: false,
+          protectedOutput: this.protects(authority.workspace),
+          readOnly: binding.readOnly === true,
+          userInitiated: true,
+          signal: combined,
+          assertLive,
+          assertMcpTool: binding.assertMcpTool
+        },
+        invoke
+      )
+      assertLive()
+      const status = this.store.status(call.callId)
+      if (status !== "succeeded" && status !== "failed")
+        throw new ModError("FLOW_EXECUTION_RECEIPT_REQUIRED")
+      const published = await this.publish(authority.workspace, value, call.callId, combined)
+      assertLive()
+      if (!this.protects(authority.workspace))
+        this.store.publication(call.callId, "", [], "published")
+      return { value: published, identity: call }
+    } catch (error) {
+      this.store.blockPublication(call.callId)
+      throw error
+    }
+  }
+
+  private hostFlowIdentity(authority: HostFlowAuthority): ModIdentity {
+    const callId = randomUUID()
+    return {
+      callId,
+      toolCallId: callId,
+      workspace: authority.workspace,
+      threadId: authority.threadId,
+      turnId: authority.runId,
+      agentId: "main",
+      origin: "user-action",
+      grantEpoch: 0,
+      flow: { runId: authority.runId, definitionDigest: authority.definitionDigest }
+    }
+  }
+
+  async invokeHostFlowMcp(
+    authority: HostFlowAuthority,
+    input: ModObject,
+    signal: AbortSignal,
+    expectedFingerprint: string
+  ): Promise<ModObject> {
+    this.hostFlowBinding(authority, signal)
+    input = functionMcpInput(input)
+    const mcp = this.mcpBindings.get(this.mcpBindingKey(authority))
+    if (!mcp?.listTools || mcp.binding.runtimeAuthority !== authority.runtimeAuthority)
+      throw new ModError("MODS_MCP_CONTEXT_REQUIRED")
+    const tool = resolveFunctionMcpTool(
+      await mcp.listTools(),
+      String(input.server),
+      String(input.tool)
+    )
+    this.hostFlowBinding(authority, signal)
+    mcp.assertLive()
+    if (functionMcpToolFingerprint(tool) !== expectedFingerprint)
+      throw new ModError("MODS_MCP_TOOL_CHANGED")
+    const binding = {
+      ...mcp.binding,
+      assertLive: mcp.assertLive,
+      assertMcpTool: (actual: McpCapabilityTool) => {
+        mcp.assertLive()
+        if (functionMcpToolFingerprint(actual) !== expectedFingerprint)
+          throw new ModError("MODS_MCP_TOOL_CHANGED")
+      }
+    }
+    const result = await this.invokeHostFlowCapability(
+      authority,
+      binding,
+      `mcp:${tool.capabilityId}`,
+      input.args as ModObject,
+      signal,
+      () => mcp.invoke(tool.capabilityId, input.args as ModObject)
+    )
+    return functionMcpResult(result.value)
+  }
+
+  async runHostFlowProjectCheck(
+    authority: HostFlowAuthority,
+    kind: ProjectCheckKind,
+    signal: AbortSignal,
+    timeoutMs: number
+  ): Promise<ProjectCheckResult> {
+    const binding = this.hostFlowBinding(authority, signal)
+    if (!binding.invokeTool) throw new ModError("MODS_TOOL_UNAVAILABLE")
+    if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) throw new ModError("MODS_COMPLETION_TIMEOUT")
+    const guard = this.registerRuntimeOperation(
+      binding,
+      signal,
+      getLocalThreadRunLease(authority.threadId),
+      () => this.hostFlowAuthorities.assert(authority)
+    )
+    const deadline = new AbortController()
+    const timer = setTimeout(
+      () => deadline.abort(new ModError("MODS_COMPLETION_TIMEOUT")),
+      Math.min(timeoutMs, 2_147_483_647)
+    )
+    const checkSignal = AbortSignal.any([guard.signal, authority.signal, deadline.signal])
+    try {
+      const plan = await planProjectCheck(
+        this.functionRuntimeScope(authority.workspace, authority.threadId).workspace,
+        kind,
+        checkSignal
+      )
+      guard.assertLive()
+      const identity = this.hostFlowIdentity(authority)
+      const input = { command: plan.command, cwd: plan.cwd }
+      await assertProjectCheckPlanCurrent(plan, checkSignal)
+      const result = await withProjectCheckInput(identity, input, () =>
+        this.invokeHostFlowCapability(
+          authority,
+          binding,
+          "host:execute",
+          input,
+          checkSignal,
+          () => binding.invokeTool!("host:execute", input),
+          identity
+        )
+      )
+      guard.assertLive()
+      checkSignal.throwIfAborted()
+      await assertProjectCheckPlanCurrent(plan, checkSignal)
+      const raw = result.value as { exitCode?: unknown }
+      if (typeof raw?.exitCode !== "number")
+        throw new ModError("MODS_PROJECT_CHECK_RECEIPT_REQUIRED")
+      const passed = raw.exitCode === 0 && this.store.status(identity.callId) === "succeeded"
+      const output = projectModResult(result.value).text.slice(-64 * 1024)
+      return {
+        kind,
+        passed,
+        exitCode: raw.exitCode,
+        executionId: identity.callId,
+        output,
+        outputFingerprint: createHash("sha256").update(output).digest("hex"),
+        ...(!passed
+          ? { reason: `PROJECT_${kind.toUpperCase()}_FAILED: ${output.slice(-8192)}` }
+          : {})
+      }
+    } finally {
+      clearTimeout(timer)
+      guard.release()
+    }
   }
 
   /** An approved background process remains a resource of this exact live runtime and grant. */
@@ -1237,7 +3500,8 @@ export class ModsManager {
       | undefined,
     run: () => Promise<T>,
     parentRunId?: string,
-    metadata?: { description: string; type: string }
+    metadata?: { description: string; type: string },
+    nativeTask?: FunctionConversationNativeTask
   ): Promise<T> {
     parent.assertLive()
     const parentBinding = this.bindings.get(`${parent.threadId}:${parent.agentId}`)
@@ -1245,6 +3509,10 @@ export class ModsManager {
       throw new ModError("MODS_THREAD_CONTEXT_REQUIRED")
     this.assertRuntimeBinding(parentBinding)
     parentBinding.assertLive?.()
+    const conversationParent = access && nativeTask
+      ? this.captureFunctionConversationChildParent(parent) : undefined
+    const conversationBinding = conversationParent ? this.functionConversationRuntimes.get(parent)
+      : undefined
     const identity = {
       workspace: parent.workspace,
       threadId: parent.threadId,
@@ -1258,7 +3526,9 @@ export class ModsManager {
         run
       )
     const parentCallId = getModCallContext()?.identity.callId
+    const epoch = this.config(parent.workspace).epoch
     const instance = this.runtimeAuthorities.create(identity, signal, parent, parentCallId)
+    this.runtimeEpochs.set(instance.authority, epoch)
     const binding: ModThreadBinding = {
       ...parentBinding,
       ...identity,
@@ -1276,14 +3546,43 @@ export class ModsManager {
       assertLive: () => {
         instance.authority.assertLive()
         parentBinding.assertLive?.()
+        if (this.config(parent.workspace).epoch !== epoch)
+          throw new ModError("MODS_CALL_SCOPE_CHANGED")
       }
     }
     const releases: Array<() => void> = []
     let turn: FunctionChildTurnObserver | undefined
     let finishAgent: ((status: "completed" | "failed" | "killed") => void) | undefined
+    let conversationHost: {
+      scope: FunctionConversationSharedCheckpointScope
+      close(): void
+    } | undefined
     let completed = false
     try {
       releases.push(this.bindThread(binding))
+      this.sharedAgentOwners.set(instance.authority, { parent, role: metadata?.type, epoch })
+      if (nativeTask && conversationParent && conversationBinding && this.functionConversations) {
+        const { createFunctionConversationSharedNativeHost } =
+          await import("./v2/conversation-shared-native-host")
+        binding.assertLive?.()
+        conversationHost = createFunctionConversationSharedNativeHost({
+          task: nativeTask, coordinator: this.functionConversations, parent: conversationParent,
+          parentBinding: conversationBinding, authority: instance.authority,
+          signal: binding.signal ?? new AbortController().signal,
+          assertCurrent: () => binding.assertLive?.(),
+          admitted: (actualBinding, producer) => {
+            binding.assertLive?.()
+            this.functionConversationRuntimes.set(instance.authority, actualBinding)
+            this.functionConversationSharedProducers.set(instance.authority,
+              { proof: producer, binding: actualBinding })
+            // Original Saver admission activates only an existing domain of the actual
+            // known child factory. Generic child graphs keep their previous path.
+            admitFunctionConversationSharedNativeInvocation(conversationHost!.scope,
+              producer, instance.authority)
+          }
+        })
+        this.functionConversationSharedScopes.set(instance.authority, conversationHost.scope)
+      }
       if (access.tools) this.bindFunctionToolCatalog(binding, access.tools)
       const mcp = this.mcpBindings.get(this.mcpBindingKey(parent))
       if (mcp && mcp.binding.runtimeAuthority === parent) {
@@ -1299,11 +3598,14 @@ export class ModsManager {
             },
             mcp.invoke,
             mcp.listTools,
-            mcp.peekTools
+            mcp.peekTools,
+            mcp.connect
           )
         )
       }
       if (this.isEnabled(parent.workspace)) {
+        const peer = this.bindFunctionPeerEndpoint(instance.authority)
+        releases.push(() => peer.close())
         if (metadata) {
           const modId = getModCallContext()?.identity.modId
           finishAgent = this.agentInstances.start(parent, {
@@ -1323,6 +3625,7 @@ export class ModsManager {
         }
         turn = this.functionTurns.startChild({
           ...identity,
+          streamSource: "authority",
           runId: `child:${identity.turnId}`,
           parentRunId,
           signal: binding.signal ?? new AbortController().signal,
@@ -1344,10 +3647,16 @@ export class ModsManager {
       return result
     } finally {
       try {
+        conversationHost?.close()
+        if (conversationHost) await conversationHost.scope.whenDrained()
         finishAgent?.(binding.signal?.aborted ? "killed" : completed ? "completed" : "failed")
         turn?.finish(completed ? "answer" : "error")
       } finally {
         this.childTurnObservers.delete(instance.authority)
+        this.functionConversationSharedScopes.delete(instance.authority)
+        this.functionConversationSharedProducers.delete(instance.authority)
+        this.functionConversationRuntimes.delete(instance.authority)
+        this.sharedAgentOwners.delete(instance.authority)
         for (const release of releases.reverse()) release()
         const catalogKey = JSON.stringify([parent.workspace, parent.threadId, agentId])
         if (
@@ -1400,9 +3709,14 @@ export class ModsManager {
       queryTool: binding?.queryTool
         ? async (tool: string, args: Record<string, unknown>) => {
             assertLive()
-            const permission = queryModRuntimeToolAccess(binding, tool)
-            if (permission.decision === "deny") return permission
-            const answer = await binding.queryTool!(tool, args)
+            const fileQuery = binding.commandOnly === true &&
+              binding.readOnly === true && binding.runtimeAuthority
+              ? this.composerFileQueries.get(binding.runtimeAuthority) : undefined
+            if (!fileQuery) {
+              const permission = queryModRuntimeToolAccess(binding, tool)
+              if (permission.decision === "deny") return permission
+            }
+            const answer = await (fileQuery ?? binding.queryTool!)(tool, args)
             assertLive()
             return answer
           }
@@ -1496,20 +3810,41 @@ export class ModsManager {
       lifecycle.hasToolCheck?.(binding.workspace, binding.threadId) === false
     )
       return undefined
-    const mandatory = async (): Promise<ToolPermissionResult> => {
+    const workspace = this.workspaceKey(binding.workspace)
+    const boundAuthority = binding.runtimeAuthority
+    const scopedAuthority = functionCallAuthority(workspace, binding.threadId)
+    if (boundAuthority && scopedAuthority && boundAuthority !== scopedAuthority)
+      throw new ModError("MODS_RUNTIME_SCOPE_CHANGED")
+    const authority = boundAuthority ?? scopedAuthority
+    const assertQuestionScope = () => {
       assertLive()
+      if (binding.runtimeAuthority !== boundAuthority ||
+        functionCallAuthority(workspace, binding.threadId) !== scopedAuthority)
+        throw new ModError("MODS_RUNTIME_SCOPE_CHANGED")
+      if (authority) assertModRuntimeAuthority(authority, {
+        workspace, threadId: binding.threadId, agentId: identity.agentId, turnId: identity.turnId
+      })
+    }
+    assertQuestionScope()
+    const agentId = authority?.agentId
+    const mandatory = async (): Promise<ToolPermissionResult> => {
+      assertQuestionScope()
       const access = queryModRuntimeToolAccess(binding, toolId)
       if (access.decision === "deny") return access
       const query =
         toolId.startsWith("host:") && isNativeFunctionTool(toolId.slice(5)) && binding.queryTool
           ? await binding.queryTool(toolId, args)
           : { decision: "allow" as const }
-      assertLive()
+      assertQuestionScope()
       const policy = this.protects(binding.workspace)
         ? this.policy.query(toolId)
         : { decision: "allow" as const }
       let value = constrainToolPermission(query, policy)
-      if (identity.modId && classifyModTool(toolId) !== "read" && !toolId.startsWith("function:"))
+      if (
+        (identity.modId || identity.flow) &&
+        classifyModTool(toolId) !== "read" &&
+        !toolId.startsWith("function:")
+      )
         value = constrainToolPermission(
           value,
           userInitiated && !binding.readOnly
@@ -1519,13 +3854,16 @@ export class ModsManager {
       return value
     }
     const initial = await mandatory()
+    const question: ModObject = {
+      tool: binding.permissionToolName ?? toolId.replace(/^(?:host:|function:)/, ""),
+      input: filterModData(args, false),
+      tool_use_id: identity.toolCallId ?? identity.callId,
+      ...(agentId && agentId !== "main" ? { agentId } : {})
+    }
+    const parseResult = createToolCheckResultParser(question)
     const value = await lifecycle.toolCheck(
       binding,
-      {
-        tool: binding.permissionToolName ?? toolId.replace(/^(?:host:|function:)/, ""),
-        input: filterModData(args, false),
-        tool_use_id: identity.toolCallId ?? identity.callId
-      },
+      question,
       async () => initial,
       caller ??
         (identity.origin === "mod" && identity.modId?.startsWith("function:")
@@ -1533,7 +3871,8 @@ export class ModsManager {
           : { plugin: "engine", tier: "core" })
     )
     const final = await mandatory()
-    return { value: constrainToolPermission(value, final), adapterAsks: final.decision === "ask" }
+    return { value: parseResult(constrainToolPermission(value, final)),
+      adapterAsks: final.decision === "ask" }
   }
 
   async authorizeRegisteredTool(
@@ -1739,6 +4078,7 @@ export class ModsManager {
       guard.assertLive()
       let receipt: { executionId: string; exitCode: number; passed: boolean } | undefined
       const input = { command: plan.command, cwd: plan.cwd }
+      await assertProjectCheckPlanCurrent(plan, checkSignal)
       const published = await withProjectCheckInput(identity, input, () =>
         this.invokeFunctionCapability(
           workspace,
@@ -1768,6 +4108,7 @@ export class ModsManager {
       )
       checkSignal.throwIfAborted()
       guard.assertLive()
+      await assertProjectCheckPlanCurrent(plan, checkSignal)
       if (!receipt) throw new ModError("MODS_PROJECT_CHECK_RECEIPT_REQUIRED")
       const output = projectModResult(published).text.slice(-64 * 1024)
       return {
@@ -1848,6 +4189,40 @@ export class ModsManager {
       if (signal.aborted) throw new ModError("MODS_CANCELLED")
       if (error instanceof ModPermissionError) throw error
       throw new ModError(modErrorCode(error))
+    }
+  }
+
+  async connectFunctionMcp(
+    workspace: string,
+    threadId: string,
+    grant: ModGrant,
+    owner: McpConnectOwner,
+    server: string,
+    signal: AbortSignal
+  ): Promise<McpConnectAdmission> {
+    workspace = this.workspaceKey(workspace)
+    const mcp = this.functionMcpBinding(workspace, threadId, grant, signal)
+    const active = mcp.binding.signal ? AbortSignal.any([signal, mcp.binding.signal]) : signal
+    const assertCurrent = () => {
+      active.throwIfAborted()
+      if (!this.isEnabled(workspace)) throw new ModError("MODS_DISABLED")
+      assertFunctionGrant(this.store, workspace, threadId, grant, active)
+      mcp.assertLive()
+      this.assertFunctionBinding(mcp.binding)
+      const turn = functionCallTurn(workspace, threadId)
+      if (turn && turn !== mcp.binding.turnId) throw new ModError("MODS_CALL_SCOPE_CHANGED")
+    }
+    assertCurrent()
+    if (!mcp.connect) return { value: mcpConnectRefusal("failed"), assertCurrent }
+    const result = await mcp.connect(owner, server, active, assertCurrent)
+    assertCurrent()
+    result.assertCurrent()
+    return {
+      value: result.value,
+      assertCurrent: () => {
+        assertCurrent()
+        result.assertCurrent()
+      }
     }
   }
 
@@ -2041,7 +4416,8 @@ export class ModsManager {
     binding: ModThreadBinding,
     invoke: (id: string, args: ModObject) => Promise<unknown>,
     listTools?: () => Promise<McpCapabilityTool[]>,
-    peekTools?: () => McpCapabilityTool[] | null
+    peekTools?: () => McpCapabilityTool[] | null,
+    connect?: McpCapabilityService["connectPluginServer"]
   ): () => void {
     this.assertRuntimeBinding(binding)
     const key = this.mcpBindingKey(binding)
@@ -2064,6 +4440,7 @@ export class ModsManager {
       invoke,
       listTools,
       peekTools,
+      connect,
       assertLive: () => {
         if (this.mcpBindings.get(key) !== entry) throw new ModError("MODS_MCP_CONTEXT_EXPIRED")
         this.assertRuntimeBinding(binding)
@@ -2166,13 +4543,18 @@ export class ModsManager {
     toolId: string,
     args: Record<string, unknown>,
     userInitiated = false,
-    capabilityRoot = false
+    capabilityRoot = false,
+    accessKind: "tool" | "host-control" = "tool"
   ): ModDispatchRequest {
     const epoch = this.config(binding.workspace).epoch
     const assertEpoch = (): void => {
       this.assertRuntimeBinding(binding)
       binding.assertLive?.()
-      if (queryModRuntimeToolAccess(binding, toolId).decision === "deny")
+      // Context/command dispatch is engine control, not a callable model tool.
+      // Nested capabilities retain the original binding and default tool checks.
+      const access =
+        accessKind === "host-control" ? { ...binding, allowedToolNames: undefined } : binding
+      if (queryModRuntimeToolAccess(access, toolId).decision === "deny")
         throw new ModError("MODS_RUNTIME_TOOL_DENIED")
       if (identity.modId?.startsWith("function:"))
         functionExecutionScope(binding.workspace, binding.threadId)
@@ -2249,7 +4631,7 @@ export class ModsManager {
         if (checked?.value.decision === "deny") throw new ModPermissionError(checked.value.reason)
         const context = getModCallContext()
         if (context) context.permissionReason = checked?.value.reason
-        if (!identity.modId || classifyModTool(target) === "read") {
+        if ((!identity.modId && !identity.flow) || classifyModTool(target) === "read") {
           if (checked?.value.decision === "ask" && !checked.adapterAsks) {
             const approved = await this.confirmToolOperation(
               binding.threadId,
@@ -2268,12 +4650,15 @@ export class ModsManager {
           throw new ModError("MODS_WRITE_REQUIRES_USER_ACTION")
         if (JSON.stringify(finalArgs, null, 2).length > 16_000)
           throw new ModError("MODS_APPROVAL_INPUT_TOO_LARGE")
-        const granted = this.store.getGrant(binding.workspace, identity.modId)
-        if (!granted?.enabled || granted.epoch !== identity.grantEpoch)
+        const granted = identity.modId && this.store.getGrant(binding.workspace, identity.modId)
+        if (
+          identity.modId &&
+          (!granted || !granted.enabled || granted.epoch !== identity.grantEpoch)
+        )
           throw new ModError("MODS_GRANT_REVOKED")
         const approved = await this.confirmToolOperation(
           binding.threadId,
-          identity.modId,
+          identity.modId ?? `flow:${identity.flow!.runId}`,
           target,
           finalArgs,
           binding.signal,
@@ -2281,7 +4666,7 @@ export class ModsManager {
         )
         if (!approved) throw new ModError("MODS_USER_REJECTED")
         assertEpoch()
-        this.store.assertGrant(granted)
+        if (granted) this.store.assertGrant(granted)
       },
       invokeTool: async (target, input, grant, userAction) => {
         assertEpoch()
@@ -2290,6 +4675,30 @@ export class ModsManager {
         const mcp = this.mcpBindings.get(this.mcpBindingKey(binding))
         if (target.startsWith("mcp:") && (!mcp || mcp.binding.turnId !== binding.turnId))
           throw new ModError("MODS_MCP_CONTEXT_REQUIRED")
+        const assertTarget = () => {
+          const item = target.startsWith("mcp:")
+            ? mcp
+                ?.peekTools?.()
+                ?.find(
+                  (tool) =>
+                    tool.toolId === target.slice(4) || tool.canonicalToolId === target.slice(4)
+                )
+            : undefined
+          if (
+            queryModRuntimeToolAccess(
+              {
+                ...binding,
+                permissionToolName: undefined,
+                permissionToolAliases: item
+                  ? [item.toolId, item.canonicalToolId ?? item.toolId]
+                  : []
+              },
+              target
+            ).decision === "deny"
+          )
+            throw new ModError("MODS_RUNTIME_TOOL_DENIED")
+        }
+        assertTarget()
         const invoke =
           target.startsWith("mcp:") && mcp
             ? (id: string, args: ModObject) => {
@@ -2325,6 +4734,7 @@ export class ModsManager {
             publish: request.publish,
             assertLive: () => {
               assertEpoch()
+              assertTarget()
               this.store.assertGrant(grant)
             }
           },
@@ -2358,7 +4768,7 @@ export class ModsManager {
           workspaceEpoch: epoch,
           turnId: binding.turnId
         })
-        this.notifyCards(binding.threadId)
+        this.notifyCards(binding.threadId, "cards")
       }
     }
     return request
@@ -2390,6 +4800,7 @@ export class ModsManager {
       workspace,
       invokeTool: binding.invokeTool ?? saved?.invokeTool,
       blockedToolNames: saved?.blockedToolNames ?? binding.blockedToolNames,
+      allowedToolNames: saved?.allowedToolNames ?? binding.allowedToolNames,
       readOnly: saved?.readOnly === true || binding.readOnly === true
     }
     const inherited = getModCallContext()
@@ -2414,7 +4825,7 @@ export class ModsManager {
     ) {
       throw new ModError("MODS_CALL_SCOPE_CHANGED")
     }
-    if (inherited?.originMod && inherited.toolId !== toolId)
+    if ((inherited?.originMod || inherited?.identity.flow) && inherited.toolId !== toolId)
       throw new ModError("MODS_TARGET_CHANGED")
     const identity: ModIdentity = inherited?.routeClaimed
       ? { ...inherited.identity, callId: randomUUID(), parentCallId: inherited.identity.callId }
@@ -2465,7 +4876,9 @@ export class ModsManager {
         origin: "model",
         grantEpoch: 0
       }
-      return await session.engine.context(this.request(binding, identity, "host:context", {}))
+      return await session.engine.context(
+        this.request(binding, identity, "host:context", {}, false, false, "host-control")
+      )
     } finally {
       session.refs--
     }
@@ -2491,7 +4904,7 @@ export class ModsManager {
       grantEpoch: 0
     }
     return session.engine
-      .commands(this.request(binding, identity, "host:command", {}))
+      .commands(this.request(binding, identity, "host:command", {}, false, false, "host-control"))
       .map((entry) => ({
         turnId: binding.turnId,
         modId: entry.modId,
@@ -2565,7 +4978,7 @@ export class ModsManager {
         grantEpoch: expected.grantEpoch
       }
       return await session.engine.command(
-        this.request(binding, identity, "host:command", args, true),
+        this.request(binding, identity, "host:command", args, true, false, "host-control"),
         expected.modId,
         expected.command,
         args
@@ -2619,7 +5032,10 @@ export class ModsManager {
           { ...summaryBinding, signal: controller.signal },
           identity,
           "host:turn_summary",
-          {}
+          {},
+          false,
+          false,
+          "host-control"
         ),
         {
           text: `本轮工具：成功 ${counts.succeeded}，失败 ${counts.failed}，待核查 ${counts.unknown}，未执行 ${counts.not_started}。`,
@@ -2714,7 +5130,7 @@ export class ModsManager {
     if (!this.store.hasCard(action.cardId, threadId)) throw new ModError("MODS_ACTION_STALE")
     this.actions.delete(actionId)
     this.store.consumeAction(action.key)
-    this.notifyCards(threadId)
+    this.notifyCards(threadId, "cards")
     this.store.assertGrant(action.grant)
     const binding = this.bindings.get(`${threadId}:${action.agentId}`)
     if (
@@ -2751,7 +5167,7 @@ export class ModsManager {
         grantEpoch: action.grant.epoch
       }
       return await session.engine.command(
-        this.request(actionBinding, identity, "host:command", {}, true),
+        this.request(actionBinding, identity, "host:command", {}, true, false, "host-control"),
         action.modId,
         action.command,
         action.args
@@ -2764,6 +5180,8 @@ export class ModsManager {
   }
 
   close(): void {
+    this.peerInbox.close()
+    this.peerListeners.clear()
     this.agentInstances.clear()
     this.functionTurns.close()
     this.invalidateFunctionReads()
@@ -2779,8 +5197,18 @@ export class ModsManager {
     this.clients.clear()
     this.actions.clear()
     this.store.close()
+    this.peerLedger.close()
   }
 }
+
+const nativeBindingOriginalMethods = [
+  [ModsManager.prototype, "assertRuntimeBinding", "manager",
+    nativeBindingDescriptor(ModsManager.prototype, "assertRuntimeBinding")!.value],
+  [ModsManager.prototype, "workspaceKey", "manager", ModsManager.prototype.workspaceKey],
+  [ModRuntimeAuthorities.prototype, "get", "registry", ModRuntimeAuthorities.prototype.get],
+  [ModRuntimeAuthorities.prototype, "key", "registry",
+    nativeBindingDescriptor(ModRuntimeAuthorities.prototype, "key")!.value]
+] as const
 
 let manager: ModsManager | undefined
 let unavailable: string | undefined
@@ -2815,7 +5243,7 @@ export async function authorizeCurrentModInput(
     context.effectiveArgs = args
     if (context.routeClaimed)
       getModsManager()?.store.bindFinalInput(context.identity.callId, toolId, args)
-    if (context.originMod && context.authorize) {
+    if ((context.originMod || context.identity.flow) && context.authorize) {
       context.authorizedInput = signature
       context.approvedOperation = { toolId, args }
     }
@@ -2827,7 +5255,7 @@ export function hasModOperationApproval(toolId: string, args: Record<string, unk
   context?.assertLive?.()
   const approved = context?.approvedOperation
   return Boolean(
-    context?.originMod &&
+    (context?.originMod || context?.identity.flow) &&
     approved?.toolId === toolId &&
     Object.entries(args).every(([key, value]) => approved.args[key] === value)
   )

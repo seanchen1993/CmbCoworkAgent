@@ -1,10 +1,17 @@
-import { randomUUID } from "crypto"
+import {
+  flowPromptResultSchema,
+  type FlowPromptOnlySubagentOptions,
+  type FlowPromptOnlyRuntimeOptions
+} from "../flow-prompt-runtime-contract"
+import { createHash, randomUUID } from "crypto"
+import { types } from "node:util"
 import { TurnTraceRecorder } from "../trace/turn-trace-recorder"
 import {
   withSubagentSessionCapture,
   subagentSessionCallbacks
 } from "../../services/subagent-session-capture"
 import { HumanMessage, ToolMessage } from "@langchain/core/messages"
+import { runtimeErrorDiagnostic } from "../../utils/runtime-error-diagnostic"
 import { DynamicStructuredTool, ToolInputParsingException } from "@langchain/core/tools"
 import { NodeInterrupt } from "@langchain/langgraph"
 import type { AgentShellAccess } from "../agent-registry"
@@ -22,7 +29,7 @@ import {
 } from "../trace/collector"
 import type { TraceContext, TraceNodeStatus, TraceOutcome } from "../trace/types"
 import { syncSubagentSkillAttribution } from "../turn-attribution"
-import { validateJsonSchemaValue } from "./json-schema"
+import { assertSupportedJsonSchema, validateJsonSchemaValue } from "./json-schema"
 import {
   WORKFLOW_STRUCTURED_OUTPUT_MAX_ATTEMPTS,
   WORKFLOW_SUBAGENT_MAX_RUNS,
@@ -86,6 +93,10 @@ const PROVIDER_SCHEMA_DROPPED_ANNOTATIONS = new Set([
 /** Minimal surface of a deepagents runtime the subagent loop needs. */
 export interface WorkflowSubagentRuntime {
   stream: (input: unknown, config: unknown) => Promise<AsyncIterable<unknown>>
+  /** Host-only turn lifecycle. Preparation runs once, not again for a schema repair nudge. */
+  preparePrompt?: (prompt: string) => Promise<string>
+  /** Runs before result publication and before the child thread is torn down. */
+  completeTurn?: (result: WorkflowSubagentResult) => Promise<void>
 }
 
 export interface WorkflowSubagentDeps {
@@ -104,6 +115,7 @@ export interface WorkflowSubagentDeps {
     shellAccess?: AgentShellAccess
     /** Immutable checkout identity used by file-root and Git guards. */
     worktreeIsolation?: WorkflowWorktreeIsolationBoundary
+    flowPromptOnly?: Omit<FlowPromptOnlyRuntimeOptions, "assertCurrent">
   }) => Promise<WorkflowSubagentRuntime>
   /** Tears down per-thread resources (checkpointer, sandbox ACLs). */
   cleanupThread: (threadId: string) => Promise<void>
@@ -119,6 +131,11 @@ export interface WorkflowSubagentDeps {
 }
 
 export interface RunWorkflowSubagentRequest {
+  flowPromptOnly?: FlowPromptOnlySubagentOptions
+  /** Native flow owns retries and must not silently execute the step a second time. */
+  singleAttempt?: boolean
+  /** An explicitly selected model must remain the selected model. */
+  strictModel?: boolean
   prompt: string
   schema?: Record<string, unknown>
   model?: string
@@ -218,7 +235,8 @@ async function runWorkflowSubagentAttempts(
   const timeoutMs = getWorkflowAgentTimeoutMs()
   let lastError: unknown
 
-  for (let attempt = 1; attempt <= WORKFLOW_SUBAGENT_MAX_RUNS; attempt += 1) {
+  const maxRuns = request.singleAttempt ? 1 : WORKFLOW_SUBAGENT_MAX_RUNS
+  for (let attempt = 1; attempt <= maxRuns; attempt += 1) {
     if (request.signal.aborted) throw new WorkflowAbortError()
     try {
       return await runOnce(deps, request, attempt, timeoutMs)
@@ -234,7 +252,7 @@ async function runWorkflowSubagentAttempts(
       const schemaRetry =
         request.schema !== undefined &&
         (isStructuredOutputRetryableError(error) || isStructuredOutputFailure(error))
-      if ((!retryable && !schemaRetry) || attempt >= WORKFLOW_SUBAGENT_MAX_RUNS) break
+      if ((!retryable && !schemaRetry) || attempt >= maxRuns) break
       console.warn(
         `[Workflow] Subagent ${request.label} attempt ${attempt} failed (${
           retryable ? "retryable API" : "structured-output"
@@ -402,7 +420,8 @@ async function runOnce(
     // collide with a dead run's leftover checkpoint — continuing on that
     // transcript poisons the subagent (or 400s on a dangling tool_call).
     // Purge any stale per-thread state before creating the runtime.
-    await deps.cleanupThread(threadId).catch(() => undefined)
+    if (request.flowPromptOnly) await deps.cleanupThread(threadId)
+    else await deps.cleanupThread(threadId).catch(() => undefined)
     tracer = createWorkflowSubagentTrace(deps, request, threadId)
     if (tracer)
       traceRecorder = new TurnTraceRecorder({
@@ -411,17 +430,29 @@ async function runOnce(
         requireUserMessageAnchor: true
       })
 
-    const additionalTools = request.schema
-      ? [
-          createStructuredOutputTool(request.schema, structured, {
-            runId: request.runId,
-            agentIndex: request.agentIndex,
-            label: request.label,
-            attempt,
-            threadId
-          })
-        ]
-      : undefined
+    if (
+      request.flowPromptOnly &&
+      (!request.singleAttempt ||
+        !request.strictModel ||
+        !request.model ||
+        JSON.stringify(request.schema) !== JSON.stringify(flowPromptResultSchema()))
+    )
+      throw Error("FLOW_PROMPT_SUBAGENT_OPTIONS")
+    const invocation = request.flowPromptOnly ? Object.freeze({}) : undefined
+    const additionalTools =
+      request.flowPromptOnly && invocation
+        ? [createPromptOnlyStructuredOutputTool(flowPromptResultSchema(), invocation)]
+        : request.schema
+          ? [
+              createStructuredOutputTool(request.schema, structured, {
+                runId: request.runId,
+                agentIndex: request.agentIndex,
+                label: request.label,
+                attempt,
+                threadId
+              })
+            ]
+          : undefined
     const baseExtraPrompt = request.schema
       ? buildWorkflowSubagentStructuredPrompt(
           JSON.stringify(request.schema, null, 2),
@@ -441,6 +472,7 @@ async function runOnce(
       threadId,
       agentId,
       model: request.model,
+      strictModel: request.strictModel,
       extraSystemPrompt,
       abortSignal: controller.signal,
       additionalTools,
@@ -448,7 +480,17 @@ async function runOnce(
       label: request.label,
       disallowedTools: request.disallowedTools,
       shellAccess: request.shellAccess,
-      worktreeIsolation: request.worktreeIsolation
+      worktreeIsolation: request.worktreeIsolation,
+      ...(request.flowPromptOnly && invocation
+        ? {
+            flowPromptOnly: {
+              ...request.flowPromptOnly,
+              invocation,
+              expectedModelRef: request.model!,
+              rolePrompt: request.roleSystemPrompt ?? ""
+            }
+          }
+        : {})
     })
     runTraceSideEffect("Workflow", () => {
       tracer?.setModelId(
@@ -471,17 +513,34 @@ async function runOnce(
       streamMode: ["values", "messages"] as Array<"values" | "messages">,
       recursionLimit: getAgentGraphRecursionLimit()
     }
+    const syncPromptResult = () => {
+      if (!invocation || !additionalTools) return
+      const accepted = readPromptOnlyStructuredOutputTool(
+        additionalTools[0],
+        invocation
+      )?.readAccepted()
+      if (accepted) {
+        structured.called = true
+        structured.value = accepted.value
+      }
+    }
     const stopAfterStructuredAccepted =
       request.schema === undefined
         ? undefined
         : (snapshot: unknown): boolean => {
             throwIfStructuredOutputInterrupt(snapshot)
+            syncPromptResult()
             return isStructuredAccepted(structured, request.schema!)
           }
 
     // raceWithAbort so a stream that never honours controller.signal (a dead async
     // iterator / a gateway that ignores the abort) can't hang the whole run — the
     // parent abort or configured per-agent timeout still unblocks us.
+    const preparedPrompt = runtime.preparePrompt
+      ? await raceWithAbort(runtime.preparePrompt(request.prompt), controller.signal)
+      : request.prompt
+    throwIfAborted(controller.signal, request.signal, timeoutMs)
+    promptMessage.content = preparedPrompt
     let snapshot = await raceWithAbort(
       (async () =>
         consumeValuesStream(
@@ -493,6 +552,7 @@ async function runOnce(
       controller.signal
     )
     latestSnapshot = snapshot
+    syncPromptResult()
     throwIfStructuredOutputInterrupt(snapshot)
 
     // Structured mode: if the model never called structured_output, give it one
@@ -588,6 +648,9 @@ async function runOnce(
             : "subagent completed without calling the structured_output tool"
         )
       }
+      const result = { text, structured: structured.value, outputTokens, modelFellBack }
+      if (runtime.completeTurn) await raceWithAbort(runtime.completeTurn(result), controller.signal)
+      throwIfAborted(controller.signal, request.signal, timeoutMs)
       runTraceSideEffect("Workflow", () => {
         if (!tracer) return
         tracer.addTerminalNode({
@@ -603,12 +666,15 @@ async function runOnce(
         })
         traceTerminalRecorded = true
       })
-      return { text, structured: structured.value, outputTokens, modelFellBack }
+      return result
     }
 
     if (!text.trim()) {
       throw new Error("subagent produced no assistant output")
     }
+    const result = { text, structured: undefined, outputTokens, modelFellBack }
+    if (runtime.completeTurn) await raceWithAbort(runtime.completeTurn(result), controller.signal)
+    throwIfAborted(controller.signal, request.signal, timeoutMs)
     runTraceSideEffect("Workflow", () => {
       if (!tracer) return
       tracer.addTerminalNode({
@@ -624,8 +690,20 @@ async function runOnce(
       })
       traceTerminalRecorded = true
     })
-    return { text, structured: undefined, outputTokens, modelFellBack }
+    return result
   } catch (error) {
+    console.warn("[Workflow] Subagent exit diagnostic", {
+      stage: "before-cleanup",
+      error: runtimeErrorDiagnostic(error),
+      childAborted: controller.signal.aborted,
+      parentAborted: request.signal.aborted,
+      ...(controller.signal.aborted
+        ? { childReason: runtimeErrorDiagnostic(controller.signal.reason) }
+        : {}),
+      ...(request.signal.aborted
+        ? { parentReason: runtimeErrorDiagnostic(request.signal.reason) }
+        : {})
+    })
     if (isWorkflowAbortError(error)) {
       traceOutcome = "cancelled"
       traceError = describeWorkflowTraceError(error)
@@ -666,9 +744,11 @@ async function runOnce(
     // completion) so any child process the subagent left tied to this signal
     // is torn down — mirrors the coordinator worker's background-task cancel.
     controller.abort()
-    await deps.cleanupThread(threadId).catch((cleanupError) => {
-      console.warn(`[Workflow] Subagent cleanup failed for ${threadId}:`, cleanupError)
-    })
+    if (request.flowPromptOnly) await deps.cleanupThread(threadId)
+    else
+      await deps.cleanupThread(threadId).catch((cleanupError) => {
+        console.warn(`[Workflow] Subagent cleanup failed for ${threadId}:`, cleanupError)
+      })
   }
 }
 
@@ -691,6 +771,7 @@ export async function createRuntimeWithModelFallback(
     threadId: string
     agentId: string
     model?: string
+    strictModel?: boolean
     extraSystemPrompt: string
     abortSignal: AbortSignal
     additionalTools?: DynamicStructuredTool[]
@@ -699,6 +780,7 @@ export async function createRuntimeWithModelFallback(
     disallowedTools?: string[]
     shellAccess?: AgentShellAccess
     worktreeIsolation?: WorkflowWorktreeIsolationBoundary
+    flowPromptOnly?: Omit<FlowPromptOnlyRuntimeOptions, "assertCurrent">
   }
 ): Promise<{ runtime: WorkflowSubagentRuntime; modelFellBack: boolean }> {
   const baseOptions = {
@@ -710,7 +792,8 @@ export async function createRuntimeWithModelFallback(
     traceContext: options.traceContext,
     disallowedTools: options.disallowedTools,
     shellAccess: options.shellAccess,
-    worktreeIsolation: options.worktreeIsolation
+    worktreeIsolation: options.worktreeIsolation,
+    ...(options.flowPromptOnly ? { flowPromptOnly: options.flowPromptOnly } : {})
   }
   if (options.model) {
     // Don't double-prefix known model references. Bare profile model names keep
@@ -722,7 +805,18 @@ export async function createRuntimeWithModelFallback(
       : `custom:${options.model}`
     try {
       return {
-        runtime: await deps.createRuntime({ ...baseOptions, modelId }),
+        runtime: await deps.createRuntime({
+          ...baseOptions,
+          modelId,
+          ...(baseOptions.flowPromptOnly
+            ? {
+                flowPromptOnly: {
+                  ...baseOptions.flowPromptOnly,
+                  expectedModelRef: modelId
+                }
+              }
+            : {})
+        }),
         modelFellBack: false
       }
     } catch (error) {
@@ -731,7 +825,7 @@ export async function createRuntimeWithModelFallback(
       // surface — silently downgrading it to the default would BOTH mask a real
       // failure and run a different model than the script asked for, while looking
       // like an intended fallback.
-      if (!isModelUnavailableError(error)) {
+      if (options.strictModel || !isModelUnavailableError(error)) {
         throw error
       }
       console.warn(
@@ -936,6 +1030,198 @@ export function createStructuredOutputTool(
 
 function cloneJsonSchema(schema: Record<string, unknown>): Record<string, unknown> {
   return JSON.parse(JSON.stringify(schema)) as Record<string, unknown>
+}
+
+// Prompt-only identity is intentionally registered only by this actual tool factory.
+// Neither a matching name/schema nor a public registration callback grants this fact.
+const promptResultTools = new WeakMap<
+  object,
+  {
+    invocation: object
+    reader: PromptOnlyResultToolReader
+  }
+>()
+export interface PromptOnlyResultToolReader {
+  readonly protocol: "host-workflow-structured-output-v1"
+  readonly schemaDigest: string
+  assertCurrent(): void
+  readAccepted(): { value: unknown; digest: string } | undefined
+}
+const promptOwnDescriptor = Object.getOwnPropertyDescriptor
+const promptOwnNames = Object.getOwnPropertyNames
+const promptOwnKeys = Reflect.ownKeys
+const promptPrototype = Object.getPrototypeOf
+const promptIsProxy = types.isProxy
+
+/** Copy only bounded JSON data without invoking getters, toJSON, or proxy traps. */
+function promptResultData(input: unknown, validatorMetadata = false): unknown {
+  let nodes = 0
+  let characters = 0
+  const visit = (value: unknown, depth: number): unknown => {
+    if (++nodes > 16384 || depth > 48) throw Error("FLOW_PROMPT_TOOL_DATA_LIMIT")
+    if (value === null || typeof value === "boolean") return value
+    if (typeof value === "string") {
+      characters += value.length
+      if (value.length > 65536 || characters > 256 * 1024)
+        throw Error("FLOW_PROMPT_TOOL_DATA_LIMIT")
+      return value
+    }
+    if (typeof value === "number" && Number.isFinite(value)) return value
+    if (typeof value !== "object" || promptIsProxy(value)) throw Error("FLOW_PROMPT_TOOL_DATA")
+    const array = Array.isArray(value)
+    if (!array && promptPrototype(value) !== Object.prototype && promptPrototype(value) !== null)
+      throw Error("FLOW_PROMPT_TOOL_DATA")
+    const copy: Record<string, unknown> | unknown[] = array ? [] : Object.create(null)
+    if (array) Object.setPrototypeOf(copy, null)
+    const names = promptOwnNames(value)
+    if (names.length > 16384) throw Error("FLOW_PROMPT_TOOL_DATA_LIMIT")
+    for (let index = 0; index < names.length; index++) {
+      const name = names[index]
+      if (array && name === "length") continue
+      characters += name.length
+      if (characters > 256 * 1024) throw Error("FLOW_PROMPT_TOOL_DATA_LIMIT")
+      const field = promptOwnDescriptor(value, name)
+      // The pinned core JSON-schema validator annotates schema nodes during invoke().
+      // Its inert URI metadata is not a schema keyword; every actual keyword stays hashed.
+      if (
+        validatorMetadata &&
+        name === "__absolute_uri__" &&
+        field &&
+        "value" in field &&
+        field.enumerable === false &&
+        field.writable === false &&
+        field.configurable === false &&
+        typeof field.value === "string" &&
+        field.value.length <= 2048
+      )
+        continue
+      if (!field || !("value" in field) || !field.enumerable) throw Error("FLOW_PROMPT_TOOL_DATA")
+      if (array && !/^(0|[1-9][0-9]*)$/.test(name)) throw Error("FLOW_PROMPT_TOOL_DATA")
+      Object.defineProperty(copy, name, {
+        value: visit(field.value, depth + 1),
+        enumerable: true,
+        writable: true,
+        configurable: true
+      })
+    }
+    return copy
+  }
+  const copy = visit(input, 0)
+  if (Buffer.byteLength(JSON.stringify(copy)) > 256 * 1024)
+    throw Error("FLOW_PROMPT_TOOL_DATA_LIMIT")
+  return copy
+}
+
+/** Opt-in factory. The legacy factory and its callers keep their original behavior. */
+export function createPromptOnlyStructuredOutputTool(
+  schema: Record<string, unknown>,
+  invocation: object
+): DynamicStructuredTool {
+  if (!invocation || promptIsProxy(invocation) || !Object.isFrozen(invocation))
+    throw Error("FLOW_PROMPT_TOOL_INVOCATION")
+  const fixedSchema = JSON.parse(JSON.stringify(promptResultData(schema))) as Record<
+    string,
+    unknown
+  >
+  assertSupportedJsonSchema(fixedSchema)
+  const schemaDigest = createHash("sha256").update(JSON.stringify(fixedSchema)).digest("hex")
+  let capturedValue: unknown
+  // The original tool assigns the accepted input object. Copy at that exact boundary,
+  // before the caller can mutate an alias; copying only in readAccepted is too late.
+  const capture = {
+    called: false,
+    get value(): unknown {
+      return capturedValue
+    },
+    set value(value: unknown) {
+      capturedValue =
+        value === undefined ? undefined : JSON.parse(JSON.stringify(promptResultData(value)))
+    }
+  }
+  const tool = createStructuredOutputTool(fixedSchema, capture)
+  const fields: {
+    owner: object
+    prototype: object | null
+    names: (string | symbol)[]
+    descriptors: PropertyDescriptor[]
+  }[] = []
+  let owner: object | null = tool
+  while (owner) {
+    if (promptIsProxy(owner)) throw Error("FLOW_PROMPT_TOOL_IDENTITY")
+    const names = promptOwnKeys(owner)
+    fields.push({
+      owner,
+      prototype: promptPrototype(owner),
+      names,
+      descriptors: names.map((name) => promptOwnDescriptor(owner!, name)!)
+    })
+    owner = promptPrototype(owner)
+  }
+  const toolSchemaDigest = createHash("sha256")
+    .update(JSON.stringify(promptResultData(tool.schema, true)))
+    .digest("hex")
+  let failed = false
+  const assertCurrent = () => {
+    try {
+      if (failed) throw Error("FLOW_PROMPT_TOOL_IDENTITY")
+      for (let index = 0; index < fields.length; index++) {
+        const entry = fields[index]
+        if (
+          promptPrototype(entry.owner) !== entry.prototype ||
+          promptOwnKeys(entry.owner).length !== entry.names.length
+        )
+          throw Error("FLOW_PROMPT_TOOL_IDENTITY")
+        for (let key = 0; key < entry.names.length; key++) {
+          const current = promptOwnDescriptor(entry.owner, entry.names[key])
+          const original = entry.descriptors[key]
+          if (
+            !current ||
+            current.value !== original.value ||
+            current.get !== original.get ||
+            current.set !== original.set ||
+            current.enumerable !== original.enumerable ||
+            current.configurable !== original.configurable ||
+            current.writable !== original.writable
+          )
+            throw Error("FLOW_PROMPT_TOOL_IDENTITY")
+        }
+      }
+      if (
+        createHash("sha256")
+          .update(JSON.stringify(promptResultData(tool.schema, true)))
+          .digest("hex") !== toolSchemaDigest
+      )
+        throw Error("FLOW_PROMPT_TOOL_IDENTITY")
+    } catch (error) {
+      failed = true
+      throw error
+    }
+  }
+  const reader: PromptOnlyResultToolReader = Object.freeze({
+    protocol: "host-workflow-structured-output-v1",
+    schemaDigest,
+    assertCurrent,
+    readAccepted: () => {
+      assertCurrent()
+      if (!capture.called || capture.value === undefined) return undefined
+      const value: unknown = JSON.parse(JSON.stringify(promptResultData(capture.value)))
+      if (validateJsonSchemaValue(fixedSchema, value).length > 0) return undefined
+      return { value, digest: createHash("sha256").update(JSON.stringify(value)).digest("hex") }
+    }
+  })
+  promptResultTools.set(tool, { invocation, reader })
+  return tool
+}
+
+export function readPromptOnlyStructuredOutputTool(
+  tool: unknown,
+  invocation: object
+): PromptOnlyResultToolReader | undefined {
+  if (!tool || typeof tool !== "object" || promptIsProxy(tool)) return undefined
+  const original = promptResultTools.get(tool)
+  if (!original || original.invocation !== invocation) return undefined
+  original.reader.assertCurrent()
+  return original.reader
 }
 
 function restoreStructuredToolSchema(

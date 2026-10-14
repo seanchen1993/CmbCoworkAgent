@@ -20,6 +20,9 @@ import {
   prepareStandardThreadRuntimeFactory
 } from "./standard-thread-turn"
 import { extractErrorDetail } from "./failover"
+import { resolve } from "node:path"
+import type { PluginMetadata } from "../types"
+import { issueRuntimePluginSourceToken, withRuntimePluginSource } from "../plugins/runtime-source-scope"
 import type { CreateAgentRuntimeOptions } from "./runtime"
 import {
   HarnessDeployUnitContextLimitError,
@@ -27,6 +30,27 @@ import {
 } from "../harness-board/context-integrity"
 
 describe("getHarnessAgentContext", () => {
+  it("rejects ordinary continuation of a pinned host project thread before legacy resolution", async () => {
+    await expect(getHarnessAgentContext({ hostProjectRuntime: { projectId: "local" } }))
+      .rejects.toThrow("PROJECT_HOST_RUN_ENTRY_REQUIRED")
+    expect(harnessServiceMocks.buildHarnessFeatureAgentContext).not.toHaveBeenCalled()
+  })
+
+  it("projects the host-issued stage prompt into the original model context", async () => {
+    const workspace = resolve("host-stage-context-test")
+    const token = issueRuntimePluginSourceToken({
+      threadId: "thread", incarnationKey: "incarnation", projectId: "local", operationId: "op",
+      workspace, packageDigest: "a".repeat(64), stageId: "review",
+      stagePrompt: "Execute only the review stage; write review.json.",
+      plugin: { id: "installed", name: "docs", version: "1.0.0", path: workspace } as PluginMetadata
+    })
+    const context = await withRuntimePluginSource(token, () => getHarnessAgentContext({
+      hostProjectRuntime: { projectId: "local", operationId: "op" }, workspacePath: workspace
+    }))
+    expect(context.pluginPromptInject).toBe("Execute only the review stage; write review.json.")
+    expect(context.harnessNodeName).toBe("review")
+    expect(harnessServiceMocks.buildHarnessFeatureAgentContext).not.toHaveBeenCalled()
+  })
   beforeEach(() => {
     vi.clearAllMocks()
     harnessServiceMocks.readHarnessFeatureMetadata.mockReturnValue({

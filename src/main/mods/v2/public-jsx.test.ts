@@ -29,8 +29,9 @@ async function fixture(factory = "h", fragment = "Fragment", client = false) {
       }
       if(e.args==="children")return {text:JSON.stringify(h(p=>p,{children:["prop"]},"argument").children)};
       if(e.args==="limits"){
-        const errors=[];let deep="x";for(let i=0;i<30;i++)deep=[deep];
-        for(const children of [deep,Array(1001).fill("x")])try{Fragment({children})}catch(error){errors.push(error.message)}
+        const errors=[];let deep="x",empty=[];for(let i=0;i<30;i++){deep=[deep];empty=[empty]}
+        for(const children of [deep,Array(1001).fill("x"),empty,Array.from({length:1001},()=>[])])
+          try{Fragment({children})}catch(error){errors.push(error.message)}
         return {text:JSON.stringify(errors)}
       }
       return {}
@@ -108,15 +109,17 @@ it.each([
   ["h", "Fragment"],
   ["__functionJsx", "__functionFragment"]
 ])(
-  "renders column fragments with %s without changing callback ownership",
+  "renders transparent fragments with %s without changing callback ownership",
   async (factory, fragment) => {
     const { session, state } = await fixture(factory, fragment)
     const [pane] = await session.panes.snapshot()
-    expect(pane.tree).toMatchObject({ type: "Box", props: { flexDirection: "column" } })
+    expect(pane.tree.type).toBe("fragment")
+    if (pane.tree.type !== "fragment") throw Error("fragment required")
+    expect(Object.keys(pane.tree)).toEqual(["type", "children"])
     expect(pane.tree.children).toHaveLength(2)
     expect(pane.tree.children![0]).toMatchObject({ type: "Text", children: ["public", "0"] })
     const button = pane.tree.children![1]
-    if (typeof button === "string") throw Error("button required")
+    if (typeof button === "string" || button.type === "engine" || button.type === "fragment") throw Error("button required")
     expect(button.press?.plugin).toBe("public-jsx")
     await session.panes.act({
       pane: pane.key,
@@ -138,6 +141,8 @@ it("retains fragment depth and node budgets", async () => {
   const { session } = await fixture()
   expect(JSON.parse((await session.run("inspect", "limits")).text as string)).toEqual([
     "MODS_UI_DEPTH",
+    "MODS_UI_NODES",
+    "MODS_UI_DEPTH",
     "MODS_UI_NODES"
   ])
 })
@@ -146,17 +151,22 @@ it("uses public factories inside the isolated Client VM and preserves control st
   const [pane] = await session.panes.snapshot()
   const client = pane.clients![0]
   expect(client.error).toBeUndefined()
-  expect(client.tree.props.flexDirection).toBe("column")
+  expect(client.tree.type).toBe("fragment")
+  if (client.tree.type !== "fragment") throw Error("fragment required")
+  expect(Object.keys(client.tree)).toEqual(["type", "children"])
   const button = client.tree.children![1]
-  if (typeof button === "string") throw Error("button required")
+  if (typeof button === "string" || button.type === "engine" || button.type === "fragment") throw Error("button required")
   await session.clients.act({
     pane: pane.key,
     instance: client.id,
+    generation: client.generation,
     handle: button.press!.handle,
     intentId: randomUUID(),
     kind: "press"
   })
   const redrawn = (await session.panes.snapshot())[0].clients![0]
   expect(redrawn.id).toBe(client.id)
-  expect(redrawn.tree.children![0]).toMatchObject({ type: "Text", children: ["CLIENT_", "1"] })
+  expect(redrawn.tree.type).toBe("fragment")
+  if (redrawn.tree.type !== "fragment") throw Error("fragment required")
+  expect(redrawn.tree.children[0]).toMatchObject({ type: "Text", children: ["CLIENT_", "1"] })
 })

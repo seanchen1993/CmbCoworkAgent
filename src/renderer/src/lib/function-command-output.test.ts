@@ -11,6 +11,7 @@ it("retains native command output formatting and status while Mods is off", () =
       command: "echo",
       text: "original",
       isErrored: true,
+      renderText: (text) => createElement("p", { role: "status" }, text),
       fallback: createElement("p", { role: "status" }, "original")
     })
   )
@@ -24,6 +25,7 @@ it("does not invent or disclose arguments absent from the durable command job", 
     command: "echo",
     text: "original",
     isErrored: false,
+    renderText: (text) => createElement("pre", {}, text),
     fallback: null
   })
   if (!isValidElement<{ facts: unknown }>(node)) throw Error("Missing site")
@@ -39,6 +41,7 @@ it("does not invent or disclose arguments absent from the durable command job", 
       command: "echo",
       text: "x".repeat(10001),
       isErrored: false,
+      renderText: (text) => createElement("pre", {}, text),
       fallback: "large native output"
     })
   ).toBe("large native output")

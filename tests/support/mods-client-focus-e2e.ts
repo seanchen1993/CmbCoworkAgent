@@ -1,3 +1,4 @@
+import { openModsResults } from "./mods-sidebar-navigation"
 import assert from "node:assert/strict"
 import { mkdirSync } from "node:fs"
 import { join } from "node:path"
@@ -91,6 +92,7 @@ export async function verifyClientFocus(
   await approve()
   await page.reload({ waitUntil: "domcontentloaded" })
   await page.getByText("Client focus", { exact: true }).first().click()
+  await openModsResults(page)
   const run = async (command: string) => {
     const descriptor = (await page.evaluate((id) => window.api.mods.commands(id), id)).find(
       (row) => row.command === command
@@ -180,6 +182,7 @@ export async function verifyClientFocus(
   assert.equal(typeof (await result("reload")).deny, "string")
   assert.notEqual((await active()).key, "target")
   pass("renderer reload cannot replay the old Client focus ownership probe")
+  await openModsResults(page)
   await click("revoke")
   await waitLog("WAIT:revoke")
   await page.evaluate((id) => window.api.mods.revokeFunction(id, "client-focus"), id)

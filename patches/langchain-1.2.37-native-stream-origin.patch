@@ -1,0 +1,614 @@
+--- a/dist/agents/ReactAgent.js
++++ b/dist/agents/ReactAgent.js
+@@ -41,6 +41,181 @@
+ * const agent: ReactAgent<MyTypes> = createAgent({ ... });
+ * ```
+ */
++// CMB native stream origin foundation. Included lexically in the pinned ReactAgent module.
++// No application authority, Source, message, checkpoint or drain permission is minted here.
++const nativeStreamApply = Reflect.apply
++const nativeStreamWeakGet = WeakMap.prototype.get
++const nativeStreamWeakSet = WeakMap.prototype.set
++const nativeStreamWeakDelete = WeakMap.prototype.delete
++const nativeStreamFreeze = Object.freeze
++const nativeStreamInstances = new WeakMap()
++const nativeStreamOperations = new WeakMap()
++const nativeStreamRequests = new WeakMap()
++let nativeStreamBoundary = undefined
++
++function nativeStreamGet(map, key) {
++  return nativeStreamApply(nativeStreamWeakGet, map, [key])
++}
++function nativeStreamSet(map, key, value) {
++  nativeStreamApply(nativeStreamWeakSet, map, [key, value])
++}
++function nativeStreamDelete(map, key) {
++  nativeStreamApply(nativeStreamWeakDelete, map, [key])
++}
++function nativeStreamInvalid(record) {
++  if (record) record.failed = true
++  throw new Error("LANGCHAIN_NATIVE_STREAM_ORIGIN_INVALID")
++}
++function nativeStreamAssert(record) {
++  if (!record || record.failed ||
++    nativeStreamGet(nativeStreamInstances, record.agent) !== record.instance ||
++    nativeStreamGet(nativeStreamOperations, record.operation) !== record ||
++    record.instance.agent !== record.agent || record.instance.graph !== record.graph ||
++    record.instance.stream !== originalNativeReactAgentStream) nativeStreamInvalid(record)
++}
++function registerNativeStreamInstance(agent, graph) {
++  nativeStreamSet(nativeStreamInstances, agent, nativeStreamFreeze({
++    agent, graph, stream: originalNativeReactAgentStream
++  }))
++}
++
++function createNativeStreamOperation(agent, state, config) {
++  const instance = nativeStreamGet(nativeStreamInstances, agent)
++  if (!instance) nativeStreamInvalid(undefined)
++  const operation = nativeStreamFreeze({})
++  nativeStreamSet(nativeStreamOperations, operation, {
++    operation, instance, agent, graph: instance.graph, state, config,
++    phase: "new", failed: false, consumed: false, actualConfig: undefined,
++    skipped: false, preflight: undefined, dispatch: undefined
++  })
++  return operation
++}
++
++function consumeNativeStreamOperation(agent, graph, state, config) {
++  const record = nativeStreamGet(nativeStreamRequests, agent)
++  if (!record) return undefined
++  nativeStreamAssert(record)
++  if (record.agent !== agent || record.graph !== graph || record.state !== state ||
++    record.config !== config || record.phase !== "executing" || record.consumed)
++    nativeStreamInvalid(record)
++  nativeStreamDelete(nativeStreamRequests, agent)
++  record.consumed = true
++  record.phase = "entered"
++  return record
++}
++
++function initializeNativeStreamOperation(record, config) {
++  nativeStreamAssert(record)
++  if (record.phase !== "entered" || record.actualConfig !== undefined)
++    nativeStreamInvalid(record)
++  record.actualConfig = config
++  record.phase = "initializing"
++}
++function skipNativeStreamInitialization(record) {
++  if (!record) return
++  nativeStreamAssert(record)
++  if (record.phase !== "initializing") nativeStreamInvalid(record)
++  record.skipped = true
++  record.phase = "initialization-skipped"
++}
++
++function runNativeStreamPreflight(record, graph, config, state, call) {
++  nativeStreamAssert(record)
++  if (record.phase !== "initializing" || record.graph !== graph ||
++    record.actualConfig !== config || record.preflight !== undefined)
++    nativeStreamInvalid(record)
++  record.phase = "preflight"
++  const boundary = nativeStreamFreeze({ record, kind: "preflight", graph, config, state })
++  record.preflight = boundary
++  const previous = nativeStreamBoundary
++  nativeStreamBoundary = boundary
++  try {
++    return call()
++  } finally {
++    nativeStreamBoundary = previous
++    // Settlement remains the original SDK await/catch, not this synchronous return.
++  }
++}
++function finishNativeStreamPreflight(record) {
++  if (!record) return
++  nativeStreamAssert(record)
++  if (record.phase !== "preflight") nativeStreamInvalid(record)
++  record.phase = "preflight-settled"
++}
++
++function runNativeStreamDispatch(record, graph, config, state, call) {
++  nativeStreamAssert(record)
++  if ((record.phase !== "preflight-settled" && record.phase !== "initialization-skipped") ||
++    record.graph !== graph || record.actualConfig !== config || record.dispatch !== undefined)
++    nativeStreamInvalid(record)
++  record.phase = "dispatch"
++  const boundary = nativeStreamFreeze({ record, kind: "dispatch", graph, config, state })
++  record.dispatch = boundary
++  const previous = nativeStreamBoundary
++  nativeStreamBoundary = boundary
++  try {
++    return call()
++  } finally {
++    nativeStreamBoundary = previous
++  }
++}
++
++function readNativeStreamBoundary(graph, config, kind) {
++  const boundary = nativeStreamBoundary
++  if (!boundary || boundary.graph !== graph || boundary.config !== config || boundary.kind !== kind)
++    return undefined
++  const record = boundary.record
++  nativeStreamAssert(record)
++  if (record.phase !== kind || record[kind] !== boundary) nativeStreamInvalid(record)
++  const check = () => {
++    nativeStreamAssert(record)
++    if (record.graph !== graph || record.actualConfig !== config || record[kind] !== boundary)
++      nativeStreamInvalid(record)
++  }
++  return nativeStreamFreeze({
++    operation: record.operation, agent: record.agent, graph,
++    actualConfig: config, actualState: boundary.state,
++    initializationSkipped: record.skipped, kind, assertDataCurrent: check
++  })
++}
++
++function executeNativeStreamOperation(operation) {
++  const record = nativeStreamGet(nativeStreamOperations, operation)
++  nativeStreamAssert(record)
++  if (record.phase !== "new") nativeStreamInvalid(record)
++  record.phase = "executing"
++  const previous = nativeStreamGet(nativeStreamRequests, record.agent)
++  if (previous) {
++    previous.failed = true
++    nativeStreamInvalid(record)
++  }
++  nativeStreamSet(nativeStreamRequests, record.agent, record)
++  let result
++  try {
++    result = nativeStreamApply(originalNativeReactAgentStream, record.agent,
++      [record.state, record.config])
++    if (!record.consumed || nativeStreamGet(nativeStreamRequests, record.agent) === record)
++      nativeStreamInvalid(record)
++  } catch (error) {
++    record.failed = true
++    throw error
++  } finally {
++    if (nativeStreamGet(nativeStreamRequests, record.agent) === record)
++      nativeStreamDelete(nativeStreamRequests, record.agent)
++  }
++  return nativeStreamApply(nativeStreamPromiseThen, result, [value => {
++    nativeStreamAssert(record)
++    if (record.phase !== "dispatch") nativeStreamInvalid(record)
++    record.phase = "dispatched"
++    // This is the original iterable shell. Its iterator/runLoop has not drained.
++    return value
++  }, error => {
++    record.failed = true
++    throw error
++  }])
++}
++const nativeStreamPromiseThen = Promise.prototype.then
++
+ var ReactAgent = class ReactAgent {
+ 	#graph;
+ 	#toolBehaviorVersion = "v2";
+@@ -275,6 +450,7 @@
+ 			name: this.options.name,
+ 			description: this.options.description
+ 		});
++		registerNativeStreamInstance(this, this.#graph);
+ 	}
+ 	/**
+ 	* Get the compiled {@link https://docs.langchain.com/oss/javascript/langgraph/use-graph-api | StateGraph}.
+@@ -538,13 +714,19 @@
+ 	/**
+ 	* Initialize middleware states if not already present in the input state.
+ 	*/
+-	async #initializeMiddlewareStates(state, config) {
+-		if (!this.options.middleware || this.options.middleware.length === 0 || state instanceof Command || !state) return state;
++	async #initializeMiddlewareStates(state, config, nativeOperation) {
++		if (!this.options.middleware || this.options.middleware.length === 0 || state instanceof Command || !state) {
++			skipNativeStreamInitialization(nativeOperation);
++			return state;
++		}
+ 		const defaultStates = await initializeMiddlewareStates(this.options.middleware, state);
+ 		const updatedState = {
+-			...(await this.#graph.getState(config).catch(() => ({ values: {} }))).values,
++			...(await (nativeOperation
++				? runNativeStreamPreflight(nativeOperation, this.#graph, config, state, () => this.#graph.getState(config))
++				: this.#graph.getState(config)).catch(() => ({ values: {} }))).values,
+ 			...state
+ 		};
++		finishNativeStreamPreflight(nativeOperation);
+ 		if (!updatedState) return updatedState;
+ 		for (const [key, value] of Object.entries(defaultStates)) if (!(key in updatedState)) updatedState[key] = value;
+ 		return updatedState;
+@@ -640,11 +822,23 @@
+ 	* ```
+ 	*/
+ 	async stream(state, config) {
+-		const mergedConfig = mergeConfigs(this.#defaultConfig, config);
+-		const initializedState = await this.#initializeMiddlewareStates(state, mergedConfig);
+-		return this.#graph.stream(initializedState, mergedConfig);
+-	}
+-	/**
++		const nativeOperation = consumeNativeStreamOperation(this, this.#graph, state, config);
++		if (!nativeOperation) {
++			const mergedConfig = mergeConfigs(this.#defaultConfig, config);
++			const initializedState = await this.#initializeMiddlewareStates(state, mergedConfig);
++			return this.#graph.stream(initializedState, mergedConfig);
++		}
++		try {
++			const mergedConfig = mergeConfigs(this.#defaultConfig, config);
++			initializeNativeStreamOperation(nativeOperation, mergedConfig);
++			const initializedState = await this.#initializeMiddlewareStates(state, mergedConfig, nativeOperation);
++			return runNativeStreamDispatch(nativeOperation, this.#graph, mergedConfig, initializedState,
++				() => this.#graph.stream(initializedState, mergedConfig));
++		} catch (error) {
++			nativeOperation.failed = true;
++			throw error;
++		}
++	}	/**
+ 	* Visualize the graph as a PNG image.
+ 	* @param params - Parameters for the drawMermaidPng method.
+ 	* @param params.withStyles - Whether to include styles in the graph.
+@@ -731,6 +925,7 @@
+ 	}
+ };
+ //#endregion
+-export { ReactAgent };
++const originalNativeReactAgentStream = Object.getOwnPropertyDescriptor(ReactAgent.prototype, "stream").value;
++export { ReactAgent, createNativeStreamOperation, executeNativeStreamOperation, readNativeStreamBoundary };
+ 
+ //# sourceMappingURL=ReactAgent.js.map
+\ No newline at end of file
+--- a/dist/agents/ReactAgent.cjs
++++ b/dist/agents/ReactAgent.cjs
+@@ -42,6 +42,181 @@
+ * const agent: ReactAgent<MyTypes> = createAgent({ ... });
+ * ```
+ */
++// CMB native stream origin foundation. Included lexically in the pinned ReactAgent module.
++// No application authority, Source, message, checkpoint or drain permission is minted here.
++const nativeStreamApply = Reflect.apply
++const nativeStreamWeakGet = WeakMap.prototype.get
++const nativeStreamWeakSet = WeakMap.prototype.set
++const nativeStreamWeakDelete = WeakMap.prototype.delete
++const nativeStreamFreeze = Object.freeze
++const nativeStreamInstances = new WeakMap()
++const nativeStreamOperations = new WeakMap()
++const nativeStreamRequests = new WeakMap()
++let nativeStreamBoundary = undefined
++
++function nativeStreamGet(map, key) {
++  return nativeStreamApply(nativeStreamWeakGet, map, [key])
++}
++function nativeStreamSet(map, key, value) {
++  nativeStreamApply(nativeStreamWeakSet, map, [key, value])
++}
++function nativeStreamDelete(map, key) {
++  nativeStreamApply(nativeStreamWeakDelete, map, [key])
++}
++function nativeStreamInvalid(record) {
++  if (record) record.failed = true
++  throw new Error("LANGCHAIN_NATIVE_STREAM_ORIGIN_INVALID")
++}
++function nativeStreamAssert(record) {
++  if (!record || record.failed ||
++    nativeStreamGet(nativeStreamInstances, record.agent) !== record.instance ||
++    nativeStreamGet(nativeStreamOperations, record.operation) !== record ||
++    record.instance.agent !== record.agent || record.instance.graph !== record.graph ||
++    record.instance.stream !== originalNativeReactAgentStream) nativeStreamInvalid(record)
++}
++function registerNativeStreamInstance(agent, graph) {
++  nativeStreamSet(nativeStreamInstances, agent, nativeStreamFreeze({
++    agent, graph, stream: originalNativeReactAgentStream
++  }))
++}
++
++function createNativeStreamOperation(agent, state, config) {
++  const instance = nativeStreamGet(nativeStreamInstances, agent)
++  if (!instance) nativeStreamInvalid(undefined)
++  const operation = nativeStreamFreeze({})
++  nativeStreamSet(nativeStreamOperations, operation, {
++    operation, instance, agent, graph: instance.graph, state, config,
++    phase: "new", failed: false, consumed: false, actualConfig: undefined,
++    skipped: false, preflight: undefined, dispatch: undefined
++  })
++  return operation
++}
++
++function consumeNativeStreamOperation(agent, graph, state, config) {
++  const record = nativeStreamGet(nativeStreamRequests, agent)
++  if (!record) return undefined
++  nativeStreamAssert(record)
++  if (record.agent !== agent || record.graph !== graph || record.state !== state ||
++    record.config !== config || record.phase !== "executing" || record.consumed)
++    nativeStreamInvalid(record)
++  nativeStreamDelete(nativeStreamRequests, agent)
++  record.consumed = true
++  record.phase = "entered"
++  return record
++}
++
++function initializeNativeStreamOperation(record, config) {
++  nativeStreamAssert(record)
++  if (record.phase !== "entered" || record.actualConfig !== undefined)
++    nativeStreamInvalid(record)
++  record.actualConfig = config
++  record.phase = "initializing"
++}
++function skipNativeStreamInitialization(record) {
++  if (!record) return
++  nativeStreamAssert(record)
++  if (record.phase !== "initializing") nativeStreamInvalid(record)
++  record.skipped = true
++  record.phase = "initialization-skipped"
++}
++
++function runNativeStreamPreflight(record, graph, config, state, call) {
++  nativeStreamAssert(record)
++  if (record.phase !== "initializing" || record.graph !== graph ||
++    record.actualConfig !== config || record.preflight !== undefined)
++    nativeStreamInvalid(record)
++  record.phase = "preflight"
++  const boundary = nativeStreamFreeze({ record, kind: "preflight", graph, config, state })
++  record.preflight = boundary
++  const previous = nativeStreamBoundary
++  nativeStreamBoundary = boundary
++  try {
++    return call()
++  } finally {
++    nativeStreamBoundary = previous
++    // Settlement remains the original SDK await/catch, not this synchronous return.
++  }
++}
++function finishNativeStreamPreflight(record) {
++  if (!record) return
++  nativeStreamAssert(record)
++  if (record.phase !== "preflight") nativeStreamInvalid(record)
++  record.phase = "preflight-settled"
++}
++
++function runNativeStreamDispatch(record, graph, config, state, call) {
++  nativeStreamAssert(record)
++  if ((record.phase !== "preflight-settled" && record.phase !== "initialization-skipped") ||
++    record.graph !== graph || record.actualConfig !== config || record.dispatch !== undefined)
++    nativeStreamInvalid(record)
++  record.phase = "dispatch"
++  const boundary = nativeStreamFreeze({ record, kind: "dispatch", graph, config, state })
++  record.dispatch = boundary
++  const previous = nativeStreamBoundary
++  nativeStreamBoundary = boundary
++  try {
++    return call()
++  } finally {
++    nativeStreamBoundary = previous
++  }
++}
++
++function readNativeStreamBoundary(graph, config, kind) {
++  const boundary = nativeStreamBoundary
++  if (!boundary || boundary.graph !== graph || boundary.config !== config || boundary.kind !== kind)
++    return undefined
++  const record = boundary.record
++  nativeStreamAssert(record)
++  if (record.phase !== kind || record[kind] !== boundary) nativeStreamInvalid(record)
++  const check = () => {
++    nativeStreamAssert(record)
++    if (record.graph !== graph || record.actualConfig !== config || record[kind] !== boundary)
++      nativeStreamInvalid(record)
++  }
++  return nativeStreamFreeze({
++    operation: record.operation, agent: record.agent, graph,
++    actualConfig: config, actualState: boundary.state,
++    initializationSkipped: record.skipped, kind, assertDataCurrent: check
++  })
++}
++
++function executeNativeStreamOperation(operation) {
++  const record = nativeStreamGet(nativeStreamOperations, operation)
++  nativeStreamAssert(record)
++  if (record.phase !== "new") nativeStreamInvalid(record)
++  record.phase = "executing"
++  const previous = nativeStreamGet(nativeStreamRequests, record.agent)
++  if (previous) {
++    previous.failed = true
++    nativeStreamInvalid(record)
++  }
++  nativeStreamSet(nativeStreamRequests, record.agent, record)
++  let result
++  try {
++    result = nativeStreamApply(originalNativeReactAgentStream, record.agent,
++      [record.state, record.config])
++    if (!record.consumed || nativeStreamGet(nativeStreamRequests, record.agent) === record)
++      nativeStreamInvalid(record)
++  } catch (error) {
++    record.failed = true
++    throw error
++  } finally {
++    if (nativeStreamGet(nativeStreamRequests, record.agent) === record)
++      nativeStreamDelete(nativeStreamRequests, record.agent)
++  }
++  return nativeStreamApply(nativeStreamPromiseThen, result, [value => {
++    nativeStreamAssert(record)
++    if (record.phase !== "dispatch") nativeStreamInvalid(record)
++    record.phase = "dispatched"
++    // This is the original iterable shell. Its iterator/runLoop has not drained.
++    return value
++  }, error => {
++    record.failed = true
++    throw error
++  }])
++}
++const nativeStreamPromiseThen = Promise.prototype.then
++
+ var ReactAgent = class ReactAgent {
+ 	#graph;
+ 	#toolBehaviorVersion = "v2";
+@@ -276,6 +451,7 @@
+ 			name: this.options.name,
+ 			description: this.options.description
+ 		});
++		registerNativeStreamInstance(this, this.#graph);
+ 	}
+ 	/**
+ 	* Get the compiled {@link https://docs.langchain.com/oss/javascript/langgraph/use-graph-api | StateGraph}.
+@@ -539,13 +715,19 @@
+ 	/**
+ 	* Initialize middleware states if not already present in the input state.
+ 	*/
+-	async #initializeMiddlewareStates(state, config) {
+-		if (!this.options.middleware || this.options.middleware.length === 0 || state instanceof _langchain_langgraph.Command || !state) return state;
++	async #initializeMiddlewareStates(state, config, nativeOperation) {
++		if (!this.options.middleware || this.options.middleware.length === 0 || state instanceof _langchain_langgraph.Command || !state) {
++			skipNativeStreamInitialization(nativeOperation);
++			return state;
++		}
+ 		const defaultStates = await require_utils$1.initializeMiddlewareStates(this.options.middleware, state);
+ 		const updatedState = {
+-			...(await this.#graph.getState(config).catch(() => ({ values: {} }))).values,
++			...(await (nativeOperation
++				? runNativeStreamPreflight(nativeOperation, this.#graph, config, state, () => this.#graph.getState(config))
++				: this.#graph.getState(config)).catch(() => ({ values: {} }))).values,
+ 			...state
+ 		};
++		finishNativeStreamPreflight(nativeOperation);
+ 		if (!updatedState) return updatedState;
+ 		for (const [key, value] of Object.entries(defaultStates)) if (!(key in updatedState)) updatedState[key] = value;
+ 		return updatedState;
+@@ -641,11 +823,23 @@
+ 	* ```
+ 	*/
+ 	async stream(state, config) {
+-		const mergedConfig = (0, _langchain_core_runnables.mergeConfigs)(this.#defaultConfig, config);
+-		const initializedState = await this.#initializeMiddlewareStates(state, mergedConfig);
+-		return this.#graph.stream(initializedState, mergedConfig);
+-	}
+-	/**
++		const nativeOperation = consumeNativeStreamOperation(this, this.#graph, state, config);
++		if (!nativeOperation) {
++			const mergedConfig = (0, _langchain_core_runnables.mergeConfigs)(this.#defaultConfig, config);
++			const initializedState = await this.#initializeMiddlewareStates(state, mergedConfig);
++			return this.#graph.stream(initializedState, mergedConfig);
++		}
++		try {
++			const mergedConfig = (0, _langchain_core_runnables.mergeConfigs)(this.#defaultConfig, config);
++			initializeNativeStreamOperation(nativeOperation, mergedConfig);
++			const initializedState = await this.#initializeMiddlewareStates(state, mergedConfig, nativeOperation);
++			return runNativeStreamDispatch(nativeOperation, this.#graph, mergedConfig, initializedState,
++				() => this.#graph.stream(initializedState, mergedConfig));
++		} catch (error) {
++			nativeOperation.failed = true;
++			throw error;
++		}
++	}	/**
+ 	* Visualize the graph as a PNG image.
+ 	* @param params - Parameters for the drawMermaidPng method.
+ 	* @param params.withStyles - Whether to include styles in the graph.
+@@ -732,6 +926,10 @@
+ 	}
+ };
+ //#endregion
++const originalNativeReactAgentStream = Object.getOwnPropertyDescriptor(ReactAgent.prototype, "stream").value;
+ exports.ReactAgent = ReactAgent;
++exports.createNativeStreamOperation = createNativeStreamOperation;
++exports.executeNativeStreamOperation = executeNativeStreamOperation;
++exports.readNativeStreamBoundary = readNativeStreamBoundary;
+ 
+ //# sourceMappingURL=ReactAgent.cjs.map
+\ No newline at end of file
+--- a/package.json
++++ b/package.json
+@@ -200,6 +200,20 @@
+         "default": "./dist/storage/in_memory.js"
+       }
+     },
++    "./native-stream-origin": {
++      "types": "./dist/native-stream-origin.d.ts",
++      "browser": null,
++      "node": {
++        "require": {
++          "types": "./dist/native-stream-origin.d.cts",
++          "default": "./dist/native-stream-origin.cjs"
++        },
++        "import": {
++          "types": "./dist/native-stream-origin.d.ts",
++          "default": "./dist/native-stream-origin.js"
++        }
++      }
++    },
+     "./package.json": "./package.json"
+   },
+   "module": "./dist/index.js",
+--- /dev/null
++++ b/dist/native-stream-origin.js
+@@ -0,0 +1 @@
++export { createNativeStreamOperation, executeNativeStreamOperation, readNativeStreamBoundary } from "./agents/ReactAgent.js";
+--- /dev/null
++++ b/dist/native-stream-origin.cjs
+@@ -0,0 +1,4 @@
++const source = require("./agents/ReactAgent.cjs");
++exports.createNativeStreamOperation = source.createNativeStreamOperation;
++exports.executeNativeStreamOperation = source.executeNativeStreamOperation;
++exports.readNativeStreamBoundary = source.readNativeStreamBoundary;
+--- /dev/null
++++ b/dist/native-stream-origin.d.ts
+@@ -0,0 +1,32 @@
++declare const nativeStreamOperationResult: unique symbol
++
++export interface NativeStreamOperation<TResult = unknown> {
++  readonly [nativeStreamOperationResult]: TResult
++}
++
++export interface NativeStreamBoundary {
++  readonly operation: NativeStreamOperation
++  readonly agent: object
++  readonly graph: object
++  readonly actualConfig: object
++  readonly actualState: unknown
++  readonly initializationSkipped: boolean
++  readonly kind: "preflight" | "dispatch"
++  assertDataCurrent(): void
++}
++
++/** SDK execution provenance only. This does not grant application or checkpoint authority. */
++export declare function createNativeStreamOperation<
++  TAgent extends { stream: (...args: never[]) => Promise<unknown> }
++>(agent: TAgent, ...args: Parameters<TAgent["stream"]>):
++  NativeStreamOperation<Awaited<ReturnType<TAgent["stream"]>>>
++
++/** Returns the exact original iterable shell; successful settlement is not physical drain. */
++export declare function executeNativeStreamOperation<TResult>(
++  operation: NativeStreamOperation<TResult>
++): Promise<TResult>
++
++/** Available only at the genuine synchronous lexical callee entry, never after an await. */
++export declare function readNativeStreamBoundary(
++  graph: object, config: object, kind: "preflight" | "dispatch"
++): NativeStreamBoundary | undefined
+--- /dev/null
++++ b/dist/native-stream-origin.d.cts
+@@ -0,0 +1,32 @@
++declare const nativeStreamOperationResult: unique symbol
++
++export interface NativeStreamOperation<TResult = unknown> {
++  readonly [nativeStreamOperationResult]: TResult
++}
++
++export interface NativeStreamBoundary {
++  readonly operation: NativeStreamOperation
++  readonly agent: object
++  readonly graph: object
++  readonly actualConfig: object
++  readonly actualState: unknown
++  readonly initializationSkipped: boolean
++  readonly kind: "preflight" | "dispatch"
++  assertDataCurrent(): void
++}
++
++/** SDK execution provenance only. This does not grant application or checkpoint authority. */
++export declare function createNativeStreamOperation<
++  TAgent extends { stream: (...args: never[]) => Promise<unknown> }
++>(agent: TAgent, ...args: Parameters<TAgent["stream"]>):
++  NativeStreamOperation<Awaited<ReturnType<TAgent["stream"]>>>
++
++/** Returns the exact original iterable shell; successful settlement is not physical drain. */
++export declare function executeNativeStreamOperation<TResult>(
++  operation: NativeStreamOperation<TResult>
++): Promise<TResult>
++
++/** Available only at the genuine synchronous lexical callee entry, never after an await. */
++export declare function readNativeStreamBoundary(
++  graph: object, config: object, kind: "preflight" | "dispatch"
++): NativeStreamBoundary | undefined

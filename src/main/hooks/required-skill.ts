@@ -1,3 +1,4 @@
+import { assertCurrentRuntimePluginSourceContent } from "../plugins/runtime-source-scope"
 import { existsSync } from "node:fs"
 import { readFile } from "node:fs/promises"
 import {
@@ -19,9 +20,9 @@ import { runHooks, type HookContext, type HookResultCallback } from "./runner"
 import { joinHookText } from "./text"
 import type { HookConfig, HookEvent, HookResult } from "./types"
 import {
-  isSkillVisibleForProjectMode,
   type ProjectModeSkillScope
 } from "../../shared/skill-visibility"
+import { isSkillVisibleForProjectMode } from "../plugins/derivation-skill-visibility"
 
 const MAX_REQUIRED_SKILL_CHARS = 12_000
 
@@ -114,6 +115,7 @@ async function resolveSkillGuidanceFromSource({
   maxDepth?: number
   plugin?: PluginSkillSourceMetadata
 }): Promise<ResolvedSkillGuidance | null> {
+  assertCurrentRuntimePluginSourceContent()
   for (const skill of await discoverSkills(sourceDir, maxDepth)) {
     if (runtimePolicy && isStandaloneSkillDisabledByRuntimePolicy(skill, runtimePolicy)) {
       continue
@@ -125,6 +127,7 @@ async function resolveSkillGuidanceFromSource({
       const candidates = new Set([...getDiscoveredSkillAliases(skill), normalizeSkillId(skillName)])
       if (!candidates.has(normalized)) continue
 
+      assertCurrentRuntimePluginSourceContent()
       return {
         name: skillName,
         path: skill.skillMdPath,
@@ -134,6 +137,7 @@ async function resolveSkillGuidanceFromSource({
         pluginName: plugin?.pluginName
       }
     } catch {
+      assertCurrentRuntimePluginSourceContent()
       continue
     }
   }

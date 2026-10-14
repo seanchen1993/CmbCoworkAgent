@@ -2,6 +2,7 @@ import { requestUserInputSchema } from "../../user-input-schema"
 import { MOD_COMMAND_HISTORY_LIMIT, type ModObject } from "../types"
 import { encodeModJson } from "../validation"
 import { isModObject, ModFunctionError } from "./contracts"
+import { isFunctionPluginPromptOrigin } from "./plugin-prompt"
 import { validateFunctionTree, type FunctionUiElement } from "./ui"
 
 export const FUNCTION_UI_SITES = [
@@ -20,6 +21,10 @@ export const FUNCTION_UI_SITES = [
   "AskUserQuestion"
 ] as const
 export type FunctionUiSite = (typeof FUNCTION_UI_SITES)[number]
+export type FunctionSiteMountOutcome =
+  | { state: "mounted"; owner: string }
+  | { state: "inactive"; reason: "mods-disabled" | "no-protection-or-functions" }
+  | { state: "retired" }
 export const FUNCTION_DURATION_SITE_LIMIT = 32
 // Each retained job can show a result and an error block; other transcript sites stay at 32.
 export const FUNCTION_COMMAND_OUTPUT_SITE_LIMIT = MOD_COMMAND_HISTORY_LIMIT * 2
@@ -36,7 +41,7 @@ export function functionQuestionPresentation(original: unknown, value: unknown) 
   const after = requestUserInputSchema.safeParse({ questions: value })
   if (!before.success || !after.success) throw new ModFunctionError("MODS_UI_SITE_PROPS")
   const identity = (questions: typeof before.data.questions) =>
-    questions.map((q) => [q.id, q.options.map((option) => option.label)])
+    questions.map((q) => [q.id, q.multiSelect === true, q.options.map((option) => option.label)])
   if (
     JSON.stringify(identity(before.data.questions)) !==
     JSON.stringify(identity(after.data.questions))
@@ -132,13 +137,14 @@ export function functionSiteProps(site: FunctionUiSite, value: unknown): ModObje
       !text(value.text) ||
       typeof value.isExpanded !== "boolean" ||
       !isModObject(value.origin) ||
-      value.origin.kind !== "unclassified" ||
-      Object.keys(value.origin).some((key) => key !== "kind") ||
+      !(
+        isFunctionPluginPromptOrigin(value.origin) ||
+        (value.origin.kind === "unclassified" && Object.keys(value.origin).length === 1)
+      ) ||
       Object.keys(value).some((key) => !["text", "origin", "isExpanded"].includes(key))
     )
       return fail()
-    // CMB's durable transcript has no upstream PromptOrigin stamp. Never infer authorship.
-    return { text: value.text, origin: { kind: "unclassified" }, isExpanded: value.isExpanded }
+    return { text: value.text, origin: { ...value.origin }, isExpanded: value.isExpanded }
   }
   if (site === "AssistantMessage") {
     if (
@@ -285,9 +291,4 @@ export function functionSiteDefault(site: FunctionUiSite, props: ModObject): Fun
 
 export function validateFunctionSiteTree(value: unknown): asserts value is FunctionUiElement {
   validateFunctionTree(value)
-  const visit = (tree: FunctionUiElement): void => {
-    if (tree.type === "Client") throw new ModFunctionError("MODS_UI_SITE_CLIENT_UNSUPPORTED")
-    for (const child of tree.children ?? []) if (typeof child !== "string") visit(child)
-  }
-  visit(value)
 }

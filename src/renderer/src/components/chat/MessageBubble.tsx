@@ -6,6 +6,11 @@ import { useReasoningExpansion } from "./reasoning-expansion-context"
 import { getCollapsedToolCallSummary } from "../../../../shared/tool-call-summary"
 import { parseGoalNoticeText } from "../../../../shared/goal-notice-presentation"
 import { stripThinkBlocksForDisplay } from "../../../../shared/think-block-display"
+import { isFunctionPluginPromptOrigin } from "../../../../shared/mods/v2/plugin-prompt"
+import {
+  functionConversationTranscriptFields,
+  isFunctionConversationHiddenNote
+} from "../../../../shared/mods/v2/conversation-transcript"
 import {
   beginOpenResourcePreviewIntent,
   emitOpenResourcePreview
@@ -423,6 +428,14 @@ function MessageBubbleImpl({
 }: MessageBubbleProps): React.JSX.Element | null {
   const [collapsedTools, setCollapsedTools] = useState<Set<string>>(new Set())
   const [collapsedHtmlTools, setCollapsedHtmlTools] = useState<Set<string>>(new Set())
+  const toolDisclosureScope = JSON.stringify([threadId, message.id])
+  const [toolDetails, setToolDetails] = useState(() => ({
+    scope: toolDisclosureScope,
+    choices: new Map<string, boolean>()
+  }))
+  if (toolDetails.scope !== toolDisclosureScope) {
+    setToolDetails({ scope: toolDisclosureScope, choices: new Map() })
+  }
   const [copySuccess, setCopySuccess] = useState(false)
   const [feedbackDialogOpen, setFeedbackDialogOpen] = useState(false)
   const [likedMessageId, setLikedMessageId] = useState<string | null>(null)
@@ -433,6 +446,8 @@ function MessageBubbleImpl({
   const [userContentOverflow, setUserContentOverflow] = useState(false)
   const userContentRef = useRef<HTMLDivElement>(null)
   const isUser = message.role === "user"
+  const pluginOrigin = isUser && isFunctionPluginPromptOrigin(message.prompt_origin)
+    ? message.prompt_origin : undefined
   const isTool = message.role === "tool"
   const isSystem = message.role === "system"
   const isForkingThisMessage = forkingMessageId === message.id
@@ -584,11 +599,11 @@ function MessageBubbleImpl({
   // Only strip the skill-use tail from OUR user messages; assistant text that
   // happens to quote the tag (e.g. while discussing the protocol) copies verbatim.
   const plainTextForCopy = extractMessagePlainText(message.content, {
-    stripSkillUse: isUser,
-    stripBuiltinBrowser: isUser
+    stripSkillUse: isUser && !pluginOrigin,
+    stripBuiltinBrowser: isUser && !pluginOrigin
   })
-  const goalUserSetMessage = isUser ? parseGoalUserSetMessage(plainTextForCopy) : null
-  const goalUserControlMessage = isUser ? parseGoalUserControlMessage(plainTextForCopy) : null
+  const goalUserSetMessage = isUser && !pluginOrigin ? parseGoalUserSetMessage(plainTextForCopy) : null
+  const goalUserControlMessage = isUser && !pluginOrigin ? parseGoalUserControlMessage(plainTextForCopy) : null
 
   const renderGoalUserSetContent = (
     goalMessage: NonNullable<typeof goalUserSetMessage>
@@ -634,7 +649,9 @@ function MessageBubbleImpl({
     </div>
   )
 
-  const messageText = (text: string, index: number, fallback: React.ReactNode): React.ReactNode => {
+  const messageText = (text: string, index: number,
+    renderText: (safeText: string) => React.ReactNode): React.ReactNode => {
+    const fallback = renderText(text)
     if (message.role !== "user" && message.role !== "assistant") return fallback
     const firstTextIndex =
       typeof displayMessageContent === "string"
@@ -644,11 +661,13 @@ function MessageBubbleImpl({
       <FunctionMessageText
         key={`text:${threadId}:${message.id}:${messageGeneration}:${index}`}
         threadId={threadId}
+        messageId={message.id}
         role={message.role}
         text={text}
         isExpanded={userContentExpanded}
         isFirstOfReply={shouldShowMessageHead && index === firstTextIndex}
         fallback={fallback}
+        renderText={renderText}
       />
     )
   }
@@ -673,8 +692,12 @@ function MessageBubbleImpl({
         // Parse the trailing `<CMBDEVCLAW-SKILL-USE-V1>` block: chip at the top,
         // rest of the message as plain text. Handles skill-only sends (no text)
         // by still rendering the chip with an empty tail.
-        const skillContent = parseUserVisibleSkillContent(displayContent)
-        const browserContent = parseUserVisibleBuiltinBrowserContent(skillContent.visibleText)
+        const skillContent = pluginOrigin
+          ? { visibleText: displayContent, skillName: null }
+          : parseUserVisibleSkillContent(displayContent)
+        const browserContent = pluginOrigin
+          ? { visibleText: displayContent, browserSelected: false }
+          : parseUserVisibleBuiltinBrowserContent(skillContent.visibleText)
         return (
           <div className="whitespace-pre-wrap break-words text-[15px] leading-7 text-foreground/95 [overflow-wrap:anywhere]">
             {skillContent.skillName && (
@@ -684,13 +707,13 @@ function MessageBubbleImpl({
             {messageText(
               browserContent.visibleText,
               0,
-              <span
+              (safeText) => <span
                 data-chat-search-text
                 data-chat-search-block-index={0}
                 data-chat-search-source-start={0}
                 data-chat-search-source-end={displayContent.length}
               >
-                {browserContent.visibleText}
+                {safeText}
               </span>
             )}
           </div>
@@ -699,12 +722,12 @@ function MessageBubbleImpl({
       return messageText(
         displayContent,
         0,
-        <StreamingMarkdown
+        (safeText) => <StreamingMarkdown
           isStreaming={isStreaming}
           threadId={threadId}
           searchLocation={searchLocation?.blockIndex === 0 ? searchLocation : undefined}
         >
-          {displayContent}
+          {safeText}
         </StreamingMarkdown>
       )
     }
@@ -717,8 +740,12 @@ function MessageBubbleImpl({
           if (!displayText.trim()) return null
           // Use streaming markdown for assistant text blocks
           if (isUser) {
-            const skillContent = parseUserVisibleSkillContent(displayText)
-            const browserContent = parseUserVisibleBuiltinBrowserContent(skillContent.visibleText)
+            const skillContent = pluginOrigin
+              ? { visibleText: displayText, skillName: null }
+              : parseUserVisibleSkillContent(displayText)
+            const browserContent = pluginOrigin
+              ? { visibleText: displayText, browserSelected: false }
+              : parseUserVisibleBuiltinBrowserContent(skillContent.visibleText)
             return (
               <div
                 key={index}
@@ -731,13 +758,13 @@ function MessageBubbleImpl({
                 {messageText(
                   browserContent.visibleText,
                   index,
-                  <span
+                  (safeText) => <span
                     data-chat-search-text
                     data-chat-search-block-index={index}
                     data-chat-search-source-start={0}
                     data-chat-search-source-end={displayText.length}
                   >
-                    {browserContent.visibleText}
+                    {safeText}
                   </span>
                 )}
               </div>
@@ -746,14 +773,14 @@ function MessageBubbleImpl({
           return messageText(
             displayText,
             index,
-            <StreamingMarkdown
+            (safeText) => <StreamingMarkdown
               key={index}
               isStreaming={isStreaming}
               threadId={threadId}
               searchBlockIndex={index}
               searchLocation={searchLocation?.blockIndex === index ? searchLocation : undefined}
             >
-              {displayText}
+              {safeText}
             </StreamingMarkdown>
           )
         }
@@ -878,6 +905,13 @@ function MessageBubbleImpl({
     return (
       <div className="group flex justify-end overflow-hidden py-4">
         <div className="flex min-w-0 max-w-[80%] flex-col items-end gap-1">
+          {pluginOrigin && (
+            <span data-plugin-prompt-source={pluginOrigin.name}
+              className="max-w-full truncate px-1 text-xs text-muted-foreground"
+              title={`由 ${pluginOrigin.name} 组件提交的任务`}>
+              由 {pluginOrigin.name} 组件提交
+            </span>
+          )}
           <div
             className={cn(
               "min-w-0 max-w-full overflow-hidden rounded-lg p-3",
@@ -999,6 +1033,7 @@ function MessageBubbleImpl({
               component="TurnDuration"
               facts={{ word: "耗时", durationMs: duration }}
               className="text-xs text-muted-foreground/70"
+              renderNative={(safe) => <DurationShow durationMs={Number(safe.durationMs)} text={String(safe.word)} />}
               fallback={<DurationShow durationMs={duration} text="耗时" />}
             />
           )}
@@ -1055,15 +1090,18 @@ function MessageBubbleImpl({
                 ...(row.result ? { output: row.result.content } : {})
               }))}
             >
-              {(groupExpanded) =>
-                displayToolRows!.map((row) => {
+              {(groupExpanded, safeCalls) =>
+                displayToolRows!.map((row, index) => {
                   const { toolId, resolvedToolCall, result, needsApproval, inferredStatus } = row
+                  const safe = safeCalls?.[index]
+                  const displayCall = safe ? { ...resolvedToolCall,
+                    args: safe.input as Record<string, unknown> } : resolvedToolCall
                   const statusMeta = getToolStatusMeta(inferredStatus)
                   const isHtmlTool = isHtmlRenderToolCall(resolvedToolCall)
                   const isExpanded =
                     groupExpanded !==
                     (isHtmlTool ? collapsedHtmlTools.has(toolId) : collapsedTools.has(toolId))
-                  const summary = getCollapsedToolCallSummary(resolvedToolCall)
+                  const summary = getCollapsedToolCallSummary(displayCall)
                   const previewPath = getToolPreviewPath(resolvedToolCall)
                   const isOk = result !== undefined && !result?.is_error
 
@@ -1115,6 +1153,7 @@ function MessageBubbleImpl({
                   return (
                     <div
                       key={toolId}
+                      data-function-request-id={resolvedToolCall.id || undefined}
                       className="rounded-sm border overflow-hidden border-border bg-background-elevated"
                     >
                       {/* 可折叠的工具标题 */}
@@ -1122,6 +1161,7 @@ function MessageBubbleImpl({
                         <button
                           type="button"
                           onClick={() => toggleToolExpansion(toolId, isHtmlTool)}
+                          aria-expanded={isExpanded}
                           className="flex min-w-0 flex-1 items-center gap-2 px-3 py-2"
                         >
                           {isExpanded ? (
@@ -1208,8 +1248,26 @@ function MessageBubbleImpl({
                       {isExpanded && (
                         <div className="border-t border-border">
                           <ToolCallRenderer
+                            key={JSON.stringify([threadId, message.id, resolvedToolCall.id])}
                             toolCall={resolvedToolCall}
                             result={result?.content}
+                            presentation={safe ? { input: safe.input, output: safe.output } : undefined}
+                            initialExpanded={groupExpanded}
+                            expanded={
+                              toolDetails.scope === toolDisclosureScope
+                                ? toolDetails.choices.get(resolvedToolCall.id)
+                                : undefined
+                            }
+                            onExpandedChange={(expanded) => {
+                              setToolDetails((previous) =>
+                                previous.scope === toolDisclosureScope
+                                  ? {
+                                      ...previous,
+                                      choices: new Map(previous.choices).set(resolvedToolCall.id, expanded)
+                                    }
+                                  : previous
+                              )
+                            }}
                             isError={result?.is_error}
                             status={inferredStatus}
                             needsApproval={false}
@@ -1393,4 +1451,25 @@ function areMessageBubblePropsEqual(
 // Parent stream updates recreate the transcript array and global tool maps.
 // Compare only fields rendered by this bubble plus this message's own tool
 // entries, so unchanged history can actually stop at the React.memo boundary.
-export const MessageBubble = React.memo(MessageBubbleImpl, areMessageBubblePropsEqual)
+function FunctionConversationMessageBubble(props: MessageBubbleProps): React.JSX.Element | null {
+  const message = props.message
+  const fields = functionConversationTranscriptFields(message, message.id, message.role)
+  const invalid = fields.function_row_invalid === true
+  if (!invalid && isFunctionConversationHiddenNote(fields)) return null
+  if (invalid || fields.function_row?.messageType === "system") {
+    const text = invalid ? "这条插件会话记录无法验证，已停止用于任务上下文。" :
+      typeof message.content === "string" ? message.content : message.content
+        .filter((block) => block.type === "text" && typeof block.text === "string")
+        .map((block) => block.text).join("\n")
+    return <div className="liquid-glass-notice liquid-glass-notice--info" role="status"
+      data-function-conversation-notice>
+      <span className="liquid-glass-notice__icon" aria-hidden="true"><Info className="size-4" /></span>
+      <div className="liquid-glass-notice__body min-w-0 whitespace-pre-wrap text-[15px] leading-7">
+        {text}
+      </div>
+    </div>
+  }
+  return <MessageBubbleImpl {...props} />
+}
+
+export const MessageBubble = React.memo(FunctionConversationMessageBubble, areMessageBubblePropsEqual)

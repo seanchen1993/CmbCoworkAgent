@@ -1,0 +1,77 @@
+{
+  "apiVersion": "cmb.mods/v2",
+  "id": "component-review-kit",
+  "claw": {
+    "componentsVersion": 1,
+    "components": [
+      {
+        "id": "review",
+        "name": "代码检视",
+        "description": "注册 /component-review，用当前默认模型检视输入的代码或变更说明。",
+        "kind": "module",
+        "entry": "review.ts",
+        "dependsOn": ["context"],
+        "actionIds": ["review"],
+        "configSchema": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "focus": { "type": "string", "title": "检视重点", "maxLength": 500 }
+          }
+        }
+      },
+      {
+        "id": "report",
+        "name": "汇报整理",
+        "description": "注册 /component-report，将给定结果整理成简洁汇报。可以单独选择。",
+        "kind": "module",
+        "entry": "report.ts",
+        "dependsOn": [],
+        "actionIds": ["report"]
+      },
+      {
+        "id": "context",
+        "name": "示例说明",
+        "description": "检视组件的显式依赖，注册 /component-help 查看使用边界。",
+        "kind": "module",
+        "entry": "context.ts",
+        "dependsOn": [],
+        "actionIds": []
+      }
+    ],
+    "actions": [
+      {
+        "id": "review",
+        "name": "检视提供的代码",
+        "command": "component-review",
+        "inputSchema": {
+          "type": "object",
+          "required": ["text"],
+          "properties": { "text": { "type": "string", "minLength": 1, "maxLength": 16000 } },
+          "additionalProperties": false
+        },
+        "outputSchema": {
+          "type": "object",
+          "required": ["text"],
+          "properties": { "text": { "type": "string" } }
+        }
+      },
+      {
+        "id": "report",
+        "name": "整理提供的结果",
+        "command": "component-report",
+        "inputSchema": {
+          "type": "object",
+          "required": ["text"],
+          "properties": { "text": { "type": "string", "minLength": 1, "maxLength": 16000 } },
+          "additionalProperties": false
+        },
+        "outputSchema": {
+          "type": "object",
+          "required": ["text"],
+          "properties": { "text": { "type": "string" } }
+        }
+      }
+    ]
+  }
+}

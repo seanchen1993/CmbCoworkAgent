@@ -1,14 +1,25 @@
 import { DatabaseSync } from "node:sqlite"
+import { canonicalDisplayColumnsDigest, canonicalDisplayValueDigest,
+  readCanonicalDisplayProjection } from
+  "../checkpointer/function-conversation-canonical-display-worker"
 import { decodeTranscriptRecoveryIntegrity } from "../../shared/transcript-recovery-integrity"
 import { hasPendingLegacyMessageTimes } from "../checkpointer/legacy-message-times"
 import type { ContentBlock, Message, ToolCall } from "../types"
 import type {
   ThreadMessageHydrationWorkerStats,
-  ThreadMessageHydrationReadRequest
+  ThreadMessageHydrationReadRequest,
+  CanonicalThreadDisplayWitness
 } from "./protocol"
 import { THREAD_MESSAGE_HYDRATION_CANCELLED } from "./protocol"
 import { isRestorableConversationTranscriptMessage } from "../../shared/checkpoint-transcript"
 import { normalizeTranscriptReasoning } from "../../shared/transcript-reasoning"
+import { isFunctionPluginPromptOrigin } from "../../shared/mods/v2/plugin-prompt"
+import { functionConversationTranscriptFields } from "../../shared/mods/v2/conversation-transcript"
+import { NativeSqliteAdapter } from "../db/native-sqlite-adapter"
+import { hasFunctionConversationProjectionMarker, hasFunctionConversationProjectionReceiptSchema }
+  from "../db/function-conversation-projection-read"
+import type { FunctionConversationProjectionColumns } from "../db/function-conversation-projection-receipt"
+import { captureThreadIncarnation, matchesThreadIncarnation } from "../services/thread-incarnation"
 import {
   GOAL_USER_MESSAGE_EVENT_PREFIX,
   isVisibleGoalUserEventMessage
@@ -43,6 +54,8 @@ interface ThreadMessageRow {
   tool_calls_json: string | null
   tool_call_id: string | null
   name: string | null
+  prompt_origin_json?: string | null
+  function_row_json?: string | null
   status: string | null
   is_error: number | null
   content_priority: number | null
@@ -335,12 +348,24 @@ function rowToMessage(
   const parsedContent = parseJsonValue(row.content_json, cancellation)
   const storedContent = normalizeMessageContent(parsedContent)
   const content = appendFragmentSummary(storedContent, fragment)
+  // The optional column keeps old databases readable. Only the host's bounded source stamp
+  // is forwarded; malformed or assistant-owned stamps never classify a human message.
+  const source = row.role === "user" && typeof row.prompt_origin_json === "string" &&
+    row.prompt_origin_json.length <= 2048
+    ? parseJsonValue(row.prompt_origin_json, cancellation) : undefined
+  const promptOrigin = isFunctionPluginPromptOrigin(source) ? source : undefined
+  const functionFields = row.function_row_json === null || row.function_row_json === undefined
+    ? {} : functionConversationTranscriptFields({
+      function_row: parseJsonValue(row.function_row_json, cancellation)
+    }, row.message_id, row.role)
 
   return {
     message: {
       id: row.message_id,
       ordinal: row.ordinal,
-      recovery_integrity: decodeTranscriptRecoveryIntegrity(row.recovery_integrity),
+      recovery_integrity: functionFields.function_row_invalid ? "unverified" :
+        decodeTranscriptRecoveryIntegrity(row.recovery_integrity),
+      ...functionFields,
       ...(row.provider_source_id ? { provider_source_id: row.provider_source_id } : {}),
       ...(typeof row.provider_occurrence === "number" && row.provider_occurrence >= 1
         ? { provider_occurrence: row.provider_occurrence }
@@ -351,6 +376,7 @@ function rowToMessage(
       ...(toolCalls ? { tool_calls: toolCalls } : {}),
       ...(row.tool_call_id ? { tool_call_id: row.tool_call_id } : {}),
       ...(row.name ? { name: row.name } : {}),
+      ...(promptOrigin ? { prompt_origin: promptOrigin } : {}),
       ...(row.status ? { status: row.status } : {}),
       ...(isError !== undefined ? { is_error: isError } : {}),
       ...(typeof row.content_priority === "number" && row.content_priority > 0
@@ -371,6 +397,78 @@ function rowToMessage(
           storedContent.length + fragment.length > THREAD_MESSAGE_TEXT_LIMIT
       )
   }
+}
+
+/** Shared pure formatter. Columns must already have passed the native 23-column seal. */
+export function formatSealedThreadMessageColumns(columns: FunctionConversationProjectionColumns,
+  cancellation: Int32Array, byteBudget?: number): { message: Message; truncated: boolean; bytes: number } {
+  const requiredText = (key: "thread_id" | "message_id" | "content_json") => {
+    const value = columns[key]
+    if (typeof value !== "string" || !value) throw Error("MODS_CONVERSATION_PROJECTION_CONFLICT")
+    return value
+  }
+  const nullableText = (key: keyof FunctionConversationProjectionColumns) => {
+    const value = columns[key]
+    if (value !== null && typeof value !== "string") throw Error("MODS_CONVERSATION_PROJECTION_CONFLICT")
+    return value
+  }
+  const nullableNumber = (key: keyof FunctionConversationProjectionColumns) => {
+    const value = columns[key]
+    if (value !== null && (typeof value !== "number" || !Number.isFinite(value)))
+      throw Error("MODS_CONVERSATION_PROJECTION_CONFLICT")
+    return value
+  }
+  const role = columns.role
+  if (role !== "user" && role !== "assistant" && role !== "system" && role !== "tool" ||
+    typeof columns.created_at !== "number" || typeof columns.ordinal !== "number")
+    throw Error("MODS_CONVERSATION_PROJECTION_CONFLICT")
+  const row: ThreadMessageRow = { thread_id: requiredText("thread_id"),
+    message_id: requiredText("message_id"), role, content_json: requiredText("content_json"),
+    provider_source_id: nullableText("provider_source_id"),
+    provider_occurrence: nullableNumber("provider_occurrence"), reasoning: nullableText("reasoning"),
+    tool_calls_json: nullableText("tool_calls_json"), tool_call_id: nullableText("tool_call_id"),
+    name: nullableText("name"), prompt_origin_json: nullableText("prompt_origin_json"),
+    function_row_json: nullableText("function_row_json"), status: nullableText("status"),
+    is_error: nullableNumber("is_error"), content_priority: nullableNumber("content_priority"),
+    recovery_integrity: nullableNumber("recovery_integrity"), goal_id: nullableText("goal_id"),
+    active_window_id: nullableText("active_window_id"), created_at: columns.created_at,
+    start_at: nullableNumber("start_at"), end_at: nullableNumber("end_at"), ordinal: columns.ordinal }
+  const hydrated = rowToMessage(row, undefined, cancellation)
+  if (byteBudget === undefined) return { ...hydrated, bytes: jsonBytes(hydrated.message) }
+  const projected = projectMessageToByteBudget(hydrated.message, byteBudget)
+  return { ...projected, truncated: hydrated.truncated || projected.truncated }
+}
+
+const canonicalAdapters = new WeakMap<DatabaseSync, NativeSqliteAdapter>()
+function canonicalPageMessage(database: DatabaseSync, row: ThreadMessageRow,
+  cancellation: Int32Array): { message?: Message; truncated: boolean;
+    witness: CanonicalThreadDisplayWitness } | undefined {
+  let adapter = canonicalAdapters.get(database)
+  if (!adapter) { adapter = new NativeSqliteAdapter(database); canonicalAdapters.set(database, adapter) }
+  if (!hasFunctionConversationProjectionMarker(adapter, row.thread_id, row.message_id)) return undefined
+  if (!hasFunctionConversationProjectionReceiptSchema(adapter))
+    throw Error("MODS_CONVERSATION_MIGRATION_REQUIRED")
+  const thread = database.prepare("SELECT created_at,metadata FROM threads WHERE thread_id=?")
+    .get(row.thread_id)
+  if (!thread || typeof thread.created_at !== "number" ||
+    (thread.metadata !== null && typeof thread.metadata !== "string"))
+    throw Error("MODS_CONVERSATION_THREAD_CHANGED")
+  const incarnation = captureThreadIncarnation({ created_at: thread.created_at, metadata: thread.metadata })
+  const { columns, presentation } = readCanonicalDisplayProjection(adapter, { threadId: row.thread_id,
+    messageId: row.message_id, incarnation, assertCurrent() {
+      throwIfCancelled(cancellation)
+      const actual = database.prepare("SELECT created_at,metadata FROM threads WHERE thread_id=?")
+        .get(row.thread_id)
+      if (!actual || typeof actual.created_at !== "number" ||
+        (actual.metadata !== null && typeof actual.metadata !== "string") ||
+        !matchesThreadIncarnation({ created_at: actual.created_at, metadata: actual.metadata }, incarnation))
+        throw Error("MODS_CONVERSATION_THREAD_CHANGED")
+    } })
+  const witness: CanonicalThreadDisplayWitness = { messageId: row.message_id,
+    columnsDigest: canonicalDisplayColumnsDigest(columns), presentation }
+  if (presentation.kind !== "visible") return { truncated: false, witness }
+  return { ...formatSealedThreadMessageColumns(columns, cancellation),
+    witness }
 }
 
 function jsonBytes(value: unknown): number {
@@ -741,8 +839,10 @@ function hasVisibleThreadConversation(
   threadId: string,
   cancellation: Int32Array
 ): boolean {
+  const hasFunctionColumn = database.prepare("PRAGMA table_info(thread_messages)")
+    .all().some((column) => column.name === "function_row_json")
   const statement = database.prepare(
-    `SELECT role,
+    `SELECT role, message_id, ${hasFunctionColumn ? "function_row_json" : "NULL AS function_row_json"},
             length(CAST(content_json AS BLOB)) AS content_bytes,
             CASE WHEN length(CAST(content_json AS BLOB)) <= ? THEN content_json ELSE NULL END AS content_json
      FROM thread_messages
@@ -770,11 +870,18 @@ function hasVisibleThreadConversation(
       return true
     }
     scannedBytes += contentBytes
+    const functionFields = raw.function_row_json === null ? {} :
+      functionConversationTranscriptFields({
+        function_row: parseJsonValue(raw.function_row_json, cancellation)
+      }, typeof raw.message_id === "string" ? raw.message_id : undefined,
+      typeof raw.role === "string" ? raw.role : undefined)
+    // A damaged native row must not make a non-empty conversation appear empty.
+    if (functionFields.function_row_invalid) return true
     if (
       typeof raw.role === "string" &&
       isRestorableConversationTranscriptMessage(
         raw.role,
-        parseJsonValue(raw.content_json, cancellation)
+        parseJsonValue(raw.content_json, cancellation), functionFields
       )
     ) {
       return true
@@ -869,7 +976,8 @@ export function openThreadMessageHydrationDatabase(databasePath: string): Databa
 export function readThreadMessagesPage(
   database: DatabaseSync,
   request: ThreadMessageHydrationReadRequest
-): { page: import("../types").ThreadMessagesPage; stats: ThreadMessageHydrationWorkerStats } {
+): { page: import("../types").ThreadMessagesPage; stats: ThreadMessageHydrationWorkerStats;
+  canonicalWitnesses?: readonly CanonicalThreadDisplayWitness[] } {
   const startedAt = performance.now()
   const cancellation = new Int32Array(request.cancellationBuffer)
   const limit = normalizePageLimit(request.options.limit)
@@ -926,16 +1034,29 @@ export function readThreadMessagesPage(
     const orderedMessages: Message[] = []
     const returnedCandidates: CandidateRow[] = []
     const truncatedMessageIds: string[] = []
+    const canonicalWitnesses: CanonicalThreadDisplayWitness[] = []
     let responseBytes = THREAD_MESSAGE_HYDRATION_RESPONSE_OVERHEAD
     for (const candidate of selected) {
       throwIfCancelled(cancellation)
       const row = rowsById.get(candidate.message_id)
       if (!row) continue
-      const hydrated = rowToMessage(row, fragments.get(candidate.message_id), cancellation)
+      const canonical = canonicalPageMessage(database, row, cancellation)
+      if (canonical && !canonical.message) {
+        canonicalWitnesses.push(canonical.witness)
+        // The cursor advances across omitted physical rows, including an entirely hidden page.
+        returnedCandidates.push(candidate)
+        continue
+      }
+      const hydrated = canonical ??
+        rowToMessage(row, fragments.get(candidate.message_id), cancellation)
+      if (!hydrated.message) throw Error("MODS_CONVERSATION_DISPLAY_SOURCE_INVALID")
       const remaining = Math.max(1, byteBudget - responseBytes)
       const projected = projectMessageToByteBudget(hydrated.message, remaining)
       if (orderedMessages.length > 0 && projected.truncated) break
       orderedMessages.push(projected.message)
+      if (canonical) canonicalWitnesses.push({ ...canonical.witness, display: {
+        kind: "page", digest: canonicalDisplayValueDigest(projected.message), byteBudget: remaining
+      } })
       returnedCandidates.push(candidate)
       responseBytes += projected.bytes + 1
       if (projected.truncated || hydrated.truncated) {
@@ -947,6 +1068,7 @@ export function readThreadMessagesPage(
     const oldest = returnedCandidates.at(-1)
     const hasMore = returnedCandidates.length < candidates.length
     return {
+      ...(canonicalWitnesses.length ? { canonicalWitnesses } : {}),
       page: {
         messages: isForwardPage ? orderedMessages : orderedMessages.reverse(),
         beforeOrdinal: !isForwardPage && hasMore && oldest ? oldest.ordinal : null,

@@ -16,6 +16,11 @@ import {
 const servers: BrowserCookieBridgeServer[] = []
 const sockets: Socket[] = []
 
+function testPipePath(): string {
+  const name = `cmb-cookie-bridge-test-${randomUUID()}`
+  return process.platform === "win32" ? "\\\\.\\pipe\\" + name : join(tmpdir(), name + ".sock")
+}
+
 afterEach(() => {
   for (const socket of sockets.splice(0)) socket.destroy()
   for (const server of servers.splice(0)) server.stop()
@@ -52,7 +57,7 @@ function waitForMessage(
 
 describe("browser cookie bridge server", () => {
   it("reports a native host authentication failure before closing the socket", async () => {
-    const pipePath = join(tmpdir(), `cmb-cookie-bridge-test-${randomUUID()}.sock`)
+    const pipePath = testPipePath()
     const server = new BrowserCookieBridgeServer(pipePath, "expected-secret")
     servers.push(server)
     await server.start()
@@ -81,7 +86,7 @@ describe("browser cookie bridge server", () => {
   })
 
   it("authenticates a native host and completes a chunked cookie export", async () => {
-    const pipePath = join(tmpdir(), `cmb-cookie-bridge-test-${randomUUID()}.sock`)
+    const pipePath = testPipePath()
     const secret = "test-secret"
     const server = new BrowserCookieBridgeServer(pipePath, secret)
     servers.push(server)
@@ -157,7 +162,7 @@ describe("browser cookie bridge server", () => {
   })
 
   it("settles a timed-out export even when sending cancellation fails", async () => {
-    const pipePath = join(tmpdir(), `cmb-cookie-bridge-test-${randomUUID()}.sock`)
+    const pipePath = testPipePath()
     const secret = "test-secret"
     const server = new BrowserCookieBridgeServer(pipePath, secret)
     servers.push(server)

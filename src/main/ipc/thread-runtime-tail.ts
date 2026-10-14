@@ -11,8 +11,10 @@ import {
 import { isImRemoteControlTranscriptMessageId } from "../../shared/im-remote-transcript"
 import {
   isRuntimeVisiblePersistedMessage as isBaseRuntimeVisiblePersistedMessage,
-  persistedMessageToRuntimeMessage
+  persistedMessageToRuntimeMessage,
+  type PersistedRuntimeMessageOptions
 } from "./persisted-runtime-message"
+import { ModFunctionError } from "../../shared/mods/v2/contracts"
 
 export { persistedMessageToRuntimeMessage } from "./persisted-runtime-message"
 
@@ -71,8 +73,10 @@ export async function getDurableRuntimeTail(
     excludeMessages?: readonly Pick<Message, "id" | "role">[]
     /** Set only after invoke replacement proves every predecessor settled. */
     allowBoundedCheckpointRecovery?: boolean
+    resolveFunctionRow?: PersistedRuntimeMessageOptions["resolveFunctionRow"]
   } = {}
 ): Promise<DurableRuntimeTail> {
+  const resolveFunctionRow = options.resolveFunctionRow
   const checkpoint = await getLatestCheckpoint(
     threadId,
     options.allowBoundedCheckpointRecovery === true
@@ -82,6 +86,8 @@ export async function getDurableRuntimeTail(
   }
 
   const transcript = deriveCheckpointTranscriptIndex(checkpoint)
+  if (transcript.hasInvalidFunctionRows)
+    throw new ModFunctionError("MODS_CONVERSATION_TRANSCRIPT_INVALID")
   if (transcript.visibleMessages.length === 0) {
     return {
       messages: [],
@@ -117,7 +123,7 @@ export async function getDurableRuntimeTail(
   )
   return {
     messages: persistedTail
-      .map(persistedMessageToRuntimeMessage)
+      .map((message) => persistedMessageToRuntimeMessage(message, { resolveFunctionRow }))
       .filter((message): message is BaseMessage => message !== null),
     persistedMessages: persistedTail,
     checkpointHasInterrupt: checkpointHasInterrupt(checkpoint)

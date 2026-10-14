@@ -23,6 +23,8 @@ import {
 } from "../../shared/checkpoint-transcript"
 import { isSerializedSummarizationMessage } from "../../shared/context-compaction-messages"
 import { extractVisibleReasoning } from "../../shared/model-reasoning"
+import { functionConversationTranscriptFields } from "../../shared/mods/v2/conversation-transcript"
+import { ModFunctionError } from "../../shared/mods/v2/contracts"
 import {
   normalizeTranscriptReasoning,
   TRANSCRIPT_REASONING_MAX_CHARS
@@ -32,6 +34,10 @@ import {
   CHECKPOINT_RUNTIME_PROJECTION_VERSION
 } from "./runtime-projection"
 import type { Checkpoint } from "@langchain/langgraph-checkpoint"
+import { canonicalDisplayColumnsDigest, canonicalDisplayValueDigest,
+  createCanonicalCheckpointDisplayVerifier,
+  type CanonicalCheckpointDisplaySelection } from "./function-conversation-canonical-display-worker"
+import { formatSealedThreadMessageColumns } from "../thread-message-hydration/page-reader"
 
 const EXTERNAL_MESSAGES_MARKER = "__cmb_sqljs_external_messages_v1"
 const LEGACY_TRANSCRIPT_BATCH_LIMIT = 64
@@ -707,6 +713,13 @@ function isVisibleSerializedCheckpointMessage(raw: unknown): boolean {
     objectRecord(message.additional_kwargs) ?? objectRecord(kwargs.additional_kwargs) ?? {}
   if (additionalKwargs.cmb_internal_coordinator_notification === true) return false
   const role = serializedMessageRole(message, kwargs)
+  const functionFields = functionConversationTranscriptFields(message,
+    typeof kwargs.id === "string" ? kwargs.id : typeof message.id === "string" ? message.id : undefined,
+    role)
+  if (functionFields.function_row_invalid) return true
+  if (functionFields.function_row)
+    return isRestorableConversationTranscriptMessage(role, message.content ?? kwargs.content,
+      functionFields)
   const rawContent = message.content ?? kwargs.content
   const visibleUserMessage = additionalKwargs.cmb_visible_user_message
   const effectiveContent =
@@ -1238,6 +1251,11 @@ function buildDurableLegacyCheckpointMessages(
     if (isSerializedSummarizationMessage(rawMessages[index])) continue
     const message = objectRecord(rawMessages[index])
     if (!message) continue
+    const fields = functionConversationTranscriptFields(message)
+    // This legacy path has neither the actual native destination nor a canonical admission.
+    // Rebuilding one of these rows from a UI projection would erase its recovery boundary.
+    if (fields.function_row || fields.function_row_invalid)
+      throw new ModFunctionError("MODS_CONVERSATION_MIGRATION_REQUIRED")
     const kwargs = objectRecord(message.kwargs) ?? {}
     const additionalKwargs =
       objectRecord(message.additional_kwargs) ?? objectRecord(kwargs.additional_kwargs) ?? {}
@@ -2106,7 +2124,14 @@ function boundedTransferCheckpointMessage(raw: unknown, index: number): unknown 
   const toolCallId = message.tool_call_id ?? kwargs.tool_call_id
   const name = message.name ?? kwargs.name
   const status = message.status ?? kwargs.status
+  const functionFields = functionConversationTranscriptFields(raw,
+    typeof rawId === "string" ? rawId : undefined, role)
+  const visibleUserMessage = additionalKwargs.cmb_visible_user_message
+  const content = role === "user" && !functionFields.function_row && !functionFields.function_row_invalid &&
+    typeof visibleUserMessage === "string" && visibleUserMessage.length > 0
+    ? visibleUserMessage : message.content ?? kwargs.content
   const selectedAdditionalKwargs = {
+    ...functionFields,
     ...(additionalKwargs.cmb_internal_coordinator_notification === true
       ? { cmb_internal_coordinator_notification: true }
       : {}),
@@ -2126,7 +2151,7 @@ function boundedTransferCheckpointMessage(raw: unknown, index: number): unknown 
   return {
     id: typeof rawId === "string" && rawId ? rawId : `worker-snapshot-${index}`,
     type: role === "user" ? "human" : role === "assistant" ? "ai" : role,
-    content: boundedTransferContent(message.content ?? kwargs.content),
+    content: boundedTransferContent(content),
     ...(toolCalls ? { tool_calls: toolCalls } : {}),
     ...(typeof toolCallId === "string" ? { tool_call_id: toolCallId.slice(0, 256) } : {}),
     ...(typeof name === "string" ? { name: name.slice(0, 256) } : {}),
@@ -2189,7 +2214,11 @@ class BoundedCheckpointMessageWindow implements CheckpointMessageSink {
 
   pushChronological(row: BoundedCheckpointMessageRow): void {
     if (this.isDisabled) return
-    const message = boundedTransferCheckpointMessageFromRow(row)
+    this.pushValidatedDisplay(boundedTransferCheckpointMessageFromRow(row))
+  }
+
+  pushValidatedDisplay(message: unknown): void {
+    if (this.isDisabled) return
     if (!message) return
     const messageBytes = payloadBytes(JSON.stringify(message))
     if (messageBytes > this.options.messageByteBudget) {
@@ -2211,6 +2240,26 @@ class BoundedCheckpointMessageWindow implements CheckpointMessageSink {
   }
 }
 
+// Preserve all three metadata locations, including conflicting/corrupt markers. JSON null
+// cannot survive json_patch as a value, so any malformed occurrence keeps an invalid fact.
+function functionTranscriptMetadataSql(path: string): string {
+  return `json_patch(
+    CASE WHEN json_type(message.value, '${path}.function_row') = 'object'
+      THEN json_object('function_row', json_extract(message.value, '${path}.function_row'))
+      WHEN json_type(message.value, '${path}.function_row') IS NOT NULL
+      THEN json_object('function_row_invalid', json('true')) ELSE json_object() END,
+    CASE WHEN json_type(message.value, '${path}.function_row_invalid') IS NOT NULL
+      THEN json_object('function_row_invalid', json('true')) ELSE json_object() END
+  )`
+}
+
+const FUNCTION_TRANSCRIPT_METADATA_SQL = `json_patch(
+  ${functionTranscriptMetadataSql("$")}, json_object(
+    'additional_kwargs', ${functionTranscriptMetadataSql("$.additional_kwargs")},
+    'kwargs', json_object('additional_kwargs',
+      ${functionTranscriptMetadataSql("$.kwargs.additional_kwargs")})
+  ))`
+
 const BOUNDED_CHECKPOINT_MESSAGE_SELECT = `
   CAST(message.key AS INTEGER) AS message_index,
   CASE
@@ -2219,7 +2268,7 @@ const BOUNDED_CHECKPOINT_MESSAGE_SELECT = `
   END AS raw_message,
   CASE
     WHEN length(CAST(message.value AS BLOB)) > ? THEN
-      json_object(
+      json_patch(json_object(
         'id', CASE
           WHEN json_type(message.value, '$.id') = 'array'
            AND json_type(message.value, '$.id[#-1]') = 'text'
@@ -2302,6 +2351,23 @@ const BOUNDED_CHECKPOINT_MESSAGE_SELECT = `
             THEN json('true')
           ELSE json('false')
         END,
+        'additional_kwargs', json_object(
+          'cmb_visible_user_message', substr(
+            CASE
+              WHEN json_type(message.value, '$.additional_kwargs') = 'object'
+                THEN CASE
+                  WHEN json_type(message.value, '$.additional_kwargs.cmb_visible_user_message') = 'text'
+                    THEN json_extract(message.value, '$.additional_kwargs.cmb_visible_user_message')
+                END
+              ELSE CASE
+                WHEN json_type(message.value, '$.kwargs.additional_kwargs.cmb_visible_user_message') = 'text'
+                  THEN json_extract(message.value, '$.kwargs.additional_kwargs.cmb_visible_user_message')
+              END
+            END,
+            1,
+            ${CHECKPOINT_TRANSFER_CONTENT_TEXT_LIMIT}
+          )
+        ),
         'kwargs', json_object(
           'id', substr(
             COALESCE(
@@ -2400,7 +2466,7 @@ const BOUNDED_CHECKPOINT_MESSAGE_SELECT = `
             END
           )
         )
-      )
+      ), ${FUNCTION_TRANSCRIPT_METADATA_SQL})
     ELSE NULL
   END AS fallback_message`
 
@@ -2872,7 +2938,8 @@ function readLatestBoundedCheckpointTuple(input: {
   threadId: string
   checkpointNs: string
   layout: CheckpointSchemaLayout
-  options: { messageLimit?: number; messageByteBudget?: number }
+  options: { messageLimit?: number; messageByteBudget?: number;
+    nativeDisplay?: CanonicalCheckpointDisplaySelection }
   cancellation?: Int32Array
 }): unknown | null {
   const runtime = readBoundedRuntimeCheckpoint(
@@ -2884,6 +2951,7 @@ function readLatestBoundedCheckpointTuple(input: {
   )
   if (!runtime) return null
   throwIfCancelled(input.cancellation)
+  if (input.options.nativeDisplay) return readCanonicalBoundedCheckpointTuple(input, runtime)
   const source = inspectBoundedCheckpointMessageSource(input.database, runtime.row)
   const window = new BoundedCheckpointMessageWindow(
     normalizeBoundedCheckpointTransferOptions(input.options)
@@ -2928,6 +2996,100 @@ function readLatestBoundedCheckpointTuple(input: {
   })
 }
 
+function readCanonicalBoundedCheckpointTuple(input: {
+  database: DatabaseSync; threadId: string; checkpointNs: string; layout: CheckpointSchemaLayout;
+  options: { messageLimit?: number; messageByteBudget?: number;
+    nativeDisplay?: CanonicalCheckpointDisplaySelection }; cancellation?: Int32Array
+}, runtime: {
+  row: StoredRuntimeProjectionRow
+  runtimeCheckpoint: Record<string, unknown>
+}): unknown {
+  const selection = input.options.nativeDisplay
+  if (!selection || selection.threadId !== input.threadId ||
+    selection.checkpointId !== runtime.row.checkpointId) throw new ModFunctionError("MODS_CONVERSATION_CHECKPOINT_CHANGED")
+  const fact = input.database.prepare(`SELECT
+    json_extract(CAST(checkpoint AS TEXT),'$.channel_values.cmbFunctionConversation') AS state,
+    json_extract(CAST(checkpoint AS TEXT),'$.ts') AS native_ts
+    FROM checkpoints WHERE thread_id=? AND checkpoint_ns=? AND checkpoint_id=?`)
+    .get(input.threadId, input.checkpointNs, selection.checkpointId)
+  if (!fact || typeof fact.native_ts !== "string")
+    throw new ModFunctionError("MODS_CONVERSATION_CHECKPOINT_MEMBERSHIP")
+  const storedState: unknown = typeof fact.state === "string" ? JSON.parse(fact.state) : undefined
+  // JsonPlus persists an optional undefined channel as this exact data-only sentinel.
+  // Decode only that value; malformed states still enter the original strict verifier.
+  const state =
+    storedState &&
+    typeof storedState === "object" &&
+    !Array.isArray(storedState) &&
+    Object.getPrototypeOf(storedState) === Object.prototype &&
+    Reflect.ownKeys(storedState).length === 2 &&
+    Object.getOwnPropertyDescriptor(storedState, "lc")?.value === 2 &&
+    Object.getOwnPropertyDescriptor(storedState, "type")?.value === "undefined"
+      ? undefined
+      : storedState
+  const messages = new DatabaseSync(selection.messageDatabasePath, { readOnly: true, timeout: 5000 })
+  try {
+    messages.exec("PRAGMA query_only=ON")
+    messages.exec("BEGIN")
+    const verifier = createCanonicalCheckpointDisplayVerifier(new NativeSqliteAdapter(messages), selection,
+      { checkpointId: selection.checkpointId, namespace: input.checkpointNs,
+        checkpointTs: fact.native_ts, parentCheckpointId: runtime.row.parentCheckpointId,
+        state },
+      () => throwIfCancelled(input.cancellation))
+    const cancellation = input.cancellation ?? new Int32Array(new SharedArrayBuffer(4))
+    const window = new BoundedCheckpointMessageWindow(normalizeBoundedCheckpointTransferOptions(input.options))
+    const witnesses = new WeakMap<object, import("../thread-message-hydration/protocol").CanonicalThreadDisplayWitness>()
+    const project = (row: BoundedCheckpointMessageRow): unknown => {
+        if (row.rawMessage === null) throw new ModFunctionError("MODS_CONVERSATION_CHECKPOINT_MEMBERSHIP")
+        const raw: unknown = JSON.parse(row.rawMessage)
+        const columns = verifier.project(raw, row.messageIndex)
+        if (columns === null) return null
+        if (columns === undefined) return boundedTransferCheckpointMessage(raw, row.messageIndex)
+        const formatted = formatSealedThreadMessageColumns(columns, cancellation).message
+        const display = { ...formatted, type: formatted.role === "user" ? "human" :
+          formatted.role === "assistant" ? "ai" : formatted.role,
+          additional_kwargs: { function_row: formatted.function_row,
+            ...(formatted.function_row?.isMeta ? { isMeta: true } : {}) },
+          __cmb_checkpoint_raw_index: row.messageIndex }
+        witnesses.set(display, { messageId: formatted.id,
+          columnsDigest: canonicalDisplayColumnsDigest(columns), display: {
+            kind: "checkpoint", digest: canonicalDisplayValueDigest(display), rawIndex: row.messageIndex
+          } })
+        return display
+      }
+    const source = inspectBoundedCheckpointMessageSource(input.database, runtime.row, true)
+    let count = source.kind === "external" ? 0 : source.messageCount
+    // The original output window stays bounded. Only the native iterator sees the complete
+    // source; the verifier hashes one safe message at a time and never allocates a full array.
+    const sink: CheckpointMessageSink = { isDisabled: false, exact: true,
+      scanMessageLimit: Number.MAX_SAFE_INTEGER, rawMessageByteLimit: Number.MAX_SAFE_INTEGER,
+      pushChronological(row) { window.pushValidatedDisplay(project(row)) } }
+    if (source.kind === "inline") readInlineBoundedCheckpointMessages({ database: input.database,
+      row: runtime.row, messageCount: count, window: sink, cancellation: input.cancellation })
+    else if (source.kind === "external") {
+      const external = readExternalMessageSnapshotSegments({ database: input.database, row: runtime.row,
+        markerMessageCount: source.markerMessageCount, scanMessageLimit: sink.scanMessageLimit,
+        cancellation: input.cancellation })
+      count = external.messageCount
+      readExternalBoundedCheckpointMessages({ database: input.database, row: runtime.row,
+        segments: external.segments, window: sink, cancellation: input.cancellation })
+    }
+    const membership = verifier.finish(count)
+    throwIfCancelled(input.cancellation)
+    messages.exec("COMMIT")
+    const tuple = checkpointTupleFromRaw({ row: runtime.row,
+      checkpoint: boundedCheckpointTransferFromRuntime({ runtimeCheckpoint: runtime.runtimeCheckpoint,
+        messages: window.messages, originalMessageCount: count }) })
+    if (!tuple || typeof tuple !== "object") throw Error("MODS_CONVERSATION_DISPLAY_SOURCE_INVALID")
+    return { ...tuple, __cmb_canonical_display_membership: membership ?? null,
+      __cmb_canonical_display_omissions: verifier.omissions(),
+      __cmb_canonical_display_witnesses: window.messages.flatMap(message => {
+      const witness = message && typeof message === "object" ? witnesses.get(message) : undefined
+      return witness ? [witness] : []
+    }) }
+  } finally { messages.close() }
+}
+
 /**
  * Renderer callers pass a message window, so the worker reads a bounded SQLite
  * tail without reconstructing the complete transcript. Cold internal callers
@@ -2941,6 +3103,7 @@ export function readLatestCheckpointTuple(
     messageLimit?: number
     messageByteBudget?: number
     cancellationBuffer?: SharedArrayBuffer
+    nativeDisplay?: CanonicalCheckpointDisplaySelection
   } = {}
 ): unknown | null {
   const cancellation = options.cancellationBuffer
@@ -2967,6 +3130,7 @@ export function readLatestCheckpointTuple(
   database.exec("BEGIN")
   try {
     const boundedTransfer =
+      options.nativeDisplay !== undefined ||
       options.messageLimit !== undefined || options.messageByteBudget !== undefined
     if (boundedTransfer) {
       const tuple = readLatestBoundedCheckpointTuple({

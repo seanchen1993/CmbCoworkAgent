@@ -82,6 +82,28 @@ it("runs operation rewrites and publication before either sink, retaining origin
   expect(debugLog.mock.calls.map((row) => row[1])).toEqual(["slow [redacted]", "hidden [redacted]"])
 })
 
+it("protects the full long real guest log after its hook and before either bounded sink", async () => {
+  const protectedInputs: string[] = []
+  const { session, debugLog } = await fixture(`
+    on("session.start", ($, e, next) => { $.ui.log("x".repeat(30000)); return next(e); });
+    on("ui.log", ($, e, next) => {
+      if(e.text.length!==30000) throw Error("original log was truncated");
+      return next({...e,text:"secret:"+e.text+":tail"});
+    });
+  `, async value => {
+    if (value && typeof value === "object" && !Array.isArray(value) &&
+      typeof value.text === "string") {
+      protectedInputs.push(value.text)
+      return { ...value, text: value.text.replace("secret:", "[redacted]:") }
+    }
+    return value
+  })
+  expect(protectedInputs[0]).toBe(`secret:${"x".repeat(30000)}:tail`)
+  const expected = `[redacted]:${"x".repeat(30000)}:tail`.slice(0, 10000)
+  expect((await session.logSnapshot()).map(row => row.text)).toEqual([expected])
+  expect(debugLog.mock.calls).toEqual([["logging", expected]])
+})
+
 it("denied logs reach neither transcript nor debug", async () => {
   const { session, debugLog } = await fixture(`
     on("session.start", async ($, e, next) => {
@@ -183,3 +205,50 @@ it("parent cancellation discards an already settled nested log waiting behind it
     settle.mockRestore()
   }
 })
+
+it.each(["cancel", "revoke"] as const)(
+  "does not send a long log to either sink after %s during real publication", async ending => {
+    let release!: () => void
+    let entered!: () => void
+    let completed = false
+    const started = new Promise<void>(resolve => { entered = resolve })
+    const pending = new Promise<void>(resolve => { release = resolve })
+    const settle = vi.spyOn(FunctionUiLog.prototype, "settle")
+    const controller = new AbortController()
+    let run: Promise<unknown> | undefined
+    try {
+      const f = await fixture(`
+        on("session.start", async ($, e, next) => {
+          await $.command.register({name:"long-log",description:"test"}); return next(e);
+        });
+        on("command.run", {command:"long-log"}, ($) => {
+          $.ui.log("x".repeat(30000)); return {text:"done"};
+        });
+      `, async value => {
+        if (value && typeof value === "object" && !Array.isArray(value) &&
+          typeof value.text === "string" && value.text.length === 30000) {
+          entered()
+          await pending
+          completed = true
+        }
+        return value
+      })
+      run = f.session.run("long-log", "", controller.signal)
+      const settled = Promise.allSettled([run])
+      await started
+      if (ending === "cancel") controller.abort(Error("cancel long log"))
+      else f.revoke()
+      release()
+      await settled
+      await f.session.close()
+      expect(completed).toBe(true)
+      expect(settle.mock.calls.filter(call => call[1] !== undefined)).toEqual([])
+      expect(f.debugLog).not.toHaveBeenCalled()
+    } finally {
+      controller.abort()
+      release?.()
+      if (run) await Promise.allSettled([run])
+      settle.mockRestore()
+    }
+  }
+)

@@ -1,0 +1,73 @@
+{
+  "name": "langchain",
+  "version": "1.2.37",
+  "upstreamTarball": "https://registry.npmjs.org/langchain/-/langchain-1.2.37.tgz",
+  "upstreamIntegrity": "sha512-zjd0TpMfX8V440XJVavRmzLSvojVv5WZ7M9LWNtgYo0MDFTiWlCdnFNdHo1sZlNoI+8aSdLsVl/WXKtucyhwEA==",
+  "upstreamSha1": "58a7c4ad408cd478b606f0d7f6ef802c00bf6fa9",
+  "license": "MIT",
+  "licenseSha256": "4ec67e4ca6e6721dba849b2ca82261597c86a61ee214bbf21416006b7b2d0478",
+  "baseManifestSha256": "2814048385a293643f074e1ccb2acd7afb5a42c0a28fa875f4007aee644c11c0",
+  "basePatchSha256": "0155242ca1c6b44e793f19c86f1e71cb56c43156ccda05dcac733e1a481378f7",
+  "patchSha256": "7de6a1bf204ec01a3d0d35d4e320cc8de01db4ce45b8d8d299ba8f1437e08529",
+  "files": [
+    {
+      "path": "dist/agents/ReactAgent.js",
+      "beforeSha256": "ceb92e21943ce13e4454db3100326c093b2f5ffef874b4cdcafdb58ce4105e82",
+      "afterSha256": "33dd3ca465d661d9c41e1d282f6fb35fc80ca5b28327ce0a54c9657b5eca801f"
+    },
+    {
+      "path": "dist/agents/ReactAgent.cjs",
+      "beforeSha256": "2f4d539b7a1114683ff561d7cac64e33da6f4daf9e1ad4cad8c512a834fa8e90",
+      "afterSha256": "b1c441b1e9fd631a8a3cb2129eaafb936886f662defbf874e5d42090f9b381a4"
+    },
+    {
+      "path": "dist/agents/nodes/ToolNode.js",
+      "beforeSha256": "85848731a012726bc178f922f81de898de43d66fdea8615b64dc0e518b48fc4e",
+      "afterSha256": "2dcf6df96f2c91539b5d7edfc25c0930dfe60158d9980bc816574f21469ba73b"
+    },
+    {
+      "path": "dist/agents/nodes/ToolNode.cjs",
+      "beforeSha256": "44759b3f3d4608e0509563dfba6448ebbccba4fe83e7d72aae7aae47fafd9d84",
+      "afterSha256": "478597b965b9e899b3958c0d9b484cd471cba7a26a96958d0278297ad2371d32"
+    },
+    {
+      "path": "package.json",
+      "beforeSha256": "8591a5177e7f519623d66100b612e1286cfb9448a90a551d958e9a4b0268dea6",
+      "afterSha256": "070d2386dc6519385389adf17dcdce5f0e703e320cc6330927b03007045c6ec8"
+    },
+    {
+      "path": "dist/native-tool-invoke-origin.js",
+      "beforeSha256": null,
+      "afterSha256": "330fab59a921ba9582a569783c3222a8886dc41d93d807a87f65adbeaa9b3667"
+    },
+    {
+      "path": "dist/native-tool-invoke-origin.cjs",
+      "beforeSha256": null,
+      "afterSha256": "b3831e7748d2155e285427536f7e975b1962f9bfb49fa2244d2488cad8cd8fe1"
+    },
+    {
+      "path": "dist/native-tool-invoke-origin.d.ts",
+      "beforeSha256": null,
+      "afterSha256": "d8e04d4fe83df54906b5360c0b166299ffb40822354be897c05351b1a0dac32a"
+    },
+    {
+      "path": "dist/native-tool-invoke-origin.d.cts",
+      "beforeSha256": null,
+      "afterSha256": "d8e04d4fe83df54906b5360c0b166299ffb40822354be897c05351b1a0dac32a"
+    }
+  ],
+  "templates": [
+    {
+      "path": "langchain-native-tool-invoke-agent.js.inc",
+      "sha256": "641f0f9012d83358e8c40e94d64731b98f3c9f28d2ac03d168adaa284cc0bded"
+    },
+    {
+      "path": "langchain-native-tool-invoke-node.js.inc",
+      "sha256": "6f600ce1b270c582a1b0bb65a5903e8905f8d87fccf7556aa325635671a9f365"
+    },
+    {
+      "path": "langchain-native-tool-invoke-origin.d.ts",
+      "sha256": "d8e04d4fe83df54906b5360c0b166299ffb40822354be897c05351b1a0dac32a"
+    }
+  ]
+}

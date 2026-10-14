@@ -98,6 +98,30 @@ it("records matcher absence from the actual QuickJS registration closure", async
   }
 })
 
+it("retains the opted-in own meter's utility request beyond the legacy eight-second IPC wall", async () => {
+  vi.useFakeTimers({ toFake: ["setInterval", "clearInterval", "performance"] })
+  const f = await fixture([{ id: "0", pattern: "command.run", hasCatch: false }])
+  f.child.postMessage = (message) => { f.messages.push(message) }
+  const heartbeat = setInterval(() => {
+    f.child.emit("message", { type: "heartbeat", rss: 0, runtimes: 1, frames: 1, replies: 0 })
+  }, 200)
+  try {
+    const pending = f.guest.invoke("0", {}, async () => ({}), {
+      event: "command.run", origin: { plugin: "engine", tier: "core" },
+      plugin: { name: "probe", root: "/probe" }, capabilities: [], ownBudgetMs: 10000
+    })
+    await vi.advanceTimersByTimeAsync(9000)
+    expect(f.client.stats.pending).toBe(1)
+    const message = f.messages.findLast((row) => row.type === "invoke")!
+    f.child.emit("message", { type: "result", id: message.id, runtimeId: message.runtimeId,
+      value: { value: "actual" } })
+    expect(await pending).toEqual({ value: "actual" })
+    expect(f.client.stats.pending).toBe(0)
+  } finally {
+    clearInterval(heartbeat)
+  }
+})
+
 it("skips only provably unconditional matcher RPCs and does not trust later metadata mutation", async () => {
   const f = await fixture([
     { id: "0", pattern: "turn.step", hasCatch: false, hasMatcher: false },

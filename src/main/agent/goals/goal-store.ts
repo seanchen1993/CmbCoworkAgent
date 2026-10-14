@@ -1,6 +1,7 @@
 import { v4 as uuid } from "uuid"
 import { RUNTIME_RESTORED_GOAL_PAUSE_NOTICE } from "../../../shared/goal-events"
 import { getDb, saveToDisk } from "../../db"
+import { notifyGoalStateChanged } from "./state-events"
 import {
   EMPTY_GOAL_LEDGER,
   RUNTIME_RESTORED_ACTIVE_GOAL_REASON,
@@ -170,6 +171,7 @@ export class SqlGoalStore implements GoalStore {
       )
     }
     saveToDisk()
+    for (const row of activeRows) notifyGoalStateChanged(String(row[0]))
     return activeRows.length
   }
 
@@ -241,12 +243,14 @@ export class SqlGoalStore implements GoalStore {
       ]
     )
     saveToDisk()
+    notifyGoalStateChanged(goal.threadId)
     return this.get(goal.threadId) ?? goal
   }
 
   delete(threadId: string): void {
     getDb().run("DELETE FROM thread_goals WHERE thread_id = ?", [threadId])
     saveToDisk()
+    notifyGoalStateChanged(threadId)
   }
 }
 

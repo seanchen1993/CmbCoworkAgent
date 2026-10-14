@@ -70,15 +70,21 @@ function customEvents(events: SdkEvent[], type: string): Record<string, unknown>
 }
 
 function messageEvents(events: SdkEvent[]): SdkEvent[] {
-  return events.filter((event) => event.event === "messages" || event.event === "values")
+  return events.filter((event) => event.event === "messages" || event.event === "values" ||
+    (event.event === "custom" && asRecord(event.data).type === "coordinator_ai_snapshot_message"))
 }
 
 function firstMessage(events: SdkEvent[]): Record<string, unknown> {
   const messageEvent = events.find((event) => event.event === "messages")
-  assert(messageEvent, "expected message event")
-  const data = messageEvent.data as Array<Record<string, unknown>>
-  assert(Array.isArray(data) && data[0], "expected message data")
-  return data[0]
+  const snapshots = customEvents(events, "coordinator_ai_snapshot_message")
+    .map(event => asRecord(event.assistantMessage))
+  const data = messageEvent?.data as Array<Record<string, unknown>> | undefined
+  const first = data?.[0] ?? snapshots[0]
+  assert(first, "expected message delta or complete assistant snapshot")
+  // Tool arguments are complete snapshots; mirror the production SDK adapter's
+  // replacement boundary instead of treating those objects as another delta.
+  return snapshots.filter(snapshot => snapshot.id === first.id)
+    .reduce((message, snapshot) => ({ ...message, ...snapshot }), first)
 }
 
 function resetWorkerFocusStore(): void {
@@ -4912,9 +4918,11 @@ async function testReadWorkerStateIsRemovedFromMixedToolCalls(): Promise<void> {
   )
 
   const messages = messageEvents(events)
-  assert(messages.length === 1, "mixed visible tool calls should still render one message")
-  const messageData = messages[0]?.data as Array<{ tool_calls?: Array<{ name?: string }> }>
-  const toolCalls = messageData?.[0]?.tool_calls ?? []
+  const renderedIds = new Set(messages.map(event => event.event === "custom"
+    ? asRecord(asRecord(event.data).assistantMessage).id
+    : (event.data as Array<Record<string, unknown>>)[0].id))
+  assert(renderedIds.size === 1, "mixed visible tool calls should still render one message")
+  const toolCalls = firstMessage(events).tool_calls as Array<{ name?: string }>
   assert(toolCalls.length === 1, "quiet read_worker_state should be stripped from mixed calls")
   assert(toolCalls[0]?.name === "start_worker", "visible coordinator tool should remain")
 
@@ -5083,7 +5091,7 @@ async function testCoordinatorValuesModeDoesNotDuplicateRepeatedSnapshots(): Pro
   )
   const repeated = convertCoordinator(transport, snapshot)
   assert(
-    messageEvents(repeated).length === 0,
+    repeated.filter(event => event.event === "messages" || event.event === "values").length === 0,
     "repeated complete tools must not enter SDK delta concatenation"
   )
   const snapshots = customEvents(repeated, "coordinator_ai_snapshot_message")
@@ -5387,6 +5395,11 @@ async function testMainReasoningFlushesBeforeToolBoundary(): Promise<void> {
       return asRecord(event.data[0]).reasoning === "inspect files"
     })
     const toolIndex = events.findIndex((event) => {
+      if (event.event === "custom") {
+        const data = asRecord(event.data)
+        return data.type === "coordinator_ai_snapshot_message" &&
+          Array.isArray(asRecord(data.assistantMessage).tool_calls)
+      }
       if (event.event !== "messages" || !Array.isArray(event.data)) return false
       return Array.isArray(asRecord(event.data[0]).tool_calls)
     })

@@ -1,4 +1,8 @@
-import { lazy, Suspense, useEffect, useState } from "react"
+import { isDevelopmentThreadMetadata } from "../../../../shared/mods/development-scope"
+import { AssistantWorkbench } from "./AssistantWorkbench"
+import { SparksTour, type SparksTourHandle } from "./SparksTour"
+import { useSettingsComposerReturn } from "./settings-return-focus"
+import { lazy, Suspense, useEffect, useRef, useState, type ReactNode } from "react"
 import {
   ArrowLeft,
   Brain,
@@ -26,6 +30,13 @@ import {
 import { Button } from "@/components/ui/button"
 import { useAppStore } from "@/lib/store"
 import { cn } from "@/lib/utils"
+import {
+  createPracticeIntent,
+  sameSimpleAuthoringScope,
+  type SimpleAuthoringPracticeIntent
+} from "@/lib/simple-authoring-intent"
+import { openBuiltinNavigation } from "@/lib/builtin-navigation"
+import { consumePluginSettings, usePluginSettingsRequest } from "@/lib/plugin-settings-intent"
 
 const SkillsPanel = lazy(() => import("./SkillsPanel").then((m) => ({ default: m.SkillsPanel })))
 const GeneralPanel = lazy(() => import("./GeneralPanel").then((m) => ({ default: m.GeneralPanel })))
@@ -40,6 +51,11 @@ const HeartbeatPanel = lazy(() =>
 )
 const PluginsPanel = lazy(() => import("./PluginsPanel").then((m) => ({ default: m.PluginsPanel })))
 const ModsPanel = lazy(() => import("./ModsPanel").then((m) => ({ default: m.ModsPanel })))
+const ClawPanel = lazy(() => import("./ClawPanel").then((m) => ({ default: m.ClawPanel })))
+const FlowsPanel = lazy(() => import("./FlowsPanel").then((m) => ({ default: m.FlowsPanel })))
+const EvaluationPanel = lazy(() =>
+  import("./EvaluationPanel").then((m) => ({ default: m.EvaluationPanel }))
+)
 const SandboxPanel = lazy(() => import("./SandboxPanel").then((m) => ({ default: m.SandboxPanel })))
 const EvolutionPanel = lazy(() =>
   import("./EvolutionPanel").then((m) => ({ default: m.EvolutionPanel }))
@@ -61,12 +77,15 @@ const ExpertTeamPanel = lazy(() =>
 )
 
 type CustomizeTab =
+  | "assistant"
   | "general"
   | "appearance"
   | "skills"
   | "connectors"
   | "plugins"
   | "mods"
+  | "flows"
+  | "claw"
   | "heartbeat"
   | "memory"
   | "taskMmd"
@@ -79,8 +98,9 @@ type CustomizeTab =
   | "lsp"
   | "codeExecTools"
   | "expertTeam"
+  | "evaluation"
 
-type MenuGroupId = "basic" | "advanced" | "profile"
+type MenuGroupId = "basic" | "advanced" | "profile" | "creator"
 
 type MenuItem = {
   tab: CustomizeTab
@@ -97,6 +117,17 @@ type MenuGroup = {
 
 const MENU_GROUPS: MenuGroup[] = [
   {
+    id: "creator",
+    label: "自定义助手",
+    items: [
+      { tab: "assistant", label: "总览", icon: Settings2 },
+      { tab: "mods", label: "添加功能", icon: Webhook },
+      { tab: "claw", label: "助手组合", icon: Sparkles },
+      { tab: "flows", label: "按步骤执行", icon: GitBranch },
+      { tab: "evaluation", label: "效果测试", icon: Code2 }
+    ]
+  },
+  {
     id: "basic",
     label: "基础功能",
     items: [
@@ -105,7 +136,6 @@ const MENU_GROUPS: MenuGroup[] = [
       { tab: "skills", label: "技能", icon: Sparkles },
       { tab: "connectors", label: "MCP 连接器", icon: Plug },
       { tab: "plugins", label: "插件", icon: Puzzle },
-      { tab: "mods", label: "Function Mods", icon: Webhook },
       { tab: "sandbox", label: "沙盒环境", icon: Shield }
     ]
   },
@@ -157,7 +187,54 @@ function CustomizePanelFallback(): React.JSX.Element {
   )
 }
 
+/** Keep only visited authoring editors alive while navigating within this settings scope. */
+function RetainedEditor({
+  active,
+  children,
+  scroll = false
+}: {
+  active: boolean
+  children: ReactNode
+  scroll?: boolean
+}): React.JSX.Element {
+  const [visited, setVisited] = useState(active)
+  if (active && !visited) setVisited(true)
+  return (
+    <div
+      hidden={!active}
+      inert={!active}
+      className={cn(
+        "min-w-0 min-h-0 flex-1",
+        active ? "flex" : "hidden",
+        scroll && "overflow-y-auto"
+      )}
+    >
+      {(active || visited) && <Suspense fallback={<CustomizePanelFallback />}>{children}</Suspense>}
+    </div>
+  )
+}
+
 export function CustomizeView(): React.JSX.Element {
+  const [tourOpen, setTourOpen] = useState(false)
+  const tourRef = useRef<SparksTourHandle>(null)
+  const [tourModsSection, setTourModsSection] = useState<"examples" | "create" | "installed">(
+    "examples"
+  )
+  const [modsNavigation, setModsNavigation] = useState<{
+    id: number
+    scope: string
+    section: "examples" | "create"
+    practice?: SimpleAuthoringPracticeIntent
+  } | null>(null)
+  const [practiceIntent, setPracticeIntent] = useState<SimpleAuthoringPracticeIntent>()
+  const requestComposerFocus = useSettingsComposerReturn()
+  const mounted = useRef(false)
+  useEffect(() => {
+    mounted.current = true
+    return () => {
+      mounted.current = false
+    }
+  }, [])
   const {
     setShowCustomizeView,
     customizeInitialTab,
@@ -166,16 +243,55 @@ export function CustomizeView(): React.JSX.Element {
     currentThreadId,
     threads
   } = useAppStore()
+  const [evaluationCandidate, setEvaluationCandidate] = useState<{
+    threadId: string | null
+    workspace: string | null
+    digest: string
+  } | null>(null)
   const [activeTab, setActiveTab] = useState<CustomizeTab>(
     customizeInitialTab === "commitPolicy"
       ? "skills"
       : (customizeInitialTab as CustomizeTab) || "general"
   )
-  const [expandedGroups, setExpandedGroups] = useState<Record<MenuGroupId, boolean>>({
-    basic: true,
-    advanced: true,
-    profile: true
-  })
+  const pluginSettingsRequestId = usePluginSettingsRequest()?.id
+  const pluginNavigationGeneration = useRef(0)
+  useEffect(() => {
+    const navigation = pluginNavigationGeneration
+    const generation = ++navigation.current
+    if (!pluginSettingsRequestId) return
+    let cancelled = false
+    queueMicrotask(() => {
+      if (!cancelled) setActiveTab("plugins")
+    })
+    return () => {
+      cancelled = true
+      // Cancel only this view's request when it closes before the catalog resolves.
+      // A replacement effect (including StrictMode replay) keeps its own request.
+      queueMicrotask(() => {
+        if (navigation.current === generation) {
+          consumePluginSettings(pluginSettingsRequestId)
+        }
+      })
+    }
+  }, [pluginSettingsRequestId])
+  const [expandedGroups, setExpandedGroups] = useState<Record<MenuGroupId, boolean>>(() => ({
+    creator: true,
+    basic: !MENU_GROUPS[0].items.some((item) => item.tab === activeTab),
+    advanced: MENU_GROUPS[2].items.some((item) => item.tab === activeTab),
+    profile: MENU_GROUPS[3].items.some((item) => item.tab === activeTab)
+  }))
+  useEffect(() => {
+    let cancelled = false
+    const group = MENU_GROUPS.find((entry) => entry.items.some((item) => item.tab === activeTab))
+    queueMicrotask(() => {
+      if (group && !cancelled) {
+        setExpandedGroups((groups) => (groups[group.id] ? groups : { ...groups, [group.id]: true }))
+      }
+    })
+    return () => {
+      cancelled = true
+    }
+  }, [activeTab])
   const currentThread = currentThreadId
     ? threads.find((thread) => thread.thread_id === currentThreadId)
     : null
@@ -183,6 +299,14 @@ export function CustomizeView(): React.JSX.Element {
     typeof currentThread?.metadata?.workspacePath === "string"
       ? currentThread.metadata.workspacePath
       : null
+  const navigationScope = JSON.stringify([currentThreadId, currentWorkspacePath])
+  const initialSectionRequest = useRef<string | null>(null)
+  const [previousNavigationScope, setPreviousNavigationScope] = useState(navigationScope)
+  if (previousNavigationScope !== navigationScope) {
+    setPreviousNavigationScope(navigationScope)
+    setPracticeIntent(undefined)
+    setModsNavigation(null)
+  }
 
   useEffect(() => {
     if (!customizeInitialTab) return
@@ -199,6 +323,34 @@ export function CustomizeView(): React.JSX.Element {
     }
   }, [customizeInitialTab])
 
+  useEffect(() => {
+    const section =
+      customizeInitialTab === "mods" &&
+      (customizeInitialSection === "create" || customizeInitialSection === "examples")
+        ? customizeInitialSection
+        : null
+    const request = section ? JSON.stringify([customizeInitialTab, section]) : null
+    if (initialSectionRequest.current === request) return
+    if (!section) {
+      initialSectionRequest.current = null
+      return
+    }
+    let cancelled = false
+    queueMicrotask(() => {
+      if (cancelled) return
+      initialSectionRequest.current = request
+      tourRef.current?.dismiss()
+      setModsNavigation((previous) => ({
+        id: (previous?.id ?? 0) + 1,
+        scope: navigationScope,
+        section
+      }))
+    })
+    return () => {
+      cancelled = true
+    }
+  }, [customizeInitialTab, customizeInitialSection, navigationScope])
+
   const toggleGroup = (groupId: MenuGroupId): void => {
     setExpandedGroups((groups) => ({ ...groups, [groupId]: !groups[groupId] }))
   }
@@ -210,11 +362,15 @@ export function CustomizeView(): React.JSX.Element {
     return (
       <button
         key={item.tab}
+        aria-current={isActive ? "page" : undefined}
         className={cn(
           "cursor-pointer flex items-center gap-3 w-full rounded-md px-2.5 py-1.5 text-sm transition-colors",
           isActive ? "bg-muted font-medium" : "text-muted-foreground hover:bg-muted/50"
         )}
-        onClick={() => setActiveTab(item.tab)}
+        onClick={() => {
+          tourRef.current?.dismiss()
+          setActiveTab(item.tab)
+        }}
       >
         <Icon className="size-3 shrink-0" />
         <span className="min-w-0 flex-1 truncate whitespace-nowrap text-left">{item.label}</span>
@@ -226,8 +382,8 @@ export function CustomizeView(): React.JSX.Element {
   }
 
   return (
-    <div className="flex h-full overflow-hidden bg-background">
-      <div className="w-[200px] shrink-0 border-r border-border flex flex-col">
+    <div className="flex h-full flex-col overflow-hidden bg-background sm:flex-row">
+      <div className="flex max-h-[35%] shrink-0 flex-col border-b border-border sm:max-h-none sm:w-[200px] sm:border-b-0 sm:border-r">
         <div className="p-3 flex items-center gap-2">
           <Button
             variant="ghost"
@@ -274,53 +430,190 @@ export function CustomizeView(): React.JSX.Element {
         </nav>
       </div>
 
-      <Suspense fallback={<CustomizePanelFallback />}>
-        {activeTab === "general" ? (
-          <GeneralPanel targetSection={customizeInitialSection} />
-        ) : activeTab === "appearance" ? (
-          <AppearancePanel />
-        ) : activeTab === "skills" ? (
-          <SkillsPanel />
-        ) : activeTab === "connectors" ? (
-          <McpPanel />
-        ) : activeTab === "plugins" ? (
-          <div className="flex flex-1 min-w-0 min-h-0 overflow-hidden">
-            <PluginsPanel />
-          </div>
-        ) : activeTab === "mods" ? (
-          <div className="flex flex-1 min-w-0 min-h-0 overflow-y-auto">
-            <ModsPanel threadId={currentThreadId} />
-          </div>
-        ) : activeTab === "heartbeat" ? (
-          <HeartbeatPanel />
-        ) : activeTab === "memory" ? (
-          <MemoryPanel workspacePath={currentWorkspacePath} />
-        ) : activeTab === "taskMmd" ? (
-          <TaskMmdPanel currentThreadId={currentThreadId} threads={threads} />
-        ) : activeTab === "evolution" ? (
-          <EvolutionPanel />
-        ) : activeTab === "robot" ? (
-          <BuiltinRobotPanel />
-        ) : activeTab === "lsp" ? (
-          <LspPanel threadId={currentThreadId} />
-        ) : activeTab === "sandbox" ? (
-          <SandboxPanel />
-        ) : activeTab === "userinfo" ? (
-          <UserInfoPanel />
-        ) : activeTab === "hooks" ? (
-          <div className="flex flex-1 overflow-hidden">
-            <HooksPanel />
-          </div>
-        ) : activeTab === "codeExecTools" ? (
-          <div className="flex flex-1 overflow-hidden">
-            <CodeExecToolsPanel />
-          </div>
-        ) : activeTab === "pet" ? (
-          <PetPanel />
-        ) : activeTab === "expertTeam" ? (
-          <ExpertTeamPanel />
-        ) : null}
-      </Suspense>
+      <div className="relative flex min-w-0 min-h-0 flex-1 flex-col">
+        <SparksTour
+          ref={tourRef}
+          onOpenChange={setTourOpen}
+          activePage={activeTab}
+          activeSection={tourModsSection}
+          visible={MENU_GROUPS[0].items.some((item) => item.tab === activeTab)}
+          onPractice={(task, suggestedName) => {
+            if (!currentThreadId) {
+              setActiveTab(task === "create" ? "mods" : task === "combine" ? "claw" : "assistant")
+              return
+            }
+            const intent = createPracticeIntent(task, {
+              threadId: currentThreadId,
+              workspace: currentWorkspacePath
+            })
+            if (suggestedName) intent.suggestedName = suggestedName
+            if (task === "inspect") {
+              openBuiltinNavigation("diff", intent.scope)
+            } else if (task === "create") {
+              setActiveTab("mods")
+              setModsNavigation((previous) => ({
+                id: (previous?.id ?? 0) + 1,
+                scope: JSON.stringify([currentThreadId, currentWorkspacePath]),
+                section: "create",
+                practice: intent
+              }))
+            } else {
+              setPracticeIntent(intent)
+              setActiveTab("claw")
+            }
+          }}
+          onNavigate={(page, section) => {
+            setActiveTab(page)
+            if (page === "mods" && section) {
+              setModsNavigation((previous) => ({
+                id: (previous?.id ?? 0) + 1,
+                scope: JSON.stringify([currentThreadId, currentWorkspacePath]),
+                section
+              }))
+            }
+          }}
+        />
+        <div
+          className="flex min-w-0 min-h-0 flex-1"
+          inert={tourOpen}
+          aria-hidden={tourOpen || undefined}
+        >
+          {activeTab === "assistant" && <AssistantWorkbench onNavigate={setActiveTab} />}
+          <RetainedEditor
+            key={JSON.stringify(["mods", currentThreadId, currentWorkspacePath])}
+            active={activeTab === "mods"}
+            scroll
+          >
+            <ModsPanel
+              onSectionChange={setTourModsSection}
+              active={activeTab === "mods"}
+              navigationRequest={
+                modsNavigation?.scope === JSON.stringify([currentThreadId, currentWorkspacePath])
+                  ? modsNavigation
+                  : undefined
+              }
+              developmentAllowed={isDevelopmentThreadMetadata(currentThread?.metadata)}
+              threadId={currentThreadId}
+              workspaceHint={currentWorkspacePath}
+              onReturnToChat={() => {
+                requestComposerFocus()
+                setShowCustomizeView(false)
+              }}
+              onOpenReuseThread={async (id) => {
+                await useAppStore.getState().loadThreads()
+                const state = useAppStore.getState()
+                const workspace =
+                  state.threads.find((thread) => thread.thread_id === state.currentThreadId)
+                    ?.metadata?.workspacePath ?? null
+                if (
+                  !mounted.current ||
+                  !state.showCustomizeView ||
+                  state.currentThreadId !== currentThreadId ||
+                  workspace !== currentWorkspacePath
+                )
+                  return
+                requestComposerFocus()
+                // selectThread synchronously selects the thread and closes this overlay.
+                // Do not close again after its promise settles: another settings session may open.
+                await state.selectThread(id)
+              }}
+            />
+          </RetainedEditor>
+          <RetainedEditor
+            key={JSON.stringify(["claw", currentThreadId, currentWorkspacePath])}
+            active={activeTab === "claw"}
+          >
+            <ClawPanel
+              threadId={currentThreadId}
+              workspaceHint={currentWorkspacePath}
+              practiceIntent={
+                practiceIntent &&
+                sameSimpleAuthoringScope(practiceIntent.scope, {
+                  threadId: currentThreadId,
+                  workspace: currentWorkspacePath
+                })
+                  ? practiceIntent
+                  : undefined
+              }
+            />
+          </RetainedEditor>
+          <RetainedEditor
+            key={JSON.stringify(["flows", currentThreadId, currentWorkspacePath])}
+            active={activeTab === "flows"}
+            scroll
+          >
+            <FlowsPanel
+              threadId={currentThreadId}
+              workspaceHint={currentWorkspacePath}
+              onOpenMods={() => setActiveTab("mods")}
+              initialDigest={
+                evaluationCandidate?.threadId === currentThreadId &&
+                evaluationCandidate?.workspace === currentWorkspacePath
+                  ? evaluationCandidate.digest
+                  : undefined
+              }
+            />
+          </RetainedEditor>
+          <Suspense fallback={<CustomizePanelFallback />}>
+            {activeTab === "general" ? (
+              <GeneralPanel targetSection={customizeInitialSection} />
+            ) : activeTab === "appearance" ? (
+              <AppearancePanel />
+            ) : activeTab === "skills" ? (
+              <SkillsPanel />
+            ) : activeTab === "connectors" ? (
+              <McpPanel />
+            ) : activeTab === "plugins" ? (
+              <div className="flex flex-1 min-w-0 min-h-0 overflow-hidden">
+                <PluginsPanel />
+              </div>
+            ) : activeTab === "heartbeat" ? (
+              <HeartbeatPanel />
+            ) : activeTab === "memory" ? (
+              <MemoryPanel workspacePath={currentWorkspacePath} />
+            ) : activeTab === "taskMmd" ? (
+              <TaskMmdPanel currentThreadId={currentThreadId} threads={threads} />
+            ) : activeTab === "evolution" ? (
+              <EvolutionPanel />
+            ) : activeTab === "robot" ? (
+              <BuiltinRobotPanel />
+            ) : activeTab === "lsp" ? (
+              <LspPanel threadId={currentThreadId} />
+            ) : activeTab === "sandbox" ? (
+              <SandboxPanel />
+            ) : activeTab === "userinfo" ? (
+              <UserInfoPanel />
+            ) : activeTab === "hooks" ? (
+              <div className="flex flex-1 overflow-hidden">
+                <HooksPanel />
+              </div>
+            ) : activeTab === "codeExecTools" ? (
+              <div className="flex flex-1 overflow-hidden">
+                <CodeExecToolsPanel />
+              </div>
+            ) : activeTab === "pet" ? (
+              <PetPanel />
+            ) : activeTab === "expertTeam" ? (
+              <ExpertTeamPanel />
+            ) : activeTab === "evaluation" ? (
+              <EvaluationPanel
+                threadId={currentThreadId}
+                workspace={currentWorkspacePath}
+                api={window.api.mods.evaluation}
+                flowApi={window.api.mods}
+                onOpenCandidate={(digest) => {
+                  setEvaluationCandidate({
+                    threadId: currentThreadId,
+                    workspace: currentWorkspacePath,
+                    digest
+                  })
+                  setActiveTab("flows")
+                }}
+              />
+            ) : null}
+          </Suspense>
+        </div>
+      </div>
     </div>
   )
 }

@@ -1,3 +1,4 @@
+import { openModsResults } from "./mods-sidebar-navigation"
 import assert from "node:assert/strict"
 import { mkdirSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
@@ -82,6 +83,7 @@ export async function verifyImperativeFocus(
   )
   await page.reload({ waitUntil: "domcontentloaded" })
   await page.getByText("Imperative focus E2E", { exact: true }).first().click()
+  await openModsResults(page)
   const composer = page.locator("textarea.composer-textarea")
   const submit = page.locator("form").filter({ has: composer }).locator('button[type="submit"]')
   const send = async (text: string) => {
@@ -161,6 +163,7 @@ export async function verifyImperativeFocus(
   )
   assert(!(await focused("target")))
   pass("renderer reload cannot reuse a focus ownership probe from its previous lifecycle")
+  await openModsResults(page)
 
   await source.fill("revoke")
   await until(() => hasLog("WAIT:revoke"), "revocation focus hook waits")

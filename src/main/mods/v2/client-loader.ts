@@ -15,6 +15,30 @@ function nodes(tree: Node): AnyNode[] {
   return result
 }
 
+/** All plugin suffixes share the same ESM syntax and import restrictions. */
+export function parseFunctionModule(
+  source: string,
+  loader: Loader,
+  file: string,
+  root: string
+): { code: string; ast: AnyNode[] } {
+  const { code } = modCompiler().transformSync(source, {
+    loader,
+    format: "esm",
+    sourcefile: relative(root, file).replaceAll("\\", "/"),
+    target: "esnext",
+    jsxFactory: "__functionJsx",
+    jsxFragment: "__functionFragment"
+  })
+  const ast = nodes(parse(code, { ecmaVersion: "latest", sourceType: "module" }))
+  for (const node of ast) {
+    if (node.type === "ImportExpression" ||
+        (node.type === "Identifier" && node.name === "require"))
+      throw Error("MODS_IMPORT_DENIED")
+  }
+  return { code, ast }
+}
+
 /** Resolve Client assets at approval time, including TSX and renamed destructured constructors. */
 export function resolveClientModules(
   source: string,
@@ -22,13 +46,7 @@ export function resolveClientModules(
   file: string,
   root: string
 ): { code: string; modules: string[] } {
-  const { code } = modCompiler().transformSync(source, {
-    loader,
-    target: "esnext",
-    jsxFactory: "__functionJsx",
-    jsxFragment: "__functionFragment"
-  })
-  const ast = nodes(parse(code, { ecmaVersion: "latest", sourceType: "module" }))
+  const { code, ast } = parseFunctionModule(source, loader, file, root)
   const names = new Set(["Client"])
   for (const node of ast) {
     if (node.type !== "ObjectPattern") continue

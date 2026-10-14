@@ -6,25 +6,25 @@ function fingerprint(path: string): string {
   return `${stat.dev}:${stat.ino}:${stat.size}:${stat.mtimeNs}:${stat.ctimeNs}`
 }
 
-/** Cache only a denial. Enabled authority is always read again from the settings store. */
+/** Recheck file identity on every admission; reuse parsing only for exactly unchanged facts. */
 export function createDisabledSwitchReader(path: string, load: () => boolean) {
-  let disabledFingerprint: string | undefined
+  let parsed: { fingerprint: string; enabled: boolean } | undefined
   return {
     invalidate() {
-      disabledFingerprint = undefined
+      parsed = undefined
     },
     read(): boolean {
       try {
         const before = fingerprint(path)
-        if (disabledFingerprint === before) return false
-        disabledFingerprint = undefined
+        if (parsed?.fingerprint === before) return parsed.enabled
+        parsed = undefined
         const enabled = load() === true
         // A concurrent settings write must not authorize work using the previous value.
         if (fingerprint(path) !== before) return false
-        if (!enabled) disabledFingerprint = before
+        parsed = { fingerprint: before, enabled }
         return enabled
       } catch {
-        disabledFingerprint = undefined
+        parsed = undefined
         return false
       }
     }

@@ -13,7 +13,7 @@ process.title = "openwork"
 const args = process.argv.slice(2)
 
 // Handle --version flag
-if (args.includes("--version") || args.includes("-v")) {
+if (args.length === 1 && (args[0] === "--version" || args[0] === "-v")) {
   const { version } = require("../package.json")
   console.log(`openwork v${version}`)
   process.exit(0)
@@ -30,6 +30,17 @@ Usage:
   openwork --help       Show this help
   openwork plugin check <directory>    Validate a function-hooks plugin
   openwork plugin inspect <directory>  Inspect its profile, digest and registrations
+  openwork plugin types <directory> [--out <new-file.d.ts>]  Export the supported authoring subset
+  openwork plugin init <new-directory> --template project-lite|harness-lite|harness-fullstack|harness-data|command [--id package-id] [--name name]
+  openwork plugin compile <source-directory> --out <new-directory>
+  openwork plugin doctor <directory>  Diagnose a lightweight project package without executing it
+  openwork plugin test <directory>    Check generated fixtures with production artifact validators
+  openwork plugin pack <directory> --out <new-file.zip>  Package a checked project for normal import
+  openwork plugin dev <directory> --out <new-directory>  Prepare an isolated snapshot and workspace
+  Project dev prepares files only; it does not start a model, install a plugin or approve a stage.
+  Add --types to check/inspect for isolated, strict TypeScript checks (no user tsconfig or plugins).
+  Add --strict-compatibility to fail when registered events lack a verified host provider.
+  This checks event availability only, not complete SDK compatibility or authorization.
 `)
   process.exit(0)
 }

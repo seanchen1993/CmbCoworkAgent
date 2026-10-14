@@ -54,6 +54,10 @@ vi.mock("../agent/workflow/run-store", () => ({
   reviveWorkflowThread: mocks.reviveWorkflowThread
 }))
 vi.mock("../db", () => ({
+  // This timer fixture uses mocked thread/runtime boundaries, not a native SQLite source.
+  getDb: () => {
+    throw new Error("HEARTBEAT_TIMER_FIXTURE_NO_NATIVE_DB")
+  },
   createThread: mocks.createThread,
   getThreadCore: mocks.getThreadCore,
   updateThread: mocks.updateThread
@@ -101,13 +105,50 @@ describe("heartbeat timer invalidation", () => {
         isBusy: (threadId) => !!getLocalThreadRunLease(threadId),
         onIdle: (listener) => onLocalThreadRunLeaseReleased((lease) => listener(lease.threadId))
       })
+      let runtimeOptions: CreateAgentRuntimeOptions | undefined
+      let runtimeAuthority: Parameters<ModsManager["measureFunctionSession"]>[0] | undefined
+      let modelCalls = 0
+      let measured = 0
+      const updateFunctionSessionMessages = vi.fn<ModsManager["updateFunctionSessionMessages"]>()
+      const measureFunctionSession = vi.fn<ModsManager["measureFunctionSession"]>(
+        async (authority, signal) => {
+          expect(authority).toBe(runtimeAuthority)
+          authority.assertLive()
+          expect(signal).toBeInstanceOf(AbortSignal)
+          if (!signal) throw new Error("ACTUAL_GRAPH_SIGNAL_REQUIRED")
+          signal.throwIfAborted()
+          const update = updateFunctionSessionMessages.mock.calls.at(-1)
+          if (!update) throw new Error("ACTUAL_GRAPH_STATE_REQUIRED")
+          expect(update[0]).toBe(authority)
+          const answer = update[1].at(-1)
+          if (!(answer instanceof AIMessage)) throw new Error("ACTUAL_GRAPH_ANSWER_REQUIRED")
+          expect(answer.content).toBe(
+            ending === "silent" ? "HEARTBEAT_OK" : "actual heartbeat answer"
+          )
+          expect(answer.usage_metadata).toEqual({
+            input_tokens: 8,
+            output_tokens: 2,
+            total_tokens: 10
+          })
+          expect(getLocalThreadRunLease("heartbeat")).toMatchObject({
+            owner: "scheduler",
+            runId: runtimeOptions?.modTurnRunId
+          })
+          expect(modelCalls).toBe(1)
+          expect(start).toHaveBeenCalledTimes(1)
+          expect(complete).not.toHaveBeenCalled()
+          expect(mocks.closeCheckpointer).not.toHaveBeenCalled()
+          measured++
+        }
+      )
       const manager = {
         startFunctionTurn: lifecycle.start.bind(lifecycle),
         functionTurns: lifecycle,
         releaseExpiredRuntimeBindings: vi.fn(),
         bindFunctionSession: vi.fn(),
-        updateFunctionSessionMessages: vi.fn(),
-        updateFunctionSessionRequest: vi.fn()
+        updateFunctionSessionMessages,
+        updateFunctionSessionRequest: vi.fn(),
+        measureFunctionSession
       }
       mocks.manager = manager
       mocks.resolveModel.mockResolvedValue(null)
@@ -120,8 +161,6 @@ describe("heartbeat timer invalidation", () => {
         getTuple: async () => undefined,
         deleteThread: prune
       })
-      let runtimeOptions: CreateAgentRuntimeOptions | undefined
-      let modelCalls = 0
       class HeartbeatModel extends BaseChatModel {
         bindTools(): this {
           return this
@@ -155,11 +194,12 @@ describe("heartbeat timer invalidation", () => {
           threadId: options.threadId!,
           turnId: options.hookTurnId!
         })
+        runtimeAuthority = authority
         return createAgent({
           model: new HeartbeatModel({}),
           tools: [],
           middleware: [
-          createFunctionSessionViewMiddleware(
+            createFunctionSessionViewMiddleware(
               manager as unknown as ModsManager,
               authority,
               "heartbeat-provider",
@@ -172,6 +212,10 @@ describe("heartbeat timer invalidation", () => {
         await runHeartbeatNow()
         await vi.waitFor(() => expect(complete).toHaveBeenCalledTimes(1))
         expect(modelCalls).toBe(1)
+        expect(measureFunctionSession).toHaveBeenCalledTimes(
+          ending === "answer" || ending === "silent" ? 1 : 0
+        )
+        expect(measured).toBe(ending === "answer" || ending === "silent" ? 1 : 0)
         const facts = complete.mock.calls[0][1]
         expect(facts.reason).toBe(
           ending === "cancel" ? "aborted" : ending === "silent" ? "answer" : ending

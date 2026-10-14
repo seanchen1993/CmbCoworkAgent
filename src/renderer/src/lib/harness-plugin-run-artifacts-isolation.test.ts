@@ -1,4 +1,5 @@
 import { readFileSync } from "node:fs"
+import { Script } from "node:vm"
 import { describe, expect, it } from "vitest"
 
 const harnessSource = readFileSync(
@@ -10,6 +11,16 @@ const rightPanelSource = readFileSync(
   "utf8"
 )
 const appSource = readFileSync(new URL("../App.tsx", import.meta.url), "utf8")
+
+/** Run only the actual synchronous data projection, without React effects or host APIs. */
+function projectPreviewField(name: string, bindings: Record<string, unknown>,
+  source = rightPanelSource): unknown {
+  const declaration = source.match(new RegExp(
+    `\\bconst ${name}\\s*=\\s*([\\s\\S]*?)(?=\\r?\\n\\s*const\\b)`
+  ))
+  if (!declaration) throw new Error(`Missing actual RightPanel projection: ${name}`)
+  return new Script(`(${declaration[1].trim()})`).runInNewContext(bindings, { timeout: 1000 })
+}
 
 describe("plugin run artifact isolation", () => {
   it("fences a stale run detail from the newly selected feature", () => {
@@ -70,9 +81,14 @@ describe("plugin run artifact isolation", () => {
 
     expect(resourceStart).toBeGreaterThanOrEqual(0)
     expect(revealStart).toBeGreaterThanOrEqual(0)
-    expect(reveal).toContain("if (externalPreviewGrant)")
+    // External paths must remain on the capability path even while a resolver renews a grant.
+    expect(reveal).toContain("if (!resolved.inWorkspace)")
     expect(reveal).toContain("await resolveExternalPreviewGrant()")
+    expect(reveal).toMatch(/if \(!grant\) \{[\s\S]*?return\s*\}/)
     expect(reveal).toContain("window.api.harnessBoard.revealRunArtifact({")
+    expect(reveal.indexOf("await resolveExternalPreviewGrant()")).toBeLessThan(
+      reveal.indexOf("revealRunArtifact({")
+    )
     expect(reveal.indexOf("revealRunArtifact({")).toBeLessThan(
       reveal.indexOf('invoke("show-item-in-folder"')
     )
@@ -123,8 +139,50 @@ describe("plugin run artifact isolation", () => {
     expect(previewSurface).toContain("previewThreadIdRef.current = currentThreadId")
     expect(previewSurface).toContain("previewThreadIdRef.current = threadId")
     expect(previewSurface).toContain("previewThreadIdRef.current = null")
-    expect(previewSurface).toContain("{previewPathForCurrentThread ? (")
+    expect(previewSurface).toMatch(
+      /currentProtectedPreview\s*\?\s*\([\s\S]*?<ProtectedFunctionPreview[\s\S]*?\)\s*:\s*previewPathForCurrentThread\s*\?\s*\([\s\S]*?<ResourcePreview/
+    )
     expect(previewSurface).toContain("filePath={previewPathForCurrentThread}")
     expect(previewSurface).toContain("previewExternalAuthorizationForCurrentThread")
+  })
+
+  it("does not expose the old thread's path, grant or protected receipt before cleanup", () => {
+    const filePath = "C:/old-workspace/report.md"
+    const owner = { current: "old-thread" }
+    const oldGrant = { threadId: "old-thread", filePath, grant: "old-capability" }
+    const oldProtected = { threadId: "old-thread", preview: { receipt: "old-receipt" } }
+    const pathBindings = { currentThreadId: "new-thread", previewThreadIdRef: owner,
+      previewPath: filePath }
+    expect(projectPreviewField("previewPathForCurrentThread", pathBindings)).toBeNull()
+    expect(projectPreviewField("previewPathForCurrentThread", {
+      ...pathBindings, currentThreadId: null
+    })).toBeNull()
+    expect(projectPreviewField("previewPathForCurrentThread", {
+      ...pathBindings, currentThreadId: "old-thread"
+    })).toBe(filePath)
+
+    const grantBindings = { currentThreadId: "new-thread",
+      previewPathForCurrentThread: filePath, previewExternalAuthorization: oldGrant }
+    expect(projectPreviewField("previewExternalAuthorizationForCurrentThread", grantBindings))
+      .toBeNull()
+    expect(projectPreviewField("previewExternalAuthorizationForCurrentThread", {
+      ...grantBindings, currentThreadId: "old-thread", previewPathForCurrentThread: "other.md"
+    })).toBeNull()
+    expect(projectPreviewField("previewExternalAuthorizationForCurrentThread", {
+      ...grantBindings, currentThreadId: "old-thread"
+    })).toBe(oldGrant)
+    expect(projectPreviewField("currentProtectedPreview", {
+      currentThreadId: "new-thread", protectedPreview: oldProtected
+    })).toBeNull()
+    expect(projectPreviewField("currentProtectedPreview", {
+      currentThreadId: "old-thread", protectedPreview: oldProtected
+    })).toBe(oldProtected)
+
+    // A removed thread fence really would leak, so this regression is not a syntax-only check.
+    const broken = rightPanelSource.replace(
+      "previewThreadIdRef.current === currentThreadId", "true"
+    )
+    expect(broken).not.toBe(rightPanelSource)
+    expect(projectPreviewField("previewPathForCurrentThread", pathBindings, broken)).toBe(filePath)
   })
 })

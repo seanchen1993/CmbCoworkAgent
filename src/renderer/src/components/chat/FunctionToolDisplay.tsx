@@ -1,5 +1,6 @@
 import type { ReactNode } from "react"
 import type { ToolCall, ToolCallStatus } from "@/types"
+import type { ModObject } from "../../../../shared/mods/types"
 import { functionSiteProps } from "../../../../shared/mods/v2/sites"
 import { FunctionSite } from "./FunctionSite"
 
@@ -12,7 +13,9 @@ export function FunctionToolDisplay({
   status,
   isError,
   needsApproval,
-  fallback
+  fallback,
+  presentation,
+  renderDetails
 }: {
   threadId: string
   component: "ToolUse" | "ToolResult"
@@ -22,6 +25,8 @@ export function FunctionToolDisplay({
   isError?: boolean
   needsApproval?: boolean
   fallback: ReactNode
+  presentation?: { input: unknown; output?: unknown }
+  renderDetails(safe: ModObject): ReactNode
 }): ReactNode {
   if (needsApproval || (component === "ToolResult" && result === undefined)) return fallback
   let facts
@@ -32,12 +37,14 @@ export function FunctionToolDisplay({
       isErrored: Boolean(isError || status === "failed" || status === "rejected"),
       ...(component === "ToolUse"
         ? {
-            input: toolCall.args,
+            input: presentation ? presentation.input : toolCall.args,
             isRunning: status === "running",
             isInterrupted: status === "interrupted"
           }
         : {}),
-      ...(result === undefined ? {} : { output: result })
+      ...((presentation ? presentation.output : result) === undefined
+        ? {}
+        : { output: presentation ? presentation.output : result })
     })
   } catch {
     return fallback
@@ -50,6 +57,7 @@ export function FunctionToolDisplay({
       facts={facts}
       className="contents"
       fallback={fallback}
+      renderNative={renderDetails}
     />
   )
 }

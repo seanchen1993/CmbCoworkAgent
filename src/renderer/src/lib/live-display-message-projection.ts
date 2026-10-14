@@ -1,4 +1,6 @@
 import type { Message } from "../types"
+import { functionConversationTranscriptFields, sameFunctionConversationTranscriptStamp }
+  from "../../../shared/mods/v2/conversation-transcript"
 import {
   createLiveStreamCumulativeFrameProjector,
   createLiveStreamMessageIdNormalizer,
@@ -48,6 +50,11 @@ function projectLiveDisplayMessage(
   const projected: Message = {
     id,
     role,
+    ...functionConversationTranscriptFields(streamMessage, id, role),
+    ...(streamMessage.provider_source_id !== undefined
+      ? { provider_source_id: streamMessage.provider_source_id } : {}),
+    ...(streamMessage.provider_occurrence !== undefined
+      ? { provider_occurrence: streamMessage.provider_occurrence } : {}),
     content: normalizeLiveStreamMessageContent(streamMessage.content),
     ...(role === "assistant" && streamMessage.reasoning
       ? { reasoning: streamMessage.reasoning }
@@ -138,6 +145,16 @@ export function createLiveDisplayMessageProjector(): (
       // A content update that changes whether the row is displayable changes
       // layout and must use the canonical full projection.
       if (!projected || displayIndex === undefined) return reconcile(frame.messages)
+      // Identity changes must invalidate consumers' structural caches even when the
+      // display ID and text are unchanged (for example a raw row acquiring provenance).
+      if (previous && (previous.role !== projected.role ||
+        previous.provider_source_id !== projected.provider_source_id ||
+        previous.provider_occurrence !== projected.provider_occurrence ||
+        previous.function_row_invalid !== projected.function_row_invalid ||
+        Boolean(previous.function_row) !== Boolean(projected.function_row) ||
+        (previous.function_row && projected.function_row &&
+          !sameFunctionConversationTranscriptStamp(previous.function_row, projected.function_row))))
+        return reconcile(frame.messages)
       messages[displayIndex] = projected
       changedMessages.push(projected)
     }

@@ -63,7 +63,7 @@ it("does not expose SDK members explicitly declared unavailable", async () => {
         .map((row) => [row.name, row])
     ).values()
   ]
-  expect(claims.length).toBeGreaterThan(10)
+  expect(claims.map((row) => row.name)).toContain("env.set")
   const guest = await FunctionGuestRuntime.create(`var __cmbFunctionMod={register(on){
     on("command.run",$=>${JSON.stringify(claims.map((row) => row.name))}.map(name=>{
       const [noun,member]=name.split(".");return [name,typeof $[noun]?.[member]]

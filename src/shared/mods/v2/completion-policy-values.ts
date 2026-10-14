@@ -32,3 +32,10 @@ export interface CompletionPolicyView {
   source: "application" | "plugin" | "default"
   policy: CompletionPolicy
 }
+
+export interface AutobizEnvironment {
+  ready: boolean
+  source: string
+  issues: string[]
+  stageSupported: boolean
+}

@@ -148,7 +148,7 @@ it("evicts old cached output and refuses oversized source or highlighted markup"
   expect(f.raw).toHaveBeenCalledTimes(19)
   f.calls.at(-1)!.resolve("html-new")
   await old.promise
-  await expect(f.scheduler.request({}, "x".repeat(10001), "typescript").promise).rejects.toThrow(
+  await expect(f.scheduler.request({}, "x".repeat(100001), "typescript").promise).rejects.toThrow(
     "MODS_CODE_HIGHLIGHT_INPUT"
   )
   const large = f.scheduler.request({}, "large", "typescript")
@@ -156,6 +156,16 @@ it("evicts old cached output and refuses oversized source or highlighted markup"
   await vi.advanceTimersByTimeAsync(100)
   f.calls.at(-1)!.resolve("x".repeat(512 * 1024 + 1))
   await rejected
+})
+
+it("sends the complete bounded display source to the existing worker", async () => {
+  const f = fixture()
+  const source = "x".repeat(100000)
+  const request = f.scheduler.request({}, source, "typescript")
+  expect(f.calls).toHaveLength(1)
+  expect(f.calls[0].source).toBe(source)
+  f.calls[0].resolve("highlighted display")
+  expect(await request.promise).toBe("highlighted display")
 })
 
 it("also bounds aggregate cached markup and recovers from synchronous worker startup errors", async () => {

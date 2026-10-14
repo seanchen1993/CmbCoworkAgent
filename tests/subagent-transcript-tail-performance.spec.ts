@@ -315,8 +315,28 @@ function testBoundedLiveProjectionAndDeltaPersistence(): void {
     Record<string, unknown>
   >
   assert.equal(bootstrap[0].content, "first-")
-  assert.equal(bootstrap[0].reasoning, "")
+  assert.equal(bootstrap[0].reasoning, undefined)
+  assert.equal(Object.hasOwn(bootstrap[0], "reasoning"), false)
   assert.equal(bootstrap[0].subagent_live_text_bootstrap, true)
+
+  // Missing pending text preserves the hydrated peer field; explicit empty text clears it.
+  for (const updated of ["content", "reasoning"] as const) {
+    const other = updated === "content" ? "reasoning" : "content"
+    for (const clearOther of [false, true]) {
+      const message = assistant("single-field", "retained-content", {
+        reasoning: "retained-reasoning",
+        [updated]: "changed",
+        [`${updated}_pending_delta`]: "changed",
+        ...(clearOther ? { [`${other}_pending_delta`]: "" } : {})
+      })
+      const row = (serializeSubagentTranscripts({ worker: [message] }).worker as Array<
+        Record<string, unknown>
+      >)[0]
+      assert.equal(row.subagent_live_text_bootstrap, true)
+      assert.equal(row[updated], "changed")
+      assert.equal(row[other], clearOther ? "" : `retained-${other}`)
+    }
+  }
 
   const contentRef = {
     v: 1 as const,

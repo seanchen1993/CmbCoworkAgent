@@ -1,3 +1,4 @@
+import { bindLiveToolEvidence } from "./live-tool-evidence"
 /**
  * Agent Trace Collector
  *
@@ -870,14 +871,16 @@ export class TraceCollector {
     return this.traceId
   }
 
+  private toolEvidenceClosed = false
+
   getTraceContext(): TraceContext {
-    return {
+    return bindLiveToolEvidence({
       traceId: this.traceId,
       threadId: this.threadId,
       rootNodeId: this.rootNodeId,
       ...this.observability,
       ...(this.harnessFeature ? { harnessFeature: { ...this.harnessFeature } } : {})
-    }
+    }, this, () => !this.toolEvidenceClosed)
   }
 
   setObservabilityContext(patch: Partial<TraceObservabilityContext>): void {
@@ -1572,6 +1575,7 @@ export class TraceCollector {
     // Finishing touches several non-idempotent side channels (skill-eval
     // windows, local persistence, cloud reporting, and adoption cleanup). Keep
     // the documented first-call-wins contract even when two teardown paths race.
+    this.toolEvidenceClosed = true
     this.finishPromise ??= this.finishOnce(outcome, errorMessage)
     return this.finishPromise
   }

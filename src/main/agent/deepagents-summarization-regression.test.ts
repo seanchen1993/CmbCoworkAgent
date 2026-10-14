@@ -318,6 +318,25 @@ describe("CmbCowork context compaction middleware", () => {
     let observedMessages: readonly unknown[] = []
     let observedState: unknown
     let checked = false
+    let modelCalls = 0
+    const controller = new AbortController()
+    const measureFunctionSession = vi.fn<ModsManager["measureFunctionSession"]>(
+      async (actualAuthority, signal) => {
+        expect(actualAuthority).toBe(authority)
+        authority.assertLive()
+        expect(signal).toBeInstanceOf(AbortSignal)
+        signal!.throwIfAborted()
+        expect(modelCalls).toBe(1)
+        expect(checked).toBe(true)
+        expect(
+          (
+            await readLiveContextUsage(observedMessages, observedState, signal!, () =>
+              authority.assertLive()
+            )
+          )?.input_tokens
+        ).toBe(50)
+      }
+    )
     const manager = {
       bindFunctionSession: vi.fn(),
       updateFunctionSessionMessages(
@@ -328,13 +347,15 @@ describe("CmbCowork context compaction middleware", () => {
         observedMessages = messages
         observedState = state
       },
-      updateFunctionSessionRequest: vi.fn()
+      updateFunctionSessionRequest: vi.fn(),
+      measureFunctionSession
     }
     class Model extends FakeChatModel {
       bindTools() {
         return this
       }
       async _generate() {
+        modelCalls++
         // The actual model is in flight; no new response or checkpoint has been produced.
         expect(
           await readLiveContextUsage(
@@ -390,8 +411,10 @@ describe("CmbCowork context compaction middleware", () => {
           }),
           new HumanMessage("continue")
         ]
-      })
+      }, { signal: controller.signal })
       expect(checked).toBe(true)
+      expect(modelCalls).toBe(1)
+      expect(measureFunctionSession).toHaveBeenCalledTimes(1)
       expect(
         (
           await readLiveContextUsage(
@@ -403,6 +426,7 @@ describe("CmbCowork context compaction middleware", () => {
         )?.input_tokens
       ).toBe(50)
     } finally {
+      controller.abort()
       authorities.close()
     }
   })

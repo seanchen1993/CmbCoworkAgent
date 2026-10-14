@@ -18,9 +18,16 @@ import {
   type RoleCollisionMessage
 } from "../../shared/message-role-collision"
 import type { Message } from "../types"
+import { readNativeConversationStreamProjection } from
+  "../agent/native-conversation-stream-projection"
 
 type ValuesSnapshotKind = "full" | "append" | "tail"
 type TranscriptValueSnapshot = [Record<string, unknown>, Record<string, unknown>]
+interface ValueEntry {
+  message: unknown
+  identity: RoleCollisionMessage
+  canonical: Message | null
+}
 const selectedSnapshots = new WeakMap<object, readonly TranscriptValueSnapshot[]>()
 const localOccurrences = new WeakMap<object, number>()
 
@@ -108,9 +115,11 @@ export function selectStreamTranscriptValueSnapshots(
   }
   // Assign identities while tool boundaries and complete occurrence order are
   // still available. Filtering AI first would collapse every reused provider ID.
-  const entries = messages.slice(start).flatMap((message) => {
+  const entries = messages.slice(start).flatMap((message): ValueEntry[] => {
+    const canonical = readNativeConversationStreamProjection(message)
+    if (canonical) return [{ message, identity: canonical, canonical }]
     const parsed = identity(message)
-    return parsed ? [{ message, identity: parsed }] : []
+    return parsed ? [{ message, identity: parsed, canonical: null }] : []
   })
   const changedEntries = entries.filter((entry) => changed.has(entry.message))
   const changedSelectors = [
@@ -168,6 +177,12 @@ export function selectStreamTranscriptValueSnapshots(
     const localOccurrence = (localCounts.get(key) ?? 0) + 1
     localCounts.set(key, localOccurrence)
     localPositions.push(localOccurrence)
+    if (entry.canonical) {
+      const occurrence = getMessageProviderOccurrence(message) ?? 1
+      counts.set(key, Math.max(counts.get(key) ?? 0, occurrence))
+      return { ...message, provider_source_id: getMessageProviderSourceId(message),
+        provider_occurrence: occurrence }
+    }
     let occurrence = getMessageProviderOccurrence(message)
     if (occurrence === undefined && message.role === "assistant" && frameCounts.get(key) === 1) {
       const candidates = turnBaseline.get(key) ?? []
@@ -225,7 +240,21 @@ export function selectStreamTranscriptValueSnapshots(
   )
   const result: TranscriptValueSnapshot[] = []
   for (let index = 0; index < entries.length; index += 1) {
-    const { message } = entries[index]
+    const { message, canonical } = entries[index]
+    if (canonical) {
+      if ((canonical.role === "assistant" || canonical.role === "tool") && changed.has(message)) {
+        // Preserve the exact private wire object. No ID normalization, provider overwrite or
+        // snapshot-index copy can acquire a canonical persistence receipt.
+        const tuple: TranscriptValueSnapshot = [message as Record<string, unknown>, {
+          [STREAM_MESSAGE_CONTENT_MODE_KEY]: "snapshot",
+          [STREAM_MESSAGE_REASONING_MODE_KEY]: "snapshot",
+          [STREAM_MESSAGE_TOOL_CALLS_MODE_KEY]: "snapshot"
+        }]
+        localOccurrences.set(tuple, localPositions[index])
+        result.push(tuple)
+      }
+      continue
+    }
     const resolved = normalized[index]
     if ((resolved.role !== "assistant" && resolved.role !== "tool") || !changed.has(message))
       continue

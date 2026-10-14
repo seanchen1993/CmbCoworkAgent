@@ -1,3 +1,14 @@
+import type { PluginInstallMode, PluginInstallResult } from "../shared/plugin-install"
+import { WINDOW_PRESENTATION_CHANGED, WINDOW_PRESENTATION_READ, type WindowPresentationSnapshot } from "../shared/window-presentation"
+import { createCommunityExamplesBridge } from "./community-examples"
+import { createPluginDerivationBridge } from "./plugin-derivation"
+import { createNodeCompositionBridge } from "./node-composition"
+import { createDevelopmentBridge } from "./development"
+import { createSkillEvaluationBridge } from "./skill-evaluation"
+import { createEvaluationBridge } from "./evaluation"
+import { createAuthoringInstallBridge } from "./authoring-install"
+import { createAuthoringPreviewBridge } from "./authoring-preview"
+import { createAuthoringBridge } from "./authoring"
 import type { DashboardThreadTraceScope } from "../shared/dashboard-thread-trace-scope"
 import type {
   AppNotification,
@@ -358,6 +369,13 @@ const electronAPI = {
   },
   getGitChangeNoticeEnabled: (): Promise<boolean> =>
     ipcRenderer.invoke(GIT_CHANGE_NOTICE_GET_CHANNEL) as Promise<boolean>,
+  getGitChangeNoticeSetting: (): Promise<{ value: boolean; revision: string }> =>
+    ipcRenderer.invoke("app:get-git-change-notice-setting"),
+  onGitChangeNoticeSetting: (callback: (current: { value: boolean; revision: string }) => void): (() => void) => {
+    const listener = (_event: unknown, current: { value: boolean; revision: string }) => callback(current)
+    ipcRenderer.on("settings:git-change-notice-updated", listener)
+    return () => ipcRenderer.removeListener("settings:git-change-notice-updated", listener)
+  },
   setGitChangeNoticeEnabled: (enabled: boolean): Promise<boolean> =>
     ipcRenderer.invoke(GIT_CHANGE_NOTICE_SET_CHANNEL, enabled) as Promise<boolean>,
   getAgentRuntimeSettings: (): Promise<AgentRuntimeSettings> =>
@@ -652,6 +670,16 @@ ipcRenderer.on(
 
 // Custom APIs for renderer
 const api = {
+  pluginDerivation: createPluginDerivationBridge((channel, input) => ipcRenderer.invoke(channel, input)),
+  nodeComposition: createNodeCompositionBridge((channel, input) => ipcRenderer.invoke(channel, input)),
+  windowPresentation: {
+    read: (): Promise<WindowPresentationSnapshot> => ipcRenderer.invoke(WINDOW_PRESENTATION_READ),
+    onChanged: (callback: (snapshot: WindowPresentationSnapshot) => void): (() => void) => {
+      const listener = (_event: Electron.IpcRendererEvent, snapshot: WindowPresentationSnapshot): void => callback(snapshot)
+      ipcRenderer.on(WINDOW_PRESENTATION_CHANGED, listener)
+      return () => { ipcRenderer.removeListener(WINDOW_PRESENTATION_CHANGED, listener) }
+    }
+  },
   agent: {
     // Send message and receive events via callback
     invoke: (
@@ -661,7 +689,8 @@ const api = {
       modelId?: string,
       agentMode?: "normal" | "coordinator" | "workflow",
       coordinatorInternalNotification?: boolean,
-      userMessageId?: string
+      userMessageId?: string,
+      composerSubmission?: import("../shared/mods/v2/composer-mentions").ComposerSubmission
     ): (() => void) => {
       const ambientChannel = coordinatorInternalNotification
         ? `agent:stream:${threadId}:coordinator-internal`
@@ -682,7 +711,8 @@ const api = {
         modelId,
         agentMode,
         coordinatorInternalNotification,
-        userMessageId
+        userMessageId,
+        composerSubmission
       })
 
       return cleanup
@@ -695,7 +725,8 @@ const api = {
       modelId?: string,
       agentMode?: "normal" | "coordinator" | "workflow",
       coordinatorInternalNotification?: boolean,
-      userMessageId?: string
+      userMessageId?: string,
+      composerSubmission?: import("../shared/mods/v2/composer-mentions").ComposerSubmission
     ): (() => void) => {
       const ambientChannel = command
         ? `agent:stream:${threadId}`
@@ -728,7 +759,8 @@ const api = {
           modelId,
           agentMode,
           coordinatorInternalNotification,
-          userMessageId
+          userMessageId,
+          composerSubmission
         })
       }
 
@@ -839,8 +871,8 @@ const api = {
     // { queued:false, reason } when there is no active foreground run.
     queueCurrentRunMessage: (
       threadId: string,
-      message: { id: string; content: string; displayContent?: string }
-    ): Promise<{ queued: boolean; reason?: string; message?: string }> => {
+      message: { id: string; content: string; displayContent?: string; composerSubmission?: import("../shared/mods/v2/composer-mentions").ComposerSubmission }
+    ): Promise<{ queued: boolean; reason?: string; message?: string; visibleText?: string }> => {
       return ipcRenderer.invoke("agent:queueCurrentRunMessage", { threadId, message }) as Promise<{
         queued: boolean
         reason?: string
@@ -3060,11 +3092,137 @@ const api = {
     }
   },
   mods: {
+    development: createDevelopmentBridge(
+      (channel, input) => ipcRenderer.invoke(channel, input),
+      (channel, callback) => {
+        const listener = (_event: unknown, payload: unknown): void => callback(payload)
+        ipcRenderer.on(channel, listener)
+        return () => ipcRenderer.removeListener(channel, listener)
+      }
+    ),
+    skillEvaluation: createSkillEvaluationBridge((channel, input) => ipcRenderer.invoke(channel, input)),
+    evaluation: createEvaluationBridge((channel, payload) => ipcRenderer.invoke(channel, payload)),
+    communityExamples: createCommunityExamplesBridge((channel, input) => ipcRenderer.invoke(channel, input)),
+    authoringInstall: createAuthoringInstallBridge((channel, payload) =>
+      ipcRenderer.invoke(channel, payload)
+    ),
+    authoringPreview: createAuthoringPreviewBridge((channel, payload) =>
+      ipcRenderer.invoke(channel, payload)
+    ),
+    authoring: createAuthoringBridge((channel, payload) => ipcRenderer.invoke(channel, payload)),
+    configList: (threadId: string) => ipcRenderer.invoke("mods:config-list", threadId),
+    configSet: (threadId: string, key: string, value: import("../shared/mods/v2/config").FunctionConfigValue) =>
+      ipcRenderer.invoke("mods:config-set", { threadId, key, value }),
+    userConfig: (threadId: string, pluginId: string, expectedWorkspace?: string) => ipcRenderer.invoke("mods:user-config", { threadId, pluginId, ...(expectedWorkspace !== undefined ? { expectedWorkspace } : {}) }),
+    saveSensitiveUserConfig: (threadId: string, view: import("../shared/mods/v2/user-config-view").FunctionUserConfigView,
+      key: string, action: import("../shared/mods/v2/user-config-view").SensitiveFunctionUserConfigAction) =>
+      ipcRenderer.invoke("mods:user-config-secret-save", { threadId, pluginId: view.pluginId,
+        digest: view.digest, key, action, revision: view.savedRevision, workspace: view.workspace }),
+    applyUserConfig: (threadId: string, view: import("../shared/mods/v2/user-config-view").FunctionUserConfigView) =>
+      ipcRenderer.invoke("mods:user-config-apply", { threadId, pluginId: view.pluginId,
+        digest: view.digest, revision: view.savedRevision, workspace: view.workspace }),
+    reloadUserConfig: (threadId: string, view: import("../shared/mods/v2/user-config-view").FunctionUserConfigView) =>
+      ipcRenderer.invoke("mods:user-config-reload", { threadId, pluginId: view.pluginId,
+        digest: view.digest, revision: view.savedRevision, workspace: view.workspace }),
+    pickUserConfigPath: (threadId: string, view: import("../shared/mods/v2/user-config-view").FunctionUserConfigView, key: string) =>
+      ipcRenderer.invoke("mods:user-config-pick-path", { threadId, pluginId: view.pluginId,
+        digest: view.digest, key, revision: view.savedRevision, workspace: view.workspace }),
+    saveUserConfig: (threadId: string, view: import("../shared/mods/v2/user-config-view").FunctionUserConfigView,
+      key: string, value: import("../shared/mods/v2/config").FunctionConfigValue) =>
+      ipcRenderer.invoke("mods:user-config-save", { threadId, pluginId: view.pluginId,
+        digest: view.digest, key, value, revision: view.savedRevision, workspace: view.workspace }),
+    flowCatalog: (threadId: string): Promise<import("../shared/mods/flows/types").FlowCatalog> =>
+      ipcRenderer.invoke("mods:flow-catalog", threadId),
+    flowMcpTools: (threadId: string): Promise<import("../shared/mods/flows/types").FlowMcpToolDescriptor[]> =>
+      ipcRenderer.invoke("mods:flow-mcp-tools", threadId),
+    flowList: (threadId: string): Promise<import("../shared/mods/flows/types").SavedFlow[]> =>
+      ipcRenderer.invoke("mods:flow-list", threadId),
+    flowSave: (threadId: string, definition: import("../shared/mods/flows/types").FlowDefinition, expectedRevision: number, expectedWorkspace?: string): Promise<import("../shared/mods/flows/types").SavedFlow> =>
+      ipcRenderer.invoke("mods:flow-save", { threadId, definition, expectedRevision, expectedWorkspace }),
+    flowStart: (threadId: string, flowId: string, revision: number, task?: import("../shared/mods/flows/types").FlowChatTask, expectedWorkspace?: string): Promise<import("../shared/mods/flows/types").FlowRun> =>
+      ipcRenderer.invoke("mods:flow-start", { threadId, flowId, revision, ...(task === undefined ? {} : { task }), ...(expectedWorkspace === undefined ? {} : { expectedWorkspace }) }),
+    flowFileReview: (threadId: string, runId: string) => ipcRenderer.invoke("mods:flow-file-review", threadId, runId),
+    flowFilePublish: (input: Parameters<import("../shared/mods/flows/file-publication").FlowFilePublicationApi["flowFilePublish"]>[0]) => ipcRenderer.invoke("mods:flow-file-publish", input),
+    flowFileCancel: (threadId: string, requestId: string) => ipcRenderer.invoke("mods:flow-file-cancel", threadId, requestId),
+    flowRuns: (threadId: string): Promise<import("../shared/mods/flows/types").FlowRun[]> =>
+      ipcRenderer.invoke("mods:flow-runs", threadId),
+    flowRun: (threadId: string, runId: string): Promise<import("../shared/mods/flows/types").FlowRun | null> =>
+      ipcRenderer.invoke("mods:flow-run", { threadId, runId }),
+    flowRecovery: (threadId: string, runId: string): Promise<import("../shared/mods/flows/recovery").FlowRecoveryPlan> =>
+      ipcRenderer.invoke("mods:flow-recovery", { threadId, runId }),
+    flowEvidence: (
+      threadId: string,
+      runId: string
+    ): Promise<import("../shared/mods/flows/execution-evidence").FlowExecutionEvidenceView> =>
+      ipcRenderer.invoke("mods:flow-evidence", { threadId, runId }),
+    flowResume: (
+      threadId: string,
+      runId: string,
+      expectedSourceDigest: string
+    ): Promise<import("../shared/mods/flows/types").FlowRun> =>
+      ipcRenderer.invoke("mods:flow-resume", { threadId, runId, expectedSourceDigest }),
+    flowDecide: (threadId: string, runId: string, nonce: string, approve: boolean): Promise<import("../shared/mods/flows/types").FlowRun> =>
+      ipcRenderer.invoke("mods:flow-decide", { threadId, runId, nonce, approve }),
+    flowCancel: (threadId: string, runId: string): Promise<void> =>
+      ipcRenderer.invoke("mods:flow-cancel", { threadId, runId }),
+    onFlowChanged: (threadId: string, callback: () => void): (() => void) => {
+      const listener = (_event: unknown, payload: { threadId?: string }): void => {
+        if (payload?.threadId === threadId) callback()
+      }
+      ipcRenderer.on("mods:flow-changed", listener)
+      return () => ipcRenderer.removeListener("mods:flow-changed", listener)
+    },
+    desktopAttach: (threadId: string, owner: string): Promise<void> => ipcRenderer.invoke("mods:desktop-attach", { threadId, owner }),
+    desktopDetach: (threadId: string, owner: string): Promise<void> => ipcRenderer.invoke("mods:desktop-detach", { threadId, owner }),
+    desktopRespond: (response: import("../shared/mods/v2/desktop-actions").DesktopResponse): Promise<void> => ipcRenderer.invoke("mods:desktop-response", response),
+    desktopCopy: (input: { threadId: string; owner: string; requestId: string; present: boolean }): Promise<void> => ipcRenderer.invoke("mods:desktop-copy", input),
+    onDesktopRequest: (callback: (request: import("../shared/mods/v2/desktop-actions").DesktopRequest) => void): (() => void) => {
+      const listener = (_event: unknown, request: import("../shared/mods/v2/desktop-actions").DesktopRequest) => callback(request)
+      ipcRenderer.on("mods:desktop-request", listener)
+      return () => ipcRenderer.removeListener("mods:desktop-request", listener)
+    },
+    promptAttach: (threadId: string, owner: string): Promise<void> => ipcRenderer.invoke("mods:prompt-attach", { threadId, owner }),
+    promptEditSupport: (threadId: string, owner: string): Promise<boolean> => ipcRenderer.invoke("mods:prompt-edit-support", { threadId, owner }),
+    promptEdit: (request: import("../shared/mods/v2/prompt-composer").PromptEditRequest): Promise<import("../shared/mods/v2/prompt-edit").FunctionPromptEditResult> => ipcRenderer.invoke("mods:prompt-edit", request),
+    promptEditCancel: (threadId: string, owner: string, sequence: number): Promise<void> => ipcRenderer.invoke("mods:prompt-edit-cancel", { threadId, owner, sequence }),
+    promptDetach: (threadId: string, owner: string): Promise<void> => ipcRenderer.invoke("mods:prompt-detach", { threadId, owner }),
+    promptAuthorize: (threadId: string, owner: string, requestId: string): Promise<boolean> => ipcRenderer.invoke("mods:prompt-authorize", { threadId, owner, requestId }),
+    promptRespond: (response: import("../shared/mods/v2/prompt-composer").PromptComposerResponse): Promise<void> => ipcRenderer.invoke("mods:prompt-response", response),
+    onPromptRequest: (callback: (request: import("../shared/mods/v2/prompt-composer").PromptComposerRequest) => void): (() => void) => {
+      const listener = (_event: unknown, request: import("../shared/mods/v2/prompt-composer").PromptComposerRequest) => callback(request)
+      ipcRenderer.on("mods:prompt-request", listener)
+      return () => ipcRenderer.removeListener("mods:prompt-request", listener)
+    },
+    clawView: (threadId: string): Promise<import("../shared/mods/claw").ClawView> =>
+      ipcRenderer.invoke("mods:claw-view", threadId),
+    clawSources: (threadId: string): Promise<import("../shared/mods/claw").ClawSourceCatalog> =>
+      ipcRenderer.invoke("mods:claw-sources", threadId),
+    clawChange: (threadId: string, mutation: import("../shared/mods/claw").ClawMutation): Promise<import("../shared/mods/claw").ClawView> =>
+      ipcRenderer.invoke("mods:claw-change", { threadId, mutation }),
+    clawStart: (threadId: string, expectedRevision: number, goal: string): Promise<import("../shared/mods/flows/types").FlowRun> =>
+      ipcRenderer.invoke("mods:claw-start", { threadId, expectedRevision, goal }),
+    chatDisplayCapability: (threadId: string, expectedWorkspace: string): Promise<boolean> =>
+      ipcRenderer.invoke("mods:chat-display-capability", { threadId, expectedWorkspace }),
+    builtinCatalog: (): Promise<import("../shared/mods/builtins").DevClawBuiltinStatus[]> =>
+      ipcRenderer.invoke("mods:builtin-catalog"),
+    builtinAdvisor: (threadId: string, expectedWorkspace: string,
+      action: "view" | "enable" | "disable" | "analyze" | "cancel" | "dismiss"):
+      Promise<import("../shared/mods/builtin-advisor").BuiltinAdvisorView> =>
+      ipcRenderer.invoke("mods:builtin-advisor", { threadId, expectedWorkspace, action }),
+    builtinChangeReview: (threadId: string, expectedWorkspace: string,
+      baseline: import("../shared/mods/builtin-change-review").BuiltinChangeReviewBaseline):
+      Promise<import("../shared/mods/builtin-change-review").BuiltinChangeReview> =>
+      ipcRenderer.invoke("mods:builtin-change-review", { threadId, expectedWorkspace, baseline }),
+    builtinOverview: (threadId: string, expectedWorkspace: string):
+      Promise<import("../shared/mods/builtins").BuiltinRunOverview> =>
+      ipcRenderer.invoke("mods:builtin-overview", { threadId, expectedWorkspace }),
     globalEnabled: (): Promise<boolean> => ipcRenderer.invoke("mods:global-enabled"),
+    composerEnabled: (threadId: string): Promise<{ workspace: string; enabled: boolean }> =>
+      ipcRenderer.invoke("mods:composer-enabled", threadId),
     configureGlobal: (enabled: boolean): Promise<boolean> =>
       ipcRenderer.invoke("mods:configure-global", enabled),
-    onConfigurationChanged: (callback: () => void): (() => void) => {
-      const listener = (): void => callback()
+    onConfigurationChanged: (callback: (event?: import("../shared/mods/types").ModConfigurationChangeEvent) => void): (() => void) => {
+      const listener = (_event: Electron.IpcRendererEvent, value: unknown): void => callback(value && typeof value === "object" && "scope" in value && value.scope === "schema" ? { scope: "schema" } : undefined)
       ipcRenderer.on("mods:configuration-changed", listener)
       return () => ipcRenderer.removeListener("mods:configuration-changed", listener)
     },
@@ -3073,6 +3231,8 @@ const api = {
       ipcRenderer.invoke("mods:unlock-function", password),
     logs: (threadId: string) => ipcRenderer.invoke("mods:function-logs", threadId),
     feedback: (threadId: string) => ipcRenderer.invoke("mods:function-feedback", threadId),
+    desktopFeedback: (threadId: string, owner: string): Promise<import("../shared/mods/v2/presentation").FunctionPresentationSnapshot> => ipcRenderer.invoke("mods:desktop-feedback", { threadId, owner }),
+    desktopPresent: (report: import("../shared/mods/v2/presentation").FunctionPresentationReport): Promise<void> => ipcRenderer.invoke("mods:desktop-present", report),
     turnNotices: (
       threadId: string
     ): Promise<import("../shared/mods/v2/turn").FunctionTurnNotice[]> =>
@@ -3086,21 +3246,47 @@ const api = {
       ipcRenderer.invoke("mods:function-completion-evidence", threadId),
     completionPolicy: (
       threadId: string,
-      plugin: string
+      plugin: string,
+      expectedWorkspace?: string
     ): Promise<import("../shared/mods/v2/completion-policy-values").CompletionPolicyView> =>
-      ipcRenderer.invoke("mods:function-completion-policy", { threadId, plugin }),
+      ipcRenderer.invoke("mods:function-completion-policy", { threadId, plugin, ...(expectedWorkspace !== undefined ? { expectedWorkspace } : {}) }),
+    autobizEnvironment: (
+      threadId: string,
+      expectedWorkspace?: string
+    ): Promise<import("../shared/mods/v2/completion-policy-values").AutobizEnvironment> =>
+      ipcRenderer.invoke("mods:function-autobiz-environment", expectedWorkspace === undefined ? threadId : { threadId, expectedWorkspace }),
     setCompletionPolicy: (
       threadId: string,
       plugin: string,
-      policy: import("../shared/mods/v2/completion-policy-values").CompletionPolicy
+      policy: import("../shared/mods/v2/completion-policy-values").CompletionPolicy,
+      expectedWorkspace?: string
     ): Promise<import("../shared/mods/v2/completion-policy-values").CompletionPolicyView> =>
-      ipcRenderer.invoke("mods:function-completion-policy-set", { threadId, plugin, policy }),
+      ipcRenderer.invoke("mods:function-completion-policy-set", { threadId, plugin, policy, ...(expectedWorkspace !== undefined ? { expectedWorkspace } : {}) }),
     advanceAutobizCheckpoint: (threadId: string, transition: import("../shared/mods/types").ModObject): Promise<import("../shared/mods/types").ModObject> =>
       ipcRenderer.invoke("mods:function-autobiz-transition", { threadId, transition }),
     panes: (threadId: string): Promise<import("../shared/mods/v2/ui").FunctionPaneSnapshot[]> =>
       ipcRenderer.invoke("mods:function-panes", threadId),
-    siteMount: (threadId: string, component: import("../shared/mods/v2/sites").FunctionUiSite): Promise<string | null> =>
-      ipcRenderer.invoke("mods:function-site-mount", { threadId, component }),
+    markdownLink: (threadId: string,
+      action: import("../shared/mods/v2/markdown-links").FunctionMarkdownLinkAction
+    ): Promise<import("../shared/mods/v2/markdown-links").FunctionMarkdownLinkOutcome> =>
+      ipcRenderer.invoke("mods:function-markdown-link", { threadId, action }),
+    markdownPreview: (threadId: string, receipt: string
+    ): Promise<import("../shared/mods/v2/markdown-links").FunctionMarkdownProtectedPreview | null> =>
+      ipcRenderer.invoke("mods:function-markdown-preview", { threadId, receipt }),
+    markdownPreviewClose: (threadId: string, receipt: string): Promise<void> =>
+      ipcRenderer.invoke("mods:function-markdown-preview-close", { threadId, receipt }),
+    onMarkdownPreviewInvalidated: (
+      callback: (event: { threadId: string; receipt: string }) => void
+    ): (() => void) => {
+      const listener = (_event: Electron.IpcRendererEvent,
+        payload: { threadId: string; receipt: string }): void => callback(payload)
+      ipcRenderer.on("mods:markdown-preview-invalidated", listener)
+      return () => ipcRenderer.removeListener("mods:markdown-preview-invalidated", listener)
+    },
+    siteMount: (threadId: string, component: import("../shared/mods/v2/sites").FunctionUiSite, messageId?: string): Promise<string | null> =>
+      ipcRenderer.invoke("mods:function-site-mount", { threadId, component, messageId }),
+    siteMountOutcome: (threadId: string, component: import("../shared/mods/v2/sites").FunctionUiSite, messageId?: string, expectedRequestId?: string): Promise<import("../shared/mods/v2/sites").FunctionSiteMountOutcome> =>
+      ipcRenderer.invoke("mods:function-site-mount-outcome", { threadId, component, messageId, expectedRequestId }),
     siteRender: (threadId: string, owner: string, props: import("../shared/mods/types").ModObject): Promise<import("../shared/mods/v2/ui").FunctionPaneSnapshot | null> =>
       ipcRenderer.invoke("mods:function-site-render", { threadId, owner, props }),
     siteUnmount: (threadId: string, owner: string): Promise<void> =>
@@ -3124,19 +3310,36 @@ const api = {
       threadId: string,
       action: import("../shared/mods/v2/ui").FunctionClientAction
     ): Promise<void> => ipcRenderer.invoke("mods:function-client-act", { threadId, action }),
-    approveFunction: (threadId: string, pluginId: string, digest: string): Promise<void> => ipcRenderer.invoke("mods:approve-function", { threadId, pluginId, digest }),
-    revokeFunction: (threadId: string, name: string): Promise<void> => ipcRenderer.invoke("mods:revoke-function", { threadId, name }),
+    peerMessages: (threadId: string): Promise<import("../shared/mods/v2/peer").FunctionPeerRecord[]> =>
+      ipcRenderer.invoke("mods:peer-messages", { threadId }),
+    onPeerMessagesChanged: (callback: (event: { threadId: string }) => void): (() => void) => {
+      const listener = (_event: Electron.IpcRendererEvent, payload: { threadId: string }): void => callback(payload)
+      ipcRenderer.on("mods:peer-messages-changed", listener)
+      return () => ipcRenderer.removeListener("mods:peer-messages-changed", listener)
+    },
+    onConversationNotice: (callback: (event: import("../shared/mods/v2/conversation-notice")
+      .FunctionConversationNoticeEvent) => void): (() => void) => {
+      const listener = (_event: Electron.IpcRendererEvent, payload:
+        import("../shared/mods/v2/conversation-notice").FunctionConversationNoticeEvent): void =>
+        callback(payload)
+      ipcRenderer.on("mods:conversation-notice", listener)
+      return () => ipcRenderer.removeListener("mods:conversation-notice", listener)
+    },
+    checkFunctionCompatibility: (threadId: string, pluginId: string, digest: string, expectedWorkspace?: string) =>
+      ipcRenderer.invoke("mods:check-function-compatibility", { threadId, pluginId, digest, ...(expectedWorkspace !== undefined ? { expectedWorkspace } : {}) }),
+    approveFunction: (threadId: string, pluginId: string, digest: string, expectedWorkspace?: string): Promise<void> => ipcRenderer.invoke("mods:approve-function", { threadId, pluginId, digest, ...(expectedWorkspace !== undefined ? { expectedWorkspace } : {}) }),
+    revokeFunction: (threadId: string, name: string, expectedWorkspace?: string): Promise<void> => ipcRenderer.invoke("mods:revoke-function", { threadId, name, ...(expectedWorkspace !== undefined ? { expectedWorkspace } : {}) }),
     status: (threadId: string): Promise<ModWorkspaceStatus> => ipcRenderer.invoke("mods:status", threadId),
-    configure: (threadId: string, enabled: boolean, outputPolicy: boolean): Promise<void> =>
-      ipcRenderer.invoke("mods:configure", { threadId, enabled, outputPolicy }),
-    approve: (threadId: string, pluginId: string, digest: string): Promise<void> =>
-      ipcRenderer.invoke("mods:approve", { threadId, pluginId, digest }),
-    revoke: (threadId: string, modId: string): Promise<void> => ipcRenderer.invoke("mods:revoke", { threadId, modId }),
+    configure: (threadId: string, enabled: boolean, outputPolicy: boolean, expectedWorkspace?: string): Promise<void> =>
+      ipcRenderer.invoke("mods:configure", { threadId, enabled, outputPolicy, ...(expectedWorkspace !== undefined ? { expectedWorkspace } : {}) }),
+    approve: (threadId: string, pluginId: string, digest: string, expectedWorkspace?: string): Promise<void> =>
+      ipcRenderer.invoke("mods:approve", { threadId, pluginId, digest, ...(expectedWorkspace !== undefined ? { expectedWorkspace } : {}) }),
+    revoke: (threadId: string, modId: string, expectedWorkspace?: string): Promise<void> => ipcRenderer.invoke("mods:revoke", { threadId, modId, ...(expectedWorkspace !== undefined ? { expectedWorkspace } : {}) }),
     cards: (threadId: string, callId: string): Promise<ModCard[]> => ipcRenderer.invoke("mods:cards", { threadId, callId }),
     act: (threadId: string, actionId: string): Promise<ModProjection> => ipcRenderer.invoke("mods:act", { threadId, actionId }),
     installExamples: (): Promise<void> => ipcRenderer.invoke("mods:install-examples"),
-    audit: (threadId: string, before?: number): Promise<import("../shared/mods/types").ModAuditEntry[]> => ipcRenderer.invoke("mods:audit", { threadId, before }),
-    reconcile: (threadId: string, callId: string, resolution: "confirmed-success" | "confirmed-failure"): Promise<void> => ipcRenderer.invoke("mods:reconcile", { threadId, callId, resolution }),
+    audit: (threadId: string, before?: number, expectedWorkspace?: string): Promise<import("../shared/mods/types").ModAuditEntry[]> => ipcRenderer.invoke("mods:audit", { threadId, before, ...(expectedWorkspace !== undefined ? { expectedWorkspace } : {}) }),
+    reconcile: (threadId: string, callId: string, resolution: "confirmed-success" | "confirmed-failure", expectedWorkspace?: string): Promise<void> => ipcRenderer.invoke("mods:reconcile", { threadId, callId, resolution, ...(expectedWorkspace !== undefined ? { expectedWorkspace } : {}) }),
     backup: (): Promise<boolean> => ipcRenderer.invoke("mods:backup"),
     artifact: (threadId: string, id: string): Promise<{ label: string; text: string }> => ipcRenderer.invoke("mods:artifact", { threadId, id }),
     saveArtifact: (threadId: string, id: string): Promise<boolean> => ipcRenderer.invoke("mods:save-artifact", { threadId, id }),
@@ -3165,19 +3368,11 @@ const api = {
       fileName: string,
       origin?: "market" | "local",
       version?: string,
-      requireMods?: boolean
-    ): Promise<{ success: boolean; pluginName?: string; error?: string }> =>
-      ipcRenderer.invoke("plugins:install", { buffer, fileName, origin, version, requireMods }) as Promise<{
-        success: boolean
-        pluginName?: string
-        error?: string
-      }>,
-    installFromDir: (requireMods?: boolean): Promise<{ success: boolean; pluginName?: string; error?: string }> =>
-      ipcRenderer.invoke("plugins:installFromDir", requireMods) as Promise<{
-        success: boolean
-        pluginName?: string
-        error?: string
-      }>,
+      requireMods?: PluginInstallMode
+    ): Promise<PluginInstallResult> =>
+      ipcRenderer.invoke("plugins:install", { buffer, fileName, origin, version, requireMods }) as Promise<PluginInstallResult>,
+    installFromDir: (requireMods?: PluginInstallMode): Promise<PluginInstallResult> =>
+      ipcRenderer.invoke("plugins:installFromDir", requireMods) as Promise<PluginInstallResult>,
     exportForMarket: (
       id: string,
       options?: { version?: string | null }
@@ -3190,8 +3385,8 @@ const api = {
       }>,
     delete: (id: string): Promise<{ success: boolean; error?: string }> =>
       ipcRenderer.invoke("plugins:delete", id) as Promise<{ success: boolean; error?: string }>,
-    setEnabled: (id: string, enabled: boolean): Promise<void> =>
-      ipcRenderer.invoke("plugins:setEnabled", { id, enabled }) as Promise<void>,
+    setEnabled: (id: string, enabled: boolean): Promise<{ success: boolean; error?: string }> =>
+      ipcRenderer.invoke("plugins:setEnabled", { id, enabled }) as Promise<{ success: boolean; error?: string }>,
     setOriginsBatch: (
       updates: Array<{ id: string; origin: "market" | "local" }>
     ): Promise<{ success: boolean; error?: string }> =>
@@ -4428,6 +4623,30 @@ const api = {
     }
   },
   harnessBoard: {
+    localProjects: {
+      library: {
+        reuse: (sourceProjectId: string, id: string, targetProjectId: string) => ipcRenderer.invoke("project-runtime:library-reuse", sourceProjectId, id, targetProjectId),
+        list: (projectId: string) => ipcRenderer.invoke("project-runtime:library-list", projectId),
+        capture: (projectId: string, input: Parameters<import("../shared/project-runtime/project-library").ProjectLibraryApi["capture"]>[1]) => ipcRenderer.invoke("project-runtime:library-capture", projectId, input),
+        read: (projectId: string, id: string, path: string) => ipcRenderer.invoke("project-runtime:library-read", projectId, id, path),
+        send: (projectId: string, id: string, input: { endpoint: string; remotePath: string }) => ipcRenderer.invoke("project-runtime:library-send", projectId, id, input),
+        remove: (projectId: string, id: string) => ipcRenderer.invoke("project-runtime:library-remove", projectId, id)
+      },
+      preview: {
+        list: (threadId: string) => ipcRenderer.invoke("project-preview:list", threadId),
+        create: (input: Parameters<import("../shared/project-runtime/development-preview").ProjectPreviewApi["create"]>[0]) => ipcRenderer.invoke("project-preview:create", input),
+        finish: (input: Parameters<import("../shared/project-runtime/development-preview").ProjectPreviewApi["finish"]>[0]) => ipcRenderer.invoke("project-preview:finish", input)
+      },
+      actionResults: (projectId: string, operationId: string) => ipcRenderer.invoke("project-runtime:action-results", projectId, operationId),
+      versions: (projectId: string) => ipcRenderer.invoke("project-runtime:versions", projectId),
+      templates: () => ipcRenderer.invoke("project-runtime:templates"),
+      list: (afterProjectId?: string) => ipcRenderer.invoke("project-runtime:list", afterProjectId),
+      get: (projectId: string) => ipcRenderer.invoke("project-runtime:get", projectId),
+      create: (input: Parameters<import("../shared/project-runtime/platform-api").LocalProjectApi["create"]>[0]) =>
+        ipcRenderer.invoke("project-runtime:create", input),
+      command: (projectId: string, command: import("../shared/project-runtime/platform-api").LocalProjectCommand) =>
+        ipcRenderer.invoke("project-runtime:command", projectId, command)
+    } satisfies import("../shared/project-runtime/platform-api").LocalProjectApi,
     catalogPage: (input: HarnessBoardCatalogPageInput): Promise<HarnessBoardCatalogPageResult> =>
       ipcRenderer.invoke(
         "harnessBoard:catalogPage",
@@ -4649,6 +4868,11 @@ const api = {
         callback(payload)
       ipcRenderer.on("harnessBoard:watchRefsChanged", handler)
       return () => ipcRenderer.removeListener("harnessBoard:watchRefsChanged", handler)
+    },
+    legacyProjects: {
+      view: (projectId: string) => ipcRenderer.invoke("project-runtime:legacy-view", projectId),
+      enable: (projectId: string) => ipcRenderer.invoke("project-runtime:legacy-enable", projectId),
+      disable: (projectId: string) => ipcRenderer.invoke("project-runtime:legacy-disable", projectId)
     },
     onManagedRunChanged: (callback: (event: ManagedRunChangeEvent) => void): (() => void) => {
       const handler = (_event: unknown, payload: ManagedRunChangeEvent): void => callback(payload)

@@ -4,8 +4,15 @@ import type { ModControlStore, ModGrant } from "../control-store"
 import { getModCallContext, modCallContext } from "../context"
 import type { ModIdentity } from "../../../shared/mods/types"
 import { ModFunctionError } from "../../../shared/mods/v2/contracts"
-import { functionExecutionScope, withFreshFunctionExecution } from "./execution-context"
+import {
+  functionExecutionScope,
+  withFreshFunctionExecution,
+  withFreshFunctionTransport,
+  withoutFunctionExecution,
+  withClosedFunctionExecution
+} from "./execution-context"
 import { assertModRuntimeAuthority, type ModRuntimeAuthority } from "../runtime-instance"
+import { functionComponentAudit } from "./component-audit"
 
 const calls = new AsyncLocalStorage<{
   identity: ModIdentity
@@ -54,6 +61,27 @@ export function withFunctionAgentExecution<T>(
   return calls.exit(() => modCallContext.exit(() => withFreshFunctionExecution(scope, run)))
 }
 
+/** Host-only model transport entry never inherits a guest file-write fence or receipt. */
+export function withFunctionTransportExecution<T>(
+  scope: Parameters<typeof withFreshFunctionTransport>[0],
+  run: () => Promise<T>
+): Promise<T> {
+  return calls.exit(() => modCallContext.exit(() => withFreshFunctionTransport(scope, run)))
+}
+
+/** Main-only lifecycle creation; it grants no guest capability or physical run identity. */
+export function withDetachedFunctionLifecycle<T>(run: () => Promise<T>): Promise<T> {
+  return calls.exit(() => modCallContext.exit(() => withoutFunctionExecution(run)))
+}
+
+/** Host-only expired cleanup: clear ancestor receipts and retain an explicitly closed owner. */
+export function withFunctionAgentCleanup<T>(
+  scope: Parameters<typeof withClosedFunctionExecution>[0],
+  run: () => Promise<T>
+): Promise<T> {
+  return calls.exit(() => modCallContext.exit(() => withClosedFunctionExecution(scope, run)))
+}
+
 /** Resolve provenance before creating a command adapter, without minting an unused receipt. */
 export function functionCallTurn(workspace: string, threadId: string): string | undefined {
   const { scope, parent } = functionCallScope(workspace, threadId)
@@ -73,6 +101,7 @@ export function functionCallIdentity(
   options: Pick<ModIdentity, "origin"> & { toolCallId?: string; fallbackTurnId: string }
 ): ModIdentity {
   const { scope, parent, runtimeAuthority } = functionCallScope(workspace, threadId)
+  const components = functionComponentAudit(grant, workspace, threadId)
   return {
     workspace,
     threadId,
@@ -85,6 +114,7 @@ export function functionCallIdentity(
     ...(options.toolCallId ? { toolCallId: options.toolCallId } : {}),
     origin: options.origin,
     modId: grant.modId,
+    ...(components ? { components } : {}),
     grantEpoch: grant.epoch
   }
 }

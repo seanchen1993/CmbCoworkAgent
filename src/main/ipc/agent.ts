@@ -1,14 +1,23 @@
+import { publishDevelopmentTurnSettlement } from "../mods/v2/development-turn-settlement"
 import { observeStopFailure } from "../hooks/stop-failure-observer"
 import { foregroundToolPolicy } from "../agent/foreground-tool-policy"
 import { managedBizRetryService } from "../harness-board/biz-retry-service"
 import { IpcMain, BrowserWindow, dialog } from "electron"
 import { getModsManager } from "../mods/manager"
+import { isPlainComposerSubmission } from "../../shared/mods/v2/prompt-submission"
+import { captureComposerMentionSubmission } from "../../shared/mods/v2/composer-mentions"
+import { captureCurrentRunMessageQueueOwnerData } from "../agent/current-run-message-queue"
+import { persistAcceptedComposerPrompt } from "../agent/mods-prompt-admission"
+import { captureFunctionConversationNativeInput } from "../agent/function-conversation-native-input"
+import type { FunctionSessionAppendOrigin } from "../../shared/mods/v2/session-append"
 import {
   StopHookContextCollector,
   STOP_HOOK_REVISION_PROMPT_PREFIX,
   type SerializedHookMessage
 } from "./stop-hook-context"
 import { persistedMessageFromStreamPayload, streamPayloadContentMode } from "./stream-transcript-payload"
+import { readNativeConversationStreamProjection } from
+  "../agent/native-conversation-stream-projection"
 import {
   selectStreamTranscriptValueSnapshots,
   rememberSelectedStreamTranscriptValueSnapshots,
@@ -16,8 +25,12 @@ import {
   getStreamTranscriptValueLocalOccurrence
 } from "./stream-transcript-values"
 import { AsyncLocalStorage } from "node:async_hooks"
+import { types as nativeTypes } from "node:util"
 import { nowIsoLocal } from "../util/local-time"
 import { StreamAssistantText } from "./stream-assistant-text"
+import { yieldBeforeStreamProjection } from "./stream-projection-yield"
+import { bindNativePartialQueuedMessage, reconcileNativePartialQueuedMessages } from
+  "../agent/native-partial-persistence"
 import { AsyncKeyedLock } from "./async-keyed-lock"
 import { withThreadRunMutationLock } from "./thread-run-mutation-lock"
 import {
@@ -77,6 +90,7 @@ import {
   peekCurrentRunMessageQueue,
   queueCurrentRunMessage,
   routeCurrentRunCompletedAssistantMessage,
+  captureCurrentRunMessageQueueOwner,
   setCurrentRunMessageQueueOwner,
   setCurrentRunTranscriptFlushBeforeInjection,
   type ModelRetryHooks,
@@ -87,11 +101,13 @@ import {
   addThreadGoalEvent,
   appendThreadMessageTextDelta,
   flushStrict,
+  getDb,
   getThreadCore,
   getThreadMessageIdentityContext,
   getThreadMessageProviderOccurrencesBeforeUser,
   getThreadMessagesByIds,
   getThread,
+  partitionCanonicalThreadMessageEchoes,
   updateThread,
   upsertThreadMessages
 } from "../db"
@@ -110,6 +126,8 @@ import {
 } from "../services/initial-coordinator-prefix-commit"
 import { matchesAgentPublicationContext } from "../services/agent-publication-context"
 import { captureThreadIncarnation, matchesThreadIncarnation } from "../services/thread-incarnation"
+import { assertFunctionConversationForkReady } from "../db/function-conversation-fork-gate"
+import { ModFunctionError } from "../../shared/mods/v2/contracts"
 import {
   isThreadMetadataHydrationWorkerUnavailable,
   readThreadWorkspacePathInWorker
@@ -405,7 +423,8 @@ import type {
   AgentResumeParams,
   AgentInterruptParams,
   AgentCancelParams,
-  Message
+  Message,
+  ThreadMessageWrite
 } from "../types"
 import {
   createStandardTurnTrace,
@@ -424,6 +443,7 @@ import {
 } from "../agent/standard-thread-turn"
 import {
   claimLocalThreadRunLease,
+  captureLocalThreadRunLease,
   getLocalThreadRunLease,
   releaseLocalThreadRunLease,
   type LocalThreadRunLease,
@@ -435,6 +455,8 @@ import {
   createBrowserWindowAgentRunDelivery,
   registerActiveAgentRunCanceller,
   registerActiveAgentRunInspector,
+  registerAgentRunSettlingInspector,
+  notifyAgentRunSettled,
   registerAgentGoalControlImplementation,
   registerAgentRunImplementation,
   startAgentRun,
@@ -442,6 +464,9 @@ import {
   type AgentRunExecutionContext
 } from "../agent/agent-run-service"
 import { isManagedTransportWindow } from "../agent/managed-transport-delivery"
+import { announceManagedTurnUserMessage } from "../agent/managed-transport-delivery"
+import { nativePluginPromptRun } from "../agent/mods-plugin-prompt-entry"
+import { functionPluginPromptModelText } from "../../shared/mods/v2/plugin-prompt"
 
 function withHarnessStageInvalidation(
   callback: HookResultCallback,
@@ -805,11 +830,54 @@ type CurrentRunMessagePreparer = {
   prepare: (message: {
     content: string
     displayContent?: string
+    allowExplicitSkillFromMessage?: boolean
   }) => Promise<CurrentRunMessagePreparation>
 }
 const currentRunMessagePreparers = new Map<string, CurrentRunMessagePreparer>()
 const currentRunMessagePreparationLocks = new AsyncKeyedLock()
 const currentRunMessagePreparingCounts = new Map<string, Map<string, number>>()
+const composerIpcMapGet = Map.prototype.get
+const composerControllerSignal = Object.getOwnPropertyDescriptor(AbortController.prototype, "signal")!.get!
+const composerSignalThrow = AbortSignal.prototype.throwIfAborted
+
+/** This module owns these maps and controllers; no public predicate grants the data gate. */
+function captureComposerIpcOwnerData(threadId: string, runToken: string,
+  controller: AbortController, preparer?: CurrentRunMessagePreparer): () => void {
+  if (nativeTypes.isProxy(controller) || (preparer && nativeTypes.isProxy(preparer)) ||
+    Object.getOwnPropertyDescriptor(controller, "signal")) throw Error("MODS_CALL_SCOPE_CHANGED")
+  const signal: AbortSignal = Reflect.apply(composerControllerSignal, controller, [])
+  const controllerPrototype = Object.getPrototypeOf(controller)
+  const assertQueue = captureCurrentRunMessageQueueOwnerData(threadId, runToken)
+  const prototype = preparer && Object.getPrototypeOf(preparer)
+  const fields = preparer ? Reflect.ownKeys(preparer).map(key => {
+    const field = Object.getOwnPropertyDescriptor(preparer, key)
+    if (!field || !("value" in field)) throw Error("MODS_CALL_SCOPE_CHANGED")
+    return [key, field] as const
+  }) : []
+  const assertDataCurrent = () => {
+    if (nativeTypes.isProxy(controller) ||
+      Object.getPrototypeOf(controller) !== controllerPrototype ||
+      Reflect.apply(composerIpcMapGet, activeRuns, [threadId]) !== controller ||
+      Reflect.apply(composerControllerSignal, controller, []) !== signal ||
+      Object.getOwnPropertyDescriptor(controller, "signal"))
+      throw Error("MODS_CALL_SCOPE_CHANGED")
+    Reflect.apply(composerSignalThrow, signal, [])
+    assertQueue()
+    if (preparer) {
+      if (nativeTypes.isProxy(preparer) || Object.getPrototypeOf(preparer) !== prototype ||
+        Reflect.apply(composerIpcMapGet, currentRunMessagePreparers, [threadId]) !== preparer ||
+        Reflect.ownKeys(preparer).length !== fields.length) throw Error("MODS_CALL_SCOPE_CHANGED")
+      for (let index = 0; index < fields.length; index++) {
+        const expected = fields[index][1], current = Object.getOwnPropertyDescriptor(preparer, fields[index][0])
+        if (!current || !("value" in current) || current.value !== expected.value ||
+          current.enumerable !== expected.enumerable || current.writable !== expected.writable ||
+          current.configurable !== expected.configurable) throw Error("MODS_CALL_SCOPE_CHANGED")
+      }
+    }
+  }
+  assertDataCurrent()
+  return assertDataCurrent
+}
 
 function currentRunMessagePreparationKey(threadId: string, runToken: string): string {
   return JSON.stringify([threadId, runToken])
@@ -1944,10 +2012,15 @@ async function settlePhysicalAgentRun({
   releaseRunLease = true
 }: PhysicalAgentRunSettlementOptions): Promise<void> {
   let transcriptFlushSucceeded = false
+  let developmentSettlementFailed = false
+  const developmentOriginalThread = getThreadCore(threadId)
+  const developmentIncarnation = developmentOriginalThread
+    ? captureThreadIncarnation(developmentOriginalThread) : undefined
   let notificationSettlement = Promise.resolve()
   const terminalRunOwnsSharedResources = (): boolean =>
     !physicalRunHasSuccessor(threadId, runToken, controller)
   const reportSettlementError = (phaseName: string, error: unknown): void => {
+    developmentSettlementFailed = true
     console.warn(
       `[Agent] ${kind} settlement phase failed for thread ${threadId} (${phaseName}):`,
       error
@@ -2029,6 +2102,7 @@ async function settlePhysicalAgentRun({
         run: () => {
           if (activeRunSettled.get(threadId) === settledPromise) {
             activeRunSettled.delete(threadId)
+            notifyAgentRunSettled(threadId)
           }
         }
       },
@@ -2051,6 +2125,14 @@ async function settlePhysicalAgentRun({
     resolveSettlement,
     onPhaseError: reportSettlementError
   })
+
+  if (releaseRunLease && developmentIncarnation &&
+    matchesThreadIncarnation(getThreadCore(threadId), developmentIncarnation)) {
+    publishDevelopmentTurnSettlement({ threadId, incarnation: developmentIncarnation,
+      turnId: runToken, outcome: controller.signal.aborted ? "cancelled" :
+        developmentSettlementFailed || !transcriptFlushSucceeded || functionTurnReason !== "answer"
+          ? "failed" : "completed" })
+  }
 
   // Notification persistence, metadata pruning, and telemetry are useful
   // best-effort maintenance, but none may hold the settlement promise (and
@@ -2401,6 +2483,7 @@ function registerCurrentRunMessagePreparer({
       const prepared = await prepareStandardUserPrompt({
         rawMessage: queuedMessage.content,
         initialModelInput: initialQueuedModelInput,
+        allowExplicitSkillFromMessage: queuedMessage.allowExplicitSkillFromMessage ?? true,
         threadId,
         workspacePath,
         turnState: promptTurnState,
@@ -2445,11 +2528,15 @@ function registerCurrentRunMessagePreparer({
 }
 
 async function validateExplicitGoalSkillContext(
-  context: GoalContext | undefined
+  context: GoalContext | undefined,
+  threadId: string
 ): Promise<string | null> {
   const explicitSkill = context?.explicitSkill
   if (!explicitSkill) return null
-  return validateExplicitSkillReference(explicitSkill)
+  return validateExplicitSkillReference(explicitSkill, {
+    threadId,
+    workspacePath: getThreadWorkspacePath(threadId) ?? ""
+  })
 }
 
 interface ActiveHookSummary {
@@ -3886,19 +3973,29 @@ function discardStreamTranscriptToolCallAccumulatorsForThread(threadId: string):
 function flushPendingStreamTranscriptMessages(
   threadId: string,
   runToken: string,
-  options: { throwOnError?: boolean } = {}
+  options: { throwOnError?: boolean; messageId?: string; assertCurrent?: () => void } = {}
 ): void {
+  options.assertCurrent?.()
   const pendingKey = pendingStreamTranscriptKey(threadId, runToken)
   const pending = pendingStreamTranscriptMessages.get(pendingKey)
   if (!pending) return
+  const selected = options.messageId === undefined ? pending.messages :
+    pending.messages.filter(message => message.id === options.messageId)
+  if (!selected.length) { options.assertCurrent?.(); return }
+  const targeted = options.messageId !== undefined
 
-  if (pending.timer) clearTimeout(pending.timer)
-  pendingStreamTranscriptMessages.delete(pendingKey)
+  if (!targeted) {
+    if (pending.timer) clearTimeout(pending.timer)
+    pendingStreamTranscriptMessages.delete(pendingKey)
+  }
 
   let rejectedDeltaIdentity: { providerSourceId: string; providerOccurrence: number } | undefined
   try {
-    if (pending.requiredSnapshotProviderSourceId) {
-      const hasRequiredSnapshot = pending.messages.some(
+    if (pending.requiredSnapshotProviderSourceId && (!targeted || selected.some(message =>
+      getMessageProviderSourceId(message) === pending.requiredSnapshotProviderSourceId &&
+      (pending.requiredSnapshotProviderOccurrence === undefined ||
+        (getMessageProviderOccurrence(message) ?? 1) === pending.requiredSnapshotProviderOccurrence)))) {
+      const hasRequiredSnapshot = selected.some(
         (message) =>
           message.role === "assistant" &&
           message.streamContentMode === "snapshot" &&
@@ -3910,13 +4007,16 @@ function flushPendingStreamTranscriptMessages(
         throw new Error("Stream suffix is waiting for an authoritative assistant snapshot")
       }
     }
+    const queuedMessages = reconcileNativePartialQueuedMessages(selected, threadId, runToken)
+    const retainedPartials = new Set(queuedMessages)
+    const retiredPartials = selected.filter(message => !retainedPartials.has(message))
     const resolved = resolveStreamTranscriptFlush({
-      queuedMessages: pending.messages,
+      queuedMessages,
       currentAssistantIdentity: streamTranscriptAssistantIdentities.get(pendingKey),
       loadBaselineMessages: () =>
         getThreadMessageIdentityContext(
           threadId,
-          pending.messages.map((message) => ({
+          selected.map((message) => ({
             messageId: message.id,
             providerSourceId: getMessageProviderSourceId(message),
             providerOccurrence: getMessageProviderOccurrence(message),
@@ -3925,10 +4025,11 @@ function flushPendingStreamTranscriptMessages(
         )
     })
     const { messages, preserveExistingOrder } = resolved
-    if (messages.length === 0) return
+    const partition = partitionCanonicalThreadMessageEchoes(threadId, messages)
     let persistedCount: number
-    if (resolved.appendTextDelta && messages.length === 1) {
-      if (!appendThreadMessageTextDelta(threadId, messages[0])) {
+    if (partition.ordinary.length === 0) persistedCount = partition.canonicalCount
+    else if (resolved.appendTextDelta && messages.length === 1) {
+      if (!appendThreadMessageTextDelta(threadId, partition.ordinary[0])) {
         // This payload is a suffix, not an authoritative snapshot. Falling
         // through to upsert would replace/create the durable row with only the
         // suffix. Retain it in the pending buffer until a safe snapshot arrives.
@@ -3936,19 +4037,35 @@ function flushPendingStreamTranscriptMessages(
           providerSourceId: getMessageProviderSourceId(messages[0]),
           providerOccurrence: getMessageProviderOccurrence(messages[0]) ?? 1
         }
-        streamTranscriptAssistantIdentities.delete(pendingKey)
+        if (!targeted) streamTranscriptAssistantIdentities.delete(pendingKey)
         throw new Error("Stream text delta no longer matches its durable assistant row")
       }
       persistedCount = 1
     } else {
-      persistedCount = upsertThreadMessages(threadId, messages, { preserveExistingOrder })
+      persistedCount = partition.canonicalCount +
+        upsertThreadMessages(threadId, partition.ordinary, { preserveExistingOrder })
     }
     if (persistedCount !== messages.length) {
       throw new Error(
         `Expected to persist ${messages.length} streamed transcript message(s), persisted ${persistedCount}`
       )
     }
-    if (resolved.nextAssistantIdentity) {
+    options.assertCurrent?.()
+    // Ordinary coalescing/persistence may read other payloads. Recheck retired rows after
+    // those callbacks before acknowledging removal of their exact pending partials.
+    if (retiredPartials.length &&
+      reconcileNativePartialQueuedMessages(retiredPartials, threadId, runToken).length)
+      throw Error("MODS_NATIVE_PARTIAL_PERSISTENCE_INVALID")
+    if (targeted) {
+      if (pendingStreamTranscriptMessages.get(pendingKey) !== pending)
+        throw new Error("Native transcript buffer changed during flush")
+      const selectedSet = new Set(selected)
+      pending.messages = pending.messages.filter(message => !selectedSet.has(message))
+      if (!pending.messages.length) {
+        if (pending.timer) clearTimeout(pending.timer)
+        pendingStreamTranscriptMessages.delete(pendingKey)
+      }
+    } else if (resolved.nextAssistantIdentity) {
       streamTranscriptAssistantIdentities.set(pendingKey, resolved.nextAssistantIdentity)
     } else {
       streamTranscriptAssistantIdentities.delete(pendingKey)
@@ -3957,7 +4074,7 @@ function flushPendingStreamTranscriptMessages(
     // Preserve the buffer for the terminal flush or a later injection retry.
     // In strict mode the steering middleware also restores the user message
     // instead of acknowledging a transcript with an unsafe ordinal.
-    pendingStreamTranscriptMessages.set(pendingKey, {
+    if (!targeted) pendingStreamTranscriptMessages.set(pendingKey, {
       threadId,
       runToken,
       messages: pending.messages,
@@ -3968,6 +4085,36 @@ function flushPendingStreamTranscriptMessages(
     })
     if (options.throwOnError) throw error
     console.warn("[Agent] Failed to persist streamed transcript messages:", error)
+  }
+}
+
+/** Only the original physical run can seal one occurrence's buffered stream projection. */
+export function captureNativeConversationTranscriptFlush(threadId: string, runToken: string,
+  signal: AbortSignal): (uuid: string) => void {
+  const assertQueueOwner = captureCurrentRunMessageQueueOwner(threadId, runToken)
+  const database = getDb(), thread = getThreadCore(threadId)
+  const ownsLease = captureLocalThreadRunLease(threadId)
+  if (!thread || !ownsLease || getLocalThreadRunLease(threadId)?.runId !== runToken)
+    throw new Error("MODS_CONVERSATION_NATIVE_SOURCE_INVALID")
+  const incarnation = captureThreadIncarnation(thread)
+  const assertCurrent = () => {
+    assertQueueOwner()
+    throwIfPhysicalStreamRunIsInactive(threadId, runToken, signal)
+    const current = getThreadCore(threadId)
+    if (!ownsLease() || getDb() !== database || !current ||
+      !matchesThreadIncarnation(current, incarnation))
+      throw new Error("MODS_CONVERSATION_NATIVE_SOURCE_INVALID")
+    assertQueueOwner()
+  }
+  assertCurrent()
+  return uuid => {
+    if (typeof uuid !== "string" || !uuid || uuid.trim() !== uuid)
+      throw new Error("MODS_CONVERSATION_NATIVE_SOURCE_INVALID")
+    assertCurrent()
+    flushPendingStreamTranscriptMessages(threadId, runToken, {
+      throwOnError: true, messageId: uuid, assertCurrent
+    })
+    assertCurrent()
   }
 }
 
@@ -4072,6 +4219,16 @@ function persistStreamTranscriptChunk(
 ): string | null {
   if (!isCurrentRunMessageQueueOwner(threadId, runToken)) return null
   if (shouldSkipMainTranscriptStreamPayload(mode, payload, threadId)) return null
+  const canonical = Array.isArray(payload) ?
+    readNativeConversationStreamProjection(payload[0], threadId) : null
+  if (canonical) {
+    const guardOwner = captureCurrentRunMessageQueueOwner(threadId, runToken)
+    const partition = partitionCanonicalThreadMessageEchoes(threadId, [canonical])
+    if (partition.canonicalCount !== 1 || partition.ordinary.length !== 0)
+      throw Error("MODS_CONVERSATION_STREAM_PROJECTION_INVALID")
+    guardOwner()
+    return canonical.id
+  }
   const message = persistedMessageFromStreamPayload(payload)
   if (!message) return null
   const completedRoute = routeCurrentRunCompletedAssistantMessage(threadId, message, runToken)
@@ -4085,7 +4242,9 @@ function persistStreamTranscriptChunk(
     setSerializedMessageIdentity(payload, completedRoute)
   }
   hydrateStreamTranscriptToolCalls(threadId, runToken, message)
-  queueStreamTranscriptMessage(threadId, runToken, { ...message, streamContentMode }, options)
+  const queuedMessage = { ...message, streamContentMode }
+  bindNativePartialQueuedMessage(payload, queuedMessage, threadId, runToken)
+  queueStreamTranscriptMessage(threadId, runToken, queuedMessage, options)
   return message.id
 }
 
@@ -4140,7 +4299,10 @@ function releaseAbandonedPhysicalStreamRunSetup(
   invalidateCurrentRunMessagePreparer(threadId, runToken)
   clearCurrentRunMessageQueue(threadId, runToken)
   if (activeRuns.get(threadId) === controller) activeRuns.delete(threadId)
-  if (activeRunSettled.get(threadId) === settledPromise) activeRunSettled.delete(threadId)
+  if (activeRunSettled.get(threadId) === settledPromise) {
+    activeRunSettled.delete(threadId)
+    notifyAgentRunSettled(threadId)
+  }
   resolveSettled()
 }
 
@@ -4238,25 +4400,24 @@ function persistVisibleUserTranscriptMessage(
   threadId: string,
   content: string,
   messageId?: string,
-  goal?: Pick<ThreadGoal, "goalId" | "activeWindowId"> | null
+  goal?: Pick<ThreadGoal, "goalId" | "activeWindowId"> | null,
+  onWrite?: (write: ThreadMessageWrite, disposition: "persisted" | "blank" | "plumbing") => void
 ): boolean {
-  if (!content.trim()) return true
-  if (isWorkflowPlumbingTranscriptContent(content)) return true
+  const write: ThreadMessageWrite = {
+    id: messageId?.trim() || uuid(), role: "user", content,
+    ...(goal?.goalId ? { goal_id: goal.goalId } : {}),
+    ...(goal?.activeWindowId ? { active_window_id: goal.activeWindowId } : {}),
+    created_at: new Date()
+  }
+  if (!content.trim()) { onWrite?.(write, "blank"); return true }
+  if (isWorkflowPlumbingTranscriptContent(content)) { onWrite?.(write, "plumbing"); return true }
   try {
     const changed = upsertThreadMessages(
       threadId,
-      [
-        {
-          id: messageId?.trim() || uuid(),
-          role: "user",
-          content,
-          ...(goal?.goalId ? { goal_id: goal.goalId } : {}),
-          ...(goal?.activeWindowId ? { active_window_id: goal.activeWindowId } : {}),
-          created_at: new Date()
-        }
-      ],
+      [write],
       { preserveExistingOrder: true }
     )
+    if (changed > 0) onWrite?.(write, "persisted")
     return changed > 0
   } catch (error) {
     console.warn("[Agent] Failed to persist user transcript message:", error)
@@ -5273,9 +5434,9 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
       _event,
       payload: {
         threadId?: string
-        message?: { id?: string; content?: string; displayContent?: string }
+        message?: { id?: string; content?: string; displayContent?: string; composerSubmission?: import("../../shared/mods/v2/composer-mentions").ComposerSubmission }
       }
-    ): Promise<{ queued: boolean; reason?: string; message?: string }> => {
+    ): Promise<{ queued: boolean; reason?: string; message?: string; visibleText?: string }> => {
       const threadId = payload?.threadId
       const message = payload?.message
       if (!threadId || !message?.id || !message.content?.trim()) {
@@ -5315,69 +5476,158 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           ) {
             return { queued: false, reason: "no_active_run" }
           }
-          let prepared: CurrentRunMessagePreparation
-          try {
-            prepared = await preparer.prepare({
-              content: messageContent,
-              displayContent: messageDisplayContent
-            })
-          } catch (error) {
-            const preparationError = error instanceof Error ? error.message : "引导消息预处理失败"
-            console.warn("[Agent][Queue] current-run prompt preparation failed:", error)
-            return {
-              queued: false,
-              reason: "hook_blocked",
-              message: preparationError
+          const prepareAndQueue = async (
+            submittedText = messageContent,
+            visibleText = messageDisplayContent || messageContent,
+            context: string[] = [],
+            allowExplicitSkillFromMessage = true,
+            assertAdmission?: () => void,
+            assertFilesCurrent?: () => Promise<void>,
+            assertOwnerData?: () => void
+          ): Promise<{ queued: boolean; reason?: string; message?: string; visibleText?: string }> => {
+            if (!allowExplicitSkillFromMessage && (!submittedText.trim() ||
+              isWorkflowPlumbingTranscriptContent(submittedText)))
+              return { queued: false, reason: "hook_blocked", message: "模组未提供可接收的任务文字" }
+            let prepared: CurrentRunMessagePreparation
+            try {
+              prepared = await preparer.prepare({
+                content: submittedText,
+                displayContent: visibleText,
+                allowExplicitSkillFromMessage
+              })
+            } catch (error) {
+              const preparationError = error instanceof Error ? error.message : "引导消息预处理失败"
+              console.warn("[Agent][Queue] current-run prompt preparation failed:", error)
+              return {
+                queued: false,
+                reason: "hook_blocked",
+                message: preparationError
+              }
             }
-          }
-          if (!prepared.accepted) {
-            return { queued: false, reason: prepared.reason, message: prepared.message }
-          }
-          // Goal state can change while an async hook or explicit-skill lifecycle
-          // runs. Recheck at the commit boundary so a late goal activation cannot
-          // receive an ordinary steered user message.
-          if (goalManager.get(threadId)?.status === "active") {
-            return { queued: false, reason: "active_goal" }
-          }
-          // The active run can settle, be stopped, or be replaced while an async
-          // hook executes. Never hand prepared content to an aborted/different run.
-          if (
-            activeRuns.get(threadId) !== activeController ||
-            activeController.signal.aborted ||
-            currentRunMessagePreparers.get(threadId)?.runToken !== preparer.runToken
-          ) {
-            return { queued: false, reason: "no_active_run" }
-          }
-          if (!isCurrentRunMessageQueueOwner(threadId, preparer.runToken)) {
-            return { queued: false, reason: "no_active_run" }
-          }
-          const queued = queueCurrentRunMessage(
-            threadId,
-            {
-              id: messageId,
-              content: prepared.content,
-              displayContent: neutralizeWorkflowPlumbingUserText(
-                messageDisplayContent || messageContent
-              )
-            },
-            preparer.runToken
-          )
-          if (!queued) {
-            if (isCurrentRunMessageWithdrawn(threadId, messageId)) {
-              return { queued: false, reason: "withdrawn" }
+            if (!prepared.accepted) {
+              return { queued: false, reason: prepared.reason, message: prepared.message }
             }
-            // Rejected because this id was already drained into the model loop (the
-            // renderer's local "已引导" state was stale relative to this run) — never
-            // silently rewrite content the model already responded to.
-            console.log(
-              `[Agent][Queue] rejected re-queue of already-injected message ${messageId} for thread ${threadId}`
+            // Goal state can change while an async hook or explicit-skill lifecycle
+            // runs. Recheck at the commit boundary so a late goal activation cannot
+            // receive an ordinary steered user message.
+            if (goalManager.get(threadId)?.status === "active") {
+              return { queued: false, reason: "active_goal" }
+            }
+            // The active run can settle, be stopped, or be replaced while an async
+            // hook executes. Never hand prepared content to an aborted/different run.
+            if (
+              activeRuns.get(threadId) !== activeController ||
+              activeController.signal.aborted ||
+              currentRunMessagePreparers.get(threadId)?.runToken !== preparer.runToken
+            ) {
+              return { queued: false, reason: "no_active_run" }
+            }
+            if (!isCurrentRunMessageQueueOwner(threadId, preparer.runToken)) {
+              return { queued: false, reason: "no_active_run" }
+            }
+            assertAdmission?.()
+            const queuedMessage = {
+              id: messageId, content: [prepared.content, ...context].join("\n\n"),
+              displayContent: allowExplicitSkillFromMessage
+                ? neutralizeWorkflowPlumbingUserText(visibleText) : visibleText
+            }
+            if (assertFilesCurrent) {
+              await assertFilesCurrent()
+              assertOwnerData?.()
+            }
+            const queued = queueCurrentRunMessage(
+              threadId,
+              queuedMessage,
+              preparer.runToken
             )
-            return { queued: false, reason: "already_injected" }
+            if (!queued) {
+              if (isCurrentRunMessageWithdrawn(threadId, messageId)) {
+                return { queued: false, reason: "withdrawn" }
+              }
+              // Rejected because this id was already drained into the model loop (the
+              // renderer's local "已引导" state was stale relative to this run) — never
+              // silently rewrite content the model already responded to.
+              console.log(
+                `[Agent][Queue] rejected re-queue of already-injected message ${messageId} for thread ${threadId}`
+              )
+              return { queued: false, reason: "already_injected" }
+            }
+            console.log(
+              `[Agent][Queue] queued current-run message ${messageId} for thread ${threadId}`
+            )
+            return { queued: true, visibleText }
           }
-          console.log(
-            `[Agent][Queue] queued current-run message ${messageId} for thread ${threadId}`
-          )
-          return { queued: true }
+          const submissionManager = getModsManager()
+          const workspace = getThreadWorkspacePath(threadId)
+          const composerWindow = BrowserWindow.fromWebContents(_event.sender)
+          const mentionSubmission = composerWindow
+            ? captureComposerMentionSubmission(message.composerSubmission, messageContent) : undefined
+          const scope = workspace && submissionManager?.isEnabled(workspace)
+            ? submissionManager.functionUserScope(workspace, threadId) : undefined
+          if (mentionSubmission && submissionManager && workspace && composerWindow) {
+            const runtimeGuard = scope?.runtimeAuthority
+              ? submissionManager.captureFunctionRuntimeGuard(scope.runtimeAuthority) : undefined
+            const assertOwner = () => {
+              runtimeGuard?.()
+              if (activeRuns.get(threadId) !== activeController || activeController.signal.aborted ||
+                currentRunMessagePreparers.get(threadId) !== preparer ||
+                !isCurrentRunMessageQueueOwner(threadId, preparer.runToken) ||
+                goalManager.get(threadId)?.status === "active") throw Error("MODS_CALL_SCOPE_CHANGED")
+            }
+            const assertOwnerData = captureComposerIpcOwnerData(threadId, preparer.runToken,
+              activeController, preparer)
+            let accepted: Awaited<ReturnType<typeof prepareAndQueue>> | undefined
+            try {
+              const result = await submissionManager.prepareComposerMentions(workspace, threadId,
+                scope?.runtimeAuthority?.turnId ?? preparer.runToken, mentionSubmission,
+                activeController.signal, assertOwner, async (received, assertFilesCurrent) => {
+                  accepted = await prepareAndQueue(String(received.text), messageDisplayContent || messageContent,
+                    (received.context as string[] | undefined) ?? [], true, assertOwner,
+                    assertFilesCurrent, assertOwnerData)
+                  return accepted
+                }, scope?.runtimeAuthority)
+              return accepted ?? { queued: false, reason: "hook_blocked",
+                message: "drop" in result ? String(result.drop) : "消息未进入当前任务" }
+            } catch (error) {
+              if (accepted?.queued) return accepted
+              return { queued: false, reason: "hook_blocked",
+                message: error instanceof Error ? error.message : "文件提及准备失败" }
+            }
+          }
+          if (!submissionManager || !workspace || !composerWindow ||
+            !isPlainComposerSubmission(message.composerSubmission, messageContent) ||
+            /^\s*\//.test(messageContent) || containsCoordinatorInternalMarker(messageContent) ||
+            parseSkillUseBlock(messageContent) ||
+            !scope?.runtimeAuthority) return prepareAndQueue()
+          const runtimeGuard = submissionManager.captureFunctionRuntimeGuard(scope.runtimeAuthority)
+          const assertOwner = () => {
+            runtimeGuard()
+            if (activeRuns.get(threadId) !== activeController || activeController.signal.aborted ||
+              currentRunMessagePreparers.get(threadId)?.runToken !== preparer.runToken ||
+              !isCurrentRunMessageQueueOwner(threadId, preparer.runToken) ||
+              goalManager.get(threadId)?.status === "active") throw new Error("MODS_CALL_SCOPE_CHANGED")
+          }
+          let accepted: Awaited<ReturnType<typeof prepareAndQueue>> | undefined
+          try {
+            const result = await submissionManager.submitComposerPrompt(workspace, threadId,
+              scope.runtimeAuthority.turnId,
+              { text: messageContent, origin: { kind: "composer" }, wait: false,
+                turnId: scope.runtimeAuthority.turnId },
+              activeController.signal, assertOwner,
+              async (received): Promise<import("../../shared/mods/types").ModObject> => {
+                accepted = await prepareAndQueue(String(received.text), String(received.text),
+                  (received.context as string[] | undefined) ?? [], false, assertOwner)
+                return accepted.queued ? { text: received.text, origin: received.origin,
+                  ...(received.context === undefined ? {} : { context: received.context }) }
+                  : { drop: accepted.message || accepted.reason || "消息未进入当前任务" }
+              }, scope.runtimeAuthority)
+            return accepted ?? { queued: false, reason: "hook_blocked", message: String(result.drop) }
+          } catch (error) {
+            // Acceptance is a fact even if a subsequent optional observer fails.
+            if (accepted?.queued) return accepted
+            return { queued: false, reason: "hook_blocked",
+              message: error instanceof Error ? error.message : "消息提交失败" }
+          }
         })
       } finally {
         trackCurrentRunMessagePreparation(preparationLockKey, messageId, -1)
@@ -5719,6 +5969,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
   // Handle agent invocation with streaming. The transport-neutral run body is
   // registered here; the IPC listener below is only an adapter into this path.
   registerActiveAgentRunInspector(hasActiveAgentRun)
+  registerAgentRunSettlingInspector(threadId => activeRunSettled.has(threadId))
   // Same abort the Stop button's ordinary path takes; exposed so a caller that
   // only knows "this thread has a background run" can reach it without owning
   // the stream. See cancelActiveAgentRun.
@@ -5756,11 +6007,19 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
         message,
         modelId,
         streamRequestId,
-        userMessageId,
+        userMessageId: requestedUserMessageId,
         agentMode: requestedAgentMode,
         managedExecution,
         coordinatorInternalNotification
       }: AgentInvokeParams = request
+      // The original visible row and final Human input share one address even for callers
+      // that omit an ID. Generating another ID during persistence would split that occurrence.
+      const userMessageId = requestedUserMessageId?.trim() || uuid()
+      const pluginPrompt = nativePluginPromptRun(runExecutionContext.pluginPrompt, threadId, message)
+      if (runExecutionContext.source === "mods" && !pluginPrompt)
+        throw Error("MODS_PLUGIN_PROMPT_RECEIPT_INVALID")
+      if (pluginPrompt && isWorkflowPlumbingTranscriptContent(message))
+        throw Error("MODS_PLUGIN_PROMPT_INTERNAL_TEXT")
       if (!managedExecution && managedBizRetryService.blocksThread(threadId)) {
         const error = "请在决策入口操作"
         delivery.send(
@@ -5779,15 +6038,33 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
       // gating must see the state the request was prepared against, not a later
       // mode/workspace commit (mirrors the UAT initial snapshot).
       const initialInvokeThread = getThreadCore(threadId)
+      if (initialInvokeThread) {
+        try {
+          assertFunctionConversationForkReady(getDb(), {
+            threadId, incarnation: captureThreadIncarnation(initialInvokeThread)
+          })
+        } catch (error) {
+          if (!(error instanceof ModFunctionError) ||
+            error.code !== "MODS_CONVERSATION_FORK_PREPARING") throw error
+          const message = "会话正在复制，请稍后再试。"
+          delivery.send(resolveAgentStreamRequestChannel(`agent:stream:${threadId}`,
+            streamRequestId), { type: "error", error: message })
+          runExecutionContext.onRunTerminated?.({ outcome: "error",
+            code: "conversation_fork_preparing", message })
+          return
+        }
+      }
       const initialInvokeParsedMetadata = parseStandardThreadMetadata(initialInvokeThread?.metadata)
       const initialInvokeMetadata = initialInvokeParsedMetadata.metadata
       const initialInvokeAgentMode = initialInvokeParsedMetadata.agentMode
       const initialInvokeCoordinatorRequest = resolveCoordinatorModeRequest(
-        message,
+        pluginPrompt ? "" : message,
         initialInvokeMetadata,
         { allowForcedRequests: allowsForcedCoordinatorRequests(initialInvokeMetadata) }
       )
       const initialInvokeWorkspacePath = initialInvokeParsedMetadata.workspacePath
+      if (pluginPrompt && (initialInvokeAgentMode !== "normal" || initialInvokeCoordinatorRequest.enabled))
+        throw Error("MODS_PLUGIN_PROMPT_SCOPE_UNSUPPORTED")
       const baseChannel = `agent:stream:${threadId}`
       // May be a managed transport's shim rather than a real window — only
       // id / isDestroyed / webContents.send / webContents.isDestroyed exist on
@@ -5816,7 +6093,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
       // actually being in workflow agent mode (a pasted byte-exact prompt in a
       // non-workflow thread stays an ordinary user message and preempts normally).
       const isWorkflowNotificationInvoke =
-        isWorkflowNotificationTurnMessage(message) && initialInvokeAgentMode === "workflow"
+        !pluginPrompt && isWorkflowNotificationTurnMessage(message) && initialInvokeAgentMode === "workflow"
       const ambientChannel = isTrustedCoordinatorNotificationInvoke
         ? `${baseChannel}:coordinator-internal`
         : baseChannel
@@ -5843,7 +6120,8 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
       ) {
         return
       }
-      let modelInputMessage = message
+      let modelInputMessage = pluginPrompt
+        ? functionPluginPromptModelText(message, pluginPrompt.origin, pluginPrompt.framed) : message
       let routingMessage = message
       let rootUserPrompt = message
       let runGoalId: string | null = null
@@ -5866,7 +6144,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
         return false
       }
 
-      if (!isTrustedCoordinatorNotificationInvoke && !isWorkflowNotificationInvoke) {
+      if (!pluginPrompt && !isTrustedCoordinatorNotificationInvoke && !isWorkflowNotificationInvoke) {
         const goalCommand = parseGoalSlashCommand(message)
         if (goalCommand.type !== "none") {
           try {
@@ -5930,7 +6208,8 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               }
               const resumeGoalSignature = readGoalMutationSignature(threadId)
               const explicitSkillValidationError = await validateExplicitGoalSkillContext(
-                currentGoal.context
+                currentGoal.context,
+                threadId
               )
               if (explicitSkillValidationError) {
                 safeSendToWindow(window, channel, {
@@ -6053,7 +6332,8 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               }
               const setGoalSignature = readGoalMutationSignature(threadId)
               const explicitSkillValidationError = await validateExplicitGoalSkillContext(
-                goalCommand.context
+                goalCommand.context,
+                threadId
               )
               if (explicitSkillValidationError) {
                 safeSendToWindow(window, channel, {
@@ -6167,6 +6447,8 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               return { threadContextChanged: true as const }
             }
             const initialController = activeRuns.get(threadId)
+            if (pluginPrompt && (initialController || activeRunSettled.has(threadId)))
+              throw Error("MODS_PLUGIN_PROMPT_NOT_IDLE")
             if (initialController && isTrustedCoordinatorNotificationInvoke) {
               return { ignoredInternalNotification: true as const }
             }
@@ -6310,7 +6592,10 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             const errorMessage = error instanceof Error ? error.message : String(error)
             safeSendToWindow(window, channel, { type: "error", error: errorMessage })
             safeSendToWindow(window, channel, { type: "done" })
-          }
+          },
+          ...(runExecutionContext.fileComposerSubmission
+            ? { onOwnedCancellation: () => safeSendToWindow(window, channel, { type: "done" }) }
+            : {})
         })
         pendingPhysicalStreamRunSetupGuard = physicalStreamRunSetupGuard
         physicalStreamRunSetupGuard.addCleanup(removeExternalAbortSubscription)
@@ -6358,7 +6643,111 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
         if (durableRuntimeTailSetup.status === "abandoned") return
         const durableRuntimeTail = durableRuntimeTailSetup.value
         let userTranscriptMessagePersisted = false
+        let nativeInputTranscript: { write: ThreadMessageWrite;
+          disposition: "persisted" | "blank" | "plumbing" } | undefined
+        const captureNativeInputTranscript = (write: ThreadMessageWrite,
+          disposition: "persisted" | "blank" | "plumbing") => {
+          nativeInputTranscript = { write, disposition }
+        }
         let visibleTranscriptUserMessage = message
+        let modsSubmittedText: string | undefined = pluginPrompt?.text
+        let modsSubmittedContext: string[] = pluginPrompt ? [...pluginPrompt.context] : []
+        if (pluginPrompt) {
+          pluginPrompt.assertLive()
+          if (!physicalStreamRunSetupGuard.isActive()) throw Error("MODS_CALL_SCOPE_CHANGED")
+          const id = userMessageId!
+          const write: ThreadMessageWrite = { id, role: "user", content: pluginPrompt.text,
+            created_at: new Date() }
+          upsertThreadMessages(threadId, [write], { preserveExistingOrder: true,
+            hostPromptOrigin: { messageId: id, text: pluginPrompt.text, origin: pluginPrompt.origin } })
+          const persisted = getThreadMessagesByIds(threadId, [id])[0]
+          if (persisted?.content !== pluginPrompt.text || !persisted.prompt_origin)
+            throw Error("MODS_PLUGIN_PROMPT_ORIGIN_NOT_COMMITTED")
+          captureNativeInputTranscript(write, "persisted")
+          userTranscriptMessagePersisted = true
+          announceManagedTurnUserMessage(threadId, { id, content: pluginPrompt.text,
+            prompt_origin: pluginPrompt.origin })
+        }
+        const composerManager = getModsManager()
+        const fileSubmission = runExecutionContext.fileComposerSubmission
+        if (composerManager && initialInvokeWorkspacePath &&
+          (fileSubmission || (composerManager.isEnabled(initialInvokeWorkspacePath) &&
+            runExecutionContext.plainComposerSubmission &&
+            isPlainComposerSubmission(runExecutionContext.plainComposerSubmission, message))) &&
+          initialInvokeAgentMode === "normal" && !initialInvokeCoordinatorRequest.enabled &&
+          !/^\s*\//.test(message) && goalManager.get(threadId)?.status !== "active" &&
+          !shouldDeferUserTranscriptPersistence && !shouldDeferUserTranscriptForModeCommit &&
+          !containsCoordinatorInternalMarker(message) && (fileSubmission || !parseSkillUseBlock(message))) {
+          const submissionGoalSignature = readGoalMutationSignature(threadId)
+          const assertSubmissionOwner = () => {
+            if (!physicalStreamRunSetupGuard.isActive()) throw new Error("MODS_CALL_SCOPE_CHANGED")
+            if (goalManager.get(threadId)?.status === "active" ||
+              !isGoalMutationSignatureCurrent(threadId, submissionGoalSignature))
+              throw new Error("MODS_CALL_SCOPE_CHANGED")
+            const currentThread = getThreadCore(threadId)
+            if (!currentThread || !matchesThreadIncarnation(currentThread,
+              expectedPublicationContext.threadIncarnation) ||
+              !matchesAgentPublicationContext(currentThread, parseThreadMetadata(currentThread.metadata),
+                expectedPublicationContext)) throw new Error("MODS_CALL_SCOPE_CHANGED")
+          }
+          const assertOwnerData = fileSubmission
+            ? captureComposerIpcOwnerData(threadId, runToken, abortController) : undefined
+          const acceptComposer = async (received: import("../../shared/mods/types").ModObject,
+            assertFilesCurrent?: () => Promise<void>): Promise<import("../../shared/mods/types").ModObject> => {
+            assertSubmissionOwner()
+            const text = String(received.text)
+            if (isWorkflowPlumbingTranscriptContent(text))
+              throw new Error("MODS_PROMPT_SUBMIT_INTERNAL_TEXT")
+            const id = userMessageId || uuid()
+            const write: ThreadMessageWrite = { id, role: "user", content: text, created_at: new Date() }
+            const context = (received.context as string[] | undefined) ?? []
+            if (assertFilesCurrent) {
+              await assertFilesCurrent()
+              assertOwnerData?.()
+            }
+            persistAcceptedComposerPrompt(id, text,
+              () => { upsertThreadMessages(threadId, [write], { preserveExistingOrder: true }) },
+              () => getThreadMessagesByIds(threadId, [id])[0])
+            captureNativeInputTranscript(write, "persisted")
+            userTranscriptMessagePersisted = true
+            modsSubmittedText = text
+            modsSubmittedContext = context
+            safeSendToWindow(window, channel, { type: "custom", data: {
+              type: "mods_prompt_admitted", userMessageId, text
+            } })
+            return { text, origin: received.origin,
+              ...(received.context === undefined ? {} : { context: received.context }) }
+          }
+          const submissionSetup = await awaitPhysicalStreamRunSetup({
+            guard: physicalStreamRunSetupGuard,
+            operation: () => fileSubmission
+              ? composerManager.prepareComposerMentions(initialInvokeWorkspacePath!, threadId,
+                turnState.turnId ?? runToken, fileSubmission, abortController.signal,
+                assertSubmissionOwner, acceptComposer)
+              : composerManager.submitComposerPrompt(
+              initialInvokeWorkspacePath!, threadId, turnState.turnId ?? runToken,
+              { text: message, origin: { kind: "composer" }, wait: false },
+              abortController.signal, assertSubmissionOwner,
+              received => acceptComposer(received))
+          })
+          if (submissionSetup.status === "abandoned") return
+          if (typeof submissionSetup.value.drop === "string") {
+            safeSendToWindow(window, channel, { type: "custom", data: {
+              type: "mods_prompt_dropped", userMessageId,
+              reason: submissionSetup.value.drop
+            } })
+            safeSendToWindow(window, channel, { type: "done" })
+            physicalStreamRunSetupGuard.abandon()
+            return
+          }
+          if (modsSubmittedText !== undefined) {
+            visibleTranscriptUserMessage = modsSubmittedText
+            modelInputMessage = modsSubmittedText
+            rootUserPrompt = modsSubmittedText
+          }
+        }
+        if (fileSubmission && modsSubmittedText === undefined)
+          throw Error("当前会话状态不支持文件提及准备，请保留草稿后重试")
         // A managed transport resolves its skill out of band (trustedExplicitSkill)
         // and hands us prose whose own markers were already neutralized, so the
         // transcript would carry no record that a skill was chosen at all — the
@@ -6433,7 +6822,8 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
                     threadId,
                     visibleMessage,
                     userMessageId,
-                    goalTranscriptBoundary
+                    goalTranscriptBoundary,
+                    captureNativeInputTranscript
                   ),
                 onRollbackError: (rollbackError) => {
                   console.error(
@@ -6463,13 +6853,14 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
         if (
           !isTrustedCoordinatorNotificationInvoke &&
           !shouldDeferUserTranscriptPersistence &&
-          !shouldDeferUserTranscriptForModeCommit
+          !shouldDeferUserTranscriptForModeCommit && !userTranscriptMessagePersisted
         ) {
           userTranscriptMessagePersisted = persistVisibleUserTranscriptMessage(
             threadId,
             message,
             userMessageId,
-            goalTranscriptBoundary
+            goalTranscriptBoundary,
+            captureNativeInputTranscript
           )
         }
         const { hookScope, skillUseTracker, skillHookKeys, stopContextCollector } = turnState
@@ -6924,6 +7315,9 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
         // background workflow's edits — those are left in the working tree for the
         // user to review (see the workflow notification block below for why).
         let isInternalNotificationTurn = false
+        let cancellationTerminalPending = false
+        let invokeDoneAttempted = false
+        let cancelledRequestEligible = false
         // True ONLY for a workflow completion turn (NOT coordinator). Used to skip
         // user Stop hooks for it: a background workflow's result can ONLY arrive via
         // this single report turn, so a plugin Stop hook blocking it would lose the
@@ -7000,6 +7394,10 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           })
           harnessAgentContext.managedExecution =
             managedExecution === true || isActiveManagedRunSession(threadId)
+          cancelledRequestEligible = runExecutionContext.source === "desktop" &&
+            !harnessAgentContext.managedExecution && !pluginPrompt &&
+            !isTrustedCoordinatorNotificationInvoke && !isWorkflowNotificationInvoke &&
+            typeof streamRequestId === "string" && streamRequestId.trim().length > 0
           sendHarnessSessionContextInjectWarning(window, channel, harnessAgentContext)
           const rawOnAgentsPromptLoadStatus = createHarnessAgentmdLoadStatusHandler(
             window,
@@ -7181,8 +7579,8 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               initialModelInput,
               trustedExplicitSkill: runExecutionContext.trustedExplicitSkill,
               allowExplicitSkillFromMessage:
-                runExecutionContext.source === "desktop" ||
-                runExecutionContext.allowTrustedTransportSkillMarker === true,
+                modsSubmittedText === undefined && (runExecutionContext.source === "desktop" ||
+                runExecutionContext.allowTrustedTransportSkillMarker === true),
               threadId,
               workspacePath,
               turnState,
@@ -7206,7 +7604,8 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           // activation or the UserPromptSubmit hook, or a plugin could block /
           // rewrite / halt the result-report turn.
           if (!isInternalNotificationTurn) {
-            const preparedPrompt = await prepareUserPromptForCurrentRun(message, modelInputMessage)
+            const preparedPrompt = await prepareUserPromptForCurrentRun(
+              modsSubmittedText ?? message, modelInputMessage)
             throwIfInvokeAborted()
             if (!preparedPrompt.accepted) {
               if (preparedPrompt.blockedBy === "explicit_skill") {
@@ -7293,16 +7692,17 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             requestedAgentMode,
             initialInvokeAgentMode
           )
-          const coordinatorRequest = resolveCoordinatorModeRequest(effectiveMessage, metadata, {
+          const coordinatorRequest = resolveCoordinatorModeRequest(pluginPrompt ? "" : modsSubmittedText === undefined
+            ? effectiveMessage : message, metadata, {
             allowForcedRequests: allowsForcedCoordinatorRequests(metadata)
           })
-          effectiveMessage = coordinatorRequest.message
+          if (modsSubmittedText === undefined) effectiveMessage = coordinatorRequest.message
           if (
             !isCoordinatorNotificationTurn &&
             containsCoordinatorInternalMarker(effectiveMessage)
           ) {
             effectiveMessage = neutralizeCoordinatorInternalUserText(effectiveMessage)
-            visibleTranscriptUserMessage = effectiveMessage
+            if (modsSubmittedText === undefined) visibleTranscriptUserMessage = effectiveMessage
           }
           if (
             !userTranscriptMessagePersisted &&
@@ -7314,9 +7714,12 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               threadId,
               visibleTranscriptUserMessage,
               userMessageId,
-              goalTranscriptBoundary
+              goalTranscriptBoundary,
+              captureNativeInputTranscript
             )
           }
+
+          if (modsSubmittedContext.length) effectiveMessage += `\n\n${modsSubmittedContext.join("\n\n")}`
 
           const coordinatorForcedByRequest =
             coordinatorRequest.source === "message-prefix" ||
@@ -7524,7 +7927,8 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
                     threadId,
                     visibleTranscriptUserMessage,
                     userMessageId,
-                    goalTranscriptBoundary
+                    goalTranscriptBoundary,
+                    captureNativeInputTranscript
                   )
                 }
               })
@@ -7879,7 +8283,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
 
           const userHumanMessage = isCoordinatorNotificationTurn
             ? undefined
-            : effectiveMessage === message
+            : modsSubmittedText === undefined && effectiveMessage === message
               ? new HumanMessage({
                   id: userMessageId,
                   content: effectiveMessage
@@ -7892,6 +8296,27 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
                     [COORDINATOR_VISIBLE_USER_MESSAGE_KEY]: visibleTranscriptUserMessage
                   }
                 })
+
+          const nativeInputManager = getModsManager()
+          const nativeInputOrigin: FunctionSessionAppendOrigin = pluginPrompt
+            ? pluginPrompt.origin
+            : { kind: runExecutionContext.source === "im" ? "bridge"
+                : runExecutionContext.source === "scheduler" ? "scheduled-trigger"
+                : runExecutionContext.source === "heartbeat" ? "auto-continuation" : "composer" }
+          const nativeConversationInput = userHumanMessage && workspacePath &&
+            nativeInputManager?.isEnabled(workspacePath)
+            ? captureFunctionConversationNativeInput({
+                message: userHumanMessage, threadId, physicalRunId: runToken,
+                workspace: nativeInputManager.workspaceKey(workspacePath),
+                signal: abortController.signal, origin: nativeInputOrigin,
+                ...(nativeInputTranscript ? { transcript: nativeInputTranscript } : {}),
+                ...(modsSubmittedText === undefined && effectiveMessage === message ? {}
+                  : { visible: visibleTranscriptUserMessage }),
+                assertCurrent() {
+                  throwIfPhysicalStreamRunIsInactive(threadId, runToken, abortController.signal)
+                  pluginPrompt?.assertLive()
+                }
+              }) : undefined
 
           const humanMessages: BaseMessage[] = [
             ...durableRuntimeTail.messages,
@@ -7933,6 +8358,9 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               threadId,
               outputStyle: getRequestedOutputStyle(metadata),
               currentRunMessageQueueOwnerToken: runToken,
+              nativeConversationInput,
+              onNativeConversationTranscriptFlush: captureNativeConversationTranscriptFlush(
+                threadId, runToken, abortController.signal),
               workspacePath,
               coordinatorTurnPrompt,
               coordinatorSelectedSkill,
@@ -7963,7 +8391,12 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               skillHookKeys,
               skillUseTracker,
               onAgentsPromptLoadStatus,
-              onFileMutation: autoCommit.onFileMutation,
+              onFileMutation: (filePath, kind) => {
+                autoCommit.onFileMutation?.(filePath)
+                // Shell edits are observed by the sandbox rather than read off
+                // the stream; memory maintenance still lists them with the turn.
+                if (kind === "shell") fileWritePaths.push(filePath.replace(/\\/g, "/"))
+              },
               onCoordinatorWorkerHookResult,
               onCoordinatorWorkerEvent,
               onCoordinatorNotificationAction,
@@ -7995,7 +8428,8 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
                   cancel: () =>
                     cancelFunctionAgentTurn(threadId, runToken, abortController, window, channel),
                   assertCurrent: () =>
-                    throwIfPhysicalStreamRunIsInactive(threadId, runToken, abortController.signal)
+                    throwIfPhysicalStreamRunIsInactive(threadId, runToken, abortController.signal),
+                  ...(pluginPrompt ? { onStarted: () => pluginPrompt.started() } : {})
                 })
               throwIfInvokeAborted()
               // First attempt sends the message; subsequent attempts resume from checkpoint
@@ -8573,6 +9007,10 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
                   continue
                 }
                 await acknowledgeDeliveredCoordinatorNotificationsIfNeeded()
+                if (mode === "values" || mode === "updates") {
+                  await yieldBeforeStreamProjection(abortController.signal)
+                  throwIfInvokeAborted()
+                }
                 const {
                   data: serialized,
                   valuesMessageIndexOffset,
@@ -9335,6 +9773,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
                 markAutoModeTerminal("error", "unknown", invokeFinalReason)
               }
             }
+            invokeDoneAttempted = true
             safeSendToWindow(window, channel, { type: "done" })
             if (invokeFinalOutcome === "success" && !isInternalNotificationTurn) {
               emitAppAttention({
@@ -9641,6 +10080,9 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               console.warn("[Agent] Failed to schedule memory maintenance:", error)
             }
           } else {
+            cancellationTerminalPending = cancelledRequestEligible && !isInternalNotificationTurn &&
+              abortController.signal.aborted &&
+              ownsPhysicalStreamRunLease(threadId, runToken, abortController)
             notifyManagedAgentRunCancelled(runExecutionContext)
             pauseActiveGoalForRuntimeStop("Agent run was aborted.")
             syncUsedSkillsContext()
@@ -9850,6 +10292,9 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             markAutoModeTerminal("error", "provider_error", errMsg, error)
             turnStateShouldDispose = true
           } else {
+            cancellationTerminalPending = cancelledRequestEligible && !isInternalNotificationTurn &&
+              abortController.signal.aborted &&
+              ownsPhysicalStreamRunLease(threadId, runToken, abortController)
             notifyManagedAgentRunCancelled(runExecutionContext)
             pauseActiveGoalForRuntimeStop("Agent run was aborted.")
             syncUsedSkillsContext()
@@ -10046,6 +10491,11 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             turnStateShouldDispose,
             disposeTurnState: () => disposeTurnRuntimeState(threadId, turnState)
           })
+          if (cancellationTerminalPending && !invokeDoneAttempted && abortController.signal.aborted &&
+            !physicalRunHasSuccessor(threadId, runToken, abortController)) {
+            invokeDoneAttempted = true
+            safeSendToWindow(window, channel, { type: "done" })
+          }
           // SessionEnd is NOT fired here — it belongs to thread lifecycle (delete / app quit),
           // not turn completion. See fireSessionEnd call in threads:delete handler.
         }
@@ -10075,7 +10525,24 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
       return
     }
 
-    void startAgentRun(request, createBrowserWindowAgentRunDelivery(window))
+    let fileComposerSubmission: import("../../shared/mods/v2/composer-mentions").ComposerMentionSubmission | undefined
+    if (!request.managedExecution && !request.coordinatorInternalNotification) {
+      try { fileComposerSubmission = captureComposerMentionSubmission(request.composerSubmission, request.message) }
+      catch (error) {
+        const channel = resolveAgentStreamRequestChannel(`agent:stream:${request.threadId}`, request.streamRequestId)
+        safeSendToWindow(window, channel, { type: "error",
+          error: error instanceof Error ? error.message : "文件提及提交无效" })
+        safeSendToWindow(window, channel, { type: "done" })
+        return
+      }
+    }
+    void startAgentRun(request, createBrowserWindowAgentRunDelivery(window), {
+      source: "desktop",
+      ...(!request.managedExecution && !request.coordinatorInternalNotification &&
+        isPlainComposerSubmission(request.composerSubmission, request.message)
+        ? { plainComposerSubmission: request.composerSubmission } : {}),
+      ...(fileComposerSubmission ? { fileComposerSubmission } : {})
+    })
       .then((handle) => {
         void handle.completion.catch((error) => {
           console.error(`[Agent] Run completion failed for thread ${handle.threadId}:`, error)
@@ -10831,6 +11298,8 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             baseOptions: () => ({
               threadId,
               currentRunMessageQueueOwnerToken: runToken,
+              onNativeConversationTranscriptFlush: captureNativeConversationTranscriptFlush(
+                threadId, runToken, abortController.signal),
               onTurnCompletionRecovery: (input) => {
                 if (!isPhysicalStreamRunActive(threadId, runToken, abortController.signal)) return
                 notifyTurnCompletionRetry(window, channel, input)
@@ -11012,6 +11481,10 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
                 const [mode, data] = chunk as unknown as [string, unknown]
                 if (isCoordinatorWorkerStreamChunk(mode, data, threadId)) {
                   continue
+                }
+                if (mode === "values" || mode === "updates") {
+                  await yieldBeforeStreamProjection(abortController.signal)
+                  throwIfPhysicalStreamRunIsInactive(threadId, runToken, abortController.signal)
                 }
                 const {
                   data: serialized,
@@ -12000,6 +12473,8 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               threadId,
               outputStyle: getRequestedOutputStyle(metadata),
               currentRunMessageQueueOwnerToken: runToken,
+              onNativeConversationTranscriptFlush: captureNativeConversationTranscriptFlush(
+                threadId, runToken, abortController.signal),
               onTurnCompletionRecovery: (input) => {
                 if (!isPhysicalStreamRunActive(threadId, runToken, abortController.signal)) return
                 notifyTurnCompletionRetry(window, channel, input)
@@ -12174,6 +12649,10 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
                 const [mode, data] = chunk as unknown as [string, unknown]
                 if (isCoordinatorWorkerStreamChunk(mode, data, threadId)) {
                   continue
+                }
+                if (mode === "values" || mode === "updates") {
+                  await yieldBeforeStreamProjection(abortController.signal)
+                  throwIfPhysicalStreamRunIsInactive(threadId, runToken, abortController.signal)
                 }
                 const {
                   data: serialized,

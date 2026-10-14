@@ -3,7 +3,7 @@ import type { ModJson, ModObject } from "../types"
 export const MODS_V2_API = "cmb.mods/v2" as const
 export const CLAUDE_MODS_PROFILE = "claude-code/2.1.278" as const
 /** Bump when expanding host authority so an old digest grant cannot silently gain capabilities. */
-export const FUNCTION_HOST_REVISION = "file-read-options-v65" as const
+export const FUNCTION_HOST_REVISION = "claude-295-tools-v90" as const
 export const MOD_TIERS = ["prepend", "user", "append", "builtin", "core"] as const
 export type ModTier = (typeof MOD_TIERS)[number]
 
@@ -34,23 +34,45 @@ export interface ModTraceEntry {
 }
 
 export interface FunctionInvocation {
+  /** Native frame admission handshake; not an SDK method or guest-controlled permission. */
+  admission?: boolean
   event: string
   origin: ModOrigin
   capabilities: string[]
   plugin: { name: string; root: string }
-  caught?: { message: string; called: boolean }
+  /** Host-captured protocol; never inferred from a guest's call arguments. */
+  modelProtocol?: "legacy-v1" | "result-v1"
+  caught?: { message?: string; called: boolean; kind?: "throw" | "timeout"; budget?: number }
   signal?: AbortSignal
   timeoutMs?: number
+  /** Native own-time meter, independent of the absolute timeout. Zero is unmetered. */
+  ownBudgetMs?: number
+  /** Native shared wall cut; host-captured, omitted from the guest metadata and public SDK. */
+  dispatchCutNs?: string
   streaming?: boolean
   operation?: boolean
   uiGeneration?: string
   /** Session-owned engine noun method handle, never chosen by a calling plugin. */
   provider?: string
+  /** Host-owned callback handle invoked under a fresh module authority frame. */
+  resourceCallback?: { handle: number; release: boolean }
+  /** Private per-pull generator protocol, never derived from an event payload. */
+  streamCursor?: { action: "open" | "next" | "return"; id?: number }
   callback?: {
     handle: number
     generation: string
-    kind: "onPress" | "onInput" | "onSubmit" | "onSelect"
+    kind: "onPress" | "onInput" | "onSubmit" | "onSelect" | "onLinkPress"
   }
+}
+
+/** Old private invocations retain their original absolute timeout unless explicitly opted in. */
+export function functionInvocationTimeoutMs(
+  options: Pick<FunctionInvocation, "timeoutMs" | "ownBudgetMs">
+): number {
+  return Math.min(
+    Math.max(options.timeoutMs ?? (options.ownBudgetMs === undefined ? 5000 : 120000), 1),
+    120000
+  )
 }
 
 export interface FunctionHostReply {
@@ -61,13 +83,19 @@ export interface FunctionHostReply {
 export type FunctionHostCall = (
   method: string,
   args: ModJson,
-  signal: AbortSignal
+  signal: AbortSignal,
+  /** Captured by native module transport only; never accepted from SDK argument JSON. */
+  context?: { dispatchCutNs: string }
 ) => Promise<FunctionHostReply>
 
 /** Both the isolated production proxy and the in-process test VM implement this contract. */
 export interface FunctionGuest {
   readonly registrations: readonly FunctionRegistration[]
   readonly stats: { disposed: boolean }
+  /** One module-lifetime resource channel. It never extends an invocation's SDK authority. */
+  bindModuleHost?(host: FunctionHostCall, onDispose?: () => void): void
+  releaseResource?(handle: number): void | Promise<void>
+  releaseStreamCursor?(handle: number): void | Promise<void>
   matches(id: string, event: ModObject): boolean | Promise<boolean>
   invoke(
     id: string,

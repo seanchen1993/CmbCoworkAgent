@@ -1,0 +1,5 @@
+{
+  "name": "workspace-audit",
+  "version": "1.0.0",
+  "description": "Choose and order repository checks, with background output and cancellable progress"
+}

@@ -6,15 +6,28 @@ import {
   toMessageDict,
   type EventStreamEvent
 } from "@langchain/langgraph-sdk/ui"
+import type { ModelSelectionIntent } from "./model-selection-intent"
+import {
+  functionConversationTranscriptFields,
+  sameFunctionConversationTranscriptStamp
+} from "../../../shared/mods/v2/conversation-transcript"
 
 type StreamValues = Record<string, unknown>
-type SubmitOptions = Parameters<UseStreamCustom<StreamValues>["submit"]>[1]
-type AssistantSnapshot = Extract<Message, { type: "ai" }> & { id: string }
+export type ElectronStreamSubmitOptions = NonNullable<
+  Parameters<UseStreamCustom<StreamValues>["submit"]>[1]
+> & {
+  modelSelectionIntent?: ModelSelectionIntent
+}
+type AssistantSnapshot = Omit<Extract<Message, { type: "ai" }>, "content"> & {
+  id: string
+  content?: Extract<Message, { type: "ai" }>["content"]
+}
 
 export interface ElectronStreamOptions {
   transport: UseStreamTransport
   threadId: string
-  onCustomEvent?: (data: unknown) => void
+  captureModelSelectionIntent?: () => ModelSelectionIntent
+  onCustomEvent?: (data: unknown, receipt?: ModelSelectionIntent) => void
   onError?: (error: unknown) => void
 }
 
@@ -42,10 +55,75 @@ function sanitizeSnapshotMessages(messages: unknown[]): Message[] {
  * values can be partial/lagging. Only an explicit retry or new run resets them.
  */
 class SnapshotMessageTupleManager extends MessageTupleManager {
+  private identities = new Map<string, { type: Message["type"]; fields: Record<string, unknown> }>()
   private frame: Message[] = EMPTY_MESSAGES
   private indexes: Map<string, number> | null = null
   private writtenId: string | null = null
   private authoritativeContentIds = new Set<string>()
+
+  private rememberIdentity(message: Message): void {
+    if (!message.id) return
+    const incoming = message as Message & Record<string, unknown>
+    const prior = this.identities.get(message.id)
+    const native = functionConversationTranscriptFields(message, message.id, message.type)
+    const fields: Record<string, unknown> = { ...native }
+    for (const key of ["provider_source_id", "provider_occurrence"] as const) {
+      if (Object.hasOwn(incoming, key)) fields[key] = incoming[key]
+    }
+    if (prior) {
+      const differentTuple = ["provider_source_id", "provider_occurrence"].some(
+        (key) =>
+          Object.hasOwn(fields, key) &&
+          Object.hasOwn(prior.fields, key) &&
+          fields[key] !== prior.fields[key]
+      )
+      const previousNative = functionConversationTranscriptFields(
+        prior.fields,
+        message.id,
+        prior.type
+      )
+      const conflictingStamp =
+        previousNative.function_row &&
+        native.function_row &&
+        !sameFunctionConversationTranscriptStamp(previousNative.function_row, native.function_row)
+      if (prior.type !== message.type || differentTuple || conflictingStamp) {
+        if (
+          previousNative.function_row ||
+          previousNative.function_row_invalid ||
+          native.function_row ||
+          native.function_row_invalid
+        ) {
+          delete fields.function_row
+          fields.function_row_invalid = true
+        }
+      } else {
+        Object.assign(fields, { ...prior.fields, ...fields })
+      }
+    }
+    if (fields.function_row_invalid) delete fields.function_row
+    this.identities.set(message.id, { type: message.type, fields })
+  }
+
+  override add(message: Message, metadata: Record<string, unknown> | undefined): string | null {
+    this.rememberIdentity(message)
+    return super.add(message, metadata)
+  }
+
+  private restoreIdentity(message: Message): Message {
+    const identity = message.id ? this.identities.get(message.id) : undefined
+    if (identity?.type !== message.type || !Object.keys(identity.fields).length) return message
+    const restored = { ...message, ...identity.fields }
+    if (identity.fields.function_row_invalid)
+      delete (restored as Record<string, unknown>).function_row
+    return restored
+  }
+
+  observeSnapshot(frame: Message[]): Message[] {
+    return frame.map((message) => {
+      this.rememberIdentity(message)
+      return this.restoreIdentity(message)
+    })
+  }
 
   readFrame(frame: Message[]): Message[] {
     if (frame !== this.frame) {
@@ -56,6 +134,12 @@ class SnapshotMessageTupleManager extends MessageTupleManager {
   }
 
   commitFrame(frame: Message[]): void {
+    if (this.writtenId) {
+      const index = super.get(this.writtenId)?.index
+      if (index !== undefined && frame[index]?.id === this.writtenId) {
+        frame[index] = this.restoreIdentity(frame[index])
+      }
+    }
     if (this.writtenId && this.authoritativeContentIds.has(this.writtenId)) {
       const index = super.get(this.writtenId)?.index
       if (index !== undefined && frame[index]?.id === this.writtenId) {
@@ -82,13 +166,15 @@ class SnapshotMessageTupleManager extends MessageTupleManager {
     const index = frame.findIndex((message) => message.id === snapshot.id && message.type === "ai")
     const tuple = super.get(snapshot.id)
     if (tuple?.chunk && tuple.chunk.getType() !== "ai") return frame
-    const merged = {
+    this.rememberIdentity({ ...snapshot, content: snapshot.content ?? "" })
+    const merged = this.restoreIdentity({
+      content: "",
       ...(index >= 0 ? frame[index] : undefined),
       // An ordinary values frame may have omitted this message. Its buffered
       // tool arguments still belong to the run and must survive a text rewrite.
       ...(tuple?.chunk ? toMessageDict(tuple.chunk) : undefined),
       ...snapshot
-    }
+    })
     // Use the public SDK converter through a fresh manager, then replace only
     // this tuple's seed. Clearing all tuples would lose interleaved tool streams.
     const seed = new MessageTupleManager()
@@ -97,9 +183,12 @@ class SnapshotMessageTupleManager extends MessageTupleManager {
     seed.add(merged, undefined)
     if (tuple) tuple.chunk = seed.get(snapshot.id)?.chunk
     else super.add(merged, undefined)
-    this.authoritativeContentIds.add(snapshot.id)
+    if (snapshot.content !== undefined) this.authoritativeContentIds.add(snapshot.id)
     const messages = frame.slice()
-    const replacement = { ...merged, content_priority: 1 }
+    const replacement = {
+      ...merged,
+      ...(snapshot.content !== undefined && { content_priority: 1 })
+    }
     if (index >= 0) messages[index] = replacement
     else messages.push(replacement)
     return messages
@@ -123,6 +212,7 @@ class SnapshotMessageTupleManager extends MessageTupleManager {
 
   override clear(): void {
     super.clear()
+    this.identities.clear()
     this.frame = EMPTY_MESSAGES
     this.indexes = null
     this.writtenId = null
@@ -141,7 +231,11 @@ export function createElectronStream(options: ElectronStreamOptions) {
   const readMessages = (values: StreamValues | null): Message[] =>
     Array.isArray(values?.messages) ? values.messages : EMPTY_MESSAGES
 
-  const submit = async (input: StreamValues | null | undefined, submitOptions?: SubmitOptions) => {
+  const submit = async (
+    input: StreamValues | null | undefined,
+    submitOptions?: ElectronStreamSubmitOptions
+  ) => {
+    const receipt = submitOptions?.modelSelectionIntent ?? options.captureModelSelectionIntent?.()
     await manager.start(
       async (signal) => {
         tuples.clear()
@@ -173,7 +267,9 @@ export function createElectronStream(options: ElectronStreamOptions) {
               // means no message update, whereas messages: [] is an explicit reset.
               const data = { ...manager.values, ...event.data }
               if (Array.isArray(event.data.messages)) {
-                data.messages = sanitizeSnapshotMessages(event.data.messages)
+                data.messages = tuples.observeSnapshot(
+                  sanitizeSnapshotMessages(event.data.messages)
+                )
               }
               yield { ...event, data }
             } else {
@@ -199,7 +295,8 @@ export function createElectronStream(options: ElectronStreamOptions) {
                   snapshot?.type === "ai" &&
                   typeof snapshot.id === "string" &&
                   snapshot.id &&
-                  (typeof snapshot.content === "string" || Array.isArray(snapshot.content))
+                  (typeof snapshot.content === "string" || Array.isArray(snapshot.content) ||
+                    (snapshot.content === undefined && Array.isArray(snapshot.tool_calls)))
                 ) {
                   manager.setStreamValues({
                     ...manager.values,
@@ -222,7 +319,7 @@ export function createElectronStream(options: ElectronStreamOptions) {
           tuples.commitFrame(messages)
           return { ...values, messages }
         },
-        callbacks: { onCustomEvent: (data) => callbacks.onCustomEvent?.(data) },
+        callbacks: { onCustomEvent: (data) => callbacks.onCustomEvent?.(data, receipt) },
         onSuccess: () => undefined,
         onError: (error) => callbacks.onError?.(error)
       }

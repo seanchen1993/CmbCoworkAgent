@@ -1,5 +1,5 @@
 import { expect, it } from "vitest"
-import { functionCodeRows, functionCodeLanguage } from "./code"
+import { functionCodeRows, functionCodeLanguage, functionCodeView } from "./code"
 import { validateFunctionTree } from "./ui"
 
 it("renders unified hunks with independent old/new gutters and skips file metadata", () => {
@@ -28,7 +28,7 @@ it("accepts zero length sides, shorthand counts and multiple hunks", () => {
   ])
 })
 
-it("refuses malformed or unbounded diffs instead of treating them as source", () => {
+it("falls back to plain unnumbered source for malformed diffs", () => {
   for (const source of [
     "plain source",
     "--- a\n+++ b",
@@ -41,7 +41,52 @@ it("refuses malformed or unbounded diffs instead of treating them as source", ()
     "@@ -1 +1 @@\n-x\n+x\ntrailing",
     "+".repeat(10001)
   ])
-    expect(() => functionCodeRows({ source, format: "diff" })).toThrow("MODS_UI_CODE_INVALID")
+    expect(functionCodeView({ source, format: "diff", startLine: 17 })).toEqual({
+      source,
+      diff: false,
+      diffFallback: true,
+      rows: source.split("\n").map((text) => ({ kind: "source", text }))
+    })
+})
+
+it("accepts long sources while preserving full validation and the original transport limit", () => {
+  const source = "界".repeat(120000)
+  const props = { source, startLine: 42 }
+  expect(functionCodeView(props).source).toBe(source.slice(0, 100000))
+  expect(props.source).toBe(source)
+  expect(() => validateFunctionTree({ type: "Code", props })).not.toThrow()
+  expect(() =>
+    validateFunctionTree({ type: "Code", props: { source: source + "\u0000" } })
+  ).toThrow("MODS_UI_TREE_INVALID")
+  expect(() => functionCodeView({ source: source + "\u0000" })).toThrow("MODS_UI_CODE_INVALID")
+  expect(() =>
+    validateFunctionTree({ type: "Code", props: { source: "x".repeat(1024 * 1024) } })
+  ).toThrow()
+})
+
+it("falls back safely when the display boundary cuts through a valid diff hunk", () => {
+  const source =
+    "@@ -0,0 +1,2000 @@\n" + Array.from({ length: 2000 }, () => "+" + "b".repeat(59)).join("\n")
+  const props = { source, format: "diff", startLine: 99 }
+  const view = functionCodeView(props)
+  expect(view.source).toBe(source.slice(0, 100000))
+  expect(view.diff).toBe(false)
+  expect(view.diffFallback).toBe(true)
+  expect(
+    view.rows.every(
+      (row) => row.kind === "source" && row.oldLine === undefined && row.newLine === undefined
+    )
+  ).toBe(true)
+  expect(props.source).toBe(source)
+})
+
+it("keeps a truncated long diff line when its declared hunk counts still parse", () => {
+  const source = "@@ -1 +1 @@\n-" + "a".repeat(60000) + "\n+" + "b".repeat(60000)
+  const view = functionCodeView({ source, format: "diff" })
+  expect(view.source).toBe(source.slice(0, 100000))
+  expect(view.diff).toBe(true)
+  expect(view.diffFallback).toBe(false)
+  expect(view.rows.map((row) => row.kind)).toEqual(["header", "remove", "add"])
 })
 
 it("numbers source only on request and resolves language without touching the path", () => {

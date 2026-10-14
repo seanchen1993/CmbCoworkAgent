@@ -1,11 +1,26 @@
-import { mkdtempSync, readFileSync, rmSync, unlinkSync, writeFileSync } from "node:fs"
+import {
+  mkdtempSync,
+  readFileSync,
+  renameSync,
+  rmSync,
+  statSync,
+  unlinkSync,
+  utimesSync,
+  writeFileSync
+} from "node:fs"
 import { tmpdir } from "node:os"
-import { join } from "node:path"
+import { basename, dirname, join, resolve } from "node:path"
 import { afterEach, expect, it, vi } from "vitest"
 import { createDisabledSwitchReader } from "./disabled-switch-cache"
 
 const roots: string[] = []
-afterEach(() => roots.splice(0).forEach((root) => rmSync(root, { recursive: true, force: true })))
+afterEach(() =>
+  roots.splice(0).forEach((root) => {
+    expect(dirname(resolve(root))).toBe(resolve(tmpdir()))
+    expect(basename(root)).toMatch(/^mods-switch-/)
+    rmSync(root, { recursive: true, force: true })
+  })
+)
 
 function fixture() {
   const root = mkdtempSync(join(tmpdir(), "mods-switch-"))
@@ -24,14 +39,44 @@ it("avoids repeated settings JSON reads only while a disabled file is unchanged"
   expect(load).toHaveBeenCalledTimes(1)
 })
 
-it("never caches enabled authority and observes an external disable immediately", () => {
+it("reuses unchanged enabled parsing but observes an external disable on the next read", () => {
   const { reader, write, load } = fixture()
   write(true)
   expect(reader.read()).toBe(true)
-  expect(reader.read()).toBe(true)
-  expect(load).toHaveBeenCalledTimes(2)
+  for (let index = 0; index < 1000; index++) expect(reader.read()).toBe(true)
+  expect(load).toHaveBeenCalledTimes(1)
   write(false)
   expect(reader.read()).toBe(false)
+  expect(reader.read()).toBe(false)
+  expect(load).toHaveBeenCalledTimes(2)
+})
+
+it("detects a same-length external rewrite even when modification time is restored", () => {
+  const { reader, path, load } = fixture()
+  writeFileSync(path, '{"enabled":true }')
+  expect(reader.read()).toBe(true)
+  const original = statSync(path)
+  const originalChangeTime = statSync(path, { bigint: true }).ctimeNs
+  // Real filesystem metadata, not a mocked invalidation or an application setter.
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 20)
+  writeFileSync(path, '{"enabled":false}')
+  utimesSync(path, original.atime, original.mtime)
+  expect(statSync(path).size).toBe(original.size)
+  expect(statSync(path, { bigint: true }).ctimeNs).not.toBe(originalChangeTime)
+  expect(reader.read()).toBe(false)
+  expect(load).toHaveBeenCalledTimes(2)
+})
+
+it("checks a replacement identity and explicit invalidation even after an enabled read", () => {
+  const { reader, path, write, load } = fixture()
+  write(true)
+  expect(reader.read()).toBe(true)
+  reader.invalidate()
+  expect(reader.read()).toBe(true)
+  expect(load).toHaveBeenCalledTimes(2)
+  const replacement = join(path, "..", "replacement.json")
+  writeFileSync(replacement, '{"enabled":false}')
+  renameSync(replacement, path)
   expect(reader.read()).toBe(false)
   expect(load).toHaveBeenCalledTimes(3)
 })

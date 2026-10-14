@@ -9,6 +9,26 @@ import { compileFunctionPlugin } from "./loader"
 import type { ModObject } from "../../../shared/mods/types"
 
 const sessions: FunctionSession[] = []
+it("defaults to lazy and gives placement replacements a new host identity", () => {
+  const registry = new FunctionToolRegistry()
+  const eager = { name: "probe", description: "Immediately callable", isDeferred: false }
+  expect(functionToolSpec(eager)).toMatchObject({ isDeferred: false })
+  registry.register("demo", eager)
+  const original = registry.get("mcp__demo__probe")
+  expect(original).toMatchObject({ description: "Immediately callable", inputSchema: { type: "object" } })
+  registry.register("demo", { ...eager, isDeferred: true })
+  const lazy = registry.get("mcp__demo__probe")
+  expect(lazy).toMatchObject({ isDeferred: true })
+  expect(lazy?.registrationId).not.toBe(original?.registrationId)
+  registry.register("demo", { name: eager.name, description: eager.description })
+  expect(registry.get("mcp__demo__probe")).toBe(lazy)
+  for (const isDeferred of [null, "false", 0]) {
+    expect(() => registry.register("demo", { ...eager, isDeferred }))
+      .toThrow("MODS_TOOL_SPEC")
+    expect(registry.get("mcp__demo__probe")).toBe(lazy)
+  }
+})
+
 afterEach(async () => {
   for (const session of sessions.splice(0)) await session.close()
 })

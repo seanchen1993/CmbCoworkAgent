@@ -1,0 +1,56 @@
+{
+  "apiVersion": "devclaw.project-contract/v1",
+  "cases": [
+    {
+      "id": "missing-0",
+      "stageId": "design",
+      "files": [],
+      "expected": "failed"
+    },
+    {
+      "id": "design-present",
+      "stageId": "design",
+      "files": [
+        {
+          "path": "design.md",
+          "text": "# 需求与接口设计\n隔离样例\n"
+        }
+      ],
+      "expected": "passed"
+    },
+    {
+      "id": "missing-1",
+      "stageId": "implement",
+      "files": [],
+      "expected": "failed"
+    },
+    {
+      "id": "implement-present",
+      "stageId": "implement",
+      "files": [
+        {
+          "path": "implementation.md",
+          "text": "# 实现与验证\n隔离样例\n"
+        }
+      ],
+      "expected": "passed"
+    },
+    {
+      "id": "missing-2",
+      "stageId": "review",
+      "files": [],
+      "expected": "failed"
+    },
+    {
+      "id": "review-present",
+      "stageId": "review",
+      "files": [
+        {
+          "path": "review.json",
+          "text": "{\n  \"summary\": \"仅验证样例结构；未执行业务\",\n  \"checked\": true\n}\n"
+        }
+      ],
+      "expected": "passed"
+    }
+  ]
+}

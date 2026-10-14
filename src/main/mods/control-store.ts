@@ -34,10 +34,15 @@ export class ModControlStore {
     this.evidenceExcludedPaths = [path, `${path}-wal`, `${path}-shm`, `${path}.initialized`]
     mkdirSync(dirname(path), { recursive: true })
     this.db = new DatabaseSync(path, { timeout: 1000 })
+    let transactionOpen = false
     try {
       this.db.exec(`
       PRAGMA journal_mode = WAL;
       PRAGMA synchronous = FULL;
+    `)
+      this.db.exec("BEGIN IMMEDIATE")
+      transactionOpen = true
+      this.db.exec(`
       CREATE TABLE IF NOT EXISTS mods_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS mods_grants (
         workspace TEXT NOT NULL, mod_id TEXT NOT NULL, digest TEXT NOT NULL,
@@ -122,8 +127,18 @@ export class ModControlStore {
           finishedAt: Date.now()
         })
       }
+      this.db.exec("COMMIT")
+      transactionOpen = false
     } catch (error) {
-      this.db.close()
+      const failures: unknown[] = [error]
+      if (transactionOpen) {
+        try { this.db.exec("ROLLBACK") }
+        catch (rollbackError) { failures.push(rollbackError) }
+      }
+      try { this.db.close() }
+      catch (closeError) { failures.push(closeError) }
+      if (failures.length > 1)
+        throw new AggregateError(failures, "MODS_STORE_INITIALIZATION_CLEANUP_FAILED")
       throw error
     }
   }
@@ -204,6 +219,20 @@ export class ModControlStore {
 
   setSetting(key: string, value: string): void {
     this.db.prepare("INSERT OR REPLACE INTO mods_meta(key,value) VALUES(?,?)").run(key, value)
+  }
+
+  /** A single SQLite statement commits both recovery source consumption and its child row. */
+  compareAndSetSetting(key: string, expected: string | undefined, value: string): boolean {
+    if (expected === undefined) {
+      return (
+        this.db.prepare("INSERT OR IGNORE INTO mods_meta(key,value) VALUES(?,?)").run(key, value)
+          .changes === 1
+      )
+    }
+    const result = this.db
+      .prepare("UPDATE mods_meta SET value = ? WHERE key = ? AND value = ?")
+      .run(value, key, expected)
+    return result.changes === 1
   }
 
   setSettings(values: Record<string, string>): void {
@@ -331,6 +360,61 @@ export class ModControlStore {
       )
       .all(workspace, threadId, limit)
       .map((row) => parseModJson(String(row.payload)) as unknown as CompletionEvidenceRecord)
+  }
+  /** Exact scoped reads; a missing/oversized/corrupt record never becomes a positive check. */
+  completionEvidenceByIds(
+    workspace: string,
+    threadId: string,
+    runId: string,
+    ids: readonly string[]
+  ) {
+    const validId = (value: unknown): value is string =>
+      typeof value === "string" && value.length > 0 && value.length <= 200
+    if (
+      !workspace ||
+      !validId(threadId) ||
+      !validId(runId) ||
+      !Array.isArray(ids) ||
+      ids.length > 128 ||
+      ids.some((id) => !validId(id)) ||
+      new Set(ids).size !== ids.length
+    )
+      throw new ModError("MODS_EVIDENCE_QUERY")
+    const records: CompletionEvidenceRecord[] = []
+    const missingIds: string[] = [],
+      invalidIds: string[] = [],
+      limitedIds: string[] = []
+    let remaining = 2 * 1024 * 1024
+    const query = this.db.prepare(`SELECT
+      CASE WHEN length(CAST(payload AS BLOB)) <= ? THEN payload ELSE NULL END AS payload
+      FROM mods_completion_evidence WHERE workspace=? AND thread_id=? AND run_id=? AND id=?`)
+    for (const id of ids) {
+      const row = query.get(Math.min(remaining, 512 * 1024), workspace, threadId, runId, id)
+      if (!row) {
+        missingIds.push(id)
+        continue
+      }
+      if (typeof row.payload !== "string") {
+        limitedIds.push(id)
+        continue
+      }
+      remaining -= Buffer.byteLength(row.payload)
+      try {
+        const value = parseModJson(row.payload) as unknown as CompletionEvidenceRecord
+        if (
+          !value ||
+          value.id !== id ||
+          value.workspace !== workspace ||
+          value.threadId !== threadId ||
+          value.runId !== runId
+        )
+          throw Error("invalid")
+        records.push(value)
+      } catch {
+        invalidIds.push(id)
+      }
+    }
+    return { records, missingIds, invalidIds, limitedIds }
   }
   hasCard(id: string, threadId: string): boolean {
     return Boolean(
@@ -496,14 +580,26 @@ export class ModControlStore {
       .run(digest, encodeModJson(ruleIds), status, id)
   }
 
-  audit(workspace: string, limit = 50, before = Number.MAX_SAFE_INTEGER): ModAuditEntry[] {
+  audit(workspace: string, limit = 50, before = Number.MAX_SAFE_INTEGER,
+    threadId?: string, excludeModId?: string): ModAuditEntry[] {
     if (!Number.isSafeInteger(limit) || limit < 1 || limit > 200 || !Number.isSafeInteger(before))
       throw new ModError("MODS_AUDIT_QUERY")
+    if (threadId !== undefined && (typeof threadId !== "string" || !threadId || threadId.length > 200))
+      throw new ModError("MODS_AUDIT_QUERY")
+    if (excludeModId !== undefined && (typeof excludeModId !== "string" || !excludeModId || excludeModId.length > 200))
+      throw new ModError("MODS_AUDIT_QUERY")
+    const conditions = ["workspace=?", "rowid<?"]
+    const parameters: Array<string | number> = [workspace, before]
+    if (threadId !== undefined) { conditions.push("thread_id=?"); parameters.push(threadId) }
+    if (excludeModId !== undefined) {
+      conditions.push("COALESCE(json_extract(scope,'$.modId'),'')<>?")
+      parameters.push(excludeModId)
+    }
     return this.db
       .prepare(
-        "SELECT rowid AS cursor,* FROM mods_calls WHERE workspace=? AND rowid<? ORDER BY rowid DESC LIMIT ?"
+        `SELECT rowid AS cursor,* FROM mods_calls WHERE ${conditions.join(" AND ")} ORDER BY rowid DESC LIMIT ?`
       )
-      .all(workspace, before, limit)
+      .all(...parameters, limit)
       .map((row) => ({
         cursor: Number(row.cursor),
         callId: String(row.id),

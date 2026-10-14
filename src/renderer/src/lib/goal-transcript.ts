@@ -10,9 +10,20 @@ import {
 } from "../../../shared/goal-events"
 import { splitGoalTransportPayload } from "../../../shared/goal-slash"
 import { getMessageProviderOccurrenceIdentity } from "../../../shared/message-role-collision"
+import { isFunctionPluginPromptOrigin } from "../../../shared/mods/v2/plugin-prompt"
+import {
+  conflictingFunctionConversationTranscriptStamps,
+  functionConversationTranscriptFields,
+  hasInvalidFunctionConversationTranscriptStamp,
+  isFunctionConversationHiddenNote,
+  readFunctionConversationTranscriptStamp
+} from "../../../shared/mods/v2/conversation-transcript"
 import { isInternalGoalPromptMessage, type GoalNoticeEvent } from "./goal-notice-messages"
 
-export function isGoalTranscriptArtifact(message: Pick<Message, "role" | "content">): boolean {
+export function isGoalTranscriptArtifact(message: Pick<Message,
+  "role" | "content" | "function_row" | "function_row_invalid">): boolean {
+  if (readFunctionConversationTranscriptStamp(message) ||
+    hasInvalidFunctionConversationTranscriptStamp(message)) return false
   if (typeof message.content !== "string") return false
   const content = message.content.trim()
   if (message.role !== "system") return false
@@ -29,9 +40,9 @@ export function isGoalTranscriptArtifact(message: Pick<Message, "role" | "conten
 }
 
 export function isVisibleCheckpointTranscriptMessage(
-  message: Pick<Message, "role" | "content">
+  message: Pick<Message, "role" | "content" | "function_row" | "function_row_invalid">
 ): boolean {
-  return isVisibleTranscriptMessage(message.role, message.content)
+  return isVisibleTranscriptMessage(message.role, message.content, message)
 }
 
 export function buildCheckpointTranscriptForDisplay(messages: Message[]): Message[] {
@@ -104,6 +115,8 @@ export function isGoalResumeCommandContent(content: string): boolean {
 }
 
 function isGoalResumeCommandMessage(message: Message): boolean {
+  if (readFunctionConversationTranscriptStamp(message) ||
+    hasInvalidFunctionConversationTranscriptStamp(message)) return false
   if (message.role !== "user" || typeof message.content !== "string") return false
   return isGoalResumeCommandContent(message.content)
 }
@@ -142,6 +155,8 @@ export function hasGoalResumeUserEvent(
 }
 
 function isGoalSetCommandMessage(message: Message): boolean {
+  if (readFunctionConversationTranscriptStamp(message) ||
+    hasInvalidFunctionConversationTranscriptStamp(message)) return false
   if (message.role !== "user" || typeof message.content !== "string") return false
   const { commandText } = splitGoalTransportPayload(message.content)
   const trimmed = commandText.trim()
@@ -230,6 +245,12 @@ function findMatchingGoalUserEventMessage(
 }
 
 export const sameGoalCommandMessage = (left: Message, right: Message): boolean => {
+  if (readFunctionConversationTranscriptStamp(left) ||
+    readFunctionConversationTranscriptStamp(right) ||
+    hasInvalidFunctionConversationTranscriptStamp(left) ||
+    hasInvalidFunctionConversationTranscriptStamp(right)) return false
+  if (isFunctionPluginPromptOrigin(left.prompt_origin) ||
+    isFunctionPluginPromptOrigin(right.prompt_origin)) return false
   if (left.role !== "user" || right.role !== "user") return false
   if (typeof left.content !== "string" || typeof right.content !== "string") return false
   if (normalizedGoalCommandContent(left.content) !== normalizedGoalCommandContent(right.content)) {
@@ -272,6 +293,9 @@ interface IndexedGoalCommand {
 }
 
 function indexedGoalCommand(message: Message): IndexedGoalCommand | null {
+  if (readFunctionConversationTranscriptStamp(message) ||
+    hasInvalidFunctionConversationTranscriptStamp(message)) return null
+  if (isFunctionPluginPromptOrigin(message.prompt_origin)) return null
   if (message.role !== "user" || typeof message.content !== "string") return null
   const time = message.created_at?.getTime?.() ?? 0
   return {
@@ -385,22 +409,39 @@ function durableMessageOrdinal(message: Message): number | null {
     : null
 }
 
-/** Carry durable ordinals onto checkpoint rows whose reconstructed timestamps are not reliable. */
+/** Restore durable ordering and host source before checkpoint rows enter Goal classification. */
 export function restoreDurableTranscriptOrdinals(
   messages: readonly Message[],
   durableMessages: readonly Message[]
 ): Message[] {
   const durableOrdinals = new Map<string, number>()
+  const sources = new Map<string, Message["prompt_origin"]>()
+  const nativeRows = new Map<string, Message>()
   for (const message of durableMessages) {
+    const fields = functionConversationTranscriptFields(message, message.id, message.role)
+    if (fields.function_row || fields.function_row_invalid)
+      nativeRows.set(JSON.stringify([message.id, getMessageProviderOccurrenceIdentity(message)]), message)
+    if (message.role === "user" && isFunctionPluginPromptOrigin(message.prompt_origin))
+      sources.set(JSON.stringify([message.id, getMessageProviderOccurrenceIdentity(message)]),
+        message.prompt_origin)
     const ordinal = durableMessageOrdinal(message)
     if (ordinal === null) continue
     durableOrdinals.set(getMessageProviderOccurrenceIdentity(message), ordinal)
   }
-  if (durableOrdinals.size === 0) return [...messages]
+  if (durableOrdinals.size === 0 && sources.size === 0 && nativeRows.size === 0) return [...messages]
   return messages.map((message) => {
-    if (durableMessageOrdinal(message) !== null) return message
-    const ordinal = durableOrdinals.get(getMessageProviderOccurrenceIdentity(message))
-    return ordinal === undefined ? message : { ...message, ordinal }
+    const identity = getMessageProviderOccurrenceIdentity(message)
+    const ordinal = durableMessageOrdinal(message) === null ? durableOrdinals.get(identity) : undefined
+    const source = message.role === "user" ? sources.get(JSON.stringify([message.id, identity])) : undefined
+    const native = nativeRows.get(JSON.stringify([message.id, identity]))
+    const nativeFields = native ? functionConversationTranscriptFields(native, message.id, message.role) : {}
+    if (native && (conflictingFunctionConversationTranscriptStamps(native, message) ||
+      functionConversationTranscriptFields(message, message.id, message.role).function_row_invalid))
+      return { ...native, function_row_invalid: true }
+    if (ordinal === undefined && !source && !native) return message
+    return { ...message, ...(ordinal !== undefined ? { ordinal } : {}),
+      ...nativeFields,
+      ...(source ? { prompt_origin: source } : {}) }
   })
 }
 
@@ -598,6 +639,13 @@ export function buildRestoredCheckpointTranscript(
   let visibleIndex = 0
 
   for (const rawMessage of rawCheckpointMessages) {
+    if (hasInvalidFunctionConversationTranscriptStamp(rawMessage) ||
+      isFunctionConversationHiddenNote(rawMessage)) continue
+    if (readFunctionConversationTranscriptStamp(rawMessage)) {
+      restored.push(rawMessage)
+      if (isVisibleCheckpointTranscriptMessage(rawMessage)) visibleIndex += 1
+      continue
+    }
     if (isInternalGoalPromptMessage(rawMessage)) {
       const matched = findMatchingGoalUserEventMessage(
         rawMessage,

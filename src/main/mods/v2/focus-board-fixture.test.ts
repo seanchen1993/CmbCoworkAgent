@@ -6,7 +6,8 @@ import { afterEach, expect, it } from "vitest"
 import type {
   FunctionPaneSnapshot,
   FunctionUiAction,
-  FunctionUiElement
+  FunctionUiElement,
+  FunctionUiNode
 } from "../../../shared/mods/v2/ui"
 import { FunctionGuestRuntime } from "./guest-runtime"
 import { compileFunctionPlugin } from "./loader"
@@ -62,14 +63,17 @@ async function openFixture(root = fixtureRoot, captureRenderError = false) {
   return session
 }
 
-function controls(tree: FunctionUiElement): FunctionUiElement[] {
+function controls(tree: FunctionUiElement): FunctionUiNode[] {
+  if (tree.type === "engine") return []
   return [
-    tree,
+    ...(tree.type === "fragment" || tree.type === "Markdown" ? [] : [tree]),
     ...(tree.children ?? []).flatMap((child) => (typeof child === "string" ? [] : controls(child)))
   ]
 }
 function text(tree: FunctionUiElement | string): string {
-  return typeof tree === "string" ? tree : (tree.children ?? []).map(text).join("")
+  if (typeof tree === "string") return tree
+  if (tree.type === "engine") return ""
+  return (tree.children ?? []).map(text).join("")
 }
 function action(
   pane: FunctionPaneSnapshot,

@@ -106,4 +106,13 @@ export class CompletionFreshness {
     this.controller?.abort(Error(reason))
     for (const [id, proof] of this.proofs) this.invalidate(id, proof, reason)
   }
+
+  /** Durable configuration changes invalidate proof immediately, without closing this monitor. */
+  invalidateAll(reason: string): void {
+    if (this.timer) clearTimeout(this.timer)
+    this.timer = undefined
+    this.dirty = false
+    this.controller?.abort(Error(reason))
+    for (const [id, proof] of this.proofs) this.invalidate(id, proof, reason)
+  }
 }

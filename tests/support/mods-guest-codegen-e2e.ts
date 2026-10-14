@@ -1,3 +1,4 @@
+import { openModsResults } from "./mods-sidebar-navigation"
 import assert from "node:assert/strict"
 import { mkdirSync } from "node:fs"
 import { join } from "node:path"
@@ -73,6 +74,7 @@ export async function verifyGuestCodegen(
   await approve()
   await page.reload({ waitUntil: "domcontentloaded" })
   await page.getByText("Guest code generation", { exact: true }).first().click()
+  await openModsResults(page)
   const run = async (command: string) => {
     const descriptor = (await page.evaluate((id) => window.api.mods.commands(id), id)).find(
       (row) => row.command === command
@@ -112,6 +114,7 @@ export async function verifyGuestCodegen(
   await page.screenshot({ path: join(artifacts, "guest-codegen-client.png") })
   await page.reload({ waitUntil: "domcontentloaded" })
   await page.getByText("Guest code generation", { exact: true }).first().click()
+  await openModsResults(page)
   await pane().getByText("COUNTER_1", { exact: true }).waitFor()
   await pane().getByText(`CLIENT_BLOCKED_${CODEGEN_PROBE_COUNT}`, { exact: true }).waitFor()
   pass(

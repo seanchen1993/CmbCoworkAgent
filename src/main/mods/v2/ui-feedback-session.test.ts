@@ -1,7 +1,8 @@
-import { afterEach, expect, it } from "vitest"
+import { afterEach, expect, it, vi } from "vitest"
 import type { ModJson } from "../../../shared/mods/types"
 import { FunctionGuestRuntime } from "./guest-runtime"
 import { FunctionSession, SESSION_CAPABILITIES } from "./session"
+import { FunctionUiFeedback } from "./ui-feedback"
 
 const sessions: FunctionSession[] = []
 afterEach(async () => {
@@ -62,6 +63,30 @@ it("operation hooks rewrite through core and publication sanitizes before storag
   )
   expect((await session.feedbackSnapshot())[0].text).toBe("[redacted] rewritten")
 })
+
+it.each(["status", "toast"] as const)(
+  "protects the full long real guest %s after its hook before storing a display copy",
+  async method => {
+    const protectedInputs: string[] = []
+    const { session } = await fixture(`
+      on("session.start", ($, e, next) => { $.ui.${method}("x".repeat(30000)); return next(e); });
+      on("ui.${method}", ($, e, next) => {
+        if(e.text.length!==30000) throw Error("original feedback was truncated");
+        return next({...e,text:"secret:"+e.text+":tail"});
+      });
+    `, async value => {
+      if (value && typeof value === "object" && !Array.isArray(value) &&
+        typeof value.text === "string") {
+        protectedInputs.push(value.text)
+        return { ...value, text: value.text.replace("secret:", "[redacted]:") }
+      }
+      return value
+    })
+    expect(protectedInputs[0]).toBe(`secret:${"x".repeat(30000)}:tail`)
+    const expected = `[redacted]:${"x".repeat(30000)}:tail`.slice(0, 10000)
+    expect((await session.feedbackSnapshot()).map(row => row.text)).toEqual([expected])
+  }
+)
 
 it("denied notifications never create presentation state", async () => {
   const { session } = await fixture(`
@@ -131,4 +156,51 @@ it("cancel during publication cannot create a late toast", async () => {
   release()
   await run
   expect(await session.feedbackSnapshot()).toEqual([])
+})
+
+it.each([
+  ["toast", "cancel"], ["status", "cancel"],
+  ["toast", "revoke"], ["status", "revoke"]
+] as const)("does not store long %s after %s during real publication", async (method, ending) => {
+  let release!: () => void
+  let entered!: () => void
+  let completed = false
+  const started = new Promise<void>(resolve => { entered = resolve })
+  const pending = new Promise<void>(resolve => { release = resolve })
+  const store = vi.spyOn(FunctionUiFeedback.prototype, "set")
+  const controller = new AbortController()
+  let run: Promise<unknown> | undefined
+  try {
+    const f = await fixture(`
+      on("session.start", async ($, e, next) => {
+        await $.command.register({name:"long-feedback",description:"test"}); return next(e);
+      });
+      on("command.run", {command:"long-feedback"}, ($) => {
+        $.ui.${method}("x".repeat(30000)); return {text:"done"};
+      });
+    `, async value => {
+      if (value && typeof value === "object" && !Array.isArray(value) &&
+        typeof value.text === "string" && value.text.length === 30000) {
+        entered()
+        await pending
+        completed = true
+      }
+      return value
+    })
+    run = f.session.run("long-feedback", "", controller.signal)
+    const settled = Promise.allSettled([run])
+    await started
+    if (ending === "cancel") controller.abort(Error("cancel long feedback"))
+    else f.revoke()
+    release()
+    await settled
+    await f.session.close()
+    expect(completed).toBe(true)
+    expect(store).not.toHaveBeenCalled()
+  } finally {
+    controller.abort()
+    release?.()
+    if (run) await Promise.allSettled([run])
+    store.mockRestore()
+  }
 })

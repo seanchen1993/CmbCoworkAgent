@@ -700,14 +700,21 @@ function testPrefixHintsNeverDeleteUnmatchedHistory(store: ContentStore): void {
 async function main(): Promise<void> {
   const previousHome = process.env.HOME
   const previousUserProfile = process.env.USERPROFILE
+  const previousAppHome = process.env.CMB_COWORK_AGENT_HOME
   const home = await mkdtemp(join(tmpdir(), "cmb-subagent-content-store-"))
+  const appHome = join(home, "app-data")
   process.env.HOME = home
   process.env.USERPROFILE = home
+  process.env.CMB_COWORK_AGENT_HOME = appHome
   try {
     const store = await import("../src/main/services/subagent-transcript-content-store.ts")
     const { getSubagentTranscriptContentDir } = await import("../src/main/storage.ts")
     const root = getSubagentTranscriptContentDir()
-    assert(root.startsWith(home), "the content store must be isolated inside the temporary home")
+    assert.equal(
+      root,
+      join(appHome, "subagent-transcript-content"),
+      "the content store must be isolated inside the temporary app home"
+    )
 
     const retainedHashes = new Set<string>()
     await testLargeContentAndToolCallsRoundTrip(store, retainedHashes)
@@ -729,6 +736,8 @@ async function main(): Promise<void> {
     else process.env.HOME = previousHome
     if (previousUserProfile === undefined) delete process.env.USERPROFILE
     else process.env.USERPROFILE = previousUserProfile
+    if (previousAppHome === undefined) delete process.env.CMB_COWORK_AGENT_HOME
+    else process.env.CMB_COWORK_AGENT_HOME = previousAppHome
     await rm(home, { recursive: true, force: true })
   }
   console.log("subagent-transcript-content-store.spec.ts passed")

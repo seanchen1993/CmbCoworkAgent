@@ -204,13 +204,13 @@ async function main(): Promise<void> {
       timeout: 60_000
     })
     await app.context().route(/^https?:/, (route) => route.abort())
-    await app.evaluate(async ({ app, BrowserWindow, ipcMain }) => {
+    await app.evaluate(async ({ app, BrowserWindow, ipcMain }, rendererPath) => {
       // Packaged mode starts SSO for an empty profile. Keep this isolated fixture local.
       ipcMain.removeHandler("open-login-page")
       ipcMain.handle("open-login-page", () => undefined)
       const window = BrowserWindow.getAllWindows()[0]
-      await window.loadFile(`${app.getAppPath()}/out/renderer/index.html`)
-    })
+      await window.loadFile(rendererPath ?? `${app.getAppPath()}/out/renderer/index.html`)
+    }, packaged ? null : join(root, "out/renderer/index.html"))
     page = await appPage(app)
     page.on("pageerror", (error) => errors.push(error.message))
     await app.evaluate(({ ipcMain }) => {

@@ -1,0 +1,6 @@
+{
+  "name": "project-public-action-provider",
+  "version": "0.1.0",
+  "description": "公开文本整理步骤",
+  "mods": "mods/manifest.json"
+}

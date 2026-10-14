@@ -12,8 +12,19 @@ import {
 } from "./message-role-collision"
 import type { RoleCollisionMessage } from "./message-role-collision"
 import { buildSubagentTaskInvocationIdentity } from "./subagent-invocation-identity"
+import {
+  conflictingFunctionConversationTranscriptStamps,
+  functionConversationTranscriptFields,
+  hasInvalidFunctionConversationTranscriptStamp,
+  isFunctionConversationHiddenNote,
+  isFunctionConversationNotice,
+  mergeFunctionConversationTranscriptStamp,
+  readFunctionConversationTranscriptStamp,
+  type FunctionConversationTranscriptStamp
+} from "./mods/v2/conversation-transcript"
 
 export interface CheckpointTranscriptIndex {
+  hasInvalidFunctionRows?: boolean
   visibleMessageIds: string[]
   internalGoalMessageIds: string[]
   subagentTranscriptIds: string[]
@@ -25,6 +36,8 @@ export interface CheckpointTranscriptIndex {
 }
 
 export interface CheckpointTranscriptMessage {
+  function_row?: FunctionConversationTranscriptStamp
+  function_row_invalid?: true
   id: string
   provider_source_id?: string
   provider_occurrence?: number
@@ -55,6 +68,8 @@ export interface FilteredThreadValuesInput {
 }
 
 export interface CheckpointAuthorityTranscriptMessage {
+  function_row?: FunctionConversationTranscriptStamp
+  function_row_invalid?: true
   id: string
   provider_source_id?: string
   provider_occurrence?: number
@@ -242,11 +257,20 @@ export function mergeCheckpointAuthorityTranscriptMessage<
   // the same logical record. Merging across roles can copy tool_call_id onto an
   // assistant (or assistant tool_calls onto a tool) and corrupt display order.
   if (base.role && incoming.role && base.role !== incoming.role) return base
+  if (hasInvalidFunctionConversationTranscriptStamp(base) ||
+    hasInvalidFunctionConversationTranscriptStamp(incoming))
+    return { ...base, function_row_invalid: true }
+  if (conflictingFunctionConversationTranscriptStamps(base, incoming)) return base
+  const functionStamp = mergeFunctionConversationTranscriptStamp(base, incoming)
+  if (functionStamp && (base.id !== incoming.id || functionStamp.uuid !== base.id ||
+    getMessageProviderOccurrenceIdentity(base) !== getMessageProviderOccurrenceIdentity(incoming)))
+    return base
 
   const checkpointClearsToolCallContent = isCheckpointEmptyAssistantToolCallMessage(base)
   const reasoning = base.reasoning || incoming.reasoning
   return {
     ...base,
+    ...(functionStamp ? { function_row: functionStamp } : {}),
     ...(reasoning ? { reasoning } : {}),
     content: checkpointClearsToolCallContent
       ? base.content
@@ -642,7 +666,10 @@ export function isWorkflowPlumbingTranscriptContent(content: unknown): boolean {
  * checkpoint and renderer guards on this one predicate so internal goal and
  * workflow plumbing cannot accidentally lock an otherwise empty task.
  */
-export function isVisibleTranscriptMessage(role: string, content: unknown): boolean {
+export function isVisibleTranscriptMessage(role: string, content: unknown, message?: unknown): boolean {
+  if (hasInvalidFunctionConversationTranscriptStamp(message)) return false
+  if (isFunctionConversationHiddenNote(message)) return false
+  if (readFunctionConversationTranscriptStamp(message)) return true
   return (
     !isInternalGoalPrompt(role, content) &&
     !isGoalTranscriptArtifact(role, content) &&
@@ -656,8 +683,13 @@ export function isVisibleTranscriptMessage(role: string, content: unknown): bool
  * persisted yet. Mutation guards therefore count it as conversation state
  * while display filtering continues to hide the raw prompt itself.
  */
-export function isRestorableConversationTranscriptMessage(role: string, content: unknown): boolean {
-  if (isVisibleTranscriptMessage(role, content)) return true
+export function isRestorableConversationTranscriptMessage(role: string, content: unknown,
+  message?: unknown
+): boolean {
+  if (hasInvalidFunctionConversationTranscriptStamp(message)) return false
+  if (isFunctionConversationNotice(message)) return false
+  if (readFunctionConversationTranscriptStamp(message)) return true
+  if (isVisibleTranscriptMessage(role, content, message)) return true
   return (
     isInternalGoalPrompt(role, content) &&
     typeof content === "string" &&
@@ -703,6 +735,7 @@ export function checkpointHasInterrupt(checkpoint: unknown): boolean {
 }
 
 export function deriveCheckpointTranscriptIndex(checkpoint: unknown): CheckpointTranscriptIndex {
+  let hasInvalidFunctionRows = false
   const visibleMessageIds: string[] = []
   const internalGoalMessageIds: string[] = []
   const subagentTranscriptIds: string[] = []
@@ -718,8 +751,17 @@ export function deriveCheckpointTranscriptIndex(checkpoint: unknown): Checkpoint
 
   getCheckpointMessages(checkpoint).forEach((raw, index) => {
     if (!isRecord(raw)) return
+    const role = getMessageRole(raw)
+    const kwargs = isRecord(raw.kwargs) ? raw.kwargs : undefined
+    // Legacy synthetic IDs remain display-only. A stamped row must have its own actual UUID.
+    const actualMessageId = readString(kwargs?.id) ?? readString(raw.id)
+    const functionFields = functionConversationTranscriptFields(raw, actualMessageId, role)
+    if (functionFields.function_row_invalid) { hasInvalidFunctionRows = true; return }
+    const functionStamp = functionFields.function_row
+    // Notifications are durable UI data and cannot introduce provider checkpoint roles.
+    if (isFunctionConversationNotice(raw)) return
     const additionalKwargs = getAdditionalKwargs(raw)
-    if (additionalKwargs?.cmb_internal_coordinator_notification === true) return
+    if (!functionStamp && additionalKwargs?.cmb_internal_coordinator_notification === true) return
 
     for (const toolCallId of getReferencedToolCallIds(raw)) {
       if (seenSubagentTranscriptIds.has(toolCallId)) continue
@@ -727,7 +769,6 @@ export function deriveCheckpointTranscriptIndex(checkpoint: unknown): Checkpoint
       subagentTranscriptIds.push(toolCallId)
     }
 
-    const role = getMessageRole(raw)
     const checkpointContent = getMessageContent(raw)
     const messageId = getMessageId(raw, index)
     if (role === "assistant") {
@@ -766,23 +807,24 @@ export function deriveCheckpointTranscriptIndex(checkpoint: unknown): Checkpoint
         subagentTranscriptInvocations.push({ toolCallId, invocationScope })
       }
     }
-    const rawInternalGoalPrompt = isInternalGoalPrompt(role, checkpointContent)
+    const rawInternalGoalPrompt = !functionStamp && isInternalGoalPrompt(role, checkpointContent)
     if (rawInternalGoalPrompt) {
       internalGoalMessageIds.push(messageId)
     }
 
     const visibleUserMessage = additionalKwargs?.cmb_visible_user_message
     const effectiveContent =
-      role === "user" && typeof visibleUserMessage === "string" && visibleUserMessage.length > 0
+      !functionStamp && role === "user" && typeof visibleUserMessage === "string" && visibleUserMessage.length > 0
         ? visibleUserMessage
         : checkpointContent
 
-    if (isVisibleTranscriptMessage(role, effectiveContent)) {
+    if (isVisibleTranscriptMessage(role, effectiveContent, raw)) {
       const providerTuple =
         role === "assistant" ? getMessageProviderTupleFromMetadata(additionalKwargs) : undefined
       visibleMessageIds.push(messageId)
       visibleMessages.push({
         id: messageId,
+        ...functionFields,
         ...providerTuple,
         role,
         text: stringifyContent(effectiveContent),
@@ -797,6 +839,7 @@ export function deriveCheckpointTranscriptIndex(checkpoint: unknown): Checkpoint
     renderId: normalizedVisibleMessages[index]?.id ?? message.id
   }))
   return {
+    ...(hasInvalidFunctionRows ? { hasInvalidFunctionRows: true } : {}),
     visibleMessageIds,
     internalGoalMessageIds,
     subagentTranscriptIds,

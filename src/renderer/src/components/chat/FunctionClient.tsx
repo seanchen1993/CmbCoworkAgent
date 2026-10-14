@@ -3,9 +3,13 @@ import type {
   FunctionClientSnapshot,
   FunctionClientAction,
   FunctionUiAction,
-  FunctionUiElement
+  FunctionUiElement,
+  FunctionUiNode
 } from "../../../../shared/mods/v2/ui"
 import type { ModJson, ModObject } from "../../../../shared/mods/types"
+import type { FunctionMarkdownContext } from "./FunctionMarkdown"
+import { closeProtectedFunctionPreviewOwner } from "../../lib/protected-function-preview"
+import { flowDraftId } from "../../lib/flow-draft-id"
 
 type Control = (
   node: FunctionUiElement | undefined,
@@ -20,14 +24,17 @@ export function FunctionClient({
   node,
   snapshot,
   refresh,
+  isCurrent,
   render
 }: {
   threadId: string
   pane: string
-  node: FunctionUiElement
+  node: FunctionUiNode
   snapshot: FunctionClientSnapshot
   refresh(): void
-  render(tree: FunctionUiElement, busy: boolean, act: Control): ReactNode
+  isCurrent?(): boolean
+  render(tree: FunctionUiElement, busy: boolean, act: Control,
+    markdown: FunctionMarkdownContext): ReactNode
 }) {
   const region = useRef<HTMLDivElement>(null)
   const mounted = useRef(true)
@@ -36,38 +43,70 @@ export function FunctionClient({
   const moveValue = useRef<ModObject | undefined>(undefined)
   const refreshRef = useRef(refresh)
   refreshRef.current = refresh
+  const isCurrentRef = useRef(isCurrent)
+  isCurrentRef.current = isCurrent
   const [pendingControls, setPendingControls] = useState(0)
   const busy = pendingControls > 0
   const [error, setError] = useState("")
+  const drawing = JSON.stringify([threadId, pane, snapshot.id, snapshot.generation])
+  const deferredRefresh = useRef<string | null>(null)
+  const currentDrawing = useRef(drawing)
+  currentDrawing.current = drawing
+  useEffect(() => () => closeProtectedFunctionPreviewOwner(threadId, {
+    kind: "client", pane, instance: snapshot.id, generation: snapshot.generation
+  }), [threadId, pane, snapshot.id, snapshot.generation])
   useEffect(() => {
     mounted.current = true
+    const visibility = (): void => {
+      if (!document.hidden) {
+        const pending = deferredRefresh.current
+        deferredRefresh.current = null
+        if (pending === currentDrawing.current && isCurrentRef.current?.() !== false)
+          refreshRef.current()
+        return
+      }
+      cancelAnimationFrame(moveFrame.current)
+      moveFrame.current = 0
+      moveValue.current = undefined
+    }
+    document.addEventListener("visibilitychange", visibility)
     return () => {
       mounted.current = false
       cancelAnimationFrame(moveFrame.current)
+      document.removeEventListener("visibilitychange", visibility)
     }
   }, [])
   const send = useCallback(
     async (kind: FunctionClientAction["kind"], value?: ModJson, handle?: number) => {
+      if (!mounted.current || document.hidden || currentDrawing.current !== drawing ||
+        isCurrentRef.current?.() === false) return
       await window.api.mods.clientAct(threadId, {
         pane,
         instance: snapshot.id,
-        intentId: crypto.randomUUID(),
+        generation: snapshot.generation,
+        intentId: flowDraftId("claw"),
         kind,
         ...(value === undefined ? {} : { value }),
         ...(handle === undefined ? {} : { handle })
       })
-      if (mounted.current && ["press", "submit", "select"].includes(kind)) refreshRef.current()
+      if (mounted.current && currentDrawing.current === drawing &&
+        isCurrentRef.current?.() !== false && ["press", "submit", "select"].includes(kind)) {
+        if (document.hidden) deferredRefresh.current = drawing
+        else refreshRef.current()
+      }
     },
-    [threadId, pane, snapshot.id]
+    [threadId, pane, snapshot.id, snapshot.generation, drawing]
   )
   useEffect(() => {
     const element = region.current
     if (!element || snapshot.error) return
     let frame = 0,
       last = ""
-    const observer = new ResizeObserver(() => {
+    const measure = (): void => {
       cancelAnimationFrame(frame)
+      if (document.hidden) return
       frame = requestAnimationFrame(() => {
+        if (document.hidden) return
         const rect = element.getBoundingClientRect()
         const size = {
           columns: Math.min(10000, Math.max(0, Math.floor(rect.width / 8))),
@@ -78,22 +117,32 @@ export function FunctionClient({
         last = key
         void send("resize", size).catch(() => {})
       })
-    })
+    }
+    const observer = new ResizeObserver(measure)
     observer.observe(element)
+    document.addEventListener("visibilitychange", measure)
     return () => {
       observer.disconnect()
       cancelAnimationFrame(frame)
+      document.removeEventListener("visibilitychange", measure)
     }
   }, [send, snapshot.error])
   const control: Control = async (control, kind, value) => {
-    if (kind === "close" || !control?.press) return
+    if (
+      document.hidden || !mounted.current || currentDrawing.current !== drawing ||
+      isCurrentRef.current?.() === false || kind === "close" || !control ||
+      control.type === "engine" || control.type === "fragment" ||
+      control.type === "Markdown" || !control.press
+    ) return
     const blocksControls = kind !== "change"
     if (blocksControls) setPendingControls((pending) => pending + 1)
-    setError("")
+    if (currentDrawing.current === drawing) setError("")
     try {
       await send(kind, value, control.press.handle)
     } catch {
-      if (mounted.current) setError("组件已更新或停止，请在当前画面重试。")
+      if (mounted.current && !document.hidden && currentDrawing.current === drawing &&
+        isCurrentRef.current?.() !== false)
+        setError("组件已更新或停止，请在当前画面重试。")
     } finally {
       // An earlier input reply must not release a different, still-pending press/submit/select.
       if (mounted.current && blocksControls) setPendingControls((pending) => pending - 1)
@@ -224,7 +273,10 @@ export function FunctionClient({
           {error}
         </p>
       )}
-      {render(snapshot.tree, busy, control)}
+      {render(snapshot.tree, busy, control, { threadId,
+        address: { kind: "client", pane, instance: snapshot.id, generation: snapshot.generation },
+        links: snapshot.markdownLinks ?? [], isCurrent: () => isCurrentRef.current?.() !== false,
+        refresh: () => refreshRef.current() })}
     </div>
   )
 }

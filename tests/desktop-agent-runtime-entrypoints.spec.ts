@@ -43,7 +43,7 @@ const sources = {
 
 const expectedDirectCalls: Record<keyof typeof sources, number> = {
   desktop: 0,
-  standardTurn: 0,
+  standardTurn: 1,
   imRunner: 0,
   scheduler: 1,
   heartbeat: 1,
@@ -62,9 +62,14 @@ for (const [owner, source] of Object.entries(sources) as [keyof typeof sources, 
 }
 
 assert(
-  count(sources.standardTurn, "return createAgentRuntime(options)") === 1,
+  count(sources.standardTurn, "createAgentRuntime(") === 1,
   "the controlled standard-turn factory must be the only shared top-level Runtime constructor"
 )
+
+const factory = sources.standardTurn.slice(sources.standardTurn.indexOf("export function prepareStandardThreadRuntimeFactory("))
+assert(count(factory, "createAgentRuntime(") === 1, "the sole constructor must remain inside the leased factory")
+assert(factory.indexOf("assertLocalThreadRunLease(options.threadId") < factory.indexOf("captureRuntimePluginSourceThreadGuard(options.threadId"), "physical run ownership must precede fixed-source child admission")
+assert(factory.includes("const previousBoundary = options.onModelBoundary") && factory.includes("assertSource()") && factory.includes("previousBoundary?.()"), "fixed-source guard must preserve the caller boundary and run before each model request")
 
 const invoke = sliceBetween(
   sources.desktop,

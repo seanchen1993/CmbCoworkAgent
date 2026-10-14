@@ -13,10 +13,13 @@ import type {
 import type { ModJson } from "../../../shared/mods/types"
 import { isModObject } from "../../../shared/mods/v2/contracts"
 import { currentFunctionExecution, withFunctionExecution } from "./execution-context"
+import { ordinaryFunctionNode } from "../../../../tests/support/function-ui-node"
 
 const cleanup: Array<() => Promise<void>> = []
 function content(node: FunctionUiElement | string): string {
-  return typeof node === "string" ? node : (node.children ?? []).map(content).join("")
+  if (typeof node === "string") return node
+  if (node.type === "engine") return ""
+  return (node.children ?? []).map(content).join("")
 }
 afterEach(async () => {
   for (const fn of cleanup.splice(0)) await fn()
@@ -93,13 +96,15 @@ function action(
 ): FunctionClientAction {
   let handle: number | undefined
   const find = (node: FunctionUiElement): void => {
-    if (node.props.key === key) handle = node.press?.handle
+    if (node.type === "engine") return
+    if (node.type !== "fragment" && node.props.key === key) handle = node.press?.handle
     for (const child of node.children ?? []) if (typeof child !== "string") find(child)
   }
   find(client.tree)
   return {
     pane: "client-board:client-board",
     instance: client.id,
+    generation: client.generation,
     intentId: randomUUID(),
     kind,
     ...(handle === undefined ? {} : { handle }),
@@ -128,7 +133,7 @@ it("matches the upstream Client descriptor and preserves local state across pare
   f.session.panes.invalidate()
   ;({ pane, client } = await f.snapshot())
   expect(client.id).toBe(click.instance)
-  expect(content(client.tree)).toContain("Client state · count:2")
+  expect(content(client.tree)).toContain("Acknowledged · count:2")
   expect(f.clients).toHaveLength(1)
 })
 
@@ -183,7 +188,7 @@ it("focuses the first drawn Client control through the owning pane and isolated 
     focused: true,
     target: { plugin: "client-board", element: "first", client: client.id }
   })
-  expect((await f.snapshot()).client.tree.props.label).toBe("focused:true")
+  expect(ordinaryFunctionNode((await f.snapshot()).client.tree).props.label).toBe("focused:true")
   await f.session.panes.closePane("client-board", "client-board")
   await expect(f.session.clients.focusFromPane(pane.key, client.id, "first", true)).rejects.toThrow(
     "MODS_CLIENT_UNMOUNTED"
@@ -264,6 +269,18 @@ it("unmounts an over-budget surface without unloading the hooks VM", async () =>
   expect(await f.session.commands()).toHaveLength(1)
 })
 
+it.each([
+  'h(Fragment,null,{type:"engine",ref:0})',
+  'h(Fragment,null,h(Fragment,null,{type:"engine",ref:0}))'
+])("rejects a native delegate inside an actual isolated Client Fragment: %s", async tree => {
+  const f = await fixture(`var __cmbSurfaceMod={default(){return ${tree}}}`)
+  const { client } = await f.snapshot()
+  expect(client.error).toBe("MODS_CLIENT_FAILED")
+  expect(f.clients[0].stats.disposed).toBe(true)
+  expect(f.state.get("client-message")).toBeUndefined()
+  expect(await f.session.commands()).toHaveLength(1)
+})
+
 it("cancels a waiting owner hook on unmount before it can write persistent state", async () => {
   const f = await fixture(
     undefined,
@@ -339,10 +356,12 @@ it("does not mount a Client after its pane closes while publication is pending",
     return value
   })
   const snapshot = f.session.panes.snapshot()
+  const rejected = expect(snapshot).rejects.toThrow("MODS_UI_DRAWING_STALE")
   await started
   await f.session.panes.closePane("client-board", "client-board")
   release()
-  expect(await snapshot).toEqual([])
+  await rejected
+  expect(await f.session.panes.snapshot()).toEqual([])
   expect(f.clients).toHaveLength(0)
 })
 

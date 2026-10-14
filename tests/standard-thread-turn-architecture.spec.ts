@@ -57,8 +57,8 @@ for (const sharedApi of [
 
 assertIncludes(
   shared,
-  "return createAgentRuntime(options)",
-  "controlled factory delegates to the existing Runtime"
+  "return createAgentRuntime({ ...options, onModelBoundary:",
+  "controlled factory delegates to the existing Runtime with a captured source boundary"
 )
 assertIncludes(
   shared,

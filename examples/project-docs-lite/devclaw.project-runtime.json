@@ -1,0 +1,92 @@
+{
+  "apiVersion": "devclaw.project-runtime/v1",
+  "plugin": {
+    "id": "project-docs-lite",
+    "version": "0.1.0"
+  },
+  "mode": "host",
+  "stateOwner": "host",
+  "stages": [
+    {
+      "id": "draft",
+      "title": "起草",
+      "actionIds": [],
+      "artifactIds": [
+        "draft"
+      ],
+      "checkIds": [
+        "draft-exists"
+      ],
+      "approval": "none",
+      "skill": "skills/draft/SKILL.md"
+    },
+    {
+      "id": "review",
+      "title": "检查与确认",
+      "actionIds": [],
+      "artifactIds": [
+        "draft",
+        "review"
+      ],
+      "checkIds": [
+        "draft-exists",
+        "review-schema"
+      ],
+      "approval": "human",
+      "skill": "skills/draft/SKILL.md"
+    }
+  ],
+  "actions": [],
+  "artifacts": [
+    {
+      "id": "draft",
+      "path": "draft.md",
+      "required": true
+    },
+    {
+      "id": "review",
+      "path": "review.json",
+      "required": true
+    }
+  ],
+  "checks": [
+    {
+      "id": "draft-exists",
+      "kind": "file-exists",
+      "artifactId": "draft",
+      "sideEffect": "read"
+    },
+    {
+      "id": "review-schema",
+      "kind": "json-schema",
+      "artifactId": "review",
+      "sideEffect": "read",
+      "schema": {
+        "type": "object",
+        "required": [
+          "summary",
+          "checked"
+        ],
+        "additionalProperties": false,
+        "properties": {
+          "summary": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 4000
+          },
+          "checked": {
+            "const": true
+          }
+        }
+      }
+    }
+  ],
+  "environment": [],
+  "capabilities": {
+    "execution": true,
+    "conditionalTransition": true,
+    "idempotency": true,
+    "reconciliation": false,
+    "cancellation": true
+  }
+}

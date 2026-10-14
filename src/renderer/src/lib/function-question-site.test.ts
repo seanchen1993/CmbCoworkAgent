@@ -33,7 +33,7 @@ it("does not mount a site for malformed native question facts", () => {
   const html = renderToStaticMarkup(
     createElement(FunctionQuestionSite, {
       request: { ...request, questions: [] },
-      onQuestions: () => {}
+      renderQuestions: () => null
     })
   )
   expect(html).toBe("")

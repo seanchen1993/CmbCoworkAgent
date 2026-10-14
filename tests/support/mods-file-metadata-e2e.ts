@@ -65,7 +65,8 @@ export async function verifyFileMetadata(
       }
       return {text:"METADATA:"+JSON.stringify({
         link:await $.fs.stat("alias",{resolve:true}), plain:await $.fs.stat("alias"),
-        leaf:await $.fs.stat("rewritten",{resolve:true}), entries:await $.fs.list()
+        leaf:await $.fs.stat("rewritten",{resolve:true}), entries:await $.fs.list(),
+        files:await $.fs.list("target")
       })}
     });
   }`)
@@ -114,8 +115,10 @@ export async function verifyFileMetadata(
   assert.equal(result.leaf.size, 5)
   assert.deepEqual(
     result.entries.find((entry: { name: string }) => entry.name === "alias"),
-    { name: "alias", kind: "other", size: 0, isLink: true }
+    { name: "alias", kind: "other", size: 0, mtimeMs: 0, isLink: true }
   )
+  assert.equal(result.files[0].mtimeMs, result.leaf.mtimeMs)
+  assert.equal(result.entries.find((entry: { name: string }) => entry.name === "target").mtimeMs, 0)
   assert.equal(requests.length, before)
   await page.screenshot({ path: join(artifacts, "file-metadata.png") })
   pass(

@@ -1,3 +1,4 @@
+import { openModsResults } from "./mods-sidebar-navigation"
 import assert from "node:assert/strict"
 import { mkdirSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
@@ -45,6 +46,7 @@ export async function verifySvg(
   )
   await page.reload({ waitUntil: "domcontentloaded" })
   await page.getByText("Vector E2E", { exact: true }).first().click()
+  await openModsResults(page)
   const outbound: string[] = []
   const listen = (request: import("playwright").Request): void => {
     if (request.url().includes("mods-svg-invalid.example")) outbound.push(request.url())

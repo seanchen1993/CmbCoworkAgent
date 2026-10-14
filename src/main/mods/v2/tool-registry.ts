@@ -5,6 +5,7 @@ import { encodeModJson, parseModJson } from "../../../shared/mods/validation"
 import { validateToolSchema, validateRegisteredToolInput } from "./tool-schema"
 import { functionMcpToolCandidates, functionMcpToolName } from "./mcp-names"
 import { isDeepStrictEqual } from "node:util"
+import { randomUUID } from "node:crypto"
 
 export function functionToolSpec(input: ModObject): ModObject {
   if (
@@ -12,7 +13,8 @@ export function functionToolSpec(input: ModObject): ModObject {
     !/^[a-zA-Z0-9_-]{1,64}$/.test(input.name) ||
     typeof input.description !== "string" ||
     input.description.length > 8000 ||
-    Object.keys(input).some((key) => !["name", "description", "inputSchema"].includes(key))
+    (input.isDeferred !== undefined && typeof input.isDeferred !== "boolean") ||
+    Object.keys(input).some((key) => !["name", "description", "inputSchema", "isDeferred"].includes(key))
   )
     throw new ModFunctionError("MODS_TOOL_SPEC")
   const inputSchema = input.inputSchema === undefined ? { type: "object" } : input.inputSchema
@@ -42,10 +44,13 @@ export class FunctionToolRegistry {
       plugin,
       description: spec.description as string,
       inputSchema: spec.inputSchema as ModObject,
-      mcp: true
+      mcp: true,
+      isDeferred: spec.isDeferred !== false,
+      registrationId: previous?.registrationId
     }
     // Repeating an identical registration must not invalidate an in-flight tool definition.
     if (previous && isDeepStrictEqual(previous, tool)) return { tool: name }
+    tool.registrationId = randomUUID()
     const totalChars = [...this.tools.values()]
       .filter((entry) => entry.name !== name)
       .reduce((size, entry) => size + JSON.stringify(entry).length, JSON.stringify(tool).length)

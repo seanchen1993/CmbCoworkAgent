@@ -1,0 +1,11 @@
+{
+  "apiVersion": "cmb.mods/v2",
+  "id": "copy-prefix",
+  "claw": {
+    "componentsVersion": 1,
+    "components": [{ "id": "prefix", "name": "复制时添加标记", "kind": "module",
+      "entry": "prefix.ts", "description": "为组件复制的文字添加“检视摘录”标记；独立于选择组件，可与其他插件组合。",
+      "dependsOn": [], "actionIds": [] }],
+    "actions": []
+  }
+}

@@ -1,16 +1,19 @@
 import { useEffect, useMemo, useRef, useState } from "react"
 import type { ModObject } from "../../../../shared/mods/types"
-import { functionCodeLanguage, functionCodeRows } from "../../../../shared/mods/v2/code"
+import { functionCodeLanguage, functionCodeView } from "../../../../shared/mods/v2/code"
 import { functionCodeHighlighter } from "../../lib/function-code-highlight"
 
 /** Source is escaped by React or the host's Shiki worker, never treated as plugin HTML. */
 export function FunctionCode({ props: values }: { props: ModObject }): React.JSX.Element {
-  const source = String(values.source)
-  const rows = useMemo(() => functionCodeRows(values), [values])
+  const view = useMemo(() => functionCodeView(values), [values])
+  const { source, rows, diff } = view
   const language = functionCodeLanguage(values)
   const highlightOwner = useRef({})
   const [highlighted, setHighlighted] = useState<{ key: string; html: string }>()
-  const key = values.format !== "diff" && language ? `${language}\u0000${source}` : undefined
+  const key = !diff && language ? `${language}\u0000${source}` : undefined
+  useEffect(() => {
+    if (view.diffFallback) console.warn("MODS_UI_CODE_DIFF_FALLBACK")
+  }, [source, view.diffFallback])
   useEffect(() => {
     if (!key || !language) return
     let live = true
@@ -26,7 +29,7 @@ export function FunctionCode({ props: values }: { props: ModObject }): React.JSX
     }
   }, [highlightOwner, key, language, source])
   const truncate = values.wrap === "truncate-end"
-  const numbered = values.format !== "diff" && typeof values.startLine === "number"
+  const numbered = !diff && !view.diffFallback && typeof values.startLine === "number"
   const html = highlighted?.key === key ? highlighted?.html : undefined
   if (html)
     return (
@@ -46,7 +49,7 @@ export function FunctionCode({ props: values }: { props: ModObject }): React.JSX
           data-code-kind={row.kind}
           className={`flex min-w-0 ${row.kind === "add" ? "bg-green-500/10 text-green-700 dark:text-green-300" : row.kind === "remove" ? "bg-red-500/10 text-red-700 dark:text-red-300" : row.kind === "header" ? "text-muted-foreground" : ""}`}
         >
-          {values.format === "diff" && row.kind !== "header" && (
+          {diff && row.kind !== "header" && (
             <span
               aria-hidden="true"
               className="w-10 shrink-0 select-none pr-2 text-right text-muted-foreground"
@@ -54,7 +57,7 @@ export function FunctionCode({ props: values }: { props: ModObject }): React.JSX
               {row.oldLine}
             </span>
           )}
-          {(numbered || (values.format === "diff" && row.kind !== "header")) && (
+          {(numbered || (diff && row.kind !== "header")) && (
             <span
               aria-hidden="true"
               className="w-10 shrink-0 select-none pr-2 text-right text-muted-foreground"
@@ -62,7 +65,7 @@ export function FunctionCode({ props: values }: { props: ModObject }): React.JSX
               {row.newLine}
             </span>
           )}
-          {values.format === "diff" && row.kind !== "header" && (
+          {diff && row.kind !== "header" && (
             <span aria-hidden="true" className="w-4 shrink-0 select-none">
               {row.kind === "add" ? "+" : row.kind === "remove" ? "-" : " "}
             </span>

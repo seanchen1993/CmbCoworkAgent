@@ -1,4 +1,6 @@
-import { useEffect, useState } from "react"
+import { publishClawNotice } from "@/lib/claw-sidebar"
+import { useModsChatScope } from "../../lib/mods-chat-scope"
+import { useEffect, useMemo, useState } from "react"
 import type { ModCommandJob } from "../../../../shared/mods/types"
 import { Button } from "@/components/ui/button"
 import { FunctionCommandOutput } from "./FunctionCommandOutput"
@@ -35,18 +37,35 @@ const errorMessages: Record<string, string> = {
   MODS_COMMAND_TURN_HELD: "当前命令不能等待另一条命令，请调整插件实现。"
 }
 export function ModCommandJobs({ threadId }: { threadId: string }): React.JSX.Element | null {
-  const [jobs, setJobs] = useState<ModCommandJob[]>([])
+  const enabled = useModsChatScope(threadId)
+  const [snapshot, setSnapshot] = useState<{ threadId: string; jobs: ModCommandJob[] }>({
+    threadId,
+    jobs: []
+  })
+  const jobs = useMemo(
+    () =>
+      snapshot.threadId !== threadId
+        ? []
+        : enabled
+          ? snapshot.jobs
+          : snapshot.jobs.filter((job) =>
+              ["succeeded", "failed", "cancelled", "unknown"].includes(job.state)
+            ),
+    [snapshot, threadId, enabled]
+  )
   const [error, setError] = useState("")
   useEffect(() => {
+    setError("")
+    if (!enabled) return
     let live = true
     let sequence = 0
-    setJobs([])
-    setError("")
+    setSnapshot({ threadId, jobs: [] })
     const refresh = (): void => {
+      if (!live) return
       const current = ++sequence
       void window.api.mods.jobs(threadId).then(
         (rows) => {
-          if (live && current === sequence) setJobs(rows)
+          if (live && current === sequence) setSnapshot({ threadId, jobs: rows })
         },
         () => {}
       )
@@ -55,13 +74,29 @@ export function ModCommandJobs({ threadId }: { threadId: string }): React.JSX.El
       if (event.threadId === threadId) refresh()
     })
     refresh()
-    window.addEventListener("mods:configuration-changed", refresh)
     return () => {
       live = false
       stop()
-      window.removeEventListener("mods:configuration-changed", refresh)
     }
-  }, [threadId])
+  }, [threadId, enabled])
+  useEffect(() => {
+    const active = jobs.some((job) => ["running", "queued"].includes(job.state))
+    const failed = jobs.some((job) => ["failed", "unknown"].includes(job.state))
+    publishClawNotice(
+      threadId,
+      "jobs",
+      !enabled
+        ? ""
+        : active
+          ? "插件命令执行中"
+          : failed
+            ? "插件命令需核查"
+            : jobs.length
+              ? "插件命令有结果"
+              : ""
+    )
+    return () => publishClawNotice(threadId, "jobs", "")
+  }, [threadId, jobs, enabled])
   if (!jobs.length) return null
   return (
     <details
@@ -71,8 +106,11 @@ export function ModCommandJobs({ threadId }: { threadId: string }): React.JSX.El
       )}
       data-mod-jobs
     >
-      <summary>Mods 命令（{jobs.length}）</summary>
-      {error && (
+      <summary>灵件操作记录（{jobs.length}）</summary>
+      {!enabled && (
+        <p className="mt-2 text-muted-foreground">灵件已关闭，以下仅为本次打开的历史结果。</p>
+      )}
+      {enabled && error && (
         <p role="alert" className="text-destructive">
           {error}
         </p>
@@ -91,6 +129,9 @@ export function ModCommandJobs({ threadId }: { threadId: string }): React.JSX.El
                 text={job.result.text}
                 isErrored={job.state !== "succeeded"}
                 fallback={<pre className="whitespace-pre-wrap break-words">{job.result.text}</pre>}
+                renderText={(safeText) => (
+                  <pre className="whitespace-pre-wrap break-words">{safeText}</pre>
+                )}
               />
             )}
             {job.error && (
@@ -100,16 +141,18 @@ export function ModCommandJobs({ threadId }: { threadId: string }): React.JSX.El
                 text={errorMessages[job.error] ?? job.error}
                 isErrored
                 fallback={<p role="status">{errorMessages[job.error] ?? job.error}</p>}
+                renderText={(safeText) => <p role="status">{safeText}</p>}
               />
             )}
             {job.state === "unknown" && (
               <p>操作可能已生效。请在项目执行记录中核查，不要直接重试。</p>
             )}
-            {["queued", "running"].includes(job.state) && (
+            {enabled && ["queued", "running"].includes(job.state) && (
               <Button
                 size="sm"
                 variant="outline"
                 onClick={() =>
+                  enabled &&
                   void window.api.mods.cancelJob(threadId, job.id).catch((e) => setError(String(e)))
                 }
               >

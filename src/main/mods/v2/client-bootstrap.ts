@@ -1,3 +1,5 @@
+import { CLIENT_MARKDOWN_FACTORY } from "./client-markdown-bootstrap"
+
 /** Client modules run in their own VM. No engine SDK, DOM, Node or ambient timers. */
 export const CLIENT_BOOTSTRAP = String.raw`
 (() => {
@@ -56,6 +58,7 @@ export const CLIENT_BOOTSTRAP = String.raw`
   for(const type of ["Box","Text","Button","Input","Select","Link","Code","Svg"]) {
     elements[type]=raw=>{
       const props={...raw}, nested=children(props.children), handlers={};
+      if(type==="Link"&&typeof props.href!=="string")throw Error("MODS_UI_LINK_HREF");
       delete props.children;
       for(const kind of ["onPress","onInput","onSubmit","onSelect"]){
         if(props[kind]!==undefined){
@@ -80,6 +83,7 @@ export const CLIENT_BOOTSTRAP = String.raw`
       return node;
     };
   }
+  ${CLIENT_MARKDOWN_FACTORY}
   freeze(elements);
   const surface=freeze({
     elements,
@@ -97,34 +101,41 @@ export const CLIENT_BOOTSTRAP = String.raw`
     post
   });
   const sync=value=>{if(value&&typeof value.then==="function")throw Error("MODS_CLIENT_ASYNC");};
+  function draw(e) {
+    if(e.kind==="render"||e.kind==="frame"){dirty=false;message=undefined;}
+    if(e.kind==="render"){props=e.props;columns=e.columns;rows=e.rows;}
+    previous=new Map([...callbacks].map(([handle,record])=>[record.signature,handle]));
+    callbacks.clear();
+    const module=globalThis.__cmbSurfaceMod;
+    const names=Object.keys(module).filter(name=>/^[A-Z]/.test(name)&&typeof module[name]==="function");
+    const fn=module.default||(names.length===1?module[names[0]]:undefined);
+    if(typeof fn!=="function")throw Error("MODS_CLIENT_EXPORT");
+    let tree;renderSetState=false;drawing=true;
+    try {tree=fn(props,surface);sync(tree);} finally {drawing=false;}
+    return {tree,dirty,renderSetState,...(message===undefined?{}:{message}),
+      timers:[...timers].map(([id,t])=>({id,ms:t.ms}))};
+  }
   globalThis.__cmbFunctionMod={register(on,options){
     owner=options.plugin;
-    on("surface.update",(_,e)=>{
+    on("surface.update",async(_,e)=>{
+      // Older direct VM readers still use update to read the first drawing.
+      if(e.kind==="render"||e.kind==="frame")return draw(e);
       dirty=false;message=undefined;
-      if(e.kind==="render") {props=e.props;columns=e.columns;rows=e.rows;}
-      else if(e.kind==="control") {
+      if(e.kind==="control") {
         const cb=callbacks.get(e.handle);
         if(!cb||cb.key!==e.event.element)throw Error("MODS_UI_STALE_ACTION");
         const fn=cb.handlers[e.callback];
         if(typeof fn!=="function"&&e.callback!=="onInput")throw Error("MODS_UI_CALLBACK");
-        if(fn)sync(e.callback==="onPress"?fn(e.event):fn(e.event.value,e.event));
-      } else if(e.kind==="key") {if(e.value.key!=="escape")sync(onKey?.(e.value));}
-      else if(e.kind==="pointer")sync(onPointer?.(e.value));
-      else if(e.kind==="focus")sync(onFocus?.(e.value));
-      else if(e.kind==="scroll")sync(onScroll?.(e.value));
-      else if(e.kind==="tick")sync(timers.get(e.handle)?.fn());
-      else if(e.kind!=="frame")throw Error("MODS_CLIENT_EVENT");
-      previous=new Map([...callbacks].map(([handle,record])=>[record.signature,handle]));
-      callbacks.clear();
-      const module=globalThis.__cmbSurfaceMod;
-      const names=Object.keys(module).filter(name=>/^[A-Z]/.test(name)&&typeof module[name]==="function");
-      const draw=module.default||(names.length===1?module[names[0]]:undefined);
-      if(typeof draw!=="function")throw Error("MODS_CLIENT_EXPORT");
-      let tree;renderSetState=false;drawing=true;
-      try {tree=draw(props,surface);sync(tree);} finally {drawing=false;}
-      return {tree,dirty,renderSetState,...(message===undefined?{}:{message}),
-        timers:[...timers].map(([id,t])=>({id,ms:t.ms}))};
+        if(fn)await (e.callback==="onPress"?fn(e.event):fn(e.event.value,e.event));
+      } else if(e.kind==="key") {if(e.value.key!=="escape")await onKey?.(e.value);}
+      else if(e.kind==="pointer")await onPointer?.(e.value);
+      else if(e.kind==="focus")await onFocus?.(e.value);
+      else if(e.kind==="scroll")await onScroll?.(e.value);
+      else if(e.kind==="tick")await timers.get(e.handle)?.fn();
+      else throw Error("MODS_CLIENT_EVENT");
+      return {dirty,...(message===undefined?{}:{message})};
     });
+    on("surface.draw",(_,e)=>draw(e));
   }};
 })();
 `

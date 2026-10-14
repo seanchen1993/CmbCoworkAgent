@@ -14,7 +14,7 @@ import {
   writeFileSync
 } from "node:fs"
 import { tmpdir } from "node:os"
-import { join } from "node:path"
+import { dirname, join } from "node:path"
 import { LocalSandbox } from "../src/main/agent/local-sandbox.ts"
 import { ApprovalStore } from "../src/main/agent/approval-store.ts"
 import { ToolOrchestrator } from "../src/main/agent/tool-orchestrator.ts"
@@ -72,7 +72,17 @@ function createDirectoryAlias(
 async function run(): Promise<void> {
   const repo = realpathSync(mkdtempSync(join(tmpdir(), "cmb-wt-shell-repo-")))
   const appDataRoot = realpathSync(mkdtempSync(join(tmpdir(), "cmb-wt-shell-data-")))
+  const previousShell = process.env.SHELL
   try {
+    if (process.platform === "win32") {
+      // This fixture exercises POSIX commands using the real Git Bash installation.
+      const gitPaths = execFileSync("where.exe", ["git"], { encoding: "utf8" })
+        .trim().split(/\r?\n/)
+      const bash = gitPaths.map(path => join(dirname(dirname(path)), "bin", "bash.exe"))
+        .find(path => existsSync(path))
+      assert.ok(bash, "the POSIX worktree fixture requires the actual Git Bash installation")
+      process.env.SHELL = bash
+    }
     git(repo, ["init", "--initial-branch=main"])
     git(repo, ["config", "user.name", "Worktree Test"])
     git(repo, ["config", "user.email", "worktree@example.com"])
@@ -472,8 +482,15 @@ async function run(): Promise<void> {
       "file tools must explicitly protect the linked-worktree .git pointer"
     )
   } finally {
-    rmSync(repo, { recursive: true, force: true })
-    rmSync(appDataRoot, { recursive: true, force: true })
+    try {
+      rmSync(repo, { recursive: true, force: true })
+      rmSync(appDataRoot, { recursive: true, force: true })
+    } finally {
+      if (process.platform === "win32") {
+        if (previousShell === undefined) delete process.env.SHELL
+        else process.env.SHELL = previousShell
+      }
+    }
   }
   console.log("PASS local-sandbox-worktree-isolation")
 }

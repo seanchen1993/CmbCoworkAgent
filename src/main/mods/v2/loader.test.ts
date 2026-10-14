@@ -1,9 +1,14 @@
+import { createHash } from "node:crypto"
+import { modCompiler } from "../loader"
+import { FUNCTION_HOST_REVISION } from "../../../shared/mods/v2/contracts"
+import type { ModObject } from "../../../shared/mods/types"
 import { mkdtemp, mkdir, writeFile, rm } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join, resolve } from "node:path"
 import { afterEach, describe, expect, it } from "vitest"
 import { compileFunctionPlugin } from "./loader"
 import { checkFunctionPlugin } from "../devtools/check"
+import { resolveFunctionUserConfig } from "../../../shared/mods/v2/user-config"
 
 const roots: string[] = []
 async function plugin(source: string, modules = ["./register.ts"]): Promise<string> {
@@ -24,6 +29,198 @@ afterEach(async () => {
 })
 
 describe("function plugin snapshot loader", () => {
+  it.each(["cjs", "cts"])("loads .%s entries and imports as ESM and pins their sources", async (extension) => {
+    const root = await plugin("", [`./register.${extension}`])
+    await writeFile(join(root, `hooks/register.${extension}`),
+      `import { text } from "./helper.${extension}";
+       export function register(on) { on("command.run", () => ({text})) }`)
+    const helper = join(root, `hooks/helper.${extension}`)
+    await writeFile(helper, extension === "cts"
+      ? 'export const text: string = "first"' : 'export const text = "first"')
+    const first = await compileFunctionPlugin(root, { captureSources: true })
+    expect(first.sources).toEqual(expect.arrayContaining([
+      `hooks/register.${extension}`, `hooks/helper.${extension}`
+    ]))
+    expect((await checkFunctionPlugin(root)).registrations).toEqual(
+      expect.arrayContaining([expect.objectContaining({ pattern: "command.run" })])
+    )
+    await writeFile(helper, 'export const text = "second"')
+    expect((await compileFunctionPlugin(root)).digest).not.toBe(first.digest)
+  })
+
+  it.each(["cjs", "cts"])("rejects require and dynamic import in .%s modules", async (extension) => {
+    const root = await plugin("", [`./register.${extension}`])
+    await writeFile(join(root, "hooks/helper.js"), 'export const text = "value"')
+    for (const body of [
+      'const source = require("./helper.js"); export function register(){return source.text}',
+      'export function register(name){return require(name)}',
+      'export function register(){return import("./helper.js")}'
+    ]) {
+      await writeFile(join(root, `hooks/register.${extension}`), body)
+      await expect(compileFunctionPlugin(root)).rejects.toThrow("MODS_IMPORT_DENIED")
+    }
+  })
+
+  it.each(["cjs", "cts"])("includes .%s client modules in the immutable bundle", async (extension) => {
+    const root = await plugin(`export function register(on){on("ui.render",($,e)=>{
+      const {Client}=$.ui.resolve(e);return Client({key:"board",module:"./board.${extension}"})
+    })}`)
+    await writeFile(join(root, `hooks/board.${extension}`),
+      'export default function Board(){ return "client" }')
+    expect(Object.keys((await compileFunctionPlugin(root)).clients)).toEqual([
+      `hooks/board.${extension}`
+    ])
+    await writeFile(join(root, `hooks/board.${extension}`),
+      'const value=require("./helper.js");export default function Board(){return value}')
+    await writeFile(join(root, "hooks/helper.js"), 'export const text="not available"')
+    await expect(compileFunctionPlugin(root)).rejects.toThrow("MODS_IMPORT_DENIED")
+  })
+
+  it("pins action declarations in the grant digest without running plugin code", async () => {
+    const root = await plugin('export function register(){throw Error("must not run") }')
+    const manifest = {
+      name: "loader-probe",
+      claw: {
+        actions: [{ id: "run", name: "Run", command: "run", inputSchema: { type: "object" } }]
+      }
+    }
+    await writeFile(join(root, ".claude-plugin/plugin.json"), JSON.stringify(manifest))
+    const first = await compileFunctionPlugin(root)
+    expect(first.actions).toEqual(manifest.claw.actions)
+    manifest.claw.actions[0].command = "other"
+    await writeFile(join(root, ".claude-plugin/plugin.json"), JSON.stringify(manifest))
+    expect((await compileFunctionPlugin(root)).digest).not.toBe(first.digest)
+  })
+
+  it("rejects action schemas with external references instead of accepting unchecked inputs", async () => {
+    const root = await plugin("export function register(){}")
+    await writeFile(
+      join(root, ".claude-plugin/plugin.json"),
+      JSON.stringify({
+        name: "loader-probe",
+        claw: {
+          actions: [
+            {
+              id: "run",
+              name: "Run",
+              command: "run",
+              inputSchema: { $ref: "https://invalid/schema" }
+            }
+          ]
+        }
+      })
+    )
+    await expect(compileFunctionPlugin(root)).rejects.toThrow("MODS_TOOL_SCHEMA_REF")
+  })
+
+  it("preserves legacy digest shape and pins the full optional configuration declaration", async () => {
+    const root = await plugin("export function register(){}")
+    const manifest = {
+      name: "loader-probe",
+      cmbCompatibility: { modelProtocol: "legacy-v1" },
+      claw: {
+        actions: [
+          {
+            id: "run",
+            name: "Run",
+            command: "run",
+            inputSchema: {}
+          } as ModObject
+        ]
+      }
+    }
+    const save = () => writeFile(join(root, ".claude-plugin/plugin.json"), JSON.stringify(manifest))
+    await save()
+    const legacy = await compileFunctionPlugin(root, { captureSources: true })
+    // This is the pre-configSchema approval hash contract, without any new normalized keys.
+    const expected = createHash("sha256")
+      .update(
+        JSON.stringify({
+          name: legacy.name,
+          profile: legacy.profile,
+          hostRevision: FUNCTION_HOST_REVISION,
+          version: modCompiler().version,
+          code: legacy.code,
+          clients: legacy.clients,
+          environment: legacy.environment,
+          sources: Object.entries(legacy.authoringSources!).sort(([a], [b]) => a.localeCompare(b))
+        })
+      )
+      .digest("hex")
+    expect(legacy.digest).toBe(expected)
+    expect(legacy.actions![0]).not.toHaveProperty("configSchema")
+    manifest.claw.actions[0].configSchema = {
+      type: "object",
+      title: "Configuration",
+      properties: {}
+    }
+    await save()
+    const added = await compileFunctionPlugin(root)
+    expect(added.actions![0].configSchema).toEqual(manifest.claw.actions[0].configSchema)
+    expect(added.digest).not.toBe(legacy.digest)
+    const configSchema = manifest.claw.actions[0].configSchema as ModObject
+    configSchema.title = "Changed annotation"
+    await save()
+    expect((await compileFunctionPlugin(root)).digest).not.toBe(added.digest)
+    delete manifest.claw.actions[0].configSchema
+    await save()
+    expect((await compileFunctionPlugin(root)).digest).toBe(legacy.digest)
+  })
+
+  it.each([null, [], { $ref: "https://invalid/schema" }, { type: "object", unsupported: true }])(
+    "rejects invalid config schemas at compilation: %j",
+    async (configSchema) => {
+      const root = await plugin("export function register(){}")
+      await writeFile(
+        join(root, ".claude-plugin/plugin.json"),
+        JSON.stringify({
+          name: "loader-probe",
+          claw: {
+            actions: [
+              {
+                id: "run",
+                name: "Run",
+                command: "run",
+                inputSchema: {},
+                configSchema
+              }
+            ]
+          }
+        })
+      )
+      await expect(compileFunctionPlugin(root)).rejects.toThrow()
+    }
+  )
+
+  it("rejects an explicit null claw declaration instead of treating it as absent", async () => {
+    const root = await plugin("export function register(){}")
+    await writeFile(
+      join(root, ".claude-plugin/plugin.json"),
+      JSON.stringify({ name: "loader-probe", claw: null })
+    )
+    await expect(compileFunctionPlugin(root)).rejects.toThrow("CLAW_ACTION_OBJECT_INVALID")
+  })
+
+  it("reports literal environment declarations in approval digest and rejects direct dynamic access", async () => {
+    const root = await plugin(
+      'export function register(on){on("command.run",async $=>({text:await $.env.get("HOME")}))}'
+    )
+    const first = await compileFunctionPlugin(root)
+    expect(first.environment).toEqual({ read: ["HOME"], write: [] })
+    expect((await checkFunctionPlugin(root)).environment).toEqual(first.environment)
+    await writeFile(
+      join(root, "hooks/register.ts"),
+      'export function register(on){on("command.run",async $=>({text:await $.env.get("PATH")}))}'
+    )
+    const second = await compileFunctionPlugin(root)
+    expect(second.environment.read).toEqual(["PATH"])
+    expect(second.digest).not.toBe(first.digest)
+    await writeFile(
+      join(root, "hooks/register.ts"),
+      'export function register(on){on("command.run",async ($,e)=>({text:await $.env.get(e.text)}))}'
+    )
+    await expect(compileFunctionPlugin(root)).rejects.toThrow("MODS_ENV_NAME_LITERAL")
+  })
   it.each(["Panel", "h", "__functionJsx"])(
     "captures %s Client modules in the grant digest and rejects dynamic or escaping paths",
     async (factory) => {
@@ -92,6 +289,21 @@ describe("function plugin snapshot loader", () => {
     })
   })
 
+  it("warns about schema-only registrations without breaking legacy package validation", async () => {
+    const root = await plugin('export function register(on){on("classic.FileChanged",()=>({}))}')
+    expect(await checkFunctionPlugin(root)).toMatchObject({
+      valid: true,
+      packageValid: true,
+      authorized: false,
+      compatibility: {
+        scope: "registration-events-only",
+        status: "unsupported",
+        strictCompatible: false
+      },
+      diagnostics: [{ code: "MODS_EVENT_SCHEMA_ONLY", pattern: "classic.FileChanged" }]
+    })
+  })
+
   it("reports completion gates only for exact registrations, not wildcard observers", async () => {
     const root = await plugin(`export function register(on) {
       on("*", (_,e,next) => next(e))
@@ -144,4 +356,77 @@ describe("function plugin snapshot loader", () => {
     )
     await expect(checkFunctionPlugin(root)).rejects.toThrow()
   })
+})
+
+
+it.each(["legacy-v1", "result-v1"])("requires fresh approval for an unchanged explicit %s package after host contract migration", async modelProtocol => {
+  const root = await plugin("export function register(){}")
+  await writeFile(join(root, ".claude-plugin/plugin.json"), JSON.stringify({
+    name: "loader-probe", cmbCompatibility: { modelProtocol }
+  }))
+  const current = await compileFunctionPlugin(root, { captureSources: true })
+  const oldHostDigest = createHash("sha256").update(JSON.stringify({
+    name: current.name, profile: current.profile,
+    ...(modelProtocol === "result-v1" ? { modelProtocol } : {}),
+    hostRevision: "module-resources-v89", version: modCompiler().version,
+    code: current.code, clients: current.clients, environment: current.environment,
+    sources: Object.entries(current.authoringSources!).sort(([a], [b]) => a.localeCompare(b))
+  })).digest("hex")
+  expect(FUNCTION_HOST_REVISION).toBe("claude-295-tools-v90")
+  expect(current.digest).not.toBe(oldHostDigest)
+})
+
+it("defaults Claude packages to result objects and pins explicit legacy opt-in in the source digest", async () => {
+  const root = await plugin("export function register(){}")
+  const first = await compileFunctionPlugin(root, { captureSources: true })
+  // Reconstruct the former implicit-legacy approval digest using the SAME package bytes.
+  const oldDigest = createHash("sha256").update(JSON.stringify({
+    name: first.name, profile: first.profile, hostRevision: FUNCTION_HOST_REVISION,
+    version: modCompiler().version, code: first.code, clients: first.clients,
+    environment: first.environment,
+    sources: Object.entries(first.authoringSources!).sort(([a], [b]) => a.localeCompare(b))
+  })).digest("hex")
+  expect(first.digest).not.toBe(oldDigest)
+  expect(first.modelProtocol).toBe("result-v1")
+  expect((await checkFunctionPlugin(root)).modelProtocol).toBe("result-v1")
+  await writeFile(join(root, ".claude-plugin/plugin.json"), JSON.stringify({name:"loader-probe",cmbCompatibility:{modelProtocol:"legacy-v1"}}))
+  const legacy = await compileFunctionPlugin(root)
+  expect(legacy.modelProtocol).toBe("legacy-v1")
+  expect(legacy.digest).not.toBe(first.digest)
+  expect((await checkFunctionPlugin(root)).modelProtocol).toBe("legacy-v1")
+  await mkdir(join(root, "mods"))
+  await writeFile(join(root, "mods/manifest.json"), JSON.stringify({apiVersion:"cmb.mods/v2",id:"loader-probe",entry:"../hooks/register.ts",cmbCompatibility:{modelProtocol:"result-v1"}}))
+  await expect(compileFunctionPlugin(root)).rejects.toThrow("MODS_MODEL_PROTOCOL_CONFLICT")
+})
+
+
+it("does not erase a Claude package null compatibility declaration with fallback", async () => {
+  const root = await plugin("export function register(){}")
+  await writeFile(join(root, ".claude-plugin/plugin.json"), JSON.stringify({ name: "loader-probe", cmbCompatibility: null }))
+  await expect(compileFunctionPlugin(root)).rejects.toThrow("MODS_MODEL_PROTOCOL_MANIFEST")
+})
+
+it("captures original userConfig schema in the approved snapshot without executing register", async () => {
+  const root = await plugin('export function register(){throw Error("must not run") }')
+  const manifest = { name: "loader-probe", userConfig: {
+    tone: { type: "string", title: "Tone", description: "Voice", default: "warm" }
+  } }
+  await writeFile(join(root, ".claude-plugin/plugin.json"), JSON.stringify(manifest))
+  const first = await compileFunctionPlugin(root)
+  expect(first.userConfig).toEqual(manifest.userConfig)
+  expect(resolveFunctionUserConfig(first.userConfig!, {})).toEqual({ tone: "warm" })
+  manifest.userConfig.tone.default = "formal"
+  await writeFile(join(root, ".claude-plugin/plugin.json"), JSON.stringify(manifest))
+  expect((await compileFunctionPlugin(root)).digest).not.toBe(first.digest)
+  expect(first.userConfig!.tone.default).toBe("warm")
+})
+
+it("does not silently ignore a null or invalid userConfig declaration", async () => {
+  const root = await plugin("export function register(){}")
+  await writeFile(join(root, ".claude-plugin/plugin.json"), JSON.stringify({ name: "loader-probe", userConfig: null }))
+  await expect(compileFunctionPlugin(root)).rejects.toThrow("Invalid plugin configuration field")
+  await writeFile(join(root, ".claude-plugin/plugin.json"), JSON.stringify({ name: "loader-probe", userConfig: {
+    bad: { type: "number", title: "Count", description: "Help", default: "not a number" }
+  } }))
+  await expect(compileFunctionPlugin(root)).rejects.toThrow("Invalid plugin configuration field: bad")
 })

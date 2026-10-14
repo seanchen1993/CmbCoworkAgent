@@ -1,4 +1,5 @@
 import { requestCodeHighlight } from "../components/tabs/code-highlight-client"
+import { FUNCTION_CODE_MAX_DRAW_CHARS } from "../../../shared/mods/v2/code"
 
 const MAX_PENDING = 16
 const MAX_CACHE_ENTRIES = 16
@@ -124,7 +125,7 @@ export function createFunctionCodeHighlighter(raw = requestCodeHighlight): {
       const previous = pending.get(owner)
       if (previous) cancel(previous)
       if (active?.owner === owner) cancel(active)
-      if (source.length > 10000 || !/^[a-z0-9-]{1,64}$/i.test(language)) {
+      if (source.length > FUNCTION_CODE_MAX_DRAW_CHARS || !/^[a-z0-9-]{1,64}$/i.test(language)) {
         reject(job, new Error("MODS_CODE_HIGHLIGHT_INPUT"))
       } else {
         const cached = cache.get(job.key)

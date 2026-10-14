@@ -25,8 +25,58 @@ const tools: Record<string, { target: string; required: string[]; optional: stri
   task_output: { target: "host:task_output", required: ["task_id"], optional: ["block", "timeout"] }
 }
 
+// Only exact native equivalents are exposed under Claude Code names. Glob/Grep differ.
+export const FUNCTION_NATIVE_TOOL_NAMES: Readonly<Record<string, string>> = {
+  read_file: "Read", write_file: "Write", edit_file: "Edit", execute: "Bash"
+}
+
+export function publicFunctionToolName(name: string): string {
+  return Object.hasOwn(FUNCTION_NATIVE_TOOL_NAMES, name) ? FUNCTION_NATIVE_TOOL_NAMES[name] : name
+}
+
+export function nativeFunctionToolName(name: string): string {
+  return Object.entries(FUNCTION_NATIVE_TOOL_NAMES).find(([, publicName]) => publicName === name)?.[0] ?? name
+}
+
+/** Preserve all fields, including host identity; only translate the native Read line origin. */
+export function publicFunctionToolInput(input: ModObject): ModObject {
+  const tool = String(input.tool)
+  const publicName = publicFunctionToolName(tool)
+  if (publicName === tool) return input
+  const value: ModObject = { ...input, tool: publicName }
+  if (tool === "read_file") {
+    if (isModObject(input.input)) value.input = publicReadArguments(input.input)
+    else Object.assign(value, publicReadArguments(input))
+    value.tool = publicName
+  }
+  return value
+}
+
+function publicReadArguments(input: ModObject): ModObject {
+  return typeof input.offset === "number" ? { ...input, offset: input.offset + 1 } : { ...input }
+}
+
+export function nativeFunctionToolInput(input: ModObject): ModObject {
+  const tool = String(input.tool)
+  const nativeName = nativeFunctionToolName(tool)
+  if (nativeName === tool) return input
+  const value: ModObject = { ...input, tool: nativeName }
+  if (tool === "Read") {
+    const convert = (args: ModObject): ModObject => {
+      if (args.offset === undefined) return { ...args }
+      if (typeof args.offset !== "number" || !Number.isInteger(args.offset) || args.offset < 1)
+        throw new ModFunctionError("MODS_TOOL_ARGUMENTS")
+      return { ...args, offset: args.offset - 1 }
+    }
+    if (isModObject(input.input)) value.input = convert(input.input)
+    else Object.assign(value, convert(input))
+    value.tool = nativeName
+  }
+  return value
+}
+
 export function isNativeFunctionTool(name: string): boolean {
-  return Object.hasOwn(tools, name)
+  return Object.hasOwn(tools, nativeFunctionToolName(name))
 }
 
 export function isMcpFunctionTool(name: string): boolean {
@@ -46,6 +96,7 @@ export function functionSdkToolInput(input: ModObject): { target: string; args: 
 }
 
 export function functionToolTarget(input: ModObject): { target: string; args: ModObject } {
+  input = nativeFunctionToolInput(input)
   const spec =
     typeof input.tool === "string" && Object.hasOwn(tools, input.tool)
       ? tools[input.tool]

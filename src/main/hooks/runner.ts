@@ -1,3 +1,5 @@
+import { observeBuiltinPolicyDecision } from "../mods/builtins/policy-decisions"
+import { assertCurrentRuntimePluginSourceContent } from "../plugins/runtime-source-scope"
 import { spawn } from "node:child_process"
 import { randomUUID } from "node:crypto"
 import { ChatOpenAI } from "@langchain/openai"
@@ -16,6 +18,7 @@ import { persistHookResultRecord } from "./log-record"
 import { getModsManager } from "../mods/manager"
 import { getModCallContext } from "../mods/context"
 import { ModError } from "../mods/errors"
+import { copyClassicResult, sameClassicResult, contributedClassicFeedback } from "../mods/v2/classic-result"
 import type { ModObject } from "../../shared/mods/types"
 import { isModObject, ModFunctionError } from "../../shared/mods/v2/contracts"
 import { trackEvent } from "../services/event-reporter"
@@ -105,6 +108,8 @@ function tagOnceResult<T extends HookResult>(
 const _regexCache = new Map<string, RegExp | null>()
 
 export interface HookContext {
+  /** Host runtime scope; the legacy notification session may be its approval owner. */
+  functionSessionId?: string
   /** Host-owned invocation identity and cancellation; never read from tool arguments. */
   toolCallId?: string
   /** Measured by the host around execution, excluding hook/approval waiting. Absent if unknown. */
@@ -602,6 +607,7 @@ function buildHookStdinPayload(event: HookEvent, context: HookContext, hook: Hoo
     if (context.stopContext?.assistantResponse !== undefined)
       payload.last_assistant_message = context.stopContext.assistantResponse
   }
+  if (event === "SessionEnd") payload.reason = context.sessionEndReason ?? "other"
   if (event === "Stop" || event === "SubagentStop") {
     payload.stop_hook_active = context.stopHookActive === true
     if (context.stopContext?.assistantResponse !== undefined)
@@ -1406,6 +1412,7 @@ async function executeSyncHook(
   context: HookContext,
   event: HookEvent
 ): Promise<HookResult> {
+  assertCurrentRuntimePluginSourceContent()
   const startedAt = Date.now()
   const diagnostic = getHookLoggingConfig().diagnostic
   const hookType = hook.type ?? "command"
@@ -1632,13 +1639,15 @@ async function runClassicFunctionHook(
   assertCurrent()
   // A recovery path must not rerun a settings hook that already had effects.
   let lower: Promise<HookResult | null> | undefined
+  let coreResult: ModObject | undefined
   const runLower = (input?: ModObject) => (lower ??= legacy(input))
   try {
     const result = await manager.classicEvent(
       context.workspacePath,
-      context.sessionId,
+      context.functionSessionId ?? context.sessionId,
       `classic.${event}`,
-      toClassicInput(event, context),
+      toClassicInput(event, context.functionSessionId
+        ? { ...context, sessionId: context.functionSessionId } : context),
       signal,
       async (input, callSignal) => {
         callSignal.throwIfAborted()
@@ -1646,7 +1655,7 @@ async function runClassicFunctionHook(
         const value = await runLower(input)
         callSignal.throwIfAborted()
         assertCurrent()
-        if (!value) return {}
+        if (!value) return (coreResult = {})
         const result: ModObject = {}
         const reason = value.stopReason || value.reason || value.stderr || value.stdout || `${event} hook blocked`
         if (event === "PreToolUse") {
@@ -1657,15 +1666,20 @@ async function runClassicFunctionHook(
           if (value.continue === false) { result.preventContinuation = true; result.stopReason = reason }
         }
         if (value.additionalContext) result.additionalContext = [value.additionalContext]
+        coreResult = copyClassicResult(result) as ModObject
         return result
       }
     )
     signal.throwIfAborted()
     assertCurrent()
-    const projected = isModObject(result)
-      ? projectClassicResult(event, result, event === "Stop" && manager.isEnabled(context.workspacePath))
-      : null
     const native = lower ? await lower : null
+    const feedbackContributed = contributedClassicFeedback(result, coreResult)
+    // Empty/unapproved/nonmatching guests and next() passthrough must retain every
+    // native field. A policy rewrite may change the wire result, but is not guest feedback.
+    if (sameClassicResult(result, coreResult) && (event !== "Stop" || !feedbackContributed)) return native
+    const projected = isModObject(result)
+      ? projectClassicResult(event, result, feedbackContributed)
+      : null
     // CMB-specific notices and human gates have no upstream result fields. Keep
     // them host-owned while the classic control fields follow the module fold.
     if (native) return {
@@ -1899,6 +1913,12 @@ function recordHookResult(
   // recorded separately when the background run completes — so each execution
   // emits exactly once.
   if (result.asyncStatus !== "pending") {
+    observeBuiltinPolicyDecision({
+      threadId: context.sessionId, workspace: context.workspacePath,
+      source: "hook", scope: hook.hookSourceType ?? "global", event,
+      decision: result.decision === "human_gate" ? "ask" : isBlockingResult(result) ? "deny" : "allow",
+      code: result.decision === "human_gate" ? "HOOK_HUMAN_GATE" : isBlockingResult(result) ? "HOOK_BLOCKED" : "HOOK_ALLOWED"
+    })
     try {
       trackEvent("hook.executed", "hook", {
         event,

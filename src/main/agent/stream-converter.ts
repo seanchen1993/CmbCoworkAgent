@@ -71,6 +71,7 @@ export type SchedulerEvent =
   | {
       type: "turn-messages"
       messages: Array<{
+        prompt_origin?: import("../../shared/mods/v2/plugin-prompt").FunctionPluginPromptOrigin
         id: string
         role: "user" | "assistant" | "tool" | "system"
         content: string
@@ -277,7 +278,10 @@ function convertValuesMessages(
       }
     })
     .filter((message) => !message.internalNotification)
-    .map(({ internalNotification: _internalNotification, ...message }) => message)
+    .map(({ internalNotification, ...message }) => {
+      void internalNotification
+      return message
+    })
 }
 
 const SUBAGENT_NAME_MAP: Record<string, string> = {

@@ -1,0 +1,27 @@
+/* Only Function Mods terminal-name colors. Application theme roles remain unchanged.
+ * Bright aliases keep their hue with the same readable foreground palette.
+ * Explicit hex/rgb/custom colors bypass these tokens. */
+:root {
+  --mods-ansi-black: #111827;
+  --mods-ansi-red: #991b1b;
+  --mods-ansi-green: #166534;
+  --mods-ansi-yellow: #854d0e;
+  --mods-ansi-blue: #1e40af;
+  --mods-ansi-magenta: #86198f;
+  --mods-ansi-cyan: #155e75;
+  --mods-ansi-white: #374151;
+  --mods-ansi-gray: #475569;
+}
+
+:root.dark,
+:root[data-color-scheme="dark"] {
+  --mods-ansi-black: #cbd5e1;
+  --mods-ansi-red: #fca5a5;
+  --mods-ansi-green: #86efac;
+  --mods-ansi-yellow: #fde047;
+  --mods-ansi-blue: #93c5fd;
+  --mods-ansi-magenta: #f0abfc;
+  --mods-ansi-cyan: #67e8f9;
+  --mods-ansi-white: #f8fafc;
+  --mods-ansi-gray: #cbd5e1;
+}

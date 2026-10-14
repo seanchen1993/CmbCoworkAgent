@@ -1183,19 +1183,32 @@ async function autoInstallGitHooksForRoot(gitRoot: string): Promise<void> {
   }
 }
 
-export function scheduleAutoInstallGitHooksForPath(workspacePath: string, filePath: string): void {
+/** Resolves after this scheduled installation settles, including its cleanup.
+ * Existing fire-and-forget callers retain the same scheduling and error handling.
+ * Follow-up event reconciliation remains separately scheduled background work.
+ */
+export function scheduleAutoInstallGitHooksForPath(
+  workspacePath: string,
+  filePath: string
+): Promise<void> {
   const resolvedPath = resolveTouchedFilePath(workspacePath, filePath)
-  if (!resolvedPath) return
+  if (!resolvedPath) return Promise.resolve()
 
-  setTimeout(() => {
-    void (async () => {
-      const gitRoot = await getGitRootForPath(resolvedPath)
-      if (!gitRoot) return
-      await autoInstallGitHooksForRoot(gitRoot)
-    })().catch((e) => {
-      console.warn("[GitHook] auto install scheduling failed:", e)
-    })
-  }, 0).unref?.()
+  return new Promise<void>((done) => {
+    setTimeout(() => {
+      void (async () => {
+        try {
+          const gitRoot = await getGitRootForPath(resolvedPath)
+          if (!gitRoot) return
+          await autoInstallGitHooksForRoot(gitRoot)
+        } catch (e) {
+          console.warn("[GitHook] auto install scheduling failed:", e)
+        } finally {
+          done()
+        }
+      })()
+    }, 0).unref?.()
+  })
 }
 
 async function readJsonFile<T>(filePath: string): Promise<T | null> {

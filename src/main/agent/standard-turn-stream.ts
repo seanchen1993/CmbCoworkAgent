@@ -1,6 +1,8 @@
 import type { Message } from "../types"
 import { isPlausibleToolName } from "../../shared/tool-name"
-import { flushStrict, upsertThreadMessages } from "../db"
+import { flushStrict, upsertThreadMessages, partitionCanonicalThreadMessageEchoes } from "../db"
+import { serializeNativeConversationStreamData, readNativeConversationStreamProjection }
+  from "./native-conversation-stream-projection"
 import { StreamConverter, type SchedulerEvent } from "./stream-converter"
 import type { TraceCollector } from "./trace/collector"
 import { TurnAttributionRecorder } from "./turn-attribution"
@@ -118,12 +120,26 @@ export class StandardTurnStreamConsumer {
     for await (const chunk of stream) {
       if (signal?.aborted) throw signal.reason ?? new DOMException("Aborted", "AbortError")
       const [mode, data] = chunk as [string, unknown]
-      const serialized = JSON.parse(JSON.stringify(data)) as unknown
+      const serialized = serializeNativeConversationStreamData(mode, data)
+      const canonicalIds = new Set<string>()
+      // The converter's public events intentionally omit stamps, timestamps and provider tuples.
+      // Certify the original private wire here, rather than reconstructing a write from that event.
+      const messages = mode === "values" && serialized && typeof serialized === "object" &&
+        "messages" in serialized && Array.isArray(serialized.messages) ? serialized.messages :
+        mode === "messages" && Array.isArray(serialized) ? [serialized[0]] : []
+      for (const message of messages) {
+        const snapshot = readNativeConversationStreamProjection(message, this.threadId)
+        if (!snapshot) continue
+        const partition = partitionCanonicalThreadMessageEchoes(this.threadId, [snapshot])
+        if (partition.canonicalCount !== 1 || partition.ordinary.length !== 0)
+          throw Error("MODS_CONVERSATION_STREAM_PROJECTION_INVALID")
+        canonicalIds.add(snapshot.id)
+      }
       this.onStreamChunk?.(mode, serialized)
       this.attribution?.onStreamChunk(mode, serialized)
       this.traceRecorder?.onStreamChunk(mode, serialized)
       for (const event of this.converter.processChunk(mode, serialized)) {
-        this.observe(event)
+        this.observe(event, canonicalIds)
         this.sink?.(event)
       }
     }
@@ -145,7 +161,7 @@ export class StandardTurnStreamConsumer {
     if (isPlausibleToolName(name)) this.toolNames.add(name)
   }
 
-  private observe(event: SchedulerEvent): void {
+  private observe(event: SchedulerEvent, canonicalIds: ReadonlySet<string>): void {
     // Tool nodes and their results are recorded by traceRecorder off the values
     // snapshots: a streamed delta can still carry `args: {}`, and the LLM node
     // a tool call belongs under does not exist yet at delta time. Only the
@@ -162,6 +178,7 @@ export class StandardTurnStreamConsumer {
     if (event.type !== "full-messages") return
 
     const transcript = event.messages
+      .filter(message => !canonicalIds.has(message.id))
       .map(transcriptMessage)
       .filter((message): message is Message => message !== null)
     if (transcript.length > 0) upsertThreadMessages(this.threadId, transcript)

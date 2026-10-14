@@ -339,8 +339,14 @@ describe("skill/plugin catalog reader", () => {
     writeFileSync(source.pluginsStorePath, "[]")
     writeFileSync(source.disabledSkillsPath, '["skill-0000"]')
 
-    const largeDescription = "x".repeat(8_192)
-    for (let index = 0; index < 520; index += 1) {
+    // Preserve the expanded-byte pressure with fewer physical files on Windows.
+    // Multibyte descriptions also detect character-counting in byte budgets.
+    const fixtureCount = 180
+    const largeDescription = "界".repeat(8_192)
+    const descriptionBytes = Buffer.byteLength(largeDescription, "utf8") * fixtureCount
+    expect(descriptionBytes).toBeLessThan(SKILL_PLUGIN_CATALOG_MAX_SNAPSHOT_BYTES)
+    expect(descriptionBytes * 2).toBeGreaterThan(SKILL_PLUGIN_CATALOG_MAX_SNAPSHOT_BYTES)
+    for (let index = 0; index < fixtureCount; index += 1) {
       const name = `skill-${String(index).padStart(4, "0")}`
       const directory = join(source.builtinSkillsDir, name)
       mkdirSync(directory)
@@ -377,7 +383,8 @@ describe("skill/plugin catalog reader", () => {
 
     expect(firstPage?.truncatedReasons).toContain("snapshot-bytes")
     expect(firstPage?.total).toBe(retainedSkills.length)
-    expect(retainedSkills.length).toBeLessThan(520)
+    expect(firstPage?.cursor).toBeTypeOf("string")
+    expect(retainedSkills.length).toBeLessThan(fixtureCount)
     expect(disabled.disabledSkillIds).toContain("skill-0000")
     expect(firstPage?.enabledSkillCount).toBe(retainedSkills.length - 1)
     expect(retainedPayloadBytes).toBeLessThanOrEqual(

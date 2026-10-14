@@ -2,12 +2,12 @@ import path from "node:path"
 import {
   WORKSPACE_FILE_PREVIEW_CANCELLED,
   WORKSPACE_FILE_PREVIEW_MAX_TEXT_BYTES,
-  WORKSPACE_FILE_PREVIEW_MAX_TEXT_LINES,
   type WorkspaceFilePreviewWorkspacePathKind,
   type WorkspaceFilePreviewTextResult
 } from "../../shared/workspace-file-preview"
 import type { WorkspaceFilePreviewWorkerSource } from "./protocol"
 import { openStableFileHandle, type StableFileHandle } from "../services/stable-file-handle"
+import { projectWorkspacePreviewTextPage } from "./text-page"
 
 export interface ResolvedPreviewFile {
   resolvedPath: string
@@ -160,61 +160,6 @@ function ensurePreviewOffset(offset: number, size: number): void {
   }
 }
 
-function utf8SafePrefixLength(buffer: Buffer, length: number): number {
-  if (length === 0) return 0
-  let leadIndex = length - 1
-  while (leadIndex >= 0 && (buffer[leadIndex] & 0xc0) === 0x80) leadIndex -= 1
-  // A page made entirely of malformed continuation bytes has no valid codepoint
-  // boundary to preserve. Consume it as a bounded replacement-decoded page so
-  // the cursor still advances by the full I/O budget.
-  if (leadIndex < 0) return length
-
-  const lead = buffer[leadIndex]
-  let expectedLength = 1
-  if ((lead & 0xe0) === 0xc0) expectedLength = 2
-  else if ((lead & 0xf0) === 0xe0) expectedLength = 3
-  else if ((lead & 0xf8) === 0xf0) expectedLength = 4
-
-  return length - leadIndex < expectedLength ? leadIndex : length
-}
-
-function boundedTextEnd(
-  buffer: Buffer,
-  bytesRead: number,
-  trimIncompleteUtf8: boolean
-): { end: number; lineCount: number } {
-  let lineBreaks = 0
-  let end = bytesRead
-  for (let index = 0; index < bytesRead; index += 1) {
-    if (buffer[index] !== 0x0a) continue
-    lineBreaks += 1
-    if (lineBreaks >= WORKSPACE_FILE_PREVIEW_MAX_TEXT_LINES) {
-      end = index + 1
-      break
-    }
-  }
-  if (end === bytesRead && trimIncompleteUtf8) {
-    const safeEnd = utf8SafePrefixLength(buffer, end)
-    // Malformed data must still advance the cursor; otherwise an all-continuation
-    // page could expose an infinite "next page" loop.
-    end = safeEnd > 0 ? safeEnd : Math.min(1, bytesRead)
-  }
-  const lineCount = end === 0 ? 0 : lineBreaks + (buffer[end - 1] === 0x0a ? 0 : 1)
-  return { end, lineCount }
-}
-
-function decodeBoundedUtf8(buffer: Buffer): { content: string; contentBytes: number } {
-  const decoded = buffer.toString("utf8")
-  const decodedBytes = Buffer.byteLength(decoded, "utf8")
-  if (decodedBytes <= WORKSPACE_FILE_PREVIEW_MAX_TEXT_BYTES) {
-    return { content: decoded, contentBytes: decodedBytes }
-  }
-  const encoded = Buffer.from(decoded, "utf8")
-  const boundedEnd = utf8SafePrefixLength(encoded, WORKSPACE_FILE_PREVIEW_MAX_TEXT_BYTES)
-  const content = encoded.subarray(0, boundedEnd).toString("utf8")
-  return { content, contentBytes: Buffer.byteLength(content, "utf8") }
-}
-
 export async function readPreviewTextPage(
   source: WorkspaceFilePreviewWorkerSource,
   workspacePath: string | undefined,
@@ -232,26 +177,22 @@ export async function readPreviewTextPage(
       readBudget === 0 ? { bytesRead: 0 } : await file.handle.read(buffer, 0, readBudget, offset)
     throwIfCancelled(cancellation)
 
-    const { end, lineCount } = boundedTextEnd(buffer, bytesRead, offset + bytesRead < file.size)
-    const consumedBytes = end
-    const nextOffset = offset + consumedBytes
-    const hasMore = nextOffset < file.size
-    const { content, contentBytes } = decodeBoundedUtf8(buffer.subarray(0, end))
+    const page = projectWorkspacePreviewTextPage(buffer, bytesRead, offset, file.size)
 
     return {
       resolvedPath: file.filePath,
       result: {
         success: true,
-        content,
-        contentBytes,
+        content: page.content,
+        contentBytes: page.contentBytes,
         size: file.size,
         modified_at: file.modified_at,
         offset,
-        nextOffset: hasMore ? nextOffset : null,
-        hasMore,
-        hasPrevious: offset > 0,
-        truncated: offset > 0 || hasMore,
-        lineCount
+        nextOffset: page.nextOffset,
+        hasMore: page.hasMore,
+        hasPrevious: page.hasPrevious,
+        truncated: page.truncated,
+        lineCount: page.lineCount
       }
     }
   } finally {

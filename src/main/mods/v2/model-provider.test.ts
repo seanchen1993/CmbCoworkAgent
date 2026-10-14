@@ -1,3 +1,10 @@
+import { mkdtemp, rm } from "node:fs/promises"
+import { join } from "node:path"
+import { tmpdir } from "node:os"
+import { ModControlStore } from "../control-store"
+import { FunctionModels } from "./models"
+import { FunctionSession, SESSION_CAPABILITIES } from "./session"
+import { FunctionGuestRuntime } from "./guest-runtime"
 import { createServer } from "node:http"
 import { afterEach, beforeAll, expect, it, vi } from "vitest"
 import { RunnableLambda } from "@langchain/core/runnables"
@@ -6,6 +13,8 @@ import { createAgent } from "langchain"
 import { invokeFunctionFork, invokeFunctionModel } from "./model-provider"
 import type { ResolvedModelConfig } from "../../models/registry"
 import type { FunctionModelForkSnapshot } from "./model-operations"
+import { prepareFunctionModelPrompt } from "./model-prompt"
+import { withIndependentPromptFrame } from "./model-prompt-frame"
 
 const cleanups: Array<() => Promise<void>> = []
 beforeAll(async () => {
@@ -17,7 +26,7 @@ afterEach(async () => {
   for (const cleanup of cleanups.splice(0)) await cleanup()
 })
 
-async function endpoint(mode: "text" | "stall" | "error" | "tool" = "text") {
+async function endpoint(mode: "text" | "stall" | "error" | "tool" | "cache" | "empty" = "text") {
   const bodies: Array<Record<string, unknown>> = []
   let closed = false
   const server = createServer(async (request, response) => {
@@ -40,7 +49,13 @@ async function endpoint(mode: "text" | "stall" | "error" | "tool" = "text") {
       object: "chat.completion.chunk",
       created: 1,
       model: "fixture",
-      choices: [{ index: 0, delta: { role: "assistant", content: "first " }, finish_reason: null }]
+      choices: [
+        {
+          index: 0,
+          delta: { role: "assistant", content: mode === "empty" ? "" : "first " },
+          finish_reason: null
+        }
+      ]
     })
     if (mode === "stall") return
     event({
@@ -63,7 +78,7 @@ async function endpoint(mode: "text" | "stall" | "error" | "tool" = "text") {
                     }
                   ]
                 }
-              : { content: "answer" },
+              : { content: mode === "empty" ? "" : "answer" },
           finish_reason: "stop"
         }
       ]
@@ -74,7 +89,12 @@ async function endpoint(mode: "text" | "stall" | "error" | "tool" = "text") {
       created: 1,
       model: "fixture",
       choices: [],
-      usage: { prompt_tokens: 12, completion_tokens: 3, total_tokens: 15 }
+      usage: {
+        prompt_tokens: 12,
+        completion_tokens: 3,
+        total_tokens: 15,
+        ...(mode === "cache" ? { prompt_tokens_details: { cached_tokens: 5 } } : {})
+      }
     })
     response.end("data: [DONE]\n\n")
   })
@@ -103,6 +123,28 @@ async function endpoint(mode: "text" | "stall" | "error" | "tool" = "text") {
     } as ResolvedModelConfig
   }
 }
+
+it.each(["low", "high", "max"] as const)("sends explicit %s effort through the supported real provider", async (effort) => {
+  const server = await endpoint()
+  await invokeFunctionModel(
+    { ...server.config, model: "deepseek-v4-pro" },
+    { model: "fixture", prompt: "effort", effort },
+    new AbortController().signal
+  )
+  expect(server.bodies).toHaveLength(1)
+  expect(server.bodies[0].reasoning_effort).toBe(effort)
+})
+
+it("rejects unsupported effort before issuing a provider request", async () => {
+  const server = await endpoint()
+  await expect(invokeFunctionModel(server.config,
+    { model: "fixture", prompt: "effort", effort: "high" }, new AbortController().signal))
+    .rejects.toThrow("MODS_MODEL_EFFORT_UNSUPPORTED")
+  await expect(invokeFunctionModel({ ...server.config, model: "deepseek-v4-pro" },
+    { model: "fixture", prompt: "effort", effort: "xhigh" }, new AbortController().signal))
+    .rejects.toThrow("MODS_MODEL_EFFORT_UNSUPPORTED")
+  expect(server.bodies).toHaveLength(0)
+})
 
 it("uses the real configured client with one prompt, identity, token cap, text SSE and usage", async () => {
   const f = await endpoint()
@@ -197,7 +239,10 @@ it("invokes fork from the sanitized host snapshot without forwarding tools", asy
     snapshot,
     new AbortController().signal
   )
-  expect(result).toEqual({ text: "first answer", usage: { input_tokens: 12, output_tokens: 3 } })
+  expect(result).toMatchObject({
+    text: "first answer",
+    usage: { input_tokens: 12, output_tokens: 3 }
+  })
   expect(f.bodies).toHaveLength(1)
   expect(f.bodies[0].messages).toEqual([
     { role: "system", content: "host-only policy" },
@@ -237,3 +282,159 @@ it("keeps nested provider events out of the caller's stream and callback observe
   expect(JSON.stringify(events)).not.toMatch(/on_chat_model|private nested prompt|first |answer/)
   expect(JSON.stringify(events)).toContain("protected result")
 }, 20000)
+
+it("runs real QuickJS model calls through accounting, protection, cached usage and protocol observers", async () => {
+  const f = await endpoint("cache")
+  const folder = await mkdtemp(join(tmpdir(), "mods-model-protocol-"))
+  const store = new ModControlStore(join(folder, "control.sqlite"))
+  const grant = store.grant(folder, "function:modern", "digest", true)
+  const models = new FunctionModels(store, {
+    assertScope: vi.fn(),
+    resolve: async () => f.config,
+    invoke: invokeFunctionModel,
+    admit: async () => {},
+    publish: async (_identity, text) => text.replace("first", "protected")
+  })
+  const guest = await FunctionGuestRuntime.create(`var __cmbFunctionMod={register(on){
+    on("session.start", async($,e,next)=>{await $.command.register({name:"ask",description:"Ask"});return next(e)});
+    on("command.run",async($)=>({text:JSON.stringify(await $.model.complete({model:"fixture",prompt:"hi",timeoutMs:3000}))}));
+    on("model.complete",async($,e,next)=>{const r=await next(e);if(!r.value.text.startsWith("protected"))throw Error("not protected");return r});
+  }}`)
+  const session = new FunctionSession(
+    [
+      {
+        name: "modern",
+        root: folder,
+        tier: "user",
+        guest,
+        modelProtocol: "result-v1",
+        capabilities: [...SESSION_CAPABILITIES]
+      }
+    ],
+    {
+      threadId: "thread",
+      workspace: folder,
+      assertLive: vi.fn(),
+      publish: async (value) => value,
+      completeModelResult: (_plugin, input, signal) =>
+        models.completeResult(folder, "thread", grant, input, signal)
+    }
+  )
+  try {
+    await session.start()
+    const result = JSON.parse(String((await session.run("ask", "")).text))
+    expect(result).toEqual({
+      isAnswered: true,
+      text: "protected answer",
+      usage: {
+        input_tokens: 7,
+        output_tokens: 3,
+        cache_read_input_tokens: 5,
+        cache_creation_input_tokens: 0
+      }
+    })
+    expect(f.bodies).toHaveLength(1)
+    expect(f.bodies[0]).not.toHaveProperty("timeoutMs")
+    expect(models.stats.pending).toBe(0)
+  } finally {
+    await session.close()
+    store.close()
+    await rm(folder, { recursive: true, force: true })
+  }
+}, 20000)
+
+it.each(["error", "stall", "empty"] as const)(
+  "reports real provider %s safely with one call and no late text",
+  async (mode) => {
+    const f = await endpoint(mode)
+    const folder = await mkdtemp(join(tmpdir(), "mods-model-outcome-"))
+    const store = new ModControlStore(join(folder, "control.sqlite"))
+    const grant = store.grant(folder, "function:modern", "digest", true)
+    let published = 0
+    const models = new FunctionModels(store, {
+      assertScope: vi.fn(),
+      resolve: async () => f.config,
+      invoke: invokeFunctionModel,
+      admit: async () => {},
+      publish: async (_id, text) => {
+        published++
+        return text
+      }
+    })
+    try {
+      const result = await models.completeResult(
+        folder,
+        "thread",
+        grant,
+        { model: "fixture", prompt: "private prompt", timeoutMs: mode === "stall" ? 150 : 3000 },
+        new AbortController().signal
+      )
+      expect(result).toMatchObject({
+        isAnswered: false,
+        reason: mode === "error" ? "api-error" : mode === "stall" ? "aborted" : "empty-reply"
+      })
+      if (mode === "error") expect(result).toMatchObject({ status: 500, error: "server_error" })
+      expect(JSON.stringify(result)).not.toMatch(
+        /private|fixture-key|127\.0\.0\.1|local fixture failure|first/
+      )
+      expect(f.bodies).toHaveLength(1)
+      if (mode !== "empty") expect(published).toBe(0)
+      if (mode === "stall") await expect.poll(f.closed).toBe(true)
+      expect(models.stats.pending).toBe(0)
+    } finally {
+      store.close()
+      await rm(folder, { recursive: true, force: true })
+    }
+  },
+  20000
+)
+
+
+it("sends a standalone request's actual composed rules and preserves fork roles to the chosen endpoint", async () => {
+  const first = await endpoint()
+  const second = await endpoint()
+  const request = { model: "custom:second", prompt: "own question", system: "explicit policy" }
+  const admit = vi.fn(async () => {})
+  const observed: unknown[] = []
+  const prepare = (snapshot?: FunctionModelForkSnapshot) => withIndependentPromptFrame(() =>
+    prepareFunctionModelPrompt(second.config, request, snapshot,
+      async (event, input, signal, core) => {
+        observed.push({ event, input })
+        if (event === "prompt.section") return { text: "composed own policy" }
+        return core(input, signal)
+      }, new AbortController().signal, () => {}, admit))
+  const simple = await prepare()
+  simple.assertBudget(32)
+  await simple.invoke({ ...request, maxTokens: 32 }, new AbortController().signal)
+  expect(first.bodies).toHaveLength(0)
+  expect(second.bodies[0].messages).toEqual([
+    { role: "system", content: "composed own policy" },
+    { role: "user", content: "own question" }
+  ])
+  expect(observed[0]).toMatchObject({ event: "prompt.compose", input: {
+    model: "gpt-4", promptModel: "gpt-4", tools: [], traits: ["analysis"]
+  } })
+  const fork = await prepare({ model: "gpt-4", modelRef: "custom:second", system: "snapshot policy",
+    messages: [{ role: "user", text: "past user" }, { role: "assistant", text: "past assistant" }] })
+  await fork.invoke({ ...request, maxTokens: 32 }, new AbortController().signal)
+  expect(second.bodies[1].messages).toEqual([
+    { role: "system", content: "composed own policy" },
+    { role: "user", content: "past user" },
+    { role: "assistant", content: "past assistant" },
+    { role: "user", content: "own question" }
+  ])
+  expect(second.bodies[1]).not.toHaveProperty("tools")
+  expect(admit).toHaveBeenCalledTimes(2)
+})
+
+it("rejects oversized composed input before a prepared provider can be called", async () => {
+  const f = await endpoint()
+  const config = { ...f.config, maxTokens: 2048 }
+  const prepared = await withIndependentPromptFrame(() => prepareFunctionModelPrompt(config,
+    { model: "fixture", prompt: "question" }, undefined,
+    async (event, input, signal, core) => event === "prompt.section"
+      ? { text: "x".repeat(16000) } : core(input, signal),
+    new AbortController().signal, () => {}, async () => {}))
+  expect(() => prepared.assertBudget(256)).toThrow("MODS_MODEL_INPUT_BUDGET")
+  expect(f.bodies).toHaveLength(0)
+})

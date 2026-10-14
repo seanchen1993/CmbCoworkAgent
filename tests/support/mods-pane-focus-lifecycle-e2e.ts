@@ -20,6 +20,7 @@ export async function verifyPaneFocusLifecycle(
       contents: `
         import {createRoot} from "react-dom/client";
         import {FunctionPanes} from ${component};
+        import {ModsChatScope} from ${JSON.stringify(join(root, "src/renderer/src/lib/mods-chat-scope.tsx"))};
         const refs=new Set(), listeners=new Set(), rows=new Map(), held=new Set();
         const pending=[], calls=[], reads=[];
         window.__paneFocusRefs=refs;
@@ -45,7 +46,7 @@ export async function verifyPaneFocusLifecycle(
             })));
             for(const listener of listeners)listener({threadId:current});
           },
-          switch(id){held.add(id);current=id;host.render(<FunctionPanes threadId={current}/>);},
+          switch(id){held.add(id);current=id;host.render(<ModsChatScope.Provider value={{threadId:current,enabled:true}}><FunctionPanes threadId={current}/></ModsChatScope.Provider>);},
           release(){held.delete(current);for(const row of pending.splice(0))row.resolve();},
           snapshot(){return {
             calls:[...calls],reads:[...reads],retained:[...refs].flatMap(ref=>[...ref.current]),
@@ -53,7 +54,7 @@ export async function verifyPaneFocusLifecycle(
           }},
           close(){host.unmount()}
         };
-        host.render(<FunctionPanes threadId={current}/>);
+        host.render(<ModsChatScope.Provider value={{threadId:current,enabled:true}}><FunctionPanes threadId={current}/></ModsChatScope.Provider>);
       `
     },
     bundle: true,

@@ -772,7 +772,8 @@ export function readHarnessDialogTips(
   projectId: string,
   slug: string,
   maxResponseBytes = HARNESS_DIALOG_TIPS_MAX_RESPONSE_BYTES,
-  cancelFlag?: Int32Array
+  cancelFlag?: Int32Array,
+  runtimeSource?: CatalogRuntimeSource
 ): HarnessDialogTipsResult {
   const startedAt = performance.now()
   const normalizedProjectId = text(projectId, 512).trim()
@@ -800,7 +801,7 @@ export function readHarnessDialogTips(
 
   const adapter = project["harness-adapter"]
   const { byId: pluginById, byName: pluginByName } = indexPlugins(readPlugins(pluginStorePath))
-  const plugin = pluginById.get(adapter.id) ?? pluginByName.get(adapter.name) ?? null
+  const plugin = fixedCatalogPlugin(projectId, pluginById.get(adapter.id) ?? pluginByName.get(adapter.name) ?? null, runtimeSource)
   if (!plugin || isCancelled(cancelFlag)) {
     return {
       tips: null,
@@ -873,7 +874,8 @@ export function readHarnessProjectContexts(
   maxResponseBytes = HARNESS_CATALOG_MAX_RESPONSE_BYTES,
   cancelFlag?: Int32Array,
   featureProjection?: FeatureDeployUnitProjection,
-  leanTokenStorePath = ""
+  leanTokenStorePath = "",
+  runtimeSource?: CatalogRuntimeSource
 ): HarnessProjectContextResult {
   const startedAt = performance.now()
   const ids = [...new Set(projectIds.map((id) => text(id, 512).trim()).filter(Boolean))]
@@ -900,7 +902,7 @@ export function readHarnessProjectContexts(
       continue
     }
     const adapter = project["harness-adapter"]
-    const rawPlugin = pluginById.get(adapter.id) ?? pluginByName.get(adapter.name) ?? null
+    const rawPlugin = fixedCatalogPlugin(id, pluginById.get(adapter.id) ?? pluginByName.get(adapter.name) ?? null, runtimeSource)
     const boardConfig = rawPlugin ? readBoardConfig(rawPlugin.path) : null
     const plugin = rawPlugin && boardConfig?.exists ? projectPluginMetadata(rawPlugin) : null
     const feature = featureProjection
@@ -1180,3 +1182,4 @@ export function getHarnessCatalogReaderCacheDiagnosticsForTests(): {
 } {
   return { configEntries: configCache.size, configBytes: configCacheBytes }
 }
+import { fixedCatalogPlugin, type CatalogRuntimeSource } from "./project-runtime/catalog-source"

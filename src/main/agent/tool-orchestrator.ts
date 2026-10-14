@@ -251,7 +251,9 @@ export class ToolOrchestrator {
     /** Isolated worktree runtimes must never retry a denied command on the host. */
     private sandboxEscapeAllowed: boolean = true,
     /** Thread workspace boundary; execute() cwd may be a nested shell directory. */
-    private workspacePath?: string
+    private workspacePath?: string,
+    /** Native flow termination hook; absent for existing ordinary/workflow callers. */
+    private onRejected?: (reason: string) => void
   ) {}
 
   /** No dialog, tool execution, cache mutation, or one-shot Mod approval is consulted here. */
@@ -359,6 +361,7 @@ export class ToolOrchestrator {
 
       // 2. Forbidden commands → reject immediately, regardless of YOLO mode
       if (safety.level === "forbidden") {
+        this.onRejected?.("command-forbidden")
         return {
           output: `Command forbidden: ${safety.reason}`,
           exitCode: 1,
@@ -858,6 +861,7 @@ export class ToolOrchestrator {
       windowsShell: outsideShellSyntax === "powershell" ? "powershell" : "unknown"
     })
     if (outsideSafety.level === "forbidden") {
+      this.onRejected?.("command-forbidden")
       return {
         output: `Command retry forbidden after shell change: ${outsideSafety.reason}`,
         exitCode: 1,

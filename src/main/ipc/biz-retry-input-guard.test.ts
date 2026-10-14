@@ -1,4 +1,5 @@
 import { readFileSync } from "node:fs"
+import { randomUUID } from "node:crypto"
 import { resolve } from "node:path"
 import ts from "typescript"
 import { describe, expect, it, vi } from "vitest"
@@ -7,6 +8,7 @@ import type {
   AgentRunExecutionContext,
   AgentRunRequest
 } from "../agent/agent-run-service"
+import { nativePluginPromptRun } from "../agent/mods-plugin-prompt-entry"
 
 type RunEntry = (
   request: AgentRunRequest,
@@ -51,6 +53,8 @@ function loadRunEntry(blocked: boolean) {
     "managedBizRetryService",
     "resolveAgentStreamRequestChannel",
     "getThreadCore",
+    "uuid",
+    "nativePluginPromptRun",
     code
   )(
     (implementation: RunEntry) => {
@@ -59,7 +63,9 @@ function loadRunEntry(blocked: boolean) {
     { run: (_context: unknown, execute: () => Promise<void>) => execute() },
     { blocksThread },
     (channel: string, requestId: string) => `${channel}:${requestId}`,
-    getThreadCore
+    getThreadCore,
+    randomUUID,
+    nativePluginPromptRun
   )
   return { entry, blocksThread, getThreadCore, reachedExecution }
 }

@@ -1,3 +1,4 @@
+import { openModsResults } from "./mods-sidebar-navigation"
 import assert from "node:assert/strict"
 import { mkdirSync } from "node:fs"
 import { join } from "node:path"
@@ -37,21 +38,21 @@ export async function verifyPublicJsx(
     on("command.run",{command:"jsx-open"},async($)=>{await $.ui.open({id:"jsx",title:"Public JSX"});return {}});
     on("command.run",{command:"jsx-inspect"},()=>({text:JSON.stringify({h:typeof h,Fragment:typeof Fragment})}));
     on("ui.render",{component:"Pane",requestId:"jsx"},($,e)=>{
-      const {Text,Button,Client}=$.ui.resolve(e);
-      return h(Fragment,null,h(Text,null,"PUBLIC_HOST_"+count),
+      const {Box,Text,Button,Client}=$.ui.resolve(e);
+      return h(Box,{flexDirection:"column"},h(Fragment,null,h(Text,null,"PUBLIC_HOST_"+count),
         h(Button,{key:"increment",label:"Increment public host",onPress(){count++;$.ui.invalidate("ui.render")}}),
         <><Text>COMPILED_HOOK_A</Text><Text>COMPILED_HOOK_B</Text></>,
-        h(Client,{key:"surface",module:"./surface.tsx"}))
+        h(Client,{key:"surface",module:"./surface.tsx"})))
     })
   }`)
   )
   zip.addFile(
     "hooks/surface.tsx",
     Buffer.from(`export default function Surface(props,s){
-    const {Text,Button}=s.elements;
-    return h(Fragment,null,h(Text,null,"PUBLIC_CLIENT_"+(s.state||0)),
+    const {Box,Text,Button}=s.elements;
+    return h(Box,{flexDirection:"column"},h(Fragment,null,h(Text,null,"PUBLIC_CLIENT_"+(s.state||0)),
       h(Button,{key:"local",label:"Increment public Client",onPress(){s.setState((s.state||0)+1)}}),
-      <><Text>COMPILED_CLIENT_A</Text><Text>COMPILED_CLIENT_B</Text></>)
+      <><Text>COMPILED_CLIENT_A</Text><Text>COMPILED_CLIENT_B</Text></>))
   }`)
   )
   const installed = await page.evaluate(
@@ -69,6 +70,7 @@ export async function verifyPublicJsx(
   )
   await page.reload({ waitUntil: "domcontentloaded" })
   await page.getByText("Public JSX", { exact: true }).first().click()
+  await openModsResults(page)
   const run = async (command: string) => {
     const descriptor = (await page.evaluate((id) => window.api.mods.commands(id), id)).find(
       (row) => row.command === command
@@ -115,7 +117,7 @@ export async function verifyPublicJsx(
   })
   assert.deepEqual(layout, { host: "column", client: "column" })
   pass(
-    "public h and Fragment render in real hooks and Client VMs; compiled fragments keep actual column layout"
+    "public h and transparent Fragment render in real hooks and Client VMs; explicit Boxes keep actual column layout"
   )
   await pane().getByRole("button", { name: "Increment public Client", exact: true }).click()
   await pane().getByText("PUBLIC_CLIENT_1", { exact: true }).waitFor()
@@ -126,6 +128,7 @@ export async function verifyPublicJsx(
   pass("public factory callbacks retain real host ownership and Client state across parent redraw")
   await page.reload({ waitUntil: "domcontentloaded" })
   await page.getByText("Public JSX", { exact: true }).first().click()
+  await openModsResults(page)
   await pane().getByText("PUBLIC_HOST_1", { exact: true }).waitFor()
   await pane().getByText("PUBLIC_CLIENT_1", { exact: true }).waitFor()
   await page.evaluate((id) => window.api.mods.revokeFunction(id, "public-jsx"), id)

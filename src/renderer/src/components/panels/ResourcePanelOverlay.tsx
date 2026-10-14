@@ -8,6 +8,7 @@ import {
   type ResourcePanelOverlayMode
 } from "@/lib/resource-panel-overlay-events"
 import { useResourcePreviewRequest } from "@/lib/use-resource-preview-request"
+import { useProtectedFunctionPreview } from "@/lib/use-protected-function-preview"
 
 interface ResourcePanelOverlayProps {
   isAgentFocusActive: boolean
@@ -21,16 +22,25 @@ export function ResourcePanelOverlay({
   renderedPanelThreadId
 }: ResourcePanelOverlayProps): React.JSX.Element | null {
   const rightPanelCollapsed = useAppStore((state) => state.rightPanelCollapsed)
+  const rightModule = useAppStore((state) => state.rightModule)
   const setRightModule = useAppStore((state) => state.setRightModule)
   const activeThreadId = renderedPanelThreadId
   const standardRightPanelMounted =
     !isAgentFocusActive &&
     !rightPanelCollapsed &&
+    rightModule !== "claw" &&
     (renderedMainView === "thread" || renderedMainView === "harness") &&
     Boolean(renderedPanelThreadId)
   const [open, setOpen] = useState(false)
+  const [protectedOnlyOpen, setProtectedOnlyOpen] = useState(false)
   const [mode, setMode] = useState<ResourcePanelOverlayMode>("preview")
   const handlePreviewRequest = useCallback((): void => {
+    setProtectedOnlyOpen(false)
+    setMode("preview")
+    setOpen(true)
+  }, [])
+  const handleProtectedPreviewRequest = useCallback((): void => {
+    setProtectedOnlyOpen(true)
     setMode("preview")
     setOpen(true)
   }, [])
@@ -39,12 +49,25 @@ export function ResourcePanelOverlay({
     !standardRightPanelMounted,
     handlePreviewRequest
   )
+  const { request: protectedPreview, clear: clearProtectedPreview } = useProtectedFunctionPreview(
+    activeThreadId, !standardRightPanelMounted, handleProtectedPreviewRequest
+  )
   const overlayThreadId = renderedPanelThreadId
+
+  useEffect(() => {
+    // Only the drawer opened for this protected request follows its native lifetime.
+    // Explicit preview/browser/git and ordinary file requests keep their original behavior.
+    if (!protectedOnlyOpen || !open || mode !== "preview" || protectedPreview) return
+    setOpen(false)
+    setProtectedOnlyOpen(false)
+  }, [protectedOnlyOpen, open, mode, protectedPreview])
 
   const close = useCallback(() => {
     setOpen(false)
+    setProtectedOnlyOpen(false)
     clearPreviewRequest()
-  }, [clearPreviewRequest])
+    clearProtectedPreview()
+  }, [clearPreviewRequest, clearProtectedPreview])
 
   useEffect(() => {
     if (!standardRightPanelMounted) return
@@ -54,6 +77,7 @@ export function ResourcePanelOverlay({
 
   const selectMode = useCallback(
     (nextMode: ResourcePanelOverlayMode) => {
+      setProtectedOnlyOpen(false)
       if (standardRightPanelMounted) {
         setOpen(false)
         setRightModule(nextMode)
@@ -97,6 +121,8 @@ export function ResourcePanelOverlay({
         moduleMode={mode}
         showSystemConstraints={renderedMainView === "harness"}
         resourcePreviewRequest={mode === "preview" || mode === "browser" ? previewRequest : null}
+        protectedFunctionPreviewRequest={mode === "preview" ? protectedPreview : null}
+        onProtectedFunctionPreviewClosed={clearProtectedPreview}
         onResourcePreviewRequestHandled={clearPreviewRequest}
         listenForResourcePreview={false}
         onRequestPreviewMode={() => setMode("preview")}

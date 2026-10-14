@@ -1,4 +1,4 @@
-import { memo, useEffect, useId, useRef, useState, type JSX } from "react"
+import { memo, useEffect, useId, useRef, useState, type JSX, type ReactNode } from "react"
 import {
   AlertTriangle,
   Check,
@@ -15,6 +15,7 @@ import { Button } from "@/components/ui/button"
 import { cn } from "@/lib/utils"
 import { toast } from "sonner"
 import { FunctionSite } from "./FunctionSite"
+import { useModsChatScope } from "../../lib/mods-chat-scope"
 
 export type ChatAgentMode = "normal" | "multi" | "coordinator" | "workflow"
 
@@ -350,7 +351,8 @@ function AgentModeSwitcherImpl({
   onChange
 }: AgentModeSwitcherProps): JSX.Element {
   const [open, setOpen] = useState(false)
-  const [customModeLabel, setCustomModeLabel] = useState(false)
+  const [nativeModeLabel, setNativeModeLabel] = useState<ReactNode>(null)
+  const modsEnabled = useModsChatScope(threadId ?? "")
   const [infoOpen, setInfoOpen] = useState(false)
   const [thumbHovered, setThumbHovered] = useState(false)
   const [hoveredStopIndex, setHoveredStopIndex] = useState<number | null>(null)
@@ -436,8 +438,8 @@ function AgentModeSwitcherImpl({
       >
         <ActiveIcon className="size-3.5" />
       </span>
-      <span className={cn("font-medium", customModeLabel && "sr-only")}>
-        {activeMode.shortLabel}
+      <span className="font-medium">
+        {threadId && modsEnabled ? nativeModeLabel ?? "模式" : activeMode.shortLabel}
       </span>
       <ChevronDown className="size-3 opacity-70" />
       {lockedReason && (
@@ -697,7 +699,8 @@ function AgentModeSwitcherImpl({
           component="SessionMode"
           facts={{ modes: [activeMode.shortLabel] }}
           className="contents"
-          onCustom={setCustomModeLabel}
+          onModeLabel={setNativeModeLabel}
+          renderNative={(safe) => <span>{Array.isArray(safe.modes) ? safe.modes.join(" & ") : ""}</span>}
         />
       )}
     </span>

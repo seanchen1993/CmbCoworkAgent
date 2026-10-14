@@ -7,6 +7,9 @@ export interface SkillPluginVisibilityMetadata {
   pluginId?: string | null
   pluginName?: string | null
   isProjectModePlugin?: boolean
+  /** Host-owned lineage metadata. Never read this from a plugin manifest. */
+  derivationFamilyMembers?: readonly string[]
+  isDerivedPlugin?: boolean
 }
 
 export interface ProjectModeSkillScope {
@@ -41,6 +44,20 @@ export function isSkillVisibleForProjectMode(
   skill: SkillPluginVisibilityMetadata,
   scope: ProjectModeSkillScope
 ): boolean {
+  if (!isDerivationVisibleForProjectMode(skill, scope)) return false
   if (!scope.projectMode || skill.isProjectModePlugin !== true) return true
   return isSkillOwnedByBoundPlugin(skill, scope)
+}
+
+export function isDerivationVisibleForProjectMode(
+  source: SkillPluginVisibilityMetadata,
+  scope: ProjectModeSkillScope
+): boolean {
+  const bound = normalizePluginIdentity(scope.boundPluginId)
+  if (source.isDerivedPlugin && (!scope.projectMode || !bound)) return false
+  const family = source.derivationFamilyMembers?.map(normalizePluginIdentity)
+  if (scope.projectMode && bound && family?.includes(bound))
+    return normalizePluginIdentity(source.pluginId) === bound
+  // A derived package can only run in its own explicitly bound project.
+  return source.isDerivedPlugin ? normalizePluginIdentity(source.pluginId) === bound : true
 }

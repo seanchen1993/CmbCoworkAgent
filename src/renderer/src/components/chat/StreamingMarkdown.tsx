@@ -11,6 +11,7 @@ import {
   useMemo,
   useRef,
   useState,
+  type ComponentProps,
   type ReactNode
 } from "react"
 import {
@@ -183,6 +184,18 @@ const MARKDOWN_COMPONENTS: Components = {
   }
 }
 
+/** Original formatting without chat search, streaming or workspace file-preview hooks. */
+export function StaticMarkdownFormatting({ text, components, ...options }: {
+  text: string
+} & Pick<ComponentProps<typeof ReactMarkdown>,
+  "components" | "remarkPlugins" | "rehypePlugins" | "urlTransform">): React.JSX.Element {
+  return <div className="streaming-markdown">
+    <ReactMarkdown {...options} components={{ ...MARKDOWN_COMPONENTS, ...components }}>
+      {text}
+    </ReactMarkdown>
+  </div>
+}
+
 const MarkdownFragment = memo(function MarkdownFragment({
   text,
   isStreaming,
@@ -196,7 +209,7 @@ const MarkdownFragment = memo(function MarkdownFragment({
 }): React.JSX.Element {
   const renderCodeBlock = useMemo(
     () =>
-      ({
+      function renderCodeBlock({
         rawCode,
         language,
         className,
@@ -206,15 +219,17 @@ const MarkdownFragment = memo(function MarkdownFragment({
         language: string | null
         className?: string
         children: ReactNode
-      }) => (
-        <MarkdownCodeBlock
-          code={rawCode.replace(/\n$/, "")}
-          language={language}
-          className={className}
-        >
-          {children}
-        </MarkdownCodeBlock>
-      ),
+      }) {
+        return (
+          <MarkdownCodeBlock
+            code={rawCode.replace(/\n$/, "")}
+            language={language}
+            className={className}
+          >
+            {children}
+          </MarkdownCodeBlock>
+        )
+      },
     []
   )
   const components = useMarkdownFilePreviewComponents({

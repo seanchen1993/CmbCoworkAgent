@@ -28,6 +28,29 @@ afterEach(() => {
 })
 
 describe("Mod durable control store", () => {
+  it("excludes advisor calls before pagination so observing cannot change its own fact window", () => {
+    const { store } = fixture()
+    for (const [id, modId] of [["original", "ordinary-plugin"], ["analysis", "devclaw-project-advisor"]]) {
+      store.claim(id, "model.complete", {}, { workspace: "project", threadId: "wanted", turnId: "turn",
+        agentId: "main", origin: "model", grantEpoch: 0, callId: id, modId })
+    }
+    expect(store.audit("project", 1, Number.MAX_SAFE_INTEGER, "wanted", "devclaw-project-advisor")
+      .map(row => row.callId)).toEqual(["original"])
+    expect(store.audit("project", 1, Number.MAX_SAFE_INTEGER, "wanted").map(row => row.callId))
+      .toEqual(["analysis"])
+  })
+  it("filters audit by thread in SQL before applying the page limit", () => {
+    const { store } = fixture()
+    for (const [id, threadId] of [["first", "wanted"], ["foreign", "other"], ["last", "wanted"]]) {
+      store.claim(id, "host:read_file", {}, { workspace: "project", threadId, turnId: "turn",
+        agentId: "main", origin: "model", grantEpoch: 0, callId: id })
+    }
+    const first = store.audit("project", 1, Number.MAX_SAFE_INTEGER, "wanted")
+    expect(first.map(row => row.callId)).toEqual(["last"])
+    expect(store.audit("project", 1, first[0].cursor, "wanted").map(row => row.callId)).toEqual(["first"])
+    expect(store.audit("project", 1, Number.MAX_SAFE_INTEGER, "absent")).toEqual([])
+    expect(() => store.audit("project", 1, 1, "")).toThrow("MODS_AUDIT_QUERY")
+  })
   it("recovers an unfinished capture without losing its identity or replaying it", () => {
     const { store, file } = fixture()
     const row = {

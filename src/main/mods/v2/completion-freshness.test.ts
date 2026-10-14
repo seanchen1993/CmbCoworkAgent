@@ -5,6 +5,27 @@ import type { CompletionEvidenceBinding } from "./completion-evidence"
 const binding = { files: [{ path: "a.ts", sha256: "one", size: 3 }] } as CompletionEvidenceBinding
 afterEach(() => vi.useRealTimers())
 
+it("durable configuration changes synchronously invalidate proofs and allow new tracking", async () => {
+  vi.useFakeTimers()
+  const stale = vi.fn()
+  const monitor = new CompletionFreshness(stale)
+  let release!: (value: CompletionEvidenceBinding) => void
+  monitor.track("old", binding, () => new Promise(resolve => { release = resolve }))
+  monitor.changed()
+  await vi.advanceTimersByTimeAsync(100)
+  monitor.invalidateAll("configuration-changed")
+  expect(stale).toHaveBeenCalledExactlyOnceWith("old", binding, "configuration-changed")
+  const current = { ...binding, requirementVersion: "new" }
+  monitor.track("new", current, async () => current)
+  release(binding)
+  await vi.advanceTimersByTimeAsync(100)
+  monitor.changed()
+  await vi.advanceTimersByTimeAsync(100)
+  expect(stale).toHaveBeenCalledOnce()
+  monitor.close("closed")
+  expect(stale).toHaveBeenLastCalledWith("new", current, "closed")
+})
+
 it("coalesces notifications and preserves a PASS when captured content is unchanged", async () => {
   vi.useFakeTimers()
   const stale = vi.fn()
