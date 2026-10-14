@@ -14,11 +14,19 @@ import {
 } from "../../shared/project-attention"
 import {
   fetchProjectAttentionRanking,
-  ProjectAttentionRankingCache
+  ProjectAttentionRankingCache,
+  type ProjectMetricSortKey
 } from "./project-attention-ranking"
 import { isNestedMappingError } from "./dashboard-es-nested-mapping"
 import { queryWithToolUsageMappingFallback } from "./dashboard-tool-usage-query"
 import { buildUserProfileIdFilter } from "./dashboard-user-profile-query"
+import {
+  projectModeMetricTimeFilters,
+  assertProjectModeResultComplete
+} from "./project-mode-query-scope"
+import { ProjectModePageCache } from "./project-mode-page-cache"
+import { fetchProjectModeCommitIds } from "./project-mode-commit-ids"
+import { fetchCompleteProjectDevMetrics } from "./project-mode-dev-metrics"
 import {
   buildToolUsageAggs,
   parseToolUsageAggs,
@@ -1023,6 +1031,9 @@ interface OrgFilterOptions {
   // 和 fromLeanOnly 同一形状的全局开关；缺省/false 表示不筛选。比较用的范围不在这里传，
   // 由各入口自己的 range 参数带下去，避免同一个时间范围在两处各存一份。
   createdInRangeOnly?: boolean | null
+  /** Explicit refresh invalidates completed project-list and ranking caches. */
+  refreshProjects?: boolean
+  skipProjectList?: boolean
 }
 
 type UserStatsOptions = OrgFilterOptions
@@ -11332,11 +11343,11 @@ interface ProjectModeFeatureView {
   statusLabel?: string
   currentNodeStatusLabel?: string
   summary?: string
-  /** This-range code adoption for the feature (sliced by harnessFeatureSlug); absent if no code data. */
+  /** Lifetime code adoption for the feature (sliced by harnessFeatureSlug); absent if no code data. */
   codeStats?: DashboardCodeStats | null
-  /** This-range successful system-constraint reads, deduplicated across workflow stages. */
+  /** Lifetime successful system-constraint reads, deduplicated across workflow stages. */
   systemConstraintReads?: ProjectModeConstraintReadStats | null
-  /** This-range runtime hook executions attributed to the feature. */
+  /** Lifetime runtime hook executions attributed to the feature. */
   hookExecutions?: ProjectModeHookStats | null
 }
 
@@ -11415,7 +11426,7 @@ interface ProjectModeProjectView {
   systemConstraintEverLoadedSuccessfully?: boolean
   /** 是否至少开启过一次托管运行。快照上的单调标记，终身事实，不随时间范围变化。 */
   managedRunEverStarted?: boolean
-  /** 所选时间范围内开启的托管运行次数。与上面那个标记不同源，可能标记为真而次数为 0。 */
+  /** 项目累计开启的托管运行次数。 */
   managedRunCount: number
   /** 运行开销四项：工具调用、模型调用、Token、请求用户回答。与「对话数」同口径。 */
   runCost: ProjectModeRunCost
@@ -11435,9 +11446,9 @@ interface ProjectModeProjectView {
   features: ProjectModeFeatureView[]
   topSkills: ProjectModeSkillCount[]
   codeStats: DashboardCodeStats | null
-  /** This-range successful system-constraint reads, deduplicated across features/stages. */
+  /** Lifetime successful system-constraint reads, deduplicated across features/stages. */
   systemConstraintReads?: ProjectModeConstraintReadStats | null
-  /** This-range runtime hook executions attributed to the project. */
+  /** Lifetime runtime hook executions attributed to the project. */
   hookExecutions?: ProjectModeHookStats | null
   stageBuckets: DashboardStageBuckets
 }
@@ -11449,7 +11460,7 @@ type ProjectModeProjectStatus = "active" | "archived"
  * - `featureCount` / `createdAt` / `archivedAt` are snapshot-doc fields → sorted
  *   cheaply in the paginated snapshot query. `archivedAt` (= lifecycle updateAt)
  *   is only meaningful on the「已归档」tab.
- * - `conversationCount` / `generatedLines` are per-range metrics on the trace /
+ * - `conversationCount` / `generatedLines` are lifetime metrics on the trace /
  *   code indices → require the heavier metric-sort path, which is only enabled
  *   for the「进行中」(active) tab (archived projects accumulate; active are few).
  */
@@ -11628,7 +11639,7 @@ interface DashboardProjectModeData {
   tools: ProjectModeToolUsage
   analytics: ProjectModeAnalytics
   projectCounts: ProjectModeProjectCounts
-  projectPage: ProjectModeProjectPageData
+  projectPage?: ProjectModeProjectPageData
   projects: ProjectModeProjectView[]
   /**
    * 收窄开关（「仅精益项目」/「仅本期新建」）下，命中的项目 id 集超过
@@ -11654,11 +11665,11 @@ interface DashboardProjectModeTracesData {
 
 /** Time-range filter over the trace index, plus an `exists harnessProjectId` clause. */
 function projectModeTraceFilters(
-  range: TimeRange,
+  range: TimeRange | null,
   orgFilterClause: Record<string, unknown> | null
 ): Record<string, unknown>[] {
   return [
-    timeRangeFilter("startedAt", range),
+    ...projectModeMetricTimeFilters("startedAt", range),
     { exists: { field: "harnessProjectId" } },
     ...(orgFilterClause ? [orgFilterClause] : [])
   ]
@@ -11674,7 +11685,7 @@ function normalizeProjectModeProjectStatus(value?: string | null): ProjectModePr
 }
 
 /**
- * Resolve the requested sort. `featureCount` is always honoured; the per-range
+ * Resolve the requested sort. `featureCount` is always honoured; the lifetime
  * metric sorts are dropped (→ default createdAt-desc) on the archived tab, so
  * callers can blindly forward the user's choice without leaking the active-only rule.
  */
@@ -11964,7 +11975,7 @@ function sliceProjectModeProjects(
   }
 }
 
-/** Parse one harness.project.snapshot hit into a project view (no per-range usage yet). */
+/** Parse one harness.project.snapshot hit into a project view (no usage metrics yet). */
 function parseProjectModeSnapshotHit(hit: unknown): ProjectModeProjectView | null {
   const source = asRecord(asRecord(hit)._source)
   const props = asRecord(source.properties)
@@ -12025,7 +12036,7 @@ function parseProjectModeSnapshotHit(hit: unknown): ProjectModeProjectView | nul
     codeStats: null,
     systemConstraintReads: null,
     hookExecutions: null,
-    // Filled with real per-range buckets when the page enriches usage/code; the
+    // Filled with lifetime buckets when the page enriches usage/code; the
     // snapshot hit alone carries no per-turn attribution.
     stageBuckets: emptyStageBuckets()
   }
@@ -12290,7 +12301,7 @@ function buildProjectModeCreatorOrgSearchFilter(
 
 /**
  * 列表分页交给 ES：状态(term) + 关键词(wildcard，按 keyword 原值匹配) + 名称排序 + from/size，
- * collapse(projectId) 兜底去重；total 用 cardinality 取去重后的项目数。返回的项目尚未带本期指标。
+ * collapse(projectId) 兜底去重；total 用 cardinality 取去重后的项目数。返回的项目尚未带累计指标。
  */
 /**
  * Build the shared snapshot-index filter set + normalized list options. Reused
@@ -12419,6 +12430,7 @@ async function fetchProjectModeProjectPageHits(
     _source: { includes: PROJECT_MODE_SNAPSHOT_SOURCE_INCLUDES }
   }
   const raw = (await esQuery(getEsIndex("event"), body)) as EsSearchResponse
+  assertProjectModeResultComplete(raw)
   const hits = raw.hits?.hits ?? []
   const projects = hits
     .map((hit) => parseProjectModeSnapshotHit(hit))
@@ -12654,45 +12666,6 @@ async function fetchProjectModeFilteredProjectIds(
   return { ids, truncated }
 }
 
-/**
- * Per-project `原始生成行数` (Σ code_gen lineCount), keyed by harnessProjectId.
- * Mirrors how `codeStats.generatedLines` is computed but drops the adopt /
- * per-feature breakdown, so it stays cheap across the full active project set.
- */
-async function fetchProjectModeGeneratedLinesByProject(
-  projectIds: string[],
-  range: TimeRange,
-  opts: OrgFilterOptions | undefined,
-  access: DashboardAccessContext
-): Promise<Map<string, number>> {
-  const result = new Map<string, number>()
-  if (projectIds.length === 0) return result
-  const orgFilterClause = buildProjectModeOrgFilter(opts, access)
-  const raw = await fetchProjectModeCodeAggs(
-    projectIds,
-    range,
-    (perBucketAggs, scopedProjectIds) => ({
-      by_project: {
-        terms: {
-          field: "properties.harnessProjectId",
-          size: Math.max(1, scopedProjectIds.length)
-        },
-        aggs: { code_gen: perBucketAggs.code_gen }
-      }
-    }),
-    orgFilterClause ? [orgFilterClause] : []
-  )
-  const buckets = asRecord(asRecord(asRecord(raw).aggregations).by_project).buckets
-  if (Array.isArray(buckets)) {
-    for (const bucket of buckets) {
-      const b = asRecord(bucket)
-      const id = asString(b.key)
-      if (!id) continue
-      result.set(id, asNumber(asRecord(asRecord(b.code_gen).generated_lines).value))
-    }
-  }
-  return result
-}
 
 /** Build project views for an explicit id set (one collapsed hit per project). */
 async function fetchProjectModeProjectViewsByIds(
@@ -12710,6 +12683,7 @@ async function fetchProjectModeProjectViewsByIds(
     collapse: { field: "properties.projectId" },
     _source: { includes: PROJECT_MODE_SNAPSHOT_SOURCE_INCLUDES }
   })) as EsSearchResponse
+  assertProjectModeResultComplete(raw)
   for (const hit of raw.hits?.hits ?? []) {
     const view = parseProjectModeSnapshotHit(hit)
     if (view) map.set(view.projectId, view)
@@ -12717,81 +12691,15 @@ async function fetchProjectModeProjectViewsByIds(
   return map
 }
 
-/**
- * Metric-sort page (active tab only): rank the whole filtered active project set
- * by a per-range metric, then paginate in-app and fetch just the page's views.
- * Returns the same shape as `fetchProjectModeProjectPageHits` so the shared
- * enrichment in `fetchProjectModeProjectPage` applies unchanged.
- */
-async function fetchProjectModeProjectPageMetricSorted(
-  range: TimeRange,
-  options: ProjectModeProjectPageOptions | undefined,
-  access: DashboardAccessContext,
-  sortBy: "conversationCount" | "generatedLines",
-  sortOrder: ProjectModeProjectSortOrder
-): Promise<{
-  projects: ProjectModeProjectView[]
-  total: number
-  page: number
-  pageSize: number
-  status: ProjectModeProjectStatus
-  keyword: string
-  adapterName: string
-  creatorKeyword: string
-  creatorOrgKeyword: string
-  truncated: boolean
-}> {
-  const { filters, status, keyword, adapterName, creatorKeyword, creatorOrgKeyword } =
-    buildProjectModeProjectListFilters(range, options, access)
-  const pageSize = clampLimit(options?.pageSize, 10, 100)
-  const { ids: allIds, truncated } = await fetchProjectModeFilteredProjectIds(filters)
-  const total = allIds.length
-  const maxPage = Math.max(1, Math.ceil(total / pageSize))
-  const page = clampLimit(options?.page, 1, maxPage)
-
-  const metric =
-    sortBy === "conversationCount"
-      ? (await fetchProjectModePageUsage(allIds, range, options, access)).perProject
-      : await fetchProjectModeGeneratedLinesByProject(allIds, range, options, access)
-
-  const dir = sortOrder === "asc" ? 1 : -1
-  const ordered = [...allIds].sort((a, b) => {
-    const av = metric.get(a) ?? 0
-    const bv = metric.get(b) ?? 0
-    if (av !== bv) return (av - bv) * dir
-    return a.localeCompare(b)
-  })
-  const pageIds = ordered.slice((page - 1) * pageSize, page * pageSize)
-  const views = await fetchProjectModeProjectViewsByIds(pageIds, filters)
-  const projects = pageIds
-    .map((id) => views.get(id))
-    .filter((project): project is ProjectModeProjectView => Boolean(project))
-
-  return {
-    projects,
-    total,
-    page,
-    pageSize,
-    status,
-    keyword,
-    adapterName,
-    creatorKeyword,
-    creatorOrgKeyword,
-    truncated
-  }
-}
 
 /**
- * Upper bound on the project set forwarded to the metric-sort / code-adoption
- * queries (ES terms cap is 65536; we stay well under it). When the snapshot
- * holds more matching projects than this, the metric-sort ranking + total are
- * computed over only the first `PROJECT_MODE_PROJECT_ID_LIMIT` projects — the
- * page data carries a `truncated` flag so the UI can warn that the list /
- * metrics are incomplete and the user should narrow the filter.
+ * Upper bound on IDs forwarded to legacy overview and code-adoption queries.
+ * Project-list ranking instead enumerates every matching ID and batches 200
+ * IDs per metric request; this cap does not truncate its ranking or total.
  */
 const PROJECT_MODE_PROJECT_ID_LIMIT = 10000
 const PROJECT_MODE_DEFAULT_PROJECT_PAGE_SIZE = 10
-/** Per-project cap on feature buckets returned by nested per-feature aggregations. */
+/** Initial feature-bucket budget across a page; missing current features are recovered in batches. */
 const PROJECT_MODE_FEATURE_SLUG_LIMIT = 200
 
 /** Composite map key pairing a project id with one of its feature slugs. */
@@ -13060,7 +12968,7 @@ async function fetchProjectModeExportUsers(
 
 async function fetchProjectModePageUsage(
   projectIds: string[],
-  range: TimeRange,
+  range: TimeRange | null,
   opts: OrgFilterOptions | undefined,
   access: DashboardAccessContext
 ): Promise<{
@@ -13080,6 +12988,7 @@ async function fetchProjectModePageUsage(
   const perProjectSkills = new Map<string, ProjectModeSkillCount[]>()
   const perProjectStageConversations = new Map<string, Record<StageBucket, number>>()
   const perProjectRunCost = new Map<string, ProjectModeRunCost>()
+  const incompleteDevProjects: string[] = []
   if (projectIds.length === 0) {
     return {
       perProject,
@@ -13092,6 +13001,7 @@ async function fetchProjectModePageUsage(
     }
   }
 
+  const featureLimit = Math.max(1, Math.floor(PROJECT_MODE_FEATURE_SLUG_LIMIT / projectIds.length))
   const orgFilterClause = buildProjectModeOrgFilter(opts, access)
   const body = {
     size: 0,
@@ -13126,11 +13036,11 @@ async function fetchProjectModePageUsage(
             by_feature: {
               terms: {
                 field: "harnessFeatureSlug",
-                size: PROJECT_MODE_FEATURE_SLUG_LIMIT
+                size: featureLimit
               },
               aggs: {
                 by_node: {
-                  terms: { field: "harnessNodeName", size: PROJECT_MODE_FEATURE_SLUG_LIMIT }
+                  terms: { field: "harnessNodeName", size: 10 }
                 }
               }
             }
@@ -13142,24 +13052,26 @@ async function fetchProjectModePageUsage(
     }
   }
   const raw = (await esQuery(getEsIndex("trace"), body)) as EsSearchResponse
+  assertProjectModeResultComplete(raw)
   const buckets = asRecord(asRecord(raw.aggregations).by_project).buckets
-  if (!Array.isArray(buckets)) {
-    return {
-      perProject,
-      perProjectSuspectedTechnicalDetail,
-      perProjectDevStage,
-      perProjectDevAssociatedFeatures,
-      perProjectSkills,
-      perProjectStageConversations,
-      perProjectRunCost
-    }
-  }
+  if (!Array.isArray(buckets)) throw new Error("项目统计缺少聚合数据，请重试")
 
   for (const bucket of buckets) {
     const b = asRecord(bucket)
     const key = asString(b.key)
     if (!key) continue
     const mainAgentConversations = readMainAgentConversations(b)
+    const featureAgg = asRecord(mainAgentConversations.by_feature)
+    const featureBuckets = Array.isArray(featureAgg.buckets) ? featureAgg.buckets : []
+    if (
+      asNumber(featureAgg.sum_other_doc_count) > 0 ||
+      asNumber(asRecord(mainAgentConversations.by_node).sum_other_doc_count) > 0 ||
+      featureBuckets.some(
+        (bucket) => asNumber(asRecord(asRecord(bucket).by_node).sum_other_doc_count) > 0
+      )
+    ) {
+      incompleteDevProjects.push(key)
+    }
     perProject.set(key, asNumber(mainAgentConversations.doc_count))
     if (includeSuspectedTechnicalDetail) {
       perProjectSuspectedTechnicalDetail.set(
@@ -13181,6 +13093,21 @@ async function fetchProjectModePageUsage(
     )
     perProjectStageConversations.set(key, parseStageBucketConversations(mainAgentConversations))
     perProjectRunCost.set(key, parseProjectModeRunCost(b))
+  }
+
+  if (incompleteDevProjects.length) {
+    const complete = await fetchCompleteProjectDevMetrics(
+      incompleteDevProjects,
+      [
+        ...projectModeTraceFilters(range, orgFilterClause),
+        projectModeMainAgentConversationFilter()
+      ],
+      (query) => esQuery(getEsIndex("trace"), query)
+    )
+    for (const [id, metric] of complete) {
+      perProjectDevStage.set(id, metric.conversations)
+      perProjectDevAssociatedFeatures.set(id, metric.features)
+    }
   }
 
   return {
@@ -13206,7 +13133,7 @@ async function fetchProjectModePageUsage(
  */
 function buildProjectModeCodeAggs(
   projectIds: string[] | null,
-  range: TimeRange,
+  range: TimeRange | null,
   extraFilters: Record<string, unknown>[] = []
 ): {
   codeGenFilters: Record<string, unknown>[]
@@ -13218,7 +13145,7 @@ function buildProjectModeCodeAggs(
     : []
   const codeGenFilters: Record<string, unknown>[] = [
     { term: { eventName: "code_gen" } },
-    timeRangeFilter("eventTime", range),
+    ...projectModeMetricTimeFilters("eventTime", range),
     ...projectFilters,
     ...extraFilters
   ]
@@ -13227,7 +13154,7 @@ function buildProjectModeCodeAggs(
     { exists: { field: "properties.adoptedLineCount" } },
     { exists: { field: "properties.generatedLineCount" } },
     { exists: { field: "properties.effectiveGeneratedLineCount" } },
-    timeRangeFilter("properties.generatedAt", range),
+    ...projectModeMetricTimeFilters("properties.generatedAt", range),
     ...projectFilters,
     ...extraFilters
   ]
@@ -13368,7 +13295,7 @@ function parseAvailableCodeSources(overallRaw: unknown): string[] {
 
 async function fetchProjectModeCodeAggs(
   projectIds: string[] | null,
-  range: TimeRange,
+  range: TimeRange | null,
   buildAggs: (
     perBucketAggs: Record<string, unknown>,
     scopedProjectIds: string[]
@@ -13493,9 +13420,13 @@ async function fetchProjectModeAggregateCodeStats(
 
 async function fetchProjectModeProjectMetrics(
   projectIds: string[],
-  range: TimeRange,
+  range: TimeRange | null,
   opts: OrgFilterOptions | undefined,
-  access: DashboardAccessContext
+  access: DashboardAccessContext,
+  featureScope?: {
+    expected?: Map<string, string[]>
+    pairs?: Array<{ projectId: string; slug: string }>
+  }
 ): Promise<{
   byProject: Map<string, DashboardCodeStats>
   byFeature: Map<string, DashboardCodeStats>
@@ -13520,8 +13451,28 @@ async function fetchProjectModeProjectMetrics(
   // per Trace x stage, so the rollups cardinality-dedupe traceId instead of
   // adding stage doc_counts (which would double-count a Trace spanning stages).
   const scopedProjectIds = projectIds.slice(0, PROJECT_MODE_PROJECT_ID_LIMIT)
+  // Bound the initial feature tree across the entire page. Missing current
+  // features are recovered below in exact project/feature batches of at most 50.
+  const featureLimit =
+    featureScope?.pairs?.length ??
+    Math.max(1, Math.floor(PROJECT_MODE_FEATURE_SLUG_LIMIT / scopedProjectIds.length))
   const orgFilterClause = buildProjectModeOrgFilter(opts, access)
-  const extraFilters = orgFilterClause ? [orgFilterClause] : []
+  const extraFilters: Record<string, unknown>[] = orgFilterClause ? [orgFilterClause] : []
+  if (featureScope?.pairs) {
+    extraFilters.push({
+      bool: {
+        should: featureScope.pairs.map(({ projectId, slug }) => ({
+          bool: {
+            filter: [
+              { term: { "properties.harnessProjectId": projectId } },
+              { term: { "properties.harnessFeatureSlug": slug } }
+            ]
+          }
+        })),
+        minimum_should_match: 1
+      }
+    })
+  }
   const { codeGenFilters, codeAdoptFilters, perBucketAggs } = buildProjectModeCodeAggs(
     scopedProjectIds,
     range,
@@ -13529,19 +13480,19 @@ async function fetchProjectModeProjectMetrics(
   )
   const constraintFilters: Record<string, unknown>[] = [
     { term: { eventName: SYSTEM_CONSTRAINT_READ_SUMMARY_EVENT } },
-    timeRangeFilter("eventTime", range),
+    ...projectModeMetricTimeFilters("eventTime", range),
     { terms: { "properties.harnessProjectId": scopedProjectIds } },
     ...extraFilters
   ]
   const hookFilters: Record<string, unknown>[] = [
     { term: { eventName: "hook.executed" } },
-    timeRangeFilter("eventTime", range),
+    ...projectModeMetricTimeFilters("eventTime", range),
     { terms: { "properties.harnessProjectId": scopedProjectIds } },
     ...extraFilters
   ]
   const managedRunFilters = buildProjectModeManagedRunFilters(
     scopedProjectIds,
-    timeRangeFilter("eventTime", range),
+    range ? timeRangeFilter("eventTime", range) : null,
     extraFilters
   )
   const projectOperationalAggs = buildProjectModeOperationalAggs(constraintFilters, hookFilters, {
@@ -13578,7 +13529,7 @@ async function fetchProjectModeProjectMetrics(
           by_feature: {
             terms: {
               field: "properties.harnessFeatureSlug",
-              size: PROJECT_MODE_FEATURE_SLUG_LIMIT
+              size: featureLimit
             },
             aggs: { ...perBucketAggs, ...featureOperationalAggs }
           },
@@ -13587,14 +13538,17 @@ async function fetchProjectModeProjectMetrics(
       }
     }
   })) as EsSearchResponse
+  assertProjectModeResultComplete(raw)
   const projectAggs = asRecord(asRecord(raw).aggregations)
   const projectBuckets = asRecord(projectAggs.by_project).buckets
+  if (!Array.isArray(projectBuckets)) throw new Error("项目统计缺少聚合数据，请重试")
   const byProject = new Map<string, DashboardCodeStats>()
   const byFeature = new Map<string, DashboardCodeStats>()
   const byProjectStage = new Map<string, Record<StageBucket, DashboardCodeStats>>()
   const operationalByProject = new Map<string, ProjectModeOperationalStats>()
   const operationalByFeature = new Map<string, ProjectModeOperationalStats>()
   const managedRunCountByProject = new Map<string, number>()
+  const missingFeatures: Array<{ projectId: string; slug: string }> = []
   if (Array.isArray(projectBuckets)) {
     for (const bucket of projectBuckets) {
       const b = asRecord(bucket)
@@ -13609,7 +13563,18 @@ async function fetchProjectModeProjectMetrics(
       }
       operationalByProject.set(projectId, parseProjectModeOperationalStats(b))
       managedRunCountByProject.set(projectId, parseProjectModeManagedRunCount(b))
-      const featureBuckets = asRecord(b.by_feature).buckets
+      const featureAgg = asRecord(b.by_feature)
+      const featureBuckets = featureAgg.buckets
+      if (featureScope?.expected && asNumber(featureAgg.sum_other_doc_count) > 0) {
+        const present = new Set(
+          Array.isArray(featureBuckets)
+            ? featureBuckets.map((bucket) => asString(asRecord(bucket).key))
+            : []
+        )
+        for (const slug of featureScope.expected.get(projectId) ?? []) {
+          if (!present.has(slug)) missingFeatures.push({ projectId, slug })
+        }
+      }
       if (!Array.isArray(featureBuckets)) continue
       for (const featureBucket of featureBuckets) {
         const fb = asRecord(featureBucket)
@@ -13626,6 +13591,22 @@ async function fetchProjectModeProjectMetrics(
       }
     }
   }
+  if (missingFeatures.length) {
+    const batches = await mapAwardBatches(missingFeatures, 50, async (pairs) =>
+      fetchProjectModeProjectMetrics(
+        [...new Set(pairs.map((pair) => pair.projectId))],
+        range,
+        opts,
+        access,
+        { pairs }
+      )
+    )
+    for (const extra of batches) {
+      for (const [key, value] of extra.byFeature) byFeature.set(key, value)
+      for (const [key, value] of extra.operationalByFeature) operationalByFeature.set(key, value)
+    }
+  }
+
   return {
     byProject,
     byFeature,
@@ -13636,10 +13617,10 @@ async function fetchProjectModeProjectMetrics(
   }
 }
 
-/** Add this-range trace/code metrics to current project snapshots. */
+/** Add indexed trace/code metrics to current snapshots; null means project lifetime. */
 async function enrichProjectModeProjectViews(
   projects: ProjectModeProjectView[],
-  range: TimeRange,
+  range: TimeRange | null,
   opts: OrgFilterOptions | undefined,
   access: DashboardAccessContext
 ): Promise<ProjectModeProjectView[]> {
@@ -13649,7 +13630,14 @@ async function enrichProjectModeProjectViews(
   // so a project ranked high by 原始生成行数 still shows its adoption columns.
   const [usage, code] = await Promise.all([
     fetchProjectModePageUsage(projectIds, range, opts, access),
-    fetchProjectModeProjectMetrics(projectIds, range, opts, access)
+    fetchProjectModeProjectMetrics(projectIds, range, opts, access, {
+      expected: new Map(
+        projects.map((project) => [
+          project.projectId,
+          project.features.map((feature) => feature.slug)
+        ])
+      )
+    })
   ])
   return projects.map((project) => ({
     ...project,
@@ -13693,14 +13681,17 @@ async function enrichProjectModeProjectViews(
 }
 
 const projectAttentionRankingCache = new ProjectAttentionRankingCache()
+const projectModePageCache = new ProjectModePageCache<ProjectModeProjectPageData>()
 
-async function fetchProjectModeAttentionPage(
+async function fetchProjectModeMetricSortedPage(
   range: TimeRange,
   options: ProjectModeProjectPageOptions | undefined,
   access: DashboardAccessContext,
-  sortBy: ProjectAttentionSortKey,
+  sortBy: ProjectMetricSortKey,
   sortOrder: ProjectModeProjectSortOrder
-): Promise<Omit<ProjectModeProjectPageData, "sortBy" | "sortOrder" | "showSuspectedTechnicalDetailMetric">> {
+): Promise<
+  Omit<ProjectModeProjectPageData, "sortBy" | "sortOrder" | "showSuspectedTechnicalDetailMetric">
+> {
   if (
     sortBy === "suspectedTechnicalDetailConversationCount" &&
     !isDashboardSuspectedTechnicalDetailAllowed(access)
@@ -13710,10 +13701,10 @@ async function fetchProjectModeAttentionPage(
   const { filters, status, keyword, adapterName, creatorKeyword, creatorOrgKeyword } =
     buildProjectModeProjectListFilters(range, options, access)
   const orgFilter = buildProjectModeOrgFilter(options, access)
-  const code = buildProjectModeCodeAggs(null, range, orgFilter ? [orgFilter] : [])
+  const code = buildProjectModeCodeAggs(null, null, orgFilter ? [orgFilter] : [])
   const scope = {
     snapshotFilters: filters,
-    traceFilters: projectModeTraceFilters(range, orgFilter),
+    traceFilters: projectModeTraceFilters(null, orgFilter),
     codeGenFilters: code.codeGenFilters,
     codeAdoptFilters: code.codeAdoptFilters,
     codeAggs: code.perBucketAggs,
@@ -13723,8 +13714,9 @@ async function fetchProjectModeAttentionPage(
   const cacheKey = JSON.stringify([scope, sortBy])
   let metrics = projectAttentionRankingCache.get(cacheKey)
   if (!metrics) {
+    const generation = projectAttentionRankingCache.generation
     metrics = await fetchProjectAttentionRanking(scope, sortBy, esQuery)
-    projectAttentionRankingCache.set(cacheKey, metrics)
+    projectAttentionRankingCache.set(cacheKey, metrics, generation)
   }
   const ordered = [...metrics.keys()].sort(
     (a, b) =>
@@ -13753,7 +13745,7 @@ async function fetchProjectModeAttentionPage(
   }
 }
 
-/** One list page: current snapshots enriched with this-range usage / code. */
+/** List membership may follow creation dates; row metrics always cover project lifetime. */
 async function fetchProjectModeProjectPage(
   range: TimeRange,
   options?: ProjectModeProjectPageOptions,
@@ -13763,20 +13755,46 @@ async function fetchProjectModeProjectPage(
   const { sortBy, sortOrder } = normalizeProjectModeProjectSort(options, status)
   const metricSort = sortBy === "conversationCount" || sortBy === "generatedLines"
 
-  // Attention ranking enumerates all matching IDs before pagination. Existing
-  // conversation/line sorts retain their active-only path; snapshot sorts stay cheap.
-  const sliced = isProjectAttentionSortKey(sortBy)
-    ? await fetchProjectModeAttentionPage(range, options, access, sortBy, sortOrder)
-    : metricSort
-      ? await fetchProjectModeProjectPageMetricSorted(range, options, access, sortBy, sortOrder)
+  const visibility = isDashboardSuspectedTechnicalDetailAllowed(access)
+  if (sortBy === "suspectedTechnicalDetailConversationCount" && !visibility) {
+    throw new Error("无权查看疑似技术细节补充统计")
+  }
+  const { filters } = buildProjectModeProjectListFilters(range, options, access)
+  const cacheKey = JSON.stringify([
+    getEsNodes(),
+    getEsIndex("event"),
+    getEsIndex("trace"),
+    access.sapId,
+    access.ystId,
+    visibility,
+    filters,
+    options?.page ?? 1,
+    options?.pageSize ?? 10,
+    sortBy,
+    sortOrder
+  ])
+  const cached = projectModePageCache.get(cacheKey)
+  if (cached) return cached
+  const generation = projectModePageCache.generation
+  const sliced =
+    isProjectAttentionSortKey(sortBy) || metricSort
+      ? await fetchProjectModeMetricSortedPage(
+          range,
+          options,
+          access,
+          sortBy as ProjectMetricSortKey,
+          sortOrder
+        )
       : await fetchProjectModeProjectPageHits(range, options, access)
-  return {
+  const result: ProjectModeProjectPageData = {
     ...sliced,
     sortBy,
     sortOrder,
-    showSuspectedTechnicalDetailMetric: isDashboardSuspectedTechnicalDetailAllowed(access),
-    projects: await enrichProjectModeProjectViews(sliced.projects, range, options, access)
+    showSuspectedTechnicalDetailMetric: visibility,
+    projects: await enrichProjectModeProjectViews(sliced.projects, null, options, access)
   }
+  projectModePageCache.set(cacheKey, result, generation)
+  return result
 }
 
 const PROJECT_MODE_EXPORT_PROJECT_BATCH_SIZE = 100
@@ -13805,7 +13823,7 @@ async function fetchProjectModeExportData(
       offset += PROJECT_MODE_EXPORT_PROJECT_BATCH_SIZE
     ) {
       const batch = snapshots.slice(offset, offset + PROJECT_MODE_EXPORT_PROJECT_BATCH_SIZE)
-      projects.push(...(await enrichProjectModeProjectViews(batch, range, opts, access)))
+      projects.push(...(await enrichProjectModeProjectViews(batch, null, opts, access)))
     }
     return projects
   })()
@@ -13822,8 +13840,18 @@ async function fetchProjectModeExportData(
   }
 }
 
-/** Upper bound on the commit-sha set collected for one feature's commit list. */
-const PROJECT_MODE_FEATURE_COMMIT_SHA_LIMIT = 500
+const projectModeCommitIdCache = new ProjectModePageCache<string[]>()
+
+async function projectModeCommitIds(filters: Record<string, unknown>[]): Promise<string[]> {
+  const index = getEsIndex("event")
+  const key = JSON.stringify([getEsNodes(), index, filters])
+  const cached = projectModeCommitIdCache.get(key)
+  if (cached) return cached
+  const generation = projectModeCommitIdCache.generation
+  const ids = await fetchProjectModeCommitIds(filters, (body) => esQuery(index, body))
+  projectModeCommitIdCache.set(key, ids, generation)
+  return ids
+}
 
 /**
  * Commit 明细 for a single project-mode feature.
@@ -13836,7 +13864,7 @@ const PROJECT_MODE_FEATURE_COMMIT_SHA_LIMIT = 500
 async function fetchProjectModeFeatureCommits(
   projectId: string,
   featureSlug: string,
-  range: TimeRange,
+  range: TimeRange | null,
   options?: number | CommitDetailsOptions
 ): Promise<{
   total: number
@@ -13855,33 +13883,15 @@ async function fetchProjectModeFeatureCommits(
   if (!normalizedProjectId || !normalizedFeatureSlug) return empty
 
   // 1) 该特性关联的 commit sha 集合：取自带 commitSha 的 code_adopt 事件。
-  //    按 generatedAt 落在所选时间范围内过滤，与特性级采纳明细（buildProjectModeCodeAggs）口径对齐。
-  const shaRaw = asRecord(
-    await esQuery(getEsIndex("event"), {
-      size: 0,
-      query: {
-        bool: {
-          filter: [
-            { term: { eventName: "code_adopt" } },
-            { term: { "properties.harnessProjectId": normalizedProjectId } },
-            { term: { "properties.harnessFeatureSlug": normalizedFeatureSlug } },
-            { exists: { field: "properties.commitSha" } },
-            timeRangeFilter("properties.generatedAt", range),
-            ...(orgFilterClause ? [orgFilterClause] : [])
-          ]
-        }
-      },
-      aggs: {
-        by_commit: {
-          terms: { field: "properties.commitSha", size: PROJECT_MODE_FEATURE_COMMIT_SHA_LIMIT }
-        }
-      }
-    })
-  )
-  const shaBuckets = asRecord(asRecord(shaRaw.aggregations).by_commit).buckets
-  const commitShas = Array.isArray(shaBuckets)
-    ? shaBuckets.map((bucket) => asString(asRecord(bucket).key)).filter(Boolean)
-    : []
+  //    按项目累计统计；兼容旧调用方传入的 generatedAt 范围，与特性级采纳明细（buildProjectModeCodeAggs）口径对齐。
+  const commitShas = await projectModeCommitIds([
+    { term: { eventName: "code_adopt" } },
+    { term: { "properties.harnessProjectId": normalizedProjectId } },
+    { term: { "properties.harnessFeatureSlug": normalizedFeatureSlug } },
+    { exists: { field: "properties.commitSha" } },
+    ...projectModeMetricTimeFilters("properties.generatedAt", range),
+    ...(orgFilterClause ? [orgFilterClause] : [])
+  ])
   if (commitShas.length === 0) return empty
 
   // 2) 拉取这些 sha 对应的 git.commit.created，并叠加 pushed / 部门 / 「室筛选」。
@@ -13925,7 +13935,7 @@ async function fetchProjectModeFeatureCommits(
  */
 async function fetchProjectModeProjectCommits(
   projectId: string,
-  range: TimeRange,
+  range: TimeRange | null,
   options?: number | CommitDetailsOptions
 ): Promise<{
   total: number
@@ -13943,31 +13953,13 @@ async function fetchProjectModeProjectCommits(
   if (!normalizedProjectId) return empty
 
   // 1) 该项目关联的 commit sha 集合：取自带 commitSha 的 code_adopt 事件（不按特性收窄）。
-  const shaRaw = asRecord(
-    await esQuery(getEsIndex("event"), {
-      size: 0,
-      query: {
-        bool: {
-          filter: [
-            { term: { eventName: "code_adopt" } },
-            { term: { "properties.harnessProjectId": normalizedProjectId } },
-            { exists: { field: "properties.commitSha" } },
-            timeRangeFilter("properties.generatedAt", range),
-            ...(orgFilterClause ? [orgFilterClause] : [])
-          ]
-        }
-      },
-      aggs: {
-        by_commit: {
-          terms: { field: "properties.commitSha", size: PROJECT_MODE_FEATURE_COMMIT_SHA_LIMIT }
-        }
-      }
-    })
-  )
-  const shaBuckets = asRecord(asRecord(shaRaw.aggregations).by_commit).buckets
-  const commitShas = Array.isArray(shaBuckets)
-    ? shaBuckets.map((bucket) => asString(asRecord(bucket).key)).filter(Boolean)
-    : []
+  const commitShas = await projectModeCommitIds([
+    { term: { eventName: "code_adopt" } },
+    { term: { "properties.harnessProjectId": normalizedProjectId } },
+    { exists: { field: "properties.commitSha" } },
+    ...projectModeMetricTimeFilters("properties.generatedAt", range),
+    ...(orgFilterClause ? [orgFilterClause] : [])
+  ])
   if (commitShas.length === 0) return empty
 
   // 2) 拉取这些 sha 对应的 git.commit.created，并叠加 pushed / 部门 / 「室筛选」。
@@ -14089,7 +14081,11 @@ async function fetchProjectMode(
   opts?: OrgFilterOptions
 ): Promise<DashboardProjectModeData> {
   const access = requireDashboardProjectModeAccess()
-  projectAttentionRankingCache.clear()
+  if (opts?.refreshProjects) {
+    projectAttentionRankingCache.clear()
+    projectModePageCache.clear()
+    projectModeCommitIdCache.clear()
+  }
 
   // 「仅精益项目」/「仅本期新建」：这两个条件都只存在于自愈快照上（projectFromLean、
   // lifecycleCreatedAt），trace / code 事件里没有，所以先把命中的项目 id 集解析出来，用于圈定
@@ -14115,20 +14111,22 @@ async function fetchProjectMode(
     fetchProjectModeSnapshotAggs(range, opts, access),
     fetchProjectModeUsage(range, opts, access, scopedProjectIds),
     fetchProjectModeAggregateCodeStats(range, opts, access, scopedProjectIds),
-    fetchProjectModeProjectPage(
-      range,
-      {
-        ...opts,
-        status: "active",
-        page: 1,
-        pageSize: PROJECT_MODE_DEFAULT_PROJECT_PAGE_SIZE,
-        keyword: "",
-        // 列表默认按创建时间降序；与渲染层初始排序态一致，避免首屏二次请求。
-        sortBy: "createdAt",
-        sortOrder: "desc"
-      },
-      access
-    )
+    opts?.skipProjectList && !opts.refreshProjects
+      ? Promise.resolve(undefined)
+      : fetchProjectModeProjectPage(
+          range,
+          {
+            ...opts,
+            status: "active",
+            page: 1,
+            pageSize: PROJECT_MODE_DEFAULT_PROJECT_PAGE_SIZE,
+            keyword: "",
+            // 列表默认按创建时间降序；与渲染层初始排序态一致，避免首屏二次请求。
+            sortBy: "createdAt",
+            sortOrder: "desc"
+          },
+          access
+        )
   ])
 
   // Adapter rows: usage carries conversation counts, snapshot aggs carry project /
@@ -14190,7 +14188,7 @@ async function fetchProjectMode(
     },
     projectCounts: snap.counts,
     projectPage,
-    projects: projectPage.projects,
+    projects: projectPage?.projects ?? [],
     leanTruncated,
     availableSources: code.availableSources
   }
@@ -14405,7 +14403,7 @@ interface ProjectModeTracesOptions {
 /** Project-mode traces for a single project (thread/trace pagination). */
 async function fetchProjectModeTraces(
   projectId: string,
-  range: TimeRange,
+  range: TimeRange | null,
   options?: ProjectModeTracesOptions
 ): Promise<DashboardProjectModeTracesData> {
   const access = requireDashboardProjectModeAccess()
@@ -14428,7 +14426,7 @@ async function fetchProjectModeTraces(
   const triggerScope = normalizeTraceTriggerScope(options?.triggerScope)
   const traceAccessFilter = buildProjectModeAccessFilter(access)
   const baseFilter = [
-    timeRangeFilter("startedAt", range),
+    ...projectModeMetricTimeFilters("startedAt", range),
     { term: { harnessProjectId: normalizedProjectId } },
     ...(normalizedFeatureSlug ? [{ term: { harnessFeatureSlug: normalizedFeatureSlug } }] : []),
     ...(normalizedNodeName ? [harnessNodeNameTraceFilterClause(normalizedNodeName)] : []),
@@ -14665,7 +14663,7 @@ async function fetchAllProjectModeHookEvents(
 /** Complete operational lists are fetched lazily so the project list query stays compact. */
 async function fetchProjectModeOperationalDetails(
   scope: ProjectModeOperationalDetailScope,
-  range: TimeRange,
+  range: TimeRange | null,
   opts?: OrgFilterOptions
 ): Promise<ProjectModeOperationalDetails> {
   const access = requireDashboardProjectModeAccess()
@@ -14683,12 +14681,12 @@ async function fetchProjectModeOperationalDetails(
   ]
   const constraintFilters: Record<string, unknown>[] = [
     { term: { eventName: SYSTEM_CONSTRAINT_READ_SUMMARY_EVENT } },
-    timeRangeFilter("eventTime", range),
+    ...projectModeMetricTimeFilters("eventTime", range),
     ...contextFilters
   ]
   const hookFilters: Record<string, unknown>[] = [
     { term: { eventName: "hook.executed" } },
-    timeRangeFilter("eventTime", range),
+    ...projectModeMetricTimeFilters("eventTime", range),
     ...contextFilters
   ]
   const [constraintFiles, hookEvents] = await Promise.all([
@@ -14706,7 +14704,7 @@ async function fetchProjectModeOperationalDetails(
  */
 async function fetchProjectModeStageAnalysis(
   projectId: string,
-  range: TimeRange,
+  range: TimeRange | null,
   opts?: OrgFilterOptions
 ): Promise<ProjectModeStageAnalysis> {
   const access = requireDashboardProjectModeAccess()
@@ -14721,7 +14719,7 @@ async function fetchProjectModeStageAnalysis(
     query: {
       bool: {
         filter: [
-          timeRangeFilter("startedAt", range),
+          ...projectModeMetricTimeFilters("startedAt", range),
           { term: { harnessProjectId: normalizedProjectId } },
           ...(orgFilterClause ? [orgFilterClause] : [])
         ]
@@ -14747,6 +14745,7 @@ async function fetchProjectModeStageAnalysis(
     }
   }
   const raw = await execute(true, true)
+  assertProjectModeResultComplete(raw)
   return parseProjectModeStageAnalysis(normalizedProjectId, asRecord(raw.aggregations))
 }
 
@@ -14994,7 +14993,8 @@ function buildFeatureNodeBreakdown(
 async function fetchProjectModeFeatureNodes(
   projectId: string,
   featureSlug: string,
-  range: TimeRange
+  range: TimeRange | null,
+  opts?: OrgFilterOptions
 ): Promise<ProjectModeFeatureNode[]> {
   const access = requireDashboardProjectModeAccess()
   const normalizedProjectId = projectId.trim()
@@ -15002,13 +15002,13 @@ async function fetchProjectModeFeatureNodes(
   if (!normalizedProjectId || !normalizedFeatureSlug) return []
 
   // 1) conversations per stage (+ status sub-breakdown) — trace index.
-  const traceAccessFilter = buildProjectModeAccessFilter(access)
+  const traceAccessFilter = buildProjectModeOrgFilter(opts, access)
   const traceBody = {
     size: 0,
     query: {
       bool: {
         filter: [
-          timeRangeFilter("startedAt", range),
+          ...projectModeMetricTimeFilters("startedAt", range),
           { term: { harnessProjectId: normalizedProjectId } },
           { term: { harnessFeatureSlug: normalizedFeatureSlug } },
           // 阶段细分里的每一个对话数（阶段总数、状态细分、stage×skill 三桶）都走
@@ -15025,7 +15025,7 @@ async function fetchProjectModeFeatureNodes(
   // 2) Code adoption + operational telemetry share one event-side by-stage
   // aggregation. Mirror fetchProjectModeProjectMetrics' org/access filter so
   // a non-admin never sees another org's events for this project+feature.
-  const orgFilterClause = buildProjectModeOrgFilter(undefined, access)
+  const orgFilterClause = buildProjectModeOrgFilter(opts, access)
   const eventContextFilters: Record<string, unknown>[] = [
     ...(orgFilterClause ? [orgFilterClause] : []),
     { term: { "properties.harnessProjectId": normalizedProjectId } },
@@ -15038,12 +15038,12 @@ async function fetchProjectModeFeatureNodes(
   )
   const constraintFilters: Record<string, unknown>[] = [
     { term: { eventName: SYSTEM_CONSTRAINT_READ_SUMMARY_EVENT } },
-    timeRangeFilter("eventTime", range),
+    ...projectModeMetricTimeFilters("eventTime", range),
     ...eventContextFilters
   ]
   const hookFilters: Record<string, unknown>[] = [
     { term: { eventName: "hook.executed" } },
-    timeRangeFilter("eventTime", range),
+    ...projectModeMetricTimeFilters("eventTime", range),
     ...eventContextFilters
   ]
   const eventBody = {
@@ -15074,6 +15074,8 @@ async function fetchProjectModeFeatureNodes(
     esQuery(getEsIndex("trace"), traceBody) as Promise<EsSearchResponse>,
     esQuery(getEsIndex("event"), eventBody) as Promise<EsSearchResponse>
   ])
+  assertProjectModeResultComplete(traceRaw)
+  assertProjectModeResultComplete(eventRaw)
   const traceParsed = parseTraceNodeBuckets(traceRaw.aggregations)
   const eventAggregations = eventRaw.aggregations
   const codeParsed = parseCodeNodeBuckets(eventAggregations)
@@ -15693,9 +15695,16 @@ export function registerDashboardHandlers(_ipcMain: typeof ipcMain): void {
   registerLatestDashboardHandler(
     _ipcMain,
     "dashboard:projectModeTraces",
-    async (_, projectId: string, range: TimeRange, options?: ProjectModeTracesOptions) => {
+    async (_, projectId: string, range: TimeRange | null, options?: ProjectModeTracesOptions) => {
       if (import.meta.env.DEV)
-        return { success: true, data: makeMockProjectModeTraces(projectId, range, options) }
+        return {
+          success: true,
+          data: makeMockProjectModeTraces(
+            projectId,
+            range ?? { from: "1970-01-01T00:00:00.000Z", to: new Date().toISOString() },
+            options
+          )
+        }
       try {
         requireDashboardProjectModeAccess()
         return { success: true, data: await fetchProjectModeTraces(projectId, range, options) }
@@ -15709,14 +15718,14 @@ export function registerDashboardHandlers(_ipcMain: typeof ipcMain): void {
   registerLatestDashboardHandler(
     _ipcMain,
     "dashboard:projectModeFeatureNodes",
-    async (_, projectId: string, featureSlug: string, range: TimeRange) => {
+    async (_, projectId: string, featureSlug: string, range: TimeRange | null, opts?: OrgFilterOptions) => {
       if (import.meta.env.DEV)
         return { success: true, data: makeMockProjectModeFeatureNodes(projectId, featureSlug) }
       try {
         requireDashboardProjectModeAccess()
         return {
           success: true,
-          data: await fetchProjectModeFeatureNodes(projectId, featureSlug, range)
+          data: await fetchProjectModeFeatureNodes(projectId, featureSlug, range, opts)
         }
       } catch (e) {
         logDashboardRequestError("projectModeFeatureNodes", e)
@@ -15730,7 +15739,7 @@ export function registerDashboardHandlers(_ipcMain: typeof ipcMain): void {
   registerLatestDashboardHandler(
     _ipcMain,
     "dashboard:projectModeStageAnalysis",
-    async (_, projectId: string, range: TimeRange, opts?: OrgFilterOptions) => {
+    async (_, projectId: string, range: TimeRange | null, opts?: OrgFilterOptions) => {
       if (import.meta.env.DEV) {
         return { success: true, data: makeMockProjectModeStageAnalysis(projectId ?? "") }
       }
@@ -15751,7 +15760,7 @@ export function registerDashboardHandlers(_ipcMain: typeof ipcMain): void {
     async (
       _,
       scope: ProjectModeOperationalDetailScope,
-      range: TimeRange,
+      range: TimeRange | null,
       opts?: OrgFilterOptions
     ) => {
       if (import.meta.env.DEV) {
@@ -15797,13 +15806,18 @@ export function registerDashboardHandlers(_ipcMain: typeof ipcMain): void {
       _,
       projectId: string,
       featureSlug: string,
-      range: TimeRange,
+      range: TimeRange | null,
       options?: number | CommitDetailsOptions
     ) => {
       if (import.meta.env.DEV)
         return {
           success: true,
-          data: makeMockProjectModeFeatureCommits(projectId, featureSlug, range, options)
+          data: makeMockProjectModeFeatureCommits(
+            projectId,
+            featureSlug,
+            range ?? { from: "1970-01-01T00:00:00.000Z", to: new Date().toISOString() },
+            options
+          )
         }
       try {
         return {
@@ -15819,11 +15833,20 @@ export function registerDashboardHandlers(_ipcMain: typeof ipcMain): void {
 
   _ipcMain.handle(
     "dashboard:projectModeProjectCommits",
-    async (_, projectId: string, range: TimeRange, options?: number | CommitDetailsOptions) => {
+    async (
+      _,
+      projectId: string,
+      range: TimeRange | null,
+      options?: number | CommitDetailsOptions
+    ) => {
       if (import.meta.env.DEV)
         return {
           success: true,
-          data: makeMockProjectModeProjectCommits(projectId, range, options)
+          data: makeMockProjectModeProjectCommits(
+            projectId,
+            range ?? { from: "1970-01-01T00:00:00.000Z", to: new Date().toISOString() },
+            options
+          )
         }
       try {
         return {

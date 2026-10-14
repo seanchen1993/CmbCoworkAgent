@@ -45,55 +45,106 @@ const conversationBucket = (id: string, inner: Record<string, unknown>) => ({
 afterEach(() => vi.restoreAllMocks())
 
 describe("project attention ranking", () => {
-  it("ranks every matching project beyond 10,000, with IDs only and a concurrency ceiling of two", async () => {
-    const ids = Array.from({ length: 10_001 }, (_, index) => `p${index}`)
-    let active = 0
-    let peak = 0
-    let idRequests = 0
-    let metricRequests = 0
-    const query = vi.fn(async (_index: string, rawBody: Record<string, unknown>) => {
-      const body = rawBody as {
-        size: number
-        _source?: unknown
-        aggs: { projects: { composite?: { size: number; after?: { project: number } } } }
-        query: { bool: { filter: Array<{ terms?: { harnessProjectId?: string[] } }> } }
-      }
-      expect(body.size).toBe(0)
-      expect(body._source).toBeUndefined()
-      expect(JSON.stringify(body)).not.toContain("_raw")
-      const composite = body.aggs.projects.composite
-      if (composite) {
-        idRequests++
-        expect(body.query.bool.filter).toEqual(scope.snapshotFilters)
-        expect(composite.size).toBe(1000)
-        const start = Number(composite.after?.project ?? 0)
-        const page = ids.slice(start, start + 1000)
-        return {
-          aggregations: {
-            projects: {
-              buckets: page.map((id) => ({ key: { project: id } })),
-              ...(start + 1000 < ids.length ? { after_key: { project: start + 1000 } } : {})
+  it.each([
+    "vibecodingShare",
+    "conversationCount",
+    "generatedLines",
+    "inclusiveAdoptionRate",
+    "suspectedTechnicalDetailConversationCount"
+  ] as const)(
+    "ranks %s for every matching project beyond 10,000, with IDs only and a concurrency ceiling of two",
+    async (key) => {
+      const ids = Array.from({ length: 10_001 }, (_, index) => `p${index}`)
+      let active = 0
+      let peak = 0
+      let idRequests = 0
+      let metricRequests = 0
+      const query = vi.fn(async (_index: string, rawBody: Record<string, unknown>) => {
+        const body = rawBody as {
+          size: number
+          _source?: unknown
+          aggs: { projects: { composite?: { size: number; after?: { project: number } } } }
+          query: { bool: { filter: Array<{ terms?: Record<string, string[]> }> } }
+        }
+        expect(body.size).toBe(0)
+        expect(body._source).toBeUndefined()
+        expect(JSON.stringify(body)).not.toContain("_raw")
+        const composite = body.aggs.projects.composite
+        if (composite) {
+          idRequests++
+          expect(body.query.bool.filter).toEqual(scope.snapshotFilters)
+          expect(composite.size).toBe(1000)
+          const start = Number(composite.after?.project ?? 0)
+          const page = ids.slice(start, start + 1000)
+          return {
+            aggregations: {
+              projects: {
+                buckets: page.map((id) => ({ key: { project: id } })),
+                ...(start + 1000 < ids.length ? { after_key: { project: start + 1000 } } : {})
+              }
             }
           }
         }
-      }
-      metricRequests++
-      const batch = body.query.bool.filter[scope.traceFilters.length].terms!.harnessProjectId!
+        metricRequests++
+        const projectTerms = body.query.bool.filter.find(
+          (filter) =>
+            filter.terms?.harnessProjectId || filter.terms?.["properties.harnessProjectId"]
+        )!.terms!
+        const batch = projectTerms.harnessProjectId ?? projectTerms["properties.harnessProjectId"]
+        expect(batch.length).toBeLessThanOrEqual(200)
+        if (key === "generatedLines") {
+          expect(body.query.bool.filter.slice(0, -1)).toEqual(scope.codeGenFilters)
+        } else if (key !== "inclusiveAdoptionRate") {
+          expect(body.query.bool.filter.slice(0, scope.traceFilters.length)).toEqual(
+            scope.traceFilters
+          )
+          expect(body.query.bool.filter.at(-1)).toEqual(projectModeMainAgentConversationFilter())
+        }
+        active++
+        peak = Math.max(peak, active)
+        await new Promise((resolve) => setTimeout(resolve, 1))
+        active--
+        return result([])
+      })
+      const metrics = await fetchProjectAttentionRanking(scope, key, query)
+      expect(metrics.size).toBe(10_001)
+      expect(idRequests).toBe(11)
+      expect(metricRequests).toBe(51)
+      expect(peak).toBe(2)
+      expect(metrics.get("p10000")).toBe(
+        key === "conversationCount" || key === "generatedLines" ? 0 : null
+      )
+    }
+  )
+
+  it("sorts generated lines using only indexed sums, with 200-ID batches and zeros for missing code", async () => {
+    const ids = Array.from({ length: 401 }, (_, i) => `p${i}`)
+    const query = vi.fn(async (index: string, body: Record<string, unknown>) => {
+      expect(index).toBe(scope.eventIndex)
+      const aggregate = (body.aggs as Record<string, { composite?: unknown }>)?.projects
+      if (aggregate.composite) return idsResult(...ids)
+      expect(JSON.stringify(body)).not.toMatch(
+        /by_feature|by_node|usedSkills|_raw|pushed|commit_count/
+      )
+      const filters = (
+        body.query as { bool: { filter: Array<{ terms?: Record<string, string[]> }> } }
+      ).bool.filter
+      expect(filters.slice(0, -1)).toEqual(genFilters)
+      const batch = filters.at(-1)!.terms!["properties.harnessProjectId"]
       expect(batch.length).toBeLessThanOrEqual(200)
-      expect(body.query.bool.filter.slice(0, scope.traceFilters.length)).toEqual(scope.traceFilters)
-      expect(body.query.bool.filter.at(-1)).toEqual(projectModeMainAgentConversationFilter())
-      active++
-      peak = Math.max(peak, active)
-      await new Promise((resolve) => setTimeout(resolve, 1))
-      active--
-      return result([])
+      return result(
+        batch.includes("p400") ? [{ key: "p400", generated_lines: { value: 900 } }] : []
+      )
     })
-    const metrics = await fetchProjectAttentionRanking(scope, "vibecodingShare", query)
-    expect(metrics.size).toBe(10_001)
-    expect(idRequests).toBe(11)
-    expect(metricRequests).toBe(51)
-    expect(peak).toBe(2)
-    expect(metrics.get("p10000")).toBeNull()
+    const metrics = await fetchProjectAttentionRanking(scope, "generatedLines", query)
+    expect(metrics.size).toBe(401)
+    expect(metrics.get("p400")).toBe(900)
+    expect(metrics.get("p0")).toBe(0)
+    expect(query).toHaveBeenCalledTimes(4)
+    const conversation = buildProjectAttentionMetricQuery(scope, ["p0"], "conversationCount")
+    expect(JSON.stringify(conversation)).not.toMatch(
+      /by_feature|by_node|known_details|sb_vibecoding/
+    )
   })
 
   it("uses attributed main-Agent conversations for VibeCoding share, preserving unknown projects", async () => {

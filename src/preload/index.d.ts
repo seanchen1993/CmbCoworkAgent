@@ -908,7 +908,7 @@ interface DashboardProjectModeData {
   tools: DashboardProjectModeToolUsage
   analytics: DashboardProjectModeAnalytics
   projectCounts: DashboardProjectModeProjectCounts
-  projectPage: DashboardProjectModeProjectPageData
+  projectPage?: DashboardProjectModeProjectPageData
   projects: DashboardProjectModeProject[]
   /**
    * 「仅精益项目」开关下精益项目 id 集被截断、遥测汇总可能不完整。开关关闭时恒为 false。
@@ -2695,7 +2695,10 @@ interface CustomAPI {
     projectMode: (
       range: { from: string; to: string },
       granularity: "day" | "week" | "month" | "custom",
-      opts?: DashboardProjectModeFilterOptions
+      opts?: DashboardProjectModeFilterOptions & {
+        refreshProjects?: boolean
+        skipProjectList?: boolean
+      }
     ) => Promise<{ success: boolean; data?: DashboardProjectModeData; error?: string }>
     projectModeCodeStats: (
       range: { from: string; to: string },
@@ -2762,17 +2765,18 @@ interface CustomAPI {
     ) => Promise<{ success: boolean; data?: DashboardProjectModeExportData; error?: string }>
     projectModeTraces: (
       projectId: string,
-      range: { from: string; to: string },
+      range: { from: string; to: string } | null,
       options?: DashboardProjectModeTracesOptions
     ) => Promise<{ success: boolean; data?: DashboardProjectModeTracesData; error?: string }>
     projectModeFeatureNodes: (
       projectId: string,
       featureSlug: string,
-      range: { from: string; to: string }
+      range: { from: string; to: string } | null,
+      opts?: { upperOrgLv1?: string | string[] | null }
     ) => Promise<{ success: boolean; data?: DashboardProjectModeFeatureNode[]; error?: string }>
     projectModeOperationalDetails: (
       scope: { projectId: string; featureSlug?: string; nodeName?: string },
-      range: { from: string; to: string },
+      range: { from: string; to: string } | null,
       opts?: { upperOrgLv1?: string | string[] | null }
     ) => Promise<{
       success: boolean
@@ -2781,7 +2785,7 @@ interface CustomAPI {
     }>
     projectModeStageAnalysis: (
       projectId: string,
-      range: { from: string; to: string },
+      range: { from: string; to: string } | null,
       opts?: { upperOrgLv1?: string | string[] | null }
     ) => Promise<{
       success: boolean
@@ -2795,7 +2799,7 @@ interface CustomAPI {
     projectModeFeatureCommits: (
       projectId: string,
       featureSlug: string,
-      range: { from: string; to: string },
+      range: { from: string; to: string } | null,
       options?: DashboardCommitDetailsOptions
     ) => Promise<{
       success: boolean
@@ -2810,7 +2814,7 @@ interface CustomAPI {
     }>
     projectModeProjectCommits: (
       projectId: string,
-      range: { from: string; to: string },
+      range: { from: string; to: string } | null,
       options?: DashboardCommitDetailsOptions
     ) => Promise<{
       success: boolean

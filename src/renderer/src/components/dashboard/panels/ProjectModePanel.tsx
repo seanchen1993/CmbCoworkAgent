@@ -1079,7 +1079,7 @@ function RunCostPair({
           className="inline-flex items-center gap-1.5 whitespace-nowrap text-[10px] text-muted-foreground"
           title={
             incomplete
-              ? `${label}：所选时间范围内包含没有该统计字段的历史会话，这里显示的是下限`
+              ? `${label}：项目累计包含没有该统计字段的历史会话，这里显示的是下限`
               : undefined
           }
         >
@@ -1288,8 +1288,8 @@ function FeatureStageBreakdown({
   const [nodes, setNodes] = useState<DashboardProjectModeFeatureNode[] | null>(null)
   const [error, setError] = useState<string | null>(null)
 
-  // 展开时按当前面板时间范围拉取；range（→ loadNodes）变化且仍展开时自动重拉，
-  // 与插件聚合的 AdapterStageBreakdown 同款，保证刷新/改日期后阶段细分同步更新。
+  // 展开时按项目累计懒加载；室筛选变化且仍展开时自动重拉，
+  // 与插件聚合的 AdapterStageBreakdown 同款，在筛选变化后更新阶段细分。
   useEffect(() => {
     if (!open) return
     let cancelled = false
@@ -1516,7 +1516,7 @@ function ProjectRow({
                     <Badge
                       variant="outline"
                       className="shrink-0 border-primary/40 bg-primary/10 px-1.5 py-0 text-[10px] font-medium text-primary normal-case tracking-normal"
-                      title="该项目至少开启过一次托管运行。这是终身标记，不受所选时间范围影响，所以可能标签亮着而「托管运行次数」为 0"
+                      title="该项目至少开启过一次托管运行。项目累计统计托管运行情况"
                     >
                       托管运行
                     </Badge>
@@ -2024,7 +2024,7 @@ function ProjectListSection({
   const [departmentQuery, setDepartmentQuery] = useState("")
   const [adapterName, setAdapterName] = useState("")
   const [expandedId, setExpandedId] = useState<string | null>(null)
-  // 阶段耗时弹窗：懒加载，每次打开重新拉（时间范围/室筛选变了结果就该变）。
+  // 阶段耗时弹窗：懒加载，每次打开重新拉（室筛选变化后应重新拉取）。
   const [stageAnalysisProject, setStageAnalysisProject] =
     useState<DashboardProjectModeProject | null>(null)
   const [stageAnalysis, setStageAnalysis] = useState<DashboardProjectModeStageAnalysis | null>(null)
@@ -2255,10 +2255,8 @@ function ProjectListSection({
         <>
           <h2 className="mb-1 text-sm font-semibold text-foreground">项目列表</h2>
           <p className="mb-3 text-[11px] leading-relaxed text-muted-foreground">
-            项目、插件、项目状态、特性数为当前状态；对话数、DEV 阶段轮次数、DEV
-            关联特性数、原始生成行数、提交、总量两口径采纳率，以及 Harness / VibeCoding
-            流程采纳率与采纳行数对比、系统约束读取与运行时 Hook
-            按所选时间范围统计；展开后可查看技能、各特性采纳明细与关联 Commit。
+            列表展示项目累计数据，不受顶部时间范围限制；“仅本期新建”只筛选项目名单。
+            展开后可查看技能、特性与阶段明细，以及关联提交。
           </p>
         </>
       )}
@@ -2336,9 +2334,11 @@ function ProjectListSection({
             </SelectContent>
           </Select>
           <InfoHint
-            hint={attentionSort
-              ? PROJECT_ATTENTION_SORTS.find((item) => item.key === attentionSort)?.hint
-              : "按所选时间范围的指标对全部匹配项目排序，帮助定位需要关注的项目；缺少统计数据的项目排在末尾。"}
+            hint={
+              attentionSort
+                ? PROJECT_ATTENTION_SORTS.find((item) => item.key === attentionSort)?.hint
+                : "按项目累计指标对全部匹配项目排序，帮助定位需要关注的项目；缺少统计数据的项目排在末尾。"
+            }
           />
         </div>
         <div className="ml-auto flex shrink-0 items-center gap-2">
@@ -2435,7 +2435,7 @@ function ProjectListSection({
                 order={sortOrder}
                 enabled={metricSortAllowed}
                 onSort={cycleSort}
-                hint="所选时间范围内，仅统计主动触发的主 Agent 会话；不包含定时任务、心跳等后台触发，也不包含子 Agent 会话。"
+                hint="项目累计，仅统计主动触发的主 Agent 会话；不包含定时任务、心跳等后台触发，也不包含子 Agent 会话。"
               />
               {showSuspectedTechnicalDetailMetric ? (
                 <th className="whitespace-nowrap px-3 py-2 text-right font-medium">
@@ -2458,7 +2458,7 @@ function ProjectListSection({
               <th className="px-3 py-2 text-right font-medium">总量口径采纳率</th>
               <th
                 className="whitespace-nowrap px-3 py-2 text-right font-medium"
-                title="所选时间范围内的 DEV 阶段轮次数，以及这些轮次关联的去重特性数；未关联特性的 DEV 轮次仅计入轮次数。与「对话数」同口径，仅统计主动触发的主 Agent 轮次"
+                title="项目累计的 DEV 阶段轮次数，以及这些轮次关联的去重特性数；未关联特性的 DEV 轮次仅计入轮次数。与「对话数」同口径，仅统计主动触发的主 Agent 轮次"
               >
                 <div>DEV阶段轮次数</div>
                 <div>DEV关联特性数</div>
@@ -2477,25 +2477,25 @@ function ProjectListSection({
               </th>
               <th
                 className="whitespace-nowrap px-3 py-2 text-right font-medium"
-                title="所选时间范围内，插件系统约束文件的有效读取次数与项目模式运行时 Hook 触发次数"
+                title="项目累计，插件系统约束文件的有效读取次数与项目模式运行时 Hook 触发次数"
               >
                 系统约束 / 运行时 Hook
               </th>
               <th
                 className="whitespace-nowrap px-3 py-2 text-right font-medium"
-                title="所选时间范围内开启的托管运行次数。项目名旁的「托管运行」标签是终身标记，不受时间范围影响，所以可能标签亮着而这里是 0"
+                title="项目累计开启的托管运行次数"
               >
                 托管运行次数
               </th>
               <th
                 className="whitespace-nowrap px-3 py-2 text-right font-medium"
-                title="所选时间范围内，该项目所有 trace 的工具与模型调用总次数，包含 Team、Workflow 等子 Agent 及后台任务。主、子 Agent 各统计自身调用。"
+                title="项目累计，该项目所有 trace 的工具与模型调用总次数，包含 Team、Workflow 等子 Agent 及后台任务。主、子 Agent 各统计自身调用。"
               >
                 工具 / 模型调用
               </th>
               <th
                 className="whitespace-nowrap px-3 py-2 text-right font-medium"
-                title="所选时间范围内，该项目所有主、子 Agent 及后台任务消耗的 Token。输入与输出分开统计，两者之和小于总量——差额是缓存读取与缓存创建。"
+                title="项目累计，该项目所有主、子 Agent 及后台任务消耗的 Token。输入与输出分别展示。"
               >
                 Token 输入 / 输出
               </th>
@@ -3313,6 +3313,7 @@ function AdapterProjectsDialogBody({
 export function ProjectModePanel({
   data,
   loading,
+  projectListLoading = loading,
   error,
   codeSource,
   codeStatsOverride,
@@ -3339,6 +3340,7 @@ export function ProjectModePanel({
 }: {
   data: DashboardProjectModeData | null
   loading: boolean
+  projectListLoading?: boolean
   error: string | null
   /** 「生产效能代码指标」当前选中的 source（null = 全部来源，用 data 自带口径）。 */
   codeSource: string | null
@@ -3460,8 +3462,9 @@ export function ProjectModePanel({
         )}
         <p className="mb-3 text-[11px] leading-relaxed text-muted-foreground">
           <span className="font-medium text-foreground">项目总数 / 特性总数</span>{" "}
-          为当前状态（项目快照实时统计，不随时间范围变化）；其余指标按
-          <span className="font-medium text-foreground">所选时间范围</span>统计。
+          为当前状态；汇总指标按
+          <span className="font-medium text-foreground">所选时间范围</span>
+          统计，项目列表展示累计数据。
         </p>
         <div className="grid grid-cols-2 gap-3 content-start md:grid-cols-3 xl:grid-cols-6">
           <StatCard
@@ -3707,7 +3710,7 @@ export function ProjectModePanel({
         adapterOptions={adapterOptions}
         pageLoading={projectPageLoading}
         pageError={projectPageError}
-        loading={loading}
+        loading={projectListLoading}
         onPageChange={onProjectPageChange}
         onOpenTraces={onOpenTraces}
         onOpenFeatureCommits={onOpenFeatureCommits}
