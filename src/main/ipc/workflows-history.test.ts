@@ -20,6 +20,7 @@ vi.mock("../db", () => ({
   getThreadCore: () => ({ metadata: JSON.stringify({ workspacePath: state.workspacePath }) })
 }))
 vi.mock("../agent/pending-notification-scheduler", () => ({ pendingNotificationScheduler: {} }))
+vi.mock("../harness-board/auto-mode-controller", () => ({ handleAutoModeAgentCancelled: vi.fn() }))
 vi.mock("../services/git-worktree", () => ({ identifyRepository: async () => null }))
 vi.mock("../agent/workflow/run-manager", () => ({
   workflowRunManager: {
