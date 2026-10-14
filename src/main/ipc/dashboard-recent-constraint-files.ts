@@ -78,7 +78,7 @@ export function buildRecentConstraintFileQuery(
   after?: JsonRecord
 ): JsonRecord {
   const window = {
-    gte: new Date(now.getTime() - 14 * DAY_MS).toISOString(),
+    gte: new Date(now.getTime() - 30 * DAY_MS).toISOString(),
     lte: now.toISOString()
   }
   const time = fields.lastReadAt

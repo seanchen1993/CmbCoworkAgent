@@ -83,7 +83,7 @@ describe("existing constraint-field compatibility", () => {
 })
 
 describe("recent constraint queries", () => {
-  it("fixes a rolling 14-day window, applies permissions before aggregation and falls back only for missing lastReadAt", () => {
+  it("fixes a rolling 30-day window, applies permissions before aggregation and falls back only for missing lastReadAt", () => {
     const query = buildRecentConstraintFileQuery(fields, [org], now)
     expect(query).toMatchObject({
       size: 0,
@@ -100,7 +100,7 @@ describe("recent constraint queries", () => {
                   {
                     range: {
                       "properties.lastReadAt": {
-                        gte: "2026-10-01T04:00:00.000Z",
+                        gte: "2026-09-15T04:00:00.000Z",
                         lte: now.toISOString()
                       }
                     }
@@ -111,7 +111,7 @@ describe("recent constraint queries", () => {
                       filter: [
                         {
                           range: {
-                            eventTime: { gte: "2026-10-01T04:00:00.000Z", lte: now.toISOString() }
+                            eventTime: { gte: "2026-09-15T04:00:00.000Z", lte: now.toISOString() }
                           }
                         }
                       ]

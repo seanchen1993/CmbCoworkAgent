@@ -1,4 +1,4 @@
-import type { ComponentType } from "react"
+import type { ComponentType, ReactNode } from "react"
 import {
   BookOpen,
   Download,
@@ -46,18 +46,18 @@ function StatCard({
   hint
 }: {
   label: string
-  value: string
+  value: ReactNode
   sub?: string
   icon: ComponentType<{ className?: string }>
   color: string
-  hint?: string
+  hint?: ReactNode
 }): React.JSX.Element {
   return (
     <div className="flex items-center gap-3 rounded-xl border border-border bg-card px-4 py-4">
       <div className={`flex size-10 shrink-0 items-center justify-center rounded-lg ${color}`}>
         <Icon className="size-5 text-white" />
       </div>
-      <div className="min-w-0">
+      <div className="min-w-0 flex-1">
         <div className="flex items-center gap-1 text-[11px] text-muted-foreground">
           <span>{label}</span>
           {hint && <InfoHint content={hint} />}
@@ -221,14 +221,14 @@ export function KnowledgeOverviewPanel({
       <section className="space-y-3">
         <div className="flex items-center gap-1.5 text-sm font-semibold">
           项目系统约束阅读情况
-          <InfoHint content="项目数和加载情况按当前项目状态统计；读取项目数和次数按所选日期统计；近期活跃文件固定统计近14天。" />
+          <InfoHint content="项目数和加载情况按当前项目状态统计；读取项目数和次数按所选日期统计。" />
         </div>
         {projectsError && (
           <div role="alert" className="text-xs text-destructive">
             {projectsError}
           </div>
         )}
-        <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-5">
+        <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-4">
           <StatCard
             label="项目总数"
             value={number(projects?.projectCount)}
@@ -260,28 +260,12 @@ export function KnowledgeOverviewPanel({
             color="bg-violet-600"
             hint="所选日期内成功读取系统约束的次数。"
           />
-          <StatCard
-            label="近期活跃读取约束文件数"
-            value={
-              recentConstraintFilesLoading || recentConstraintFilesError || !recentConstraintFiles
-                ? "—"
-                : `${recentConstraintFiles.complete ? "" : "≥"}${number(recentConstraintFiles.fileCount)}`
-            }
-            sub={
-              recentConstraintFilesLoading
-                ? "加载中…"
-                : (recentConstraintFilesError ?? "个 · 近14天")
-            }
-            icon={FileText}
-            color="bg-amber-500"
-            hint={`按近14天有效读取记录去重统计，同一插件的同一文件只计一次；不随日期筛选变化。${recentConstraintFiles && !recentConstraintFiles.complete ? "部分旧记录信息不完整，显示已确认的文件数。" : ""}`}
-          />
         </div>
       </section>
       <section className="space-y-3">
         <div className="text-sm font-semibold">知识沉淀运行情况</div>
         <div className="text-[11px] text-muted-foreground">
-          知识数量及分布为累计数据，不受日期筛选影响；技能修改采纳率按所选日期统计。
+          知识总量及分布为累计数据，活跃指标统计近30天，不受日期筛选影响；技能修改采纳率按所选日期统计。
         </div>
         <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-4">
           <StatCard
@@ -300,10 +284,40 @@ export function KnowledgeOverviewPanel({
           />
           <StatCard
             label="活跃知识沉淀数目"
-            value={number(totals?.activeNum)}
-            sub={statSub ?? `活跃率 · ${percent(ratio(totals?.activeNum, totals?.totalNum))}`}
+            value={
+              <div className="flex items-baseline gap-4">
+                <span className="whitespace-nowrap">
+                  {number(totals?.activeNum)}
+                  <span className="ml-1 text-[10px] font-normal text-muted-foreground">更新</span>
+                </span>
+                <span className="whitespace-nowrap">
+                  {recentConstraintFilesLoading ||
+                  recentConstraintFilesError ||
+                  !recentConstraintFiles
+                    ? "—"
+                    : `${recentConstraintFiles.complete ? "" : "≥"}${number(recentConstraintFiles.fileCount)}`}
+                  <span className="ml-1 text-[10px] font-normal text-muted-foreground">读取</span>
+                </span>
+              </div>
+            }
+            sub={
+              statSub ??
+              (recentConstraintFilesLoading
+                ? "读取加载中…"
+                : (recentConstraintFilesError ??
+                  `近30天 · 更新占比 ${percent(ratio(totals?.activeNum, totals?.totalNum))}`))
+            }
             icon={Zap}
             color="bg-emerald-500"
+            hint={
+              <div className="space-y-1">
+                <p>近30天内，更新数表示有更新的知识沉淀，读取数表示被有效读取过的知识沉淀。</p>
+                <p>读取数按插件和文件去重，两个指标均不受日期筛选影响。</p>
+                {recentConstraintFiles && !recentConstraintFiles.complete && (
+                  <p>部分记录信息不完整，读取数显示已确认的数量。</p>
+                )}
+              </div>
+            }
           />
           <StatCard
             label="技能修改采纳率"
