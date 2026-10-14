@@ -91,7 +91,7 @@ describe("agent runtime settings integration", () => {
     expect(runtimeHandlers.match(/toolStrategy: getAgentToolStrategy\(\)/g)).toHaveLength(4)
     expect(preload).toContain("setAgentToolStrategy: (value: AgentToolStrategy)")
     expect(preloadTypes).toContain("setAgentToolStrategy: (value: AgentToolStrategy)")
-    expect(generalPanel).toContain("当前运行不热切换")
+    expect(generalPanel).toContain("下次运行生效，当前任务不受影响")
     expect(generalPanel.indexOf("await window.electron.setAgentToolStrategy(value)")).toBeLessThan(
       generalPanel.indexOf("setToolStrategy(settings.toolStrategy)")
     )

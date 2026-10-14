@@ -11,6 +11,7 @@ import { getOpenworkDir } from "../storage"
 import type { Thread } from "../types"
 import { getDefaultModel } from "../ipc/models"
 import { resolveRecentWorkspacePath } from "../ipc/recent-workspace"
+import { validateWorkspaceDirectory } from "./workspace-validation"
 
 const settingsStore = new Store({
   name: "settings",
@@ -48,6 +49,12 @@ export async function createThreadService(
     if (lastWorkspacePath) {
       nextMetadata.workspacePath = lastWorkspacePath
     }
+  }
+
+  // An explicit path must not bypass validation or be persisted as a broken session.
+  // null/undefined retain the existing workspace-less thread creation behavior.
+  if (nextMetadata.workspacePath !== null && nextMetadata.workspacePath !== undefined) {
+    await validateWorkspaceDirectory(nextMetadata.workspacePath)
   }
 
   let harnessContext: Awaited<ReturnType<typeof buildHarnessFeatureAgentContext>> = null

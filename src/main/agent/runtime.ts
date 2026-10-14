@@ -1,4 +1,5 @@
 /* eslint-disable @typescript-eslint/no-unused-vars */
+import { validateWorkspaceDirectory } from "../services/workspace-validation"
 // Runtime: agent lifecycle and middleware orchestration
 import {
   createFilesystemMiddleware,
@@ -4679,6 +4680,10 @@ export interface RuntimeInteractionWaitHooks {
 export type AgentRuntime = ReturnType<typeof createAgent>
 
 export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Promise<DeepAgent> {
+  // Persisted sessions may retain directories from a different machine or deleted workspaces.
+  await validateWorkspaceDirectory(options.workspacePath)
+  options.abortSignal?.throwIfAborted()
+
   // Snapshot once per runtime. Nested runtimes inherit this preference, NOT the
   // parent's role-filtered effective value. Rebuilt top-level runtimes read anew.
   const toolStrategy = normalizeAgentToolStrategy(options.toolStrategy ?? getAgentToolStrategy())
