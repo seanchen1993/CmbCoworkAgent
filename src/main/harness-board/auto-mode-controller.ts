@@ -7,6 +7,7 @@ import { getAllThreadSummaries, getThread } from "../db"
 import type { AgentRunDelivery } from "../agent/agent-run-service"
 import type { AppDecisionResult } from "../../shared/app-notifications"
 import { hasActiveTopLevelAgentRun } from "../agent/agent-run-service"
+import { workflowRunManager } from "../agent/workflow/run-manager"
 import { emitAppAttention } from "../app-attention-events"
 import { AsyncKeyedLock } from "../ipc/async-keyed-lock"
 import { managedBizRetryService } from "./biz-retry-service"
@@ -585,6 +586,21 @@ async function inspectAndLaunch(
 ): Promise<void> {
   if (isManagedRunStopRequested(run)) return
   const feature = await inspectHarnessManagedFeatureStatus(run.projectId, run.featureId)
+  if (isManagedRunStopRequested(run)) return
+  if (
+    sourceEvent.type === "managed_agent_turn_ended" &&
+    run.currentSession &&
+    (await workflowRunManager.isBusyForThreadAsync(run.currentSession.threadId, run.workspacePath))
+  ) {
+    console.info(
+      "[ManagedRun] Workflow became busy during feature inspection; deferring evaluation:",
+      {
+        threadId: run.currentSession.threadId,
+        runId: run.runId
+      }
+    )
+    return
+  }
   if (isManagedRunStopRequested(run)) return
   const evaluation = resolveManagedRunDecision({
     run,
@@ -1326,6 +1342,18 @@ export async function handleAutoModeAgentTurnEnd(input: AutoModeAgentTurnEndInpu
         runId,
         workflowRunIds: input.executionFacts?.workflowLaunchedRunIds
       })
+      return
+    }
+    if (
+      await workflowRunManager.isBusyForThreadAsync(input.threadId, record.snapshot.workspacePath)
+    ) {
+      console.info(
+        "[ManagedRun] Workflow is running or awaiting result delivery; deferring evaluation:",
+        {
+          threadId: input.threadId,
+          runId
+        }
+      )
       return
     }
     if (input.outcome === "error") {

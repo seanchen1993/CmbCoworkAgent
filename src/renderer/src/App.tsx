@@ -10,6 +10,8 @@ import {
   lazy,
   Suspense
 } from "react"
+import { PageEntryGuide } from "@/components/guides/PageEntryGuide"
+import projectModeGuideImage from "@/assets/guides/feature-create-guide-v5.png"
 import {
   Briefcase,
   Eye,
@@ -1440,6 +1442,15 @@ function App(): React.JSX.Element {
                   >
                     <HarnessBoardView
                       onActiveSessionThreadChange={handleHarnessActiveSessionThreadChange}
+                    />
+                    <PageEntryGuide
+                      active={!showCustomizeView}
+                      guideId="project-mode-getting-started"
+                      revision={1}
+                      maxShowCount={3}
+                      title="项目模式使用引导"
+                      imageSrc={projectModeGuideImage}
+                      imageAlt="项目模式操作引导：配置发布单元与仓库、创建特性时选择发布单元、配置会话工作区"
                     />
                   </Suspense>
                 </main>
