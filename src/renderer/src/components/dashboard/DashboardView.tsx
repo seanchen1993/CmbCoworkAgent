@@ -2774,6 +2774,7 @@ export function DashboardView(): React.JSX.Element {
     skillEval,
     projectMode,
     projectModeLoading,
+    projectListLoading,
     projectModeError,
     efficiency,
     efficiencyPluginFilter,
@@ -3820,7 +3821,8 @@ export function DashboardView(): React.JSX.Element {
         granularity,
         selectedOrgLv1List,
         fromLeanProjectsOnly,
-        createdInRangeProjectsOnly
+        createdInRangeProjectsOnly,
+        true
       )
     }
     if (activeMainTab === "knowledge") {
@@ -3876,19 +3878,20 @@ export function DashboardView(): React.JSX.Element {
       const res = await window.api.dashboard.projectModeFeatureNodes(
         project.projectId,
         feature.slug,
-        range
+        null,
+        { upperOrgLv1: selectedOrgLv1List }
       )
       if (!res.success) throw new Error(res.error ?? "获取阶段数据失败")
       return Array.isArray(res.data) ? (res.data as DashboardProjectModeFeatureNode[]) : []
     },
-    [range]
+    [selectedOrgLv1List]
   )
 
   const loadProjectOperationalDetails = useCallback(
     async (
       scope: DashboardProjectModeOperationalDetailScope
     ): Promise<DashboardProjectModeOperationalDetails> => {
-      const res = await window.api.dashboard.projectModeOperationalDetails(scope, range, {
+      const res = await window.api.dashboard.projectModeOperationalDetails(scope, null, {
         upperOrgLv1: selectedOrgLv1List
       })
       if (!res.success || !res.data) {
@@ -3896,13 +3899,13 @@ export function DashboardView(): React.JSX.Element {
       }
       return res.data as DashboardProjectModeOperationalDetails
     },
-    [range, selectedOrgLv1List]
+    [selectedOrgLv1List]
   )
 
-  // 单项目的阶段耗时分析，跟随面板当前时间范围与室筛选。
+  // 单项目的阶段耗时分析，按项目累计，并应用室筛选。
   const loadProjectStageAnalysis = useCallback(
     async (projectId: string): Promise<DashboardProjectModeStageAnalysis> => {
-      const res = await window.api.dashboard.projectModeStageAnalysis(projectId, range, {
+      const res = await window.api.dashboard.projectModeStageAnalysis(projectId, null, {
         upperOrgLv1: selectedOrgLv1List
       })
       if (!res.success || !res.data) {
@@ -3910,7 +3913,7 @@ export function DashboardView(): React.JSX.Element {
       }
       return res.data as DashboardProjectModeStageAnalysis
     },
-    [range, selectedOrgLv1List]
+    [selectedOrgLv1List]
   )
 
   // 插件聚合的按阶段细分，跟随面板当前时间范围（range 变化即得到新回调，展开中的细分会重拉）。
@@ -3950,7 +3953,7 @@ export function DashboardView(): React.JSX.Element {
       setProjectTracesLoading(true)
       setProjectTracesError(null)
       try {
-        const res = await window.api.dashboard.projectModeTraces(currentProject.projectId, range, {
+        const res = await window.api.dashboard.projectModeTraces(currentProject.projectId, null, {
           tracePage: projectTracePage,
           tracePageSize: PROJECT_TRACE_PAGE_SIZE,
           mode: projectTraceViewMode,
@@ -3998,8 +4001,7 @@ export function DashboardView(): React.JSX.Element {
     projectTraceStageBucket,
     projectTracePage,
     projectTraceProject,
-    projectTraceViewMode,
-    range
+    projectTraceViewMode
   ])
 
   useEffect(() => {
@@ -4585,12 +4587,12 @@ export function DashboardView(): React.JSX.Element {
           ? await window.api.dashboard.projectModeFeatureCommits(
               scope.projectId,
               scope.featureSlug,
-              range,
+              null,
               commitOptions
             )
           : await window.api.dashboard.projectModeProjectCommits(
               scope.projectId,
-              range,
+              null,
               commitOptions
             )
         if (!result.success) throw new Error(result.error ?? "获取 Commit 明细失败")
@@ -4601,7 +4603,7 @@ export function DashboardView(): React.JSX.Element {
         setFeatureCommitLoading(false)
       }
     },
-    [featureCommitDeptFilter, featureCommitUserFilter, range, selectedOrgLv1List]
+    [featureCommitDeptFilter, featureCommitUserFilter, selectedOrgLv1List]
   )
 
   const handleProjectOpenFeatureCommits = useCallback(
@@ -5399,6 +5401,7 @@ export function DashboardView(): React.JSX.Element {
               <ProjectModePanel
                 data={projectMode}
                 loading={projectModeLoading}
+                projectListLoading={projectListLoading}
                 error={projectModeError}
                 codeSource={projectModeCodeSource}
                 codeStatsOverride={projectModeCodeStatsOverride}

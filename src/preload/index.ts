@@ -3923,7 +3923,13 @@ const api = {
     projectMode: (
       range: { from: string; to: string },
       granularity: "day" | "week" | "month" | "custom",
-      opts?: { upperOrgLv1?: string | string[] | null }
+      opts?: {
+        upperOrgLv1?: string | string[] | null
+        fromLeanOnly?: boolean | null
+        createdInRangeOnly?: boolean | null
+        refreshProjects?: boolean
+        skipProjectList?: boolean
+      }
     ): Promise<{ success: boolean; data?: unknown; error?: string }> =>
       ipcRenderer.invoke("dashboard:projectMode", range, granularity, opts),
     projectModeCodeStats: (
@@ -4015,7 +4021,7 @@ const api = {
       ipcRenderer.invoke("dashboard:projectModeExportData", range, opts),
     projectModeTraces: (
       projectId: string,
-      range: { from: string; to: string },
+      range: { from: string; to: string } | null,
       options?: {
         limit?: number
         page?: number
@@ -4034,18 +4040,19 @@ const api = {
     projectModeFeatureNodes: (
       projectId: string,
       featureSlug: string,
-      range: { from: string; to: string }
+      range: { from: string; to: string } | null,
+      opts?: { upperOrgLv1?: string | string[] | null }
     ): Promise<{ success: boolean; data?: unknown; error?: string }> =>
-      ipcRenderer.invoke("dashboard:projectModeFeatureNodes", projectId, featureSlug, range),
+      ipcRenderer.invoke("dashboard:projectModeFeatureNodes", projectId, featureSlug, range, opts),
     projectModeOperationalDetails: (
       scope: { projectId: string; featureSlug?: string; nodeName?: string },
-      range: { from: string; to: string },
+      range: { from: string; to: string } | null,
       opts?: { upperOrgLv1?: string | string[] | null }
     ): Promise<{ success: boolean; data?: unknown; error?: string }> =>
       ipcRenderer.invoke("dashboard:projectModeOperationalDetails", scope, range, opts),
     projectModeStageAnalysis: (
       projectId: string,
-      range: { from: string; to: string },
+      range: { from: string; to: string } | null,
       opts?: { upperOrgLv1?: string | string[] | null }
     ): Promise<{ success: boolean; data?: unknown; error?: string }> =>
       ipcRenderer.invoke("dashboard:projectModeStageAnalysis", projectId, range, opts),
@@ -4057,7 +4064,7 @@ const api = {
     projectModeFeatureCommits: (
       projectId: string,
       featureSlug: string,
-      range: { from: string; to: string },
+      range: { from: string; to: string } | null,
       options?: {
         page?: number
         pageSize?: number
@@ -4076,7 +4083,7 @@ const api = {
       ),
     projectModeProjectCommits: (
       projectId: string,
-      range: { from: string; to: string },
+      range: { from: string; to: string } | null,
       options?: {
         page?: number
         pageSize?: number

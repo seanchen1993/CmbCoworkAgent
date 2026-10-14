@@ -8,11 +8,13 @@ import {
 } from "./dashboard-stage-buckets"
 import { normalizeCodeStatsFromContainer } from "./dashboard-code-stats"
 import { mapAwardBatches } from "./dashboard-awards-skill"
+import { ProjectModePageCache } from "./project-mode-page-cache"
 
 type JsonRecord = Record<string, unknown>
 type Query = (index: string, body: JsonRecord) => Promise<unknown>
 export const PROJECT_ATTENTION_ID_PAGE_SIZE = 1000
 export const PROJECT_ATTENTION_METRIC_BATCH_SIZE = 200
+export type ProjectMetricSortKey = ProjectAttentionSortKey | "conversationCount" | "generatedLines"
 
 function record(value: unknown): JsonRecord {
   return value && typeof value === "object" && !Array.isArray(value) ? (value as JsonRecord) : {}
@@ -87,8 +89,28 @@ async function matchingProjectIds(
 export function buildProjectAttentionMetricQuery(
   scope: ProjectAttentionRankingScope,
   ids: string[],
-  key: ProjectAttentionSortKey
+  key: ProjectMetricSortKey
 ): { index: string; body: JsonRecord } {
+  if (key === "generatedLines") {
+    return {
+      index: scope.eventIndex,
+      body: {
+        size: 0,
+        track_total_hits: false,
+        query: {
+          bool: {
+            filter: [...scope.codeGenFilters, { terms: { "properties.harnessProjectId": ids } }]
+          }
+        },
+        aggs: {
+          projects: {
+            terms: { field: "properties.harnessProjectId", size: ids.length },
+            aggs: { generated_lines: { sum: { field: "properties.lineCount" } } }
+          }
+        }
+      }
+    }
+  }
   if (key === "inclusiveAdoptionRate") {
     const project = { terms: { "properties.harnessProjectId": ids } }
     // These two existing aggregations preserve the list's adoption formula.
@@ -133,10 +155,12 @@ export function buildProjectAttentionMetricQuery(
   const inner =
     key === "vibecodingShare"
       ? stageBucketTraceAggs()
-      : {
-          known_details: { filter: { exists: { field: "suspectedTechnicalDetailSupplement" } } },
-          suspected_details: { filter: { term: { suspectedTechnicalDetailSupplement: true } } }
-        }
+      : key === "conversationCount"
+        ? {}
+        : {
+            known_details: { filter: { exists: { field: "suspectedTechnicalDetailSupplement" } } },
+            suspected_details: { filter: { term: { suspectedTechnicalDetailSupplement: true } } }
+          }
   return {
     index: scope.traceIndex,
     body: {
@@ -161,11 +185,13 @@ export function buildProjectAttentionMetricQuery(
   }
 }
 
-function metricValue(bucket: JsonRecord, key: ProjectAttentionSortKey): number | null {
+function metricValue(bucket: JsonRecord, key: ProjectMetricSortKey): number | null {
+  if (key === "generatedLines") return Number(record(bucket.generated_lines).value) || 0
   if (key === "inclusiveAdoptionRate") {
     return normalizeCodeStatsFromContainer(bucket).inclusiveAdoptionRate
   }
   const conversations = readMainAgentConversations(bucket)
+  if (key === "conversationCount") return Number(conversations.doc_count) || 0
   if (key === "suspectedTechnicalDetailConversationCount") {
     return Number(record(conversations.known_details).doc_count) > 0
       ? Number(record(conversations.suspected_details).doc_count)
@@ -179,11 +205,12 @@ function metricValue(bucket: JsonRecord, key: ProjectAttentionSortKey): number |
 /** One selected metric, 200 IDs per batch, at most two ES requests in flight. */
 export async function fetchProjectAttentionRanking(
   scope: ProjectAttentionRankingScope,
-  key: ProjectAttentionSortKey,
+  key: ProjectMetricSortKey,
   query: Query
 ): Promise<Map<string, number | null>> {
   const ids = await matchingProjectIds(scope, query)
-  const metrics = new Map<string, number | null>(ids.map((id) => [id, null]))
+  const empty = key === "conversationCount" || key === "generatedLines" ? 0 : null
+  const metrics = new Map<string, number | null>(ids.map((id) => [id, empty]))
   await mapAwardBatches(ids, PROJECT_ATTENTION_METRIC_BATCH_SIZE, async (batch) => {
     const request = buildProjectAttentionMetricQuery(scope, batch, key)
     const result = completeAggregation(await query(request.index, request.body), "projects")
@@ -201,25 +228,8 @@ export async function fetchProjectAttentionRanking(
 }
 
 /** Completed results only; scoped by permission filters, dates and chosen metric. */
-export class ProjectAttentionRankingCache {
-  private readonly entries = new Map<
-    string,
-    { expiresAt: number; metrics: Map<string, number | null> }
-  >()
-  get(key: string): Map<string, number | null> | undefined {
-    const entry = this.entries.get(key)
-    if (!entry || entry.expiresAt <= Date.now()) {
-      this.entries.delete(key)
-      return undefined
-    }
-    return entry.metrics
-  }
-  set(key: string, metrics: Map<string, number | null>): void {
-    this.entries.delete(key)
-    this.entries.set(key, { expiresAt: Date.now() + 30_000, metrics })
-    while (this.entries.size > 4) this.entries.delete(this.entries.keys().next().value!)
-  }
-  clear(): void {
-    this.entries.clear()
+export class ProjectAttentionRankingCache extends ProjectModePageCache<Map<string, number | null>> {
+  constructor() {
+    super(4)
   }
 }
