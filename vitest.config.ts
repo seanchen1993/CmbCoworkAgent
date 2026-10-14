@@ -30,6 +30,7 @@ export default defineConfig({
       "src/renderer/src/components/chat/chat-scroll-runtime-harness.test.ts",
       "src/renderer/src/components/chat/chat-scroll-navigator.test.ts",
       "src/renderer/src/components/chat/chat-search-overlay.test.ts",
+      "src/renderer/src/components/chat/reasoning-expansion-context.test.ts",
       "src/renderer/src/lib/chat-scroll-tail-change.test.ts",
       "src/renderer/src/lib/chat-thread-projection-cache.test.ts",
       "src/renderer/src/lib/app-catalog-cache.test.ts",

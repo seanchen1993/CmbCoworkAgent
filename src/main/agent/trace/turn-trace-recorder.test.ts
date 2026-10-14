@@ -156,6 +156,50 @@ describe("TurnTraceRecorder", () => {
     expect(result.modelName).toBe("deepseek-v4-flash")
   })
 
+  it("does not let a malformed tool call name into the trace as a tool", async () => {
+    const collector = tracer()
+    const recorder = new TurnTraceRecorder({ tracer: collector, userMessageId: "u1" })
+    // Verbatim from a usage ranking: a model emitted DSML-format tool calls the
+    // harness could not parse, and the raw text landed in the name field.
+    // Recorded as-is, it outranked the real tools — the dashboard filter
+    // excludes built-ins by exact name, so `read_file` was hidden while this was
+    // not.
+    recorder.onStreamChunk("values", {
+      messages: [
+        human("u1"),
+        ai("a1", "", {
+          tool_calls: [
+            {
+              id: "call-bad",
+              name: 'read_file</think> <|DSML|tool_calls> <|DSML|invoke name="ls',
+              args: { file_path: "src" }
+            }
+          ],
+          usage_metadata: USAGE
+        })
+      ]
+    })
+    const trace = await collector.finish("success")
+    const toolNodes = (trace.nodes ?? []).filter((node) => node.type === "tool")
+
+    expect(toolNodes).toHaveLength(1)
+    expect(toolNodes[0]?.name).toBe("unknown")
+    // Marked, not silently renamed: a model producing unparseable tool calls is
+    // worth being able to see once the ranking stops showing it.
+    expect(toolNodes[0]?.metadata?.malformedToolName).toBe(true)
+  })
+
+  it("keeps a real tool name unmarked", async () => {
+    const collector = tracer()
+    const recorder = new TurnTraceRecorder({ tracer: collector, userMessageId: "u1" })
+    recorder.onStreamChunk("values", turnSnapshot())
+    const trace = await collector.finish("success")
+    const toolNodes = (trace.nodes ?? []).filter((node) => node.type === "tool")
+
+    expect(toolNodes[0]?.name).toBe("ls")
+    expect(toolNodes[0]?.metadata?.malformedToolName).toBeUndefined()
+  })
+
   it("counts a model call once when the same snapshot arrives repeatedly", async () => {
     const collector = tracer()
     const recorder = new TurnTraceRecorder({ tracer: collector, userMessageId: "u1" })

@@ -25,6 +25,20 @@ const GIT_EXEC_MAX_BUFFER_BYTES = 20 * 1024 * 1024
 const GIT_CONTEXT_QUERY_TIMEOUT_MS = 10_000
 const AUTO_COMMIT_FEATURE_ENABLED = false
 
+/** A real person saw the confirmation dialog and declined it. */
+export const AUTO_COMMIT_USER_DECLINED_REASON = "用户取消了本次自动提交"
+
+/**
+ * "ask" mode with nobody to ask: a headless run (IM, scheduler, any managed
+ * transport) has no desktop window to parent the confirmation modal to. The
+ * changes stay uncommitted for later review — the same outcome as a decline,
+ * but nobody declined, so it must not read or report as a user cancellation.
+ * agent.ts keys its `cancelled` telemetry off AUTO_COMMIT_USER_DECLINED_REASON,
+ * so this wording deliberately shares no substring with it.
+ */
+export const AUTO_COMMIT_NO_CONFIRMER_REASON =
+  "自动提交设为「询问」，但本次运行没有可确认的桌面窗口，已跳过（改动保留待审阅）"
+
 const GIT_BASE_ENV: NodeJS.ProcessEnv = {
   ...process.env,
   GIT_OPTIONAL_LOCKS: "0",
@@ -1035,12 +1049,19 @@ async function maybeAutoCommitMultipleRepositories(params: {
   }
 
   if (settings.mode === "ask") {
-    const approved = await confirm?.(preview)
+    if (!confirm) {
+      return {
+        ...preview,
+        status: "skipped",
+        reasons: [AUTO_COMMIT_NO_CONFIRMER_REASON]
+      }
+    }
+    const approved = await confirm(preview)
     if (!approved) {
       return {
         ...preview,
         status: "skipped",
-        reasons: ["用户取消了本次自动提交"]
+        reasons: [AUTO_COMMIT_USER_DECLINED_REASON]
       }
     }
   }
@@ -1289,12 +1310,19 @@ export async function maybeAutoCommitAfterAgentRun({
       warnings
     }
     if (settings.mode === "ask") {
-      const approved = await confirm?.(preview)
+      if (!confirm) {
+        return {
+          ...preview,
+          status: "skipped",
+          reasons: [AUTO_COMMIT_NO_CONFIRMER_REASON]
+        }
+      }
+      const approved = await confirm(preview)
       if (!approved) {
         return {
           ...preview,
           status: "skipped",
-          reasons: ["用户取消了本次自动提交"]
+          reasons: [AUTO_COMMIT_USER_DECLINED_REASON]
         }
       }
     }

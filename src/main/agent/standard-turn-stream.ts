@@ -1,4 +1,5 @@
 import type { Message } from "../types"
+import { isPlausibleToolName } from "../../shared/tool-name"
 import { flushStrict, upsertThreadMessages } from "../db"
 import { StreamConverter, type SchedulerEvent } from "./stream-converter"
 import type { TraceCollector } from "./trace/collector"
@@ -128,6 +129,18 @@ export class StandardTurnStreamConsumer {
     await flushStrict()
   }
 
+  /**
+   * Records one tool name, refusing anything that could not be one.
+   *
+   * This summary is what a Stop hook is told the turn called, so a name the
+   * model malformed must not appear in it — the hook would be reasoning about a
+   * tool that does not exist. The malformed call is marked on the trace node
+   * instead, where it belongs; see recordToolCallTraceNode.
+   */
+  private observeToolName(name: string | undefined): void {
+    if (isPlausibleToolName(name)) this.toolNames.add(name)
+  }
+
   private observe(event: SchedulerEvent): void {
     // Tool nodes and their results are recorded by traceRecorder off the values
     // snapshots: a streamed delta can still carry `args: {}`, and the LLM node
@@ -135,11 +148,11 @@ export class StandardTurnStreamConsumer {
     // tool-name summary is collected here.
     if (event.type === "message-delta" && Array.isArray(event.toolCalls)) {
       for (const call of event.toolCalls as Array<{ name?: string }>) {
-        if (call.name) this.toolNames.add(call.name)
+        this.observeToolName(call.name)
       }
     }
     if (event.type === "tool-message") {
-      if (event.name) this.toolNames.add(event.name)
+      this.observeToolName(event.name)
       return
     }
     if (event.type !== "full-messages") return

@@ -241,7 +241,12 @@ export interface Message {
 }
 
 /** Internal write payload; readers always receive a complete reasoning snapshot. */
-export interface ThreadMessageWrite extends Message, TranscriptReasoningUpdate {}
+export interface ThreadMessageWrite extends Message, TranscriptReasoningUpdate {
+  /** Write-only authority for content; does not replace tool calls or priority. */
+  content_mode?: "delta" | "snapshot"
+  /** Write-only replacement for an explicitly complete tool-call list. */
+  tool_calls_mode?: "delta" | "snapshot"
+}
 
 export interface ThreadMessagesPageOptions {
   /**
@@ -670,7 +675,6 @@ export interface BuiltinRobotSettings {
   gatewayUrl: string | null
   remoteAccess: "inbox-only" | "inbox-and-features"
   remoteApprovalEnabled: boolean
-  waitingDesktopTtlMinutes: number
 }
 
 export type BuiltinRobotConnectionState = "connecting" | "online" | "offline" | "error"

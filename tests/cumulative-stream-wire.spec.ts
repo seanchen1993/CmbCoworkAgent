@@ -5,6 +5,11 @@ import { ElectronIPCTransport } from "../src/renderer/src/lib/electron-transport
 import { useAppStore } from "../src/renderer/src/lib/store"
 
 type SdkEvent = { event: string; data: unknown }
+const cumulativeChunkModes = {
+  content: "snapshot",
+  reasoning: "snapshot",
+  tool_args: "snapshot"
+} as const
 type TestableTransport = {
   convertToSDKEvents: (
     event: unknown,
@@ -80,7 +85,7 @@ function customPayloads(events: SdkEvent[], type: string): Array<Record<string, 
 }
 
 function testForegroundCumulativeWireProjection(): void {
-  const serializer = createStreamDataSerializer()
+  const serializer = createStreamDataSerializer({ messageChunkModes: cumulativeChunkModes })
   const transport = new ElectronIPCTransport()
   const emittedContent: string[] = []
   let finalReasoning = ""
@@ -140,7 +145,7 @@ function testDeltaRepeatsAndRewriteFallback(): void {
   }
   assert.equal(emitted.join(""), "ha!haha")
 
-  const snapshotSerializer = createStreamDataSerializer()
+  const snapshotSerializer = createStreamDataSerializer({ messageChunkModes: cumulativeChunkModes })
   const snapshotTransport = new ElectronIPCTransport()
   for (const content of ["stable-prefix", "stable-prefix-tail"]) {
     convert(
@@ -181,7 +186,7 @@ function testToolArgsDeltaCumulativeAndRollbackModes(): void {
   }
   assert.equal(deltaValue, "haha")
 
-  const snapshotSerializer = createStreamDataSerializer()
+  const snapshotSerializer = createStreamDataSerializer({ messageChunkModes: cumulativeChunkModes })
   const snapshotTransport = new ElectronIPCTransport()
   for (const args of ['{"value":"', '{"value":"old"}']) {
     convert(
@@ -268,7 +273,9 @@ function testToolArgsDeltaCumulativeAndRollbackModes(): void {
     "after-empty"
   )
 
-  const backgroundSerializer = createStreamDataSerializer()
+  const backgroundSerializer = createStreamDataSerializer({
+    messageChunkModes: cumulativeChunkModes
+  })
   const backgroundConverter = new StreamConverter("wire-tool-background-snapshot")
   const backgroundArgs = [
     '{"value":"',
@@ -299,10 +306,12 @@ function testToolArgsDeltaCumulativeAndRollbackModes(): void {
 }
 
 function testBackgroundAndFocusedWorkerProjection(): void {
-  const backgroundSerializer = createStreamDataSerializer()
+  const backgroundSerializer = createStreamDataSerializer({
+    messageChunkModes: cumulativeChunkModes
+  })
   const converter = new StreamConverter("cumulative-background")
-  const deltas: string[] = []
-  const reasoningDeltas: string[] = []
+  let backgroundContent = ""
+  let backgroundReasoning = ""
   let cumulative = ""
   let cumulativeReasoning = ""
   let cumulativeToolArgs = ""
@@ -328,16 +337,21 @@ function testBackgroundAndFocusedWorkerProjection(): void {
       })
     )
     for (const event of converter.processChunk("messages", serialized.data)) {
+      if (event.type === "custom" && event.data.type === "coordinator_ai_snapshot_message") {
+        const snapshot = event.data.assistantMessage as { content?: string; reasoning?: string }
+        if (snapshot.content !== undefined) backgroundContent = snapshot.content
+        if (snapshot.reasoning !== undefined) backgroundReasoning = snapshot.reasoning
+      }
       if (event.type !== "message-delta") continue
-      deltas.push(event.content)
-      if (event.reasoning) reasoningDeltas.push(event.reasoning)
+      backgroundContent += event.content
+      if (event.reasoning) backgroundReasoning += event.reasoning
       const calls = Array.isArray(event.toolCalls) ? event.toolCalls : []
       backgroundToolValue = (calls[0] as { args?: { payload?: unknown } } | undefined)?.args
         ?.payload
     }
   }
-  assert.equal(deltas.join(""), cumulative)
-  assert.equal(reasoningDeltas.join(""), cumulativeReasoning)
+  assert.equal(backgroundContent, cumulative)
+  assert.equal(backgroundReasoning, cumulativeReasoning)
   assert.equal(backgroundToolValue, "z".repeat(cumulativeToolArgs.length - 14))
 
   const workerThreadId = "wire-thread__worker__focused"
@@ -354,7 +368,7 @@ function testBackgroundAndFocusedWorkerProjection(): void {
     description: "verify cumulative wire"
   })
   try {
-    const workerSerializer = createStreamDataSerializer()
+    const workerSerializer = createStreamDataSerializer({ messageChunkModes: cumulativeChunkModes })
     const workerTransport = new ElectronIPCTransport()
     let workerCumulative = ""
     let workerReasoning = ""

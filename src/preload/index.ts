@@ -1,3 +1,8 @@
+import type {
+  AppNotification,
+  AppDecisionInput,
+  AppDecisionResult
+} from "../shared/app-notifications"
 import type { SubagentExportTarget } from "../shared/subagent-session-export"
 import { contextBridge, ipcRenderer, shell } from "electron"
 import { randomUUID } from "node:crypto"
@@ -154,9 +159,6 @@ import type {
   HarnessAdapterRegistryItem,
   HarnessDynamicWorkflowConfig,
   HarnessWatchRefChangedEvent,
-  HarnessHumanGateChangedEvent,
-  HarnessHumanGateDecisionInput,
-  HarnessHumanGateSnapshot,
   ManagedRunEventCursor,
   ManagedRunEventsPage,
   ManagedRunIdentity,
@@ -399,6 +401,9 @@ function createBrowserApi() {
     },
     setBounds: (bounds: BrowserBounds, visible?: boolean): Promise<BrowserState> => {
       return ipcRenderer.invoke("browser:setBounds", bounds, visible) as Promise<BrowserState>
+    },
+    setZoomFactor: (zoomFactor: number): Promise<BrowserState> => {
+      return ipcRenderer.invoke("browser:setZoomFactor", zoomFactor) as Promise<BrowserState>
     },
     navigate: (url: string, options?: BrowserNavigateOptions): Promise<BrowserState> => {
       return ipcRenderer.invoke("browser:navigate", url, options) as Promise<BrowserState>
@@ -1027,6 +1032,19 @@ const api = {
     },
     hydrate: (threadId: string): Promise<unknown> => {
       return ipcRenderer.invoke("workflow:hydrate", { threadId }) as Promise<unknown>
+    },
+    /** Holds off the automatic summary after the user presses Stop. */
+    suppressPendingNotification: (threadId: string, suppressed = true): Promise<void> => {
+      return ipcRenderer.invoke("agent:suppress-pending-notification", {
+        threadId,
+        suppressed
+      }) as Promise<void>
+    },
+    /** Asks the main process to consider a pending summary; it decides and runs it. */
+    requestPendingNotification: (threadId: string): Promise<void> => {
+      return ipcRenderer.invoke("agent:request-pending-notification", {
+        threadId
+      }) as Promise<void>
     },
     onWorkflowEvents: (threadId: string, callback: (payload: unknown) => void): (() => void) => {
       // Durable per-thread channel for background workflow runs. Unlike the
@@ -1829,6 +1847,7 @@ const api = {
       changedFiles?: string[]
       changedFilesTotal?: number
       omittedFileCount?: number
+      skippedDirs?: string[]
       totals: { additions: number; deletions: number; fileCount: number }
       hasPendingDiff: boolean
       hasPushableCommit: boolean
@@ -1856,6 +1875,7 @@ const api = {
         changedFiles?: string[]
         changedFilesTotal?: number
         omittedFileCount?: number
+        skippedDirs?: string[]
         totals: { additions: number; deletions: number; fileCount: number }
         hasPendingDiff: boolean
         hasPushableCommit: boolean
@@ -1926,6 +1946,7 @@ const api = {
       changedFiles?: string[]
       changedFilesTotal?: number
       omittedFileCount?: number
+      skippedDirs?: string[]
       totals: { additions: number; deletions: number; fileCount: number }
       hasPendingDiff: boolean
       suggestedCommitMessage?: string
@@ -1948,6 +1969,7 @@ const api = {
         changedFiles?: string[]
         changedFilesTotal?: number
         omittedFileCount?: number
+        skippedDirs?: string[]
         totals: { additions: number; deletions: number; fileCount: number }
         hasPendingDiff: boolean
         suggestedCommitMessage?: string
@@ -1992,6 +2014,29 @@ const api = {
           additions: number
           deletions: number
         }
+        error?: string
+      }>
+    },
+    addGitignoreEntry: (
+      threadId: string,
+      targetPath: string,
+      kind: "file" | "directory",
+      options?: { worktreePath?: string }
+    ): Promise<{
+      success: boolean
+      entry?: string
+      alreadyExists?: boolean
+      error?: string
+    }> => {
+      return ipcRenderer.invoke("workspace:addGitignoreEntry", {
+        threadId,
+        targetPath,
+        kind,
+        options
+      }) as Promise<{
+        success: boolean
+        entry?: string
+        alreadyExists?: boolean
         error?: string
       }>
     },
@@ -2891,6 +2936,8 @@ const api = {
     }
   },
   builtinRobot: {
+    cancelThread: (threadId: string): Promise<boolean> =>
+      ipcRenderer.invoke("builtinRobot:cancelThread", threadId),
     getStatus: (): Promise<BuiltinRobotStatus> =>
       ipcRenderer.invoke("builtinRobot:getStatus") as Promise<BuiltinRobotStatus>,
     getRemoteAccess: (): Promise<BuiltinRobotRemoteAccessOverview> =>
@@ -4275,6 +4322,16 @@ const api = {
     ): Promise<{ success: boolean; data?: unknown; error?: string }> =>
       ipcRenderer.invoke("adoption:commitLines", commitSha, genEventIds)
   },
+  appNotifications: {
+    list: (): Promise<AppNotification[]> => ipcRenderer.invoke("appNotifications:list"),
+    decide: (input: AppDecisionInput): Promise<AppDecisionResult> =>
+      ipcRenderer.invoke("appNotifications:decide", input),
+    onChanged: (callback: () => void): (() => void) => {
+      const handler = (): void => callback()
+      ipcRenderer.on("appNotifications:changed", handler)
+      return () => ipcRenderer.removeListener("appNotifications:changed", handler)
+    }
+  },
   harnessBoard: {
     onApiProjectChanged: (callback: (payload: { projectId: string }) => void): (() => void) => {
       const handler = (_event: unknown, payload: { projectId: string }): void => callback(payload)
@@ -4304,14 +4361,6 @@ const api = {
       ipcRenderer.invoke("harnessBoard:registry") as Promise<HarnessAdapterRegistryItem[]>,
     listProjects: (): Promise<HarnessProjectListItem[]> =>
       ipcRenderer.invoke("harnessBoard:listProjects") as Promise<HarnessProjectListItem[]>,
-    getHumanGateForThread: (threadId: string): Promise<HarnessHumanGateSnapshot | undefined> =>
-      ipcRenderer.invoke("harnessBoard:getHumanGateForThread", threadId) as Promise<
-        HarnessHumanGateSnapshot | undefined
-      >,
-    approveHumanGate: (input: HarnessHumanGateDecisionInput): Promise<boolean> =>
-      ipcRenderer.invoke("harnessBoard:approveHumanGate", input) as Promise<boolean>,
-    rejectHumanGate: (input: HarnessHumanGateDecisionInput): Promise<boolean> =>
-      ipcRenderer.invoke("harnessBoard:rejectHumanGate", input) as Promise<boolean>,
     getDeployUnitMappings: (): Promise<HarnessDeployUnitMapping[]> =>
       ipcRenderer.invoke("harnessBoard:getDeployUnitMappings") as Promise<
         HarnessDeployUnitMapping[]
@@ -4350,6 +4399,11 @@ const api = {
         "harnessBoard:searchEnterpriseProjects",
         input
       ) as Promise<HarnessEnterpriseProjectSearchResult>,
+    verifyEnterpriseProjectCode: (projectCode: string): Promise<boolean> =>
+      ipcRenderer.invoke(
+        "harnessBoard:verifyEnterpriseProjectCode",
+        projectCode
+      ) as Promise<boolean>,
     searchDeployUnits: (
       input: HarnessDeployUnitSearchInput
     ): Promise<HarnessDeployUnitSearchResult> =>
@@ -4495,6 +4549,11 @@ const api = {
         "harnessBoard:getManagedRunEvents",
         input
       ) as Promise<ManagedRunEventsPage>,
+    getLatestManagedRun: (
+      projectId: string,
+      featureId: string
+    ): Promise<ManagedRunSummary | null> =>
+      ipcRenderer.invoke("harnessBoard:getLatestManagedRun", projectId, featureId),
     cancelDialogTips: (): Promise<void> =>
       ipcRenderer.invoke("harnessBoard:cancelDialogTips") as Promise<void>,
     onWatchRefsChanged: (callback: (event: HarnessWatchRefChangedEvent) => void): (() => void) => {
@@ -4515,12 +4574,6 @@ const api = {
         callback(payload)
       ipcRenderer.on("harnessBoard:managedRunThreadCreated", handler)
       return () => ipcRenderer.removeListener("harnessBoard:managedRunThreadCreated", handler)
-    },
-    onHumanGateChanged: (callback: (event: HarnessHumanGateChangedEvent) => void): (() => void) => {
-      const handler = (_event: unknown, payload: HarnessHumanGateChangedEvent): void =>
-        callback(payload)
-      ipcRenderer.on("harnessBoard:humanGateChanged", handler)
-      return () => ipcRenderer.removeListener("harnessBoard:humanGateChanged", handler)
     }
   },
   app: {

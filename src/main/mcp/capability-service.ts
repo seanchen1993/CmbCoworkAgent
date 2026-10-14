@@ -1,6 +1,7 @@
 import { createHash } from "crypto"
 import { join } from "path"
 import { MultiServerMCPClient } from "@langchain/mcp-adapters"
+import { shouldSuppressInAppBrowserMcpTool } from "../browser/cdp/in-app-browser-mcp-tools"
 import { buildMcpServerConfig } from "../ipc/mcp"
 import { getEnabledMcpConnectors, getPlugins, getUserInfo, parseMcpJsonFile } from "../storage"
 import type { PluginMcpServerConfig } from "../types"
@@ -365,6 +366,14 @@ class ManagedMcpCapabilityService implements McpCapabilityService {
         for (const rawTool of serverTools) {
           const toolName = typeof rawTool.name === "string" ? rawTool.name : ""
           if (!toolName) continue
+          if (
+            shouldSuppressInAppBrowserMcpTool({
+              providerDisplayName: source.providerDisplayName,
+              toolName
+            })
+          ) {
+            continue
+          }
 
           seeds.push({
             capabilityId:

@@ -1,3 +1,8 @@
+import type {
+  AppNotification,
+  AppDecisionInput,
+  AppDecisionResult
+} from "../shared/app-notifications"
 import type { SubagentExportTarget } from "../shared/subagent-session-export"
 import type { UpdateSourceInfo } from "../main/updater/channel-config"
 import type {
@@ -122,9 +127,6 @@ import type {
   ManagedAutoSendStreamStartEvent,
   HarnessDynamicWorkflowConfig,
   HarnessWatchRefChangedEvent,
-  HarnessHumanGateChangedEvent,
-  HarnessHumanGateDecisionInput,
-  HarnessHumanGateSnapshot,
   ManagedRunEventCursor,
   ManagedRunEventsPage,
   ManagedRunIdentity,
@@ -1094,6 +1096,8 @@ interface CustomAPI {
       agentIndex: number
     ) => Promise<unknown[] | null>
     hydrate: (threadId: string) => Promise<unknown>
+    requestPendingNotification: (threadId: string) => Promise<void>
+    suppressPendingNotification: (threadId: string, suppressed?: boolean) => Promise<void>
     /** Durable per-thread channel; survives past the launching turn. Returns unsubscribe. */
     onWorkflowEvents: (threadId: string, callback: (payload: unknown) => void) => () => void
     /** Display-only live subagent tool-stream (keyed by parent threadId; payload carries
@@ -1483,6 +1487,7 @@ interface CustomAPI {
       changedFiles?: string[]
       changedFilesTotal?: number
       omittedFileCount?: number
+      skippedDirs?: string[]
       totals: { additions: number; deletions: number; fileCount: number }
       hasPendingDiff: boolean
       hasPushableCommit: boolean
@@ -1538,6 +1543,7 @@ interface CustomAPI {
       changedFiles?: string[]
       changedFilesTotal?: number
       omittedFileCount?: number
+      skippedDirs?: string[]
       totals: { additions: number; deletions: number; fileCount: number }
       hasPendingDiff: boolean
       suggestedCommitMessage?: string
@@ -1561,6 +1567,17 @@ interface CustomAPI {
         additions: number
         deletions: number
       }
+      error?: string
+    }>
+    addGitignoreEntry: (
+      threadId: string,
+      targetPath: string,
+      kind: "file" | "directory",
+      options?: { worktreePath?: string }
+    ) => Promise<{
+      success: boolean
+      entry?: string
+      alreadyExists?: boolean
       error?: string
     }>
     getGitChangedFilesSummary: (threadId: string) => Promise<{
@@ -1941,6 +1958,7 @@ interface CustomAPI {
     attach: (options?: BrowserAttachOptions) => Promise<BrowserState>
     detach: () => Promise<BrowserState>
     setBounds: (bounds: BrowserBounds, visible?: boolean) => Promise<BrowserState>
+    setZoomFactor: (zoomFactor: number) => Promise<BrowserState>
     navigate: (url: string, options?: BrowserNavigateOptions) => Promise<BrowserState>
     goBack: () => Promise<BrowserState>
     goForward: () => Promise<BrowserState>
@@ -2111,6 +2129,7 @@ interface CustomAPI {
     ) => () => void
   }
   builtinRobot: {
+    cancelThread: (threadId: string) => Promise<boolean>
     getStatus: () => Promise<BuiltinRobotStatus>
     getRemoteAccess: () => Promise<BuiltinRobotRemoteAccessOverview>
     setThreadRemoteAccess: (
@@ -2858,6 +2877,11 @@ interface CustomAPI {
       genEventIds: string[]
     ) => Promise<{ success: boolean; data?: LocalGenAdoptionLines[]; error?: string }>
   }
+  appNotifications: {
+    list: () => Promise<AppNotification[]>
+    decide: (input: AppDecisionInput) => Promise<AppDecisionResult>
+    onChanged: (callback: () => void) => () => void
+  }
   harnessBoard: {
     onApiProjectChanged: (callback: (payload: { projectId: string }) => void) => () => void
     catalogPage: (input: HarnessBoardCatalogPageInput) => Promise<HarnessBoardCatalogPageResult>
@@ -2870,9 +2894,6 @@ interface CustomAPI {
     }>
     registry: () => Promise<HarnessAdapterRegistryItem[]>
     listProjects: () => Promise<HarnessProjectListItem[]>
-    getHumanGateForThread: (threadId: string) => Promise<HarnessHumanGateSnapshot | undefined>
-    approveHumanGate: (input: HarnessHumanGateDecisionInput) => Promise<boolean>
-    rejectHumanGate: (input: HarnessHumanGateDecisionInput) => Promise<boolean>
     getDeployUnitMappings: () => Promise<HarnessDeployUnitMapping[]>
     getLeanTokenConfig: () => Promise<HarnessLeanTokenConfig>
     saveDeployUnitMappings: (
@@ -2886,6 +2907,7 @@ interface CustomAPI {
     searchEnterpriseProjects: (
       input: HarnessEnterpriseProjectSearchInput
     ) => Promise<HarnessEnterpriseProjectSearchResult>
+    verifyEnterpriseProjectCode: (projectCode: string) => Promise<boolean>
     searchDeployUnits: (
       input: HarnessDeployUnitSearchInput
     ) => Promise<HarnessDeployUnitSearchResult>
@@ -2940,13 +2962,13 @@ interface CustomAPI {
     getManagedRunEvents: (
       input: ManagedRunIdentity & { cursor?: ManagedRunEventCursor; limit?: number }
     ) => Promise<ManagedRunEventsPage>
+    getLatestManagedRun: (projectId: string, featureId: string) => Promise<ManagedRunSummary | null>
     cancelDialogTips: () => Promise<void>
     onWatchRefsChanged: (callback: (event: HarnessWatchRefChangedEvent) => void) => () => void
     onManagedRunChanged: (callback: (event: ManagedRunChangeEvent) => void) => () => void
     onManagedRunThreadCreated: (
       callback: (event: ManagedRunThreadCreatedEvent) => void
     ) => () => void
-    onHumanGateChanged: (callback: (event: HarnessHumanGateChangedEvent) => void) => () => void
   }
   app: {
     restart: () => Promise<void>

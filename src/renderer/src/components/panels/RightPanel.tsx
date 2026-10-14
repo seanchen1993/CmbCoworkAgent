@@ -1405,16 +1405,6 @@ export function RightPanel({
   }, [activeResourcePreviewRequest, currentThreadId, moduleMode])
 
   useEffect(() => {
-    if (!currentThreadId) return
-    const cleanup = window.api.workspace.onFilesChanged((data) => {
-      if (data.threadIds.includes(currentThreadId) && previewPathForCurrentThread) {
-        setPreviewReloadToken((v) => v + 1)
-      }
-    })
-    return cleanup
-  }, [currentThreadId, previewPathForCurrentThread])
-
-  useEffect(() => {
     const request = activeResourcePreviewRequest
     if (!request || !currentThreadId || request.threadId !== currentThreadId) return
 
@@ -2082,7 +2072,6 @@ export function RightPanel({
           >
             {previewPathForCurrentThread ? (
               <ResourcePreview
-                key={`${currentThreadId}:${previewPathForCurrentThread}:${previewWorkspacePathKind}:${previewReloadToken}`}
                 filePath={previewPathForCurrentThread}
                 workspacePathKind={previewWorkspacePathKind}
                 workspacePath={workspacePath ?? null}

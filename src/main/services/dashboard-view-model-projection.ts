@@ -528,6 +528,7 @@ function projectAdvancedEvent(raw: unknown): Record<string, unknown> {
   const heartbeat = asRecord(aggs.heartbeat)
   const evolution = asRecord(aggs.evo_run)
   const im = asRecord(aggs.im)
+  const imOut = asRecord(aggs.im_out)
   const hooks = asRecord(aggs.hooks)
   return {
     hbActionable: countByKey(heartbeat.by_outcome, "actionable"),
@@ -547,6 +548,13 @@ function projectAdvancedEvent(raw: unknown): Record<string, unknown> {
     imCompleted: countByKey(im.by_outcome, "completed"),
     imCancelled: countByKey(im.by_outcome, "cancelled"),
     imError: countByKey(im.by_outcome, "error") + countByKey(im.by_outcome, "outcome_unknown"),
+    imReplied: countByKey(imOut.by_kind, "reply"),
+    imPushed: countByKey(imOut.by_kind, "push"),
+    imCards: countByKey(imOut.by_kind, "card"),
+    // "unknown" is a send the gateway may well have delivered, so it is grouped
+    // with the failures rather than the successes — the card reads it as "did
+    // not confirm", which is what is actually known.
+    imSendFailed: countByKey(imOut.by_outcome, "failed") + countByKey(imOut.by_outcome, "unknown"),
     hookTotal: asNumber(hooks.doc_count),
     hookBlocked: asNumber(asRecord(hooks.blocked).doc_count)
   }

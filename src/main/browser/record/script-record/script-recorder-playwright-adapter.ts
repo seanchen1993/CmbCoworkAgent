@@ -628,6 +628,10 @@ export function buildPlaywrightScriptRecorderInjectionScript(frameChannelId = ""
       return 'input[type="file"]';
     }
 
+    function isTransientActionSelector(selector) {
+      return /(?:^|[.#\s>+~:[\]'"])(?:ant-(?:tooltip|popover|dropdown)-open|[\w-]*(?:hover|active|focus|focused|open|opened|expanded)[\w-]*)(?:$|[.#\s>+~:[\]'"])/i.test(selector);
+    }
+
     function fallbackFileUploadLocator(locator) {
       return {
         ...(locator ?? {}),
@@ -707,8 +711,38 @@ export function buildPlaywrightScriptRecorderInjectionScript(frameChannelId = ""
 
     window[FRAME_SELECTOR_HELPER] = (index) => selectorForFrameElementAtIndex(index);
 
-    window.__pw_recorderRecordAction = async (action) => {
+    let lastHoveredActionSelector = "";
+
+    function rememberHoveredActionSelector(event) {
+      try {
+        const target = recorder._recorder.deepEventTarget(event);
+        if (!(target instanceof Element) || !target.isConnected) return;
+        const generated = injectedScript.generateSelector(target, {
+          testIdAttributeName: RECORDER_OPTIONS.testIdAttributeName,
+          multiple: false
+        });
+        const selector = text(generated?.selector);
+        if (selector) lastHoveredActionSelector = selector;
+      } catch {}
+    }
+
+    function selectorForRecorderAction(action) {
       const selector = typeof action?.selector === "string" ? action.selector : "";
+      const actionName = typeof action?.name === "string" ? action.name : "";
+      if (
+        (actionName === "click" || actionName === "check" || actionName === "uncheck") &&
+        selector &&
+        lastHoveredActionSelector &&
+        isTransientActionSelector(selector) &&
+        resolveElement(lastHoveredActionSelector)
+      ) {
+        return lastHoveredActionSelector;
+      }
+      return selector;
+    }
+
+    window.__pw_recorderRecordAction = async (action) => {
+      const selector = selectorForRecorderAction(action);
       const element = resolveElement(selector);
       const locator = locatorForElement(element, selector || undefined);
       const selectedFileName =
@@ -756,6 +790,9 @@ export function buildPlaywrightScriptRecorderInjectionScript(frameChannelId = ""
     // 会以 clickCount=0 的 click 动作上报，由宿主的 parse 层丢弃（与 codegen
     // 的 detail===0 过滤一致），避免 checkbox/radio/switch 被重复记录。
     const recorder = new PollingRecorder(injectedScript, { recorderMode: "api" });
+    try {
+      document.addEventListener("mousemove", rememberHoveredActionSelector, true);
+    } catch {}
     try {
       const style = document.createElement("style");
       style.textContent = "x-pw-overlay { display: none !important; }";

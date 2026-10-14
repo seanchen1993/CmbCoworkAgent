@@ -1,6 +1,8 @@
 import type {
   GatewayReasonCodeV1,
   RemoteImAckV1,
+  RemoteImCardSendV1,
+  RemoteImCardUpdateV1,
   RemoteImReplyV1
 } from "../../../shared/im-gateway-contract"
 import type { ImEventRecord } from "./event-store"
@@ -18,6 +20,24 @@ export interface ImReplySubmissionResult {
 }
 
 /**
+ * A card is an enhancement, so its submission result never has to be believed
+ * for a gate to stay answerable — "rejected" here only means the reader keeps
+ * using the short code that was published alongside it.
+ */
+export interface ImCardSubmissionResult {
+  state: "accepted" | "rejected"
+  reasonCode?: GatewayReasonCodeV1 | string
+  /**
+   * The frame was already on the wire when this failed, so the card may well
+   * have been stored and delivered. Treating that as "not published" makes the
+   * desktop forget a card the reader can still see and press — and a press on a
+   * forgotten card is answered "this request has ended", which for a gate that
+   * never times out is both false and final.
+   */
+  resultUnknown?: boolean
+}
+
+/**
  * Frozen client-side port for Gateway G0/G1. The production WSS adapter owns
  * authentication and the active desktop session; local services never receive
  * platform credentials or choose a route themselves.
@@ -28,6 +48,9 @@ export interface ImGatewayClientPort {
   acquireExecutionPermit(event: ImEventRecord): Promise<ImExecutionPermitResult>
   renewExecutionPermit(event: ImEventRecord): Promise<ImExecutionPermitResult>
   submitReply(reply: RemoteImReplyV1): Promise<ImReplySubmissionResult>
+  sendCard(card: RemoteImCardSendV1): Promise<ImCardSubmissionResult>
+  updateCard(update: RemoteImCardUpdateV1): Promise<ImCardSubmissionResult>
+  acknowledgeCardReceipt(receiptId: string): Promise<void>
 }
 
 export class ImGatewayUnavailableError extends Error {
@@ -46,6 +69,11 @@ export const unavailableImGatewayClient: ImGatewayClientPort = {
   acquireExecutionPermit: async () => ({ status: "denied", reasonCode: "DESKTOP_OFFLINE" }),
   renewExecutionPermit: async () => ({ status: "denied", reasonCode: "DESKTOP_OFFLINE" }),
   submitReply: async () => {
+    throw new ImGatewayUnavailableError()
+  },
+  sendCard: async () => ({ state: "rejected", reasonCode: "DESKTOP_OFFLINE" }),
+  updateCard: async () => ({ state: "rejected", reasonCode: "DESKTOP_OFFLINE" }),
+  acknowledgeCardReceipt: async () => {
     throw new ImGatewayUnavailableError()
   }
 }

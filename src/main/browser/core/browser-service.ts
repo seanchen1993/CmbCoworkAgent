@@ -41,6 +41,8 @@ import type {
 
 const MAX_BROWSER_CONSOLE_ENTRIES = 200
 const MAX_BROWSER_CONSOLE_MESSAGE_CHARS = 4_000
+const MIN_BROWSER_ZOOM_FACTOR = 0.25
+const MAX_BROWSER_ZOOM_FACTOR = 5
 const BROWSER_PROFILE_PARTITION = "persist:cmbdevclaw-browser-profile"
 const BROWSER_SERVICE_LOG_PREFIX = `${BUILTIN_BROWSER_LOG_PREFIX}[BrowserService]`
 
@@ -68,20 +70,13 @@ function rectanglesEqual(a: Rectangle, b: Rectangle): boolean {
   return a.x === b.x && a.y === b.y && a.width === b.width && a.height === b.height
 }
 
-function formatBounds(bounds: Rectangle | BrowserBounds): string {
-  return `${bounds.x},${bounds.y} ${bounds.width}x${bounds.height}`
+function normalizeZoomFactor(value: number): number {
+  if (!Number.isFinite(value)) return 1
+  return Math.min(MAX_BROWSER_ZOOM_FACTOR, Math.max(MIN_BROWSER_ZOOM_FACTOR, value))
 }
 
 function formatError(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
-}
-
-function formatSessionSnapshot(session: BrowserSession | null): string {
-  if (!session) return "(none)"
-  const webContents = session.view.webContents
-  const destroyed = webContents.isDestroyed()
-  const url = destroyed ? "(destroyed)" : webContents.getURL() || "(empty)"
-  return `id=${session.id} attached=${session.isAttached} visible=${session.view.getVisible()} bounds=${formatBounds(session.view.getBounds())} destroyed=${destroyed} url=${url}`
 }
 
 function sameSiteForElectron(
@@ -175,6 +170,24 @@ function sortedSkippedWebsites(
   )
 }
 
+async function runCookieImportPool(
+  cookies: BrowserSessionCookie[],
+  importOneCookie: (cookie: BrowserSessionCookie) => Promise<void>,
+  concurrency = 24
+): Promise<void> {
+  let nextIndex = 0
+  const workerCount = Math.min(concurrency, cookies.length)
+  await Promise.all(
+    Array.from({ length: workerCount }, async () => {
+      while (nextIndex < cookies.length) {
+        const cookie = cookies[nextIndex]
+        nextIndex += 1
+        await importOneCookie(cookie)
+      }
+    })
+  )
+}
+
 type PathApi = typeof posix
 
 function usesWindowsPaths(...paths: Array<string | null | undefined>): boolean {
@@ -239,6 +252,11 @@ function normalizeUrlInput(input: string, workspacePath: string | null): string 
   return `https://${value}`
 }
 
+export function shouldReloadAfterProfileImport(currentUrl: string): boolean {
+  const value = currentUrl.trim()
+  return Boolean(value && value !== "about:blank")
+}
+
 function getUrlPermissionError(url: string, workspacePath: string | null): string | null {
   void workspacePath
   let parsed: URL
@@ -301,28 +319,37 @@ export class BrowserService {
 
   constructor(private readonly getMainWindow: () => BrowserWindow | null) {}
 
+  appendConsoleEntry(input: {
+    level: BrowserConsoleLevel
+    message: string
+    sourceId?: string
+  }): BrowserState {
+    const session = this.getActiveSession()
+    if (!session) return this.getState()
+    session.consoleEntries = appendBrowserConsoleEntry(session.consoleEntries, {
+      id: `${session.id}:${session.nextConsoleEntryId++}`,
+      timestamp: new Date().toISOString(),
+      level: input.level,
+      message: truncateBrowserConsoleMessage(input.message),
+      sourceId: input.sourceId
+    })
+    this.emitState(session.id)
+    return this.getState()
+  }
+
   attach(options: BrowserAttachOptions = {}): BrowserState {
     const sessionId = BROWSER_SESSION_ID
     const window = this.getUsableWindow()
-    console.info(
-      `${BROWSER_SERVICE_LOG_PREFIX} Attach requested for ${sessionId}; active=${formatSessionSnapshot(this.activeSession)} requestedVisible=${options.visible ?? true} workspacePath=${options.workspacePath ?? "(unchanged)"} initialUrl=${options.initialUrl ?? "(none)"}.`
-    )
 
     const existingSession = this.activeSession
     const session = this.ensureActiveSession(sessionId, options.workspacePath)
     if (!session.isAttached) {
-      console.info(
-        `${BROWSER_SERVICE_LOG_PREFIX} addChildView for ${sessionId}; snapshot before attach=${formatSessionSnapshot(session)}.`
-      )
       window.contentView.addChildView(session.view)
       session.isAttached = true
     }
     const requestedVisible = options.visible ?? true
     const shouldUpdateVisibility = !existingSession || requestedVisible
     const previousVisible = session.view.getVisible()
-    console.info(
-      `${BROWSER_SERVICE_LOG_PREFIX} Attach resolved session for ${sessionId}; existing=${Boolean(existingSession)} shouldUpdateVisibility=${shouldUpdateVisibility} previousVisible=${previousVisible} current=${formatSessionSnapshot(session)}.`
-    )
     if (shouldUpdateVisibility) {
       if (previousVisible !== requestedVisible) session.view.setVisible(requestedVisible)
     }
@@ -336,11 +363,7 @@ export class BrowserService {
       this.emitState(sessionId)
     }
 
-    const state = this.getState()
-    console.info(
-      `${BROWSER_SERVICE_LOG_PREFIX} Attached Browser session ${sessionId} visible=${state.visible}.`
-    )
-    return state
+    return this.getState()
   }
 
   async prepareTarget(options: BrowserAttachOptions = {}): Promise<BrowserState> {
@@ -352,15 +375,10 @@ export class BrowserService {
 
   detach(): BrowserState {
     const sessionId = BROWSER_SESSION_ID
-    console.info(
-      `${BROWSER_SERVICE_LOG_PREFIX} Detach requested for ${sessionId}; active=${formatSessionSnapshot(this.activeSession)}.`
-    )
     if (!this.activeSession) return this.getState()
     this.disposeActiveSession()
     this.emitState(sessionId)
-    const state = this.getState()
-    console.info(`${BROWSER_SERVICE_LOG_PREFIX} Detached Browser session ${sessionId}.`)
-    return state
+    return this.getState()
   }
 
   setBounds(bounds: BrowserBounds, visible = true): BrowserState {
@@ -381,26 +399,32 @@ export class BrowserService {
     const visibilityChanged = currentVisible !== nextVisible
 
     if (!boundsChanged && !visibilityChanged) {
-      console.info(
-        `${BROWSER_SERVICE_LOG_PREFIX} Ignored Browser bounds update for ${sessionId}; unchanged current=${formatBounds(currentBounds)} visible=${currentVisible}.`
-      )
       return this.getState()
     }
 
-    console.info(
-      `${BROWSER_SERVICE_LOG_PREFIX} Applying Browser bounds for ${sessionId}; from=${formatBounds(currentBounds)} visible=${currentVisible} to=${formatBounds(nextBounds)} visible=${nextVisible}.`
-    )
     if (boundsChanged) session.view.setBounds(nextBounds)
     if (visibilityChanged) session.view.setVisible(nextVisible)
     if (nextVisible && (boundsChanged || visibilityChanged)) {
       this.invalidateSession(session)
     }
     this.emitState(sessionId)
-    const state = this.getState()
-    console.info(
-      `${BROWSER_SERVICE_LOG_PREFIX} Updated Browser bounds for ${sessionId} to ${formatBounds(nextBounds)} visible=${nextVisible}.`
-    )
-    return state
+    return this.getState()
+  }
+
+  setZoomFactor(zoomFactor: number): BrowserState {
+    const sessionId = BROWSER_SESSION_ID
+    const session = this.getActiveSession()
+    if (!session) {
+      console.warn(
+        `${BROWSER_SERVICE_LOG_PREFIX} Ignored zoom update for inactive Browser session ${sessionId}.`
+      )
+      return this.getState()
+    }
+
+    const nextZoomFactor = normalizeZoomFactor(zoomFactor)
+    session.view.webContents.setZoomFactor(nextZoomFactor)
+    this.emitState(sessionId)
+    return this.getState()
   }
 
   async navigate(inputUrl: string, options: BrowserNavigateOptions = {}): Promise<BrowserState> {
@@ -439,9 +463,7 @@ export class BrowserService {
     }
 
     this.emitState(sessionId)
-    const state = this.getState()
-    console.info(`${BROWSER_SERVICE_LOG_PREFIX} Navigated ${sessionId} to ${state.url || url}.`)
-    return state
+    return this.getState()
   }
 
   goBack(): BrowserState {
@@ -505,18 +527,18 @@ export class BrowserService {
     const skippedWebsites = new Map<string, BrowserProfileImportSkippedWebsite>()
     let importedCookies = 0
     let skippedCookies = 0
-    for (const cookie of data.cookies) {
+    const importOneCookie = async (cookie: BrowserSessionCookie): Promise<void> => {
       if (cookie.partitionKey !== undefined && cookie.partitionKey !== null) {
         skippedCookies += 1
         addSkippedWebsite(skippedWebsites, cookie, "partitioned")
-        continue
+        return
       }
 
       const details = browserProfileCookieDetails(cookie)
       if (!details) {
         skippedCookies += 1
         addSkippedWebsite(skippedWebsites, cookie, "invalid")
-        continue
+        return
       }
 
       try {
@@ -527,16 +549,17 @@ export class BrowserService {
         addSkippedWebsite(skippedWebsites, cookie, "browser_rejected")
       }
     }
+    await runCookieImportPool(data.cookies, importOneCookie)
 
     const skippedLocalStorage = data.localStorage.length
     if (this.activeSession && !this.activeSession.view.webContents.isDestroyed()) {
-      this.activeSession.view.webContents.reload()
-      this.emitState(this.activeSession.id)
+      const currentUrl = this.activeSession.view.webContents.getURL()
+      if (shouldReloadAfterProfileImport(currentUrl)) {
+        this.activeSession.view.webContents.reload()
+        this.emitState(this.activeSession.id)
+      }
     }
 
-    console.info(
-      `${BROWSER_SERVICE_LOG_PREFIX} Imported browser profile data cookies=${importedCookies} localStorage=0 skipped=${skippedCookies + skippedLocalStorage}.`
-    )
     return {
       importedCookies,
       importedLocalStorage: 0,
@@ -562,6 +585,7 @@ export class BrowserService {
         isLoading: false,
         canGoBack: false,
         canGoForward: false,
+        zoomFactor: 1,
         visible: false,
         created: false,
         consoleEntries: []
@@ -577,6 +601,7 @@ export class BrowserService {
       isLoading: isDestroyed ? false : webContents.isLoading(),
       canGoBack: isDestroyed ? false : webContents.canGoBack(),
       canGoForward: isDestroyed ? false : webContents.canGoForward(),
+      zoomFactor: isDestroyed ? 1 : webContents.getZoomFactor(),
       visible: session.view.getVisible(),
       created: true,
       consoleEntries: session.consoleEntries.slice(),
@@ -604,9 +629,6 @@ export class BrowserService {
     const existing = this.activeSession
     if (existing) {
       if (workspacePath !== undefined) existing.workspacePath = workspacePath
-      console.info(
-        `${BROWSER_SERVICE_LOG_PREFIX} Reusing active Browser session ${sessionId}; snapshot=${formatSessionSnapshot(existing)} workspacePath=${existing.workspacePath ?? "(none)"}.`
-      )
       return existing
     }
 
@@ -643,9 +665,6 @@ export class BrowserService {
       this.emitState(sessionId)
       console.error(`${BROWSER_SERVICE_LOG_PREFIX} ${session.error}.`)
     })
-    console.info(
-      `${BROWSER_SERVICE_LOG_PREFIX} Created Browser session ${sessionId}; snapshot=${formatSessionSnapshot(session)} workspacePath=${workspacePath ?? "(none)"}.`
-    )
     return session
   }
 
@@ -674,7 +693,6 @@ export class BrowserService {
       this.invalidateSession(session)
       ensureScriptRecorder()
       emit()
-      console.info(`${BROWSER_SERVICE_LOG_PREFIX} Loaded Browser session ${session.id}.`)
     })
     webContents.on("dom-ready", () => {
       ensureScriptRecorder()
@@ -722,7 +740,6 @@ export class BrowserService {
       recordScriptNavigation(url, "implicit")
       ensureScriptRecorder()
       emit()
-      console.info(`${BROWSER_SERVICE_LOG_PREFIX} Browser session ${session.id} reached ${url}.`)
     })
     webContents.on("did-navigate-in-page", (_event, _url, isMainFrame) => {
       if (isMainFrame) {
@@ -753,9 +770,6 @@ export class BrowserService {
       console.error(
         `${BROWSER_SERVICE_LOG_PREFIX} Browser renderer ended for ${session.id}: ${details.reason}.`
       )
-    })
-    webContents.on("destroyed", () => {
-      console.info(`${BROWSER_SERVICE_LOG_PREFIX} Browser webContents destroyed for ${session.id}.`)
     })
     webContents.setWindowOpenHandler((details) => {
       const permissionError = getUrlPermissionError(details.url, session.workspacePath)
@@ -816,9 +830,6 @@ export class BrowserService {
     const session = this.activeSession
     if (!session) return null
 
-    console.info(
-      `${BROWSER_SERVICE_LOG_PREFIX} Disposing active Browser session ${session.id}; snapshot before dispose=${formatSessionSnapshot(session)}.`
-    )
     this.activeSession = null
     session.view.setVisible(false)
 
@@ -827,7 +838,6 @@ export class BrowserService {
       try {
         window.contentView.removeChildView(session.view)
         session.isAttached = false
-        console.info(`${BROWSER_SERVICE_LOG_PREFIX} removeChildView completed for ${session.id}.`)
       } catch (error) {
         console.warn(
           `${BROWSER_SERVICE_LOG_PREFIX} Browser view detach failed for ${session.id}: ${formatError(error)}.`
@@ -837,7 +847,6 @@ export class BrowserService {
 
     try {
       if (!session.view.webContents.isDestroyed()) {
-        console.info(`${BROWSER_SERVICE_LOG_PREFIX} Closing Browser webContents for ${session.id}.`)
         session.view.webContents.close({ waitForBeforeUnload: false })
       }
     } catch (error) {
@@ -846,7 +855,6 @@ export class BrowserService {
       )
     }
 
-    console.info(`${BROWSER_SERVICE_LOG_PREFIX} Disposed Browser session ${session.id}.`)
     return session.id
   }
 }

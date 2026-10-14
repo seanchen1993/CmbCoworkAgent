@@ -170,9 +170,6 @@ import type {
   HarnessBoardCompatibility,
   HarnessStatus,
   HarnessWatchRefChangedEvent,
-  HarnessHumanGateSnapshot,
-  HarnessHumanGateChangedEvent,
-  HarnessHumanGateDecisionInput,
   HarnessWorkflowNextAction,
   HarnessWorkflow
 } from "../../shared/harness-board-types"
@@ -270,9 +267,6 @@ export type {
   HarnessBoardCompatibility,
   HarnessStatus,
   HarnessWatchRefChangedEvent,
-  HarnessHumanGateSnapshot,
-  HarnessHumanGateChangedEvent,
-  HarnessHumanGateDecisionInput,
   HarnessWorkflowNextAction,
   HarnessWorkflow
 }
@@ -295,6 +289,10 @@ export interface Message {
   ordinal?: number
   provider_source_id?: string
   provider_occurrence?: number
+  /** Renderer-only provenance for Team worker content; absent for partial fragments. */
+  worker_content_source?: "values" | "snapshot"
+  /** This worker identity has appeared in a complete ordered values frame. */
+  worker_snapshot_identity?: boolean
   role: "user" | "assistant" | "system" | "tool"
   content: string | ContentBlock[]
   content_priority?: number
@@ -309,6 +307,8 @@ export interface Message {
   content_persisted_length?: number
   content_pending_delta?: string
   content_stream_delta?: string
+  /** Renderer-only full replacement awaiting persistence acknowledgement. */
+  content_stream_snapshot?: boolean
   // Internal transcript aliases used to collapse a provisional subagent
   // assistant row into its stable task-completion row across reloads/replays.
   replaced_message_ids?: string[]
@@ -334,6 +334,7 @@ export interface Message {
   reasoning_persisted_length?: number
   reasoning_pending_delta?: string
   reasoning_stream_delta?: string
+  reasoning_stream_snapshot?: boolean
   tool_calls?: ToolCall[]
   tool_calls_ref?: SubagentTranscriptBlobRef
   // For tool messages - links result to its tool call

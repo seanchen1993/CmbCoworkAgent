@@ -46,11 +46,8 @@ function testRemoteInboxIsReadOnlyAtRendererAndMainBoundary(): void {
   const agent = source("src/main/ipc/agent.ts")
   assert(chat.includes('remoteThreadInfo?.kind === "inbox"'))
   assert(chat.includes("远程收件箱在桌面仅可查看"))
-  assert(
-    chat.includes(
-      "const effectiveInputDisabled = inputDisabled || contextReminderPending || readOnly"
-    )
-  )
+  // Composer rendering and Agent entry behavior are covered by chat-composer-guard.test.ts
+  // and biz-retry-input-guard.test.ts; no assertions on local variable spelling.
   assert(agent.includes("rejectDesktopRunForRemoteReadOnlyThread"))
   assert(agent.includes("REMOTE_INBOX_DESKTOP_READ_ONLY"))
   assert(agent.includes('metadata.remoteState === "historical"'))
@@ -172,7 +169,7 @@ function testRemoteThreadsHaveStableSourceAndModeLabels(): void {
   assert(harnessBoard.includes("从招乎发起新会话"))
   assert(harnessBoard.includes("window.api.builtinRobot.setFeatureRemoteAccess"))
   assert(harnessBoard.includes("disabled={busy || (!enabled && !featureImManagementAvailable)}"))
-  assert(harnessBoard.includes("关闭后，下方已经接入的会话仍由各自的会话开关管理"))
+  assert(harnessBoard.includes("关闭后已经接入招乎的会话不受影响，可在会话中单独管理接入状态"))
 }
 
 function testRemoteTurnMirrorsCompleteRendererLifecycle(): void {

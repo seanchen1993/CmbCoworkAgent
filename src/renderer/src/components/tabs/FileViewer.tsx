@@ -48,14 +48,14 @@ interface FileViewerProps {
   resolveExternalPreviewGrant?: () => Promise<string>
   reloadToken?: number
   previewMode?: FilePreviewMode
-  /** Fail-closed: only the workspace file tab may opt into static HTML rendering. */
+  /** Fail-closed: only the workspace file tab may opt into isolated HTML/JS rendering. */
   htmlPreviewPolicy?: HtmlPreviewPolicy
   /** Stable per surface so a persisted file tab cancels the prior task's preview. */
   requestLane?: string
 }
 
-const MAX_HTML_DEPENDENCY_REQUESTS = 8
-const MAX_HTML_DEPENDENCY_BYTES = 256 * 1024
+const MAX_HTML_DEPENDENCY_REQUESTS = 16
+const MAX_HTML_DEPENDENCY_BYTES = 2 * 1024 * 1024
 const MAX_MARKDOWN_IMAGE_REQUESTS = 32
 const MAX_MARKDOWN_IMAGE_SOURCE_BYTES = 32 * 1024 * 1024
 
@@ -101,7 +101,7 @@ export function FileViewer({
   const markdownLike = ext === "md" || ext === "markdown" || ext === "mdx"
   const htmlLike = ext === "html" || ext === "htm"
   const allowHtmlRender =
-    htmlPreviewPolicy === "workspace-static" &&
+    htmlPreviewPolicy === "workspace-scripted" &&
     !externalFullPath &&
     workspacePathKind === "relative" &&
     Boolean(threadId)
@@ -120,6 +120,7 @@ export function FileViewer({
   const dependencyBudgetRef = useRef({
     htmlRequests: 0,
     htmlBytes: 0,
+    htmlReads: new Map<string, Promise<string | null>>(),
     imageRequests: 0,
     imageBytes: 0
   })
@@ -219,6 +220,7 @@ export function FileViewer({
     dependencyBudgetRef.current = {
       htmlRequests: 0,
       htmlBytes: 0,
+      htmlReads: new Map<string, Promise<string | null>>(),
       imageRequests: 0,
       imageBytes: 0
     }
@@ -304,6 +306,7 @@ export function FileViewer({
       dependencyBudgetRef.current = {
         htmlRequests: 0,
         htmlBytes: 0,
+        htmlReads: new Map<string, Promise<string | null>>(),
         imageRequests: 0,
         imageBytes: 0
       }
@@ -351,6 +354,8 @@ export function FileViewer({
     async (resolvedPath: string): Promise<string | null> => {
       const generation = generationRef.current
       const budget = dependencyBudgetRef.current
+      const cached = budget.htmlReads.get(resolvedPath)
+      if (cached) return cached
       if (budget.htmlRequests >= MAX_HTML_DEPENDENCY_REQUESTS) return null
       budget.htmlRequests += 1
       const dependencyLane = `${lane}:html:${shortPathHash(resolvedPath)}`
@@ -365,17 +370,27 @@ export function FileViewer({
         })
         return generation === generationRef.current && result.success ? result : null
       }
-      const first = await readPage(0)
-      if (!first) return null
-      const result = await assembleBoundedTextPreview(first, readPage, {
-        maxBytes: MAX_HTML_DEPENDENCY_BYTES,
-        maxPages: WEB_SOURCE_PREVIEW_MAX_PAGES
-      })
-      if (result.truncated || budget.htmlBytes + result.contentBytes > MAX_HTML_DEPENDENCY_BYTES) {
-        return null
+      const loadDependency = async (): Promise<string | null> => {
+        const first = await readPage(0)
+        if (!first) return null
+        const result = await assembleBoundedTextPreview(first, readPage, {
+          maxBytes: MAX_HTML_DEPENDENCY_BYTES,
+          maxPages: WEB_SOURCE_PREVIEW_MAX_PAGES
+        })
+        if (
+          generation !== generationRef.current ||
+          result.truncated ||
+          budget.htmlBytes + result.contentBytes > MAX_HTML_DEPENDENCY_BYTES
+        ) {
+          return null
+        }
+        budget.htmlBytes += result.contentBytes
+        return result.content
       }
-      budget.htmlBytes += result.contentBytes
-      return result.content
+      // Reopening the sandbox must not consume the file generation's bounded budget again.
+      const pending = loadDependency().catch(() => null)
+      budget.htmlReads.set(resolvedPath, pending)
+      return pending
     },
     [lane, previewSourceForPath]
   )
@@ -526,9 +541,6 @@ export function FileViewer({
         content={content}
         path={displayPath}
         fillHeight
-        showHeader={false}
-        showModeToggle={false}
-        viewMode="preview"
         readDependencyFile={readHtmlDependencyFile}
       />
     )

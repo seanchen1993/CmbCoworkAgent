@@ -492,9 +492,6 @@ export async function executeRecordingScriptInBuiltinBrowser(
         progressPercent: clampProgressPercent(totalSteps || completedSteps || 1, totalSteps)
       })
     )
-    console.info(
-      `${BROWSER_SCRIPT_EXECUTION_LOG_PREFIX} Executed recorded script in the in-app browser.`
-    )
   } catch (error) {
     if (isBrowserScriptExecutionCancelledError(error) || executionController.cancelled) {
       emitBrowserScriptExecutionState(

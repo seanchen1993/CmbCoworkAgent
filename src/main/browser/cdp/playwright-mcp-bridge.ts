@@ -59,16 +59,6 @@ function parsePlaywrightTabs(result: McpInvocationResult): PlaywrightTabEntry[] 
   return tabs
 }
 
-function formatPlaywrightTabsForLog(tabs: PlaywrightTabEntry[]): string {
-  if (tabs.length === 0) return "(none)"
-  return tabs
-    .map(
-      (tab) =>
-        `${tab.index}${tab.current ? "*" : ""}:${tab.title || "(untitled)"}@${tab.url || "(empty)"}`
-    )
-    .join(" | ")
-}
-
 function findLastMatchingTab(
   tabs: PlaywrightTabEntry[],
   predicate: (tab: PlaywrightTabEntry) => boolean
@@ -261,10 +251,6 @@ export async function autoSelectPlaywrightInAppBrowserTab(options: {
   const currentTab = tabs.find((tab) => tab.current) ?? null
   const matchingTab = pickPlaywrightTabForBrowserState(tabs, state)
 
-  console.info(
-    `${PLAYWRIGHT_MCP_BRIDGE_LOG_PREFIX} Tab sync for ${BROWSER_SESSION_ID}; tool=${options.tool.toolId} stateUrl=${formatUrlForLog(state.url)} stateTitle=${state.title || "(empty)"} current=${currentTab ? `${currentTab.index}@${formatUrlForLog(currentTab.url)}` : "(none)"} match=${matchingTab ? `${matchingTab.index}@${formatUrlForLog(matchingTab.url)}` : "(none)"} tabs=${formatPlaywrightTabsForLog(tabs)}.`
-  )
-
   if (!matchingTab) {
     console.warn(
       `${PLAYWRIGHT_MCP_BRIDGE_LOG_PREFIX} No matching Playwright tab found for ${BROWSER_SESSION_ID}; BrowserView url=${formatUrlForLog(state.url)} title=${state.title || "(empty)"}.`
@@ -273,9 +259,6 @@ export async function autoSelectPlaywrightInAppBrowserTab(options: {
   }
 
   if (currentTab?.index === matchingTab.index) {
-    console.info(
-      `${PLAYWRIGHT_MCP_BRIDGE_LOG_PREFIX} Playwright tab already aligned for ${BROWSER_SESSION_ID}; index=${matchingTab.index}.`
-    )
     return
   }
 
@@ -290,7 +273,4 @@ export async function autoSelectPlaywrightInAppBrowserTab(options: {
     return
   }
 
-  console.info(
-    `${PLAYWRIGHT_MCP_BRIDGE_LOG_PREFIX} Selected Playwright tab ${matchingTab.index} for ${BROWSER_SESSION_ID}; url=${formatUrlForLog(matchingTab.url)} title=${matchingTab.title || "(empty)"}.`
-  )
 }

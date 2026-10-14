@@ -43,7 +43,10 @@ const trustedToolPreview = readFileSync(
   "utf8"
 )
 const messageBubble = readFileSync(new URL("../chat/MessageBubble.tsx", import.meta.url), "utf8")
-const htmlPreview = readFileSync(new URL("../chat/previews/HtmlPreview.tsx", import.meta.url), "utf8")
+const htmlPreview = readFileSync(
+  new URL("../chat/previews/HtmlPreview.tsx", import.meta.url),
+  "utf8"
+)
 const htmlSrcDoc = readFileSync(new URL("../../lib/html-srcdoc.ts", import.meta.url), "utf8")
 const agentRuntime = readFileSync(
   new URL("../../../../main/agent/runtime.ts", import.meta.url),
@@ -85,6 +88,8 @@ describe("persisted active file preview isolation", () => {
     expect(fileViewer).toContain("MAX_HTML_DEPENDENCY_REQUESTS")
     expect(fileViewer).toContain("MAX_HTML_DEPENDENCY_BYTES")
     expect(fileViewer).toContain("readHtmlDependencyFile")
+    expect(fileViewer).toContain("budget.htmlReads.get(resolvedPath)")
+    expect(fileViewer).toContain("budget.htmlReads.set(resolvedPath, pending)")
     expect(fileViewer).toContain("MAX_MARKDOWN_IMAGE_SOURCE_BYTES")
   })
 
@@ -105,11 +110,11 @@ describe("persisted active file preview isolation", () => {
     expect(rendererStyles).toContain(".shiki-content.shiki-content-soft-wrap .line")
   })
 
-  it("renders workspace-tab HTML as static UI while resource previews stay source-only", () => {
+  it("renders workspace-tab HTML in isolation while resource previews stay source-only", () => {
     expect(tabbedPanel).toContain("workspaceFilePreviewModeForPath(activeFile.path)")
     expect(tabbedPanel).toContain("previewMode={activeFilePreviewMode}")
-    expect(tabbedPanel).toContain('activeFilePreviewMode === "preview" ? "workspace-static"')
-    expect(fileViewer).toContain('htmlPreviewPolicy === "workspace-static"')
+    expect(tabbedPanel).toContain('activeFilePreviewMode === "preview" ? "workspace-scripted"')
+    expect(fileViewer).toContain('htmlPreviewPolicy === "workspace-scripted"')
     expect(fileViewer).toContain("!externalFullPath")
     expect(fileViewer).toContain('workspacePathKind === "relative"')
     expect(fileViewer).toContain('previewKind === "html"')
@@ -121,16 +126,14 @@ describe("persisted active file preview isolation", () => {
     expect(rightPanel).not.toContain("onRequestBrowserMode")
     expect(rightPanel).not.toContain("browserPreviewUrl")
     expect(resourcePanelOverlay).not.toContain('setMode("browser")')
-    expect(htmlPreview).toContain("buildStaticHtmlPreviewDocument")
-    expect(htmlPreview).toContain('sandbox=""')
-    expect(htmlPreview).not.toContain('setSrcDocContent(content)')
-    expect(htmlPreview).not.toContain("allow-scripts")
+    expect(htmlPreview).toContain("buildHtmlPreviewDocument")
+    expect(htmlPreview).toContain('sandbox="allow-scripts"')
+    expect(htmlPreview).not.toContain("setSrcDocContent(content)")
     expect(htmlPreview).not.toContain("allow-same-origin")
-    expect(htmlSrcDoc).toContain('"default-src \'none\'"')
-    expect(htmlSrcDoc).toContain("script, iframe, frame, fencedframe, object, embed")
+    expect(htmlSrcDoc).toContain("\"default-src 'none'\"")
+    expect(htmlSrcDoc).toContain("iframe, frame, fencedframe, object, embed")
     expect(htmlSrcDoc).toContain('content.replace(/<\\/style/gi, "\\\\3C /style")')
     expect(htmlSrcDoc).toContain("serialization fixed point")
-    expect(htmlSrcDoc).not.toContain("scriptTags")
   })
 
   it("lets the file viewer own scrolling inside the available right-panel height", () => {

@@ -104,6 +104,14 @@ const TEXTUAL_TOOL_CALL_MARKERS = [
   "<function="
 ]
 
+// DSML can leak as closing tags only, including a tail joined to the preceding
+// prose. A complete invoke/tool_calls closing pair is a stronger signal than
+// a single inline tag, which may just be mentioned in an explanation.
+const DSML_TOOL_LINE_RE =
+  /(^|\n)[ \t*-]*<\/?[｜|]dsml[｜|][ \t]*(?:tool_calls|invoke|parameter)(?=[\s>])/
+const DSML_TOOL_TAIL_RE =
+  /<\/[｜|]dsml[｜|][ \t]*invoke>[ \t\r\n]*<\/[｜|]dsml[｜|][ \t]*tool_calls>\s*$/
+
 /**
  * Models observed emitting an explicit finish signal at least once in this
  * process, keyed by the model name the provider reports.
@@ -295,6 +303,7 @@ function stripCodeSpans(text: string): string {
  *   - the marker must OPEN an unquoted line. A model that emits a call instead of using
  *     the tool API puts it on its own line; prose that mentions one has it mid
  *     sentence ("代码里判断的是 <function=foo> 这种写法").
+ *     DSML also permits its paired closing tags at the end of unquoted prose.
  *
  * This is deliberately biased toward MISSING a real textual call: a miss just
  * returns to "the turn ends normally", which the other defect classes
@@ -303,9 +312,22 @@ function stripCodeSpans(text: string): string {
  */
 export function containsTextualToolCall(text: string): boolean {
   const prose = stripCodeSpans(text).toLowerCase()
-  return TEXTUAL_TOOL_CALL_MARKERS.some((marker) =>
-    new RegExp(`(^|\n)[ \t*-]*${escapeRegExp(marker.toLowerCase())}`).test(prose)
+  if (
+    TEXTUAL_TOOL_CALL_MARKERS.some((marker) =>
+      new RegExp(`(^|\n)[ \t*-]*${escapeRegExp(marker.toLowerCase())}`).test(prose)
+    )
   )
+    return true
+
+  // Keep quoted logs/documentation out of the suffix check as well. Normalize
+  // Markdown escapes only for DSML matching; do not reinterpret arbitrary text
+  // or try to execute incomplete tool arguments recovered from the answer.
+  const dsmlProse = prose
+    .split("\n")
+    .filter((line) => !/^[ \t]*(?:(?:[-*+]|\d+[.)])[ \t]+)*>/.test(line))
+    .join("\n")
+    .replace(/\\([<>_/])/g, "$1")
+  return DSML_TOOL_LINE_RE.test(dsmlProse) || DSML_TOOL_TAIL_RE.test(dsmlProse)
 }
 
 export interface InspectFinalMessageOptions {

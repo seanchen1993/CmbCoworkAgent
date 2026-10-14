@@ -23,6 +23,7 @@ export interface BrowserState {
   isLoading: boolean
   canGoBack: boolean
   canGoForward: boolean
+  zoomFactor: number
   visible: boolean
   created: boolean
   consoleEntries: BrowserConsoleEntry[]
@@ -255,6 +256,7 @@ export interface BrowserProfileImportPreview {
 }
 
 export interface BrowserProfileImportOptions {
+  autoImport?: boolean
   importCookies?: boolean
   profileDirectory?: string
   sourceBrowser: BrowserProfileImportSource

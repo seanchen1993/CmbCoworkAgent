@@ -4,6 +4,7 @@ import {
   mergeStreamingReasoning,
   truncateReasoningForTrace
 } from "../../../shared/model-reasoning"
+import { isPlausibleToolName } from "../../../shared/tool-name"
 import { nowIsoLocal } from "../../util/local-time"
 import { normalizeTraceTokenUsage } from "./token-usage"
 import type { TraceChatMessage, TraceNodeStatus, TraceToolCall, TraceTokenUsage } from "./types"
@@ -199,8 +200,18 @@ export function traceToolCallId(toolCall: TraceToolCallLike | undefined): string
   return typeof toolCall?.id === "string" ? toolCall.id : ""
 }
 
+/**
+ * The name a tool node carries, or "unknown".
+ *
+ * A name that could not be a tool name is treated the same as a missing one. It
+ * reaches here when a model emits a tool call the harness could not parse and
+ * its raw text lands in the name field, and recording it verbatim put that text
+ * into usage statistics as though it were a tool — outranking the real ones,
+ * since the dashboard's filter excludes built-ins by exact name and matched
+ * none of these. See isPlausibleToolName.
+ */
 export function traceToolCallName(toolCall: TraceToolCallLike | undefined): string {
-  return typeof toolCall?.name === "string" && toolCall.name ? toolCall.name : "unknown"
+  return isPlausibleToolName(toolCall?.name) ? toolCall.name : "unknown"
 }
 
 function traceToolCallArgs(toolCall: TraceToolCallLike | undefined): Record<string, unknown> {
@@ -321,13 +332,18 @@ export function recordToolCallTraceNode(input: {
   llmMessageId: string
   parentId?: string
 }): string {
+  // Marked rather than silently renamed to "unknown". A model emitting tool
+  // calls the harness cannot parse is worth being able to see, and cleaning the
+  // usage ranking without leaving a trace of it would hide the very signal that
+  // made the problem visible.
+  const malformed = input.toolCall?.name !== undefined && !isPlausibleToolName(input.toolCall.name)
   return input.tracer.addToolNode({
     name: traceToolCallName(input.toolCall),
     input: traceToolCallArgs(input.toolCall),
     ...(input.parentId ? { parentId: input.parentId } : {}),
     llmMessageId: input.llmMessageId,
     ...(traceToolCallId(input.toolCall) ? { toolCallId: traceToolCallId(input.toolCall) } : {}),
-    metadata: { index: input.index }
+    metadata: { index: input.index, ...(malformed ? { malformedToolName: true } : {}) }
   })
 }
 

@@ -8,6 +8,10 @@ import {
   mergeStreamingReasoning,
   truncateReasoningForTrace
 } from "../../shared/model-reasoning"
+import {
+  STREAM_MESSAGE_CONTENT_MODE_KEY,
+  STREAM_MESSAGE_REASONING_MODE_KEY
+} from "../../shared/stream-message-wire-mode"
 
 function aiChunk(
   content: string,
@@ -24,9 +28,7 @@ function aiChunk(
       kwargs: {
         id: options.id ?? "assistant-1",
         content,
-        ...(options.reasoning === undefined
-          ? {}
-          : { reasoning_content: options.reasoning }),
+        ...(options.reasoning === undefined ? {} : { reasoning_content: options.reasoning }),
         ...(options.toolCalls === undefined ? {} : { tool_calls: options.toolCalls }),
         additional_kwargs: {}
       }
@@ -36,6 +38,72 @@ function aiChunk(
 }
 
 describe("stream message side-effect buffer", () => {
+  it("appends repeated reasoning tokens when their protocol is explicitly delta", () => {
+    const buffer = createStreamMessageSideEffectBuffer()
+    for (const reasoning of ["ha", "ha", "haha"]) {
+      buffer.push(
+        aiChunk("", {
+          reasoning,
+          metadata: { [STREAM_MESSAGE_REASONING_MODE_KEY]: "delta" }
+        })
+      )
+    }
+    const [payload] = buffer.drain()
+    expect(getPremergedStreamSideEffectReasoning(payload)).toBe("hahahaha")
+  })
+
+  it("clears explicit reasoning snapshots and continues from the empty prediction", () => {
+    const buffer = createStreamMessageSideEffectBuffer({ getReasoningSeed: () => "committed" })
+    buffer.push(aiChunk("", { reasoning: "old" }))
+    buffer.push(
+      aiChunk("", {
+        reasoning: "",
+        metadata: { [STREAM_MESSAGE_REASONING_MODE_KEY]: "snapshot" }
+      })
+    )
+    buffer.push(aiChunk("", { reasoning: "fresh" }))
+    const drained = buffer.drain()
+    expect(getPremergedStreamSideEffectReasoning(drained[1])).toBe("")
+    expect(getPremergedStreamSideEffectReasoning(drained[2])).toBe("fresh")
+  })
+
+  it("preserves reasoning when a snapshot tag has no reasoning field", () => {
+    const buffer = createStreamMessageSideEffectBuffer({ getReasoningSeed: () => "committed" })
+    const complete = aiChunk("", {
+      metadata: { [STREAM_MESSAGE_REASONING_MODE_KEY]: "snapshot" }
+    })
+    ;(complete[0] as { id: string[] }).id = ["langchain_core", "messages", "AIMessage"]
+    buffer.push(complete)
+    buffer.push(aiChunk("", { reasoning: "-tail" }))
+    const drained = buffer.drain()
+    expect(getPremergedStreamSideEffectReasoning(drained[0])).toBeUndefined()
+    expect(getPremergedStreamSideEffectReasoning(drained[1])).toBe("committed-tail")
+  })
+
+  it("attaches exact reasoning to unmerged snapshot and tool lifecycle payloads", () => {
+    const buffer = createStreamMessageSideEffectBuffer({ getReasoningSeed: () => "committed" })
+    const rewrite = aiChunk("replacement", {
+      reasoning: "revised",
+      metadata: {
+        [STREAM_MESSAGE_CONTENT_MODE_KEY]: "snapshot",
+        [STREAM_MESSAGE_REASONING_MODE_KEY]: "snapshot"
+      }
+    })
+    const tool = aiChunk("", {
+      reasoning: "",
+      metadata: { [STREAM_MESSAGE_REASONING_MODE_KEY]: "snapshot" },
+      toolCalls: [{ id: "call-1", name: "read_file", args: {} }]
+    })
+    buffer.push(rewrite)
+    buffer.push(tool)
+    const drained = buffer.drain()
+    expect(drained).toEqual([rewrite, tool])
+    expect(drained[0]).toBe(rewrite)
+    expect(drained[1]).toBe(tool)
+    expect(getPremergedStreamSideEffectReasoning(drained[0])).toBe("revised")
+    expect(getPremergedStreamSideEffectReasoning(drained[1])).toBe("")
+  })
+
   it("collapses a very long ordinary token stream into one terminal item", () => {
     const buffer = createStreamMessageSideEffectBuffer()
     for (let index = 0; index < 100_000; index += 1) buffer.push(aiChunk("x"))
@@ -87,9 +155,7 @@ describe("stream message side-effect buffer", () => {
     const drained = buffer.drain()
     expect(drained[1]).toBe(tool)
     expect(
-      drained.map(
-        (payload) => ((payload as unknown[])[0] as { kwargs: { id: string } }).kwargs.id
-      )
+      drained.map((payload) => ((payload as unknown[])[0] as { kwargs: { id: string } }).kwargs.id)
     ).toEqual(["assistant-1", "assistant-1", "assistant-2"])
   })
 
@@ -97,9 +163,9 @@ describe("stream message side-effect buffer", () => {
     const buffer = createStreamMessageSideEffectBuffer()
     for (let index = 0; index < 100_000; index += 1) {
       const payload = aiChunk("")
-      ;(
-        (payload[0] as { kwargs: Record<string, unknown> }).kwargs
-      ).tool_call_chunks = [{ index: 0, args: "x" }]
+      ;(payload[0] as { kwargs: Record<string, unknown> }).kwargs.tool_call_chunks = [
+        { index: 0, args: "x" }
+      ]
       buffer.push(payload)
     }
     const finalToolCall = aiChunk("", {
@@ -117,13 +183,13 @@ describe("stream message side-effect buffer", () => {
     const buffer = createStreamMessageSideEffectBuffer()
     for (let index = 0; index < 10_000; index += 1) {
       const payload = aiChunk("")
-      ;((payload[0] as { kwargs: Record<string, unknown> }).kwargs).content = [
+      ;(payload[0] as { kwargs: Record<string, unknown> }).kwargs.content = [
         { type: "text", text: "x" }
       ]
       buffer.push(payload)
     }
     const structural = aiChunk("")
-    ;((structural[0] as { kwargs: Record<string, unknown> }).kwargs).content = [
+    ;(structural[0] as { kwargs: Record<string, unknown> }).kwargs.content = [
       { type: "tool_use", id: "call-1" }
     ]
     buffer.push(structural)
@@ -150,10 +216,7 @@ describe("stream message side-effect buffer", () => {
 
     let expected = seed
     for (const reasoning of ["-a", "-b", "-c"]) {
-      expected = truncateReasoningForTrace(
-        mergeStreamingReasoning(expected, reasoning),
-        2_000
-      )
+      expected = truncateReasoningForTrace(mergeStreamingReasoning(expected, reasoning), 2_000)
     }
     const drained = buffer.drain()
     expect(drained).toHaveLength(3)

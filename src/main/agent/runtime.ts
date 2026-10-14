@@ -9,6 +9,7 @@ import {
   GENERAL_PURPOSE_SUBAGENT,
   StateBackend
 } from "deepagents"
+import { withModelResponseDiagnostics } from "./model-response-diagnostics"
 import {
   getThreadCheckpointPath,
   deleteThreadCheckpoint,
@@ -349,6 +350,8 @@ import {
   isWorkflowSubagentThreadOf,
   type WorkflowWorktreeIsolationBoundary
 } from "./workflow/types"
+import type { BackgroundNotificationOwner } from "../../shared/internal-notification-turn"
+import { isPlausibleToolName } from "../../shared/tool-name"
 import {
   createTraceCollectorSafely,
   finishTraceInBackground,
@@ -863,8 +866,7 @@ setCurrentRunInjectionNotifier(async (threadId, messages, context) => {
         ? [
             {
               messageId: context.anchorMessage.id,
-              providerSourceId:
-                context.anchorMessage.providerSourceId ?? context.anchorMessage.id,
+              providerSourceId: context.anchorMessage.providerSourceId ?? context.anchorMessage.id,
               role: context.anchorMessage.role,
               providerOccurrence: context.anchorMessage.providerOccurrence
             }
@@ -1503,10 +1505,10 @@ export function createScopedMcpCapabilityService(
       const tabsTool =
         tool.toolName === "browser_tabs"
           ? tool
-          : snapshot.tools.find(
+          : (snapshot.tools.find(
               (candidate) =>
                 candidate.providerKey === tool.providerKey && candidate.toolName === "browser_tabs"
-            ) ?? null
+            ) ?? null)
 
       await autoSelectPlaywrightInAppBrowserTab({
         tool,
@@ -4304,7 +4306,11 @@ export function getModelInstance(
     },
     configuration: {
       baseURL: customConfig.baseUrl,
-      fetch: modelFetch
+      fetch: withModelResponseDiagnostics(
+        modelFetch,
+        { model: resolvedModel, purpose },
+        (diagnostic) => console.log("[Runtime][ModelResponse]", JSON.stringify(diagnostic))
+      )
     }
   }
 
@@ -4401,6 +4407,9 @@ export interface CreateAgentRuntimeOptions {
   managedExecution?: boolean
   /** Turn-local observer invoked only after a Dynamic Workflow launch succeeds. */
   onWorkflowLaunched?: (runId: string) => void
+  /** Recorded on any background task this turn launches — a workflow run or a
+   * coordinator worker. See BackgroundNotificationOwner. */
+  backgroundNotificationOwner?: BackgroundNotificationOwner
   /** Immutable checkout/git boundary for a dynamic-workflow worktree agent.
    * Its workspaceRoot moves only the agent's file view; workspacePath remains
    * the host identity for hooks, thread data, memory and the agent registry. */
@@ -4641,6 +4650,7 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
     onCoordinatorWorkerEvent,
     onCoordinatorNotificationAction,
     onWorkflowLaunched,
+    backgroundNotificationOwner,
     hookTurnId,
     actionStationarityTurnId = hookTurnId,
     onHookSkippedFactory,
@@ -5543,6 +5553,7 @@ The workspace root is: ${fileRoot}`
         workspacePath,
         modelId,
         onLaunched: onWorkflowLaunched,
+        notificationOwner: backgroundNotificationOwner,
         // Run-before approval gate (aligns with Claude Code's "Review dynamic
         // workflow before running"): the model writing a workflow can fan out
         // many file-editing subagents and spend real tokens, so the user
@@ -5937,6 +5948,7 @@ Use the same worker thread context for follow-up instructions. ${scratchpadGuida
     const seenWorkerToolCallKeys = new Set<string>()
     const workerToolNames = new Set<string>()
     let workerToolCallCount = 0
+    let workerMalformedToolCalls = 0
     const workerSkillUsageDetector = new SkillUsageDetector()
     let workerTracer: TraceCollector | undefined
     let workerTraceTerminalRecorded = false
@@ -6095,8 +6107,14 @@ Use the same worker thread context for follow-up instructions. ${scratchpadGuida
             (event) => {
               if (event.type === "tool_call") {
                 workerToolCallCount += 1
-                if (event.toolName) {
+                // The call still counts; only the name is refused. A name that
+                // could not be a tool name is a tool call the model malformed,
+                // and recording it put model text into the usage ranking as if
+                // it were a tool. See isPlausibleToolName.
+                if (isPlausibleToolName(event.toolName)) {
                   workerToolNames.add(event.toolName)
+                } else if (event.toolName) {
+                  workerMalformedToolCalls += 1
                 }
               }
               workerInput.onProgress(event)
@@ -6399,6 +6417,9 @@ Access limits: read-only handoff continuation. Do not modify files, run commands
             tokenUsage,
             toolNames: Array.from(workerToolNames),
             toolCallCount: workerToolCallCount,
+            ...(workerMalformedToolCalls > 0
+              ? { malformedToolCalls: workerMalformedToolCalls }
+              : {}),
             ...(workerReasoning ? { reasoning: workerReasoning } : {})
           }
         })
@@ -6427,7 +6448,10 @@ Access limits: read-only handoff continuation. Do not modify files, run commands
               metadata: {
                 tokenUsage,
                 toolNames: Array.from(workerToolNames),
-                toolCallCount: workerToolCallCount
+                toolCallCount: workerToolCallCount,
+                ...(workerMalformedToolCalls > 0
+                  ? { malformedToolCalls: workerMalformedToolCalls }
+                  : {})
               }
             })
             workerTraceTerminalRecorded = true
@@ -6474,6 +6498,7 @@ Access limits: read-only handoff continuation. Do not modify files, run commands
             prompt: injectSelectedSkillIntoWorkerPrompt(input.prompt, input.selectedSkill),
             selectedSkill: input.selectedSkill,
             runner: coordinatorWorkerRunner,
+            notificationOwner: backgroundNotificationOwner,
             onUpdate: emitCoordinatorWorkerEvent,
             onUpdateKey: `runtime:${threadId}`
           }),
@@ -6497,6 +6522,10 @@ Access limits: read-only handoff continuation. Do not modify files, run commands
             prompt: injectSelectedSkillIntoWorkerPrompt(input.prompt, selectedSkill),
             selectedSkill,
             runner: coordinatorWorkerRunner,
+            // A worker continued from a different surface than the one that
+            // started it changes hands: the summary is owed to whoever is
+            // driving now, not to whoever launched the first turn.
+            notificationOwner: backgroundNotificationOwner,
             onUpdate: emitCoordinatorWorkerEvent,
             onUpdateKey: `runtime:${threadId}`
           })

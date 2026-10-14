@@ -35,7 +35,7 @@ import {
 import { forgetCoordinatorThreadState, hasActiveAgentRun } from "./agent"
 import { nowIsoLocal } from "../util/local-time"
 import { parseGitRemoteInfo } from "../utils/git-remote"
-import { registerGitPanelHandlers } from "./git-panel"
+import { collectSkippedUntrackedGitPanelDirs, registerGitPanelHandlers } from "./git-panel"
 import {
   discoverWorkspaceGitRepositories,
   type DiscoveredGitRepository,
@@ -234,6 +234,7 @@ interface GitPanelDiffStatePayload {
   changedFiles?: string[]
   changedFilesTotal?: number
   omittedFileCount?: number
+  skippedDirs?: string[]
   totals: { additions: number; deletions: number; fileCount: number }
   hasPendingDiff: boolean
   suggestedCommitMessage?: string
@@ -1116,6 +1117,7 @@ const GIT_PANEL_EXCLUDED_UNTRACKED_DIRS = [
 function buildExcludedDirPathspecs(dirs: readonly string[]): string[] {
   return dirs.flatMap((dir) => [`:(exclude)${dir}`, `:(glob,exclude)**/${dir}/**`])
 }
+
 const gitRootCache = new Map<string, TimedPromiseCacheEntry<string | null>>()
 const worktreeCache = new Map<string, TimedPromiseCacheEntry<boolean>>()
 const summaryCache = new Map<string, TimedPromiseCacheEntry<GitPanelSummaryStats>>()
@@ -2627,6 +2629,7 @@ export async function buildGitPanelState(
   changedFiles: string[]
   changedFilesTotal: number
   omittedFileCount: number
+  skippedDirs: string[]
   totals: { additions: number; deletions: number; fileCount: number }
 }> {
   const silent = Boolean(options?.silent)
@@ -2655,6 +2658,7 @@ export async function buildGitPanelState(
       changedFiles: [],
       changedFilesTotal: 0,
       omittedFileCount: 0,
+      skippedDirs: [],
       totals: { additions: 0, deletions: 0, fileCount: 0 }
     }
   }
@@ -2667,12 +2671,15 @@ export async function buildGitPanelState(
   const effectiveUntrackedMode: GitStatusUntrackedMode = filterByTracked
     ? statusUntrackedMode
     : "all"
-  const statusOut = await runStatusPorcelain(worktreePath, statusPathspecs, {
-    silent,
-    untrackedMode: effectiveUntrackedMode,
-    maxBufferBytes: statusMaxBufferBytes,
-    excludeDirs: excludeUntrackedDirs
-  })
+  const [statusOut, skippedDirs] = await Promise.all([
+    runStatusPorcelain(worktreePath, statusPathspecs, {
+      silent,
+      untrackedMode: effectiveUntrackedMode,
+      maxBufferBytes: statusMaxBufferBytes,
+      excludeDirs: excludeUntrackedDirs
+    }),
+    collectSkippedUntrackedGitPanelDirs(worktreePath, excludeUntrackedDirs ?? [], { silent })
+  ])
   const rawChangedFileEntries = await collectChangedFileEntriesFromStatus(
     worktreePath,
     statusOut,
@@ -2701,6 +2708,7 @@ export async function buildGitPanelState(
       changedFiles: [],
       changedFilesTotal: 0,
       omittedFileCount: 0,
+      skippedDirs,
       totals: { additions: 0, deletions: 0, fileCount: 0 }
     }
   }
@@ -2834,6 +2842,7 @@ export async function buildGitPanelState(
     changedFiles,
     changedFilesTotal: displayChangedFiles.length,
     omittedFileCount,
+    skippedDirs,
     totals: {
       additions: totals.additions,
       deletions: totals.deletions,
@@ -3208,6 +3217,7 @@ function createEmptyGitPanelDiffState(
     changedFiles: [],
     changedFilesTotal: 0,
     omittedFileCount: 0,
+    skippedDirs: [],
     totals: { additions: 0, deletions: 0, fileCount: 0 },
     hasPendingDiff: false,
     suggestedCommitMessage: "",
@@ -3503,11 +3513,13 @@ async function buildMultiRepositoryGitPanelDiffState(
 
   const fileGroups: GitPanelFileDiff[][] = []
   const changedFiles: string[] = []
+  const skippedDirs: string[] = []
   let changedFilesTotal = 0
 
   for (const { repo, state } of repoStates) {
     changedFilesTotal += state.changedFilesTotal
     changedFiles.push(...(state.changedFiles ?? []).map((file) => prefixRepositoryPath(repo, file)))
+    skippedDirs.push(...state.skippedDirs.map((dir) => prefixRepositoryPath(repo, dir)))
     const visibleRepoFiles = state.files.map((file) => ({
       ...file,
       path: prefixRepositoryPath(repo, file.path),
@@ -3541,6 +3553,7 @@ async function buildMultiRepositoryGitPanelDiffState(
     changedFiles,
     changedFilesTotal,
     omittedFileCount,
+    skippedDirs,
     totals: {
       additions: visibleTotals.additions,
       deletions: visibleTotals.deletions,
@@ -3618,6 +3631,7 @@ export async function buildGitPanelDiffState(
     changedFiles: state.changedFiles,
     changedFilesTotal,
     omittedFileCount: state.omittedFileCount,
+    skippedDirs: state.skippedDirs,
     totals: state.totals,
     hasPendingDiff: changedFilesTotal > 0,
     suggestedCommitMessage:
@@ -4185,81 +4199,81 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
       const mutationGeneration = workspaceMutationGate.begin(mutationKey)
       let expectedThreadIncarnation: ThreadIncarnation | null = null
       try {
-      const entryThread = threadId ? getThreadCoreSync(threadId) : null
-      expectedThreadIncarnation = entryThread ? captureThreadIncarnation(entryThread) : null
-      const parentWindow = BrowserWindow.fromWebContents(event.sender)
-      if (!threadId) {
-        // Fallback to global setting
+        const entryThread = threadId ? getThreadCoreSync(threadId) : null
+        expectedThreadIncarnation = entryThread ? captureThreadIncarnation(entryThread) : null
+        const parentWindow = BrowserWindow.fromWebContents(event.sender)
+        if (!threadId) {
+          // Fallback to global setting
+          if (newPath) {
+            const ready = await prepareWorkspaceSelectionSandbox(newPath, parentWindow)
+            if (!ready) return null
+            if (!workspaceMutationGate.isCurrent(mutationKey, mutationGeneration)) {
+              return store.get("workspacePath", null) as string | null
+            }
+            store.set("workspacePath", newPath)
+          } else {
+            store.delete("workspacePath")
+          }
+          return newPath
+        }
+
+        const { getThreadCore } = await import("../db")
+        const readCurrentPath = (): string | null => {
+          const currentMetadata = parseThreadMetadata(getThreadCore(threadId)?.metadata)
+          return typeof currentMetadata.workspacePath === "string"
+            ? currentMetadata.workspacePath
+            : null
+        }
+        const isCurrentMutation = (): boolean =>
+          workspaceMutationGate.isCurrent(threadId, mutationGeneration)
+        const thread = getThreadCore(threadId)
+        if (!thread || !expectedThreadIncarnation) return null
+        const workspaceSetIncarnation = expectedThreadIncarnation
+        assertThreadIncarnationCurrent(thread, workspaceSetIncarnation)
+
+        const metadata = thread.metadata ? JSON.parse(thread.metadata) : {}
+        await assertWorkspaceSwitchAllowed(threadId, metadata.workspacePath, newPath)
+        if (!isCurrentMutation()) return readCurrentPath()
         if (newPath) {
           const ready = await prepareWorkspaceSelectionSandbox(newPath, parentWindow)
           if (!ready) return null
-          if (!workspaceMutationGate.isCurrent(mutationKey, mutationGeneration)) {
-            return store.get("workspacePath", null) as string | null
-          }
-          store.set("workspacePath", newPath)
-        } else {
-          store.delete("workspacePath")
-        }
-        return newPath
-      }
-
-      const { getThreadCore } = await import("../db")
-      const readCurrentPath = (): string | null => {
-        const currentMetadata = parseThreadMetadata(getThreadCore(threadId)?.metadata)
-        return typeof currentMetadata.workspacePath === "string"
-          ? currentMetadata.workspacePath
-          : null
-      }
-      const isCurrentMutation = (): boolean =>
-        workspaceMutationGate.isCurrent(threadId, mutationGeneration)
-      const thread = getThreadCore(threadId)
-      if (!thread || !expectedThreadIncarnation) return null
-      const workspaceSetIncarnation = expectedThreadIncarnation
-      assertThreadIncarnationCurrent(thread, workspaceSetIncarnation)
-
-      const metadata = thread.metadata ? JSON.parse(thread.metadata) : {}
-      await assertWorkspaceSwitchAllowed(threadId, metadata.workspacePath, newPath)
-      if (!isCurrentMutation()) return readCurrentPath()
-      if (newPath) {
-        const ready = await prepareWorkspaceSelectionSandbox(newPath, parentWindow)
-        if (!ready) return null
-        if (!isCurrentMutation()) return readCurrentPath()
-        let watcherStart: Promise<"existing" | "started" | "failed" | "superseded"> | undefined
-        let committed = false
-        await workflowRunManager.withThreadTransitionLease(threadId, () =>
-          withThreadRunMutationLock(threadId, async () => {
-            if (!isCurrentMutation()) return
-            const latest = getThreadCore(threadId)
-            if (!latest) throw new Error("Thread not found")
-            assertThreadIncarnationCurrent(latest, workspaceSetIncarnation)
-            const latestMetadata = parseThreadMetadata(latest.metadata)
-            if (
-              !(await assertNoThreadTranscriptBeforeWorkspaceChange(
-                threadId,
-                latestMetadata.workspacePath,
-                newPath,
-                isCurrentMutation
-              ))
-            ) {
-              return
-            }
+          if (!isCurrentMutation()) return readCurrentPath()
+          let watcherStart: Promise<"existing" | "started" | "failed" | "superseded"> | undefined
+          let committed = false
+          await workflowRunManager.withThreadTransitionLease(threadId, () =>
+            withThreadRunMutationLock(threadId, async () => {
+              if (!isCurrentMutation()) return
+              const latest = getThreadCore(threadId)
+              if (!latest) throw new Error("Thread not found")
+              assertThreadIncarnationCurrent(latest, workspaceSetIncarnation)
+              const latestMetadata = parseThreadMetadata(latest.metadata)
+              if (
+                !(await assertNoThreadTranscriptBeforeWorkspaceChange(
+                  threadId,
+                  latestMetadata.workspacePath,
+                  newPath,
+                  isCurrentMutation
+                ))
+              ) {
+                return
+              }
               await assertWorkspaceSwitchAllowed(threadId, latestMetadata.workspacePath, newPath)
-            if (!isCurrentMutation()) return
-            mutateLatestThreadMetadata(threadId, (current) => {
-              bindThreadWorkspace(current, newPath)
+              if (!isCurrentMutation()) return
+              mutateLatestThreadMetadata(threadId, (current) => {
+                bindThreadWorkspace(current, newPath)
+              })
+              // Calling startWatching here advances its generation before releasing the lease. The
+              // potentially slow worker startup is awaited outside so workspace B can supersede A.
+              watcherStart = startWatching(threadId, newPath)
+              committed = true
             })
-            // Calling startWatching here advances its generation before releasing the lease. The
-            // potentially slow worker startup is awaited outside so workspace B can supersede A.
-            watcherStart = startWatching(threadId, newPath)
-            committed = true
-          })
-        )
+          )
 
-        if (!committed) return readCurrentPath()
-        await watcherStart
-        const current = getThreadCore(threadId)
-        assertThreadIncarnationCurrent(current, workspaceSetIncarnation)
-        const currentMetadata = parseThreadMetadata(current?.metadata)
+          if (!committed) return readCurrentPath()
+          await watcherStart
+          const current = getThreadCore(threadId)
+          assertThreadIncarnationCurrent(current, workspaceSetIncarnation)
+          const currentMetadata = parseThreadMetadata(current?.metadata)
           const publication = resolveWorkspaceMutationPublication(
             isCurrentMutation(),
             currentMetadata.workspacePath,
@@ -4268,38 +4282,38 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
           if (!publication.committed) return publication.currentWorkspacePath
           // Only the still-current selection may become the default for a newly created thread.
           store.set("workspacePath", newPath)
-      } else {
-        let committed = false
-        await workflowRunManager.withThreadTransitionLease(threadId, () =>
-          withThreadRunMutationLock(threadId, async () => {
-            if (!isCurrentMutation()) return
-            const latest = getThreadCore(threadId)
-            if (!latest) throw new Error("Thread not found")
-            assertThreadIncarnationCurrent(latest, workspaceSetIncarnation)
-            const latestMetadata = parseThreadMetadata(latest.metadata)
-            if (
-              !(await assertNoThreadTranscriptBeforeWorkspaceChange(
-                threadId,
-                latestMetadata.workspacePath,
-                newPath,
-                isCurrentMutation
-              ))
-            ) {
-              return
-            }
+        } else {
+          let committed = false
+          await workflowRunManager.withThreadTransitionLease(threadId, () =>
+            withThreadRunMutationLock(threadId, async () => {
+              if (!isCurrentMutation()) return
+              const latest = getThreadCore(threadId)
+              if (!latest) throw new Error("Thread not found")
+              assertThreadIncarnationCurrent(latest, workspaceSetIncarnation)
+              const latestMetadata = parseThreadMetadata(latest.metadata)
+              if (
+                !(await assertNoThreadTranscriptBeforeWorkspaceChange(
+                  threadId,
+                  latestMetadata.workspacePath,
+                  newPath,
+                  isCurrentMutation
+                ))
+              ) {
+                return
+              }
               await assertWorkspaceSwitchAllowed(threadId, latestMetadata.workspacePath, newPath)
-            if (!isCurrentMutation()) return
-            mutateLatestThreadMetadata(threadId, (current) => {
-              bindThreadWorkspace(current, newPath)
+              if (!isCurrentMutation()) return
+              mutateLatestThreadMetadata(threadId, (current) => {
+                bindThreadWorkspace(current, newPath)
+              })
+              stopWatching(threadId)
+              committed = true
             })
-            stopWatching(threadId)
-            committed = true
-          })
-        )
-        if (!committed) return readCurrentPath()
-      }
+          )
+          if (!committed) return readCurrentPath()
+        }
 
-      return newPath
+        return newPath
       } finally {
         workspaceMutationGate.finish(mutationKey, mutationGeneration)
       }
@@ -4312,124 +4326,124 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
     const mutationGeneration = workspaceMutationGate.begin(mutationKey)
     let expectedThreadIncarnation: ThreadIncarnation | null = null
     try {
-    const entryThread = threadId ? getThreadCoreSync(threadId) : null
-    expectedThreadIncarnation = entryThread ? captureThreadIncarnation(entryThread) : null
-    const parentWindow = BrowserWindow.fromWebContents(event.sender)
-    // 选择器默认路径优先级：
-    // 1) 当前线程已绑定的 workspacePath
-    // 2) 全局记录的最近 workspacePath
-    // 3) 让系统对话框自行决定默认目录
-    let preferredPath: string | null = null
+      const entryThread = threadId ? getThreadCoreSync(threadId) : null
+      expectedThreadIncarnation = entryThread ? captureThreadIncarnation(entryThread) : null
+      const parentWindow = BrowserWindow.fromWebContents(event.sender)
+      // 选择器默认路径优先级：
+      // 1) 当前线程已绑定的 workspacePath
+      // 2) 全局记录的最近 workspacePath
+      // 3) 让系统对话框自行决定默认目录
+      let preferredPath: string | null = null
 
-    if (threadId) {
-      const { getThreadCore } = await import("../db")
+      if (threadId) {
+        const { getThreadCore } = await import("../db")
         if (!workspaceMutationGate.isCurrent(threadId, mutationGeneration)) {
-        const currentMetadata = parseThreadMetadata(getThreadCore(threadId)?.metadata)
-        return typeof currentMetadata.workspacePath === "string"
-          ? currentMetadata.workspacePath
-          : null
-      }
-      const thread = getThreadCore(threadId)
-      if (!thread) return null
-      if (!expectedThreadIncarnation) return null
-      assertThreadIncarnationCurrent(thread, expectedThreadIncarnation)
-      if (thread?.metadata) {
-        try {
-          const metadata = JSON.parse(thread.metadata) as Record<string, unknown>
+          const currentMetadata = parseThreadMetadata(getThreadCore(threadId)?.metadata)
+          return typeof currentMetadata.workspacePath === "string"
+            ? currentMetadata.workspacePath
+            : null
+        }
+        const thread = getThreadCore(threadId)
+        if (!thread) return null
+        if (!expectedThreadIncarnation) return null
+        assertThreadIncarnationCurrent(thread, expectedThreadIncarnation)
+        if (thread?.metadata) {
+          try {
+            const metadata = JSON.parse(thread.metadata) as Record<string, unknown>
             preferredPath =
               typeof metadata.workspacePath === "string" ? metadata.workspacePath : null
-        } catch {
-          preferredPath = null
+          } catch {
+            preferredPath = null
+          }
         }
       }
-    }
 
-    if (!preferredPath) {
-      const storedPath = store.get("workspacePath", null)
-      preferredPath = typeof storedPath === "string" ? storedPath : null
-    }
-
-    // UNC probes can be slow; never block Electron main with existsSync here.
-    let defaultPath: string | undefined
-    if (preferredPath) {
-      try {
-        await fs.access(preferredPath)
-        defaultPath = preferredPath
-      } catch {
-        defaultPath = undefined
+      if (!preferredPath) {
+        const storedPath = store.get("workspacePath", null)
+        preferredPath = typeof storedPath === "string" ? storedPath : null
       }
-    }
 
-    const result = await dialog.showOpenDialog({
-      properties: ["openDirectory", "createDirectory"],
-      title: "选择工作区文件夹",
-      message: "请选择代理要工作的文件夹",
-      defaultPath
-    })
-
-    if (result.canceled || result.filePaths.length === 0) {
-      return null
-    }
-
-    const selectedPath = result.filePaths[0]
-
-    if (threadId) {
-      const { getThreadCore } = await import("../db")
-      const readCurrentPath = (): string | null => {
-        const currentMetadata = parseThreadMetadata(getThreadCore(threadId)?.metadata)
-        return typeof currentMetadata.workspacePath === "string"
-          ? currentMetadata.workspacePath
-          : null
+      // UNC probes can be slow; never block Electron main with existsSync here.
+      let defaultPath: string | undefined
+      if (preferredPath) {
+        try {
+          await fs.access(preferredPath)
+          defaultPath = preferredPath
+        } catch {
+          defaultPath = undefined
+        }
       }
-      const isCurrentMutation = (): boolean =>
-        workspaceMutationGate.isCurrent(threadId, mutationGeneration)
-      if (!isCurrentMutation()) return readCurrentPath()
-      const thread = getThreadCore(threadId)
-      if (!expectedThreadIncarnation) throw new Error("Thread not found")
-      const workspaceSelectIncarnation = expectedThreadIncarnation
-      assertThreadIncarnationCurrent(thread, workspaceSelectIncarnation)
-      if (thread) {
-        const metadata = thread.metadata ? JSON.parse(thread.metadata) : {}
-        await assertWorkspaceSwitchAllowed(threadId, metadata.workspacePath, selectedPath)
+
+      const result = await dialog.showOpenDialog({
+        properties: ["openDirectory", "createDirectory"],
+        title: "选择工作区文件夹",
+        message: "请选择代理要工作的文件夹",
+        defaultPath
+      })
+
+      if (result.canceled || result.filePaths.length === 0) {
+        return null
+      }
+
+      const selectedPath = result.filePaths[0]
+
+      if (threadId) {
+        const { getThreadCore } = await import("../db")
+        const readCurrentPath = (): string | null => {
+          const currentMetadata = parseThreadMetadata(getThreadCore(threadId)?.metadata)
+          return typeof currentMetadata.workspacePath === "string"
+            ? currentMetadata.workspacePath
+            : null
+        }
+        const isCurrentMutation = (): boolean =>
+          workspaceMutationGate.isCurrent(threadId, mutationGeneration)
         if (!isCurrentMutation()) return readCurrentPath()
-        const ready = await prepareWorkspaceSelectionSandbox(selectedPath, parentWindow)
-        if (!ready) return null
-        if (!isCurrentMutation()) return readCurrentPath()
-        let watcherStart: Promise<"existing" | "started" | "failed" | "superseded"> | undefined
-        let committed = false
-        await workflowRunManager.withThreadTransitionLease(threadId, () =>
-          withThreadRunMutationLock(threadId, async () => {
-            if (!isCurrentMutation()) return
-            const latest = getThreadCore(threadId)
-            if (!latest) throw new Error("Thread not found")
-            assertThreadIncarnationCurrent(latest, workspaceSelectIncarnation)
-            const latestMetadata = parseThreadMetadata(latest.metadata)
-            if (
-              !(await assertNoThreadTranscriptBeforeWorkspaceChange(
+        const thread = getThreadCore(threadId)
+        if (!expectedThreadIncarnation) throw new Error("Thread not found")
+        const workspaceSelectIncarnation = expectedThreadIncarnation
+        assertThreadIncarnationCurrent(thread, workspaceSelectIncarnation)
+        if (thread) {
+          const metadata = thread.metadata ? JSON.parse(thread.metadata) : {}
+          await assertWorkspaceSwitchAllowed(threadId, metadata.workspacePath, selectedPath)
+          if (!isCurrentMutation()) return readCurrentPath()
+          const ready = await prepareWorkspaceSelectionSandbox(selectedPath, parentWindow)
+          if (!ready) return null
+          if (!isCurrentMutation()) return readCurrentPath()
+          let watcherStart: Promise<"existing" | "started" | "failed" | "superseded"> | undefined
+          let committed = false
+          await workflowRunManager.withThreadTransitionLease(threadId, () =>
+            withThreadRunMutationLock(threadId, async () => {
+              if (!isCurrentMutation()) return
+              const latest = getThreadCore(threadId)
+              if (!latest) throw new Error("Thread not found")
+              assertThreadIncarnationCurrent(latest, workspaceSelectIncarnation)
+              const latestMetadata = parseThreadMetadata(latest.metadata)
+              if (
+                !(await assertNoThreadTranscriptBeforeWorkspaceChange(
+                  threadId,
+                  latestMetadata.workspacePath,
+                  selectedPath,
+                  isCurrentMutation
+                ))
+              ) {
+                return
+              }
+              await assertWorkspaceSwitchAllowed(
                 threadId,
                 latestMetadata.workspacePath,
-                selectedPath,
-                isCurrentMutation
-              ))
-            ) {
-              return
-            }
-            await assertWorkspaceSwitchAllowed(
-              threadId,
-              latestMetadata.workspacePath,
-              selectedPath
-            )
-            if (!isCurrentMutation()) return
-            mutateLatestThreadMetadata(threadId, (current) => {
-              bindThreadWorkspace(current, selectedPath)
+                selectedPath
+              )
+              if (!isCurrentMutation()) return
+              mutateLatestThreadMetadata(threadId, (current) => {
+                bindThreadWorkspace(current, selectedPath)
+              })
+              watcherStart = startWatching(threadId, selectedPath)
+              committed = true
             })
-            watcherStart = startWatching(threadId, selectedPath)
-            committed = true
-          })
-        )
+          )
 
-        if (!committed) return readCurrentPath()
-        await watcherStart
+          if (!committed) return readCurrentPath()
+          await watcherStart
           const current = getThreadCore(threadId)
           assertThreadIncarnationCurrent(current, workspaceSelectIncarnation)
           const currentMetadata = parseThreadMetadata(current?.metadata)
@@ -4441,20 +4455,20 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
           if (!publication.committed) return publication.currentWorkspacePath
           store.set("workspacePath", selectedPath)
           return selectedPath
+        }
+      } else {
+        const ready = await prepareWorkspaceSelectionSandbox(selectedPath, parentWindow)
+        if (!ready) return null
+        if (!workspaceMutationGate.isCurrent(mutationKey, mutationGeneration)) {
+          return store.get("workspacePath", null) as string | null
+        }
       }
-    } else {
-      const ready = await prepareWorkspaceSelectionSandbox(selectedPath, parentWindow)
-      if (!ready) return null
-      if (!workspaceMutationGate.isCurrent(mutationKey, mutationGeneration)) {
-        return store.get("workspacePath", null) as string | null
-      }
-    }
 
       // Thread-scoped selections publish their recent workspace immediately after
       // watcher revalidation above. Only the legacy global path reaches here.
       store.set("workspacePath", selectedPath)
 
-    return selectedPath
+      return selectedPath
     } finally {
       workspaceMutationGate.finish(mutationKey, mutationGeneration)
     }
@@ -4696,16 +4710,16 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
           // by manual create/rollback and workflow provisioning. A stale picker
           // snapshot can no longer remove a path that was replaced meanwhile.
           const worktrees = await listWorktrees(latestGitRoot)
-        const target = worktrees.find(
+          const target = worktrees.find(
             (item) =>
               path.resolve(item.path) === resolvedPath ||
               path.normalize(item.path) === path.normalize(worktreePath)
-        )
+          )
           if (!target) throw new Error("指定的 Worktree 不属于当前仓库")
           if (target.isMain) throw new Error("不能删除主 Worktree")
           if (path.resolve(latestWorkspacePath) === resolvedPath) {
             throw new Error("不能删除当前正在使用的 Worktree")
-        }
+          }
 
           // Ownership is persisted before workflow `git worktree add`. Read the
           // fail-closed manifest state under the same repository lock so a
@@ -4716,7 +4730,7 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
           const manifestState = await listWorkflowWorktreeRecordsForPrune(repository.commonDir)
           if (!manifestState.reliable) {
             throw new Error("工作流 Worktree 所有权记录不完整，拒绝执行破坏性删除")
-        }
+          }
           const managedOwnership = findBlockingWorkflowWorktreeOwnership(
             manifestState.records,
             target.path
@@ -4740,7 +4754,7 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
             throw new Error(
               `该 Worktree 正被任务 ${bindingConflict.threadId} 使用，请先切换该任务的工作区。`
             )
-        }
+          }
           const activeWorkflowOwner = workflowRunManager.activeManagedWorktreeOwner(target.path)
           if (activeWorkflowOwner) {
             throw new Error(
@@ -4807,25 +4821,25 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
         isCurrent: (generation) => workspaceMutationGate.isCurrent(threadId, generation),
         finish: (generation) => workspaceMutationGate.finish(threadId, generation),
         run: async (mutationGeneration) => {
-      const entryThread =
-        typeof threadId === "string" && threadId ? getThreadCoreSync(threadId) : null
-      const expectedThreadIncarnation = entryThread
-        ? captureThreadIncarnation(entryThread)
-        : null
-      const parentWindow = BrowserWindow.fromWebContents(event.sender)
-      let created = false
+          const entryThread =
+            typeof threadId === "string" && threadId ? getThreadCoreSync(threadId) : null
+          const expectedThreadIncarnation = entryThread
+            ? captureThreadIncarnation(entryThread)
+            : null
+          const parentWindow = BrowserWindow.fromWebContents(event.sender)
+          let created = false
           let creationAttempted = false
-      let bound = false
-      let worktreePath = ""
+          let bound = false
+          let worktreePath = ""
           let baseBranch = ""
           let baseCommit = ""
           let branchWasAbsentBeforeAttempt = false
-      let watcherStart: Promise<"existing" | "started" | "failed" | "superseded"> | undefined
-      const isCurrentMutation = (): boolean =>
-        workspaceMutationGate.isCurrent(threadId, mutationGeneration)
-      const rollbackCreatedWorktree = async (): Promise<string | null> => {
+          let watcherStart: Promise<"existing" | "started" | "failed" | "superseded"> | undefined
+          const isCurrentMutation = (): boolean =>
+            workspaceMutationGate.isCurrent(threadId, mutationGeneration)
+          const rollbackCreatedWorktree = async (): Promise<string | null> => {
             if ((!created && !creationAttempted) || !worktreePath || !safeBranch) return null
-        try {
+            try {
               let retainedByDurableBinding = false
               await withGitWorktreeRepositoryLock(gitRoot, async () => {
                 // A failed/stale response is not permission to remove a checkout
@@ -4859,80 +4873,80 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
                 })
               })
               if (retainedByDurableBinding) return null
-          created = false
+              created = false
               creationAttempted = false
-          return null
-        } catch (error) {
-          return `自动清理未绑定 Worktree 失败，请手动检查 ${worktreePath}：${
+              return null
+            } catch (error) {
+              return `自动清理未绑定 Worktree 失败，请手动检查 ${worktreePath}：${
                 error instanceof Error ? error.message : String(error)
               }`
-        }
-      }
+            }
+          }
 
-      try {
-        const { getThreadCore } = await import("../db")
-        const initialThread = getThreadCore(threadId)
-        if (!initialThread || !expectedThreadIncarnation) {
-          return { success: false, error: "线程不存在" }
-        }
-        assertThreadIncarnationCurrent(initialThread, expectedThreadIncarnation)
-        const initialMetadata = parseThreadMetadata(initialThread.metadata)
-        const initialWorkspacePath =
+          try {
+            const { getThreadCore } = await import("../db")
+            const initialThread = getThreadCore(threadId)
+            if (!initialThread || !expectedThreadIncarnation) {
+              return { success: false, error: "线程不存在" }
+            }
+            assertThreadIncarnationCurrent(initialThread, expectedThreadIncarnation)
+            const initialMetadata = parseThreadMetadata(initialThread.metadata)
+            const initialWorkspacePath =
               typeof initialMetadata.workspacePath === "string"
                 ? initialMetadata.workspacePath
                 : null
-        if (!initialWorkspacePath) return { success: false, error: "当前线程尚未绑定工作区" }
+            if (!initialWorkspacePath) return { success: false, error: "当前线程尚未绑定工作区" }
 
-        const actualGitRoot = await getGitRoot(initialWorkspacePath)
-        if (!actualGitRoot || !workspaceIdentityEquals(actualGitRoot, gitRoot)) {
-          return { success: false, error: "请求的 Git 仓库与当前线程工作区不匹配" }
-        }
-        if (!isCurrentMutation()) {
-          return { success: false, error: "工作区请求已被更新的操作取代" }
-        }
-
-        const repoName = path.basename(gitRoot)
-        const baseDir = path.join(gitRoot, "..")
-        const baseName = `${repoName}-wt-${safeBranch.replace(/\//g, "-")}`
-        worktreePath = path.join(baseDir, baseName)
-        if (!isCurrentMutation()) {
-          return { success: false, error: "工作区请求已被更新的操作取代" }
-        }
-
-        // Preflight under the same lock order used by invoke publication. No Git
-        // side effect begins unless the current thread is switchable right now.
-        let preflightPassed = false
-        await workflowRunManager.withThreadTransitionLease(threadId, () =>
-          withThreadRunMutationLock(threadId, async () => {
-            if (!isCurrentMutation()) return
-            const latest = getThreadCore(threadId)
-            if (!latest) throw new Error("线程不存在")
-            assertThreadIncarnationCurrent(latest, expectedThreadIncarnation)
-            const latestMetadata = parseThreadMetadata(latest.metadata)
-            if (!workspaceIdentityEquals(latestMetadata.workspacePath, initialWorkspacePath)) {
-              return
+            const actualGitRoot = await getGitRoot(initialWorkspacePath)
+            if (!actualGitRoot || !workspaceIdentityEquals(actualGitRoot, gitRoot)) {
+              return { success: false, error: "请求的 Git 仓库与当前线程工作区不匹配" }
             }
-            if (
-              !(await assertNoThreadTranscriptBeforeWorkspaceChange(
-                threadId,
-                latestMetadata.workspacePath,
-                worktreePath,
-                isCurrentMutation
-              ))
-            ) {
-              return
+            if (!isCurrentMutation()) {
+              return { success: false, error: "工作区请求已被更新的操作取代" }
             }
-            await assertWorkspaceSwitchAllowed(
-              threadId,
-              latestMetadata.workspacePath,
-              worktreePath
+
+            const repoName = path.basename(gitRoot)
+            const baseDir = path.join(gitRoot, "..")
+            const baseName = `${repoName}-wt-${safeBranch.replace(/\//g, "-")}`
+            worktreePath = path.join(baseDir, baseName)
+            if (!isCurrentMutation()) {
+              return { success: false, error: "工作区请求已被更新的操作取代" }
+            }
+
+            // Preflight under the same lock order used by invoke publication. No Git
+            // side effect begins unless the current thread is switchable right now.
+            let preflightPassed = false
+            await workflowRunManager.withThreadTransitionLease(threadId, () =>
+              withThreadRunMutationLock(threadId, async () => {
+                if (!isCurrentMutation()) return
+                const latest = getThreadCore(threadId)
+                if (!latest) throw new Error("线程不存在")
+                assertThreadIncarnationCurrent(latest, expectedThreadIncarnation)
+                const latestMetadata = parseThreadMetadata(latest.metadata)
+                if (!workspaceIdentityEquals(latestMetadata.workspacePath, initialWorkspacePath)) {
+                  return
+                }
+                if (
+                  !(await assertNoThreadTranscriptBeforeWorkspaceChange(
+                    threadId,
+                    latestMetadata.workspacePath,
+                    worktreePath,
+                    isCurrentMutation
+                  ))
+                ) {
+                  return
+                }
+                await assertWorkspaceSwitchAllowed(
+                  threadId,
+                  latestMetadata.workspacePath,
+                  worktreePath
+                )
+                if (isCurrentMutation()) preflightPassed = true
+              })
             )
-            if (isCurrentMutation()) preflightPassed = true
-          })
-        )
-        if (!preflightPassed) {
-          return { success: false, error: "工作区请求已被更新的操作取代" }
-        }
+            if (!preflightPassed) {
+              return { success: false, error: "工作区请求已被更新的操作取代" }
+            }
 
             await withGitWorktreeRepositoryLock(gitRoot, async () => {
               if (!isCurrentMutation()) throw new Error("工作区请求已被更新的操作取代")
@@ -4942,7 +4956,7 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
                 throw new Error(
                   `已达到 Worktree 数量上限（${MAX_WORKTREES} 个），请先删除不用的 Worktree 后再创建。`
                 )
-        }
+              }
               const branchConflict = worktrees.find((item) => item.branch === safeBranch)
               if (branchConflict) {
                 throw new Error(
@@ -4978,64 +4992,64 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
                 ["worktree", "add", "-b", safeBranch, worktreePath, baseCommit],
                 { timeoutMs: getWorkflowWorktreeTimeoutMs() }
               )
-        created = true
+              created = true
             })
-        const sandboxReady = await prepareWorkspaceSelectionSandbox(worktreePath, parentWindow)
-        if (!sandboxReady) throw new Error("Worktree 已创建，但沙箱准备失败")
+            const sandboxReady = await prepareWorkspaceSelectionSandbox(worktreePath, parentWindow)
+            if (!sandboxReady) throw new Error("Worktree 已创建，但沙箱准备失败")
 
-        await workflowRunManager.withThreadTransitionLease(threadId, () =>
-          withThreadRunMutationLock(threadId, async () => {
-            if (!isCurrentMutation()) return
-            const latest = getThreadCore(threadId)
-            if (!latest) throw new Error("线程不存在")
-            assertThreadIncarnationCurrent(latest, expectedThreadIncarnation)
-            const latestMetadata = parseThreadMetadata(latest.metadata)
+            await workflowRunManager.withThreadTransitionLease(threadId, () =>
+              withThreadRunMutationLock(threadId, async () => {
+                if (!isCurrentMutation()) return
+                const latest = getThreadCore(threadId)
+                if (!latest) throw new Error("线程不存在")
+                assertThreadIncarnationCurrent(latest, expectedThreadIncarnation)
+                const latestMetadata = parseThreadMetadata(latest.metadata)
                 if (!workspaceIdentityEquals(latestMetadata.workspacePath, initialWorkspacePath))
                   return
-            if (
-              !(await assertNoThreadTranscriptBeforeWorkspaceChange(
-                threadId,
-                latestMetadata.workspacePath,
-                worktreePath,
-                isCurrentMutation
-              ))
-            ) {
-              return
-            }
-            await assertWorkspaceSwitchAllowed(
-              threadId,
-              latestMetadata.workspacePath,
-              worktreePath
-            )
-            if (!isCurrentMutation()) return
-            mutateLatestThreadMetadata(threadId, (metadata) => {
-              bindThreadWorktree(metadata, {
-                workspacePath: worktreePath,
-                gitRoot,
-                branch: safeBranch,
-                baseBranch,
-                baseCommit
+                if (
+                  !(await assertNoThreadTranscriptBeforeWorkspaceChange(
+                    threadId,
+                    latestMetadata.workspacePath,
+                    worktreePath,
+                    isCurrentMutation
+                  ))
+                ) {
+                  return
+                }
+                await assertWorkspaceSwitchAllowed(
+                  threadId,
+                  latestMetadata.workspacePath,
+                  worktreePath
+                )
+                if (!isCurrentMutation()) return
+                mutateLatestThreadMetadata(threadId, (metadata) => {
+                  bindThreadWorktree(metadata, {
+                    workspacePath: worktreePath,
+                    gitRoot,
+                    branch: safeBranch,
+                    baseBranch,
+                    baseCommit
+                  })
+                })
+                watcherStart = startWatching(threadId, worktreePath)
+                bound = true
               })
-            })
-            watcherStart = startWatching(threadId, worktreePath)
-            bound = true
-          })
-        )
-        if (!bound) throw new Error("工作区请求已被更新的操作取代")
-        await watcherStart
-        const currentThread = getThreadCore(threadId)
-        assertThreadIncarnationCurrent(currentThread, expectedThreadIncarnation)
-        const currentMetadata = parseThreadMetadata(currentThread?.metadata)
+            )
+            if (!bound) throw new Error("工作区请求已被更新的操作取代")
+            await watcherStart
+            const currentThread = getThreadCore(threadId)
+            assertThreadIncarnationCurrent(currentThread, expectedThreadIncarnation)
+            const currentMetadata = parseThreadMetadata(currentThread?.metadata)
             const publication = resolveCreatedWorktreePublication(
               isCurrentMutation(),
               currentMetadata,
               {
                 workspacePath: worktreePath,
                 gitRoot,
-          branch: safeBranch,
-          baseBranch,
-          baseCommit
-        }
+                branch: safeBranch,
+                baseBranch,
+                baseCommit
+              }
             )
             if (!publication.durablyBound) {
               // The newer intent actually moved the durable binding elsewhere. The
@@ -5052,16 +5066,16 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
               baseBranch: publication.baseBranch,
               baseCommit: publication.baseCommit
             }
-      } catch (error) {
-        const cleanupError = await rollbackCreatedWorktree()
-        return {
-          success: false,
-          error: [error instanceof Error ? error.message : "创建 Worktree 失败", cleanupError]
-            .filter(Boolean)
-            .join("；")
+          } catch (error) {
+            const cleanupError = await rollbackCreatedWorktree()
+            return {
+              success: false,
+              error: [error instanceof Error ? error.message : "创建 Worktree 失败", cleanupError]
+                .filter(Boolean)
+                .join("；")
+            }
+          }
         }
-      }
-    }
       })
     }
   )
@@ -5227,21 +5241,21 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
       }
     ) =>
       gitReadRequestCoordinator.run(event.sender, "panel", "meta", threadId, async () => {
-      let context: Awaited<ReturnType<typeof resolveThreadWorkspaceContext>> | null = null
-      try {
-        context = await resolveThreadWorkspaceContext(threadId, {
-          webContentsId: event.sender.id,
-          requestScope: "git-panel-meta"
-        })
-        return await buildGitPanelMetaState(threadId, context, options)
-      } catch (e) {
-        return createEmptyGitPanelMetaState(threadId, {
-          isWorktree: Boolean(context?.isWorktree),
-          isGitRepo: Boolean(context?.isGitRepo),
-          error: e instanceof Error ? e.message : "加载 Git 仓库信息失败"
-        })
-      }
-    })
+        let context: Awaited<ReturnType<typeof resolveThreadWorkspaceContext>> | null = null
+        try {
+          context = await resolveThreadWorkspaceContext(threadId, {
+            webContentsId: event.sender.id,
+            requestScope: "git-panel-meta"
+          })
+          return await buildGitPanelMetaState(threadId, context, options)
+        } catch (e) {
+          return createEmptyGitPanelMetaState(threadId, {
+            isWorktree: Boolean(context?.isWorktree),
+            isGitRepo: Boolean(context?.isGitRepo),
+            error: e instanceof Error ? e.message : "加载 Git 仓库信息失败"
+          })
+        }
+      })
   )
 
   ipcMain.handle(
@@ -5263,21 +5277,21 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
       }
     ) =>
       gitReadRequestCoordinator.run(event.sender, "panel", "diffs", threadId, async () => {
-      let context: Awaited<ReturnType<typeof resolveThreadWorkspaceContext>> | null = null
-      try {
-        context = await resolveThreadWorkspaceContext(threadId, {
-          webContentsId: event.sender.id,
-          requestScope: "git-panel-diffs"
-        })
-        return await buildGitPanelDiffState(threadId, context, options)
-      } catch (e) {
-        return createEmptyGitPanelDiffState(threadId, {
-          isWorktree: Boolean(context?.isWorktree),
-          isGitRepo: Boolean(context?.isGitRepo),
-          error: e instanceof Error ? e.message : "加载 Git 文件变更失败"
-        })
-      }
-    })
+        let context: Awaited<ReturnType<typeof resolveThreadWorkspaceContext>> | null = null
+        try {
+          context = await resolveThreadWorkspaceContext(threadId, {
+            webContentsId: event.sender.id,
+            requestScope: "git-panel-diffs"
+          })
+          return await buildGitPanelDiffState(threadId, context, options)
+        } catch (e) {
+          return createEmptyGitPanelDiffState(threadId, {
+            isWorktree: Boolean(context?.isWorktree),
+            isGitRepo: Boolean(context?.isGitRepo),
+            error: e instanceof Error ? e.message : "加载 Git 文件变更失败"
+          })
+        }
+      })
   )
 
   ipcMain.handle(
@@ -5291,21 +5305,21 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
       }: { threadId: string; filePath: string; options?: { worktreePath?: string } }
     ) =>
       gitReadRequestCoordinator.run(event.sender, "panel", "file-diff", threadId, async () => {
-      let context: Awaited<ReturnType<typeof resolveThreadWorkspaceContext>> | null = null
-      try {
-        context = await resolveThreadWorkspaceContext(threadId, {
-          webContentsId: event.sender.id,
-          requestScope: "git-panel-file-diff"
-        })
-        return await buildGitPanelFileDiffState(threadId, context, filePath, options)
-      } catch (e) {
-        return createEmptyGitPanelFileDiffState(threadId, {
-          isWorktree: Boolean(context?.isWorktree),
-          isGitRepo: Boolean(context?.isGitRepo),
-          error: e instanceof Error ? e.message : "加载文件 diff 失败"
-        })
-      }
-    })
+        let context: Awaited<ReturnType<typeof resolveThreadWorkspaceContext>> | null = null
+        try {
+          context = await resolveThreadWorkspaceContext(threadId, {
+            webContentsId: event.sender.id,
+            requestScope: "git-panel-file-diff"
+          })
+          return await buildGitPanelFileDiffState(threadId, context, filePath, options)
+        } catch (e) {
+          return createEmptyGitPanelFileDiffState(threadId, {
+            isWorktree: Boolean(context?.isWorktree),
+            isGitRepo: Boolean(context?.isGitRepo),
+            error: e instanceof Error ? e.message : "加载文件 diff 失败"
+          })
+        }
+      })
   )
 
   ipcMain.handle(
@@ -5317,29 +5331,29 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
         threadId,
         threadId,
         async () => {
-      let context: Awaited<ReturnType<typeof resolveThreadWorkspaceContext>> | null = null
-      try {
-        context = await resolveThreadWorkspaceContext(threadId, {
-          webContentsId: event.sender.id,
-          // A workspace event can request summaries for several tasks at once.
-          // Keep those metadata reads independent; a shared latest-wins scope
-          // would make task B cancel task A before either Git projection starts.
-          requestScope: `git-changed-summary:${threadId}`
-        })
-        return await buildGitChangedFilesSummary(threadId, context)
-      } catch (e) {
-        return createEmptyGitChangedFilesSummary(threadId, {
-          isWorktree: Boolean(context?.isWorktree),
-          isGitRepo: Boolean(context?.isGitRepo),
-          error: e instanceof Error ? e.message : "加载 Git 文件列表失败"
-        })
-      }
+          let context: Awaited<ReturnType<typeof resolveThreadWorkspaceContext>> | null = null
+          try {
+            context = await resolveThreadWorkspaceContext(threadId, {
+              webContentsId: event.sender.id,
+              // A workspace event can request summaries for several tasks at once.
+              // Keep those metadata reads independent; a shared latest-wins scope
+              // would make task B cancel task A before either Git projection starts.
+              requestScope: `git-changed-summary:${threadId}`
+            })
+            return await buildGitChangedFilesSummary(threadId, context)
+          } catch (e) {
+            return createEmptyGitChangedFilesSummary(threadId, {
+              isWorktree: Boolean(context?.isWorktree),
+              isGitRepo: Boolean(context?.isGitRepo),
+              error: e instanceof Error ? e.message : "加载 Git 文件列表失败"
+            })
+          }
         }
-  )
+      )
   )
 
   ipcMain.handle("workspace:getGitPanelState", async (event, { threadId }: { threadId: string }) =>
-      gitReadRequestCoordinator.run(event.sender, "panel", "state", threadId, async () => {
+    gitReadRequestCoordinator.run(event.sender, "panel", "state", threadId, async () => {
       let context: Awaited<ReturnType<typeof resolveThreadWorkspaceContext>> | null = null
       try {
         context = await resolveThreadWorkspaceContext(threadId, {
@@ -5360,6 +5374,7 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
           changedFiles: diff.changedFiles,
           changedFilesTotal: diff.changedFilesTotal ?? meta.changedFilesTotal,
           omittedFileCount: diff.omittedFileCount,
+          skippedDirs: diff.skippedDirs,
           totals: diff.totals,
           hasPendingDiff: diff.hasPendingDiff,
           hasPushableCommit: meta.hasPushableCommit,
@@ -5389,55 +5404,91 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
     "workspace:getGitPanelSummary",
     async (event, { threadId }: { threadId: string }) =>
       gitReadRequestCoordinator.run(event.sender, "summary", "summary", threadId, async () => {
-      try {
-        logGitStep(threadId, "summary", "请求 getGitPanelSummary")
-        const context = await resolveThreadWorkspaceContext(threadId, {
-          webContentsId: event.sender.id,
-          requestScope: "git-summary"
-        })
-        if (!context.workspacePath || !context.isGitRepo) {
-          logGitStep(threadId, "summary", "非 Git 工作区，返回空摘要")
-          return {
-            success: true,
-            isWorktree: false,
-            isGitRepo: false,
-            hasPendingDiff: false,
-            changedFiles: 0
-          }
-        }
-        const repos = await getContextGitRepositories(context)
-        if (repos.length > 1) {
-          const summaries: GitPanelSummaryStats[] = new Array(repos.length)
-          await runWithConcurrency(
-            repos.map((repo, index) => ({ repo, index })),
-            GIT_PANEL_MULTI_REPO_SCAN_CONCURRENCY,
-            async ({ repo, index }) => {
-              summaries[index] = await getCachedPromise(
-                summaryCache,
-                getCacheKeyForPath(repo.repoPath),
-                GIT_CONTEXT_CACHE_TTL_MS,
-                () => getGitPanelSummaryQuick(repo.repoPath)
-              ).catch(() => ({ hasPendingDiff: false, changedFiles: 0 }))
+        try {
+          logGitStep(threadId, "summary", "请求 getGitPanelSummary")
+          const context = await resolveThreadWorkspaceContext(threadId, {
+            webContentsId: event.sender.id,
+            requestScope: "git-summary"
+          })
+          if (!context.workspacePath || !context.isGitRepo) {
+            logGitStep(threadId, "summary", "非 Git 工作区，返回空摘要")
+            return {
+              success: true,
+              isWorktree: false,
+              isGitRepo: false,
+              hasPendingDiff: false,
+              changedFiles: 0
             }
-          )
-          const changedFiles = summaries.reduce((sum, summary) => sum + summary.changedFiles, 0)
-          const hasPendingDiff = changedFiles > 0
+          }
+          const repos = await getContextGitRepositories(context)
+          if (repos.length > 1) {
+            const summaries: GitPanelSummaryStats[] = new Array(repos.length)
+            await runWithConcurrency(
+              repos.map((repo, index) => ({ repo, index })),
+              GIT_PANEL_MULTI_REPO_SCAN_CONCURRENCY,
+              async ({ repo, index }) => {
+                summaries[index] = await getCachedPromise(
+                  summaryCache,
+                  getCacheKeyForPath(repo.repoPath),
+                  GIT_CONTEXT_CACHE_TTL_MS,
+                  () => getGitPanelSummaryQuick(repo.repoPath)
+                ).catch(() => ({ hasPendingDiff: false, changedFiles: 0 }))
+              }
+            )
+            const changedFiles = summaries.reduce((sum, summary) => sum + summary.changedFiles, 0)
+            const hasPendingDiff = changedFiles > 0
+            logGitStep(
+              threadId,
+              "summary",
+              `完成 multiRepo=${repos.length} hasPendingDiff=${hasPendingDiff} changedFiles=${changedFiles}`
+            )
+            return {
+              success: true,
+              isWorktree: false,
+              isGitRepo: true,
+              hasPendingDiff,
+              changedFiles
+            }
+          }
+          const target = await resolveGitOperationTarget(context)
+          if ("error" in target) {
+            logGitStep(threadId, "summary", `失败：${target.error}`)
+            return {
+              success: true,
+              isWorktree: false,
+              isGitRepo: false,
+              hasPendingDiff: false,
+              changedFiles: 0
+            }
+          }
+          const workspacePath = target.worktreePath
+          const cacheKey = getCacheKeyForPath(workspacePath)
+          const [{ hasPendingDiff, changedFiles }, isWorktree] = await Promise.all([
+            getCachedPromise(summaryCache, cacheKey, GIT_CONTEXT_CACHE_TTL_MS, () =>
+              getGitPanelSummaryQuick(workspacePath)
+            ),
+            getCacheKeyForPath(workspacePath) === getCacheKeyForPath(context.workspacePath)
+              ? Promise.resolve(context.isWorktree)
+              : detectIsWorktreePath(workspacePath)
+          ])
           logGitStep(
             threadId,
             "summary",
-            `完成 multiRepo=${repos.length} hasPendingDiff=${hasPendingDiff} changedFiles=${changedFiles}`
+            `完成 hasPendingDiff=${hasPendingDiff} changedFiles=${changedFiles}`
           )
           return {
             success: true,
-            isWorktree: false,
+            isWorktree,
             isGitRepo: true,
             hasPendingDiff,
             changedFiles
           }
-        }
-        const target = await resolveGitOperationTarget(context)
-        if ("error" in target) {
-          logGitStep(threadId, "summary", `失败：${target.error}`)
+        } catch (error) {
+          logGitStep(
+            threadId,
+            "summary",
+            `异常：${error instanceof Error ? error.message : String(error)}`
+          )
           return {
             success: true,
             isWorktree: false,
@@ -5446,54 +5497,18 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
             changedFiles: 0
           }
         }
-        const workspacePath = target.worktreePath
-        const cacheKey = getCacheKeyForPath(workspacePath)
-        const [{ hasPendingDiff, changedFiles }, isWorktree] = await Promise.all([
-          getCachedPromise(summaryCache, cacheKey, GIT_CONTEXT_CACHE_TTL_MS, () =>
-            getGitPanelSummaryQuick(workspacePath)
-          ),
-          getCacheKeyForPath(workspacePath) === getCacheKeyForPath(context.workspacePath)
-            ? Promise.resolve(context.isWorktree)
-            : detectIsWorktreePath(workspacePath)
-        ])
-        logGitStep(
-          threadId,
-          "summary",
-          `完成 hasPendingDiff=${hasPendingDiff} changedFiles=${changedFiles}`
-        )
-        return {
-          success: true,
-          isWorktree,
-          isGitRepo: true,
-          hasPendingDiff,
-          changedFiles
-        }
-      } catch (error) {
-        logGitStep(
-          threadId,
-          "summary",
-          `异常：${error instanceof Error ? error.message : String(error)}`
-        )
-        return {
-          success: true,
-          isWorktree: false,
-          isGitRepo: false,
-          hasPendingDiff: false,
-          changedFiles: 0
-        }
-      }
-    })
+      })
   )
 
   ipcMain.handle("workspace:cancelGitPanelReads", (event, family?: GitReadFamily): void => {
-      const selectedFamily: GitReadFamily | undefined =
-        family === "panel" ||
-        family === "changed-summary" ||
-        family === "summary" ||
-        family === "workspace-probe"
-          ? family
-          : undefined
-      gitReadRequestCoordinator.cancel(event.sender.id, selectedFamily)
+    const selectedFamily: GitReadFamily | undefined =
+      family === "panel" ||
+      family === "changed-summary" ||
+      family === "summary" ||
+      family === "workspace-probe"
+        ? family
+        : undefined
+    gitReadRequestCoordinator.cancel(event.sender.id, selectedFamily)
   })
 
   // Commit workspace changes in Git repo with a user-provided message.

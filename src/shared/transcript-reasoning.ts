@@ -5,7 +5,7 @@ export const TRANSCRIPT_REASONING_MAX_CHARS = 120_000
 
 export interface TranscriptReasoningUpdate {
   reasoning?: string
-  /** Write-only: omitted for complete renderer/checkpoint snapshots. */
+  /** Write-only: snapshot explicitly replaces, including an empty string. */
   reasoning_mode?: StreamMessageWireMode
 }
 
@@ -22,8 +22,14 @@ export function mergeTranscriptReasoningUpdates(
   existing: TranscriptReasoningUpdate,
   incoming: TranscriptReasoningUpdate
 ): TranscriptReasoningUpdate {
+  if (incoming.reasoning_mode === "snapshot" && typeof incoming.reasoning === "string") {
+    return {
+      reasoning: normalizeTranscriptReasoning(incoming.reasoning) ?? "",
+      reasoning_mode: "snapshot"
+    }
+  }
   if (!incoming.reasoning) {
-    return existing.reasoning
+    return existing.reasoning || existing.reasoning_mode === "snapshot"
       ? { reasoning: existing.reasoning, reasoning_mode: existing.reasoning_mode }
       : {}
   }
@@ -35,6 +41,12 @@ export function mergeTranscriptReasoningUpdates(
       : incoming.reasoning
   return {
     reasoning: normalizeTranscriptReasoning(reasoning),
-    reasoning_mode: isDelta ? (existing.reasoning ? existing.reasoning_mode : "delta") : undefined
+    reasoning_mode: isDelta
+      ? existing.reasoning_mode === "snapshot"
+        ? "snapshot"
+        : existing.reasoning
+          ? existing.reasoning_mode
+          : "delta"
+      : undefined
   }
 }

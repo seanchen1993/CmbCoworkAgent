@@ -1,4 +1,5 @@
 import type { RemoteImReplyV1 } from "../../../shared/im-gateway-contract"
+import { trackEvent } from "../event-reporter"
 import { imEventStore, type ImEventStore, type ImReplyOutboxRecord } from "./event-store"
 import {
   unavailableImGatewayClient,
@@ -118,22 +119,22 @@ export class ImReplyClient {
       const submitted: ImReplySubmissionResult = await this.gateway.submitReply(toReply(record))
       if (submitted.state === "platform_unknown") {
         await this.eventStore.markOutboxUnknown(record.outboxId, "PLATFORM_RESULT_UNKNOWN")
-        return "unknown"
+        return this.reportDelivery(record, "unknown")
       }
       await this.eventStore.markOutboxSent(
         record.outboxId,
         submitted.platformReplyId?.trim() || `gateway:${record.idempotencyKey}`
       )
-      return "sent"
+      return this.reportDelivery(record, "sent")
     } catch (error) {
       const details = errorDetails(error)
       if (details.resultUnknown) {
         await this.eventStore.markOutboxUnknown(record.outboxId, details.reasonCode)
-        return "unknown"
+        return this.reportDelivery(record, "unknown")
       }
       if (details.permanent) {
         await this.eventStore.markOutboxFailed(record.outboxId, details.reasonCode)
-        return "failed"
+        return this.reportDelivery(record, "failed")
       }
       const delayMs = Math.min(60_000, 1_000 * 2 ** Math.min(record.attemptCount, 6))
       await this.eventStore.rescheduleOutbox(
@@ -141,7 +142,31 @@ export class ImReplyClient {
         this.now() + delayMs,
         details.reasonCode
       )
+      // Deliberately unreported. A deferred send is a retry of the same message,
+      // and this envelope comes back through here until it settles — counting it
+      // would report one message as several.
       return "deferred"
     }
+  }
+
+  /**
+   * The one place every outbound text message leaves for Zhaohu.
+   *
+   * `kind` comes from the envelope's own eventId rather than from the caller:
+   * a reply to an inbound event carries one, and a proactive delivery is
+   * inserted with event_id NULL. That is the distinction worth showing — the
+   * robot answering what it was asked, versus pushing a background result back
+   * on its own.
+   */
+  private reportDelivery<T extends "sent" | "unknown" | "failed">(
+    record: ImReplyOutboxRecord,
+    outcome: T
+  ): T {
+    trackEvent("im.message.delivered", "im", {
+      direction: "outbound",
+      kind: record.eventId ? "reply" : "push",
+      outcome
+    })
+    return outcome
   }
 }

@@ -198,7 +198,17 @@ async function createJourney() {
     getRunDetail: () => ({ sessions: [] }) as never,
     buildFeatureContext: () => ({ featureId: "feature-quick-pay" }) as never,
     getThread: (threadId) => threads.get(threadId) ?? null,
-    createThread: makeThread as never,
+    // Stands in for createThreadService, which the Feature path now uses so a
+    // session inherits the Feature's configured mode.
+    createThread: (async (metadata?: Record<string, unknown>) => {
+      const threadId = createId("feature-thread")
+      const resolved = {
+        ...(metadata ?? {}),
+        ...(metadata && "agentMode" in metadata ? {} : { agentMode: "workflow" })
+      }
+      makeThread(threadId, resolved)
+      return { thread_id: threadId, metadata: resolved }
+    }) as never,
     createId: () => createId("feature-thread")
   })
   const inbox = new ImInboxService({
@@ -258,8 +268,7 @@ async function createJourney() {
         enabled: true,
         gatewayUrl: null,
         remoteAccess: "inbox-and-features",
-        remoteApprovalEnabled: true,
-        waitingDesktopTtlMinutes: 10
+        remoteApprovalEnabled: true
       }) as never,
     now: () => clock.now,
     createCode: () => "A1B2C3",
@@ -279,8 +288,7 @@ async function createJourney() {
         enabled: true,
         gatewayUrl: null,
         remoteAccess: "inbox-and-features",
-        remoteApprovalEnabled: true,
-        waitingDesktopTtlMinutes: 10
+        remoteApprovalEnabled: true
       }) as never,
     getPendingForThread: ((threadId: string) => pendingUserInputs.get(threadId) ?? null) as never,
     submitResponse: ((response: UserInputResponse) => {
@@ -377,7 +385,6 @@ async function createJourney() {
     notifyThreadChanged: () => undefined,
     createRunId: () => createId("run"),
     permitRenewIntervalMs: 60_000,
-    waitingDesktopTtlMs: 5_000,
     setThreadLifecycle: async () => undefined,
     executeTurn: async ({ event, signal, interactionWaitHooks }) => {
       executedMessages.push(event.messageText)
@@ -481,7 +488,8 @@ async function createJourney() {
     abortCurrent: (conversationKey, threadId) =>
       queue.abortCurrentImEvent(conversationKey, undefined, threadId),
     getCurrentEventId: (conversationKey, threadId) =>
-      queue.getCurrentEventId(conversationKey, threadId)
+      queue.getCurrentEventId(conversationKey, threadId),
+    getThread: (threadId) => threads.get(threadId) ?? null
   })
   const ingress = new ImIngressSequencer({
     conversationState: conversations,
@@ -592,7 +600,12 @@ async function testSimulatedZhaohuUserJourney(): Promise<void> {
     const helpText = journey.eventReplyText(help.event.eventId)
     assert(helpText.includes("/会话"))
     assert(helpText.includes("/批准"))
+    assert(helpText.includes("/<技能名> <任务> 或 /技能 <技能名或短码> <任务>"))
+    assert(helpText.includes("/goal 或 /goal status|pause|resume|clear"))
+    assert(helpText.includes("自定义回答使用“其他 <内容>”"))
+    assert(helpText.includes("//<文本>"))
     assert.equal(helpText.match(/^\/收件箱 —/gmu)?.length, 1)
+    assert.equal(helpText.trimEnd().split("\n").at(-1)?.startsWith("/重试 "), true)
 
     const current = await journey.send("/当前")
     assert(journey.eventReplyText(current.event.eventId).includes("当前目标：【收件箱】"))
@@ -618,7 +631,7 @@ async function testSimulatedZhaohuUserJourney(): Promise<void> {
     assert(initialSessionsText.includes("支付平台 / 快捷支付（特性，可创建新会话）"))
     const featureIndex = selectionIndexContaining(initialSessionsText, "（特性，可创建新会话）")
     const featureBind = await journey.send(`/绑定 ${featureIndex}`)
-    assert(journey.eventReplyText(featureBind.event.eventId).includes("新建会话并切换"))
+    assert(journey.eventReplyText(featureBind.event.eventId).includes("会话并切换"))
     const featureTarget = journey.conversations.getActiveTarget(CONVERSATION_KEY)
     assert.equal(featureTarget?.kind, "thread")
     if (featureTarget?.kind !== "thread") throw new Error("Feature Thread target expected")
@@ -671,8 +684,8 @@ async function testSimulatedZhaohuUserJourney(): Promise<void> {
     await journey.waitForEventState(longTask.event.eventId, "completed")
     const longReply = journey.eventReplyText(longTask.event.eventId)
     assert(longReply.includes("【会话：检查 Feature 当前状态】"))
-    assert(longReply.includes("切换前任务"))
-    assert(!journey.eventReplyText(queuedInbox.event.eventId).includes("切换前任务"))
+    assert(longReply.includes("非当前绑定会话"))
+    assert(!journey.eventReplyText(queuedInbox.event.eventId).includes("非当前绑定会话"))
 
     const sessions = await journey.send("/会话")
     const sessionsText = journey.eventReplyText(sessions.event.eventId)
@@ -698,7 +711,7 @@ async function testSimulatedZhaohuUserJourney(): Promise<void> {
     assert(journey.eventReplyText(approvalTask.event.eventId).includes("审批通过后任务完成"))
     assert.equal(journey.audits.getByRequestId("approval-request-journey")?.decision, "approve")
     const reusedApproval = await journey.send("/批准 A1B2C3")
-    assert(journey.eventReplyText(reusedApproval.event.eventId).includes("已过期或已使用"))
+    assert(journey.eventReplyText(reusedApproval.event.eventId).includes("已使用"))
 
     const ordinaryUserInputTask = await journey.send("询问发布范围：普通会话")
     await journey.waitForEventState(ordinaryUserInputTask.event.eventId, "waiting_desktop")

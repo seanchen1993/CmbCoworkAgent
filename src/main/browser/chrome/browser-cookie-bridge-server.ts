@@ -96,7 +96,6 @@ export class BrowserCookieBridgeServer {
         reject(error)
       })
       server.listen(this.pipePath, () => {
-        console.log(`${BROWSER_COOKIE_BRIDGE_LOG_PREFIX} Server listening on ${this.pipePath}`)
         server.removeAllListeners("error")
         server.on("error", (error) => {
           console.warn(`${BROWSER_COOKIE_BRIDGE_LOG_PREFIX} Server error: ${error.message}`)
@@ -110,7 +109,6 @@ export class BrowserCookieBridgeServer {
   }
 
   stop(): void {
-    console.log(`${BROWSER_COOKIE_BRIDGE_LOG_PREFIX} Stopping server, ${this.clients.size} client(s) connected`)
     this.failPending(
       new BrowserCookieBridgeError("extension_not_connected", "Chrome 扩展连接已关闭")
     )
@@ -121,7 +119,6 @@ export class BrowserCookieBridgeServer {
     if (process.platform !== "win32" && existsSync(this.pipePath)) {
       rmSync(this.pipePath, { force: true })
     }
-    console.log(`${BROWSER_COOKIE_BRIDGE_LOG_PREFIX} Server stopped`)
   }
 
   get connected(): boolean {
@@ -153,7 +150,6 @@ export class BrowserCookieBridgeServer {
     }
 
     const requestId = randomUUID()
-    console.log(`${BROWSER_COOKIE_BRIDGE_LOG_PREFIX} Cookie export started, requestId=${requestId}`)
     return new Promise<{ cookies: CmbChromeCookie[]; skippedCookies: number }>(
       (resolve, reject) => {
         const timer = setTimeout(() => {
@@ -201,7 +197,6 @@ export class BrowserCookieBridgeServer {
       socket
     }
     this.clients.add(client)
-    console.log(`${BROWSER_COOKIE_BRIDGE_LOG_PREFIX} Client connected, total=${this.clients.size}`)
     socket.on("data", (chunk: Buffer) => {
       try {
         for (const message of client.decoder.push(chunk)) this.handleMessage(client, message)
@@ -233,7 +228,6 @@ export class BrowserCookieBridgeServer {
     })
     socket.once("close", () => {
       this.clients.delete(client)
-      console.log(`${BROWSER_COOKIE_BRIDGE_LOG_PREFIX} Client disconnected, remaining=${this.clients.size}`)
       if (this.pending?.client === client) {
         this.failPending(
           new BrowserCookieBridgeError("extension_not_connected", "Chrome 扩展在导入过程中断开")
@@ -286,7 +280,6 @@ export class BrowserCookieBridgeServer {
       throw new Error("Native host authentication failed")
     }
     client.authenticated = true
-    console.log(`${BROWSER_COOKIE_BRIDGE_LOG_PREFIX} Client authenticated`)
   }
 
   private handleReady(client: BridgeClient, message: Record<string, unknown>): void {
@@ -300,7 +293,6 @@ export class BrowserCookieBridgeServer {
       throw new Error("Extension ready message is invalid")
     }
     client.ready = message as unknown as CmbChromeExtensionReadyMessage
-    console.log(`${BROWSER_COOKIE_BRIDGE_LOG_PREFIX} Extension ready, version=${client.ready.extensionVersion}`)
   }
 
   private handleBegin(client: BridgeClient, message: Record<string, unknown>): void {
@@ -357,9 +349,6 @@ export class BrowserCookieBridgeServer {
     }
     clearTimeout(pending.timer)
     this.pending = null
-    console.log(
-      `${BROWSER_COOKIE_BRIDGE_LOG_PREFIX} Cookie export complete, total=${pending.expectedTotal}, skipped=${pending.skipped}`
-    )
     pending.resolve({ cookies: pending.cookies, skippedCookies: pending.skipped ?? 0 })
   }
 
