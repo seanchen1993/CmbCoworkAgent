@@ -98,31 +98,20 @@ export function BotGroupMentionInput({
         "aria-multiline": "true"
       },
       handleKeyDown: (view, event) => actions.current.key(view, event),
-      handlePaste: (view, event) => {
+      handlePaste: (_view, event) => {
         const files = Array.from(event.clipboardData?.files ?? [])
         if (files.length) {
           event.preventDefault()
           current.current.onPasteFiles(files)
           return true
         }
-        const plain = event.clipboardData?.getData("text/plain")
-        if (!plain) return false
-        event.preventDefault()
-        // Pasted labels remain plain text, never trusted member selections or HTML nodes.
-        view.dispatch(view.state.tr.insertText(plain.replace(/\r\n?/g, "\n")))
-        return true
+        // Use the editor's paragraph/selection/clipboard semantics. The mention
+        // schema rejects HTML imports, so pasted labels cannot create recipients.
+        return false
       },
-      handleDrop: (view, event) => {
+      handleDrop: (_view, event) => {
         // File drops bubble to the existing composer attachment handler.
-        if (event.dataTransfer?.files.length) return true
-        if (view.dragging) return false
-        const plain = event.dataTransfer?.getData("text/plain")
-        if (!plain) return false
-        const position = view.posAtCoords({ left: event.clientX, top: event.clientY })
-        if (!position) return false
-        event.preventDefault()
-        view.dispatch(view.state.tr.insertText(plain.replace(/\r\n?/g, "\n"), position.pos))
-        return true
+        return Boolean(event.dataTransfer?.files.length)
       },
       handleDOMEvents: {
         compositionstart: () => {

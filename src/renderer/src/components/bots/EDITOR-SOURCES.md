@@ -3,10 +3,10 @@
 The group editor adapts the user-provided Grok Bot reconstructed frontend:
 
 - `grok-bot-0.18-reconstructed-main/frontend/src/recovered/features/conversation/workspace/rich-text-editor.tsx`
-- `promptEditorContent`, `serializePromptNode`, `PromptMention`, `createPromptEditorExtensions`, and `PromptRichTextEditor`
+- `promptEditorContent`, `serializePromptNode`, `PromptMention`, `createPromptEditorExtensions`, `PromptRichTextEditor`, `ScrollCaretIntoView`, and `MacEmacsLineMotion`
 
 It uses the same Tiptap 3.14.0 editor primitives, inline atom model, native history,
-plain-text serialization, and controlled external content synchronization. Only
+plain-text serialization, caret visibility, Mac line navigation, and controlled external content synchronization. Only
 document/paragraph/text/hard-break/history/placeholder functionality is loaded;
 workflow, PR, emoji, global clipboard, model, and service integration are omitted.
 

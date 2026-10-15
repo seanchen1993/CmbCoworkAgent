@@ -1,10 +1,10 @@
-import { Node, type JSONContent } from "@tiptap/core"
+import { Extension, Node, type JSONContent } from "@tiptap/core"
 import Document from "@tiptap/extension-document"
 import Paragraph from "@tiptap/extension-paragraph"
 import Text from "@tiptap/extension-text"
 import HardBreak from "@tiptap/extension-hard-break"
 import { Placeholder, UndoRedo } from "@tiptap/extensions"
-import { Plugin } from "@tiptap/pm/state"
+import { Plugin, TextSelection } from "@tiptap/pm/state"
 import type { Node as EditorNode } from "@tiptap/pm/model"
 import { validGroupMentions, type BotGroupMention } from "./bot-group-mentions"
 
@@ -101,6 +101,83 @@ export const GroupMentionNode = Node.create({
   }
 })
 
+// Grok's editor plugins: keep typed/pasted content visible and preserve Mac line
+// navigation across hard breaks and mention atoms without custom DOM selection.
+export function groupEditorLineBoundary(
+  parent: EditorNode,
+  offset: number,
+  direction: "forward" | "backward"
+): number {
+  let boundary = direction === "backward" ? 0 : parent.content.size
+  let found = false
+  parent.forEach((node, position) => {
+    if (node.type.name !== "hardBreak") return
+    if (direction === "backward" && position + node.nodeSize <= offset)
+      boundary = position + node.nodeSize
+    if (direction === "forward" && !found && position >= offset) {
+      boundary = position
+      found = true
+    }
+  })
+  return boundary
+}
+
+export function groupEditorMotionPlugin() {
+  return new Plugin({
+    appendTransaction(transactions, _previous, state) {
+      return transactions.some((item) => item.docChanged) &&
+        state.selection.empty &&
+        !transactions.some((item) => item.scrolledIntoView)
+        ? state.tr.scrollIntoView()
+        : null
+    },
+    props: {
+      handleKeyDown(view, event) {
+        if (
+          typeof navigator === "undefined" ||
+          !/mac/i.test(navigator.platform) ||
+          !event.ctrlKey ||
+          event.metaKey ||
+          event.altKey ||
+          event.isComposing ||
+          view.composing ||
+          event.keyCode === 229
+        )
+          return false
+        const key = event.key.toLowerCase()
+        if (key !== "a" && key !== "e") return false
+        const { state } = view
+        const head = state.selection.$head
+        if (!head.parent.isTextblock) return false
+        const position =
+          head.start() +
+          groupEditorLineBoundary(
+            head.parent,
+            head.parentOffset,
+            key === "e" ? "forward" : "backward"
+          )
+        view.dispatch(
+          state.tr
+            .setSelection(
+              TextSelection.create(
+                state.doc,
+                event.shiftKey ? state.selection.anchor : position,
+                position
+              )
+            )
+            .scrollIntoView()
+        )
+        return true
+      }
+    }
+  })
+}
+
+const GroupEditorMotion = Extension.create({
+  name: "groupEditorMotion",
+  addProseMirrorPlugins: () => [groupEditorMotionPlugin()]
+})
+
 /** Same editor primitives as Grok; omit its unrelated formatting/reference extensions. */
 export function groupEditorExtensions(mention = GroupMentionNode) {
   return [
@@ -109,6 +186,7 @@ export function groupEditorExtensions(mention = GroupMentionNode) {
     Text,
     HardBreak,
     UndoRedo.configure({ newGroupDelay: 100 }),
+    GroupEditorMotion,
     Placeholder.configure({ placeholder: "发消息，或 @ 提及 Bot…" }),
     mention
   ]

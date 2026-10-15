@@ -1,17 +1,21 @@
-import { describe, expect, it } from "vitest"
+import { afterEach, describe, expect, it, vi } from "vitest"
 import { getSchema } from "@tiptap/core"
-import { EditorState } from "@tiptap/pm/state"
+import { EditorState, TextSelection } from "@tiptap/pm/state"
+import type { EditorView } from "@tiptap/pm/view"
 import { history, undo, redo, closeHistory } from "@tiptap/pm/history"
 import {
   groupEditorContent,
   groupEditorDraft,
   groupEditorExtensions,
-  groupEditorOffset
+  groupEditorOffset,
+  groupEditorLineBoundary,
+  groupEditorMotionPlugin
 } from "./bot-group-editor"
 import { groupMessageRecipients } from "./bot-group-mentions"
 
 const schema = getSchema(groupEditorExtensions())
 const member = { start: 0, end: 3, botId: "a", label: "甲乙" }
+afterEach(() => vi.unstubAllGlobals())
 
 describe("group editor draft projection", () => {
   it.each(["", "一行", "甲\n\n乙\n", "🙂\n<attachment> @普通文本"])(
@@ -105,5 +109,70 @@ describe("group editor draft projection", () => {
       text: "前\n@乙",
       mentions: [{ start: 2, end: 4, botId: "b", label: "乙" }]
     })
+  })
+})
+
+describe("Grok editor motion adaptation", () => {
+  it("requests a single caret scroll after content edits, never a transaction loop", () => {
+    const state = EditorState.create({ schema, plugins: [groupEditorMotionPlugin()] })
+    const edited = state.applyTransaction(state.tr.insertText("内容"))
+    expect(edited.transactions).toHaveLength(2)
+    expect(edited.transactions.at(-1)!.scrolledIntoView).toBe(true)
+    expect(
+      state.applyTransaction(state.tr.insertText("内容").scrollIntoView()).transactions
+    ).toHaveLength(1)
+    expect(
+      edited.state.applyTransaction(edited.state.tr.setMeta("unrelated", true)).transactions
+    ).toHaveLength(1)
+  })
+
+  it("uses actual node offsets across hard breaks and mention atoms", () => {
+    const paragraph = schema.node("paragraph", null, [
+      schema.text("前"),
+      schema.node("groupMention", { botId: "a", label: "长名称" }),
+      schema.node("hardBreak"),
+      schema.text("后"),
+      schema.node("hardBreak"),
+      schema.text("尾")
+    ])
+    expect(groupEditorLineBoundary(paragraph, 3, "backward")).toBe(3)
+    expect(groupEditorLineBoundary(paragraph, 3, "forward")).toBe(4)
+    expect(groupEditorLineBoundary(paragraph, 6, "backward")).toBe(5)
+  })
+
+  it("moves and extends the Mac selection within the current hard-break line", () => {
+    vi.stubGlobal("navigator", { platform: "MacIntel" })
+    const doc = schema.node("doc", null, [
+      schema.node("paragraph", null, [
+        schema.text("第一行"),
+        schema.node("hardBreak"),
+        schema.text("第二行")
+      ])
+    ])
+    let state = EditorState.create({ schema, doc, selection: TextSelection.create(doc, 7) })
+    const view = {
+      get state() {
+        return state
+      },
+      composing: false,
+      dispatch(transaction) {
+        state = state.apply(transaction)
+      }
+    } as EditorView
+    const plugin = groupEditorMotionPlugin()
+    const press = (key: string, extra: object = {}) =>
+      plugin.props.handleKeyDown!.call(plugin, view, {
+        key,
+        ctrlKey: true,
+        ...extra
+      } as KeyboardEvent)
+    expect(press("a")).toBe(true)
+    expect(state.selection.from).toBe(5)
+    expect(press("e", { shiftKey: true })).toBe(true)
+    expect([state.selection.anchor, state.selection.head]).toEqual([5, 8])
+    expect(press("a", { isComposing: true })).toBe(false)
+    vi.stubGlobal("navigator", { platform: "Win32" })
+    expect(press("a")).toBe(false)
+    expect([state.selection.anchor, state.selection.head]).toEqual([5, 8])
   })
 })
