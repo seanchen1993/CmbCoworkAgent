@@ -519,6 +519,59 @@ describe("ToolOrchestrator YOLO git behavior", () => {
     expect(requestApproval).not.toHaveBeenCalled()
   })
 
+  it.each([false, true])("preserves Git safety decisions when YOLO is %s", async (yolo) => {
+    const rawExecute = vi.fn<RawExecuteFn>()
+    const requestApproval = vi.fn<RequestApprovalFn>()
+    const orchestrator = new ToolOrchestrator(
+      new ApprovalStore(),
+      rawExecute,
+      requestApproval,
+      () => yolo
+    )
+    const cwd = process.cwd()
+    const rewrite = "node <<'EOF'\nconst seenKeys = new Set()\nseenKeys.add('input')\nEOF"
+
+    expect(orchestrator.queryExecute(rewrite, cwd, "none", "posix")).toMatchObject({
+      decision: yolo ? "allow" : "ask"
+    })
+    for (const command of [
+      "git add -f .env",
+      "$BIN add = -f .env",
+      "$BIN add.foo -f .env",
+      "$BIN foo.add -f .env",
+      "$BIN .add -f .env",
+      "$BIN seenKeys.add -f .env",
+      "$BIN const add -f .env",
+      "$BIN var commit",
+      "/cmd/g?t.exe foo.add -f .env",
+      "sudo /cmd/g?t.exe foo.add -f .env",
+      "( /cmd/g?t.exe foo.add -f .env )"
+    ]) {
+      expect(orchestrator.queryExecute(command, cwd, "none", "posix")).toMatchObject({
+        decision: "deny"
+      })
+    }
+    for (const { command, shellSyntax } of [
+      { command: "%BIN% commit.foo", shellSyntax: "cmd" as const },
+      { command: "%BIN% const add -f .env", shellSyntax: "cmd" as const },
+      {
+        command: "Write-Output $(& $exe const add -f .env)",
+        shellSyntax: "powershell" as const
+      },
+      { command: "& $exe foo.add -f .env", shellSyntax: "powershell" as const }
+    ]) {
+      expect(orchestrator.queryExecute(command, cwd, "none", shellSyntax)).toMatchObject({
+        decision: "deny"
+      })
+    }
+    const denied = await orchestrator.execute("$BIN add = -f .env", cwd, "none", "posix")
+    expect(denied.exitCode).toBe(1)
+    expect(denied.output).toContain("cannot verify Git operations safely")
+    expect(denied.output).not.toContain("forced git add")
+    expect(rawExecute).not.toHaveBeenCalled()
+    expect(requestApproval).not.toHaveBeenCalled()
+  })
+
   it("uses the actual POSIX shell syntax before the YOLO raw-execute shortcut", async () => {
     const rawExecute = vi.fn<RawExecuteFn>()
     const requestApproval = vi.fn<RequestApprovalFn>()
