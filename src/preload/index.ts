@@ -1,6 +1,10 @@
 import type {
   KnowledgeAccumulationData,
+  KnowledgeActiveDetails,
+  KnowledgeFileReaders,
   KnowledgeProjectStats,
+  KnowledgeReadDetails,
+  KnowledgeReadFileRef,
   KnowledgeRecentConstraintFiles
 } from "../shared/dashboard-knowledge-overview"
 import type { EfficiencyPluginFilter } from "../shared/dashboard-efficiency-compute"
@@ -4005,6 +4009,31 @@ const api = {
       error?: string
       cancelled?: boolean
     }> => ipcRenderer.invoke("dashboard:knowledgeAccumulation", opts),
+    knowledgeActiveDetails: (opts?: {
+      upperOrgLv1?: string | string[] | null
+    }): Promise<{
+      success: boolean
+      data?: KnowledgeActiveDetails
+      error?: string
+      cancelled?: boolean
+    }> => ipcRenderer.invoke("dashboard:knowledgeActiveDetails", opts),
+    knowledgeReadDetails: (opts?: {
+      upperOrgLv1?: string | string[] | null
+    }): Promise<{
+      success: boolean
+      data?: KnowledgeReadDetails
+      error?: string
+      cancelled?: boolean
+    }> => ipcRenderer.invoke("dashboard:knowledgeReadDetails", opts),
+    knowledgeReadReaders: (
+      file: KnowledgeReadFileRef,
+      opts?: { upperOrgLv1?: string | string[] | null }
+    ): Promise<{
+      success: boolean
+      data?: KnowledgeFileReaders
+      error?: string
+      cancelled?: boolean
+    }> => ipcRenderer.invoke("dashboard:knowledgeReadReaders", file, opts),
     knowledgeProjectStats: (
       range: { from: string; to: string },
       opts?: { upperOrgLv1?: string | string[] | null }

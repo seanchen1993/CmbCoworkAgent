@@ -1,6 +1,7 @@
-import type { ComponentType, ReactNode } from "react"
+import { useState, type ComponentType, type ReactNode } from "react"
 import {
   BookOpen,
+  ChevronRight,
   Download,
   Eye,
   FileText,
@@ -22,6 +23,7 @@ import type {
   DashboardKnowledgeCommitRateUnavailableReason
 } from "../../../../../shared/dashboard-knowledge-commit-rate"
 import { InfoHint } from "./dashboard-shared"
+import { KnowledgeActiveDetailsDialog } from "../KnowledgeActiveDetailsDialog"
 
 const COLORS = ["#3b82f6", "#14b8a6", "#8b5cf6", "#f59e0b", "#f97316", "#94a3b8"]
 const SCOPE_NOTES: Record<DashboardKnowledgeCommitRateUnavailableReason, string> = {
@@ -194,7 +196,9 @@ export function KnowledgeOverviewPanel({
   recentConstraintFilesError,
   rate,
   rateLoading,
-  rateError
+  rateError,
+  rooms,
+  refreshKey
 }: {
   accumulation: KnowledgeAccumulationData | null
   accumulationLoading: boolean
@@ -208,7 +212,10 @@ export function KnowledgeOverviewPanel({
   rate: DashboardKnowledgeCommitRate | null
   rateLoading: boolean
   rateError: string | null
+  rooms: string[]
+  refreshKey: number
 }): React.JSX.Element {
+  const [detailsOpen, setDetailsOpen] = useState(false)
   const totals = accumulation?.totals ?? undefined
   const users = accumulation?.users?.slice(0, 20) ?? []
   const maxUser = Math.max(1, ...users.map((row) => row.value))
@@ -291,7 +298,14 @@ export function KnowledgeOverviewPanel({
           <StatCard
             label="活跃知识沉淀数目"
             value={
-              <div className="flex items-baseline gap-4">
+              <button
+                type="button"
+                className="flex w-full items-baseline gap-4 text-left transition-colors hover:text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                aria-label="查看活跃知识沉淀明细"
+                aria-haspopup="dialog"
+                aria-expanded={detailsOpen}
+                onClick={() => setDetailsOpen(true)}
+              >
                 <span className="whitespace-nowrap">
                   {number(totals?.activeNum)}
                   <span className="ml-1 text-[10px] font-normal text-muted-foreground">更新</span>
@@ -304,7 +318,8 @@ export function KnowledgeOverviewPanel({
                     : `${recentConstraintFiles.complete ? "" : "≥"}${number(recentConstraintFiles.fileCount)}`}
                   <span className="ml-1 text-[10px] font-normal text-muted-foreground">读取</span>
                 </span>
-              </div>
+                <ChevronRight className="ml-auto size-3.5 shrink-0 self-center text-muted-foreground" />
+              </button>
             }
             sub={
               statSub ??
@@ -391,6 +406,14 @@ export function KnowledgeOverviewPanel({
           />
         </div>
       </section>
+      {detailsOpen && (
+        <KnowledgeActiveDetailsDialog
+          key={JSON.stringify([rooms, refreshKey])}
+          open={detailsOpen}
+          onOpenChange={setDetailsOpen}
+          rooms={rooms}
+        />
+      )}
     </div>
   )
 }

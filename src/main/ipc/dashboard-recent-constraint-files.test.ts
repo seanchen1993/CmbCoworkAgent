@@ -1,7 +1,11 @@
 import { describe, expect, it, vi } from "vitest"
 import {
   buildRecentConstraintFileQuery,
+  buildRecentReadTimeAggs,
+  fetchRecentConstraintFileDetails,
   fetchRecentConstraintFiles,
+  latestReadTime,
+  readRecentReadTime,
   resolveRecentConstraintFields,
   type RecentConstraintFields
 } from "./dashboard-recent-constraint-files"
@@ -11,7 +15,8 @@ const fields: RecentConstraintFields = {
   pluginId: "properties.pluginId",
   pluginName: "properties.pluginName",
   adapterName: "properties.harnessAdapterName",
-  lastReadAt: "properties.lastReadAt"
+  lastReadAt: "properties.lastReadAt",
+  lastReadAtAggregation: "properties.lastReadAt"
 }
 const now = new Date("2026-10-15T04:00:00.000Z")
 const org = { term: { upperOrgLv1: "本室" } }
@@ -83,6 +88,76 @@ describe("existing constraint-field compatibility", () => {
 })
 
 describe("recent constraint queries", () => {
+  it("uses max dates plus missing-date event times without scripts or extra requests", () => {
+    expect(buildRecentReadTimeAggs(fields)).toEqual({
+      latest_read: { max: { field: "properties.lastReadAt" } },
+      fallback_read: {
+        filter: { bool: { must_not: [{ exists: { field: "properties.lastReadAt" } }] } },
+        aggs: { latest_read: { max: { field: "eventTime" } } }
+      }
+    })
+    expect(buildRecentReadTimeAggs({ ...fields, lastReadAtAggregation: undefined })).toEqual({
+      latest_read: { max: { field: "eventTime" } }
+    })
+    const cap = resolveRecentConstraintFields({
+      fields: { "properties.lastReadAt": capability("date", { aggregatable: false }) }
+    })
+    expect(cap.lastReadAt).toBe("properties.lastReadAt")
+    expect(cap.lastReadAtAggregation).toBeUndefined()
+    expect(
+      readRecentReadTime({
+        latest_read: { value: Date.parse("2026-10-13T04:00:00Z") },
+        fallback_read: { latest_read: { value: Date.parse("2026-10-14T04:00:00Z") } }
+      })
+    ).toBe("2026-10-14T04:00:00.000Z")
+    expect(readRecentReadTime({ latest_read: { value: null } })).toBeUndefined()
+    expect(readRecentReadTime({ latest_read: { value: "bad" } })).toBeUndefined()
+    expect(readRecentReadTime({ latest_read: { value: 1e30 } })).toBeUndefined()
+    expect(latestReadTime("bad", undefined)).toBeUndefined()
+  })
+  it("merges latest file times across pages and historic aliases without changing the file count", async () => {
+    const bucket = (key: Record<string, string>, time: string) => ({
+      key,
+      latest_read: { value: Date.parse(time) }
+    })
+    const query = vi
+      .fn()
+      .mockResolvedValueOnce({
+        aggregations: {
+          files: {
+            buckets: [bucket({ pluginName: "插件A", file: "sys/a.md" }, "2026-10-14T04:00:00Z")],
+            after_key: { file: "a" }
+          }
+        }
+      })
+      .mockResolvedValueOnce({
+        aggregations: {
+          files: {
+            buckets: [
+              bucket(
+                { pluginId: "a", pluginName: "插件A", file: "sys/a.md" },
+                "2026-10-12T04:00:00Z"
+              ),
+              bucket(
+                { pluginId: "a", pluginName: "插件A", file: "sys/b.md" },
+                "2026-10-15T01:00:00Z"
+              )
+            ]
+          }
+        }
+      })
+    const data = await fetchRecentConstraintFileDetails(fields, [], query, undefined, now)
+    expect(data.fileCount).toBe(2)
+    expect(data.items.map((row) => [row.filePath, row.lastReadAt])).toEqual([
+      ["sys/b.md", "2026-10-15T01:00:00.000Z"],
+      ["sys/a.md", "2026-10-14T04:00:00.000Z"]
+    ])
+    expect(query).toHaveBeenCalledTimes(2)
+    for (const [body] of query.mock.calls)
+      expect(body).toMatchObject({
+        aggs: { files: { aggs: { latest_read: { max: { field: "properties.lastReadAt" } } } } }
+      })
+  })
   it("fixes a rolling 30-day window, applies permissions before aggregation and falls back only for missing lastReadAt", () => {
     const query = buildRecentConstraintFileQuery(fields, [org], now)
     expect(query).toMatchObject({
@@ -167,6 +242,50 @@ describe("recent constraint queries", () => {
 })
 
 describe("reported file identities", () => {
+  it("builds read details using the same cross-page and historic alias identities as the count", async () => {
+    const query = vi
+      .fn()
+      .mockResolvedValueOnce(
+        response(
+          [
+            { pluginName: "插件A", file: "sys/project.md" },
+            { adapterName: "插件A", file: "sys/rules.md" }
+          ],
+          { file: "page-one" }
+        )
+      )
+      .mockResolvedValueOnce(
+        response([
+          { pluginId: "a", pluginName: "插件A", file: "sys/project.md" },
+          { pluginId: "a", file: "sys/project.md" },
+          { pluginId: "b", pluginName: "插件B", file: "sys/project.md" },
+          { file: "sys/no-plugin.md" },
+          { pluginId: "b", file: null }
+        ])
+      )
+    const result = await fetchRecentConstraintFileDetails(fields, [org], query, undefined, now)
+    expect(result).toEqual({
+      fileCount: 3,
+      complete: false,
+      items: [
+        {
+          filePath: "sys/project.md",
+          pluginId: "a",
+          pluginName: "插件A",
+          pluginAliases: ["插件A"]
+        },
+        { filePath: "sys/rules.md", pluginId: "a", pluginName: "插件A", pluginAliases: ["插件A"] },
+        { filePath: "sys/project.md", pluginId: "b", pluginName: "插件B", pluginAliases: ["插件B"] }
+      ]
+    })
+    for (const [body] of query.mock.calls) {
+      expect(body).toMatchObject({
+        size: 0,
+        query: { bool: { filter: expect.arrayContaining([org]) } }
+      })
+      expect(JSON.stringify(body)).not.toMatch(/_raw|top_hits|script/)
+    }
+  })
   it("deduplicates repeated reads across projects, users, stages and agents, while keeping different plugins separate", async () => {
     const query = vi.fn().mockResolvedValue(
       response([

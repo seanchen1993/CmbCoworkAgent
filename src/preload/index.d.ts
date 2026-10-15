@@ -1,6 +1,10 @@
 import type {
   KnowledgeAccumulationData,
+  KnowledgeActiveDetails,
+  KnowledgeFileReaders,
   KnowledgeProjectStats,
+  KnowledgeReadDetails,
+  KnowledgeReadFileRef,
   KnowledgeRecentConstraintFiles
 } from "../shared/dashboard-knowledge-overview"
 import type { ProjectAttentionSortKey } from "../shared/project-attention"
@@ -2714,6 +2718,27 @@ interface CustomAPI {
     }) => Promise<{
       success: boolean
       data?: KnowledgeAccumulationData
+      error?: string
+      cancelled?: boolean
+    }>
+    knowledgeActiveDetails: (opts?: { upperOrgLv1?: string | string[] | null }) => Promise<{
+      success: boolean
+      data?: KnowledgeActiveDetails
+      error?: string
+      cancelled?: boolean
+    }>
+    knowledgeReadDetails: (opts?: { upperOrgLv1?: string | string[] | null }) => Promise<{
+      success: boolean
+      data?: KnowledgeReadDetails
+      error?: string
+      cancelled?: boolean
+    }>
+    knowledgeReadReaders: (
+      file: KnowledgeReadFileRef,
+      opts?: { upperOrgLv1?: string | string[] | null }
+    ) => Promise<{
+      success: boolean
+      data?: KnowledgeFileReaders
       error?: string
       cancelled?: boolean
     }>
