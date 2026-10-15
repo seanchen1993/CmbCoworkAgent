@@ -4085,6 +4085,8 @@ export function DashboardView(): React.JSX.Element {
         page: skillTracePage,
         pageSize: skillDetail.tracePageSize || SKILL_TRACE_PAGE_SIZE,
         totalTraces: skillDetail.totalTraces,
+        viewMode: skillDetail.traceViewMode ?? skillTraceViewMode,
+        triggerScope: skillDetail.traceTriggerScope ?? skillTraceTriggerScope,
         traces: skillDetail.traces
       })
       if (!result.success && !result.canceled) {
@@ -4095,7 +4097,7 @@ export function DashboardView(): React.JSX.Element {
     } finally {
       setSkillTraceExporting(false)
     }
-  }, [range, selectedSkill, skillDetail, skillTracePage])
+  }, [range, selectedSkill, skillDetail, skillTracePage, skillTraceTriggerScope, skillTraceViewMode])
 
   const loadUserList = useCallback(
     async (
@@ -4381,7 +4383,6 @@ export function DashboardView(): React.JSX.Element {
         await window.api.dashboard.threadTraces(threadId, {
           scope: "project",
           projectId: projectTraceProject.projectId,
-          range,
           featureSlug: projectTraceFeature?.slug,
           nodeName: projectTraceNode?.nodeName,
           nodeStatus: projectTraceStatus ?? undefined,
@@ -4392,7 +4393,6 @@ export function DashboardView(): React.JSX.Element {
     },
     [
       projectTraceProject,
-      range,
       projectTraceFeature,
       projectTraceNode,
       projectTraceStatus,
