@@ -11,14 +11,7 @@ import type { SubagentTranscriptBlobRef } from "../../shared/subagent-transcript
 
 export type { ForkBoundarySource, ForkUnstableReason } from "../../shared/checkpoint-forkability"
 
-export interface FileAttachment {
-  filename: string
-  filePath: string // full path for display
-  content: string // extracted text content
-  mimeType: string
-  size: number
-  truncated: boolean
-}
+export type { FileAttachment } from "../../shared/file-attachment"
 
 export type ThreadStatus = "idle" | "busy" | "interrupted" | "error"
 

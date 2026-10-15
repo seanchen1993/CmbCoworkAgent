@@ -91,13 +91,16 @@ export default defineConfig({
     build: {
       lib: {
         entry: {
-          index: "src/main/index.ts",
+          index: "src/main/bootstrap.ts",
+          application: "src/main/index.ts",
+          "bot-browser-host": "src/main/bots/browser-host-entry.ts",
           "browser-native-host": "src/main/browser/chrome/browser-native-host-entry.ts",
           "pty-host": "src/main/pty-host.ts",
           "code-exec-helper": "src/main/code-exec/helper-entry.ts",
           "mod-host": "src/main/mods/host-entry.ts",
           "function-mod-host": "src/main/mods/v2/host-entry.ts",
           "mods-cli": "src/main/mods/devtools/cli-entry.ts",
+          ...(process.env.CMB_BOTS_E2E === "1" ? { "bots-browser-e2e": "tests/support/bots-browser-e2e-entry.ts" } : {}),
           // Test-only exports share the production module instances. Absent in normal builds.
           ...(process.env.CMB_MODS_E2E === "1" ? { "mods-e2e": "tests/support/mods-e2e-entry.ts" } : {})
         },

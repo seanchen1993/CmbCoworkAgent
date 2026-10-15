@@ -1,4 +1,6 @@
-import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react"
+import React, { useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react"
+import { ChatPresentationContext } from "./chat-presentation-context"
+import { botMessageDate } from "@/lib/bot-message-date"
 import { Loader2 } from "lucide-react"
 import {
   Virtuoso,
@@ -126,8 +128,8 @@ export interface ChatMessageVirtualListProps {
   autoApproveGitPush: boolean
   onApprovalDecision: (decision: ChatApprovalDecision) => void
   onEditUserMessage: (message: Message) => void
-  onSetGoalFromMessage: (text: string) => void
-  onForkFromMessage: (message: Message) => void
+  onSetGoalFromMessage?: (text: string) => void
+  onForkFromMessage?: (message: Message) => void
   forkingMessageId: string | null
   onOpenHookLogBucket: (turnId: string) => void
   threadId: string
@@ -204,6 +206,8 @@ function ChatMessageRowImpl({
   userSendTimeLabel,
   searchLocation
 }: ChatMessageRowProps): React.JSX.Element {
+  const presentation = useContext(ChatPresentationContext)
+  const dateSeparator = presentation === "bot" ? botMessageDate(message, previousMessage) : null
   const navigatorRef = useMemo(
     () => setMessageRef(message.id, message.role),
     [message.id, message.role, setMessageRef]
@@ -231,6 +235,7 @@ function ChatMessageRowImpl({
       data-chat-message-id={message.id}
       data-message-role={message.role}
     >
+      {dateSeparator && <time className="bot-message-date">{dateSeparator}</time>}
       <MessageBubble
         messageGeneration={messageGeneration}
         messageRevision={messageRevision}

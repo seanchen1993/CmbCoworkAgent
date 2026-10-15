@@ -71,11 +71,7 @@ export function isGoalSlashTransportSensitiveControlCommandInput(input: string):
 
   const arg = trimmed.slice("/goal".length).trim().toLowerCase()
   return (
-    arg === "" ||
-    arg === "status" ||
-    arg === "pause" ||
-    arg === "resume" ||
-    isGoalClearAlias(arg)
+    arg === "" || arg === "status" || arg === "pause" || arg === "resume" || isGoalClearAlias(arg)
   )
 }
 
@@ -143,6 +139,7 @@ export function buildSlashPopoverMode(params: {
   skillSelected: boolean
   browserSelected?: boolean
   modCommands?: SlashCommandItem[]
+  generalCommands?: SlashCommandItem[]
 }): PopoverMode {
   const { input, skills, skillSelected, browserSelected = false } = params
 
@@ -152,7 +149,10 @@ export function buildSlashPopoverMode(params: {
   const filter = input.slice(1).toLowerCase()
   if (/\s/.test(filter)) return { kind: "closed" }
 
-  const commands = [...GENERAL_SLASH_COMMANDS, ...(params.modCommands ?? [])].filter((command) => commandMatchesFilter(command, filter))
+  const commands = [
+    ...(params.generalCommands ?? GENERAL_SLASH_COMMANDS),
+    ...(params.modCommands ?? [])
+  ].filter((command) => commandMatchesFilter(command, filter))
   const filteredSkills = filter
     ? skills.filter(
         (s) =>
@@ -179,13 +179,21 @@ export function useSlashCommands(params: {
   skillSelected: boolean
   browserSelected?: boolean
   modCommands?: SlashCommandItem[]
+  generalCommands?: SlashCommandItem[]
 }) {
   const { input, skills, skillSelected, browserSelected = false } = params
   const [selectedIdx, setSelectedIdx] = useState(0)
 
   const mode = useMemo<PopoverMode>(() => {
-    return buildSlashPopoverMode({ input, skills, skillSelected, browserSelected, modCommands: params.modCommands })
-  }, [input, skills, skillSelected, browserSelected, params.modCommands])
+    return buildSlashPopoverMode({
+      input,
+      skills,
+      skillSelected,
+      browserSelected,
+      modCommands: params.modCommands,
+      generalCommands: params.generalCommands
+    })
+  }, [input, skills, skillSelected, browserSelected, params.modCommands, params.generalCommands])
 
   // Reset highlight to top whenever the popover (re-)opens or the filter changes,
   // so pressing Enter right after typing never selects a stale carry-over item.

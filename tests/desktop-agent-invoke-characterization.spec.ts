@@ -201,7 +201,7 @@ function testPromptSkillHookAndHarnessPreparation(): void {
     [
       "await resolveHarnessFeatureBindingContext(bindingMetadata)",
       "createStandardTurnTrace({",
-      "const harnessAgentContext = await getHarnessAgentContext(metadata",
+      "harnessAgentContext = await getHarnessAgentContext(metadata",
       "await fireSessionStartOnce(",
       "const preparedPrompt = await prepareUserPromptForCurrentRun"
     ],

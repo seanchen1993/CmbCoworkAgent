@@ -27,6 +27,7 @@ import { AIMessage, HumanMessage } from "@langchain/core/messages"
 import { createMiddleware } from "langchain"
 import { randomUUID } from "crypto"
 import type { Message } from "../types"
+import { isInternalNotificationMessage } from "../../shared/checkpoint-transcript"
 import {
   advanceCompletedMessageContentRoute,
   getMessageProviderOccurrence,
@@ -40,6 +41,9 @@ export interface CurrentRunQueuedMessage {
   id: string
   content: string
   displayContent?: string
+  /** Trusted host receipt, called synchronously before durable transcript/model injection.
+   * False withdraws a cancelled inbox message. Throws fail the turn before model side effects. */
+  beforeInject?: () => boolean
 }
 
 /** Final assistant reply immediately preceding an afterModel steer. The outer
@@ -274,6 +278,16 @@ function currentRunInjectionAnchorForMessage(value: unknown): CurrentRunInjectio
   }
 }
 
+function currentRunInjectionAnchorForTail(
+  messages: readonly unknown[],
+  index: number
+): CurrentRunInjectionAnchor | undefined {
+  // Internal cues exist in graph state but are deliberately absent from the visible
+  // durable transcript. Anchor to the preceding real message, or the empty history.
+  while (index >= 0 && isInternalNotificationMessage(messages[index])) index--
+  return index >= 0 ? currentRunInjectionAnchorForMessage(messages[index]) : undefined
+}
+
 const currentRunMessageQueues = new Map<string, CurrentRunQueuedMessage[]>()
 const currentRunMessageQueueOwners = new Map<string, string>()
 const completedAssistantMessagesByRun = new Map<string, CurrentRunCompletedAssistantMessage>()
@@ -454,8 +468,8 @@ async function drainCurrentRunMessagesForInjection(
     }
   | undefined
 > {
-  const queued = drainCurrentRunMessageQueue(threadId, runToken).filter((message) =>
-    message.content.trim()
+  const queued = drainCurrentRunMessageQueue(threadId, runToken).filter(
+    (message) => message.content.trim() && (message.beforeInject?.() ?? true)
   )
   if (queued.length === 0) return undefined
 
@@ -574,7 +588,7 @@ export function createCurrentRunMessageQueueMiddleware(
       if (!threadId || !ownerRunToken) return undefined
 
       const messages = Array.isArray(state.messages) ? state.messages : []
-      const anchorMessage = currentRunInjectionAnchorForMessage(messages.at(-1))
+      const anchorMessage = currentRunInjectionAnchorForTail(messages, messages.length - 1)
       const injection = await drainCurrentRunMessagesForInjection(
         threadId,
         ownerRunToken,
@@ -609,7 +623,7 @@ export function createCurrentRunMessageQueueMiddleware(
           completedAssistantMessagesByRun.get(completedKey) ??
           completedAssistantMessageForTranscript(lastMessage)
         completedAssistantMessagesByRun.delete(completedKey)
-        const anchorMessage = currentRunInjectionAnchorForMessage(messages.at(-2))
+        const anchorMessage = currentRunInjectionAnchorForTail(messages, messages.length - 2)
 
         const injection = await drainCurrentRunMessagesForInjection(
           threadId,

@@ -3,6 +3,14 @@ import { describe, expect, it } from "vitest"
 
 const source = readFileSync(new URL("./threads.ts", import.meta.url), "utf8")
 
+function deletionHandlerSource(): string {
+  const start = source.indexOf("const deleteThread: ThreadDeletionService = async")
+  const end = source.indexOf('ipcMain.handle("threads:delete", deleteThread)', start)
+  expect(start).toBeGreaterThanOrEqual(0)
+  expect(end).toBeGreaterThan(start)
+  return source.slice(start, end)
+}
+
 describe("threads:get hydration contract", () => {
   it("runs the hot path in the read-only metadata worker with a narrow fallback", () => {
     const channel = source.indexOf('"threads:get"')
@@ -40,12 +48,8 @@ describe("threads:get hydration contract", () => {
   })
 
   it("cancels migration before deletion waits and forgets it only after DB removal", () => {
-    const channel = source.indexOf('"threads:delete"')
-    const start = source.lastIndexOf("ipcMain.handle(", channel)
-    const end = source.indexOf('// Get thread history', start)
-    const handler = source.slice(start, end)
+    const handler = deletionHandlerSource()
 
-    expect(start).toBeGreaterThanOrEqual(0)
     expect(handler).toContain("const lease = requireThreadMutationLease(threadId)")
     expect(handler.indexOf("cancelLegacySubagentTranscriptMigration(threadId)")).toBeLessThan(
       handler.indexOf("withThreadMutationLeaseLock(lease")
@@ -72,14 +76,13 @@ describe("threads:get hydration contract", () => {
   })
 
   it("binds grouped deletion to the confirmed incarnation and selector inside the mutation lock", () => {
-    const channel = source.indexOf('"threads:delete"')
-    const start = source.lastIndexOf("ipcMain.handle(", channel)
-    const end = source.indexOf("// Get thread history", start)
-    const handler = source.slice(start, end)
+    const handler = deletionHandlerSource()
     const lockIndex = handler.indexOf("withThreadMutationLeaseLock(lease")
     const incarnationIndex = handler.indexOf("matchesThreadIncarnation(threadRow")
     const membershipIndex = handler.indexOf("threadMetadataMatchesGroupSelector(")
-    const deletionIndex = handler.indexOf("performThreadDeletion(event, threadId, options?.groupGuard)")
+    const deletionIndex = handler.indexOf(
+      "performThreadDeletion(event, threadId, options?.groupGuard)"
+    )
 
     expect(handler).toContain("normalizeThreadDeleteOptions(rawOptions)")
     expect(lockIndex).toBeGreaterThanOrEqual(0)
@@ -90,7 +93,7 @@ describe("threads:get hydration contract", () => {
 
   it("revalidates a grouped selection again at the synchronous database commit boundary", () => {
     const start = source.indexOf("const performThreadDeletion = async")
-    const end = source.indexOf('"threads:delete"', start)
+    const end = source.indexOf("const deleteThread: ThreadDeletionService", start)
     const deletion = source.slice(start, end)
     const finalIncarnationCheck = deletion.lastIndexOf("matchesThreadIncarnation(")
     const finalMembershipCheck = deletion.lastIndexOf("threadMetadataMatchesGroupSelector(")
@@ -104,7 +107,7 @@ describe("threads:get hydration contract", () => {
 
   it("rechecks owner-managed runs at the synchronous database commit boundary", () => {
     const start = source.indexOf("const performThreadDeletion = async")
-    const end = source.indexOf('"threads:delete"', start)
+    const end = source.indexOf("const deleteThread: ThreadDeletionService", start)
     const deletion = source.slice(start, end)
     const finalBusyCheck = deletion.lastIndexOf("isExternallyManagedThreadRunBusy(")
     const databaseCommit = deletion.indexOf("dbDeleteThread(threadId)")
@@ -116,7 +119,7 @@ describe("threads:get hydration contract", () => {
 
   it("does not turn post-commit artifact cleanup failures into deletion failures", () => {
     const start = source.indexOf("const performThreadDeletion = async")
-    const end = source.indexOf('"threads:delete"', start)
+    const end = source.indexOf("const deleteThread: ThreadDeletionService", start)
     const deletion = source.slice(start, end)
     const commitIndex = deletion.indexOf("dbDeleteThread(threadId)")
     const workflowCleanupIndex = deletion.indexOf(
@@ -169,9 +172,7 @@ describe("threads:get hydration contract", () => {
     const handler = source.slice(start, end)
 
     expect(start).toBeGreaterThanOrEqual(0)
-    expect(handler).toContain(
-      "selectedPage.messages[selectedPage.deferredHydrationIndex ?? 0]"
-    )
+    expect(handler).toContain("selectedPage.messages[selectedPage.deferredHydrationIndex ?? 0]")
     expect(handler).toContain("page.messages[deferredHydrationIndex]")
     expect(handler).toContain("messageIndex: page.start + deferredHydrationIndex")
   })
@@ -208,10 +209,7 @@ describe("threads:get hydration contract", () => {
 
   it("returns only a cancellable bounded worker-checkpoint tail", () => {
     const start = source.indexOf('ipcMain.handle("threads:latest-checkpoint"')
-    const end = source.indexOf(
-      'ipcMain.handle("threads:latest-checkpoint-runtime-state"',
-      start
-    )
+    const end = source.indexOf('ipcMain.handle("threads:latest-checkpoint-runtime-state"', start)
     const handler = source.slice(start, end)
 
     expect(start).toBeGreaterThanOrEqual(0)
@@ -224,10 +222,7 @@ describe("threads:get hydration contract", () => {
 
   it("hydrates only bounded runtime channels in the cancellable projection worker", () => {
     const start = source.indexOf('ipcMain.handle("threads:latest-checkpoint-runtime-state"')
-    const end = source.indexOf(
-      '"threads:bootstrap-legacy-checkpoint-transcript"',
-      start
-    )
+    const end = source.indexOf('"threads:bootstrap-legacy-checkpoint-transcript"', start)
     const handler = source.slice(start, end)
 
     expect(start).toBeGreaterThanOrEqual(0)

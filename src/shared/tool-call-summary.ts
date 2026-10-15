@@ -1,4 +1,20 @@
+export const BOT_TOOL_LABELS: Record<string, string> = {
+  bot_list_peers: "查看可协作的 Bot",
+  bot_delegate: "交办给其他 Bot",
+  bot_update_profile: "更新 Bot 资料",
+  bot_schedule: "管理例行任务",
+  bot_browser: "操作 Bot 浏览器",
+  bot_request_browser_help: "请你操作浏览器",
+  bot_deliver_files: "交付工作成果",
+  bot_memory_search: "查找 Bot 记忆",
+  bot_memory_list: "查看 Bot 记忆目录",
+  bot_memory_get: "读取 Bot 记忆",
+  bot_remember: "保存 Bot 记忆",
+  bot_forget: "删除 Bot 记忆"
+}
+
 const COLLAPSED_TOOL_LABELS: Record<string, string> = {
+  ...BOT_TOOL_LABELS,
   read_file: "读取文件",
   write_file: "写入文件",
   edit_file: "编辑文件",

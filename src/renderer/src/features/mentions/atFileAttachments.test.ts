@@ -9,6 +9,7 @@ import {
 
 afterEach(() => {
   vi.useRealTimers()
+  vi.unstubAllGlobals()
 })
 
 describe("bounded @file attachment reads", () => {
@@ -107,6 +108,7 @@ describe("bounded @file attachment reads", () => {
   })
 
   it("binds a selected chip to its normalized workspace and removes it after A -> B", () => {
+    vi.stubGlobal("window", { electron: { process: { platform: "win32" } } })
     const selectedInA = toMentionedWorkspaceFile(
       {
         id: "/same.md",

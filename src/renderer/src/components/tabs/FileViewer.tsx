@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useId, useMemo, useRef, useState } from "react"
+import type { BotFilePreviewTransport } from "../../../../shared/bots/contracts"
 import { AlertCircle, ChevronLeft, ChevronRight, FileCode, Loader2 } from "lucide-react"
 import {
   type WorkspaceFilePreviewMediaResult,
@@ -37,6 +38,8 @@ import {
 } from "@/lib/file-preview-mode"
 
 interface FileViewerProps {
+  transport?: BotFilePreviewTransport
+  cacheNamespace?: string
   filePath: string
   threadId?: string
   externalFullPath?: string
@@ -87,14 +90,16 @@ export function FileViewer({
   reloadToken,
   previewMode,
   htmlPreviewPolicy,
-  requestLane
+  requestLane,
+  transport = window.api.workspace,
+  cacheNamespace = ""
 }: FileViewerProps): React.JSX.Element | null {
   const generatedLane = useId().replace(/[^a-zA-Z\d_-]/g, "")
   const lane = requestLane ?? `file-viewer-${generatedLane}`
   const displayPath = externalFullPath || filePath
-  const sourceCachePrefix = externalFullPath
+  const sourceCachePrefix = cacheNamespace + (externalFullPath
     ? `external:${externalFullPath}\u0000`
-    : `workspace:${threadId ?? ""}:${workspacePathKind ?? "relative"}:${filePath}\u0000`
+    : `workspace:${threadId ?? ""}:${workspacePathKind ?? "relative"}:${filePath}\u0000`)
 
   const fileName = displayPath.split(/[/\\]/).pop() || displayPath
   const ext = fileName.includes(".") ? (fileName.split(".").pop()?.toLowerCase() ?? "") : ""
@@ -164,7 +169,7 @@ export function FileViewer({
 
       const previewSource = await previewSourceForPath(displayPath)
       if (generation !== generationRef.current) return null
-      const result = await window.api.workspace.readFilePreview({
+      const result = await transport.readFilePreview({
         source: previewSource,
         offset,
         lane,
@@ -183,7 +188,7 @@ export function FileViewer({
       writeWorkspaceFilePreviewCache(cacheKey, result)
       return result
     },
-    [displayPath, lane, previewSourceForPath, sourceCachePrefix]
+    [displayPath, lane, previewSourceForPath, sourceCachePrefix, transport]
   )
 
   const loadTextPreview = useCallback(
@@ -243,7 +248,7 @@ export function FileViewer({
         if (isBinary) {
           const previewSource = await previewSourceForPath(displayPath)
           if (generation !== generationRef.current) return
-          const result = await window.api.workspace.openMediaPreview({
+          const result = await transport.openMediaPreview({
             source: previewSource,
             lane,
             requestToken,
@@ -251,7 +256,7 @@ export function FileViewer({
           })
           if (generation !== generationRef.current) {
             if (result.success && result.previewUrl) {
-              void window.api.workspace.releaseFilePreview({ previewUrl: result.previewUrl })
+              void transport.releaseFilePreview({ previewUrl: result.previewUrl })
             }
             return
           }
@@ -280,9 +285,9 @@ export function FileViewer({
 
     return () => {
       if (generationRef.current === generation) generationRef.current += 1
-      void window.api.workspace.cancelFilePreview({ lanePrefix: lane, requestToken })
+      void transport.cancelFilePreview({ lanePrefix: lane, requestToken })
       if (releasedMediaUrl) {
-        void window.api.workspace.releaseFilePreview({ previewUrl: releasedMediaUrl })
+        void transport.releaseFilePreview({ previewUrl: releasedMediaUrl })
       }
     }
   }, [
@@ -296,7 +301,8 @@ export function FileViewer({
     previewSourceForPath,
     reloadToken,
     sourceCachePrefix,
-    threadId
+    threadId,
+    transport
   ])
 
   const navigateToOffset = useCallback(
@@ -310,11 +316,11 @@ export function FileViewer({
         imageRequests: 0,
         imageBytes: 0
       }
-      void window.api.workspace.cancelFilePreview({
+      void transport.cancelFilePreview({
         lanePrefix: `${lane}:html`,
         requestToken
       })
-      void window.api.workspace.cancelFilePreview({
+      void transport.cancelFilePreview({
         lanePrefix: `${lane}:image`,
         requestToken
       })
@@ -362,7 +368,7 @@ export function FileViewer({
       const readPage = async (offset: number): Promise<WorkspaceFilePreviewTextResult | null> => {
         const previewSource = await previewSourceForPath(resolvedPath)
         if (generation !== generationRef.current) return null
-        const result = await window.api.workspace.readFilePreview({
+        const result = await transport.readFilePreview({
           source: previewSource,
           offset,
           lane: dependencyLane,
@@ -392,7 +398,7 @@ export function FileViewer({
       budget.htmlReads.set(resolvedPath, pending)
       return pending
     },
-    [lane, previewSourceForPath]
+    [lane, previewSourceForPath, transport]
   )
 
   // Markdown images receive a short-lived protocol URL, never a base64 IPC payload.
@@ -404,32 +410,32 @@ export function FileViewer({
       budget.imageRequests += 1
       const previewSource = await previewSourceForPath(resolvedPath)
       if (generation !== generationRef.current) return null
-      const result = await window.api.workspace.openMediaPreview({
+      const result = await transport.openMediaPreview({
         source: previewSource,
         lane: `${lane}:image:${shortPathHash(resolvedPath)}`,
         requestToken: requestTokenRef.current
       })
       if (generation !== generationRef.current) {
         if (result.success && result.previewUrl) {
-          void window.api.workspace.releaseFilePreview({ previewUrl: result.previewUrl })
+          void transport.releaseFilePreview({ previewUrl: result.previewUrl })
         }
         return null
       }
       if (!result.success) return null
       if (!result.inlineAllowed && result.previewUrl) {
-        void window.api.workspace.releaseFilePreview({ previewUrl: result.previewUrl })
+        void transport.releaseFilePreview({ previewUrl: result.previewUrl })
         return null
       }
       if (budget.imageBytes + result.size > MAX_MARKDOWN_IMAGE_SOURCE_BYTES) {
         if (result.previewUrl) {
-          void window.api.workspace.releaseFilePreview({ previewUrl: result.previewUrl })
+          void transport.releaseFilePreview({ previewUrl: result.previewUrl })
         }
         return null
       }
       budget.imageBytes += result.size
       return result.previewUrl
     },
-    [lane, previewSourceForPath]
+    [lane, previewSourceForPath, transport]
   )
 
   if (isLoading) {

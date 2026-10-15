@@ -24,7 +24,7 @@ function toTime(value: Date | string | number | undefined): number | null {
   return toDate(value)?.getTime() ?? null
 }
 
-function getCreatedTime(message: Message): number | null {
+export function getCreatedTime(message: Message): number | null {
   return toTime(message.created_at) ?? toTime(message.start_at) ?? toTime(message.end_at)
 }
 

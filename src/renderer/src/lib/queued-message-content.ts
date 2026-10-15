@@ -1,4 +1,5 @@
 import type { QueuedMessage } from "@/types"
+import { BOT_BROWSER_PROMPT_PREFIX } from "../../../shared/user-input-transport"
 // Relative (not "@/") so this module stays importable from tsx unit tests, which
 // don't resolve the "@/" path alias for runtime values. skill-marker has no
 // imports of its own, so the chain stays alias-free.
@@ -15,8 +16,14 @@ import {
 // live (non-queued) send composes, so a drained draft is byte-identical to typing
 // and sending it directly.
 
-export function getQueuedModelContent(message: QueuedMessage): string {
-  const text = formatBuiltinBrowserTransportMessage(message.text, message.builtinBrowser === true)
+export function getQueuedModelContent(
+  message: QueuedMessage,
+  browserTarget: "workbench" | "bot" = "workbench"
+): string {
+  const text =
+    message.builtinBrowser && browserTarget === "bot"
+      ? `${BOT_BROWSER_PROMPT_PREFIX}${message.text}`
+      : formatBuiltinBrowserTransportMessage(message.text, message.builtinBrowser === true)
   const primary = `${text}${message.attachmentModelBlocks ?? ""}`.trim()
   return [primary, message.skillBlock].filter((part) => part && part.trim()).join("\n\n")
 }
@@ -77,9 +84,9 @@ export function canClaimQueuedMessage(
 ): boolean {
   return Boolean(
     current &&
-      current.id === expected.id &&
-      !current.handoffRequestedAt &&
-      current.updated_at.getTime() === expected.updated_at.getTime()
+    current.id === expected.id &&
+    !current.handoffRequestedAt &&
+    current.updated_at.getTime() === expected.updated_at.getTime()
   )
 }
 

@@ -32,6 +32,7 @@ import { RightPanel } from "@/components/panels/RightPanel"
 import { WorkerStreamPanel } from "@/components/chat/WorkerStreamPanel"
 import { SubagentStreamPanel } from "@/components/chat/SubagentStreamPanel"
 import { WorkflowAgentStreamPanel } from "@/components/chat/WorkflowAgentStreamPanel"
+const BotsWorkspace = lazy(() => import("@/components/bots/BotsWorkspace").then(m => ({ default: m.BotsWorkspace })))
 const KanbanView = lazy(() =>
   import("@/components/kanban").then((m) => ({ default: m.KanbanView }))
 )
@@ -1096,13 +1097,13 @@ function App(): React.JSX.Element {
       */}
       <div className="isolate flex flex-col h-screen overflow-hidden bg-background">
         {/* Titlebar - logo centered, right panel toggle on right */}
-        <div className="flex h-9 w-full shrink-0 app-drag-region items-center border-b border-border">
+        <div className={`${renderedMainView === "bots" ? "hidden" : "flex"} h-9 w-full shrink-0 app-drag-region items-center border-b border-border`}>
           {/* Left: sidebar toggle */}
           <div
             className="flex flex-1 h-9 min-w-0 items-center"
             style={{ marginLeft: "var(--titlebar-inset-left, 0px)" }}
           >
-            {!showCustomizeView && !isAgentFocusActive && (
+            {renderedMainView !== "bots" && !showCustomizeView && !isAgentFocusActive && (
               <button
                 type="button"
                 className={`${panelToggleBaseClass} ${
@@ -1137,7 +1138,7 @@ function App(): React.JSX.Element {
               transform: `scale(${1 / zoomLevel})`,
               transformOrigin: "center center"
             }}
-            className="flex flex-1 min-w-0 items-center justify-center gap-1.5"
+            className={`flex flex-1 min-w-0 items-center justify-center gap-1.5 ${renderedMainView === "bots" ? "invisible" : ""}`}
           >
             <CmbDevClawLogo className="size-7 shrink-0 object-contain" />
             <span className="app-badge-name">
@@ -1268,7 +1269,7 @@ function App(): React.JSX.Element {
                 className="relative flex flex-1 overflow-hidden bg-grid-subtle"
               >
                 {/* Left Sidebar */}
-                {!sidebarCollapsed && !isAgentFocusActive && (
+                {renderedMainView !== "bots" && !sidebarCollapsed && !isAgentFocusActive && (
                   <AnimatedThreadSidebar
                     hidden={browserFullscreen}
                     width={leftWidth}
@@ -1276,7 +1277,9 @@ function App(): React.JSX.Element {
                   />
                 )}
 
-                {renderedMainView === "kanban" ? (
+                {renderedMainView === "bots" ? (
+                  <Suspense fallback={<div className="flex flex-1 items-center justify-center"><Loader2 className="size-5 animate-spin" /></div>}><BotsWorkspace /></Suspense>
+                ) : renderedMainView === "kanban" ? (
                   <main className="relative flex flex-1 flex-col min-w-0 overflow-hidden">
                     <Suspense
                       fallback={
@@ -1541,11 +1544,13 @@ function App(): React.JSX.Element {
                 </div>
               </div>
             )}
-            <ResourcePanelOverlay
-              isAgentFocusActive={isAgentFocusActive}
-              renderedMainView={renderedMainView}
-              renderedPanelThreadId={renderedRightPanelThreadId}
-            />
+            {renderedMainView !== "bots" && (
+              <ResourcePanelOverlay
+                isAgentFocusActive={isAgentFocusActive}
+                renderedMainView={renderedMainView}
+                renderedPanelThreadId={renderedRightPanelThreadId}
+              />
+            )}
           </div>
           {showCustomizeView && (
             <SettingsOverlay onClose={() => setShowCustomizeView(false)}>

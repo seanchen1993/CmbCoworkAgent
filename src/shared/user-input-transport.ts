@@ -13,6 +13,7 @@ import { SKILL_USE_TAG_NAME } from "./skill-use-block"
 // renderer modules, share one spelling with the composer.
 
 export const BUILTIN_BROWSER_PROMPT_PREFIX = "使用内置浏览器 browser_*工具："
+export const BOT_BROWSER_PROMPT_PREFIX = "使用 Bot 浏览器 bot_browser 工具："
 export const BUILTIN_BROWSER_NO_SCREENSHOT_PROMPT_PREFIX =
   "使用内置浏览器 browser_*工具（不允许使用截图功能）："
 
@@ -36,7 +37,9 @@ const SLASH_COMMAND_PATTERN = /^\s*\/[a-z][a-z0-9-]*(?=\s|$)/
  */
 export function stripUserInputTransportDecorations(content: string): string {
   let text = content
-  if (text.startsWith(BUILTIN_BROWSER_NO_SCREENSHOT_PROMPT_PREFIX)) {
+  if (text.startsWith(BOT_BROWSER_PROMPT_PREFIX)) {
+    text = text.slice(BOT_BROWSER_PROMPT_PREFIX.length)
+  } else if (text.startsWith(BUILTIN_BROWSER_NO_SCREENSHOT_PROMPT_PREFIX)) {
     text = text.slice(BUILTIN_BROWSER_NO_SCREENSHOT_PROMPT_PREFIX.length)
   } else if (text.startsWith(BUILTIN_BROWSER_PROMPT_PREFIX)) {
     text = text.slice(BUILTIN_BROWSER_PROMPT_PREFIX.length)

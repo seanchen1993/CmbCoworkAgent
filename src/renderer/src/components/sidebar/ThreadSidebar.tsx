@@ -1,6 +1,7 @@
 import { useState, useCallback, useEffect, useMemo, useRef, memo } from "react"
 import { useShallow } from "zustand/react/shallow"
 import {
+  Bot,
   Plus,
   Trash2,
   Pencil,
@@ -62,7 +63,7 @@ import {
   listCompleteThreadGroupSelection,
   type ThreadGroupSelectionEntry
 } from "@/lib/thread-group-selection"
-import { isHarnessFeatureThread, isHarnessProjectModeThread } from "@/lib/thread-classification"
+import { isHarnessFeatureThread, isHarnessProjectModeThread, isRegularChatThread } from "@/lib/thread-classification"
 import { isRemoteInboxThread, REMOTE_INBOX_WORKSPACE_NAME } from "@/lib/remote-thread-display"
 import { FEATURE_GATES } from "../../../../shared/feature-gates"
 import {
@@ -642,12 +643,12 @@ export const ThreadSidebar = memo(function ThreadSidebar(): React.JSX.Element {
       const previousThread = previousThreadId
         ? threads.find((thread) => thread.thread_id === previousThreadId)
         : null
-      if (previousThread && !isHarnessProjectModeThread(previousThread)) {
+      if (previousThread && isRegularChatThread(previousThread)) {
         setShowHarnessBoardView(false)
         return
       }
 
-      const firstThread = threads.find((thread) => !isHarnessProjectModeThread(thread))
+      const firstThread = threads.find(isRegularChatThread)
       if (firstThread) {
         await selectThread(firstThread.thread_id)
         return
@@ -752,7 +753,7 @@ export const ThreadSidebar = memo(function ThreadSidebar(): React.JSX.Element {
     let sortIndex = 0
 
     for (const thread of threads) {
-      if (isHarnessProjectModeThread(thread)) continue
+      if (isHarnessProjectModeThread(thread) || thread.metadata?.botId) continue
       const path = getThreadWorkspacePath(
         thread,
         threadStateSummaries[thread.thread_id]?.workspacePath
@@ -1280,6 +1281,7 @@ export const ThreadSidebar = memo(function ThreadSidebar(): React.JSX.Element {
       ) : activeSidebarTab === "chat" ? (
         <ScrollArea className="flex-1 min-h-0">
           <div className="space-y-0.5 px-1 pb-1">
+            <Button variant="ghost" size="sm" className="w-full justify-start gap-2 text-sm font-semibold" onClick={() => setMainView("bots")}><div className="flex size-5 items-center justify-center rounded-full bg-muted-foreground/15"><Bot className="size-3" /></div><span className="text-muted-foreground">Bots 工作区</span></Button>
             <Button
               variant="ghost"
               size="sm"

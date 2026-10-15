@@ -146,6 +146,9 @@ export interface SummarizeOptions {
   memoryDir: string
   scopeHint?: string
   allowedTypes?: MemoryType[]
+  signal?: AbortSignal
+  /** Optional scoped owner commits extracted facts using its own version/path rules. */
+  apply?: (operations: readonly MemoryOperation[]) => void
 }
 
 interface CreateOp {
@@ -168,7 +171,8 @@ interface SkipOp {
   filename: string
   reason?: string
 }
-type Operation = CreateOp | UpdateOp | SkipOp
+export type MemoryOperation = CreateOp | UpdateOp | SkipOp
+type Operation = MemoryOperation
 
 function buildManifestForPrompt(headers: MemoryHeader[]): string {
   if (headers.length === 0) return "(没有现有记忆)"
@@ -379,7 +383,10 @@ export function summarizeAndSave(options: SummarizeOptions): Promise<void> {
   const prev = summarizeQueues.get(key) ?? Promise.resolve()
   const next = prev.then(() => summarizeAndSaveInner(options))
   // Swallow errors so one failure doesn't block subsequent calls for this dir.
-  summarizeQueues.set(key, next.catch(() => undefined))
+  summarizeQueues.set(
+    key,
+    next.catch(() => undefined)
+  )
   return next
 }
 
@@ -414,14 +421,19 @@ async function summarizeAndSaveInner(options: SummarizeOptions): Promise<void> {
       `CONVERSATION:\n${truncated}\n\n` +
       `Output the JSON object with operations and the updated memory_md now.`
 
-    const response = await model.invoke([
-      new SystemMessage(SUMMARIZE_SYSTEM_PROMPT),
-      new HumanMessage(userPrompt)
-    ])
+    const response = await model.invoke(
+      [new SystemMessage(SUMMARIZE_SYSTEM_PROMPT), new HumanMessage(userPrompt)],
+      options.signal ? { signal: options.signal } : undefined
+    )
 
     const raw =
       typeof response.content === "string" ? response.content : JSON.stringify(response.content)
     const { operations, memoryMd } = parseResponse(raw)
+    if (options.apply) {
+      options.signal?.throwIfAborted()
+      options.apply(operations)
+      return
+    }
 
     const touched: string[] = []
     let creates = 0

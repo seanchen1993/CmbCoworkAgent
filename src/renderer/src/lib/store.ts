@@ -10,7 +10,7 @@ import type {
   ThreadForkParams
 } from "@/types"
 import type { BrowserCdpConfig } from "../../../shared/browser-types"
-import { findFirstChatThread, isHarnessProjectModeThread } from "./thread-classification"
+import { findFirstChatThread, isRegularChatThread } from "./thread-classification"
 import {
   appendThreadDirectoryPages,
   indexThreadDirectory,
@@ -851,6 +851,7 @@ type WorkerFocusAppendOptions = {
 
 type EvolutionTab = "candidates" | "traces" | "review"
 type MainView =
+  | "bots"
   | "thread"
   | "customize"
   | "evolution"
@@ -873,7 +874,7 @@ function resolveChatThreadId(threads: Thread[], preferredThreadId?: string | nul
   const preferredThread = preferredThreadId
     ? threads.find((thread) => thread.thread_id === preferredThreadId)
     : null
-  if (preferredThread && !isHarnessProjectModeThread(preferredThread)) {
+  if (preferredThread && isRegularChatThread(preferredThread)) {
     return preferredThread.thread_id
   }
   return findFirstChatThread(threads)?.thread_id ?? null
@@ -2278,7 +2279,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   },
 
   setMainView: (view) => {
-    if (view === "scheduled" || view === "market") {
+    if (view === "scheduled" || view === "market" || view === "bots") {
       set({
         mainView: view,
         showCustomizeView: false,

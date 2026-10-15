@@ -129,6 +129,7 @@ import {
   resolveWorkflowToolStrategy,
   SHELL_FIRST_TOOL_DESCRIPTIONS
 } from "./tool-strategy"
+import { profileShellCommand } from "./shell-command-profile"
 import {
   DEFAULT_AGENT_OUTPUT_STYLE,
   resolveAgentOutputStyle,
@@ -382,7 +383,7 @@ import { resolveModel } from "../routing"
 import { patchRuntimeReadFileTool, resolveReadFileTraceContext } from "./read-file-tool"
 import { createWorkflowTool } from "./workflow/tool"
 import { workflowRunManager } from "./workflow/run-manager"
-import { WORKFLOW_MODE_SYSTEM_PROMPT } from "./workflow/prompts"
+import { WORKFLOW_MODE_SYSTEM_PROMPT, AUTOMATIC_WORKFLOW_SYSTEM_PROMPT } from "./workflow/prompts"
 import {
   PROJECT_MODE_MEMORY_ENV,
   isMemoryAllowedForProjectMode,
@@ -2349,6 +2350,9 @@ function assembleDeepAgent(
     filesystemAccess,
     mainBlockedToolNames = [],
     managedExecution = false,
+    notifiedBackgroundCommands = false,
+    backgroundCommandShellSyntax = "posix",
+    backgroundCommandCwd = "",
     registrySubagentSpecs = [],
     modRuntimeAuthority,
     modSessionModel,
@@ -2602,8 +2606,17 @@ function assembleDeepAgent(
         ) {
           return readOnlyExecuteBlockMessage(windowsShellKind)
         }
+        // Shell detachment would escape the existing process owner. Never start it and retry.
+        if (
+          notifiedBackgroundCommands &&
+          (await profileShellCommand(
+            input.command, input.cwd ?? backgroundCommandCwd, backgroundCommandShellSyntax
+          )).background
+        ) {
+          return "Command was not started. Remove shell detachment (& / Start-Process / start) and use execute with run_in_background: true. The host owns the process and will deliver its completion automatically; do not poll or launch it twice."
+        }
         if (input.run_in_background) {
-          if (managedExecution) {
+          if (managedExecution && !notifiedBackgroundCommands) {
             return formatExecuteResponse(await sandbox.execute(input.command, input.cwd))
           }
           return sandbox.executeBackground(input.command, input.cwd)
@@ -2653,11 +2666,13 @@ function assembleDeepAgent(
               .boolean()
               .optional()
               .describe(
-                managedExecution
-                  ? "Managed sessions always execute in the foreground. This flag is accepted for compatibility but still waits up to 20 minutes and returns the final command result instead of a task ID."
-                  : "Set to true to run the command in the background. Returns a task ID immediately. " +
-                      "Use this for long-running commands like builds, dependency downloads, or test suites. " +
-                      "Retrieve the result later with the task_output tool."
+                notifiedBackgroundCommands
+                  ? "Run the command under the existing background process manager and return its task ID. Completion is delivered automatically to this conversation. Do not poll or detach the shell yourself."
+                  : managedExecution
+                    ? "Managed sessions always execute in the foreground. This flag is accepted for compatibility but still waits up to 20 minutes and returns the final command result instead of a task ID."
+                    : "Set to true to run the command in the background. Returns a task ID immediately. " +
+                        "Use this for long-running commands like builds, dependency downloads, or test suites. " +
+                        "Retrieve the result later with the task_output tool."
               )
           })
         }
@@ -3485,6 +3500,7 @@ export function getSystemPrompt(
   options: {
     includeBackgroundExec?: boolean
     managedForegroundExec?: boolean
+    notifiedBackgroundCommands?: boolean
     includeSubagents?: boolean
     includeMemory?: boolean
     includeCurrentTime?: boolean
@@ -3551,7 +3567,15 @@ ${effectiveToolStrategy !== "standard" ? "- Inspect the workspace root with tool
   // execute is present, but isReadOnlyShellCommand rejects builds/installs/tests.
   const backgroundExecSection = !includeBackgroundExec
     ? ""
-    : managedForegroundExec
+    : options.notifiedBackgroundCommands
+      ? `
+### Long-running commands
+
+Keep this Bot conversation available for new messages. Use execute with run_in_background: true for long-running commands. It returns a tracked task ID after acceptance; the host persists completion and wakes this conversation automatically. Do not use shell detachment, poll task_output or create another agent just to wait for a command.
+
+After acceptance, briefly report what is pending and end this turn. New user messages can be handled while the command runs. When its result arrives, verify the actual output and deliver files or a concrete failure. A task ID is not a PID or proof of success; do not claim completion at launch. Short inspections may use foreground execute.
+`
+      : managedForegroundExec
       ? `
 ### 长时间命令执行
 
@@ -4839,6 +4863,9 @@ export interface CreateAgentRuntimeOptions {
   coordinatorNotificationSelectedSkills?: Record<string, CoordinatorSelectedSkill | undefined>
   /** Shared per-turn worker planning counters, reused across failover runtime rebuilds. */
   coordinatorWorkerTurnPlanning?: CoordinatorWorkerTurnPlanningState
+  /** Offer the existing workflow engine without requiring a user-selected mode. */
+  workflowEnabled?: boolean
+  backgroundCommandLifecycle?: import("./background-command-lifecycle").BackgroundCommandLifecycle
   /** Runtime mode. "normal" preserves the existing agent; "coordinator" enables async worker orchestration. */
   agentMode?: AgentMode
   /** Parent/root trace context used to link async worker and workflow subagent traces. */
@@ -4904,6 +4931,8 @@ export interface CreateAgentRuntimeOptions {
   onFileMutation?: (filePath: string, kind: AgentFileMutationKind) => void
   /** Extra tools appended to the runtime tool list (e.g. a workflow subagent's structured_output). */
   additionalTools?: DynamicStructuredTool[]
+  /** Host-scoped discovery and invocation, inherited by nested runtimes. */
+  capabilityService?: McpCapabilityService
   /**
    * Overrides the tool-concurrency queue id. Tools sharing a queue serialize
    * their EXCLUSIVE operations (write_file/edit_file/writing execute) via a
@@ -5150,6 +5179,10 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
     options.filesystemAccess?.workload === "read_only"
   const isCoordinatorMode = agentMode === "coordinator"
   const isWorkflowMode = agentMode === "workflow"
+  const hasWorkflowTool =
+    !runtimeBlockedToolNames.has("workflow") &&
+    (isWorkflowMode || (options.workflowEnabled === true && !isCoordinatorMode && !disableSubagents))
+  const notifiedBackgroundCommands = Boolean(options.backgroundCommandLifecycle)
   const outputStyle =
     agentMode === "normal"
       ? resolveAgentOutputStyle(options.outputStyle, options.conciseModeEnabled === true)
@@ -5447,6 +5480,7 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
       }
     ),
     abortSignal: options.abortSignal,
+    backgroundCommandLifecycle: options.backgroundCommandLifecycle,
     runId: threadId,
     // Foreground turns on the same thread can overlap briefly during bounded
     // replacement. Keep background-task ownership logical, but scope ACL
@@ -5680,6 +5714,7 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
     filesystemEnabled: !isCoordinatorMode,
     includeBackgroundExec: executeToolAvailable && !isReadOnlyRuntime,
     managedForegroundExec: managedExecution,
+    notifiedBackgroundCommands,
     includeSubagents: mainSubagentsEnabled,
     includeMemory: runtimePolicy.includeMemory,
     includeCurrentTime: runtimePolicy.includeCurrentTime
@@ -5875,7 +5910,7 @@ The workspace root is: ${fileRoot}`
   }
 
   const capabilityService = createScopedMcpCapabilityService(
-    getGlobalMcpCapabilityService(),
+    options.capabilityService ?? getGlobalMcpCapabilityService(),
     hookScope,
     resolveHooksForContext,
     onHookResult,
@@ -6032,7 +6067,7 @@ The workspace root is: ${fileRoot}`
     extraTools.push(...(options.additionalTools as unknown as RuntimeTool[]))
   }
 
-  if (isWorkflowMode) {
+  if (hasWorkflowTool) {
     const workflowAgentProfiles = await loadAgentProfilesAsync(workspacePath)
     const worktreeSubagentThreads = new Set<string>()
     // Dynamic Workflows: the model writes a JS orchestration script; the run
@@ -6045,6 +6080,8 @@ The workspace root is: ${fileRoot}`
         threadId,
         workspacePath,
         modelId,
+        automaticUse: options.workflowEnabled === true,
+        abortSignal: options.abortSignal,
         onLaunched: onWorkflowLaunched,
         notificationOwner: backgroundNotificationOwner,
         // Run-before approval gate (aligns with Claude Code's "Review dynamic
@@ -6059,7 +6096,7 @@ The workspace root is: ${fileRoot}`
         // threadId). Injected so a script writeFile() and a concurrent agent()'s
         // tool write serialize TOGETHER, not each in its own silo. (#2)
         runExclusiveFileWrite: <T>(fn: () => Promise<T>): Promise<T> =>
-          getToolConcurrencyLock(threadId).write(fn),
+          getToolConcurrencyLock(options.toolConcurrencyQueueId ?? threadId).write(fn),
         agentProfiles: workflowAgentProfiles,
         subagentDeps: {
           traceContext,
@@ -6103,6 +6140,7 @@ The workspace root is: ${fileRoot}`
               enableAgentsPrompt: !restrictedRole,
               disableMemoryInjection: restrictedRole,
               memoryEnabled: memoryEnabledForThread,
+              capabilityService: options.capabilityService,
               agentMode: "normal",
               traceContext: subagentOptions.traceContext,
               disableSubagents: true,
@@ -6159,7 +6197,7 @@ The workspace root is: ${fileRoot}`
               // run in parallel — which is the entire point of asking for a
               // worktree. Writes WITHIN one worktree stay serialized, because the
               // key is the worktree and one worktree hosts exactly one agent.
-              toolConcurrencyQueueId: worktreeIsolation?.workspaceRoot ?? threadId,
+              toolConcurrencyQueueId: worktreeIsolation?.workspaceRoot ?? options.toolConcurrencyQueueId ?? threadId,
               // acceptEdits: the user approved the whole workflow at launch, so
               // its background subagents must not re-prompt per file edit
               // (shell execution stays gated).
@@ -6738,6 +6776,8 @@ Use the same worker thread context for follow-up instructions. ${scratchpadGuida
             maxRetryAttempts,
             hookScope: workerHookScope,
             memoryEnabled: memoryEnabledForThread,
+            capabilityService: options.capabilityService,
+            toolConcurrencyQueueId: options.toolConcurrencyQueueId,
             traceContext: workerRuntimeTraceContext,
             ...workerHarnessContext,
             onHookResult: workerOnHookResult,
@@ -6811,6 +6851,8 @@ Use the same worker thread context for follow-up instructions. ${scratchpadGuida
             maxRetryAttempts,
             hookScope: workerHookScope,
             memoryEnabled: memoryEnabledForThread,
+            capabilityService: options.capabilityService,
+            toolConcurrencyQueueId: options.toolConcurrencyQueueId,
             traceContext: workerRuntimeTraceContext,
             ...workerHarnessContext,
             onHookResult: workerOnHookResult,
@@ -6868,6 +6910,8 @@ Access limits: read-only handoff continuation. Do not modify files, run commands
             maxRetryAttempts,
             hookScope: workerHookScope,
             memoryEnabled: memoryEnabledForThread,
+            capabilityService: options.capabilityService,
+            toolConcurrencyQueueId: options.toolConcurrencyQueueId,
             traceContext: workerRuntimeTraceContext,
             ...workerHarnessContext,
             onHookResult: workerOnHookResult,
@@ -7155,8 +7199,10 @@ Access limits: read-only handoff continuation. Do not modify files, run commands
     if (runtimePolicy.includeDeferredToolInventoryPrompt && hasInvokeDeferredTool) {
       systemPrompt += renderAvailableDeferredToolsPrompt(deferredToolIds)
     }
-    if (isWorkflowMode) {
-      systemPrompt += WORKFLOW_MODE_SYSTEM_PROMPT
+    if (hasWorkflowTool) {
+      systemPrompt += options.workflowEnabled === true
+        ? AUTOMATIC_WORKFLOW_SYSTEM_PROMPT
+        : WORKFLOW_MODE_SYSTEM_PROMPT
     }
   }
   systemPrompt += "\n\n" + userInfoPrompt
@@ -7417,6 +7463,15 @@ Access limits: read-only handoff continuation. Do not modify files, run commands
     filesystemAccess: options.filesystemAccess,
     mainBlockedToolNames: [...runtimeBlockedToolNames],
     managedExecution,
+    // Background command ownership is a trusted host capability, not a mode
+    // chosen by the model. Never inherit it into the actual workflow executor.
+    notifiedBackgroundCommands,
+    backgroundCommandCwd: fileRoot,
+    backgroundCommandShellSyntax: isPowerShell
+      ? "powershell"
+      : isBashLike
+        ? "posix"
+        : "cmd",
     registrySubagentSpecs,
     // The runtime's commands execute via the sandbox; on Windows with a sandbox
     // that's PowerShell. Pass that to the read-only execute gate so PS read-only

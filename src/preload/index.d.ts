@@ -1025,6 +1025,7 @@ interface DashboardPluginAggregate {
 }
 
 interface CustomAPI {
+  bots: import("../shared/bots/contracts").BotClient
   uiGuides: {
     getState(config: UiGuideConfig): Promise<UiGuideState>
     recordDisplay(config: UiGuideConfig): Promise<boolean>

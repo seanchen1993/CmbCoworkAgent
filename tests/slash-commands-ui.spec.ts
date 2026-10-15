@@ -17,6 +17,7 @@ import {
 } from "../src/renderer/src/features/slash-commands/useSlashCommands.ts"
 import {
   BUILTIN_BROWSER_COMMAND_ID,
+  BUILTIN_BROWSER_COMMAND,
   formatBuiltinBrowserPrompt,
   getBuiltinBrowserPromptPrefix,
   parseBuiltinBrowserPrompt,
@@ -69,6 +70,23 @@ function testRootSlashShowsGoalAboveSkills(): void {
 function testPlainTextKeepsPopoverClosed(): void {
   const mode = buildSlashPopoverMode({ input: "hello /", skills, skillSelected: false })
   assertEqual(mode.kind, "closed", "plain text should not open slash popover")
+}
+
+function testManagedSurfaceKeepsSkillsWithoutDesktopControlCommands(): void {
+  const mode = buildSlashPopoverMode({
+    input: "/",
+    skills,
+    skillSelected: false,
+    generalCommands: [BUILTIN_BROWSER_COMMAND]
+  })
+  assertEqual(mode.kind, "slash", "managed composer still supports slash selection")
+  if (mode.kind !== "slash") return
+  assertArrayEqual(
+    mode.commands.map((item) => item.id),
+    [BUILTIN_BROWSER_COMMAND_ID],
+    "managed commands must not expose the desktop Goal control plane"
+  )
+  assertEqual(mode.skills.length, 2, "managed composer retains available skills")
 }
 
 function testGoalFilterShowsGoalCommand(): void {
@@ -550,6 +568,7 @@ function testRuntimeComposerStateKeepsHistoryLoadingLocked(): void {
 function main(): void {
   const tests = [
     testRootSlashShowsGoalAboveSkills,
+    testManagedSurfaceKeepsSkillsWithoutDesktopControlCommands,
     testPlainTextKeepsPopoverClosed,
     testGoalFilterShowsGoalCommand,
     testSkillNameFilteringStillWorks,

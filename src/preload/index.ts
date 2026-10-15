@@ -1,3 +1,4 @@
+import { localBotsApi } from "./bots"
 import type { DashboardThreadTraceScope } from "../shared/dashboard-thread-trace-scope"
 import type {
   AppNotification,
@@ -648,6 +649,7 @@ ipcRenderer.on(
 
 // Custom APIs for renderer
 const api = {
+  bots: localBotsApi,
   uiGuides: {
     getState: (config: UiGuideConfig): Promise<UiGuideState> =>
       ipcRenderer.invoke("uiGuides:getState", config),

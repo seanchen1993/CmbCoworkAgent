@@ -18,6 +18,16 @@ function message(
 }
 
 describe("chat scroll navigator virtualization bridge", () => {
+  it("does not publish navigation markers for quiet turns and refreshes visibility without new tokens", () => {
+    const project = createChatScrollQuestionProjector()
+    const messages = [message("routine", "user"), message("quiet", "assistant"), message("u-next", "user")]
+    expect(project(messages, 1).userMessageIds).toEqual(["routine", "u-next"])
+    const hidden = new Set(["routine", "quiet"])
+    const projected = project(messages, 1, null, hidden)
+    expect(projected.userMessageIds).toEqual(["u-next"])
+    expect(projected.userMessageIndexes).toEqual([2])
+    expect(project(messages, 1, null, hidden)).toBe(projected)
+  })
   it("resolves the owning user while a tall assistant row has unloaded its user row", () => {
     const messages = [
       message("u-1", "user"),

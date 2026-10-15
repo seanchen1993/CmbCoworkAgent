@@ -105,6 +105,7 @@ interface Harness {
 
 function createHarness(options: {
   agentMode: string
+  botMetadata?: Record<string, unknown>
   runBody?: () => Promise<void>
   environmentForcesCoordinator?: boolean
   /**
@@ -133,7 +134,11 @@ function createHarness(options: {
     getThread: (() =>
       ({
         thread_id: THREAD,
-        metadata: JSON.stringify({ workspacePath: WORKSPACE, agentMode: options.agentMode })
+        metadata: JSON.stringify({
+          workspacePath: WORKSPACE,
+          agentMode: options.agentMode,
+          ...options.botMetadata
+        })
       }) as never) as never,
     startRun: startRun as never,
     getDelivery: (() => ({}) as never) as never,
@@ -180,6 +185,70 @@ afterEach(() => {
 })
 
 describe("pending notification scheduler", () => {
+  it("dispatches durable managed work without claiming or running a desktop summary", async () => {
+    const runs = pendingRuns(persistedRun({ notificationOwner: "desktop" }))
+    const { scheduler, startRun } = createHarness({ agentMode: "workflow" })
+    const dispatch = vi.fn(async () => true)
+    scheduler.setManagedDispatcher(dispatch)
+    expect(await scheduler.check(THREAD)).toEqual({ started: false, reason: "managed-queue" })
+    expect(dispatch).toHaveBeenCalledWith({ threadId: THREAD, kind: "workflow", key: "wf_1" })
+    expect(startRun).not.toHaveBeenCalled()
+    expect(await runs.deliverOne()).not.toBeNull()
+  })
+
+  it.each([undefined, "normal"])(
+    "routes a Bot receipt without a user-selected workflow mode (%s)",
+    async (mode) => {
+      const runs = pendingRuns(persistedRun({ notificationOwner: "desktop" }))
+      const { scheduler, startRun } = createHarness({
+        agentMode: "normal",
+        botMetadata: { agentMode: mode, botId: "local-bot", botHostId: "local" }
+      })
+      const dispatch = vi.fn(async () => true)
+      scheduler.setManagedDispatcher(dispatch)
+      expect(await scheduler.check(THREAD)).toEqual({ started: false, reason: "managed-queue" })
+      expect(dispatch).toHaveBeenCalledOnce()
+      expect(startRun).not.toHaveBeenCalled()
+      expect(await runs.deliverOne()).not.toBeNull()
+    }
+  )
+
+  it.each([{}, { botId: "b", botHostId: "remote" }, { botHostId: "local" }])(
+    "does not enable workflow notifications for an ordinary or unbound thread: %j",
+    async (botMetadata) => {
+      pendingRuns(persistedRun({ notificationOwner: "desktop" }))
+      const { scheduler, startRun } = createHarness({ agentMode: "normal", botMetadata })
+      const dispatch = vi.fn(async () => true)
+      scheduler.setManagedDispatcher(dispatch)
+      expect(await scheduler.check(THREAD)).toEqual({
+        started: false,
+        reason: "not-a-background-mode"
+      })
+      expect(dispatch).not.toHaveBeenCalled()
+      expect(startRun).not.toHaveBeenCalled()
+    }
+  )
+
+  it("keeps ordinary desktop behavior when the optional queue declines a thread", async () => {
+    pendingRuns(persistedRun({ notificationOwner: "desktop" }))
+    const { scheduler, startRun } = createHarness({ agentMode: "workflow" })
+    scheduler.setManagedDispatcher(async () => false)
+    await scheduler.check(THREAD)
+    expect(startRun).toHaveBeenCalledTimes(1)
+  })
+
+  it("retries queue failure within the existing budget without an unscoped fallback", async () => {
+    pendingRuns(persistedRun({ notificationOwner: "desktop" }))
+    const { scheduler, startRun, timers } = createHarness({ agentMode: "workflow" })
+    scheduler.setManagedDispatcher(async () => {
+      throw new Error("queue full")
+    })
+    await scheduler.check(THREAD)
+    expect(startRun).not.toHaveBeenCalled()
+    expect(timers.pending()).toBe(1)
+    scheduler.stop()
+  })
+
   it("leaves the notification for the run body to claim", async () => {
     const runs = pendingRuns(persistedRun({ notificationOwner: "desktop" }))
     let claimedByBody: PersistedWorkflowRun | null | undefined

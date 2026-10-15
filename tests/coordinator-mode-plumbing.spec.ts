@@ -1727,8 +1727,8 @@ async function testMainResolvesAndPersistsMode(): Promise<void> {
   )
   assertIncludes(
     agentIpc,
-    "isTrustedCoordinatorNotificationInvoke ? undefined : message",
-    "agent Stop hook context does not seed internal coordinator notification turns as user messages"
+    "isTrustedCoordinatorNotificationInvoke || isBotInternalTurnInvoke ? undefined : message",
+    "agent Stop hook context does not seed trusted coordinator or command receipts as user messages"
   )
   assertIncludes(
     agentIpc,

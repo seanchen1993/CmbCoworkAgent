@@ -89,6 +89,7 @@ import {
   getThreadCore,
   getThreadMessageIdentityContext,
   getThreadMessageProviderOccurrencesBeforeUser,
+  captureThreadMessageProviderOccurrenceBoundary,
   getThreadMessagesByIds,
   getThread,
   updateThread,
@@ -270,10 +271,10 @@ import {
   type CoordinatorSelectedSkill
 } from "../agent/coordinator-mode"
 import { workflowRunManager } from "../agent/workflow/run-manager"
+import { hasBotWorkflowCapability } from "../agent/workflow/bot-capability"
 import { resolveWorkflowOutputFile } from "../agent/workflow/run-store"
 import {
   WORKFLOW_NOTIFICATION_MARKER_PREFIX,
-  WORKFLOW_NOTIFICATION_TURN_PROMPT,
   WORKFLOW_NOTIFICATION_TURN_TRIGGER,
   buildWorkflowNotificationMessage,
   isWorkflowNotificationTurnMessage
@@ -436,6 +437,9 @@ import {
   registerActiveAgentRunInspector,
   registerAgentGoalControlImplementation,
   registerAgentRunImplementation,
+  registerAgentRunSteerer,
+  type AgentRunSteerRequest,
+  type AgentRunSteerResult,
   startAgentRun,
   type AgentRunDelivery,
   type AgentRunExecutionContext
@@ -4172,7 +4176,11 @@ function persistAndForwardPhysicalRunStreamChunk(
   payload: unknown,
   valuesMessageIndexOffset = 0,
   valuesSnapshotKind: "full" | "append" | "tail" = "full",
-  completeValuesMessages?: readonly unknown[]
+  completeValuesMessages?: readonly unknown[],
+  loadPreviousTurnOccurrences?: (
+    userMessageId: string,
+    sourceIds: readonly string[]
+  ) => ReturnType<typeof getThreadMessageProviderOccurrencesBeforeUser>
 ): string | null {
   // This fence deliberately sits immediately beside persistence and renderer
   // forwarding. A provider callback may resume after any earlier await even
@@ -4214,8 +4222,8 @@ function persistAndForwardPhysicalRunStreamChunk(
             role: message.role as Message["role"]
           }))
         ),
-      loadPreviousTurnOccurrences: (userMessageId, sourceIds) =>
-        getThreadMessageProviderOccurrencesBeforeUser(threadId, userMessageId, sourceIds)
+      loadPreviousTurnOccurrences: loadPreviousTurnOccurrences ?? ((userMessageId, sourceIds) =>
+        getThreadMessageProviderOccurrencesBeforeUser(threadId, userMessageId, sourceIds))
     })
     rememberSelectedStreamTranscriptValueSnapshots(payload, snapshots)
     for (const snapshot of snapshots) {
@@ -5261,125 +5269,143 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
   // Let the runtime's checkpointer LRU avoid evicting threads with a live run.
   setCheckpointerBusyGuard(hasActiveAgentRun)
 
-  // Steer a queued draft into the RUNNING turn on this thread. Rejected (so the
-  // renderer keeps it in its draft queue and can retry) when the thread has no
-  // active foreground run — background workflow/coordinator-worker/scheduler/chatx
-  // runs are intentionally NOT steerable here, as they don't use `activeRuns`.
+  // Shared hook/lease protected queue, used by desktop drafts and trusted Bot inboxes.
+  const queueIntoOwnedRun = async (request: AgentRunSteerRequest): Promise<AgentRunSteerResult> => {
+    const { threadId, message } = request
+    const ownsLease = (): boolean => {
+      const lease = getLocalThreadRunLease(threadId)
+      return lease?.owner === request.owner && lease.runId === request.runId
+    }
+    if (!ownsLease()) return { queued: false, reason: "no_active_run" }
+    if (!threadId || !message?.id || !message.content?.trim()) {
+      console.warn("[Agent][Queue] rejected invalid queue payload", { threadId })
+      return { queued: false, reason: "invalid_payload" }
+    }
+    const messageId = message.id
+    const messageContent = message.content
+    const messageDisplayContent = message.displayContent
+    const activeController = activeRuns.get(threadId)
+    if (!activeController || activeController.signal.aborted) {
+      console.log(
+        `[Agent][Queue] no active run for thread ${threadId}; activeRuns=[${Array.from(
+          activeRuns.keys()
+        ).join(", ")}]`
+      )
+      return { queued: false, reason: "no_active_run" }
+    }
+    if (goalManager.get(threadId)?.status === "active") {
+      return { queued: false, reason: "active_goal" }
+    }
+    const preparer = currentRunMessagePreparers.get(threadId)
+    if (!preparer) {
+      return { queued: false, reason: "run_not_ready" }
+    }
+    // Serialize messages only within this exact run. A stale run can remain
+    // inside a slow external Hook after its token is invalidated; keying by
+    // token prevents that work from blocking steer requests for the new run.
+    const preparationLockKey = currentRunMessagePreparationKey(threadId, preparer.runToken)
+    trackCurrentRunMessagePreparation(preparationLockKey, messageId, 1)
+    try {
+      return await currentRunMessagePreparationLocks.withKey(preparationLockKey, async () => {
+        if (
+          !ownsLease() ||
+          activeRuns.get(threadId) !== activeController ||
+          activeController.signal.aborted ||
+          currentRunMessagePreparers.get(threadId)?.runToken !== preparer.runToken
+        ) {
+          return { queued: false, reason: "no_active_run" }
+        }
+        let prepared: CurrentRunMessagePreparation
+        try {
+          prepared = await preparer.prepare({
+            content: messageContent,
+            displayContent: messageDisplayContent
+          })
+        } catch (error) {
+          const preparationError = error instanceof Error ? error.message : "引导消息预处理失败"
+          console.warn("[Agent][Queue] current-run prompt preparation failed:", error)
+          return {
+            queued: false,
+            reason: "hook_blocked",
+            message: preparationError
+          }
+        }
+        if (!prepared.accepted) {
+          return { queued: false, reason: prepared.reason, message: prepared.message }
+        }
+        // Goal state can change while an async hook or explicit-skill lifecycle
+        // runs. Recheck at the commit boundary so a late goal activation cannot
+        // receive an ordinary steered user message.
+        if (goalManager.get(threadId)?.status === "active") {
+          return { queued: false, reason: "active_goal" }
+        }
+        // The active run can settle, be stopped, or be replaced while an async
+        // hook executes. Never hand prepared content to an aborted/different run.
+        if (
+          !ownsLease() ||
+          activeRuns.get(threadId) !== activeController ||
+          activeController.signal.aborted ||
+          currentRunMessagePreparers.get(threadId)?.runToken !== preparer.runToken
+        ) {
+          return { queued: false, reason: "no_active_run" }
+        }
+        if (!isCurrentRunMessageQueueOwner(threadId, preparer.runToken)) {
+          return { queued: false, reason: "no_active_run" }
+        }
+        const queued = queueCurrentRunMessage(
+          threadId,
+          {
+            id: messageId,
+            beforeInject: message.beforeInject,
+            content: prepared.content,
+            displayContent: neutralizeWorkflowPlumbingUserText(
+              messageDisplayContent || messageContent
+            )
+          },
+          preparer.runToken
+        )
+        if (!queued) {
+          if (isCurrentRunMessageWithdrawn(threadId, messageId)) {
+            return { queued: false, reason: "withdrawn" }
+          }
+          // Rejected because this id was already drained into the model loop (the
+          // renderer's local "已引导" state was stale relative to this run) — never
+          // silently rewrite content the model already responded to.
+          console.log(
+            `[Agent][Queue] rejected re-queue of already-injected message ${messageId} for thread ${threadId}`
+          )
+          return { queued: false, reason: "already_injected" }
+        }
+        console.log(
+          `[Agent][Queue] queued current-run message ${messageId} for thread ${threadId}`
+        )
+        // Only the trusted Bot path opts into process handoff. Desktop queue semantics stay unchanged.
+        if (request.owner === "bot") LocalSandbox.yieldForegroundCommands(activeController.signal)
+        return { queued: true }
+      })
+    } finally {
+      trackCurrentRunMessagePreparation(preparationLockKey, messageId, -1)
+    }
+  }
+  registerAgentRunSteerer(queueIntoOwnedRun)
   ipcMain.handle(
     "agent:queueCurrentRunMessage",
-    async (
-      _event,
-      payload: {
-        threadId?: string
-        message?: { id?: string; content?: string; displayContent?: string }
-      }
-    ): Promise<{ queued: boolean; reason?: string; message?: string }> => {
-      const threadId = payload?.threadId
-      const message = payload?.message
-      if (!threadId || !message?.id || !message.content?.trim()) {
-        console.warn("[Agent][Queue] rejected invalid queue payload", { threadId })
+    async (_event, payload: {
+      threadId?: string
+      message?: { id?: string; content?: string; displayContent?: string }
+    }): Promise<AgentRunSteerResult> => {
+      const lease = payload?.threadId ? getLocalThreadRunLease(payload.threadId) : undefined
+      if (!lease || lease.owner !== "desktop") return { queued: false, reason: "no_active_run" }
+      if (!payload?.message?.id || !payload.message.content?.trim())
         return { queued: false, reason: "invalid_payload" }
-      }
-      const messageId = message.id
-      const messageContent = message.content
-      const messageDisplayContent = message.displayContent
-      const activeController = activeRuns.get(threadId)
-      if (!activeController || activeController.signal.aborted) {
-        console.log(
-          `[Agent][Queue] no active run for thread ${threadId}; activeRuns=[${Array.from(
-            activeRuns.keys()
-          ).join(", ")}]`
-        )
-        return { queued: false, reason: "no_active_run" }
-      }
-      if (goalManager.get(threadId)?.status === "active") {
-        return { queued: false, reason: "active_goal" }
-      }
-      const preparer = currentRunMessagePreparers.get(threadId)
-      if (!preparer) {
-        return { queued: false, reason: "run_not_ready" }
-      }
-      // Serialize messages only within this exact run. A stale run can remain
-      // inside a slow external Hook after its token is invalidated; keying by
-      // token prevents that work from blocking steer requests for the new run.
-      const preparationLockKey = currentRunMessagePreparationKey(threadId, preparer.runToken)
-      trackCurrentRunMessagePreparation(preparationLockKey, messageId, 1)
-      try {
-        return await currentRunMessagePreparationLocks.withKey(preparationLockKey, async () => {
-          if (
-            activeRuns.get(threadId) !== activeController ||
-            activeController.signal.aborted ||
-            currentRunMessagePreparers.get(threadId)?.runToken !== preparer.runToken
-          ) {
-            return { queued: false, reason: "no_active_run" }
-          }
-          let prepared: CurrentRunMessagePreparation
-          try {
-            prepared = await preparer.prepare({
-              content: messageContent,
-              displayContent: messageDisplayContent
-            })
-          } catch (error) {
-            const preparationError = error instanceof Error ? error.message : "引导消息预处理失败"
-            console.warn("[Agent][Queue] current-run prompt preparation failed:", error)
-            return {
-              queued: false,
-              reason: "hook_blocked",
-              message: preparationError
-            }
-          }
-          if (!prepared.accepted) {
-            return { queued: false, reason: prepared.reason, message: prepared.message }
-          }
-          // Goal state can change while an async hook or explicit-skill lifecycle
-          // runs. Recheck at the commit boundary so a late goal activation cannot
-          // receive an ordinary steered user message.
-          if (goalManager.get(threadId)?.status === "active") {
-            return { queued: false, reason: "active_goal" }
-          }
-          // The active run can settle, be stopped, or be replaced while an async
-          // hook executes. Never hand prepared content to an aborted/different run.
-          if (
-            activeRuns.get(threadId) !== activeController ||
-            activeController.signal.aborted ||
-            currentRunMessagePreparers.get(threadId)?.runToken !== preparer.runToken
-          ) {
-            return { queued: false, reason: "no_active_run" }
-          }
-          if (!isCurrentRunMessageQueueOwner(threadId, preparer.runToken)) {
-            return { queued: false, reason: "no_active_run" }
-          }
-          const queued = queueCurrentRunMessage(
-            threadId,
-            {
-              id: messageId,
-              content: prepared.content,
-              displayContent: neutralizeWorkflowPlumbingUserText(
-                messageDisplayContent || messageContent
-              )
-            },
-            preparer.runToken
-          )
-          if (!queued) {
-            if (isCurrentRunMessageWithdrawn(threadId, messageId)) {
-              return { queued: false, reason: "withdrawn" }
-            }
-            // Rejected because this id was already drained into the model loop (the
-            // renderer's local "已引导" state was stale relative to this run) — never
-            // silently rewrite content the model already responded to.
-            console.log(
-              `[Agent][Queue] rejected re-queue of already-injected message ${messageId} for thread ${threadId}`
-            )
-            return { queued: false, reason: "already_injected" }
-          }
-          console.log(
-            `[Agent][Queue] queued current-run message ${messageId} for thread ${threadId}`
-          )
-          return { queued: true }
-        })
-      } finally {
-        trackCurrentRunMessagePreparation(preparationLockKey, messageId, -1)
-      }
+      return queueIntoOwnedRun({
+        threadId: lease.threadId, owner: lease.owner, runId: lease.runId,
+        // Never copy host callbacks or a caller-supplied lease from renderer input.
+        message: {
+          id: payload.message.id, content: payload.message.content,
+          displayContent: payload.message.displayContent
+        }
+      })
     }
   )
 
@@ -5388,6 +5414,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
     "agent:deleteCurrentRunQueuedMessage",
     async (_event, payload: { threadId?: string; messageId?: string }): Promise<void> => {
       if (!payload?.threadId || !payload.messageId) return
+      if (getLocalThreadRunLease(payload.threadId)?.owner !== "desktop") return
       // Tombstones only protect an in-flight preparation. An ordinary draft
       // deleted while idle never entered main and must not allocate run state.
       if (!activeRuns.has(payload.threadId)) return
@@ -5803,6 +5830,12 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
         .startsWith(COORDINATOR_NOTIFICATION_PROMPT_PREFIX)
       const isTrustedCoordinatorNotificationInvoke =
         coordinatorInternalNotification === true && hasCoordinatorNotificationPrefixAtInvoke
+      const isBotInternalTurnInvoke =
+        runExecutionContext.source === "bot" &&
+        (runExecutionContext.commandInternalNotification === true ||
+          runExecutionContext.botIntroduction === true) &&
+        initialInvokeMetadata.botHostId === "local" &&
+        typeof initialInvokeMetadata.botId === "string"
       // A completed background workflow delivers its result via an INTERNAL
       // notification turn whose message is exactly WORKFLOW_NOTIFICATION_TURN_PROMPT
       // (recognized at ~5100). Like the coordinator notification above, that turn
@@ -5811,10 +5844,14 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
       // arrives (with "user message preempted active goal") and never resumes.
       // Both legs mirror the authoritative recognition below: full prompt match
       // (a user pasting the trigger as ordinary text is unaffected) AND the thread
-      // actually being in workflow agent mode (a pasted byte-exact prompt in a
-      // non-workflow thread stays an ordinary user message and preempts normally).
+      // having workflow capability. A normal-mode Bot additionally requires a
+      // host-owned receipt flag; user text cannot impersonate its result turn.
       const isWorkflowNotificationInvoke =
-        isWorkflowNotificationTurnMessage(message) && initialInvokeAgentMode === "workflow"
+        isWorkflowNotificationTurnMessage(message) &&
+        (initialInvokeAgentMode === "workflow" ||
+          (runExecutionContext.source === "bot" &&
+            runExecutionContext.workflowInternalNotification === true &&
+            hasBotWorkflowCapability(initialInvokeMetadata)))
       const ambientChannel = isTrustedCoordinatorNotificationInvoke
         ? `${baseChannel}:coordinator-internal`
         : baseChannel
@@ -5864,7 +5901,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
         return false
       }
 
-      if (!isTrustedCoordinatorNotificationInvoke && !isWorkflowNotificationInvoke) {
+      if (!isTrustedCoordinatorNotificationInvoke && !isWorkflowNotificationInvoke && !isBotInternalTurnInvoke) {
         const goalCommand = parseGoalSlashCommand(message)
         if (goalCommand.type !== "none") {
           try {
@@ -6216,13 +6253,13 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
 
             const nextTurnState = getOrCreateTurnState(
               threadId,
-              isTrustedCoordinatorNotificationInvoke ? undefined : message,
+              isTrustedCoordinatorNotificationInvoke || isBotInternalTurnInvoke ? undefined : message,
               userMessageId
             )
             resetTurnStateForNewInvoke(
               threadId,
               nextTurnState,
-              isTrustedCoordinatorNotificationInvoke ? undefined : message,
+              isTrustedCoordinatorNotificationInvoke || isBotInternalTurnInvoke ? undefined : message,
               userMessageId
             )
             const nextRunToken = startTurnStateRun(nextTurnState, nextInvokeRunToken)
@@ -6460,6 +6497,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
         }
         if (
           !isTrustedCoordinatorNotificationInvoke &&
+          !isBotInternalTurnInvoke &&
           !shouldDeferUserTranscriptPersistence &&
           !shouldDeferUserTranscriptForModeCommit
         ) {
@@ -6511,15 +6549,16 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             const bindingMetadata = JSON.parse(bindingThread.metadata) as Record<string, unknown>
             harnessFeatureBinding = await resolveHarnessFeatureBindingContext(bindingMetadata)
             isWorkflowNotificationTrace =
-              message.trim() === WORKFLOW_NOTIFICATION_TURN_PROMPT &&
-              getAgentModeFromMetadata(bindingMetadata) === "workflow"
+              isWorkflowNotificationInvoke &&
+              (getAgentModeFromMetadata(bindingMetadata) === "workflow" ||
+                hasBotWorkflowCapability(bindingMetadata))
           }
         } catch {
           // Non-project threads or unparsable metadata: leave the trace untagged.
         }
         // Start trace collection for this invocation (modelId resolved later)
         const isInternalNotificationTrace =
-          isTrustedCoordinatorNotificationInvoke || isWorkflowNotificationTrace
+          isTrustedCoordinatorNotificationInvoke || isWorkflowNotificationTrace || isBotInternalTurnInvoke
         const tracer = createStandardTurnTrace({
           threadId,
           rawMessage: rootUserPrompt,
@@ -6921,7 +6960,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
         // edits THIS turn itself makes via a fresh snapshot. It does NOT commit a
         // background workflow's edits — those are left in the working tree for the
         // user to review (see the workflow notification block below for why).
-        let isInternalNotificationTurn = false
+        let isInternalNotificationTurn = isBotInternalTurnInvoke
         // True ONLY for a workflow completion turn (NOT coordinator). Used to skip
         // user Stop hooks for it: a background workflow's result can ONLY arrive via
         // this single report turn, so a plugin Stop hook blocking it would lose the
@@ -6997,7 +7036,8 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             featureBinding: harnessFeatureBinding
           })
           harnessAgentContext.managedExecution =
-            managedExecution === true || isActiveManagedRunSession(threadId)
+            managedExecution === true || isActiveManagedRunSession(threadId) ||
+            runExecutionContext.source === "bot"
           sendHarnessSessionContextInjectWarning(window, channel, harnessAgentContext)
           const rawOnAgentsPromptLoadStatus = createHarnessAgentmdLoadStatusHandler(
             window,
@@ -7036,8 +7076,8 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           // (mirrors how coordinator notification turns expand pending worker
           // results main-side). A stale trigger (nothing pending) ends quietly.
           // Only treat the trigger as internal plumbing when the thread is
-          // actually in workflow mode. Otherwise a user who literally types the
-          // sentinel is just sending ordinary text — neutralize it like the
+          // in workflow mode or the Bot host owns this durable receipt. Otherwise
+          // a user who literally types the sentinel is ordinary text — neutralize it like the
           // coordinator path does, rather than swallowing the message.
           // Internal plumbing ONLY when the message matches the FULL trigger prompt. A
           // user can paste the short sentinel prefix (e.g. from a log / code sample),
@@ -7057,7 +7097,11 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           const hasWorkflowNotificationPrefix =
             trimmedStart.startsWith(WORKFLOW_NOTIFICATION_TURN_TRIGGER) ||
             trimmedStart.startsWith(WORKFLOW_NOTIFICATION_MARKER_PREFIX)
-          if (matchesWorkflowNotificationPrompt && parsedThreadMetadata.agentMode === "workflow") {
+          if (
+            matchesWorkflowNotificationPrompt &&
+            (parsedThreadMetadata.agentMode === "workflow" ||
+              (isWorkflowNotificationInvoke && hasBotWorkflowCapability(metadata)))
+          ) {
             // Scoped to this turn's owner. The trigger only ever arrives from an
             // automatic summary, and two of those can be pending on one thread:
             // claiming whatever was newest let a desktop turn report a run owed
@@ -7276,6 +7320,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               syncUsedSkillsContext()
             }
           })
+          runExecutionContext.onSteeringReady?.()
 
           const persistedCoordinatorSelectedSkill = parseCoordinatorSelectedSkillMetadata(metadata)
           const persistedCoordinatorTurnPrompt = parseCoordinatorTurnPromptMetadata(metadata)
@@ -7875,6 +7920,13 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
 
           const userHumanMessage = isCoordinatorNotificationTurn
             ? undefined
+            : isBotInternalTurnInvoke
+              ? new HumanMessage({
+                  id: userMessageId,
+                  content: effectiveMessage,
+                  // Reuse the existing internal-receipt projection for live UI, hydration and search.
+                  additional_kwargs: { [COORDINATOR_INTERNAL_NOTIFICATION_MESSAGE_KEY]: true }
+                })
             : effectiveMessage === message
               ? new HumanMessage({
                   id: userMessageId,
@@ -7889,6 +7941,9 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
                   }
                 })
 
+          const notificationOccurrenceBoundary = isInternalNotificationTurn
+            ? captureThreadMessageProviderOccurrenceBoundary(threadId)
+            : undefined
           const humanMessages: BaseMessage[] = [
             ...durableRuntimeTail.messages,
             coordinatorNotificationHumanMessage
@@ -7937,12 +7992,18 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               coordinatorWorkerTurnPlanning,
               abortSignal: abortController.signal,
               ...foregroundToolPolicy(effectiveAgentMode, metadata),
-              allowDeferredUserInputRenderer: runExecutionContext.source === "im",
+              allowDeferredUserInputRenderer:
+                runExecutionContext.allowDeferredUserInputRenderer ?? runExecutionContext.source === "im",
               interactionWaitHooks:
-                runExecutionContext.source === "im"
+                runExecutionContext.source === "im" || runExecutionContext.source === "bot"
                   ? runExecutionContext.interactionWaitHooks
                   : undefined,
+              workflowEnabled: runExecutionContext.workflowEnabled,
+              backgroundCommandLifecycle: runExecutionContext.backgroundCommandLifecycle,
               extraSystemPrompt: runExecutionContext.extraSystemPrompt,
+              additionalTools: runExecutionContext.additionalTools,
+              toolConcurrencyQueueId: runExecutionContext.toolConcurrencyQueueId,
+              capabilityService: runExecutionContext.capabilityService,
               agentMode: effectiveAgentMode,
               traceContext: runtimeTraceContext,
               soloTaskTraceManager,
@@ -8146,7 +8207,12 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               payload,
               valuesMessageIndexOffset,
               valuesSnapshotKind,
-              completeValuesMessages
+              completeValuesMessages,
+              notificationOccurrenceBoundary
+                ? (userId, sourceIds) =>
+                    getThreadMessageProviderOccurrencesBeforeUser(threadId, userId, sourceIds) ??
+                    notificationOccurrenceBoundary(sourceIds)
+                : undefined
             )
           }
 

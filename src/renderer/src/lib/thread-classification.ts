@@ -24,6 +24,14 @@ export function isHarnessProjectModeThread(thread: Thread | null | undefined): b
   return isHarnessFeatureThread(thread) || isHarnessProjectSessionThread(thread)
 }
 
+export function isBotThread(thread: Thread | null | undefined): boolean {
+  return typeof thread?.metadata?.botId === "string" && thread.metadata.botId.length > 0
+}
+
+export function isRegularChatThread(thread: Thread | null | undefined): boolean {
+  return Boolean(thread) && !isHarnessProjectModeThread(thread) && !isBotThread(thread)
+}
+
 export function findFirstChatThread(threads: Thread[]): Thread | null {
-  return threads.find((thread) => !isHarnessProjectModeThread(thread)) ?? null
+  return threads.find(isRegularChatThread) ?? null
 }

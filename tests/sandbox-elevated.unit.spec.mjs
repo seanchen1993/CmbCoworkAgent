@@ -16,6 +16,10 @@ const windowsSafeCommandsSource = readFileSync(
   "utf8"
 )
 const runtimeSource = readFileSync(new URL("../src/main/agent/runtime.ts", import.meta.url), "utf8")
+const codexBinarySource = readFileSync(
+  new URL("../src/main/agent/codex-sandbox-binary.ts", import.meta.url),
+  "utf8"
+)
 const workflowEngineSource = readFileSync(
   new URL("../src/main/agent/workflow/engine.ts", import.meta.url),
   "utf8"
@@ -1546,8 +1550,8 @@ test("sandbox execute safety checks do not synchronously spawn helper processes"
 test("sandbox-adjacent runtime startup avoids synchronous filesystem probes", () => {
   const runtimeResourceSection = sectionBetween(
     runtimeSource,
-    "async function ensureCodexExe(",
-    "  const enabledHooks = getEnabledHooks(workspacePath)"
+    "  let resourceBase: string",
+    "  const baseHooks = getEnabledHooks(workspacePath)"
   )
   const codeExecHelperSection = sectionBetween(
     codeExecRunnerSource,
@@ -1563,7 +1567,7 @@ test("sandbox-adjacent runtime startup avoids synchronous filesystem probes", ()
     "agent runtime should not import sync fs helpers on sandbox startup path"
   )
   assert.doesNotMatch(
-    runtimeResourceSection,
+    runtimeResourceSection + codexBinarySource,
     forbiddenSyncFs,
     "sandbox runtime resource/codex.exe checks should use async fs APIs"
   )
@@ -1840,7 +1844,7 @@ test("workflow notification backlog drains: ack kicks the next pending run", () 
   )
   assert.match(
     workflowRunManagerSource,
-    /kickNextPendingNotificationAsync[\s\S]*?await this\.findPendingNotificationAsync\(workspacePath, threadId\)[\s\S]*?broadcast\(threadId, \{ type: "workflow_notification"/,
+    /kickNextPendingNotificationAsync[\s\S]*?await this\.findPendingNotificationAsync\(workspacePath, threadId\)[\s\S]*?broadcast\(threadId, \{\s*type: "workflow_notification"/,
     "the async kick re-broadcasts the next undelivered run's notification"
   )
   assert.match(
@@ -2070,12 +2074,17 @@ test("workflow script writeFile shares the run-level write lock with subagent to
   // Script writeFile() used its own fileWriteChain while subagent tool writes used
   // the threadId tool-concurrency lock — two silos that could clobber the same file
   // on a concurrent script+agent write. runtime injects the SAME lock
-  // (getToolConcurrencyLock(threadId).write); the engine's writeFile routes through
+  // (explicit shared-workspace queue, or threadId by default); the engine's writeFile routes through
   // it; run-manager threads it down.
   assert.match(
     runtimeSource,
-    /runExclusiveFileWrite:[\s\S]*?getToolConcurrencyLock\(threadId\)\.write\(fn\)/,
-    "runtime injects the threadId write lock as the workflow's runExclusiveFileWrite"
+    /runExclusiveFileWrite:[\s\S]*?getToolConcurrencyLock\(options\.toolConcurrencyQueueId \?\? threadId\)\.write\(fn\)/,
+    "runtime preserves an explicit shared-workspace lock and otherwise uses the original thread lock"
+  )
+  assert.match(
+    runtimeSource,
+    /toolConcurrencyQueueId: worktreeIsolation\?\.workspaceRoot \?\? options\.toolConcurrencyQueueId \?\? threadId/,
+    "shared-workspace subagents use that same lock; isolated worktrees retain their own lock"
   )
   assert.match(
     workflowEngineSource,
@@ -2448,8 +2457,13 @@ test("workflow notification turn is recognized on a FULL prompt match, not just 
   )
   assert.match(
     agentIpcSource,
-    /matchesWorkflowNotificationPrompt &&\s+parsedThreadMetadata\.agentMode === "workflow"/,
-    "the full-match gate is combined with workflow agent mode"
+    /matchesWorkflowNotificationPrompt &&\s*\(parsedThreadMetadata\.agentMode === "workflow" \|\|\s*\(isWorkflowNotificationInvoke && hasBotWorkflowCapability\(metadata\)\)\)/,
+    "the full-match gate requires workflow mode or an authorized Bot receipt"
+  )
+  assert.match(
+    agentIpcSource,
+    /runExecutionContext\.source === "bot" &&\s*runExecutionContext\.workflowInternalNotification === true &&\s*hasBotWorkflowCapability\(initialInvokeMetadata\)/,
+    "ordinary user text cannot impersonate a Bot's workflow receipt"
   )
 })
 
@@ -2724,7 +2738,7 @@ test("workflow notification is at-least-once: delivered persisted only on SUCCES
   )
   assert.match(
     agentIpcSource,
-    /await workflowRunManager\.claimPendingNotificationAsync\(\s*workspacePath,\s*threadId\s*\)/,
+    /await workflowRunManager\.claimPendingNotificationAsync\(\s*workspacePath,\s*threadId,\s*\{ owner: backgroundNotificationOwner \}\s*\)/,
     "notification turn uses the atomic async claim"
   )
   const notificationClaimStart = agentIpcSource.indexOf(
@@ -2788,7 +2802,7 @@ test("workflow notification is at-least-once: delivered persisted only on SUCCES
   // can't double-report the same run.
   assert.match(
     workflowRunManagerSource,
-    /if \(run && this\.inFlightNotifications\.has\(run\.runId\)\) return null/,
+    /findUndeliveredTerminalRunAsync\(workspacePath, threadId, \(candidate\) => \{\s*if \(this\.inFlightNotifications\.has\(candidate\.runId\)\) return false/,
     "findPendingNotification excludes in-flight runs"
   )
   // The in-flight set is IN MEMORY: a restart clears it, which is exactly what
