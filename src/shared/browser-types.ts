@@ -180,6 +180,8 @@ export interface BrowserScriptLibraryEntry {
 }
 
 export interface BrowserScriptLibraryListOptions {
+  /** Skip reading script bodies when only manifest metadata is needed. */
+  includeVariableInfo?: boolean
   workspacePath?: string | null
 }
 
