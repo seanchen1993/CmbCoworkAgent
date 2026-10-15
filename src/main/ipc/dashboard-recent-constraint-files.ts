@@ -1,5 +1,10 @@
-import type { KnowledgeRecentConstraintFiles } from "../../shared/dashboard-knowledge-overview"
+import type {
+  KnowledgeReadDetails,
+  KnowledgeReadFile,
+  KnowledgeRecentConstraintFiles
+} from "../../shared/dashboard-knowledge-overview"
 import { DashboardRequestCancelledError } from "../services/dashboard-request-coordinator"
+import { indexedKeywordField } from "./dashboard-es-indexed-fields"
 
 type JsonRecord = Record<string, unknown>
 export const RECENT_CONSTRAINT_FILES_PAGE_SIZE = 500
@@ -15,6 +20,7 @@ export interface RecentConstraintFields {
   pluginName?: string
   adapterName?: string
   lastReadAt?: string
+  lastReadAtAggregation?: string
 }
 
 /** Use indexed keywords only; never enable text fielddata or use a per-document script. */
@@ -26,22 +32,7 @@ export function resolveRecentConstraintFields(caps: unknown): RecentConstraintFi
   const fields = record(raw.fields)
   const noUnavailableIndices = (value: unknown): boolean =>
     value == null || (Array.isArray(value) && value.length === 0)
-  const keyword = (name: string): string | undefined => {
-    for (const candidate of [name, `${name}.keyword`]) {
-      const types = Object.values(record(fields[candidate])).map(record)
-      if (
-        types.length &&
-        types.every(
-          (type) =>
-            ["keyword", "constant_keyword"].includes(String(type.type)) &&
-            type.aggregatable === true &&
-            noUnavailableIndices(type.non_aggregatable_indices)
-        )
-      )
-        return candidate
-    }
-    return undefined
-  }
+  const keyword = (name: string): string | undefined => indexedKeywordField(fields, name)
   const file = keyword("properties.constraintFiles")
   // An entirely new index may have no read events/field yet. Unmapped keyword
   // sources return no file keys; the missing-files probe prevents false zeroes.
@@ -67,8 +58,50 @@ export function resolveRecentConstraintFields(caps: unknown): RecentConstraintFi
     pluginId: keyword("properties.pluginId"),
     pluginName: keyword("properties.pluginName"),
     adapterName: keyword("properties.harnessAdapterName"),
-    lastReadAt
+    lastReadAt,
+    ...(readTypes.length &&
+    readTypes.every(
+      (type) =>
+        ["date", "date_nanos"].includes(String(type.type)) &&
+        type.aggregatable === true &&
+        noUnavailableIndices(type.non_aggregatable_indices)
+    )
+      ? { lastReadAtAggregation: "properties.lastReadAt" }
+      : {})
   }
+}
+
+/** Numeric/date doc values only. Missing or legacy keyword timestamps use eventTime. */
+export function buildRecentReadTimeAggs(fields: RecentConstraintFields): JsonRecord {
+  const field = fields.lastReadAtAggregation
+  if (!field) return { latest_read: { max: { field: "eventTime" } } }
+  return {
+    latest_read: { max: { field } },
+    fallback_read: {
+      filter: { bool: { must_not: [{ exists: { field } }] } },
+      aggs: { latest_read: { max: { field: "eventTime" } } }
+    }
+  }
+}
+
+export function latestReadTime(...values: (string | undefined)[]): string | undefined {
+  const times = values.map((value) => (value ? Date.parse(value) : NaN)).filter(Number.isFinite)
+  if (!times.length) return undefined
+  return new Date(Math.max(...times)).toISOString()
+}
+
+export function readRecentReadTime(bucket: unknown): string | undefined {
+  const data = record(bucket)
+  const values = [
+    record(data.latest_read).value,
+    record(record(data.fallback_read).latest_read).value
+  ]
+  const times = values.flatMap((value) => {
+    if (typeof value !== "number" || !Number.isFinite(value)) return []
+    const date = new Date(value)
+    return Number.isFinite(date.getTime()) ? [date.toISOString()] : []
+  })
+  return latestReadTime(...times)
 }
 
 export function buildRecentConstraintFileQuery(
@@ -126,7 +159,8 @@ export function buildRecentConstraintFileQuery(
           size: RECENT_CONSTRAINT_FILES_PAGE_SIZE,
           sources,
           ...(after ? { after } : {})
-        }
+        },
+        aggs: buildRecentReadTimeAggs(fields)
       },
       ...(!after
         ? { truncated_files: { filter: { term: { "properties.filesTruncated": true } } } }
@@ -136,19 +170,30 @@ export function buildRecentConstraintFileQuery(
 }
 
 /** Exact de-duplication of reported plugin/file keys; only time attribution is approximate. */
-export async function fetchRecentConstraintFiles(
+export async function fetchRecentConstraintFileDetails(
   fields: RecentConstraintFields,
   orgFilters: JsonRecord[],
   query: (body: JsonRecord) => Promise<unknown>,
   signal?: AbortSignal,
   now = new Date()
-): Promise<KnowledgeRecentConstraintFiles> {
-  const files = new Set<string>()
+): Promise<KnowledgeReadDetails> {
+  const files = new Map<string, KnowledgeReadFile>()
   const aliases = new Map<string, Set<string>>()
-  const namedFiles = new Map<string, Set<string>>()
+  const namedFiles = new Map<string, Map<string, string | undefined>>()
   const cursors = new Set<string>()
   let complete = true
   let after: JsonRecord | undefined
+  const addFile = (id: string, name: string, path: string, time?: string): void => {
+    const key = JSON.stringify(id ? ["id", id, path] : ["name", name, path])
+    const existing = files.get(key)
+    const lastReadAt = latestReadTime(existing?.lastReadAt, time)
+    files.set(key, {
+      filePath: path,
+      pluginId: id,
+      pluginName: existing?.pluginName || name,
+      ...(lastReadAt ? { lastReadAt } : {})
+    })
+  }
   for (;;) {
     if (signal?.aborted) throw new DashboardRequestCancelledError()
     const raw = record(await query(buildRecentConstraintFileQuery(fields, orgFilters, now, after)))
@@ -167,20 +212,21 @@ export async function fetchRecentConstraintFiles(
       const id = text("pluginId")
       const name = text("pluginName") || text("adapterName")
       const path = text("file")
+      const time = readRecentReadTime(item)
       if (!path || (!id && !name)) {
         complete = false
         continue
       }
       if (id) {
-        files.add(JSON.stringify(["id", id, path]))
+        addFile(id, name, path, time)
         for (const alias of new Set([text("pluginName"), text("adapterName")].filter(Boolean))) {
           const ids = aliases.get(alias) ?? new Set<string>()
           ids.add(id)
           aliases.set(alias, ids)
         }
       } else {
-        const paths = namedFiles.get(name) ?? new Set<string>()
-        paths.add(path)
+        const paths = namedFiles.get(name) ?? new Map<string, string | undefined>()
+        paths.set(path, latestReadTime(paths.get(path), time))
         namedFiles.set(name, paths)
       }
     }
@@ -205,8 +251,44 @@ export async function fetchRecentConstraintFiles(
       continue
     }
     const id = ids?.values().next().value
-    for (const path of paths)
-      files.add(JSON.stringify(id ? ["id", id, path] : ["name", name, path]))
+    for (const [path, time] of paths) addFile(id ?? "", name, path, time)
   }
-  return { fileCount: files.size, complete }
+  const aliasesById = new Map<string, string[]>()
+  for (const [name, ids] of aliases) {
+    if (ids.size !== 1) continue
+    const id = ids.values().next().value!
+    const names = aliasesById.get(id) ?? []
+    names.push(name)
+    aliasesById.set(id, names)
+  }
+  const items = [...files.values()]
+    .map((file) => ({
+      ...file,
+      pluginAliases: (aliasesById.get(file.pluginId) ?? []).sort()
+    }))
+    .sort(
+      (a, b) =>
+        (b.lastReadAt ?? "").localeCompare(a.lastReadAt ?? "") ||
+        (a.pluginName || a.pluginId).localeCompare(b.pluginName || b.pluginId) ||
+        a.filePath.localeCompare(b.filePath) ||
+        a.pluginId.localeCompare(b.pluginId)
+    )
+  return { fileCount: items.length, complete, items }
+}
+
+export async function fetchRecentConstraintFiles(
+  fields: RecentConstraintFields,
+  orgFilters: JsonRecord[],
+  query: (body: JsonRecord) => Promise<unknown>,
+  signal?: AbortSignal,
+  now = new Date()
+): Promise<KnowledgeRecentConstraintFiles> {
+  const { fileCount, complete } = await fetchRecentConstraintFileDetails(
+    fields,
+    orgFilters,
+    query,
+    signal,
+    now
+  )
+  return { fileCount, complete }
 }

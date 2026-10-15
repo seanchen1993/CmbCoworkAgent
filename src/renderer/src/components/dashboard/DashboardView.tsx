@@ -5391,6 +5391,8 @@ export function DashboardView(): React.JSX.Element {
             <div className="p-6">
               <KnowledgeOverviewPanel
                 {...knowledgeOverview}
+                rooms={selectedOrgLv1List}
+                refreshKey={knowledgeRefreshKey}
                 rate={knowledgeCommitRate}
                 rateLoading={knowledgeCommitRateLoading}
                 rateError={knowledgeCommitRateError}

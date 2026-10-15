@@ -91,6 +91,13 @@ import {
   resolveKnowledgeCommitRateScope
 } from "./dashboard-knowledge-commit-rate"
 import type { DashboardKnowledgeCommitRate } from "../../shared/dashboard-knowledge-commit-rate"
+import { fetchKnowledgeActiveList } from "./dashboard-knowledge-active-details"
+import {
+  fetchKnowledgeFileReaders,
+  normalizeKnowledgeReadFileRef,
+  resolveKnowledgeReaderFields,
+  type KnowledgeReaderFields
+} from "./dashboard-knowledge-readers"
 import {
   buildKnowledgeProjectQueries,
   emptyKnowledgeAccumulation,
@@ -101,11 +108,15 @@ import {
 } from "./dashboard-knowledge-overview"
 import type {
   KnowledgeAccumulationData,
+  KnowledgeActiveDetails,
+  KnowledgeFileReaders,
   KnowledgeProjectStats,
+  KnowledgeReadDetails,
+  KnowledgeReadFileRef,
   KnowledgeRecentConstraintFiles
 } from "../../shared/dashboard-knowledge-overview"
 import {
-  fetchRecentConstraintFiles,
+  fetchRecentConstraintFileDetails,
   resolveRecentConstraintFields,
   type RecentConstraintFields
 } from "./dashboard-recent-constraint-files"
@@ -14285,14 +14296,12 @@ async function fetchKnowledgeOverviewProjects(
 
 const recentConstraintFieldCache = new Map<
   string,
-  { expiresAt: number; fields: RecentConstraintFields }
+  { expiresAt: number; fields: RecentConstraintFields; readers: KnowledgeReaderFields }
 >()
+const recentConstraintDetailsCache = new ProjectModePageCache<KnowledgeReadDetails>()
+const knowledgeFileReadersCache = new ProjectModePageCache<KnowledgeFileReaders>()
 
-async function fetchKnowledgeRecentConstraintFiles(
-  opts: OrgFilterOptions | undefined
-): Promise<KnowledgeRecentConstraintFiles> {
-  const access = requireDashboardProjectModeAccess()
-  const orgFilter = buildProjectModeOrgFilter(opts, access)
+async function getKnowledgeConstraintFields() {
   const index = getEsIndex("event")
   const cacheKey = JSON.stringify([getEsNodes(), index])
   let fields = recentConstraintFieldCache.get(cacheKey)
@@ -14309,32 +14318,98 @@ async function fetchKnowledgeRecentConstraintFiles(
           "properties.pluginName.keyword",
           "properties.harnessAdapterName",
           "properties.harnessAdapterName.keyword",
-          "properties.lastReadAt"
+          "properties.lastReadAt",
+          ...["sapId", "ystId", "userName", "upperOrgLv1", "upperOrgLv0"].flatMap((name) => [
+            name,
+            `${name}.keyword`
+          ])
         ]
       },
       { operation: "field_caps" }
     )
-    fields = { expiresAt: Date.now() + 5 * 60_000, fields: resolveRecentConstraintFields(caps) }
+    fields = {
+      expiresAt: Date.now() + 5 * 60_000,
+      fields: resolveRecentConstraintFields(caps),
+      readers: resolveKnowledgeReaderFields(caps)
+    }
     recentConstraintFieldCache.set(cacheKey, fields)
     while (recentConstraintFieldCache.size > 8) {
       recentConstraintFieldCache.delete(recentConstraintFieldCache.keys().next().value!)
     }
   }
-  return fetchRecentConstraintFiles(
+  return fields
+}
+
+async function fetchKnowledgeRecentConstraintFileDetails(
+  opts: OrgFilterOptions | undefined,
+  reuseCache = true
+): Promise<KnowledgeReadDetails> {
+  const access = requireDashboardProjectModeAccess()
+  const orgFilter = buildProjectModeOrgFilter(opts, access)
+  const index = getEsIndex("event")
+  const detailsKey = JSON.stringify([getEsNodes(), index, orgFilter])
+  const cached = reuseCache ? recentConstraintDetailsCache.get(detailsKey) : undefined
+  if (cached) return cached
+  const fields = await getKnowledgeConstraintFields()
+  const data = await fetchRecentConstraintFileDetails(
     fields.fields,
     orgFilter ? [orgFilter] : [],
     (body) => esQuery(index, body),
     getDashboardRequestSignal()
   )
+  recentConstraintDetailsCache.set(detailsKey, data)
+  return data
 }
 
-async function fetchKnowledgeOverviewAccumulation(
+async function fetchKnowledgeReadReaders(
+  fileInput: KnowledgeReadFileRef,
   opts: OrgFilterOptions | undefined
-): Promise<KnowledgeAccumulationData> {
+): Promise<KnowledgeFileReaders> {
+  const access = requireDashboardProjectModeAccess()
+  const selected = normalizeKnowledgeReadFileRef(fileInput)
+  const orgFilter = buildProjectModeOrgFilter(opts, access)
+  const index = getEsIndex("event")
+  const fileIdentity = selected.pluginId
+    ? ["id", selected.pluginId, selected.filePath]
+    : ["name", selected.pluginName, selected.filePath]
+  const key = JSON.stringify([getEsNodes(), index, orgFilter, fileIdentity])
+  const cached = knowledgeFileReadersCache.get(key)
+  if (cached) return cached
+  // Reuse the authorized catalogue; never accept caller-provided plugin aliases.
+  const catalogue = await fetchKnowledgeRecentConstraintFileDetails(opts)
+  const file = catalogue.items.find(
+    (row) =>
+      row.filePath === selected.filePath &&
+      (selected.pluginId
+        ? row.pluginId === selected.pluginId
+        : !row.pluginId && row.pluginName === selected.pluginName)
+  )
+  if (!file) throw new Error("当前范围内未找到该读取文件，请刷新后重试")
+  const fields = await getKnowledgeConstraintFields()
+  const data = await fetchKnowledgeFileReaders(
+    fields.fields,
+    fields.readers,
+    file,
+    orgFilter ? [orgFilter] : [],
+    (body) => esQuery(index, body),
+    getDashboardRequestSignal()
+  )
+  knowledgeFileReadersCache.set(key, data)
+  return data
+}
+
+async function fetchKnowledgeRecentConstraintFiles(
+  opts: OrgFilterOptions | undefined
+): Promise<KnowledgeRecentConstraintFiles> {
+  const { fileCount, complete } = await fetchKnowledgeRecentConstraintFileDetails(opts, false)
+  return { fileCount, complete }
+}
+
+function resolveKnowledgeRequestScope(opts: OrgFilterOptions | undefined) {
   const access = import.meta.env.DEV
     ? getDashboardAccessContext()
     : requireDashboardProjectModeAccess()
-  const scope = resolveKnowledgeOverviewScope(
+  return resolveKnowledgeOverviewScope(
     {
       requestedRooms: normalizeUpperOrgLv1List(opts?.upperOrgLv1),
       admin: isDashboardProjectModeAdmin(access),
@@ -14343,6 +14418,39 @@ async function fetchKnowledgeOverviewAccumulation(
     },
     getKnowledgeRoomOrgIds
   )
+}
+
+async function fetchKnowledgeActiveDetails(
+  opts: OrgFilterOptions | undefined
+): Promise<KnowledgeActiveDetails> {
+  const scope = resolveKnowledgeRequestScope(opts)
+  if (scope.unavailableReason) return { items: [], unavailableReason: scope.unavailableReason }
+  if (import.meta.env.DEV) {
+    const count = Math.round(25 * (scope.orgIds ? Math.min(1, scope.orgIds.length / 3) : 1))
+    return {
+      items: Array.from({ length: count }, (_, i) => ({
+        filePath: `LF3918/03_Backend_Services/services/demo/local_rules_${i + 1}.md`,
+        fileName: `local_rules_${i + 1}.md`,
+        subProduct: "LF39.18",
+        deployUnit: "LF39.18_demo",
+        lastCommitDate: new Date(Date.now() - (i + 1) * 86400_000)
+          .toISOString()
+          .slice(0, 19)
+          .replace("T", " "),
+        lastCommitUser: "演示用户",
+        roomId: scope.orgIds?.[0] ?? "992391",
+        roomName: normalizeUpperOrgLv1List(opts?.upperOrgLv1)[0] ?? "演示部门"
+      }))
+    }
+  }
+  const url = (import.meta.env.VITE_KNOWLEDGE_OVERVIEW_BASE_URL as string | undefined)?.trim() ?? ""
+  return { items: await fetchKnowledgeActiveList(url, scope.orgIds, getDashboardRequestSignal()) }
+}
+
+async function fetchKnowledgeOverviewAccumulation(
+  opts: OrgFilterOptions | undefined
+): Promise<KnowledgeAccumulationData> {
+  const scope = resolveKnowledgeRequestScope(opts)
   if (scope.unavailableReason) {
     return { ...emptyKnowledgeAccumulation(), unavailableReason: scope.unavailableReason }
   }
@@ -15656,6 +15764,71 @@ export function registerDashboardHandlers(_ipcMain: typeof ipcMain): void {
         return { success: true, data: await fetchKnowledgeOverviewAccumulation(opts) }
       } catch (e) {
         logDashboardRequestError("knowledgeAccumulation", e)
+        return { success: false, error: e instanceof Error ? e.message : String(e) }
+      }
+    }
+  )
+
+  registerLatestDashboardHandler(
+    _ipcMain,
+    "dashboard:knowledgeActiveDetails",
+    async (_, opts: OrgFilterOptions | undefined) => {
+      try {
+        return { success: true, data: await fetchKnowledgeActiveDetails(opts) }
+      } catch (e) {
+        logDashboardRequestError("knowledgeActiveDetails", e)
+        return { success: false, error: e instanceof Error ? e.message : String(e) }
+      }
+    }
+  )
+
+  registerLatestDashboardHandler(
+    _ipcMain,
+    "dashboard:knowledgeReadDetails",
+    async (_, opts: OrgFilterOptions | undefined) => {
+      try {
+        const data: KnowledgeReadDetails = import.meta.env.DEV
+          ? {
+              fileCount: 286,
+              complete: true,
+              items: Array.from({ length: 286 }, (_, i) => ({
+                filePath: `sys/rules/local_rules_${i + 1}.md`,
+                pluginId: "demo-plugin",
+                pluginName: "演示插件",
+                lastReadAt: new Date(Date.now() - i * 3600_000).toISOString()
+              }))
+            }
+          : await fetchKnowledgeRecentConstraintFileDetails(opts)
+        return { success: true, data }
+      } catch (e) {
+        logDashboardRequestError("knowledgeReadDetails", e)
+        return { success: false, error: e instanceof Error ? e.message : String(e) }
+      }
+    }
+  )
+
+  registerLatestDashboardHandler(
+    _ipcMain,
+    "dashboard:knowledgeReadReaders",
+    async (_, file: KnowledgeReadFileRef, opts: OrgFilterOptions | undefined) => {
+      try {
+        const data: KnowledgeFileReaders = import.meta.env.DEV
+          ? {
+              items: Array.from({ length: 15 }, (_, i) => ({
+                key: `demo-user-${i + 1}`,
+                userName: `演示用户${i + 1}`,
+                sapId: `demo-${i + 1}`,
+                ystId: "",
+                departments: [normalizeUpperOrgLv1List(opts?.upperOrgLv1)[0] ?? "演示部门"],
+                nameOnly: false,
+                lastReadAt: new Date(Date.now() - i * 3600_000).toISOString()
+              })),
+              hasUnknownReaders: false
+            }
+          : await fetchKnowledgeReadReaders(file, opts)
+        return { success: true, data }
+      } catch (e) {
+        logDashboardRequestError("knowledgeReadReaders", e)
         return { success: false, error: e instanceof Error ? e.message : String(e) }
       }
     }
