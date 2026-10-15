@@ -25,6 +25,12 @@ import {
   type BrowserRecordingListDialogProps
 } from "./BrowserRecordingListDialog"
 import { BrowserScriptVariableDialog } from "./BrowserScriptVariableDialog"
+import {
+  clearBrowserPlaybackHistory,
+  readBrowserPlaybackHistory,
+  saveBrowserPlaybackHistoryEntry,
+  type BrowserPlaybackHistoryEntry
+} from "./browser-playback-history"
 
 interface BrowserScriptRecordingControlsProps {
   browserCreated: boolean
@@ -115,6 +121,9 @@ export function BrowserScriptRecordingControls({
     status: "idle"
   })
   const [playbackMode, setPlaybackMode] = useState<PlaybackModeState>(EMPTY_PLAYBACK_MODE_STATE)
+  const [playbackHistory, setPlaybackHistory] = useState<BrowserPlaybackHistoryEntry[]>(() =>
+    readBrowserPlaybackHistory()
+  )
   const hasWorkspace = Boolean(workspacePath?.trim())
   const scriptSessionIsActive = isRecordingSessionActive(scriptRecording)
 
@@ -214,6 +223,9 @@ export function BrowserScriptRecordingControls({
 
     const unsubscribe = window.api.browser.onScriptExecutionState((state) => {
       setPlaybackState(state)
+      if (state.status !== "idle" && state.status !== "running") {
+        setPlaybackHistory(saveBrowserPlaybackHistoryEntry(state))
+      }
       setIsCancellingPlayback(false)
       if (state.status === "running") {
         setPlaybackMode((current) => ({
@@ -425,6 +437,15 @@ export function BrowserScriptRecordingControls({
       .finally(() => {
         setIsCancellingPlayback(false)
       })
+  }, [])
+
+  const clearPlaybackHistory = useCallback(() => {
+    if (!clearBrowserPlaybackHistory()) {
+      toast.error("清空回放历史失败")
+      return
+    }
+    setPlaybackHistory([])
+    toast.success("回放历史已清空")
   }, [])
 
   const hasUnnamedVariableActions = variableActionIds.some(
@@ -1018,6 +1039,8 @@ export function BrowserScriptRecordingControls({
         isLoading={isScriptLibraryLoading}
         error={scriptLibraryError}
         entries={scriptLibraryEntries}
+        playbackHistory={playbackHistory}
+        onClearPlaybackHistory={clearPlaybackHistory}
         loadingFileName={loadingLibraryFileName}
         loadingAction={loadingLibraryAction}
         isPlaybackRunning={isPlaybackBusy}
