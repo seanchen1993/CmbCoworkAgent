@@ -146,7 +146,11 @@ function Distribution({
                   ))}
                 </Pie>
                 <ChartTooltip
-                  formatter={(value) => [typeof value === "number" ? number(value) : "—", "知识数"]}
+                  formatter={(value, name) => [
+                    typeof value === "number" ? number(value) : "—",
+                    name ?? "未归属"
+                  ]}
+                  contentStyle={{ maxWidth: 280, whiteSpace: "normal", overflowWrap: "anywhere" }}
                 />
               </PieChart>
             </ResponsiveContainer>
@@ -206,7 +210,7 @@ export function KnowledgeOverviewPanel({
   rateError: string | null
 }): React.JSX.Element {
   const totals = accumulation?.totals ?? undefined
-  const users = accumulation?.users?.slice(0, 10) ?? []
+  const users = accumulation?.users?.slice(0, 20) ?? []
   const maxUser = Math.max(1, ...users.map((row) => row.value))
   const scopeNote = accumulation?.unavailableReason
     ? SCOPE_NOTES[accumulation.unavailableReason]
@@ -216,6 +220,8 @@ export function KnowledgeOverviewPanel({
   const rateNote =
     rateError ?? (rate?.unavailableReason ? SCOPE_NOTES[rate.unavailableReason] : undefined)
   const statSub = accumulationLoading ? "加载中…" : sectionError("totals")
+  const readRatio = ratio(recentConstraintFiles?.fileCount, totals?.totalNum)
+  const readShare = `${readRatio != null && recentConstraintFiles?.complete === false ? "≥" : ""}${percent(readRatio)}`
   return (
     <div className="space-y-5">
       <section className="space-y-3">
@@ -305,7 +311,7 @@ export function KnowledgeOverviewPanel({
               (recentConstraintFilesLoading
                 ? "读取加载中…"
                 : (recentConstraintFilesError ??
-                  `近30天 · 更新占比 ${percent(ratio(totals?.activeNum, totals?.totalNum))}`))
+                  `近30天 · 更新占比 ${percent(ratio(totals?.activeNum, totals?.totalNum))} · 读取占比 ${readShare}`))
             }
             icon={Zap}
             color="bg-emerald-500"
@@ -313,6 +319,7 @@ export function KnowledgeOverviewPanel({
               <div className="space-y-1">
                 <p>近30天内，更新数表示有更新的知识沉淀，读取数表示被有效读取过的知识沉淀。</p>
                 <p>读取数按插件和文件去重，两个指标均不受日期筛选影响。</p>
+                <p>更新占比和读取占比均以生成知识沉淀总数为分母。</p>
                 {recentConstraintFiles && !recentConstraintFiles.complete && (
                   <p>部分记录信息不完整，读取数显示已确认的数量。</p>
                 )}
@@ -335,7 +342,7 @@ export function KnowledgeOverviewPanel({
           <div className="flex h-[clamp(240px,38vh,320px)] min-w-0 flex-col rounded-xl border border-border bg-card p-4">
             <div className="flex shrink-0 items-center justify-between text-xs font-medium">
               <span>用户分析</span>
-              <span className="text-[10px] font-normal text-muted-foreground">提交次数 Top 10</span>
+              <span className="text-[10px] font-normal text-muted-foreground">提交次数 Top 20</span>
             </div>
             {accumulationLoading || sectionError("users") || users.length === 0 ? (
               <Status
@@ -348,11 +355,11 @@ export function KnowledgeOverviewPanel({
                 className="mt-4 min-h-0 flex-1 space-y-5 overflow-y-auto overscroll-contain pr-2"
                 tabIndex={0}
                 role="region"
-                aria-label="提交次数 Top 10 用户排行"
+                aria-label="提交次数 Top 20 用户排行"
               >
                 {users.map((row, index) => (
                   <div key={row.name} className="flex items-center gap-2 text-[11px]">
-                    <span className="w-3 text-amber-600">{index + 1}</span>
+                    <span className="w-5 shrink-0 tabular-nums text-amber-600">{index + 1}</span>
                     <span className="w-28 shrink-0 truncate" title={row.name}>
                       {row.name}
                     </span>
