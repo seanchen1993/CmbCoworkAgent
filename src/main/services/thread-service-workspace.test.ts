@@ -3,6 +3,7 @@ const mocks = vi.hoisted(() => ({
   resolve: vi.fn(),
   validate: vi.fn(async (workspace: string) => workspace),
   stage: vi.fn(),
+  context: vi.fn(),
   create: vi.fn((threadId: string, metadata: Record<string, unknown>) => ({
     thread_id: threadId,
     metadata: JSON.stringify(metadata),
@@ -26,7 +27,7 @@ vi.mock("../ipc/recent-workspace", () => ({ resolveRecentWorkspacePath: async ()
 vi.mock("../harness-board/service", () => ({
   requireHarnessFeatureWorkspace: mocks.resolve,
   resolveHarnessFeatureCurrentStage: mocks.stage,
-  buildHarnessFeatureAgentContext: async () => null,
+  buildHarnessFeatureAgentContext: mocks.context,
   DEFAULT_HARNESS_REQUEST_USER_INPUT_CONFIG: {}
 }))
 import { createThreadService } from "./thread-service"
@@ -35,8 +36,24 @@ beforeEach(() => {
   vi.clearAllMocks()
   mocks.resolve.mockResolvedValue("/feature")
   mocks.stage.mockResolvedValue({ name: "Dev-代码实现", status: "进行中" })
+  mocks.context.mockResolvedValue(null)
 })
 describe("new thread workspace policy", () => {
+  it("preserves explicit multi mode while ordinary creation follows the plugin mode", async () => {
+    mocks.context.mockResolvedValue({ agentConfig: { agentMode: "workflow" } })
+    const metadata = { harnessFeature: { projectId: "p", slug: "f" } }
+    await createThreadService({ ...metadata, agentMode: "normal", subagentsEnabled: true })
+    expect(mocks.create).toHaveBeenLastCalledWith(
+      expect.any(String),
+      expect.objectContaining({ agentMode: "normal", subagentsEnabled: true })
+    )
+    await createThreadService(metadata)
+    expect(mocks.create).toHaveBeenLastCalledWith(
+      expect.any(String),
+      expect.objectContaining({ agentMode: "workflow" })
+    )
+  })
+
   it("uses current feature configuration rather than a stale renderer path", async () => {
     await createThreadService({
       workspacePath: "/old",

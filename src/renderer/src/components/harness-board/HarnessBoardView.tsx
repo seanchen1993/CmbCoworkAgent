@@ -87,6 +87,7 @@ import { ThreadForkCheckpointDialog } from "@/components/sidebar/ThreadForkCheck
 import { ThreadGroupDeleteDialog } from "@/components/sidebar/ThreadGroupDeleteDialog"
 import { KnowledgePreviewPanel } from "@/components/harness-board/KnowledgePreviewPanel"
 import { KnowledgeDialog } from "@/components/harness-board/KnowledgeDialog"
+import { ArtifactAccumulationButton } from "./ArtifactAccumulationButton"
 import { ManagedRunTimeline } from "@/components/harness-board/ManagedRunPanel"
 import {
   createBoundedLatestTaskQueue,
@@ -6815,33 +6816,43 @@ function FeatureDetailPage({
     void selectThread(activeSessionThreadIdForView, { preserveView: true })
   }, [activeSessionThreadIdForView, selectThread])
 
-  const handleCreateSession = useCallback(async (): Promise<void> => {
-    if (!detail || sessionBusy || projectInteractionDisabled) return
-    setSessionBusy("create")
-    try {
-      const thread = await createHarnessSession({
-        projectId: detail.project.projectId,
-        slug: detail.run.slug,
-        sessionWorkspacePath: detail.run.resolvedSessionWorkspacePath,
-        nextAction: getHarnessRunNextAction(detail),
-        createThread
-      })
-      setSelectedSessionState({ detailKey, threadId: thread.thread_id })
-      onActiveSessionChange?.(thread.thread_id)
-      setActiveDetailTab("session")
-    } catch (error) {
-      toast.error(cleanIpcError(error))
-    } finally {
-      setSessionBusy(null)
-    }
-  }, [
-    createThread,
-    detail,
-    detailKey,
-    onActiveSessionChange,
-    projectInteractionDisabled,
-    sessionBusy
-  ])
+  const handleCreateSession = useCallback(
+    async (nextAction?: HarnessWorkflowNextAction, initialAgentMode?: "multi"): Promise<void> => {
+      if (!detail || sessionBusy || projectInteractionDisabled) return
+      setSessionBusy("create")
+      try {
+        const thread = await createHarnessSession({
+          projectId: detail.project.projectId,
+          slug: detail.run.slug,
+          sessionWorkspacePath: detail.run.resolvedSessionWorkspacePath,
+          nextAction: nextAction ?? getHarnessRunNextAction(detail),
+          createThread:
+            initialAgentMode === "multi"
+              ? (metadata, options) =>
+                  createThread(
+                    { ...metadata, agentMode: "normal", subagentsEnabled: true },
+                    options
+                  )
+              : createThread
+        })
+        setSelectedSessionState({ detailKey, threadId: thread.thread_id })
+        onActiveSessionChange?.(thread.thread_id)
+        setActiveDetailTab("session")
+      } catch (error) {
+        toast.error(cleanIpcError(error))
+      } finally {
+        setSessionBusy(null)
+      }
+    },
+    [
+      createThread,
+      detail,
+      detailKey,
+      onActiveSessionChange,
+      projectInteractionDisabled,
+      sessionBusy
+    ]
+  )
 
   const setCombinedFeatureImManagement = useCallback(
     async (enabled: boolean): Promise<void> => {
@@ -7402,6 +7413,15 @@ function FeatureDetailPage({
                   )}
                 </div>
               </TooltipProvider>
+              {detail?.artifactAccumulation && (
+                <ArtifactAccumulationButton
+                  disabled={loading || projectInteractionDisabled}
+                  creating={sessionBusy !== null}
+                  onClick={() =>
+                    void handleCreateSession(detail.artifactAccumulation?.nextAction, "multi")
+                  }
+                />
+              )}
               <Button
                 type="button"
                 variant="ghost"
