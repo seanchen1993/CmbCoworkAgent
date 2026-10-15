@@ -2980,6 +2980,8 @@ interface CustomAPI {
       page: number
       pageSize: number
       totalTraces: number
+      viewMode?: DashboardTraceViewMode
+      triggerScope?: DashboardTraceTriggerScope
       traces: DashboardTraceDetail[]
     }) => Promise<{ success: boolean; canceled?: boolean; filePath?: string; error?: string }>
     exportUserTraces: (payload: {

@@ -27,6 +27,7 @@ import {
 import { ProjectModePageCache } from "./project-mode-page-cache"
 import { fetchProjectModeCommitIds } from "./project-mode-commit-ids"
 import { fetchCompleteProjectDevMetrics } from "./project-mode-dev-metrics"
+import { loadTraceExportDetails } from "./dashboard-trace-export"
 import {
   buildToolUsageAggs,
   parseToolUsageAggs,
@@ -316,7 +317,9 @@ function makeEsUnavailableError(nodes: string[], lastError: Error | null): Error
   // 「请检查网络连接」只会把排查引到错误方向（本次线上就是这么被误导的）。
   if (isDashboardEsResponseTooLarge(lastError)) {
     console.warn("[Dashboard] ES response too large:", detail)
-    return new Error("本次查询返回的数据量过大，请缩小时间范围或减少每页条数后重试")
+    return new Error("本次查询返回的数据量过大，请缩小时间范围或减少每页条数后重试", {
+      cause: lastError
+    })
   }
   if (getDashboardEsHttpErrorStatus(lastError) === 400) {
     console.warn("[Dashboard] ES rejected query parameters:", detail)
@@ -1155,6 +1158,8 @@ interface DashboardTraceExportPayload {
   page: number
   pageSize: number
   totalTraces: number
+  viewMode: TraceViewMode
+  triggerScope: TraceTriggerScope
   traces: DashboardTraceDetail[]
 }
 
@@ -1698,7 +1703,9 @@ function formatTraceExportMarkdown(
     `- Range: ${payload.range.from} 至 ${payload.range.to}`,
     `- Page: ${payload.page}`,
     `- Page Size: ${payload.pageSize}`,
-    `- Total Traces: ${payload.totalTraces}`,
+    `- View Mode: ${payload.viewMode}`,
+    `- Trigger Scope: ${payload.triggerScope}`,
+    `- Total ${payload.viewMode === "thread" ? "Threads" : "Traces"}: ${payload.totalTraces}`,
     `- Exported: ${exportedAt}`,
     ""
   ]
@@ -1783,6 +1790,8 @@ function normalizeTraceExportPayload(value: unknown): DashboardTraceExportPayloa
     page: clampLimit(page, 1, 1000),
     pageSize: clampLimit(pageSize, 10, 50),
     totalTraces: asNumber(payload.totalTraces, traces.length),
+    viewMode: normalizeTraceViewMode(payload.viewMode),
+    triggerScope: normalizeTraceTriggerScope(payload.triggerScope),
     traces
   }
 }
@@ -6654,6 +6663,35 @@ const MAX_THREAD_TRACES = 200
 const THREAD_TRACES_FETCH_CHUNK = 25
 
 type ThreadTracesOptions = DashboardThreadTraceScope
+
+async function fetchTraceExportDetails(
+  payload: { traces: DashboardTraceDetail[]; viewMode: TraceViewMode },
+  options?: ThreadTracesOptions
+): Promise<DashboardTraceDetail[]> {
+  const projectScoped = options?.scope === "project"
+  const access = projectScoped ? requireDashboardProjectModeAccess() : requireDashboardAccess()
+  // Development fixtures already contain complete content and have no ES backing records.
+  if (import.meta.env.DEV) {
+    if (payload.traces.some((trace) => trace.rawPending || !trace.rawAvailable)) {
+      throw new Error("会话记录缺少完整内容，无法导出")
+    }
+    return payload.traces
+  }
+  const filters = buildThreadTraceScopeFilters(options)
+  appendOptionalFilter(
+    filters,
+    projectScoped ? buildProjectModeAccessFilter(access) : buildTraceAccessFilter(access)
+  )
+  return loadTraceExportDetails({
+    previews: payload.traces,
+    viewMode: payload.viewMode,
+    filters,
+    sourceIncludes: dashboardTraceSourceIncludes(),
+    query: (body) => esQuery(getEsIndex("trace"), body),
+    normalize: (hit) => normalizeTraceDetail(hit as EsSearchHit),
+    isResponseTooLarge: isDashboardEsResponseTooLarge
+  })
+}
 
 async function fetchThreadTraces(
   threadId: string,
@@ -16334,13 +16372,14 @@ export function registerDashboardHandlers(_ipcMain: typeof ipcMain): void {
         return { success: false, canceled: true }
       }
 
+      payload.traces = await fetchTraceExportDetails(payload)
       const zip = new AdmZip()
       zip.addFile("traces.md", Buffer.from(formatTraceExportMarkdown(payload, exportedAt), "utf-8"))
       zip.addFile(
         "traces.json",
         Buffer.from(`${stringifyExportValue({ version: 1, exportedAt, ...payload })}\n`, "utf-8")
       )
-      zip.writeZip(result.filePath)
+      await zip.writeZipPromise(result.filePath)
 
       return { success: true, filePath: result.filePath }
     } catch (e) {
@@ -16370,6 +16409,12 @@ export function registerDashboardHandlers(_ipcMain: typeof ipcMain): void {
         return { success: false, canceled: true }
       }
 
+      payload.traces = await fetchTraceExportDetails(
+        payload,
+        payload.projectMode
+          ? { scope: "project", range: payload.range, triggerScope: payload.triggerScope }
+          : undefined
+      )
       const zip = new AdmZip()
       zip.addFile(
         `${viewLabel}.md`,
@@ -16396,7 +16441,7 @@ export function registerDashboardHandlers(_ipcMain: typeof ipcMain): void {
           ? { ...commonPayload, threads: groupTraceExportThreads(payload.traces) }
           : { ...commonPayload, traces: payload.traces }
       zip.addFile(`${viewLabel}.json`, Buffer.from(`${stringifyExportValue(data)}\n`, "utf-8"))
-      zip.writeZip(result.filePath)
+      await zip.writeZipPromise(result.filePath)
 
       return { success: true, filePath: result.filePath }
     } catch (e) {

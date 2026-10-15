@@ -4379,6 +4379,8 @@ const api = {
       page: number
       pageSize: number
       totalTraces: number
+      viewMode?: "thread" | "trace"
+      triggerScope?: "active" | "all"
       traces: unknown[]
     }): Promise<{ success: boolean; canceled?: boolean; filePath?: string; error?: string }> =>
       ipcRenderer.invoke("dashboard:exportSkillTraces", payload),
