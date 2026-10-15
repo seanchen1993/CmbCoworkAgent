@@ -75,7 +75,9 @@ test("runtime allows parallel task subagent spawns", () => {
 
 test("subagents use their own concurrency gate to avoid parent task deadlock", () => {
   const subagentSection = sectionBetween(runtimeSource, "const subagentMiddleware: any[] = [", "const generalPurposeSubagent =")
-  const mainAgentSection = sectionBetween(runtimeSource, "const agentOptions = {", "const agent = createAgent(")
+  const mainAgentSection = runtimeSource.includes("const agentOptions = {")
+    ? sectionBetween(runtimeSource, "const agentOptions = {", "const agent = createAgent(")
+    : sectionBetween(runtimeSource, "return createAgent({", "createSubAgentMiddleware({")
 
   assert.match(
     runtimeSource,
@@ -119,7 +121,7 @@ test("local sandbox keeps risky commands exclusive while limiting read-only comm
   )
   assert.match(
     executeRawSection,
-    /effectiveSandboxMode === "none" \|\|\s*\(backgroundExecution && !this\.worktreeIsolation\)[\s\S]*executeRawUnserialized/,
+    /effectiveSandboxMode === "none" \|\|\s*\(backgroundExecution && !this\.worktreeIsolation\)[\s\S]*(?:executeRawUnserialized|runUnserialized\(\))/,
     "background commands outside isolated worktrees should bypass the foreground workspace gate"
   )
   assert.doesNotMatch(
