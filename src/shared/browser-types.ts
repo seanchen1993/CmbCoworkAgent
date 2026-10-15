@@ -213,6 +213,8 @@ export interface BrowserScriptExecutionState {
   endedAt?: string
   error?: string
   progressPercent?: number
+  completedSteps?: number
+  totalSteps?: number
 }
 
 export interface BrowserScriptLibrarySaveInput {
