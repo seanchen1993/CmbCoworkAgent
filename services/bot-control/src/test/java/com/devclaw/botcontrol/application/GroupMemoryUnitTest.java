@@ -49,4 +49,18 @@ class GroupMemoryUnitTest {
         Changed value=new Changed(1,memory("m","saved","active"));assertEquals(GroupMemoryValues.encode(value),GroupMemoryValues.encode(GroupMemoryValues.decodeChanged(GroupMemoryValues.encode(value))));
         assertThrows(ApplicationFault.class,()->GroupMemoryValues.version(9007199254740992L,0));
     }
+    @Test void expertSnapshotsAreExplicitScopedAndLegacyWireStaysUnchanged()throws Exception {
+        Memory expert=new Memory("m","A","expert",1,"shared expert knowledge","active",source("{\"kind\":\"manual\"}"),"owner","owner","2026-10-12T12:00:00.000Z","2026-10-12T12:00:00.000Z",true);
+        Snapshot snapshot=new Snapshot(1,Collections.singletonList(expert),"expert");String json=GroupMemoryValues.encode(snapshot);
+        assertTrue(json.contains("\"scope\":\"bot\""));assertFalse(json.contains("groupId"));
+        assertEquals(json,GroupMemoryValues.encode(GroupMemoryValues.decodeSnapshot(json,"A","expert",true)));
+        assertThrows(ApplicationFault.class,()->GroupMemoryValues.decodeSnapshot(json,"A","other",true));
+        assertThrows(ApplicationFault.class,()->GroupMemoryValues.decodeSnapshot(json,"A","expert"));
+        assertThrows(ApplicationFault.class,()->new Snapshot(1,Collections.singletonList(expert)));
+        Changed changed=new Changed(1,expert);assertEquals(GroupMemoryValues.encode(changed),GroupMemoryValues.encode(GroupMemoryValues.decodeChanged(GroupMemoryValues.encode(changed))));
+    }
+    @Test void expertCannotPublishPrivateTaskOrResultProvenance()throws Exception {
+        for(Source privateSource:Arrays.asList(source("{\"kind\":\"task\",\"taskId\":\"private-task\",\"taskVersion\":1}"),source("{\"kind\":\"result\",\"runId\":\"private-run\"}")))
+            assertThrows(ApplicationFault.class,()->new Memory("m","A","expert",1,"private","active",privateSource,"owner","owner","2026-10-12T12:00:00.000Z","2026-10-12T12:00:00.000Z",true));
+    }
 }

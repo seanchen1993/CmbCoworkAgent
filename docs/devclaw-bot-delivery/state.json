@@ -1,9 +1,95 @@
 {
   "schema_version": 1,
-  "updated_on": "2026-10-13",
+  "updated_on": "2026-10-15",
   "project": "DevClaw Bot",
-  "phase": "R01_GROUP_MEMORY_LOCAL_ACCEPTED",
-  "status": "waiting_user_next_scope",
+  "phase": "R01_EXPERT_MEMORY_DESIGN",
+  "status": "waiting_user_design_review",
+  "local_delivery_checkpoint": {
+    "request": "2026-10-15 user asks current branch and to commit agent changes; local commit only, no push.",
+    "branch": "codex/devclaw-bot-integration",
+    "base_head": "2f0d6c3f2d7580c02fbed6cb0673e85496e6d75e",
+    "scope": "A9 expert memory/default private directory, A10 no Group UI, local default connection/preview helper, tests and delivery/design documents. Preview lifecycle limitations remain documented WIP; automatic learning is not implemented.",
+    "source_manifest_sha256": "36336f77c2a8f7d21149f7a7137e5d98694eba0d0fdfe1f09e9d862ffdac9292",
+    "git_anchor": "Local commit containing this checkpoint; resolve exact id with git log. Historical accepted_uncommitted records below describe pre-checkpoint state, not current Git cleanliness.",
+    "checks": "Commit-time54 App tests,7 preview units and14 IPC passed. Node/Web types checked before commit; previous A9/A10 integration evidence remains in acceptance reports; no database/model/App mutation for commit."
+  },
+  "expert_memory_design": {
+    "task": "tasks/R01-A11-design.md",
+    "report": "reviews/Astra-expert-memory-grok-design.md",
+    "authorization": "2026-10-15 user explicitly asks Astra to design expert long-term memory based on Grok Bot and DevClaw requirements; design only, not implementation.",
+    "agent": "/root/astra_mvp_expert_design",
+    "model": "gpt-6-astra",
+    "status": "design_delivered",
+    "latest_discussion": "User questions mandatory human publication. Root recommends auto maintenance inside explicitly permitted learning/sharing boundaries, human confirmation only for conflicts or expanded sharing; source-private/task-specific/unknown-code facts not automatically generalized. Original Astra manual-publication draft not accepted as final, no auto-learning implementation authorized by commit request.",
+    "recommendation": "Natural-language remember/correct/forget with preview confirmation, <=3 evidence-bound proposals after settled analysis, human publication only, deterministic per-Task recall, expert ownership. Ordinary contentRevision only affects new start snapshots; explicit forget always tombstone+invalidationEpoch, including current disclosure checks for successful-result replay. Reuse pure algorithms/scheduling from personal memory, never attach its default store/model/tools.",
+    "root_review": "Independently read actual Grok turn-settle/turn-memory/state write-forget/gate/freeze/shared-room and DevClaw maintainer/manual write/snapshot/revision/settle replay/zero-tool-one-call/personal file-store paths. Astra supplemental review resolves normal disable vs strong forget and stored-success idempotency vs disclosure. Document explicitly separates proposals from implemented behavior.",
+    "source_snapshot": { "dirty_non_doc_paths": 43, "manifest_sha256": "36336f77c2a8f7d21149f7a7137e5d98694eba0d0fdfe1f09e9d862ffdac9292", "unchanged_from_A10": true },
+    "boundaries": "Design only delivered, not authorization to implement or freeze public contracts. No product writes/tests/service or data mutations by design agent, no child agents. Root wrote design/checkpoints only. Existing source/local App preserved, timer PAUSED; implementation and real proposal-model costs require explicit human continuation/authorization."
+  },
+  "expert_only_ui": {
+    "task": "tasks/R01-A10.md",
+    "report": "attempts/R01-A10-root.md",
+    "authorization": "2026-10-15 human: completely hide Group; first version permits breaking updates and needs no legacy compatibility.",
+    "writer": "root_serial",
+    "status": "accepted_uncommitted",
+    "scope": "Removed Group/legacy adoption/binding/team memory from UI and their renderer IPC; internal automatic task/authorization relationships remain. No database deletion/refactor, all other dirty work preserved, timer PAUSED.",
+    "verification": "14IPC,60App,main+browser types0/web0,actualReactChromium fakeIPC advanced expanded before/after expert/result with no Group or legacy controls; removed operations reject registration, local revocation/input boundaries preserved. 9511 safe full Electron-vite build and actual Java/MySQL/default identity ready; CUA confirms actual new UI including advanced open then closed, no user expert/Run created.",
+    "runtime": "App94408/Java94349:55521/supervisor94211/session9511,390b46 actual status running/database healthy/data preserved. Old92595 idle app normal nativeQuit after lost supervisor guard rejection; explicitstop72298 exit0 before restart, no force kill or unrelated resource mutation.",
+    "source_snapshot": { "dirty_non_doc_paths": 43, "includes_prior_A9_and_launcher_WIP": true, "deleted": "src/renderer/src/components/customize/GroupMemoryPanel.tsx; recoverable from Git", "manifest_sha256": "36336f77c2a8f7d21149f7a7137e5d98694eba0d0fdfe1f09e9d862ffdac9292", "manifest_format": "sorted paths; SHA256(file bytes) or DELETED, two spaces, relative path, LF; hash UTF8 manifest" }
+  },
+  "expert_first_mvp": {
+    "task": "tasks/R01-A9.md",
+    "authorization": "2026-10-15 human: simplify overview, expert-scoped memory without Group UX, default local expert metadata/memory directory; Astra designs, root implements.",
+    "design_agent": "/root/astra_mvp_expert_design",
+    "writer": "root_serial",
+    "status": "accepted_uncommitted",
+    "acceptance": "reviews/R01-A9-acceptance.md",
+    "source_snapshot": { "files": 42, "sha256": "5d3932f74f9186524706f114c15f0935781e1aaf94559c92f9f962c15ad4b15c", "canonical_manifest_sha256": "b32a6dd3031ff3fa9b1a367b4a4adee3a3c49abe3d3857fcd3f27e5bc2f1c7dc", "canonical_manifest_format": "git modified+untracked non-doc paths, lexically sorted; each line SHA256(file bytes), two spaces, relative path, LF; SHA256 of UTF8 manifest", "jar_sha256": "9be0762b0d1b2d891c117ace30c84f996dee3a58ba9026ccdf6da386d7d30dee" },
+    "verification": "69JUnit/1884parity0,76App,65service,12IPC,F03all24,main+newtests/web0; actualReactChromium; final expertHTTP twice/V6upgrade/currentroles/frozen scopes; oldGroupV5upgrade42+empty41; two catalog DB26tables/7migrations/noFK; final actualAppWorker/SQLite/DeepAgent fake4tools0/defaultdata/cache journey. All disposable resources exact cleaned.",
+    "runtime": "67009/48ed61 safe full App build + actual Java/MySQL ready; App92595, Java92534:53883, samePartnerMySQLbdf4f0d8/volume healthy. CUA confirms new expert/task/local three areas, advanced closed, no connection/workspace step, node disabled, no persistent user expert or Run auto-created. 2f946b status running,7bab44 resource proof; original MySQL restored stopped, ES/S3 retained healthy; actual timer PAUSED.",
+    "known_test_history": "44644 expertHTTP failed old broad fixed-run-scopes assertion once; trigger not determined, retained in report. Fine-grained diagnostics and same core code final22102+2652 both passed; no claim of identifying/fixing original trigger. Preview bootstrap Ctrl+C/relative-path caveats remain separate WIP.",
+    "boundaries": "Preserve legacy Group records and frozen Runs; no automatic cross-group promotion; MySQL authority, local rebuildable cache only; fake model/tools0; explicit node enable; timer PAUSED. Preserve dirty default-connection and launcher WIP."
+  },
+  "service_integration_decision": {
+    "confirmed_on": "2026-10-13",
+    "source": "用户明确：先记下，先在本地跑通，再合并服务；原IM网关采用内网专有依赖，当前不便本地调试。",
+    "local_first": "保留 services/bot-control 独立本地开发启动方式和公开可获取依赖；先验证 App/控制服务/MySQL/模拟招乎/模拟模型的闭环，不引入内网专有 BOM、认证或平台依赖。",
+    "later_target": "本地闭环通过后，再将伙伴业务模块合入原IM网关工程；服务部署统一、职责仍分离；优先复用已有 App WSS 连接，管理和执行控制保留 HTTP，不另建一套重复生产 WebSocket。",
+    "current_transport": "伙伴当前是本地 HTTP + 节点轮询，不存在已实现的第二套 WSS。",
+    "preserve_boundaries": "消息 ACK 不等于 Run 执行授权或结果；企业身份、节点身份和 Group 授权分开核对；新旧招乎机器人凭据与路由分离；原个人 Runtime 不变。",
+    "gate": "这是后续路线决定，不是立即合并或访问内网的授权。实际合并需原网关工程及依赖环境，并在本地验证后明确实施范围。"
+  },
+  "local_preview": {
+    "status": "rework_pending",
+    "default_connection": {
+      "status": "verified_uncommitted",
+      "authorization": "2026-10-15 用户要求去掉本地测试的连接服务步骤，直接使用默认配置。仅本地预览自动配置/身份验证；不自动选择工作区、建团队、授予权限、启用节点或执行。",
+      "implementation": "preview launcher supplies main-only private descriptor file path; unpackaged App only. Controller serializes default import + three-identity verification on status, preserves same-identity workspace/team/receipts, retries failed initialization. Renderer hides import/connect/disconnect only in local-default mode. No hardcoded tokens or plaintext fallback; ordinary/packaged path unchanged.",
+      "verification": "26 affected controller/config/preview units dfd0b1 passed; final core client/config/worker/controller/memory30 tests393284 passed, IPC11+actualReact/Chromium fakeIPC91190/a4397f passed (default mode hides import/connect/disconnect), main/web types98201/1f0879 exit0. Actual safe App build+Java/MySQL identity verification12818/98e5b6 ready connected=true/node=false, CUA confirms visible local workspace page, no import/connect buttons. Encrypted config owned0600; Partner same container/volume healthy, no tasks/models started.",
+      "source_snapshot": { "files": 9, "sha256": "7c79db17a0c4fe899c2504adaaa499cfd0a65f77267018d7069dcde135709d6f" },
+      "runtime": "Old supervisor28148 confirmed absent but orphan App28340 present; CUA verified unconfigured/disconnected/node disabled/no active Run, native Quit then ps confirms absent. Reopened actual App83014 via absolute Node22 script/session12818; Java28281:55565 and independent Partner MySQL retained same running resource, default encrypted config saved. No broad kill, validator bypass or data reset. Launcher Ctrl+C/relative-path caveats remain separate pending work."
+    },
+    "debug_session": {
+      "authorized_on": "2026-10-15",
+      "request": "用户要求首版彻底不展示Group、不要求旧版兼容；root串行清理并重开验证。未合并网关或修引导脚本Ctrl+C。",
+      "status": "running",
+      "launcher": "Node22 + absolute partner-preview.mjs start，session9511/supervisor94211保持给用户测试。旧supervisor已失，idle App92595正常nativeQuit后明确stop72298 exit0；无强杀/数据清空/守卫放宽，不依赖Node25 Ctrl+C。",
+      "app_pid": 94408,
+      "java_pid": 94349,
+      "port": 55521,
+      "verification": "9511/e80fc6安全完整Appbuild及真实默认身份连接通过；CUA核对高级展开后无Group/恢复绑定/团队记忆/采用切换，随后收起，无自动专家/Run、节点未启用。390b46 status running/database healthy；原profile/凭据/卷保留，Java jar沿用9be0762b未改服务端。",
+      "other_resources": "7bab44：同Partner container bdf4f0d8/volume healthy。原B00 MySQL693a1c3为测试守卫精确同容器临时start后46072/edef40恢复原停止；ES/S3同ID保持healthy，未改数据或凭据。无测试容器残留。",
+      "stop": "本轮保持App和伙伴服务运行给用户调试。停止用npm run stop:bot-preview，不承诺Node25引导Ctrl+C已修；定时仍PAUSED。"
+    },
+    "authorization": "2026-10-13 human: 把这套启动流程落地为脚本，然后停止应用，稍后回来测试。仅本地启动/状态/停止脚本，不扩展产品功能或恢复定时。",
+    "baseline": "2f0d6c3f",
+    "script": "deploy/dev/service/partner-preview.mjs",
+    "profile": "/Users/heyirui/.devclaw-bot-b00/runtime/devclaw-bot-partner-dev/preview-app",
+    "previous_preview": "Ad-hoc Electron87990 closed gracefully; Java87281 and independent Partner MySQL stopped by existing validated launcher; all data retained. Previous app-preview-7hnllQ was unconfigured, no tasks or active run, retained not adopted/deleted.",
+    "checks": "65 service tests passed including 7 preview tests (97769/aa8f56). Real safe builds/App page/getStatus/duplicate starts/profile restart passed; final normal stop 49961/866309 and starter28302/39ad47 both exit0 after capturing child handle. Earlier starter exits1 were disposal-after-close checks; preserved history. PTY Ctrl+C23192/739659 exited1 and left Java94487/60888+Partner MySQL running after App exited; Node25 synchronous Node22 bootstrap signal forwarding/parent exit requires repair and revalidation. Not accepted or committed.",
+    "current_resources": "2026-10-15 A10 running App94408/Java94349:55521/Partner MySQLhealthy，默认连接、节点未启用，session9511。旧运行记录为历史；原配置/数据与16已提交任务记录保留。",
+    "next": "用户可直接创建专家→启用本机→发送任务，目录自动准备。保持App运行，不自动创建用户专家/Run，不扩大网关或真实模型；Node25引导Ctrl+C/相对路径guard仍独立WIP，停止用stop:bot-preview；定时PAUSED。"
+  },
   "integration": {
     "worktree": "/Users/heyirui/.codex/worktrees/devclaw-bot-integration/cmbCowork",
     "branch": "codex/devclaw-bot-integration",
@@ -27,11 +113,14 @@
       "R01_LOCAL_NODE_THREAD_SLICE",
       "R01_LOCAL_EXECUTION_SLICE",
       "R01_LOCAL_DEV_APP_SLICE",
-      "R01_GROUP_MEMORY_SLICE"
+      "R01_GROUP_MEMORY_SLICE",
+      "R01_EXPERT_FIRST_MVP",
+      "R01_EXPERT_ONLY_UI",
+      "R01_EXPERT_MEMORY_DESIGN"
     ],
     "implementation_task_ids": [],
     "scope_confirmed": true,
-    "scope_confirmation": "2026-10-12 human explicitly authorized implementation following Astra review. A8 Group explicit memory only, MySQL authority/current Group ACL/frozen Run snapshots/conservative in-flight invalidation/App maintenance/explicit BotVersion adoption; simulated models only; timer PAUSED.",
+    "scope_confirmation": "2026-10-15 latest human asks Astra to design expert long-term memory based on Grok Bot and project needs. Design delivered only; A10 expert-only UI already done, no new implementation authorization, no product/model/service/data changes, timer remainsPAUSED.",
     "task_guest_dns_sudo_allowed": true,
     "local_es_s3_containers_allowed": true,
     "host_sudo_or_network_change_allowed": false,
@@ -68,6 +157,9 @@
     "last_verified_at_utc": "2026-10-12T06:26:24Z"
   },
   "tasks": [
+    {"id":"R01-A11-design","status":"design_delivered","spec":"tasks/R01-A11-design.md","report":"reviews/Astra-expert-memory-grok-design.md","agent":"/root/astra_mvp_expert_design","scope":"Read-only design delivered, root independent source check and documentation; not implementation authorization","product_changes":false},
+    {"id":"R01-A10","status":"accepted_uncommitted","spec":"tasks/R01-A10.md","report":"attempts/R01-A10-root.md","writer":"root_serial","scope":"No Group UI or legacy renderer operations; keep automatic internal task/auth relationships and expert-only primary flow","verification":"14IPC/60App/types0/actualReactChromium pass, actual Appbuild and CUA expanded advanced confirm no Group;390b46 healthy, source43manifest36336f77. No DB edits/clear, lost old supervisor handled by idle normalQuit and explicit stop, prior data preserved.","live_commands":[{"session_id":9511,"purpose":"user local preview keep running","app_pid":94408,"java_pid":94349,"port":55521}]},
+    {"id":"R01-A9","status":"accepted_uncommitted","spec":"tasks/R01-A9.md","report":"attempts/R01-A9-root.md","design":"reviews/Astra-mvp-expert-design.md","acceptance_review":"reviews/R01-A9-acceptance.md","writer":"root_serial","design_agent":"/root/astra_mvp_expert_design","scope":"expert-first UI/default private data directory/expert manual memory with explicit legacy adoption and frozen Run scope","verification":"Final JDK8 69JUnit/1884parity0,76App/12IPC/65service/F03full24/types0/ReactChromium passed; real expertHTTP final two passes, legacyGroup regression, seven-migration26-table zero-FK catalog and actual AppWorker/default-private-directory/SQLite/DeepAgent fake4/tools0 journey passed. One earlier fixed-run-scopes failure remains unexplained and recorded, not claimed fixed. New actual App92595/Java92534:53883 open for user testing, node disabled, no user expert/Run created. Preview launcher lifecycle caveats remain separate WIP.","live_commands":[{"session_id":67009,"purpose":"user-requested local App preview; keep running","app_pid":92595,"java_pid":92534,"port":53883}]},
     {
       "id": "F01",
       "status": "accepted",
@@ -602,7 +694,7 @@
     ,
     {"id":"R01-A8","status":"accepted","spec":"tasks/R01-A8.md","attempt_id":"R01-A8-root","report":"attempts/R01-A8-root.md","java_report":"attempts/R01-A8-java.md","worktree":"/Users/heyirui/.codex/worktrees/devclaw-bot-integration/cmbCowork","baseline":"2f914995","implementation_strategy":"root App and same gpt-6.1-sol/high a6_java_execution Java, disjoint file scopes; Java builder/DB exclusive until frozen","java_agent_id":"/root/a6_java_execution","dispatch_status":"sent_same_original_high","live_commands":[],"prior_tasks_count":15,"prior_tasks_sha256":"0fbb35328b09820b694e8de9032af0f7c0fffc956c13f5b8b5268b3ea96b643f","started_at_utc":"2026-10-12T11:44:36Z","model":"simulated only","next":"A8 local simulated-model memory milestone complete; wait for human next scope. No automatic extraction/crossGroup learning/vector/real model or Zhaohu/cloud/intranet/deploy/push/timer.","verification":{"baseline_app":"b8b32f exit0 71 baseline affected App/Thread/actual graph/partner tests after first private DTO changes","memory_unit":"32a279 exit0 33=old16 executor+new17 memory/Controller/actual zero-tool graph; no real model","first_tsc":"39735/818520 exit2 memoryPolicy inference; fixed explicit callback return type, 96333 rerun in progress","rootBuild":"97365/1c6fbe exit0 genuine49main/23test JDK8,67JUnit,1884parity0/audit class52/libs34; jar d7c4e1ca3a1b10d3730c2a4ee8663cd2cde30b1a8bacabee77bcab55f4a70055","rootUnits":"6992/1e20cd exit0 App92; service336e1a57; F03dc2fc424; IPC30804/e1cec610; browser72854/da3860; main+affectedTest91082/8c3f1f0","rootMemoryFailure":"18056/02a178 exit1 command-cas GROUP_MEMORY_BOUNDARY; owned5985f0/c60a1823/33059/Java52277:55553 exactclean; A8-J1 samechild safe diagnostic only","rootTypes":"99843/a41c93 main0,9510/28f6c2web0; latest21789/9780a4web0; finalmain+test includes new validation0","rootActualMemoryJourney":"7155/3e2b73 exit0 realJava+MySQL57+AppWorker+SQLite+actualDeepAgent fake4/tools0, twoTasksReuse/inflightAbort/noAutoReplay/disabledEmpty/newSQLiteMemoryPersists/history; exact058813/b455/33060/Java52742:55997 removed original3samehealthy","rootAppBuild":"88061/8e1d60 exit0 main/preload/renderer build","rootBrowserFinal":"77988/0ab302 exit0 actualReactChromium fakeIPC errors0","rootLegacyPending":"99658/87897b33passed includes pendingA7disabled fingerprint unchanged","rootUnitsFinal":"31824/2b93ff exit0 93 App tests after pendingA7 compatibility;16019/c8aea3 main+allaffected-test0;service683aab58 includes durable13 safe classifier cases","rootCatalog":"53990/b82cf3 exit0 2realDB22tables/noFK/6migrations/history5preserved/timeouts1024/1025ms exactclean","rootEnvironmentIncident":"originalmysql693a1c3 OOM true exited at2026-10-12T14:26:44.796998112Z, discoveredb6d447; no data/volume deletion.4e3a32 volume-name precheck failed beforeaction; corrected actual dev-data label/owner check fa19a0 exactdockerstart only.780075 fullB00proof healthy same3IDs/mounts/volume/daemon; ephemeralmysqlport33063","rootJ1":"samehigh safeclassifierreviewed, independent4bb7db13casespassed/durable58suite; Javajar unchanged","rootJ2":"actual source8cd144/66ded9 read finiteV5window only; no productlease change; old70749 failed OUTCOME_UNKNOWN exactclean; finalApp16819/e9540e closed0","rootFinalBuild":"1526/128ea7 exit0 true23test recompiled after J2 qualification; main unchanged already root49compiled97365;67JUnit/1884parity0/sixmigration/class52/lib34 audit jar76e6447ea65bce27dd337f03c9002d76d47a3f0b028e40fd7b46a4484ca677a4","rootJ2CompilationFailure":"39428/d447d7 exit1 testCompile;89516/a27f7e exact Timestamp ambiguous sql/security; one line java.sql.Timestamp qualified, no productchange","rootMemoryFinal":"26816/791fea exit0 actualV5upgrade42/empty41; allscope/source/CAS/replay/rollback/unknowncommit/frozeninput/renew+settleterminalcapacity/disabled/expiredunknown/budget100/10/Unicode/realJavareopen/withdrawcurrentACL; exact9664/bb5b33065 anddd79/a22733066 removed,original3samehealthy","rootPersistent":"2831/7e3634 exit0 genuine Java+MySQL stoprestart identicalmemorylist/credentials/container/volume/owner;08d31e14/Java64373:53132 precise testproject removed original3samehealthy","rootOldPartnerFinal":"53288/10172f exit0 oldPartnerHTTP25 denials/auth4methods/poll8/clarification/start-renew-settle/result;96bf/454c5b/33069/Java65051:53157 exactremoved original3samehealthy","rootActualMemoryFinal":"91341/0459d8 finaljar76e6 exit0 actualJavaHTTP/MySQL57/AppWorker/SQLite/DeepAgent fake4/tools0 twoTasksReuse/changecancel/noautoreplay/disabledEmpty/freshSQLitekeepsmemory/history;fccc823c/9384ab0c/33070/Java65274:53248 exactremoved original3samehealthy"},"java":"samehigh quotaerrored confirmedstopped; rootserialJ2 one-line compile fix/independent review+build, no newwriter","latest_checkpoint":"Accepted f1067cc3 after independent source review/JDK8+MySQL/realcrosslayer+UI+all key regressions; all commands/resourcesclosed, original15records retained exactly. Historical failures preserved, no unknown writes replayed.","recovery":"2026-10-13T00:39Z humancontinue, usage ordinaryAllowed true 0/58%, advertisedtimepassed; samehigh quotaerrored interrupt confirmedstopped, pgrepjavaemptyc333ff, 17464unavailable outcomeunknown(notcountpass); allcodepreserved, rootserialindependentbuild next, no newagent/model/reset/credits","source_snapshot":{"files":58,"sha256":"ee5619243e45de216c01a63912a9203c0b19c529401b13d89ed569cd220ab0d5","jar_sha256":"76e6447ea65bce27dd337f03c9002d76d47a3f0b028e40fd7b46a4484ca677a4"},"accepted_code_commit":"f1067cc3b56312adbf1ebe620b1daaa779b64cef","accepted_at_utc":"2026-10-13T00:49:18Z","acceptance_review":"reviews/R01-A8-acceptance.md","open_review_items":[],"historical_unexplained_failures":["worker92097 GROUP_MEMORY_CHECK","root18056 GROUP_MEMORY_BOUNDARY; pre-J1 flags unavailable"],"terminal_audit":"a8013c Javaabsent;59f87a onlyoriginal3sameIDhealthy/3volumes/devnetwork/runtimeonlydev,0testcontainersnetworksvolumesdirs/defaultPartnernotcreated, originalmysql33063;2ff1e3 actualtimerPAUSED;0f633d58sourceee5619/76e6;58verifiedsourceslocalcommitf1067cc3 normalhooks notbypassed"}
   ],
-  "next_action": "R01-A8 approved, private memory DTO and conservative in-flight invalidation frozen in task. Parallel root App/original high Java; preserve old accepted tasks, timer PAUSED, no real model/intranet/push/deploy/cloud/auto-summary.",
+  "next_action": "Astra专家长期记忆设计已交付reviews/Astra-expert-memory-grok-design.md，等待用户讨论/明确实施；本轮仅文档，不自动写切片1代码或调用提炼模型、不恢复定时。现有A10 App和代码未改，运行信息沿上次核对记录，不为设计重启。",
   "quota_recovery": {
     "verified_at_utc": "2026-10-05T03:55:26Z",
     "ordinary_usage_allowed": true,
@@ -614,5 +706,5 @@
     "last_verified_limits": {"verified_at_utc":"2026-10-07T10:30:05Z","actual_error":"You have hit your usage limit; try again at4:29PM","advertised_timezone":"notreturned; previouslocalAsia/Shanghai inferred","ordinaryUsageAllowed":true,"primary_used_percent":2,"secondary_used_percent":16,"primary_resets_at_utc":"2026-10-07T15:29:46Z","secondary_resets_at_utc":"2026-10-14T03:29:55Z","agent_previous_status":"actualerrored; interruptconfirmedstopped","worker_head":"5e6d4b430cc47c1148a70ed5d7f615ab94aa11b2","worker_clean":"d92e47","next":"sameoriginalhigh sameA02 audit-only afteractualstop/resourcechecks; no credits/reset/account/modelchange/newwriter/automaticresume","policy":"Currentordinaryusageallowed andoldadvertisedtimepassed. Only recover SAME stoppedoriginalhigh, auditlost19326result first; fresh tests wait maindecision. No reset/purchase/modelaccountchange; automaticPAUSED."}
   },
   "recovery_notes": "R01-A7 accepted0a711b31; original14accepted task objects exact. Root real JavaHTTP+MySQL+AppControllerWorker+SQLite+existingDeepAgent fake model1/tools0/realTTLoffline/cancel/clarification/results/reopen no replay/currentGrantCAS passed; newHTTP25/launcher realBot across stop-restart/defaultHTTPtwoDB30denials4replays13startup/2JVM4rollback lostTCP0 passed. Final62JUnit1884parity0/55serviceNode/71App9IPC/ReactChromium fakeIPC/main+test+web0/fullAppbuild passed. PIDexit race fixed confirmedESRCH only plus4 deterministic tests; oldV5test-onlyprobe synchronized17tables/order/run_id guard. All handles/writers closed, original3sameIDhealthy/3vol/devnetwork, oldlocalclean, defaultPartnernot-created and timerPAUSED. No push/deploy/real keys/model/intranet/paid. Source46files normal localcommit; docs followup only.",
-  "current_task_id": "R01-A8"
+  "current_task_id": "R01-A11-design"
 }

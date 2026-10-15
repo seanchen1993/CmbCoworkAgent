@@ -7,7 +7,7 @@ import {
   type IpcMainInvokeEvent
 } from "electron"
 import { realpath, stat } from "node:fs/promises"
-import { join } from "node:path"
+import { isAbsolute, join, normalize } from "node:path"
 import type { PartnerDevStatus } from "../../shared/bot/partner-dev"
 import { getDb } from "../db"
 import { isTrustedRendererUrl } from "../main-log-forwarding"
@@ -22,6 +22,8 @@ import { PartnerRequirementExecutor } from "../services/bot/requirement-executor
 import { PartnerTaskThreadStore } from "../services/bot/task-thread-store"
 import { PartnerRequirementAttemptStore } from "../services/bot/requirement-attempt-store"
 import { PARTNER_FAKE_MODEL_REF } from "../services/bot/partner-fake-model"
+import { getCmbCoworkAgentDataRoot } from "../app-data-root"
+import { expertLocalData } from "../services/bot/expert-local-data"
 
 let controller: PartnerDevController | undefined
 export function hasActivePartnerDevRun(): boolean {
@@ -36,11 +38,35 @@ export function registerPartnerDevHandlers(
   getWindow: () => BrowserWindow | null,
   rendererUrl: string | undefined
 ): void {
+  // Set only by the isolated local preview launcher. No production auto-login,
+  // renderer-selected path, hardcoded bearer or plaintext credential fallback.
+  const defaultConnectionFile = app.isPackaged
+    ? undefined
+    : process.env.CMB_PARTNER_LOCAL_CONNECTION_FILE
   controller = new PartnerDevController({
     store: new PartnerLocalConfigStore(
       join(app.getPath("userData"), "devclaw-partner-local"),
       safeStorage
     ),
+    expertData: (descriptor, botId) =>
+      expertLocalData(
+        getCmbCoworkAgentDataRoot(),
+        defaultConnectionFile ?? descriptor.url,
+        descriptor,
+        botId
+      ),
+    ...(defaultConnectionFile
+      ? {
+          defaultDescriptor: async () => {
+            if (
+              !isAbsolute(defaultConnectionFile) ||
+              normalize(defaultConnectionFile) !== defaultConnectionFile
+            )
+              throw new PartnerLocalFault("STORAGE_FAILURE")
+            return readPartnerPrivateJson(defaultConnectionFile)
+          }
+        }
+      : {}),
     createExecutor(config, client) {
       const db = getDb(),
         d = config.descriptor
@@ -103,12 +129,10 @@ export function registerPartnerDevHandlers(
     getStatus: () => current.getStatus(),
     connect: () => current.connect(),
     disconnect: () => current.disconnect(),
-    enableNode: () => current.enableNode(),
     stopNode: () => current.stopNode(),
-    authorizeTeam: () => current.authorizeTeam(),
-    revokeTeam: () => current.revokeTeam(),
-    listMemories: () => current.listMemories(),
-    enableTeamMemory: () => current.enableTeamMemory()
+    revokeLocalAuthorization: () => current.revokeTeam(),
+    startExpert: () => current.startExpert(),
+    listExpertMemories: () => current.listExpertMemories()
   }))
     register(name, async (_event, args) => {
       none(args)
@@ -135,34 +159,23 @@ export function registerPartnerDevHandlers(
     if (!(await stat(path)).isDirectory()) throw new PartnerLocalFault("INVALID_PAYLOAD")
     return current.setWorkspace(path)
   })
-  register("createTeam", async (_event, args) => {
-    const hasPolicy =
-      args.length === 1 &&
-      !!args[0] &&
-      typeof args[0] === "object" &&
-      Object.hasOwn(args[0], "useMemory")
-    const v = input(args, ["name", "instructions", ...(hasPolicy ? ["useMemory"] : [])])
-    return current.createTeam(
-      v.name as string,
-      v.instructions as string,
-      hasPolicy ? (v.useMemory as boolean) : false
+  register("createExpert", async (_event, args) => {
+    const v = input(args, ["name", "instructions"])
+    return current.createExpert(v.name as string, v.instructions as string)
+  })
+  register("createExpertMemory", async (_event, args) => {
+    const v = input(args, ["text"])
+    return current.createExpertMemory(v.text as string)
+  })
+  register("updateExpertMemory", async (_event, args) => {
+    const v = input(args, ["memoryId", "expectedVersion", "text", "status"])
+    return current.updateExpertMemory(
+      v as unknown as Parameters<PartnerDevController["updateExpertMemory"]>[0]
     )
   })
-  register("createMemory", async (_event, args) => {
-    const v = input(args, ["text", "source"])
-    return current.createMemory(v as unknown as Parameters<PartnerDevController["createMemory"]>[0])
-  })
-  register("updateMemory", async (_event, args) => {
-    const v = input(args, ["memoryId", "expectedVersion", "text", "source", "status"])
-    return current.updateMemory(v as unknown as Parameters<PartnerDevController["updateMemory"]>[0])
-  })
-  register("disableMemory", async (_event, args) => {
+  register("disableExpertMemory", async (_event, args) => {
     const v = input(args, ["memoryId", "expectedVersion"])
-    return current.disableMemory(v.memoryId as string, v.expectedVersion as number)
-  })
-  register("bindTeam", async (_event, args) => {
-    const v = input(args, ["groupId"])
-    return current.bindTeam(v.groupId as string)
+    return current.disableExpertMemory(v.memoryId as string, v.expectedVersion as number)
   })
   register("sendMessage", async (_event, args) => {
     const v = input(args, ["mentioned", "text"])

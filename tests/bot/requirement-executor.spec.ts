@@ -26,6 +26,7 @@ import {
   withSqlite
 } from "./requirement-execution-fixture"
 import type { GroupMemorySnapshot } from "../../src/shared/bot/group-memory"
+import type { ExpertMemorySnapshot } from "../../src/shared/bot/expert-memory"
 import { memoryFixture } from "./group-memory-fixture"
 
 test("uninitialized restricted profile never falls back to personal execution; default callers unchanged", async () => {
@@ -55,7 +56,8 @@ function setup(
     leaseMs?: number
     renewFails?: boolean
     loseSettlement?: boolean
-    memory?: GroupMemorySnapshot | null
+    memory?: GroupMemorySnapshot | ExpertMemorySnapshot | null
+    memoryScope?: "group" | "bot"
     memoryPolicy?: "disabled" | "explicit_only"
     renewMemoryChanged?: boolean
     settleMemoryChanged?: boolean
@@ -67,6 +69,7 @@ function setup(
     attempts = new PartnerRequirementAttemptStore(db)
   if (options.leaseMs) run.leaseExpiresAt = new Date(Date.now() + options.leaseMs).toISOString()
   input.memorySnapshot = options.memory ?? null
+  if (options.memoryScope) run.memoryScope = options.memoryScope
   input.botVersion.config.memoryPolicy = options.memoryPolicy ?? "disabled"
   const stats = {
     models: 0,
@@ -476,6 +479,40 @@ test("server Group snapshot is injected into the actual zero-tool graph with ver
     assert.equal(f.stats.models, 1)
     await f.executor.execute(f.run)
     assert.equal(f.stats.models, 1)
+  }))
+
+test("expert snapshot enters actual graph as bot-scoped shared knowledge, not Group-private data", () =>
+  withSqlite(async (db) => {
+    const { groupId: _group, source: _source, ...memory } = memoryFixture()
+    const f = setup(db, {
+      memoryPolicy: "explicit_only",
+      memoryScope: "bot",
+      memory: {
+        scope: "bot",
+        botId: "expert",
+        revision: 1,
+        memories: [{ ...memory, botId: "expert", source: { kind: "manual" } }]
+      }
+    })
+    await f.executor.execute(f.run)
+    assert.match(f.stats.prompts[0], /交易查询仅提供T\+1数据/)
+    assert.ok(f.stats.prompts[0].replaceAll("\\", "").includes('"scope":"bot"'))
+    assert.equal(f.stats.tools.length, 0)
+    assert.equal(f.stats.models, 1)
+    await f.executor.execute(f.run)
+    assert.equal(f.stats.models, 1)
+  }))
+
+test("explicit legacy group scope preserves pre-V7 SQLite attempt receipts without model replay", () =>
+  withSqlite(async (db) => {
+    const f = setup(db)
+    await f.executor.execute(f.run)
+    await f.executor.execute({ ...f.run, memoryScope: "group" })
+    assert.equal(f.stats.models, 1)
+    assert.throws(
+      () => new PartnerRequirementAttemptStore(db).get({ ...f.run, memoryScope: "bot" }),
+      /PARTNER_ATTEMPT_CHANGED/
+    )
   }))
 
 test("disabled and explicit-only policies require corresponding server snapshots, no implicit fallback", () =>

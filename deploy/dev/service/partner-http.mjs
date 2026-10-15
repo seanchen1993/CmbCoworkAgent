@@ -123,9 +123,9 @@ export async function partnerRequest(handle, path, body, { principal = "owner", 
     request.on("error", () => finish(Error("PARTNER_REQUEST"))); request.end(bytes)
   })
 }
-export async function withPartnerHttpFixture(callback, { signal, upgradeV5 = false } = {}) {
+export async function withPartnerHttpFixture(callback, { signal, upgradeV5 = false, upgradeV6 = false } = {}) {
   if (typeof callback !== "function") throw Error("PARTNER_CALLBACK")
-  if (typeof upgradeV5 !== "boolean") throw Error("PARTNER_SELECTION")
+  if (typeof upgradeV5 !== "boolean" || typeof upgradeV6 !== "boolean" || (upgradeV5 && upgradeV6)) throw Error("PARTNER_SELECTION")
   active(signal)
   const original = await httpDevProof(), runtime = await packagedDatabaseRuntime()
   let entry, fixture, server, descriptorDirectory
@@ -133,10 +133,11 @@ export async function withPartnerHttpFixture(callback, { signal, upgradeV5 = fal
     console.log(JSON.stringify(await httpCapacity(signal))); entry = await createTestDatabase()
     console.log(JSON.stringify({ stage: "partner-registered", project: entry.project }))
     console.log(JSON.stringify({ stage: "partner-database-ready", ...(await startTestDatabase(entry, signal)) }))
-    const upgrade = upgradeV5 ? await groupMemoryProbe(runtime, entry, "seed-v5", {}, signal) : null
-    const migrated = await javaDatabase(runtime, entry, "migrate", { signal }); check(migrated.exitCode === 0 && migrated.proof.migrations === (upgradeV5 ? 1 : 6))
+    const upgrade = upgradeV5 || upgradeV6 ? await groupMemoryProbe(runtime, entry, upgradeV5 ? "seed-v5" : "seed-v6", {}, signal) : null
+    const migrated = await javaDatabase(runtime, entry, "migrate", { signal }); check(migrated.exitCode === 0 && migrated.proof.migrations === (upgradeV5 ? 2 : upgradeV6 ? 1 : 7))
     const noop = await javaDatabase(runtime, entry, "migrate", { signal }); check(noop.exitCode === 0 && noop.proof.migrations === 0)
     if (upgradeV5) { const proof = await groupMemoryProbe(runtime, entry, "verify-v5", { v5Facts: upgrade.v5Facts, runId: upgrade.running.id, terminalId: upgrade.terminal.id }, signal); check(proof.v5FactsPreserved && proof.historicalRunningNull && proof.oldResultPreserved) }
+    if (upgradeV6) { const proof = await groupMemoryProbe(runtime, entry, "verify-v6", upgrade, signal); check(proof.v6ScopeAndDataPreserved && proof.noExpertPromotion) }
     fixture = await createHttpFixture(partnerPrincipals(), signal); server = await startPartnerJava(runtime, entry, fixture, signal)
     console.log(JSON.stringify({ stage: "partner-listener", pid: server.pid, port: server.port, project: entry.project, realPartnerMain: true }))
     descriptorDirectory = await privateTemp(); const connectionFile = join(descriptorDirectory, "connection.json")

@@ -25,9 +25,11 @@ final class PartnerHttpHandler {
     static final String CONTROL="/api/bot/local/v1/control",NODE="/api/bot/local/v1/node";
     private final PartnerLaunchConfig config;private final RequirementRunApplication runs;private final RuntimeNodeApplication nodes;private final LocalAuthenticatedNodeAdapter adapter;private final GroupMemoryApplication memories;
     private final Semaphore admission=new Semaphore(4);private final ObjectMapper json=CompatibilityProbe.strictMapper();private final ContractBoundary boundary=new ContractBoundary();
+    private final ExpertMemoryApplication expertMemories;
     PartnerHttpHandler(PartnerLaunchConfig config,DataSource source){
         this.config=config;nodes=new RuntimeNodeApplication(source,config.legacy.identity,config.access,TransactionObserver.NONE);runs=new RequirementRunApplication(source,config.legacy.identity,config.access,TransactionObserver.NONE);adapter=new LocalAuthenticatedNodeAdapter(config.credentials,nodes,runs);
         memories=new GroupMemoryApplication(source,config.legacy.identity,TransactionObserver.NONE);
+        expertMemories=new ExpertMemoryApplication(source,config.legacy.identity);
         json.getFactory().setStreamReadConstraints(StreamReadConstraints.builder().maxNestingDepth(16).maxStringLength(65536).maxNumberLength(128).build());
     }
     boolean accepts(String path){return path!=null&&path.startsWith("/api/bot/local/");}
@@ -54,6 +56,12 @@ final class PartnerHttpHandler {
     private Object control(JsonNode body,TrustedContext actor){
         String op=text(body,"operation");switch(op){
             case "identity":exact(body,"operation");return json.createObjectNode().put("spaceId",actor.spaceId).put("principalId",actor.principalId);
+            case "listExpertMemories":exact(body,"operation","botId");return expertMemories.list(actor,id(body,"botId"));
+            case "createExpertMemory":exact(body,"operation","botId","commandId","text");return expertMemories.create(actor,id(body,"botId"),id(body,"commandId"),text(body,"text"));
+            case "updateExpertMemory":exact(body,"operation","botId","memoryId","commandId","expectedVersion","text","status");return expertMemories.update(actor,id(body,"botId"),id(body,"memoryId"),id(body,"commandId"),number(body,"expectedVersion",1),text(body,"text"),text(body,"status"));
+            case "disableExpertMemory":exact(body,"operation","botId","memoryId","commandId","expectedVersion");return expertMemories.disable(actor,id(body,"botId"),id(body,"memoryId"),id(body,"commandId"),number(body,"expectedVersion",1));
+            case "expertMemoryAdoption":exact(body,"operation","groupId","botId");return expertMemories.adoption(actor,id(body,"groupId"),id(body,"botId"));
+            case "activateExpertMemory":exact(body,"operation","groupId","botId","botVersionId","expectedGroupVersion");return expertMemories.activate(actor,id(body,"groupId"),id(body,"botId"),id(body,"botVersionId"),number(body,"expectedGroupVersion",1));
             case "listGroupMemories":exact(body,"operation","groupId");return memories.listGroupMemories(actor,id(body,"groupId"));
             case "createGroupMemory":exact(body,"operation","groupId","commandId","text","source");return memories.createGroupMemory(actor,id(body,"groupId"),id(body,"commandId"),text(body,"text"),GroupMemoryValues.source(body.get("source")));
             case "updateGroupMemory":exact(body,"operation","groupId","memoryId","commandId","expectedVersion","text","source","status");return memories.updateGroupMemory(actor,id(body,"groupId"),id(body,"memoryId"),id(body,"commandId"),number(body,"expectedVersion",1),text(body,"text"),GroupMemoryValues.source(body.get("source")),text(body,"status"));

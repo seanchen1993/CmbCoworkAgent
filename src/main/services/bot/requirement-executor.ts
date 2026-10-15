@@ -9,7 +9,7 @@ import { assemblePartnerPrompt } from "./prompt-assembly"
 import { REQUIREMENT_INPUT_ONLY_PROMPT } from "./input-only-requirement-run"
 import { PartnerRequirementAttemptStore } from "./requirement-attempt-store"
 import { PartnerTaskThreadStore, type PartnerTaskThreadContext } from "./task-thread-store"
-import { parseMemorySnapshot } from "./group-memory-validation"
+import { parseRunMemorySnapshot } from "./expert-memory-validation"
 import { groupMemorySourceRef } from "../../../shared/bot/group-memory"
 import {
   samePartnerAttempt,
@@ -84,7 +84,13 @@ function prepared(run: PartnerRequirementRun, raw: PartnerRequirementInput) {
     messageIds.add(value.id)
     previousVersion = entry.taskVersion
   }
-  const snapshot = parseMemorySnapshot(input.memorySnapshot, run.spaceId, run.groupId)
+  const snapshot = parseRunMemorySnapshot(
+    input.memorySnapshot,
+    run.spaceId,
+    run.groupId,
+    run.botId,
+    run.memoryScope
+  )
   if ((botVersion.config.memoryPolicy === "disabled") !== (snapshot === null))
     throw new Error("PARTNER_EXECUTION_INPUT_CHANGED")
   const prompt = assemblePartnerPrompt({
@@ -96,8 +102,8 @@ function prepared(run: PartnerRequirementRun, raw: PartnerRequirementInput) {
     memories:
       snapshot?.memories.map((memory) => ({
         spaceId: memory.spaceId,
-        scope: "group" as const,
-        ownerId: memory.groupId,
+        scope: "botId" in memory ? ("bot" as const) : ("group" as const),
+        ownerId: "botId" in memory ? memory.botId : memory.groupId,
         sourceRef: groupMemorySourceRef(memory),
         origin: "explicit" as const,
         text: memory.text

@@ -51,6 +51,7 @@ public final class JdbcRequirementRunStore {
         @com.fasterxml.jackson.databind.annotation.JsonSerialize(using=com.devclaw.botcontrol.application.RequirementInstantSerializer.class)
         public final Instant deadline, createdAt, updatedAt, leaseExpiresAt;
         public final String attemptId, leaseId;
+        public final String memoryScope;
         public final Long fence;
         public final boolean readOnly = true;
         private final byte[] fingerprint;
@@ -60,6 +61,7 @@ public final class JdbcRequirementRunStore {
             nodeId = id(r.getString("node_id")); ownerPrincipalId = id(r.getString("owner_principal_id")); grantId = id(r.getString("grant_id")); workspaceRef = id(r.getString("workspace_ref"));
             version = version(r.getLong("version")); taskVersion = version(r.getLong("task_version")); groupVersion = version(r.getLong("group_version")); nodeVersion = version(r.getLong("node_version")); grantVersion = version(r.getLong("grant_version"));
             status = status(r.getString("status")); initialStatus = status(r.getString("initial_status"));
+            memoryScope=r.getString("memory_scope");if(!Arrays.asList("group","bot").contains(memoryScope))throw JdbcApplicationStore.corrupt();
             if (initialStatus != Status.QUEUED && initialStatus != Status.WAITING_NODE) throw JdbcApplicationStore.corrupt();
             deadline = instant(r, "deadline"); createdAt = instant(r, "created_at"); updatedAt = instant(r, "updated_at");
             if (!deadline.isAfter(createdAt) || updatedAt.isBefore(createdAt)) throw JdbcApplicationStore.corrupt();
@@ -114,6 +116,11 @@ public final class JdbcRequirementRunStore {
         String runId = UUID.randomUUID().toString();
         change("INSERT INTO requirement_run_queue(space_id,id,requester_principal_id,command_id,fingerprint,group_id,task_id,stage_id,bot_id,bot_version_id,node_id,owner_principal_id,grant_id,workspace_ref,task_version,group_version,node_version,grant_version,version,initial_status,status,deadline,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,1,?,?,?,?,?)",
             space, runId, d.requesterPrincipalId, command, hash, d.groupId, d.taskId, d.stageId, d.botId, d.botVersionId, d.nodeId, d.ownerPrincipalId, d.grantId, d.workspaceRef, d.taskVersion, d.groupVersion, d.nodeVersion, d.grantVersion, wire(status), wire(status), deadline, d.observedAt, d.observedAt);
+        // The authorized Group parent is locked by the caller. A later adoption
+        // cannot change this Run's memory authority, even before first start.
+        try(PreparedStatement p=prepare("SELECT bot_id FROM group_expert_memory_modes WHERE space_id=? AND group_id=?",space,d.groupId);ResultSet row=p.executeQuery()){
+            if(row.next()){if(d.botId.equals(row.getString(1)))change("UPDATE requirement_run_queue SET memory_scope='bot' WHERE space_id=? AND id=?",space,runId);if(row.next())throw JdbcApplicationStore.corrupt();}
+        }
         return run(runId);
     }
     public Run claim(Run old, Instant now, Instant expiry) throws SQLException {

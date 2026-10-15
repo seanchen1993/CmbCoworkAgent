@@ -6,6 +6,7 @@ import type {
   TaskMessageResult
 } from "../../../shared/bot/contracts.generated"
 import type { GroupMemorySnapshot } from "../../../shared/bot/group-memory"
+import type { ExpertMemorySnapshot } from "../../../shared/bot/expert-memory"
 
 /** Internal adapter DTO, not the frozen public RunSpec or a client authorization. */
 export interface PartnerRequirementRun {
@@ -27,6 +28,7 @@ export interface PartnerRequirementRun {
   status: string
   leaseExpiresAt: string
   deadline: string
+  memoryScope?: "group" | "bot"
 }
 export interface PartnerRequirementInput {
   bot: Bot
@@ -35,7 +37,7 @@ export interface PartnerRequirementInput {
   task: Task
   /** Bounded explicit Task messages, not ambient group/Thread history. */
   messages: TaskMessageResult[]
-  memorySnapshot: GroupMemorySnapshot | null
+  memorySnapshot: GroupMemorySnapshot | ExpertMemorySnapshot | null
 }
 export type RequirementOutcome = "succeeded" | "failed"
 export interface PartnerRequirementResult {
@@ -84,6 +86,7 @@ export function validatePartnerRun(run: PartnerRequirementRun): PartnerRequireme
     run.fence !== 1 ||
     ![run.taskVersion, run.groupVersion].every((v) => Number.isSafeInteger(v) && v > 0) ||
     !STATUSES.includes(run.status) ||
+    (run.memoryScope !== undefined && !["group", "bot"].includes(run.memoryScope)) ||
     ![run.leaseExpiresAt, run.deadline].every(
       (v) =>
         typeof v === "string" &&
@@ -102,11 +105,15 @@ export function validatePartnerRun(run: PartnerRequirementRun): PartnerRequireme
         "groupVersion",
         "status",
         "leaseExpiresAt",
-        "deadline"
+        "deadline",
+        ...(run.memoryScope !== undefined ? ["memoryScope"] : [])
       ].map((k) => [k, run[k]])
     )
   ) as unknown as PartnerRequirementRun
 }
 export function samePartnerAttempt(a: PartnerRequirementRun, b: PartnerRequirementRun): boolean {
-  return [...ID_KEYS, "fence", "taskVersion", "groupVersion"].every((k) => a[k] === b[k])
+  return (
+    (a.memoryScope ?? "group") === (b.memoryScope ?? "group") &&
+    [...ID_KEYS, "fence", "taskVersion", "groupVersion"].every((k) => a[k] === b[k])
+  )
 }

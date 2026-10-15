@@ -1,5 +1,13 @@
 # DevClaw Bot 长程交付与断点续跑
 
+**2026-10-15 本地提交检查点：** 用户要求把现有改动提交至codex/devclaw-bot-integration，不推送。包含A9/A10专家手工记忆/默认目录/无Group界面、本地默认连接及带已知限制的预览脚本、测试与方案记录；自动学习未实施，预览生命周期仍独立WIP。Astra“逐条人工发布”初稿已附用户后续讨论修正，不能当成最终批准方案。准确commit见Git历史，下面“未提交”为检查点前的记录。
+
+**2026-10-15 最新出口：Astra专家长期记忆设计已交付，未实施。** 见reviews/Astra-expert-memory-grok-design.md（任务R01-A11-design）。结合Grok非官方重建的实际提取/门控/工具接线与现有专家/个人记忆代码，推荐自然语言确认维护、<=3待确认候选、按任务召回和内容版本/强遗忘epoch分离。root只整理方案与检查点，产品43路径快照仍36336f77，未动App/服务/数据库或调用模型，定时仍PAUSED。方案不是接口冻结或实施授权；等用户决定后才划实施片。
+
+**2026-10-15 最新出口：R01-A10 accepted_uncommitted。** 用户明确首版不需要旧版兼容，root删除伙伴页Group/恢复绑定/团队记忆/采用切换及旧renderer IPC和组件；内部任务授权关系仍自动管理，不重构数据库、不清空资料。14IPC、60App、主端含浏览器/Web类型零与真实ReactChromium通过；实际安全完整App重建后94408/Java94349:55521已打开，CUA核对高级展开也无Group，节点未启用，未代造专家或Run。详见attempts/R01-A10-root.md。定时PAUSED；下面“高级旧版兼容保留”仅历史，不再代表当前UI。
+
+**2026-10-15 最新出口：R01-A9专家优先首版已验收（代码未提交）。** Astra设计与二次只读复核，root实施：主流程创建专家→明确启用本机→发任务；专家长期记忆/私有默认数据目录/轻量缓存检索，Group只保留内部任务授权及高级旧版兼容。MySQL唯一权威，旧资料不自动跨组，Run scope/快照固定、不自动重跑。实际Java/MySQL/AppWorker/SQLite/DeepAgent模拟4次零工具、旧Group兼容、26表零FK与UI/类型/契约均过，详见reviews/R01-A9-acceptance.md。新版App92595/Java92534:53883已启动供用户调试、节点未启用、未自动造任务；定时PAUSED，不自动进入真实模型/招乎/网关合并。原启动脚本Ctrl+C/相对路径仍独立WIP，下面旧“等待授权/implementing/旧App运行”为历史。
+
 **2026-10-13 最新出口：R01-A8 accepted，代码f1067cc3。** 团队Group长期记忆首版：Java/MySQL权威存储、当前成员/admin权限、手工来源/发布/修改/停用、独立revision和固定Run快照、在途记忆变更终态失效/不自动重跑、App维护与专家版本显式采用已完成。root独立67JUnit/1884parity0、93App/58service/10IPC/F03全24/类型零/全Appbuild/真实ReactChromium与Java+MySQL+SQLite+DeepAgent fake4tools0旅程、V5升级与空库记忆42/41、目录历史两库、持久重启、旧Partner25全部通过。全部测试资源闭合、原三保留健康，默认Partner未创建，定时PAUSED；原MySQL此前OOM已精确原容器重启保留卷，当前33063。说明local-partner-app.md，详见R01-A8-acceptance。只模拟模型，无自动提炼/跨团队学习/真实招乎/源码/云；此片完成不自动扩大。下方implementing/ready/live为历史，不重放旧测试或派单。
 
 **2026-10-12 最新授权：R01-A8 团队长期记忆第一版实施。** 用户明确“按Astra的建议，开始继续实施”；见tasks/R01-A8.md和reviews/Astra-memory-review.md。仅Group显式记忆/MySQL存储/权限与start快照/在途更新失效/App手工维护与专家版本采用，模拟模型继续；不自动总结或跨团队学习，不恢复定时。root App与原gpt-6.1-sol/high Java不同文件并行，builder/DB首轮子代理独占；新代码尚未验收。A7完成出口保留为历史。

@@ -6,39 +6,40 @@ import type {
   PartnerDevRunView,
   PartnerDevStatus
 } from "../../../../shared/bot/partner-dev"
-import type { GroupMemoryList, GroupMemoryWrite } from "../../../../shared/bot/group-memory"
-import { GroupMemoryPanel, memorySourceLabel } from "./GroupMemoryPanel"
+import type { ExpertMemoryList } from "../../../../shared/bot/expert-memory"
+import { ExpertMemoryPanel } from "./ExpertMemoryPanel"
 
 const ERRORS: Record<string, string> = {
-  FORBIDDEN: "当前身份或授权不允许此操作。",
-  UNAUTHENTICATED: "凭据已失效，请重新导入本地连接文件。",
-  VERSION_CONFLICT: "版本已变化，请刷新后重试。",
-  INPUT_CHANGED:
-    "任务、来源或专家版本已变化，或有结果未知写入。请核对；未知写入须以相同内容重试，不能盲换指令。",
+  FORBIDDEN: "当前身份没有操作权限。",
+  UNAUTHENTICATED: "本地连接凭据已失效，请检查启动配置。",
+  VERSION_CONFLICT: "资料已更新，请刷新后重试。",
+  INPUT_CHANGED: "配置或资料已变化；请核对。若上次写入结果未知，请用原内容重试。",
   OUTCOME_UNKNOWN: "上次执行结果不确定，不会自动重跑。",
-  NODE_OFFLINE: "请先连接本地控制服务。",
-  NOT_CONFIGURED: "请完成连接、工作区与团队配置。",
-  STORAGE_FAILURE: "连接文件须为私有、当前用户拥有的普通文件；请检查启动说明。",
+  NODE_OFFLINE: "本地服务未连接。",
+  NOT_CONFIGURED: "请先创建专家，再启用本机。",
+  STORAGE_FAILURE: "本地私有数据目录或配置不可用，请检查启动说明。",
   STORAGE_UNAVAILABLE: "系统安全存储不可用，未保存明文凭据。",
-  DEPENDENCY_UNAVAILABLE: "本地服务不可用或连接中断，请检查启动状态。",
-  INVALID_PAYLOAD: "参数不符合当前文本开发版约束。",
-  MEMORY_CHANGED: "团队记忆已变化，上次分析失效。请查看结果，是否重新分析由你决定。",
-  PAYLOAD_TOO_LARGE: "记忆超过条数或装配预算，请先整理或停用条目。"
+  DEPENDENCY_UNAVAILABLE: "本地服务暂不可用，请检查启动状态。",
+  INVALID_PAYLOAD: "输入不符合文本测试版约束。",
+  MEMORY_CHANGED: "记忆已变化，此次分析失效。是否重新分析由你决定。",
+  PAYLOAD_TOO_LARGE: "记忆超过上限，请先整理或停用条目。"
 }
 function errorText(error: unknown): string {
   const text = error instanceof Error ? error.message : String(error)
-  const code = Object.keys(ERRORS).find((k) => text.includes(k))
-  return code ? ERRORS[code] : "操作未完成，请检查本地服务与当前权限。"
+  return (
+    ERRORS[Object.keys(ERRORS).find((k) => text.includes(k)) ?? ""] ??
+    "操作未完成，请检查本地服务与权限。"
+  )
 }
 const RUN_LABELS: Record<string, string> = {
-  waiting_node: "等待负责人节点",
+  waiting_node: "等待本机启用",
   queued: "排队中",
-  starting: "已领取",
-  running: "模拟执行中",
-  succeeded: "模拟完成",
-  failed: "失败",
+  starting: "准备分析",
+  running: "模拟分析中",
+  succeeded: "模拟分析完成",
+  failed: "分析未完成",
   cancelled: "已取消",
-  outcome_unknown: "结果未知（不会自动重跑）"
+  outcome_unknown: "结果未知，不会自动重跑"
 }
 
 export function PartnerDevPanel(): React.JSX.Element {
@@ -47,62 +48,77 @@ export function PartnerDevPanel(): React.JSX.Element {
     [error, setError] = useState<string | null>(null)
   const [name, setName] = useState("需求领域专家"),
     [instructions, setInstructions] = useState(
-      "聚焦本产品的业务需求，区分事实与假设，明确范围、澄清问题和验收标准。"
+      "聚焦本产品业务需求，区分事实与假设，明确范围、澄清问题和验收标准。"
     )
-  const [groupId, setGroupId] = useState(""),
-    [mentioned, setMentioned] = useState(true),
-    [text, setText] = useState("新任务：增加按日期查询交易的能力，先梳理权限与边界。")
-  const [useMemory, setUseMemory] = useState(false)
-  const [memories, setMemories] = useState<GroupMemoryList | null>(null)
-  const [memoryDraft, setMemoryDraft] = useState<GroupMemoryWrite | null>(null)
-  const [lastTask, setLastTask] = useState<{ id: string; version: number; text: string } | null>(
-    null
-  )
-  const [taskNumber, setTaskNumber] = useState(""),
-    [runId, setRunId] = useState(""),
-    [run, setRun] = useState<PartnerDevRunView | null>(null),
-    [messages, setMessages] = useState<string[]>([])
+  const [text, setText] = useState("新任务：增加按日期查询交易的能力，先梳理权限与边界。"),
+    [taskNumber, setTaskNumber] = useState(""),
+    [runId, setRunId] = useState("")
+  const [run, setRun] = useState<PartnerDevRunView | null>(null),
+    [messages, setMessages] = useState<string[]>([]),
+    [memories, setMemories] = useState<ExpertMemoryList | null>(null)
   const busyRef = useRef(false),
     selection = useRef({ runId: "", taskNumber: "" }),
-    requestEpoch = useRef(0),
-    currentTeam = useRef<string | null>(null)
+    epoch = useRef(0),
+    currentBot = useRef<string | null>(null)
   useEffect(() => {
     selection.current = { runId, taskNumber }
   }, [runId, taskNumber])
+  const acceptStatus = (current: PartnerDevStatus) => {
+    const key = JSON.stringify([
+      current.url,
+      current.spaceId,
+      current.ownerPrincipalId,
+      current.groupId,
+      current.botId
+    ])
+    if (currentBot.current !== key) {
+      currentBot.current = key
+      setMemories(null)
+      setRun(null)
+      setTaskNumber("")
+      setRunId("")
+      setMessages([])
+      selection.current = { runId: "", taskNumber: "" }
+    }
+    if (!current.connected) {
+      setMemories(null)
+      setRun(null)
+    }
+    setStatus(current)
+  }
   useEffect(() => {
     let alive = true,
       timer: ReturnType<typeof setTimeout> | undefined
     const refresh = async () => {
-      const epoch = requestEpoch.current
-      const currentRequest = () => alive && epoch === requestEpoch.current
+      const request = epoch.current,
+        currentRequest = () => alive && request === epoch.current
       try {
         const current = await window.api.partnerDev.getStatus()
         if (!currentRequest()) return
-        if (currentTeam.current !== current.groupId) {
-          currentTeam.current = current.groupId
+        acceptStatus(current)
+        if (current.connected && current.botId && current.canManageExpertMemory !== false) {
+          try {
+            const list = await window.api.partnerDev.listExpertMemories()
+            if (!currentRequest()) return
+            setMemories(list)
+          } catch (e) {
+            if (!currentRequest()) return
+            setMemories(null)
+            setError(errorText(e))
+            // Losing expert maintenance rights does not revoke a separately
+            // authorized Task result. Never render stale cache, still inspect.
+          }
+        } else {
           setMemories(null)
-          setMemoryDraft(null)
-          setLastTask(null)
-          setRun(null)
-        }
-        setStatus(current)
-        if (current.connected && current.groupId) {
-          const list = await window.api.partnerDev.listMemories()
-          if (!currentRequest()) return
-          setMemories(list)
-        } else if (alive) {
-          setMemories(null)
-          setMemoryDraft(null)
-          setLastTask(null)
         }
         if (!selection.current.taskNumber && current.lastTaskNumber)
           setTaskNumber(current.lastTaskNumber)
         const id = selection.current.runId || current.lastRunId
         if (!selection.current.runId && id) setRunId(id)
         if (current.connected && id) {
-          const inspected = await window.api.partnerDev.inspectRun({ runId: id })
+          const value = await window.api.partnerDev.inspectRun({ runId: id })
           if (currentRequest() && (!selection.current.runId || selection.current.runId === id))
-            setRun(inspected)
+            setRun(value)
         }
       } catch (e) {
         if (currentRequest()) {
@@ -111,10 +127,7 @@ export function PartnerDevPanel(): React.JSX.Element {
           setRun(null)
         }
       } finally {
-        if (alive)
-          timer = setTimeout(() => {
-            void refresh()
-          }, 2000)
+        if (alive) timer = setTimeout(() => void refresh(), 2000)
       }
     }
     void refresh()
@@ -125,261 +138,167 @@ export function PartnerDevPanel(): React.JSX.Element {
   }, [])
   const action = async (fn: () => Promise<unknown>): Promise<void> => {
     if (busyRef.current) return
-    requestEpoch.current++
+    epoch.current++
     busyRef.current = true
     setBusy(true)
     setError(null)
     try {
       await fn()
-      const current = await window.api.partnerDev.getStatus()
-      if (currentTeam.current !== current.groupId) {
-        currentTeam.current = current.groupId
-        setMemories(null)
-        setMemoryDraft(null)
-        setLastTask(null)
-        setRun(null)
-      }
-      setStatus(current)
+      acceptStatus(await window.api.partnerDev.getStatus())
     } catch (e) {
       setError(errorText(e))
+      setMemories(null)
     } finally {
       busyRef.current = false
       setBusy(false)
     }
   }
-  const reply = (value: PartnerDevMessageReply, submitted?: string) => {
-    setMessages((old) => [...old.slice(-19), value.notice])
+  const reply = (value: PartnerDevMessageReply) => {
+    setMessages((old) => [...old.slice(-9), value.notice])
     if (value.taskNumber) {
       setTaskNumber(value.taskNumber)
       setText(`${value.taskNumber}：补充业务规则：仅允许查询本人有权限的交易。`)
     }
-    if (submitted !== undefined)
-      setLastTask(
-        value.taskId && value.taskVersion
-          ? { id: value.taskId, version: value.taskVersion, text: submitted }
-          : null
-      )
     if (value.runId) {
       setRunId(value.runId)
       setRun(null)
     }
   }
-  const connected = !!status?.connected
+  const connected = !!status?.connected,
+    local = status?.connectionMode === "local-default"
   return (
     <div className="flex-1 min-w-0 overflow-y-auto p-6" data-testid="partner-dev-panel">
-      <div className="mx-auto max-w-4xl space-y-5">
+      <div className="mx-auto max-w-3xl space-y-4">
         <header>
-          <h2 className="text-xl font-semibold">DevClaw 伙伴 · 开发联调</h2>
-          <p className="mt-2 text-sm text-muted-foreground">
-            独立专家 / 协作团队 + 负责人本地节点 +
-            假招乎。当前只使用模拟模型，不读取仓库，不调用真实招乎或真实模型。
+          <h2 className="text-xl font-semibold">DevClaw 伙伴</h2>
+          <p className="mt-1 text-sm text-muted-foreground">
+            让领域专家参与需求澄清与分析。当前为本地模拟测试，不读取代码、不调用真实模型或招乎。
           </p>
         </header>
-        <div className="rounded-lg border bg-muted/30 p-3 text-sm" role="status">
-          控制服务：{connected ? "已连接" : "未连接"}　节点：
-          {status?.nodeEnabled ? "已启用" : "未启用"}　模型：模拟返回
-          {status?.activeRunId && <span>　执行：{status.activeRunId}</span>}
-        </div>
         {(error || status?.lastError) && (
           <p
-            className="rounded-md border border-destructive/30 p-3 text-sm text-destructive"
             role="alert"
+            className="rounded-md border border-destructive/30 p-3 text-sm text-destructive"
           >
-            {error ?? ERRORS[status!.lastError!] ?? "节点连接失败，请手动重新连接。"}
+            {error ?? ERRORS[status!.lastError!] ?? "本地状态异常，请检查启动配置。"}
           </p>
         )}
         <section className="space-y-3 rounded-xl border p-4">
-          <h3 className="font-medium">1. 负责人连接与工作区</h3>
-          <p className="text-xs text-muted-foreground">
-            先按本地启动说明生成 connection.json。凭据只由 App 主进程保管；重开 App
-            需手动连接、启用节点。
-          </p>
-          <div className="flex flex-wrap gap-2">
-            <Button
-              disabled={busy}
-              onClick={() => void action(() => window.api.partnerDev.importConnection())}
-            >
-              导入连接文件
-            </Button>
-            <Button
-              variant="outline"
-              disabled={busy || !status?.configured}
-              onClick={() => void action(() => window.api.partnerDev.connect())}
-            >
-              连接服务
-            </Button>
-            <Button
-              variant="outline"
-              disabled={busy || !status?.configured}
-              onClick={() => void action(() => window.api.partnerDev.chooseWorkspace())}
-            >
-              选择工作区
-            </Button>
-            <Button
-              variant="outline"
-              disabled={busy || !connected}
-              onClick={() => void action(() => window.api.partnerDev.disconnect())}
-            >
-              断开
-            </Button>
-          </div>
-          <div className="break-all text-xs text-muted-foreground">
-            服务：{status?.url ?? "未导入"}
-            <br />
-            负责人：{status?.ownerPrincipalId ?? "—"}　业务身份：
-            {status?.businessPrincipalId ?? "—"}　节点：{status?.nodeId ?? "—"}
-            <br />
-            工作区：{status?.workspacePath ?? "未选择（不使用当前聊天目录）"}
-          </div>
-        </section>
-        <section className="space-y-3 rounded-xl border p-4">
-          <h3 className="font-medium">2. 专家、团队与节点授权</h3>
-          {!status?.groupId && (
+          <h3 className="font-medium">我的专家</h3>
+          {!status?.botId ? (
             <>
-              <label className="block text-sm">
-                专家名称
-                <Input
-                  aria-label="专家名称"
-                  value={name}
-                  maxLength={80}
-                  onChange={(e) => setName(e.target.value)}
-                />
-              </label>
-              <label className="block text-sm">
-                专家指令
-                <textarea
-                  aria-label="专家指令"
-                  className="mt-1 w-full rounded-md border bg-background p-2 text-sm"
-                  rows={3}
-                  maxLength={16384}
-                  value={instructions}
-                  onChange={(e) => setInstructions(e.target.value)}
-                />
-              </label>
-              <label className="flex items-center gap-2 text-sm">
-                <input
-                  type="checkbox"
-                  aria-label="新专家使用团队记忆"
-                  checked={useMemory}
-                  onChange={(e) => setUseMemory(e.target.checked)}
-                />
-                允许此专家使用本团队已确认的显式记忆（不自动记住聊天）
-              </label>
+              <Input
+                aria-label="专家名称"
+                value={name}
+                maxLength={80}
+                onChange={(e) => setName(e.target.value)}
+              />
+              <textarea
+                aria-label="专家职责"
+                value={instructions}
+                rows={3}
+                maxLength={16384}
+                onChange={(e) => setInstructions(e.target.value)}
+                className="w-full rounded-md border bg-background p-2 text-sm"
+              />
+              <p className="text-xs text-muted-foreground">
+                支持你手工保存的长期记忆，不自动学习聊天。创建后不会自动执行任务，数据目录自动准备。
+              </p>
               <Button
-                disabled={busy || !connected}
+                disabled={busy || !connected || !name.trim() || !instructions.trim()}
                 onClick={() =>
-                  void action(() =>
-                    window.api.partnerDev.createTeam({ name, instructions, useMemory })
-                  )
+                  void action(() => window.api.partnerDev.createExpert({ name, instructions }))
                 }
               >
-                创建单专家团队
+                创建专家
               </Button>
-              <div className="flex gap-2">
-                <Input
-                  aria-label="已有团队 ID"
-                  placeholder="或填入已有 Group ID（单专家团队）"
-                  value={groupId}
-                  onChange={(e) => setGroupId(e.target.value)}
+            </>
+          ) : (
+            <>
+              <p className="text-sm font-medium">{status.expertName ?? "当前领域专家"}</p>
+              <details>
+                <summary className="cursor-pointer text-sm">长期记忆</summary>
+                <ExpertMemoryPanel
+                  connected={connected}
+                  botId={status.botId}
+                  busy={busy}
+                  memories={memories}
+                  canManage={status.canManageExpertMemory}
+                  onChange={setMemories}
+                  action={action}
                 />
-                <Button
-                  variant="outline"
-                  disabled={busy || !connected || !groupId}
-                  onClick={() => void action(() => window.api.partnerDev.bindTeam({ groupId }))}
-                >
-                  绑定已有团队
-                </Button>
-              </div>
+              </details>
             </>
           )}
-          {status?.groupId && (
-            <p className="break-all text-xs text-muted-foreground">
-              Group：{status.groupId}　专家：{status.botId}
+        </section>
+        <section
+          className="flex flex-wrap items-center justify-between gap-3 rounded-xl border p-4"
+          aria-label="本地状态"
+        >
+          <div role="status" className="text-sm">
+            本机：
+            {!connected
+              ? "未连接"
+              : status?.activeRunId
+                ? "执行中"
+                : status?.nodeEnabled
+                  ? "已启用"
+                  : "未启用"}
+            <span className="ml-3 text-muted-foreground">模拟模型</span>
+            <p className="mt-1 text-xs text-muted-foreground">
+              专家数据目录自动准备，无需选择代码仓库。
             </p>
-          )}
-          <div className="flex flex-wrap gap-2">
-            <Button
-              disabled={busy || !connected || !status?.groupId || !status.workspacePath}
-              onClick={() => void action(() => window.api.partnerDev.authorizeTeam())}
-            >
-              授权团队使用此节点（24小时）
-            </Button>
+          </div>
+          {status?.nodeEnabled ? (
             <Button
               variant="outline"
-              disabled={busy || !connected || !status?.workspacePath || status.nodeEnabled}
-              onClick={() => void action(() => window.api.partnerDev.enableNode())}
-            >
-              启用本地节点
-            </Button>
-            <Button
-              variant="outline"
-              disabled={busy || !status?.nodeEnabled}
+              disabled={busy}
               onClick={() => void action(() => window.api.partnerDev.stopNode())}
             >
-              停止节点并等待清理
+              停止本机
             </Button>
+          ) : (
             <Button
-              variant="outline"
-              disabled={busy || !connected || !status?.groupId}
-              onClick={() => void action(() => window.api.partnerDev.revokeTeam())}
+              disabled={busy || !connected || !status?.botId || !status.expertMemoryAdopted}
+              onClick={() => {
+                if (
+                  window.confirm(
+                    `允许“${status?.expertName ?? "当前专家"}”使用本机进行模拟文本分析（授权24小时）？\n数据目录：${status?.expertDataPath ?? "应用私有目录"}\n不读取代码，不调用真实模型。`
+                  )
+                )
+                  void action(() => window.api.partnerDev.startExpert())
+              }}
             >
-              撤销团队授权
-            </Button>
-          </div>
-        </section>
-        <section className="space-y-3 rounded-xl border p-4">
-          <h3 className="font-medium">3. 假招乎群 · 业务人员入口</h3>
-          <p className="text-xs text-muted-foreground">
-            新任务只创建任务；TASK-编号用于明确澄清。点击分析需求才入队。本页模拟业务身份，没有回复串，也不默认读取整群消息。
-          </p>
-          <label className="flex items-center gap-2 text-sm">
-            <input
-              type="checkbox"
-              checked={mentioned}
-              onChange={(e) => setMentioned(e.target.checked)}
-            />
-            结构化 @DevClaw伙伴
-          </label>
-          <textarea
-            aria-label="假招乎消息"
-            className="w-full rounded-md border bg-background p-2 text-sm"
-            rows={3}
-            value={text}
-            maxLength={16384}
-            onChange={(e) => setText(e.target.value)}
-          />
-          <Button
-            disabled={busy || !connected || !status?.groupId || !text.trim()}
-            onClick={() =>
-              void action(async () =>
-                reply(await window.api.partnerDev.sendMessage({ mentioned, text }), text)
-              )
-            }
-          >
-            发送消息
-          </Button>
-          {lastTask && (
-            <Button
-              variant="outline"
-              disabled={busy || !connected || !memories?.canManage}
-              onClick={() =>
-                setMemoryDraft({
-                  text: lastTask.text.slice(0, 512),
-                  source: { kind: "task", taskId: lastTask.id, taskVersion: lastTask.version }
-                })
-              }
-            >
-              从本次澄清准备团队记忆（预填前512字，须编辑确认）
+              启用本机
             </Button>
           )}
-          <div className="flex gap-2">
-            <Input
-              aria-label="任务编号"
-              placeholder="TASK-1"
-              value={taskNumber}
-              onChange={(e) => setTaskNumber(e.target.value)}
-            />
+        </section>
+        <section className="space-y-3 rounded-xl border p-4">
+          <h3 className="font-medium">任务</h3>
+          <p className="text-xs text-muted-foreground">
+            模拟 @专家：用“新任务：内容”开始，按任务编号继续澄清。发送仅保存，点击“分析需求”才执行。
+          </p>
+          <textarea
+            aria-label="任务消息"
+            value={text}
+            rows={3}
+            maxLength={16384}
+            onChange={(e) => setText(e.target.value)}
+            className="w-full rounded-md border bg-background p-2 text-sm"
+          />
+          <div className="flex flex-wrap items-center gap-2">
             <Button
+              disabled={busy || !connected || !status?.botId || !text.trim()}
+              onClick={() =>
+                void action(async () =>
+                  reply(await window.api.partnerDev.sendMessage({ mentioned: true, text }))
+                )
+              }
+            >
+              发送给专家
+            </Button>
+            <Button
+              variant="outline"
               disabled={busy || !connected || !taskNumber}
               onClick={() =>
                 void action(async () =>
@@ -389,6 +308,7 @@ export function PartnerDevPanel(): React.JSX.Element {
             >
               分析需求
             </Button>
+            {taskNumber && <span className="text-xs text-muted-foreground">{taskNumber}</span>}
           </div>
           <div className="space-y-1 text-sm" aria-live="polite">
             {messages.map((message, i) => (
@@ -397,19 +317,8 @@ export function PartnerDevPanel(): React.JSX.Element {
               </p>
             ))}
           </div>
-          <label className="block text-xs text-muted-foreground">
-            执行编号（可查询持久结果）
-            <Input
-              aria-label="执行编号"
-              value={runId}
-              onChange={(e) => {
-                setRunId(e.target.value)
-                setRun(null)
-              }}
-            />
-          </label>
           {run && (
-            <div className="space-y-2 rounded-lg border p-3">
+            <div className="space-y-2 rounded-md border p-3">
               <p className="text-sm">{RUN_LABELS[run.status] ?? run.status}</p>
               {run.result && (
                 <pre
@@ -419,41 +328,19 @@ export function PartnerDevPanel(): React.JSX.Element {
                   {run.result.text}
                 </pre>
               )}
-              {run.result?.text === "MEMORY_CHANGED" && (
-                <p className="text-sm text-destructive">
-                  记忆变更使此次分析失效；未发布旧结果，也不会自动重跑。可明确点击分析需求重新执行。
-                </p>
-              )}
-              {run.result?.outcome === "succeeded" && (
-                <Button
-                  variant="outline"
-                  disabled={busy || !memories?.canManage}
-                  onClick={() =>
-                    setMemoryDraft({
-                      text: run.result!.text.slice(0, 512),
-                      source: { kind: "result", runId: run.runId }
-                    })
-                  }
-                >
-                  从结果准备团队记忆（模拟内容须核实）
-                </Button>
-              )}
               {run.memorySnapshot !== undefined && (
-                <div
-                  className="space-y-1 border-t pt-2 text-xs text-muted-foreground"
-                  data-testid="run-memory-snapshot"
-                >
-                  <p>
+                <details data-testid="run-memory-snapshot">
+                  <summary className="cursor-pointer text-xs text-muted-foreground">
                     {run.memorySnapshot === null
-                      ? "此次专家未启用记忆"
-                      : `此次使用记忆修订 ${run.memorySnapshot.revision} · ${run.memorySnapshot.memories.length}条`}
-                  </p>
+                      ? "此次未使用长期记忆"
+                      : `此次使用 ${run.memorySnapshot.memories.length} 条记忆`}
+                  </summary>
                   {run.memorySnapshot?.memories.map((m) => (
-                    <p key={m.id} className="break-all">
-                      v{m.version} · {m.text} · {memorySourceLabel(m.source)}
+                    <p key={m.id} className="break-all text-xs">
+                      v{m.version} · {m.text}
                     </p>
                   ))}
-                </div>
+                </details>
               )}
               {["queued", "waiting_node"].includes(run.status) && (
                 <Button
@@ -470,21 +357,78 @@ export function PartnerDevPanel(): React.JSX.Element {
                     )
                   }
                 >
-                  取消未领取任务
+                  取消等待中的分析
                 </Button>
               )}
             </div>
           )}
         </section>
-        <GroupMemoryPanel
-          connected={connected}
-          groupId={status?.groupId ?? null}
-          busy={busy}
-          memories={memories}
-          draft={memoryDraft}
-          onChange={setMemories}
-          action={action}
-        />
+        <details className="space-y-3 rounded-xl border p-4" data-testid="partner-advanced">
+          <summary className="cursor-pointer text-sm text-muted-foreground">高级设置与调试</summary>
+          <div className="space-y-3 pt-3">
+            {!local && (
+              <div className="flex gap-2">
+                <Button
+                  disabled={busy}
+                  onClick={() => void action(() => window.api.partnerDev.importConnection())}
+                >
+                  导入连接文件
+                </Button>
+                <Button
+                  disabled={busy || !status?.configured}
+                  onClick={() => void action(() => window.api.partnerDev.connect())}
+                >
+                  连接服务
+                </Button>
+                <Button
+                  variant="outline"
+                  disabled={busy || !connected}
+                  onClick={() => void action(() => window.api.partnerDev.disconnect())}
+                >
+                  断开
+                </Button>
+              </div>
+            )}
+            <p className="break-all text-xs text-muted-foreground">
+              服务：{status?.url ?? "初始化中"}
+              <br />
+              专家数据目录：{status?.expertDataPath ?? "创建专家后自动生成"}
+              <br />
+              运行目录：{status?.workspacePath ?? "自动准备"}
+              <br />
+              节点：{status?.nodeId ?? "—"} · 专家：{status?.botId ?? "—"}
+            </p>
+            <Button
+              variant="outline"
+              disabled={busy || !status?.configured}
+              onClick={() => void action(() => window.api.partnerDev.chooseWorkspace())}
+            >
+              更换运行目录（不授予源码权限）
+            </Button>
+            <Button
+              variant="outline"
+              disabled={busy || !connected || !status?.groupId}
+              onClick={() => void action(() => window.api.partnerDev.revokeLocalAuthorization())}
+            >
+              撤销本机授权
+            </Button>
+            <Input
+              aria-label="任务编号"
+              placeholder="查询已有 TASK-编号"
+              value={taskNumber}
+              onChange={(e) => setTaskNumber(e.target.value)}
+            />
+            <Input
+              aria-label="执行编号"
+              placeholder="查询已有执行编号"
+              value={runId}
+              onChange={(e) => {
+                setRunId(e.target.value)
+                setRun(null)
+              }}
+            />
+          </div>
+        </details>
       </div>
     </div>
   )

@@ -4,6 +4,7 @@ import addFormats from "ajv-formats"
 import schemas from "../../../../contracts/bot/v1/schemas.json"
 import states from "../../../../contracts/bot/v1/state-transitions.json"
 import type {
+  Bot,
   BotResult,
   CreateBotVersionRequest,
   CreateBotRequest,
@@ -26,17 +27,25 @@ import type {
   GroupMemoryList,
   GroupMemoryWrite,
   GroupMemoryUpdate,
-  GroupMemoryReceipt,
-  GroupMemorySnapshot
+  GroupMemoryReceipt
 } from "../../../shared/bot/group-memory"
 import {
   memorySource,
   memoryText,
   memoryVersion,
   parseMemoryList,
-  parseMemoryReceipt,
-  parseMemorySnapshot
+  parseMemoryReceipt
 } from "./group-memory-validation"
+import type {
+  ExpertMemoryList,
+  ExpertMemoryReceipt,
+  ExpertMemoryUpdate
+} from "../../../shared/bot/expert-memory"
+import {
+  parseExpertMemoryList,
+  parseExpertMemoryReceipt,
+  parseRunMemorySnapshot
+} from "./expert-memory-validation"
 
 export interface PartnerConnectionDescriptor {
   version: 1
@@ -305,10 +314,12 @@ export class PartnerLocalClient {
         group: partnerSchema("Group", raw.group),
         task: partnerSchema("Task", raw.task),
         messages: raw.messages.map((m) => partnerSchema<TaskMessageResult>("TaskMessageResult", m)),
-        memorySnapshot: parseMemorySnapshot(
+        memorySnapshot: parseRunMemorySnapshot(
           raw.memorySnapshot,
           this.descriptor.spaceId,
-          partnerId((raw.group as Group).id)
+          partnerId((raw.group as Group).id),
+          partnerId((raw.bot as Bot).id),
+          (v.run as PartnerRequirementRun).memoryScope
         )
       }
     }
@@ -480,6 +491,98 @@ export class PartnerLocalClient {
       groupId
     )
   }
+  async listExpertMemories(botId: string): Promise<ExpertMemoryList> {
+    return parseExpertMemoryList(
+      await this.control("owner", "listExpertMemories", { botId: partnerId(botId) }),
+      this.descriptor.spaceId,
+      botId
+    )
+  }
+  async createExpertMemory(
+    botId: string,
+    text: string,
+    commandId: string
+  ): Promise<ExpertMemoryReceipt> {
+    return parseExpertMemoryReceipt(
+      await this.control("owner", "createExpertMemory", {
+        botId: partnerId(botId),
+        text: memoryText(text),
+        commandId: partnerId(commandId)
+      }),
+      this.descriptor.spaceId,
+      botId
+    )
+  }
+  async updateExpertMemory(
+    botId: string,
+    input: ExpertMemoryUpdate,
+    commandId: string
+  ): Promise<ExpertMemoryReceipt> {
+    if (!["active", "disabled"].includes(input.status))
+      throw new PartnerLocalFault("INVALID_PAYLOAD")
+    return parseExpertMemoryReceipt(
+      await this.control("owner", "updateExpertMemory", {
+        botId: partnerId(botId),
+        memoryId: partnerId(input.memoryId),
+        expectedVersion: memoryVersion(input.expectedVersion),
+        text: memoryText(input.text),
+        status: input.status,
+        commandId: partnerId(commandId)
+      }),
+      this.descriptor.spaceId,
+      botId
+    )
+  }
+  async disableExpertMemory(
+    botId: string,
+    memoryId: string,
+    expectedVersion: number,
+    commandId: string
+  ): Promise<ExpertMemoryReceipt> {
+    return parseExpertMemoryReceipt(
+      await this.control("owner", "disableExpertMemory", {
+        botId: partnerId(botId),
+        memoryId: partnerId(memoryId),
+        expectedVersion: memoryVersion(expectedVersion),
+        commandId: partnerId(commandId)
+      }),
+      this.descriptor.spaceId,
+      botId
+    )
+  }
+  async expertMemoryAdoption(
+    groupId: string,
+    botId: string
+  ): Promise<{ adopted: boolean; botName: string; canManage: boolean }> {
+    const v = partnerObject(
+      await this.control("owner", "expertMemoryAdoption", {
+        groupId: partnerId(groupId),
+        botId: partnerId(botId)
+      }),
+      ["adopted", "botName", "canManage"]
+    )
+    if (
+      typeof v.adopted !== "boolean" ||
+      typeof v.canManage !== "boolean" ||
+      typeof v.botName !== "string" ||
+      !v.botName.trim() ||
+      v.botName.length > 512
+    )
+      throw new PartnerLocalFault("INVALID_PAYLOAD")
+    return { adopted: v.adopted, botName: v.botName, canManage: v.canManage }
+  }
+  async activateExpertMemory(group: Group, botId: string, botVersionId: string): Promise<void> {
+    const v = partnerObject(
+      await this.control("owner", "activateExpertMemory", {
+        groupId: partnerId(group.id),
+        botId: partnerId(botId),
+        botVersionId: partnerId(botVersionId),
+        expectedGroupVersion: memoryVersion(group.version)
+      }),
+      ["adopted"]
+    )
+    if (v.adopted !== true) throw new PartnerLocalFault("INVALID_PAYLOAD")
+  }
   async createGroupMemory(
     groupId: string,
     input: GroupMemoryWrite,
@@ -532,12 +635,23 @@ export class PartnerLocalClient {
       groupId
     )
   }
-  async inspectMemorySnapshot(runId: string, groupId: string): Promise<GroupMemorySnapshot | null> {
+  async inspectMemorySnapshot(
+    runId: string,
+    groupId: string,
+    botId?: string,
+    scope: "group" | "bot" = "group"
+  ): Promise<PartnerRequirementInput["memorySnapshot"]> {
     const v = partnerObject(
       await this.control("business", "inspectMemorySnapshot", { runId: partnerId(runId) }),
       ["memorySnapshot"]
     )
-    return parseMemorySnapshot(v.memorySnapshot, this.descriptor.spaceId, groupId)
+    return parseRunMemorySnapshot(
+      v.memorySnapshot,
+      this.descriptor.spaceId,
+      groupId,
+      botId ?? "unused",
+      scope
+    )
   }
   async memoryChanged(run: PartnerRequirementRun): Promise<boolean> {
     const v = partnerObject(await this.node("inspect", { runId: partnerId(run.id) }), [
@@ -546,8 +660,7 @@ export class PartnerLocalClient {
     ])
     const r = validatePartnerRun(v.run as PartnerRequirementRun),
       result = this.result(v.result)
-    if (!samePartnerAttempt(r, run))
-      throw new PartnerLocalFault("FORBIDDEN")
+    if (!samePartnerAttempt(r, run)) throw new PartnerLocalFault("FORBIDDEN")
     return (
       r.status === "failed" &&
       result?.runId === run.id &&

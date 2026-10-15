@@ -9,7 +9,10 @@ import type {
   Task
 } from "../../src/shared/bot/contracts.generated"
 import { PartnerDevController } from "../../src/main/services/bot/partner-dev-controller"
-import { PartnerLocalClient } from "../../src/main/services/bot/partner-local-client"
+import {
+  PartnerLocalClient,
+  PartnerLocalFault
+} from "../../src/main/services/bot/partner-local-client"
 import type { PartnerLocalConfig } from "../../src/main/services/bot/partner-local-config"
 import { descriptor } from "./partner-local-fixture"
 import { inputFixture } from "./requirement-execution-fixture"
@@ -243,5 +246,152 @@ test("storage failure prevents any new external write", async () => {
     assert.equal(f.client.writes.length, count)
   } finally {
     await f.controller.disconnect()
+  }
+})
+
+test("local defaults connect once on page load without enabling a node or granting a team", async () => {
+  let saved: PartnerLocalConfig | null = null,
+    saves = 0,
+    identities = 0,
+    reads = 0,
+    executors = 0
+  const client = new Client()
+  client.verifyIdentity = async () => {
+    identities++
+  }
+  const controller = new PartnerDevController({
+    store: {
+      async load() {
+        return saved
+      },
+      async save(c) {
+        saves++
+        saved = structuredClone(c)
+      }
+    },
+    defaultDescriptor: async () => {
+      reads++
+      return descriptor()
+    },
+    clientFactory: () => client,
+    createExecutor: () => {
+      executors++
+      throw Error("must not run")
+    }
+  })
+  try {
+    const [status, duplicate] = await Promise.all([controller.getStatus(), controller.getStatus()])
+    assert.equal(status.connectionMode, "local-default")
+    assert.equal(status.connected, true)
+    assert.equal(status.configured, true)
+    assert.equal(status.nodeEnabled, false)
+    assert.equal(status.workspacePath, null)
+    assert.equal(status.groupId, null)
+    assert.deepEqual(status, duplicate)
+    assert.deepEqual([saves, identities, reads, executors, client.writes.length], [1, 1, 1, 0, 0])
+    for (const token of [
+      descriptor().ownerToken,
+      descriptor().businessToken,
+      descriptor().nodeToken
+    ])
+      assert(!JSON.stringify(status).includes(token))
+    await controller.shutdown()
+    assert.equal((await controller.getStatus()).connected, false)
+    assert.equal(identities, 1) // Shutdown/disconnect is not silently undone.
+  } finally {
+    await controller.shutdown()
+  }
+})
+test("default connection replaces a changed local port but retains workspace, team and receipts", async () => {
+  const f = await setup()
+  await f.controller.disconnect()
+  const before = structuredClone(f.stored()!)
+  const controller = new PartnerDevController({
+    ...f.deps,
+    defaultDescriptor: async () => descriptor(32124)
+  })
+  try {
+    const status = await controller.getStatus()
+    assert.equal(status.connected, true)
+    assert.equal(status.url, "http://127.0.0.1:32124")
+    assert.equal(status.nodeEnabled, false)
+    assert.deepEqual(f.stored(), { ...before, descriptor: descriptor(32124) })
+    assert.equal(f.executors(), 0)
+    assert.equal(f.client.writes.length, 2)
+  } finally {
+    await controller.shutdown()
+  }
+})
+test("failed default authentication retries status without repeated saves or automatic work", async () => {
+  let saved: PartnerLocalConfig | null = null,
+    attempts = 0,
+    saves = 0
+  const client = new Client()
+  client.verifyIdentity = async () => {
+    if (++attempts === 1) throw new PartnerLocalFault("UNAUTHENTICATED")
+  }
+  const controller = new PartnerDevController({
+    store: {
+      async load() {
+        return saved
+      },
+      async save(c) {
+        saves++
+        saved = structuredClone(c)
+      }
+    },
+    defaultDescriptor: async () => descriptor(),
+    clientFactory: () => client,
+    createExecutor: () => {
+      throw Error("must not run")
+    }
+  })
+  try {
+    const failed = await controller.getStatus()
+    assert.equal(failed.connectionMode, "local-default")
+    assert.equal(failed.connected, false)
+    assert.equal(failed.lastError, "UNAUTHENTICATED")
+    const ready = await controller.getStatus()
+    assert.equal(ready.connected, true)
+    assert.equal(ready.nodeEnabled, false)
+    assert.equal(ready.lastError, null)
+    assert.deepEqual([saves, attempts, client.writes.length], [1, 2, 0])
+  } finally {
+    await controller.shutdown()
+  }
+})
+test("invalid or unreadable defaults never fall back to a cached identity or a remote address", async () => {
+  for (const load of [
+    async () => ({ ...descriptor(), url: "https://remote.example" }),
+    async () => {
+      throw new PartnerLocalFault("STORAGE_FAILURE")
+    }
+  ]) {
+    let clients = 0,
+      saves = 0
+    const controller = new PartnerDevController({
+      store: {
+        async load() {
+          return null
+        },
+        async save() {
+          saves++
+        }
+      },
+      defaultDescriptor: load,
+      clientFactory: () => {
+        clients++
+        return new Client()
+      },
+      createExecutor: () => {
+        throw Error("must not run")
+      }
+    })
+    const status = await controller.getStatus()
+    assert.equal(status.connected, false)
+    assert.equal(status.nodeEnabled, false)
+    assert.equal(status.connectionMode, "local-default")
+    assert(["INVALID_PAYLOAD", "STORAGE_FAILURE"].includes(status.lastError!))
+    assert.deepEqual([clients, saves], [0, 0])
   }
 })

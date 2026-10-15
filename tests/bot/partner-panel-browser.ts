@@ -6,11 +6,7 @@ import { createRequire } from "node:module"
 import { build } from "esbuild"
 import { _electron } from "playwright"
 import type { PartnerDevStatus, PartnerDevRunView } from "../../src/shared/bot/partner-dev"
-import type {
-  GroupMemory,
-  GroupMemorySource,
-  GroupMemoryList
-} from "../../src/shared/bot/group-memory"
+import type { ExpertMemoryList } from "../../src/shared/bot/expert-memory"
 
 /** Actual React component in Chromium, deterministic fake IPC for UI only.
  * Backend/actual graph acceptance is the separate partner-http-journey. */
@@ -58,16 +54,20 @@ async function main() {
     page.on("pageerror", (e) => errors.push(e.message))
     await page.waitForURL(/index\.html$/)
     const status: PartnerDevStatus = {
-      configured: false,
-      connected: false,
+      connectionMode: "local-default",
+      configured: true,
+      connected: true,
       nodeEnabled: false,
       model: "simulated",
-      url: null,
-      spaceId: null,
-      nodeId: null,
-      ownerPrincipalId: null,
-      businessPrincipalId: null,
+      url: "http://127.0.0.1:32123",
+      spaceId: "A",
+      nodeId: "node",
+      ownerPrincipalId: "owner",
+      businessPrincipalId: "business",
       workspacePath: null,
+      expertDataPath: null,
+      expertName: null,
+      expertMemoryAdopted: false,
       groupId: null,
       botId: null,
       lastError: null,
@@ -75,235 +75,205 @@ async function main() {
       lastRunId: null,
       lastTaskNumber: null
     }
-    let result: PartnerDevRunView = {
+    const memories: ExpertMemoryList = {
+      botId: "expert-ui",
+      revision: 0,
+      memories: [],
+      canManage: true
+    }
+    let denyMemory = false
+    let analyses = 0,
+      enables = 0,
+      revocations = 0,
+      prompts = 0,
+      result: PartnerDevRunView = {
         runId: "run-ui",
         status: "waiting_node",
         version: 1,
         result: null
-      },
-      sends = 0,
-      analyses = 0,
-      memoryPublishes = 0,
-      memoryUpdates = 0
-    const memoryList: GroupMemoryList = {
-      revision: 0,
-      memories: [],
-      canManage: true,
-      botPolicies: [{ botId: "expert-ui", botVersionId: "expert-ui-v1", memoryPolicy: "disabled" }]
-    }
+      }
     await page.exposeFunction(
       "partnerFixtureCall",
-      async (
-        method: string,
-        value?: {
-          mentioned?: boolean
-          text?: string
-          useMemory?: boolean
-          source?: GroupMemorySource
-          memoryId?: string
-          expectedVersion?: number
-          status?: "active" | "disabled"
-        }
-      ) => {
-        if (method === "getStatus") return structuredClone(status)
-        if (method === "importConnection")
-          Object.assign(status, {
-            configured: true,
-            url: "http://127.0.0.1:32123",
-            spaceId: "A",
-            nodeId: "node",
-            ownerPrincipalId: "owner",
-            businessPrincipalId: "business"
-          })
-        if (method === "chooseWorkspace") status.workspacePath = "/explicit-owner-workspace"
-        if (method === "connect") status.connected = true
-        if (method === "disconnect") {
-          status.connected = false
-          status.nodeEnabled = false
-        }
-        if (method === "createTeam") {
-          assert.equal(value?.useMemory, false)
-          Object.assign(status, { groupId: "group-ui", botId: "expert-ui" })
-        }
-        if (method === "listMemories") return structuredClone(memoryList)
-        if (method === "enableTeamMemory") {
-          memoryList.botPolicies[0].memoryPolicy = "explicit_only"
-          memoryList.botPolicies[0].botVersionId = "expert-ui-v2"
-          status.nodeEnabled = false
-        }
-        if (method === "createMemory") {
-          memoryPublishes++
-          assert.equal(value?.source?.kind, "task")
-          assert.deepEqual(value?.source, { kind: "task", taskId: "task-ui", taskVersion: 2 })
-          const memory: GroupMemory = {
-            id: "memory-ui",
-            spaceId: "A",
-            groupId: "group-ui",
-            version: 1,
-            text: value!.text!,
-            status: "active",
-            source: value!.source!,
-            createdBy: "owner",
-            updatedBy: "owner",
-            createdAt: new Date().toISOString(),
-            updatedAt: new Date().toISOString()
-          }
-          memoryList.memories = [memory]
-          memoryList.revision++
-          return structuredClone(memoryList)
-        }
-        if (method === "updateMemory") {
-          memoryUpdates++
-          assert.equal(value?.expectedVersion, 1)
-          Object.assign(memoryList.memories[0], {
-            text: value!.text,
-            version: 2,
-            status: value!.status
-          })
-          memoryList.revision++
-          return structuredClone(memoryList)
-        }
-        if (method === "disableMemory") {
-          assert.equal(value?.expectedVersion, 2)
-          Object.assign(memoryList.memories[0], { status: "disabled", version: 3 })
-          memoryList.revision++
-          return structuredClone(memoryList)
-        }
-        if (method === "sendMessage") {
-          sends++
-          if (!value?.mentioned)
-            return { kind: "ignored", notice: "没有结构化 @，伙伴未读取或保存这条群消息。" }
-          if (value.text?.startsWith("新任务")) {
-            status.lastTaskNumber = "TASK-1"
-            return {
-              kind: "task",
-              taskId: "task-ui",
-              taskNumber: "TASK-1",
-              taskVersion: 1,
-              notice: "任务已创建"
-            }
-          }
-          return {
-            kind: "task",
-            taskId: "task-ui",
-            taskNumber: "TASK-1",
-            taskVersion: 2,
-            notice: "澄清已保存"
-          }
-        }
-        if (method === "analyzeTask") {
-          analyses++
-          status.lastRunId = "run-ui"
-          return {
-            kind: "task",
-            taskNumber: "TASK-1",
-            runId: "run-ui",
-            runStatus: "waiting_node",
-            notice: "任务已排队，等待负责人启用节点"
-          }
-        }
-        if (method === "enableNode") {
-          status.nodeEnabled = true
-          result = {
-            runId: "run-ui",
-            status: "succeeded",
-            version: 3,
-            result: {
-              outcome: "succeeded",
-              text: "[模拟模型返回｜非真实分析]\nTASK-1 需求说明书草稿：权限与范围待确认。",
-              settledAt: new Date().toISOString()
-            },
-            memorySnapshot: {
-              revision: memoryList.revision,
-              memories: structuredClone(memoryList.memories.filter((m) => m.status === "active"))
-            }
-          }
-        }
-        if (method === "stopNode" || method === "revokeTeam") status.nodeEnabled = false
-        if (method === "inspectRun") return structuredClone(result)
-        return structuredClone(status)
-      }
-    )
-    await page.evaluate(() => {
-      const target = window as unknown as {
-        api: { partnerDev: Record<string, (value?: unknown) => Promise<unknown>> }
-        partnerFixtureCall: (name: string, value?: unknown) => Promise<unknown>
-        __name?: (v: unknown) => unknown
-      }
-      target.__name = (v) => v
-      target.api = {
-        partnerDev: Object.fromEntries(
-          [
-            "getStatus",
-            "importConnection",
-            "chooseWorkspace",
-            "connect",
-            "disconnect",
+      async (method: string, value?: Record<string, unknown>) => {
+        assert(
+          ![
             "createTeam",
             "bindTeam",
             "authorizeTeam",
             "revokeTeam",
             "enableNode",
-            "stopNode",
-            "sendMessage",
-            "analyzeTask",
-            "inspectRun",
-            "cancelPending",
             "listMemories",
-            "enableTeamMemory",
             "createMemory",
             "updateMemory",
-            "disableMemory"
-          ].map((name) => [name, (value?: unknown) => target.partnerFixtureCall(name, value)])
+            "disableMemory",
+            "enableTeamMemory",
+            "adoptExpertMemory"
+          ].includes(method),
+          "removed renderer operation: " + method
         )
+        if (method === "getStatus") return structuredClone(status)
+        if (method === "createExpert")
+          Object.assign(status, {
+            botId: "expert-ui",
+            groupId: "internal-only",
+            expertName: value!.name,
+            expertMemoryAdopted: true,
+            expertDataPath: "/private/experts/stable-id",
+            workspacePath: "/private/experts/stable-id/runtime"
+          })
+        if (method === "listExpertMemories") {
+          if (denyMemory) throw Error("FORBIDDEN")
+          return structuredClone(memories)
+        }
+        if (method === "createExpertMemory") {
+          memories.revision++
+          memories.memories.push({
+            id: "memory-ui",
+            spaceId: "A",
+            botId: "expert-ui",
+            version: 1,
+            text: String(value!.text),
+            status: "active",
+            source: { kind: "manual" },
+            createdBy: "owner",
+            updatedBy: "owner",
+            createdAt: "2026-10-15T01:00:00Z",
+            updatedAt: "2026-10-15T01:00:00Z"
+          })
+          return structuredClone(memories)
+        }
+        if (method === "updateExpertMemory" || method === "disableExpertMemory") {
+          assert.equal(value!.expectedVersion, memories.memories[0].version)
+          memories.revision++
+          memories.memories[0].version++
+          if (method === "disableExpertMemory") memories.memories[0].status = "disabled"
+          else Object.assign(memories.memories[0], { text: value!.text, status: value!.status })
+          return structuredClone(memories)
+        }
+        if (method === "startExpert") {
+          enables++
+          status.nodeEnabled = true
+        }
+        if (method === "stopNode") status.nodeEnabled = false
+        if (method === "revokeLocalAuthorization") {
+          revocations++
+          status.nodeEnabled = false
+        }
+        if (method === "disconnect") {
+          status.connected = false
+          status.nodeEnabled = false
+        }
+        if (method === "connect") status.connected = true
+        if (method === "sendMessage") {
+          assert.equal(value!.mentioned, true)
+          return {
+            kind: "task",
+            notice: "任务已保存",
+            taskId: "task-ui",
+            taskNumber: "TASK-1",
+            taskVersion: 1
+          }
+        }
+        if (method === "analyzeTask") {
+          analyses++
+          return { kind: "task", notice: "等待模拟结果", taskNumber: "TASK-1", runId: "run-ui" }
+        }
+        if (method === "inspectRun") return structuredClone(result)
+        return structuredClone(status)
       }
+    )
+    await page.addScriptTag({
+      content:
+        "window.api={partnerDev:new Proxy({}, {get:(_t,key)=>(value)=>window.partnerFixtureCall(key,value)})}"
     })
     await page.addScriptTag({ content: bundle.outputFiles[0].text })
-    assert.ok(await page.getByText("DevClaw 伙伴 · 开发联调", { exact: true }).isVisible())
-    await page.getByRole("button", { name: "导入连接文件", exact: true }).click()
-    await page.getByRole("button", { name: "连接服务", exact: true }).click()
-    await page.getByRole("button", { name: "选择工作区", exact: true }).click()
-    await page.getByRole("button", { name: "创建单专家团队", exact: true }).click()
-    await page.getByRole("button", { name: "授权团队使用此节点（24小时）", exact: true }).click()
-    await page.getByRole("button", { name: "发送消息", exact: true }).click()
+    await page.getByRole("button", { name: "创建专家", exact: true }).waitFor()
+    assert.equal(await page.getByRole("button", { name: "连接服务", exact: true }).count(), 0)
+    assert.equal(await page.getByTestId("partner-advanced").getAttribute("open"), null)
+    const assertNoGroupSettings = async () => {
+      // textContent also covers collapsed/hidden content, not just visible labels.
+      assert(!/Group|团队|旧版|改用专家记忆/.test((await page.locator("body").textContent()) ?? ""))
+      assert.equal(await page.getByLabel("已有内部 Group ID").count(), 0)
+    }
+    await assertNoGroupSettings()
+    await page.getByText("高级设置与调试", { exact: true }).click()
+    await assertNoGroupSettings()
+    await page.getByText("高级设置与调试", { exact: true }).click()
+    await page.getByRole("button", { name: "创建专家", exact: true }).click()
+    await page.getByText("长期记忆", { exact: true }).waitFor()
+    assert.equal(status.workspacePath, "/private/experts/stable-id/runtime")
+    assert.equal(enables, 0)
     assert.equal(analyses, 0)
-    await page.getByRole("button", { name: "发送消息", exact: true }).click()
-    assert.equal(sends, 2)
-    await page.getByRole("button", { name: "发布并采用允许记忆的新专家版本", exact: true }).click()
-    await page.getByText("当前专家：允许显式记忆", { exact: true }).waitFor()
-    await page
-      .getByRole("button", {
-        name: "从本次澄清准备团队记忆（预填前512字，须编辑确认）",
-        exact: true
-      })
-      .click()
-    await page.getByLabel("团队记忆正文").fill("业务日统一采用交易系统日切日")
-    assert.equal(memoryPublishes, 0)
-    await page.getByRole("button", { name: "确认发布到本团队", exact: true }).click()
-    await page.getByTestId("group-memory-entry").waitFor()
-    assert.equal(memoryPublishes, 1)
-    await page.getByRole("button", { name: "编辑", exact: true }).click()
-    await page.getByLabel("团队记忆正文").fill("交易系统采用T+1数据")
-    await page.getByRole("button", { name: "确认修改", exact: true }).click()
-    assert.equal(memoryUpdates, 1)
+    await page.getByText("高级设置与调试", { exact: true }).click()
+    await assertNoGroupSettings()
+    await page.getByText("高级设置与调试", { exact: true }).click()
+    await page.getByText("长期记忆", { exact: true }).click()
+    await page.getByLabel("专家记忆正文").fill("业务日按交易日历计算")
+    await page.getByRole("button", { name: "保存到专家记忆", exact: true }).click()
+    await page.getByTestId("expert-memory-entry").waitFor()
+    await page.getByLabel("检索专家记忆").fill("无匹配")
+    assert.equal(await page.getByTestId("expert-memory-entry").count(), 0)
+    await page.getByLabel("检索专家记忆").fill("交易日历")
+    await page.getByTestId("expert-memory-entry").waitFor()
+    page.once("dialog", async (dialog) => {
+      prompts++
+      await dialog.dismiss()
+    })
+    await page.getByRole("button", { name: "启用本机", exact: true }).click()
+    assert.equal(enables, 0)
+    page.once("dialog", async (dialog) => {
+      prompts++
+      assert(dialog.message().includes("不读取代码"))
+      await dialog.accept()
+    })
+    await page.getByRole("button", { name: "启用本机", exact: true }).click()
+    await page.getByRole("button", { name: "停止本机", exact: true }).waitFor()
+    assert.equal(enables, 1)
+    assert.equal(prompts, 2)
+    await page.getByRole("button", { name: "发送给专家", exact: true }).click()
+    await page.getByText("任务已保存", { exact: true }).waitFor()
+    assert.equal(analyses, 0)
     await page.getByRole("button", { name: "分析需求", exact: true }).click()
-    await page.getByText("等待负责人节点", { exact: true }).waitFor()
-    assert.equal(analyses, 1)
-    await page.getByRole("button", { name: "启用本地节点", exact: true }).click()
+    result = {
+      runId: "run-ui",
+      status: "succeeded",
+      version: 4,
+      result: { outcome: "succeeded", text: "模拟需求说明书", settledAt: "2026-10-15T02:00:00Z" },
+      memorySnapshot: {
+        scope: "bot",
+        botId: "expert-ui",
+        revision: 1,
+        memories: structuredClone(memories.memories)
+      }
+    }
     await page.getByTestId("partner-result").waitFor()
-    assert.ok((await page.getByTestId("partner-result").innerText()).includes("非真实分析"))
-    await page.getByTestId("run-memory-snapshot").waitFor()
-    assert.match(await page.getByTestId("run-memory-snapshot").innerText(), /修订 2/)
+    assert.equal(analyses, 1)
+    await page.getByText("高级设置与调试", { exact: true }).click()
+    await assertNoGroupSettings()
+    await page.getByRole("button", { name: "编辑", exact: true }).click()
+    await page.getByLabel("专家记忆正文").fill("业务日使用产品交易日历")
+    await page.getByRole("button", { name: "保存修改", exact: true }).click()
+    await page.getByText("业务日使用产品交易日历", { exact: true }).waitFor()
     await page.getByRole("button", { name: "停用", exact: true }).click()
-    assert.equal(memoryList.memories[0].status, "disabled")
-    assert.match(await page.getByTestId("run-memory-snapshot").innerText(), /v2/)
-    await page.getByRole("button", { name: "停止节点并等待清理", exact: true }).click()
-    assert.equal(status.nodeEnabled, false)
-    await page.getByRole("button", { name: "断开", exact: true }).click()
-    await page.getByRole("button", { name: "连接服务", exact: true }).click()
-    await page.getByTestId("partner-result").waitFor()
-    assert.equal(status.nodeEnabled, false)
+    await page.getByRole("button", { name: "重新启用", exact: true }).waitFor()
+    await page.getByRole("button", { name: "停止本机", exact: true }).click()
+    await page.getByRole("button", { name: "启用本机", exact: true }).waitFor()
+    status.connected = false
+    await page
+      .getByText("连接恢复前无法核对权限，暂不展示本地缓存正文。", { exact: true })
+      .waitFor()
+    assert.equal(await page.getByTestId("expert-memory-entry").count(), 0)
+    status.connected = true
+    await page.getByTestId("expert-memory-entry").waitFor()
+    denyMemory = true
+    result.result!.text = "无记忆维护权，仍可查看获授权的任务结果"
+    await page.getByText("无记忆维护权，仍可查看获授权的任务结果", { exact: true }).waitFor()
+    assert.equal(await page.getByTestId("expert-memory-entry").count(), 0)
+    assert.equal(enables, 1)
     assert.equal(analyses, 1)
+    await page.getByRole("button", { name: "撤销本机授权", exact: true }).click()
+    assert.equal(revocations, 1)
+    await assertNoGroupSettings()
     assert.deepEqual(errors, [])
     console.log(
       JSON.stringify({
@@ -311,15 +281,13 @@ async function main() {
         actualReactComponent: true,
         actualChromium: true,
         fakeIPC: true,
-        ownerConfig: true,
-        taskClarification: true,
-        offlineWaiting: true,
-        simulatedResultVisible: true,
-        stopAndReconnect: true,
-        explicitMemoryPolicy: true,
-        taskToMemoryConfirmation: true,
-        memoryEditAndDisable: true,
-        historicalSnapshotVisible: true,
+        simpleExpertTaskLocalFlow: true,
+        noGroupOrLegacySettingsEvenExpanded: true,
+        localAuthorizationRevocation: true,
+        noWorkspaceSelection: true,
+        explicitEnableConfirmation: true,
+        expertMemorySearchEditDisable: true,
+        offlineCacheHidden: true,
         autoModelCalls: 0,
         errors: 0
       })

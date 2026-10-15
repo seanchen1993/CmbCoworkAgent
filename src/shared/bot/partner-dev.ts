@@ -1,11 +1,12 @@
 /** Redacted, fixed local-development IPC surface. Never carries credentials. */
-import type {
-  GroupMemoryList,
-  GroupMemorySnapshot,
-  GroupMemoryWrite,
-  GroupMemoryUpdate
-} from "./group-memory"
+import type { GroupMemorySnapshot } from "./group-memory"
+import type { ExpertMemoryList, ExpertMemorySnapshot, ExpertMemoryUpdate } from "./expert-memory"
 export interface PartnerDevStatus {
+  connectionMode?: "local-default"
+  expertName?: string | null
+  expertDataPath?: string | null
+  expertMemoryAdopted?: boolean
+  canManageExpertMemory?: boolean
   configured: boolean
   connected: boolean
   nodeEnabled: boolean
@@ -37,7 +38,7 @@ export interface PartnerDevRunView {
   status: string
   version: number
   result: { outcome: "succeeded" | "failed"; text: string; settledAt: string } | null
-  memorySnapshot?: GroupMemorySnapshot | null
+  memorySnapshot?: GroupMemorySnapshot | ExpertMemorySnapshot | null
 }
 export interface PartnerDevApi {
   getStatus(): Promise<PartnerDevStatus>
@@ -45,21 +46,17 @@ export interface PartnerDevApi {
   chooseWorkspace(): Promise<PartnerDevStatus>
   connect(): Promise<PartnerDevStatus>
   disconnect(): Promise<PartnerDevStatus>
-  enableNode(): Promise<PartnerDevStatus>
   stopNode(): Promise<PartnerDevStatus>
-  createTeam(input: {
-    name: string
-    instructions: string
-    useMemory?: boolean
-  }): Promise<PartnerDevStatus>
-  bindTeam(input: { groupId: string }): Promise<PartnerDevStatus>
-  authorizeTeam(): Promise<PartnerDevStatus>
-  revokeTeam(): Promise<PartnerDevStatus>
-  listMemories(): Promise<GroupMemoryList>
-  createMemory(input: GroupMemoryWrite): Promise<GroupMemoryList>
-  updateMemory(input: GroupMemoryUpdate): Promise<GroupMemoryList>
-  disableMemory(input: { memoryId: string; expectedVersion: number }): Promise<GroupMemoryList>
-  enableTeamMemory(): Promise<PartnerDevStatus>
+  createExpert(input: { name: string; instructions: string }): Promise<PartnerDevStatus>
+  startExpert(): Promise<PartnerDevStatus>
+  listExpertMemories(): Promise<ExpertMemoryList>
+  createExpertMemory(input: { text: string }): Promise<ExpertMemoryList>
+  updateExpertMemory(input: ExpertMemoryUpdate): Promise<ExpertMemoryList>
+  disableExpertMemory(input: {
+    memoryId: string
+    expectedVersion: number
+  }): Promise<ExpertMemoryList>
+  revokeLocalAuthorization(): Promise<PartnerDevStatus>
   sendMessage(input: { mentioned: boolean; text: string }): Promise<PartnerDevMessageReply>
   analyzeTask(input: { taskNumber: string }): Promise<PartnerDevMessageReply>
   inspectRun(input: { runId: string }): Promise<PartnerDevRunView>

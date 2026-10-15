@@ -46,22 +46,32 @@ public final class GroupMemoryValues {
             case "result":exact(node,"kind","runId");return new Source(kind,null,null,id(string(node,"runId")));
             default:throw invalid();}
     }
+    @JsonInclude(JsonInclude.Include.NON_NULL)
     public static final class Memory {
-        public final String id,spaceId,groupId,text,status,createdBy,updatedBy,createdAt,updatedAt;
+        public final String id,spaceId,groupId,botId,text,status,createdBy,updatedBy,createdAt,updatedAt;
         public final long version;public final Source source;
         public Memory(String id,String space,String group,long version,String text,String status,Source source,String createdBy,String updatedBy,String createdAt,String updatedAt){
-            this.id=GroupMemoryValues.id(id);spaceId=GroupMemoryValues.id(space);groupId=GroupMemoryValues.id(group);this.version=GroupMemoryValues.version(version,1);this.text=GroupMemoryValues.text(text);this.status=GroupMemoryValues.status(status);
+            this(id,space,group,version,text,status,source,createdBy,updatedBy,createdAt,updatedAt,false);
+        }
+        public Memory(String id,String space,String owner,long version,String text,String status,Source source,String createdBy,String updatedBy,String createdAt,String updatedAt,boolean expert){
+            this.id=GroupMemoryValues.id(id);spaceId=GroupMemoryValues.id(space);groupId=expert?null:GroupMemoryValues.id(owner);botId=expert?GroupMemoryValues.id(owner):null;this.version=GroupMemoryValues.version(version,1);this.text=GroupMemoryValues.text(text);this.status=GroupMemoryValues.status(status);
             this.source=GroupMemoryValues.source(JSON.valueToTree(source));this.createdBy=GroupMemoryValues.id(createdBy);this.updatedBy=GroupMemoryValues.id(updatedBy);this.createdAt=date(createdAt);this.updatedAt=date(updatedAt);
+            if(expert&&!"manual".equals(this.source.kind))throw invalid();
             if(Instant.parse(updatedAt).isBefore(Instant.parse(createdAt)))throw invalid();
         }
+        public String ownerId(){return botId==null?groupId:botId;}
     }
     private static Memory memory(JsonNode n) {
-        exact(n,"id","spaceId","groupId","version","text","status","source","createdBy","updatedBy","createdAt","updatedAt");
-        return new Memory(string(n,"id"),string(n,"spaceId"),string(n,"groupId"),number(n,"version",1),string(n,"text"),string(n,"status"),source(n.get("source")),string(n,"createdBy"),string(n,"updatedBy"),string(n,"createdAt"),string(n,"updatedAt"));
+        boolean expert=n.has("botId");String key=expert?"botId":"groupId";
+        exact(n,"id","spaceId",key,"version","text","status","source","createdBy","updatedBy","createdAt","updatedAt");
+        return new Memory(string(n,"id"),string(n,"spaceId"),string(n,key),number(n,"version",1),string(n,"text"),string(n,"status"),source(n.get("source")),string(n,"createdBy"),string(n,"updatedBy"),string(n,"createdAt"),string(n,"updatedAt"),expert);
     }
+    @JsonInclude(JsonInclude.Include.NON_NULL)
     public static final class Snapshot {
+        public final String scope,botId;
         public final long revision;public final List<Memory> memories;
-        public Snapshot(long revision,List<Memory> memories){this.revision=version(revision,0);this.memories=Collections.unmodifiableList(new ArrayList<Memory>(memories));validateMemories(this.memories,true);for(Memory memory:this.memories)if(memory.version>revision)throw invalid();budget(this.memories);}
+        public Snapshot(long revision,List<Memory> memories){this(revision,memories,null);}
+        public Snapshot(long revision,List<Memory> memories,String bot){scope=bot==null?null:"bot";botId=bot==null?null:id(bot);this.revision=version(revision,0);this.memories=Collections.unmodifiableList(new ArrayList<Memory>(memories));validateMemories(this.memories,true);for(Memory memory:this.memories)if(memory.version>revision||!Objects.equals(botId,memory.botId))throw invalid();budget(this.memories);}
     }
     public static final class Changed {
         public final long revision;public final Memory memory;
@@ -71,8 +81,11 @@ public final class GroupMemoryValues {
     public static Source decodeSource(String value) { try{return source(JSON.readTree(value));}catch(Exception failure){throw invalid();} }
     public static Changed decodeChanged(String value) { try{JsonNode node=JSON.readTree(value);exact(node,"revision","memory");return new Changed(number(node,"revision",1),memory(node.get("memory")));}catch(Exception failure){throw invalid();} }
     public static Snapshot decodeSnapshot(String value,String space,String group) {
-        try{JsonNode node=JSON.readTree(value);if(node==null)throw invalid();if(node.isNull())return null;exact(node,"revision","memories");JsonNode values=node.get("memories");if(!values.isArray()||values.size()>10)throw invalid();
-            List<Memory> memories=new ArrayList<Memory>();for(JsonNode item:values){Memory memory=memory(item);if(!space.equals(memory.spaceId)||!group.equals(memory.groupId))throw invalid();memories.add(memory);}return new Snapshot(number(node,"revision",0),memories);
+        return decodeSnapshot(value,space,group,false);
+    }
+    public static Snapshot decodeSnapshot(String value,String space,String owner,boolean expert) {
+        try{JsonNode node=JSON.readTree(value);if(node==null)throw invalid();if(node.isNull())return null;if(expert){exact(node,"scope","botId","revision","memories");if(!"bot".equals(string(node,"scope"))||!owner.equals(string(node,"botId")))throw invalid();}else exact(node,"revision","memories");JsonNode values=node.get("memories");if(!values.isArray()||values.size()>10)throw invalid();
+            List<Memory> memories=new ArrayList<Memory>();for(JsonNode item:values){Memory memory=memory(item);if(!space.equals(memory.spaceId)||!owner.equals(memory.ownerId())||expert!=(memory.botId!=null))throw invalid();memories.add(memory);}return new Snapshot(number(node,"revision",0),memories,expert?owner:null);
         }catch(Exception failure){throw invalid();}
     }
     public static void validateMemories(List<Memory> memories,boolean activeOnly) {
@@ -83,7 +96,7 @@ public final class GroupMemoryValues {
     /** Matches JS JSON.stringify followed by <,>,&,backtick -> literal Unicode escapes;
      * Java String.length intentionally measures UTF-16, not code points/UTF-8 bytes. */
     public static int budget(List<Memory> memories) {
-        ArrayNode values=JSON.createArrayNode();for(Memory memory:memories)if("active".equals(memory.status))values.add(JSON.createObjectNode().put("scope","group").put("sourceRef","memory:"+memory.id+":v"+memory.version).put("text",memory.text));
+        ArrayNode values=JSON.createArrayNode();for(Memory memory:memories)if("active".equals(memory.status))values.add(JSON.createObjectNode().put("scope",memory.botId==null?"group":"bot").put("sourceRef","memory:"+memory.id+":v"+memory.version).put("text",memory.text));
         String encoded=encode(values);int length=encoded.length();for(int i=0;i<encoded.length();i++)if("<>&`".indexOf(encoded.charAt(i))>=0)length+=5;
         if(length>10000)throw new ApplicationFault(ErrorCode.PAYLOAD_TOO_LARGE);return length;
     }

@@ -27,6 +27,8 @@ import type {
 } from "../../../shared/bot/group-memory"
 import { memorySource, memoryText, memoryVersion } from "./group-memory-validation"
 import { partnerObject } from "./partner-local-boundary"
+import type { ExpertMemoryList, ExpertMemoryUpdate } from "../../../shared/bot/expert-memory"
+import type { ExpertLocalData } from "./expert-local-data"
 
 export interface PartnerConfigPersistence {
   load(): Promise<PartnerLocalConfig | null>
@@ -39,6 +41,11 @@ export class PartnerDevController {
   private client?: PartnerLocalClient
   private worker?: PartnerLocalWorker
   private error: string | null = null
+  private defaultInitialized = false
+  private expertData?: ExpertLocalData
+  private expertName: string | null = null
+  private expertAdopted = false
+  private canManageExpertMemory = false
   constructor(
     private readonly deps: {
       store: PartnerConfigPersistence
@@ -47,6 +54,11 @@ export class PartnerDevController {
         client: PartnerLocalClient
       ) => PartnerWorkerExecutor
       clientFactory?: (d: PartnerConnectionDescriptor) => PartnerLocalClient
+      defaultDescriptor?: () => Promise<unknown>
+      expertData?: (
+        descriptor: PartnerConnectionDescriptor,
+        botId: string
+      ) => Promise<ExpertLocalData>
     }
   ) {}
   private exclusive<T>(fn: () => Promise<T>): Promise<T> {
@@ -95,6 +107,15 @@ export class PartnerDevController {
     const c = this.config,
       d = c?.descriptor
     return {
+      ...(this.deps.defaultDescriptor ? { connectionMode: "local-default" as const } : {}),
+      ...(this.deps.expertData
+        ? {
+            expertName: this.expertName,
+            expertDataPath: this.expertData?.path ?? null,
+            expertMemoryAdopted: this.expertAdopted,
+            canManageExpertMemory: this.canManageExpertMemory
+          }
+        : {}),
       configured: !!c,
       connected:
         !!this.client && !["DEPENDENCY_UNAVAILABLE", "UNAUTHENTICATED"].includes(this.error ?? ""),
@@ -115,7 +136,20 @@ export class PartnerDevController {
     }
   }
   getStatus(): Promise<PartnerDevStatus> {
-    return this.exclusive(async () => this.view())
+    return this.exclusive(async () => {
+      if (this.deps.defaultDescriptor && !this.defaultInitialized) {
+        try {
+          const descriptor = parsePartnerDescriptor(await this.deps.defaultDescriptor())
+          if (JSON.stringify(this.config?.descriptor) !== JSON.stringify(descriptor))
+            await this.applyDescriptor(descriptor)
+          await this.connectConfigured()
+          this.defaultInitialized = true
+        } catch (error) {
+          this.error = error instanceof PartnerLocalFault ? error.code : "DEPENDENCY_UNAVAILABLE"
+        }
+      }
+      return this.view()
+    })
   }
   hasActiveRun(): boolean {
     return !!this.worker?.activeRunId()
@@ -130,31 +164,37 @@ export class PartnerDevController {
     this.client = undefined
   }
   importDescriptor(value: unknown): Promise<PartnerDevStatus> {
-    return this.exclusive(async () => {
-      const descriptor = parsePartnerDescriptor(value)
-      await this.close()
-      const old = this.config,
-        same =
-          old &&
-          ["spaceId", "nodeId", "ownerPrincipalId", "businessPrincipalId", "workspaceRef"].every(
-            (k) => old.descriptor[k] === descriptor[k]
-          )
-      this.config = same
-        ? { ...old, descriptor }
-        : {
-            descriptor,
-            workspacePath: null,
-            groupId: null,
-            botId: null,
-            botVersionId: null,
-            pending: null,
-            lastRunId: null,
-            lastTaskNumber: null
-          }
-      await this.persist()
-      this.error = null
-      return this.view()
-    })
+    return this.exclusive(() => this.applyDescriptor(parsePartnerDescriptor(value)))
+  }
+  private async applyDescriptor(
+    descriptor: PartnerConnectionDescriptor
+  ): Promise<PartnerDevStatus> {
+    await this.close()
+    this.expertData = undefined
+    this.expertName = null
+    this.expertAdopted = false
+    this.canManageExpertMemory = false
+    const old = this.config,
+      same =
+        old &&
+        ["spaceId", "nodeId", "ownerPrincipalId", "businessPrincipalId", "workspaceRef"].every(
+          (k) => old.descriptor[k] === descriptor[k]
+        )
+    this.config = same
+      ? { ...old, descriptor }
+      : {
+          descriptor,
+          workspacePath: null,
+          groupId: null,
+          botId: null,
+          botVersionId: null,
+          pending: null,
+          lastRunId: null,
+          lastTaskNumber: null
+        }
+    await this.persist()
+    this.error = null
+    return this.view()
   }
   setWorkspace(path: string): Promise<PartnerDevStatus> {
     return this.exclusive(async () => {
@@ -175,21 +215,24 @@ export class PartnerDevController {
     })
   }
   connect(): Promise<PartnerDevStatus> {
-    return this.exclusive(async () => {
-      await this.close()
-      const candidate = (this.deps.clientFactory ?? ((d) => new PartnerLocalClient(d)))(
-        this.requireConfig().descriptor
-      )
-      try {
-        await candidate.verifyIdentity()
-        this.client = candidate
-        this.error = null
-        return this.view()
-      } catch (error) {
-        candidate.close()
-        throw error
-      }
-    })
+    return this.exclusive(() => this.connectConfigured())
+  }
+  private async connectConfigured(): Promise<PartnerDevStatus> {
+    await this.close()
+    const candidate = (this.deps.clientFactory ?? ((d) => new PartnerLocalClient(d)))(
+      this.requireConfig().descriptor
+    )
+    try {
+      await candidate.verifyIdentity()
+      this.client = candidate
+      if (this.deps.expertData && this.config?.botId) await this.refreshExpert()
+      this.error = null
+      return this.view()
+    } catch (error) {
+      candidate.close()
+      this.client = undefined
+      throw error
+    }
   }
   disconnect(): Promise<PartnerDevStatus> {
     return this.exclusive(async () => {
@@ -199,23 +242,24 @@ export class PartnerDevController {
     })
   }
   enableNode(): Promise<PartnerDevStatus> {
-    return this.exclusive(async () => {
-      const c = this.requireConfig(),
-        client = this.requireClient()
-      if (!c.workspacePath) throw new PartnerLocalFault("NOT_CONFIGURED")
-      await this.worker?.stop()
-      const worker = new PartnerLocalWorker({
-        client,
-        executor: this.deps.createExecutor(structuredClone(c), client),
-        onChange: (v) => {
-          if (this.worker === worker && v.error) this.error = v.error
-        }
-      })
-      this.worker = worker
-      await worker.start()
-      this.error = null
-      return this.view()
+    return this.exclusive(() => this.enableConfigured())
+  }
+  private async enableConfigured(): Promise<PartnerDevStatus> {
+    const c = this.requireConfig(),
+      client = this.requireClient()
+    if (!c.workspacePath) throw new PartnerLocalFault("NOT_CONFIGURED")
+    await this.worker?.stop()
+    const worker = new PartnerLocalWorker({
+      client,
+      executor: this.deps.createExecutor(structuredClone(c), client),
+      onChange: (v) => {
+        if (this.worker === worker && v.error) this.error = v.error
+      }
     })
+    this.worker = worker
+    await worker.start()
+    this.error = null
+    return this.view()
   }
   stopNode(): Promise<PartnerDevStatus> {
     return this.exclusive(async () => {
@@ -257,7 +301,12 @@ export class PartnerDevController {
     this.error = null
     return value
   }
-  createTeam(name: string, instructions: string, useMemory = false): Promise<PartnerDevStatus> {
+  createTeam(
+    name: string,
+    instructions: string,
+    useMemory = false,
+    expert = false
+  ): Promise<PartnerDevStatus> {
     return this.exclusive(async () => {
       if (
         typeof name !== "string" ||
@@ -275,7 +324,11 @@ export class PartnerDevController {
       await this.mutation(
         "createTeam",
         // Keep the original disabled-policy fingerprint for pending A7 commands.
-        useMemory ? { name, instructions, useMemory } : { name, instructions },
+        expert
+          ? { name, instructions, useMemory, expert }
+          : useMemory
+            ? { name, instructions, useMemory }
+            : { name, instructions },
         async (command) => {
           const { bot, botVersion } = await client.createBot({
             commandId: command + ":bot",
@@ -302,6 +355,7 @@ export class PartnerDevController {
             ],
             limits: { maxRuns: 2, maxHandoffs: 1, maxTokens: 10000 }
           })
+          if (expert) await client.activateExpertMemory(group, bot.id, botVersion.id)
           return { bot, botVersion, group }
         },
         (v) => {
@@ -310,6 +364,7 @@ export class PartnerDevController {
           c.botVersionId = v.botVersion.id
         }
       )
+      if (expert) await this.refreshExpert()
       return this.view()
     })
   }
@@ -328,26 +383,126 @@ export class PartnerDevController {
       )
         throw new PartnerLocalFault("FORBIDDEN")
       c.groupId = group.id
+      this.expertData = undefined
+      this.expertAdopted = false
       c.botId = group.bots[0].botId
       c.botVersionId = group.bots[0].botVersionId
       c.lastRunId = null
       c.lastTaskNumber = null
       await this.persist()
+      if (this.deps.expertData) await this.refreshExpert()
       return this.view()
     })
   }
   authorizeTeam(): Promise<PartnerDevStatus> {
+    return this.exclusive(() => this.authorizeConfigured())
+  }
+  private async authorizeConfigured(): Promise<PartnerDevStatus> {
+    const { groupId, config } = this.team()
+    if (!config.workspacePath) throw new PartnerLocalFault("NOT_CONFIGURED")
+    const client = this.requireClient()
+    // Explicit owner authorization also registers the authenticated local
+    // node's fixed profile once. This does not enable polling or execution.
+    await client.observe()
+    const version = await client.authorizationVersion(groupId)
+    await client.authorize(groupId, version)
+    this.error = null
+    return this.view()
+  }
+  createExpert(name: string, instructions: string): Promise<PartnerDevStatus> {
+    return this.createTeam(name, instructions, true, true)
+  }
+  startExpert(): Promise<PartnerDevStatus> {
     return this.exclusive(async () => {
-      const { groupId, config } = this.team()
-      if (!config.workspacePath) throw new PartnerLocalFault("NOT_CONFIGURED")
-      const client = this.requireClient()
-      // Explicit owner authorization also registers the authenticated local
-      // node's fixed profile once. This does not enable polling or execution.
-      await client.observe()
-      const version = await client.authorizationVersion(groupId)
-      await client.authorize(groupId, version)
-      this.error = null
+      await this.refreshExpert()
+      if (!this.expertAdopted) throw new PartnerLocalFault("NOT_CONFIGURED")
+      await this.ensureExpertData()
+      await this.authorizeConfigured()
+      return this.enableConfigured()
+    })
+  }
+  private async ensureExpertData(): Promise<void> {
+    const c = this.requireConfig()
+    if (!this.deps.expertData || !c.botId) return
+    this.expertData ??= await this.deps.expertData(c.descriptor, c.botId)
+    if (!c.workspacePath) {
+      c.workspacePath = this.expertData.runtimePath
+      await this.persist()
+    }
+  }
+  private async refreshExpert(): Promise<void> {
+    const { config: c, botId, groupId } = this.team(),
+      client = this.requireClient()
+    const overview = await client.expertMemoryAdoption(groupId, botId)
+    this.expertName = overview.botName
+    this.canManageExpertMemory = overview.canManage
+    this.expertAdopted = overview.adopted
+    await this.ensureExpertData()
+    if (c.botId !== botId) throw new PartnerLocalFault("INPUT_CHANGED")
+  }
+  adoptExpertMemory(): Promise<PartnerDevStatus> {
+    return this.exclusive(async () => {
+      // Keep the whole human operation serial, including the durable version
+      // plan. A concurrent bind must not change its target between two steps.
+      await this.enableMemoryConfigured()
+      const { botId, groupId, config } = this.team(),
+        client = this.requireClient()
+      await this.worker?.stop()
+      const group = await client.getGroup(groupId)
+      await client.activateExpertMemory(group, botId, config.botVersionId!)
+      await this.refreshExpert()
       return this.view()
+    })
+  }
+  private async expertMemories(): Promise<ExpertMemoryList> {
+    const { botId } = this.team()
+    const list = await this.requireClient().listExpertMemories(botId)
+    await this.ensureExpertData()
+    await this.expertData?.sync(list)
+    return list
+  }
+  listExpertMemories(): Promise<ExpertMemoryList> {
+    return this.exclusive(() => this.expertMemories())
+  }
+  createExpertMemory(text: string): Promise<ExpertMemoryList> {
+    return this.exclusive(async () => {
+      const { botId } = this.team(),
+        client = this.requireClient(),
+        body = { botId, text: memoryText(text) }
+      return this.mutation("createExpertMemory", body, async (command) => {
+        await client.createExpertMemory(botId, body.text, command)
+        return this.expertMemories()
+      })
+    })
+  }
+  updateExpertMemory(input: ExpertMemoryUpdate): Promise<ExpertMemoryList> {
+    return this.exclusive(async () => {
+      const v = partnerObject(input, ["memoryId", "expectedVersion", "text", "status"])
+      if (v.status !== "active" && v.status !== "disabled")
+        throw new PartnerLocalFault("INVALID_PAYLOAD")
+      const { botId } = this.team(),
+        client = this.requireClient()
+      const body: ExpertMemoryUpdate = {
+        memoryId: partnerId(v.memoryId),
+        expectedVersion: memoryVersion(v.expectedVersion),
+        text: memoryText(v.text),
+        status: v.status
+      }
+      return this.mutation("updateExpertMemory", { botId, ...body }, async (command) => {
+        await client.updateExpertMemory(botId, body, command)
+        return this.expertMemories()
+      })
+    })
+  }
+  disableExpertMemory(memoryId: string, expectedVersion: number): Promise<ExpertMemoryList> {
+    return this.exclusive(async () => {
+      const { botId } = this.team(),
+        client = this.requireClient(),
+        body = { memoryId: partnerId(memoryId), expectedVersion: memoryVersion(expectedVersion) }
+      return this.mutation("disableExpertMemory", { botId, ...body }, async (command) => {
+        await client.disableExpertMemory(botId, body.memoryId, body.expectedVersion, command)
+        return this.expertMemories()
+      })
     })
   }
   revokeTeam(): Promise<PartnerDevStatus> {
@@ -413,65 +568,66 @@ export class PartnerDevController {
     })
   }
   enableTeamMemory(): Promise<PartnerDevStatus> {
-    return this.exclusive(async () => {
-      const { groupId, botId, config: c } = this.team(),
-        client = this.requireClient()
-      let plan: PartnerMemoryEnablePlan
-      if (c.pending) {
-        if (c.pending.kind !== "enableMemory") throw new PartnerLocalFault("INPUT_CHANGED")
-        plan = parseMemoryEnablePlan(c.pending.plan)
-      } else {
-        const group = await client.getGroup(groupId),
-          { bot, botVersion } = await client.getBot(botId)
-        if (
-          group.bots.length !== 1 ||
-          group.bots[0].botId !== botId ||
-          group.bots[0].botVersionId !== c.botVersionId ||
-          botVersion.id !== c.botVersionId
-        )
-          throw new PartnerLocalFault("INPUT_CHANGED")
-        if (botVersion.config.memoryPolicy === "explicit_only") {
-          this.error = null
-          return this.view()
-        }
-        plan = parseMemoryEnablePlan({
-          botId,
-          groupId,
-          botVersion: bot.version,
-          groupVersion: group.version,
-          config: { ...botVersion.config, memoryPolicy: "explicit_only" },
-          bots: group.bots,
-          members: group.members
-        })
-      }
-      await this.worker?.stop()
-      await this.mutation(
-        "enableMemory",
-        plan,
-        async (command) => {
-          const version = await client.createBotVersion(botId, {
-            commandId: command + ":version",
-            expectedVersion: plan.botVersion,
-            config: plan.config
-          })
-          await client.updateGroupMembers(groupId, {
-            commandId: command + ":adopt",
-            expectedVersion: plan.groupVersion,
-            bots: plan.bots.map((b) => ({ ...b, botVersionId: version.botVersion.id })),
-            members: plan.members
-          })
-          const current = await client.getGroup(groupId)
-          if (current.bots.length !== 1 || current.bots[0].botVersionId !== version.botVersion.id)
-            throw new PartnerLocalFault("INPUT_CHANGED")
-          return version.botVersion.id
-        },
-        (id) => {
-          c.botVersionId = id
-        },
-        plan
+    return this.exclusive(() => this.enableMemoryConfigured())
+  }
+  private async enableMemoryConfigured(): Promise<PartnerDevStatus> {
+    const { groupId, botId, config: c } = this.team(),
+      client = this.requireClient()
+    let plan: PartnerMemoryEnablePlan
+    if (c.pending) {
+      if (c.pending.kind !== "enableMemory") throw new PartnerLocalFault("INPUT_CHANGED")
+      plan = parseMemoryEnablePlan(c.pending.plan)
+    } else {
+      const group = await client.getGroup(groupId),
+        { bot, botVersion } = await client.getBot(botId)
+      if (
+        group.bots.length !== 1 ||
+        group.bots[0].botId !== botId ||
+        group.bots[0].botVersionId !== c.botVersionId ||
+        botVersion.id !== c.botVersionId
       )
-      return this.view()
-    })
+        throw new PartnerLocalFault("INPUT_CHANGED")
+      if (botVersion.config.memoryPolicy === "explicit_only") {
+        this.error = null
+        return this.view()
+      }
+      plan = parseMemoryEnablePlan({
+        botId,
+        groupId,
+        botVersion: bot.version,
+        groupVersion: group.version,
+        config: { ...botVersion.config, memoryPolicy: "explicit_only" },
+        bots: group.bots,
+        members: group.members
+      })
+    }
+    await this.worker?.stop()
+    await this.mutation(
+      "enableMemory",
+      plan,
+      async (command) => {
+        const version = await client.createBotVersion(botId, {
+          commandId: command + ":version",
+          expectedVersion: plan.botVersion,
+          config: plan.config
+        })
+        await client.updateGroupMembers(groupId, {
+          commandId: command + ":adopt",
+          expectedVersion: plan.groupVersion,
+          bots: plan.bots.map((b) => ({ ...b, botVersionId: version.botVersion.id })),
+          members: plan.members
+        })
+        const current = await client.getGroup(groupId)
+        if (current.bots.length !== 1 || current.bots[0].botVersionId !== version.botVersion.id)
+          throw new PartnerLocalFault("INPUT_CHANGED")
+        return version.botVersion.id
+      },
+      (id) => {
+        c.botVersionId = id
+      },
+      plan
+    )
+    return this.view()
   }
   sendMessage(mentioned: boolean, text: string): Promise<PartnerDevMessageReply> {
     return this.exclusive(async () => {
@@ -569,7 +725,12 @@ export class PartnerDevController {
     let memorySnapshot: PartnerDevRunView["memorySnapshot"]
     if (!["queued", "waiting_node", "starting", "cancelled"].includes(String(value.run.status))) {
       try {
-        memorySnapshot = await this.requireClient().inspectMemorySnapshot(runId, groupId)
+        memorySnapshot = await this.requireClient().inspectMemorySnapshot(
+          runId,
+          groupId,
+          String(value.run.botId),
+          value.run.memoryScope === "bot" ? "bot" : "group"
+        )
       } catch (error) {
         if (!(error instanceof PartnerLocalFault) || error.code !== "NOT_FOUND") throw error
         // Pre-start and pre-V6 history must not be mislabeled as memory disabled.

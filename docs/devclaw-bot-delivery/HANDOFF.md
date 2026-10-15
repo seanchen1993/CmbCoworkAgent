@@ -1,5 +1,35 @@
 # DevClaw Bot 当前交接点
 
+**2026-10-15 本地代码检查点提交。** 用户要求确认分支并提交改动，当前为codex/devclaw-bot-integration（非d12a），起点2f0d6c3f。本提交保存专家记忆/默认目录、无Group界面、本地默认连接/预览脚本和测试文档；源码43路径清单仍36336f77，无夹带运行时凭据/构建产物。预览脚本Ctrl+C/相对路径/监督进程遗失的限制仍是明确WIP，不因提交变成正式验收；不推送、不改用户App/库、不恢复定时。具体commit以包含本段的git log为准，下方“代码未提交”是本检查点之前的历史。
+
+用户最新讨论质疑全部记忆人工发布；root已依据官方说明建议改为授权边界内自动维护、例外确认。Astra方案文档新增讨论说明，旧全人工版本不是最终批准，自动学习尚未实施。后续先收敛这个设计，不据本次“提交代码”自动进入实现。提交前54项App、7项预览单测、14项IPC通过，类型及最终Git结果见提交出口；旧A9/A10真实集成验收保留原证据，不重复冒充本轮执行。
+
+**2026-10-15 最新出口：R01-A11-design已交付，尚未实施。** 原Astra给出完整建议及个人记忆复用/明确遗忘/成功结果重交披露补充，root独立源码核对后整理reviews/Astra-expert-memory-grok-design.md。推荐自然语言确认维护＋分析后<=3候选人工发布＋按Task召回，唯一专家归属，MySQL权威；普通内容更新不打断已冻结Run，明确忘记一律tombstone/安全epoch并遮蔽已撤回旧正文重披露，不改历史成功/不重跑。复用个人记忆纯算法和调度，不挂个人store/默认模型/文件工具；Grok是非官方重建且部分门控。全部为设计，用户尚未授权实施；本轮无产品改动、测试、模型调用、服务/数据变更。非docs43路径清单仍36336f77，A10代码/App保留，timerPAUSED。等待用户讨论或明确继续，不自动实现切片1；下方设计中记录为历史。
+
+**2026-10-15 最新请求：R01-A11-design，仅设计不实施。** 用户指定Astra结合Grok Bot和DevClaw需求设计专家长期记忆。已向原 /root/astra_mvp_expert_design（gpt-6-astra）下发自包含只读任务，要求按专家维度/无Group UI/无旧兼容负担，给出提炼、显式记住遗忘、来源确认、召回、维护及运行快照方案，重点检查自动整理与现有revision使在途运行失效的冲突。任务tasks/R01-A11-design.md；root待结果独立核对后保存reviews/Astra-expert-memory-grok-design.md。没有产品实现、服务/数据/模型调用或定时恢复授权；现有App/dirty全部保留。下方A10是已完成历史，不重复执行。
+
+**2026-10-15 最新出口：R01-A10 accepted_uncommitted。** 用户明确首版不要求旧版兼容；root已彻底删除伙伴页Group编号/恢复绑定/团队记忆/采用切换，renderer操作由27减至17，保留专家记忆、显式启用/撤销本机、任务和结果。内部Group自动任务/授权关系不变，无数据库删除。14IPC/60App/主端含浏览器和Web类型0/实际ReactChromium通过。实际安全完整Appbuild9511/e80fc6后App94408、Java94349:55521运行；CUA展开高级确认无Group后收起，390b46服务/库健康，用户未创建专家/Run、节点未启用。源43路径清单36336f77（含旧dirty与一项Git可恢复删除），详见attempts/R01-A10-root.md。原监督失联导致第一次stop守卫拒绝，确认空闲后正常nativeQuit再明确stop成功、原profile/卷保留；未强杀/修无关launcher WIP。定时仍PAUSED；下面A10implementing/A9旧运行记录为历史。等待用户测试，不扩大路线。
+
+**2026-10-15 最新授权：R01-A10 implementing，root串行。** 用户明确彻底不展示Group、首版不要求旧版兼容，允许破坏性更新。删除页面及旧renderer兼容操作，不重构内部自动任务/授权模型、不清空数据库。当前App92595/Java92534仍运行，待测试后核对无在途任务再重开；旧A9成果/dirty全部保留。任务tasks/R01-A10.md，报告attempts/R01-A10-root.md，定时仍PAUSED。下方“高级兼容保留”为已被新授权覆盖的历史。
+
+**2026-10-15 最新出口：R01-A9 accepted（代码未提交），新版App已打开。** Astra设计+二次只读复核、root全部实施：专家/任务/本机三块，长期记忆真正归Bot、默认私有专家数据目录/可重建JSON缓存，旧Group资料不复制、旧Run保留scope，当前维护权限与任务权限分离。最终69JUnit/1884parity0、76App/65service/12IPC/F03全24/main+新tests/web0、实际ReactChromium、专家HTTP两次、旧Group42/41、两catalog库26表7迁移零FK、实际AppWorker/SQLite/DeepAgent fake4tools0闭环通过；见reviews/R01-A9-acceptance.md/attempts/R01-A9-root.md。历史一次专家测试泛阶段失败触发未确定，新增细分诊断后最终连续两次通过，保留记录不谎称定位修复。
+
+session67009完成安全全Appbuild并保留真实App92595/Java92534:53883，2f946b状态running、7bab44同PartnerMySQLbdf4f0d8/卷healthy；CUA确认真实简版页，高级关闭、无导入/连接/选目录步骤、节点未启用，未自动造用户专家/Run。可直接创建专家→启用本机→发任务。原测试资源全部精确回收，原B00 MySQL693a1c3临时同ID启动后已恢复原停止，ES/S3同ID健康保留。timer实际TOML PAUSED，原16task对象完全不变；源42SHA5d3932f7/jar9be0762b。停止仍用stop:bot-preview；启动器Ctrl+C/相对路径为旧WIP，不据本片验收说已修。旧A8/原App运行/收尾待验描述均为历史，不重放或自动扩范围。
+
+**2026-10-15 A9收尾检查点（覆盖下方App运行记录）：** 已按Astra设计实施专家优先页面、专家显式记忆、私有默认目录与可重建缓存。Astra二次只读指出非maintainer管理员连接阻断，root改私有overview及独立记忆/任务刷新；公共Bot权限未放宽。当前真实App83014/Java28281已用stop正常闭合，Partner库停止保留；尚未重开新版，不能沿用下方“App仍运行”。真实V6升级专家HTTP首轮、AppWorker+SQLite+DeepAgent fake4tools0和旧Group两库42/41兼容通过；一次专家HTTP最终复验在fixed-run-scopes失败已精确回收，新增细分phase正在重验，不忽略失败。最新69JUnit/1884parity/主+新test类型0，jar9be0762b。原B00 MySQL此前OOM停止，已核对同ID/卷精确启动用于测试守卫，结束后恢复原停止。所有dirty保留，A9尚未验收，定时PAUSED。
+
+**2026-10-15 当前授权：R01-A9 专家优先简版。** 用户要求概览收拢、长期记忆按专家管理、默认本地目录，并明确 Astra 设计、root 实施。原A8已完成，不重做；旧Group资料不自动转为专家共享。只读设计子代理 `/root/astra_mvp_expert_design` 正在核对代码；root保留全部dirty，先核对专家数据目录/服务端迁移边界。见 tasks/R01-A9.md。当前真实App83014/Java28281仍在，不关闭用户任务、不自动启节点或模型。定时仍PAUSED；不合并网关、不访问内网/真实模型。
+
+**2026-10-15 verified（未提交）：本地默认连接，已重开给用户测试。** 用户直接授权，root串行。预览启动器通过主进程私有配置路径提供默认参数，仅unpackaged生效；首次状态读取串行导入/核对三identity，同身份保留工作区/团队/回执，失败无远程/其他身份fallback。默认模式不显示导入/连接/断开；普通/打包模式不变。不硬编码秘密或明文保存，不自动选择工作区、创建/授权团队、启用节点或执行。26相关单测、最终核心30、IPC11/实际ReactChromiumfakeIPC/main+web类型零、安全全Appbuild及真实Java/MySQL自动身份验证均过；源9文件SHA7c79db17见state。源码仍dirty，与之前脚本WIP一起保留。
+
+旧supervisor28148已失但App28340仍在，守卫正确拒绝；CUA确认其未连接/未启用后native Quit、ps证实退出，未强杀或放宽校验。当前直接Node22绝对脚本/session12818，真实App83014在伙伴页“控制服务已连接/节点未启用”，CUA确认只显示选择工作区；Java28281:55565未重启、独立Partner MySQL同container/volume健康，默认配置已加密保存owned0600，未创建真实任务或调用模型。保持运行供用户调试。定时PAUSED，不合并网关/引入内网依赖；普通`stop:bot-preview`可用，Node25引导Ctrl+C/相对路径guard仍为独立未验收遗留，不混成本次默认连接已完成。下方14日/App28340/需手动连接为历史。
+
+**2026-10-14 当前调试会话：已按用户请求启动，保持运行。** 直接已安装Node22+绝对脚本路径，执行会话1496；安全本地构建、Java28281/127.0.0.1:55565、独立Partner MySQL healthy、真实App28340固定preview-app profile、CUA确认伙伴页可见。未自动导入、连接或启用节点，固定模拟模型，不读原APIkey或内网。状态876352 running/healthy/app running；数据保留，停止用 `npm run stop:bot-preview`。本轮不修引导脚本、不合并网关，定时仍PAUSED。原ES/S3healthy同ID，原B00 MySQL693a1c3已停止、无端口导致旧proof B00_LOOPBACK；原因未知，本次未重启或改动，伙伴独立库不受影响。首次直接相对路径在claim守卫拒绝、无服务启动，绝对路径已成功；记为后续脚本兼容修正点。下方13日“全部已停”为历史。
+
+**2026-10-13 最新路线决定：先本地跑通，再合并原 IM 网关。** 用户明确原网关使用内网专有依赖，不便本地调试。当前保留 `services/bot-control` 独立本地启动与可公开获取的依赖，优先完成 App/控制服务/MySQL/假招乎/模拟模型闭环；不提前引入内网 BOM/平台认证或将调试依赖移到内网。后续本地验证通过，再将伙伴业务模块合入原网关工程，统一部署并复用已有 App WSS；团队、记忆、Run 与 IM 收发职责仍分开，HTTP管理/执行控制可保留，不另建重复生产 WS。伙伴目前仅 HTTP+轮询，不是已存在第二套 WSS。消息ACK、Run权限、节点身份不可混用；网关工程/内网环境及实际合并范围届时明确，不把路线记录当立即合并授权。
+
+**本地脚本尚未最终验收，当前全部演示进程已停。** 新增 `partner-preview.mjs`/npm dev/status/stop:bot-preview；65服务测试（含7预览）通过，安全构建/真实伙伴页/固定profile重开/防重复/最终普通stop和starter退出0已过。前几轮因关闭后Playwright对象释放导致退出检查误报，已保存真实child句柄修正；但PTY Ctrl+C23192退出1，App已退、Java94487/60888及Partner库仍运行，Node25→Node22同步bootstrap的信号收尾尚待修，不能声称脚本全部完成。随后显式stop76147/1ad251已确认App/Java/Partner MySQL全部停止、数据保留；暂用 `stop:bot-preview`，回来续测时先修复/复验Ctrl+C。源码未提交，保留所有dirty/untracked文件；无活动实现句柄，不自动重开。原三服务健康同ID保留，定时PAUSED；原临时未配置profile app-preview-7hnllQ也保留，不删除。
+
 **2026-10-13 最终出口：R01-A8 accepted，源代码f1067cc3，全部句柄闭合。** Group显式团队记忆/MySQL5.7+JDK8无FK/当前成员读admin写/Task-result受限来源/手工编辑确认与停用/独立revision与持久Run快照/在途变更failed-MEMORY_CHANGED释放容量/不自动重跑/App维护及不可变专家版本明确采用已交付。原个人Runtime/机器人独立，模拟模型零工具、无自动总结或跨团队学习。
 
 root实际读diff、独立首轮49main+23test新编及最终J2 23test重编，67JUnit/1884parity0/class52/34libs；93App、58service、10IPC、F03全24、main+affectedtest/web类型零、全Appbuild、真实ReactChromiumfakeIPC及最终91341实际JavaHTTP/MySQL/AppWorker/SQLite/DeepAgent fake4tools0通过。26816真实V5upgrade42/empty41权限-source-CAS-故障-快照-失效-capacity-disabled-expiredunknown-budget-reopen全部过，目录历史两库、持久Java+MySQL重启、旧Partner25回归通过。新jar76e6447e；验收reviews/R01-A8-acceptance.md，使用local-partner-app.md。

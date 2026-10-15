@@ -3,13 +3,21 @@ import type { IpcMain, IpcMainInvokeEvent, BrowserWindow } from "electron"
 const mock = vi.hoisted(() => ({
   getStatus: vi.fn(),
   sendMessage: vi.fn(),
-  createMemory: vi.fn(),
-  updateMemory: vi.fn(),
-  disableMemory: vi.fn(),
+  createExpertMemory: vi.fn(),
+  updateExpertMemory: vi.fn(),
+  disableExpertMemory: vi.fn(),
+  revokeTeam: vi.fn(),
+  packaged: false,
+  options: null as Record<string, unknown> | null,
   dialog: vi.fn()
 }))
 vi.mock("electron", () => ({
-  app: { getPath: () => "/unread-test-user-data" },
+  app: {
+    getPath: () => "/unread-test-user-data",
+    get isPackaged() {
+      return mock.packaged
+    }
+  },
   BrowserWindow: class {},
   safeStorage: {},
   dialog: { showOpenDialog: mock.dialog }
@@ -27,11 +35,15 @@ vi.mock("../agent/managed-transport-delivery", () => ({
 vi.mock("../services/bot/requirement-executor", () => ({ PartnerRequirementExecutor: class {} }))
 vi.mock("../services/bot/partner-dev-controller", () => ({
   PartnerDevController: class {
+    constructor(options: Record<string, unknown>) {
+      mock.options = options
+    }
     getStatus = mock.getStatus
     sendMessage = mock.sendMessage
-    createMemory = mock.createMemory
-    updateMemory = mock.updateMemory
-    disableMemory = mock.disableMemory
+    createExpertMemory = mock.createExpertMemory
+    updateExpertMemory = mock.updateExpertMemory
+    disableExpertMemory = mock.disableExpertMemory
+    revokeTeam = mock.revokeTeam
   }
 }))
 import { registerPartnerDevHandlers } from "./partner-dev"
@@ -41,6 +53,9 @@ let handlers: Map<string, (event: IpcMainInvokeEvent, ...args: unknown[]) => Pro
   window: BrowserWindow
 beforeEach(() => {
   vi.clearAllMocks()
+  vi.unstubAllEnvs()
+  vi.stubEnv("CMB_PARTNER_LOCAL_CONNECTION_FILE", "")
+  mock.packaged = false
   mock.getStatus.mockResolvedValue({ configured: false })
   mock.dialog.mockResolvedValue({ canceled: true, filePaths: [] })
   const frame = { parent: null, url: "http://localhost:5173/" },
@@ -62,13 +77,26 @@ beforeEach(() => {
 })
 const call = (name: string, ...args: unknown[]) =>
   handlers.get("partnerDev:" + name)!(event, ...args)
-it("registration alone does not read config, connect, or execute; 20 fixed handlers only", async () => {
-  expect(handlers.size).toBe(20)
+it("registration alone does not read config, connect, or execute; 17 fixed expert handlers only", async () => {
+  expect(handlers.size).toBe(17)
   expect(mock.getStatus).not.toHaveBeenCalled()
   expect(await call("getStatus")).toEqual({ configured: false })
   expect(mock.getStatus).toHaveBeenCalledTimes(1)
 })
-it("memory IPC has no arbitrary identities, paths, policies or actor-supplied author fields", async () => {
+it("expert maintenance accepts no source promotion, path, scope or caller-selected expert", async () => {
+  for (const extra of [
+    { botId: "other" },
+    { groupId: "g" },
+    { source: { kind: "task", taskId: "private" } },
+    { path: "/outside" }
+  ])
+    await expect(call("createExpertMemory", { text: "manual", ...extra })).rejects.toThrow(
+      "INVALID_PAYLOAD"
+    )
+  for (const name of ["startExpert", "listExpertMemories"])
+    await expect(call(name, { botId: "other" })).rejects.toThrow("INVALID_PAYLOAD")
+})
+it("expert memory IPC has no arbitrary identities, paths, policies or actor-supplied author fields", async () => {
   for (const extra of [
     { groupId: "other" },
     { spaceId: "B" },
@@ -77,16 +105,40 @@ it("memory IPC has no arbitrary identities, paths, policies or actor-supplied au
     { url: "https://example.com" },
     { memoryPolicy: "auto" }
   ])
-    await expect(
-      call("createMemory", { text: "团队约定", source: { kind: "manual" }, ...extra })
-    ).rejects.toThrow("INVALID_PAYLOAD")
-  await expect(call("listMemories", { groupId: "other" })).rejects.toThrow("INVALID_PAYLOAD")
-  await expect(call("enableTeamMemory", { botId: "expert" })).rejects.toThrow("INVALID_PAYLOAD")
-  expect(mock.createMemory).not.toHaveBeenCalled()
-  mock.createMemory.mockResolvedValue({ revision: 1 })
-  expect(await call("createMemory", { text: "团队约定", source: { kind: "manual" } })).toEqual({
+    await expect(call("createExpertMemory", { text: "业务约定", ...extra })).rejects.toThrow(
+      "INVALID_PAYLOAD"
+    )
+  await expect(call("listExpertMemories", { groupId: "other" })).rejects.toThrow("INVALID_PAYLOAD")
+  expect(mock.createExpertMemory).not.toHaveBeenCalled()
+  mock.createExpertMemory.mockResolvedValue({ revision: 1 })
+  expect(await call("createExpertMemory", { text: "业务约定" })).toEqual({
     revision: 1
   })
+})
+it("does not register legacy team, group binding, adoption or raw node-enable operations", () => {
+  for (const name of [
+    "createTeam",
+    "bindTeam",
+    "authorizeTeam",
+    "revokeTeam",
+    "enableNode",
+    "listMemories",
+    "createMemory",
+    "updateMemory",
+    "disableMemory",
+    "enableTeamMemory",
+    "adoptExpertMemory"
+  ])
+    expect(handlers.has("partnerDev:" + name)).toBe(false)
+})
+it("local authorization revocation remains explicit and cannot choose another context", async () => {
+  mock.revokeTeam.mockResolvedValue({ nodeEnabled: false })
+  await expect(call("revokeLocalAuthorization", { groupId: "other" })).rejects.toThrow(
+    "INVALID_PAYLOAD"
+  )
+  expect(mock.revokeTeam).not.toHaveBeenCalled()
+  expect(await call("revokeLocalAuthorization")).toEqual({ nodeEnabled: false })
+  expect(mock.revokeTeam).toHaveBeenCalledTimes(1)
 })
 it.each(["other-window", "subframe", "missing-frame", "remote-frame", "remote-main-window"])(
   "rejects %s before privileged controller work",
@@ -130,4 +182,26 @@ it("main asks through a native dialog; cancel does not import renderer data", as
 it("unexpected dependency errors never expose raw exception details", async () => {
   mock.getStatus.mockRejectedValue(new Error("SECRET_SQL_STACK"))
   await expect(call("getStatus")).rejects.toThrow(/^DEPENDENCY_UNAVAILABLE$/)
+})
+it("only an unpackaged preview can supply main-owned default connection configuration", async () => {
+  const register = () =>
+    registerPartnerDevHandlers(
+      { handle: vi.fn() } as unknown as IpcMain,
+      () => window,
+      "http://localhost:5173/"
+    )
+  expect(mock.options?.defaultDescriptor).toBeUndefined()
+  vi.stubEnv("CMB_PARTNER_LOCAL_CONNECTION_FILE", "/private/local/connection.json")
+  register()
+  expect(mock.options?.defaultDescriptor).toBeTypeOf("function")
+  expect(mock.dialog).not.toHaveBeenCalled()
+  mock.packaged = true
+  register()
+  expect(mock.options?.defaultDescriptor).toBeUndefined()
+  mock.packaged = false
+  vi.stubEnv("CMB_PARTNER_LOCAL_CONNECTION_FILE", "relative/connection.json")
+  register()
+  await expect((mock.options?.defaultDescriptor as () => Promise<unknown>)()).rejects.toThrow(
+    "STORAGE_FAILURE"
+  )
 })

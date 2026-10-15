@@ -1,7 +1,7 @@
 import { ownedProcess } from "../process.mjs"
 import { active, appPassword } from "./test-database.mjs"
 
-const children = new Set(), actions = new Set(["seed-v5", "verify-v5", "faults", "expire", "facts", "other-space"])
+const children = new Set(), actions = new Set(["seed-v5", "verify-v5", "seed-v6", "verify-v6", "faults", "expire", "facts", "other-space"])
 const phases = new Set(["input", "seed-v5", "verify-v5", "write-faults", "expire", "other-space"])
 // Pure classification only: never retain/return any child bytes, error detail,
 // credential, command line or runtime path in a diagnostic.

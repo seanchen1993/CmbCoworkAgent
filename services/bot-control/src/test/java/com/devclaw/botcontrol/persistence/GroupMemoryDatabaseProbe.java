@@ -36,30 +36,11 @@ public final class GroupMemoryDatabaseProbe {
             c.setTransactionIsolation(Connection.TRANSACTION_REPEATABLE_READ);c.setAutoCommit(false);
             for(String table:DatabaseReadiness.TABLES){if(v5&&Arrays.asList("group_memory_revisions","group_memories","group_memory_commands","requirement_run_memory_snapshots").contains(table))continue;
                 List<String> rows=new ArrayList<String>();out.writeUTF(table);
-                try(PreparedStatement p=c.prepareStatement("SELECT * FROM "+table+(v5&&table.equals("bot_schema_history")?" WHERE version IN ('1','2','3','4','5')":""))){p.setQueryTimeout(2);try(ResultSet r=p.executeQuery()){out.writeInt(r.getMetaData().getColumnCount());while(r.next()){ByteArrayOutputStream bytes=new ByteArrayOutputStream();DataOutputStream row=new DataOutputStream(bytes);for(int i=1;i<=r.getMetaData().getColumnCount();i++){byte[] value=r.getBytes(i);row.writeInt(value==null?-1:value.length);if(value!=null)row.write(value);}rows.add(Base64.getEncoder().encodeToString(bytes.toByteArray()));}}}
+                try(PreparedStatement p=c.prepareStatement("SELECT * FROM "+table+(v5&&table.equals("bot_schema_history")?" WHERE version IN ('1','2','3','4','5')":""))){p.setQueryTimeout(2);try(ResultSet r=p.executeQuery()){out.writeInt(r.getMetaData().getColumnCount()-(v5&&table.equals("requirement_run_queue")&&r.getMetaData().getColumnCount()==29?1:0));while(r.next()){ByteArrayOutputStream bytes=new ByteArrayOutputStream();DataOutputStream row=new DataOutputStream(bytes);for(int i=1;i<=r.getMetaData().getColumnCount();i++){if(v5&&"memory_scope".equals(r.getMetaData().getColumnName(i)))continue;byte[] value=r.getBytes(i);row.writeInt(value==null?-1:value.length);if(value!=null)row.write(value);}rows.add(Base64.getEncoder().encodeToString(bytes.toByteArray()));}}}
                 Collections.sort(rows);for(String row:rows){out.writeUTF(row);}out.writeBoolean(false);
             }c.rollback();
         }
         StringBuilder hex=new StringBuilder();for(byte value:digest.digest())hex.append(String.format(Locale.ROOT,"%02x",value&255));return hex.toString();
-    }
-    private static Run v5Start(HikariDataSource source,Policy policy,ObjectNode ids,String command)throws Exception {
-        RequirementRunApplication app=new RequirementRunApplication(source,policy,policy,TransactionObserver.NONE);Enqueued queued=app.enqueueRequirement(BUSINESS,command,ids.path("task").asText(),ids.path("bot").asText(),1,expiry());Run claimed=app.claimRequirementRun(NODE,queued.runId);
-        // This is exactly the old V5 state transition, before memory existed.
-        try(Connection c=source.getConnection()){c.setAutoCommit(false);JdbcApplicationStore db=new JdbcApplicationStore(c,"A",TransactionObserver.NONE);db.group(claimed.groupId);JdbcRequirementRunStore runs=new JdbcRequirementRunStore(c,"A");Run running=runs.start(runs.run(claimed.id),db.now().toInstant());c.commit();return running;}
-    }
-    private static Run migrationFixtureWindow(HikariDataSource source,Run seeded)throws Exception {
-        // Disposable migration fixture ONLY. Seed -> migrate -> verify -> JVM boot
-        // is not a production node execution interval. Keep this one known old
-        // running attempt alive up to its EXISTING finite ten-minute deadline;
-        // no production lease duration, terminal row, ticket or deadline changes.
-        try(Connection c=source.getConnection()){
-            c.setAutoCommit(false);JdbcApplicationStore db=new JdbcApplicationStore(c,"A",TransactionObserver.NONE);check(db.group(seeded.groupId)!=null);JdbcRequirementRunStore runs=new JdbcRequirementRunStore(c,"A");Run old=runs.run(seeded.id);Instant now=db.now().toInstant();
-            check(old!=null&&old.spaceId.equals("A")&&old.status==Status.RUNNING&&old.attemptId.equals(seeded.attemptId)&&old.leaseId.equals(seeded.leaseId)&&old.version==seeded.version&&old.deadline.isAfter(now)&&!old.deadline.isAfter(now.plusSeconds(600)));
-            try(PreparedStatement p=c.prepareStatement("UPDATE requirement_run_queue SET lease_expires_at=? WHERE space_id='A' AND id=? AND status='running' AND attempt_id=? AND lease_id=? AND version=?")){
-                p.setQueryTimeout(2);p.setTimestamp(1,java.sql.Timestamp.from(old.deadline),Calendar.getInstance(TimeZone.getTimeZone("UTC")));p.setString(2,old.id);p.setString(3,old.attemptId);p.setString(4,old.leaseId);p.setLong(5,old.version);check(p.executeUpdate()==1);
-            }
-            Run fixture=runs.run(old.id);check(fixture.leaseExpiresAt.equals(old.deadline)&&fixture.deadline.equals(seeded.deadline)&&fixture.attemptId.equals(seeded.attemptId));c.commit();return fixture;
-        }
     }
     private static ObjectNode seedV5(HikariDataSource source)throws Exception {
         phase="seed-v5";check(MigrationRunner.configuration(source).target("5").load().migrate().migrationsExecuted==5);Policy policy=new Policy();ObjectNode ids=RuntimeNodeDatabaseProbe.seed(source,policy);
@@ -69,14 +50,38 @@ public final class GroupMemoryDatabaseProbe {
         BotResult published=new com.devclaw.botcontrol.validation.ContractBoundary().readResponse("createBotVersion",201,response.body(),BotResult.class);
         UpdateGroupMembersRequest update=new UpdateGroupMembersRequest();update.commandId="v5-adopt-explicit";update.expectedVersion=1L;update.members=group.members;update.bots=group.bots;update.bots.get(0).botVersionId=published.botVersion.id;check(bots.execute(Operation.UPDATE_GROUP_MEMBERS,OWNER,group.id,JdbcApplicationStore.json(update)).status==200);
         RuntimeNodeApplication nodes=new RuntimeNodeApplication(source,policy,policy,TransactionObserver.NONE);nodes.observeDesktopNode(NODE,true,Collections.singleton(Capability.REQUIREMENTS_ANALYZE));nodes.authorizeRequirementNode(OWNER,ids.path("group").asText(),"node","view",0,expiry());
-        Run terminal=v5Start(source,policy,ids,"v5-terminal");
-        try(Connection c=source.getConnection()){c.setAutoCommit(false);JdbcApplicationStore db=new JdbcApplicationStore(c,"A",TransactionObserver.NONE);db.group(terminal.groupId);JdbcRequirementRunStore runs=new JdbcRequirementRunStore(c,"A");runs.settle(runs.run(terminal.id),db.now().toInstant(),"succeeded","V5_PERSISTED_RESULT");c.commit();}
-        Run running=migrationFixtureWindow(source,v5Start(source,policy,ids,"v5-running"));ObjectNode result=JSON.createObjectNode();result.set("running",JSON.valueToTree(running));result.set("terminal",JSON.valueToTree(terminal));result.put("v5RunningFixtureWindow",true);result.put("v5Facts",facts(source,true));return result;
+        ObjectNode terminal=LegacyMemoryRunFixture.create(source,nodes,ids.path("task").asText(),ids.path("bot").asText(),"v5-terminal",expiry(),"succeeded");
+        ObjectNode running=LegacyMemoryRunFixture.create(source,nodes,ids.path("task").asText(),ids.path("bot").asText(),"v5-running",expiry(),"running");ObjectNode result=JSON.createObjectNode();result.set("running",running);result.set("terminal",terminal);result.put("v5RunningFixtureWindow",true);result.put("v5Facts",facts(source,true));return result;
     }
     private static ObjectNode verifyV5(HikariDataSource source,JsonNode fixture)throws Exception {
         phase="verify-v5";exact(fixture,"v5Facts","runId","terminalId");check(fixture.path("v5Facts").asText().equals(facts(source,true)));Policy policy=new Policy();RequirementRunApplication app=new RequirementRunApplication(source,policy,policy,TransactionObserver.NONE);
         Run run=app.getRequirementRun(BUSINESS,id(fixture,"runId"));check(run.status==Status.RUNNING);try(Connection c=source.getConnection()){JdbcGroupMemoryStore.Frozen frozen=new JdbcGroupMemoryStore(c,"A").snapshot(run);check(frozen.found&&frozen.value==null);}
         check(app.getRequirementResult(BUSINESS,id(fixture,"terminalId")).text.equals("V5_PERSISTED_RESULT"));return JSON.createObjectNode().put("v5FactsPreserved",true).put("historicalRunningNull",true).put("oldResultPreserved",true);
+    }
+    private static ObjectNode seedV6(HikariDataSource source)throws Exception {
+        ObjectNode old=seedV5(source);check(MigrationRunner.configuration(source).target("6").load().migrate().migrationsExecuted==1);
+        Policy policy=new Policy();String group=old.path("running").path("groupId").asText();String bot,version;
+        try(Connection c=source.getConnection()){c.setAutoCommit(false);Group value=new JdbcApplicationStore(c,"A",TransactionObserver.NONE).group(group);bot=value.bots.get(0).botId;version=value.bots.get(0).botVersionId;c.rollback();}
+        Changed memory=new GroupMemoryApplication(source,policy,TransactionObserver.NONE).createGroupMemory(OWNER,group,"v6-private-memory","LEGACY_GROUP_PRIVATE_SENTINEL",manual());
+        RuntimeNodeApplication nodes=new RuntimeNodeApplication(source,policy,policy,TransactionObserver.NONE);
+        ObjectNode queued=LegacyMemoryRunFixture.create(source,nodes,oldTask(source,group),bot,"v6-queued",expiry(),"queued");
+        ObjectNode running=LegacyMemoryRunFixture.create(source,nodes,oldTask(source,group),bot,"v6-running",expiry(),"running");
+        String snapshot=GroupMemoryValues.encode(new Snapshot(memory.revision,Collections.singletonList(memory.memory)));
+        try(Connection c=source.getConnection();PreparedStatement p=c.prepareStatement("INSERT INTO requirement_run_memory_snapshots(space_id,run_id,attempt_id,snapshot_json) VALUES('A',?,?,?)")){p.setQueryTimeout(2);p.setString(1,running.path("id").asText());p.setString(2,running.path("attemptId").asText());p.setString(3,snapshot);check(p.executeUpdate()==1);}
+        ObjectNode result=JSON.createObjectNode().put("groupId",group).put("botId",bot).put("botVersionId",version).put("snapshot",snapshot).put("memory",GroupMemoryValues.encode(memory.memory));result.set("queued",queued);result.set("running",running);result.set("terminal",old.get("terminal"));return result;
+    }
+    private static String oldTask(HikariDataSource source,String group)throws Exception {
+        try(Connection c=source.getConnection();PreparedStatement p=c.prepareStatement("SELECT id FROM tasks WHERE space_id='A' AND group_id=?")){p.setQueryTimeout(2);p.setString(1,group);try(ResultSet row=p.executeQuery()){check(row.next());return row.getString(1);}}
+    }
+    private static ObjectNode verifyV6(HikariDataSource source,JsonNode fixture)throws Exception {
+        Policy policy=new Policy();RequirementRunApplication app=new RequirementRunApplication(source,policy,policy,TransactionObserver.NONE);
+        for(String field:Arrays.asList("queued","running","terminal"))check("group".equals(app.getRequirementRun(BUSINESS,fixture.path(field).path("id").asText()).memoryScope));
+        Run running=app.getRequirementRun(BUSINESS,fixture.path("running").path("id").asText());
+        try(Connection c=source.getConnection()){check(GroupMemoryValues.encode(new JdbcGroupMemoryStore(c,"A").snapshot(running).value).equals(fixture.path("snapshot").asText()));}
+        GroupMemoryApplication.Listed list=new GroupMemoryApplication(source,policy,TransactionObserver.NONE).listGroupMemories(OWNER,fixture.path("groupId").asText());check(list.revision==1&&list.memories.size()==1&&GroupMemoryValues.encode(list.memories.get(0)).equals(fixture.path("memory").asText()));
+        check(new ExpertMemoryApplication(source,policy).list(OWNER,fixture.path("botId").asText()).memories.isEmpty());
+        check(!new ExpertMemoryApplication(source,policy).adoption(OWNER,fixture.path("groupId").asText(),fixture.path("botId").asText()).adopted);
+        return JSON.createObjectNode().put("v6ScopeAndDataPreserved",true).put("noExpertPromotion",true);
     }
     private static ObjectNode faults(HikariDataSource source,JsonNode fixture)throws Exception {
         phase="write-faults";exact(fixture,"groupId");String group=id(fixture,"groupId");Policy policy=new Policy();GroupMemoryApplication app=new GroupMemoryApplication(source,policy,TransactionObserver.NONE);String before=facts(source,false);
@@ -104,8 +109,8 @@ public final class GroupMemoryDatabaseProbe {
     }
     private static final class ListedCheck {static void check(GroupMemoryApplication.Listed value){GroupMemoryDatabaseProbe.check(value.revision==1&&value.memories.size()==1&&value.memories.get(0).text.equals("SPACE_B_PRIVATE_MEMORY")&&value.memories.get(0).spaceId.equals("B"));}}
     public static void main(String[] args){int exit=1;try{
-        check(args.length==1&&Arrays.asList("seed-v5","verify-v5","faults","expire","facts","other-space").contains(args[0]));ByteArrayOutputStream bytes=new ByteArrayOutputStream();for(int value;(value=System.in.read())!=-1;){check(bytes.size()<131072);bytes.write(value);}JsonNode request=JSON.readTree(bytes.toByteArray());exact(request,"db","fixture");JsonNode fixture=request.get("fixture");check(fixture.isObject());LocalDatabaseConfig config=LocalDatabaseConfig.fromTrustedLauncher(new ByteArrayInputStream(JSON.writeValueAsBytes(request.get("db"))));
-        try(HikariDataSource source=config.openPool()){DatabaseReadiness.requireConnection(source);ObjectNode result;if(args[0].equals("seed-v5")){exact(fixture);result=seedV5(source);}else{DatabaseReadiness.requireReady(source);switch(args[0]){case "verify-v5":result=verifyV5(source,fixture);break;case "faults":result=faults(source,fixture);break;case "expire":result=expire(source,fixture);break;case "other-space":result=otherSpace(source,fixture);break;default:exact(fixture);result=JSON.createObjectNode().put("factsSha256",facts(source,false));}}
+        check(args.length==1&&Arrays.asList("seed-v5","verify-v5","seed-v6","verify-v6","faults","expire","facts","other-space").contains(args[0]));ByteArrayOutputStream bytes=new ByteArrayOutputStream();for(int value;(value=System.in.read())!=-1;){check(bytes.size()<131072);bytes.write(value);}JsonNode request=JSON.readTree(bytes.toByteArray());exact(request,"db","fixture");JsonNode fixture=request.get("fixture");check(fixture.isObject());LocalDatabaseConfig config=LocalDatabaseConfig.fromTrustedLauncher(new ByteArrayInputStream(JSON.writeValueAsBytes(request.get("db"))));
+        try(HikariDataSource source=config.openPool()){DatabaseReadiness.requireConnection(source);ObjectNode result;if(args[0].equals("seed-v5")||args[0].equals("seed-v6")){exact(fixture);result=args[0].equals("seed-v5")?seedV5(source):seedV6(source);}else{DatabaseReadiness.requireReady(source);switch(args[0]){case "verify-v6":result=verifyV6(source,fixture);break;case "verify-v5":result=verifyV5(source,fixture);break;case "faults":result=faults(source,fixture);break;case "expire":result=expire(source,fixture);break;case "other-space":result=otherSpace(source,fixture);break;default:exact(fixture);result=JSON.createObjectNode().put("factsSha256",facts(source,false));}}
             result.put("status","verified").put("case",args[0]);System.out.println(JSON.writeValueAsString(result));exit=0;
         }
     }catch(Exception failure){System.out.println("{\"status\":\"failed\",\"phase\":\""+phase+"\",\"category\":\"GROUP_MEMORY_PROBE\"}");}System.exit(exit);}

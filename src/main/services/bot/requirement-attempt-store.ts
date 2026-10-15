@@ -13,8 +13,17 @@ export interface StoredRequirementAttempt {
   text: string | null
 }
 function fingerprint(run: PartnerRequirementRun) {
-  const { status: _status, leaseExpiresAt: _expiry, ...identity } = validatePartnerRun(run)
-  return createHash("sha256").update(JSON.stringify(identity)).digest("hex")
+  const {
+    status: _status,
+    leaseExpiresAt: _expiry,
+    memoryScope,
+    ...identity
+  } = validatePartnerRun(run)
+  // V6 local receipts predate this field. Explicit legacy 'group' must retain
+  // their exact fingerprint; new expert attempts remain distinct.
+  return createHash("sha256")
+    .update(JSON.stringify(memoryScope === "bot" ? { ...identity, memoryScope } : identity))
+    .digest("hex")
 }
 
 /** Durable local at-most-one admission. A reserved/running record after a crash
