@@ -18,6 +18,8 @@ const COLLAPSED_TOOL_LABELS: Record<string, string> = {
   invoke_deferred_tool: "调用延迟加载的工具",
   inspect_tool: "查看工具定义",
   search_tool: "搜索工具",
+  inAppBrowser_list_recordings: "内置浏览器-列出录制脚本",
+  inAppBrowser_execute_recording: "内置浏览器-执行录制脚本",
   mcp__inAppBrowser__browser_close: "内置浏览器-关闭",
   mcp__inAppBrowser__browser_resize: "内置浏览器-调整窗口大小",
   mcp__inAppBrowser__browser_console_messages: "内置浏览器-获取控制台消息",

@@ -309,6 +309,7 @@ import {
   getActionStationarityHaltError
 } from "./action-stationarity"
 import { createLspTool } from "./tools/lsp-tool"
+import { createBrowserRecordingTools } from "./tools/browser-recording-tools"
 import { detectJavaProject } from "../lsp"
 import {
   buildAgentsPromptLoadStatusItems,
@@ -5016,6 +5017,7 @@ export async function prepareForegroundRuntimeToolCatalog(
     ? [createMemorySearchTool([]), createMemoryGetTool([])]
     : []
   const extras = createRuntimeBaseTools(options, workspacePath, policy)
+  extras.push(...(await createBrowserRecordingTools(scoped, options)))
   const deferred = await createToolSearchTools(definitions, options, {
     codeExecRouteEnabled,
     savedToolsEnabled: codeExecEnabled
@@ -5932,6 +5934,15 @@ The workspace root is: ${fileRoot}`
   }
 
   const extraTools = createRuntimeBaseTools(options, fileRoot, runtimePolicy)
+  if (!disableMcpTools && !isConstrainedCoordinatorWorker) {
+    extraTools.push(
+      ...(await createBrowserRecordingTools(allMcpTools, {
+        workspacePath,
+        threadId: options.threadId,
+        abortSignal: options.abortSignal
+      }))
+    )
+  }
 
   // Wrap extra tools so that errors are returned as strings instead of throwing
   function wrapToolErrors(tools: RuntimeTool[]): void {
