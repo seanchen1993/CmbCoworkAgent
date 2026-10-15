@@ -108,7 +108,6 @@ import {
 } from "./project-mode-operational-metrics"
 import {
   buildChangeKindAggs,
-  buildComputeEfficiency,
   buildNewRatioHistogramAgg,
   buildPendingScalability,
   computeUnmeasuredRatio,
@@ -117,6 +116,8 @@ import {
   normalizeNewRatioHistogram,
   type DashboardEfficiencyData
 } from "./dashboard-efficiency"
+import { fetchEfficiencyCompute } from "./dashboard-efficiency-full"
+import type { EfficiencyPluginFilter } from "../../shared/dashboard-efficiency-compute"
 import {
   executeDashboardEsQuery,
   type DashboardEsIndexAlias,
@@ -1350,6 +1351,8 @@ function requireDashboardAnalysisAgentAccess(): void {
 }
 
 // 「生成但未提交分析」（漏斗首层下钻）的访问门槛：
+// - 项目模式：继承项目运营概览的数据权限；
+// 平台模式沿用以下规则：
 // - 管理员（VITE_TRACE_EVOLVER_REVIEW_ADMIN_YST_IDS）：可看全部数据；
 // - 非管理员但在 VITE_DASHBOARD_UNRESTRICTED_YST_IDS 名单内：可看与自己 upperOrgLv1 相同的数据；
 // - 其他普通登录用户：仅可看自己的数据。
@@ -1359,6 +1362,7 @@ interface UncommittedAnalysisAccess {
   sapId: string
   ystId: string
   upperOrgLv1: string
+  projectAccessFilter: Record<string, unknown> | null
 }
 
 function isDashboardUncommittedAnalysisAllowed(
@@ -1371,9 +1375,17 @@ function isDashboardUncommittedAnalysisAllowed(
 function requireDashboardUncommittedAnalysisAccess(): UncommittedAnalysisAccess {
   const access = getDashboardAccessContext()
   if (import.meta.env.DEV) {
-    return { admin: true, selfOnly: false, sapId: "dev", ystId: "dev", upperOrgLv1: "" }
+    return {
+      admin: true,
+      selfOnly: false,
+      sapId: "dev",
+      ystId: "dev",
+      upperOrgLv1: "",
+      projectAccessFilter: null
+    }
   }
   if (!access.loggedIn) throw new Error("请先登录后再查看生成但未提交分析")
+  const projectAccessFilter = buildProjectModeAccessFilter(access)
   const admin = Boolean(access.ystId) && getTraceEvolverReviewAdminIds().has(access.ystId)
   if (admin) {
     return {
@@ -1381,7 +1393,8 @@ function requireDashboardUncommittedAnalysisAccess(): UncommittedAnalysisAccess 
       selfOnly: false,
       sapId: access.sapId,
       ystId: access.ystId,
-      upperOrgLv1: access.upperOrgLv1
+      upperOrgLv1: access.upperOrgLv1,
+      projectAccessFilter
     }
   }
   if (access.unrestricted && access.upperOrgLv1) {
@@ -1390,7 +1403,8 @@ function requireDashboardUncommittedAnalysisAccess(): UncommittedAnalysisAccess 
       selfOnly: false,
       sapId: access.sapId,
       ystId: access.ystId,
-      upperOrgLv1: access.upperOrgLv1
+      upperOrgLv1: access.upperOrgLv1,
+      projectAccessFilter
     }
   }
   return {
@@ -1398,7 +1412,8 @@ function requireDashboardUncommittedAnalysisAccess(): UncommittedAnalysisAccess 
     selfOnly: true,
     sapId: access.sapId,
     ystId: access.ystId,
-    upperOrgLv1: access.upperOrgLv1
+    upperOrgLv1: access.upperOrgLv1,
+    projectAccessFilter
   }
 }
 
@@ -3680,16 +3695,19 @@ function uncommittedScopeFilters(
   access: UncommittedAnalysisAccess
 ): Record<string, unknown>[] {
   const filters: Record<string, unknown>[] = []
-  // 数据权限与界面筛选 AND 叠加：普通用户锁本人，名单用户锁本室，管理员不加身份约束。
-  if (access.selfOnly) {
+  const projectId = typeof options?.projectId === "string" ? options.projectId.trim() : ""
+  const featureSlug = typeof options?.featureSlug === "string" ? options.featureSlug.trim() : ""
+  // 项目下钻沿用项目概览权限，平台模式沿用全量 / 本室 / 本人的限制。
+  // 权限约束继续与界面筛选 AND 叠加。
+  if (options?.projectMode || projectId || featureSlug) {
+    if (access.projectAccessFilter) filters.push(access.projectAccessFilter)
+  } else if (access.selfOnly) {
     filters.push(buildUncommittedSelfUserFilter(access))
   } else if (!access.admin && access.upperOrgLv1) {
     filters.push(buildUpperOrgLv1Filter(access.upperOrgLv1))
   }
   const orgFilterClause = buildUpperOrgLv1ListFilter(normalizeUpperOrgLv1List(options?.upperOrgLv1))
   if (orgFilterClause) filters.push(orgFilterClause)
-  const projectId = typeof options?.projectId === "string" ? options.projectId.trim() : ""
-  const featureSlug = typeof options?.featureSlug === "string" ? options.featureSlug.trim() : ""
   if (projectId) {
     filters.push({ term: { "properties.harnessProjectId": projectId } })
   } else if (options?.projectMode || featureSlug) {
@@ -3725,7 +3743,7 @@ async function fetchUncommittedRanking(
   range: TimeRange,
   options?: UncommittedScopeOptions
 ): Promise<UncommittedRankingData> {
-  // 管理员可看全部；unrestricted 名单用户看本室；普通用户只看本人。
+  // 项目模式继承项目概览权限，平台模式保留原有身份范围。
   const access = requireDashboardUncommittedAnalysisAccess()
   const scopeFilters = uncommittedScopeFilters(options, access)
 
@@ -3879,7 +3897,7 @@ async function fetchUncommittedDetail(
   range: TimeRange,
   options?: UncommittedScopeOptions
 ): Promise<UncommittedDetailData> {
-  // 管理员可看全部；unrestricted 名单用户看本室；普通用户只看本人。
+  // 项目模式继承项目概览权限，平台模式保留原有身份范围。
   const access = requireDashboardUncommittedAnalysisAccess()
   const normalizedSapId = sapId.trim()
   if (!normalizedSapId) throw new Error("sapId is required")
@@ -13892,7 +13910,7 @@ async function fetchProjectModeProjectCommits(
  */
 async function fetchDashboardEfficiency(
   range: TimeRange,
-  opts?: OrgFilterOptions
+  opts?: OrgFilterOptions & EfficiencyPluginFilter
 ): Promise<DashboardEfficiencyData> {
   const access = requireDashboardProjectModeAccess()
   const orgFilterClause = buildProjectModeOrgFilter(opts, access)
@@ -13911,7 +13929,13 @@ async function fetchDashboardEfficiency(
     { terms: { "properties.harnessProjectId": leanProjectIds } }
   ]
 
-  const [changeKindRaw, overallRaw, traceRaw, codeTraceRaw] = await Promise.all([
+  const traceFilters = [
+    ...projectModeTraceFilters(range, orgFilterClause),
+    { terms: { harnessProjectId: leanProjectIds } }
+  ]
+  const computeQuery = (index: "trace" | "event", body: Record<string, unknown>) =>
+    esQuery(getEsIndex(index), body)
+  const [changeKindRaw, overallRaw, computeResult, projectRaw] = await Promise.all([
     // 指标 2 — adoption split by 新增 / 存量.
     fetchProjectModeCodeAggs(
       null,
@@ -13924,50 +13948,20 @@ async function fetchDashboardEfficiency(
     ),
     // Unsplit totals, used for the unmeasured-share credibility indicator.
     fetchProjectModeCodeAggs(null, range, (perBucketAggs) => perBucketAggs, codeExtraFilters),
-    // 指标 3 numerator — tokens live on the trace index.
+    fetchEfficiencyCompute(computeQuery, traceFilters, codeExtraFilters, range, {
+      ...opts,
+      scope: opts?.scope ?? "dev"
+    }),
+    // The panel-wide project count keeps its original active-project scope;
+    // compute-only plugin/stage filters must not alter the adoption section.
     esQuery(getEsIndex("trace"), {
       size: 0,
-      track_total_hits: false,
-      query: {
-        bool: {
-          filter: [
-            ...projectModeTraceFilters(range, orgFilterClause),
-            { terms: { harnessProjectId: leanProjectIds } }
-          ]
-        }
-      },
-      aggs: {
-        trace_count: { value_count: { field: "traceId" } },
-        project_count: { cardinality: { field: "harnessProjectId" } },
-        total_input_tokens: { sum: { field: "totalInputTokens" } },
-        total_output_tokens: { sum: { field: "totalOutputTokens" } },
-        total_tokens: { sum: { field: "totalTokens" } },
-        // Flattened at trace-finish time (see summarizeTraceCacheTokens);
-        // a part of the input total, not an addition to it.
-        cache_read_tokens: { sum: { field: "cacheReadTokens" } }
-      }
-    }),
-    // Traces that actually produced code, so the panel can show how much of the
-    // token spend went to conversations that never wrote anything.
-    esQuery(getEsIndex("event"), {
-      size: 0,
-      track_total_hits: false,
-      query: {
-        bool: {
-          filter: [
-            { term: { eventName: "code_gen" } },
-            timeRangeFilter("eventTime", range),
-            ...codeExtraFilters
-          ]
-        }
-      },
-      aggs: { code_traces: { cardinality: { field: "properties.traceId" } } }
+      query: { bool: { filter: traceFilters } },
+      aggs: { project_count: { cardinality: { field: "harnessProjectId" } } }
     })
   ])
 
   const overall = normalizeCodeStatsFromAggs(overallRaw)
-  const traceAggs = asRecord(asRecord(traceRaw).aggregations)
-  const codeTraceAggs = asRecord(asRecord(codeTraceRaw).aggregations)
 
   return {
     scalability: buildPendingScalability(),
@@ -13977,21 +13971,11 @@ async function fetchDashboardEfficiency(
       newRatioHistogram: normalizeNewRatioHistogram(changeKindRaw),
       unmeasuredRatio: computeUnmeasuredRatio(overall)
     },
-    compute: buildComputeEfficiency({
-      totalInputTokens: asNumber(asRecord(traceAggs.total_input_tokens).value),
-      totalOutputTokens: asNumber(asRecord(traceAggs.total_output_tokens).value),
-      totalTokens: resolveTokenTotal(
-        asRecord(traceAggs.total_tokens).value,
-        asNumber(asRecord(traceAggs.total_input_tokens).value),
-        asNumber(asRecord(traceAggs.total_output_tokens).value)
-      ),
-      cacheReadTokens: asNumber(asRecord(traceAggs.cache_read_tokens).value),
-      pushedAdoptedLines: overall.pushedAdoptedLines,
-      traceCount: asNumber(asRecord(traceAggs.trace_count).value),
-      codeProducingTraceCount: asNumber(asRecord(codeTraceAggs.code_traces).value)
-    }),
+    ...computeResult,
     meta: {
-      projectCount: asNumber(asRecord(traceAggs.project_count).value),
+      projectCount: asNumber(
+        asRecord(asRecord(asRecord(projectRaw).aggregations).project_count).value
+      ),
       truncated
     }
   }
@@ -15245,8 +15229,8 @@ export function registerDashboardHandlers(_ipcMain: typeof ipcMain): void {
   registerLatestDashboardHandler(
     _ipcMain,
     "dashboard:efficiency",
-    async (_, range: TimeRange, opts?: OrgFilterOptions) => {
-      if (import.meta.env.DEV) return { success: true, data: makeMockEfficiency() }
+    async (_, range: TimeRange, opts?: OrgFilterOptions & EfficiencyPluginFilter) => {
+      if (import.meta.env.DEV) return { success: true, data: makeMockEfficiency(opts) }
       try {
         requireDashboardProjectModeAccess()
         return { success: true, data: await fetchDashboardEfficiency(range, opts) }

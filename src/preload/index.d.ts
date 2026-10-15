@@ -1,5 +1,9 @@
 import type { PluginInstallMode, PluginInstallResult } from "../shared/plugin-install"
 import type { WindowPresentationBridge } from "../shared/window-presentation"
+import type {
+  EfficiencyDevComputeResult,
+  EfficiencyPluginFilter
+} from "../shared/dashboard-efficiency-compute"
 import type { DashboardToolUsageCoverage } from "../shared/dashboard-tool-usage"
 import type { DashboardThreadTraceScope } from "../shared/dashboard-thread-trace-scope"
 import type { DashboardKnowledgeCommitRate } from "../shared/dashboard-knowledge-commit-rate"
@@ -9,6 +13,7 @@ import type {
   AppDecisionResult
 } from "../shared/app-notifications"
 import type { SubagentExportTarget } from "../shared/subagent-session-export"
+import type { UiGuideConfig, UiGuideState } from "../shared/ui-guides"
 import type { UpdateSourceInfo } from "../main/updater/channel-config"
 import type {
   WorkflowWorktreeAction,
@@ -531,7 +536,7 @@ interface DashboardEfficiencyChangeKindStats extends DashboardCodeStats {
   changeKind: "new" | "legacy" | "unclassified"
 }
 
-interface DashboardEfficiencyData {
+interface DashboardEfficiencyData extends EfficiencyDevComputeResult {
   scalability: {
     slope: number | null
     pendingReason: string
@@ -541,18 +546,6 @@ interface DashboardEfficiencyData {
     byChangeKind: DashboardEfficiencyChangeKindStats[]
     newRatioHistogram: { from: number; docCount: number }[]
     unmeasuredRatio: number | null
-  }
-  compute: {
-    totalInputTokens: number
-    totalOutputTokens: number
-    totalTokens: number
-    cacheReadTokens: number
-    tokenTotalsConsistent: boolean
-    pushedAdoptedLines: number
-    tokensPerAdoptedLine: number | null
-    traceCount: number
-    codeProducingTraceCount: number
-    codeProducingTraceRatio: number | null
   }
   meta: {
     projectCount: number
@@ -1030,6 +1023,11 @@ interface DashboardPluginAggregate {
 interface CustomAPI {
   pluginDerivation: import("../shared/plugin-derivation").PluginDerivationApi
   nodeComposition: import("../shared/node-composition").NodeCompositionApi
+  uiGuides: {
+    getState(config: UiGuideConfig): Promise<UiGuideState>
+    recordDisplay(config: UiGuideConfig): Promise<boolean>
+    acknowledge(config: UiGuideConfig): Promise<void>
+  }
   // Presentation receipts are native renderer-only and cannot be called through the Mods SDK.
   mods: {
     development: import("../shared/mods/development").DevelopmentApi
@@ -2787,7 +2785,7 @@ interface CustomAPI {
     ) => Promise<{ success: boolean; data?: DashboardKnowledgeCommitRate; error?: string }>
     efficiency: (
       range: { from: string; to: string },
-      opts?: { upperOrgLv1?: string | string[] | null }
+      opts?: { upperOrgLv1?: string | string[] | null } & EfficiencyPluginFilter
     ) => Promise<{ success: boolean; data?: DashboardEfficiencyData; error?: string }>
     projectMetricGroupOptions: (
       filters: Pick<ProjectMetricFilters, "range" | "upperOrgLv1">

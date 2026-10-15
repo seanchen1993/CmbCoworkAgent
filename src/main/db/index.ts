@@ -1,5 +1,6 @@
 import { invalidateThreadTitleObservers } from "./thread-title-observer"
 import { ensureAppNotificationsSchema } from "./app-notifications-schema"
+import { ensureUiGuideSchema } from "./ui-guide-store"
 import {
   getDbPath,
   getMemorySessionOptInMigrationState,
@@ -988,6 +989,7 @@ export async function initializeDatabase(): Promise<NativeSqliteAdapter> {
   )
 
   ensureAppNotificationsSchema(db)
+  ensureUiGuideSchema(db)
   ensureImServiceSchema(db)
 
   migrateLegacyMemorySessionOptIn(db)

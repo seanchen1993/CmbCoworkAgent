@@ -6,13 +6,13 @@
 
 客户端已经改为在采集时按次累加，并把准确总量放在 trace 顶层。服务端只需改为**优先读取这几个字段**即可。
 
-**本次改动不需要修改 ES mapping。**
+**生产索引已有 `cacheReadTokens`（long）时，本次不需要修改 ES mapping。** 提供的服务端建索引模板已补齐此字段；如果某个索引缺少该字段，需要补上 `"cacheReadTokens": { "type": "long" }`。
 
 ---
 
-## 需要改的两处
+## 接口与处理逻辑
 
-### 1. `AgentTraceDTO` 补 4 个字段
+### 1. `AgentTraceDTO` 补 5 个字段
 
 ```java
 @Data
@@ -29,6 +29,9 @@ public class AgentTraceDTO {
 
     /** 客户端按次累加的 token 总量 */
     private Long totalTokens;
+
+    /** 客户端按次累加的缓存读取 token，不受 modelCalls 数组上限影响 */
+    private Long cacheReadTokens;
 
     /** 客户端统计的模型调用次数，可能大于 modelCalls.size() */
     private Long totalModelCalls;
@@ -66,8 +69,10 @@ long outputTokens = 0;
 long totalTokens = 0;
 long cacheReadTokens = 0;
 
-// cacheReadTokens 始终从数组求和：客户端没有对应的顶层字段，口径保持不变
-if (dto.getModelCalls() != null) {
+// 顶层缓存累计值独立于其它 token 字段；0 是有效值，只有缺失才回退明细。
+if (dto.getCacheReadTokens() != null) {
+    cacheReadTokens = dto.getCacheReadTokens();
+} else if (dto.getModelCalls() != null) {
     for (AgentTraceDTO.TraceModelCallDTO mc : dto.getModelCalls()) {
         if (mc.getTokenUsage() != null) {
             cacheReadTokens += Optional.ofNullable(mc.getTokenUsage().getCacheReadTokens()).orElse(0L);
@@ -114,17 +119,19 @@ Integer modelCallCount = dto.getTotalModelCalls() != null
 | **ES mapping** | `totalInputTokens` / `totalOutputTokens` / `totalTokens` / `modelCallCount` 都已存在，类型不变 |
 | **`TraceEsDocument`** | 不新增字段。注意索引是 `"dynamic": "strict"`，**新增字段必须先改 mapping，否则整篇文档会被拒** |
 | **`totalToolCalls`** | 已经是直接取 DTO，客户端那边已修好，服务端无需改动 |
-| **`cacheReadTokens`** | 维持数组求和，与客户端口径一致 |
+| **`cacheReadTokens`** | ES 已有此字段。优先取 DTO 顶层累计值；缺失时回退数组求和；不能再加进输入或总 Token |
 | **`_raw`** | 不变。它是 `enabled: false`，只存不索引 |
 
 ---
 
 ## 验证方式
 
-1. 用**新版客户端**跑一个工具调用超过 512 次的长任务，上报后检查 ES 文档：
+1. 用**新版客户端**跑一个模型调用超过 512 次的长任务，上报后检查 ES 文档：
    - `totalInputTokens` 应等于该会话真实消耗，而不是 `modelCalls` 数组求和的结果
    - `modelCallCount` 应大于 `_raw.modelCalls` 数组长度（数组封顶 512）
-2. 用**老版本客户端**（或手工构造一份不含这 4 个字段的 JSON）上报，确认结果与改动前完全一致。
+   - `cacheReadTokens` 应等于顶层累计值，包含第 513 次及之后调用的缓存读取；不能覆盖成明细求和
+   - 顶层 `cacheReadTokens: 0` 即使与明细不同，也应保留 0，不回退明细
+2. 用**老版本客户端**（或手工构造一份不含这 5 个字段的 JSON）上报，确认结果与改动前完全一致。已有其它累计字段、但缺少 `cacheReadTokens` 的客户端也必须回退缓存明细求和。
 3. 确认没有出现 `strict_dynamic_mapping_exception`。
 
 ---
@@ -136,6 +143,7 @@ Integer modelCallCount = dto.getTotalModelCalls() != null
 | `totalInputTokens` | 约 51%（只统计到 512 次） | 100% |
 | `totalOutputTokens` | 同上 | 100% |
 | `totalTokens` | 同上 | 100% |
+| `cacheReadTokens` | 最多统计到 512 次调用的缓存读取 | 100% |
 | `modelCallCount` | 512 | 1000 |
 | `totalToolCalls` | 已准确（客户端已修） | 不变 |
 

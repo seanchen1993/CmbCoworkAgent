@@ -9,6 +9,7 @@ import { createEvaluationBridge } from "./evaluation"
 import { createAuthoringInstallBridge } from "./authoring-install"
 import { createAuthoringPreviewBridge } from "./authoring-preview"
 import { createAuthoringBridge } from "./authoring"
+import type { EfficiencyPluginFilter } from "../shared/dashboard-efficiency-compute"
 import type { DashboardThreadTraceScope } from "../shared/dashboard-thread-trace-scope"
 import type {
   AppNotification,
@@ -16,6 +17,7 @@ import type {
   AppDecisionResult
 } from "../shared/app-notifications"
 import type { SubagentExportTarget } from "../shared/subagent-session-export"
+import type { UiGuideConfig, UiGuideState } from "../shared/ui-guides"
 import { contextBridge, ipcRenderer, shell } from "electron"
 import { randomUUID } from "node:crypto"
 import type {
@@ -679,6 +681,14 @@ const api = {
       ipcRenderer.on(WINDOW_PRESENTATION_CHANGED, listener)
       return () => { ipcRenderer.removeListener(WINDOW_PRESENTATION_CHANGED, listener) }
     }
+  },
+  uiGuides: {
+    getState: (config: UiGuideConfig): Promise<UiGuideState> =>
+      ipcRenderer.invoke("uiGuides:getState", config),
+    recordDisplay: (config: UiGuideConfig): Promise<boolean> =>
+      ipcRenderer.invoke("uiGuides:recordDisplay", config),
+    acknowledge: (config: UiGuideConfig): Promise<void> =>
+      ipcRenderer.invoke("uiGuides:acknowledge", config)
   },
   agent: {
     // Send message and receive events via callback
@@ -4228,7 +4238,7 @@ const api = {
       ipcRenderer.invoke("dashboard:knowledgeCommitRate", range, opts),
     efficiency: (
       range: { from: string; to: string },
-      opts?: { upperOrgLv1?: string | string[] | null }
+      opts?: { upperOrgLv1?: string | string[] | null } & EfficiencyPluginFilter
     ): Promise<{ success: boolean; data?: unknown; error?: string }> =>
       ipcRenderer.invoke("dashboard:efficiency", range, opts),
     projectMetricGroupOptions: (

@@ -43,9 +43,6 @@ import { onWorkflowNotificationBroadcast, workflowRunManager } from "./workflow/
  * ordinary desktop input changes — this only owns the automatic follow-up.
  */
 
-/** Matches the renderer hold this replaced, so Stop feels the same. */
-const SUPPRESS_AFTER_STOP_MS = 15_000
-
 /**
  * A summary that failed is retried, but not forever.
  *
@@ -62,8 +59,6 @@ const MAX_SUMMARY_ATTEMPTS = 3
 const RETRY_AFTER_FAILURE_MS = 2_000
 /** How long a spent budget keeps refusing, so it bounds without latching. */
 const BUDGET_COOLDOWN_MS = 60_000
-/** Clears the hold before a wake reads it, rather than racing the same millisecond. */
-const WAKE_AFTER_SUPPRESSION_MS = 50
 
 /**
  * Terminal codes that mean a decision was made, not that something went wrong.
@@ -131,9 +126,9 @@ export class PendingNotificationScheduler {
   private readonly recheckRequested = new Set<string>()
   /** Threads whose check was deferred until the current run releases the lease. */
   private readonly waitingForIdle = new Set<string>()
-  /** Threads the user just stopped; see suppressAfterStop. */
-  private readonly suppressedUntil = new Map<string, number>()
-  /** Wake-ups for holds that expire on their own clock, not on a lease. */
+  /** Stop remains in effect until the user sends a new message in this process. */
+  private readonly suppressedThreads = new Set<string>()
+  /** Wake-ups for retryable failures, never for a user-requested stop. */
   private readonly wakeTimers = new Map<string, ReturnType<typeof setTimeout>>()
   /** Consecutive failed summary attempts, per thread; see MAX_SUMMARY_ATTEMPTS. */
   private readonly failedAttempts = new Map<string, number>()
@@ -192,7 +187,7 @@ export class PendingNotificationScheduler {
     this.waitingForIdle.clear()
     this.checking.clear()
     this.recheckRequested.clear()
-    this.suppressedUntil.clear()
+    this.suppressedThreads.clear()
     this.failedAttempts.clear()
     this.budgetSpentUntil.clear()
   }
@@ -203,25 +198,23 @@ export class PendingNotificationScheduler {
    * Stop has to actually stop. A coordinator whose workers already finished has
    * a notification waiting, and without this the summary turn starts again the
    * instant the cancelled run releases the thread — which reads as the stop
-   * button not working. The hold expires rather than latching, so a result is
-   * delayed, never dropped — which is only true because expiry wakes a check of
-   * its own: the thread it is holding is idle, so no lease release is coming.
+   * button not working. Keep the notification pending, but do not resume it on
+   * a timer, hydration, or another completion event. New user input releases
+   * the hold explicitly through the existing suppression IPC.
    */
   suppressAfterStop(threadId: string, suppressed = true): void {
     if (!suppressed) {
-      // The user said something new, which is a clearer signal than the timer:
-      // they are back, and whatever they stopped is no longer what they mean.
-      const wasHeld = this.suppressedUntil.delete(threadId)
+      const wasHeld = this.suppressedThreads.delete(threadId)
       this.cancelWake(threadId)
-      // Lifting the hold early also cancels the wake that came with it, so the
-      // held summary would have nothing left to bring it back. Checking now
-      // finds the thread busy with whatever the user just sent and defers onto
-      // that run's lease, which is the wake it should have been waiting for.
+      // The held notification is still pending. A new user turn allows the
+      // scheduler to check again and defer to that turn's lease if needed.
       if (wasHeld) this.requestCheck(threadId)
       return
     }
-    this.suppressedUntil.set(threadId, Date.now() + SUPPRESS_AFTER_STOP_MS)
-    this.scheduleWake(threadId, SUPPRESS_AFTER_STOP_MS)
+    this.suppressedThreads.add(threadId)
+    this.cancelWake(threadId)
+    this.waitingForIdle.delete(threadId)
+    this.recheckRequested.delete(threadId)
   }
 
   /** Fire-and-forget entry for callers that cannot await (IPC, event handlers). */
@@ -265,7 +258,7 @@ export class PendingNotificationScheduler {
       // wake coming: a second worker can finish while the first is being
       // summarised, and the lease release it would have waited for is this
       // scheduler's own. Every other outcome already has a wake — a lease
-      // release, or the timer set with the hold or the failure.
+      // release or a failure retry timer. Stop waits for new user input.
       //
       // Bounded by external asks, not by what it finds: each pass consumes the
       // flag, and only another caller can set it again.
@@ -279,21 +272,10 @@ export class PendingNotificationScheduler {
     }
   }
 
-  /**
-   * A hold that ends on its own clock needs its own wake; a lease is not coming.
-   *
-   * One wake per thread, never earlier than the stop hold. A retry scheduled
-   * two seconds out used to replace the fifteen-second hold expiry, then find
-   * itself still suppressed and schedule nothing — so the hold ended with
-   * nothing left to notice, and the summary was dropped rather than delayed.
-   */
+  /** One retry wake per thread; a failure settling after Stop cannot restart it. */
   private scheduleWake(threadId: string, delayMs: number, options: { retry?: boolean } = {}): void {
     this.cancelWake(threadId)
-    const suppressedUntil = this.suppressedUntil.get(threadId)
-    const effectiveDelayMs =
-      suppressedUntil === undefined
-        ? delayMs
-        : Math.max(delayMs, suppressedUntil - Date.now() + WAKE_AFTER_SUPPRESSION_MS)
+    if (this.suppressedThreads.has(threadId)) return
     this.wakeTimers.set(
       threadId,
       this.dependencies.setTimer(() => {
@@ -304,7 +286,7 @@ export class PendingNotificationScheduler {
             reason: error instanceof Error ? error.message : String(error)
           })
         })
-      }, effectiveDelayMs)
+      }, delayMs)
     )
   }
 
@@ -539,14 +521,8 @@ export class PendingNotificationScheduler {
   }
 
   private async checkOnce(threadId: string): Promise<PendingNotificationOutcome> {
-    const suppressedUntil = this.suppressedUntil.get(threadId)
-    if (suppressedUntil !== undefined) {
-      if (suppressedUntil > Date.now()) {
-        // Waits on the timer set with the hold, not on a lease: the thread this
-        // is holding is idle by definition, so no release is coming.
-        return { started: false, reason: "suppressed-after-stop" }
-      }
-      this.suppressedUntil.delete(threadId)
+    if (this.suppressedThreads.has(threadId)) {
+      return { started: false, reason: "suppressed-after-stop" }
     }
     if (this.isBudgetSpent(threadId)) {
       return { started: false, reason: "summary-attempts-exhausted" }
@@ -569,6 +545,11 @@ export class PendingNotificationScheduler {
     const run = await workflowRunManager.findPendingNotificationAsync(workspacePath, threadId, {
       owner: "desktop"
     })
+    // Stop may arrive while disk discovery is pending. Recheck before claiming
+    // a lease, otherwise this already-admitted check can bypass the hold.
+    if (this.suppressedThreads.has(threadId)) {
+      return { started: false, reason: "suppressed-after-stop" }
+    }
     if (!run) {
       // Either nothing is waiting or what is waiting belongs to the transport
       // that started it. Filtered in the lookup rather than checked afterwards:

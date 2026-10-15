@@ -428,15 +428,14 @@ describe("pending notification scheduler", () => {
     expect(startRun).toHaveBeenCalledTimes(1)
   })
 
-  it("does not strand the summary when a new message lifts the hold early", async () => {
+  it("does not strand the summary when a new message lifts the hold", async () => {
     coordinatorOwnedBy("desktop")
     const { scheduler, startRun } = createHarness({ agentMode: "coordinator" })
     scheduler.suppressAfterStop(THREAD)
     await scheduler.check(THREAD)
     expect(startRun).not.toHaveBeenCalled()
 
-    // Lifting the hold cancels the wake that came with it. Nothing else was
-    // going to bring the held summary back, so this has to.
+    // Stop has no expiry timer. New user input must recheck the pending result.
     scheduler.suppressAfterStop(THREAD, false)
     await vi.waitFor(() => expect(startRun).toHaveBeenCalledTimes(1))
   })
@@ -468,20 +467,50 @@ describe("pending notification scheduler", () => {
     expect(startRun).toHaveBeenCalledTimes(1)
   })
 
-  it("wakes itself when a stop hold expires, since no lease is coming", async () => {
-    coordinatorOwnedBy("desktop")
-    const { scheduler, startRun, timers } = createHarness({ agentMode: "coordinator" })
-    scheduler.suppressAfterStop(THREAD)
-    await scheduler.check(THREAD)
-    expect(startRun).not.toHaveBeenCalled()
+  it.each(["workflow", "coordinator"])(
+    "keeps a stopped %s summary idle until new user input",
+    async (agentMode) => {
+      if (agentMode === "workflow") pendingRuns(persistedRun({ notificationOwner: "desktop" }))
+      else coordinatorOwnedBy("desktop")
+      const { scheduler, startRun, timers } = createHarness({ agentMode })
+      scheduler.suppressAfterStop(THREAD)
+      await scheduler.check(THREAD)
+      expect(startRun).not.toHaveBeenCalled()
 
-    // The thread this is holding is idle by definition, so the lease release
-    // every other deferral waits on will never fire. Expiry has to wake itself
-    // or the result is not delayed, it is dropped.
-    expect(timers.pending()).toBe(1)
-    vi.spyOn(Date, "now").mockReturnValue(Date.now() + 60_000)
-    timers.run()
-    await vi.waitFor(() => expect(startRun).toHaveBeenCalledTimes(1))
+      // Time passing or another hydration/completion check must not undo Stop.
+      expect(timers.pending()).toBe(0)
+      vi.spyOn(Date, "now").mockReturnValue(Date.now() + 60_000)
+      timers.run()
+      expect(await scheduler.check(THREAD)).toEqual({
+        started: false,
+        reason: "suppressed-after-stop"
+      })
+      expect(startRun).not.toHaveBeenCalled()
+
+      scheduler.suppressAfterStop(THREAD, false)
+      await vi.waitFor(() => expect(startRun).toHaveBeenCalledTimes(1))
+    }
+  )
+
+  it("honours Stop while workflow history discovery is in flight", async () => {
+    let resolvePending!: (run: PersistedWorkflowRun) => void
+    vi.spyOn(workflowRunManager, "findPendingNotificationAsync").mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          resolvePending = resolve
+        })
+    )
+    const { scheduler, startRun } = createHarness({ agentMode: "workflow" })
+    const checking = scheduler.check(THREAD)
+    scheduler.suppressAfterStop(THREAD)
+    resolvePending(persistedRun({ notificationOwner: "desktop" }))
+
+    expect(await checking).toEqual({ started: false, reason: "suppressed-after-stop" })
+    expect(startRun).not.toHaveBeenCalled()
+    expect(await scheduler.check(THREAD)).toEqual({
+      started: false,
+      reason: "suppressed-after-stop"
+    })
   })
 
   it("retries a model failure the run body reported and then swallowed", async () => {
@@ -516,12 +545,9 @@ describe("pending notification scheduler", () => {
     expect(timers.pending()).toBe(0)
   })
 
-  it("never wakes a retry inside the hold a stop just set", async () => {
+  it("does not schedule a late failure retry after Stop", async () => {
     coordinatorOwnedBy("desktop")
-    // A genuine failure landing at the same moment as a stop. There is one wake
-    // per thread, so a two-second retry replaced the fifteen-second hold, found
-    // itself still suppressed, and scheduled nothing — the hold then expired
-    // with nothing left to notice it and the summary was dropped, not delayed.
+    // A provider failure can settle after Stop has already cancelled its wake.
     const { scheduler, timers } = createHarness({
       agentMode: "coordinator",
       terminal: { outcome: "error", code: "provider_error" }
@@ -531,8 +557,7 @@ describe("pending notification scheduler", () => {
     scheduler.suppressAfterStop(THREAD)
     await started
 
-    expect(timers.pending()).toBe(1)
-    expect(timers.delays()[0]).toBeGreaterThan(14_000)
+    expect(timers.pending()).toBe(0)
   })
 
   it("does not retry a summary a hook deliberately halted", async () => {
