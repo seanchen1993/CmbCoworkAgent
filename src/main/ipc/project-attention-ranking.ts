@@ -1,9 +1,12 @@
-import type { ProjectAttentionSortKey } from "../../shared/project-attention"
+import {
+  vibecodingAdoptedShare,
+  type ProjectAttentionSortKey
+} from "../../shared/project-attention"
 import {
   mainAgentConversationAggs,
   readMainAgentConversations,
-  stageBucketTraceAggs,
-  parseStageBucketConversations,
+  stageBucketCodeFilterClause,
+  stageBucketAggKey,
   projectModeMainAgentConversationFilter
 } from "./dashboard-stage-buckets"
 import { normalizeCodeStatsFromContainer } from "./dashboard-code-stats"
@@ -111,6 +114,34 @@ export function buildProjectAttentionMetricQuery(
       }
     }
   }
+  if (key === "vibecodingShare") {
+    return {
+      index: scope.eventIndex,
+      body: {
+        size: 0,
+        track_total_hits: false,
+        query: {
+          bool: {
+            filter: [...scope.codeAdoptFilters, { terms: { "properties.harnessProjectId": ids } }]
+          }
+        },
+        aggs: {
+          projects: {
+            terms: { field: "properties.harnessProjectId", size: ids.length },
+            aggs: Object.fromEntries(
+              (["plugin_constrained", "vibecoding"] as const).map((bucket) => [
+                stageBucketAggKey(bucket),
+                {
+                  filter: stageBucketCodeFilterClause(bucket),
+                  aggs: { adopted_lines: { sum: { field: "properties.adoptedLineCount" } } }
+                }
+              ])
+            )
+          }
+        }
+      }
+    }
+  }
   if (key === "inclusiveAdoptionRate") {
     const project = { terms: { "properties.harnessProjectId": ids } }
     // These two existing aggregations preserve the list's adoption formula.
@@ -153,14 +184,12 @@ export function buildProjectAttentionMetricQuery(
     }
   }
   const inner =
-    key === "vibecodingShare"
-      ? stageBucketTraceAggs()
-      : key === "conversationCount"
-        ? {}
-        : {
-            known_details: { filter: { exists: { field: "suspectedTechnicalDetailSupplement" } } },
-            suspected_details: { filter: { term: { suspectedTechnicalDetailSupplement: true } } }
-          }
+    key === "conversationCount"
+      ? {}
+      : {
+          known_details: { filter: { exists: { field: "suspectedTechnicalDetailSupplement" } } },
+          suspected_details: { filter: { term: { suspectedTechnicalDetailSupplement: true } } }
+        }
   return {
     index: scope.traceIndex,
     body: {
@@ -190,6 +219,11 @@ function metricValue(bucket: JsonRecord, key: ProjectMetricSortKey): number | nu
   if (key === "inclusiveAdoptionRate") {
     return normalizeCodeStatsFromContainer(bucket).inclusiveAdoptionRate
   }
+  if (key === "vibecodingShare") {
+    const lines = (key: "plugin_constrained" | "vibecoding") =>
+      Number(record(record(bucket[stageBucketAggKey(key)]).adopted_lines).value) || 0
+    return vibecodingAdoptedShare(lines("plugin_constrained"), lines("vibecoding"))
+  }
   const conversations = readMainAgentConversations(bucket)
   if (key === "conversationCount") return Number(conversations.doc_count) || 0
   if (key === "suspectedTechnicalDetailConversationCount") {
@@ -197,9 +231,7 @@ function metricValue(bucket: JsonRecord, key: ProjectMetricSortKey): number | nu
       ? Number(record(conversations.suspected_details).doc_count)
       : null
   }
-  const counts = parseStageBucketConversations(conversations)
-  const attributed = counts.plugin_constrained + counts.vibecoding
-  return attributed > 0 ? counts.vibecoding / attributed : null
+  return null
 }
 
 /** One selected metric, 200 IDs per batch, at most two ES requests in flight. */

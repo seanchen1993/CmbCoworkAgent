@@ -8,6 +8,7 @@ import type {
   KnowledgeRecentConstraintFiles
 } from "../shared/dashboard-knowledge-overview"
 import type { EfficiencyPluginFilter } from "../shared/dashboard-efficiency-compute"
+import type { ProjectCodeTraceRequest } from "../shared/project-code-trace"
 import type { DashboardThreadTraceScope } from "../shared/dashboard-thread-trace-scope"
 import type {
   AppNotification,
@@ -4048,6 +4049,8 @@ const api = {
       }
     ): Promise<{ success: boolean; data?: unknown; error?: string }> =>
       ipcRenderer.invoke("dashboard:projectModeExportData", range, opts),
+    projectCodeTrace: (input: ProjectCodeTraceRequest) =>
+      ipcRenderer.invoke("dashboard:projectCodeTrace", input),
     projectModeTraces: (
       projectId: string,
       range: { from: string; to: string } | null,

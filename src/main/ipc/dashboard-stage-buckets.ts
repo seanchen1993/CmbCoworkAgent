@@ -197,6 +197,12 @@ export function stageBucketCodeAggs(
   }
 }
 
+/** Reuse the exact event-side classification for drill-downs and ranking. */
+export function stageBucketCodeFilterClause(bucket: StageBucket): Record<string, unknown> {
+  return (stageBucketCodeAggs({})[stageBucketAggKey(bucket)] as { filter: Record<string, unknown> })
+    .filter
+}
+
 /** 从一个带 `sb_*` 过滤桶的容器里读出每桶对话数。 */
 export function parseStageBucketConversations(container: unknown): Record<StageBucket, number> {
   const c = asRecord(container)

@@ -94,6 +94,9 @@ describe("project attention ranking", () => {
         expect(batch.length).toBeLessThanOrEqual(200)
         if (key === "generatedLines") {
           expect(body.query.bool.filter.slice(0, -1)).toEqual(scope.codeGenFilters)
+        } else if (key === "vibecodingShare") {
+          expect(_index).toBe(scope.eventIndex)
+          expect(body.query.bool.filter.slice(0, -1)).toEqual(scope.codeAdoptFilters)
         } else if (key !== "inclusiveAdoptionRate") {
           expect(body.query.bool.filter.slice(0, scope.traceFilters.length)).toEqual(
             scope.traceFilters
@@ -147,28 +150,36 @@ describe("project attention ranking", () => {
     )
   })
 
-  it("uses attributed main-Agent conversations for VibeCoding share, preserving unknown projects", async () => {
+  it("uses adopted code lines exactly like the list, excluding unattributed lines and ignoring conversation counts", async () => {
     const query = vi
       .fn()
       .mockResolvedValueOnce(idsResult("high", "low", "unknown"))
       .mockResolvedValueOnce(
         result([
-          conversationBucket("high", {
-            sb_plugin_constrained: { doc_count: 1 },
-            sb_vibecoding: { doc_count: 3 },
-            sb_unattributed: { doc_count: 20 }
-          }),
-          conversationBucket("low", {
-            sb_plugin_constrained: { doc_count: 9 },
-            sb_vibecoding: { doc_count: 1 }
-          }),
-          conversationBucket("unknown", { sb_unattributed: { doc_count: 20 } })
+          {
+            key: "high",
+            main_agent_conversations: { sb_plugin_constrained: { doc_count: 9999 } },
+            sb_plugin_constrained: { adopted_lines: { value: 100 } },
+            sb_vibecoding: { adopted_lines: { value: 300 } },
+            sb_unattributed: { adopted_lines: { value: 10000 } }
+          },
+          {
+            key: "low",
+            sb_plugin_constrained: { adopted_lines: { value: 900 } },
+            sb_vibecoding: { adopted_lines: { value: 100 } }
+          },
+          { key: "unknown", sb_unattributed: { adopted_lines: { value: 2000 } } }
         ])
       )
     const metrics = await fetchProjectAttentionRanking(scope, "vibecodingShare", query)
     expect(metrics.get("high")).toBe(0.75)
     expect(metrics.get("low")).toBe(0.1)
     expect(metrics.get("unknown")).toBeNull()
+    const request = buildProjectAttentionMetricQuery(scope, ["high"], "vibecodingShare")
+    expect(request.index).toBe(scope.eventIndex)
+    expect(JSON.stringify(request.body)).not.toMatch(
+      /main_agent|startedAt|code_gen|pushed|commit_count|by_feature|_raw/
+    )
   })
 
   it("keeps the exact list adoption formula, including unmeasured and not-yet-submitted code", async () => {

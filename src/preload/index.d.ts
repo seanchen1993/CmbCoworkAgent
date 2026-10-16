@@ -8,6 +8,7 @@ import type {
   KnowledgeRecentConstraintFiles
 } from "../shared/dashboard-knowledge-overview"
 import type { ProjectAttentionSortKey } from "../shared/project-attention"
+import type { ProjectCodeTraceRequest, ProjectCodeTracePage } from "../shared/project-code-trace"
 import type {
   EfficiencyDevComputeResult,
   EfficiencyPluginFilter
@@ -2752,6 +2753,9 @@ interface CustomAPI {
       range: { from: string; to: string },
       opts?: DashboardProjectModeFilterOptions
     ) => Promise<{ success: boolean; data?: DashboardProjectModeExportData; error?: string }>
+    projectCodeTrace: (
+      input: ProjectCodeTraceRequest
+    ) => Promise<{ success: boolean; data?: ProjectCodeTracePage; error?: string }>
     projectModeTraces: (
       projectId: string,
       range: { from: string; to: string } | null,

@@ -19,10 +19,10 @@ export const PROJECT_ATTENTION_SORTS: Array<{
   },
   {
     key: "vibecodingShare",
-    label: "VibeCoding 占比高优先",
-    metricLabel: "VibeCoding 对话占比",
+    label: "VibeCoding 采纳占比高优先",
+    metricLabel: "VibeCoding 采纳占比",
     order: "desc",
-    hint: "VibeCoding 对话数 ÷ Harness 与 VibeCoding 对话数之和；未归因对话不计入分母。"
+    hint: "VibeCoding 采纳行数 ÷ Harness 与 VibeCoding 采纳行数之和，与列表采纳行数占比一致；未归因代码不计入分母。"
   },
   {
     key: "suspectedTechnicalDetailConversationCount",
@@ -32,6 +32,11 @@ export const PROJECT_ATTENTION_SORTS: Array<{
     hint: "按疑似技术细节补充的轮次数从多到少排列。"
   }
 ]
+
+export function vibecodingAdoptedShare(harnessLines: number, vibeLines: number): number | null {
+  const total = harnessLines + vibeLines
+  return total > 0 ? vibeLines / total : null
+}
 
 export function isProjectAttentionSortKey(value: unknown): value is ProjectAttentionSortKey {
   return PROJECT_ATTENTION_SORTS.some((item) => item.key === value)

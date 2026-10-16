@@ -5401,6 +5401,7 @@ export function DashboardView(): React.JSX.Element {
           ) : activeMainTab === "project-mode" && projectModeAllowed ? (
             <div className="space-y-6 p-6">
               <ProjectModePanel
+                codeTraceOrgLv1={selectedOrgLv1List}
                 data={projectMode}
                 loading={projectModeLoading}
                 projectListLoading={projectListLoading}
