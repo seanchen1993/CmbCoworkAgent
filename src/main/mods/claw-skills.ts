@@ -109,7 +109,11 @@ async function catalog(access: ClawSkillCatalogAccess): Promise<RegisteredSkill[
       }
     }
   }
-  return [...found.values()].sort((left, right) => right.root.length - left.root.length)
+  return [...found.values()].sort(
+    (left, right) =>
+      right.root.length - left.root.length ||
+      (left.root < right.root ? -1 : left.root > right.root ? 1 : 0)
+  )
 }
 
 export async function listClawSkillSources(

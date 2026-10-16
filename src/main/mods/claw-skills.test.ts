@@ -52,6 +52,23 @@ function fixture() {
 }
 
 describe("Claw Skill catalog and real filesystem selection", () => {
+  it("keeps equal-length skill roots stable when source discovery order changes", async () => {
+    const f = fixture()
+    const one = f.add("one")
+    const two = f.add("two")
+    const sources = [{ sourceDir: one }, { sourceDir: two }]
+    f.sources(sources)
+    const first = await listClawSkillSources(f.access)
+    f.sources([...sources].reverse())
+    const second = await listClawSkillSources(f.access)
+    expect(first).toHaveLength(2)
+    expect(second).toEqual(first)
+    expect(first.map((item) => item.name)).toEqual(["one", "two"])
+    writeFileSync(join(one, "SKILL.md"), "---\nname: one\n---\nchanged source")
+    const changed = await listClawSkillSources(f.access)
+    expect(changed[0].digest).not.toBe(first[0].digest)
+    expect(changed[1]).toEqual(first[1])
+  })
   it("discovers once for many flow nodes but rechecks every node document against the pin", async () => {
     const f = fixture()
     const paths = Array.from({ length: 64 }, (_, index) => f.add(`node-${index}`))
