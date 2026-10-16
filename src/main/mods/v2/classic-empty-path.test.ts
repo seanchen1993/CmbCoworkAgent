@@ -5,11 +5,13 @@ import { afterEach, expect, it, vi } from "vitest"
 import { ModControlStore } from "../control-store"
 import { FunctionGuestRuntime } from "./guest-runtime"
 import { FunctionModsManager } from "./manager"
+import * as loader from "./loader"
 import type { ModObject } from "../../../shared/mods/types"
 
 const cleanup: Array<() => Promise<void>> = []
 afterEach(async () => {
   for (const close of cleanup.splice(0)) await close()
+  vi.restoreAllMocks()
 })
 async function fixture(code = 'on("tool.call",($,e,next)=>next(e))') {
   const root = await mkdtemp(join(tmpdir(), "mods-classic-empty-"))
@@ -17,9 +19,8 @@ async function fixture(code = 'on("tool.call",($,e,next)=>next(e))') {
   await cp(resolve("resources/mods/function-commands"), plugin, { recursive: true })
   await writeFile(join(plugin, "hooks/register.ts"), `export function register(on){${code}}`)
   const store = new ModControlStore(join(root, "control.sqlite"))
-  const plugins = vi.fn(() => [
-    { id: "source", name: "function-commands", path: plugin, enabled: true }
-  ])
+  const source = { id: "source", name: "function-commands", path: plugin, enabled: true }
+  const plugins = vi.fn(() => [source])
   const publish = vi.fn(async (_workspace: string, value: unknown) =>
     JSON.parse(JSON.stringify(value).replaceAll("SECRET", "FILTERED"))
   )
@@ -75,6 +76,7 @@ async function fixture(code = 'on("tool.call",($,e,next)=>next(e))') {
     store,
     root,
     plugins,
+    source,
     publish,
     core,
     call,
@@ -85,13 +87,22 @@ async function fixture(code = 'on("tool.call",($,e,next)=>next(e))') {
   }
 }
 
-it("avoids repeated source discovery for a live session with no matching classic handler", async () => {
+it("reuses the compiled live classic chain while checking current source metadata", async () => {
   const f = await fixture()
+  const compile = vi.spyOn(loader, "compileFunctionPlugin")
   await expect(f.call()).resolves.toEqual({ additionalContext: ["native"] })
-  expect(f.plugins).not.toHaveBeenCalled()
+  expect(f.plugins).toHaveBeenCalled()
+  expect(compile).not.toHaveBeenCalled()
   expect(f.core).toHaveBeenCalledOnce()
   expect(f.core.mock.calls[0]?.[0]).toMatchObject({ tool_response: "FILTERED" })
   expect(f.publish).toHaveBeenCalled()
+})
+
+it("rejects stale source metadata before an empty classic chain can call native core", async () => {
+  const f = await fixture()
+  f.source.enabled = false
+  await expect(f.call()).rejects.toThrow("插件已停用或更新")
+  expect(f.core).not.toHaveBeenCalled()
 })
 
 it("still checks grants before the native core on an empty classic chain", async () => {
