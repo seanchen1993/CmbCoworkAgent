@@ -1,3 +1,4 @@
+import { suppressCompositionPythonCache } from "./composition-python-cache"
 import { markHarnessStageAttributionDirty } from "../services/harness-stage-attribution"
 import { derivationDigest, snapshotDerivationSource } from "../plugins/derivation-source"
 import { isSameWorkspacePath } from "../../shared/workspace-path"
@@ -222,6 +223,7 @@ const HARNESS_INSPECT_COMMAND_CONFIG_KEYS: Record<
 }
 
 interface ConfiguredHarnessInvocation {
+  readonlyPackage?: boolean
   cwd: string
   invocation: {
     executable: string
@@ -1255,6 +1257,12 @@ async function runHarnessInvocationAsync(
 
   try {
     if (signal?.aborted) throw harnessDetailCancelledError()
+    const suppressPythonCache = configured.readonlyPackage ||
+      await suppressCompositionPythonCache(configured.cwd)
+    if (suppressPythonCache && logOptions?.configKey === "pull_knowledge")
+      throw Object.assign(new Error(
+        "此插件的知识同步尚未提供独立可变数据目录，已停止同步以保留受保护源码。请绑定已同步知识，或使用支持独立数据目录的适配版本。"
+      ), { code: "HARNESS_KNOWLEDGE_SYNC_SOURCE_IMMUTABLE" })
     if (beforeSpawn) await beforeSpawn()
     if (signal?.aborted) throw harnessDetailCancelledError()
     const { cwd, invocation } = configured
@@ -1265,7 +1273,8 @@ async function runHarnessInvocationAsync(
         env: {
           ...process.env,
           PYTHONIOENCODING: "utf-8",
-          PYTHONUTF8: "1"
+          PYTHONUTF8: "1",
+          ...(suppressPythonCache ? { PYTHONDONTWRITEBYTECODE: "1" } : {})
         },
         stdio: ["ignore", "pipe", "pipe"],
         windowsHide: true
@@ -1370,6 +1379,8 @@ async function runHarnessInvocationAsync(
     return stdoutBuffer
   } catch (error) {
     if (logOptions) logHarnessInvocationFailure(configured, logOptions, error)
+    if (error instanceof Error && "code" in error &&
+      error.code === "HARNESS_KNOWLEDGE_SYNC_SOURCE_IMMUTABLE") throw error
     throw new Error(formatAdapterError(error))
   } finally {
     release()
@@ -3727,6 +3738,7 @@ export async function syncHarnessProjectConstraints(
   const commandProject = createKnowledgeCommandProject(plugin, adapter)
   const configured: ConfiguredHarnessInvocation = {
     cwd: plugin.path,
+    readonlyPackage: isDerivedPlugin(plugin.id),
     invocation: parseInspectCommand(
       configuredCommand,
       commandProject,
