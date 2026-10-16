@@ -761,3 +761,19 @@ it("host-only start fence rechecks after asynchronous prepare before any step ex
   expect(f.state.disposed).toBe(true)
   expect(getLocalThreadRunLease(f.thread)).toBeUndefined()
 })
+
+
+it("exposes only the active owner summary within the workspace and clears it after cancellation", async () => {
+  const f = fixture([{ id: "approval", name: "确认", enabled: true, kind: "approval", prompt: "check" }])
+  const run = await f.start()
+  await wait(f, run.id, value => value.status === "waiting")
+  expect(f.manager.activeSummary(f.workspace, "other-chat")).toEqual({
+    runId: run.id, threadId: f.thread, flowName: "delivery", status: "waiting"
+  })
+  expect(f.manager.activeSummary("other-workspace", "other-chat")).toBeNull()
+  f.host.assertScope = () => { throw Error("scope changed") }
+  expect(() => f.manager.activeSummary(f.workspace, "other-chat")).toThrow("scope changed")
+  f.host.assertScope = () => {}
+  await f.manager.cancel(f.workspace, f.thread, run.id)
+  expect(f.manager.activeSummary(f.workspace, f.thread)).toBeNull()
+})

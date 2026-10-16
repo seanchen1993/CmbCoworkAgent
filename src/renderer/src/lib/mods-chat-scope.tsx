@@ -1,4 +1,6 @@
 import { FunctionSiteLifetime } from "./function-site-lifecycle"
+import { FunctionSitePresentationCache } from "./function-site-presentation"
+import { isModSiteChangeScope } from "../../../shared/mods/types"
 import { createContext, useContext, useEffect, useCallback, useRef, useState, type ComponentType } from "react"
 
 export const ModsChatScope = createContext<{
@@ -8,6 +10,7 @@ export const ModsChatScope = createContext<{
   error?: string
   retry?: () => void
   isCurrent?: () => boolean
+  presentationCache?: FunctionSitePresentationCache | null
 } | null>(null)
 
 export function useModsChatEnabled(
@@ -20,13 +23,16 @@ export function useModsChatEnabled(
 export function useModsChatState(
   threadId: string,
   workspace: string | null | undefined
-): { enabled: boolean; ready: boolean; error?: string; retry: () => void; isCurrent: () => boolean } {
+): { enabled: boolean; ready: boolean; error?: string; retry: () => void; isCurrent: () => boolean
+  presentationCache?: FunctionSitePresentationCache | null } {
   const key = JSON.stringify([threadId, workspace])
   const [identity, setIdentity] = useState({ key })
   const [scopeLifetime] = useState(() => new FunctionSiteLifetime())
   const [snapshot, setSnapshot] = useState<{
     identity: typeof identity; enabled?: boolean; error?: string; current: () => boolean
+    presentationCache?: FunctionSitePresentationCache
   }>()
+  const presentationCache = useRef<FunctionSitePresentationCache | null>(null)
   // React retries this render before committing. Returning to A creates a fresh identity.
   if (identity.key !== key) {
     // Revocation is conservative even if React abandons this render.
@@ -45,6 +51,8 @@ export function useModsChatState(
     let generation = 0
     const refresh = () => {
       const revision = ++generation
+      presentationCache.current?.invalidate()
+      presentationCache.current = null
       // Revocation is synchronous, including before React commits the pending state.
       const ticket = scopeLifetime.capture()
       const current = () => live && generation === revision && ticket.current()
@@ -53,7 +61,10 @@ export function useModsChatState(
       void (async () => window.api.mods.chatDisplayCapability(threadId, workspace))().then(
         (enabled) => {
           if (!current()) return
-          setSnapshot(typeof enabled === "boolean" ? { identity, enabled, current }
+          const cache = typeof window.api.mods.onCardsChanged === "function" && enabled === true
+            ? new FunctionSitePresentationCache(current) : undefined
+          presentationCache.current = cache ?? null
+          setSnapshot(typeof enabled === "boolean" ? { identity, enabled, current, presentationCache: cache }
             : { identity, current, error: "无法确认当前显示保护，请重新读取。" })
         },
         () => {
@@ -67,6 +78,14 @@ export function useModsChatState(
       // Form fields changed, not the current display authorization.
       if (event?.scope !== "schema") refresh()
     })
+    const stopPresentations = window.api.mods.onCardsChanged?.((event) => {
+      if (event.threadId !== threadId) return
+      if (event.scope?.startsWith("site-presentations:"))
+        presentationCache.current?.invalidate(event.scope.slice("site-presentations:".length))
+      else if (!isModSiteChangeScope(event.scope) &&
+        !["panes", "records", "cards", "feedback"].includes(event.scope ?? ""))
+        presentationCache.current?.invalidate()
+    })
     window.addEventListener("mods:configuration-changed", refresh)
     refresh()
     return () => {
@@ -74,6 +93,9 @@ export function useModsChatState(
       if (requestRef.current?.identity === identity) requestRef.current = null
       retryRef.current = () => {}
       stop()
+      stopPresentations?.()
+      presentationCache.current?.invalidate()
+      presentationCache.current = null
       window.removeEventListener("mods:configuration-changed", refresh)
     }
   }, [identity, scopeLifetime, threadId, workspace])
@@ -92,7 +114,8 @@ export function useModsChatState(
     error: !workspace?.trim() ? "无法确认当前聊天的工作区，请重新读取聊天信息。"
       : current ? snapshot?.error : undefined,
     retry,
-    isCurrent
+    isCurrent,
+    presentationCache: current ? snapshot?.presentationCache : null
   }
 }
 
@@ -104,6 +127,12 @@ export function useModsChatReady(threadId: string): boolean {
 export function useModsChatScope(threadId: string): boolean {
   const scope = useContext(ModsChatScope)
   return Boolean(scope?.enabled && scope.threadId === threadId)
+}
+
+export function useModsChatPresentationCache(threadId: string): FunctionSitePresentationCache | null {
+  const scope = useContext(ModsChatScope)
+  return scope?.threadId === threadId && scope.enabled && scope.ready !== false
+    ? scope.presentationCache ?? null : null
 }
 
 /** Disabled surfaces never mount their subscriptions, requests, or drawing owners. */

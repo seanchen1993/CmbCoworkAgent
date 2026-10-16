@@ -157,7 +157,7 @@ it("diagnoses interrupted history through trusted IPC without mutating records",
   )
 })
 
-function fixture() {
+function fixture(ownerScope?: (threadId: string) => string) {
   const entries = new Map<string, string>()
   const handlers = new Map<string, (event: IpcMainInvokeEvent, input: unknown) => unknown>()
   const webContents = Object.assign(new EventEmitter(), { mainFrame: {}, isDestroyed: () => false })
@@ -201,7 +201,7 @@ function fixture() {
       trusted: (event) => {
         if (event !== sender) throw Error("MODS_IPC_SENDER")
       },
-      threadScope: () => String(state.metadata.workspacePath),
+      threadScope: ownerScope ?? (() => String(state.metadata.workspacePath)),
       changed: vi.fn()
     }
   )
@@ -466,3 +466,26 @@ it.each(["workspace", "incarnation", "frame", "navigation"])(
     expect(f.webContents.listenerCount("did-start-navigation")).toBe(0)
   }
 )
+
+
+it("returns a scope-checked active summary without exposing the task or mutating runs", () => {
+  const f = fixture()
+  const summary = {runId: "active", threadId: "owner", flowName: "Review", status: "waiting" as const}
+  const read = vi.spyOn(FlowManager.prototype, "activeSummary").mockReturnValue(summary)
+  expect(f.call("active", "thread")).toEqual(summary)
+  expect(read).toHaveBeenCalledWith("project", "thread")
+  expect(f.store.setSetting).not.toHaveBeenCalled()
+  expect(() => f.call("active", "thread", {} as IpcMainInvokeEvent)).toThrow("MODS_IPC_SENDER")
+  read.mockImplementation(() => { state.present = false; return summary })
+  expect(() => f.call("active", "thread")).toThrow()
+})
+
+it("rejects an active owner whose workspace changed and returns null when no owner exists", () => {
+  const f = fixture(id => id === "owner" ? "foreign" : "project")
+  const read = vi.spyOn(FlowManager.prototype, "activeSummary").mockReturnValue({
+    runId: "active", threadId: "owner", flowName: "Review", status: "waiting"
+  })
+  expect(() => f.call("active", "thread")).toThrow("FLOW_SCOPE_CHANGED")
+  read.mockReturnValue(null)
+  expect(f.call("active", "thread")).toBeNull()
+})

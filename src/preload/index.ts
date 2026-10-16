@@ -3154,6 +3154,8 @@ const api = {
     flowFileReview: (threadId: string, runId: string) => ipcRenderer.invoke("mods:flow-file-review", threadId, runId),
     flowFilePublish: (input: Parameters<import("../shared/mods/flows/file-publication").FlowFilePublicationApi["flowFilePublish"]>[0]) => ipcRenderer.invoke("mods:flow-file-publish", input),
     flowFileCancel: (threadId: string, requestId: string) => ipcRenderer.invoke("mods:flow-file-cancel", threadId, requestId),
+    flowActive: (threadId: string): Promise<import("../shared/mods/flows/types").FlowActiveSummary | null> =>
+      ipcRenderer.invoke("mods:flow-active", threadId),
     flowRuns: (threadId: string): Promise<import("../shared/mods/flows/types").FlowRun[]> =>
       ipcRenderer.invoke("mods:flow-runs", threadId),
     flowRun: (threadId: string, runId: string): Promise<import("../shared/mods/flows/types").FlowRun | null> =>

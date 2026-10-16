@@ -20,6 +20,7 @@ export default defineConfig({
       "tests/browser/**/*.test.ts",
       "src/renderer/src/components/panels/git-panel-file-tree.test.ts",
       "src/renderer/src/components/customize/development-creation-setup.test.ts",
+      "src/renderer/src/components/customize/development-trial-view.test.ts",
       "src/renderer/src/components/customize/development-reuse-receipts.test.ts",
       "src/renderer/src/lib/**/*.test.ts",
       "src/renderer/src/lib/agent-git-commit-selection.test.ts",

@@ -108,6 +108,18 @@ export class FlowManager {
   list(workspace: string): SavedFlow[] {
     return this.store.list(workspace)
   }
+  activeSummary(workspace: string, threadId: string): import("../../../shared/mods/flows/types").FlowActiveSummary | null {
+    this.host.assertScope(workspace, threadId)
+    const active = [...this.active.values()].find((item) => item.run.workspace === workspace)
+    if (!active) return null
+    this.host.assertScope(workspace, active.run.threadId)
+    return {
+      runId: active.run.id,
+      threadId: active.run.threadId,
+      flowName: active.run.flow.definition.name,
+      status: activeStatus(active.run) ? active.run.status : "running"
+    }
+  }
   save(workspace: string, definition: unknown, expectedRevision: number): SavedFlow {
     return this.store.save(workspace, definition, expectedRevision)
   }
@@ -130,6 +142,11 @@ export class FlowManager {
     })
   }
   run(workspace: string, threadId: string, runId: string): FlowRun | null {
+    const live = this.active.get(threadId)
+    if (live?.run.id === runId && live.run.workspace === workspace && activeStatus(live.run)) {
+      this.host.assertScope(workspace, threadId)
+      return clone(live.run)
+    }
     return this.runs(workspace, threadId).find((row) => row.id === runId) ?? null
   }
 
@@ -1070,6 +1087,7 @@ export class FlowManager {
       }
       if (this.active.get(run.threadId) === active) this.active.delete(run.threadId)
       releaseLocalThreadRunLease(run.threadId, "mods", run.id)
+      this.notify(run.threadId)
     }
   }
 }

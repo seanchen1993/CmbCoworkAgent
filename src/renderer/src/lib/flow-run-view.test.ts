@@ -83,8 +83,9 @@ describe("flow run overview", () => {
         ]
       )
     )
-    expect(html).toContain("已通过 2 / 2 个步骤")
-    expect(html).toContain("已失效，不能作为当前通过依据")
+    expect(html).toContain("已完成 2 / 2 步")
+    expect(html).toContain("历史步骤与技术详情")
+    expect(html).not.toContain("已失效，不能作为当前通过依据")
     expect(html).toContain("尚无可确认的项目测试结果，不能据此认为测试通过")
   })
 
@@ -102,9 +103,9 @@ describe("flow run overview", () => {
     )
     value.status = "interrupted"
     const html = render(value)
-    expect(html).toContain("已通过 1 / 4 个步骤")
+    expect(html).toContain("已完成 1 / 4 步")
     expect(html).toContain("不要直接重复提交")
-    expect(html).toContain("结果未知")
+    expect(html).toContain("需要核对")
   })
 
   it("does not let invalidated unknown attempts override the completed run next step", () => {
@@ -117,7 +118,7 @@ describe("flow run overview", () => {
         ]
       )
     )
-    expect(html).toContain("已通过 1 / 1 个步骤")
+    expect(html).toContain("已完成 1 / 1 步")
     expect(html).toContain("下一步：查看成果和检查结果")
   })
 
@@ -140,14 +141,15 @@ describe("flow run overview", () => {
     )
     for (const text of [
       "技术详情 · 运行编号与版本",
-      "RAW_FIXTURE",
-      "查看子执行轨迹",
       "技术详情 · 历史检查证据"
     ]) {
       expect(disclosureAncestors(html, text).some((tag) => !/\bopen(?:=|\s|>)/.test(tag))).toBe(
         true
       )
     }
+    expect(html).toContain("Fixture failure")
+    expect(html).not.toContain("RAW_FIXTURE")
+    expect(html).not.toContain("查看子执行轨迹")
   })
 
   it("keeps approval outcome and both decisions outside technical disclosures", () => {

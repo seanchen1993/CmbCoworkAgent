@@ -8,7 +8,7 @@ export interface ChatFlowChoice {
   bindingRevision?: number
 }
 
-// Explicit session UI preference only. Nothing executes when a choice is restored.
+// Explicit one-message UI intent only. Bindings never implicitly select an execution mode.
 const choices = new Map<string, ChatFlowChoice>()
 const listeners = new Set<() => void>()
 const subscribe = (listener: () => void) => {
@@ -30,3 +30,7 @@ export function useChatFlowChoice(threadId: string): ChatFlowChoice | null {
 }
 
 export const currentChatFlowChoice = (threadId: string) => choices.get(threadId) ?? null
+
+export function consumeChatFlowChoice(threadId: string, expected: ChatFlowChoice): void {
+  if (choices.get(threadId) === expected) selectChatFlow(threadId, null)
+}

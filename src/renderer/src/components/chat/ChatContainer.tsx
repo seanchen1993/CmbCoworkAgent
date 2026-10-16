@@ -1,10 +1,15 @@
+import { CHAT_COMPOSER_FOCUS_EVENT, consumeChatComposerFocus, requestChatFlowUse } from "@/lib/chat-flow-use"
 import { sameSimpleAuthoringScope } from "@/lib/simple-authoring-intent"
 import { useSimpleAuthoringTask, dismissSimpleAuthoringTask } from "@/lib/simple-authoring-composer"
-import { selectChatFlow } from "@/lib/chat-flow-choice"
+import { currentChatFlowChoice } from "@/lib/chat-flow-choice"
+import { ChatFlowTaskCards } from "./ChatFlowTaskCards"
 import { BuiltinNavigationPanel } from "./BuiltinNavigationPanel"
 import { openBuiltinNavigation } from "@/lib/builtin-navigation"
 import { builtinTargetFromItem, parseBuiltinNavigation, builtinNavigationPrefix, builtinCommandConflicts } from "@/features/slash-commands/builtin-commands"
 import { ModsDevelopmentPanel } from "../customize/ModsDevelopmentPanel"
+import { enterCreatorMode } from "../customize/creator-mode-entry"
+import { enqueueCreatorRepair } from "@/lib/creator-repair-submission"
+import { ChatTaskOverview } from "./ChatTaskOverview"
 import { usePromptComposer } from "@/lib/use-prompt-composer"
 import { useFunctionDesktop } from "@/lib/use-function-desktop"
 import { useChatTransientToasts } from "@/lib/use-chat-transient-toasts"
@@ -13,7 +18,6 @@ import { PromptDecorations } from "./PromptDecorations"
 import { useChatFlow } from "@/lib/use-chat-flow"
 import { ClawSidebar, ClawComposerBar } from "./ClawSidebar"
 import { ProjectRunDetails } from "./ProjectRunDetails"
-import { openClawSidebar } from "@/lib/claw-sidebar"
 import { isOrdinaryFlowMetadata } from "../../../../shared/mods/flows/scope"
 import { isDevelopmentThreadMetadata } from "../../../../shared/mods/development-scope"
 import { ModsChatScope, useModsChatState } from "../../lib/mods-chat-scope"
@@ -1966,6 +1970,15 @@ export function ChatContainer({
     [currentThread]
   )
   const modsChatState = useModsChatState(threadId, currentForkWorkspacePath)
+  const developmentScope = JSON.stringify([threadId, currentForkWorkspacePath])
+  const creatorNavigation = useRef({ threadId, readOnly, workspace: currentForkWorkspacePath })
+  creatorNavigation.current = { threadId, readOnly, workspace: currentForkWorkspacePath }
+  const [developmentMode, setDevelopmentMode] = useState<{
+    scope: string
+    mode: "normal" | "creator"
+  } | null>(null)
+  const creatorMode = !readOnly && developmentMode?.scope === developmentScope &&
+    developmentMode.mode === "creator"
   const modsChatEnabled = modsChatState.enabled
   const chatToasts = useChatTransientToasts(threadId, modsChatEnabled && !readOnly)
   const toast = chatToasts.toast
@@ -2338,6 +2351,22 @@ export function ChatContainer({
     setDraftBuiltinBrowser: setSelectedBuiltinBrowser
   } = useCurrentThread(threadId)
   const chatFlow = useChatFlow(threadId, currentForkWorkspacePath, modsChatEnabled && !readOnly && isOrdinaryFlowMetadata(currentThread?.metadata))
+  const latestChatFlow = useRef(chatFlow)
+  latestChatFlow.current = chatFlow
+  useEffect(() => {
+    let frame: number | undefined
+    const focus = () => {
+      if (frame !== undefined) cancelAnimationFrame(frame)
+      frame = requestAnimationFrame(() => {
+      if (useAppStore.getState().currentThreadId === threadId && !useAppStore.getState().showCustomizeView && currentForkWorkspacePath &&
+        consumeChatComposerFocus({ threadId, workspace: currentForkWorkspacePath }))
+        inputRef.current?.focus({ preventScroll: true })
+      })
+    }
+    focus()
+    window.addEventListener(CHAT_COMPOSER_FOCUS_EVENT, focus)
+    return () => { if (frame !== undefined) cancelAnimationFrame(frame); window.removeEventListener(CHAT_COMPOSER_FOCUS_EVENT, focus) }
+  }, [threadId, currentForkWorkspacePath, showCustomizeView])
   const clawDefaultModel = chatClawDefaultModel(
     chatFlow.enabled,
     "binding" in chatFlow ? chatFlow.binding : undefined
@@ -5080,8 +5109,7 @@ export function ChatContainer({
     threadMessages.length
   ])
 
-  const [flowIntent, setFlowIntent] = useState<{ threadId: string; mode: "chat" | "flow" }>({ threadId, mode: "chat" })
-  const composerMode = flowIntent.threadId === threadId ? flowIntent.mode : "chat"
+  const composerMode = "chat" as const
   const firstTask = useSimpleAuthoringTask(threadId, currentForkWorkspacePath ?? null)
   const [preparingFirstTask, setPreparingFirstTask] = useState(false)
   const firstTaskScope = useRef("")
@@ -5110,15 +5138,17 @@ export function ChatContainer({
           !sameSimpleAuthoringScope(firstTask.scope, { threadId, workspace: current.workspace }) ||
           JSON.stringify(current.active.flow ?? null) !== JSON.stringify(firstTask.flow ?? null))
         throw Error("助手设置已变化，请返回组合页面核对后再准备任务。")
-      const text = [draft.text, firstTask.suggestedText].filter(Boolean).join("\n\n")
-      if (!applyPromptDraft(draft.revision, text))
-        throw Error("输入已变化，请重新点击准备；当前内容已保留。")
-      if (firstTask.flow) selectChatFlow(threadId, {
-        workspace: current.workspace, id: firstTask.flow.definition.id,
-        name: firstTask.flow.definition.name, revision: firstTask.flow.revision,
-        bindingRevision: current.bindingRevision
-      })
-      setFlowIntent({ threadId, mode: firstTask.flow ? "flow" : "chat" })
+      if (firstTask.flow) {
+        requestChatFlowUse({ threadId,
+          workspace: current.workspace, id: firstTask.flow.definition.id,
+          name: firstTask.flow.definition.name, revision: firstTask.flow.revision,
+          bindingRevision: current.bindingRevision
+        })
+      } else {
+        const text = [draft.text, firstTask.suggestedText].filter(Boolean).join("\n\n")
+        if (!applyPromptDraft(draft.revision, text))
+          throw Error("输入已变化，请重新点击准备；当前内容已保留。")
+      }
       dismissSimpleAuthoringTask(firstTask.id)
       inputRef.current?.focus()
     } catch (cause) { setError(cause instanceof Error ? cause.message : String(cause)) }
@@ -5241,6 +5271,7 @@ export function ChatContainer({
       return "任务运行中，可使用取消按钮停止当前任务"
     }
     if (hasPendingFilePayload) return "输入消息或直接发送文件..."
+    if (creatorMode) return "描述想创建、修改或组合的 Mod，助手会完成配置并应用到当前聊天"
     if (!goal) return "向 CMBDevClaw 提问，/ 输入命令；@ 引用文件；Shift + Enter 换行"
     if (goal.status === "active") {
       return "输入新消息会暂停当前 Goal；查看详情用 /goal status"
@@ -5250,6 +5281,7 @@ export function ChatContainer({
     }
     return "输入新问题，或用 /goal <目标> 开始新的长期任务"
   }, [
+    creatorMode,
     bizRetryPending,
     contextReminderPending,
     goalUi.goal,
@@ -5593,6 +5625,30 @@ export function ChatContainer({
   const handleSubmit = async (e: React.FormEvent, defaultText = ""): Promise<void> => {
     e.preventDefault()
     if (isComposingRef.current) return
+    const selectedFlow = !defaultText && chatFlow.choice
+    if (selectedFlow) {
+      try {
+        if (hasPendingFilePayload || selectedSkill || selectedBuiltinBrowser)
+          throw Error("本次步骤只接收任务文字。请先移除附件、技能或浏览器选择；输入已保留。")
+        const modelIntent = captureModelSelectionIntent()
+        const assertCurrent = captureComposerSubmissionState(() => submissionStateRef.current,
+          () => isModelSelectionIntentCurrent(modelIntent))
+        await submitAfterPromptEdit(threadId, { flush: promptComposer.flushSubmission,
+          read: readPromptDraft, isConfirmed: promptComposer.isSubmissionConfirmed, assertCurrent,
+          submit: async draft => {
+            assertCurrent()
+            if (currentChatFlowChoice(threadId) !== selectedFlow)
+              throw Error("本次步骤选择已变化，请核对后重新发送。")
+            if (!draft.text.trim()) return
+            if (await startChatFlow(draft.text)) {
+              if (applyPromptDraft(draft.revision, "")) promptComposer.reset()
+            }
+          } })
+      } catch (cause) {
+        setError(`任务未确认启动，输入已保留。${cause instanceof Error ? cause.message : String(cause)}`)
+      }
+      return
+    }
     const localText = readPromptDraft().text.trim()
     const localTarget = !defaultText ? parseBuiltinNavigation(localText) : null
     const localPrefix = !defaultText ? builtinNavigationPrefix(localText) : null
@@ -5645,19 +5701,6 @@ export function ChatContainer({
         throw Error("准备发送期间会话、附件、技能或任务状态已变化，请重新发送；当前输入已保留。")
     }
     const trimmedInput = defaultText || submittedDraft.text.trim()
-    if (composerMode === "flow" && !defaultText) {
-      if (!trimmedInput) return
-      try {
-        if (hasPendingFilePayload || selectedSkill || selectedBuiltinBrowser)
-          throw Error("流程目标暂只接收文本，请移除附件、技能和浏览器选择，或切回聊天；你的输入已保留。")
-        if (!chatFlow.choice) throw Error("请先在右侧选择一个已保存流程，再发送本次任务。")
-        if (await startChatFlow(trimmedInput)) {
-          if (applyPromptDraft(submittedDraft.revision, "")) promptComposer.reset()
-          openClawSidebar("results")
-        }
-      } catch (cause) { setError(cause instanceof Error ? cause.message : String(cause)) }
-      return
-    }
     const isGoalSlashInput = /^\/goal(?:\s|$)/i.test(trimmedInput)
     const shouldOpenGoalDetailsForStatus = /^\/goal(?:\s+status)?\s*$/i.test(trimmedInput)
     // Defense-in-depth: every current trigger already short-circuits while the
@@ -6916,6 +6959,11 @@ export function ChatContainer({
     // IME composing (Chinese/Japanese/Korean) should not trigger submit on Enter
     const isComposing = e.nativeEvent.isComposing || isComposingRef.current
     if (isComposing) return
+    if (chatFlow.choice && e.key === "Enter" && !e.shiftKey) {
+      e.preventDefault()
+      void handleSubmit(e)
+      return
+    }
     if ((e.key === "Tab" || e.key === "ArrowRight") && !e.shiftKey && !e.ctrlKey &&
       !e.metaKey && !e.altKey && promptComposer.acceptSuggestion()) {
       e.preventDefault()
@@ -7634,6 +7682,85 @@ export function ChatContainer({
     [toast, currentForkWorkspacePath, forkingMessageId, isLoading, threadId]
   )
 
+  const enterCreatorFromChat = useCallback(async (prompt?: string, selectMissing = false) => {
+    const initial = creatorNavigation.current
+    const assertThread = () => {
+      const current = creatorNavigation.current
+      const state = useAppStore.getState()
+      const target = state.threads.find(thread => thread.thread_id === threadId)
+      if (current.threadId !== threadId || current.readOnly ||
+        state.currentThreadId !== threadId || !target ||
+        !isDevelopmentThreadMetadata(target.metadata))
+        throw Error("聊天已变化，请在目标聊天重新进入创造者模式。")
+    }
+    assertThread()
+    let workspace = initial.workspace
+    if (!workspace && selectMissing) {
+      const selected = await window.api.workspace.select(threadId)
+      assertThread()
+      if (!selected) return
+      await useAppStore.getState().loadThreads()
+      assertThread()
+      workspace = selected
+      threadContext.getThreadActions(threadId).setWorkspacePath(selected)
+    }
+    if (!workspace) throw Error("请先选择本地项目目录。")
+    const expected = normalizeWorkspacePathKey(workspace)
+    const assertCurrent = () => {
+      assertThread()
+      const target = useAppStore.getState().threads.find(thread => thread.thread_id === threadId)
+      const current = getForkWorkspacePath(target ?? null)
+      if (!current || normalizeWorkspacePathKey(current) !== expected)
+        throw Error("项目目录已变化，请重新进入创造者模式。")
+    }
+    const status = await enterCreatorMode(
+      window.api.mods, window.api.mods.development, threadId, workspace, assertCurrent
+    )
+    assertCurrent()
+    setDevelopmentMode({ scope: JSON.stringify([threadId, workspace]), mode: status.mode ?? "creator" })
+    if (prompt) {
+      setInput([inputRef.current?.value ?? input, prompt].filter(Boolean).join("\n\n"))
+      promptComposer.changed()
+    }
+    inputRef.current?.focus({ preventScroll: true })
+  }, [threadId, threadContext, input, setInput, promptComposer])
+
+  const creatorRepairAdmission = useRef({ models, historyLoading, pendingUserInput,
+    hasActiveGoalRunning, bizRetryPending, flowActive: chatFlow.active, flowBusy: chatFlow.busy,
+    queuedMessages })
+  creatorRepairAdmission.current = { models, historyLoading, pendingUserInput,
+    hasActiveGoalRunning, bizRetryPending, flowActive: chatFlow.active, flowBusy: chatFlow.busy,
+    queuedMessages }
+  const requestCreatorRepair = (text: string): void => {
+    const current = submissionStateRef.current
+    const latest = creatorRepairAdmission.current
+    const model = latest.models.find(item => item.id === current.currentModel)
+    enqueueCreatorRepair({
+      text,
+      modelId: current.currentModel,
+      modelAvailable: model?.available === true,
+      blocked: current.readOnly || current.isLoading || latest.historyLoading ||
+        current.contextReminderPending || Boolean(current.pendingApproval) ||
+        current.approvalQueue.length > 0 || Boolean(latest.pendingUserInput) ||
+        latest.hasActiveGoalRunning || latest.bizRetryPending || latest.flowActive || latest.flowBusy ||
+        submitInFlightRef.current.has(threadId),
+      hasQueuedMessages: latest.queuedMessages.length > 0,
+      assertCurrent: () => {
+        const state = useAppStore.getState()
+        const target = state.threads.find(item => item.thread_id === threadId)
+        const workspace = getForkWorkspacePath(target ?? null)
+        if (current.threadId !== threadId || state.currentThreadId !== threadId ||
+          creatorNavigation.current.threadId !== threadId || creatorNavigation.current.readOnly ||
+          !target || !isDevelopmentThreadMetadata(target.metadata) || !workspace ||
+          normalizeWorkspacePathKey(workspace) !== normalizeWorkspacePathKey(currentForkWorkspacePath))
+          throw Error("DEVELOPMENT_SCOPE_CHANGED")
+      },
+      enqueue: addQueuedMessage,
+      clearError,
+      resumeQueue: () => setQueueAutoDrainSuppressed(false)
+    })
+  }
+
   const handleSelectForkWorkspace = useCallback(async (): Promise<string | null> => {
     if (selectingForkWorkspace) return forkWorkspacePath
     setSelectingForkWorkspace(true)
@@ -7913,6 +8040,20 @@ export function ChatContainer({
       return next
     })
   }, [threadId])
+  const flowTaskState = useMemo(() => ({
+    threadId, run: chatFlow.run, recentRuns: chatFlow.recentRuns, busy: chatFlow.busy,
+    enabled: chatFlow.enabled, stopping: chatFlow.stopping, active: chatFlow.active,
+    error: chatFlow.error,
+    act: (...args: Parameters<typeof chatFlow.act>) => latestChatFlow.current.act(...args),
+    acceptResumed: (...args: Parameters<typeof chatFlow.acceptResumed>) => latestChatFlow.current.acceptResumed(...args)
+  }), [threadId, chatFlow.run, chatFlow.recentRuns, chatFlow.busy, chatFlow.enabled,
+    chatFlow.stopping, chatFlow.active, chatFlow.error])
+  const followUpFlowTask = useCallback((text: string) => {
+    const draft = readPromptDraft()
+    if (applyPromptDraft(draft.revision, [draft.text, text].filter(Boolean).join("\n\n")))
+      promptComposer.changed()
+    inputRef.current?.focus({ preventScroll: true })
+  }, [readPromptDraft, applyPromptDraft, promptComposer.changed])
   const chatMessageListFooter = (
     <div
       className="space-y-4 pt-4 pb-4"
@@ -7977,6 +8118,7 @@ export function ChatContainer({
           {todos.length > 0 && <ChatTodos todos={todos} />}
         </div>
       )}
+      <ChatFlowTaskCards flow={flowTaskState} onFollowUp={followUpFlowTask} />
       {workflowRun ? (
         <WorkflowRunPanel threadId={threadId} run={workflowRun} />
       ) : isWorkflowModeMetadata(currentThread?.metadata) ? (
@@ -8700,11 +8842,11 @@ export function ChatContainer({
                 reserveLeftSpace && "md:pl-[20px]"
               )}
             >
-              {firstTask && <section aria-label="准备首次任务" className="mx-auto mb-3 max-w-3xl space-y-2 rounded-xl border p-3 text-sm">
-                <p>助手已应用。把任务填入输入框，检查后再发送。</p>
+              {firstTask && <section aria-label="在这段聊天使用" className="mx-auto mb-3 max-w-3xl space-y-2 rounded-xl border p-3 text-sm">
+                <p>{firstTask.flow ? "已应用。选择本次步骤，在聊天输入框描述任务并发送。" : "已应用。把任务填入输入框，检查后再发送。"}</p>
                 {input.trim() && <p className="text-muted-foreground">{firstTask.kind === "command" ? "请先保存或处理原输入，再填入插件命令。" : "你的原输入会保留，新任务附加在后面。"}</p>}
                 <button type="button" className="mr-4 underline" disabled={preparingFirstTask || isLoading || chatFlow.active || chatFlow.busy}
-                  onClick={() => void prepareFirstTask()}>{preparingFirstTask ? "正在核对…" : firstTask.kind === "command" ? "填入插件命令" : input.trim() ? "保留原输入并添加任务" : "填入首次任务"}</button>
+                  onClick={() => void prepareFirstTask()}>{preparingFirstTask ? "正在核对…" : firstTask.flow ? "选择本次步骤" : firstTask.kind === "command" ? "填入插件命令" : input.trim() ? "保留原输入并添加任务" : "填入参考任务"}</button>
                 <button type="button" className="underline" onClick={() => dismissSimpleAuthoringTask(firstTask.id)}>稍后再用</button>
               </section>}
               <BuiltinNavigationPanel threadId={threadId} workspace={currentForkWorkspacePath ?? null} />
@@ -8715,6 +8857,31 @@ export function ChatContainer({
               <FunctionPeerMessages key={`peers:${threadId}`} threadId={threadId} />
               {isOrdinaryFlowMetadata(currentThread?.metadata) ? <ClawSidebar key={`claw:${threadId}`} threadId={threadId} flow={chatFlow}
                 workspace={currentForkWorkspacePath}
+                onRequestCreator={enterCreatorFromChat}
+                onStart={startChatFlow}
+                taskWorking={isLoading}
+                taskOverview={!chatFlow.active ? <ChatTaskOverview
+                  working={isLoading}
+                  waitingApproval={Boolean(pendingApproval) || approvalQueue.length > 0}
+                  waitingInput={Boolean(pendingUserInput)}
+                  interrupted={Boolean(hookInterruption)}
+                  paused={goalUi.goal?.status === "paused"}
+                  hasReply={lastVisibleMessageIndex !== undefined &&
+                    ["assistant", "ai"].includes(displayMessages[lastVisibleMessageIndex]?.role ?? "")}
+                  hasMessages={displayMessages.length > 0}
+                  error={threadError}
+                  disabled={readOnly}
+                  onReturn={() => {
+                    useAppStore.getState().setRightPanelCollapsed(true)
+                    scrollToConversationBottom()
+                    inputRef.current?.focus({ preventScroll: true })
+                  }}
+                  onStop={() => void handleCancel({
+                    preventDefault() { /* This control is outside the composer form. */ },
+                    stopPropagation() { /* There is no parent submit event. */ }
+                  })}
+                  onContinue={() => void applyGoalPanelCommand("/goal resume")}
+                /> : undefined}
                 disabled={readOnly || isLoading || historyLoading || hasActiveGoalRunning || Boolean(pendingApproval)}
                 records={<>
                   <ModCommandJobs key={threadId} threadId={threadId} />
@@ -8725,7 +8892,6 @@ export function ChatContainer({
                   </details>
                 </>}
                 onFollowUp={(text) => {
-                  setFlowIntent({ threadId, mode: "chat" })
                   setInput([inputRef.current?.value ?? input, text].filter(Boolean).join("\n\n"))
                 }}>
                 <FunctionPanes key={`panes:${threadId}`} threadId={threadId} />
@@ -8738,11 +8904,15 @@ export function ChatContainer({
                 facts={{ isWorking: isLoading }}
                 className="sparks-inline-surface mx-auto w-full max-w-3xl overflow-auto text-xs text-muted-foreground" />
               <form onSubmit={handleSubmit} className="max-w-3xl mx-auto relative">
-                <ClawComposerBar threadId={threadId} flow={chatFlow} mode={composerMode}
-                  onModeChange={(mode) => setFlowIntent({ threadId, mode })}>
+                <ClawComposerBar threadId={threadId} flow={chatFlow}>
                   {!readOnly && isDevelopmentThreadMetadata(currentThread?.metadata) && (
                     <ModsDevelopmentPanel threadId={threadId} workspaceHint={currentForkWorkspacePath}
                       mode="chat" onReturnToChat={() => inputRef.current?.focus()}
+                      onSelectWorkspaceForCreator={() => enterCreatorFromChat(undefined, true)}
+                      onModeChange={(mode) => setDevelopmentMode((current) =>
+                        current?.scope === developmentScope && current.mode === mode
+                          ? current : { scope: developmentScope, mode })}
+                      onRequestRepair={requestCreatorRepair}
                       onOpenWorkbench={() => {
                         inputRef.current?.focus({ preventScroll: true })
                         useAppStore.getState().setShowCustomizeView(true, "mods")
@@ -8750,7 +8920,7 @@ export function ChatContainer({
                   )}
                 </ClawComposerBar>
                 <SlashCommandPopover
-                  mode={slash.mode}
+                  mode={chatFlow.choice ? { kind: "closed" } : slash.mode}
                   selectedIdx={slash.selectedIdx}
                   onHoverIdx={slash.setSelectedIdx}
                   onSelectCommand={applySlashCommand}
@@ -9336,7 +9506,7 @@ export function ChatContainer({
                       )}
                       {/* Textarea */}
                       <div className="relative">
-                      {promptComposer.suggestion && !input && <div aria-hidden="true"
+                      {promptComposer.suggestion && !input && !effectiveInputDisabled && <div aria-hidden="true"
                         data-prompt-suggestion className={cn(
                           "pointer-events-none absolute inset-0 mr-2 overflow-hidden whitespace-pre-wrap break-words p-4 text-sm text-muted-foreground/60",
                           hasPendingFilePayload && "pt-1.5", composerRightClearanceClass)}>
@@ -9359,7 +9529,7 @@ export function ChatContainer({
                           promptComposer.composition(false)
                         }}
                         onKeyDown={handleKeyDown}
-                        placeholder={promptComposer.suggestion ? "" : composerMode === "flow" ? "输入本次流程任务，发送后按右侧所选步骤执行" : !modsChatState.ready ? "" : !modsChatEnabled ? inputPlaceholder : functionHint?.threadId === threadId ? functionHint.text ?? "" : ""}
+                        placeholder={effectiveInputDisabled ? inputPlaceholder : promptComposer.suggestion ? "" : creatorMode ? inputPlaceholder : !modsChatState.ready ? "" : !modsChatEnabled ? inputPlaceholder : functionHint?.threadId === threadId ? functionHint.text ?? "" : ""}
                         disabled={effectiveInputDisabled}
                         className={cn(
                           "composer-textarea relative z-[1] mr-2 w-[calc(100%-0.5rem)] resize-none overflow-y-auto bg-transparent",
@@ -9374,7 +9544,10 @@ export function ChatContainer({
                           ...(promptComposer.decorations.length ? { fontFamily: "ui-monospace, monospace" } : {}) }}
                       />
                       </div>
-                      {promptComposer.suggestion && !input && <div className="px-4 pb-1 text-xs text-muted-foreground">
+                      {effectiveInputDisabled && <p role="status" className="px-4 pb-2 text-xs text-muted-foreground">
+                        {inputPlaceholder}
+                      </p>}
+                      {promptComposer.suggestion && !input && !effectiveInputDisabled && <div className="px-4 pb-1 text-xs text-muted-foreground">
                         按 Tab 或 → 接受建议，确认后再发送
                       </div>}
                       {/* Bottom bar: primary execution controls left, send button right */}
@@ -9486,10 +9659,10 @@ export function ChatContainer({
                               )}
                               <button
                                 type="submit"
-                                aria-label={composerMode === "flow" ? "发送并执行流程" : "发送消息"}
-                                title={composerMode === "flow" ? "发送并执行流程" : "发送消息"}
+                                aria-label="发送消息"
+                                title={chatFlow.choice ? `使用已选任务方案“${chatFlow.choice.name}”` : "发送消息"}
                                 disabled={
-                                  !localCommandTarget && ((composerMode === "flow" && (chatFlow.busy || chatFlow.active || !chatFlow.enabled)) ||
+                                  (chatFlow.choice ? chatFlow.busy || chatFlow.active || Boolean(chatFlow.workspaceActive) || !chatFlow.enabled : !localCommandTarget && (
                                   !stream ||
                                   effectiveInputDisabled ||
                                   (!input.trim() &&
@@ -9497,9 +9670,9 @@ export function ChatContainer({
                                     !selectedSkill &&
                                     !selectedBuiltinBrowser) ||
                                   (slash.mode.kind === "slash" &&
-                                    !isBareGoalSlashCommandInput(input)))
+                                    !isBareGoalSlashCommandInput(input)))) || (Boolean(chatFlow.choice) && (!input.trim() || effectiveInputDisabled))
                                 }
-                                className="flex size-8 shrink-0 items-center justify-center rounded-full bg-button text-button-foreground transition-colors hover:bg-button/90 disabled:cursor-not-allowed disabled:opacity-40"
+                                className={cn("flex h-8 shrink-0 items-center justify-center rounded-full bg-button text-button-foreground transition-colors hover:bg-button/90 disabled:cursor-not-allowed disabled:opacity-40", chatFlow.choice ? "gap-1 px-3 text-sm" : "w-8")}
                               >
                                 <ArrowUp className="size-5" strokeWidth={1.75} />
                               </button>

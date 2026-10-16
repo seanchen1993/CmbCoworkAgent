@@ -295,6 +295,13 @@ export function registerModsFlowHandlers(
         )
     }
   )
+  ipcMain.handle("mods:flow-active", (event, threadId: string) => {
+    const workspace = scope(event, threadId)
+    const active = flows.activeSummary(workspace, threadId)
+    if (active && threadScope(active.threadId) !== workspace) throw Error("FLOW_SCOPE_CHANGED")
+    if (scope(event, threadId) !== workspace) throw Error("FLOW_SCOPE_CHANGED")
+    return active
+  })
   ipcMain.handle("mods:flow-runs", (event, threadId: string) =>
     flows.runs(scope(event, threadId), threadId)
   )

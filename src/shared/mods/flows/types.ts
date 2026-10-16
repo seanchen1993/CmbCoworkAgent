@@ -106,6 +106,8 @@ export interface FlowStepResult {
   outputTokens?: number
 }
 export interface FlowAttempt {
+  /** Bounded public observation only; never completion or recovery evidence. */
+  progress?: { phase: "model" | "tool"; text?: string; toolName?: string; updatedAt: number }
   /** Host trace correlation only; never recovery or execution authority. */
   telemetry?: { childThreadId: string; traceId: string; rootTraceId: string }
   executionId: string
@@ -176,7 +178,14 @@ export interface FlowCatalog {
   skills?: ClawSourceEntry[]
   features: { id: string; checkpoint: string }[]
 }
+export interface FlowActiveSummary {
+  runId: string
+  threadId: string
+  flowName: string
+  status: FlowRun["status"]
+}
 export interface FlowApi extends FlowFilePublicationApi {
+  flowActive(threadId: string): Promise<FlowActiveSummary | null>
   flowMcpTools(threadId: string): Promise<FlowMcpToolDescriptor[]>
   flowCatalog(threadId: string): Promise<FlowCatalog>
   flowList(threadId: string): Promise<SavedFlow[]>

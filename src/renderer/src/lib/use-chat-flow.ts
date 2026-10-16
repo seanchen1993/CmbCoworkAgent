@@ -1,9 +1,22 @@
 import type { ClawView } from "../../../shared/mods/claw"
 import { useCallback, useEffect, useRef, useState } from "react"
-import type { FlowCatalog, FlowRun, SavedFlow } from "../../../shared/mods/flows/types"
+import type {
+  FlowActiveSummary,
+  FlowCatalog,
+  FlowRun,
+  SavedFlow
+} from "../../../shared/mods/flows/types"
 import { parseFlowTaskGoal, flowRunnableInCatalog } from "../../../shared/mods/flows/schema"
-import { currentChatFlowChoice, selectChatFlow, useChatFlowChoice } from "./chat-flow-choice"
+import {
+  consumeChatFlowChoice,
+  currentChatFlowChoice,
+  selectChatFlow,
+  useChatFlowChoice
+} from "./chat-flow-choice"
 import { chatClawEnabled } from "./chat-claw-state"
+import { useAppStore } from "@/lib/store"
+import { watchFlowOwner } from "./flow-owner-watch"
+import { normalizeWorkspacePathKey } from "../../../shared/workspace-path"
 
 const activeRun = (run: FlowRun | null) =>
   !!run && ["queued", "running", "waiting"].includes(run.status)
@@ -28,7 +41,6 @@ export function useChatFlow(
   const configurationRefreshPending = useRef(false)
   const sequence = useRef(0)
   const loadSequence = useRef(0)
-  const seenBinding = useRef("")
   const invalidateReads = useCallback(() => {
     sequence.current++
   }, [])
@@ -38,10 +50,13 @@ export function useChatFlow(
     catalog?: FlowCatalog
     flows: SavedFlow[]
     run: FlowRun | null
+    workspaceActive?: FlowActiveSummary | null
     error: string
   }>({ key, flows: [], run: null, error: "" })
   const [pending, setPending] = useState<string | null>(null)
+  const [operation, setOperation] = useState<string | null>(null)
   const [loading, setLoading] = useState<string | null>(null)
+  const [recent, setRecent] = useState<{ key: string; runs: FlowRun[] }>({ key, runs: [] })
   const state = snapshot.key === key ? snapshot : { flows: [], run: null, error: "" }
   const visibleRun = useRef<string | undefined>(state.run?.id)
   visibleRun.current = state.run?.id
@@ -52,8 +67,27 @@ export function useChatFlow(
     execution.current = { enabled: canExecute, generation: execution.current.generation + 1 }
   const renderedExecutionGeneration = execution.current.generation
   const live = useCallback(() => alive.current && current.current === key, [key])
+  const remember = useCallback(
+    (runs: FlowRun[]) => {
+      if (!live()) return
+      setRecent((previous) => {
+        const byId = new Map(
+          (previous.key === key ? previous.runs : []).map((run) => [run.id, run])
+        )
+        for (const run of runs)
+          if (
+            run.threadId === threadId &&
+            normalizeWorkspacePathKey(run.workspace) === normalizeWorkspacePathKey(workspace)
+          )
+            byId.set(run.id, run)
+        return { key, runs: [...byId.values()].sort((a, b) => a.startedAt - b.startedAt).slice(-3) }
+      })
+    },
+    [key, live, threadId, workspace]
+  )
   const update = useCallback(
     (patch: Partial<Omit<typeof snapshot, "key">>) => {
+      if (patch.run) remember([patch.run])
       if (live())
         setSnapshot((old) => ({
           ...(old.key === key ? old : { flows: [], run: null, error: "" }),
@@ -61,7 +95,7 @@ export function useChatFlow(
           ...patch
         }))
     },
-    [key, live]
+    [key, live, remember]
   )
 
   useEffect(() => {
@@ -73,36 +107,28 @@ export function useChatFlow(
   }, [invalidateReads])
 
   const load = async (withCatalog = true) => {
-    if (!alive.current || !enabled || !workspace || lock.current) return
+    if (!alive.current || !enabled || !workspace) return
+    if (lock.current) {
+      configurationRefreshPending.current = true
+      return
+    }
     const request = ++loadSequence.current
     const runSequence = sequence.current
     setLoading(key)
     try {
-      const [catalog, flows, runs, binding] = await Promise.all([
+      const [catalog, flows, runs, binding, workspaceActive] = await Promise.all([
         withCatalog
           ? window.api.mods.flowCatalog(threadId)
           : Promise.resolve("catalog" in state ? state.catalog : undefined),
         withCatalog ? window.api.mods.flowList(threadId) : Promise.resolve(state.flows),
         window.api.mods.flowRuns(threadId),
-        window.api.mods.clawView(threadId)
+        window.api.mods.clawView(threadId),
+        window.api.mods.flowActive(threadId)
       ])
       if (!live() || request !== loadSequence.current) return
-      const bindingKey = JSON.stringify([key, binding.bindingRevision])
-      if (seenBinding.current !== bindingKey) {
-        seenBinding.current = bindingKey
-        const selected = binding.active?.flow
-        if (selected)
-          selectChatFlow(threadId, {
-            workspace: binding.workspace,
-            id: selected.definition.id,
-            name: selected.definition.name,
-            revision: selected.revision,
-            bindingRevision: binding.bindingRevision
-          })
-        else if (currentChatFlowChoice(threadId)?.bindingRevision !== undefined)
-          selectChatFlow(threadId, null)
-      }
+      remember(runs.slice(0, 3))
       update({
+        workspaceActive,
         binding,
         catalog,
         flows,
@@ -134,6 +160,18 @@ export function useChatFlow(
   }, [enabled, workspace, key])
 
   const watchRun = Boolean(choice || state.run)
+  const otherOwner =
+    "workspaceActive" in state && state.workspaceActive?.threadId !== threadId
+      ? state.workspaceActive?.threadId
+      : undefined
+  useEffect(() => {
+    if (!enabled || !workspace || !otherOwner) return
+    return watchFlowOwner(
+      (changed) => window.api.mods.onFlowChanged(otherOwner, changed),
+      () => window.api.mods.flowActive(threadId),
+      (workspaceActive) => update({ workspaceActive })
+    )
+  }, [enabled, workspace, threadId, otherOwner, update])
   useEffect(() => {
     if (!enabled || !workspace || !watchRun) return
     let disposed = false
@@ -148,9 +186,14 @@ export function useChatFlow(
       reading = true
       const request = ++sequence.current
       try {
-        const runs = await window.api.mods.flowRuns(threadId)
-        if (!disposed && request === sequence.current)
-          update({ run: runs.find(activeRun) ?? runs[0] ?? null })
+        const workspaceActive = await window.api.mods.flowActive(threadId)
+        const id =
+          workspaceActive?.threadId === threadId ? workspaceActive.runId : visibleRun.current
+        // Progress events read one active in-memory run, not the entire durable history.
+        const run = id
+          ? await window.api.mods.flowRun(threadId, id)
+          : ((await window.api.mods.flowRuns(threadId)).find(activeRun) ?? null)
+        if (!disposed && request === sequence.current) update({ run, workspaceActive })
       } catch (error) {
         if (!disposed && request === sequence.current) update({ error: errorText(error) })
       } finally {
@@ -210,10 +253,26 @@ export function useChatFlow(
     const goal = parseFlowTaskGoal(text)
     lock.current = true
     setPending(key)
+    setOperation("start")
     update({ error: "" })
     try {
+      const workspaceActive = await window.api.mods.flowActive(threadId)
+      if (!live()) return false
+      update({ workspaceActive })
+      if (workspaceActive)
+        throw Error(
+          `本项目正在运行“${workspaceActive.flowName}”。请在“任务进展”查看或前往正在运行的聊天；本次输入已保留。`
+        )
+      if (
+        !execution.current.enabled ||
+        execution.current.generation !== executionGeneration ||
+        currentChatFlowChoice(threadId) !== choice ||
+        normalizeWorkspacePathKey(choice.workspace) !== normalizeWorkspacePathKey(workspace)
+      )
+        throw Error("聊天、项目或本次步骤选择已变化；输入已保留，请重新核对。")
       if (choice.bindingRevision !== undefined) {
         const run = await window.api.mods.clawStart(threadId, choice.bindingRevision, goal)
+        consumeChatFlowChoice(threadId, choice)
         if (!live()) return false
         sequence.current++
         update({ run, error: "" })
@@ -245,6 +304,7 @@ export function useChatFlow(
         workspace: choice.workspace,
         goal
       })
+      consumeChatFlowChoice(threadId, choice)
       if (!live()) return false
       sequence.current++
       update({ catalog, flows, run, error: "" })
@@ -272,6 +332,7 @@ export function useChatFlow(
     if (operation !== "cancel" && !execution.current.enabled) return
     lock.current = true
     setPending(key)
+    setOperation(operation)
     try {
       if (operation === "cancel") await window.api.mods.flowCancel(threadId, run.id)
       else {
@@ -301,10 +362,26 @@ export function useChatFlow(
   }
 
   return {
+    threadId,
+    workspace,
+    openActive: async () => {
+      if (!live()) return
+      try {
+        const active = await window.api.mods.flowActive(threadId)
+        if (!live()) return
+        update({ workspaceActive: active })
+        if (active) await useAppStore.getState().selectThread(active.threadId)
+      } catch (error) {
+        update({ error: errorText(error) })
+      }
+    },
+    workspaceActive: "workspaceActive" in state ? state.workspaceActive : undefined,
     ...state,
     choice,
+    recentRuns: recent.key === key ? recent.runs : [],
     enabled: canExecute,
     busy: pending === key,
+    stopping: pending === key && operation === "cancel",
     loading: loading === key,
     active: activeRun(state.run),
     load,
@@ -326,7 +403,7 @@ export function useChatFlow(
       update({ run: next, error: "" })
     },
     clear: () => {
-      if (!lock.current && !activeRun(state.run)) selectChatFlow(threadId, null)
+      if (!lock.current) selectChatFlow(threadId, null)
     }
   }
 }

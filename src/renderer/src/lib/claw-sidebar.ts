@@ -3,6 +3,14 @@ import { useAppStore } from "@/lib/store"
 
 const hosts = new Map<string, HTMLElement>()
 const paneOpens = new Map<string, Map<string, string>>()
+const protectedFlowViews = new Set<string>()
+export function protectFlowTaskView(threadId: string, active: boolean) {
+  if (active) protectedFlowViews.add(threadId)
+  else protectedFlowViews.delete(threadId)
+  return () => {
+    protectedFlowViews.delete(threadId)
+  }
+}
 const listeners = new Set<() => void>()
 const subscribe = (listener: () => void) => {
   listeners.add(listener)
@@ -65,7 +73,7 @@ export function revealClawPanes(
   if (!hosts.has(threadId)) return
   const observed = paneOpens.get(threadId) ?? new Map<string, string>()
   paneOpens.set(threadId, observed)
-  const activeKeys = new Set(rows.map(row => row.key))
+  const activeKeys = new Set(rows.map((row) => row.key))
   for (const key of observed.keys()) if (!activeKeys.has(key)) observed.delete(key)
   let opened = false
   for (const row of rows) {
@@ -76,5 +84,9 @@ export function revealClawPanes(
   }
   const store = useAppStore.getState()
   if (!opened || store.currentThreadId !== threadId || store.mainView !== "thread") return
+  if (protectedFlowViews.has(threadId)) {
+    publishClawNotice(threadId, "flow-panes", "有新的灵件记录")
+    return
+  }
   openClawSidebar("results")
 }
