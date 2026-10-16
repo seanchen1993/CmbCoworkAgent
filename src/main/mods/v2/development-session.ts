@@ -4,15 +4,29 @@ import type { ThreadIncarnation } from "../../services/thread-incarnation"
 import { pluginCatalogGate } from "../../plugins/catalog-gate"
 import { claimConfigurationReload } from "./configuration-reload-lease"
 import { ModFunctionError } from "../../../shared/mods/v2/contracts"
+import type {
+  DevelopmentWaitingReason,
+  DevelopmentValidation,
+  DevelopmentRuntimeDiagnostics
+} from "../../../shared/mods/development"
+import { FUNCTION_SDK_METHODS } from "./sdk-capabilities"
+import {
+  FUNCTION_COMPATIBILITY_EVENT_NAMES,
+  getFunctionEventSupport
+} from "../../../shared/mods/v2/compatibility-catalog"
 
 const publicPreparationCodes = new Set([
+  "MODS_COMMAND_CONFLICT",
   "MODS_CONFIG_RELOAD_EFFECT_UNSUPPORTED",
   "MODS_DEVELOPMENT_BUSY",
   "MODS_DEVELOPMENT_SOURCE_CHANGED",
   "MODS_DEVELOPMENT_REVOKED",
   "MODS_DEVELOPMENT_CAPABILITY_DENIED",
   "MODS_SCOPE_CHANGED",
-  "MODS_RUNTIME_LOST"
+  "MODS_RUNTIME_LOST",
+  "MODS_RETURN_UNDEFINED",
+  "MODS_SESSION_START_RESULT",
+  "MODS_COMMAND_RESERVED"
 ])
 function preparationErrorCode(error: unknown): string | undefined {
   const code =
@@ -49,6 +63,21 @@ export const DEVELOPMENT_CAPABILITIES = Object.freeze([
   "command.list",
   ...DEVELOPMENT_EVENT_CAPABILITIES
 ])
+/** Real trial consent adds SDK admission, while every existing method/target guard still applies. */
+export const DEVELOPMENT_REAL_CAPABILITIES: readonly string[] = Object.freeze([
+  ...new Set([
+    ...DEVELOPMENT_CAPABILITIES,
+    ...FUNCTION_SDK_METHODS,
+    ...FUNCTION_COMPATIBILITY_EVENT_NAMES
+      .filter((name) => getFunctionEventSupport(name)?.availability === "bounded")
+      .map((name) => `event:${name}`)
+  ])
+])
+export function developmentCapabilities(validation?: DevelopmentValidation): readonly string[] {
+  return validation === "authorized-real"
+    ? DEVELOPMENT_REAL_CAPABILITIES
+    : DEVELOPMENT_CAPABILITIES
+}
 export interface DevelopmentScope {
   workspace: string
   threadId: string
@@ -63,6 +92,8 @@ export interface DevelopmentRevision {
   sourcePath: string
   turnId: string
   capabilities: readonly string[]
+  validation?: DevelopmentValidation
+  purpose?: string
 }
 export type DevelopmentPhase =
   | "needs-approval"
@@ -81,7 +112,10 @@ export interface DevelopmentStatus extends Omit<
   phase: DevelopmentPhase
   activeRevision?: number
   activeDigest?: string
+  waitingReason?: DevelopmentWaitingReason
   error?: string
+  addedCapabilities?: string[]
+  diagnostics?: DevelopmentRuntimeDiagnostics
 }
 export interface DevelopmentActivation {
   readonly id: string
@@ -106,6 +140,7 @@ export interface DevelopmentDriver {
   /** Synchronous compare-and-swap. The candidate cannot enter before this returns. */
   activate(activation: DevelopmentActivation, candidate: DevelopmentCandidate): void
   changed(scope: DevelopmentScope, status: DevelopmentStatus): void
+  diagnostics?(scope: DevelopmentScope, activationId: string): DevelopmentRuntimeDiagnostics | undefined
 }
 export interface DevelopmentRetention {
   releasable: boolean
@@ -153,6 +188,7 @@ function copyScope(scope: DevelopmentScope): DevelopmentScope {
   })
 }
 function copyRevision(input: DevelopmentRevision): DevelopmentRevision {
+  const allowed = developmentCapabilities(input.validation)
   if (
     !input.componentId ||
     !input.draftId ||
@@ -163,8 +199,12 @@ function copyRevision(input: DevelopmentRevision): DevelopmentRevision {
     !/^[a-f0-9]{64}$/.test(input.bundleDigest) ||
     !/^[a-f0-9]{64}$/.test(input.compiledDigest) ||
     !Array.isArray(input.capabilities) ||
-    input.capabilities.length > DEVELOPMENT_CAPABILITIES.length ||
-    input.capabilities.some((value) => !DEVELOPMENT_CAPABILITIES.includes(value))
+    (input.validation !== undefined &&
+      !["session-local", "authorized-real"].includes(input.validation)) ||
+    (input.purpose !== undefined &&
+      (typeof input.purpose !== "string" || input.purpose.length > 400 || input.purpose.includes("\0"))) ||
+    input.capabilities.length > allowed.length ||
+    input.capabilities.some((value) => !allowed.includes(value))
   )
     reject("MODS_DEVELOPMENT_CAPABILITY_UNSUPPORTED")
   return Object.freeze({ ...input, capabilities: Object.freeze([...new Set(input.capabilities)]) })
@@ -174,6 +214,7 @@ function copyRevision(input: DevelopmentRevision): DevelopmentRevision {
 export class FunctionDevelopmentSessions {
   private readonly entries = new Map<string, Entry>()
   private readonly settled = new Map<string, Set<string>>()
+  private readonly interrupted = new Map<string, Set<string>>()
   private closed = false
   private readonly stopSettlement: () => void
   constructor(private readonly driver: DevelopmentDriver) {
@@ -202,6 +243,7 @@ export class FunctionDevelopmentSessions {
       if (this.retention(candidate.scope)?.releasable) {
         this.entries.delete(storedKey)
         this.settled.delete(storedKey)
+        this.interrupted.delete(storedKey)
       }
     }
     const identity = key(scope),
@@ -210,7 +252,21 @@ export class FunctionDevelopmentSessions {
       reject("MODS_DEVELOPMENT_COMPONENT_CAPACITY")
     if (old?.applying || old?.closing) reject("MODS_DEVELOPMENT_APPLYING")
     if (old?.phase === "unknown") reject("MODS_DEVELOPMENT_RETIRE_UNCONFIRMED")
-    if (old && revision.revision <= old.pending.revision)
+    // Re-requesting the unchanged draft from a new creation turn can recover an
+    // interrupted request. Approval still applies only to these exact bytes and
+    // activation still waits for the new turn's successful physical settlement.
+    const resumesInterrupted = old?.phase === "queued" &&
+      this.interrupted.get(identity)?.has(old.pending.turnId) &&
+      revision.turnId !== old.pending.turnId &&
+      revision.revision === old.pending.revision &&
+      revision.draftId === old.pending.draftId &&
+      revision.bundleDigest === old.pending.bundleDigest &&
+      revision.compiledDigest === old.pending.compiledDigest &&
+      revision.sourcePath === old.pending.sourcePath &&
+      revision.capabilities.length === old.pending.capabilities.length &&
+      revision.validation === old.pending.validation &&
+      revision.capabilities.every(value => old.pending.capabilities.includes(value))
+    if (old && revision.revision <= old.pending.revision && !resumesInterrupted)
       reject("MODS_DEVELOPMENT_REVISION_CONFLICT")
     if (!old && this.entries.size >= 32) reject("MODS_DEVELOPMENT_CAPACITY")
     const entry: Entry = old ?? {
@@ -247,11 +303,16 @@ export class FunctionDevelopmentSessions {
     if (
       entry.applying || entry.closing ||
       entry.pending.compiledDigest !== digest ||
-      capabilities.some((value) => !DEVELOPMENT_CAPABILITIES.includes(value)) ||
+      capabilities.some((value) => !developmentCapabilities(entry.pending.validation).includes(value)) ||
+      capabilities.some((value) => !entry.pending.capabilities.includes(value)) ||
       entry.pending.capabilities.some((value) => !capabilities.includes(value))
     )
       reject("MODS_DEVELOPMENT_APPROVAL_CHANGED")
     assertTrustedUser()
+    if (entry.phase === "active" && entry.active?.revision === entry.pending) {
+      entry.active.assertCurrent()
+      return this.status(scope)!
+    }
     entry.approved = new Set([...entry.approved, ...capabilities])
     if (!entry.epoch) entry.epoch++
     entry.phase = "queued"
@@ -266,14 +327,27 @@ export class FunctionDevelopmentSessions {
     outcome: "completed" | "failed" | "cancelled"
   ) {
     this.driver.assertScope(scope)
-    if (outcome !== "completed") return
-    const identity = key(scope),
-      turns = this.settled.get(identity) ?? new Set<string>()
+    const identity = key(scope)
+    if (outcome !== "completed") {
+      if (this.settled.get(identity)?.has(turnId)) return
+      const interrupted = this.interrupted.get(identity) ?? new Set<string>()
+      interrupted.add(turnId)
+      if (interrupted.size > 64) interrupted.delete(interrupted.values().next().value!)
+      this.interrupted.set(identity, interrupted)
+      const entry = this.entries.get(identity)
+      if (entry?.pending.turnId === turnId && entry.phase === "queued") this.publish(entry)
+      return
+    }
+    this.interrupted.get(identity)?.delete(turnId)
+    const turns = this.settled.get(identity) ?? new Set<string>()
     turns.add(turnId)
     if (turns.size > 64) turns.delete(turns.values().next().value!)
     this.settled.set(identity, turns)
     const entry = this.entries.get(identity)
-    if (entry) this.schedule(entry)
+    if (entry) {
+      this.schedule(entry)
+      if (entry.phase === "queued") this.publish(entry)
+    }
   }
 
   idle(threadId: string) {
@@ -337,11 +411,16 @@ export class FunctionDevelopmentSessions {
 
   private snapshot(entry: Entry): DevelopmentStatus {
     const { sourcePath: _sourcePath, ...revision } = entry.pending
+    const diagnostics = entry.active && this.driver.diagnostics
+      ? this.observedDiagnostics(entry) : undefined
     void _sourcePath
     return {
       ...revision,
       capabilities: [...revision.capabilities],
       phase: entry.phase,
+      addedCapabilities: revision.capabilities.filter((value) => !entry.approved.has(value)),
+      ...(diagnostics ? { diagnostics } : {}),
+      ...(entry.phase === "queued" ? { waitingReason: this.waitingReason(entry) } : {}),
       ...(entry.active
         ? {
             activeRevision: entry.active.revision.revision,
@@ -350,6 +429,33 @@ export class FunctionDevelopmentSessions {
         : {}),
       ...(entry.error ? { error: entry.error } : {})
     }
+  }
+
+  private observedDiagnostics(entry: Entry): DevelopmentRuntimeDiagnostics | undefined {
+    try {
+      const observed = this.driver.diagnostics?.(entry.scope, entry.active!.id)
+      if (!observed) return undefined
+      const keys = ["providers", "subscriptions", "inFlight", "unknownRequests", "completedRequests",
+        "failedRequests", "cancelledRequests", "backgroundResources", "pages", "generation"] as const
+      return Object.fromEntries(keys.flatMap((name) => {
+        const value = observed[name]
+        return typeof value === "number" && Number.isSafeInteger(value) && value >= 0
+          ? [[name, value]] : []
+      }))
+    } catch {
+      // Lost scope or cleanup uncertainty cannot be published as successful zero-resource proof.
+      return undefined
+    }
+  }
+
+  private waitingReason(entry: Entry): DevelopmentWaitingReason {
+    const identity = key(entry.scope)
+    if (!this.settled.get(identity)?.has(entry.pending.turnId)) {
+      return this.interrupted.get(identity)?.has(entry.pending.turnId)
+        ? "turn-interrupted"
+        : "turn-finishing"
+    }
+    return this.driver.isBusy?.(entry.scope) ? "conversation-busy" : "waiting-for-idle"
   }
 
   async stop(scope: DevelopmentScope, componentId: string, assertTrustedUser: () => void) {
@@ -432,6 +538,7 @@ export class FunctionDevelopmentSessions {
       entry.approved.clear()
     }
     this.settled.clear()
+    this.interrupted.clear()
   }
 
   private require(scope: DevelopmentScope, componentId: string) {
@@ -521,6 +628,9 @@ export class FunctionDevelopmentSessions {
         this.driver.activate(activation, candidate)
         candidate = undefined
         entry.active = activation
+        // A successfully narrowed version revokes removed permissions for later upgrades.
+        // Keep the old envelope until adoption so a rejected candidate cannot break the old version.
+        entry.approved = new Set(revision.capabilities)
         entry.phase = "active"
       } catch (error) {
         if (retired) entry.active = undefined

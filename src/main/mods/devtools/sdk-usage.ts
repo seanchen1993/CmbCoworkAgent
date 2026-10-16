@@ -46,6 +46,8 @@ export async function analyzeFunctionSdk(snapshot: Snapshot) {
       strictCompatible: false,
       truncated: true,
       usages: [] as FunctionSdkUsage[],
+      registrationEvents: [] as string[],
+      registrationEventsVerified: false,
       diagnostics: [
         {
           file: "",
@@ -151,6 +153,8 @@ async function analyzeSnapshot(snapshot: Snapshot) {
     unknown(undefined, "源码超过静态分析节点上限。")
   }
   const bindings = new Map<TS.Symbol, string>()
+  const registrationEvents = new Set<string>()
+  let registrationEventsVerified = true
   const supported = new Set<string>(FUNCTION_SDK_METHODS)
   const symbols = (node: TS.Node) =>
     node.parent && ts.isShorthandPropertyAssignment(node.parent)
@@ -352,8 +356,10 @@ async function analyzeSnapshot(snapshot: Snapshot) {
       if (fn.parameters[0]) bind(fn.parameters[0].name, "")
       if (value === "@on") {
         const event = node.arguments[0]
-        if (!event || !ts.isStringLiteralLike(event))
+        if (!event || !ts.isStringLiteralLike(event)) {
+          registrationEventsVerified = false
           unknown(node, "动态事件表达式的 SDK 上下文未验证。")
+        }
         else if (matchesEventPattern(event.text, "engine.create")) {
           const parameter = fn.parameters[0]?.name
           if (parameter && ts.isIdentifier(parameter)) {
@@ -362,6 +368,11 @@ async function analyzeSnapshot(snapshot: Snapshot) {
           } else if (parameter) unknown(node, "engine.create 上下文不提供普通 SDK。")
           if (event.text === "engine.create")
             unknown(node, "engine.create 可改变运行时 SDK；其上下文没有普通会话能力。")
+        }
+        if (event && ts.isStringLiteralLike(event)) {
+          if (!/^[a-z][\w-]*(?:\.[\w-]+)*$/.test(event.text))
+            registrationEventsVerified = false
+          else registrationEvents.add(event.text)
         }
       }
     }
@@ -586,6 +597,8 @@ async function analyzeSnapshot(snapshot: Snapshot) {
     strictCompatible: !truncated && diagnostics.length === 0,
     truncated,
     usages,
+    registrationEvents: [...registrationEvents].sort(),
+    registrationEventsVerified,
     diagnostics
   }
 }

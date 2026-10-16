@@ -5,8 +5,27 @@ import { dirname, join } from "node:path"
 import { developmentCatalog, developmentCatalogPage } from "./development-catalog"
 import { analyzeAuthoringPreview } from "./authoring-preflight"
 import { authoringCompileDiagnostics } from "./authoring-compile-diagnostics"
+import { FUNCTION_UI_SITES } from "../../../shared/mods/v2/sites"
+import { FUNCTION_SDK_METHODS } from "../v2/sdk-capabilities"
+import { getFunctionEventSupport } from "../../../shared/mods/v2/compatibility-catalog"
 
 const roots: string[] = []
+it("freezes a discoverable S1 promise using real supported sites, events and SDK methods", () => {
+  const page = developmentCatalogPage("support")
+  if (!("content" in page) || typeof page.content !== "object" || Array.isArray(page.content))
+    throw Error("expected support profile")
+  const support = page.content
+  expect(support.id).toBe("creator-s1-2026-10-16")
+  expect(support.sites.every(site => FUNCTION_UI_SITES.includes(site as typeof FUNCTION_UI_SITES[number])))
+    .toBe(true)
+  expect([...support.localMethods, ...support.authorizedMethods]
+    .filter(method => !FUNCTION_SDK_METHODS.some(known => known === method))).toEqual([])
+  expect(support.events.every(event => getFunctionEventSupport(event)?.availability === "bounded"))
+    .toBe(true)
+  expect(support.onUnsupported).toContain("保留当前运行版、草稿和可用组合")
+  expect(support.unsupported).toContain("自动启动任意已保存 Flow")
+  expect(JSON.stringify(page).length).toBeLessThan(8000)
+})
 afterEach(async () => {
   for (const root of roots.splice(0)) await rm(root, { recursive: true, force: true })
 })
@@ -57,6 +76,26 @@ it("returns actionable source diagnostics for a real syntax error", async () => 
     ])
   )
 })
+
+it("typechecks the first-release authorized discovery and document actions against the shipped contract", async () => {
+  const root = await source()
+  await writeFile(join(root, "mods/main.ts"), `import type {Register} from "claude-code"
+export const register:Register=(on)=>{
+  on("command.run",{command:"review"},async($)=>{
+    const entries=await $.fs.list(".")
+    if(await $.fs.exists("review.md")) await $.fs.stat("review.md",{resolve:true})
+    const text=await $.fs.read("review.md")
+    const tools=await $.tool.list()
+    const check=await $.tool.check({tool:"Read",input:{file_path:"review.md"}})
+    if(check.decision==="allow") await $.tool.call({tool:"Read",file_path:"review.md"})
+    const answer=await $.model.complete({model:"default",prompt:text})
+    return{text:answer.isAnswered?answer.text:String(entries.length+tools.length)}
+  })
+}`)
+  const result = await analyzeAuthoringPreview(root)
+  expect(result.typecheck.diagnostics).toEqual([])
+  expect(result.sdk.strictCompatible).toBe(true)
+}, 15_000)
 
 it("discovers the exact SDK in bounded pages without losing declarations", () => {
   expect(JSON.stringify(developmentCatalogPage()).length).toBeLessThan(8000)

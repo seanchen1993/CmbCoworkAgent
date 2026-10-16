@@ -11,6 +11,7 @@ describe("development preload bridge", () => {
     const api = createDevelopmentBridge(invoke, () => () => {})
     await api.status({ threadId: "thread" })
     await api.setEnabled({ threadId: "thread", expectedWorkspace: "workspace", enabled: true })
+    await api.setMode({ threadId: "thread", expectedWorkspace: "workspace", mode: "normal" })
     await api.approve({
       threadId: "thread",
       expectedWorkspace: "workspace",
@@ -28,11 +29,32 @@ describe("development preload bridge", () => {
     expect(invoke.mock.calls.map(([channel]) => channel)).toEqual([
       "mods:development:status",
       "mods:development:set-enabled",
+      "mods:development:set-mode",
       "mods:development:approve",
       "mods:development:stop",
       "mods:development:promote"
     ])
-    expect(invoke.mock.calls[2][1]).toMatchObject({ revision: 2, digest: "digest" })
+    expect(invoke.mock.calls[2][1]).toMatchObject({ mode: "normal" })
+    expect(invoke.mock.calls[3][1]).toMatchObject({ revision: 2, digest: "digest" })
+  })
+  it("forwards native reuse approval and undo with their exact scoped payloads", async () => {
+    const invoke = vi.fn<(channel: string, input: unknown) => Promise<unknown>>(async () => ({}))
+    const api = createDevelopmentBridge(invoke, () => () => {})
+    const scope = { threadId: "thread", expectedWorkspace: "workspace" }
+    const approval = { ...scope, planId: "plan", sourceDigest: "source",
+      compiledDigest: "compiled", targetProfileDigest: "target" }
+    await api.requestReuse({ ...scope, id: "draft", revision: 1 })
+    await api.approveReuse(approval)
+    await api.undoComposition(scope)
+    await api.cancelComposition(scope)
+    await api.undoTrial(scope)
+    expect(invoke.mock.calls).toEqual([
+      ["mods:development:request-reuse", { ...scope, id: "draft", revision: 1 }],
+      ["mods:development:approve-reuse", approval],
+      ["mods:development:undo-composition", scope],
+      ["mods:development:cancel-composition", scope],
+      ["mods:development:undo-trial", scope]
+    ])
   })
   it("forwards only a thread change and exposes owned unsubscribe", () => {
     let deliver: (payload: unknown) => void = () => {}

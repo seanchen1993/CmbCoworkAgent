@@ -11,8 +11,9 @@ export function createAuthoringPreviewBackend(): AuthoringPreviewBackend {
     preflight: (directory, signal) => preflight.run(directory, signal),
     load: (code, options) => client.load(code, options),
     stop: async () => {
-      client.stop()
-      await preflight.stop()
+      const results = await Promise.allSettled([client.stopAndDrain(), preflight.stop()])
+      const failure = results.find((result) => result.status === "rejected")
+      if (failure?.status === "rejected") throw failure.reason
     }
   }
 }

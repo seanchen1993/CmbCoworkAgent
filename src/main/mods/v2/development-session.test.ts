@@ -12,8 +12,93 @@ import { publishDevelopmentTurnSettlement } from "./development-turn-settlement"
 import { ModFunctionError } from "../../../shared/mods/v2/contracts"
 
 const closes: Array<() => void> = []
+it("keeps real SDK effects behind explicit mode, settlement and exact capability consent", async () => {
+  const f = fixture()
+  const real = { ...f.input, validation: "authorized-real" as const,
+    purpose: "Read current workspace and call an approved service", capabilities: ["http.fetch"] }
+  expect(() => f.stage({ ...real, validation: undefined })).toThrow("CAPABILITY_UNSUPPORTED")
+  expect(() => f.stage({ ...real, capabilities: ["native.rawIPC"] })).toThrow("CAPABILITY_UNSUPPORTED")
+  expect(() => f.stage({ ...real, capabilities: ["event:*"] })).toThrow("CAPABILITY_UNSUPPORTED")
+  expect(f.stage(real)).toMatchObject({ phase: "needs-approval", addedCapabilities: ["http.fetch"] })
+  f.settled()
+  expect(f.driver.prepare).not.toHaveBeenCalled()
+  f.registry.approve(f.scope, real.componentId, real.compiledDigest, real.capabilities, () => {})
+  await vi.waitFor(() => expect(f.registry.status(f.scope)?.phase).toBe("active"))
+  expect(() => f.activation()!.assertCapability("http.fetch")).not.toThrow()
+  expect(() => f.activation()!.assertCapability("fs.write")).toThrow("CAPABILITY_DENIED")
+  const next = { ...real, revision: 2, compiledDigest: "c".repeat(64),
+    capabilities: ["http.fetch", "fs.write"] }
+  expect(f.stage(next)).toMatchObject({ phase: "needs-approval", activeRevision: 1,
+    addedCapabilities: ["fs.write"] })
+  expect(() => f.activation()!.assertCapability("fs.write")).toThrow("CAPABILITY_DENIED")
+  await f.registry.stop(f.scope, real.componentId, () => {})
+  expect(() => f.activation()!.assertCapability("http.fetch")).toThrow("REVOKED")
+})
+
+it("permits a statically declared supported event only after its real trial consent", async () => {
+  const f = fixture()
+  const revision = { ...f.input, validation: "authorized-real" as const,
+    capabilities: ["event:prompt.compose"] }
+  expect(f.stage(revision).phase).toBe("needs-approval")
+  f.settled()
+  expect(f.driver.prepare).not.toHaveBeenCalled()
+  f.registry.approve(f.scope, revision.componentId, revision.compiledDigest, revision.capabilities, () => {})
+  await vi.waitFor(() => expect(f.registry.status(f.scope)?.phase).toBe("active"))
+  expect(() => f.activation()!.assertCapability("event:prompt.compose")).not.toThrow()
+  expect(() => f.activation()!.assertCapability("event:fs.write")).toThrow("CAPABILITY_DENIED")
+})
+
+it("reports native resource diagnostics only for the exact active generation", async () => {
+  const diagnostics = vi.fn<NonNullable<DevelopmentDriver["diagnostics"]>>(() => ({
+    providers: 2, subscriptions: 1, inFlight: 1, unknownRequests: 1, backgroundResources: -1
+  }))
+  const f = fixture({ diagnostics })
+  f.stage(); f.approve(); f.settled()
+  await vi.waitFor(() => expect(f.registry.status(f.scope)?.phase).toBe("active"))
+  expect(diagnostics).toHaveBeenLastCalledWith(f.scope, f.activation()!.id)
+  expect(f.registry.status(f.scope)?.diagnostics).toEqual({
+    providers: 2, subscriptions: 1, inFlight: 1, unknownRequests: 1
+  })
+  diagnostics.mockImplementation(() => { throw Error("old generation") })
+  expect(f.registry.status(f.scope)?.diagnostics).toBeUndefined()
+  await f.registry.stop(f.scope, f.input.componentId, () => {})
+  diagnostics.mockClear()
+  expect(f.registry.status(f.scope)?.diagnostics).toBeUndefined()
+  expect(diagnostics).not.toHaveBeenCalled()
+})
+
+it("requires consent again when a later upgrade reintroduces a removed permission", async () => {
+  const f = fixture()
+  const first = { ...f.input, validation: "authorized-real" as const,
+    capabilities: ["ui.resolve", "http.fetch"] }
+  f.stage(first)
+  f.registry.approve(f.scope, first.componentId, first.compiledDigest, first.capabilities, () => {})
+  f.settled()
+  await vi.waitFor(() => expect(f.registry.status(f.scope)?.activeRevision).toBe(1))
+  f.stage({ ...first, revision: 2, capabilities: ["ui.resolve"] })
+  await vi.waitFor(() => expect(f.registry.status(f.scope)?.activeRevision).toBe(2))
+  expect(f.stage({ ...first, revision: 3 })).toMatchObject({
+    phase: "needs-approval", activeRevision: 2, addedCapabilities: ["http.fetch"]
+  })
+  expect(() => f.activation()!.assertCapability("http.fetch")).toThrow("CAPABILITY_DENIED")
+})
+
+it("does not restart an active version on repeated consent or accept a future permission envelope", async () => {
+  const f = fixture()
+  f.stage(); f.approve(); f.settled()
+  await vi.waitFor(() => expect(f.registry.status(f.scope)?.phase).toBe("active"))
+  const activation = f.activation()
+  expect(f.approve().phase).toBe("active")
+  await Promise.resolve()
+  expect(f.activation()).toBe(activation)
+  expect(f.driver.prepare).toHaveBeenCalledOnce()
+  expect(f.driver.retire).toHaveBeenCalledOnce()
+  expect(() => f.registry.approve(f.scope,f.input.componentId,f.input.compiledDigest,
+    [...f.input.capabilities,"store.set"],()=>{})).toThrow("APPROVAL_CHANGED")
+})
 it("reports only allowlisted preparation codes, never localized or arbitrary error bodies", async () => {
   for (const [error, expected] of [
+    [new ModFunctionError("MODS_RETURN_UNDEFINED", "敏感路径不能发布"), "MODS_RETURN_UNDEFINED"],
     [new ModFunctionError("MODS_CONFIG_RELOAD_EFFECT_UNSUPPORTED", "敏感路径不能发布"), "MODS_CONFIG_RELOAD_EFFECT_UNSUPPORTED"],
     [new ModFunctionError("MODS_PRIVATE_UNKNOWN", "敏感路径不能发布"), "MODS_DEVELOPMENT_PREPARE_FAILED"],
     [new Error("MODS_CONFIG_RELOAD_EFFECT_UNSUPPORTED: sensitive detail"), "MODS_DEVELOPMENT_PREPARE_FAILED"]
@@ -106,10 +191,41 @@ it("waits for the actual physical lease and never steals it", async () => {
   f.approve()
   f.settled()
   expect(f.driver.prepare).not.toHaveBeenCalled()
+  expect(f.registry.status(f.scope)?.waitingReason).toBe("waiting-for-idle")
   releaseLocalThreadRunLease(f.scope.threadId, "desktop", "running")
   f.registry.idle(f.scope.threadId)
   await vi.waitFor(() => expect(f.registry.status(f.scope)?.phase).toBe("active"))
+  expect(f.registry.status(f.scope)?.waitingReason).toBeUndefined()
 })
+
+it.each(["failed", "cancelled"] as const)(
+  "explains a %s creation turn without granting activation or poisoning its replacement",
+  async (outcome) => {
+    const changed = vi.fn()
+    let busy = true
+    const f = fixture({ changed, isBusy: () => busy })
+    f.stage()
+    f.approve()
+    expect(f.registry.status(f.scope)?.waitingReason).toBe("turn-finishing")
+    changed.mockClear()
+    f.registry.noteSettled(f.scope, "turn", outcome)
+    expect(changed).toHaveBeenCalledOnce()
+    expect(f.registry.status(f.scope)?.waitingReason).toBe("turn-interrupted")
+    f.approve()
+    f.registry.idle(f.scope.threadId)
+    expect(f.driver.prepare).not.toHaveBeenCalled()
+    f.stage({ ...f.input, revision: 2, turnId: "replacement" })
+    expect(f.registry.status(f.scope)?.waitingReason).toBe("turn-finishing")
+    f.registry.noteSettled(f.scope, "replacement", "completed")
+    expect(f.registry.status(f.scope)?.waitingReason).toBe("conversation-busy")
+    expect(f.driver.prepare).not.toHaveBeenCalled()
+    busy = false
+    f.registry.idle(f.scope.threadId)
+    await vi.waitFor(() => expect(f.registry.status(f.scope)?.phase).toBe("active"))
+    expect(f.registry.status(f.scope)?.waitingReason).toBeUndefined()
+    expect(f.driver.prepare).toHaveBeenCalledOnce()
+  }
+)
 
 it("rejects unsupported effects, stale revisions and another component", () => {
   const f = fixture()
@@ -117,6 +233,35 @@ it("rejects unsupported effects, stale revisions and another component", () => {
   f.stage()
   expect(() => f.stage()).toThrow("REVISION_CONFLICT")
   expect(() => f.stage({ ...f.input, componentId: "other", revision: 2 })).toThrow("CAPACITY")
+})
+
+it("retries unchanged interrupted drafts only through a new successfully completed turn", async () => {
+  const f = fixture()
+  f.stage()
+  f.approve()
+  const retry = { ...f.input, turnId: "retry" }
+  expect(() => f.stage(retry)).toThrow("REVISION_CONFLICT")
+  f.registry.noteSettled(f.scope, "turn", "cancelled")
+  for (const invalid of [
+    f.input,
+    { ...retry, draftId: "other" },
+    { ...retry, sourcePath: "other" },
+    { ...retry, bundleDigest: "d".repeat(64) },
+    { ...retry, compiledDigest: "d".repeat(64) },
+    { ...retry, capabilities: [] },
+    { ...retry, capabilities: [...retry.capabilities, "store.get"] }
+  ]) expect(() => f.stage(invalid)).toThrow("REVISION_CONFLICT")
+  expect(f.stage(retry).waitingReason).toBe("turn-finishing")
+  f.registry.noteSettled(f.scope, "turn", "completed")
+  f.registry.idle(f.scope.threadId)
+  expect(f.driver.prepare).not.toHaveBeenCalled()
+  f.registry.noteSettled(f.scope, "retry", "failed")
+  expect(f.registry.status(f.scope)?.waitingReason).toBe("turn-interrupted")
+  f.stage({ ...retry, turnId: "retry-again" })
+  f.registry.noteSettled(f.scope, "retry-again", "completed")
+  await vi.waitFor(() => expect(f.registry.status(f.scope)?.phase).toBe("active"))
+  expect(f.driver.prepare).toHaveBeenCalledOnce()
+  expect(() => f.stage({ ...retry, turnId: "after-active" })).toThrow("REVISION_CONFLICT")
 })
 
 it("preserves the active revision when a later preflight fails", async () => {

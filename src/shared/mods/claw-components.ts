@@ -1,6 +1,12 @@
 import { clawActionObject } from "./claw-actions"
 import type { ModObject } from "./types"
 import { isModObject } from "./v2/contracts"
+import {
+  isCapabilityUsageAllowed,
+  parseCapabilityUsage,
+  type CapabilityUsage,
+  type CapabilityUsageContext
+} from "./capability-usage"
 
 export interface ClawComponentExport {
   id: string
@@ -11,6 +17,7 @@ export interface ClawComponentExport {
   dependsOn: string[]
   actionIds: string[]
   configSchema?: ModObject
+  usage?: CapabilityUsage
 }
 
 export interface ClawComponentSelection {
@@ -74,6 +81,7 @@ export function parseClawComponentExports(value: unknown): ClawComponentExport[]
       entry: item.entry,
       dependsOn: ids(item.dependsOn ?? []),
       actionIds: ids(item.actionIds ?? []),
+      ...(item.usage === undefined ? {} : { usage: parseCapabilityUsage(item.usage) }),
       ...(item.description === undefined ? {} : { description: item.description }),
       ...(item.configSchema === undefined
         ? {}
@@ -88,7 +96,17 @@ export function parseClawComponentExports(value: unknown): ClawComponentExport[]
     const entry = entries.find((item) => item.id === id)
     if (!entry) throw Error("CLAW_COMPONENT_DEPENDENCY_MISSING")
     visiting.add(id)
-    entry.dependsOn.forEach(visit)
+    for (const dependency of entry.dependsOn) {
+      const target = entries.find((item) => item.id === dependency)
+      if (!target) throw Error("CLAW_COMPONENT_DEPENDENCY_MISSING")
+      for (const context of ["chat", "project"] as const)
+        if (
+          isCapabilityUsageAllowed(entry.usage, context) &&
+          !isCapabilityUsageAllowed(target.usage, context)
+        )
+          throw Error("CLAW_COMPONENT_DEPENDENCY_USAGE_INVALID")
+      visit(dependency)
+    }
     visiting.delete(id)
     visited.add(id)
   }
@@ -115,7 +133,8 @@ export function parseClawComponentSelection(value: unknown): ClawComponentSelect
 /** Resolve only explicitly selected IDs. Missing dependencies never silently grant execution. */
 export function resolveClawComponents(
   entries: ClawComponentExport[],
-  selection?: ClawComponentSelection
+  selection?: ClawComponentSelection,
+  context?: CapabilityUsageContext
 ): ClawComponentExport[] {
   if (!entries.length) {
     if (selection) throw Error("CLAW_COMPONENTS_NOT_DECLARED")
@@ -123,11 +142,20 @@ export function resolveClawComponents(
   }
   const normalized = selection && parseClawComponentSelection(selection)
   const selected = new Set(
-    normalized?.mode === "selected" ? normalized.ids : entries.map((entry) => entry.id)
+    normalized?.mode === "selected"
+      ? normalized.ids
+      : entries
+          .filter(
+            (entry) => normalized || !context || isCapabilityUsageAllowed(entry.usage, context)
+          )
+          .map((entry) => entry.id)
   )
   for (const id of selected)
     if (!entries.some((entry) => entry.id === id)) throw Error("CLAW_COMPONENT_UNAVAILABLE")
   const result = entries.filter((entry) => selected.has(entry.id))
+  for (const entry of result)
+    if (context && !isCapabilityUsageAllowed(entry.usage, context))
+      throw Error(`CLAW_COMPONENT_USAGE_UNAVAILABLE: ${entry.id}`)
   for (const entry of result)
     for (const dependency of entry.dependsOn)
       if (!selected.has(dependency)) throw Error("CLAW_COMPONENT_DEPENDENCY_REQUIRED")

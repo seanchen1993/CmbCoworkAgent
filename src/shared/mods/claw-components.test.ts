@@ -19,6 +19,58 @@ const review = {
 const manifest = { componentsVersion: 1, components: [base, review] }
 
 describe("explicit component selection", () => {
+  it("filters implicit defaults but rejects incompatible explicit all and selected", () => {
+    const entries = parseClawComponentExports({
+      componentsVersion: 1,
+      components: [base, { ...review, usage: "project" }]
+    })
+    expect(resolveClawComponents(entries, undefined, "chat").map((item) => item.id)).toEqual([
+      "base"
+    ])
+    expect(resolveClawComponents(entries, undefined, "project")).toHaveLength(2)
+    expect(resolveClawComponents(entries)).toHaveLength(2)
+    for (const mode of ["all", "selected"] as const)
+      expect(() =>
+        resolveClawComponents(
+          entries,
+          {
+            mode,
+            ids: ["base", "review"],
+            config: {}
+          },
+          "chat"
+        )
+      ).toThrow("USAGE_UNAVAILABLE: review")
+  })
+  it("rejects cross-mode implicit dependencies and unknown declarations", () => {
+    for (const [usage, dependencyUsage] of [
+      ["project", "chat"],
+      ["chat", "project"],
+      ["universal", "project"],
+      ["universal", "chat"],
+      [undefined, "project"]
+    ])
+      expect(() =>
+        parseClawComponentExports({
+          componentsVersion: 1,
+          components: [
+            { ...base, usage: dependencyUsage },
+            { ...review, ...(usage === undefined ? {} : { usage }) }
+          ]
+        })
+      ).toThrow("DEPENDENCY_USAGE_INVALID")
+    expect(() =>
+      parseClawComponentExports({
+        componentsVersion: 1,
+        components: [{ ...base, usage: "unknown" }]
+      })
+    ).toThrow("USAGE_INVALID")
+    const entries = parseClawComponentExports({
+      componentsVersion: 1,
+      components: [{ ...base, usage: "chat" }]
+    })
+    expect(resolveClawComponents(entries, undefined, "project")).toEqual([])
+  })
   it("preserves legacy whole-package profiles without inventing a new selection", () => {
     const profile = {
       id: "p",

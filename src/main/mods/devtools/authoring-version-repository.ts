@@ -65,7 +65,12 @@ function review(analysis: AuthoringPreviewAnalysis) {
     strictCompatible: analysis.sdk.strictCompatible,
     typesValid: analysis.typecheck.valid,
     modelProtocol: analysis.compiled.modelProtocol ?? "unknown",
-    sdkMethods: [...new Set((analysis.sdk.usages ?? []).map((usage) => usage.method))].sort()
+    sdkMethods: [...new Set((analysis.sdk.usages ?? []).map((usage) => usage.method))].sort(),
+    registrationEvents: [...new Set(
+      (analysis.sdk as { registrationEvents?: string[] }).registrationEvents ?? []
+    )].sort(),
+    registrationEventsVerified:
+      (analysis.sdk as { registrationEventsVerified?: boolean }).registrationEventsVerified === true
   }
 }
 const copy = <T>(value: T): T => JSON.parse(JSON.stringify(value)) as T

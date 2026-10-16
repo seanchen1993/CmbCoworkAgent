@@ -20,6 +20,9 @@ import {
   type ClawActionDescriptor
 } from "../../../shared/mods/claw-actions"
 import { PROJECT_ACTION_LOCK_PATH } from "../../../shared/project-runtime/action-bindings"
+import { ModFunctionError } from "../../../shared/mods/v2/contracts"
+import { DevelopmentCandidateError } from "../../mods/devtools/development-candidate-diagnostics"
+import { CREATOR_REQUEST_LIMITS } from "../../mods/devtools/creator-request-budget"
 
 const schema = z
   .object({
@@ -29,8 +32,12 @@ const schema = z
       "scaffold",
       "read",
       "save",
+      "submit",
       "check",
       "request_trial",
+      "resume_trial",
+      "undo_trial",
+      "request_reuse",
       "inspect_plugin",
       "read_plugin_asset",
       "project_scaffold",
@@ -96,7 +103,7 @@ const schema = z
       ])
       .optional(),
     assetPath: z.string().min(1).max(240).optional(),
-    catalogSection: z.enum(["overview", "types", "events", "sdk"]).optional(),
+    catalogSection: z.enum(["overview", "types", "events", "sdk", "support"]).optional(),
     cursor: z.number().int().min(0).max(100000).optional()
   })
   .strict()
@@ -109,6 +116,7 @@ export function createModAuthoringTool(input: {
   projectActions?: (workspace: string, threadId: string) => Promise<ClawActionDescriptor[]>
 }) {
   const { threadId, workspace } = input
+  const assertCreator = getModDevelopmentService()?.captureCreatorMode?.(threadId, workspace)
   const lease = getLocalThreadRunLease(threadId)
   const ownsLease = captureLocalThreadRunLease(threadId)
   let operations = 0
@@ -125,13 +133,15 @@ export function createModAuthoringTool(input: {
             !lease ||
             lease.owner !== "desktop" ||
             !ownsLease?.() ||
-            !service?.isEnabled(threadId, workspace)
+            !service?.isCreatorMode(threadId, workspace)
           )
             throw Error("DEVELOPMENT_TURN_CHANGED")
+          assertCreator?.()
         }
         assertTurn()
         service!.claimAuthoringBudget?.(threadId, lease!.runId, "operation")
-        if (++operations > 32 || performance.now() - createdAt > 10 * 60_000)
+        if (++operations > CREATOR_REQUEST_LIMITS.operations ||
+          performance.now() - createdAt > CREATOR_REQUEST_LIMITS.durationMs)
           throw Error("DEVELOPMENT_TURN_BUDGET")
         const id = () => {
           if (!args.id) throw Error("DEVELOPMENT_ID_REQUIRED")
@@ -140,6 +150,16 @@ export function createModAuthoringTool(input: {
         const revision = () => {
           if (args.revision === undefined) throw Error("DEVELOPMENT_REVISION_REQUIRED")
           return args.revision
+        }
+        const attemptCandidate = () => {
+          const observed = service!.claimAuthoringBudget?.(threadId, lease!.runId, "candidate")
+          if (observed) {
+            candidateAttempts = observed.candidates
+            return
+          }
+          if (candidateAttempts >= CREATOR_REQUEST_LIMITS.candidates)
+            throw Error("DEVELOPMENT_REPAIR_BUDGET")
+          candidateAttempts++
         }
         const project = () => {
           const context = service!.projectAuthoringContext(threadId)
@@ -306,12 +326,27 @@ export function createModAuthoringTool(input: {
               files: args.files
             })
             break
+          case "submit":
+            if (!args.name || !args.files) throw Error("DEVELOPMENT_INPUT")
+            attemptCandidate()
+            result = await service!.submit(
+              threadId,
+              {
+                id: id(),
+                name: args.name,
+                expectedRevision: revision(),
+                files: args.files
+              },
+              lease!.runId,
+              signal,
+              assertTurn
+            )
+            break
           case "check":
             result = await service!.check(threadId, id(), revision(), signal)
             break
-          case "request_trial": {
-            const observed = service!.claimAuthoringBudget?.(threadId, lease!.runId, "candidate")
-            if (!observed && ++candidateAttempts > 3) throw Error("DEVELOPMENT_REPAIR_BUDGET")
+          case "request_trial":
+            attemptCandidate()
             result = await service!.requestTrial(
               threadId,
               id(),
@@ -321,7 +356,30 @@ export function createModAuthoringTool(input: {
               assertTurn
             )
             break
-          }
+          case "resume_trial":
+            attemptCandidate()
+            result = await service!.resumeTrial(
+              threadId,
+              id(),
+              revision(),
+              lease!.runId,
+              signal,
+              assertTurn
+            )
+            break
+          case "undo_trial":
+            result = await service!.undoTrial(threadId, lease!.runId, signal, assertTurn)
+            break
+          case "request_reuse":
+            result = await service!.requestReuse(
+              threadId,
+              id(),
+              revision(),
+              lease!.runId,
+              signal,
+              assertTurn
+            )
+            break
           case "inspect_plugin": {
             const plugins = getPlugins()
             result = {
@@ -340,26 +398,66 @@ export function createModAuthoringTool(input: {
         assertTurn()
         return JSON.stringify({ ok: true, result })
       } catch (error) {
-        const code =
-          error instanceof Error && /^[A-Z][A-Z0-9_]{2,90}$/.test(error.message)
-            ? error.message
-            : "DEVELOPMENT_OPERATION_FAILED"
+        const rawCode =
+          error instanceof ModFunctionError
+            ? error.code
+            : error instanceof Error
+              ? error.message
+              : ""
+        const code = /^[A-Z][A-Z0-9_]{2,90}$/.test(rawCode)
+          ? rawCode
+          : "DEVELOPMENT_OPERATION_FAILED"
+        const requiredFields =
+          args.action === "scaffold"
+            ? ["name", "instruction", "kind"]
+            : ["save", "submit"].includes(args.action)
+              ? ["name", "files"]
+              : []
+        const missingFields =
+          code === "DEVELOPMENT_INPUT"
+            ? requiredFields.filter((field) => !args[field as keyof typeof args])
+            : []
         return JSON.stringify({
           ok: false,
           error: code,
+          ...(missingFields.length ? { missingFields } : {}),
+          ...(error instanceof DevelopmentCandidateError
+            ? {
+                target: error.target,
+                diagnostics: error.diagnostics,
+                repair: {
+                  attempt: candidateAttempts,
+                  maxAttempts: CREATOR_REQUEST_LIMITS.candidates,
+                  remaining: Math.max(0, CREATOR_REQUEST_LIMITS.candidates - candidateAttempts),
+                  canRetry: error.repairable && candidateAttempts < CREATOR_REQUEST_LIMITS.candidates,
+                  previousVersionPreserved: true
+                }
+              }
+            : {}),
           ...(error instanceof ProjectDraftLimitError ? { limit: error.reason } : {}),
           hint:
-            error instanceof ProjectDraftLimitError
-              ? projectDraftLimitHint(error.reason)
-              : args.action.startsWith("project_")
-                ? "用 project_read 核对 revision；公开动作需 project_actions 取得当前真实身份和 schema，未授权或版本改变时让用户经原入口处理，不可猜 ID。修正后 doctor/test；dev 只准备目录，pack 由用户经原入口安装。"
-                : "检查草稿版本、当前会话和诊断；失败不会替你批准权限。request_trial 只请求轮次结束后试用。"
+            error instanceof DevelopmentCandidateError
+              ? error.diagnostics[0].hint
+              : code === "DEVELOPMENT_BUDGET_UNCONFIRMED"
+                ? "本次制作请求的预算记录无法核对，已停止推进。保留草稿和当前运行版，先核对状态；不要自动重试或新开轮次绕过。"
+              : code === "DEVELOPMENT_TURN_BUDGET"
+                ? "本次制作请求已达到操作或时间预算。保留草稿和当前运行版，说明已完成与未完成部分，等待用户明确的新要求；不要自动新开请求继续。"
+              : code === "DEVELOPMENT_REPAIR_BUDGET"
+                ? "本轮已检查三个候选（初次制作加两次修复）。保留草稿和当前可用版，说明最后的准确诊断；不要继续循环提交或重放动作。"
+                : missingFields.length
+                  ? `此操作缺少 ${missingFields.join(", ")}；补齐这些字段后继续当前需求。`
+                  : error instanceof ProjectDraftLimitError
+                    ? projectDraftLimitHint(error.reason)
+                    : args.action.startsWith("project_")
+                      ? "用 project_read 核对 revision；公开动作需 project_actions 取得当前真实身份和 schema，未授权或版本改变时让用户经原入口处理，不可猜 ID。修正后 doctor/test；dev 只准备目录，pack 由用户经原入口安装。"
+                      : "检查草稿版本、当前会话和诊断；失败不会替你批准权限。request_trial 只请求轮次结束后试用。"
         })
       }
     },
     {
       name: "mod_authoring",
       description:
+        "Prefer submit(id,name,revision,files) to save, check and request the trial in one preparation; inspect result.check and repair diagnostics. A no-effect candidate startup preflight returns exact event/source diagnostics before this turn ends. Repair known code errors in this same request, using target.revision as the next expected revision; at most two repairs after the initial candidate. Never retry an unknown outcome or perform external actions to test startup. session.start must return next(event); a void startup handler fails even if syntax compiles. resume_trial(id,revision) re-prepares a persisted current-chat draft after restart and requests fresh consent, without installing. undo_trial stops the first active trial after the turn, or restores the immediately preceding source as a new revision through the same checks and permission envelope. request_reuse(id,revision) only prepares a reviewable formal installation and named combination for reuse in other chats; it does not install, approve, stop or apply before explicit UI confirmation. Do not use formal reuse merely to preserve this chat across restart. " +
         "Create or modify a Mod in this creator session. Read catalog for this build's SDK/types/examples; write actual TypeScript with save (revision=0 for new, latest revision for updates), check diagnostics and repair, then request_trial. Trials apply only after this turn settles and the person approves the capability envelope. Never claim active from queued. For project packages use project_scaffold(id,name,template?) with project-lite (compatible default), harness-lite, harness-fullstack or harness-data. Harness templates need only devclaw.harness.json ordered nodes (id,title,skill,artifacts[{id,path,example,schema?}],approval none/human) and skills. After editing node definitions call project_compile(id,revision) to generate a new immutable runtime/contract revision and run isolated artifact contracts; existing public action bindings are preserved. Then use project_read, project_save(files,name,revision), project_doctor, project_test, project_dev and project_pack (id,revision). project_actions(cursor) lists real installed authorized public actions and schemas. project_bind_action(id,revision,stageId,localActionId,provider,actionInput,actionConfig?,inputFrom?) reads the catalogue again and locks the chosen identity/schema into a new draft version. Never invent provider IDs/digests. InputFrom is a prior-stage artifact JSON object or an earlier action output object plus JSON pointer; actionInput constants override matching fields. No expressions or internal file imports. Project drafts use separate immutable versions; project_test runs isolated production artifact validators, project_dev only prepares an isolated package and empty workspace, project_pack returns a ZIP for the original user installation entry. These do not run a model, action, install, approve or advance a project. inspect_plugin reports original sources to preserve in an independent adapter; it neither executes nor converts the original plugin. Each project draft retains at most 8 revisions; scaffold/save/compile/bind consume revisions. PROJECT_DRAFT_LIMIT includes limit revision/drafts/sessions and a recovery hint. At revision capacity, project_read then project_save with a new draft id, revision:0, the original name and exact source.files continues without renaming the plugin or changing action locks; old previews stay pinned. At 4 drafts per creator session or 16 sessions per process, export checked packages and preserve full source for CLI editing; another chat or restart does not automatically restore drafts. Approval and promotion are user UI actions, unavailable to this tool.",
       schema
     }

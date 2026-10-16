@@ -6,6 +6,9 @@ import {
 } from "../../mods/devtools/development-service"
 import { claimLocalThreadRunLease, releaseLocalThreadRunLease } from "../thread-run-lease"
 import { projectAuthoringSessions } from "../../mods/devtools/project-authoring-session"
+import { DevelopmentCandidateError } from "../../mods/devtools/development-candidate-diagnostics"
+import { ModFunctionError } from "../../../shared/mods/v2/contracts"
+import { CreatorRequestBudgets } from "../../mods/devtools/creator-request-budget"
 
 vi.mock("../../storage", () => ({ getPlugins: vi.fn(() => []) }))
 
@@ -13,11 +16,15 @@ const threadId = "authoring-tool-test"
 const workspace = "workspace"
 function fixture() {
   const service = {
-    isEnabled: vi.fn((id, root) => id === threadId && root === workspace),
+    isCreatorMode: vi.fn((id, root) => id === threadId && root === workspace),
     status: vi.fn(() => ({ enabled: true })),
     save: vi.fn(() => ({ revision: 1 })),
     check: vi.fn(async () => ({ valid: true })),
-    requestTrial: vi.fn(async () => ({ trials: [] }))
+    requestTrial: vi.fn(async () => ({ trials: [] })),
+    submit: vi.fn(async () => ({ check: { valid: true, runtimeVerified: false } })),
+    resumeTrial: vi.fn(async () => ({ trials: [] })),
+    undoTrial: vi.fn(async () => ({ action: "restore-queued" })),
+    requestReuse: vi.fn(async () => ({ reuse: { phase: "needs-approval" } }))
   }
   setModDevelopmentService(service as unknown as ModDevelopmentService)
   claimLocalThreadRunLease({ threadId, owner: "desktop", runId: "first" })
@@ -31,6 +38,118 @@ afterEach(() => {
 })
 
 describe("conversation Mod tool", () => {
+  it("retains the request repair budget when tools are rebuilt during the same native run", async () => {
+    const service = fixture()
+    const ledger = new CreatorRequestBudgets()
+    Object.assign(service, { claimAuthoringBudget: (_thread: string, run: string, kind: "operation" | "candidate") =>
+      ledger.claim(workspace, run, kind) })
+    const files = [{ path: "mods/main.ts", text: "export const register = () => {}" }]
+    const args = { action: "submit" as const, id: "demo", name: "Demo", revision: 0, files }
+    for (let i = 0; i < 3; i++)
+      expect(JSON.parse(await createModAuthoringTool({ threadId, workspace }).invoke(args)).ok).toBe(true)
+    expect(JSON.parse(await createModAuthoringTool({ threadId, workspace }).invoke(args)))
+      .toMatchObject({ ok: false, error: "DEVELOPMENT_REPAIR_BUDGET" })
+    expect(service.submit).toHaveBeenCalledTimes(3)
+    expect(ledger.latest(workspace)).toMatchObject({ runId: "first", candidates: 3, operations: 4 })
+  })
+  it("returns exact startup diagnostics and bounds same-turn repair to two attempts", async () => {
+    const service = fixture()
+    const files = [
+      {
+        path: "mods/main.ts",
+        text: 'export const register = (on) => { on("session.start", async ($) => {}) }'
+      }
+    ]
+    service.submit.mockRejectedValue(
+      new DevelopmentCandidateError(
+        new ModFunctionError("MODS_RETURN_UNDEFINED"),
+        { id: "weather", revision: 1, digest: "a".repeat(64) },
+        files
+      )
+    )
+    const author = createModAuthoringTool({ threadId, workspace })
+    const args = { action: "submit" as const, id: "weather", name: "Weather", revision: 0, files }
+    expect(JSON.parse(await author.invoke(args))).toMatchObject({
+      ok: false,
+      error: "MODS_RETURN_UNDEFINED",
+      target: { id: "weather", revision: 1 },
+      diagnostics: [
+        { stage: "candidate-startup", event: "session.start", file: "mods/main.ts", line: 1 }
+      ],
+      repair: { attempt: 1, maxAttempts: 3, remaining: 2, canRetry: true }
+    })
+    await author.invoke(args)
+    expect(JSON.parse(await author.invoke(args))).toMatchObject({ repair: { canRetry: false } })
+    expect(JSON.parse(await author.invoke(args))).toMatchObject({
+      ok: false,
+      error: "DEVELOPMENT_REPAIR_BUDGET"
+    })
+    expect(service.submit).toHaveBeenCalledTimes(3)
+    expect(service.requestReuse).not.toHaveBeenCalled()
+  })
+  it("names missing scaffold fields and preserves a host error code without exposing its message", async () => {
+    const service = fixture()
+    const author = createModAuthoringTool({ threadId, workspace })
+    expect(
+      JSON.parse(
+        await author.invoke({ action: "scaffold", id: "demo", name: "Demo", kind: "panel" })
+      )
+    ).toMatchObject({ ok: false, error: "DEVELOPMENT_INPUT", missingFields: ["instruction"] })
+    service.requestTrial.mockRejectedValue(
+      new ModFunctionError("MODS_COMMAND_CONFLICT", "PRIVATE_VALUE")
+    )
+    const result = await author.invoke({ action: "request_trial", id: "demo", revision: 1 })
+    expect(JSON.parse(result)).toMatchObject({ ok: false, error: "MODS_COMMAND_CONFLICT" })
+    expect(result).not.toContain("PRIVATE_VALUE")
+  })
+  it("offers combined submission, current-chat resume and undo, and review-only formal reuse", async () => {
+    const service = fixture()
+    const author = createModAuthoringTool({ threadId, workspace })
+    const files = [{ path: "mods/main.ts", text: "export const register = () => {}" }]
+    expect(
+      JSON.parse(
+        await author.invoke({ action: "submit", id: "demo", name: "Demo", revision: 0, files })
+      )
+    ).toMatchObject({ ok: true, result: { check: { valid: true, runtimeVerified: false } } })
+    expect(service.submit).toHaveBeenCalledExactlyOnceWith(
+      threadId,
+      { id: "demo", name: "Demo", expectedRevision: 0, files },
+      "first",
+      expect.any(AbortSignal),
+      expect.any(Function)
+    )
+    expect(service.check).not.toHaveBeenCalled()
+    expect(
+      JSON.parse(await author.invoke({ action: "resume_trial", id: "demo", revision: 1 }))
+    ).toMatchObject({ ok: true })
+    expect(service.resumeTrial).toHaveBeenCalledWith(
+      threadId,
+      "demo",
+      1,
+      "first",
+      expect.any(AbortSignal),
+      expect.any(Function)
+    )
+    expect(JSON.parse(await author.invoke({ action: "undo_trial" }))).toMatchObject({ ok: true })
+    expect(service.undoTrial).toHaveBeenCalledWith(
+      threadId,
+      "first",
+      expect.any(AbortSignal),
+      expect.any(Function)
+    )
+    expect(
+      JSON.parse(await author.invoke({ action: "request_reuse", id: "demo", revision: 1 }))
+    ).toMatchObject({ ok: true, result: { reuse: { phase: "needs-approval" } } })
+    expect(service.requestReuse).toHaveBeenCalledWith(
+      threadId,
+      "demo",
+      1,
+      "first",
+      expect.any(AbortSignal),
+      expect.any(Function)
+    )
+    expect(author.schema.safeParse({ action: "approve_reuse" }).success).toBe(false)
+  })
   it("routes the Harness template and explicit compile through the scoped project session", async () => {
     const service = fixture()
     const scope = { threadId, workspace, incarnation: { token: "one", legacyCreatedAt: 1 } }

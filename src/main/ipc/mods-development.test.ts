@@ -7,11 +7,17 @@ function fixture() {
   const handlers = new Map<string, (event: IpcMainInvokeEvent, input: unknown) => unknown>()
   const service = {
     status: vi.fn(),
+    refreshReuse: vi.fn(),
     setEnabled: vi.fn(),
+    setMode: vi.fn(),
     approve: vi.fn(),
     stop: vi.fn(),
-    promote: vi.fn()
+    promote: vi.fn(),
+    requestReuse: vi.fn(),
+    approveReuse: vi.fn()
   }
+  service.status.mockReturnValue({ workspace: "workspace" })
+  const actions = { undoComposition: vi.fn(), cancelComposition: vi.fn(), undoTrial: vi.fn() }
   const trustedEvent = {} as IpcMainInvokeEvent
   registerModsDevelopmentHandlers(
     {
@@ -21,21 +27,42 @@ function fixture() {
     service as unknown as ModDevelopmentService,
     (event) => {
       if (event !== trustedEvent) throw Error("UNTRUSTED")
-    }
+    },
+    actions
   )
   return {
     service,
+    actions,
     run: (name: string, input: unknown, event = trustedEvent) =>
       handlers.get(`mods:development:${name}`)!(event, input)
   }
 }
 
 describe("development IPC authority", () => {
+  it("refreshes unknown reuse receipts through read-only reconciliation", async () => {
+    const f = fixture()
+    const receipt = { reuse: { phase: "unknown" } }
+    f.service.refreshReuse.mockResolvedValue(receipt)
+    expect(await f.run("status", { threadId: "thread" })).toBe(receipt)
+    expect(f.service.refreshReuse).toHaveBeenCalledExactlyOnceWith("thread")
+    expect(f.service.status).not.toHaveBeenCalledWith("thread")
+  })
   it("rejects untrusted callers before reading or changing any state", () => {
     const f = fixture()
-    for (const name of ["status", "set-enabled", "approve", "stop", "promote"])
+    f.service.status.mockClear()
+    for (const name of ["status", "set-enabled", "set-mode", "approve", "stop", "promote",
+      "request-reuse", "approve-reuse", "undo-composition", "cancel-composition", "undo-trial"])
       expect(() => f.run(name, {}, {} as IpcMainInvokeEvent)).toThrow("UNTRUSTED")
     for (const method of Object.values(f.service)) expect(method).not.toHaveBeenCalled()
+    for (const method of Object.values(f.actions)) expect(method).not.toHaveBeenCalled()
+  })
+  it("forwards an explicit conversation mode and rejects unknown modes or authority fields", () => {
+    const f = fixture()
+    const input = { threadId: "thread", expectedWorkspace: "workspace", mode: "normal" }
+    f.run("set-mode", input)
+    expect(f.service.setMode).toHaveBeenCalledWith("thread", "workspace", "normal")
+    for (const extra of [{ mode: "auto" }, { enabled: true }, { capabilities: ["fs.write"] }])
+      expect(() => f.run("set-mode", { ...input, ...extra })).toThrow("DEVELOPMENT_INPUT")
   })
   it("rejects model-supplied capabilities and malformed revisions", () => {
     const f = fixture()
@@ -60,8 +87,20 @@ describe("development IPC authority", () => {
       "workspace",
       "demo",
       1,
-      "a".repeat(64)
+      "a".repeat(64),
+      undefined
     )
+  })
+  it("carries exact source bytes for real consent but rejects an injected validation or target", () => {
+    const f = fixture()
+    const input = { threadId: "thread", expectedWorkspace: "workspace", id: "demo",
+      revision: 2, digest: "a".repeat(64), sourceDigest: "b".repeat(64) }
+    f.run("approve", input)
+    expect(f.service.approve).toHaveBeenCalledWith("thread", "workspace", "demo", 2,
+      input.digest, input.sourceDigest)
+    for (const extra of [{ sourceDigest: "invalid" }, { validation: "authorized-real" },
+      { target: { workspace: "other" } }])
+      expect(() => f.run("approve", { ...input, ...extra })).toThrow("DEVELOPMENT_INPUT")
   })
   it("binds stop and promotion to the caller's visible workspace and revision", () => {
     const f = fixture()
@@ -74,5 +113,30 @@ describe("development IPC authority", () => {
     })
     expect(f.service.stop).toHaveBeenCalledWith("thread", "workspace", "demo")
     expect(f.service.promote).toHaveBeenCalledWith("thread", "workspace", "demo", 3)
+  })
+  it("binds one reuse approval to the exact source, compiled version and target selection", () => {
+    const f = fixture()
+    const input = { threadId: "thread", expectedWorkspace: "workspace",
+      planId: "3e901082-1468-4c56-962c-d48e60d9c9b6", sourceDigest: "a".repeat(64),
+      compiledDigest: "b".repeat(64), targetProfileDigest: "c".repeat(64) }
+    f.run("approve-reuse", input)
+    expect(f.service.approveReuse).toHaveBeenCalledWith("thread", "workspace", input)
+    for (const extra of [{ targetProfileDigest: undefined }, { capabilities: ["fs.write"] },
+      { planId: "other" }, { sourceDigest: "bad" }])
+      expect(() => f.run("approve-reuse", { ...input, ...extra })).toThrow("DEVELOPMENT_INPUT")
+    f.run("request-reuse", { threadId: "thread", expectedWorkspace: "workspace", id: "demo", revision: 1 })
+    expect(f.service.requestReuse).toHaveBeenCalledWith("thread", "demo", 1)
+    expect(() => f.run("request-reuse", { threadId: "thread", expectedWorkspace: "other",
+      id: "demo", revision: 1 })).toThrow("DEVELOPMENT_SCOPE_CHANGED")
+  })
+  it("keeps undo and cancellation restricted to native scoped controls", () => {
+    const f = fixture()
+    const input = { threadId: "thread", expectedWorkspace: "workspace" }
+    for (const [channel, method] of [["undo-composition", f.actions.undoComposition],
+      ["cancel-composition", f.actions.cancelComposition], ["undo-trial", f.actions.undoTrial]] as const) {
+      f.run(channel, input)
+      expect(method).toHaveBeenCalledWith(input)
+      expect(() => f.run(channel, { ...input, revision: 1 })).toThrow("DEVELOPMENT_INPUT")
+    }
   })
 })

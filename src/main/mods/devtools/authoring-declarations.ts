@@ -38,6 +38,9 @@ declare module "claude-code" {
     {isAnswered:false;reason:"api-error";status:number|null;error:"rate_limit"|"overloaded"|"invalid_request"|"authentication_failed"|"server_error"|"unknown";usage:ModelUsage}
   export type ForkResult = ModelResult | {isAnswered:false;reason:"nothing-to-fork"}
   export interface ModelRequest {model:string;prompt:string;system?:string;maxTokens?:number}
+  export interface FileStat {kind:"file"|"dir"|"other";size:number;mtimeMs:number;realPath?:string}
+  export interface ToolInfo {name:string;description:string;mcp:boolean}
+  export interface ToolResult {result:Json;text?:string;isError?:true;context?:string[];ref?:number}
   export interface UiEvent {component:string;requestId?:string;surface:"desktop";props:JsonObject;viewport?:{columns:number;rows:number}}
   export type UiTree = unknown
   export interface UiElements {
@@ -51,6 +54,9 @@ declare module "claude-code" {
   export interface PromptComposition {sections:PromptSection[]}
   export interface ToolEvent extends JsonObject {tool:string}
   export interface SDKBase<Owner extends string=string> {
+    fs:{write(path:string,text:string):Promise<void>;read(path:string):Promise<string>;
+      list(path?:string):Promise<(Omit<FileStat,"mtimeMs"> & {name:string;mtimeMs?:number})[]>;
+      exists(path:string):Promise<boolean>;stat(path:string,options?:{resolve?:boolean}):Promise<FileStat>}
     // __MODEL_PROTOCOL_METHODS__
     plugin:{readonly name:string;readonly root:string}
     session:{id():Promise<string>;cwd():Promise<string>;surface():Promise<"desktop">;surfaces():Promise<"desktop"[]>}
@@ -65,7 +71,10 @@ declare module "claude-code" {
     process:{run(argv:string[],options?:ProcessOptions):Promise<{exitCode:number;stdout:string;stderr:string}>;spawn(input:ProcessEvent):Stream<ProcessChunk,ProcessResult>}
     http:{fetch(url:string,init?:{method?:string;headers?:Record<string,string>;body?:string}):Promise<{status:number;ok:boolean;headers:Record<string,string>;text:string}>}
     /** Tools are deferred by default; false publishes their schema immediately. */
-    tool:{register(input:{name:string;description:string;inputSchema?:JsonObject;isDeferred?:boolean}):Promise<unknown>}
+    tool:{register(input:{name:string;description:string;inputSchema?:JsonObject;isDeferred?:boolean}):Promise<unknown>;
+      call(input:JsonObject & {tool:string}):Promise<ToolResult|{deny:string}>;
+      list():Promise<ToolInfo[]>;
+      check(input:{tool:string;input:Json}):Promise<{decision:"allow"|"ask"|"deny";reason?:string;rule?:string;hook?:string;ceiling?:"allow"|"ask"|"deny"}>}
     store:{get(key:string):Promise<Json|undefined>;set(key:string,value:Json):Promise<void>;keys():Promise<string[]>;delete(key:string):Promise<void>}
     ui:{log(text:string):void;status(text?:string):void;toast(text:string):void;
       resolve(event:UiEvent):UiElements;invalidate(event:"ui.render"):void;
@@ -87,7 +96,7 @@ declare module "claude-code" {
     // __MODEL_PROTOCOL_HOOKS__
     (event:"command.run",handler:($:SDK<Owner>,event:CommandEvent,next:Next<CommandEvent,CommandResult>)=>CommandResult|Promise<CommandResult>):{catch(handler:($:SDK<Owner>,event:CommandEvent,next:Next<CommandEvent,CommandResult>)=>CommandResult|Promise<CommandResult>):void}
     (event:"command.run",matcher:{command:string},handler:($:SDK<Owner>,event:CommandEvent,next:Next<CommandEvent,CommandResult>)=>CommandResult|Promise<CommandResult>):void
-    (event:"session.start",handler:($:SDK<Owner>,event:{cwd:string;surface:"desktop";isInteractive:boolean},next:Next<{cwd:string;surface:"desktop";isInteractive:boolean},Json>)=>unknown):void
+    (event:"session.start",handler:($:SDK<Owner>,event:{cwd:string;surface:"desktop";isInteractive:boolean},next:Next<{cwd:string;surface:"desktop";isInteractive:boolean},Json>)=>Json|Promise<Json>):void
     (event:"turn.complete",handler:($:SDK<Owner>,event:TurnCompleteEvent,next:Next<TurnCompleteEvent,Json>)=>unknown):void
     (event:"agent.register",handler:($:SDK<Owner>,event:AgentSpec,next:Next<AgentSpec,OperationResult<{agent:string}>>)=>OperationResult<{agent:string}>|Promise<OperationResult<{agent:string}>>):void
     (event:"agent.spawn",handler:($:SDK<Owner>,event:AgentSpawnEvent,next:Next<AgentSpawnEvent,AgentSpawnResult>)=>AgentSpawnResult|Promise<AgentSpawnResult>):void
