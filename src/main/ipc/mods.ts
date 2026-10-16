@@ -30,8 +30,11 @@ import { writeFunctionModDebugLog } from "../logging"
 import { gitNoticeFunctionConfig } from "../mods/v2/git-notice-config"
 import { registerClawHandlers } from "./mods-claw"
 import { isClawThread, resolveClawThread } from "../mods/claw-scope"
+import { resolveCapabilityContext } from "../mods/capability-context"
+import { getHarnessCapabilityWorkspaces, getHarnessCapabilityFeatureWorkspace } from "../harness-board/service"
 import { listLocalThreadRunLeases, getLocalThreadRunLease,
-  onLocalThreadRunLeaseReleased } from "../agent/thread-run-lease"
+  onLocalThreadRunLeaseReleased, claimLocalThreadRunLease,
+  releaseLocalThreadRunLease, captureLocalThreadRunLease } from "../agent/thread-run-lease"
 import { queryFunctionAgentList } from "../mods/v2/agent-list-host"
 import { inspectAutobizEnvironment } from "../mods/v2/autobiz-environment"
 import { prepareFunctionSessionTitle } from "../mods/v2/session-title"
@@ -51,6 +54,7 @@ import {
   setGitChangeNoticeEnabled,
   getOpenworkDir,
   getPlugins,
+  getInstalledPluginIds,
   setModsGlobalEnabled,
   getStoredDefaultModelId,
   getStoredAgentGraphRecursionLimit,
@@ -110,11 +114,23 @@ import { createLegacyModsRuntime, registerLegacyModsRuntime } from "../harness-b
 import { prepareProjectActionSelection } from "../harness-board/project-action-selection"
 import { projectActionFlowMetadata } from "../harness-board/project-action-scope"
 import { ClawStore } from "../mods/claw-store"
+import type { ClawProfile } from "../../shared/mods/claw"
+import type { DevelopmentScope } from "../mods/v2/development-session"
 import { registerModsAuthoringHandlers } from "./mods-authoring"
 import { registerModsDevelopmentHandlers } from "./mods-development"
 import { ModDevelopmentService, setModDevelopmentService } from "../mods/devtools/development-service"
 import { goalManager } from "../agent/goals/runtime"
+import {
+  CreatorCompositionService,
+  getCreatorCompositionService,
+  setCreatorCompositionService
+} from "../mods/devtools/creator-composition"
 import { isDevelopmentThreadMetadata } from "../../shared/mods/development-scope"
+import { CreatorCompositionHistory } from "../mods/devtools/creator-composition-history"
+import { CreatorReuseService } from "../mods/devtools/creator-reuse"
+import { CreatorTrialUndoScheduler } from "../mods/devtools/creator-trial-undo"
+import { claimConfigurationReload } from "../mods/v2/configuration-reload-lease"
+import { publishDevelopmentTurnSettlement } from "../mods/v2/development-turn-settlement"
 import { registerModsAuthoringPreviewHandlers } from "./mods-authoring-preview"
 import { AuthoringDraftStore } from "../mods/devtools/authoring-store"
 import { getPendingUserInputForThread } from "../services/user-input"
@@ -126,6 +142,7 @@ import { describeDevClawBuiltins } from "../mods/builtins/registry"
 import { readBuiltinProjectFacts } from "../mods/builtins/project-facts"
 
 export function registerModsHandlers(ipcMain: IpcMain, window: () => BrowserWindow | null): void {
+  let reconcileCreatorReuse: ((threadId?: string) => void) | undefined
   let manager: ModsManager
   try {
     manager = new ModsManager(
@@ -313,6 +330,11 @@ export function registerModsHandlers(ipcMain: IpcMain, window: () => BrowserWind
     manager.store,
     {
       plugins: getPlugins,
+      installedPluginIds: getInstalledPluginIds,
+      threadIncarnationKey: (_workspace, threadId) => {
+        const thread = getThreadCore(threadId)
+        return thread ? JSON.stringify(captureThreadIncarnation(thread)) : undefined
+      },
       debugLog: writeFunctionModDebugLog,
       openConversationOwner: (context) => {
         if (readCoordinatorWorkerModsContext(context.threadId)) {
@@ -346,6 +368,8 @@ export function registerModsHandlers(ipcMain: IpcMain, window: () => BrowserWind
         return () => { physical(); logical() }
       },
       configChanged: (scope) => {
+        getCreatorCompositionService()?.reconcile()
+        reconcileCreatorReuse?.()
         if (scope === "schema") window()?.webContents.send("mods:configuration-changed", { scope })
         else window()?.webContents.send("mods:configuration-changed")
       },
@@ -662,10 +686,33 @@ export function registerModsHandlers(ipcMain: IpcMain, window: () => BrowserWind
       creatorHook: (workspace, threadId) =>
         manager.functionModelHookSource(functionCallAuthority(workspace, threadId)),
       clawApplicable: (threadId) => functionClawScope(threadId) !== null,
+      capabilityContext: functionCapabilityContext,
       clawScope: functionClawScope,
       publish: (workspace, value, signal) => manager.publish(workspace, value, undefined, signal),
       assertThread: (workspace, threadId) => {
         assertFunctionDataScope(workspace, threadId)
+      },
+      callDevelopmentTool: (workspace, threadId, activation, capability, input, signal) => {
+        const { target, args } = functionSdkToolInput(input)
+        if (target === "mcp:call") throw new ModFunctionError("MODS_MCP_TOOL_UNAVAILABLE")
+        return scheduleFunctionTool(queue, workspace, threadId, target, signal,
+          async (operationSignal, readOnly, userInitiated) => {
+            if (writableThreadScope(threadId) !== workspace)
+              throw new ModError("MODS_CALL_SCOPE_CHANGED")
+            activation.assertCapability(capability)
+            const execution = functionExecutionScope(workspace, threadId)
+            manager.functionToolAgent(workspace, threadId)
+            const invoke = () => manager.invokeDevelopmentTool(workspace, threadId,
+              activation, capability, target, args, operationSignal, readOnly, userInitiated,
+              typeof input.tool_use_id === "string" ? input.tool_use_id : undefined)
+            if (execution?.turnId || !manager.needsCommandBinding(threadId)) return invoke()
+            assertStandaloneThread(threadId)
+            const turnId = functionCallTurn(workspace, threadId) ?? `development-tools:${randomUUID()}`
+            return withFunctionCommandBinding("native", workspace, threadId, operationSignal,
+              () => bindStandaloneModCommand(workspace, threadId, turnId, operationSignal),
+              () => withFunctionExecution({ workspace, threadId, turnId, leased: true,
+                immediate: readOnly, userInitiated }, invoke))
+          })
       },
       callTool: (workspace, threadId, grant, input, signal) => {
         const { target, args } = functionSdkToolInput(input)
@@ -716,11 +763,14 @@ export function registerModsHandlers(ipcMain: IpcMain, window: () => BrowserWind
         scheduleFunctionCommand(queue, workspace, threadId, command, signal, run),
       markdownPreviewInvalidated: (threadId, receipt) =>
         window()?.webContents.send("mods:markdown-preview-invalidated", { threadId, receipt }),
-      changed: (threadId, scope) =>
+      changed: (threadId, scope) => {
+        getCreatorCompositionService()?.reconcile(threadId)
+        reconcileCreatorReuse?.(threadId)
         window()?.webContents.send("mods:cards-changed", {
           threadId,
           ...(scope === undefined ? {} : { scope })
         })
+      }
     },
     () => new FunctionRuntimeClient(join(__dirname, "function-mod-host.js"))
   )
@@ -976,7 +1026,7 @@ export function registerModsHandlers(ipcMain: IpcMain, window: () => BrowserWind
     historySettings: manager.store,
     requestGroup: threadId => {
       const goal = goalManager.getActive(threadId)
-      return goal ? "goal:" + goal.goalId : undefined
+      return goal ? `goal:${goal.goalId}` : undefined
     },
     versionsRoot: join(getOpenworkDir(), "mod-development"),
     workerEntry: join(__dirname, "mods-authoring-preflight.js"),
@@ -1013,7 +1063,176 @@ export function registerModsHandlers(ipcMain: IpcMain, window: () => BrowserWind
     }
   })
   setModDevelopmentService(development)
-  registerModsDevelopmentHandlers(ipcMain, development, trusted)
+  const assertCreatorAuthorized = (scope: DevelopmentScope, profile: ClawProfile | null) => {
+    if (!manager.isEnabled(scope.workspace)) throw Error("COMPOSITION_MODS_DISABLED")
+    const runtime = functions.runtimeSessions(scope.threadId)
+    if (runtime.error || runtime.sessions.some(session => session.threadId === scope.threadId &&
+      session.workspace === scope.workspace && ["releasing", "stopped", "failed"].includes(session.state)))
+      throw Error("COMPOSITION_RUNTIME_STOPPED")
+    const installed = getPlugins()
+    for (const capability of profile?.capabilities ?? []) {
+      const grant = manager.store.getGrant(scope.workspace, `function:${capability.name}`)
+      if (!grant?.enabled || grant.digest !== capability.digest ||
+        !installed.some(plugin => plugin.id === capability.pluginId && plugin.enabled !== false))
+        throw Error("COMPOSITION_AUTHORITY_CHANGED")
+    }
+  }
+  const creatorComposition = new CreatorCompositionService({
+    store: new ClawStore(manager.store),
+    history: new CreatorCompositionHistory(manager.store),
+    context: threadId => development.projectAuthoringContext(threadId),
+    readContext: threadId => development.reuseContext(threadId),
+    assertScope: scope => development.assertScope(scope),
+    assertAuthorized: assertCreatorAuthorized,
+    runtimeReady: (scope, profile) =>
+      functions.selectionRuntimeReady(scope.workspace, scope.threadId, profile),
+    identity: threadId => {
+      const selected = resolveClawThread(threadId, getThreadCore,
+        workspace => manager.workspaceKey(workspace))
+      if (!selected || selected.threadId !== threadId) throw Error("COMPOSITION_SCOPE_CHANGED")
+      return selected.identity
+    },
+    usage: functionCapabilityContext,
+    available: workspace => functions.status(workspace),
+    selectionCatalog: async workspace => {
+      const [{ listClawSkillSources }, { readClawMcpSources }, registry] = await Promise.all([
+        import("../mods/claw-skills"), import("../mods/claw-mcp"), import("../models/registry")
+      ])
+      return {
+        models: registry.getModelConfigs().filter(model => !!model.apiKey)
+          .map(model => ({ id: registry.toModelRef(model), name: model.name })),
+        skills: await listClawSkillSources(), mcp: readClawMcpSources(),
+        flows: new FlowStore(manager.store).list(workspace)
+      }
+    },
+    issues: (workspace, profile, available) => functions.clawSelectionIssues(
+      workspace, profile, available, "chat"),
+    busy: threadId => !!getLocalThreadRunLease(threadId) ||
+      manager.functionTurns.hasUnsettled(threadId) || functions.configurationBusy(threadId),
+    onIdle: listener => {
+      const physical = onLocalThreadRunLeaseReleased(lease => listener(lease.threadId))
+      const logical = manager.functionTurns.onSettled(listener)
+      const guest = functions.onConfigurationIdle(listener)
+      return () => { physical(); logical(); guest() }
+    },
+    applySelection: (workspace, threadId, profile, commitSelection, assertCurrent) =>
+      functions.reconfigureSelection(workspace, threadId, profile, commitSelection, assertCurrent),
+    changed: threadId => {
+      const owner = window()
+      if (owner && !owner.isDestroyed() && !owner.webContents.isDestroyed()) {
+        owner.webContents.send("mods:development-changed", { threadId })
+        owner.webContents.send("mods:configuration-changed")
+      }
+    }
+  })
+  development.configureCompositionStatus(threadId => creatorComposition.status(threadId))
+  setCreatorCompositionService(creatorComposition)
+  const reuseThreads = new Set<string>()
+  const creatorReuse = new CreatorReuseService({
+    settings: manager.store, drafts: new AuthoringDraftStore(manager.store),
+    claws: new ClawStore(manager.store), install: authoringInstall,
+    readContext: threadId => {
+      reuseThreads.delete(threadId)
+      reuseThreads.add(threadId)
+      if (reuseThreads.size > 64) reuseThreads.delete(reuseThreads.values().next().value!)
+      return development.reuseContext(threadId)
+    },
+    readDraft: (threadId, id) => development.read(threadId, id),
+    identity: threadId => {
+      const scope = resolveClawThread(threadId, getThreadCore, workspace => manager.workspaceKey(workspace))
+      if (!scope || scope.threadId !== threadId) throw Error("CREATOR_REUSE_SCOPE_CHANGED")
+      return scope.identity
+    },
+    available: workspace => functions.status(workspace),
+    stopTrial: async (scope, id, guard) => {
+      guard()
+      const trial = functions.developmentStatus(scope).find(item => item.draftId === id)
+      if (!trial || trial.phase === "stopped") return
+      await functions.stopDevelopment(scope, trial.componentId, guard)
+      if (functions.developmentStatus(scope).some(item => item.draftId === id && item.phase !== "stopped"))
+        throw Error("CREATOR_REUSE_STOP_UNCONFIRMED")
+    },
+    approveInstalled: (scope, receipt, guard) =>
+      functions.approve(scope.workspace, receipt.installationId, receipt.compiledDigest, guard),
+    applySelection: async (workspace, threadId, profile, commit, guard) => {
+      const lease = claimConfigurationReload(threadId)
+      if (!lease) throw Error("CREATOR_REUSE_BUSY")
+      try {
+        await functions.reconfigureSelection(workspace, threadId, profile, commit,
+          () => { lease.assertLive(); guard() })
+      } finally { lease.release() }
+    },
+    runtimeReady: (scope, profile) => functions.selectionRuntimeReady(scope.workspace, scope.threadId, profile),
+    assertAuthorized: assertCreatorAuthorized,
+    busy: () => {
+      const runtime = functions.runtimeSessions()
+      return listLocalThreadRunLeases().length > 0 || runtime.retiring > 0 || runtime.reserved > 0 ||
+        runtime.sessions.some(session => functions.configurationBusy(session.threadId))
+    },
+    onIdle: listener => {
+      const publish = () => { for (const id of reuseThreads) listener(id) }
+      const physical = onLocalThreadRunLeaseReleased(publish)
+      const logical = manager.functionTurns.onSettled(publish)
+      const guest = functions.onConfigurationIdle(publish)
+      return () => { physical(); logical(); guest() }
+    },
+    changed: threadId => {
+      const owner = window()
+      if (owner && !owner.isDestroyed() && !owner.webContents.isDestroyed()) {
+        owner.webContents.send("mods:development-changed", { threadId })
+        owner.webContents.send("mods:configuration-changed")
+      }
+    }
+  })
+  development.configureReuse(creatorReuse)
+  reconcileCreatorReuse = threadId => creatorReuse.reconcileAuthorizations(threadId)
+  const trialUndo = new CreatorTrialUndoScheduler({
+    read: scope => functions.developmentStatus(scope),
+    stop: (scope, id, guard) => functions.stopDevelopment(scope, id, guard),
+    busy: threadId => !!getLocalThreadRunLease(threadId) ||
+      manager.functionTurns.hasUnsettled(threadId) || functions.configurationBusy(threadId),
+    onIdle: listener => {
+      const physical = onLocalThreadRunLeaseReleased(lease => listener(lease.threadId))
+      const logical = manager.functionTurns.onSettled(listener)
+      const guest = functions.onConfigurationIdle(listener)
+      return () => { physical(); logical(); guest() }
+    },
+    changed: threadId => window()?.webContents.send("mods:development-changed", { threadId })
+  })
+  development.configureTrialUndoStop((scope, id, turnId, guard) => trialUndo.request(scope, id, turnId, guard))
+  development.configureTrialUndoStatus(threadId => trialUndo.status(threadId))
+  registerModsDevelopmentHandlers(ipcMain, development, trusted, {
+    undoComposition: async input => {
+      await creatorComposition.undo(input.threadId, input.expectedWorkspace)
+      return development.status(input.threadId)
+    },
+    cancelComposition: input => {
+      creatorComposition.cancel(input.threadId, input.expectedWorkspace)
+      return development.status(input.threadId)
+    },
+    undoTrial: async input => {
+      const context = development.reuseContext(input.threadId)
+      if (context.scope.workspace !== input.expectedWorkspace) throw Error("DEVELOPMENT_SCOPE_CHANGED")
+      const runId = `creator-undo:${randomUUID()}`
+      const claim = claimLocalThreadRunLease({ threadId: input.threadId, owner: "mods", runId })
+      if (!claim.acquired) throw Error("DEVELOPMENT_BUSY")
+      const owns = captureLocalThreadRunLease(input.threadId)!
+      let completed = false
+      try {
+        await development.undoTrial(input.threadId, runId, new AbortController().signal, () => {
+          context.assertCurrent()
+          if (!owns()) throw Error("DEVELOPMENT_TURN_CHANGED")
+        })
+        completed = true
+      } finally {
+        // This is the trusted native undo operation's settlement, never a fabricated model turn.
+        publishDevelopmentTurnSettlement({ threadId: input.threadId, turnId: runId,
+          incarnation: context.scope.incarnation, outcome: completed ? "completed" : "cancelled" })
+        releaseLocalThreadRunLease(input.threadId, "mods", runId)
+      }
+      return development.status(input.threadId)
+    }
+  })
   const evaluationFlows = registerModsFlowHandlers(ipcMain, manager, functions, {
     trusted,
     threadScope: writableThreadScope,
@@ -1110,9 +1329,11 @@ export function registerModsHandlers(ipcMain: IpcMain, window: () => BrowserWind
     classicEvent: (...args) => functions.classicEvent(...args),
     presentationEvent: (...args) => functions.presentationEvent(...args),
     invalidate: (workspace) => functions.invalidate(workspace),
+    pluginsChanged: (workspace, ids) => functions.pluginsChanged(workspace, ids),
     invalidateAll: () => functions.invalidateAll(),
     prepareEnd: (reason, threadId) => functions.prepareEnd(reason, threadId),
     closeThread: (threadId) => {
+      if (!getThreadCore(threadId)) functions.forgetReleasedThread(threadId)
       functions.closeThread(threadId)
       queue.closeThread(threadId)
     },
@@ -1121,6 +1342,11 @@ export function registerModsHandlers(ipcMain: IpcMain, window: () => BrowserWind
   app.once("will-quit", () => {
     stopPolicyObservations()
     setModDevelopmentService(undefined)
+    creatorComposition.close()
+    creatorReuse.close()
+    reconcileCreatorReuse = undefined
+    trialUndo.close()
+    setCreatorCompositionService(undefined)
     queue.close()
     setModsManager(undefined)
     manager.close()
@@ -1266,6 +1492,20 @@ export function registerModsHandlers(ipcMain: IpcMain, window: () => BrowserWind
       getThreadCore, (workspace) => manager.workspaceKey(workspace))
     return worker && selected ? { threadId, identity: selected.identity } : selected
   }
+  function functionCapabilityContext(workspace: string, threadId: string) {
+    const worker = readCoordinatorWorkerModsContext(threadId)
+    if (worker) assertFunctionDataScope(manager.workspaceKey(worker.workspace), threadId)
+    return resolveCapabilityContext(workspace, worker?.parentThreadId ?? threadId, {
+      thread: getThreadCore,
+      projectWorkspaces: getHarnessCapabilityWorkspaces,
+      featureWorkspace: getHarnessCapabilityFeatureWorkspace,
+      hostProject: (id, root, binding) => {
+        const facts = readBuiltinProjectFacts(id, root)
+        return facts.facts.state === "observed" && facts.review?.projectId ===
+          (binding as { projectId?: string }).projectId
+      }
+    })
+  }
   function assertStandaloneThread(threadId: string): void {
     const thread = getThreadCore(threadId)!
     const metadata =
@@ -1280,6 +1520,7 @@ export function registerModsHandlers(ipcMain: IpcMain, window: () => BrowserWind
       throw new ModError("MODS_THREAD_CONTEXT_REQUIRED")
   }
   registerClawHandlers(ipcMain, manager, functions, {
+    context: functionCapabilityContext,
     sources: async () => {
       const [{ listClawSkillSources }, { readClawMcpSources }] = await Promise.all([
         import("../mods/claw-skills"),
@@ -1305,7 +1546,11 @@ export function registerModsHandlers(ipcMain: IpcMain, window: () => BrowserWind
           throw Error("本对话有任务或审批正在进行，请结束或取消后再应用 Claw 组合。")
       }
     },
-    changed: () => window()?.webContents.send("mods:configuration-changed")
+    changed: () => {
+      creatorComposition.reconcile()
+      creatorReuse.reconcileAuthorizations()
+      window()?.webContents.send("mods:configuration-changed")
+    }
   })
   ipcMain.handle("mods:commands", async (event, threadId: string) => {
     const workspace = scope(event, threadId)
@@ -1856,6 +2101,8 @@ export function registerModsHandlers(ipcMain: IpcMain, window: () => BrowserWind
     if (typeof enabled !== "boolean") throw new ModError("MODS_SETTINGS_INVALID")
     const value = setModsGlobalEnabled(enabled)
     manager.invalidateAll()
+    creatorComposition.reconcile()
+    creatorReuse.reconcileAuthorizations()
     const owner = window()
     if (owner && !owner.isDestroyed()) owner.webContents.send("mods:configuration-changed")
     return value
@@ -1900,6 +2147,8 @@ export function registerModsHandlers(ipcMain: IpcMain, window: () => BrowserWind
     if (typeof input.name !== "string" || input.name.length > 100)
       throw new ModError("MODS_GRANT_INVALID")
     functions.revoke(workspace, input.name)
+    creatorComposition.reconcile()
+    creatorReuse.reconcileAuthorizations()
     const owner = window()
     if (owner && !owner.isDestroyed()) owner.webContents.send("mods:configuration-changed")
   })
@@ -1911,6 +2160,8 @@ export function registerModsHandlers(ipcMain: IpcMain, window: () => BrowserWind
       if (typeof input.enabled !== "boolean" || typeof input.outputPolicy !== "boolean")
         throw new ModError("MODS_SETTINGS_INVALID")
       manager.configure(workspace, input.enabled, input.outputPolicy)
+      creatorComposition.reconcile()
+      creatorReuse.reconcileAuthorizations()
     }
   )
   ipcMain.handle(

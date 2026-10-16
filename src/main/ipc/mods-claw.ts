@@ -12,6 +12,7 @@ import type { FunctionModsManager } from "../mods/v2/manager"
 import { flowDigest } from "../mods/flows/store"
 import { resolveClawComponents } from "../../shared/mods/claw-components"
 import { validateClawActionConfig } from "../mods/v2/action-config"
+import type { CapabilityContext } from "../mods/capability-context"
 
 export function registerClawHandlers(
   ipc: IpcMain,
@@ -21,6 +22,7 @@ export function registerClawHandlers(
     scope(event: IpcMainInvokeEvent, threadId: string): string
     applicable(threadId: string): boolean
     identity?(threadId: string): string
+    context?(workspace: string, threadId: string): CapabilityContext
     validateModels?(refs: string[]): Promise<void>
     sources?(): Promise<ClawSourceCatalog>
     assertIdle(workspace: string, threadId: string): void
@@ -30,17 +32,23 @@ export function registerClawHandlers(
   const store = new ClawStore(manager.store)
   const identity = (threadId: string) =>
     access.identity?.(threadId) ?? JSON.stringify([threadId, "legacy"])
+  const context = (workspace: string, threadId: string): CapabilityContext =>
+    access.context?.(workspace, threadId) ?? { usage: "chat", identity: "legacy" }
   const view = async (event: IpcMainInvokeEvent, threadId: string): Promise<ClawView> => {
     const workspace = access.scope(event, threadId)
     const applicable = access.applicable(threadId)
+    const usage = context(workspace, threadId)
     const bindingIdentity = applicable ? identity(threadId) : undefined
     const capabilities = await functions.status(workspace)
     if (
       workspace !== access.scope(event, threadId) ||
       applicable !== access.applicable(threadId) ||
-      (applicable && bindingIdentity !== identity(threadId))
+      (applicable && bindingIdentity !== identity(threadId)) ||
+      usage.identity !== context(workspace, threadId).identity
     )
       throw Error("CLAW_SCOPE_CHANGED")
+    // Reconcile live bindings before returning the same selection used by the runtime.
+    if (applicable) functions.clawSelection(workspace, threadId)
     const state = store.read(workspace)
     const binding = bindingIdentity
       ? store.selection(workspace, bindingIdentity)
@@ -52,13 +60,15 @@ export function registerClawHandlers(
       workspace,
       enabled: manager.isEnabled(workspace),
       applicable,
+      usageContext: usage.usage,
       capabilities,
-      issues: functions.clawSelectionIssues(workspace, binding.profile, capabilities)
+      issues: functions.clawSelectionIssues(workspace, binding.profile, capabilities, usage.usage)
     }
   }
   ipc.handle("mods:claw-view", view)
   ipc.handle("mods:claw-sources", async (event, threadId: string) => {
     const workspace = access.scope(event, threadId)
+    const usage = context(workspace, threadId)
     if (!access.applicable(threadId)) throw Error("请在支持的本地项目会话中配置我的 Claw。")
     const bindingIdentity = identity(threadId)
     if (!access.sources) throw Error("CLAW_SOURCE_CATALOG_UNAVAILABLE")
@@ -66,7 +76,8 @@ export function registerClawHandlers(
     if (
       workspace !== access.scope(event, threadId) ||
       !access.applicable(threadId) ||
-      bindingIdentity !== identity(threadId)
+      bindingIdentity !== identity(threadId) ||
+      usage.identity !== context(workspace, threadId).identity
     )
       throw Error("CLAW_SCOPE_CHANGED")
     return catalog
@@ -77,6 +88,7 @@ export function registerClawHandlers(
       const threadId = input?.threadId
       const workspace = access.scope(event, threadId)
       const bindingIdentity = identity(threadId)
+      const usage = context(workspace, threadId)
       if (!access.applicable(threadId)) throw Error("请在支持的本地项目会话中配置我的 Claw。")
       const mutation = input?.mutation
       if (
@@ -195,10 +207,11 @@ export function registerClawHandlers(
       if (
         workspace !== access.scope(event, threadId) ||
         bindingIdentity !== identity(threadId) ||
-        !access.applicable(threadId)
+        !access.applicable(threadId) ||
+        usage.identity !== context(workspace, threadId).identity
       )
         throw Error("CLAW_SCOPE_CHANGED")
-      const issues = functions.clawSelectionIssues(workspace, profile, available)
+      const issues = functions.clawSelectionIssues(workspace, profile, available, usage.usage)
       if (issues.length) throw Error(issues.join("；"))
       for (const capability of profile?.capabilities ?? []) {
         const source = available.find(
@@ -207,7 +220,10 @@ export function registerClawHandlers(
             item.name === capability.name &&
             item.digest === capability.digest
         )
-        const components = resolveClawComponents(source?.components ?? [], capability.components)
+        const components = resolveClawComponents(
+          source?.components ?? [], capability.components ?? (source?.components?.length
+            ? { mode: "all", ids: [], config: {} } : undefined), usage.usage
+        )
         for (const component of components) {
           try {
             validateClawActionConfig(

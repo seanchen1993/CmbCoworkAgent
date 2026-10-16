@@ -3232,6 +3232,17 @@ export function getPluginsDir(): string {
   return PLUGINS_DIR
 }
 
+export function getInstalledPluginIds(): ReadonlySet<string> {
+  getOpenworkDir()
+  const parsed: unknown = JSON.parse(readFileSync(PLUGINS_FILE, "utf-8"))
+  if (!Array.isArray(parsed) || parsed.some(item => !item || typeof item.id !== "string" ||
+    !item.id || typeof item.name !== "string" || typeof item.path !== "string"))
+    throw Error("PLUGIN_REGISTRY_INVALID")
+  const ids = new Set<string>(parsed.map(item => item.id))
+  if (ids.size !== parsed.length) throw Error("PLUGIN_REGISTRY_INVALID")
+  return ids
+}
+
 export function getPlugins(): PluginMetadata[] {
   getOpenworkDir()
   if (!existsSync(PLUGINS_FILE)) return []

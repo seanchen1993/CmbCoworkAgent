@@ -1853,12 +1853,17 @@ function normalizeProjectStore(value: unknown): HarnessProjectStoreFile {
 }
 
 const managedRunProjectDirectoryById = new Map<string, string>()
+const capabilityProjectWorkspacesById = new Map<string, readonly string[]>()
+const capabilityFeatureWorkspacesByKey = new Map<string, string>()
 
 function refreshManagedRunProjectDirectoryCache(store: HarnessProjectStoreFile): void {
   managedRunProjectDirectoryById.clear()
+  capabilityProjectWorkspacesById.clear()
   for (const project of store.projects) {
     try {
       managedRunProjectDirectoryById.set(project.projectId, projectDirectoryPath(project))
+      capabilityProjectWorkspacesById.set(project.projectId,
+        [resolve(project.workspacePath), projectDirectoryPath(project)])
     } catch (error) {
       console.warn("[ManagedRun] Ignoring project with invalid ManagedRun directory:", {
         projectId: project.projectId,
@@ -1946,7 +1951,18 @@ function normalizeFeatureDeployUnitBindingStore(
 
 async function readFeatureDeployUnitBindingStore(): Promise<HarnessFeatureDeployUnitBindingStoreFile> {
   const parsed = await readHarnessConfigV2File(HARNESS_FEATURE_DEPLOY_UNIT_BINDING_FILE)
-  return normalizeFeatureDeployUnitBindingStore(parsed)
+  const store = normalizeFeatureDeployUnitBindingStore(parsed)
+  refreshCapabilityFeatureWorkspaces(store)
+  return store
+}
+
+function refreshCapabilityFeatureWorkspaces(store: HarnessFeatureDeployUnitBindingStoreFile): void {
+  capabilityFeatureWorkspacesByKey.clear()
+  for (const binding of store.bindings) {
+    const workspace = resolveFeatureWorkspace(binding.sessionWorkspace, binding.selectedDeployUnitMappings)
+    if (workspace && isAbsolute(workspace))
+      capabilityFeatureWorkspacesByKey.set(featureDeployUnitBindingKey(binding.projectId, binding.featureId), resolve(workspace))
+  }
 }
 
 async function findFeatureDeployUnitBinding(
@@ -2004,6 +2020,7 @@ async function saveFeatureDeployUnitBinding(
       HARNESS_CONFIG_V2_STORE_MAX_BYTES,
       "Harness feature binding store"
     )
+    refreshCapabilityFeatureWorkspaces(store)
     return binding
   })
 }
@@ -2061,6 +2078,7 @@ async function updateFeatureDeployUnitBinding(
       HARNESS_CONFIG_V2_STORE_MAX_BYTES,
       "Harness feature binding store"
     )
+    refreshCapabilityFeatureWorkspaces(store)
     return binding
   })
 }
@@ -2098,6 +2116,7 @@ export async function setHarnessFeatureImManagement(
       HARNESS_CONFIG_V2_STORE_MAX_BYTES,
       "Harness feature binding store"
     )
+    refreshCapabilityFeatureWorkspaces(store)
     if (!enabled) harnessNotifications.disableIm(projectId, featureId)
     return next
   })
@@ -2105,6 +2124,17 @@ export async function setHarnessFeatureImManagement(
 
 export async function initializeHarnessManagedRunProjectDirectories(): Promise<void> {
   await readProjectStore()
+  // An unavailable old feature configuration must not prevent ordinary application startup.
+  await readFeatureDeployUnitBindingStore().catch(() => capabilityFeatureWorkspacesByKey.clear())
+}
+
+export function getHarnessCapabilityWorkspaces(projectId: string): readonly string[] | undefined {
+  const roots = capabilityProjectWorkspacesById.get(projectId)
+  return roots ? [...roots] : undefined
+}
+
+export function getHarnessCapabilityFeatureWorkspace(projectId: string, featureId: string): string | undefined {
+  return capabilityFeatureWorkspacesByKey.get(featureDeployUnitBindingKey(projectId, featureId))
 }
 
 export function getHarnessProjectRootPath(projectId: string): string {

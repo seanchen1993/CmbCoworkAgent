@@ -241,8 +241,7 @@ import { createMemorySearchTool, createMemoryGetTool } from "../memory/tools"
 import { resolveWorkspaceMemoryDirs } from "../memory/paths"
 import { createSchedulerTool } from "./tools/scheduler-tool"
 import { createSkillEvolutionTool } from "./tools/skill-evolution-tool"
-import { createModAuthoringTool } from "./tools/mod-authoring-tool"
-import { getModDevelopmentService } from "../mods/devtools/development-service"
+import { createModAuthoringRuntimeTools, modAuthoringRuntimePrompt } from "./mod-authoring-runtime"
 import {
   flushStrict,
   getDb,
@@ -5634,11 +5633,9 @@ function createRuntimeBaseTools(
     extraTools.push(createSkillEvolutionTool({ threadId: options.threadId }))
   }
 
-  if (!runtimePolicy.isProjectMode && (!options.agentId || options.agentId === "main") && options.threadId &&
-    getModDevelopmentService()?.isEnabled(options.threadId, workspacePath)) {
-    extraTools.push(createModAuthoringTool({ threadId: options.threadId,
-      workspace: workspacePath, signal: options.abortSignal }))
-  }
+  extraTools.push(...createModAuthoringRuntimeTools({ threadId: options.threadId,
+    workspace: workspacePath, agentId: options.agentId, projectMode: runtimePolicy.isProjectMode,
+    signal: options.abortSignal }))
 
   // Conditionally inject Java LSP tool
   try {
@@ -6870,6 +6867,8 @@ The workspace root is: ${fileRoot}`
   }
 
   const extraTools = createRuntimeBaseTools(options, fileRoot, runtimePolicy)
+  const nativeCreatorTools = new Set(extraTools.filter(tool =>
+    tool.name === "mod_authoring" || tool.name === "mod_composition"))
 
   // Wrap extra tools so that errors are returned as strings instead of throwing
   function wrapToolErrors(tools: RuntimeTool[]): void {
@@ -8105,6 +8104,11 @@ Access limits: read-only handoff continuation. Do not modify files, run commands
 
   backend.setGitWorkflowCommitOnly(false)
   const mainTools = isCoordinatorMode ? coordinatorWorkerToolsForMain : finalTools
+  const authoringPrompt = modAuthoringRuntimePrompt(mainTools.filter((tool): tool is RuntimeTool =>
+    typeof tool === "object" && tool !== null && "name" in tool && typeof tool.name === "string" &&
+    nativeCreatorTools.has(tool as RuntimeTool) &&
+    (!options.allowedToolNames || options.allowedToolNames.includes(tool.name))))
+  if (authoringPrompt) appendSystemContribution("cmb:mod-authoring", authoringPrompt)
   // Task-tool subagents must not orchestrate workflows of their own.
   const workerTools = finalTools.filter(
     (runtimeTool) => (runtimeTool as { name?: string }).name !== "workflow"

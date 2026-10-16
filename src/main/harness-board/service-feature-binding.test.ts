@@ -1,5 +1,5 @@
 import { mkdir, readFile, rm, writeFile } from "node:fs/promises"
-import { join } from "node:path"
+import { join, resolve } from "node:path"
 import { afterAll, beforeEach, describe, expect, it, vi } from "vitest"
 
 const state = vi.hoisted(() => ({
@@ -36,7 +36,7 @@ vi.mock("./catalog-client", () => ({
                 apiVersion: 1,
                 inspectCommands: {
                   [process.platform]: {
-                    project_status: `${process.execPath} --version`,
+                    project_status: `"${process.execPath}" --version`,
                     system_prompt_inject: "workspace=${sessionWorkspacePath}"
                   }
                 }
@@ -69,7 +69,10 @@ vi.mock("./adapter-detail-client", () => ({
 import {
   updateHarnessFeatureDeployUnits,
   buildHarnessFeatureAgentContext,
-  archiveHarnessProject
+  archiveHarnessProject,
+  getHarnessCapabilityFeatureWorkspace,
+  getHarnessCapabilityWorkspaces,
+  initializeHarnessManagedRunProjectDirectories
 } from "./service"
 import { FEATURE_V2_FILE, DEPLOY_UNIT_V2_FILE, initializeHarnessConfigV2 } from "./config-v2"
 
@@ -103,6 +106,50 @@ const update = () =>
   })
 
 describe("editing historical feature bindings", () => {
+  it("publishes only persisted workspace facts and refreshes them after binding changes", async () => {
+    await writeFile(
+      join(state.root, "harness-board-projects.json"),
+      JSON.stringify({
+        version: 1,
+        projects: [
+          {
+            projectId: "p",
+            name: "project",
+            projectCode: "project",
+            projectDir: "project",
+            workspacePath: state.root,
+            lifecycle: { status: "active" },
+            "harness-adapter": { id: "plugin", name: "plugin", type: "plugin" }
+          }
+        ]
+      })
+    )
+    await update()
+    await initializeHarnessManagedRunProjectDirectories()
+    expect(getHarnessCapabilityWorkspaces("p")).toEqual([
+      resolve(state.root),
+      resolve(state.root, "project")
+    ])
+    const observed = getHarnessCapabilityWorkspaces("p") as string[]
+    observed.push("spoofed")
+    expect(getHarnessCapabilityWorkspaces("p")).not.toContain("spoofed")
+    expect(getHarnessCapabilityFeatureWorkspace("p", "f")).toBe(resolve(state.root))
+    const next = join(state.root, "new-session")
+    await mkdir(next, { recursive: true })
+    await updateHarnessFeatureDeployUnits({
+      projectId: "p",
+      featureId: "f",
+      selectedDeployUnits: [],
+      sessionWorkspace: { source: "directory", path: next }
+    })
+    expect(getHarnessCapabilityFeatureWorkspace("p", "f")).toBe(resolve(next))
+    expect(getHarnessCapabilityFeatureWorkspace("p", "other")).toBeUndefined()
+    expect(getHarnessCapabilityWorkspaces("missing")).toBeUndefined()
+    await writeFile(join(state.root, FEATURE_V2_FILE), "corrupt")
+    await initializeHarnessManagedRunProjectDirectories()
+    expect(getHarnessCapabilityFeatureWorkspace("p", "f")).toBeUndefined()
+  })
+
   it.each([true, false])(
     "derives missing binding injection source from project capability: %s",
     async (supportsPlugin) => {

@@ -59,5 +59,12 @@ request_trial 只提交排队请求，须本轮结束且用户在界面确认后
 
 /** Called before adding caller-supplied tools; only an actually admitted native tool enables it. */
 export function modAuthoringRuntimePrompt(tools: readonly { name?: string }[]): string | null {
-  return tools.some((tool) => tool.name === "mod_authoring") ? guidance : null
+  const authoring = tools.some((tool) => tool.name === "mod_authoring")
+  const composition = tools.some((tool) => tool.name === "mod_composition")
+  if (authoring && composition) return guidance
+  if (!authoring && !composition) return null
+  const available = authoring
+    ? '当前只提供 mod_authoring，可以生成或修改源码。先用 action="catalog" 及 catalogSection="support" 核对真实范围；未提供组合工具，不要尝试调用组合动作。'
+    : '当前只提供 mod_composition，可以检索、组合、配置、命名保存或套用已有功能。先用 list/details 核对真实来源；未提供源码制作工具，无法为缺失能力生成源码。'
+  return `\n\n## 当前对话：创造者模式（受限工具）\n${available}\n\n按用户目标完成可支持部分，保留其他已启用功能和已有成果。说明具体缺口，不假造工具或要求用户逐项手配。必要授权继续使用原确认，排队不代表生效。操作或修复预算耗尽、用户停止或结果未知时停止自动推进，保留草稿和真实状态，不自动重放副作用。`
 }

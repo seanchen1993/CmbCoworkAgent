@@ -237,12 +237,23 @@ it("refreshes mounted controls only after actual approval commits, including an 
 
 it("notifies the renderer after revoking a component, with no retired Session required", () => {
   const send = vi.fn(), revoke = vi.fn()
+  const reconcileComposition = vi.fn(), reconcileReuse = vi.fn()
   const handler = globalHandler({
     scope: () => "workspace", ModError: Error, functions: { revoke },
+    creatorComposition: { reconcile: reconcileComposition },
+    creatorReuse: { reconcileAuthorizations: reconcileReuse },
     window: () => ({ isDestroyed: () => false, webContents: { send } })
   }, "mods:revoke-function")
   handler({}, { threadId: "thread", name: "actual" })
   expect(revoke).toHaveBeenCalledWith("workspace", "actual")
+  expect(reconcileComposition).toHaveBeenCalledExactlyOnceWith()
+  expect(reconcileReuse).toHaveBeenCalledExactlyOnceWith()
+  expect(reconcileComposition.mock.invocationCallOrder[0])
+    .toBeGreaterThan(revoke.mock.invocationCallOrder[0])
+  expect(reconcileReuse.mock.invocationCallOrder[0])
+    .toBeGreaterThan(revoke.mock.invocationCallOrder[0])
+  expect(send.mock.invocationCallOrder[0])
+    .toBeGreaterThan(reconcileReuse.mock.invocationCallOrder[0])
   expect(send).toHaveBeenCalledExactlyOnceWith("mods:configuration-changed")
 })
 
@@ -458,6 +469,9 @@ it("reads ordinary completion rules without starting external environment proces
 it("notifies mounted renderers after global off and reenable even with no live sessions", () => {
   let enabled = true
   const events: boolean[] = []
+  const compositionStates: boolean[] = [], reuseStates: boolean[] = []
+  const reconcileComposition = vi.fn(() => { compositionStates.push(enabled) })
+  const reconcileReuse = vi.fn(() => { reuseStates.push(enabled) })
   const send = vi.fn((channel: string) => {
     expect(channel).toBe("mods:configuration-changed")
     events.push(enabled)
@@ -467,6 +481,8 @@ it("notifies mounted renderers after global off and reenable even with no live s
     trusted: vi.fn(),
     ModError: Error,
     window: () => owner,
+    creatorComposition: { reconcile: reconcileComposition },
+    creatorReuse: { reconcileAuthorizations: reconcileReuse },
     setModsGlobalEnabled: (value: boolean) => {
       enabled = value
       return value
@@ -476,6 +492,10 @@ it("notifies mounted renderers after global off and reenable even with no live s
   expect(handler({ sender: {} }, false)).toBe(false)
   expect(handler({ sender: {} }, true)).toBe(true)
   expect(events).toEqual([false, true])
+  expect(reconcileComposition).toHaveBeenCalledTimes(2)
+  expect(reconcileReuse).toHaveBeenCalledTimes(2)
+  expect(compositionStates).toEqual([false, true])
+  expect(reuseStates).toEqual([false, true])
 })
 
 it("edits completion settings without a password while retaining writable scope checks", () => {
@@ -505,6 +525,7 @@ it("edits completion settings without a password while retaining writable scope 
 it("does not mutate or broadcast a denied global enable", () => {
   const set = vi.fn()
   const send = vi.fn()
+  const reconcileComposition = vi.fn(), reconcileReuse = vi.fn()
   const handler = globalHandler({
     trusted: () => {
       throw Error("untrusted sender")
@@ -512,11 +533,15 @@ it("does not mutate or broadcast a denied global enable", () => {
     ModError: Error,
     window: () => ({ isDestroyed: () => false, webContents: { send } }),
     setModsGlobalEnabled: set,
+    creatorComposition: { reconcile: reconcileComposition },
+    creatorReuse: { reconcileAuthorizations: reconcileReuse },
     manager: { invalidateAll: vi.fn() }
   })
   expect(() => handler({ sender: {} }, true)).toThrow("untrusted sender")
   expect(set).not.toHaveBeenCalled()
   expect(send).not.toHaveBeenCalled()
+  expect(reconcileComposition).not.toHaveBeenCalled()
+  expect(reconcileReuse).not.toHaveBeenCalled()
 })
 
 it.each(["mods:function-unlocked", "mods:unlock-function"])(

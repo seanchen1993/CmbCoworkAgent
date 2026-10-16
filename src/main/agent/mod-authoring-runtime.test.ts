@@ -69,3 +69,15 @@ it("fences creator tools in ordinary mode while the session remains enabled for 
   })
   expect(createModAuthoringRuntimeTools(scope)).toEqual([])
 })
+
+it("describes only the creator tools retained by the actual runtime allowlist", () => {
+  const author = modAuthoringRuntimePrompt([{ name: "mod_authoring" }])
+  expect(author).toContain("当前只提供 mod_authoring")
+  expect(author).toContain('catalogSection="support"')
+  expect(author).not.toContain("stage 提交")
+  const composition = modAuthoringRuntimePrompt([{ name: "mod_composition" }])
+  expect(composition).toContain("当前只提供 mod_composition")
+  expect(composition).toContain("无法为缺失能力生成源码")
+  expect(composition).not.toContain("catalogSection")
+  expect(composition).toContain("不自动重放副作用")
+})

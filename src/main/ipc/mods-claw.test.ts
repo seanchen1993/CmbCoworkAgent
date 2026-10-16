@@ -22,7 +22,8 @@ function fixture() {
     state: "ready" as const,
     capabilities: []
   }
-  const state = { workspace: "a", idle: true, applicable: true }
+  const state = { workspace: "a", idle: true, applicable: true,
+    usage: "chat" as "chat" | "project", contextIdentity: "chat-one" }
   const invalidate = vi.fn()
   const validateModels = vi.fn(async () => undefined)
   const sources = vi.fn(async () => ({
@@ -31,6 +32,7 @@ function fixture() {
   }))
   const functions = {
     status: vi.fn(async () => [source]),
+    clawSelection: vi.fn(() => null),
     clawSelectionIssues: (_workspace, profile, available) => clawIssues(profile, available)
   } as unknown as FunctionModsManager
   registerClawHandlers(
@@ -50,6 +52,7 @@ function fixture() {
         return state.workspace
       },
       applicable: () => state.applicable,
+      context: () => ({ usage: state.usage, identity: state.contextIdentity }),
       validateModels,
       sources,
       assertIdle: () => {
@@ -81,6 +84,48 @@ function fixture() {
     catalog: () => handlers.get("mods:claw-sources")!(sender, "thread")
   }
 }
+
+it("uses host mode for component application and preserves explicit incompatible selections", async () => {
+  const f = fixture()
+  vi.mocked(f.functions.status).mockResolvedValue([{
+    ...f.profile.capabilities[0], state: "ready", capabilities: [],
+    components: [{ id: "stage", name: "阶段验收", kind: "module", entry: "stage.ts",
+      dependsOn: [], actionIds: [], usage: "project" }]
+  }])
+  await expect(f.call({ kind: "save", profile: f.profile, revision: 0 }))
+    .rejects.toThrow("CLAW_COMPONENT_USAGE_UNAVAILABLE")
+  expect((await f.view()).profiles).toEqual([])
+  f.state.usage = "project"
+  f.state.contextIdentity = "project-one"
+  const saved = await f.call({ kind: "save", profile: f.profile, revision: 0 })
+  expect(saved.usageContext).toBe("project")
+  f.state.usage = "chat"
+  f.state.contextIdentity = "chat-one"
+  await expect(f.call({ kind: "apply", id: "p", revision: saved.revision }))
+    .rejects.toThrow("CLAW_COMPONENT_USAGE_UNAVAILABLE")
+  expect(f.invalidate).not.toHaveBeenCalled()
+  expect((await f.view()).profiles[0].capabilities).toEqual(f.profile.capabilities)
+})
+
+it("rejects a mode change while awaiting sources without committing a selection", async () => {
+  const f = fixture()
+  f.sources.mockImplementationOnce(async () => {
+    f.state.usage = "project"
+    f.state.contextIdentity = "project-two"
+    return { skills: [], mcp: [] }
+  })
+  await expect(f.catalog()).rejects.toThrow("CLAW_SCOPE_CHANGED")
+  f.state.usage = "chat"
+  f.state.contextIdentity = "chat-one"
+  vi.mocked(f.functions.status).mockImplementationOnce(async () => {
+    f.state.usage = "project"
+    f.state.contextIdentity = "project-two"
+    return [{ ...f.profile.capabilities[0], state: "ready", capabilities: [] }]
+  })
+  await expect(f.call({ kind: "save", profile: f.profile, revision: 0 }))
+    .rejects.toThrow("CLAW_SCOPE_CHANGED")
+  expect((await f.view()).profiles).toEqual([])
+})
 
 it("rejects a stale application preview before changing the thread binding", async () => {
   const f = fixture()
