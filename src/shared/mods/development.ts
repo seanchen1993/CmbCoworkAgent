@@ -25,6 +25,10 @@ export interface DevelopmentStatus {
   workspace: string
   threadId: string
   enabled: boolean
+  /** Original request observations only; no approval or execution authority. */
+  request?: {
+    runId: string; startedAt: number; operations: number; candidates: number; groupId?: string
+  } | { error: "DEVELOPMENT_BUDGET_UNCONFIRMED" }
   drafts: Array<{ id: string; name: string; revision: number; digest: string }>
   trials: DevelopmentTrialStatus[]
 }

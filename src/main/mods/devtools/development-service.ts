@@ -10,6 +10,8 @@ import { createAuthoringSourceBundle } from "./authoring-bundle"
 import { readPureFunctionSource } from "./authoring-install-source"
 import { AuthoringVersionRepository } from "./authoring-version-repository"
 import { analyzeDevelopmentSource } from "./development-analysis"
+import { CreatorRequestBudgets } from "./creator-request-budget"
+import type { AuthoringAtomicSettings } from "./authoring-config-snapshot"
 
 export interface DevelopmentRuntime {
   referencesSourceDirectory?(path: string): boolean
@@ -79,6 +81,7 @@ export class ModDevelopmentService {
       }
     }
   }
+  private readonly requests: CreatorRequestBudgets
   private readonly enabled = new Map<string, EnabledSession>()
   private readonly busy = new Set<string>()
   private readonly prepared = new Map<
@@ -103,8 +106,19 @@ export class ModDevelopmentService {
       normalizeWorkspace?(workspace: string): string
       canRun?(scope: DevelopmentScope): boolean
       analyze?: typeof analyzeDevelopmentSource
+      /** Accounting only; persisted observations never restore execution authority. */
+      historySettings?: AuthoringAtomicSettings
+      requestGroup?(threadId: string): string | undefined
     }
-  ) {}
+  ) {
+    this.requests = new CreatorRequestBudgets(deps.historySettings)
+  }
+
+  claimAuthoringBudget(threadId: string, runId: string, kind: "operation" | "candidate") {
+    const context = this.projectAuthoringContext(threadId)
+    context.assertCurrent()
+    return this.requests.claim(identity(context.scope), runId, kind, this.deps.requestGroup?.(threadId))
+  }
 
   private key(scope: DevelopmentScope): string {
     return `development:${identity(scope)}`
@@ -132,10 +146,20 @@ export class ModDevelopmentService {
   }
   status(threadId: string): DevelopmentStatus {
     const { scope } = this.current(threadId, false)
+    let request: DevelopmentStatus["request"]
+    try {
+      const latest = this.requests.latest(identity(scope))
+      if (latest) {
+        const { runId, startedAt, operations, candidates, groupId } = latest
+        request = { runId, startedAt, operations, candidates, ...(groupId ? { groupId } : {}) }
+      }
+    }
+    catch { request = { error: "DEVELOPMENT_BUDGET_UNCONFIRMED" } }
     return {
       workspace: scope.workspace,
       threadId,
       enabled: this.enabled.has(identity(scope)),
+      ...(request ? { request } : {}),
       drafts: this.deps.drafts.list(this.key(scope)).map((draft) => ({
         id: draft.id,
         name: draft.name,

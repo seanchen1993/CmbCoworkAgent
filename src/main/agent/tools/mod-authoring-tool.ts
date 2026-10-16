@@ -112,6 +112,7 @@ export function createModAuthoringTool(input: {
   const lease = getLocalThreadRunLease(threadId)
   const ownsLease = captureLocalThreadRunLease(threadId)
   let operations = 0
+  let candidateAttempts = 0
   const createdAt = performance.now()
   const signal = input.signal ?? new AbortController().signal
   return tool(
@@ -129,6 +130,7 @@ export function createModAuthoringTool(input: {
             throw Error("DEVELOPMENT_TURN_CHANGED")
         }
         assertTurn()
+        service!.claimAuthoringBudget?.(threadId, lease!.runId, "operation")
         if (++operations > 32 || performance.now() - createdAt > 10 * 60_000)
           throw Error("DEVELOPMENT_TURN_BUDGET")
         const id = () => {
@@ -307,7 +309,9 @@ export function createModAuthoringTool(input: {
           case "check":
             result = await service!.check(threadId, id(), revision(), signal)
             break
-          case "request_trial":
+          case "request_trial": {
+            const observed = service!.claimAuthoringBudget?.(threadId, lease!.runId, "candidate")
+            if (!observed && ++candidateAttempts > 3) throw Error("DEVELOPMENT_REPAIR_BUDGET")
             result = await service!.requestTrial(
               threadId,
               id(),
@@ -317,6 +321,7 @@ export function createModAuthoringTool(input: {
               assertTurn
             )
             break
+          }
           case "inspect_plugin": {
             const plugins = getPlugins()
             result = {

@@ -113,6 +113,7 @@ import { ClawStore } from "../mods/claw-store"
 import { registerModsAuthoringHandlers } from "./mods-authoring"
 import { registerModsDevelopmentHandlers } from "./mods-development"
 import { ModDevelopmentService, setModDevelopmentService } from "../mods/devtools/development-service"
+import { goalManager } from "../agent/goals/runtime"
 import { isDevelopmentThreadMetadata } from "../../shared/mods/development-scope"
 import { registerModsAuthoringPreviewHandlers } from "./mods-authoring-preview"
 import { AuthoringDraftStore } from "../mods/devtools/authoring-store"
@@ -972,6 +973,11 @@ export function registerModsHandlers(ipcMain: IpcMain, window: () => BrowserWind
   })
   const development = new ModDevelopmentService({
     drafts: new AuthoringDraftStore(manager.store), runtime: functions,
+    historySettings: manager.store,
+    requestGroup: threadId => {
+      const goal = goalManager.getActive(threadId)
+      return goal ? "goal:" + goal.goalId : undefined
+    },
     versionsRoot: join(getOpenworkDir(), "mod-development"),
     workerEntry: join(__dirname, "mods-authoring-preflight.js"),
     normalizeWorkspace: workspace => manager.workspaceKey(workspace),
