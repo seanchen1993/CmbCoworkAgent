@@ -176,16 +176,23 @@ it("keeps a rejected process occupied until its actual backend cleanup completes
 })
 
 it("runs argv through the operation hook before approving the final command", async () => {
-  const { session, authorize } = await fixture(
+  const { session, authorize, guest } = await fixture(
     `return await $.process.run(${command("process.stdout.write('before')")});`,
     `on("process.run",async($,e,next)=>next({...e,argv:${command("process.stdout.write('after')")}}));`
   )
   expect(await session.run("test", "")).toEqual({ exitCode: 0, stdout: "after", stderr: "" })
-  expect(authorize).toHaveBeenCalledWith(
-    expect.anything(),
-    expect.objectContaining({ argv: JSON.parse(command("process.stdout.write('after')")) }),
-    expect.any(AbortSignal)
-  )
+  const calls = authorize.mock.calls as unknown as Parameters<
+    NonNullable<FunctionSessionHost["authorizeProcess"]>
+  >[]
+  expect(calls.length).toBe(1)
+  expect(calls[0].length).toBe(4)
+  const [plugin, request, signal, method] = calls[0]
+  expect(plugin.name).toBe("process")
+  expect(plugin.root).toBe("/plugin")
+  expect(plugin.guest === guest).toBe(true)
+  expect(request.argv).toEqual(JSON.parse(command("process.stdout.write('after')")))
+  expect(signal instanceof AbortSignal).toBe(true)
+  expect(method).toBe("process.run")
 })
 
 it("consumes a background process after creator return and logs its final result", async () => {
