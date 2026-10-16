@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react"
+import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import { flushSync } from "react-dom"
 import {
   Check,
@@ -27,6 +27,7 @@ import {
 } from "@/components/ui/dialog"
 import { MAX_BROWSER_SCRIPT_LIBRARY_ENTRIES } from "../../../../shared/browser-types"
 import type { BrowserScriptLibraryEntry } from "../../../../shared/browser-types"
+import { countTextLines } from "@/lib/browser-script-text"
 import { BrowserScriptEditor } from "./BrowserScriptEditor"
 import {
   formatPlaybackDuration,
@@ -65,18 +66,18 @@ export interface BrowserRecordingListDialogProps {
 function formatRecordingTime(createdAt: string): string {
   const date = new Date(createdAt)
   if (Number.isNaN(date.getTime())) return createdAt
-  return new Intl.DateTimeFormat("zh-CN", {
-    year: "numeric",
-    month: "2-digit",
-    day: "2-digit",
-    hour: "2-digit",
-    minute: "2-digit",
-    second: "2-digit",
-    hour12: false
-  })
-    .format(date)
-    .replace(/\//g, "-")
+  return RECORDING_TIME_FORMATTER.format(date).replace(/\//g, "-")
 }
+
+const RECORDING_TIME_FORMATTER = new Intl.DateTimeFormat("zh-CN", {
+  year: "numeric",
+  month: "2-digit",
+  day: "2-digit",
+  hour: "2-digit",
+  minute: "2-digit",
+  second: "2-digit",
+  hour12: false
+})
 
 function formatPlaybackHistoryStatus(status: BrowserPlaybackHistoryEntry["status"]): string {
   switch (status) {
@@ -172,7 +173,9 @@ export function BrowserRecordingListDialog({
   const [currentPage, setCurrentPage] = useState(1)
   const [displayNameFilter, setDisplayNameFilter] = useState("")
   const [activeTab, setActiveTab] = useState<"recordings" | "history">("recordings")
-  const detailDraftsRef = useRef<Record<string, DetailDraftState>>({})
+  const detailDraftsRef = useRef(new Map<string, DetailDraftState>())
+  const detailReadsRef = useRef(new Map<string, Promise<string>>())
+  const detailCacheGenerationRef = useRef(0)
 
   const saveDetailDraft = useCallback(
     (
@@ -182,15 +185,12 @@ export function BrowserRecordingListDialog({
       displayName: string,
       initialDisplayName: string
     ): void => {
-      detailDraftsRef.current = {
-        ...detailDraftsRef.current,
-        [fileName]: {
-          initialScript,
-          script,
-          initialDisplayName,
-          displayName
-        }
-      }
+      detailDraftsRef.current.set(fileName, {
+        initialScript,
+        script,
+        initialDisplayName,
+        displayName
+      })
     },
     []
   )
@@ -226,39 +226,57 @@ export function BrowserRecordingListDialog({
   useEffect(() => {
     // A continued recording can update the same file while this component stays mounted.
     // Scope drafts to the current list snapshot and open dialog session.
-    detailDraftsRef.current = {}
+    detailCacheGenerationRef.current += 1
+    detailDraftsRef.current.clear()
+    detailReadsRef.current.clear()
   }, [entries, open])
 
   useEffect(() => {
     if (!open || activeTab !== "recordings" || !selectedEntry || error || isLoading) return
 
-    const cachedDraft = detailDraftsRef.current[selectedEntry.fileName]
+    const cachedDraft = detailDraftsRef.current.get(selectedEntry.fileName)
     let cancelled = false
 
     if (cachedDraft) {
-      const cachedDraftTimer = window.setTimeout(() => {
-        if (cancelled) return
-        setDetailScript(cachedDraft.script)
-        setDetailInitialScript(cachedDraft.initialScript)
-        setDetailDisplayName(cachedDraft.displayName)
-        setDetailInitialDisplayName(cachedDraft.initialDisplayName)
-        setDetailCopied(false)
-        setDetailLoading(false)
-      }, 0)
-      return () => {
-        cancelled = true
-        window.clearTimeout(cachedDraftTimer)
-      }
+      setDetailScript(cachedDraft.script)
+      setDetailInitialScript(cachedDraft.initialScript)
+      setDetailDisplayName(cachedDraft.displayName)
+      setDetailInitialDisplayName(cachedDraft.initialDisplayName)
+      setDetailCopied(false)
+      setDetailLoading(false)
+      return
     }
 
-    const loadingTimer = window.setTimeout(() => {
-      if (!cancelled) {
-        setDetailCopied(false)
-        setDetailLoading(true)
+    setDetailCopied(false)
+    setDetailLoading(true)
+    let detailRead = detailReadsRef.current.get(selectedEntry.fileName)
+    if (!detailRead) {
+      const entry = selectedEntry
+      const cacheGeneration = detailCacheGenerationRef.current
+      detailRead = onReadScript(entry).then((script) => {
+        if (
+          detailCacheGenerationRef.current === cacheGeneration &&
+          !detailDraftsRef.current.has(entry.fileName)
+        ) {
+          detailDraftsRef.current.set(entry.fileName, {
+            initialScript: script,
+            script,
+            initialDisplayName: entry.displayName,
+            displayName: entry.displayName
+          })
+        }
+        return script
+      })
+      detailReadsRef.current.set(selectedEntry.fileName, detailRead)
+      const clearRead = (): void => {
+        if (detailReadsRef.current.get(selectedEntry.fileName) === detailRead) {
+          detailReadsRef.current.delete(selectedEntry.fileName)
+        }
       }
-    }, 0)
+      void detailRead.then(clearRead, clearRead)
+    }
 
-    void onReadScript(selectedEntry)
+    void detailRead
       .then((script) => {
         if (cancelled) return
         setDetailScript(script)
@@ -282,9 +300,8 @@ export function BrowserRecordingListDialog({
 
     return () => {
       cancelled = true
-      window.clearTimeout(loadingTimer)
     }
-  }, [activeTab, error, entries, isLoading, onReadScript, open, saveDetailDraft, selectedEntry])
+  }, [activeTab, error, isLoading, onReadScript, open, saveDetailDraft, selectedEntry])
 
   const handleCopyDetailScript = async (): Promise<void> => {
     if (!detailScriptValue.trim()) return
@@ -301,8 +318,7 @@ export function BrowserRecordingListDialog({
   const detailViewActive = Boolean(selectedEntry && !error && !isLoading)
   const detailScriptValue = detailViewActive ? detailScript : ""
   const detailDisplayNameValue = detailViewActive ? detailDisplayName : ""
-  const detailScriptLineCount =
-    detailScriptValue.trim().length > 0 ? detailScriptValue.split(/\r?\n/u).length : 0
+  const detailScriptLineCount = useMemo(() => countTextLines(detailScript), [detailScript])
   const detailDirty =
     detailViewActive &&
     (detailScript !== detailInitialScript || detailDisplayName !== detailInitialDisplayName)

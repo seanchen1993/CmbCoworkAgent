@@ -348,6 +348,23 @@ export function parsePlaywrightScriptRecorderEvent(
   }
 }
 
+export function preferExactRecordedTextSelector<T>(
+  selector: string,
+  queryAll: (selector: string) => T[]
+): string {
+  if (!/^internal:text="(?:\\.|[^"\\])*"i$/u.test(selector)) return selector
+  const exactSelector = `${selector.slice(0, -1)}s`
+  try {
+    const original = queryAll(selector)
+    const exact = queryAll(exactSelector)
+    return original.length === 1 && exact.length === 1 && original[0] === exact[0]
+      ? exactSelector
+      : selector
+  } catch {
+    return selector
+  }
+}
+
 export function buildPlaywrightScriptRecorderInjectionScript(frameChannelId = ""): string {
   const { injectedScriptSource, pollingRecorderSource } = getPlaywrightRecorderSourceBundle()
   const injectedScriptConstructor = buildPlaywrightModuleConstructorExpression(
@@ -708,6 +725,13 @@ export function buildPlaywrightScriptRecorderInjectionScript(frameChannelId = ""
     window.__pw_resume = async () => {};
 
     const injectedScript = new InjectedScriptConstructor(globalThis, RECORDER_OPTIONS);
+    const preferExactRecordedTextSelector = ${preferExactRecordedTextSelector.toString()};
+
+    function normalizeRecordedSelector(selector) {
+      return preferExactRecordedTextSelector(selector, (candidate) =>
+        injectedScript.querySelectorAll(injectedScript.parseSelector(candidate), injectedScript.document)
+      );
+    }
 
     window[FRAME_SELECTOR_HELPER] = (index) => selectorForFrameElementAtIndex(index);
 
@@ -721,7 +745,7 @@ export function buildPlaywrightScriptRecorderInjectionScript(frameChannelId = ""
           testIdAttributeName: RECORDER_OPTIONS.testIdAttributeName,
           multiple: false
         });
-        const selector = text(generated?.selector);
+        const selector = normalizeRecordedSelector(text(generated?.selector));
         if (selector) lastHoveredActionSelector = selector;
       } catch {}
     }
@@ -742,7 +766,7 @@ export function buildPlaywrightScriptRecorderInjectionScript(frameChannelId = ""
     }
 
     window.__pw_recorderRecordAction = async (action) => {
-      const selector = selectorForRecorderAction(action);
+      const selector = normalizeRecordedSelector(selectorForRecorderAction(action));
       const element = resolveElement(selector);
       const locator = locatorForElement(element, selector || undefined);
       const selectedFileName =
@@ -768,6 +792,7 @@ export function buildPlaywrightScriptRecorderInjectionScript(frameChannelId = ""
       }
       const normalizedAction = {
         ...action,
+        selector,
         files:
           action?.name === "setInputFiles"
             ? resolveFileUploadPaths(element, action?.files)
