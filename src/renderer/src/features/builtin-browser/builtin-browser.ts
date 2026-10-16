@@ -1,6 +1,8 @@
 // Relative (not "@/") so this module stays importable from unit tests that
 // don't resolve the "@/" path alias for runtime values.
 import {
+  LEGACY_BUILTIN_BROWSER_PROMPT_PREFIX as PREVIOUS_BROWSER_PROMPT_PREFIX,
+  LEGACY_BUILTIN_BROWSER_NO_SCREENSHOT_PROMPT_PREFIX,
   BUILTIN_BROWSER_NO_SCREENSHOT_PROMPT_PREFIX,
   BUILTIN_BROWSER_PROMPT_PREFIX
 } from "../../../../shared/user-input-transport"
@@ -63,23 +65,16 @@ export function parseBuiltinBrowserPrompt(input: string): {
   visibleText: string
   browserSelected: boolean
 } {
-  if (input.startsWith(BUILTIN_BROWSER_NO_SCREENSHOT_PROMPT_PREFIX)) {
-    return {
-      visibleText: input.slice(BUILTIN_BROWSER_NO_SCREENSHOT_PROMPT_PREFIX.length),
-      browserSelected: true
+  for (const prefix of [
+    BUILTIN_BROWSER_NO_SCREENSHOT_PROMPT_PREFIX,
+    BUILTIN_BROWSER_PROMPT_PREFIX,
+    LEGACY_BUILTIN_BROWSER_NO_SCREENSHOT_PROMPT_PREFIX,
+    PREVIOUS_BROWSER_PROMPT_PREFIX,
+    LEGACY_BUILTIN_BROWSER_PROMPT_PREFIX
+  ]) {
+    if (input.startsWith(prefix)) {
+      return { visibleText: input.slice(prefix.length), browserSelected: true }
     }
   }
-  if (input.startsWith(LEGACY_BUILTIN_BROWSER_PROMPT_PREFIX)) {
-    return {
-      visibleText: input.slice(LEGACY_BUILTIN_BROWSER_PROMPT_PREFIX.length),
-      browserSelected: true
-    }
-  }
-  if (!input.startsWith(BUILTIN_BROWSER_PROMPT_PREFIX)) {
-    return { visibleText: input, browserSelected: false }
-  }
-  return {
-    visibleText: input.slice(BUILTIN_BROWSER_PROMPT_PREFIX.length),
-    browserSelected: true
-  }
+  return { visibleText: input, browserSelected: false }
 }

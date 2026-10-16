@@ -5,6 +5,8 @@ import { projectGoalNoticeVisibleText } from "./goal-notice-presentation"
 import { SKILL_USE_TAG_NAME } from "./skill-use-block"
 import { createChatSearchPlan } from "./chat-search-plan"
 import {
+  LEGACY_BUILTIN_BROWSER_PROMPT_PREFIX,
+  LEGACY_BUILTIN_BROWSER_NO_SCREENSHOT_PROMPT_PREFIX,
   BUILTIN_BROWSER_NO_SCREENSHOT_PROMPT_PREFIX,
   BUILTIN_BROWSER_PROMPT_PREFIX
 } from "./user-input-transport"
@@ -62,15 +64,18 @@ function parseUserTransportText(content: string): {
   }
 
   let browserSelected = false
-  if (visibleText.startsWith(BROWSER_NO_SCREENSHOT_PREFIX)) {
-    browserSelected = true
-    visibleText = visibleText.slice(BROWSER_NO_SCREENSHOT_PREFIX.length)
-  } else if (visibleText.startsWith(BROWSER_PREFIX)) {
-    browserSelected = true
-    visibleText = visibleText.slice(BROWSER_PREFIX.length)
-  } else if (visibleText.startsWith(LEGACY_BROWSER_PREFIX)) {
-    browserSelected = true
-    visibleText = visibleText.slice(LEGACY_BROWSER_PREFIX.length)
+  for (const prefix of [
+    BROWSER_NO_SCREENSHOT_PREFIX,
+    BROWSER_PREFIX,
+    LEGACY_BUILTIN_BROWSER_NO_SCREENSHOT_PROMPT_PREFIX,
+    LEGACY_BUILTIN_BROWSER_PROMPT_PREFIX,
+    LEGACY_BROWSER_PREFIX
+  ]) {
+    if (visibleText.startsWith(prefix)) {
+      browserSelected = true
+      visibleText = visibleText.slice(prefix.length)
+      break
+    }
   }
 
   return { visibleText, skillName, browserSelected }
