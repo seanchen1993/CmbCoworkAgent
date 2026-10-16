@@ -368,12 +368,11 @@ async function runOnce(
     deriveWorkerState: false
   })
   const syncSkillAttribution = (): void => {
-    if (!tracer) return
     const usedSkills = skillUsageDetector.getUsedSkillNames()
     const skillSource = skillUsageDetector.getUsedSkillSourceRefs()
-    tracer.setUsedSkills(usedSkills)
-    tracer.setSkillSource(skillSource)
-    tracer.setEvolvedSkills(skillUsageDetector.getUsedEvolvedSkillNames())
+    tracer?.setUsedSkills(usedSkills)
+    tracer?.setSkillSource(skillSource)
+    tracer?.setEvolvedSkills(skillUsageDetector.getUsedEvolvedSkillNames())
     // This agent owns its own thread, so recordGen reads *this* thread's
     // adoption context. Resolve the fallback chain rather than publishing the
     // bare detector result: an agent that never re-reads a SKILL.md would
@@ -404,6 +403,9 @@ async function runOnce(
     // Purge any stale per-thread state before creating the runtime.
     await deps.cleanupThread(threadId).catch(() => undefined)
     tracer = createWorkflowSubagentTrace(deps, request, threadId)
+    // Trace creation resets adoption context. Restore inherited Skills before
+    // the first tool can generate code, even if this agent never reads a Skill.
+    runTraceSideEffect("Workflow Skill initialization", syncSkillAttribution)
     if (tracer)
       traceRecorder = new TurnTraceRecorder({
         tracer,
