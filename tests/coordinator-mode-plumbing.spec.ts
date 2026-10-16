@@ -3473,9 +3473,9 @@ async function testHookAgentIdentityPlumbing(): Promise<void> {
     "agentId: baseContext.agentId",
     "runtime passes agent identity into MCP hook contexts"
   )
-  assertIncludes(
+  assertMatches(
     runtime,
-    "const workerHarnessContext = {\n      agentId: workerInput.workerId,",
+    /const workerHarnessContext\s*=\s*\{[^}]*agentId:\s*workerInput\.workerId,/,
     "coordinator worker runtimes retain the worker id across rebuilds"
   )
   assertOccurrenceCount(

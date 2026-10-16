@@ -35,7 +35,7 @@ describe("natural language project authoring actions", () => {
         incarnation: { token: `inc-${++sequence}`, legacyCreatedAt: 1 }
       }
       setModDevelopmentService({
-        isEnabled: () => true,
+        isCreatorMode: () => true,
         projectAuthoringContext: () => ({ scope, assertCurrent: () => undefined }),
         assertScope: () => undefined
       } as unknown as ModDevelopmentService)
@@ -66,7 +66,7 @@ describe("natural language project authoring actions", () => {
       incarnation: { token: `inc-${++sequence}`, legacyCreatedAt: 1 }
     }
     const service = {
-      isEnabled: () => true,
+      isCreatorMode: () => true,
       projectAuthoringContext: () => ({ scope, assertCurrent: () => undefined }),
       assertScope: () => undefined,
       requestTrial: vi.fn()
@@ -170,7 +170,7 @@ describe("natural language project authoring actions", () => {
       incarnation: { token: `inc-${++sequence}`, legacyCreatedAt: 1 }
     }
     setModDevelopmentService({
-      isEnabled: () => true,
+      isCreatorMode: () => true,
       projectAuthoringContext: () => ({ scope, assertCurrent: () => undefined }),
       assertScope: () => undefined
     } as unknown as ModDevelopmentService)
@@ -200,7 +200,7 @@ describe("natural language project authoring actions", () => {
       incarnation: { token: `inc-${++sequence}`, legacyCreatedAt: 1 }
     }
     const service = {
-      isEnabled: () => true,
+      isCreatorMode: () => true,
       projectAuthoringContext: () => ({ scope, assertCurrent: () => undefined }),
       assertScope: () => undefined,
       requestTrial: vi.fn()

@@ -116,7 +116,7 @@ assertIncludes(
 )
 assertIncludes(
   harnessService,
-  "if (error instanceof HarnessSessionContextLimitError) throw error",
+  "if (error instanceof HarnessSessionContextLimitError || error instanceof HarnessRequiredContextError)\n      throw error",
   "oversized plugin context blocks execution instead of falling back silently"
 )
 assertNotIncludes(

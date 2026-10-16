@@ -120,9 +120,19 @@ async function fixture(observeOwners = false) {
 
 it("stops presence discovery at the first source while both live guests still intercept", async () => {
   const f = await fixture()
-  await expect(f.call()).resolves.toEqual({ result: 2 })
-  expect(f.reads[0]).toBeGreaterThan(0)
-  expect(f.reads[1]).toBe(0)
+  const discovery = vi.spyOn(f.manager as unknown as {
+    isSource(source: ModPluginSource): boolean
+  }, "isSource")
+  try {
+    await expect(f.call()).resolves.toEqual({ result: 2 })
+    expect(discovery).toHaveBeenCalled()
+    expect(discovery.mock.calls.every(([source]) => source.id === "source-0")).toBe(true)
+    // Presence discovery stops early, but live source guards must still check both guests.
+    expect(f.reads[0]).toBeGreaterThan(0)
+    expect(f.reads[1]).toBeGreaterThan(0)
+  } finally {
+    discovery.mockRestore()
+  }
 })
 
 it("keeps off source-free and respects disappearance of every source without a cached answer", async () => {

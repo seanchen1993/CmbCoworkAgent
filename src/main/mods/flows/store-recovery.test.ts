@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from "vitest"
-import { mkdtempSync, rmSync } from "node:fs"
+import { mkdtempSync, rmSync, symlinkSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { spawnSync } from "node:child_process"
@@ -228,6 +228,11 @@ describe("SQLite recovery history reservation (storage contract only)", () => {
   it("persists consumption across actual Node exit and a fresh process opening the database", async () => {
     const directory = mkdtempSync(join(tmpdir(), "cmb-recovery-process-"))
     cleanup.push(() => rmSync(directory, { recursive: true, force: true }))
+    symlinkSync(
+      join(process.cwd(), "node_modules"),
+      join(directory, "node_modules"),
+      process.platform === "win32" ? "junction" : "dir"
+    )
     // Bundle the real source modules independently, so fresh processes share no test objects.
     const modulePath = join(directory, "store-process.mjs")
     const sourcePath = (relative: string) =>

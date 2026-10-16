@@ -83,8 +83,8 @@ async function main() {
     await page.waitForFunction("document.querySelector('[data-claw-results]')?.hidden === false")
     assert.equal(
       await page
-        .getByRole("tab", { name: "运行过程", exact: true })
-        .getAttribute("aria-pressed"),
+        .getByRole("tab", { name: "结果", exact: true })
+        .getAttribute("aria-selected"),
       "true"
     )
     // Explicit button retains the existing no-focus-steal policy; tab navigation still reaches the pane.
@@ -98,7 +98,7 @@ async function main() {
       }
     }
     assert(tabReached, "New pane must be keyboard reachable without another results-entry click")
-    await page.getByRole("button", { name: "收起当前助手", exact: true }).click()
+    await page.getByRole("button", { name: "收起任务进展", exact: true }).click()
     await pane.waitFor({ state: "hidden" })
     const refreshCount = await page.evaluate("window.paneFixture.rendered()")
     await page.evaluate("window.paneFixture.refresh()")
@@ -145,14 +145,14 @@ async function main() {
     await pane.waitFor({ state: "detached" })
     await openFocused.click()
     await pane.waitFor({ state: "visible" })
-    await page.getByRole("button", { name: "收起当前助手", exact: true }).click()
+    await page.getByRole("button", { name: "收起任务进展", exact: true }).click()
     await page.getByRole("textbox", { name: "Composer", exact: true }).focus()
     await page.evaluate("window.paneFixture.openFromComposer()")
     await pane.waitFor({ state: "visible" })
     await page.waitForFunction(
       "document.activeElement?.getAttribute('data-function-control') === 'pane-action'"
     )
-    await page.getByRole("button", { name: "收起当前助手", exact: true }).click()
+    await page.getByRole("button", { name: "收起任务进展", exact: true }).click()
     const backgroundCount = await page.evaluate("window.paneFixture.rendered()")
     await page.evaluate("window.paneFixture.background()")
     await page.waitForFunction(`window.paneFixture.rendered() > ${backgroundCount}`)

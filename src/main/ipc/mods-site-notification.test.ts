@@ -43,6 +43,7 @@ it("preserves native site and Pane scopes through the actual main/preload notifi
     expect(channel).toBe("mods:cards-changed")
     listener!({}, payload)
   })
+  const reconcileComposition = vi.fn(), reconcileCreatorReuse = vi.fn()
   const changed = productionExpression(
     "src/main/ipc/mods.ts",
     (node) =>
@@ -52,6 +53,8 @@ it("preserves native site and Pane scopes through the actual main/preload notifi
       node.initializer.parameters.length === 2 &&
       node.initializer.getText().includes('"mods:cards-changed"'),
     {
+      getCreatorCompositionService: () => ({ reconcile: reconcileComposition }),
+      reconcileCreatorReuse,
       window: () => ({ webContents: { send } })
     }
   )
@@ -64,6 +67,10 @@ it("preserves native site and Pane scopes through the actual main/preload notifi
   }
   expect(on).toHaveBeenCalledWith("mods:cards-changed", expect.any(Function))
   expect(received).toHaveBeenCalledTimes(10)
+  expect(reconcileComposition).toHaveBeenCalledTimes(10)
+  expect(reconcileCreatorReuse).toHaveBeenCalledTimes(10)
+  expect(reconcileComposition.mock.calls).toEqual(Array.from({ length: 10 }, () => ["actual-thread"]))
+  expect(reconcileCreatorReuse.mock.calls).toEqual(Array.from({ length: 10 }, () => ["actual-thread"]))
   unsubscribe()
   expect(removeListener).toHaveBeenCalledWith("mods:cards-changed", listener)
 })
@@ -72,6 +79,7 @@ it("preserves native site and Pane scopes through the actual main/preload notifi
 it("passes only known schema notifications through the original configuration IPC listener", () => {
   let listener: ((event: object, value?: unknown) => void) | undefined
   const received = vi.fn()
+  const reconcileComposition = vi.fn(), reconcileCreatorReuse = vi.fn()
   const subscribe = productionExpression("src/preload/index.ts", node =>
     ts.isPropertyAssignment(node) && node.name.getText() === "onConfigurationChanged", {
       ipcRenderer: { on: (_channel: string, handler: typeof listener) => { listener = handler }, removeListener: vi.fn() }
@@ -79,14 +87,19 @@ it("passes only known schema notifications through the original configuration IP
   subscribe(received)
   const changed = productionExpression("src/main/ipc/mods.ts", node =>
     ts.isPropertyAssignment(node) && node.name.getText() === "configChanged", {
+      getCreatorCompositionService: () => ({ reconcile: reconcileComposition }),
+      reconcileCreatorReuse,
       window: () => ({webContents: {send: (_channel: string, payload?: unknown) => listener!({}, payload)}})
     })
   changed("schema")
   expect(received).toHaveBeenLastCalledWith({scope: "schema"})
   changed()
   expect(received).toHaveBeenLastCalledWith(undefined)
+  expect(reconcileComposition.mock.calls).toEqual([[], []])
+  expect(reconcileCreatorReuse.mock.calls).toEqual([[], []])
   for (const value of [null, "schema", {scope:"unknown"}, {}]) {
     listener!({}, value)
     expect(received).toHaveBeenLastCalledWith(undefined)
   }
+  expect(received).toHaveBeenCalledTimes(6)
 })

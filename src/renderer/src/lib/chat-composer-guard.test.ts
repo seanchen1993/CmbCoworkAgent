@@ -36,6 +36,8 @@ function renderComposer(overrides: Record<string, unknown> = {}): string {
     readOnly: false,
     input: "",
     inputPlaceholder: "输入消息",
+    currentForkWorkspacePath: "c:/composer",
+    developmentMode: null,
     functionHint: null,
     modsChatState: { ready: true, enabled: false },
     modsChatEnabled: false,
@@ -129,6 +131,15 @@ function expectAvailability(markup: string, blocked: boolean): void {
 }
 
 describe("Chat composer rendered decision guards", () => {
+  it("keeps the disabled reason visible when Mods suggestions or hints are active", () => {
+    const markup = renderComposer({ readOnly: true, modsChatEnabled: true,
+      modsChatState: { ready: true, enabled: true },
+      promptComposer: { suggestion: "继续任务", decorations: [] },
+      functionHint: { threadId: "thread", text: "输入需求" },
+      inputPlaceholder: "此会话由项目阶段创建，请返回项目任务执行下一步。" })
+    expect(markup).toContain('placeholder="此会话由项目阶段创建，请返回项目任务执行下一步。"')
+    expectAvailability(markup, true)
+  })
   it("keeps decision guards while a suggestion and decorations are displayed",()=>{
     expectAvailability(renderComposer({readOnly:true,promptComposer:{suggestion:"Next",decorations:[{start:0,end:1}]}}),true)
   })
@@ -166,10 +177,40 @@ describe("Chat composer rendered decision guards", () => {
     )
   })
 
-  it("keeps decision guards active in flow mode and restores chat intent on another thread", () => {
+  it("retains every decision guard in the matching creator scope", () => {
+    const creator = {
+      developmentMode: { scope: JSON.stringify(["thread", "c:/composer"]), mode: "creator" },
+      modsChatEnabled: true,
+      modsChatState: { ready: true, enabled: true },
+      inputPlaceholder: "描述想创建、修改或组合的 Mod"
+    }
+    const markup = renderComposer(creator)
+    expect(markup).toContain('placeholder="描述想创建、修改或组合的 Mod"')
+    expectAvailability(markup, false)
+    for (const guard of ["readOnly", "contextReminderPending"]) {
+      expectAvailability(renderComposer({ ...creator, [guard]: true }), true)
+    }
+    expectAvailability(renderComposer({ ...creator,
+      useHarnessNotifications: () => [
+        { type: "biz_retry", status: "pending", sourceThreadId: "thread" }
+      ]
+    }), true)
+    const input = renderComposer({ ...creator, inputDisabled: true })
+    expect(input.match(/<textarea\b[^>]*>/u)?.[0]).toContain('disabled=""')
+    expect(input.match(/<button\b[^>]*aria-label="添加文件"[^>]*>/u)?.[0]).toContain(
+      'aria-disabled="false"'
+    )
+    const controls = renderComposer({ ...creator, composerControlsDisabled: true })
+    expect(controls.match(/<textarea\b[^>]*>/u)?.[0]).not.toContain('disabled=""')
+    expect(controls.match(/<button\b[^>]*aria-label="添加文件"[^>]*>/u)?.[0]).toContain(
+      'aria-disabled="true"'
+    )
+  })
+
+  it("keeps chat independent of flow choice and retains all decision guards", () => {
     const flowIntent = { threadId: "thread", mode: "flow" }
     const markup = renderComposer({ flowIntent })
-    expect(markup).toContain("输入本次流程任务")
+    expect(markup).toContain('placeholder="输入消息"')
     expectAvailability(markup, false)
     expectAvailability(renderComposer({ flowIntent, readOnly: true }), true)
     expectAvailability(renderComposer({ flowIntent, contextReminderPending: true }), true)
