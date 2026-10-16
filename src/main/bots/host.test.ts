@@ -25,6 +25,152 @@ afterEach(async () => {
 })
 
 describe("Bot control state", () => {
+  it("invalidates a memory view without changing control state or broadcasting private content", async () => {
+    const db = store(),
+      bot = db.create(input),
+      host = new LocalBotHost(db, { acquire: () => null, onAvailable: () => () => {} })
+    hosts.push(host)
+    const before = host.snapshot(),
+      listener = vi.fn()
+    const unsubscribe = host.subscribe(listener)
+    host.memoryChanged(bot.id)
+    expect(listener.mock.calls).toEqual([
+      [{ hostId: "local", revision: before.revision, memoryBotId: bot.id }]
+    ])
+    expect(host.snapshot()).toEqual(before)
+    unsubscribe()
+    host.memoryChanged(bot.id)
+    expect(listener).toHaveBeenCalledTimes(1)
+    host.subscribe(listener)
+    await host.stop()
+    const stoppedCalls = listener.mock.calls.length
+    host.memoryChanged(bot.id)
+    expect(listener).toHaveBeenCalledTimes(stoppedCalls)
+  })
+
+  it("merges a requested teammate profile without changing identity or touching a busy target", () => {
+    const db = store(),
+      a = db.create(input),
+      b = db.create({ ...input, modelRef: "custom:reviewer", label: "Keep label", shape: "cloud" })
+    const task = db.enqueue({ botId: a.id, requestId: "peer-profile", message: "Rename reviewer" })
+    expect(() => db.updateTeammate(task.id, b.id, { name: "Reviewer" })).toThrow("当前用户")
+    db.transition(task.id, "running")
+    const renamed = db.updateTeammate(task.id, b.id, { name: "Reviewer" })
+    expect(renamed).toEqual({ ...b, name: "Reviewer", version: b.version + 1 })
+    expect(db.updateTeammate(task.id, b.id, { name: "Reviewer" })).toEqual(renamed)
+    expect(db.updateTeammate(task.id, b.id, { instructions: "  " })).toEqual(renamed)
+    expect(() => db.updateTeammate(task.id, a.id, { name: "Self" })).toThrow("自己的资料")
+    expect(() => db.updateTeammate(task.id, b.id, { instructions: "x".repeat(8001) })).toThrow()
+    const active = db.enqueue({ botId: b.id, requestId: "reviewer-work", message: "Review" })
+    db.transition(active.id, "running")
+    expect(() => db.updateTeammate(task.id, b.id, { instructions: "New role" })).toThrow("先停止")
+    expect(db.getBot(b.id)).toEqual(renamed)
+    db.settle(active.id, "completed", null)
+    const revised = db.updateTeammate(task.id, b.id, { instructions: "New role" })
+    expect(revised).toEqual({ ...renamed, instructions: "New role", version: renamed.version + 1 })
+    expect(db.getBot(a.id)).toEqual(a)
+    db.settle(task.id, "completed", null)
+    expect(() => db.updateTeammate(task.id, b.id, { name: "Late" })).toThrow("当前用户")
+  })
+
+  it("limits teammate changes to group members and denies peer or routine reconfiguration", () => {
+    const db = store(),
+      a = db.create(input),
+      b = db.create(input),
+      outside = db.create(input),
+      group = db.saveGroup({ name: "Profile requests", memberIds: [a.id, b.id] })
+    db.sendGroup({
+      groupId: group.id,
+      requestId: "group-peer-profile",
+      text: "Rename B",
+      targetBotIds: [a.id]
+    })
+    const task = db.recentTasks().find((item) => item.botId === a.id)!
+    db.transition(task.id, "running")
+    expect(db.updateTeammate(task.id, b.id, { name: "Reviewer" }).name).toBe("Reviewer")
+    expect(() => db.updateTeammate(task.id, outside.id, { name: "Outside" })).toThrow("当前群聊")
+    const peer = db.delegate(task.id, b.id, "Rename A", "peer-profile-relay")
+    db.transition(peer.id, "running")
+    expect(() => db.updateTeammate(peer.id, a.id, { name: "Relay" })).toThrow("当前用户")
+    db.settle(peer.id, "completed", null)
+    const routine = db.enqueue(
+      { botId: b.id, requestId: "routine-peer-profile", message: "Rename A" },
+      { kind: "schedule", scheduleId: "synthetic" }
+    )
+    db.transition(routine.id, "running")
+    expect(() => db.updateTeammate(routine.id, a.id, { name: "Routine" })).toThrow("当前用户")
+    db.settle(routine.id, "completed", null)
+    const current = db.getBot(b.id)
+    db.update({ ...current, archived: true, expectedVersion: current.version })
+    expect(() => db.updateTeammate(task.id, b.id, { name: "Archived" })).toThrow("已归档")
+    const archived = db.getBot(b.id)
+    db.update({ ...archived, archived: false, expectedVersion: archived.version })
+    db.saveGroup({ name: group.name, memberIds: [b.id] }, group)
+    expect(() => db.updateTeammate(task.id, b.id, { name: "Removed sender" })).toThrow("当前用户")
+    expect(db.getGroup(group.id).memberIds).toEqual([b.id])
+    expect(db.getBot(outside.id)).toEqual(outside)
+  })
+
+  it("creates a persistent teammate from direct work once, without starting work or copying private state", () => {
+    const db = store(),
+      owner = db.create({ ...input, modelRef: "custom:test-model", shape: "cloud" })
+    const task = db.enqueue({
+      botId: owner.id,
+      requestId: "create-colleague",
+      message: "Create a reviewer"
+    })
+    const profile = { name: "核对同事", instructions: "核对合成数字并报告差异" }
+    expect(() => db.createTeammate(task.id, "reviewer", profile)).toThrow("当前用户")
+    db.transition(task.id, "running")
+    const created = db.createTeammate(task.id, "reviewer", profile)
+    expect(created).toMatchObject({ ...profile, modelRef: "custom:test-model" })
+    expect(created.id).not.toBe(owner.id)
+    expect(created.threadId).not.toBe(owner.threadId)
+    expect(db.recentTasks()).toHaveLength(1)
+    expect(db.listBots()).toHaveLength(2)
+    expect(db.createTeammate(task.id, "reviewer", profile)).toEqual(created)
+    expect(() => db.createTeammate(task.id, "reviewer", { ...profile, name: "不同身份" })).toThrow(
+      "请求键"
+    )
+    expect(() => db.createTeammate(task.id, "invalid key", profile)).toThrow("标识格式")
+    expect(() => db.createTeammate(task.id, "invalid-profile", { ...profile, name: " " })).toThrow(
+      "不能为空"
+    )
+    expect(db.listBots()).toHaveLength(2)
+    db.settle(task.id, "completed", null)
+    expect(() => db.createTeammate(task.id, "late", profile)).toThrow("当前用户")
+  })
+
+  it("allows addressed group creation without adding members and denies peer/routine authority", () => {
+    const db = store(),
+      a = db.create(input),
+      b = db.create(input),
+      group = db.saveGroup({ name: "合成群", memberIds: [a.id, b.id] })
+    db.sendGroup({
+      groupId: group.id,
+      requestId: "group-create",
+      text: "Create a colleague",
+      targetBotIds: [a.id]
+    })
+    const task = db.recentTasks().find((item) => item.botId === a.id)!
+    db.transition(task.id, "running")
+    const profile = { name: "群外同事", instructions: "Review" }
+    const created = db.createTeammate(task.id, "reviewer", profile)
+    expect(db.getGroup(group.id).memberIds).toEqual([a.id, b.id])
+    expect(db.getBot(created.id).threadId).not.toBe(task.threadId)
+    const peer = db.delegate(task.id, b.id, "Create another", "create-relay")
+    db.transition(peer.id, "running")
+    expect(() => db.createTeammate(peer.id, "relay", profile)).toThrow("当前用户")
+    db.settle(peer.id, "completed", null)
+    const routine = db.enqueue(
+      { botId: b.id, requestId: "routine-create", message: "Create another" },
+      { kind: "schedule", scheduleId: "synthetic" }
+    )
+    db.transition(routine.id, "running")
+    expect(() => db.createTeammate(routine.id, "routine", profile)).toThrow("当前用户")
+    expect(db.listBots()).toHaveLength(3)
+  })
+
   it("prioritizes direct user work, then group work, then peer work ahead of background triggers", () => {
     const db = store(),
       bot = db.create(input)
@@ -589,6 +735,56 @@ describe("Bot control state", () => {
     expect(() => db.updateOwnProfile(task.id, { name: "Too late" })).toThrow("当前用户")
     expect(db.getBot(a.id).name).toBe("Sean")
   })
+  it("accepts own-profile changes from an addressed group user and rejects relays, stale membership and foreign messages", () => {
+    const db = store(),
+      a = db.create(input),
+      b = db.create(input),
+      c = db.create(input)
+    const group = db.saveGroup({ name: "Profile requests", memberIds: [a.id, b.id, c.id] })
+    db.sendGroup({
+      groupId: group.id,
+      requestId: "group-profile",
+      text: "Call yourself Sean",
+      targetBotIds: [a.id]
+    })
+    const task = db.recentTasks().find((item) => item.origin.kind === "group")!
+    expect(() => db.updateOwnProfile(task.id, { name: "Too early" })).toThrow("当前用户")
+    db.transition(task.id, "running")
+    expect(
+      db.updateOwnProfile(task.id, { name: "Sean", instructions: "Review results" })
+    ).toMatchObject({
+      id: a.id,
+      threadId: a.threadId,
+      modelRef: a.modelRef,
+      name: "Sean",
+      instructions: "Review results",
+      version: a.version + 1
+    })
+    expect(db.getBot(b.id).name).toBe(b.name)
+    const peer = db.delegate(task.id, b.id, "Change your role", "profile-relay")
+    db.transition(peer.id, "running")
+    expect(() => db.updateOwnProfile(peer.id, { name: "Relay" })).toThrow("当前用户")
+    db.settle(peer.id, "completed", null)
+    const other = db.saveGroup({ name: "Other group", memberIds: [b.id, c.id] })
+    for (const [requestId, botId, groupId, messageId] of [
+      ["not-addressed", b.id, group.id, "group-profile"],
+      ["foreign-message", b.id, other.id, "group-profile"],
+      ["missing-message", b.id, group.id, "missing"]
+    ]) {
+      const invalid = db.enqueue(
+        { botId, requestId, message: "Forged profile request" },
+        { kind: "group", groupId, messageId }
+      )
+      db.transition(invalid.id, "running")
+      expect(() => db.updateOwnProfile(invalid.id, { name: "Invalid" })).toThrow("当前用户")
+      db.settle(invalid.id, "failed", "Rejected")
+    }
+    db.saveGroup({ name: group.name, memberIds: [b.id, c.id] }, group)
+    expect(() => db.updateOwnProfile(task.id, { name: "Removed" })).toThrow("当前用户")
+    db.settle(task.id, "completed", null)
+    expect(() => db.updateOwnProfile(task.id, { name: "Too late" })).toThrow("当前用户")
+    expect(db.getBot(a.id).name).toBe("Sean")
+  })
   it("rolls back a failed schema upgrade and repairs unfinished legacy task ownership", () => {
     const raw = new DatabaseSync(":memory:")
     raw.exec(`CREATE TABLE bots (
@@ -872,6 +1068,85 @@ describe("Bot control state", () => {
     expect(db.getTask(task.id).state).toBe("interrupted")
     expect(db.nextQueued([])).toBeNull()
     expect(() => db.transition(task.id, "running")).toThrow("状态")
+  })
+
+  it("recovers one interruption receipt to a completed collaboration parent without replaying the child", () => {
+    const db = store(),
+      a = db.create(input),
+      b = db.create(input)
+    const root = db.enqueue({ botId: a.id, requestId: "recovery-root", message: "Delegate once" })
+    db.transition(root.id, "running")
+    const child = db.delegate(root.id, b.id, "Ask for the calculation basis", "check")
+    db.transition(child.id, "running")
+    db.transition(child.id, "waiting_user")
+    db.settle(root.id, "completed", null, "Dispatched")
+    db.recover()
+    db.flushReplies()
+    const receipt = db.nextQueued([])!
+    expect(db.getTask(child.id).state).toBe("interrupted")
+    expect(receipt).toMatchObject({
+      botId: a.id,
+      requestId: `reply-${child.id}`,
+      origin: { kind: "bot", expectsReply: false, fromBotId: b.id }
+    })
+    expect(receipt.message).toContain("interrupted")
+    expect(receipt.message).toContain("避免重复执行")
+    db.recover()
+    db.flushReplies()
+    expect(db.recentTasks().filter((task) => task.requestId === receipt.requestId)).toHaveLength(1)
+    expect(db.recentTasks().filter((task) => task.botId === b.id)).toEqual([db.getTask(child.id)])
+  })
+
+  it.each(["running", "cancelled"] as const)(
+    "does not wake a %s parent on crash recovery",
+    (rootState) => {
+      const db = store(),
+        a = db.create(input),
+        b = db.create(input)
+      const root = db.enqueue({
+        botId: a.id,
+        requestId: "recovery-stopped-root",
+        message: "Delegate"
+      })
+      db.transition(root.id, "running")
+      const child = db.delegate(root.id, b.id, "Wait", "check")
+      db.transition(child.id, "running")
+      if (rootState === "cancelled") db.transition(root.id, "cancelled")
+      db.recover()
+      db.flushReplies()
+      expect(db.getTask(child.id).state).toBe("interrupted")
+      expect(db.nextQueued([])).toBeNull()
+    }
+  )
+
+  it("keeps a recovered group collaboration receipt in the same group", () => {
+    const db = store(),
+      a = db.create(input),
+      b = db.create(input)
+    const group = db.saveGroup({ name: "Recovery", memberIds: [a.id, b.id] })
+    db.sendGroup({
+      groupId: group.id,
+      requestId: "recover-group",
+      text: "Check",
+      targetBotIds: [a.id]
+    })
+    const root = db.recentTasks()[0]
+    db.transition(root.id, "running")
+    const child = db.delegate(root.id, b.id, "Wait for a basis", "check")
+    db.transition(child.id, "running")
+    db.settle(root.id, "completed", null, "Dispatched")
+    db.recover()
+    db.flushReplies()
+    const receipt = db.nextQueued([])!
+    expect(receipt).toMatchObject({
+      threadId: `group-${group.id}-${a.id}`,
+      origin: { kind: "bot", groupId: group.id, expectsReply: false }
+    })
+    db.saveGroup({ name: group.name, memberIds: [b.id] }, group)
+    expect(db.getTask(receipt.id).state).toBe("cancelled")
+    db.recover()
+    db.flushReplies()
+    expect(db.nextQueued([])).toBeNull()
   })
 
   it("archive atomically cancels pending work and rejects new tasks", () => {

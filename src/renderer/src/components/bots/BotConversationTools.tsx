@@ -13,15 +13,17 @@ import type {
   BotClient,
   BotTask,
   BotDefinition,
-  BotMessageOrigin
+  BotMessageOrigin,
+  BotSchedule
 } from "../../../../shared/bots/contracts"
 import { useThreadContext, useThreadStateSelector } from "@/lib/thread-context"
 import {
   ChatPresentationContext,
+  ChatReplySourceContext,
   ChatActivityPresentationContext,
   ChatExecutionDetailsContext,
   ChatFoldedToolCallsContext,
-  ChatFoldedMessageIdsContext,
+  ChatExecutionCardCallIdsContext,
   ChatFilePresentationContext,
   ChatMessageVisibilityContext,
   ChatMessagePresentationContext,
@@ -36,6 +38,10 @@ import { parseBotFileDelivery } from "../../../../shared/bots/file-delivery"
 import { botGroupBrowserScope } from "../../../../shared/bots/contracts"
 import { projectBotExecution } from "@/lib/bot-execution-visibility"
 import { botProfileEvent } from "@/lib/bot-profile-event"
+import { botScheduleReceipt } from "@/lib/bot-schedule-view"
+import { botQuestionHistory } from "@/lib/bot-question-history"
+import { BotQuestionHistory } from "./BotQuestionHistory"
+import { parseBotMessageReply } from "../../../../shared/bots/message-reply"
 import { botDeliveredFileReferences } from "@/lib/bot-delivered-file-references"
 import { getModCards, subscribeModCards } from "@/lib/mod-cards-store"
 import { useBotViewStore } from "./view-store"
@@ -47,6 +53,7 @@ export function BotConversationTools({
   groupId,
   tasks,
   bots,
+  schedules,
   executionDetails,
   children
 }: {
@@ -55,6 +62,7 @@ export function BotConversationTools({
   groupId?: string
   tasks: BotTask[]
   bots: BotDefinition[]
+  schedules?: readonly BotSchedule[]
   executionDetails?: boolean
   children: ReactNode
 }) {
@@ -73,6 +81,7 @@ export function BotConversationTools({
   )
   const getCards = useCallback(() => getModCards(threadId ?? ""), [threadId])
   const cards = useSyncExternalStore(subscribeCards, getCards)
+  const cardCallIds = useMemo(() => new Set(cards.map((card) => card.callId)), [cards])
   // The window identity is stable during streamed token updates; source lookups need no per-token work.
   const windowKey = useThreadStateSelector(
     threadId,
@@ -109,6 +118,26 @@ export function BotConversationTools({
     () => new Map([...origins, ...tasks].map((task) => [task.requestId, task])),
     [tasks, origins]
   )
+  const replySource = useMemo(
+    () =>
+      groupId
+        ? null
+        : {
+            resolve: (messageId: string) => client.messageReply(botId, messageId),
+            quoteFor: (message: Message) => {
+              const origin = taskByMessage.get(message.id)?.origin
+              if (origin?.kind !== "user" || !origin.replyTo || typeof message.content !== "string")
+                return undefined
+              const parsed = parseBotMessageReply(message.content)
+              return parsed?.reply.id === origin.replyTo.id &&
+                parsed.reply.ordinal === origin.replyTo.ordinal &&
+                parsed.reply.role === origin.replyTo.role
+                ? parsed.reply
+                : undefined
+            }
+          },
+    [client, botId, groupId, taskByMessage]
+  )
   const deliveredReferences = useMemo(
     () => botDeliveredFileReferences(threadId ? context.getThreadState(threadId).messages : []),
     [context, threadId, windowKey]
@@ -126,11 +155,10 @@ export function BotConversationTools({
       const running = tasks.some((task) =>
         ["queued", "running", "waiting_user"].includes(task.state)
       )
-      const cardCallIds = new Set(cards.map((card) => card.callId))
       view = projectBotExecution(messages, running, cardCallIds)
     }
     return { ...view, quietMessages: quietBotTurnMessageIds(messages, taskByMessage) }
-  }, [threadId, context, taskByMessage, windowKey, showExecutionDetails, tasks, cards])
+  }, [threadId, context, taskByMessage, windowKey, showExecutionDetails, tasks, cardCallIds])
   useEffect(() => {
     if (!exchangeId && exchangeTrigger.current?.isConnected) exchangeTrigger.current.focus()
   }, [exchangeId])
@@ -154,6 +182,8 @@ export function BotConversationTools({
           />
         )
       }
+      const questionHistory = !showExecutionDetails ? botQuestionHistory(tool, result) : null
+      if (questionHistory) return <BotQuestionHistory history={questionHistory} />
       const profileEvent = !showExecutionDetails ? botProfileEvent(tool, result) : null
       if (profileEvent)
         return (
@@ -161,6 +191,47 @@ export function BotConversationTools({
             {profileEvent}
           </div>
         )
+      const scheduleReceipt = !showExecutionDetails ? botScheduleReceipt(tool, result) : null
+      if (scheduleReceipt && scheduleReceipt.action !== "list") {
+        if (scheduleReceipt.action === "remove")
+          return (
+            <div className="bot-profile-event" role="note">
+              例行任务已删除
+            </div>
+          )
+        const exists = schedules?.some(
+          (schedule) => schedule.id === scheduleReceipt.id && schedule.botId === botId
+        )
+        return (
+          <div className="bot-profile-event bot-schedule-event" role="note">
+            <span>已{scheduleReceipt.created ? "创建" : "更新"}例行任务</span>
+            {exists ? (
+              <button
+                type="button"
+                className="bot-routine-link"
+                title={scheduleReceipt.name}
+                aria-label={`查看例行任务：${scheduleReceipt.name}`}
+                onClick={(event) => {
+                  event.stopPropagation()
+                  useBotViewStore.getState().update(client.hostId, {
+                    selectedId: botId,
+                    groupId: null,
+                    detailOpen: true,
+                    detailTab: "details"
+                  })
+                }}
+              >
+                <Clock size={14} aria-hidden="true" />
+                <span>{scheduleReceipt.name}</span>
+              </button>
+            ) : (
+              <span className="truncate" title={scheduleReceipt.name}>
+                {scheduleReceipt.name}
+              </span>
+            )}
+          </div>
+        )
+      }
       if (tool.name === "bot_deliver_files" && !result.is_error && threadId) {
         const files = parseBotFileDelivery(result.content)
         if (!files) return null
@@ -199,7 +270,7 @@ export function BotConversationTools({
         </button>
       )
     },
-    [bots, tasks, client, groupId, botId, threadId, showExecutionDetails]
+    [bots, schedules, tasks, client, groupId, botId, threadId, showExecutionDetails]
   )
   const presentMessage = useCallback(
     (message: Message) => {
@@ -268,7 +339,7 @@ export function BotConversationTools({
               <ChatPresentationContext.Provider value="bot">
                 <ChatExecutionDetailsContext.Provider value={showExecutionDetails}>
                   <ChatFoldedToolCallsContext.Provider value={executionView.foldedTools}>
-                    <ChatFoldedMessageIdsContext.Provider value={executionView.hiddenMessages}>
+                    <ChatExecutionCardCallIdsContext.Provider value={cardCallIds}>
                       <ChatFilePresentationContext.Provider value={presentFile}>
                         <ChatActivityPresentationContext.Provider
                           value={
@@ -277,10 +348,12 @@ export function BotConversationTools({
                             ) : null
                           }
                         >
-                          {children}
+                          <ChatReplySourceContext.Provider value={replySource}>
+                            {children}
+                          </ChatReplySourceContext.Provider>
                         </ChatActivityPresentationContext.Provider>
                       </ChatFilePresentationContext.Provider>
-                    </ChatFoldedMessageIdsContext.Provider>
+                    </ChatExecutionCardCallIdsContext.Provider>
                   </ChatFoldedToolCallsContext.Provider>
                 </ChatExecutionDetailsContext.Provider>
               </ChatPresentationContext.Provider>

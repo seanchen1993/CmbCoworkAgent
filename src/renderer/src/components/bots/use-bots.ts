@@ -1,11 +1,12 @@
 import { botErrorMessage } from "@/lib/bot-error-message"
-import { useEffect, useState } from "react"
+import { useEffect, useRef, useState } from "react"
 import type { BotClient, BotSnapshot } from "../../../../shared/bots/contracts"
 
 /** Revision-coalesced invalidation: at most one snapshot request at a time. */
 export function useBots(client: BotClient) {
   const [snapshot, setSnapshot] = useState<BotSnapshot | null>(null)
   const [error, setError] = useState<string | null>(null)
+  const refreshRef = useRef<() => void>(() => {})
   useEffect(() => {
     let disposed = false,
       pending = false,
@@ -35,19 +36,26 @@ export function useBots(client: BotClient) {
         pending = false
       }
     }
-    const unsubscribe = client.subscribe(() => {
-      void refresh()
+    const unsubscribe = client.subscribe((event) => {
+      // Memory owns its scoped reader; these writes do not change the control snapshot.
+      if (!event.memoryBotId) void refresh()
     })
     const onFocus = () => {
       void refresh()
     }
+    refreshRef.current = onFocus
     window.addEventListener("focus", onFocus)
     void refresh()
     return () => {
       disposed = true
+      refreshRef.current = () => {}
       unsubscribe()
       window.removeEventListener("focus", onFocus)
     }
   }, [client])
-  return { snapshot: snapshot?.host.id === client.hostId ? snapshot : null, error }
+  return {
+    snapshot: snapshot?.host.id === client.hostId ? snapshot : null,
+    error,
+    retry: () => refreshRef.current()
+  }
 }

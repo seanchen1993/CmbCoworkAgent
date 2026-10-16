@@ -1,5 +1,9 @@
-import { useEffect, useRef } from "react"
+import { useEffect, useLayoutEffect, useRef } from "react"
 import { BOT_COMPACT_SIDEBAR_WIDTH, clampBotPanelWidth } from "./view-store"
+
+function clearPanelDrag(container: HTMLElement | null, kind: "sidebar" | "detail"): void {
+  if (container?.dataset.botPanelDragging === kind) delete container.dataset.botPanelDragging
+}
 
 /** Pointer capture owns drag lifetime, including cancellation; no document-level listeners. */
 export function BotPanelDivider({
@@ -16,21 +20,29 @@ export function BotPanelDivider({
   const container = useRef<HTMLElement | null>(null)
   const pending = useRef(width)
   const change = useRef(onChange)
-  change.current = onChange
+  useLayoutEffect(() => {
+    change.current = onChange
+  }, [onChange])
   const direction = kind === "sidebar" ? 1 : -1
+  const widthVariable = kind === "sidebar" ? "--bot-sidebar-width" : "--bot-detail-width"
   const finish = () => {
     if (frame.current !== null) {
       cancelAnimationFrame(frame.current)
       frame.current = null
     }
-    if (drag.current) change.current(pending.current)
+    if (drag.current) {
+      container.current?.style.setProperty(widthVariable, `${pending.current}px`)
+      change.current(pending.current)
+    }
     drag.current = null
+    clearPanelDrag(container.current, kind)
   }
   useEffect(
     () => () => {
       if (frame.current !== null) cancelAnimationFrame(frame.current)
+      clearPanelDrag(container.current, kind)
     },
-    []
+    [kind]
   )
   return (
     <div
@@ -48,9 +60,16 @@ export function BotPanelDivider({
         event.preventDefault()
         event.currentTarget.focus({ preventScroll: true })
         event.currentTarget.setPointerCapture(event.pointerId)
-        drag.current = { x: event.clientX, width }
-        pending.current = width
         container.current = event.currentTarget.parentElement
+        const panel = container.current?.querySelector(
+          kind === "sidebar" ? ".bots-sidebar" : ".bot-details"
+        )
+        const actualWidth = panel?.getBoundingClientRect().width ?? width
+        // A drag can interrupt a keyboard transition; freeze its current visual width first.
+        container.current?.style.setProperty(widthVariable, `${actualWidth}px`)
+        if (container.current) container.current.dataset.botPanelDragging = kind
+        drag.current = { x: event.clientX, width: actualWidth }
+        pending.current = clampBotPanelWidth(kind, actualWidth)
       }}
       onPointerMove={(event) => {
         if (!drag.current) return
@@ -61,10 +80,7 @@ export function BotPanelDivider({
         if (frame.current === null)
           frame.current = requestAnimationFrame(() => {
             frame.current = null
-            container.current?.style.setProperty(
-              kind === "sidebar" ? "--bot-sidebar-width" : "--bot-detail-width",
-              `${pending.current}px`
-            )
+            container.current?.style.setProperty(widthVariable, `${pending.current}px`)
           })
       }}
       onPointerUp={(event) => {

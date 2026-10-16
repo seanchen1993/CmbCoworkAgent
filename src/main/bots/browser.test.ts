@@ -19,13 +19,22 @@ class TestPage extends EventEmitter {
   setInputFiles = vi.fn(async (_file: string) => {})
   getByLabel = vi.fn(() => ({ count: async () => 1, setInputFiles: this.setInputFiles }))
   snapshot = vi.fn(async () => '- textbox "Name"')
+  fileInputs = vi.fn(
+    async (): Promise<{
+      controls: { label: string | null; multiple: boolean; accept: string; disabled: boolean }[]
+      truncated: boolean
+    }> => ({ controls: [], truncated: false })
+  )
   mouse = { wheel: vi.fn(async () => {}) }
   bringToFront = vi.fn(async () => {})
   getByRole() {
     return { count: async () => 1, fill: this.fill, click: this.click, press: this.press }
   }
-  locator() {
-    return { ariaSnapshot: this.snapshot }
+  locator(selector: string) {
+    return {
+      ariaSnapshot: this.snapshot,
+      evaluateAll: selector === 'input[type="file"]' ? this.fileInputs : undefined
+    }
   }
   url() {
     return this.address
@@ -84,6 +93,19 @@ afterEach(async () => {
 })
 
 describe("Bot browser ownership and control", () => {
+  it("reports actual file controls even when the ARIA snapshot calls them buttons", async () => {
+    const { pageId } = JSON.parse(await service.act("a", { action: "observe" }, signal()))
+    const page = context.entries[0]
+    page.snapshot.mockResolvedValue('- button "合成附件"')
+    const controls = [{ label: "合成附件", multiple: false, accept: ".csv", disabled: false }]
+    page.fileInputs.mockResolvedValue({ controls, truncated: false })
+    const observed = JSON.parse(await service.act("a", { action: "observe", pageId }, signal()))
+    expect(observed.fileInputs).toEqual({ controls, truncated: false })
+    expect(observed.content).toBe('- button "合成附件"')
+    expect(observed.note).toContain("Native file inputs may have the ARIA role button")
+    expect(page.click).not.toHaveBeenCalled()
+    expect(page.setInputFiles).not.toHaveBeenCalled()
+  })
   it("reopens human control without replacing its instruction, generation or pending help", async () => {
     const { pageId } = JSON.parse(await service.act("a", { action: "observe" }, signal()))
     let entered!: () => void

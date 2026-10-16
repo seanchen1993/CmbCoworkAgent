@@ -140,7 +140,7 @@ export function botTaskStateLabel(state: BotTaskState): string {
 }
 
 export type BotTaskOrigin =
-  | { kind: "user" }
+  | { kind: "user"; replyTo?: Pick<BotMessageReply, "id" | "ordinal" | "role"> }
   | { kind: "introduction" }
   | {
       kind: "bot"
@@ -240,6 +240,15 @@ export interface SendBotMessageInput {
   /** Client-generated identity retained when retrying an unacknowledged submission. */
   requestId: string
   message: string
+  replyToId?: string
+}
+
+/** A bounded reference resolved from this Bot's existing durable private transcript. */
+export interface BotMessageReply {
+  id: string
+  ordinal: number
+  role: "user" | "assistant"
+  text: string
 }
 
 export interface BotSnapshot {
@@ -268,6 +277,8 @@ export interface BotConversationActivity {
 export interface BotChangeEvent {
   hostId: string
   revision: number
+  /** Invalidate this Bot's memory view; never carries private memory content. */
+  memoryBotId?: string
 }
 
 export interface BotMemory {
@@ -309,6 +320,8 @@ export interface WriteBotMemoryInput {
 }
 
 /** The local implementation uses IPC. A future remote implementation must preserve this contract. */
+export type BotGroupHistoryCursor = number | { targetMessageId: string }
+
 export interface BotClient {
   readonly hostId: string
   readonly filePreview: BotFilePreviewTransport
@@ -340,6 +353,7 @@ export interface BotClient {
   snapshot(): Promise<BotSnapshot>
   exchange(botId: string, taskId: string, groupId?: string): Promise<BotExchange>
   messageOrigins(botId: string, messageIds: string[], groupId?: string): Promise<BotMessageOrigin[]>
+  messageReply(botId: string, messageId: string): Promise<BotMessageReply>
   requestReceipts(botId: string, checks: BotRequestCheck[]): Promise<BotRequestReceipt[]>
   exchangeHistory(
     botId: string,
@@ -367,7 +381,7 @@ export interface BotClient {
   removeSchedule(id: string, version: number): Promise<void>
   saveGroup(input: BotGroupInput, existing?: { id: string; version: number }): Promise<BotGroup>
   removeGroup(groupId: string, expectedVersion: number): Promise<void>
-  groupMessages(groupId: string, before?: number): Promise<BotGroupMessage[]>
+  groupMessages(groupId: string, cursor?: BotGroupHistoryCursor): Promise<BotGroupMessage[]>
   sendGroup(input: SendBotGroupMessageInput): Promise<void>
   create(input: CreateBotInput): Promise<BotDefinition>
   update(input: UpdateBotInput): Promise<BotDefinition>

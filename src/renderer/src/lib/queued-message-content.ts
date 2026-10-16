@@ -1,4 +1,5 @@
 import type { QueuedMessage } from "@/types"
+import { formatBotMessageReply } from "../../../shared/bots/message-reply"
 import { BOT_BROWSER_PROMPT_PREFIX } from "../../../shared/user-input-transport"
 // Relative (not "@/") so this module stays importable from tsx unit tests, which
 // don't resolve the "@/" path alias for runtime values. skill-marker has no
@@ -25,7 +26,10 @@ export function getQueuedModelContent(
       ? `${BOT_BROWSER_PROMPT_PREFIX}${message.text}`
       : formatBuiltinBrowserTransportMessage(message.text, message.builtinBrowser === true)
   const primary = `${text}${message.attachmentModelBlocks ?? ""}`.trim()
-  return [primary, message.skillBlock].filter((part) => part && part.trim()).join("\n\n")
+  const content = [primary, message.skillBlock].filter((part) => part && part.trim()).join("\n\n")
+  return browserTarget === "bot" && message.botReplyTo
+    ? formatBotMessageReply(content, message.botReplyTo)
+    : content
 }
 
 export function getQueuedDisplayContent(message: QueuedMessage): string {

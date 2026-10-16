@@ -1,3 +1,4 @@
+import { formatBotMessageReply } from "../../../shared/bots/message-reply"
 import { describe, expect, it } from "vitest"
 import type { BotDefinition, BotTask, BotTaskOrigin } from "../../../shared/bots/contracts"
 import { BOT_REPLY_FILES_PREFIX } from "../../../shared/bots/file-delivery"
@@ -88,12 +89,18 @@ it("refreshes files after every settled outcome, including partial cancelled wor
 describe("private Bot conversation task scope", () => {
   it("keeps native background work busy after its parent turn completes", () => {
     expect(botConversationState([], undefined, true)).toBe("running")
-    expect(botConversationState([], {
-      hasPendingApproval: true,
-      hasPendingUserInput: false,
-      hasRunningCoordinatorWorker: false,
-      workflowRunning: false
-    }, true)).toBe("waiting_user")
+    expect(
+      botConversationState(
+        [],
+        {
+          hasPendingApproval: true,
+          hasPendingUserInput: false,
+          hasRunningCoordinatorWorker: false,
+          workflowRunning: false
+        },
+        true
+      )
+    ).toBe("waiting_user")
     expect(botConversationState([], undefined, false)).toBeNull()
   })
   it("keeps private user, routine, peer and background work in queue order", () => {
@@ -162,4 +169,33 @@ it("projects actual peer receipts without leaking routing state into task previe
   expect(botTaskPreview(withFiles)).toBe("核验 Bot：实际合计：50.75")
   expect(botTaskPreview({ ...withFiles, origin: { kind: "user" } })).toContain("/peer/report.md")
   expect(withFiles.message).toContain("/peer/report.md")
+})
+
+it("shows only original visible user text and attachment names in recent work", () => {
+  const reply = { id: "original", ordinal: 3, role: "assistant" as const, text: "41" }
+  const current = task("request", {
+    kind: "user",
+    replyTo: { id: reply.id, ordinal: reply.ordinal, role: reply.role }
+  })
+  current.message = formatBotMessageReply(
+    '请核对附件。\n<attachment filename="核验.csv" path="shared/private-dir/核验.csv" type="text/csv">amount\n12.50</attachment>',
+    reply
+  )
+  const preview = botTaskPreview(current)
+  expect(preview).not.toContain("\n")
+  expect(preview).toContain("请核对附件")
+  expect(preview).toContain("核验.csv")
+  expect(preview).not.toMatch(/CMBDEVCLAW|attachment|private-dir|12\.50/)
+})
+
+it("hides the partial final attachment in a bounded snapshot without reading its body", () => {
+  const current = task("bounded", { kind: "user" })
+  current.message = (
+    '请核对。\n<attachment filename="visible.csv" path="shared/private-dir/visible.csv" size="9999">' +
+    "private body ".repeat(1000)
+  ).slice(0, 600)
+  const preview = botTaskPreview(current)
+  expect(preview).toContain("visible.csv")
+  expect(preview).toContain("请核对")
+  expect(preview).not.toMatch(/attachment|private-dir|private body/)
 })

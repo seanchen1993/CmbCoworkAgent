@@ -559,6 +559,24 @@ describe("Bot Runtime integration", () => {
     expect(fixture.announce).not.toHaveBeenCalled()
     expect(fixture.summary).not.toHaveBeenCalled()
   })
+  it("offers the existing own-profile tool to direct group users without exposing private memory", async () => {
+    fixture.thread.mockReturnValue({ metadata: JSON.stringify(metadata("g")) })
+    await port()
+      .acquire(bot, {
+        ...task,
+        threadId: "group-g-a",
+        origin: { kind: "group", groupId: "g", messageId: "group-message" }
+      })!
+      .execute(new AbortController().signal, vi.fn())
+    expect(fixture.start.mock.calls[0][2].additionalTools).toEqual([
+      "own-profile",
+      "delivery",
+      "owned-browser",
+      "collaboration"
+    ])
+    expect(fixture.memoryTools).not.toHaveBeenCalled()
+    expect(fixture.summary).not.toHaveBeenCalled()
+  })
   it.each<BotTask["origin"]>([
     { kind: "bot", fromBotId: "peer", rootTaskId: "root", depth: 1, expectsReply: true },
     { kind: "schedule", scheduleId: "routine" }

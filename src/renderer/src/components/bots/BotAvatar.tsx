@@ -18,6 +18,7 @@ import {
 import type { BotAvatarShape, BotTask } from "../../../../shared/bots/contracts"
 import type { BotAvatarMood } from "@/lib/bot-avatar-mood"
 import { botAppearanceColor } from "@/lib/bot-chat-accent"
+import { cn } from "@/lib/utils"
 
 // Grok renders the character inside an oversized SVG so its optical fill is 92%.
 const EXTENT = (40 * 0.92) / 0.6
@@ -196,7 +197,8 @@ export const BotAvatar = memo(function BotAvatar({
   busy = false,
   mood,
   settlement,
-  animated = true
+  animated = true,
+  className
 }: {
   color: string
   shape?: BotAvatarShape
@@ -205,6 +207,7 @@ export const BotAvatar = memo(function BotAvatar({
   mood?: BotAvatarMood
   settlement?: Pick<BotTask, "id" | "state">
   animated?: boolean
+  className?: string
 }) {
   const ref = useRef<SVGSVGElement>(null)
   const host = useRef<SVGGElement>(null)
@@ -273,7 +276,7 @@ export const BotAvatar = memo(function BotAvatar({
       height={size}
       viewBox="0 0 40 40"
       aria-hidden="true"
-      className="bot-avatar"
+      className={cn("bot-avatar", className)}
       data-mood={mood ?? (busy ? "work" : "idle")}
     >
       <g ref={host} transform={`translate(${OFFSET} ${OFFSET})`} />

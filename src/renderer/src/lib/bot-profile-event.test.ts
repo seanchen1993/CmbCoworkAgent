@@ -17,4 +17,24 @@ describe("Bot profile event", () => {
       expect(botProfileEvent(tool, { content: invalid })).toBeNull()
     expect(botProfileEvent({ ...tool, name: "other" }, { content })).toBeNull()
   })
+  it("shows creation only from a successful receipt containing the stable identity", () => {
+    const create = { ...tool, name: "bot_create_teammate" }
+    expect(botProfileEvent(create, { content })).toBeNull()
+    const created = JSON.stringify({ id: "created-actual", name: "Actual", instructions: "Review" })
+    expect(botProfileEvent(create, { content: created })).toBe("已创建 Actual")
+    expect(botProfileEvent(create, { content: created, is_error: true })).toBeNull()
+  })
+  it("names the actual updated teammate and rejects mismatched or failed receipts", () => {
+    const update = {
+      ...tool,
+      name: "bot_update_teammate",
+      args: { botId: "peer-id", name: "Requested" }
+    }
+    const updated = JSON.stringify({ id: "peer-id", name: "Actual", instructions: "Review" })
+    expect(botProfileEvent(update, { content: updated })).toBe("已更新 Actual 的资料")
+    expect(botProfileEvent(update, { content: updated, is_error: true })).toBeNull()
+    expect(
+      botProfileEvent({ ...update, args: { ...update.args, botId: "other" } }, { content: updated })
+    ).toBeNull()
+  })
 })

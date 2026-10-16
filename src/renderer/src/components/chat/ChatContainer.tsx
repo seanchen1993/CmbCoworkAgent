@@ -1,3 +1,4 @@
+import type { BotMessageReply } from "../../../../shared/bots/contracts"
 import { projectHumanGate } from "../../../../shared/harness-notifications"
 import { useModCommands } from "../../features/slash-commands/useModCommands"
 import { ModCommandJobs } from "./ModCommandJobs"
@@ -17,15 +18,19 @@ import React, {
   useContext
 } from "react"
 import {
+  ChatReplySourceContext,
+  ChatReplyActionsContext,
   ChatMessageVisibilityContext,
   ChatActivityPresentationContext,
-  ChatFoldedMessageIdsContext,
+  ChatExecutionCardCallIdsContext,
   ChatExecutionDetailsContext
 } from "./chat-presentation-context"
+import { projectBotExecution } from "@/lib/bot-execution-visibility"
 import ReactMarkdown, { type Components } from "react-markdown"
 import remarkBreaks from "remark-breaks"
 import type { VirtuosoHandle } from "react-virtuoso"
 import {
+  Reply,
   ArrowUp,
   Square,
   AlertCircle,
@@ -117,6 +122,7 @@ import { ModelSwitcher } from "./ModelSwitcher"
 import { AgentModeSwitcher, type ChatAgentMode } from "./AgentModeSwitcher"
 import { WorkflowRunPanel, WorkflowHistoryButton } from "./WorkflowRunPanel"
 import { BackgroundTaskStatus } from "./BackgroundTaskStatus"
+import { getCreatedTime } from "@/lib/message-bubble-timing"
 import { SandboxModeSwitcher } from "./SandboxModeSwitcher"
 import { MemorySessionSwitcher } from "./MemorySessionSwitcher"
 import { ThreadRemoteAccessSwitcher } from "./ThreadRemoteAccessSwitcher"
@@ -2291,6 +2297,7 @@ export function ChatContainer({
     harnessAgentmdLoadStatus,
     currentModel,
     draftInput: input,
+    draftBotReplyTo,
     draftAttachments,
     harnessNextActionDialogTips,
     draftSkill: selectedSkill,
@@ -2339,6 +2346,7 @@ export function ChatContainer({
     clearHookInterruption,
     setContextReminder,
     setDraftInput: setInput,
+    setDraftBotReplyTo,
     setDraftAttachments,
     setHarnessNextActionDialogTips,
     setDraftSkill: setSelectedSkill,
@@ -3532,9 +3540,32 @@ export function ChatContainer({
   })
 
   const hiddenMessageIds = useContext(ChatMessageVisibilityContext)
-  const foldedMessageIds = useContext(ChatFoldedMessageIdsContext)
+  const executionCardCallIds = useContext(ChatExecutionCardCallIdsContext)
   const showExecutionDetails = useContext(ChatExecutionDetailsContext)
   const activityPresentation = useContext(ChatActivityPresentationContext)
+  // Fold the actual committed + streamed timeline. The parent only owns committed history.
+  // Reuse the existing tool projection version so ordinary text tokens do not rescan results.
+  const toolDerivationProjection = threadProjectionRuntime.projectToolDerivationMessages(
+    displayMessages,
+    displayMessageProjection.changedMessages,
+    displayMessagesStructureVersion
+  )
+  const foldedMessageIds = useMemo(
+    () =>
+      surface === "bot" && !showExecutionDetails
+        ? projectBotExecution(displayMessages, isLoading, executionCardCallIds).hiddenMessages
+        : new Set<string>(),
+    [
+      surface,
+      showExecutionDetails,
+      executionCardCallIds,
+      displayMessages,
+      displayMessagesStructureVersion,
+      toolDerivationProjection.version,
+      dynamicVisibilityProjection.version,
+      isLoading
+    ]
+  )
   const unfilteredVisibleMessageIndexes = threadProjectionRuntime.projectVisibleMessageIndexes({
     stableIndexes: orderedStableVisibleMessageIndexes,
     dynamicVisibilityByIndex,
@@ -3583,11 +3614,6 @@ export function ChatContainer({
   // Ordinary assistant tokens update only the changed display slot. Keep the
   // tool projection stable and replace a slot only when that changed row is
   // itself tool-relevant.
-  const toolDerivationProjection = threadProjectionRuntime.projectToolDerivationMessages(
-    displayMessages,
-    displayMessageProjection.changedMessages,
-    displayMessagesStructureVersion
-  )
   const toolDerivationMessages = toolDerivationProjection.messages
   const toolResults = threadProjectionRuntime.projectToolResults(
     toolDerivationMessages,
@@ -4394,7 +4420,7 @@ export function ChatContainer({
     [threadId]
   )
   const revealDurableMessage = useCallback(
-    async (match: DurableChatSearchMatch): Promise<void> => {
+    async (match: Pick<DurableChatSearchMatch, "messageId" | "ordinal">): Promise<void> => {
       if (!shouldHydrateDurableSearchMatch(match.messageId, visibleMessageIndexById)) {
         // The overlay's common reveal path mounts/centers this resident virtual row immediately.
         return
@@ -4598,7 +4624,7 @@ export function ChatContainer({
   }, [dispatchChatScrollEvent, invalidateDurableMessageReveal, scrollParent])
 
   const scrollToMessageById = useCallback(
-    (messageId: string): void => {
+    (messageId: string, virtualBehavior: "smooth" | "auto" = "smooth"): void => {
       const index = visibleMessageIndexById.get(messageId)
       if (index === undefined) return
       invalidateDurableMessageReveal()
@@ -4614,7 +4640,7 @@ export function ChatContainer({
         })
         return
       }
-      virtuosoRef.current?.scrollToIndex({ index, align: "start", behavior: "smooth" })
+      virtuosoRef.current?.scrollToIndex({ index, align: "start", behavior: virtualBehavior })
     },
     [dispatchChatScrollEvent, getViewport, invalidateDurableMessageReveal, visibleMessageIndexById]
   )
@@ -4629,6 +4655,68 @@ export function ChatContainer({
       virtuosoRef.current?.scrollToIndex({ index, align: "center", behavior: "auto" })
     },
     [dispatchChatScrollEvent, invalidateDurableMessageReveal, visibleMessageIndexById]
+  )
+  const replySource = useContext(ChatReplySourceContext)
+  const replySelection = useRef(0)
+  const cancelBotReply = useCallback(() => {
+    replySelection.current++
+    setDraftBotReplyTo(null)
+    inputRef.current?.focus()
+  }, [setDraftBotReplyTo])
+  const botReplyScrollRef = useRef(scrollToMessageById)
+  useLayoutEffect(() => {
+    botReplyScrollRef.current = scrollToMessageById
+  }, [scrollToMessageById])
+  const jumpToBotReply = useCallback(
+    (reply: BotMessageReply) => {
+      invalidateDurableMessageReveal()
+      const revealed = revealDurableMessage({ messageId: reply.id, ordinal: reply.ordinal })
+      const generation = durableMessageWindowGenerationRef.current
+      void revealed
+        .then(async () => {
+          // Hydration commits the transcript first; let Virtuoso commit its new item offsets.
+          await waitForTranscriptCommit()
+          if (
+            chatViewMountedRef.current &&
+            generation === durableMessageWindowGenerationRef.current
+          )
+            botReplyScrollRef.current(reply.id, "auto")
+        })
+        .catch((error) => {
+          if (
+            chatViewMountedRef.current &&
+            generation === durableMessageWindowGenerationRef.current
+          )
+            toast.error(error instanceof Error ? error.message : "无法定位原消息")
+        })
+    },
+    [invalidateDurableMessageReveal, revealDurableMessage, waitForTranscriptCommit]
+  )
+  const botReplyActions = useMemo(
+    () =>
+      surface !== "bot" || !replySource
+        ? null
+        : {
+            quoteFor: replySource.quoteFor,
+            setDraftReply: setDraftBotReplyTo,
+            jump: jumpToBotReply,
+            reply: (messageId: string) => {
+              if (readOnly) return
+              const selection = ++replySelection.current
+              void replySource
+                .resolve(messageId)
+                .then((reply) => {
+                  if (!chatViewMountedRef.current || selection !== replySelection.current) return
+                  setDraftBotReplyTo(reply)
+                  inputRef.current?.focus()
+                })
+                .catch((error) => {
+                  if (chatViewMountedRef.current && selection === replySelection.current)
+                    toast.error(error instanceof Error ? error.message : "无法引用原消息")
+                })
+            }
+          },
+    [surface, replySource, jumpToBotReply, readOnly, setDraftBotReplyTo]
   )
   const handleScrollToQuestion = useCallback((): void => {
     invalidateDurableMessageReveal()
@@ -5949,6 +6037,7 @@ export function ChatContainer({
       const composedDraft: QueuedMessage = {
         id: crypto.randomUUID(),
         text: userText,
+        ...(surface === "bot" && draftBotReplyTo ? { botReplyTo: draftBotReplyTo } : {}),
         attachmentModelBlocks,
         attachmentDisplayPrefix,
         skillBlock,
@@ -5976,6 +6065,8 @@ export function ChatContainer({
         const currentDraft = threadContext.getThreadState(threadId)
         if (!defaultText && currentDraft.draftInput.trim() === trimmedInput) setInput("")
         if (currentDraft.draftAttachments === claimedAttachments) setAttachments([])
+        if (composedDraft.botReplyTo && currentDraft.draftBotReplyTo === composedDraft.botReplyTo)
+          setDraftBotReplyTo(null)
         if (mentionedFilesRef.current === claimedMentionedFiles) setMentionedFiles([])
         if (skill && currentDraft.draftSkill === skill) setSelectedSkill(null)
         if (browser && currentDraft.draftBuiltinBrowser) setSelectedBuiltinBrowser(false)
@@ -7848,12 +7939,21 @@ export function ChatContainer({
                 )}
               </div>
             ))}
-          {todos.length > 0 && <ChatTodos todos={todos} />}
+          {todos.length > 0 && (surface !== "bot" || showExecutionDetails) && (
+            <ChatTodos todos={todos} />
+          )}
         </div>
       )}
       {managedTurn && !showExecutionDetails ? (
         workflowRun ? (
-          <BackgroundTaskStatus status={workflowRun.status} />
+          <BackgroundTaskStatus
+            run={workflowRun}
+            latestUserTime={
+              displayMessages[lastUserMessageIndex]
+                ? getCreatedTime(displayMessages[lastUserMessageIndex])
+                : null
+            }
+          />
         ) : null
       ) : workflowRun ? (
         <WorkflowRunPanel threadId={threadId} run={workflowRun} />
@@ -7914,7 +8014,9 @@ export function ChatContainer({
     </div>
   )
 
-  return (
+  return React.createElement(
+    ChatReplyActionsContext.Provider,
+    { value: botReplyActions },
     <div
       ref={chatRootRef}
       data-chat-thread-id={threadId}
@@ -8177,6 +8279,8 @@ export function ChatContainer({
                   )}
                   <ChatExecutionDetailsContext.Provider value={showExecutionDetails || searchOpen}>
                     <ChatMessageVirtualList
+                      historyReady={!historyLoading && !historyPageLoading}
+                      canAnimateMessages={chatScrollUiState.mode === "following"}
                       functionTurnNotices={functionTurnNotices}
                       messageAttempts={streamData.messageAttempts}
                       searchReveal={searchOpen ? searchReveal : null}
@@ -8621,6 +8725,27 @@ export function ChatContainer({
                   onSelectFile={applyAtFileMention}
                 />
                 <div className="flex flex-col gap-2">
+                  {botReplyActions && draftBotReplyTo && (
+                    <div className="bot-group-reply-draft">
+                      <button
+                        type="button"
+                        className="bot-group-reply-preview"
+                        aria-label="跳转到被回复的消息"
+                        onClick={() => jumpToBotReply(draftBotReplyTo)}
+                      >
+                        <Reply size={15} />
+                        <span>“{cleanUserAttachmentContentForDisplay(draftBotReplyTo.text)}”</span>
+                      </button>
+                      <button
+                        type="button"
+                        className="bot-icon-button"
+                        aria-label="取消回复"
+                        onClick={cancelBotReply}
+                      >
+                        <X size={15} />
+                      </button>
+                    </div>
+                  )}
                   {queuedMessages.length > 0 && (
                     <div className="px-1 py-1">
                       <div className="flex items-center gap-2 pb-1 text-[11px] text-muted-foreground">
@@ -9227,7 +9352,9 @@ export function ChatContainer({
                           isComposingRef.current = false
                         }}
                         onKeyDown={handleKeyDown}
-                        placeholder={inputPlaceholder}
+                        placeholder={
+                          botReplyActions && draftBotReplyTo ? "回复…" : inputPlaceholder
+                        }
                         disabled={effectiveInputDisabled}
                         className={cn(
                           "composer-textarea relative z-[1] mr-2 w-[calc(100%-0.5rem)] resize-none overflow-y-auto bg-transparent",

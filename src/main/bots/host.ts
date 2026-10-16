@@ -17,6 +17,7 @@ import {
   type BotGroup,
   type BotGroupInput,
   type BotGroupMessage,
+  type BotGroupHistoryCursor,
   type SendBotGroupMessageInput
 } from "../../shared/bots/contracts"
 import type { BotStore } from "./store"
@@ -53,8 +54,16 @@ export interface BotRunPort {
 export class LocalBotHost {
   private readonly active = new Map<
     string,
-    { botId: string; task: BotTask; lease: BotRunLease; controller: AbortController; done: Promise<void>;
-      steered: Set<string>; preparingSteers: Set<string>; steeringReady: boolean }
+    {
+      botId: string
+      task: BotTask
+      lease: BotRunLease
+      controller: AbortController
+      done: Promise<void>
+      steered: Set<string>
+      preparingSteers: Set<string>
+      steeringReady: boolean
+    }
   >()
   private readonly deletions = new Map<string, Promise<void>>()
   private readonly listeners = new Set<(event: BotChangeEvent) => void>()
@@ -146,8 +155,16 @@ export class LocalBotHost {
     }
   }
 
-  private changed(): void {
-    const event = { hostId: LOCAL_BOT_HOST_ID, revision: this.store.revision() }
+  memoryChanged(botId: string): void {
+    if (!this.stopping) this.changed(botId)
+  }
+
+  private changed(memoryBotId?: string): void {
+    const event = {
+      hostId: LOCAL_BOT_HOST_ID,
+      revision: this.store.revision(),
+      ...(memoryBotId ? { memoryBotId } : {})
+    }
     for (const listener of this.listeners) {
       try {
         listener(event)
@@ -219,9 +236,9 @@ export class LocalBotHost {
     this.changed()
     return group
   }
-  groupMessages(id: string, before?: number): BotGroupMessage[] {
+  groupMessages(id: string, cursor?: BotGroupHistoryCursor): BotGroupMessage[] {
     this.requireRunning()
-    return this.store.groupMessages(id, before)
+    return this.store.groupMessages(id, cursor)
   }
   publishGroupFiles(taskId: string, callId: string, files: BotDeliveredFile[]): void {
     this.requireRunning()
@@ -310,6 +327,17 @@ export class LocalBotHost {
   create(input: CreateBotInput): BotDefinition {
     this.requireRunning()
     const bot = this.store.create(input)
+    this.changed()
+    return bot
+  }
+
+  createTeammate(
+    taskId: string,
+    requestKey: string,
+    profile: { name: string; instructions: string }
+  ): BotDefinition {
+    this.requireRunning()
+    const bot = this.store.createTeammate(taskId, requestKey, profile)
     this.changed()
     return bot
   }
@@ -423,6 +451,11 @@ export class LocalBotHost {
     }
   }
 
+  messageReply(botId: string, messageId: string) {
+    this.requireRunning()
+    return this.store.messageReply(botId, messageId)
+  }
+
   send(input: SendBotMessageInput): BotTask {
     this.requireRunning()
     const task = this.store.enqueue(input)
@@ -434,31 +467,50 @@ export class LocalBotHost {
 
   private steerDirectMessage(task: BotTask): void {
     if (task.state !== "queued" || task.origin.kind !== "user") return
-    const run = [...this.active.values()].find((candidate) =>
-      candidate.task.threadId === task.threadId &&
-      (candidate.task.origin.kind === "user" || candidate.task.origin.kind === "introduction")
+    const run = [...this.active.values()].find(
+      (candidate) =>
+        candidate.task.threadId === task.threadId &&
+        (candidate.task.origin.kind === "user" || candidate.task.origin.kind === "introduction")
     )
-    if (!run?.lease.steer || !run.steeringReady || run.controller.signal.aborted ||
-        run.preparingSteers.has(task.id)) return
+    if (
+      !run?.lease.steer ||
+      !run.steeringReady ||
+      run.controller.signal.aborted ||
+      run.preparingSteers.has(task.id)
+    )
+      return
     run.preparingSteers.add(task.id)
     // Hooks may take time. The runtime rechecks the exact lease after preparation,
     // and this callback commits ownership just before transcript/model injection.
     // A crash after this point yields interrupted, never an automatic replay.
-    void run.lease.steer(task, () => {
-      if (this.stopping || this.faulted || run.controller.signal.aborted ||
-          this.active.get(run.task.id) !== run) return false
-      if (run.steered.has(task.id)) return true // transcript flush retry
-      if (this.store.getTask(task.id).state !== "queued") return false
-      this.store.injectIntoRun(task.id, run.task.id)
-      run.steered.add(task.id)
-      this.changed()
-      return true
-    }).catch(this.reportError).finally(() => run.preparingSteers.delete(task.id))
+    void run.lease
+      .steer(task, () => {
+        if (
+          this.stopping ||
+          this.faulted ||
+          run.controller.signal.aborted ||
+          this.active.get(run.task.id) !== run
+        )
+          return false
+        if (run.steered.has(task.id)) return true // transcript flush retry
+        if (this.store.getTask(task.id).state !== "queued") return false
+        this.store.injectIntoRun(task.id, run.task.id)
+        run.steered.add(task.id)
+        this.changed()
+        return true
+      })
+      .catch(this.reportError)
+      .finally(() => run.preparingSteers.delete(task.id))
   }
 
   onSteeringReady(taskId: string): void {
     const run = this.active.get(taskId)
-    if (!run || (run.task.origin.kind !== "user" && run.task.origin.kind !== "introduction") || run.controller.signal.aborted) return
+    if (
+      !run ||
+      (run.task.origin.kind !== "user" && run.task.origin.kind !== "introduction") ||
+      run.controller.signal.aborted
+    )
+      return
     run.steeringReady = true
     for (const task of this.store.pendingConversationTasks(run.botId)) this.steerDirectMessage(task)
   }
@@ -470,11 +522,22 @@ export class LocalBotHost {
     return bot
   }
 
+  updateTeammate(
+    taskId: string,
+    botId: string,
+    patch: { name?: string; instructions?: string }
+  ): BotDefinition {
+    this.requireRunning()
+    const bot = this.store.updateTeammate(taskId, botId, patch)
+    this.changed()
+    return bot
+  }
+
   cancel(taskId: string): void {
     this.requireRunning()
     const task = this.store.getTask(taskId)
-    const active = this.active.get(taskId) ??
-      [...this.active.values()].find((run) => run.steered.has(taskId))
+    const active =
+      this.active.get(taskId) ?? [...this.active.values()].find((run) => run.steered.has(taskId))
     if (active) {
       // Durable cancellation only after runtime cleanup, never while tools are still unwinding.
       active.controller.abort()
@@ -541,8 +604,14 @@ export class LocalBotHost {
       // Start in a microtask so cancellation and waiting hooks always see their active owner.
       const done = Promise.resolve().then(() => this.execute(task, lease, controller))
       this.active.set(task.id, {
-        botId: task.botId, task, lease, controller, done,
-        steered: new Set(), preparingSteers: new Set(), steeringReady: false
+        botId: task.botId,
+        task,
+        lease,
+        controller,
+        done,
+        steered: new Set(),
+        preparingSteers: new Set(),
+        steeringReady: false
       })
       this.changed()
     }
@@ -580,7 +649,14 @@ export class LocalBotHost {
       try {
         // These messages were consumed by this exact graph, not separate queued runs.
         // Unconsumed messages stay queued and run normally after the lease releases.
-        this.store.settleRun(task.id, this.active.get(task.id)?.steered ?? [], state, reason, finalText, files)
+        this.store.settleRun(
+          task.id,
+          this.active.get(task.id)?.steered ?? [],
+          state,
+          reason,
+          finalText,
+          files
+        )
         this.changed()
         try {
           this.runtime.onSettled?.(task, state, finalText)

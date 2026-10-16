@@ -86,6 +86,25 @@ function fixture() {
 }
 
 describe("Bot sends through the original durable draft queue", () => {
+  it("retains the exact quote and payload across response loss and reload", async () => {
+    const f = fixture()
+    const reply = { id: "original", ordinal: 7, role: "assistant" as const, text: "合计 41" }
+    f.patch({ botReplyTo: reply })
+    const original = getQueuedModelContent(f.draft(), "bot")
+    f.client.send.mockRejectedValueOnce(new Error("transport interrupted"))
+    await f.sender().send(f.draft())
+    expect(f.client.send.mock.calls[0][0]).toMatchObject({
+      replyToId: reply.id,
+      message: original,
+      requestId: "request-1"
+    })
+    f.reload()
+    expect(f.draft().botReplyTo).toEqual(reply)
+    await f.sender().send(f.draft())
+    expect(f.client.send.mock.calls[1][0]).toEqual(f.client.send.mock.calls[0][0])
+    expect(f.saved()).toBe("")
+  })
+
   it("does not dispatch a delayed retry after the user stops while receipt reconciliation is in flight", async () => {
     const f = fixture()
     f.patch({ handoffRequestedAt: new Date(1000) })

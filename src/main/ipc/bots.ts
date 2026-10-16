@@ -11,7 +11,7 @@ import {
   parseExistingVersion,
   parseGroup,
   parseGroupMessage,
-  parseHistoryCursor,
+  parseGroupHistoryCursor,
   parseBotRequestChecks
 } from "../../shared/bots/validation"
 import { prepareBotThread } from "../bots/runtime-adapter"
@@ -114,8 +114,8 @@ export function registerBotHandlers(ipcMain: IpcMain, deleteThread?: ThreadDelet
   ipcMain.handle("bots:group:save", (_event, hostId: unknown, input: unknown, existing: unknown) =>
     hostFor(hostId).saveGroup(parseGroup(input), parseExistingVersion(existing))
   )
-  ipcMain.handle("bots:group:messages", (_event, hostId: unknown, id: unknown, before: unknown) =>
-    hostFor(hostId).groupMessages(botIdentifier(id), parseHistoryCursor(before))
+  ipcMain.handle("bots:group:messages", (_event, hostId: unknown, id: unknown, cursor: unknown) =>
+    hostFor(hostId).groupMessages(botIdentifier(id), parseGroupHistoryCursor(cursor))
   )
   ipcMain.handle("bots:group:send", (_event, hostId: unknown, input: unknown) =>
     hostFor(hostId).sendGroup(parseGroupMessage(input))
@@ -251,6 +251,11 @@ export function registerBotHandlers(ipcMain: IpcMain, deleteThread?: ThreadDelet
   )
   ipcMain.handle("bots:send", (_event, hostId: unknown, input: unknown) =>
     hostFor(hostId).send(parseSendBotMessage(input))
+  )
+  ipcMain.handle(
+    "bots:message-reply",
+    (_event, hostId: unknown, botId: unknown, messageId: unknown) =>
+      hostFor(hostId).messageReply(botIdentifier(botId), botIdentifier(messageId))
   )
   ipcMain.handle("bots:cancel", (_event, hostId: unknown, taskId: unknown) =>
     hostFor(hostId).cancel(botIdentifier(taskId))

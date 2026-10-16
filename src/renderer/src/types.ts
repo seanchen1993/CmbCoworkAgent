@@ -361,6 +361,8 @@ export interface Message {
 export interface QueuedMessage {
   id: string
   text: string
+  /** Bot-only durable reference; ordinary thread composition does not use it. */
+  botReplyTo?: import("../../shared/bots/contracts").BotMessageReply
   attachmentModelBlocks?: string
   attachmentDisplayPrefix?: string
   skillBlock?: string

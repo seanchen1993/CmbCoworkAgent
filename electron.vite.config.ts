@@ -31,6 +31,16 @@ function copyResources(): { name: string; closeBundle: () => void } {
       mirrorRequiredDirectorySync(resolve("resources/mods"), resolve("out/resources/mods"))
       copyFileSync(resolve("resources/mods-policy.json"), resolve("out/resources/mods-policy.json"))
 
+      // Preserve the original notices for adapted Bot code in packaged builds.
+      const botNotices = resolve("out/resources/notices")
+      mkdirSync(botNotices, { recursive: true })
+      for (const [source, name] of [
+        ["src/renderer/src/components/bots/animation/LICENSE.hermes", "hermes-bots-animation.txt"],
+        ["src/renderer/src/components/bots/animation/vendor/README.md", "grok-avatar-source.md"],
+        ["src/renderer/src/components/bots/EDITOR-SOURCES.md", "grok-group-editor-source.md"]
+      ])
+        copyFileSync(resolve(source), resolve(botNotices, name))
+
       // Playwright vendored 录制器生成文件在主进程 bundle 中仍通过
       // require("./generated/*.js") 加载，因此这里把源码副本同步到
       // out/main/generated，保证开发和构建产物都能命中相对路径。

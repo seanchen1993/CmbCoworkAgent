@@ -105,7 +105,12 @@ export class BotDraftSender {
       if (persistenceError) throw new Error(persistenceError)
       if (epoch !== this.dispatchEpoch || !this.same(draft)) return
       try {
-        const task = await this.client.send({ botId: this.botId, requestId: draft.id, message })
+        const task = await this.client.send({
+          botId: this.botId,
+          requestId: draft.id,
+          message,
+          ...(draft.botReplyTo ? { replyToId: draft.botReplyTo.id } : {})
+        })
         if (task.botId !== this.botId || task.requestId !== draft.id || task.message !== message)
           throw new Error("收到的发送确认与原消息不一致，请核对回执。")
         this.acknowledge(draft)

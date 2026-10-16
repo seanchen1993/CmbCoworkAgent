@@ -1,3 +1,11 @@
+import { parseBotMessageReply } from "../../../../shared/bots/message-reply"
+import { cleanUserAttachmentContentForDisplay } from "../../../../shared/user-attachment-display"
+import {
+  ContextMenu,
+  ContextMenuTrigger,
+  ContextMenuContent,
+  ContextMenuItem
+} from "@/components/ui/context-menu"
 import type { Message, HITLRequest, ToolCallState, ToolCallStatus } from "@/types"
 import { ToolCallRenderer } from "./ToolCallRenderer"
 import { ModCards } from "./ModCards"
@@ -12,6 +20,7 @@ import {
 } from "@/lib/resource-preview-events"
 import React, { useContext, useEffect, useMemo, useRef, useState } from "react"
 import {
+  ChatReplyActionsContext,
   ChatPresentationContext,
   ChatActivityPresentationContext,
   ChatMessageIdentityContext,
@@ -24,6 +33,7 @@ import { splitBotInlineReasoning } from "@/lib/bot-inline-reasoning"
 import { botToolResultStatus } from "@/lib/bot-tool-result-status"
 import { isBotExecutionTool } from "@/lib/bot-execution-visibility"
 import {
+  Reply,
   ChevronDown,
   ChevronRight,
   ChevronUp,
@@ -446,6 +456,8 @@ function MessageBubbleImpl({
   userSendTimeLabel = null,
   searchLocation
 }: MessageBubbleProps): React.JSX.Element | null {
+  const replyActions = useContext(ChatReplyActionsContext)
+  const quotedReply = useMemo(() => replyActions?.quoteFor(message), [replyActions, message])
   const presentation = useContext(ChatPresentationContext)
   const showExecutionDetails = useContext(ChatExecutionDetailsContext)
   const activityPresentation = useContext(ChatActivityPresentationContext)
@@ -480,6 +492,10 @@ function MessageBubbleImpl({
     [isUser, message.reasoning, message.content, presentation]
   )
   const displayMessageContent = useMemo<Message["content"]>(() => {
+    if (isUser && quotedReply && typeof message.content === "string") {
+      const parsed = parseBotMessageReply(message.content)
+      if (parsed?.reply.id === quotedReply.id) return parsed.message
+    }
     if (isUser || !reasoningText) return message.content
     if (typeof message.content === "string") {
       return stripThinkBlocksForDisplay(message.content)
@@ -494,7 +510,7 @@ function MessageBubbleImpl({
       return { ...block, text }
     })
     return changed ? projected : message.content
-  }, [isUser, message.content, reasoningText])
+  }, [isUser, message.content, reasoningText, quotedReply])
   const visibleAssistantContentText = useMemo(() => {
     if (isUser) return ""
     if (typeof displayMessageContent === "string") {
@@ -620,7 +636,7 @@ function MessageBubbleImpl({
 
   // Only strip the skill-use tail from OUR user messages; assistant text that
   // happens to quote the tag (e.g. while discussing the protocol) copies verbatim.
-  const plainTextForCopy = extractMessagePlainText(message.content, {
+  const plainTextForCopy = extractMessagePlainText(displayMessageContent, {
     stripSkillUse: isUser,
     stripBuiltinBrowser: isUser
   })
@@ -860,8 +876,39 @@ function MessageBubbleImpl({
     return null
   }
 
+  const replyButton =
+    replyActions && (isUser || !isStreaming) && plainTextForCopy.trim() ? (
+      <button
+        type="button"
+        className="inline-flex items-center justify-center rounded p-1 text-muted-foreground hover:text-foreground hover:bg-background-interactive transition-colors"
+        aria-label="回复消息"
+        title="回复"
+        onClick={() => replyActions.reply(message.id)}
+      >
+        <Reply className="size-3" />
+      </button>
+    ) : null
+  const withReplyMenu = (bubble: React.ReactElement) =>
+    replyButton ? (
+      <ContextMenu>
+        <ContextMenuTrigger asChild>{bubble}</ContextMenuTrigger>
+        <ContextMenuContent data-bot-popup>
+          <ContextMenuItem onSelect={() => replyActions!.reply(message.id)}>
+            <Reply size={15} />
+            回复
+          </ContextMenuItem>
+          <ContextMenuItem onSelect={() => void handleCopyMessage()}>
+            <Copy size={15} />
+            复制
+          </ContextMenuItem>
+        </ContextMenuContent>
+      </ContextMenu>
+    ) : (
+      bubble
+    )
+
   if (isUser) {
-    return (
+    return withReplyMenu(
       <div data-message-bubble="user" className="group flex justify-end overflow-hidden py-4">
         <div className="flex min-w-0 max-w-[80%] flex-col items-end gap-1">
           <div
@@ -873,6 +920,17 @@ function MessageBubbleImpl({
                 : "bg-primary/10"
             )}
           >
+            {quotedReply && replyActions && (
+              <button
+                type="button"
+                className="bot-group-reply-preview"
+                aria-label="跳转到被回复的消息"
+                onClick={() => replyActions.jump(quotedReply)}
+              >
+                <Reply size={14} />
+                <span>“{cleanUserAttachmentContentForDisplay(quotedReply.text)}”</span>
+              </button>
+            )}
             <div
               ref={userContentRef}
               data-chat-search-user-content-collapse-threshold={USER_MESSAGE_COLLAPSED_MAX_PX}
@@ -926,6 +984,7 @@ function MessageBubbleImpl({
               </time>
             )}
             <div className="flex items-center gap-1 opacity-0 transition-opacity group-hover:opacity-100 group-focus-within:opacity-100">
+              {replyButton}
               <button
                 type="button"
                 onClick={handleCopyMessage}
@@ -941,7 +1000,12 @@ function MessageBubbleImpl({
               </button>
               <button
                 type="button"
-                onClick={() => onEditUserMessage?.(message)}
+                onClick={() => {
+                  replyActions?.setDraftReply(quotedReply ?? null)
+                  onEditUserMessage?.(
+                    replyActions ? { ...message, content: displayMessageContent } : message
+                  )
+                }}
                 className="inline-flex items-center justify-center rounded p-1 text-muted-foreground hover:text-foreground hover:bg-background-interactive transition-colors"
                 title="编辑后重新发送"
                 aria-label="编辑后重新发送"
@@ -967,7 +1031,7 @@ function MessageBubbleImpl({
     )
   }
 
-  return (
+  return withReplyMenu(
     <div data-message-bubble="assistant" className="group overflow-hidden space-y-1.5">
       {shouldShowMessageHead && (
         <div data-message-meta className="flex flex-wrap items-center gap-x-2 gap-y-1 mb-4">
@@ -1127,6 +1191,39 @@ function MessageBubbleImpl({
                     {presented}
                     <ModCards threadId={threadId} callId={resolvedToolCall.id ?? ""} />
                   </React.Fragment>
+                )
+
+              if (
+                presentation === "bot" &&
+                !showExecutionDetails &&
+                isBotExecutionTool(resolvedToolCall) &&
+                (inferredStatus === "failed" || inferredStatus === "interrupted")
+              )
+                return (
+                  <div key={toolId} className="bot-execution-issue">
+                    <button
+                      type="button"
+                      className="bot-execution-issue-toggle"
+                      aria-expanded={isExpanded}
+                      onClick={() => toggleToolExpansion(toolId, isHtmlTool)}
+                    >
+                      <Info size={14} aria-hidden="true" />
+                      <span>{inferredStatus === "failed" ? "执行遇到问题" : "执行已中断"}</span>
+                      {isExpanded ? <ChevronDown size={13} /> : <ChevronRight size={13} />}
+                      <span className="sr-only">查看执行详情</span>
+                    </button>
+                    {isExpanded && (
+                      <ToolCallRenderer
+                        toolCall={resolvedToolCall}
+                        result={result?.content}
+                        isError={result?.is_error}
+                        status={inferredStatus}
+                        needsApproval={false}
+                        threadId={threadId}
+                      />
+                    )}
+                    <ModCards threadId={threadId} callId={resolvedToolCall.id ?? ""} />
+                  </div>
                 )
 
               if (
@@ -1309,6 +1406,7 @@ function MessageBubbleImpl({
             data-message-actions
             className="flex items-center gap-1 px-3 opacity-0 transition-opacity group-hover:opacity-100 group-focus-within:opacity-100"
           >
+            {replyButton}
             <button
               type="button"
               onClick={handleCopyMessage}

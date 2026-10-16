@@ -10,6 +10,7 @@ import {
   type WriteBotMemoryInput,
   type BotScheduleInput,
   type BotGroupInput,
+  type BotGroupHistoryCursor,
   type SendBotGroupMessageInput
 } from "./contracts"
 
@@ -81,6 +82,14 @@ export function parseHistoryCursor(value: unknown): number | undefined {
   return Number(value)
 }
 
+export function parseGroupHistoryCursor(value: unknown): BotGroupHistoryCursor | undefined {
+  if (value == null || typeof value === "number") return parseHistoryCursor(value)
+  const item = record(value)
+  if (Object.keys(item).length !== 1 || !("targetMessageId" in item))
+    throw new BotError("INVALID_INPUT", "历史游标无效")
+  return { targetMessageId: botIdentifier(item.targetMessageId) }
+}
+
 function boundedString(value: unknown, label: string, max: number, allowEmpty = false): string {
   if (typeof value !== "string" || value.length > max || value.includes("\0")) {
     throw new BotError("INVALID_INPUT", `${label}格式或长度无效`)
@@ -134,7 +143,8 @@ export function parseSendBotMessage(input: unknown): SendBotMessageInput {
   return {
     botId: botIdentifier(item.botId),
     requestId: botIdentifier(item.requestId),
-    message: boundedString(item.message, "消息", 64_000)
+    message: boundedString(item.message, "消息", 64_000),
+    ...(item.replyToId !== undefined ? { replyToId: botIdentifier(item.replyToId) } : {})
   }
 }
 

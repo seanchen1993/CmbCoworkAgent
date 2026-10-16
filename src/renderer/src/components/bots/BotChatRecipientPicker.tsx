@@ -110,6 +110,7 @@ export function BotChatRecipientPicker({
         />
       </PopoverAnchor>
       <PopoverContent
+        data-bot-popup
         className="bot-recipient-options max-h-80 overflow-y-auto rounded-2xl p-1.5"
         align="start"
         onOpenAutoFocus={(event) => event.preventDefault()}

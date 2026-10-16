@@ -21,8 +21,9 @@ const result = (id: string, is_error = false, content = "done"): Message => ({
 })
 
 describe("Bot execution presentation", () => {
-  it("folds completed private memory operations but preserves errors and the user-facing answer", () => {
+  it("folds completed directory and memory reads but preserves errors and the user-facing answer", () => {
     const tools = [
+      "bot_list_peers",
       "bot_memory_search",
       "bot_memory_list",
       "bot_memory_get",
@@ -106,7 +107,7 @@ describe("Bot execution presentation", () => {
     expect([...projectBotExecution(messages, true, new Set()).hiddenMessages]).toEqual([])
     expect([...projectBotExecution(messages, false, new Set()).hiddenMessages]).toEqual(["stream"])
   })
-  it("does not fold an active turn whose tool result may still be enriched into an error", () => {
+  it("folds confirmed live tools and restores the same row when a result is enriched into an error", () => {
     const messages: Message[] = [
       call("old"),
       result("old"),
@@ -114,8 +115,62 @@ describe("Bot execution presentation", () => {
       call("active"),
       result("active")
     ]
-    expect([...projectBotExecution(messages, true, new Set()).hiddenMessages]).toEqual(["old"])
+    expect([...projectBotExecution(messages, true, new Set()).hiddenMessages]).toEqual([
+      "old",
+      "active"
+    ])
     messages[4] = result("active", true, "late failure")
-    expect([...projectBotExecution(messages, false, new Set()).hiddenMessages]).toEqual(["old"])
+    expect([...projectBotExecution(messages, true, new Set()).hiddenMessages]).toEqual(["old"])
+  })
+  it("removes consecutive live execution shells without removing progress, cards or the growing reply", () => {
+    const committed: Message[] = [
+      { id: "user", role: "user", content: "build six files", created_at }
+    ]
+    const live = [
+      call("progress", "execute", "开始创建文件。"),
+      result("progress"),
+      ...Array.from({ length: 6 }, (_, i) => [
+        call(`write-${i}`, "write_file"),
+        result(`write-${i}`)
+      ]).flat(),
+      call("mod"),
+      result("mod"),
+      call("pending"),
+      call("choice", "request_user_input"),
+      { id: "reply", role: "assistant", content: "", reasoning: "pending", created_at } as Message
+    ]
+    // The committed parent cannot see these rows; the list must project the merged timeline.
+    expect(projectBotExecution(committed, true, new Set()).hiddenMessages.size).toBe(0)
+    const view = projectBotExecution([...committed, ...live], true, new Set(["call-mod"]))
+    expect([...view.hiddenMessages]).toEqual(Array.from({ length: 6 }, (_, i) => `write-${i}`))
+    expect(committed).toHaveLength(1)
+    expect(live.at(-1)?.content).toBe("")
+  })
+  it("folds only valid successful routine reads, preserving changes, errors, pending and Mod UI", () => {
+    const scheduleCall = (id: string, action: string): Message => ({
+      ...call(id, "bot_schedule"),
+      tool_calls: [{ id: `call-${id}`, name: "bot_schedule", args: { action } }]
+    })
+    const messages = [
+      scheduleCall("list", "list"),
+      result("list", false, "[]"),
+      scheduleCall("pending-routine", "list"),
+      scheduleCall("invalid-list", "list"),
+      result("invalid-list", false, '[{"error":"failed"}]'),
+      scheduleCall("failed-routine", "list"),
+      result("failed-routine", true, "[]"),
+      scheduleCall("saved", "save"),
+      result("saved", false, "{}"),
+      scheduleCall("removed", "remove"),
+      result("removed", false, "例行任务已删除，排队中的触发已取消。"),
+      scheduleCall("mod-routine", "list"),
+      result("mod-routine", false, "[]")
+    ]
+    expect([
+      ...projectBotExecution(messages, false, new Set(["call-mod-routine"])).hiddenMessages
+    ]).toEqual(["list"])
+    expect([
+      ...projectBotExecution(messages, true, new Set(["call-mod-routine"])).hiddenMessages
+    ]).toEqual(["list"])
   })
 })

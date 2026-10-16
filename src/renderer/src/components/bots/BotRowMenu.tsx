@@ -81,14 +81,19 @@ export function BotRowMenu({
         <ContextMenuTrigger asChild>
           <TooltipTrigger asChild>{children}</TooltipTrigger>
         </ContextMenuTrigger>
-        <TooltipContent side="right" sideOffset={12} className="bot-sidebar-tooltip">
+        <TooltipContent side="right" sideOffset={8} className="bot-sidebar-tooltip">
           <span className="bot-sidebar-tooltip-heading">
             {avatar}
             <span>{bot.name}</span>
           </span>
-          <BotSidebarPreview conversation={conversation} preview={preview ?? ""} waiting={waiting} />
+          <BotSidebarPreview
+            conversation={conversation}
+            preview={preview ?? ""}
+            waiting={waiting}
+          />
         </TooltipContent>
         <ContextMenuContent
+          data-bot-popup
           onCloseAutoFocus={(event) => {
             if (inlineFocus.current) {
               event.preventDefault()

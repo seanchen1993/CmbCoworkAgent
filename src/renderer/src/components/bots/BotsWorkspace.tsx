@@ -64,20 +64,24 @@ import { botGroupBrowserScope, BOT_REQUEST_RECEIPT_LIMIT } from "../../../../sha
 import type {
   BotClient,
   BotDefinition,
+  BotSchedule,
   BotTask,
   BotGroup,
   CreateBotInput
 } from "../../../../shared/bots/contracts"
 import { BotAvatar } from "./BotAvatar"
 import { BotRuntimeAvatar } from "./BotRuntimeAvatar"
-import { BotAppearancePicker, BotAvatarEditor, createBotAppearance } from "./BotAppearancePicker"
+import { BotAppearancePicker, BotAvatarEditor } from "./BotAppearancePicker"
+import { createBotAppearance } from "../../../../shared/bots/appearance"
 import { BotConversationTools } from "./BotConversationTools"
 import { BotDeleteDialog } from "./BotDeleteDialog"
 import { BotMemoryPanel } from "./BotMemoryPanel"
 import { BotSchedulePanel } from "./BotSchedulePanel"
 import { BotGroupEditor } from "./BotGroupEditor"
+import { BotNameInput } from "./BotNameInput"
 import { BotGroupMembers } from "./BotGroupMembers"
 import { BotGroupConversation } from "./BotGroupConversation"
+import { BotDetailsPane } from "./BotDetailsPane"
 import { BotNewChat } from "./BotNewChat"
 import { BotSectionEditor } from "./BotSectionEditor"
 import {
@@ -289,6 +293,7 @@ function BotEditor({
 function BotConversation({
   bot,
   bots,
+  schedules,
   tasks,
   backgroundBusy,
   client,
@@ -296,6 +301,7 @@ function BotConversation({
 }: {
   bot: BotDefinition
   bots: BotDefinition[]
+  schedules: BotSchedule[]
   tasks: BotTask[]
   backgroundBusy: boolean
   client: BotClient
@@ -450,7 +456,13 @@ function BotConversation({
           </button>
         </div>
       )}
-      <BotConversationTools client={client} botId={bot.id} tasks={tasks} bots={bots}>
+      <BotConversationTools
+        client={client}
+        botId={bot.id}
+        tasks={tasks}
+        bots={bots}
+        schedules={schedules}
+      >
         <ChatContainer
           threadId={bot.threadId}
           surface="bot"
@@ -535,7 +547,7 @@ function GroupFiles({
 }
 
 export function BotsWorkspace({ client = localBotClient() }: { client?: BotClient }) {
-  const { snapshot, error } = useBots(client)
+  const { snapshot, error, retry } = useBots(client)
   useEffect(() => {
     if (snapshot) {
       useBotGroupDrafts.getState().prune(
@@ -559,7 +571,13 @@ export function BotsWorkspace({ client = localBotClient() }: { client?: BotClien
   const setSelectedId = (selectedId: string | null) => updateView({ selectedId })
   const setGroupId = (groupId: string | null) => updateView({ groupId })
   const setShowArchived = (showArchived: boolean) => updateView({ showArchived })
-  const setDetailOpen = (detailOpen: boolean) => updateView({ detailOpen })
+  const detailTriggerRef = useRef<HTMLButtonElement>(null)
+  const setDetailOpen = (detailOpen: boolean) => {
+    if (!detailOpen && document.activeElement?.closest(".bot-details")) {
+      detailTriggerRef.current?.focus({ preventScroll: true })
+    }
+    updateView({ detailOpen })
+  }
   const setDetailTab = (detailTab: typeof view.detailTab) => updateView({ detailTab })
   const [query, setQuery] = useState("")
   const [showHidden, setShowHidden] = useState(false)
@@ -1447,7 +1465,23 @@ export function BotsWorkspace({ client = localBotClient() }: { client?: BotClien
               {error}
             </div>
           )}
-          {newChat ? (
+          {!snapshot ? (
+            <div className="bot-empty" role="status">
+              {error ? (
+                <>
+                  <p>暂时无法读取 Bot 列表</p>
+                  <Button variant="outline" className="rounded-full" onClick={retry}>
+                    重试
+                  </Button>
+                </>
+              ) : (
+                <>
+                  <Loader2 className="size-5 animate-spin" aria-hidden="true" />
+                  <p>正在读取 Bots…</p>
+                </>
+              )}
+            </div>
+          ) : newChat ? (
             <BotNewChat
               bots={snapshot?.bots ?? []}
               groups={snapshot?.groups ?? []}
@@ -1472,6 +1506,7 @@ export function BotsWorkspace({ client = localBotClient() }: { client?: BotClien
               onEdit={() => setGroupEditor(selectedGroup)}
               onDetails={() => setDetailOpen(!detailOpen)}
               detailOpen={detailOpen}
+              detailsTriggerRef={detailTriggerRef}
               onOpenBot={(bot) =>
                 updateView({ selectedId: bot.id, groupId: null, detailTab: "details" })
               }
@@ -1496,6 +1531,7 @@ export function BotsWorkspace({ client = localBotClient() }: { client?: BotClien
                 </button>
                 <button
                   className="bot-title-pill"
+                  ref={detailTriggerRef}
                   aria-label="查看 Bot 详情"
                   aria-expanded={detailOpen}
                   onClick={() => setDetailOpen(!detailOpen)}
@@ -1526,6 +1562,7 @@ export function BotsWorkspace({ client = localBotClient() }: { client?: BotClien
                 bot={selected}
                 onConfigureModel={() => setEditor(selected)}
                 bots={snapshot?.bots ?? []}
+                schedules={snapshot?.schedules ?? []}
                 tasks={tasks}
                 backgroundBusy={Boolean(
                   snapshot?.backgroundThreads?.includes(selected.threadId) ||
@@ -1553,14 +1590,16 @@ export function BotsWorkspace({ client = localBotClient() }: { client?: BotClien
             </div>
           )}
         </main>
-        {!newChat && selectedGroup && detailOpen && (
+        {!newChat && selectedGroup && (
           <>
-            <BotPanelDivider
-              kind="detail"
-              width={clampBotPanelWidth("detail", view.detailWidth)}
-              onChange={(detailWidth) => updateView({ detailWidth })}
-            />
-            <aside className="bot-details" aria-label="群聊详情">
+            {detailOpen && (
+              <BotPanelDivider
+                kind="detail"
+                width={clampBotPanelWidth("detail", view.detailWidth)}
+                onChange={(detailWidth) => updateView({ detailWidth })}
+              />
+            )}
+            <BotDetailsPane open={detailOpen} label="群聊详情">
               <div className="bot-detail-actions">
                 <button
                   className="bot-icon-button"
@@ -1574,16 +1613,22 @@ export function BotsWorkspace({ client = localBotClient() }: { client?: BotClien
                 <BotGroupAvatar
                   memberIds={selectedGroup.memberIds}
                   bots={snapshot?.bots ?? []}
-                  size={84}
+                  size={64}
                 />
-                <button
-                  className="bot-profile-name"
-                  aria-label="重命名群聊"
-                  onClick={() => setRenamingGroup(selectedGroup)}
-                >
-                  <h2>{selectedGroup.name}</h2>
-                </button>
-                <span>群内资料共享，成员页面独立</span>
+                <BotNameInput
+                  key={`${client.hostId}:${selectedGroup.id}`}
+                  name={selectedGroup.name}
+                  version={selectedGroup.version}
+                  label="群组名称"
+                  maxLength={120}
+                  disabled={Boolean(selectedGroup.deleting)}
+                  onSave={(name, version) =>
+                    client.saveGroup(
+                      { name, memberIds: selectedGroup.memberIds },
+                      { id: selectedGroup.id, version }
+                    )
+                  }
+                />
               </div>
               <Tabs
                 value={view.groupDetailTab ?? "details"}
@@ -1665,17 +1710,19 @@ export function BotsWorkspace({ client = localBotClient() }: { client?: BotClien
                   />
                 </TabsContent>
               </Tabs>
-            </aside>
+            </BotDetailsPane>
           </>
         )}
-        {!newChat && selected && detailOpen && (
+        {!newChat && selected && (
           <>
-            <BotPanelDivider
-              kind="detail"
-              width={clampBotPanelWidth("detail", view.detailWidth)}
-              onChange={(detailWidth) => updateView({ detailWidth })}
-            />
-            <aside className="bot-details" aria-label="Bot 详情">
+            {detailOpen && (
+              <BotPanelDivider
+                kind="detail"
+                width={clampBotPanelWidth("detail", view.detailWidth)}
+                onChange={(detailWidth) => updateView({ detailWidth })}
+              />
+            )}
+            <BotDetailsPane open={detailOpen} label="Bot 详情">
               <div className="bot-detail-actions">
                 <Popover>
                   <PopoverTrigger asChild>
@@ -1736,18 +1783,23 @@ export function BotsWorkspace({ client = localBotClient() }: { client?: BotClien
                   busy={selectedState === "running"}
                   waiting={selectedState === "waiting_user"}
                 />
-                <button
-                  className="bot-profile-name"
-                  aria-label="编辑 Bot 名称"
-                  onClick={() => setRenaming(selected)}
-                >
-                  <h2>{selected.name}</h2>
-                </button>
-                <BotProfileLabel
-                  bot={selected}
-                  client={client}
-                  disabled={Boolean(selectedState || selected.deleting)}
-                />
+                <div className="bot-profile-identity">
+                  <BotNameInput
+                    name={selected.name}
+                    version={selected.version}
+                    label="Bot 名称"
+                    maxLength={80}
+                    disabled={Boolean(selectedState || selected.deleting)}
+                    onSave={(name, expectedVersion) =>
+                      client.update({ ...selected, name, expectedVersion })
+                    }
+                  />
+                  <BotProfileLabel
+                    bot={selected}
+                    client={client}
+                    disabled={Boolean(selectedState || selected.deleting)}
+                  />
+                </div>
                 {(selectedState || selected.archived) && (
                   <span>
                     {selectedState
@@ -1800,7 +1852,7 @@ export function BotsWorkspace({ client = localBotClient() }: { client?: BotClien
                     <BotBrowserPanel key={selected.id} botId={selected.id} client={client} />
                   ) : detailTab === "memory" ? (
                     <BotMemoryPanel
-                      key={selected.id}
+                      key={`${client.hostId}:${selected.id}`}
                       botId={selected.id}
                       client={client}
                       peers={snapshot?.bots ?? []}
@@ -1847,7 +1899,7 @@ export function BotsWorkspace({ client = localBotClient() }: { client?: BotClien
                   )}
                 </TabsContent>
               </Tabs>
-            </aside>
+            </BotDetailsPane>
           </>
         )}
         {renamingGroup && (

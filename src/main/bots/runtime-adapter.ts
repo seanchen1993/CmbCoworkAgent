@@ -308,6 +308,9 @@ export function createLocalBotRunPort(
                 extraSystemPrompt: buildBotPrompt(bot, task, workspacePath),
                 additionalTools: botTaskGroupId(task)
                   ? [
+                      ...(task.origin.kind === "group"
+                        ? createBotProfileTools(task.id, getHost, signal)
+                        : []),
                       ...createBotDeliveryTools(workspacePath, signal, (files, callId) =>
                         getHost().publishGroupFiles(task.id, callId, files)
                       ),

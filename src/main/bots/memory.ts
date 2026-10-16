@@ -27,7 +27,19 @@ export class BotMemoryService {
   private stopping = false
   private readonly retiredBots = new Set<string>()
   private readonly edits = new Map<string, number>()
-  constructor(private readonly root: string) {}
+  constructor(
+    private readonly root: string,
+    private readonly onChanged: (botId: string) => void = () => {}
+  ) {}
+
+  private changed(botId: string): void {
+    try {
+      this.onChanged(botId)
+    } catch (error) {
+      // A failed observer must not turn an already committed write into a failed tool call.
+      console.warn("[Bots] Failed to notify a memory change:", error)
+    }
+  }
 
   private directory(botId: string): string {
     if (this.retiredBots.has(botId)) throw new BotError("NOT_FOUND", "Bot 已删除")
@@ -73,6 +85,7 @@ export class BotMemoryService {
   write(botId: string, input: WriteBotMemoryInput): BotMemory {
     const result = this.persist(botId, input)
     this.edits.set(botId, this.editVersion(botId) + 1)
+    this.changed(botId)
     return result
   }
 
@@ -98,23 +111,29 @@ export class BotMemoryService {
       return
     const before = this.list(botId),
       known = new Map(before.map((item) => [`${item.id}.md`, item]))
-    for (const operation of operations.slice(0, 24)) {
-      if (operation.action === "skip") continue
-      const prior = operation.action === "update" ? known.get(operation.filename) : undefined
-      if (operation.action === "update" && !prior) continue
-      const name = (operation.name || prior?.name || "记忆").slice(0, 120),
-        content = operation.content.slice(0, 12_000)
-      if (
-        operation.action === "create" &&
-        this.list(botId).some((item) => item.content === content)
-      )
-        continue
-      const saved = this.persist(botId, {
-        ...(prior ? { id: prior.id, expectedVersion: prior.version } : {}),
-        name,
-        content
-      })
-      known.set(`${saved.id}.md`, saved)
+    let committed = false
+    try {
+      for (const operation of operations.slice(0, 24)) {
+        if (operation.action === "skip") continue
+        const prior = operation.action === "update" ? known.get(operation.filename) : undefined
+        if (operation.action === "update" && !prior) continue
+        const name = (operation.name || prior?.name || "记忆").slice(0, 120),
+          content = operation.content.slice(0, 12_000)
+        if (
+          operation.action === "create" &&
+          this.list(botId).some((item) => item.content === content)
+        )
+          continue
+        const saved = this.persist(botId, {
+          ...(prior ? { id: prior.id, expectedVersion: prior.version } : {}),
+          name,
+          content
+        })
+        known.set(`${saved.id}.md`, saved)
+        committed = true
+      }
+    } finally {
+      if (committed) this.changed(botId)
     }
   }
 
@@ -159,6 +178,7 @@ export class BotMemoryService {
       throw new BotError("CONFLICT", "记忆已被更新，请刷新后删除")
     unlinkSync(file)
     this.edits.set(botId, this.editVersion(botId) + 1)
+    this.changed(botId)
   }
   share(botId: string, id: string, expectedVersion: string, targetBotId: string): BotMemory {
     if (botId === targetBotId) throw new BotError("INVALID_INPUT", "请选择其他 Bot")

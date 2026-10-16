@@ -23,22 +23,49 @@ export function BotMemoryPanel({
   const [notice, setNotice] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const [readError, setReadError] = useState<string | null>(null)
+  const refreshRef = useRef<() => void>(() => {})
   const lock = useRef(false)
   const mounted = useRef(true)
   useEffect(() => {
     mounted.current = true
     let disposed = false
-    client
-      .listMemory(botId)
-      .then((result) => {
-        if (!disposed) setEntries(result)
-      })
-      .catch((cause) => {
-        if (!disposed) setError(botErrorMessage(cause))
-      })
+    let pending = false,
+      dirty = false
+    const refresh = async () => {
+      dirty = true
+      if (pending) return
+      pending = true
+      try {
+        while (dirty && !disposed) {
+          dirty = false
+          const result = await client.listMemory(botId)
+          if (!disposed) {
+            setEntries(result)
+            setReadError(null)
+          }
+        }
+      } catch (cause) {
+        if (!disposed) setReadError(botErrorMessage(cause))
+      } finally {
+        pending = false
+      }
+    }
+    const onFocus = () => {
+      void refresh()
+    }
+    refreshRef.current = onFocus
+    const unsubscribe = client.subscribe((event) => {
+      if (event.hostId === client.hostId && event.memoryBotId === botId) void refresh()
+    })
+    window.addEventListener("focus", onFocus)
+    void refresh()
     return () => {
       disposed = true
       mounted.current = false
+      refreshRef.current = () => {}
+      unsubscribe()
+      window.removeEventListener("focus", onFocus)
     }
   }, [botId, client])
   const edit = (entry: BotMemory | "new") => {
@@ -86,9 +113,14 @@ export function BotMemoryPanel({
       <p className="mb-4 text-xs text-muted-foreground">
         此 Bot 保存的偏好和经验。你可以随时修改或删除。
       </p>
-      {error && (
+      {(error || readError) && (
         <p role="alert" className="mb-3 text-xs text-destructive">
-          {error}
+          {error || readError}
+          {readError && (
+            <button className="ml-2 underline" onClick={() => refreshRef.current()}>
+              重新读取
+            </button>
+          )}
         </p>
       )}
       {notice && (
@@ -135,7 +167,10 @@ export function BotMemoryPanel({
               size="sm"
               variant="ghost"
               disabled={busy}
-              onClick={() => setEditing(null)}
+              onClick={() => {
+                setEditing(null)
+                setError(null)
+              }}
             >
               取消
             </Button>
@@ -260,7 +295,7 @@ export function BotMemoryPanel({
           <p className="text-muted-foreground">还没有保存记忆。</p>
         )
       ) : (
-        !error && <Loader2 className="size-4 animate-spin" />
+        !error && !readError && <Loader2 className="size-4 animate-spin" />
       )}
     </section>
   )

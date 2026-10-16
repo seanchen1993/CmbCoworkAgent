@@ -1,4 +1,5 @@
 import { z } from "zod"
+import { isBotMessageReply } from "../../../shared/bots/message-reply"
 import type { useThreadContext } from "./thread-context"
 import {
   botDraftContentSchema,
@@ -12,7 +13,13 @@ type DraftContext = Pick<
   "initializeThread" | "getThreadState" | "getThreadActions" | "subscribeToThreadState"
 >
 const prefix = "cmb-bot-conversation-draft-v1:"
-const schema = botDraftContentSchema.extend({ version: z.literal(1) })
+const schema = botDraftContentSchema.extend({
+  version: z.literal(1),
+  replyTo: z
+    .custom<import("../../../shared/bots/contracts").BotMessageReply>(isBotMessageReply)
+    .nullable()
+    .optional()
+})
 const key = (hostId: string, botId: string) => prefix + JSON.stringify([hostId, botId])
 
 export function loadBotConversationDraft(hostId: string, botId: string) {
@@ -29,13 +36,14 @@ export function restoreBotConversationDraft(
   // exists. Restore that queue before draft actions create a default state.
   context.initializeThread(threadId)
   const current = context.getThreadState(threadId)
-  if (current.draftInput || current.draftAttachments.length) return null
+  if (current.draftInput || current.draftAttachments.length || current.draftBotReplyTo) return null
   const saved = loadBotConversationDraft(hostId, botId)
   if (saved.error) return saved.error
   if (saved.draft) {
     const actions = context.getThreadActions(threadId)
     actions.setDraftInput(saved.draft.text)
     actions.setDraftAttachments(saved.draft.attachments)
+    if (saved.draft.replyTo) actions.setDraftBotReplyTo(saved.draft.replyTo)
   }
   return null
 }
@@ -52,10 +60,11 @@ export function saveBotConversationDraft(
     {
       version: 1 as const,
       text: current.draftInput,
-      attachments: current.draftAttachments
+      attachments: current.draftAttachments,
+      replyTo: current.draftBotReplyTo ?? null
     },
     schema,
-    !current.draftInput && !current.draftAttachments.length
+    !current.draftInput && !current.draftAttachments.length && !current.draftBotReplyTo
   )
 }
 
@@ -68,17 +77,25 @@ export function bindBotConversationDraft(
   onError: (error: string | null) => void
 ): () => void {
   const restoreError = restoreBotConversationDraft(context, hostId, botId, threadId)
-  let { draftInput: previousText, draftAttachments: previousAttachments } =
-    context.getThreadState(threadId)
+  let {
+    draftInput: previousText,
+    draftAttachments: previousAttachments,
+    draftBotReplyTo: previousReply
+  } = context.getThreadState(threadId)
   const save = () => onError(saveBotConversationDraft(context, hostId, botId, threadId))
   if (restoreError) onError(restoreError)
   else save()
   return context.subscribeToThreadState(threadId, () => {
     const current = context.getThreadState(threadId)
-    if (current.draftInput === previousText && current.draftAttachments === previousAttachments)
+    if (
+      current.draftInput === previousText &&
+      current.draftAttachments === previousAttachments &&
+      current.draftBotReplyTo === previousReply
+    )
       return
     previousText = current.draftInput
     previousAttachments = current.draftAttachments
+    previousReply = current.draftBotReplyTo
     save()
   })
 }

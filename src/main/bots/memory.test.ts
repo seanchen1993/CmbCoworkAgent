@@ -1,14 +1,14 @@
 import { existsSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { afterEach, describe, expect, it } from "vitest"
+import { afterEach, describe, expect, it, vi } from "vitest"
 import { BotMemoryService } from "./memory"
 import { botDirectory } from "./paths"
 
 const resources: Array<{ root: string; memory: BotMemoryService }> = []
-function setup() {
+function setup(onChanged?: (botId: string) => void) {
   const root = mkdtempSync(join(tmpdir(), "cmb-bot-memory-"))
-  const memory = new BotMemoryService(root)
+  const memory = new BotMemoryService(root, onChanged)
   resources.push({ root, memory })
   return { root, memory }
 }
@@ -20,6 +20,60 @@ afterEach(async () => {
 })
 
 describe("Bot private memory", () => {
+  it("notifies only the changed namespace after committed edits, shares and summary batches", () => {
+    const changed = vi.fn()
+    const { memory } = setup(changed)
+    const entry = memory.write("bot-a", { name: "Format", content: "Two decimals" })
+    expect(changed.mock.calls).toEqual([["bot-a"]])
+    expect(() => memory.write("bot-a", { ...entry, expectedVersion: "stale" })).toThrow()
+    expect(changed).toHaveBeenCalledTimes(1)
+    const copy = memory.share("bot-a", entry.id, entry.version, "bot-b")
+    expect(changed.mock.calls).toEqual([["bot-a"], ["bot-b"]])
+    const version = memory.editVersion("bot-a")
+    memory.applySummary("bot-a", version, [
+      {
+        action: "update",
+        filename: `${entry.id}.md`,
+        content: "Three decimals",
+        name: "Format",
+        description: "Format"
+      },
+      {
+        action: "create",
+        type: "user",
+        filename: "language.md",
+        content: "Chinese",
+        name: "Language",
+        description: "Language"
+      }
+    ])
+    expect(changed.mock.calls).toEqual([["bot-a"], ["bot-b"], ["bot-a"]])
+    expect(memory.list("bot-a")).toHaveLength(2)
+    memory.applySummary("bot-a", version, [
+      { action: "skip", filename: `${entry.id}.md`, reason: "No change" }
+    ])
+    expect(changed).toHaveBeenCalledTimes(3)
+    memory.remove("bot-b", copy.id, copy.version)
+    expect(changed.mock.calls).toEqual([["bot-a"], ["bot-b"], ["bot-a"], ["bot-b"]])
+    expect(memory.list("bot-b")).toEqual([])
+  })
+
+  it("does not turn a persisted memory into a failed operation when an observer throws", () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {})
+    try {
+      const { memory } = setup(() => {
+        throw new Error("Observer unavailable")
+      })
+      const saved = memory.write("bot-a", { name: "Format", content: "Two decimals" })
+      expect(memory.list("bot-a")[0]).toMatchObject({ id: saved.id, version: saved.version })
+      expect(memory.list("bot-a")[0].content.trim()).toBe("Two decimals")
+      expect(memory.editVersion("bot-a")).toBe(1)
+      expect(warn).toHaveBeenCalledTimes(1)
+    } finally {
+      warn.mockRestore()
+    }
+  })
+
   it("retires a deleted Bot's index and rejects stale summaries and searches", async () => {
     const { root, memory } = setup()
     memory.write("bot-a", { name: "Language", content: "Prefer TypeScript" })

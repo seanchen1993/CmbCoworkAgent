@@ -42,6 +42,7 @@ export function BotSchedulePanel({
   const [busy, setBusy] = useState(false),
     [error, setError] = useState<string | null>(null)
   const lock = useRef(false)
+  const trigger = useRef<HTMLButtonElement | null>(null)
   const mutate = async (operation: () => Promise<unknown>, close = false) => {
     if (lock.current) return
     lock.current = true
@@ -57,7 +58,8 @@ export function BotSchedulePanel({
       setBusy(false)
     }
   }
-  const edit = (schedule: BotSchedule | "new", reschedule = false) => {
+  const edit = (schedule: BotSchedule | "new", opener: HTMLButtonElement, reschedule = false) => {
+    trigger.current = opener
     setEditing(schedule)
     setError(null)
     setInput(
@@ -80,7 +82,11 @@ export function BotSchedulePanel({
     <section className="bot-detail-section">
       <div className="mb-3 flex items-center justify-between">
         <h3 className="!mb-0">例行任务</h3>
-        <button className="bot-icon-button" aria-label="创建例行任务" onClick={() => edit("new")}>
+        <button
+          className="bot-icon-button"
+          aria-label="创建例行任务"
+          onClick={(event) => edit("new", event.currentTarget)}
+        >
           <Plus size={15} />
         </button>
       </div>
@@ -109,9 +115,9 @@ export function BotSchedulePanel({
                       ? "暂停例行任务"
                       : "启用例行任务"
                 }
-                onClick={() =>
+                onClick={(event) =>
                   presentation.reschedule
-                    ? edit(schedule, true)
+                    ? edit(schedule, event.currentTarget, true)
                     : void mutate(() =>
                         client.saveSchedule(
                           botId,
@@ -133,7 +139,7 @@ export function BotSchedulePanel({
                 className="bot-icon-button"
                 disabled={busy}
                 aria-label="编辑例行任务"
-                onClick={() => edit(schedule)}
+                onClick={(event) => edit(schedule, event.currentTarget)}
               >
                 <Pencil size={13} />
               </button>
@@ -149,7 +155,14 @@ export function BotSchedulePanel({
             if (!open && !busy) setEditing(null)
           }}
         >
-          <DialogContent className="bot-editor sm:max-w-[440px]">
+          <DialogContent
+            className="bot-editor sm:max-w-[440px]"
+            onCloseAutoFocus={(event) => {
+              if (!trigger.current?.isConnected) return
+              event.preventDefault()
+              trigger.current.focus({ preventScroll: true })
+            }}
+          >
             <DialogHeader>
               <DialogTitle>{editing === "new" ? "创建例行任务" : "编辑例行任务"}</DialogTitle>
               <DialogDescription>按本机时区执行；请保持应用在后台运行。</DialogDescription>

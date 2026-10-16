@@ -1,4 +1,4 @@
-/** Typed boundary for the isolated, unmodified renderer kernel. */
+/** Typed boundary for the isolated reference renderer kernel; source updates are documented. */
 export type MotionState =
   | "idle"
   | "thinking"

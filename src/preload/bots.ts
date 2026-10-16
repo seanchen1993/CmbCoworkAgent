@@ -42,8 +42,8 @@ export const localBotsApi: BotClient = {
     ipcRenderer.invoke("bots:group:save", LOCAL_BOT_HOST_ID, input, existing),
   removeGroup: (id, version) =>
     ipcRenderer.invoke("bots:group:remove", LOCAL_BOT_HOST_ID, id, version),
-  groupMessages: (id, before) =>
-    ipcRenderer.invoke("bots:group:messages", LOCAL_BOT_HOST_ID, id, before),
+  groupMessages: (id, cursor) =>
+    ipcRenderer.invoke("bots:group:messages", LOCAL_BOT_HOST_ID, id, cursor),
   sendGroup: (input) => ipcRenderer.invoke("bots:group:send", LOCAL_BOT_HOST_ID, input),
   open: (id) => ipcRenderer.invoke("bots:open", LOCAL_BOT_HOST_ID, id),
   listMemory: (id) => ipcRenderer.invoke("bots:memory:list", LOCAL_BOT_HOST_ID, id),
@@ -61,6 +61,8 @@ export const localBotsApi: BotClient = {
     ipcRenderer.invoke("bots:exchange", LOCAL_BOT_HOST_ID, botId, taskId, groupId),
   messageOrigins: (botId, ids, groupId) =>
     ipcRenderer.invoke("bots:message-origins", LOCAL_BOT_HOST_ID, botId, ids, groupId),
+  messageReply: (botId, messageId) =>
+    ipcRenderer.invoke("bots:message-reply", LOCAL_BOT_HOST_ID, botId, messageId),
   requestReceipts: (botId, checks) =>
     ipcRenderer.invoke("bots:request-receipts", LOCAL_BOT_HOST_ID, botId, checks),
   exchangeHistory: (botId, taskId, groupId, before) =>

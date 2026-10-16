@@ -10,11 +10,80 @@ import {
   createBotScheduleTools,
   createBotBrowserTools,
   createBotDeliveryTools,
+  createBotProfileTools,
   createBotCollaborationTools
 } from "./tools"
 import { parseBotFileDelivery } from "../../shared/bots/file-delivery"
 import type { BotBrowserService } from "./browser"
 import { ToolMessage } from "@langchain/core/messages"
+
+it("preserves the exact teammate identity and failed update receipt without sending work", async () => {
+  const controller = new AbortController()
+  const updateTeammate = vi.fn(() => ({ id: "peer-id", name: "Reviewer", instructions: "Review" }))
+  const host = { updateTeammate } as unknown as LocalBotHost
+  const update = createBotProfileTools("direct-task", () => host, controller.signal).find(
+    (entry) => entry.name === "bot_update_teammate"
+  )!
+  const call = {
+    type: "tool_call" as const,
+    id: "update-peer-call",
+    name: update.name,
+    args: { botId: "peer-id", name: "Reviewer" }
+  }
+  const result = await update.invoke(call)
+  expect(JSON.parse(result.content)).toEqual({
+    id: "peer-id",
+    name: "Reviewer",
+    instructions: "Review"
+  })
+  expect(updateTeammate).toHaveBeenCalledWith("direct-task", "peer-id", { name: "Reviewer" })
+  updateTeammate.mockImplementation(() => {
+    throw new Error("Target is busy")
+  })
+  const failed = await update.invoke(call)
+  expect(failed.status).toBe("error")
+  expect(failed.tool_call_id).toBe(call.id)
+  expect(JSON.parse(failed.content).error).toBe("Target is busy")
+  controller.abort(new Error("cancelled"))
+  await expect(update.invoke(call)).rejects.toThrow("cancelled")
+  expect(updateTeammate).toHaveBeenCalledTimes(2)
+})
+
+it("uses host-controlled persistent creation, preserves failed receipts and respects cancellation", async () => {
+  const controller = new AbortController()
+  const createTeammate = vi.fn(() => ({ id: "created", name: "Reviewer", instructions: "Review" }))
+  const host = { createTeammate } as unknown as LocalBotHost
+  const create = createBotProfileTools("direct-task", () => host, controller.signal).find(
+    (entry) => entry.name === "bot_create_teammate"
+  )!
+  const call = {
+    type: "tool_call" as const,
+    id: "create-call",
+    name: create.name,
+    args: { requestKey: "reviewer", name: "Reviewer", instructions: "Review" }
+  }
+  const result = await create.invoke(call)
+  expect(JSON.parse(result.content)).toEqual({
+    id: "created",
+    name: "Reviewer",
+    instructions: "Review"
+  })
+  expect(createTeammate).toHaveBeenCalledWith("direct-task", "reviewer", {
+    name: "Reviewer",
+    instructions: "Review"
+  })
+  createTeammate.mockImplementation(() => {
+    throw new Error("当前用户未授权")
+  })
+  const failed = await create.invoke(call)
+  expect(failed.status).toBe("error")
+  expect(failed.tool_call_id).toBe("create-call")
+  expect(JSON.parse(failed.content).error).toContain("未授权")
+  await expect(create.invoke({ ...call.args, requestKey: "invalid key" })).rejects.toThrow()
+  controller.abort(new Error("cancelled"))
+  await expect(create.invoke(call)).rejects.toThrow("cancelled")
+  expect(createTeammate).toHaveBeenCalledTimes(2)
+})
 
 it("resolves peer names only within the current task roster and preserves host validation/errors", async () => {
   const controller = new AbortController()
@@ -172,6 +241,7 @@ it("preserves browser failure status through the standard Runtime tool-result fo
 })
 
 function fixture(origin: BotTask["origin"] = { kind: "user" }, schedules: BotSchedule[] = []) {
+  const controller = new AbortController()
   const save = vi.fn((botId, input, existing) => ({ botId, ...input, ...existing }))
   const host = {
     snapshot: () => ({ schedules }),
@@ -182,12 +252,54 @@ function fixture(origin: BotTask["origin"] = { kind: "user" }, schedules: BotSch
     { id: "a" } as BotDefinition,
     { origin } as BotTask,
     () => host,
-    new AbortController().signal
+    controller.signal
   )
-  return { schedule, save }
+  return { schedule, save, controller }
 }
 
 describe("Bot schedule tool contract", () => {
+  it("returns error ToolMessages for real calls while preserving cancellation and validation", async () => {
+    const { schedule, save, controller } = fixture()
+    const call = {
+      type: "tool_call" as const,
+      id: "schedule-call",
+      name: "bot_schedule",
+      args: { action: "save", id: "missing-routine" }
+    }
+    const missing = await schedule.invoke(call)
+    expect(missing).toBeInstanceOf(ToolMessage)
+    expect(missing.status).toBe("error")
+    expect(missing.tool_call_id).toBe(call.id)
+    expect(missing.content).toBe("此 Bot 中不存在该例行任务")
+    expect(save).not.toHaveBeenCalled()
+
+    const invalid = await schedule.invoke({
+      ...call,
+      args: {
+        action: "save",
+        name: "Invalid",
+        message: "Reply",
+        frequency: "once",
+        runAt: "2030-01-02T09:30:00"
+      }
+    })
+    expect(invalid.status).toBe("error")
+    expect(invalid.content).toContain("时区")
+    expect(save).not.toHaveBeenCalled()
+
+    const nested = fixture({ kind: "schedule", scheduleId: "routine" })
+    const denied = await nested.schedule.invoke(call)
+    expect(denied.status).toBe("error")
+    expect(denied.content).toContain("用户直接交办")
+    expect(nested.save).not.toHaveBeenCalled()
+
+    controller.abort(new Error("cancelled"))
+    await expect(schedule.invoke({ ...call, args: { action: "list" } })).rejects.toThrow(
+      "cancelled"
+    )
+    expect(save).not.toHaveBeenCalled()
+  })
+
   it("accepts a model's once request without an explicit enabled flag", async () => {
     const { schedule, save } = fixture()
     await schedule.invoke({

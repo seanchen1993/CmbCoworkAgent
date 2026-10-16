@@ -897,6 +897,10 @@ function fo(e, t, n) {
   return e <= t || e >= n ? 0 : Math.sin((Math.PI * (e - t)) / (n - t)) ** 2;
 }
 const Yb = 0.14;
+// Grok 0.71.2: time-based gaze blend (bx, mx=.14, gx=1/60 in the supplied renderer).
+function gazeBlend(dt) {
+  return 1 - (1 - Yb) ** (dt / (1 / 60));
+}
 const Zb = 0.55;
 const Qb = { heartChubby: 0.6, wedge: 0.55 };
 function al(e, t, n) {
@@ -1380,19 +1384,19 @@ function Yf(e = {}) {
       else (L(q, U), (w = U));
       ((g = null), O());
     },
-    ne = ($, q) => {
-      const U = $ + (q - $) * Yb;
+    ne = ($, q, factor) => {
+      const U = $ + (q - $) * factor;
       return Math.abs(q - U) < Ax ? q : U;
     },
-    se = () => {
+    se = (dt) => {
+      if (v || (!m.isHeld && m.hold === 0)) return;
+      const factor = gazeBlend(dt);
       if (
-        v ||
-        (!m.isHeld && m.hold === 0) ||
         ((m = {
           ...m,
-          cx: ne(m.cx, m.x),
-          cy: ne(m.cy, m.y),
-          hold: ne(m.hold, m.isHeld ? 1 : 0),
+          cx: ne(m.cx, m.x, factor),
+          cy: ne(m.cy, m.y, factor),
+          hold: ne(m.hold, m.isHeld ? 1 : 0, factor),
         }),
         S)
       )
@@ -1574,9 +1578,9 @@ function Yf(e = {}) {
       F = $;
     },
     advance($) {
-      se();
-      const q = Math.min($, Mx),
-        U = 1 - a.snapshot().amount;
+      const q = Math.min($, Mx);
+      se(q);
+      const U = 1 - a.snapshot().amount;
       if (
         (S && Q(q * U),
         ee(q),

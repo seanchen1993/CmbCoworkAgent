@@ -10,3 +10,11 @@ The closure uses only standard numeric, string, array and collection built-ins. 
 `grok-avatar-adapter.ts` maps the persisted CMB shape and activity names. `BotAvatar.tsx` owns one visibility-gated shared clock and pointer listener, reduced-motion handling and unmount cleanup. Idle settled avatars do not request frames. Runtime state remains owned by the original CMB thread context.
 
 The vendor snapshot comes from the supplied Grok code; the Hermes MIT notice applies to the separate shared clock files, not to this snapshot. Do not merge this code into those files or attribute it to Hermes.
+
+## 0.71.2 gaze timing update
+
+The installed reference renderer `index.eager-platform-DKZJbDqM.js` changes motion `ih`'s gaze interpolation to use elapsed time, through `bx(dt) = 1 - (1 - .14) ** (dt / (1 / 60))`. This snapshot applies that narrow change as `gazeBlend` and passes the already bounded motion delta into gaze advancement. Shape, clip data and the state director remain unchanged. Read-only AST comparison and before/after timing evidence are recorded under the phase-one plan's 1016G item. The earlier source hash above identifies the original formatted snapshot, before this documented update.
+
+## Static workspace entry mark
+
+`src/renderer/src/assets/bot-workspace-mark.svg` is an idle teardrop frame generated from this existing kernel, using the same optical extent as `BotAvatar`. It is the Suspense placeholder for the workbench navigation entry. The entry lazily imports the existing `BotAvatar` module, without loading the Bots workspace or its Runtime. Hover uses the same character geometry and gaze as the workspace; visibility, reduced motion, idle dormancy and teardown remain owned by that one shared avatar clock.

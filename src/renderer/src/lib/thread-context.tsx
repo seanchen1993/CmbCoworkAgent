@@ -21,6 +21,8 @@ import {
   type FallbackIndexBaselineCache
 } from "./stream-fallback-baselines"
 import { isSerializedSummarizationMessage } from "../../../shared/context-compaction-messages"
+import type { BotMessageReply } from "../../../shared/bots/contracts"
+import { isBotMessageReply } from "../../../shared/bots/message-reply"
 import {
   CONTEXT_COMPACTION_EVENT_TYPE,
   parseContextCompactionLifecycleEvent,
@@ -685,6 +687,7 @@ export interface ThreadState {
   contextReminder: ContextReminderState
   harnessAgentmdLoadStatus: HarnessAgentmdLoadStatusState | null
   draftInput: string
+  draftBotReplyTo?: BotMessageReply | null
   /** Managed Bot composer attachments survive navigation; no binary data is retained here. */
   draftAttachments: FileAttachment[]
   harnessNextActionDialogTips: string | null
@@ -921,6 +924,7 @@ export interface ThreadActions {
     update: ContextReminderState | ((prev: ContextReminderState) => ContextReminderState)
   ) => void
   setDraftInput: (input: string) => void
+  setDraftBotReplyTo: (reply: BotMessageReply | null) => void
   setDraftAttachments: (
     update: FileAttachment[] | ((previous: FileAttachment[]) => FileAttachment[])
   ) => void
@@ -975,6 +979,7 @@ function normalizeQueuedMessage(raw: unknown): QueuedMessage | null {
   return {
     id: item.id,
     text: item.text,
+    ...(isBotMessageReply(item.botReplyTo) ? { botReplyTo: item.botReplyTo } : {}),
     attachmentModelBlocks:
       typeof item.attachmentModelBlocks === "string" ? item.attachmentModelBlocks : undefined,
     attachmentDisplayPrefix:
@@ -5713,6 +5718,9 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
         },
         setDraftInput: (input: string) => {
           updateThreadState(threadId, () => ({ draftInput: input }))
+        },
+        setDraftBotReplyTo: (draftBotReplyTo) => {
+          updateThreadState(threadId, () => ({ draftBotReplyTo }))
         },
         setDraftAttachments: (update) => {
           updateThreadState(threadId, (state) => ({

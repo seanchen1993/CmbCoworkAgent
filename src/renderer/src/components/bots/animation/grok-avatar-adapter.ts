@@ -41,12 +41,12 @@ export function avatarSeed(id: string): number {
   return seed >>> 0
 }
 
-/** Grok's pointer normalization; geometry owns the gaze spring and facial deformation. */
+/** Grok's attachMarkHoverGaze uses .5; the global pointer-follow default is 2. */
 export function grokAvatarGaze(
   rect: Pick<DOMRect, "left" | "top" | "width" | "height">,
   point: { x: number; y: number }
 ): readonly [number, number] {
-  const radius = Math.max(rect.width, 1) * 2
+  const radius = Math.max(rect.width, 1) * 0.5
   const clamp = (value: number) => Math.max(-1, Math.min(1, value))
   return [
     clamp((point.x - rect.left - rect.width / 2) / radius),

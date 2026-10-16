@@ -40,6 +40,7 @@ export function BotWorkspaceMenu({
         </button>
       </PopoverTrigger>
       <PopoverContent
+        data-bot-popup
         side="top"
         align="start"
         sideOffset={12}

@@ -17,7 +17,14 @@ it("maps the original palette without changing custom colours or persisted shape
   expect(grokAvatarBody("circle")).toBe("sphere")
   expect(grokAvatarBody("squircle")).toBe("square")
   expect(botAppearanceColor("#ED2040")).toBe("#ff263c")
-  expect(botChatAccent("#ed2040")["--bot-user-bubble"]).toBe("#ff263c")
+  expect(botChatAccent("#ed2040")).toEqual({
+    "--bot-user-bubble-light": "#c82532",
+    "--bot-user-bubble-dark": "#cf2b35",
+    "--bot-user-text-light": "#ffffff",
+    "--bot-user-text-dark": "#f5f5f5"
+  })
+  expect(botChatAccent("#777777")).toEqual({})
+  expect(botChatAccent("#ffffff")["--bot-user-text"]).toBe("#000")
   expect(botAppearanceColor("#123456")).toBe("#123456")
 })
 
@@ -83,5 +90,26 @@ it("settles a resting avatar and preserves a continuous shape change and pointer
   expect(motion.frame()).toMatchObject({ body: "clover", offset: [0, 0], squash: [1, 1] })
   const rect = { left: 100, top: 100, width: 40, height: 40 }
   expect(grokAvatarGaze(rect, { x: 120, y: 120 })).toEqual([0, -0])
+  expect(grokAvatarGaze(rect, { x: 130, y: 110 })).toEqual([0.5, 0.5])
+  expect(grokAvatarGaze(rect, { x: 100, y: 140 })).toEqual([-1, -1])
   expect(grokAvatarGaze(rect, { x: 200, y: 40 })).toEqual([1, 1])
+  expect(grokAvatarGaze({ ...rect, width: 0, height: 0 }, { x: 100, y: 100 })).toEqual([0, -0])
+})
+
+it("advances pointer gaze by elapsed time consistently at 30, 60 and 120 fps", () => {
+  const frames = [30, 60, 120].map((fps) => {
+    const motion = createMotion({ body: "teardrop" })
+    motion.setGazeAlways(true)
+    motion.setGaze([0.7, -0.4])
+    const before = motion.frame()
+    motion.advance(0)
+    expect(motion.frame()).toEqual(before)
+    for (let frame = 0; frame < fps / 10; frame++) motion.advance(1 / fps)
+    return motion.frame() as { offset: number[]; quat: number[] }
+  })
+  for (const frame of frames) {
+    frame.offset.forEach((value, index) => expect(value).toBeCloseTo(frames[1].offset[index], 12))
+    frame.quat.forEach((value, index) => expect(value).toBeCloseTo(frames[1].quat[index], 12))
+  }
+  expect(Math.abs(frames[1].offset[0])).toBeGreaterThan(0.01)
 })

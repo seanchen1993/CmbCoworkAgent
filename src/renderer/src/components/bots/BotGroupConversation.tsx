@@ -10,7 +10,9 @@ import { botGroupMessageView } from "@/lib/bot-group-message-view"
 import { BotGroupAvatar } from "./BotGroupAvatar"
 import { BotGroupMessageActions } from "./BotGroupMessageActions"
 import { BotMentionLabel } from "./BotMentionLabel"
-import { useEffect, useRef, useState } from "react"
+import { useEffect, useMemo, useRef, useState, type RefObject } from "react"
+import { useBotMessageEntrances } from "@/lib/use-bot-message-entrances"
+import { BotMessageEntrance } from "./BotMessageEntrance"
 import {
   ArrowDown,
   ArrowUp,
@@ -66,6 +68,7 @@ export function BotGroupConversation({
   onEdit,
   onDetails,
   detailOpen,
+  detailsTriggerRef,
   onOpenBot,
   onBrowser,
   onFiles
@@ -79,6 +82,7 @@ export function BotGroupConversation({
   onEdit(): void
   onDetails(): void
   detailOpen: boolean
+  detailsTriggerRef?: RefObject<HTMLButtonElement | null>
   onOpenBot(bot: BotDefinition): void
   onBrowser(): void
   onFiles(): void
@@ -88,9 +92,14 @@ export function BotGroupConversation({
   const listRef = useRef<VirtuosoHandle>(null)
   const [atBottom, setAtBottom] = useState(true)
   const [anchorId, setAnchorId] = useState<string | null>(null)
+  const entranceIds = useMemo(() => messages.map((item) => item.id), [messages])
+  const { entering: enteringMessages, retire: retireMessage } = useBotMessageEntrances(
+    `${client.hostId}:group:${group.id}`,
+    entranceIds,
+    history.loaded && atBottom && !anchorId
+  )
   const anchorRef = useRef<string | null>(null)
   const historyGeneration = useRef(0)
-  const scrollToMessage = useRef<string | null>(null)
   const scrollAfterOrdinal = useRef<number | null>(null)
   const olderPending = useRef(false)
   const mounted = useRef(true)
@@ -100,23 +109,6 @@ export function BotGroupConversation({
       mounted.current = false
     }
   }, [])
-  useEffect(() => {
-    if (scrollToMessage.current) {
-      const index = messages.findIndex((item) => item.id === scrollToMessage.current)
-      if (index >= 0) {
-        listRef.current?.scrollToIndex({
-          index,
-          align: "center",
-          behavior: "auto"
-        })
-        scrollToMessage.current = null
-      }
-    }
-    if (scrollAfterOrdinal.current === null) return
-    if ((messages.at(-1)?.ordinal ?? 0) <= scrollAfterOrdinal.current) return
-    scrollAfterOrdinal.current = null
-    listRef.current?.scrollToIndex({ index: "LAST", align: "end", behavior: "auto" })
-  }, [messages, history.firstIndex])
   const draftKey = groupDraftKey(client.hostId, group.id)
   useEffect(() => useBotGroupDrafts.getState().restore(draftKey), [draftKey])
   const draft = useBotGroupDrafts((state) => state.drafts[draftKey] ?? EMPTY_GROUP_DRAFT)
@@ -256,7 +248,6 @@ export function BotGroupConversation({
   }, [revision])
   const returnToLatest = () => {
     historyGeneration.current++
-    scrollToMessage.current = null
     anchorRef.current = null
     setAnchorId(null)
     setOlder(true)
@@ -278,13 +269,12 @@ export function BotGroupConversation({
     const generation = ++historyGeneration.current
     setBusy(true)
     try {
-      // Open one existing 50-message page around the quote, not every intervening page.
-      const page = await client.groupMessages(group.id, reply.ordinal + 1)
+      // Resolve the exact same-group message and its context without walking old pages.
+      const page = await client.groupMessages(group.id, { targetMessageId: reply.id })
       if (!mounted.current || historyGeneration.current !== generation) return
       if (!page.some((item) => item.id === reply.id)) throw new Error("被回复的消息已不可用")
       anchorRef.current = reply.id
       setAnchorId(reply.id)
-      scrollToMessage.current = reply.id
       setOlder(page.length === 50)
       setHistory(mergeGroupHistory(EMPTY_GROUP_HISTORY, page))
     } catch (cause) {
@@ -345,6 +335,7 @@ export function BotGroupConversation({
       <header className="bot-chat-header bot-group-header">
         <button
           className="bot-title-pill"
+          ref={detailsTriggerRef}
           aria-label="查看群聊详情"
           aria-expanded={detailOpen}
           onClick={onDetails}
@@ -421,11 +412,28 @@ export function BotGroupConversation({
                   firstItemIndex={history.firstIndex}
                   computeItemKey={(_, item) => item.id}
                   followOutput={!anchorId}
+                  scrollIntoViewOnChange={() => {
+                    if (
+                      anchorRef.current ||
+                      scrollAfterOrdinal.current === null ||
+                      (messages.at(-1)?.ordinal ?? 0) <= scrollAfterOrdinal.current
+                    )
+                      return false
+                    // Let Virtuoso wait for the new row's measurements before consuming
+                    // the explicit send intent. A React effect can target the old tail.
+                    scrollAfterOrdinal.current = null
+                    return { index: messages.length - 1, align: "end", behavior: "auto" }
+                  }}
                   atBottomThreshold={32}
                   atBottomStateChange={setAtBottom}
                   initialTopMostItemIndex={{
-                    index: Math.max(0, messages.length - 1),
-                    align: "end"
+                    index: Math.max(
+                      0,
+                      anchorId
+                        ? messages.findIndex((item) => item.id === anchorId)
+                        : messages.length - 1
+                    ),
+                    align: anchorId ? "center" : "end"
                   }}
                   components={{
                     Header: () =>
@@ -460,149 +468,158 @@ export function BotGroupConversation({
                         {presentation.date && (
                           <div className="bot-message-date">{presentation.date}</div>
                         )}
-                        <article
-                          className="bot-group-message"
-                          data-user={!item.authorBotId}
-                          data-continued={presentation.continued}
-                          aria-label={`${author?.name ?? (item.authorBotId ? "已移除的 Bot" : "你")} · ${new Date(item.createdAt).toLocaleString()}`}
+                        <BotMessageEntrance
+                          key={item.id}
+                          id={item.id}
+                          entering={enteringMessages.has(item.id)}
+                          onEntered={retireMessage}
                         >
-                          {presentation.showAuthor && (
-                            <div className="bot-group-author">
-                              {author && !author.deleting ? (
-                                <button
-                                  className="bot-group-author-link"
-                                  aria-label={`打开 ${author.name} 的聊天`}
-                                  onClick={() => onOpenBot(author)}
-                                >
-                                  <span style={{ color: author.color }}>{author.name}</span>
-                                </button>
-                              ) : (
-                                <span>
-                                  {item.authorBotId ? (author?.name ?? "已移除的 Bot") : "你"}
-                                </span>
-                              )}
-                            </div>
-                          )}
-                          {presentation.showAvatar && author && !author.deleting && (
-                            <button
-                              className="bot-group-avatar-link"
-                              aria-label={`查看 ${author.name}`}
-                              onClick={() => onOpenBot(author)}
-                            >
-                              <BotAvatar color={author.color} shape={author.shape} size={23} />
-                            </button>
-                          )}
-                          <time
-                            className="bot-group-message-time"
-                            dateTime={new Date(item.createdAt).toISOString()}
+                          <article
+                            className="bot-group-message"
+                            data-user={!item.authorBotId}
+                            data-continued={presentation.continued}
+                            aria-label={`${author?.name ?? (item.authorBotId ? "已移除的 Bot" : "你")} · ${new Date(item.createdAt).toLocaleString()}`}
                           >
-                            {new Date(item.createdAt).toLocaleTimeString([], {
-                              hour: "2-digit",
-                              minute: "2-digit"
-                            })}
-                          </time>
-                          {item.text && (
-                            <div className="bot-group-bubble">
-                              <BotGroupMessageActions
-                                author={author?.name ?? (item.authorBotId ? "已移除的 Bot" : "你")}
-                                text={displayText}
-                                onError={(cause) =>
-                                  setError(botErrorMessage(cause, "复制失败，请重试。"))
-                                }
-                                onReply={() => {
-                                  editDraft({
-                                    replyTo: {
-                                      id: item.id,
-                                      ordinal: item.ordinal,
-                                      authorBotId: item.authorBotId,
-                                      text: displayText.slice(0, 1000)
-                                    }
-                                  })
-                                  inputRef.current?.focus()
-                                }}
-                              />
-                              {item.replyTo && (
-                                <button
-                                  type="button"
-                                  className="bot-group-reply-preview"
-                                  aria-label="跳转到被回复的消息"
-                                  disabled={busy}
-                                  onClick={() => void jumpToReply(item.replyTo!)}
-                                >
-                                  <MessageCircle size={14} />
+                            {presentation.showAuthor && (
+                              <div className="bot-group-author">
+                                {author && !author.deleting ? (
+                                  <button
+                                    className="bot-group-author-link"
+                                    aria-label={`打开 ${author.name} 的聊天`}
+                                    onClick={() => onOpenBot(author)}
+                                  >
+                                    <span style={{ color: author.color }}>{author.name}</span>
+                                  </button>
+                                ) : (
                                   <span>
-                                    “
-                                    {
-                                      splitBotInlineReasoning(
-                                        cleanUserAttachmentContentForDisplay(item.replyTo.text)
-                                      ).body
-                                    }
-                                    ”
+                                    {item.authorBotId ? (author?.name ?? "已移除的 Bot") : "你"}
                                   </span>
-                                </button>
-                              )}
-                              <BotInlineMentionsContext.Provider
-                                value={
-                                  mentions.length
-                                    ? {
-                                        mentions,
-                                        renderLabel: (mention) => (
-                                          <BotMentionLabel
-                                            mention={mention}
-                                            bot={bots.find(
-                                              (bot) => bot.id === mention.botId && !bot.deleting
-                                            )}
-                                          />
-                                        ),
-                                        canOpen: (id) =>
-                                          bots.some((bot) => bot.id === id && !bot.deleting),
-                                        open: (id) => {
-                                          const bot = bots.find(
-                                            (bot) => bot.id === id && !bot.deleting
-                                          )
-                                          if (bot) onOpenBot(bot)
-                                        }
-                                      }
-                                    : null
-                                }
+                                )}
+                              </div>
+                            )}
+                            {presentation.showAvatar && author && !author.deleting && (
+                              <button
+                                className="bot-group-avatar-link"
+                                aria-label={`查看 ${author.name}`}
+                                onClick={() => onOpenBot(author)}
                               >
-                                <StreamingMarkdown
-                                  isStreaming={false}
-                                  threadId={author ? `group-${group.id}-${author.id}` : undefined}
-                                >
-                                  {displayText}
-                                </StreamingMarkdown>
-                              </BotInlineMentionsContext.Provider>
-                            </div>
-                          )}
-                          {item.files && author && (
-                            <div className="bot-delivered-files">
-                              {item.files.map((file) => (
-                                <BotDeliveredFile
-                                  key={file.filePath}
-                                  client={client}
-                                  botId={author.id}
-                                  groupId={group.id}
-                                  threadId={`group-${group.id}-${author.id}`}
-                                  filePath={file.filePath}
-                                  size={file.size}
-                                />
-                              ))}
-                            </div>
-                          )}
-                          {item.exchange && (
-                            <button
-                              className="bot-exchange-link"
-                              onClick={(event) => {
-                                exchangeTrigger.current = event.currentTarget
-                                setExchange(item.exchange)
-                              }}
+                                <BotAvatar color={author.color} shape={author.shape} size={23} />
+                              </button>
+                            )}
+                            <time
+                              className="bot-group-message-time"
+                              dateTime={new Date(item.createdAt).toISOString()}
                             >
-                              查看 Bot 交流
-                              <ChevronRight size={14} />
-                            </button>
-                          )}
-                        </article>
+                              {new Date(item.createdAt).toLocaleTimeString([], {
+                                hour: "2-digit",
+                                minute: "2-digit"
+                              })}
+                            </time>
+                            {item.text && (
+                              <div className="bot-group-bubble">
+                                <BotGroupMessageActions
+                                  author={
+                                    author?.name ?? (item.authorBotId ? "已移除的 Bot" : "你")
+                                  }
+                                  text={displayText}
+                                  onError={(cause) =>
+                                    setError(botErrorMessage(cause, "复制失败，请重试。"))
+                                  }
+                                  onReply={() => {
+                                    editDraft({
+                                      replyTo: {
+                                        id: item.id,
+                                        ordinal: item.ordinal,
+                                        authorBotId: item.authorBotId,
+                                        text: displayText.slice(0, 1000)
+                                      }
+                                    })
+                                    inputRef.current?.focus()
+                                  }}
+                                />
+                                {item.replyTo && (
+                                  <button
+                                    type="button"
+                                    className="bot-group-reply-preview"
+                                    aria-label="跳转到被回复的消息"
+                                    disabled={busy}
+                                    onClick={() => void jumpToReply(item.replyTo!)}
+                                  >
+                                    <MessageCircle size={14} />
+                                    <span>
+                                      “
+                                      {
+                                        splitBotInlineReasoning(
+                                          cleanUserAttachmentContentForDisplay(item.replyTo.text)
+                                        ).body
+                                      }
+                                      ”
+                                    </span>
+                                  </button>
+                                )}
+                                <BotInlineMentionsContext.Provider
+                                  value={
+                                    mentions.length
+                                      ? {
+                                          mentions,
+                                          renderLabel: (mention) => (
+                                            <BotMentionLabel
+                                              mention={mention}
+                                              bot={bots.find(
+                                                (bot) => bot.id === mention.botId && !bot.deleting
+                                              )}
+                                            />
+                                          ),
+                                          canOpen: (id) =>
+                                            bots.some((bot) => bot.id === id && !bot.deleting),
+                                          open: (id) => {
+                                            const bot = bots.find(
+                                              (bot) => bot.id === id && !bot.deleting
+                                            )
+                                            if (bot) onOpenBot(bot)
+                                          }
+                                        }
+                                      : null
+                                  }
+                                >
+                                  <StreamingMarkdown
+                                    isStreaming={false}
+                                    threadId={author ? `group-${group.id}-${author.id}` : undefined}
+                                  >
+                                    {displayText}
+                                  </StreamingMarkdown>
+                                </BotInlineMentionsContext.Provider>
+                              </div>
+                            )}
+                            {item.files && author && (
+                              <div className="bot-delivered-files">
+                                {item.files.map((file) => (
+                                  <BotDeliveredFile
+                                    key={file.filePath}
+                                    client={client}
+                                    botId={author.id}
+                                    groupId={group.id}
+                                    threadId={`group-${group.id}-${author.id}`}
+                                    filePath={file.filePath}
+                                    size={file.size}
+                                  />
+                                ))}
+                              </div>
+                            )}
+                            {item.exchange && (
+                              <button
+                                className="bot-exchange-link"
+                                onClick={(event) => {
+                                  exchangeTrigger.current = event.currentTarget
+                                  setExchange(item.exchange)
+                                }}
+                              >
+                                查看 Bot 交流
+                                <ChevronRight size={14} />
+                              </button>
+                            )}
+                          </article>
+                        </BotMessageEntrance>
                       </>
                     )
                   }}

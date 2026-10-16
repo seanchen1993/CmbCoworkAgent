@@ -23,10 +23,12 @@ const fixture = vi.hoisted(() => ({
   exchange: vi.fn(),
   exchangeHistory: vi.fn(),
   messageOrigins: vi.fn(),
+  messageReply: vi.fn(),
   requestReceipts: vi.fn(),
   stopConversation: vi.fn(),
   markUnread: vi.fn(),
-  markRead: vi.fn()
+  markRead: vi.fn(),
+  groupMessages: vi.fn()
 }))
 vi.mock("electron", () => ({
   BrowserWindow: { getAllWindows: () => [] },
@@ -68,6 +70,46 @@ beforeEach(() => {
   fixture.getHost.mockImplementation(() => fixture)
 })
 describe("Bot IPC boundaries", () => {
+  it("validates private quote host and both identities before domain access", () => {
+    const call = register()
+    expect(() => call("bots:message-reply", "remote", "bot", "message")).toThrow()
+    expect(() => call("bots:message-reply", "local", "../bot", "message")).toThrow()
+    expect(() => call("bots:message-reply", "local", "bot", "other/thread")).toThrow()
+    expect(fixture.messageReply).not.toHaveBeenCalled()
+    call("bots:message-reply", "local", "bot", "message")
+    expect(fixture.messageReply).toHaveBeenCalledWith("bot", "message")
+  })
+
+  it("validates exact same-group history targets and retains numeric backward cursors", () => {
+    const call = register()
+    for (const cursor of [
+      0,
+      -1,
+      NaN,
+      Infinity,
+      "40",
+      {},
+      [],
+      { targetMessageId: "../message" },
+      { targetMessageId: "" },
+      { targetMessageId: "message", before: 40 }
+    ]) {
+      expect(() => call("bots:group:messages", "local", "group", cursor)).toThrow()
+    }
+    expect(() =>
+      call("bots:group:messages", "remote", "group", { targetMessageId: "message" })
+    ).toThrow()
+    expect(() => call("bots:group:messages", "local", "../group", 40)).toThrow()
+    expect(fixture.groupMessages).not.toHaveBeenCalled()
+    call("bots:group:messages", "local", "group", { targetMessageId: "message" })
+    call("bots:group:messages", "local", "group", 40)
+    call("bots:group:messages", "local", "group")
+    expect(fixture.groupMessages.mock.calls).toEqual([
+      ["group", { targetMessageId: "message" }],
+      ["group", 40],
+      ["group", undefined]
+    ])
+  })
   it("introduces only the validated local Bot when opening its conversation", () => {
     const call = register()
     expect(() => call("bots:open", "remote", "a")).toThrow()

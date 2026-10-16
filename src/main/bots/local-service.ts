@@ -15,6 +15,7 @@ import { startElectronBotBrowser } from "./electron-browser-engine"
 import { botDirectory } from "./paths"
 import { createBotMemoryMaintainer } from "./memory-summary-adapter"
 import type { BotMemoryMaintainer } from "./memory-maintainer"
+import { splitBotInlineReasoning } from "../../shared/bots/inline-reasoning"
 
 let host: LocalBotHost | undefined
 let database: NativeSqliteAdapter | undefined
@@ -36,7 +37,9 @@ export function getBotBrowserService(): BotBrowserService {
 }
 
 export function getBotMemoryService(): BotMemoryService {
-  return (memory ??= new BotMemoryService(join(getCmbCoworkAgentDataRoot(), "bots")))
+  return (memory ??= new BotMemoryService(join(getCmbCoworkAgentDataRoot(), "bots"), (botId) => {
+    if (!shutdown) host?.memoryChanged(botId)
+  }))
 }
 
 export function initializeBotNotificationDispatch(): void {
@@ -64,13 +67,39 @@ export function getLocalBotHost(): LocalBotHost {
       }
     })
     host = new LocalBotHost(
-      new BotStore(database, Date.now, (threadId, ids) => {
-        const messages = new Map<string, string>()
-        for (const message of getThreadMessagesByIds(threadId, ids))
-          if (message.role === "user" && typeof message.content === "string")
-            messages.set(message.id, message.content)
-        return messages
-      }),
+      new BotStore(
+        database,
+        Date.now,
+        (threadId, ids) => {
+          const messages = new Map<string, string>()
+          for (const message of getThreadMessagesByIds(threadId, ids))
+            if (message.role === "user" && typeof message.content === "string")
+              messages.set(message.id, message.content)
+          return messages
+        },
+        (threadId, messageId) => {
+          const message = getThreadMessagesByIds(threadId, [messageId])[0]
+          if (
+            !message ||
+            (message.role !== "user" && message.role !== "assistant") ||
+            !Number.isSafeInteger(message.ordinal)
+          )
+            return null
+          const text =
+            typeof message.content === "string"
+              ? message.content
+              : message.content
+                  .filter((block) => block.type === "text")
+                  .map((block) => block.text ?? "")
+                  .join("\n")
+          return {
+            id: message.id,
+            ordinal: message.ordinal!,
+            role: message.role,
+            text: message.role === "assistant" ? splitBotInlineReasoning(text).body : text
+          }
+        }
+      ),
       createLocalBotRunPort(
         getBotMemoryService(),
         getLocalBotHost,

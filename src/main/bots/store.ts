@@ -1,3 +1,4 @@
+import { cleanUserAttachmentContentForDisplay } from "../../shared/user-attachment-display"
 import { createHash, randomUUID } from "node:crypto"
 import type { NativeSqliteAdapter } from "../db/native-sqlite-adapter"
 import type {
@@ -5,6 +6,7 @@ import type {
   BackgroundCommandResult
 } from "../agent/background-command-lifecycle"
 import {
+  botIdentifier,
   parseCreateBot,
   parseBotRequestChecks,
   parseGroupMessage
@@ -13,6 +15,12 @@ import { splitBotInlineReasoning } from "../../shared/bots/inline-reasoning"
 import { projectVisibleChatSearchContent } from "../../shared/chat-search-visible-content"
 import { projectMarkdownVisibleText } from "../../shared/markdown-visible-text"
 import { isBotRoutineSilent } from "../../shared/bots/routine-silence"
+import { createBotAppearance } from "../../shared/bots/appearance"
+import {
+  BOT_MESSAGE_REPLY_END,
+  isBotMessageReply,
+  parseBotMessageReply
+} from "../../shared/bots/message-reply"
 import {
   BOT_REPLY_FILES_PREFIX,
   parseBotFileDelivery,
@@ -31,6 +39,7 @@ import {
   type BotExchange,
   type BotExchangePage,
   type BotMessageOrigin,
+  type BotMessageReply,
   type BotTaskState,
   type CreateBotInput,
   type UpdateBotInput,
@@ -41,6 +50,7 @@ import {
   type BotGroup,
   type BotGroupInput,
   type BotGroupMessage,
+  type BotGroupHistoryCursor,
   type BotConversationActivity,
   type SendBotGroupMessageInput
 } from "../../shared/bots/contracts"
@@ -84,7 +94,8 @@ export class BotStore {
     private readonly readTranscript?: (
       threadId: string,
       messageIds: string[]
-    ) => Map<string, string>
+    ) => Map<string, string>,
+    private readonly readReply?: (threadId: string, messageId: string) => BotMessageReply | null
   ) {
     this.transaction(() => {
       db.run(`
@@ -364,12 +375,15 @@ export class BotStore {
   }
 
   create(input: CreateBotInput): BotDefinition {
+    return this.insertBot(input, randomUUID())
+  }
+
+  private insertBot(input: CreateBotInput, id: string): BotDefinition {
     return this.transaction(() => {
       if (Number(this.rows("SELECT COUNT(*) AS n FROM bots")[0].n) >= 200) {
         throw new BotError("CONFLICT", "本机 Bot 数量已达上限")
       }
-      const id = randomUUID(),
-        now = this.now()
+      const now = this.now()
       this.db.run(
         `INSERT INTO bots (id, thread_id, name, instructions, model_ref, color, shape, label, created_at, updated_at, introduction_pending)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)`,
@@ -388,6 +402,38 @@ export class BotStore {
       )
       this.changed()
       return this.getBot(id)
+    })
+  }
+
+  /** Reuse normal Bot creation; a retried tool call must not create another identity. */
+  createTeammate(
+    taskId: string,
+    requestKey: string,
+    profile: { name: string; instructions: string }
+  ): BotDefinition {
+    return this.transaction(() => {
+      if (!this.hasDirectUserRequest(taskId))
+        throw new BotError("CONFLICT", "创建 Bot 需要当前用户直接交办")
+      const owner = this.getBot(this.getTask(taskId).botId)
+      if (owner.archived || owner.deleting) throw new BotError("CONFLICT", "Bot 已归档或正在删除")
+      const input = parseCreateBot({
+        ...profile,
+        modelRef: owner.modelRef,
+        color: owner.color,
+        shape: owner.shape
+      })
+      const id = `created-${createHash("sha256")
+        .update(JSON.stringify([taskId, botIdentifier(requestKey)]))
+        .digest("hex")}`
+      if (this.rows("SELECT id FROM bots WHERE id=?", [id]).length) {
+        const existing = this.getBot(id)
+        if (existing.name !== input.name || existing.instructions !== input.instructions)
+          throw new BotError("CONFLICT", "该请求已创建 Bot，请勿用同一请求键创建不同身份")
+        if (existing.archived || existing.deleting)
+          throw new BotError("CONFLICT", "该请求创建的 Bot 已归档或正在删除")
+        return existing
+      }
+      return this.insertBot({ ...input, ...createBotAppearance() }, id)
     })
   }
 
@@ -476,6 +522,18 @@ export class BotStore {
     const task = this.getTask(taskId)
     if (task.state !== "running") return false
     if (task.origin.kind === "user") return true
+    if (task.origin.kind === "group") {
+      const group = this.getGroup(task.origin.groupId)
+      return (
+        !group.deleting &&
+        group.memberIds.includes(task.botId) &&
+        this.rows(
+          `SELECT id FROM bot_group_messages WHERE id=? AND group_id=? AND author_bot_id IS NULL
+           AND EXISTS (SELECT 1 FROM json_each(targets_json) WHERE value=?)`,
+          [task.origin.messageId, group.id, task.botId]
+        ).length > 0
+      )
+    }
     return (
       task.origin.kind === "introduction" &&
       this.rows(
@@ -483,6 +541,33 @@ export class BotStore {
         [task.id, task.botId, task.threadId]
       ).length > 0
     )
+  }
+
+  /** Merge only requested profile fields; reuse the normal idle-target update guard. */
+  updateTeammate(
+    taskId: string,
+    botId: string,
+    patch: { name?: string; instructions?: string }
+  ): BotDefinition {
+    return this.transaction(() => {
+      const task = this.getTask(taskId)
+      if (!this.hasDirectUserRequest(taskId))
+        throw new BotError("CONFLICT", "修改同事资料需要当前用户直接交办")
+      if (task.botId === botId)
+        throw new BotError("INVALID_INPUT", "修改自己的资料请使用 bot_update_profile")
+      const groupId = botTaskGroupId(task)
+      if (groupId && !this.getGroup(groupId).memberIds.includes(botId))
+        throw new BotError("NOT_FOUND", "当前群聊中不存在该 Bot")
+      const bot = this.getBot(botId)
+      if (bot.archived || bot.deleting) throw new BotError("CONFLICT", "Bot 已归档或正在删除")
+      const profile = parseCreateBot({
+        ...bot,
+        name: patch.name?.trim() || bot.name,
+        instructions: patch.instructions?.trim() || bot.instructions
+      })
+      if (profile.name === bot.name && profile.instructions === bot.instructions) return bot
+      return this.update({ ...bot, ...profile, expectedVersion: bot.version })
+    })
   }
 
   beginDeletion(id: string, expectedVersion: number): string[] {
@@ -554,11 +639,42 @@ export class BotStore {
     })
   }
 
+  messageReply(botId: string, messageId: string): BotMessageReply {
+    const bot = this.getBot(botId)
+    if (bot.deleting) throw new BotError("NOT_FOUND", "Bot 正在删除")
+    const source = this.readReply?.(bot.threadId, messageId)
+    if (!source) throw new BotError("NOT_FOUND", "原消息已不可用，无法引用")
+    let text = source.text
+    if (source.role === "user") {
+      const origin = this.messageOrigins(botId, [messageId])[0]?.origin
+      const parsed = origin?.kind === "user" && origin.replyTo ? parseBotMessageReply(text) : null
+      if (parsed && origin?.kind === "user" && parsed.reply.id === origin.replyTo?.id)
+        text = parsed.message
+    }
+    const reply = {
+      ...source,
+      text: projectVisibleChatSearchContent(
+        source.role,
+        source.role === "user" ? cleanUserAttachmentContentForDisplay(text) : text
+      ).slice(0, 8_000)
+    }
+    if (!isBotMessageReply(reply) || reply.id !== messageId)
+      throw new BotError("NOT_FOUND", "原消息已不可用，无法引用")
+    return reply
+  }
+
   enqueue(input: SendBotMessageInput, origin: BotTaskOrigin = { kind: "user" }): BotTask {
     return this.transaction(() => {
       const prior = this.rows("SELECT * FROM bot_tasks WHERE request_id=?", [input.requestId])[0]
       if (prior) {
-        if (prior.bot_id !== input.botId || prior.message !== input.message)
+        const previousOrigin = this.task(prior).origin
+        const previousReply =
+          previousOrigin.kind === "user" ? previousOrigin.replyTo?.id : undefined
+        if (
+          prior.bot_id !== input.botId ||
+          prior.message !== input.message ||
+          previousReply !== input.replyToId
+        )
           throw new BotError("CONFLICT", "请求标识已用于另一条消息")
         return this.task(prior)
       }
@@ -570,7 +686,7 @@ export class BotStore {
         this.rows("SELECT id FROM bot_exchange_archive WHERE request_id=?", [input.requestId])
           .length
       )
-        throw new BotError("CONFLICT", "该协作请求已处理；如需重新执行，请发送新消息。")
+        throw new BotError("CONFLICT", "该请求已处理；如需重新执行，请发送新消息。")
       if (receipt) {
         if (
           receipt.bot_id !== input.botId ||
@@ -584,6 +700,25 @@ export class BotStore {
       }
       const bot = this.getBot(input.botId)
       if (bot.archived) throw new BotError("CONFLICT", "请先恢复已归档的 Bot")
+      if (input.replyToId !== undefined) {
+        if (origin.kind !== "user")
+          throw new BotError("INVALID_INPUT", "仅用户消息可以引用私聊历史")
+        const parsed = parseBotMessageReply(input.message)
+        const reply = this.messageReply(bot.id, input.replyToId)
+        if (
+          !parsed ||
+          parsed.reply.id !== reply.id ||
+          parsed.reply.ordinal !== reply.ordinal ||
+          parsed.reply.role !== reply.role ||
+          parsed.reply.text !== reply.text
+        )
+          throw new BotError("CONFLICT", "引用与原消息不一致，请重新选择原消息")
+        // Keep the quote body only in the original transcript payload, not a second history.
+        origin = {
+          kind: "user",
+          replyTo: { id: reply.id, ordinal: reply.ordinal, role: reply.role }
+        }
+      }
       if (Number(this.rows("SELECT COUNT(*) AS n FROM bot_tasks WHERE state='queued'")[0].n) >= 500)
         throw new BotError("CONFLICT", "待办队列已满，请稍后发送")
       const id = randomUUID(),
@@ -618,7 +753,11 @@ export class BotStore {
         this.noteActivity(
           "bot",
           bot.id,
-          origin.kind === "notification" ? "整理后台任务结果" : input.message,
+          origin.kind === "notification"
+            ? "整理后台任务结果"
+            : origin.kind === "user" && origin.replyTo
+              ? parseBotMessageReply(input.message)!.message
+              : input.message,
           origin.kind !== "user" && origin.kind !== "introduction"
         )
       return this.getTask(id)
@@ -712,7 +851,8 @@ export class BotStore {
     return this.rows(
       `SELECT id,request_id,origin_json,state FROM bot_exchange_records
       WHERE bot_id=? AND COALESCE(json_extract(origin_json,'$.groupId'),'')=?
-      AND json_extract(origin_json,'$.kind') IN ('bot','schedule')
+      AND (json_extract(origin_json,'$.kind') IN ('bot','schedule')
+        OR (json_extract(origin_json,'$.kind')='user' AND json_extract(origin_json,'$.replyTo.id') IS NOT NULL))
       AND request_id IN (${messageIds.map(() => "?").join(",")})`,
       [botId, groupId ?? "", ...messageIds]
     ).map((row) => ({
@@ -844,8 +984,15 @@ export class BotStore {
 
   recentTasks(previewsOnly = false): BotTask[] {
     // Active/queued entries must remain visible even when terminal history grows.
+    // Skip a verified quote in SQLite before applying the same 600-character budget.
+    // Do not load all task bodies just to build an inbox snapshot.
+    const boundary = `'${BOT_MESSAGE_REPLY_END.replace(/'/g, "''")}'`
+    const preview = `CASE WHEN json_extract(origin_json,'$.kind')='user'
+      AND json_extract(origin_json,'$.replyTo.id') IS NOT NULL AND instr(message,${boundary})>0
+      THEN substr(message,instr(message,${boundary})+length(${boundary}),600)
+      ELSE substr(message,1,600) END`
     const projection = previewsOnly
-      ? "id,bot_id,thread_id,request_id,substr(message,1,600) AS message,state,error,created_at,updated_at,origin_json"
+      ? `id,bot_id,thread_id,request_id,${preview} AS message,state,error,created_at,updated_at,origin_json`
       : "*"
     return this.rows(
       `SELECT ${projection} FROM bot_tasks WHERE state IN ('queued','running','waiting_user')
@@ -901,7 +1048,11 @@ export class BotStore {
       )
       for (const row of expired) {
         const task = this.task(row)
-        if (task.origin.kind === "bot" || task.origin.kind === "schedule") {
+        if (
+          task.origin.kind === "bot" ||
+          task.origin.kind === "schedule" ||
+          (task.origin.kind === "user" && task.origin.replyTo)
+        ) {
           const original = storedMessages.get(task.threadId)?.get(task.requestId)
           const prefix =
             task.origin.kind === "bot"
@@ -911,9 +1062,7 @@ export class BotStore {
             row.id,
             row.bot_id,
             row.request_id,
-            task.origin.kind === "schedule" || original === prefix + task.message
-              ? null
-              : row.message,
+            task.origin.kind !== "bot" || original === prefix + task.message ? null : row.message,
             row.state,
             row.error,
             row.created_at,
@@ -986,15 +1135,36 @@ export class BotStore {
 
   recover(): void {
     this.transaction(() => {
+      const awaitingReplies = this.rows(
+        `SELECT id FROM bot_tasks WHERE state IN (?, ?)
+         AND json_extract(origin_json,'$.kind')='bot'
+         AND json_extract(origin_json,'$.expectsReply')=1`,
+        [...ACTIVE_STATES]
+      )
+      const reason = "应用已重启。请检查已有结果，再决定是否继续，避免重复执行外部操作。"
       this.db.run(
         `UPDATE bot_tasks SET state='interrupted', error=?, updated_at=? WHERE state IN (?, ?)`,
-        [
-          "应用已重启。请检查已有结果，再决定是否继续，避免重复执行外部操作。",
-          this.now(),
-          ...ACTIVE_STATES
-        ]
+        [reason, this.now(), ...ACTIVE_STATES]
       )
       if (this.db.getRowsModified()) this.changed()
+      // Fence every interrupted parent first. Reuse the normal terminal/outbox
+      // transaction only for receipts, never for replaying the delegated work.
+      for (const row of awaitingReplies) {
+        const task = this.getTask(String(row.id))
+        if (task.origin.kind !== "bot" || !task.origin.expectsReply) continue
+        const groupId = botTaskGroupId(task)
+        if (groupId) {
+          const group = this.groups().find((item) => item.id === groupId)
+          if (
+            !group ||
+            group.deleting ||
+            !group.memberIds.includes(task.botId) ||
+            !group.memberIds.includes(task.origin.fromBotId)
+          )
+            continue
+        }
+        this.settle(task.id, "interrupted", reason)
+      }
       // Acceptance was committed before spawn. After a crash neither absence nor success is provable.
       // Retain that uncertainty and wake a verification turn; never restart the external command.
       for (const row of this.rows("SELECT id,thread_id FROM bot_commands WHERE state='accepted'"))
@@ -1586,10 +1756,25 @@ export class BotStore {
       this.changed()
     })
   }
-  groupMessages(groupId: string, before = Number.MAX_SAFE_INTEGER): BotGroupMessage[] {
+  groupMessages(groupId: string, cursor?: BotGroupHistoryCursor): BotGroupMessage[] {
     const group = this.getGroup(groupId)
+    let boundary = typeof cursor === "number" ? cursor : Number.MAX_SAFE_INTEGER
+    const targeted = typeof cursor === "object"
+    if (targeted) {
+      const anchor = this.rows("SELECT ordinal FROM bot_group_messages WHERE group_id=? AND id=?", [
+        groupId,
+        cursor.targetMessageId
+      ])[0]
+      if (!anchor) throw new BotError("NOT_FOUND", "被回复的消息已不可用")
+      // Use actual rows: global ordinals have gaps when other groups write messages.
+      const following = this.rows(
+        "SELECT ordinal FROM bot_group_messages WHERE group_id=? AND ordinal>=? ORDER BY ordinal LIMIT 26",
+        [groupId, Number(anchor.ordinal)]
+      )
+      boundary = Number(following.at(-1)!.ordinal)
+    }
     return this.rows(
-      `WITH page AS (SELECT * FROM bot_group_messages WHERE group_id=? AND ordinal<? ORDER BY ordinal DESC LIMIT 50),
+      `WITH page AS (SELECT * FROM bot_group_messages WHERE group_id=? AND ordinal${targeted ? "<=" : "<"}? ORDER BY ordinal DESC LIMIT 50),
        dispatches AS (SELECT * FROM bot_exchange_records WHERE request_id IN (SELECT id FROM page)),
        results AS (SELECT * FROM bot_exchange_records WHERE id IN (SELECT substr(id,8) FROM page WHERE id LIKE 'result-%'))
        SELECT m.*, COALESCE(d.id,r.id) AS exchange_id,
@@ -1602,7 +1787,7 @@ export class BotStore {
        LEFT JOIN dispatches d ON d.request_id=m.id
        LEFT JOIN results r ON m.id LIKE 'result-%' AND r.id=substr(m.id,8)
        ORDER BY m.ordinal DESC`,
-      [groupId, before]
+      [groupId, boundary]
     )
       .reverse()
       .map((row) => {

@@ -1,4 +1,7 @@
+import { cleanUserAttachmentContentForDisplay } from "../../../shared/user-attachment-display"
+import { parseBotMessageReply } from "../../../shared/bots/message-reply"
 import { botTaskGroupId, type BotDefinition, type BotTask } from "../../../shared/bots/contracts"
+import { projectVisibleChatSearchContent } from "../../../shared/chat-search-visible-content"
 import { projectMarkdownVisibleText } from "../../../shared/markdown-visible-text"
 import type { ThreadStateSummary } from "./thread-context"
 import { BOT_REPLY_FILES_PREFIX } from "../../../shared/bots/file-delivery"
@@ -38,6 +41,21 @@ export function botFileRefreshKey(tasks: readonly BotTask[]): string {
 
 export function botTaskPreview(task: BotTask): string {
   let text = task.message
+  if (task.origin.kind === "user" && task.origin.replyTo)
+    text = parseBotMessageReply(text)?.message ?? text
+  if (task.origin.kind === "user") {
+    // Snapshots are bounded before reaching the UI: their final attachment may be partial.
+    const opening = text.lastIndexOf("<attachment ")
+    if (opening > text.lastIndexOf("</attachment>")) {
+      const name = /^<attachment\s+filename="([^"]*)"/.exec(text.slice(opening))?.[1]
+      text = text.slice(0, opening) + (name ? `<attachment filename="${name}"></attachment>` : "")
+    }
+    return projectMarkdownVisibleText(
+      projectVisibleChatSearchContent("user", cleanUserAttachmentContentForDisplay(text))
+    )
+      .replace(/\s+/g, " ")
+      .trim()
+  }
   if (task.origin.kind === "bot" && !task.origin.expectsReply) {
     const prefix = `${task.origin.fromBotName ?? "其他 Bot"} 的协作任务已结束（`
     if (text.startsWith(prefix)) {

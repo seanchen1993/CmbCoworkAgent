@@ -1,7 +1,6 @@
-import { useState, useCallback, useEffect, useMemo, useRef, memo } from "react"
+import { useState, useCallback, useEffect, useMemo, useRef, memo, lazy, Suspense } from "react"
 import { useShallow } from "zustand/react/shallow"
 import {
-  Bot,
   Plus,
   Trash2,
   Pencil,
@@ -34,6 +33,7 @@ import { ScrollArea } from "@/components/ui/scroll-area"
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip"
 import { UpdateActionButton } from "@/components/update/UpdateActionButton"
 import { CmbDevClawLogo } from "@/components/branding/CmbDevClawLogo"
+import botWorkspaceMarkUrl from "@/assets/bot-workspace-mark.svg"
 import {
   Dialog,
   DialogContent,
@@ -87,6 +87,9 @@ const DEFAULT_VISIBLE_THREADS = 5
 const VISIBLE_THREADS_STEP = 10
 const DEFAULT_VISIBLE_PROJECTS = 60
 const VISIBLE_PROJECTS_STEP = 60
+const BotWorkspaceAvatar = lazy(() =>
+  import("../bots/BotAvatar").then(({ BotAvatar }) => ({ default: BotAvatar }))
+)
 type SidebarTab = "chat" | "project"
 
 interface ThreadProject {
@@ -1281,7 +1284,32 @@ export const ThreadSidebar = memo(function ThreadSidebar(): React.JSX.Element {
       ) : activeSidebarTab === "chat" ? (
         <ScrollArea className="flex-1 min-h-0">
           <div className="space-y-0.5 px-1 pb-1">
-            <Button variant="ghost" size="sm" className="w-full justify-start gap-2 text-sm font-semibold" onClick={() => setMainView("bots")}><div className="flex size-5 items-center justify-center rounded-full bg-muted-foreground/15"><Bot className="size-3" /></div><span className="text-muted-foreground">Bots 工作区</span></Button>
+            <Button
+              variant="ghost"
+              size="sm"
+              className="w-full justify-start gap-2.5 rounded-lg text-sm font-medium text-foreground/80 transition-colors hover:text-foreground"
+              aria-label="Bots 工作区"
+              onClick={() => setMainView("bots")}
+            >
+              <Suspense
+                fallback={
+                  <img
+                    src={botWorkspaceMarkUrl}
+                    alt=""
+                    aria-hidden="true"
+                    draggable={false}
+                    className="size-5 shrink-0"
+                  />
+                }
+              >
+                <BotWorkspaceAvatar
+                  color="#ff263c"
+                  size={20}
+                  className="size-5 shrink-0 overflow-visible"
+                />
+              </Suspense>
+              <span>Bots</span>
+            </Button>
             <Button
               variant="ghost"
               size="sm"

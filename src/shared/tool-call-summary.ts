@@ -2,6 +2,8 @@ export const BOT_TOOL_LABELS: Record<string, string> = {
   bot_list_peers: "查看可协作的 Bot",
   bot_delegate: "交办给其他 Bot",
   bot_update_profile: "更新 Bot 资料",
+  bot_create_teammate: "创建 Bot",
+  bot_update_teammate: "修改同事资料",
   bot_schedule: "管理例行任务",
   bot_browser: "操作 Bot 浏览器",
   bot_request_browser_help: "请你操作浏览器",

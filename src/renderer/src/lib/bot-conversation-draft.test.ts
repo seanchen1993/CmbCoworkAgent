@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
+import type { BotMessageReply } from "../../../shared/bots/contracts"
 import type { FileAttachment } from "../../../shared/file-attachment"
 import {
   bindBotConversationDraft,
@@ -17,13 +18,19 @@ const file: FileAttachment = {
   truncated: false
 }
 const fixture = () => {
-  let state = { draftInput: "", draftAttachments: [] as FileAttachment[], messages: [] }
+  let state = {
+    draftInput: "",
+    draftAttachments: [] as FileAttachment[],
+    draftBotReplyTo: null as BotMessageReply | null,
+    messages: []
+  }
   const listeners = new Set<() => void>()
   const publish = (patch: Partial<typeof state>) => {
     state = { ...state, ...patch }
     for (const listener of listeners) listener()
   }
   const actions = {
+    setDraftBotReplyTo: (draftBotReplyTo: BotMessageReply | null) => publish({ draftBotReplyTo }),
     setDraftInput: (draftInput: string) => publish({ draftInput }),
     setDraftAttachments: (draftAttachments: FileAttachment[]) => publish({ draftAttachments })
   }
@@ -62,6 +69,26 @@ beforeEach(() => {
 afterEach(() => vi.unstubAllGlobals())
 
 describe("private Bot drafts in the original ThreadContext", () => {
+  it("retains reply-only drafts, attachments and cancellation through the existing observer", () => {
+    const f = fixture()
+    const unbind = bindBotConversationDraft(f.context, "local", "a", "t", vi.fn())
+    const reply: BotMessageReply = { id: "m1", ordinal: 5, role: "assistant", text: "合计 41" }
+    f.actions.setDraftBotReplyTo(reply)
+    const cold = fixture()
+    restoreBotConversationDraft(cold.context, "local", "a", "t")
+    expect(cold.state().draftBotReplyTo).toEqual(reply)
+    f.actions.setDraftInput("核对附件")
+    f.actions.setDraftAttachments([file])
+    f.actions.setDraftBotReplyTo(null)
+    const restored = fixture()
+    restoreBotConversationDraft(restored.context, "local", "a", "t")
+    expect(restored.state()).toMatchObject({
+      draftInput: "核对附件",
+      draftAttachments: [file],
+      draftBotReplyTo: null
+    })
+    unbind()
+  })
   it("initializes the original queue and history before any restored composer action", () => {
     const f = fixture()
     f.actions.setDraftInput("Saved")

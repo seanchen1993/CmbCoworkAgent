@@ -11,20 +11,7 @@ import {
 } from "../../../../shared/bots/contracts"
 import { BotAvatar } from "./BotAvatar"
 import { BotRuntimeAvatar } from "./BotRuntimeAvatar"
-
-export const BOT_COLORS = [
-  ["#242424", "黑色"],
-  ["#936439", "棕色"],
-  ["#ff263c", "红色"],
-  ["#ff6700", "橙色"],
-  ["#ff9800", "黄色"],
-  ["#00c972", "绿色"],
-  ["#00bca6", "青色"],
-  ["#1084fe", "蓝色"],
-  ["#9159fe", "紫罗兰色"],
-  ["#ff309b", "品红色"],
-  ["#777777", "灰色"]
-] as const
+import { BOT_COLORS } from "../../../../shared/bots/appearance"
 const SHAPE_LABELS: Record<BotAvatarShape, string> = {
   drop: "水滴",
   circle: "团块",
@@ -41,15 +28,6 @@ const SHAPE_LABELS: Record<BotAvatarShape, string> = {
   star: "星形"
 }
 type Appearance = { color: string; shape?: BotAvatarShape }
-
-/** Generate once at creation, then persist through the existing Bot profile. */
-export function createBotAppearance(): Appearance {
-  const choices = crypto.getRandomValues(new Uint32Array(2))
-  return {
-    color: BOT_COLORS[choices[0] % BOT_COLORS.length][0],
-    shape: BOT_AVATAR_SHAPES[choices[1] % BOT_AVATAR_SHAPES.length]
-  }
-}
 
 /** Shared by creation and the profile popover; thumbnails never register animation clocks. */
 export function BotAppearancePicker({
@@ -141,14 +119,19 @@ export function BotAvatarEditor({
             threadId={bot.threadId}
             color={current.color}
             shape={current.shape}
-            size={104}
+            size={64}
             busy={busy}
             settlement={settlement}
             waiting={waiting}
           />
         </button>
       </PopoverTrigger>
-      <PopoverContent className="bot-appearance-popover" sideOffset={12} aria-label="头像编辑器">
+      <PopoverContent
+        data-bot-popup
+        className="bot-appearance-popover"
+        sideOffset={12}
+        aria-label="头像编辑器"
+      >
         <div className="bot-appearance-heading">
           <span className="bot-appearance-tab">Bot</span>
           {saving && <Loader2 size={14} className="animate-spin" aria-label="正在保存头像" />}

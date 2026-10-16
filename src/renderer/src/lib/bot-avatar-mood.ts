@@ -72,7 +72,12 @@ export function botAvatarMood(
   if (name === "read_file") return "read"
   if (name === "write_file" || name === "edit_file") return "write"
   if (name === "execute") return "run"
-  if (name === "bot_delegate" || name === "bot_update_profile") return "send"
+  if (
+    ["bot_delegate", "bot_update_profile", "bot_create_teammate", "bot_update_teammate"].includes(
+      name
+    )
+  )
+    return "send"
   if (
     name === "bot_browser" ||
     name.startsWith("browser_") ||

@@ -4,6 +4,8 @@ const fixture = vi.hoisted(() => ({
   stop: vi.fn(),
   browserClose: vi.fn(),
   memoryClose: vi.fn(),
+  memoryChanged: vi.fn(),
+  notifyMemory: undefined as ((botId: string) => void) | undefined,
   summaryClose: vi.fn(),
   databaseClose: vi.fn(),
   trace: [] as string[]
@@ -20,11 +22,15 @@ vi.mock("./store", () => ({ BotStore: class {} }))
 vi.mock("./host", () => ({
   LocalBotHost: class {
     stop = fixture.stop
+    memoryChanged = fixture.memoryChanged
   }
 }))
 vi.mock("./runtime-adapter", () => ({ createLocalBotRunPort: vi.fn() }))
 vi.mock("./memory", () => ({
   BotMemoryService: class {
+    constructor(_root: string, onChanged: (botId: string) => void) {
+      fixture.notifyMemory = onChanged
+    }
     close = fixture.memoryClose
   }
 }))
@@ -43,6 +49,7 @@ beforeEach(() => {
   vi.resetModules()
   vi.resetAllMocks()
   fixture.trace = []
+  fixture.notifyMemory = undefined
   fixture.browserClose.mockImplementation(async () => {
     fixture.trace.push("browser")
   })
@@ -58,6 +65,17 @@ beforeEach(() => {
 })
 
 describe("Bot local service shutdown", () => {
+  it("routes committed memory invalidation through the existing host and fences it on shutdown", async () => {
+    const service = await import("./local-service")
+    service.getLocalBotHost()
+    fixture.notifyMemory!("bot-a")
+    expect(fixture.memoryChanged.mock.calls).toEqual([["bot-a"]])
+    const close = service.stopLocalBotHost()
+    fixture.notifyMemory!("bot-a")
+    await close
+    expect(fixture.memoryChanged).toHaveBeenCalledTimes(1)
+  })
+
   it("drains the host before closing resources, shares a single shutdown, and fences late IPC", async () => {
     let release!: () => void
     fixture.stop.mockImplementation(
