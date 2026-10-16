@@ -83,6 +83,8 @@ import {
 import {
   HARNESS_DEPLOY_UNIT_MAPPING_MAX_ENTRIES,
   HarnessSessionContextLimitError,
+  HarnessRequiredContextError,
+  requireLoadedHarnessContext,
   requireCompleteHarnessDeployUnitContext,
   requireCompleteHarnessSessionContext
 } from "./context-integrity"
@@ -2713,6 +2715,7 @@ export interface HarnessAgentConfig {
   agentMode?: HarnessRuntimeAgentMode
   subagentConfig?: HarnessProjectModeSubagentConfig
   toolConfig?: {
+    task?: { enabled: boolean }
     requestUserInput?: HarnessRequestUserInputConfig
   }
 }
@@ -2794,12 +2797,19 @@ function normalizeHarnessAgentConfig(value: unknown): HarnessAgentConfig | undef
   const requestUserInputConfig = isObject(value.toolConfig)
     ? normalizeHarnessRequestUserInputConfig(value.toolConfig.requestUserInput)
     : undefined
+  const taskConfig = isObject(value.toolConfig) && isObject(value.toolConfig.task) &&
+    typeof value.toolConfig.task.enabled === "boolean"
+    ? { enabled: value.toolConfig.task.enabled }
+    : undefined
 
-  if (!agentMode && !subagentConfig && !requestUserInputConfig) return undefined
+  if (!agentMode && !subagentConfig && !requestUserInputConfig && !taskConfig) return undefined
   return {
     ...(agentMode ? { agentMode } : {}),
     ...(subagentConfig ? { subagentConfig } : {}),
-    ...(requestUserInputConfig ? { toolConfig: { requestUserInput: requestUserInputConfig } } : {})
+    ...(requestUserInputConfig || taskConfig ? { toolConfig: {
+      ...(taskConfig ? { task: taskConfig } : {}),
+      ...(requestUserInputConfig ? { requestUserInput: requestUserInputConfig } : {})
+    } } : {})
   }
 }
 
@@ -2826,6 +2836,8 @@ async function readHarnessFeatureSessionContextAgentPrompt(
   } = {}
 ): Promise<HarnessSessionContextInjectResult> {
   if (!hasConfiguredHarnessInvocationInContext(context, "sessionContext")) {
+    if (options.selectedDeployUnits?.length)
+      throw new HarnessRequiredContextError(options.selectedDeployUnits.map(item => item.deployUnitId))
     const configKey = HARNESS_INSPECT_COMMAND_CONFIG_KEYS.sessionContext
     const detail = `插件未配置 inspectCommands.${process.platform}.${configKey}`
     console.warn(
@@ -2856,7 +2868,18 @@ async function readHarnessFeatureSessionContextAgentPrompt(
     )
     const result = await runHarnessJsonInvocation(configured, "sessionContext")
     const message = normalizeText(result.message).trim()
+    const agentmdLoadStatus = normalizeHarnessAgentmdLoadStatus(result.agentmdLoadStatus)
+    if (result.agentmdLoadStatus != null &&
+      (!Array.isArray(result.agentmdLoadStatus) ||
+        result.agentmdLoadStatus.length !== agentmdLoadStatus.length))
+      throw new HarnessRequiredContextError(["(unreported)"])
+    requireLoadedHarnessContext(
+      agentmdLoadStatus,
+      options.selectedDeployUnits?.map(item => item.deployUnitId)
+    )
     if (!isHarnessSessionContextOk(result.ok)) {
+      if (options.selectedDeployUnits?.length)
+        throw new HarnessRequiredContextError(options.selectedDeployUnits.map(item => item.deployUnitId))
       console.warn(
         "[HarnessBoard] session_context_inject returned not ok, fallback to CMBDevClaw AGENTS.md:",
         {
@@ -2867,12 +2890,16 @@ async function readHarnessFeatureSessionContextAgentPrompt(
       )
       return { warning: formatSessionContextInjectWarning(message) }
     }
-    const agentmdLoadStatus = normalizeHarnessAgentmdLoadStatus(result.agentmdLoadStatus)
     const sessionContext = requireCompleteHarnessSessionContext(
       normalizeText(result.sessionContext).trim()
     )
     const agentConfig = normalizeHarnessAgentConfig(result.agentConfig)
     if (!sessionContext) {
+      if (options.selectedDeployUnits?.length || agentmdLoadStatus.some(item => item.required !== false))
+        throw new HarnessRequiredContextError(
+          options.selectedDeployUnits?.map(item => item.deployUnitId) ??
+            agentmdLoadStatus.filter(item => item.required !== false).map(item => item.deployUnitId)
+        )
       return {
         agentmdLoadStatus,
         ...(agentConfig ? { agentConfig } : {})
@@ -2884,7 +2911,10 @@ async function readHarnessFeatureSessionContextAgentPrompt(
       ...(agentConfig ? { agentConfig } : {})
     }
   } catch (error) {
-    if (error instanceof HarnessSessionContextLimitError) throw error
+    if (error instanceof HarnessSessionContextLimitError || error instanceof HarnessRequiredContextError)
+      throw error
+    if (options.selectedDeployUnits?.length)
+      throw new HarnessRequiredContextError(options.selectedDeployUnits.map(item => item.deployUnitId))
     const detail = error instanceof Error ? error.message : String(error)
     console.error(
       "[HarnessBoard] session_context_inject failed, fallback to CMBDevClaw AGENTS.md:",
@@ -2987,7 +3017,7 @@ export async function buildHarnessFeatureAgentContext(
       : resolveHarnessRequestUserInputConfig(persistedToolConfig)
   const agentConfig: HarnessAgentConfig = {
     ...(pluginAgentConfig ?? {}),
-    toolConfig: { requestUserInput: requestUserInputConfig }
+    toolConfig: { ...pluginAgentConfig?.toolConfig, requestUserInput: requestUserInputConfig }
   }
   const harnessAgentsPrompt = sessionContextInjectResult?.prompt
   const pluginPromptLoaded = Boolean(harnessAgentsPrompt?.trim())

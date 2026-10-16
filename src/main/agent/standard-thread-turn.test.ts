@@ -26,6 +26,7 @@ import { issueRuntimePluginSourceToken, withRuntimePluginSource } from "../plugi
 import type { CreateAgentRuntimeOptions } from "./runtime"
 import {
   HarnessDeployUnitContextLimitError,
+  HarnessRequiredContextError,
   HarnessSessionContextLimitError
 } from "../harness-board/context-integrity"
 
@@ -104,6 +105,25 @@ describe("getHarnessAgentContext", () => {
     expect(runtimeOptions.currentRunMessageQueueOwnerToken).toBeUndefined()
   })
 
+  it.each([true, false, undefined])("honors the plugin task policy without widening caller restrictions: %s", async (enabled) => {
+    harnessServiceMocks.buildHarnessFeatureAgentContext.mockResolvedValue({
+      harnessProjectId: "project-1", featureId: "feature-1",
+      agentConfig: { toolConfig: { task: enabled === undefined ? undefined : { enabled } } }
+    })
+    const context = await getHarnessAgentContext(
+      { harnessFeature: { projectId: "project-1", slug: "feature-1" } },
+      { featureBinding: { projectId: "project-1", slug: "feature-1" } }
+    )
+    expect(context.disableSubagents).toBe(enabled === false ? true : undefined)
+    const options = (restricted: boolean) => prepareStandardThreadRuntimeFactory({
+      source: "desktop", runLease: { owner: "desktop", runId: "run-1" },
+      baseOptions: { threadId: "thread-1", disableSubagents: restricted } as Omit<CreateAgentRuntimeOptions, "modelId">,
+      harnessContext: context
+    }).optionsForModel()
+    expect(options(true).disableSubagents).toBe(true)
+    expect(options(false).disableSubagents).toBe(enabled === false)
+  })
+
   it("blocks a Harness turn when its critical context cannot be built", async () => {
     vi.spyOn(console, "warn").mockImplementation(() => undefined)
     const cause = new Error("catalog worker failed")
@@ -174,6 +194,18 @@ describe("getHarnessAgentContext", () => {
       harnessProjectId: "project-1",
       featureId: "feature-1",
       pluginPromptInject: "critical harness constraints"
+    })
+  })
+
+  it("explains missing required knowledge instead of suggesting a model retry", async () => {
+    vi.spyOn(console, "warn").mockImplementation(() => undefined)
+    harnessServiceMocks.buildHarnessFeatureAgentContext.mockRejectedValue(
+      new HarnessRequiredContextError(["required-team"])
+    )
+    const error = await getHarnessAgentContext({ harnessFeature: {} }).catch((caught: unknown) => caught)
+    expect(extractErrorDetail(error)).toMatchObject({
+      code: "harness_context_unavailable", statusLabel: "必需项目知识未装载",
+      reason: expect.stringContaining("required-team"), hint: expect.stringContaining("更换模型不能补齐")
     })
   })
 

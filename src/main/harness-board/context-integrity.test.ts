@@ -6,11 +6,35 @@ import {
   HARNESS_SESSION_CONTEXT_LIMIT_EXCEEDED,
   HARNESS_SESSION_CONTEXT_MAX_CHARS,
   HarnessSessionContextLimitError,
+  HarnessRequiredContextError,
+  requireLoadedHarnessContext,
   requireCompleteHarnessDeployUnitContext,
   requireCompleteHarnessSessionContext
 } from "./context-integrity"
 
 describe("Harness context integrity", () => {
+  const context = (deployUnitId: string, loaded: boolean, required?: boolean) => ({
+    deployUnitId, loaded, ...(required === undefined ? {} : { required }),
+    path: "knowledge.md", source: "local", message: loaded ? "" : "missing"
+  })
+
+  it("blocks partial and missing selected knowledge despite a usable remaining prompt", () => {
+    expect(() => requireLoadedHarnessContext([
+      context("loaded", true), context("missing", false)
+    ])).toThrow(HarnessRequiredContextError)
+    expect(() => requireLoadedHarnessContext([context("loaded", true)], ["selected"]))
+      .toThrow(HarnessRequiredContextError)
+    expect(() => requireLoadedHarnessContext([context("selected", false, false)], ["selected"]))
+      .toThrow(HarnessRequiredContextError)
+  })
+
+  it("preserves explicitly optional degradation while requiring selected inputs", () => {
+    expect(() => requireLoadedHarnessContext([
+      context("required", true), context("optional", false, false)
+    ], ["required"])).not.toThrow()
+    expect(() => requireLoadedHarnessContext([])).not.toThrow()
+  })
+
   it("preserves a complete session context at the configured safety boundary", () => {
     const context = "x".repeat(HARNESS_SESSION_CONTEXT_MAX_CHARS)
 

@@ -540,6 +540,17 @@ export function extractErrorDetail(
       providerMessage: sessionContextLimitMessage
     }
   }
+  const requiredContextError = findErrorWithCode(error, "HARNESS_REQUIRED_CONTEXT_UNAVAILABLE")
+  if (requiredContextError) {
+    const reason = cleanProviderMessage(requiredContextError)
+    return {
+      code: "harness_context_unavailable",
+      statusLabel: "必需项目知识未装载",
+      hint: "请核对已选部署单元、知识来源及同步结果；补齐后再运行。更换模型不能补齐缺失的项目知识。",
+      reason: reason ?? "必需项目知识未完整装载，已阻止本次任务。",
+      providerMessage: reason
+    }
+  }
   const harnessContextError = findErrorWithCode(error, "HARNESS_AGENT_CONTEXT_UNAVAILABLE")
   if (harnessContextError) {
     const harnessContextCause = asErrorLike(harnessContextError)?.cause

@@ -169,6 +169,8 @@ export interface HarnessAgentmdLoadStatusItem {
   deployUnitId: string
   path: string
   loaded: boolean
+  /** Missing reported constraints are required unless explicitly declared optional. */
+  required?: boolean
   source: string
   message: string
 }
@@ -209,6 +211,7 @@ export function normalizeHarnessAgentmdLoadStatus(value: unknown): HarnessAgentm
       deployUnitId: deployUnitId || "(unknown)",
       path,
       loaded: item.loaded === true,
+      ...(typeof item.required === "boolean" ? { required: item.required } : {}),
       source: normalizeHarnessText(item.source).trim(),
       message: normalizeHarnessText(item.message).trim()
     })

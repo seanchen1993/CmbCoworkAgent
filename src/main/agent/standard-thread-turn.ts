@@ -90,6 +90,8 @@ export interface HarnessAgentContext {
   pluginPromptInject?: string
   enableAgentsPrompt?: boolean
   subagentConfig?: HarnessProjectModeSubagentConfig
+  /** A plugin may disable task spawning; it cannot widen a caller's leaf restriction. */
+  disableSubagents?: boolean
   requestUserInputConfig?: HarnessRequestUserInputConfig
   isHarnessProjectSession?: boolean
   harnessAgentsPrompt?: string
@@ -330,6 +332,9 @@ export async function getHarnessAgentContext(
     pluginPromptInject: featureContext.systemPromptInject,
     enableAgentsPrompt: featureContext.enableAgentsPrompt,
     subagentConfig: featureContext.agentConfig?.subagentConfig,
+    ...(featureContext.agentConfig?.toolConfig?.task?.enabled === false
+      ? { disableSubagents: true }
+      : {}),
     requestUserInputConfig: featureContext.agentConfig?.toolConfig?.requestUserInput,
     ...(isHarnessProjectSession ? { isHarnessProjectSession: true } : {}),
     harnessAgentsPrompt: featureContext.harnessAgentsPrompt,

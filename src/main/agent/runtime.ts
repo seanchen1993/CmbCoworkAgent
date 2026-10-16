@@ -6981,6 +6981,10 @@ The workspace root is: ${fileRoot}`
               // verify (full shell) keep both: a write-capable subagent inherits
               // claudeMd in CC. memory_search/memory_get tools stay available either way.
               enableAgentsPrompt: !restrictedRole,
+              // Plugin knowledge is already resolved in the parent's frozen run context.
+              // Preserve it separately from workspace AGENTS and optional memory policy.
+              harnessAgentsPrompt: normalizedHarnessAgentsPrompt,
+              agentmdLoadStatus: normalizedHarnessAgentmdLoadStatus,
               disableMemoryInjection: restrictedRole,
               memoryEnabled: memoryEnabledForThread,
               agentMode: "normal",
