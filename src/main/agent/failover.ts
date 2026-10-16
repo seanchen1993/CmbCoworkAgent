@@ -540,6 +540,17 @@ export function extractErrorDetail(
       providerMessage: sessionContextLimitMessage
     }
   }
+  const requiredContextChanged = findErrorWithCode(error, "MODS_REQUIRED_CONTEXT_CHANGED")
+  if (requiredContextChanged) {
+    const reason = cleanProviderMessage(requiredContextChanged)
+    return {
+      code: "harness_context_unavailable",
+      statusLabel: "必需项目知识被提示词处理改写",
+      hint: "请保留原项目知识后重试，或撤回改写该内容的提示词 Mod。更换模型不能修复上下文完整性。",
+      reason: reason ?? "必需项目知识已变化，已阻止本次模型请求。",
+      providerMessage: reason
+    }
+  }
   const requiredContextError = findErrorWithCode(error, "HARNESS_REQUIRED_CONTEXT_UNAVAILABLE")
   if (requiredContextError) {
     const reason = cleanProviderMessage(requiredContextError)

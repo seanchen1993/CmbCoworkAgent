@@ -11,7 +11,7 @@ import type { ModRuntimeAuthority } from "../mods/runtime-instance"
 import type { ModHookStream, FunctionStreamOptions } from "../mods/v2/stream-dispatcher"
 import { currentCompletionBudget, reserveCompletionModelUsage } from "../mods/v2/completion-budget"
 import { composeModPrompt } from "./mods-prompt-composition"
-import { promptContributionsFor } from "./mods-prompt-sources"
+import { assertRequiredPromptContext, promptContributionsFor } from "./mods-prompt-sources"
 import type { FunctionPromptCore, FunctionPromptEvent } from "../../shared/mods/v2/prompt-composition"
 
 export interface CompletionRuntimeCancellation {
@@ -522,6 +522,7 @@ class ModAwareChatModel extends BaseChatModel {
           if (!base.bindTools) throw new Error("MODS_MODEL_TOOLS_UNSUPPORTED")
           provider = base.bindTools(tools, boundTools.kwargs) as BaseChatModel
         }
+        assertRequiredPromptContext(providerMessages, authority)
         if (promptComposition) {
           const model = selection?.model ?? String(received.model)
           const composed = await composeModPrompt(
@@ -548,6 +549,7 @@ class ModAwareChatModel extends BaseChatModel {
           assertActive()
           finalPromptText = composed.text
         }
+        assertRequiredPromptContext(providerMessages, authority)
         // Budget the actual composed text and described tools, not the pre-Hook snapshot.
         if (selection) {
           const inputTokens = countTokensApproximately(providerMessages, providerTools)

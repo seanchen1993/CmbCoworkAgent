@@ -4,11 +4,14 @@ import type { BaseMessage } from "@langchain/core/messages"
 import { createMiddleware, type WrapModelCallHook } from "langchain"
 import type { ModRuntimeAuthority } from "../mods/runtime-instance"
 import type { FunctionInstructionFile } from "../../shared/mods/v2/prompt-context"
+import { assertRequiredPromptTexts, RequiredPromptContextError } from "./required-prompt-context"
 
 export type PromptContribution = {
   id: string
   text: string | null
   scope: "session"
+  /** Host-resolved project knowledge that ordinary prompt transforms must retain verbatim. */
+  requiredText?: string
   context?: {
     name: string
     instructionFiles?: readonly FunctionInstructionFile[]
@@ -31,6 +34,7 @@ type PromptFrame = Readonly<{
   lifetime: Lifetime
   snapshot: ContentSnapshot | undefined
   contributions: readonly PromptContribution[] | undefined
+  requiredTexts: readonly string[]
 }>
 
 const frames = new AsyncLocalStorage<PromptFrame | undefined>()
@@ -118,6 +122,7 @@ function copyContributions(
     if (context && part.context)
       contextOccurrences.set(context, promptContextOccurrence(part.context))
     result.push(Object.freeze({ id: part.id, text: part.text, scope: "session",
+      ...(part.requiredText === undefined ? {} : { requiredText: part.requiredText }),
       ...(context ? { context } : {}) }))
   }
   return Object.freeze(result)
@@ -203,12 +208,21 @@ export function createPromptSourceMiddleware(options: {
       const authority = options.authority()
       if (!authority || !live(authority)) return frames.run(undefined, () => handler(request))
       const content = snapshot(request.systemMessage?.content)
-      const seed = copyContributions(options.seed(request))
+      const rawSeed = options.seed(request)
+      const requiredTexts = Object.freeze((rawSeed ?? []).flatMap(part => {
+        if (part?.requiredText === undefined) return []
+        if (typeof part.requiredText !== "string" || !part.requiredText ||
+          typeof part.text !== "string" || !part.text.includes(part.requiredText))
+          throw new RequiredPromptContextError()
+        return [part.requiredText]
+      }))
+      const seed = copyContributions(rawSeed)
       const lifetime = { active: true }
       const frame: PromptFrame = Object.freeze({
         authority,
         lifetime,
         snapshot: content,
+        requiredTexts,
         contributions: content && seed && reconstruct(seed) === content.text ? seed : undefined
       })
       try {
@@ -239,6 +253,17 @@ export function observePromptSourceMiddleware<T extends ObservableMiddleware>(
     })
   }
   return { ...middleware, wrapModelCall: observed }
+}
+
+/** Requirements survive opaque native rewrites even when the section provenance cannot. */
+export function assertRequiredPromptContext(
+  messages: readonly BaseMessage[],
+  authority: ModRuntimeAuthority
+): void {
+  const frame = frames.getStore()
+  if (!frame || frame.authority !== authority || !active(frame.lifetime)) return
+  authority.assertLive()
+  assertRequiredPromptTexts(messages, frame.requiredTexts)
 }
 
 /** Undefined keeps the final adapter's whole-message opaque path, never a guessed split. */

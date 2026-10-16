@@ -6613,6 +6613,8 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
   const combinedAgentsPrompt = rawCombinedAgentsPrompt
     ? renderAgentsInstructionsPrompt(rawCombinedAgentsPrompt)
     : undefined
+  // Protect canonical host-rendered bytes, not the original unnormalized Markdown.
+  const requiredProjectPrompt = normalizedHarnessAgentsPrompt ? combinedAgentsPrompt : undefined
   appendSystemContribution("cmb:plugin-context",
     renderedPluginPromptInject ? `\n\n${renderedPluginPromptInject}` : null)
   appendSystemContribution("cmb:agents",
@@ -6624,6 +6626,7 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
     })
   }
   modSystemContributions.at(-1)!.context = modInstructionContext
+  modSystemContributions.at(-1)!.requiredText = requiredProjectPrompt
   const resolvedProjectContextPrompt =
     [renderedPluginPromptInject, combinedAgentsPrompt].filter(Boolean).join("\n\n") || undefined
   if (
@@ -7221,10 +7224,12 @@ The workspace root is: ${fileRoot}`
   const coordinatorProjectInstructions = [combinedAgentsPrompt, extraSystemPrompt]
     .filter(Boolean)
     .join("\n\n")
+  // Plugin knowledge is inherited separately, preserving one copy in the actual worker prompt.
+  const workerAgentsPrompt = normalizedHarnessAgentsPrompt ? undefined : combinedAgentsPrompt
   const coordinatorWorkerProjectInstructions = runtimePolicy.isProjectMode
-    ? [resolvedProjectContextPrompt, extraSystemPrompt].filter(Boolean).join("\n\n")
+    ? [renderedPluginPromptInject, workerAgentsPrompt, extraSystemPrompt].filter(Boolean).join("\n\n")
     : [
-        combinedAgentsPrompt,
+        workerAgentsPrompt,
         coordinatorPluginPromptInject
           ? `### Skills Runtime Context\n\n${coordinatorPluginPromptInject}`
           : "",
@@ -7390,6 +7395,8 @@ Use the same worker thread context for follow-up instructions. ${scratchpadGuida
     // derive from these LocalSandbox/runtime options). SESSION_ID intentionally
     // stays the worker thread id and is not part of this bundle.
     const workerHarnessContext = {
+      harnessAgentsPrompt: normalizedHarnessAgentsPrompt,
+      agentmdLoadStatus: normalizedHarnessAgentmdLoadStatus,
       agentId: workerInput.workerId,
       onFileMutation,
       systemId,
@@ -8029,7 +8036,8 @@ Access limits: read-only handoff continuation. Do not modify files, run commands
       hasCodeExecTool,
       deferredToolIds
     })
-    modSystemContributions = [{ id: "cmb:coordinator", text: systemPrompt, scope: "session" }]
+    modSystemContributions = [{ id: "cmb:coordinator", text: systemPrompt, scope: "session",
+      requiredText: requiredProjectPrompt }]
   } else {
     appendSystemContribution("cmb:tool-routing", runtimePolicy.includeInjectedToolUsagePrompt
       ? renderInjectedToolUsagePrompt({
@@ -8425,7 +8433,7 @@ Access limits: read-only handoff continuation. Do not modify files, run commands
       ? [
           { id: "cmb:agent", text: options.modAgentSystemPrompt, scope: "session" },
           { id: "cmb:agents", text: combinedAgentsPrompt ? `\n\n${combinedAgentsPrompt}` : null,
-            scope: "session", context: modInstructionContext }
+            scope: "session", context: modInstructionContext, requiredText: requiredProjectPrompt }
         ]
       : modSystemContributions,
     modTaskProjectContributions: projectModeTaskSubagentsInheritFullContext
@@ -8436,12 +8444,12 @@ Access limits: read-only handoff continuation. Do not modify files, run commands
           ...(combinedAgentsPrompt ? [
             { id: "cmb:agents", text:
               `${renderedPluginPromptInject ? "\n\n" : ""}${combinedAgentsPrompt}`, scope: "session",
-              context: modInstructionContext }
+              context: modInstructionContext, requiredText: requiredProjectPrompt }
           ] : [])
         ]
       : combinedAgentsPrompt
         ? [{ id: "cmb:agents", text: combinedAgentsPrompt, scope: "session",
-            context: modInstructionContext }]
+            context: modInstructionContext, requiredText: requiredProjectPrompt }]
         : [],
     outputStyle,
     toolStrategy: windowsSandbox === "readonly" ? "standard" : toolStrategy,
