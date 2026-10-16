@@ -6457,12 +6457,11 @@ Use the same worker thread context for follow-up instructions. ${scratchpadGuida
     let workerTraceError: string | undefined
     let workerValuesSnapshotAccumulator: WorkerValuesSnapshotAccumulator | undefined
     const syncWorkerSkillAttribution = (): void => {
-      if (!workerTracer) return
       const usedSkills = workerSkillUsageDetector.getUsedSkillNames()
       const skillSource = workerSkillUsageDetector.getUsedSkillSourceRefs()
-      workerTracer.setUsedSkills(usedSkills)
-      workerTracer.setSkillSource(skillSource)
-      workerTracer.setEvolvedSkills(workerSkillUsageDetector.getUsedEvolvedSkillNames())
+      workerTracer?.setUsedSkills(usedSkills)
+      workerTracer?.setSkillSource(skillSource)
+      workerTracer?.setEvolvedSkills(workerSkillUsageDetector.getUsedEvolvedSkillNames())
       // Workers own their own thread, so recordGen reads the worker's adoption
       // context. Resolve the fallback chain (this run → this worker thread →
       // the coordinator thread) instead of publishing the bare detector result,
@@ -6588,6 +6587,9 @@ Use the same worker thread context for follow-up instructions. ${scratchpadGuida
         )
         workerRuntimeTraceContext = workerTracer?.getTraceContext() ?? traceContext
       }
+      // Trace creation resets adoption context. Restore inherited Skills before
+      // the first tool can generate code, even if this worker never reads a Skill.
+      runTraceSideEffect("CoordinatorWorker Skill initialization", syncWorkerSkillAttribution)
       const workerPromptMessage = new HumanMessage({
         content: effectiveWorkerPrompt,
         id: randomUUID()
