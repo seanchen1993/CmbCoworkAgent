@@ -2,7 +2,7 @@ import { createHash } from "node:crypto"
 import type { ModControlStore } from "../control-store"
 import type { ModJson } from "../../../shared/mods/types"
 import {
-  DEVELOPMENT_CAPABILITIES,
+  developmentCapabilities,
   type DevelopmentScope,
   type DevelopmentStatus
 } from "./development-session"
@@ -30,6 +30,9 @@ export class DevelopmentHistory {
   read(scope: DevelopmentScope): DevelopmentStatus | undefined {
     const value = this.store.functionState.get(namespace, identity(scope))
     if (value === undefined) return undefined
+    const validation = value && typeof value === "object" && !Array.isArray(value)
+      ? value.validation : undefined
+    const allowed = developmentCapabilities(validation === "authorized-real" ? validation : undefined)
     if (
       !value ||
       typeof value !== "object" ||
@@ -48,9 +51,11 @@ export class DevelopmentHistory {
       typeof value.compiledDigest !== "string" ||
       !/^[a-f0-9]{64}$/.test(value.compiledDigest) ||
       !Array.isArray(value.capabilities) ||
-      value.capabilities.length > DEVELOPMENT_CAPABILITIES.length ||
+      (value.validation !== undefined &&
+        value.validation !== "session-local" && value.validation !== "authorized-real") ||
+      value.capabilities.length > allowed.length ||
       value.capabilities.some(
-        (item) => typeof item !== "string" || !DEVELOPMENT_CAPABILITIES.includes(item)
+        (item) => typeof item !== "string" || !allowed.includes(item)
       ) ||
       typeof value.phase !== "string" ||
       ![
@@ -74,6 +79,9 @@ export class DevelopmentHistory {
       bundleDigest: value.bundleDigest,
       compiledDigest: value.compiledDigest,
       capabilities: value.capabilities as string[],
+      ...(value.validation ? { validation: value.validation } : {}),
+      ...(typeof value.purpose === "string" && value.purpose.length <= 400
+        ? { purpose: value.purpose } : {}),
       phase: uncertain ? "unknown" : "stopped",
       error: uncertain
         ? "MODS_DEVELOPMENT_RESTART_UNCONFIRMED"

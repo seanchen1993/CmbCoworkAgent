@@ -37,6 +37,12 @@ it("retains an interrupted activation across SQLite reopen without reviving auth
     expect(
       history.read({ ...scope, incarnation: { token: "recreated", legacyCreatedAt: 1 } })
     ).toBeUndefined()
+    history.write(scope, { ...status, validation: "authorized-real", purpose: "Actual file action",
+      capabilities: ["fs.write", "http.fetch"], phase: "active",
+      diagnostics: { inFlight: 1, subscriptions: 1 } })
+    expect(history.read(scope)).toMatchObject({ validation: "authorized-real", phase: "unknown",
+      error: "MODS_DEVELOPMENT_RESTART_UNCONFIRMED" })
+    expect(history.read(scope)?.diagnostics).toBeUndefined()
     history.write(scope, { ...status, phase: "queued" })
     expect(history.read(scope)).toMatchObject({
       phase: "stopped",

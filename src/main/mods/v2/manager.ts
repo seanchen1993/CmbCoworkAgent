@@ -1,5 +1,7 @@
-import { FunctionDevelopmentSessions, type DevelopmentScope, type DevelopmentRevision, type DevelopmentStatus, type DevelopmentActivation, type DevelopmentCandidate } from "./development-session"
+import { developmentRegistrationCapabilities } from "./development-registration-capabilities"
+import { FunctionDevelopmentSessions, DEVELOPMENT_CAPABILITIES, developmentCapabilities, type DevelopmentScope, type DevelopmentRevision, type DevelopmentStatus, type DevelopmentActivation, type DevelopmentCandidate } from "./development-session"
 import { developmentUiOnly } from "./development-conversation-owner"
+import { withDevelopmentNativeAuthority } from "./development-native-authority"
 import { DevelopmentHistory } from "./development-history"
 import { guardPluginCatalogOperations, pluginCatalogGate } from "../../plugins/catalog-gate"
 import type { FunctionModelResult, FunctionForkResult } from "../../../shared/mods/v2/model-protocol"
@@ -15,11 +17,17 @@ import { FunctionStartupModelRoute } from "./startup-model-route"
 import { FunctionHostOnlySites } from "./host-only-sites"
 import { pickFunctionUserConfigPath, type FunctionUserConfigPathKind } from "./user-config-path"
 import { FunctionConfigurationReloadControl } from "./configuration-reload-control"
+import type { FunctionRuntimeSession, FunctionRuntimeSessions } from "../../../shared/mods/v2/runtime-sessions"
+import { readRuntimeStopReceipts, writeRuntimeStopReceipts, type RuntimeStopReceipt } from "./runtime-stop-receipts"
 import { claimConfigurationReload } from "./configuration-reload-lease"
 import { trackFunctionGuest } from "./session-guest"
+import { FunctionGuestExecutionFacts } from "./guest-execution-facts"
 import { trackFunctionSession } from "./session-facade"
 import { retainHostStream } from "./host-stream-lifetime"
 import { withFunctionTransportExecution, withDetachedFunctionLifecycle } from "./host-call"
+import { getModCallContext } from "../context"
+import { validateFunctionTurnStepInput } from "./turn-contract"
+import { validateModelToolInput } from "./tool-sdk"
 import { assertFunctionSourcesCurrent } from "./source-adoption-fence"
 import { FunctionUserConfigValues } from "./user-config-values"
 import { resolveFunctionUserConfig } from "../../../shared/mods/v2/user-config"
@@ -27,7 +35,7 @@ import { synchronizePromptContext } from "../../../shared/mods/v2/prompt-context
 import { publishPromptAttachmentInput } from "./prompt-attachment-publication"
 import { bindHostPromptGuard, bindHostPromptOccurrence, hostPromptGuard, hostPromptOccurrence, isCachedPromptEvent } from "./prompt-cache"
 import type { FunctionPromptCore, FunctionPromptEvent } from "../../../shared/mods/v2/prompt-composition"
-import { ClawStore } from "../claw-store"
+import { ClawStore, withoutUninstalledClawPlugins } from "../claw-store"
 import {
   CLAW_ACTION_MAX_BYTES,
   clawActionObject,
@@ -161,6 +169,8 @@ interface Snapshot {
   grant: ModGrant
 }
 interface PreparedConfigurationReload {
+  created?(entry: SessionEntry): void
+  capacityReservation?: object
   snapshots: Map<string, Snapshot>
   sourcePlugins: Map<string, Snapshot>
   selectionFingerprint: string
@@ -178,13 +188,19 @@ export interface HostCompletionOptions {
   evidence?(record: BoundCompletionEvidenceRecord): void
 }
 interface FunctionConnection {
+  readonly stats?: { pending: number; calls: number }
   load(code: string, options: CompiledFunctionPlugin["options"]): Promise<FunctionGuest>
   stop(): void
   stopAndDrain?(): Promise<void>
 }
 interface SessionEntry {
+  catalogInvalidated?: boolean
+  execution: FunctionGuestExecutionFacts
+  registrationProbe: boolean
+  probeRetirementError?: string
   closeConversationOwner?: () => void
   conversationOwner?: FunctionConversationOwnerContext
+  conversationGuard?: () => void
   activity: FunctionSessionActivity
   initializer: FunctionSessionInitializer
   applicationError?: string
@@ -201,6 +217,7 @@ interface SessionEntry {
   client: FunctionConnection
   session?: FunctionSession
   loading: Promise<FunctionSession>
+  loaded?: boolean
   snapshots: Map<string, Snapshot>
   sourceDirectories: Set<string>
   developmentPlugins: Map<FunctionPlugin, DevelopmentActivation>
@@ -230,6 +247,9 @@ interface FunctionEndingRequest {
   stage?: FunctionClassicEndStage
 }
 interface FunctionManagerHost extends FunctionConversationManagerHost {
+  threadIncarnationKey?(workspace: string, threadId: string): string | undefined
+  capabilityContext?(workspace: string, threadId: string):
+    import("../capability-context").CapabilityContext
   debugLog?: FunctionSessionHost["debugLog"]
   protects?(workspace: string): boolean
   captureSiteGuard?(workspace: string, threadId: string): () => void
@@ -326,6 +346,7 @@ interface FunctionManagerHost extends FunctionConversationManagerHost {
     timeoutMs: number
   ): Promise<ProjectCheckResult>
   plugins(): ModPluginSource[]
+  installedPluginIds?(): ReadonlySet<string>
   enabled(workspace: string): boolean
   publish(workspace: string, value: ModJson, signal: AbortSignal): Promise<ModJson>
   changed(threadId: string, scope?: ModUiChangeScope): void
@@ -385,6 +406,14 @@ interface FunctionManagerHost extends FunctionConversationManagerHost {
     input: ModObject,
     signal: AbortSignal
   ): Promise<ModObject>
+  callDevelopmentTool?(
+    workspace: string,
+    threadId: string,
+    activation: DevelopmentActivation,
+    capability: "fs.write" | "tool.call",
+    input: ModObject,
+    signal: AbortSignal
+  ): Promise<ModObject>
   callMcp?(
     workspace: string,
     threadId: string,
@@ -431,16 +460,27 @@ interface FunctionManagerHost extends FunctionConversationManagerHost {
   ): ReturnType<NonNullable<FunctionSessionHost["scheduleCommand"]>>
 }
 
-/** Grants bind a complete source snapshot; a live session never rereads mutable plugin source. */
 export class FunctionModsManager {
   private readonly userConfigValues: FunctionUserConfigValues
   private readonly configurationSourceCache = new FunctionConfigurationSourceCache()
-  private readonly statusCompilations = new Map<string, Promise<CompiledFunctionPlugin>>()
+  private readonly statusSourceCache = new FunctionConfigurationSourceCache(64)
   private readonly clawSelections = new Map<string, { epoch: number; active: ClawProfile | null }>()
+  private readonly preparingSelection = new AsyncLocalStorage<{
+    workspace: string
+    threadId: string
+    profile: ClawProfile | null
+    active: boolean
+  }>()
   private readonly applicationPolicies: ApplicationCompletionPolicies
   private readonly initialEpoch = randomInt(1, 2 ** 48)
   private readonly epochs = new Map<string, number>()
+  // Plugin catalog retirement is independent from native thread/policy authority.
+  private readonly nativeEpochs = new Map<string, number>()
   private readonly sessions = new Map<string, SessionEntry>()
+  private readonly runtimeReservations = new Map<string, object>()
+  private readonly pendingSessionBuilds = new Map<string, Promise<SessionEntry>>()
+  private readonly probeRetirements = new Map<string, Promise<void>>()
+  private capacityReclaim?: Promise<void>
   private readonly hostOnlySites: FunctionHostOnlySites
   private readonly siteOwners = new Map<string, {
     workspace: string
@@ -465,8 +505,11 @@ export class FunctionModsManager {
   private readonly uiResolveQuotas = new Map<string, FunctionUiResolveMainQuota>()
   private readonly applying = new Map<string, Promise<void>>()
   private readonly reloadControl = new FunctionConfigurationReloadControl()
+  private readonly releasedSessions = new Map<string, RuntimeStopReceipt>()
+  private runtimeReceiptError?: string
   private readonly operations = new AsyncLocalStorage<FunctionOperationScope>()
   private readonly stopConfigurationIdle: () => void
+  private readonly configurationIdleListeners = new Set<(threadId: string) => void>()
   private readonly namedStates = new Map<
     string,
     {
@@ -489,6 +532,7 @@ export class FunctionModsManager {
     changed?(scope: DevelopmentScope, status: DevelopmentStatus): void
   }
   private readonly developmentCandidates = new WeakMap<DevelopmentCandidate, SessionEntry>()
+  private readonly developmentPreflights = new Set<string>()
 
   configureDevelopmentAccess(access: NonNullable<FunctionModsManager["developmentAccess"]>): void {
     if (this.developmentAccess) throw new ModFunctionError("MODS_DEVELOPMENT_ALREADY_CONFIGURED")
@@ -503,6 +547,14 @@ export class FunctionModsManager {
       },
       isBusy: scope => this.host.configurationBusy?.(scope.threadId) === true ||
         (this.sessions.get(JSON.stringify([scope.workspace, scope.threadId]))?.activity.retirementBlockingSize ?? 0) > 0,
+      diagnostics: (scope, activationId) => {
+        const entry = this.sessions.get(JSON.stringify([scope.workspace, scope.threadId]))
+        if (!entry?.session || ![...entry.developmentPlugins.values()].some(value =>
+          value.id === activationId && value.scope.incarnation.token === scope.incarnation.token &&
+          value.scope.incarnation.legacyCreatedAt === scope.incarnation.legacyCreatedAt)) return undefined
+        return { ...{},
+          backgroundResources: entry.session.ownedResourceCount }
+      },
       run: (_scope, work) => this.operations.exit(() => this.startupModels.fresh(() =>
         withFreshFunctionSessionActivity(() => withDetachedFunctionLifecycle(work)))),
       prepare: async activation => {
@@ -595,6 +647,78 @@ export class FunctionModsManager {
     if (!this.development) throw new ModFunctionError("MODS_DEVELOPMENT_UNAVAILABLE")
     return this.development.stage(scope, revision, assertCurrent)
   }
+  /** Current-turn diagnostic guest only: never grants, adopts or retires the published version. */
+  async preflightDevelopment(scope: DevelopmentScope, revision: DevelopmentRevision,
+    assertSource: () => void): Promise<void> {
+    if (!this.developmentAccess) throw new ModFunctionError("MODS_DEVELOPMENT_UNAVAILABLE")
+    const key = JSON.stringify([scope.workspace, scope.threadId])
+    if (this.developmentPreflights.has(key) || this.developmentPreflights.size >= 4)
+      throw new ModFunctionError("MODS_DEVELOPMENT_BUSY")
+    const previous = this.sessions.get(key), epoch = this.epoch(scope.workspace)
+    const allowed = developmentCapabilities(revision.validation)
+    if (revision.capabilities.some(method => !allowed.includes(method)))
+      throw new ModFunctionError("MODS_DEVELOPMENT_CAPABILITY_DENIED")
+    const guard = () => {
+      assertSource()
+      this.developmentAccess!.assertScope(scope)
+      this.host.assertThread?.(scope.workspace, scope.threadId)
+      this.assertEndAdmission(scope.workspace, scope.threadId)
+      if (this.closed || !this.host.enabled(scope.workspace) ||
+        this.epoch(scope.workspace) !== epoch || this.sessions.get(key) !== previous)
+        throw new ModFunctionError("MODS_DEVELOPMENT_SOURCE_CHANGED")
+      if (this.reloadControl.error(scope.workspace, scope.threadId) || this.releasedSessions.has(key))
+        throw new ModFunctionError("MODS_CONFIG_RELOAD_STOPPED")
+    }
+    guard()
+    const activation: DevelopmentActivation = Object.freeze({
+      id: randomUUID(), scope, revision,
+      assertCurrent: guard,
+      assertCapability: (method: string) => {
+        guard()
+        if (!revision.capabilities.includes(method))
+          throw new ModFunctionError("MODS_DEVELOPMENT_CAPABILITY_DENIED")
+        if (!DEVELOPMENT_CAPABILITIES.includes(method))
+          throw new ModFunctionError("MODS_CONFIG_RELOAD_EFFECT_UNSUPPORTED",
+            `插件启动时需要 ${method}；制作预检查不请求实际宿主权限。`)
+      },
+      assertCapabilities: (methods: readonly string[]) => {
+        guard()
+        if (methods.some(method => !revision.capabilities.includes(method)))
+          throw new ModFunctionError("MODS_DEVELOPMENT_CAPABILITY_DENIED")
+      }
+    })
+    const releaseCatalog = pluginCatalogGate.retain()
+    this.developmentPreflights.add(key)
+    let candidate: SessionEntry | undefined
+    let failed = false, failure: unknown
+    try {
+      await this.operations.exit(() => this.startupModels.fresh(() =>
+        withFreshFunctionSessionActivity(() => withDetachedFunctionLifecycle(async () => {
+          candidate = await this.buildEntry(scope.workspace, scope.threadId, false,
+            previous, undefined, activation)
+          guard()
+          candidate.initializer.assertReady()
+        }))))
+    } catch (error) {
+      failed = true
+      failure = error
+    } finally {
+      try {
+        if (candidate) {
+          this.candidates.delete(candidate)
+          candidate.activity.close()
+          try { this.closePromptSessions(candidate) }
+          catch { failed = true; failure = new ModFunctionError("MODS_DEVELOPMENT_CLEANUP_UNCONFIRMED") }
+          try { await this.drainEntry(candidate, true) }
+          catch { failed = true; failure = new ModFunctionError("MODS_DEVELOPMENT_CLEANUP_UNCONFIRMED") }
+        }
+      } finally {
+        this.developmentPreflights.delete(key)
+        releaseCatalog()
+      }
+    }
+    if (failed) throw failure
+  }
   approveDevelopment(scope: DevelopmentScope, componentId: string, digest: string,
     capabilities: readonly string[], assertTrustedUser: () => void) {
     if (!this.development) throw new ModFunctionError("MODS_DEVELOPMENT_UNAVAILABLE")
@@ -644,6 +768,17 @@ export class FunctionModsManager {
     private readonly createClient: () => FunctionConnection = () =>
       new FunctionRuntimeClient(join(__dirname, "function-mod-host.js"))
   ) {
+    try {
+      for (const receipt of readRuntimeStopReceipts(store)) {
+        this.releasedSessions.set(JSON.stringify([receipt.workspace, receipt.threadId]), receipt)
+        this.sessionGeneration = Math.max(this.sessionGeneration, receipt.generation)
+        const control = this.reloadControl.begin(receipt.workspace, receipt.threadId)
+        control.failed(new Error(receipt.error ?? "组件已由你停用，请明确恢复。"))
+        control.finish()
+      }
+    } catch {
+      this.runtimeReceiptError = "无法读取组件停止记录，已阻止重新启动。请保留任务记录并检查本机数据。"
+    }
     this.userConfigValues = new FunctionUserConfigValues(store, host.secretProtector)
     this.applicationPolicies = new ApplicationCompletionPolicies(store)
     this.hostOnlySites = new FunctionHostOnlySites({
@@ -675,6 +810,8 @@ export class FunctionModsManager {
       "pickUserConfigPath",
       "applyUserConfig",
       "reloadUserConfig",
+      "releaseRuntimeSession",
+      "resumeRuntimeSession",
       "runtimeReady",
       "effectiveStatus",
       "status",
@@ -724,6 +861,7 @@ export class FunctionModsManager {
       this.development?.idle(threadId)
       for (const entry of this.sessions.values())
         if (entry.threadId === threadId) this.scheduleConfigurationApplication(entry)
+      this.publishConfigurationIdle(threadId)
     }) ?? (() => {})
     this.stopWatching = onWorkspaceFilesChanged((change) => {
       for (const entry of this.sessions.values())
@@ -738,6 +876,33 @@ export class FunctionModsManager {
 
 
   /** Read actual host occupancy; resident idle UI is not a running operation. */
+  configurationBusy(threadId: string): boolean {
+    return this.host.configurationBusy?.(threadId) === true ||
+      [...this.sessions.values()].some(entry => entry.threadId === threadId &&
+        entry.activity.retirementBlockingSize > 0)
+  }
+
+  selectionRuntimeReady(workspace: string, threadId: string, profile: ClawProfile | null): boolean {
+    const entry = this.sessions.get(JSON.stringify([workspace, threadId]))
+    return !this.closed && this.host.enabled(workspace) &&
+      !this.reloadControl.error(workspace, threadId) && !!entry?.loaded &&
+      !this.entryDrains.has(entry) && entry.session?.lifecycleSignal.aborted === false &&
+      entry.session?.hasCompletedStartup === true &&
+      !entry.session.plugins.some(plugin => plugin.guest.stats.disposed) &&
+      entry.selectionFingerprint === encodeModJson(profile)
+  }
+
+  onConfigurationIdle(listener: (threadId: string) => void): () => void {
+    this.configurationIdleListeners.add(listener)
+    return () => { this.configurationIdleListeners.delete(listener) }
+  }
+
+  private publishConfigurationIdle(threadId: string): void {
+    for (const listener of this.configurationIdleListeners) {
+      try { listener(threadId) } catch { /* Observers cannot break operation cleanup. */ }
+    }
+  }
+
   assertCatalogIdle(): void {
     if (this.candidates.size || this.applying.size || this.runtimeReadiness.size ||
       this.pendingSiteMounts.size || this.endingEntries.size || this.endingRequests.size ||
@@ -829,6 +994,11 @@ export class FunctionModsManager {
     }
     this.development?.assertAdmission(workspace, threadId)
     const key = JSON.stringify([workspace, threadId])
+    const probeRetirement = this.probeRetirements.get(key)
+    if (probeRetirement) await probeRetirement
+    const released = this.releasedSessions.get(key)
+    if (released && released.state !== "stopped")
+      throw new ModFunctionError("MODS_CONFIG_RELOAD_STOPPED", "组件已停用，正在清理或需核对清理结果。")
     const original = this.sessions.get(key)
     if (applyBefore && original && !this.endingEntries.has(key)) await this.applyConfigurationIfIdle(original)
     const application = this.applying.get(key)
@@ -892,6 +1062,9 @@ export class FunctionModsManager {
   }
 
   private applyConfigurationIfIdle(entry: SessionEntry, retry = false): Promise<void> {
+    // An owned retirement may dispose the guest before physical cleanup finishes.
+    // Its caller owns the outcome; idle notifications must not reinterpret it as a crash.
+    if (this.entryDrains.has(entry)) return Promise.resolve()
     const key = JSON.stringify([entry.workspace, entry.threadId])
     if (this.sessions.get(key) === entry && entry.session?.plugins.some(plugin => plugin.guest.stats.disposed)) {
       this.stopLostEntry(entry)
@@ -1271,9 +1444,354 @@ export class FunctionModsManager {
     return this.userConfig(workspace, threadId, pluginId, signal, assertOwner)
   }
 
+  private hasMandatoryRuntimePolicy(workspace: string, threadId: string, names: string[]): boolean {
+    const rules = this.clawSelection(workspace, threadId)?.completionRules ?? []
+    for (const name of new Set([...names, ...rules.map(rule => rule.name)])) {
+      const raw = this.applicationPolicies.value(workspace, name)
+      const additional = rules.find(rule => rule.name === name)?.policy
+      const policy = mergeClawCompletionPolicy(raw == null ? undefined : parseCompletionPolicy(raw), additional)
+      if (policy && ["check", "repair"].includes(policy.mode)) return true
+    }
+    return false
+  }
+
+  private runtimeOccupancy(): number {
+    return new Set([...this.sessions.keys(), ...this.runtimeReservations.keys()]).size
+  }
+
+  private pureProbeBlocker(entry: SessionEntry): string | undefined {
+    const key = JSON.stringify([entry.workspace, entry.threadId])
+    if (!entry.registrationProbe || !entry.loaded || !entry.session || entry.session.hasStarted ||
+      entry.execution.guestEntered || entry.execution.hostCallAttempted || entry.execution.registrationSealed)
+      return "组件已进入执行阶段或仍在加载"
+    if (entry.session.plugins.some(plugin => plugin.guest.stats.disposed || plugin.guest.registrationQuiescent !== true))
+      return "缺少登记阶段无待决任务的宿主证明"
+    if (!entry.client.stopAndDrain || !entry.client.stats || entry.client.stats.pending || entry.client.stats.calls)
+      return "宿主仍有待决请求或不能确认物理退出"
+    if (entry.activity.size || entry.conversationOwner || entry.closeConversationOwner ||
+      entry.session.hasReleaseResources || entry.completionChecks.size ||
+      [...this.siteOwners.values()].some(owner => owner.entry === entry)) return "组件仍拥有活动或资源"
+    if (entry.developmentPlugins.size || this.pendingSessionBuilds.has(key) ||
+      this.runtimeReservations.has(key) || this.applying.has(key) || this.probeRetirements.has(key) ||
+      this.releasedSessions.has(key) || this.endingEntries.has(key) || this.classicEndDrain ||
+      [...this.candidates].some(candidate => candidate.workspace === entry.workspace && candidate.threadId === entry.threadId) ||
+      [...this.endingRequests].some(request => request.threadId === undefined || request.threadId === entry.threadId) ||
+      this.host.configurationBusy?.(entry.threadId) ||
+      [...this.pendingSiteMounts, ...this.runtimeReadiness].some(request =>
+        request.workspace === entry.workspace && request.threadId === entry.threadId)) return "组件仍有宿主控制或请求"
+    try {
+      if (this.hasMandatoryRuntimePolicy(entry.workspace, entry.threadId, [...entry.snapshots.keys()]))
+        return "组件承担强制检查"
+    } catch { return "无法证明检查策略允许回收" }
+    return undefined
+  }
+
+  private retirePureProbe(entry: SessionEntry): Promise<void> {
+    const key = JSON.stringify([entry.workspace, entry.threadId])
+    if (this.sessions.get(key) !== entry || this.pureProbeBlocker(entry) ||
+      !entry.activity.pauseIfIdle()) return Promise.reject(new ModFunctionError("MODS_SESSION_CAPACITY"))
+    if (!entry.execution.sealRegistration()) {
+      entry.activity.resume()
+      return Promise.reject(new ModFunctionError("MODS_SESSION_CAPACITY"))
+    }
+    entry.activity.close()
+    entry.freshness.close("registration-probe-reclaimed")
+    const task = Promise.resolve().then(async () => {
+      try {
+        await entry.activity.cleanup(() => this.drainEntry(entry, true, false, false, true))
+        if (this.retiringEntries.has(entry)) throw new ModFunctionError("MODS_RESOURCE_CLEANUP_PENDING")
+        if (this.sessions.get(key) === entry) this.sessions.delete(key)
+      } catch (error) {
+        entry.probeRetirementError = "登记探测的物理清理未确认，名额仍保留；当前不会重建该组件。"
+        throw error
+      } finally {
+        if (this.probeRetirements.get(key) === task) this.probeRetirements.delete(key)
+        try { this.host.changed(entry.threadId) } catch { /* Retirement proof does not depend on UI. */ }
+      }
+    })
+    this.probeRetirements.set(key, task)
+    return task
+  }
+
+  /** Admission owns the freed slot before any waiting request can observe it as available. */
+  private async acquireRuntimeSlot(key: string): Promise<object> {
+    if (this.runtimeReservations.has(key)) throw new ModFunctionError("MODS_RUNTIME_SESSION_BUSY")
+    if (this.sessions.has(key) || this.runtimeOccupancy() < 6) return this.reserveRuntimeSlot(key)
+    const pending = this.capacityReclaim
+    if (pending) { await pending; return this.acquireRuntimeSlot(key) }
+    const probe = [...this.sessions.values()].find(entry =>
+      JSON.stringify([entry.workspace, entry.threadId]) !== key && !this.pureProbeBlocker(entry))
+    if (!probe) throw new ModFunctionError("MODS_SESSION_CAPACITY")
+    let reservation: object | undefined
+    const reclaim = this.retirePureProbe(probe).then(() => { reservation = this.reserveRuntimeSlot(key) })
+    this.capacityReclaim = reclaim
+    try { await reclaim; return reservation! }
+    finally { if (this.capacityReclaim === reclaim) this.capacityReclaim = undefined }
+  }
+
+  private reserveRuntimeSlot(key: string): object {
+    if (this.runtimeReservations.has(key)) throw new ModFunctionError("MODS_RUNTIME_SESSION_BUSY")
+    if (!this.sessions.has(key) && this.runtimeOccupancy() >= 6)
+      throw new ModFunctionError("MODS_SESSION_CAPACITY")
+    const reservation = {}
+    this.runtimeReservations.set(key, reservation)
+    return reservation
+  }
+
+  private releaseRuntimeSlot(key: string, reservation: object, entry?: SessionEntry): void {
+    if (entry && this.sessions.get(key) !== entry) {
+      if (this.retiringEntries.has(entry)) {
+        // External invalidation may own a drain that is still awaiting this build's finally.
+        // Keep the slot until physical/resource retirement succeeds, then resume its release.
+        void this.entryDrains.get(entry)?.then(() => {
+          if (!this.retiringEntries.has(entry)) this.releaseRuntimeSlot(key, reservation, entry)
+        }, () => { /* Unconfirmed retirement retains its capacity fence. */ })
+        return
+      }
+      if (entry.activity.size) {
+        void entry.activity.whenSettled().then(() => this.releaseRuntimeSlot(key, reservation, entry))
+        return
+      }
+    }
+    if (this.runtimeReservations.get(key) === reservation) this.runtimeReservations.delete(key)
+  }
+
+  private runtimeReleaseBlocker(entry: SessionEntry): string | undefined {
+    const key = JSON.stringify([entry.workspace, entry.threadId])
+    if (this.releasedSessions.size >= 64 || !this.reloadControl.canBegin(entry.workspace, entry.threadId))
+      return "已保留 64 条组件停止记录。明确恢复组件或删除不再需要的旧聊天后，才能继续停止并释放。"
+    if (!entry.loaded) return "组件正在加载"
+    if (entry.developmentPlugins.size) return "请先停止组件试用"
+    if (entry.session?.plugins.some(plugin => plugin.guest.stats.disposed)) return "组件运行已中断，请先核对任务结果"
+    if (!entry.client.stopAndDrain) return "当前运行环境无法确认进程退出"
+    if (this.applying.has(key) || [...this.candidates].some(candidate =>
+      candidate.workspace === entry.workspace && candidate.threadId === entry.threadId))
+      return "组件配置正在切换"
+    if (this.endingEntries.has(key) || this.classicEndDrain || [...this.endingRequests].some(request =>
+      request.threadId === undefined || request.threadId === entry.threadId)) return "聊天正在结束"
+    if (this.host.configurationBusy?.(entry.threadId) || entry.completionChecks.size ||
+      entry.activity.releaseBlockingSize) return "聊天或组件仍有操作进行中"
+    if (entry.session?.hasReleaseResources) return "组件仍有后台资源或定时任务"
+    try {
+      if (this.hasMandatoryRuntimePolicy(entry.workspace, entry.threadId, [...entry.snapshots.keys()]))
+        return "这段聊天启用了强制完成检查，请先在宿主设置中明确处理该策略"
+    } catch { return "无法确认完成检查策略，请先核对组件设置" }
+    if ([...this.pendingSiteMounts, ...this.runtimeReadiness].some(request =>
+      request.workspace === entry.workspace && request.threadId === entry.threadId))
+      return "组件界面正在准备"
+    return undefined
+  }
+
+  private saveRuntimeStops(): void {
+    if (this.runtimeReceiptError) throw new ModFunctionError("MODS_RUNTIME_RECEIPTS_UNAVAILABLE")
+    writeRuntimeStopReceipts(this.store, this.releasedSessions.values())
+  }
+
+  private clearRuntimeStop(key: string): void {
+    const receipt = this.releasedSessions.get(key)
+    if (!receipt) return
+    this.releasedSessions.delete(key)
+    try { this.saveRuntimeStops() }
+    catch (error) { this.releasedSessions.set(key, receipt); throw error }
+  }
+
+  /** Caller must have proved metadata deletion; changing a combination is not deletion. */
+  forgetReleasedThread(threadId: string): void {
+    const removed = [...this.releasedSessions].filter(([, receipt]) => receipt.threadId === threadId)
+    for (const [key] of removed) this.releasedSessions.delete(key)
+    try { if (removed.length) this.saveRuntimeStops() }
+    catch (error) { for (const [key, receipt] of removed) this.releasedSessions.set(key, receipt); throw error }
+    this.reloadControl.forgetThread(threadId)
+  }
+
+  /** No compilation, admission, guest calls or implicit startup. */
+  runtimeSessions(currentThreadId?: string): FunctionRuntimeSessions {
+    const sessions: FunctionRuntimeSession[] = []
+    for (const [key, entry] of this.sessions) {
+      const stopped = this.releasedSessions.get(key)
+      const blocker = entry.probeRetirementError ?? (entry.execution.registrationSealed
+        ? "正在回收纯登记探测" : stopped ? "组件已停用，正在清理或需核对清理结果" : this.runtimeReleaseBlocker(entry))
+      sessions.push({ workspace: entry.workspace, threadId: entry.threadId, generation: entry.generation,
+        state: entry.probeRetirementError ? "failed" : stopped?.state ?? (!entry.loaded ? "loading" : entry.session?.hasStarted ? "resident" : "discovery"),
+        autoReclaimable: !this.pureProbeBlocker(entry), guestEntered: entry.execution.guestEntered,
+        mountedSites: [...this.siteOwners.values()].filter(owner => owner.entry === entry).length,
+        ...(entry.session && entry.loaded ? { diagnostics: { ...{},
+          backgroundResources: entry.session.ownedResourceCount } } : {}),
+        ...(blocker ? { blocker } : {}), ...(stopped?.error ? { error: stopped.error } : {}),
+        canRelease: !blocker, canResume: false })
+    }
+    const stoppedRows = [...this.releasedSessions].filter(([key]) => !this.sessions.has(key))
+    const recent = stoppedRows.slice(-10).reverse()
+    const current = stoppedRows.find(([, row]) => row.threadId === currentThreadId)
+    if (current && !recent.includes(current)) recent.unshift(current)
+    for (const row of stoppedRows)
+      if (this.runtimeReservations.has(row[0]) && !recent.includes(row)) recent.unshift(row)
+    for (const [key, stopped] of recent) {
+      sessions.push({ workspace: stopped.workspace, threadId: stopped.threadId,
+        generation: stopped.generation, state: stopped.state, canRelease: false,
+        canResume: stopped.state === "stopped" && !this.applying.has(key),
+        ...(stopped.error ? { error: stopped.error } : {}) })
+    }
+    return { limit: 6, resident: this.runtimeOccupancy(), retiring: this.retiringEntries.size, sessions,
+      reserved: [...this.runtimeReservations.keys()].filter(key => !this.sessions.has(key)).length,
+      stoppedTotal: stoppedRows.length, omitted: stoppedRows.length - recent.length,
+      ...(this.runtimeReceiptError ? { error: this.runtimeReceiptError } : {}) }
+  }
+
+  /** Trusted user control. Keep its capacity reservation until strict physical retirement. */
+  async releaseRuntimeSession(workspace: string, threadId: string, generation: number,
+    signal: AbortSignal, assertOwner: () => void): Promise<FunctionRuntimeSessions> {
+    assertOwner(); signal.throwIfAborted(); this.host.assertThread?.(workspace, threadId)
+    const key = JSON.stringify([workspace, threadId]), entry = this.sessions.get(key)
+    if (this.closed || this.runtimeReceiptError || !entry || entry.generation !== generation || this.releasedSessions.has(key))
+      throw new ModFunctionError("MODS_RUNTIME_SESSION_STALE")
+    const blocker = this.runtimeReleaseBlocker(entry)
+    if (blocker) throw new ModFunctionError("MODS_RUNTIME_SESSION_BUSY", blocker)
+    if (!entry.activity.pauseForRelease()) throw new ModFunctionError("MODS_RUNTIME_SESSION_BUSY")
+    let reservation: object
+    try { reservation = this.reserveRuntimeSlot(key) }
+    catch (error) { entry.activity.resume(); throw error }
+    const lease = claimConfigurationReload(threadId)
+    if (!lease) { this.releaseRuntimeSlot(key, reservation); entry.activity.resume(); throw new ModFunctionError("MODS_RUNTIME_SESSION_BUSY") }
+    let control: ReturnType<FunctionConfigurationReloadControl["begin"]>
+    try { control = this.reloadControl.begin(workspace, threadId) }
+    catch (error) { lease.release(); this.releaseRuntimeSlot(key, reservation); entry.activity.resume(); throw error }
+    const receipt = { workspace, threadId, generation,
+      sourceIds: [...entry.snapshots.values()].flatMap(snapshot => snapshot.sourceId ? [snapshot.sourceId] : []),
+      names: [...entry.snapshots.keys()],
+      incarnationKey: this.host.threadIncarnationKey?.(workspace, threadId),
+      state: "releasing" as "releasing" | "stopped" | "failed", error: undefined as string | undefined }
+    // From this point, renderer loss cancels neither cleanup nor the stopped fence.
+    control.failed(new Error("组件已由你停用。普通入口不会重新启动，请明确恢复。"))
+    this.releasedSessions.set(key, receipt)
+    try { this.saveRuntimeStops() }
+    catch (error) {
+      this.releasedSessions.delete(key); control.applied(); control.finish()
+      lease.release(); this.releaseRuntimeSlot(key, reservation); entry.activity.resume(); throw error
+    }
+    entry.activity.close()
+    entry.freshness.close("session-released")
+    this.closePromptSessions(entry)
+    const task = Promise.resolve().then(async () => {
+      try {
+        await entry.activity.cleanup(() => this.drainEntry(entry, true, false, false, true))
+        if (this.retiringEntries.has(entry)) throw new ModFunctionError("MODS_RESOURCE_CLEANUP_PENDING")
+        if (this.sessions.get(key) === entry) this.sessions.delete(key)
+        this.releaseRuntimeSlot(key, reservation, entry)
+        receipt.state = "stopped"
+        this.saveRuntimeStops()
+      } catch (error) {
+        receipt.state = "failed"
+        receipt.error = "组件清理或进程退出尚未确认，名额仍保留。请核对未完成操作，当前不会重新启动。"
+        if (this.releasedSessions.get(key) === receipt) control.failed(new Error(receipt.error))
+        try { this.saveRuntimeStops() } catch { /* Durable releasing receipt still prevents startup. */ }
+        this.lostEntries.set(key, new Set([entry]))
+        this.failedLostEntries.add(entry)
+        throw error
+      } finally {
+        control.finish(); lease.release()
+        if (this.applying.get(key) === task) this.applying.delete(key)
+        try { this.host.changed(threadId) } catch { /* Cleanup outcome is independent of UI delivery. */ }
+      }
+    })
+    this.applying.set(key, task)
+    try { this.host.changed(threadId) } catch { /* The owned cleanup still has to finish. */ }
+    await task
+    return this.runtimeSessions()
+  }
+
+  /** The only automatic action after release is staying stopped; resume is a new user intent. */
+  async resumeRuntimeSession(workspace: string, threadId: string, generation: number,
+    signal: AbortSignal, assertOwner: () => void): Promise<FunctionRuntimeSessions> {
+    const key = JSON.stringify([workspace, threadId]), receipt = this.releasedSessions.get(key)
+    const epoch = this.epoch(workspace)
+    const guard = () => {
+      assertOwner(); signal.throwIfAborted(); this.host.assertThread?.(workspace, threadId)
+      if (this.closed || this.runtimeReceiptError || !this.host.enabled(workspace) || this.epoch(workspace) !== epoch ||
+        this.releasedSessions.get(key) !== receipt || !receipt || receipt.generation !== generation ||
+        receipt.state !== "stopped" || this.sessions.has(key))
+        throw new ModFunctionError("MODS_RUNTIME_SESSION_STALE")
+    }
+    guard()
+    if (this.applying.has(key) || this.host.configurationBusy?.(threadId))
+      throw new ModFunctionError("MODS_RUNTIME_SESSION_BUSY")
+    const reservation = await this.acquireRuntimeSlot(key)
+    try { guard() } catch (error) { this.releaseRuntimeSlot(key, reservation); throw error }
+    const lease = claimConfigurationReload(threadId)
+    if (!lease) { this.releaseRuntimeSlot(key, reservation); throw new ModFunctionError("MODS_RUNTIME_SESSION_BUSY") }
+    let control: ReturnType<FunctionConfigurationReloadControl["begin"]>
+    try { control = this.reloadControl.begin(workspace, threadId) }
+    catch (error) { lease.release(); this.releaseRuntimeSlot(key, reservation); throw error }
+    const lifetime = AbortSignal.any([signal, control.signal])
+    const current = () => {
+      guard(); lifetime.throwIfAborted(); lease.assertLive(); this.assertEndAdmission(workspace, threadId)
+      if (this.host.configurationLogicalBusy?.(threadId)) throw new ModFunctionError("MODS_RUNTIME_SESSION_BUSY")
+    }
+    let replacement: SessionEntry | undefined
+    const task = Promise.resolve().then(() => this.operations.exit(() =>
+      withFunctionTransportExecution({ workspace, threadId, userInitiated: true,
+        leased: true, immediate: false }, async () => {
+        try {
+          current()
+          // If the app exits during startup, its next process must not silently replay effects.
+          receipt!.state = "releasing"
+          this.saveRuntimeStops()
+          receipt!.state = "stopped"
+          const prepared = await this.prepareConfigurationReload(workspace, threadId,
+            undefined, undefined, current, lifetime)
+          current()
+          if (receipt!.sourceIds.some(id => !prepared.sourcePlugins.has(id)))
+            throw new ModFunctionError("MODS_CONFIG_SOURCE_CHANGED", "组件来源或权限已变更，请先核对已添加的灵件。")
+          prepared.created = entry => { replacement = entry }
+          prepared.capacityReservation = reservation
+          replacement = await this.buildEntry(workspace, threadId, false, undefined, prepared)
+          current(); this.assertPreparedConfiguration(prepared)
+          replacement.initializer.activate()
+          prepared.assertLive = () => {}
+          this.sessions.set(key, replacement)
+          this.candidates.delete(replacement)
+          this.activateConversationOwner(replacement)
+          this.clearRuntimeStop(key)
+          control.applied()
+        } catch (error) {
+          if (replacement) {
+            if (this.sessions.get(key) === replacement) this.sessions.delete(key)
+            this.candidates.delete(replacement)
+            replacement.activity.close()
+            await this.drainEntry(replacement, true).catch(() => {})
+            // A failed restart may have performed effects: never offer an automatic retry.
+          }
+          // Confirmed deletion/another incarnation may have removed this exact receipt while
+          // startup or physical cleanup was awaited. An old control must never resurrect it.
+          if (this.releasedSessions.get(key) === receipt) {
+            if (replacement) {
+              const lost = this.lostEntries.get(key) ?? new Set<SessionEntry>()
+              lost.add(replacement); this.lostEntries.set(key, lost)
+              receipt!.state = "failed"
+              receipt!.error = "恢复未完成，请先核对启动操作的结果；当前不会自动重试。"
+            }
+            try { this.saveRuntimeStops() } catch { /* Keep the prior durable stop receipt. */ }
+            control.failed(error)
+          }
+          throw error
+        } finally {
+          this.releaseRuntimeSlot(key, reservation, replacement)
+          control.finish(); lease.release()
+          if (this.applying.get(key) === task) this.applying.delete(key)
+          try { this.host.changed(threadId) } catch { /* Control outcome has already settled. */ }
+        }
+      })))
+    this.applying.set(key, task)
+    await task
+    return this.runtimeSessions()
+  }
+
   /** Native explicit control, deliberately outside ordinary operation/activity wrappers. */
   async reloadUserConfig(workspace: string, threadId: string, pluginId: string, digest: string,
     expectedRevision: number, signal: AbortSignal, assertOwner: () => void) {
+    if (this.runtimeReceiptError) throw new ModFunctionError("MODS_RUNTIME_RECEIPTS_UNAVAILABLE")
+    const released = this.releasedSessions.get(JSON.stringify([workspace, threadId]))
+    if (released) throw new ModFunctionError("MODS_RUNTIME_SESSION_STOPPED", "请在“聊天组件占用”中核对并明确恢复组件。")
     const view = await this.userConfig(workspace, threadId, pluginId, signal, assertOwner)
     if (view.digest !== digest || view.savedRevision !== expectedRevision)
       throw new ModFunctionError("MODS_CONFIG_VALUE_CHANGED")
@@ -1297,6 +1815,9 @@ export class FunctionModsManager {
     let control: ReturnType<FunctionConfigurationReloadControl["begin"]>
     try { control = this.reloadControl.begin(workspace, threadId) }
     catch (error) { lease.release(); previous?.activity.resume(); throw error }
+    let reservation: object
+    try { reservation = this.reserveRuntimeSlot(key) }
+    catch (error) { control.finish(); lease.release(); previous?.activity.resume(); throw error }
     const lifetime = AbortSignal.any([signal, control.signal])
     let retired = false, replacement: SessionEntry | undefined
     const guard = () => {
@@ -1317,6 +1838,8 @@ export class FunctionModsManager {
           guard()
           const prepared = await this.prepareConfigurationReload(workspace, threadId, view.plugin,
             digest, guard, lifetime)
+          prepared.capacityReservation = reservation
+          prepared.created = entry => { replacement = entry }
           guard()
           if (previous?.activity.foregroundSize)
             throw new ModFunctionError("MODS_CONFIG_RELOAD_BUSY")
@@ -1345,6 +1868,7 @@ export class FunctionModsManager {
           this.sessions.set(key, replacement)
           this.candidates.delete(replacement)
           this.activateConversationOwner(replacement)
+          this.clearRuntimeStop(key)
           control.applied()
           if (this.lostEntries.get(key) === lost) this.lostEntries.delete(key)
         } catch (error) {
@@ -1358,6 +1882,9 @@ export class FunctionModsManager {
             this.reportConfigurationFailure(previous, error)
           }
         } finally {
+          // Existing configuration adapters without physical-drain support keep their prior
+          // explicit-retry contract. Native runtime controls require that support up front.
+          this.releaseRuntimeSlot(key, reservation, replacement?.client.stopAndDrain ? replacement : undefined)
           if (!retired && this.sessions.get(key) === previous) previous?.activity.resume()
           control.finish()
           lease.release()
@@ -1371,12 +1898,15 @@ export class FunctionModsManager {
   }
 
   private configurationSources(workspace: string, threadId: string): string {
-    return encodeModJson(this.sources(this.clawSelection(workspace, threadId))
-      .map(source => ({ id: source.id, path: source.path, enabled: source.enabled })))
+    return encodeModJson({
+      context: this.capabilityContext(workspace, threadId).identity,
+      sources: this.sources(this.clawSelection(workspace, threadId))
+        .map(source => ({ id: source.id, path: source.path, enabled: source.enabled }))
+    })
   }
 
-  private async prepareConfigurationReload(workspace: string, threadId: string, plugin: string,
-    digest: string, guard: () => void, signal: AbortSignal): Promise<PreparedConfigurationReload> {
+  private async prepareConfigurationReload(workspace: string, threadId: string, plugin: string | undefined,
+    digest: string | undefined, guard: () => void, signal: AbortSignal): Promise<PreparedConfigurationReload> {
     const selected = this.clawSelection(workspace, threadId)
     const prepared: PreparedConfigurationReload = {
       snapshots: new Map(), sourcePlugins: new Map(), signal,
@@ -1394,8 +1924,12 @@ export class FunctionModsManager {
       const grant = this.store.getGrant(workspace, `function:${compiled.name}`)
       if (!grant?.enabled || grant.digest !== compiled.digest)
         throw new ModFunctionError("MODS_CONFIG_SOURCE_CHANGED")
-      const projection = projectFunctionComponents(compiled,
-        selected?.capabilities.find(capability => capability.pluginId === source.id)?.components)
+      const componentSelection = selected?.capabilities.find(
+        capability => capability.pluginId === source.id)?.components ??
+        (selected && compiled.components?.length
+          ? { mode: "all" as const, ids: [], config: {} } : undefined)
+      const projection = projectFunctionComponents(compiled, componentSelection,
+        this.capabilityContext(workspace, threadId).usage)
       const configured = this.configuredOptions(workspace, compiled, projection.options)
       if (prepared.snapshots.has(compiled.name)) throw new ModFunctionError("MODS_DUPLICATE_MOD_ID")
       if (prepared.snapshots.size >= 8) throw new ModFunctionError("MODS_CHAIN_CAPACITY")
@@ -1404,7 +1938,7 @@ export class FunctionModsManager {
       prepared.snapshots.set(compiled.name, snapshot)
       prepared.sourcePlugins.set(source.id, snapshot)
     }
-    if (prepared.snapshots.get(plugin)?.compiled.digest !== digest)
+    if (plugin !== undefined && prepared.snapshots.get(plugin)?.compiled.digest !== digest)
       throw new ModFunctionError("MODS_CONFIG_SOURCE_CHANGED")
     this.assertPreparedConfiguration(prepared)
     return prepared
@@ -1502,6 +2036,47 @@ export class FunctionModsManager {
     }
   }
 
+  private assertSnapshotSource(snapshot: Snapshot): void {
+    if (!snapshot.sourceId || !snapshot.sourcePath || !this.host.plugins().some((source) =>
+      source.id === snapshot.sourceId && source.enabled &&
+      isSameWorkspacePath(source.path, snapshot.sourcePath)))
+      throw new ModFunctionError("MODS_PLUGIN_CHANGED", "插件已停用或更新，本次插件调用已停止；可继续制作。已开始的外部操作请先核对结果，不会自动重试。")
+  }
+
+  private sessionHasHandler(entry: SessionEntry, event: string): boolean {
+    if (!entry.session) throw new ModFunctionError("MODS_SCOPE_CHANGED")
+    // Retirement cannot turn a participating handler into proof of an empty chain.
+    return entry.session.plugins.some((plugin) =>
+      plugin.guest.registrations.some((registration) =>
+        matchesEventPattern(registration.pattern, event)))
+  }
+
+  /** Native core is not a resource of an unrelated UI guest. Policy and owner still fence it. */
+  private captureNativeBoundary(workspace: string, threadId: string, signal: AbortSignal) {
+    const epoch = this.nativeEpochs.get(workspace) ?? this.initialEpoch
+    this.nativeEpochs.set(workspace, epoch)
+    const context = this.capabilityContext(workspace, threadId).identity
+    const selection = structuredClone(this.clawSelection(workspace, threadId))
+    const protects = this.host.protects?.(workspace)
+    const owner = this.host.captureSiteGuard?.(workspace, threadId)
+    const parent = getModCallContext()
+    return () => {
+      signal.throwIfAborted()
+      parent?.signal?.throwIfAborted()
+      parent?.assertLive?.()
+      owner?.()
+      this.host.assertThread?.(workspace, threadId)
+      if (this.closed || !this.host.enabled(workspace) ||
+        (this.nativeEpochs.get(workspace) ?? this.initialEpoch) !== epoch ||
+        this.host.protects?.(workspace) !== protects ||
+        this.capabilityContext(workspace, threadId).identity !== context ||
+        encodeModJson(this.clawSelection(workspace, threadId) ?? null) !==
+          encodeModJson(withoutUninstalledClawPlugins(selection,
+            selection?.capabilities.length ? this.installedPluginIds() : new Set()) ?? null))
+        throw new ModFunctionError("MODS_SCOPE_CHANGED")
+    }
+  }
+
   private assertAppliedConfiguration(entry: SessionEntry): void {
     for (const snapshot of entry.snapshots.values())
       if (snapshot.compiled.userConfig &&
@@ -1562,6 +2137,7 @@ export class FunctionModsManager {
   }
 
   private hasSources(workspace: string, threadId: string): boolean {
+    if (this.runtimeReceiptError) return false
     if (this.development?.activeFor(workspace, threadId)) return true
     if (this.reloadControl.error(workspace, threadId)) return false
     const selection = this.clawSelection(workspace, threadId)
@@ -1673,6 +2249,11 @@ export class FunctionModsManager {
   /** Graph shape is fixed for this physical run; discovery never starts a plugin VM. */
   async runtimeReady(workspace: string, threadId: string, signal?: AbortSignal): Promise<boolean> {
     signal?.throwIfAborted()
+    if (this.runtimeReceiptError) throw new ModFunctionError("MODS_RUNTIME_RECEIPTS_UNAVAILABLE", this.runtimeReceiptError)
+    const stopped = this.releasedSessions.get(JSON.stringify([workspace, threadId]))
+    if (stopped && (!stopped.names || this.hasMandatoryRuntimePolicy(workspace, threadId, stopped.names)))
+      throw new ModFunctionError("MODS_RUNTIME_SESSION_REQUIRED",
+        "这段聊天的组件已停止，但当前组合需要强制完成检查。请先在“聊天组件占用”中明确恢复组件后继续。")
     if (this.reloadControl.error(workspace, threadId)) return false
     if (this.closed || !this.host.enabled(workspace) || !this.hasSources(workspace, threadId))
       return false
@@ -1717,16 +2298,32 @@ export class FunctionModsManager {
     if (!this.host.clawApplicable?.(threadId)) return null
     const scope = this.host.clawScope?.(threadId)
     if (this.host.clawScope && !scope) return null
+    const preparing = this.preparingSelection.getStore()
+    if (preparing?.active && preparing.workspace === workspace && preparing.threadId === threadId)
+      return preparing.profile
     const identity = scope?.identity ?? JSON.stringify([threadId, "legacy"])
     const epoch = this.epoch(workspace)
     const key = JSON.stringify([workspace, threadId, identity])
     const cached = this.clawSelections.get(key)
     if (cached?.epoch === epoch) return cached.active
-    const active = new ClawStore(this.store).selection(workspace, identity).profile
+    const store = new ClawStore(this.store)
+    if (store.selection(workspace, identity).profile?.capabilities.length)
+      store.reconcileInstalledPlugins(workspace, this.installedPluginIds())
+    const active = store.selection(workspace, identity).profile
     this.clawSelections.set(key, { epoch, active })
     if (this.clawSelections.size > 64)
       this.clawSelections.delete(this.clawSelections.keys().next().value!)
     return active
+  }
+
+  private installedPluginInventory?: ReadonlySet<string>
+
+  private installedPluginIds(): ReadonlySet<string> {
+    if (!this.host.installedPluginIds)
+      return new Set(this.host.plugins().map(plugin => plugin.id))
+    // Native stream guards run per chunk. Read the strict registry once per catalog change.
+    return this.installedPluginInventory ??=
+      new Set(this.host.installedPluginIds())
   }
 
   clawDefaultModel(workspace: string, threadId: string): string | undefined {
@@ -1735,10 +2332,18 @@ export class FunctionModsManager {
     return this.clawSelection(workspace, threadId)?.models?.default
   }
 
+  private capabilityContext(workspace: string, threadId: string):
+    import("../capability-context").CapabilityContext {
+    return this.host.capabilityContext?.(workspace, threadId) ?? {
+      usage: "chat", identity: "legacy"
+    }
+  }
+
   clawSelectionIssues(
     workspace: string,
     profile: ClawProfile | null,
-    available: FunctionPluginStatus[]
+    available: FunctionPluginStatus[],
+    usageContext?: import("../../../shared/mods/capability-usage").CapabilityUsageContext
   ): string[] {
     const issues = clawIssues(profile, available)
     if (profile) {
@@ -1756,15 +2361,20 @@ export class FunctionModsManager {
         try {
           for (const component of resolveClawComponents(
             source.components ?? [],
-            capability.components
+            capability.components ?? (source.components?.length
+              ? { mode: "all", ids: [], config: {} } : undefined),
+            usageContext
           )) {
             const config = capability.components?.config[component.id] ?? {}
             if (component.configSchema !== undefined)
               validateRegisteredToolInput(component.configSchema, config)
             else if (Object.keys(config).length) throw Error("CLAW_COMPONENT_CONFIG_UNDECLARED")
           }
-        } catch {
-          issues.push(`${capability.name} 的组件选择、依赖或配置无效，请重新核对组合。`)
+        } catch (error) {
+          issues.push(error instanceof Error &&
+            error.message.startsWith("CLAW_COMPONENT_USAGE_UNAVAILABLE")
+            ? `${capability.name} 包含当前模式不能使用的功能，请重新选择后应用。`
+            : `${capability.name} 的组件选择、依赖或配置无效，请重新核对组合。`)
         }
       }
       for (const item of available) {
@@ -1793,12 +2403,26 @@ export class FunctionModsManager {
 
   private async inspectEffectiveStatus(workspace: string, threadId: string): Promise<FunctionPluginStatus[]> {
     const epoch = this.epoch(workspace)
+    const usage = this.capabilityContext(workspace, threadId)
     const selection = this.clawSelection(workspace, threadId)
     const available = await this.status(workspace)
-    if (this.closed || epoch !== this.epoch(workspace))
+    if (this.closed || epoch !== this.epoch(workspace) ||
+      usage.identity !== this.capabilityContext(workspace, threadId).identity)
       throw new ModFunctionError("MODS_SCOPE_CHANGED")
-    if (!selection) return available
-    const issues = this.clawSelectionIssues(workspace, selection, available)
+    if (!selection) {
+      // Settings retain every source's diagnostic, including disabled broken packages. A source
+      // explicitly disabled by the host cannot intercept/protect this session's presentation.
+      // Active invalid sources and explicit combination bindings still fail closed below.
+      const disabled = new Set(
+        this.sources().filter(source => !source.enabled).map(source => source.id)
+      )
+      return available.filter((item) => {
+        if (item.state === "invalid" && disabled.has(item.pluginId)) return false
+        if (item.state !== "ready" || !item.components?.length) return true
+        return resolveClawComponents(item.components, undefined, usage.usage).length > 0
+      })
+    }
+    const issues = this.clawSelectionIssues(workspace, selection, available, usage.usage)
     if (issues.length) throw new ModFunctionError("CLAW_CAPABILITY_CHANGED", issues.join("；"))
     const selected = selection.capabilities.flatMap((capability) =>
       available.filter(
@@ -1813,17 +2437,8 @@ export class FunctionModsManager {
   }
 
   private async compileStatusSource(path: string): Promise<CompiledFunctionPlugin> {
-    const existing = this.statusCompilations.get(path)
-    if (existing) return existing
-    // Several visible slots discover the same sources at once after a combination change.
-    // Share only this in-flight compilation: grants and completed status are never cached.
-    const pending = compileFunctionPlugin(path)
-    this.statusCompilations.set(path, pending)
-    try {
-      return await pending
-    } finally {
-      if (this.statusCompilations.get(path) === pending) this.statusCompilations.delete(path)
-    }
+    // Byte proofs are rechecked for each read. Authorization is read below, never cached.
+    return this.statusSourceCache.read(path)
   }
 
   async status(workspace: string): Promise<FunctionPluginStatus[]> {
@@ -1947,14 +2562,14 @@ export class FunctionModsManager {
     this.assertConfiguredOptions(workspace, compiled, configured.revision)
     assertApproval()
     this.store.grant(workspace, `function:${compiled.name}`, digest, true)
-    this.invalidate(workspace)
+    this.pluginsChanged(workspace)
   }
 
   revoke(workspace: string, name: string): void {
     const key = `function:${name}`
     const grant = this.store.getGrant(workspace, key)
     if (grant) this.store.grant(workspace, key, grant.digest, false)
-    this.invalidate(workspace)
+    this.pluginsChanged(workspace)
   }
 
   /** Read-only retention proof for immutable installed source; uncertainty remains referenced. */
@@ -2012,6 +2627,7 @@ export class FunctionModsManager {
           return // Preserve ordinary close(false) result while keeping the source protected.
         }
         this.retiringEntries.delete(entry)
+        if (!this.closed) this.publishConfigurationIdle(entry.threadId)
       }
     })
     this.entryDrains.set(entry, drained)
@@ -2034,8 +2650,49 @@ export class FunctionModsManager {
   }
 
   invalidate(workspace: string): void {
+    this.nativeEpochs.set(workspace, (this.nativeEpochs.get(workspace) ?? this.initialEpoch) + 1)
+    this.invalidateCatalog(workspace)
+  }
+
+  /** Known disabled or uninstalled sources cannot be new participants in a loaded session. */
+  pluginsChanged(workspace: string, changedPluginIds?: readonly string[]): void {
+    this.installedPluginInventory = undefined
+    const plugins = this.host.plugins()
+    const ids = new Set(changedPluginIds)
+    const entries = [...this.sessions.values()].filter((entry) => entry.workspace === workspace)
+    const unknown = !ids.size || [...ids].some((id) =>
+      plugins.some((plugin) => plugin.id === id && plugin.enabled !== false))
+    const constructing = entries.some((entry) => !entry.loaded) ||
+      [...this.candidates].some((entry) => entry.workspace === workspace) ||
+      [...this.pendingSessionBuilds.keys(), ...this.runtimeReservations.keys()]
+        .some((key) => JSON.parse(key)[0] === workspace)
+    if (unknown || constructing) {
+      for (const entry of entries) entry.catalogInvalidated = true
+      this.invalidateCatalog(workspace)
+      return
+    }
     this.configurationSourceCache.clear()
-    this.statusCompilations.clear()
+    this.statusSourceCache.clear()
+    this.hostOnlySites.invalidate(workspace)
+    for (const entry of entries) {
+      let affected = true
+      try {
+        affected = [...entry.snapshots.values()].some((snapshot) =>
+          !snapshot.sourceId || ids.has(snapshot.sourceId)) ||
+          !!this.clawSelection(workspace, entry.threadId)?.capabilities.some((item) => ids.has(item.pluginId))
+      } catch { /* An unreadable selection cannot prove the source unrelated. */ }
+      if (!affected) continue
+      entry.catalogInvalidated = true
+      this.closeThread(entry.threadId)
+    }
+    for (const key of this.clawSelections.keys())
+      if (JSON.parse(key)[0] === workspace) this.clawSelections.delete(key)
+  }
+
+  private invalidateCatalog(workspace: string): void {
+    this.installedPluginInventory = undefined
+    this.configurationSourceCache.clear()
+    this.statusSourceCache.clear()
     this.hostOnlySites.invalidate(workspace)
     this.retireSiteOwners(workspace)
     this.reloadControl.cancel(workspace)
@@ -2065,6 +2722,7 @@ export class FunctionModsManager {
   invalidateAll(): void {
     this.reloadControl.cancel()
     const workspaces = new Set([
+      ...this.nativeEpochs.keys(),
       ...[...this.runtimeReadiness].map((request) => request.workspace),
       ...(this.compatibilityWorkspace === undefined ? [] : [this.compatibilityWorkspace]),
       ...[...this.namedStates.values()].map((entry) => entry.workspace),
@@ -2095,6 +2753,20 @@ export class FunctionModsManager {
     this.host.activateConversationOwner?.(Object.freeze({ ...context, readOnly: false }))
   }
 
+  private ensureConversationOwner(entry: SessionEntry): void {
+    if (entry.conversationOwner || !entry.session ||
+      developmentUiOnly(entry.session.plugins, entry.developmentPlugins)) return
+    const context: FunctionConversationOwnerContext = Object.freeze({ owner: entry,
+      workspace: entry.workspace, threadId: entry.threadId, signal: entry.session.lifecycleSignal,
+      readOnly: !entry.initializer.allowsStartupEffects,
+      assertCurrent: () => {
+        if (!entry.conversationGuard) throw new ModFunctionError("MODS_SCOPE_CHANGED")
+        entry.conversationGuard()
+      } })
+    entry.conversationOwner = context
+    entry.closeConversationOwner = this.host.openConversationOwner?.(context)
+  }
+
   /** Native retained row only. Absence of a resident never loads or starts plugin code. */
   async appendConversation(workspace: string, threadId: string,
     ticket: FunctionSessionAppendTicket): Promise<FunctionSessionAppendResult> {
@@ -2102,6 +2774,8 @@ export class FunctionModsManager {
     const entry = this.sessions.get(JSON.stringify([workspace, threadId]))
     if (!entry?.session) return ticket.core(ticket.input)
     this.captureOperation(entry)
+    entry.execution.enterGuest()
+    this.ensureConversationOwner(entry)
     return entry.session.appendConversation(ticket)
   }
 
@@ -2233,6 +2907,141 @@ export class FunctionModsManager {
     })
   }
 
+  /** Native caller owns the conversation/configuration lease and the selection CAS. */
+  async reconfigureSelection(workspace: string, threadId: string, profile: ClawProfile | null,
+    commitSelection: () => void, assertCurrent: () => void): Promise<void> {
+    const key = JSON.stringify([workspace, threadId]), epoch = this.epoch(workspace)
+    const previous = this.sessions.get(key)
+    const development = this.development?.activeFor(workspace, threadId)
+    const target = structuredClone(profile), fingerprint = encodeModJson(target)
+    const preparing = { workspace, threadId, profile: target, active: true }
+    let candidate: SessionEntry | undefined, committed = false, retired = false
+    let assertReloadLive = () => {}
+    const guard = () => {
+      assertReloadLive()
+      assertCurrent()
+      this.assertEndAdmission(workspace, threadId)
+      this.host.assertThread?.(workspace, threadId)
+      if (this.closed || this.runtimeReceiptError || !this.host.enabled(workspace) ||
+        this.epoch(workspace) !== epoch || this.sessions.get(key) !== previous ||
+        this.host.configurationLogicalBusy?.(threadId) ||
+        this.development?.activeFor(workspace, threadId) !== development)
+        throw new ModFunctionError("MODS_SCOPE_CHANGED")
+      development?.assertCurrent()
+    }
+    guard()
+    if (this.reloadControl.error(workspace, threadId) || this.releasedSessions.has(key))
+      throw new ModFunctionError("MODS_CONFIG_RELOAD_STOPPED")
+    if (this.applying.has(key) || this.pendingSessionBuilds.has(key) ||
+      this.probeRetirements.has(key) || this.runtimeReservations.has(key) ||
+      [...this.retiringEntries].some(entry => entry.workspace === workspace && entry.threadId === threadId))
+      throw new ModFunctionError("MODS_CONFIG_RELOAD_BUSY")
+    previous?.session?.assertRetirementHealthy()
+    if (previous && (!previous.loaded || !previous.client.stopAndDrain ||
+      !previous.activity.pauseForRetirement()))
+      throw new ModFunctionError("MODS_CONFIG_RELOAD_BUSY")
+    let control: ReturnType<FunctionConfigurationReloadControl["begin"]>
+    try { control = this.reloadControl.begin(workspace, threadId) }
+    catch (error) { previous?.activity.resume(); throw error }
+    assertReloadLive = () => control.signal.throwIfAborted()
+    const task = this.operations.exit(() => this.startupModels.fresh(() =>
+      withFreshFunctionSessionActivity(() => withDetachedFunctionLifecycle(async () => {
+        try {
+          // This private choice exists only during no-effect preparation. Inherited async
+          // branches lose it before commit and can never pin an obsolete live selection.
+          candidate = await this.preparingSelection.run(preparing, () =>
+            this.buildEntry(workspace, threadId, false, previous, undefined, development, true))
+          preparing.active = false
+          guard()
+          for (const capability of target?.capabilities ?? []) {
+            const snapshot = candidate.snapshots.get(capability.name)
+            if (snapshot?.sourceId !== capability.pluginId ||
+              snapshot.compiled.digest !== capability.digest)
+              throw new ModFunctionError("MODS_CONFIG_SOURCE_CHANGED")
+          }
+          const assertCandidate = () => {
+            guard()
+            candidate!.session!.assertRetirementHealthy()
+            candidate!.initializer.assertReady()
+            for (const snapshot of candidate!.snapshots.values()) {
+              this.store.assertGrant(snapshot.grant)
+              this.assertConfiguredOptions(workspace, snapshot.compiled, snapshot.configuredRevision ?? 0)
+              assertFunctionSourcesCurrent(snapshot.compiled)
+            }
+          }
+          assertCandidate()
+          // The old selection and guest have not changed if preparation or this CAS fails.
+          commitSelection()
+          committed = true
+          for (const cacheKey of this.clawSelections.keys())
+            if (JSON.parse(cacheKey)[1] === threadId) this.clawSelections.delete(cacheKey)
+          if (encodeModJson(this.clawSelection(workspace, threadId) ?? null) !== fingerprint)
+            throw new ModFunctionError("MODS_CONFIG_SOURCE_CHANGED")
+          assertCandidate()
+          control.failed(new Error("当前组合正在切换，旧组件清理完成前不会重新启动。"))
+          if (previous) {
+            retired = true
+            this.retireSiteEntry(previous)
+            previous.freshness.close("selection-reconfigured")
+            for (const check of previous.completionChecks)
+              check.abort(new ModFunctionError("MODS_SCOPE_CHANGED"))
+            previous.activity.close()
+            this.closePromptSessions(previous)
+            // Preserve the exact trial activation and its consent. This replaces only the
+            // physical guest generation, unlike externally stopping the development trial.
+            await previous.activity.cleanup(() => this.drainEntry(previous, true))
+          }
+          assertCandidate()
+          this.sessions.set(key, candidate)
+          candidate.initializer.activate()
+          this.candidates.delete(candidate)
+          this.activateConversationOwner(candidate)
+          control.applied()
+          try {
+            this.host.changed(threadId, `source-replaced:${candidate.generation}`)
+          } catch { /* A display notification cannot undo the completed native transaction. */ }
+        } catch (error) {
+          preparing.active = false
+          if (candidate) {
+            if (this.sessions.get(key) === candidate) this.sessions.delete(key)
+            this.candidates.delete(candidate)
+            candidate.activity.close()
+            try { this.closePromptSessions(candidate) } catch { /* Still drain its real resources. */ }
+            await this.drainEntry(candidate, true).catch(() => {})
+          }
+          if (!committed && this.sessions.get(key) === previous) previous?.activity.resume()
+          else if (committed) {
+            control.failed(error)
+            if (this.sessions.get(key) === previous) this.sessions.delete(key)
+            if (previous) {
+              retired = true
+              previous.activity.close()
+              previous.freshness.close("selection-reconfiguration-failed")
+              try { this.closePromptSessions(previous) } catch { /* Still drain its real resources. */ }
+              await this.drainEntry(previous, true).catch(() => {})
+            }
+            if (development) this.development?.retireExternal(development, async () => {
+              if (previous) await this.entryDrains.get(previous)
+              throw error
+            })
+            if (retired && previous) {
+              this.lostEntries.set(key, new Set([previous]))
+              if (this.retiringEntries.has(previous)) this.failedLostEntries.add(previous)
+            }
+          }
+          if (committed) throw new ModFunctionError("MODS_COMPOSITION_APPLY_UNCONFIRMED",
+            "组合已保存，但运行切换未确认完成；请核对旧组件的未完成操作。", true)
+          throw error
+        } finally { preparing.active = false; control.finish() }
+      }))))
+    this.applying.set(key, task)
+    try { await task }
+    finally {
+      if (this.applying.get(key) === task) this.applying.delete(key)
+      this.publishConfigurationIdle(threadId)
+    }
+  }
+
   closeThread(threadId: string): void {
     // This entry point also closes a configuration on a still-existing thread. Retired physical
     // children keep sharing its pool with a later reopen until their true exit and host finally.
@@ -2261,17 +3070,21 @@ export class FunctionModsManager {
   }
 
   private async session(workspace: string, threadId: string, registrationOnly = false): Promise<SessionEntry> {
+    if (this.runtimeReceiptError) throw new ModFunctionError("MODS_RUNTIME_RECEIPTS_UNAVAILABLE")
     this.assertEndAdmission(workspace, threadId)
     if (this.closed || !this.host.enabled(workspace)) throw new ModFunctionError("MODS_DISABLED")
     if (this.reloadControl.error(workspace, threadId))
       throw new ModFunctionError("MODS_CONFIG_RELOAD_STOPPED", "MODS_CONFIG_RELOAD_STOPPED: 当前组合已停用，请在插件参数中明确重新加载。")
     const key = JSON.stringify([workspace, threadId])
+    const retirement = this.probeRetirements.get(key)
+    if (retirement) { await retirement; return this.session(workspace, threadId, registrationOnly) }
     const entry = this.sessions.get(key)
     if (this.endingEntries.has(key)) {
       if (!entry?.session?.hasCompletedStartup) throw new ModFunctionError("MODS_SESSION_ENDING")
       return entry
     }
     if (entry) {
+      if (entry.probeRetirementError) throw new ModFunctionError("MODS_RUNTIME_SESSION_BUSY", entry.probeRetirementError)
       await entry.loading
       if (entry.session!.plugins.every((plugin) => !plugin.guest.stats.disposed)) {
         if (!registrationOnly) {
@@ -2292,11 +3105,28 @@ export class FunctionModsManager {
       throw new ModFunctionError("MODS_CONFIG_RELOAD_STOPPED",
         "MODS_CONFIG_RELOAD_STOPPED: 组件运行已停止。请先核对未完成操作的结果，再到插件参数明确重新加载当前组合。")
     }
-    return this.buildEntry(workspace, threadId, registrationOnly)
+    let pending = this.pendingSessionBuilds.get(key)
+    if (!pending) {
+      pending = this.buildEntry(workspace, threadId, registrationOnly)
+      this.pendingSessionBuilds.set(key, pending)
+    }
+    try {
+      const created = await pending
+      this.captureOperation(created)
+      if (!registrationOnly) await this.startEntry(created)
+      return created
+    } finally {
+      if (this.pendingSessionBuilds.get(key) === pending) {
+        this.pendingSessionBuilds.delete(key)
+        this.publishConfigurationIdle(threadId)
+      }
+    }
   }
 
   /** Lost execution is not a read retry. Keep a stopped receipt until trusted user reload. */
   private stopLostEntry(entry: SessionEntry): void {
+    // Explicit retirement already has a cleanup owner and preserves any unknown outcome.
+    if (this.entryDrains.has(entry)) return
     const key = JSON.stringify([entry.workspace, entry.threadId])
     if (this.sessions.get(key) !== entry) return
     const control = this.reloadControl.begin(entry.workspace, entry.threadId)
@@ -2320,6 +3150,8 @@ export class FunctionModsManager {
   }
 
   private startEntry(entry: SessionEntry): Promise<void> {
+    entry.execution.enterGuest()
+    this.ensureConversationOwner(entry)
     if (entry.initializer.allowsStartupEffects && this.sessions.get(
       JSON.stringify([entry.workspace, entry.threadId])) === entry)
       this.activateConversationOwner(entry)
@@ -2381,803 +3213,880 @@ export class FunctionModsManager {
 
   private async buildEntry(workspace: string, threadId: string, registrationOnly: boolean,
     previous?: SessionEntry, prepared?: PreparedConfigurationReload,
-    development?: DevelopmentActivation): Promise<SessionEntry> {
+    development?: DevelopmentActivation, selectionCandidate = false): Promise<SessionEntry> {
+    if (this.runtimeReceiptError) throw new ModFunctionError("MODS_RUNTIME_RECEIPTS_UNAVAILABLE")
     const key = JSON.stringify([workspace, threadId])
-    const privateBuild = previous !== undefined || prepared !== undefined || development !== undefined
-    if (!previous && this.sessions.size >= 6) throw new ModFunctionError("MODS_SESSION_CAPACITY")
-    const entry: SessionEntry = {
-      activity: new FunctionSessionActivity(() => {
-        if (this.sessions.get(key) === entry) this.scheduleConfigurationApplication(entry)
-      }, cleanup => cleanup ? pluginCatalogGate.retainRetirement() : pluginCatalogGate.retain(), () => {
-        if (this.sessions.get(key) === entry) this.development?.idle(threadId)
-      }),
-      initializer: new FunctionSessionInitializer(development ? true : prepared ? "restart" : previous !== undefined),
-      selectionFingerprint: encodeModJson(this.clawSelection(workspace, threadId) ?? null),
-      promptSessionId: randomUUID(),
-      freshness: new CompletionFreshness((id, binding, reason) => {
-        this.invalidateCompletionEvidence(workspace, threadId, id, binding, reason)
-      }),
-      completionChecks: new Set(),
-      completionProofs: new Map(),
-      turnNotices: new FunctionTurnNotices(),
-      workspace,
-      threadId,
-      epoch: this.epoch(workspace),
-      generation: ++this.sessionGeneration,
-      client: this.createClient(),
-      snapshots: new Map(),
-      sourceDirectories: new Set(),
-      developmentPlugins: new Map(),
-      trustedBuiltins: new Map(),
-      loading: Promise.resolve(undefined as unknown as FunctionSession)
-    }
-    const current = entry
-    if (privateBuild) this.candidates.add(current)
-    else {
-      // Admission can reject a stale operation before construction has a loading promise.
-      // Do not expose its placeholder entry to the next independent caller.
-      this.captureOperation(current)
-      this.sessions.set(key, current)
-    }
-    const assertLive = (plugin?: FunctionPlugin): void => {
-      this.assertClassicEndStage(threadId)
-      if (current.initializer.strict) prepared?.assertLive()
+    const usage = this.capabilityContext(workspace, threadId)
+    const admissionEpoch = this.epoch(workspace)
+    const admissionSources = this.configurationSources(workspace, threadId)
+    const privateBuild = previous !== undefined || prepared !== undefined || development !== undefined || selectionCandidate
+    let reservation = this.runtimeReservations.get(key)
+    if (!previous && reservation && reservation !== prepared?.capacityReservation)
+      throw new ModFunctionError("MODS_RUNTIME_SESSION_BUSY")
+    let admission: object | undefined
+    if (!privateBuild && !reservation) {
+      admission = await this.acquireRuntimeSlot(key)
+      reservation = admission
+    } else if (!previous && !reservation && this.runtimeOccupancy() >= 6)
+      throw new ModFunctionError("MODS_SESSION_CAPACITY")
+    let admitted: SessionEntry | undefined
+    try {
+      this.assertEndAdmission(workspace, threadId)
       this.host.assertThread?.(workspace, threadId)
-      if (
-        this.closed ||
-        (privateBuild && current.initializer.strict
-          ? !this.candidates.has(current) || this.sessions.get(key) !== previous
-          : this.sessions.get(key) !== current) ||
-        !this.host.enabled(workspace) ||
-        this.epoch(workspace) !== current.epoch
-      )
+      if (this.closed || !this.host.enabled(workspace)) throw new ModFunctionError("MODS_DISABLED")
+      if (this.epoch(workspace) !== admissionEpoch ||
+        usage.identity !== this.capabilityContext(workspace, threadId).identity ||
+        this.configurationSources(workspace, threadId) !== admissionSources ||
+        (!privateBuild && this.reloadControl.error(workspace, threadId)))
         throw new ModFunctionError("MODS_SCOPE_CHANGED")
-      if (plugin) {
-        const development = current.developmentPlugins.get(plugin)
-        development?.assertCapabilities(
-          plugin.guest.registrations.map(registration => `event:${registration.pattern}`))
-        const snapshot = current.snapshots.get(plugin.name)
-        if (snapshot) this.store.assertGrant(snapshot.grant)
-        else if (!development && current.trustedBuiltins.get(plugin.name) !== plugin)
-          throw new ModFunctionError("MODS_GRANT_MISSING")
-      } else {
-        for (const snapshot of current.snapshots.values()) this.store.assertGrant(snapshot.grant)
-        for (const [plugin, development] of current.developmentPlugins) {
-          development.assertCapabilities(
-            plugin.guest.registrations.map(registration => `event:${registration.pattern}`))
-        }
+      const entry: SessionEntry = {
+        execution: new FunctionGuestExecutionFacts(),
+        registrationProbe: registrationOnly && !privateBuild,
+        activity: new FunctionSessionActivity(() => {
+          if (this.sessions.get(key) === entry) {
+            this.scheduleConfigurationApplication(entry)
+            this.publishConfigurationIdle(threadId)
+          }
+        }, cleanup => cleanup ? pluginCatalogGate.retainRetirement() : pluginCatalogGate.retain(), () => {
+          if (this.sessions.get(key) === entry) {
+            this.development?.idle(threadId)
+            this.publishConfigurationIdle(threadId)
+          }
+        }),
+        initializer: new FunctionSessionInitializer(development || selectionCandidate ? true : prepared ? "restart" : previous !== undefined),
+        selectionFingerprint: encodeModJson(this.clawSelection(workspace, threadId) ?? null),
+        promptSessionId: randomUUID(),
+        freshness: new CompletionFreshness((id, binding, reason) => {
+          this.invalidateCompletionEvidence(workspace, threadId, id, binding, reason)
+        }),
+        completionChecks: new Set(),
+        completionProofs: new Map(),
+        turnNotices: new FunctionTurnNotices(),
+        workspace,
+        threadId,
+        epoch: this.epoch(workspace),
+        generation: ++this.sessionGeneration,
+        client: this.createClient(),
+        snapshots: new Map(),
+        sourceDirectories: new Set(),
+        developmentPlugins: new Map(),
+        trustedBuiltins: new Map(),
+        loading: Promise.resolve(undefined as unknown as FunctionSession)
       }
-      if (current.session?.plugins.some((loaded) => loaded.guest.stats.disposed))
-        throw new ModFunctionError("MODS_RUNTIME_LOST")
-    }
-    current.loading = this.candidateConstruction.run(privateBuild ? current : undefined, async () => {
-      try {
-        const plugins: FunctionPlugin[] = []
-        const ready = new Set(
-          (prepared ? [] : await this.effectiveStatus(workspace, threadId))
-            .filter((s) => s.state === "ready")
-            .map((s) => s.pluginId)
+      admitted = entry
+      const current = entry
+      prepared?.created?.(entry)
+      if (privateBuild) this.candidates.add(current)
+      else {
+        // Admission can reject a stale operation before construction has a loading promise.
+        // Do not expose its placeholder entry to the next independent caller.
+        this.captureOperation(current)
+        this.sessions.set(key, current)
+      }
+      const assertLive = (plugin?: FunctionPlugin): void => {
+        if (current.catalogInvalidated) throw new ModFunctionError("MODS_PLUGIN_CHANGED", "插件已停用或更新，本次插件调用已停止；可继续制作。已开始的外部操作请先核对结果，不会自动重试。")
+        this.assertClassicEndStage(threadId)
+        if (current.initializer.strict) prepared?.assertLive()
+        this.host.assertThread?.(workspace, threadId)
+        if (
+          this.closed ||
+          (privateBuild && current.initializer.strict
+            ? !this.candidates.has(current) || this.sessions.get(key) !== previous
+            : this.sessions.get(key) !== current) ||
+          !this.host.enabled(workspace) ||
+          this.epoch(workspace) !== current.epoch ||
+          usage.identity !== this.capabilityContext(workspace, threadId).identity
         )
-        const selected = this.clawSelection(workspace, threadId)
-        for (const source of this.sources(selected)) {
-          if (prepared ? !prepared.sourcePlugins.has(source.id)
-            : !ready.has(source.id)) continue
-          if (!source.enabled) continue
-          current.sourceDirectories.add(source.path)
-          const original = prepared?.sourcePlugins.get(source.id)
-          const compiled = original ? original.compiled : await compileFunctionPlugin(source.path)
-          if (compiled.name === CONTEXT_METER_NAME)
-            throw new ModFunctionError("MODS_RESERVED_BUILTIN_NAME")
-          if (
-            selected &&
-            !selected.capabilities.some(
-              (capability) =>
-                capability.pluginId === source.id &&
-                capability.name === compiled.name &&
-                capability.digest === compiled.digest
-            )
-          )
-            throw new ModFunctionError("CLAW_CAPABILITY_CHANGED")
-          const grant = this.store.getGrant(workspace, `function:${compiled.name}`)
-          if (!grant?.enabled || grant.digest !== compiled.digest) continue
-          const componentSelection = selected?.capabilities.find(
-            (capability) => capability.pluginId === source.id
-          )?.components
-          const projection = original?.projection ?? projectFunctionComponents(compiled, componentSelection)
-          if (current.snapshots.has(compiled.name))
-            throw new ModFunctionError("MODS_DUPLICATE_MOD_ID")
-          if (plugins.length >= 8) throw new ModFunctionError("MODS_CHAIN_CAPACITY")
-          assertLive()
-          const configured = original
-            ? { options: structuredClone(original.configuredOptions!), revision: original.configuredRevision ?? 0 }
-            : this.configuredOptions(workspace, compiled, projection.options)
-          const guest = trackFunctionGuest(
-            await current.client.load(projection.code, configured.options),
-            current.activity, current.initializer, (run) => this.startupModels.fresh(() => this.operations.exit(run))
-          )
-          assertLive()
-          this.assertConfiguredOptions(workspace, compiled, configured.revision)
-          current.snapshots.set(compiled.name, {
-            compiled, projection, grant, sourceId: source.id, sourcePath: source.path,
-            configuredRevision: configured.revision,
-            configuredOptions: structuredClone(configured.options)
-          })
-          if (projection.selectionDigest)
-            bindFunctionComponentAudit(
-              grant,
-              threadId,
-              { ids: projection.effectiveIds, selectionDigest: projection.selectionDigest },
-              assertLive
-            )
-          plugins.push({
-            name: compiled.name,
-            root: compiled.root,
-            environment: projection.environment,
-            modelProtocol: compiled.modelProtocol,
-            tier: "user",
-            guest,
-            capabilities: [...SESSION_CAPABILITIES]
-          })
-        }
-        const localDevelopment = development ?? this.development?.activeFor(workspace, threadId)
-        if (localDevelopment) {
-          localDevelopment.assertCurrent()
-          current.sourceDirectories.add(localDevelopment.revision.sourcePath)
-          const compiled = await compileFunctionPlugin(localDevelopment.revision.sourcePath)
-          localDevelopment.assertCurrent()
-          if (compiled.digest !== localDevelopment.revision.compiledDigest || compiled.userConfig ||
-            plugins.some(plugin => plugin.name === compiled.name) || compiled.name === CONTEXT_METER_NAME)
-            throw new ModFunctionError("MODS_DEVELOPMENT_SOURCE_CHANGED")
-          const guest = trackFunctionGuest(await current.client.load(compiled.code, compiled.options),
-            current.activity, current.initializer,
-            run => this.startupModels.fresh(() => this.operations.exit(run)))
-          localDevelopment.assertCapabilities(
-            guest.registrations.map(registration => `event:${registration.pattern}`))
-          const plugin: FunctionPlugin = { name: compiled.name, root: compiled.root, tier: "user",
-            guest, capabilities: localDevelopment.revision.capabilities.filter(value => !value.startsWith("event:")) }
-          current.developmentPlugins.set(plugin, localDevelopment)
-          plugins.push(plugin)
-        }
-        if (selected?.builtins?.contextMeter) {
-          assertLive()
-          const guest = trackFunctionGuest(
-            await current.client.load(CONTEXT_METER_CODE, {}), current.activity, current.initializer,
-            (run) => this.startupModels.fresh(() => this.operations.exit(run))
-          )
-          assertLive()
-          const builtin: FunctionPlugin = {
-            name: CONTEXT_METER_NAME,
-            root: workspace,
-            tier: "builtin",
-            guest,
-            capabilities: [...CONTEXT_METER_CAPABILITIES]
-          }
-          current.trustedBuiltins.set(builtin.name, builtin)
-          plugins.push(builtin)
-        }
-        const namedState =
-          this.namedStates.get(key)?.state ??
-          new FunctionNamedState(() => {
-            // Read-only and legacy sessions reserve no retained-state capacity. Only an actual
-            // state write may hit this separate budget; it never prevents starting a conversation.
-            if (!this.namedStates.has(key) && this.namedStates.size >= 32)
-              throw new ModFunctionError("MODS_STATE_SESSION_QUOTA")
-            const sourceDirectories = this.namedStates.get(key)?.sourceDirectories ?? new Set<string>()
-            for (const path of current.sourceDirectories) sourceDirectories.add(path)
-            this.namedStates.set(key, { workspace, threadId, state: namedState, sourceDirectories })
-          })
-        const retainedState = this.namedStates.get(key)
-        if (retainedState)
-          for (const path of current.sourceDirectories) retainedState.sourceDirectories.add(path)
-        const promptScope = (plugin: FunctionPlugin, signal: AbortSignal) => ({
-          threadId, pluginId: plugin.name,
-          sessionId: current.promptSessionId + ":" + plugin.name,
-          signal, assertLive: () => assertLive(plugin)
-        })
-        assertLive()
-        for (const snapshot of current.snapshots.values())
-          this.assertConfiguredOptions(workspace, snapshot.compiled, snapshot.configuredRevision ?? 0)
-        const checkClientModule = (name: string, module: string): void => {
-          assertLive()
-          const snapshot = current.snapshots.get(name)
-          if (!snapshot || !Object.hasOwn(snapshot.projection.clients, module))
-            throw new ModFunctionError("MODS_CLIENT_MODULE_UNAPPROVED")
-          this.store.assertGrant(snapshot.grant)
-        }
-        const conversationContext = (plugin: FunctionPlugin, signal: AbortSignal,
-          originalGuard: () => void): FunctionConversationCallContext => {
+          throw new ModFunctionError("MODS_SCOPE_CHANGED")
+        if (plugin) {
+          const development = current.developmentPlugins.get(plugin)
+          development?.assertCapabilities(
+            developmentRegistrationCapabilities(plugin.guest.registrations))
           const snapshot = current.snapshots.get(plugin.name)
-          const readOnly = !current.initializer.allowsStartupEffects
-          const guard = () => {
-            signal.throwIfAborted()
-            originalGuard()
-            assertLive(plugin)
-            if (!plugins.includes(plugin)) throw new ModFunctionError("MODS_GRANT_MISSING")
-            if (current.selectionFingerprint !== encodeModJson(this.clawSelection(workspace, threadId) ?? null))
-              throw new ModFunctionError("MODS_SCOPE_CHANGED")
-            if (snapshot) {
-              if (current.snapshots.get(plugin.name) !== snapshot)
-                throw new ModFunctionError("MODS_SCOPE_CHANGED")
-              this.assertConfiguredOptions(workspace, snapshot.compiled,
-                snapshot.configuredRevision ?? 0)
-              assertFunctionSourcesCurrent(snapshot.compiled)
-              this.store.assertGrant(snapshot.grant)
-            }
+          if (snapshot) {
+            this.assertSnapshotSource(snapshot)
+            this.store.assertGrant(snapshot.grant)
           }
-          guard()
-          return Object.freeze({ owner: current, workspace, threadId, signal, readOnly,
-            plugin, ...(snapshot ? { grant: snapshot.grant } : {}), assertCurrent: guard })
+          else if (!development && current.trustedBuiltins.get(plugin.name) !== plugin)
+            throw new ModFunctionError("MODS_GRANT_MISSING")
+        } else {
+          for (const snapshot of current.snapshots.values()) {
+            this.assertSnapshotSource(snapshot)
+            this.store.assertGrant(snapshot.grant)
+          }
+          for (const [plugin, development] of current.developmentPlugins) {
+            development.assertCapabilities(
+              developmentRegistrationCapabilities(plugin.guest.registrations))
+          }
         }
-        current.session = new FunctionSession(plugins, {
-          debugLog: this.host.debugLog
-            ? (plugin, text) => this.host.debugLog!(plugin, text)
-            : undefined,
-          appendSession: this.host.appendSession ? async (plugin, args, source, run) => {
-            const context = conversationContext(plugin, source.signal, source.assertCurrent)
-            if (context.readOnly) throw new ModFunctionError("MODS_CONFIG_RELOAD_EFFECT_UNSUPPORTED")
-            const result = await this.host.appendSession!(context, args, source, run)
-            context.assertCurrent()
-            return result
-          } : undefined,
-          readConversation: this.host.readConversation ? async (plugin, args, signal, guard) => {
-            const context = conversationContext(plugin, signal, guard)
-            const result = await this.host.readConversation!(context, args)
-            context.assertCurrent()
-            return result
-          } : undefined,
-          pendingQuestion: () => {
+        if (current.session?.plugins.some((loaded) => loaded.guest.stats.disposed))
+          throw new ModFunctionError("MODS_RUNTIME_LOST")
+      }
+      current.loading = this.candidateConstruction.run(privateBuild ? current : undefined, async () => {
+        try {
+          const plugins: FunctionPlugin[] = []
+          const ready = new Set(
+            (prepared ? [] : await this.effectiveStatus(workspace, threadId))
+              .filter((s) => s.state === "ready")
+              .map((s) => s.pluginId)
+          )
+          const selected = this.clawSelection(workspace, threadId)
+          for (const source of this.sources(selected)) {
+            if (prepared ? !prepared.sourcePlugins.has(source.id)
+              : !ready.has(source.id)) continue
+            if (!source.enabled) continue
+            current.sourceDirectories.add(source.path)
+            const original = prepared?.sourcePlugins.get(source.id)
+            const compiled = original ? original.compiled : await compileFunctionPlugin(source.path)
+            if (compiled.name === CONTEXT_METER_NAME)
+              throw new ModFunctionError("MODS_RESERVED_BUILTIN_NAME")
+            if (
+              selected &&
+              !selected.capabilities.some(
+                (capability) =>
+                  capability.pluginId === source.id &&
+                  capability.name === compiled.name &&
+                  capability.digest === compiled.digest
+              )
+            )
+              throw new ModFunctionError("CLAW_CAPABILITY_CHANGED")
+            const grant = this.store.getGrant(workspace, `function:${compiled.name}`)
+            if (!grant?.enabled || grant.digest !== compiled.digest) continue
+            const componentSelection = selected?.capabilities.find(
+              (capability) => capability.pluginId === source.id
+            )?.components ?? (selected && compiled.components?.length
+              ? { mode: "all" as const, ids: [], config: {} } : undefined)
+            const projection = original?.projection ?? projectFunctionComponents(
+              compiled, componentSelection, usage.usage)
+            if (current.snapshots.has(compiled.name))
+              throw new ModFunctionError("MODS_DUPLICATE_MOD_ID")
+            if (plugins.length >= 8) throw new ModFunctionError("MODS_CHAIN_CAPACITY")
             assertLive()
-            const question = this.host.pendingQuestion?.(threadId) ?? null
+            const configured = original
+              ? { options: structuredClone(original.configuredOptions!), revision: original.configuredRevision ?? 0 }
+              : this.configuredOptions(workspace, compiled, projection.options)
+            const guest = trackFunctionGuest(
+              await current.client.load(projection.code, configured.options),
+              current.activity, current.initializer, (run) => this.startupModels.fresh(() => this.operations.exit(run)), current.execution
+            )
             assertLive()
-            return question
-          },
-          checkClientModule,
-          userMessageOrigin: messageId => this.host.userMessageOrigin?.(threadId, messageId),
-          reservePluginPrompt: this.host.reservePluginPrompt ? (plugin, origin, lifetime) => {
+            this.assertConfiguredOptions(workspace, compiled, configured.revision)
+            current.snapshots.set(compiled.name, {
+              compiled, projection, grant, sourceId: source.id, sourcePath: source.path,
+              configuredRevision: configured.revision,
+              configuredOptions: structuredClone(configured.options)
+            })
+            if (projection.selectionDigest)
+              bindFunctionComponentAudit(
+                grant,
+                threadId,
+                { ids: projection.effectiveIds, selectionDigest: projection.selectionDigest },
+                assertLive
+              )
+            plugins.push({
+              name: compiled.name,
+              root: compiled.root,
+              environment: projection.environment,
+              modelProtocol: compiled.modelProtocol,
+              tier: "user",
+              guest,
+              capabilities: [...SESSION_CAPABILITIES]
+            })
+          }
+          const localDevelopment = development ?? this.development?.activeFor(workspace, threadId)
+          if (localDevelopment) {
+            localDevelopment.assertCurrent()
+            current.sourceDirectories.add(localDevelopment.revision.sourcePath)
+            const compiled = await this.configurationSourceCache.read(localDevelopment.revision.sourcePath)
+            localDevelopment.assertCurrent()
+            assertLive()
+            if (compiled.digest !== localDevelopment.revision.compiledDigest || compiled.userConfig ||
+              plugins.some(plugin => plugin.name === compiled.name) || compiled.name === CONTEXT_METER_NAME)
+              throw new ModFunctionError("MODS_DEVELOPMENT_SOURCE_CHANGED")
+            // Trial runs represent the full draft. Never silently omit a draft's other-mode modules.
+            if (compiled.components?.length)
+              resolveClawComponents(compiled.components,
+                { mode: "all", ids: [], config: {} }, usage.usage)
+            const guest = trackFunctionGuest(await current.client.load(compiled.code, compiled.options),
+              current.activity, current.initializer,
+              run => this.startupModels.fresh(() => this.operations.exit(run)), current.execution)
+            assertLive()
+            localDevelopment.assertCapabilities(
+              developmentRegistrationCapabilities(guest.registrations))
+            const plugin: FunctionPlugin = { name: compiled.name, root: compiled.root, tier: "user",
+              modelProtocol: compiled.modelProtocol,
+              guest, capabilities: localDevelopment.revision.capabilities.filter(value => !value.startsWith("event:")) }
+            current.developmentPlugins.set(plugin, localDevelopment)
+            plugins.push(plugin)
+          }
+          if (selected?.builtins?.contextMeter) {
+            assertLive()
+            const guest = trackFunctionGuest(
+              await current.client.load(CONTEXT_METER_CODE, {}), current.activity, current.initializer,
+              (run) => this.startupModels.fresh(() => this.operations.exit(run)), current.execution
+            )
+            assertLive()
+            const builtin: FunctionPlugin = {
+              name: CONTEXT_METER_NAME,
+              root: workspace,
+              tier: "builtin",
+              guest,
+              capabilities: [...CONTEXT_METER_CAPABILITIES]
+            }
+            current.trustedBuiltins.set(builtin.name, builtin)
+            plugins.push(builtin)
+          }
+          const namedState =
+            this.namedStates.get(key)?.state ??
+            new FunctionNamedState(() => {
+              // Read-only and legacy sessions reserve no retained-state capacity. Only an actual
+              // state write may hit this separate budget; it never prevents starting a conversation.
+              if (!this.namedStates.has(key) && this.namedStates.size >= 32)
+                throw new ModFunctionError("MODS_STATE_SESSION_QUOTA")
+              const sourceDirectories = this.namedStates.get(key)?.sourceDirectories ?? new Set<string>()
+              for (const path of current.sourceDirectories) sourceDirectories.add(path)
+              this.namedStates.set(key, { workspace, threadId, state: namedState, sourceDirectories })
+            })
+          const retainedState = this.namedStates.get(key)
+          if (retainedState)
+            for (const path of current.sourceDirectories) retainedState.sourceDirectories.add(path)
+          const promptScope = (plugin: FunctionPlugin, signal: AbortSignal) => ({
+            threadId, pluginId: plugin.name,
+            sessionId: current.promptSessionId + ":" + plugin.name,
+            signal, assertLive: () => assertLive(plugin)
+          })
+          assertLive()
+          for (const snapshot of current.snapshots.values())
+            this.assertConfiguredOptions(workspace, snapshot.compiled, snapshot.configuredRevision ?? 0)
+          const checkClientModule = (name: string, module: string): void => {
+            assertLive()
+            const snapshot = current.snapshots.get(name)
+            if (!snapshot || !Object.hasOwn(snapshot.projection.clients, module))
+              throw new ModFunctionError("MODS_CLIENT_MODULE_UNAPPROVED")
+            this.store.assertGrant(snapshot.grant)
+          }
+          const conversationContext = (plugin: FunctionPlugin, signal: AbortSignal,
+            originalGuard: () => void): FunctionConversationCallContext => {
             const snapshot = current.snapshots.get(plugin.name)
-            if (!snapshot) throw new ModFunctionError("MODS_GRANT_MISSING")
+            const readOnly = !current.initializer.allowsStartupEffects
             const guard = () => {
+              signal.throwIfAborted()
+              originalGuard()
               assertLive(plugin)
-              this.assertConfiguredOptions(workspace, snapshot.compiled,
-                snapshot.configuredRevision ?? 0)
-              assertFunctionSourcesCurrent(snapshot.compiled)
+              if (!plugins.includes(plugin)) throw new ModFunctionError("MODS_GRANT_MISSING")
               if (current.selectionFingerprint !== encodeModJson(this.clawSelection(workspace, threadId) ?? null))
                 throw new ModFunctionError("MODS_SCOPE_CHANGED")
+              if (snapshot) {
+                if (current.snapshots.get(plugin.name) !== snapshot)
+                  throw new ModFunctionError("MODS_SCOPE_CHANGED")
+                this.assertConfiguredOptions(workspace, snapshot.compiled,
+                  snapshot.configuredRevision ?? 0)
+                assertFunctionSourcesCurrent(snapshot.compiled)
+                this.store.assertGrant(snapshot.grant)
+              }
             }
             guard()
-            return this.host.reservePluginPrompt!(workspace, threadId, origin, lifetime, guard)
-          } : undefined,
-          preparePluginPrompt: this.host.preparePluginPrompt ? (plugin, signal, assertAdmission, onInvalid, run) =>
-            this.host.preparePluginPrompt!(workspace, threadId, signal, () => {
-              assertLive(plugin)
-              assertAdmission()
-            }, onInvalid, run)
-            : undefined,
-          activity: current.activity,
-          initializer: current.initializer,
-          uiResolveQuota: current.client instanceof FunctionRuntimeClient ? () => {
-            let quota = this.uiResolveQuotas.get(key)
-            if (!quota) {
-              quota = new FunctionUiResolveMainQuota()
-              this.uiResolveQuotas.set(key, quota)
-            }
-            return quota
-          } : undefined,
-          assertUiResolveCurrent: plugin => {
+            return Object.freeze({ owner: current, workspace, threadId, signal, readOnly,
+              plugin, ...(snapshot ? { grant: snapshot.grant } : {}), assertCurrent: guard })
+          }
+          const withNativeGrant = async <T>(plugin: FunctionPlugin, method: string,
+            run: (grant: ModGrant) => Promise<T>): Promise<T> => {
             assertLive(plugin)
-            if (current.selectionFingerprint !== encodeModJson(this.clawSelection(workspace, threadId) ?? null))
-              throw new ModFunctionError("MODS_SCOPE_CHANGED")
-            const snapshots = plugin ? [current.snapshots.get(plugin.name)]
-              : [...current.snapshots.values()]
-            for (const snapshot of snapshots) {
-              if (!snapshot) continue // Trusted builtins have no external source files.
-              this.assertConfiguredOptions(workspace, snapshot.compiled,
-                snapshot.configuredRevision ?? 0)
-              assertFunctionSourcesCurrent(snapshot.compiled)
-            }
-          },
-          initializationSignal: prepared?.signal,
-          freshEntry: (run) => this.startupModels.fresh(() => this.operations.exit(run)),
-          configRows: this.configurationRows(workspace, current.snapshots),
-          configChanged: (scope) => this.host.configChanged?.(scope),
-          prepareDesktop: async (plugin, signal) => {
-            assertLive(plugin)
-            const guard = this.host.capturePromptGuard?.(workspace, threadId)
-            const check = () => { assertLive(plugin); guard?.(); signal.throwIfAborted() }
-            if (!this.host.desktop) return {
-              assertLive: check,
-              copy: async () => ({ isCopied: false as const, reason: "no-surface" as const }),
-              selection: async () => undefined, clearSelection: async () => {}, drawings: async () => []
-            }
-            const scope = promptScope(plugin, signal)
-            const access = await this.host.desktop.capture({ ...scope, assertLive: () => {
-              scope.assertLive()
-              guard?.()
-            } })
-            assertLive(plugin)
-            guard?.()
-            signal.throwIfAborted()
-            return access
-          },
-          creatorHook: () => this.host.creatorHook?.(workspace, threadId),
-          preparePromptSuggest: async (plugin, signal) => {
-            assertLive(plugin)
-            if (!this.host.prompt) throw new ModFunctionError("MODS_PROMPT_UNAVAILABLE")
-            const guard = this.host.capturePromptGuard?.(workspace, threadId)
-            const scope = promptScope(plugin, signal)
-            const offer = await this.host.prompt.prepareSuggestion({ ...scope, assertLive: () => {
-              scope.assertLive()
-              guard?.()
-            } })
-            assertLive(plugin)
-            return async (input, active) => {
-              assertLive(plugin)
-              guard?.()
-              const result = await offer({ text: input.text as string }, active)
-              assertLive(plugin)
-              guard?.()
-              active.throwIfAborted()
+            const development = current.developmentPlugins.get(plugin)
+            if (development)
+              return withDevelopmentNativeAuthority(this.store, workspace, threadId,
+                development, method, run)
+            const grant = current.snapshots.get(plugin.name)?.grant
+            if (!grant) throw new ModFunctionError("MODS_GRANT_MISSING")
+            return run(grant)
+          }
+          current.session = new FunctionSession(plugins, {
+            debugLog: this.host.debugLog
+              ? (plugin, text) => this.host.debugLog!(plugin, text)
+              : undefined,
+            appendSession: this.host.appendSession ? async (plugin, args, source, run) => {
+              const context = conversationContext(plugin, source.signal, source.assertCurrent)
+              if (context.readOnly) throw new ModFunctionError("MODS_CONFIG_RELOAD_EFFECT_UNSUPPORTED")
+              const result = await this.host.appendSession!(context, args, source, run)
+              context.assertCurrent()
               return result
-            }
-          },
-          preparePromptFill: async (plugin, signal) => {
-            assertLive(plugin)
-            if (!this.host.prompt) throw new ModFunctionError("MODS_PROMPT_UNAVAILABLE")
-            await this.host.prompt.prepareFill(promptScope(plugin, signal))
-            assertLive(plugin)
-          },
-          peekPrompt: async (plugin, signal) => {
-            assertLive(plugin)
-            if (!this.host.prompt) throw new ModFunctionError("MODS_PROMPT_UNAVAILABLE")
-            const box = await this.host.prompt.peek(promptScope(plugin, signal))
-            assertLive(plugin)
-            return box
-          },
-          prompt: async (plugin, method, input, signal) => {
-            assertLive(plugin)
-            if (!this.host.prompt) throw new ModFunctionError("MODS_PROMPT_UNAVAILABLE")
-            const scope = promptScope(plugin, signal)
-            const result = method === "prompt.read"
-              ? await this.host.prompt.read(scope)
-              : await this.host.prompt.fill(scope, input as { text: string; mode?: "replace" | "append" | "insert" })
-            assertLive(plugin)
-            signal.throwIfAborted()
-            return { ...result }
-          },
-          namedState,
-          version: this.host.version,
-          readSettings: this.host.readSettings
-            ? async () => {
-                assertLive()
-                const value = await this.host.readSettings!(workspace, threadId)
-                assertLive()
-                return value
+            } : undefined,
+            readConversation: this.host.readConversation ? async (plugin, args, signal, guard) => {
+              const context = conversationContext(plugin, signal, guard)
+              const result = await this.host.readConversation!(context, args)
+              context.assertCurrent()
+              return result
+            } : undefined,
+            pendingQuestion: () => {
+              assertLive()
+              const question = this.host.pendingQuestion?.(threadId) ?? null
+              assertLive()
+              return question
+            },
+            checkClientModule,
+            userMessageOrigin: messageId => this.host.userMessageOrigin?.(threadId, messageId),
+            reservePluginPrompt: this.host.reservePluginPrompt ? (plugin, origin, lifetime) => {
+              const snapshot = current.snapshots.get(plugin.name)
+              if (!snapshot) throw new ModFunctionError("MODS_GRANT_MISSING")
+              const guard = () => {
+                assertLive(plugin)
+                this.assertConfiguredOptions(workspace, snapshot.compiled,
+                  snapshot.configuredRevision ?? 0)
+                assertFunctionSourcesCurrent(snapshot.compiled)
+                if (current.selectionFingerprint !== encodeModJson(this.clawSelection(workspace, threadId) ?? null))
+                  throw new ModFunctionError("MODS_SCOPE_CHANGED")
               }
-            : undefined,
-          workspace,
-          threadId,
-          cwd: () => this.host.fileScope?.(workspace, threadId).workspace ?? workspace,
-          directory: () => {
-            assertLive()
-            const directory = this.host.cwd?.(workspace, threadId) ??
-              this.host.fileScope?.(workspace, threadId).workspace ?? workspace
-            assertLive()
-            return directory
-          },
-          dialogs: this.host.dialogs?.(workspace, threadId),
-          assertLive,
-          assertCapability: (plugin, method) => current.developmentPlugins.get(plugin)?.assertCapability(method),
-          prepareAgent: async (plugin, args, signal) => {
-            assertLive(plugin)
-            if (!this.host.prepareAgent) throw new ModFunctionError("MODS_AGENT_SPAWN_UNAVAILABLE")
-            const result = await this.host.prepareAgent(
-              workspace,
-              threadId,
-              current.snapshots.get(plugin.name)!.grant,
-              args,
-              signal
-            )
-            assertLive(plugin)
-            return result
-          },
-          spawnAgent: async (plugin, input, signal, lifetime, creator) => {
-            assertLive(plugin)
-            if (!this.host.spawnAgent) throw new ModFunctionError("MODS_AGENT_SPAWN_UNAVAILABLE")
-            const result = await this.host.spawnAgent(
-              workspace,
-              threadId,
-              current.snapshots.get(plugin.name)!.grant,
-              input,
-              signal,
-              lifetime,
-              creator
-            )
-            // Return ownership even after revocation so the session can await real cleanup.
-            // It stores completion before checking the live resource again.
-            return result
-          },
-          sendPeer: async (plugin, input, signal) => {
-            assertLive(plugin)
-            if (!this.host.sendPeer) throw new ModFunctionError("MODS_PEER_UNAVAILABLE")
-            const result = await this.host.sendPeer(
-              workspace,
-              threadId,
-              current.snapshots.get(plugin.name)!.grant,
-              input,
-              signal
-            )
-            signal.throwIfAborted()
-            assertLive(plugin)
-            return result
-          },
-          authorizeProcess: async (plugin, request, signal) => {
-            assertLive(plugin)
-            if (!this.host.authorizeProcess) throw new ModFunctionError("MODS_PROCESS_UNAVAILABLE")
-            await this.host.authorizeProcess(
-              workspace,
-              threadId,
-              current.snapshots.get(plugin.name)!.grant,
-              request,
-              signal
-            )
-            signal.throwIfAborted()
-            assertLive(plugin)
-          },
-          runEffect: async (plugin, method, input, signal, run) => {
-            assertLive(plugin)
-            if (!this.host.runEffect) throw new ModFunctionError("MODS_EFFECT_UNAVAILABLE")
-            return this.host.runEffect(
-              workspace,
-              threadId,
-              current.snapshots.get(plugin.name)!.grant,
-              method,
-              input,
-              signal,
-              run
-            )
-          },
-          authorizeHttp: async (plugin, request, signal) => {
-            assertLive(plugin)
-            if (!this.host.authorizeHttp) throw new ModFunctionError("MODS_HTTP_UNAVAILABLE")
-            await this.host.authorizeHttp(
-              workspace,
-              threadId,
-              current.snapshots.get(plugin.name)!.grant,
-              request,
-              signal
-            )
-            signal.throwIfAborted()
-            assertLive(plugin)
-          },
-          abortTurn: async (plugin, turnId, signal) => {
-            assertLive(plugin)
-            if (!this.host.abortTurn) throw new ModFunctionError("MODS_TURN_UNAVAILABLE")
-            await this.host.abortTurn(
-              workspace,
-              threadId,
-              current.snapshots.get(plugin.name)!.grant,
-              turnId,
-              signal
-            )
-          },
-          readSession: async (method, signal, usageArgs) => {
-            assertLive()
-            if (!this.host.readSession) throw new ModFunctionError("MODS_SESSION_UNAVAILABLE")
-            const value = await this.host.readSession(
-              workspace,
-              threadId,
-              method,
-              signal,
-              usageArgs
-            )
-            assertLive()
-            const result = await this.host.publish(workspace, value, signal)
-            assertLive()
-            return result
-          },
-          compactSession: async (instructions, signal) => {
-            assertLive()
-            if (!this.host.compactSession) throw new ModFunctionError("MODS_SESSION_UNAVAILABLE")
-            const value = await this.host.compactSession(workspace, threadId, instructions, signal)
-            assertLive()
-            const result = await this.host.publish(workspace, value, signal)
-            assertLive()
-            return result
-          },
-          listAgents: async (signal) => {
-            assertLive()
-            if (!this.host.listAgents) throw new ModFunctionError("MODS_AGENT_LIST_UNAVAILABLE")
-            const result = await this.host.listAgents(workspace, threadId, signal)
-            signal.throwIfAborted()
-            assertLive()
-            return result
-          },
-          listTools: this.host.listTools
-            ? (signal) => this.host.listTools!(workspace, threadId, signal)
-            : undefined,
-          filterTools: this.host.filterTools
-            ? (tools) => this.host.filterTools!(workspace, threadId, tools)
-            : undefined,
-          assertToolNameAvailable: (plugin, name) => {
-            assertLive()
-            this.host.assertToolNameAvailable?.(workspace, threadId, plugin, name)
-          },
-          registeredTool: async (owner, input, origin, signal, run, caller) => {
-            assertLive(owner)
-            if (!this.host.registeredTool)
-              throw new ModFunctionError("MODS_REGISTERED_TOOL_UNAVAILABLE")
-            const answer = await this.host.registeredTool(
-              workspace,
-              threadId,
-              current.snapshots.get(owner.name)!.grant,
-              input,
-              origin,
-              signal,
-              run,
-              caller
-            )
-            assertLive(owner)
-            return answer
-          },
-          captureStartupModelGuard: () => this.captureStartupModelGuard(workspace, threadId),
-          assertStartupStatus: () => this.startupModels.assertStatus(workspace, threadId),
-          completeModelResult: async (plugin, input, signal) => {
-            assertLive(plugin)
-            if (!this.host.completeModelResult) throw new ModFunctionError("MODS_MODEL_OPERATION_UNSUPPORTED")
-            const grant = current.snapshots.get(plugin.name)!.grant
-            const result = await this.host.completeModelResult(workspace, threadId, grant, input, signal)
-            assertLive(plugin)
-            return result
-          },
-          forkModelResult: async (plugin, input, signal) => {
-            assertLive(plugin)
-            if (!this.host.forkModelResult) throw new ModFunctionError("MODS_MODEL_OPERATION_UNSUPPORTED")
-            const grant = current.snapshots.get(plugin.name)!.grant
-            const result = await this.host.forkModelResult(workspace, threadId, grant, input, signal)
-            assertLive(plugin)
-            return result
-          },
-          completeModel: async (plugin, input, signal) => {
-            assertLive(plugin)
-            if (!this.host.completeModel) throw new ModFunctionError("MODS_MODEL_UNAVAILABLE")
-            const grant = current.snapshots.get(plugin.name)!.grant
-            const result = await this.host.completeModel(workspace, threadId, grant, input, signal)
-            assertLive(plugin)
-            return result
-          },
-          capability: async (plugin, method, args, signal) => {
-            assertLive(plugin)
-            if (!this.host.capability)
-              throw new ModFunctionError("MODS_MODEL_OPERATION_UNSUPPORTED")
-            const grant = current.snapshots.get(plugin.name)!.grant
-            const input = args[0]
-            if (!isModObject(input)) throw new ModFunctionError("MODS_MODEL_ARGUMENTS")
-            const result = await this.host.capability(
-              workspace,
-              threadId,
-              grant,
-              method as "model.fork" | "model.classify",
-              input,
-              signal
-            )
-            assertLive(plugin)
-            return result
-          },
-          callTool: async (plugin, input, signal) => {
-            assertLive(plugin)
-            if (!this.host.callTool) throw new ModFunctionError("MODS_TOOL_UNAVAILABLE")
-            const grant = current.snapshots.get(plugin.name)!.grant
-            const result = await this.host.callTool(workspace, threadId, grant, input, signal)
-            assertLive(plugin)
-            return result
-          },
-          callMcp: async (plugin, input, signal, dispatch) => {
-            assertLive(plugin)
-            if (!this.host.callMcp) throw new ModFunctionError("MODS_MCP_UNAVAILABLE")
-            const grant = current.snapshots.get(plugin.name)!.grant
-            const result = await this.host.callMcp(
-              workspace,
-              threadId,
-              grant,
-              input,
-              signal,
-              dispatch
-            )
-            assertLive(plugin)
-            return result
-          },
-          connectMcp: async (plugin, signal, run) => {
-            assertLive(plugin)
-            const snapshot = current.snapshots.get(plugin.name)
-            if (!snapshot?.sourceId || !snapshot.sourcePath)
-              return run(async () => ({
-                value: mcpConnectRefusal("unlisted"),
-                assertCurrent: () => { assertLive(plugin); signal.throwIfAborted() }
-              }))
-            if (!this.host.connectMcp) throw new ModFunctionError("MODS_MCP_UNAVAILABLE")
-            const check = () => {
+              guard()
+              return this.host.reservePluginPrompt!(workspace, threadId, origin, lifetime, guard)
+            } : undefined,
+            preparePluginPrompt: this.host.preparePluginPrompt ? (plugin, signal, assertAdmission, onInvalid, run) =>
+              this.host.preparePluginPrompt!(workspace, threadId, signal, () => {
+                assertLive(plugin)
+                assertAdmission()
+              }, onInvalid, run)
+              : undefined,
+            activity: current.activity,
+            initializer: current.initializer,
+            uiResolveQuota: current.client instanceof FunctionRuntimeClient ? () => {
+              let quota = this.uiResolveQuotas.get(key)
+              if (!quota) {
+                quota = new FunctionUiResolveMainQuota()
+                this.uiResolveQuotas.set(key, quota)
+              }
+              return quota
+            } : undefined,
+            assertUiResolveCurrent: plugin => {
+              assertLive(plugin)
+              if (current.selectionFingerprint !== encodeModJson(this.clawSelection(workspace, threadId) ?? null))
+                throw new ModFunctionError("MODS_SCOPE_CHANGED")
+              const snapshots = plugin ? [current.snapshots.get(plugin.name)]
+                : [...current.snapshots.values()]
+              for (const snapshot of snapshots) {
+                if (!snapshot) continue // Trusted builtins have no external source files.
+                this.assertConfiguredOptions(workspace, snapshot.compiled,
+                  snapshot.configuredRevision ?? 0)
+                assertFunctionSourcesCurrent(snapshot.compiled)
+              }
+            },
+            initializationSignal: prepared?.signal,
+            freshEntry: (run) => this.startupModels.fresh(() => this.operations.exit(run)),
+            configRows: this.configurationRows(workspace, current.snapshots),
+            configChanged: (scope) => this.host.configChanged?.(scope),
+            prepareDesktop: async (plugin, signal) => {
+              assertLive(plugin)
+              const guard = this.host.capturePromptGuard?.(workspace, threadId)
+              const check = () => { assertLive(plugin); guard?.(); signal.throwIfAborted() }
+              if (!this.host.desktop) return {
+                assertLive: check,
+                copy: async () => ({ isCopied: false as const, reason: "no-surface" as const }),
+                selection: async () => undefined, clearSelection: async () => {}, drawings: async () => []
+              }
+              const scope = promptScope(plugin, signal)
+              const access = await this.host.desktop.capture({ ...scope, assertLive: () => {
+                scope.assertLive()
+                guard?.()
+              } })
+              assertLive(plugin)
+              guard?.()
+              signal.throwIfAborted()
+              return access
+            },
+            creatorHook: () => this.host.creatorHook?.(workspace, threadId),
+            preparePromptSuggest: async (plugin, signal) => {
+              assertLive(plugin)
+              if (!this.host.prompt) throw new ModFunctionError("MODS_PROMPT_UNAVAILABLE")
+              const guard = this.host.capturePromptGuard?.(workspace, threadId)
+              const scope = promptScope(plugin, signal)
+              const offer = await this.host.prompt.prepareSuggestion({ ...scope, assertLive: () => {
+                scope.assertLive()
+                guard?.()
+              } })
+              assertLive(plugin)
+              return async (input, active) => {
+                assertLive(plugin)
+                guard?.()
+                const result = await offer({ text: input.text as string }, active)
+                assertLive(plugin)
+                guard?.()
+                active.throwIfAborted()
+                return result
+              }
+            },
+            preparePromptFill: async (plugin, signal) => {
+              assertLive(plugin)
+              if (!this.host.prompt) throw new ModFunctionError("MODS_PROMPT_UNAVAILABLE")
+              await this.host.prompt.prepareFill(promptScope(plugin, signal))
+              assertLive(plugin)
+            },
+            peekPrompt: async (plugin, signal) => {
+              assertLive(plugin)
+              if (!this.host.prompt) throw new ModFunctionError("MODS_PROMPT_UNAVAILABLE")
+              const box = await this.host.prompt.peek(promptScope(plugin, signal))
+              assertLive(plugin)
+              return box
+            },
+            prompt: async (plugin, method, input, signal) => {
+              assertLive(plugin)
+              if (!this.host.prompt) throw new ModFunctionError("MODS_PROMPT_UNAVAILABLE")
+              const scope = promptScope(plugin, signal)
+              const result = method === "prompt.read"
+                ? await this.host.prompt.read(scope)
+                : await this.host.prompt.fill(scope, input as { text: string; mode?: "replace" | "append" | "insert" })
+              assertLive(plugin)
+              signal.throwIfAborted()
+              return { ...result }
+            },
+            namedState,
+            version: this.host.version,
+            readSettings: this.host.readSettings
+              ? async () => {
+                  assertLive()
+                  const value = await this.host.readSettings!(workspace, threadId)
+                  assertLive()
+                  return value
+                }
+              : undefined,
+            workspace,
+            threadId,
+            cwd: () => this.host.fileScope?.(workspace, threadId).workspace ?? workspace,
+            directory: () => {
+              assertLive()
+              const directory = this.host.cwd?.(workspace, threadId) ??
+                this.host.fileScope?.(workspace, threadId).workspace ?? workspace
+              assertLive()
+              return directory
+            },
+            dialogs: this.host.dialogs?.(workspace, threadId),
+            assertLive,
+            assertCapability: (plugin, method) => current.developmentPlugins.get(plugin)?.assertCapability(method),
+            prepareAgent: async (plugin, args, signal) => {
+              assertLive(plugin)
+              if (!this.host.prepareAgent) throw new ModFunctionError("MODS_AGENT_SPAWN_UNAVAILABLE")
+              const result = await withNativeGrant(plugin, "agent.spawn", grant => this.host.prepareAgent!(
+                workspace,
+                threadId,
+                grant,
+                args,
+                signal
+              ))
+              assertLive(plugin)
+              return result
+            },
+            spawnAgent: async (plugin, input, signal, lifetime, creator) => {
+              assertLive(plugin)
+              if (!this.host.spawnAgent) throw new ModFunctionError("MODS_AGENT_SPAWN_UNAVAILABLE")
+              const result = await withNativeGrant(plugin, "agent.spawn", grant => this.host.spawnAgent!(
+                workspace,
+                threadId,
+                grant,
+                input,
+                signal,
+                lifetime,
+                creator
+              ))
+              // Return ownership even after revocation so the session can await real cleanup.
+              // It stores completion before checking the live resource again.
+              return result
+            },
+            sendPeer: async (plugin, input, signal) => {
+              assertLive(plugin)
+              if (!this.host.sendPeer) throw new ModFunctionError("MODS_PEER_UNAVAILABLE")
+              const result = await withNativeGrant(plugin, "session.send", grant => this.host.sendPeer!(
+                workspace,
+                threadId,
+                grant,
+                input,
+                signal
+              ))
               signal.throwIfAborted()
               assertLive(plugin)
-              if (current.snapshots.get(plugin.name) !== snapshot)
-                throw new ModFunctionError("MODS_SCOPE_CHANGED")
-              const source = this.sources().find(entry => entry.id === snapshot.sourceId)
-              if (!source?.enabled || source.path !== snapshot.sourcePath)
-                throw new ModFunctionError("MODS_SCOPE_CHANGED")
-              this.assertConfiguredOptions(workspace, snapshot.compiled,
-                snapshot.configuredRevision ?? 0)
-              assertFunctionSourcesCurrent(snapshot.compiled)
-              this.store.assertGrant(snapshot.grant)
-            }
-            check()
-            const result = await this.host.connectMcp(workspace, threadId, snapshot.grant,
-              { pluginId: snapshot.sourceId, sourcePath: snapshot.sourcePath,
-                root: snapshot.compiled.root }, signal, connect => run(async (input, active) => {
-                check()
-                const admission = await connect(input, active)
-                check()
-                admission.assertCurrent()
-                return { value: admission.value, assertCurrent: () => {
-                  check()
-                  active.throwIfAborted()
-                  admission.assertCurrent()
-                } }
-              }))
-            check()
-            return result
-          },
-          checkTool: async (plugin, input, signal, registered) => {
-            assertLive(plugin)
-            if (!this.host.checkTool) throw new ModFunctionError("MODS_TOOL_CHECK_UNAVAILABLE")
-            const grant = current.snapshots.get(plugin.name)!.grant
-            const result = await this.host.checkTool(
-              workspace,
-              threadId,
-              grant,
-              input,
-              signal,
-              registered
-            )
-            assertLive(plugin)
-            return result
-          },
-          uiChanged: (scope) => this.host.changed(threadId, scope),
-          markdownPreviewInvalidated: receipt => this.host.markdownPreviewInvalidated?.(threadId, receipt),
-          loadClient: async (name, module) => {
-            checkClientModule(name, module)
-            const snapshot = current.snapshots.get(name)!
-            const guest = await current.client.load(
-              CLIENT_BOOTSTRAP + "\n" + snapshot.projection.clients[module],
-              { plugin: name }
-            )
-            try {
-              checkClientModule(name, module)
-              return trackFunctionGuest(guest, current.activity, current.initializer,
-                (run) => this.startupModels.fresh(() => this.operations.exit(run)))
-            } catch (error) {
-              await guest.dispose()
-              throw error
-            }
-          },
-          scheduleCommand: this.host.scheduleCommand
-            ? (command, signal, run) => {
-                assertLive()
-                return this.host.scheduleCommand!(
-                  workspace,
-                  threadId,
-                  command,
-                  signal,
-                  async (s) => {
-                    assertLive()
-                    const result = await run(s)
-                    assertLive()
-                    return result
-                  }
-                )
+              return result
+            },
+            authorizeProcess: async (plugin, request, signal, method = "process.run") => {
+              assertLive(plugin)
+              if (!this.host.authorizeProcess) throw new ModFunctionError("MODS_PROCESS_UNAVAILABLE")
+              await withNativeGrant(plugin, method, grant => this.host.authorizeProcess!(
+                workspace,
+                threadId,
+                grant,
+                request,
+                signal
+              ))
+              signal.throwIfAborted()
+              assertLive(plugin)
+            },
+            runEffect: async (plugin, method, input, signal, run) => {
+              assertLive(plugin)
+              if (!this.host.runEffect) throw new ModFunctionError("MODS_EFFECT_UNAVAILABLE")
+              return withNativeGrant(plugin, method, grant => this.host.runEffect!(
+                workspace,
+                threadId,
+                grant,
+                method,
+                input,
+                signal,
+                run
+              ))
+            },
+            authorizeHttp: async (plugin, request, signal) => {
+              assertLive(plugin)
+              if (!this.host.authorizeHttp) throw new ModFunctionError("MODS_HTTP_UNAVAILABLE")
+              await withNativeGrant(plugin, "http.fetch", grant => this.host.authorizeHttp!(
+                workspace,
+                threadId,
+                grant,
+                request,
+                signal
+              ))
+              signal.throwIfAborted()
+              assertLive(plugin)
+            },
+            abortTurn: async (plugin, turnId, signal) => {
+              assertLive(plugin)
+              if (!this.host.abortTurn) throw new ModFunctionError("MODS_TURN_UNAVAILABLE")
+              await withNativeGrant(plugin, "turn.abort", grant => this.host.abortTurn!(
+                workspace,
+                threadId,
+                grant,
+                turnId,
+                signal
+              ))
+            },
+            readSession: async (method, signal, usageArgs) => {
+              assertLive()
+              if (!this.host.readSession) throw new ModFunctionError("MODS_SESSION_UNAVAILABLE")
+              const value = await this.host.readSession(
+                workspace,
+                threadId,
+                method,
+                signal,
+                usageArgs
+              )
+              assertLive()
+              const result = await this.host.publish(workspace, value, signal)
+              assertLive()
+              return result
+            },
+            compactSession: async (instructions, signal) => {
+              assertLive()
+              if (!this.host.compactSession) throw new ModFunctionError("MODS_SESSION_UNAVAILABLE")
+              const value = await this.host.compactSession(workspace, threadId, instructions, signal)
+              assertLive()
+              const result = await this.host.publish(workspace, value, signal)
+              assertLive()
+              return result
+            },
+            listAgents: async (signal) => {
+              assertLive()
+              if (!this.host.listAgents) throw new ModFunctionError("MODS_AGENT_LIST_UNAVAILABLE")
+              const result = await this.host.listAgents(workspace, threadId, signal)
+              signal.throwIfAborted()
+              assertLive()
+              return result
+            },
+            listTools: this.host.listTools
+              ? (signal) => this.host.listTools!(workspace, threadId, signal)
+              : undefined,
+            filterTools: this.host.filterTools
+              ? (tools) => this.host.filterTools!(workspace, threadId, tools)
+              : undefined,
+            assertToolNameAvailable: (plugin, name) => {
+              assertLive()
+              this.host.assertToolNameAvailable?.(workspace, threadId, plugin, name)
+            },
+            registeredTool: async (owner, input, origin, signal, run, caller) => {
+              assertLive(owner)
+              if (!this.host.registeredTool)
+                throw new ModFunctionError("MODS_REGISTERED_TOOL_UNAVAILABLE")
+              const answer = await withNativeGrant(owner, "tool.register", grant => this.host.registeredTool!(
+                workspace,
+                threadId,
+                grant,
+                input,
+                origin,
+                signal,
+                run,
+                caller
+              ))
+              assertLive(owner)
+              return answer
+            },
+            captureStartupModelGuard: () => this.captureStartupModelGuard(workspace, threadId),
+            assertStartupStatus: () => this.startupModels.assertStatus(workspace, threadId),
+            completeModelResult: async (plugin, input, signal) => {
+              assertLive(plugin)
+              if (!this.host.completeModelResult) throw new ModFunctionError("MODS_MODEL_OPERATION_UNSUPPORTED")
+              const result = await withNativeGrant(plugin, "model.complete", grant =>
+                this.host.completeModelResult!(workspace, threadId, grant, input, signal))
+              assertLive(plugin)
+              return result
+            },
+            forkModelResult: async (plugin, input, signal) => {
+              assertLive(plugin)
+              if (!this.host.forkModelResult) throw new ModFunctionError("MODS_MODEL_OPERATION_UNSUPPORTED")
+              const result = await withNativeGrant(plugin, "model.fork", grant =>
+                this.host.forkModelResult!(workspace, threadId, grant, input, signal))
+              assertLive(plugin)
+              return result
+            },
+            completeModel: async (plugin, input, signal) => {
+              assertLive(plugin)
+              if (!this.host.completeModel) throw new ModFunctionError("MODS_MODEL_UNAVAILABLE")
+              const result = await withNativeGrant(plugin, "model.complete", grant =>
+                this.host.completeModel!(workspace, threadId, grant, input, signal))
+              assertLive(plugin)
+              return result
+            },
+            capability: async (plugin, method, args, signal) => {
+              assertLive(plugin)
+              if (!this.host.capability)
+                throw new ModFunctionError("MODS_MODEL_OPERATION_UNSUPPORTED")
+              const input = args[0]
+              if (!isModObject(input)) throw new ModFunctionError("MODS_MODEL_ARGUMENTS")
+              const result = await withNativeGrant(plugin, method, grant => this.host.capability!(
+                workspace,
+                threadId,
+                grant,
+                method as "model.fork" | "model.classify",
+                input,
+                signal
+              ))
+              assertLive(plugin)
+              return result
+            },
+            callTool: async (plugin, input, signal) => {
+              assertLive(plugin)
+              const development = current.developmentPlugins.get(plugin)
+              if (development) {
+                const capability = input.tool === "write_file" && plugin.capabilities.includes("fs.write")
+                  ? "fs.write" : "tool.call"
+                development.assertCapability(capability)
+                if (!this.host.callDevelopmentTool) throw new ModFunctionError("MODS_TOOL_UNAVAILABLE")
+                const result = await this.host.callDevelopmentTool(workspace, threadId,
+                  development, capability, input, signal)
+                assertLive(plugin)
+                return result
               }
-            : undefined,
-          files: (plugin) => {
-            const scope = this.host.fileScope?.(workspace, threadId)
-            return new ProjectFunctionFiles(
-              scope?.workspace ?? workspace,
-              () => {
-                assertLive(plugin)
-                scope?.assertLive()
-              },
-              (value, signal) => this.host.publish(workspace, value, signal),
-              scope?.queryTool
-            )
-          },
-          state: (plugin) => {
-            // Reloads keep state; project and plugin identity remain separate namespaces.
-            const localDevelopment = current.developmentPlugins.get(plugin)
-            const namespace = localDevelopment
-              ? JSON.stringify(["development", workspace, threadId, localDevelopment.scope.incarnation,
-                  localDevelopment.revision.componentId])
-              : JSON.stringify([workspace, plugin.name])
-            return {
-              get: async (key, signal) => {
-                assertLive(plugin)
-                const value =
-                  !localDevelopment && key === "completion-config"
-                    ? this.applicationPolicies.guestValue(workspace, plugin.name)
-                    : this.store.functionState.get(namespace, key)
-                const checked =
-                  value === undefined
-                    ? undefined
-                    : await this.host.publish(workspace, value, signal)
-                assertLive(plugin)
-                return checked
-              },
-              keys: async (signal) => {
-                assertLive(plugin)
-                const checked = await this.host.publish(
-                  workspace,
-                  [
-                    ...new Set([
-                      ...this.store.functionState.keys(namespace),
-                      ...(localDevelopment || this.applicationPolicies.hostValue(workspace, plugin.name) === undefined
-                        ? []
-                        : ["completion-config"])
-                    ])
-                  ],
-                  signal
-                )
-                assertLive(plugin)
-                if (!Array.isArray(checked) || checked.some((key) => typeof key !== "string"))
-                  throw new ModFunctionError("MODS_STORE_PUBLICATION")
-                return checked as string[]
-              },
-              delete: (key) => {
-                assertLive(plugin)
-                this.applicationPolicies.assertGuestWritable(workspace, plugin.name, key)
-                this.store.functionState.delete(namespace, key)
-                current.freshness.changed()
-              },
-              set: async (key, value, signal) => {
-                assertLive(plugin)
-                this.applicationPolicies.assertGuestWritable(workspace, plugin.name, key)
-                const checked = await this.host.publish(workspace, value, signal)
-                assertLive(plugin)
+              if (!this.host.callTool) throw new ModFunctionError("MODS_TOOL_UNAVAILABLE")
+              const grant = current.snapshots.get(plugin.name)?.grant
+              if (!grant) throw new ModFunctionError("MODS_GRANT_MISSING")
+              const result = await this.host.callTool(workspace, threadId, grant, input, signal)
+              assertLive(plugin)
+              return result
+            },
+            callMcp: async (plugin, input, signal, dispatch) => {
+              assertLive(plugin)
+              if (!this.host.callMcp) throw new ModFunctionError("MODS_MCP_UNAVAILABLE")
+              const result = await withNativeGrant(plugin, "mcp.call", grant => this.host.callMcp!(
+                workspace,
+                threadId,
+                grant,
+                input,
+                signal,
+                dispatch
+              ))
+              assertLive(plugin)
+              return result
+            },
+            connectMcp: async (plugin, signal, run) => {
+              assertLive(plugin)
+              const snapshot = current.snapshots.get(plugin.name)
+              if (!snapshot?.sourceId || !snapshot.sourcePath)
+                return run(async () => ({
+                  value: mcpConnectRefusal("unlisted"),
+                  assertCurrent: () => { assertLive(plugin); signal.throwIfAborted() }
+                }))
+              if (!this.host.connectMcp) throw new ModFunctionError("MODS_MCP_UNAVAILABLE")
+              const check = () => {
                 signal.throwIfAborted()
-                this.applicationPolicies.assertGuestWritable(workspace, plugin.name, key)
-                this.store.functionState.set(namespace, key, checked)
-                current.freshness.changed()
+                assertLive(plugin)
+                if (current.snapshots.get(plugin.name) !== snapshot)
+                  throw new ModFunctionError("MODS_SCOPE_CHANGED")
+                const source = this.sources().find(entry => entry.id === snapshot.sourceId)
+                if (!source?.enabled || source.path !== snapshot.sourcePath)
+                  throw new ModFunctionError("MODS_SCOPE_CHANGED")
+                this.assertConfiguredOptions(workspace, snapshot.compiled,
+                  snapshot.configuredRevision ?? 0)
+                assertFunctionSourcesCurrent(snapshot.compiled)
+                this.store.assertGrant(snapshot.grant)
               }
-            }
-          },
-          publish: (value, signal) => this.host.publish(workspace, value, signal)
-        })
-        if (!developmentUiOnly(plugins, current.developmentPlugins)) {
-          current.conversationOwner = Object.freeze({
-            owner: current, workspace, threadId, signal: current.session.lifecycleSignal,
-            readOnly: !current.initializer.allowsStartupEffects,
-            assertCurrent: () => { current.session?.lifecycleSignal.throwIfAborted(); assertLive() }
+              check()
+              const result = await this.host.connectMcp(workspace, threadId, snapshot.grant,
+                { pluginId: snapshot.sourceId, sourcePath: snapshot.sourcePath,
+                  root: snapshot.compiled.root }, signal, connect => run(async (input, active) => {
+                  check()
+                  const admission = await connect(input, active)
+                  check()
+                  admission.assertCurrent()
+                  return { value: admission.value, assertCurrent: () => {
+                    check()
+                    active.throwIfAborted()
+                    admission.assertCurrent()
+                  } }
+                }))
+              check()
+              return result
+            },
+            checkTool: async (plugin, input, signal, registered) => {
+              assertLive(plugin)
+              if (!this.host.checkTool) throw new ModFunctionError("MODS_TOOL_CHECK_UNAVAILABLE")
+              const result = await withNativeGrant(plugin, "tool.check", grant => this.host.checkTool!(
+                workspace,
+                threadId,
+                grant,
+                input,
+                signal,
+                registered
+              ))
+              assertLive(plugin)
+              return result
+            },
+            uiChanged: (scope) => this.host.changed(threadId, scope),
+            markdownPreviewInvalidated: receipt => this.host.markdownPreviewInvalidated?.(threadId, receipt),
+            loadClient: async (name, module) => {
+              checkClientModule(name, module)
+              const snapshot = current.snapshots.get(name)!
+              const guest = await current.client.load(
+                CLIENT_BOOTSTRAP + "\n" + snapshot.projection.clients[module],
+                { plugin: name }
+              )
+              try {
+                checkClientModule(name, module)
+                return trackFunctionGuest(guest, current.activity, current.initializer,
+                  (run) => this.startupModels.fresh(() => this.operations.exit(run)), current.execution)
+              } catch (error) {
+                await guest.dispose()
+                throw error
+              }
+            },
+            scheduleCommand: this.host.scheduleCommand
+              ? (command, signal, run) => {
+                  assertLive()
+                  return this.host.scheduleCommand!(
+                    workspace,
+                    threadId,
+                    command,
+                    signal,
+                    async (s) => {
+                      assertLive()
+                      const result = await run(s)
+                      assertLive()
+                      return result
+                    }
+                  )
+                }
+              : undefined,
+            files: (plugin) => {
+              const scope = this.host.fileScope?.(workspace, threadId)
+              return new ProjectFunctionFiles(
+                scope?.workspace ?? workspace,
+                () => {
+                  assertLive(plugin)
+                  scope?.assertLive()
+                },
+                (value, signal) => this.host.publish(workspace, value, signal),
+                scope?.queryTool
+              )
+            },
+            state: (plugin) => {
+              // Reloads keep state; project and plugin identity remain separate namespaces.
+              const localDevelopment = current.developmentPlugins.get(plugin)
+              const namespace = localDevelopment
+                ? JSON.stringify(["development", workspace, threadId, localDevelopment.scope.incarnation,
+                    localDevelopment.revision.componentId])
+                : JSON.stringify([workspace, plugin.name])
+              return {
+                get: async (key, signal) => {
+                  assertLive(plugin)
+                  const value =
+                    !localDevelopment && key === "completion-config"
+                      ? this.applicationPolicies.guestValue(workspace, plugin.name)
+                      : this.store.functionState.get(namespace, key)
+                  const checked =
+                    value === undefined
+                      ? undefined
+                      : await this.host.publish(workspace, value, signal)
+                  assertLive(plugin)
+                  return checked
+                },
+                keys: async (signal) => {
+                  assertLive(plugin)
+                  const checked = await this.host.publish(
+                    workspace,
+                    [
+                      ...new Set([
+                        ...this.store.functionState.keys(namespace),
+                        ...(localDevelopment || this.applicationPolicies.hostValue(workspace, plugin.name) === undefined
+                          ? []
+                          : ["completion-config"])
+                      ])
+                    ],
+                    signal
+                  )
+                  assertLive(plugin)
+                  if (!Array.isArray(checked) || checked.some((key) => typeof key !== "string"))
+                    throw new ModFunctionError("MODS_STORE_PUBLICATION")
+                  return checked as string[]
+                },
+                delete: (key) => {
+                  assertLive(plugin)
+                  this.applicationPolicies.assertGuestWritable(workspace, plugin.name, key)
+                  this.store.functionState.delete(namespace, key)
+                  current.freshness.changed()
+                },
+                set: async (key, value, signal) => {
+                  assertLive(plugin)
+                  this.applicationPolicies.assertGuestWritable(workspace, plugin.name, key)
+                  const checked = await this.host.publish(workspace, value, signal)
+                  assertLive(plugin)
+                  signal.throwIfAborted()
+                  this.applicationPolicies.assertGuestWritable(workspace, plugin.name, key)
+                  this.store.functionState.set(namespace, key, checked)
+                  current.freshness.changed()
+                }
+              }
+            },
+            publish: (value, signal) => this.host.publish(workspace, value, signal)
           })
-          current.closeConversationOwner = this.host.openConversationOwner?.(current.conversationOwner)
+          current.conversationGuard = () => { current.session?.lifecycleSignal.throwIfAborted(); assertLive() }
+          if (!registrationOnly && !developmentUiOnly(plugins, current.developmentPlugins)) {
+            current.conversationOwner = Object.freeze({
+              owner: current, workspace, threadId, signal: current.session.lifecycleSignal,
+              readOnly: !current.initializer.allowsStartupEffects,
+              assertCurrent: current.conversationGuard
+            })
+            current.closeConversationOwner = this.host.openConversationOwner?.(current.conversationOwner)
+          }
+          if (this.classicEndDrain) current.session.prepareQuitDrain(this.classicEndDrain)
+          current.session = trackFunctionSession(current.session, current.activity)
+          if (!registrationOnly) await this.startEntry(current)
+          current.initializer.assertReady()
+          for (const snapshot of current.snapshots.values())
+            this.assertConfiguredOptions(workspace, snapshot.compiled, snapshot.configuredRevision ?? 0)
+          assertLive()
+          current.loaded = true
+          return current.session
+        } catch (error) {
+          current.activity.close()
+          this.candidates.delete(current)
+          current.freshness.close("session-load-failed")
+          this.closePromptSessions(current)
+          if (this.sessions.get(key) === current) this.sessions.delete(key)
+          // An external owner may already be waiting for this construction promise. Let it
+          // observe rejection and perform cleanup, rather than making the two owners await each other.
+          if (!this.entryDrains.has(current))
+            await this.drainEntry(current, selectionCandidate || !!development || current.developmentPlugins.size > 0, false, true)
+          throw error
         }
-        if (this.classicEndDrain) current.session.prepareQuitDrain(this.classicEndDrain)
-        current.session = trackFunctionSession(current.session, current.activity)
-        if (!registrationOnly) await this.startEntry(current)
-        current.initializer.assertReady()
-        for (const snapshot of current.snapshots.values())
-          this.assertConfiguredOptions(workspace, snapshot.compiled, snapshot.configuredRevision ?? 0)
-        assertLive()
-        return current.session
-      } catch (error) {
-        current.activity.close()
-        this.candidates.delete(current)
-        current.freshness.close("session-load-failed")
-        this.closePromptSessions(current)
-        if (this.sessions.get(key) === current) this.sessions.delete(key)
-        // An external owner may already be waiting for this construction promise. Let it
-        // observe rejection and perform cleanup, rather than making the two owners await each other.
-        if (!this.entryDrains.has(current))
-          await this.drainEntry(current, !!development || current.developmentPlugins.size > 0, false, true)
-        throw error
-      }
-    })
-    await current.loading
-    return current
+      })
+      await current.loading
+      return current
+    } finally {
+      // Legacy adapters keep ordinary failed-load retry behavior. Automatic retirement and
+      // native runtime controls admit only clients that can prove physical drain.
+      if (admission) this.releaseRuntimeSlot(key, admission,
+        admitted?.client.stopAndDrain ? admitted : undefined)
+    }
   }
 
   async commands(workspace: string, threadId: string): Promise<ModCommandDescriptor[]> {
@@ -3585,6 +4494,21 @@ export class FunctionModsManager {
     )
       return core(input, signal ?? new AbortController().signal)
     const entry = await this.session(workspace, threadId)
+    if (!creatorSkip && !getModCallContext()?.identity?.modId &&
+      !entry.session!.registeredToolOrigin(String(input.tool)) &&
+      !this.sessionHasHandler(entry, "tool.call")) {
+      validateModelToolInput(input)
+      const active = signal ?? new AbortController().signal
+      const assertNative = this.captureNativeBoundary(workspace, threadId, active)
+      assertNative()
+      const safe = await this.host.publish(workspace, input, active)
+      assertNative()
+      const result = await core(safe as ModObject, active)
+      assertNative()
+      const published = await this.host.publish(workspace, result, active)
+      assertNative()
+      return published as ModObject
+    }
     return entry.session!.interceptTool(input, signal, core, creatorSkip)
   }
 
@@ -3859,9 +4783,14 @@ export class FunctionModsManager {
   ): Promise<ModHookStream> {
     if (!this.host.enabled(workspace))
       return dispatchFunctionStream([], input, { signal, core, transport })
+    const assertNative = this.captureNativeBoundary(workspace, threadId, signal)
     const epoch = this.epoch(workspace)
     const entry = this.hasSources(workspace, threadId) ? await this.session(workspace, threadId) : undefined
+    const usesGuest = !!entry && dispatchHooks && this.sessionHasHandler(entry, "turn.step")
+    if (entry && !usesGuest) validateFunctionTurnStepInput(input)
     const assertEntry = (): void => {
+      assertNative()
+      if (!usesGuest) return
       signal.throwIfAborted()
       entry?.session!.assertTransportLive()
       this.host.assertThread?.(workspace, threadId)
@@ -3883,7 +4812,7 @@ export class FunctionModsManager {
     }
     const safe = await publish(input, signal)
     const protectedCore = protectFunctionStreamCore(core, publish, assertEntry)
-    if (!entry) return dispatchFunctionStream([], safe as ModObject, { signal, core: protectedCore, transport })
+    if (!usesGuest) return dispatchFunctionStream([], safe as ModObject, { signal, core: protectedCore, transport })
     return entry.session!.turnStep(
       safe as ModObject, protectedCore, signal, dispatchHooks, skip, transport
     )
@@ -4789,7 +5718,6 @@ export class FunctionModsManager {
     const nativeLive = binding.assertLive
     return { ...binding, assertLive: () => { assertCurrent(); nativeLive() } }
   }
-
   async panes(workspace: string, threadId: string): Promise<FunctionPaneSnapshot[]> {
     // Merely mounting the renderer must not allocate or restart a plugin session.
     if (!this.host.enabled(workspace)) return []
@@ -4951,7 +5879,10 @@ export class FunctionModsManager {
       // A visible site is an entry point: approved modules must start without a command warmup.
       // Inspect grants before allocating a runtime, and retain cancellation during discovery.
       let hasFunctions = enabled && this.hasSources(workspace, threadId)
-      if (hasFunctions && !this.sessions.has(key)) {
+      // turn.step can retain a native-only session while installed functions await approval.
+      // Its presence alone must not turn every ordinary transcript slot into a retired site.
+      // Recheck current authority unless this exact resident has actual loaded functions.
+      if (hasFunctions && !this.sessions.get(key)?.session?.plugins.length) {
         const available = await this.effectiveStatus(workspace, threadId)
         assertCurrent()
         if (available.some(item => item.state === "invalid")) return { state: "retired" }
@@ -5084,8 +6015,6 @@ export class FunctionModsManager {
     await entry.loading
     await entry.session!.clients.act(action)
   }
-
-  /** Discovery parses approved snapshots but never allocates or starts a guest. */
   async actionCatalog(
     workspace: string,
     threadId: string,
@@ -5120,7 +6049,6 @@ export class FunctionModsManager {
           }))
     )
   }
-
   async prepareAction(
     workspace: string,
     threadId: string,
@@ -5172,7 +6100,6 @@ export class FunctionModsManager {
       command
     }
   }
-
   async runAction(
     workspace: string,
     threadId: string,
@@ -5279,12 +6206,13 @@ export class FunctionModsManager {
     this.endingRequests.clear()
     this.endingEntries.clear()
     this.configurationSourceCache.clear()
-    this.statusCompilations.clear()
+    this.statusSourceCache.clear()
     this.reloadControl.cancel()
     this.stopCompatibilityProbe()
     this.namedStates.clear()
     this.stopWatching()
     this.stopConfigurationIdle()
+    this.configurationIdleListeners.clear()
     for (const candidate of this.candidates) {
       candidate.activity.close()
       void this.drainEntry(candidate, candidate.developmentPlugins.size > 0)

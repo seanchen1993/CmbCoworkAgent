@@ -5,6 +5,7 @@ import type { ModJson, ModObject } from "../../../shared/mods/types"
 import { encodeModJson, parseModJson } from "../../../shared/mods/validation"
 import {
   ModFunctionError,
+  isModObject,
   functionInvocationTimeoutMs,
   type FunctionGuest,
   type FunctionHostCall,
@@ -439,12 +440,16 @@ export class FunctionRuntimeClient {
 
   async load(code: string, options: ModObject = {}): Promise<FunctionGuest> {
     const runtimeId = randomUUID()
-    const registrations = (await this.request({
+    const loaded = await this.request({
       type: "load",
       runtimeId,
       code,
       options
-    })) as unknown as FunctionRegistration[]
+    })
+    const registrations = (Array.isArray(loaded) ? loaded :
+      isModObject(loaded) ? loaded.registrations : undefined) as unknown as FunctionRegistration[]
+    if (!Array.isArray(registrations)) throw new ModFunctionError("MODS_REGISTRATION_INVALID")
+    const registrationQuiescent = isModObject(loaded) && loaded.registrationQuiescent === true
     // Capture immutable bootstrap facts, never a cache of mutable guest matcher values.
     const unconditional = new Set(
       registrations.filter((row) => row.hasMatcher === false).map((row) => row.id)
@@ -477,6 +482,7 @@ export class FunctionRuntimeClient {
     }
     const guest: FunctionGuest = {
       registrations,
+      registrationQuiescent,
       bindModuleHost: bind,
       get stats() {
         return { disposed: isDisposed() }

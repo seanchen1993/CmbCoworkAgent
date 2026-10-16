@@ -57,6 +57,17 @@ it("keeps a healthy utility runtime live across a wall-clock correction", async 
   await expect(f.guest.matches("0", {})).resolves.toBe(true)
 })
 
+it("accepts native quiescence proof and keeps legacy registration replies ineligible", async () => {
+  const registrations = [{ id: "0", pattern: "command.run", hasCatch: false, hasMatcher: false }]
+  const native = await fixture({ registrations, registrationQuiescent: true })
+  expect(native.guest.registrationQuiescent).toBe(true)
+  expect(native.guest.registrations).toEqual(registrations)
+  const legacy = await fixture(registrations)
+  expect(legacy.guest.registrationQuiescent).toBe(false)
+  const pending = await fixture({ registrations, registrationQuiescent: false })
+  expect(pending.guest.registrationQuiescent).toBe(false)
+})
+
 it("expires missing utility replies with a frozen wall clock even while heartbeats continue", async () => {
   vi.useFakeTimers({ toFake: ["setInterval", "clearInterval", "performance"] })
   const f = await fixture([{ id: "0", pattern: "command.run", hasCatch: false }])

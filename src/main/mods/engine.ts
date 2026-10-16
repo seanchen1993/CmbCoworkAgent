@@ -13,7 +13,7 @@ import { encodeModJson, parseModUi } from "../../shared/mods/validation"
 import type { CompiledMod } from "./loader"
 import type { ModControlStore, ModGrant } from "./control-store"
 import type { ModHostCall } from "./guest-runtime"
-import { ModError, modErrorCode } from "./errors"
+import { ModError, ModPluginChangedError, modErrorCode } from "./errors"
 import { validateModRegistrations } from "./registrations"
 import {
   filterModData,
@@ -39,11 +39,14 @@ export interface ModRuntime {
 export interface ApprovedMod {
   compiled: CompiledMod
   grant: ModGrant
+  /** Native package lifecycle fence, independent of the chat's physical run. */
+  assertCurrent?(): void
 }
 
 interface LoadedMod extends ApprovedMod {
   runtimeId: string
   registrations: ModRegistration[]
+  controller: AbortController
 }
 
 export interface ModDispatchRequest {
@@ -62,7 +65,9 @@ export interface ModDispatchRequest {
     id: string,
     args: ModObject,
     grant: ModGrant,
-    userInitiated: boolean
+    userInitiated: boolean,
+    assertSource?: () => void,
+    sourceSignal?: AbortSignal
   ) => Promise<unknown>
   authorize?: (toolId: string, args: Record<string, unknown>) => Promise<void>
   userInitiated?: boolean
@@ -102,6 +107,9 @@ function projection(value: unknown): ModProjection {
 
 export class ModEngine {
   private readonly mods: LoadedMod[] = []
+  private readonly retiredMods = new WeakSet<LoadedMod>()
+  private readonly invocationSources = new Map<string, LoadedMod>()
+  private readonly activeInvocations = new Map<string, Set<Promise<void>>>()
   private queue: Promise<void> = Promise.resolve()
   private disposed = false
   private waiting = 0
@@ -120,6 +128,11 @@ export class ModEngine {
     signal?: AbortSignal
   ): Promise<ModJson> {
     const pending = new Set<Promise<ModJson>>()
+    let finish!: () => void
+    const finished = new Promise<void>((done) => { finish = done })
+    let active = this.activeInvocations.get(id)
+    if (!active) this.activeInvocations.set(id, active = new Set())
+    active.add(finished)
     try {
       return await this.runtime.invoke(
         id,
@@ -133,19 +146,30 @@ export class ModEngine {
         },
         signal
       )
+    } catch (error) {
+      const source = this.invocationSources.get(id)
+      if (source) this.assertModCurrent(source)
+      throw error
     } finally {
       // A guest can drop an SDK promise. The host still owns and settles that operation.
       await Promise.allSettled([...pending])
+      active.delete(finished)
+      if (!active.size) this.activeInvocations.delete(id)
+      finish()
     }
   }
 
   async load(approved: ApprovedMod[]): Promise<void> {
     try {
       for (const mod of approved) {
+        mod.assertCurrent?.()
         this.store.assertGrant(mod.grant)
         const runtimeId = randomUUID()
         const registrations = await this.runtime.load(runtimeId, mod.compiled.code)
-        this.mods.push({ ...mod, runtimeId, registrations })
+        const loaded = { ...mod, runtimeId, registrations, controller: new AbortController() }
+        this.mods.push(loaded)
+        this.invocationSources.set(runtimeId, loaded)
+        mod.assertCurrent?.()
         validateModRegistrations(mod.compiled.manifest, registrations)
       }
     } catch (error) {
@@ -166,7 +190,15 @@ export class ModEngine {
     request.assertScope?.()
     if (this.disposed) throw new ModError("MODS_SESSION_ENDED")
     if (request.signal?.aborted) throw new ModError("MODS_CANCELLED")
-    for (const mod of selected) this.store.assertGrant(mod.grant)
+    for (const mod of selected) {
+      this.assertModCurrent(mod)
+      this.store.assertGrant(mod.grant)
+    }
+  }
+
+  private assertModCurrent(mod: LoadedMod): void {
+    if (this.retiredMods.has(mod)) throw new ModPluginChangedError()
+    mod.assertCurrent?.()
   }
 
   private async exclusive<T>(request: ModDispatchRequest, fn: () => Promise<T>): Promise<T> {
@@ -201,8 +233,19 @@ export class ModEngine {
         .filter((reg) => reg.event === "tool.call" && reg.tools?.includes(request.toolId))
         .map((registration) => ({ mod, registration }))
     )
+    const participants = [...new Set(chain.map((link) => link.mod))]
+    const assertDispatch = () => {
+      // Native Core does not acquire authority from a presentation-only guest.
+      // Actual middleware/capability calls retain their exact source fences.
+      if (participants.length || request.identity.origin === "mod")
+        this.assertLive(request, participants)
+      else {
+        request.assertScope?.()
+        if (request.signal?.aborted) throw new ModError("MODS_CANCELLED")
+      }
+    }
     const run = async (): Promise<T> => {
-      this.assertLive(request, selected)
+      assertDispatch()
       let actual: T | undefined
       let executed = false
       let coreFailure: unknown
@@ -211,7 +254,7 @@ export class ModEngine {
       const invokeCore = (args: ModObject): Promise<ModToolResult> => {
         if (corePromise) throw new ModError("MODS_CORE_ALREADY_STARTED")
         corePromise = (async () => {
-          this.assertLive(request, selected)
+          assertDispatch()
           this.store.claim(
             request.identity.callId,
             request.toolId,
@@ -237,18 +280,18 @@ export class ModEngine {
               publish: request.publish,
               protectData: request.protectData,
               userInitiated: request.userInitiated,
-              assertLive: () => this.assertLive(request, selected),
+              assertLive: assertDispatch,
               assertMcpTool: request.assertMcpTool,
               approvalFingerprint:
                 `${request.identity.threadId}:${request.identity.turnId}:${request.identity.agentId}:${request.identity.modId ?? "model"}:${request.identity.grantEpoch}:${request.policyDigest ?? "none"}|` +
-                selected
+                participants
                   .map((mod) => `${mod.grant.modId}:${mod.grant.digest}:${mod.grant.epoch}`)
                   .join("|")
             }
             actual = await modCallContext.run(context, () => core(args))
             const failed = this.failed(actual)
             this.store.settle(request.identity.callId, failed ? "failed" : "succeeded")
-            this.assertLive(request, selected)
+            assertDispatch()
             actual = request.publish
               ? await request.publish(actual, "before-observers")
               : filterModResult(actual, request.protectedOutput, toolCallId)
@@ -291,7 +334,7 @@ export class ModEngine {
               registration.id,
               event,
               async (method, input) => {
-                this.assertLive(request, selected)
+                assertDispatch()
                 if (method !== "next")
                   return this.capability(mod, request, registration.event, method, input)
                 if (nextUsed) throw new ModError("MODS_NEXT_ALREADY_USED")
@@ -322,7 +365,7 @@ export class ModEngine {
       }
       try {
         const result = await layer(0, record(request.args))
-        this.assertLive(request, selected)
+        assertDispatch()
         if (!executed || actual === undefined) throw new ModError("MODS_RESULT_MISSING")
         const originalProjection = projectModResult(actual, toolCallId)
         const same = encodeModJson(originalProjection) === encodeModJson(result.projection)
@@ -333,9 +376,15 @@ export class ModEngine {
           ? await request.publish(transformed, "final")
           : filterModResult(transformed, request.protectedOutput, toolCallId)
         const render = () => this.render(request, selected, projectModResult(published, toolCallId))
-        if (chain.length === 0 && selected.length > 0) await this.exclusive(request, render)
+        if (chain.length === 0 && selected.length > 0) {
+          try { await this.exclusive(request, render) }
+          catch (error) {
+            assertDispatch()
+            this.diagnostic("native-presentation", modErrorCode(error))
+          }
+        }
         else await render()
-        this.assertLive(request, selected)
+        assertDispatch()
         return published
       } catch (error) {
         if (!corePromise && this.store.status(request.identity.callId) === undefined) {
@@ -374,6 +423,7 @@ export class ModEngine {
     method: string,
     input: ModJson
   ): Promise<ModJson> {
+    this.assertModCurrent(mod)
     this.store.assertGrant(mod.grant)
     if (request.signal?.aborted) throw new ModError("MODS_CANCELLED")
     if (event === "ui.render") throw new ModError("MODS_RENDER_IO_DENIED")
@@ -397,12 +447,16 @@ export class ModEngine {
         args.toolId,
         record(args.args),
         mod.grant,
-        request.identity.origin === "user-action"
+        request.identity.origin === "user-action",
+        () => this.assertModCurrent(mod),
+        mod.controller.signal
       )
+      this.assertModCurrent(mod)
       this.store.assertGrant(mod.grant)
       const safe = request.publish
         ? await request.publish(value, "final")
         : filterModResult(value, request.protectedOutput)
+      this.assertLive(request, [mod])
       return {
         receipt: randomUUID(),
         execution: this.failed(value) ? "failed" : "succeeded",
@@ -413,9 +467,11 @@ export class ModEngine {
       if (typeof args.field !== "string" || !permissions.context.includes(args.field))
         throw new ModError("MODS_CONTEXT_DENIED")
       const value = request.context?.[args.field] ?? null
-      return request.publish
+      const safe = request.publish
         ? await request.publish(value, "final")
         : filterModData(value, request.protectedOutput)
+      this.assertLive(request, [mod])
+      return safe
     }
     const namespace = `${mod.grant.workspace}\u001f${mod.compiled.manifest.id}\u001f${mod.compiled.digest}`
     if (method === "artifacts.create") {
@@ -453,18 +509,19 @@ export class ModEngine {
         throw new ModError("MODS_STORE_DENIED")
       if (method === "store.get") {
         const value = this.store.read(namespace, args.key)
-        return request.publish
+        const safe = request.publish
           ? await request.publish(value, "final")
           : filterModData(value, request.protectedOutput)
+        this.assertLive(request, [mod])
+        return safe
       }
-      if (method === "store.set")
-        this.store.write(
-          namespace,
-          args.key,
-          request.publish
-            ? await request.publish(args.value, "final")
-            : filterModData(args.value, request.protectedOutput)
-        )
+      if (method === "store.set") {
+        const safe = request.publish
+          ? await request.publish(args.value, "final")
+          : filterModData(args.value, request.protectedOutput)
+        this.assertLive(request, [mod])
+        this.store.write(namespace, args.key, safe)
+      }
       else if (method === "store.delete") this.store.delete(namespace, args.key)
       else throw new ModError("MODS_CAPABILITY_UNKNOWN")
       return null
@@ -483,7 +540,9 @@ export class ModEngine {
   async context(request: ModDispatchRequest): Promise<string[]> {
     return this.exclusive(request, async () => {
       const blocks: string[] = []
-      for (const mod of this.selected(request)) {
+      const participants = this.selected(request).filter((mod) =>
+        mod.registrations.some((registration) => registration.event === "prompt.context"))
+      for (const mod of participants) {
         for (const registration of mod.registrations.filter((r) => r.event === "prompt.context")) {
           try {
             const value = await this.invokeGuest(
@@ -496,6 +555,7 @@ export class ModEngine {
                   : this.capability(mod, request, registration.event, method, input),
               request.signal
             )
+            this.assertModCurrent(mod)
             if (!Array.isArray(value) || value.length > 8) throw new ModError("MODS_CONTEXT_LIMIT")
             for (const item of value) {
               const block = record(item)
@@ -515,7 +575,7 @@ export class ModEngine {
           }
         }
       }
-      this.assertLive(request, this.selected(request))
+      this.assertLive(request, participants)
       return blocks.slice(0, 8)
     })
   }
@@ -628,5 +688,22 @@ export class ModEngine {
   async dispose(): Promise<void> {
     this.disposed = true
     await Promise.allSettled(this.mods.splice(0).map((mod) => this.runtime.unload(mod.runtimeId)))
+    this.invocationSources.clear()
+  }
+
+  /** A catalogue update unloads only that source; native Core and other guests keep their owner. */
+  async retirePlugins(pluginIds?: readonly string[]): Promise<void> {
+    const removed = this.mods.filter((mod) => !pluginIds || pluginIds.includes(mod.compiled.pluginId))
+    for (const mod of removed) {
+      this.retiredMods.add(mod)
+      mod.controller.abort(new ModPluginChangedError())
+      this.mods.splice(this.mods.indexOf(mod), 1)
+    }
+    await Promise.allSettled(removed.map(async (mod) => {
+      // Revocation above is synchronous; physical disposal waits for the real host operation.
+      await Promise.allSettled([...(this.activeInvocations.get(mod.runtimeId) ?? [])])
+      await this.runtime.unload(mod.runtimeId)
+      this.invocationSources.delete(mod.runtimeId)
+    }))
   }
 }

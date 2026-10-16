@@ -410,3 +410,83 @@ it("describes host defaults after middleware without changing hook or core input
     "MODS_CALL_ALREADY_STARTED"
   )
 })
+
+it("unloads an approved presentation-only legacy Mod without dropping or replaying native Core", async () => {
+  const f = await fixture(
+    'on.ui({id:"view",slot:"tool.result.after"},async()=>[{type:"text",text:"view"}])',
+    { events: ["ui.render"], tools: [] }
+  )
+  let enter!: () => void
+  let resume!: () => void
+  const entered = new Promise<void>((done) => { enter = done })
+  const released = new Promise<void>((done) => { resume = done })
+  let calls = 0
+  const pending = f.engine.dispatch(f.request, async () => {
+    calls++
+    const guard = getModCallContext()!.assertLive!
+    enter()
+    await released
+    guard()
+    return "native creator result"
+  })
+  await entered
+  await f.engine.retirePlugins(["plugin"])
+  resume()
+  expect(await pending).toBe("native creator result")
+  expect(calls).toBe(1)
+  expect(f.store.status("call")).toBe("succeeded")
+})
+
+it("rejects a retired legacy middleware's in-flight result without replaying native Core", async () => {
+  const f = await fixture(`on.tool({id:"filter",tools:["host:write_file"]},async($,e,next)=>{
+    const r=await next({args:e.args});
+    return {kind:"result",receipt:r.receipt,projection:r.projection};
+  })`)
+  let enter!: () => void
+  let resume!: () => void
+  const entered = new Promise<void>((done) => { enter = done })
+  const released = new Promise<void>((done) => { resume = done })
+  let calls = 0
+  const pending = f.engine.dispatch(f.request, async () => {
+    calls++
+    enter()
+    await released
+    return "retired source must not publish this result"
+  })
+  const rejected = expect(pending).rejects.toThrow("MODS_PLUGIN_CHANGED")
+  await entered
+  const retiring = f.engine.retirePlugins(["plugin"])
+  resume()
+  await rejected
+  await retiring
+  expect(calls).toBe(1)
+})
+
+it("does not persist a legacy store write after its source retires during publication", async () => {
+  const f = await fixture(`on.tool({id:"store",tools:["host:write_file"]},async($,e,next)=>{
+    await $.store.set("key","blocked-value");
+    const r=await next({args:e.args});
+    return {kind:"result",receipt:r.receipt,projection:r.projection};
+  })`, { permissions: { readTools: [], writeTools: [], context: [], store: true } })
+  let enter!: () => void
+  let resume!: () => void
+  const entered = new Promise<void>((done) => { enter = done })
+  const released = new Promise<void>((done) => { resume = done })
+  f.request.publish = async (value) => {
+    if (value === "blocked-value") {
+      enter()
+      await released
+    }
+    return value
+  }
+  let calls = 0
+  const pending = f.engine.dispatch(f.request, async () => { calls++; return "must not execute" })
+  const rejected = expect(pending).rejects.toThrow("MODS_PLUGIN_CHANGED")
+  await entered
+  const retiring = f.engine.retirePlugins(["plugin"])
+  resume()
+  await rejected
+  await retiring
+  expect(f.store.read("workspace\u001fquality\u001fdigest", "key")).toBeNull()
+  expect(calls).toBe(0)
+})

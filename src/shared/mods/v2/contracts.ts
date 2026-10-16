@@ -91,6 +91,8 @@ export type FunctionHostCall = (
 /** Both the isolated production proxy and the in-process test VM implement this contract. */
 export interface FunctionGuest {
   readonly registrations: readonly FunctionRegistration[]
+  /** Native VM proof; an old peer without this fact cannot be reclaimed automatically. */
+  readonly registrationQuiescent?: boolean
   readonly stats: { disposed: boolean }
   /** One module-lifetime resource channel. It never extends an invocation's SDK authority. */
   bindModuleHost?(host: FunctionHostCall, onDispose?: () => void): void

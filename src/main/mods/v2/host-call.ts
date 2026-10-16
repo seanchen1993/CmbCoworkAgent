@@ -13,6 +13,7 @@ import {
 } from "./execution-context"
 import { assertModRuntimeAuthority, type ModRuntimeAuthority } from "../runtime-instance"
 import { functionComponentAudit } from "./component-audit"
+import { assertDevelopmentNativeGrant } from "./development-native-authority"
 
 const calls = new AsyncLocalStorage<{
   identity: ModIdentity
@@ -128,6 +129,11 @@ export function assertFunctionGrant(
 ): void {
   signal.throwIfAborted()
   functionCallScope(workspace, threadId)
+  if (grant.modId.startsWith("development:")) {
+    if (grant.workspace !== workspace) throw new ModFunctionError("MODS_DEVELOPMENT_SCOPE_CHANGED")
+    assertDevelopmentNativeGrant(store, grant)
+    return
+  }
   if (grant.workspace !== workspace || !grant.modId.startsWith("function:"))
     throw new ModFunctionError("MODS_GRANT_REVOKED")
   store.assertGrant(grant)

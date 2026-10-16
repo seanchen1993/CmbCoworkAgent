@@ -20,7 +20,7 @@ import { createModModelBoundary } from "../../agent/mods-model-boundary"
 
 const cleanups: Array<() => Promise<void>> = []
 
-it("shares only in-flight status compilation while reading each workspace grant afresh", async () => {
+it("reuses proved status compilation while reading each workspace grant afresh", async () => {
   const f = await fixture()
   const digest = await f.approve()
   const compile = functionLoader.compileFunctionPlugin
@@ -38,7 +38,7 @@ it("shares only in-flight status compilation while reading each workspace grant 
     expect((await other)[0].state).toBe("needs-approval")
     f.control.grant(f.root, "function:function-commands", digest, false)
     expect((await f.manager.status(f.root))[0].state).toBe("needs-approval")
-    expect(spy).toHaveBeenCalledTimes(2)
+    expect(spy).toHaveBeenCalledTimes(1)
     expect(f.loads()).toBe(1)
   } finally {
     gate.resolve()

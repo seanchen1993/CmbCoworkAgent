@@ -14,6 +14,7 @@ import { MOD_COMMAND_HISTORY_LIMIT } from "../../shared/mods/types"
 import { encodeModJson, parseModJson } from "../../shared/mods/validation"
 import { ModError } from "./errors"
 import { FunctionStateStore } from "./v2/state-store"
+import { developmentNativeGrant, assertDevelopmentNativeGrant } from "./v2/development-native-authority"
 import type { CompletionEvidenceRecord } from "./v2/completion-evidence"
 
 export interface ModGrant {
@@ -444,6 +445,8 @@ export class ModControlStore {
   }
 
   getGrant(workspace: string, modId: string): ModGrant | null {
+    if (modId.startsWith("development:"))
+      return developmentNativeGrant(this, workspace, modId) ?? null
     // Reuse the compiled query, never an authorization result. Each get sees
     // the current committed row, including changes from another connection.
     this.grantQuery ??= this.db.prepare("SELECT * FROM mods_grants WHERE workspace=? AND mod_id=?")
@@ -460,6 +463,10 @@ export class ModControlStore {
   }
 
   assertGrant(expected: ModGrant): void {
+    if (expected.modId.startsWith("development:")) {
+      assertDevelopmentNativeGrant(this, expected)
+      return
+    }
     const actual = this.getGrant(expected.workspace, expected.modId)
     if (!actual?.enabled || actual.digest !== expected.digest || actual.epoch !== expected.epoch) {
       throw new ModError("MODS_GRANT_REVOKED")

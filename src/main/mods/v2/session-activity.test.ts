@@ -476,3 +476,22 @@ it("external close wakes a pending explicit retirement as unknown rather than a 
   await expect(waiting).rejects.toThrow("MODS_SESSION_CLOSED")
   held.release()
 })
+
+it("closed admission never mistakes its outer caller or native cleanup for settled occupancy", async () => {
+  const activity = new FunctionSessionActivity()
+  const caller = activity.retainFresh()
+  const gate = Promise.withResolvers<void>()
+  const cleanup = activity.cleanup(() => gate.promise)
+  activity.close()
+  let settled = false
+  const waiting = activity.whenSettled().then(() => { settled = true })
+  caller()
+  await Promise.resolve()
+  expect(settled).toBe(false)
+  expect(activity.size).toBe(1)
+  gate.resolve()
+  await cleanup
+  await waiting
+  expect(settled).toBe(true)
+  expect(activity.size).toBe(0)
+})

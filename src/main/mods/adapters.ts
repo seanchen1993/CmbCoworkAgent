@@ -153,11 +153,13 @@ export function withModToolCall<T, R extends ToolRequest>(
           "MODS_TOOL_VALIDATION_LIMIT",
           "MODS_TOOL_AGENT_UNAVAILABLE",
           "MODS_RUNTIME_TOOL_DENIED",
-          "MODS_TOOL_PERMISSION_DENIED"
+          "MODS_TOOL_PERMISSION_DENIED",
+          "MODS_PLUGIN_CHANGED"
         ].includes(error.code)
       )
         return {
-          result: error.code === "MODS_TOOL_PERMISSION_DENIED" ? error.message : error.code,
+          result: ["MODS_TOOL_PERMISSION_DENIED", "MODS_PLUGIN_CHANGED"].includes(error.code)
+            ? error.message : error.code,
           isError: true
         }
       throw error

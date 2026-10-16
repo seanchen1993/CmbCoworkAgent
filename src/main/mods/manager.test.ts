@@ -1059,7 +1059,7 @@ describe("project Mods lifecycle and UI authority", () => {
     f.manager.revoke(f.root, "review")
     await expect(
       f.manager.runCommand(f.root, "thread", command, {}, new AbortController().signal)
-    ).rejects.toThrow("SCOPE_CHANGED")
+    ).rejects.toThrow("GRANT_REVOKED")
     expect(f.executions).toHaveLength(1)
   })
   it("summarizes a settled turn once from execution facts", async () => {
@@ -1290,6 +1290,28 @@ describe("project Mods lifecycle and UI authority", () => {
     await expect(f.manager.act(7, "thread", id)).rejects.toThrow()
     expect(await f.dispatch()).toBe("text")
     expect(f.button().actionId).toBeUndefined()
+  })
+  it("does not write after a legacy source is disabled while its final native approval is pending", async () => {
+    const f = await fixture()
+    await f.enable()
+    await f.dispatch()
+    let enter!: () => void
+    let approve!: (value: boolean) => void
+    const entered = new Promise<void>((done) => { enter = done })
+    const approval = new Promise<boolean>((done) => { approve = done })
+    f.confirm.mockImplementationOnce(async () => {
+      enter()
+      return approval
+    })
+    const running = f.manager.act(7, "thread", f.button().actionId!)
+    const rejected = expect(running).rejects.toThrow("MODS_PLUGIN_CHANGED")
+    await entered
+    f.plugins[0].enabled = false
+    f.manager.pluginsChanged(["plugin"])
+    approve(true)
+    await rejected
+    expect(f.executions).toHaveLength(0)
+    expect(await f.dispatch()).toBe("text")
   })
   it("rejects stale code grants and cancelled scopes", async () => {
     const f = await fixture()

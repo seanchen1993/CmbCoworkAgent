@@ -185,7 +185,8 @@ async function handle(request: FunctionRequest): Promise<ModJson> {
         }
       )
       runtimes.set(request.runtimeId, guest)
-      return guest.registrations as unknown as ModJson
+      return { registrations: guest.registrations,
+        registrationQuiescent: guest.registrationQuiescent } as unknown as ModJson
     } finally {
       loading.delete(request.runtimeId)
     }

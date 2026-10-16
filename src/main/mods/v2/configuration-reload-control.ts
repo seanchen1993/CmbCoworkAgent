@@ -15,6 +15,10 @@ export class FunctionConfigurationReloadControl {
     return this.stopped.get(JSON.stringify([workspace, threadId]))
   }
 
+  canBegin(workspace: string, threadId: string): boolean {
+    return this.stopped.has(JSON.stringify([workspace, threadId])) || this.stopped.size < 64
+  }
+
   begin(workspace: string, threadId: string) {
     const key = JSON.stringify([workspace, threadId])
     if (!this.stopped.has(key) && this.stopped.size >= 64)
@@ -37,5 +41,12 @@ export class FunctionConfigurationReloadControl {
         (threadId === undefined || control.threadId === threadId)
       )
         control.controller.abort(new ModFunctionError("MODS_SCOPE_CHANGED"))
+  }
+
+  /** Native confirmed thread deletion only; ordinary source invalidation keeps stopped intent. */
+  forgetThread(threadId: string): void {
+    this.cancel(undefined, threadId)
+    for (const key of this.stopped.keys())
+      if (JSON.parse(key)[1] === threadId) this.stopped.delete(key)
   }
 }

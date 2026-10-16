@@ -1728,7 +1728,7 @@ it.each(["failed", "killed"] as const)(
   }
 )
 
-it.each(["cancel", "disable", "revoke", "replace", "workspace"])(
+it.each(["cancel", "disable", "replace", "workspace"])(
   "does not publish agent instances after %s while filtering",
   async (action) => {
     const f = fixture()
@@ -1760,7 +1760,6 @@ it.each(["cancel", "disable", "revoke", "replace", "workspace"])(
     await started
     if (action === "cancel") controller.abort()
     else if (action === "disable") f.manager.configure(f.workspace, false, false)
-    else if (action === "revoke") f.manager.revoke(f.workspace, f.grant.modId)
     else if (action === "replace")
       f.manager.createRuntimeAuthority({
         workspace: f.workspace,
@@ -1772,6 +1771,32 @@ it.each(["cancel", "disable", "revoke", "replace", "workspace"])(
     await rejected
   }
 )
+
+it("keeps an original native agent list alive when an unrelated Mod grant is revoked", async () => {
+  const f = fixture()
+  let enter!: () => void
+  let resume!: () => void
+  const entered = new Promise<void>((done) => { enter = done })
+  const released = new Promise<void>((done) => { resume = done })
+  const publish = vi.spyOn(f.manager, "publish").mockImplementationOnce(async (_workspace, value) => {
+    enter()
+    await released
+    return value
+  })
+  const result = queryFunctionAgentList(
+    f.manager,
+    f.workspace,
+    "thread",
+    new AbortController().signal,
+    () => {}
+  )
+  await entered
+  f.manager.revoke(f.workspace, f.grant.modId)
+  resume()
+  await expect(result).resolves.toEqual([])
+  expect(publish).toHaveBeenCalledOnce()
+})
+
 it.each(["off", "no-source", "unapproved"] as const)(
   "preserves the existing graph budget with Mods %s",
   async (mode) => {

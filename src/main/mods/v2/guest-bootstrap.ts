@@ -525,11 +525,14 @@ export const FUNCTION_GUEST_BOOTSTRAP = String.raw`
           const owner = current?.uiConstructor ? current :
             current && current.plugin === meta.plugin.name ? current : scope;
           if (!owner.ended) owner.unawaited.push(pending);
+          let closing;
           return freeze({cancel() {
-            if (cancelled) return;
+            if (closing) return closing;
             cancelled = true;
             resourceCallbacks.delete(handle);
-            opening.then(opened => resourceCall("resource.close", {id:opened.id})).catch(() => {});
+            closing = opening.then(opened => resourceCall("resource.close", {id:opened.id})).then(()=>{});
+            closing.catch(() => {});
+            return closing;
           }});
         };
         continue;

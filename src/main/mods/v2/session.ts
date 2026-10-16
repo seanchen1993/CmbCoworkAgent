@@ -294,7 +294,8 @@ export interface FunctionSessionHost {
   authorizeProcess?(
     plugin: FunctionPlugin,
     request: Readonly<FunctionProcessRequest>,
-    signal: AbortSignal
+    signal: AbortSignal,
+    method?: "process.run" | "process.spawn"
   ): Promise<void>
   version?: import("../../../shared/mods/v2/session").FunctionSessionVersion
   runEffect?(
@@ -904,7 +905,6 @@ export class FunctionSession {
       }
     )
   }
-
   private async openProcess(
     plugin: FunctionPlugin,
     input: ModObject,
@@ -961,7 +961,7 @@ export class FunctionSession {
           authorize: async (request: Readonly<FunctionProcessRequest>, signal: AbortSignal) => {
             callSignal.throwIfAborted()
             if (!this.host.authorizeProcess) throw new ModFunctionError("MODS_PROCESS_UNAVAILABLE")
-            await this.host.authorizeProcess(plugin, request, AbortSignal.any([signal, callSignal]))
+            await this.host.authorizeProcess(plugin, request, AbortSignal.any([signal, callSignal]), "process.spawn")
             callSignal.throwIfAborted()
             this.resources.assert(plugin, resource.id)
           },
@@ -2580,7 +2580,6 @@ export class FunctionSession {
       this.scopedCapability(plugin, method, raw, callSignal, source, depth, turnHeld, logSignal, candidateInvalidation)
     )
   }
-
   private async scopedCapability(
     plugin: FunctionPlugin,
     method: string,
@@ -3172,7 +3171,7 @@ export class FunctionSession {
                 authorize: async (finalRequest, approvalSignal) => {
                   if (!this.host.authorizeProcess)
                     throw new ModFunctionError("MODS_PROCESS_UNAVAILABLE")
-                  await this.host.authorizeProcess(plugin, finalRequest, approvalSignal)
+                  await this.host.authorizeProcess(plugin, finalRequest, approvalSignal, "process.run")
                   approvalSignal.throwIfAborted()
                   this.assertLive(plugin)
                 },
@@ -4162,6 +4161,12 @@ export class FunctionSession {
   assertRetirementHealthy(): void {
     this.resources.assertCleanupHealthy()
   }
+
+  /** Native resource observations; no automatic restart or business state. */
+  get hasReleaseResources(): boolean {
+    return this.resources.size > 0 || this.processOpenings.size > 0
+  }
+  get ownedResourceCount(): number { return this.resources.size }
 
   async close(strict = false): Promise<void> {
     this.closing ??= this.retire()

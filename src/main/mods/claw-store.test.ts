@@ -82,6 +82,50 @@ it("requires the exact installed and approved identity", () => {
   ])
     expect(clawIssues(profile, [candidate])).toHaveLength(1)
 })
+
+it("detaches uninstalled capabilities from live bindings durably without changing saved templates", () => {
+  const f = fixture()
+  const composed = parseClawProfile({
+    ...profile,
+    capabilities: [...profile.capabilities, { pluginId: "b", name: "other", digest: "b".repeat(64) }],
+    completionRules: [{ ...profile.capabilities[0], policy: { mode: "check" } }],
+    mcp: { mode: "selected", items: [
+      { id: "plugin:a/server", name: "removed", digest: "a".repeat(64) },
+      { id: "plugin:ab/server", name: "retained", digest: "b".repeat(64) }
+    ] },
+    models: { default: "model", roles: {} },
+    builtins: { contextMeter: true }
+  })
+  f.store.write("a", { revision: 0, profiles: [composed], active: composed }, 0)
+  f.store.apply("a", '["selected"]', composed, 1)
+  f.store.apply("a", '["inherited"]', null, 2)
+  f.store.write("other", { revision: 0, profiles: [], active: profile }, 0)
+  f.store.reconcileInstalledPlugins("a", new Set(["b", "ab"]))
+  const reopened = new ClawStore(f.settings)
+  const state = reopened.read("a")
+  expect(state.revision).toBe(4)
+  expect(state.profiles).toEqual([composed])
+  expect(state.active).toEqual({ ...composed, capabilities: [composed.capabilities[1]],
+    completionRules: [], mcp: { mode: "selected", items: [composed.mcp!.items[1]] } })
+  expect(reopened.selection("a", '["selected"]')).toEqual({ revision: 4, profile: state.active })
+  expect(reopened.selection("a", '["inherited"]')).toEqual({ revision: 3, profile: null })
+  expect(reopened.read("other").active).toEqual(profile)
+  expect(() => reopened.apply("a", '["selected"]', composed, 3)).toThrow("已变化")
+  reopened.reconcileInstalledPlugins("a", new Set(["b", "ab"]))
+  expect(reopened.read("a").revision).toBe(4)
+  reopened.reconcileInstalledPlugins("a", new Set())
+  expect(reopened.selection("a", '["selected"]').profile?.capabilities).toEqual([])
+  expect(reopened.selection("a", '["selected"]').profile).not.toBeNull()
+})
+
+it("keeps installed-but-disabled, unapproved or broken packages pinned and rejects corrupt state", () => {
+  const f = fixture()
+  f.store.write("a", { revision: 0, profiles: [profile], active: profile }, 0)
+  f.store.reconcileInstalledPlugins("a", new Set(["a"]))
+  expect(f.store.read("a")).toEqual({ revision: 1, profiles: [profile], active: profile })
+  f.data.set(JSON.stringify(["claw-profiles-v1", "a"]), "broken")
+  expect(() => f.store.reconcileInstalledPlugins("a", new Set())).toThrow()
+})
 it("limits selection to ordinary chat and its host-created flow children", () => {
   const rows: Record<string, { metadata: object }> = {
     normal: { metadata: { workspacePath: "a" } },

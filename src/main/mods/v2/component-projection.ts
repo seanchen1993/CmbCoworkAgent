@@ -9,6 +9,7 @@ import type { ClawActionExport } from "../../../shared/mods/claw-actions"
 import type { CompiledFunctionPlugin } from "./loader"
 import type { FunctionEnvironmentDeclaration } from "./environment-sdk"
 import { validateRegisteredToolInput } from "./tool-schema"
+import type { CapabilityUsageContext } from "../../../shared/mods/capability-usage"
 
 export interface CompiledFunctionComponent {
   code: string
@@ -75,9 +76,10 @@ function canonical(value: ModJson): ModJson {
 /** Project an approved immutable package snapshot without re-reading mutable source files. */
 export function projectFunctionComponents(
   compiled: CompiledFunctionPlugin,
-  selection?: ClawComponentSelection
+  selection?: ClawComponentSelection,
+  usageContext?: CapabilityUsageContext
 ): FunctionComponentProjection {
-  const entries = resolveClawComponents(compiled.components ?? [], selection)
+  const entries = resolveClawComponents(compiled.components ?? [], selection, usageContext)
   const options = structuredClone(compiled.options)
   if (!compiled.components?.length)
     return {

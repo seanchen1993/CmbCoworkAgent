@@ -48,6 +48,8 @@ export interface ClawState {
   active: ClawProfile | null
 }
 export interface ClawView extends ClawState {
+  /** Host-derived usage context; absent in older hosts. */
+  usageContext?: import("./capability-usage").CapabilityUsageContext
   bindingRevision: number
   workspace: string
   enabled: boolean

@@ -8,6 +8,28 @@ interface ClawBinding {
 }
 type ClawRecord = ClawState & { bindings?: Record<string, ClawBinding> }
 
+/** Absence in the host registry is uninstall; an installed-but-invalid source stays pinned. */
+export function withoutUninstalledClawPlugins(
+  profile: ClawProfile | null,
+  installed: ReadonlySet<string>
+): ClawProfile | null {
+  if (!profile) return null
+  const removed = new Set(profile.capabilities
+    .filter(item => !installed.has(item.pluginId)).map(item => item.pluginId))
+  if (!removed.size) return profile
+  return {
+    ...profile,
+    capabilities: profile.capabilities.filter(item => !removed.has(item.pluginId)),
+    ...(profile.completionRules ? {
+      completionRules: profile.completionRules.filter(item => !removed.has(item.pluginId))
+    } : {}),
+    ...(profile.mcp?.mode === "selected" ? {
+      mcp: { ...profile.mcp, items: profile.mcp.items.filter(item =>
+        ![...removed].some(id => item.id.startsWith(`plugin:${id}/`))) }
+    } : {})
+  }
+}
+
 export class ClawStore {
   constructor(private readonly settings: FlowSettingsStore) {}
   private key(workspace: string) {
@@ -73,6 +95,27 @@ export class ClawStore {
   selection(workspace: string, identity: string): ClawBinding {
     const state = this.record(workspace)
     return state.bindings?.[identity] ?? { revision: 0, profile: state.active }
+  }
+  /** The host registry distinguishes uninstall from a disabled, broken or changed package.
+   * Detach only absent packages from live bindings. Saved templates and flow snapshots remain
+   * intact for diagnosis; an empty binding must never become null (inherit every plugin).
+   */
+  reconcileInstalledPlugins(workspace: string, installed: ReadonlySet<string>): void {
+    const state = this.record(workspace)
+    let changed = false
+    const reconcile = (profile: ClawProfile | null): ClawProfile | null => {
+      const next = withoutUninstalledClawPlugins(profile, installed)
+      if (next !== profile) changed = true
+      return next
+    }
+    const active = reconcile(state.active)
+    const bindings = Object.fromEntries(Object.entries(state.bindings ?? {}).map(([key, binding]) => {
+      const profile = reconcile(binding.profile)
+      return [key, profile === binding.profile ? binding : { revision: state.revision + 1, profile }]
+    }))
+    if (changed) this.persist(workspace, {
+      ...state, active, bindings, revision: state.revision + 1
+    })
   }
   apply(workspace: string, identity: string, profile: ClawProfile | null, expected: number): void {
     const state = this.record(workspace)

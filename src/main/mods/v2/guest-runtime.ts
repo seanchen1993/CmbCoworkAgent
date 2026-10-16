@@ -387,6 +387,10 @@ export class FunctionGuestRuntime implements FunctionUiConstructorGuest {
     }
   }
 
+  get registrationQuiescent(): boolean {
+    return !this.disposed && !this.frames.size && !this.rpcSize && !this.vm.hasPendingJob()
+  }
+
   get stats(): { frames: number; replies: number; disposed: boolean } {
     return {
       frames: this.frames.size,

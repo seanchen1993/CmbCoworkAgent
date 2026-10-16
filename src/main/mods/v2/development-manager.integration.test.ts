@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto"
+import { createServer } from "node:http"
 import { AsyncResource } from "node:async_hooks"
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises"
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { basename, dirname, join, resolve } from "node:path"
 import { afterEach, expect, it, vi } from "vitest"
@@ -9,20 +10,37 @@ import { ModCommandQueue } from "../command-queue"
 import { FunctionModsManager } from "./manager"
 import { FunctionGuestRuntime } from "./guest-runtime"
 import { compileFunctionPlugin } from "./loader"
+import * as functionLoader from "./loader"
+import { assertFunctionSourcesCurrent } from "./source-adoption-fence"
 import { DEVELOPMENT_EVENT_CAPABILITIES, type DevelopmentScope } from "./development-session"
 import { ModDevelopmentService } from "../devtools/development-service"
 import { AuthoringDraftStore } from "../devtools/authoring-store"
 import { withFunctionTransportExecution } from "./host-call"
-import { currentFunctionExecution } from "./execution-context"
+import { currentFunctionExecution, withFunctionExecution } from "./execution-context"
 import { FunctionSessionActivity } from "./session-activity"
+import { ModsManager, authorizeCurrentModInput } from "../manager"
+import type { ModThreadBinding } from "../manager"
+import { LocalSandbox } from "../../agent/local-sandbox"
+import { functionSdkToolInput } from "./tool-sdk"
+import { getModCallContext } from "../context"
+import { ClawStore } from "../claw-store"
+import type { ClawProfile } from "../../../shared/mods/claw"
+import { claimConfigurationReload } from "./configuration-reload-lease"
 
 const cleanups: Array<() => Promise<void>> = []
 afterEach(async () => {
   for (const close of cleanups.splice(0).reverse()) await close()
 })
 
-async function fixture(options: { drain?: () => Promise<void> } = {}) {
-  const root = await mkdtemp(join(tmpdir(), "mods-development-"))
+async function fixture(options: {
+  drain?: () => Promise<void>
+  nativeWorkspace?: boolean
+  realCapabilities?: string[]
+  host?: Partial<ConstructorParameters<typeof FunctionModsManager>[1]>
+} = {}) {
+  const createdRoot = await mkdtemp(join(tmpdir(), "mods-development-"))
+  const root = options.nativeWorkspace && process.platform === "win32"
+    ? createdRoot.toLowerCase() : createdRoot
   const store = new ModControlStore(join(root, "control.sqlite"))
   const scope: DevelopmentScope = {
     workspace: root,
@@ -30,21 +48,25 @@ async function fixture(options: { drain?: () => Promise<void> } = {}) {
     incarnation: { token: randomUUID(), legacyCreatedAt: 1 }
   }
   let live = true, enabled = true
+  let plugins: Array<{ id: string; name: string; path: string; enabled: boolean }> = []
   const loads = vi.fn()
   const openConversationOwner = vi.fn(() => () => {})
   const activateConversationOwner = vi.fn()
+  let configurationIdle: (threadId: string) => void = () => {}
   const manager = new FunctionModsManager(
     store,
     {
-      plugins: () => [],
+      plugins: () => plugins,
       enabled: () => enabled,
       publish: async (_workspace, value) => value,
       changed: () => {},
+      onConfigurationIdle: listener => { configurationIdle = listener; return () => {} },
       openConversationOwner,
       activateConversationOwner,
       assertThread: () => {
         if (!live) throw Error("scope lost")
-      }
+      },
+      ...options.host
     },
     () => {
       const guests: FunctionGuestRuntime[] = []
@@ -77,7 +99,7 @@ async function fixture(options: { drain?: () => Promise<void> } = {}) {
     }
   })
   const componentId = randomUUID()
-  const stage = async (revision: number, body: string) => {
+  const stage = async (revision: number, body: string, publish = true) => {
     const path = join(root, String(revision))
     await mkdir(join(path, "hooks"), { recursive: true })
     await writeFile(join(path, "plugin.json"), JSON.stringify({ name: "dev-example" }))
@@ -97,11 +119,14 @@ async function fixture(options: { drain?: () => Promise<void> } = {}) {
         "store.get",
         "store.set",
         "command.register",
+        ...options.realCapabilities ?? [],
         ...DEVELOPMENT_EVENT_CAPABILITIES
-      ]
+      ],
+      ...(options.realCapabilities ? { validation: "authorized-real" as const } : {})
     }
-    manager.stageDevelopment(scope, input, () => {
+    if (publish) manager.stageDevelopment(scope, input, () => {
       if (!live) throw Error("scope lost")
+      assertFunctionSourcesCurrent(compiled)
     })
     return input
   }
@@ -109,8 +134,8 @@ async function fixture(options: { drain?: () => Promise<void> } = {}) {
     manager.close()
     await new Promise((resolve) => setTimeout(resolve, 30))
     store.close()
-    expect(dirname(resolve(root))).toBe(resolve(tmpdir()))
-    expect(basename(root)).toMatch(/^mods-development-/)
+    expect(dirname(resolve(createdRoot))).toBe(resolve(tmpdir()))
+    expect(basename(createdRoot)).toMatch(/^mods-development-/)
     await rm(root, { recursive: true, force: true })
   })
   const activate = async (revision: number, body: string) => {
@@ -141,6 +166,8 @@ async function fixture(options: { drain?: () => Promise<void> } = {}) {
     openConversationOwner,
     activateConversationOwner,
     componentId,
+    configurationIdle: () => configurationIdle(scope.threadId),
+    setPlugins: (value: typeof plugins) => { plugins = value },
     setEnabled: (value: boolean) => { enabled = value },
     revoke: () => {
       live = false
@@ -152,6 +179,430 @@ const source = (text: string) => `export function register(on) {
     const {Text}=$.ui.resolve(e);return Text({children:${JSON.stringify(text)}})
   })
 }`
+
+it("keeps old calls and display owners live through candidate save, compile, preflight and both queue barriers", async () => {
+  const approval = Promise.withResolvers<void>()
+  const entered = Promise.withResolvers<void>()
+  let pendingSignal: AbortSignal | undefined
+  let requests = 0
+  const server = createServer((_request, response) => {
+    requests++
+    response.end("old request completed")
+  })
+  await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve))
+  cleanups.push(() => new Promise<void>(resolve => server.close(() => resolve())))
+  const address = server.address()
+  if (!address || typeof address === "string") throw Error("HTTP fixture unavailable")
+  const changes: Array<string | undefined> = []
+  const f = await fixture({ realCapabilities: ["http.fetch"], host: {
+    changed: (_thread, reason) => { changes.push(reason) },
+    authorizeHttp: async (_workspace, _thread, _grant, _request, signal) => {
+      pendingSignal = signal; entered.resolve(); await approval.promise; signal.throwIfAborted()
+    },
+    runEffect: async (_workspace, _thread, _grant, _method, _input, _signal, run) => run()
+  } })
+  const code = (version: string) => `export function register(on) {
+    on("session.start",async($,event,next)=>{
+      await $.command.register({name:"hold",description:"hold old call"});return next(event)
+    });
+    on("command.run",{command:"hold"},async($)=>{
+      const response=await $.http.fetch("http://127.0.0.1:${address.port}/old");
+      await $.store.set("completed",response.text);return{text:${JSON.stringify(version)}+":"+response.text}
+    });
+    on("ui.render",{component:"AbovePrompt"},($,event)=>{
+      const {Text}=$.ui.resolve(event);return Text({children:${JSON.stringify(version)}})
+    })
+  }`
+  const active = await f.activate(1, code("v1"))
+  const owner = (await f.manager.siteMount(f.root, f.scope.threadId, "AbovePrompt"))!
+  const descriptor = (await f.manager.commands(f.root, f.scope.threadId))[0]
+  const queue = new ModCommandQueue(f.store, () => {})
+  cleanups.push(async () => { queue.close() })
+  const running = queue.enqueue(f.root, f.scope.threadId, descriptor.command, signal =>
+    withFunctionExecution({ workspace: f.root, threadId: f.scope.threadId,
+      leased: true, immediate: false, userInitiated: true }, () =>
+      f.manager.runCommand(f.root, f.scope.threadId, descriptor, "", signal))).completion
+  void running.catch(() => {})
+  const renderOld = () => f.manager.siteRender(f.root, f.scope.threadId, owner, {
+    isWorking: true, bodyColumns: 80, maxRows: 10
+  })
+  try {
+    await Promise.race([entered.promise, running.then(() => {
+      throw Error("Old command completed before reaching HTTP approval")
+    })])
+    changes.length = 0
+    const candidate = await f.stage(2, code("v2"), false)
+    expect(JSON.stringify(await renderOld())).toContain("v1")
+    await f.manager.preflightDevelopment(f.scope, candidate, () => {})
+    expect(JSON.stringify(await renderOld())).toContain("v1")
+    f.manager.stageDevelopment(f.scope, candidate, () => {})
+    expect(f.manager.developmentStatus(f.scope)[0]).toMatchObject({
+      phase: "queued", activeRevision: 1, activeDigest: active.compiledDigest,
+      waitingReason: "turn-finishing"
+    })
+    f.manager.noteDevelopmentTurnSettled(f.scope, candidate.turnId, "completed")
+    expect(f.manager.developmentStatus(f.scope)[0]).toMatchObject({ phase: "queued", activeRevision: 1 })
+    expect(JSON.stringify(await renderOld())).toContain("v1")
+    expect(pendingSignal?.aborted).toBe(false)
+    expect(requests).toBe(0)
+    expect(changes.every(reason => reason === "records")).toBe(true)
+    approval.resolve()
+    expect(await running).toEqual({ text: "v1:old request completed" })
+    expect(requests).toBe(1)
+    f.configurationIdle()
+    await vi.waitFor(() => expect(f.manager.developmentStatus(f.scope)[0])
+      .toMatchObject({ phase: "active", activeRevision: 2 }))
+    await expect(renderOld()).rejects.toThrow()
+    await expect(f.manager.runCommand(f.root, f.scope.threadId, descriptor, "", new AbortController().signal))
+      .rejects.toThrow("MODS_COMMAND_STALE")
+  } finally { approval.resolve(); await running.catch(() => {}) }
+}, 15_000)
+
+it("preflights the actual startup protocol during the authoring turn without staging or retiring", async () => {
+  const f = await fixture()
+  const body = (next: boolean) => `export function register(on) {
+    on("session.start", async ($,event,next) => {
+      await $.command.register({name:"weather-refresh",description:"Refresh weather"});
+      ${next ? "return next(event)" : ""}
+    })
+  }`
+  const broken = await f.stage(1, body(false), false)
+  await expect(f.manager.preflightDevelopment(f.scope, broken, () => {}))
+    .rejects.toMatchObject({ code: "MODS_RETURN_UNDEFINED" })
+  expect(f.manager.developmentStatus(f.scope)).toEqual([])
+  expect(await f.manager.commands(f.root, f.scope.threadId)).toEqual([])
+  const repaired = await f.stage(2, body(true), false)
+  await expect(f.manager.preflightDevelopment(f.scope, repaired, () => {})).resolves.toBeUndefined()
+  expect(f.manager.developmentStatus(f.scope)).toEqual([])
+  expect(await f.manager.commands(f.root, f.scope.threadId)).toEqual([])
+  expect(f.store.getGrant(f.root, "function:dev-example")).toBeNull()
+})
+
+it("preserves the active trial while a same-turn startup candidate fails", async () => {
+  const f = await fixture()
+  await f.activate(1, compositionCommand("counter-current"))
+  const candidate = await f.stage(2, `export function register(on) {
+    on("session.start", async ($) => { await $.store.get("counter") })
+  }`, false)
+  await expect(f.manager.preflightDevelopment(f.scope, candidate, () => {}))
+    .rejects.toMatchObject({ code: "MODS_RETURN_UNDEFINED" })
+  expect(f.manager.developmentStatus(f.scope)[0]).toMatchObject({ phase: "active", activeRevision: 1 })
+  expect((await f.manager.commands(f.root, f.scope.threadId)).map(item => item.command))
+    .toEqual(["counter-current"])
+})
+
+it("blocks startup HTTP before authorization and permits weather refresh after consent", async () => {
+  const compilation = vi.spyOn(functionLoader, "compileFunctionPlugin")
+  cleanups.push(async () => { compilation.mockRestore() })
+  let requests = 0
+  const server = createServer((_request, response) => {
+    requests++
+    response.writeHead(200, { "content-type": "application/json" })
+    response.end(JSON.stringify({ temperature: 23, forecast: "晴" }))
+  })
+  await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve))
+  cleanups.push(() => new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve())))
+  const address = server.address()
+  if (!address || typeof address === "string") throw Error("HTTP fixture unavailable")
+  const url = `http://127.0.0.1:${address.port}/weather`
+  const approval = Promise.withResolvers<void>()
+  const approvalEntered = Promise.withResolvers<void>()
+  let authorizationSignal: AbortSignal | undefined
+  const authorize = vi.fn(async (_workspace: string, _threadId: string, _grant: unknown,
+    _request: unknown, signal: AbortSignal) => {
+    authorizationSignal = signal
+    approvalEntered.resolve()
+    await approval.promise
+    signal.throwIfAborted()
+  })
+  const f = await fixture({ realCapabilities: ["http.fetch", "ui.invalidate"],
+    host: { authorizeHttp: authorize,
+      runEffect: async (_workspace, _thread, _grant, _method, _input, _signal, run) => run() } })
+  const eager = await f.stage(1, `export function register(on) {
+    on("session.start",async($,event,next)=>{
+      await $.http.fetch(${JSON.stringify(url)});return next(event)
+    })
+  }`, false)
+  await expect(f.manager.preflightDevelopment(f.scope, eager, () => {}))
+    .rejects.toMatchObject({ code: "MODS_CONFIG_RELOAD_EFFECT_UNSUPPORTED" })
+  expect(authorize).not.toHaveBeenCalled()
+  expect(requests).toBe(0)
+  const lazy = `export function register(on) {
+    let weather="待更新",calls=0,loaded=false;
+    on("session.start",async($,event,next)=>{
+      weather=(await $.store.get("weather")) || "待更新";
+      loaded=weather!=="待更新";
+      await $.command.register({name:"weather-refresh",description:"更新天气"});
+      return next(event)
+    });
+    on("command.run",{command:"weather-refresh"},async($)=>{
+      const response=await $.http.fetch(${JSON.stringify(url)});
+      const forecast=JSON.parse(response.text);
+      weather=forecast.temperature+"° "+forecast.forecast;
+      await $.store.set("weather",weather);$.ui.invalidate("ui.render");return {text:weather}
+    });
+    on("tool.call",async($,event,next)=>{calls++;$.ui.invalidate("ui.render");return next(event)});
+    on("ui.render",{component:"AbovePrompt"},async($,event)=>{
+      if(!loaded){
+        loaded=true;
+        const response=await $.http.fetch(${JSON.stringify(url)});
+        const forecast=JSON.parse(response.text);
+        weather=forecast.temperature+"° "+forecast.forecast;
+        await $.store.set("weather",weather)
+      }
+      const {Text}=$.ui.resolve(event);return Text({children:"工具次数："+calls+" | 天气："+weather})
+    })
+  }`
+  const candidate = await f.stage(2, lazy, false)
+  await f.manager.preflightDevelopment(f.scope, candidate, () => {})
+  const candidateCompilations = () => compilation.mock.calls.filter(
+    ([path]) => path === candidate.sourcePath).length
+  const preflightCompilations = candidateCompilations()
+  expect(preflightCompilations).toBeGreaterThan(0)
+  expect(authorize).not.toHaveBeenCalled()
+  expect(requests).toBe(0)
+  f.manager.stageDevelopment(f.scope, candidate, () => {})
+  expect(f.manager.developmentStatus(f.scope)[0].phase).toBe("needs-approval")
+  f.manager.noteDevelopmentTurnSettled(f.scope, candidate.turnId, "completed")
+  expect(requests).toBe(0)
+  f.manager.approveDevelopment(f.scope, f.componentId, candidate.compiledDigest,
+    candidate.capabilities, () => {})
+  await vi.waitFor(() => expect(f.manager.developmentStatus(f.scope)[0].phase).toBe("active"))
+  expect(candidateCompilations()).toBe(preflightCompilations)
+  expect(requests).toBe(0)
+  const owner = await f.manager.siteMount(f.root, f.scope.threadId, "AbovePrompt")
+  const render = () => withFunctionExecution({ workspace: f.root, threadId: f.scope.threadId,
+    userInitiated: false, leased: false, immediate: true }, () =>
+    f.manager.siteRender(f.root, f.scope.threadId, owner!, {
+      isWorking: false, bodyColumns: 80, maxRows: 10
+    }))
+  let completed = false
+  const drawing = render().finally(() => { completed = true })
+  void drawing.catch(() => {})
+  try {
+    await approvalEntered.promise
+    // User permission waits must not spend the guest hook's 10-second own budget.
+    await new Promise(resolve => setTimeout(resolve, 10_100))
+    expect(authorizationSignal?.aborted).toBe(false)
+    expect(completed).toBe(false)
+    expect(requests).toBe(0)
+  } finally { approval.resolve() }
+  const rendered = await drawing
+  expect(authorize).toHaveBeenCalledOnce()
+  expect(requests).toBe(1)
+  expect(JSON.stringify(rendered)).toContain("工具次数：0 | 天气：23° 晴")
+  expect(JSON.stringify(await render())).toContain("天气：23° 晴")
+  expect(requests).toBe(1)
+}, 25_000)
+
+async function compositionFixture(options: Parameters<typeof fixture>[0] = {}) {
+  const f = await fixture({ ...options, host: { ...options.host, clawApplicable: () => true } })
+  const claws = new ClawStore(f.store)
+  const identity = JSON.stringify([f.scope.threadId, "legacy"])
+  const initial: ClawProfile = { id: "initial", name: "Initial", capabilities: [] }
+  claws.apply(f.root, identity, initial, claws.read(f.root).revision)
+  const installed = async (body: string) => {
+    const path = join(f.root, "installed")
+    await mkdir(join(path, "hooks"), { recursive: true })
+    await writeFile(join(path, "plugin.json"), JSON.stringify({ name: "installed" }))
+    await writeFile(join(path, "hooks/hooks.json"), '{"modules":["./register.ts"]}')
+    await writeFile(join(path, "hooks/register.ts"), body)
+    const compiled = await compileFunctionPlugin(path)
+    f.setPlugins([{ id: "installed", name: "installed", path, enabled: true }])
+    f.store.grant(f.root, "function:installed", compiled.digest, true)
+    const target: ClawProfile = { id: "combined", name: "Combined", capabilities: [
+      { pluginId: "installed", name: "installed", digest: compiled.digest }
+    ] }
+    return { target, compiled }
+  }
+  const apply = async (target: ClawProfile | null, commit?: () => void) => {
+    const revision = claws.read(f.root).revision
+    const binding = claws.selection(f.root, identity)
+    const lease = claimConfigurationReload(f.scope.threadId)!
+    expect(lease).toBeTruthy()
+    let committed = false
+    const assertCurrent = () => {
+      lease.assertLive()
+      expect(claws.read(f.root).revision).toBe(revision + Number(committed))
+      expect(claws.selection(f.root, identity).profile).toEqual(committed ? target : binding.profile)
+    }
+    try {
+      await f.manager.reconfigureSelection(f.root, f.scope.threadId, target, () => {
+        commit?.()
+        claws.apply(f.root, identity, target, revision)
+        committed = true
+      }, assertCurrent)
+    } finally { lease.release() }
+  }
+  const render = async (owner?: string) => {
+    const current = owner ?? await f.manager.siteMount(f.root, f.scope.threadId, "AbovePrompt")
+    return JSON.stringify(await f.manager.siteRender(f.root, f.scope.threadId, current!, {
+      isWorking: false, bodyColumns: 80, maxRows: 10
+    }))
+  }
+  return { ...f, claws, identity, initial, installed, apply, render }
+}
+
+const compositionCommand = (name: string) => `export function register(on) {
+  on("session.start",async($,e,next)=>{
+    await $.command.register({name:${JSON.stringify(name)},description:"Installed command"});return next(e)
+  })
+  on("command.run",{command:${JSON.stringify(name)}},()=>({text:"installed command ran"}))
+}`
+
+it("restores the actual inherited selection and its authorized commands", async () => {
+  const f = await compositionFixture()
+  await f.installed(compositionCommand("inherited-command"))
+  await f.apply(f.initial)
+  expect(await f.manager.commands(f.root, f.scope.threadId)).toEqual([])
+  await f.apply(null)
+  expect(f.claws.selection(f.root, f.identity).profile).toBeNull()
+  expect(f.manager.selectionRuntimeReady(f.root, f.scope.threadId, null)).toBe(true)
+  expect((await f.manager.commands(f.root, f.scope.threadId))[0].command)
+    .toBe("inherited-command")
+})
+
+it("requires a live completed guest for the exact selection readiness proof", async () => {
+  const f = await compositionFixture()
+  const { target } = await f.installed(compositionCommand("live-command"))
+  expect(f.manager.selectionRuntimeReady(f.root, f.scope.threadId, target)).toBe(false)
+  await f.apply(target)
+  expect(f.manager.selectionRuntimeReady(f.root, f.scope.threadId, target)).toBe(true)
+  expect(f.manager.selectionRuntimeReady(f.root, f.scope.threadId, f.initial)).toBe(false)
+  const entries = (f.manager as unknown as { sessions: Map<string, {
+    session: { plugins: Array<{ guest: FunctionGuestRuntime }> }
+  }> }).sessions
+  await entries.get(JSON.stringify([f.root, f.scope.threadId]))!.session.plugins[0].guest.dispose()
+  expect(f.manager.selectionRuntimeReady(f.root, f.scope.threadId, target)).toBe(false)
+})
+
+it("publishes physical foreground idle even while a resident background resource remains", async () => {
+  const f = await compositionFixture()
+  await f.apply(f.initial)
+  const entries = (f.manager as unknown as {
+    sessions: Map<string, { activity: FunctionSessionActivity }>
+  }).sessions
+  const activity = entries.get(JSON.stringify([f.root, f.scope.threadId]))!.activity
+  const resource = activity.retainFreshResource()
+  resource.ready()
+  const release = activity.retainFresh()
+  const idle = vi.fn()
+  const unsubscribe = f.manager.onConfigurationIdle(idle)
+  try {
+    expect(f.manager.configurationBusy(f.scope.threadId)).toBe(true)
+    release()
+    await vi.waitFor(() => expect(idle).toHaveBeenCalledWith(f.scope.threadId))
+    expect(activity.size).toBe(1)
+    expect(f.manager.configurationBusy(f.scope.threadId)).toBe(false)
+  } finally { unsubscribe(); release(); resource.release() }
+})
+
+it("composes an installed Mod while preserving the active trial, consent and pending revision", async () => {
+  const f = await compositionFixture()
+  const active = await f.activate(1, source("kept trial"))
+  const oldOwner = await f.manager.siteMount(f.root, f.scope.threadId, "AbovePrompt")
+  const pending = await f.stage(2, source("pending trial"))
+  const { target } = await f.installed(compositionCommand("installed-command"))
+  await f.apply(target)
+  expect(f.manager.developmentStatus(f.scope)[0]).toMatchObject({
+    phase: "queued", revision: 2, activeRevision: 1, activeDigest: active.compiledDigest,
+    addedCapabilities: [], waitingReason: "turn-finishing"
+  })
+  expect(await f.render()).toContain("kept trial")
+  await expect(f.render(oldOwner!)).rejects.toThrow()
+  const command = (await f.manager.commands(f.root, f.scope.threadId))[0]
+  expect(command.command).toBe("installed-command")
+  expect(await f.manager.runCommand(f.root, f.scope.threadId, command, "", new AbortController().signal))
+    .toEqual({ text: "installed command ran" })
+  expect(f.store.getGrant(f.root, "function:dev-example")).toBeNull()
+  f.manager.noteDevelopmentTurnSettled(f.scope, pending.turnId, "completed")
+  await vi.waitFor(() => expect(f.manager.developmentStatus(f.scope)[0]).toMatchObject({
+    phase: "active", activeRevision: 2
+  }))
+  expect(await f.render()).toContain("pending trial")
+  expect((await f.manager.commands(f.root, f.scope.threadId))[0].command).toBe("installed-command")
+})
+
+it("keeps the exact old trial and selection when composition preparation or CAS fails", async () => {
+  const f = await compositionFixture()
+  await f.activate(1, source("untouched trial"))
+  const owner = await f.manager.siteMount(f.root, f.scope.threadId, "AbovePrompt")
+  const { target } = await f.installed(`export function register(on) {
+    on("session.start",async($,e,next)=>{await $.store.set("external-start",true);return next(e)})
+  }`)
+  const commit = vi.fn()
+  const before = f.claws.read(f.root).revision
+  await expect(f.apply(target, commit)).rejects.toMatchObject({ code: "MODS_CONFIG_RELOAD_EFFECT_UNSUPPORTED" })
+  expect(commit).not.toHaveBeenCalled()
+  expect(f.claws.read(f.root).revision).toBe(before)
+  expect(f.manager.developmentStatus(f.scope)[0]).toMatchObject({ phase: "active", activeRevision: 1 })
+  expect(await f.render(owner!)).toContain("untouched trial")
+  const next = await f.installed(compositionCommand("safe-command"))
+  await expect(f.apply(next.target, () => { throw Error("CAS changed") })).rejects.toThrow("CAS changed")
+  expect(f.claws.selection(f.root, f.identity).profile).toEqual(f.initial)
+  expect(await f.render(owner!)).toContain("untouched trial")
+})
+
+it("awaits the old physical guest drain without stopping the trial or publishing the candidate", async () => {
+  const gate = Promise.withResolvers<void>()
+  const started = Promise.withResolvers<void>()
+  const f = await compositionFixture({ drain: async () => { started.resolve(); await gate.promise } })
+  await f.activate(1, source("same activation"))
+  const { target } = await f.installed(compositionCommand("after-drain"))
+  let finished = false
+  const applying = f.apply(target).then(() => { finished = true })
+  try {
+    await started.promise
+    f.configurationIdle()
+    expect(finished).toBe(false)
+    expect(f.manager.developmentStatus(f.scope)[0]).toMatchObject({ phase: "active", activeRevision: 1 })
+    gate.resolve()
+    await applying
+    expect(await f.render()).toContain("same activation")
+    expect((await f.manager.commands(f.root, f.scope.threadId))[0].command).toBe("after-drain")
+  } finally { gate.resolve(); await applying.catch(() => {}) }
+})
+
+it("retains a not-yet-approved draft when composing before its first activation", async () => {
+  const f = await compositionFixture()
+  const pending = await f.stage(1, source("approved later"))
+  const { target } = await f.installed(compositionCommand("already-installed"))
+  await f.apply(target)
+  expect(f.manager.developmentStatus(f.scope)[0]).toMatchObject({ phase: "needs-approval", revision: 1 })
+  expect((await f.manager.commands(f.root, f.scope.threadId))[0].command).toBe("already-installed")
+  f.manager.approveDevelopment(f.scope, f.componentId, pending.compiledDigest, pending.capabilities, () => {})
+  f.manager.noteDevelopmentTurnSettled(f.scope, pending.turnId, "completed")
+  await vi.waitFor(() => expect(f.manager.developmentStatus(f.scope)[0].phase).toBe("active"))
+  expect(await f.render()).toContain("approved later")
+  expect((await f.manager.commands(f.root, f.scope.threadId))[0].command).toBe("already-installed")
+})
+
+it.each(["drain-failure", "grant-revoked"] as const)(
+  "fails closed after selection commit when %s prevents safe activation", async mode => {
+    const gate = Promise.withResolvers<void>(), started = Promise.withResolvers<void>()
+    const f = await compositionFixture({ drain: async () => {
+      started.resolve()
+      await gate.promise
+      if (mode === "drain-failure") throw Error("physical drain unconfirmed")
+    } })
+    await f.activate(1, source("cannot silently restart"))
+    const { target, compiled } = await f.installed(compositionCommand("not-published"))
+    const applying = f.apply(target)
+    const failed = expect(applying).rejects.toMatchObject({ code: "MODS_COMPOSITION_APPLY_UNCONFIRMED" })
+    try {
+      await started.promise
+      if (mode === "grant-revoked")
+        f.store.grant(f.root, "function:installed", compiled.digest, false)
+      gate.resolve()
+      await failed
+      expect(f.claws.selection(f.root, f.identity).profile).toEqual(target)
+      await vi.waitFor(() => expect(f.manager.developmentStatus(f.scope)[0].phase).toBe("unknown"))
+      const loaded = f.loads.mock.calls.length
+      await expect(f.manager.commands(f.root, f.scope.threadId)).resolves.toEqual([])
+      expect(f.loads).toHaveBeenCalledTimes(loaded)
+    } finally { gate.resolve(); await applying.catch(() => {}) }
+  }
+)
 
 it("loads a real guest only after approval/settlement and renders only in its session", async () => {
   const f = await fixture()
@@ -208,6 +659,55 @@ it("keeps conversation protection for a real tool.call development registration"
   expect(f.activateConversationOwner).toHaveBeenCalledOnce()
 })
 
+it("runs edit-weather commands and edit-only effects during trial and after formal installation", async () => {
+  const f = await fixture()
+  const input = await f.stage(1, `export function register(on) {
+    on("session.start", async ($, event, next) => {
+      await $.command.register({name:"set-weather", description:"设置演示天气"})
+      return next(event)
+    })
+    on("command.run", {command:"set-weather"}, async ($, event) => {
+      await $.store.set("weather", event.args)
+      return {text:"天气已设置："+event.args}
+    })
+    on("tool.call", {tool:"edit_file"}, async ($, event, next) => {
+      const result = await next(event)
+      return {...result, context:[await $.store.get("weather") ?? "请先设置天气"]}
+    })
+  }`)
+  f.manager.approveDevelopment(f.scope, f.componentId, input.compiledDigest,
+    input.capabilities, () => {})
+  expect(f.manager.developmentStatus(f.scope)[0].waitingReason).toBe("turn-finishing")
+  expect(await f.manager.commands(f.root, f.scope.threadId)).toEqual([])
+  f.manager.noteDevelopmentTurnSettled(f.scope, input.turnId, "completed")
+  await vi.waitFor(() => expect(f.manager.developmentStatus(f.scope)[0].phase).toBe("active"))
+  const runWeather = async (text: string) => {
+    const descriptor = (await f.manager.commands(f.root, f.scope.threadId))[0]
+    expect(descriptor.command).toBe("set-weather")
+    const result = await f.manager.runCommand(f.root, f.scope.threadId, descriptor,
+      text, new AbortController().signal)
+    expect(result.text).toBe(`天气已设置：${text}`)
+    const edit = vi.fn(async () => ({result:"编辑完成"}))
+    expect(await f.manager.interceptTool(f.root, f.scope.threadId,
+      {tool:"edit_file", tool_use_id:randomUUID()}, undefined, edit))
+      .toEqual({result:"编辑完成", context:[text]})
+    expect(edit).toHaveBeenCalledOnce()
+    expect(await f.manager.interceptTool(f.root, f.scope.threadId,
+      {tool:"read_file", tool_use_id:randomUUID()}, undefined, async () => ({result:"读取完成"})))
+      .toEqual({result:"读取完成"})
+  }
+  await runWeather("上海晴")
+  await f.manager.stopDevelopment(f.scope, f.componentId, () => {})
+  expect(await f.manager.commands(f.root, f.scope.threadId)).toEqual([])
+  // The formal source still needs an independent digest grant and actual selection.
+  f.setPlugins([{id:"formal-weather", name:"dev-example", path:input.sourcePath, enabled:true}])
+  f.manager.invalidate(f.root)
+  expect(await f.manager.commands(f.root, f.scope.threadId)).toEqual([])
+  f.store.grant(f.root, "function:dev-example", input.compiledDigest, true)
+  f.manager.invalidate(f.root)
+  await runWeather("北京多云")
+})
+
 it("rejects startup effects without retiring the previous real guest", async () => {
   const f = await fixture()
   await f.activate(1, source("kept"))
@@ -230,6 +730,58 @@ it("rejects startup effects without retiring the previous real guest", async () 
       })
     )
   ).toContain("kept")
+})
+
+it("does not mark a deliberately draining trial as lost when configuration idle fires", async () => {
+  let release!: () => void
+  let entered!: () => void
+  const draining = new Promise<void>(resolve => { entered = resolve })
+  const barrier = new Promise<void>(resolve => { release = resolve })
+  const f = await fixture({ drain: async () => { entered(); await barrier } })
+  const trial = await f.activate(1, `export function register(on) {
+    on("session.start",async($,e,next)=>{
+      await $.command.register({name:"weather-city",description:"Weather city"});return next(e)
+    })
+  }`)
+  const stopping = f.manager.stopDevelopment(f.scope, f.componentId, () => {})
+  await draining
+  f.configurationIdle()
+  release()
+  await stopping
+  expect(f.manager.developmentStatus(f.scope)[0].phase).toBe("stopped")
+  await expect(f.manager.commands(f.root, f.scope.threadId)).resolves.toEqual([])
+  f.setPlugins([{ id: "formal-weather", name: "dev-example", path: trial.sourcePath, enabled: true }])
+  f.store.grant(f.root, "function:dev-example", trial.compiledDigest, true)
+  expect((await f.manager.commands(f.root, f.scope.threadId))[0].command).toBe("weather-city")
+})
+
+it("reports a formal command conflict and permits explicit retry after that source is removed", async () => {
+  const f = await fixture()
+  const body = `export function register(on) {
+    on("session.start",async($,e,next)=>{
+      await $.command.register({name:"weather-city",description:"Weather city"});
+      return next(e)
+    })
+  }`
+  const path = join(f.root, "formal-weather")
+  await mkdir(join(path, "hooks"), { recursive: true })
+  await writeFile(join(path, "plugin.json"), JSON.stringify({ name: "formal-weather" }))
+  await writeFile(join(path, "hooks/hooks.json"), '{"modules":["./register.ts"]}')
+  await writeFile(join(path, "hooks/register.ts"), body)
+  const compiled = await compileFunctionPlugin(path)
+  f.setPlugins([{ id: "formal-weather", name: "formal-weather", path, enabled: true }])
+  f.store.grant(f.root, "function:formal-weather", compiled.digest, true)
+  const input = await f.stage(1, body)
+  f.manager.approveDevelopment(f.scope, f.componentId, input.compiledDigest, input.capabilities, () => {})
+  f.manager.noteDevelopmentTurnSettled(f.scope, input.turnId, "completed")
+  await vi.waitFor(() => {
+    expect(f.manager.developmentStatus(f.scope)[0].phase).toBe("failed")
+    expect(f.manager.developmentStatus(f.scope)[0].error).toBe("MODS_COMMAND_CONFLICT")
+  })
+  f.setPlugins([])
+  expect(f.manager.developmentStatus(f.scope)[0].phase).toBe("failed")
+  f.manager.approveDevelopment(f.scope, f.componentId, input.compiledDigest, input.capabilities, () => {})
+  await vi.waitFor(() => expect(f.manager.developmentStatus(f.scope)[0].phase).toBe("active"))
 })
 
 it("runs registered development commands through the real queue without a formal grant", async () => {
@@ -281,6 +833,116 @@ it("runs registered development commands through the real queue without a formal
   } finally {
     queue.close()
   }
+})
+
+async function realFileFixture() {
+  const approval = vi.fn<ConstructorParameters<typeof ModsManager>[2]>(async () => true)
+  const calls = vi.fn()
+  const f = await fixture({
+    nativeWorkspace: true,
+    realCapabilities: ["fs.write", "tool.call"],
+    host: {
+      callDevelopmentTool: async (workspace, threadId, activation, capability, input, signal) => {
+        const { target, args } = functionSdkToolInput(input)
+        return native.invokeDevelopmentTool(workspace, threadId, activation, capability,
+          target, args, signal, false, true, String(input.tool_use_id))
+      }
+    }
+  })
+  const native = new ModsManager(join(f.root, "native.sqlite"), () => [], approval, () => {})
+  cleanups.push(async () => { native.close() })
+  native.configure(f.root, true, false)
+  const sandbox = new LocalSandbox({ rootDir: f.root, runId: f.scope.threadId })
+  const binding: ModThreadBinding = { workspace: f.root, threadId: f.scope.threadId,
+    turnId: `native:${f.scope.threadId}` }
+  native.bindThread({ ...binding, invokeTool: (target, args) =>
+    native.dispatch(binding, target, args, async input => {
+      await authorizeCurrentModInput(target, input)
+      getModCallContext()?.assertLive?.()
+      calls(target, input)
+      if (target !== "host:write_file") throw Error("UNEXPECTED_NATIVE_TOOL")
+      return sandbox.write(String(input.file_path), String(input.content))
+    }) })
+  const target = join(f.root, "actual-native-output.txt")
+  const source = `export function register(on){
+    on("session.start",async($,e,next)=>{await $.command.register({name:"write",description:"write"});return next(e)});
+    on("command.run",{command:"write"},async($,e)=>{
+      if(e.args==="background")return{ text:JSON.stringify(await $.tool.call({tool:"Bash",command:"echo forbidden",run_in_background:true})) };
+      await $.fs.write(${JSON.stringify(target)},"approved development bytes");return{text:"actual native write"}
+    });
+  }`
+  const revision = await f.stage(1, source)
+  const queue = new ModCommandQueue(f.store, () => {})
+  cleanups.push(async () => { queue.close() })
+  const activate = async () => {
+    f.manager.approveDevelopment(f.scope, f.componentId, revision.compiledDigest,
+      revision.capabilities, () => {})
+    f.manager.noteDevelopmentTurnSettled(f.scope, revision.turnId, "completed")
+    await vi.waitFor(() => expect(f.manager.developmentStatus(f.scope)[0].phase).toBe("active"))
+  }
+  const run = async (args = "") => {
+    const descriptor = (await f.manager.commands(f.root, f.scope.threadId))[0]
+    return queue.enqueue(f.root, f.scope.threadId, descriptor.command, signal =>
+      withFunctionExecution({ ...binding, leased: true, immediate: false, userInitiated: true }, () =>
+        f.manager.runCommand(f.root, f.scope.threadId, descriptor, args, signal))).completion
+  }
+  return { ...f, native, approval, calls, target, revision, activate, run }
+}
+
+it("runs approved development fs.write through real native approval and file creation without a formal grant", async () => {
+  const f = await realFileFixture()
+  expect(await f.manager.commands(f.root, f.scope.threadId)).toEqual([])
+  expect(f.calls).not.toHaveBeenCalled()
+  await f.activate()
+  expect(await f.run()).toEqual({ text: "actual native write" })
+  expect(await readFile(f.target, "utf8")).toBe("approved development bytes")
+  expect(f.approval).toHaveBeenCalled()
+  expect(f.approval.mock.calls.every(([threadId, modId, tool]) =>
+    threadId === f.scope.threadId && modId.startsWith("development:") &&
+    tool === "host:write_file")).toBe(true)
+  expect(f.approval.mock.calls.map(([, , , input]) => input)).toEqual([
+    { file_path: f.target, content: "approved development bytes" },
+    { filePath: f.target, content: "approved development bytes" }
+  ])
+  expect(f.calls).toHaveBeenCalledExactlyOnceWith("host:write_file", {
+    file_path: f.target, content: "approved development bytes"
+  })
+  expect(f.store.getGrant(f.root, "function:dev-example")).toBeNull()
+  expect(f.native.store.getGrant(f.root, "function:dev-example")).toBeNull()
+})
+
+it("keeps denied and background development native effects from starting", async () => {
+  const f = await realFileFixture()
+  await f.activate()
+  f.approval.mockResolvedValue(false)
+  await expect(f.run()).rejects.toThrow()
+  await expect(readFile(f.target)).rejects.toMatchObject({ code: "ENOENT" })
+  expect(f.calls).not.toHaveBeenCalled()
+  f.approval.mockResolvedValueOnce(true).mockResolvedValue(false)
+  await expect(f.run()).rejects.toThrow()
+  await expect(readFile(f.target)).rejects.toMatchObject({ code: "ENOENT" })
+  f.approval.mockClear()
+  f.calls.mockClear()
+  await expect(f.run("background")).rejects.toThrow()
+  expect(f.approval).not.toHaveBeenCalled()
+  expect(f.calls).not.toHaveBeenCalled()
+})
+
+it.each(["stop", "source"] as const)("rechecks development %s after final native approval before actual writing", async kind => {
+  const f = await realFileFixture()
+  await f.activate()
+  const gate = Promise.withResolvers<boolean>()
+  f.approval.mockImplementation(() => gate.promise)
+  const pending = f.run().catch(error => error)
+  await vi.waitFor(() => expect(f.approval).toHaveBeenCalledOnce())
+  let stopped: Promise<unknown> | undefined
+  if (kind === "stop") stopped = f.manager.stopDevelopment(f.scope, f.componentId, () => {})
+  else await writeFile(join(f.revision.sourcePath, "hooks/register.ts"), "export function register(){}")
+  gate.resolve(true)
+  expect(await pending).toBeInstanceOf(Error)
+  await stopped
+  expect(f.calls).not.toHaveBeenCalled()
+  await expect(readFile(f.target)).rejects.toMatchObject({ code: "ENOENT" })
 })
 
 it.each(["*", "!ui.render", "prompt.context", "model.request"])(

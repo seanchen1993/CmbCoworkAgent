@@ -74,7 +74,7 @@ import { ModControlStore, type ModGrant } from "./control-store"
 import { compileMod, readModApiVersion, type CompiledMod } from "./loader"
 import { ModRuntimeClient } from "./runtime-client"
 import { ModEngine, classifyModTool, type ApprovedMod, type ModDispatchRequest } from "./engine"
-import { ModError, ModPermissionError, modErrorCode } from "./errors"
+import { ModError, ModPermissionError, ModPluginChangedError, modErrorCode } from "./errors"
 import { autobizCheckpointRequest } from "./v2/autobiz-checkpoint-request"
 import type { AutobizCheckpointTransition } from "./v2/autobiz-validation"
 import { assertProjectCheckPlanCurrent, planProjectCheck } from "./v2/project-check-plan"
@@ -100,6 +100,8 @@ import {
   withFunctionAgentCleanup
 } from "./v2/host-call"
 import { currentFunctionExecution, functionExecutionScope } from "./v2/execution-context"
+import type { DevelopmentActivation } from "./v2/development-session"
+import { withDevelopmentNativeAuthority, captureDevelopmentNativeResourceGuard } from "./v2/development-native-authority"
 import { withFreshFunctionSessionActivity } from "./v2/session-activity"
 import type { FunctionSessionCompactor } from "../agent/mods-session-view"
 import {
@@ -312,6 +314,7 @@ export interface ModThreadBinding extends ModRuntimeToolAccess {
 }
 interface Session {
   engine: ModEngine
+  pluginIds: readonly string[]
   client: ModRuntimeClient
   generation: number
   used: number
@@ -336,6 +339,7 @@ interface StoredCard {
   grant: ModGrant
   workspaceEpoch: number
   turnId: string
+  catalogEpoch?: number
 }
 
 /** Captured by the actual graph owner; never reconstructed from a public run id. */
@@ -364,6 +368,10 @@ export class ModsManager {
     (id: string, args: Record<string, unknown>) => Promise<ToolPermissionResult>
   >()
   private readonly runtimeEpochs = new WeakMap<ModRuntimeAuthority, number>()
+  // Package changes retire guest code; they do not replace the native chat's physical owner.
+  private pluginCatalogEpoch = 0
+  private readonly pluginSourceEpochs = new Map<string, number>()
+  private unknownPluginSourceEpoch = 0
   private readonly functionCreators = new WeakMap<
     ModRuntimeAuthority,
     Readonly<import("./v2/dispatcher").FunctionHookSource>
@@ -518,9 +526,12 @@ export class ModsManager {
     const startupSignal = AbortSignal.any([ownedSignal, signal])
     const cancelStartup = () => controller.abort(signal.reason)
     signal.addEventListener("abort", cancelStartup, { once: true })
+    const assertResourceGrant = grant.modId.startsWith("development:")
+      ? captureDevelopmentNativeResourceGuard(this.store, grant)
+      : () => this.store.assertGrant(grant)
     const assertOwned = () => {
       ownedSignal.throwIfAborted()
-      this.store.assertGrant(grant)
+      assertResourceGrant()
       if (!this.isEnabled(workspace) || this.config(workspace).epoch !== epoch)
         throw new ModError("MODS_SCOPE_CHANGED")
     }
@@ -1626,6 +1637,7 @@ export class ModsManager {
     measure?(workspace: string, threadId: string, signal: AbortSignal,
       assertOriginal: () => void): Promise<void>
     invalidate(workspace: string): void
+    pluginsChanged?(workspace: string, changedPluginIds?: readonly string[]): void
     invalidateAll?(): void
     closeThread(threadId: string): void
     prepareEnd?(reason: import("./v2/session-end").FunctionSessionEndReason,
@@ -2855,9 +2867,30 @@ export class ModsManager {
       if (workspace === key) controller.abort()
   }
 
-  pluginsChanged(): void {
-    for (const [workspace, config] of this.settings)
-      this.configure(workspace, config.enabled, config.policy)
+  pluginsChanged(changedPluginIds?: readonly string[]): void {
+    const changed = changedPluginIds?.length ? [...new Set(changedPluginIds)] : undefined
+    this.pluginCatalogEpoch++
+    if (changed) {
+      for (const id of changed)
+        this.pluginSourceEpochs.set(id, (this.pluginSourceEpochs.get(id) ?? 0) + 1)
+    } else this.unknownPluginSourceEpoch++
+    for (const [workspace] of this.settings) {
+      // Settings/protection remain pinned. Existing guest grants and source generations
+      // still expire immediately, while the next native boundary discovers the new chain.
+      if (this.functionLifecycle?.pluginsChanged)
+        this.functionLifecycle.pluginsChanged(workspace, changed)
+      else this.functionLifecycle?.invalidate(workspace)
+      this.clearActions(workspace)
+      for (const binding of this.bindings.values())
+        if (binding.workspace === workspace) this.notifyCards(binding.threadId)
+    }
+    for (const pending of this.sessions.values())
+      void pending.then((session) => {
+        if (session.pluginIds.length &&
+          (!changed || session.pluginIds.some((id) => changed.includes(id))))
+          return session.engine.retirePlugins(changed)
+        return undefined
+      }).catch(() => undefined)
   }
 
   pluginsChangedForWorkspace(workspace: string): void {
@@ -2964,16 +2997,14 @@ export class ModsManager {
     }
     assertCurrent()
     this.store.grant(key, candidate.compiled.manifest.id, digest, true)
-    const config = this.config(key)
-    this.configure(key, config.enabled, config.policy)
+    this.pluginsChanged([pluginId])
   }
 
   revoke(workspace: string, modId: string): void {
     const key = this.workspaceKey(workspace)
     const grant = this.store.getGrant(key, modId)
     if (grant) this.store.grant(key, modId, grant.digest, false)
-    const config = this.config(key)
-    this.configure(key, config.enabled, config.policy)
+    this.pluginsChanged()
   }
 
   private clearActions(workspace: string): void {
@@ -4127,6 +4158,55 @@ export class ModsManager {
   }
 
   /** Function SDK calls reuse native tool authority, execution receipts and final-argument approval. */
+  async invokeDevelopmentTool(
+    workspace: string,
+    threadId: string,
+    activation: DevelopmentActivation,
+    capability: "fs.write" | "tool.call",
+    toolId: string,
+    args: ModObject,
+    signal: AbortSignal,
+    readOnly: boolean,
+    userInitiated: boolean,
+    toolCallId?: string
+  ): Promise<ModObject> {
+    workspace = this.workspaceKey(workspace)
+    activation.assertCapability(capability)
+    if (activation.revision.validation !== "authorized-real" ||
+      activation.scope.workspace !== workspace || activation.scope.threadId !== threadId ||
+      (capability === "fs.write" && toolId !== "host:write_file") ||
+      (toolId === "host:execute" && args.run_in_background === true))
+      throw new ModError("MODS_DEVELOPMENT_CAPABILITY_DENIED")
+    return withDevelopmentNativeAuthority(this.store, workspace, threadId, activation, capability,
+      async identity => {
+        const published = await this.invokeFunctionCapability(workspace, threadId, identity,
+          toolId, args, signal, readOnly, userInitiated, undefined, undefined, toolCallId)
+        return this.functionToolResult(published)
+      })
+  }
+
+  private assertNativeToolGrant(grant: ModGrant, workspace: string, threadId: string): void {
+    if (grant.workspace !== workspace) throw new ModError("MODS_GRANT_REVOKED")
+    if (grant.modId.startsWith("development:")) functionExecutionScope(workspace, threadId)
+    this.store.assertGrant(grant)
+  }
+
+  private nativeIdentityGrant(workspace: string, threadId: string, identity: ModIdentity): ModGrant | null {
+    if (!identity.modId) return null
+    const grant = this.store.getGrant(workspace, identity.modId)
+    if (grant?.modId.startsWith("development:")) this.assertNativeToolGrant(grant, workspace, threadId)
+    return grant
+  }
+
+  private functionToolResult(published: unknown): ModObject {
+    const result = filterModData(published, false)
+    const text = projectModResult(published).text
+    const failed = !!result && typeof result === "object" && !Array.isArray(result) &&
+      (result.isError === true || result.status === "error" || typeof result.error === "string" ||
+        (typeof result.exitCode === "number" && result.exitCode !== 0))
+    return { result, text, ...(failed ? { isError: true } : {}) }
+  }
+
   async invokeFunctionTool(
     workspace: string,
     threadId: string,
@@ -4151,17 +4231,7 @@ export class ModsManager {
       undefined,
       toolCallId
     )
-    const result = filterModData(published, false)
-    const text = projectModResult(published).text
-    const failed =
-      !!result &&
-      typeof result === "object" &&
-      !Array.isArray(result) &&
-      (result.isError === true ||
-        result.status === "error" ||
-        typeof result.error === "string" ||
-        (typeof result.exitCode === "number" && result.exitCode !== 0))
-    return { result, text, ...(failed ? { isError: true } : {}) }
+    return this.functionToolResult(published)
   }
 
   async invokeFunctionMcp(
@@ -4353,10 +4423,13 @@ export class ModsManager {
     if (
       !this.isEnabled(workspace) ||
       grant.workspace !== workspace ||
-      !grant.modId.startsWith("function:")
+      (!grant.modId.startsWith("function:") && !grant.modId.startsWith("development:"))
     )
       throw new ModError("MODS_GRANT_REVOKED")
-    assertFunctionGrant(this.store, workspace, threadId, grant, signal)
+    if (grant.modId.startsWith("development:")) {
+      signal.throwIfAborted()
+      this.assertNativeToolGrant(grant, workspace, threadId)
+    } else assertFunctionGrant(this.store, workspace, threadId, grant, signal)
     const identity = functionCallIdentity(workspace, threadId, grant, {
       origin: "mod",
       toolCallId,
@@ -4385,7 +4458,7 @@ export class ModsManager {
     try {
       const actual = await request.invokeTool!(toolId, args, grant, userInitiated)
       request.assertScope?.()
-      this.store.assertGrant(grant)
+      this.assertNativeToolGrant(grant, workspace, threadId)
       const published = await this.publish(
         workspace,
         project(actual, identity),
@@ -4492,7 +4565,8 @@ export class ModsManager {
   }
 
   private async session(binding: ModThreadBinding): Promise<Session> {
-    const key = `${binding.workspace}\u001f${binding.threadId}\u001f${binding.turnId}\u001f${binding.agentId ?? "main"}\u001f${this.config(binding.workspace).epoch}`
+    const catalogEpoch = this.pluginCatalogEpoch
+    const key = `${binding.workspace}\u001f${binding.threadId}\u001f${binding.turnId}\u001f${binding.agentId ?? "main"}\u001f${this.config(binding.workspace).epoch}\u001f${catalogEpoch}`
     let promise = this.sessions.get(key)
     if (promise) {
       const session = await promise
@@ -4516,18 +4590,27 @@ export class ModsManager {
           }
         }
         const approved: ApprovedMod[] = []
+        const sourceEpochs = new Map(this.pluginSourceEpochs)
+        const unknownEpoch = this.unknownPluginSourceEpoch
         if (this.isEnabled(binding.workspace)) {
           for (const candidate of await this.candidates(binding.workspace)) {
             if (candidate.status.state !== "ready" || !candidate.compiled) continue
             const grant = this.store.getGrant(binding.workspace, candidate.compiled.manifest.id)!
-            approved.push({ compiled: candidate.compiled, grant })
+            const pluginId = candidate.compiled.pluginId
+            const sourceEpoch = sourceEpochs.get(pluginId) ?? 0
+            approved.push({ compiled: candidate.compiled, grant, assertCurrent: () => {
+              if ((this.pluginSourceEpochs.get(pluginId) ?? 0) !== sourceEpoch ||
+                this.unknownPluginSourceEpoch !== unknownEpoch)
+                throw new ModPluginChangedError()
+            } })
           }
         }
         if (approved.length > 8) throw new ModError("MODS_CHAIN_CAPACITY")
         const client = this.client(binding.workspace)
         const engine = new ModEngine(this.store, client, (id, code) => this.diagnose(id, code))
         await engine.load(orderApprovedMods(approved))
-        return { engine, client, generation: client.version, used: Date.now(), refs: 0 }
+        return { engine, pluginIds: approved.map((mod) => mod.compiled.pluginId),
+          client, generation: client.version, used: Date.now(), refs: 0 }
       })()
       this.sessions.set(key, promise)
       void promise.catch(() => {
@@ -4556,12 +4639,12 @@ export class ModsManager {
         accessKind === "host-control" ? { ...binding, allowedToolNames: undefined } : binding
       if (queryModRuntimeToolAccess(access, toolId).decision === "deny")
         throw new ModError("MODS_RUNTIME_TOOL_DENIED")
-      if (identity.modId?.startsWith("function:"))
+      if (identity.modId?.startsWith("function:") || identity.modId?.startsWith("development:"))
         functionExecutionScope(binding.workspace, binding.threadId)
       if (this.config(binding.workspace).epoch !== epoch) throw new ModError("MODS_SCOPE_CHANGED")
       if (binding.signal?.aborted) throw new ModError("MODS_CANCELLED")
       if (identity.modId) {
-        const grant = this.store.getGrant(binding.workspace, identity.modId)
+        const grant = this.nativeIdentityGrant(binding.workspace, binding.threadId, identity)
         if (!grant?.enabled || grant.epoch !== identity.grantEpoch)
           throw new ModError("MODS_GRANT_REVOKED")
       }
@@ -4650,7 +4733,7 @@ export class ModsManager {
           throw new ModError("MODS_WRITE_REQUIRES_USER_ACTION")
         if (JSON.stringify(finalArgs, null, 2).length > 16_000)
           throw new ModError("MODS_APPROVAL_INPUT_TOO_LARGE")
-        const granted = identity.modId && this.store.getGrant(binding.workspace, identity.modId)
+        const granted = identity.modId && this.nativeIdentityGrant(binding.workspace, binding.threadId, identity)
         if (
           identity.modId &&
           (!granted || !granted.enabled || granted.epoch !== identity.grantEpoch)
@@ -4666,12 +4749,13 @@ export class ModsManager {
         )
         if (!approved) throw new ModError("MODS_USER_REJECTED")
         assertEpoch()
-        if (granted) this.store.assertGrant(granted)
+        if (granted) this.assertNativeToolGrant(granted, binding.workspace, binding.threadId)
       },
-      invokeTool: async (target, input, grant, userAction) => {
+      invokeTool: async (target, input, grant, userAction, assertSource, sourceSignal) => {
         assertEpoch()
+        assertSource?.()
         if (++capabilityCalls > 16) throw new ModError("MODS_CAPABILITY_LIMIT")
-        this.store.assertGrant(grant)
+        this.assertNativeToolGrant(grant, binding.workspace, binding.threadId)
         const mcp = this.mcpBindings.get(this.mcpBindingKey(binding))
         if (target.startsWith("mcp:") && (!mcp || mcp.binding.turnId !== binding.turnId))
           throw new ModError("MODS_MCP_CONTEXT_REQUIRED")
@@ -4726,19 +4810,27 @@ export class ModsManager {
             protectedOutput: request.protectedOutput,
             readOnly: binding.readOnly ?? false,
             userInitiated: userAction,
-            signal: request.signal,
+            signal: sourceSignal
+              ? AbortSignal.any([sourceSignal, ...(request.signal ? [request.signal] : [])])
+              : request.signal,
             originMod: grant.modId,
             policyDigest: request.policyDigest,
             protectData: request.protectData,
             assertMcpTool: binding.assertMcpTool,
             publish: request.publish,
             assertLive: () => {
+              assertSource?.()
               assertEpoch()
               assertTarget()
-              this.store.assertGrant(grant)
+              this.assertNativeToolGrant(grant, binding.workspace, binding.threadId)
             }
           },
-          () => invoke(target, input)
+          async () => {
+            assertSource?.()
+            const result = await invoke(target, input)
+            assertSource?.()
+            return result
+          }
         )
       },
       onCard: (card) => {
@@ -4766,7 +4858,8 @@ export class ModsManager {
           card,
           grant,
           workspaceEpoch: epoch,
-          turnId: binding.turnId
+          turnId: binding.turnId,
+          catalogEpoch: this.pluginCatalogEpoch
         })
         this.notifyCards(binding.threadId, "cards")
       }
@@ -5076,6 +5169,7 @@ export class ModsManager {
         !binding.signal?.aborted &&
         grant.workspace === binding.workspace &&
         stored.workspaceEpoch === workspaceEpoch &&
+        stored.catalogEpoch === this.pluginCatalogEpoch &&
         stored.turnId === binding.turnId &&
         liveGrant?.enabled &&
         liveGrant.digest === grant.digest &&

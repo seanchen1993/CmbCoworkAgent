@@ -23,6 +23,7 @@ export class FunctionSessionActivity {
   private readonly tokens = new Set<Token>()
   private readonly waiters = new Set<{ resolve(): void; reject(error: Error): void }>()
   private readonly retirementWaiters = new Set<() => void>()
+  private readonly settlementWaiters = new Set<() => void>()
   private paused = false
   private closed = false
   private foregroundIdlePending = false
@@ -35,6 +36,12 @@ export class FunctionSessionActivity {
     return this.tokens.size
   }
 
+  /** Physical retirement still waits for the admitted native caller's real finally. */
+  whenSettled(): Promise<void> {
+    if (!this.tokens.size) return Promise.resolve()
+    return new Promise(resolve => this.settlementWaiters.add(resolve))
+  }
+
   get foregroundSize(): number {
     return [...this.tokens].filter((token) => token.kind === "foreground").length
   }
@@ -42,6 +49,17 @@ export class FunctionSessionActivity {
   /** Native UI remains occupied until drain, but can be cancelled during retirement. */
   get retirementBlockingSize(): number {
     return [...this.tokens].filter((token) => token.kind === "foreground" && !token.retirementUi).length
+  }
+
+  /** Explicit release preserves background resources; native drawing can retire with its VM. */
+  get releaseBlockingSize(): number {
+    return [...this.tokens].filter(token => !token.retirementUi).length
+  }
+
+  pauseForRelease(): boolean {
+    if (this.closed || this.paused || this.releaseBlockingSize) return false
+    this.paused = true
+    return true
   }
 
   pauseForRetirement(): boolean {
@@ -109,6 +127,10 @@ export class FunctionSessionActivity {
     token.active = false
     this.tokens.delete(token)
     token.releaseCatalog?.()
+    if (!this.tokens.size) {
+      for (const resolve of this.settlementWaiters) resolve()
+      this.settlementWaiters.clear()
+    }
     if (token.kind === "foreground") this.notifyForegroundIdle()
     if (!this.tokens.size && !this.closed) queueMicrotask(this.idle)
   }
