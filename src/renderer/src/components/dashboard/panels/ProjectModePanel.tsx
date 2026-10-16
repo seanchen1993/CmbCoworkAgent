@@ -1,4 +1,13 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react"
+import {
+  createContext,
+  useContext,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type ReactNode
+} from "react"
 import { PieChart, Pie, Cell, Tooltip as RechartsTooltip, ResponsiveContainer } from "recharts"
 import {
   Boxes,
@@ -91,11 +100,13 @@ import type {
 } from "../use-dashboard"
 import { formatTopUserOrgName } from "../use-dashboard"
 import { ProjectStageAnalysisDialog } from "../ProjectStageAnalysisDialog"
+import { ProjectCodeTraceDialog, type ProjectCodeTraceTarget } from "../ProjectCodeTraceDialog"
 import {
   STAGE_BUCKET_HINTS,
   STAGE_BUCKET_LABELS,
   type StageBucket
 } from "../../../../../shared/harness-stage-bucket"
+const OpenProjectCodeTrace = createContext<((target: ProjectCodeTraceTarget) => void) | null>(null)
 const EMPTY_FUNNEL_DATA: CodeAdoptionFunnelData = {
   inclusiveEffectiveGeneratedLines: 0,
   effectiveGeneratedLines: 0,
@@ -1108,9 +1119,11 @@ function bucketLineShare(lines: number, comparedLines: number): number | null {
  * 公平，但绝对值低于实际写进仓库的行数。
  */
 function ProjectStageAdoptedLines({
-  buckets
+  buckets,
+  onOpen
 }: {
   buckets: DashboardStageBuckets
+  onOpen?: (bucket: StageBucket) => void
 }): React.JSX.Element {
   const unattributedLines = buckets.unattributed.codeStats?.adoptedLines ?? 0
   const rows: Array<{
@@ -1138,9 +1151,15 @@ function ProjectStageAdoptedLines({
       {rows.map(({ bucket, shortLabel, dot, lines }) => {
         const share = formatPercent(bucketLineShare(lines, comparedLines))
         return (
-          <span
+          <button
             key={bucket}
-            className="inline-flex items-center gap-1 text-[10px] text-muted-foreground"
+            type="button"
+            disabled={!onOpen}
+            onClick={(event) => {
+              event.stopPropagation()
+              onOpen?.(bucket)
+            }}
+            className="inline-flex items-center gap-1 text-[10px] text-muted-foreground hover:text-primary disabled:cursor-default disabled:hover:text-muted-foreground"
             title={`${STAGE_BUCKET_LABELS[bucket]}：采纳 ${formatNumber(lines)} 行，占两桶合计 ${formatNumber(comparedLines)} 行的 ${share}。未归因另有 ${formatNumber(unattributedLines)} 行，不计入分母。`}
           >
             <span className={`size-1.5 rounded-full ${dot}`} />
@@ -1148,7 +1167,7 @@ function ProjectStageAdoptedLines({
             <span className="font-medium text-foreground">{formatLineCount(lines)}</span>
             <span>行</span>
             <span>{share}</span>
-          </span>
+          </button>
         )
       })}
     </div>
@@ -1433,6 +1452,7 @@ function ProjectRow({
   loadOperationalDetails: DashboardProjectModeOperationalDetailsLoader
 }): React.JSX.Element {
   const codeStats = project.codeStats
+  const openCodeTrace = useContext(OpenProjectCodeTrace)
   const attention = PROJECT_ATTENTION_SORTS.find((item) => item.key === attentionSort)
   const attentionValue = project.attentionMetric ?? null
   const hasCommitAdoption = Boolean(codeStats && codeStats.effectiveGeneratedLines > 0)
@@ -1620,7 +1640,15 @@ function ProjectRow({
           <ProjectStageAdoptionRates buckets={project.stageBuckets} />
         </td>
         <td className="px-3 py-2 text-right tabular-nums">
-          <ProjectStageAdoptedLines buckets={project.stageBuckets} />
+          <ProjectStageAdoptedLines
+            buckets={project.stageBuckets}
+            onOpen={
+              openCodeTrace
+                ? (bucket) =>
+                    openCodeTrace({ projectId: project.projectId, name: project.name, bucket })
+                : undefined
+            }
+          />
         </td>
         <td className="px-3 py-2 text-right tabular-nums">
           {project.systemConstraintReads || project.hookExecutions ? (
@@ -3310,7 +3338,28 @@ function AdapterProjectsDialogBody({
   )
 }
 
-export function ProjectModePanel({
+export function ProjectModePanel(
+  props: React.ComponentProps<typeof ProjectModePanelContent> & {
+    codeTraceOrgLv1?: string | string[] | null
+  }
+): React.JSX.Element {
+  const [target, setTarget] = useState<ProjectCodeTraceTarget | null>(null)
+  return (
+    <OpenProjectCodeTrace.Provider value={setTarget}>
+      <ProjectModePanelContent {...props} />
+      {target ? (
+        <ProjectCodeTraceDialog
+          key={target.projectId + target.bucket}
+          target={target}
+          upperOrgLv1={props.codeTraceOrgLv1}
+          onClose={() => setTarget(null)}
+        />
+      ) : null}
+    </OpenProjectCodeTrace.Provider>
+  )
+}
+
+function ProjectModePanelContent({
   data,
   loading,
   projectListLoading = loading,

@@ -9,9 +9,12 @@ import {
 import { buildSkillUsageMatchFilter } from "./dashboard-skill-usage"
 import {
   compareProjectAttentionValues,
+  vibecodingAdoptedShare,
   isProjectAttentionSortKey,
   type ProjectAttentionSortKey
 } from "../../shared/project-attention"
+import type { ProjectCodeTracePage, ProjectCodeTraceRequest } from "../../shared/project-code-trace"
+import { fetchProjectCodeTracePage } from "./project-code-trace"
 import {
   fetchProjectAttentionRanking,
   ProjectAttentionRankingCache,
@@ -11952,9 +11955,10 @@ function projectModeProjectSortValue(
   }
   if (sortBy === "vibecodingShare") {
     const buckets = project.stageBuckets
-    const attributed =
-      buckets.pluginConstrained.conversationCount + buckets.vibecoding.conversationCount
-    return attributed > 0 ? buckets.vibecoding.conversationCount / attributed : null
+    return vibecodingAdoptedShare(
+      buckets.pluginConstrained.codeStats?.adoptedLines ?? 0,
+      buckets.vibecoding.codeStats?.adoptedLines ?? 0
+    )
   }
   if (sortBy === "conversationCount") return project.conversationCount
   if (sortBy === "generatedLines") return project.codeStats?.generatedLines ?? 0
@@ -15898,6 +15902,95 @@ export function registerDashboardHandlers(_ipcMain: typeof ipcMain): void {
         return { success: true, data: await fetchProjectModeExportData(range, opts) }
       } catch (e) {
         console.error("[Dashboard] projectModeExportData error:", e)
+        return { success: false, error: e instanceof Error ? e.message : String(e) }
+      }
+    }
+  )
+
+  registerLatestDashboardHandler(
+    _ipcMain,
+    "dashboard:projectCodeTrace",
+    async (_, input: ProjectCodeTraceRequest) => {
+      try {
+        const access = requireDashboardProjectModeAccess()
+        if (import.meta.env.DEV) {
+          const project = makeMockProjectMode({
+            from: "1970-01-01",
+            to: new Date().toISOString()
+          }).projects.find((p) => p.projectId === input.projectId)
+          const buckets = project?.stageBuckets
+          const summary = {
+            harnessLines: buckets?.pluginConstrained.codeStats?.adoptedLines ?? 0,
+            vibeLines: buckets?.vibecoding.codeStats?.adoptedLines ?? 0,
+            unattributedLines: buckets?.unattributed.codeStats?.adoptedLines ?? 0
+          }
+          const count =
+            input.bucket === "plugin_constrained"
+              ? summary.harnessLines
+              : input.bucket === "vibecoding"
+                ? summary.vibeLines
+                : summary.unattributedLines
+          const teamLines = Math.ceil(count * 0.65)
+          const workflowLines = Math.floor(count * 0.2)
+          const sizes = [teamLines, workflowLines, count - teamLines - workflowLines]
+          const data: ProjectCodeTracePage = {
+            summary,
+            total: sizes.filter((n) => n > 0).length,
+            nextCursor: null,
+            items: sizes
+              .map((lines, i) => ({
+                eventId: `mock-adopt-${input.bucket}-${i}`,
+                genEventId: `mock-gen-${i}`,
+                file: ["controller.ts", "service.ts", "utils.ts"][i],
+                tool: "edit_file",
+                language: "ts",
+                generatedLines: lines + 20,
+                effectiveLines: lines + 10,
+                adoptedLines: lines,
+                usedSkills:
+                  input.bucket === "plugin_constrained" || i === 1 ? ["autodev-code-v1.0.0"] : [],
+                skillSource: [],
+                nodeName: "Dev-代码实现",
+                nodeStatus:
+                  input.bucket === "unattributed"
+                    ? null
+                    : input.bucket === "plugin_constrained" || i !== 1
+                      ? "进行中"
+                      : "已完成",
+                featureSlug: project?.features[0]?.slug ?? null,
+                pluginName: project?.adapterName ?? null,
+                pluginVersion: project?.adapterVersion ?? null,
+                model: "test-model",
+                userName: project?.creatorUserName ?? null,
+                agentKind: ["coordinator_worker", "workflow_agent", "root"][i],
+                agentLabel: i === 2 ? null : "implementer",
+                threadId: i === 2 ? "mock-parent" : `mock-worker-${i}`,
+                traceId: null,
+                rootThreadId: "mock-parent",
+                parentThreadId: i === 2 ? null : "mock-parent",
+                generatedAt: new Date().toISOString(),
+                measuredAt: new Date().toISOString(),
+                commitSha: "a".repeat(40),
+                commitUrl: null,
+                repository: "demo",
+                branch: "main",
+                pushed: true,
+                verdict: "adopted",
+                generationAvailable: true,
+                generationAttribution: null,
+                attributionMismatch: false
+              }))
+              .filter((item) => item.adoptedLines > 0)
+          }
+          return { success: true, data }
+        }
+        const org = buildProjectModeOrgFilter(input, access)
+        const data = await fetchProjectCodeTracePage(input, org ? [org] : [], (body) =>
+          esQuery(getEsIndex("event"), body)
+        )
+        return { success: true, data }
+      } catch (e) {
+        logDashboardRequestError("projectCodeTrace", e)
         return { success: false, error: e instanceof Error ? e.message : String(e) }
       }
     }

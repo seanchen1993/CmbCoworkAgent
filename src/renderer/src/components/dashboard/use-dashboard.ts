@@ -2314,6 +2314,7 @@ const DASHBOARD_HOOK_REQUEST_FAMILIES = [
   "dashboard:projectModeCodeStats",
   "dashboard:knowledgeCommitRate",
   "dashboard:projectModeProjects",
+  "dashboard:projectCodeTrace",
   "dashboard:projectModeTraces",
   "dashboard:projectModeFeatureNodes",
   "dashboard:pluginAggregate",

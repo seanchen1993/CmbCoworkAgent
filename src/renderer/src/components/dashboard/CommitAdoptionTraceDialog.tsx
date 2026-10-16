@@ -206,7 +206,7 @@ function SupersededLocalFallback({ reason }: { reason: string | null }): React.J
   )
 }
 
-function LocalLinesPanel({
+export function LocalLinesPanel({
   loading,
   error,
   data
