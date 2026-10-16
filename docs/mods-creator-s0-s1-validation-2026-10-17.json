@@ -1,0 +1,131 @@
+{
+  "schemaVersion": 1,
+  "recordedAt": "2026-10-16T18:10:04.948Z",
+  "scope": {
+    "branch": "codex/mods-v2",
+    "stages": [
+      "S0",
+      "S1"
+    ],
+    "mechanism": "原 Mods、权限与执行器",
+    "deferred": [
+      "S2 公共扩展契约",
+      "S6 阶段回退"
+    ]
+  },
+  "candidate": {
+    "applicationSourceHead": "446dd9b3b1a1356c020e507633645069ddddbde1",
+    "runtimeCommit": "6556c718",
+    "sha256": "b9badfe42a4a0b4eb2f42a53b47eddad660497a1e5c82f422096a88635553b03",
+    "execution": "built-output",
+    "node": "22.23.3",
+    "verifiedSourceAndConfigFiles": 3187,
+    "verifiedResourceFiles": 43
+  },
+  "checks": {
+    "build": "通过",
+    "nodeTypecheck": "通过",
+    "webTypecheck": "通过",
+    "vitest": {
+      "inventoryFiles": 1293,
+      "passedFiles": 1288,
+      "conditionalSkipFiles": [
+        "src/main/agent/local-sandbox-shell-file-capture.test.ts",
+        "src/main/mods/v2/native-engine-performance.test.ts",
+        "src/main/mods/v2/ui-resolve-performance.test.ts",
+        "src/main/mods/v2/markdown-performance.test.ts",
+        "src/main/mods/v2/plugin-prompt-performance.test.ts"
+      ],
+      "uncoveredFiles": [],
+      "method": "首轮 121 个通过文件 + 剩余 1172 个文件 + 原失败 7 文件 48 用例复查；没有隐藏初次失败或将条件跳过计为通过。"
+    },
+    "standalone": {
+      "groups": 16,
+      "initialPassedGroups": 13,
+      "completeGroupRechecksPassed": [
+        "test:desktop-agent-baseline",
+        "test:mods:ui-colors"
+      ],
+      "workflow": "整组复查已运行到最后一条队列结构检查，前序命令通过；修正最后旧断言后，该检查 52 项通过。",
+      "note": "逐项覆盖原 npm test 全部子命令；初次 npm test 因旧断言展开而耗尽测试堆，后续分段汇总，不宣称初次命令退出码为零。"
+    }
+  },
+  "frozenGates": {
+    "frozenAt": "2026-10-16T21:54:00+08:00",
+    "weatherVisibleMs": 60000,
+    "documentVisibleMs": 45000,
+    "displayPatchMs": 30000,
+    "submitClicks": 1,
+    "trialConfirmations": 1,
+    "technicalPageVisits": 0,
+    "unrelatedBusinessReruns": 0
+  },
+  "desktop": {
+    "document": {
+      "passed": true,
+      "evidence": "output/s1/run-rAcFB5/document-evidence.json",
+      "metrics": {
+        "creation": {
+          "elapsedMs": 10081,
+          "candidateReadyMs": 6712,
+          "confirmationMs": 1337,
+          "submitClicks": 1,
+          "trialConfirmations": 1,
+          "technicalPageVisits": 0,
+          "reviews": 1,
+          "clicks": [
+            "发送消息",
+            "确认并应用到这段聊天"
+          ]
+        },
+        "localPatch": {
+          "elapsedMs": 13688,
+          "submitClicks": 1,
+          "confirmations": 0,
+          "additionalReviews": 0,
+          "clicks": [
+            "发送消息"
+          ]
+        }
+      }
+    },
+    "weather": {
+      "passed": true,
+      "evidence": "output/s1/run-XGkVBn/creator-evidence.json",
+      "metrics": {
+        "creation": {
+          "elapsedMs": 12454,
+          "candidateReadyMs": 8433,
+          "confirmationMs": 1648,
+          "authoringCandidates": 3,
+          "submitClicks": 1,
+          "trialConfirmations": 1,
+          "nativeHttpConfirmations": 1,
+          "technicalPageVisits": 0,
+          "clicks": [
+            "发送消息",
+            "确认并应用到这段聊天"
+          ]
+        }
+      },
+      "actualForecastRequestsAcrossJourney": 2,
+      "measurement": "候选数读取原持久预算，HTTP 确认数读取真实待批记录；点击读取真实按钮事件。"
+    }
+  },
+  "integrity": {
+    "externalAutoBizFilesChecked": 7,
+    "externalAutoBizUnchanged": true,
+    "candidateLifecycle": "真实 guest/HTTP/命令队列回归覆盖保存、编译、预检及两道排队屏障，旧调用和显示所有者保持有效，实际切换后旧句柄失效。",
+    "retainedBoundaries": [
+      "新增权限需确认",
+      "不支持需求保留旧版及草稿",
+      "未知操作不自动重放",
+      "必需知识缺失阻断业务入口"
+    ]
+  },
+  "limits": [
+    "确定性本地模型与网络夹具，不代表真实远程模型的普遍创作成功率或生产时延。",
+    "真实 Electron built-output 验收，不是 OS 安装器或签名发行包验收。",
+    "既有条件跳过及失败复查过程保留；没有通过降低检查、增大修复预算或修改第三方 pin 取得成功。"
+  ]
+}

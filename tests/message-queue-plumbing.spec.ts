@@ -1965,8 +1965,13 @@ function testCancelSuppressesAutoDrain(): void {
   assertOccurrences(
     chat,
     "setQueueAutoDrainSuppressed(false)",
-    4,
-    "suppression clears for live enqueue/send and both guide fallback paths"
+    5,
+    "suppression clears for live enqueue/send, guide fallbacks and explicit creator repair"
+  )
+  assertIncludes(
+    chat,
+    "resumeQueue: () => setQueueAutoDrainSuppressed(false)",
+    "a person-requested creator repair resumes the existing guarded queue"
   )
 }
 

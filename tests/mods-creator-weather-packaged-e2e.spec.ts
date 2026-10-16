@@ -408,11 +408,21 @@ async function main() {
       "trial activated after physical completion"
     )
     await seeForecast()
+    const nativeHttpApprovals = await app.evaluate(() => {
+      const state = globalThis as typeof globalThis & {
+        forecastApprovals: { rows: Array<{ decided: boolean }> }
+      }
+      return {
+        decided: state.forecastApprovals.rows.every(row => row.decided),
+        count: state.forecastApprovals.rows.length
+      }
+    })
+    assert(nativeHttpApprovals.decided)
     metrics.creation = { elapsedMs: Date.now() - creationStarted,
       candidateReadyMs: confirmationReady - creationStarted,
       confirmationMs: confirmedAt - confirmationReady,
-      authoringCandidates: 3, submitClicks: 1, trialConfirmations: 1,
-      nativeHttpConfirmations: 1, technicalPageVisits: 0 }
+      authoringCandidates: needs.request?.candidates, submitClicks: 1, trialConfirmations: 1,
+      nativeHttpConfirmations: nativeHttpApprovals.count, technicalPageVisits: 0 }
     Object.assign(metrics.creation as object, { clicks: await clicks.read() })
     assert.equal(forecastRequests, 1)
     const commands = () => page!.evaluate((id) => window.api.mods.commands(id), scope.threadId)

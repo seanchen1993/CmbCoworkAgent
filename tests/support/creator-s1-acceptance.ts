@@ -57,7 +57,10 @@ export function assertCreatorCreationMetrics(kind: "weather" | "document", input
     (input as { clicks: string[] }).clicks.slice().sort(),
     ["发送消息", "确认并应用到这段聊天"].sort()
   )
-  if (kind === "weather") assert.equal(value.nativeHttpConfirmations, 1)
+  if (kind === "weather") {
+    assert.equal(value.nativeHttpConfirmations, 1)
+    assert.equal(value.authoringCandidates, 3)
+  }
 }
 
 export function assertCreatorPatchMetrics(input: unknown) {
