@@ -6,6 +6,11 @@ import {
 } from "../../../../src/main/browser/record/script-record/script-recorder-playwright-adapter"
 import { formatPlaywrightSelector } from "../../../../src/main/browser/record/common/playwright-codegen/projectLocatorAdapter"
 
+interface RecorderTestWindow extends Window {
+  __pw_recorderRecordAction: (action: { name: string; selector: string }) => Promise<void>
+  editClicks?: number
+}
+
 async function main(): Promise<void> {
   const browser = await chromium.launch({ headless: true })
   try {
@@ -25,15 +30,18 @@ async function main(): Promise<void> {
         predicate: (entry) => entry.text().startsWith(PLAYWRIGHT_SCRIPT_RECORDER_EVENT_PREFIX)
       })
       await page.evaluate(async (value) => {
-        await (window as any).__pw_recorderRecordAction({ name: "click", selector: value })
+        await (window as RecorderTestWindow).__pw_recorderRecordAction({
+          name: "click",
+          selector: value
+        })
       }, selector)
       const payload = JSON.parse(
         (await message).text().slice(PLAYWRIGHT_SCRIPT_RECORDER_EVENT_PREFIX.length)
       )
       return payload.locator.selector
     }
-    // The recorder must not tighten a selector that already has multiple matches.
-    assert.equal(await record('internal:text="编辑"i'), 'internal:text="编辑"i')
+    // A unique exact match remains stable even when another element contains the same text.
+    assert.equal(await record('internal:text="编辑"i'), 'internal:text="编辑"s')
     await page.getByText("编辑流水线配置", { exact: true }).evaluate((node) => node.remove())
     const recorded = await record('internal:text="编辑"i')
     assert.equal(recorded, 'internal:text="编辑"s')
@@ -52,7 +60,7 @@ async function main(): Promise<void> {
     const hoverFallback = await record(".ant-tooltip-open")
     assert.equal(hoverFallback, 'internal:text="编辑"s')
     await page.locator(recorded).click()
-    assert.equal(await page.evaluate(() => (window as any).editClicks), 1)
+    assert.equal(await page.evaluate(() => (window as RecorderTestWindow).editClicks), 1)
     assert.equal(await record('internal:text="CI_OWNER"i'), 'internal:text="CI_OWNER"i')
     assert.equal(
       await record('internal:role=button[name="保存"i]'),
@@ -63,14 +71,14 @@ async function main(): Promise<void> {
       .evaluate((node) => node.classList.remove("ant-tooltip-open"))
     await page.getByRole("tooltip").evaluate((node) => node.remove())
     await page.locator(hoverFallback).click()
-    assert.equal(await page.evaluate(() => (window as any).editClicks), 2)
+    assert.equal(await page.evaluate(() => (window as RecorderTestWindow).editClicks), 2)
     const frame = page.frames()[1]
     await frame.evaluate(buildPlaywrightScriptRecorderInjectionScript("child"))
     const frameMessage = page.waitForEvent("console", {
       predicate: (entry) => entry.text().startsWith(PLAYWRIGHT_SCRIPT_RECORDER_EVENT_PREFIX)
     })
     await frame.evaluate(async () => {
-      await (window as any).__pw_recorderRecordAction({
+      await (window as RecorderTestWindow).__pw_recorderRecordAction({
         name: "click",
         selector: 'internal:text="编辑"i'
       })

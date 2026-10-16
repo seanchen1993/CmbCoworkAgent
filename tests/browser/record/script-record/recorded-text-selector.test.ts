@@ -22,7 +22,7 @@ describe("recorded text selector precision", () => {
     ["partial text", [target], []],
     ["duplicate exact text", [target], [target, other]],
     ["different element", [target], [other]],
-    ["ambiguous original", [target, other], [target]],
+    ["different first fuzzy match", [other, target], [target]],
     ["detached target", [], []]
   ])("preserves the original selector for %s", (_name, original, exactMatches) => {
     expect(
@@ -55,6 +55,14 @@ describe("recorded text selector precision", () => {
         throw new Error("detached")
       })
     ).toBe(selector)
+  })
+
+  it("records exact text when a tooltip adds a second fuzzy match", () => {
+    expect(
+      preferExactRecordedTextSelector(selector, (value) =>
+        value === selector ? [target, other] : [target]
+      )
+    ).toBe(exact)
   })
 })
 
@@ -117,9 +125,9 @@ function createTooltipHarness() {
       generateSelector: () => ({ selector: context.generatedSelector })
     },
     resolveElement: (selector: string) => query(selector)[0] ?? null,
-    rememberHoveredActionSelector: (_event: { target: FakeElement }) => {},
-    selectorForRecorderAction: (_action: { name: string; selector: string }) => "",
-    normalizeRecordedSelector: (_selector: string) => ""
+    rememberHoveredActionSelector: (event: { target: FakeElement }) => void event,
+    selectorForRecorderAction: (action: { name: string; selector: string }) => action.selector,
+    normalizeRecordedSelector: (selector: string) => selector
   }
   function query(selector: string): FakeElement[] {
     if (!target.isConnected) return []

@@ -357,9 +357,7 @@ export function preferExactRecordedTextSelector<T>(
   try {
     const original = queryAll(selector)
     const exact = queryAll(exactSelector)
-    return original.length === 1 && exact.length === 1 && original[0] === exact[0]
-      ? exactSelector
-      : selector
+    return exact.length === 1 && original[0] === exact[0] ? exactSelector : selector
   } catch {
     return selector
   }
