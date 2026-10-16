@@ -1,3 +1,4 @@
+import { registerBusinessModAssemblyHandlers } from "./ipc/business-mod-assembly"
 import { registerWindowPresentation } from "./window-presentation"
 import { initializeHarnessConfigV2 } from "./harness-board/config-v2"
 import { initializeNotificationRuntime } from "./notification-runtime"
@@ -1171,6 +1172,7 @@ if (browserNativeMessagingHostLaunch) {
     registerGitHandlers()
     registerPluginHandlers(ipcMain)
     registerPluginDerivationHandlers(ipcMain, () => mainWindow)
+    registerBusinessModAssemblyHandlers(ipcMain, () => mainWindow)
     registerNodeCompositionHandlers(ipcMain, () => mainWindow)
     registerModsHandlers(ipcMain, () => mainWindow)
     registerPluginFileHandlers(ipcMain)

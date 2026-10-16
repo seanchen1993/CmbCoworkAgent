@@ -1159,14 +1159,14 @@ function App(): React.JSX.Element {
                     <button
                       type="button"
                       onClick={() => openClawSidebar("configuration")}
-                      aria-label="当前助手"
+                      aria-label="任务进展"
                       aria-pressed={rightModule === "claw"}
                       className={`${panelToggleBaseClass} ${
                         rightModule === "claw" ? moduleActiveClass : moduleInactiveClass
                       }`}
                     >
                       <Sparkles size={16} aria-hidden="true" />
-                      <span>当前助手</span>
+                      <span>任务进展</span>
                     </button>
                   )}
                   <button

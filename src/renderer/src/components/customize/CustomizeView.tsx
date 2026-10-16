@@ -1,5 +1,6 @@
 import { isDevelopmentThreadMetadata } from "../../../../shared/mods/development-scope"
 import { AssistantWorkbench } from "./AssistantWorkbench"
+import { creatorEntryError, enterCreatorMode } from "./creator-mode-entry"
 import { SparksTour, type SparksTourHandle } from "./SparksTour"
 import { useSettingsComposerReturn } from "./settings-return-focus"
 import { lazy, Suspense, useEffect, useRef, useState, type ReactNode } from "react"
@@ -31,12 +32,22 @@ import { Button } from "@/components/ui/button"
 import { useAppStore } from "@/lib/store"
 import { cn } from "@/lib/utils"
 import {
-  createPracticeIntent,
   sameSimpleAuthoringScope,
   type SimpleAuthoringPracticeIntent
 } from "@/lib/simple-authoring-intent"
 import { openBuiltinNavigation } from "@/lib/builtin-navigation"
 import { consumePluginSettings, usePluginSettingsRequest } from "@/lib/plugin-settings-intent"
+import { ConfigurationTargetPicker } from "./ConfigurationTargetPicker"
+import {
+  beginConfigurationTarget,
+  configurationTargetValid,
+  configurationWorkspace,
+  useConfigurationTarget,
+  captureConfigurationScope,
+  goToConfigurationThread,
+  supportsConfiguration,
+  useConfigurationDraft
+} from "@/lib/configuration-target"
 
 const SkillsPanel = lazy(() => import("./SkillsPanel").then((m) => ({ default: m.SkillsPanel })))
 const GeneralPanel = lazy(() => import("./GeneralPanel").then((m) => ({ default: m.GeneralPanel })))
@@ -100,7 +111,7 @@ type CustomizeTab =
   | "expertTeam"
   | "evaluation"
 
-type MenuGroupId = "basic" | "advanced" | "profile" | "creator"
+type MenuGroupId = "basic" | "advanced" | "profile" | "creator" | "creatorAdvanced"
 
 type MenuItem = {
   tab: CustomizeTab
@@ -118,13 +129,16 @@ type MenuGroup = {
 const MENU_GROUPS: MenuGroup[] = [
   {
     id: "creator",
-    label: "自定义助手",
+    label: "创造者模式",
+    items: [{ tab: "assistant", label: "对话创作", icon: Sparkles }]
+  },
+  {
+    id: "creatorAdvanced",
+    label: "高级自定义",
     items: [
-      { tab: "assistant", label: "总览", icon: Settings2 },
-      { tab: "mods", label: "添加功能", icon: Webhook },
-      { tab: "claw", label: "助手组合", icon: Sparkles },
-      { tab: "flows", label: "按步骤执行", icon: GitBranch },
-      { tab: "evaluation", label: "效果测试", icon: Code2 }
+      { tab: "mods", label: "灵件管理", icon: Webhook },
+      { tab: "claw", label: "搭配管理", icon: Sparkles },
+      { tab: "flows", label: "步骤管理", icon: GitBranch }
     ]
   },
   {
@@ -134,7 +148,7 @@ const MENU_GROUPS: MenuGroup[] = [
       { tab: "general", label: "通用", icon: Settings2 },
       { tab: "appearance", label: "外观", icon: Palette },
       { tab: "skills", label: "技能", icon: Sparkles },
-      { tab: "connectors", label: "MCP 连接器", icon: Plug },
+      { tab: "connectors", label: "连接工具", icon: Plug },
       { tab: "plugins", label: "插件", icon: Puzzle },
       { tab: "sandbox", label: "沙盒环境", icon: Shield }
     ]
@@ -144,13 +158,14 @@ const MENU_GROUPS: MenuGroup[] = [
     label: "高级特性",
     items: [
       { tab: "expertTeam", label: "专家团", icon: Users },
+      { tab: "evaluation", label: "效果测试", icon: Code2 },
       { tab: "heartbeat", label: "心跳监控", icon: HeartPulse },
       { tab: "memory", label: "记忆管理", icon: Brain },
       { tab: "taskMmd", label: "任务画布", icon: Network },
-      { tab: "lsp", label: "Java LSP", icon: Code2 },
+      { tab: "lsp", label: "Java 代码诊断", icon: Code2 },
       { tab: "evolution", label: "自优化", icon: GitBranch },
       { tab: "robot", label: "机器人管理", icon: Cpu },
-      { tab: "hooks", label: "钩子", icon: Webhook },
+      { tab: "hooks", label: "自动触发规则", icon: Webhook },
       { tab: "codeExecTools", label: "编程式工具调用", icon: Wrench, truncate: true }
     ]
   },
@@ -227,6 +242,9 @@ export function CustomizeView(): React.JSX.Element {
     practice?: SimpleAuthoringPracticeIntent
   } | null>(null)
   const [practiceIntent, setPracticeIntent] = useState<SimpleAuthoringPracticeIntent>()
+  const [creatorBusy, setCreatorBusy] = useState(false)
+  const [creatorError, setCreatorError] = useState("")
+  const creatorPending = useRef(false)
   const requestComposerFocus = useSettingsComposerReturn()
   const mounted = useRef(false)
   useEffect(() => {
@@ -240,9 +258,23 @@ export function CustomizeView(): React.JSX.Element {
     customizeInitialTab,
     customizeInitialSection,
     pendingEvolution,
-    currentThreadId,
+    currentThreadId: chatThreadId,
     threads
   } = useAppStore()
+  const configurationTarget = useConfigurationTarget()
+  useEffect(() => {
+    const state = useAppStore.getState()
+    const row = state.threads.find((item) => item.thread_id === state.currentThreadId)
+    return beginConfigurationTarget({
+      threadId: row && supportsConfiguration(row) ? row.thread_id : null,
+      workspace: row && supportsConfiguration(row) ? configurationWorkspace(row) : null
+    })
+  }, [])
+  const targetValid = configurationTarget && configurationTargetValid(configurationTarget, threads)
+  const currentThreadId = configurationTarget?.threadId ?? null
+  const chatWorkspacePath = configurationWorkspace(
+    threads.find((row) => row.thread_id === chatThreadId)
+  )
   const [evaluationCandidate, setEvaluationCandidate] = useState<{
     threadId: string | null
     workspace: string | null
@@ -274,12 +306,15 @@ export function CustomizeView(): React.JSX.Element {
       })
     }
   }, [pluginSettingsRequestId])
-  const [expandedGroups, setExpandedGroups] = useState<Record<MenuGroupId, boolean>>(() => ({
-    creator: true,
-    basic: !MENU_GROUPS[0].items.some((item) => item.tab === activeTab),
-    advanced: MENU_GROUPS[2].items.some((item) => item.tab === activeTab),
-    profile: MENU_GROUPS[3].items.some((item) => item.tab === activeTab)
-  }))
+  const [expandedGroups, setExpandedGroups] = useState<Record<MenuGroupId, boolean>>(
+    () =>
+      Object.fromEntries(
+        MENU_GROUPS.map((group) => [
+          group.id,
+          group.id === "creator" || group.items.some((item) => item.tab === activeTab)
+        ])
+      ) as Record<MenuGroupId, boolean>
+  )
   useEffect(() => {
     let cancelled = false
     const group = MENU_GROUPS.find((entry) => entry.items.some((item) => item.tab === activeTab))
@@ -295,10 +330,47 @@ export function CustomizeView(): React.JSX.Element {
   const currentThread = currentThreadId
     ? threads.find((thread) => thread.thread_id === currentThreadId)
     : null
-  const currentWorkspacePath =
-    typeof currentThread?.metadata?.workspacePath === "string"
-      ? currentThread.metadata.workspacePath
-      : null
+  const currentWorkspacePath = configurationTarget?.workspace ?? null
+  useConfigurationDraft(
+    { threadId: currentThreadId, workspace: currentWorkspacePath },
+    false,
+    creatorBusy
+  )
+  const creatorUnavailable =
+    !currentThreadId || !currentWorkspacePath
+      ? "请先在上方选择一段具有本地项目目录的聊天。"
+      : !targetValid || !isDevelopmentThreadMetadata(currentThread?.metadata)
+        ? "请在上方选择普通本地聊天，再进入创造者模式。"
+        : undefined
+  const startCreator = async () => {
+    if (creatorPending.current || creatorUnavailable || !currentThreadId || !currentWorkspacePath)
+      return
+    const scope = { threadId: currentThreadId, workspace: currentWorkspacePath }
+    const current = captureConfigurationScope(scope)
+    const assertCurrent = () => {
+      if (!mounted.current || !current()) throw Error("DEVELOPMENT_SCOPE_CHANGED")
+    }
+    creatorPending.current = true
+    setCreatorBusy(true)
+    setCreatorError("")
+    try {
+      await enterCreatorMode(
+        window.api.mods,
+        window.api.mods.development,
+        currentThreadId,
+        currentWorkspacePath,
+        assertCurrent
+      )
+      assertCurrent()
+      tourRef.current?.dismiss()
+      goToConfigurationThread(scope, requestComposerFocus)
+    } catch (error) {
+      if (mounted.current) setCreatorError(creatorEntryError(error))
+    } finally {
+      creatorPending.current = false
+      if (mounted.current) setCreatorBusy(false)
+    }
+  }
   const navigationScope = JSON.stringify([currentThreadId, currentWorkspacePath])
   const initialSectionRequest = useRef<string | null>(null)
   const [previousNavigationScope, setPreviousNavigationScope] = useState(navigationScope)
@@ -306,6 +378,7 @@ export function CustomizeView(): React.JSX.Element {
     setPreviousNavigationScope(navigationScope)
     setPracticeIntent(undefined)
     setModsNavigation(null)
+    setCreatorError("")
   }
 
   useEffect(() => {
@@ -431,35 +504,26 @@ export function CustomizeView(): React.JSX.Element {
       </div>
 
       <div className="relative flex min-w-0 min-h-0 flex-1 flex-col">
+        {["assistant", "mods", "claw", "flows", "evaluation"].includes(activeTab) && (
+          <ConfigurationTargetPicker threads={threads} />
+        )}
         <SparksTour
           ref={tourRef}
           onOpenChange={setTourOpen}
           activePage={activeTab}
           activeSection={tourModsSection}
-          visible={MENU_GROUPS[0].items.some((item) => item.tab === activeTab)}
-          onPractice={(task, suggestedName) => {
+          visible={["mods", "claw", "flows"].includes(activeTab)}
+          onPractice={(task) => {
             if (!currentThreadId) {
-              setActiveTab(task === "create" ? "mods" : task === "combine" ? "claw" : "assistant")
+              setActiveTab("assistant")
               return
             }
-            const intent = createPracticeIntent(task, {
-              threadId: currentThreadId,
-              workspace: currentWorkspacePath
-            })
-            if (suggestedName) intent.suggestedName = suggestedName
             if (task === "inspect") {
-              openBuiltinNavigation("diff", intent.scope)
-            } else if (task === "create") {
-              setActiveTab("mods")
-              setModsNavigation((previous) => ({
-                id: (previous?.id ?? 0) + 1,
-                scope: JSON.stringify([currentThreadId, currentWorkspacePath]),
-                section: "create",
-                practice: intent
-              }))
+              openBuiltinNavigation("diff", {
+                threadId: currentThreadId, workspace: currentWorkspacePath
+              })
             } else {
-              setPracticeIntent(intent)
-              setActiveTab("claw")
+              void startCreator()
             }
           }}
           onNavigate={(page, section) => {
@@ -475,10 +539,31 @@ export function CustomizeView(): React.JSX.Element {
         />
         <div
           className="flex min-w-0 min-h-0 flex-1"
-          inert={tourOpen}
+          inert={
+            tourOpen ||
+            (["mods", "claw", "flows", "evaluation"].includes(activeTab) &&
+              !!currentThreadId &&
+              !targetValid)
+          }
           aria-hidden={tourOpen || undefined}
         >
-          {activeTab === "assistant" && <AssistantWorkbench onNavigate={setActiveTab} />}
+          {activeTab === "assistant" && (
+            <AssistantWorkbench
+              onStartCreator={() => void startCreator()}
+              creatorBusy={creatorBusy}
+              creatorUnavailable={creatorUnavailable}
+              creatorError={creatorError}
+              onNavigate={(tab, section) => {
+                setActiveTab(tab)
+                if (tab === "mods" && section)
+                  setModsNavigation((previous) => ({
+                    id: (previous?.id ?? 0) + 1,
+                    scope: JSON.stringify([currentThreadId, currentWorkspacePath]),
+                    section
+                  }))
+              }}
+            />
+          )}
           <RetainedEditor
             key={JSON.stringify(["mods", currentThreadId, currentWorkspacePath])}
             active={activeTab === "mods"}
@@ -493,29 +578,24 @@ export function CustomizeView(): React.JSX.Element {
                   : undefined
               }
               developmentAllowed={isDevelopmentThreadMetadata(currentThread?.metadata)}
+              onStartCreator={() => void startCreator()}
+              creatorBusy={creatorBusy}
+              creatorUnavailable={creatorUnavailable}
+              creatorError={creatorError}
               threadId={currentThreadId}
               workspaceHint={currentWorkspacePath}
               onReturnToChat={() => {
-                requestComposerFocus()
-                setShowCustomizeView(false)
+                goToConfigurationThread(
+                  { threadId: currentThreadId, workspace: currentWorkspacePath },
+                  requestComposerFocus
+                )
               }}
               onOpenReuseThread={async (id) => {
+                const scope = { threadId: currentThreadId, workspace: currentWorkspacePath }
+                const current = captureConfigurationScope(scope)
                 await useAppStore.getState().loadThreads()
-                const state = useAppStore.getState()
-                const workspace =
-                  state.threads.find((thread) => thread.thread_id === state.currentThreadId)
-                    ?.metadata?.workspacePath ?? null
-                if (
-                  !mounted.current ||
-                  !state.showCustomizeView ||
-                  state.currentThreadId !== currentThreadId ||
-                  workspace !== currentWorkspacePath
-                )
-                  return
-                requestComposerFocus()
-                // selectThread synchronously selects the thread and closes this overlay.
-                // Do not close again after its promise settles: another settings session may open.
-                await state.selectThread(id)
+                if (!mounted.current || !current()) return
+                goToConfigurationThread(scope, requestComposerFocus, id)
               }}
             />
           </RetainedEditor>
@@ -570,15 +650,15 @@ export function CustomizeView(): React.JSX.Element {
             ) : activeTab === "heartbeat" ? (
               <HeartbeatPanel />
             ) : activeTab === "memory" ? (
-              <MemoryPanel workspacePath={currentWorkspacePath} />
+              <MemoryPanel workspacePath={chatWorkspacePath} />
             ) : activeTab === "taskMmd" ? (
-              <TaskMmdPanel currentThreadId={currentThreadId} threads={threads} />
+              <TaskMmdPanel currentThreadId={chatThreadId} threads={threads} />
             ) : activeTab === "evolution" ? (
               <EvolutionPanel />
             ) : activeTab === "robot" ? (
               <BuiltinRobotPanel />
             ) : activeTab === "lsp" ? (
-              <LspPanel threadId={currentThreadId} />
+              <LspPanel threadId={chatThreadId} />
             ) : activeTab === "sandbox" ? (
               <SandboxPanel />
             ) : activeTab === "userinfo" ? (

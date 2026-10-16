@@ -830,6 +830,10 @@ export interface PluginMetadata {
   mcpServerCount: number
   hookCount?: number
   modCount?: number
+  /** Display-only business implementation catalog count; never grants function runtime authority. */
+  businessModCount?: number
+  /** Display-only optional functions offered to the business plugin assembler. */
+  businessExtensionCount?: number
   /** Cached hooks config path relative to plugin root, read from manifest at install/inspect time. */
   hookPath?: string
   /**
@@ -968,6 +972,8 @@ export interface PluginMcpServerDetail {
 
 export interface PluginDetail {
   modCount?: number
+  businessModCount?: number
+  businessExtensionCount?: number
   skills: string[]
   mcpServers: string[]
   mcpServerDetails: PluginMcpServerDetail[]

@@ -3150,6 +3150,7 @@ interface CustomAPI {
       callback: (event: ManagedRunThreadCreatedEvent) => void
     ) => () => void
   }
+  businessModAssembly: import("../shared/business-mod-assembly-api").BusinessModAssemblyApi
   app: {
     restart: () => Promise<void>
   }

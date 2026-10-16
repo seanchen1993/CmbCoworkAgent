@@ -170,8 +170,8 @@ describe("practice handoff", () => {
   it("carries only human text and a scoped, unique intent into the real source picker", () => {
     const first = createPracticeIntent("create", { threadId: "one", workspace: "C:/project" })
     const second = createPracticeIntent("create", first.scope)
-    expect(first.target).toBe("derive-source")
-    expect(first.suggestedName).toBe("我的 AutoBiz")
+    expect(first.target).toBe("new-component")
+    expect(first.suggestedName).toBe("我的编辑提醒")
     expect(first.id).not.toBe(second.id)
     expect(first).not.toHaveProperty("pluginId")
     expect(

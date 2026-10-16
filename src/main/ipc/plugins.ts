@@ -1,3 +1,6 @@
+import { BUSINESS_MOD_MANIFEST } from "../../shared/business-mods"
+import { parseBusinessModCatalog } from "../plugins/business-mod-manifest"
+import { openStableFileHandle, readStableFileHandleBounded } from "../services/stable-file-handle"
 import { isCreatorVersionSource } from "../plugins/creator-path"
 import { isProjectModePluginRoot } from "../harness-board/plugin-mode"
 import { isPluginInstallMode, type PluginInstallMode, type PluginInstallResult } from "../../shared/plugin-install"
@@ -59,6 +62,8 @@ interface ParsedPlugin {
   hookCount: number
   hookPath: string
   modCount: number
+  businessModCount: number
+  businessExtensionCount: number
   name: string
 }
 
@@ -275,6 +280,24 @@ async function parsePluginDir(dirPath: string, fallbackName?: string): Promise<P
     await compileFunctionPlugin(dirPath)
     modCount++
   }
+  let businessModCount = 0
+  let businessExtensionCount = 0
+  if (existsSync(path.join(dirPath, BUSINESS_MOD_MANIFEST))) {
+    const manifestPath = resolveModFile(dirPath, BUSINESS_MOD_MANIFEST)
+    const opened = await openStableFileHandle(dirPath, manifestPath)
+    try {
+      const bytes = await readStableFileHandleBounded(opened, 256 * 1024)
+      const businessCatalog = parseBusinessModCatalog(JSON.parse(
+        new TextDecoder("utf-8", { fatal: true }).decode(bytes)
+      ))
+      businessModCount = businessCatalog.modules.length
+      businessExtensionCount = businessCatalog.extensions?.length ?? 0
+      if (resolveModFile(dirPath, BUSINESS_MOD_MANIFEST) !== manifestPath)
+        throw Error("业务 Mods 声明读取期间已变化")
+    } finally {
+      await opened.handle.close()
+    }
+  }
 
   return {
     manifest,
@@ -285,6 +308,8 @@ async function parsePluginDir(dirPath: string, fallbackName?: string): Promise<P
     hookCount,
     hookPath,
     modCount,
+    businessModCount,
+    businessExtensionCount,
     name
   }
 }
@@ -299,7 +324,7 @@ function formatAuthor(author: PluginManifest["author"]): string {
 export async function inspectCompletePluginDirectory(directory: string): Promise<void> {
   const parsed = await parsePluginDir(directory)
   if (!parsed.skillNames.length && !Object.keys(parsed.mcpConfigs).length &&
-    !parsed.hookCount && !parsed.modCount) throw Error("插件没有可识别的技能、Hooks、MCP 或模块")
+    !parsed.hookCount && !parsed.modCount && !parsed.businessModCount && !parsed.businessExtensionCount) throw Error("插件没有可识别的技能、Hooks、MCP 或模块")
 }
 
 /** External callers share the same writer queue as the Plugin IPC handlers. */
@@ -396,7 +421,7 @@ async function installPluginFromDirLocked(
       parsed.skillNames.length === 0 &&
       Object.keys(parsed.mcpConfigs).length === 0 &&
       parsed.hookCount === 0 &&
-      parsed.modCount === 0
+      parsed.modCount === 0 && parsed.businessModCount === 0 && parsed.businessExtensionCount === 0
     ) {
       return { success: false, error: "未检测到有效的 skills、MCP 配置、hooks 或 CMB Mods 清单" }
     }
@@ -509,6 +534,8 @@ async function installPluginFromDirLocked(
       hookCount: parsed.hookCount,
       hookPath: parsed.hookPath,
       ...(parsed.modCount ? { modCount: parsed.modCount } : {}),
+      ...(parsed.businessModCount ? { businessModCount: parsed.businessModCount } : {}),
+      ...(parsed.businessExtensionCount ? { businessExtensionCount: parsed.businessExtensionCount } : {}),
       origin: resolvedOrigin,
       createdAt: existing?.createdAt ?? now,
       updatedAt: now
@@ -567,7 +594,7 @@ async function selectExtractedPluginRoot(tempDir: string): Promise<string> {
       parsed.skillNames.length > 0 ||
       Object.keys(parsed.mcpConfigs).length > 0 ||
       parsed.hookCount > 0 ||
-      parsed.modCount > 0
+      parsed.modCount > 0 || parsed.businessModCount > 0 || parsed.businessExtensionCount > 0
     ) {
       validCandidates.push(candidate)
     }
@@ -732,6 +759,8 @@ export async function inspectPluginZip(buffer: ArrayBuffer): Promise<PluginDetai
       mcpServerDetails: parsed.mcpServerDetails,
       hookCount: parsed.hookCount,
       modCount: parsed.modCount,
+      businessModCount: parsed.businessModCount,
+      businessExtensionCount: parsed.businessExtensionCount,
       // Uninstalled plugins have no per-hook enable metadata; only the count
       // is meaningful here. The detail panel reads hookCount for the summary.
       hooks: [],
@@ -1018,6 +1047,9 @@ export function registerPluginHandlers(ipcMain: IpcMain): void {
         mcpServers: Object.keys(parsed.mcpConfigs),
         mcpServerDetails: parsed.mcpServerDetails,
         hookCount: parsed.hookCount,
+        modCount: parsed.modCount,
+        businessModCount: parsed.businessModCount,
+        businessExtensionCount: parsed.businessExtensionCount,
         hooks: getPluginHooks(plugin.id),
         manifest: parsed.manifest
       }

@@ -1,3 +1,4 @@
+import { createBusinessModAssemblyBridge } from "./business-mod-assembly"
 import type { PluginInstallMode, PluginInstallResult } from "../shared/plugin-install"
 import { WINDOW_PRESENTATION_CHANGED, WINDOW_PRESENTATION_READ, type WindowPresentationSnapshot } from "../shared/window-presentation"
 import { createCommunityExamplesBridge } from "./community-examples"
@@ -4900,6 +4901,7 @@ const api = {
       return () => ipcRenderer.removeListener("harnessBoard:managedRunThreadCreated", handler)
     }
   },
+  businessModAssembly: createBusinessModAssemblyBridge((channel, input) => ipcRenderer.invoke(channel, input)),
   app: {
     restart: (): Promise<void> => ipcRenderer.invoke("app:restart") as Promise<void>
   },

@@ -1,4 +1,5 @@
 import { PluginDerivationPanel } from "./PluginDerivationPanel"
+import { BusinessModAssemblyPanel } from "./BusinessModAssemblyPanel"
 import {
   sameSimpleAuthoringScope,
   type SimpleAuthoringPracticeIntent
@@ -9,9 +10,12 @@ import { normalizeWorkspacePathKey } from "../../../../shared/workspace-path"
 import { Button } from "@/components/ui/button"
 import { useAppStore } from "@/lib/store"
 import { openClawSidebar } from "@/lib/claw-sidebar"
+import { goToConfigurationThread, useConfigurationDraft } from "@/lib/configuration-target"
 import { openDerivedProject } from "@/lib/derived-project-intent"
 import { openPluginSettings } from "@/lib/plugin-settings-intent"
 import { useFeatureGate } from "@/lib/feature-gates"
+import { installedModUseState } from "@/lib/installed-mod-use-state"
+import type { ClawView } from "../../../../shared/mods/claw"
 import { FEATURE_GATES } from "../../../../shared/feature-gates"
 import type { PluginInstallResult } from "../../../../shared/plugin-install"
 import { ModCreator } from "./ModCreator"
@@ -47,6 +51,10 @@ export function ModsPanel({
   threadId,
   workspaceHint,
   onReturnToChat,
+  onStartCreator,
+  creatorBusy = false,
+  creatorUnavailable,
+  creatorError,
   onOpenReuseThread,
   developmentAllowed,
   active = true,
@@ -56,6 +64,10 @@ export function ModsPanel({
   threadId: string | null
   workspaceHint?: string | null
   onReturnToChat?: () => void
+  onStartCreator?: () => void
+  creatorBusy?: boolean
+  creatorUnavailable?: string
+  creatorError?: string
   onOpenReuseThread?: (threadId: string) => Promise<void>
   developmentAllowed?: boolean
   active?: boolean
@@ -66,9 +78,10 @@ export function ModsPanel({
   }
   onSectionChange?: (section: "examples" | "create" | "installed") => void
 }): React.JSX.Element {
-  const [section, setSection] = useState<"examples" | "create" | "installed">("examples")
+  const [section, setSection] = useState<"examples" | "create" | "installed">("create")
   const [advanced, setAdvanced] = useState(false)
-  const [createKind, setCreateKind] = useState<"new" | "derive">("new")
+  const [manualOpen, setManualOpen] = useState(false)
+  const [createKind, setCreateKind] = useState<"new" | "derive" | "assemble">("new")
   const [sourceRequest, setSourceRequest] = useState<{
     id: string
     pluginId: string
@@ -82,15 +95,30 @@ export function ModsPanel({
   if (active && navigationRequest && navigationRequest.id !== consumedNavigation) {
     setConsumedNavigation(navigationRequest.id)
     setSection(navigationRequest.section)
-    if (navigationRequest.section === "create") setAdvanced(false)
+    if (navigationRequest.section === "create") {
+      setAdvanced(false)
+      setManualOpen(false)
+    }
     if (
       navigationRequest.practice?.target === "derive-source" &&
       sameSimpleAuthoringScope(navigationRequest.practice.scope, {
         threadId,
         workspace: workspaceHint
       })
-    )
+    ) {
       setCreateKind("derive")
+      setManualOpen(true)
+    }
+    if (
+      navigationRequest.practice?.target === "new-component" &&
+      sameSimpleAuthoringScope(navigationRequest.practice.scope, {
+        threadId,
+        workspace: workspaceHint
+      })
+    ) {
+      setCreateKind("new")
+      setManualOpen(true)
+    }
   }
   const selectionScope = JSON.stringify([threadId, workspaceHint])
   useEffect(
@@ -99,11 +127,13 @@ export function ModsPanel({
         if (readReuseSelection(selectionScope)) {
           setSection("create")
           setAdvanced(false)
+          setCreateKind("new")
+          setManualOpen(true)
         }
       }),
     [selectionScope]
   )
-  const editorActive = section === "create"
+  const editorActive = section === "create" && manualOpen
   const chooseSection = (next: typeof section) => {
     setSection(next)
     if (next === "installed") setSettingsVisited(true)
@@ -114,11 +144,13 @@ export function ModsPanel({
         <h1 className="text-xl font-semibold">灵件</h1>
         <SparksDocumentationLink />
       </div>
-      <p className="text-sm text-muted-foreground">为聊天添加新功能，或制作自己的插件。</p>
+      <p className="text-sm text-muted-foreground">
+        直接在创造者模式描述需求，也可以浏览示例或管理已有灵件。
+      </p>
       <div className="rounded-lg bg-muted/40 px-4 py-3 text-xs text-muted-foreground">
         <p>
           {threadId
-            ? "选好后确认权限，即可在这段聊天中使用。"
+            ? "添加后核对这段聊天的权限和使用设置；授权与应用状态分别显示。"
             : "可以先添加灵件；使用时需要打开聊天。"}
         </p>
         <p className="mt-1 break-all">
@@ -130,9 +162,9 @@ export function ModsPanel({
       <nav aria-label="灵件工作区" className="flex flex-wrap gap-1 border-b pb-3">
         {(
           [
+            ["create", "对话创作"],
             ["examples", "挑选使用"],
-            ["installed", "我已添加"],
-            ["create", "自己制作"]
+            ["installed", "我已添加"]
           ] as const
         ).map(([id, label]) => (
           <Button
@@ -155,8 +187,52 @@ export function ModsPanel({
           onInstalled={() => useAppStore.getState().bumpPluginVersion()}
         />
       )}
+      {section === "create" && (
+        <section className="space-y-3 rounded-xl border border-primary/20 bg-primary/5 p-5">
+          <h2 className="font-semibold">一句话，制作或组合你需要的灵件</h2>
+          <p className="text-sm leading-6 text-muted-foreground">
+            进入创造者模式后，告诉助手你想改变什么。生成新灵件、调整已有功能、组合多个灵件并应用，都可以在聊天中完成。
+          </p>
+          {onStartCreator ? (
+            <Button onClick={onStartCreator} disabled={creatorBusy || !!creatorUnavailable}>
+              {creatorBusy ? "正在进入创造者模式…" : "进入创造者模式"}
+            </Button>
+          ) : (
+            <Button onClick={onReturnToChat} disabled={!onReturnToChat || !threadId}>
+              返回聊天选择创造者模式
+            </Button>
+          )}
+          {creatorUnavailable && (
+            <p className="text-sm text-muted-foreground">{creatorUnavailable}</p>
+          )}
+          {creatorError && (
+            <p role="alert" className="text-sm text-destructive">
+              {creatorError}
+            </p>
+          )}
+          <p className="text-xs leading-5 text-muted-foreground">
+            需要新权限时会请你确认，当前任务结束后应用到这段聊天。
+          </p>
+        </section>
+      )}
+      {section === "create" && (
+        <Button
+          variant="ghost"
+          size="sm"
+          aria-expanded={manualOpen}
+          onClick={() => setManualOpen(!manualOpen)}
+        >
+          {manualOpen ? "收起高级手动编辑" : "高级：手动组装、源码与历史版本"}
+        </Button>
+      )}
       <div hidden={!editorActive} inert={!editorActive}>
         <div className="mb-4 flex flex-wrap gap-2" aria-label="制作方式">
+          <Button
+            variant={createKind === "assemble" ? "secondary" : "outline"}
+            onClick={() => setCreateKind("assemble")}
+          >
+            从 Mods 组装
+          </Button>
           <Button
             variant={createKind === "derive" ? "secondary" : "outline"}
             onClick={() => setCreateKind("derive")}
@@ -169,6 +245,13 @@ export function ModsPanel({
           >
             描述新功能
           </Button>
+        </div>
+        <div hidden={createKind !== "assemble"} inert={createKind !== "assemble"}>
+          <BusinessModAssemblyPanel
+            threadId={threadId}
+            workspace={workspaceHint}
+            active={active && editorActive && createKind === "assemble"}
+          />
         </div>
         <div hidden={createKind !== "derive"} inert={createKind !== "derive"}>
           <PluginDerivationPanel
@@ -204,6 +287,10 @@ export function ModsPanel({
         </div>
       </div>
       <div hidden={section !== "installed"} inert={section !== "installed"}>
+        <p className="mb-3 text-xs leading-5 text-muted-foreground">
+          这里列出已添加的插件。未应用常用搭配时按已授权的默认设置使用；有搭配时以所选聊天的实际应用版本为准。
+          插件启停属于应用管理，会影响使用它的其他聊天。
+        </p>
         {settingsVisited && (
           <ModsSettings
             key={JSON.stringify([threadId, normalizeWorkspacePathKey(workspaceHint)])}
@@ -213,11 +300,13 @@ export function ModsPanel({
             onDerive={(plugin) => {
               setSourceRequest({ id: crypto.randomUUID(), pluginId: plugin.id, name: plugin.name })
               setCreateKind("derive")
+              setManualOpen(true)
               setSection("create")
             }}
           />
         )}
       </div>
+      
       {section === "create" && (
         <details className="rounded-xl border p-4">
           <summary className="cursor-pointer text-sm font-medium">灵件使用指南</summary>
@@ -252,17 +341,22 @@ export function ModsSettings({
     if (!active) setDeleteTarget(null)
   }, [active])
   const [status, setStatus] = useState<ModWorkspaceStatus | null>(null)
+  const [usage, setUsage] = useState<ClawView | null>(null)
+  const [usageReadFailed, setUsageReadFailed] = useState(false)
   const [globalEnabled, setGlobalEnabled] = useState(false)
   const [globalLoaded, setGlobalLoaded] = useState(false)
   const [readFailed, setReadFailed] = useState(false)
   const [error, setError] = useState("")
   const [busy, setBusy] = useState(false)
+  useConfigurationDraft({ threadId, workspace: workspaceHint ?? null }, false, busy)
   const alive = useRef(false)
   const running = useRef(false)
   const readVersion = useRef(0)
   const installedMods = installed.filter(
     (plugin) =>
       (plugin.modCount ?? 0) > 0 ||
+      (plugin.businessModCount ?? 0) > 0 ||
+      (plugin.businessExtensionCount ?? 0) > 0 ||
       status?.functionMods?.some((mod) => mod.pluginId === plugin.id) ||
       status?.mods.some((mod) => mod.pluginId === plugin.id)
   )
@@ -275,10 +369,13 @@ export function ModsSettings({
   const refresh = useCallback(async () => {
     const version = ++readVersion.current
     try {
-      const [plugins, enabled, workspace] = await Promise.allSettled([
+      const [plugins, enabled, workspace, currentUsage] = await Promise.allSettled([
         window.api.plugins.list(),
         window.api.mods.globalEnabled(),
-        readWorkspaceStatus(threadId)
+        readWorkspaceStatus(threadId),
+        threadId && typeof window.api.mods.clawView === "function"
+          ? window.api.mods.clawView(threadId)
+          : Promise.resolve(null)
       ])
       if (!alive.current || version !== readVersion.current) return
       if (
@@ -293,6 +390,8 @@ export function ModsSettings({
       }
       if (plugins.status === "fulfilled") setInstalled(plugins.value)
       if (enabled.status === "fulfilled") setGlobalEnabled(enabled.value)
+      if (currentUsage.status === "fulfilled") setUsage(currentUsage.value ?? null)
+      setUsageReadFailed(currentUsage.status === "rejected")
       setGlobalLoaded(enabled.status === "fulfilled")
       setStatus(workspace.status === "fulfilled" ? workspace.value : null)
       const failures = [
@@ -353,7 +452,7 @@ export function ModsSettings({
       <div className="space-y-1">
         <h2 className="font-semibold">我已添加</h2>
         <p className="text-sm text-muted-foreground">
-          AutoBiz 等项目插件和灵件都可以在这里安装。安装后，按插件卡片上的提示继续使用。
+          查看已添加的功能及所选聊天的实际使用状态。插件启停会影响使用它的其他聊天。
         </p>
       </div>
       {installedMods.length > 0 && (
@@ -477,6 +576,12 @@ export function ModsSettings({
               {plugin.skillCount} 项技能 · {plugin.hookCount ?? 0} 项自动检查
               {` · ${plugin.mcpServerCount} 个工具连接`}
               {(plugin.modCount ?? 0) > 0 ? ` · ${plugin.modCount} 个灵件模块` : ""}
+              {(plugin.businessModCount ?? 0) > 0
+                ? ` · ${plugin.businessModCount} 个可组合业务 Mods`
+                : ""}
+              {(plugin.businessExtensionCount ?? 0) > 0
+                ? ` · ${plugin.businessExtensionCount} 个可组合常驻扩展`
+                : ""}
               {plugin.hasProjectMode ? " · 支持项目模式" : ""}
             </p>
             <div className="flex flex-wrap gap-2">
@@ -587,7 +692,8 @@ export function ModsSettings({
             <DialogTitle>卸载插件</DialogTitle>
             <DialogDescription>
               确认卸载「{deleteTarget?.name}」的整个来源插件？其中的灵件、技能、工具连接和自动检查
-              会一并移除，相关命令与面板停止运行；其他插件保留。审计记录和已保存的灵件 数据不清除。
+              会一并移除，相关命令与面板停止运行；其他插件保留。聊天记录不受影响，当前组合会移除该插件的灵件引用。
+              已保存的搭配和流程模板保留，复用时需重新核对来源。审计记录和已保存的灵件数据不清除。
             </DialogDescription>
           </DialogHeader>
           {error && <SparksOperationError message={error} />}
@@ -701,18 +807,19 @@ export function ModsSettings({
           <details className="rounded-xl border p-4">
             <summary className="cursor-pointer text-sm">查看进度或排查问题</summary>
             <p className="my-3 text-xs text-muted-foreground">
-              步骤结果、检查记录和项目调用记录已集中到聊天右侧的“运行过程”。
+              在聊天中描述需求并发送，在原任务卡或“任务进展”查看状态、待确认事项和结果。插件面板在“结果”中，技术记录可展开排查详情。
             </p>
             <Button
               type="button"
               size="sm"
               variant="outline"
               onClick={() => {
-                useAppStore.getState().setShowCustomizeView(false)
-                openClawSidebar("results")
+                goToConfigurationThread({ threadId, workspace: status.workspace }, () =>
+                  openClawSidebar("results")
+                )
               }}
             >
-              打开运行过程
+              去这段聊天查看记录
             </Button>
           </details>
           {(status.functionMods?.length ?? 0) > 0 && (
@@ -745,6 +852,15 @@ export function ModsSettings({
                         }
                       </span>
                     </div>
+                    <p role="status" className="text-sm font-medium" data-plugin-use-state>
+                      {installedModUseState(
+                        mod,
+                        status.workspace,
+                        globalEnabled && status.enabled,
+                        usage,
+                        usageReadFailed
+                      )}
+                    </p>
                     <p className="text-xs leading-relaxed text-muted-foreground">
                       可读取项目、扩展工具与界面、调用已配置的模型。模型调用产生实际用量；写文件与执行命令仍需批准最终参数。
                     </p>

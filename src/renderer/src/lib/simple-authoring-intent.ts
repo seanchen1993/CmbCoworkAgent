@@ -10,7 +10,7 @@ export interface SimpleAuthoringPracticeIntent {
   id: string
   scope: SimpleAuthoringScope
   task: "create" | "combine" | "inspect"
-  target: "derive-source" | "simple-combination" | "diff" | "runs"
+  target: "new-component" | "derive-source" | "simple-combination" | "diff" | "runs"
   suggestedName?: string
   suggestedText?: string
 }
@@ -34,8 +34,8 @@ export function createPracticeIntent(
     scope,
     task,
     target:
-      task === "create" ? "derive-source" : task === "combine" ? "simple-combination" : "diff",
-    ...(task === "create" ? { suggestedName: "我的 AutoBiz" } : {}),
+      task === "create" ? "new-component" : task === "combine" ? "simple-combination" : "diff",
+    ...(task === "create" ? { suggestedName: "我的编辑提醒" } : {}),
     ...(task === "combine" ? { suggestedName: "我的文件检视助手" } : {})
   }
 }
