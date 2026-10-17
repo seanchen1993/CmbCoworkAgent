@@ -2,6 +2,7 @@ import { randomUUID } from "crypto"
 import { BrowserWindow } from "electron"
 import type { UserInputQuestion, UserInputRequest, UserInputResponse } from "../types"
 import { emitAppAttention } from "../app-attention-events"
+import { hasAgentStreamSink } from "../agent/agent-stream-sinks"
 
 interface AutoResolvedUserInputResponse {
   requestId: string
@@ -131,8 +132,10 @@ export function requestUserInput(params: RequestUserInputParams): Promise<UserIn
     autoResolutionMs,
     autoResolution,
     abortSignal,
-    allowDeferredRenderer = false
+    allowDeferredRenderer: configuredDeferredRenderer = false
   } = params
+  // Both HTTP execution paths have a live SSE sink before the tool starts.
+  const allowDeferredRenderer = configuredDeferredRenderer || hasAgentStreamSink(threadId)
   if (abortSignal?.aborted) {
     return Promise.reject(new Error("User input request was cancelled before it was shown."))
   }

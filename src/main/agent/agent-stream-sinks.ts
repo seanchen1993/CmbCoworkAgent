@@ -6,9 +6,10 @@
  * gateway needs the SAME payloads to relay them to a remote SSE client, but it
  * has no window.
  *
- * This registry is a display-only tap: the agent code forwards a copy of every
- * stream payload here (keyed by thread id), and any registered sink — e.g. an
- * SSE response writer — receives it. When no sink is registered for a thread
+ * The agent code forwards a copy of every stream payload here (keyed by thread
+ * id), and any registered sink — e.g. an SSE response writer — receives it.
+ * An active HTTP sink also lets user input wait without a desktop acknowledgement.
+ * When no sink is registered for a thread
  * (the normal renderer-only path), forwarding is a cheap no-op, so the tap has
  * zero impact on local usage.
  *
