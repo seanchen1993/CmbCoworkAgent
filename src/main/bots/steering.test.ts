@@ -10,8 +10,8 @@ function fixture() {
   const db = new NativeSqliteAdapter(new DatabaseSync(":memory:"))
   const store = new BotStore(db)
   const bot = store.create({ name: "Synthetic", instructions: "", color: "#ea2845", modelRef: null })
-  let finish!: (value: { state: "completed"; result: string }) => void
-  const pending = new Promise<{ state: "completed"; result: string }>((resolve) => { finish = resolve })
+  let finish!: (value: { state: "completed" | "superseded"; result: string }) => void
+  const pending = new Promise<{ state: "completed" | "superseded"; result: string }>((resolve) => { finish = resolve })
   const injections = new Map<string, () => boolean>()
   const steer = vi.fn<NonNullable<BotRunLease["steer"]>>(async (task, inject) => {
     injections.set(task.id, inject)
@@ -36,6 +36,33 @@ async function running(f: ReturnType<typeof fixture>) {
 }
 
 describe("Bot messages during a user run", () => {
+  it("preserves every unconsumed inbox message when its model round is superseded", async () => {
+    const f = fixture(),
+      root = await running(f)
+    f.steer.mockResolvedValue(false)
+    const first = f.host.send({
+      botId: f.bot.id,
+      requestId: "correction-1",
+      message: "Keep the original goal and add tests"
+    })
+    const second = f.host.send({
+      botId: f.bot.id,
+      requestId: "correction-2",
+      message: "Also deliver the files"
+    })
+    await vi.waitFor(() => expect(f.steer).toHaveBeenCalledTimes(2))
+    f.finish({ state: "superseded", result: "" })
+    await vi.waitFor(() => expect(f.store.getTask(root.id).state).toBe("superseded"))
+    expect(f.store.getTask(root.id).message).toBe("Original goal")
+    for (const inbox of [first, second]) {
+      expect(f.store.getTask(inbox.id)).toMatchObject({
+        state: "queued",
+        message: inbox.message,
+        requestId: inbox.requestId
+      })
+    }
+    expect(f.store.nextQueued([])?.id).toBe(first.id)
+  })
   it("delivers the first direct request into a running introduction with durable ownership", async () => {
     const f = fixture()
     f.host.introduce(f.bot.id)

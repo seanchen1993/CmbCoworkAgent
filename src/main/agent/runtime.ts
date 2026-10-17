@@ -2405,6 +2405,7 @@ function assembleDeepAgent(
     threadId,
     onTaskSubagentPromptsResolved,
     currentRunMessageQueueOwnerToken,
+    onPrimaryModelRequestState,
     soloTaskTraceManager,
     actionStationarityTurnId,
     // PR-12 — optional callback fired-and-forgotten by toolErrorMiddleware
@@ -3334,7 +3335,10 @@ function assembleDeepAgent(
       // summarization (injected turns should participate in context management)
       // and BEFORE humanInTheLoop (a steered message must never race a pending
       // tool-approval interrupt). See createCurrentRunMessageQueueMiddleware.
-      createCurrentRunMessageQueueMiddleware(currentRunMessageQueueOwnerToken),
+      createCurrentRunMessageQueueMiddleware(
+        currentRunMessageQueueOwnerToken,
+        onPrimaryModelRequestState
+      ),
       mainSummarizationController.middleware,
       anthropicPromptCachingMiddleware({ unsupportedModelBehavior: "ignore" }),
       // Recover from malformed/truncated tool-call JSON (deepseek et al.): promote
@@ -4793,6 +4797,8 @@ export interface CreateAgentRuntimeOptions {
   /** Physical foreground run token allowed to drain the current-run steer queue.
    * Doubles as the turn-completion gate's run key (same physical run). */
   currentRunMessageQueueOwnerToken?: string
+  /** Foreground model call only; not inherited by compaction, workers or subagents. */
+  onPrimaryModelRequestState?: (active: boolean) => void
   /** Physical Mods observation owner, independent of foreground steering and sandbox ACLs. */
   modTurnRunId?: string
   /** Notice sink for turn-completion-gate recoveries (empty reply retried, …). */
@@ -7552,6 +7558,7 @@ Access limits: read-only handoff continuation. Do not modify files, run commands
     },
     threadId: options.threadId,
     currentRunMessageQueueOwnerToken: options.currentRunMessageQueueOwnerToken,
+    onPrimaryModelRequestState: options.onPrimaryModelRequestState,
     onTurnCompletionRecovery: options.onTurnCompletionRecovery,
     turnCompletionTodoGateEnabled: options.turnCompletionTodoGateEnabled,
     soloTaskTraceManager,

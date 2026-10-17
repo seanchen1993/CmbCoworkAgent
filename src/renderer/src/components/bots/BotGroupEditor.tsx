@@ -18,6 +18,7 @@ export function BotGroupEditor({
   bots,
   client,
   nameOnly = false,
+  returnFocusTo,
   onClose,
   onSaved
 }: {
@@ -25,6 +26,7 @@ export function BotGroupEditor({
   bots: BotDefinition[]
   client: BotClient
   nameOnly?: boolean
+  returnFocusTo?: HTMLElement | null
   onClose(): void
   onSaved(group: BotGroup): void
 }) {
@@ -34,7 +36,7 @@ export function BotGroupEditor({
     [error, setError] = useState<string | null>(null)
   const [deleting, setDeleting] = useState(Boolean(group?.deleting))
   const lock = useRef(false)
-  const trigger = useRef(document.activeElement)
+  const trigger = useRef(returnFocusTo ?? document.activeElement)
   const save = async (event: React.FormEvent) => {
     event.preventDefault()
     if (lock.current) return

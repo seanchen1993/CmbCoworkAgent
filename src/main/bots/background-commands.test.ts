@@ -32,31 +32,45 @@ function fixture() {
 }
 
 describe("Bot native command receipts", () => {
-  it("continues an original user's profile update through its own completed command receipt", () => {
+  it.each(["completed", "superseded"] as const)(
+    "continues the original user's profile update after a %s model round",
+    (state) => {
+      const { store, bot, task, command, result } = fixture()
+      const peer = store.create({
+        name: "Reviewer",
+        instructions: "Keep this role",
+        color: "#123456",
+        modelRef: "custom:peer"
+      })
+      store.acceptCommand(task.id, command)
+      store.transition(task.id, state)
+      store.settleCommand(result)
+      const notice = store.nextQueued([])!
+      store.transition(notice.id, "running")
+      expect(store.updateTeammate(notice.id, peer.id, { name: "Renamed" })).toMatchObject({
+        ...peer,
+        name: "Renamed",
+        version: peer.version + 1,
+        updatedAt: expect.any(Number)
+      })
+      expect(store.updateOwnProfile(notice.id, { name: "Local renamed" }).name).toBe(
+        "Local renamed"
+      )
+      expect(store.hasDirectUserRequest(notice.id)).toBe(false)
+      expect(() =>
+        store.createTeammate(notice.id, "new", { name: "New", instructions: "Review" })
+      ).toThrow("当前用户直接交办")
+      expect(store.getBot(bot.id).threadId).toBe(bot.threadId)
+    }
+  )
+
+  it("still suppresses a superseded round's command after an explicit stop", () => {
     const { store, bot, task, command, result } = fixture()
-    const peer = store.create({
-      name: "Reviewer",
-      instructions: "Keep this role",
-      color: "#123456",
-      modelRef: "custom:peer"
-    })
     store.acceptCommand(task.id, command)
-    store.transition(task.id, "completed")
+    store.transition(task.id, "superseded")
+    store.suppressCommands(bot.threadId)
     store.settleCommand(result)
-    const notice = store.nextQueued([])!
-    store.transition(notice.id, "running")
-    expect(store.updateTeammate(notice.id, peer.id, { name: "Renamed" })).toMatchObject({
-      ...peer,
-      name: "Renamed",
-      version: peer.version + 1,
-      updatedAt: expect.any(Number)
-    })
-    expect(store.updateOwnProfile(notice.id, { name: "Local renamed" }).name).toBe("Local renamed")
-    expect(store.hasDirectUserRequest(notice.id)).toBe(false)
-    expect(() =>
-      store.createTeammate(notice.id, "new", { name: "New", instructions: "Review" })
-    ).toThrow("当前用户直接交办")
-    expect(store.getBot(bot.id).threadId).toBe(bot.threadId)
+    expect(store.nextQueued([])).toBeNull()
   })
 
   it.each([

@@ -23,7 +23,7 @@ import {
   createBotCollaborationTools
 } from "./tools"
 import { parseBotFileDelivery } from "../../shared/bots/file-delivery"
-import type { BotBrowserService } from "./browser"
+import { BotBrowserActionError, type BotBrowserService } from "./browser"
 import { ToolMessage } from "@langchain/core/messages"
 
 it("keeps teammate creation unavailable to command continuations", () => {
@@ -281,6 +281,34 @@ it("exposes human browser help as a dedicated scope-bound tool with original err
   await expect(help.invoke({ instruction: "缺少目标" })).rejects.toThrow()
   controller.abort(new Error("cancelled"))
   await expect(help.invoke(call)).rejects.toThrow("cancelled")
+})
+
+it("returns the owned target for authorized cleanup while keeping a failed action an error", async () => {
+  const cause = new Error("page.goto: Timeout 20000ms exceeded")
+  const act = vi
+    .fn()
+    .mockRejectedValue(new BotBrowserActionError(cause, "owned-page", "about:blank"))
+  const [browser] = createBotBrowserTools(
+    { id: "private" } as BotDefinition,
+    { act } as unknown as BotBrowserService,
+    new AbortController().signal,
+    vi.fn()
+  )
+  const result = await browser.invoke({
+    type: "tool_call",
+    id: "failed-navigation",
+    name: "bot_browser",
+    args: { action: "navigate", url: "https://example.test/slow" }
+  })
+  expect(result).toBeInstanceOf(ToolMessage)
+  expect(result.status).toBe("error")
+  expect(JSON.parse(result.content)).toMatchObject({
+    ok: false,
+    error: cause.message,
+    pageId: "owned-page",
+    url: "about:blank"
+  })
+  expect(JSON.parse(result.content).recovery).toContain("For authorized cleanup")
 })
 
 it("preserves browser failure status through the standard Runtime tool-result format", async () => {

@@ -91,6 +91,7 @@ export type BotTaskState =
   | "failed"
   | "cancelled"
   | "interrupted"
+  | "superseded"
   | "outcome_unknown"
 
 export interface BotTask {
@@ -135,6 +136,7 @@ export function botTaskStateLabel(state: BotTaskState): string {
     failed: "执行失败",
     cancelled: "已停止",
     interrupted: "执行已中断",
+    superseded: "已由新消息接续",
     outcome_unknown: "执行结果待确认"
   }[state]
 }

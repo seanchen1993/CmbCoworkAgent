@@ -175,6 +175,9 @@ export function createLocalBotRunPort(
       })
       if (!claim.acquired) return null
       const supplementalMessages = new Map<string, string>()
+      let interruptModel: (() => boolean) | undefined
+      let superseded = false
+      let interactionWaits = 0
       return {
         async steer(message, beforeInject) {
           // A peer, routine or group run has a different prompt and result owner.
@@ -186,6 +189,12 @@ export function createLocalBotRunPort(
             task.botId !== message.botId
           )
             return false
+          if (superseded) return false
+          if (interactionWaits === 0 && interruptModel?.()) {
+            superseded = true
+            // The inbox entry stays queued. The original host starts it after cleanup and lease release.
+            return false
+          }
           const result = await steerAgentRun({
             threadId: task.threadId,
             owner: "bot",
@@ -208,7 +217,11 @@ export function createLocalBotRunPort(
           releaseLocalThreadRunLease(task.threadId, "bot", task.id)
           pendingNotificationScheduler.requestCheck(task.threadId)
         },
-        async execute(signal, waiting) {
+        async execute(signal, onWaiting) {
+          const waiting = (active: boolean): void => {
+            interactionWaits = Math.max(0, interactionWaits + (active ? 1 : -1))
+            onWaiting(active)
+          }
           signal.throwIfAborted()
           const workspacePath = prepareBotThread(bot, task)
           const peerReplyFiles =
@@ -409,13 +422,26 @@ export function createLocalBotRunPort(
                   terminal = outcome
                 },
                 onSteeringReady: () => getHost().onSteeringReady(task.id),
+                onModelRequestState:
+                  task.origin.kind === "user" || task.origin.kind === "introduction"
+                    ? (interrupt) => {
+                        interruptModel = interrupt
+                      }
+                    : undefined,
                 onFinalAssistant: (output) => {
                   finalText = output.finalText
                 }
               }
             )
           )
-          await handle.completion
+          try {
+            await handle.completion
+          } catch (error) {
+            if (!superseded) throw error
+          } finally {
+            interruptModel = undefined
+          }
+          if (superseded) return { state: "superseded" }
           if (terminal?.outcome === "success") {
             if (
               task.origin.kind === "bot" &&

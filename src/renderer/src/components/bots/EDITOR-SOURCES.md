@@ -51,6 +51,12 @@ Grok `sand-floating-primitives.tsx` uses the same connected-opener check and
 menu trigger, while direct role editing returns to its own button. No shared
 dialog or additional focus listener is introduced.
 
+The same connected-opener rule covers Bot/group rename and delete confirmations.
+Their sidebar context menus pass the persistent Radix trigger to the existing
+dialog; the outgoing menu suppresses its own focus return while opening the dialog.
+The profile delete confirmation returns to its persistent profile menu trigger.
+No shared dialog, focus manager, or backend mutation behavior is changed.
+
 The private-memory sharing recipient picker reuses CMB's existing Radix Select,
 as BotEditor and BotSchedulePanel already do. The recovered Grok
 `sand-floating-primitives.tsx` (`SandSelect`) and its CSS inform the bounded,

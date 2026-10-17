@@ -7984,6 +7984,24 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               threadId,
               outputStyle: getRequestedOutputStyle(metadata),
               currentRunMessageQueueOwnerToken: runToken,
+              onPrimaryModelRequestState:
+                runExecutionContext.source === "bot" && runExecutionContext.onModelRequestState
+                  ? (active) =>
+                      runExecutionContext.onModelRequestState!(
+                        active
+                          ? () => {
+                              if (
+                                activeRuns.get(threadId) !== abortController ||
+                                abortController.signal.aborted
+                              )
+                                return false
+                              // Supersede only this round; detached commands keep their owner.
+                              abortController.abort()
+                              return true
+                            }
+                          : undefined
+                      )
+                  : undefined,
               workspacePath,
               coordinatorTurnPrompt,
               coordinatorSelectedSkill,

@@ -169,6 +169,9 @@ export interface AgentRunExecutionContext {
   onRunCancelled?: () => void
   /** The original user-prompt/steer pipeline is ready; trusted inboxes can offer saved messages. */
   onSteeringReady?: () => void
+  /** Trusted Bot inbox only: the exact active main-model round can be superseded.
+   * Undefined ends that opportunity; tools, compaction and leaf models do not expose it. */
+  onModelRequestState?: (interrupt: (() => boolean) | undefined) => void
   /**
    * Fires exactly once per run, before its completion promise settles.
    *

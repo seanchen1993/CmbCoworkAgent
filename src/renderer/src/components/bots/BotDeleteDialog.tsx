@@ -16,18 +16,21 @@ export function BotDeleteDialog({
   bot,
   kind = "bot",
   client,
+  returnFocusTo,
   onClose,
   onDeleted
 }: {
   bot: BotDefinition | BotGroup
   kind?: "bot" | "group"
   client: BotClient
+  returnFocusTo?: HTMLElement | null
   onClose(): void
   onDeleted(): void
 }) {
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const lock = useRef(false)
+  const trigger = useRef(returnFocusTo ?? document.activeElement)
   const remove = async () => {
     if (lock.current) return
     lock.current = true
@@ -51,7 +54,14 @@ export function BotDeleteDialog({
         if (!open && !busy) onClose()
       }}
     >
-      <DialogContent className="sm:max-w-[420px]">
+      <DialogContent
+        className="sm:max-w-[420px]"
+        onCloseAutoFocus={(event) => {
+          if (!(trigger.current instanceof HTMLElement) || !trigger.current.isConnected) return
+          event.preventDefault()
+          trigger.current.focus({ preventScroll: true })
+        }}
+      >
         <DialogHeader>
           <DialogTitle>删除「{bot.name}」？</DialogTitle>
           <DialogDescription>

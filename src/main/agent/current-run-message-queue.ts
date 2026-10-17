@@ -562,23 +562,29 @@ function completedAssistantMessageForTranscript(
  * into a foreground run can never be drained by a differently-keyed background
  * run, even though they all share this exact middleware. */
 export function createCurrentRunMessageQueueMiddleware(
-  ownerRunToken?: string
+  ownerRunToken?: string,
+  onModelRequestState?: (active: boolean) => void
 ): ReturnType<typeof createMiddleware> {
   return createMiddleware({
     name: "currentRunMessageQueue",
     wrapModelCall: async (request, handler) => {
-      const response = await handler(request)
-      const threadId =
-        typeof request.runtime?.configurable?.thread_id === "string"
-          ? request.runtime.configurable.thread_id
-          : undefined
-      if (threadId && ownerRunToken && AIMessage.isInstance(response)) {
-        const completed = completedAssistantMessageForTranscript(response)
-        if (completed) {
-          completedAssistantMessagesByRun.set(runScopedKey(threadId, ownerRunToken), completed)
+      onModelRequestState?.(true)
+      try {
+        const response = await handler(request)
+        const threadId =
+          typeof request.runtime?.configurable?.thread_id === "string"
+            ? request.runtime.configurable.thread_id
+            : undefined
+        if (threadId && ownerRunToken && AIMessage.isInstance(response)) {
+          const completed = completedAssistantMessageForTranscript(response)
+          if (completed) {
+            completedAssistantMessagesByRun.set(runScopedKey(threadId, ownerRunToken), completed)
+          }
         }
+        return response
+      } finally {
+        onModelRequestState?.(false)
       }
-      return response
     },
     beforeModel: async (state, runtime) => {
       const threadId =

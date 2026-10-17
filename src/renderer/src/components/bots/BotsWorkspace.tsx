@@ -113,6 +113,7 @@ const STATE_LABELS: Record<BotTask["state"], string> = {
   failed: "执行失败",
   cancelled: "已停止",
   interrupted: "已中断",
+  superseded: "已由新消息接续",
   outcome_unknown: "需要核对结果"
 }
 const active = (task: BotTask) => task.state === "running" || task.state === "waiting_user"
@@ -938,11 +939,17 @@ export function BotsWorkspace({ client = localBotClient() }: { client?: BotClien
     onMove: (id: string | null) => moveToSection(bot.id, id),
     onNewSection: () => createSection(bot.id),
     onPin: () => togglePin(bot.id),
-    onRename: () => setRenaming(bot),
+    onRename: (trigger: HTMLElement | null) => {
+      editorTrigger.current = trigger
+      setRenaming(bot)
+    },
     onArchive: () => {
       void archive(bot)
     },
-    onDelete: () => setDeleting(bot),
+    onDelete: (trigger: HTMLElement | null) => {
+      editorTrigger.current = trigger
+      setDeleting(bot)
+    },
     onCopy: () => {
       void copyConversationId(bot)
     }
@@ -969,8 +976,14 @@ export function BotsWorkspace({ client = localBotClient() }: { client?: BotClien
     sections,
     unread: activityByConversation.get(`group:${group.id}`)?.unread ?? false,
     onPin: () => togglePin(group.id, "group"),
-    onRename: () => setRenamingGroup(group),
-    onDelete: () => setDeletingGroup(group),
+    onRename: (trigger: HTMLElement | null) => {
+      editorTrigger.current = trigger
+      setRenamingGroup(group)
+    },
+    onDelete: (trigger: HTMLElement | null) => {
+      editorTrigger.current = trigger
+      setDeletingGroup(group)
+    },
     onCopy: () => {
       void navigator.clipboard
         .writeText(group.id)
@@ -1197,6 +1210,7 @@ export function BotsWorkspace({ client = localBotClient() }: { client?: BotClien
           <BotDeleteDialog
             bot={deleting}
             client={client}
+            returnFocusTo={editorTrigger.current}
             onClose={() => setDeleting(null)}
             onDeleted={() => {
               setDeleting(null)
@@ -1788,7 +1802,10 @@ export function BotsWorkspace({ client = localBotClient() }: { client?: BotClien
                     </button>
                     <button
                       className="flex w-full items-center rounded p-2 text-sm text-destructive hover:bg-muted"
-                      onClick={() => setDeleting(selected)}
+                      onClick={() => {
+                        editorTrigger.current = profileMenuTrigger.current
+                        setDeleting(selected)
+                      }}
                     >
                       <Trash2 className="mr-2 size-4" />
                       {selected.deleting ? "继续删除" : "删除 Bot"}
@@ -1942,6 +1959,7 @@ export function BotsWorkspace({ client = localBotClient() }: { client?: BotClien
             bots={snapshot?.bots ?? []}
             client={client}
             nameOnly
+            returnFocusTo={editorTrigger.current}
             onClose={() => setRenamingGroup(null)}
             onSaved={() => setRenamingGroup(null)}
           />
@@ -1951,6 +1969,7 @@ export function BotsWorkspace({ client = localBotClient() }: { client?: BotClien
             bot={deletingGroup}
             kind="group"
             client={client}
+            returnFocusTo={editorTrigger.current}
             onClose={() => setDeletingGroup(null)}
             onDeleted={() => {
               const id = deletingGroup.id,
@@ -1993,6 +2012,7 @@ export function BotsWorkspace({ client = localBotClient() }: { client?: BotClien
             bot={renaming}
             client={client}
             nameOnly
+            returnFocusTo={editorTrigger.current}
             onClose={() => setRenaming(null)}
             onSaved={() => setRenaming(null)}
           />

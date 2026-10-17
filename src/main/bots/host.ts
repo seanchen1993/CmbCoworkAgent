@@ -31,7 +31,7 @@ export interface BotRunLease {
     signal: AbortSignal,
     waiting: (value: boolean) => void
   ): Promise<{
-    state: "completed" | "failed" | "outcome_unknown"
+    state: "completed" | "failed" | "outcome_unknown" | "superseded"
     error?: string
     result?: string
     files?: BotDeliveredFile[]

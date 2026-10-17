@@ -68,17 +68,18 @@ export function BotRowMenu({
   onMove(sectionId: string | null): void
   onNewSection(): void
   onPin(): void
-  onRename(): void
+  onRename(trigger: HTMLElement | null): void
   onArchive?(): void
-  onDelete(): void
+  onDelete(trigger: HTMLElement | null): void
   onCopy(): void
 }) {
   const inlineFocus = useRef(false)
+  const trigger = useRef<HTMLSpanElement>(null)
   const [menuOpen, setMenuOpen] = useState(false)
   return (
     <Tooltip delayDuration={250} open={compact && !menuOpen ? undefined : false}>
       <ContextMenu onOpenChange={setMenuOpen}>
-        <ContextMenuTrigger asChild>
+        <ContextMenuTrigger asChild ref={trigger}>
           <TooltipTrigger asChild>{children}</TooltipTrigger>
         </ContextMenuTrigger>
         <TooltipContent side="right" sideOffset={8} className="bot-sidebar-tooltip">
@@ -141,7 +142,13 @@ export function BotRowMenu({
             {unread ? <MailOpen /> : <Mail />}
             {unread ? "标为已读" : "标为未读"}
           </ContextMenuItem>
-          <ContextMenuItem disabled={bot.deleting} onSelect={onRename}>
+          <ContextMenuItem
+            disabled={bot.deleting}
+            onSelect={() => {
+              inlineFocus.current = true
+              onRename(trigger.current)
+            }}
+          >
             <Pencil />
             {kind === "bot" ? "重命名 Bot" : "重命名聊天"}
           </ContextMenuItem>
@@ -162,7 +169,13 @@ export function BotRowMenu({
               {bot.archived ? "恢复 Bot" : "归档 Bot"}
             </ContextMenuItem>
           )}
-          <ContextMenuItem variant="destructive" onSelect={onDelete}>
+          <ContextMenuItem
+            variant="destructive"
+            onSelect={() => {
+              inlineFocus.current = true
+              onDelete(trigger.current)
+            }}
+          >
             <Trash2 />
             {bot.deleting ? "继续删除" : kind === "bot" ? "删除 Bot" : "删除群聊"}
           </ContextMenuItem>

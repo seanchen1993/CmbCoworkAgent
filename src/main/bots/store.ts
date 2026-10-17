@@ -77,12 +77,21 @@ function groupReferenceText(message: BotGroupMessage): string {
 }
 const TRANSITIONS: Record<BotTaskState, readonly BotTaskState[]> = {
   queued: ["running", "cancelled"],
-  running: ["waiting_user", "completed", "failed", "cancelled", "interrupted", "outcome_unknown"],
+  running: [
+    "waiting_user",
+    "completed",
+    "failed",
+    "cancelled",
+    "interrupted",
+    "superseded",
+    "outcome_unknown"
+  ],
   waiting_user: ["running", "completed", "failed", "cancelled", "interrupted", "outcome_unknown"],
   completed: [],
   failed: [],
   cancelled: [],
   interrupted: [],
+  superseded: [],
   outcome_unknown: []
 }
 
@@ -582,7 +591,9 @@ export class BotStore {
       `SELECT source.* FROM bot_commands command JOIN bot_tasks source ON source.id=command.source_task_id
        WHERE command.id=? AND command.bot_id=? AND command.thread_id=?
          AND COALESCE(command.group_id,'')=? AND command.state='completed' AND command.suppressed=0
-         AND source.bot_id=command.bot_id AND source.thread_id=command.thread_id AND source.state='completed'`,
+         AND source.bot_id=command.bot_id AND source.thread_id=command.thread_id
+         AND (source.state='completed' OR (source.state='superseded' AND command.group_id IS NULL
+           AND json_extract(source.origin_json,'$.kind')='user'))`,
       [task.origin.key, task.botId, task.threadId, botTaskGroupId(task) ?? ""]
     )[0]
     if (!row) return null // Legacy or pruned receipts carry no inferred authority.

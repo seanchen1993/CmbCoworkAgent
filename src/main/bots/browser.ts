@@ -50,6 +50,18 @@ interface OwnedPage {
 
 export type BotBrowserUploadLock = (operation: () => Promise<string>) => Promise<string>
 
+/** Retain the exact still-owned target when a native operation fails before its observation. */
+export class BotBrowserActionError extends Error {
+  constructor(
+    cause: unknown,
+    readonly pageId: string,
+    readonly url: string
+  ) {
+    super(cause instanceof Error ? cause.message : String(cause), { cause })
+    this.name = "BotBrowserActionError"
+  }
+}
+
 /** Dedicated profile and exact Page ownership. No shared workbench CDP target discovery. */
 export class BotBrowserService {
   private readonly lock = new AsyncKeyedLock({
@@ -333,6 +345,18 @@ export class BotBrowserService {
       // Old targets are stale after takeover. Return fresh evidence without replaying the requested input.
       const target = action.pageId ? this.pages.get(action.pageId) : undefined
       if (target && target.botId !== botId) throw new BotError("CONFLICT", "页面不属于此 Bot")
+      if (
+        ![...this.pages.values()].some((entry) => entry.botId === botId && !entry.page.isClosed())
+      ) {
+        this.check(signal, this.generation, botId)
+        if (this.isRetired(botId)) throw new BotError("NOT_FOUND", "Bot 或群聊已删除")
+        return JSON.stringify({
+          closed: action.pageId ?? null,
+          pages: [],
+          control: "bot",
+          note: "The browser page was closed during human control. No replacement page was opened and no action was replayed. Do not assume the requested user action was completed. Report what remains unfinished unless you can verify completion. Reopen only if the current user request allows it."
+        })
+      }
       const observed = JSON.parse(
         await this.act(
           botId,
@@ -492,6 +516,18 @@ export class BotBrowserService {
             .filter(Boolean)
             .join(" ")
         })
+      } catch (error) {
+        if (
+          error instanceof BotError ||
+          signal.aborted ||
+          this.stopping ||
+          this.human?.botId === botId ||
+          generation !== this.generation ||
+          this.pages.get(entry.id) !== entry ||
+          page.isClosed()
+        )
+          throw error
+        throw new BotBrowserActionError(error, entry.id, page.url())
       } finally {
         if (entry.pendingInput)
           void entry.pendingInput

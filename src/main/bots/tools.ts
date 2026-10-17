@@ -11,7 +11,12 @@ import type { BotDefinition, BotTask } from "../../shared/bots/contracts"
 import { parseSchedule } from "../../shared/bots/validation"
 import type { BotMemoryService } from "./memory"
 import type { LocalBotHost } from "./host"
-import type { BotBrowserAction, BotBrowserService, BotBrowserUploadLock } from "./browser"
+import {
+  BotBrowserActionError,
+  type BotBrowserAction,
+  type BotBrowserService,
+  type BotBrowserUploadLock
+} from "./browser"
 import { botImportDestination, copyBotFile } from "./file-copy"
 
 export interface BotPeerDeliveryFiles {
@@ -255,8 +260,11 @@ export function createBotBrowserTools(
       const content = JSON.stringify({
         ok: false,
         error: error instanceof Error ? error.message : String(error),
+        ...(error instanceof BotBrowserActionError ? { pageId: error.pageId, url: error.url } : {}),
         recovery:
-          "Use the error details to correct the call. Do not assume the operation succeeded or bypass it with another tool. Observe before retrying an action whose outcome is uncertain."
+          error instanceof BotBrowserActionError
+            ? "The operation failed. pageId identifies its still-open owned page; completion is unverified. For authorized cleanup, close that exact page directly without another observation. Observe before retrying an action with uncertain effects, and retry only if the current user request permits it. Do not bypass the failure with another tool."
+            : "Use the error details to correct the call. Do not assume the operation succeeded or bypass it with another tool. Observe before retrying an action whose outcome is uncertain."
       })
       return callId
         ? new ToolMessage({ content, status: "error", tool_call_id: callId, name })

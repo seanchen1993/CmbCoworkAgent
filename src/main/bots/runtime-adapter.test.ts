@@ -832,6 +832,116 @@ describe("Bot Runtime integration", () => {
 })
 
 describe("Bot steering uses the original runtime", () => {
+  it("keeps pending interaction waits on the original steering path", async () => {
+    let context!: AgentRunExecutionContext
+    let finish!: () => void
+    fixture.start.mockImplementation(async (_request, _delivery, incoming) => {
+      context = incoming
+      return {
+        completion: new Promise<void>((resolve) => {
+          finish = resolve
+        })
+      }
+    })
+    fixture.steer.mockResolvedValue({ queued: true })
+    const lease = port().acquire(bot, task)!
+    const pending = lease.execute(new AbortController().signal, vi.fn())
+    await vi.waitFor(() => expect(context).toBeDefined())
+    const interrupt = vi.fn(() => true)
+    context.onModelRequestState!(interrupt)
+    const event = { id: "approval", kind: "approval" as const, threadId: task.threadId }
+    await context.interactionWaitHooks!.onWaitStart(event)
+    await context.interactionWaitHooks!.onWaitStart(event)
+    expect(await lease.steer!(task, () => true)).toBe(true)
+    await context.interactionWaitHooks!.onWaitEnd(event)
+    expect(await lease.steer!(task, () => true)).toBe(true)
+    expect(interrupt).not.toHaveBeenCalled()
+    await context.interactionWaitHooks!.onWaitEnd(event)
+    expect(await lease.steer!(task, () => true)).toBe(false)
+    expect(interrupt).toHaveBeenCalledOnce()
+    finish()
+    expect((await pending).state).toBe("superseded")
+  })
+  it("leaves a new direct message queued while interrupting only its own active model round", async () => {
+    let context!: AgentRunExecutionContext
+    let finish!: () => void
+    fixture.start.mockImplementation(async (_request, _delivery, incoming) => {
+      context = incoming
+      return {
+        completion: new Promise<void>((resolve) => {
+          finish = resolve
+        })
+      }
+    })
+    const lease = port().acquire(bot, task)!
+    const pending = lease.execute(new AbortController().signal, vi.fn())
+    await vi.waitFor(() => expect(context).toBeDefined())
+    const interrupt = vi.fn(() => true)
+    context.onModelRequestState!(interrupt)
+    const inject = vi.fn(() => true)
+    for (const foreign of [
+      { ...task, botId: "other" },
+      { ...task, threadId: "other" }
+    ])
+      expect(await lease.steer!(foreign, inject)).toBe(false)
+    expect(interrupt).not.toHaveBeenCalled()
+    expect(
+      await lease.steer!({ ...task, id: "new", requestId: "new", message: "Correction" }, inject)
+    ).toBe(false)
+    expect(interrupt).toHaveBeenCalledOnce()
+    expect(inject).not.toHaveBeenCalled()
+    expect(fixture.steer).not.toHaveBeenCalled()
+    // A second arrival remains queued too, rather than entering the dying graph.
+    expect(await lease.steer!({ ...task, id: "next", requestId: "next" }, inject)).toBe(false)
+    expect(interrupt).toHaveBeenCalledOnce()
+    context.onRunTerminated?.({ outcome: "error", code: "cancelled" })
+    finish()
+    expect(await pending).toEqual({ state: "superseded" })
+    expect(fixture.summary).not.toHaveBeenCalled()
+    expect(fixture.cancelCommands).not.toHaveBeenCalled()
+    expect(fixture.cancelWorkers).not.toHaveBeenCalled()
+  })
+  it("keeps the original injection path after model completion or stale cancellation refusal", async () => {
+    let context!: AgentRunExecutionContext
+    let finish!: () => void
+    fixture.start.mockImplementation(async (_request, _delivery, incoming) => {
+      context = incoming
+      return {
+        completion: new Promise<void>((resolve) => {
+          finish = resolve
+        })
+      }
+    })
+    fixture.steer.mockResolvedValue({ queued: true })
+    const lease = port().acquire(bot, task)!
+    const pending = lease.execute(new AbortController().signal, vi.fn())
+    await vi.waitFor(() => expect(context).toBeDefined())
+    const interrupt = vi.fn(() => false)
+    context.onModelRequestState!(interrupt)
+    const inject = vi.fn(() => true)
+    expect(await lease.steer!({ ...task, id: "new", requestId: "new" }, inject)).toBe(true)
+    expect(interrupt).toHaveBeenCalledOnce()
+    context.onModelRequestState!(undefined)
+    expect(await lease.steer!({ ...task, id: "next", requestId: "next" }, inject)).toBe(true)
+    expect(interrupt).toHaveBeenCalledOnce()
+    expect(fixture.steer).toHaveBeenCalledTimes(2)
+    context.onRunTerminated?.({ outcome: "success", code: "done" })
+    finish()
+    expect((await pending).state).toBe("completed")
+  })
+  it.each<BotTask["origin"]>([
+    { kind: "group", groupId: "group", messageId: "message" },
+    { kind: "bot", fromBotId: "peer", rootTaskId: "root", depth: 1, expectsReply: true },
+    { kind: "schedule", scheduleId: "routine" },
+    { kind: "notification", notificationKind: "command", key: "command" }
+  ])("does not expose model interruption for $kind ownership", async (origin) => {
+    if (origin.kind === "group")
+      fixture.thread.mockReturnValue({ metadata: JSON.stringify(metadata(origin.groupId)) })
+    await port()
+      .acquire(bot, { ...task, origin })!
+      .execute(new AbortController().signal, vi.fn())
+    expect(fixture.start.mock.calls.at(-1)![2].onModelRequestState).toBeUndefined()
+  })
   it("offers saved inbox messages only after the runtime announces prompt readiness", async () => {
     fixture.start.mockImplementation(
       async (_request, _delivery, context: AgentRunExecutionContext) => {

@@ -825,10 +825,14 @@ describe("Bot browser ownership and control", () => {
     const lease = await service.preview("a")
     await context.entries[0].close()
     const observed = JSON.parse(await help)
-    expect(observed.pageId).not.toBe(original.pageId)
-    expect(observed.pageId).not.toBe(peer.pageId)
-    expect(observed.url).toBe("about:blank")
+    expect(observed.closed).toBe(original.pageId)
+    expect(observed.pages).toEqual([])
+    expect(observed.pageId).toBeUndefined()
+    expect(observed.url).toBeUndefined()
+    expect(observed.note).toContain("No replacement page was opened")
+    expect(context.entries).toHaveLength(2)
     expect(context.entries[1].closed).toBe(false)
+    expect((await service.preview("b")).pages.map((page) => page.id)).toEqual([peer.pageId])
     expect((await service.preview("a")).control).toBe("bot")
     await expect(service.giveBack("a", lease.generation)).rejects.toThrow("控制权已改变")
     await expect(
@@ -841,6 +845,117 @@ describe("Bot browser ownership and control", () => {
     for (const page of context.entries) expect(page.fill).not.toHaveBeenCalled()
     expect(context.entries[0].goto).toHaveBeenCalledTimes(1)
     expect(waiting.mock.calls).toEqual([[true], [false]])
+  })
+
+  it.each(["observe", "navigate", "fill", "upload"] as const)(
+    "returns the closed state without replaying queued %s or creating a replacement",
+    async (action) => {
+      const { pageId } = JSON.parse(await service.act("a", { action: "observe" }, signal()))
+      await service.takeOver("a", pageId)
+      const waiting = vi.fn()
+      const fileLock = vi.fn(async (operation: () => Promise<string>) => operation())
+      const pending = service.act(
+        "a",
+        {
+          action,
+          ...(action === "fill" || action === "upload" ? { pageId } : {}),
+          url: "https://example.test/must-not-reopen",
+          role: "textbox",
+          name: "Name",
+          text: "must not be replayed",
+          fileId: "missing-file.txt"
+        },
+        signal(),
+        waiting,
+        fileLock
+      )
+      await context.entries[0].close()
+      const closed = JSON.parse(await pending)
+      expect(closed.closed).toBe(action === "fill" || action === "upload" ? pageId : null)
+      expect(closed.pages).toEqual([])
+      expect(closed.note).toContain("Do not assume the requested user action was completed")
+      expect(context.entries).toHaveLength(1)
+      expect(context.entries[0].goto).not.toHaveBeenCalled()
+      expect(context.entries[0].fill).not.toHaveBeenCalled()
+      expect(context.entries[0].setInputFiles).not.toHaveBeenCalled()
+      expect(fileLock).not.toHaveBeenCalled()
+      expect(waiting.mock.calls).toEqual([[true], [false]])
+    }
+  )
+
+  it.each(["abort", "shutdown"] as const)(
+    "does not turn %s during human control into a successful closed receipt",
+    async (reason) => {
+      const { pageId } = JSON.parse(await service.act("a", { action: "observe" }, signal()))
+      await service.takeOver("a", pageId)
+      const controller = new AbortController()
+      const result = service.act("a", { action: "observe", pageId }, controller.signal).then(
+        () => "succeeded",
+        (error: Error) => error.message
+      )
+      if (reason === "abort") {
+        const closing = context.entries[0].close()
+        controller.abort(new Error("acceptance cancelled"))
+        await closing
+      } else await service.close()
+      expect(await result).toBe(reason === "abort" ? "acceptance cancelled" : "浏览器正在退出")
+      expect(context.entries).toHaveLength(1)
+    }
+  )
+
+  it("keeps the exact owned target on an operation failure without waiting for another DOM observation", async () => {
+    const owned = JSON.parse(await service.act("a", { action: "observe" }, signal()))
+    const peer = JSON.parse(await service.act("b", { action: "observe" }, signal()))
+    const page = context.entries[0]
+    page.address = "https://example.test/previous"
+    page.snapshot.mockClear()
+    const cause = new Error("page.goto: Timeout 20000ms exceeded")
+    page.goto.mockRejectedValueOnce(cause)
+    const failure = await service
+      .act("a", { action: "navigate", url: "https://example.test/pending" }, signal())
+      .catch((error) => error)
+    expect(failure).toMatchObject({
+      message: cause.message,
+      cause,
+      pageId: owned.pageId,
+      url: "https://example.test/previous"
+    })
+    expect(page.snapshot).not.toHaveBeenCalled()
+    const closed = JSON.parse(
+      await service.act("a", { action: "close", pageId: failure.pageId }, signal())
+    )
+    expect(closed.closed).toBe(owned.pageId)
+    expect((await service.preview("b")).pages.map((entry) => entry.id)).toEqual([peer.pageId])
+    expect(context.entries).toHaveLength(2)
+  })
+
+  it("does not attach page metadata to validation errors or failures overtaken by human control", async () => {
+    const { pageId } = JSON.parse(await service.act("a", { action: "observe" }, signal()))
+    const invalid = await service
+      .act("a", { action: "navigate", pageId, url: "file:///private" }, signal())
+      .catch((error) => error)
+    expect(invalid.code).toBe("INVALID_INPUT")
+    expect(invalid.pageId).toBeUndefined()
+    const entered = deferred(),
+      gate = deferred()
+    const cause = new Error("native operation failed")
+    context.entries[0].goto.mockImplementationOnce(async () => {
+      entered.resolve()
+      await gate.promise
+      throw cause
+    })
+    const pending = service.act(
+      "a",
+      { action: "navigate", pageId, url: "https://example.test" },
+      signal()
+    )
+    await entered.promise
+    const takeover = service.takeOver("a", pageId)
+    gate.resolve()
+    await expect(pending).rejects.toBe(cause)
+    await takeover
+    expect((await service.preview("a")).control).toBe("human")
+    await service.giveBack("a")
   })
 
   it("does not retain stale pages after a crash or let a failed takeover block future work", async () => {

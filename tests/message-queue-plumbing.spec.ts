@@ -55,6 +55,7 @@ function assertSourceOrder(value: string, before: string, after: string, label: 
   assert(b < a, `${label}: expected ${JSON.stringify(before)} before ${JSON.stringify(after)}`)
 }
 
+const queueMiddlewareCall = "createCurrentRunMessageQueueMiddleware(\n        currentRunMessageQueueOwnerToken,\n        onPrimaryModelRequestState\n      )"
 const runtime = read("src/main/agent/runtime.ts")
 const queueModule = read("src/main/agent/current-run-message-queue.ts")
 const standardTurn = read("src/main/agent/standard-thread-turn.ts")
@@ -82,7 +83,7 @@ function testMiddlewareOnlyOnMainStack(): void {
   // can't leak into a background subagent's loop.
   assertOccurrences(
     runtime,
-    "createCurrentRunMessageQueueMiddleware(currentRunMessageQueueOwnerToken)",
+    queueMiddlewareCall,
     1,
     "middleware invoked once (main stack only)"
   )
@@ -92,7 +93,7 @@ function testMiddlewareBeforeSummarizationAndHITL(): void {
   // Slice from the (single) main-stack invocation — summarization also appears in
   // the subagent stack earlier in the file, so a whole-file order check is wrong.
   const idx = runtime.indexOf(
-    "createCurrentRunMessageQueueMiddleware(currentRunMessageQueueOwnerToken)"
+    queueMiddlewareCall
   )
   assert(idx >= 0, "queue middleware present on the main stack")
   const after = runtime.slice(idx)
@@ -100,7 +101,7 @@ function testMiddlewareBeforeSummarizationAndHITL(): void {
   // context management): the queue middleware immediately precedes it in the array.
   assertMatches(
     after,
-    /createCurrentRunMessageQueueMiddleware\(currentRunMessageQueueOwnerToken\),\s*\n\s*mainSummarizationController\.middleware/,
+    /createCurrentRunMessageQueueMiddleware\(\s*currentRunMessageQueueOwnerToken,\s*onPrimaryModelRequestState\s*\),\s*\n\s*mainSummarizationController\.middleware/,
     "queue middleware immediately precedes summarization on the main stack"
   )
   assertIncludes(
@@ -112,7 +113,7 @@ function testMiddlewareBeforeSummarizationAndHITL(): void {
   // injection.
   assertSourceOrder(
     after,
-    "createCurrentRunMessageQueueMiddleware(currentRunMessageQueueOwnerToken)",
+    queueMiddlewareCall,
     "humanInTheLoopMiddleware",
     "queue middleware before HITL on the main stack"
   )
@@ -653,7 +654,7 @@ function testClearOnEveryRunExit(): void {
   )
   assertIncludes(
     runtime,
-    "createCurrentRunMessageQueueMiddleware(currentRunMessageQueueOwnerToken)",
+    queueMiddlewareCall,
     "each middleware closure is bound to its physical run token"
   )
   assertOccurrences(
