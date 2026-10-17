@@ -35,4 +35,52 @@ describe("Bot recovered tool result status", () => {
       )
     ).toBeUndefined()
   })
+
+  it.each([
+    ["failed command", "Y_FAILED\n[Command failed with exit code 7, elapsed: 3s]", "failed"],
+    [
+      "terminated command",
+      "<no output>\n[Command failed with exit code null, elapsed: 1s]",
+      "failed"
+    ],
+    ["missing task", 'Error: No background task found with id "missing-1017Y".', "failed"],
+    ["invalid id", "Error: Invalid task id.", "failed"],
+    ["blocked hook", "[Hook blocked] task_output was blocked by a hook", "failed"],
+    [
+      "cancelled polling",
+      "Task polling aborted: conversation was cancelled by user.",
+      "interrupted"
+    ]
+  ] as const)(
+    "recognizes a native task_output %s without reclassifying file contents",
+    (_, content, status) => {
+      expect(botToolResultStatus({ ...tool, name: "task_output" }, { content })).toBe(status)
+      expect(botToolResultStatus(tool, { content })).toBeUndefined()
+    }
+  )
+
+  it("uses the final task_output receipt rather than a success marker printed by the command", () => {
+    const content =
+      "[Command succeeded with exit code 0, elapsed: 1s]\n[Command failed with exit code 7, elapsed: 3s]"
+    expect(botToolResultStatus({ ...tool, name: "task_output" }, { content })).toBe("failed")
+    expect(
+      botToolResultStatus(
+        { ...tool, name: "task_output" },
+        {
+          content: "Y_READY\n[Command succeeded with exit code 0, elapsed: 47s]"
+        }
+      )
+    ).toBeUndefined()
+  })
+
+  it("does not classify nontext task_output payloads as successful", () => {
+    expect(
+      botToolResultStatus(
+        { ...tool, name: "task_output" },
+        {
+          content: { retrieval_status: "not_ready", elapsed: 2, command: "node job.mjs" }
+        }
+      )
+    ).toBeUndefined()
+  })
 })

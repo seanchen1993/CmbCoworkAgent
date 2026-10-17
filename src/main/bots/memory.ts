@@ -82,6 +82,14 @@ export class BotMemoryService {
         }
       })
   }
+  /** Fresh per-run snapshot, newest first like the original memory manifest. No second cache. */
+  forPrompt(botId: string): BotMemory[] {
+    const directory = this.directory(botId)
+    return this.list(botId)
+      .map((entry) => ({ entry, modified: lstatSync(join(directory, `${entry.id}.md`)).mtimeMs }))
+      .sort((a, b) => b.modified - a.modified || a.entry.id.localeCompare(b.entry.id))
+      .map(({ entry }) => entry)
+  }
   write(botId: string, input: WriteBotMemoryInput): BotMemory {
     const result = this.persist(botId, input)
     this.edits.set(botId, this.editVersion(botId) + 1)

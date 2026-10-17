@@ -1,7 +1,7 @@
-import type { Message, ToolCall } from "@/types"
+import type { Message, ToolCall, ToolResult } from "@/types"
 import { buildToolResultAssociations, getWorkerToolUiKey } from "./worker-tool-result-key"
 import { splitBotInlineReasoning } from "./bot-inline-reasoning"
-import { botToolResultStatus } from "./bot-tool-result-status"
+import { botTaskOutputState, botToolResultStatus } from "./bot-tool-result-status"
 import { botScheduleReceipt } from "./bot-schedule-view"
 
 // Only ordinary built-in execution records are folded. Unknown tools may own interactive UI.
@@ -23,7 +23,12 @@ const executionTools = new Set([
   "bot_forget"
 ])
 
-export function isBotExecutionTool(tool: ToolCall): boolean {
+export function isBotExecutionTool(
+  tool: ToolCall,
+  result?: Pick<ToolResult, "content" | "is_error">
+): boolean {
+  if (tool.name === "task_output")
+    return !!result && (!!botToolResultStatus(tool, result) || !!botTaskOutputState(result.content))
   return (
     executionTools.has(tool.name) &&
     !(tool.name === "bot_browser" && tool.args?.action === "request_help")
@@ -34,7 +39,8 @@ export function isBotExecutionTool(tool: ToolCall): boolean {
 export function projectBotExecution(
   messages: readonly Message[],
   keepActiveTurn: boolean,
-  cardCallIds: ReadonlySet<string>
+  cardCallIds: ReadonlySet<string>,
+  pendingQuestionCallId: string | null = null
 ): { hiddenMessages: Set<string>; foldedTools: Set<string> } {
   const hidden = new Set<string>()
   const foldedTools = new Set<string>()
@@ -53,10 +59,14 @@ export function projectBotExecution(
       if (cardCallIds.has(tool.id)) continue
       const key = getWorkerToolUiKey(message.id, tool.id, toolIndex)
       const result = results.get(key)
+      if (!result && tool.name === "request_user_input" && tool.id === pendingQuestionCallId) {
+        foldedTools.add(key)
+        continue
+      }
       if (
         result &&
         !botToolResultStatus(tool, result) &&
-        (isBotExecutionTool(tool) || botScheduleReceipt(tool, result)?.action === "list")
+        (isBotExecutionTool(tool, result) || botScheduleReceipt(tool, result)?.action === "list")
       )
         foldedTools.add(key)
     }

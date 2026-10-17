@@ -148,28 +148,31 @@ describe("private Bot conversation task scope", () => {
   })
 })
 
-it("projects actual peer receipts without leaking routing state into task previews", () => {
-  const receipt = {
-    ...task("reply-one", {
-      kind: "bot",
-      fromBotId: "b",
-      fromBotName: "核验 Bot",
-      rootTaskId: "root",
-      depth: 1,
-      expectsReply: false
-    }),
-    message: "核验 Bot 的协作任务已结束（completed）。\n实际合计：**50.75**"
+it.each(["completed", "已完成"])(
+  "projects %s peer receipts without leaking routing state into task previews",
+  (label) => {
+    const receipt = {
+      ...task("reply-one", {
+        kind: "bot",
+        fromBotId: "b",
+        fromBotName: "核验 Bot",
+        rootTaskId: "root",
+        depth: 1,
+        expectsReply: false
+      }),
+      message: `核验 Bot 的协作任务已结束（${label}）。\n实际合计：**50.75**`
+    }
+    expect(botTaskPreview(receipt)).toBe("核验 Bot：实际合计：50.75")
+    expect(botTaskPreview({ ...receipt, origin: { kind: "user" } })).toContain(label)
+    const withFiles = {
+      ...receipt,
+      message: `${receipt.message}${BOT_REPLY_FILES_PREFIX}\n{"filePath":"/peer/report.md"}`
+    }
+    expect(botTaskPreview(withFiles)).toBe("核验 Bot：实际合计：50.75")
+    expect(botTaskPreview({ ...withFiles, origin: { kind: "user" } })).toContain("/peer/report.md")
+    expect(withFiles.message).toContain("/peer/report.md")
   }
-  expect(botTaskPreview(receipt)).toBe("核验 Bot：实际合计：50.75")
-  expect(botTaskPreview({ ...receipt, origin: { kind: "user" } })).toContain("completed")
-  const withFiles = {
-    ...receipt,
-    message: `${receipt.message}${BOT_REPLY_FILES_PREFIX}\n{"filePath":"/peer/report.md"}`
-  }
-  expect(botTaskPreview(withFiles)).toBe("核验 Bot：实际合计：50.75")
-  expect(botTaskPreview({ ...withFiles, origin: { kind: "user" } })).toContain("/peer/report.md")
-  expect(withFiles.message).toContain("/peer/report.md")
-})
+)
 
 it("shows only original visible user text and attachment names in recent work", () => {
   const reply = { id: "original", ordinal: 3, role: "assistant" as const, text: "41" }

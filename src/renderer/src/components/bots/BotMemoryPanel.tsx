@@ -2,6 +2,13 @@ import { botErrorMessage } from "@/lib/bot-error-message"
 import { useEffect, useRef, useState } from "react"
 import { Check, Loader2, Pencil, Plus, Share2, Trash2, X } from "lucide-react"
 import { Button } from "@/components/ui/button"
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue
+} from "@/components/ui/select"
 import type { BotClient, BotDefinition, BotMemory } from "../../../../shared/bots/contracts"
 
 export function BotMemoryPanel({
@@ -27,6 +34,8 @@ export function BotMemoryPanel({
   const refreshRef = useRef<() => void>(() => {})
   const lock = useRef(false)
   const mounted = useRef(true)
+  const recipients = peers.filter((bot) => bot.id !== botId && !bot.archived)
+  const recipientAvailable = recipients.some((bot) => bot.id === recipient)
   useEffect(() => {
     mounted.current = true
     let disposed = false
@@ -223,22 +232,32 @@ export function BotMemoryPanel({
               <p>{entry.content}</p>
               {sharing === entry.id && (
                 <div className="mt-3 space-y-3">
-                  <label className="bot-field">
-                    分享给
-                    <select
-                      value={recipient}
-                      onChange={(event) => setRecipient(event.target.value)}
+                  <div className="bot-field">
+                    <span>分享给</span>
+                    <Select
+                      value={recipientAvailable ? recipient : ""}
+                      onValueChange={setRecipient}
+                      disabled={busy || !recipients.length}
                     >
-                      <option value="">选择 Bot</option>
-                      {peers
-                        .filter((bot) => bot.id !== botId && !bot.archived)
-                        .map((bot) => (
-                          <option key={bot.id} value={bot.id}>
+                      <SelectTrigger
+                        aria-label="分享记忆给 Bot"
+                        className="h-11 rounded-xl shadow-none"
+                      >
+                        <SelectValue placeholder="选择 Bot" />
+                      </SelectTrigger>
+                      <SelectContent
+                        data-bot-popup
+                        className="bot-memory-recipient-menu max-h-[min(20rem,var(--radix-select-content-available-height))] w-[var(--radix-select-trigger-width)] rounded-xl"
+                        collisionPadding={8}
+                      >
+                        {recipients.map((bot) => (
+                          <SelectItem key={bot.id} value={bot.id} className="rounded-lg">
                             {bot.name}
-                          </option>
+                          </SelectItem>
                         ))}
-                    </select>
-                  </label>
+                      </SelectContent>
+                    </Select>
+                  </div>
                   <p className="text-xs text-muted-foreground">
                     仅复制这条记忆，后续修改互不影响。
                   </p>
@@ -253,7 +272,7 @@ export function BotMemoryPanel({
                     </Button>
                     <Button
                       size="sm"
-                      disabled={busy || !recipient}
+                      disabled={busy || !recipientAvailable}
                       onClick={() =>
                         void mutate(async () => {
                           await client.shareMemory(botId, entry.id, entry.version, recipient)

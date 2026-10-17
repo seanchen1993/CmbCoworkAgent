@@ -1,7 +1,32 @@
 import { describe, expect, it } from "vitest"
-import { parseBotFileDelivery } from "./file-delivery"
+import { parseBotFileDelivery, parseBotOutputFiles } from "./file-delivery"
 
 describe("verified file delivery projection", () => {
+  it("bounds explicit portable output paths without accepting private or ambiguous destinations", () => {
+    expect(parseBotOutputFiles()).toEqual([])
+    const paths = ["reports/核验 报告.md", "data.csv"]
+    expect(parseBotOutputFiles(paths)).toEqual(["data.csv", "reports/核验 报告.md"])
+    expect(paths[0]).toBe("reports/核验 报告.md")
+    for (const value of [
+      null,
+      "report.md",
+      ["../private.md"],
+      ["a/../x"],
+      ["/tmp/x"],
+      ["C:/x"],
+      ["a\\x"],
+      ["a//x"],
+      ["./x"],
+      ["a\0b"],
+      ["a\nb"],
+      ["x."],
+      ["a/COM1.txt"],
+      ["x", "x"],
+      Array(9).fill("x"),
+      [""]
+    ])
+      expect(() => parseBotOutputFiles(value)).toThrow("协作输出")
+  })
   it("keeps real zero-byte and Unicode metadata without interpreting assistant prose", () => {
     const files = [{ filePath: "C:\\workspace\\核验 报告.md", name: "核验 报告.md", size: 0 }]
     expect(parseBotFileDelivery(JSON.stringify({ kind: "bot-file-delivery", files }))).toEqual(

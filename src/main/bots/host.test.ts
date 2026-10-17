@@ -315,9 +315,10 @@ describe("Bot control state", () => {
       expect(replies[0].message.length).toBeLessThan(13_000)
       expect(replies[0].message.includes(files[0].filePath)).toBe(state === "completed")
       if (state === "completed") {
+        expect(replies[0].origin).toMatchObject({ replyFiles: files })
         expect(replies[0].message).toContain("尚未复制")
         expect(replies[0].message).not.toContain(files[7].filePath)
-      }
+      } else expect(replies[0].origin).not.toHaveProperty("replyFiles")
       expect(replies[0].origin).toMatchObject({ fromBotId: b.id, expectsReply: false })
     }
   )
@@ -348,6 +349,7 @@ describe("Bot control state", () => {
     const reopened = new BotStore(databases.at(-1)!, () => 1000)
     expect(reopened.groupMessages(group.id).at(-1)?.files).toEqual(files)
     db.settle(task.id, "cancelled", null)
+    expect(db.groupMessages(group.id).at(-1)?.text).toBe("已停止")
     expect(() => db.publishGroupFiles(task.id, "late", files)).toThrow("活动群任务")
     expect(db.groupMessages(group.id).filter((message) => message.files)).toHaveLength(1)
     db.sendGroup({
@@ -1089,7 +1091,7 @@ describe("Bot control state", () => {
       requestId: `reply-${child.id}`,
       origin: { kind: "bot", expectsReply: false, fromBotId: b.id }
     })
-    expect(receipt.message).toContain("interrupted")
+    expect(receipt.message).toContain("执行已中断")
     expect(receipt.message).toContain("避免重复执行")
     db.recover()
     db.flushReplies()
@@ -1158,6 +1160,102 @@ describe("Bot control state", () => {
     expect(() => db.enqueue({ botId: bot.id, requestId: "two", message: "Run" })).toThrow("归档")
   })
 
+  it.each([false, true])(
+    "returns one cancellation receipt when an archived recipient has queued work (group=%s)",
+    (inGroup) => {
+      const db = store(),
+        sender = db.create(input),
+        recipient = db.create(input)
+      const group = inGroup
+        ? db.saveGroup({ name: "Archive receipt", memberIds: [sender.id, recipient.id] })
+        : null
+      if (group)
+        db.sendGroup({
+          groupId: group.id,
+          requestId: "archive-root",
+          text: "Check with the recipient",
+          targetBotIds: [sender.id]
+        })
+      else
+        db.enqueue({
+          botId: sender.id,
+          requestId: "archive-root",
+          message: "Check with the recipient"
+        })
+      const root = db.recentTasks().find((task) => task.botId === sender.id)!
+      db.transition(root.id, "running")
+      const child = db.delegate(root.id, recipient.id, "Check once", "archive-check")
+      db.settle(root.id, "completed", null, "Waiting for the check")
+      const archived = db.update({
+        ...recipient,
+        expectedVersion: recipient.version,
+        archived: true
+      })
+      db.flushReplies()
+      const receipts = () =>
+        db.recentTasks().filter((task) => task.requestId === `reply-${child.id}`)
+      expect(receipts()).toHaveLength(1)
+      expect(db.getTask(child.id)).toMatchObject({
+        state: "cancelled",
+        error: "Bot 已归档，排队任务未执行。"
+      })
+      expect(receipts()[0]).toMatchObject({
+        botId: sender.id,
+        threadId: root.threadId,
+        origin: { kind: "bot", fromBotId: recipient.id, expectsReply: false }
+      })
+      expect(receipts()[0].message).toContain("Bot 已归档，排队任务未执行。")
+      db.update({ ...archived, expectedVersion: archived.version, archived: false })
+      db.recover()
+      db.flushReplies()
+      expect(receipts()).toHaveLength(1)
+      expect(db.getTask(child.id).state).toBe("cancelled")
+    }
+  )
+
+  it("does not wake a cancelled parent when its queued recipient is archived", () => {
+    const db = store(),
+      sender = db.create(input),
+      recipient = db.create(input)
+    const root = db.enqueue({ botId: sender.id, requestId: "cancelled-root", message: "Check" })
+    db.transition(root.id, "running")
+    const child = db.delegate(root.id, recipient.id, "Check once", "cancelled-parent")
+    db.settle(root.id, "cancelled", null)
+    db.update({ ...recipient, expectedVersion: recipient.version, archived: true })
+    db.flushReplies()
+    expect(db.getTask(child.id).state).toBe("cancelled")
+    expect(db.recentTasks().some((task) => task.requestId === `reply-${child.id}`)).toBe(false)
+  })
+
+  it.each([
+    ["completed", "已完成"],
+    ["failed", "执行失败"],
+    ["cancelled", "已停止"],
+    ["interrupted", "执行已中断"],
+    ["outcome_unknown", "执行结果待确认"]
+  ] as const)(
+    "uses a readable %s receipt while retaining the actual state and exchange body",
+    (state, label) => {
+      const db = store(),
+        sender = db.create(input),
+        recipient = db.create(input)
+      const root = db.enqueue({ botId: sender.id, requestId: "readable-root", message: "Check" })
+      db.transition(root.id, "running")
+      const child = db.delegate(root.id, recipient.id, "Check once", "readable-receipt")
+      db.transition(child.id, "running")
+      db.settle(root.id, "completed", null)
+      db.settle(child.id, state, null, "实际结果或待核验依据")
+      db.flushReplies()
+      const receipt = db.recentTasks().find((task) => task.requestId === `reply-${child.id}`)!
+      expect(receipt.message).toContain(`的协作任务已结束（${label}）。`)
+      expect(receipt.message).not.toContain(`（${state}）`)
+      expect(db.getTask(child.id).state).toBe(state)
+      expect(db.exchangeHistory(sender.id, child.id).items[0].reply?.message).toBe(
+        "实际结果或待核验依据"
+      )
+    }
+  )
+
   it("validates untrusted input before filesystem or database use", () => {
     expect(() => parseCreateBot({ ...input, color: "url(secret)" })).toThrow()
     expect(() => parseCreateBot({ ...input, instructions: "x".repeat(8001) })).toThrow()
@@ -1167,6 +1265,30 @@ describe("Bot control state", () => {
     expect(() =>
       parseUpdateBot({ ...input, id: "safe", expectedVersion: NaN, archived: false })
     ).toThrow()
+  })
+
+  it("persists explicit output requirements and rejects changed outputs on an idempotent dispatch", () => {
+    const db = store(),
+      a = db.create(input),
+      b = db.create(input)
+    const root = db.enqueue({ botId: a.id, requestId: "outputs-root", message: "Prepare report" })
+    db.transition(root.id, "running")
+    const child = db.delegate(root.id, b.id, "Prepare files", "outputs", ["report.md", "data.csv"])
+    expect(child.origin).toMatchObject({ outputFiles: ["data.csv", "report.md"] })
+    expect(
+      db.delegate(root.id, b.id, "Prepare files", "outputs", ["data.csv", "report.md"]).id
+    ).toBe(child.id)
+    expect(() => db.delegate(root.id, b.id, "Prepare files", "outputs", ["other.md"])).toThrow(
+      "输出文件要求已改变"
+    )
+    expect(() => db.delegate(root.id, b.id, "Prepare files", "escape", ["../private.md"])).toThrow(
+      "协作输出"
+    )
+    db.transition(child.id, "running")
+    db.settle(child.id, "completed", null, "Verified")
+    db.flushReplies()
+    const reply = db.recentTasks().find((task) => task.requestId === `reply-${child.id}`)!
+    expect(reply.origin).not.toHaveProperty("outputFiles")
   })
 
   it("delivers peer work and replies durably without recursive automatic replies", () => {

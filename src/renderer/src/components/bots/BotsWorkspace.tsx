@@ -123,15 +123,18 @@ function BotEditor({
   client,
   onClose,
   onSaved,
+  returnFocusTo,
   nameOnly = false
 }: {
   bot: BotDefinition | null
   client: BotClient
   onClose(): void
   onSaved(bot: BotDefinition): void
+  returnFocusTo?: HTMLElement | null
   nameOnly?: boolean
 }) {
   const models = useAppStore((state) => state.models)
+  const trigger = useRef(returnFocusTo ?? document.activeElement)
   const [input, setInput] = useState<CreateBotInput>(
     () =>
       bot ?? {
@@ -176,14 +179,21 @@ function BotEditor({
           if (!open && !saving) onClose()
         }}
       >
-        <DialogContent className="bot-editor sm:max-w-[440px]">
+        <DialogContent
+          className="bot-editor flex max-h-[calc(100dvh-3rem)] flex-col sm:max-w-[440px]"
+          onCloseAutoFocus={(event) => {
+            if (!(trigger.current instanceof HTMLElement) || !trigger.current.isConnected) return
+            event.preventDefault()
+            trigger.current.focus({ preventScroll: true })
+          }}
+        >
           <DialogHeader>
             <DialogTitle>{nameOnly ? "重命名 Bot" : bot ? "编辑 Bot" : "新建 Bot"}</DialogTitle>
             <DialogDescription>
               {nameOnly ? "修改名称不会改变对话和工作资料。" : "为 Bot 起个名字，告诉它负责什么。"}
             </DialogDescription>
           </DialogHeader>
-          <form onSubmit={submit} className="space-y-5">
+          <form onSubmit={submit} className="min-h-0 space-y-5 overflow-y-auto overscroll-contain">
             {!nameOnly && (
               <div className="flex flex-col items-center gap-4 py-2">
                 <BotAvatar color={input.color} shape={input.shape} size={90} />
@@ -639,6 +649,13 @@ export function BotsWorkspace({ client = localBotClient() }: { client?: BotClien
   const [renamingGroup, setRenamingGroup] = useState<BotGroup | null>(null)
   const [renaming, setRenaming] = useState<BotDefinition | null>(null)
   const [editor, setEditor] = useState<BotDefinition | "new" | null>(null)
+  const editorTrigger = useRef<HTMLElement | null>(null)
+  const profileMenuTrigger = useRef<HTMLButtonElement | null>(null)
+  const openBotEditor = (bot: BotDefinition, trigger?: HTMLElement | null) => {
+    editorTrigger.current =
+      trigger ?? (document.activeElement instanceof HTMLElement ? document.activeElement : null)
+    setEditor(bot)
+  }
   const visible = useMemo(
     () =>
       (snapshot?.bots ?? []).filter(
@@ -1560,7 +1577,7 @@ export function BotsWorkspace({ client = localBotClient() }: { client?: BotClien
               <BotConversation
                 key={`${selected.hostId}:${selected.id}`}
                 bot={selected}
-                onConfigureModel={() => setEditor(selected)}
+                onConfigureModel={() => openBotEditor(selected)}
                 bots={snapshot?.bots ?? []}
                 schedules={snapshot?.schedules ?? []}
                 tasks={tasks}
@@ -1726,7 +1743,11 @@ export function BotsWorkspace({ client = localBotClient() }: { client?: BotClien
               <div className="bot-detail-actions">
                 <Popover>
                   <PopoverTrigger asChild>
-                    <button className="bot-icon-button" aria-label="更多 Bot 操作">
+                    <button
+                      ref={profileMenuTrigger}
+                      className="bot-icon-button"
+                      aria-label="更多 Bot 操作"
+                    >
                       <MoreHorizontal size={20} />
                     </button>
                   </PopoverTrigger>
@@ -1746,7 +1767,7 @@ export function BotsWorkspace({ client = localBotClient() }: { client?: BotClien
                     )}
                     <button
                       className="flex w-full items-center rounded-md p-2 text-sm hover:bg-muted"
-                      onClick={() => setEditor(selected)}
+                      onClick={() => openBotEditor(selected, profileMenuTrigger.current)}
                     >
                       <Settings2 className="mr-2 size-4" />
                       编辑 Bot
@@ -1820,6 +1841,9 @@ export function BotsWorkspace({ client = localBotClient() }: { client?: BotClien
                   <TabsTrigger
                     value="details"
                     className="font-normal data-[state=active]:shadow-none"
+                    onClick={() => {
+                      if (detailTab === "memory") setDetailTab("details")
+                    }}
                   >
                     详情
                   </TabsTrigger>
@@ -1865,7 +1889,9 @@ export function BotsWorkspace({ client = localBotClient() }: { client?: BotClien
                           {selected.instructions ||
                             "你可以在对话中交办工作，也可以为它设定长期职责。"}
                         </p>
-                        <button onClick={() => setEditor(selected)}>编辑职责</button>
+                        <button onClick={(event) => openBotEditor(selected, event.currentTarget)}>
+                          编辑职责
+                        </button>
                         <button className="ml-4" onClick={() => setDetailTab("memory")}>
                           管理记忆
                         </button>
@@ -1968,6 +1994,7 @@ export function BotsWorkspace({ client = localBotClient() }: { client?: BotClien
           <BotEditor
             bot={editor === "new" ? null : editor}
             client={client}
+            returnFocusTo={editorTrigger.current}
             onClose={() => setEditor(null)}
             onSaved={(bot) => {
               setSelectedId(bot.id)

@@ -132,7 +132,13 @@ export function BotBrowserPanel({ botId, client }: { botId: string; client: BotC
         ) : (
           <div className="bot-browser-empty">
             <Monitor size={30} strokeWidth={1.4} />
-            <p>{state?.pages.length ? "正在获取画面…" : "Bot 浏览网页时，画面会显示在这里。"}</p>
+            <p>
+              {state?.dialogPending
+                ? "网页有待处理的弹窗"
+                : state?.pages.length
+                  ? "正在获取画面…"
+                  : "Bot 浏览网页时，画面会显示在这里。"}
+            </p>
           </div>
         )}
       </div>

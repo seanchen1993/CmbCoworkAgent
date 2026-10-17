@@ -1,5 +1,14 @@
 import { describe, expect, it, vi } from "vitest"
-import { mkdtemp, mkdir, writeFile, symlink, rm } from "node:fs/promises"
+import {
+  mkdtemp,
+  mkdir,
+  writeFile,
+  readFile,
+  realpath,
+  readdir,
+  symlink,
+  rm
+} from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import type { BotDefinition, BotSchedule, BotTask } from "../../shared/bots/contracts"
@@ -16,6 +25,14 @@ import {
 import { parseBotFileDelivery } from "../../shared/bots/file-delivery"
 import type { BotBrowserService } from "./browser"
 import { ToolMessage } from "@langchain/core/messages"
+
+it("keeps teammate creation unavailable to command continuations", () => {
+  const host = {} as LocalBotHost
+  const names = createBotProfileTools("notice", () => host, new AbortController().signal, true).map(
+    (entry) => entry.name
+  )
+  expect(names).toEqual(["bot_update_profile", "bot_update_teammate"])
+})
 
 it("preserves the exact teammate identity and failed update receipt without sending work", async () => {
   const controller = new AbortController()
@@ -96,7 +113,7 @@ it("resolves peer names only within the current task roster and preserves host v
       type: "tool_call",
       id: "call-delegate",
       name: send.name,
-      args: { botId, message: "Check synthetic data", requestKey: "same-request" }
+      args: { botId, message: "Check synthetic data", requestKey: "same-request", outputFiles: [] }
     })
   for (const target of ["校对助手", "member-a"]) {
     const result = await call(target)
@@ -106,7 +123,8 @@ it("resolves peer names only within the current task roster and preserves host v
       "group-task",
       "member-a",
       "Check synthetic data",
-      "same-request"
+      "same-request",
+      []
     )
   }
   peers.mockReturnValue([
@@ -173,6 +191,55 @@ it("delivers verified current-workspace files and rejects missing, private, link
     await expect(deliver.invoke({ files: Array(9).fill("核验 报告.md") })).rejects.toThrow()
     controller.abort(new Error("cancelled"))
     await expect(call(["核验 报告.md"])).rejects.toThrow("cancelled")
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+it("imports only host-verified files from this exact peer handoff, preserving originals and cancellation", async () => {
+  const root = await mkdtemp(join(tmpdir(), "bot-peer-delivery-"))
+  const workspace = join(root, "mine"),
+    source = join(root, "peer")
+  const controller = new AbortController(),
+    publish = vi.fn()
+  try {
+    await mkdir(workspace)
+    await mkdir(source)
+    const report = join(source, "核验 报告.md"),
+      privateFile = join(source, "private.md")
+    const original = Buffer.from("\uFEFF原件\r\n金额：74.13\r\n", "utf8")
+    await writeFile(report, original)
+    await writeFile(privateFile, "not authorized")
+    const actual = await realpath(report)
+    const [deliver] = createBotDeliveryTools(workspace, controller.signal, publish, {
+      workspacePath: source,
+      files: [{ filePath: actual, name: "核验 报告.md", size: original.length }]
+    })
+    const call = (files: string[]) =>
+      deliver.invoke({
+        type: "tool_call",
+        id: "peer-delivery",
+        name: deliver.name,
+        args: { files }
+      })
+    // Reject the whole selection before importing the eligible first item.
+    expect((await call([report, privateFile])).status).toBe("error")
+    expect(await readdir(workspace)).toEqual([])
+    const first = parseBotFileDelivery((await call([report, report])).content)!
+    expect(first).toHaveLength(1)
+    expect(first[0].filePath).toContain(`${await realpath(workspace)}/shared/`)
+    expect(first[0].name).toBe("核验 报告.md")
+    expect(await readFile(first[0].filePath)).toEqual(original)
+    expect(await readFile(report)).toEqual(original)
+    expect(parseBotFileDelivery((await call([report])).content)).toEqual(first)
+    expect(publish).toHaveBeenCalledTimes(2)
+    await rm(report)
+    await symlink(privateFile, report)
+    expect((await call([report])).status).toBe("error")
+    expect(publish).toHaveBeenCalledTimes(2)
+    controller.abort(new Error("cancelled"))
+    await expect(call([first[0].filePath])).rejects.toThrow("cancelled")
+    expect(await readFile(privateFile, "utf8")).toBe("not authorized")
   } finally {
     await rm(root, { recursive: true, force: true })
   }
@@ -270,7 +337,8 @@ describe("Bot schedule tool contract", () => {
     expect(missing).toBeInstanceOf(ToolMessage)
     expect(missing.status).toBe("error")
     expect(missing.tool_call_id).toBe(call.id)
-    expect(missing.content).toBe("此 Bot 中不存在该例行任务")
+    expect(missing.content).toContain("此 Bot 中不存在该例行任务，未保存")
+    expect(missing.content).toContain("新建时省略 id")
     expect(save).not.toHaveBeenCalled()
 
     const invalid = await schedule.invoke({

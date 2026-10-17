@@ -472,7 +472,7 @@ export class BotBrowserService {
         .map(async (entry) => ({
           id: entry.id,
           url: entry.page.url(),
-          title: await entry.page.title().catch(() => "页面已关闭")
+          title: await this.engine!.getTitle(entry.page).catch(() => "页面已关闭")
         }))
     )
   }
@@ -485,7 +485,7 @@ export class BotBrowserService {
         : [...this.pages.values()].find((item) => item.botId === botId)
       if (selected && selected.botId !== botId) throw new BotError("CONFLICT", "页面不属于此 Bot")
       const image =
-        selected && !selected.page.isClosed()
+        selected && !selected.dialog && !selected.page.isClosed()
           ? await selected.page
               .screenshot({ type: "jpeg", quality: 60, timeout: 5000 })
               .catch(() => null)
@@ -503,6 +503,7 @@ export class BotBrowserService {
               ? "other-human"
               : "bot",
         image: image ? `data:image/jpeg;base64,${image.toString("base64")}` : null,
+        dialogPending: Boolean(selected?.dialog),
         helpInstruction: this.human?.botId === botId ? this.human.instruction : undefined
       }
     })

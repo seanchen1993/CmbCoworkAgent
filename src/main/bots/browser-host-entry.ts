@@ -108,9 +108,10 @@ else {
               for (const window of parents) if (!window.isDestroyed()) window.hide()
               return
             }
-            if (action === "show" && typeof targetId === "string") {
+            if ((action === "show" || action === "get-title") && typeof targetId === "string") {
               const window = targets.get(targetId)
               if (!window || window.isDestroyed()) throw new Error("浏览器页面已关闭")
+              if (action === "get-title") return window.webContents.getTitle()
               if (window.isMinimized()) window.restore()
               window.show()
               window.focus()

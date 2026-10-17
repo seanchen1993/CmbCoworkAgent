@@ -80,6 +80,7 @@ beforeEach(() => {
       ({
         context,
         createPage: () => context.newPage(),
+        getTitle: async () => "Test page",
         show: (page: TestPage) => page.bringToFront(),
         hide: async () => {},
         close: () => context.close()
@@ -93,6 +94,55 @@ afterEach(async () => {
 })
 
 describe("Bot browser ownership and control", () => {
+  it("keeps preview metadata from blocking dialog handling on the same browser queue", async () => {
+    const { pageId } = JSON.parse(await service.act("a", { action: "observe" }, signal()))
+    const page = context.entries[0]
+    let releaseTitle!: (title: string) => void
+    page.title = vi.fn(
+      () =>
+        new Promise<string>((resolve) => {
+          releaseTitle = resolve
+        })
+    )
+    let finishInput!: () => void
+    const accept = vi.fn(async () => finishInput())
+    page.click.mockImplementationOnce(
+      () =>
+        new Promise<void>((resolve) => {
+          finishInput = resolve
+          page.emit("dialog", { type: () => "confirm", message: () => "Synthetic", accept })
+        })
+    )
+    try {
+      const opened = JSON.parse(
+        await service.act("a", { action: "click", pageId, role: "button", name: "Open" }, signal())
+      )
+      expect(opened.dialog.type).toBe("confirm")
+      const capture = vi.spyOn(page, "screenshot")
+      let preview: Awaited<ReturnType<BotBrowserService["preview"]>> | undefined
+      const pending = service.preview("a", pageId).then((value) => {
+        preview = value
+      })
+      await vi.waitFor(() => expect(preview).toBeDefined(), { timeout: 300 })
+      await pending
+      expect(preview!.pages).toEqual([{ id: pageId, url: "about:blank", title: "Test page" }])
+      expect(preview!.dialogPending).toBe(true)
+      expect(page.title).not.toHaveBeenCalled()
+      expect(capture).not.toHaveBeenCalled()
+      const handled = JSON.parse(
+        await service.act("a", { action: "dialog", pageId, accept: true }, signal())
+      )
+      expect(handled.dialog).toBeUndefined()
+      expect(accept).toHaveBeenCalledTimes(1)
+      expect(page.click).toHaveBeenCalledTimes(1)
+      const resumed = await service.preview("a", pageId)
+      expect(resumed.dialogPending).toBe(false)
+      expect(resumed.image).toBeTruthy()
+    } finally {
+      releaseTitle?.("Test page")
+      finishInput?.()
+    }
+  })
   it("reports actual file controls even when the ARIA snapshot calls them buttons", async () => {
     const { pageId } = JSON.parse(await service.act("a", { action: "observe" }, signal()))
     const page = context.entries[0]

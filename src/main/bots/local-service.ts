@@ -127,7 +127,8 @@ export function getLocalBotHost(): LocalBotHost {
 }
 
 export function hasActiveBotRuns(): boolean {
-  return host?.hasActiveRuns() ?? false
+  // Native window/quit callbacks can run again after Bot cleanup closed the store.
+  return database ? (host?.hasActiveRuns() ?? false) : false
 }
 
 export function stopLocalBotHost(): Promise<void> {

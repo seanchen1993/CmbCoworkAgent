@@ -4,10 +4,12 @@ import type { BotQuestionHistory as QuestionHistory } from "@/lib/bot-question-h
 const statusLabels = {
   submitted: "已回答",
   ignored: "已跳过",
-  auto_resolved: "已自动结束"
+  auto_resolved: "已自动结束",
+  cancelled: "已取消",
+  interrupted: "已中断"
 }
 
-/** Settled questions reuse the original receipt; pending input stays in the existing dialog. */
+/** Receipts and proven stopped-turn states are display projections; pending input stays separate. */
 export function BotQuestionHistory({ history }: { history: QuestionHistory }) {
   return (
     <div className="bot-question-history" data-state={history.status}>

@@ -30,8 +30,10 @@ export async function copyBotFileBytes(destination: string, bytes: ArrayBuffer):
 export async function copyBotFile(
   root: string,
   source: string,
-  destination: string
+  destination: string,
+  signal?: AbortSignal
 ): Promise<void> {
+  signal?.throwIfAborted()
   const file = await openStableFileHandle(root, source)
   const temporary = join(dirname(destination), `.${randomUUID()}.part`)
   try {
@@ -46,7 +48,8 @@ export async function copyBotFile(
     await pipeline(
       file.handle.createReadStream({ autoClose: false }),
       limit,
-      createWriteStream(temporary, { flags: "wx", mode: 0o600 })
+      createWriteStream(temporary, { flags: "wx", mode: 0o600 }),
+      { signal }
     )
     await file.assertPathIdentity()
     const after = await file.handle.stat({ bigint: true })
@@ -56,6 +59,7 @@ export async function copyBotFile(
       after.ctimeNs !== file.identity.changedNs
     )
       throw new Error("文件在复制过程中发生变化，请重试")
+    signal?.throwIfAborted()
     await rename(temporary, destination)
   } finally {
     await file.handle.close()

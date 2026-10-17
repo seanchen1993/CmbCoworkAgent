@@ -1,6 +1,11 @@
 import { describe, expect, it } from "vitest"
-import { botQuestionHistory } from "./bot-question-history"
-import type { ToolCall } from "@/types"
+import {
+  botQuestionHistory,
+  pendingBotQuestionCallId,
+  stoppedBotQuestionHistory
+} from "./bot-question-history"
+import type { Message, ToolCall, UserInputRequest } from "@/types"
+import type { BotMessageOrigin } from "../../../shared/bots/contracts"
 
 const question = {
   id: "delivery",
@@ -21,7 +26,153 @@ const receipt = (status: string, answers: Record<string, unknown> = {}) => ({
   content: JSON.stringify({ status, requestId: "request", answers })
 })
 
+describe("Bot stopped question history", () => {
+  const user: Message = { id: "user", role: "user", content: "ask", created_at: new Date() }
+  const call: Message = {
+    id: "assistant",
+    role: "assistant",
+    content: "",
+    tool_calls: [tool],
+    created_at: new Date()
+  }
+  const origins = (state: BotMessageOrigin["state"]) =>
+    new Map<string, BotMessageOrigin>([
+      ["user", { id: "task", requestId: "user", origin: { kind: "user" }, state }]
+    ])
+
+  it("uses proven cancelled or interrupted ownership without inventing an answer", () => {
+    for (const state of ["cancelled", "interrupted"] as const) {
+      const history = stoppedBotQuestionHistory([user, call], origins(state)).get(tool.id)
+      expect(history).toEqual({
+        status: state,
+        questions: [{ id: question.id, question: question.question }]
+      })
+    }
+  })
+
+  it("never treats a missing result alone as cancellation, including a paged-away owner", () => {
+    for (const state of [
+      "queued",
+      "running",
+      "waiting_user",
+      "completed",
+      "failed",
+      "outcome_unknown"
+    ] as const)
+      expect(stoppedBotQuestionHistory([user, call], origins(state)).size).toBe(0)
+    expect(stoppedBotQuestionHistory([call], origins("cancelled")).size).toBe(0)
+    expect(stoppedBotQuestionHistory([user, call], new Map()).size).toBe(0)
+  })
+
+  it("preserves actual answered or failed receipts even when the containing task was cancelled", () => {
+    for (const result of [receipt("ignored"), { content: "aborted", is_error: true }]) {
+      const message: Message = {
+        id: "result",
+        role: "tool",
+        tool_call_id: tool.id,
+        name: tool.name,
+        created_at: new Date(),
+        ...result
+      }
+      expect(stoppedBotQuestionHistory([user, call, message], origins("cancelled")).size).toBe(0)
+    }
+  })
+
+  it("keeps the stopped question settled while a later task starts", () => {
+    const nextUser = { ...user, id: "next-user" }
+    const nextCall = { ...call, id: "next-call", tool_calls: [{ ...tool, id: "next-tool" }] }
+    const ownership = origins("cancelled")
+    ownership.set(nextUser.id, {
+      id: "next-task",
+      requestId: nextUser.id,
+      origin: { kind: "user" },
+      state: "running"
+    })
+    const view = stoppedBotQuestionHistory([user, call, nextUser, nextCall], ownership)
+    expect([...view.keys()]).toEqual([tool.id])
+    expect(view.get(tool.id)?.status).toBe("cancelled")
+  })
+
+  it("does not label ambiguous IDs, subagent requests or malformed questions", () => {
+    const repeated = { ...call, id: "duplicate" }
+    expect(stoppedBotQuestionHistory([user, call, repeated], origins("cancelled")).size).toBe(0)
+    expect(
+      stoppedBotQuestionHistory(
+        [user, { ...call, subagent_tool_call_id: "child" }],
+        origins("cancelled")
+      ).size
+    ).toBe(0)
+    const malformed = {
+      ...call,
+      tool_calls: [{ ...tool, args: { questions: [question, question] } }]
+    }
+    expect(stoppedBotQuestionHistory([user, malformed], origins("cancelled")).size).toBe(0)
+  })
+})
+
+describe("Bot pending question ownership", () => {
+  const request: UserInputRequest = {
+    requestId: "pending",
+    threadId: "thread",
+    createdAt: new Date().toISOString(),
+    questions: [{ ...question, options: question.options.slice(1) }]
+  }
+  const message = (id: string, callId: string): Message => ({
+    id,
+    role: "assistant",
+    content: "",
+    created_at: new Date(),
+    tool_calls: [{ ...tool, id: callId }]
+  })
+
+  it("matches the latest loaded call despite runtime free-form option filtering", () => {
+    expect(
+      pendingBotQuestionCallId([message("older", "old"), message("latest", "new")], request)
+    ).toBe("new")
+  })
+
+  it("keeps unmatched calls and calls without an actual pending request inspectable", () => {
+    expect(pendingBotQuestionCallId([message("call", "call")], null)).toBeNull()
+    expect(
+      pendingBotQuestionCallId([message("call", "call")], {
+        ...request,
+        questions: [{ ...request.questions[0], id: "other" }]
+      })
+    ).toBeNull()
+  })
+
+  it("does not fall back to an older unanswered call once the latest has a receipt", () => {
+    const messages: Message[] = [
+      message("older", "old"),
+      message("latest", "new"),
+      {
+        id: "receipt",
+        role: "tool",
+        tool_call_id: "new",
+        name: tool.name,
+        content: "cancelled",
+        created_at: new Date(),
+        is_error: true
+      }
+    ]
+    expect(pendingBotQuestionCallId(messages, request)).toBeNull()
+  })
+})
+
 describe("Bot settled question history", () => {
+  it("reuses the original exact cancellation receipt without treating it as an answer", () => {
+    const content = `Tool call ${tool.name} with id ${tool.id} was cancelled - another message came in before it could be completed.`
+    expect(botQuestionHistory(tool, { content })).toEqual({
+      status: "interrupted",
+      questions: [{ id: question.id, question: question.question }]
+    })
+    expect(botQuestionHistory(tool, { content, is_error: true })?.status).toBe("interrupted")
+    expect(botQuestionHistory({ ...tool, id: "other-call" }, { content })).toBeNull()
+    expect(
+      botQuestionHistory(tool, { content: "User input request was cancelled.", is_error: true })
+    ).toBeNull()
+  })
+
   it("uses the submitted label after runtime option filtering, preserving clarification", () => {
     const history = botQuestionHistory(
       tool,

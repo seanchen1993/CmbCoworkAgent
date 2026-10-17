@@ -71,7 +71,7 @@ export function BotGroupEditor({
         if (!open && !busy) onClose()
       }}
     >
-      <DialogContent className="bot-editor sm:max-w-[420px]">
+      <DialogContent className="bot-editor flex max-h-[calc(100dvh-3rem)] flex-col sm:max-w-[420px]">
         <DialogHeader>
           <DialogTitle>{nameOnly ? "重命名聊天" : group ? "群聊设置" : "新建群聊"}</DialogTitle>
           <DialogDescription>
@@ -80,7 +80,7 @@ export function BotGroupEditor({
               : "选择一起工作的 Bot。群聊使用独立会话，不带入私聊历史。"}
           </DialogDescription>
         </DialogHeader>
-        <form className="space-y-4" onSubmit={save}>
+        <form className="min-h-0 space-y-4 overflow-y-auto overscroll-contain" onSubmit={save}>
           <label className="bot-field">
             群聊名称
             <input

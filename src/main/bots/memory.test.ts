@@ -1,4 +1,4 @@
-import { existsSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs"
+import { existsSync, mkdtempSync, rmSync, symlinkSync, utimesSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterEach, describe, expect, it, vi } from "vitest"
@@ -20,6 +20,29 @@ afterEach(async () => {
 })
 
 describe("Bot private memory", () => {
+  it("snapshots only current private facts newest first without retaining edited or deleted copies", () => {
+    const changed = vi.fn()
+    const { root, memory } = setup(changed)
+    const old = memory.write("bot-a", { name: "Old", content: "Prefer blue" })
+    const recent = memory.write("bot-a", { name: "Recent", content: "Prefer TypeScript" })
+    memory.write("bot-b", { name: "Other Bot", content: "Private to B" })
+    const snapshot = () =>
+      memory.forPrompt("bot-a").map((entry) => ({ ...entry, content: entry.content.trim() }))
+    utimesSync(join(root, "memories", "bot-a", `${old.id}.md`), 1, 1)
+    expect(snapshot()).toEqual([recent, old])
+    const edited = memory.write("bot-a", {
+      ...old,
+      expectedVersion: old.version,
+      content: "Prefer red"
+    })
+    utimesSync(join(root, "memories", "bot-a", `${recent.id}.md`), 1, 1)
+    expect(snapshot()).toEqual([edited, recent])
+    memory.remove("bot-a", edited.id, edited.version)
+    changed.mockClear()
+    expect(snapshot()).toEqual([recent])
+    expect(memory.forPrompt("bot-b")[0].content.trim()).toBe("Private to B")
+    expect(changed).not.toHaveBeenCalled()
+  })
   it("notifies only the changed namespace after committed edits, shares and summary batches", () => {
     const changed = vi.fn()
     const { memory } = setup(changed)

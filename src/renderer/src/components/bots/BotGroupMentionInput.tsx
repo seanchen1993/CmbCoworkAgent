@@ -63,6 +63,7 @@ export function BotGroupMentionInput({
   members,
   inputRef,
   onEdit,
+  onCancelReply,
   onPasteFiles
 }: {
   text: string
@@ -70,6 +71,7 @@ export function BotGroupMentionInput({
   members: BotDefinition[]
   inputRef: RefObject<BotGroupInputControl | null>
   onEdit(patch: { text: string; mentions: BotGroupMention[] }): void
+  onCancelReply(): boolean
   onPasteFiles(files: File[]): void
 }) {
   const id = useId()
@@ -79,8 +81,8 @@ export function BotGroupMentionInput({
   const [dismissed, setDismissed] = useState<string | null>(null)
   const [selected, setSelected] = useState(0)
   const selectedRef = useRef<HTMLButtonElement | null>(null)
-  const current = useRef({ onEdit, onPasteFiles })
-  current.current = { onEdit, onPasteFiles }
+  const current = useRef({ onEdit, onCancelReply, onPasteFiles })
+  current.current = { onEdit, onCancelReply, onPasteFiles }
   const actions = useRef<{ key(view: EditorView, event: KeyboardEvent): boolean }>({
     key: () => false
   })
@@ -189,6 +191,11 @@ export function BotGroupMentionInput({
         if (candidates[selectedIndex]) choose(candidates[selectedIndex])
         return true
       }
+    }
+    // ProseMirror consumes Escape before it bubbles to the composer's form.
+    if (event.key === "Escape" && current.current.onCancelReply()) {
+      event.preventDefault()
+      return true
     }
     if (event.key === "Enter" && !event.shiftKey) {
       event.preventDefault()

@@ -16,5 +16,45 @@ No rich-text JSON or second draft is persisted. Pasted labels do not create boun
 recipient IDs. The original workbench composer and Agent Runtime are unchanged
 by this editor adaptation.
 
+The CMB group editor supplies ProseMirror's `clipboardTextParser` using the same
+plain-prompt document builder. This preserves empty paragraphs that the library's
+default text parser merges, while retaining native selection replacement and
+undo/redo. CRLF/CR line endings become LF; pasted labels remain unbound text.
+This is a CMB integration fix, not a copied Grok clipboard parser.
+
+Escape handling follows Grok's editor-level `handleKeyDown` callback, before
+ProseMirror's default Escape capture prevents the outer form handler. Mention
+candidates consume Escape first; otherwise the existing composer cancels its
+reply draft. Composition guards and the original draft store remain in use.
+
 Tiptap and ProseMirror retain their own package licenses. This note records source
 provenance and does not assign a license to the reconstructed Grok source.
+
+## Inline question presentation
+
+`BotQuestionInput` follows the installed Grok Bot 0.71.2 renderer's
+`chunk-widget-BhFzp8Ld.js` (`Ue`, `It`, `Tt`): inline question headings,
+lettered options, direct single-choice responses, custom answers, explicit dismissal,
+and compact settled receipts. It adapts those interactions to CMB's existing
+multi-question request and supplementary-answer contract. Request drafts, response
+serialization, deadlines and transport remain owned by `UserInputRequestDialog`
+and the original runtime; no Grok service protocol or second message store is used.
+
+Stopped questions use CMB's existing Bot task ownership and `botToolResultStatus`
+cancellation-receipt recognition. Missing results alone are not treated as cancellation;
+actual submitted answers and inspectable execution records remain intact.
+
+Bot profile editor focus restoration reuses CMB `SettingsOverlay` and
+`BotSchedulePanel` (`onCloseAutoFocus` with a connected opener). The recovered
+Grok `sand-floating-primitives.tsx` uses the same connected-opener check and
+`focus({ preventScroll: true })`; menu-opened editing returns to the persistent
+menu trigger, while direct role editing returns to its own button. No shared
+dialog or additional focus listener is introduced.
+
+The private-memory sharing recipient picker reuses CMB's existing Radix Select,
+as BotEditor and BotSchedulePanel already do. The recovered Grok
+`sand-floating-primitives.tsx` (`SandSelect`) and its CSS inform the bounded,
+rounded in-app popup, selected/hover state, Escape dismissal and return to the
+trigger. No Grok popup implementation is copied and no shared primitive is
+changed. Recipient IDs, memory versions and copying remain with the existing
+Bot memory service.

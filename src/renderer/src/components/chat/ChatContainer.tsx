@@ -23,9 +23,11 @@ import {
   ChatMessageVisibilityContext,
   ChatActivityPresentationContext,
   ChatExecutionCardCallIdsContext,
-  ChatExecutionDetailsContext
+  ChatExecutionDetailsContext,
+  ChatToolPresentationContext
 } from "./chat-presentation-context"
 import { projectBotExecution } from "@/lib/bot-execution-visibility"
+import { pendingBotQuestionCallId } from "@/lib/bot-question-history"
 import ReactMarkdown, { type Components } from "react-markdown"
 import remarkBreaks from "remark-breaks"
 import type { VirtuosoHandle } from "react-virtuoso"
@@ -142,6 +144,8 @@ import type {
   SkillMetadata,
   Thread,
   ThreadForkOverrides,
+  ToolCall,
+  ToolResult,
   ToolCallState,
   ToolCallStatus,
   UserInputResponse
@@ -924,6 +928,8 @@ interface ChatContainerProps {
   surface?: ChatSurface
   hideWelcomeSkillTabs?: boolean
   readOnlyReason?: string | null
+  /** Group execution records may answer existing requests while their composer stays read-only. */
+  allowUserInputInReadOnly?: boolean
   onHarnessSessionCreated?: (threadId: string) => void
 }
 
@@ -1711,6 +1717,7 @@ export function ChatContainer({
   surface = "default",
   hideWelcomeSkillTabs = false,
   readOnlyReason = null,
+  allowUserInputInReadOnly = false,
   onHarnessSessionCreated,
   managedTurn
 }: ChatContainerProps): React.JSX.Element {
@@ -1734,6 +1741,7 @@ export function ChatContainer({
   const chatScrollSessionLeaseRef = useRef(initialChatScrollView.lease)
   const initialPendingDurableRevealMessageId = initialChatScrollView.pendingRevealMessageId
   const readOnly = Boolean(resolvedReadOnlyReason)
+  const canAnswerUserInput = !readOnly || (surface === "bot" && allowUserInputInReadOnly)
   const shouldShowWelcomeHeadline = surfaceConfig.showWelcomeHeadline
   const shouldShowWelcomeSkillTabs = surfaceConfig.showWelcomeSkillTabs && !hideWelcomeSkillTabs
   const shouldShowHarnessDialogTips = surfaceConfig.showHarnessDialogTips && !readOnly
@@ -2623,7 +2631,7 @@ export function ChatContainer({
       patchThreadMetadata
     ]
   )
-  const userInputScrollPadding = pendingUserInput
+  const userInputScrollPadding = surface !== "bot" && pendingUserInput
     ? Math.ceil((userInputDialogLayout?.height ?? 320) + 24)
     : undefined
 
@@ -3543,6 +3551,7 @@ export function ChatContainer({
   const executionCardCallIds = useContext(ChatExecutionCardCallIdsContext)
   const showExecutionDetails = useContext(ChatExecutionDetailsContext)
   const activityPresentation = useContext(ChatActivityPresentationContext)
+  const parentToolPresentation = useContext(ChatToolPresentationContext)
   // Fold the actual committed + streamed timeline. The parent only owns committed history.
   // Reuse the existing tool projection version so ordinary text tokens do not rescan results.
   const toolDerivationProjection = threadProjectionRuntime.projectToolDerivationMessages(
@@ -3550,10 +3559,37 @@ export function ChatContainer({
     displayMessageProjection.changedMessages,
     displayMessagesStructureVersion
   )
+  const inlineQuestionCallId = useMemo(
+    () =>
+      surface === "bot" && canAnswerUserInput && pendingUserInput?.threadId === threadId
+        ? pendingBotQuestionCallId(displayMessages, pendingUserInput)
+        : null,
+    [
+      surface,
+      canAnswerUserInput,
+      threadId,
+      pendingUserInput,
+      displayMessages,
+      displayMessagesStructureVersion,
+      toolDerivationProjection.version
+    ]
+  )
+  const presentInlineQuestion = useCallback(
+    (tool: ToolCall, result?: Pick<ToolResult, "content" | "is_error">) =>
+      !showExecutionDetails && !searchOpen && !result && tool.id === inlineQuestionCallId
+        ? <></>
+        : parentToolPresentation?.(tool, result),
+    [showExecutionDetails, searchOpen, inlineQuestionCallId, parentToolPresentation]
+  )
   const foldedMessageIds = useMemo(
     () =>
       surface === "bot" && !showExecutionDetails
-        ? projectBotExecution(displayMessages, isLoading, executionCardCallIds).hiddenMessages
+        ? projectBotExecution(
+            displayMessages,
+            isLoading,
+            executionCardCallIds,
+            inlineQuestionCallId
+          ).hiddenMessages
         : new Set<string>(),
     [
       surface,
@@ -3563,6 +3599,7 @@ export function ChatContainer({
       displayMessagesStructureVersion,
       toolDerivationProjection.version,
       dynamicVisibilityProjection.version,
+      inlineQuestionCallId,
       isLoading
     ]
   )
@@ -5115,7 +5152,13 @@ export function ChatContainer({
 
   useEffect(() => {
     const state = chatScrollStateRef.current
-    if (!pendingUserInput || !userInputDialogLayout || !state || !shouldFollowChatOutput(state)) {
+    if (
+      surface === "bot" ||
+      !pendingUserInput ||
+      !userInputDialogLayout ||
+      !state ||
+      !shouldFollowChatOutput(state)
+    ) {
       return
     }
     const viewport = getViewport()
@@ -5160,6 +5203,7 @@ export function ChatContainer({
     getViewport,
     lastContentMessageId,
     pendingUserInput,
+    surface,
     userInputDialogLayout?.height,
     userInputDialogLayout?.top
   ])
@@ -7918,6 +7962,14 @@ export function ChatContainer({
           </div>
         </div>
       )}
+      {surface === "bot" && canAnswerUserInput && (
+        <UserInputRequestDialog
+          key={pendingUserInput?.requestId ?? "idle"}
+          request={pendingUserInput}
+          onSubmit={handleUserInputSubmit}
+          presentation="bot"
+        />
+      )}
       {isLoading && (
         <div className="space-y-3">
           {contextCompaction?.phase !== "started" &&
@@ -8278,58 +8330,60 @@ export function ChatContainer({
                     />
                   )}
                   <ChatExecutionDetailsContext.Provider value={showExecutionDetails || searchOpen}>
-                    <ChatMessageVirtualList
-                      historyReady={!historyLoading && !historyPageLoading}
-                      canAnimateMessages={chatScrollUiState.mode === "following"}
-                      functionTurnNotices={functionTurnNotices}
-                      messageAttempts={streamData.messageAttempts}
-                      searchReveal={searchOpen ? searchReveal : null}
-                      messages={displayMessages}
-                      visibleMessageIndexes={visibleMessageIndexes}
-                      lastUserMessageIndex={lastUserMessageIndex}
-                      contentVersion={displayMessagesContentVersion}
-                      onLoadEarlierHistoryPage={loadEarlierHistoryPage}
-                      historyHasMore={historyHasMore}
-                      historyPageLoading={historyPageLoading}
-                      historyRemainingCount={historyRemainingCount}
-                      historyGapBeforeMessageId={historyGapBeforeVisibleMessageId}
-                      canLoadReleasedHistory={Boolean(historyWindowGap?.reloadTargetMessageId)}
-                      onLoadReleasedHistoryWindow={loadReleasedHistoryWindow}
-                      onRestoreLatestHistoryWindow={scrollToConversationBottom}
-                      hookLoggingEnabled={hookLogConfig.enabled}
-                      hookLogBucketByTurnId={hookLogBucketByTurnId}
-                      detachedHookLogBuckets={detachedHookLogBuckets}
-                      contentMessageRefs={contentMessageRefs}
-                      setMessageRef={setMessageRef}
-                      isLoading={isLoading}
-                      toolResults={toolResults}
-                      toolCallStates={toolCallDisplayStates}
-                      pendingApprovalToolCallKeys={pendingApprovalToolCallKeys}
-                      pendingApproval={pendingApproval}
-                      autoApproveGitPush={autoApproveGitPush}
-                      onApprovalDecision={handleApprovalDecision}
-                      onEditUserMessage={handleEditUserMessage}
-                      onSetGoalFromMessage={managedTurn ? undefined : handleSetGoalFromMessage}
-                      onForkFromMessage={managedTurn ? undefined : handleForkFromMessage}
-                      forkingMessageId={forkingMessageId}
-                      onOpenHookLogBucket={handleOpenHookLogBucket}
-                      threadId={threadId}
-                      assistantDurationMsById={assistantDurationMsById}
-                      userSendTimeLabelById={userSendTimeLabelById}
-                      customScrollParent={scrollParent}
-                      virtuosoRef={virtuosoRef}
-                      navigatorVirtualRangeRef={virtualRangeRef}
-                      initialTopMostItemIndex={
-                        chatScrollUiState.mode === "initializing" ||
-                        chatScrollUiState.mode === "following"
-                          ? { index: "LAST", align: "end", behavior: "auto" }
-                          : undefined
-                      }
-                      onInitialVirtualItemsRendered={handleInitialVirtualItemsRendered}
-                      onContentHeightChanged={handleContentHeightChanged}
-                      onAtBottomStateChange={handleVirtualAtBottomStateChange}
-                      footer={chatMessageListFooter}
-                    />
+                    <ChatToolPresentationContext.Provider value={presentInlineQuestion}>
+                      <ChatMessageVirtualList
+                        historyReady={!historyLoading && !historyPageLoading}
+                        canAnimateMessages={chatScrollUiState.mode === "following"}
+                        functionTurnNotices={functionTurnNotices}
+                        messageAttempts={streamData.messageAttempts}
+                        searchReveal={searchOpen ? searchReveal : null}
+                        messages={displayMessages}
+                        visibleMessageIndexes={visibleMessageIndexes}
+                        lastUserMessageIndex={lastUserMessageIndex}
+                        contentVersion={displayMessagesContentVersion}
+                        onLoadEarlierHistoryPage={loadEarlierHistoryPage}
+                        historyHasMore={historyHasMore}
+                        historyPageLoading={historyPageLoading}
+                        historyRemainingCount={historyRemainingCount}
+                        historyGapBeforeMessageId={historyGapBeforeVisibleMessageId}
+                        canLoadReleasedHistory={Boolean(historyWindowGap?.reloadTargetMessageId)}
+                        onLoadReleasedHistoryWindow={loadReleasedHistoryWindow}
+                        onRestoreLatestHistoryWindow={scrollToConversationBottom}
+                        hookLoggingEnabled={hookLogConfig.enabled}
+                        hookLogBucketByTurnId={hookLogBucketByTurnId}
+                        detachedHookLogBuckets={detachedHookLogBuckets}
+                        contentMessageRefs={contentMessageRefs}
+                        setMessageRef={setMessageRef}
+                        isLoading={isLoading}
+                        toolResults={toolResults}
+                        toolCallStates={toolCallDisplayStates}
+                        pendingApprovalToolCallKeys={pendingApprovalToolCallKeys}
+                        pendingApproval={pendingApproval}
+                        autoApproveGitPush={autoApproveGitPush}
+                        onApprovalDecision={handleApprovalDecision}
+                        onEditUserMessage={handleEditUserMessage}
+                        onSetGoalFromMessage={managedTurn ? undefined : handleSetGoalFromMessage}
+                        onForkFromMessage={managedTurn ? undefined : handleForkFromMessage}
+                        forkingMessageId={forkingMessageId}
+                        onOpenHookLogBucket={handleOpenHookLogBucket}
+                        threadId={threadId}
+                        assistantDurationMsById={assistantDurationMsById}
+                        userSendTimeLabelById={userSendTimeLabelById}
+                        customScrollParent={scrollParent}
+                        virtuosoRef={virtuosoRef}
+                        navigatorVirtualRangeRef={virtualRangeRef}
+                        initialTopMostItemIndex={
+                          chatScrollUiState.mode === "initializing" ||
+                          chatScrollUiState.mode === "following"
+                            ? { index: "LAST", align: "end", behavior: "auto" }
+                            : undefined
+                        }
+                        onInitialVirtualItemsRendered={handleInitialVirtualItemsRendered}
+                        onContentHeightChanged={handleContentHeightChanged}
+                        onAtBottomStateChange={handleVirtualAtBottomStateChange}
+                        footer={chatMessageListFooter}
+                      />
+                    </ChatToolPresentationContext.Provider>
                   </ChatExecutionDetailsContext.Provider>
                 </div>
               </div>
@@ -9525,11 +9579,13 @@ export function ChatContainer({
                       />
                     </div>
                     {/* Keep the upward-opening request panel outside the composer's clipped shell. */}
-                    <UserInputRequestDialog
-                      request={pendingUserInput}
-                      onSubmit={handleUserInputSubmit}
-                      onLayoutChange={handleUserInputDialogLayoutChange}
-                    />
+                    {surface !== "bot" && (
+                      <UserInputRequestDialog
+                        request={pendingUserInput}
+                        onSubmit={handleUserInputSubmit}
+                        onLayoutChange={handleUserInputDialogLayoutChange}
+                      />
+                    )}
                   </div>
                 </div>
               </form>

@@ -49,7 +49,10 @@ export async function startElectronBotBrowser(profile: string): Promise<BotBrows
     if (reply.error) request.reject(new Error(reply.error))
     else request.resolve(reply.value)
   })
-  const call = (action: "create" | "show" | "hide", targetId?: string): Promise<unknown> => {
+  const call = (
+    action: "create" | "show" | "hide" | "get-title",
+    targetId?: string
+  ): Promise<unknown> => {
     if (closed || !child.connected) return Promise.reject(new Error("Bot 浏览器未连接"))
     if (pending.size >= 16) return Promise.reject(new Error("浏览器请求过多，请稍候"))
     const id = ++sequence
@@ -160,6 +163,9 @@ export async function startElectronBotBrowser(profile: string): Promise<BotBrows
           await new Promise((resolve) => setTimeout(resolve, 25))
         } while (!closed && Date.now() < deadline)
         throw new Error("未能绑定 Bot 浏览器页面")
+      },
+      async getTitle(page) {
+        return (await call("get-title", await targetOf(page))) as string
       },
       async show(page) {
         await call("show", await targetOf(page))

@@ -9,7 +9,8 @@ import {
   groupEditorExtensions,
   groupEditorOffset,
   groupEditorLineBoundary,
-  groupEditorMotionPlugin
+  groupEditorMotionPlugin,
+  groupEditorClipboardPlugin
 } from "./bot-group-editor"
 import { groupMessageRecipients } from "./bot-group-mentions"
 
@@ -109,6 +110,73 @@ describe("group editor draft projection", () => {
       text: "前\n@乙",
       mentions: [{ start: 2, end: 4, botId: "b", label: "乙" }]
     })
+  })
+})
+
+describe("group editor clipboard", () => {
+  const clipboard = groupEditorClipboardPlugin()
+  const paste = (state: EditorState, text: string) => {
+    const slice = clipboard.props.clipboardTextParser!.call(
+      clipboard,
+      text,
+      state.selection.$from,
+      true,
+      { state } as EditorView
+    )
+    return state.apply(state.tr.replaceSelection(slice!).setMeta("uiEvent", "paste"))
+  }
+
+  it.each([
+    "首段\n\n第二段\n\n- 第一项\n- 第二项\n\n```js\nconsole.log(82)\n```",
+    "\n\n首段\n\n",
+    "  缩进\t空格  \n\n🙂",
+    "首段\r\n\r\n第二段\r末行"
+  ])("preserves exact plain paragraphs through native paste replacement: %s", (text) => {
+    const state = paste(EditorState.create({ schema }), text)
+    expect(groupEditorDraft(state.doc.toJSON())).toEqual({
+      text: text.replace(/\r\n?/g, "\n"),
+      mentions: []
+    })
+    expect(groupEditorOffset(state.doc, state.selection.from)).toBe(
+      text.replace(/\r\n?/g, "\n").length
+    )
+  })
+
+  it("replaces selected text between bound atoms, preserving IDs and native undo/redo", () => {
+    const text = "@甲乙 待替换 @甲乙"
+    const mentions = [member, { ...member, start: 8, end: 11, botId: "b" }]
+    const doc = schema.nodeFromJSON(groupEditorContent(text, mentions))
+    let state = EditorState.create({
+      schema,
+      doc,
+      selection: TextSelection.create(doc, 3, 6),
+      plugins: [history()]
+    })
+    state = paste(state, "首段\n\n@甲乙\n末行")
+    const pasted = groupEditorDraft(state.doc.toJSON())
+    expect(pasted).toEqual({
+      text: "@甲乙 首段\n\n@甲乙\n末行 @甲乙",
+      mentions: [member, { ...member, botId: "b", start: 15, end: 18 }]
+    })
+    expect(groupEditorOffset(state.doc, state.selection.from)).toBe(14)
+    expect(
+      undo(state, (transaction) => {
+        state = state.apply(transaction)
+      })
+    ).toBe(true)
+    expect(groupEditorDraft(state.doc.toJSON())).toEqual({ text, mentions })
+    expect(
+      redo(state, (transaction) => {
+        state = state.apply(transaction)
+      })
+    ).toBe(true)
+    expect(groupEditorDraft(state.doc.toJSON())).toEqual(pasted)
+  })
+
+  it("keeps clipboard markup and typed mention labels as unbound text", () => {
+    const text = '<span data-group-mention data-bot-id="a">@甲乙</span>\n\n@所有人'
+    const state = paste(EditorState.create({ schema }), text)
+    expect(groupEditorDraft(state.doc.toJSON())).toEqual({ text, mentions: [] })
   })
 })
 

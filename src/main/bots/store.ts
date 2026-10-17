@@ -23,6 +23,7 @@ import {
 } from "../../shared/bots/message-reply"
 import {
   BOT_REPLY_FILES_PREFIX,
+  parseBotOutputFiles,
   parseBotFileDelivery,
   type BotDeliveredFile
 } from "../../shared/bots/file-delivery"
@@ -184,6 +185,12 @@ export class BotStore {
         db.run("ALTER TABLE bot_tasks ADD COLUMN origin_json TEXT")
       if (!columns.some((column) => column.name === "thread_id"))
         db.run("ALTER TABLE bot_tasks ADD COLUMN thread_id TEXT")
+      if (
+        !this.rows("PRAGMA table_info(bot_commands)").some(
+          (column) => column.name === "source_task_id"
+        )
+      )
+        db.run("ALTER TABLE bot_commands ADD COLUMN source_task_id TEXT")
       // Repair partially applied older migrations without changing valid group/private ownership.
       db.run(
         "UPDATE bot_tasks SET thread_id=(SELECT thread_id FROM bots WHERE bots.id=bot_tasks.bot_id) WHERE thread_id IS NULL"
@@ -485,21 +492,32 @@ export class BotStore {
           bot.id
         ]
       )
-      if (input.archived)
-        this.db.run(
-          "UPDATE bot_tasks SET state='cancelled', updated_at=? WHERE bot_id=? AND state='queued'",
-          [this.now(), bot.id]
+      if (input.archived) {
+        const awaitingReplies = this.rows(
+          `SELECT id FROM bot_tasks WHERE bot_id=? AND state='queued'
+           AND json_extract(origin_json,'$.kind')='bot'
+           AND json_extract(origin_json,'$.expectsReply')=1`,
+          [bot.id]
         )
+        const reason = "Bot 已归档，排队任务未执行。"
+        this.db.run(
+          "UPDATE bot_tasks SET state='cancelled', error=?, updated_at=? WHERE bot_id=? AND state='queued'",
+          [reason, this.now(), bot.id]
+        )
+        // Fence every queued parent before producing replies; never revive work
+        // cancelled in this transaction or invent a second delivery path.
+        for (const row of awaitingReplies) this.settle(String(row.id), "cancelled", reason)
+      }
       this.changed()
       return this.getBot(bot.id)
     })
   }
 
-  /** A running user turn can update only its own profile, never model, ownership or lifecycle. */
+  /** A user-authorized turn updates profile fields, never model, ownership or lifecycle. */
   updateOwnProfile(taskId: string, patch: { name?: string; instructions?: string }): BotDefinition {
     return this.transaction(() => {
       const task = this.getTask(taskId)
-      if (!this.hasDirectUserRequest(taskId))
+      if (!this.hasDirectUserRequest(taskId) && !this.profileContinuationRequest(taskId))
         throw new BotError("CONFLICT", "修改 Bot 身份需要当前用户直接交办")
       const bot = this.getBot(task.botId)
       if (bot.archived || bot.deleting) throw new BotError("CONFLICT", "Bot 已归档或正在删除")
@@ -534,13 +552,54 @@ export class BotStore {
         ).length > 0
       )
     }
-    return (
-      task.origin.kind === "introduction" &&
-      this.rows(
-        "SELECT id FROM bot_tasks WHERE injected_into=? AND bot_id=? AND thread_id=? AND state='running' AND json_extract(origin_json,'$.kind')='user' LIMIT 1",
-        [task.id, task.botId, task.threadId]
-      ).length > 0
+    return task.origin.kind === "introduction" && this.injectedUserRequestId(task) !== null
+  }
+
+  private injectedUserRequestId(task: BotTask): string | null {
+    const row = this.rows(
+      `SELECT id FROM bot_tasks WHERE injected_into=? AND bot_id=? AND thread_id=?
+       AND state='running' AND json_extract(origin_json,'$.kind')='user'
+       ORDER BY created_at DESC,rowid DESC LIMIT 1`,
+      [task.id, task.botId, task.threadId]
+    )[0]
+    return row ? String(row.id) : null
+  }
+
+  /** A command result may continue its persisted user request, never authorize a new one. */
+  profileContinuationRequest(taskId: string): string | null {
+    return this.commandProfileSource(this.getTask(taskId))?.message ?? null
+  }
+
+  private commandProfileSource(task: BotTask): BotTask | null {
+    if (
+      task.state !== "running" ||
+      task.origin.kind !== "notification" ||
+      task.origin.notificationKind !== "command" ||
+      task.requestId !== `notification:${task.threadId}:command:${task.origin.key}`
     )
+      return null
+    const row = this.rows(
+      `SELECT source.* FROM bot_commands command JOIN bot_tasks source ON source.id=command.source_task_id
+       WHERE command.id=? AND command.bot_id=? AND command.thread_id=?
+         AND COALESCE(command.group_id,'')=? AND command.state='completed' AND command.suppressed=0
+         AND source.bot_id=command.bot_id AND source.thread_id=command.thread_id AND source.state='completed'`,
+      [task.origin.key, task.botId, task.threadId, botTaskGroupId(task) ?? ""]
+    )[0]
+    if (!row) return null // Legacy or pruned receipts carry no inferred authority.
+    const source = this.task(row)
+    if (source.origin.kind === "user" && !botTaskGroupId(task)) return source
+    if (source.origin.kind !== "group" || source.origin.groupId !== botTaskGroupId(task))
+      return null
+    const group = this.getGroup(source.origin.groupId)
+    return !group.deleting &&
+      group.memberIds.includes(task.botId) &&
+      this.rows(
+        `SELECT id FROM bot_group_messages WHERE id=? AND group_id=? AND author_bot_id IS NULL
+       AND EXISTS (SELECT 1 FROM json_each(targets_json) WHERE value=?)`,
+        [source.origin.messageId, group.id, task.botId]
+      ).length > 0
+      ? source
+      : null
   }
 
   /** Merge only requested profile fields; reuse the normal idle-target update guard. */
@@ -551,7 +610,7 @@ export class BotStore {
   ): BotDefinition {
     return this.transaction(() => {
       const task = this.getTask(taskId)
-      if (!this.hasDirectUserRequest(taskId))
+      if (!this.hasDirectUserRequest(taskId) && !this.profileContinuationRequest(taskId))
         throw new BotError("CONFLICT", "修改同事资料需要当前用户直接交办")
       if (task.botId === botId)
         throw new BotError("INVALID_INPUT", "修改自己的资料请使用 bot_update_profile")
@@ -957,8 +1016,12 @@ export class BotStore {
           BotTaskOrigin,
           { kind: "bot" }
         >
-        const prefix = `${origin.fromBotName ?? row.recipient_name} 的协作任务已结束（${task.state}）。\n`
-        if (message.startsWith(prefix)) message = message.slice(prefix.length)
+        for (const state of [task.state, botTaskStateLabel(task.state)]) {
+          const prefix = `${origin.fromBotName ?? row.recipient_name} 的协作任务已结束（${state}）。\n`
+          if (!message.startsWith(prefix)) continue
+          message = message.slice(prefix.length)
+          break
+        }
         message = splitBotInlineReasoning(message).body
       }
       const identity = (side: "sender" | "recipient", id: string): BotExchange["sender"] => ({
@@ -1020,6 +1083,7 @@ export class BotStore {
         SELECT t.* FROM bot_tasks t
         WHERE t.state NOT IN ('queued','running','waiting_user') AND t.updated_at < ?
           AND t.id NOT IN (SELECT id FROM bot_tasks WHERE state NOT IN ('queued','running','waiting_user') ORDER BY updated_at DESC,id DESC LIMIT 100)
+          AND NOT EXISTS (SELECT 1 FROM bot_commands command WHERE command.source_task_id=t.id)
           AND NOT EXISTS (
             SELECT 1 FROM bot_tasks member
             WHERE COALESCE(json_extract(member.origin_json,'$.rootTaskId'),member.id)=COALESCE(json_extract(t.origin_json,'$.rootTaskId'),t.id)
@@ -1208,16 +1272,22 @@ export class BotStore {
         active.filter((row) => row.thread_id === command.threadId).length >= 8
       )
         throw new BotError("CONFLICT", "后台任务数量已达上限，请等待已有任务完成")
-      this.db.run("INSERT INTO bot_commands VALUES (?,?,?,?,?,?,'accepted',0,?,?)", [
-        command.id,
-        source.botId,
-        command.threadId,
-        groupId ?? null,
-        command.command,
-        command.cwd,
-        command.startedAt,
-        this.now()
-      ])
+      this.db.run(
+        "INSERT INTO bot_commands (id,bot_id,thread_id,group_id,command,cwd,state,suppressed,started_at,updated_at,source_task_id) VALUES (?,?,?,?,?,?,'accepted',0,?,?,?)",
+        [
+          command.id,
+          source.botId,
+          command.threadId,
+          groupId ?? null,
+          command.command,
+          command.cwd,
+          command.startedAt,
+          this.now(),
+          this.commandProfileSource(source)?.id ??
+            (source.origin.kind === "introduction" ? this.injectedUserRequestId(source) : null) ??
+            source.id
+        ]
+      )
       // Bound receipts even while the host continuously handles queued work and never becomes idle.
       this.db.run(`DELETE FROM bot_commands WHERE state!='accepted' AND id NOT IN
         (SELECT id FROM bot_commands WHERE state!='accepted' ORDER BY updated_at DESC,id DESC LIMIT 200)`)
@@ -1299,7 +1369,14 @@ export class BotStore {
     })
   }
 
-  delegate(fromTaskId: string, targetBotId: string, message: string, key: string): BotTask {
+  delegate(
+    fromTaskId: string,
+    targetBotId: string,
+    message: string,
+    key: string,
+    outputFiles: string[] = []
+  ): BotTask {
+    const outputs = parseBotOutputFiles(outputFiles)
     return this.transaction(() => {
       const source = this.getTask(fromTaskId)
       if (!ACTIVE_STATES.includes(source.state as (typeof ACTIVE_STATES)[number]))
@@ -1320,6 +1397,14 @@ export class BotStore {
       const requestId = `delegate-${source.id}-${createHash("sha256").update(key).digest("hex").slice(0, 24)}`
       const rootTaskId = source.origin.kind === "bot" ? source.origin.rootTaskId : source.id
       const prior = this.rows("SELECT id FROM bot_tasks WHERE request_id=?", [requestId])[0]
+      if (prior) {
+        const origin = this.getTask(String(prior.id)).origin
+        if (
+          origin.kind !== "bot" ||
+          JSON.stringify(origin.outputFiles ?? []) !== JSON.stringify(outputs)
+        )
+          throw new BotError("CONFLICT", "同一交办标识的输出文件要求已改变，请使用新的请求标识")
+      }
       const count = Number(
         this.rows(
           "SELECT COUNT(*) AS n FROM bot_tasks WHERE json_extract(origin_json,'$.rootTaskId')=?",
@@ -1337,6 +1422,7 @@ export class BotStore {
           rootTaskId,
           depth,
           expectsReply: true,
+          ...(outputs.length ? { outputFiles: outputs } : {}),
           ...(groupId ? { groupId } : {})
         }
       )
@@ -1428,10 +1514,13 @@ export class BotStore {
             `result-${task.id}`,
             group.id,
             task.botId,
-            (visibleResult || error || `${botTaskStateLabel(state)}；没有可确认的结果。`).slice(
-              0,
-              60_000
-            ),
+            (
+              visibleResult ||
+              error ||
+              (state === "cancelled"
+                ? botTaskStateLabel(state)
+                : `${botTaskStateLabel(state)}；没有可确认的结果。`)
+            ).slice(0, 60_000),
             "[]",
             this.now()
           ]
@@ -1459,28 +1548,32 @@ export class BotStore {
       const root = this.rows("SELECT state FROM bot_tasks WHERE id=?", [task.origin.rootTaskId])[0]
       if (!root || root.state === "cancelled" || root.state === "interrupted") return
       let references = ""
+      let verifiedFiles: BotDeliveredFile[] | undefined
       // Group outputs already belong to its shared workspace. Private replies need
       // exact source references, not guessed relative paths or a scan of peer files.
       // Never derive references from model prose or advertise cancelled outputs.
       if (!groupId && state === "completed" && files?.length) {
         const verified = parseBotFileDelivery(JSON.stringify({ kind: "bot-file-delivery", files }))
         if (verified) {
+          verifiedFiles = verified
           for (const file of verified) {
             const line = JSON.stringify(file)
             if (references.length + line.length + 1 > 12_000) break
             references += `\n${line}`
           }
           if (references)
-            references = `${BOT_REPLY_FILES_PREFIX}${references}\n这些文件仍位于接收 Bot 的工作区，尚未复制到你的工作区。仅按用户授权读取这些明确路径；需要在当前对话交付附件时，通过现有文件工具将原文件复制到自己的工作区，验证后交付。不要猜测路径、扫描其他 Bot 的目录或把引用当作额外授权。`
+            references = `${BOT_REPLY_FILES_PREFIX}${references}\n这些文件仍位于接收 Bot 的工作区，尚未复制到你的工作区。需要在当前对话交付附件时，bot_deliver_files可按上述已验证路径导入并交付副本，无需自行拼复制命令。仅使用用户授权的这些明确文件；不要猜测路径、扫描其他 Bot 的目录或把引用当作额外授权。`
         }
       }
-      const message = `${source.name} 的协作任务已结束（${state}）。\n${(visibleResult || error || "未收到可确认的结果，请核对任务状态。").slice(0, 30_000)}${references}`
+      const message = `${source.name} 的协作任务已结束（${botTaskStateLabel(state)}）。\n${(visibleResult || error || "未收到可确认的结果，请核对任务状态。").slice(0, 30_000)}${references}`
       this.db.run("INSERT OR IGNORE INTO bot_reply_outbox VALUES (?, ?, ?, ?)", [
         task.id,
         task.origin.fromBotId,
         message,
         JSON.stringify({
           ...task.origin,
+          outputFiles: undefined,
+          replyFiles: verifiedFiles,
           fromBotId: task.botId,
           fromBotName: source.name,
           expectsReply: false

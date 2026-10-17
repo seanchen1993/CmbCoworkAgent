@@ -785,7 +785,7 @@ function getTaskConcurrencyLimiter(queueId: string): AsyncSemaphore {
   return limiter
 }
 
-function createGradedToolConcurrencyMiddleware(queueId: string) {
+function createGradedToolConcurrencyMiddleware(queueId: string, userInputWithoutToolLock = false) {
   const lock = getToolConcurrencyLock(queueId)
   const taskLimiter = getTaskConcurrencyLimiter(queueId)
   return createMiddleware({
@@ -794,7 +794,10 @@ function createGradedToolConcurrencyMiddleware(queueId: string) {
       const toolCall = request.toolCall as
         | { id?: string; name?: string; args?: unknown }
         | undefined
-      if (shouldFastRejectActiveWorkflow(queueId, toolCall)) {
+      if (
+        (userInputWithoutToolLock && toolCall?.name === "request_user_input") ||
+        shouldFastRejectActiveWorkflow(queueId, toolCall)
+      ) {
         return handler(request)
       }
       const tier = classifyToolConcurrency(toolCall)
@@ -2364,6 +2367,7 @@ function assembleDeepAgent(
     // strict cross-platform behavior (the macOS/Linux default).
     windowsShellKind = "unknown",
     toolConcurrencyQueueId = "default",
+    userInputWithoutToolLock = false,
     toolHookMiddleware,
     threadId,
     onTaskSubagentPromptsResolved,
@@ -2932,7 +2936,7 @@ function assembleDeepAgent(
   // Base middleware for custom subagents (no skills — custom subagents must define their own)
 
   const gradedToolConcurrencyMiddleware =
-    createGradedToolConcurrencyMiddleware(toolConcurrencyQueueId)
+    createGradedToolConcurrencyMiddleware(toolConcurrencyQueueId, userInputWithoutToolLock)
   const subagentToolConcurrencyMiddleware = createGradedToolConcurrencyMiddleware(
     `${toolConcurrencyQueueId}:subagent`
   )
@@ -4942,6 +4946,8 @@ export interface CreateAgentRuntimeOptions {
    * runtime's own thread id (per-runtime isolation, the original behavior).
    */
   toolConcurrencyQueueId?: string
+  /** Trusted shared-workspace hosts may wait for user choices without holding the file tool lock. */
+  userInputWithoutToolLock?: boolean
   /**
    * Auto-approve file edits (write_file/edit_file) without per-file prompts,
    * while still gating shell execution. Dynamic-workflow subagents set this:
@@ -7513,6 +7519,7 @@ Access limits: read-only handoff continuation. Do not modify files, run commands
     soloTaskTraceManager,
     actionStationarityTurnId,
     toolConcurrencyQueueId: options.toolConcurrencyQueueId ?? options.threadId ?? workspacePath,
+    userInputWithoutToolLock: options.userInputWithoutToolLock,
     toolHookMiddleware,
     onFailureFuseNotice,
     modRuntimeAuthority,

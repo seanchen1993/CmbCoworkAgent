@@ -151,6 +151,10 @@ export type BotTaskOrigin =
       depth: number
       expectsReply: boolean
       groupId?: string
+      /** Declared by the dispatch tool; verified by the host before a successful file reply. */
+      outputFiles?: string[]
+      /** Host-verified outputs of this exact private handoff, not model-supplied grants. */
+      replyFiles?: BotDeliveredFile[]
     }
   | {
       kind: "notification"
@@ -294,6 +298,8 @@ export interface BotBrowserState {
   generation: number
   control: "bot" | "requesting" | "human" | "other-human"
   image: string | null
+  /** A JavaScript dialog on the selected page currently prevents page capture. */
+  dialogPending?: boolean
   /** Present only for this target's user-help lease; never exposed to other Bot scopes. */
   helpInstruction?: string
 }

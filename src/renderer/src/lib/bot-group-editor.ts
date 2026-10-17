@@ -5,7 +5,7 @@ import Text from "@tiptap/extension-text"
 import HardBreak from "@tiptap/extension-hard-break"
 import { Placeholder, UndoRedo } from "@tiptap/extensions"
 import { Plugin, TextSelection } from "@tiptap/pm/state"
-import type { Node as EditorNode } from "@tiptap/pm/model"
+import { Slice, type Node as EditorNode } from "@tiptap/pm/model"
 import { validGroupMentions, type BotGroupMention } from "./bot-group-mentions"
 
 // Adapted from Grok's rich-text-editor.tsx: a plain prompt with inline mention atoms,
@@ -178,6 +178,26 @@ const GroupEditorMotion = Extension.create({
   addProseMirrorPlugins: () => [groupEditorMotionPlugin()]
 })
 
+export function groupEditorClipboardPlugin() {
+  return new Plugin({
+    props: {
+      clipboardTextParser(text, context) {
+        // PM's default parser collapses consecutive newlines. Keep the prompt's
+        // exact paragraphs, then use native paste selection/history semantics.
+        const doc = context.doc.type.schema.nodeFromJSON(
+          groupEditorContent(text.replace(/\r\n?/g, "\n"), [])
+        )
+        return Slice.maxOpen(doc.content)
+      }
+    }
+  })
+}
+
+const GroupEditorClipboard = Extension.create({
+  name: "groupEditorClipboard",
+  addProseMirrorPlugins: () => [groupEditorClipboardPlugin()]
+})
+
 /** Same editor primitives as Grok; omit its unrelated formatting/reference extensions. */
 export function groupEditorExtensions(mention = GroupMentionNode) {
   return [
@@ -187,6 +207,7 @@ export function groupEditorExtensions(mention = GroupMentionNode) {
     HardBreak,
     UndoRedo.configure({ newGroupDelay: 100 }),
     GroupEditorMotion,
+    GroupEditorClipboard,
     Placeholder.configure({ placeholder: "发消息，或 @ 提及 Bot…" }),
     mention
   ]

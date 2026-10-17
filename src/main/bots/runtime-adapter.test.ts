@@ -1,13 +1,14 @@
 import { describe, expect, it, vi, beforeEach } from "vitest"
 import { AsyncLocalStorage } from "node:async_hooks"
 import { AsyncLocalStorageProviderSingleton } from "@langchain/core/singletons"
-import type { BotDefinition, BotTask } from "../../shared/bots/contracts"
+import type { BotDefinition, BotMemory, BotTask } from "../../shared/bots/contracts"
 import type { AgentRunExecutionContext } from "../agent/agent-run-service"
 import type { LocalBotHost } from "./host"
 import type { BotMemoryService } from "./memory"
 import type { BotMemoryMaintainer } from "./memory-maintainer"
 import type { BotBrowserService } from "./browser"
 import type { BotDeliveredFile } from "../../shared/bots/file-delivery"
+import type { BotPeerDeliveryFiles } from "./tools"
 
 const fixture = vi.hoisted(() => ({
   thread: vi.fn(),
@@ -26,6 +27,8 @@ const fixture = vi.hoisted(() => ({
   cancelWorkflow: vi.fn(),
   cancelCommands: vi.fn(),
   commandLifecycle: vi.fn(() => ({ accepted: vi.fn(), settled: vi.fn() })),
+  profileContinuation: vi.fn<() => string | null>(() => null),
+  profileTools: vi.fn<(...args: unknown[]) => string[]>(() => ["own-profile"]),
   cancelWorkers: vi.fn(),
   waitWorkers: vi.fn(),
   acknowledgeWorkers: vi.fn(),
@@ -33,13 +36,18 @@ const fixture = vi.hoisted(() => ({
   notify: vi.fn(),
   browserTools: vi.fn(() => ["owned-browser"]),
   memoryTools: vi.fn(() => ["private-memory"]),
-  deliveryTools: vi.fn(
+  memoryEnabled: true,
+  memorySnapshot: vi.fn(() => [] as BotMemory[]),
+  deliveryTools: vi.fn<
     (
-      _workspace: string,
-      _signal: AbortSignal,
-      _publish?: (files: BotDeliveredFile[], callId: string) => void
-    ) => ["delivery"]
-  )
+      workspace: string,
+      signal: AbortSignal,
+      publish?: (files: BotDeliveredFile[], callId: string) => void,
+      peer?: BotPeerDeliveryFiles
+    ) => string[]
+  >(() => ["delivery"]),
+  verifyFiles: vi.fn(),
+  publishFiles: vi.fn()
 }))
 vi.mock("../db", () => ({
   getThreadCore: fixture.thread,
@@ -51,6 +59,7 @@ vi.mock("../models/registry", () => ({
   toModelRef: (model: { ref: string }) => model.ref
 }))
 vi.mock("../app-data-root", () => ({ getCmbCoworkAgentDataRoot: () => "/synthetic" }))
+vi.mock("../storage", () => ({ isMemoryEnabled: () => fixture.memoryEnabled }))
 vi.mock("./paths", () => ({
   botDirectory: (_root: string, _kind: string, id: string) => `/synthetic/workspaces/${id}`
 }))
@@ -89,10 +98,11 @@ vi.mock("../mcp/capability-service", () => ({ getGlobalMcpCapabilityService: () 
 vi.mock("./mcp-scope", () => ({ createBotMcpScope: () => fixture.scope }))
 vi.mock("../services/notify", () => ({ notifyIfBackground: fixture.notify }))
 vi.mock("./tools", () => ({
-  createBotProfileTools: () => ["own-profile"],
+  createBotProfileTools: fixture.profileTools,
   createBotMemoryTools: fixture.memoryTools,
   createBotBrowserTools: fixture.browserTools,
   createBotDeliveryTools: fixture.deliveryTools,
+  verifyBotDeliveryFiles: fixture.verifyFiles,
   createBotCollaborationTools: () => ["collaboration"],
   createBotScheduleTools: () => ["routine"]
 }))
@@ -125,12 +135,14 @@ const task: BotTask = {
 }
 function port() {
   return createLocalBotRunPort(
-    { editVersion: () => 7 } as unknown as BotMemoryService,
+    { editVersion: () => 7, forPrompt: fixture.memorySnapshot } as unknown as BotMemoryService,
     () =>
       ({
-        getBot: () => bot,
+        getBot: (id: string) => ({ ...bot, id }),
         onSteeringReady: fixture.steeringReady,
-        commandLifecycle: fixture.commandLifecycle
+        commandLifecycle: fixture.commandLifecycle,
+        profileContinuationRequest: fixture.profileContinuation,
+        publishGroupFiles: fixture.publishFiles
       }) as unknown as LocalBotHost,
     {} as BotBrowserService,
     { enqueue: fixture.summary } as unknown as BotMemoryMaintainer
@@ -147,6 +159,10 @@ function metadata(groupId?: string) {
 }
 beforeEach(() => {
   vi.clearAllMocks()
+  fixture.verifyFiles.mockReset().mockResolvedValue([])
+  fixture.memoryEnabled = true
+  fixture.profileContinuation.mockReturnValue(null)
+  fixture.memorySnapshot.mockReset().mockReturnValue([])
   fixture.defaultModel.mockReturnValue({ ref: "custom:available-default" })
   fixture.hasNotifications.mockReturnValue(true)
   fixture.cancelWorkers.mockReturnValue([])
@@ -163,6 +179,179 @@ beforeEach(() => {
   )
 })
 describe("Bot Runtime integration", () => {
+  it.each([null, "After the command finishes, rename Reviewer to Auditor."])(
+    "offers profile updates only for a host-verified command continuation (%s)",
+    async (originalRequest) => {
+      fixture.profileContinuation.mockReturnValue(originalRequest)
+      const continuation: BotTask = {
+        ...task,
+        origin: { kind: "notification", notificationKind: "command", key: "command" }
+      }
+      await port().acquire(bot, continuation)!.execute(new AbortController().signal, vi.fn())
+      const context = fixture.start.mock.calls.at(-1)![2]
+      const request = fixture.start.mock.calls.at(-1)![0]
+      expect(context.additionalTools.includes("own-profile")).toBe(Boolean(originalRequest))
+      if (originalRequest) {
+        expect(fixture.profileTools.mock.calls.at(-1)?.[3]).toBe(true)
+        expect(request.message).toContain(JSON.stringify(originalRequest))
+        expect(request.message).toContain("Never reuse a shell, SQL or profile-file workaround")
+      } else {
+        expect(fixture.profileTools).not.toHaveBeenCalled()
+        expect(request.message).not.toContain("Original user request linked by the host")
+      }
+    }
+  )
+  it("binds verified peer imports only to the exact private return turn", async () => {
+    const files = [{ filePath: "/synthetic/workspaces/b/report.md", name: "report.md", size: 40 }]
+    const peerTask: BotTask = {
+      ...task,
+      origin: {
+        kind: "bot",
+        fromBotId: "b",
+        rootTaskId: "root",
+        depth: 1,
+        expectsReply: false,
+        replyFiles: files
+      }
+    }
+    await port().acquire(bot, peerTask)!.execute(new AbortController().signal, vi.fn())
+    expect(fixture.deliveryTools.mock.calls.at(-1)![3]).toEqual({
+      workspacePath: "/synthetic/workspaces/b",
+      files
+    })
+    await port()
+      .acquire(bot, { ...peerTask, origin: { ...peerTask.origin, expectsReply: true } } as BotTask)!
+      .execute(new AbortController().signal, vi.fn())
+    expect(fixture.deliveryTools.mock.calls.at(-1)![3]).toBeUndefined()
+    fixture.thread.mockReturnValue({ metadata: JSON.stringify(metadata("g")) })
+    await port()
+      .acquire(bot, {
+        ...peerTask,
+        threadId: "group-g-a",
+        origin: { ...peerTask.origin, groupId: "g" }
+      } as BotTask)!
+      .execute(new AbortController().signal, vi.fn())
+    expect(fixture.deliveryTools.mock.calls.at(-1)![3]).toBeUndefined()
+  })
+  it.each([false, true])(
+    "verifies group outputs without publishing a delivered file twice (%s)",
+    async (alreadyDelivered) => {
+      fixture.thread.mockReturnValue({ metadata: JSON.stringify(metadata("g")) })
+      const files = [
+        { filePath: "/synthetic/workspaces/group-g/report.md", name: "report.md", size: 40 }
+      ]
+      fixture.verifyFiles.mockResolvedValue(files)
+      fixture.start.mockImplementation(async (_request, _delivery, context) => {
+        if (alreadyDelivered)
+          fixture.deliveryTools.mock.calls.at(-1)![2]!(files, "explicit-delivery")
+        context.onRunTerminated?.({ outcome: "success", code: "done" })
+        return { completion: Promise.resolve() }
+      })
+      const peerTask: BotTask = {
+        ...task,
+        threadId: "group-g-a",
+        origin: {
+          kind: "bot",
+          fromBotId: "b",
+          rootTaskId: "root",
+          depth: 1,
+          expectsReply: true,
+          groupId: "g",
+          outputFiles: ["report.md"]
+        }
+      }
+      await port().acquire(bot, peerTask)!.execute(new AbortController().signal, vi.fn())
+      expect(fixture.publishFiles).toHaveBeenCalledTimes(1)
+      expect(fixture.publishFiles).toHaveBeenCalledWith(
+        task.id,
+        alreadyDelivered ? "explicit-delivery" : `outputs-${task.id}`,
+        files
+      )
+    }
+  )
+  it("verifies declared peer outputs even when the model returns only a written path", async () => {
+    const files = [{ filePath: "/synthetic/workspaces/a/report.md", name: "report.md", size: 40 }]
+    fixture.verifyFiles.mockResolvedValue(files)
+    const peerTask: BotTask = {
+      ...task,
+      origin: {
+        kind: "bot",
+        fromBotId: "b",
+        rootTaskId: "root",
+        depth: 1,
+        expectsReply: true,
+        outputFiles: ["report.md"]
+      }
+    }
+    const signal = new AbortController().signal
+    const result = await port().acquire(bot, peerTask)!.execute(signal, vi.fn())
+    expect(fixture.verifyFiles).toHaveBeenCalledWith(
+      "/synthetic/workspaces/a",
+      ["report.md"],
+      signal
+    )
+    expect(result).toMatchObject({ state: "completed", files })
+    fixture.verifyFiles.mockRejectedValueOnce(new Error("Required output missing"))
+    await expect(port().acquire(bot, peerTask)!.execute(signal, vi.fn())).rejects.toThrow(
+      "Required output missing"
+    )
+    fixture.verifyFiles.mockClear()
+    await port()
+      .acquire(bot, {
+        ...peerTask,
+        origin: { ...peerTask.origin, expectsReply: false }
+      } as BotTask)!
+      .execute(signal, vi.fn())
+    expect(fixture.verifyFiles).not.toHaveBeenCalled()
+  })
+  it("never verifies or publishes declared outputs after a failed run", async () => {
+    fixture.start.mockImplementation(async (_request, _delivery, context) => {
+      context.onRunTerminated?.({ outcome: "error", code: "provider_error" })
+      return { completion: Promise.resolve() }
+    })
+    const peerTask: BotTask = {
+      ...task,
+      origin: {
+        kind: "bot",
+        fromBotId: "b",
+        rootTaskId: "root",
+        depth: 1,
+        expectsReply: true,
+        outputFiles: ["report.md"]
+      }
+    }
+    const result = await port()
+      .acquire(bot, peerTask)!
+      .execute(new AbortController().signal, vi.fn())
+    expect(result.state).toBe("failed")
+    expect(result.files).toBeUndefined()
+    expect(fixture.verifyFiles).not.toHaveBeenCalled()
+  })
+  it("loads only this Bot's fresh private facts once per run without enabling global memory", async () => {
+    const saved = { id: "fact", name: "Format", content: "Three sections", version: "v1" }
+    fixture.memorySnapshot.mockReturnValue([saved])
+    await port().acquire(bot, task)!.execute(new AbortController().signal, vi.fn())
+    expect(fixture.memorySnapshot.mock.calls).toEqual([[bot.id]])
+    expect(fixture.start.mock.calls[0][2].extraSystemPrompt).toContain('"content":"Three sections"')
+    fixture.memorySnapshot.mockReturnValue([{ ...saved, content: "Four sections", version: "v2" }])
+    await port().acquire(bot, task)!.execute(new AbortController().signal, vi.fn())
+    expect(fixture.memorySnapshot.mock.calls).toEqual([[bot.id], [bot.id]])
+    const prompt = fixture.start.mock.calls[1][2].extraSystemPrompt
+    expect(prompt).toContain('"content":"Four sections"')
+    expect(prompt).not.toContain("Three sections")
+    expect(JSON.parse(fixture.update.mock.calls.at(-1)![1].metadata).memoryEnabled).toBe(false)
+  })
+  it("does not read or inject saved facts when the global memory setting is off", async () => {
+    fixture.memoryEnabled = false
+    fixture.memorySnapshot.mockImplementationOnce(() => {
+      throw new Error("Disabled memory must not be read")
+    })
+    await port().acquire(bot, task)!.execute(new AbortController().signal, vi.fn())
+    expect(fixture.memorySnapshot).not.toHaveBeenCalled()
+    expect(fixture.start.mock.calls[0][2].extraSystemPrompt).not.toContain(
+      "Private Bot memory reference"
+    )
+  })
   it("starts a new inbox turn without inheriting a completed command's graph callbacks", async () => {
     AsyncLocalStorageProviderSingleton.initializeGlobalInstance(new AsyncLocalStorage())
     let inherited: unknown = "unchecked"
@@ -482,6 +671,7 @@ describe("Bot Runtime integration", () => {
       allowTrustedTransportSkillMarker: true,
       capabilityService: fixture.scope,
       toolConcurrencyQueueId: "a",
+      userInputWithoutToolLock: false,
       additionalTools: [
         "delivery",
         "own-profile",
@@ -556,8 +746,11 @@ describe("Bot Runtime integration", () => {
     )
     expect(context.allowTrustedTransportSkillMarker).toBe(false)
     expect(context.toolConcurrencyQueueId).toBe("bot-group-g")
+    expect(context.userInputWithoutToolLock).toBe(true)
     expect(fixture.announce).not.toHaveBeenCalled()
     expect(fixture.summary).not.toHaveBeenCalled()
+    expect(fixture.memorySnapshot).not.toHaveBeenCalled()
+    expect(context.extraSystemPrompt).not.toContain("Private Bot memory reference")
   })
   it("offers the existing own-profile tool to direct group users without exposing private memory", async () => {
     fixture.thread.mockReturnValue({ metadata: JSON.stringify(metadata("g")) })
@@ -576,6 +769,7 @@ describe("Bot Runtime integration", () => {
     ])
     expect(fixture.memoryTools).not.toHaveBeenCalled()
     expect(fixture.summary).not.toHaveBeenCalled()
+    expect(fixture.memorySnapshot).not.toHaveBeenCalled()
   })
   it.each<BotTask["origin"]>([
     { kind: "bot", fromBotId: "peer", rootTaskId: "root", depth: 1, expectsReply: true },

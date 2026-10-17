@@ -161,6 +161,7 @@ export interface AgentRunExecutionContext {
   /** Trusted host adapters can add identity-bound tools; never populated from renderer input. */
   additionalTools?: CreateAgentRuntimeOptions["additionalTools"]
   toolConcurrencyQueueId?: string
+  userInputWithoutToolLock?: CreateAgentRuntimeOptions["userInputWithoutToolLock"]
   capabilityService?: CreateAgentRuntimeOptions["capabilityService"]
   onGoalNotice?: (notice: AgentRunGoalNotice) => void
   onFinalAssistant?: (result: AgentRunFinalAssistant) => void | Promise<void>

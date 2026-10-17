@@ -50,6 +50,38 @@ function fixture() {
 }
 
 describe("Bot control history retention", () => {
+  it("keeps a command's original request while its bounded receipt is retained", () => {
+    const f = fixture()
+    const source = f.store.enqueue({
+      botId: f.bot.id,
+      requestId: "command-source",
+      message: "Rename Peer after checking"
+    })
+    f.store.transition(source.id, "running")
+    f.store.acceptCommand(source.id, {
+      id: "long-command",
+      threadId: source.threadId,
+      command: "node check.js",
+      cwd: "/synthetic",
+      startedAt: 1000
+    })
+    f.store.transition(source.id, "completed")
+    f.fillTail()
+    f.store.pruneTaskHistory()
+    expect(f.store.getTask(source.id).message).toBe(source.message)
+    const reopened = f.reopen()
+    reopened.settleCommand({
+      id: "long-command",
+      threadId: source.threadId,
+      output: "Checked",
+      exitCode: 0,
+      truncated: false,
+      cancelled: false
+    })
+    const notice = reopened.nextQueued([])!
+    reopened.transition(notice.id, "running")
+    expect(reopened.profileContinuationRequest(notice.id)).toBe(source.message)
+  })
   it("retains routine provenance after task pruning without copying the routine transcript", () => {
     const f = fixture()
     const task = f.store.enqueue(
@@ -60,7 +92,9 @@ describe("Bot control history retention", () => {
     f.store.settle(task.id, "completed", null, "BOT_ROUTINE_SILENT")
     f.fillTail()
     expect(f.store.pruneTaskHistory()).toBe(1)
-    expect(f.native.prepare("SELECT message FROM bot_exchange_archive WHERE id=?").get(task.id)).toEqual({ message: null })
+    expect(
+      f.native.prepare("SELECT message FROM bot_exchange_archive WHERE id=?").get(task.id)
+    ).toEqual({ message: null })
     expect(f.reopen().messageOrigins(f.bot.id, [task.requestId])).toEqual([
       { id: task.id, requestId: task.requestId, origin: task.origin, state: "completed" }
     ])

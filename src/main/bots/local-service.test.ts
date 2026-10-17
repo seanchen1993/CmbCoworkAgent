@@ -5,6 +5,7 @@ const fixture = vi.hoisted(() => ({
   browserClose: vi.fn(),
   memoryClose: vi.fn(),
   memoryChanged: vi.fn(),
+  hasActiveRuns: vi.fn(),
   notifyMemory: undefined as ((botId: string) => void) | undefined,
   summaryClose: vi.fn(),
   databaseClose: vi.fn(),
@@ -23,6 +24,7 @@ vi.mock("./host", () => ({
   LocalBotHost: class {
     stop = fixture.stop
     memoryChanged = fixture.memoryChanged
+    hasActiveRuns = fixture.hasActiveRuns
   }
 }))
 vi.mock("./runtime-adapter", () => ({ createLocalBotRunPort: vi.fn() }))
@@ -50,6 +52,7 @@ beforeEach(() => {
   vi.resetAllMocks()
   fixture.trace = []
   fixture.notifyMemory = undefined
+  fixture.hasActiveRuns.mockReturnValue(true)
   fixture.browserClose.mockImplementation(async () => {
     fixture.trace.push("browser")
   })
@@ -85,6 +88,7 @@ describe("Bot local service shutdown", () => {
         })
     )
     const service = await import("./local-service")
+    expect(service.hasActiveBotRuns()).toBe(false)
     service.getLocalBotHost()
     const first = service.stopLocalBotHost()
     expect(service.stopLocalBotHost()).toBe(first)
@@ -92,11 +96,16 @@ describe("Bot local service shutdown", () => {
     await Promise.resolve()
     expect(fixture.databaseClose).not.toHaveBeenCalled()
     expect(fixture.browserClose).not.toHaveBeenCalled()
+    expect(service.hasActiveBotRuns()).toBe(true)
     release()
     await first
     expect(fixture.trace.slice(0, 2).sort()).toEqual(["browser", "summary"])
     expect(fixture.trace.slice(2)).toEqual(["memory", "database"])
     expect(fixture.stop).toHaveBeenCalledTimes(1)
+    fixture.hasActiveRuns.mockImplementation(() => {
+      throw new Error("Database is closed")
+    })
+    expect(service.hasActiveBotRuns()).toBe(false)
     expect(() => service.getLocalBotHost()).toThrow("退出")
   })
 
@@ -108,5 +117,9 @@ describe("Bot local service shutdown", () => {
     expect(fixture.summaryClose).toHaveBeenCalledTimes(1)
     expect(fixture.memoryClose).toHaveBeenCalledTimes(1)
     expect(fixture.databaseClose).toHaveBeenCalledTimes(1)
+    fixture.hasActiveRuns.mockImplementation(() => {
+      throw new Error("Database is closed")
+    })
+    expect(service.hasActiveBotRuns()).toBe(false)
   })
 })

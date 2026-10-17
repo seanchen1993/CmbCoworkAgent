@@ -56,7 +56,12 @@ app.whenReady().then(async () => {
     assert.equal(await pages[0].getByLabel('Upload').evaluate(input => input.files[0].name), 'upload.txt');
     const dialog = JSON.parse(await service.act('a', { action: 'click', role: 'button', name: 'Confirm' }, new AbortController().signal));
     assert.equal(dialog.dialog.message, 'Synthetic confirmation');
+    const dialogPreview = await service.preview('a', a.pageId);
+    assert.equal(dialogPreview.pages.find(page => page.id === a.pageId).title, 'Bot browser fixture');
+    assert.equal(dialogPreview.image, null);
+    assert.equal(dialogPreview.dialogPending, true);
     await service.act('a', { action: 'dialog', accept: true }, new AbortController().signal);
+    assert.equal((await service.preview('a')).dialogPending, false);
     assert.equal(await pages[0].locator('#answer').textContent(), 'accepted');
     await service.act('a', { action: 'click', role: 'link', name: 'Download' }, new AbortController().signal);
     let download;

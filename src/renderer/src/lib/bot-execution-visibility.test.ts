@@ -21,6 +21,98 @@ const result = (id: string, is_error = false, content = "done"): Message => ({
 })
 
 describe("Bot execution presentation", () => {
+  it.each([
+    ["native success", "V_READY\n[Command succeeded with exit code 0, elapsed: 47s]"],
+    ["empty success", "<no output>\n[Command succeeded with exit code 0, elapsed: 0s]"],
+    [
+      "not ready",
+      JSON.stringify({ retrieval_status: "not_ready", elapsed: 2, command: "node job.mjs" })
+    ],
+    [
+      "wait timeout",
+      JSON.stringify({
+        retrieval_status: "timeout",
+        elapsed: 30,
+        command: "node job.mjs",
+        partialOutput: "working",
+        partialTruncated: false,
+        idleSeconds: 2
+      })
+    ]
+  ])("folds a validated task_output %s without leaving an empty message shell", (_, content) => {
+    const messages = [call("output", "task_output"), result("output", false, content)]
+    for (const active of [false, true]) {
+      const view = projectBotExecution(messages, active, new Set())
+      expect([...view.hiddenMessages]).toEqual(["output"])
+      expect([...view.foldedTools]).toEqual([getWorkerToolUiKey("output", "call-output", 0)])
+    }
+    expect(projectBotExecution(messages, false, new Set(["call-output"])).hiddenMessages.size).toBe(
+      0
+    )
+  })
+
+  it.each([
+    "Y_FAILED\n[Command failed with exit code 7, elapsed: 3s]",
+    'Error: No background task found with id "missing-1017Y".',
+    "Task polling aborted: conversation was cancelled by user.",
+    "[Hook blocked] denied",
+    "custom post-hook response",
+    "[Command succeeded with exit code 0, elapsed: 1s]\npost-hook warning",
+    JSON.stringify({ retrieval_status: "not_ready", elapsed: 2 }),
+    JSON.stringify({ retrieval_status: "timeout", elapsed: -1, command: "node job.mjs" }),
+    JSON.stringify({
+      retrieval_status: "not_ready",
+      elapsed: 2,
+      command: "node job.mjs",
+      error: "denied"
+    }),
+    JSON.stringify({
+      retrieval_status: "not_ready",
+      elapsed: 2,
+      command: "node job.mjs",
+      partialOutput: { error: "denied" }
+    }),
+    "{broken json"
+  ])("keeps exceptional or unknown task_output records visible: %s", (content) => {
+    const view = projectBotExecution(
+      [call("output", "task_output"), result("output", false, content)],
+      true,
+      new Set()
+    )
+    expect(view.hiddenMessages.size).toBe(0)
+    expect(view.foldedTools.size).toBe(0)
+  })
+
+  it("keeps missing and explicitly failed task_output results visible", () => {
+    const output = call("output", "task_output")
+    expect(projectBotExecution([output], true, new Set()).foldedTools.size).toBe(0)
+    expect(
+      projectBotExecution(
+        [
+          output,
+          result("output", true, "Y_READY\n[Command succeeded with exit code 0, elapsed: 1s]")
+        ],
+        true,
+        new Set()
+      ).foldedTools.size
+    ).toBe(0)
+  })
+
+  it("only folds a pending question behind its real inline card and preserves returned errors", () => {
+    const question = call("question", "request_user_input")
+    expect(projectBotExecution([question], true, new Set()).hiddenMessages.size).toBe(0)
+    expect([
+      ...projectBotExecution([question], true, new Set(), "call-question").hiddenMessages
+    ]).toEqual(["question"])
+    expect(
+      projectBotExecution([question], true, new Set(["call-question"]), "call-question")
+        .hiddenMessages.size
+    ).toBe(0)
+    expect(
+      projectBotExecution([question, result("question", true)], true, new Set(), "call-question")
+        .hiddenMessages.size
+    ).toBe(0)
+  })
   it("folds completed directory and memory reads but preserves errors and the user-facing answer", () => {
     const tools = [
       "bot_list_peers",

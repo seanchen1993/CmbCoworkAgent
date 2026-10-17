@@ -39,7 +39,11 @@ import { botGroupBrowserScope } from "../../../../shared/bots/contracts"
 import { projectBotExecution } from "@/lib/bot-execution-visibility"
 import { botProfileEvent } from "@/lib/bot-profile-event"
 import { botScheduleReceipt } from "@/lib/bot-schedule-view"
-import { botQuestionHistory } from "@/lib/bot-question-history"
+import {
+  botQuestionHistory,
+  stoppedBotQuestionHistory,
+  type BotQuestionHistory as QuestionHistory
+} from "@/lib/bot-question-history"
 import { BotQuestionHistory } from "./BotQuestionHistory"
 import { parseBotMessageReply } from "../../../../shared/bots/message-reply"
 import { botDeliveredFileReferences } from "@/lib/bot-delivered-file-references"
@@ -147,7 +151,8 @@ export function BotConversationTools({
       return {
         hiddenMessages: new Set<string>(),
         foldedTools: new Set<string>(),
-        quietMessages: new Set<string>()
+        quietMessages: new Set<string>(),
+        stoppedQuestions: new Map<string, QuestionHistory>()
       }
     const messages = context.getThreadState(threadId).messages
     let view = { hiddenMessages: new Set<string>(), foldedTools: new Set<string>() }
@@ -157,7 +162,13 @@ export function BotConversationTools({
       )
       view = projectBotExecution(messages, running, cardCallIds)
     }
-    return { ...view, quietMessages: quietBotTurnMessageIds(messages, taskByMessage) }
+    return {
+      ...view,
+      quietMessages: quietBotTurnMessageIds(messages, taskByMessage),
+      stoppedQuestions: showExecutionDetails
+        ? new Map<string, QuestionHistory>()
+        : stoppedBotQuestionHistory(messages, taskByMessage)
+    }
   }, [threadId, context, taskByMessage, windowKey, showExecutionDetails, tasks, cardCallIds])
   useEffect(() => {
     if (!exchangeId && exchangeTrigger.current?.isConnected) exchangeTrigger.current.focus()
@@ -165,6 +176,11 @@ export function BotConversationTools({
   const presentTool = useCallback(
     (tool: ToolCall, result?: Pick<ToolResult, "content" | "is_error">) => {
       if (!result) {
+        const stoppedQuestion =
+          !showExecutionDetails && tool.name === "request_user_input" && !cardCallIds.has(tool.id)
+            ? executionView.stoppedQuestions.get(tool.id)
+            : undefined
+        if (stoppedQuestion) return <BotQuestionHistory history={stoppedQuestion} />
         if (
           !(
             tool.name === "bot_request_browser_help" ||
@@ -270,7 +286,18 @@ export function BotConversationTools({
         </button>
       )
     },
-    [bots, schedules, tasks, client, groupId, botId, threadId, showExecutionDetails]
+    [
+      bots,
+      schedules,
+      tasks,
+      client,
+      groupId,
+      botId,
+      threadId,
+      showExecutionDetails,
+      cardCallIds,
+      executionView.stoppedQuestions
+    ]
   )
   const presentMessage = useCallback(
     (message: Message) => {

@@ -1,10 +1,12 @@
 /* Scoped to the Bots workspace; the existing workbench keeps its theme and layout. */
+/* Surface and base colors follow Grok's sand-light / sand-dark theme tokens. */
 .bots-workspace {
-  --bot-panel: #f7f7f7;
-  --bot-canvas: #fff;
+  --bot-panel: #f5f5f5;
+  --bot-canvas: #fcfcfc;
+  --bot-elevated: #fff;
   --bot-hover: #ececec;
   --bot-line: #e9e9e9;
-  --bot-text: #242424;
+  --bot-text: #1c1c1c;
   --bot-muted: #828282;
   --bot-agent-bubble: #efefef;
   --bot-user-bubble: var(--bot-user-bubble-light, #e2e2e2);
@@ -21,13 +23,14 @@
   color: var(--bot-text);
 }
 .dark .bots-workspace {
-  --bot-panel: #111111;
-  --bot-canvas: #080808;
+  --bot-panel: #0e0e0e;
+  --bot-canvas: #121212;
+  --bot-elevated: #1f1f1f;
   --bot-hover: #272727;
   --bot-line: #232323;
-  --bot-text: #ededed;
+  --bot-text: #f5f5f5;
   --bot-muted: #888;
-  --bot-agent-bubble: #262626;
+  --bot-agent-bubble: #1f1f1f;
   --bot-user-bubble: var(--bot-user-bubble-dark, #4b4b4b);
   --bot-user-text: var(--bot-user-text-dark, var(--bot-text));
 }
@@ -484,7 +487,7 @@
 .bot-detail-actions {
   display: flex;
   justify-content: flex-end;
-  gap: 6px;
+  gap: 8px;
 }
 .bot-profile {
   display: flex;
@@ -672,6 +675,24 @@
   flex-direction: column;
   gap: 8px;
   font-size: 13px;
+}
+/* Portaled picker uses the same neutral surfaces as the Bot appearance popover. */
+.bot-memory-recipient-menu {
+  --accent: #ececec;
+  --accent-foreground: #242424;
+  background: #fafafa;
+  color: #242424;
+  border-color: #e4e4e4;
+}
+.dark .bot-memory-recipient-menu {
+  --accent: #2b2b2b;
+  --accent-foreground: #ededed;
+  background: #1f1f1f;
+  color: #ededed;
+  border-color: #303030;
+}
+.bot-memory-recipient-menu[data-bot-popup] {
+  transform-origin: var(--radix-select-content-transform-origin);
 }
 .bot-field input,
 .bot-field textarea {
@@ -954,8 +975,131 @@
   font-size: 12px;
   white-space: pre-wrap;
 }
-.bot-question-history[data-state="ignored"] .bot-question-card {
+.bot-question-history[data-state="ignored"] .bot-question-card,
+.bot-question-history[data-state="cancelled"] .bot-question-card,
+.bot-question-history[data-state="interrupted"] .bot-question-card {
   color: var(--bot-muted);
+}
+.bot-question-input {
+  padding: 16px;
+}
+.bot-question-input header {
+  align-items: flex-start;
+}
+.bot-question-input button {
+  cursor: pointer;
+  transition:
+    background-color 120ms ease,
+    color 120ms ease;
+}
+.bot-question-input button:focus-visible,
+.bot-question-input textarea:focus-visible {
+  outline: 2px solid var(--bot-muted);
+  outline-offset: 2px;
+}
+.bot-question-input button:disabled {
+  cursor: default;
+  opacity: 0.35;
+}
+.bot-question-dismiss,
+.bot-question-additional,
+.bot-question-input nav button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  flex-shrink: 0;
+  border-radius: 50%;
+  color: var(--bot-muted);
+}
+.bot-question-dismiss:hover,
+.bot-question-additional:hover,
+.bot-question-input nav button:not(:disabled):hover {
+  background: var(--bot-hover);
+  color: var(--bot-text);
+}
+.bot-question-options {
+  display: grid;
+  gap: 4px;
+  margin: 12px -8px 0;
+}
+.bot-question-option {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 28px;
+  align-items: center;
+  border-radius: 12px;
+}
+.bot-question-option:hover,
+.bot-question-option[data-selected="true"] {
+  background: var(--bot-hover);
+}
+.bot-question-option > button:first-child {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 8px;
+  text-align: left;
+  min-width: 0;
+}
+.bot-question-key {
+  width: 22px;
+  flex-shrink: 0;
+  color: var(--bot-muted);
+  font-size: 12px;
+  text-align: center;
+}
+.bot-question-option small {
+  display: block;
+  margin-top: 2px;
+  color: var(--bot-muted);
+  font-size: 12px;
+  line-height: 18px;
+}
+.bot-question-input textarea {
+  grid-column: 1 / -1;
+  field-sizing: content;
+  resize: none;
+  width: 100%;
+  min-height: 36px;
+  max-height: 160px;
+  padding: 7px 10px;
+  border: 1px solid var(--bot-line);
+  border-radius: 10px;
+  background: var(--bot-panel);
+  color: var(--bot-text);
+  font: inherit;
+  line-height: 22px;
+}
+.bot-question-input textarea::placeholder {
+  color: var(--bot-muted);
+}
+.bot-question-custom {
+  margin-top: 12px;
+}
+.bot-question-input footer,
+.bot-question-input nav {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.bot-question-input footer {
+  justify-content: space-between;
+  margin-top: 12px;
+}
+.bot-question-input nav {
+  color: var(--bot-muted);
+  font-size: 11px;
+}
+.bot-question-submit {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  background: var(--bot-text);
+  color: var(--bot-canvas);
 }
 .bot-message-entrance {
   display: contents;
@@ -992,9 +1136,13 @@
 [data-chat-surface="bot"] [data-message-bubble]:is(:hover, :focus-within) [data-message-actions] {
   opacity: 1;
 }
-[data-bot-composer] {
-  background: var(--bot-panel);
-  box-shadow: none;
+[data-bot-composer],
+.bot-group-composer {
+  background: var(--bot-elevated);
+  box-shadow:
+    0 2px 8px -1px #0000000d,
+    0 1px 2px #00000008,
+    0 0 0 1px #e4e4e40a;
 }
 [data-bot-composer] button[type="submit"] {
   background: var(--bot-text);
@@ -1258,7 +1406,6 @@
   max-width: calc(var(--bot-group-width) - 2 * var(--bot-group-gutter));
   margin: 16px auto 22px;
   border-radius: 26px;
-  background: var(--bot-panel);
   border: 1px solid var(--bot-line);
   padding: 12px 16px;
 }
@@ -2011,15 +2158,17 @@
   }
 }
 
-.bots-sidebar-toolbar .bot-toolbar-action {
+.bots-sidebar-toolbar .bot-toolbar-action,
+.bot-detail-actions > .bot-icon-button {
   width: 36px;
   height: 36px;
   border: 1px solid var(--bot-line);
   border-radius: 50%;
-  background: var(--bot-panel);
+  background: var(--bot-elevated);
   color: var(--bot-text);
 }
-.bots-sidebar-toolbar .bot-toolbar-action:hover {
+.bots-sidebar-toolbar .bot-toolbar-action:hover,
+.bot-detail-actions > .bot-icon-button:hover {
   background: var(--bot-hover);
 }
 .bot-pinned-card .bot-group-avatar {

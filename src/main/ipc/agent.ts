@@ -8003,6 +8003,8 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               extraSystemPrompt: runExecutionContext.extraSystemPrompt,
               additionalTools: runExecutionContext.additionalTools,
               toolConcurrencyQueueId: runExecutionContext.toolConcurrencyQueueId,
+              userInputWithoutToolLock:
+                runExecutionContext.source === "bot" && runExecutionContext.userInputWithoutToolLock,
               capabilityService: runExecutionContext.capabilityService,
               agentMode: effectiveAgentMode,
               traceContext: runtimeTraceContext,

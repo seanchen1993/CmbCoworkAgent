@@ -25,6 +25,7 @@ import {
   ChatActivityPresentationContext,
   ChatMessageIdentityContext,
   ChatExecutionDetailsContext,
+  ChatExecutionCardCallIdsContext,
   ChatFoldedToolCallsContext,
   ChatToolPresentationContext,
   ChatMessagePresentationContext
@@ -460,6 +461,7 @@ function MessageBubbleImpl({
   const quotedReply = useMemo(() => replyActions?.quoteFor(message), [replyActions, message])
   const presentation = useContext(ChatPresentationContext)
   const showExecutionDetails = useContext(ChatExecutionDetailsContext)
+  const executionCardCallIds = useContext(ChatExecutionCardCallIdsContext)
   const activityPresentation = useContext(ChatActivityPresentationContext)
   const foldedToolCalls = useContext(ChatFoldedToolCallsContext)
   const presentTool = useContext(ChatToolPresentationContext)
@@ -1180,11 +1182,17 @@ function MessageBubbleImpl({
               }
 
               const presented =
-                result && !result.is_error && inferredStatus === "completed"
+                presentation === "bot" &&
+                !showExecutionDetails &&
+                resolvedToolCall.name === "request_user_input" &&
+                inferredStatus === "interrupted" &&
+                !executionCardCallIds.has(resolvedToolCall.id)
                   ? presentTool?.(resolvedToolCall, result)
-                  : !result && inferredStatus === "running"
-                    ? presentTool?.(resolvedToolCall)
-                    : null
+                  : result && !result.is_error && inferredStatus === "completed"
+                    ? presentTool?.(resolvedToolCall, result)
+                    : !result && inferredStatus === "running"
+                      ? presentTool?.(resolvedToolCall)
+                      : null
               if (presented)
                 return (
                   <React.Fragment key={toolId}>
@@ -1196,7 +1204,8 @@ function MessageBubbleImpl({
               if (
                 presentation === "bot" &&
                 !showExecutionDetails &&
-                isBotExecutionTool(resolvedToolCall) &&
+                (isBotExecutionTool(resolvedToolCall, result) ||
+                  resolvedToolCall.name === "bot_deliver_files") &&
                 (inferredStatus === "failed" || inferredStatus === "interrupted")
               )
                 return (
@@ -1229,7 +1238,7 @@ function MessageBubbleImpl({
               if (
                 presentation === "bot" &&
                 !showExecutionDetails &&
-                ((isBotExecutionTool(resolvedToolCall) &&
+                ((isBotExecutionTool(resolvedToolCall, result) &&
                   (inferredStatus === "running" ||
                     inferredStatus === "completed" ||
                     inferredStatus === "queued" ||

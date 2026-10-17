@@ -156,7 +156,7 @@ export function BotSchedulePanel({
           }}
         >
           <DialogContent
-            className="bot-editor sm:max-w-[440px]"
+            className="bot-editor flex max-h-[calc(100dvh-3rem)] flex-col sm:max-w-[440px]"
             onCloseAutoFocus={(event) => {
               if (!trigger.current?.isConnected) return
               event.preventDefault()
@@ -168,7 +168,7 @@ export function BotSchedulePanel({
               <DialogDescription>按本机时区执行；请保持应用在后台运行。</DialogDescription>
             </DialogHeader>
             <form
-              className="space-y-4"
+              className="min-h-0 space-y-4 overflow-y-auto overscroll-contain"
               onSubmit={(event) => {
                 event.preventDefault()
                 void mutate(

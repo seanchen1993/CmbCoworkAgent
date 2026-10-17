@@ -255,9 +255,15 @@ export class LocalBotHost {
     this.wake()
   }
 
-  delegate(taskId: string, target: string, message: string, key: string): BotTask {
+  delegate(
+    taskId: string,
+    target: string,
+    message: string,
+    key: string,
+    outputFiles: string[] = []
+  ): BotTask {
     this.requireRunning()
-    const task = this.store.delegate(taskId, target, message, key)
+    const task = this.store.delegate(taskId, target, message, key, outputFiles)
     this.changed()
     this.wake()
     return task
@@ -352,6 +358,11 @@ export class LocalBotHost {
   hasDirectUserRequest(taskId: string): boolean {
     this.requireRunning()
     return this.store.hasDirectUserRequest(taskId)
+  }
+
+  profileContinuationRequest(taskId: string): string | null {
+    this.requireRunning()
+    return this.store.profileContinuationRequest(taskId)
   }
 
   update(input: UpdateBotInput): BotDefinition {

@@ -385,6 +385,7 @@ export function BotGroupConversation({
                 threadId={inspecting.threadId}
                 surface="bot"
                 readOnlyReason="请回到群聊交办新的工作；当前审批可在此处理。"
+                allowUserInputInReadOnly
                 managedTurn={{
                   busy: running.some((task) => task.id === inspecting.id),
                   cancel: () => client.cancel(inspecting.id),
@@ -788,6 +789,11 @@ export function BotGroupConversation({
                   members={members}
                   inputRef={inputRef}
                   onEdit={editDraft}
+                  onCancelReply={() => {
+                    if (!draft.replyTo) return false
+                    editDraft({ replyTo: null })
+                    return true
+                  }}
                   onPasteFiles={(files) => void attach(files)}
                 />
                 <button
