@@ -58,3 +58,15 @@ rounded in-app popup, selected/hover state, Escape dismissal and return to the
 trigger. No Grok popup implementation is copied and no shared primitive is
 changed. Recipient IDs, memory versions and copying remain with the existing
 Bot memory service.
+
+The sidebar footer follows installed Grok Bot 0.71.2's `bD`, `mD` and `pD`
+components: a round profile entry, a text pill when expanded, and a storefront
+button on the collapsed rail. The profile name and account page reuse CMB's
+`models.getUserInfo`, `notify-login-msg` subscription and `UserInfoPanel`.
+Hidden/archived views, theme preferences and connector opening retain their
+existing owners. Menu surfaces use the existing Bot palette and Radix motion.
+
+`BotStorefrontIcon` is the single `storefront` outline glyph (U+F483) from that
+client's `cursor-icons-16-gwXtdAvu.woff2`, SHA-256
+`3887767ecc6d7ac4ec8f5f1bfe7133a2e1b83a0992bf3211abb1f3680696054a`.
+Its original 300-unit outline and 16px display size are retained as inline SVG.

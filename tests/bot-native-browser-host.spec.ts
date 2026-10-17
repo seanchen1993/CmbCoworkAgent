@@ -28,7 +28,13 @@ app.whenReady().then(async () => {
   await fs.mkdir(workspace('a'), { recursive: true });
   await fs.writeFile(path.join(workspace('a'), 'upload.txt'), 'synthetic upload');
   const server = http.createServer((req, res) => {
-    if (req.url === '/download') {
+    if (req.url === '/login') {
+      res.writeHead(200, { 'Content-Type': 'text/html', 'Set-Cookie': 'native-host-auth=synthetic; Max-Age=3600; Path=/; HttpOnly; SameSite=Lax' });
+      res.end('<title>Cookie accepted</title>');
+    } else if (req.url === '/session') {
+      res.writeHead(200, { 'Content-Type': 'text/html' });
+      res.end((req.headers.cookie || '').split(';').some(value => value.trim() === 'native-host-auth=synthetic') ? 'signed-in' : 'signed-out');
+    } else if (req.url === '/download') {
       res.writeHead(200, { 'Content-Type': 'text/plain', 'Content-Disposition': 'attachment; filename="result.txt"' });
       res.end('synthetic download');
     } else {
@@ -45,6 +51,12 @@ app.whenReady().then(async () => {
     assert.notEqual(a.pageId, b.pageId);
     const pages = engine.context.pages();
     assert.equal(pages.length, 2);
+    await assert.rejects(
+      startElectronBotBrowser(${JSON.stringify(join(root, "bot-profile"))}),
+      /Bot 浏览器启动失败/,
+      'a second host must not take ownership of the active profile'
+    );
+    assert.equal(engine.context.pages().length, 2, 'the profile owner must remain available');
     await pages[0].setContent('<label>Name <input></label>');
     await pages[1].setContent('<label>Name <input></label>');
     await service.act('a', { action: 'fill', role: 'textbox', name: 'Name', text: 'original Electron 引擎' }, new AbortController().signal);
@@ -93,10 +105,17 @@ app.whenReady().then(async () => {
     await service.navigateAsHuman('a', a.pageId, fixtureUrl + '/help-confirmed');
     await service.giveBack('a', helpState.generation);
     assert.equal(JSON.parse(await help).url, fixtureUrl + '/help-confirmed');
+    // Do not wait for Chromium's periodic cookie flush before closing the host.
+    await service.act('a', { action: 'navigate', url: fixtureUrl + '/login' }, new AbortController().signal);
     await service.close();
     const restarted = await startElectronBotBrowser(${JSON.stringify(join(root, "bot-profile"))});
-    await restarted.createPage();
-    await restarted.close();
+    try {
+      const restored = await restarted.createPage();
+      await restored.goto(fixtureUrl + '/session');
+      assert.equal(await restored.locator('body').innerText(), 'signed-in', 'new persistent cookies must survive an immediate host restart');
+    } finally {
+      await restarted.close();
+    }
     await new Promise(resolve => server.close(resolve));
     console.log('BOT_NATIVE_HOST_PASS');
     app.exit(0);
@@ -125,7 +144,7 @@ app.whenReady().then(async () => {
       assert.equal(code, 0, output)
       assert.ok(output.includes("BOT_NATIVE_HOST_PASS"), output)
       console.log(
-        "PASS: production Bot browser adapter starts the bundled Electron host, binds exact pages, captures previews, shows/hides takeover, and releases its profile for restart."
+        "PASS: production Bot browser adapter starts the bundled Electron host, binds exact pages, captures previews, shows/hides takeover, and preserves a newly set persistent cookie across an immediate host restart."
       )
     } finally {
       clearTimeout(timer)

@@ -344,7 +344,15 @@
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 12px;
+  padding: 16px;
+}
+.bot-account-button {
+  width: 36px;
+  height: 36px;
+  border: 1px solid var(--bot-line);
+  background: var(--bot-hover);
+  font-size: 14px;
+  font-weight: 500;
 }
 .bot-connect-apps {
   display: flex;
@@ -361,6 +369,9 @@
 }
 .bot-connect-apps:hover {
   background: var(--bot-hover);
+}
+.bot-connect-apps > svg {
+  display: none;
 }
 .bot-connect-apps:focus-visible {
   outline: 2px solid var(--bot-muted);
@@ -677,21 +688,28 @@
   font-size: 13px;
 }
 /* Portaled picker uses the same neutral surfaces as the Bot appearance popover. */
-.bot-memory-recipient-menu {
+.bot-memory-recipient-menu,
+.bot-workspace-menu,
+.bot-workspace-select,
+.bot-control-tooltip {
   --accent: #ececec;
   --accent-foreground: #242424;
   background: #fafafa;
   color: #242424;
   border-color: #e4e4e4;
 }
-.dark .bot-memory-recipient-menu {
+.dark .bot-memory-recipient-menu,
+.dark .bot-workspace-menu,
+.dark .bot-workspace-select,
+.dark .bot-control-tooltip {
   --accent: #2b2b2b;
   --accent-foreground: #ededed;
   background: #1f1f1f;
   color: #ededed;
   border-color: #303030;
 }
-.bot-memory-recipient-menu[data-bot-popup] {
+.bot-memory-recipient-menu[data-bot-popup],
+.bot-workspace-select[data-bot-popup] {
   transform-origin: var(--radix-select-content-transform-origin);
 }
 .bot-field input,
@@ -2315,6 +2333,11 @@
     flex: none;
     width: 40px;
     min-height: 40px;
+    border: 0;
+    color: var(--bot-muted);
+  }
+  .bot-connect-apps > svg {
+    display: block;
   }
 }
 

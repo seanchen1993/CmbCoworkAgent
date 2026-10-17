@@ -1,4 +1,4 @@
-import { TooltipProvider } from "@/components/ui/tooltip"
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip"
 import { botErrorMessage } from "@/lib/bot-error-message"
 import { BotGroupAvatar } from "./BotGroupAvatar"
 import { useCallback, useEffect, useMemo, useRef, useState } from "react"
@@ -6,7 +6,6 @@ import {
   Archive,
   ChevronDown,
   CircleAlert,
-  EyeOff,
   ChevronRight,
   Loader2,
   ListTree,
@@ -14,7 +13,6 @@ import {
   PanelRight,
   Pin,
   PinOff,
-  Plug,
   Plus,
   Search,
   Settings2,
@@ -60,6 +58,7 @@ import {
 } from "@/lib/bot-conversation-draft"
 import { BotDraftFileTransfer, validateNewChatFiles } from "@/lib/bot-new-chat-files"
 import { BotDraftSender, validateBotDraft } from "@/lib/bot-draft-sender"
+import { BotStorefrontIcon } from "./BotStorefrontIcon"
 import { botGroupBrowserScope, BOT_REQUEST_RECEIPT_LIMIT } from "../../../../shared/bots/contracts"
 import type {
   BotClient,
@@ -1139,6 +1138,47 @@ export function BotsWorkspace({ client = localBotClient() }: { client?: BotClien
     orderBotConversations(bots, groups, activityByConversation).map((item) =>
       item.kind === "bot" ? renderBotRow(item.value) : renderGroupRow(item.value)
     )
+  const sidebarCollapsed = clampBotPanelWidth("sidebar", view.sidebarWidth) < 180
+  const footerActions = [
+    <BotWorkspaceMenu
+      key="account"
+      accentMode={view.accentMode ?? "neutral"}
+      onAccentChange={(accentMode) => updateView({ accentMode })}
+      showArchived={showArchived}
+      showHidden={showHidden}
+      onProfile={() => useAppStore.getState().setShowCustomizeView(true, "userinfo")}
+      onHidden={() => {
+        setShowHidden(!showHidden)
+        setShowArchived(false)
+        setSelectedId(null)
+        setGroupId(null)
+      }}
+      onArchive={() => {
+        setShowHidden(false)
+        setShowArchived(!showArchived)
+        setSelectedId(null)
+        setGroupId(null)
+      }}
+      onWorkbench={() => useAppStore.getState().setMainView("thread")}
+    />,
+    <Tooltip key="apps">
+      <TooltipTrigger asChild>
+        <button
+          className="bot-connect-apps"
+          aria-label="连接应用"
+          onClick={() => useAppStore.getState().setShowCustomizeView(true, "connectors")}
+        >
+          <BotStorefrontIcon />
+          <span>连接应用</span>
+        </button>
+      </TooltipTrigger>
+      {sidebarCollapsed && (
+        <TooltipContent data-bot-popup side="right" className="bot-control-tooltip rounded-xl">
+          连接应用
+        </TooltipContent>
+      )}
+    </Tooltip>
+  ]
 
   return (
     <TooltipProvider delayDuration={250} skipDelayDuration={150}>
@@ -1434,40 +1474,7 @@ export function BotsWorkspace({ client = localBotClient() }: { client?: BotClien
             )}
           </BotConversationList>
           <footer className="bots-sidebar-footer">
-            <button
-              className="bot-connect-apps"
-              aria-label="连接应用"
-              title="连接应用"
-              onClick={() => useAppStore.getState().setShowCustomizeView(true, "connectors")}
-            >
-              <Plug size={16} aria-hidden="true" />
-              <span>连接应用</span>
-            </button>
-            <button
-              className="bot-icon-button"
-              aria-label={showHidden ? "返回会话列表" : "显示隐藏的会话"}
-              aria-pressed={showHidden}
-              onClick={() => {
-                setShowHidden(!showHidden)
-                setShowArchived(false)
-                setSelectedId(null)
-                setGroupId(null)
-              }}
-            >
-              <EyeOff size={17} />
-            </button>
-            <BotWorkspaceMenu
-              accentMode={view.accentMode ?? "neutral"}
-              onAccentChange={(accentMode) => updateView({ accentMode })}
-              showArchived={showArchived}
-              onArchive={() => {
-                setShowHidden(false)
-                setShowArchived(!showArchived)
-                setSelectedId(null)
-                setGroupId(null)
-              }}
-              onWorkbench={() => useAppStore.getState().setMainView("thread")}
-            />
+            {sidebarCollapsed ? [footerActions[1], footerActions[0]] : footerActions}
           </footer>
         </aside>
         <BotPanelDivider
