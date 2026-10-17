@@ -52,7 +52,7 @@ export function BotMessageFilePreview({
       }}
     >
       <DialogContent
-        className="!max-w-[1000px] w-[85vw] h-[78vh] flex flex-col gap-3"
+        className="bot-file-preview flex flex-col gap-0 p-0"
         onOpenAutoFocus={() => {
           trigger.current =
             document.activeElement instanceof HTMLElement ? document.activeElement : null
@@ -65,25 +65,23 @@ export function BotMessageFilePreview({
           trigger.current = null
         }}
       >
-        <DialogHeader>
-          <div className="flex items-center gap-3 pr-8">
-            <DialogTitle className="min-w-0 flex-1 truncate">
-              {request.filePath.split(/[\\/]/).pop()}
-            </DialogTitle>
-            {!request.externalPreviewGrant && (
-              <button
-                type="button"
-                className="inline-flex size-8 shrink-0 items-center justify-center rounded-lg text-muted-foreground hover:bg-muted hover:text-foreground disabled:opacity-50"
-                aria-label="保存工作成果"
-                title="保存到本机"
-                disabled={saving}
-                onClick={() => void save()}
-              >
-                {saving ? <Loader2 size={17} className="animate-spin" /> : <Download size={17} />}
-              </button>
-            )}
-          </div>
-          <DialogDescription>{name}的工作成果</DialogDescription>
+        <DialogHeader className="bot-file-preview-header space-y-0">
+          <DialogTitle className="bot-file-preview-title">
+            {request.filePath.split(/[\\/]/).pop()}
+          </DialogTitle>
+          <DialogDescription className="sr-only">{name}的工作成果</DialogDescription>
+          {!request.externalPreviewGrant && (
+            <button
+              type="button"
+              className="bot-file-preview-save"
+              aria-label="保存工作成果"
+              title="保存到本机"
+              disabled={saving}
+              onClick={() => void save()}
+            >
+              {saving ? <Loader2 size={16} className="animate-spin" /> : <Download size={16} />}
+            </button>
+          )}
         </DialogHeader>
         <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
           <FileViewer

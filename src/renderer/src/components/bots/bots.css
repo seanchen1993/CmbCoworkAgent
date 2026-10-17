@@ -687,6 +687,95 @@
   gap: 8px;
   font-size: 13px;
 }
+/* The preview is portaled outside the workspace; keep its original file viewer themed locally. */
+/* DialogContent renders its existing overlay immediately before the content. */
+div[data-state]:has(+ .bot-file-preview) {
+  background: #000000e5;
+  animation: none;
+}
+.bot-file-preview {
+  --background: #fff;
+  --background-secondary: #f5f5f5;
+  --background-elevated: #fff;
+  --background-interactive: #f1f1f1;
+  --foreground: #1c1c1c;
+  --muted: #f5f5f5;
+  --muted-foreground: #828282;
+  --border: #1c1c1c1f;
+  --border-emphasis: #1c1c1c3d;
+  --primary: var(--foreground);
+  --accent: var(--background-interactive);
+  --accent-foreground: var(--foreground);
+  --ring: var(--foreground);
+  width: calc(100vw - 80px);
+  max-width: 1100px;
+  height: calc(100dvh - 80px);
+  min-height: 0;
+  border: 0.5px solid var(--border);
+  border-radius: 12px;
+  background: var(--background);
+  color: var(--foreground);
+  box-shadow: 0 32px 80px #0000008c;
+}
+.dark .bot-file-preview {
+  --background: #111;
+  --background-secondary: #171717;
+  --background-elevated: #1f1f1f;
+  --background-interactive: #2b2b2b;
+  --foreground: #ededed;
+  --muted: #242424;
+  --muted-foreground: #aaa;
+  --border: #ffffff1f;
+  --border-emphasis: #ffffff3d;
+}
+.bot-file-preview[data-state] {
+  animation: none;
+}
+.bot-file-preview-header {
+  flex: none;
+  flex-direction: row;
+  align-items: center;
+  gap: 12px;
+  min-height: 40px;
+  padding: 8px 48px 8px 16px;
+}
+.bot-file-preview-title {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 14px;
+  font-weight: 500;
+  line-height: 20px;
+}
+.bot-file-preview-save,
+.bot-file-preview > button {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  border-radius: 6px;
+  color: var(--muted-foreground);
+}
+.bot-file-preview > button {
+  top: 8px;
+  right: 12px;
+}
+.bot-file-preview-save:hover,
+.bot-file-preview > button:hover {
+  background: var(--background-interactive);
+  color: var(--foreground);
+}
+.bot-file-preview-save:focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: 2px;
+}
+.bot-file-preview-save:disabled {
+  opacity: 0.5;
+}
 /* Portaled picker uses the same neutral surfaces as the Bot appearance popover. */
 .bot-memory-recipient-menu,
 .bot-workspace-menu,

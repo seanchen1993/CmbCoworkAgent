@@ -70,3 +70,11 @@ existing owners. Menu surfaces use the existing Bot palette and Radix motion.
 client's `cursor-icons-16-gwXtdAvu.woff2`, SHA-256
 `3887767ecc6d7ac4ec8f5f1bfe7133a2e1b83a0992bf3211abb1f3680696054a`.
 Its original 300-unit outline and 16px display size are retained as inline SVG.
+
+The Bot file-preview shell follows installed 0.71.2's `Ee` / `le` in
+`chunk-table-loader-CHDxCAMF.js`: 40px viewport margins, a 1100px maximum width,
+12px corners, a half-pixel border, and a compact 14px title. It keeps CMB's
+existing Dialog, FileViewer, preview transport, saving and focus restoration.
+Palette variables are scoped to this portaled Bot dialog so its Markdown/table
+styles do not inherit the workbench's accent. The existing workbench preview
+and its file parsing are unchanged; Grok's interactive JSON tree is not copied.
