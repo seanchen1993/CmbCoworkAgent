@@ -44,6 +44,8 @@ import {
 } from "./agent-bridge"
 import { readApiGatewayConfig, apiGatewayStartBlockReason, type ApiGatewayConfig } from "./config"
 import { createOpenAiStreamEncoder } from "./openai-stream"
+import { subscribePendingUserInput } from "../services/user-input"
+import { apiSubmitUserInputResponse } from "./user-input"
 
 const MAX_BODY_BYTES = 1024 * 1024 // 1 MiB — messages/metadata only, no uploads.
 
@@ -186,6 +188,7 @@ function handleSendMessage(
     clearInterval(heartbeat)
     clearTimeout(maxTimer)
     unsubscribe()
+    unsubscribeUserInput()
     res.end()
   }
 
@@ -219,6 +222,20 @@ function handleSendMessage(
       res.write(`data: ${JSON.stringify(payload)}\n\n`)
       if (isTerminalPayload(payload)) end()
     }
+  })
+
+  const unsubscribeUserInput = subscribePendingUserInput((request) => {
+    if (ended || request.threadId !== threadId) return
+    res.write(
+      `event: user_input_required\ndata: ${JSON.stringify({
+        thread_id: threadId,
+        request_id: request.requestId,
+        questions: request.questions,
+        ...(request.autoResolutionMs !== undefined
+          ? { auto_resolution_ms: request.autoResolutionMs }
+          : {})
+      })}\n\n`
+    )
   })
 
   // IncomingMessage.close reports POST-body completion, not response disconnects.
@@ -327,6 +344,23 @@ async function route(
     if (typeof body.sandbox === "boolean") metadata.sandbox = body.sandbox
     const thread = await apiCreateThread(metadata)
     sendJson(res, 201, thread)
+    return
+  }
+
+  const userInputMatch = path.match(/^\/v1\/threads\/([^/]+)\/user-input\/([^/]+)\/response$/)
+  if (method === "POST" && userInputMatch) {
+    const threadId = decodeURIComponent(userInputMatch[1])
+    const requestId = decodeURIComponent(userInputMatch[2])
+    if (!apiGetThread(threadId)) {
+      sendJson(res, 404, { error: "thread_not_found" })
+      return
+    }
+    try {
+      const result = apiSubmitUserInputResponse(threadId, requestId, await readJsonBody(req))
+      sendJson(res, 200, result)
+    } catch (error) {
+      sendApiFailure(res, error)
+    }
     return
   }
 

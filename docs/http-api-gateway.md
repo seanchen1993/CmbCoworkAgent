@@ -4,6 +4,8 @@
 
 > 版本对应分支 `feature/cmbdevclaw-security-test`。
 
+> **问答接口实施状态**：§5.8 的回答接口和 §9.3 的 `user_input_required` 事件已实现。启动包含此改动的应用后可按本文联调；本次改动不包含推理内容输出。
+
 ---
 
 ## 1. 快速开始(零配置)
@@ -88,6 +90,7 @@ CMB_API_TOKEN=your-secret CMB_API_PORT=9000 npm run start
 | GET | `/v1/threads/:id/messages` | 查询历史消息 | 是 |
 | POST | `/v1/threads/:id/messages` | 发送消息(SSE 流式回复) | 是 |
 | POST | `/v1/threads/:id/approvals/:approvalId/decision` | 批准或拒绝待审批操作 | 是 |
+| POST | `/v1/threads/:id/user-input/:requestId/response` | 提交本次提问的答案（见 §5.8） | 是 |
 | POST | `/v1/threads/:id/cancel` | 取消正在运行的回合 | 是 |
 
 ---
@@ -337,6 +340,8 @@ curl -sN -X POST "http://192.168.43.16:8765/v1/threads/<thread_id>/messages" \
 
 HTTP 200 表示 SSE 连接已建立，不表示桌面已经提交消息或模型已经生成回复。默认流会立即发送 `: open` 注释，等待期间每 15 秒发送 `: ping`；SSE 客户端通常不将这些注释显示为消息。正常回复以 `data: [DONE]` 结束，运行错误通过 SSE 正文返回。
 
+同一条 SSE 连接还会发送具名的 `user_input_required` 事件，表示 Agent 已登记问题并正在等待回答，见 §9.3。调用方收到事件后展示问题，通过 §5.8 的独立 HTTP 请求提交答案，并保持原 SSE 连接以接收后续结果。消息请求体和已有工具调用格式不变。
+
 如果 Postman 显示 200 但没有回复，请先区分发送消息的 POST 与读取历史的 GET。使用 `?format=raw` 查看内部事件，同时在另一条请求中读取 `GET /v1/threads/:id` 的 `runtime`：`not_started` 表示尚未启动，需检查桌面是否就绪、会话模型是否存在且可用、工作区是否已选择以及界面的错误提示；`awaiting_approval` 表示需处理审批；`generating` 表示任务仍在运行。正常桌面路径的 `modelId` 不生效，模型来自创建会话时的 `model`。可以用 `curl -N` 对照查看 SSE，避免客户端显示缓冲造成误判。
 
 ---
@@ -418,6 +423,108 @@ curl -X POST \
 | 409 | `approval_thread_mismatch` | approval_id 属于其他会话 |
 | 409 | `desktop_action_required` | 该批准操作必须在 app 桌面端完成；审批仍保持等待 |
 | 422 | `approval_action_not_allowed` | 运行时不允许该决定 |
+
+---
+
+### 5.8 POST /v1/threads/:id/user-input/:requestId/response — 回答问题
+
+Agent 的实际工具名为 `request_user_input`，即本文讨论的提问能力。该接口回答一次已经登记的提问，使等待中的工具继续执行，不新增用户消息，也不启动新的回合。
+
+**请求标识**
+
+| 字段 | 来源与用途 |
+|---|---|
+| 路径 `:id` | 现有会话 ID；使用问题事件中的 `thread_id` |
+| 路径 `:requestId` | 问题事件中的 `request_id`；唯一标识本次提问请求 |
+| `answers` 的键 | 问题事件中 `questions[].id`；标识本次请求中的具体问题 |
+
+只接受 `request_id`，不接受 `tool_call_id` 作为替代。一次提问请求可以包含多个问题，必须一次提交所有问题的答案。问题和选项以 §9.3 事件中的最终内容为准，不使用原始工具参数作为答题依据。
+
+**选择已有选项**
+
+```http
+POST /v1/threads/thread-123/user-input/request-456/response
+Content-Type: application/json
+
+{
+  "answers": {
+    "deploy_env": {
+      "type": "option",
+      "optionIndex": 0,
+      "additionalText": "请使用测试数据库"
+    }
+  }
+}
+```
+
+**自由文本回答**
+
+```json
+{
+  "answers": {
+    "deploy_env": {
+      "type": "other",
+      "text": "暂不部署，先生成部署方案"
+    }
+  }
+}
+```
+
+**请求字段与校验**
+
+| 字段 | 类型 | 规则 |
+|---|---|---|
+| `answers` | object | 必填；键必须与本次所有问题的 ID 一一对应，不允许漏答或增加未知问题 |
+| `type` | string | 必填；仅 `option` 或 `other` |
+| `optionIndex` | integer | `option` 时必填；从 0 开始，必须落在对应问题的 `options` 数组范围内 |
+| `additionalText` | string | `option` 时可选，用于补充所选选项；不能替代选择 |
+| `text` | string | `other` 时必填，去除首尾空白后不能为空 |
+
+请求体只接受 `answers`；`option` 答案只接受 `type`、`optionIndex`、`additionalText`；`other` 答案只接受 `type`、`text`。字段命名与现有工具答案结构一致。字段类型错误、混用两种答案字段、未知字段或答案不完整均返回校验错误。不接受客户端传入 `status`、`requestId`、`questionId`、`label`、`description`、`submittedAt`、`ignored` 或 `autoResolved`。服务端从路径读取请求 ID，从 `answers` 的键补齐 `questionId`，从实际问题读取选项名称和描述，并生成提交时间；新增提交时间使用 GMT+8 的 `YYYY-MM-DD HH:mm:ss`。
+
+全部答案校验通过后才消费请求；校验失败不影响待回答问题，调用方可以修正后重试。本接口不提供单题暂存或忽略整组问题的能力；需要停止任务时使用现有 `/cancel` 接口。
+
+**响应 200**
+
+```json
+{
+  "status": "submitted",
+  "requestId": "request-456",
+  "submittedAt": "2026-10-16 15:30:00",
+  "answers": {
+    "deploy_env": {
+      "type": "option",
+      "questionId": "deploy_env",
+      "optionIndex": 0,
+      "label": "测试环境",
+      "description": "用于功能验证",
+      "additionalText": "请使用测试数据库"
+    }
+  }
+}
+```
+
+成功响应直接返回工具的提交结果对象，字段、字段值及补齐后的答案与本次 `request_user_input` 工具结果一致，不额外包裹 `accepted`、`thread_id` 或 `request_id`。工具在 SSE 中仍沿用现有工具结果格式，其 `content` 为该对象的 JSON 字符串；HTTP 响应直接为 JSON 对象，无需再解析一层字符串。两者使用同一份服务端生成的 `submittedAt`，不是各自生成时间。
+
+自由文本答案在响应中为 `{ "type": "other", "questionId": "deploy_env", "text": "暂不部署，先生成部署方案" }`，不包含选项字段；可选的 `additionalText` 仅在提交时提供才返回。
+
+`status:"submitted"` 表示答案已经被运行时接收，Agent 将继续执行，不表示后续任务已经成功。继续读取原 POST `/messages` 的 SSE 获取工具结果和后续回复，不要再次发送原任务。HTTP 回答成功后，桌面对应的问题卡片同步关闭。HTTP 响应与后续 SSE 工具结果的到达顺序不作保证，调用方通过响应的 `requestId` 与问题事件的 `request_id` 关联本次提问。
+
+**错误响应**
+
+错误体沿用 `{ "error": "错误码", "message": "具体说明" }`；鉴权错误沿用网关现有响应。
+
+| HTTP | error | 含义 |
+|---|---|---|
+| 401 | `unauthorized` | 网关已配置鉴权，但凭据缺失或错误 |
+| 400 | `invalid_json` / `invalid_request` | JSON 无效、请求结构或字段类型错误、出现未知字段 |
+| 404 | `thread_not_found` | 会话不存在 |
+| 404 | `user_input_not_found` | 指定会话下没有这个有效请求；可能已回答、取消、自动处理或失效，也可能 ID 不匹配 |
+| 413 | `payload_too_large` | 请求体超过现有的 1 MiB 限制 |
+| 422 | `invalid_user_input_answer` | 缺少答案、出现未知问题、选项下标无效或自由文本为空 |
+| 500 | `internal_error` | 服务端异常 |
+
+桌面与 HTTP 共用同一个待回答请求，先成功提交的答案生效。后续重复提交返回 `404 user_input_not_found`，不保留已处理记录用于重复返回成功。请求结果不确定时，不应发送新的任务来替代回答；可以重试原回答请求，但应将 404 视为请求已不再可回答，而不能据此断言上一次提交成功。
 
 ---
 
@@ -523,6 +630,56 @@ data: [DONE]
 ### 9.2 原始流(`format=raw`)
 
 追加 `?format=raw`,返回**内部原始事件流**(含 `type:"stream"` / `mode:"values"` 全量状态快照、`mode:"messages"` 逐 token、routing 等),体积大、字段多,仅用于**调试**。日常对接用默认 openai 即可。
+
+### 9.3 用户提问事件
+
+在默认 `format=openai` 和 `format=raw` 下，均通过当前 POST `/messages` 的同一条 SSE 连接发送以下具名事件：
+
+```text
+event: user_input_required
+data: {"thread_id":"thread-123","request_id":"request-456","questions":[{"id":"deploy_env","header":"部署环境","question":"请选择部署环境","options":[{"label":"测试环境","description":"用于功能验证"},{"label":"生产环境","description":"用于正式运行"}]}]}
+
+```
+
+实际传输时 `data:` 后是单行 JSON，事件以空行结束。事件在问题通过工具校验、完成处理并登记成功后发送，`questions` 为用户实际需要回答的问题和选项。问题事件不包在 `choices[].delta` 中，也不是工具返回，不会结束当前回合。
+
+**事件字段**
+
+| 字段 | 类型 | 说明 |
+|---|---|---|
+| `thread_id` | string | 当前请求所属会话，供回答接口使用 |
+| `request_id` | string | 本次提问请求的唯一 ID，供回答接口使用 |
+| `questions` | array | 完整问题列表，一次展示并收集所有答案；数组顺序为展示顺序 |
+| `questions[].id` | string | 本次请求内唯一的问题 ID，对应 `answers` 的键 |
+| `questions[].header` | string | 简短的问题分类标题 |
+| `questions[].question` | string | 问题正文 |
+| `questions[].options` | array | 最终可选项；回答时使用从 0 开始的数组下标，不按名称匹配 |
+| `questions[].options[].label` | string | 选项名称 |
+| `questions[].options[].description` | string | 选项说明 |
+| `auto_resolution_ms` | integer | 可选，工具配置的自动处理等待时长，单位毫秒；未返回时没有该问题自身的自动处理计时 |
+
+`auto_resolution_ms` 从服务端登记问题时开始计时，不是客户端收到事件后的剩余时长。即使字段缺省，SSE 的 15 分钟总上限、主动取消和断开连接规则仍然生效。自动处理沿用会话已有策略，不因使用 HTTP 增加默认答案。
+
+**调用方处理流程**
+
+1. 按 SSE 规范解析完整事件，保留 `event:` 和 `data:`；网络读取的一段数据可能只包含半个事件，也可能包含多个事件。
+2. 收到 `event: user_input_required` 后，解析其完整 JSON，保存 `thread_id`、`request_id` 并展示问题。自由文本输入由调用方提供，不需要在 `options` 中追加“其他”选项。
+3. 收集全部答案，通过 §5.8 的回答接口提交。请求期间持续读取原 SSE，避免等待用户操作时停止消费流。
+4. 回答成功后关闭答题入口，继续处理原流的工具结果与回复；不要主动关闭原 SSE。
+5. 如果请求已失效、任务结束或流断开，关闭答题入口。若问题在桌面被回答或被自动处理，Agent 会继续输出；工具返回中的 `requestId` 可用于关联，名称沿用现有工具结果格式。收到 `[DONE]` 或终止错误后，不再提交该流内的问题。
+
+未指定 `event:` 的普通 `data:` 仍按原格式处理：默认格式中为 `chat.completion.chunk` 或 `[DONE]`，raw 格式中为内部原始事件。不要将具名问题事件交给严格的 OpenAI chunk 解析器，也不要把问题 JSON 拼接到助手正文中。其他不认识的具名事件应忽略，不作为模型正文。
+
+工具调用仍按原格式输出，可用于展示执行过程；其分段参数不作为答题依据，不承诺在其中增加 `request_id`。客户端只以 `user_input_required` 事件作为展示可回答问题的入口。
+
+**连接与生命周期约定**
+
+- 正常交互不需要轮询，也不发送 Webhook；客户端收到问题事件后主动调用回答接口。
+- 本协议覆盖当前消息 SSE 连接对应的运行过程，不承诺通过已经结束的连接投递 Workflow 后台任务产生的问题。
+- SSE 必须保持连接；断开连接仍按现有规则取消回合，最长 15 分钟的连接上限包含用户回答的等待时间。
+- 当前消息 SSE 连接存在时，问答可等待远端回答，不因桌面未在 5 秒内确认收到而撤销问题；有桌面转发和无窗口执行两条路径均支持。
+- 不增加问题历史存储、事件重放或断线续传。GET `/messages` 继续查询已有消息历史，GET 会话接口本次不增加待回答问题或新的运行状态；等待期间原 `runtime.state` 可能仍为 `generating`，调用方以问题事件维护答题状态。
+- 自动处理、取消或其他端回答后，提交旧 `request_id` 返回 404；收到问题事件表示登记时有效，不保证用户提交时仍然有效。
 
 ---
 
