@@ -8,9 +8,15 @@ import {
   DialogHeader,
   DialogTitle
 } from "@/components/ui/dialog"
-import { FileViewer } from "@/components/tabs/FileViewer"
+import { FileViewer, type TextFilePreviewAdapter } from "@/components/tabs/FileViewer"
 import { useResourcePreviewRequest } from "@/lib/use-resource-preview-request"
 import type { BotClient } from "../../../../shared/bots/contracts"
+import { BotJsonFilePreview } from "./BotJsonFilePreview"
+
+const botJsonFilePreview: TextFilePreviewAdapter = {
+  extensions: ["json"],
+  component: BotJsonFilePreview
+}
 
 /** Reuse the workbench's ordered preview requests, bound to the message's owning thread. */
 export function BotMessageFilePreview({
@@ -96,6 +102,7 @@ export function BotMessageFilePreview({
             reloadToken={request.intentId}
             requestLane={`bot-message:${client.hostId}:${threadId}`}
             htmlPreviewPolicy="workspace-scripted"
+            textPreview={botJsonFilePreview}
           />
         </div>
       </DialogContent>

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest"
 import type { Message } from "@/types"
-import { projectBotExecution } from "./bot-execution-visibility"
+import { isBotExecutionTool, projectBotExecution } from "./bot-execution-visibility"
 import { getWorkerToolUiKey } from "./worker-tool-result-key"
 const created_at = new Date(2026, 9, 14)
 
@@ -171,20 +171,53 @@ describe("Bot execution presentation", () => {
       call("custom", "custom_tool"),
       result("custom"),
       call("help", "bot_request_browser_help"),
-      result("help"),
       {
         ...call("legacy-help", "bot_browser"),
         tool_calls: [
           { id: "call-legacy-help", name: "bot_browser", args: { action: "request_help" } }
         ]
       },
-      result("legacy-help"),
       call("mod"),
       result("mod")
     ]
     const view = projectBotExecution(messages, false, new Set(["call-mod"]))
     expect([...view.hiddenMessages]).toEqual([])
     expect([...view.foldedTools]).toEqual([])
+  })
+  it.each([
+    ["bot_request_browser_help", {}],
+    ["bot_browser", { action: "request_help" }]
+  ] as const)("settles %s history without hiding live handoffs or exceptions", (name, args) => {
+    const message = call("handoff", name)
+    message.tool_calls![0].args = args
+    const tool = message.tool_calls![0]
+    expect(isBotExecutionTool(tool)).toBe(false)
+    expect(projectBotExecution([message], true, new Set()).hiddenMessages.size).toBe(0)
+
+    const returned = result("handoff", false, '{"title":"Synthetic page","generation":2}')
+    for (const active of [false, true]) {
+      const view = projectBotExecution([message, returned], active, new Set())
+      expect([...view.hiddenMessages]).toEqual(["handoff"])
+      expect([...view.foldedTools]).toEqual([getWorkerToolUiKey("handoff", tool.id, 0)])
+    }
+    expect(
+      projectBotExecution([message, returned], false, new Set([tool.id])).hiddenMessages.size
+    ).toBe(0)
+
+    for (const exceptional of [
+      result("handoff", true, "Browser task was cancelled"),
+      result(
+        "handoff",
+        false,
+        `Tool call ${name} with id ${tool.id} was cancelled - another message came in before it could be completed.`
+      )
+    ]) {
+      // Exceptions use the existing compact issue UI rather than disappearing with successes.
+      expect(isBotExecutionTool(tool, exceptional)).toBe(true)
+      expect(
+        projectBotExecution([message, exceptional], false, new Set()).hiddenMessages.size
+      ).toBe(0)
+    }
   })
   it("keeps the active last response until it is settled and preserves nontext content", () => {
     const messages: Message[] = [

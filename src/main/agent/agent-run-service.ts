@@ -162,6 +162,7 @@ export interface AgentRunExecutionContext {
   additionalTools?: CreateAgentRuntimeOptions["additionalTools"]
   toolConcurrencyQueueId?: string
   userInputWithoutToolLock?: CreateAgentRuntimeOptions["userInputWithoutToolLock"]
+  botBrowserToolsOwnFileLock?: CreateAgentRuntimeOptions["botBrowserToolsOwnFileLock"]
   capabilityService?: CreateAgentRuntimeOptions["capabilityService"]
   onGoalNotice?: (notice: AgentRunGoalNotice) => void
   onFinalAssistant?: (result: AgentRunFinalAssistant) => void | Promise<void>

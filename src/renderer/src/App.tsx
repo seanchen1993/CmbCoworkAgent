@@ -1097,7 +1097,9 @@ function App(): React.JSX.Element {
       */}
       <div className="isolate flex flex-col h-screen overflow-hidden bg-background">
         {/* Titlebar - logo centered, right panel toggle on right */}
-        <div className={`${renderedMainView === "bots" ? "hidden" : "flex"} h-9 w-full shrink-0 app-drag-region items-center border-b border-border`}>
+        <div
+          className={`${renderedMainView === "bots" && !showCustomizeView ? "hidden" : "flex"} h-9 w-full shrink-0 app-drag-region items-center border-b border-border`}
+        >
           {/* Left: sidebar toggle */}
           <div
             className="flex flex-1 h-9 min-w-0 items-center"

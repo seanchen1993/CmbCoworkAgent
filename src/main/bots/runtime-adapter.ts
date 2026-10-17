@@ -240,6 +240,8 @@ export function createLocalBotRunPort(
           )
             return { state: "completed" }
           const memoryEditVersion = memory.editVersion(bot.id)
+          const groupId = botTaskGroupId(task)
+          const toolConcurrencyQueueId = groupId ? `bot-group-${groupId}` : bot.id
           const profileContinuationRequest =
             task.origin.kind === "notification" && task.origin.notificationKind === "command"
               ? getHost().profileContinuationRequest(task.id)
@@ -361,7 +363,11 @@ export function createLocalBotRunPort(
                         browser,
                         signal,
                         waiting,
-                        botGroupBrowserScope(botTaskGroupId(task)!, bot.id)
+                        botGroupBrowserScope(botTaskGroupId(task)!, bot.id),
+                        async (upload) => {
+                          const { withToolFileWriteLock } = await import("../agent/runtime")
+                          return withToolFileWriteLock(toolConcurrencyQueueId, upload)
+                        }
                       ),
                       ...createBotCollaborationTools(task.id, getHost, signal)
                     ]
@@ -387,11 +393,10 @@ export function createLocalBotRunPort(
                       ...createBotCollaborationTools(task.id, getHost, signal),
                       ...createBotScheduleTools(bot, task, getHost, signal)
                     ],
-                toolConcurrencyQueueId: botTaskGroupId(task)
-                  ? `bot-group-${botTaskGroupId(task)}`
-                  : bot.id,
+                toolConcurrencyQueueId,
                 // Waiting for a human does not touch shared files; peers must keep working.
                 userInputWithoutToolLock: Boolean(botTaskGroupId(task)),
+                botBrowserToolsOwnFileLock: Boolean(groupId),
                 remotePolicy: { disableScheduler: true },
                 verifyResolvedThread: (resolved) =>
                   resolved.metadata.botId === bot.id &&

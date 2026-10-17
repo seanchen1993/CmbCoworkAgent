@@ -124,7 +124,8 @@ function paint(now: number): void {
         ),
         EXTENT,
         target.id,
-        { displaySize: 40, extent: EXTENT }
+        // Geometry uses a logical canvas; activity marks use the actual optical size.
+        { displaySize: target.size, extent: EXTENT }
       )
     )
     target.dirty = false

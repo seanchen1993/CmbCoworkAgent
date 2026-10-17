@@ -8005,6 +8005,8 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               toolConcurrencyQueueId: runExecutionContext.toolConcurrencyQueueId,
               userInputWithoutToolLock:
                 runExecutionContext.source === "bot" && runExecutionContext.userInputWithoutToolLock,
+              botBrowserToolsOwnFileLock:
+                runExecutionContext.source === "bot" && runExecutionContext.botBrowserToolsOwnFileLock,
               capabilityService: runExecutionContext.capabilityService,
               agentMode: effectiveAgentMode,
               traceContext: runtimeTraceContext,

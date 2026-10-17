@@ -29,10 +29,12 @@ export function isBotExecutionTool(
 ): boolean {
   if (tool.name === "task_output")
     return !!result && (!!botToolResultStatus(tool, result) || !!botTaskOutputState(result.content))
-  return (
-    executionTools.has(tool.name) &&
-    !(tool.name === "bot_browser" && tool.args?.action === "request_help")
+  if (
+    tool.name === "bot_request_browser_help" ||
+    (tool.name === "bot_browser" && tool.args?.action === "request_help")
   )
+    return !!result // Keep the live handoff card; settle its history like other native tools.
+  return executionTools.has(tool.name)
 }
 
 /** View projection only: preserve approvals, failures, deliveries, collaboration and Mod cards. */

@@ -55,6 +55,8 @@ export function BotChatRecipientPicker({
     if (disabled) return
     const option = options[index]
     if (!option) return
+    // A dialog opened by this option must return to the persistent combobox, not a removed option.
+    input.current?.focus({ preventScroll: true })
     setOpen(false)
     onSelect(option.value, option.name)
   }

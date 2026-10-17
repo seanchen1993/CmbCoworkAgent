@@ -34,7 +34,8 @@ const fixture = vi.hoisted(() => ({
   acknowledgeWorkers: vi.fn(),
   scope: {},
   notify: vi.fn(),
-  browserTools: vi.fn(() => ["owned-browser"]),
+  browserTools: vi.fn<(...args: unknown[]) => string[]>(() => ["owned-browser"]),
+  fileLock: vi.fn(async (_queueId: string, operation: () => Promise<string>) => operation()),
   memoryTools: vi.fn(() => ["private-memory"]),
   memoryEnabled: true,
   memorySnapshot: vi.fn(() => [] as BotMemory[]),
@@ -67,6 +68,7 @@ vi.mock("../agent/agent-run-service", () => ({
   startAgentRun: fixture.start,
   steerAgentRun: fixture.steer
 }))
+vi.mock("../agent/runtime", () => ({ withToolFileWriteLock: fixture.fileLock }))
 vi.mock("../agent/managed-transport-delivery", () => ({
   createManagedTransportAgentRunDelivery: () => ({}),
   announceManagedTurnUserMessage: fixture.announce
@@ -672,6 +674,7 @@ describe("Bot Runtime integration", () => {
       capabilityService: fixture.scope,
       toolConcurrencyQueueId: "a",
       userInputWithoutToolLock: false,
+      botBrowserToolsOwnFileLock: false,
       additionalTools: [
         "delivery",
         "own-profile",
@@ -742,11 +745,20 @@ describe("Bot Runtime integration", () => {
       expect.anything(),
       expect.any(AbortSignal),
       expect.any(Function),
-      "group-g--a"
+      "group-g--a",
+      expect.any(Function)
     )
     expect(context.allowTrustedTransportSkillMarker).toBe(false)
     expect(context.toolConcurrencyQueueId).toBe("bot-group-g")
     expect(context.userInputWithoutToolLock).toBe(true)
+    expect(context.botBrowserToolsOwnFileLock).toBe(true)
+    const upload = vi.fn(async () => "attached")
+    const withFileLock = fixture.browserTools.mock.calls[0][5] as (
+      operation: typeof upload
+    ) => Promise<string>
+    expect(await withFileLock(upload)).toBe("attached")
+    expect(fixture.fileLock).toHaveBeenCalledWith("bot-group-g", upload)
+    expect(upload).toHaveBeenCalledTimes(1)
     expect(fixture.announce).not.toHaveBeenCalled()
     expect(fixture.summary).not.toHaveBeenCalled()
     expect(fixture.memorySnapshot).not.toHaveBeenCalled()

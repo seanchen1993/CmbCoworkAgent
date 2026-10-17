@@ -34,6 +34,7 @@ export function BotGroupEditor({
     [error, setError] = useState<string | null>(null)
   const [deleting, setDeleting] = useState(Boolean(group?.deleting))
   const lock = useRef(false)
+  const trigger = useRef(document.activeElement)
   const save = async (event: React.FormEvent) => {
     event.preventDefault()
     if (lock.current) return
@@ -71,7 +72,14 @@ export function BotGroupEditor({
         if (!open && !busy) onClose()
       }}
     >
-      <DialogContent className="bot-editor flex max-h-[calc(100dvh-3rem)] flex-col sm:max-w-[420px]">
+      <DialogContent
+        className="bot-editor flex max-h-[calc(100dvh-3rem)] flex-col sm:max-w-[420px]"
+        onCloseAutoFocus={(event) => {
+          if (!(trigger.current instanceof HTMLElement) || !trigger.current.isConnected) return
+          event.preventDefault()
+          trigger.current.focus({ preventScroll: true })
+        }}
+      >
         <DialogHeader>
           <DialogTitle>{nameOnly ? "重命名聊天" : group ? "群聊设置" : "新建群聊"}</DialogTitle>
           <DialogDescription>

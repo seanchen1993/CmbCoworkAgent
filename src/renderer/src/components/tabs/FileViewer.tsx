@@ -37,6 +37,12 @@ import {
   type HtmlPreviewPolicy
 } from "@/lib/file-preview-mode"
 
+/** Optional presentation only; FileViewer retains ownership of bounded reads and cancellation. */
+export interface TextFilePreviewAdapter {
+  extensions: readonly string[]
+  component: React.ComponentType<{ content: string; filePath: string }>
+}
+
 interface FileViewerProps {
   transport?: BotFilePreviewTransport
   cacheNamespace?: string
@@ -55,6 +61,7 @@ interface FileViewerProps {
   htmlPreviewPolicy?: HtmlPreviewPolicy
   /** Stable per surface so a persisted file tab cancels the prior task's preview. */
   requestLane?: string
+  textPreview?: TextFilePreviewAdapter
 }
 
 const MAX_HTML_DEPENDENCY_REQUESTS = 16
@@ -91,15 +98,18 @@ export function FileViewer({
   previewMode,
   htmlPreviewPolicy,
   requestLane,
+  textPreview,
   transport = window.api.workspace,
   cacheNamespace = ""
 }: FileViewerProps): React.JSX.Element | null {
   const generatedLane = useId().replace(/[^a-zA-Z\d_-]/g, "")
   const lane = requestLane ?? `file-viewer-${generatedLane}`
   const displayPath = externalFullPath || filePath
-  const sourceCachePrefix = cacheNamespace + (externalFullPath
-    ? `external:${externalFullPath}\u0000`
-    : `workspace:${threadId ?? ""}:${workspacePathKind ?? "relative"}:${filePath}\u0000`)
+  const sourceCachePrefix =
+    cacheNamespace +
+    (externalFullPath
+      ? `external:${externalFullPath}\u0000`
+      : `workspace:${threadId ?? ""}:${workspacePathKind ?? "relative"}:${filePath}\u0000`)
 
   const fileName = displayPath.split(/[/\\]/).pop() || displayPath
   const ext = fileName.includes(".") ? (fileName.split(".").pop()?.toLowerCase() ?? "") : ""
@@ -111,6 +121,10 @@ export function FileViewer({
     workspacePathKind === "relative" &&
     Boolean(threadId)
   const webSourceLike = shouldAssembleWebSourcePreview(fileName)
+  const TextPreview =
+    previewMode !== "source" && textPreview?.extensions.includes(ext)
+      ? textPreview.component
+      : undefined
   const fileTypeInfo = useMemo(() => getFileType(fileName), [fileName])
   const isBinary = useMemo(() => isBinaryFile(fileName), [fileName])
 
@@ -201,20 +215,21 @@ export function FileViewer({
       const first = await loadTextPage(offset, generation, requestToken, allowCache)
       if (!first || generation !== generationRef.current) return null
 
-      const result = webSourceLike
-        ? await assembleBoundedTextPreview(
-            first,
-            (nextOffset) => loadTextPage(nextOffset, generation, requestToken, allowCache),
-            {
-              maxBytes: WEB_SOURCE_PREVIEW_MAX_BYTES,
-              maxPages: WEB_SOURCE_PREVIEW_MAX_PAGES
-            }
-          )
-        : first
+      const result =
+        webSourceLike || TextPreview
+          ? await assembleBoundedTextPreview(
+              first,
+              (nextOffset) => loadTextPage(nextOffset, generation, requestToken, allowCache),
+              {
+                maxBytes: WEB_SOURCE_PREVIEW_MAX_BYTES,
+                maxPages: WEB_SOURCE_PREVIEW_MAX_PAGES
+              }
+            )
+          : first
       if (generation === generationRef.current) setTextPage(result)
       return generation === generationRef.current ? result : null
     },
-    [loadTextPage, webSourceLike]
+    [loadTextPage, webSourceLike, TextPreview]
   )
 
   useEffect(() => {
@@ -550,6 +565,8 @@ export function FileViewer({
         readDependencyFile={readHtmlDependencyFile}
       />
     )
+  } else if (TextPreview && !textPage?.truncated) {
+    body = <TextPreview content={content} filePath={displayPath} />
   } else {
     body = <CodeViewer filePath={displayPath} content={content} />
   }

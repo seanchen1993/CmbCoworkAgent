@@ -213,7 +213,7 @@ export function BotBrowserPanel({ botId, client }: { botId: string; client: BotC
         {human
           ? "请在独立浏览器窗口中操作，完成后归还。接管期间 Bot 暂停浏览器操作。"
           : state?.control === "other-human"
-            ? "另一 Bot 的浏览器正在由你操作，请先归还。"
+            ? "你正在操作另一 Bot 的浏览器。请先归还，再接管此页面。"
             : "在独立窗口中登录或接手操作，登录状态会保留。"}
       </p>
       {actionError && (

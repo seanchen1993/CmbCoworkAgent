@@ -776,6 +776,90 @@ div[data-state]:has(+ .bot-file-preview) {
 .bot-file-preview-save:disabled {
   opacity: 0.5;
 }
+.bot-json-preview {
+  --json-string: #00854a;
+  --json-number: #c14c00;
+  --json-keyword: #7547d0;
+  --json-key: #aa6300;
+  flex: 1;
+  min-height: 0;
+  padding: 16px 24px 28px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 12px;
+  line-height: 1.7;
+  user-select: text;
+}
+.dark .bot-json-preview {
+  --json-string: #64c58f;
+  --json-number: #e99d66;
+  --json-keyword: #b698f5;
+  --json-key: #dfbd78;
+}
+.bot-json-row {
+  position: relative;
+  display: flex;
+  align-items: flex-start;
+  min-width: 0;
+  /* Grok's 860px content box includes 24px padding on each side. */
+  max-width: 812px;
+  min-height: 22px;
+}
+.bot-json-scroll::-webkit-scrollbar-thumb {
+  background: transparent;
+}
+.bot-json-scroll:hover::-webkit-scrollbar-thumb {
+  background: var(--border-emphasis);
+}
+.bot-json-guides {
+  position: absolute;
+  inset-block: 0;
+  inset-inline-start: 0;
+  pointer-events: none;
+  background: repeating-linear-gradient(
+    to right,
+    transparent 0 7px,
+    var(--border) 7px 8px,
+    transparent 8px 17px
+  );
+}
+.bot-json-caret {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 20px;
+  border-radius: 4px;
+  color: var(--muted-foreground);
+}
+button.bot-json-caret:hover {
+  color: var(--foreground);
+}
+button.bot-json-caret:focus-visible {
+  outline: none;
+  box-shadow: inset 0 0 0 2px var(--ring);
+}
+.bot-json-text {
+  min-width: 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.bot-json-key {
+  color: var(--json-key);
+}
+.bot-json-colon,
+.bot-json-summary {
+  color: var(--muted-foreground);
+}
+.bot-json-string {
+  color: var(--json-string);
+}
+.bot-json-number {
+  color: var(--json-number);
+}
+.bot-json-keyword {
+  color: var(--json-keyword);
+}
 /* Portaled picker uses the same neutral surfaces as the Bot appearance popover. */
 .bot-memory-recipient-menu,
 .bot-workspace-menu,

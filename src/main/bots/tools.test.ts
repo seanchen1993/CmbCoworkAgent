@@ -249,12 +249,14 @@ it("exposes human browser help as a dedicated scope-bound tool with original err
   const controller = new AbortController(),
     waiting = vi.fn()
   const act = vi.fn().mockResolvedValue("fresh page evidence")
+  const fileLock = vi.fn(async (operation: () => Promise<string>) => operation())
   const help = createBotBrowserTools(
     { id: "private" } as BotDefinition,
     { act } as unknown as BotBrowserService,
     controller.signal,
     waiting,
-    "group-g--member"
+    "group-g--member",
+    fileLock
   ).find((entry) => entry.name === "bot_request_browser_help")!
   const call = {
     type: "tool_call" as const,
@@ -268,7 +270,8 @@ it("exposes human browser help as a dedicated scope-bound tool with original err
     "group-g--member",
     { action: "request_help", ...call.args },
     controller.signal,
-    waiting
+    waiting,
+    fileLock
   )
   act.mockRejectedValue(new Error("页面不属于此 Bot"))
   const failed = await help.invoke(call)
@@ -303,7 +306,8 @@ it("preserves browser failure status through the standard Runtime tool-result fo
     "group-g",
     expect.anything(),
     expect.any(AbortSignal),
-    expect.any(Function)
+    expect.any(Function),
+    undefined
   )
 })
 

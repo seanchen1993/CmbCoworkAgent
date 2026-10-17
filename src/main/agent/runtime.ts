@@ -550,6 +550,19 @@ const SHARED_TOOL_NAMES = new Set([
 
 const MAX_PARALLEL_TASK_SUBAGENTS = 3
 
+const BOT_BROWSER_ACTIONS = new Set([
+  "observe",
+  "navigate",
+  "click",
+  "fill",
+  "press",
+  "scroll",
+  "close",
+  "upload",
+  "dialog",
+  "request_help"
+])
+
 type RuntimePromptToolPolicy = {
   isProjectMode: boolean
   includeCurrentTime: boolean
@@ -759,6 +772,11 @@ function getToolConcurrencyLock(queueId: string): AsyncRWLock {
   return lock
 }
 
+/** Reuse the same workspace mutex when a trusted tool locks only its file-I/O phase. */
+export function withToolFileWriteLock<T>(queueId: string, operation: () => Promise<T>): Promise<T> {
+  return getToolConcurrencyLock(queueId).write(operation)
+}
+
 /**
  * Drops the tool-concurrency locks keyed by a thread (its own queue and the
  * `:subagent` queue) when the thread is deleted, so the module-level map doesn't
@@ -785,7 +803,11 @@ function getTaskConcurrencyLimiter(queueId: string): AsyncSemaphore {
   return limiter
 }
 
-function createGradedToolConcurrencyMiddleware(queueId: string, userInputWithoutToolLock = false) {
+function createGradedToolConcurrencyMiddleware(
+  queueId: string,
+  userInputWithoutToolLock = false,
+  botBrowserToolsOwnFileLock = false
+) {
   const lock = getToolConcurrencyLock(queueId)
   const taskLimiter = getTaskConcurrencyLimiter(queueId)
   return createMiddleware({
@@ -795,7 +817,17 @@ function createGradedToolConcurrencyMiddleware(queueId: string, userInputWithout
         | { id?: string; name?: string; args?: unknown }
         | undefined
       if (
-        (userInputWithoutToolLock && toolCall?.name === "request_user_input") ||
+        (userInputWithoutToolLock &&
+          (toolCall?.name === "request_user_input" ||
+            toolCall?.name === "bot_request_browser_help" ||
+            (toolCall?.name === "bot_browser" &&
+              isRecord(toolCall.args) &&
+              toolCall.args.action === "request_help"))) ||
+        (botBrowserToolsOwnFileLock &&
+          toolCall?.name === "bot_browser" &&
+          isRecord(toolCall.args) &&
+          typeof toolCall.args.action === "string" &&
+          BOT_BROWSER_ACTIONS.has(toolCall.args.action)) ||
         shouldFastRejectActiveWorkflow(queueId, toolCall)
       ) {
         return handler(request)
@@ -2368,6 +2400,7 @@ function assembleDeepAgent(
     windowsShellKind = "unknown",
     toolConcurrencyQueueId = "default",
     userInputWithoutToolLock = false,
+    botBrowserToolsOwnFileLock = false,
     toolHookMiddleware,
     threadId,
     onTaskSubagentPromptsResolved,
@@ -2935,8 +2968,11 @@ function assembleDeepAgent(
 
   // Base middleware for custom subagents (no skills — custom subagents must define their own)
 
-  const gradedToolConcurrencyMiddleware =
-    createGradedToolConcurrencyMiddleware(toolConcurrencyQueueId, userInputWithoutToolLock)
+  const gradedToolConcurrencyMiddleware = createGradedToolConcurrencyMiddleware(
+    toolConcurrencyQueueId,
+    userInputWithoutToolLock,
+    botBrowserToolsOwnFileLock
+  )
   const subagentToolConcurrencyMiddleware = createGradedToolConcurrencyMiddleware(
     `${toolConcurrencyQueueId}:subagent`
   )
@@ -4946,8 +4982,10 @@ export interface CreateAgentRuntimeOptions {
    * runtime's own thread id (per-runtime isolation, the original behavior).
    */
   toolConcurrencyQueueId?: string
-  /** Trusted shared-workspace hosts may wait for user choices without holding the file tool lock. */
+  /** Trusted shared-workspace hosts may wait for native choices/handoffs without the file tool lock. */
   userInputWithoutToolLock?: boolean
+  /** Trusted Bot tools acquire this same file lock for uploads, after any human-control wait. */
+  botBrowserToolsOwnFileLock?: boolean
   /**
    * Auto-approve file edits (write_file/edit_file) without per-file prompts,
    * while still gating shell execution. Dynamic-workflow subagents set this:
@@ -7520,6 +7558,7 @@ Access limits: read-only handoff continuation. Do not modify files, run commands
     actionStationarityTurnId,
     toolConcurrencyQueueId: options.toolConcurrencyQueueId ?? options.threadId ?? workspacePath,
     userInputWithoutToolLock: options.userInputWithoutToolLock,
+    botBrowserToolsOwnFileLock: options.botBrowserToolsOwnFileLock,
     toolHookMiddleware,
     onFailureFuseNotice,
     modRuntimeAuthority,

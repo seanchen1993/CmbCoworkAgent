@@ -232,13 +232,13 @@ export function CustomizeView(): React.JSX.Element {
           <Button
             variant="ghost"
             size="sm"
-            className="h-7 w-9 p-0"
+            className="h-7 justify-start gap-2 px-2 text-base font-bold"
             aria-label="返回应用"
             onClick={() => setShowCustomizeView(false)}
           >
             <ArrowLeft className="size-6" strokeWidth={1} />
+            <span>返回应用</span>
           </Button>
-          <span className="text-base font-bold">返回应用</span>
         </div>
         <nav className="min-h-0 flex-1 px-3 pb-3 space-y-3 overflow-y-auto">
           {MENU_GROUPS.map((group) => {

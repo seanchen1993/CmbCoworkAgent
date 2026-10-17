@@ -1,5 +1,15 @@
 import { EventEmitter } from "node:events"
-import { mkdtempSync, rmSync, writeFileSync, realpathSync, mkdirSync } from "node:fs"
+import {
+  mkdtempSync,
+  rmSync,
+  writeFileSync,
+  realpathSync,
+  mkdirSync,
+  existsSync,
+  readFileSync,
+  readdirSync,
+  truncateSync
+} from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
@@ -16,7 +26,7 @@ class TestPage extends EventEmitter {
   fill = vi.fn(async () => {})
   click = vi.fn(async () => {})
   press = vi.fn(async () => {})
-  setInputFiles = vi.fn(async (_file: string) => {})
+  setInputFiles = vi.fn<(file: string) => Promise<void>>(async () => {})
   getByLabel = vi.fn(() => ({ count: async () => 1, setInputFiles: this.setInputFiles }))
   snapshot = vi.fn(async () => '- textbox "Name"')
   fileInputs = vi.fn(
@@ -63,8 +73,8 @@ class TestContext extends EventEmitter {
     this.emit("page", page)
     return page
   }
-  setDefaultTimeout() {}
-  setDefaultNavigationTimeout() {}
+  setDefaultTimeout = vi.fn()
+  setDefaultNavigationTimeout = vi.fn()
   async close() {
     await Promise.all(this.entries.map((page) => page.close()))
     this.emit("close")
@@ -72,6 +82,13 @@ class TestContext extends EventEmitter {
 }
 let context: TestContext, service: BotBrowserService, directory: string
 const signal = () => new AbortController().signal
+function deferred() {
+  let resolve!: () => void
+  const promise = new Promise<void>((done) => {
+    resolve = done
+  })
+  return { promise, resolve }
+}
 beforeEach(() => {
   directory = mkdtempSync(join(tmpdir(), "bot-browser-test-"))
   context = new TestContext()
@@ -94,6 +111,91 @@ afterEach(async () => {
 })
 
 describe("Bot browser ownership and control", () => {
+  it("publishes a downloaded file only after saving its complete contents", async () => {
+    service = new BotBrowserService(launch, () => directory)
+    await service.act("a", { action: "observe" }, signal())
+    const entered = deferred()
+    const finish = deferred()
+    const deleted = deferred()
+    const download = {
+      suggestedFilename: () => "complete.csv",
+      saveAs: vi.fn(async (path: string) => {
+        writeFileSync(path, "partial")
+        entered.resolve()
+        await finish.promise
+        writeFileSync(path, "id,amount\n1,14.25\n2,-2.75\n")
+      }),
+      cancel: vi.fn(async () => {}),
+      delete: vi.fn(async () => deleted.resolve())
+    }
+    context.entries[0].emit("download", download)
+    try {
+      await entered.promise
+      const saving = JSON.parse(await service.act("a", { action: "observe" }, signal()))
+        .downloads[0]
+      expect(saving.state).toBe("saving")
+      expect(existsSync(join(directory, saving.file))).toBe(false)
+      finish.resolve()
+      await deleted.promise
+      const saved = JSON.parse(await service.act("a", { action: "observe" }, signal())).downloads[0]
+      expect(saved).toEqual({ file: saving.file, state: "saved" })
+      expect(readFileSync(join(directory, saved.file), "utf8")).toBe(
+        "id,amount\n1,14.25\n2,-2.75\n"
+      )
+      expect(
+        readdirSync(join(directory, "downloads")).filter((name) => name.endsWith(".part"))
+      ).toEqual([])
+      expect(download.saveAs).toHaveBeenCalledTimes(1)
+      expect(download.delete).toHaveBeenCalledTimes(1)
+    } finally {
+      finish.resolve()
+      await deleted.promise
+    }
+  })
+
+  it.each(["save failure", "oversize"])(
+    "cleans a %s without deleting another file at the intended destination",
+    async (failure) => {
+      service = new BotBrowserService(launch, () => directory)
+      await service.act("a", { action: "observe" }, signal())
+      const entered = deferred()
+      const finish = deferred()
+      const deleted = deferred()
+      const download = {
+        suggestedFilename: () => "failed.csv",
+        saveAs: vi.fn(async (path: string) => {
+          writeFileSync(path, "partial")
+          entered.resolve()
+          await finish.promise
+          if (failure === "save failure") throw new Error("Synthetic save failure")
+          // A sparse file exercises the limit without allocating a 100 MiB buffer.
+          truncateSync(path, 100 * 1024 * 1024 + 1)
+        }),
+        cancel: vi.fn(async () => {}),
+        delete: vi.fn(async () => deleted.resolve())
+      }
+      context.entries[0].emit("download", download)
+      try {
+        await entered.promise
+        const saving = JSON.parse(await service.act("a", { action: "observe" }, signal()))
+          .downloads[0]
+        const otherFile = join(directory, saving.file)
+        writeFileSync(otherFile, "existing peer result")
+        finish.resolve()
+        await deleted.promise
+        const failed = JSON.parse(await service.act("a", { action: "observe" }, signal()))
+          .downloads[0]
+        expect(failed).toEqual({ file: saving.file, state: "failed" })
+        expect(readFileSync(otherFile, "utf8")).toBe("existing peer result")
+        expect(readdirSync(join(directory, "downloads"))).toEqual([saving.file.split("/").at(-1)])
+        expect(download.delete).toHaveBeenCalledTimes(1)
+      } finally {
+        finish.resolve()
+        await deleted.promise
+      }
+    }
+  )
+
   it("keeps preview metadata from blocking dialog handling on the same browser queue", async () => {
     const { pageId } = JSON.parse(await service.act("a", { action: "observe" }, signal()))
     const page = context.entries[0]
@@ -491,6 +593,173 @@ describe("Bot browser ownership and control", () => {
     expect(waiting.mock.calls).toEqual([[true], [false]])
   })
 
+  it("keeps a peer's own page usable without changing the user's current lease", async () => {
+    const a = JSON.parse(await service.act("a", { action: "observe" }, signal()))
+    const b = JSON.parse(await service.act("b", { action: "observe" }, signal()))
+    await service.takeOver("a", a.pageId)
+    const lease = await service.preview("a")
+    const observed = context.entries[0].snapshot.mock.calls.length
+    const waiting = vi.fn()
+    let completed = false
+    const input = service
+      .act(
+        "b",
+        { action: "fill", pageId: b.pageId, role: "textbox", name: "Name", text: "peer input" },
+        signal(),
+        waiting
+      )
+      .then(() => {
+        completed = true
+      })
+    try {
+      await new Promise<void>((resolve) => setImmediate(resolve))
+      expect(completed).toBe(true)
+      expect(waiting).not.toHaveBeenCalled()
+      expect(context.entries[1].fill).toHaveBeenCalledWith("peer input")
+      expect(context.entries[0].fill).not.toHaveBeenCalled()
+      expect(context.entries[0].snapshot).toHaveBeenCalledTimes(observed)
+      await expect(
+        service.act("b", { action: "observe", pageId: a.pageId }, signal())
+      ).rejects.toThrow("不属于")
+      await service.act("b", { action: "close", pageId: b.pageId }, signal())
+      expect((await service.preview("a")).generation).toBe(lease.generation)
+      expect((await service.preview("a")).control).toBe("human")
+      await service.giveBack("a", lease.generation)
+    } finally {
+      if ((await service.preview("a")).control === "human") await service.giveBack("a")
+      await input
+    }
+  })
+
+  it("registers a newly created peer page before applying human-tab ownership", async () => {
+    const a = JSON.parse(await service.act("a", { action: "observe" }, signal()))
+    await service.takeOver("a", a.pageId)
+    const lease = await service.preview("a")
+    let result: { pageId: string; url: string } | undefined
+    const navigate = service
+      .act("b", { action: "navigate", url: "https://example.test/peer" }, signal())
+      .then((value) => {
+        result = JSON.parse(value)
+      })
+    try {
+      await new Promise<void>((resolve) => setImmediate(resolve))
+      expect(result?.url).toBe("https://example.test/peer")
+      const peer = await service.preview("b")
+      const human = await service.preview("a")
+      expect(peer.pages.map((page) => page.id)).toEqual([result?.pageId])
+      expect(human.pages.map((page) => page.id)).toEqual([a.pageId])
+      expect(human.generation).toBe(lease.generation)
+      expect(context.entries[0].goto).not.toHaveBeenCalled()
+      expect(context.entries[1].goto).toHaveBeenCalledWith("https://example.test/peer", {
+        waitUntil: "domcontentloaded"
+      })
+      await service.giveBack("a", lease.generation)
+    } finally {
+      if ((await service.preview("a")).control === "human") await service.giveBack("a")
+      await navigate
+    }
+  })
+
+  it("preserves manually opened human tabs during a pending peer page creation", async () => {
+    const a = JSON.parse(await service.act("a", { action: "observe" }, signal()))
+    await service.takeOver("a", a.pageId)
+    const engine = (await launch.mock.results[0].value) as BotBrowserEngine
+    const created = deferred()
+    const finish = deferred()
+    vi.spyOn(engine, "createPage").mockImplementationOnce(async () => {
+      const page = await context.newPage()
+      created.resolve()
+      await finish.promise
+      return page as unknown as Awaited<ReturnType<BotBrowserEngine["createPage"]>>
+    })
+    const peer = service.act("b", { action: "observe" }, signal())
+    await created.promise
+    const manual = await context.newPage()
+    finish.resolve()
+    const b = JSON.parse(await peer)
+    const human = await service.preview("a")
+    expect(human.pages).toHaveLength(2)
+    expect(human.pages.some((page) => page.id === a.pageId)).toBe(true)
+    expect(human.pages.some((page) => page.id === b.pageId)).toBe(false)
+    expect((await service.preview("b")).pages.map((page) => page.id)).toEqual([b.pageId])
+    await service.removeBot("b")
+    expect(manual.closed).toBe(false)
+    expect(context.entries[0].closed).toBe(false)
+    expect(context.entries[1].closed).toBe(true)
+    await service.giveBack("a", human.generation)
+  })
+
+  it.each(["takeover", "cancel"] as const)(
+    "rechecks %s after waiting for the upload file lock without holding the browser lock",
+    async (transition) => {
+      service = new BotBrowserService(launch, () => directory)
+      const controller = new AbortController()
+      writeFileSync(join(directory, "upload.txt"), "synthetic")
+      const { pageId } = JSON.parse(await service.act("a", { action: "observe" }, signal()))
+      const entered = deferred(),
+        finish = deferred()
+      const fileLock = vi.fn(async (operation: () => Promise<string>) => {
+        entered.resolve()
+        await finish.promise
+        return operation()
+      })
+      const upload = service.act(
+        "a",
+        { action: "upload", pageId, fileId: "upload.txt", name: "Upload" },
+        controller.signal,
+        () => {},
+        fileLock
+      )
+      const outcome = upload.then(
+        () => null,
+        (error: unknown) => error
+      )
+      try {
+        await new Promise<void>((resolve) => setImmediate(resolve))
+        expect(fileLock).toHaveBeenCalledTimes(1)
+        expect(context.entries[0].setInputFiles).not.toHaveBeenCalled()
+        // Acquiring human control must not be behind an upload's pending file lock.
+        if (transition === "takeover") await service.takeOver("a", pageId)
+        else controller.abort(new Error("cancelled upload"))
+      } finally {
+        finish.resolve()
+        await outcome
+        if ((await service.preview("a")).control === "human") await service.giveBack("a")
+      }
+      expect(await outcome).toBeInstanceOf(Error)
+      expect(((await outcome) as Error).message).toContain(
+        transition === "takeover" ? "控制权已改变" : "cancelled upload"
+      )
+      expect(context.entries[0].setInputFiles).not.toHaveBeenCalled()
+    }
+  )
+
+  it("waits for human control without taking an upload lock or replaying the old upload", async () => {
+    service = new BotBrowserService(launch, () => directory)
+    const file = join(directory, "upload.txt")
+    writeFileSync(file, "synthetic")
+    const { pageId } = JSON.parse(await service.act("a", { action: "observe" }, signal()))
+    await service.takeOver("a", pageId)
+    const fileLock = vi.fn(async (operation: () => Promise<string>) => operation())
+    const action = { action: "upload" as const, pageId, fileId: "upload.txt", name: "Upload" }
+    const waiting = vi.fn()
+    const pending = service.act("a", action, signal(), waiting, fileLock)
+    expect(waiting).toHaveBeenCalledWith(true)
+    expect(fileLock).not.toHaveBeenCalled()
+    await service.giveBack("a")
+    const resumed = JSON.parse(await pending)
+    expect(resumed.upload).toBeUndefined()
+    expect(resumed.control).toBe("bot")
+    expect(resumed.note).toContain("Human control ended")
+    expect(resumed.note).toContain("it was not replayed")
+    expect(fileLock).not.toHaveBeenCalled()
+    expect(context.entries[0].setInputFiles).not.toHaveBeenCalled()
+    const uploaded = JSON.parse(await service.act("a", action, signal(), waiting, fileLock))
+    expect(fileLock).toHaveBeenCalledTimes(1)
+    expect(uploaded.upload).toEqual({ filename: "upload.txt", state: "attached" })
+    expect(context.entries[0].setInputFiles).toHaveBeenCalledExactlyOnceWith(realpathSync(file))
+  })
+
   it("reobserves this Bot's replacement page when a queued target expired before human return", async () => {
     const old = JSON.parse(await service.act("a", { action: "observe" }, signal()))
     await context.entries[0].close()
@@ -526,11 +795,52 @@ describe("Bot browser ownership and control", () => {
     expect((await service.preview("a")).pages).toHaveLength(2)
     const controller = new AbortController(),
       waiting = vi.fn()
-    const action = service.act("b", { action: "observe" }, controller.signal, waiting)
+    const action = service.act("a", { action: "observe" }, controller.signal, waiting)
     controller.abort(new Error("cancelled"))
     await expect(action).rejects.toThrow("cancelled")
     expect(waiting.mock.calls).toEqual([[true], [false]])
     await service.giveBack("a")
+  })
+
+  it("releases pending help when its final page closes without replaying input or touching a peer", async () => {
+    const original = JSON.parse(
+      await service.act("a", { action: "navigate", url: "https://example.test/original" }, signal())
+    )
+    const peer = JSON.parse(await service.act("b", { action: "observe" }, signal()))
+    const waiting = vi.fn()
+    let entered!: () => void
+    const suspended = new Promise<void>((resolve) => {
+      entered = resolve
+    })
+    const help = service.act(
+      "a",
+      { action: "request_help", pageId: original.pageId, instruction: "Inspect the test page" },
+      signal(),
+      (active) => {
+        waiting(active)
+        if (active) entered()
+      }
+    )
+    await suspended
+    const lease = await service.preview("a")
+    await context.entries[0].close()
+    const observed = JSON.parse(await help)
+    expect(observed.pageId).not.toBe(original.pageId)
+    expect(observed.pageId).not.toBe(peer.pageId)
+    expect(observed.url).toBe("about:blank")
+    expect(context.entries[1].closed).toBe(false)
+    expect((await service.preview("a")).control).toBe("bot")
+    await expect(service.giveBack("a", lease.generation)).rejects.toThrow("控制权已改变")
+    await expect(
+      service.act(
+        "a",
+        { action: "fill", pageId: original.pageId, role: "textbox", name: "Name", text: "stale" },
+        signal()
+      )
+    ).rejects.toThrow("页面已关闭")
+    for (const page of context.entries) expect(page.fill).not.toHaveBeenCalled()
+    expect(context.entries[0].goto).toHaveBeenCalledTimes(1)
+    expect(waiting.mock.calls).toEqual([[true], [false]])
   })
 
   it("does not retain stale pages after a crash or let a failed takeover block future work", async () => {

@@ -77,4 +77,23 @@ The Bot file-preview shell follows installed 0.71.2's `Ee` / `le` in
 existing Dialog, FileViewer, preview transport, saving and focus restoration.
 Palette variables are scoped to this portaled Bot dialog so its Markdown/table
 styles do not inherit the workbench's accent. The existing workbench preview
-and its file parsing are unchanged; Grok's interactive JSON tree is not copied.
+and its default file presentation are unchanged.
+
+The Bot JSON preview adapts the installed 0.71.2
+`chunk-fullscreen-file-viewer-body-BJijlGrd.js` pure tree model (`sa`, `aa`, `Dt`)
+and `En` presentation: two expanded levels, ordinal node identities, a 200-child
+limit, descendant expansion reset, container summaries, and Tab between carets.
+Row spacing follows its 16px caret / 17px nesting / 22px baseline and 12px mono
+text, an 860px padded content width, and hover-visible scrollbars.
+The installed client's `Mn` uses the shared `za` scroll area without an explicit
+`viewportTabIndex`. Virtuoso's additional default scroll-container tab stop is
+removed with `tabIndex={-1}`; the tree carets keep their native button focus.
+CMB's existing react-virtuoso handles variable-height virtualization;
+Grok's custom layout, frame measurement and selection framework are not copied.
+Unlike a numeric JSON.parse round trip, number leaves retain their original
+source lexemes. Parsing and expansion use a preview-scoped Vite Worker following
+CMB's existing code-highlight worker pattern; only display rows cross to React,
+and switching or closing the document terminates the worker. The optional FileViewer adapter reuses its existing bounded
+assembly, permissions, cancellation and cache; invalid or incomplete JSON uses
+the original CodeViewer. Hermes's json-document-editor is an in-memory editor,
+so it is not reused for an on-disk preview.

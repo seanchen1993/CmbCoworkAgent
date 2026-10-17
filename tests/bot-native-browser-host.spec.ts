@@ -99,6 +99,19 @@ app.whenReady().then(async () => {
     const helpState = await service.preview('a');
     assert.equal(helpState.helpInstruction, 'Confirm the synthetic page');
     assert.equal(helpState.control, 'human');
+    // Other exact targets remain usable; they must not acquire the user's page or lease.
+    const peer = JSON.parse(await service.act('b', { action: 'navigate', pageId: b.pageId, url: fixtureUrl + '/peer' }, new AbortController().signal));
+    assert.equal(peer.pageId, b.pageId);
+    const createdPeer = JSON.parse(await service.act('c', { action: 'navigate', url: fixtureUrl + '/created-peer' }, new AbortController().signal));
+    assert.notEqual(createdPeer.pageId, a.pageId);
+    assert.notEqual(createdPeer.pageId, b.pageId);
+    assert.deepEqual((await service.preview('a')).pages.map(page => page.id), [a.pageId]);
+    assert.deepEqual((await service.preview('c')).pages.map(page => page.id), [createdPeer.pageId]);
+    assert.equal(pages[0].url(), fixtureUrl + '/manual');
+    await service.act('b', { action: 'close', pageId: b.pageId }, new AbortController().signal);
+    await service.act('c', { action: 'close', pageId: createdPeer.pageId }, new AbortController().signal);
+    assert.equal((await service.preview('a')).generation, helpState.generation);
+    assert.equal((await service.preview('a')).control, 'human');
     await service.takeOver('a', a.pageId);
     assert.equal((await service.preview('a')).generation, helpState.generation);
     assert.equal((await service.preview('a')).helpInstruction, 'Confirm the synthetic page');

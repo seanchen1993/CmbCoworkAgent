@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto"
-import { lstat, mkdir, realpath, rm } from "node:fs/promises"
+import { lstat, mkdir, realpath, rename, rm } from "node:fs/promises"
 import { basename, join } from "node:path"
 import type { BrowserContext, Page, Locator, Dialog, Download } from "playwright"
 import { AsyncKeyedLock } from "../ipc/async-keyed-lock"
@@ -48,6 +48,8 @@ interface OwnedPage {
   downloads: Array<{ file: string; state: "saving" | "saved" | "failed" }>
 }
 
+export type BotBrowserUploadLock = (operation: () => Promise<string>) => Promise<string>
+
 /** Dedicated profile and exact Page ownership. No shared workbench CDP target discovery. */
 export class BotBrowserService {
   private readonly lock = new AsyncKeyedLock({
@@ -59,10 +61,15 @@ export class BotBrowserService {
   private readonly retiredGroups = new Set<string>()
   private readonly pages = new Map<string, OwnedPage>()
   private starting: Promise<BrowserContext> | undefined
+  private creating: Promise<OwnedPage> | undefined
   private context: BrowserContext | undefined
   private engine: BotBrowserEngine | undefined
-  private human: { botId: string; status: "requesting" | "active"; instruction?: string } | null =
-    null
+  private human: {
+    botId: string
+    status: "requesting" | "active"
+    instruction?: string
+    generation: number
+  } | null = null
   private generation = 0
   private stopping = false
   private readonly returned = new Set<() => void>()
@@ -101,7 +108,10 @@ export class BotBrowserService {
         // Manually opened tabs have no opener; they belong to the current human lease.
         void page
           .opener()
-          .then((opener) => {
+          .then(async (opener) => {
+            // Parent-created targets register their exact owner before the human-tab fallback.
+            if (!opener) await this.creating?.catch(() => undefined)
+            if ([...this.pages.values()].some((item) => item.page === page)) return
             const owner =
               [...this.pages.values()].find((item) => item.page === opener)?.botId ??
               this.human?.botId
@@ -189,7 +199,7 @@ export class BotBrowserService {
     }
     entry.downloads.push(record)
     if (entry.downloads.length > 20) entry.downloads.shift()
-    let destination: string | undefined
+    let temporary: string | undefined
     const timeout = setTimeout(() => {
       void download.cancel().catch(() => {})
     }, 120_000)
@@ -198,16 +208,18 @@ export class BotBrowserService {
         directory = join(workspace, "downloads")
       await mkdir(directory, { recursive: true })
       if ((await lstat(directory)).isSymbolicLink()) throw new Error("下载目录不能是链接")
-      destination = join(directory, filename)
-      await download.saveAs(destination)
-      if ((await lstat(destination)).size > 100 * 1024 * 1024)
-        throw new Error("下载文件超过 100 MiB")
+      const destination = join(directory, filename)
+      // Match file-copy.ts: publish the complete file with one same-directory rename.
+      temporary = join(directory, `.${randomUUID()}.part`)
+      await download.saveAs(temporary)
+      if ((await lstat(temporary)).size > 100 * 1024 * 1024) throw new Error("下载文件超过 100 MiB")
+      await rename(temporary, destination)
       record.state = "saved"
     } catch {
       record.state = "failed"
-      if (destination) await rm(destination, { force: true }).catch(() => {})
     } finally {
       clearTimeout(timeout)
+      if (temporary) await rm(temporary, { force: true }).catch(() => {})
       await download.delete().catch(() => {})
     }
   }
@@ -230,14 +242,19 @@ export class BotBrowserService {
     if (this.pages.size >= 24)
       throw new BotError("CONFLICT", "浏览器页面已达上限，请先关闭不用的页面")
     await this.start()
-    const page = await this.engine!.createPage()
-    return this.register(botId, page)
+    const creating = this.engine!.createPage().then((page) => this.register(botId, page))
+    this.creating = creating
+    try {
+      return await creating
+    } finally {
+      if (this.creating === creating) this.creating = undefined
+    }
   }
 
-  private check(signal: AbortSignal, generation: number): void {
+  private check(signal: AbortSignal, generation: number, botId: string): void {
     signal.throwIfAborted()
     if (this.stopping) throw new BotError("STOPPING", "浏览器正在退出")
-    if (this.human || generation !== this.generation)
+    if (this.human?.botId === botId || generation !== this.generation)
       throw new BotError("CONFLICT", "浏览器控制权已改变，请等待用户归还，再重新观察页面")
   }
 
@@ -269,7 +286,8 @@ export class BotBrowserService {
     botId: string,
     action: BotBrowserAction,
     signal: AbortSignal,
-    waiting: (active: boolean) => void = () => {}
+    waiting: (active: boolean) => void = () => {},
+    withUploadFileLock?: BotBrowserUploadLock
   ): Promise<string> {
     signal.throwIfAborted()
     if (action.action === "request_help") {
@@ -289,7 +307,7 @@ export class BotBrowserService {
       // Reuse the existing abortable control wait. After return, observe instead of replaying input.
       return this.act(botId, { action: "observe", pageId: entry.id }, signal, waiting)
     }
-    if (this.human) {
+    if (this.human?.botId === botId) {
       waiting(true)
       try {
         await new Promise<void>((resolve, reject) => {
@@ -315,20 +333,39 @@ export class BotBrowserService {
       // Old targets are stale after takeover. Return fresh evidence without replaying the requested input.
       const target = action.pageId ? this.pages.get(action.pageId) : undefined
       if (target && target.botId !== botId) throw new BotError("CONFLICT", "页面不属于此 Bot")
-      return this.act(
-        botId,
-        { action: "observe", pageId: target && !target.page.isClosed() ? target.id : undefined },
-        signal,
-        waiting
+      const observed = JSON.parse(
+        await this.act(
+          botId,
+          { action: "observe", pageId: target && !target.page.isClosed() ? target.id : undefined },
+          signal,
+          waiting
+        )
       )
+      return JSON.stringify({
+        ...observed,
+        control: "bot",
+        note: [
+          observed.note,
+          "Human control ended. You now have control again. The pending action was replaced with this fresh observation; it was not replayed. Verify the result before requesting any further user action."
+        ]
+          .filter(Boolean)
+          .join(" ")
+      })
     }
     const generation = this.generation
-    this.check(signal, generation)
+    this.check(signal, generation, botId)
+    if (action.action === "upload" && withUploadFileLock) {
+      // Keep file → browser lock order. Human waits return fresh evidence without uploading.
+      return withUploadFileLock(() => {
+        this.check(signal, generation, botId)
+        return this.act(botId, action, signal, waiting)
+      })
+    }
     return this.lock.withKey("browser", async () => {
-      this.check(signal, generation)
+      this.check(signal, generation, botId)
       const entry = await this.page(botId, action.pageId),
         page = entry.page
-      this.check(signal, generation)
+      this.check(signal, generation, botId)
       const abort = () => {
         void page.close({ runBeforeUnload: false }).catch(() => {})
       }
@@ -379,7 +416,7 @@ export class BotBrowserService {
           const target = page.getByLabel(action.name, { exact: true })
           if ((await target.count()) !== 1)
             throw new BotError("CONFLICT", "文件选择控件不唯一，请重新观察")
-          this.check(signal, generation)
+          this.check(signal, generation, botId)
           await this.input(entry, () => target.setInputFiles(file))
           upload = { filename: basename(file), state: "attached" }
         } else if (action.action === "navigate") {
@@ -393,7 +430,7 @@ export class BotBrowserService {
           const target: Locator = page.getByRole(action.role, { name: action.name, exact: true })
           if ((await target.count()) !== 1)
             throw new BotError("CONFLICT", "页面目标不唯一或已改变，请重新观察")
-          this.check(signal, generation)
+          this.check(signal, generation, botId)
           if (action.action === "click") await this.input(entry, () => target.click())
           else if (action.action === "fill")
             await this.input(entry, () => target.fill(action.text ?? ""))
@@ -404,7 +441,7 @@ export class BotBrowserService {
           await page.close({ runBeforeUnload: false })
           return JSON.stringify({ closed: entry.id })
         }
-        this.check(signal, generation)
+        this.check(signal, generation, botId)
         if (entry.dialog)
           return JSON.stringify({
             pageId: entry.id,
@@ -434,7 +471,7 @@ export class BotBrowserService {
           }),
           truncated: elements.length > 20
         }))
-        this.check(signal, generation)
+        this.check(signal, generation, botId)
         return JSON.stringify({
           pageId: entry.id,
           url: page.url(),
@@ -493,7 +530,7 @@ export class BotBrowserService {
       return {
         pages,
         pageId: selected?.id ?? null,
-        generation: this.generation,
+        generation: this.human?.botId === botId ? this.human.generation : this.generation,
         control:
           this.human?.botId === botId
             ? this.human.status === "active"
@@ -527,9 +564,13 @@ export class BotBrowserService {
       })
       return
     }
-    const claim = { botId, status: "requesting" as "requesting" | "active", instruction }
+    const claim = {
+      botId,
+      status: "requesting" as "requesting" | "active",
+      instruction,
+      generation: ++this.generation
+    }
     this.human = claim
-    this.generation++
     try {
       await this.lock.withKey("browser", async () => {
         const entry = await this.page(botId, pageId)
@@ -545,7 +586,7 @@ export class BotBrowserService {
     }
   }
   async giveBack(botId: string, expectedGeneration?: number): Promise<void> {
-    if (expectedGeneration !== undefined && expectedGeneration !== this.generation)
+    if (expectedGeneration !== undefined && expectedGeneration !== this.human?.generation)
       throw new BotError("CONFLICT", "浏览器控制权已改变，请刷新后再归还")
     if (this.human?.botId !== botId || this.human.status !== "active")
       throw new BotError("CONFLICT", "当前没有可归还的浏览器")
