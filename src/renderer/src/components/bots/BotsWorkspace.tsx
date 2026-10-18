@@ -243,7 +243,7 @@ function BotEditor({
                     <SelectTrigger aria-label="模型" className="h-11 rounded-xl shadow-none">
                       <SelectValue />
                     </SelectTrigger>
-                    <SelectContent className="rounded-xl">
+                    <SelectContent data-bot-popup className="bot-workspace-select rounded-xl">
                       <SelectItem value="default">使用默认模型</SelectItem>
                       {models.map((model) => (
                         <SelectItem key={model.id} value={model.id}>
@@ -514,7 +514,7 @@ function GroupBrowser({
           <SelectTrigger aria-label="查看成员浏览器" className="rounded-xl shadow-none">
             <SelectValue />
           </SelectTrigger>
-          <SelectContent className="rounded-xl">
+          <SelectContent data-bot-popup className="bot-workspace-select rounded-xl">
             {members.map((bot) => (
               <SelectItem key={bot.id} value={bot.id}>
                 {bot.name}
@@ -1410,6 +1410,8 @@ export function BotsWorkspace({ client = localBotClient() }: { client?: BotClien
                         </button>
                       </ContextMenuTrigger>
                       <ContextMenuContent
+                        data-bot-popup
+                        className="bot-workspace-menu rounded-xl p-1.5"
                         onCloseAutoFocus={(event) => {
                           if (sectionFocus.current) {
                             event.preventDefault()
@@ -1772,10 +1774,14 @@ export function BotsWorkspace({ client = localBotClient() }: { client?: BotClien
                       <MoreHorizontal size={20} />
                     </button>
                   </PopoverTrigger>
-                  <PopoverContent align="end">
+                  <PopoverContent
+                    data-bot-popup
+                    align="end"
+                    className="bot-workspace-menu rounded-xl p-1.5"
+                  >
                     {!selected.archived && (
                       <button
-                        className="flex w-full items-center rounded-md p-2 text-sm hover:bg-muted"
+                        className="flex w-full items-center rounded-md p-2 text-sm hover:bg-accent"
                         onClick={() => togglePin(selected.id)}
                       >
                         {pinnedIds.includes(selected.id) ? (
@@ -1787,21 +1793,21 @@ export function BotsWorkspace({ client = localBotClient() }: { client?: BotClien
                       </button>
                     )}
                     <button
-                      className="flex w-full items-center rounded-md p-2 text-sm hover:bg-muted"
+                      className="flex w-full items-center rounded-md p-2 text-sm hover:bg-accent"
                       onClick={() => openBotEditor(selected, profileMenuTrigger.current)}
                     >
                       <Settings2 className="mr-2 size-4" />
                       编辑 Bot
                     </button>
                     <button
-                      className="flex w-full items-center rounded-md p-2 text-sm hover:bg-muted"
+                      className="flex w-full items-center rounded-md p-2 text-sm hover:bg-accent"
                       onClick={() => void archive(selected)}
                     >
                       <Archive className="mr-2 size-4" />
                       {selected.archived ? "恢复 Bot" : "归档 Bot"}
                     </button>
                     <button
-                      className="flex w-full items-center rounded p-2 text-sm text-destructive hover:bg-muted"
+                      className="flex w-full items-center rounded p-2 text-sm text-destructive hover:bg-accent"
                       onClick={() => {
                         editorTrigger.current = profileMenuTrigger.current
                         setDeleting(selected)

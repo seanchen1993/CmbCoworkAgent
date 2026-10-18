@@ -27,6 +27,7 @@ import {
   ChatToolPresentationContext
 } from "./chat-presentation-context"
 import { projectBotExecution } from "@/lib/bot-execution-visibility"
+import { botMessageHasEntranceBody } from "@/lib/bot-message-entrance"
 import { pendingBotQuestionCallId } from "@/lib/bot-question-history"
 import ReactMarkdown, { type Components } from "react-markdown"
 import remarkBreaks from "remark-breaks"
@@ -3514,13 +3515,30 @@ export function ChatContainer({
       ),
     [hookLogBucketByTurnId, hookLogConfig.enabled]
   )
+  const hiddenMessageIds = useContext(ChatMessageVisibilityContext)
+  const executionCardCallIds = useContext(ChatExecutionCardCallIdsContext)
+  const showExecutionDetails = useContext(ChatExecutionDetailsContext)
+  const activityPresentation = useContext(ChatActivityPresentationContext)
+  const parentToolPresentation = useContext(ChatToolPresentationContext)
+  const hasPresentedMessageRow = useCallback(
+    (message: Message, hasHookLogChip: boolean): boolean =>
+      messageHasVisibleRow(message, hasHookLogChip) &&
+      (surface !== "bot" ||
+        showExecutionDetails ||
+        searchOpen ||
+        message.role !== "assistant" ||
+        Boolean(message.tool_calls?.length) ||
+        botMessageHasEntranceBody(message)),
+    [surface, showExecutionDetails, searchOpen]
+  )
   const dynamicVisibilityProjection = threadProjectionRuntime.projectDynamicLiveVisibility({
     live: liveDisplayProjection,
     displayMessages,
     displayIndexById: displayMessageProjection.indexById,
     displayContentVersion: displayMessagesContentVersion,
     displayStructureVersion: displayMessagesStructureVersion,
-    hasHookLogChip: hasHookLogChipForMessage
+    hasHookLogChip: hasHookLogChipForMessage,
+    hasVisibleRow: surface === "bot" ? hasPresentedMessageRow : undefined
   })
   const dynamicVisibilityByIndex = dynamicVisibilityProjection.byIndex
   const orderedDynamicVisibleMessageIndexes = dynamicVisibilityProjection.orderedVisibleIndexes
@@ -3547,11 +3565,6 @@ export function ChatContainer({
     hookLogBuckets
   })
 
-  const hiddenMessageIds = useContext(ChatMessageVisibilityContext)
-  const executionCardCallIds = useContext(ChatExecutionCardCallIdsContext)
-  const showExecutionDetails = useContext(ChatExecutionDetailsContext)
-  const activityPresentation = useContext(ChatActivityPresentationContext)
-  const parentToolPresentation = useContext(ChatToolPresentationContext)
   // Fold the actual committed + streamed timeline. The parent only owns committed history.
   // Reuse the existing tool projection version so ordinary text tokens do not rescan results.
   const toolDerivationProjection = threadProjectionRuntime.projectToolDerivationMessages(
@@ -3581,73 +3594,6 @@ export function ChatContainer({
         : parentToolPresentation?.(tool, result),
     [showExecutionDetails, searchOpen, inlineQuestionCallId, parentToolPresentation]
   )
-  const foldedMessageIds = useMemo(
-    () =>
-      surface === "bot" && !showExecutionDetails
-        ? projectBotExecution(
-            displayMessages,
-            isLoading,
-            executionCardCallIds,
-            inlineQuestionCallId
-          ).hiddenMessages
-        : new Set<string>(),
-    [
-      surface,
-      showExecutionDetails,
-      executionCardCallIds,
-      displayMessages,
-      displayMessagesStructureVersion,
-      toolDerivationProjection.version,
-      dynamicVisibilityProjection.version,
-      inlineQuestionCallId,
-      isLoading
-    ]
-  )
-  const unfilteredVisibleMessageIndexes = threadProjectionRuntime.projectVisibleMessageIndexes({
-    stableIndexes: orderedStableVisibleMessageIndexes,
-    dynamicVisibilityByIndex,
-    orderedDynamicIndexes: orderedDynamicVisibleMessageIndexes,
-    dynamicVersion: dynamicVisibilityProjection.version
-  })
-  const visibleMessageIndexes = useMemo(
-    () =>
-      hiddenMessageIds.size || (!searchOpen && foldedMessageIds.size)
-        ? unfilteredVisibleMessageIndexes.filter(
-            (index) =>
-              !hiddenMessageIds.has(displayMessages[index].id) &&
-              (searchOpen || !foldedMessageIds.has(displayMessages[index].id))
-          )
-        : unfilteredVisibleMessageIndexes,
-    [
-      unfilteredVisibleMessageIndexes,
-      hiddenMessageIds,
-      foldedMessageIds,
-      searchOpen,
-      displayMessages,
-      displayMessagesStructureVersion
-    ]
-  )
-  const historyGapBeforeVisibleMessageId = useMemo(() => {
-    if (!historyWindowGap) return null
-    const boundaryIndex = displayMessageProjection.indexById.get(historyWindowGap.beforeMessageId)
-    if (boundaryIndex === undefined) return null
-    const visibleBoundaryIndex = visibleMessageIndexes.find((index) => index >= boundaryIndex)
-    return visibleBoundaryIndex === undefined
-      ? null
-      : (displayMessages[visibleBoundaryIndex]?.id ?? null)
-  }, [
-    displayMessageProjection.indexById,
-    displayMessages,
-    displayMessagesStructureVersion,
-    historyWindowGap,
-    visibleMessageIndexes
-  ])
-  const lastVisibleMessageIndex = visibleMessageIndexes[visibleMessageIndexes.length - 1]
-  const lastContentMessageId =
-    lastVisibleMessageIndex === undefined
-      ? null
-      : (displayMessages[lastVisibleMessageIndex]?.id ?? null)
-
   // Ordinary assistant tokens update only the changed display slot. Keep the
   // tool projection stable and replace a slot only when that changed row is
   // itself tool-relevant.
@@ -3751,6 +3697,75 @@ export function ChatContainer({
         }
       }
     })
+
+  const foldedMessageIds = useMemo(
+    () =>
+      surface === "bot" && !showExecutionDetails
+        ? projectBotExecution(
+            displayMessages,
+            isLoading,
+            executionCardCallIds,
+            inlineQuestionCallId,
+            toolCallDisplayStates
+          ).hiddenMessages
+        : new Set<string>(),
+    [
+      surface,
+      showExecutionDetails,
+      executionCardCallIds,
+      displayMessages,
+      displayMessagesStructureVersion,
+      toolDerivationProjection.version,
+      dynamicVisibilityProjection.version,
+      inlineQuestionCallId,
+      toolCallDisplayStates,
+      isLoading
+    ]
+  )
+  const unfilteredVisibleMessageIndexes = threadProjectionRuntime.projectVisibleMessageIndexes({
+    stableIndexes: orderedStableVisibleMessageIndexes,
+    dynamicVisibilityByIndex,
+    orderedDynamicIndexes: orderedDynamicVisibleMessageIndexes,
+    dynamicVersion: dynamicVisibilityProjection.version
+  })
+  const visibleMessageIndexes = useMemo(
+    () =>
+      hiddenMessageIds.size || (!searchOpen && foldedMessageIds.size)
+        ? unfilteredVisibleMessageIndexes.filter(
+            (index) =>
+              !hiddenMessageIds.has(displayMessages[index].id) &&
+              (searchOpen || !foldedMessageIds.has(displayMessages[index].id))
+          )
+        : unfilteredVisibleMessageIndexes,
+    [
+      unfilteredVisibleMessageIndexes,
+      hiddenMessageIds,
+      foldedMessageIds,
+      searchOpen,
+      displayMessages,
+      displayMessagesStructureVersion
+    ]
+  )
+  const historyGapBeforeVisibleMessageId = useMemo(() => {
+    if (!historyWindowGap) return null
+    const boundaryIndex = displayMessageProjection.indexById.get(historyWindowGap.beforeMessageId)
+    if (boundaryIndex === undefined) return null
+    const visibleBoundaryIndex = visibleMessageIndexes.find((index) => index >= boundaryIndex)
+    return visibleBoundaryIndex === undefined
+      ? null
+      : (displayMessages[visibleBoundaryIndex]?.id ?? null)
+  }, [
+    displayMessageProjection.indexById,
+    displayMessages,
+    displayMessagesStructureVersion,
+    historyWindowGap,
+    visibleMessageIndexes
+  ])
+  const lastVisibleMessageIndex = visibleMessageIndexes[visibleMessageIndexes.length - 1]
+  const lastContentMessageId =
+    lastVisibleMessageIndex === undefined
+      ? null
+      : (displayMessages[lastVisibleMessageIndex]?.id ?? null)
 
   const buildSearchDocument = useCallback(
     (message: Message, sortIndex: number): ChatSearchDocument | null => {
@@ -4265,11 +4280,16 @@ export function ChatContainer({
           bottomSettleAttemptRef.current = 0
         }
         const virtualized = Boolean(messageVirtualizationEnabledRef.current && virtuosoRef.current)
-        const writer = resolveChatBottomScrollWriter(
-          virtualized,
-          pending.reason,
-          bottomSettleAttemptRef.current
-        )
+        // Bot rows can appear after hidden reasoning/tool shells. Follow their measured
+        // viewport directly; priming the estimated last item first briefly scrolls backwards.
+        const writer =
+          surface === "bot" && pending.reason === "content-appended"
+            ? "viewport"
+            : resolveChatBottomScrollWriter(
+                virtualized,
+                pending.reason,
+                bottomSettleAttemptRef.current
+              )
 
         if (writer === "virtual-index" && virtuosoRef.current) {
           virtuosoRef.current.scrollToIndex({
@@ -4323,7 +4343,7 @@ export function ChatContainer({
 
       bottomScrollFrameRef.current = window.requestAnimationFrame(run)
     },
-    [applyChatScrollEvent, getViewport]
+    [applyChatScrollEvent, getViewport, surface]
   )
 
   const runChatScrollTransition = useCallback(
@@ -4774,6 +4794,33 @@ export function ChatContainer({
     visibleMessageIndexes.length
   ])
 
+  const settleBotViewportBeforePaint = useCallback((): void => {
+    const state = chatScrollStateRef.current
+    if (
+      surface !== "bot" ||
+      !state ||
+      state.generation !== chatScrollUiState.generation ||
+      !shouldFollowChatOutput(state)
+    )
+      return
+    const viewport = getViewport()
+    if (!viewport) return
+    const bottom = Math.max(0, viewport.scrollHeight - viewport.clientHeight)
+    if (Math.abs(viewport.scrollTop - bottom) > 1) viewport.scrollTop = bottom
+  }, [surface, chatScrollUiState.generation, getViewport])
+
+  // Settle streamed-to-committed row replacements before the browser paints an
+  // intermediate virtual height. Detached readers remain under the existing controller.
+  useLayoutEffect(() => {
+    settleBotViewportBeforePaint()
+  }, [
+    settleBotViewportBeforePaint,
+    displayMessagesContentVersion,
+    displayMessagesStructureVersion,
+    visibleMessageIndexes,
+    isLoading
+  ])
+
   const handleContentHeightChanged = useCallback((): void => {
     const state = chatScrollStateRef.current
     if (
@@ -4784,11 +4831,17 @@ export function ChatContainer({
     ) {
       return
     }
+    settleBotViewportBeforePaint()
     dispatchChatScrollEvent({
       type: "CONTENT_GROWN",
       generation: chatScrollUiState.generation
     })
-  }, [chatScrollUiState.generation, dispatchChatScrollEvent, visibleMessageIndexes.length])
+  }, [
+    chatScrollUiState.generation,
+    dispatchChatScrollEvent,
+    settleBotViewportBeforePaint,
+    visibleMessageIndexes.length
+  ])
 
   const handleVirtualAtBottomStateChange = useCallback(
     (atBottom: boolean): void => {
@@ -8290,7 +8343,10 @@ export function ChatContainer({
       >
         {({ reserveLeftSpace, setMessageRef, virtualRangeRef }) => (
           <>
-            <ScrollArea className="flex-1 min-h-0" ref={scrollRef}>
+            <ScrollArea
+              className={cn("flex-1 min-h-0", surface === "bot" && "bot-chat-scroll")}
+              ref={scrollRef}
+            >
               <div className={cn("px-4 pt-4", reserveLeftSpace && "md:pl-[20px]")}>
                 <div className="max-w-3xl mx-auto space-y-4">
                   {historyLoading && displayMessages.length === 0 && (

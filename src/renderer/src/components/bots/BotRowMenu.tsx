@@ -102,7 +102,7 @@ export function BotRowMenu({
             }
           }}
           aria-label={`${bot.name} 的操作`}
-          className="bot-row-menu w-52 rounded-xl p-1.5"
+          className="bot-row-menu bot-workspace-menu w-52 rounded-xl p-1.5"
         >
           {!bot.archived && !bot.deleting && (
             <ContextMenuItem onSelect={onPin}>
@@ -116,7 +116,10 @@ export function BotRowMenu({
                 <FolderPlus className="mr-2" />
                 移至分组
               </ContextMenuSubTrigger>
-              <ContextMenuSubContent className="max-h-80 overflow-y-auto rounded-xl">
+              <ContextMenuSubContent
+                data-bot-popup
+                className="bot-workspace-menu max-h-80 overflow-y-auto rounded-xl"
+              >
                 {sections.map((section) => (
                   <ContextMenuItem key={section.id} onSelect={() => onMove(section.id)}>
                     {section.name}

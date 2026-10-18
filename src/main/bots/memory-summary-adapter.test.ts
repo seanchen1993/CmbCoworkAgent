@@ -7,13 +7,15 @@ const fixture = vi.hoisted(() => ({
   enabled: true,
   extraction: vi.fn(),
   route: vi.fn(),
-  model: vi.fn()
+  model: vi.fn(),
+  verify: vi.fn()
 }))
 vi.mock("@langchain/openai", () => ({
   ChatOpenAI: class {
     constructor(options: unknown) {
       fixture.model(options)
     }
+    invoke = fixture.verify
   }
 }))
 vi.mock("../storage", () => ({
@@ -41,6 +43,262 @@ beforeEach(() => {
   vi.clearAllMocks()
   fixture.enabled = true
   fixture.route.mockResolvedValue(null)
+  fixture.verify.mockResolvedValue({ content: '{"approved":true}' })
+})
+
+const preference = {
+  action: "create" as const,
+  type: "user" as const,
+  filename: "user_format.md",
+  name: "Standing format preference",
+  description: "Synthetic durable preference",
+  content: "For project Cedar, use Summary, Verification and Follow-up in future reports."
+}
+
+describe("Bot automatic memory verification", () => {
+  it.each([false, true])(
+    "runs the original extractor before an independent approval of %s",
+    async (approved) => {
+      const root = mkdtempSync(join(tmpdir(), "bot-memory-original-extractor-"))
+      const memory = new BotMemoryService(root)
+      const original =
+        await vi.importActual<typeof import("../memory/summarizer")>("../memory/summarizer")
+      fixture.extraction.mockImplementation(original.summarizeAndSave)
+      fixture.verify
+        .mockResolvedValueOnce({
+          content: JSON.stringify({ operations: [preference], memory_md: "# Memory Index" })
+        })
+        .mockImplementationOnce(async () => {
+          expect(memory.list("a")).toEqual([])
+          return { content: JSON.stringify({ approved }) }
+        })
+      const maintainer = createBotMemoryMaintainer(memory, () => true)
+      try {
+        maintainer.enqueue({ ...turn, editVersion: 0 })
+        await tick()
+        expect(fixture.verify).toHaveBeenCalledTimes(2)
+        expect(memory.list("a")).toHaveLength(approved ? 1 : 0)
+        expect(fixture.verify.mock.calls[0][0][0].content).toContain("memory curation agent")
+        expect(fixture.verify.mock.calls[1][0][0].content).toContain(
+          "Audit proposed private long-term memory"
+        )
+      } finally {
+        await maintainer.close()
+        await memory.close()
+        rmSync(root, { recursive: true, force: true })
+      }
+    }
+  )
+
+  it.each([
+    '{"approved":false}',
+    '{"approved":"true"}',
+    '{"approved":true,"unexpected":"override"}',
+    '[{"approved":true}]',
+    "unparseable",
+    ""
+  ])("does not persist an unapproved or invalid verdict: %s", async (content) => {
+    const root = mkdtempSync(join(tmpdir(), "bot-memory-review-"))
+    const memory = new BotMemoryService(root)
+    memory.write("a", { name: "Existing preference", content: "Prefer blue" })
+    const existing = memory.list("a")[0]
+    fixture.extraction.mockImplementation(async (options) => {
+      options.apply([
+        {
+          ...preference,
+          name: "Temporary test correction",
+          content: "The null-name test was not run."
+        }
+      ])
+    })
+    fixture.verify.mockResolvedValue({ content })
+    const maintainer = createBotMemoryMaintainer(memory, () => true)
+    try {
+      maintainer.enqueue({ ...turn, editVersion: memory.editVersion("a") })
+      await tick()
+      expect(memory.list("a")).toEqual([existing])
+      expect(fixture.verify).toHaveBeenCalledOnce()
+    } finally {
+      await maintainer.close()
+      await memory.close()
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
+  it("reviews durable creates and updates before committing, using only the target Bot's prior entries", async () => {
+    const root = mkdtempSync(join(tmpdir(), "bot-memory-review-"))
+    const memory = new BotMemoryService(root)
+    memory.write("a", { name: "Existing preference", content: "Prefer blue" })
+    const existing = memory.list("a")[0]
+    memory.write("b", { name: "Other Bot", content: "Private other-Bot information" })
+    const update = {
+      ...preference,
+      action: "update" as const,
+      filename: `${existing.id}.md`,
+      content: "Prefer red"
+    }
+    fixture.extraction.mockImplementation(async (options) => options.apply([update, preference]))
+    fixture.verify.mockImplementation(async (messages, options) => {
+      expect(memory.list("a")).toEqual([existing])
+      expect(messages[0].getType()).toBe("system")
+      const evidence = JSON.parse(messages[1].content)
+      expect(evidence.conversation).toBe(turn.conversation)
+      expect(evidence.proposedChanges).toEqual([update, preference])
+      expect(evidence.currentMemories).toEqual([existing])
+      expect(JSON.stringify(evidence)).not.toContain("Private other-Bot information")
+      expect(options.signal).toBeInstanceOf(AbortSignal)
+      return { content: '<think>internal</think>\n```json\n{"approved":true}\n```' }
+    })
+    const maintainer = createBotMemoryMaintainer(memory, () => true)
+    try {
+      maintainer.enqueue({ ...turn, editVersion: memory.editVersion("a") })
+      await tick()
+      expect(fixture.verify).toHaveBeenCalledOnce()
+      expect(memory.list("a")).toHaveLength(2)
+      expect(
+        memory
+          .list("a")
+          .find((entry) => entry.id === existing.id)
+          ?.content.trim()
+      ).toBe("Prefer red")
+      expect(memory.list("a").some((entry) => entry.content.trim() === preference.content)).toBe(
+        true
+      )
+    } finally {
+      await maintainer.close()
+      await memory.close()
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
+  it("does not request verification for empty or skip-only proposals", async () => {
+    const memory = {
+      editVersion: () => 1,
+      summaryDirectory: () => "/fixture/bots/a/memory",
+      applySummary: vi.fn()
+    } as unknown as BotMemoryService
+    fixture.extraction.mockImplementation(async (options) => {
+      options.apply([{ action: "skip", filename: "existing.md" }])
+    })
+    const maintainer = createBotMemoryMaintainer(memory, () => true)
+    maintainer.enqueue(turn)
+    await tick()
+    expect(fixture.verify).not.toHaveBeenCalled()
+    expect(memory.applySummary).not.toHaveBeenCalled()
+    await maintainer.close()
+  })
+
+  it("rejects invented update filenames without a request or a partial commit", async () => {
+    const memory = {
+      editVersion: () => 1,
+      summaryDirectory: () => "/fixture/bots/a/memory",
+      list: () => [],
+      applySummary: vi.fn()
+    } as unknown as BotMemoryService
+    fixture.extraction.mockImplementation(async (options) => {
+      expect(options.scopeHint).toContain("EXACT filename")
+      options.apply([
+        preference,
+        { ...preference, action: "update", filename: "reference_invented.md" }
+      ])
+    })
+    const warning = vi.spyOn(console, "warn").mockImplementation(() => {})
+    const maintainer = createBotMemoryMaintainer(memory, () => true)
+    try {
+      maintainer.enqueue(turn)
+      await tick()
+      expect(fixture.verify).not.toHaveBeenCalled()
+      expect(memory.applySummary).not.toHaveBeenCalled()
+      expect(warning).toHaveBeenCalledOnce()
+    } finally {
+      await maintainer.close()
+      warning.mockRestore()
+    }
+  })
+
+  it("uses the existing total deadline to abort verification without writing memory", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] })
+    const memory = {
+      editVersion: () => 1,
+      summaryDirectory: () => "/fixture/bots/a/memory",
+      applySummary: vi.fn()
+    } as unknown as BotMemoryService
+    fixture.extraction.mockImplementation(async (options) => options.apply([preference]))
+    let reviewSignal: AbortSignal | undefined
+    fixture.verify.mockImplementation(
+      (_messages, options) =>
+        new Promise((_resolve, reject) => {
+          reviewSignal = options.signal
+          options.signal.addEventListener("abort", () => reject(options.signal.reason), {
+            once: true
+          })
+        })
+    )
+    const maintainer = createBotMemoryMaintainer(memory, () => true)
+    try {
+      maintainer.enqueue(turn)
+      await tick()
+      expect(reviewSignal?.aborted).toBe(false)
+      await vi.advanceTimersByTimeAsync(30_000)
+      expect(reviewSignal?.aborted).toBe(true)
+      expect(memory.applySummary).not.toHaveBeenCalled()
+      await maintainer.close()
+      expect(vi.getTimerCount()).toBe(0)
+    } finally {
+      await maintainer.close()
+      vi.useRealTimers()
+    }
+  })
+
+  it.each(["edit", "delete", "archive", "disable", "close", "failure"] as const)(
+    "does not commit an approved proposal after %s during verification",
+    async (change) => {
+      const root = mkdtempSync(join(tmpdir(), "bot-memory-review-"))
+      const memory = new BotMemoryService(root)
+      const entry = memory.write("a", { name: "Existing preference", content: "Prefer blue" })
+      const apply = vi.spyOn(memory, "applySummary")
+      let active = true
+      let finish!: () => void
+      let started!: () => void
+      const pending = new Promise<void>((resolve) => (started = resolve))
+      fixture.extraction.mockImplementation(async (options) => options.apply([preference]))
+      fixture.verify.mockImplementation(
+        (_messages, options) =>
+          new Promise((resolve, reject) => {
+            finish = () =>
+              change === "failure"
+                ? reject(new Error("Synthetic verification failure"))
+                : resolve({ content: '{"approved":true}' })
+            expect(options.signal).toBeInstanceOf(AbortSignal)
+            started()
+          })
+      )
+      const warning = vi.spyOn(console, "error").mockImplementation(() => {})
+      const maintainer = createBotMemoryMaintainer(memory, () => active)
+      try {
+        maintainer.enqueue({ ...turn, editVersion: memory.editVersion("a") })
+        await pending
+        if (change === "edit")
+          memory.write("a", { ...entry, expectedVersion: entry.version, content: "Prefer red" })
+        if (change === "delete") memory.remove("a", entry.id, entry.version)
+        if (change === "archive") active = false
+        if (change === "disable") fixture.enabled = false
+        const expected = memory.list("a")
+        const closing = change === "close" ? maintainer.close() : undefined
+        finish()
+        await closing
+        await tick()
+        expect(apply).not.toHaveBeenCalled()
+        expect(memory.list("a")).toEqual(expected)
+      } finally {
+        finish?.()
+        await maintainer.close()
+        await memory.close()
+        warning.mockRestore()
+        rmSync(root, { recursive: true, force: true })
+      }
+    }
+  )
 })
 
 describe("Bot memory extraction wiring", () => {
@@ -69,12 +327,12 @@ describe("Bot memory extraction wiring", () => {
       expect.objectContaining({ maxRetries: 0, timeout: 30_000 })
     )
     commit!([])
-    expect(apply).toHaveBeenCalledTimes(1)
+    expect(apply).not.toHaveBeenCalled()
     fixture.enabled = false
     commit!([])
     maintainer.enqueue(turn)
     await tick()
-    expect(apply).toHaveBeenCalledTimes(1)
+    expect(apply).not.toHaveBeenCalled()
     expect(fixture.extraction).toHaveBeenCalledTimes(1)
     await maintainer.close()
   })

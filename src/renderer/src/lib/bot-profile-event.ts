@@ -33,15 +33,34 @@ export function botProfileEvent(
       return typeof value.id === "string" && /^[A-Za-z0-9_-]{1,128}$/.test(value.id)
         ? `已创建 ${value.name}`
         : null
+    let nameChanged = typeof tool.args.name === "string"
+    let instructionsChanged = typeof tool.args.instructions === "string"
+    if ("changes" in value) {
+      const changes = value.changes
+      if (
+        !changes ||
+        typeof changes !== "object" ||
+        Array.isArray(changes) ||
+        !("name" in changes) ||
+        typeof changes.name !== "boolean" ||
+        !("instructions" in changes) ||
+        typeof changes.instructions !== "boolean"
+      )
+        return null
+      nameChanged &&= changes.name
+      instructionsChanged &&= changes.instructions
+    }
     if (tool.name === "bot_update_teammate")
       return typeof value.id === "string" &&
         value.id === tool.args.botId &&
         (tool.args.name || tool.args.instructions)
-        ? `已更新 ${value.name} 的资料`
+        ? nameChanged || instructionsChanged
+          ? `已更新 ${value.name} 的资料`
+          : `${value.name} 的资料未变更`
         : null
-    if (typeof tool.args.name === "string")
-      return `已重命名为 ${value.name}${typeof tool.args.instructions === "string" ? "，职责已更新" : ""}`
-    return typeof tool.args.instructions === "string" ? "职责已更新" : null
+    if (nameChanged) return `已重命名为 ${value.name}${instructionsChanged ? "，职责已更新" : ""}`
+    if (instructionsChanged) return "职责已更新"
+    return "changes" in value ? "资料未变更" : null
   } catch {
     return null
   }

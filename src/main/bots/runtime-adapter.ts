@@ -8,6 +8,8 @@ import {
   createManagedTransportAgentRunDelivery,
   announceManagedTurnUserMessage
 } from "../agent/managed-transport-delivery"
+import { mirrorStandardTurnStreamToRenderer } from "../agent/renderer-stream-mirror"
+import type { SchedulerRendererEvent } from "../agent/stream-converter"
 import {
   claimLocalThreadRunLease,
   releaseLocalThreadRunLease,
@@ -47,6 +49,23 @@ import { getAvailableModelConfigOrDefault, toModelRef } from "../models/registry
 import { isMemoryEnabled } from "../storage"
 import { isBotRoutineSilent } from "../../shared/bots/routine-silence"
 import { parseBotFileDelivery, type BotDeliveredFile } from "../../shared/bots/file-delivery"
+
+function isBackgroundCommitSkip(event: SchedulerRendererEvent): boolean {
+  if (event.type !== "custom" || event.data.type !== "auto_commit_result") return false
+  const result = event.data.result
+  if (!result || typeof result !== "object" || Array.isArray(result)) return false
+  const value = result as Record<string, unknown>
+  // finalizeAutoCommit emits this no-op while background work owns the workspace.
+  // Preserve any additional result, warning or unknown field instead of hiding it.
+  return (
+    Object.keys(value).length === 2 &&
+    value.status === "skipped" &&
+    Array.isArray(value.reasons) &&
+    value.reasons.length === 1 &&
+    value.reasons[0] ===
+      "后台任务运行中（动态工作流 / 协作 worker），已跳过本回合自动提交（改动留待其完成后审阅）"
+  )
+}
 
 function botModelId(bot: BotDefinition): string | undefined {
   if (bot.modelRef) return bot.modelRef
@@ -315,7 +334,12 @@ export function createLocalBotRunPort(
                   ? { coordinatorInternalNotification: true }
                   : {})
               },
-              createManagedTransportAgentRunDelivery(),
+              createManagedTransportAgentRunDelivery({
+                mirror(threadId, event) {
+                  if (!isBackgroundCommitSkip(event))
+                    mirrorStandardTurnStreamToRenderer(threadId, event)
+                }
+              }),
               {
                 source: "bot",
                 // Reply-producing delegation and routines keep their original managed task owner

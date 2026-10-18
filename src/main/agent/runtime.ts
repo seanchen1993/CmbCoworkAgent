@@ -78,6 +78,7 @@ import { withRawApiCallCapture } from "../services/llm-api-request-capture"
 import { runWithTrustedToolFilePreviewContext } from "../services/trusted-tool-file-preview"
 
 import { ChatOpenAI, ChatOpenAICompletions } from "@langchain/openai"
+import { StreamableHTTPError } from "@modelcontextprotocol/sdk/client/streamableHttp.js"
 import { DynamicStructuredTool, ToolInputParsingException, tool } from "@langchain/core/tools"
 import { SqlJsSaver } from "../checkpointer/sqljs-saver"
 import { recoverMainCheckpointMessages } from "./checkpoint-message-recovery"
@@ -1253,7 +1254,9 @@ export function isRetryableMcpTransportError(error: unknown): boolean {
       ? record.status
       : typeof record?.statusCode === "number"
         ? record.statusCode
-        : undefined
+        : error instanceof StreamableHTTPError
+          ? error.code
+          : undefined
   if (status === 502 || status === 503 || status === 504) return true
 
   const message = error instanceof Error ? error.message : ""

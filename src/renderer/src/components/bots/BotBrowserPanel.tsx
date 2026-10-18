@@ -114,7 +114,7 @@ export function BotBrowserPanel({ botId, client }: { botId: string; client: BotC
           <SelectTrigger aria-label="浏览器页面" className="mb-3 rounded-xl shadow-none">
             <SelectValue placeholder="选择页面" />
           </SelectTrigger>
-          <SelectContent className="rounded-xl">
+          <SelectContent data-bot-popup className="bot-workspace-select rounded-xl">
             {state.pages.map((page) => (
               <SelectItem key={page.id} value={page.id}>
                 {page.title || "新标签页"}

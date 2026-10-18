@@ -1,5 +1,57 @@
 import { describe, expect, it } from "vitest"
-import { botToolResultStatus } from "./bot-tool-result-status"
+import { botMcpBridgeState, botToolResultStatus } from "./bot-tool-result-status"
+
+describe("Bot original MCP bridge receipts", () => {
+  const invoke = { id: "deferred", name: "invoke_deferred_tool", args: {} }
+  it("recognizes the deferred protocol failure without reclassifying business data", () => {
+    const content = '{"ok":false,"error":"BR_SYNTHETIC_ERROR"}'
+    expect(botMcpBridgeState(invoke, content)).toBe("failed")
+    expect(botToolResultStatus(invoke, { content })).toBe("failed")
+    expect(botToolResultStatus({ ...invoke, name: "read_file" }, { content })).toBeUndefined()
+    const success = '{"ok":true,"data":{"ok":false,"error":"business field"}}'
+    expect(botMcpBridgeState(invoke, success)).toBe("succeeded")
+    expect(botToolResultStatus(invoke, { content: success })).toBeUndefined()
+  })
+
+  it("preserves inspect failures mixed with valid schemas and ignores nested schema fields", () => {
+    const tool = { ...invoke, name: "inspect_tool" }
+    const error = JSON.stringify({
+      loaded_tools: [
+        { tool_id: "allowed", schema: {} },
+        { tool_id: "missing", source: "mcp", allow_callers: [], error: "Tool not found" }
+      ]
+    })
+    expect(botToolResultStatus(tool, { content: error })).toBe("failed")
+    const schema = JSON.stringify({ loaded_tools: [{ tool_id: "data", schema: { error: {} } }] })
+    expect(botMcpBridgeState(tool, schema)).toBe("succeeded")
+    expect(botToolResultStatus(tool, { content: schema })).toBeUndefined()
+  })
+
+  it("recognizes the original search metadata and projected deferred success", () => {
+    expect(
+      botMcpBridgeState(
+        { name: "search_tool" },
+        '{"tools":[{"tool_id":"mcp__br__total","source":"mcp","allow_callers":["invoke_deferred_tool"],"description":"Synthetic"}]}'
+      )
+    ).toBe("succeeded")
+    expect(botMcpBridgeState(invoke, '{"ok":true,"data":null,"_projection":{}}')).toBe("succeeded")
+  })
+
+  it.each([
+    "unknown",
+    "{broken",
+    "[]",
+    '{"ok":true}',
+    '{"ok":false}',
+    '{"ok":false,"error":{}}',
+    '{"ok":true,"data":1,"error":"contradictory"}',
+    '{"ok":false,"error":"post-hook","extra":true}',
+    '{"ok":true,"data":1,"_projection":"unexpected"}'
+  ])("does not assign a status to an unrecognized deferred receipt: %s", (content) => {
+    expect(botMcpBridgeState(invoke, content)).toBeUndefined()
+    expect(botToolResultStatus(invoke, { content })).toBeUndefined()
+  })
+})
 
 describe("Bot recovered tool result status", () => {
   const tool = { id: "call_1", name: "write_file", args: {} }

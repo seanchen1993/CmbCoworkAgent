@@ -197,9 +197,13 @@ export function BotFilesPanel({
                       <MoreHorizontal size={16} />
                     </button>
                   </PopoverTrigger>
-                  <PopoverContent align="end" className="w-44">
+                  <PopoverContent
+                    data-bot-popup
+                    align="end"
+                    className="bot-workspace-menu w-44 rounded-xl p-1.5"
+                  >
                     <button
-                      className="flex items-center gap-2 rounded-md p-2 text-sm hover:bg-muted w-full"
+                      className="flex items-center gap-2 rounded-md p-2 text-sm hover:bg-accent w-full"
                       onClick={() =>
                         void mutate(() =>
                           client.exportFile(bot.id, relativeId(file.path), group?.id)
@@ -210,7 +214,7 @@ export function BotFilesPanel({
                       保存到本机
                     </button>
                     <button
-                      className="flex items-center gap-2 rounded-md p-2 text-sm hover:bg-muted w-full"
+                      className="flex items-center gap-2 rounded-md p-2 text-sm hover:bg-accent w-full"
                       onClick={() => {
                         setTarget("")
                         setSharing(relativeId(file.path))

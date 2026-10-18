@@ -50,6 +50,10 @@ export interface BotRunPort {
   onSettled?(task: BotTask, state: BotTaskState, result?: string): void
 }
 
+type BotProfileUpdateReceipt = BotDefinition & {
+  changes: { name: boolean; instructions: boolean }
+}
+
 /** No Electron or renderer dependency. The host owns the queue even with no open workspace. */
 export class LocalBotHost {
   private readonly active = new Map<
@@ -526,22 +530,39 @@ export class LocalBotHost {
     for (const task of this.store.pendingConversationTasks(run.botId)) this.steerDirectMessage(task)
   }
 
-  updateOwnProfile(taskId: string, patch: { name?: string; instructions?: string }): BotDefinition {
+  updateOwnProfile(
+    taskId: string,
+    patch: { name?: string; instructions?: string }
+  ): BotProfileUpdateReceipt {
     this.requireRunning()
+    const before = this.store.getBot(this.store.getTask(taskId).botId)
     const bot = this.store.updateOwnProfile(taskId, patch)
     this.changed()
-    return bot
+    return {
+      ...bot,
+      changes: {
+        name: before.name !== bot.name,
+        instructions: before.instructions !== bot.instructions
+      }
+    }
   }
 
   updateTeammate(
     taskId: string,
     botId: string,
     patch: { name?: string; instructions?: string }
-  ): BotDefinition {
+  ): BotProfileUpdateReceipt {
     this.requireRunning()
+    const before = this.store.getBot(botId)
     const bot = this.store.updateTeammate(taskId, botId, patch)
     this.changed()
-    return bot
+    return {
+      ...bot,
+      changes: {
+        name: before.name !== bot.name,
+        instructions: before.instructions !== bot.instructions
+      }
+    }
   }
 
   cancel(taskId: string): void {

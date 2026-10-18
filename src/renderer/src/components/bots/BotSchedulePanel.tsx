@@ -221,7 +221,7 @@ export function BotSchedulePanel({
                   <SelectTrigger aria-label="重复" className="h-11 rounded-xl shadow-none">
                     <SelectValue />
                   </SelectTrigger>
-                  <SelectContent className="rounded-xl">
+                  <SelectContent data-bot-popup className="bot-workspace-select rounded-xl">
                     <SelectItem value="daily">每天</SelectItem>
                     <SelectItem value="weekly">每周</SelectItem>
                     <SelectItem value="interval">固定间隔</SelectItem>
@@ -297,7 +297,7 @@ export function BotSchedulePanel({
                     <SelectTrigger aria-label="星期" className="h-11 rounded-xl shadow-none">
                       <SelectValue />
                     </SelectTrigger>
-                    <SelectContent className="rounded-xl">
+                    <SelectContent data-bot-popup className="bot-workspace-select rounded-xl">
                       {["周日", "周一", "周二", "周三", "周四", "周五", "周六"].map(
                         (name, index) => (
                           <SelectItem key={index} value={String(index)}>

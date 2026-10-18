@@ -5,6 +5,7 @@
  *   npx tsx tests/mcp-fallback.spec.ts
  */
 import assert from "node:assert/strict"
+import { StreamableHTTPError } from "@modelcontextprotocol/sdk/client/streamableHttp.js"
 import {
   createScopedMcpCapabilityService,
   isRetryableMcpTransportError
@@ -179,6 +180,23 @@ function testRetryableErrorClassifier(): void {
   assert.equal(isRetryableMcpTransportError(new Error("order id 215024")), false)
   assert.equal(isRetryableMcpTransportError(new Error("{code:1502}")), false)
   assert.equal(isRetryableMcpTransportError(new Error("amount 5024.00")), false)
+  for (const status of [502, 503, 504]) {
+    assert.equal(
+      isRetryableMcpTransportError(new StreamableHTTPError(status, "CB_HTTP_FAILURE")),
+      true,
+      `MCP SDK HTTP ${status} must be recognized without relying on response body text`
+    )
+  }
+  assert.equal(isRetryableMcpTransportError(new StreamableHTTPError(401, "denied")), false)
+  assert.equal(isRetryableMcpTransportError(new StreamableHTTPError(403, "denied")), false)
+  assert.equal(isRetryableMcpTransportError(new StreamableHTTPError(400, "invalid input")), false)
+  assert.equal(
+    isRetryableMcpTransportError(
+      Object.assign(new Error("business validation rejected"), { code: 503 })
+    ),
+    false,
+    "an unrelated numeric business code must not grant transport fallback"
+  )
 }
 
 async function testScopedSnapshotCacheReusesBaseSnapshot(): Promise<void> {
@@ -257,7 +275,8 @@ async function testBotScopeSurvivesRuntimeFallback(): Promise<void> {
   const calls: string[] = []
   const base: McpCapabilityService = {
     listTools: async () => available,
-    getTool: async (id) => available.find((tool) => tool.capabilityId === id || tool.toolId === id) ?? null,
+    getTool: async (id) =>
+      available.find((tool) => tool.capabilityId === id || tool.toolId === id) ?? null,
     invoke: async (id) => {
       calls.push(id)
       if (id === primary.capabilityId) throw new Error("ECONNRESET")
@@ -269,20 +288,35 @@ async function testBotScopeSurvivesRuntimeFallback(): Promise<void> {
   const scope = createHookScope()
   scope.activatePlugin("docs")
   const scoped = createScopedMcpCapabilityService(
-    createBotMcpScope(base), scope, () => [], undefined, undefined,
+    createBotMcpScope(base),
+    scope,
+    () => [],
+    undefined,
+    undefined,
     { workspacePath: process.cwd(), threadId: "bot-fallback" }
   )
   const discovered = await scoped.listTools()
-  assert.equal(discovered.some((tool) => tool.capabilityId === sharedBrowser.capabilityId), false)
+  assert.equal(
+    discovered.some((tool) => tool.capabilityId === sharedBrowser.capabilityId),
+    false
+  )
   await assert.rejects(() => scoped.invoke(sharedBrowser.capabilityId, {}), /共享电脑/)
   assert.deepEqual(calls, [], "direct invocation cannot bypass Bot discovery restrictions")
   const result = await scoped.invoke(primary.capabilityId, { value: "x" })
   assert.equal(result.fallbackCapabilityId, documents.capabilityId)
-  assert.deepEqual(calls, [primary.capabilityId, documents.capabilityId], "fallback uses an allowed connector only")
+  assert.deepEqual(
+    calls,
+    [primary.capabilityId, documents.capabilityId],
+    "fallback uses an allowed connector only"
+  )
   // The runtime caches discovery; the Bot wrapper must revalidate the actual target at invocation.
   available = [primary, sharedBrowser, { ...documents, providerKey: "in-app-browser" }]
   await assert.rejects(() => scoped.invoke(documents.capabilityId, {}), /共享电脑/)
-  assert.equal(calls.length, 2, "a stale discovery entry cannot restore access to the shared browser")
+  assert.equal(
+    calls.length,
+    2,
+    "a stale discovery entry cannot restore access to the shared browser"
+  )
 }
 
 async function testScopedPermissionSnapshot(): Promise<void> {

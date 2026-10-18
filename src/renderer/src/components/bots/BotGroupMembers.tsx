@@ -83,7 +83,10 @@ export function BotGroupMembers({
             {group.memberIds.length >= 8 ? "已达 8 位成员上限" : "添加成员"}
           </span>
         </SelectTrigger>
-        <SelectContent className="bot-group-member-menu max-h-72 min-w-52">
+        <SelectContent
+          data-bot-popup
+          className="bot-group-member-menu bot-workspace-select max-h-72 min-w-52"
+        >
           {available.map((bot) => (
             <SelectItem key={bot.id} value={bot.id} textValue={bot.name}>
               <span className="flex items-center gap-2">

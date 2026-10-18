@@ -1,5 +1,6 @@
 import { botErrorMessage } from "@/lib/bot-error-message"
 import { botAppearanceColor } from "@/lib/bot-chat-accent"
+import { botAvatarRings } from "@/assets/bot-avatar-rings"
 import { useRef, useState, type ComponentProps } from "react"
 import { Loader2 } from "lucide-react"
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover"
@@ -53,6 +54,11 @@ export function BotAppearancePicker({
             onClick={() => onChange({ ...value, shape })}
           >
             <BotAvatar color={value.color} shape={shape} size={36} animated={false} />
+            <span
+              aria-hidden="true"
+              className="bot-shape-ring"
+              style={{ maskImage: `url("${botAvatarRings[shape]}")` }}
+            />
           </button>
         ))}
       </div>

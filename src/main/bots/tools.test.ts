@@ -36,7 +36,12 @@ it("keeps teammate creation unavailable to command continuations", () => {
 
 it("preserves the exact teammate identity and failed update receipt without sending work", async () => {
   const controller = new AbortController()
-  const updateTeammate = vi.fn(() => ({ id: "peer-id", name: "Reviewer", instructions: "Review" }))
+  const updateTeammate = vi.fn(() => ({
+    id: "peer-id",
+    name: "Reviewer",
+    instructions: "Review",
+    changes: { name: false, instructions: false }
+  }))
   const host = { updateTeammate } as unknown as LocalBotHost
   const update = createBotProfileTools("direct-task", () => host, controller.signal).find(
     (entry) => entry.name === "bot_update_teammate"
@@ -51,7 +56,8 @@ it("preserves the exact teammate identity and failed update receipt without send
   expect(JSON.parse(result.content)).toEqual({
     id: "peer-id",
     name: "Reviewer",
-    instructions: "Review"
+    instructions: "Review",
+    changes: { name: false, instructions: false }
   })
   expect(updateTeammate).toHaveBeenCalledWith("direct-task", "peer-id", { name: "Reviewer" })
   updateTeammate.mockImplementation(() => {
@@ -64,6 +70,114 @@ it("preserves the exact teammate identity and failed update receipt without send
   controller.abort(new Error("cancelled"))
   await expect(update.invoke(call)).rejects.toThrow("cancelled")
   expect(updateTeammate).toHaveBeenCalledTimes(2)
+})
+
+it("forwards the host's actual own-profile changes without inferring them from requested fields", async () => {
+  const updateOwnProfile = vi.fn(() => ({
+    name: "Original",
+    instructions: "Keep role",
+    changes: { name: false, instructions: true }
+  }))
+  const host = { updateOwnProfile } as unknown as LocalBotHost
+  const update = createBotProfileTools(
+    "direct-task",
+    () => host,
+    new AbortController().signal
+  ).find((entry) => entry.name === "bot_update_profile")!
+  const result = await update.invoke({
+    type: "tool_call",
+    id: "profile-call",
+    name: update.name,
+    args: { name: "Original", instructions: "Keep role" }
+  })
+  expect(JSON.parse(result.content)).toEqual({
+    name: "Original",
+    instructions: "Keep role",
+    changes: { name: false, instructions: true }
+  })
+  expect(updateOwnProfile).toHaveBeenCalledWith("direct-task", {
+    name: "Original",
+    instructions: "Keep role"
+  })
+})
+
+it("preserves an own-profile rejection as a failed receipt and propagates cancellation", async () => {
+  const controller = new AbortController()
+  const updateOwnProfile = vi.fn(() => {
+    throw new Error("修改 Bot 身份需要当前用户直接交办")
+  })
+  const update = createBotProfileTools(
+    "stale-task",
+    () => ({ updateOwnProfile }) as unknown as LocalBotHost,
+    controller.signal
+  ).find((entry) => entry.name === "bot_update_profile")!
+  const call = {
+    type: "tool_call" as const,
+    id: "rejected-profile-call",
+    name: update.name,
+    args: { name: "Rejected name" }
+  }
+  const result = await update.invoke(call)
+  expect(result).toBeInstanceOf(ToolMessage)
+  expect(result).toMatchObject({
+    status: "error",
+    name: update.name,
+    tool_call_id: call.id
+  })
+  expect(JSON.parse(result.content)).toMatchObject({
+    ok: false,
+    error: "修改 Bot 身份需要当前用户直接交办"
+  })
+  expect(updateOwnProfile).toHaveBeenCalledWith("stale-task", { name: "Rejected name" })
+  controller.abort(new Error("cancelled"))
+  await expect(update.invoke(call)).rejects.toThrow("cancelled")
+  expect(updateOwnProfile).toHaveBeenCalledTimes(1)
+})
+
+it("keeps real profile validation and task ownership failures from changing persisted identity", async () => {
+  const { DatabaseSync } = await import("node:sqlite")
+  const { NativeSqliteAdapter } = await import("../db/native-sqlite-adapter")
+  const { BotStore } = await import("./store")
+  const { LocalBotHost: Host } = await import("./host")
+  const db = new NativeSqliteAdapter(new DatabaseSync(":memory:"))
+  const store = new BotStore(db, () => 1000)
+  const host = new Host(store, { acquire: () => null, onAvailable: () => () => {} })
+  try {
+    const bot = store.create({
+      name: "Original",
+      instructions: "Keep role",
+      color: "#ea2845",
+      modelRef: null
+    })
+    const task = store.enqueue({ botId: bot.id, requestId: "profile-boundary", message: "Rename" })
+    store.transition(task.id, "running")
+    const update = createBotProfileTools(task.id, () => host, new AbortController().signal).find(
+      (entry) => entry.name === "bot_update_profile"
+    )!
+    const invoke = (name: string) =>
+      update.invoke({
+        type: "tool_call",
+        id: "profile-boundary-call",
+        name: update.name,
+        args: { name }
+      })
+    const invalid = await invoke("Invalid\0name")
+    expect(invalid).toBeInstanceOf(ToolMessage)
+    expect(invalid.status).toBe("error")
+    expect(JSON.parse(invalid.content).error).toContain("名称格式或长度无效")
+    expect(store.getBot(bot.id)).toEqual(bot)
+    const unchanged = await invoke(bot.name)
+    expect(unchanged.status).toBe("success")
+    expect(JSON.parse(unchanged.content).changes).toEqual({ name: false, instructions: false })
+    store.settle(task.id, "completed", null)
+    const late = await invoke("Too late")
+    expect(late.status).toBe("error")
+    expect(JSON.parse(late.content).error).toContain("当前用户直接交办")
+    expect(store.getBot(bot.id)).toEqual(bot)
+  } finally {
+    await host.stop()
+    db.close()
+  }
 })
 
 it("uses host-controlled persistent creation, preserves failed receipts and respects cancellation", async () => {

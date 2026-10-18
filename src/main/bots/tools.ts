@@ -146,10 +146,32 @@ export function createBotProfileTools(
 ): DynamicStructuredTool[] {
   return [
     tool(
-      async (patch) => {
-        signal.throwIfAborted()
-        const bot = getHost().updateOwnProfile(taskId, patch)
-        return JSON.stringify({ name: bot.name, instructions: bot.instructions })
+      async (patch, config) => {
+        try {
+          signal.throwIfAborted()
+          const bot = getHost().updateOwnProfile(taskId, patch)
+          return JSON.stringify({
+            name: bot.name,
+            instructions: bot.instructions,
+            changes: bot.changes
+          })
+        } catch (cause) {
+          signal.throwIfAborted()
+          const content = JSON.stringify({
+            ok: false,
+            error: cause instanceof Error ? cause.message : String(cause),
+            recovery:
+              "The profile was not updated. Check the current user request and correct the rejected fields. Do not claim the change succeeded or bypass the profile tool with shell, SQL or file edits."
+          })
+          return config.toolCall?.id
+            ? new ToolMessage({
+                content,
+                status: "error",
+                tool_call_id: config.toolCall.id,
+                name: "bot_update_profile"
+              })
+            : content
+        }
       },
       {
         name: "bot_update_profile",
@@ -209,7 +231,12 @@ export function createBotProfileTools(
         try {
           signal.throwIfAborted()
           const bot = getHost().updateTeammate(taskId, botId, patch)
-          return JSON.stringify({ id: bot.id, name: bot.name, instructions: bot.instructions })
+          return JSON.stringify({
+            id: bot.id,
+            name: bot.name,
+            instructions: bot.instructions,
+            changes: bot.changes
+          })
         } catch (cause) {
           signal.throwIfAborted()
           const content = JSON.stringify({

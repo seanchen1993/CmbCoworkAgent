@@ -18,3 +18,14 @@ The installed reference renderer `index.eager-platform-DKZJbDqM.js` changes moti
 ## Static workspace entry mark
 
 `src/renderer/src/assets/bot-workspace-mark.svg` is an idle teardrop frame generated from this existing kernel, using the same optical extent as `BotAvatar`. It is the Suspense placeholder for the workbench navigation entry. The entry lazily imports the existing `BotAvatar` module, without loading the Bots workspace or its Runtime. Hover uses the same character geometry and gaze as the workspace; visibility, reduced motion, idle dormancy and teardown remain owned by that one shared avatar clock.
+
+## Static shape selection rings
+
+`src/renderer/src/assets/bot-avatar-rings/*.svg` contains the 13 fixed contour masks
+from installed 0.71.2's `Gv` / `Vxe` / `$7e` selection treatment: a 36px body,
+3px clearance and 1px ring in a 44px SVG, centered in the existing 48px button.
+The masks were generated with that renderer's pure `QN` / `Qh` / `cP` geometry
+and existing CMB shape-name mapping. They use no external resources or script;
+only these static masks ship, without another geometry engine, runtime cache,
+frame callback or event listener. Profile storage and the existing avatar
+motion kernel are unchanged.

@@ -904,19 +904,37 @@ button.bot-json-caret:focus-visible {
   display: flex;
   flex-wrap: wrap;
   justify-content: center;
-  gap: 6px;
+  gap: 8px;
+  column-gap: clamp(0px, calc((100% - 240px) / 4), 8px);
 }
 .bot-shape-picker button {
-  padding: 4px;
-  border-radius: 10px;
-  border: 1px solid transparent;
-}
-.bot-shape-picker button:hover {
-  background: var(--accent);
-}
-.bot-shape-picker button[aria-pressed="true"] {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 48px;
+  height: 48px;
+  flex-shrink: 0;
+  padding: 0;
+  border: 0;
+  outline: none;
   background: transparent;
-  border-color: color-mix(in srgb, var(--foreground) 40%, transparent);
+}
+.bot-shape-ring {
+  position: absolute;
+  inset: 2px;
+  pointer-events: none;
+  background: color-mix(in srgb, var(--foreground) 24%, transparent);
+  mask-size: 100% 100%;
+  mask-repeat: no-repeat;
+  opacity: 0;
+}
+.bot-shape-picker button:is(:hover, :focus-visible) .bot-shape-ring,
+.bot-shape-picker button[aria-pressed="true"] .bot-shape-ring {
+  opacity: 1;
+}
+.bot-shape-picker button[aria-pressed="true"] .bot-shape-ring {
+  background: color-mix(in srgb, var(--foreground) 40%, transparent);
 }
 .bot-color[aria-pressed="true"] {
   outline: 2px solid currentColor;
@@ -924,6 +942,11 @@ button.bot-json-caret:focus-visible {
   transform: scale(0.9);
 }
 /* Existing chat logic, with surface-scoped appearance. */
+.bot-chat-scroll > [data-radix-scroll-area-viewport] {
+  /* The chat controller and virtual list already own anchoring. Native anchoring
+     can select the status footer and counter-scroll when hidden rows settle. */
+  overflow-anchor: none;
+}
 [data-chat-surface="bot"] {
   --background: var(--bot-canvas);
   --background-elevated: var(--bot-panel);
@@ -1920,7 +1943,7 @@ button.bot-json-caret:focus-visible {
 .bot-appearance-picker button:disabled {
   cursor: wait;
 }
-.bot-appearance-picker button:focus-visible,
+.bot-appearance-picker .bot-color:focus-visible,
 .bot-avatar-edit-trigger:focus-visible {
   outline: 2px solid var(--ring);
   outline-offset: 3px;

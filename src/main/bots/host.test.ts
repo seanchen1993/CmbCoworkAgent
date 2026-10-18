@@ -25,6 +25,47 @@ afterEach(async () => {
 })
 
 describe("Bot control state", () => {
+  it("reports only actual profile field changes without changing the stored definition shape", () => {
+    const db = store(),
+      bot = db.create(input),
+      peer = db.create(input),
+      host = new LocalBotHost(db, { acquire: () => null, onAvailable: () => () => {} })
+    hosts.push(host)
+    const task = db.enqueue({
+      botId: bot.id,
+      requestId: "profile-receipt",
+      message: "Update profiles"
+    })
+    db.transition(task.id, "running")
+    const unchanged = host.updateOwnProfile(task.id, {
+      name: bot.name,
+      instructions: bot.instructions
+    })
+    expect(unchanged).toMatchObject({ ...bot, changes: { name: false, instructions: false } })
+    expect(db.getBot(bot.id)).toEqual(bot)
+    const renamed = host.updateOwnProfile(task.id, {
+      name: "Renamed",
+      instructions: bot.instructions
+    })
+    expect(renamed.changes).toEqual({ name: true, instructions: false })
+    expect(db.getBot(bot.id)).not.toHaveProperty("changes")
+    const role = host.updateOwnProfile(task.id, { instructions: "New role" })
+    expect(role.changes).toEqual({ name: false, instructions: true })
+    const peerUnchanged = host.updateTeammate(task.id, peer.id, {
+      name: peer.name,
+      instructions: " "
+    })
+    expect(peerUnchanged).toMatchObject({ ...peer, changes: { name: false, instructions: false } })
+    expect(db.getBot(peer.id)).toEqual(peer)
+    const revised = host.updateTeammate(task.id, peer.id, {
+      name: "Reviewer",
+      instructions: "Review"
+    })
+    expect(revised.changes).toEqual({ name: true, instructions: true })
+    db.settle(task.id, "completed", null)
+    expect(() => host.updateOwnProfile(task.id, { name: "Late" })).toThrow("当前用户")
+    expect(() => host.updateTeammate(task.id, peer.id, { name: "Late" })).toThrow("当前用户")
+  })
   it("invalidates a memory view without changing control state or broadcasting private content", async () => {
     const db = store(),
       bot = db.create(input),

@@ -16,6 +16,8 @@ const fixture = vi.hoisted(() => ({
   defaultModel: vi.fn(),
   update: vi.fn(),
   start: vi.fn(),
+  managedDelivery: vi.fn<(...args: unknown[]) => object>(() => ({})),
+  mirror: vi.fn(),
   steer: vi.fn(),
   steeringReady: vi.fn(),
   announce: vi.fn(),
@@ -70,8 +72,11 @@ vi.mock("../agent/agent-run-service", () => ({
 }))
 vi.mock("../agent/runtime", () => ({ withToolFileWriteLock: fixture.fileLock }))
 vi.mock("../agent/managed-transport-delivery", () => ({
-  createManagedTransportAgentRunDelivery: () => ({}),
+  createManagedTransportAgentRunDelivery: fixture.managedDelivery,
   announceManagedTurnUserMessage: fixture.announce
+}))
+vi.mock("../agent/renderer-stream-mirror", () => ({
+  mirrorStandardTurnStreamToRenderer: fixture.mirror
 }))
 vi.mock("../agent/thread-run-lease", () => ({
   claimLocalThreadRunLease: () => ({ acquired: true }),
@@ -181,6 +186,49 @@ beforeEach(() => {
   )
 })
 describe("Bot Runtime integration", () => {
+  it("silences only the no-op background commit notice and preserves meaningful events", async () => {
+    await port().acquire(bot, task)!.execute(new AbortController().signal, vi.fn())
+    const deps = fixture.managedDelivery.mock.calls.at(-1)![0] as {
+      mirror: (threadId: string, event: unknown) => void
+    }
+    const skipped = {
+      status: "skipped",
+      reasons: [
+        "后台任务运行中（动态工作流 / 协作 worker），已跳过本回合自动提交（改动留待其完成后审阅）"
+      ]
+    }
+    const event = (result: unknown) => ({
+      type: "custom",
+      data: { type: "auto_commit_result", result }
+    })
+    deps.mirror("t", event(skipped))
+    expect(fixture.mirror).not.toHaveBeenCalled()
+    const preserved = [
+      { type: "started" },
+      { type: "done" },
+      { type: "error", error: "Original run error" },
+      { type: "custom", data: { type: "request_user_input", question: "Continue?" } },
+      ...[
+        { ...skipped, status: "committed", commitHash: "abc123" },
+        { ...skipped, status: "failed" },
+        { ...skipped, status: "needs_confirmation" },
+        { ...skipped, message: "Additional context" },
+        { ...skipped, warnings: ["Original warning"] },
+        { ...skipped, pushError: "Push failed" },
+        { ...skipped, repoResults: [{ status: "committed", repoPath: "/workspace" }] },
+        { ...skipped, reasons: ["Other skip reason"] },
+        { ...skipped, reasons: [...skipped.reasons, "Another reason"] },
+        null,
+        []
+      ].map(event)
+    ]
+    for (const item of preserved) {
+      deps.mirror("t", item)
+      expect(fixture.mirror).toHaveBeenLastCalledWith("t", item)
+    }
+    expect(fixture.mirror).toHaveBeenCalledTimes(preserved.length)
+  })
+
   it.each([null, "After the command finishes, rename Reviewer to Auditor."])(
     "offers profile updates only for a host-verified command continuation (%s)",
     async (originalRequest) => {

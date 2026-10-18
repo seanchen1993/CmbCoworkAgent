@@ -36,7 +36,9 @@ export function BotGroupMessageActions({
             <Reply size={16} />
           </button>
         </TooltipTrigger>
-        <TooltipContent>回复</TooltipContent>
+        <TooltipContent data-bot-popup className="bot-control-tooltip rounded-xl">
+          回复
+        </TooltipContent>
       </Tooltip>
       <Tooltip>
         <TooltipTrigger asChild>
@@ -54,7 +56,9 @@ export function BotGroupMessageActions({
             {copied ? <Check size={16} /> : <Copy size={16} />}
           </button>
         </TooltipTrigger>
-        <TooltipContent>{copied ? "已复制" : "复制"}</TooltipContent>
+        <TooltipContent data-bot-popup className="bot-control-tooltip rounded-xl">
+          {copied ? "已复制" : "复制"}
+        </TooltipContent>
       </Tooltip>
     </div>
   )
