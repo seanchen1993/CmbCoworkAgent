@@ -75,6 +75,31 @@ afterEach(async () => {
 })
 
 describe("TraceCollector completion", () => {
+  it("reports false for the initial project Skill turn and keeps later technical supplements", async () => {
+    const prompt = "请调整 get_user_ids 的返回值"
+    const startup = new TraceCollector("startup", prompt, "test", {
+      includeSkillEval: false,
+      harnessFeature: { projectId: "p", slug: "f" },
+      isFirstProjectTurn: true,
+      hasExplicitSkill: true
+    })
+    const followup = new TraceCollector("followup", prompt, "test", {
+      includeSkillEval: false,
+      harnessFeature: { projectId: "p", slug: "f" },
+      isFirstProjectTurn: false,
+      hasExplicitSkill: true
+    })
+    const [initialTrace, laterTrace] = await Promise.all([
+      startup.finish("success"),
+      followup.finish("success")
+    ])
+    expect(initialTrace.suspectedTechnicalDetailSupplement).toBe(false)
+    expect(laterTrace.suspectedTechnicalDetailSupplement).toBe(true)
+    expect(sanitizeTraceForCloudUpload(initialTrace).suspectedTechnicalDetailSupplement).toBe(false)
+    expect(sanitizeTraceForCloudUpload(laterTrace).suspectedTechnicalDetailSupplement).toBe(true)
+    expect(initialTrace.userMessage).toBe(prompt)
+  })
+
   it("uploads per-stage cache totals beyond the model-detail cap", async () => {
     const tracer = new TraceCollector("stage-cache-cap", "go", "test", {
       includeSkillEval: false,

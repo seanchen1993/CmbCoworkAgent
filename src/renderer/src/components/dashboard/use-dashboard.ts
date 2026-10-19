@@ -2,6 +2,7 @@ import type {
   EfficiencyDevComputeResult,
   EfficiencyPluginFilter
 } from "../../../../shared/dashboard-efficiency-compute"
+import type { ProjectAttentionSortKey } from "../../../../shared/project-attention"
 import {
   parseToolUsageAggs,
   type DashboardToolUsageCoverage
@@ -143,6 +144,8 @@ export interface DashboardTraceNode {
 }
 
 export interface DashboardTraceDetail {
+  threadSkillUsage?: import("../../../../shared/dashboard-thread-skills").DashboardThreadSkill[]
+  threadSkillUsageError?: string
   traceId: string
   threadId: string
   startedAt: string
@@ -726,6 +729,7 @@ export interface DashboardProjectModeProject {
   conversationCount: number
   /** Forward-only count of main-Agent turns matching the technical-detail heuristic. */
   suspectedTechnicalDetailConversationCount?: number
+  attentionMetric?: number | null
   /** Conversations attributed to a workflow node in the Dev group. */
   devStageConversationCount: number
   /** Distinct bound Features that contributed a Dev-stage conversation in the range. */
@@ -763,6 +767,7 @@ export interface DashboardProjectModeProjectCounts {
 }
 
 export type DashboardProjectModeProjectSortKey =
+  | ProjectAttentionSortKey
   | "featureCount"
   | "createdAt"
   | "conversationCount"
@@ -842,7 +847,7 @@ export interface DashboardProjectModeData {
   tools: DashboardProjectModeToolUsage
   analytics: DashboardProjectModeAnalytics
   projectCounts: DashboardProjectModeProjectCounts
-  projectPage: DashboardProjectModeProjectPageData
+  projectPage?: DashboardProjectModeProjectPageData
   projects: DashboardProjectModeProject[]
   /** 「仅精益项目」开关下精益项目 id 集被截断、遥测汇总可能不完整；开关关闭时恒为 false。 */
   leanTruncated: boolean
@@ -2311,6 +2316,7 @@ const DASHBOARD_HOOK_REQUEST_FAMILIES = [
   "dashboard:projectModeCodeStats",
   "dashboard:knowledgeCommitRate",
   "dashboard:projectModeProjects",
+  "dashboard:projectCodeTrace",
   "dashboard:projectModeTraces",
   "dashboard:projectModeFeatureNodes",
   "dashboard:pluginAggregate",
@@ -2336,8 +2342,8 @@ export function useDashboard() {
   // 项目运营概览「仅精益项目」全局开关：仅统计绑定了企业（精益）项目的项目。
   const [fromLeanProjectsOnly, setFromLeanProjectsOnly] = useState(false)
   // 项目运营概览「仅本期新建」全局开关：仅统计创建时间落在当前所选时间范围内的项目。
-  // 和「仅精益项目」互相独立，可叠加。
-  const [createdInRangeProjectsOnly, setCreatedInRangeProjectsOnly] = useState(false)
+  // 默认开启以收窄查询范围，和「仅精益项目」互相独立，可叠加，也可手动关闭。
+  const [createdInRangeProjectsOnly, setCreatedInRangeProjectsOnly] = useState(true)
   const [loading, setLoading] = useState(false)
   const [userStatsLoading, setUserStatsLoading] = useState(false)
   const [skillEvalLoading, setSkillEvalLoading] = useState(false)
@@ -2360,6 +2366,7 @@ export function useDashboard() {
     Partial<Record<DashboardProjectModeProjectStatus, string>>
   >({})
   const [projectModeLoading, setProjectModeLoading] = useState(false)
+  const [projectListLoading, setProjectListLoading] = useState(false)
   const [projectModeError, setProjectModeError] = useState<string | null>(null)
   const [efficiency, setEfficiency] = useState<DashboardEfficiencyData | null>(null)
   const [efficiencyPluginFilter, setEfficiencyPluginFilter] = useState<EfficiencyPluginFilter>({})
@@ -2386,6 +2393,8 @@ export function useDashboard() {
   const skillEvalFetchIdRef = useRef(0)
   const orgOptionsFetchIdRef = useRef(0)
   const projectModeFetchIdRef = useRef(0)
+  const projectListScopeRef = useRef<string | null>(null)
+  const projectOverviewRangeRef = useRef<string | null>(null)
   const projectModeCodeStatsFetchIdRef = useRef(0)
   const knowledgeCommitRateFetchIdRef = useRef(0)
   const efficiencyFetchIdRef = useRef(0)
@@ -2530,9 +2539,22 @@ export function useDashboard() {
       g: Granularity,
       orgList: string[],
       leanOnly = false,
-      createdInRangeOnly = false
+      createdInRangeOnly = false,
+      refreshProjects = false
     ) => {
+      const listScope = JSON.stringify([
+        orgList,
+        leanOnly,
+        createdInRangeOnly,
+        createdInRangeOnly ? r : null
+      ])
+      const preserveList =
+        !refreshProjects &&
+        !createdInRangeOnly &&
+        projectListScopeRef.current === listScope &&
+        projectOverviewRangeRef.current !== JSON.stringify(r)
       const id = ++projectModeFetchIdRef.current
+      setProjectListLoading(!preserveList)
       setProjectModeLoading(true)
       setProjectModeError(null)
       // 时间/组织/精益/新建口径变了：source 候选会变，回到「全部来源」并作废在途的换数请求。
@@ -2540,13 +2562,20 @@ export function useDashboard() {
       setProjectModeCodeSource(null)
       setProjectModeCodeStatsOverride(null)
       setProjectModeCodeStatsLoading(false)
-      projectModeProjectPageFetchIdRef.current.active += 1
-      projectModeProjectPageFetchIdRef.current.archived += 1
-      setProjectModeProjectPageLoading({ active: false, archived: false })
-      setProjectModeProjectPageError({})
+      if (!preserveList) {
+        projectModeProjectPageFetchIdRef.current.active += 1
+        projectModeProjectPageFetchIdRef.current.archived += 1
+        setProjectModeProjectPageLoading({ active: false, archived: false })
+        setProjectModeProjectPageError({})
+        if (typeof window.api.dashboard.cancelRequests === "function") {
+          void window.api.dashboard
+            .cancelRequests(["dashboard:projectModeProjects"])
+            .catch(() => undefined)
+        }
+      }
       if (typeof window.api.dashboard.cancelRequests === "function") {
         void window.api.dashboard
-          .cancelRequests(["dashboard:projectModeCodeStats", "dashboard:projectModeProjects"])
+          .cancelRequests(["dashboard:projectModeCodeStats"])
           .catch(() => undefined)
       }
 
@@ -2554,24 +2583,33 @@ export function useDashboard() {
         const result = await window.api.dashboard.projectMode(r, g, {
           upperOrgLv1: orgList,
           fromLeanOnly: leanOnly,
-          createdInRangeOnly
+          createdInRangeOnly,
+          refreshProjects,
+          skipProjectList: preserveList
         })
         if (id !== projectModeFetchIdRef.current) return
         if (!result.success) throw new Error(result.error ?? "获取项目模式数据失败")
         const nextProjectMode = (result.data as DashboardProjectModeData) ?? null
         setProjectMode(nextProjectMode)
-        setProjectModeProjectPages(
-          nextProjectMode?.projectPage
-            ? { [nextProjectMode.projectPage.status]: nextProjectMode.projectPage }
-            : {}
-        )
-        setProjectModeProjectPageError({})
-        setProjectModeProjectPageLoading({ active: false, archived: false })
+        projectOverviewRangeRef.current = JSON.stringify(r)
+        if (!preserveList) {
+          setProjectModeProjectPages(
+            nextProjectMode?.projectPage
+              ? { [nextProjectMode.projectPage.status]: nextProjectMode.projectPage }
+              : {}
+          )
+          projectListScopeRef.current = nextProjectMode?.projectPage ? listScope : null
+          setProjectModeProjectPageError({})
+          setProjectModeProjectPageLoading({ active: false, archived: false })
+        }
       } catch (e) {
         if (id !== projectModeFetchIdRef.current) return
         setProjectModeError(e instanceof Error ? e.message : String(e))
       } finally {
-        if (id === projectModeFetchIdRef.current) setProjectModeLoading(false)
+        if (id === projectModeFetchIdRef.current) {
+          setProjectModeLoading(false)
+          setProjectListLoading(false)
+        }
       }
     },
     []
@@ -2881,14 +2919,18 @@ export function useDashboard() {
     setRange({ from, to })
   }, [])
 
-  const refresh = useCallback(() => {
-    const nextRange = getRefreshRange(range, granularity)
-    if (nextRange.from !== range.from || nextRange.to !== range.to) {
-      setRange(nextRange)
-      return
-    }
-    fetchAll(range, granularity, selectedOrgLv1List)
-  }, [fetchAll, range, granularity, selectedOrgLv1List])
+  const refresh = useCallback(
+    (reloadPlatform = true): TimeRange => {
+      const nextRange = getRefreshRange(range, granularity)
+      if (nextRange.from !== range.from || nextRange.to !== range.to) {
+        setRange(nextRange)
+      } else if (reloadPlatform) {
+        void fetchAll(range, granularity, selectedOrgLv1List)
+      }
+      return nextRange
+    },
+    [fetchAll, range, granularity, selectedOrgLv1List]
+  )
 
   const clearSkillEval = useCallback(() => {
     ++skillEvalFetchIdRef.current
@@ -2943,6 +2985,7 @@ export function useDashboard() {
     skillEval,
     projectMode,
     projectModeLoading,
+    projectListLoading,
     projectModeError,
     efficiency,
     efficiencyPluginFilter,

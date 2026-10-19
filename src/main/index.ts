@@ -52,6 +52,7 @@ import {
 } from "./logging"
 import {
   createMainLogForwarder,
+  getRendererConsoleLevelName,
   createMainLogForwardingGate,
   createSafeLogMethod,
   createSafeLogProcessingGuard,
@@ -159,21 +160,6 @@ function isTrackEventPayload(payload: unknown): payload is {
       typeof record.properties === "object" &&
       !Array.isArray(record.properties))
   )
-}
-
-function getConsoleLevelName(level: number): string {
-  switch (level) {
-    case 0:
-      return "INFO"
-    case 1:
-      return "WARN"
-    case 2:
-      return "ERROR"
-    case 3:
-      return "DEBUG"
-    default:
-      return "LOG"
-  }
 }
 
 function shouldMirrorRendererBrowserLog(message: string): boolean {
@@ -817,7 +803,7 @@ function createWindow(): void {
   })
 
   mainWindow.webContents.on("console-message", (_event, level, message, line, sourceId) => {
-    writeRendererLog(getConsoleLevelName(level), message, { sourceId, line })
+    writeRendererLog(getRendererConsoleLevelName(level), message, { sourceId, line })
     if (shouldMirrorRendererBrowserLog(message)) {
       const location = sourceId ? `${sourceId}:${line}` : `line:${line}`
       console.log(`${formatMirroredRendererBrowserLog(message)} (${location})`)

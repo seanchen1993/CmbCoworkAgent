@@ -7,6 +7,7 @@ import type { DashboardToolUsageCoverage } from "../../../../../shared/dashboard
 /* eslint-disable react-refresh/only-export-components */
 import { useState } from "react"
 import { Search, X, Info } from "lucide-react"
+import { DrilldownArrow } from "../DrilldownArrow"
 import { Input } from "@/components/ui/input"
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip"
 import { hasMarketSkill } from "../skill-market"
@@ -447,6 +448,7 @@ export function SearchableRankingPanel({
                     onClick={() => onItemClick(item.name)}
                   >
                     {content}
+                    <DrilldownArrow />
                   </button>
                 )
               }
@@ -693,6 +695,7 @@ export function CodeAdoptionFunnel({
                     <span className="font-semibold" style={{ color: s.color }}>
                       {formatPercent(s.rate)}
                     </span>
+                    {clickable ? <DrilldownArrow /> : null}
                   </div>
                   <div className="mt-0.5 whitespace-nowrap text-[10px] text-muted-foreground">
                     采纳 {formatNumber(s.adoptedLines)} / 生成 {formatNumber(s.generatedLines)}
@@ -977,6 +980,7 @@ function SkillAdoptionRankingPanel({
                     onClick={() => onSkillClick(item.skill)}
                   >
                     {content}
+                    <DrilldownArrow />
                   </button>
                 )
               }

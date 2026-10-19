@@ -1,4 +1,15 @@
 import type {
+  KnowledgeAccumulationData,
+  KnowledgeActiveDetails,
+  KnowledgeFileReaders,
+  KnowledgeProjectStats,
+  KnowledgeReadDetails,
+  KnowledgeReadFileRef,
+  KnowledgeRecentConstraintFiles
+} from "../shared/dashboard-knowledge-overview"
+import type { ProjectAttentionSortKey } from "../shared/project-attention"
+import type { ProjectCodeTraceRequest, ProjectCodeTracePage } from "../shared/project-code-trace"
+import type {
   EfficiencyDevComputeResult,
   EfficiencyPluginFilter
 } from "../shared/dashboard-efficiency-compute"
@@ -306,6 +317,8 @@ interface DashboardTraceNode {
 }
 
 interface DashboardTraceDetail {
+  threadSkillUsage?: import("../shared/dashboard-thread-skills").DashboardThreadSkill[]
+  threadSkillUsageError?: string
   traceId: string
   threadId: string
   startedAt: string
@@ -772,6 +785,7 @@ interface DashboardProjectModeProject {
   featureCount: number
   conversationCount: number
   suspectedTechnicalDetailConversationCount?: number
+  attentionMetric?: number | null
   devStageConversationCount: number
   devAssociatedFeatureCount: number
   hasError: boolean
@@ -805,6 +819,7 @@ interface DashboardProjectModeProjectCounts {
 }
 
 type DashboardProjectModeProjectSortKey =
+  | ProjectAttentionSortKey
   | "featureCount"
   | "createdAt"
   | "conversationCount"
@@ -900,7 +915,7 @@ interface DashboardProjectModeData {
   tools: DashboardProjectModeToolUsage
   analytics: DashboardProjectModeAnalytics
   projectCounts: DashboardProjectModeProjectCounts
-  projectPage: DashboardProjectModeProjectPageData
+  projectPage?: DashboardProjectModeProjectPageData
   projects: DashboardProjectModeProject[]
   /**
    * 「仅精益项目」开关下精益项目 id 集被截断、遥测汇总可能不完整。开关关闭时恒为 false。
@@ -2687,7 +2702,10 @@ interface CustomAPI {
     projectMode: (
       range: { from: string; to: string },
       granularity: "day" | "week" | "month" | "custom",
-      opts?: DashboardProjectModeFilterOptions
+      opts?: DashboardProjectModeFilterOptions & {
+        refreshProjects?: boolean
+        skipProjectList?: boolean
+      }
     ) => Promise<{ success: boolean; data?: DashboardProjectModeData; error?: string }>
     projectModeCodeStats: (
       range: { from: string; to: string },
@@ -2697,6 +2715,52 @@ interface CustomAPI {
       success: boolean
       data?: { codeStats: DashboardCodeStats | null; skillCodeStats: DashboardCodeStats | null }
       error?: string
+    }>
+    knowledgeAccumulation: (opts?: {
+      upperOrgLv1?: string | string[] | null
+    }) => Promise<{
+      success: boolean
+      data?: KnowledgeAccumulationData
+      error?: string
+      cancelled?: boolean
+    }>
+    knowledgeActiveDetails: (opts?: { upperOrgLv1?: string | string[] | null }) => Promise<{
+      success: boolean
+      data?: KnowledgeActiveDetails
+      error?: string
+      cancelled?: boolean
+    }>
+    knowledgeReadDetails: (opts?: { upperOrgLv1?: string | string[] | null }) => Promise<{
+      success: boolean
+      data?: KnowledgeReadDetails
+      error?: string
+      cancelled?: boolean
+    }>
+    knowledgeReadReaders: (
+      file: KnowledgeReadFileRef,
+      opts?: { upperOrgLv1?: string | string[] | null }
+    ) => Promise<{
+      success: boolean
+      data?: KnowledgeFileReaders
+      error?: string
+      cancelled?: boolean
+    }>
+    knowledgeProjectStats: (
+      range: { from: string; to: string },
+      opts?: { upperOrgLv1?: string | string[] | null }
+    ) => Promise<{
+      success: boolean
+      data?: KnowledgeProjectStats
+      error?: string
+      cancelled?: boolean
+    }>
+    knowledgeRecentConstraintFiles: (opts?: {
+      upperOrgLv1?: string | string[] | null
+    }) => Promise<{
+      success: boolean
+      data?: KnowledgeRecentConstraintFiles
+      error?: string
+      cancelled?: boolean
     }>
     knowledgeCommitRate: (
       range: { from: string; to: string },
@@ -2727,19 +2791,23 @@ interface CustomAPI {
       range: { from: string; to: string },
       opts?: DashboardProjectModeFilterOptions
     ) => Promise<{ success: boolean; data?: DashboardProjectModeExportData; error?: string }>
+    projectCodeTrace: (
+      input: ProjectCodeTraceRequest
+    ) => Promise<{ success: boolean; data?: ProjectCodeTracePage; error?: string }>
     projectModeTraces: (
       projectId: string,
-      range: { from: string; to: string },
+      range: { from: string; to: string } | null,
       options?: DashboardProjectModeTracesOptions
     ) => Promise<{ success: boolean; data?: DashboardProjectModeTracesData; error?: string }>
     projectModeFeatureNodes: (
       projectId: string,
       featureSlug: string,
-      range: { from: string; to: string }
+      range: { from: string; to: string } | null,
+      opts?: { upperOrgLv1?: string | string[] | null }
     ) => Promise<{ success: boolean; data?: DashboardProjectModeFeatureNode[]; error?: string }>
     projectModeOperationalDetails: (
       scope: { projectId: string; featureSlug?: string; nodeName?: string },
-      range: { from: string; to: string },
+      range: { from: string; to: string } | null,
       opts?: { upperOrgLv1?: string | string[] | null }
     ) => Promise<{
       success: boolean
@@ -2748,7 +2816,7 @@ interface CustomAPI {
     }>
     projectModeStageAnalysis: (
       projectId: string,
-      range: { from: string; to: string },
+      range: { from: string; to: string } | null,
       opts?: { upperOrgLv1?: string | string[] | null }
     ) => Promise<{
       success: boolean
@@ -2762,7 +2830,7 @@ interface CustomAPI {
     projectModeFeatureCommits: (
       projectId: string,
       featureSlug: string,
-      range: { from: string; to: string },
+      range: { from: string; to: string } | null,
       options?: DashboardCommitDetailsOptions
     ) => Promise<{
       success: boolean
@@ -2777,7 +2845,7 @@ interface CustomAPI {
     }>
     projectModeProjectCommits: (
       projectId: string,
-      range: { from: string; to: string },
+      range: { from: string; to: string } | null,
       options?: DashboardCommitDetailsOptions
     ) => Promise<{
       success: boolean
@@ -2943,6 +3011,8 @@ interface CustomAPI {
       page: number
       pageSize: number
       totalTraces: number
+      viewMode?: DashboardTraceViewMode
+      triggerScope?: DashboardTraceTriggerScope
       traces: DashboardTraceDetail[]
     }) => Promise<{ success: boolean; canceled?: boolean; filePath?: string; error?: string }>
     exportUserTraces: (payload: {
