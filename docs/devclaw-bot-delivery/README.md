@@ -1,6 +1,12 @@
 # DevClaw Bot 长程交付与断点续跑
 
+**2026-10-19 最新 M05（覆盖下方 M04 与更早架构）：** 用户授权保留 beta 全功能、只做扩展，业务数据/Runtime 本地权威；独立任务放 beta 右侧，新建 Bot 与专家统一 UI。后端可先 mock，真实 Java 接入/精简及 IM 合仓延后，不阻塞 App MVP。root 设计验收，原 gpt-6.1-sol/xhigh 唯一实施。设计 `reviews/M05-beta-local-unification-design.md`，清单 `tasks/M05-beta-local-unification.md`，验收 `reviews/M05-acceptance.md`。
+
+M04 首轮 d9efa226 已合入 b479d51d，但用户指出双 UI 未融合，不能视为新目标验收。五文件未提交修复保留，先保存 WIP，再按 M05 扩展 beta 本地链路。实际网关 `/Users/heyirui/Downloads/LF39_devclaw_im_gateway_0821` 已只读核对，现有三文件用户改动不动；群消息目前在 ingress 被忽略。当前不写网关、不接真实招乎、不 push/deploy，scheduler 仍 PAUSED，用户预览与历史数据保留。
+
 **2026-10-19 当前协作规则（覆盖下方历史策略）：** 用户要求以后沿用 root 设计、拆分与质量验收，`gpt-6.1-sol` 子代理负责实现；复杂任务用 `xhigh`，简单改动用 `high`。一个实施写者，root 独立审查和复验后集成；已有工作树/提交/检查点持续保留。此分工不意味着授权所有后续里程碑或恢复定时。
+
+**当前 M04：主对话与独立任务会话实施中。** 用户接受Dots式主对话协调、具体任务各有独立会话，并要求与现有beta UI融合。取消新流程强制需求文档、成果版本和退回表单，修改作为普通消息，完成/继续同任务为轻量真实动作。沿用原6.1-sol/xhigh唯一写者，基线`247f1ec4`，实施分支`codex/bot-task-conversations-m04`；root设计与验收，协议见`tasks/M04-task-conversations.md`。已有专家职责和M03数据保留，当前用户预览不关闭，候选验收后再受控更新；定时PAUSED、不push/deploy。下方M03为已接受历史，不代表本轮仍沿用成果版本产品设计。
 
 **当前 M03：已验收合入。** 文本成果v1→退回意见→同Task修改v2→确认关闭Task已完成，旧版与意见可回看、失败可显式继续、失回包/重开恢复。候选 `ae702957`，正常合并 `5beb5c60`，未推送。root独立92核心/18IPC/25契约、原生SQLite/实际Electron、真实Java-MySQL完整旅程及目标类型/完整隔离构建通过。早先一次附加DB探针依赖异常未能归因，后续完整复验通过，诊断与局限如实记录于 `reviews/M03-acceptance.md`。测试资源已清理、原B00恢复停止、用户库未动、定时仍PAUSED；本轮模型测试全部fake。
 
