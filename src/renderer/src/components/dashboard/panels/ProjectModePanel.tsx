@@ -83,7 +83,6 @@ import type {
   DashboardProjectModeOperationalDetailScope,
   DashboardProjectModeOperationalDetails,
   DashboardProjectModeOperationalDetailsLoader,
-  DashboardProjectModeStageAnalysis,
   DashboardProjectModeStageAnalysisLoader,
   DashboardProjectModeOrgDistributionItem,
   DashboardProjectModeProject,
@@ -100,6 +99,7 @@ import type {
   DashboardStageBucketStat
 } from "../use-dashboard"
 import { formatTopUserOrgName } from "../use-dashboard"
+import { formatStageDuration } from "../project-stage-analysis-view"
 import { ProjectStageAnalysisDialog } from "../ProjectStageAnalysisDialog"
 import { ProjectCodeTraceDialog, type ProjectCodeTraceTarget } from "../ProjectCodeTraceDialog"
 import {
@@ -450,7 +450,7 @@ function lifecycleLabel(status?: string): string {
   }
 }
 
-function formatProjectCreatedAt(value?: string): string {
+function formatProjectCreatedAt(value?: string | null): string {
   if (!value) return "—"
   const date = new Date(value)
   if (Number.isNaN(date.getTime())) return "—"
@@ -1731,6 +1731,9 @@ function ProjectRow({
         <td className="whitespace-nowrap px-3 py-2 text-right text-muted-foreground tabular-nums">
           {createdAt}
         </td>
+        <td className="whitespace-nowrap px-3 py-2 text-right text-muted-foreground tabular-nums">
+          {formatProjectCreatedAt(project.lastExecutedAt)}
+        </td>
         <td className="whitespace-nowrap px-3 py-2 text-right">
           <div className="flex flex-col items-end gap-1">
             <button
@@ -1764,7 +1767,7 @@ function ProjectRow({
       </tr>
       {expanded && (
         <tr className="border-b border-border/50 bg-muted/20">
-          <td colSpan={showSuspectedTechnicalDetailMetric ? 16 : 15} className="px-3 py-3">
+          <td colSpan={showSuspectedTechnicalDetailMetric ? 21 : 20} className="px-3 py-3">
             <div className="w-full max-w-[1200px] min-w-0 space-y-3">
               {/* 常用技能（生成行数 / 采纳率已下沉到各特性行） */}
               <div className="flex flex-wrap items-center gap-1.5 text-xs">
@@ -1861,6 +1864,23 @@ function ProjectRow({
                             <DrilldownArrow className="size-3" />
                           </button>
                         </div>
+                      </div>
+                      <div className="flex flex-wrap items-center gap-x-5 gap-y-1 text-[11px] text-muted-foreground">
+                        <span className="inline-flex items-center gap-1">
+                          累计执行时长：
+                          <span className="tabular-nums text-foreground">
+                            {feature.totalDurationMs == null
+                              ? "—"
+                              : formatStageDuration(feature.totalDurationMs)}
+                          </span>
+                          <InfoHint hint="累计该特性主动触发的主 Agent 各轮执行耗时，与阶段耗时总计口径一致；子 Agent 时长不重复累加。" />
+                        </span>
+                        <span title="最近一次主动触发的主 Agent 轮次开始时间">
+                          最后执行时间：
+                          <span className="tabular-nums text-foreground">
+                            {formatProjectCreatedAt(feature.lastExecutedAt)}
+                          </span>
+                        </span>
                       </div>
                       <FeatureCodeStatsLine
                         codeStats={feature.codeStats}
@@ -2091,38 +2111,9 @@ function ProjectListSection({
   // 阶段耗时弹窗：懒加载，每次打开重新拉（室筛选变化后应重新拉取）。
   const [stageAnalysisProject, setStageAnalysisProject] =
     useState<DashboardProjectModeProject | null>(null)
-  const [stageAnalysis, setStageAnalysis] = useState<DashboardProjectModeStageAnalysis | null>(null)
-  const [stageAnalysisLoading, setStageAnalysisLoading] = useState(false)
-  const [stageAnalysisError, setStageAnalysisError] = useState<string | null>(null)
-
   const openStageAnalysis = useCallback(
     (project: DashboardProjectModeProject) => {
-      if (!loadStageAnalysis) return
-      setStageAnalysisProject(project)
-      setStageAnalysis(null)
-      setStageAnalysisError(null)
-      setStageAnalysisLoading(true)
-      const requestedProjectId = project.projectId
-      void loadStageAnalysis(requestedProjectId)
-        .then((data) => {
-          // 请求飞行期间用户可能已经点开了另一个项目，迟到的响应不能覆盖当前的。
-          setStageAnalysisProject((current) => {
-            if (current?.projectId === requestedProjectId) {
-              setStageAnalysis(data)
-              setStageAnalysisLoading(false)
-            }
-            return current
-          })
-        })
-        .catch((error: unknown) => {
-          setStageAnalysisProject((current) => {
-            if (current?.projectId === requestedProjectId) {
-              setStageAnalysisError(error instanceof Error ? error.message : String(error))
-              setStageAnalysisLoading(false)
-            }
-            return current
-          })
-        })
+      if (loadStageAnalysis) setStageAnalysisProject(project)
     },
     [loadStageAnalysis]
   )
@@ -2163,7 +2154,7 @@ function ProjectListSection({
   const pageData = projectPages[tab]
   const showSuspectedTechnicalDetailMetric = pageData?.showSuspectedTechnicalDetailMetric === true
   const attentionSort = isProjectAttentionSortKey(effectiveSortBy) ? effectiveSortBy : undefined
-  const tableColumnCount = showSuspectedTechnicalDetailMetric ? 20 : 19
+  const tableColumnCount = showSuspectedTechnicalDetailMetric ? 21 : 20
   const currentError = pageError[tab]
   const tabCount =
     tab === "archived" ? (projectCounts?.archived ?? 0) : (projectCounts?.active ?? 0)
@@ -2459,7 +2450,7 @@ function ProjectListSection({
         <table
           className={cn(
             "w-full table-fixed text-xs",
-            showSuspectedTechnicalDetailMetric ? "min-w-[2968px]" : "min-w-[2828px]"
+            showSuspectedTechnicalDetailMetric ? "min-w-[3108px]" : "min-w-[2968px]"
           )}
         >
           {/*
@@ -2494,6 +2485,7 @@ function ProjectListSection({
             <col className="w-[128px]" />
             <col className="w-[110px]" />
             <col className="w-[210px]" />
+            <col className="w-[140px]" />
             <col className="w-[140px]" />
             <col className="w-[94px]" />
           </colgroup>
@@ -2596,6 +2588,12 @@ function ProjectListSection({
                 enabled
                 onSort={cycleSort}
               />
+              <th
+                className="px-3 py-2 text-right font-medium"
+                title="项目累计，最近一次主动触发的主 Agent 轮次开始时间"
+              >
+                最新执行时间
+              </th>
               <th className="px-3 py-2 text-right font-medium">操作</th>
             </tr>
           </thead>
@@ -2687,21 +2685,19 @@ function ProjectListSection({
           </div>
         )}
       </div>
-      {stageAnalysisProject ? (
+      {stageAnalysisProject && loadStageAnalysis ? (
         <ProjectStageAnalysisDialog
+          key={stageAnalysisProject.projectId}
           open
           onOpenChange={(next) => {
             if (!next) {
               setStageAnalysisProject(null)
-              setStageAnalysis(null)
-              setStageAnalysisError(null)
-              setStageAnalysisLoading(false)
             }
           }}
           projectName={stageAnalysisProject.name}
-          analysis={stageAnalysis}
-          loading={stageAnalysisLoading}
-          error={stageAnalysisError}
+          projectId={stageAnalysisProject.projectId}
+          features={stageAnalysisProject.features}
+          loadAnalysis={loadStageAnalysis}
         />
       ) : null}
     </section>

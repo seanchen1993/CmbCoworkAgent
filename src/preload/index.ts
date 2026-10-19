@@ -4083,7 +4083,7 @@ const api = {
     projectModeStageAnalysis: (
       projectId: string,
       range: { from: string; to: string } | null,
-      opts?: { upperOrgLv1?: string | string[] | null }
+      opts?: { upperOrgLv1?: string | string[] | null; featureSlug?: string }
     ): Promise<{ success: boolean; data?: unknown; error?: string }> =>
       ipcRenderer.invoke("dashboard:projectModeStageAnalysis", projectId, range, opts),
     pluginAggregate: (

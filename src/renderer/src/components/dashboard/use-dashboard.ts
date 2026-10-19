@@ -493,6 +493,8 @@ export interface DashboardAwardTeamBenchmarkRow {
 }
 
 export interface DashboardProjectModeFeature {
+  totalDurationMs?: number | null
+  lastExecutedAt?: string | null
   slug: string
   title: string
   location?: string
@@ -592,7 +594,8 @@ export interface DashboardProjectModeStageAnalysis {
 }
 
 export type DashboardProjectModeStageAnalysisLoader = (
-  projectId: string
+  projectId: string,
+  featureSlug?: string
 ) => Promise<DashboardProjectModeStageAnalysis>
 
 /** Per-stage (workflow node) breakdown of a feature: conversations + code adoption. */
@@ -685,6 +688,7 @@ export interface DashboardStageBuckets {
 }
 
 export interface DashboardProjectModeProject {
+  lastExecutedAt?: string | null
   projectId: string
   name: string
   description?: string

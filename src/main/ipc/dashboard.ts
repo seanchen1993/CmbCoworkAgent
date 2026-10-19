@@ -29,6 +29,14 @@ import {
 } from "./project-mode-query-scope"
 import { ProjectModePageCache } from "./project-mode-page-cache"
 import { fetchProjectModeCommitIds } from "./project-mode-commit-ids"
+import {
+  featureExecutionAggs,
+  featureExecutionKey,
+  readFeatureExecution,
+  readLastExecution,
+  fetchCompleteFeatureExecution,
+  type FeatureExecutionMetrics
+} from "./project-mode-execution-metrics"
 import { fetchCompleteProjectDevMetrics } from "./project-mode-dev-metrics"
 import { describeDashboardEsQuery } from "../services/dashboard-es-query-diagnostics"
 import { loadTraceExportDetails } from "./dashboard-trace-export"
@@ -8962,7 +8970,10 @@ function makeMockFeatureOperationalStats(
  * 总耗时最高只是因为轮次最多，而评审阶段单轮最慢。mock 要是把两个排名造成一致的，
  * 本地就看不出为什么需要同时展示这两列。
  */
-function makeMockProjectModeStageAnalysis(projectId: string): ProjectModeStageAnalysis {
+function makeMockProjectModeStageAnalysis(
+  projectId: string,
+  featureSlug?: string
+): ProjectModeStageAnalysis {
   const stage = (
     nodeName: string,
     conversationCount: number,
@@ -8988,13 +8999,16 @@ function makeMockProjectModeStageAnalysis(projectId: string): ProjectModeStageAn
     }
   })
 
+  const scale = featureSlug
+    ? 2 + ([...featureSlug].reduce((sum, char) => sum + char.charCodeAt(0), 0) % 3)
+    : 1
   const stages = [
-    stage("dev-编码实现", 142, 21_400, 68_000),
+    stage("dev-编码实现", Math.ceil(142 / scale), 21_400, 68_000),
     // 轮次少但单轮最慢：总耗时排第三，平均耗时排第一。
-    stage("review-代码评审", 18, 47_900, 132_000),
-    stage("plan-方案设计", 46, 24_800, 71_000),
-    stage("test-测试验证", 37, 15_200, 44_000),
-    stage(STAGE_BUCKET_LABELS.unattributed, 12, 9_800, 26_000)
+    stage("review-代码评审", Math.ceil(18 / scale), 47_900, 132_000),
+    stage("plan-方案设计", Math.ceil(46 / scale), 24_800, 71_000),
+    stage("test-测试验证", Math.ceil(37 / scale), 15_200, 44_000),
+    stage(STAGE_BUCKET_LABELS.unattributed, Math.ceil(12 / scale), 9_800, 26_000)
   ].sort((a, b) => b.metrics.totalDurationMs - a.metrics.totalDurationMs)
 
   const total = stages.reduce((acc, item) => {
@@ -9417,7 +9431,18 @@ function makeMockProjectMode(range: TimeRange, opts?: OrgFilterOptions): Dashboa
       project.codeStats,
       project.features.length
     )
+    const lastExecution = new Date(range.to).getTime()
+    project.lastExecutedAt =
+      project.conversationCount > 0 ? new Date(lastExecution).toISOString() : null
     project.features.forEach((feature, idx) => {
+      feature.totalDurationMs =
+        project.conversationCount > 0
+          ? makeMockProjectModeStageAnalysis(project.projectId, feature.slug).total.totalDurationMs
+          : null
+      feature.lastExecutedAt =
+        project.conversationCount > 0
+          ? new Date(lastExecution - idx * 3600_000).toISOString()
+          : null
       feature.codeStats = featureStats[idx]
       const operational = makeMockFeatureOperationalStats(project.projectId, feature.slug)
       feature.systemConstraintReads = operational.systemConstraintReads
@@ -11384,6 +11409,8 @@ const FILTERED_TOOL_EXCLUDES = [
 ]
 
 interface ProjectModeFeatureView {
+  totalDurationMs?: number | null
+  lastExecutedAt?: string | null
   slug: string
   title: string
   location?: string
@@ -11449,6 +11476,7 @@ interface ProjectModeAnalytics {
 }
 
 interface ProjectModeProjectView {
+  lastExecutedAt?: string | null
   projectId: string
   name: string
   description?: string
@@ -13018,9 +13046,12 @@ async function fetchProjectModePageUsage(
   projectIds: string[],
   range: TimeRange | null,
   opts: OrgFilterOptions | undefined,
-  access: DashboardAccessContext
+  access: DashboardAccessContext,
+  expectedFeatures?: Map<string, string[]>
 ): Promise<{
   perProject: Map<string, number>
+  lastExecutionByProject: Map<string, string | null>
+  executionByFeature: Map<string, FeatureExecutionMetrics>
   perProjectSuspectedTechnicalDetail: Map<string, number>
   perProjectDevStage: Map<string, number>
   perProjectDevAssociatedFeatures: Map<string, number>
@@ -13030,6 +13061,9 @@ async function fetchProjectModePageUsage(
 }> {
   const includeSuspectedTechnicalDetail = isDashboardSuspectedTechnicalDetailAllowed(access)
   const perProject = new Map<string, number>()
+  const lastExecutionByProject = new Map<string, string | null>()
+  const executionByFeature = new Map<string, FeatureExecutionMetrics>()
+  const incompleteExecutionProjects: string[] = []
   const perProjectSuspectedTechnicalDetail = new Map<string, number>()
   const perProjectDevStage = new Map<string, number>()
   const perProjectDevAssociatedFeatures = new Map<string, number>()
@@ -13040,6 +13074,8 @@ async function fetchProjectModePageUsage(
   if (projectIds.length === 0) {
     return {
       perProject,
+      lastExecutionByProject,
+      executionByFeature,
       perProjectSuspectedTechnicalDetail,
       perProjectDevStage,
       perProjectDevAssociatedFeatures,
@@ -13073,6 +13109,7 @@ async function fetchProjectModePageUsage(
           // 三桶尤其明显：一次用户轮次派出 10 个 Task 子代理就会被记成 11 次对话，
           // 让「VibeCoding 对话远多于 Harness」看起来像结论，其实是口径差。
           ...buildProjectModeConversationAndCostAggs({
+            last_execution: { max: { field: "startedAt" } },
             ...stageBucketTraceAggs(),
             ...(includeSuspectedTechnicalDetail
               ? {
@@ -13085,9 +13122,11 @@ async function fetchProjectModePageUsage(
             by_feature: {
               terms: {
                 field: "harnessFeatureSlug",
-                size: featureLimit
+                size: featureLimit,
+                show_term_doc_count_error: true
               },
               aggs: {
+                ...featureExecutionAggs(),
                 by_node: {
                   terms: { field: "harnessNodeName", size: 10 }
                 }
@@ -13112,6 +13151,20 @@ async function fetchProjectModePageUsage(
     const mainAgentConversations = readMainAgentConversations(b)
     const featureAgg = asRecord(mainAgentConversations.by_feature)
     const featureBuckets = Array.isArray(featureAgg.buckets) ? featureAgg.buckets : []
+    lastExecutionByProject.set(key, readLastExecution(mainAgentConversations))
+    if (
+      asNumber(featureAgg.sum_other_doc_count) > 0 ||
+      asNumber(featureAgg.doc_count_error_upper_bound) !== 0
+    ) {
+      incompleteExecutionProjects.push(key)
+    } else {
+      for (const item of featureBuckets) {
+        const bucket = asRecord(item)
+        const slug = asString(bucket.key)
+        if (slug)
+          executionByFeature.set(featureExecutionKey(key, slug), readFeatureExecution(bucket))
+      }
+    }
     if (
       asNumber(featureAgg.sum_other_doc_count) > 0 ||
       asNumber(asRecord(mainAgentConversations.by_node).sum_other_doc_count) > 0 ||
@@ -13159,8 +13212,23 @@ async function fetchProjectModePageUsage(
     }
   }
 
+  if (incompleteExecutionProjects.length) {
+    const complete = await fetchCompleteFeatureExecution(
+      incompleteExecutionProjects,
+      [
+        ...projectModeTraceFilters(range, orgFilterClause),
+        projectModeMainAgentConversationFilter()
+      ],
+      (query) => esQuery(getEsIndex("trace"), query),
+      expectedFeatures
+    )
+    for (const [key, metric] of complete) executionByFeature.set(key, metric)
+  }
+
   return {
     perProject,
+    lastExecutionByProject,
+    executionByFeature,
     perProjectSuspectedTechnicalDetail,
     perProjectDevStage,
     perProjectDevAssociatedFeatures,
@@ -13674,23 +13742,23 @@ async function enrichProjectModeProjectViews(
   access: DashboardAccessContext
 ): Promise<ProjectModeProjectView[]> {
   const projectIds = projects.map((project) => project.projectId)
+  const expectedFeatures = new Map(
+    projects.map((project) => [
+      project.projectId,
+      project.features.map((feature) => feature.slug).filter(Boolean)
+    ])
+  )
   const includeSuspectedTechnicalDetail = isDashboardSuspectedTechnicalDetailAllowed(access)
   // Key code stats on the page's project ids (not just those with conversations)
   // so a project ranked high by 原始生成行数 still shows its adoption columns.
   const [usage, code] = await Promise.all([
-    fetchProjectModePageUsage(projectIds, range, opts, access),
-    fetchProjectModeProjectMetrics(projectIds, range, opts, access, {
-      expected: new Map(
-        projects.map((project) => [
-          project.projectId,
-          project.features.map((feature) => feature.slug)
-        ])
-      )
-    })
+    fetchProjectModePageUsage(projectIds, range, opts, access, expectedFeatures),
+    fetchProjectModeProjectMetrics(projectIds, range, opts, access, { expected: expectedFeatures })
   ])
   return projects.map((project) => ({
     ...project,
     conversationCount: usage.perProject.get(project.projectId) ?? 0,
+    lastExecutedAt: usage.lastExecutionByProject.get(project.projectId) ?? null,
     ...(includeSuspectedTechnicalDetail
       ? {
           suspectedTechnicalDetailConversationCount:
@@ -13719,9 +13787,14 @@ async function enrichProjectModeProjectViews(
     features: project.features.map((feature) => {
       const key = projectFeatureKey(project.projectId, feature.slug)
       const operational = code.operationalByFeature.get(key)
+      const execution = usage.executionByFeature.get(
+        featureExecutionKey(project.projectId, feature.slug)
+      )
       return {
         ...feature,
         codeStats: code.byFeature.get(key) ?? null,
+        totalDurationMs: execution?.totalDurationMs ?? null,
+        lastExecutedAt: execution?.lastExecutedAt ?? null,
         systemConstraintReads: operational?.systemConstraintReads ?? null,
         hookExecutions: operational?.hookExecutions ?? null
       }
@@ -14851,7 +14924,7 @@ async function fetchProjectModeOperationalDetails(
 async function fetchProjectModeStageAnalysis(
   projectId: string,
   range: TimeRange | null,
-  opts?: OrgFilterOptions
+  opts?: OrgFilterOptions & { featureSlug?: string }
 ): Promise<ProjectModeStageAnalysis> {
   const access = requireDashboardProjectModeAccess()
   const normalizedProjectId = typeof projectId === "string" ? projectId.trim() : ""
@@ -14859,14 +14932,19 @@ async function fetchProjectModeStageAnalysis(
     return { projectId: "", total: emptyProjectModeStageMetrics(), stages: [] }
   }
 
+  if (opts?.featureSlug != null && typeof opts.featureSlug !== "string")
+    throw new Error("特性筛选无效")
+  const featureSlug = opts?.featureSlug?.trim()
   const orgFilterClause = buildProjectModeOrgFilter(opts, access)
   const body = {
     size: 0,
+    track_total_hits: false,
     query: {
       bool: {
         filter: [
           ...projectModeMetricTimeFilters("startedAt", range),
           { term: { harnessProjectId: normalizedProjectId } },
+          ...(featureSlug ? [{ term: { harnessFeatureSlug: featureSlug } }] : []),
           ...(orgFilterClause ? [orgFilterClause] : [])
         ]
       }
@@ -16039,9 +16117,17 @@ export function registerDashboardHandlers(_ipcMain: typeof ipcMain): void {
   registerLatestDashboardHandler(
     _ipcMain,
     "dashboard:projectModeStageAnalysis",
-    async (_, projectId: string, range: TimeRange | null, opts?: OrgFilterOptions) => {
+    async (
+      _,
+      projectId: string,
+      range: TimeRange | null,
+      opts?: OrgFilterOptions & { featureSlug?: string }
+    ) => {
       if (import.meta.env.DEV) {
-        return { success: true, data: makeMockProjectModeStageAnalysis(projectId ?? "") }
+        return {
+          success: true,
+          data: makeMockProjectModeStageAnalysis(projectId ?? "", opts?.featureSlug)
+        }
       }
       try {
         requireDashboardProjectModeAccess()
