@@ -1,3 +1,5 @@
+import type { ServiceConversationContext } from "./service-conversation"
+import type { Task } from "../../../shared/bot/contracts.generated"
 import { createHash, randomUUID } from "node:crypto"
 import { isAbsolute, normalize } from "node:path"
 import type {
@@ -53,6 +55,14 @@ export class PartnerDevController {
         config: PartnerLocalConfig,
         client: PartnerLocalClient
       ) => PartnerWorkerExecutor
+      beforeLegacyEnqueue?: (
+        config: PartnerLocalConfig,
+        client: PartnerLocalClient,
+        task: Task,
+        command: string,
+        deadline: string
+      ) => Promise<void>
+      onWorkerChange?: () => void
       clientFactory?: (d: PartnerConnectionDescriptor) => PartnerLocalClient
       defaultDescriptor?: () => Promise<unknown>
       expertData?: (
@@ -149,6 +159,45 @@ export class PartnerDevController {
         }
       }
       return this.view()
+    })
+  }
+  conversationContext(): Promise<ServiceConversationContext> {
+    return this.exclusive(async () => {
+      const { config: c, groupId, botId } = this.team(),
+        client = this.requireClient()
+      await client.verifyIdentity()
+      const group = await client.getBusinessGroup(groupId)
+      const binding = group.bots.find((b) => b.botId === botId)
+      if (
+        group.spaceId !== c.descriptor.spaceId ||
+        !binding ||
+        binding.botVersionId !== c.botVersionId ||
+        !group.members.some(
+          (m) => m.principalId === c.descriptor.ownerPrincipalId && m.role === "admin"
+        ) ||
+        !group.members.some((m) => m.principalId === c.descriptor.businessPrincipalId)
+      )
+        throw new PartnerLocalFault("FORBIDDEN")
+      return {
+        scope: {
+          url: c.descriptor.url,
+          spaceId: c.descriptor.spaceId,
+          businessPrincipalId: c.descriptor.businessPrincipalId,
+          ownerPrincipalId: c.descriptor.ownerPrincipalId,
+          nodeId: c.descriptor.nodeId,
+          workspaceRef: c.descriptor.workspaceRef,
+          workspaceHash: createHash("sha256")
+            .update(c.workspacePath ?? "")
+            .digest("hex"),
+          groupId,
+          botId
+        },
+        client,
+        group,
+        botVersionId: binding.botVersionId,
+        expertName: this.expertName ?? "服务专家",
+        nodeEnabled: this.worker?.isEnabled() ?? false
+      }
     })
   }
   hasActiveRun(): boolean {
@@ -254,6 +303,7 @@ export class PartnerDevController {
       executor: this.deps.createExecutor(structuredClone(c), client),
       onChange: (v) => {
         if (this.worker === worker && v.error) this.error = v.error
+        this.deps.onWorkerChange?.()
       }
     })
     this.worker = worker
@@ -397,14 +447,32 @@ export class PartnerDevController {
   authorizeTeam(): Promise<PartnerDevStatus> {
     return this.exclusive(() => this.authorizeConfigured())
   }
-  private async authorizeConfigured(): Promise<PartnerDevStatus> {
+  private async authorizeConfigured(reuseExisting = false): Promise<PartnerDevStatus> {
     const { groupId, config } = this.team()
     if (!config.workspacePath) throw new PartnerLocalFault("NOT_CONFIGURED")
     const client = this.requireClient()
     // Explicit owner authorization also registers the authenticated local
     // node's fixed profile once. This does not enable polling or execution.
     await client.observe()
-    const version = await client.authorizationVersion(groupId)
+    let version: number
+    if (reuseExisting) {
+      const grant = await client.currentAuthorization(groupId),
+        d = config.descriptor
+      if (
+        grant &&
+        grant.spaceId === d.spaceId &&
+        grant.groupId === groupId &&
+        grant.nodeId === d.nodeId &&
+        grant.ownerPrincipalId === d.ownerPrincipalId &&
+        grant.workspaceRef === d.workspaceRef &&
+        grant.enabled &&
+        Date.parse(grant.expiresAt) > Date.now()
+      ) {
+        this.error = null
+        return this.view()
+      }
+      version = grant?.version ?? 0
+    } else version = await client.authorizationVersion(groupId)
     await client.authorize(groupId, version)
     this.error = null
     return this.view()
@@ -417,7 +485,7 @@ export class PartnerDevController {
       await this.refreshExpert()
       if (!this.expertAdopted) throw new PartnerLocalFault("NOT_CONFIGURED")
       await this.ensureExpertData()
-      await this.authorizeConfigured()
+      await this.authorizeConfigured(true)
       return this.enableConfigured()
     })
   }
@@ -696,7 +764,16 @@ export class PartnerDevController {
       const result = await this.mutation(
         "enqueue",
         { taskId: task.id, botId, version: task.version },
-        (command, deadline) => client.enqueue(task, botId, command, deadline),
+        async (command, deadline) => {
+          await this.deps.beforeLegacyEnqueue?.(
+            structuredClone(this.requireConfig()),
+            client,
+            task,
+            command,
+            deadline
+          )
+          return client.enqueue(task, botId, command, deadline)
+        },
         (v) => {
           const c = this.requireConfig()
           c.lastRunId = v.runId

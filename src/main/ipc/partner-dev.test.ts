@@ -2,6 +2,7 @@ import { beforeEach, expect, it, vi } from "vitest"
 import type { IpcMain, IpcMainInvokeEvent, BrowserWindow } from "electron"
 const mock = vi.hoisted(() => ({
   getStatus: vi.fn(),
+  connect: vi.fn(),
   sendMessage: vi.fn(),
   createExpertMemory: vi.fn(),
   updateExpertMemory: vi.fn(),
@@ -39,6 +40,7 @@ vi.mock("../services/bot/partner-dev-controller", () => ({
       mock.options = options
     }
     getStatus = mock.getStatus
+    connect = mock.connect
     sendMessage = mock.sendMessage
     createExpertMemory = mock.createExpertMemory
     updateExpertMemory = mock.updateExpertMemory
@@ -59,7 +61,7 @@ beforeEach(() => {
   mock.getStatus.mockResolvedValue({ configured: false })
   mock.dialog.mockResolvedValue({ canceled: true, filePaths: [] })
   const frame = { parent: null, url: "http://localhost:5173/" },
-    contents = { mainFrame: frame, getURL: () => "http://localhost:5173/" },
+    contents = { mainFrame: frame, getURL: () => "http://localhost:5173/", send: vi.fn() },
     fakeWindow = { isDestroyed: () => false, webContents: contents }
   window = fakeWindow as unknown as BrowserWindow
   event = { sender: contents, senderFrame: frame } as unknown as IpcMainInvokeEvent
@@ -77,8 +79,8 @@ beforeEach(() => {
 })
 const call = (name: string, ...args: unknown[]) =>
   handlers.get("partnerDev:" + name)!(event, ...args)
-it("registration alone does not read config, connect, or execute; 17 fixed expert handlers only", async () => {
-  expect(handlers.size).toBe(17)
+it("registration alone does not read config, connect, or execute; 17 expert and 7 fixed service conversation handlers", async () => {
+  expect(handlers.size).toBe(24)
   expect(mock.getStatus).not.toHaveBeenCalled()
   expect(await call("getStatus")).toEqual({ configured: false })
   expect(mock.getStatus).toHaveBeenCalledTimes(1)
@@ -204,4 +206,67 @@ it("only an unpackaged preview can supply main-owned default connection configur
   await expect((mock.options?.defaultDescriptor as () => Promise<unknown>)()).rejects.toThrow(
     "STORAGE_FAILURE"
   )
+})
+
+it("service conversation rejects shape, identities, paths and oversized text before journal/model access", async () => {
+  const submit = handlers.get("serviceConversation:send")!
+  const value = {
+    conversationId: "conversation",
+    taskRef: null,
+    requestId: "request",
+    text: "analysis"
+  }
+  for (const patch of [
+    { spaceId: "other" },
+    { credentials: "secret" },
+    { workspacePath: "/outside" },
+    { runId: "run" },
+    { modelRef: "custom:injected" }
+  ])
+    await expect(submit(event, { ...value, ...patch })).rejects.toThrow("INVALID_PAYLOAD")
+  for (const patch of [
+    { text: "" },
+    { text: "x".repeat(16385) },
+    { text: "\0" },
+    { conversationId: "../outside" },
+    { taskRef: 42 },
+    { requestId: null }
+  ])
+    await expect(submit(event, { ...value, ...patch })).rejects.toThrow("INVALID_PAYLOAD")
+  await expect(handlers.get("serviceConversation:open")!(event, {})).rejects.toThrow(
+    "INVALID_PAYLOAD"
+  )
+  await expect(
+    handlers.get("serviceConversation:selectModel")!(event, {
+      conversationId: "c",
+      modelRef: "default"
+    })
+  ).rejects.toThrow("INVALID_PAYLOAD")
+})
+it("service conversation rejects untrusted/subframe access before persistence", async () => {
+  const submit = handlers.get("serviceConversation:send")!,
+    value = {
+      conversationId: "conversation",
+      taskRef: null,
+      requestId: "request",
+      text: "analysis"
+    }
+  await expect(
+    submit(
+      { ...event, senderFrame: { ...event.senderFrame, parent: {} } } as IpcMainInvokeEvent,
+      value
+    )
+  ).rejects.toThrow("FORBIDDEN")
+  await expect(
+    submit({ ...event, senderFrame: null } as IpcMainInvokeEvent, value)
+  ).rejects.toThrow("FORBIDDEN")
+})
+
+it("context mutation invalidates before work and after failure so terminal cached UI cannot survive a failed switch", async () => {
+  mock.connect.mockRejectedValue(new Error("private dependency failure"))
+  await expect(call("connect")).rejects.toThrow("DEPENDENCY_UNAVAILABLE")
+  expect((window.webContents.send as ReturnType<typeof vi.fn>).mock.calls).toEqual([
+    ["serviceConversation:invalidated", true],
+    ["serviceConversation:invalidated", false]
+  ])
 })

@@ -224,6 +224,9 @@ async function main() {
     page.once("dialog", async (dialog) => {
       prompts++
       assert(dialog.message().includes("不读取代码"))
+      assert(dialog.message().includes("服务会话使用负责人明确选择的模型"))
+      assert(dialog.message().includes("开发演示仍使用模拟模型"))
+      assert(!dialog.message().includes("不调用真实模型"))
       await dialog.accept()
     })
     await page.getByRole("button", { name: "启用本机", exact: true }).click()

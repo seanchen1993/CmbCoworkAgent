@@ -6,6 +6,7 @@ import {
   type IpcMain,
   type IpcMainInvokeEvent
 } from "electron"
+import { createHash } from "node:crypto"
 import { realpath, stat } from "node:fs/promises"
 import { isAbsolute, join, normalize } from "node:path"
 import type { PartnerDevStatus } from "../../shared/bot/partner-dev"
@@ -23,13 +24,28 @@ import { PartnerTaskThreadStore } from "../services/bot/task-thread-store"
 import { PartnerRequirementAttemptStore } from "../services/bot/requirement-attempt-store"
 import { PARTNER_FAKE_MODEL_REF } from "../services/bot/partner-fake-model"
 import { getCmbCoworkAgentDataRoot } from "../app-data-root"
+import { serviceConversationInput } from "../services/bot/service-conversation-boundary"
+import {
+  ServiceConversationStore,
+  serviceScopeKey,
+  type ServiceScope
+} from "../services/bot/service-conversation-store"
+import { ServiceConversationService } from "../services/bot/service-conversation"
+import { ServiceConversationRouter } from "../services/bot/service-conversation-router"
+import {
+  resolveServiceModel,
+  serviceModelBinding,
+  type ServiceModelBinding
+} from "../services/bot/service-model-binding"
 import { expertLocalData } from "../services/bot/expert-local-data"
 
 let controller: PartnerDevController | undefined
+let conversations: ServiceConversationService | undefined
 export function hasActivePartnerDevRun(): boolean {
   return controller?.hasActiveRun() ?? false
 }
 export async function stopPartnerDev(): Promise<void> {
+  await conversations?.stop()
   await controller?.shutdown()
 }
 
@@ -43,7 +59,77 @@ export function registerPartnerDevHandlers(
   const defaultConnectionFile = app.isPackaged
     ? undefined
     : process.env.CMB_PARTNER_LOCAL_CONNECTION_FILE
+  let journal: ServiceConversationStore | undefined
+  let router: ServiceConversationRouter | undefined
+  const getJournal = () => (journal ??= new ServiceConversationStore(getDb()))
+  const scopeFor = (
+    config: import("../services/bot/partner-local-config").PartnerLocalConfig
+  ): ServiceScope => {
+    const d = config.descriptor
+    if (!config.groupId || !config.botId) throw new PartnerLocalFault("NOT_CONFIGURED")
+    return {
+      url: d.url,
+      spaceId: d.spaceId,
+      nodeId: d.nodeId,
+      ownerPrincipalId: d.ownerPrincipalId,
+      businessPrincipalId: d.businessPrincipalId,
+      workspaceRef: d.workspaceRef,
+      workspaceHash: createHash("sha256")
+        .update(config.workspacePath ?? "")
+        .digest("hex"),
+      groupId: config.groupId,
+      botId: config.botId
+    }
+  }
+  const getConversations = () =>
+    (conversations ??= new ServiceConversationService({
+      store: getJournal(),
+      context: () => controller!.conversationContext(),
+      overview: async () => {
+        const s = await controller!.getStatus()
+        return {
+          connected: s.connected,
+          nodeEnabled: s.nodeEnabled,
+          expertName: s.expertName ?? null
+        }
+      },
+      model: resolveServiceModel,
+      models: async () => {
+        const { getModelConfigs } = await import("../models/registry")
+        return getModelConfigs().flatMap((c) => {
+          try {
+            const b = serviceModelBinding(c, c.ref)
+            return [{ ref: b.ref, name: b.name }]
+          } catch {
+            return []
+          }
+        })
+      },
+      cancelOwned: (runId) => router?.cancelOwned(runId) ?? false
+    }))
+  conversations = undefined
   controller = new PartnerDevController({
+    onWorkerChange: () => conversations?.wake(),
+    async beforeLegacyEnqueue(config, client, task, commandId, deadline) {
+      const scope = scopeFor(config),
+        group = await client.getBusinessGroup(scope.groupId),
+        bot = group.bots.find((b) => b.botId === scope.botId)
+      if (!bot) throw new PartnerLocalFault("FORBIDDEN")
+      getJournal().bind(serviceScopeKey(scope), {
+        ...scope,
+        commandId,
+        taskId: task.id,
+        taskVersion: task.version,
+        stageId: task.currentStageId,
+        groupVersion: group.version,
+        botVersionId: bot.botVersionId,
+        deadline,
+        model: { ref: PARTNER_FAKE_MODEL_REF, name: "模拟模型", hash: "" },
+        kind: "legacy",
+        runId: null,
+        attemptId: null
+      })
+    },
     store: new PartnerLocalConfigStore(
       join(app.getPath("userData"), "devclaw-partner-local"),
       safeStorage
@@ -70,19 +156,40 @@ export function registerPartnerDevHandlers(
     createExecutor(config, client) {
       const db = getDb(),
         d = config.descriptor
-      return new PartnerRequirementExecutor({
-        config: {
-          spaceId: d.spaceId,
-          nodeId: d.nodeId,
-          ownerPrincipalId: d.ownerPrincipalId,
-          modelRef: PARTNER_FAKE_MODEL_REF,
-          workspaces: new Map([[d.workspaceRef, config.workspacePath!]])
-        },
-        control: client,
-        threads: new PartnerTaskThreadStore(db),
-        attempts: new PartnerRequirementAttemptStore(db),
-        delivery: createManagedTransportAgentRunDelivery()
+      const createExecutor = (
+        model?: ServiceModelBinding,
+        refusalCode?: "MODEL_CHANGED" | "MODEL_UNAVAILABLE"
+      ) =>
+        new PartnerRequirementExecutor({
+          config: {
+            spaceId: d.spaceId,
+            nodeId: d.nodeId,
+            ownerPrincipalId: d.ownerPrincipalId,
+            modelRef: model?.ref ?? PARTNER_FAKE_MODEL_REF,
+            ...(model ? { modelConfigHash: model.hash } : {}),
+            workspaces: new Map([[d.workspaceRef, config.workspacePath!]])
+          },
+          control: client,
+          threads: new PartnerTaskThreadStore(db),
+          attempts: new PartnerRequirementAttemptStore(db),
+          delivery: createManagedTransportAgentRunDelivery(),
+          refusalCode,
+          cancelBeforeStart: (run) => getConversations().cancelledBeforeStart(scopeFor(config), run)
+        })
+      router = new ServiceConversationRouter({
+        scope: scopeFor(config),
+        store: getJournal(),
+        legacy: createExecutor(),
+        legacyRunId: config.lastRunId,
+        model: resolveServiceModel,
+        createExecutor: (model, refusal) => createExecutor(model, refusal),
+        attemptState: (run) => new PartnerRequirementAttemptStore(db).get(run)?.state ?? null,
+        unknown: (scope, run) => getConversations().markUnknown(scope, run),
+        refused: (scope, run, code) => getConversations().markRefused(scope, run, code),
+        claimed: (scope, run) => getConversations().claimed(scope, run),
+        finished: () => conversations?.wake()
       })
+      return router
     }
   })
   const current = controller
@@ -105,6 +212,12 @@ export function registerPartnerDevHandlers(
       throw new PartnerLocalFault("FORBIDDEN")
     return window
   }
+  let contextMutations = 0
+  const invalidate = (busy: boolean) => {
+    const target = getWindow()
+    if (target && !target.isDestroyed())
+      target.webContents.send("serviceConversation:invalidated", busy)
+  }
   const register = (
     operation: string,
     action: (event: IpcMainInvokeEvent, args: unknown[]) => Promise<unknown>
@@ -112,7 +225,26 @@ export function registerPartnerDevHandlers(
     ipcMain.handle("partnerDev:" + operation, async (event, ...args: unknown[]) => {
       try {
         trusted(event)
-        return await action(event, args)
+        const changesContext = [
+          "connect",
+          "disconnect",
+          "importConnection",
+          "chooseWorkspace",
+          "createExpert",
+          "revokeLocalAuthorization"
+        ].includes(operation)
+        if (changesContext) {
+          contextMutations++
+          invalidate(true)
+        }
+        try {
+          return await action(event, args)
+        } finally {
+          if (changesContext) {
+            contextMutations--
+            invalidate(contextMutations > 0)
+          }
+        }
       } catch (error) {
         throw new Error(error instanceof PartnerLocalFault ? error.code : "DEPENDENCY_UNAVAILABLE")
       }
@@ -138,6 +270,30 @@ export function registerPartnerDevHandlers(
       none(args)
       return action()
     })
+  for (const operation of [
+    "open",
+    "selectModel",
+    "tasks",
+    "read",
+    "updates",
+    "send",
+    "cancel"
+  ] as const) {
+    ipcMain.handle("serviceConversation:" + operation, async (event, ...args: unknown[]) => {
+      try {
+        trusted(event)
+        if (operation === "open") {
+          none(args)
+          return await getConversations().open()
+        }
+        if (args.length !== 1) throw new PartnerLocalFault("INVALID_PAYLOAD")
+        const input = serviceConversationInput(operation, args[0])
+        return await getConversations()[operation](input)
+      } catch (error) {
+        throw new Error(error instanceof PartnerLocalFault ? error.code : "DEPENDENCY_UNAVAILABLE")
+      }
+    })
+  }
   register("importConnection", async (event, args): Promise<PartnerDevStatus> => {
     none(args)
     const result = await dialog.showOpenDialog(trusted(event), {

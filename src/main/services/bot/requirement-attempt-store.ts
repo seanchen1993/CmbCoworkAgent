@@ -17,6 +17,8 @@ function fingerprint(run: PartnerRequirementRun) {
     status: _status,
     leaseExpiresAt: _expiry,
     memoryScope,
+    commandId: _commandId,
+    requesterPrincipalId: _requesterPrincipalId,
     ...identity
   } = validatePartnerRun(run)
   // V6 local receipts predate this field. Explicit legacy 'group' must retain

@@ -172,7 +172,7 @@ export function PartnerDevPanel(): React.JSX.Element {
         <header>
           <h2 className="text-xl font-semibold">DevClaw 伙伴</h2>
           <p className="mt-1 text-sm text-muted-foreground">
-            让领域专家参与需求澄清与分析。当前为本地模拟测试，不读取代码、不调用真实模型或招乎。
+            让领域专家参与需求澄清与分析。当前为本地模拟测试，不读取代码、服务会话使用负责人明确选择的模型，开发演示仍使用模拟模型或招乎。
           </p>
         </header>
         {(error || status?.lastError) && (
@@ -263,7 +263,7 @@ export function PartnerDevPanel(): React.JSX.Element {
               onClick={() => {
                 if (
                   window.confirm(
-                    `允许“${status?.expertName ?? "当前专家"}”使用本机进行模拟文本分析（授权24小时）？\n数据目录：${status?.expertDataPath ?? "应用私有目录"}\n不读取代码，不调用真实模型。`
+                    `允许“${status?.expertName ?? "当前专家"}”使用本机进行文本分析（授权24小时）？\n数据目录：${status?.expertDataPath ?? "应用私有目录"}\n不读取代码，服务会话使用负责人明确选择的模型，开发演示仍使用模拟模型。`
                   )
                 )
                   void action(() => window.api.partnerDev.startExpert())

@@ -26,6 +26,7 @@ export interface PartnerLocalExecutionConfig {
   nodeId: string
   ownerPrincipalId: string
   modelRef: string
+  modelConfigHash?: string
   /** Explicit local owner mappings only; no most-recent/default workspace lookup. */
   workspaces: ReadonlyMap<string, string>
 }
@@ -37,6 +38,8 @@ export interface PartnerRequirementExecutorDependencies {
   delivery: AgentRunDelivery
   startRun?: typeof startAgentRun
   /** Trusted local test clock cadence only, never a remote request parameter. */
+  refusalCode?: "MODEL_CHANGED" | "MODEL_UNAVAILABLE"
+  cancelBeforeStart?: (run: PartnerRequirementRun) => boolean
   renewalIntervalMs?: number
 }
 
@@ -135,6 +138,8 @@ export class PartnerRequirementExecutor {
   constructor(private readonly deps: PartnerRequirementExecutorDependencies) {
     this.config = { ...deps.config, workspaces: new Map(deps.config.workspaces) }
     if (
+      (this.config.modelConfigHash !== undefined &&
+        !/^[a-f0-9]{64}$/.test(this.config.modelConfigHash)) ||
       typeof this.config.modelRef !== "string" ||
       !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(this.config.modelRef) ||
       (deps.renewalIntervalMs !== undefined &&
@@ -211,6 +216,7 @@ export class PartnerRequirementExecutor {
         return this.settle(ticket, previous.outcome!, previous.text!) // Current server auth, never model replay.
       throw new Error("PARTNER_EXECUTION_OUTCOME_UNKNOWN")
     }
+    if (ticket.status !== "starting") throw new Error("PARTNER_EXECUTION_OUTCOME_UNKNOWN")
     const started = await control.start(ticket)
     let run = validatePartnerRun(started.run)
     if (!samePartnerAttempt(ticket, run) || run.status !== "running")
@@ -291,38 +297,48 @@ export class PartnerRequirementExecutor {
     let terminal: AgentRunTerminal | undefined
     try {
       attempts.markRunning(run)
+      if (this.deps.cancelBeforeStart?.(run)) controller.abort()
       armExpiry()
       renewTimer = setTimeout(() => {
         void renew()
       }, this.deps.renewalIntervalMs ?? 5000)
       threads.verify(scope, binding.localThreadId)
-      const handle = await (this.deps.startRun ?? startAgentRun)(
-        { threadId: binding.localThreadId, message: prompt.message },
-        this.deps.delivery,
-        {
-          source: "im",
-          signal: controller.signal,
-          partnerInputOnly: { systemPrompt: prompt.systemPrompt, modelRef: this.config.modelRef },
-          localRunLease: { owner: "im", runId: run.attemptId, managedExternally: true },
-          allowTrustedTransportSkillMarker: false,
-          verifyResolvedThread: (resolved) => {
-            try {
-              threads.verify(scope, binding.localThreadId, resolved)
-              return null
-            } catch {
-              return "PARTNER_THREAD_CONTEXT_CHANGED"
+      if (this.deps.refusalCode) terminal = { outcome: "error", code: this.deps.refusalCode }
+      else {
+        const handle = await (this.deps.startRun ?? startAgentRun)(
+          { threadId: binding.localThreadId, message: prompt.message },
+          this.deps.delivery,
+          {
+            source: "im",
+            signal: controller.signal,
+            partnerInputOnly: {
+              systemPrompt: prompt.systemPrompt,
+              modelRef: this.config.modelRef,
+              ...(this.config.modelConfigHash !== undefined
+                ? { modelConfigHash: this.config.modelConfigHash }
+                : {})
+            },
+            localRunLease: { owner: "im", runId: run.attemptId, managedExternally: true },
+            allowTrustedTransportSkillMarker: false,
+            verifyResolvedThread: (resolved) => {
+              try {
+                threads.verify(scope, binding.localThreadId, resolved)
+                return null
+              } catch {
+                return "PARTNER_THREAD_CONTEXT_CHANGED"
+              }
+            },
+            onFinalAssistant: (result) => {
+              if (finalText !== undefined) throw Error("PARTNER_DUPLICATE_FINAL")
+              finalText = result.finalText
+            },
+            onRunTerminated: (value) => {
+              terminal = value
             }
-          },
-          onFinalAssistant: (result) => {
-            if (finalText !== undefined) throw Error("PARTNER_DUPLICATE_FINAL")
-            finalText = result.finalText
-          },
-          onRunTerminated: (value) => {
-            terminal = value
           }
-        }
-      )
-      await handle.completion
+        )
+        await handle.completion
+      }
     } catch {
       terminal = { outcome: "error", code: "EXECUTION_FAILED" }
     } finally {

@@ -102,6 +102,7 @@ import { botChatAccent } from "@/lib/bot-chat-accent"
 import { BotWorkspaceMenu } from "./BotWorkspaceMenu"
 import { BotPanelDivider } from "./BotPanelDivider"
 import { useBotViewStore, DEFAULT_BOT_VIEW, clampBotPanelWidth } from "./view-store"
+import { ServiceExpertConversation, SERVICE_EXPERT_SELECTION } from "./ServiceExpertConversation"
 import "./bots.css"
 
 const COLORS = ["#ed2040", "#168bea", "#ffb800", "#9a65ee", "#37b897", "#f07e4a"]
@@ -558,6 +559,19 @@ function GroupFiles({
 
 export function BotsWorkspace({ client = localBotClient() }: { client?: BotClient }) {
   const { snapshot, error, retry } = useBots(client)
+  const [serviceName, setServiceName] = useState<string | null>(null);
+  useEffect(() => {
+    let live = true;
+    void window.api.serviceConversation
+      ?.open()
+      .then((info) => {
+        if (live) setServiceName(info.expertName);
+      })
+      .catch(() => undefined);
+    return () => {
+      live = false;
+    };
+  }, []);
   useEffect(() => {
     if (snapshot) {
       useBotGroupDrafts.getState().prune(
@@ -1284,6 +1298,29 @@ export function BotsWorkspace({ client = localBotClient() }: { client?: BotClien
             </label>
           )}
           <BotConversationList label={showArchived ? "已归档 Bot" : "Bot 会话"}>
+            {!showArchived && window.api.serviceConversation && (
+              <button
+                className="service-expert-sidebar"
+                data-selected={
+                  selectedId === SERVICE_EXPERT_SELECTION &&
+                  !groupId &&
+                  !newChat
+                }
+                onClick={() => {
+                  setNewChat(false);
+                  updateView({
+                    selectedId: SERVICE_EXPERT_SELECTION,
+                    groupId: null,
+                  });
+                }}
+              >
+                <BotAvatar color="#168bea" shape="circle" size={32} />
+                <span>
+                  {serviceName ?? "服务专家"}
+                  <small>服务管理 · 文本分析</small>
+                </span>
+              </button>
+            )}
             {(pinnedBots.length > 0 ||
               visibleGroups.some((group) => pinnedGroupIds.includes(group.id))) && (
               <div className="bot-pinned-list" aria-label="已置顶的 Bot">
@@ -1505,7 +1542,9 @@ export function BotsWorkspace({ client = localBotClient() }: { client?: BotClien
               {error}
             </div>
           )}
-          {!snapshot ? (
+          {selectedId === SERVICE_EXPERT_SELECTION && !groupId && !newChat ? (
+            <ServiceExpertConversation onName={setServiceName} />
+          ) : !snapshot ? (
             <div className="bot-empty" role="status">
               {error ? (
                 <>

@@ -29,7 +29,7 @@ export interface InputOnlyRunDependencies {
     metadata: Record<string, unknown>
   }
   /** Explicit owner-approved reference; no default/fallback or business supplied model. */
-  resolveModel(modelRef: string): BaseChatModel | Promise<BaseChatModel>
+  resolveModel(modelRef: string, configHash?: string): BaseChatModel | Promise<BaseChatModel>
 }
 
 /** Uses the EXISTING DeepAgent graph builder with zero tools and an in-memory
@@ -75,7 +75,7 @@ export function createInputOnlyRequirementImplementation(deps: InputOnlyRunDepen
     }
     try {
       check()
-      const model = await deps.resolveModel(profile!.modelRef)
+      const model = await deps.resolveModel(profile!.modelRef, profile!.modelConfigHash)
       check() // Recheck after asynchronous model/module resolution, before the graph.
       let modelCalls = 0
       const guard = createMiddleware({
