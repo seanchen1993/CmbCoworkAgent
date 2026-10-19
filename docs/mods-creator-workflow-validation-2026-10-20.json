@@ -1,0 +1,373 @@
+{
+  "schemaVersion": 1,
+  "scope": "插件创作、首次模块化、试用关联、整轮验收与独立交付",
+  "branch": "codex/mods-v2",
+  "codeCommit": "aa371899bcf99d94e47f50dde06bf61e97d0437c",
+  "remoteVerified": true,
+  "sourceSnapshotSha256": "9f21355bc82330519604902cde36ce479263d66c1bb9ef2a31a08313ea8a61e5",
+  "codeCommitProof": {
+    "path": "output/creator-journey-20261020/commit-source-proof-aa371899bcf99d94e47f50dde06bf61e97d0437c.json",
+    "sha256": "0476d66fa5947d414b0bfb6666fffff33f80774692a6c51f7e7ca1641ae7e15f",
+    "files": 4785,
+    "byteExactFiles": 3041,
+    "normalizedFiles": 1743,
+    "historicalCheckoutExceptionFiles": 1
+  },
+  "checks": [
+    {
+      "label": "types-final-r9",
+      "startedAt": "2026-10-19T18:04:40.322Z",
+      "completedAt": "2026-10-19T18:06:09.278Z",
+      "exitCode": 0,
+      "signal": null,
+      "success": true,
+      "changedFiles": [],
+      "sourceSnapshotBeforeSha256": "9f21355bc82330519604902cde36ce479263d66c1bb9ef2a31a08313ea8a61e5",
+      "sourceSnapshotAfterSha256": "9f21355bc82330519604902cde36ce479263d66c1bb9ef2a31a08313ea8a61e5",
+      "log": "C:\\ai\\CmbCoworkAgent-mods-v2\\output\\creator-journey-20261020\\types-final-r9.log",
+      "noAutomaticRetry": true
+    },
+    {
+      "label": "changed-eslint-final-r4",
+      "startedAt": "2026-10-19T18:06:11.116Z",
+      "completedAt": "2026-10-19T18:06:24.568Z",
+      "exitCode": 0,
+      "signal": null,
+      "success": true,
+      "changedFiles": [],
+      "sourceSnapshotBeforeSha256": "9f21355bc82330519604902cde36ce479263d66c1bb9ef2a31a08313ea8a61e5",
+      "sourceSnapshotAfterSha256": "9f21355bc82330519604902cde36ce479263d66c1bb9ef2a31a08313ea8a61e5",
+      "log": "C:\\ai\\CmbCoworkAgent-mods-v2\\output\\creator-journey-20261020\\changed-eslint-final-r4.log",
+      "noAutomaticRetry": true
+    },
+    {
+      "label": "workspace-browser-final-r8",
+      "startedAt": "2026-10-19T18:06:26.055Z",
+      "completedAt": "2026-10-19T18:06:44.832Z",
+      "exitCode": 0,
+      "signal": null,
+      "success": true,
+      "changedFiles": [],
+      "sourceSnapshotBeforeSha256": "9f21355bc82330519604902cde36ce479263d66c1bb9ef2a31a08313ea8a61e5",
+      "sourceSnapshotAfterSha256": "9f21355bc82330519604902cde36ce479263d66c1bb9ef2a31a08313ea8a61e5",
+      "log": "C:\\ai\\CmbCoworkAgent-mods-v2\\output\\creator-journey-20261020\\workspace-browser-final-r8.log",
+      "noAutomaticRetry": true
+    },
+    {
+      "label": "normal-build-r3",
+      "startedAt": "2026-10-19T18:06:46.389Z",
+      "completedAt": "2026-10-19T18:07:45.987Z",
+      "exitCode": 0,
+      "signal": null,
+      "success": true,
+      "changedFiles": [],
+      "sourceSnapshotBeforeSha256": "9f21355bc82330519604902cde36ce479263d66c1bb9ef2a31a08313ea8a61e5",
+      "sourceSnapshotAfterSha256": "9f21355bc82330519604902cde36ce479263d66c1bb9ef2a31a08313ea8a61e5",
+      "log": "C:\\ai\\CmbCoworkAgent-mods-v2\\output\\creator-journey-20261020\\normal-build-r3.log",
+      "noAutomaticRetry": true
+    },
+    {
+      "label": "normal-package-r3",
+      "startedAt": "2026-10-19T18:07:47.497Z",
+      "completedAt": "2026-10-19T18:15:46.698Z",
+      "exitCode": 0,
+      "signal": null,
+      "success": true,
+      "changedFiles": [],
+      "sourceSnapshotBeforeSha256": "9f21355bc82330519604902cde36ce479263d66c1bb9ef2a31a08313ea8a61e5",
+      "sourceSnapshotAfterSha256": "9f21355bc82330519604902cde36ce479263d66c1bb9ef2a31a08313ea8a61e5",
+      "log": "C:\\ai\\CmbCoworkAgent-mods-v2\\output\\creator-journey-20261020\\normal-package-r3.log",
+      "noAutomaticRetry": true
+    },
+    {
+      "label": "creator-delivery-packaged-r4",
+      "startedAt": "2026-10-19T18:15:49.967Z",
+      "completedAt": "2026-10-19T18:16:10.090Z",
+      "exitCode": 0,
+      "signal": null,
+      "success": true,
+      "changedFiles": [],
+      "sourceSnapshotBeforeSha256": "9f21355bc82330519604902cde36ce479263d66c1bb9ef2a31a08313ea8a61e5",
+      "sourceSnapshotAfterSha256": "9f21355bc82330519604902cde36ce479263d66c1bb9ef2a31a08313ea8a61e5",
+      "log": "C:\\ai\\CmbCoworkAgent-mods-v2\\output\\creator-journey-20261020\\creator-delivery-packaged-r4.log",
+      "noAutomaticRetry": true
+    },
+    {
+      "label": "preview-recovery-packaged-r2",
+      "startedAt": "2026-10-19T18:16:11.612Z",
+      "completedAt": "2026-10-19T18:16:47.093Z",
+      "exitCode": 0,
+      "signal": null,
+      "success": true,
+      "changedFiles": [],
+      "sourceSnapshotBeforeSha256": "9f21355bc82330519604902cde36ce479263d66c1bb9ef2a31a08313ea8a61e5",
+      "sourceSnapshotAfterSha256": "9f21355bc82330519604902cde36ce479263d66c1bb9ef2a31a08313ea8a61e5",
+      "log": "C:\\ai\\CmbCoworkAgent-mods-v2\\output\\creator-journey-20261020\\preview-recovery-packaged-r2.log",
+      "noAutomaticRetry": true
+    },
+    {
+      "label": "independent-host-packaged-r1",
+      "startedAt": "2026-10-19T18:16:48.603Z",
+      "completedAt": "2026-10-19T18:19:11.268Z",
+      "exitCode": 0,
+      "signal": null,
+      "success": true,
+      "changedFiles": [],
+      "sourceSnapshotBeforeSha256": "9f21355bc82330519604902cde36ce479263d66c1bb9ef2a31a08313ea8a61e5",
+      "sourceSnapshotAfterSha256": "9f21355bc82330519604902cde36ce479263d66c1bb9ef2a31a08313ea8a61e5",
+      "log": "C:\\ai\\CmbCoworkAgent-mods-v2\\output\\creator-journey-20261020\\independent-host-packaged-r1.log",
+      "noAutomaticRetry": true
+    },
+    {
+      "label": "autobiz-creator-packaged-r1",
+      "startedAt": "2026-10-19T18:19:12.752Z",
+      "completedAt": "2026-10-19T18:21:56.341Z",
+      "exitCode": 0,
+      "signal": null,
+      "success": true,
+      "changedFiles": [],
+      "sourceSnapshotBeforeSha256": "9f21355bc82330519604902cde36ce479263d66c1bb9ef2a31a08313ea8a61e5",
+      "sourceSnapshotAfterSha256": "9f21355bc82330519604902cde36ce479263d66c1bb9ef2a31a08313ea8a61e5",
+      "log": "C:\\ai\\CmbCoworkAgent-mods-v2\\output\\creator-journey-20261020\\autobiz-creator-packaged-r1.log",
+      "noAutomaticRetry": true
+    },
+    {
+      "label": "whole-vitest-r1",
+      "startedAt": "2026-10-19T18:21:57.879Z",
+      "completedAt": "2026-10-19T19:27:36.694Z",
+      "exitCode": 0,
+      "signal": null,
+      "success": true,
+      "changedFiles": [],
+      "sourceSnapshotBeforeSha256": "9f21355bc82330519604902cde36ce479263d66c1bb9ef2a31a08313ea8a61e5",
+      "sourceSnapshotAfterSha256": "9f21355bc82330519604902cde36ce479263d66c1bb9ef2a31a08313ea8a61e5",
+      "log": "C:\\ai\\CmbCoworkAgent-mods-v2\\output\\creator-journey-20261020\\whole-vitest-r1.log",
+      "noAutomaticRetry": true
+    },
+    {
+      "label": "standalone-suite-r1",
+      "startedAt": "2026-10-19T19:27:38.210Z",
+      "completedAt": "2026-10-19T19:42:26.181Z",
+      "exitCode": 0,
+      "signal": null,
+      "success": true,
+      "changedFiles": [],
+      "sourceSnapshotBeforeSha256": "9f21355bc82330519604902cde36ce479263d66c1bb9ef2a31a08313ea8a61e5",
+      "sourceSnapshotAfterSha256": "9f21355bc82330519604902cde36ce479263d66c1bb9ef2a31a08313ea8a61e5",
+      "log": "C:\\ai\\CmbCoworkAgent-mods-v2\\output\\creator-journey-20261020\\standalone-suite-r1.log",
+      "noAutomaticRetry": true
+    }
+  ],
+  "full": {
+    "startedAt": "2026-10-19T18:21:59.549Z",
+    "completedAt": "2026-10-19T19:27:35.116Z",
+    "pretestExitCode": 0,
+    "exitCode": 0,
+    "success": true,
+    "passedTests": 15146,
+    "failedTests": 0,
+    "skippedTests": 56,
+    "passedSuites": 2617,
+    "failedSuites": 0,
+    "changedFiles": [],
+    "isolated": "C:/tmp/cmb-frozen-vitest-VRGm8l",
+    "originalTimeoutsUnchanged": true
+  },
+  "standalone": {
+    "startedAt": "2026-10-19T19:27:39.814Z",
+    "completedAt": "2026-10-19T19:42:24.860Z",
+    "success": true,
+    "changedFiles": [],
+    "home": "C:/tmp/cmb-frozen-standalone-QDblEM",
+    "results": [
+      {
+        "script": "test:adoption",
+        "began": "2026-10-19T19:27:39.822Z",
+        "ended": "2026-10-19T19:28:05.862Z",
+        "exitCode": 0,
+        "logFile": "C:\\ai\\CmbCoworkAgent-mods-v2\\output\\creator-journey-20261020\\standalone-inner-r1-test-adoption.log"
+      },
+      {
+        "script": "test:messages",
+        "began": "2026-10-19T19:28:05.863Z",
+        "ended": "2026-10-19T19:28:44.136Z",
+        "exitCode": 0,
+        "logFile": "C:\\ai\\CmbCoworkAgent-mods-v2\\output\\creator-journey-20261020\\standalone-inner-r1-test-messages.log"
+      },
+      {
+        "script": "test:hooks",
+        "began": "2026-10-19T19:28:44.138Z",
+        "ended": "2026-10-19T19:30:38.108Z",
+        "exitCode": 0,
+        "logFile": "C:\\ai\\CmbCoworkAgent-mods-v2\\output\\creator-journey-20261020\\standalone-inner-r1-test-hooks.log"
+      },
+      {
+        "script": "test:plugins",
+        "began": "2026-10-19T19:30:38.109Z",
+        "ended": "2026-10-19T19:30:56.480Z",
+        "exitCode": 0,
+        "logFile": "C:\\ai\\CmbCoworkAgent-mods-v2\\output\\creator-journey-20261020\\standalone-inner-r1-test-plugins.log"
+      },
+      {
+        "script": "test:task-cards",
+        "began": "2026-10-19T19:30:56.481Z",
+        "ended": "2026-10-19T19:30:59.277Z",
+        "exitCode": 0,
+        "logFile": "C:\\ai\\CmbCoworkAgent-mods-v2\\output\\creator-journey-20261020\\standalone-inner-r1-test-task-cards.log"
+      },
+      {
+        "script": "test:merge",
+        "began": "2026-10-19T19:30:59.278Z",
+        "ended": "2026-10-19T19:31:04.566Z",
+        "exitCode": 0,
+        "logFile": "C:\\ai\\CmbCoworkAgent-mods-v2\\output\\creator-journey-20261020\\standalone-inner-r1-test-merge.log"
+      },
+      {
+        "script": "test:workflow",
+        "began": "2026-10-19T19:31:04.567Z",
+        "ended": "2026-10-19T19:38:04.360Z",
+        "exitCode": 0,
+        "logFile": "C:\\ai\\CmbCoworkAgent-mods-v2\\output\\creator-journey-20261020\\standalone-inner-r1-test-workflow.log"
+      },
+      {
+        "script": "test:desktop-agent-baseline",
+        "began": "2026-10-19T19:38:04.361Z",
+        "ended": "2026-10-19T19:38:24.197Z",
+        "exitCode": 0,
+        "logFile": "C:\\ai\\CmbCoworkAgent-mods-v2\\output\\creator-journey-20261020\\standalone-inner-r1-test-desktop-agent-baseline.log"
+      },
+      {
+        "script": "test:im-v1",
+        "began": "2026-10-19T19:38:24.198Z",
+        "ended": "2026-10-19T19:40:05.513Z",
+        "exitCode": 0,
+        "logFile": "C:\\ai\\CmbCoworkAgent-mods-v2\\output\\creator-journey-20261020\\standalone-inner-r1-test-im-v1.log"
+      },
+      {
+        "script": "test:mods:flows:recovery-runtime",
+        "began": "2026-10-19T19:40:05.514Z",
+        "ended": "2026-10-19T19:40:21.391Z",
+        "exitCode": 0,
+        "logFile": "C:\\ai\\CmbCoworkAgent-mods-v2\\output\\creator-journey-20261020\\standalone-inner-r1-test-mods-flows-recovery-runtime.log"
+      },
+      {
+        "script": "test:mods:authoring:runtime",
+        "began": "2026-10-19T19:40:21.391Z",
+        "ended": "2026-10-19T19:40:32.315Z",
+        "exitCode": 0,
+        "logFile": "C:\\ai\\CmbCoworkAgent-mods-v2\\output\\creator-journey-20261020\\standalone-inner-r1-test-mods-authoring-runtime.log"
+      },
+      {
+        "script": "test:mods:authoring:install-runtime",
+        "began": "2026-10-19T19:40:32.316Z",
+        "ended": "2026-10-19T19:40:55.788Z",
+        "exitCode": 0,
+        "logFile": "C:\\ai\\CmbCoworkAgent-mods-v2\\output\\creator-journey-20261020\\standalone-inner-r1-test-mods-authoring-install-runtime.log"
+      },
+      {
+        "script": "test:mods:flows:files:runtime",
+        "began": "2026-10-19T19:40:55.789Z",
+        "ended": "2026-10-19T19:41:30.419Z",
+        "exitCode": 0,
+        "logFile": "C:\\ai\\CmbCoworkAgent-mods-v2\\output\\creator-journey-20261020\\standalone-inner-r1-test-mods-flows-files-runtime.log"
+      },
+      {
+        "script": "test:mods:evaluation:runtime",
+        "began": "2026-10-19T19:41:30.420Z",
+        "ended": "2026-10-19T19:41:41.180Z",
+        "exitCode": 0,
+        "logFile": "C:\\ai\\CmbCoworkAgent-mods-v2\\output\\creator-journey-20261020\\standalone-inner-r1-test-mods-evaluation-runtime.log"
+      },
+      {
+        "script": "test:mods-skill-evaluation-runtime",
+        "began": "2026-10-19T19:41:41.181Z",
+        "ended": "2026-10-19T19:41:54.750Z",
+        "exitCode": 0,
+        "logFile": "C:\\ai\\CmbCoworkAgent-mods-v2\\output\\creator-journey-20261020\\standalone-inner-r1-test-mods-skill-evaluation-runtime.log"
+      },
+      {
+        "script": "test:mods:ui-colors",
+        "began": "2026-10-19T19:41:54.750Z",
+        "ended": "2026-10-19T19:42:23.448Z",
+        "exitCode": 0,
+        "logFile": "C:\\ai\\CmbCoworkAgent-mods-v2\\output\\creator-journey-20261020\\standalone-inner-r1-test-mods-ui-colors.log"
+      }
+    ]
+  },
+  "build": {
+    "startedAt": "2026-10-19T18:06:44.906Z",
+    "completedAt": "2026-10-19T18:15:47.811Z",
+    "passed": true,
+    "destination": "output/mods-v2-validation/20261020-creator-journey-r3",
+    "results": [
+      {
+        "label": "normal-build-r3",
+        "exitCode": 0,
+        "signal": null
+      },
+      {
+        "label": "normal-package-r3",
+        "exitCode": 0,
+        "signal": null
+      }
+    ],
+    "archiveEntries": 31846,
+    "compiled": [
+      {
+        "path": "out/main/index.js",
+        "sha256": "02021615d1380e69cf8da7867687e5c32d7e3331bcf6e867bc503a3310b00096",
+        "generatedStagedArchivedMatch": true
+      },
+      {
+        "path": "out/preload/index.js",
+        "sha256": "7a28736eb8e3c532e29c1436bdd7cc83304619cb437f3b33a25abbb020dd5ab4",
+        "generatedStagedArchivedMatch": true
+      }
+    ],
+    "skills": {
+      "files": 21,
+      "exactInventoryAndBytes": true
+    },
+    "artifacts": [
+      {
+        "path": "C:\\ai\\CmbCoworkAgent-mods-v2\\output\\mods-v2-validation\\20261020-creator-journey-r3\\win-unpacked\\resources\\app.asar",
+        "bytes": 388269172,
+        "sha256": "8d0e1b22c88638ead0fc9e2acc1f852bac1e5c239272855c43c92a9659b630c0"
+      },
+      {
+        "path": "C:\\ai\\CmbCoworkAgent-mods-v2\\output\\mods-v2-validation\\20261020-creator-journey-r3\\win-unpacked\\CMBDevClaw.exe",
+        "bytes": 210970112,
+        "sha256": "728c64e4d3d344479ca53821ef1ffac14ff3702fc9b908eb2e3b24f3c4626024"
+      },
+      {
+        "path": "C:\\ai\\CmbCoworkAgent-mods-v2\\output\\mods-v2-validation\\20261020-creator-journey-r3\\CMBDevClaw-Mods-v2-1.5.9-preview-setup.exe",
+        "bytes": 248466063,
+        "sha256": "5890ba0161399c72fc5c9fe0558ed82d8b010584042ae7bae72927df6f92765f"
+      }
+    ],
+    "noTestBridge": true,
+    "normalBuild": true,
+    "normalNsis": true,
+    "failure": null,
+    "existingInstalledApplicationReplaced": false,
+    "productionAcceptance": "not_evaluated"
+  },
+  "globalLint": {
+    "passed": false,
+    "errors": 171,
+    "errorFiles": 74,
+    "changedFilesLintPassed": true,
+    "comparisonEvidence": "output/creator-journey-20261020/whole-eslint-comparison-r1.json"
+  },
+  "limitations": [
+    "S6继续暂缓",
+    "模型为确定性本地回环服务，不证明外部模型质量",
+    "技术契约检查不替代业务效果与人工审批",
+    "首次模块化不自动推断任意动态流程或未知Hook语义",
+    "AutoBiz用例仅PRD、原知识加载、反馈新候选及重启未知态，未覆盖完整生命周期",
+    "首次模块化交付用例未执行业务且原Hook为空声明",
+    "本轮无token节约或性能收益定量结论",
+    "用户原安装目录未替换；新包位于output目录",
+    "历史校验结果不是持续磁盘重验"
+  ]
+}
