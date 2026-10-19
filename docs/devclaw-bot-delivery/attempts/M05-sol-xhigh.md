@@ -1,8 +1,47 @@
 # M05 — beta 本地统一实施检查点
 
-状态：M05-02/03 实施中，尚未冻结或验收。gpt-6.1-sol / xhigh，唯一实施者。已正常合入 root 接口提交9675f8b4（merge c05f5bfb）；以下 M05-01 内容保留为历史调查，原“尚未改产品”只描述该检查点。
+状态：**M05-02/03 本地统一工作切片进入 review_pending，本次提交后停写产品，等待 root 独立复验。整个 M05 尚未完成：M05-04 mock 与 M05-05 旧服务入口/worker清理尚未实施。** gpt-6.1-sol / xhigh，唯一实施者。原 WIP `358eaf689` 保留；本节为最终当前事实，后面的“未验证/未运行App/尚未改产品”均为有日期顺序的历史检查点。
 
-## M05-02/03 当前实现检查点
+## M05-02/03 候选范围与真实验证
+
+- 沿用 beta 原 Bot 新建/编辑/职责/模型、原 `BotConversation` / `ChatContainer` / `ManagedChatTurn` / `startAgentRun`，扩展本地固定 Work Thread、多次 BotTask、右侧目录与显式完成/继续。桌面仍拥有 beta 原工具/文件/浏览器/MCP/技能/记忆/群/例行路径；没有另建模型引擎、input-only桌面profile或强制JSON final。
+- 原 control.sqlite 同事务接纳 work、稳定 command、首 BotTask；消息库按固定 Thread ID 懒 ensure 并持久 initialized 证明。原收据重放不新建工作/执行；真实SQLite关库重开、原命令重放、`PRAGMA query_only=ON` 写拒绝回滚、initialized缺Thread/错身份拒绝已有固定用例。原执行记录pruning后目录与删除发现仍保留真实Thread。
+- 目标贯通 send/open/stop/引用/receipt/origins/协作返还/文件/浏览器/草稿/后台通知/归档删除。work未解析或get失败时，中央与资源区保持该工作加载/错误，不回退主Thread/client；copy ID同样拒绝未知目标。真实App测试实际hold/reject work:get并观察files/browser IPC，未发生main资源调用，重试后只读原workId。
+- 调度硬上限仍2（含waiting），新增work及rootWorkId后代共占最多1槽，另一个main可真正响应；旧普通Bot/内部群原有调度保留。共享文件锁按实际Bot workspace、浏览器按原服务互斥；人工审批等待不持共享工具锁。
+- 工作完成门禁覆盖同work执行、已接纳补充、在途peer/待返还outbox、source绑定shell、自己固定Thread的原workflow/coordinator驻留和持久待通知。迟到关闭目标通知不运行/自动重开，失效outbox保留可查看结果并跳过，不毒化其他队列。归档/删除拒绝仍活跃关联peer，取消未开始后代并在派发查询再次核owner/work状态。
+- **精确后台归属限制（root已冻结）**：完成/停止的动态workflow/coordinator只覆盖work固定Thread。历史peer使用原beta对方main，peer已返回后在该main另行持有的detached workflow仍属于peer主会话，不宣称被work聚合。peer前台按rootWorkId逐task取消；peer shell仅从可信source_task_id收据取command IDs，经原LocalSandbox取消循环精确过滤并等待真实termination，不取消整个peer thread。固定回归证明历史peer无关后台不挡本work完成、停止不杀无关peer后台/命令。
+- 目录只投影摘要：稳定ordinal游标40/页（41探测），优先活动/待用户/未读入口≤6；已展开旧页按ID≤40一批刷新，scope/generation隔离、单一刷新合并。45项固定UI场景9次metadata list、扩展批次最大5（一般硬上限40）、同scope最大同时list=1；7条无cursor仍可展开到最后；跨Bot迟到get与get失败不残留旧选中。没有逐工作正文轮询。waiting_user（含关联peer）形成工作自己的待处理活动；主/工作自动已读互不清，显式Bot标已读只确认捕获边界。
+
+### 新文件（相对 M05-01 接口合并点 c05f5bfb）
+
+`src/shared/bots/work.ts`；`src/main/bots/work-tools.ts`、`work-tools.test.ts`、`work.test.ts`；`src/renderer/src/components/bots/BotWorkPanel.tsx`、`use-bot-works.ts`；`src/renderer/src/lib/bot-work-client.ts`、`bot-work-client.test.ts`、`bot-work-receipt.ts`；`tests/bots-local-work-app.spec.ts`、`bots-work-directory-browser.spec.ts`、`tests/support/bots-work-directory-fixture.tsx`。其余修改文件见本候选git diff；无Java/deploy/LF39修改。
+
+### 最终命令与日志（全部 exit0）
+
+以下 node 均为 `/Users/heyirui/.npm/_npx/52027bd8fc0022aa/node_modules/node/bin/node`，workdir均为本实施树。
+
+1. `node node_modules/vitest/vitest.mjs run src/main/bots src/main/ipc/bots.test.ts src/main/ipc/bot-files.test.ts src/main/agent/local-sandbox-background-settlement.test.ts src/renderer/src/lib/bot-work-client.test.ts src/renderer/src/lib/bot-conversation-draft.test.ts` → **27文件371/371**，`/tmp/m05-local-slice-final-core.log`。包括原beta Bot全套受影响逻辑与新增work、后台完成/精确停止、native SQLite故障、IPC窄参数拒绝、实际scope转发。
+2. `node node_modules/vitest/vitest.mjs run src/renderer/src/lib/bot*.test.ts src/shared/bots/file-delivery.test.ts src/shared/bots/client-registry.test.ts` → **32文件231/231**，`/tmp/m05-local-slice-final-view.log`。与上一命令少数文件重叠，不把相加数宣称独立用例数。
+3. `node node_modules/typescript/bin/tsc --noEmit -p tsconfig.node.json --composite false` → `/tmp/m05-local-slice-final-node.log`；web项目同命令换 `tsconfig.web.json` → `/tmp/m05-local-slice-final-web.log`。
+4. `node node_modules/electron-vite/bin/electron-vite.js build --config /tmp/m05-electron-vite.config.mjs --mode m05-isolated` → `/tmp/m05-local-slice-final-build.log`。临时config仅继承本树config并把main/preload/renderer的envDir全部指向 `/tmp/m05-empty-vite-env`，未加载真实 `.env`，没有修改产品构建配置。
+5. `node --import tsx tests/bots-local-work-app.spec.ts` → `/tmp/m05-local-slice-final-app.log`。**完整真实App/preload/IPC/Store/Thread/Runtime/ChatContainer**，12次localhost固定模型响应；主聊天工具交办→右侧work→report.md真实写入审批等待→返回main并收到真实响应→回work只允许固定文件一次→持久bot-file-delivery回执/实际文件正文/打开真实预览→修改请求携入该work上一助手、不含其他main材料→文件第二版→同Thread完成/继续→草稿分离→目标读取延迟/失败资源隔离。没有stub ChatContainer。截图 `/tmp/m05-local-work-app.png`、`/tmp/m05-local-work-app-dark.png`、`/tmp/m05-local-work-file-preview.png`。
+6. `node --import tsx tests/bots-work-directory-browser.spec.ts` → `/tmp/m05-directory-ui-second.log`。仅metadata API为fixture，真实hook/右侧Panel；覆盖45项分页/展开后旧项刷新、7项无cursor、迟到切Bot/选择失败/恢复、批次和并发边界；不冒充原聊天Runtime验收。
+7. 新增/改动TS/TSX/CSS已用仓库Prettier；`local-sandbox.ts`保留既有无关格式，只留下新增command-ID过滤的12行diff。`git diff --check`通过。
+
+### 首轮失败与解释
+
+- 原类型/112/165检查失败与修正见下面WIP历史。最终边界第一轮99条中1条失败是IPC mock不执行Host混合scope拒绝的错误测试预期，改为验证IPC合法scope转发/非法ID拒绝；真实Host和scoped client门禁保持不变。最终371通过。
+- 完整App首轮新profile trace加密导致launch等待；隔离夹具改用fixture自己的plaintext trace（不改用户策略）。之后有Bot导航selector、实际审批按钮文案和误点旧service“主对话”的夹具错误，均已修为精确真实UI选择。第4/5/10轮存在新输入仍留composer、未接纳/未发provider请求的夹具发送时序；最终在实际按钮提交前等待受控input两帧提交、首助手呈现，未重复重发已接纳请求，第11轮及最终轮通过。未宣称对原ChatContainer做了发送行为修复。旧版首次截图正文尚未恢复，不作为视觉通过证据；最终截图等待第二版实际消息呈现。root随后发现Work搜索框暗色仍用通用tokens而白底（修复后的最终真实主题补测exit0），已将所有新增Work区域改为原beta bot-elevated/line/muted/text并显式placeholder；fixture最终通过真实“Bot工作区设置→主题→深色”，等待data-color-scheme并断言搜索文字/背景/placeholder计算色值，不再只手加dark class。
+- metadata UI首轮绕过input直接改query，没有触发Panel自身limit重置，断言期待6但显示7；改为真实搜索输入操作，第二轮通过。没有为夹具放宽产品分页或权限。
+- 最早夹具曾覆盖临时HOME隔离，root指出后已改为保留宿主HOME，只用 `CMB_COWORK_AGENT_HOME`、Electron `--user-data-dir` 和App自有临时配置；最终所有命令均使用后者。没有读取/修改用户profile或真实模型配置。
+
+### 资源与后续
+
+最终core/type/build/view/两个Electron夹具均已确认exit0。所有本人测试Electron、loopback provider、metadata fixture和隔离profile均finally关闭/移除；没有仍运行的本人App/Java/DB/容器/模型进程。只保留诊断日志/截图/构建输出，无push/部署/用户预览更新。用户App/profile与root运行资源未接管。
+
+本切片暂保留旧Service左入口/CustomizeView及旧worker，避免在未验收本地链前拆依赖；**M05-05必须一起移除默认App执行接线，并提供旧journal只读归档/导出与显式职责导入，绝不自动重放**。M05-04尚未写产品，按root要求先审本候选再放行；模拟入口只在Bot更多菜单弹窗，binding固定受众，事件/执行原子去重，外部只有文字+同受众工作工具，生产V1/Java/LF39不动。不得把本地02/03候选当完整M05交付。
+
+## 历史检查点：M05-02/03 初始接线（已被上方当前事实取代）
 
 - 已写（未提交、尚未场景验证）：shared Work DTO/validation、control.sqlite 增量目录/命令/执行关联、Host 真实目标与 thread 调度、原 Runtime 线程确保/Work 工具扩展、work IPC/preload、文件目标贯通、原 BotsWorkspace/ChatContainer 实际 thread 绑定、右侧 Work 列表及完成/继续、独立草稿键。没有另建文本引擎或 JSON final 协议。
 - 工作与协作 lineage 使用 rootWorkId，单跳回传使用 returnWorkId；同一工作族最多一个驻留执行，主对话优先，原普通 Bot/群全局并发机制保留。完成门禁已加入 peer/outbox/background，晚到失效目标回执保留并跳过；摘要使用元数据聚合，不读工作正文。

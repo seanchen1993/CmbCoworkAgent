@@ -47,8 +47,11 @@ export interface BotRunLease {
 
 export interface BotRunPort {
   browser?: boolean
+  /** Existing workflow/coordinator managers remain authoritative, including durable pending results. */
+  hasPendingWork?(threadIds: readonly string[]): Promise<boolean>
   /** Cancel only this conversation's detached work through the existing managers. */
   cancelBackground?(threadId: string): void | Promise<void>
+  cancelBackgroundCommands?(commandIds: readonly string[]): void | Promise<void>
   recover?(threadIds: string[], signal: AbortSignal): Promise<void>
   /** Claim the existing runtime's thread lease before changing durable task state. */
   acquire(bot: BotDefinition, task: BotTask, work?: BotWorkItem): BotRunLease | null
@@ -205,7 +208,7 @@ export class LocalBotHost {
     if (botTaskGroupId(task)) throw new BotError("CONFLICT", "请在私聊主会话中管理独立工作")
     return task
   }
-  changeWorkFromTool(
+  async changeWorkFromTool(
     source: { taskId: string; callId: string; key: string },
     workId: string,
     version: number,
@@ -214,7 +217,19 @@ export class LocalBotHost {
     const task = this.workToolSource(source.taskId)
     if (!this.store.hasDirectUserRequest(task.id))
       throw new BotError("CONFLICT", "只有当前用户明确指令可以完成或继续工作")
-    const result = this.store.changeWork(task.botId, workId, version, source.callId, action, source)
+    const pending = action === "complete" ? await this.pendingWork(task.botId, workId) : false
+    this.workToolSource(source.taskId)
+    if (!this.store.hasDirectUserRequest(task.id))
+      throw new BotError("CONFLICT", "当前用户指令已不可用")
+    const result = this.store.changeWork(
+      task.botId,
+      workId,
+      version,
+      source.callId,
+      action,
+      source,
+      pending
+    )
     this.changed()
     this.wake()
     return result
@@ -255,7 +270,13 @@ export class LocalBotHost {
     this.wake()
     return receipt
   }
-  changeWork(
+  private async pendingWork(botId: string, workId: string): Promise<boolean> {
+    await this.recovery
+    return (
+      (await this.runtime.hasPendingWork?.([this.store.getWork(botId, workId).threadId])) ?? false
+    )
+  }
+  async changeWork(
     botId: string,
     workId: string,
     version: number,
@@ -263,7 +284,17 @@ export class LocalBotHost {
     action: "complete" | "continue"
   ) {
     this.requireRunning()
-    const result = this.store.changeWork(botId, workId, version, operationId, action)
+    const pending = action === "complete" ? await this.pendingWork(botId, workId) : false
+    this.requireRunning()
+    const result = this.store.changeWork(
+      botId,
+      workId,
+      version,
+      operationId,
+      action,
+      undefined,
+      pending
+    )
     this.changed()
     this.wake()
     return result
@@ -535,6 +566,8 @@ export class LocalBotHost {
     const bot = this.store.getBot(botId)
     if (bot.archived || bot.deleting) return
     const work = this.store.workForThread(botId, threadId)
+    // A late result remains in the original manager's history. It cannot reopen or run a closed work.
+    if (work?.state === "completed") return
     const expectedThread = work?.threadId ?? (groupId ? `group-${groupId}-${botId}` : bot.threadId)
     if (threadId !== expectedThread) throw new BotError("CONFLICT", "后台通知不属于此 Bot 会话")
     if (groupId) {
@@ -705,15 +738,13 @@ export class LocalBotHost {
     const pending = workId
       ? this.store.pendingWorkFamily(botId, workId)
       : this.store.pendingConversationTasks(botId, groupId)
-    const threads = new Set([
-      threadId,
-      ...pending.map((task) => task.threadId),
-      ...(workId ? this.store.workCommandThreads(botId, workId) : [])
-    ])
     for (const task of pending) this.cancel(task.id)
-    for (const current of threads) {
-      this.store.suppressCommands(current)
-      void Promise.resolve(this.runtime.cancelBackground?.(current)).catch(this.reportError)
+    this.store.suppressCommands(threadId)
+    void Promise.resolve(this.runtime.cancelBackground?.(threadId)).catch(this.reportError)
+    if (workId) {
+      const ids = this.store.suppressWorkPeerCommands(botId, workId)
+      if (ids.length)
+        void Promise.resolve(this.runtime.cancelBackgroundCommands?.(ids)).catch(this.reportError)
     }
   }
 

@@ -522,7 +522,8 @@ export class BotStore {
       (SELECT seen_version FROM bot_activity a WHERE a.kind='work' AND a.id=w.id) AS seen_version,
       (SELECT updated_at FROM bot_activity a WHERE a.kind='work' AND a.id=w.id) AS activity_at,
       (SELECT preview FROM bot_activity a WHERE a.kind='work' AND a.id=w.id) AS activity_preview,
-      (SELECT t.state FROM bot_tasks t WHERE t.work_id=w.id
+      (SELECT t.state FROM bot_tasks t WHERE t.work_id=w.id OR
+        (json_extract(t.origin_json,'$.rootWorkId')=w.id AND t.state IN ('queued','running','waiting_user'))
       ORDER BY CASE t.state WHEN 'waiting_user' THEN 0 WHEN 'running' THEN 1 WHEN 'queued' THEN 2 ELSE 3 END,
       t.created_at DESC,t.rowid DESC LIMIT 1) AS execution_state,
       (SELECT COUNT(*) FROM bot_tasks p WHERE json_extract(p.origin_json,'$.rootWorkId')=w.id
@@ -701,10 +702,12 @@ export class BotStore {
             : []
           if (
             context.length !== ids.length ||
+            new Set(context.map((m) => m.id)).size !== ids.length ||
             context.some((m) => !ids.includes(m.id)) ||
             Buffer.byteLength(JSON.stringify(context), "utf8") > 24000
           )
             throw new BotError("INVALID_INPUT", "所选相关消息不可用或超过上限")
+          context.sort((a, b) => a.ordinal - b.ordinal)
           const id = randomUUID(),
             now = this.now(),
             threadId = `bot-work-${id}`
@@ -769,7 +772,8 @@ export class BotStore {
     expectedVersion: number,
     operationId: string,
     action: "complete" | "continue",
-    source?: { taskId: string; callId: string; key: string }
+    source?: { taskId: string; callId: string; key: string },
+    backgroundBusy = false
   ): BotWorkItem {
     return this.transaction(() => {
       const bot = this.getBot(botId)
@@ -782,6 +786,8 @@ export class BotStore {
         source ? `tool:${source.taskId}:${source.callId}` : `lifecycle:${operationId}`,
         fingerprint,
         () => {
+          if (action === "complete" && backgroundBusy)
+            throw new BotError("CONFLICT", "后台工作或待处理结果仍未结束，请处理后再完成工作")
           if (work.version !== expectedVersion)
             throw new BotError("CONFLICT", "工作状态已变化，请刷新")
           if (
@@ -936,16 +942,17 @@ export class BotStore {
         ]
       )
       if (input.archived) {
+        this.assertOwnedWorkPeersIdle(bot.id)
         const awaitingReplies = this.rows(
-          `SELECT id FROM bot_tasks WHERE bot_id=? AND state='queued'
+          `SELECT id FROM bot_tasks WHERE (bot_id=? OR json_extract(origin_json,'$.rootWorkId') IN (SELECT id FROM bot_work_items WHERE bot_id=?)) AND state='queued'
            AND json_extract(origin_json,'$.kind')='bot'
            AND json_extract(origin_json,'$.expectsReply')=1`,
-          [bot.id]
+          [bot.id, bot.id]
         )
         const reason = "Bot 已归档，排队任务未执行。"
         this.db.run(
-          "UPDATE bot_tasks SET state='cancelled', error=?, updated_at=? WHERE bot_id=? AND state='queued'",
-          [reason, this.now(), bot.id]
+          "UPDATE bot_tasks SET state='cancelled', error=?, updated_at=? WHERE (bot_id=? OR json_extract(origin_json,'$.rootWorkId') IN (SELECT id FROM bot_work_items WHERE bot_id=?)) AND state='queued'",
+          [reason, this.now(), bot.id, bot.id]
         )
         // Fence every queued parent before producing replies; never revive work
         // cancelled in this transaction or invent a second delivery path.
@@ -1047,6 +1054,20 @@ export class BotStore {
       : null
   }
 
+  private assertOwnedWorkPeersIdle(botId: string): void {
+    if (
+      this.rows(
+        `SELECT t.id FROM bot_tasks t JOIN bot_work_items w ON w.id=json_extract(t.origin_json,'$.rootWorkId')
+      WHERE w.bot_id=? AND t.state IN ('running','waiting_user') LIMIT 1`,
+        [botId]
+      ).length ||
+      this.rows(
+        `SELECT c.id FROM bot_commands c JOIN bot_tasks t ON t.id=c.source_task_id JOIN bot_work_items w ON w.id=json_extract(t.origin_json,'$.rootWorkId') WHERE w.bot_id=? AND c.state='accepted' LIMIT 1`,
+        [botId]
+      ).length
+    )
+      throw new BotError("CONFLICT", "请先停止独立工作的关联协作和后台执行")
+  }
   /** Merge only requested profile fields; reuse the normal idle-target update guard. */
   updateTeammate(
     taskId: string,
@@ -1077,6 +1098,11 @@ export class BotStore {
   beginDeletion(id: string, expectedVersion: number): string[] {
     return this.transaction(() => {
       const bot = this.getBot(id)
+      this.assertOwnedWorkPeersIdle(id)
+      this.db.run(
+        `UPDATE bot_tasks SET state='cancelled',error='原工作所属 Bot 正在删除',updated_at=? WHERE state='queued' AND json_extract(origin_json,'$.rootWorkId') IN (SELECT id FROM bot_work_items WHERE bot_id=?)`,
+        [this.now(), id]
+      )
       if (bot.version !== expectedVersion)
         throw new BotError("CONFLICT", "Bot 已被修改，请刷新后重试")
       if (
@@ -1324,12 +1350,17 @@ export class BotStore {
       [workId, workId]
     ).map((row) => this.task(row))
   }
-  workCommandThreads(botId: string, workId: string): string[] {
+  suppressWorkPeerCommands(botId: string, workId: string): string[] {
     const work = this.getWork(botId, workId)
-    return this.rows(
-      `SELECT DISTINCT c.thread_id FROM bot_commands c LEFT JOIN bot_tasks t ON t.id=c.source_task_id WHERE c.state='accepted' AND (c.thread_id=? OR json_extract(t.origin_json,'$.rootWorkId')=?)`,
-      [work.threadId, workId]
-    ).map((row) => String(row.thread_id))
+    return this.transaction(() => {
+      const ids = this.rows(
+        `SELECT c.id FROM bot_commands c JOIN bot_tasks t ON t.id=c.source_task_id WHERE c.state='accepted' AND c.thread_id!=? AND json_extract(t.origin_json,'$.rootWorkId')=?`,
+        [work.threadId, workId]
+      ).map((row) => String(row.id))
+      for (const id of ids)
+        this.db.run("UPDATE bot_commands SET suppressed=1 WHERE id=? AND state='accepted'", [id])
+      return ids
+    })
   }
   /** Read the inbox authority, including compacted receipts, without reading any transcript. */
   requestReceipts(botId: string, input: BotRequestCheck[], workId?: string): BotRequestReceipt[] {
@@ -1705,7 +1736,9 @@ export class BotStore {
       : ""
     const row = this.rows(
       `SELECT t.* FROM bot_tasks t JOIN bots b ON b.id=t.bot_id
-      WHERE t.state='queued' AND b.archived=0 ${exclusion}
+      WHERE t.state='queued' AND b.archived=0 AND b.deleting=0 ${exclusion}
+      AND (t.work_id IS NULL OR EXISTS(SELECT 1 FROM bot_work_items own WHERE own.id=t.work_id AND own.bot_id=t.bot_id AND own.state='active'))
+      AND (json_extract(t.origin_json,'$.rootWorkId') IS NULL OR EXISTS(SELECT 1 FROM bot_work_items root JOIN bots owner ON owner.id=root.bot_id WHERE root.id=json_extract(t.origin_json,'$.rootWorkId') AND root.state='active' AND owner.archived=0 AND owner.deleting=0))
       ${allowWork ? "" : "AND t.work_id IS NULL AND json_extract(t.origin_json,'$.rootWorkId') IS NULL"}
       AND NOT EXISTS (SELECT 1 FROM bot_tasks a WHERE a.thread_id=t.thread_id AND a.state IN ('running','waiting_user'))
       ORDER BY CASE WHEN t.work_id IS NULL AND json_extract(t.origin_json,'$.rootWorkId') IS NULL THEN 0 ELSE 1 END, CASE COALESCE(json_extract(t.origin_json,'$.kind'),'user')
@@ -1728,6 +1761,9 @@ export class BotStore {
         this.now(),
         id
       ])
+      const workId = botTaskWorkFamily(current)
+      if (state === "waiting_user" && workId)
+        this.noteWorkActivity(workId, "工作正在等待你处理", true)
       this.changed()
       return this.getTask(id)
     })

@@ -729,7 +729,9 @@ export function BotsWorkspace({ client = localBotClient() }: { client?: BotClien
   const activeWorkId = selected ? (view.activeWorkIdByBot?.[selected.id] ?? null) : null
   const works = useBotWorks(client, selected?.id, activeWorkId, snapshot?.revision ?? 0)
   const selectedWork = activeWorkId && works.selected?.id === activeWorkId ? works.selected : null
-  const selectedThreadId = selectedWork?.threadId ?? selected?.threadId ?? ""
+  const selectedThreadId = activeWorkId
+    ? (selectedWork?.threadId ?? "")
+    : (selected?.threadId ?? "")
   const conversationClient = useMemo(
     () => (selectedWork ? botWorkClient(client, selectedWork) : client),
     [client, selectedWork?.id, selectedWork?.threadId]
@@ -911,6 +913,8 @@ export function BotsWorkspace({ client = localBotClient() }: { client?: BotClien
   }
   const copyConversationId = async (bot: BotDefinition) => {
     try {
+      if (bot.id === selected?.id && activeWorkId && !selectedWork)
+        throw new Error("工作会话尚未读取，请重试后再复制。")
       await navigator.clipboard.writeText(bot.id === selected?.id ? selectedThreadId : bot.threadId)
       toast.success("已复制对话 ID")
     } catch (cause) {
@@ -2048,7 +2052,15 @@ export function BotsWorkspace({ client = localBotClient() }: { client?: BotClien
                   value={detailTab === "memory" ? "details" : detailTab}
                   className="mt-0"
                 >
-                  {detailTab === "files" ? (
+                  {activeWorkId &&
+                  !selectedWork &&
+                  (detailTab === "files" || detailTab === "computer") ? (
+                    <div className="bot-detail-section" role="status">
+                      <p>{works.error ?? "正在读取工作会话，资源面板暂不可用…"}</p>
+                      <button onClick={() => void works.refresh()}>重试</button>
+                      <button onClick={() => selectWork(null)}>返回主对话</button>
+                    </div>
+                  ) : detailTab === "files" ? (
                     <BotFilesPanel
                       key={selectedThreadId}
                       bot={selected}
@@ -2085,14 +2097,6 @@ export function BotsWorkspace({ client = localBotClient() }: { client?: BotClien
                           管理记忆
                         </button>
                       </section>
-                      <BotSchedulePanel
-                        key={selected.id}
-                        botId={selected.id}
-                        client={client}
-                        schedules={(snapshot?.schedules ?? []).filter(
-                          (item) => item.botId === selected.id
-                        )}
-                      />
                       <BotWorkPanel
                         key={`${client.hostId}:${selected.id}`}
                         client={client}
@@ -2101,6 +2105,14 @@ export function BotsWorkspace({ client = localBotClient() }: { client?: BotClien
                         selected={selectedWork}
                         onSelect={selectWork}
                         disabled={Boolean(selected.archived || selected.deleting)}
+                      />
+                      <BotSchedulePanel
+                        key={selected.id}
+                        botId={selected.id}
+                        client={client}
+                        schedules={(snapshot?.schedules ?? []).filter(
+                          (item) => item.botId === selected.id
+                        )}
                       />
                       <section className="bot-detail-section">
                         <h3>当前会话执行</h3>

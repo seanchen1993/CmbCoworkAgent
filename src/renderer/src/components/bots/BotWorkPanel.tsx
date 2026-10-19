@@ -12,6 +12,9 @@ function status(work: BotWorkSummary): string {
   if (work.pendingPeers) return "协作中"
   if (work.backgroundBusy) return "后台处理中"
   if (work.executionState === "queued") return "等待执行"
+  if (work.executionState === "completed") return "已回复"
+  if (work.executionState === "failed") return "执行失败"
+  if (work.executionState === "cancelled") return "已停止"
   if (work.executionState === "outcome_unknown" || work.executionState === "interrupted")
     return "需要核对结果"
   return "进行中"
@@ -97,6 +100,10 @@ export function BotWorkPanel({
     }
   }
   if (!client.works) return null
+  const directory = [
+    ...controller.priority,
+    ...controller.items.filter((item) => !controller.priority.some((v) => v.id === item.id))
+  ]
   return (
     <section className="bot-detail-section bot-works" aria-label="独立工作">
       <div className="bot-works-heading">
@@ -111,7 +118,6 @@ export function BotWorkPanel({
       </div>
       {selected && (
         <div className="bot-work-current">
-          <strong>{selected.title}</strong>
           <span>{status(selected)}</span>
           <div>
             <button onClick={() => onSelect(null)}>
@@ -178,28 +184,11 @@ export function BotWorkPanel({
           <button onClick={() => void controller.refresh()}>刷新</button>
         </p>
       )}
-      {controller.priority.length > 0 && (
-        <div className="bot-work-list" aria-label="待处理工作">
-          {controller.priority.map((work) => (
-            <button
-              className="bot-work-row"
-              key={work.id}
-              aria-pressed={selected?.id === work.id}
-              onClick={() => onSelect(work.id)}
-            >
-              <span>
-                {work.activity?.unread ? "● " : ""}
-                {work.title}
-              </span>
-              <small>{status(work)}</small>
-            </button>
-          ))}
-        </div>
-      )}
       <div className="bot-work-list" aria-label="全部工作">
-        {controller.items.slice(0, limit).map((work) => (
+        {directory.slice(0, limit).map((work) => (
           <button
             className="bot-work-row"
+            data-work-id={work.id}
             key={work.id}
             aria-pressed={selected?.id === work.id}
             onClick={() => onSelect(work.id)}
@@ -212,14 +201,12 @@ export function BotWorkPanel({
           </button>
         ))}
       </div>
-      {!controller.items.length && !controller.loading && (
-        <p>明确交办的工作会在这里保留独立会话。</p>
-      )}
-      {(controller.items.length > limit || controller.cursor) && (
+      {!directory.length && !controller.loading && <p>明确交办的工作会在这里保留独立会话。</p>}
+      {(directory.length > limit || controller.cursor) && (
         <button
           disabled={controller.loading}
           onClick={() => {
-            if (limit >= controller.items.length) void controller.more()
+            if (limit >= directory.length) void controller.more()
             setLimit((v) => v + 40)
           }}
         >

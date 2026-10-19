@@ -26,8 +26,13 @@ const fixture = vi.hoisted(() => ({
   check: vi.fn(),
   restore: vi.fn(),
   hasNotifications: vi.fn(),
+  workflowActive: vi.fn(() => false),
+  workflowPending: vi.fn(async () => false),
+  workerActive: vi.fn(() => false),
+  workerPersisting: vi.fn(() => false),
   cancelWorkflow: vi.fn(),
   cancelCommands: vi.fn(),
+  cancelCommandIds: vi.fn(),
   commandLifecycle: vi.fn(() => ({ accepted: vi.fn(), settled: vi.fn() })),
   profileContinuation: vi.fn<() => string | null>(() => null),
   workTools: vi.fn<(...args: unknown[]) => string[]>(() => ["works"]),
@@ -92,16 +97,25 @@ vi.mock("../agent/coordinator-worker-manager", () => ({
   coordinatorWorkerManager: {
     restoreWorkersForThread: fixture.restore,
     hasAutoRunnableNotifications: fixture.hasNotifications,
+    hasRunningWorkersForThread: fixture.workerActive,
+    hasTerminalWorkerAwaitingNotificationForThread: fixture.workerPersisting,
     cancelWorkersForThread: fixture.cancelWorkers,
     waitForWorkerCleanup: fixture.waitWorkers,
     acknowledgeNotifications: fixture.acknowledgeWorkers
   }
 }))
 vi.mock("../agent/local-sandbox", () => ({
-  LocalSandbox: { cancelBackgroundTasksAndWait: fixture.cancelCommands }
+  LocalSandbox: {
+    cancelBackgroundTasksAndWait: fixture.cancelCommands,
+    cancelBackgroundCommandIdsAndWait: fixture.cancelCommandIds
+  }
 }))
 vi.mock("../agent/workflow/run-manager", () => ({
-  workflowRunManager: { cancel: fixture.cancelWorkflow }
+  workflowRunManager: {
+    cancel: fixture.cancelWorkflow,
+    isActive: fixture.workflowActive,
+    hasDeliverablePendingNotificationAsync: fixture.workflowPending
+  }
 }))
 vi.mock("../mcp/capability-service", () => ({ getGlobalMcpCapabilityService: () => ({}) }))
 vi.mock("./mcp-scope", () => ({ createBotMcpScope: () => fixture.scope }))
@@ -169,6 +183,10 @@ function metadata(groupId?: string) {
 beforeEach(() => {
   vi.clearAllMocks()
   fixture.verifyFiles.mockReset().mockResolvedValue([])
+  fixture.workflowActive.mockReturnValue(false)
+  fixture.workflowPending.mockResolvedValue(false)
+  fixture.workerActive.mockReturnValue(false)
+  fixture.workerPersisting.mockReturnValue(false)
   fixture.memoryEnabled = true
   fixture.profileContinuation.mockReturnValue(null)
   fixture.memorySnapshot.mockReset().mockReturnValue([])
@@ -188,6 +206,40 @@ beforeEach(() => {
   )
 })
 describe("Bot Runtime integration", () => {
+  it("requires the fixed initialized work Thread identity instead of recreating missing history", () => {
+    const work: any = {
+      id: "w",
+      botId: "a",
+      threadId: "work-thread",
+      title: "Draft",
+      audienceKey: "desktop",
+      threadInitialized: true
+    }
+    fixture.thread.mockReturnValue(null)
+    expect(() =>
+      prepareBotThread(bot, { threadId: work.threadId, origin: { kind: "user" } }, work)
+    ).toThrow("记录缺失")
+    expect(fixture.create).not.toHaveBeenCalled()
+    fixture.thread.mockReturnValue({
+      metadata: JSON.stringify({ ...metadata(), botWorkId: "other", botAudienceKey: "desktop" })
+    })
+    expect(() =>
+      prepareBotThread(bot, { threadId: work.threadId, origin: { kind: "user" } }, work)
+    ).toThrow("身份不一致")
+    fixture.thread.mockReturnValue({
+      metadata: JSON.stringify({ ...metadata(), botWorkId: "w", botAudienceKey: "desktop" })
+    })
+    expect(prepareBotThread(bot, { threadId: work.threadId, origin: { kind: "user" } }, work)).toBe(
+      "/synthetic/workspaces/a"
+    )
+  })
+  it("forwards only the trusted command IDs without cancelling a peer's workflow or workers", async () => {
+    await port().cancelBackgroundCommands!(["fixed-command"])
+    expect(fixture.cancelCommandIds).toHaveBeenCalledWith(["fixed-command"])
+    expect(fixture.cancelWorkflow).not.toHaveBeenCalled()
+    expect(fixture.cancelWorkers).not.toHaveBeenCalled()
+    expect(fixture.cancelCommands).not.toHaveBeenCalled()
+  })
   it("silences only the no-op background commit notice and preserves meaningful events", async () => {
     await port().acquire(bot, task)!.execute(new AbortController().signal, vi.fn())
     const deps = fixture.managedDelivery.mock.calls.at(-1)![0] as {
@@ -709,6 +761,26 @@ describe("Bot Runtime integration", () => {
       expect(fixture.summary).not.toHaveBeenCalled()
     }
   )
+  it("checks original workflow and coordinator activity plus durable pending notification before work completion", async () => {
+    fixture.hasNotifications.mockReturnValue(false)
+    const runtime = port()
+    expect(await runtime.hasPendingWork!(["t"])).toBe(false)
+    expect(fixture.workflowPending).toHaveBeenCalledWith("/synthetic/workspaces/a", "t")
+    fixture.workflowActive.mockReturnValue(true)
+    expect(await runtime.hasPendingWork!(["t"])).toBe(true)
+    fixture.workflowActive.mockReturnValue(false)
+    fixture.workerActive.mockReturnValue(true)
+    expect(await runtime.hasPendingWork!(["t"])).toBe(true)
+    fixture.workerActive.mockReturnValue(false)
+    fixture.workerPersisting.mockReturnValue(true)
+    expect(await runtime.hasPendingWork!(["t"])).toBe(true)
+    fixture.workerPersisting.mockReturnValue(false)
+    fixture.hasNotifications.mockReturnValue(true)
+    expect(await runtime.hasPendingWork!(["t"])).toBe(true)
+    fixture.hasNotifications.mockReturnValue(false)
+    fixture.workflowPending.mockResolvedValue(true)
+    expect(await runtime.hasPendingWork!(["t"])).toBe(true)
+  })
   it("reuses the configured execution mode and scoped tools, then summarizes only a successful user turn", async () => {
     const runtime = port(),
       lease = runtime.acquire(bot, task)!

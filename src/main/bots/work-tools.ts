@@ -15,14 +15,18 @@ export function createBotWorkTools(
   const invoke = async (
     name: string,
     callId: string | undefined,
-    action: (host: LocalBotHost) => unknown
+    action: (host: LocalBotHost) => unknown | Promise<unknown>
   ) => {
     try {
       signal.throwIfAborted()
       if (!callId) throw new Error("缺少可信工具调用标识，未执行工作操作")
       const host = getHost()
       host.workToolSource(taskId)
-      return JSON.stringify({ kind: "bot-work-receipt", operation: name, receipt: action(host) })
+      return JSON.stringify({
+        kind: "bot-work-receipt",
+        operation: name,
+        receipt: await action(host)
+      })
     } catch (cause) {
       signal.throwIfAborted()
       const content = JSON.stringify({

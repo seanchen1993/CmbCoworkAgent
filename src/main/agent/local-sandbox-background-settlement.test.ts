@@ -16,6 +16,42 @@ import { LocalSandbox } from "./local-sandbox"
 import { modCallContext } from "../mods/context"
 
 describe("background result publication scope", () => {
+  it("cancels exact host-owned command IDs without touching another command in the same peer thread", async () => {
+    const tasks = (LocalSandbox as unknown as { backgroundTasks: Map<string, any> })
+        .backgroundTasks,
+      selected = new AbortController(),
+      unrelated = new AbortController(),
+      termination = createDeferred<void>()
+    tasks.set("work-selected", {
+      threadId: "peer",
+      command: "fixture",
+      completed: false,
+      abortController: selected,
+      termination: termination.promise
+    })
+    tasks.set("peer-unrelated", {
+      threadId: "peer",
+      command: "other",
+      completed: false,
+      abortController: unrelated
+    })
+    try {
+      let finished = false
+      const stopped = LocalSandbox.cancelBackgroundCommandIdsAndWait(["work-selected"]).then(() => {
+        finished = true
+      })
+      expect(selected.signal.aborted).toBe(true)
+      expect(unrelated.signal.aborted).toBe(false)
+      await Promise.resolve()
+      expect(finished).toBe(false)
+      termination.resolve()
+      await stopped
+    } finally {
+      termination.resolve()
+      tasks.delete("work-selected")
+      tasks.delete("peer-unrelated")
+    }
+  })
   it("rejects other threads and holds partial protected output", () => {
     const sandbox = new LocalSandbox({
       rootDir: tmpdir(),

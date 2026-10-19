@@ -28,7 +28,13 @@ const fixture = vi.hoisted(() => ({
   stopConversation: vi.fn(),
   markUnread: vi.fn(),
   markRead: vi.fn(),
-  groupMessages: vi.fn()
+  groupMessages: vi.fn(),
+  listWorks: vi.fn(),
+  workSummaries: vi.fn(),
+  getWork: vi.fn(),
+  createWork: vi.fn(),
+  changeWork: vi.fn(),
+  markWorksRead: vi.fn()
 }))
 vi.mock("electron", () => ({
   BrowserWindow: { getAllWindows: () => [] },
@@ -70,6 +76,49 @@ beforeEach(() => {
   fixture.getHost.mockImplementation(() => fixture)
 })
 describe("Bot IPC boundaries", () => {
+  it("accepts only bounded local work controls and never renderer authority or conversation paths", () => {
+    const call = register(),
+      input = { botId: "a", operationId: "create", title: "Draft", goal: "Prepare" }
+    for (const invalid of [
+      { ...input, threadId: "owner" },
+      { ...input, sourceTaskId: "task" },
+      { ...input, audienceKey: "desktop" },
+      { ...input, workspacePath: "/private" },
+      { ...input, contextMessageIds: ["m", "m"] },
+      { ...input, contextMessageIds: Array.from({ length: 13 }, (_, i) => `m${i}`) }
+    ])
+      expect(() => call("bots:work:create", "local", invalid)).toThrow()
+    expect(() => call("bots:work:create", "remote", input)).toThrow()
+    expect(fixture.createWork).not.toHaveBeenCalled()
+    call("bots:work:create", "local", input)
+    expect(fixture.createWork).toHaveBeenCalledWith(input)
+    for (const ids of ["work", Array(41).fill("w"), ["w", "w"], ["../w"]])
+      expect(() => call("bots:work:summaries", "local", "a", ids)).toThrow()
+    expect(() => call("bots:work:get", "local", "a", "../w")).toThrow()
+    expect(() => call("bots:work:mark-all-read", "local", "a", 0)).toThrow()
+    const lifecycle = {
+      botId: "a",
+      workId: "w",
+      expectedVersion: 1,
+      operationId: "done",
+      action: "complete"
+    }
+    expect(() => call("bots:work:lifecycle", "local", { ...lifecycle, actor: "owner" })).toThrow()
+    expect(() => call("bots:work:lifecycle", "local", { ...lifecycle, action: "replay" })).toThrow()
+    call("bots:work:lifecycle", "local", lifecycle)
+    expect(fixture.changeWork).toHaveBeenCalledWith("a", "w", 1, "done", "complete")
+    call(
+      "bots:request-receipts",
+      "local",
+      "a",
+      [{ requestId: "r", messageHash: "a".repeat(64) }],
+      "w"
+    )
+    expect(fixture.requestReceipts).toHaveBeenLastCalledWith("a", expect.any(Array), "w")
+    expect(() => call("bots:stop-conversation", "local", "a", undefined, "../w")).toThrow()
+    call("bots:stop-conversation", "local", "a", undefined, "w")
+    expect(fixture.stopConversation).toHaveBeenLastCalledWith("a", undefined, "w")
+  })
   it("validates private quote host and both identities before domain access", () => {
     const call = register()
     expect(() => call("bots:message-reply", "remote", "bot", "message")).toThrow()

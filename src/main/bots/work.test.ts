@@ -1,5 +1,8 @@
 import { DatabaseSync } from "node:sqlite"
 import { createHash } from "node:crypto"
+import { mkdtempSync, rmSync } from "node:fs"
+import { tmpdir } from "node:os"
+import { join } from "node:path"
 import { afterEach, describe, expect, it } from "vitest"
 import { NativeSqliteAdapter } from "../db/native-sqlite-adapter"
 import { BotStore } from "./store"
@@ -30,6 +33,44 @@ function finish(store: BotStore, id: string) {
 }
 
 describe("durable local independent works", () => {
+  it("reopens the original receipt and rolls back native write refusal without creating another work", () => {
+    const dir = mkdtempSync(join(tmpdir(), "m05-work-store-")),
+      path = join(dir, "control.sqlite")
+    let db = new NativeSqliteAdapter(new DatabaseSync(path))
+    try {
+      let store = new BotStore(db)
+      const bot = store.create({
+        name: "A",
+        instructions: "Work",
+        color: "#123456",
+        modelRef: null
+      })
+      const input = {
+        botId: bot.id,
+        operationId: "create-original",
+        title: "Draft",
+        goal: "Prepare"
+      }
+      const receipt = store.createWork(input)
+      store.initializeWorkThread(bot.id, receipt.work.id)
+      db.close()
+      db = new NativeSqliteAdapter(new DatabaseSync(path))
+      store = new BotStore(db)
+      expect(store.createWork(input)).toEqual(receipt)
+      expect(store.getWork(bot.id, receipt.work.id).threadInitialized).toBe(true)
+      expect(store.recentTasks()).toHaveLength(1)
+      db.run("PRAGMA query_only=ON")
+      expect(() => store.createWork({ ...input, operationId: "write-refused" })).toThrow()
+      db.run("PRAGMA query_only=OFF")
+      expect(store.listWorks(bot.id).items).toHaveLength(1)
+      const accepted = store.createWork({ ...input, operationId: "write-refused" })
+      expect(store.createWork({ ...input, operationId: "write-refused" })).toEqual(accepted)
+      expect(store.recentTasks()).toHaveLength(2)
+    } finally {
+      db.close()
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
   it("creates one fixed conversation and initial execution, scopes replay and receipts, and keeps lifecycle explicit", () => {
     const f = fixture(),
       r = f.create()
@@ -157,6 +198,31 @@ describe("durable local independent works", () => {
       message: "A draft"
     })
   })
+  it("keeps work-family waits visible and fences archive/deletion without orphaning peer execution", () => {
+    const f = fixture(),
+      r = f.create()
+    f.store.transition(r.task.id, "running")
+    const peer = f.store.delegate(r.task.id, f.peer.id, "Review", "peer")
+    f.store.settle(r.task.id, "completed", null)
+    f.store.transition(peer.id, "running")
+    f.store.transition(peer.id, "waiting_user")
+    expect(f.store.getWork(f.bot.id, r.work.id).executionState).toBe("waiting_user")
+    expect(f.store.getWork(f.bot.id, r.work.id).activity?.unread).toBe(true)
+    expect(() =>
+      f.store.update({ ...f.bot, expectedVersion: f.bot.version, archived: true })
+    ).toThrow("关联协作")
+    expect(() => f.store.beginDeletion(f.bot.id, f.bot.version)).toThrow("关联协作")
+    expect(f.store.getBot(f.bot.id).archived).toBe(false)
+    f.store.settle(peer.id, "cancelled", null)
+    const next = f.create("next")
+    f.store.transition(next.task.id, "running")
+    const queuedPeer = f.store.delegate(next.task.id, f.peer.id, "Another review", "another")
+    f.store.settle(next.task.id, "completed", null)
+    f.store.update({ ...f.bot, expectedVersion: f.bot.version, archived: true })
+    expect(f.store.getTask(queuedPeer.id).state).toBe("cancelled")
+    expect(f.store.nextQueued([])).toBeNull()
+    expect(() => f.store.flushReplies()).not.toThrow()
+  })
   it("keeps paginated metadata and thread discovery after execution pruning", () => {
     const f = fixture()
     for (let i = 0; i < 45; i++) {
@@ -237,6 +303,109 @@ describe("durable local independent works", () => {
     expect(f.store.activities().some((x) => x.kind === "work")).toBe(false)
     f.store.markWorksRead(f.bot.id, f.store.workActivities()[0].version)
     expect(f.store.workActivities()[0].unread).toBe(false)
+  })
+  it("blocks completion on original background managers and skips late notifications for a closed work", async () => {
+    const f = fixture(),
+      r = f.create()
+    finish(f.store, r.task.id)
+    let busy = true
+    const host = new LocalBotHost(f.store, {
+      acquire: () => null,
+      onAvailable: () => () => {},
+      hasPendingWork: async (threads) => {
+        expect(threads).toContain(r.work.threadId)
+        return busy
+      }
+    })
+    hosts.push(host)
+    const current = f.store.getWork(f.bot.id, r.work.id)
+    await expect(
+      host.changeWork(f.bot.id, r.work.id, current.version, "complete", "complete")
+    ).rejects.toThrow("后台")
+    busy = false
+    const done = await host.changeWork(f.bot.id, r.work.id, current.version, "complete", "complete")
+    expect(done.state).toBe("completed")
+    busy = true
+    expect(
+      await host.changeWork(f.bot.id, r.work.id, current.version, "complete", "complete")
+    ).toEqual(done)
+    expect(() =>
+      host.enqueueNotification(f.bot.id, r.work.threadId, "workflow", "late", "Late result")
+    ).not.toThrow()
+    expect(() =>
+      host.enqueueNotification(f.bot.id, r.work.threadId, "coordinator", "late", "Late result")
+    ).not.toThrow()
+    expect(f.store.recentTasks()).toHaveLength(1)
+  })
+  it("does not claim a historical peer's later background work, and stops only source-bound peer commands", async () => {
+    const f = fixture(),
+      cancelledThreads: string[] = [],
+      cancelledCommands: string[][] = []
+    const host = new LocalBotHost(f.store, {
+      acquire: () => null,
+      onAvailable: () => () => {},
+      hasPendingWork: async (threads) => threads.includes(f.peer.threadId),
+      cancelBackground: (thread) => {
+        cancelledThreads.push(thread)
+      },
+      cancelBackgroundCommands: (ids) => {
+        cancelledCommands.push([...ids])
+      }
+    })
+    hosts.push(host)
+    const r = f.create()
+    f.store.transition(r.task.id, "running")
+    const peer = f.store.delegate(r.task.id, f.peer.id, "Review", "peer")
+    f.store.settle(r.task.id, "completed", null)
+    finish(f.store, peer.id)
+    f.store.flushReplies()
+    finish(f.store, f.store.recentTasks().find((t) => t.requestId === `reply-${peer.id}`)!.id)
+    const unrelated = f.store.enqueue({
+      botId: f.peer.id,
+      requestId: "unrelated",
+      message: "Other work"
+    })
+    f.store.transition(unrelated.id, "running")
+    f.store.acceptCommand(unrelated.id, {
+      id: "unrelated-command",
+      threadId: f.peer.threadId,
+      command: "unrelated",
+      cwd: "/fixture",
+      startedAt: 1
+    })
+    f.store.settle(unrelated.id, "completed", null)
+    expect(
+      (
+        await host.changeWork(
+          f.bot.id,
+          r.work.id,
+          f.store.getWork(f.bot.id, r.work.id).version,
+          "done",
+          "complete"
+        )
+      ).state
+    ).toBe("completed")
+    host.stopConversation(f.bot.id, undefined, r.work.id)
+    expect(cancelledThreads).toEqual([r.work.threadId])
+    expect(cancelledCommands).toEqual([])
+    const other = f.create("other")
+    f.store.transition(other.task.id, "running")
+    const linked = f.store.delegate(other.task.id, f.peer.id, "Review another", "another")
+    f.store.transition(linked.id, "running")
+    f.store.acceptCommand(linked.id, {
+      id: "linked-command",
+      threadId: f.peer.threadId,
+      command: "linked",
+      cwd: "/fixture",
+      startedAt: 2
+    })
+    f.store.settle(linked.id, "completed", null)
+    host.stopConversation(f.bot.id, undefined, other.work.id)
+    expect(cancelledThreads).toEqual([r.work.threadId, other.work.threadId])
+    expect(cancelledCommands).toEqual([["linked-command"]])
+    expect(
+      f.db.exec("SELECT suppressed FROM bot_commands WHERE id='unrelated-command'")[0].values[0][0]
+    ).toBe(0)
   })
   it("reserves one graph for main while a work or its peer waits; additional work stays queued", async () => {
     const f = fixture(),

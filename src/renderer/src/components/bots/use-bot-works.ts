@@ -17,13 +17,18 @@ export function useBotWorks(
   const [selected, setSelected] = useState<BotWorkItem | null>(null)
   const [cursor, setCursor] = useState<string | null>(null)
   const [query, setQuery] = useState("")
+  const scope = JSON.stringify([client.hostId, botId, query])
+  const [loadedScope, setLoadedScope] = useState("")
+  const pending = useRef<Promise<void> | null>(null),
+    dirty = useRef(false),
+    mounted = useRef(true)
   const [error, setError] = useState<string | null>(null)
   const [loading, setLoading] = useState(false)
   const generation = useRef(0),
     expanded = useRef(false),
     current = useRef({ botId, selectedId })
   current.current = { botId, selectedId }
-  const refresh = useCallback(async () => {
+  const load = useCallback(async () => {
     const token = ++generation.current
     if (!botId || !client.works) {
       setItems([])
@@ -48,6 +53,7 @@ export function useBotWorks(
         refreshed.push(...(await client.works.summaries(botId, extra.slice(offset, offset + 40))))
       }
       if (generation.current !== token) return
+      setLoadedScope(scope)
       setPriority(page.priority)
       setItems((old) =>
         expanded.current
@@ -70,7 +76,32 @@ export function useBotWorks(
     } finally {
       if (generation.current === token) setLoading(false)
     }
-  }, [client, botId, selectedId, query])
+  }, [client, botId, selectedId, query, scope])
+  const latestLoad = useRef(load)
+  latestLoad.current = load
+  const refresh = useCallback(() => {
+    dirty.current = true
+    if (pending.current) return pending.current
+    pending.current = Promise.resolve()
+      .then(async () => {
+        while (dirty.current && mounted.current) {
+          dirty.current = false
+          await latestLoad.current()
+        }
+      })
+      .finally(() => {
+        pending.current = null
+      })
+    return pending.current
+  }, [])
+  useEffect(() => {
+    mounted.current = true
+    return () => {
+      mounted.current = false
+      dirty.current = false
+      generation.current++
+    }
+  }, [])
   useEffect(() => {
     expanded.current = false
     setItems([])
@@ -89,9 +120,9 @@ export function useBotWorks(
     return () => {
       generation.current++
     }
-  }, [refresh, revision])
+  }, [load, refresh, revision])
   const more = async () => {
-    if (!botId || !cursor || !client.works || loading) return
+    if (!botId || !cursor || !client.works || loading || pending.current) return
     const token = generation.current
     setLoading(true)
     try {
@@ -111,10 +142,13 @@ export function useBotWorks(
     }
   }
   return {
-    priority,
-    items: items.map((item) => (selected?.id === item.id ? selected : item)),
-    selected,
-    cursor,
+    priority: loadedScope === scope ? priority : [],
+    items:
+      loadedScope === scope
+        ? items.map((item) => (selected?.id === item.id ? selected : item))
+        : [],
+    selected: selected?.botId === botId && selected?.id === selectedId ? selected : null,
+    cursor: loadedScope === scope ? cursor : null,
     query,
     setQuery,
     error,

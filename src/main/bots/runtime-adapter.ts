@@ -138,6 +138,9 @@ export function createLocalBotRunPort(
 ): BotRunPort {
   return {
     browser: true,
+    cancelBackgroundCommands(commandIds) {
+      return LocalSandbox.cancelBackgroundCommandIdsAndWait(commandIds)
+    },
     cancelBackground(threadId) {
       workflowRunManager.cancel(threadId)
       const workers = coordinatorWorkerManager.cancelWorkersForThread(
@@ -157,6 +160,29 @@ export function createLocalBotRunPort(
           )
       }
       return Promise.all([commandCleanup, workerCleanup]).then(() => undefined)
+    },
+    async hasPendingWork(threadIds) {
+      for (const threadId of threadIds) {
+        if (
+          workflowRunManager.isActive(threadId) ||
+          coordinatorWorkerManager.hasRunningWorkersForThread(threadId) ||
+          coordinatorWorkerManager.hasTerminalWorkerAwaitingNotificationForThread(threadId) ||
+          coordinatorWorkerManager.hasAutoRunnableNotifications(threadId, { owner: "desktop" })
+        )
+          return true
+        const thread = getThreadCore(threadId)
+        if (!thread) continue
+        const metadata = JSON.parse(thread.metadata || "{}") as Record<string, unknown>
+        if (
+          typeof metadata.workspacePath === "string" &&
+          (await workflowRunManager.hasDeliverablePendingNotificationAsync(
+            metadata.workspacePath,
+            threadId
+          ))
+        )
+          return true
+      }
+      return false
     },
     async recover(threadIds, signal) {
       for (const threadId of threadIds) {
