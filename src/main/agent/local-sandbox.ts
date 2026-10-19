@@ -7459,7 +7459,7 @@ export class LocalSandbox
     if (!this.pluginRoot) return false
 
     const hooksRoot = path.win32
-      .normalize(path.win32.join(this.pluginRoot, "hooks"))
+      .normalize(path.win32.join(resolveMarketRuntimePath(this.pluginRoot), "hooks"))
       .replace(/\\+$/, "")
       .replace(/\\+/g, "\\")
       .toLowerCase()

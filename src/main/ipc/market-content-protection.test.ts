@@ -373,6 +373,29 @@ describe("market content IPC regression", () => {
     expect(readFileSync(join(root, "hook.cjs"), "utf8")).toContain(MARKET_CONTENT_PREFIX)
   })
 
+  it.skipIf(process.platform !== "win32")(
+    "preserves project hook execution after runtime path mapping",
+    async () => {
+      const { LocalSandbox } = await import("../agent/local-sandbox")
+      const plugin = storage.getPlugins().find((item) => item.name === "hook-protected")!
+      const hookPath = join(plugin.path, "hooks", "run.cjs")
+      writeFileSync(hookPath, "console.log('protected-project-hook')")
+      protectMarketDirectory(plugin.path)
+      const sandbox = new LocalSandbox({
+        rootDir: home,
+        runId: "protected-project-hook",
+        windowsSandbox: "readonly",
+        pluginRoot: plugin.path
+      })
+      const prefix = /(?:pwsh|powershell)(?:\.exe)?$/i.test(LocalSandbox.resolvedShell())
+        ? "& "
+        : ""
+      const result = await sandbox.executeRaw(`${prefix}"${process.execPath}" "${hookPath}"`)
+      expect(result.exitCode, result.output).toBe(0)
+      expect(result.output).toContain("protected-project-hook")
+    }
+  )
+
   it("executes ordinary commands before a custom skills directory exists", async () => {
     const { LocalSandbox } = await import("../agent/local-sandbox")
     const custom = storage.getCustomSkillsDir()
