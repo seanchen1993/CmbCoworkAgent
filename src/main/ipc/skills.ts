@@ -135,8 +135,8 @@ function isPathUnderAllowedDirs(filePath: string): boolean {
 async function assertUserOriginalContent(filePath: string): Promise<void> {
   assertOriginalContent(filePath)
   const real = await fs.realpath(filePath)
-  const custom = await fs.realpath(getCustomSkillsDir())
-  if (isPathUnderDir(real, custom)) return
+  const custom = await fs.realpath(getCustomSkillsDir()).catch(() => null)
+  if (custom && isPathUnderDir(real, custom)) return
   for (const plugin of getPlugins()) {
     if (plugin.origin !== "local") continue
     const root = await fs.realpath(plugin.path).catch(() => null)

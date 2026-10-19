@@ -29,6 +29,8 @@ import {
   readContentFileSync
 } from "./market-content"
 import { discoverSkills, discoverSkillsSync } from "../skills/discovery"
+import { SkillUsageDetector } from "../agent/skill-evolution/usage-detector"
+import { loadAgentProfiles, loadAgentProfilesAsync } from "../agent/agent-registry"
 import { readSkillPluginCatalogPage } from "../skill-plugin-catalog/reader"
 import {
   issueExternalFileReadGrant,
@@ -133,6 +135,40 @@ describe("market content storage and runtime", () => {
     expect(() =>
       assertOriginalUpload(Buffer.from("{}"), `plugin/${MARKET_CONTENT_MARKER}`)
     ).toThrow("受保护")
+  })
+
+  it("keeps the version in usage attribution for protected skills", () => {
+    const root = fixture()
+    const skillPath = join(root, "SKILL.md")
+    writeFileSync(skillPath, "---\nname: market-usage\nversion: 2.3.4\n---\nprivate")
+    protectMarketDirectory(root)
+    const detector = new SkillUsageDetector()
+    detector.onSkillsMetadata([{ name: "market-usage", path: skillPath }])
+    expect(detector.onReadFilePath(skillPath)).toBe(true)
+    expect(detector.getUsedSkillNames()).toEqual(["market-usage-v2.3.4"])
+  })
+
+  it("loads protected subagents through both registries with the original prompt byte limit", async () => {
+    const root = fixture()
+    const agentPath = join(root, "agent.md")
+    const oversizedPath = join(root, "oversized.md")
+    const prompt = "x".repeat(220_000)
+    writeFileSync(agentPath, "---\nname: market-agent\ntools: Read\n---\n" + prompt)
+    writeFileSync(oversizedPath, "---\nname: oversized-agent\n---\n" + "x".repeat(270_000))
+    protectMarketDirectory(root)
+    const config = {
+      disabledBuiltinSubagents: [],
+      customSubagentFiles: [agentPath, oversizedPath]
+    }
+    for (const profiles of [
+      loadAgentProfiles(undefined, config),
+      await loadAgentProfilesAsync(undefined, config)
+    ]) {
+      const profile = profiles.find((item) => item.name === "market-agent")
+      expect(profile?.shellAccess).toBe("none")
+      expect(profile?.systemPrompt === prompt).toBe(true)
+      expect(profiles.some((profile) => profile.name === "oversized-agent")).toBe(false)
+    }
   })
 
   it("does not allow a junction to make protected files editable", () => {

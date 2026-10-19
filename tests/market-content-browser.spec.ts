@@ -71,9 +71,26 @@ async function main(): Promise<void> {
       animations: "disabled",
       path: join(artifacts, "original-editable.png")
     })
+    await page.evaluate(() =>
+      (
+        window as unknown as { renderMarketPluginFixture: (value: boolean) => void }
+      ).renderMarketPluginFixture(true)
+    )
+    await page.getByText("具体 Hooks、Skills、MCP 配置详情已隐藏", { exact: false }).waitFor()
+    assert.equal(await page.getByText("private-mcp-server", { exact: true }).count(), 0)
+    await page.screenshot({
+      animations: "disabled",
+      path: join(artifacts, "market-plugin-protected.png")
+    })
+    await page.evaluate(() =>
+      (
+        window as unknown as { renderMarketPluginFixture: (value: boolean) => void }
+      ).renderMarketPluginFixture(false)
+    )
+    await page.getByText("private-mcp-server", { exact: true }).waitFor()
     assert.deepEqual(errors, [])
     console.log(
-      "Market content browser regression passed: protected source hidden; original source editable"
+      "Market content browser regression passed: protected skills/plugins hidden; originals viewable and editable"
     )
   } finally {
     await app.close()

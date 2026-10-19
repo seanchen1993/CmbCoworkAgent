@@ -1,5 +1,6 @@
 import { createRoot } from "react-dom/client"
 import { SkillDetail } from "../../src/renderer/src/components/customize/SkillsPanel"
+import { PluginDetailPanel } from "../../src/renderer/src/components/customize/PluginsPanel"
 import type { SkillMetadata } from "../../src/renderer/src/types"
 
 const root = createRoot(document.getElementById("root")!)
@@ -46,5 +47,39 @@ export function renderMarketContentFixture(protectedContent: boolean): void {
   )
 }
 
-Object.assign(window, { renderMarketContentFixture })
+export function renderMarketPluginFixture(protectedContent: boolean): void {
+  root.render(
+    <main style={{ height: "100vh", display: "flex", padding: 24 }}>
+      <PluginDetailPanel
+        plugin={{
+          id: "plugin-fixture",
+          name: "企业插件",
+          version: "1.0.0",
+          description: "企业工作流",
+          author: "",
+          path: "C:/plugins/enterprise",
+          enabled: true,
+          skillCount: 0,
+          mcpServerCount: 1,
+          origin: protectedContent ? "market" : "local",
+          createdAt: "",
+          updatedAt: ""
+        }}
+        detail={{
+          skills: [],
+          mcpServers: ["private-mcp-server"],
+          mcpServerDetails: [],
+          hookCount: 0,
+          hooks: [],
+          manifest: null
+        }}
+        onToggleEnabled={() => undefined}
+        onDelete={() => undefined}
+        hideActions
+      />
+    </main>
+  )
+}
+
+Object.assign(window, { renderMarketContentFixture, renderMarketPluginFixture })
 renderMarketContentFixture(true)

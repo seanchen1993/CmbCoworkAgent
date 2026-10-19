@@ -1,7 +1,6 @@
 import {
   decodeMarketContent,
-  findProtectedMarketRoot,
-  MARKET_CONTENT_PREFIX
+  getMarketContentStoredLimit
 } from "../services/market-content"
 import { constants } from "node:fs"
 import { open, type FileHandle } from "node:fs/promises"
@@ -106,9 +105,7 @@ export async function readHarnessJsonFileBounded(
     throw error
   }
   try {
-    const storedLimit = findProtectedMarketRoot(path)
-      ? Math.ceil(maxBytes / 3) * 4 + MARKET_CONTENT_PREFIX.length
-      : maxBytes
+    const storedLimit = getMarketContentStoredLimit(path, maxBytes)
     const bytes = decodeMarketContent(await readOpenedFileBounded(handle, storedLimit, label))
     if (bytes.byteLength > maxBytes)
       throw new HarnessStoreLimitError(label, bytes.byteLength, maxBytes)

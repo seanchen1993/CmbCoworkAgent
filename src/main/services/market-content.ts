@@ -83,6 +83,10 @@ export function assertOriginalContent(filePath: string): void {
   if (findProtectedMarketRoot(filePath)) throw new Error(MARKET_CONTENT_DENIED)
 }
 
+export function getMarketContentStoredLimit(filePath: string, maxBytes: number): number {
+  return findProtectedMarketRoot(filePath) ? Math.ceil(maxBytes / 3) * 4 + prefix.length : maxBytes
+}
+
 function walkFiles(root: string, visit: (filePath: string) => void): void {
   for (const entry of readdirSync(root, { withFileTypes: true })) {
     if (entry.name === MARKET_CONTENT_MARKER) continue

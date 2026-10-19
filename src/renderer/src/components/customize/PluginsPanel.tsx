@@ -1041,10 +1041,11 @@ export function PluginDetailPanel(props: {
     onPublish,
     publishLabel = "发布到市场",
     hideActions = false,
-    hideComponentDetails = false,
+    hideComponentDetails: requestedHideComponentDetails = false,
     isMarketPlugin = false,
     onEditFiles
   } = props
+  const hideComponentDetails = requestedHideComponentDetails || plugin?.origin !== "local"
 
   if (!plugin) {
     return (

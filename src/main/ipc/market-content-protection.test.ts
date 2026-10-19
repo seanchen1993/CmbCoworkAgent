@@ -250,6 +250,28 @@ describe("market content IPC regression", () => {
     expect(existsSync(skill.path)).toBe(true)
   })
 
+  it("permits original plugin evolution before any standalone skill is installed", async () => {
+    const customDir = storage.getCustomSkillsDir()
+    const saved = customDir + "-saved"
+    renameSync(customDir, saved)
+    try {
+      const plugin = storage.getPlugins().find((item) => item.name === "market-plugin")!
+      const skillPath = join(plugin.path, "skills", "action", "SKILL.md")
+      const evolved = original("plugin-action") + "\noriginal update"
+      const result = await invoke("skills:applyPluginSkillEvolution", {
+        skillPath,
+        candidateId: "fresh-original",
+        skillName: "plugin-action",
+        buffer: bytes(Buffer.from(evolved)),
+        fileName: "SKILL.md"
+      })
+      expect(result.success, result.error).toBe(true)
+      expect(readFileSync(skillPath, "utf8")).toBe(evolved)
+    } finally {
+      renameSync(saved, customDir)
+    }
+  })
+
   it("lets the agent discover and read protected skills while rejecting mutations", async () => {
     const { LocalSandbox } = await import("../agent/local-sandbox")
     const skill = (await skills.listAllSkills()).find((item) => item.name === "market-analysis")!
