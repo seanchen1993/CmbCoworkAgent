@@ -1,10 +1,14 @@
-# 2026-10-19 M02 服务专家私聊已授权
+# 2026-10-19 M02 服务专家私聊已验收
 
-用户明确继续下一步，并固定后续分工：root 设计和验收，gpt-6.1-sol 实施；复杂任务 xhigh，简单 high。M02 是复杂链路，任务 `tasks/M02-service-conversation.md` 已ready。目标基准e80f741c，沿用附属工作树 `/Users/heyirui/.codex/worktrees/beta-merge-review/agent-channel-integration-research-7ff0d6`、新分支 `codex/bot-service-conversation-m02`。旧high代理 `/root/beta_merge_sol` 已完成只读核查、clean且结束，无产品改动；xhigh writer实际ID见state，不能重复派写者。
+用户固定后续开发方式：root设计、拆分与质量验收，gpt-6.1-sol实施，复杂xhigh、简单high。唯一产品写者 `/root/service_conversation_sol` 已停止写入，最终候选 `96e6e1429def5bb47ea838704b4f46bd76291787`（父 `6bfabefc`）。root独立复验后正常合并到 `codex/devclaw-bot-integration`，提交 `1007a11bc21a0803b19b7ee8e6b41471eb821924`。目标 `/Users/heyirui/.codex/worktrees/devclaw-bot-integration/cmbCowork`，产品树与候选一致，beta祖先保留；未推送。root验收文档提交以包含本交接段的Git记录为准。
 
-设计：当前已配置单服务专家在beta工作区中私聊；窄API+持久journal承接单次发送/create或message/enqueue，展示会话与Task执行Thread分离，服务Task/Run明确建模。补充先留待下一轮，避免改变当前冻结Task.version。enqueue前按完整scope和commandId冻结模型ref/非密钥配置hash；单node worker按精确claim身份路由，旧dev仍fake，服务绑定缺失不fallback。运行后持久结果回到原任务/会话，重开不重跑。真实模型能力沿用受限零工具resolver，测试只fake；多专家目录、换机历史、文件工具和正式成果确认不在此片。
+已完成当前单服务专家的beta会话入口、模型选择、持久发送与Task/Run、同任务延后补充、精确停止、结果与重开恢复。完整身份和原命令先持久，单worker精确claim路由，旧开发fake保留。未知不重跑，result_ready同结果重交；最终审查发现并修复迟到enqueue回执倒退状态的竞态。真实模型配置能力接线，验证只fake，不调用付费模型。
 
-root独占状态/任务/集成分支；实施只写附属树和attempts/M02-sol-xhigh.md。按任务矩阵验证实际Java+隔离MySQL+SQLite/worker/DeepAgent以及真实UI，不调用真实模型/内网、不推送部署或恢复自动任务，不改用户App/数据。下方M01完成出口保留为历史，不代表M02已完成。
+root最终85核心/17IPC、独立SQLite105条历史、实际Electron/React、真实JavaHTTP+隔离MySQL+SQLite+DeepAgent fake4/tools0、契约24及集成树Node/Web类型和完整m02-isolated构建通过。实施者另完成Bot530/IPC+Bot32/桌面IM26/Java69+1884parity及Partner面板。真实HTTP/UI对应6bfabefc，最后96e6e142仅保护迟到回执，最终核心和集成构建覆盖它；没有伪称重复全部数据库套件。详见 `reviews/M02-acceptance.md`、`attempts/M02-sol-xhigh.md`。
+
+所有测试资源精确回收；原B00 MySQL693a1c3同容器/卷恢复原停止，ES/S3同ID healthy，用户Partner MySQL bdf4f0d原停止未动。无用户profile/凭据/数据变更，无部署或自动任务恢复。原预览启动器WIP仍独立保留。任务 `tasks/M02-service-conversation.md` accepted，状态 `state.json` 已更新；不要重派M02或重放历史服务启动步骤。
+
+后续功能缺口为正式成果版本/确认/退回、多专家目录、跨设备历史、群协作收束与自动知识采纳。本片“分析完成”不等于业务验收；按后续用户任务界定下一片，沿用上述设计/实施/验收分工。下方历史出口不覆盖当前状态。
 
 # 2026-10-19 beta 合并已验收
 

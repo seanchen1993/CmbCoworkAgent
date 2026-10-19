@@ -1,11 +1,11 @@
 # M02：beta 私聊接通服务 Task / Run
 
-状态：ready。2026-10-19 用户要求继续下一步，沿用 root 设计与质量验收、6.1-sol 实施。随后明确：复杂任务使用 xhigh，简单修改使用 high。本任务属于复杂执行链路，唯一实施写者为 gpt-6.1-sol/xhigh。
+状态：accepted。最终候选 `96e6e142`，root 独立复验后以 `1007a11b` 正常合入 integration，未推送；完整证据见 `reviews/M02-acceptance.md`。2026-10-19 用户要求继续下一步，沿用 root 设计与质量验收、6.1-sol 实施。随后明确：复杂任务使用 xhigh，简单修改使用 high。本任务属于复杂执行链路，唯一实施写者为 gpt-6.1-sol/xhigh。
 
 ## 基准与交付
 
 - 集成分支 `codex/devclaw-bot-integration`，产品基准 `e80f741c`（M01 已验收，beta 已合入）。
-- 沿用附属工作树 `/Users/heyirui/.codex/worktrees/beta-merge-review/agent-channel-integration-research-7ff0d6`，分支 `codex/bot-service-conversation-m02`，已从 e80f741c 创建且 clean。
+- 沿用附属工作树 `/Users/heyirui/.codex/worktrees/beta-merge-review/agent-channel-integration-research-7ff0d6`，分支 `codex/bot-service-conversation-m02`，创建时基于 e80f741c 且 clean，最终候选已提交冻结。
 - 原 high 代理 `/root/beta_merge_sol` 已完成 M02 只读核查、无产品改动。xhigh 实施者接续其发现，不重建工作树或覆盖任何改动；不得再派子代理。
 - 实施记录 `attempts/M02-sol-xhigh.md`；root 独占 integration 目标树、README、state.json、HANDOFF.md、任务单和验收报告。
 - 本轮完成“私聊交办 → 服务任务/执行 → 已授权节点受限模型分析 → 状态/结果回到原会话”的纵向流程。正式成果版本、确认/退回闭环属于后续切片，不冒充已完成整个第一阶段。
