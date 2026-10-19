@@ -5,8 +5,8 @@ import {
   type DashboardEsWorkerQueryRequest
 } from "./dashboard-es-protocol"
 import { projectDashboardEsResponse } from "./dashboard-view-model-projection"
+import { readDashboardEsErrorDetail } from "./dashboard-es-error-body"
 
-const ERROR_BODY_BYTE_LIMIT = 4 * 1024
 const NORMALIZATION_MAX_DEPTH = 128
 const CANCELLATION_POLL_MS = 8
 
@@ -135,10 +135,9 @@ async function queryNode(
       signal: controller.signal
     })
     if (!response.ok) {
-      const bytes = await readResponseBytes(response, ERROR_BODY_BYTE_LIMIT, cancellation).catch(
-        () => new Uint8Array()
-      )
-      const detail = new TextDecoder().decode(bytes).slice(0, 200)
+      const detail = await readDashboardEsErrorDetail(response, () =>
+        throwIfCancelled(cancellation)
+      ).catch(() => "")
       throw new DashboardEsRuntimeError(
         "DASHBOARD_ES_HTTP_ERROR",
         `ES ${response.status}${detail ? `: ${detail}` : ""}`

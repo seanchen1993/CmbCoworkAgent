@@ -35,7 +35,7 @@ export function formatKnowledgeApiTime(iso: string): string {
  * 室名称比对前统一括号：映射按手工录入，室名称来自采集到的机构路径，「(成都)」和「（成都）」
  * 两种写法都可能出现，不统一的话带地域后缀的室会被当成没配置。
  */
-function normalizeRoomName(name: string): string {
+export function normalizeRoomName(name: string): string {
   return name.trim().replace(/（/g, "(").replace(/）/g, ")")
 }
 

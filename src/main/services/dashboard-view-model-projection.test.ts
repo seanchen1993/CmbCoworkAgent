@@ -120,6 +120,15 @@ describe("dashboard worker view-model projection", () => {
     ])
   })
 
+  it.each([{ timed_out: true }, { _shards: { failed: 1 } }])(
+    "rejects incomplete user-directory responses: %j",
+    (partial) => {
+      expect(() => projectDashboardEsResponse(partial, { kind: "user-directory" })).toThrow(
+        "未完整"
+      )
+    }
+  )
+
   it("projects user-directory pages and preserves composite pagination", () => {
     const projected = projectDashboardEsResponse(
       {

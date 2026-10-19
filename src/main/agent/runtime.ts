@@ -349,7 +349,7 @@ import {
   WorkerValuesSnapshotAccumulator,
   type WorkerValuesSnapshotContext
 } from "./coordinator-worker-stream"
-import { syncSubagentSkillAttribution } from "./turn-attribution"
+import { createSubagentSkillAttribution } from "./turn-attribution"
 import { buildOrderedChain, isRetryableApiError } from "./failover"
 import { resolveModel } from "../routing"
 import { patchRuntimeReadFileTool, resolveReadFileTraceContext } from "./read-file-tool"
@@ -5916,6 +5916,10 @@ The workspace root is: ${fileRoot}`
   }
 
   const runCoordinatorWorkerTurn: CoordinatorWorkerRunner = async (workerInput) => {
+    const syncWorkerCodeSkills = createSubagentSkillAttribution({
+      threadId: workerInput.workerThreadId,
+      parentThreadId: workerInput.parentThreadId
+    })
     const workerActionStationarityTurnId = `${workerInput.workerThreadId}:turn:${workerInput.workerTurn}`
     const workerSubagent = buildCoordinatorWorkerSubagents(
       coordinatorWorkerProjectInstructions || undefined,
@@ -5993,22 +5997,14 @@ Use the same worker thread context for follow-up instructions. ${scratchpadGuida
     let workerTraceError: string | undefined
     let workerValuesSnapshotAccumulator: WorkerValuesSnapshotAccumulator | undefined
     const syncWorkerSkillAttribution = (): void => {
-      if (!workerTracer) return
       const usedSkills = workerSkillUsageDetector.getUsedSkillNames()
       const skillSource = workerSkillUsageDetector.getUsedSkillSourceRefs()
-      workerTracer.setUsedSkills(usedSkills)
-      workerTracer.setSkillSource(skillSource)
-      workerTracer.setEvolvedSkills(workerSkillUsageDetector.getUsedEvolvedSkillNames())
-      // Workers own their own thread, so recordGen reads the worker's adoption
-      // context. Resolve the fallback chain (this run → this worker thread →
-      // the coordinator thread) instead of publishing the bare detector result,
-      // which drops attribution the coordinator had already established.
-      syncSubagentSkillAttribution({
-        threadId: workerInput.workerThreadId,
-        parentThreadId: workerInput.parentThreadId,
-        currentRunSkills: usedSkills,
-        currentRunSkillSource: skillSource
-      })
+      workerTracer?.setUsedSkills(usedSkills)
+      workerTracer?.setSkillSource(skillSource)
+      workerTracer?.setEvolvedSkills(workerSkillUsageDetector.getUsedEvolvedSkillNames())
+      // Inherit once per worker turn; only this worker's own reads can change
+      // its snapshot or contribute Skills back to the coordinator.
+      syncWorkerCodeSkills({ usedSkills, skillSource })
     }
     const cancelWorkerBackgroundTasks = (): void => {
       LocalSandbox.cancelBackgroundTasks(workerInput.workerThreadId)
@@ -6124,6 +6120,9 @@ Use the same worker thread context for follow-up instructions. ${scratchpadGuida
         )
         workerRuntimeTraceContext = workerTracer?.getTraceContext() ?? traceContext
       }
+      // Trace creation resets adoption context. Restore inherited Skills before
+      // the first tool can generate code, even if this worker never reads a Skill.
+      runTraceSideEffect("CoordinatorWorker Skill initialization", syncWorkerSkillAttribution)
       const workerPromptMessage = new HumanMessage({
         content: effectiveWorkerPrompt,
         id: randomUUID()
