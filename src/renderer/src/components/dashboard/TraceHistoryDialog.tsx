@@ -43,6 +43,7 @@ import type {
   DashboardTraceViewMode
 } from "./use-dashboard"
 import { unwrapThreadTracesResponse } from "./thread-traces-response"
+import { DrilldownArrow } from "./DrilldownArrow"
 import type { DashboardThreadSkillSource } from "../../../../shared/dashboard-thread-skills"
 import { ThreadSkillUsagePanel } from "./ThreadSkillUsagePanel"
 
@@ -561,6 +562,7 @@ function TraceCard({
             parent {shortTraceId(trace.parentTraceId)}
           </span>
         )}
+        <DrilldownArrow className="ml-auto" />
       </div>
       <p
         className={cn(

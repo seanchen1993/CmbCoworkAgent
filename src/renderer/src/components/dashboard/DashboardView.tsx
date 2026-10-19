@@ -86,6 +86,7 @@ import {
 } from "./use-dashboard"
 import { OverviewPanel } from "./panels/OverviewPanel"
 import { ProjectModePanel } from "./panels/ProjectModePanel"
+import { DrilldownArrow } from "./DrilldownArrow"
 import { EfficiencyPanel } from "./panels/EfficiencyPanel"
 import { ProjectMetricGroupFilter } from "./panels/ProjectMetricGroupFilter"
 import { AwardsPanel, type AwardSkillRow, type TeamBenchmarkRow } from "./panels/AwardsPanel"
@@ -1617,6 +1618,7 @@ function UserListPage({
                     <td className="px-3 py-2">
                       <div className="font-medium text-foreground">
                         {user.userName || user.sapId}
+                        <DrilldownArrow className="ml-1" />
                       </div>
                       <div className="font-mono text-[10px] text-muted-foreground">
                         {user.sapId}
@@ -2105,8 +2107,9 @@ const SkillEvalSkillRow = memo(function SkillEvalSkillRow({
     >
       <span className={`h-8 rounded-full ${active ? "bg-primary" : "bg-transparent"}`} />
       <div className="min-w-0">
-        <div className={`truncate font-medium ${active ? "text-foreground" : "text-foreground"}`}>
-          {skill.skillName}
+        <div className="flex min-w-0 items-center gap-1 font-medium text-foreground">
+          <span className="truncate">{skill.skillName}</span>
+          <DrilldownArrow />
         </div>
         <div
           className={`mt-0.5 text-[11px] ${active ? "text-foreground/70" : "text-muted-foreground"}`}
@@ -2181,7 +2184,10 @@ const SkillEvalRunRow = memo(function SkillEvalRunRow({
         )}
         <div className="min-w-0 flex-1">
           <div className="flex flex-wrap items-center gap-2">
-            <span className="font-medium text-foreground">{run.skillName}</span>
+            <span className="font-medium text-foreground">
+              {run.skillName}
+              <DrilldownArrow className="ml-1" />
+            </span>
             {run.skillVersion && <Badge variant="outline">{run.skillVersion}</Badge>}
             <Badge variant={run.pass ? "nominal" : "critical"}>
               {formatSkillEvalScore(run.score)}
@@ -2664,6 +2670,7 @@ const SkillEvalDashboardPanel = memo(function SkillEvalDashboardPanel({
             aria-current={selectedSkillKey === null ? "true" : undefined}
           >
             全部运行
+            <DrilldownArrow className="ml-1" />
           </button>
           {data.skills.map((skill) => {
             const key = skillEvalKey(skill.skillName, skill.skillVersion)
@@ -5281,6 +5288,7 @@ export function DashboardView(): React.JSX.Element {
                   disabled={activeMainTab === "project-mode" && !projectModeAllowed}
                 >
                   <Bot className="size-3.5" /> 指标分析
+                  <DrilldownArrow />
                 </Button>
               ) : (
                 // 隐藏入口：在「指标分析」按钮原位置放一个不可见热区，连续点三下才显形。
@@ -5410,6 +5418,7 @@ export function DashboardView(): React.JSX.Element {
                 codeStatsOverride={projectModeCodeStatsOverride}
                 codeStatsLoading={projectModeCodeStatsLoading}
                 onCodeSourceChange={selectProjectModeCodeSource}
+                createdInRangeProjectsOnly={createdInRangeProjectsOnly}
                 headerAction={
                   <div className="flex items-center gap-2">
                     <Button

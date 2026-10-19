@@ -34,6 +34,7 @@ import {
   X
 } from "lucide-react"
 import { Badge } from "@/components/ui/badge"
+import { DrilldownArrow } from "../DrilldownArrow"
 import { Input } from "@/components/ui/input"
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip"
 import {
@@ -251,7 +252,14 @@ function ProjectModePieCard({
     <div className="rounded-xl border border-border bg-card p-4">
       <div className="mb-3 flex min-h-[42px] items-start justify-between gap-2">
         <div className="min-w-0">
-          <h3 className="text-xs font-medium text-muted-foreground">{title}</h3>
+          <h3 className="flex items-center gap-1 text-xs font-medium text-muted-foreground">
+            {title}
+            {onSliceClick && data.length > 0 ? (
+              <span title="点击扇区查看明细">
+                <DrilldownArrow />
+              </span>
+            ) : null}
+          </h3>
           {helperText ? (
             <p className="mt-1 text-[11px] leading-snug text-muted-foreground/80">{helperText}</p>
           ) : null}
@@ -339,7 +347,10 @@ function ProjectModeUserAnalysisCard({
                   </td>
                   <td className="px-2 py-1.5 text-muted-foreground">{user.orgName || "—"}</td>
                   <td className="px-2 py-1.5 text-right font-medium text-foreground">
-                    {formatNumber(user.count)}
+                    <span className="inline-flex items-center gap-1">
+                      {formatNumber(user.count)}
+                      {canClick ? <DrilldownArrow /> : null}
+                    </span>
                   </td>
                 </tr>
               )
@@ -485,11 +496,12 @@ function CodeEfficiencyModelInfo(): React.JSX.Element {
           <TooltipTrigger asChild>
             <button
               type="button"
-              className="inline-flex size-4 shrink-0 items-center justify-center rounded-sm text-muted-foreground/70 transition-colors hover:text-foreground"
+              className="inline-flex h-4 shrink-0 items-center justify-center gap-0.5 rounded-sm text-muted-foreground/70 transition-colors hover:text-foreground"
               aria-label="查看口径说明大图"
               onClick={() => setOpen(true)}
             >
               <Info className="size-3.5" />
+              <DrilldownArrow className="size-3" />
             </button>
           </TooltipTrigger>
           <TooltipContent>点击查看口径说明示意图</TooltipContent>
@@ -876,7 +888,7 @@ function AdoptionRateLine({
     return (
       <button
         type="button"
-        className="group block w-full text-right transition-colors hover:text-primary"
+        className="group inline-flex w-full items-center justify-end gap-1 whitespace-nowrap text-right transition-colors hover:text-primary"
         title={title}
         onClick={(event) => {
           event.stopPropagation()
@@ -884,6 +896,7 @@ function AdoptionRateLine({
         }}
       >
         {body}
+        <DrilldownArrow className="size-3" />
       </button>
     )
   }
@@ -923,6 +936,7 @@ function StageStatusRows({
               >
                 <MessagesSquare className="size-3" />
                 查看对话
+                <DrilldownArrow className="size-3" />
               </button>
             ) : null}
           </div>
@@ -1167,6 +1181,7 @@ function ProjectStageAdoptedLines({
             <span className="font-medium text-foreground">{formatLineCount(lines)}</span>
             <span>行</span>
             <span>{share}</span>
+            {onOpen ? <DrilldownArrow className="size-3" /> : null}
           </button>
         )
       })}
@@ -1210,6 +1225,7 @@ function StageBucketRows({
                 >
                   <MessagesSquare className="size-3" />
                   查看对话
+                  <DrilldownArrow className="size-3" />
                 </button>
               ) : null}
             </div>
@@ -1388,6 +1404,7 @@ function FeatureStageBreakdown({
                   >
                     <MessagesSquare className="size-3.5" />
                     查看对话
+                    <DrilldownArrow className="size-3" />
                   </button>
                 </div>
                 <FeatureCodeStatsLine codeStats={node.codeStats} />
@@ -1722,6 +1739,7 @@ function ProjectRow({
             >
               <MessagesSquare className="size-3.5 shrink-0" />
               查看对话
+              <DrilldownArrow className="size-3" />
             </button>
             <button
               type="button"
@@ -1734,6 +1752,7 @@ function ProjectRow({
             >
               <Timer className="size-3.5 shrink-0" />
               阶段耗时
+              <DrilldownArrow className="size-3" />
             </button>
           </div>
         </td>
@@ -1821,6 +1840,7 @@ function ProjectRow({
                           >
                             <GitCommit className="size-3.5" />
                             Commit 记录
+                            <DrilldownArrow className="size-3" />
                           </button>
                           <button
                             type="button"
@@ -1833,6 +1853,7 @@ function ProjectRow({
                           >
                             <MessagesSquare className="size-3.5" />
                             查看对话
+                            <DrilldownArrow className="size-3" />
                           </button>
                         </div>
                       </div>
@@ -2002,6 +2023,7 @@ function ProjectListSection({
   loadFeatureNodes,
   loadOperationalDetails,
   loadStageAnalysis,
+  createdInRangeProjectsOnly = false,
   lockedAdapterName
 }: {
   projectCounts?: DashboardProjectModeProjectCounts
@@ -2042,6 +2064,7 @@ function ProjectListSection({
   loadOperationalDetails: DashboardProjectModeOperationalDetailsLoader
   /** 不传则不显示「阶段耗时」入口（插件「项目数」弹窗等嵌入场景用不到）。 */
   loadStageAnalysis?: DashboardProjectModeStageAnalysisLoader
+  createdInRangeProjectsOnly?: boolean
   /** 嵌入模式：锁定到该插件名（隐藏标题与插件下拉，强制按此插件过滤）。用于插件「项目数」弹窗。 */
   lockedAdapterName?: string
 }): React.JSX.Element {
@@ -2283,9 +2306,32 @@ function ProjectListSection({
         <>
           <h2 className="mb-1 text-sm font-semibold text-foreground">项目列表</h2>
           <p className="mb-3 text-[11px] leading-relaxed text-muted-foreground">
-            列表展示项目累计数据，不受顶部时间范围限制；“仅本期新建”只筛选项目名单。
+            列表展示项目累计数据，不受顶部时间范围限制。
             展开后可查看技能、特性与阶段明细，以及关联提交。
           </p>
+          {createdInRangeProjectsOnly && (
+            <div className="mb-3 min-w-0">
+              <TooltipProvider delayDuration={200}>
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <button
+                      type="button"
+                      className="flex w-fit max-w-full items-center gap-1.5 rounded-md border border-blue-500/30 bg-blue-500/10 px-2 py-1 text-left text-[11px] text-blue-800 cursor-help dark:text-blue-300"
+                    >
+                      <Info className="size-3.5 shrink-0" />
+                      <span className="truncate">
+                        已开启“仅本期新建”，仅显示所选时间内新建的项目
+                      </span>
+                    </button>
+                  </TooltipTrigger>
+                  <TooltipContent side="bottom" align="start" className="max-w-xs leading-relaxed">
+                    已开启“仅本期新建”，当前只展示顶部所选时间范围内新建的项目。
+                    如需查看更早创建的项目，请关闭页面上方的“仅本期新建”。
+                  </TooltipContent>
+                </Tooltip>
+              </TooltipProvider>
+            </div>
+          )}
         </>
       )}
 
@@ -3368,6 +3414,7 @@ function ProjectModePanelContent({
   codeStatsOverride,
   codeStatsLoading,
   onCodeSourceChange,
+  createdInRangeProjectsOnly,
   headerAction,
   projectPages,
   projectPageLoading,
@@ -3402,6 +3449,7 @@ function ProjectModePanelContent({
   codeStatsLoading: boolean
   /** 切换 source 下拉（null = 全部来源）。 */
   onCodeSourceChange: (source: string | null) => void
+  createdInRangeProjectsOnly: boolean
   headerAction?: ReactNode
   projectPages: Partial<
     Record<DashboardProjectModeProjectStatus, DashboardProjectModeProjectPageData>
@@ -3767,6 +3815,7 @@ function ProjectModePanelContent({
         loadFeatureNodes={loadFeatureNodes}
         loadOperationalDetails={loadOperationalDetails}
         loadStageAnalysis={loadStageAnalysis}
+        createdInRangeProjectsOnly={createdInRangeProjectsOnly}
       />
 
       {/* Adapter (plugin) distribution — 紧随项目列表之后 */}

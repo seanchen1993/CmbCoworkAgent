@@ -1,3 +1,4 @@
+import { DrilldownArrow } from "./DrilldownArrow"
 import type {
   DashboardThreadSkill,
   DashboardThreadSkillSource
@@ -49,6 +50,7 @@ export function ThreadSkillUsagePanel({
                 {source.isSubagent ? "由 " : ""}
                 {source.label}
                 {" 加载"}
+                {source.threadId ? <DrilldownArrow className="ml-1" /> : null}
               </button>
             ))}
           </div>
