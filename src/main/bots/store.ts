@@ -24,7 +24,7 @@ import {
   type GroupDiscussion
 } from "./group-discussion"
 import { createBotAppearance } from "../../shared/bots/appearance"
-import { canDeferBotTask, type BotStoppedTaskContext } from "./continuation"
+import { canDeferBotTask, canSteerBotTask, type BotStoppedTaskContext } from "./continuation"
 import { botContinuationTaskId } from "../../shared/bots/task-continuation"
 import {
   BOT_MESSAGE_REPLY_END,
@@ -1664,12 +1664,9 @@ export class BotStore {
         child = this.getTask(id)
       if (
         id === parentId ||
-        (source.origin.kind !== "user" && source.origin.kind !== "introduction") ||
-        child.origin.kind !== "user" ||
+        !canSteerBotTask(source, child) ||
         !ACTIVE_STATES.includes(source.state as (typeof ACTIVE_STATES)[number]) ||
-        child.state !== "queued" ||
-        child.threadId !== source.threadId ||
-        child.botId !== source.botId
+        child.state !== "queued"
       )
         throw new BotError("CONFLICT", "补充消息不属于当前执行轮次")
       this.db.run(
@@ -1694,15 +1691,15 @@ export class BotStore {
         const child = this.getTask(childId)
         if (
           childId === id ||
-          (source.origin.kind !== "user" && source.origin.kind !== "introduction") ||
-          child.origin.kind !== "user" ||
-          child.threadId !== source.threadId ||
-          child.botId !== source.botId ||
+          !canSteerBotTask(source, child) ||
           this.rows("SELECT injected_into FROM bot_tasks WHERE id=?", [childId])[0]
             ?.injected_into !== id
         )
           throw new BotError("CONFLICT", "补充消息不属于当前会话")
-        this.settle(childId, state, error)
+        // One physical group run has one actual reply. Do not publish a second
+        // generic "completed; no result" message for its consumed inbox entry.
+        if (child.origin.kind === "group") this.transition(childId, state, error)
+        else this.settle(childId, state, error)
       }
       // Preserve the actual final result as the sidebar preview, not a child's generic status.
       this.settle(id, state, error, result, files)

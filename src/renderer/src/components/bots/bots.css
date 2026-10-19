@@ -1799,12 +1799,17 @@ button.bot-json-caret:focus-visible {
   background: var(--bot-user-bubble);
   color: var(--bot-user-text, var(--bot-text));
 }
+.bot-group-progress,
+.bot-group-composer {
+  width: calc(100% - 2 * var(--bot-group-gutter));
+  max-width: calc(var(--bot-group-width) - 2 * var(--bot-group-gutter));
+}
 .bot-group-progress {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
   gap: 8px;
-  margin: 0 24px;
+  margin: 0 auto;
   font-size: 12px;
   color: var(--bot-muted);
 }
@@ -1817,8 +1822,6 @@ button.bot-json-caret:focus-visible {
   background: var(--bot-panel);
 }
 .bot-group-composer {
-  width: calc(100% - 2 * var(--bot-group-gutter));
-  max-width: calc(var(--bot-group-width) - 2 * var(--bot-group-gutter));
   margin: 16px auto 22px;
   border-radius: 26px;
   border: 1px solid var(--bot-line);
@@ -2874,7 +2877,7 @@ button.bot-json-caret:focus-visible {
   margin: 0;
 }
 .bot-group-editor .is-editor-empty:first-child::before {
-  content: attr(data-placeholder);
+  content: var(--bot-group-placeholder, attr(data-placeholder));
   float: left;
   height: 0;
   color: var(--bot-muted);

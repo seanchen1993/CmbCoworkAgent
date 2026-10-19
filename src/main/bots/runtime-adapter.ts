@@ -52,7 +52,7 @@ import { getAvailableModelConfigOrDefault, toModelRef } from "../models/registry
 import { isMemoryEnabled } from "../storage"
 import { isBotRoutineSilent } from "../../shared/bots/routine-silence"
 import { withCheckpointer } from "../agent/runtime"
-import { botContinuationMessageId, canDeferBotTask } from "./continuation"
+import { botContinuationMessageId, canDeferBotTask, canSteerBotTask } from "./continuation"
 import { parseBotFileDelivery, type BotDeliveredFile } from "../../shared/bots/file-delivery"
 
 function isBackgroundCommitSkip(event: SchedulerRendererEvent): boolean {
@@ -245,13 +245,12 @@ export function createLocalBotRunPort(
           tryYield()
         },
         async steer(message, beforeInject) {
-          // A peer, routine or group run has a different prompt and result owner.
-          // Direct messages must not silently change that owner's permissions or reply route.
+          // A peer, routine or another conversation cannot change this run's
+          // prompt/authority. Group input joins only while its own question waits.
           if (
-            (task.origin.kind !== "user" && task.origin.kind !== "introduction") ||
-            message.origin.kind !== "user" ||
-            task.threadId !== message.threadId ||
-            task.botId !== message.botId
+            !canSteerBotTask(task, message) ||
+            (task.origin.kind === "group" &&
+              (interactionWaits === 0 || !getPendingUserInputForThread(task.threadId)))
           )
             return false
           if (superseded) return false

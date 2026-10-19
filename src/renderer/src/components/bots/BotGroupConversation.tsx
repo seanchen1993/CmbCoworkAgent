@@ -9,6 +9,9 @@ import { botErrorMessage } from "@/lib/bot-error-message"
 import { botGroupMessageView } from "@/lib/bot-group-message-view"
 import { BotGroupAvatar } from "./BotGroupAvatar"
 import { BotGroupMessageActions } from "./BotGroupMessageActions"
+import { BotGroupQuestion } from "./BotGroupQuestion"
+import { botGroupActiveTasks } from "@/lib/bot-group-question"
+import { useGroupQuestions, type BotGroupPendingQuestion } from "./use-group-questions"
 import { BotMentionLabel } from "./BotMentionLabel"
 import { useEffect, useMemo, useRef, useState, type RefObject } from "react"
 import { useBotMessageEntrances } from "@/lib/use-bot-message-entrances"
@@ -37,7 +40,6 @@ import type {
   BotGroupMessage,
   BotTask
 } from "../../../../shared/bots/contracts"
-import { botTaskGroupId } from "../../../../shared/bots/contracts"
 import { BotAvatar } from "./BotAvatar"
 import { BotMessageFilePreview } from "./BotMessageFilePreview"
 import { BotDeliveredFile } from "./BotDeliveredFile"
@@ -57,6 +59,10 @@ import {
   type FileAttachment
 } from "../../../../shared/file-attachment"
 import { cleanUserAttachmentContentForDisplay } from "../../../../shared/user-attachment-display"
+
+type GroupTimelineItem =
+  | { kind: "message"; message: BotGroupMessage }
+  | ({ kind: "question" } & BotGroupPendingQuestion)
 
 export function BotGroupConversation({
   group,
@@ -89,6 +95,14 @@ export function BotGroupConversation({
 }) {
   const [history, setHistory] = useState(EMPTY_GROUP_HISTORY)
   const { messages } = history
+  const questions = useGroupQuestions(client.hostId, group.id, tasks)
+  const timeline = useMemo<GroupTimelineItem[]>(
+    () => [
+      ...messages.map((message) => ({ kind: "message" as const, message })),
+      ...questions.map((question) => ({ kind: "question" as const, ...question }))
+    ],
+    [messages, questions]
+  )
   const listRef = useRef<VirtuosoHandle>(null)
   const [atBottom, setAtBottom] = useState(true)
   const [anchorId, setAnchorId] = useState<string | null>(null)
@@ -202,11 +216,7 @@ export function BotGroupConversation({
       }
     }
   }
-  const running = tasks.filter(
-    (task) =>
-      botTaskGroupId(task) === group.id &&
-      ["queued", "running", "waiting_user"].includes(task.state)
-  )
+  const running = botGroupActiveTasks(group.id, tasks)
   const backgroundMembers = group.memberIds.filter((id) =>
     backgroundThreads.includes(`group-${group.id}-${id}`)
   )
@@ -409,9 +419,11 @@ export function BotGroupConversation({
                   key={anchorId ?? "latest"}
                   ref={listRef}
                   className="flex-1 min-h-0"
-                  data={messages}
+                  data={timeline}
                   firstItemIndex={history.firstIndex}
-                  computeItemKey={(_, item) => item.id}
+                  computeItemKey={(_, item) =>
+                    item.kind === "message" ? item.message.id : `question-${item.request.requestId}`
+                  }
                   followOutput={!anchorId}
                   scrollIntoViewOnChange={() => {
                     if (
@@ -423,7 +435,7 @@ export function BotGroupConversation({
                     // Let Virtuoso wait for the new row's measurements before consuming
                     // the explicit send intent. A React effect can target the old tail.
                     scrollAfterOrdinal.current = null
-                    return { index: messages.length - 1, align: "end", behavior: "auto" }
+                    return { index: timeline.length - 1, align: "end", behavior: "auto" }
                   }}
                   atBottomThreshold={32}
                   atBottomStateChange={setAtBottom}
@@ -432,7 +444,7 @@ export function BotGroupConversation({
                       0,
                       anchorId
                         ? messages.findIndex((item) => item.id === anchorId)
-                        : messages.length - 1
+                        : timeline.length - 1
                     ),
                     align: anchorId ? "center" : "end"
                   }}
@@ -448,7 +460,14 @@ export function BotGroupConversation({
                         </button>
                       ) : null
                   }}
-                  itemContent={(index, item) => {
+                  itemContent={(index, row) => {
+                    if (row.kind === "question") {
+                      const bot = members.find((member) => member.id === row.task.botId)
+                      return bot && !bot.deleting ? (
+                        <BotGroupQuestion {...row} bot={bot} onOpenBot={onOpenBot} />
+                      ) : null
+                    }
+                    const item = row.message
                     const displayText = item.authorBotId
                       ? splitBotInlineReasoning(item.text).body
                       : cleanUserAttachmentContentForDisplay(item.text)
@@ -789,6 +808,7 @@ export function BotGroupConversation({
                   text={input}
                   mentions={draft.mentions}
                   members={members}
+                  placeholder={questions.length ? "输入你的回答，或聊点别的" : undefined}
                   inputRef={inputRef}
                   onEdit={editDraft}
                   onCancelReply={() => {

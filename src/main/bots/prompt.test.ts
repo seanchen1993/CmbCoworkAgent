@@ -53,6 +53,32 @@ describe("Bot first conversation", () => {
   })
 })
 
+describe("optional group review scope", () => {
+  it("permits missing or corrected delivery without treating every verified peer file as a new handoff", () => {
+    const prompt = buildBotPrompt(
+      bot,
+      { ...task, origin: { kind: "discussion", groupId: "g", messageId: "m", round: 1 } },
+      "/group"
+    )
+    expect(prompt).toContain("reply exactly (pass)")
+    expect(prompt).toContain("missing requested deliverable")
+    expect(prompt).not.toContain(
+      "Use normal assistant replies for user-visible progress and delivery"
+    )
+    expect(prompt).not.toContain("Use bot_deliver_files to deliver actual workspace files")
+    expect(prompt).toContain("missing or corrected requested deliverable")
+    expect(prompt).toContain("original member-specific constraints")
+    const direct = buildBotPrompt(
+      bot,
+      { ...task, origin: { kind: "group", groupId: "g", messageId: "m" } },
+      "/group"
+    )
+    expect(direct).toContain("Use normal assistant replies for user-visible progress and delivery")
+    expect(direct).toContain("Use bot_deliver_files to deliver actual workspace files")
+    expect(direct).not.toContain("During optional group review")
+  })
+})
+
 describe("Bot stopped receipt prompt", () => {
   it("supplies real terminal facts without selecting an answer or preventing explicit resumption", () => {
     const prompt = buildBotStoppedTaskPrompt([

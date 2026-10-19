@@ -9,6 +9,19 @@ export interface BotStoppedTaskContext {
   messagePreview: string
 }
 
+/** Only direct user input in the same conversation may join its active Runtime. */
+export function canSteerBotTask(source: BotTask, incoming: BotTask): boolean {
+  if (source.botId !== incoming.botId || source.threadId !== incoming.threadId) return false
+  if (incoming.origin.kind === "user")
+    return source.origin.kind === "user" || source.origin.kind === "introduction"
+  return (
+    source.origin.kind === "group" &&
+    incoming.origin.kind === "group" &&
+    source.origin.groupId === incoming.origin.groupId &&
+    source.threadId === `group-${source.origin.groupId}-${source.botId}`
+  )
+}
+
 /** Workflow receipts need their instance fence; legacy receipts and coordinator claims stay unchanged. */
 export function canDeferBotTask(task: Pick<BotTask, "origin">): boolean {
   return (

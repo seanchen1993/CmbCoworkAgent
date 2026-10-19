@@ -810,7 +810,10 @@ describe("Bot Runtime integration", () => {
       expect(prompt).not.toContain("first conversation after the user created you")
     }
     expect(prompt).toContain("fully quitting the app stops execution")
-    expect(prompt).toContain("Use normal assistant replies")
+    if (origin.kind === "discussion") {
+      expect(prompt).not.toContain("Use normal assistant replies")
+      expect(prompt).toContain("During optional group review")
+    } else expect(prompt).toContain("Use normal assistant replies")
     expect(prompt).toContain("Match the depth the user requested")
     expect(prompt).toContain("check each requested acceptance criterion")
     expect(prompt).toContain("without a test wrapper changing its arguments")
@@ -853,11 +856,16 @@ describe("Bot Runtime integration", () => {
     else expect(prompt).not.toContain("reply exactly BOT_ROUTINE_SILENT")
     expect(prompt).toContain("call bot_request_browser_help")
     expect(prompt).toContain("Use bot_deliver_files")
-    expect(prompt).toContain(
-      "Generated workspace files are deliverables even when the user attached no input files"
-    )
-    expect(prompt).toContain("only when that input is actually required")
-    expect(prompt).toContain("Only deliver or link files you actually created or verified")
+    if (origin.kind === "discussion") {
+      expect(prompt).not.toContain("Generated workspace files are deliverables")
+      expect(prompt).toContain("missing or corrected requested deliverable")
+    } else {
+      expect(prompt).toContain(
+        "Generated workspace files are deliverables even when the user attached no input files"
+      )
+      expect(prompt).toContain("only when that input is actually required")
+      expect(prompt).toContain("Only deliver or link files you actually created or verified")
+    }
     expect(prompt).toContain("Report execution, output and success only from actual tool receipts")
     expect(prompt).toContain("never simulate an action or predict its result")
     expect(prompt).toContain("calculations that need no external action can be answered directly")
@@ -1142,6 +1150,74 @@ describe("Bot steering uses the original runtime", () => {
     fixture.steer.mockRejectedValueOnce(new Error("preparation failed"))
     await expect(lease.steer!(addition, () => true)).rejects.toThrow("preparation failed")
     expect(fixture.answerQuestion).not.toHaveBeenCalled()
+  })
+  it("accepts same-room user input only while that group's actual question waits", async () => {
+    const groupTask: BotTask = {
+      ...task,
+      threadId: "group-g-a",
+      origin: { kind: "group", groupId: "g", messageId: "root" }
+    }
+    fixture.thread.mockReturnValue({ metadata: JSON.stringify(metadata("g")) })
+    fixture.activeLease.mockReturnValue({
+      threadId: groupTask.threadId,
+      owner: "bot",
+      runId: groupTask.id,
+      acquiredAt: "now"
+    })
+    let context!: AgentRunExecutionContext
+    let finish!: () => void
+    fixture.start.mockImplementation(async (_request, _delivery, incoming) => {
+      context = incoming
+      return {
+        completion: new Promise<void>((resolve) => {
+          finish = resolve
+        })
+      }
+    })
+    fixture.steer.mockResolvedValue({ queued: true })
+    const lease = port().acquire(bot, groupTask)!
+    const pending = lease.execute(new AbortController().signal, vi.fn())
+    await vi.waitFor(() => expect(context).toBeDefined())
+    const next = {
+      ...groupTask,
+      id: "next",
+      requestId: "next",
+      origin: {
+        kind: "group" as const,
+        groupId: "g",
+        messageId: "next-user-message"
+      }
+    }
+    const inject = vi.fn(() => true)
+    expect(await lease.steer!(next, inject)).toBe(false)
+    const wait = { id: "question", kind: "user_input" as const, threadId: groupTask.threadId }
+    await context.interactionWaitHooks!.onWaitStart(wait)
+    // A pending approval alone is not a question and cannot be dismissed by chat.
+    expect(await lease.steer!(next, inject)).toBe(false)
+    fixture.pendingQuestion.mockReturnValue({ ...question, threadId: groupTask.threadId })
+    for (const foreign of [
+      { ...next, botId: "other" },
+      { ...next, threadId: "other" },
+      { ...next, origin: { kind: "user" as const } },
+      { ...next, origin: { kind: "group" as const, groupId: "other", messageId: "m" } },
+      { ...next, origin: { kind: "discussion" as const, groupId: "g", messageId: "m", round: 1 } }
+    ])
+      expect(await lease.steer!(foreign, inject)).toBe(false)
+    fixture.steer.mockResolvedValueOnce({ queued: false, reason: "hook_blocked" })
+    expect(await lease.steer!(next, inject)).toBe(false)
+    expect(fixture.answerQuestion).not.toHaveBeenCalled()
+    expect(await lease.steer!(next, inject)).toBe(true)
+    expect(fixture.answerQuestion).toHaveBeenCalledExactlyOnceWith(
+      { requestId: question.requestId, answers: {}, ignored: true },
+      { notifyRenderer: true, reason: expect.any(String) }
+    )
+    expect(fixture.cancelCommands).not.toHaveBeenCalled()
+    expect(fixture.cancelWorkers).not.toHaveBeenCalled()
+    await context.interactionWaitHooks!.onWaitEnd(wait)
+    expect(await lease.steer!(next, inject)).toBe(false)
+    context.onRunTerminated?.({ outcome: "success", code: "done" })
+    finish()
+    expect((await pending).state).toBe("completed")
   })
   it.each<Pick<LocalThreadRunLease, "owner" | "runId"> | undefined>([
     undefined,

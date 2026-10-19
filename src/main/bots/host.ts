@@ -21,7 +21,7 @@ import {
   type SendBotGroupMessageInput
 } from "../../shared/bots/contracts"
 import type { BotStore } from "./store"
-import { canDeferBotTask } from "./continuation"
+import { canDeferBotTask, canSteerBotTask } from "./continuation"
 import type { BotDeliveredFile } from "../../shared/bots/file-delivery"
 import type { BackgroundCommandLifecycle } from "../agent/background-command-lifecycle"
 
@@ -278,6 +278,15 @@ export class LocalBotHost {
     this.store.sendGroup(input)
     if (obsolete) this.cancel(obsolete)
     this.changed()
+    for (const run of this.active.values())
+      if (
+        run.task.origin.kind === "group" &&
+        run.task.origin.groupId === input.groupId &&
+        input.targetBotIds.includes(run.botId)
+      )
+        for (const task of this.store.pendingConversationTasks(run.botId, input.groupId))
+          if (task.origin.kind === "group" && task.origin.messageId === input.requestId)
+            this.steerUserMessage(task)
     this.wake()
   }
 
@@ -518,16 +527,19 @@ export class LocalBotHost {
     this.requireRunning()
     const task = this.store.enqueue(input)
     this.changed()
-    this.steerDirectMessage(task)
+    this.steerUserMessage(task)
     this.wake()
     return task
   }
 
-  private steerDirectMessage(task: BotTask): void {
-    if (task.state !== "queued" || task.origin.kind !== "user") return
-    const backgroundRun = [...this.active.values()].find(
-      (candidate) => candidate.botId === task.botId && canDeferBotTask(candidate.task)
-    )
+  private steerUserMessage(task: BotTask): void {
+    if (task.state !== "queued" || !["user", "group"].includes(task.origin.kind)) return
+    const backgroundRun =
+      task.origin.kind === "user"
+        ? [...this.active.values()].find(
+            (candidate) => candidate.botId === task.botId && canDeferBotTask(candidate.task)
+          )
+        : undefined
     if (backgroundRun?.steeringReady && !backgroundRun.controller.signal.aborted) {
       backgroundRun.lease.yieldToUser?.(
         () =>
@@ -541,14 +553,11 @@ export class LocalBotHost {
       )
       return
     }
-    const run = [...this.active.values()].find(
-      (candidate) =>
-        candidate.task.threadId === task.threadId &&
-        (candidate.task.origin.kind === "user" || candidate.task.origin.kind === "introduction")
-    )
+    const run = [...this.active.values()].find((candidate) => canSteerBotTask(candidate.task, task))
     if (
       !run?.lease.steer ||
       !run.steeringReady ||
+      (task.origin.kind === "group" && this.store.getTask(run.task.id).state !== "waiting_user") ||
       run.controller.signal.aborted ||
       run.preparingSteers.has(task.id)
     )
@@ -586,7 +595,12 @@ export class LocalBotHost {
     )
       return
     run.steeringReady = true
-    for (const task of this.store.pendingConversationTasks(run.botId)) this.steerDirectMessage(task)
+    // Preserve the original private-inbox priority while a background/group
+    // runtime is starting. Its own room is an additional, separate inbox.
+    for (const task of this.store.pendingConversationTasks(run.botId)) this.steerUserMessage(task)
+    if (run.task.origin.kind === "group")
+      for (const task of this.store.pendingConversationTasks(run.botId, run.task.origin.groupId))
+        this.steerUserMessage(task)
   }
 
   taskCheckpoint(taskId: string): string | undefined {

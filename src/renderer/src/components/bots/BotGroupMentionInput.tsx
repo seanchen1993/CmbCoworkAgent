@@ -7,6 +7,7 @@ import {
   useMemo,
   useRef,
   useState,
+  type CSSProperties,
   type RefObject
 } from "react"
 import {
@@ -61,6 +62,7 @@ export function BotGroupMentionInput({
   text,
   mentions,
   members,
+  placeholder = "发消息，或 @ 提及 Bot…",
   inputRef,
   onEdit,
   onCancelReply,
@@ -69,6 +71,7 @@ export function BotGroupMentionInput({
   text: string
   mentions: BotGroupMention[]
   members: BotDefinition[]
+  placeholder?: string
   inputRef: RefObject<BotGroupInputControl | null>
   onEdit(patch: { text: string; mentions: BotGroupMention[] }): void
   onCancelReply(): boolean
@@ -235,6 +238,7 @@ export function BotGroupMentionInput({
   useEffect(() => {
     if (!editor) return
     const dom = editor.view.dom
+    dom.setAttribute("aria-placeholder", placeholder)
     dom.setAttribute("aria-expanded", String(open))
     dom.setAttribute("aria-autocomplete", "list")
     if (open) dom.setAttribute("aria-controls", id)
@@ -242,9 +246,12 @@ export function BotGroupMentionInput({
     if (open && candidates.length)
       dom.setAttribute("aria-activedescendant", `${id}-${selectedIndex}`)
     else dom.removeAttribute("aria-activedescendant")
-  }, [editor, open, candidates.length, id, selectedIndex])
+  }, [editor, open, candidates.length, id, selectedIndex, placeholder])
   return (
-    <div className="bot-group-input">
+    <div
+      className="bot-group-input"
+      style={{ "--bot-group-placeholder": JSON.stringify(placeholder) } as CSSProperties}
+    >
       {open && (
         <div id={id} role="listbox" aria-label="提及群成员" className="bot-mention-options">
           <div className="bot-mention-heading">提及</div>
