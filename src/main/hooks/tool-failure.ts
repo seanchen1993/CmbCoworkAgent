@@ -19,6 +19,7 @@
  */
 
 import { classifyApiError, type ApiErrorCode } from "../agent/failover"
+import { hasFailedCommandResult } from "../../shared/command-result"
 
 export type ToolFailureKind =
   | "throw"
@@ -55,19 +56,14 @@ export function detectToolFailure(
   // failed) with exit code N]" marker — only "failed" (and any explicit
   // non-zero code) triggers; bare "succeeded" returns null.
   if (typeof toolResult === "string") {
-    const m = /\[Command (succeeded|failed) with exit code (-?\d+)\]/.exec(toolResult)
-    if (m) {
-      const status = m[1]
-      const code = parseInt(m[2], 10)
-      if (status === "failed" || code !== 0) {
-        const truncated = toolResult.length > 500 ? toolResult.slice(0, 500) + "…" : toolResult
-        return {
-          kind: "exit-nonzero",
-          message: truncated,
-          errorType: classifyApiError({ message: toolResult } as Error),
-          isInterrupt: false,
-          isTimeout: false
-        }
+    if (hasFailedCommandResult(toolResult)) {
+      const truncated = toolResult.length > 500 ? toolResult.slice(0, 500) + "…" : toolResult
+      return {
+        kind: "exit-nonzero",
+        message: truncated,
+        errorType: classifyApiError({ message: toolResult } as Error),
+        isInterrupt: false,
+        isTimeout: false
       }
     }
     return null

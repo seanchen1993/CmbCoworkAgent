@@ -139,6 +139,10 @@ export function selectStreamTranscriptValueSnapshots(
     const previous = context.loadPreviousTurnOccurrences(userMessageId, [
       ...new Set(changedEntries.map((entry) => getMessageProviderSourceId(entry.identity)))
     ])
+    // A hidden notification prompt has no durable user row. A caller with a
+    // captured run boundary can still authoritatively distinguish history from
+    // this turn's streamed rows; an empty result is meaningful too.
+    if (previous !== undefined) offsets.clear()
     for (const message of previous ?? []) {
       offsets.set(
         JSON.stringify([message.role, message.provider_source_id]),

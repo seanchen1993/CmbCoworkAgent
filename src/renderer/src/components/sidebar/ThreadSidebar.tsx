@@ -1,4 +1,4 @@
-import { useState, useCallback, useEffect, useMemo, useRef, memo } from "react"
+import { useState, useCallback, useEffect, useMemo, useRef, memo, lazy, Suspense } from "react"
 import { useShallow } from "zustand/react/shallow"
 import {
   Plus,
@@ -33,6 +33,7 @@ import { ScrollArea } from "@/components/ui/scroll-area"
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip"
 import { UpdateActionButton } from "@/components/update/UpdateActionButton"
 import { CmbDevClawLogo } from "@/components/branding/CmbDevClawLogo"
+import botWorkspaceMarkUrl from "@/assets/bot-workspace-mark.svg"
 import {
   Dialog,
   DialogContent,
@@ -62,7 +63,7 @@ import {
   listCompleteThreadGroupSelection,
   type ThreadGroupSelectionEntry
 } from "@/lib/thread-group-selection"
-import { isHarnessFeatureThread, isHarnessProjectModeThread } from "@/lib/thread-classification"
+import { isHarnessFeatureThread, isHarnessProjectModeThread, isRegularChatThread } from "@/lib/thread-classification"
 import { isRemoteInboxThread, REMOTE_INBOX_WORKSPACE_NAME } from "@/lib/remote-thread-display"
 import { FEATURE_GATES } from "../../../../shared/feature-gates"
 import {
@@ -86,6 +87,9 @@ const DEFAULT_VISIBLE_THREADS = 5
 const VISIBLE_THREADS_STEP = 10
 const DEFAULT_VISIBLE_PROJECTS = 60
 const VISIBLE_PROJECTS_STEP = 60
+const BotWorkspaceAvatar = lazy(() =>
+  import("../bots/BotAvatar").then(({ BotAvatar }) => ({ default: BotAvatar }))
+)
 type SidebarTab = "chat" | "project"
 
 interface ThreadProject {
@@ -642,12 +646,12 @@ export const ThreadSidebar = memo(function ThreadSidebar(): React.JSX.Element {
       const previousThread = previousThreadId
         ? threads.find((thread) => thread.thread_id === previousThreadId)
         : null
-      if (previousThread && !isHarnessProjectModeThread(previousThread)) {
+      if (previousThread && isRegularChatThread(previousThread)) {
         setShowHarnessBoardView(false)
         return
       }
 
-      const firstThread = threads.find((thread) => !isHarnessProjectModeThread(thread))
+      const firstThread = threads.find(isRegularChatThread)
       if (firstThread) {
         await selectThread(firstThread.thread_id)
         return
@@ -752,7 +756,7 @@ export const ThreadSidebar = memo(function ThreadSidebar(): React.JSX.Element {
     let sortIndex = 0
 
     for (const thread of threads) {
-      if (isHarnessProjectModeThread(thread)) continue
+      if (isHarnessProjectModeThread(thread) || thread.metadata?.botId) continue
       const path = getThreadWorkspacePath(
         thread,
         threadStateSummaries[thread.thread_id]?.workspacePath
@@ -1280,6 +1284,32 @@ export const ThreadSidebar = memo(function ThreadSidebar(): React.JSX.Element {
       ) : activeSidebarTab === "chat" ? (
         <ScrollArea className="flex-1 min-h-0">
           <div className="space-y-0.5 px-1 pb-1">
+            <Button
+              variant="ghost"
+              size="sm"
+              className="w-full justify-start gap-2.5 rounded-lg text-sm font-medium text-foreground/80 transition-colors hover:text-foreground"
+              aria-label="Bots 工作区"
+              onClick={() => setMainView("bots")}
+            >
+              <Suspense
+                fallback={
+                  <img
+                    src={botWorkspaceMarkUrl}
+                    alt=""
+                    aria-hidden="true"
+                    draggable={false}
+                    className="size-5 shrink-0"
+                  />
+                }
+              >
+                <BotWorkspaceAvatar
+                  color="#ff263c"
+                  size={20}
+                  className="size-5 shrink-0 overflow-visible"
+                />
+              </Suspense>
+              <span>Bots</span>
+            </Button>
             <Button
               variant="ghost"
               size="sm"

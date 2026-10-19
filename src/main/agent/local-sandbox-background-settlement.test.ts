@@ -144,6 +144,133 @@ afterEach(() => {
 })
 
 describe("LocalSandbox background-task settlement", () => {
+  it.each([false, true])(
+    "rejects shell detachment introduced by a hook (background=%s)",
+    async (background) => {
+      const accepted = vi.fn(),
+        execute = vi.fn()
+      const sandbox = new LocalSandbox({
+        rootDir: process.cwd(),
+        runId: "receipt-hook-detach",
+        windowsSandbox: "none",
+        backgroundCommandLifecycle: { accepted, settled: vi.fn() }
+      })
+      Reflect.set(sandbox, "runPreToolUseHookForTool", async () => ({
+        updatedInput: { command: "node task.js &" }
+      }))
+      Reflect.set(sandbox, "runPreToolUseHook", async () => ({
+        updatedInput: { command: "node task.js &" }
+      }))
+      Reflect.set(sandbox, "executeRaw", execute)
+      const result = background
+        ? await sandbox.executeBackground("echo safe")
+        : await sandbox.execute("echo safe")
+      expect(typeof result === "string" ? result : result.output).toContain("was not started")
+      expect(execute).not.toHaveBeenCalled()
+      expect(accepted).not.toHaveBeenCalled()
+    }
+  )
+  it("refuses execution when the host cannot persist acceptance", async () => {
+    const sandbox = new LocalSandbox({
+      rootDir: process.cwd(),
+      runId: "receipt-refused",
+      windowsSandbox: "none",
+      backgroundCommandLifecycle: {
+        accepted: () => {
+          throw new Error("receipt unavailable")
+        },
+        settled: vi.fn()
+      }
+    })
+    const execute = vi.fn()
+    Reflect.set(sandbox, "executeRaw", execute)
+    await expect(sandbox.executeBackground("echo safe")).rejects.toThrow("receipt unavailable")
+    expect(execute).not.toHaveBeenCalled()
+    expect(LocalSandbox.hasActiveBackgroundTasks("receipt-refused")).toBe(false)
+  })
+
+  it("does not launch when the parent is stopped during a preflight hook", async () => {
+    const gate = createDeferred<undefined>(),
+      controller = new AbortController()
+    const accepted = vi.fn(),
+      execute = vi.fn()
+    const sandbox = new LocalSandbox({
+      rootDir: process.cwd(),
+      runId: "receipt-stop",
+      windowsSandbox: "none",
+      abortSignal: controller.signal,
+      backgroundCommandLifecycle: { accepted, settled: vi.fn() }
+    })
+    Reflect.set(sandbox, "runPreToolUseHookForTool", () => gate.promise)
+    Reflect.set(sandbox, "executeRaw", execute)
+    const start = sandbox.executeBackground("echo safe")
+    controller.abort()
+    gate.resolve(undefined)
+    await expect(start).rejects.toThrow()
+    expect(accepted).not.toHaveBeenCalled()
+    expect(execute).not.toHaveBeenCalled()
+  })
+
+  it("persists before execution and publishes only after the process tree and launch hooks settle", async () => {
+    const execution = createDeferred<{ output: string; exitCode: number; truncated: boolean }>()
+    const termination = createDeferred<void>(),
+      hook = createDeferred<string>()
+    const events: string[] = [],
+      settled = vi.fn(() => events.push("settled"))
+    let taskId = ""
+    const sandbox = new LocalSandbox({
+      rootDir: process.cwd(),
+      runId: "receipt-fence",
+      windowsSandbox: "none",
+      backgroundCommandLifecycle: {
+        accepted: (receipt) => {
+          taskId = receipt.id
+          events.push("accepted")
+        },
+        settled
+      }
+    })
+    Reflect.set(
+      sandbox,
+      "executeRaw",
+      (
+        _command: string,
+        _mode: string,
+        _timeout: number,
+        _signal: AbortSignal,
+        options: ExecuteRawTestOptions
+      ) => {
+        events.push("execute")
+        options.onTermination?.(termination.promise)
+        return execution.promise
+      }
+    )
+    Reflect.set(sandbox, "applyPostToolUseHookToText", () => hook.promise)
+    const start = sandbox.executeBackground("echo safe")
+    await vi.waitFor(() => expect(events).toEqual(["accepted", "execute"]))
+    const task = getBackgroundTasks().get(taskId)!
+    try {
+      execution.resolve({ output: "done", exitCode: 0, truncated: false })
+      termination.resolve()
+      await Promise.resolve()
+      expect(settled).not.toHaveBeenCalled()
+      hook.resolve("accepted")
+      await start
+      await task.completion
+      expect(settled).toHaveBeenCalledExactlyOnceWith(
+        expect.objectContaining({ id: taskId, cancelled: false, exitCode: 0 })
+      )
+      expect(events).toEqual(["accepted", "execute", "settled"])
+    } finally {
+      execution.resolve({ output: "done", exitCode: 0, truncated: false })
+      termination.resolve()
+      hook.resolve("accepted")
+      await start
+      await task.completion
+      getBackgroundTasks().delete(taskId)
+    }
+  })
+
   it("keeps a cancelled task active until execution and physical termination both settle", async () => {
     const threadId = `background-settlement-${Date.now()}-${Math.random()}`
     const physicalRunToken = `${threadId}:physical-run`

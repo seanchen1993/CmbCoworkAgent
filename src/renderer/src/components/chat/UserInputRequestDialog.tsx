@@ -10,21 +10,15 @@ import {
 import { Button } from "@/components/ui/button"
 import { cn } from "@/lib/utils"
 import { useAppStore } from "@/lib/store"
-import type { UserInputAnswer, UserInputRequest, UserInputResponse } from "@/types"
-
-type DraftAnswer =
-  | {
-      type: "option"
-      optionIndex: number
-      additionalText?: string
-      additionalTextOpen?: boolean
-    }
-  | { type: "other"; text: string }
+import { userInputAnswers, type UserInputDraftAnswer as DraftAnswer } from "@/lib/user-input-answer"
+import { BotQuestionInput } from "../bots/BotQuestionInput"
+import type { UserInputRequest, UserInputResponse } from "@/types"
 
 interface UserInputRequestDialogProps {
   request: UserInputRequest | null
   onSubmit: (response: UserInputResponse) => void
   onLayoutChange?: (layout: UserInputRequestDialogLayout | null) => void
+  presentation?: "workbench" | "bot"
 }
 
 export interface UserInputRequestDialogLayout {
@@ -41,7 +35,8 @@ function formatRemainingTime(totalSeconds: number): string {
 export function UserInputRequestDialog({
   request,
   onSubmit,
-  onLayoutChange
+  onLayoutChange,
+  presentation = "workbench"
 }: UserInputRequestDialogProps): React.JSX.Element | null {
   const dialogRef = useRef<HTMLDivElement>(null)
   const [draftAnswers, setDraftAnswers] = useState<Record<string, DraftAnswer>>({})
@@ -82,7 +77,7 @@ export function UserInputRequestDialog({
   }, [onSubmit, request])
 
   useEffect(() => {
-    if (!request) return
+    if (!request || presentation === "bot") return
     const handleKeyDown = (event: KeyboardEvent): void => {
       if (event.defaultPrevented || useAppStore.getState().showCustomizeView) return
       if (event.key !== "Escape") return
@@ -92,10 +87,10 @@ export function UserInputRequestDialog({
 
     window.addEventListener("keydown", handleKeyDown)
     return () => window.removeEventListener("keydown", handleKeyDown)
-  }, [handleIgnore, request])
+  }, [handleIgnore, request, presentation])
 
   useEffect(() => {
-    if (!onLayoutChange) return
+    if (!onLayoutChange || presentation === "bot") return
     if (!request) {
       onLayoutChange(null)
       return
@@ -132,16 +127,11 @@ export function UserInputRequestDialog({
       resizeObserver?.disconnect()
       window.removeEventListener("resize", updateLayout)
     }
-  }, [activeIndex, collapsed, onLayoutChange, request])
+  }, [activeIndex, collapsed, onLayoutChange, request, presentation])
 
   const canSubmit = useMemo(() => {
     if (!request) return false
-    return request.questions.every((question) => {
-      const answer = draftAnswers[question.id]
-      if (!answer) return false
-      if (answer.type === "other") return answer.text.length > 0
-      return question.options[answer.optionIndex] !== undefined
-    })
+    return userInputAnswers(request.questions, draftAnswers) !== null
   }, [draftAnswers, request])
 
   if (!request) return null
@@ -161,15 +151,15 @@ export function UserInputRequestDialog({
   }
 
   const selectOption = (questionId: string, optionIndex: number): void => {
-    setDraftAnswers((prev) => {
-      const current = prev[questionId]
-      const answer =
-        current?.type === "option" && current.optionIndex === optionIndex
-          ? current
-          : { type: "option" as const, optionIndex }
-      return { ...prev, [questionId]: answer }
-    })
+    const current = draftAnswers[questionId]
+    const answer: Extract<DraftAnswer, { type: "option" }> =
+      current?.type === "option" && current.optionIndex === optionIndex
+        ? current
+        : { type: "option" as const, optionIndex }
+    const next = { ...draftAnswers, [questionId]: answer }
+    setDraftAnswers(next)
     setActiveIndex((prev) => Math.min(request.questions.length - 1, prev + 1))
+    if (presentation === "bot" && !answer.additionalTextOpen) submitDraftAnswers(next)
   }
 
   const openAdditionalText = (questionId: string, optionIndex: number): void => {
@@ -207,41 +197,47 @@ export function UserInputRequestDialog({
     }))
   }
 
-  const handleSubmit = (): void => {
-    if (!canSubmit) return
-    const answers: Record<string, UserInputAnswer> = {}
-
-    for (const question of request.questions) {
-      const answer = draftAnswers[question.id]
-      if (!answer) continue
-      if (answer.type === "other") {
-        answers[question.id] = {
-          type: "other",
-          questionId: question.id,
-          text: answer.text
-        }
-        continue
-      }
-
-      const option = question.options[answer.optionIndex]
-      if (!option) continue
-      const additionalText = answer.additionalText?.trim()
-      answers[question.id] = {
-        type: "option",
-        questionId: question.id,
-        optionIndex: answer.optionIndex,
-        label: option.label,
-        description: option.description,
-        ...(additionalText ? { additionalText } : {})
-      }
-    }
-
+  function submitDraftAnswers(drafts: Readonly<Record<string, DraftAnswer>>): void {
+    if (!request) return
+    const answers = userInputAnswers(request.questions, drafts)
+    if (!answers) return
     onSubmit({
       requestId: request.requestId,
       answers,
       submittedAt: new Date().toISOString()
     })
   }
+  const handleSubmit = (): void => submitDraftAnswers(draftAnswers)
+
+  if (presentation === "bot")
+    return (
+      <BotQuestionInput
+        request={request}
+        activeIndex={Math.min(activeIndex, request.questions.length - 1)}
+        draft={activeDraft}
+        complete={canSubmit}
+        remainingLabel={
+          remainingSeconds === null
+            ? null
+            : `将在 ${formatRemainingTime(remainingSeconds)}后自动继续`
+        }
+        onChoose={(index) => selectOption(activeQuestion.id, index)}
+        onAdditional={(index) => openAdditionalText(activeQuestion.id, index)}
+        onEditAdditional={(index, value) => updateAdditionalText(activeQuestion.id, index, value)}
+        onEditCustom={(text) => updateDraft(activeQuestion.id, { type: "other", text })}
+        onNavigate={setActiveIndex}
+        onContinue={() => {
+          if (canSubmit) handleSubmit()
+          else {
+            const next = request.questions.findIndex(
+              (question) => userInputAnswers([question], draftAnswers) === null
+            )
+            if (next >= 0) setActiveIndex(next)
+          }
+        }}
+        onIgnore={handleIgnore}
+      />
+    )
 
   return (
     <div

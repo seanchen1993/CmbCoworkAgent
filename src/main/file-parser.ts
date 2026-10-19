@@ -19,16 +19,8 @@ import {
 export { MAX_ATTACHMENT_FILE_BYTES } from "../shared/file-attachment"
 
 /** Parsed result returned to the renderer. */
-export interface ParsedAttachment {
-  filename: string
-  filePath: string // full picker path or dropped-file display identity
-  content: string // extracted text
-  mimeType: string
-  /** Original file size in bytes */
-  size: number
-  /** true when content was truncated */
-  truncated: boolean
-}
+export type { FileAttachment as ParsedAttachment } from "../shared/file-attachment"
+import type { FileAttachment as ParsedAttachment } from "../shared/file-attachment"
 
 /** Max text length (characters) to inject into context. ~24k chars ≈ ~6-7k tokens */
 export const MAX_ATTACHMENT_TEXT_LENGTH = 24_000

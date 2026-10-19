@@ -17,10 +17,14 @@ import {
 } from "../src/renderer/src/lib/queued-message-content.ts"
 import type { QueuedMessage } from "../src/renderer/src/types.ts"
 import { formatSkillUseBlock } from "../src/renderer/src/features/slash-commands/skill-marker.ts"
+import { parseBuiltinBrowserPrompt } from "../src/renderer/src/features/builtin-browser/builtin-browser.ts"
+import { parseSkillUseBlock } from "../src/renderer/src/features/slash-commands/skill-marker.ts"
 
 function assertEqual(actual: unknown, expected: unknown, message: string): void {
   if (actual !== expected)
-    throw new Error(`${message}:\n  expected: ${JSON.stringify(expected)}\n  actual:   ${JSON.stringify(actual)}`)
+    throw new Error(
+      `${message}:\n  expected: ${JSON.stringify(expected)}\n  actual:   ${JSON.stringify(actual)}`
+    )
 }
 
 function testPumpClaimsOnlyUnchangedDraftVersion(): void {
@@ -87,6 +91,39 @@ const SKILL = "[[skill:demo]] read /skills/demo/SKILL.md"
 
 function testModelPlainText(): void {
   assertEqual(getQueuedModelContent(qm({ text: "hello" })), "hello", "plain text")
+}
+
+function testBotBrowserPayloadRetainsAttachmentsAndSkill(): void {
+  const skillBlock = formatSkillUseBlock({ name: "Review", path: "/skills/review/SKILL.md" })
+  const draft = qm({
+    text: "检查网页",
+    builtinBrowser: true,
+    attachmentModelBlocks: ATT,
+    skillBlock
+  })
+  const payload = getQueuedModelContent(draft, "bot")
+  assertEqual(payload.includes("browser_*"), false, "Bot must not request workbench browser tools")
+  assertEqual(
+    payload.startsWith("使用 Bot 浏览器 bot_browser 工具："),
+    true,
+    "Bot browser selection must bind its own tool"
+  )
+  const parsed = parseSkillUseBlock(payload)
+  assertEqual(
+    parsed?.skillPath,
+    "/skills/review/SKILL.md",
+    "skill remains the final parseable block"
+  )
+  assertEqual(
+    parseBuiltinBrowserPrompt(parsed!.rest).visibleText,
+    `检查网页${ATT}`,
+    "reload keeps the user text and attached file"
+  )
+  assertEqual(
+    getQueuedModelContent(draft).includes("browser_*"),
+    true,
+    "original workbench keeps its own browser payload"
+  )
 }
 
 function testModelTextPlusAttachment(): void {
@@ -215,6 +252,7 @@ function testGuardPrefixesCoordinatorMarker(): void {
 
 async function main(): Promise<void> {
   const tests = [
+    testBotBrowserPayloadRetainsAttachmentsAndSkill,
     testModelPlainText,
     testModelTextPlusAttachment,
     testModelTextPlusSkill,

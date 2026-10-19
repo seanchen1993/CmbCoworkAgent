@@ -3371,6 +3371,7 @@ export function ResourcePreview({
             resolveExternalPreviewGrant={resolveExternalPreviewGrant}
             reloadToken={reloadToken}
             previewMode={filePreviewMode}
+            visualEditPolicy="thread-submit"
           />
         </Suspense>
       </div>

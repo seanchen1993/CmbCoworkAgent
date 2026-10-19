@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useId, useMemo, useRef, useState } from "react"
+import type { BotFilePreviewTransport } from "../../../../shared/bots/contracts"
 import { AlertCircle, ChevronLeft, ChevronRight, FileCode, Loader2 } from "lucide-react"
 import {
   type WorkspaceFilePreviewMediaResult,
@@ -26,8 +27,8 @@ import {
 } from "@/components/visual-edit/visual-edit-store"
 
 // Visual edit needs a live thread to submit into, so its hooks live in a child
-// that is only mounted when threadId is present. FileViewer itself is also used
-// without a thread (external knowledge-base previews), where visual edit is off.
+// that is only mounted when a caller explicitly grants ordinary thread submission.
+// Managed Bot/Partner and external knowledge previews must not gain this path.
 function HtmlPreviewWithVisualEdit({
   threadId,
   content,
@@ -96,7 +97,15 @@ import {
   type HtmlPreviewPolicy
 } from "@/lib/file-preview-mode"
 
+/** Optional presentation only; FileViewer retains ownership of bounded reads and cancellation. */
+export interface TextFilePreviewAdapter {
+  extensions: readonly string[]
+  component: React.ComponentType<{ content: string; filePath: string }>
+}
+
 interface FileViewerProps {
+  transport?: BotFilePreviewTransport
+  cacheNamespace?: string
   filePath: string
   threadId?: string
   externalFullPath?: string
@@ -112,6 +121,9 @@ interface FileViewerProps {
   htmlPreviewPolicy?: HtmlPreviewPolicy
   /** Stable per surface so a persisted file tab cancels the prior task's preview. */
   requestLane?: string
+  textPreview?: TextFilePreviewAdapter
+  /** Ordinary thread submit capability; managed callers must keep this disabled. */
+  visualEditPolicy?: "disabled" | "thread-submit"
 }
 
 const MAX_HTML_DEPENDENCY_REQUESTS = 16
@@ -147,14 +159,20 @@ export function FileViewer({
   reloadToken,
   previewMode,
   htmlPreviewPolicy,
-  requestLane
+  requestLane,
+  textPreview,
+  visualEditPolicy = "disabled",
+  transport = window.api.workspace,
+  cacheNamespace = ""
 }: FileViewerProps): React.JSX.Element | null {
   const generatedLane = useId().replace(/[^a-zA-Z\d_-]/g, "")
   const lane = requestLane ?? `file-viewer-${generatedLane}`
   const displayPath = externalFullPath || filePath
-  const sourceCachePrefix = externalFullPath
-    ? `external:${externalFullPath}\u0000`
-    : `workspace:${threadId ?? ""}:${workspacePathKind ?? "relative"}:${filePath}\u0000`
+  const sourceCachePrefix =
+    cacheNamespace +
+    (externalFullPath
+      ? `external:${externalFullPath}\u0000`
+      : `workspace:${threadId ?? ""}:${workspacePathKind ?? "relative"}:${filePath}\u0000`)
 
   const fileName = displayPath.split(/[/\\]/).pop() || displayPath
   const ext = fileName.includes(".") ? (fileName.split(".").pop()?.toLowerCase() ?? "") : ""
@@ -166,6 +184,10 @@ export function FileViewer({
     workspacePathKind === "relative" &&
     Boolean(threadId)
   const webSourceLike = shouldAssembleWebSourcePreview(fileName)
+  const TextPreview =
+    previewMode !== "source" && textPreview?.extensions.includes(ext)
+      ? textPreview.component
+      : undefined
   const fileTypeInfo = useMemo(() => getFileType(fileName), [fileName])
   const isBinary = useMemo(() => isBinaryFile(fileName), [fileName])
 
@@ -224,7 +246,7 @@ export function FileViewer({
 
       const previewSource = await previewSourceForPath(displayPath)
       if (generation !== generationRef.current) return null
-      const result = await window.api.workspace.readFilePreview({
+      const result = await transport.readFilePreview({
         source: previewSource,
         offset,
         lane,
@@ -243,7 +265,7 @@ export function FileViewer({
       writeWorkspaceFilePreviewCache(cacheKey, result)
       return result
     },
-    [displayPath, lane, previewSourceForPath, sourceCachePrefix]
+    [displayPath, lane, previewSourceForPath, sourceCachePrefix, transport]
   )
 
   const loadTextPreview = useCallback(
@@ -256,20 +278,21 @@ export function FileViewer({
       const first = await loadTextPage(offset, generation, requestToken, allowCache)
       if (!first || generation !== generationRef.current) return null
 
-      const result = webSourceLike
-        ? await assembleBoundedTextPreview(
-            first,
-            (nextOffset) => loadTextPage(nextOffset, generation, requestToken, allowCache),
-            {
-              maxBytes: WEB_SOURCE_PREVIEW_MAX_BYTES,
-              maxPages: WEB_SOURCE_PREVIEW_MAX_PAGES
-            }
-          )
-        : first
+      const result =
+        webSourceLike || TextPreview
+          ? await assembleBoundedTextPreview(
+              first,
+              (nextOffset) => loadTextPage(nextOffset, generation, requestToken, allowCache),
+              {
+                maxBytes: WEB_SOURCE_PREVIEW_MAX_BYTES,
+                maxPages: WEB_SOURCE_PREVIEW_MAX_PAGES
+              }
+            )
+          : first
       if (generation === generationRef.current) setTextPage(result)
       return generation === generationRef.current ? result : null
     },
-    [loadTextPage, webSourceLike]
+    [loadTextPage, webSourceLike, TextPreview]
   )
 
   useEffect(() => {
@@ -303,7 +326,7 @@ export function FileViewer({
         if (isBinary) {
           const previewSource = await previewSourceForPath(displayPath)
           if (generation !== generationRef.current) return
-          const result = await window.api.workspace.openMediaPreview({
+          const result = await transport.openMediaPreview({
             source: previewSource,
             lane,
             requestToken,
@@ -311,7 +334,7 @@ export function FileViewer({
           })
           if (generation !== generationRef.current) {
             if (result.success && result.previewUrl) {
-              void window.api.workspace.releaseFilePreview({ previewUrl: result.previewUrl })
+              void transport.releaseFilePreview({ previewUrl: result.previewUrl })
             }
             return
           }
@@ -340,9 +363,9 @@ export function FileViewer({
 
     return () => {
       if (generationRef.current === generation) generationRef.current += 1
-      void window.api.workspace.cancelFilePreview({ lanePrefix: lane, requestToken })
+      void transport.cancelFilePreview({ lanePrefix: lane, requestToken })
       if (releasedMediaUrl) {
-        void window.api.workspace.releaseFilePreview({ previewUrl: releasedMediaUrl })
+        void transport.releaseFilePreview({ previewUrl: releasedMediaUrl })
       }
     }
   }, [
@@ -356,7 +379,8 @@ export function FileViewer({
     previewSourceForPath,
     reloadToken,
     sourceCachePrefix,
-    threadId
+    threadId,
+    transport
   ])
 
   const navigateToOffset = useCallback(
@@ -370,11 +394,11 @@ export function FileViewer({
         imageRequests: 0,
         imageBytes: 0
       }
-      void window.api.workspace.cancelFilePreview({
+      void transport.cancelFilePreview({
         lanePrefix: `${lane}:html`,
         requestToken
       })
-      void window.api.workspace.cancelFilePreview({
+      void transport.cancelFilePreview({
         lanePrefix: `${lane}:image`,
         requestToken
       })
@@ -422,7 +446,7 @@ export function FileViewer({
       const readPage = async (offset: number): Promise<WorkspaceFilePreviewTextResult | null> => {
         const previewSource = await previewSourceForPath(resolvedPath)
         if (generation !== generationRef.current) return null
-        const result = await window.api.workspace.readFilePreview({
+        const result = await transport.readFilePreview({
           source: previewSource,
           offset,
           lane: dependencyLane,
@@ -452,7 +476,7 @@ export function FileViewer({
       budget.htmlReads.set(resolvedPath, pending)
       return pending
     },
-    [lane, previewSourceForPath]
+    [lane, previewSourceForPath, transport]
   )
 
   // Markdown images receive a short-lived protocol URL, never a base64 IPC payload.
@@ -464,32 +488,32 @@ export function FileViewer({
       budget.imageRequests += 1
       const previewSource = await previewSourceForPath(resolvedPath)
       if (generation !== generationRef.current) return null
-      const result = await window.api.workspace.openMediaPreview({
+      const result = await transport.openMediaPreview({
         source: previewSource,
         lane: `${lane}:image:${shortPathHash(resolvedPath)}`,
         requestToken: requestTokenRef.current
       })
       if (generation !== generationRef.current) {
         if (result.success && result.previewUrl) {
-          void window.api.workspace.releaseFilePreview({ previewUrl: result.previewUrl })
+          void transport.releaseFilePreview({ previewUrl: result.previewUrl })
         }
         return null
       }
       if (!result.success) return null
       if (!result.inlineAllowed && result.previewUrl) {
-        void window.api.workspace.releaseFilePreview({ previewUrl: result.previewUrl })
+        void transport.releaseFilePreview({ previewUrl: result.previewUrl })
         return null
       }
       if (budget.imageBytes + result.size > MAX_MARKDOWN_IMAGE_SOURCE_BYTES) {
         if (result.previewUrl) {
-          void window.api.workspace.releaseFilePreview({ previewUrl: result.previewUrl })
+          void transport.releaseFilePreview({ previewUrl: result.previewUrl })
         }
         return null
       }
       budget.imageBytes += result.size
       return result.previewUrl
     },
-    [lane, previewSourceForPath]
+    [lane, previewSourceForPath, transport]
   )
 
   if (isLoading) {
@@ -596,7 +620,7 @@ export function FileViewer({
       </div>
     )
   } else if (previewKind === "html") {
-    if (!threadId) {
+    if (!threadId || visualEditPolicy !== "thread-submit") {
       body = (
         <HtmlPreview
           content={content}
@@ -620,6 +644,8 @@ export function FileViewer({
         />
       )
     }
+  } else if (TextPreview && !textPage?.truncated) {
+    body = <TextPreview content={content} filePath={displayPath} />
   } else {
     body = <CodeViewer filePath={displayPath} content={content} />
   }

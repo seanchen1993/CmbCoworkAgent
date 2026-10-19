@@ -87,7 +87,9 @@ import { ProjectModePanel } from "./panels/ProjectModePanel"
 import { EfficiencyPanel } from "./panels/EfficiencyPanel"
 import { ProjectMetricGroupFilter } from "./panels/ProjectMetricGroupFilter"
 import { AwardsPanel, type AwardSkillRow, type TeamBenchmarkRow } from "./panels/AwardsPanel"
+import { formatAwardAdoptionExportValues } from "@/lib/award-code-adoption"
 import { STAGE_BUCKET_LABELS, type StageBucket } from "../../../../shared/harness-stage-bucket"
+import { toolRankingCountLabel } from "../../../../shared/dashboard-tool-usage"
 import { ModelPanel } from "./panels/ModelPanel"
 import { UserPanel } from "./panels/UserPanel"
 import { ProductivityPanel } from "./panels/ProductivityPanel"
@@ -269,7 +271,10 @@ function buildDashboardAnalysisPanelSnapshot({
           totalSkills: overview.totalSkills,
           totalSkillCalls: overview.totalSkillCalls,
           totalTools: overview.totalTools,
-          totalToolCalls: overview.totalToolCalls,
+          // 没有完整计数时排行是「用过该工具的 Trace 数」，调用总数未知，不能给 0。
+          toolRankingMetric: overview.toolUsageCoverage?.metric ?? "traces",
+          totalToolCalls:
+            overview.toolUsageCoverage?.metric === "calls" ? overview.totalToolCalls : null,
           codeGeneratedLines: overview.codeGeneratedLines,
           codeMeasuredGeneratedLines: overview.codeMeasuredGeneratedLines,
           codeEffectiveGeneratedLines: overview.codeEffectiveGeneratedLines,
@@ -3056,6 +3061,8 @@ export function DashboardView(): React.JSX.Element {
     useState<DashboardTraceTriggerScope>("active")
   const [userDetailTraceExporting, setUserDetailTraceExporting] = useState(false)
   const [marketSkillKeys, setMarketSkillKeys] = useState<Set<string>>(new Set())
+  const [marketSkillItems, setMarketSkillItems] = useState<MarketItem[]>([])
+  const [marketSkillsError, setMarketSkillsError] = useState<string | null>(null)
   const [marketSkillMap, setMarketSkillMap] = useState<Map<string, MarketItem>>(new Map())
   const [skillUploaderProfiles, setSkillUploaderProfiles] = useState<
     Record<string, SkillUploaderProfile>
@@ -3203,18 +3210,26 @@ export function DashboardView(): React.JSX.Element {
     // 个人构建技能名集：取应用市场（marketApi.getSkills）条目名，后端按名聚合并按名回传。
     const personalSkillNames = Array.from(
       new Set(
-        Array.from(marketSkillMap.values())
-          .map((item) => item.name?.trim() || "")
+        marketSkillItems
+          .map((item) => item.name?.trim() || item.filename?.trim() || "")
           .filter(Boolean)
       )
     )
 
     async function loadSkillContribs(): Promise<void> {
       if (marketSkillsLoading) return
+      if (marketSkillsError) {
+        if (!cancelled) {
+          setAwardSkillsError(marketSkillsError)
+          setAwardSkillsLoading(false)
+        }
+        return
+      }
       if (personalSkillNames.length === 0) {
         if (!cancelled) {
           setAwardSkillContribs([])
           setAwardSkillsError(null)
+          setAwardSkillsLoading(false)
         }
         return
       }
@@ -3242,6 +3257,17 @@ export function DashboardView(): React.JSX.Element {
       }
     }
 
+    void loadSkillContribs()
+
+    return () => {
+      cancelled = true
+    }
+  }, [activeMainTab, awardsAdmin, range, marketSkillItems, marketSkillsLoading, marketSkillsError])
+
+  // 应用奖不依赖市场列表，避免市场加载期间重复触发全量查询。
+  useEffect(() => {
+    if (activeMainTab !== "awards" || !awardsAdmin) return
+    let cancelled = false
     async function loadUserApps(): Promise<void> {
       if (!cancelled) {
         setAwardUsersLoading(true)
@@ -3264,13 +3290,11 @@ export function DashboardView(): React.JSX.Element {
       }
     }
 
-    void loadSkillContribs()
     void loadUserApps()
-
     return () => {
       cancelled = true
     }
-  }, [activeMainTab, awardsAdmin, range, marketSkillMap, marketSkillsLoading])
+  }, [activeMainTab, awardsAdmin, range])
 
   // 团队标杆奖懒加载：拉取室/组指标后，按上传时间过滤市场技能，再按作者归属补「贡献技能数 / 覆盖数」。
   useEffect(() => {
@@ -3279,6 +3303,13 @@ export function DashboardView(): React.JSX.Element {
 
     async function loadTeam(): Promise<void> {
       if (marketSkillsLoading) return
+      if (marketSkillsError) {
+        if (!cancelled) {
+          setAwardTeamError(marketSkillsError)
+          setAwardTeamLoading(false)
+        }
+        return
+      }
       if (!cancelled) {
         setAwardTeamLoading(true)
         setAwardTeamError(null)
@@ -3293,7 +3324,7 @@ export function DashboardView(): React.JSX.Element {
         const rawRows = (result.data as DashboardAwardTeamBenchmarkRow[]) ?? []
         const knownShiList = rawRows.map((row) => row.shi).filter(Boolean)
         const knownGroupsByShi = buildKnownTeamGroupsByShi(rawRows)
-        const uploadedInRangeSkills = Array.from(marketSkillMap.values()).filter((item) =>
+        const uploadedInRangeSkills = marketSkillItems.filter((item) =>
           isMarketSkillUploadedInRange(item, range)
         )
         const skillContribs = buildTeamSkillContributions(
@@ -3315,7 +3346,8 @@ export function DashboardView(): React.JSX.Element {
         if (coverageGroups.length > 0) {
           const cov = await window.api.dashboard.awardsTeamSkillCoverage(range, coverageGroups)
           if (cancelled) return
-          if (cov.success) coverageByOrg = (cov.data as Record<string, number>) ?? {}
+          if (!cov.success) throw new Error(cov.error || "获取技能覆盖数据失败")
+          coverageByOrg = (cov.data as Record<string, number>) ?? {}
         }
 
         const enriched: TeamBenchmarkRow[] = rawRows.map((row) => ({
@@ -3326,8 +3358,7 @@ export function DashboardView(): React.JSX.Element {
             const key = child.group ? teamOrgContributionKey(row.shi, child.group) : ""
             return {
               ...child,
-              contributedSkillCount:
-                skillContribs.byOrg.get(key)?.contributedSkillKeys.size ?? 0,
+              contributedSkillCount: skillContribs.byOrg.get(key)?.contributedSkillKeys.size ?? 0,
               skillCoverageShiCount: coverageByOrg[key] ?? 0,
               children: undefined
             }
@@ -3351,8 +3382,9 @@ export function DashboardView(): React.JSX.Element {
     activeMainTab,
     awardsAdmin,
     range,
-    marketSkillMap,
+    marketSkillItems,
     marketSkillsLoading,
+    marketSkillsError,
     skillUploaderProfiles
   ])
 
@@ -3387,7 +3419,7 @@ export function DashboardView(): React.JSX.Element {
     })
   }, [awardSkillContribs, marketSkillMap, skillUploaderProfiles])
 
-  // 评奖辅助看板导出：两个 sheet（技能贡献奖 / 技能应用奖），口径同界面，四个入库率全列。
+  // 评奖辅助看板导出：三个奖项，四个入库率及分子分母同界面。
   const handleAwardsExport = useCallback(async () => {
     setExporting(true)
     try {
@@ -3423,10 +3455,7 @@ export function DashboardView(): React.JSX.Element {
           r.crossOrgCount >= 2 ? "是" : "否",
           r.userCount,
           r.callCount,
-          formatPercent(r.codeStats?.measuredAdoptionRate ?? null),
-          formatPercent(r.codeStats?.pushedAdoptionRate ?? null),
-          formatPercent(r.codeStats?.inclusiveAdoptionRate ?? null),
-          formatPercent(r.codeStats?.inclusivePushedAdoptionRate ?? null)
+          ...formatAwardAdoptionExportValues(r.codeStats)
         ])
       })
 
@@ -3460,10 +3489,7 @@ export function DashboardView(): React.JSX.Element {
           r.toolCallCount,
           r.threadCount,
           r.featureCount,
-          formatPercent(r.codeStats?.measuredAdoptionRate ?? null),
-          formatPercent(r.codeStats?.pushedAdoptionRate ?? null),
-          formatPercent(r.codeStats?.inclusiveAdoptionRate ?? null),
-          formatPercent(r.codeStats?.inclusivePushedAdoptionRate ?? null)
+          ...formatAwardAdoptionExportValues(r.codeStats)
         ])
       })
 
@@ -3481,10 +3507,7 @@ export function DashboardView(): React.JSX.Element {
             row.skillCoverageShiCount === null ? "" : row.skillCoverageShiCount,
             row.skillUsageCount,
             row.codeStats?.adoptedLines ?? 0,
-            formatPercent(row.codeStats?.measuredAdoptionRate ?? null),
-            formatPercent(row.codeStats?.pushedAdoptionRate ?? null),
-            formatPercent(row.codeStats?.inclusiveAdoptionRate ?? null),
-            formatPercent(row.codeStats?.inclusivePushedAdoptionRate ?? null)
+            ...formatAwardAdoptionExportValues(row.codeStats)
           ])
         }
         emit(shiRow, false)
@@ -3600,14 +3623,20 @@ export function DashboardView(): React.JSX.Element {
         const result = await marketApi.getSkills()
         if (cancelled) return
         if (result.success && result.data) {
+          setMarketSkillsError(
+            result.hasNextPage ? "技能市场列表未完整返回，无法生成完整评奖结果" : null
+          )
+          setMarketSkillItems(result.data)
           setMarketSkillKeys(buildMarketSkillKeySet(result.data))
           setMarketSkillMap(buildMarketSkillMap(result.data))
           void loadUploaderProfiles(result.data)
           return
         }
+        setMarketSkillsError(result.error || "获取技能市场数据失败")
         console.warn("[Dashboard] Failed to load marketplace skills:", result.error)
       } catch (error) {
         if (!cancelled) {
+          setMarketSkillsError(error instanceof Error ? error.message : String(error))
           console.warn("[Dashboard] Failed to load marketplace skills:", error)
         }
       } finally {
@@ -4626,6 +4655,10 @@ export function DashboardView(): React.JSX.Element {
 
       // 1. Overview summary
       if (overview) {
+        // 没有完整计数时，Tool 排行是「用过该工具的 Trace 数」，调用总数未知。
+        const toolCountLabel = toolRankingCountLabel(overview.toolUsageCoverage)
+        const toolCallTotal =
+          overview.toolUsageCoverage?.metric === "calls" ? overview.totalToolCalls : "暂无完整计数"
         sheets.push({
           name: "使用概览",
           header: ["指标", "值"],
@@ -4659,7 +4692,7 @@ export function DashboardView(): React.JSX.Element {
             ["Skill 种类数", overview.totalSkills],
             ["Skill 调用次数", overview.totalSkillCalls],
             ["Tool 种类数", overview.totalTools],
-            ["Tool 调用次数", overview.totalToolCalls]
+            ["Tool 调用次数", toolCallTotal]
           ]
         })
 
@@ -4723,10 +4756,10 @@ export function DashboardView(): React.JSX.Element {
         if (exportFilteredTools.length > 0) {
           sheets.push({
             name: "Tool使用排行(已过滤)",
-            header: ["排名", "Tool", "调用次数"],
+            header: ["排名", "Tool", toolCountLabel],
             rows: [
               ["Tool 种类数", overview.totalTools, ""],
-              ["Tool 调用次数", overview.totalToolCalls, ""],
+              ["Tool 调用次数", toolCallTotal, ""],
               ["", "", ""],
               ...exportFilteredTools.map((t, i) => [i + 1, t.tool, t.count])
             ]
@@ -4739,10 +4772,10 @@ export function DashboardView(): React.JSX.Element {
         if (exportAllTools.length > 0) {
           sheets.push({
             name: "Tool使用排行(全部)",
-            header: ["排名", "Tool", "调用次数"],
+            header: ["排名", "Tool", toolCountLabel],
             rows: [
               ["Tool 种类数", overview.totalTools, ""],
-              ["Tool 调用次数", overview.totalToolCalls, ""],
+              ["Tool 调用次数", toolCallTotal, ""],
               ["", "", ""],
               ...exportAllTools.map((t, i) => [i + 1, t.tool, t.count])
             ]
@@ -5048,10 +5081,11 @@ export function DashboardView(): React.JSX.Element {
         projectMode.tools.byToolFilteredAll.length > 0
           ? projectMode.tools.byToolFilteredAll
           : projectMode.tools.byTool
+      const toolCountLabel = toolRankingCountLabel(projectMode.tools.toolUsageCoverage)
       if (exportFilteredTools.length > 0) {
         sheets.push({
           name: "项目Tool使用排行(已过滤)",
-          header: ["排名", "Tool", "调用次数"],
+          header: ["排名", "Tool", toolCountLabel],
           rows: exportFilteredTools.map((tool, index) => [index + 1, tool.tool, tool.count])
         })
       }
@@ -5063,7 +5097,7 @@ export function DashboardView(): React.JSX.Element {
       if (exportAllTools.length > 0) {
         sheets.push({
           name: "项目Tool使用排行(全部)",
-          header: ["排名", "Tool", "调用次数"],
+          header: ["排名", "Tool", toolCountLabel],
           rows: exportAllTools.map((tool, index) => [index + 1, tool.tool, tool.count])
         })
       }

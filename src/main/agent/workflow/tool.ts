@@ -13,7 +13,7 @@ import {
   type StableFileHandle
 } from "../../services/stable-file-handle"
 import { isPathInside } from "./paths"
-import { WORKFLOW_TOOL_DESCRIPTION } from "./prompts"
+import { WORKFLOW_TOOL_DESCRIPTION, AUTOMATIC_WORKFLOW_TOOL_DESCRIPTION } from "./prompts"
 import { loadAgentProfiles, loadAgentProfilesAsync, type AgentProfile } from "../agent-registry"
 import { workflowRunManager } from "./run-manager"
 import {
@@ -85,7 +85,11 @@ const workflowToolSchema = z.object({
 export interface CreateWorkflowToolOptions {
   threadId: string
   workspacePath: string
+  /** Prevent a cancelled foreground turn from launching after async preparation. */
+  abortSignal?: AbortSignal
   modelId?: string
+  /** Trusted runtime opt-in; does not change launch or command approval. */
+  automaticUse?: boolean
   /** Reads the current global YOLO state when the run-before gate is reached. */
   readYoloMode?: () => boolean
   /** Physical-run observer. Called after the run manager accepts and schedules
@@ -123,15 +127,17 @@ export interface CreateWorkflowToolOptions {
  */
 function buildWorkflowToolDescription(
   workspacePath: string,
-  suppliedProfiles?: AgentProfile[]
+  suppliedProfiles?: AgentProfile[],
+  automaticUse = false
 ): string {
+  const description = automaticUse ? AUTOMATIC_WORKFLOW_TOOL_DESCRIPTION : WORKFLOW_TOOL_DESCRIPTION
   let profiles: ReturnType<typeof loadAgentProfiles>
   try {
     profiles = suppliedProfiles ?? loadAgentProfiles(workspacePath)
   } catch {
-    return WORKFLOW_TOOL_DESCRIPTION
+    return description
   }
-  if (profiles.length === 0) return WORKFLOW_TOOL_DESCRIPTION
+  if (profiles.length === 0) return description
   const describeAccess = (p: (typeof profiles)[number]): string => {
     const parts: string[] = []
     if (p.disallowedTools.length > 0) parts.push(`no ${p.disallowedTools.join("/")}`)
@@ -145,7 +151,7 @@ function buildWorkflowToolDescription(
     return parts.join(", ")
   }
   const lines = profiles.map((p) => `  - "${p.name}" — ${p.description} [${describeAccess(p)}]`)
-  return `${WORKFLOW_TOOL_DESCRIPTION}
+  return `${description}
 
 agentType catalogue (pass as opts.agentType on an agent() call; omit for the default full-tool agent). A role's listed restrictions (disallowed tools / shell policy) are physically enforced — the blocked tools are removed from that subagent and a read-only shell only runs provably read-only commands — so use restricted roles for recon/verification fan-out and the default (or a write-capable custom) agent for anything that edits files:
 ${lines.join("\n")}
@@ -162,6 +168,7 @@ export function createWorkflowTool(options: CreateWorkflowToolOptions): DynamicS
 
   return tool(
     async (input: z.infer<typeof workflowToolSchema>) => {
+      options.abortSignal?.throwIfAborted()
       if (workflowRunManager.isActive(threadId)) {
         throw new Error(
           `A dynamic workflow (${workflowRunManager.activeRunId(threadId)}) is already running in this thread. Wait for its task-notification, or the user can cancel it from the workflow panel.`
@@ -213,6 +220,7 @@ export function createWorkflowTool(options: CreateWorkflowToolOptions): DynamicS
       // executed by the engine. A profile file changed while the approval card
       // is open therefore cannot silently alter this launch's permissions.
       const executionProfiles = await loadAgentProfilesAsync(workspacePath)
+      options.abortSignal?.throwIfAborted()
 
       // Run-before approval gate. Reject → don't launch; return a plain message
       // so the model relays it to the user instead of retrying.
@@ -225,6 +233,7 @@ export function createWorkflowTool(options: CreateWorkflowToolOptions): DynamicS
         input.tokenBudget ?? null,
         executionProfiles
       )
+      options.abortSignal?.throwIfAborted()
       if (!approved) {
         return JSON.stringify(
           {
@@ -271,6 +280,9 @@ export function createWorkflowTool(options: CreateWorkflowToolOptions): DynamicS
       // before launch; launch itself remains a synchronous active-map critical
       // section, so concurrent calls still cannot start two runs on one thread.
       await workflowRunManager.prepareLaunch(workspacePath, threadId)
+      // No await between this check and launch's synchronous active-map claim.
+      // Once accepted, the manager owns the workflow independently of this turn.
+      options.abortSignal?.throwIfAborted()
 
       const launch = workflowRunManager.launch({
         threadId,
@@ -324,7 +336,11 @@ export function createWorkflowTool(options: CreateWorkflowToolOptions): DynamicS
     },
     {
       name: "workflow",
-      description: buildWorkflowToolDescription(workspacePath, options.agentProfiles),
+      description: buildWorkflowToolDescription(
+        workspacePath,
+        options.agentProfiles,
+        options.automaticUse
+      ),
       schema: workflowToolSchema
     }
   ) as unknown as DynamicStructuredTool

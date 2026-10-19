@@ -30,6 +30,71 @@ afterAll(async () => {
   await db.closeDatabase()
 })
 
+it.each([false, true])(
+  "keeps hidden notification snapshots on one streamed row (reused provider: %s)",
+  (reused) => {
+    const threadId = `hidden-notification-${reused}`
+    db.createThread(threadId)
+    db.upsertThreadMessages(threadId, [
+      { id: "u", role: "user", content: "delegate work", created_at: new Date(1) },
+      {
+        id: reused ? "response" : "earlier",
+        role: "assistant",
+        content: "started",
+        created_at: new Date(2)
+      }
+    ])
+    const boundary = db.captureThreadMessageProviderOccurrenceBoundary(threadId)
+    const serialize = createStreamDataSerializer()
+    const persist = (tuples: unknown[]) => {
+      const queued = tuples.map(persistedMessageFromStreamPayload).filter((value) => value !== null)
+      const result = resolveStreamTranscriptFlush({
+        queuedMessages: queued,
+        loadBaselineMessages: () => db.getThreadMessages(threadId)
+      })
+      db.upsertThreadMessages(threadId, result.messages, { preserveExistingOrder: true })
+    }
+    persist([
+      serialize("messages", [
+        new AIMessageChunk({
+          id: "response",
+          content: "result",
+          additional_kwargs: {
+            cmb_internal_provider_source_id: "response",
+            cmb_internal_provider_occurrence: reused ? 2 : 1
+          }
+        }),
+        {}
+      ]).data
+    ])
+    for (const content of ["result complete", "result complete", "result corrected"]) {
+      const frame = serialize("values", {
+        messages: [
+          new HumanMessage({ id: "hidden-notice", content: "internal result" }),
+          new AIMessage({ id: "response", content, tool_calls: [] })
+        ]
+      })
+      persist(
+        selectStreamTranscriptValueSnapshots(frame.data, frame.valuesSnapshotKind, {
+          loadBaselineMessages: () => db.getThreadMessages(threadId),
+          loadPreviousTurnOccurrences: (_userId, sources) => boundary(sources)
+        })
+      )
+    }
+    const rows = db.getThreadMessages(threadId)
+    expect(rows).toHaveLength(3)
+    expect(rows[1].content).toBe("started")
+    expect(rows[2]).toMatchObject({
+      content: "result corrected",
+      provider_source_id: "response",
+      provider_occurrence: reused ? 2 : 1
+    })
+    expect(boundary(["response"])).toEqual(
+      reused ? [{ provider_source_id: "response", role: "assistant", provider_occurrence: 1 }] : []
+    )
+  }
+)
+
 it("accepts new native values after clear without letting delayed renderer echoes restore drafts", () => {
   const threadId = "native-values-authority"
   db.createThread(threadId)

@@ -1,6 +1,7 @@
 // Relative (not "@/") so this module stays importable from unit tests that
 // don't resolve the "@/" path alias for runtime values.
 import {
+  BOT_BROWSER_PROMPT_PREFIX,
   BUILTIN_BROWSER_NO_SCREENSHOT_PROMPT_PREFIX,
   BUILTIN_BROWSER_PROMPT_PREFIX
 } from "../../../../shared/user-input-transport"
@@ -63,6 +64,9 @@ export function parseBuiltinBrowserPrompt(input: string): {
   visibleText: string
   browserSelected: boolean
 } {
+  if (input.startsWith(BOT_BROWSER_PROMPT_PREFIX)) {
+    return { visibleText: input.slice(BOT_BROWSER_PROMPT_PREFIX.length), browserSelected: true }
+  }
   if (input.startsWith(BUILTIN_BROWSER_NO_SCREENSHOT_PROMPT_PREFIX)) {
     return {
       visibleText: input.slice(BUILTIN_BROWSER_NO_SCREENSHOT_PROMPT_PREFIX.length),

@@ -1,5 +1,5 @@
 import React from "react"
-import { Loader2 } from "lucide-react"
+import { Info, Loader2 } from "lucide-react"
 import {
   Dialog,
   DialogContent,
@@ -110,7 +110,12 @@ function StageRow({
           {fmtDuration(metrics.avgDurationMs)}
         </span>
       </td>
-      <td className="px-3 py-2 text-right tabular-nums">{fmtDuration(metrics.p95DurationMs)}</td>
+      <td
+        className="px-3 py-2 text-right tabular-nums"
+        title={metrics.p95Available === false ? "新旧统计口径混合，暂不显示 P95" : undefined}
+      >
+        {metrics.p95Available === false ? "—" : fmtDuration(metrics.p95DurationMs)}
+      </td>
       <td className="px-3 py-2 text-right tabular-nums">
         {fmtTokens(metrics.runCost.inputTokens)}
       </td>
@@ -119,6 +124,17 @@ function StageRow({
       </td>
       <td className="px-3 py-2 text-right tabular-nums">{fmtCount(metrics.runCost.modelCalls)}</td>
       <td className="px-3 py-2 text-right tabular-nums">{fmtCount(metrics.runCost.toolCalls)}</td>
+      <td
+        className="px-3 py-2 text-right tabular-nums"
+        title="向用户请求补充信息的次数；≥ 表示仅覆盖部分记录，— 表示没有完整记录"
+      >
+        {metrics.runCost.userInputRequestDocs >=
+        (metrics.runCost.traceDocs ?? metrics.conversationCount)
+          ? fmtCount(metrics.runCost.userInputRequests)
+          : metrics.runCost.userInputRequestDocs > 0
+            ? `≥${fmtCount(metrics.runCost.userInputRequests)}`
+            : "—"}
+      </td>
     </tr>
   )
 }
@@ -146,21 +162,38 @@ export function ProjectStageAnalysisDialog({
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="flex max-h-[85vh] w-[95vw] max-w-[1400px] flex-col">
         <DialogHeader>
-          <DialogTitle className="text-base">阶段耗时分析</DialogTitle>
+          <DialogTitle className="flex items-center gap-1.5 text-base">
+            阶段耗时分析
+            <span className="group relative inline-flex">
+              <button
+                type="button"
+                aria-label="查看阶段耗时统计说明"
+                aria-describedby="project-stage-analysis-help"
+                className="inline-flex size-5 items-center justify-center text-muted-foreground hover:text-foreground focus-visible:rounded-sm focus-visible:outline-2 focus-visible:outline-ring"
+              >
+                <Info className="size-3.5" />
+              </button>
+              <span
+                id="project-stage-analysis-help"
+                role="tooltip"
+                className="pointer-events-none invisible absolute left-0 top-full z-[60] w-96 max-w-[calc(100vw-4rem)] rounded-md border bg-popover px-2.5 py-1.5 text-left text-xs font-normal leading-relaxed text-popover-foreground opacity-0 shadow-md transition-opacity group-hover:pointer-events-auto group-hover:visible group-hover:opacity-100"
+              >
+                耗时统计主 Agent
+                会话从发起到结束的工作时间，按经过的阶段拆分；一轮跨多个阶段，每个阶段各计 1
+                轮，因此阶段轮次之和可能大于总轮次。工具、模型调用及 Token 汇总主、子
+                Agent，按调用开始时的阶段归属；旧记录按轮次开始阶段归属，无法确定的计入「未归因」。
+                {analysis?.costAttribution &&
+                  analysis.costAttribution.tokenUsageReportedCalls <
+                    analysis.costAttribution.modelCalls &&
+                  " 部分模型调用未返回 Token 用量。"}
+                {(analysis?.costAttribution?.truncated ||
+                  analysis?.durationAttribution?.truncated) &&
+                  " 阶段数量超出展示上限，阶段合计可能小于项目总计。"}
+              </span>
+            </span>
+          </DialogTitle>
           <DialogDescription className="truncate">{projectName}</DialogDescription>
         </DialogHeader>
-
-        {/*
-          口径说明放在最显眼的位置，不折叠也不塞进 tooltip：这里的耗时是 Agent 忙碌
-          时长，不是阶段的墙钟周期，两者能差一个数量级，读错了结论就反了。
-        */}
-        <div className="rounded-md border border-border bg-muted/30 px-3 py-2 text-[11px] leading-relaxed text-muted-foreground">
-          耗时统计的是 <span className="font-medium text-foreground">Agent 实际工作时长</span>
-          （每轮对话从发起到结束），
-          <strong className="font-bold text-foreground">按该轮开始时特性所处的阶段归属</strong>。
-          轮次和耗时只统计主动触发的主 Agent 会话；工具、模型调用与 Token 包含同范围内所有主、子
-          Agent。
-        </div>
 
         {loading && !analysis ? (
           <div className="flex flex-1 items-center justify-center gap-2 py-16 text-sm text-muted-foreground">
@@ -173,7 +206,7 @@ export function ProjectStageAnalysisDialog({
           </div>
         ) : !total || stages.length === 0 ? (
           <div className="flex flex-1 items-center justify-center py-16 text-sm text-muted-foreground">
-            当前时间范围内该项目没有主 Agent 会话
+            当前时间范围内该项目没有阶段统计数据
           </div>
         ) : (
           <>
@@ -212,6 +245,7 @@ export function ProjectStageAnalysisDialog({
                   <col className="w-[96px]" />
                   <col className="w-[84px]" />
                   <col className="w-[84px]" />
+                  <col className="w-[84px]" />
                 </colgroup>
                 <thead className="sticky top-0 bg-muted/60 backdrop-blur">
                   <tr className="whitespace-nowrap border-b border-border text-muted-foreground">
@@ -232,18 +266,16 @@ export function ProjectStageAnalysisDialog({
                     </th>
                     <th
                       className="px-3 py-2 text-right font-medium"
-                      title="送进模型的 token，不含缓存读取"
+                      title="模型上报的输入 Token，缓存按模型返回口径计入，不重复相加"
                     >
                       输入 Token
                     </th>
-                    <th
-                      className="px-3 py-2 text-right font-medium"
-                      title="模型生成的 token。它和输入之和不等于总量，总量还含缓存"
-                    >
+                    <th className="px-3 py-2 text-right font-medium" title="模型上报的输出 Token">
                       输出 Token
                     </th>
                     <th className="px-3 py-2 text-right font-medium">模型调用</th>
                     <th className="px-3 py-2 text-right font-medium">工具调用</th>
+                    <th className="px-3 py-2 text-right font-medium">请求输入</th>
                   </tr>
                 </thead>
                 <tbody>

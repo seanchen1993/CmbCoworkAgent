@@ -5,6 +5,7 @@ import { projectGoalNoticeVisibleText } from "./goal-notice-presentation"
 import { SKILL_USE_TAG_NAME } from "./skill-use-block"
 import { createChatSearchPlan } from "./chat-search-plan"
 import {
+  BOT_BROWSER_PROMPT_PREFIX,
   BUILTIN_BROWSER_NO_SCREENSHOT_PROMPT_PREFIX,
   BUILTIN_BROWSER_PROMPT_PREFIX
 } from "./user-input-transport"
@@ -62,7 +63,10 @@ function parseUserTransportText(content: string): {
   }
 
   let browserSelected = false
-  if (visibleText.startsWith(BROWSER_NO_SCREENSHOT_PREFIX)) {
+  if (visibleText.startsWith(BOT_BROWSER_PROMPT_PREFIX)) {
+    browserSelected = true
+    visibleText = visibleText.slice(BOT_BROWSER_PROMPT_PREFIX.length)
+  } else if (visibleText.startsWith(BROWSER_NO_SCREENSHOT_PREFIX)) {
     browserSelected = true
     visibleText = visibleText.slice(BROWSER_NO_SCREENSHOT_PREFIX.length)
   } else if (visibleText.startsWith(BROWSER_PREFIX)) {
@@ -144,7 +148,10 @@ export function projectVisibleChatSearchContentWithMetadata(
     if (role !== "user") {
       const bounded = buildStreamingMarkdownPreview(text)
       return {
-        text: [bounded.head, bounded.tail].filter(Boolean).map(projectMarkdownVisibleText).join("\n"),
+        text: [bounded.head, bounded.tail]
+          .filter(Boolean)
+          .map(projectMarkdownVisibleText)
+          .join("\n"),
         truncated: bounded.omittedCharacters > 0
       }
     }
@@ -153,13 +160,13 @@ export function projectVisibleChatSearchContentWithMetadata(
   }
 
   const blocks = content.flatMap((block) => {
-        if (!block || typeof block !== "object") return []
-        const record = block as Record<string, unknown>
-        if (record.type === "text" && typeof record.text === "string") return [record.text]
-        // MessageBubble only renders `content` fallbacks for system notices.
-        if (role === "system" && typeof record.content === "string") return [record.content]
-        return []
-      })
+    if (!block || typeof block !== "object") return []
+    const record = block as Record<string, unknown>
+    if (record.type === "text" && typeof record.text === "string") return [record.text]
+    // MessageBubble only renders `content` fallbacks for system notices.
+    if (role === "system" && typeof record.content === "string") return [record.content]
+    return []
+  })
   if (role !== "user") {
     const projectedBlocks = blocks.map((block) =>
       projectVisibleChatSearchContentWithMetadata(role, block, options)

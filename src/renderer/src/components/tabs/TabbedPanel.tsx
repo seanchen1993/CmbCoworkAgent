@@ -100,6 +100,7 @@ export function TabbedPanel({
                   activeFilePreviewMode === "preview" ? "workspace-scripted" : undefined
                 }
                 requestLane="active-file-tab"
+                visualEditPolicy="thread-submit"
               />
             </Suspense>
           </div>

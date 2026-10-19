@@ -49,3 +49,35 @@ jobs:
 
       - name: Build
         run: npm run build
+
+  bots:
+    name: Bots (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Bot core regression
+        run: npx vitest run src/main/bots src/main/ipc/bots.test.ts src/renderer/src/lib/bot- src/shared/bots
+
+      - name: Build isolated Bot browser integration fixture
+        run: npm run build
+        env:
+          CMB_BOTS_E2E: "1"
+
+      - name: Native Electron Bot browser integration
+        run: npx tsx tests/bot-native-browser-host.spec.ts

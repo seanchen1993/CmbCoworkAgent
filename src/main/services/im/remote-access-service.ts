@@ -256,17 +256,30 @@ export class ImRemoteAccessService {
       const time = (minuteCounts.get(minuteKey) ?? 0) > 1 ? second : minute
       target.label = `${target.label} · ${time}${(secondCounts.get(secondKey) ?? 0) > 1 ? ` #${target.threadId.slice(0, 8)}` : ""}`
     }
-    for (const grant of this.dependencies.grants.listFeatureGrants(route.principalId)) {
-      if (grant.state !== "active" || !featureGrantPrincipalMatches(route.principalId, grant))
-        continue
-      targets.push({
-        kind: "feature_grant",
-        grantId: grant.grantId,
-        grantVersion: grant.grantVersion,
-        label: `${grant.projectNameSnapshot} / ${grant.featureTitleSnapshot}`,
-        projectId: grant.projectId,
-        featureSlug: grant.featureSlug
-      })
+    const featureGrants = this.dependencies.grants
+      .listFeatureGrants(route.principalId)
+      .filter(
+        (grant) =>
+          grant.state === "active" && featureGrantPrincipalMatches(route.principalId, grant)
+      )
+    if (featureGrants.length > 0) {
+      const catalog = await this.dependencies.features.listRemoteFeatureCatalog(
+        new Set(featureGrants.map((grant) => grant.projectId))
+      )
+      const projects = new Map(catalog.map((entry) => [entry.project.id, entry]))
+      for (const grant of featureGrants) {
+        const entry = projects.get(grant.projectId)
+        const feature = entry?.features.find((candidate) => candidate.slug === grant.featureSlug)
+        if (!entry || !feature) continue
+        targets.push({
+          kind: "feature_grant",
+          grantId: grant.grantId,
+          grantVersion: grant.grantVersion,
+          label: `${entry.project.name} / ${feature.title}`,
+          projectId: grant.projectId,
+          featureSlug: grant.featureSlug
+        })
+      }
     }
     return targets.sort((left, right) => left.label.localeCompare(right.label, "zh-CN"))
   }

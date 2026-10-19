@@ -2887,7 +2887,9 @@ function normalizeThreadDeleteOptions(options: unknown): ThreadDeleteOptions | u
   }
 }
 
-export function registerThreadHandlers(ipcMain: IpcMain): void {
+export type ThreadDeletionService = (event: IpcMainInvokeEvent, threadId: string, options?: ThreadDeleteOptions) => Promise<void>
+
+export function registerThreadHandlers(ipcMain: IpcMain): ThreadDeletionService {
   // Read a bounded page of task summaries. The renderer incrementally builds the
   // directory so Electron never structured-clones an unbounded task table.
   ipcMain.handle("threads:list-page", async (event, options?: ThreadSummaryPageOptions) => {
@@ -3876,66 +3878,64 @@ export function registerThreadHandlers(ipcMain: IpcMain): void {
     await deletionCheckpoint
   }
 
-  ipcMain.handle(
-    "threads:delete",
-    async (event, threadId: string, rawOptions?: ThreadDeleteOptions) => {
-      const options = normalizeThreadDeleteOptions(rawOptions)
-      const lease = requireThreadMutationLease(threadId)
-      // Abort a parser before waiting for the same-thread mutation lock. Every
-      // completed batch is independently committed and therefore safe to leave
-      // behind until deletion or a later idempotent retry.
-      cancelLegacySubagentTranscriptMigration(threadId)
-      cancelSubagentTranscriptStartupRead(threadId)
-      cancelLegacyCheckpointTranscriptBootstrap(threadId)
-      return withThreadMutationLeaseLock(lease, async (threadRow) => {
-        let metadata: Record<string, unknown>
-        try {
-          const parsed = threadRow.metadata ? (JSON.parse(threadRow.metadata) as unknown) : {}
-          if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
-            throw new Error("Thread metadata is not an object")
-          }
-          metadata = parsed as Record<string, unknown>
-        } catch {
-          throw new Error("会话元数据异常，无法确认删除条件，请修复后重试。")
+  const deleteThread: ThreadDeletionService = async (event, threadId, rawOptions) => {
+    const options = normalizeThreadDeleteOptions(rawOptions)
+    const lease = requireThreadMutationLease(threadId)
+    // Abort a parser before waiting for the same-thread mutation lock. Every
+    // completed batch is independently committed and therefore safe to leave
+    // behind until deletion or a later idempotent retry.
+    cancelLegacySubagentTranscriptMigration(threadId)
+    cancelSubagentTranscriptStartupRead(threadId)
+    cancelLegacyCheckpointTranscriptBootstrap(threadId)
+    return withThreadMutationLeaseLock(lease, async (threadRow) => {
+      let metadata: Record<string, unknown>
+      try {
+        const parsed = threadRow.metadata ? (JSON.parse(threadRow.metadata) as unknown) : {}
+        if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+          throw new Error("Thread metadata is not an object")
         }
-        // Check before teardown: without a workspace the durable worktree guards
-        // below cannot prove that deleting a cold workflow/coordinator is safe.
-        // Apply this to individual deletion too, so retry cannot bypass protection.
-        assertThreadDeletionWorkspace(getAgentModeFromMetadata(metadata), metadata.workspacePath)
+        metadata = parsed as Record<string, unknown>
+      } catch {
+        throw new Error("会话元数据异常，无法确认删除条件，请修复后重试。")
+      }
+      // Check before teardown: without a workspace the durable worktree guards
+      // below cannot prove that deleting a cold workflow/coordinator is safe.
+      // Apply this to individual deletion too, so retry cannot bypass protection.
+      assertThreadDeletionWorkspace(getAgentModeFromMetadata(metadata), metadata.workspacePath)
+      if (
+        options?.groupGuard &&
+        (!matchesThreadIncarnation(threadRow, options.groupGuard.incarnation) ||
+          !threadMetadataMatchesGroupSelector(metadata, options.groupGuard.selector))
+      ) {
+        throw new Error("会话已变更或已移出分组，请重新确认。")
+      }
+      if (options?.requireIdle) {
         if (
-          options?.groupGuard &&
-          (!matchesThreadIncarnation(threadRow, options.groupGuard.incarnation) ||
-            !threadMetadataMatchesGroupSelector(metadata, options.groupGuard.selector))
+          await isThreadDeletionBusy(threadId, {
+            hasActiveRun: hasActiveAgentRun,
+            isAborting: isActiveAgentRunAborting,
+            waitForSettlement: waitForActiveAgentRunToSettle,
+            hasExternalRun: (id) => isExternallyManagedThreadRunBusy(id, metadata),
+            hasWorkflowRun: (id) => workflowRunManager.isActive(id),
+            hasWorkerRun: (id) => coordinatorWorkerManager.hasRunningWorkersForThread(id)
+          })
         ) {
-          throw new Error("会话已变更或已移出分组，请重新确认。")
+          throw new Error("会话仍在运行，已跳过该会话。")
         }
-        if (options?.requireIdle) {
-          if (
-            await isThreadDeletionBusy(threadId, {
-              hasActiveRun: hasActiveAgentRun,
-              isAborting: isActiveAgentRunAborting,
-              waitForSettlement: waitForActiveAgentRunToSettle,
-              hasExternalRun: (id) => isExternallyManagedThreadRunBusy(id, metadata),
-              hasWorkflowRun: (id) => workflowRunManager.isActive(id),
-              hasWorkerRun: (id) => coordinatorWorkerManager.hasRunningWorkersForThread(id)
-            })
-          ) {
-            throw new Error("会话仍在运行，已跳过该会话。")
-          }
-        }
-        while (deletingThreads.has(threadId)) {
-          await deletingThreads.get(threadId)?.catch(() => undefined)
-        }
-        const deletion = performThreadDeletion(event, threadId, options?.groupGuard)
-        deletingThreads.set(threadId, deletion)
-        try {
-          await deletion
-        } finally {
-          if (deletingThreads.get(threadId) === deletion) deletingThreads.delete(threadId)
-        }
-      })
-    }
-  )
+      }
+      while (deletingThreads.has(threadId)) {
+        await deletingThreads.get(threadId)?.catch(() => undefined)
+      }
+      const deletion = performThreadDeletion(event, threadId, options?.groupGuard)
+      deletingThreads.set(threadId, deletion)
+      try {
+        await deletion
+      } finally {
+        if (deletingThreads.get(threadId) === deletion) deletingThreads.delete(threadId)
+      }
+    })
+  }
+  ipcMain.handle("threads:delete", deleteThread)
 
   // Get thread history (checkpoints)
   ipcMain.handle("threads:history", async (_event, threadId: string) => {
@@ -4204,5 +4204,6 @@ export function registerThreadHandlers(ipcMain: IpcMain): void {
   ipcMain.handle("threads:generateTitle", async (_event, message: string) => {
     return generateTitle(message)
   })
+  return deleteThread
 }
 import { getModsManager } from "../mods/manager"

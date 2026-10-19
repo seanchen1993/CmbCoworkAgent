@@ -2,6 +2,8 @@ import { initializeHarnessConfigV2 } from "./harness-board/config-v2"
 import { initializeNotificationRuntime } from "./notification-runtime"
 import { notificationService } from "./services/notification-service"
 import { registerNotificationHandlers } from "./ipc/notifications"
+import type { UiGuideConfig } from "../shared/ui-guides"
+import { acknowledgeUiGuide, getUiGuideState, recordUiGuideDisplay } from "./db/ui-guide-store"
 import {
   app,
   BrowserWindow,
@@ -359,6 +361,8 @@ import { registerSkillsHandlers } from "./ipc/skills"
 import { closeSkillPluginCatalogWorker } from "./skill-plugin-catalog/client"
 import { registerMcpHandlers } from "./ipc/mcp"
 import { registerScheduledTaskHandlers } from "./ipc/scheduled-tasks"
+import { registerBotHandlers } from "./ipc/bots"
+import { hasActiveBotRuns, stopLocalBotHost } from "./bots/local-service"
 import { registerHeartbeatHandlers } from "./ipc/heartbeat"
 import { registerMemoryHandlers } from "./ipc/memory"
 import { closeMemoryCatalogWorker } from "./memory-catalog/client"
@@ -428,7 +432,7 @@ import {
   startRegisteredGitHookEventSync,
   stopRegisteredGitHookEventSync
 } from "./services/git-hook-service"
-import { getAllThreadSummaries, initializeDatabase, flush } from "./db"
+import { getAllThreadSummaries, initializeDatabase, flush, getDb } from "./db"
 import { closeThreadMessageHydrationWorker } from "./thread-message-hydration/client"
 import { closeCheckpointRuntimeProjectionWorker } from "./checkpointer/runtime-projection-client"
 import { closeThreadMetadataHydrationWorker } from "./thread-metadata-hydration/client"
@@ -648,6 +652,7 @@ function clearCloseToTrayPromptState(): void {
 function hasActiveForegroundRuns(): boolean {
   return (
     hasAnyActiveAgentTasks() ||
+    hasActiveBotRuns() ||
     hasActiveScheduledTaskRuns() ||
     isHeartbeatRunning() ||
     builtinRobotManager.hasActiveRuns() ||
@@ -949,6 +954,7 @@ function createWindow(): void {
  * 供单实例唤起、宠物窗口交互等入口复用，覆盖主窗口被销毁、最小化和隐藏三种情况。
  */
 function ensureMainWindowVisible(): BrowserWindow | null {
+  if (isAppQuitting()) return null
   clearAppAttention()
   if (!mainWindow || mainWindow.isDestroyed()) {
     createWindow()
@@ -1152,7 +1158,8 @@ if (browserNativeMessagingHostLaunch) {
     // Register IPC handlers
     registerAgentHandlers(ipcMain)
     registerWorkflowHandlers(ipcMain)
-    registerThreadHandlers(ipcMain)
+    const deleteThread = registerThreadHandlers(ipcMain)
+    registerBotHandlers(ipcMain, deleteThread)
     registerModelHandlers(ipcMain)
     registerWorkspaceFilePreviewHandlers(ipcMain)
     registerWorkspaceFilePreviewProtocol()
@@ -1182,6 +1189,15 @@ if (browserNativeMessagingHostLaunch) {
     registerAdoptionTraceHandlers(ipcMain)
     registerFeatureGateHandlers(ipcMain)
     registerNotificationHandlers(ipcMain)
+    ipcMain.handle("uiGuides:getState", (_event, config: UiGuideConfig) =>
+      getUiGuideState(getDb(), config)
+    )
+    ipcMain.handle("uiGuides:recordDisplay", (_event, config: UiGuideConfig) =>
+      recordUiGuideDisplay(getDb(), config)
+    )
+    ipcMain.handle("uiGuides:acknowledge", (_event, config: UiGuideConfig) =>
+      acknowledgeUiGuide(getDb(), config)
+    )
     registerHarnessBoardHandlers(ipcMain)
     registerUpdaterHandlers()
     registerLspHandlers(ipcMain)
@@ -1606,7 +1622,7 @@ if (browserNativeMessagingHostLaunch) {
       platform: process.platform,
       pet: getPetWindowDebugInfo()
     })
-    if (process.platform !== "darwin") {
+    if (process.platform !== "darwin" || isAppQuitting()) {
       app.quit()
     }
   })
@@ -1648,6 +1664,7 @@ if (browserNativeMessagingHostLaunch) {
     void (async () => {
       try {
         const shutdownResults = await Promise.allSettled([
+          waitBestEffort(stopLocalBotHost(), 5_000),
           shutdownAllAgentTasks(5_000),
           stopSchedulerAndWait(5_000),
           stopHeartbeatAndWait(5_000),
@@ -1721,6 +1738,7 @@ if (browserNativeMessagingHostLaunch) {
 
     const cleanup = Promise.all([
       stopPartnerDev().catch(() => console.warn("[Main] partner development shutdown failed")),
+      stopLocalBotHost().catch((error) => console.warn("[Bots] Shutdown failed", error)),
       builtinRobotManager
         .stop()
         .catch((err) => console.warn("[Main] stop built-in robot error:", err)),

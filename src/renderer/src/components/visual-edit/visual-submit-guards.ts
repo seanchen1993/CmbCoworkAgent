@@ -78,3 +78,17 @@ export function getVisualEditSubmitBlock(params: {
 
   return null
 }
+
+/** A persistent managed Thread can be idle and still cannot use ordinary submit. */
+export function getVisualEditThreadSubmitDisabledReason(
+  thread: { metadata?: Record<string, unknown> | null } | undefined
+): string | null {
+  if (!thread) return "线程信息尚未就绪，请稍后再提交视觉标注。"
+  const metadata = thread.metadata ?? {}
+  if (
+    (typeof metadata.botId === "string" && typeof metadata.botHostId === "string") ||
+    Object.prototype.hasOwnProperty.call(metadata, "cmb_devclaw_partner_task")
+  )
+    return "此任务由专用执行器管理，请在原会话中提交修改要求。"
+  return null
+}

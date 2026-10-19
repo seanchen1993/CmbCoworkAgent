@@ -50,6 +50,8 @@ export const PROJECT_MODE_PROJECT_EXPORT_HEADER = [
   "托管运行次数",
   "工具调用次数",
   "模型调用次数",
+  "请求输入次数（不完整时为下限）",
+  "请求输入统计完整",
   "Token 总量",
   // 输入 + 输出 < 总量：差额是缓存读取与缓存创建，三个是不同的量，不是对不上。
   "输入 Token",
@@ -227,6 +229,11 @@ export function buildProjectModeProjectExportRows(
         project.managedRunCount ?? 0,
         project.runCost?.toolCalls ?? 0,
         project.runCost?.modelCalls ?? 0,
+        project.userInputRequestCountComplete === true ||
+        (project.runCost?.userInputRequestDocs ?? 0) > 0
+          ? (project.runCost?.userInputRequests ?? 0)
+          : "",
+        project.userInputRequestCountComplete === true ? "是" : "否",
         project.runCost?.totalTokens ?? 0,
         project.runCost?.inputTokens ?? 0,
         project.runCost?.outputTokens ?? 0,

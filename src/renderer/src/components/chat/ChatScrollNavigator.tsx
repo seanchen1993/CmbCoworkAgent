@@ -1,9 +1,11 @@
 import type { Message } from "@/types"
 import { Popover, PopoverAnchor, PopoverContent } from "@/components/ui/popover"
 import { cn } from "@/lib/utils"
+import { ChatMessageVisibilityContext } from "./chat-presentation-context"
 import {
   memo,
   useCallback,
+  useContext,
   useEffect,
   useLayoutEffect,
   useRef,
@@ -370,7 +372,7 @@ function parseUserInputRequestResponse(
   }
 }
 
-function getChatScrollQuestions(messages: Message[]): {
+function getChatScrollQuestions(messages: Message[], hidden?: ReadonlySet<string>): {
   questions: ChatScrollQuestion[]
   userMessageIndexes: number[]
 } {
@@ -404,6 +406,7 @@ function getChatScrollQuestions(messages: Message[]): {
   let activeRequestToolCallIds = new Set<string>()
 
   for (const [messageIndex, message] of messages.entries()) {
+    if (hidden?.has(message.id)) continue
     if (message.role === "user") {
       activeQuestionIndex = questions.length
       activeRequestToolCallIds = new Set()
@@ -454,21 +457,25 @@ interface ChatScrollQuestionProjection {
 export function createChatScrollQuestionProjector(): (
   messages: Message[],
   revision: number,
-  gapBeforeMessageId?: string | null
+  gapBeforeMessageId?: string | null,
+  hidden?: ReadonlySet<string>
 ) => ChatScrollQuestionProjection {
   let previousRevision = -1
   let previousGapBeforeMessageId: string | null = null
   let projection: ChatScrollQuestionProjection | null = null
+  let previousHidden: ReadonlySet<string> | undefined
 
-  return (messages, revision, gapBeforeMessageId = null) => {
+  return (messages, revision, gapBeforeMessageId = null, hidden) => {
     if (
       projection &&
       previousRevision === revision &&
-      previousGapBeforeMessageId === gapBeforeMessageId
+      previousGapBeforeMessageId === gapBeforeMessageId &&
+      previousHidden === hidden
     ) {
       return projection
     }
-    const { questions, userMessageIndexes } = getChatScrollQuestions(messages)
+    const { questions, userMessageIndexes } = getChatScrollQuestions(messages, hidden)
+    previousHidden = hidden
     const userMessageIds = questions.map((question) => question.id)
     const questionIndexByMessageId = new Map(
       userMessageIds.map((messageId, index) => [messageId, index])
@@ -914,10 +921,12 @@ export function ChatScrollNavigator({
   const [activeQuestionIndex, setActiveQuestionIndex] = useState(-1)
 
   const [projectChatScrollQuestions] = useState(createChatScrollQuestionProjector)
+  const hiddenMessageIds = useContext(ChatMessageVisibilityContext)
   const questionProjection = projectChatScrollQuestions(
     messages,
     questionStructureRevision,
-    historyGapBeforeMessageId
+    historyGapBeforeMessageId,
+    hiddenMessageIds
   )
   const {
     questions,

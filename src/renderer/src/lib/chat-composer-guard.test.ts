@@ -30,6 +30,8 @@ function renderComposer(overrides: Record<string, unknown> = {}): string {
     Plus: () => null,
     useHarnessNotifications: () => [],
     threadId: "thread",
+    managedTurn: undefined,
+    historyLoading: false,
     inputDisabled: false,
     composerControlsDisabled: false,
     contextReminderPending: false,
@@ -124,6 +126,18 @@ function expectAvailability(markup: string, blocked: boolean): void {
 }
 
 describe("Chat composer rendered decision guards", () => {
+  it("keeps the existing decision guards when a Bot adds its composer callbacks", () => {
+    const managedTurn = { submitDraft: async () => {}, attachFiles: async () => {} }
+    expectAvailability(renderComposer({ managedTurn }), false)
+    expectAvailability(renderComposer({ managedTurn, historyLoading: true }), true)
+    expectAvailability(renderComposer({ managedTurn, readOnly: true }), true)
+    expectAvailability(renderComposer({ managedTurn, contextReminderPending: true }), true)
+    const notifications = [{ type: "biz_retry", status: "pending", sourceThreadId: "thread" }]
+    expectAvailability(
+      renderComposer({ managedTurn, useHarnessNotifications: () => notifications }),
+      true
+    )
+  })
   it("disables both controls for a pending Biz Retry and releases them when it disappears", () => {
     const notifications = [{ type: "biz_retry", status: "pending", sourceThreadId: "thread" }]
     expectAvailability(renderComposer({ useHarnessNotifications: () => notifications }), true)
