@@ -1,3 +1,13 @@
+# 2026-10-19 真实模型闭环已验证，保持运行供用户测试
+
+用户明确“用现有模型配置接上真实模型，把专家配置好，完整测试交办、退回修改和确认”。仅将现有 `custom:cheap / deepseek-v4-flash` 及对应凭据复用至独立预览profile（文件0600），原 `~/.cmbcoworkagent` 配置不变，没有复制其他模型或私有历史。专家“需求交付专家”已创建；实际原生确认后本机启用24小时，仅处理交办文本，无源码/文件工具。
+
+root设计与实际验收，原6.1-sol/xhigh实施预览原生确认修复候选 `9e451c66`，正常合并 `c1cc9c5d`。Playwright无dialog listener自动dismiss使原“启用本机”确认失效；现在仅订阅不处理，保留人工确认，不自动接受或取消。root独立9/9、sol19/19通过，实际重启与CUA确认后本机成功启用。原Node25引导Ctrl+C历史WIP没有借此宣称修好。
+
+真实流程已完成：虚构图书借阅TASK-1交办→v1（30天/5本）→提出修改并保存→v2（14天/3本，其余规则保留）→确认完成。两次DeepSeek provider HTTP200；两个Run均succeeded；服务端taskStatus=completed/taskVersion=5、head v2 completed，v1和退回意见可查；确认无额外推理。当前页面为Bots工作区→需求交付专家→空白“交办新任务”，已选真实模型，右侧已完成示例可回看。详见 `reviews/M03-real-model-local-test.md`。
+
+保持运行：launcher session50615/supervisor27333、App27558、Java27495/127.0.0.1:61613、同Partner MySQL healthy；profile/数据保留。启动日志 `/tmp/m03-real-model-preview-fixed-start.log`，证据 `/tmp/m03-real-model-evidence.json`，精确状态 `state.json.local_preview.current_user_test_session`。需要停止时使用集成树 `npm run stop:bot-preview`，勿依据下方历史验收的“全部停止”关闭用户会话。原B00 MySQL停止、ES/S3未改，定时仍PAUSED，未push/deploy。
+
 # 2026-10-19 M03 成果确认与退回修改已验收
 
 root设计与独立验收，唯一实施者 `/root/service_conversation_sol`（gpt-6.1-sol/xhigh）已提交停写，工作树clean。候选 `ae7029571ee7741cc52fbcf9de49a93113f9d93e`，正常合并 `5beb5c604779593a6d818a2ac30c0cd2316c3d49` 到 `codex/devclaw-bot-integration`；目标产品与候选完全一致，M01 beta91554cbc及M02祖先保留。没有推送；验收文档提交以包含本段的Git记录为准。
