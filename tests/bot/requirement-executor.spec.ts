@@ -566,3 +566,89 @@ test("revision change at settlement keeps unpublished local result and retry nev
     assert.equal(f.stats.models, 1)
     assert.equal(f.stats.settles, 2)
   }))
+
+for (const problem of ["missing", "digest", "feedback"] as const)
+  test(`revision ${problem} mismatch never reaches a model or personal context`, () =>
+    withSqlite(async (db) => {
+      const f = setup(db)
+      f.run.taskVersion = 3
+      f.run.deliveryVersionId = "v1"
+      f.input.task.version = 3
+      f.input.deliveryInput = {
+        runId: f.run.id,
+        spaceId: "A",
+        taskId: f.run.taskId,
+        taskVersion: 3,
+        versionId: "v1",
+        number: 1,
+        digest: "sha256:" + "a".repeat(64),
+        text: "上一版明确正文",
+        feedbackMessageId: "feedback",
+        feedbackText: "指定修改意见",
+        feedbackTaskVersion: 3
+      }
+      if (problem === "missing") f.input.deliveryInput = null
+      if (problem === "feedback") {
+        const { textDigest } = await import("../../src/main/services/bot/text-delivery-validation")
+        f.input.deliveryInput!.digest = textDigest(f.input.deliveryInput!.text)
+      }
+      await assert.rejects(f.executor.execute(f.run), /INPUT_CHANGED|INVALID_PAYLOAD/)
+      assert.equal(f.stats.models, 0)
+      assert.equal(f.stats.personal, 0)
+      assert.equal(f.stats.tools.length, 0)
+    }))
+
+test("frozen revision text and explicit messages share the 60K input budget without truncation", () =>
+  withSqlite(async (db) => {
+    const f = setup(db)
+    const { textDigest } = await import("../../src/main/services/bot/text-delivery-validation")
+    f.run.taskVersion = 4
+    f.run.deliveryVersionId = "v1"
+    f.input.task.version = 4
+    f.input.task.goal = "原".repeat(16384)
+    const text = "旧".repeat(16384),
+      feedback = "改".repeat(16384)
+    f.input.deliveryInput = {
+      runId: f.run.id,
+      spaceId: "A",
+      taskId: f.run.taskId,
+      taskVersion: 4,
+      versionId: "v1",
+      number: 1,
+      digest: textDigest(text),
+      text,
+      feedbackMessageId: "feedback",
+      feedbackText: feedback,
+      feedbackTaskVersion: 3
+    }
+    f.input.messages = [
+      {
+        taskVersion: 3,
+        message: {
+          id: "feedback",
+          spaceId: "A",
+          taskId: f.run.taskId,
+          authorPrincipalId: "business",
+          text: feedback,
+          artifactVersions: [],
+          createdAt: f.input.task.createdAt
+        }
+      },
+      {
+        taskVersion: 4,
+        message: {
+          id: "follow-up",
+          spaceId: "A",
+          taskId: f.run.taskId,
+          authorPrincipalId: "business",
+          text: "补".repeat(16384),
+          artifactVersions: [],
+          createdAt: f.input.task.createdAt
+        }
+      }
+    ]
+    await assert.rejects(f.executor.execute(f.run), /PARTNER_EXECUTION_INPUT_TOO_LARGE/)
+    assert.equal(f.stats.models, 0)
+    assert.equal(f.stats.personal, 0)
+    assert.equal(f.stats.tools.length, 0)
+  }))

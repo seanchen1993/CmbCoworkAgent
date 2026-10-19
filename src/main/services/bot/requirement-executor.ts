@@ -1,3 +1,4 @@
+import { parseDeliveryInput } from "./text-delivery-validation"
 import { createHash } from "node:crypto"
 import {
   startAgentRun,
@@ -112,7 +113,35 @@ function prepared(run: PartnerRequirementRun, raw: PartnerRequirementInput) {
         text: memory.text
       })) ?? []
   })
+  const deliveryInput = parseDeliveryInput(
+    input.deliveryInput,
+    run.spaceId,
+    run.taskId,
+    run.id,
+    run.taskVersion
+  )
+  if ((run.deliveryVersionId ?? null) !== (deliveryInput?.versionId ?? null))
+    throw new Error("PARTNER_EXECUTION_INPUT_CHANGED")
+  if (
+    deliveryInput &&
+    !input.messages.some(
+      ({ message, taskVersion }) =>
+        message.id === deliveryInput.feedbackMessageId &&
+        message.text === deliveryInput.feedbackText &&
+        taskVersion === deliveryInput.feedbackTaskVersion
+    )
+  )
+    throw new Error("PARTNER_EXECUTION_INPUT_CHANGED")
   const message = JSON.stringify({
+    ...(deliveryInput
+      ? {
+          revision: {
+            ...deliveryInput,
+            instruction:
+              "基于明确给出的上一版全文和修改意见，输出完整的新版本草稿。保留符合原要求的内容，应用本次意见。"
+          }
+        }
+      : {}),
     taskNumber: task.taskNumber,
     title: task.title,
     goal: task.goal,

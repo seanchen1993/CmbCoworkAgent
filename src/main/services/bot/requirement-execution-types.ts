@@ -29,11 +29,13 @@ export interface PartnerRequirementRun {
   leaseExpiresAt: string
   deadline: string
   memoryScope?: "group" | "bot"
+  deliveryVersionId?: string | null
   /** Authenticated service routing envelope, excluded from legacy attempt fingerprints. */
   commandId?: string
   requesterPrincipalId?: string
 }
 export interface PartnerRequirementInput {
+  deliveryInput?: import("../../../shared/bot/text-delivery").TextDeliveryInput | null
   bot: Bot
   botVersion: BotVersion
   group: Group
@@ -90,6 +92,8 @@ export function validatePartnerRun(run: PartnerRequirementRun): PartnerRequireme
       ![run.commandId, run.requesterPrincipalId].every(
         (v) => typeof v === "string" && ID.test(v)
       )) ||
+    (run.deliveryVersionId != null &&
+      (typeof run.deliveryVersionId !== "string" || !ID.test(run.deliveryVersionId))) ||
     run.fence !== 1 ||
     ![run.taskVersion, run.groupVersion].every((v) => Number.isSafeInteger(v) && v > 0) ||
     !STATUSES.includes(run.status) ||
@@ -114,6 +118,7 @@ export function validatePartnerRun(run: PartnerRequirementRun): PartnerRequireme
         "leaseExpiresAt",
         "deadline",
         ...(run.memoryScope !== undefined ? ["memoryScope"] : []),
+        ...(run.deliveryVersionId != null ? ["deliveryVersionId"] : []),
         ...(run.commandId !== undefined ? ["commandId", "requesterPrincipalId"] : [])
       ].map((k) => [k, run[k]])
     )
@@ -121,6 +126,7 @@ export function validatePartnerRun(run: PartnerRequirementRun): PartnerRequireme
 }
 export function samePartnerAttempt(a: PartnerRequirementRun, b: PartnerRequirementRun): boolean {
   return (
+    a.deliveryVersionId === b.deliveryVersionId &&
     a.commandId === b.commandId &&
     a.requesterPrincipalId === b.requesterPrincipalId &&
     (a.memoryScope ?? "group") === (b.memoryScope ?? "group") &&

@@ -80,7 +80,7 @@ beforeEach(() => {
 const call = (name: string, ...args: unknown[]) =>
   handlers.get("partnerDev:" + name)!(event, ...args)
 it("registration alone does not read config, connect, or execute; 17 expert and 7 fixed service conversation handlers", async () => {
-  expect(handlers.size).toBe(24)
+  expect(handlers.size).toBe(29)
   expect(mock.getStatus).not.toHaveBeenCalled()
   expect(await call("getStatus")).toEqual({ configured: false })
   expect(mock.getStatus).toHaveBeenCalledTimes(1)
@@ -269,4 +269,47 @@ it("context mutation invalidates before work and after failure so terminal cache
     ["serviceConversation:invalidated", true],
     ["serviceConversation:invalidated", false]
   ])
+})
+
+it("text delivery inputs reject authority/content injection, invalid decisions and subframes before journal", async () => {
+  const base = {
+    conversationId: "c",
+    taskRef: "task",
+    operationId: "operation",
+    versionId: "v1",
+    decision: "reject",
+    comment: "修改意见"
+  }
+  for (const [operation, value] of [
+    ["review", base],
+    ["publish", { conversationId: "c", requestId: "request" }],
+    [
+      "retryRevision",
+      { conversationId: "c", taskRef: "task", actionId: "action", operationId: "operation" }
+    ]
+  ] as const) {
+    const handler = handlers.get("serviceConversation:" + operation)!
+    for (const extra of [
+      { actor: "owner" },
+      { text: "forged result" },
+      { runId: "run" },
+      { credentials: "secret" },
+      { digest: "sha256:forged" }
+    ])
+      await expect(handler(event, { ...value, ...extra })).rejects.toThrow("INVALID_PAYLOAD")
+    await expect(
+      handler(
+        { ...event, senderFrame: { ...event.senderFrame, parent: {} } } as IpcMainInvokeEvent,
+        value
+      )
+    ).rejects.toThrow("FORBIDDEN")
+  }
+  const handler = handlers.get("serviceConversation:review")!
+  for (const patch of [
+    { comment: "" },
+    { decision: "approve", comment: "不能夹带意见" },
+    { decision: "approve", comment: undefined },
+    { decision: "publish" }
+  ])
+    await expect(handler(event, { ...base, ...patch })).rejects.toThrow("INVALID_PAYLOAD")
 })

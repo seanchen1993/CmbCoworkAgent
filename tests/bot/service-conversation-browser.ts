@@ -115,6 +115,7 @@ async function main() {
           models: [{ ref: "custom:fixture", name: "Fixture模型" }]
         }
       }
+      if (method === "delivery") return null
       if (method === "updates")
         return [...taskRecords.values()]
           .flat()
@@ -180,7 +181,7 @@ async function main() {
     })
     await page.addScriptTag({
       content:
-        "window.api={serviceConversation:{open:()=>window.serviceFixtureCall('open'),selectModel:v=>window.serviceFixtureCall('selectModel',v),tasks:v=>window.serviceFixtureCall('tasks',v),read:v=>window.serviceFixtureCall('read',v),updates:v=>window.serviceFixtureCall('updates',v),send:v=>window.serviceFixtureCall('send',v),cancel:v=>window.serviceFixtureCall('cancel',v),subscribeInvalidation:fn=>{window.serviceInvalidate=fn;return()=>{window.serviceInvalidate=null}}},bots:new Proxy({}, {get:()=>()=>{throw Error('LOCAL_BOT_API_MUST_NOT_BE_CALLED')}})}"
+        "window.api={serviceConversation:{open:()=>window.serviceFixtureCall('open'),selectModel:v=>window.serviceFixtureCall('selectModel',v),tasks:v=>window.serviceFixtureCall('tasks',v),read:v=>window.serviceFixtureCall('read',v),updates:v=>window.serviceFixtureCall('updates',v),send:v=>window.serviceFixtureCall('send',v),cancel:v=>window.serviceFixtureCall('cancel',v),delivery:v=>window.serviceFixtureCall('delivery',v),subscribeInvalidation:fn=>{window.serviceInvalidate=fn;return()=>{window.serviceInvalidate=null}}},bots:new Proxy({}, {get:()=>()=>{throw Error('LOCAL_BOT_API_MUST_NOT_BE_CALLED')}})}"
     })
     const assets = resolve("out/renderer/assets")
     for (const name of (await readdir(assets)).filter((name) =>

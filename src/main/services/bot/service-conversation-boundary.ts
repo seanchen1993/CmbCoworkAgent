@@ -1,6 +1,22 @@
 import { partnerId, partnerObject, PartnerLocalFault } from "./partner-local-boundary"
-export type ServiceOperation = "selectModel" | "tasks" | "read" | "send" | "cancel" | "updates"
+export type ServiceOperation =
+  | "selectModel"
+  | "tasks"
+  | "read"
+  | "send"
+  | "cancel"
+  | "updates"
+  | "delivery"
+  | "deliveryVersion"
+  | "publish"
+  | "review"
+  | "retryRevision"
 const keys: Record<ServiceOperation, string[]> = {
+  delivery: ["conversationId", "taskRef", "before"],
+  deliveryVersion: ["conversationId", "taskRef", "versionId"],
+  publish: ["conversationId", "requestId"],
+  review: ["conversationId", "taskRef", "operationId", "versionId", "decision", "comment"],
+  retryRevision: ["conversationId", "taskRef", "actionId", "operationId"],
   updates: ["conversationId", "taskRef", "requestIds"],
   selectModel: ["conversationId", "modelRef"],
   tasks: ["conversationId", "cursor"],
@@ -16,6 +32,24 @@ export function serviceConversationInput(
   const v = partnerObject(raw, keys[operation])
   partnerId(v.conversationId)
   if ("taskRef" in v && !(operation === "send" && v.taskRef === null)) partnerId(v.taskRef)
+  for (const key of ["versionId", "operationId", "actionId"]) if (key in v) partnerId(v[key])
+  if (
+    "before" in v &&
+    v.before !== null &&
+    (!Number.isSafeInteger(v.before) || Number(v.before) < 1)
+  )
+    throw new PartnerLocalFault("INVALID_PAYLOAD")
+  if (
+    operation === "review" &&
+    (!["approve", "reject"].includes(String(v.decision)) ||
+      (v.decision === "approve"
+        ? v.comment !== null
+        : typeof v.comment !== "string" ||
+          !v.comment.trim() ||
+          v.comment.length > 16384 ||
+          /[\u0000\uD800-\uDFFF]/u.test(v.comment)))
+  )
+    throw new PartnerLocalFault("INVALID_PAYLOAD")
   if ("requestId" in v) partnerId(v.requestId)
   if ("requestIds" in v) {
     if (

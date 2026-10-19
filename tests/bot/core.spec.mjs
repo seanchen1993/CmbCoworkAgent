@@ -99,3 +99,11 @@ test("actual generator CLI --check detects drift and never overwrites it", () =>
     rmSync(scratch, { recursive: true, force: true })
   }
 })
+
+ test("text task review can complete directly without a fictional handoff", () => {
+  const table = states["x-state-transitions"].TaskStatus
+  assert.ok(table.awaiting_business.includes("completed"))
+  assert.ok(table.awaiting_business.includes("active"))
+  assert.deepEqual(table.completed, [])
+  assert.equal(table.active.includes("completed"), false)
+})

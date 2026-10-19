@@ -76,7 +76,7 @@
     "TaskStatus": {
       "draft": ["active", "cancelled"],
       "active": ["awaiting_business", "awaiting_technical", "handed_off", "cancelled"],
-      "awaiting_business": ["active", "handed_off", "cancelled"],
+      "awaiting_business": ["active", "handed_off", "completed", "cancelled"],
       "awaiting_technical": ["active", "handed_off", "cancelled"],
       "handed_off": ["completed", "cancelled"],
       "completed": [],

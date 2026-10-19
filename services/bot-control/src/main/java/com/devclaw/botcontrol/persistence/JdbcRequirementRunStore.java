@@ -51,7 +51,7 @@ public final class JdbcRequirementRunStore {
         @com.fasterxml.jackson.databind.annotation.JsonSerialize(using=com.devclaw.botcontrol.application.RequirementInstantSerializer.class)
         public final Instant deadline, createdAt, updatedAt, leaseExpiresAt;
         public final String attemptId, leaseId;
-        public final String memoryScope;
+        public final String memoryScope,deliveryVersionId;
         public final Long fence;
         public final boolean readOnly = true;
         private final byte[] fingerprint;
@@ -61,6 +61,7 @@ public final class JdbcRequirementRunStore {
             nodeId = id(r.getString("node_id")); ownerPrincipalId = id(r.getString("owner_principal_id")); grantId = id(r.getString("grant_id")); workspaceRef = id(r.getString("workspace_ref"));
             version = version(r.getLong("version")); taskVersion = version(r.getLong("task_version")); groupVersion = version(r.getLong("group_version")); nodeVersion = version(r.getLong("node_version")); grantVersion = version(r.getLong("grant_version"));
             status = status(r.getString("status")); initialStatus = status(r.getString("initial_status"));
+            deliveryVersionId=r.getString("delivery_version_id");if(deliveryVersionId!=null)id(deliveryVersionId);
             memoryScope=r.getString("memory_scope");if(!Arrays.asList("group","bot").contains(memoryScope))throw JdbcApplicationStore.corrupt();
             if (initialStatus != Status.QUEUED && initialStatus != Status.WAITING_NODE) throw JdbcApplicationStore.corrupt();
             deadline = instant(r, "deadline"); createdAt = instant(r, "created_at"); updatedAt = instant(r, "updated_at");

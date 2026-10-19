@@ -66,11 +66,11 @@ public final class JdbcTaskStore {
             try {
                 Task value = BOUNDARY.readResponse("createTask", 201, r.getBytes(4), TaskResult.class).task;
                 if (!space.equals(value.spaceId) || !id.equals(value.id) || !r.getString(1).equals(value.groupId) || r.getLong(2) != value.version || !r.getString(3).equals(value.taskNumber) || r.next()) throw JdbcApplicationStore.corrupt();
-                if (value.status != TaskStatus.ACTIVE || !value.inputArtifactVersions.isEmpty() || value.stages.size() != StageKind.values().length || !value.currentStageId.equals(value.stages.get(0).id)) throw JdbcApplicationStore.corrupt();
+                if (!Arrays.asList(TaskStatus.ACTIVE,TaskStatus.AWAITING_BUSINESS,TaskStatus.COMPLETED).contains(value.status) || !value.inputArtifactVersions.isEmpty() || value.stages.size() != StageKind.values().length || !value.currentStageId.equals(value.stages.get(0).id)) throw JdbcApplicationStore.corrupt();
                 Set<String> stageIds = new HashSet<String>();
                 for (int i = 0; i < value.stages.size(); i++) {
                     Stage stage = value.stages.get(i);
-                    if (!stageIds.add(stage.id) || stage.kind != StageKind.values()[i] || stage.status != (i == 0 ? StageStatus.ACTIVE : StageStatus.PENDING) || !stage.inputArtifactVersions.isEmpty() || !stage.outputArtifactVersions.isEmpty()) throw JdbcApplicationStore.corrupt();
+                    if (!stageIds.add(stage.id) || stage.kind != StageKind.values()[i] || stage.status != (i == 0 ? (value.status==TaskStatus.ACTIVE?StageStatus.ACTIVE:value.status==TaskStatus.AWAITING_BUSINESS?StageStatus.WAITING_CONFIRMATION:StageStatus.COMPLETED) : (value.status==TaskStatus.COMPLETED?StageStatus.CANCELLED:StageStatus.PENDING)) || !stage.inputArtifactVersions.isEmpty() || !stage.outputArtifactVersions.isEmpty()) throw JdbcApplicationStore.corrupt();
                 }
                 return value;
             } catch (ContractBoundary.Failure failure) { throw JdbcApplicationStore.corrupt(); }
@@ -125,6 +125,13 @@ public final class JdbcTaskStore {
         EventsResult result = new EventsResult(); result.events = Collections.singletonList(event); result.nextCursor = "storage"; result.hasMore = false;
         change("UPDATE mutation_outbox SET task_seq=?,task_group_id=?,event_bytes=? WHERE space_id=? AND principal_id=? AND command_id=? AND target_type='task' AND target_id=? AND target_version=? AND task_seq IS NULL AND task_group_id IS NULL AND event_bytes IS NULL", event.seq, task.groupId, BOUNDARY.writeResponse("getEvents", 200, result), space, principal, command, task.id, task.version);
         change("UPDATE task_space_head SET event_seq=? WHERE space_id=? AND event_seq=?", event.seq, space, oldHead);
+    }
+    /** Internal mutations have their own receipts. This server-generated event command is
+     * not a public request selector or receipt, and cannot replay a client command. */
+    public void internalEvent(Task task,String principal,String operation,long oldHead,Timestamp now)throws SQLException {
+        String eventCommand=UUID.randomUUID().toString();
+        change("INSERT INTO mutation_outbox(space_id,id,principal_id,command_id,operation,target_type,target_id,target_version,created_at) VALUES(?,?,?,?,?,'task',?,?,?)",space,UUID.randomUUID().toString(),principal,eventCommand,operation,task.id,task.version,now);
+        event(task,principal,eventCommand,oldHead,now);
     }
     public static final class EventRow {
         public final Event event; public final String group;

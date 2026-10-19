@@ -1,3 +1,4 @@
+import { ServiceDeliveryStore } from "./service-delivery-store"
 import { createHash, randomUUID } from "node:crypto"
 import type { NativeSqliteAdapter } from "../../db/native-sqlite-adapter"
 import type { Task } from "../../../shared/bot/contracts.generated"
@@ -80,6 +81,9 @@ export interface ServiceRequestRecord {
   runVersion: number | null
   cancelRequested: boolean
   model: ServiceModelBinding
+  autoDelivery?: boolean
+  publicationScheduled?: boolean
+  supersededBy?: string
   result: PartnerRequirementResult | null
 }
 const PAGE = 40
@@ -89,7 +93,9 @@ function hash(value: unknown): string {
 /** All intent/transition writes are SQLite transactions, committed before HTTP.
  * Indexed keyset pages bound both UI history reads and the recovery pump. */
 export class ServiceConversationStore {
+  readonly deliveries: ServiceDeliveryStore
   constructor(private readonly db: NativeSqliteAdapter) {
+    this.deliveries = new ServiceDeliveryStore(db)
     db.run(`CREATE TABLE IF NOT EXISTS service_conversations (
       scope_key TEXT PRIMARY KEY, id TEXT NOT NULL UNIQUE, body TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS service_conversation_tasks (
@@ -182,7 +188,8 @@ export class ServiceConversationStore {
     taskRef: string | null,
     requestId: string,
     text: string,
-    model: ServiceModelBinding | null = null
+    model: ServiceModelBinding | null = null,
+    revisionTaskVersion?: number
   ): ServiceRequestRecord {
     const key = serviceScopeKey(scope),
       fingerprint = hash([conversationId, taskRef, text])
@@ -226,14 +233,15 @@ export class ServiceConversationStore {
         messageCommand: "sc-message:" + randomUUID(),
         enqueueCommand: "sc-run:" + randomUUID(),
         expectedVersion: null,
-        taskVersion: null,
-        phase: "saved",
+        taskVersion: revisionTaskVersion ?? null,
+        phase: revisionTaskVersion ? "bind" : "saved",
         status: "saved",
         notice: null,
         runId: null,
         runVersion: null,
         cancelRequested: false,
         model,
+        autoDelivery: true,
         result: null
       }
       this.db.run(
@@ -242,6 +250,26 @@ export class ServiceConversationStore {
       )
       return this.request(key, requestId)
     })
+  }
+  acceptRevision(
+    scope: ServiceScope,
+    conversationId: string,
+    taskRef: string,
+    requestId: string,
+    text: string,
+    model: ServiceModelBinding,
+    taskVersion: number
+  ): ServiceRequestRecord {
+    const key = serviceScopeKey(scope),
+      old = this.findRequest(key, requestId)
+    if (old) return this.accept(scope, conversationId, taskRef, requestId, text)
+    return this.accept(scope, conversationId, taskRef, requestId, text, model, taskVersion)
+  }
+  hasTaskPending(scope: string, task: string, exclude = ""): boolean {
+    return !!this.rows(
+      "SELECT seq FROM service_conversation_requests WHERE scope_key=? AND task_ref=? AND request_id<>? AND json_extract(body,'$.supersededBy') IS NULL AND (pending=1 OR json_extract(body,'$.status') IN ('outcome_unknown','blocked')) LIMIT 1",
+      [scope, task, exclude]
+    )[0]
   }
   private decode(row: Record<string, unknown>): ServiceRequestRecord {
     return { ...JSON.parse(String(row.body)), seq: Number(row.seq), revision: Number(row.revision) }
@@ -275,7 +303,10 @@ export class ServiceConversationStore {
         "UPDATE service_conversation_requests SET revision=?,pending=?,body=? WHERE scope_key=? AND request_id=? AND revision=?",
         [
           value.revision,
-          value.phase === "terminal" ? 0 : 1,
+          value.phase === "terminal" &&
+          !(value.autoDelivery && value.status === "succeeded" && !value.publicationScheduled)
+            ? 0
+            : 1,
           JSON.stringify(value),
           scopeKey,
           requestId,
@@ -288,7 +319,7 @@ export class ServiceConversationStore {
   }
   previousPending(value: ServiceRequestRecord): ServiceRequestRecord | null {
     const row = this.rows(
-      "SELECT * FROM service_conversation_requests WHERE scope_key=? AND task_ref=? AND seq<? AND (pending=1 OR json_extract(body,'$.status') IN ('outcome_unknown','blocked')) ORDER BY seq LIMIT 1",
+      "SELECT * FROM service_conversation_requests WHERE scope_key=? AND task_ref=? AND seq<? AND json_extract(body,'$.supersededBy') IS NULL AND (pending=1 OR json_extract(body,'$.status') IN ('outcome_unknown','blocked')) ORDER BY seq LIMIT 1",
       [value.scopeKey, value.taskRef, value.seq]
     )[0]
     return row ? this.decode(row) : null
