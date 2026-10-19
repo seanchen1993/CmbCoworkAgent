@@ -1,8 +1,10 @@
-# 2026-10-19 beta 合并接续
+# 2026-10-19 beta 合并已验收
 
-用户明确把 beta 合入 integration，由 root 设计/质量把控、gpt-6.1-sol 执行。任务 tasks/M01-beta-merge.md，功能设计 reviews/beta-integration-functional-design.md。目标 integration=d76f3020，已 fetch 的 beta=91554cbc；两个主分支在检查时干净。已创建独立工作树 /Users/heyirui/.codex/worktrees/beta-merge-review/agent-channel-integration-research-7ff0d6，已派发唯一 sol/high 写者 /root/beta_merge_sol，旧活动子代理列表为空。
+用户要求 beta 合入 integration，root 设计与质量把控、gpt-6.1-sol/high 实施。已完成：beta `91554cbc` 与 integration `d76f3020` 的真实双亲候选 `bac6d2e7`，root 审查后正常合入目标 `codex/devclaw-bot-integration`，合并提交 `f47861fe`。目标工作树 `/Users/heyirui/.codex/worktrees/devclaw-bot-integration/cmbCowork`，产品树与验收候选完全一致。本轮新提交未推送。
 
-保留 beta 客户端与 integration Java/权限/Run/专家知识，重点语义合并共同执行入口和 IPC/生命周期；先交付合并兼容基础，成果确认等后续闭环另行实施与验收。root 管理 state/HANDOFF/目标分支，实施代理只写独立树及 attempts/M01-sol.md。自动任务仍暂停，不调用真实模型/内网/部署或自动推送，不动既有数据与运行中的用户 App。
+保留 beta 客户端/Bot 全能力和 integration Java/权限/Run/专家记忆/需求设计。root 发现并要求修复 Bot HTML 预览误走普通视觉提交的合并缺陷；显式预览能力与持久线程标记检查已验证。Java69JUnit/1884parity零差异、服务65、契约24、受限执行/记忆50、实际React面板、ES69、视觉18+真实Electron均经root复验；sol完成Bot337/UI229/Partner106/需求54、桌面7入口/IM19入口、浏览器与异常退出恢复。目标安装43公开依赖后Node/Web类型和普通隔离完整构建均通过。报告 `reviews/M01-acceptance.md`，实施记录 `attempts/M01-sol.md`，任务 `tasks/M01-beta-merge.md`。
+
+本次交付合并兼容基础，beta LocalBotHost尚未接成Java服务派发；统一会话Task/Run、成果确认/退回、群业务收束、正式专家知识自动采纳等仍待实施。后续按 `reviews/beta-integration-functional-design.md` 优先接通私聊交办到服务Task/Run的纵向流程。既有预览启动器WIP仍在，不把合并当完整产品闭环。自动任务继续暂停；没有真实模型/生产ES/内网访问、部署、数据库或用户App变更。sol候选已冻结且停止写代码。
 
 以下为历史交接，不覆盖本次最新用户授权及真实 Git 状态。
 

@@ -1,6 +1,6 @@
 # M01 beta 合入 integration
 
-状态：ready。2026-10-19 用户明确授权把 beta 合入 integration，由 root 设计与把控质量、gpt-6.1-sol 执行。此最新决定覆盖历史仅设计、旧无 Group 页面等限制；本轮交付代码合并与必要兼容修复，不把全部后续产品路线当已完成。
+状态：accepted。目标合并 `f47861fe`；root 验收报告 `../reviews/M01-acceptance.md`。2026-10-19 用户明确授权把 beta 合入 integration，由 root 设计与把控质量、gpt-6.1-sol 执行。此最新决定覆盖历史仅设计、旧无 Group 页面等限制；本轮交付代码合并与必要兼容修复，不把全部后续产品路线当已完成。
 
 ## 固定基准与归属
 
