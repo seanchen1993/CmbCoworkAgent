@@ -1,0 +1,1346 @@
+{
+  "schemaVersion": 2,
+  "title": "业务 Mods 组装通用化联合验收",
+  "generatedAt": "2026-10-19T15:54:09.547Z",
+  "branch": "codex/mods-v2",
+  "baseCommit": "dc14150ca00e7d192305c200bc43ab8ff1dc5e7a",
+  "codeCommit": "c1f3006c89d3af8134c919880ff3dbe6808bc28a",
+  "sourceSnapshotSha256": "5900b0ebd7636a1615dd6f30f5e84105ca0605f107c4f455c97927fa51f1bcb5",
+  "packagedSourceSnapshotSha256": "5900b0ebd7636a1615dd6f30f5e84105ca0605f107c4f455c97927fa51f1bcb5",
+  "codeCommitProof": {
+    "path": "output/mods-business-genericization-20261019/commit-source-proof-c1f3006c89d3af8134c919880ff3dbe6808bc28a.json",
+    "sha256": "a21f496faf14bfd141cffbb2603520528ec86fe90855da4b9e1c8b8a31bde793",
+    "coveredByCodeCommit": true,
+    "files": 4754,
+    "byteExactFiles": 3010,
+    "normalizedFiles": 1743,
+    "byteExactProtectedFiles": 25,
+    "normalizationPolicy": "Only CRLF pair removal; effective current/commit/baseline attributes identical; no filter/encoding; existing baseline LF blob required; -text never normalized",
+    "protectedFiles": 26,
+    "historicalCheckoutExceptionFiles": 1,
+    "historicalCheckoutExceptions": [
+      {
+        "path": "tests/fixtures/mods-upstream/README.md",
+        "bytes": 947,
+        "rawSha256": "fa1f497f96f2223d43bfd02ec86c7faf139d7e19cbe09e9a26a7ee6e6c7d0d34",
+        "rawGitBlobSha1": "14c24fc25b0aa4036901ad43a14242fd48f4c7ac",
+        "committedGitBlobSha1": "0a0b3f151a9957a9d25bee506fcaa2c35b31009c",
+        "mode": "100644",
+        "byteExact": false,
+        "historicalCheckoutException": {
+          "kind": "pre-existing-protected-documentation-line-ending-difference",
+          "crlfPairs": 7,
+          "attributes": {
+            "text": "unset",
+            "eol": "unspecified",
+            "working-tree-encoding": "unspecified",
+            "filter": "unspecified"
+          },
+          "baseline": {
+            "commit": "dc14150ca00e7d192305c200bc43ab8ff1dc5e7a",
+            "blob": "0a0b3f151a9957a9d25bee506fcaa2c35b31009c",
+            "bytes": 940,
+            "canonicalLFOnly": true
+          },
+          "limitation": "README is unchanged non-executable documentation; raw bytes are not claimed equal to the committed blob"
+        }
+      }
+    ],
+    "remotePushVerification": "Recorded separately by root after explicit branch push"
+  },
+  "sourceSnapshotScope": [
+    "src",
+    "resources",
+    "examples",
+    "scripts",
+    "tests",
+    "skills",
+    "docs/sparks",
+    "package.json",
+    "package-lock.json",
+    ".nvmrc",
+    "tsconfig.json",
+    "tsconfig.node.json",
+    "tsconfig.web.json",
+    "electron.vite.config.ts",
+    "vitest.config.ts",
+    "eslint.config.mjs"
+  ],
+  "snapshotExclusions": [
+    "docs/mods-business-assembly-generalization-2026-10-19.md",
+    "docs/mods-business-assembly-generalization-validation-2026-10-19.json",
+    "ignored output evidence and generated build artifacts"
+  ],
+  "commitIdentityPolicy": "baseCommit identifies the checkout base used for validation, not a self-referential final commit SHA; final commit/push is recorded separately by root",
+  "chains": {
+    "postFixChain": {
+      "path": "output/mods-business-genericization-20261019/post-fix-final-r5-summary.json",
+      "sha256": "b36fbe896e678e6f92ec371a729daafe55a70b1480adc73668169776f146fc6b",
+      "completedAt": "2026-10-19T15:48:28.543Z",
+      "requiredStepsConfirmed": true
+    },
+    "finalChain": {
+      "path": "output/mods-business-genericization-20261019/final-chain-r5-summary.json",
+      "sha256": "57843f74dad4b1ce0f771a2fc1e8c2415afa277f522f45d86a224fcf4b340838",
+      "completedAt": "2026-10-19T15:48:24.954Z",
+      "requiredStepsConfirmed": true
+    }
+  },
+  "scope": {
+    "commonAssembly": true,
+    "staticReviewedAdapters": [
+      "host-linear-v1",
+      "autobiz-v1"
+    ],
+    "independentBusiness": "供应商准入与自定义资格审核 Mod",
+    "newBusinessSpecificPlatformBranches": false,
+    "S6": "deferred"
+  },
+  "postFixRegressions": {
+    "label": "post-fix-regressions-r5",
+    "success": true,
+    "exitCode": 0,
+    "sourceSnapshotSha256": "5900b0ebd7636a1615dd6f30f5e84105ca0605f107c4f455c97927fa51f1bcb5",
+    "changedFiles": [],
+    "completedAt": "2026-10-19T14:02:35.704Z",
+    "summary": {
+      "path": "output/mods-business-genericization-20261019/post-fix-regressions-r5-summary.json",
+      "sha256": "435f3c2f33afcf601be563fd6971f97e68dec5e5fda0451c369e587f2820101a"
+    },
+    "invocation": {
+      "path": "output/mods-business-genericization-20261019/post-fix-regressions-r5-invocation.json",
+      "sha256": "9cbfe34414de5c687d8209ddf3ff378cbf4522204295f4268f7aaf2763606773"
+    },
+    "defaultLog": {
+      "path": "output/mods-business-genericization-20261019/post-fix-regressions-r5.log",
+      "sha256": "2a18a863b606713d7a661304a185e204bb11a9f30592f1cc9c40b1ce9d820b5b"
+    },
+    "testFiles": 12,
+    "passedFiles": 12,
+    "failedFiles": 0,
+    "skippedFiles": 0,
+    "passedTests": 232,
+    "failedTests": 0,
+    "skippedTests": 0,
+    "todoTests": 0,
+    "skipped": [],
+    "rawSuiteCounters": {
+      "passed": 22,
+      "failed": 0,
+      "pending": 0
+    },
+    "countingPolicy": "Files with no passed/failed assertions (including all pending/skipped/todo) are excluded from passedFiles. Raw suite counters are not file counts.",
+    "rawReport": {
+      "path": "output/mods-business-genericization-20261019/post-fix-regressions-r5.json",
+      "sha256": "5407b8874999e84d5cd56d5598e1bd4af2db9034ae2897376a78b29bdc08d3a2"
+    }
+  },
+  "vitest": {
+    "success": true,
+    "testFiles": 1523,
+    "passedFiles": 1515,
+    "failedFiles": 0,
+    "skippedFiles": 8,
+    "passedTests": 15039,
+    "failedTests": 0,
+    "skippedTests": 56,
+    "todoTests": 0,
+    "skipped": [
+      {
+        "file": "src/main/agent/local-sandbox-shell-file-capture.test.ts",
+        "name": "LocalSandbox Shell generation pipeline captures through the production Orchestrator branch (YOLO=true)",
+        "status": "skipped"
+      },
+      {
+        "file": "src/main/agent/local-sandbox-shell-file-capture.test.ts",
+        "name": "LocalSandbox Shell generation pipeline captures through the production Orchestrator branch (YOLO=false)",
+        "status": "skipped"
+      },
+      {
+        "file": "src/main/agent/local-sandbox-shell-file-capture.test.ts",
+        "name": "LocalSandbox Shell generation pipeline never captures a rejected command or leaks its source into a later raw Hook",
+        "status": "skipped"
+      },
+      {
+        "file": "src/main/agent/local-sandbox-shell-file-capture.test.ts",
+        "name": "LocalSandbox Shell generation pipeline uses execute.cwd for mutations and legacy move tracking (Orchestrator=true)",
+        "status": "skipped"
+      },
+      {
+        "file": "src/main/agent/local-sandbox-shell-file-capture.test.ts",
+        "name": "LocalSandbox Shell generation pipeline uses execute.cwd for mutations and legacy move tracking (Orchestrator=false)",
+        "status": "skipped"
+      },
+      {
+        "file": "src/main/agent/local-sandbox-shell-file-capture.test.ts",
+        "name": "LocalSandbox Shell generation pipeline captures each approved retry separately, after the actual raw attempt",
+        "status": "skipped"
+      },
+      {
+        "file": "src/main/agent/local-sandbox-shell-file-capture.test.ts",
+        "name": "LocalSandbox Shell generation pipeline does not capture detached background tasks through the production approval path",
+        "status": "skipped"
+      },
+      {
+        "file": "src/main/agent/local-sandbox-shell-file-capture.test.ts",
+        "name": "LocalSandbox Shell generation pipeline observes the post-Hook command but does not count Hook-side writes",
+        "status": "skipped"
+      },
+      {
+        "file": "src/main/agent/local-sandbox-shell-file-capture.test.ts",
+        "name": "LocalSandbox Shell generation pipeline captures real structural writes through Orchestrator: target=a.ts; printf \"const a = 2\\n\" > \"$target\"",
+        "status": "skipped"
+      },
+      {
+        "file": "src/main/agent/local-sandbox-shell-file-capture.test.ts",
+        "name": "LocalSandbox Shell generation pipeline captures real structural writes through Orchestrator: printf \"const a = 2\\n\" > a.ts 2>&1",
+        "status": "skipped"
+      },
+      {
+        "file": "src/main/agent/local-sandbox-shell-file-capture.test.ts",
+        "name": "LocalSandbox Shell generation pipeline captures real structural writes through Orchestrator: printf \"const a = 2\\n\" &> a.ts",
+        "status": "skipped"
+      },
+      {
+        "file": "src/main/agent/local-sandbox-shell-file-capture.test.ts",
+        "name": "LocalSandbox Shell generation pipeline captures real structural writes through Orchestrator: bash -c 'printf \"const a = 2\\n\"' > a.ts",
+        "status": "skipped"
+      },
+      {
+        "file": "src/main/agent/local-sandbox-shell-file-capture.test.ts",
+        "name": "LocalSandbox Shell generation pipeline captures real structural writes through Orchestrator: echo \"<<EOF\"\nprintf \"const a = 2\\n\" > a.ts",
+        "status": "skipped"
+      },
+      {
+        "file": "src/main/agent/local-sandbox-shell-file-capture.test.ts",
+        "name": "LocalSandbox Shell generation pipeline distinguishes template pipelines from model output through Orchestrator",
+        "status": "skipped"
+      },
+      {
+        "file": "src/main/agent/local-sandbox-shell-file-capture.test.ts",
+        "name": "LocalSandbox Shell generation pipeline captures a real foreground command with raw pre/post content and mutation notification",
+        "status": "skipped"
+      },
+      {
+        "file": "src/main/agent/local-sandbox-shell-file-capture.test.ts",
+        "name": "LocalSandbox Shell generation pipeline leaves standard mode unchanged",
+        "status": "skipped"
+      },
+      {
+        "file": "src/main/agent/local-sandbox-shell-file-capture.test.ts",
+        "name": "LocalSandbox Shell generation pipeline attributes copies but does not report them as model-generated code",
+        "status": "skipped"
+      },
+      {
+        "file": "src/main/agent/local-sandbox-shell-file-capture.test.ts",
+        "name": "LocalSandbox Shell generation pipeline still captures partial mutations from commands that fail",
+        "status": "skipped"
+      },
+      {
+        "file": "src/main/agent/local-sandbox-shell-file-capture.test.ts",
+        "name": "LocalSandbox Shell generation pipeline does not capture a read-only command or a raw hook invocation",
+        "status": "skipped"
+      },
+      {
+        "file": "src/main/agent/local-sandbox-shell-file-capture.test.ts",
+        "name": "LocalSandbox Shell generation pipeline keeps shared Task backend generation attributed to the invoking child",
+        "status": "skipped"
+      },
+      {
+        "file": "src/main/agent/local-sandbox-shell-file-capture.test.ts",
+        "name": "LocalSandbox Shell generation pipeline deduplicates file-tool edits against an overlapping Shell window",
+        "status": "skipped"
+      },
+      {
+        "file": "src/main/agent/plugin-system-constraint.test.ts",
+        "name": "resolvePluginSystemConstraintPath rejects a symlink under sys when its physical target escapes the directory",
+        "status": "skipped"
+      },
+      {
+        "file": "src/main/agent/shell-file-effects.test.ts",
+        "name": "shell file effects against real Git repositories keeps test stdout excluded through a real recursive consumer: make test | bash -c 'sed s/passed/ok/' > wrapper-report.html",
+        "status": "skipped"
+      },
+      {
+        "file": "src/main/agent/shell-file-effects.test.ts",
+        "name": "shell file effects against real Git repositories keeps test stdout excluded through a real recursive consumer: make test | npm run change > wrapper-report.html",
+        "status": "skipped"
+      },
+      {
+        "file": "src/main/agent/shell-file-effects.test.ts",
+        "name": "shell file effects against real Git repositories does not let unknown output locations hide an explicit model write: make test",
+        "status": "skipped"
+      },
+      {
+        "file": "src/main/agent/shell-file-effects.test.ts",
+        "name": "shell file effects against real Git repositories does not let unknown output locations hide an explicit model write: cat b.ts",
+        "status": "skipped"
+      },
+      {
+        "file": "src/main/agent/shell-file-effects.test.ts",
+        "name": "shell file effects against real Git repositories does not let unknown output locations hide an explicit model write: prettier b.ts",
+        "status": "skipped"
+      },
+      {
+        "file": "src/main/agent/shell-file-effects.test.ts",
+        "name": "shell file effects against real Git repositories counts the file actually written using scoped variables: target=a.ts; (target=b.ts); printf \"new model\\n\" > \"$target\"; make test",
+        "status": "skipped"
+      },
+      {
+        "file": "src/main/agent/shell-file-effects.test.ts",
+        "name": "shell file effects against real Git repositories counts the file actually written using scoped variables: target=a.ts; if false; then target=b.ts; fi; printf \"new model\\n\" > \"$target\"; make test",
+        "status": "skipped"
+      },
+      {
+        "file": "src/main/agent/shell-file-effects.test.ts",
+        "name": "shell file effects against real Git repositories counts the file actually written using scoped variables: target=a.ts; target=b.ts true; printf \"new model\\n\" > \"$target\"; make test",
+        "status": "skipped"
+      },
+      {
+        "file": "src/main/agent/shell-file-effects.test.ts",
+        "name": "shell file effects against real Git repositories counts the file actually written using scoped variables: target=a.ts; false && target=b.ts; printf \"new model\\n\" > \"$target\"; make test",
+        "status": "skipped"
+      },
+      {
+        "file": "src/main/agent/shell-file-effects.test.ts",
+        "name": "shell file effects against real Git repositories counts the file actually written using scoped variables: target=a.ts; true || target=b.ts; printf \"new model\\n\" > \"$target\"; make test",
+        "status": "skipped"
+      },
+      {
+        "file": "src/main/agent/shell-file-effects.test.ts",
+        "name": "shell file effects against real Git repositories counts the file actually written using scoped variables: target=a.ts; target=b.ts | cat; printf \"new model\\n\" > \"$target\"; make test",
+        "status": "skipped"
+      },
+      {
+        "file": "src/main/agent/shell-file-effects.test.ts",
+        "name": "shell file effects against real Git repositories counts the file actually written using scoped variables: target=a.ts; { target=b.ts; } | cat; printf \"new model\\n\" > \"$target\"; make test",
+        "status": "skipped"
+      },
+      {
+        "file": "src/main/agent/shell-file-effects.test.ts",
+        "name": "shell file effects against real Git repositories counts the file actually written using scoped variables: target=a.ts; if false; then target=b.ts; else printf \"new model\\n\" > \"$target\"; fi; make test",
+        "status": "skipped"
+      },
+      {
+        "file": "src/main/agent/shell-file-effects.test.ts",
+        "name": "shell file effects against real Git repositories counts the file actually written using scoped variables: target=a.ts; if false; then target=b.ts; elif true; then printf \"new model\\n\" > \"$target\"; fi; make test",
+        "status": "skipped"
+      },
+      {
+        "file": "src/main/agent/shell-file-effects.test.ts",
+        "name": "shell file effects against real Git repositories counts the file actually written using scoped variables: false && cd nested; printf \"new model\\n\" > a.ts; make test",
+        "status": "skipped"
+      },
+      {
+        "file": "src/main/agent/shell-file-effects.test.ts",
+        "name": "shell file effects against real Git repositories counts the file actually written using scoped variables: true || cd nested; printf \"new model\\n\" > a.ts; make test",
+        "status": "skipped"
+      },
+      {
+        "file": "src/main/agent/shell-file-effects.test.ts",
+        "name": "shell file effects against real Git repositories counts the file actually written using scoped variables: cd nested | cat; printf \"new model\\n\" > a.ts; make test",
+        "status": "skipped"
+      },
+      {
+        "file": "src/main/agent/shell-file-effects.test.ts",
+        "name": "shell file effects against real Git repositories counts the file actually written using scoped variables: if false; then cd nested; else printf \"new model\\n\" > a.ts; fi; make test",
+        "status": "skipped"
+      },
+      {
+        "file": "src/main/agent/shell-file-effects.test.ts",
+        "name": "shell file effects against real Git repositories excludes real test logs piped to a code extension, including mixed model writes",
+        "status": "skipped"
+      },
+      {
+        "file": "src/main/agent/shell-file-effects.test.ts",
+        "name": "shell file effects against real Git repositories does not count mixed transfer stdout from a real nested shell",
+        "status": "skipped"
+      },
+      {
+        "file": "src/main/agent/shell-file-effects.test.ts",
+        "name": "shell file effects against real Git repositories attributes real formatter stdout without counting it as model code",
+        "status": "skipped"
+      },
+      {
+        "file": "src/main/harness-board/autobiz-mods-node-create.integration.test.ts",
+        "name": "real AutoBiz IPC previews optional closure and original createFeature persists exactly three nodes",
+        "status": "skipped"
+      },
+      {
+        "file": "src/main/ipc/git-panel-diff.test.ts",
+        "name": "buildGitPanelState — lazy mode (includeDiffs:false) preserves literal quote characters in selected Git paths",
+        "status": "skipped"
+      },
+      {
+        "file": "src/main/ipc/git-panel-diff.test.ts",
+        "name": "Agent commit path staging treats a dangling symlink as an existing Git path",
+        "status": "skipped"
+      },
+      {
+        "file": "src/main/plugins/derivation-node-composition.test.ts",
+        "name": "publishes a real AutoBiz candidate atomically without model calls or protocol changes",
+        "status": "skipped"
+      },
+      {
+        "file": "src/main/plugins/verified-artifacts-candidate.integration.test.ts",
+        "name": "admits the actual new export ZIP with exact reviewed agent resources and refuses changed bytes",
+        "status": "skipped"
+      },
+      {
+        "file": "src/main/services/git-repository-discovery.test.ts",
+        "name": "discoverWorkspaceGitRepositories preserves trailing spaces in a requested repository path",
+        "status": "skipped"
+      },
+      {
+        "file": "src/main/agent/workflow/run-store-location.test.ts",
+        "name": "workflow run storage location async resume rejects a journal symlink that resolves outside its run directory",
+        "status": "skipped"
+      },
+      {
+        "file": "src/main/harness-board/project-runtime/package-snapshots.test.ts",
+        "name": "measures bounded two-package admission and repeated guards",
+        "status": "skipped"
+      },
+      {
+        "file": "src/main/mods/v2/markdown-performance.test.ts",
+        "name": "measures final Markdown parsing and unchanged native publication",
+        "status": "skipped"
+      },
+      {
+        "file": "src/main/mods/v2/native-engine-performance.test.ts",
+        "name": "measures isolated actual native drawing, protected refs and shared Client admission",
+        "status": "skipped"
+      },
+      {
+        "file": "src/main/mods/v2/plugin-prompt-performance.test.ts",
+        "name": "measures isolated host queue admission and real cleanup, without model or IPC substitutes in the timing claim",
+        "status": "skipped"
+      },
+      {
+        "file": "src/main/mods/v2/ui-resolve-performance.test.ts",
+        "name": "measures isolated actual VM preparation and cached foreign constructors",
+        "status": "skipped"
+      },
+      {
+        "file": "src/main/mods/v2/worktree-progress.integration.test.ts",
+        "name": "runs actual assembled observer undefined against original scheduler/worktrees and retains process approval",
+        "status": "skipped"
+      }
+    ],
+    "rawSuiteCounters": {
+      "passed": 2599,
+      "failed": 0,
+      "pending": 0
+    },
+    "countingPolicy": "Files with no passed/failed assertions (including all pending/skipped/todo) are excluded from passedFiles. Raw suite counters are not file counts.",
+    "rawReport": {
+      "path": "output/mods-s2-s5-20261017/business-genericization-whole-r5.json",
+      "sha256": "deedf52165e9b29816bdc35bb374a6190fd179c72e7e232226770b6d6bf58c57"
+    },
+    "pretestExitCode": 0,
+    "originalTimeoutsUnchanged": true,
+    "unfiltered": true,
+    "workers": 1,
+    "wrapper": {
+      "label": "whole-suite-r5",
+      "success": true,
+      "exitCode": 0,
+      "sourceSnapshotSha256": "5900b0ebd7636a1615dd6f30f5e84105ca0605f107c4f455c97927fa51f1bcb5",
+      "changedFiles": [],
+      "completedAt": "2026-10-19T15:28:10.724Z",
+      "summary": {
+        "path": "output/mods-business-genericization-20261019/whole-suite-r5-summary.json",
+        "sha256": "dad8d93199b6e75fe6054fd60b2a5ba54e3acc6a6f782ce9fab9b52515e05766"
+      },
+      "invocation": {
+        "path": "output/mods-business-genericization-20261019/whole-suite-r5-invocation.json",
+        "sha256": "3e1e567b9aee20b4bd7fe5d8c72e21d877db2cdf1c55ef041b91be2b2a0aaff3"
+      },
+      "defaultLog": {
+        "path": "output/mods-business-genericization-20261019/whole-suite-r5.log",
+        "sha256": "1b244f4c1cdfcbf13a1a871c30140b8261cacf9df1258e1126c68feb55471a78"
+      }
+    },
+    "originalSummary": {
+      "path": "output/mods-s2-s5-20261017/business-genericization-whole-r5-summary.json",
+      "sha256": "2d841a6aa51a8e22f34386870205c5cbb82f9c23a6b90a40e345835af68c60bb"
+    }
+  },
+  "standalone": {
+    "success": true,
+    "originalGroups": 16,
+    "sequential": true,
+    "results": [
+      {
+        "script": "test:adoption",
+        "exitCode": 0
+      },
+      {
+        "script": "test:messages",
+        "exitCode": 0
+      },
+      {
+        "script": "test:hooks",
+        "exitCode": 0
+      },
+      {
+        "script": "test:plugins",
+        "exitCode": 0
+      },
+      {
+        "script": "test:task-cards",
+        "exitCode": 0
+      },
+      {
+        "script": "test:merge",
+        "exitCode": 0
+      },
+      {
+        "script": "test:workflow",
+        "exitCode": 0
+      },
+      {
+        "script": "test:desktop-agent-baseline",
+        "exitCode": 0
+      },
+      {
+        "script": "test:im-v1",
+        "exitCode": 0
+      },
+      {
+        "script": "test:mods:flows:recovery-runtime",
+        "exitCode": 0
+      },
+      {
+        "script": "test:mods:authoring:runtime",
+        "exitCode": 0
+      },
+      {
+        "script": "test:mods:authoring:install-runtime",
+        "exitCode": 0
+      },
+      {
+        "script": "test:mods:flows:files:runtime",
+        "exitCode": 0
+      },
+      {
+        "script": "test:mods:evaluation:runtime",
+        "exitCode": 0
+      },
+      {
+        "script": "test:mods-skill-evaluation-runtime",
+        "exitCode": 0
+      },
+      {
+        "script": "test:mods:ui-colors",
+        "exitCode": 0
+      }
+    ],
+    "wrapper": {
+      "label": "standalone-suite-r5",
+      "success": true,
+      "exitCode": 0,
+      "sourceSnapshotSha256": "5900b0ebd7636a1615dd6f30f5e84105ca0605f107c4f455c97927fa51f1bcb5",
+      "changedFiles": [],
+      "completedAt": "2026-10-19T15:43:17.496Z",
+      "summary": {
+        "path": "output/mods-business-genericization-20261019/standalone-suite-r5-summary.json",
+        "sha256": "a6047646f49e65b838ef33135a986fc3b0a9301f5dc1c314c17006eab8ba201d"
+      },
+      "invocation": {
+        "path": "output/mods-business-genericization-20261019/standalone-suite-r5-invocation.json",
+        "sha256": "e4b533d5d29fcae8598b8e0fd98757acbf608c135ccee6b059ac6dfab98874cf"
+      },
+      "defaultLog": {
+        "path": "output/mods-business-genericization-20261019/standalone-suite-r5.log",
+        "sha256": "9cc5ca2445d89e05ef6ee1c9b51942bbaf64bf83b64fe637454bce50d38e09ec"
+      }
+    },
+    "rawSummary": {
+      "path": "output/mods-s2-s5-20261017/business-genericization-standalone-r5-summary.json",
+      "sha256": "bb124e78e089c4b737c79e385dd3b173fa3c5260eef3136926313a21b11fcbb9"
+    }
+  },
+  "typecheck": {
+    "label": "node-web-final-r11",
+    "success": true,
+    "exitCode": 0,
+    "sourceSnapshotSha256": "5900b0ebd7636a1615dd6f30f5e84105ca0605f107c4f455c97927fa51f1bcb5",
+    "changedFiles": [],
+    "completedAt": "2026-10-19T14:04:29.258Z",
+    "summary": {
+      "path": "output/mods-business-genericization-20261019/node-web-final-r11-summary.json",
+      "sha256": "cb9cd477cde6d5f5fc5b72fd1fef48160747a1ec25e538d3bbea8c324dec8f84"
+    },
+    "invocation": {
+      "path": "output/mods-business-genericization-20261019/node-web-final-r11-invocation.json",
+      "sha256": "43f34c260cace02fb6fd76f3fb31ccac06f40cd0ccbaa0f3be75e6d3b170187c"
+    },
+    "defaultLog": {
+      "path": "output/mods-business-genericization-20261019/node-web-final-r11.log",
+      "sha256": "018facb1327e4269b3f14764cf1a68a7b1d3da7645513125890cc94532379441"
+    }
+  },
+  "supplementalFixtureTypes": {
+    "label": "independent-fixture-types-r11",
+    "success": true,
+    "exitCode": 0,
+    "sourceSnapshotSha256": "5900b0ebd7636a1615dd6f30f5e84105ca0605f107c4f455c97927fa51f1bcb5",
+    "changedFiles": [],
+    "completedAt": "2026-10-19T14:04:48.984Z",
+    "summary": {
+      "path": "output/mods-business-genericization-20261019/independent-fixture-types-r11-summary.json",
+      "sha256": "435340a1525416d1ebcf38ea23a4b142438cead4ebc908ac05946cd396642599"
+    },
+    "invocation": {
+      "path": "output/mods-business-genericization-20261019/independent-fixture-types-r11-invocation.json",
+      "sha256": "49c689d8a9c143525e57cfc13b9a64bf921e0085607d616fbe409123a53287bc"
+    },
+    "defaultLog": {
+      "path": "output/mods-business-genericization-20261019/independent-fixture-types-r11.log",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    }
+  },
+  "changedLint": {
+    "label": "changed-eslint-r11",
+    "success": true,
+    "exitCode": 0,
+    "sourceSnapshotSha256": "5900b0ebd7636a1615dd6f30f5e84105ca0605f107c4f455c97927fa51f1bcb5",
+    "changedFiles": [],
+    "completedAt": "2026-10-19T14:05:09.529Z",
+    "summary": {
+      "path": "output/mods-business-genericization-20261019/changed-eslint-r11-summary.json",
+      "sha256": "5ffc4287fb8672e75fb36f8d0e51fb215f72960ac9d9c3ced17e6c3892d84251"
+    },
+    "invocation": {
+      "path": "output/mods-business-genericization-20261019/changed-eslint-r11-invocation.json",
+      "sha256": "1ec95712c1b15e867aaa2821b8c827da249d44a1ca6dd900a0bdabd559a32572"
+    },
+    "defaultLog": {
+      "path": "output/mods-business-genericization-20261019/changed-eslint-r11.log",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "files": 90,
+    "errors": 0,
+    "warnings": 2781
+  },
+  "fullLint": {
+    "fullLintPassed": false,
+    "baselineComparisonPassed": true,
+    "baselineErrors": 171,
+    "currentErrors": 171,
+    "newErrors": 0,
+    "byteIdenticalErrorFiles": 74,
+    "currentWarnings": 650608,
+    "wrapper": {
+      "label": "whole-eslint-r5",
+      "success": false,
+      "exitCode": 1,
+      "sourceSnapshotSha256": "5900b0ebd7636a1615dd6f30f5e84105ca0605f107c4f455c97927fa51f1bcb5",
+      "changedFiles": [],
+      "completedAt": "2026-10-19T15:48:22.692Z",
+      "summary": {
+        "path": "output/mods-business-genericization-20261019/whole-eslint-r5-summary.json",
+        "sha256": "3bdbd0c158278f72136f63643edee03fe2c84d554e7541c3e10ae9bfcc394176"
+      },
+      "invocation": {
+        "path": "output/mods-business-genericization-20261019/whole-eslint-r5-invocation.json",
+        "sha256": "ea0cc5d8b90376bcd98566a1eec80f6054098c96afc772050022cb0a7a324698"
+      },
+      "defaultLog": {
+        "path": "output/mods-business-genericization-20261019/whole-eslint-r5.log",
+        "sha256": "fedcb0c053d706fccec392a7cbc4ee5f9d4c4dbf94579079e0de33b74996305d"
+      }
+    },
+    "comparison": {
+      "path": "output/mods-business-genericization-20261019/whole-eslint-r5-baseline-reviewed.json",
+      "sha256": "7fe406f29149bc50910edb64482d7125764c435f905a6a320a8f3483df1fcb80"
+    },
+    "limitation": "171 pre-existing errors remain; full lint is not reported as passed"
+  },
+  "browser": [
+    {
+      "label": "flow-ui-browser-r7",
+      "success": true,
+      "exitCode": 0,
+      "sourceSnapshotSha256": "7e329bbec4dc40a08975b349be8d5abd3d456375aa64871a170f2be86862b650",
+      "changedFiles": [],
+      "completedAt": "2026-10-19T10:54:59.722Z",
+      "summary": {
+        "path": "output/mods-business-genericization-20261019/flow-ui-browser-r7-summary.json",
+        "sha256": "a9b3104a342b7cebc1f5fda33705bee35af42984ccf91c9ed20e4d798ddc6794"
+      },
+      "invocation": {
+        "path": "output/mods-business-genericization-20261019/flow-ui-browser-r7-invocation.json",
+        "sha256": "a4d1731aee0aa2ce764032ef2dc461fe0817bd4b4127371663814ac27aabe5df"
+      },
+      "defaultLog": {
+        "path": "output/mods-business-genericization-20261019/flow-ui-browser-r7.log",
+        "sha256": "b1414e75bd2e0b40d64d3d533b1c884e8f9b3678f2eb202cd004afa08870615d"
+      },
+      "applicability": {
+        "entireSourceSnapshotIdentical": false,
+        "checkedFiles": 1348,
+        "checkedInputsSha256": "ee52f94883beac445f70d88d5278f00acdaf7ffb6d1cc14bbbf497537c374756",
+        "rendererAndSharedInputsByteIdentical": true,
+        "fixtureDependencyClosure": [
+          "tests/mods-flow-browser.spec.ts"
+        ],
+        "limitations": [
+          "Source applicability only; installed dependencies and browser binaries were not byte-compared",
+          "Historical generated renderer CSS read by the flow fixture was not retained in this source snapshot; no final-package CSS identity claim"
+        ],
+        "scope": "All renderer/shared/preload source files, existing browser support, this run's actual fixture closure and dependency/build configuration; controlled IPC/store, not native execution validation"
+      }
+    },
+    {
+      "label": "business-ui-browser-r8",
+      "success": true,
+      "exitCode": 0,
+      "sourceSnapshotSha256": "f366c3de4cfd6dd43d226686660032169671d5dc1ffaaae1cf7a73174822172e",
+      "changedFiles": [],
+      "completedAt": "2026-10-19T10:56:45.063Z",
+      "summary": {
+        "path": "output/mods-business-genericization-20261019/business-ui-browser-r8-summary.json",
+        "sha256": "cd1c268bea79fa5204a7b70acc103b7325050e830e692dcfa6fa2d46fd2cc91b"
+      },
+      "invocation": {
+        "path": "output/mods-business-genericization-20261019/business-ui-browser-r8-invocation.json",
+        "sha256": "58fede9471c80168d5bf9264fe614262c0c7351397b15bd1d03a517ea5aebe37"
+      },
+      "defaultLog": {
+        "path": "output/mods-business-genericization-20261019/business-ui-browser-r8.log",
+        "sha256": "00a43c492ac7dc4a73c0e9cc6913be46f16b0d2071193b5d5fd78902437ed139"
+      },
+      "applicability": {
+        "entireSourceSnapshotIdentical": false,
+        "checkedFiles": 1348,
+        "checkedInputsSha256": "7cc089fdc067b974a588008fa4c8d199a3b5ae9f7c9535875de6c728275f3ee5",
+        "rendererAndSharedInputsByteIdentical": true,
+        "fixtureDependencyClosure": [
+          "tests/business-mod-assembly-browser.spec.ts"
+        ],
+        "limitations": [
+          "Source applicability only; installed dependencies and browser binaries were not byte-compared",
+          "Historical generated renderer CSS read by the flow fixture was not retained in this source snapshot; no final-package CSS identity claim"
+        ],
+        "scope": "All renderer/shared/preload source files, existing browser support, this run's actual fixture closure and dependency/build configuration; controlled IPC/store, not native execution validation"
+      }
+    },
+    {
+      "label": "derivation-ui-browser-r8",
+      "success": true,
+      "exitCode": 0,
+      "sourceSnapshotSha256": "f366c3de4cfd6dd43d226686660032169671d5dc1ffaaae1cf7a73174822172e",
+      "changedFiles": [],
+      "completedAt": "2026-10-19T10:56:58.132Z",
+      "summary": {
+        "path": "output/mods-business-genericization-20261019/derivation-ui-browser-r8-summary.json",
+        "sha256": "742f45b7093ca0090e01832860aacfceaed0dc6371807779d948f2641bca7457"
+      },
+      "invocation": {
+        "path": "output/mods-business-genericization-20261019/derivation-ui-browser-r8-invocation.json",
+        "sha256": "674c9a37ae398c44f0d01f053d3b79680a9cc94c1a475631277ea8ebdc2d1770"
+      },
+      "defaultLog": {
+        "path": "output/mods-business-genericization-20261019/derivation-ui-browser-r8.log",
+        "sha256": "e11148bec9372a7d981f1ef9a7953bef7a0661cf47784a6d7b6659032a312289"
+      },
+      "applicability": {
+        "entireSourceSnapshotIdentical": false,
+        "checkedFiles": 1348,
+        "checkedInputsSha256": "309744d10555ed2f060cfe696f2db62f90dfd5c4671d83f22c15a22e5ff8186f",
+        "rendererAndSharedInputsByteIdentical": true,
+        "fixtureDependencyClosure": [
+          "tests/plugin-derivation-browser.spec.ts"
+        ],
+        "limitations": [
+          "Source applicability only; installed dependencies and browser binaries were not byte-compared",
+          "Historical generated renderer CSS read by the flow fixture was not retained in this source snapshot; no final-package CSS identity claim"
+        ],
+        "scope": "All renderer/shared/preload source files, existing browser support, this run's actual fixture closure and dependency/build configuration; controlled IPC/store, not native execution validation"
+      }
+    },
+    {
+      "label": "entry-ui-browser-r8",
+      "success": true,
+      "exitCode": 0,
+      "sourceSnapshotSha256": "f366c3de4cfd6dd43d226686660032169671d5dc1ffaaae1cf7a73174822172e",
+      "changedFiles": [],
+      "completedAt": "2026-10-19T10:57:05.687Z",
+      "summary": {
+        "path": "output/mods-business-genericization-20261019/entry-ui-browser-r8-summary.json",
+        "sha256": "8d31502c8782b8d8e2d44b4cf55df02024157115c602aa223c5796ef41c8efd9"
+      },
+      "invocation": {
+        "path": "output/mods-business-genericization-20261019/entry-ui-browser-r8-invocation.json",
+        "sha256": "f67d84b4aab96df8464ae1709e9025047468b9c282b6fe6f5c4b277b1bf90385"
+      },
+      "defaultLog": {
+        "path": "output/mods-business-genericization-20261019/entry-ui-browser-r8.log",
+        "sha256": "50a2496d96af187f2118a6b8f87138f598f88441528c52da837faec41b2d1b0b"
+      },
+      "applicability": {
+        "entireSourceSnapshotIdentical": false,
+        "checkedFiles": 1349,
+        "checkedInputsSha256": "2920c17d371cc50dcd8c2bb5dd4b7520d7eb916de7fb7a837afdee0e450010b1",
+        "rendererAndSharedInputsByteIdentical": true,
+        "fixtureDependencyClosure": [
+          "tests/mods-entry-navigation-browser.spec.ts",
+          "tests/mods-flow-browser.spec.ts"
+        ],
+        "limitations": [
+          "Source applicability only; installed dependencies and browser binaries were not byte-compared",
+          "Historical generated renderer CSS read by the flow fixture was not retained in this source snapshot; no final-package CSS identity claim"
+        ],
+        "scope": "All renderer/shared/preload source files, existing browser support, this run's actual fixture closure and dependency/build configuration; controlled IPC/store, not native execution validation"
+      }
+    },
+    {
+      "label": "native-import-ui-browser-r9",
+      "success": true,
+      "exitCode": 0,
+      "sourceSnapshotSha256": "5a45a78ca0e2d44f81a03dfcaedb1582b5eb6674ffd81a7852bc5d0d1f49380a",
+      "changedFiles": [],
+      "completedAt": "2026-10-19T10:59:38.896Z",
+      "summary": {
+        "path": "output/mods-business-genericization-20261019/native-import-ui-browser-r9-summary.json",
+        "sha256": "cf1ff2d6ade443c3895f2502f135576138b969cf1f266bbcba916507462676f0"
+      },
+      "invocation": {
+        "path": "output/mods-business-genericization-20261019/native-import-ui-browser-r9-invocation.json",
+        "sha256": "12d244204d628f5c51544eb85fa65e60466f9ef0d9f97b8c3e5f1c0992db9879"
+      },
+      "defaultLog": {
+        "path": "output/mods-business-genericization-20261019/native-import-ui-browser-r9.log",
+        "sha256": "2dc1b972d4f646d9dfe0b435b8fe361395f463f5efe412b5054a2d634d3a720e"
+      },
+      "applicability": {
+        "entireSourceSnapshotIdentical": false,
+        "checkedFiles": 1348,
+        "checkedInputsSha256": "7908bf727c6835967028bc2ac3483b9fa69e0ab9340318ea95f88f789fb479b6",
+        "rendererAndSharedInputsByteIdentical": true,
+        "fixtureDependencyClosure": [
+          "tests/native-plugin-import-browser.spec.ts"
+        ],
+        "limitations": [
+          "Source applicability only; installed dependencies and browser binaries were not byte-compared",
+          "Historical generated renderer CSS read by the flow fixture was not retained in this source snapshot; no final-package CSS identity claim"
+        ],
+        "scope": "All renderer/shared/preload source files, existing browser support, this run's actual fixture closure and dependency/build configuration; controlled IPC/store, not native execution validation"
+      }
+    }
+  ],
+  "package": {
+    "normalBuild": {
+      "label": "normal-build-r4",
+      "success": true,
+      "exitCode": 0,
+      "sourceSnapshotSha256": "5900b0ebd7636a1615dd6f30f5e84105ca0605f107c4f455c97927fa51f1bcb5",
+      "changedFiles": [],
+      "completedAt": "2026-10-19T14:06:13.026Z",
+      "summary": {
+        "path": "output/mods-business-genericization-20261019/normal-build-r4-summary.json",
+        "sha256": "a9f7dd2c58c63f3842f91508a8cff4dee0e3e2fc7dbd985c5b75f8cfc7b1eb64"
+      },
+      "invocation": {
+        "path": "output/mods-business-genericization-20261019/normal-build-r4-invocation.json",
+        "sha256": "e73d9123ec40cdb5a71890a3706c158c91ae242e236dbae2f68ba2b14895f010"
+      },
+      "defaultLog": {
+        "path": "output/mods-business-genericization-20261019/normal-build-r4.log",
+        "sha256": "d31da7c5dbb5996d0b935759acd31ef2f76a2c136fef6579b47c371d867f5263"
+      }
+    },
+    "normalNsis": {
+      "label": "normal-package-r4",
+      "success": true,
+      "exitCode": 0,
+      "sourceSnapshotSha256": "5900b0ebd7636a1615dd6f30f5e84105ca0605f107c4f455c97927fa51f1bcb5",
+      "changedFiles": [],
+      "completedAt": "2026-10-19T14:16:01.859Z",
+      "summary": {
+        "path": "output/mods-business-genericization-20261019/normal-package-r4-summary.json",
+        "sha256": "fa3ca22872781a77107d24188dc36401432cd5d8322dfd41561d7a887136ba3d"
+      },
+      "invocation": {
+        "path": "output/mods-business-genericization-20261019/normal-package-r4-invocation.json",
+        "sha256": "56c3320f9363b19c3b7f98b6f647c42c81371a04117178b088501f543717ffd7"
+      },
+      "defaultLog": {
+        "path": "output/mods-business-genericization-20261019/normal-package-r4.log",
+        "sha256": "1a10e621c57a641b5dc6175df425bb399b4d5384a289953642dcc14a05f5e72a"
+      }
+    },
+    "noTestBridge": true,
+    "buildProof": {
+      "path": "output/mods-business-genericization-20261019/normal-package-build-r4-summary.json",
+      "sha256": "15637c9a5efb2723ad25c85d4266547d859491ed15853f51a284a092ece95212"
+    },
+    "compiled": [
+      {
+        "path": "out/main/index.js",
+        "sha256": "bcef5b720a5db83a0b0e8d46816a9bd901ee03a0a45187a581fbf3ed9532a9d7",
+        "generatedStagedArchivedMatch": true
+      },
+      {
+        "path": "out/preload/index.js",
+        "sha256": "9bbb631ce11331e93ac18d41040d82c958d4ed92718578a33d96d0b60f3f7a1b",
+        "generatedStagedArchivedMatch": true
+      }
+    ],
+    "skills": {
+      "files": 21,
+      "exactInventoryAndBytes": true
+    },
+    "artifacts": [
+      {
+        "path": "output/mods-v2-validation/20261019-business-genericization-r4/win-unpacked/resources/app.asar",
+        "bytes": 388108404,
+        "sha256": "d54f7530e95e6bcf1ff666061f1c9702a24a9b675d46ff2bfa3a57fdd5d434ed"
+      },
+      {
+        "path": "output/mods-v2-validation/20261019-business-genericization-r4/win-unpacked/CMBDevClaw.exe",
+        "bytes": 210970112,
+        "sha256": "9250b554a668454a2778449e914bf6f49b72a764d5c4388a73c11694549b63fd"
+      },
+      {
+        "path": "output/mods-v2-validation/20261019-business-genericization-r4/CMBDevClaw-Mods-v2-1.5.9-preview-setup.exe",
+        "bytes": 248435975,
+        "sha256": "4c492fd4fa65fa28b95e23f2650b5f7d3a26ff5c9162040279fc822a6f2eb49a"
+      }
+    ],
+    "existingInstalledApplicationReplaced": false,
+    "productionAcceptance": "not_evaluated"
+  },
+  "independentPackageJourney": {
+    "label": "independent-host-packaged-r5",
+    "success": true,
+    "exitCode": 0,
+    "sourceSnapshotSha256": "5900b0ebd7636a1615dd6f30f5e84105ca0605f107c4f455c97927fa51f1bcb5",
+    "changedFiles": [],
+    "completedAt": "2026-10-19T14:18:41.296Z",
+    "summary": {
+      "path": "output/mods-business-genericization-20261019/independent-host-packaged-r5-summary.json",
+      "sha256": "dbbcbf738111c6436cc4b0e714f4b82e8af4ba286cbd270b843a24448ce1fa66"
+    },
+    "invocation": {
+      "path": "output/mods-business-genericization-20261019/independent-host-packaged-r5-invocation.json",
+      "sha256": "370e88c92059904f3b095bf33b298dd6b57c7b388e39b3af158087947c1d19ca"
+    },
+    "defaultLog": {
+      "path": "output/mods-business-genericization-20261019/independent-host-packaged-r5.log",
+      "sha256": "7db889732b9994a9386a07d4f3b64a52261646947d239a34ed16756bd880992c"
+    },
+    "evidence": {
+      "run": "run-jA4ars",
+      "evidenceFile": "evidence.json",
+      "sha256": "ea0acf3e9a6325cd8dc4266161bc296ef713e67a326424ef2b83d21c1ab43ea5",
+      "location": "local isolated temporary runtime; absolute path redacted"
+    },
+    "asarSha256": "d54f7530e95e6bcf1ff666061f1c9702a24a9b675d46ff2bfa3a57fdd5d434ed",
+    "controlledModel": true,
+    "requests": 25,
+    "hookEvents": 8,
+    "stages": 3,
+    "finalStatus": "completed",
+    "operations": 4,
+    "exit": {
+      "code": 0,
+      "signal": null
+    },
+    "limitations": [
+      "One expected schema failure and existing failed-stage output repair; not S6",
+      "Hook observer proves original channel execution, not AutoBiz business Hook transfer",
+      "Business decision still requires human review"
+    ]
+  },
+  "autobizPackageJourney": {
+    "label": "autobiz-creator-packaged-r5",
+    "success": true,
+    "exitCode": 0,
+    "sourceSnapshotSha256": "5900b0ebd7636a1615dd6f30f5e84105ca0605f107c4f455c97927fa51f1bcb5",
+    "changedFiles": [],
+    "completedAt": "2026-10-19T14:21:28.385Z",
+    "summary": {
+      "path": "output/mods-business-genericization-20261019/autobiz-creator-packaged-r5-summary.json",
+      "sha256": "0bcb28731ce01ac0faac56dfb6b16bf2a61aee2a28e3799263074c2a558e9917"
+    },
+    "invocation": {
+      "path": "output/mods-business-genericization-20261019/autobiz-creator-packaged-r5-invocation.json",
+      "sha256": "e58893989bd33a2e55f196ef8e35b64d66fc0dae1c5a6c655af8600e1ced47d7"
+    },
+    "defaultLog": {
+      "path": "output/mods-business-genericization-20261019/autobiz-creator-packaged-r5.log",
+      "sha256": "d84f0992814ad55764ae6beadd5af7e434f433b340ce5cb50ef642b58710ad2f"
+    },
+    "evidence": {
+      "run": "run-OYQXOb",
+      "evidenceFile": "validation.json",
+      "sha256": "c1ce070d230ca8653689714b611f3700d9dcfa4121b9a57d21a1cb95fabdaad3",
+      "location": "local isolated temporary runtime; absolute path redacted"
+    },
+    "asarSha256": "d54f7530e95e6bcf1ff666061f1c9702a24a9b675d46ff2bfa3a57fdd5d434ed",
+    "controlledModel": true,
+    "scope": "Actual original AutoBiz PRD with chosen knowledge, feedback and isolated trial, restart restoration; not a full seven-stage lifecycle",
+    "modelRequests": 19,
+    "formalCandidateInstalled": false,
+    "externalSourceAndFrozenArchiveUnchanged": true,
+    "fullSevenStagesClaimed": false,
+    "S6Claimed": false
+  },
+  "historicalRuns": {
+    "cancelled": [
+      {
+        "label": "r1",
+        "reason": "Legacy-only rejection fixture corrected; explicit Host same-name resource positive retained"
+      },
+      {
+        "label": "r2",
+        "reason": "Expanded production boundary coupling found, fixed and revalidated without extending original deadlines"
+      },
+      {
+        "label": "r3",
+        "reason": "Mutable HEAD was not the historical parser; authentic pinned historical fixture preserves rejection assertions"
+      }
+    ],
+    "completedR4": {
+      "overallSuccess": false,
+      "success": false,
+      "testFiles": 1522,
+      "passedFiles": 1506,
+      "failedFiles": 8,
+      "skippedFiles": 8,
+      "passedTests": 15020,
+      "failedTests": 15,
+      "skippedTests": 56,
+      "todoTests": 0,
+      "skipped": [
+        {
+          "file": "src/main/agent/local-sandbox-shell-file-capture.test.ts",
+          "name": "LocalSandbox Shell generation pipeline captures through the production Orchestrator branch (YOLO=true)",
+          "status": "skipped"
+        },
+        {
+          "file": "src/main/agent/local-sandbox-shell-file-capture.test.ts",
+          "name": "LocalSandbox Shell generation pipeline captures through the production Orchestrator branch (YOLO=false)",
+          "status": "skipped"
+        },
+        {
+          "file": "src/main/agent/local-sandbox-shell-file-capture.test.ts",
+          "name": "LocalSandbox Shell generation pipeline never captures a rejected command or leaks its source into a later raw Hook",
+          "status": "skipped"
+        },
+        {
+          "file": "src/main/agent/local-sandbox-shell-file-capture.test.ts",
+          "name": "LocalSandbox Shell generation pipeline uses execute.cwd for mutations and legacy move tracking (Orchestrator=true)",
+          "status": "skipped"
+        },
+        {
+          "file": "src/main/agent/local-sandbox-shell-file-capture.test.ts",
+          "name": "LocalSandbox Shell generation pipeline uses execute.cwd for mutations and legacy move tracking (Orchestrator=false)",
+          "status": "skipped"
+        },
+        {
+          "file": "src/main/agent/local-sandbox-shell-file-capture.test.ts",
+          "name": "LocalSandbox Shell generation pipeline captures each approved retry separately, after the actual raw attempt",
+          "status": "skipped"
+        },
+        {
+          "file": "src/main/agent/local-sandbox-shell-file-capture.test.ts",
+          "name": "LocalSandbox Shell generation pipeline does not capture detached background tasks through the production approval path",
+          "status": "skipped"
+        },
+        {
+          "file": "src/main/agent/local-sandbox-shell-file-capture.test.ts",
+          "name": "LocalSandbox Shell generation pipeline observes the post-Hook command but does not count Hook-side writes",
+          "status": "skipped"
+        },
+        {
+          "file": "src/main/agent/local-sandbox-shell-file-capture.test.ts",
+          "name": "LocalSandbox Shell generation pipeline captures real structural writes through Orchestrator: target=a.ts; printf \"const a = 2\\n\" > \"$target\"",
+          "status": "skipped"
+        },
+        {
+          "file": "src/main/agent/local-sandbox-shell-file-capture.test.ts",
+          "name": "LocalSandbox Shell generation pipeline captures real structural writes through Orchestrator: printf \"const a = 2\\n\" > a.ts 2>&1",
+          "status": "skipped"
+        },
+        {
+          "file": "src/main/agent/local-sandbox-shell-file-capture.test.ts",
+          "name": "LocalSandbox Shell generation pipeline captures real structural writes through Orchestrator: printf \"const a = 2\\n\" &> a.ts",
+          "status": "skipped"
+        },
+        {
+          "file": "src/main/agent/local-sandbox-shell-file-capture.test.ts",
+          "name": "LocalSandbox Shell generation pipeline captures real structural writes through Orchestrator: bash -c 'printf \"const a = 2\\n\"' > a.ts",
+          "status": "skipped"
+        },
+        {
+          "file": "src/main/agent/local-sandbox-shell-file-capture.test.ts",
+          "name": "LocalSandbox Shell generation pipeline captures real structural writes through Orchestrator: echo \"<<EOF\"\nprintf \"const a = 2\\n\" > a.ts",
+          "status": "skipped"
+        },
+        {
+          "file": "src/main/agent/local-sandbox-shell-file-capture.test.ts",
+          "name": "LocalSandbox Shell generation pipeline distinguishes template pipelines from model output through Orchestrator",
+          "status": "skipped"
+        },
+        {
+          "file": "src/main/agent/local-sandbox-shell-file-capture.test.ts",
+          "name": "LocalSandbox Shell generation pipeline captures a real foreground command with raw pre/post content and mutation notification",
+          "status": "skipped"
+        },
+        {
+          "file": "src/main/agent/local-sandbox-shell-file-capture.test.ts",
+          "name": "LocalSandbox Shell generation pipeline leaves standard mode unchanged",
+          "status": "skipped"
+        },
+        {
+          "file": "src/main/agent/local-sandbox-shell-file-capture.test.ts",
+          "name": "LocalSandbox Shell generation pipeline attributes copies but does not report them as model-generated code",
+          "status": "skipped"
+        },
+        {
+          "file": "src/main/agent/local-sandbox-shell-file-capture.test.ts",
+          "name": "LocalSandbox Shell generation pipeline still captures partial mutations from commands that fail",
+          "status": "skipped"
+        },
+        {
+          "file": "src/main/agent/local-sandbox-shell-file-capture.test.ts",
+          "name": "LocalSandbox Shell generation pipeline does not capture a read-only command or a raw hook invocation",
+          "status": "skipped"
+        },
+        {
+          "file": "src/main/agent/local-sandbox-shell-file-capture.test.ts",
+          "name": "LocalSandbox Shell generation pipeline keeps shared Task backend generation attributed to the invoking child",
+          "status": "skipped"
+        },
+        {
+          "file": "src/main/agent/local-sandbox-shell-file-capture.test.ts",
+          "name": "LocalSandbox Shell generation pipeline deduplicates file-tool edits against an overlapping Shell window",
+          "status": "skipped"
+        },
+        {
+          "file": "src/main/agent/plugin-system-constraint.test.ts",
+          "name": "resolvePluginSystemConstraintPath rejects a symlink under sys when its physical target escapes the directory",
+          "status": "skipped"
+        },
+        {
+          "file": "src/main/agent/shell-file-effects.test.ts",
+          "name": "shell file effects against real Git repositories keeps test stdout excluded through a real recursive consumer: make test | bash -c 'sed s/passed/ok/' > wrapper-report.html",
+          "status": "skipped"
+        },
+        {
+          "file": "src/main/agent/shell-file-effects.test.ts",
+          "name": "shell file effects against real Git repositories keeps test stdout excluded through a real recursive consumer: make test | npm run change > wrapper-report.html",
+          "status": "skipped"
+        },
+        {
+          "file": "src/main/agent/shell-file-effects.test.ts",
+          "name": "shell file effects against real Git repositories does not let unknown output locations hide an explicit model write: make test",
+          "status": "skipped"
+        },
+        {
+          "file": "src/main/agent/shell-file-effects.test.ts",
+          "name": "shell file effects against real Git repositories does not let unknown output locations hide an explicit model write: cat b.ts",
+          "status": "skipped"
+        },
+        {
+          "file": "src/main/agent/shell-file-effects.test.ts",
+          "name": "shell file effects against real Git repositories does not let unknown output locations hide an explicit model write: prettier b.ts",
+          "status": "skipped"
+        },
+        {
+          "file": "src/main/agent/shell-file-effects.test.ts",
+          "name": "shell file effects against real Git repositories counts the file actually written using scoped variables: target=a.ts; (target=b.ts); printf \"new model\\n\" > \"$target\"; make test",
+          "status": "skipped"
+        },
+        {
+          "file": "src/main/agent/shell-file-effects.test.ts",
+          "name": "shell file effects against real Git repositories counts the file actually written using scoped variables: target=a.ts; if false; then target=b.ts; fi; printf \"new model\\n\" > \"$target\"; make test",
+          "status": "skipped"
+        },
+        {
+          "file": "src/main/agent/shell-file-effects.test.ts",
+          "name": "shell file effects against real Git repositories counts the file actually written using scoped variables: target=a.ts; target=b.ts true; printf \"new model\\n\" > \"$target\"; make test",
+          "status": "skipped"
+        },
+        {
+          "file": "src/main/agent/shell-file-effects.test.ts",
+          "name": "shell file effects against real Git repositories counts the file actually written using scoped variables: target=a.ts; false && target=b.ts; printf \"new model\\n\" > \"$target\"; make test",
+          "status": "skipped"
+        },
+        {
+          "file": "src/main/agent/shell-file-effects.test.ts",
+          "name": "shell file effects against real Git repositories counts the file actually written using scoped variables: target=a.ts; true || target=b.ts; printf \"new model\\n\" > \"$target\"; make test",
+          "status": "skipped"
+        },
+        {
+          "file": "src/main/agent/shell-file-effects.test.ts",
+          "name": "shell file effects against real Git repositories counts the file actually written using scoped variables: target=a.ts; target=b.ts | cat; printf \"new model\\n\" > \"$target\"; make test",
+          "status": "skipped"
+        },
+        {
+          "file": "src/main/agent/shell-file-effects.test.ts",
+          "name": "shell file effects against real Git repositories counts the file actually written using scoped variables: target=a.ts; { target=b.ts; } | cat; printf \"new model\\n\" > \"$target\"; make test",
+          "status": "skipped"
+        },
+        {
+          "file": "src/main/agent/shell-file-effects.test.ts",
+          "name": "shell file effects against real Git repositories counts the file actually written using scoped variables: target=a.ts; if false; then target=b.ts; else printf \"new model\\n\" > \"$target\"; fi; make test",
+          "status": "skipped"
+        },
+        {
+          "file": "src/main/agent/shell-file-effects.test.ts",
+          "name": "shell file effects against real Git repositories counts the file actually written using scoped variables: target=a.ts; if false; then target=b.ts; elif true; then printf \"new model\\n\" > \"$target\"; fi; make test",
+          "status": "skipped"
+        },
+        {
+          "file": "src/main/agent/shell-file-effects.test.ts",
+          "name": "shell file effects against real Git repositories counts the file actually written using scoped variables: false && cd nested; printf \"new model\\n\" > a.ts; make test",
+          "status": "skipped"
+        },
+        {
+          "file": "src/main/agent/shell-file-effects.test.ts",
+          "name": "shell file effects against real Git repositories counts the file actually written using scoped variables: true || cd nested; printf \"new model\\n\" > a.ts; make test",
+          "status": "skipped"
+        },
+        {
+          "file": "src/main/agent/shell-file-effects.test.ts",
+          "name": "shell file effects against real Git repositories counts the file actually written using scoped variables: cd nested | cat; printf \"new model\\n\" > a.ts; make test",
+          "status": "skipped"
+        },
+        {
+          "file": "src/main/agent/shell-file-effects.test.ts",
+          "name": "shell file effects against real Git repositories counts the file actually written using scoped variables: if false; then cd nested; else printf \"new model\\n\" > a.ts; fi; make test",
+          "status": "skipped"
+        },
+        {
+          "file": "src/main/agent/shell-file-effects.test.ts",
+          "name": "shell file effects against real Git repositories excludes real test logs piped to a code extension, including mixed model writes",
+          "status": "skipped"
+        },
+        {
+          "file": "src/main/agent/shell-file-effects.test.ts",
+          "name": "shell file effects against real Git repositories does not count mixed transfer stdout from a real nested shell",
+          "status": "skipped"
+        },
+        {
+          "file": "src/main/agent/shell-file-effects.test.ts",
+          "name": "shell file effects against real Git repositories attributes real formatter stdout without counting it as model code",
+          "status": "skipped"
+        },
+        {
+          "file": "src/main/harness-board/autobiz-mods-node-create.integration.test.ts",
+          "name": "real AutoBiz IPC previews optional closure and original createFeature persists exactly three nodes",
+          "status": "skipped"
+        },
+        {
+          "file": "src/main/ipc/git-panel-diff.test.ts",
+          "name": "buildGitPanelState — lazy mode (includeDiffs:false) preserves literal quote characters in selected Git paths",
+          "status": "skipped"
+        },
+        {
+          "file": "src/main/ipc/git-panel-diff.test.ts",
+          "name": "Agent commit path staging treats a dangling symlink as an existing Git path",
+          "status": "skipped"
+        },
+        {
+          "file": "src/main/services/git-repository-discovery.test.ts",
+          "name": "discoverWorkspaceGitRepositories preserves trailing spaces in a requested repository path",
+          "status": "skipped"
+        },
+        {
+          "file": "src/main/plugins/derivation-node-composition.test.ts",
+          "name": "publishes a real AutoBiz candidate atomically without model calls or protocol changes",
+          "status": "skipped"
+        },
+        {
+          "file": "src/main/plugins/verified-artifacts-candidate.integration.test.ts",
+          "name": "admits the actual new export ZIP with exact reviewed agent resources and refuses changed bytes",
+          "status": "skipped"
+        },
+        {
+          "file": "src/main/agent/workflow/run-store-location.test.ts",
+          "name": "workflow run storage location async resume rejects a journal symlink that resolves outside its run directory",
+          "status": "skipped"
+        },
+        {
+          "file": "src/main/harness-board/project-runtime/package-snapshots.test.ts",
+          "name": "measures bounded two-package admission and repeated guards",
+          "status": "skipped"
+        },
+        {
+          "file": "src/main/mods/v2/markdown-performance.test.ts",
+          "name": "measures final Markdown parsing and unchanged native publication",
+          "status": "skipped"
+        },
+        {
+          "file": "src/main/mods/v2/native-engine-performance.test.ts",
+          "name": "measures isolated actual native drawing, protected refs and shared Client admission",
+          "status": "skipped"
+        },
+        {
+          "file": "src/main/mods/v2/plugin-prompt-performance.test.ts",
+          "name": "measures isolated host queue admission and real cleanup, without model or IPC substitutes in the timing claim",
+          "status": "skipped"
+        },
+        {
+          "file": "src/main/mods/v2/ui-resolve-performance.test.ts",
+          "name": "measures isolated actual VM preparation and cached foreign constructors",
+          "status": "skipped"
+        },
+        {
+          "file": "src/main/mods/v2/worktree-progress.integration.test.ts",
+          "name": "runs actual assembled observer undefined against original scheduler/worktrees and retains process approval",
+          "status": "skipped"
+        }
+      ],
+      "rawSuiteCounters": {
+        "passed": 2584,
+        "failed": 14,
+        "pending": 0
+      },
+      "countingPolicy": "Files with no passed/failed assertions (including all pending/skipped/todo) are excluded from passedFiles. Raw suite counters are not file counts.",
+      "rawReport": {
+        "path": "output/mods-s2-s5-20261017/business-genericization-whole-r4.json",
+        "sha256": "b688b8a2011309ec06c4ef3650d4d86306a28bd4d4d468646ac75fb15dbeb120"
+      },
+      "timeouts": 14,
+      "otherFailures": 1,
+      "diagnosticOrderRegression": "Required-agent absence masked by earlier whole-inventory rejection; fixed in production, both rejection gates retained",
+      "timeoutClassificationSource": {
+        "path": "output/mods-s2-s5-20261017/business-genericization-whole-r4.log",
+        "sha256": "d425f150dc4bf1177df6bbf9016d126de5d14967e90fa80ad3e6bf6de37f2c43"
+      },
+      "classificationPolicy": "14 explicit timeout messages counted in original default reporter; JSON STACK_TRACE_ERROR alone is not a timeout classifier",
+      "standalone": {
+        "success": true,
+        "groups": 16,
+        "path": "output/mods-s2-s5-20261017/business-genericization-standalone-r4-summary.json",
+        "sha256": "4aed831fe3437ecb149da1ff6eb4a23e3bc4e93e911f44f87fb6f0416d8cf727"
+      }
+    },
+    "r5Basis": {
+      "path": "output/mods-business-genericization-20261019/post-fix-r5-condition.json",
+      "sha256": "488fae00438704e360ac92fe6a90554719051213ed42999e6f0ebcb2c326048d",
+      "originalTimeoutsUnchanged": true,
+      "environment": "User selected Turbo power mode; environmental clue, not a proven root cause for the old timeouts"
+    }
+  },
+  "limitations": [
+    "Host uses the existing linear contract, not arbitrary DAG or a new executor",
+    "Adapters are static and platform-reviewed; arbitrary Python kernels are not supported by relabeling",
+    "Original bounded text-resource capture, native approvals, action locks and required checks remain",
+    "Completion references are trusted internal declarations, not unrestricted public Guest file access",
+    "Controlled providers do not establish professional business correctness, token savings or global performance gains",
+    "AutoBiz validation covers PRD/knowledge/feedback/restart, not the complete seven-stage lifecycle",
+    "S6 stage snapshots, rollback, isolation debugger and intermediate rerun remain deferred"
+  ],
+  "report": {
+    "path": "docs/mods-business-assembly-generalization-2026-10-19.md",
+    "sha256": "48b4b9d3633618a8aa24318f0713280a9be245d5969e0abe90d227403543c78d"
+  },
+  "evidencePolicy": "Raw logs, isolated runtime data and packages remain local. Published references use repository-relative evidence paths or redacted temporary run IDs; credentials and machine-specific absolute paths are excluded."
+}
