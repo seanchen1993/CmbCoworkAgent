@@ -239,7 +239,9 @@ export class LocalBotHost {
     workId: string,
     message: string
   ) {
-    this.workToolSource(source.taskId)
+    const task = this.workToolSource(source.taskId)
+    if (!this.store.hasDirectUserRequest(task.id))
+      throw new BotError("CONFLICT", "只有当前用户明确指令可以转达工作消息")
     const result = this.store.sendWork(source, workId, message)
     this.changed()
     this.wake()

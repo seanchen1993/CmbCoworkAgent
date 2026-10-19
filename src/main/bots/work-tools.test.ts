@@ -4,6 +4,7 @@ import { NativeSqliteAdapter } from "../db/native-sqlite-adapter"
 import { BotStore } from "./store"
 import { LocalBotHost } from "./host"
 import { createBotWorkTools } from "./work-tools"
+import type { BotTaskOrigin } from "../../shared/bots/contracts"
 
 const hosts: LocalBotHost[] = [],
   dbs: NativeSqliteAdapter[] = []
@@ -41,6 +42,81 @@ function fixture() {
 }
 const tick = () => new Promise((resolve) => setTimeout(resolve, 15))
 describe("work Runtime tools", () => {
+  it("forwards a live main user's instruction once, including a lost tool reply replay", async () => {
+    const f = fixture()
+    await tick()
+    const work = f.host.createWork({
+      botId: f.bot.id,
+      operationId: "target",
+      title: "Draft",
+      goal: "Prepare"
+    })
+    const send = createBotWorkTools(f.source.id, () => f.host, new AbortController().signal).find(
+      (t) => t.name === "bot_work_send"
+    )!
+    const args = {
+      requestKey: "supplement",
+      workId: work.work.id,
+      message: "Apply the user's requested change"
+    }
+    const invoke = (id: string, input = args) =>
+      send.invoke({ type: "tool_call", id, name: send.name, args: input })
+    const first = await invoke("first-send"),
+      replay = await invoke("lost-reply-retry")
+    const receipt = (value: unknown) =>
+      JSON.parse(String((value as { content: unknown }).content)).receipt
+    expect(receipt(first).id).toBe(receipt(replay).id)
+    expect(receipt(first).threadId).toBe(work.work.threadId)
+    expect(
+      f.store
+        .recentTasks()
+        .filter((t) => t.origin.kind === "work" && t.origin.sourceTaskId === f.source.id)
+    ).toHaveLength(1)
+    expect(
+      ((await invoke("changed", { ...args, message: "Different" })) as { status: string }).status
+    ).toBe("error")
+  })
+  it.each<BotTaskOrigin>([
+    { kind: "notification", notificationKind: "workflow", key: "background" },
+    { kind: "schedule", scheduleId: "routine" },
+    { kind: "bot", fromBotId: "peer", fromBotName: "Peer", rootTaskId: "root", expectsReply: false }
+  ])("rejects forwarding from autonomous $kind turns before durable acceptance", async (origin) => {
+    const f = fixture()
+    await tick()
+    f.host.cancel(f.source.id)
+    await tick()
+    const work = f.host.createWork({
+      botId: f.bot.id,
+      operationId: "target",
+      title: "Draft",
+      goal: "Prepare"
+    })
+    const source = f.store.enqueue(
+      { botId: f.bot.id, requestId: "autonomous", message: "Forward this" },
+      origin
+    )
+    f.host.resume()
+    await tick()
+    expect(f.store.getTask(source.id).state).toBe("running")
+    const send = createBotWorkTools(source.id, () => f.host, new AbortController().signal).find(
+      (t) => t.name === "bot_work_send"
+    )!
+    const command = { taskId: source.id, callId: "blocked", key: "blocked" }
+    expect(() => f.store.sendWork(command, work.work.id, "Forward")).toThrow("不能转达")
+    expect(() => f.host.sendWork(command, work.work.id, "Forward")).toThrow("当前用户明确指令")
+    const result = await send.invoke({
+      type: "tool_call",
+      id: "blocked",
+      name: send.name,
+      args: { requestKey: "blocked", workId: work.work.id, message: "Forward" }
+    })
+    expect((result as { status: string }).status).toBe("error")
+    expect(
+      f.store
+        .recentTasks()
+        .filter((t) => t.origin.kind === "work" && t.origin.sourceTaskId === source.id)
+    ).toHaveLength(0)
+  })
   it("uses a live lease plus actual call ID, deduplicates both call and request key, and keeps normal replies unconstrained", async () => {
     const f = fixture()
     await tick()

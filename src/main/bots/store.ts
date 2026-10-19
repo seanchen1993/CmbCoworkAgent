@@ -739,6 +739,7 @@ export class BotStore {
     return this.transaction(() => {
       const task = this.getTask(source.taskId)
       if (
+        !this.hasDirectUserRequest(task.id) ||
         !ACTIVE_STATES.includes(task.state as (typeof ACTIVE_STATES)[number]) ||
         botTaskGroupId(task)
       )

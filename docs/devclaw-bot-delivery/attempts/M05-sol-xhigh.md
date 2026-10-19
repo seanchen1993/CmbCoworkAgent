@@ -2,6 +2,15 @@
 
 状态：**M05-02/03 本地统一工作切片进入 review_pending，本次提交后停写产品，等待 root 独立复验。整个 M05 尚未完成：M05-04 mock 与 M05-05 旧服务入口/worker清理尚未实施。** gpt-6.1-sol / xhigh，唯一实施者。原 WIP `358eaf689` 保留；本节为最终当前事实，后面的“未验证/未运行App/尚未改产品”均为有日期顺序的历史检查点。
 
+## 3511dbe19 后的唯一验收补修：转达来源
+
+root在候选交叉审查中发现 `sendWork` 尚未与 create/lifecycle 一样核对直接用户指令。本次仅在 Host live lease 校验后、Store同步事务接纳前补 `hasDirectUserRequest`，通知/例行/协作回包不能自发转达新工作指令；不改变beta原collaboration，也不将未来模拟渠道仅凭origin=user提升为桌面来源。
+
+- 新增实际Tool→Host→Store测试：正常main直接用户转达成功；同requestKey/不同可信callId重放仍同一BotTask；改payload冲突；workflow通知、schedule、peer reply在Host和Store均拒绝，零新增转达BotTask。
+- `node node_modules/vitest/vitest.mjs run src/main/bots/work.test.ts src/main/bots/work-tools.test.ts src/main/bots/host.test.ts` → **3文件94/94 exit0**，`/tmp/m05-send-authority-tests.log`。
+- `node node_modules/typescript/bin/tsc --noEmit -p tsconfig.node.json --composite false` → **exit0**，`/tmp/m05-send-authority-node.log`。
+- 下方371/231、完整构建/App/明暗截图为父候选 `3511dbe19c790e19b654432680e35f26f87e4485` 的完整证据。按root明确要求，本窄权限修复只补相关核心/工具/Node类型，不重复整个App或无关全套。界面/运行资源未改变，仍在本追加提交后停写。
+
 ## M05-02/03 候选范围与真实验证
 
 - 沿用 beta 原 Bot 新建/编辑/职责/模型、原 `BotConversation` / `ChatContainer` / `ManagedChatTurn` / `startAgentRun`，扩展本地固定 Work Thread、多次 BotTask、右侧目录与显式完成/继续。桌面仍拥有 beta 原工具/文件/浏览器/MCP/技能/记忆/群/例行路径；没有另建模型引擎、input-only桌面profile或强制JSON final。
