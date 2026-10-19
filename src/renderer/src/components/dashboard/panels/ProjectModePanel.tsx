@@ -528,11 +528,13 @@ function CodeEfficiencyModelInfo(): React.JSX.Element {
 /** Per-feature code-adoption line: 原始生成行数 / 有效生成行数 / 已Commit·已Push 采纳率（含行数明细）。 */
 function FeatureCodeStatsLine({
   codeStats,
-  compact = false
+  compact = false,
+  onOpenCommits
 }: {
   codeStats?: DashboardCodeStats | null
   /** 紧凑模式：隐藏「原始/有效生成行数」首行，提交口径 + 总量口径合并为一行。 */
   compact?: boolean
+  onOpenCommits?: (pushedOnly: boolean) => void
 }): React.JSX.Element {
   if (!codeStats) {
     return <div className="text-[11px] text-muted-foreground/80">暂无代码生成数据</div>
@@ -542,50 +544,53 @@ function FeatureCodeStatsLine({
   const totalDenom = formatLineCount(codeStats.inclusiveEffectiveGeneratedLines)
   const adopted = formatLineCount(codeStats.adoptedLines)
   const pushedAdopted = formatLineCount(codeStats.pushedAdoptedLines)
+  const rateItem = (
+    label: string,
+    rate: number | null,
+    numerator: string,
+    denominator: string,
+    pushedOnly: boolean
+  ): React.JSX.Element => {
+    const content = (
+      <>
+        {label} <span className="font-medium text-foreground">{formatPercent(rate)}</span>
+        <span className="ml-1 text-muted-foreground/80">
+          ({numerator} / {denominator} 行)
+        </span>
+      </>
+    )
+    if (!onOpenCommits || rate === null) return <span>{content}</span>
+    return (
+      <button
+        type="button"
+        className="inline-flex items-center gap-0.5 whitespace-nowrap text-left underline-offset-2 hover:text-primary hover:underline"
+        title={
+          pushedOnly
+            ? "查看该特性已 Push 的 Commit 及采纳溯源"
+            : "查看该特性关联的 Commit 及采纳溯源"
+        }
+        onClick={(event) => {
+          event.stopPropagation()
+          onOpenCommits(pushedOnly)
+        }}
+      >
+        {content}
+        <DrilldownArrow className="ml-0.5 size-3" />
+      </button>
+    )
+  }
   const commitGroup = (
     <>
       <span className="text-muted-foreground/70">提交口径</span>
-      <span>
-        提交{" "}
-        <span className="font-medium text-foreground">
-          {formatPercent(codeStats.measuredAdoptionRate)}
-        </span>
-        <span className="ml-1 text-muted-foreground/80">
-          ({adopted} / {commitDenom} 行)
-        </span>
-      </span>
-      <span>
-        入库{" "}
-        <span className="font-medium text-foreground">
-          {formatPercent(codeStats.pushedAdoptionRate)}
-        </span>
-        <span className="ml-1 text-muted-foreground/80">
-          ({pushedAdopted} / {pushDenom} 行)
-        </span>
-      </span>
+      {rateItem("提交", codeStats.measuredAdoptionRate, adopted, commitDenom, false)}
+      {rateItem("入库", codeStats.pushedAdoptionRate, pushedAdopted, pushDenom, true)}
     </>
   )
   const totalGroup = (
     <>
       <span className="text-muted-foreground/70">总量口径</span>
-      <span>
-        提交{" "}
-        <span className="font-medium text-foreground">
-          {formatPercent(codeStats.inclusiveAdoptionRate)}
-        </span>
-        <span className="ml-1 text-muted-foreground/80">
-          ({adopted} / {totalDenom} 行)
-        </span>
-      </span>
-      <span>
-        入库{" "}
-        <span className="font-medium text-foreground">
-          {formatPercent(codeStats.inclusivePushedAdoptionRate)}
-        </span>
-        <span className="ml-1 text-muted-foreground/80">
-          ({pushedAdopted} / {totalDenom} 行)
-        </span>
-      </span>
+      {rateItem("提交", codeStats.inclusiveAdoptionRate, adopted, totalDenom, false)}
+      {rateItem("入库", codeStats.inclusivePushedAdoptionRate, pushedAdopted, totalDenom, true)}
     </>
   )
   if (compact) {
@@ -1460,7 +1465,7 @@ function ProjectRow({
     status?: string,
     stageBucket?: StageBucket
   ) => void
-  onOpenFeatureCommits: (feature: DashboardProjectModeFeature) => void
+  onOpenFeatureCommits: (feature: DashboardProjectModeFeature, pushedOnly?: boolean) => void
   onOpenProjectCommits: (pushedOnly?: boolean) => void
   onOpenStageAnalysis: () => void
   loadFeatureNodes: (
@@ -1857,7 +1862,14 @@ function ProjectRow({
                           </button>
                         </div>
                       </div>
-                      <FeatureCodeStatsLine codeStats={feature.codeStats} />
+                      <FeatureCodeStatsLine
+                        codeStats={feature.codeStats}
+                        onOpenCommits={
+                          feature.slug
+                            ? (pushedOnly) => onOpenFeatureCommits(feature, pushedOnly)
+                            : undefined
+                        }
+                      />
                       <OperationalTelemetry
                         constraint={feature.systemConstraintReads}
                         hooks={feature.hookExecutions}
@@ -2054,7 +2066,8 @@ function ProjectListSection({
   ) => void
   onOpenFeatureCommits: (
     project: DashboardProjectModeProject,
-    feature: DashboardProjectModeFeature
+    feature: DashboardProjectModeFeature,
+    pushedOnly?: boolean
   ) => void
   onOpenProjectCommits: (project: DashboardProjectModeProject, pushedOnly?: boolean) => void
   loadFeatureNodes: (
@@ -2600,7 +2613,9 @@ function ProjectListSection({
                 onOpenTraces={(feature, node, status, stageBucket) =>
                   onOpenTraces(project, feature, node, status, stageBucket)
                 }
-                onOpenFeatureCommits={(feature) => onOpenFeatureCommits(project, feature)}
+                onOpenFeatureCommits={(feature, pushedOnly) =>
+                  onOpenFeatureCommits(project, feature, pushedOnly)
+                }
                 onOpenProjectCommits={(pushedOnly) => onOpenProjectCommits(project, pushedOnly)}
                 onOpenStageAnalysis={() => openStageAnalysis(project)}
                 loadFeatureNodes={(feature) => loadFeatureNodes(project, feature)}
@@ -2997,7 +3012,8 @@ function AdapterListSection({
   ) => void
   onOpenFeatureCommits: (
     project: DashboardProjectModeProject,
-    feature: DashboardProjectModeFeature
+    feature: DashboardProjectModeFeature,
+    pushedOnly?: boolean
   ) => void
   onOpenProjectCommits: (project: DashboardProjectModeProject, pushedOnly?: boolean) => void
   loadFeatureNodes: (
@@ -3246,7 +3262,8 @@ interface AdapterProjectsDialogHandlers {
   ) => void
   onOpenFeatureCommits: (
     project: DashboardProjectModeProject,
-    feature: DashboardProjectModeFeature
+    feature: DashboardProjectModeFeature,
+    pushedOnly?: boolean
   ) => void
   onOpenProjectCommits: (project: DashboardProjectModeProject, pushedOnly?: boolean) => void
   loadFeatureNodes: (
@@ -3476,7 +3493,8 @@ function ProjectModePanelContent({
   ) => void
   onOpenFeatureCommits: (
     project: DashboardProjectModeProject,
-    feature: DashboardProjectModeFeature
+    feature: DashboardProjectModeFeature,
+    pushedOnly?: boolean
   ) => void
   onOpenProjectCommits: (project: DashboardProjectModeProject, pushedOnly?: boolean) => void
   loadFeatureNodes: (

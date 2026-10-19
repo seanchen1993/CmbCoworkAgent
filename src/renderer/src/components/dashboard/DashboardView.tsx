@@ -4614,7 +4614,11 @@ export function DashboardView(): React.JSX.Element {
   )
 
   const handleProjectOpenFeatureCommits = useCallback(
-    (project: DashboardProjectModeProject, feature: DashboardProjectModeFeature) => {
+    (
+      project: DashboardProjectModeProject,
+      feature: DashboardProjectModeFeature,
+      pushedOnly = false
+    ) => {
       if (!feature.slug) return
       const scope = {
         projectId: project.projectId,
@@ -4626,7 +4630,7 @@ export function DashboardView(): React.JSX.Element {
       setFeatureCommitUserValue("")
       setFeatureCommitUserFilter("")
       setFeatureCommitScope(scope)
-      void loadFeatureCommits(scope, 1, false, "", "")
+      void loadFeatureCommits(scope, 1, pushedOnly, "", "")
     },
     [loadFeatureCommits]
   )
