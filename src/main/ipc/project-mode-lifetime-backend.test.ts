@@ -9,6 +9,7 @@ import * as costs from "./project-mode-run-cost-metrics"
 import * as dev from "./project-mode-metrics"
 import * as scope from "./project-mode-query-scope"
 import * as snapshots from "./project-mode-snapshot-filters"
+import { fetchCompleteProjectDevMetrics } from "./project-mode-dev-metrics"
 import { ProjectModePageCache } from "./project-mode-page-cache"
 import {
   compareProjectAttentionValues,
@@ -170,6 +171,7 @@ function fixture(featureCount = 1) {
     ...dev,
     ...scope,
     ...snapshots,
+    fetchCompleteProjectDevMetrics,
     mapAwardBatches,
     compareProjectAttentionValues,
     isProjectAttentionSortKey,
@@ -248,6 +250,61 @@ describe("project list lifetime IPC flow", () => {
       )
     }
   )
+
+  it("recovers overflowing Dev metrics in the real project enrichment path", async () => {
+    const { api, esQuery } = fixture()
+    const original = esQuery.getMockImplementation()!
+    esQuery.mockImplementation(async (index, body) => {
+      const aggs = body.aggs as Record<
+        string,
+        { composite?: { sources: Record<string, unknown>[]; after?: unknown } }
+      >
+      const composite = aggs.dev_metrics?.composite
+      if (composite) {
+        expect(body.size).toBe(0)
+        expect(JSON.stringify(body.query)).toContain("本室")
+        expect(JSON.stringify(body.query)).toContain("parentTraceId")
+        expect(JSON.stringify(body.query)).not.toContain('"range"')
+        const sources = composite.sources.map((source) => Object.keys(source)[0])
+        const after = JSON.parse(
+          JSON.stringify(composite.after ?? {}, (_k, v) => (v === null ? undefined : v))
+        )
+        if (composite.after) {
+          expect(Object.keys(after)).toEqual(sources)
+          return { aggregations: { dev_metrics: { buckets: [] } } }
+        }
+        const bound = sources.includes("feature")
+        const key = { project: "p", ...(bound ? { feature: "f" } : {}), node: "Dev-实现" }
+        return {
+          aggregations: {
+            dev_metrics: {
+              buckets: [{ key, doc_count: bound ? 3 : 2 }],
+              after_key: key
+            }
+          }
+        }
+      }
+      const result = await original(index, body)
+      if (index === "traces") {
+        const aggregate = result.aggregations as {
+          by_project: {
+            buckets: Array<{
+              main_agent_conversations: { by_feature: { sum_other_doc_count?: number } }
+            }>
+          }
+        }
+        aggregate.by_project.buckets[0].main_agent_conversations.by_feature.sum_other_doc_count = 5
+      }
+      return result
+    })
+    const result = await api.fetchProjectModeProjectPage(range, { createdInRangeOnly: false })
+    expect(result.projects[0]).toMatchObject({
+      devStageConversationCount: 5,
+      devAssociatedFeatureCount: 1,
+      codeStats: { generatedLines: 100, adoptedLines: 40 }
+    })
+    expect(esQuery).toHaveBeenCalledTimes(6)
+  })
 
   it("globally orders projects before paging and reuses metrics for paging, reversals and unfiltered date changes", async () => {
     const { api, ranking, rankedViews } = fixture()

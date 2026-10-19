@@ -85,30 +85,37 @@ beforeAll(async () => {
         text += chunk
       })
       request.on("end", () => {
-        const body = JSON.parse(text)
-        const after = body.aggs.dev_metrics.composite.after
-        if (after && Object.keys(after).length !== 3) {
+        // Model a null-dropping intermediary on the outbound request as well
+        // as the response, not just a direct client -> ES connection.
+        const body = JSON.parse(text, (_key, value) => (value === null ? undefined : value))
+        const composite = body.aggs.dev_metrics.composite
+        const names = composite.sources.map(
+          (source: Record<string, unknown>) => Object.keys(source)[0]
+        )
+        const after = composite.after
+        if (after && Object.keys(after).length !== names.length) {
           response.writeHead(400, { "content-type": "application/json" })
           response.end(
-            JSON.stringify({ error: { reason: "[after] has 2 value(s) but [sources] has 3" } })
+            JSON.stringify({
+              error: {
+                reason: `[after] has ${Object.keys(after).length} value(s) but [sources] has ${names.length}`
+              }
+            })
           )
           return
         }
+        const key = names.includes("feature")
+          ? { project: "p", feature: "late", node: "Dev-实现" }
+          : { project: "p", node: "Dev-实现" }
         response.writeHead(200, { "content-type": "application/json" })
         response.end(
           JSON.stringify({
             aggregations: {
               dev_metrics: after
-                ? {
-                    buckets: [
-                      { key: { project: "p", feature: "late", node: "Dev-实现" }, doc_count: 3 }
-                    ]
-                  }
+                ? { buckets: [] }
                 : {
-                    buckets: [
-                      { key: { project: "p", feature: null, node: "Dev-实现" }, doc_count: 2 }
-                    ],
-                    after_key: { project: "p", node: "Dev-实现" }
+                    buckets: [{ key, doc_count: names.includes("feature") ? 3 : 2 }],
+                    after_key: key
                   }
             }
           })
@@ -285,7 +292,7 @@ function query(client: DashboardEsWorkerClient, index: string, signal?: AbortSig
 }
 
 describe("Dashboard ES worker", () => {
-  it("repairs nullable composite cursor dimensions through the production worker HTTP path", async () => {
+  it("exports bound and unbound Dev metrics through a null-dropping HTTP intermediary", async () => {
     const client = createClient()
     const execute = (body: Record<string, unknown>) =>
       client.query({
@@ -298,7 +305,14 @@ describe("Dashboard ES worker", () => {
       })
     await expect(
       execute({
-        aggs: { dev_metrics: { composite: { after: { project: "p", node: "Dev-实现" } } } }
+        aggs: {
+          dev_metrics: {
+            composite: {
+              sources: [{ project: {} }, { feature: {} }, { node: {} }],
+              after: { project: "p", feature: null, node: "Dev-实现" }
+            }
+          }
+        }
       })
     ).rejects.toMatchObject({
       cause: { message: expect.stringContaining("[after] has 2 value(s) but [sources] has 3") }

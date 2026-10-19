@@ -13,66 +13,76 @@ export async function fetchCompleteProjectDevMetrics(
   const counts = new Map(ids.map((id) => [id, 0]))
   const features = new Map(ids.map((id) => [id, new Set<string>()]))
   if (ids.length === 0) return new Map()
-  const cursors = new Set<string>()
-  let after: JsonRecord | undefined
-  for (;;) {
-    const raw = record(
-      await execute({
-        size: 0,
-        track_total_hits: false,
-        query: { bool: { filter: [...filters, { terms: { harnessProjectId: ids } }] } },
-        aggs: {
-          dev_metrics: {
-            composite: {
-              size: 1000,
-              sources: [
-                { project: { terms: { field: "harnessProjectId" } } },
-                { feature: { terms: { field: "harnessFeatureSlug", missing_bucket: true } } },
-                { node: { terms: { field: "harnessNodeName", missing_bucket: true } } }
+  // Separate bound/unbound features so pagination never relies on nullable keys.
+  // A missing node cannot be a Dev stage, so exclude it before aggregation.
+  // Keep both partitions sequential to preserve the export concurrency bound.
+  for (const hasFeature of [true, false]) {
+    const sources = [
+      { project: { terms: { field: "harnessProjectId" } } },
+      ...(hasFeature ? [{ feature: { terms: { field: "harnessFeatureSlug" } } }] : []),
+      { node: { terms: { field: "harnessNodeName" } } }
+    ]
+    const names = sources.map((source) => Object.keys(source)[0])
+    const cursors = new Set<string>()
+    let after: JsonRecord | undefined
+    for (;;) {
+      const raw = record(
+        await execute({
+          size: 0,
+          track_total_hits: false,
+          query: {
+            bool: {
+              filter: [
+                ...filters,
+                { terms: { harnessProjectId: ids } },
+                { exists: { field: "harnessNodeName" } },
+                ...(hasFeature ? [{ exists: { field: "harnessFeatureSlug" } }] : [])
               ],
-              ...(after ? { after } : {})
+              ...(!hasFeature ? { must_not: [{ exists: { field: "harnessFeatureSlug" } }] } : {})
+            }
+          },
+          aggs: {
+            dev_metrics: {
+              composite: { size: 1000, sources, ...(after ? { after } : {}) }
             }
           }
-        }
-      })
-    )
-    const page = record(record(raw.aggregations).dev_metrics)
-    if (raw.timed_out || Number(record(raw._shards).failed) > 0 || !Array.isArray(page.buckets)) {
-      throw new Error("项目研发轮次统计未完整返回，请重试")
+        })
+      )
+      const page = record(record(raw.aggregations).dev_metrics)
+      if (raw.timed_out || Number(record(raw._shards).failed) > 0 || !Array.isArray(page.buckets)) {
+        throw new Error("项目研发轮次统计未完整返回，请重试")
+      }
+      for (const item of page.buckets) {
+        const bucket = record(item)
+        const key = record(bucket.key)
+        const id = String(key.project ?? "")
+        if (!counts.has(id)) throw new Error("项目研发统计返回了范围外的项目")
+        if (!isHarnessDevStageNodeName(typeof key.node === "string" ? key.node : undefined))
+          continue
+        const count = Number(bucket.doc_count)
+        if (!Number.isFinite(count) || count < 0) throw new Error("项目研发统计计数无效")
+        counts.set(id, counts.get(id)! + count)
+        if (hasFeature && typeof key.feature === "string" && key.feature.trim())
+          features.get(id)!.add(key.feature.trim())
+      }
+      if (page.buckets.length === 0 || page.after_key == null) break
+      const key = record(page.after_key)
+      if (
+        Object.keys(key).length !== names.length ||
+        names.some((name) => typeof key[name] !== "string")
+      ) {
+        throw new Error("项目研发统计分页游标维度不完整，请重试")
+      }
+      if (!counts.has(key.project as string)) {
+        throw new Error("项目研发统计分页缺少有效项目游标，请重试")
+      }
+      // Use the exact server cursor, ordered by sources; never infer from the last bucket.
+      const next = Object.fromEntries(names.map((name) => [name, key[name]]))
+      const cursor = JSON.stringify(next)
+      if (cursors.has(cursor)) throw new Error("项目研发统计分页未前进，请重试")
+      cursors.add(cursor)
+      after = next
     }
-    for (const item of page.buckets) {
-      const bucket = record(item)
-      const key = record(bucket.key)
-      const id = String(key.project ?? "")
-      if (!counts.has(id)) throw new Error("项目研发统计返回了范围外的项目")
-      if (!isHarnessDevStageNodeName(typeof key.node === "string" ? key.node : undefined)) continue
-      const count = Number(bucket.doc_count)
-      if (!Number.isFinite(count) || count < 0) throw new Error("项目研发统计计数无效")
-      counts.set(id, counts.get(id)! + count)
-      if (typeof key.feature === "string" && key.feature.trim())
-        features.get(id)!.add(key.feature.trim())
-    }
-    if (page.buckets.length === 0 || page.after_key == null) break
-    const key = record(page.after_key)
-    if (typeof key.project !== "string" || !counts.has(key.project)) {
-      throw new Error("项目研发统计分页缺少有效项目游标，请重试")
-    }
-    for (const name of Object.keys(key)) {
-      if (!["project", "feature", "node"].includes(name))
-        throw new Error("项目研发统计分页游标维度无效，请重试")
-    }
-    for (const name of ["feature", "node"]) {
-      if (key[name] != null && typeof key[name] !== "string")
-        throw new Error("项目研发统计分页游标值无效，请重试")
-    }
-    // missing_bucket dimensions must still be present in `after`. Some response
-    // serializers omit null entries; restore only these two nullable dimensions.
-    // Preserve the server's after_key values instead of deriving from the last bucket.
-    const next = { project: key.project, feature: key.feature ?? null, node: key.node ?? null }
-    const cursor = JSON.stringify(next)
-    if (cursors.has(cursor)) throw new Error("项目研发统计分页未前进，请重试")
-    cursors.add(cursor)
-    after = next
   }
   return new Map(
     ids.map((id) => [id, { conversations: counts.get(id)!, features: features.get(id)!.size }])
