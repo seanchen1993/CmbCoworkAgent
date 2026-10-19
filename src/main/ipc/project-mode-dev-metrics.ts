@@ -12,6 +12,7 @@ export async function fetchCompleteProjectDevMetrics(
 ): Promise<Map<string, { conversations: number; features: number }>> {
   const counts = new Map(ids.map((id) => [id, 0]))
   const features = new Map(ids.map((id) => [id, new Set<string>()]))
+  if (ids.length === 0) return new Map()
   const cursors = new Set<string>()
   let after: JsonRecord | undefined
   for (;;) {
@@ -51,8 +52,23 @@ export async function fetchCompleteProjectDevMetrics(
       if (typeof key.feature === "string" && key.feature.trim())
         features.get(id)!.add(key.feature.trim())
     }
-    const next = record(page.after_key)
-    if (page.buckets.length === 0 || Object.keys(next).length === 0) break
+    if (page.buckets.length === 0 || page.after_key == null) break
+    const key = record(page.after_key)
+    if (typeof key.project !== "string" || !counts.has(key.project)) {
+      throw new Error("项目研发统计分页缺少有效项目游标，请重试")
+    }
+    for (const name of Object.keys(key)) {
+      if (!["project", "feature", "node"].includes(name))
+        throw new Error("项目研发统计分页游标维度无效，请重试")
+    }
+    for (const name of ["feature", "node"]) {
+      if (key[name] != null && typeof key[name] !== "string")
+        throw new Error("项目研发统计分页游标值无效，请重试")
+    }
+    // missing_bucket dimensions must still be present in `after`. Some response
+    // serializers omit null entries; restore only these two nullable dimensions.
+    // Preserve the server's after_key values instead of deriving from the last bucket.
+    const next = { project: key.project, feature: key.feature ?? null, node: key.node ?? null }
     const cursor = JSON.stringify(next)
     if (cursors.has(cursor)) throw new Error("项目研发统计分页未前进，请重试")
     cursors.add(cursor)
