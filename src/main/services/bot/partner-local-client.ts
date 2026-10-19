@@ -763,6 +763,8 @@ export class PartnerLocalClient {
     expectedTaskVersion: number
     sourceRequestId: string
     allowedTaskIds: string[]
+    expectedGroupVersion: number
+    expectedBotVersionId: string
   }): Promise<ExpertConversationInput> {
     const value = parseExpertInput(
       await this.control("business", "freezeExpertInput", input),

@@ -4,7 +4,12 @@ import { StreamingMarkdown } from "@/components/chat/StreamingMarkdown"
 import { BotAvatar } from "./BotAvatar"
 import { formatMessageTimeLabel } from "@/lib/message-bubble-timing"
 import { useAppStore } from "@/lib/store"
-import { SERVICE_NEW_TASK, serviceBusy, type ServiceExpertChats } from "./useServiceExpertChats"
+import {
+  SERVICE_NEW_TASK,
+  serviceBusy,
+  serviceNotice,
+  type ServiceExpertChats
+} from "./useServiceExpertChats"
 import type { ServiceRequestStatus } from "../../../../shared/bot/service-conversation"
 export { SERVICE_EXPERT_SELECTION } from "./useServiceExpertChats"
 export const SERVICE_STATUS: Record<ServiceRequestStatus, string> = {
@@ -33,6 +38,14 @@ export function ServiceExpertConversation({
   onSelect: (ref: string | null) => void
 }) {
   const [settings, setSettings] = useState(false)
+  const composer = useRef<HTMLTextAreaElement>(null)
+  useLayoutEffect(() => {
+    const el = composer.current
+    if (el) {
+      el.style.height = "44px"
+      el.style.height = Math.min(180, el.scrollHeight) + "px"
+    }
+  }, [c.draft])
   const viewport = useRef<HTMLDivElement>(null),
     pinned = useRef(true),
     snapshot = useRef<{
@@ -149,7 +162,7 @@ export function ServiceExpertConversation({
         <>
           {taskRef && taskRef !== SERVICE_NEW_TASK && (
             <div className="service-chat-task-bar">
-              <span>{completed ? "任务已完成" : "任务处理中"}</span>
+              <span>{completed ? "任务已完成" : "进行中"}</span>
               <button
                 disabled={c.working || (!completed && (!!actual || c.task?.busy))}
                 onClick={() => {
@@ -203,8 +216,7 @@ export function ServiceExpertConversation({
                       </div>
                     </div>
                   </div>
-                  <div className="service-chat-reply">
-                    <BotAvatar color="#168bea" shape="circle" size={26} />
+                  <div className="service-chat-reply" data-message-bubble="assistant">
                     <div className="service-chat-answer">
                       {entry.result?.outcome === "succeeded" && (
                         <div data-message-body="assistant">
@@ -254,7 +266,9 @@ export function ServiceExpertConversation({
                             </button>
                           )}
                       </div>
-                      {entry.notice && <p className="service-chat-notice">{entry.notice}</p>}
+                      {entry.notice && (
+                        <p className="service-chat-notice">{serviceNotice(entry.notice)}</p>
+                      )}
                       {entry.coordination?.state === "blocked" && (
                         <p className="service-chat-notice">交办未完成，请核对服务状态。</p>
                       )}
@@ -267,12 +281,15 @@ export function ServiceExpertConversation({
           <div className="service-chat-composer-wrap" data-chat-surface="bot">
             <form
               className="service-chat-composer"
+              data-bot-composer
               onSubmit={(e) => {
                 e.preventDefault()
                 send()
               }}
             >
               <textarea
+                ref={composer}
+                rows={1}
                 className="composer-textarea"
                 aria-label={taskRef ? "给任务发消息" : "给专家发消息"}
                 placeholder={
@@ -299,13 +316,6 @@ export function ServiceExpertConversation({
               />
               <div>
                 <button
-                  type="button"
-                  className="service-chat-model"
-                  onClick={() => setSettings(!settings)}
-                >
-                  {info.selectedModel?.name ?? "选择模型"}
-                </button>
-                <button
                   type="submit"
                   className="service-chat-send"
                   aria-label="发送消息"
@@ -319,7 +329,6 @@ export function ServiceExpertConversation({
                 </button>
               </div>
             </form>
-            <p className="service-chat-hint">仅处理你提供的文本 · 结果供参考</p>
           </div>
         </>
       )}

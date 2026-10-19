@@ -1,3 +1,4 @@
+import { PartnerLocalFault } from "../../src/main/services/bot/partner-local-boundary"
 import assert from "node:assert/strict"
 import test from "node:test"
 import { withSqlite } from "./requirement-execution-fixture"
@@ -40,6 +41,7 @@ test("normal main conversation, real task receipt, same-task supplement, complet
         (await f.app.chatTasks({ conversationId: id, cursor: null, query: "" })).items.length,
         0
       )
+      assert.equal(f.journal.taskPage(serviceScopeKey((await f.context()).scope), id!, 0).length, 0)
       await chat(f, id!, "delegate", "请帮我写一份计划")
       await pump(f)
       f.settle(
@@ -165,6 +167,306 @@ test("bad main JSON is visible failure and does not poison subsequent chat", () 
       assert.equal(f.stats.enqueues, 2)
       assert.ok([...f.inputs.values()].at(-1)!.messages.some((m) => m.text.includes("无法解析")))
       assert.equal(f.journal.hasPendingMain(serviceScopeKey(f.scope)), true)
+    } finally {
+      await f.app.stop()
+    }
+  }))
+
+for (const output of [
+  '{"reply":"bad","intent":null,"extra":true}',
+  '{"reply":false,"intent":null}',
+  '{"reply":"bad","intent":{"kind":"create_task","sourceRequestId":"bad-shape","title":"Task","contextSourceIds":["/bad/path"]}}'
+])
+  test("all malformed model shapes are recoverable protocol failures", () =>
+    withSqlite(async (db) => {
+      const f = expertSetup(db)
+      try {
+        const { conversationId: id, mainTaskRef } = await init(f)
+        await chat(f, id!, "bad-shape", "讨论")
+        await pump(f)
+        f.settle("run-1", output)
+        await pump(f)
+        const old = (await f.app.read({ conversationId: id, taskRef: mainTaskRef, cursor: null }))
+          .items[0]
+        assert.equal(old.status, "failed")
+        assert.equal(old.result, null)
+        await chat(f, id!, "following", "继续讨论")
+        await pump(f)
+        assert.equal(f.stats.enqueues, 2)
+      } finally {
+        await f.app.stop()
+      }
+    }))
+test("known coordinate refusal closes the barrier, uncertain refusal preserves original command", () =>
+  withSqlite(async (db) => {
+    const f = expertSetup(db)
+    try {
+      const { conversationId: id } = await init(f)
+      await chat(f, id!, "refused", "请做任务")
+      await pump(f)
+      f.client.coordinateExpertTask = async () => {
+        throw new PartnerLocalFault("INPUT_CHANGED")
+      }
+      f.settle(
+        "run-1",
+        JSON.stringify({
+          reply: "等待",
+          intent: {
+            kind: "create_task",
+            sourceRequestId: "refused",
+            title: "Task",
+            contextSourceIds: []
+          }
+        })
+      )
+      await pump(f)
+      assert.equal(f.journal.hasPendingMain(serviceScopeKey(f.scope)), false)
+      await chat(f, id!, "following", "正常解释")
+      await pump(f)
+      assert.equal(f.stats.enqueues, 2)
+    } finally {
+      await f.app.stop()
+    }
+  }))
+test("running-target transfer waits without appending, and late stop after summary await prevents HTTP", () =>
+  withSqlite(async (db) => {
+    const f = expertSetup(db)
+    try {
+      const { conversationId: id } = await init(f)
+      const work = await f.app.chat({
+        conversationId: id,
+        taskRef: null,
+        role: "task",
+        requestId: "work",
+        text: "独立任务"
+      })
+      await pump(f)
+      const task = f.journal.task(serviceScopeKey(f.scope), work.taskRef).task!
+      await chat(f, id!, "transfer", "补充已有任务")
+      await pump(f)
+      f.settle(
+        "run-2",
+        JSON.stringify({
+          reply: "等待",
+          intent: { kind: "append_task", sourceRequestId: "transfer", targetTaskRef: task.id }
+        })
+      )
+      await pump(f)
+      assert.equal(f.stats.messages, 0)
+      assert.equal(f.journal.hasPendingMain(serviceScopeKey(f.scope)), true)
+      f.settle("run-1", "任务前文")
+      const original = f.client.expertConversationSummaries
+      let release: () => void = () => {}
+      let entered = false
+      f.client.expertConversationSummaries = async (...args: any[]) => {
+        const value = await original(...args)
+        if (!entered) {
+          entered = true
+          await new Promise<void>((resolve) => (release = resolve))
+        }
+        return value
+      }
+      const draining = f.app.drain()
+      for (let i = 0; i < 20 && !entered; i++) await new Promise((r) => setTimeout(r, 1))
+      await f.app.cancel({ conversationId: id, requestId: "transfer" })
+      release()
+      await draining
+      assert.equal(f.stats.messages, 0)
+      assert.equal(
+        f.journal.request(serviceScopeKey(f.scope), "transfer").coordinationCancelled,
+        true
+      )
+    } finally {
+      await f.app.stop()
+    }
+  }))
+test("the 41st task can be explicitly included by number without reading its goal", () =>
+  withSqlite(async (db) => {
+    const f = expertSetup(db)
+    try {
+      const { conversationId: id } = await init(f)
+      for (let i = 0; i < 41; i++) {
+        const task = await f.client.createTask("group", "Target " + i, "seed-" + i)
+        f.journal.attachExpertTask(f.scope, id!, task)
+      }
+      const targets = f.journal.allowedTargets(serviceScopeKey(f.scope), id!, "给 TASK-1 补充说明")
+      assert.equal(targets.length, 40)
+      assert.equal(targets[0].task.id, "task-1")
+      assert.equal(Object.hasOwn(targets[0].task, "goal"), false)
+    } finally {
+      await f.app.stop()
+    }
+  }))
+
+test("completion that finishes during delayed model lookup rejects the late supplement", () =>
+  withSqlite(async (db) => {
+    const f = expertSetup(db)
+    let release: () => void = () => {}
+    try {
+      const { conversationId: id } = await init(f)
+      const r = await f.app.chat({
+        conversationId: id,
+        taskRef: null,
+        role: "task",
+        requestId: "work",
+        text: "独立工作"
+      })
+      await pump(f)
+      f.settle("run-1", "已回复")
+      await pump(f)
+      let entered = false
+      const original = f.deps.model
+      f.deps.model = async (ref) => {
+        entered = true
+        await new Promise<void>((resolve) => (release = resolve))
+        return original(ref)
+      }
+      const delayed = chat(f, id!, "late", "补充", r.taskRef)
+      for (let i = 0; i < 20 && !entered; i++)
+        await new Promise((resolve) => setTimeout(resolve, 1))
+      await f.app.taskLifecycle({
+        conversationId: id,
+        taskRef: r.taskRef,
+        operationId: "complete-race",
+        action: "complete"
+      })
+      await f.app.drain()
+      release()
+      await assert.rejects(delayed, /INPUT_CHANGED/)
+      assert.equal(f.stats.messages, 0)
+    } finally {
+      release()
+      await f.app.stop()
+    }
+  }))
+test("concurrent explicit retries admit one stable child; unknown outcomes cannot retry", () =>
+  withSqlite(async (db) => {
+    const f = expertSetup(db),
+      releases: Array<() => void> = []
+    try {
+      const { conversationId: id } = await init(f)
+      const r = await f.app.chat({
+        conversationId: id,
+        taskRef: null,
+        role: "task",
+        requestId: "work",
+        text: "原工作"
+      })
+      await pump(f)
+      const key = serviceScopeKey(f.scope),
+        old = f.journal.request(key, "work")
+      f.runs.get("run-1")!.run.status = "failed"
+      f.runs.get("run-1")!.run.version = 2
+      f.runs.get("run-1")!.result = {
+        runId: "run-1",
+        attemptId: f.runs.get("run-1")!.run.attemptId,
+        outcome: "failed",
+        text: "EXECUTION_FAILED",
+        settledAt: new Date().toISOString()
+      }
+      await pump(f)
+      const original = f.deps.model
+      f.deps.model = async (ref) => {
+        await new Promise<void>((resolve) => releases.push(resolve))
+        return original(ref)
+      }
+      const input = { conversationId: id, taskRef: r.taskRef, requestId: old.requestId }
+      const a = f.app.retryChat({ ...input, operationId: "retry-a" }),
+        b = f.app.retryChat({ ...input, operationId: "retry-b" })
+      for (let i = 0; i < 30 && releases.length < 2; i++)
+        await new Promise((resolve) => setTimeout(resolve, 1))
+      assert.equal(releases.length, 2)
+      for (const release of releases) release()
+      const results = await Promise.allSettled([a, b])
+      assert.equal(results.filter((r) => r.status === "fulfilled").length, 1)
+      f.deps.model = original
+      await pump(f)
+      assert.equal(f.stats.enqueues, 2)
+      assert.equal(f.stats.messages, 0)
+      const active = f.journal.latest(key, r.taskRef)!
+      f.app.markUnknown(f.scope, f.runs.get(active.runId!)!.run as any)
+      await assert.rejects(
+        f.app.retryChat({
+          conversationId: id,
+          taskRef: r.taskRef,
+          requestId: active.requestId,
+          operationId: "unknown-retry"
+        }),
+        /INPUT_CHANGED/
+      )
+    } finally {
+      for (const release of releases) release()
+      await f.app.stop()
+    }
+  }))
+
+test("101 immutable replies page in bounded 40s with one current authorization and no per-result inspect", () =>
+  withSqlite(async (db) => {
+    const f = expertSetup(db)
+    try {
+      const { conversationId: id } = await init(f)
+      const first = await f.app.chat({
+        conversationId: id,
+        taskRef: null,
+        role: "task",
+        requestId: "first",
+        text: "任务目标"
+      })
+      await pump(f)
+      f.settle("run-1", "原回复")
+      await pump(f)
+      const key = serviceScopeKey(f.scope)
+      for (let i = 1; i <= 100; i++) {
+        const r = f.journal.accept(
+          f.scope,
+          id!,
+          first.taskRef,
+          "history-" + i,
+          "历史文本 " + i,
+          model,
+          1,
+          "expert_task_v1"
+        )
+        f.journal.update(key, r.requestId, (v) => {
+          v.phase = "terminal"
+          v.status = "succeeded"
+          v.result = {
+            runId: "history-run-" + i,
+            attemptId: "history-attempt-" + i,
+            outcome: "succeeded",
+            text: "历史回复 " + i,
+            settledAt: new Date().toISOString()
+          }
+          v.runId = v.result.runId
+        })
+      }
+      let authorizations = 0,
+        maxBatch = 0
+      const original = f.client.expertConversationSummaries
+      f.client.expertConversationSummaries = async (group: string, bot: string, ids: string[]) => {
+        authorizations++
+        maxBatch = Math.max(maxBatch, ids.length)
+        return original(group, bot, ids)
+      }
+      const before = f.stats.inspects
+      let cursor: string | null = null
+      const ids = new Set<string>()
+      let pages = 0
+      do {
+        const page = await f.app.read({ conversationId: id, taskRef: first.taskRef, cursor })
+        assert.ok(page.items.length <= 40)
+        for (const r of page.items) {
+          assert.equal(ids.has(r.requestId), false)
+          ids.add(r.requestId)
+        }
+        cursor = page.nextCursor
+        pages++
+      } while (cursor)
+      assert.equal(ids.size, 101)
+      assert.equal(pages, 3)
+      assert.equal(authorizations, 3)
+      assert.equal(maxBatch, 1)
+      assert.equal(f.stats.inspects, before)
     } finally {
       await f.app.stop()
     }

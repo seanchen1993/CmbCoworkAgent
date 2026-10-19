@@ -70,7 +70,11 @@ function view(r: ServiceRequestRecord, store: ServiceConversationStore): Service
           }
           result = {
             ...result,
-            text: delivered ? "已交办到任务会话。" : "已保存交办意图，等待转入任务会话。"
+            text: delivered
+              ? "已交办到任务会话。"
+              : action?.phase === "blocked"
+                ? "交办未完成，请核对权限后重新说明。"
+                : "已保存交办意图，等待转入任务会话。"
           }
         } else result = { ...result, text: envelope.reply }
       } catch {
@@ -1237,9 +1241,28 @@ export class ServiceConversationService {
           const latest = this.deps.store.expert.get(key, a.id)!,
             code = safeCode(error)
           latest.notice = code
-          if (!uncertain.has(code) && !["RATE_LIMITED", "INPUT_CHANGED"].includes(code))
-            latest.phase = "blocked"
+          let waiting = code === "RATE_LIMITED"
+          if (
+            code === "INPUT_CHANGED" &&
+            latest.kind === "coordinate" &&
+            latest.intent?.kind === "append_task" &&
+            latest.targetRef
+          ) {
+            await this.expertSummaries(current, [latest.targetRef])
+            const target = this.deps.store.expert.summary(key, latest.targetRef)!
+            waiting =
+              target.busy ||
+              target.status === "completed" ||
+              this.deps.store.hasTaskPending(key, latest.targetRef)
+            if (waiting) latest.remoteStarted = false // known rejection, no remote commit
+          }
+          if (!uncertain.has(code) && !waiting) latest.phase = "blocked"
           this.deps.store.expert.save(latest)
+          if (latest.kind === "coordinate" && latest.phase === "blocked")
+            this.deps.store.update(key, latest.sourceRequestId!, (value) => {
+              value.coordinationDone = true
+              value.notice = "交办未完成，请核对权限后重新说明。"
+            })
         }
       }
       pending =
@@ -1475,6 +1498,8 @@ export class ServiceConversationService {
       if (r.profile && !store.expert.input(key, id)) {
         if (!r.allowedTaskIds)
           r = store.update(key, id, (value) => {
+            value.freezeGroupVersion = c.group.version
+            value.freezeBotVersionId = c.botVersionId
             value.allowedTaskIds =
               value.profile === "expert_main_v1"
                 ? store.allowedTargets(key, r.conversationId, r.text).map((t) => t.task!.id)
@@ -1484,6 +1509,8 @@ export class ServiceConversationService {
           commandId: r.enqueueCommand,
           taskId: record.task!.id,
           expectedTaskVersion: r.taskVersion!,
+          expectedGroupVersion: r.freezeGroupVersion!,
+          expectedBotVersionId: r.freezeBotVersionId!,
           sourceRequestId: r.requestId,
           allowedTaskIds: r.allowedTaskIds!
         })
@@ -1503,8 +1530,8 @@ export class ServiceConversationService {
         taskId: task.id,
         taskVersion: r.taskVersion!,
         stageId: task.currentStageId,
-        groupVersion: c.group.version,
-        botVersionId: c.botVersionId,
+        groupVersion: r.freezeGroupVersion ?? c.group.version,
+        botVersionId: r.freezeBotVersionId ?? c.botVersionId,
         deadline: r.deadline!,
         model,
         kind: "service",

@@ -111,7 +111,7 @@ export function parseExpertInput(
     reject()
   return structuredClone(value) as unknown as ExpertConversationInput
 }
-export function parseCoordination(
+function coordinationEnvelope(
   raw: string,
   input: ExpertConversationInput
 ): ExpertCoordinationEnvelope {
@@ -155,6 +155,17 @@ export function parseCoordination(
       reject()
   }
   return value as unknown as ExpertCoordinationEnvelope
+}
+/** All model-shape failures share one safe, recoverable protocol outcome. */
+export function parseCoordination(
+  raw: string,
+  input: ExpertConversationInput
+): ExpertCoordinationEnvelope {
+  try {
+    return coordinationEnvelope(raw, input)
+  } catch {
+    throw new PartnerLocalFault("COORDINATION_INVALID_OUTPUT")
+  }
 }
 export function parseExpertReceipt(
   raw: unknown,

@@ -24,6 +24,8 @@ CREATE TABLE expert_conversation_inputs (
  command_id VARCHAR(128) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
  task_id VARCHAR(128) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
  task_version BIGINT NOT NULL,
+ group_version BIGINT NOT NULL,
+ bot_version_id VARCHAR(128) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
  run_id VARCHAR(128) CHARACTER SET ascii COLLATE ascii_bin NULL,
  profile VARCHAR(32) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
  digest VARCHAR(71) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,

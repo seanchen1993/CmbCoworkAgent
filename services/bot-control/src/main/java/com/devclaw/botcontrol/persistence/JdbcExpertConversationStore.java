@@ -62,13 +62,13 @@ public final class JdbcExpertConversationStore {
         change("INSERT INTO expert_task_conversations(space_id,task_id,group_id,bot_id,principal_id,role,main_key,carried_context) VALUES(?,?,?,?,?,?,?,?)",space,task,group,bot,principal,role,"main".equals(role)?principal:null,bytes(carried));
     }
     public static final class Input {
-        public final String taskId,runId,profile,digest,principalId,commandId;
-        public final long taskVersion;
+        public final String taskId,runId,profile,digest,principalId,commandId,botVersionId;
+        public final long taskVersion,groupVersion;
         public final byte[] fingerprint;
         public final ObjectNode body;
         Input(ResultSet r)throws SQLException {
-            taskId=GroupId.id(r.getString("task_id"));runId=r.getString("run_id");principalId=GroupId.id(r.getString("principal_id"));commandId=GroupId.id(r.getString("command_id"));profile=r.getString("profile");digest=r.getString("digest");taskVersion=r.getLong("task_version");fingerprint=r.getBytes("fingerprint");body=object(r.getBytes("body_bytes"));if(runId!=null)GroupId.id(runId);
-            if(!Arrays.asList("expert_main_v1","expert_task_v1").contains(profile)||digest==null||!digest.matches("sha256:[a-f0-9]{64}")||taskVersion<1||taskVersion>JdbcTaskStore.MAX||!taskId.equals(body.path("taskId").textValue())||taskVersion!=body.path("taskVersion").longValue()||!profile.equals(body.path("profile").textValue())||!digest.equals(body.path("digest").textValue())||fingerprint==null||fingerprint.length!=32)throw JdbcApplicationStore.corrupt();
+            taskId=GroupId.id(r.getString("task_id"));runId=r.getString("run_id");principalId=GroupId.id(r.getString("principal_id"));commandId=GroupId.id(r.getString("command_id"));profile=r.getString("profile");digest=r.getString("digest");taskVersion=r.getLong("task_version");groupVersion=r.getLong("group_version");botVersionId=GroupId.id(r.getString("bot_version_id"));fingerprint=r.getBytes("fingerprint");body=object(r.getBytes("body_bytes"));if(runId!=null)GroupId.id(runId);
+            if(!Arrays.asList("expert_main_v1","expert_task_v1").contains(profile)||digest==null||!digest.matches("sha256:[a-f0-9]{64}")||groupVersion<1||groupVersion>JdbcTaskStore.MAX||taskVersion<1||taskVersion>JdbcTaskStore.MAX||!taskId.equals(body.path("taskId").textValue())||taskVersion!=body.path("taskVersion").longValue()||!profile.equals(body.path("profile").textValue())||!digest.equals(body.path("digest").textValue())||fingerprint==null||fingerprint.length!=32)throw JdbcApplicationStore.corrupt();
         }
     }
     private Input inputWhere(String where,Object... values)throws SQLException {
@@ -78,8 +78,8 @@ public final class JdbcExpertConversationStore {
     }
     public Input input(String principal,String command)throws SQLException{return inputWhere("principal_id=? AND command_id=?",space,principal,command);}
     public Input runInput(String run)throws SQLException{return inputWhere("run_id=?",space,run);}
-    public void input(String principal,String command,byte[] fingerprint,ObjectNode body)throws SQLException {
-        change("INSERT INTO expert_conversation_inputs(space_id,principal_id,command_id,task_id,task_version,profile,digest,fingerprint,body_bytes) VALUES(?,?,?,?,?,?,?,?,?)",space,principal,command,body.path("taskId").textValue(),body.path("taskVersion").longValue(),body.path("profile").textValue(),body.path("digest").textValue(),fingerprint,bytes(body));
+    public void input(String principal,String command,byte[] fingerprint,ObjectNode body,long groupVersion,String botVersionId)throws SQLException {
+        change("INSERT INTO expert_conversation_inputs(space_id,principal_id,command_id,task_id,task_version,profile,digest,fingerprint,body_bytes,group_version,bot_version_id) VALUES(?,?,?,?,?,?,?,?,?,?,?)",space,principal,command,body.path("taskId").textValue(),body.path("taskVersion").longValue(),body.path("profile").textValue(),body.path("digest").textValue(),fingerprint,bytes(body),groupVersion,botVersionId);
     }
     public void attach(String principal,String command,JdbcRequirementRunStore.Run run,Input input)throws SQLException {
         change("UPDATE expert_conversation_inputs SET run_id=? WHERE space_id=? AND principal_id=? AND command_id=? AND run_id IS NULL",run.id,space,principal,command);
@@ -90,8 +90,9 @@ public final class JdbcExpertConversationStore {
         public final byte[] fingerprint;
         public final ObjectNode receipt;
         Command(ResultSet r)throws SQLException {
-            taskId=r.getString("task_id");sourceRunId=r.getString("source_run_id");operation=r.getString("operation");fingerprint=r.getBytes("fingerprint");receipt=object(r.getBytes("receipt_bytes"));
-            JsonNode task=receipt.path("task");if(!taskId.equals(task.path("id").textValue())||!r.getString("space_id").equals(task.path("spaceId").textValue())||!r.getString("principal_id").equals(receipt.path("principalId").textValue())||!Objects.equals(sourceRunId,receipt.path("sourceRunId").textValue())||fingerprint==null||fingerprint.length!=32)throw JdbcApplicationStore.corrupt();
+            taskId=GroupId.id(r.getString("task_id"));GroupId.id(r.getString("principal_id"));GroupId.id(r.getString("command_id"));sourceRunId=r.getString("source_run_id");if(sourceRunId!=null)GroupId.id(sourceRunId);operation=r.getString("operation");fingerprint=r.getBytes("fingerprint");receipt=object(r.getBytes("receipt_bytes"));
+            Set<String> fields=new HashSet<String>();receipt.fieldNames().forEachRemaining(fields::add);if(!fields.equals(new HashSet<String>(Arrays.asList("task","role","botId","principalId","sourceRunId","messageId")))||!Arrays.asList("ensure","coordinate","complete","reopen").contains(operation)||!Arrays.asList("main","task").contains(receipt.path("role").textValue())||"coordinate".equals(operation)!=(sourceRunId!=null)||(!"ensure".equals(operation)&&!"task".equals(receipt.path("role").textValue())))throw JdbcApplicationStore.corrupt();GroupId.id(receipt.path("botId").textValue());if(!receipt.path("messageId").isNull())GroupId.id(receipt.path("messageId").textValue());
+            JsonNode task=receipt.path("task");try{ObjectNode response=CompatibilityProbe.strictMapper().createObjectNode();response.set("task",task);new com.devclaw.botcontrol.validation.ContractBoundary().readResponse("createTask",201,bytes(response),com.devclaw.botcontrol.contracts.BotContracts.TaskResult.class);}catch(RuntimeException failure){throw JdbcApplicationStore.corrupt();}if(!taskId.equals(task.path("id").textValue())||!r.getString("space_id").equals(task.path("spaceId").textValue())||!r.getString("principal_id").equals(receipt.path("principalId").textValue())||!Objects.equals(sourceRunId,receipt.path("sourceRunId").textValue())||fingerprint==null||fingerprint.length!=32)throw JdbcApplicationStore.corrupt();
         }
     }
     private Command commandWhere(String where,Object... values)throws SQLException {

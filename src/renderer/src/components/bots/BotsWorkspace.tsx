@@ -1349,12 +1349,12 @@ export function BotsWorkspace({ client = localBotClient() }: { client?: BotClien
                     </span>
                   </button>
                 ))}
-                {service.taskCursor && (
+                {(service.tasks.length > serviceTaskLimit || service.taskCursor) && (
                   <button
                     className="service-chat-list-more"
                     onClick={() => {
-                      setServiceTaskLimit(value => value + 40)
-                    void service.moreTasks()
+                      setServiceTaskLimit((value) => value + 40)
+                      if (service.tasks.length <= serviceTaskLimit) void service.moreTasks()
                     }}
                   >
                     更多任务

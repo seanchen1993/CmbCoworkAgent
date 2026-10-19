@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react"
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react"
 import type {
   ServiceConversationApi,
   ServiceConversationOverview,
@@ -24,7 +24,10 @@ export function serviceError(error: unknown): string {
   const raw = error instanceof Error ? error.message : ""
   const codes: Record<string, string> = {
     MODEL_UNAVAILABLE: "请先选择可用模型",
-    MODEL_CHANGED: "模型配置已变化，请重新选择",
+    COORDINATION_INVALID_OUTPUT: "回复格式无法识别，未交办；可以重新说明。",
+    OUTCOME_UNKNOWN: "执行结果需要核对，不会自动重跑",
+    RATE_LIMITED: "等待当前任务结束后继续",
+    MODEL_CHANGED: "模型配置已变化，请重新选择后重试",
     FORBIDDEN: "当前身份没有访问权限，请检查连接与授权",
     INPUT_CHANGED: "任务状态已变化，或仍有待处理消息，请刷新核对",
     VERSION_CONFLICT: "任务已变化，请刷新核对",
@@ -35,6 +38,9 @@ export function serviceError(error: unknown): string {
     DEPENDENCY_UNAVAILABLE: "服务暂时不可用，请稍后刷新"
   }
   return Object.entries(codes).find(([code]) => raw.includes(code))?.[1] ?? "操作未完成，请刷新核对"
+}
+export function serviceNotice(notice: string): string {
+  return /^[A-Z][A-Z0-9_]+$/.test(notice) ? serviceError(new Error(notice)) : notice
 }
 const merge = <T>(old: T[], fresh: T[], key: (value: T) => string) => {
   const values = new Map(old.map((value) => [key(value), value]))
@@ -100,10 +106,16 @@ export function useServiceExpertChats(
     setTaskCursor(null)
     setEntryCursor(null)
     setPending(false)
+    setSelectedTask(undefined)
     pendingSend.current.clear()
   }, [])
-  const reload = useCallback(async () => {
-    if (!api || suspended.current || lock.current) return
+  const reloadRequested = useRef(false)
+  const reload = useCallback(async (): Promise<void> => {
+    if (!api || suspended.current) return
+    if (lock.current) {
+      reloadRequested.current = true
+      return
+    }
     lock.current = true
     const g = generation.current
     try {
@@ -114,7 +126,6 @@ export function useServiceExpertChats(
         values.current.overview.conversationId !== info.conversationId
       ) {
         clear()
-        return
       }
       setOverview(info)
       setError(null)
@@ -125,6 +136,12 @@ export function useServiceExpertChats(
       }
     } finally {
       lock.current = false
+      if (reloadRequested.current && mounted.current && !suspended.current) {
+        reloadRequested.current = false
+        queueMicrotask(() => {
+          void reload()
+        })
+      }
     }
   }, [api, clear, valid])
   useEffect(() => {
@@ -172,7 +189,7 @@ export function useServiceExpertChats(
     }
   }, [api, conversationId, query, valid])
   const ref = selectedRef ?? overview?.mainTaskRef ?? null
-  useEffect(() => {
+  useLayoutEffect(() => {
     const sg = ++selectionGeneration.current,
       g = generation.current
     setEntries([])
@@ -197,7 +214,7 @@ export function useServiceExpertChats(
   const draftKey = conversationId
     ? "service-chat-draft:" + conversationId + ":" + (selectedRef ?? "main")
     : null
-  useEffect(() => {
+  useLayoutEffect(() => {
     try {
       setDraftState(draftKey ? (localStorage.getItem(draftKey) ?? "") : "")
     } catch {
@@ -304,7 +321,7 @@ export function useServiceExpertChats(
       const page = await api.chatTasks({ conversationId, cursor: anchor, query: q })
       if (valid(g, conversationId) && q === values.current.query) {
         setTasks((old) => merge(old, page.items, (t) => t.taskRef))
-        setTaskCursor(page.nextCursor)
+        setTaskCursor((current) => (current === anchor ? page.nextCursor : current))
       }
     } catch (error) {
       if (valid(g, conversationId)) setError(serviceError(error))
@@ -319,7 +336,7 @@ export function useServiceExpertChats(
       const page = await api.read({ conversationId, taskRef: ref, cursor: anchor })
       if (valid(g, conversationId) && sg === selectionGeneration.current) {
         setEntries((old) => merge(page.items, old, (t) => t.requestId))
-        setEntryCursor(page.nextCursor)
+        setEntryCursor((current) => (current === anchor ? page.nextCursor : current))
       }
     } catch (error) {
       if (valid(g, conversationId) && sg === selectionGeneration.current)
@@ -350,7 +367,25 @@ export function useServiceExpertChats(
         sg = selectionGeneration.current,
         text = draft
       const draftId = conversationId + ":" + (selectedRef ?? "main"),
-        old = pendingSend.current.get(draftId)
+        old =
+          pendingSend.current.get(draftId) ??
+          (() => {
+            try {
+              const value = JSON.parse(
+                localStorage.getItem("service-chat-pending:" + draftId) ?? "null"
+              )
+              return value &&
+                value.conversationId === conversationId &&
+                value.taskRef === (selectedRef === SERVICE_NEW_TASK ? null : selectedRef) &&
+                value.role === (selectedRef ? "task" : "main") &&
+                typeof value.requestId === "string" &&
+                typeof value.text === "string"
+                ? value
+                : null
+            } catch {
+              return null
+            }
+          })()
       const payload =
         old && old.text === text
           ? old
@@ -361,10 +396,13 @@ export function useServiceExpertChats(
               requestId: crypto.randomUUID(),
               text
             }
+      // Persist the same intent before IPC, including across renderer remounts.
+      localStorage.setItem("service-chat-pending:" + draftId, JSON.stringify(payload))
       pendingSend.current.set(draftId, payload)
       const request = await api.chat(payload)
       if (!valid(g, conversationId) || sg !== selectionGeneration.current) return
       pendingSend.current.delete(draftId)
+      localStorage.removeItem("service-chat-pending:" + draftId)
       setPending(true)
       setDraft("")
       setEntries((old) => merge(old, [request], (r) => r.requestId))
@@ -379,7 +417,10 @@ export function useServiceExpertChats(
       if (valid(g, conversationId) && sg === selectionGeneration.current)
         setOverview((old) => (old ? { ...old, ...next } : null))
     })
-  const task = selectedTask ?? tasks.find((t) => t.taskRef === selectedRef)
+  const task =
+    selectedTask?.taskRef === selectedRef
+      ? selectedTask
+      : tasks.find((t) => t.taskRef === selectedRef)
   return {
     overview,
     tasks,

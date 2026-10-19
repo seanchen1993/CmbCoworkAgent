@@ -137,12 +137,20 @@ async function main() {
               runId: "run-" + i,
               attemptId: "attempt-" + i,
               outcome: "succeeded",
-              text: i === 100 ? "季度安排已整理：先明确目标，再分配各月工作。" : "历史回复 " + i,
+              text:
+                i === 100
+                  ? "季度安排已整理：先明确目标，再分配各月工作。"
+                  : i === 99
+                    ? "## 本轮要点\n- 保留目标\n- 补充边界\n\n|阶段|动作|\n|---|---|\n|一|讨论|\n\n```text\n仅文本，无工具执行\n```"
+                    : "历史回复 " + i,
               settledAt: new Date().toISOString()
             }
           }))
         ]
       ])
+      let taskCount = 41
+      let loseSendReply = false
+      const committed = new Map<string, any>()
       let failRefresh = false,
         heldRead: (() => void) | null = null,
         delayRead = false,
@@ -170,7 +178,7 @@ async function main() {
             failRefresh = false
             throw Error("DEPENDENCY_UNAVAILABLE")
           }
-          const filtered = tasks.filter((t) => t.title.includes(v.query))
+          const filtered = tasks.slice(0, taskCount).filter((t) => t.title.includes(v.query))
           const after = v.cursor ? Number(v.cursor) : 0
           return {
             selectedTask: structuredClone(tasks.find((t) => t.taskRef === v.selectedRef)),
@@ -198,11 +206,8 @@ async function main() {
             (records.get(v.taskRef) ?? []).filter((r) => v.requestIds.includes(r.requestId))
           ),
         chat: async (v: any) => {
+          if (committed.has(v.requestId)) return structuredClone(committed.get(v.requestId))
           stats.sends++
-          if (delaySend) {
-            delaySend = false
-            await new Promise<void>((r) => (heldSend = r))
-          }
           const ref = v.role === "main" ? "main" : (v.taskRef ?? "task-new")
           if (ref === "task-new" && !tasks.some((t) => t.taskRef === ref))
             tasks.unshift({
@@ -225,6 +230,15 @@ async function main() {
             createdAt: new Date().toISOString()
           }
           records.set(ref, [...(records.get(ref) ?? []), r])
+          committed.set(v.requestId, r)
+          if (delaySend) {
+            delaySend = false
+            await new Promise<void>((resolve) => (heldSend = resolve))
+          }
+          if (loseSendReply) {
+            loseSendReply = false
+            throw Error("DEPENDENCY_UNAVAILABLE")
+          }
           return structuredClone(r)
         },
         cancel: async (v: any) => {
@@ -280,6 +294,12 @@ async function main() {
       }
       w.m04 = {
         stats,
+        limitTasks: (count: number) => {
+          taskCount = count
+        },
+        loseSendReply: () => {
+          loseSendReply = true
+        },
         failRefresh: () => {
           failRefresh = true
         },
@@ -317,21 +337,64 @@ async function main() {
     await page.getByRole("button", { name: "整理季度安排", exact: true }).last().click()
     await page.getByRole("textbox", { name: "给任务发消息" }).waitFor()
     await page.getByText("季度安排已整理：先明确目标，再分配各月工作。", { exact: true }).waitFor()
+    await page.getByRole("heading", { name: "本轮要点" }).waitFor()
+    assert.equal(await page.locator(".service-chat-reply > svg").count(), 0)
+    assert.ok(await page.locator('[data-message-bubble="assistant"] [data-message-body]').count())
+    assert.ok(
+      (await page
+        .locator(".service-chat-composer")
+        .evaluate((el) => el.getBoundingClientRect().height)) <= 50
+    )
     await page.screenshot({ path: "/tmp/m04-bots-workspace.png" })
     assert.equal(await page.getByRole("button", { name: "本地写作 Bot", exact: true }).count(), 1)
     await page.getByRole("button", { name: "更多任务", exact: true }).click()
+    await page.locator('.service-chat-task-row[title="历史任务 40"]').waitFor()
+    await page.getByRole("button", { name: "更多任务", exact: true }).click()
     await page.getByRole("button", { name: /历史任务 41/ }).waitFor()
-    await page.getByRole("button", { name: "加载更早消息" }).click()
-    assert.ok(await page.getByText("任务讨论 21", { exact: true }).count())
+    assert.ok(
+      (await page
+        .locator(".service-chat-transcript")
+        .evaluate((el) => el.scrollHeight - el.scrollTop - el.clientHeight)) < 2
+    )
+    await page.locator(".service-chat-transcript").evaluate((el) => {
+      el.scrollTop = 0
+      el.dispatchEvent(new Event("scroll"))
+    })
+    const oldAnchor = await page
+      .locator('[data-request-id="history-61"]')
+      .evaluate((el) => el.getBoundingClientRect().top)
+    await page
+      .getByRole("button", { name: "加载更早消息" })
+      .evaluate((el) => (el as HTMLButtonElement).click())
+    await page.getByText("任务讨论 21", { exact: true }).waitFor()
+    assert.ok(
+      Math.abs(
+        (await page
+          .locator('[data-request-id="history-61"]')
+          .evaluate((el) => el.getBoundingClientRect().top)) - oldAnchor
+      ) < 3
+    )
     const draft = page.getByRole("textbox", { name: "给任务发消息" })
     await draft.fill("请补充风险安排")
     await draft.press("Enter")
     await page.getByText("正在处理", { exact: true }).last().waitFor()
+    await page.locator(".service-chat-transcript").evaluate((el) => {
+      el.scrollTop = 0
+      el.dispatchEvent(new Event("scroll"))
+    })
+    await page.evaluate(() => (window as any).m04.settle())
+    await page.getByText("已按补充意见调整。", { exact: true }).waitFor()
+    assert.equal(await page.locator(".service-chat-transcript").evaluate((el) => el.scrollTop), 0)
+    await draft.fill("这轮请先暂停")
+    await draft.press("Enter")
     await page.getByRole("button", { name: "停止当前请求" }).click()
     await page.evaluate(() => (window as any).m04.settle())
     await page.getByRole("button", { name: "完成", exact: true }).click()
     await page.getByRole("button", { name: "继续处理", exact: true }).waitFor()
+    await page.getByRole("button", { name: "搜索 Bot", exact: true }).click()
+    await page.getByRole("textbox", { name: "搜索 Bot", exact: true }).fill("历史任务 41")
     await page.getByRole("button", { name: "继续处理", exact: true }).click()
+    await page.getByRole("textbox", { name: "搜索 Bot", exact: true }).fill("")
     await page.getByRole("button", { name: "完成", exact: true }).waitFor()
     await page.getByRole("button", { name: "回到专家主对话" }).click()
     await page.getByRole("textbox", { name: "给专家发消息" }).fill("主对话草稿")
@@ -345,6 +408,71 @@ async function main() {
       await page.getByRole("textbox", { name: "给专家发消息" }).inputValue(),
       "主对话草稿"
     )
+    await page.evaluate(() => (window as any).m04.delayRead())
+    await page
+      .getByRole("button", { name: /整理季度安排 已回复/ })
+      .first()
+      .click()
+    await page.getByRole("button", { name: "回到专家主对话" }).click()
+    await page.evaluate(() => (window as any).m04.releaseRead())
+    assert.equal(
+      await page.getByText("季度安排已整理：先明确目标，再分配各月工作。", { exact: true }).count(),
+      0
+    )
+    const mainDraft = page.getByRole("textbox", { name: "给专家发消息" })
+    await mainDraft.fill("输入法组合中")
+    const beforeIme = await page.evaluate(() => (window as any).m04.stats.sends)
+    await mainDraft.evaluate((el) =>
+      el.dispatchEvent(
+        new KeyboardEvent("keydown", {
+          key: "Enter",
+          isComposing: true,
+          bubbles: true,
+          cancelable: true
+        })
+      )
+    )
+    assert.equal(await page.evaluate(() => (window as any).m04.stats.sends), beforeIme)
+    await page.evaluate(() => (window as any).m04.delaySend())
+    await mainDraft.fill("迟到发送保留原请求")
+    await mainDraft.press("Enter")
+    await page
+      .getByRole("button", { name: /整理季度安排 已回复/ })
+      .first()
+      .click()
+    await page.evaluate(() => (window as any).m04.releaseSend())
+    await page.getByRole("button", { name: "回到专家主对话" }).click()
+    assert.equal(await mainDraft.inputValue(), "迟到发送保留原请求")
+    const beforeReplay = await page.evaluate(() => (window as any).m04.stats.sends)
+    await mainDraft.press("Enter")
+    await page.waitForFunction(
+      () =>
+        (document.querySelector('[aria-label="给专家发消息"]') as HTMLTextAreaElement)?.value === ""
+    )
+    assert.equal(await page.evaluate(() => (window as any).m04.stats.sends), beforeReplay)
+    await page.evaluate(() => (window as any).m04.loseSendReply())
+    await mainDraft.fill("失回包重开后用同请求")
+    await mainDraft.press("Enter")
+    await page.getByRole("alert").waitFor()
+    const beforeRemount = await page.evaluate(() => (window as any).m04.stats.sends)
+    await page.evaluate(() => (window as any).remountM04())
+    await mainDraft.waitFor()
+    assert.equal(await mainDraft.inputValue(), "失回包重开后用同请求")
+    await mainDraft.press("Enter")
+    await page.waitForFunction(
+      () =>
+        (document.querySelector('[aria-label="给专家发消息"]') as HTMLTextAreaElement)?.value === ""
+    )
+    assert.equal(await page.evaluate(() => (window as any).m04.stats.sends), beforeRemount)
+    const listBefore = await page.evaluate(() => (window as any).m04.stats.lists)
+    await page.evaluate(() => (window as any).m04.failRefresh())
+    await page.waitForFunction(
+      (count) => (window as any).m04.stats.lists >= count + 2,
+      listBefore,
+      { timeout: 10000 }
+    )
+    await page.evaluate(() => (window as any).m04.settle())
+    await page.getByText("已按补充意见调整。", { exact: true }).first().waitFor()
     await page.evaluate(() => document.documentElement.classList.add("dark"))
     await page.setViewportSize({ width: 740, height: 820 })
     await page.screenshot({ path: "/tmp/m04-bots-workspace-dark.png" })
@@ -352,9 +480,20 @@ async function main() {
       await page.evaluate(() => document.documentElement.scrollWidth > window.innerWidth),
       false
     )
+    await page.evaluate(() => {
+      ;(window as any).m04.limitTasks(6)
+      ;(window as any).remountM04()
+    })
+    await page.getByRole("button", { name: "工作协调专家 主对话" }).waitFor()
+    assert.equal(await page.locator('.service-chat-task-row[title="历史任务 6"]').count(), 0)
+    const beforeExpand = await page.evaluate(() => (window as any).m04.stats.lists)
+    await page.getByRole("button", { name: "更多任务", exact: true }).click()
+    await page.locator('.service-chat-task-row[title="历史任务 6"]').waitFor()
+    assert.equal(await page.evaluate(() => (window as any).m04.stats.lists), beforeExpand)
+    assert.equal(await page.getByRole("button", { name: "更多任务", exact: true }).count(), 0)
     const stats = await page.evaluate(() => (window as any).m04.stats)
     assert.equal(stats.localWrites, 0)
-    assert.equal(stats.sends, 1)
+    assert.equal(stats.sends, 4)
     assert.equal(stats.cancels.length, 1)
     assert.equal(stats.completes, 1)
     assert.equal(stats.reopens, 1)

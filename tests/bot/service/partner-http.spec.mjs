@@ -77,7 +77,7 @@ test("Partner process identity still reads exact stamp and rejects invalid PID b
   for (const pid of [0, 1, -1, "123", NaN]) await assert.rejects(partnerProcessInfo(pid, { exists() { throw Error("MUST_NOT_PROBE") }, read() { throw Error("MUST_NOT_READ") } }), /PARTNER_DEV/)
 })
 
-test("Partner startup accepts new V8 and supported V5/V6/V7 upgrades, rejects stale or invalid counts", () => {
-  for (const value of [0,1,2,3,8]) assert.equal(partnerMigrationCountAccepted(value),true)
-  for (const value of [7,9,-1,1.5,"8",null,undefined]) assert.equal(partnerMigrationCountAccepted(value),false)
+test("Partner startup accepts new V9 and supported V5/V6/V7/V8 upgrades, rejects stale or invalid counts", () => {
+  for (const value of [0,1,2,3,4,9]) assert.equal(partnerMigrationCountAccepted(value),true)
+  for (const value of [7,8,-1,1.5,"9",null,undefined]) assert.equal(partnerMigrationCountAccepted(value),false)
 })

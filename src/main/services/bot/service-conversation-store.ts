@@ -68,6 +68,8 @@ export interface ExecutionBinding extends ServiceScope {
 export interface ServiceRequestRecord {
   profile?: import("../../../shared/bot/expert-conversation").ExpertConversationProfile
   allowedTaskIds?: string[]
+  freezeGroupVersion?: number
+  freezeBotVersionId?: string
   coordinationDone?: boolean
   coordinationCancelled?: boolean
   protocolFailure?: boolean
@@ -168,11 +170,10 @@ export class ServiceConversationStore {
   }
   /** Legacy URL scopes are candidates, never authorization. The caller must
    * authenticate the service and verify every stored task/run before migration. */
-  legacyScopes(
-    scope: ServiceScope
-  ): Array<{
+  legacyScopes(scope: ServiceScope): Array<{
     key: string
     conversation: ConversationRecord
+    hasLocalIntent: boolean
     tasks: Array<{ id: string; number: string; runId: string | null }>
   }> {
     const match = (candidate: ServiceScope) =>
@@ -206,7 +207,17 @@ export class ServiceConversationStore {
           return row ? String(row.run_id) : null
         })()
       }))
-      return [{ key, conversation, tasks }]
+      return [
+        {
+          key,
+          conversation,
+          tasks,
+          hasLocalIntent: !!this.rows(
+            "SELECT seq FROM service_conversation_requests WHERE scope_key=? LIMIT 1",
+            [key]
+          )[0]
+        }
+      ]
     })
   }
   migrateScope(from: string, scope: ServiceScope): void {
@@ -233,7 +244,10 @@ export class ServiceConversationStore {
         "service_expert_summaries",
         "service_expert_actions"
       ]) {
-        const rows = this.rows("SELECT rowid,body FROM " + table + " WHERE scope_key=?", [from])
+        const rows = this.rows(
+          "SELECT rowid AS migration_row_id,body FROM " + table + " WHERE scope_key=?",
+          [from]
+        )
         for (const row of rows) {
           const body = JSON.parse(String(row.body))
           if (Object.hasOwn(body, "scopeKey")) body.scopeKey = to
@@ -241,8 +255,9 @@ export class ServiceConversationStore {
           this.db.run("UPDATE " + table + " SET scope_key=?,body=? WHERE rowid=?", [
             to,
             JSON.stringify(body),
-            row.rowid
+            row.migration_row_id
           ])
+          if (this.db.getRowsModified() !== 1) throw new PartnerLocalFault("STORAGE_FAILURE")
         }
       }
       this.db.run("UPDATE service_conversations SET scope_key=?,body=? WHERE scope_key=?", [
@@ -576,7 +591,7 @@ export class ServiceConversationStore {
   }
   taskPage(scopeKey: string, conversationId: string, after: number) {
     return this.rows(
-      "SELECT seq,body FROM service_conversation_tasks WHERE scope_key=? AND conversation_id=? AND seq<? ORDER BY seq DESC LIMIT ?",
+      "SELECT seq,body FROM service_conversation_tasks WHERE scope_key=? AND conversation_id=? AND seq<? AND COALESCE(json_extract(body,'$.role'),'task')<>'main' ORDER BY seq DESC LIMIT ?",
       [scopeKey, conversationId, after || Number.MAX_SAFE_INTEGER, PAGE + 1]
     ).map((row) => ({
       seq: Number(row.seq),
