@@ -41,6 +41,7 @@ import {
   type AgentProfile
 } from "../../agent/agent-registry"
 import { runWorkflowSubagent, type WorkflowSubagentDeps } from "../../agent/workflow/subagent"
+import { publicFlowProgress } from "./progress"
 import { getModelConfigByRef, getDefaultModelConfig } from "../../models/registry"
 import { deleteThreadCheckpoint, getEnabledHooks, getWindowsSandboxMode } from "../../storage"
 import { clearActionStationarityTurn } from "../../agent/action-stationarity"
@@ -63,6 +64,10 @@ import { flowEvidenceInput } from "./evidence-input"
 import { clawModelFingerprint } from "./model-fingerprint"
 import { observeLegacyFlowRecovery } from "./recovery-observation"
 import { FlowStore } from "./store"
+import { publishOriginalFlowActionResult } from "./action-execution-facts"
+import { readOriginalActionText } from "../v2/action-result-text"
+import { captureProjectActionContentGuard } from "../../harness-board/project-action-scope"
+import { captureNativeChildWorkflows } from "./native-child-workflows"
 import type { FlowRecoveryObservation } from "./recovery"
 import { validateRegisteredToolInput } from "../v2/tool-schema"
 import { validateClawActionConfig } from "../v2/action-config"
@@ -663,6 +668,12 @@ export class NativeFlowHost implements FlowHost {
     signal: AbortSignal
   ): Promise<FlowExecution> {
     this.assertScope(workspace, threadId)
+    const assertProjectContent = captureProjectActionContentGuard(threadId)
+    const withProjectContent = async <T>(run: () => Promise<T>): Promise<T> => {
+      assertProjectContent?.()
+      try { return await run() }
+      finally { assertProjectContent?.() }
+    }
     const lease = getLocalThreadRunLease(threadId)
     const leaseCurrent = captureLocalThreadRunLease(threadId)
     if (lease?.owner !== "mods" || lease.runId !== run.id || !leaseCurrent)
@@ -753,13 +764,20 @@ export class NativeFlowHost implements FlowHost {
         if (clawModelFingerprint(model) !== fingerprint) throw Error(`FLOW_MODEL_CHANGED: ${ref}`)
       }
     }
+    const pendingWorkflowChildren = new Set<string>()
     const dispose = async () => {
       const errors: unknown[] = []
       await attemptCleanup(errors, () => controller.abort(Error("FLOW_EXECUTION_DISPOSED")))
+      for (const cleanup of [...children.values()]) await attemptCleanup(errors, cleanup)
+      // A still-running original workflow retains its parent source/authority for retryable
+      // physical cleanup. Other child cleanup failures keep their existing aggregation policy.
+      if (pendingWorkflowChildren.size) {
+        throwCleanupErrors(errors)
+        throw Error("FLOW_CHILD_WORKFLOW_CLEANUP_UNCONFIRMED")
+      }
       await attemptCleanup(errors, releaseBinding)
       await attemptCleanup(errors, () => authority?.release())
       await attemptCleanup(errors, scope.dispose)
-      for (const cleanup of [...children.values()]) await attemptCleanup(errors, cleanup)
       await attemptCleanup(errors, () => {
         if (!leaseCurrent()) throw Error("FLOW_LEASE_CHANGED")
         return LocalSandbox.cancelBackgroundTasksAndWait(threadId)
@@ -1240,6 +1258,7 @@ export class NativeFlowHost implements FlowHost {
             if (!prepared) throw Error("FLOW_MCP_NOT_PREPARED")
             if (invokedMcpSteps.has(step.id)) throw Error("FLOW_MCP_REPLAY_FORBIDDEN")
             invokedMcpSteps.add(step.id)
+            return withProjectContent(async () => {
             const result = await inScope(() => prepared.invoke(input, actionSignal))
             return publish(
               {
@@ -1258,9 +1277,11 @@ export class NativeFlowHost implements FlowHost {
               },
               actionSignal
             )
+            })
           }
           const prepared = actions.get(step.id)
           if (!prepared) throw Error("CLAW_ACTION_NOT_PREPARED")
+          return withProjectContent(async () => {
           const result = await inScope(() =>
             this.functions.runAction(
               workspace,
@@ -1279,9 +1300,9 @@ export class NativeFlowHost implements FlowHost {
             )
           )
           assertLive()
-          return publish(
+          return publishOriginalFlowActionResult(
             {
-              passed: true,
+              passed: result.passed ?? true,
               summary: result.text,
               source: "plugin-action",
               provider: {
@@ -1292,8 +1313,10 @@ export class NativeFlowHost implements FlowHost {
               },
               ...(result.output === undefined ? {} : { output: result.output })
             },
-            actionSignal
+            (original) => publish(original, actionSignal),
+            readOriginalActionText(result)
           )
+          })
         }
         if (step.kind === "check") return (await check(context, step)).result
         if (step.kind === "autobiz-stage")
@@ -1365,11 +1388,22 @@ export class NativeFlowHost implements FlowHost {
                 throw Error("FLOW_CHILD_ID_CHANGED")
             }
             let releaseSourceChild = () => {}
+            const childWorkflows = {
+              current: undefined as Awaited<ReturnType<typeof captureNativeChildWorkflows>> | undefined
+            }
             children.set(childId, async () => {
-              disposePromptRuntime()
               // Every operation below accepts only a string id. Fence it before first use,
               // after each await, and immediately before deleting durable state.
               assertChildIdentity()
+              try {
+                await childWorkflows.current?.settle(true)
+              } catch (error) {
+                pendingWorkflowChildren.add(childId)
+                throw error
+              }
+              pendingWorkflowChildren.delete(childId)
+              assertChildIdentity()
+              disposePromptRuntime()
               const errors: unknown[] = []
               const ownedCleanup = (cleanup: () => void | Promise<void>) =>
                 attemptCleanup(errors, () => {
@@ -1396,6 +1430,9 @@ export class NativeFlowHost implements FlowHost {
               assertLive()
               assertChildIdentity()
             })
+            childWorkflows.current = await captureNativeChildWorkflows(
+              workspace, childId, assertChildIdentity, options.abortSignal
+            )
             if (fileContext) {
               if (!options.flowPromptOnly || typeof incarnation !== "string") throw Error("FLOW_FILE_INVOCATION_REQUIRED")
               const { readFlowFileRuntimeProof } = await import("../../agent/flow-file-runtime")
@@ -1419,6 +1456,7 @@ export class NativeFlowHost implements FlowHost {
               if (!proof) throw Error("FLOW_FILE_RUNTIME_PROOF_REQUIRED")
               disposePromptRuntime = () => proof.dispose()
               return { stream: runtime.stream.bind(runtime), completeTurn: async (result: import("../../agent/workflow/types").WorkflowSubagentResult) => {
+                await childWorkflows.current!.settle()
                 const attempt = context.run.attempts.find((item) => item.executionId === context.executionId)
                 if (!attempt) throw Error("FLOW_FILE_EXECUTION_REQUIRED")
                 fileCapture = await sealNativeFlowFileCapture({
@@ -1462,6 +1500,7 @@ export class NativeFlowHost implements FlowHost {
                 completeTurn: async (
                   result: import("../../agent/workflow/types").WorkflowSubagentResult
                 ) => {
+                  await childWorkflows.current!.settle()
                   const facts = await proof.seal()
                   assertChildCurrent()
                   const structured = result.structured as
@@ -1579,6 +1618,7 @@ export class NativeFlowHost implements FlowHost {
                 runHostLifecycle!(() => skillTurn.preparePrompt(prompt)),
               completeTurn: (result: import("../../agent/workflow/types").WorkflowSubagentResult) =>
                 runHostLifecycle!(async () => {
+                  await childWorkflows.current!.settle()
                   await skillTurn.completeTurn(result)
                   mergeHookScopeSnapshot(parentHookScope, skillTurn.turnState.hookScope.snapshot())
                 })
@@ -1631,6 +1671,10 @@ export class NativeFlowHost implements FlowHost {
           shellAccess: role?.shellAccess,
           singleAttempt: true,
           strictModel: true,
+          onValues: (snapshot) => {
+            const progress = publicFlowProgress(snapshot)
+            if (progress) context.onProgress?.(progress)
+          },
           ...(closedContext
             ? {
                 flowPromptOnly: {

@@ -1,4 +1,5 @@
 import { createHash, randomUUID } from "node:crypto"
+import { mkdtempSync } from "node:fs"
 import { mkdir } from "node:fs/promises"
 import { join } from "node:path"
 import type { DevelopmentScope } from "../v2/development-session"
@@ -125,7 +126,7 @@ export class ProjectDevelopmentSessions {
         revision: draft.revision,
         digest: prepared.digest,
         packagePath: prepared.packagePath,
-        workspace: existing?.current.workspace ?? prepared.workspace
+        workspace: prepared.workspace
       }
       if (!existing) {
         this.entries.set(key, {
@@ -152,7 +153,13 @@ export class ProjectDevelopmentSessions {
   }
 
   /** Caller must hold this through actual settlement; unknown effects must retain the lease. */
-  acquire(scope: DevelopmentScope, id: string, revision: number, guard: () => void) {
+  acquire(
+    scope: DevelopmentScope,
+    id: string,
+    revision: number,
+    guard: () => void,
+    options: { freshWorkspace?: boolean; retainedWorkspace?: string } = {}
+  ) {
     guard()
     const key = identity(scope, id)
     const entry = this.entries.get(key)
@@ -161,10 +168,20 @@ export class ProjectDevelopmentSessions {
     if (entry.current.revision !== revision || entry.diagnostics.length || entry.pending)
       throw Error("PROJECT_DEV_REVISION_UNAVAILABLE")
     if (entry.leases.size) throw Error("PROJECT_DEV_RUNNING")
+    // A new native trial is a new project, including when the author chooses the same
+    // source revision again. Retain earlier workspaces as evidence without treating
+    // their artifacts as inputs to a different goal or trial.
+    const workspace =
+      options.retainedWorkspace ??
+      (options.freshWorkspace
+        ? mkdtempSync(join(entry.root, "trial-workspace-"))
+        : entry.current.workspace)
+    guard()
     // A model save guard belongs to its tool turn. Retain only the actual preview lease guard.
     entry.guard = guard
     const token = {}
     entry.leases.add(token)
+    entry.current = { ...entry.current, workspace }
     const snapshot = structuredClone(entry.current)
     return {
       snapshot,

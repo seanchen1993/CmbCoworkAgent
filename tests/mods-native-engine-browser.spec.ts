@@ -12,6 +12,9 @@ type FixtureOptions = {
   ready?: boolean
   holdMount?: boolean
   transparent?: boolean
+  role?: "user" | "assistant"
+  retiredMounts?: number
+  nullReads?: number
 }
 
 async function fixture(page: Page, options: FixtureOptions = {}) {
@@ -27,6 +30,7 @@ async function fixture(page: Page, options: FixtureOptions = {}) {
     const settings=${JSON.stringify(options)},calls=[],answers=[],changes=[],rows=new Map();
     const cards=new Set(),configuration=new Set(),reads=[],mounts=[],history=[];
     let sequence=0,first=settings.first||'safe',holdMount=Boolean(settings.holdMount);
+    let retiredMounts=settings.retiredMounts||0,nullReads=settings.nullReads||0;
     let failNext='',holdRead=false,revision=1,modeLayout='inline',badMetadata='';
     const rootNode=document.getElementById('root');
     const record=value=>{if(typeof value==='string'&&value.includes('RAW_SECRET'))history.push(value)};
@@ -42,7 +46,7 @@ async function fixture(page: Page, options: FixtureOptions = {}) {
     observer.observe(rootNode,{subtree:true,childList:true,characterData:true,characterDataOldValue:true,attributes:true,attributeOldValue:true});
     const draw=(row,input)=>{
       let props=structuredClone(input);
-      if(row.component==='UserMessage')props.text='Safe message '+revision;
+      if(['UserMessage','AssistantMessage'].includes(row.component))props.text='Safe message '+revision;
       if(row.component==='AskUserQuestion')props.questions=props.questions.map(question=>({...question,
         header:'Safe header',question:'Safe question '+row.requestId+' '+revision,
         options:question.options.map(option=>({...option,description:'Safe description'}))}));
@@ -65,6 +69,7 @@ async function fixture(page: Page, options: FixtureOptions = {}) {
     window.api.mods.siteMountOutcome=async(threadId,component,messageId,requestId)=>{
       calls.push(['mount',component,requestId||null]);
       if(first==='inactive')return {state:'inactive',reason:'no-protection-or-functions'};
+      if(retiredMounts>0){retiredMounts--;return {state:'retired'}};
       const owner='owner-'+(++sequence),row={owner,component,requestId};rows.set(owner,row);
       if(holdMount)await new Promise(resolve=>mounts.push(resolve));
       return {state:'mounted',owner};
@@ -72,6 +77,7 @@ async function fixture(page: Page, options: FixtureOptions = {}) {
     window.api.mods.siteRender=async(threadId,owner,input)=>{
       const row=rows.get(owner);if(!row)throw Error('MODS_UI_SITE_CLOSED');
       calls.push(['render',row.component,row.requestId||null,owner]);
+      if(nullReads>0){nullReads--;return null};
       const candidate=structuredClone(draw(row,input));
       if(badMetadata==='missing')delete candidate.nativeContent;
       if(badMetadata==='component')candidate.nativeContent.component='AssistantMessage';
@@ -100,6 +106,7 @@ async function fixture(page: Page, options: FixtureOptions = {}) {
         holdMount:()=>holdMount=true,
         holdNext:()=>{holdRead=true;revision++},
         failNext:error=>failNext=error,
+        failures:(mounts,reads)=>{retiredMounts=mounts;nullReads=reads},
         malformNext:kind=>badMetadata=kind,
         refresh:component=>{for(const row of rows.values())if(row.component===component)for(const fn of cards)fn({threadId:'thread',scope:'site:'+row.owner})},
         interactiveMode:()=>{modeLayout='interactive';revision++;for(const row of rows.values())if(row.component==='SessionMode')for(const fn of cards)fn({threadId:'thread',scope:'site:'+row.owner})},
@@ -117,7 +124,7 @@ async function fixture(page: Page, options: FixtureOptions = {}) {
             settings.scenario==='mode'?
               <AgentModeSwitcher threadId='thread' mode={mode} locked={locked} lockedReason={locked?'Real task is running':undefined}
                 onChange={value=>{changes.push(value);setMode(value)}}/>:
-              <FunctionMessageText threadId='thread' messageId='original-message' role='user'
+              <FunctionMessageText threadId='thread' messageId='original-message' role={settings.role||'user'}
                 text={text} isExpanded={true} isFirstOfReply={true} fallback={renderText(text)} renderText={renderText}/>)}
         </main>
       </ModsChatScope.Provider>;
@@ -324,6 +331,63 @@ async function main() {
       0
     )
     pass("only an explicit host inactive outcome returns the ordinary original renderer")
+    await dispose(page)
+
+    for (const [role, failures] of [
+      ["user", { retiredMounts: 1 }],
+      ["assistant", { nullReads: 1 }]
+    ] as const) {
+      await fixture(page, { role, ...failures })
+      await page.getByText("Safe message 1", { exact: true }).waitFor()
+      await noRaw(page)
+      const calls = (await page.evaluate("window.nativeFixture.calls")) as string[][]
+      assert.equal(calls.filter((row) => row[0] === "mount").length, 2)
+      assert.equal(calls.filter((row) => row[0] === "render").length, role === "user" ? 1 : 2)
+      if (role === "assistant") {
+        const draws = calls.filter((row) => row[0] === "render")
+        assert.notEqual(draws[0][3], draws[1][3])
+        assert(calls.some((row) => row[0] === "unmount" && row[1] === draws[0][3]))
+      }
+      assert.equal(await page.getByRole("alert").count(), 0)
+      pass(`${role} retirement recovers through a fresh protected mount without raw fallback`)
+      await dispose(page)
+    }
+
+    await fixture(page, { retiredMounts: 1, nullReads: 10 })
+    await page.getByText("当前界面暂不可用，请重新读取。", { exact: true }).waitFor()
+    await noRaw(page)
+    const failedCalls = (await page.evaluate("window.nativeFixture.calls")) as string[][]
+    assert.equal(failedCalls.filter((row) => row[0] === "mount").length, 5)
+    assert.equal(failedCalls.filter((row) => row[0] === "render").length, 4)
+    assert.deepEqual(await page.evaluate("window.nativeFixture.liveOwners()"), [])
+    // Wait beyond the longest retry delay to prove exhaustion is stable, not a slow loop.
+    await page.waitForTimeout(2200)
+    assert.equal(await page.evaluate("window.nativeFixture.calls.length"), failedCalls.length)
+    await page.evaluate("window.nativeFixture.failures(0,0)")
+    await page.getByRole("button", { name: "重新读取界面", exact: true }).click()
+    await page.getByText("Safe message 1", { exact: true }).waitFor()
+    await noRaw(page)
+    assert.equal(
+      await page.evaluate("window.nativeFixture.calls.filter(row=>row[0]==='mount').length"),
+      6
+    )
+    pass(
+      "mixed retired/null reads share four retries, remain visible on exhaustion and allow explicit retry"
+    )
+    await dispose(page)
+
+    await fixture(page, { retiredMounts: 10 })
+    await page.waitForFunction(
+      "window.nativeFixture.calls.filter(row=>row[0]==='mount').length===1"
+    )
+    await page.evaluate("window.nativeFixture.visible(false)")
+    await page.waitForTimeout(300)
+    assert.equal(
+      await page.evaluate("window.nativeFixture.calls.filter(row=>row[0]==='mount').length"),
+      1
+    )
+    await noRaw(page)
+    pass("unmount cancels an outstanding retirement retry without allocating another owner")
     await dispose(page)
 
     await fixture(page, { scenario: "ask", transparent: true })

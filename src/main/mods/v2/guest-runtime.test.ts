@@ -24,13 +24,97 @@ afterEach(() => {
 it("a held admission ACK cannot enter guest after its monotonic deadline", async () => {
   const runtime = await guest('on("command.run",async($)=>({text:await $.session.id()}))')
   const methods: string[] = []
-  await expect(runtime.invoke("0", {}, async method => {
-    methods.push(method)
-    if (method === "invoke.admitted") await new Promise(resolve => setTimeout(resolve, 12))
-    return { value: "wrong" }
-  }, { ...options, admission: true, timeoutMs: 2 })).rejects.toThrow("MODS_BUDGET_EXCEEDED")
-  expect(methods).toEqual(["invoke.admitted"])
-  expect(runtime.stats.frames).toBe(0)
+  const epoch = performance.now()
+  let monotonicNow = epoch
+  const clock = vi.spyOn(performance, "now").mockImplementation(() => monotonicNow)
+  let admitted!: () => void
+  let releaseAck!: () => void
+  const admissionEntered = new Promise<void>((resolve) => {
+    admitted = resolve
+  })
+  const heldAck = new Promise<void>((resolve) => {
+    releaseAck = resolve
+  })
+  const controller = new AbortController()
+  // Cleanup watchdog only: cancellation must fail the budget assertion, never satisfy it.
+  const safety = setTimeout(() => controller.abort(), 250)
+  let settlement: Promise<unknown> | undefined
+  try {
+    const pending = runtime.invoke(
+      "0",
+      {},
+      async (method) => {
+        methods.push(method)
+        if (method === "invoke.admitted") {
+          admitted()
+          await heldAck
+        }
+        return { value: "wrong" }
+      },
+      { ...options, admission: true, timeoutMs: 2, signal: controller.signal }
+    )
+    settlement = pending.then(
+      () => "settled",
+      () => "settled"
+    )
+    const first = await Promise.race([admissionEntered.then(() => "admitted"), settlement])
+    expect(first).toBe("admitted")
+    expect(methods).toEqual(["invoke.admitted"])
+    // The ACK is now genuinely held. Only the test clock advances; the deadline stays 2 ms.
+    monotonicNow = epoch + 12
+    releaseAck()
+    await expect(pending).rejects.toThrow("MODS_BUDGET_EXCEEDED")
+    expect(methods).toEqual(["invoke.admitted"])
+    expect(runtime.stats.frames).toBe(0)
+  } finally {
+    clearTimeout(safety)
+    releaseAck()
+    try {
+      runtime.dispose()
+      await settlement
+    } finally {
+      clock.mockRestore()
+    }
+  }
+})
+
+it("does not issue an admission ACK once the original deadline has expired", async () => {
+  const runtime = await guest('on("command.run",async($)=>({text:await $.session.id()}))')
+  const methods: string[] = []
+  const epoch = performance.now()
+  let monotonicNow = epoch
+  const clock = vi.spyOn(performance, "now").mockImplementation(() => monotonicNow)
+  const controller = new AbortController()
+  const safety = setTimeout(() => controller.abort(), 250)
+  let settlement: Promise<unknown> | undefined
+  try {
+    const pending = runtime.invoke(
+      "0",
+      {},
+      async (method) => {
+        methods.push(method)
+        return { value: "wrong" }
+      },
+      { ...options, admission: true, timeoutMs: 2, signal: controller.signal }
+    )
+    settlement = pending.then(
+      () => undefined,
+      () => undefined
+    )
+    // Advance before the original admission microtask runs; >= is the production boundary.
+    monotonicNow = epoch + 2
+    await expect(pending).rejects.toThrow("MODS_BUDGET_EXCEEDED")
+    expect(methods).toEqual([])
+    expect(runtime.stats.frames).toBe(0)
+  } finally {
+    clearTimeout(safety)
+    try {
+      runtime.dispose()
+      await settlement
+    } finally {
+      clock.mockRestore()
+    }
+  }
 })
 
 it("expires a pending guest even when the wall clock stops advancing", async () => {

@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useId, useRef, useState } from "react"
+import { useConfigurationDraft } from "@/lib/configuration-target"
 import { Button } from "@/components/ui/button"
 import {
   COMPLETION_CHECKS,
@@ -365,6 +366,8 @@ function CompletionPolicyEditor({
   const [view, setView] = useState<CompletionPolicyView>()
   const [draft, setDraft] = useState<CompletionPolicy>()
   const [busy, setBusy] = useState(false)
+  useConfigurationDraft({ threadId, workspace: expectedWorkspace ?? null },
+    !!draft && !!view && JSON.stringify(draft) !== JSON.stringify(view.policy), busy)
   const [error, setError] = useState("")
   const [notice, setNotice] = useState("")
   const [environment, setEnvironment] = useState<AutobizEnvironment>()

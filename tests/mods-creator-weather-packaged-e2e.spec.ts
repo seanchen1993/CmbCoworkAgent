@@ -79,6 +79,7 @@ const files = [
 ]
 const errors: string[] = []
 const requests: unknown[] = []
+const summaries: unknown[] = []
 let held = false
 let release: (() => void) | undefined
 let app: ElectronApplication | undefined
@@ -109,7 +110,12 @@ const server = createServer(async (req, res) => {
     let tool: string | undefined
     let args: Record<string, unknown> | undefined
     let text = ""
-    if (prompt.includes("CREATE_WEATHER")) {
+    if (prompt.includes("Create a compact continuation handoff")) {
+      assert(!Array.isArray(body.tools) || body.tools.length === 0)
+      text = `## Goal\nMaintain the weather and tool-count Mod and follow the latest real user request.\n## Constraints\nUse original tools, native permissions and actual creator status. Never infer authorization or formal installation from a summary.\n## Completed\nThe weather-demo draft reached revision 3 after two failed candidates. Its authorized trial displayed the loopback forecast and counted an actual file edit. The trial was stopped through undo and resumed with explicit native confirmation.\n## Current State\nDraft weather-demo revision 3 is the current reviewed source. The latest request asks to save and reuse it in other chats. A request_reuse call has been submitted; inspect its retained native result and current creator status for the exact pending plan.\n## Blockers\nFormal installation, authorization, saved selection and activation require native receipts; none is established by this handoff.\n## Key Decisions\nPreserve the running trial until the native formal reuse transaction takes over. Do not replay a completed request_reuse or grant permissions from summarized text.\n## Next Step\nFinish the response to the latest real user request using the retained tool result; pending native approval must remain pending until the actual user confirms.\n## Critical Evidence\nUse mod_authoring list and original runtime receipts for exact current status.`
+      summaries.push({ messages, tools: body.tools ?? null, toolChoice: body.tool_choice ?? null,
+        stream: body.stream, response: text })
+    } else if (prompt.includes("CREATE_WEATHER")) {
       if (results.length < 3) {
         if (results.length === 1) {
           const failure = JSON.parse(String(results[0].content))
@@ -193,10 +199,13 @@ const server = createServer(async (req, res) => {
     }
     if (tool)
       assert(
-        body.tools.some((entry: { function: { name: string } }) => entry.function.name === tool),
+        Array.isArray(body.tools) &&
+          body.tools.some((entry: { function: { name: string } }) => entry.function.name === tool),
         `Missing actual tool ${tool}`
       )
-    requests.push({ prompt, tool, args, resultCount: results.length, results })
+    requests.push({ prompt, tool, args, resultCount: results.length, results,
+      shape: { roles: messages.map(message => message.role), toolCount: Array.isArray(body.tools) ? body.tools.length : 0,
+        summary: prompt.includes("Create a compact continuation handoff") } })
     res.writeHead(200, { "content-type": "text/event-stream" })
     const delta = tool
       ? {
@@ -629,6 +638,14 @@ async function main() {
       .getByRole("button", { name: "停止任务", exact: true })
       .click()
     assert.equal(errors.length, 0, errors.join("\n"))
+    assert.equal(
+      requests.filter((row) => {
+        const request = row as { tool?: string; args?: { action?: string } }
+        return request.tool === "mod_authoring" && request.args?.action === "request_reuse"
+      }).length,
+      1,
+      "Context compaction must not replay the native formal reuse request"
+    )
     if (process.env.CREATOR_E2E_ACCEPTANCE === "1")
       assertCreatorCreationMetrics("weather", metrics.creation)
     passed = true
@@ -656,6 +673,7 @@ async function main() {
           passed,
           candidate,
           requests,
+          summaries,
           forecastRequests,
           metrics,
           gates: process.env.CREATOR_E2E_ACCEPTANCE === "1" ? CREATOR_S1_GATES : "baseline-only",

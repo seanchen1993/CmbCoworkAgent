@@ -2,13 +2,87 @@ import { randomUUID } from "node:crypto"
 import type { McpCapabilityService, McpInvocationResult } from "../../mcp/capability-types"
 import type { TraceContext, TraceNodeStatus } from "./types"
 import type { TraceCollector } from "./collector"
+import type { CreatorTraceUsage } from "../../mods/devtools/creator-model-accounting"
+import {
+  isModRuntimeAuthorityDataCurrent,
+  type ModRuntimeAuthority
+} from "../../mods/runtime-instance"
 
 interface Binding {
   context: Readonly<TraceContext>
-  collector: Pick<TraceCollector, "addToolNode" | "addToolResultNode">
+  collector: Pick<TraceCollector, "addToolNode" | "addToolResultNode"> &
+    Partial<Pick<TraceCollector, "bindCreatorUsageObserver">>
   active(): boolean
 }
+
+/** Reuses the native context binding; a copied or serialized traceId cannot fabricate totals. */
+export function bindCreatorTraceUsage(
+  context: TraceContext | undefined,
+  observe: (usage: CreatorTraceUsage) => void
+): string | undefined {
+  const binding = context && bindings.get(context)
+  if (!binding || !binding.active() || !binding.collector.bindCreatorUsageObserver) return undefined
+  binding.collector.bindCreatorUsageObserver(observe)
+  return binding.context.traceId
+}
+
+export function readCreatorTraceId(context: TraceContext | undefined): string | undefined {
+  const binding = context && bindings.get(context)
+  return binding && binding.active() && binding.collector.bindCreatorUsageObserver
+    ? binding.context.traceId
+    : undefined
+}
 const bindings = new WeakMap<TraceContext, Binding>()
+const runtimeParents = new WeakMap<
+  ModRuntimeAuthority,
+  {
+    context: Readonly<TraceContext>
+    active(): boolean
+  }
+>()
+
+/** Main-only lineage, captured from a genuine collector at this exact runtime's birth. */
+export function bindRuntimeTraceContext(
+  authority: ModRuntimeAuthority,
+  context?: TraceContext
+): void {
+  try {
+    const binding = context && bindings.get(context)
+    if (
+      !binding ||
+      !binding.active() ||
+      binding.context.threadId !== authority.threadId ||
+      !isModRuntimeAuthorityDataCurrent(authority)
+    )
+      return
+    authority.assertLive()
+    runtimeParents.set(authority, {
+      active: binding.active,
+      context: Object.freeze({
+        ...binding.context,
+        ...(binding.context.harnessFeature
+          ? { harnessFeature: Object.freeze({ ...binding.context.harnessFeature }) }
+          : {})
+      })
+    })
+  } catch {
+    // Missing observability must never change runtime admission.
+  }
+}
+
+/** Read before approval awaits. The immutable historical link grants no execution authority. */
+export function captureRuntimeTraceParent(
+  authority: ModRuntimeAuthority
+): Readonly<TraceContext> | undefined {
+  try {
+    if (!isModRuntimeAuthorityDataCurrent(authority)) return undefined
+    authority.assertLive()
+    const original = runtimeParents.get(authority)
+    return original?.active() ? original.context : undefined
+  } catch {
+    return undefined
+  }
+}
 
 /** Only a live native collector binds this identity. Serialized trace IDs cannot append evidence. */
 export function bindLiveToolEvidence<T extends TraceContext>(

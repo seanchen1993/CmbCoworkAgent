@@ -36,7 +36,7 @@ async function main() {
   const entry = join(isolated, "main.cjs")
   writeFileSync(
     entry,
-    `const {app,BrowserWindow}=require("electron");app.whenReady().then(()=>new BrowserWindow({width:1000,height:700,webPreferences:{backgroundThrottling:false}}).loadFile(${JSON.stringify(html)}));`
+    `const {app,BrowserWindow}=require("electron");app.whenReady().then(()=>new BrowserWindow({show:${process.env.CMB_E2E_HEADLESS !== "1"},width:1000,height:700,webPreferences:{backgroundThrottling:false,offscreen:${process.env.CMB_E2E_HEADLESS === "1"}}}).loadFile(${JSON.stringify(html)}));`
   )
   const env: Record<string, string> = Object.fromEntries(
     Object.entries(process.env).filter(

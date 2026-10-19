@@ -20,9 +20,14 @@ import { ClawCompletionRules } from "./ClawCompletionRules"
 import { ClawComponentSelector } from "./ClawComponentSelector"
 import { FunctionUserConfig } from "./FunctionUserConfig"
 import { normalizeWorkspacePathKey } from "../../../../shared/workspace-path"
+import { createSimpleClawDraft, markSimpleDraftSaved, updateSimpleClawProfile, simpleDraftDefinition, editSimpleFlowText, saveSimpleCombination, type SimpleClawDraft } from "@/lib/simple-claw-builder"
+import { requestChatFlowUse, requestChatComposerFocus } from "@/lib/chat-flow-use"
 import { SimpleClawBuilder } from "./SimpleClawBuilder"
 import { NativePluginCapabilities } from "./NativePluginCapabilities"
+import { BusinessModAssemblyPanel } from "./BusinessModAssemblyPanel"
+import { hasUsableClawComponents, newClawCapability } from "@/lib/claw-capability-usage"
 import type { SimpleAuthoringPracticeIntent } from "@/lib/simple-authoring-intent"
+import { goToConfigurationThread, useConfigurationDraft } from "@/lib/configuration-target"
 
 const empty = (): ClawProfile => ({
   id: flowDraftId("claw"),
@@ -48,7 +53,7 @@ export function ClawPanel({
     />
   ) : (
     <p className="p-6 text-sm text-muted-foreground">
-      请先回到聊天，在输入框下方选择项目文件夹，再来组合插件。
+      请在上方选择带项目目录的本地聊天，再来组合插件。
     </p>
   )
 }
@@ -63,10 +68,22 @@ function ClawSettings({
   practiceIntent?: SimpleAuthoringPracticeIntent
 }) {
   const [advancedOpen, setAdvancedOpen] = useState(false)
+  const [assemblyOpen, setAssemblyOpen] = useState(false)
+  const [assemblyVisited, setAssemblyVisited] = useState(false)
+  const [assemblySource, setAssemblySource] = useState<string>()
+  const showAssembly = (pluginId?: string) => {
+    setAssemblySource(pluginId)
+    setAssemblyVisited(true)
+    setAssemblyOpen(true)
+  }
   const [view, setView] = useState<ClawView | null>(null)
   const [catalog, setCatalog] = useState<FlowCatalog | null>(null)
   const [flows, setFlows] = useState<SavedFlow[]>([])
-  const [draft, setDraftState] = useState<ClawProfile>(empty)
+  const [editing, setEditingState] = useState(() => createSimpleClawDraft(empty(), flowDraftId("flow")))
+  const draft = editing.profile
+  const setDraftState = (next: ClawProfile) =>
+    setEditingState((old) => updateSimpleClawProfile(old, next))
+  const [draftEdited, setDraftEdited] = useState(false)
   const [editorSession, setEditorSession] = useState(0)
   const [componentDirty, setComponentDirty] = useState<Record<string, boolean>>({})
   const onComponentDirty = useCallback(
@@ -83,24 +100,32 @@ function ClawSettings({
   const componentsInvalid = draft.capabilities.some(
     (item) => componentValid[item.pluginId] === false
   )
+  const unfinishedStepDrafts = editing.mode === "sequence" && Object.values(editing.parameterDrafts)
+    .some((value) => !!parameterError({}, undefined, value, false, false))
   const selectDraft = (next: ClawProfile) => {
-    if (
-      componentsInvalid &&
-      !window.confirm("当前组件参数有未完成的草稿，切换会丢弃这些草稿，继续吗？")
-    )
-      return
+    if ((componentsInvalid || draftEdited || Object.values(componentDirty).some(Boolean)) &&
+      !window.confirm("切换搭配会替换当前未保存的草稿，继续吗？")) return
+    setComponentDirty({})
     setComponentValid({})
     setEditorSession((value) => value + 1)
-    setDraft(next)
+    setEditingState(createSimpleClawDraft(next, flowDraftId("flow")))
+    setDraftEdited(false)
+    setPreview(null)
   }
   const draftInitialized = useRef(false)
   const setDraft = (next: ClawProfile) => {
     draftInitialized.current = true
+    setDraftEdited(true)
     setDraftState(next)
+    setPreview(null)
   }
   const [sources, setSources] = useState<ClawSourceCatalog | null>(null)
   const [sourcesError, setSourcesError] = useState("")
   const [busy, setBusy] = useState(false)
+  const savedDraft = view?.profiles.find((item) => item.id === draft.id)
+  useConfigurationDraft({ threadId, workspace: view?.workspace ?? workspaceHint ?? null },
+    (draftEdited && (editing.mode === "sequence" || JSON.stringify(draft) !== JSON.stringify(savedDraft))) ||
+      Object.values(componentDirty).some(Boolean), busy)
   const [error, setError] = useState("")
   const [notice, setNotice] = useState("")
   const [preview, setPreview] = useState<{
@@ -108,6 +133,7 @@ function ClawSettings({
     revision: number
     bindingRevision: number
     workspace: string
+    usageContext: "chat" | "project"
   } | null>(null)
   const [upgradeIssues, setUpgradeIssues] = useState<string[]>([])
   const previewApply = (profile: ClawProfile | null) => {
@@ -116,22 +142,30 @@ function ClawSettings({
         profile: structuredClone(profile),
         revision: view.revision,
         bindingRevision: view.bindingRevision,
-        workspace: view.workspace
+        workspace: view.workspace,
+        usageContext: view.usageContext ?? "chat"
       })
   }
   const upgrade = async () => {
     if (!view || !catalog || mutating.current) return
     if (
-      Object.values(componentDirty).some(Boolean) &&
-      !window.confirm("更新灵件版本会重置未提交的参数草稿，继续吗？")
+      (Object.values(componentDirty).some(Boolean) || Object.values(editing.parameterDrafts).some((item) => item.dirty)) &&
+      !window.confirm("更新版本会保留当前有效参数，并重置未完成的数字或 JSON 输入草稿，继续吗？")
     )
       return
+    let pendingDefinition: ReturnType<typeof simpleDraftDefinition>
+    try { pendingDefinition = simpleDraftDefinition(editing, catalog.actions ?? [], true) }
+    catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause))
+      return
+    }
     const proposal = planClawUpgrade(
       draft,
       view.capabilities,
       catalog.actions ?? [],
       (value, schema, providedFields) =>
-        parameterError(value, schema, undefined, providedFields ?? false)
+        parameterError(value, schema, undefined, providedFields ?? false),
+      pendingDefinition ?? null
     )
     setUpgradeIssues(proposal.issues)
     setComponentValid({})
@@ -149,31 +183,17 @@ function ClawSettings({
       )
       return
     }
-    mutating.current = true
-    const generation = lifetime.current
-    ++reading.current
-    setBusy(true)
-    try {
-      const definition = {
-        ...proposal.flow,
-        id: flowDraftId("flow"),
-        name: `${proposal.flow.name.slice(0, 65)} · 修复副本`
-      }
-      const saved = await window.api.mods.flowSave(threadId, definition, 0, view.workspace)
-      if (generation !== lifetime.current) return
-      setFlows((previous) => [...previous, saved])
-      setDraft({ ...proposal.profile, flow: saved })
-      setNotice(
-        "已建立新的流程修复副本，并放入组合草稿。原组合与活动对话未改变；请核对后保存组合并应用。"
-      )
-    } catch (cause) {
-      if (generation === lifetime.current)
-        setError(cause instanceof Error ? cause.message : String(cause))
-    } finally {
-      mutating.current = false
-      if (generation === lifetime.current) setBusy(false)
+    const definition = {
+      ...proposal.flow,
+      id: flowDraftId("flow"),
+      name: `${proposal.flow.name.slice(0, 65)} · 修复副本`
     }
+    setEditingState(editSimpleFlowText(createSimpleClawDraft(proposal.profile, definition.id),
+      JSON.stringify(definition, null, 2)))
+    setDraftEdited(true)
+    setNotice("新版本的执行步骤已放入同一份草稿，尚未保存。核对后保存搭配，再应用到所选聊天。")
   }
+
   const lifetime = useRef(0)
   const reading = useRef(0)
   const mutating = useRef(false)
@@ -258,11 +278,12 @@ function ClawSettings({
       assertViewScope(next)
       setView(next)
       if (mutation.kind === "apply") setPreview(null)
+      if (mutation.kind === "save") setDraftEdited(false)
       setNotice(
         mutation.kind === "save"
-          ? "版本已保存，尚未应用。点击“应用到当前对话”后生效；不会自动执行任务。"
+          ? "版本已保存，尚未应用。点击“应用到所选聊天”后生效；不会自动执行任务。"
           : next.active
-            ? `已在这段聊天使用 ${next.active.name}。回到聊天即可使用。`
+            ? `已在这段聊天使用 ${next.active.name}。点击“去这段聊天使用”即可进入。`
             : "本聊天已恢复原来的灵件、模型、技能和工具设置。"
       )
     } catch (cause) {
@@ -272,6 +293,84 @@ function ClawSettings({
       mutating.current = false
       if (generation === lifetime.current) setBusy(false)
     }
+  }
+  const saveEditing = async () => {
+    if (!view || mutating.current || componentsInvalid || unfinishedStepDrafts) return
+    const originalView = view
+    const generation = lifetime.current
+    const assertCurrent = () => {
+      if (generation !== lifetime.current ||
+        canonicalScope.current !== normalizeWorkspacePathKey(originalView.workspace))
+        throw Error("聊天或项目已变化，草稿已保留，请重新核对后保存。")
+    }
+    mutating.current = true
+    ++reading.current
+    setBusy(true)
+    setError("")
+    let checkpoint = editing.checkpoint
+    try {
+      assertCurrent()
+      const definition = simpleDraftDefinition(editing, catalog?.actions ?? [])
+      const profile = editing.mode === "together" ? { ...draft, flow: undefined } : draft
+      if (checkpoint?.profileSaved) {
+        const savedProfile = checkpoint.flow ? { ...profile, flow: checkpoint.flow } : profile
+        if (JSON.stringify(originalView.profiles.find((item) => item.id === profile.id)) !==
+          JSON.stringify(savedProfile))
+          checkpoint = { ...checkpoint, profileSaved: false }
+      }
+      const result = await saveSimpleCombination({
+        profile, definition, checkpoint, assertCurrent,
+        onCheckpoint: (value) => {
+          checkpoint = value
+          setEditingState((old) => ({ ...old, checkpoint: value, savedFlow: value.flow ?? old.savedFlow }))
+        },
+        saveFlow: async (value) => {
+          const prior = [checkpoint?.flow, editing.savedFlow, draft.flow].find((entry) => entry?.definition.id === value.id)
+          if (prior && JSON.stringify(prior.definition) === JSON.stringify(value)) return prior
+          const saved = await window.api.mods.flowSave(threadId, value,
+            prior?.definition.id === value.id ? prior.revision : 0, originalView.workspace)
+          assertCurrent()
+          setFlows((old) => [...old.filter((item) => item.definition.id !== saved.definition.id), saved])
+          return saved
+        },
+        saveProfile: async (value) => {
+          assertCurrent()
+          const next = await window.api.mods.clawChange(threadId, { kind: "save", profile: value,
+            workspace: originalView.workspace, revision: originalView.revision })
+          assertCurrent()
+          assertViewScope(next)
+          setView(next)
+        }
+      })
+      assertCurrent()
+      setEditingState((old) => ({ ...markSimpleDraftSaved(old, result), checkpoint }))
+      setDraftEdited(false)
+      setNotice("搭配已保存，尚未应用。请从已保存搭配核对后应用到所选聊天。")
+    } catch (cause) {
+      if (generation === lifetime.current) setError(cause instanceof Error ? cause.message : String(cause))
+    } finally {
+      mutating.current = false
+      if (generation === lifetime.current) setBusy(false)
+    }
+  }
+  let editingDefinition: ReturnType<typeof simpleDraftDefinition>
+  try { editingDefinition = simpleDraftDefinition(editing, catalog?.actions ?? []) }
+  catch { editingDefinition = editing.baseDefinition }
+  const changeEditing = (next: SimpleClawDraft, saved = false) => {
+    draftInitialized.current = true
+    setEditingState(next)
+    setDraftEdited(!saved)
+    setPreview(null)
+  }
+  const useInChat = () => {
+    if (!view) return
+    goToConfigurationThread({ threadId, workspace: view.workspace }, () => {
+      const flow = view.active?.flow
+      if (flow) requestChatFlowUse({ threadId, workspace: view.workspace,
+        id: flow.definition.id, revision: flow.revision, name: flow.definition.name,
+        bindingRevision: view.bindingRevision })
+      else requestChatComposerFocus({ threadId, workspace: view.workspace })
+    })
   }
   const navigate = (tab: string) => useAppStore.getState().setShowCustomizeView(true, tab)
   const disabled = busy || !view?.applicable
@@ -285,23 +384,29 @@ function ClawSettings({
       <header className="rounded-2xl border bg-card p-5 sm:p-6">
         <div className="flex items-center gap-3">
           <Sparkles className="size-5 text-primary" />
-          <h2 className="text-xl font-semibold">助手组合</h2>
+          <h2 className="text-xl font-semibold">{assemblyOpen ? "从 Mods 组装新插件" : "常用搭配"}</h2>
         </div>
         <p className="mt-3 text-sm leading-6 text-muted-foreground">
-          查看已安装插件，或把可组合的功能插件和聊天设置存成一套组合。
-          保存后点击“应用到当前对话”，这段聊天才会使用它。
+          先选择目标：为聊天配置功能与工具，或把业务 Mods 和界面扩展组装成独立插件。
+          项目步骤用于已安装插件的一次需求，需进入对应项目使用。
         </p>
-        <div className="mt-4 grid gap-3 text-sm sm:grid-cols-3">
-          {[
-            ["1 · 选择可组合的功能", "原生插件的项目步骤在对应项目中选择"],
-            ["2 · 保存并核对应用", "预览组合将改变哪些设置"],
-            ["3 · 准备首次任务", "回到聊天，填写任务后发送"]
-          ].map(([title, text]) => (
-            <div key={title} className="rounded-xl bg-muted/40 p-3">
-              <strong>{title}</strong>
-              <p className="mt-1 text-xs text-muted-foreground">{text}</p>
-            </div>
-          ))}
+        <div className="mt-4 grid gap-3 text-sm sm:grid-cols-2" aria-label="选择配置目标">
+          <button type="button" aria-label="配置聊天搭配" aria-pressed={!assemblyOpen} disabled={busy}
+            className={`rounded-xl border p-4 text-left ${!assemblyOpen ? "border-primary bg-primary/5" : "hover:bg-muted/40"}`}
+            onClick={() => setAssemblyOpen(false)}>
+            <strong>配置聊天搭配</strong>
+            <span className="mt-1 block text-xs text-muted-foreground">
+              选择聊天功能、公开动作、技能和工具，保存并确认应用到所选聊天。
+            </span>
+          </button>
+          <button type="button" aria-label="从 Mods 组装新插件" aria-pressed={assemblyOpen} disabled={busy || !view?.workspace}
+            className={`rounded-xl border p-4 text-left ${assemblyOpen ? "border-primary bg-primary/5" : "hover:bg-muted/40"}`}
+            onClick={() => showAssembly()}>
+            <strong>从 Mods 组装新插件</strong>
+            <span className="mt-1 block text-xs text-muted-foreground">
+              组合 AutoBiz 业务步骤和自己的界面扩展，生成、检查后再安装新插件。
+            </span>
+          </button>
         </div>
         <div className="mt-4 flex flex-wrap gap-2">
           <Button variant="outline" size="sm" onClick={() => navigate("mods")}>
@@ -312,6 +417,11 @@ function ClawSettings({
           </Button>
         </div>
       </header>
+      {assemblyVisited && <div hidden={!assemblyOpen} inert={!assemblyOpen}>
+        <BusinessModAssemblyPanel threadId={threadId} workspace={workspaceHint ?? view?.workspace}
+          initialPluginId={assemblySource} active={assemblyOpen} />
+      </div>}
+      <div hidden={assemblyOpen} inert={assemblyOpen} className="space-y-6" aria-label="聊天搭配配置">
       {error && (
         <p
           role="alert"
@@ -374,9 +484,9 @@ function ClawSettings({
               <Button
                 size="sm"
                 disabled={disabled}
-                onClick={() => useAppStore.getState().setShowCustomizeView(false)}
+                onClick={useInChat}
               >
-                回到聊天使用
+                去这段聊天使用
               </Button>
               <Button
                 size="sm"
@@ -398,7 +508,7 @@ function ClawSettings({
                 核对后应用：{preview.profile?.name ?? "恢复原来的聊天设置"}
               </h3>
               <p className="text-xs text-muted-foreground">
-                下面是这段聊天将发生的变化。确认后使用新设置，任务仍需你发送。
+                下面是这段聊天将发生的变化。确认后使用新设置，任务仍需你主动开始。
               </p>
               <ul className="space-y-1 text-sm">
                 {(clawChangeSummary(view.active, preview.profile).length
@@ -410,7 +520,8 @@ function ClawSettings({
               </ul>
               {(preview.revision !== view.revision ||
                 preview.bindingRevision !== view.bindingRevision ||
-                preview.workspace !== view.workspace) && (
+                preview.workspace !== view.workspace ||
+                preview.usageContext !== (view.usageContext ?? "chat")) && (
                 <p role="alert" className="text-sm text-destructive">
                   配置已变化，请关闭后重新预览。
                 </p>
@@ -422,7 +533,8 @@ function ClawSettings({
                     disabled ||
                     preview.revision !== view.revision ||
                     preview.bindingRevision !== view.bindingRevision ||
-                    preview.workspace !== view.workspace
+                    preview.workspace !== view.workspace ||
+                    preview.usageContext !== (view.usageContext ?? "chat")
                   }
                   onClick={() =>
                     void run({
@@ -448,14 +560,17 @@ function ClawSettings({
               threadId={threadId}
               workspace={view.workspace}
               functionPluginIds={view.capabilities.map((item) => item.pluginId)}
+              onAssemble={showAssembly}
             />
           )}
-          {catalog && (
+          {!advancedOpen && catalog && (
             <SimpleClawBuilder
+              onAssemble={() => showAssembly()}
               threadId={threadId}
               view={view}
               catalog={catalog}
-              initialProfile={draft}
+              editor={editing}
+              onEditor={changeEditing}
               practiceIntent={practiceIntent}
               externalBusy={busy}
               beginMutation={() => {
@@ -474,7 +589,10 @@ function ClawSettings({
                 assertViewScope(next)
                 setView(next)
               }}
-              onAdvanced={() => setAdvancedOpen(true)}
+              onAdvanced={() => {
+                setAdvancedOpen(true)
+                return true
+              }}
               onSources={() => navigate("mods")}
             />
           )}
@@ -531,12 +649,13 @@ function ClawSettings({
                       {JSON.stringify(view.active) === JSON.stringify(profile) && (
                         <Check className="mr-1 size-3" />
                       )}
-                      应用到当前对话
+                      应用到所选聊天
                     </Button>
                   </div>
                 ))}
               </aside>
               <section className="space-y-4 rounded-xl border bg-card p-5">
+                <Button type="button" size="sm" variant="outline" onClick={() => setAdvancedOpen(false)}>返回简单配置</Button>
                 <div className="flex flex-wrap items-center justify-between gap-2">
                   <h3 className="text-sm font-semibold">
                     {view.active?.id === draft.id
@@ -551,7 +670,7 @@ function ClawSettings({
                   组合名称
                   <input
                     aria-label="助手组合名称"
-                    className="rounded-lg border bg-background px-3 py-2"
+                    className="devclaw-input w-full min-w-0 text-sm"
                     disabled={disabled}
                     maxLength={80}
                     value={draft.name}
@@ -581,9 +700,11 @@ function ClawSettings({
                   <p className="text-xs text-muted-foreground">
                     上下调整插件顺序可以改变它们的加载顺序；多个插件修改同一位置时，效果可能不同。
                   </p>
-                  {!view.capabilities.length && (
+                  {!view.capabilities.some((item) =>
+                    hasUsableClawComponents(item, view.usageContext ?? "chat")
+                  ) && (
                     <p className="text-sm text-muted-foreground">
-                      还没有可选灵件。先到“添加功能”安装，也可以只调整下方聊天设置。
+                      当前场景没有适用功能。可到“添加功能”管理插件，或调整下方聊天设置。
                     </p>
                   )}
                   {[
@@ -592,6 +713,7 @@ function ClawSettings({
                     ),
                     ...view.capabilities.filter(
                       (item) =>
+                        hasUsableClawComponents(item, view.usageContext ?? "chat") &&
                         !draft.capabilities.some(
                           (capability) => capability.pluginId === item.pluginId
                         )
@@ -634,11 +756,7 @@ function ClawSettings({
                               capabilities: event.target.checked
                                 ? [
                                     ...draft.capabilities,
-                                    {
-                                      pluginId: item.pluginId,
-                                      name: item.name,
-                                      digest: item.digest!
-                                    }
+                                    newClawCapability(item, view.usageContext ?? "chat")
                                   ]
                                 : draft.capabilities.filter(
                                     (capability) => capability.pluginId !== item.pluginId
@@ -700,6 +818,7 @@ function ClawSettings({
                             <ClawComponentSelector
                               key={`${editorSession}:${item.pluginId}`}
                               source={item}
+                              usageContext={view.usageContext ?? "chat"}
                               value={
                                 draft.capabilities.find(
                                   (capability) => capability.pluginId === item.pluginId
@@ -707,6 +826,13 @@ function ClawSettings({
                               }
                               disabled={disabled}
                               onValidity={onComponentValidity}
+                              drafts={editing.componentDrafts[item.pluginId] ?? {}}
+                              onDraftsChange={(value) => {
+                                setDraftEdited(true)
+                                setEditingState((old) => ({ ...old, componentDrafts: {
+                                  ...old.componentDrafts, [item.pluginId]: value
+                                } }))
+                              }}
                               onDirty={onComponentDirty}
                               onChange={(next) =>
                                 setDraft({
@@ -814,7 +940,7 @@ function ClawSettings({
                       聊天默认模型
                       <select
                         aria-label="聊天默认模型"
-                        className="rounded-lg border bg-background p-2"
+                        className="devclaw-select w-full min-w-0 text-sm"
                         disabled={disabled}
                         value={draft.models?.default ?? ""}
                         onChange={(event) =>
@@ -858,7 +984,7 @@ function ClawSettings({
                         · {role}
                         <select
                           aria-label={`步骤模型 ${role}`}
-                          className="rounded-lg border bg-background p-2"
+                          className="devclaw-select w-full min-w-0 text-sm"
                           disabled={disabled}
                           value={draft.models?.roles[role] ?? ""}
                           onChange={(event) => {
@@ -888,20 +1014,36 @@ function ClawSettings({
                   </section>
                   <section className="space-y-3 rounded-xl border bg-muted/20 p-4">
                     <h3 className="text-sm font-medium">可选：搭配一套执行步骤</h3>
+                    {editing.mode === "sequence" && <div className="space-y-2">
+                      <p className="text-sm">此份草稿包含 {editing.steps.length} 个执行步骤；切换视图不会保存步骤或替换正式版本。</p>
+                      <details className="space-y-2">
+                        <summary className="cursor-pointer text-sm">高级：编辑本份执行步骤定义</summary>
+                        {editingDefinition || editing.flowText !== undefined ? <>
+                          <textarea aria-label="执行步骤定义草稿" spellCheck={false}
+                            className="devclaw-input min-h-56 w-full min-w-0 font-mono text-xs"
+                            disabled={disabled} value={editing.flowText ?? JSON.stringify(editingDefinition, null, 2)}
+                            onChange={(event) => {
+                              if (unfinishedStepDrafts && !window.confirm("编辑完整定义会替换尚未完成的简单参数输入，继续吗？")) return
+                              changeEditing(editSimpleFlowText(unfinishedStepDrafts
+                                ? { ...editing, parameterDrafts: {} } : editing, event.target.value))
+                            }}/>
+                          {editing.flowTextError && <p role="alert" className="text-sm text-destructive">{editing.flowTextError}</p>}
+                          <p className="text-xs text-muted-foreground">这里只编辑草稿；保存时由原流程校验器核对来源、结构与版本。正式版本未改变。</p>
+                        </> : <p className="text-sm">先在简单配置中为每一步选择操作，再编辑完整定义。</p>}
+                      </details>
+                    </div>}
+
                     <select
                       aria-label="组合使用的流程"
-                      className="w-full rounded-lg border bg-background p-2 text-sm"
+                      className="devclaw-select w-full min-w-0 text-sm"
                       disabled={disabled}
                       value={draft.flow ? `${draft.flow.definition.id}:${draft.flow.revision}` : ""}
-                      onChange={(event) =>
-                        setDraft({
-                          ...draft,
-                          flow: flows.find(
-                            (flow) =>
-                              `${flow.definition.id}:${flow.revision}` === event.target.value
-                          )
-                        })
-                      }
+                      onChange={(event) => {
+                        if (draftEdited && editing.mode === "sequence" &&
+                          !window.confirm("改用已保存步骤将替换当前未保存的步骤草稿，继续吗？")) return
+                        const flow = flows.find((entry) => `${entry.definition.id}:${entry.revision}` === event.target.value)
+                        changeEditing(createSimpleClawDraft({ ...draft, flow }, flowDraftId("flow")))
+                      }}
                     >
                       <option value="">不预设执行步骤</option>
                       {draft.flow &&
@@ -924,7 +1066,7 @@ function ClawSettings({
                       ))}
                     </select>
                     <p className="text-xs leading-5 text-muted-foreground">
-                      保存后会保留这套步骤的当前版本。使用时回到聊天，选择“按步骤执行”，填写目标并发送。
+                      应用后点击“去这段聊天使用”。在唯一输入框中填写任务，由你选择本次使用步骤并发送。
                     </p>
                     <Button
                       type="button"
@@ -940,23 +1082,18 @@ function ClawSettings({
                   选好后请查看各插件的使用说明：有的在聊天时自动工作，有的需要输入命令，有的需要设置检查规则。
                 </p>
                 <Button
-                  disabled={disabled || !draft.name.trim() || componentsInvalid}
-                  onClick={() =>
-                    void run({
-                      kind: "save",
-                      profile: draft,
-                      workspace: view.workspace,
-                      revision: view.revision
-                    })
-                  }
+                  disabled={disabled || !draft.name.trim() || componentsInvalid || unfinishedStepDrafts || !!editing.flowTextError}
+                  onClick={() => void saveEditing()}
                 >
                   保存组合
                 </Button>
+                {unfinishedStepDrafts && <p role="alert" className="text-sm text-destructive">执行步骤有未完成的参数输入。请返回简单配置修正，或明确改写完整定义后再保存。</p>}
               </section>
             </div>
           </details>
         </>
       )}
+      </div>
     </div>
   )
 }

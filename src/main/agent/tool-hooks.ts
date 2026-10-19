@@ -12,6 +12,7 @@ import { withFunctionExecution, currentFunctionExecution } from "../mods/v2/exec
 import type { ModRuntimeAuthority } from "../mods/runtime-instance"
 import type { HookContext, HookResultCallback } from "../hooks/runner"
 import { runHooksEnriched } from "../hooks/required-skill"
+import { bindHookExecutionResult } from "../hooks/execution-result"
 import {
   getCurrentHookAgentId,
   getHookAgentIdFromRequest,
@@ -461,8 +462,7 @@ export function createToolHookMiddleware(options: ToolHookMiddlewareOptions) {
 
             const toolArgs = mergeUpdatedInput(baseToolArgs, preResult?.updatedInput)
             await authorizeCurrentModInput(`host:${toolName}`, toolArgs)
-            const result = await publishCurrentModResult(
-              await handler({
+            const nativeResult = await handler({
                 ...request,
                 toolCall: toolCall ? { ...toolCall, args: toolArgs } : toolCall,
                 state:
@@ -472,7 +472,8 @@ export function createToolHookMiddleware(options: ToolHookMiddlewareOptions) {
                     ? { ...(request.state as Record<string, unknown>) }
                     : request.state
               })
-            )
+            const executionResult = stringifyToolResult(nativeResult)
+            const result = await publishCurrentModResult(nativeResult)
 
             const signal = detectToolFailure(toolName, getFailureDetectionInput(result))
             const alreadyRecordedThrowFailure = Boolean(
@@ -497,6 +498,7 @@ export function createToolHookMiddleware(options: ToolHookMiddlewareOptions) {
               toolArgs,
               toolResult: stringifyToolResult(result)
             }
+            bindHookExecutionResult(postContext, executionResult)
             const postResult = await runHooksEnriched(
               options.resolveHooksForContext("PostToolUse", postContext),
               "PostToolUse",

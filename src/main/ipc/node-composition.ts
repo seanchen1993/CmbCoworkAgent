@@ -13,6 +13,9 @@ import {
 } from "../harness-board/service"
 import type { PluginDerivationScope } from "../../shared/plugin-derivation"
 import { isSameWorkspacePath } from "../../shared/workspace-path"
+import { getPlugins } from "../storage"
+import { capabilityCatalogWorkers } from "../plugins/capability-catalog-client"
+import { readPluginCompatibility } from "../plugins/plugin-compatibility"
 
 export function registerNodeCompositionHandlers(ipc: IpcMain, window: () => BrowserWindow | null) {
   const service = new NativeNodeComposition({
@@ -80,6 +83,24 @@ export function registerNodeCompositionHandlers(ipc: IpcMain, window: () => Brow
       ])
     }
   }
+  ipc.handle("node-composition:compatibility", async (event, input) => {
+    const scope = access(event, input)
+    if (typeof input.pluginId !== "string" || !input.pluginId || input.pluginId.length > 200)
+      throw Error("插件标识无效。")
+    const installed = getPlugins().find((plugin) => plugin.id === input.pluginId)
+    if (!installed) throw Error("插件已移除，请刷新目录。")
+    const plugin = { ...installed }
+    const identity = (value: typeof plugin) => JSON.stringify([
+      value.id, value.path, value.name, value.version, value.enabled, value.updatedAt
+    ])
+    const result = await capabilityCatalogWorkers.read((reader) =>
+      readPluginCompatibility(plugin, reader))
+    scope.guard()
+    const current = getPlugins().find((item) => item.id === plugin.id)
+    if (!current || identity(current) !== identity(plugin))
+      throw Error("插件版本或启用状态已变化，请重新检查适用范围。")
+    return result
+  })
   ipc.handle("node-composition:projects", async (event, input) => {
     const scope = access(event, input)
     const result = await listNativeNodeProjects(input.expectedWorkspace)
@@ -103,7 +124,8 @@ export function registerNodeCompositionHandlers(ipc: IpcMain, window: () => Brow
       input.projectId,
       input.templateId,
       input.selected,
-      scope.guard
+      scope.guard,
+      input.includeOptionalDependencies
     )
   })
   ipc.handle("node-composition:create", async (event, input) => {
@@ -113,7 +135,8 @@ export function registerNodeCompositionHandlers(ipc: IpcMain, window: () => Brow
       input.expectedWorkspace,
       input.planId,
       input.feature,
-      scope.guard
+      scope.guard,
+      input.acknowledgeEntryRequirements
     )
   })
 }

@@ -3,7 +3,7 @@ export const MOD_COMMAND_HISTORY_LIMIT = 50
 
 /** Missing scope retains the original global notification, including legacy Mods. */
 // Records change retained evidence/notices only; they do not revoke UI drawings.
-export type ModUiChangeScope = "panes" | "records" | "cards" | "feedback" | `source-replaced:${number}` | `source-retiring:${number}` | `site:${string}` | `site-invalidated:${string}` | `site-redraw:${string}`
+export type ModUiChangeScope = "panes" | "records" | "cards" | "feedback" | `source-replaced:${number}` | `source-retiring:${number}` | `site:${string}` | `site-invalidated:${string}` | `site-redraw:${string}` | `site-presentations:${string}`
 
 export function isModSiteChangeScope(scope: unknown): scope is `site:${string}` | `site-invalidated:${string}` | `site-redraw:${string}` {
   return typeof scope === "string" &&

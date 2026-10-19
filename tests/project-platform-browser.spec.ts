@@ -220,7 +220,7 @@ async function main() {
       const root=createRoot(document.getElementById('root'));
       const pending=[], calls=[]; let failed=false;
       const overview=(id,workspace)=>({threadId:id,workspace,capturedAt:1,
-        instructions:{status:'unknown',message:'规范 '+workspace},
+        instructions:{status:'observed',message:'规范说明',snapshot:{origin:'host',entries:[{path:'规范 '+workspace,delivery:'unknown',layer:'project',scope:workspace,reason:'待核对'}],limitations:[]}},
         policy:{required:false,blockedTools:[],recordedBlocks:0,explanation:'原审批保留',decisions:{state:'observed',explanation:'真实确认记录',limited:false,records:[{id:'policy-id',at:1,source:'hook',event:'PreSkillUse',ruleId:'technical-rule-id',explanation:'原检查阻止了本次执行',nextStep:'请修复已列出的条件后再确认'}]}},
         legacyMetrics:{state:'observed',counts:{started:0,succeeded:1,failed:1,cancelled:0,unknown:1},totalSettledExecutionMs:1200,repeatedExecutions:1,explanation:'历史结束不等于成果合格',limited:false,executions:[{operationId:'technical-operation-id',threadId:'technical-thread-id',startedAt:1,status:'unknown'}]},
         metrics:{sampled:0,succeeded:0,failed:0,running:0,unknown:0,inputTokens:null,outputTokens:null,limited:false,explanation:'仅保留的记录'},suggestions:[]});
@@ -266,7 +266,7 @@ async function main() {
     await page.getByRole("alert").waitFor()
     assert.match(await page.getByRole("alert").innerText(), /保留上次读取/)
     assert.equal(await page.getByText("规范 A", { exact: true }).count(), 1)
-    await page.getByText("组织策略 · 查看限制与说明", { exact: true }).click()
+    await page.getByText("使用限制 · 查看限制与说明", { exact: true }).click()
     await page.getByText("原检查阻止了本次执行", { exact: true }).waitFor()
     await page.getByText("下一步：请修复已列出的条件后再确认", { exact: true }).waitFor()
     assert.equal(await page.getByText(/technical-rule-id/).isVisible(), false)
@@ -310,7 +310,7 @@ async function main() {
     assert.equal(await page.getByText(/执行中 0 次/).count(), 0)
     await page.getByText("这是关联托管任务的单独快照，不与执行账本相加。", { exact: true }).waitFor()
     console.log("PASS hidden panel is idle; workspace A→B→A rejects stale data; refresh failure labeled; diff explicit and scoped; no repeated reads or React errors")
-    await verifyLocalProjects(root, browser, artifacts)
+    if (!process.argv.includes("--overview-only")) await verifyLocalProjects(root, browser, artifacts)
   } finally { await browser.close() }
 }
 main().catch(error => { console.error(error); process.exitCode = 1 })

@@ -241,12 +241,15 @@ internal static class WindowsBackgroundJobController
 
     private static int Main(string[] args)
     {
-        bool isArgv = args.Length >= 2 && args[1] == "argv";
+        bool isArgvCmd = args.Length >= 2 && args[1] == "argv-cmd";
+        bool isHook = args.Length >= 2 && (args[1] == "hook-argv" || isArgvCmd);
+        bool isArgv = args.Length >= 2 && (args[1] == "argv" || isHook);
         if ((!isArgv && args.Length != 2) || args.Length < (isArgv ? 3 : 2) || string.IsNullOrWhiteSpace(args[0]))
         {
             Console.Error.WriteLine("[LocalSandbox] Background shell path is missing");
             return 126;
         }
+        if (isArgvCmd && args.Length != 4) return 126;
 
         string jobError;
         if (!InitializeKillOnCloseJob(out jobError))
@@ -286,8 +289,11 @@ internal static class WindowsBackgroundJobController
             }
         }
 
-        string shellArguments = isArgv ? DirectArguments(args) : ShellArguments(args[1], cmdCommand);
-        if (isCmdShell &&
+        // Hook commands preserve Node's raw cmd quoting while their JSON stdin remains input.
+        // The ordinary argv protocol continues to use CRT argument quoting unchanged.
+        string shellArguments = isArgvCmd ? ShellArguments("cmd", args[3]) :
+            isArgv ? DirectArguments(args) : ShellArguments(args[1], cmdCommand);
+        if ((isCmdShell || isArgvCmd) &&
             WindowsCommandLineLength(args[0], shellArguments) > CmdMaximumArgumentsLength)
         {
             Console.Error.WriteLine(
@@ -344,11 +350,17 @@ internal static class WindowsBackgroundJobController
                 return 126;
             }
 
+            string hookNonce = null;
             if (isArgv)
             {
                 // Private protocol prefix: distinguish executable startup failure from exit 126.
                 // Write before pumping either child stream; the Mods host removes this prefix.
-                byte[] ready = Encoding.ASCII.GetBytes("MODS_PROCESS_STARTED_V1\n");
+                // This nonce is controller-private: never put it in child argv/environment.
+                // A Hook cannot manufacture a valid native cleanup trailer in its own stdout.
+                hookNonce = isHook ? Guid.NewGuid().ToString("N") : null;
+                byte[] ready = Encoding.ASCII.GetBytes(isHook
+                    ? "MODS_HOOK_STARTED_V1:" + hookNonce + "\n"
+                    : "MODS_PROCESS_STARTED_V1\n");
                 Stream output = Console.OpenStandardOutput();
                 output.Write(ready, 0, ready.Length);
                 output.Flush();
@@ -374,6 +386,14 @@ internal static class WindowsBackgroundJobController
                 // shell drain deadline to the argv stream; cancellation closes this Job instead.
                 if (!StopRemainingJobChildren()) return 125;
                 try { Task.WaitAll(new[] { outputPump, errorPump }); } catch { return 125; }
+                if (isHook)
+                {
+                    byte[] settled = Encoding.ASCII.GetBytes(
+                        "MODS_HOOK_SETTLED_V1:" + hookNonce + ":0\n");
+                    Stream output = Console.OpenStandardOutput();
+                    output.Write(settled, 0, settled.Length);
+                    output.Flush();
+                }
                 return exitCode;
             }
             // A daemon may inherit the shell's stdout/stderr writers. Waiting

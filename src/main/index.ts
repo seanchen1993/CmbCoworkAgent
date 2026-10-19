@@ -1,4 +1,5 @@
-import { registerBusinessModAssemblyHandlers } from "./ipc/business-mod-assembly"
+import { registerProjectCapabilityRuntimeAdmission } from "./plugins/project-capability-admission"
+import { registerLegacyCompositionAdmission } from "./harness-board/project-runtime/composition-legacy-production"
 import { registerWindowPresentation } from "./window-presentation"
 import { initializeHarnessConfigV2 } from "./harness-board/config-v2"
 import { initializeNotificationRuntime } from "./notification-runtime"
@@ -370,6 +371,7 @@ import { registerTaskMmdHandlers } from "./ipc/task-mmd"
 import { registerGitHandlers } from "./ipc/git"
 import { registerPluginHandlers } from "./ipc/plugins"
 import { registerPluginDerivationHandlers } from "./ipc/plugin-derivation"
+import { registerBusinessModAssemblyHandlers } from "./ipc/business-mod-assembly"
 import { registerNodeCompositionHandlers } from "./ipc/node-composition"
 import { registerModsHandlers } from "./ipc/mods"
 import { registerPluginFileHandlers } from "./ipc/plugin-files"
@@ -440,6 +442,7 @@ import { closeAllWorkspaceFileScans } from "./workspace-file-scan/manager"
 import { stopAllWatching } from "./services/workspace-watcher"
 import { closeLegacySubagentTranscriptMigrations } from "./legacy-subagent-migration/coordinator"
 import { closeSubagentTranscriptStartupWorker } from "./subagent-transcript-startup/client"
+import { closeWorkspaceProbeWorker } from "./services/workspace-probe-client"
 import {
   hasActiveScheduledTaskRuns,
   startScheduler,
@@ -1199,6 +1202,8 @@ if (browserNativeMessagingHostLaunch) {
     )
     registerHarnessBoardHandlers(ipcMain)
     registerProjectRuntimeHandlers(ipcMain, () => mainWindow)
+    registerProjectCapabilityRuntimeAdmission()
+    registerLegacyCompositionAdmission()
     registerUpdaterHandlers()
     registerLspHandlers(ipcMain)
     registerPathOpenersHandlers(ipcMain)
@@ -1778,6 +1783,9 @@ if (browserNativeMessagingHostLaunch) {
       ),
       closeSubagentTranscriptStartupWorker().catch((err) =>
         console.warn("[Main] closeSubagentTranscriptStartupWorker error:", err)
+      ),
+      closeWorkspaceProbeWorker().catch((err) =>
+        console.warn("[Main] closeWorkspaceProbeWorker error:", err)
       ),
       closeHarnessAdapterDetailWorker().catch((err) =>
         console.warn("[Main] closeHarnessAdapterDetailWorker error:", err)

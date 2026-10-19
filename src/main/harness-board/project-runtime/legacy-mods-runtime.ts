@@ -1,3 +1,4 @@
+import { lstatSync, realpathSync } from "node:fs"
 import type { PluginMetadata } from "../../types"
 import type { ModControlStore } from "../../mods/control-store"
 import type { LegacyProjectRuntimeBinding } from "../../../shared/project-runtime/legacy-operations"
@@ -6,6 +7,9 @@ import { assertFunctionSourcesCurrent } from "../../mods/v2/source-adoption-fenc
 
 export interface LegacyModsAdmission {
   identity: NonNullable<LegacyProjectRuntimeBinding["mods"]>
+  /** Original authority/revocation only; metadata readers must not hash complete packages. */
+  assertAuthorityCurrent(): void
+  /** Fresh two-root source proof for real execution/IO/adoption/publication boundaries. */
   assertCurrent(): void
 }
 interface LegacyModsRuntime {
@@ -65,22 +69,48 @@ export function createLegacyModsRuntime(deps: {
       const grant = deps.store.getGrant(key, modId)
       if (!grant?.enabled || grant.digest !== installed.digest)
         throw Error("LEGACY_MODS_GRANT_REQUIRED")
-      const assertCurrent = () => {
-        const current = deps.plugins().find((candidate) => candidate.id === plugin.id)
+      // Capture immutable metadata and real root identities before returning this admission.
+      // No source bytes or long-lived content cache are used by routine authority readers.
+      const expected = { id: plugin.id, name: plugin.name, version: plugin.version, path: plugin.path }
+      const roots = [installed.root, pinned.root].map(path => {
+        const stat = lstatSync(path, { bigint: true })
+        return { path, device: stat.dev, inode: stat.ino }
+      })
+      const pathKey = (path: string) => process.platform === "win32" ? path.toLowerCase() : path
+      const assertAuthorityCurrent = () => {
+        const current = deps.plugins().find((candidate) => candidate.id === expected.id)
         if (
           deps.workspaceKey(workspace) !== key ||
           !deps.isEnabled(key) ||
           !current?.enabled ||
-          current.path !== plugin.path
+          current.path !== expected.path || current.name !== expected.name ||
+          current.version !== expected.version
         )
           throw Error("LEGACY_MODS_RUNTIME_CHANGED")
         deps.store.assertGrant(grant)
+        try {
+          for (const root of roots) {
+            const stat = lstatSync(root.path, { bigint: true })
+            if (!stat.isDirectory() || stat.isSymbolicLink() || stat.dev !== root.device ||
+                stat.ino !== root.inode || pathKey(realpathSync(root.path)) !== pathKey(root.path))
+              throw Error("LEGACY_MODS_RUNTIME_CHANGED")
+          }
+        } catch (cause) {
+          // Missing/unreadable or replaced local roots are native source invalidation,
+          // never a provider failure that can be repaired by replaying the business turn.
+          throw Error("LEGACY_MODS_RUNTIME_CHANGED", { cause })
+        }
+      }
+      const assertCurrent = () => {
+        assertAuthorityCurrent()
         assertFunctionSourcesCurrent(installed)
         assertFunctionSourcesCurrent(pinned)
+        assertAuthorityCurrent()
       }
       assertCurrent()
       return {
         identity: { modId, digest: installed.digest, grantEpoch: grant.epoch },
+        assertAuthorityCurrent,
         assertCurrent
       }
     }

@@ -54,6 +54,8 @@ async function fixture(startup = "", hooks = "") {
     oldPeer: false,
     pending: 0,
     calls: 0,
+    readGate: undefined as Promise<void> | undefined,
+    reading: false,
     owners: 0
   }
   const guests: FunctionGuestRuntime[] = []
@@ -73,7 +75,10 @@ async function fixture(startup = "", hooks = "") {
           return value
         },
         changed: () => {},
-        readSession: async () => ({}),
+        readSession: async () => {
+          if (state.readGate) { state.reading = true; await state.readGate }
+          return {}
+        },
         configurationBusy: () => state.busy,
         openConversationOwner: () => {
           state.owners++
@@ -153,6 +158,100 @@ async function fixture(startup = "", hooks = "") {
     path
   }
 }
+
+it("retires generated stage and prepare owners before admitting two actual parallel child VMs", async () => {
+  const f = await fixture()
+  await f.run("ordinary-history")
+  for (const stage of ["prd", "specs", "design", "plan"]) {
+    expect(await f.run(stage)).toEqual({ text: "1" })
+    await f.manager.closeThreadAndWait(stage)
+    expect(f.manager.runtimeSessions()).toMatchObject({ resident: 1, reserved: 0, retiring: 0 })
+  }
+  await f.run("code")
+  await f.run("workflow-prepare")
+  await f.manager.closeThreadAndWait("workflow-prepare")
+  expect(await Promise.all([f.run("batch-a"), f.run("batch-b")])).toEqual([
+    { text: "1" }, { text: "1" }
+  ])
+  expect(f.manager.runtimeSessions()).toMatchObject({ limit: 6, resident: 4 })
+  await Promise.all([f.manager.closeThreadAndWait("batch-a"), f.manager.closeThreadAndWait("batch-b")])
+  expect(await f.run("ordinary-history")).toEqual({ text: "2" })
+  expect(await f.run("code")).toEqual({ text: "2" })
+  expect(f.starts("ordinary-history")).toBe(1)
+  expect(f.starts("code")).toBe(1)
+})
+
+it("holds a one-shot owner's sixth slot until its actual VM drain confirms", async () => {
+  const f = await fixture()
+  for (let index = 0; index < 6; index++) await f.run("live-" + index)
+  const gate = Promise.withResolvers<void>()
+  f.state.gate = gate.promise
+  let settled = false
+  const closing = f.manager.closeThreadAndWait("live-5").then(() => { settled = true })
+  try {
+    await vi.waitFor(() => expect(f.state.drains).toBe(1))
+    expect(settled).toBe(false)
+    expect(f.manager.runtimeSessions()).toMatchObject({ resident: 6, reserved: 1, retiring: 1 })
+    await expect(f.run("next-child")).rejects.toThrow("MODS_SESSION_CAPACITY")
+    expect(f.state.loads).toBe(6)
+  } finally {
+    gate.resolve()
+    await closing
+  }
+  expect(f.manager.runtimeSessions()).toMatchObject({ resident: 5, reserved: 0, retiring: 0 })
+  expect(await f.run("next-child")).toEqual({ text: "1" })
+})
+
+it("does not release capacity or rebuild an owner when its physical retirement fails", async () => {
+  const f = await fixture()
+  for (let index = 0; index < 6; index++) await f.run("live-" + index)
+  f.state.failDrain = true
+  await expect(f.manager.closeThreadAndWait("live-5")).rejects.toThrow("EXIT_UNCONFIRMED")
+  expect(f.manager.runtimeSessions()).toMatchObject({ resident: 6, reserved: 1, retiring: 1 })
+  await expect(f.run("next-child")).rejects.toThrow("MODS_SESSION_CAPACITY")
+  await expect(f.run("live-5")).rejects.toThrow("MODS_RUNTIME_SESSION_BUSY")
+  expect(f.state.loads).toBe(6)
+})
+
+it("awaits an entered native SDK caller's real finally before releasing its retired slot", async () => {
+  const f = await fixture(
+    'await $.command.register({name:"held",description:"Held"})',
+    'on("command.run",{command:"held"},async($)=>{await $.session.messages();return{text:"read"}})'
+  )
+  const gate = Promise.withResolvers<void>()
+  f.state.readGate = gate.promise
+  const command = (await f.manager.commands(f.root, "child")).find(item => item.command === "held")!
+  const caller = f.manager.runCommand(f.root, "child", command, "", f.signal)
+  const callerResult = caller.catch(error => error)
+  await vi.waitFor(() => expect(f.state.reading).toBe(true))
+  let settled = false
+  const closing = f.manager.closeThreadAndWait("child").then(() => { settled = true })
+  try {
+    await vi.waitFor(() => expect(f.state.drains).toBe(1))
+    expect(settled).toBe(false)
+    expect(f.manager.runtimeSessions()).toMatchObject({ resident: 1, reserved: 1 })
+  } finally {
+    gate.resolve()
+    await callerResult
+    await closing
+  }
+  expect(f.manager.runtimeSessions()).toMatchObject({ resident: 0, reserved: 0, retiring: 0 })
+})
+
+it("a captured predecessor cannot retire a replacement VM with the same thread identity", async () => {
+  const f = await fixture()
+  await f.run("same")
+  const old = f.manager.captureThreadRetirement("same")
+  await f.manager.closeThreadAndWait("same")
+  await f.run("same")
+  expect(() => old.retire()).toThrow("MODS_SCOPE_CHANGED")
+  expect(await f.run("same")).toEqual({ text: "2" })
+  const current = f.manager.captureThreadRetirement("same")
+  const first = current.retire()
+  expect(current.retire()).toBe(first)
+  await first
+  expect(f.state.drains).toBe(2)
+})
 
 it("reads occupancy without loading and releases only the selected VM before admitting seven", async () => {
   const f = await fixture()
@@ -679,6 +778,57 @@ it("retains started closures while reclaiming other pure probes", async () => {
   for (let i = 0; i < 6; i++) await f.manager.hasEventHandler(f.root, `quiet-${i}`, "command.run")
   expect(await f.run("started")).toEqual({ text: "2" })
   expect(f.starts("started")).toBe(1)
+})
+
+it("retains applied native behavior selections under probe pressure until explicitly disabled", async () => {
+  const f = await fixture(
+    "",
+    `on.capability({
+    apiVersion:"devclaw.capability/v1",id:"format",version:"1.0.0",title:"Format",
+    scope:"conversation",stateSchema:{type:"object",additionalProperties:true},actions:[{
+      id:"format",title:"Format",inputSchema:{type:"object",additionalProperties:true},
+      outputSchema:{type:"object",additionalProperties:true},requiredPermissions:[],
+      cancellable:true,idempotency:"keyed"
+    }],presentation:{type:"behavior",apiVersion:"devclaw.behavior/v1",id:"format",
+      title:"Format",point:"ui.toast",phase:"replace",action:"format"}
+  },{act:async()=>({})});`
+  )
+  const selection = "release-demo/format"
+  for (let i = 0; i < 6; i++) {
+    const threadId = `selected-${i}`
+    await f.manager.hasEventHandler(f.root, threadId, "command.run")
+    expect(f.row(threadId).autoReclaimable).toBe(true)
+    const preview = f.manager.platformBehaviorPreview(f.root, threadId, [selection])
+    expect(preview.canApply).toBe(true)
+    f.manager.platformBehaviorApply(f.root, threadId, preview.previewId, preview.revision)
+    expect(f.row(threadId)).toMatchObject({
+      autoReclaimable: false,
+      guestEntered: false,
+      canRelease: false,
+      state: "discovery",
+      diagnostics: { backgroundResources: 0, subscriptions: 0, inFlight: 0 }
+    })
+  }
+  await expect(f.manager.hasEventHandler(f.root, "seventh", "command.run")).rejects.toMatchObject({
+    code: "MODS_SESSION_CAPACITY"
+  })
+  await expect(f.release(f.row("selected-0"))).rejects.toMatchObject({
+    code: "MODS_RUNTIME_SESSION_BUSY"
+  })
+  expect(f.state.drains).toBe(0)
+  expect(f.state.loads).toBe(6)
+  for (let i = 0; i < 6; i++) {
+    expect(f.manager.platformBehaviorList(f.root, `selected-${i}`).active).toEqual([selection])
+    expect(f.starts(`selected-${i}`)).toBeUndefined()
+  }
+  f.manager.platformBehaviorDisable(f.root, "selected-0")
+  expect(f.row("selected-0").autoReclaimable).toBe(true)
+  expect(await f.manager.hasEventHandler(f.root, "seventh", "command.run")).toBe(true)
+  expect(f.row("selected-0")).toBeUndefined()
+  expect(f.state.drains).toBe(1)
+  expect(f.state.loads).toBe(7)
+  expect(f.manager.platformBehaviorList(f.root, "selected-1").active).toEqual([selection])
+  expect(f.starts("seventh")).toBeUndefined()
 })
 
 it("detaches native drawing without discarding the used guest or replaying startup", async () => {

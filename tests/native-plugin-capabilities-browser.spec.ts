@@ -17,12 +17,12 @@ async function main() {
       import React from 'react'; import {createRoot} from 'react-dom/client';
       import {NativePluginCapabilities} from './src/renderer/src/components/customize/NativePluginCapabilities';
       window.calls=[];window.fail=false;
-      const plugins=[['original','原版 AutoBiz',true,true],['derived','我的 AutoBiz v2',true,true],['off','已停用插件',false,true],['function','功能插件',true,false]].map(([id,name,enabled,hasProjectMode])=>({id,name,enabled,hasProjectMode,version:'1.0',description:'本地已安装插件',skillCount:id==='function'?0:3}));
+      const plugins=[['original','原版 AutoBiz',true,true],['derived','我的 AutoBiz v2',true,true],['off','已停用插件',false,true],['function','功能插件',true,false]].map(([id,name,enabled,hasProjectMode])=>({id,name,enabled,hasProjectMode,version:'1.0',description:'本地已安装插件',skillCount:id==='function'?0:3,...(id==='derived'?{businessModCount:5,businessExtensionCount:1}:{})}));
       const projects=['original','derived'].map(id=>({projectId:id+'-project',name:id+' 项目',harnessAdapter:{id,type:'plugin'}}));
       window.togglePlugin=(id,enabled)=>{plugins.find(p=>p.id===id).enabled=enabled;window.bumpVersion()};
       window.api={plugins:{list:async()=>{window.calls.push(['list']);if(window.fail)throw Error('目录不可读');const value=structuredClone(plugins);if(window.deferList)return new Promise(resolve=>window.finishList=()=>resolve(value));return value}},skills:{listPlugins:async()=>plugins.filter(p=>p.enabled&&p.skillCount).map(p=>({pluginId:p.id,name:'build-'+p.id,path:p.id,isProjectModePlugin:p.hasProjectMode}))},nodeComposition:{projects:async()=>projects,catalog:async(input)=>{window.calls.push(['catalog',input]);return {project:projects.find(p=>p.projectId===input.projectId),nodes:[],config:{nodes:[],templates:[{id:'custom',templateType:'custom',requiredNodes:[],name:'自选'}]}}}}};
       const root=createRoot(document.getElementById('root'));
-      window.renderNative=()=>root.render(<NativePluginCapabilities threadId='thread' workspace='C:/fixture' functionPluginIds={['function']}/>);
+      window.renderNative=()=>root.render(<NativePluginCapabilities threadId='thread' workspace='C:/fixture' functionPluginIds={['function']} onAssemble={id=>window.calls.push(['assemble',id])}/>);
       window.renderNative();
     `
     },
@@ -39,7 +39,7 @@ async function main() {
           builder.onResolve(
             {
               filter:
-                /^@\/lib\/(plugin-settings-intent|feature-gates|node-composition-intent|store)$/
+                /^@\/lib\/(plugin-settings-intent|feature-gates|node-composition-intent|derived-project-intent|store)$/
             },
             (args) => ({ path: args.path, namespace: "fixture" })
           )
@@ -52,6 +52,8 @@ async function main() {
                 ? "export const openPluginSettings=id=>window.calls.push(['manage',id])"
                 : args.path.endsWith("feature-gates")
                   ? "export const useFeatureGate=()=>({enabled:true,loading:false})"
+                  : args.path.endsWith("derived-project-intent")
+                    ? "export const openDerivedProject=(...args)=>window.calls.push(['new-project',...args]);export const openExistingPluginProject=(...args)=>window.calls.push(['existing-project',...args])"
                   : "export const openNativeNodePlan=async()=>{throw Error('unexpected write')}"
           }))
         }
@@ -99,21 +101,26 @@ async function main() {
     await original.getByText("查看插件内容", { exact: true }).click()
     assert.equal(await original.getByText("build-original", { exact: true }).isVisible(), false)
     assert.equal(await page.getByRole("article", { name: "功能插件", exact: true }).count(), 0)
-    assert(await disabled.getByRole("button", { name: "选择项目步骤", exact: true }).isDisabled())
+    assert(await disabled.getByRole("button", { name: "查看项目流程", exact: true }).isDisabled())
     assert.equal(await page.getByRole("checkbox").count(), 0)
     assert.equal(
       await page.evaluate(() => document.documentElement.scrollWidth > innerWidth),
       false
     )
     await page.screenshot({ path: resolve(output, "native-directory-mobile.png"), fullPage: true })
-    await derived.getByRole("button", { name: "选择项目步骤", exact: true }).click()
+    await derived.getByRole("button", { name: "用这些 Mods 组装新插件", exact: true }).click()
+    assert(await page.evaluate(() => JSON.stringify((window as unknown as { calls: unknown[] }).calls).includes('["assemble","derived"]')))
+    await derived.getByRole("button", { name: "新建此插件项目", exact: true }).click()
+    const creation = await page.evaluate(() => (window as unknown as { calls: unknown[][] }).calls.find(([kind]) => kind === "new-project"))
+    assert.deepEqual(creation, ["new-project", "derived", "我的 AutoBiz v2", { threadId: "thread", expectedWorkspace: "C:/fixture" }])
+    await derived.getByRole("button", { name: "查看项目流程", exact: true }).click()
     const projects = page.getByLabel("选择节点所属项目")
     await projects.waitFor()
     assert.deepEqual(await projects.locator("option").allTextContents(), ["请选择", "derived 项目"])
     await projects.selectOption("derived-project")
     await page.getByRole("button", { name: "检查并预览步骤", exact: true }).waitFor()
     await page
-      .getByText("此处只选择当前项目的步骤，前置检查和人工确认会保留。", { exact: true })
+      .getByText("此版本支持为本次需求自选步骤，前置检查和人工确认会保留。", { exact: true })
       .waitFor()
     await disabled.getByRole("button", { name: "管理并启用插件", exact: true }).click()
     assert.equal(
@@ -148,7 +155,7 @@ async function main() {
     await page.evaluate(() => {
       document.getElementById("root")!.hidden = false
     })
-    assert(await disabled.getByRole("button", { name: "选择项目步骤", exact: true }).isEnabled())
+    assert(await disabled.getByRole("button", { name: "查看项目流程", exact: true }).isEnabled())
     await page.evaluate(() => {
       const fixture = window as unknown as {
         deferList: boolean
@@ -173,7 +180,7 @@ async function main() {
     await page.evaluate(
       () => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)))
     )
-    assert(await disabled.getByRole("button", { name: "选择项目步骤", exact: true }).isEnabled())
+    assert(await disabled.getByRole("button", { name: "查看项目流程", exact: true }).isEnabled())
     const callsBeforeRender = await page.evaluate(
       () =>
         (window as unknown as { calls: unknown[][] }).calls.filter((row) => row[0] === "list")

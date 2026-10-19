@@ -118,6 +118,29 @@ export function sampleInitialChatPresentation(
   const geometry: unknown[] = [viewport.scrollTop, viewport.scrollHeight, viewport.clientHeight]
   let count = 0
   let ready = true
+  // Rows share most ancestors. Read each style once per sample; later frames must recheck it.
+  const visibility = new WeakMap<HTMLElement, boolean>()
+  const isPresented = (element: HTMLElement): boolean => {
+    const ancestors: HTMLElement[] = []
+    let current: HTMLElement | null = element
+    let visible = true
+    while (current && current !== viewport) {
+      const known = visibility.get(current)
+      if (known !== undefined) {
+        visible = known
+        break
+      }
+      ancestors.push(current)
+      const style = view.getComputedStyle(current)
+      if (style.visibility === "hidden" || style.display === "none") {
+        visible = false
+        break
+      }
+      current = current.parentElement
+    }
+    for (const ancestor of ancestors) visibility.set(ancestor, visible)
+    return visible
+  }
   for (const site of root.querySelectorAll<HTMLElement>(
     '[data-function-site="UserMessage"], [data-function-site="AssistantMessage"], [data-function-site="CommandOutput"]'
   )) {
@@ -134,12 +157,7 @@ export function sampleInitialChatPresentation(
     count++
     geometry.push(box.x, box.y, box.width, box.height, site.dataset.functionSite)
     if (site.querySelector("[data-function-site-pending]")) ready = false
-    let element: HTMLElement | null = site
-    while (element && element !== viewport) {
-      const style = view.getComputedStyle(element)
-      if (style.visibility === "hidden" || style.display === "none") ready = false
-      element = element.parentElement
-    }
+    if (!isPresented(site)) ready = false
   }
   // System/tool/hook rows legitimately bypass FunctionSite. They must not pay the stall deadline.
   for (const row of root.querySelectorAll<HTMLElement>("[data-item-index]")) {
@@ -155,12 +173,7 @@ export function sampleInitialChatPresentation(
       continue
     count++
     geometry.push("native-row", box.x, box.y, box.width, box.height)
-    let element: HTMLElement | null = row
-    while (element && element !== viewport) {
-      const style = view.getComputedStyle(element)
-      if (style.visibility === "hidden" || style.display === "none") ready = false
-      element = element.parentElement
-    }
+    if (!isPresented(row)) ready = false
   }
   return { ready: ready && count > 0, geometry: JSON.stringify(geometry) }
 }

@@ -18,6 +18,9 @@ export function registerModsDevelopmentHandlers(
     undoComposition(input: AuthoringScope): Promise<unknown>
     cancelComposition(input: AuthoringScope): unknown
     undoTrial(input: AuthoringScope): Promise<unknown>
+    approveBusiness?(input: AuthoringScope & { planId: string; digest: string }): Promise<unknown>
+    exportBusiness?(input: AuthoringScope & { planId: string; digest: string }): Promise<unknown>
+    reconcileBusiness?(input: AuthoringScope & { planId: string; digest: string }): Promise<unknown>
   }
 ) {
   const register = <S extends z.ZodType>(
@@ -41,14 +44,45 @@ export function registerModsDevelopmentHandlers(
   register("set-mode", scope.extend({ mode: z.enum(["normal", "creator"]) }).strict(), (input) =>
     service.setMode(input.threadId, input.expectedWorkspace, input.mode)
   )
+  register("planning-catalog", scope.strict(), (input) =>
+    service.planningCatalog(input.threadId, input.expectedWorkspace)
+  )
+  register(
+    "select-planning",
+    scope
+      .extend({
+        expectedRevision: z.number().int().min(0),
+        selected: z
+          .object({
+            pluginId: z.string().min(1).max(256),
+            name: z.string().min(1).max(100),
+            digest: z.string().regex(/^[a-f0-9]{64}$/)
+          })
+          .strict()
+          .nullable()
+      })
+      .strict(),
+    (input) =>
+      service.selectPlanning(
+        input.threadId,
+        input.expectedWorkspace,
+        input.expectedRevision,
+        input.selected
+      )
+  )
   register(
     "approve",
-    scope.extend({
-      id,
-      revision,
-      digest: z.string().regex(/^[a-f0-9]{64}$/),
-      sourceDigest: z.string().regex(/^[a-f0-9]{64}$/).optional()
-    }).strict(),
+    scope
+      .extend({
+        id,
+        revision,
+        digest: z.string().regex(/^[a-f0-9]{64}$/),
+        sourceDigest: z
+          .string()
+          .regex(/^[a-f0-9]{64}$/)
+          .optional()
+      })
+      .strict(),
     (input) =>
       service.approve(
         input.threadId,
@@ -70,14 +104,41 @@ export function registerModsDevelopmentHandlers(
       throw Error("DEVELOPMENT_SCOPE_CHANGED")
     return service.requestReuse(input.threadId, input.id, input.revision)
   })
-  register("approve-reuse", scope.extend({
-    planId: z.string().uuid(),
-    sourceDigest: z.string().regex(/^[a-f0-9]{64}$/),
-    compiledDigest: z.string().regex(/^[a-f0-9]{64}$/),
-    targetProfileDigest: z.string().regex(/^[a-f0-9]{64}$/)
-  }).strict(), input => service.approveReuse(input.threadId, input.expectedWorkspace, input))
+  register(
+    "approve-reuse",
+    scope
+      .extend({
+        planId: z.string().uuid(),
+        sourceDigest: z.string().regex(/^[a-f0-9]{64}$/),
+        compiledDigest: z.string().regex(/^[a-f0-9]{64}$/),
+        targetProfileDigest: z.string().regex(/^[a-f0-9]{64}$/)
+      })
+      .strict(),
+    (input) => service.approveReuse(input.threadId, input.expectedWorkspace, input)
+  )
+  for (const name of ["approve-business", "export-business", "reconcile-business"] as const) {
+    register(
+      name,
+      scope
+        .extend({
+          planId: z.string().uuid(),
+          digest: z.string().regex(/^[a-f0-9]{64}$/)
+        })
+        .strict(),
+      (input) => {
+        const action =
+          name === "approve-business"
+            ? actions?.approveBusiness
+            : name === "export-business"
+              ? actions?.exportBusiness
+              : actions?.reconcileBusiness
+        if (!action) throw Error("DEVELOPMENT_ACTION_UNAVAILABLE")
+        return action(input)
+      }
+    )
+  }
   for (const name of ["undo-composition", "cancel-composition", "undo-trial"] as const) {
-    register(name, scope.strict(), input => {
+    register(name, scope.strict(), (input) => {
       if (!actions) throw Error("DEVELOPMENT_ACTION_UNAVAILABLE")
       if (name === "undo-composition") return actions.undoComposition(input)
       if (name === "cancel-composition") return actions.cancelComposition(input)

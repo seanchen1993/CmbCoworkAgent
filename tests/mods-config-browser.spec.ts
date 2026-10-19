@@ -19,6 +19,8 @@ async function main() {
       import {createRoot} from "react-dom/client";
       import {FunctionUserConfig} from ${JSON.stringify(join(renderer, "components/customize/FunctionUserConfig.tsx"))};
       import {readDesktopSelection} from ${JSON.stringify(join(renderer, "lib/function-desktop.ts"))};
+      import {beginConfigurationTarget,chooseConfigurationTarget} from ${JSON.stringify(join(renderer,"lib/configuration-target.ts"))};
+      import {useAppStore} from ${JSON.stringify(join(renderer,"lib/store.ts"))};
       const listeners=new Set(),calls=[],secretCalls=[],applies=[],reloads=[],picks=[];let failRead=false,deferRead=false,deferSave=false,deny=false,rewrite;
       const pendingReads=[],pendingSaves=[],pendingPicks=[],pendingSecretAcks=[];let deferSecretAck=false;
       let view={pluginId:'p',plugin:'sample',digest:'digest',workspace:'a',savedRevision:0,
@@ -57,6 +59,7 @@ async function main() {
       },onConfigurationChanged:fn=>{listeners.add(fn);return()=>listeners.delete(fn)}}};
       function Fixture(){const [thread,setThread]=useState('a');
         window.probe={calls,secretCalls,applies,reloads,thread:setThread,readFailure:value=>failRead=value,
+          beginTarget:()=>{useAppStore.setState({showCustomizeView:true,currentThreadId:'a',threads:['a','b'].map(id=>({thread_id:id,title:id,metadata:{workspacePath:id,agentMode:'normal'}}))});window.closeTarget=beginConfigurationTarget({threadId:'a',workspace:'a'})},chooseTarget:()=>chooseConfigurationTarget({threadId:'b',workspace:'b'}),closeTarget:()=>window.closeTarget(),
           readDelay:value=>deferRead=value,saveDelay:value=>deferSave=value,deny:value=>deny=value,
           reads:pendingReads,saves:pendingSaves,view:()=>view,
           picks,pickResults:pendingPicks,rewrite:value=>rewrite=value,listenerCount:()=>listeners.size,
@@ -91,7 +94,7 @@ async function main() {
       : undefined
     if (css) await page.addStyleTag({ content: readFileSync(join(assets, css), "utf8") })
     await page.addScriptTag({ content: result.outputFiles[0].text })
-    await page.locator("summary").click()
+    await page.getByText("插件参数", { exact: true }).click()
     await page.getByLabel("Tone").waitFor()
     assert.equal(await page.getByLabel("Flag").getAttribute("aria-checked"), "false")
     assert.equal(await page.getByLabel("Budget").inputValue(), "0")
@@ -114,7 +117,7 @@ async function main() {
     await page.waitForFunction("!document.querySelector('input').disabled")
     assert.equal(await page.getByLabel("Tone").inputValue(), "my draft")
     await row("Tone").getByRole("button").click()
-    await page.getByRole("status").filter({ hasText: "等待安全应用" }).waitFor()
+    await page.getByRole("status").filter({ hasText: "已保存，等待应用到当前聊天" }).waitFor()
     assert.equal(await page.evaluate("window.probe.calls.at(-1).current.savedRevision"), 1)
     assert.equal(await page.getByLabel("Tone").inputValue(), "my draft")
     console.log("PASS live changes retain dirty drafts and save the actual observed revision")
@@ -151,7 +154,7 @@ async function main() {
       "PASS explicit application retry keeps dirty drafts and uses the exact saved revision"
     )
     await page.evaluate("window.probe.change({state:'stopped',error:'backend close rejected'})")
-    await page.getByRole("status").filter({ hasText: "当前组合已停用" }).waitFor()
+    await page.getByRole("status").filter({ hasText: "当前组合已停止" }).waitFor()
     await page.waitForFunction("!document.querySelector('input').disabled")
     await page.getByRole("button", { name: "重新加载当前组合", exact: true }).click()
     await page.getByRole("status").filter({ hasText: "当前对话已应用" }).waitFor()
@@ -197,6 +200,10 @@ async function main() {
     const fileRow = row("File")
     const pickFile = () => fileRow.getByRole("button", { name: /选择文件|正在选择/ }).click()
     await pickFile()
+    await page.evaluate("window.probe.beginTarget()")
+    assert.equal(await page.evaluate("window.probe.chooseTarget()"),"当前操作尚未结束，请稍后切换配置聊天。",
+      "an outstanding native path chooser must block target changes")
+    await page.evaluate("window.probe.closeTarget()")
     const writes = await page.evaluate("window.probe.calls.length")
     await page.evaluate("window.probe.pickResults.shift()('selected-file')")
     await page.waitForFunction(
@@ -225,8 +232,8 @@ async function main() {
     await page.getByRole("button", { name: "选择文件", exact: true }).waitFor()
     assert.equal(await page.getByLabel("File", { exact: true }).inputValue(), "second")
     await pickFile()
-    await page.locator("summary").click()
-    await page.locator("summary").click()
+    await page.getByText("插件参数", { exact: true }).click()
+    await page.getByText("插件参数", { exact: true }).click()
     await page.getByRole("button", { name: "选择文件", exact: true }).waitFor()
     await page.evaluate("window.probe.pickResults.shift()('closed-picker')")
     assert.equal(await page.getByLabel("File", { exact: true }).inputValue(), "")
@@ -275,9 +282,9 @@ async function main() {
     assert(await saveSecret.isDisabled())
     await secret.fill("discard this draft")
     assert(await saveSecret.isEnabled())
-    await page.locator("summary").click()
+    await page.getByText("插件参数", { exact: true }).click()
     await page.waitForFunction("window.probe.listenerCount()===0")
-    await page.locator("summary").click()
+    await page.getByText("插件参数", { exact: true }).click()
     await page.waitForFunction(
       "document.getElementById('plugin-param-p-secret').value===''&&!document.querySelector('input').disabled"
     )
@@ -428,9 +435,9 @@ async function main() {
     await page.evaluate("window.probe.saveDelay(true)")
     await secret.fill("submitted private")
     await saveSecret.click()
-    await page.locator("summary").click()
+    await page.getByText("插件参数", { exact: true }).click()
     await page.waitForFunction("window.probe.listenerCount()===0")
-    await page.locator("summary").click()
+    await page.getByText("插件参数", { exact: true }).click()
     await page.waitForFunction("!document.querySelector('input').disabled")
     await secret.fill("new private draft")
     await page.getByLabel("Tone").fill("other new draft")
@@ -458,7 +465,7 @@ async function main() {
       "PASS unavailable secure storage explains the restriction while ordinary fields remain usable"
     )
     await page.evaluate("window.probe.readFailure(true);window.probe.thread('b')")
-    await page.locator("summary").click()
+    await page.getByText("插件参数", { exact: true }).click()
     await page.getByRole("alert").filter({ hasText: "read failed" }).waitFor()
     assert.equal(await page.getByLabel("Tone").count(), 0)
     assert.equal(await page.getByRole("button", { name: "保存", exact: true }).count(), 0)

@@ -56,6 +56,21 @@ function fixture() {
 }
 
 describe("private actual independent child family receipts", () => {
+  it("does not trust a caller-supplied independent capture function on a generic parent", () => {
+    const f = fixture(), original = f.families.readParent(f.parent)
+    let forged = 0
+    const input = { ...original,
+      captureIndependentCurrent: () => { forged++; return () => {} } }
+    const parent = f.families.captureParent(input), child = f.child()
+    const proof = f.families.register(parent, child.input)
+    try {
+      f.families.read(proof)
+      f.retireOwner()
+      expect(() => f.families.read(proof)).toThrow("ORIGINAL_FAMILY_RETIRED")
+      expect(forged).toBe(0)
+    } finally { f.families.retire(proof) }
+  })
+
   it("keeps shared identity reads fresh and preserves full metadata and read failures", () => {
     const f = fixture(), parent = f.runtime.authority, signal = new AbortController().signal
     expect(claimLocalThreadRunLease({ threadId: parent.threadId,

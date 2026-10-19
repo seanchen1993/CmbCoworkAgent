@@ -1,0 +1,9 @@
+{
+  "apiVersion": "devclaw.capabilities/v1",
+  "capabilities": [{
+    "id": "consume-json", "title": "通用已校验 JSON 消费", "kind": "flow", "usage": "project",
+    "entry": "devclaw.project-runtime.json", "dependsOn": [],
+    "requiredHooks": ["Stop:verify-consumed-report"],
+    "inputs": [{ "id": "context", "title": "绑定的已校验 JSON 产物", "path": "inputs/verified-context.json", "required": true }]
+  }]
+}

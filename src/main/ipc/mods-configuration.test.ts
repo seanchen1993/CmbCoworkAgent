@@ -5,6 +5,7 @@ import { runInNewContext } from "node:vm"
 import ts from "typescript"
 import { expect, it, vi } from "vitest"
 import { captureThreadIncarnation, matchesThreadIncarnation } from "../services/thread-incarnation"
+import { nativeChildThreadReaders } from "./native-child-mods.test-helper"
 
 // Execute the actual registered handler/preload subscription without starting Electron.
 function expression(file: string, pick: (node: ts.Node) => ts.Node | undefined, scope: object) {
@@ -153,6 +154,7 @@ function composerRouteFixture() {
     ipcMain: { handle: (_channel: string, value: typeof handler) => { handler = value } },
     process: { env: {} }, URL, __dirname: directory,
     join, pathToFileURL, window: () => owner, getThreadCore,
+    ...nativeChildThreadReaders(getThreadCore),
     manager: { workspaceKey, isEnabled, status, candidates, approve }, ModError: Error
   }) as (threadId: string) => string
   if (!handler) throw Error("Actual composer route was not registered")

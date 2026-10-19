@@ -257,12 +257,16 @@ function testTheRunBodyStillHonoursWhatTheBridgeDependsOn(): void {
     "a prompt blocked before the model must stay distinct from a completion hook halt"
   )
   // Every error branch has to carry the original error, or retryability is lost.
-  for (const code of ["hook_halt", "failure_fuse", "provider_error"]) {
+  for (const code of ["hook_halt", "failure_fuse"]) {
     assert(
       new RegExp(`markAutoModeTerminal\\("error", "${code}"[^)]*, error\\)`).test(agent),
       `the ${code} branch must pass the original error to the terminal report`
     )
   }
+  assert(
+    /markAutoModeTerminal\("error", classifyManagedAgentFailure\(error\), errMsg, error\)/.test(agent),
+    "the provider/native classifier must receive and preserve the original thrown error"
+  )
 }
 
 async function testTurnInputMapsOntoTheRunContext(): Promise<void> {

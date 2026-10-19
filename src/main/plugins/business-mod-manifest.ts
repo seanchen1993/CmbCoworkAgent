@@ -7,6 +7,9 @@ import { BUSINESS_MOD_MANIFEST } from "../../shared/business-mods"
 import { parseClawActionExports } from "../../shared/mods/claw-actions"
 import { parseCapabilityUsage } from "../../shared/mods/capability-usage"
 import type { DerivationFile, DerivationSnapshot } from "./derivation-source"
+import { parsePortableBusinessModUserConfig } from "./business-mod-user-config"
+import { validateToolSchema } from "../mods/v2/tool-schema"
+import type { ModObject } from "../../shared/mods/types"
 
 const identifier = /^[a-zA-Z0-9][\w.-]{0,79}$/
 const version = /^\d+\.\d+\.\d+(?:-[\w.-]+)?$/
@@ -78,7 +81,17 @@ export function parseBusinessModCatalog(value: unknown): BusinessModCatalog {
     const pluginFields =
       data.pluginFields === undefined ? undefined : businessModObject(data.pluginFields)
     if (pluginFields)
-      fields(pluginFields, ["hooks", "skills", "mcpServers", "description", "author", "license"])
+      fields(pluginFields, [
+        "hooks",
+        "skills",
+        "mcpServers",
+        "description",
+        "author",
+        "license",
+        "userConfig"
+      ])
+    if (pluginFields?.userConfig !== undefined)
+      parsePortableBusinessModUserConfig(pluginFields.userConfig)
     kernel = {
       ...kernelIdentity(data),
       resources: strings(data.resources, businessModPath, 4096),
@@ -98,7 +111,8 @@ export function parseBusinessModCatalog(value: unknown): BusinessModCatalog {
       "resources",
       "dependencies",
       "checks",
-      "insertAfter"
+      "insertAfter",
+      "userConfig"
     ])
     const id = businessModId(item.id),
       node = businessModObject(item.node)
@@ -159,6 +173,11 @@ export function parseBusinessModCatalog(value: unknown): BusinessModCatalog {
         advisory: strings(dependencies.advisory, businessModId, 64)
       },
       checks: { validators, guards },
+      ...(item.userConfig === undefined
+        ? {}
+        : {
+            userConfig: parsePortableBusinessModUserConfig(item.userConfig)
+          }),
       ...(item.insertAfter === undefined ? {} : { insertAfter: businessModId(item.insertAfter) })
     }
   })
@@ -178,7 +197,11 @@ export function parseBusinessModCatalog(value: unknown): BusinessModCatalog {
         "resources",
         "dependencies",
         "usage",
-        "actions"
+        "actions",
+        "configSchema",
+        "userConfig",
+        "contextProvider",
+        "skills"
       ])
       const id = businessModId(item.id),
         entry = businessModPath(item.entry)
@@ -192,6 +215,51 @@ export function parseBusinessModCatalog(value: unknown): BusinessModCatalog {
       seen.add(id.toLowerCase())
       const dependencies = businessModObject(item.dependencies)
       fields(dependencies, ["required", "advisory"])
+      const configSchema =
+        item.configSchema === undefined
+          ? undefined
+          : (businessModObject(item.configSchema) as ModObject)
+      if (configSchema) validateToolSchema(configSchema)
+      const skills =
+        item.skills === undefined
+          ? undefined
+          : strings(
+              item.skills,
+              (value) => {
+                const path = businessModPath(value)
+                if (!path.startsWith(`mods/business/${id}/skills/`) || !path.endsWith("/SKILL.md"))
+                  throw Error("常驻扩展辅助技能必须位于自己的命名空间")
+                return path
+              },
+              16
+            )
+      let contextProvider: BusinessModExtensionDefinition["contextProvider"]
+      if (item.contextProvider !== undefined) {
+        const provider = businessModObject(item.contextProvider)
+        fields(provider, ["entry", "operations", "knowledgeBinding", "required"])
+        const providerEntry = businessModPath(provider.entry)
+        if (
+          !providerEntry.startsWith(`mods/business/${id}/`) ||
+          !Array.isArray(provider.operations) ||
+          !provider.operations.length ||
+          provider.operations.length > 2 ||
+          new Set(provider.operations).size !== provider.operations.length ||
+          !provider.operations.every((op) => op === "session-context" || op === "sync-knowledge") ||
+          typeof provider.required !== "boolean" ||
+          (provider.knowledgeBinding !== undefined &&
+            (typeof provider.knowledgeBinding !== "string" ||
+              !/^[a-zA-Z][\w.-]{0,79}$/.test(provider.knowledgeBinding)))
+        )
+          throw Error("业务 Mod 上下文提供器声明无效")
+        contextProvider = {
+          entry: providerEntry,
+          operations: [...provider.operations] as NonNullable<typeof contextProvider>["operations"],
+          required: provider.required,
+          ...(provider.knowledgeBinding === undefined
+            ? {}
+            : { knowledgeBinding: provider.knowledgeBinding as string })
+        }
+      }
       return {
         id,
         title: text(item.title),
@@ -203,6 +271,14 @@ export function parseBusinessModCatalog(value: unknown): BusinessModCatalog {
           advisory: strings(dependencies.advisory, businessModId, 64)
         },
         ...(item.usage === undefined ? {} : { usage: parseCapabilityUsage(item.usage) }),
+        ...(configSchema ? { configSchema: structuredClone(configSchema) } : {}),
+        ...(contextProvider ? { contextProvider } : {}),
+        ...(skills?.length ? { skills } : {}),
+        ...(item.userConfig === undefined
+          ? {}
+          : {
+              userConfig: parsePortableBusinessModUserConfig(item.userConfig)
+            }),
         ...(item.actions === undefined
           ? {}
           : { actions: parseClawActionExports({ actions: item.actions }) })

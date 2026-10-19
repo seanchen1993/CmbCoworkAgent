@@ -8,6 +8,7 @@ import {
   PROJECT_ACTION_LOCK_MAX_BYTES,
   PROJECT_ACTION_LOCK_PATH,
   parseProjectActionLock,
+  projectActionTarget,
   type ProjectActionBinding,
   type ProjectActionLock
 } from "../../../shared/project-runtime/action-bindings"
@@ -30,13 +31,16 @@ function stable(value: unknown): string {
         : value
   return encodeModJson(sort(value))
 }
-/** Display/review identity for the command contract, independent of JSON property ordering. */
+/** Display/review identity for the action contract, independent of JSON property ordering. */
 export function projectActionContractDigest(
-  action: Pick<ClawActionDescriptor, "command" | "inputSchema" | "configSchema" | "outputSchema">
+  action: Pick<
+    ClawActionDescriptor,
+    "command" | "platform" | "inputSchema" | "configSchema" | "outputSchema"
+  >
 ): string {
   return runtimeDigest(
     stable({
-      command: action.command,
+      ...projectActionTarget(action),
       inputSchema: action.inputSchema,
       configSchema: action.configSchema ?? null,
       outputSchema: action.outputSchema ?? null
@@ -61,7 +65,7 @@ export function createProjectActionBinding(
           digest: action.digest,
           actionId: action.actionId
         },
-        command: action.command,
+        ...projectActionTarget(action),
         input,
         config,
         ...(inputFrom ? { inputFrom } : {}),
@@ -98,7 +102,7 @@ export function assertProjectActionProviders(
     )
     if (
       !descriptor ||
-      descriptor.command !== binding.command ||
+      stable(projectActionTarget(descriptor)) !== stable(projectActionTarget(binding)) ||
       stable(descriptor.inputSchema) !== stable(binding.inputSchema) ||
       stable(descriptor.configSchema ?? null) !== stable(binding.configSchema) ||
       stable(descriptor.outputSchema ?? null) !== stable(binding.outputSchema)
@@ -109,10 +113,11 @@ export function assertProjectActionProviders(
 }
 export function readProjectActionLock(
   snapshotRoot: string,
-  manifest: ProjectRuntimeManifest
+  manifest: ProjectRuntimeManifest,
+  readFile: (path: string, limit: number) => { bytes?: Buffer } =
+    (path, limit) => readRuntimeScopedFile(snapshotRoot, path, limit)
 ): ProjectActionLock {
-  const file = readRuntimeScopedFile(
-    snapshotRoot,
+  const file = readFile(
     PROJECT_ACTION_LOCK_PATH,
     PROJECT_ACTION_LOCK_MAX_BYTES
   )
@@ -160,6 +165,22 @@ export function assertProjectActionLock(
         throw Error("PROJECT_ACTION_OUTPUT_ORDER")
       seen.add(id)
     }
+    const checkActions = new Set<string>()
+    for (const check of manifest.checks.filter(
+      (item) => stage.checkIds.includes(item.id) && item.kind === "action"
+    )) {
+      const binding = lock.bindings.find((item) => item.id === check.actionId)
+      if (
+        !binding ||
+        seen.has(binding.id) ||
+        checkActions.has(binding.id) ||
+        binding.inputFrom?.kind !== "artifact" ||
+        binding.inputFrom.artifactId !== check.artifactId ||
+        binding.inputFrom.pointer !== ""
+      )
+        throw Error("PROJECT_ACTION_CHECK_INPUT_INVALID")
+      checkActions.add(binding.id)
+    }
   }
   return lock
 }
@@ -174,7 +195,8 @@ export interface CapturedProjectActionInputs {
 /** Bounded JSON objects only; no path expressions, arbitrary files, credentials or code evaluation. */
 export function captureProjectActionInputs(
   state: HostProjectState,
-  rawLock: ProjectActionLock
+  rawLock: ProjectActionLock,
+  phase?: { actionIds: readonly string[]; allowCheckArtifacts?: boolean }
 ): CapturedProjectActionInputs {
   const project = structuredClone(state),
     lock = parseProjectActionLock(rawLock)
@@ -194,11 +216,16 @@ export function captureProjectActionInputs(
   const predecessors = new Set(
     project.manifest.stages.slice(0, project.stageIndex).flatMap((item) => item.artifactIds)
   )
+  const checkArtifacts = new Map(
+    project.manifest.checks
+      .filter((check) => stage.checkIds.includes(check.id) && check.kind === "action")
+      .map((check) => [check.actionId!, check.artifactId])
+  )
   const read = () => {
     const files: Array<[string, string]> = []
     const seen = new Set<string>()
     let bytes = 0
-    const bindings = stage.actionIds.map((id) => {
+    const bindings = (phase?.actionIds ?? stage.actionIds).map((id) => {
       const binding = lock.bindings.find((item) => item.id === id)
       const declaration = project.manifest.actions.find((item) => item.id === id)
       if (!binding || !declaration || stable(binding.ref) !== stable(declaration.ref))
@@ -213,7 +240,10 @@ export function captureProjectActionInputs(
         )
           throw Error("PROJECT_ACTION_OUTPUT_ORDER")
       } else if (from?.kind === "artifact") {
-        if (!predecessors.has(from.artifactId)) throw Error("PROJECT_ACTION_INPUT_NOT_PRIOR")
+        const isCheck = phase?.allowCheckArtifacts && checkArtifacts.get(id) === from.artifactId
+        if (!predecessors.has(from.artifactId) && !isCheck)
+          throw Error("PROJECT_ACTION_INPUT_NOT_PRIOR")
+        if (isCheck && from.pointer !== "") throw Error("PROJECT_ACTION_CHECK_INPUT_INVALID")
         const artifact = project.manifest.artifacts.find((item) => item.id === from.artifactId)
         if (
           !artifact ||
@@ -231,9 +261,14 @@ export function captureProjectActionInputs(
         if (!file.bytes) throw Error("PROJECT_ACTION_INPUT_MISSING")
         bytes += file.bytes.length
         if (bytes > 128 * 1024) throw Error("PROJECT_ACTION_INPUT_LIMIT")
-        const object = clawActionObject(
-          JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(file.bytes))
+        const text = new TextDecoder("utf-8", { fatal: true }).decode(file.bytes)
+        const object =
+          from.format === "text" ? { content: text } : clawActionObject(JSON.parse(text))
+        if (
+          (isCheck || from.format === "text") &&
+          Object.keys(binding.input).some((key) => Object.hasOwn(object, key))
         )
+          throw Error("PROJECT_ACTION_ARTIFACT_INPUT_OVERRIDE")
         next.input = resolveClawActionInput(binding.input, object, from.pointer)
         delete next.inputFrom
         validateRegisteredToolInput(binding.inputSchema, next.input)

@@ -1,3 +1,4 @@
+import type { HostActionCheckEvidence } from "./action-check-evidence"
 import type { ModObject } from "../../../shared/mods/types"
 import { clawActionObject } from "../../../shared/mods/claw-actions"
 import type { ProjectRuntimeManifest } from "../../../shared/project-runtime"
@@ -15,7 +16,6 @@ import { readRuntimeScopedFile, runtimeDigest, runtimeDirectoryIdentity } from "
 export function assertHostRuntimeSupported(manifest: ProjectRuntimeManifest): void {
   if (manifest.mode !== "host" || manifest.stateOwner !== "host") hostStateError("OWNER_MISMATCH")
   for (const check of manifest.checks) {
-    if (check.kind === "action") hostStateError("CHECK_UNSUPPORTED")
     if (check.kind === "json-schema")
       validateToolSchema(clawActionObject(check.schema), { allowReservedKeys: true })
   }
@@ -36,7 +36,11 @@ function stageFor(state: HostProjectState, operation: HostExecutionTicket | Host
 }
 
 /** Checked current outputs may be revised; other preceding artifacts remain immutable inputs. */
-export function fingerprintHostStageInput(state: HostProjectState, goal: string): string {
+export function fingerprintHostStageInput(
+  state: HostProjectState,
+  goal: string,
+  runtimeInputIdentity?: string
+): string {
   const stage = state.manifest.stages[state.stageIndex]
   const outputPaths = new Set(
     state.manifest.checks
@@ -75,6 +79,7 @@ export function fingerprintHostStageInput(state: HostProjectState, goal: string)
       version: state.version,
       stage: state.manifest.stages[state.stageIndex]?.id,
       pluginDigest: state.pluginDigest,
+      ...(runtimeInputIdentity === undefined ? {} : { runtimeInputIdentity }),
       // Still read all preceding files above: required inputs cannot disappear, unsafe paths
       // and byte limits still fail. Revised outputs receive new stage receipts; old receipts
       // remain historical and cannot validate the new bytes or capture them as old knowledge.
@@ -90,7 +95,9 @@ export function validateHostStage(
   state: HostProjectState,
   ticket: HostExecutionTicket,
   signal?: AbortSignal,
-  now = () => Date.now()
+  now = () => Date.now(),
+  actionChecks: ReadonlyMap<string, HostActionCheckEvidence> = new Map(),
+  runtimeInputIdentity?: string
 ): HostValidationReceipt[] {
   assertHostRuntimeSupported(state.manifest)
   const stage = stageFor(state, ticket)
@@ -117,6 +124,8 @@ export function validateHostStage(
         result = "failed"
       }
     }
+    const action = check.kind === "action" ? actionChecks.get(check.id) : undefined
+    if (check.kind === "action") result = file.present ? (action?.result ?? "unknown") : "failed"
     signal?.throwIfAborted()
     return {
       schemaVersion: 1,
@@ -128,7 +137,10 @@ export function validateHostStage(
       artifactFingerprint: file.fingerprint,
       checkId,
       result,
-      validatorVersion: `host-${check.kind}/v1`,
+      validatorVersion: hostValidatorIdentity(
+        action?.validatorVersion ?? `host-${check.kind}/v1`,
+        runtimeInputIdentity
+      ),
       checkedAt: now()
     }
   })
@@ -137,7 +149,9 @@ export function validateHostStage(
 /** Call without an await before the store's synchronous transition transaction. */
 export function assertHostReceiptsCurrent(
   state: HostProjectState,
-  operation: HostProjectOperation
+  operation: HostProjectOperation,
+  actionChecks: ReadonlyMap<string, HostActionCheckEvidence> = new Map(),
+  runtimeInputIdentity?: string
 ): void {
   const stage = stageFor(state, operation)
   let totalBytes = 0
@@ -148,7 +162,24 @@ export function assertHostReceiptsCurrent(
     const file = readRuntimeScopedFile(state.workspace, artifact.path)
     totalBytes += file.bytes?.length ?? 0
     if (totalBytes > 16 * 1024 * 1024) hostStateError("VALIDATION_LIMIT")
-    if (!receipt || receipt.result !== "passed" || receipt.artifactFingerprint !== file.fingerprint)
+    const action = check.kind === "action" ? actionChecks.get(check.id) : undefined
+    const validator = hostValidatorIdentity(
+      action?.validatorVersion ?? `host-${check.kind}/v1`,
+      runtimeInputIdentity
+    )
+    if (
+      !receipt ||
+      receipt.result !== "passed" ||
+      receipt.artifactFingerprint !== file.fingerprint ||
+      receipt.validatorVersion !== validator ||
+      (check.kind === "action" && action?.result !== "passed")
+    )
       hostStateError("EVIDENCE_STALE")
   }
+}
+
+function hostValidatorIdentity(base: string, runtimeInputIdentity?: string): string {
+  return runtimeInputIdentity === undefined
+    ? base
+    : `${base}:inputs-${runtimeDigest(runtimeInputIdentity)}`
 }

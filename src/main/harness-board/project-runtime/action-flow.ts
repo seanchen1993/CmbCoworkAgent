@@ -8,7 +8,8 @@ import { runtimeDigest } from "./safe-files"
 export function createProjectActionFlow(
   state: HostProjectState,
   operationId: string,
-  captured: CapturedProjectActionInputs
+  captured: CapturedProjectActionInputs,
+  phase: "actions" | "checks" | "context" = "actions"
 ): HostFlowDefinition {
   const stage = state.manifest.stages[state.stageIndex]
   if (
@@ -24,8 +25,8 @@ export function createProjectActionFlow(
   const definition: HostFlowDefinition = {
     schemaVersion: 2,
     execution: { kind: "host" },
-    id: `project-actions-${runtimeDigest(operationId).slice(0, 24)}`,
-    name: `${state.name} · ${stage.title}`.slice(0, 100),
+    id: projectActionPhaseId(operationId, phase),
+    name: `${state.name} 路 ${stage.title}`.slice(0, 100),
     goal: state.goal,
     timeoutMs: 300_000,
     // Native Flow records final verification and optional mandatory-rule evidence as executions.
@@ -46,4 +47,9 @@ export function createProjectActionFlow(
     }))
   }
   return parseFlowDefinition(definition) as HostFlowDefinition
+}
+
+/** Phase identity keeps context/check evidence separate from displayable stage action results. */
+export function projectActionPhaseId(operationId: string, phase: "actions" | "checks" | "context") {
+  return `project-${phase}-${runtimeDigest(operationId).slice(0, 24)}`
 }

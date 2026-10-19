@@ -23,6 +23,7 @@ import {
   captureThreadIncarnation, matchesThreadIncarnation, type ThreadIncarnationRow
 } from "../services/thread-incarnation"
 import { encodeModJson, parseModJson } from "../../shared/mods/validation"
+import { nativeChildThreadReaders } from "./native-child-mods.test-helper"
 
 const channels = ["mods:function-panes", "mods:function-site-mount",
   "mods:function-site-mount-outcome", "mods:function-site-render"] as const
@@ -130,6 +131,7 @@ function fixture() {
     panes: operation, siteMount: operation, siteMountOutcome: operation, siteRender: operation,
     commands: nativeCommands, runCommand
   }
+  const getThreadCore = (id: string) => id === threadId ? row : undefined
   const code = ts.transpileModule([
     ...helpers.map(node => node.getText(source)),
     ...handlerNodes.map(node => node.getText(source)),
@@ -140,7 +142,8 @@ function fixture() {
   const display: Display = runInNewContext(code, {
     ipcMain: { handle: (channel: string, handler: Handler) => handlers.set(channel, handler) },
     process: { env: {} }, URL, __dirname: nativeDirectory, join, pathToFileURL,
-    window: () => owner, getThreadCore: (id: string) => id === threadId ? row : undefined,
+    window: () => owner, getThreadCore,
+    ...nativeChildThreadReaders(getThreadCore),
     manager: { workspaceKey: (workspace: string) => workspace, functionUserScope,
       commands: legacyCommands, isEnabled: () => true }, functions, queue: { enqueue },
     ModError, functionExecutionScope, functionCallAgent, functionCallAuthority, functionCallTurn,

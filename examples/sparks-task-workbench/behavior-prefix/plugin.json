@@ -1,0 +1,5 @@
+{
+  "name": "task-behavior-prefix",
+  "version": "1.0.0",
+  "description": "为两个真实呈现处理点提供可预览的替代实现，明确委托原实现"
+}

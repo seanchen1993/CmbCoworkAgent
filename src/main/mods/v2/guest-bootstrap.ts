@@ -102,6 +102,8 @@ export const FUNCTION_GUEST_BOOTSTRAP = String.raw`
       if (reply.error) {
         const error = Error(reply.error.message);
         define(error, "code", { value: reply.error.code });
+        if (reply.error.code === "MODS_RUNTIME_INSTANCE_EXPIRED" && reply.error.downstream === true)
+          define(error, "__downstream", { value: true });
         throw error;
       }
       return frozen(reply.value);
@@ -114,6 +116,8 @@ export const FUNCTION_GUEST_BOOTSTRAP = String.raw`
     if (reply.error) {
       const error = Error(reply.error.message);
       define(error, "code", { value: reply.error.code });
+      if (reply.error.code === "MODS_RUNTIME_INSTANCE_EXPIRED" && reply.error.downstream === true)
+        define(error, "__downstream", { value: true });
       throw error;
     }
     return frozen(reply.value);
@@ -189,7 +193,7 @@ export const FUNCTION_GUEST_BOOTSTRAP = String.raw`
       (positive.endsWith(".*") && event.startsWith(positive.slice(0, -1)));
     return negative ? !result : result;
   }
-  const on = freeze((pattern, matcher, fn) => {
+  const on = (pattern, matcher, fn) => {
     if (!registering) throw Error("MODS_REGISTRATION_CLOSED");
     if (typeof matcher === "function") { fn = matcher; matcher = undefined; }
     if (typeof pattern !== "string" || typeof fn !== "function") throw Error("MODS_REGISTRATION_INVALID");
@@ -209,7 +213,16 @@ export const FUNCTION_GUEST_BOOTSTRAP = String.raw`
       record.hasCatch = true;
       handler.recover = recover;
     }});
-  });
+  };
+  define(on, "capability", { value(descriptor, handlers) {
+    if (!registering) throw Error("MODS_REGISTRATION_CLOSED");
+    const copied = frozen(parse(pack(descriptor)));
+    if (!copied || typeof copied.id !== "string" || typeof copied.version !== "string" ||
+        !handlers || typeof handlers.act !== "function") throw Error("MODS_PLATFORM_DESCRIPTOR");
+    on("platform.action", { capability: { id: copied.id, version: copied.version } }, handlers.act);
+    registrations[registrations.length - 1].platformCapability = copied;
+  }});
+  freeze(on);
   define(globalThis, "__functionRegister", { value(json) {
     const options = frozen(parse(json));
     const module = globalThis.__cmbFunctionMod;
@@ -436,6 +449,14 @@ export const FUNCTION_GUEST_BOOTSTRAP = String.raw`
       }
       if(capability==="clock.sleep"){
         sdk[noun][method]=(ms,options)=>sdkCall(capability,[ms],options?.signal);
+        continue;
+      }
+      if(capability==="platform.act"){
+        sdk[noun][method]=(input,options)=>{
+          if(options!==undefined&&(!options||typeof options!=="object"||Array.isArray(options)||
+              ownKeys(options).some(key=>key!=="signal")))throw Error("MODS_PLATFORM_ARGUMENTS");
+          return sdkCall(capability,[input],options?.signal);
+        };
         continue;
       }
       if(capability==="model.complete"){

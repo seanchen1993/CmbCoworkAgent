@@ -1,7 +1,7 @@
 import { getModCallContext, modCallContext } from "../context"
 import { claimLocalThreadRunLease, releaseLocalThreadRunLease } from "../../agent/thread-run-lease"
 import { existsSync, readFileSync } from "node:fs"
-import { mkdtemp, rm, writeFile } from "node:fs/promises"
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { basename, dirname, join, resolve } from "node:path"
 import { afterEach, expect, it, vi } from "vitest"
@@ -26,16 +26,28 @@ vi.mock("../../storage", async (original) => ({
   getUserInfo: () => ({}),
   getOpenworkDir: () => fixtureState.root,
   getEnabledHooks: () => [],
+  getLspConfig: () => ({ enabled: false }),
+  isThreadMemoryEnabled: () => false,
+  isCodeExecEnabled: () => false,
   parseMcpJsonFile: (path: string) => JSON.parse(readFileSync(path, "utf8")).mcpServers
+}))
+vi.mock("../../agent/agent-registry", async original => ({
+  ...(await original<typeof import("../../agent/agent-registry")>()),
+  loadAgentProfilesAsync: async () => []
+}))
+vi.mock("../../code-exec/saved-tool-store", async original => ({
+  ...(await original<typeof import("../../code-exec/saved-tool-store")>()),
+  listSavedCodeExecTools: () => []
 }))
 vi.mock("../../hooks/required-skill", () => ({ runHooksEnriched: vi.fn(async () => null) }))
 vi.mock("../../mcp/tool-example-store", () => ({ recordSuccessfulToolExample: () => {} }))
 vi.mock("../../browser/cdp/playwright-mcp-bridge", () => ({
-  autoSelectPlaywrightInAppBrowserTab: () => {
-    throw Error("Unexpected browser helper")
+  autoSelectPlaywrightInAppBrowserTab: ({ tool }: { tool: { toolName: string } }) => {
+    if (tool.toolName !== "echo") throw Error("Unexpected browser helper")
   },
-  invokeMcpToolWithPlaywrightInAppBrowserSupport: () => {
-    throw Error("Unexpected browser reroute")
+  invokeMcpToolWithPlaywrightInAppBrowserSupport: ({ tool, invoke }: { tool: { toolName: string }; invoke(): Promise<unknown> }) => {
+    if (tool.toolName !== "echo") throw Error("Unexpected browser reroute")
+    return invoke()
   }
 }))
 vi.mock("../runtime-client", () => ({
@@ -66,8 +78,15 @@ import { ModsManager, setModsManager } from "../manager"
 import { readClawMcpSources } from "../claw-mcp"
 import {
   closeGlobalMcpCapabilityService,
-  getGlobalMcpCapabilityService
+  getGlobalMcpCapabilityService,
+  getProjectMcpCapabilityService,
+  closeProjectCapabilityMcpService
 } from "../../mcp/capability-service"
+import {
+  issueRuntimePluginSourceToken, withRuntimePluginSource,
+  type RuntimePluginSourceToken
+} from "../../plugins/runtime-source-scope"
+import { withFunctionMcpCommand } from "../v2/mcp-command"
 import { withFunctionExecution } from "../v2/execution-context"
 import { listNativeMcpTools, nativeMcpSchemaDigest, prepareNativeMcpStep } from "./native-mcp"
 import { runHooksEnriched } from "../../hooks/required-skill"
@@ -75,8 +94,10 @@ import type { McpCapabilityTool } from "../../mcp/capability-types"
 import { DEFAULT_MOD_POLICY } from "../policy"
 
 let manager: ModsManager | undefined
+const sourceTokens: RuntimePluginSourceToken[] = []
 afterEach(async () => {
   releaseLocalThreadRunLease("flow-thread", "mods", "flow-run")
+  for (const token of sourceTokens.splice(0)) await closeProjectCapabilityMcpService(token)
   await closeGlobalMcpCapabilityService()
   setModsManager(undefined)
   manager?.close()
@@ -175,6 +196,94 @@ async function fixture() {
     configPath
   }
 }
+
+it.each(["flow", "cold-command"] as const)("uses only the exact retained parent's real stdio peer for %s and leaves global peers independent", async route => {
+  const f = await fixture()
+  const foreignRoot = join(f.workspace, "unselected-plugin")
+  await mkdir(foreignRoot)
+  await writeFile(join(foreignRoot, ".mcp.json"), JSON.stringify({ mcpServers: {
+    c: { command: process.execPath, args: [resolve("tests/support/native-flow-mcp-server.mjs"), f.journal, "unselected-plugin"] }
+  } }))
+  fixtureState.plugins.push({ id: "unselected", name: "Unselected", path: foreignRoot, enabled: true, mcpServerCount: 1 })
+  const global = getGlobalMcpCapabilityService()
+  const globalTools = await global.listTools()
+  const foreign = globalTools.find(tool => tool.providerKey === "plugin:unselected/c")!
+  const foreignSource = readClawMcpSources().find(source => source.id === foreign.providerKey)!
+  expect(foreign).toBeDefined()
+  const snapshot = join(f.workspace, "retained-parent")
+  await mkdir(snapshot)
+  await writeFile(join(snapshot, ".mcp.json"), JSON.stringify({ mcpServers: {
+    a: { command: process.execPath, args: [resolve("tests/support/native-flow-mcp-server.mjs"), f.journal, "retained-a"] }
+  } }))
+  let current = true
+  const token = issueRuntimePluginSourceToken({
+    mode: "legacy", threadId: f.scope.threadId, incarnationKey: "exact-parent",
+    projectId: "retained-project", operationId: "retained-operation", workspace: f.workspace,
+    packageDigest: "d".repeat(64), stageId: "code",
+    plugin: { id: "fixture", name: "Fixture", version: "1", path: snapshot,
+      description: "", author: "", enabled: true, skillCount: 0, mcpServerCount: 1,
+      hookCount: 0, createdAt: "", updatedAt: "" }
+  }, () => { if (!current) throw Error("retained-content-changed") }, () => {
+    if (!current) throw Error("retained-owner-revoked")
+  })
+  sourceTokens.push(token)
+  await withRuntimePluginSource(token, async () => {
+    const { prepareForegroundRuntimeToolCatalog } = await import("../../agent/runtime")
+    const foreground = await prepareForegroundRuntimeToolCatalog(f.workspace,
+      f.scope.threadId, { subagentsEnabled: false }, f.controller.signal)
+    const discovered = getProjectMcpCapabilityService().peekTools!()!
+    expect(discovered.map(tool => tool.providerKey)).toEqual(["plugin:fixture/a"])
+    // Ordinary cold catalogs deliberately defer plugin-active MCP tools. The
+    // actual initialized cache/peer must nevertheless belong to this retained owner.
+    expect(foreground.some(tool => tool.name === "search_tool")).toBe(true)
+    expect(foreground.filter(tool => tool.mcp)).toEqual([])
+    expect(f.records().filter(row => row.event === "ready" && row.provider === "retained-a")).toHaveLength(1)
+    expect(f.records().filter(row => row.event === "call")).toHaveLength(0)
+    const catalog = await listNativeMcpTools()
+    expect(catalog.map(tool => tool.provider.id)).toEqual(["plugin:fixture/a"])
+    const service = getProjectMcpCapabilityService()
+    const [tool] = await service.listTools()
+    const invoke = async (value: string) => route === "flow"
+      ? (await prepareNativeMcpStep({
+          ...catalog[0], manager: manager!, ...f.scope, signal: f.controller.signal,
+          assertLive: () => f.controller.signal.throwIfAborted(),
+          withOwnerGrant: async run => run(f.grant)
+        })).invoke({ tool: value })
+      : withFunctionMcpCommand(f.workspace, f.scope.threadId, f.scope.turnId,
+          f.controller.signal, () => manager!.invokeFunctionMcp(f.workspace,
+            f.scope.threadId, f.grant, { server: tool.providerAlias, tool: "echo", args: { tool: value } },
+            f.controller.signal, false, true))
+    await withFunctionExecution(f.scope, async () => {
+      const result = await invoke("exact-retained-call")
+      expect(result).toMatchObject({ structuredContent: { provider: "retained-a", value: "exact-retained-call" } })
+      if (route === "flow") {
+        await expect(prepareNativeMcpStep({
+          provider: foreignSource, toolName: foreign.toolName, schemaDigest: nativeMcpSchemaDigest(foreign),
+          manager: manager!, ...f.scope, signal: f.controller.signal, assertLive: () => {},
+          withOwnerGrant: async run => run(f.grant)
+        })).rejects.toThrow("CLAW_MCP_SOURCE_CHANGED")
+      } else {
+        await expect(withFunctionMcpCommand(f.workspace, f.scope.threadId, f.scope.turnId,
+          f.controller.signal, () => manager!.invokeFunctionMcp(f.workspace, f.scope.threadId,
+            f.grant, { server: foreign.providerAlias, tool: "echo", args: { tool: "must-not-reach-global" } },
+            f.controller.signal, false, true))).rejects.toThrow()
+      }
+      f.confirm.mockImplementation(async () => { current = false; return true })
+      await expect(invoke("must-not-run-after-native-approval-revocation")).rejects.toThrow()
+    })
+  })
+  expect(f.confirm).toHaveBeenCalledTimes(2)
+  expect(f.records().filter(row => row.event === "call")).toEqual([
+    { event: "call", provider: "retained-a", args: { tool: "exact-retained-call" } }
+  ])
+  current = false
+  expect(() => withRuntimePluginSource(token, async () => listNativeMcpTools())).toThrow("retained")
+  await closeProjectCapabilityMcpService(token)
+  expect((await global.listTools()).map(tool => tool.providerKey).sort()).toEqual(["plugin:fixture/a", "plugin:fixture/b", "plugin:unselected/c"])
+  expect(await global.invoke(foreign.capabilityId, { tool: "global-remains-usable" })).toMatchObject({
+    structuredContent: { provider: "unselected-plugin", value: "global-remains-usable" }
+  })
+}, 30_000)
 
 it("discovers explicitly, executes the exact real provider with reserved parameter names and records authority", async () => {
   const f = await fixture()

@@ -16,7 +16,7 @@ import { FunctionConversationChildFamilies, type FunctionConversationChildParent
   type FunctionConversationChildParentCapture } from "./conversation-child-family"
 import { FunctionConversationRegistry } from "./conversation-registry"
 import { projectFunctionSessionApiMessages } from "./session-api-transcript"
-import { THREAD_INCARNATION_METADATA_KEY } from "../../services/thread-incarnation"
+import { captureThreadIncarnation, THREAD_INCARNATION_METADATA_KEY } from "../../services/thread-incarnation"
 import type { FunctionConversationCallContext } from "./session-conversation-host"
 import type { FunctionPlugin } from "./dispatcher"
 
@@ -184,6 +184,107 @@ async function fixture(options: { genericStore?: boolean; wrappedBackend?: boole
 }
 
 describe("actual native parent current execution", () => {
+  it("keeps an admitted independent child on its own physical lease after parent lease release", async () => {
+    const f = await fixture()
+    const physicalThreadId = randomUUID(), runId = randomUUID(), agentId = `mods-agent:${randomUUID()}`
+    const row = appDb.createThread(physicalThreadId, { workspacePath: f.context.workspace,
+      parentThreadId: f.threadId, isInternalFlowRuntime: true, modsAgentRunId: runId })
+    const childSignal = new AbortController()
+    expect(claimLocalThreadRunLease({ threadId: physicalThreadId, runId, owner: "mods" }).acquired).toBe(true)
+    let ownedLive = true
+    const child = f.manager.createRuntimeAuthority({ workspace: f.context.workspace,
+      threadId: physicalThreadId, agentId, turnId: runId, signal: childSignal.signal })
+    let proof: ReturnType<typeof f.families.register> | undefined
+    try {
+      proof = f.families.register(f.proof, { invocation: {}, physicalThreadId, runId, agentId,
+        checkpointIncarnation: captureThreadIncarnation(row), signal: childSignal.signal,
+        assertCurrent: () => { if (!ownedLive) throw Error("ORIGINAL_CHILD_SOURCE_REVOKED") } })
+      f.families.bind(proof, child.authority)
+      expect(f.families.read(proof).authority).toBe(child.authority)
+      expect(releaseLocalThreadRunLease(f.threadId, "desktop", f.runId)).toBe(true)
+      // The historical parent mutation receipt remains expired and cannot be revived by a new lease.
+      expect(() => f.parent.assertCurrent()).toThrow("MODS_CONVERSATION_TARGET_CHANGED")
+      f.families.read(proof)
+      expect(claimLocalThreadRunLease({ threadId: f.threadId, runId: f.runId, owner: "desktop" }).acquired).toBe(true)
+      expect(() => f.parent.assertCurrent()).toThrow("MODS_CONVERSATION_TARGET_CHANGED")
+      expect(() => f.families.read(proof!)).not.toThrow()
+      ownedLive = false
+      expect(() => f.families.read(proof!)).toThrow("ORIGINAL_CHILD_SOURCE_REVOKED")
+    } finally {
+      if (proof) f.families.retire(proof)
+      child.release()
+      releaseLocalThreadRunLease(physicalThreadId, "mods", runId)
+      await f.close()
+    }
+  })
+
+  it.each(["lease", "lease-aba", "child-run", "child-incarnation", "child-abort",
+    "parent-incarnation", "branch", "workspace", "source-epoch"])(
+    "keeps independent handoff fenced by original %s facts", async mode => {
+      const f = await fixture()
+      const physicalThreadId = randomUUID(), runId = randomUUID(), agentId = `mods-agent:${randomUUID()}`
+      const row = appDb.createThread(physicalThreadId, { workspacePath: f.context.workspace,
+        parentThreadId: f.threadId, isInternalFlowRuntime: true, modsAgentRunId: runId })
+      const childSignal = new AbortController()
+      expect(claimLocalThreadRunLease({ threadId: physicalThreadId, runId, owner: "mods" }).acquired).toBe(true)
+      const child = f.manager.createRuntimeAuthority({ workspace: f.context.workspace,
+        threadId: physicalThreadId, agentId, turnId: runId, signal: childSignal.signal })
+      let proof: ReturnType<typeof f.families.register> | undefined
+      try {
+        proof = f.families.register(f.proof, { invocation: {}, physicalThreadId, runId, agentId,
+          checkpointIncarnation: captureThreadIncarnation(row), signal: childSignal.signal,
+          assertCurrent: () => childSignal.signal.throwIfAborted() })
+        f.families.bind(proof, child.authority)
+        releaseLocalThreadRunLease(f.threadId, "desktop", f.runId)
+        expect(() => f.parent.assertCurrent()).toThrow()
+        f.families.read(proof)
+        if (mode === "lease" || mode === "lease-aba") {
+          releaseLocalThreadRunLease(physicalThreadId, "mods", runId)
+          if (mode === "lease-aba") claimLocalThreadRunLease({ threadId: physicalThreadId, runId, owner: "mods" })
+        } else if (mode === "child-abort") childSignal.abort()
+        else if (mode === "source-epoch") f.manager.configure(f.context.workspace, false, false)
+        else if (mode === "branch") f.database.run(
+          "UPDATE function_conversations SET checkpoint_namespace=? WHERE conversation_id=?",
+          ["changed branch binding", f.prepared.target.ref.conversationId])
+        else if (mode === "workspace") f.database.run(
+          "UPDATE function_logical_sessions SET workspace=? WHERE logical_session_id=?",
+          ["foreign workspace", f.prepared.target.ref.logicalSessionId])
+        else {
+          const changedThread = mode === "parent-incarnation" ? f.threadId : physicalThreadId
+          const current = appDb.getThreadCore(changedThread)!
+          f.database.run("UPDATE threads SET metadata=? WHERE thread_id=?", [JSON.stringify({
+            ...JSON.parse(current.metadata!),
+            [mode === "child-run" ? "modsAgentRunId" : THREAD_INCARNATION_METADATA_KEY]: randomUUID()
+          }), changedThread])
+        }
+        expect(() => f.families.read(proof!)).toThrow()
+      } finally {
+        if (proof) f.families.retire(proof)
+        child.release()
+        releaseLocalThreadRunLease(physicalThreadId, "mods", runId)
+        await f.close()
+      }
+    }
+  )
+
+  it("does not mint independent ownership after the original parent lease already expired", async () => {
+    const f = await fixture()
+    const physicalThreadId = randomUUID(), runId = randomUUID()
+    const row = appDb.createThread(physicalThreadId, { workspacePath: f.context.workspace,
+      parentThreadId: f.threadId, isInternalFlowRuntime: true, modsAgentRunId: runId })
+    claimLocalThreadRunLease({ threadId: physicalThreadId, runId, owner: "mods" })
+    try {
+      releaseLocalThreadRunLease(f.threadId, "desktop", f.runId)
+      expect(() => f.families.register(f.proof, { invocation: {}, physicalThreadId, runId,
+        agentId: `mods-agent:${randomUUID()}`, checkpointIncarnation: captureThreadIncarnation(row),
+        signal: new AbortController().signal, assertCurrent: () => {} })).toThrow()
+      expect(f.families.forThread(f.context.workspace, physicalThreadId)).toBeUndefined()
+    } finally {
+      releaseLocalThreadRunLease(physicalThreadId, "mods", runId)
+      await f.close()
+    }
+  })
+
   it("runs original Owner G/P once with the original receivers and fresh Store facts", async () => {
     const f = await fixture()
     try {

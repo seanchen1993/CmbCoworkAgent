@@ -1,4 +1,5 @@
 import { lazy, Suspense, useCallback, useEffect, useRef, useState } from "react"
+import { useConfigurationDraft } from "@/lib/configuration-target"
 import type { EvaluationApi, EvaluationView } from "../../../../shared/mods/evaluation-api"
 import type { FlowApi, FlowRun, SavedFlow } from "../../../../shared/mods/flows/types"
 import { FlowRunView } from "./FlowRunView"
@@ -102,6 +103,7 @@ function ScopedEvaluationPanel({
   const [rows, setRows] = useState<EvaluationView[]>([])
   const [run, setRun] = useState<FlowRun | null>(null)
   const [busy, setBusy] = useState(false)
+  useConfigurationDraft({ threadId, workspace }, !!tasks.trim(), busy)
   const [message, setMessage] = useState("")
   const [discardTarget, setDiscardTarget] = useState<{ id: string; digest: string } | null>(null)
   const [discardConsent, setDiscardConsent] = useState(false)

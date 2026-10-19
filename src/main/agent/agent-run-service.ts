@@ -5,10 +5,32 @@ import type { AgentInvokeParams } from "../types"
 import type { RuntimeInteractionWaitHooks } from "./runtime"
 import type { RemoteTurnPolicy, StandardTurnSource } from "./standard-thread-turn"
 import type { LocalThreadRunOwner } from "./thread-run-lease"
-import { withRuntimePluginSource, type RuntimePluginSourceToken } from "../plugins/runtime-source-scope"
+import {
+  withRuntimePluginSource,
+  type RuntimePluginSourceToken
+} from "../plugins/runtime-source-scope"
 import { prepareAgentRunAdmission } from "./agent-run-admission"
+import { classifyManagedAgentFailure } from "./managed-agent-failure"
 
 export type AgentRunRequest = AgentInvokeParams
+
+class FunctionTurnSettlementFailure extends Error {
+  constructor(cause: unknown) {
+    super("Function turn settlement could not confirm its original authority", { cause })
+  }
+}
+
+/** Only after this producer releases its physical lease; ordinary observer failures stay optional. */
+export async function settleAgentFunctionTurn(
+  settlement: Promise<void> | undefined
+): Promise<void> {
+  try {
+    await settlement
+  } catch (error) {
+    if (classifyManagedAgentFailure(error) !== "provider_error")
+      throw new FunctionTurnSettlementFailure(error)
+  }
+}
 
 export interface AgentRunDelivery {
   /**
@@ -34,6 +56,11 @@ export interface AgentRunDelivery {
 export interface AgentRunHandle {
   threadId: string
   completion: Promise<void>
+  /** Exact observers then original admission settle/transfer, after external lease release.
+   * Existing owned background Workflow cleanup may still be deferred to its original owner. */
+  sourceSettlement?: Promise<void>
+  /** Main-only compare-and-release failure: retire only the captured original logical entry. */
+  invalidateSourceSettlement?: () => void
 }
 
 export interface AgentRunGoalNotice {
@@ -89,6 +116,10 @@ export interface AgentGoalControlResult {
  * that their lease or security policy belongs to the desktop.
  */
 export interface AgentRunExecutionContext {
+  /** Main-only owner contract; never accepted from renderer invoke parameters. */
+  deferSourceSettlement?: boolean
+  /** Installed by startAgentRun for the exact original producer's logical entry. */
+  onFunctionTurnSettlement?: (settlement: Promise<void>, invalidate: () => void) => void
   /** Host-issued opaque retained-package source scope; never accepted from renderer request fields. */
   pluginSourceSnapshot?: RuntimePluginSourceToken
   /** Only a resident native plugin-prompt queue can provide this private receipt. */
@@ -204,8 +235,11 @@ export function onAgentRunSettled(listener: (threadId: string) => void): () => v
 export function notifyAgentRunSettled(threadId: string): void {
   queueMicrotask(() => {
     for (const listener of settledListeners) {
-      try { listener(threadId) }
-      catch (error) { console.error("[Agent] Settlement listener failed:", error) }
+      try {
+        listener(threadId)
+      } catch (error) {
+        console.error("[Agent] Settlement listener failed:", error)
+      }
     }
   })
 }
@@ -274,10 +308,80 @@ export async function startAgentRun(
   const implementation = agentRunImplementation
   const admission = await prepareAgentRunAdmission(request, context)
   if (admission) context = admission.context
-  const completion = Promise.resolve().then(() => withRuntimePluginSource(context.pluginSourceSnapshot,
-    () => implementation(request, delivery, context))).finally(async () => {
-    try { await admission?.settle() }
-    finally { delivery.finish?.(request.threadId) }
+  const deferred =
+    context.deferSourceSettlement === true && context.localRunLease?.managedExternally === true
+  const logicalSettlements = new Map<Promise<void>, () => void>()
+  let sourceOwnerLost = false
+  if (deferred)
+    context = {
+      ...context,
+      onFunctionTurnSettlement: (settlement, invalidate) => {
+        logicalSettlements.set(settlement, invalidate)
+        if (sourceOwnerLost) invalidate()
+      }
+    }
+  const reportSettlementFailure = (error: unknown) => {
+    if (error instanceof FunctionTurnSettlementFailure)
+      context.onRunTerminated?.({
+        outcome: "unknown",
+        code: "function_turn_settlement_unconfirmed",
+        error
+      })
+  }
+  const physical = Promise.resolve()
+    .then(() =>
+      withRuntimePluginSource(context.pluginSourceSnapshot, () =>
+        implementation(request, delivery, context)
+      )
+    )
+    .catch((error) => {
+      reportSettlementFailure(error)
+      throw error
+    })
+  if (deferred) {
+    const sourceSettlement = physical
+      .catch(() => {})
+      .then(async () => {
+        try {
+          // Every captured entry is the original run, not a later same-thread run.
+          // Drain all entries before cleanup even when one authority has failed.
+          const results = await Promise.allSettled(
+            [...logicalSettlements.keys()].map(settleAgentFunctionTurn)
+          )
+          const failure = results.find((result) => result.status === "rejected")
+          const error =
+            failure?.status === "rejected"
+              ? failure.reason
+              : sourceOwnerLost
+                ? new FunctionTurnSettlementFailure(new Error("MODS_CALL_SCOPE_CHANGED"))
+                : undefined
+          if (error) {
+            reportSettlementFailure(error)
+            throw error
+          }
+        } finally {
+          await admission?.settle()
+        }
+      })
+    // The original owner receives this promise before awaiting physical completion.
+    // Its durable delivery may fail first; rejection must still remain observed.
+    void sourceSettlement.catch(() => {})
+    return {
+      threadId: request.threadId,
+      completion: physical.finally(() => delivery.finish?.(request.threadId)),
+      sourceSettlement,
+      invalidateSourceSettlement: () => {
+        sourceOwnerLost = true
+        for (const invalidate of logicalSettlements.values()) invalidate()
+      }
+    }
+  }
+  const completion = physical.finally(async () => {
+    try {
+      await admission?.settle()
+    } finally {
+      delivery.finish?.(request.threadId)
+    }
   })
   return {
     threadId: request.threadId,

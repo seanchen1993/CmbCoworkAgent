@@ -58,6 +58,8 @@ export interface FunctionDispatchOptions {
   timeoutMs?: number
   /** End-only shared native cut, inherited by nested dispatch without restarting its clock. */
   dispatchCutNs?: string
+  platformUiOpen?: boolean
+  platformCleanup?: boolean
   operation?: boolean
   uiGeneration?: string
   capabilities?(plugin: FunctionPlugin): string[]
@@ -396,6 +398,8 @@ export class FunctionDispatcher {
           modelProtocol: plugin.modelProtocol ?? "result-v1",
           ownBudgetMs: caught ? 1000 : event === "engine.create" ? 0 : 10000,
           ...(options.dispatchCutNs ? { dispatchCutNs: options.dispatchCutNs } : {}),
+          ...(options.platformUiOpen ? { platformUiOpen: true } : {}),
+          ...(options.platformCleanup ? { platformCleanup: true } : {}),
           ...(options.operation ? { operation: true } : {}),
           ...(options.uiGeneration ? { uiGeneration: options.uiGeneration } : {}),
           ...(options.signal ? { signal: options.signal } : {}),

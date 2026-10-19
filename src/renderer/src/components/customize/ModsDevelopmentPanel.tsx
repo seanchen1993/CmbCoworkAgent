@@ -21,6 +21,10 @@ import type { DevelopmentReuseOrigin } from "./DevelopmentReusePanel"
 import { normalizeWorkspacePathKey } from "../../../../shared/workspace-path"
 import { ProjectDevelopmentPreviewPanel } from "./ProjectDevelopmentPreviewPanel"
 import { DevelopmentReusePlanCard } from "./DevelopmentReusePlanCard"
+import { FunctionUserConfig } from "./FunctionUserConfig"
+import { BusinessCreatorReviewCard } from "./BusinessCreatorReviewCard"
+import { BusinessCreatorTrialDialog } from "./BusinessCreatorTrialDialog"
+import { CreatorPlanningPanel } from "./CreatorPlanningPanel"
 
 const phases: Record<DevelopmentTrialStatus["phase"], string> = {
   "needs-approval": "等待你确认能力",
@@ -188,6 +192,7 @@ function ScopedDevelopment({
   const announcedCompositionFailure = useRef("")
   const announcedReuse = useRef("")
   const [projectPreviewOpen, setProjectPreviewOpen] = useState(false)
+  const [businessTrialOpen, setBusinessTrialOpen] = useState(false)
   const accept = useCallback(
     (next: DevelopmentStatus) => {
       if (
@@ -335,6 +340,45 @@ function ScopedDevelopment({
     }
     if (!compositionFailureKey) announcedCompositionFailure.current = ""
   }, [mode, compositionFailureKey])
+  const configurationId = status?.configuration?.id
+  const announcedConfiguration = useRef<string | undefined>(undefined)
+  useEffect(() => {
+    if (mode === "chat" && configurationId &&
+      announcedConfiguration.current !== configurationId) {
+      announcedConfiguration.current = configurationId
+      setOpen(true)
+    }
+  }, [mode, configurationId])
+  const projectTrialId = status?.projectTrial?.id
+  const announcedProjectTrial = useRef<string | undefined>(undefined)
+  useEffect(() => {
+    if (mode === "chat" && projectTrialId && announcedProjectTrial.current !== projectTrialId) {
+      announcedProjectTrial.current = projectTrialId
+      setOpen(true)
+    }
+  }, [mode, projectTrialId])
+  const businessReview = status?.business?.review
+  const businessTrialDiagnostic = status?.business?.trialDiagnostic
+  const businessTrial = businessTrialDiagnostic ? undefined : status?.business?.trial
+  const announcedBusinessTrial = useRef("")
+  const businessTrialAttention = businessTrial &&
+    ["needs-confirmation", "failed", "unknown"].includes(businessTrial.phase)
+    ? JSON.stringify([businessTrial.id, businessTrial.phase]) : ""
+  useEffect(() => {
+    if (businessTrialAttention && announcedBusinessTrial.current !== businessTrialAttention) {
+      announcedBusinessTrial.current = businessTrialAttention
+      setBusinessTrialOpen(true)
+      setOpen(false)
+    }
+  }, [businessTrialAttention])
+  const businessReviewKey = businessReview ? JSON.stringify([businessReview.planId, businessReview.phase]) : ""
+  const announcedBusinessReview = useRef("")
+  useEffect(() => {
+    if (mode === "chat" && businessReviewKey && announcedBusinessReview.current !== businessReviewKey) {
+      announcedBusinessReview.current = businessReviewKey
+      if (!businessTrialAttention && !businessTrialOpen) setOpen(true)
+    }
+  }, [mode, businessReviewKey, businessTrialAttention, businessTrialOpen])
   const approvalKey = JSON.stringify(status?.trials.filter((row) => row.phase === "needs-approval")
     .map((row) => [row.componentId, row.revision, row.bundleDigest, row.compiledDigest]) ?? [])
   useEffect(() => {
@@ -344,7 +388,14 @@ function ScopedDevelopment({
     }
     if (!awaitingApproval) announcedApproval.current = ""
   }, [mode, awaitingApproval, approvalKey])
-  const label = undoBusy ? "正在撤销修改"
+  const label = businessTrialDiagnostic ? "业务试用记录待核对"
+    : businessTrial?.phase === "unknown" ? "业务试用结果待核对"
+    : businessTrial && ["needs-configuration", "ready"].includes(businessTrial.phase) ? "配置业务试用"
+    : businessTrial?.phase === "running" ? "业务插件试用中"
+    : businessReview ? businessReview.phase === "unknown" ? "插件结果待核对" : "业务插件组装"
+    : projectTrialId ? "确认项目真实试用"
+    : configurationId ? "填写插件参数"
+    : undoBusy ? "正在撤销修改"
     : status?.undo?.phase === "failed" ? "撤销结果待核对"
     : reuse?.phase === "needs-approval"
     ? "确认跨聊天复用"
@@ -406,8 +457,54 @@ function ScopedDevelopment({
           刷新状态
         </button>
       </div>
+      {status?.planning?.diagnostic && <p role="status" className="text-xs text-muted-foreground">
+        {status.planning.diagnostic}
+      </p>}
+      {businessTrialDiagnostic && <p role="alert" className="text-sm text-destructive">
+        隔离试用记录暂不可用：{businessTrialDiagnostic}。请核对原记录；这里不会启动或重放试用。
+      </p>}
+      {businessReview && (
+        <BusinessCreatorReviewCard review={businessReview} busy={busy}
+          onTrial={api.businessTrial && !businessTrialDiagnostic ? () => { setOpen(false); setBusinessTrialOpen(true) } : undefined}
+          onApprove={() => void operate(expectedWorkspace => api.approveBusiness({
+            threadId, expectedWorkspace, planId: businessReview.planId, digest: businessReview.digest
+          }), accept)}
+          onExport={() => void operate(expectedWorkspace => api.exportBusiness({
+            threadId, expectedWorkspace, planId: businessReview.planId, digest: businessReview.digest
+          }), accept)}
+          onRead={() => void (businessReview.canReconcile
+            ? operate(expectedWorkspace => api.reconcileBusiness({
+              threadId, expectedWorkspace, planId: businessReview.planId, digest: businessReview.digest
+            }), accept) : read())} />
+      )}
+      {status?.projectTrial && (
+        <article className="space-y-3 rounded-xl border bg-card p-3" aria-label="项目真实试用请求">
+          <p className="text-sm font-medium">{status.projectTrial.name} · 版本 {status.projectTrial.revision}</p>
+          <p className="text-xs leading-5 text-muted-foreground">
+            已准备独立试用；尚未执行。确认后使用原项目运行器，从起点执行真实阶段并校验产物。
+            修改源码不会改动正在运行的版本，也不会自动重跑原任务。当前入口适用于标准宿主项目插件，
+            不会将已有 Python 业务插件转换为纯函数扩展。
+          </p>
+          <ProjectDevelopmentPreviewPanel key={status.projectTrial.id} threadId={threadId}
+            workspace={status.workspace} request={status.projectTrial} />
+        </article>
+      )}
+      {status?.configuration && (
+        <article className="space-y-3 rounded-xl border bg-card p-3" aria-label="插件参数填写请求">
+          <p className="text-sm font-medium">{status.configuration.plugin} · {status.configuration.label}</p>
+          <p className="text-xs leading-5 text-muted-foreground">
+            请在原生参数表单中选择或填写。敏感内容不会交给助手；参数保存在当前项目，
+            同一项目使用此插件的聊天共享。保存后，正在执行的任务继续使用原设置，结束后应用。
+            此表单不批准插件代码或扩大权限。
+          </p>
+          <FunctionUserConfig key={status.configuration.id} threadId={threadId}
+            pluginId={status.configuration.pluginId} expectedWorkspace={status.workspace}
+            expectedDigest={status.configuration.digest} focusKey={status.configuration.key}
+            initiallyOpen onSaved={() => void read(false)} />
+        </article>
+      )}
       {reuse && (
-        <DevelopmentReusePlanCard plan={reuse} current={reuseCurrent} busy={busy}
+        <DevelopmentReusePlanCard plan={reuse} save={status?.save} current={reuseCurrent} busy={busy}
           onApprove={() => {
             if (!reuse.planId || !reuse.compiledDigest || !reuse.targetProfileDigest || !reuseCurrent) return
             void operate((expectedWorkspace) => api.approveReuse({
@@ -486,6 +583,22 @@ function ScopedDevelopment({
           {"error" in status.request
             ? "本次制作预算无法核对，已停止继续提交。草稿和当前功能仍保留。"
             : `${status.request.groupId ? "当前目标累计" : "最近一次需求"}已检查 ${status.request.candidates}/3 个候选；重新打开界面不会重置修复次数。`}
+          {!("error" in status.request) && status.request.model && (
+            <span className="block">
+              模型实际请求 {status.request.model.attempts}/{status.request.model.attemptLimit} 次（含重试）；
+              用量已上报 {status.request.model.usageReportedAttempts} 次
+              {status.request.model.coverage === "partial" ? "，其余用量待核对" : ""}。
+              {status.request.model.recordedModelCalls !== undefined
+                ? ` 原运行记录：模型调用 ${status.request.model.recordedModelCalls} 次、工具调用 ${status.request.model.recordedToolCalls} 次${status.request.model.traceCoverage === "partial" ? "（覆盖不完整）" : ""}。`
+                : " 原运行调用记录待核对。"}
+              {status.request.model.inputTokens !== undefined
+                ? ` 已上报输入 ${status.request.model.inputTokens}、输出 ${status.request.model.outputTokens} Token。`
+                : " Token 用量未知。"}
+              费用未知：未配置可信价格，不能保证硬费用上限。
+              {status.request.model.historicalUsageUnknown
+                ? " 历史模型次数未知，已停止自动续跑；草稿保留，可提出新的需求。" : ""}
+            </span>
+          )}
         </p>
       )}
       {status?.trials.map((row) => {
@@ -744,6 +857,7 @@ function ScopedDevelopment({
             </button>
           </div>
           <p className="mt-2">结束创作会停止这段聊天的灵件试用。项目试用请从任务页面停止。</p>
+          <CreatorPlanningPanel api={api} threadId={threadId} workspace={status.workspace} />
         </details>
       )}
       {status?.enabled && (
@@ -872,7 +986,13 @@ function ScopedDevelopment({
       )}
     </section>
   )
-  if (mode === "entry") return content
+  const businessTrialDialog = !businessTrialDiagnostic && businessReview && status?.workspace && api.businessTrial && (
+    <BusinessCreatorTrialDialog open={businessTrialOpen} onOpenChange={setBusinessTrialOpen}
+      threadId={threadId} workspace={status.workspace} review={businessReview}
+      trial={businessTrial} api={api.businessTrial} onStatus={accept}
+      onRequestRepair={onRequestRepair} />
+  )
+  if (mode === "entry") return <>{content}{businessTrialDialog}</>
   return (
     <div className="flex flex-wrap items-center gap-2" aria-label="聊天模式与 Mod 状态">
       <div className="inline-flex rounded-lg border border-border/70 bg-background/80 p-0.5" role="group" aria-label="聊天模式">
@@ -934,6 +1054,7 @@ function ScopedDevelopment({
         {content}
       </PopoverContent>
       </Popover>
+      {businessTrialDialog}
     </div>
   )
 }

@@ -3,7 +3,7 @@ import type { ModJson, ModObject } from "../types"
 export const MODS_V2_API = "cmb.mods/v2" as const
 export const CLAUDE_MODS_PROFILE = "claude-code/2.1.278" as const
 /** Bump when expanding host authority so an old digest grant cannot silently gain capabilities. */
-export const FUNCTION_HOST_REVISION = "claude-295-tools-v90" as const
+export const FUNCTION_HOST_REVISION = "claude-295-tools-v91" as const
 export const MOD_TIERS = ["prepend", "user", "append", "builtin", "core"] as const
 export type ModTier = (typeof MOD_TIERS)[number]
 
@@ -18,6 +18,8 @@ export interface FunctionRegistration {
   hasCatch: boolean
   /** Missing metadata retains remote matching for older runtime peers. */
   hasMatcher?: boolean
+  /** Synchronous registration metadata. Discovery never invokes a hook or matcher. */
+  platformCapability?: import("./platform-capabilities").PlatformCapabilityDescriptor
 }
 
 export interface ModTraceEntry {
@@ -56,6 +58,10 @@ export interface FunctionInvocation {
   provider?: string
   /** Host-owned callback handle invoked under a fresh module authority frame. */
   resourceCallback?: { handle: number; release: boolean }
+  /** Native cleanup frame; never supplied by an SDK payload or an author descriptor. */
+  platformCleanup?: boolean
+  /** Native view initialization cannot invoke external effects or ordinary business actions. */
+  platformUiOpen?: boolean
   /** Private per-pull generator protocol, never derived from an event payload. */
   streamCursor?: { action: "open" | "next" | "return"; id?: number }
   callback?: {
@@ -91,7 +97,7 @@ export type FunctionHostCall = (
 /** Both the isolated production proxy and the in-process test VM implement this contract. */
 export interface FunctionGuest {
   readonly registrations: readonly FunctionRegistration[]
-  /** Native VM proof; an old peer without this fact cannot be reclaimed automatically. */
+  /** Native VM proof captured after registration; missing peers cannot be auto reclaimed. */
   readonly registrationQuiescent?: boolean
   readonly stats: { disposed: boolean }
   /** One module-lifetime resource channel. It never extends an invocation's SDK authority. */

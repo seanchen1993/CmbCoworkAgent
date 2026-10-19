@@ -156,7 +156,8 @@ export class FunctionConfiguration {
     value: FunctionConfigValue,
     origin: FunctionConfigOrigin,
     signal?: AbortSignal,
-    excludePlugin?: string
+    excludePlugin?: string,
+    nativeReset = false
   ): Promise<FunctionConfigSetResult> {
     const check = this.operationGuard(signal)
     check()
@@ -164,7 +165,7 @@ export class FunctionConfiguration {
     const receipt = this.rows.prepare(key, origin, value, () => {
       check()
       commitGuard?.()
-    })
+    }, nativeReset)
     const safe = await this.protect(receipt.input, signal, check)
     if (!isModObject(safe)) throw new ModFunctionError("MODS_CONFIG_SET_INPUT")
     // The private receipt retains raw previous/revision. The public previous is protected.

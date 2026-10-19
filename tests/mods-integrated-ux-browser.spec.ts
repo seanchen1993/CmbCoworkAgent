@@ -25,12 +25,13 @@ async function main() {
       page,
       `window.bumpClaw=()=>{profileView.revision++;for(const fn of configurationListeners)fn()};host.render(<ClawPanel threadId='a'/>);`
     )
+    await page.getByText("高级编辑与已保存组合", { exact: true }).click()
     await page.getByLabel("选择能力 Demo").check()
     await page.getByText("更多设置：技能、工具、模型与步骤", { exact: true }).click()
     await page.getByRole("button", { name: "添加检查要求", exact: true }).click()
     await page.getByLabel("附加模式 Demo").selectOption("report")
     await page.getByRole("button", { name: "保存组合", exact: true }).click()
-    await page.getByRole("button", { name: "应用到当前对话", exact: true }).click()
+    await page.getByRole("button", { name: "应用到所选聊天", exact: true }).click()
     assert.equal(
       await page.evaluate(
         "window.fixture.calls.filter(c=>c[0]==='claw'&&c[1].kind==='apply').length"
@@ -46,7 +47,7 @@ async function main() {
       true
     )
     await page.getByRole("button", { name: "取消", exact: true }).click()
-    await page.getByRole("button", { name: "应用到当前对话", exact: true }).click()
+    await page.getByRole("button", { name: "应用到所选聊天", exact: true }).click()
     await page.getByRole("button", { name: "确认应用", exact: true }).click()
     const mutation = await page.evaluate(
       "window.fixture.calls.filter(c=>c[0]==='claw'&&c[1].kind==='apply').at(-1)[1]"
@@ -66,6 +67,7 @@ async function main() {
       window.activeClaw=()=>profileView.active;host.render(<ClawPanel threadId='a'/>);
     `
     )
+    await page.getByText("高级编辑与已保存组合", { exact: true }).click()
     await page.getByRole("button", { name: "检查灵件版本", exact: true }).click()
     await page.getByRole("button", { name: "保存组合", exact: true }).click()
     const repaired = await page.evaluate(
@@ -83,28 +85,41 @@ async function main() {
     )
 
     await mount(page, `host.render(<FlowsPanel threadId='a'/>);`)
-    await page
-      .getByText("支持带项目目录的本地聊天和受支持的项目任务。项目要求的完成检查仍会执行。", {
-        exact: true
-      })
-      .waitFor()
+    await page.getByText("配好步骤，保存后在聊天中开始任务。", { exact: true }).waitFor()
     assert.equal(
       await page.getByRole("button", { name: "新建代码检视流程", exact: true }).isEnabled(),
       true
     )
     assert.equal(
-      await page.getByText(/支持有效的 Plugin\/Harness 项目、Feature 会话/).isVisible(),
+      await page
+        .getByText("项目要求的完成检查和人工确认仍会执行。关闭配置页面不会停止任务。", {
+          exact: true
+        })
+        .isVisible(),
       false
     )
-    await page.getByText("查看支持范围", { exact: true }).click()
+    await page.getByRole("button", { name: "流程配置说明", exact: true }).click()
     assert.equal(
-      await page.getByText(/支持有效的 Plugin\/Harness 项目、Feature 会话/).isVisible(),
+      await page
+        .getByText("项目要求的完成检查和人工确认仍会执行。关闭配置页面不会停止任务。", {
+          exact: true
+        })
+        .isVisible(),
       true
     )
+    await page
+      .getByText(
+        "这里负责创建和修改执行步骤。保存后点击“去这段聊天使用”，在聊天输入框填写任务并明确发送。",
+        {
+          exact: true
+        }
+      )
+      .waitFor()
+    await page.keyboard.press("Escape")
     checks.push(
-      "a host-available catalog enables flow creation and accurately includes validated local Plugin/Harness contexts"
+      "a host-available catalog enables flow creation; help explains explicit task start and preserved project checks and approval"
     )
-    await page.getByRole("button", { name: "Flow a · v1", exact: true }).click()
+    await page.getByRole("button", { name: "Flow a", exact: true }).click()
     const step = page.locator('[data-flow-step="review"]')
     await step.getByRole("button", { name: /^配置步骤：/ }).click()
     await step.getByLabel("模型选择方式").selectOption("fixed")
@@ -124,8 +139,9 @@ async function main() {
       page,
       `host.render(<FlowRunView run={{id:'r',threadId:'a',workspace:'a',status:'complete',flow:saved('a'),startedAt:1,epoch:1,attempts:[{executionId:'e',stepId:'test',attempt:1,epoch:0,status:'passed',startedAt:1,invalidated:true,result:{source:'native-check',check:'unit-test',passed:true,summary:'old pass',evidenceIds:['old']}}],failureCounts:{},summary:'流程已完成'}} busy={false} onDecide={()=>{}} onCancel={()=>{}}/>);`
     )
+    await page.getByText("测试记录", { exact: true }).click()
     await page
-      .getByText("未执行原生项目测试，或结果已失效。Agent / 插件文字报告不替代真实测试回执。", {
+      .getByText("尚无可确认的项目测试结果，不能据此认为测试通过。", {
         exact: true
       })
       .waitFor()

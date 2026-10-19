@@ -48,9 +48,11 @@ async function main() {
           summary:'增加 SQL 与数据质量报告要求',files:[{path:'skills/build/SKILL.md',before:text,after:text+'\\n'+input.instruction}]};
         if(window.deferGenerate)return new Promise(resolve=>window.finishGenerate=()=>resolve(value));return value},
       prepareNodeComposition:async(input)=>{window.calls.push(['prepareNodes',input]);return {proposalId:'nodes-'+input.requestId,copyId:copy.copyId,baseDigest:copy.digest,summary:'新增可选择步骤的入口，原检查和人工确认保留',files:[{path:'board_core/board_config.json',before:JSON.stringify({workflow:{templates:{standard:{kind:'profile'}}}}),after:JSON.stringify({workflow:{templates:{standard:{kind:'profile'},'devclaw-composed':{kind:'custom',requiredNodes:['dev.code','ops.archive']}}}})}]}},
+      prepareFlowComposition:async(input)=>{window.calls.push(['prepareFlow',input]);return {proposalId:'flow-'+input.requestId,copyId:copy.copyId,baseDigest:copy.digest,summary:'新增完整流程入口，原检查和人工确认保留',files:[{path:'devclaw.capabilities.json',before:'',after:JSON.stringify({apiVersion:'devclaw.capabilities/v1',capabilities:[{id:'full-flow',kind:'flow',usage:'project'}]})}]}},
       cancelProposal:async(input)=>window.calls.push(['cancel',input]),
       applyProposal:async(input)=>{window.calls.push(['apply',input]);if(window.sourceChanged)throw Error('源码已变化，请重新生成修改建议');if(window.failSave)throw Error('save failed');
         if(input.proposalId.startsWith('nodes-'))return update({digest:'nodes-saved',status:'changed'});
+        if(input.proposalId.startsWith('flow-'))return update({digest:'flow-saved',status:'changed'});
         const proposal=window.calls.filter(x=>x[0]==='propose').at(-1)[1];text+='\\n'+proposal.instruction;
         return update({digest:'proposal-saved',status:'changed'})},
       get:async()=>({...copy}), listEditableFiles:async()=>['skills/build/SKILL.md','hooks/verify.py'],
@@ -228,6 +230,32 @@ async function main() {
     await page.getByRole("button", { name: "添加自选步骤选项", exact: true }).click()
     await page.getByRole("button", { name: "确认添加自选步骤选项", exact: true }).click()
     await page.getByText("“自选项目步骤”已保存。接下来检查能否安装。", { exact: true }).waitFor()
+    const beforeFlow = await page.evaluate(
+      () => (window as unknown as FixtureWindow).calls.filter(([name]) => name === "apply").length
+    )
+    await page.getByRole("button", { name: "用于完整流程组合", exact: true }).click()
+    await page
+      .getByLabel("修改建议预览")
+      .getByText("devclaw.capabilities.json", { exact: true })
+      .click()
+    await page.getByLabel("新增文件内容", { exact: true }).waitFor()
+    assert.equal(
+      await page.evaluate(
+        () => (window as unknown as FixtureWindow).calls.filter(([name]) => name === "apply").length
+      ),
+      beforeFlow,
+      "Preparing a flow must not save before confirmation"
+    )
+    await page.getByRole("button", { name: "取消本次建议", exact: true }).click()
+    assert.equal(await page.getByLabel("修改建议预览").count(), 0)
+    await page.getByRole("button", { name: "用于完整流程组合", exact: true }).click()
+    await page.getByRole("button", { name: "确认保存完整流程配置", exact: true }).click()
+    await page
+      .getByText(
+        "完整流程组合配置已保存。请检查并安装此副本，再到项目会话的“项目能力”选择完整流程。",
+        { exact: true }
+      )
+      .waitFor()
     await page.getByRole("button", { name: "检查能否安装", exact: true }).click()
     await page.getByRole("button", { name: "安装新插件", exact: true }).click()
     assert.equal(

@@ -3,6 +3,8 @@ export function createNodeCompositionBridge(
   invoke: (channel: string, input: unknown) => Promise<unknown>
 ): NodeCompositionApi {
   return {
+    compatibility: (input) => invoke("node-composition:compatibility", input) as
+      ReturnType<NodeCompositionApi["compatibility"]>,
     projects: (input) =>
       invoke("node-composition:projects", input) as ReturnType<NodeCompositionApi["projects"]>,
     catalog: (input) =>

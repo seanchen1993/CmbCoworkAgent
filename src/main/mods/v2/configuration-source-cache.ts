@@ -36,6 +36,13 @@ export class FunctionConfigurationSourceCache {
     private readonly compile = (path: string) => compileFunctionPlugin(path)
   ) {}
 
+  /** Main-process identity consumers may reuse only a still-proved completed compilation. */
+  peek(path: string): CompiledFunctionPlugin | undefined {
+    const compiled = this.entries.get(path)
+    if (compiled) assertConfigurationSourcesCurrent(path, compiled)
+    return compiled
+  }
+
   async read(path: string): Promise<CompiledFunctionPlugin> {
     const generation = this.generation
     const previous = this.entries.get(path)

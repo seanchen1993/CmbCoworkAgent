@@ -9,6 +9,7 @@ import { AuthoringInstallPanel } from "./AuthoringInstallPanel"
 import { AuthoringPreviewPanel } from "./AuthoringPreviewPanel"
 import { useEffect, useRef, useState } from "react"
 import { normalizeWorkspacePathKey } from "../../../../shared/workspace-path"
+import { useConfigurationDraft } from "@/lib/configuration-target"
 import type {
   AuthoringDocument,
   AuthoringFile,
@@ -23,8 +24,8 @@ const templates: [AuthoringTemplateKind, string][] = [
   ["panel", "面板"],
   ["flow-action", "流程动作"]
 ]
-const inputClass = "w-full rounded border bg-background p-2 text-sm"
-const buttonClass = "rounded border px-3 py-2 text-sm disabled:opacity-50"
+const inputClass = "devclaw-input w-full min-w-0 text-sm"
+const buttonClass = "rounded border px-3 py-2 text-sm hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50"
 function publicError(error: unknown): string {
   const message = error instanceof Error ? error.message : ""
   if (message.includes("AUTHORING_VERSION_LIMIT"))
@@ -91,6 +92,9 @@ function Creator({
   const [kind, setKind] = useState<AuthoringTemplateKind>("command")
   const [comparison, setComparison] = useState<AuthoringDocument | null>(null)
   const [busy, setBusy] = useState(false)
+  useConfigurationDraft({ threadId, workspace: workspace || workspaceHint || null },
+    document ? name !== document.name || JSON.stringify(files) !== JSON.stringify(document.source.files)
+      : !!(id.trim() || name.trim() || instruction.trim() || files.length), busy)
   const [error, setError] = useState("")
   const [notice, setNotice] = useState("")
   const alive = useRef(true),
@@ -225,6 +229,9 @@ function Creator({
         <p className="text-sm text-muted-foreground">
           从模板生成并编辑源码。保存和还原只记录草稿版本，不安装、不授权、不应用到当前组合。保存后可使用独立样例预览；预览不会改变当前组合。
         </p>
+        <p className="text-xs text-muted-foreground">
+          独立样例预览使用隔离环境，不能证明文件、网络或模型已实际调用。需要真实效果时回到制作聊天申请试用，核对用途、目标和权限后直接验证；保存使用再走安装与版本授权。
+        </p>
         {!opened ? (
           <button
             className={buttonClass}
@@ -321,7 +328,7 @@ function Creator({
                       模板
                       <select
                         aria-label="组件模板"
-                        className={inputClass}
+                        className="devclaw-select w-full min-w-0 text-sm"
                         value={kind}
                         disabled={busy}
                         onChange={(event) => setKind(event.target.value as AuthoringTemplateKind)}

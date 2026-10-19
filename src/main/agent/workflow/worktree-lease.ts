@@ -69,7 +69,9 @@ export class WorkflowWorktreeLedger {
     return this.sourcePromise
   }
 
-  async acquire(label: string): Promise<WorkflowWorktreeInfo> {
+  async acquire(label: string, agentIndex?: number): Promise<WorkflowWorktreeInfo> {
+    if (agentIndex !== undefined && (!Number.isSafeInteger(agentIndex) || agentIndex < 0))
+      throw new Error("invalid workflow agent index")
     if (this.disposed) throw new Error("workflow run is shutting down — no new isolated worktree")
     const source = await this.source()
     if (this.disposed) throw new Error("workflow run was cancelled before worktree creation")
@@ -90,6 +92,7 @@ export class WorkflowWorktreeLedger {
     })
     const now = new Date().toISOString()
     let record: WorkflowWorktreeRecord = {
+      ...(agentIndex === undefined ? {} : { agentIndex }),
       id: info.name,
       runId: this.options.runId,
       threadId,

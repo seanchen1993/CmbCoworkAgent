@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto"
 import { lstat, readdir, realpath, open, mkdir, writeFile, chmod } from "node:fs/promises"
 import { dirname, isAbsolute, join, relative, resolve } from "node:path"
+import { parseProjectRuntimeManifest } from "../../shared/project-runtime"
 
 export const DERIVATION_LIMITS = {
   files: 4096,
@@ -66,15 +67,24 @@ export async function snapshotDerivationSource(directory: string): Promise<Deriv
   if (root.toLowerCase() !== original.toLowerCase()) throw Error("来源目录包含链接")
   const files: DerivationFile[] = []
   const excluded: string[] = []
+  const active = new Set<Promise<void>>()
+  const jobs: Array<{ order: number; done: Promise<void> }> = []
   let totalBytes = 0
   let visited = 0
+  let nextFile = 0
+  let failure: { order: number; error: unknown } | undefined
+  const failed = (order: number, error: unknown): void => {
+    if (!failure || order < failure.order) failure = { order, error }
+  }
   const walk = async (directoryPath: string, depth: number): Promise<void> => {
+    if (failure) return
     if (depth > DERIVATION_LIMITS.depth) throw Error("插件目录层级超限")
     const entries = (await readdir(directoryPath, { withFileTypes: true })).sort((a, b) =>
       a.name.localeCompare(b.name, "en")
     )
     const names = new Set<string>()
     for (const entry of entries) {
+      if (failure) return
       if (++visited > DERIVATION_LIMITS.files) throw Error("插件文件数超限")
       const key = entry.name.toLowerCase()
       if (names.has(key) || /[<>:"|?*]/.test(entry.name) || /[. ]$/.test(entry.name))
@@ -90,6 +100,7 @@ export async function snapshotDerivationSource(directory: string): Promise<Deriv
         (stat.isFile() && stat.nlink !== 1)
       )
         throw Error("插件包含链接或硬链接")
+      if (failure) return
       if (excludedName(entry.name)) {
         excluded.push(path)
         continue
@@ -99,46 +110,79 @@ export async function snapshotDerivationSource(directory: string): Promise<Deriv
         continue
       }
       if (!stat.isFile()) throw Error("插件包含不支持的文件类型")
+      const reservedBytes = stat.size
       if (
-        stat.size > DERIVATION_LIMITS.fileBytes ||
-        totalBytes + stat.size > DERIVATION_LIMITS.totalBytes
+        reservedBytes > DERIVATION_LIMITS.fileBytes ||
+        totalBytes + reservedBytes > DERIVATION_LIMITS.totalBytes
       )
         throw Error("插件文件大小超限")
-      const handle = await open(absolute, "r")
-      try {
-        const before = await handle.stat()
-        if (
-          !before.isFile() ||
-          before.nlink !== 1 ||
-          before.ino !== stat.ino ||
-          before.dev !== stat.dev ||
-          before.size !== stat.size
-        )
-          throw Error("来源已变化，请重新检查")
-        const bytes = Buffer.alloc(before.size)
-        let offset = 0
-        while (offset < bytes.length) {
-          const read = await handle.read(bytes, offset, bytes.length - offset, offset)
-          if (!read.bytesRead) throw Error("来源已变化，请重新检查")
-          offset += read.bytesRead
+      // Reserve in DFS order before waiting for a slot; buffers may never exceed this budget.
+      totalBytes += reservedBytes
+      while (active.size >= 8) await Promise.race(active)
+      if (failure) return
+      const order = visited
+      const index = nextFile++
+      const read = async (): Promise<DerivationFile> => {
+        const handle = await open(absolute, "r")
+        try {
+          const before = await handle.stat()
+          if (
+            !before.isFile() ||
+            before.nlink !== 1 ||
+            before.ino !== stat.ino ||
+            before.dev !== stat.dev ||
+            before.size !== reservedBytes
+          )
+            throw Error("来源已变化，请重新检查")
+          const bytes = Buffer.alloc(before.size)
+          let offset = 0
+          while (offset < bytes.length) {
+            const read = await handle.read(bytes, offset, bytes.length - offset, offset)
+            if (!read.bytesRead) throw Error("来源已变化，请重新检查")
+            offset += read.bytesRead
+          }
+          const after = await handle.stat()
+          const current = await lstat(absolute)
+          if (
+            after.size !== before.size ||
+            after.mtimeMs !== before.mtimeMs ||
+            current.ino !== before.ino ||
+            current.isSymbolicLink()
+          )
+            throw Error("来源已变化，请重新检查")
+          return { path, bytes, mode: stat.mode, digest: hash(bytes) }
+        } finally {
+          await handle.close()
         }
-        const after = await handle.stat()
-        const current = await lstat(absolute)
-        if (
-          after.size !== before.size ||
-          after.mtimeMs !== before.mtimeMs ||
-          current.ino !== before.ino ||
-          current.isSymbolicLink()
-        )
-          throw Error("来源已变化，请重新检查")
-        totalBytes += bytes.length
-        files.push({ path, bytes, mode: stat.mode, digest: hash(bytes) })
-      } finally {
-        await handle.close()
       }
+      const done: Promise<void> = read()
+        .then(
+          (file) => {
+            files[index] = file
+          },
+          (error: unknown) => {
+            failed(order, error)
+          }
+        )
+        .finally(() => {
+          active.delete(done)
+        })
+      active.add(done)
+      jobs.push({ order, done })
     }
   }
-  await walk(root, 0)
+  try {
+    await walk(root, 0)
+  } catch (error) {
+    failed(visited, error)
+  }
+  // Never publish a result or error while a started read/close is still physically pending.
+  const settled = await Promise.allSettled(jobs.map((job) => job.done))
+  for (let index = 0; index < settled.length; index++) {
+    const result = settled[index]
+    if (result.status === "rejected") failed(jobs[index].order, result.reason)
+  }
+  if (failure) throw failure.error
   if ((await realpath(original)) !== root) throw Error("来源已变化，请重新检查")
   const manifests = DERIVATION_MANIFESTS.filter((path) => files.some((file) => file.path === path))
   if (!manifests.length) throw Error("未找到完整插件清单")
@@ -152,7 +196,11 @@ export async function snapshotDerivationSource(directory: string): Promise<Deriv
   const paths = new Set(files.map((file) => file.path))
   const runtime = files.find((file) => file.path === "devclaw.project-runtime.json")
   if (runtime) {
-    const manifest = packageJson(runtime.bytes)
+    const rawManifest = packageJson(runtime.bytes)
+    const manifest =
+      rawManifest.apiVersion === "devclaw.project-runtime/v2"
+        ? parseProjectRuntimeManifest(rawManifest)
+        : rawManifest
     const plugin = manifest.plugin as Record<string, unknown> | undefined
     if (!plugin || plugin.id !== first.name || plugin.version !== first.version)
       throw Error("项目运行时清单与插件身份不一致")

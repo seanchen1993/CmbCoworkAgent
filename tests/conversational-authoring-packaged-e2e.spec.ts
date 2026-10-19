@@ -584,7 +584,7 @@ async function main() {
     await page.reload()
     await page.getByText(directoryThreadTitle, { exact: true }).first().click()
     await page.getByRole("button", { name: "自定义设置", exact: true }).click()
-    await page.getByRole("button", { name: "助手组合", exact: true }).click()
+    await page.getByRole("button", { name: "常用搭配", exact: true }).click()
     const nativeDirectory = page.getByRole("region", { name: "已安装的原生插件", exact: true })
     const originalCard = nativeDirectory.getByRole("article", {
       name: originalPlugin.name,
@@ -593,7 +593,7 @@ async function main() {
     const derivedCard = nativeDirectory.getByRole("article", { name: installed.name, exact: true })
     await originalCard.waitFor()
     await derivedCard.waitFor()
-    await derivedCard.getByRole("button", { name: "选择项目步骤", exact: true }).click()
+    await derivedCard.getByRole("button", { name: "查看项目流程", exact: true }).click()
     const projectOptions = nativeDirectory.getByLabel("选择节点所属项目")
     await projectOptions.waitFor()
     await projectOptions
@@ -609,7 +609,7 @@ async function main() {
       path: join(artifacts, "c-native-directory-project-binding.png"),
       fullPage: true
     })
-    await originalCard.getByRole("button", { name: "选择项目步骤", exact: true }).click()
+    await originalCard.getByRole("button", { name: "查看项目流程", exact: true }).click()
     await nativeDirectory
       .getByText("这个工作区没有绑定此插件版本的可用项目。", { exact: false })
       .waitFor()
@@ -633,10 +633,10 @@ async function main() {
         (await window.api.plugins.list()).find((item) => item.id === id)?.enabled === false,
       originalPlugin.id
     )
-    await page.getByRole("button", { name: "助手组合", exact: true }).click()
+    await page.getByRole("button", { name: "常用搭配", exact: true }).click()
     await originalCard.getByRole("button", { name: "管理并启用插件", exact: true }).waitFor()
     assert(
-      await originalCard.getByRole("button", { name: "选择项目步骤", exact: true }).isDisabled()
+      await originalCard.getByRole("button", { name: "查看项目流程", exact: true }).isDisabled()
     )
     await originalCard.getByRole("button", { name: "管理并启用插件", exact: true }).click()
     await page.getByRole("button", { name: "已禁用", exact: true }).click()
@@ -645,10 +645,10 @@ async function main() {
         (await window.api.plugins.list()).find((item) => item.id === id)?.enabled === true,
       originalPlugin.id
     )
-    await page.getByRole("button", { name: "助手组合", exact: true }).click()
+    await page.getByRole("button", { name: "常用搭配", exact: true }).click()
     await originalCard.getByRole("button", { name: "管理插件", exact: true }).waitFor()
     assert(
-      await originalCard.getByRole("button", { name: "选择项目步骤", exact: true }).isEnabled()
+      await originalCard.getByRole("button", { name: "查看项目流程", exact: true }).isEnabled()
     )
     await page.screenshot({
       path: join(artifacts, "d-native-directory-management-return.png"),

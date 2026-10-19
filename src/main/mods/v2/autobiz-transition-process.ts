@@ -9,7 +9,7 @@ export function runAutobizTransitionProcess(input: {
   timeoutMs: number
   verifyEvidence(): Promise<void>
   operationId?: string
-  prepare?(message: unknown): void
+  prepare?(message: unknown): void | Promise<void>
   written?(message: unknown): void
   uncertain?(): void
 }): Promise<string> {
@@ -63,11 +63,14 @@ export function runAutobizTransitionProcess(input: {
           ready = true
           void input
             .verifyEvidence()
-            .then(() => {
+            .then(async () => {
               signal.throwIfAborted()
               if (failure) throw failure
               if (closed) throw Error("AUTOBIZ_TRANSITION_PROCESS_FAILED")
-              input.prepare?.(message)
+              await input.prepare?.(message)
+              signal.throwIfAborted()
+              if (failure) throw failure
+              if (closed) throw Error("AUTOBIZ_TRANSITION_PROCESS_FAILED")
               acknowledged = true
               child.stdin.write(input.operationId ? `commit:${input.operationId}\n` : "commit\n")
             })

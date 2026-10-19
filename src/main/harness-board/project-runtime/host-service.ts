@@ -1,3 +1,4 @@
+import { readPackageExtensionContract } from "../../plugins/extension-contract"
 import type {
   HostActionResult,
   HostExecutionTicket,
@@ -15,6 +16,13 @@ import {
 } from "./host-validators"
 import { readRuntimeScopedFile, runtimeDirectory } from "./safe-files"
 import { assertHostPackageSupported } from "./package-preflight"
+import { withSnapshotRetention } from "./snapshot-retention"
+import { readHostActionCheckEvidence } from "./action-check-evidence"
+import {
+  prepareProjectRuntimeInputIdentity,
+  projectRuntimeInputIdentity,
+  captureProjectRuntimeInputAuthorityIdentity
+} from "../project-action-runtime"
 
 export interface HostInstalledPackage {
   installedPluginId: string
@@ -25,7 +33,15 @@ export interface HostInstalledPackage {
 }
 
 export interface HostSkillExecutionContext {
+  /** Main-only directory visibility for an engine unit owned by a project composition. */
+  internalCompositionUnit?: boolean
   knowledgeReference?: string
+  /** Main-only guard for explicit composition inputs; never derived from goal/model text. */
+  assertInputsCurrent?: () => void
+  /** Routine authority checks never replace the full guard at external execution boundaries. */
+  assertAuthorityCurrent?: () => void
+  /** Main-only physical-result inspection. Never authorizes a model, tool, or source read. */
+  assertSettlementCurrent?: () => void
   project: HostProjectState
   operation: HostProjectOperation
   ticket: HostExecutionTicket
@@ -39,7 +55,7 @@ export interface HostSkillExecutionContext {
     code: string
   }) => void
   /** Main-only dependency preflight after thread identity exists and before the original model run. */
-  prepareThread?: (threadId: string) => Promise<void>
+  prepareThread?: (threadId: string) => Promise<void | { requiredContextText?: string }>
 }
 
 export interface HostProjectServiceDependencies {
@@ -48,6 +64,9 @@ export interface HostProjectServiceDependencies {
   /** Use the original lifecycle, with ALL Skill/Hook/script/resource reads bound to snapshotRoot. */
   executeSkill: (context: HostSkillExecutionContext) => Promise<HostActionResult["outcome"]>
   /** Optional result inspection only. Absence means unknown operations require manual recovery. */
+  prepareInputIdentity?: (project: HostProjectState, root: string) => Promise<void>
+  inputIdentity?: (project: HostProjectState, root: string) => string
+  captureInputAuthorityIdentity?: (project: HostProjectState, root: string) => () => string
   inspectOperation?: (
     context: Omit<HostSkillExecutionContext, "signal">
   ) => Promise<HostActionResult["outcome"]>
@@ -56,6 +75,7 @@ export interface HostProjectServiceDependencies {
 /** Main-process service. IPC must derive/authorize project scope before invoking these methods. */
 export class HostProjectService {
   private readonly coordinator: HostProjectCoordinator
+  private readonly operationInputs = new Map<string, () => void>()
   constructor(
     private readonly store: HostProjectStore,
     private readonly snapshots: HostPackageSnapshots,
@@ -65,12 +85,65 @@ export class HostProjectService {
       authorize: async (project, operation) => {
         const snapshot = this.snapshot(project)
         assertHostPackageSupported(snapshot.root, project.manifest)
+        await this.prepareRuntimeInputs(project.projectId)
         await deps.authorize(project, operation)
+        this.operationInputs.get(operation.operationId)?.()
       },
-      fingerprint: async (project) => fingerprintHostStageInput(project, project.goal),
+      fingerprint: async (project) => this.fingerprint(project),
       execute: async (project, ticket, signal) => {
         const operation = this.operation(ticket.operationId)
-        return deps.executeSkill({ ...this.executionContext(project, operation, ticket), signal })
+        const externalGuard = this.operationInputs.get(operation.operationId)
+        const execution = this.executionContext(project, operation, ticket)
+        const authorityIdentity = this.deps.captureInputAuthorityIdentity?.(project, execution.snapshotRoot) ??
+          captureProjectRuntimeInputAuthorityIdentity(project, execution.snapshotRoot) ?? (() => undefined)
+        const admittedAuthority = authorityIdentity()
+        const metadata = (state: HostProjectState) => JSON.stringify({
+          version: state.version, stageIndex: state.stageIndex, pluginDigest: state.pluginDigest,
+          packageId: state.packageId, packageVersion: state.packageVersion, workspace: state.workspace,
+          installedPluginId: state.installedPluginId, goal: state.goal, manifest: state.manifest
+        })
+        const admittedMetadata = metadata(project)
+        let active = true
+        const assertOperationCurrent = (settling: boolean) => {
+          if (!active) hostStateError("OPERATION_SCOPE_CHANGED")
+          const current = this.store.get(project.projectId)
+          const owned = this.store.getOperation(ticket.operationId)
+          const live = owned?.status === "started" && owned.cancelRequestedAt === null
+          const cancelling = settling && signal.aborted && owned?.status === "cancel_requested" &&
+            owned.cancelRequestedAt !== null
+          if (!current || metadata(current) !== admittedMetadata || (!live && !cancelling) ||
+            owned?.inputFingerprint !== ticket.inputFingerprint)
+            hostStateError("OPERATION_SCOPE_CHANGED")
+          if (authorityIdentity() !== admittedAuthority) hostStateError("INPUT_CHANGED")
+        }
+        const assertAuthorityCurrent = () => assertOperationCurrent(false)
+        const assertInputBytesCurrent = () => {
+          externalGuard?.()
+          if (this.fingerprint(project) !== ticket.inputFingerprint) hostStateError("INPUT_CHANGED")
+        }
+        const assertInputsCurrent = () => {
+          assertAuthorityCurrent()
+          assertInputBytesCurrent()
+        }
+        const assertSettlementCurrent = () => {
+          assertOperationCurrent(true)
+          assertInputBytesCurrent()
+        }
+        assertInputsCurrent()
+        try {
+          const outcome = await deps.executeSkill({
+            ...execution,
+            signal,
+            assertInputsCurrent,
+            assertAuthorityCurrent,
+            assertSettlementCurrent
+          })
+          if (outcome === "cancelled") assertSettlementCurrent()
+          else assertInputsCurrent()
+          return outcome
+        } finally {
+          active = false
+        }
       },
       validate: async (project, ticket, signal) => this.validateTicket(project, ticket, signal)
     })
@@ -86,6 +159,52 @@ export class HostProjectService {
     return this.store.listOperations(projectId, limit)
   }
 
+  /** Native configuration preparation uses the very same retained bytes as localCreate. */
+  async retainConfigurationSource(installedPluginId: string, expectedDigest: string) {
+    const installed = await this.deps.resolveInstalledPlugin(hostText(installedPluginId))
+    if (!installed?.enabled || installed.installedPluginId !== installedPluginId)
+      hostStateError("PLUGIN_UNAVAILABLE")
+    const snapshot = this.snapshots.capture(installed.root)
+    if (snapshot.digest !== expectedDigest || snapshot.manifest.plugin.id !== installed.packageId ||
+        snapshot.manifest.plugin.version !== installed.packageVersion)
+      hostStateError("PACKAGE_IDENTITY_MISMATCH")
+    assertHostPackageSupported(snapshot.root, snapshot.manifest)
+    const current = await this.deps.resolveInstalledPlugin(installedPluginId)
+    if (!current?.enabled || current.installedPluginId !== installedPluginId ||
+        current.root !== installed.root || current.packageId !== installed.packageId ||
+        current.packageVersion !== installed.packageVersion)
+      hostStateError("PACKAGE_IDENTITY_MISMATCH")
+    return this.snapshots.read(expectedDigest)
+  }
+  readConfigurationSource(expectedDigest: string) {
+    return this.snapshots.read(expectedDigest)
+  }
+
+  /** Rebuild only immutable source/schema caches after restart; never replaces an operation fingerprint. */
+  async prepareRuntimeInputs(projectId: string): Promise<void> {
+    const project = this.project(projectId)
+    const root = this.snapshot(project).root
+    await (this.deps.prepareInputIdentity?.(project, root) ??
+      prepareProjectRuntimeInputIdentity(project, root))
+  }
+
+  private fingerprint(project: HostProjectState) {
+    const root = this.snapshot(project).root
+    return fingerprintHostStageInput(
+      project,
+      project.goal,
+      this.runtimeInputIdentity(project, root)
+    )
+  }
+
+  private runtimeInputIdentity(project: HostProjectState, root: string) {
+    const identity =
+      this.deps.inputIdentity?.(project, root) ?? projectRuntimeInputIdentity(project, root)
+    if (identity === undefined && readPackageExtensionContract(root)?.context)
+      hostStateError("INPUT_IDENTITY_UNAVAILABLE")
+    return identity
+  }
+
   async localCreate(input: {
     projectId: string
     name: string
@@ -93,44 +212,63 @@ export class HostProjectService {
     installedPluginId: string
     goal: string
   }): Promise<HostProjectState> {
-    hostRecord(input, ["projectId", "name", "workspace", "installedPluginId", "goal"])
-    input = structuredClone(input)
-    hostText(input.projectId)
-    hostText(input.name)
-    hostGoal(input.goal)
-    const workspace = runtimeDirectory(input.workspace)
-    const installed = await this.deps.resolveInstalledPlugin(hostText(input.installedPluginId))
-    if (!installed || !installed.enabled || installed.installedPluginId !== input.installedPluginId)
-      hostStateError("PLUGIN_UNAVAILABLE")
-    const snapshot = this.snapshots.capture(installed.root)
-    if (
-      snapshot.manifest.plugin.id !== installed.packageId ||
-      snapshot.manifest.plugin.version !== installed.packageVersion
-    )
-      hostStateError("PACKAGE_IDENTITY_MISMATCH")
-    assertHostPackageSupported(snapshot.root, snapshot.manifest)
-    for (const stage of snapshot.manifest.stages) {
-      if (!readRuntimeScopedFile(snapshot.root, stage.skill!, 256 * 1024).present)
-        hostStateError("SKILL_MISSING")
-    }
-    // Recheck the host catalog after capture: update/disable cannot race project binding silently.
-    const current = await this.deps.resolveInstalledPlugin(input.installedPluginId)
-    if (
-      !current ||
-      !current.enabled ||
-      current.installedPluginId !== input.installedPluginId ||
-      current.root !== installed.root ||
-      current.packageId !== installed.packageId ||
-      current.packageVersion !== installed.packageVersion
-    )
-      hostStateError("PACKAGE_IDENTITY_MISMATCH")
-    return this.store.create({
-      ...input,
-      workspace,
-      packageId: installed.packageId,
-      packageVersion: installed.packageVersion,
-      pluginDigest: snapshot.digest,
-      manifest: snapshot.manifest
+    return withSnapshotRetention([this.snapshots.root], async () => {
+      hostRecord(input, ["projectId", "name", "workspace", "installedPluginId", "goal"])
+      input = structuredClone(input)
+      hostText(input.projectId)
+      hostText(input.name)
+      hostGoal(input.goal)
+      const workspace = runtimeDirectory(input.workspace)
+      const installed = await this.deps.resolveInstalledPlugin(hostText(input.installedPluginId))
+      if (
+        !installed ||
+        !installed.enabled ||
+        installed.installedPluginId !== input.installedPluginId
+      )
+        hostStateError("PLUGIN_UNAVAILABLE")
+      const snapshot = this.snapshots.capture(installed.root)
+      if (
+        snapshot.manifest.plugin.id !== installed.packageId ||
+        snapshot.manifest.plugin.version !== installed.packageVersion
+      )
+        hostStateError("PACKAGE_IDENTITY_MISMATCH")
+      assertHostPackageSupported(snapshot.root, snapshot.manifest)
+      for (const stage of snapshot.manifest.stages) {
+        if (!readRuntimeScopedFile(snapshot.root, stage.skill!, 256 * 1024).present)
+          hostStateError("SKILL_MISSING")
+      }
+      // Recheck the host catalog after capture: update/disable cannot race project binding silently.
+      const current = await this.deps.resolveInstalledPlugin(input.installedPluginId)
+      if (
+        !current ||
+        !current.enabled ||
+        current.installedPluginId !== input.installedPluginId ||
+        current.root !== installed.root ||
+        current.packageId !== installed.packageId ||
+        current.packageVersion !== installed.packageVersion
+      )
+        hostStateError("PACKAGE_IDENTITY_MISMATCH")
+      const creation = {
+        ...input,
+        workspace,
+        packageId: installed.packageId,
+        packageVersion: installed.packageVersion,
+        pluginDigest: snapshot.digest,
+        manifest: snapshot.manifest
+      }
+      const preparation: HostProjectState = {
+        ...creation,
+        schemaVersion: 1,
+        stateOwner: "host",
+        version: 1,
+        stageIndex: 0,
+        status: "active",
+        createdAt: Date.now(),
+        updatedAt: Date.now()
+      }
+      await (this.deps.prepareInputIdentity?.(preparation, snapshot.root) ??
+        prepareProjectRuntimeInputIdentity(preparation, snapshot.root))
+      return this.store.create(creation)
     })
   }
 
@@ -152,7 +290,7 @@ export class HostProjectService {
     return this.store.prepare({
       ...input,
       stageId: stage.id,
-      inputFingerprint: fingerprintHostStageInput(project, project.goal)
+      inputFingerprint: this.fingerprint(project)
     })
   }
 
@@ -167,13 +305,26 @@ export class HostProjectService {
   ): HostProjectOperation {
     const operation = this.operation(operationId)
     const project = this.project(operation.projectId)
-    if (fingerprintHostStageInput(project, project.goal) !== operation.inputFingerprint)
-      hostStateError("INPUT_CHANGED")
+    if (this.fingerprint(project) !== operation.inputFingerprint) hostStateError("INPUT_CHANGED")
     return this.store.decideApproval(operationId, input)
   }
 
-  start(operationId: string): Promise<HostProjectOperation> {
-    return this.coordinator.executePrepared(operationId)
+  start(
+    operationId: string,
+    options?: { assertInputsCurrent: () => void }
+  ): Promise<HostProjectOperation> {
+    if (!options) return this.coordinator.executePrepared(operationId)
+    if (this.operationInputs.has(operationId)) hostStateError("OPERATION_BUSY")
+    let active = true
+    const guard = () => {
+      if (!active) hostStateError("OPERATION_SCOPE_CHANGED")
+      options.assertInputsCurrent()
+    }
+    this.operationInputs.set(operationId, guard)
+    return this.coordinator.executePrepared(operationId).finally(() => {
+      active = false
+      if (this.operationInputs.get(operationId) === guard) this.operationInputs.delete(operationId)
+    })
   }
 
   /** Explicit validation-only operation; it checks existing artifacts without launching a Skill. */
@@ -186,7 +337,7 @@ export class HostProjectService {
       hostStateError("ACTION_EXECUTION_REQUIRED")
     this.snapshot(project)
     await this.deps.authorize(structuredClone(project), structuredClone(operation))
-    const ticket = this.store.start(operationId, fingerprintHostStageInput(project, project.goal))
+    const ticket = this.store.start(operationId, this.fingerprint(project))
     try {
       const receipts = this.validateTicket(project, ticket)
       return this.store.recordResult(ticket, { outcome: "succeeded", receipts })
@@ -196,14 +347,56 @@ export class HostProjectService {
     }
   }
 
+  /** Main-only final-byte inspection for the existing composition proof, including action custody. */
+  assertStageEvidenceCurrent(
+    project: HostProjectState,
+    operation: HostProjectOperation,
+    checkIds: readonly string[]
+  ): void {
+    const root = this.snapshot(project).root
+    const index = project.manifest.stages.findIndex((stage) => stage.id === operation.stageId)
+    if (index < 0 || checkIds.some((id) => !project.manifest.stages[index].checkIds.includes(id)))
+      hostStateError("EVIDENCE_STALE")
+    const historical = { ...project, version: operation.expectedVersion, stageIndex: index }
+    const ticket = {
+      operationId: operation.operationId,
+      projectId: operation.projectId,
+      stageId: operation.stageId,
+      expectedVersion: operation.expectedVersion,
+      inputFingerprint: operation.inputFingerprint,
+      pluginDigest: operation.pluginDigest
+    }
+    const evidence = readHostActionCheckEvidence(historical, ticket, operation, root, checkIds)
+    const state = structuredClone(historical)
+    state.manifest.stages[index].checkIds = [...checkIds]
+    assertHostReceiptsCurrent(state, operation, evidence, this.runtimeInputIdentity(project, root))
+  }
+
   transition(operationId: string): HostProjectState {
     const operation = this.operation(operationId)
     if (operation.status === "transitioned")
       return this.store.transition(operationId, operation.inputFingerprint)
     const project = this.project(operation.projectId)
     this.snapshot(project)
-    const fingerprint = fingerprintHostStageInput(project, project.goal)
-    assertHostReceiptsCurrent(project, operation)
+    const fingerprint = this.fingerprint(project)
+    assertHostReceiptsCurrent(
+      project,
+      operation,
+      readHostActionCheckEvidence(
+        project,
+        {
+          operationId: operation.operationId,
+          projectId: project.projectId,
+          stageId: operation.stageId,
+          expectedVersion: operation.expectedVersion,
+          inputFingerprint: operation.inputFingerprint,
+          pluginDigest: operation.pluginDigest
+        },
+        operation,
+        this.snapshot(project).root
+      ),
+      this.runtimeInputIdentity(project, this.snapshot(project).root)
+    )
     // No await follows revalidation. External processes are not locked: receipts prove this check time only.
     return this.store.transition(operationId, fingerprint)
   }
@@ -230,7 +423,7 @@ export class HostProjectService {
       })
       const outcome = await inspect(this.executionContext(project, operation, ticket))
       if (outcome !== "succeeded") return { outcome, receipts: [] }
-      if (fingerprintHostStageInput(project, project.goal) !== operation.inputFingerprint)
+      if (this.fingerprint(project) !== operation.inputFingerprint)
         return { outcome: "unknown", receipts: [] }
       return { outcome: "succeeded", receipts: this.validateTicket(project, ticket) }
     })
@@ -281,8 +474,19 @@ export class HostProjectService {
     signal?: AbortSignal
   ) {
     this.snapshot(project)
-    if (fingerprintHostStageInput(project, project.goal) !== ticket.inputFingerprint)
-      hostStateError("INPUT_CHANGED")
-    return validateHostStage(project, ticket, signal)
+    if (this.fingerprint(project) !== ticket.inputFingerprint) hostStateError("INPUT_CHANGED")
+    return validateHostStage(
+      project,
+      ticket,
+      signal,
+      () => Date.now(),
+      readHostActionCheckEvidence(
+        project,
+        ticket,
+        this.operation(ticket.operationId),
+        this.snapshot(project).root
+      ),
+      this.runtimeInputIdentity(project, this.snapshot(project).root)
+    )
   }
 }

@@ -1,0 +1,27 @@
+{
+  "apiVersion": "devclaw.capabilities/v1",
+  "capabilities": [
+    {
+      "id": "quality-advice",
+      "title": "检查数据质量要求",
+      "kind": "skill",
+      "usage": "project",
+      "entry": "skills/quality-advice/SKILL.md"
+    },
+    {
+      "id": "data-flow",
+      "title": "数据口径、开发与验收",
+      "kind": "flow",
+      "usage": "project",
+      "entry": "devclaw.project-runtime.json",
+      "inputs": [
+        {
+          "id": "requirements",
+          "title": "前一套流程的需求文档",
+          "path": "incoming/requirements.md",
+          "required": false
+        }
+      ]
+    }
+  ]
+}

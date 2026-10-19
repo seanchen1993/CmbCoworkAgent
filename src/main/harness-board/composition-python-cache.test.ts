@@ -4,6 +4,7 @@ import { join } from "node:path"
 import { spawnSync } from "node:child_process"
 import { afterEach, describe, expect, it } from "vitest"
 import { suppressCompositionPythonCache } from "./composition-python-cache"
+import { isReviewedAutobizProtocol } from "../plugins/autobiz-composition-protocol"
 
 const folders: string[] = []
 async function fixture() {
@@ -46,6 +47,27 @@ describe("composition Python cache preference", () => {
   it("does not opt a host-managed package into the legacy preference", async () => {
     const root = await fixture()
     await declare(root, "host")
+    expect(await suppressCompositionPythonCache(root)).toBe(false)
+  })
+  it("suppresses v2 inline legacy bytecode without granting source or contract admission", async () => {
+    const root = await fixture()
+    await declare(root)
+    const runtime = JSON.stringify({ apiVersion: "devclaw.project-runtime/v2",
+      runtime: { apiVersion: "devclaw.project-runtime/v1", mode: "legacy", stateOwner: "plugin" } })
+    await writeFile(join(root, "devclaw.project-runtime.json"), runtime)
+    expect(await suppressCompositionPythonCache(root)).toBe(true)
+    expect(isReviewedAutobizProtocol({ files: [{ path: "devclaw.project-runtime.json",
+      bytes: Buffer.from(runtime) }] })).toBe(false)
+  })
+  it.each([
+    { apiVersion: "devclaw.project-runtime/v3", runtime: { apiVersion: "devclaw.project-runtime/v1", mode: "legacy", stateOwner: "plugin" } },
+    { apiVersion: "devclaw.project-runtime/v2", runtime: [] },
+    { apiVersion: "devclaw.project-runtime/v2", runtime: { apiVersion: "devclaw.project-runtime/v3", mode: "legacy", stateOwner: "plugin" } },
+    { apiVersion: "devclaw.project-runtime/v2", runtime: { apiVersion: "devclaw.project-runtime/v1", mode: "host", stateOwner: "host" } }
+  ])("does not infer a legacy preference from an unsupported inline shape %j", async runtime => {
+    const root = await fixture()
+    await declare(root)
+    await writeFile(join(root, "devclaw.project-runtime.json"), JSON.stringify(runtime))
     expect(await suppressCompositionPythonCache(root)).toBe(false)
   })
   it("accepts a declaration above 32 KiB within the catalog limit", async () => {

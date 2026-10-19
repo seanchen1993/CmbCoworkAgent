@@ -5,15 +5,23 @@ import type { ClawActionDescriptor } from "../../../../shared/mods/claw-actions"
 import type { ModObject, ModCommandDescriptor } from "../../../../shared/mods/types"
 import { resolveClawComponents } from "../../../../shared/mods/claw-components"
 import { clawChangeSummary } from "../../../../shared/mods/claw-change-summary"
-import { useAppStore } from "@/lib/store"
+import {
+  isConfigurationScopeCurrent,
+  useConfigurationDraft,
+  goToConfigurationThread
+} from "@/lib/configuration-target"
 import { flowDraftId } from "@/lib/flow-draft-id"
 import { parameterError, type ParameterDraft } from "@/lib/flow-parameter-form"
 import {
-  buildSimpleFlow,
+  createSimpleClawDraft,
+  markSimpleDraftSaved,
+  simpleDraftDefinition,
+  simpleFlowSupported,
+  removeSimpleStep,
   saveSimpleCombination,
   simpleConnections,
   simpleFormSupported,
-  simpleProfileSupported,
+  type SimpleClawDraft,
   type SimpleSaveCheckpoint
 } from "@/lib/simple-claw-builder"
 import {
@@ -21,16 +29,19 @@ import {
   type SimpleAuthoringPracticeIntent
 } from "@/lib/simple-authoring-intent"
 import { prepareSimpleAuthoringTask } from "@/lib/simple-authoring-composer"
+import { requestChatFlowUse, requestChatComposerFocus } from "@/lib/chat-flow-use"
 import { openBuiltinNavigation } from "@/lib/builtin-navigation"
 import { Button } from "@/components/ui/button"
 import { SimpleActionParameters } from "./SimpleActionParameters"
 import { ClawComponentSelector } from "./ClawComponentSelector"
 import { FunctionUserConfig } from "./FunctionUserConfig"
+import { hasUsableClawComponents, newClawCapability } from "@/lib/claw-capability-usage"
 
-const fieldClass = "w-full min-w-0 rounded-lg border bg-background p-2 text-sm"
+const fieldClass = "devclaw-input w-full min-w-0 text-sm"
+const selectClass = "devclaw-select w-full min-w-0 text-sm"
 const blankProfile = (): ClawProfile => ({
   id: flowDraftId("claw"),
-  name: "我的文件检视助手",
+  name: "我的常用搭配",
   capabilities: []
 })
 const actionKey = (action: ClawActionDescriptor) => `${action.pluginId}:${action.actionId}`
@@ -40,10 +51,13 @@ export function SimpleClawBuilder({
   view,
   catalog,
   initialProfile,
+  editor,
+  onEditor,
   practiceIntent,
   onView,
   onAdvanced,
   onSources,
+  onAssemble,
   externalBusy = false,
   beginMutation,
   endMutation
@@ -51,43 +65,61 @@ export function SimpleClawBuilder({
   threadId: string
   view: ClawView
   catalog: FlowCatalog
-  initialProfile: ClawProfile
+  initialProfile?: ClawProfile
+  editor?: SimpleClawDraft
+  onEditor?(value: SimpleClawDraft, saved?: boolean): void
   practiceIntent?: SimpleAuthoringPracticeIntent
   onView(view: ClawView): void
-  onAdvanced(): void
+  onAdvanced(): boolean | void
   onSources(): void
+  onAssemble?(): void
   externalBusy?: boolean
   beginMutation?(): boolean
   endMutation?(): void
 }) {
-  // Separate from the retained advanced editor: entering a tutorial cannot overwrite that draft.
-  const [profile, setProfile] = useState(() => structuredClone(initialProfile))
-  const originalFlow = initialProfile.flow?.definition
-  const [mode, setMode] = useState<"together" | "sequence">(originalFlow ? "sequence" : "together")
-  const [actionIds, setActionIds] = useState<string[]>(
-    () =>
-      originalFlow?.steps.map((step) =>
-        step.kind === "plugin-action" ? `${step.pluginId}:${step.actionId}` : ""
-      ) ?? ["", ""]
+  const usageContext = view.usageContext ?? "chat"
+  // Both views edit this document; the fallback supports a standalone builder.
+  const [localEditor, setLocalEditor] = useState(() =>
+    createSimpleClawDraft(initialProfile ?? blankProfile(), flowDraftId("flow"))
   )
-  const [inputs, setInputs] = useState<ModObject[]>(
-    () =>
-      originalFlow?.steps.map((step) => (step.kind === "plugin-action" ? step.input : {})) ?? [
-        {},
-        {}
-      ]
-  )
-  const [configs, setConfigs] = useState<ModObject[]>(
-    () =>
-      originalFlow?.steps.map((step) =>
-        step.kind === "plugin-action" ? (step.config ?? {}) : {}
-      ) ?? [{}, {}]
-  )
-  const [connection, setConnection] = useState<string | null>(() => {
-    const step = originalFlow?.steps[1]
-    return step?.kind === "plugin-action" ? (step.inputFrom?.path ?? "") : null
-  })
-  const [parameterDrafts, setParameterDrafts] = useState<Record<string, ParameterDraft>>({})
+  const draft = editor ?? localEditor
+  const latestDraft = useRef(draft)
+  latestDraft.current = draft
+  const commit = (next: SimpleClawDraft, saved = false) => {
+    latestDraft.current = next
+    if (onEditor) onEditor(next, saved)
+    else setLocalEditor(next)
+  }
+  const mutateDraft = (update: (old: SimpleClawDraft) => SimpleClawDraft, resetFlowText = true) => {
+    commit({
+      ...update(latestDraft.current),
+      ...(resetFlowText ? { flowText: undefined, flowTextError: undefined } : {})
+    })
+    setDirty(true)
+    setPreview(null)
+    setApplied(null)
+  }
+  const { profile, mode, steps, parameterDrafts } = draft
+  const actionIds = steps.map((step) => step.action)
+  const inputs = steps.map((step) => step.input)
+  const configs = steps.map((step) => step.config)
+  const setProfile = (value: ClawProfile) =>
+    mutateDraft((old) => ({ ...old, profile: value }), false)
+  const setMode = (value: "together" | "sequence") =>
+    mutateDraft((old) => ({ ...old, mode: value }))
+  const setInputs = (update: (old: ModObject[]) => ModObject[]) =>
+    mutateDraft((old) => {
+      const next = update(old.steps.map((step) => step.input))
+      return { ...old, steps: old.steps.map((step, index) => ({ ...step, input: next[index] })) }
+    })
+  const setConfigs = (update: (old: ModObject[]) => ModObject[]) =>
+    mutateDraft((old) => {
+      const next = update(old.steps.map((step) => step.config))
+      return { ...old, steps: old.steps.map((step, index) => ({ ...step, config: next[index] })) }
+    })
+  const setParameterDrafts = (
+    update: (old: Record<string, ParameterDraft>) => Record<string, ParameterDraft>
+  ) => mutateDraft((old) => ({ ...old, parameterDrafts: update(old.parameterDrafts) }))
   const [invalidComponents, setInvalidComponents] = useState<Record<string, boolean>>({})
   const onValidity = useCallback(
     (id: string, valid: boolean) =>
@@ -100,14 +132,34 @@ export function SimpleClawBuilder({
     profile: ClawProfile
     revision: number
     bindingRevision: number
+    usageContext: "chat" | "project"
   } | null>(null)
   const [applied, setApplied] = useState<ClawProfile | null>(null)
   const [commands, setCommands] = useState<ModCommandDescriptor[]>([])
   const [dirty, setDirty] = useState(false)
   const [acceptedIntent, setAcceptedIntent] = useState<string>()
-  const checkpoint = useRef<SimpleSaveCheckpoint | undefined>(undefined)
-  const savedFlow = useRef<SavedFlow | undefined>(initialProfile.flow)
-  const flowId = useRef(initialProfile.flow?.definition.id ?? flowDraftId("flow"))
+  const checkpoint = useRef<SimpleSaveCheckpoint | undefined>(draft.checkpoint)
+  checkpoint.current = draft.checkpoint
+  const ownSavedProfile = useRef<ClawProfile | undefined>(undefined)
+  const savedFlow = useRef<SavedFlow | undefined>(
+    draft.checkpoint?.flow ?? draft.savedFlow ?? profile.flow
+  )
+  useEffect(() => {
+    const acknowledged = draft.checkpoint?.flow ?? draft.savedFlow
+    savedFlow.current =
+      acknowledged &&
+      (!profile.flow ||
+        (acknowledged.definition.id === profile.flow.definition.id &&
+          acknowledged.revision > profile.flow.revision))
+        ? acknowledged
+        : profile.flow
+  }, [profile.id, profile.flow, draft.checkpoint?.flow, draft.savedFlow])
+  useEffect(() => {
+    if (!lock.current && profile !== ownSavedProfile.current) {
+      setPreview(null)
+      setApplied(null)
+    }
+  }, [profile])
   const alive = useRef(true)
   const lock = useRef(false)
   const currentView = useRef(view)
@@ -119,17 +171,19 @@ export function SimpleClawBuilder({
     }
   }, [])
   const scope = { threadId, workspace: view.workspace }
+  useConfigurationDraft(
+    scope,
+    (!editor && dirty) ||
+      Object.values(parameterDrafts).some((item) => item.dirty) ||
+      Object.values(draft.componentDrafts).some((values) =>
+        Object.values(values).some((item) => item.dirty)
+      ),
+    busy
+  )
   const assertCurrent = () => {
-    const store = useAppStore.getState()
-    const workspace = store.threads.find((item) => item.thread_id === store.currentThreadId)
-      ?.metadata?.workspacePath
-    if (
-      !alive.current ||
-      !sameSimpleAuthoringScope(scope, {
-        threadId: store.currentThreadId,
-        workspace: typeof workspace === "string" ? workspace : null
-      })
-    )
+    if ((currentView.current.usageContext ?? "chat") !== usageContext)
+      throw Error("使用场景已变化，请重新核对组合。")
+    if (!alive.current || !isConfigurationScopeCurrent(scope))
       throw Error("对话或项目已切换，已停止旧操作；请回到原项目继续。")
     for (const capability of profile.capabilities) {
       const source = currentView.current.capabilities.find(
@@ -146,17 +200,12 @@ export function SimpleClawBuilder({
     setApplied(null)
   }
   const reset = (name?: string) => {
-    setProfile({ ...blankProfile(), ...(name ? { name } : {}) })
-    setMode("together")
-    setActionIds(["", ""])
-    setInputs([{}, {}])
-    setConfigs([{}, {}])
-    setConnection(null)
-    setParameterDrafts({})
+    commit(
+      createSimpleClawDraft({ ...blankProfile(), ...(name ? { name } : {}) }, flowDraftId("flow"))
+    )
     setInvalidComponents({})
     checkpoint.current = undefined
     savedFlow.current = undefined
-    flowId.current = flowDraftId("flow")
     setPreview(null)
     setApplied(null)
     setDirty(false)
@@ -174,7 +223,7 @@ export function SimpleClawBuilder({
     sameSimpleAuthoringScope(practiceIntent.scope, scope)
       ? practiceIntent
       : undefined
-  const supported = simpleProfileSupported(profile)
+  const supported = simpleFlowSupported(draft.baseDefinition) && !draft.flowTextError
   const actions = useMemo(
     () =>
       (catalog.actions ?? []).filter((action) => {
@@ -184,7 +233,11 @@ export function SimpleClawBuilder({
         const source = view.capabilities.find((item) => item.pluginId === action.pluginId)
         if (!capability || !source) return false
         try {
-          const selected = resolveClawComponents(source.components ?? [], capability.components)
+          const selected = resolveClawComponents(
+            source.components ?? [],
+            capability.components,
+            usageContext
+          )
           return (
             !source.components?.length ||
             selected.some((item) => item.actionIds.includes(action.actionId))
@@ -193,13 +246,18 @@ export function SimpleClawBuilder({
           return false
         }
       }),
-    [catalog.actions, profile.capabilities, view.capabilities]
+    [catalog.actions, profile.capabilities, view.capabilities, usageContext]
   )
-  const chosen = actionIds.map((id) => actions.find((action) => actionKey(action) === id))
-  const connections = simpleConnections(chosen[0]?.outputSchema, chosen[1]?.inputSchema)
-  const selectedConnection = connection ?? (connections.length === 1 ? connections[0].path : null)
+  const chosen = actionIds.map((id, index) =>
+    actions.find(
+      (action) =>
+        actionKey(action) === id &&
+        (!steps[index].digest || action.digest === steps[index].digest) &&
+        (!steps[index].plugin || action.plugin === steps[index].plugin)
+    )
+  )
   const issues: string[] = []
-  if (profile.capabilities.length !== 2) issues.push("请选择两个插件。")
+  if (!profile.capabilities.length) issues.push("请至少选择一个功能。")
   for (const capability of profile.capabilities) {
     const source = view.capabilities.find((item) => item.pluginId === capability.pluginId)
     if (!source || source.state !== "ready" || source.digest !== capability.digest)
@@ -207,55 +265,69 @@ export function SimpleClawBuilder({
     if (invalidComponents[capability.pluginId])
       issues.push(`${capability.name} 的功能配置尚未完成。`)
   }
-  if (mode === "sequence") {
-    if (!chosen[0] || !chosen[1]) issues.push("请选择每个插件要完成的操作。")
-    else {
-      if (chosen[0].pluginId === chosen[1].pluginId) issues.push("请选择分别来自两个插件的动作。")
-      if (
-        selectedConnection === null ||
-        !connections.some((entry) => entry.path === selectedConnection)
+  if (mode === "sequence" && supported) {
+    chosen.forEach((action, index) => {
+      if (!action) {
+        issues.push(`步骤 ${index + 1}：请选择要执行的操作。`)
+        return
+      }
+      const binding = steps[index].inputFrom
+      if (binding) {
+        const source = steps.findIndex((step) => step.id === binding.stepId)
+        if (
+          source < 0 ||
+          source >= index ||
+          !simpleConnections(chosen[source]?.outputSchema, action.inputSchema).some(
+            (entry) => entry.path === binding.path
+          )
+        )
+          issues.push(`步骤 ${index + 1} 的前置结果已失效，请重新选择输入来源。`)
+      }
+      if (!simpleFormSupported(action.inputSchema) || !simpleFormSupported(action.configSchema))
+        issues.push(`${action.name} 含有复杂参数，请使用高级编辑。当前草稿会保留。`)
+      const inputError = parameterError(
+        inputs[index],
+        action.inputSchema,
+        parameterDrafts[`${steps[index].id}:input`],
+        !!binding
       )
-        issues.push(
-          "第二步不能直接使用第一步的结果。请换一个操作，或到高级编辑中设置。"
-        )
-      chosen.forEach((action, index) => {
-        if (!action) return
-        if (!simpleFormSupported(action.inputSchema) || !simpleFormSupported(action.configSchema))
-          issues.push(`${action.name} 含有复杂参数，请使用高级编辑。当前草稿会保留。`)
-        const inputError = parameterError(
-          inputs[index],
-          action.inputSchema,
-          parameterDrafts[`${index}:input`],
-          index === 1 && selectedConnection !== null
-        )
-        const configError = parameterError(
-          configs[index],
-          action.configSchema,
-          parameterDrafts[`${index}:config`]
-        )
-        if (inputError) issues.push(`步骤 ${index + 1}：${inputError}`)
-        if (configError) issues.push(`步骤 ${index + 1}：${configError}`)
-      })
-    }
+      const configError = parameterError(
+        configs[index],
+        action.configSchema,
+        parameterDrafts[`${steps[index].id}:config`]
+      )
+      if (inputError) issues.push(`步骤 ${index + 1}：${inputError}`)
+      if (configError) issues.push(`步骤 ${index + 1}：${configError}`)
+    })
   }
   const disabled = busy || externalBusy || !view.applicable || !view.enabled
+  const currentDefinition = () => simpleDraftDefinition(latestDraft.current, actions)
+  const saveDraftFlow = async (definition: NonNullable<ReturnType<typeof currentDefinition>>) => {
+    assertCurrent()
+    if (
+      savedFlow.current &&
+      JSON.stringify(savedFlow.current.definition) === JSON.stringify(definition)
+    )
+      return savedFlow.current
+    const saved = await window.api.mods.flowSave(
+      threadId,
+      definition,
+      savedFlow.current?.definition.id === definition.id ? savedFlow.current.revision : 0,
+      view.workspace
+    )
+    savedFlow.current = saved
+    return saved
+  }
+  const continueInAdvanced = () => {
+    if (!busy && !externalBusy) onAdvanced()
+  }
   const save = async () => {
     if (lock.current || externalBusy || issues.length || beginMutation?.() === false) return
     lock.current = true
     setBusy(true)
     setError("")
     try {
-      const definition =
-        mode === "sequence"
-          ? buildSimpleFlow({
-              id: flowId.current,
-              name: profile.name,
-              actions: chosen as [ClawActionDescriptor, ClawActionDescriptor],
-              inputs: inputs as [ModObject, ModObject],
-              configs: configs as [ModObject, ModObject],
-              connection: selectedConnection!
-            })
-          : undefined
+      const definition = currentDefinition()
       const nextProfile = mode === "sequence" ? profile : { ...profile, flow: undefined }
       if (checkpoint.current?.profileSaved) {
         const savedProfile = checkpoint.current.flow
@@ -274,18 +346,13 @@ export function SimpleClawBuilder({
         assertCurrent,
         onCheckpoint: (value) => {
           checkpoint.current = value
+          commit({
+            ...latestDraft.current,
+            checkpoint: value,
+            savedFlow: value.flow ?? latestDraft.current.savedFlow
+          })
         },
-        saveFlow: async (value) => {
-          assertCurrent()
-          const saved = await window.api.mods.flowSave(
-            threadId,
-            value,
-            savedFlow.current?.revision ?? 0,
-            view.workspace
-          )
-          savedFlow.current = saved
-          return saved
-        },
+        saveFlow: saveDraftFlow,
         saveProfile: async (value) => {
           assertCurrent()
           const next = await window.api.mods.clawChange(threadId, {
@@ -303,8 +370,11 @@ export function SimpleClawBuilder({
       setPreview({
         profile: result,
         revision: currentView.current.revision,
-        bindingRevision: currentView.current.bindingRevision
+        bindingRevision: currentView.current.bindingRevision,
+        usageContext
       })
+      ownSavedProfile.current = result
+      commit(markSimpleDraftSaved(latestDraft.current, result), true)
       setDirty(false)
     } catch (cause) {
       if (alive.current) setError(cause instanceof Error ? cause.message : String(cause))
@@ -359,10 +429,18 @@ export function SimpleClawBuilder({
   }
   return (
     <section className="space-y-4 rounded-2xl border bg-card p-4" aria-label="简单组合">
-      <h3 className="font-semibold">把两个插件搭配起来</h3>
+      <h3 className="font-semibold">配置常用搭配</h3>
+      <p className="text-sm text-muted-foreground">
+        这里只列当前聊天可用的功能扩展、工具和已导出的动作。AutoBiz 的需求、设计、开发等业务步骤在项目中运行。
+      </p>
+      {onAssemble && (
+        <Button variant="outline" size="sm" onClick={onAssemble} disabled={disabled}>
+          组合业务 Mods 或自己的界面扩展
+        </Button>
+      )}
       {pendingIntent && (
         <div className="space-y-2 rounded-lg border p-3" role="status">
-          <p>演练已结束。现在选择你实际安装的两个插件；现有草稿仍保留。</p>
+          <p>演练已结束。现在选择实际安装的功能；当前草稿已保留。</p>
           <Button size="sm" onClick={() => setAcceptedIntent(pendingIntent.id)}>
             继续当前草稿
           </Button>
@@ -370,11 +448,7 @@ export function SimpleClawBuilder({
             size="sm"
             variant="ghost"
             onClick={() => {
-              if (
-                dirty &&
-                !window.confirm("另建组合将替换此处的简单配置草稿。高级编辑草稿仍保留，继续吗？")
-              )
-                return
+              if (dirty && !window.confirm("另建搭配将替换当前未保存草稿，继续吗？")) return
               reset(pendingIntent.suggestedName)
               setAcceptedIntent(pendingIntent.id)
             }}
@@ -385,11 +459,8 @@ export function SimpleClawBuilder({
       )}
       {!supported ? (
         <div className="space-y-3">
-          <p>此组合包含更多设置，已完整保留。请用高级编辑修改，或另建一个简单组合。</p>
-          <Button onClick={onAdvanced}>打开高级编辑</Button>
-          <Button variant="ghost" onClick={() => reset()}>
-            另建简单组合
-          </Button>
+          <p>执行步骤包含高级设置，原始定义和未完成编辑已完整保留。请在高级编辑中继续。</p>
+          <Button onClick={() => onAdvanced()}>打开高级编辑</Button>
         </div>
       ) : (
         <>
@@ -400,7 +471,7 @@ export function SimpleClawBuilder({
                 type="button"
                 disabled={disabled}
                 aria-pressed={mode === value}
-                className={`rounded-xl border p-4 text-left ${mode === value ? "border-primary bg-primary/5" : ""}`}
+                className={`rounded-xl border p-4 text-left ${mode === value ? "border-primary bg-primary/5" : "hover:bg-muted/40"}`}
                 onClick={() => {
                   setMode(value)
                   setDirty(true)
@@ -408,11 +479,14 @@ export function SimpleClawBuilder({
                   setApplied(null)
                 }}
               >
+                <span aria-hidden="true" className="mr-2">
+                  {mode === value ? "◉" : "○"}
+                </span>
                 <strong>{value === "together" ? "一起使用" : "先后执行"}</strong>
                 <p className="mt-1 text-xs text-muted-foreground">
                   {value === "together"
-                    ? "在同一段聊天里使用两个插件"
-                    : "把第一个插件的结果交给第二个处理"}
+                    ? "在这段聊天里使用所选功能"
+                    : actions.length ? `已选功能提供 ${actions.length} 个动作，可按顺序执行并传递结果` : "选择提供动作的插件后，按顺序执行并传递结果"}
                 </p>
               </button>
             ))}
@@ -428,184 +502,258 @@ export function SimpleClawBuilder({
             />
           </label>
           <div className="grid gap-3 sm:grid-cols-2">
-            {view.capabilities.map((source) => {
-              const capability = profile.capabilities.find(
-                (item) => item.pluginId === source.pluginId
+            {view.capabilities
+              .filter(
+                (source) =>
+                  hasUsableClawComponents(source, usageContext) ||
+                  profile.capabilities.some((item) => item.pluginId === source.pluginId)
               )
-              return (
-                <div key={source.pluginId} className="min-w-0 space-y-2 rounded-xl border p-3">
-                  <label className="flex items-start gap-2 text-sm">
-                    <input
-                      type="checkbox"
-                      checked={!!capability}
-                      disabled={
-                        disabled ||
-                        (!capability &&
-                          (profile.capabilities.length >= 2 || source.state !== "ready"))
-                      }
-                      onChange={(event) => {
-                        if (
-                          !event.target.checked &&
-                          !window.confirm(`移除 ${source.name} 及其简单配置草稿？`)
-                        )
-                          return
-                        update({
-                          ...profile,
-                          capabilities: event.target.checked
-                            ? [
-                                ...profile.capabilities,
-                                {
-                                  pluginId: source.pluginId,
-                                  name: source.name,
-                                  digest: source.digest!
-                                }
-                              ]
-                            : profile.capabilities.filter(
-                                (item) => item.pluginId !== source.pluginId
-                              ),
-                          completionRules: event.target.checked
-                            ? profile.completionRules
-                            : profile.completionRules?.filter(
-                                (rule) => rule.pluginId !== source.pluginId
-                              )
-                        })
-                      }}
-                    />
-                    <strong className="break-all">{source.name}</strong>
-                  </label>
-                  <p className="text-xs text-muted-foreground">
-                    {source.actions?.[0]?.description ??
-                      (source.components?.map((item) => item.name).join("、") ||
-                        "具体用法请查看插件说明")}
-                  </p>
-                  <p className="text-xs">
-                    {source.state === "ready"
-                      ? "已准备好"
-                      : source.error || "需要先安装、启用或授权"}
-                  </p>
-                  {capability && source.components?.length ? (
-                    <ClawComponentSelector
-                      source={source}
-                      value={capability}
-                      disabled={disabled}
-                      onValidity={onValidity}
-                      onChange={(next) =>
-                        update({
-                          ...profile,
-                          capabilities: profile.capabilities.map((item) =>
-                            item.pluginId === next.pluginId ? next : item
+              .map((source) => {
+                const capability = profile.capabilities.find(
+                  (item) => item.pluginId === source.pluginId
+                )
+                return (
+                  <div key={source.pluginId} className="min-w-0 space-y-2 rounded-xl border p-3">
+                    <label className="flex items-start gap-2 text-sm">
+                      <input
+                        type="checkbox"
+                        checked={!!capability}
+                        disabled={disabled || (!capability && source.state !== "ready")}
+                        onChange={(event) => {
+                          if (
+                            !event.target.checked &&
+                            !window.confirm(`移除 ${source.name} 及其简单配置草稿？`)
                           )
-                        })
-                      }
-                    />
-                  ) : null}
-                  {capability && !!source.userConfigFieldCount && (
-                    <FunctionUserConfig
-                      threadId={threadId}
-                      pluginId={source.pluginId}
-                      expectedWorkspace={view.workspace}
-                    />
-                  )}
-                </div>
-              )
-            })}
+                            return
+                          update({
+                            ...profile,
+                            capabilities: event.target.checked
+                              ? [...profile.capabilities, newClawCapability(source, usageContext)]
+                              : profile.capabilities.filter(
+                                  (item) => item.pluginId !== source.pluginId
+                                ),
+                            completionRules: event.target.checked
+                              ? profile.completionRules
+                              : profile.completionRules?.filter(
+                                  (rule) => rule.pluginId !== source.pluginId
+                                )
+                          })
+                        }}
+                      />
+                      <strong className="break-all">{source.name}</strong>
+                    </label>
+                    <p className="text-xs text-muted-foreground">
+                      {source.actions?.[0]?.description ??
+                        (source.components?.map((item) => item.name).join("、") ||
+                          "具体用法请查看插件说明")}
+                    </p>
+                    <p className="text-xs">
+                      {source.state === "ready"
+                        ? "已准备好"
+                        : source.error || "需要先安装、启用或授权"}
+                    </p>
+                    <p className="text-xs text-muted-foreground">
+                      {source.actions?.length
+                        ? `支持先后执行 · ${source.actions.length} 个动作`
+                        : "当前提供对话或界面功能；未导出可编排动作"}
+                    </p>
+                    {capability && source.components?.length ? (
+                      <ClawComponentSelector
+                        source={source}
+                        usageContext={usageContext}
+                        value={capability}
+                        disabled={disabled}
+                        onValidity={onValidity}
+                        drafts={draft.componentDrafts[source.pluginId] ?? {}}
+                        onDraftsChange={(value) =>
+                          mutateDraft(
+                            (old) => ({
+                              ...old,
+                              componentDrafts: { ...old.componentDrafts, [source.pluginId]: value }
+                            }),
+                            false
+                          )
+                        }
+                        onChange={(next) =>
+                          update({
+                            ...profile,
+                            capabilities: profile.capabilities.map((item) =>
+                              item.pluginId === next.pluginId ? next : item
+                            )
+                          })
+                        }
+                      />
+                    ) : null}
+                    {capability && !!source.userConfigFieldCount && (
+                      <FunctionUserConfig
+                        threadId={threadId}
+                        pluginId={source.pluginId}
+                        expectedWorkspace={view.workspace}
+                      />
+                    )}
+                  </div>
+                )
+              })}
           </div>
-          {view.capabilities.filter((source) => source.state === "ready").length < 2 && (
+          {view.capabilities.filter(
+            (source) => source.state === "ready" && hasUsableClawComponents(source, usageContext)
+          ).length === 0 && (
             <div className="space-y-2 text-sm">
-              <p>请先添加并授权两个插件，再回来选择组合。</p>
+              <p>暂无适用功能，请添加并确认权限后再配置。</p>
               <Button variant="outline" onClick={onSources}>
                 去添加插件
               </Button>
             </div>
           )}
           {mode === "sequence" && (
-            <div className="space-y-3" aria-label="两步流程">
-              {[0, 1].map((index) => (
-                <div key={index} className="space-y-3 rounded-xl border p-3">
-                  <h4 className="font-medium">
-                    {index === 0 ? "步骤一 · 准备输入" : "↓ 步骤二 · 接着处理"}
-                  </h4>
-                  <select
-                    aria-label={`步骤${index + 1}动作`}
-                    className={fieldClass}
-                    disabled={disabled}
-                    value={actionIds[index]}
-                    onChange={(event) => {
-                      if (
-                        dirty &&
-                        Object.keys(inputs[index]).length &&
-                        !window.confirm("更换动作会清除此步骤的参数，继续吗？")
-                      )
-                        return
-                      setActionIds((old) =>
-                        old.map((value, i) => (i === index ? event.target.value : value))
-                      )
-                      setInputs((old) => old.map((value, i) => (i === index ? {} : value)))
-                      setConfigs((old) => old.map((value, i) => (i === index ? {} : value)))
-                      setParameterDrafts((old) =>
-                        Object.fromEntries(
-                          Object.entries(old).filter(([key]) => !key.startsWith(`${index}:`))
+            <div className="space-y-3" aria-label="执行步骤配置">
+              {steps.map((step, index) => {
+                const connectionOptions = steps.slice(0, index).flatMap((source, sourceIndex) =>
+                  simpleConnections(
+                    chosen[sourceIndex]?.outputSchema,
+                    chosen[index]?.inputSchema
+                  ).map((entry) => ({
+                    value: JSON.stringify([source.id, entry.path]),
+                    label: `步骤 ${sourceIndex + 1} · ${entry.label}`,
+                    binding: { stepId: source.id, path: entry.path }
+                  }))
+                )
+                return (
+                  <div key={step.id} className="space-y-3 rounded-xl border p-3">
+                    <h4 className="font-medium">步骤 {index + 1}</h4>
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      aria-label={`移除步骤 ${index + 1}`}
+                      disabled={disabled || steps.length === 1}
+                      onClick={() => {
+                        if (!window.confirm("移除此步骤？引用它的后续步骤将改为自行填写输入。"))
+                          return
+                        mutateDraft((old) => removeSimpleStep(old, step.id))
+                      }}
+                    >
+                      移除
+                    </Button>
+                    <select
+                      aria-label={`步骤${index + 1}动作`}
+                      className={selectClass}
+                      disabled={disabled}
+                      value={actionIds[index]}
+                      onChange={(event) => {
+                        if (
+                          dirty &&
+                          Object.keys(inputs[index]).length &&
+                          !window.confirm("更换动作会清除此步骤的参数，继续吗？")
                         )
-                      )
-                      setConnection(null)
-                      setDirty(true)
-                      setPreview(null)
-                      setApplied(null)
-                    }}
-                  >
-                    <option value="">选择要执行的操作</option>
-                    {actions.map((action) => (
-                      <option key={actionKey(action)} value={actionKey(action)}>
-                        {action.name}
-                      </option>
-                    ))}
-                  </select>
-                  {!actions.length && (
-                    <p className="text-sm">
-                      所选插件暂不支持在这里分步调用。可以改选“一起使用”；AutoBiz 的阶段任务请从项目模式中创建。
-                    </p>
-                  )}
-                  {chosen[index] && (
-                    <>
-                      <p className="text-xs text-muted-foreground">{chosen[index]!.description}</p>
-                      {index === 1 && (
-                        <label className="grid gap-1 text-sm">
-                          从步骤一取得
-                          <select
-                            aria-label="两步连接"
-                            className={fieldClass}
-                            disabled={disabled}
-                            value={selectedConnection ?? "unconnected"}
-                            onChange={(event) => {
-                              setConnection(
-                                event.target.value === "unconnected" ? null : event.target.value
-                              )
-                              setDirty(true)
-                              setPreview(null)
-                              setApplied(null)
-                            }}
-                          >
-                            <option value="unconnected">请选择兼容的结果</option>
-                            {connections.map((entry) => (
-                              <option key={entry.path} value={entry.path}>
-                                {entry.label}
-                              </option>
-                            ))}
-                          </select>
-                        </label>
+                          return
+                        const value = event.target.value
+                        const selectedAction = actions.find((entry) => actionKey(entry) === value)
+                        mutateDraft((old) => ({
+                          ...old,
+                          steps: old.steps.map((entry) =>
+                            entry.id === step.id
+                              ? {
+                                  ...entry,
+                                  action: value,
+                                  digest: selectedAction?.digest,
+                                  plugin: selectedAction?.plugin,
+                                  input: {},
+                                  config: {},
+                                  inputFrom: undefined
+                                }
+                              : entry.inputFrom?.stepId === step.id
+                                ? { ...entry, inputFrom: undefined }
+                                : entry
+                          ),
+                          parameterDrafts: Object.fromEntries(
+                            Object.entries(old.parameterDrafts).filter(
+                              ([key]) => !key.startsWith(`${step.id}:`)
+                            )
+                          )
+                        }))
+                        setDirty(true)
+                        setPreview(null)
+                        setApplied(null)
+                      }}
+                    >
+                      <option value="">选择要执行的操作</option>
+                      {step.action && !chosen[index] && (
+                        <option value={step.action}>原操作不可用，请重新选择</option>
                       )}
-                      {simpleFormSupported(chosen[index]!.inputSchema) &&
-                        (index === 0 ||
-                          selectedConnection === null ||
-                          Object.keys(inputs[index]).length > 0) && (
+                      {actions.map((action) => (
+                        <option key={actionKey(action)} value={actionKey(action)}>
+                          {action.name}
+                        </option>
+                      ))}
+                    </select>
+                    {!actions.length && (
+                      <p className="text-sm">
+                        请勾选提供动作的插件，例如 AutoBiz 的“收集交付证据”和“生成交付报告”，再选择要执行的操作。
+                      </p>
+                    )}
+                    {chosen[index] && (
+                      <>
+                        <p className="text-xs text-muted-foreground">
+                          {chosen[index]!.description}
+                        </p>
+                        {index > 0 && (
+                          <label className="grid gap-1 text-sm">
+                            输入来源
+                            <select
+                              aria-label={`步骤${index + 1}输入来源`}
+                              className={selectClass}
+                              disabled={disabled}
+                              value={
+                                step.inputFrom
+                                  ? JSON.stringify([step.inputFrom.stepId, step.inputFrom.path])
+                                  : "manual"
+                              }
+                              onChange={(event) => {
+                                const binding = connectionOptions.find(
+                                  (entry) => entry.value === event.target.value
+                                )?.binding
+                                mutateDraft((old) => ({
+                                  ...old,
+                                  steps: old.steps.map((entry) =>
+                                    entry.id === step.id ? { ...entry, inputFrom: binding } : entry
+                                  )
+                                }))
+                              }}
+                            >
+                              <option value="manual">自行填写输入</option>
+                              {step.inputFrom &&
+                                !connectionOptions.some(
+                                  (entry) =>
+                                    entry.value ===
+                                    JSON.stringify([step.inputFrom!.stepId, step.inputFrom!.path])
+                                ) && (
+                                  <option
+                                    value={JSON.stringify([
+                                      step.inputFrom.stepId,
+                                      step.inputFrom.path
+                                    ])}
+                                  >
+                                    原连接已失效，请重新选择
+                                  </option>
+                                )}
+                              {connectionOptions.map((entry) => (
+                                <option key={entry.value} value={entry.value}>
+                                  {entry.label}
+                                </option>
+                              ))}
+                            </select>
+                          </label>
+                        )}
+                        {simpleFormSupported(chosen[index]!.inputSchema) && !step.inputFrom && (
                           <fieldset disabled={disabled}>
                             <SimpleActionParameters
                               title={`步骤${index + 1}输入`}
                               value={inputs[index]}
                               schema={chosen[index]!.inputSchema}
-                              draft={parameterDrafts[`${index}:input`]}
+                              draft={parameterDrafts[`${step.id}:input`]}
+                              allowMissing={!!step.inputFrom}
                               onDraftChange={(value) =>
-                                updateParameterDraft(`${index}:input`, value)
+                                updateParameterDraft(`${step.id}:input`, value)
                               }
                               onChange={(value) => {
                                 setInputs((old) =>
@@ -618,42 +766,134 @@ export function SimpleClawBuilder({
                             />
                           </fieldset>
                         )}
-                      {index === 1 && selectedConnection !== null && (
-                        <p className="text-sm text-primary">
-                          第二步会使用第一步的结果，无需再次填写。
-                        </p>
-                      )}
-                      {chosen[index]!.configSchema &&
-                        simpleFormSupported(chosen[index]!.configSchema) && (
-                          <details>
-                            <summary className="cursor-pointer text-xs">
-                              可选设置（默认沿用当前模型）
-                            </summary>
-                            <fieldset disabled={disabled}>
-                              <SimpleActionParameters
-                                title={`步骤${index + 1}设置`}
-                                value={configs[index]}
-                                schema={chosen[index]!.configSchema}
-                                draft={parameterDrafts[`${index}:config`]}
-                                onDraftChange={(value) =>
-                                  updateParameterDraft(`${index}:config`, value)
+                        {step.inputFrom && (
+                          <div className="space-y-2">
+                            <p className="text-sm text-primary">
+                              先使用前置步骤的实际结果；下方固定值会覆盖同名字段。
+                            </p>
+                            <details
+                              open={
+                                Object.keys(inputs[index]).length > 0 ||
+                                !!parameterDrafts[`${step.id}:input`]?.dirty
+                              }
+                            >
+                              <summary className="cursor-pointer text-sm font-medium">
+                                固定覆盖值（可选，{Object.keys(inputs[index]).length} 项）
+                              </summary>
+                              <p className="my-2 text-sm text-muted-foreground">
+                                仅勾选需要固定的字段。未设置的字段沿用前置结果；已填写的字段优先使用这里的值。
+                              </p>
+                              {simpleFormSupported(chosen[index]!.inputSchema) ? (
+                                <fieldset disabled={disabled}>
+                                  <SimpleActionParameters
+                                    title={`步骤${index + 1}输入`}
+                                    value={inputs[index]}
+                                    schema={chosen[index]!.inputSchema}
+                                    draft={parameterDrafts[`${step.id}:input`]}
+                                    allowMissing={!!step.inputFrom}
+                                    onDraftChange={(value) =>
+                                      updateParameterDraft(`${step.id}:input`, value)
+                                    }
+                                    onChange={(value) => {
+                                      setInputs((old) =>
+                                        old.map((item, i) => (i === index ? value : item))
+                                      )
+                                      setDirty(true)
+                                      setPreview(null)
+                                      setApplied(null)
+                                    }}
+                                  />
+                                </fieldset>
+                              ) : (
+                                <p className="text-sm">
+                                  此输入含有复杂结构，请在高级编辑中查看或修改固定值。
+                                </p>
+                              )}
+                              <Button
+                                type="button"
+                                size="sm"
+                                variant="outline"
+                                disabled={
+                                  disabled ||
+                                  (!Object.keys(inputs[index]).length &&
+                                    !parameterDrafts[`${step.id}:input`]?.dirty)
                                 }
-                                onChange={(value) => {
-                                  setConfigs((old) =>
-                                    old.map((item, i) => (i === index ? value : item))
+                                onClick={() => {
+                                  if (
+                                    !window.confirm(
+                                      "清除本步骤的固定覆盖值及未完成输入？之后将完整沿用前置结果。"
+                                    )
                                   )
-                                  setDirty(true)
-                                  setPreview(null)
-                                  setApplied(null)
+                                    return
+                                  mutateDraft((old) => ({
+                                    ...old,
+                                    steps: old.steps.map((entry) =>
+                                      entry.id === step.id ? { ...entry, input: {} } : entry
+                                    ),
+                                    parameterDrafts: Object.fromEntries(
+                                      Object.entries(old.parameterDrafts).filter(
+                                        ([key]) => key !== `${step.id}:input`
+                                      )
+                                    )
+                                  }))
                                 }}
-                              />
-                            </fieldset>
-                          </details>
+                              >
+                                清除固定覆盖值
+                              </Button>
+                            </details>
+                          </div>
                         )}
-                    </>
-                  )}
-                </div>
-              ))}
+                        {chosen[index]!.configSchema &&
+                          simpleFormSupported(chosen[index]!.configSchema) && (
+                            <details>
+                              <summary className="cursor-pointer text-xs">
+                                可选设置（默认沿用当前模型）
+                              </summary>
+                              <fieldset disabled={disabled}>
+                                <SimpleActionParameters
+                                  title={`步骤${index + 1}设置`}
+                                  value={configs[index]}
+                                  schema={chosen[index]!.configSchema}
+                                  draft={parameterDrafts[`${step.id}:config`]}
+                                  onDraftChange={(value) =>
+                                    updateParameterDraft(`${step.id}:config`, value)
+                                  }
+                                  onChange={(value) => {
+                                    setConfigs((old) =>
+                                      old.map((item, i) => (i === index ? value : item))
+                                    )
+                                    setDirty(true)
+                                    setPreview(null)
+                                    setApplied(null)
+                                  }}
+                                />
+                              </fieldset>
+                            </details>
+                          )}
+                      </>
+                    )}
+                  </div>
+                )
+              })}
+              <Button
+                type="button"
+                variant="outline"
+                disabled={disabled || steps.length >= 32}
+                onClick={() =>
+                  mutateDraft((old) => ({
+                    ...old,
+                    steps: [
+                      ...old.steps,
+                      { id: flowDraftId("step"), action: "", input: {}, config: {} }
+                    ]
+                  }))
+                }
+              >
+                添加步骤
+              </Button>
+              {steps.length >= 32 && (
+                <p className="text-xs text-muted-foreground">最多配置 32 个步骤。</p>
+              )}
             </div>
           )}
           {issues.length > 0 && (
@@ -666,7 +906,9 @@ export function SimpleClawBuilder({
           {error && (
             <p role="alert" className="text-sm text-destructive">
               {error}{" "}
-              {checkpoint.current?.flow ? "流程已保存，再次点击会继续保存组合。" : "草稿已保留。"}
+              {checkpoint.current?.flow
+                ? "执行步骤已保存，再次保存将继续完成搭配。"
+                : "草稿已保留。"}
             </p>
           )}
           {!preview && !applied && (
@@ -688,9 +930,12 @@ export function SimpleClawBuilder({
                   <li key={line}>{line}</li>
                 ))}
               </ul>
-              <p className="text-xs">只更换当前聊天的配置，接下来还会让你准备首次任务。</p>
+              <p className="text-xs">
+                只更换所选聊天的配置。应用后可直接进入聊天，由你输入并发送任务。
+              </p>
               {(preview.revision !== view.revision ||
-                preview.bindingRevision !== view.bindingRevision) && (
+                preview.bindingRevision !== view.bindingRevision ||
+                preview.usageContext !== usageContext) && (
                 <p role="alert">配置已变化，请取消预览后重新核对。</p>
               )}
               <Button
@@ -698,7 +943,8 @@ export function SimpleClawBuilder({
                   disabled ||
                   issues.length > 0 ||
                   preview.revision !== view.revision ||
-                  preview.bindingRevision !== view.bindingRevision
+                  preview.bindingRevision !== view.bindingRevision ||
+                  preview.usageContext !== usageContext
                 }
                 onClick={() => void apply()}
               >
@@ -714,29 +960,37 @@ export function SimpleClawBuilder({
               className="space-y-3 rounded-xl border border-primary/30 p-4"
               aria-label="组合首次使用"
             >
-              <h4 className="font-medium">已应用 · 现在怎么用</h4>
+              <h4 className="font-medium">已用于所选聊天</h4>
               <p className="text-sm">
                 {applied.flow
-                  ? "已准备两步流程。回聊天填写本次检视目标，再发送任务。"
-                  : "回到当前聊天，输入你希望这两个插件完成的任务。命令和界面仍按各插件原入口使用。"}
+                  ? "进入聊天后，本次使用所选执行步骤；填写任务后再发送。"
+                  : "进入所选聊天后输入任务。命令和界面仍按各功能原入口使用。"}
               </p>
               <Button
                 onClick={() => {
                   try {
                     assertCurrent()
-                    prepareSimpleAuthoringTask({
-                      id: flowDraftId("claw"),
-                      scope,
-                      profileId: applied.id,
-                      flow: applied.flow,
-                      suggestedText: applied.flow ? "检查这个文件是否存在问题，并说明依据。" : ""
-                    })
+                    if (applied.flow) {
+                      goToConfigurationThread(scope, () =>
+                        requestChatFlowUse({
+                          threadId,
+                          workspace: view.workspace,
+                          id: applied.flow!.definition.id,
+                          revision: applied.flow!.revision,
+                          name: applied.flow!.definition.name,
+                          bindingRevision: currentView.current.bindingRevision
+                        })
+                      )
+                    } else
+                      goToConfigurationThread(scope, () =>
+                        requestChatComposerFocus({ threadId, workspace: view.workspace })
+                      )
                   } catch (cause) {
                     setError(cause instanceof Error ? cause.message : String(cause))
                   }
                 }}
               >
-                准备首次任务
+                去这段聊天使用
               </Button>
               {!applied.flow &&
                 commands.map((command) => (
@@ -769,15 +1023,23 @@ export function SimpleClawBuilder({
                 ))}
               {!applied.flow && (
                 <Button variant="ghost" onClick={() => openBuiltinNavigation("runs", scope)}>
-                  打开运行过程与插件面板
+                  查看插件记录
                 </Button>
               )}
             </section>
           )}
         </>
       )}
+      <Button
+        type="button"
+        variant="outline"
+        disabled={busy || externalBusy}
+        onClick={continueInAdvanced}
+      >
+        在高级编辑中继续此草稿
+      </Button>
       <p className="text-xs text-muted-foreground">
-        需要调整技能、工具、模型或检查规则时，可展开下方高级编辑。两个编辑区的草稿分别保留。
+        简单与高级共用此份草稿。切换不会保存、应用或开始任务，未完成的参数仍会保留。
       </p>
     </section>
   )

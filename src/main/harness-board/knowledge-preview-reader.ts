@@ -8,6 +8,9 @@ import {
 } from "node:fs"
 import { basename, isAbsolute, join, relative, resolve } from "node:path"
 import { serialize } from "node:v8"
+import { EXTENSION_BOARD_API_VERSION } from "../../shared/project-runtime"
+import { readPackageExtensionContract } from "../plugins/extension-contract"
+import { isSameWorkspacePath } from "../../shared/workspace-path"
 import type { HarnessKnowledgePreviewResult } from "../../shared/harness-board-types"
 import type { PluginMetadata } from "../types"
 import {
@@ -307,7 +310,8 @@ export function readHarnessKnowledgePreview(
   const config = readBoardConfig(plugin.path)
   if (!config) throw new Error("插件未提供项目看板配置")
   const apiVersion = Number(config.apiVersion)
-  if (!Number.isInteger(apiVersion) || apiVersion !== APP_BOARD_API_VERSION) {
+  if (!Number.isInteger(apiVersion) || (apiVersion !== APP_BOARD_API_VERSION &&
+    !(apiVersion === EXTENSION_BOARD_API_VERSION && readPackageExtensionContract(plugin.path)))) {
     throw new Error("插件与当前客户端的项目看板 API 版本不兼容")
   }
 
@@ -315,14 +319,18 @@ export function readHarnessKnowledgePreview(
     adapterId: boundedText(plugin.id, 512),
     adapterName: boundedText(plugin.name, 1_024)
   }
+  const authorized = source.authorizedKnowledge
+  const approvedRoot = authorized?.pluginId === plugin.id &&
+    isSameWorkspacePath(resolve(authorized.pluginPath), resolve(plugin.path))
+    ? authorized.root : undefined
   const template = knowledgePathTemplate(config)
-  if (!template) {
+  if (!template && !approvedRoot) {
     return { ...resultBase, configured: false, exists: false, files: [] }
   }
 
-  const knowledgePath = resolveKnowledgePath(template, plugin, source)
+  const knowledgePath = approvedRoot ? resolve(approvedRoot) : resolveKnowledgePath(template, plugin, source)
   const pluginRoot = resolve(plugin.path)
-  if (!isPathInside(pluginRoot, knowledgePath)) {
+  if (!approvedRoot && !isPathInside(pluginRoot, knowledgePath)) {
     return {
       ...resultBase,
       configured: true,
@@ -347,7 +355,8 @@ export function readHarnessKnowledgePreview(
       realpathSync(pluginRoot),
       realpathSync(knowledgePath)
     ]
-    if (!isPathInside(realPluginRoot, realKnowledgePath)) {
+    if (approvedRoot ? !isSameWorkspacePath(resolve(approvedRoot), realKnowledgePath)
+      : !isPathInside(realPluginRoot, realKnowledgePath)) {
       return {
         ...resultBase,
         configured: true,

@@ -149,6 +149,60 @@ describe("Claw upgrades and previews", () => {
     expect(plan.profile.flow).toEqual(before.flow)
     expect(plan.profile.flow?.digest).toBe("c".repeat(64))
   })
+  it("upgrades the pending definition without replacing it with an older saved receipt", () => {
+    const before = profile()
+    const pending = {
+      schemaVersion: 2 as const,
+      execution: { kind: "host" as const },
+      id: "pending",
+      name: "pending",
+      goal: "actual pending edits",
+      timeoutMs: 10000,
+      maxExecutions: 10,
+      steps: [
+        {
+          id: "review",
+          name: "review",
+          enabled: true,
+          kind: "plugin-action" as const,
+          pluginId: "a",
+          plugin: "a",
+          actionId: "review",
+          digest: "a".repeat(64),
+          input: { path: "src/unsaved.ts", strict: false }
+        }
+      ]
+    }
+    before.flow = {
+      definition: {
+        ...pending,
+        goal: "old saved goal",
+        steps: [{ ...pending.steps[0], input: { path: "src/old.ts" } }]
+      },
+      revision: 9,
+      digest: "old-host-proof",
+      updatedAt: 1
+    }
+    const actions = [
+      {
+        pluginId: "a",
+        plugin: "a",
+        digest: "b".repeat(64),
+        actionId: "review",
+        name: "review",
+        command: "review",
+        inputSchema: {}
+      }
+    ]
+    const result = planClawUpgrade(before, [source()], actions, () => undefined, pending)
+    expect(result.flow?.goal).toBe("actual pending edits")
+    expect(result.flow?.steps[0]).toMatchObject({
+      digest: "b".repeat(64),
+      input: { path: "src/unsaved.ts", strict: false }
+    })
+    expect(result.profile.flow).toEqual(before.flow)
+    expect(planClawUpgrade(before, [source()], actions, () => undefined, null).flow).toBeUndefined()
+  })
   it("ignores object key ordering when comparing unchanged configuration", () => {
     const before = profile(),
       after = profile()

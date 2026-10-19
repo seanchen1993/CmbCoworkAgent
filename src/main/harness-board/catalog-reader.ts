@@ -2,6 +2,8 @@ import { existsSync, readFileSync, statSync } from "node:fs"
 import { basename, isAbsolute, join, relative, resolve } from "node:path"
 import { serialize } from "node:v8"
 import type { PluginMetadata } from "../types"
+import { assertPackageExtensionCompatibility } from "../plugins/extension-contract"
+import { EXTENSION_BOARD_API_VERSION } from "../../shared/project-runtime"
 import type {
   HarnessAdapterRegistryItem,
   HarnessBoardCatalogPageInput,
@@ -325,6 +327,16 @@ function setConfigCache(path: string, signature: string, value: BoardConfigSnaps
 }
 
 function readBoardConfig(pluginPath: string): BoardConfigSnapshot {
+  // The board may be unchanged while its required host protocol changes.
+  // Check before the board cache so the old project entrance cannot bypass it.
+  try {
+    if (existsSync(join(pluginPath, "devclaw.project-runtime.json")) ||
+      existsSync(join(pluginPath, "devclaw.capabilities.json")))
+      assertPackageExtensionCompatibility(pluginPath)
+  } catch (error) {
+    return { value: null, exists: true,
+      error: error instanceof Error ? error.message.slice(0, 512) : "EXTENSION_CONTRACT_INVALID" }
+  }
   const path = join(pluginPath, BOARD_CONFIG_REL_PATH)
   const signature = fileSignature(path)
   const cached = configCache.get(path)
@@ -416,6 +428,17 @@ function compatibility(
     }
   }
   if (apiVersion > APP_BOARD_API_VERSION) {
+    if (apiVersion === EXTENSION_BOARD_API_VERSION) {
+      try {
+        assertPackageExtensionCompatibility(plugin.path)
+        return { status: "compatible", compatible: true, appApiVersion: EXTENSION_BOARD_API_VERSION,
+          pluginApiVersion: apiVersion, label: "兼容" }
+      } catch (error) {
+        return { status: "invalid-board-config", compatible: false,
+          appApiVersion: APP_BOARD_API_VERSION, pluginApiVersion: apiVersion,
+          label: "扩展协议不兼容", message: error instanceof Error ? error.message : String(error) }
+      }
+    }
     return {
       status: "app-too-old",
       compatible: false,

@@ -47,6 +47,8 @@ const schema = z
       "project_doctor",
       "project_test",
       "project_dev",
+      "project_request_trial",
+      "project_list",
       "project_pack",
       "project_actions",
       "project_bind_action"
@@ -61,6 +63,7 @@ const schema = z
       .optional(),
     revision: z.number().int().min(0).optional(),
     instruction: z.string().min(1).max(2000).optional(),
+    goal: z.string().min(1).max(8000).optional(),
     kind: z.enum(["command", "tool", "rule", "panel", "flow-action"]).optional(),
     files: z
       .array(z.object({ path: z.string().max(240), text: z.string().max(65536) }))
@@ -258,7 +261,25 @@ export function createModAuthoringTool(input: {
             )
             break
           }
-          case "project_read": {
+            case "project_list": {
+              const context = project()
+              result = projectAuthoringSessions.list(context.scope).map(draft => ({
+                id: draft.id, name: draft.name, revision: draft.revision,
+                digest: draft.source.digest, development: draft.development
+              }))
+              break
+            }
+            case "project_request_trial": {
+              if (!args.goal) throw Error("PROJECT_TRIAL_GOAL_REQUIRED")
+              const context = project()
+              const draft = projectAuthoringSessions.read(context.scope, id())
+              const actions = draft.source.files.some(file => file.path === PROJECT_ACTION_LOCK_PATH)
+                ? await projectCatalog(context) : []
+              result = await projectAuthoringSessions.requestTrial(context.scope, id(),
+                revision(), args.goal, context.guard, actions)
+              break
+            }
+            case "project_read": {
             const context = project()
             result = projectAuthoringSessions.read(context.scope, id())
             break
@@ -449,7 +470,7 @@ export function createModAuthoringTool(input: {
                   : error instanceof ProjectDraftLimitError
                     ? projectDraftLimitHint(error.reason)
                     : args.action.startsWith("project_")
-                      ? "用 project_read 核对 revision；公开动作需 project_actions 取得当前真实身份和 schema，未授权或版本改变时让用户经原入口处理，不可猜 ID。修正后 doctor/test；dev 只准备目录，pack 由用户经原入口安装。"
+                      ? "用 project_list/project_read 核对持久草稿和 revision；公开动作需 project_actions 取得当前真实身份和 schema，未授权或版本改变时经原权限确认，不可猜 ID。修正后 doctor/test；project_request_trial(id,revision,goal) 展示当前聊天原生真实试用卡，确认后使用原项目运行器从起点执行。dev 仅准备目录，pack 不会自动安装；重启恢复源码，不恢复授权或运行。"
                       : "检查草稿版本、当前会话和诊断；失败不会替你批准权限。request_trial 只请求轮次结束后试用。"
         })
       }
@@ -458,7 +479,7 @@ export function createModAuthoringTool(input: {
       name: "mod_authoring",
       description:
         "Prefer submit(id,name,revision,files) to save, check and request the trial in one preparation; inspect result.check and repair diagnostics. A no-effect candidate startup preflight returns exact event/source diagnostics before this turn ends. Repair known code errors in this same request, using target.revision as the next expected revision; at most two repairs after the initial candidate. Never retry an unknown outcome or perform external actions to test startup. session.start must return next(event); a void startup handler fails even if syntax compiles. resume_trial(id,revision) re-prepares a persisted current-chat draft after restart and requests fresh consent, without installing. undo_trial stops the first active trial after the turn, or restores the immediately preceding source as a new revision through the same checks and permission envelope. request_reuse(id,revision) only prepares a reviewable formal installation and named combination for reuse in other chats; it does not install, approve, stop or apply before explicit UI confirmation. Do not use formal reuse merely to preserve this chat across restart. " +
-        "Create or modify a Mod in this creator session. Read catalog for this build's SDK/types/examples; write actual TypeScript with save (revision=0 for new, latest revision for updates), check diagnostics and repair, then request_trial. Trials apply only after this turn settles and the person approves the capability envelope. Never claim active from queued. For project packages use project_scaffold(id,name,template?) with project-lite (compatible default), harness-lite, harness-fullstack or harness-data. Harness templates need only devclaw.harness.json ordered nodes (id,title,skill,artifacts[{id,path,example,schema?}],approval none/human) and skills. After editing node definitions call project_compile(id,revision) to generate a new immutable runtime/contract revision and run isolated artifact contracts; existing public action bindings are preserved. Then use project_read, project_save(files,name,revision), project_doctor, project_test, project_dev and project_pack (id,revision). project_actions(cursor) lists real installed authorized public actions and schemas. project_bind_action(id,revision,stageId,localActionId,provider,actionInput,actionConfig?,inputFrom?) reads the catalogue again and locks the chosen identity/schema into a new draft version. Never invent provider IDs/digests. InputFrom is a prior-stage artifact JSON object or an earlier action output object plus JSON pointer; actionInput constants override matching fields. No expressions or internal file imports. Project drafts use separate immutable versions; project_test runs isolated production artifact validators, project_dev only prepares an isolated package and empty workspace, project_pack returns a ZIP for the original user installation entry. These do not run a model, action, install, approve or advance a project. inspect_plugin reports original sources to preserve in an independent adapter; it neither executes nor converts the original plugin. Each project draft retains at most 8 revisions; scaffold/save/compile/bind consume revisions. PROJECT_DRAFT_LIMIT includes limit revision/drafts/sessions and a recovery hint. At revision capacity, project_read then project_save with a new draft id, revision:0, the original name and exact source.files continues without renaming the plugin or changing action locks; old previews stay pinned. At 4 drafts per creator session or 16 sessions per process, export checked packages and preserve full source for CLI editing; another chat or restart does not automatically restore drafts. Approval and promotion are user UI actions, unavailable to this tool.",
+        "Create or modify a Mod in this creator session. Read catalog for this build's SDK/types/examples; write actual TypeScript with save (revision=0 for new, latest revision for updates), check diagnostics and repair, then request_trial. Trials apply only after this turn settles and the person approves the capability envelope. Never claim active from queued. For project packages use project_scaffold(id,name,template?) with project-lite (compatible default), harness-lite, harness-fullstack or harness-data. Harness templates need only devclaw.harness.json ordered nodes (id,title,skill,artifacts[{id,path,example,schema?}],approval none/human) and skills. After editing node definitions call project_compile(id,revision) to generate a new immutable runtime/contract revision and run isolated artifact contracts; existing public action bindings are preserved. Use project_list to recover the current chat source drafts. Then use project_read, project_save(files,name,revision), project_doctor, project_test, project_dev and project_pack (id,revision). project_request_trial(id,revision,goal) prepares an exact-version native preview card in this chat; the user confirms creation and starts the original project runner to execute real stages and validate actual artifacts. A needs-approval result is not execution. This path supports standard host project packages; it does not convert legacy Python business plugins or run them in the pure-function compiler. project_actions(cursor) lists real installed authorized public actions and schemas. project_bind_action(id,revision,stageId,localActionId,provider,actionInput,actionConfig?,inputFrom?) reads the catalogue again and locks the chosen identity/schema into a new draft version. Never invent provider IDs/digests. InputFrom is a prior-stage artifact JSON object or an earlier action output object plus JSON pointer; actionInput constants override matching fields. No expressions or internal file imports. Project drafts can include bounded same-package mods/hooks/skills source resources and .mcp.json. The original native exact-source card grants package Mods only in the selected private project workspace; fill required settings in its original native editor first. MCP resolves ${CLAUDE_PLUGIN_ROOT} against that pinned package; never use an author-machine absolute path or a changed live installation. These are not automatic grants or global installation. Project drafts use separate immutable versions; project_test runs isolated production artifact validators, project_dev only prepares an isolated package and empty workspace, project_pack returns a ZIP for the original user installation entry. These do not run a model, action, install, approve or advance a project. inspect_plugin reports original sources to preserve in an independent adapter; it neither executes nor converts the original plugin. Each project draft retains at most 8 revisions; scaffold/save/compile/bind consume revisions. PROJECT_DRAFT_LIMIT includes limit revision/drafts/sessions and a recovery hint. At revision capacity, project_read then project_save with a new draft id, revision:0, the original name and exact source.files continues without renaming the plugin or changing action locks; old previews stay pinned. At 4 drafts per creator session or 16 sessions per process, export checked packages and preserve full source for CLI editing; restart restores persisted source in the same chat, without automatically restoring preview authority, grants or execution; the person may use the original native review-and-recover card to recheck an exact retained project before preparing and approving new work. Another chat has a separate source scope. Approval and promotion are user UI actions, unavailable to this tool.",
       schema
     }
   )

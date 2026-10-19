@@ -29,7 +29,14 @@ export function createFunctionPluginPromptHost(
   manager: Pick<ModsManager, "workspaceKey" | "isEnabled" | "functionTurns">,
   assertThread: (workspace: string, threadId: string) => void
 ) {
-  const runIds = new WeakMap<FunctionPluginPromptLease, string>()
+  const runIds = new WeakMap<
+    FunctionPluginPromptLease,
+    {
+      runId: string
+      sourceSettlement?: Promise<void>
+      invalidateSourceSettlement?: () => void
+    }
+  >()
   const queue = new FunctionPluginPromptQueue({
     busy: (threadId) =>
       !!getLocalThreadRunLease(threadId) ||
@@ -45,11 +52,22 @@ export function createFunctionPluginPromptHost(
         assertCurrent: () => {
           if (!current?.()) throw new ModFunctionError("MODS_PLUGIN_PROMPT_LEASE_CHANGED")
         },
-        release: () => {
-          releaseLocalThreadRunLease(threadId, "mods", runId)
+        release: async () => {
+          let changed = false
+          try {
+            if (current?.()) releaseLocalThreadRunLease(threadId, "mods", runId)
+            else {
+              changed = true
+              runIds.get(lease)?.invalidateSourceSettlement?.()
+            }
+            await runIds.get(lease)?.sourceSettlement
+          } finally {
+            runIds.delete(lease)
+          }
+          if (changed) throw new ModFunctionError("MODS_PLUGIN_PROMPT_LEASE_CHANGED")
         }
       }
-      runIds.set(lease, runId)
+      runIds.set(lease, { runId })
       return lease
     },
     run: (scope, input, framed, lease, signal, started) =>
@@ -63,8 +81,9 @@ export function createFunctionPluginPromptHost(
             immediate: false
           },
           async () => {
-            const runId = runIds.get(lease)
-            if (!runId) throw new ModFunctionError("MODS_PLUGIN_PROMPT_LEASE_CHANGED")
+            const owner = runIds.get(lease)
+            if (!owner) throw new ModFunctionError("MODS_PLUGIN_PROMPT_LEASE_CHANGED")
+            const { runId } = owner
             const assertLive = () => {
               signal.throwIfAborted()
               scope.assertLive()
@@ -92,6 +111,7 @@ export function createFunctionPluginPromptHost(
                 pluginPrompt: receipt,
                 signal,
                 localRunLease: { owner: "mods", runId, managedExternally: true },
+                deferSourceSettlement: true,
                 backgroundNotificationOwner: "desktop",
                 verifyResolvedThread: (resolved) => {
                   try {
@@ -108,6 +128,8 @@ export function createFunctionPluginPromptHost(
                 }
               }
             )
+            owner.sourceSettlement = handle.sourceSettlement
+            owner.invalidateSourceSettlement = handle.invalidateSourceSettlement
             await handle.completion
           }
         )

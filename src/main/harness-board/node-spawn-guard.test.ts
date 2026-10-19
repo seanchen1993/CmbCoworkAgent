@@ -5,6 +5,7 @@ import { spawn } from "node:child_process"
 import { afterEach, describe, expect, it, vi } from "vitest"
 import ts from "typescript"
 import { suppressCompositionPythonCache } from "./composition-python-cache"
+import { prepareExtensionContext } from "./extension-context"
 import { isDerivedPlugin, setDerivationFamilies } from "../plugins/derivation-scope"
 
 afterEach(() => setDerivationFamilies([]))
@@ -18,11 +19,13 @@ function syncEntry(deps: Record<string, unknown>) {
     true,
     ts.ScriptKind.TS
   )
-  const node = source.statements.find(
-    (node) => ts.isFunctionDeclaration(node) && node.name?.text === "syncHarnessProjectConstraints"
-  )
-  if (!node) throw Error("Missing production sync entry")
-  const javascript = ts.transpileModule(node.getText(source).replace(/^export /, ""), {
+  const declarations = ["resolveHarnessKnowledgeWorkspace", "createKnowledgeCommandProject",
+    "syncHarnessProjectConstraints"].map(name => {
+    const node = source.statements.find(node => ts.isFunctionDeclaration(node) && node.name?.text === name)
+    if (!node) throw Error(`Missing production sync helper: ${name}`)
+    return node.getText(source).replace(/^export /, "")
+  })
+  const javascript = ts.transpileModule(declarations.join("\n"), {
     compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS }
   }).outputText
   return new Function(...Object.keys(deps), javascript + "\nreturn syncHarnessProjectConstraints")(
@@ -32,7 +35,8 @@ function syncEntry(deps: Record<string, unknown>) {
 
 /** Execute the production private runner with a controlled queue; avoid importing app singletons. */
 function runner(deps: Record<string, unknown>) {
-  deps = { suppressCompositionPythonCache, ...deps }
+  deps = { suppressCompositionPythonCache, prepareExtensionContext, join,
+    getOpenworkDir: () => tmpdir(), ...deps }
   const source = readFileSync(new URL("./service.ts", import.meta.url), "utf8")
   const start = source.indexOf("async function runHarnessInvocationAsync(")
   const end = source.indexOf("\nasync function runInspectAdapter(", start)
@@ -92,7 +96,9 @@ describe("native create verification at the process queue boundary", () => {
             config: {}
           }),
           readBoardConfigPlatformTextFromValue: () => "fixture sync",
-          createKnowledgeCommandProject: () => ({}),
+          getOpenworkDir: () => root,
+          pluginToHarnessAdapterSnapshot: (plugin: { id: string }) => ({ id: plugin.id,
+            name: "Fixture", type: "plugin" }),
           parseInspectCommand: () => ({
             executable: "python",
             args: ["-c", 'import json; print(json.dumps({"ok":True,"message":"synced"}))']
@@ -123,6 +129,7 @@ describe("native create verification at the process queue boundary", () => {
   )
 
   it("rejects a protected package knowledge sync before it can start or mutate package bytes", async () => {
+    const root = mkdtempSync(join(tmpdir(), "protected-legacy-sync-"))
     const spawn = vi.fn(),
       release = vi.fn()
     const invoke = runner({
@@ -131,24 +138,26 @@ describe("native create verification at the process queue boundary", () => {
       logHarnessInvocationFailure: () => {},
       formatAdapterError: (error: Error) => error.message
     })
-    await expect(
-      invoke(
-        {
-          readonlyPackage: true,
-          cwd: "retained-source",
-          invocation: {
-            executable: "python",
-            args: ["hooks/sync_agents.py", "--write-board-config"]
-          }
-        },
-        { configKey: "pull_knowledge" },
-        1000,
-        undefined,
-        async () => {}
-      )
-    ).rejects.toMatchObject({ code: "HARNESS_KNOWLEDGE_SYNC_SOURCE_IMMUTABLE" })
-    expect(spawn).not.toHaveBeenCalled()
-    expect(release).toHaveBeenCalledOnce()
+    try {
+      await expect(
+        invoke(
+          {
+            readonlyPackage: true,
+            cwd: root,
+            invocation: {
+              executable: "python",
+              args: ["hooks/sync_agents.py", "--write-board-config"]
+            }
+          },
+          { configKey: "pull_knowledge" },
+          1000,
+          undefined,
+          async () => {}
+        )
+      ).rejects.toMatchObject({ code: "HARNESS_KNOWLEDGE_SYNC_SOURCE_IMMUTABLE" })
+      expect(spawn).not.toHaveBeenCalled()
+      expect(release).toHaveBeenCalledOnce()
+    } finally { rmSync(root, { recursive: true, force: true }) }
   })
 
   it("waits for the semaphore then rejects changed identity before any process starts", async () => {
@@ -223,7 +232,7 @@ it("original internal Python imports preserve retained package bytes and entries
   }
 })
 
-it("public declared AutoBiz initialization also preserves package bytes", async () => {
+it.each([1, 2])("public declared AutoBiz v%s initialization also preserves package bytes", async version => {
   const root = mkdtempSync(join(tmpdir(), "public-composition-python-"))
   try {
     writeFileSync(
@@ -233,14 +242,15 @@ it("public declared AutoBiz initialization also preserves package bytes", async 
         adapter: "autobiz-v1"
       })
     )
-    writeFileSync(
-      join(root, "devclaw.project-runtime.json"),
-      JSON.stringify({
+    const runtime = {
         apiVersion: "devclaw.project-runtime/v1",
         mode: "legacy",
         stateOwner: "plugin"
-      })
-    )
+    }
+    const declaration = JSON.stringify(version === 1 ? runtime : {
+      apiVersion: "devclaw.project-runtime/v2", runtime
+    })
+    writeFileSync(join(root, "devclaw.project-runtime.json"), declaration)
     writeFileSync(join(root, "fixture_module.py"), "VALUE = 42\n")
     const invoke = runner({
       harnessInvocationSemaphore: { acquire: async () => () => undefined },
@@ -264,6 +274,8 @@ it("public declared AutoBiz initialization also preserves package bytes", async 
     )
     expect(result.toString().trim()).toBe("42")
     expect(existsSync(join(root, "__pycache__"))).toBe(false)
+    expect(readFileSync(join(root, "devclaw.project-runtime.json"), "utf8")).toBe(declaration)
+    expect(readFileSync(join(root, "fixture_module.py"), "utf8")).toBe("VALUE = 42\n")
   } finally {
     rmSync(root, { recursive: true, force: true })
   }

@@ -1,16 +1,28 @@
-export type CommunityExampleId = "token-weather" | "replay-theater" | "blast-radius"
+export type CommunityExampleId =
+  | "token-weather"
+  | "replay-theater"
+  | "blast-radius"
+  | "task-workbench-provider"
+  | "task-workbench-consumer"
+  | "task-behavior-prefix"
+  | "task-behavior-compact"
+  | "edit-reminder"
 
-export interface CommunityExample {
+interface CommunityExampleBase {
   id: CommunityExampleId
   pluginName: string
   title: string
   description: string
   usage: string
   conflictNote?: string
-  upstreamUrl: string
-  commit: string
   installation?: { state: "missing" | "installed" | "conflict"; pluginId?: string }
 }
+
+export type CommunityExample = CommunityExampleBase &
+  (
+    | { origin?: "anthropic"; upstreamUrl: string; commit: string }
+    | { origin: "devclaw"; sourcePath: string; version: string }
+  )
 
 export interface CommunityExampleInstallation {
   pluginId: string

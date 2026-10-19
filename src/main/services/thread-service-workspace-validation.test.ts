@@ -1,7 +1,17 @@
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { basename, dirname, join, resolve } from "node:path"
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
+import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from "vitest"
+import { closeWorkspaceProbeWorker } from "./workspace-probe-client"
+import { removeWorkspaceProbeTestWorker } from "./workspace-probe.test-helper"
+
+vi.mock("./workspace-probe-worker?nodeWorker", async () => ({
+  default: (await import("./workspace-probe.test-helper")).createWorkspaceProbeTestWorker
+}))
+afterAll(async () => {
+  await closeWorkspaceProbeWorker()
+  removeWorkspaceProbeTestWorker()
+})
 
 const mocks = vi.hoisted(() => ({
   createThread: vi.fn((threadId: string, metadata: Record<string, unknown>) => ({

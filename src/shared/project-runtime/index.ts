@@ -1,4 +1,5 @@
 export * from "./types"
 export * from "./manifest"
+export * from "./extension-contract"
 export * from "./host-types"
 export * from "./legacy-operations"

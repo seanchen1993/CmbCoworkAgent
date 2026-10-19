@@ -8,6 +8,8 @@ import { AIMessage, HumanMessage } from "@langchain/core/messages"
 import { tool } from "@langchain/core/tools"
 import { createAgent } from "langchain"
 import { z } from "zod"
+import { bindCreatorTraceUsage, readCreatorTraceId } from "./live-tool-evidence"
+import { CreatorRequestBudgets, creatorModelSummary } from "../../mods/devtools/creator-request-budget"
 import { mkdtempSync, readFileSync, rmSync } from "fs"
 import { tmpdir } from "os"
 import { join } from "path"
@@ -75,6 +77,38 @@ afterEach(async () => {
 })
 
 describe("TraceCollector completion", () => {
+  it("projects original logical counters separately from provider attempts using only the real bound trace context", async () => {
+    const tracer = new TraceCollector("creator-trace-proof", "fixture", "test", { includeSkillEval: false })
+    const context = tracer.getTraceContext()
+    expect(readCreatorTraceId(context)).toBe(tracer.getTraceId())
+    expect(readCreatorTraceId({ ...context })).toBeUndefined()
+    const budgets = new CreatorRequestBudgets()
+    budgets.bindModel("scope", "run")
+    expect(bindCreatorTraceUsage({ ...context }, () => { throw Error("must not bind a serialized ID") })).toBeUndefined()
+    expect(bindCreatorTraceUsage(context, usage => budgets.recordModelTrace("scope", "run", usage))).toBe(tracer.getTraceId())
+    const attempt = budgets.claimModel("scope", "run", tracer.getTraceId())
+    budgets.settleModel("scope", "run", attempt, { inputTokens: 11, outputTokens: 3 })
+    const recorder = new TurnTraceRecorder({ tracer, userMessageId: "user" })
+    const snapshot = { messages: [
+      { id: ["langchain_core", "messages", "HumanMessage"], kwargs: { id: "user", content: "fixture" } },
+      { id: ["langchain_core", "messages", "AIMessage"], kwargs: { id: "reply", type: "ai", content: "fixture",
+        usage_metadata: { input_tokens: 11, output_tokens: 3, total_tokens: 14 } } }
+    ] }
+    recorder.onStreamChunk("values", snapshot)
+    recorder.onStreamChunk("values", snapshot)
+    // Original collector totals remain independent of retained detail and transport attempts.
+    for (let index = 0; index < 520; index++) tracer.recordModelCall({ startedAt: new Date().toISOString(),
+      inputMessages: [], outputMessage: { role: "assistant", content: "fixture" }, toolCalls: [] })
+    const trace = await tracer.finish("success")
+    const summary = creatorModelSummary(budgets.latest("scope")?.model)
+    expect(summary).toMatchObject({ attempts: 1, usageReportedAttempts: 1, recordedModelCalls: trace.totalModelCalls,
+      recordedToolCalls: trace.totalToolCalls, recordedUsageReportedCalls: 1, traceIds: [tracer.getTraceId()] })
+    expect(summary.recordedModelCalls).toBe(521)
+    expect(summary.inputTokens).toBe(11)
+    expect(bindCreatorTraceUsage(context, () => { throw Error("closed") })).toBeUndefined()
+    expect(readCreatorTraceId(context)).toBeUndefined()
+  })
+
   it("uploads per-stage cache totals beyond the model-detail cap", async () => {
     const tracer = new TraceCollector("stage-cache-cap", "go", "test", {
       includeSkillEval: false,

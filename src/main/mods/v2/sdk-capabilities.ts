@@ -1,5 +1,7 @@
 /** Built-in session SDK methods. Availability still depends on invocation and grants. */
 export const FUNCTION_SDK_METHODS = [
+  "platform.list", "platform.read", "platform.subscribe", "platform.poll", "platform.unsubscribe",
+  "platform.publish", "platform.act", "platform.cancel", "platform.status",
   "agent.list",
   "agent.register",
   "agent.spawn",

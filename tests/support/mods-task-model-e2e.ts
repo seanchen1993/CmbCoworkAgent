@@ -453,9 +453,9 @@ export async function verifyTaskModelComposition(
     )
     await instructionsUi
       .locator("summary")
-      .filter({ hasText: /^项目规范 · 查看本次加载来源$/ })
+      .filter({ hasText: /^项目规范 · 本次来源$/ })
       .click()
-    assert(await instructionsUi.getByText(/自然语言冲突需要核对/).isVisible())
+    assert(await instructionsUi.getByText(/内容冲突需人工核对/).isVisible())
     await page.screenshot({ path: join(artifacts, "task-288-instruction-children-expanded.png") })
     await childSummary.click()
     assert.equal(await childDetails.getAttribute("open"), null)

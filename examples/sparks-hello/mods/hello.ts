@@ -1,4 +1,6 @@
-export function register(on) {
+import type { Register } from "claude-code"
+
+export const register: Register = (on) => {
   on("session.start", async ($, event, next) => {
     await $.command.register({
       name: "hello-spark",

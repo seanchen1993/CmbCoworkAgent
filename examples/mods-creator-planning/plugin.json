@@ -1,0 +1,6 @@
+{
+  "name": "creator-review-first",
+  "version": "1.0.0",
+  "description": "通用创造者规划建议：先核对已有能力和验收，再提交最小修改。",
+  "mods": "mods/manifest.json"
+}

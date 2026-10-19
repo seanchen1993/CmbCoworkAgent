@@ -5,6 +5,12 @@ import type { ModsManager } from "../manager"
 import { getLocalThreadRunLease } from "../../agent/thread-run-lease"
 import { FunctionConversationChildFamilies } from "./conversation-child-family"
 import {
+  assertCreatorModelAccounting,
+  issueCreatorModelAccounting,
+  type CreatorModelAccounting
+} from "../devtools/creator-model-accounting"
+import { CreatorRequestBudgets } from "../devtools/creator-request-budget"
+import {
   functionAgentModelFingerprint,
   prepareFunctionAgentPlan,
   runFunctionAgentChild,
@@ -17,6 +23,8 @@ const host = vi.hoisted(() => ({
   createRuntime: vi.fn(),
   cleanup: vi.fn(),
   checkpoint: vi.fn(),
+  createTrace: vi.fn(),
+  finishTrace: vi.fn(),
   options: undefined as undefined | Record<string, unknown>
 }))
 vi.mock("../../db", () => ({
@@ -25,7 +33,10 @@ vi.mock("../../db", () => ({
     throw new Error("AGENT_SPAWN_FIXTURE_NO_NATIVE_DB")
   },
   createThread: (id: string, metadata: Record<string, unknown>) => {
-    const row = { metadata: JSON.stringify({ ...metadata, cmb_thread_incarnation: "incarnation" }), created_at: 1 }
+    const row = {
+      metadata: JSON.stringify({ ...metadata, cmb_thread_incarnation: "incarnation" }),
+      created_at: 1
+    }
     host.rows.set(id, row)
     return row
   },
@@ -42,6 +53,18 @@ vi.mock("../../agent/agent-registry", () => ({
 vi.mock("../../agent/runtime", () => ({
   createAgentRuntime: (...args: unknown[]) => host.createRuntime(...args),
   closeCheckpointer: (...args: unknown[]) => host.checkpoint(...args)
+}))
+// Runtime streams are test doubles here; real collectors/tools are covered by the integration suite.
+vi.mock("../../agent/trace/collector", () => ({
+  createTraceCollectorSafely: (...args: unknown[]) => host.createTrace(...args),
+  finishTraceInBackground: (...args: unknown[]) => host.finishTrace(...args),
+  runTraceSideEffect: (_scope: string, run: () => void) => {
+    try {
+      run()
+    } catch {
+      /* Observational only. */
+    }
+  }
 }))
 vi.mock("../../agent/local-sandbox", () => ({
   LocalSandbox: {
@@ -100,33 +123,167 @@ function fixture() {
 }
 
 describe("independent native agent host", () => {
+  it.each(["answer", "error", "aborted", "cleanup"])(
+    "finalizes optional telemetry only after physical cleanup facts for %s",
+    async (outcome) => {
+      const { plan, context, manager, controller } = fixture()
+      const tracer = { getTraceContext: () => undefined }
+      host.createTrace.mockReturnValueOnce(tracer)
+      host.cleanup.mockImplementationOnce(async () => {
+        expect(host.finishTrace).not.toHaveBeenCalled()
+        if (outcome === "cleanup") throw Error("physical cleanup unconfirmed")
+      })
+      if (outcome === "error") host.createRuntime.mockRejectedValueOnce(Error("runtime failed"))
+      if (outcome === "aborted")
+        host.createRuntime.mockImplementationOnce(async () => {
+          controller.abort()
+          throw controller.signal.reason
+        })
+      const pending = runFunctionAgentChild(manager, plan, context)
+      if (outcome === "cleanup") await expect(pending).rejects.toThrow("MODS_AGENT_CLEANUP_FAILED")
+      else await pending
+      expect(host.finishTrace).toHaveBeenCalledTimes(1)
+      expect(host.createTrace.mock.calls[0][3]).toMatchObject({
+        traceKind: "subagent",
+        executionMode: "normal"
+      })
+      expect(host.createTrace.mock.calls[0][3]).not.toHaveProperty("parentTraceId")
+      expect(host.finishTrace.mock.calls[0].slice(0, 2)).toEqual([
+        tracer,
+        outcome === "cleanup"
+          ? "unknown"
+          : outcome === "answer"
+            ? "success"
+            : outcome === "aborted"
+              ? "cancelled"
+              : "error"
+      ])
+    }
+  )
+  it("inherits the native parent's original CAS budget for the exact physical child", async () => {
+    const { plan, context, manager } = fixture()
+    const settings = new Map<string, string>()
+    const budgets = new CreatorRequestBudgets({
+      getSetting: (key, fallback) => settings.get(key) ?? fallback ?? "",
+      compareAndSetSetting: (key, expected, value) => {
+        if (settings.get(key) !== expected) return false
+        settings.set(key, value)
+        return true
+      }
+    })
+    const scope = "original-parent-scope",
+      run = "original-parent-request"
+    budgets.bindModel(scope, run, undefined, { modelAttemptLimit: 1 })
+    const parent = issueCreatorModelAccounting(
+      {
+        assertCurrent: context.assertLive,
+        claim: (traceId) => {
+          const id = budgets.claimModel(scope, run, traceId)
+          return { settle: (usage) => budgets.settleModel(scope, run, id, usage) }
+        }
+      },
+      undefined,
+      undefined,
+      { workspace: plan.workspace, threadId: context.parentThreadId }
+    )
+    const runtime = host.createRuntime.getMockImplementation()!
+    host.createRuntime.mockImplementation(async (options: Record<string, unknown>) => {
+      const accounting = options.creatorAccounting as CreatorModelAccounting
+      expect(accounting).toBeDefined()
+      expect(accounting).not.toBe(parent)
+      assertCreatorModelAccounting(accounting, {
+        workspace: plan.workspace,
+        threadId: String(options.threadId)
+      })
+      const attempt = accounting.claim()
+      attempt.settle({ inputTokens: 11, outputTokens: 3 })
+      expect(() => parent.claim()).toThrow("DEVELOPMENT_MODEL_ATTEMPT_BUDGET")
+      return runtime(options)
+    })
+    const result = await runFunctionAgentChild(manager, plan, {
+      ...context,
+      creatorAccounting: parent
+    })
+    expect(result.reason).toBe("answer")
+    expect(budgets.latest(scope)?.model?.attempts).toMatchObject([
+      { state: "reported", inputTokens: 11, outputTokens: 3 }
+    ])
+    expect(budgets.latest(scope)?.model?.attempts[0].traceId).toBeUndefined()
+    expect(host.rows.size).toBe(0)
+  })
+
+  it.each(["forged", "foreign-parent", "foreign-workspace"])(
+    "rejects %s accounting without starting a provider",
+    async (kind) => {
+      const { plan, context, manager } = fixture()
+      const accounting =
+        kind === "forged"
+          ? ({ forChild: vi.fn() } as unknown as CreatorModelAccounting)
+          : issueCreatorModelAccounting(
+              { assertCurrent: () => {}, claim: () => ({ settle: () => {} }) },
+              undefined,
+              undefined,
+              {
+                workspace: kind === "foreign-workspace" ? "foreign" : plan.workspace,
+                threadId: kind === "foreign-parent" ? "foreign" : context.parentThreadId
+              }
+            )
+      await expect(
+        runFunctionAgentChild(manager, plan, { ...context, creatorAccounting: accounting })
+      ).rejects.toThrow("DEVELOPMENT_MODEL_ACCOUNTING_SCOPE")
+      expect(host.createRuntime).not.toHaveBeenCalled()
+      expect(host.rows.size).toBe(0)
+    }
+  )
+
   it.each(["answer", "startup-error"])(
-    "registers the actual factory before runtime and retires it before cleanup for %s", async outcome => {
+    "registers the actual factory before runtime and retires it before cleanup for %s",
+    async (outcome) => {
       const { plan, context, manager } = fixture()
       // This mocked-runtime unit verifies forwarding/order only. Actual receipt validation is
       // independently covered by conversation-child-family's real DB/lease/authority tests.
       const receipts = new FunctionConversationChildFamilies({ get: () => undefined })
-      const parent = receipts.captureParent({ owner: {}, physicalParentThreadId: context.parentThreadId,
-        target: { threadId: context.parentThreadId, workspace: plan.workspace,
-          incarnation: { token: "unit-parent", legacyCreatedAt: 1 }, logicalSessionId: "unit-session",
-          conversationId: "unit-main", branchId: "unit-branch", kind: "main", checkpointNamespace: "" },
-        signal: context.signal, assertCurrent: context.assertLive, assertFactory: context.assertLive })
-      let factoryLive = false, physical = ""
-      const register = vi.fn((_parent: Parameters<ModsManager["registerFunctionConversationChild"]>[0],
-        input: Parameters<ModsManager["registerFunctionConversationChild"]>[1]) => {
-        expect(_parent).toBe(parent)
-        input.assertCurrent()
-        physical = input.physicalThreadId
-        expect(host.rows.has(physical)).toBe(true)
-        expect(getLocalThreadRunLease(physical)).toMatchObject({ owner: "mods", runId: input.runId })
-        expect(input.checkpointIncarnation).toEqual({ token: "incarnation", legacyCreatedAt: 1 })
-        factoryLive = true
-        return () => {
-          expect(host.rows.has(physical)).toBe(true)
-          expect(getLocalThreadRunLease(physical)?.owner).toBe("mods")
-          factoryLive = false
-        }
+      const parent = receipts.captureParent({
+        owner: {},
+        physicalParentThreadId: context.parentThreadId,
+        target: {
+          threadId: context.parentThreadId,
+          workspace: plan.workspace,
+          incarnation: { token: "unit-parent", legacyCreatedAt: 1 },
+          logicalSessionId: "unit-session",
+          conversationId: "unit-main",
+          branchId: "unit-branch",
+          kind: "main",
+          checkpointNamespace: ""
+        },
+        signal: context.signal,
+        assertCurrent: context.assertLive,
+        assertFactory: context.assertLive
       })
+      let factoryLive = false,
+        physical = ""
+      const register = vi.fn(
+        (
+          _parent: Parameters<ModsManager["registerFunctionConversationChild"]>[0],
+          input: Parameters<ModsManager["registerFunctionConversationChild"]>[1]
+        ) => {
+          expect(_parent).toBe(parent)
+          input.assertCurrent()
+          physical = input.physicalThreadId
+          expect(host.rows.has(physical)).toBe(true)
+          expect(getLocalThreadRunLease(physical)).toMatchObject({
+            owner: "mods",
+            runId: input.runId
+          })
+          expect(input.checkpointIncarnation).toEqual({ token: "incarnation", legacyCreatedAt: 1 })
+          factoryLive = true
+          return () => {
+            expect(host.rows.has(physical)).toBe(true)
+            expect(getLocalThreadRunLease(physical)?.owner).toBe("mods")
+            factoryLive = false
+          }
+        }
+      )
       manager.registerFunctionConversationChild = register
       const runtime = host.createRuntime.getMockImplementation()
       host.createRuntime.mockImplementation(async (...args) => {
@@ -135,8 +292,13 @@ describe("independent native agent host", () => {
         if (!runtime) throw Error("ACTUAL_FIXTURE_RUNTIME_REQUIRED")
         return runtime(...args)
       })
-      manager.closeFunctionThread = vi.fn(() => { expect(factoryLive).toBe(false) })
-      const result = await runFunctionAgentChild(manager, plan, { ...context, conversationParent: parent })
+      manager.closeFunctionThread = vi.fn(() => {
+        expect(factoryLive).toBe(false)
+      })
+      const result = await runFunctionAgentChild(manager, plan, {
+        ...context,
+        conversationParent: parent
+      })
       expect(result.reason).toBe(outcome === "answer" ? "answer" : "error")
       expect(register).toHaveBeenCalledOnce()
       expect(manager.closeFunctionThread).toHaveBeenCalledWith(physical)

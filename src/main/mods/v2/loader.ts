@@ -8,6 +8,7 @@ import { lstatSync, realpathSync, statSync } from "node:fs"
 import { dirname, extname, relative, resolve } from "node:path"
 import type { ModObject } from "../../../shared/mods/types"
 import { parseFunctionUserConfig, type FunctionUserConfig } from "../../../shared/mods/v2/user-config"
+import { parseFunctionUserConfigSchema, type FunctionUserConfigSchema } from "../../../shared/mods/v2/user-config-schema"
 import {
   isModObject,
   CLAUDE_MODS_PROFILE,
@@ -43,6 +44,7 @@ export interface CompiledFunctionPlugin {
   code: string
   options: ModObject
   userConfig?: FunctionUserConfig
+  userConfigSchema?: FunctionUserConfigSchema
   sources: string[]
   clients: Record<string, string>
   environment: FunctionEnvironmentDeclaration
@@ -127,6 +129,13 @@ export async function compileFunctionPlugin(
     throw Error("MODS_USER_CONFIG_DECLARATION_CONFLICT")
   const userConfig = parseFunctionUserConfig(packageManifest?.userConfig !== undefined
     ? packageManifest.userConfig : native?.userConfig)
+  if (packageManifest?.userConfigSchema !== undefined && native?.userConfigSchema !== undefined)
+    throw Error("MODS_USER_CONFIG_DECLARATION_CONFLICT")
+  if ((packageManifest?.userConfigSchema !== undefined && packageManifest.userConfig === undefined) ||
+    (native?.userConfigSchema !== undefined && native.userConfig === undefined))
+    throw Error("MODS_USER_CONFIG_SCHEMA_SOURCE_CONFLICT")
+  const userConfigSchema = parseFunctionUserConfigSchema(packageManifest?.userConfigSchema ?? native?.userConfigSchema,
+    userConfig)
   if (components.length && userConfig && Object.hasOwn(userConfig, "claw"))
     throw Error("MODS_USER_CONFIG_RESERVED_FIELD")
   if (parseClawComponentExports(packageManifest?.claw).length)
@@ -171,6 +180,14 @@ export async function compileFunctionPlugin(
       ? packageManifest.cmbCompatibility
       : native?.cmbCompatibility
   )
+  for (const manifest of [packageManifest, native]) {
+    const compatibility = manifest?.cmbCompatibility
+    const migrationsRequired = isModObject(compatibility) && compatibility.userConfigMigrations === "v1"
+    if (manifest?.userConfigSchema !== undefined && !migrationsRequired)
+      throw Error("MODS_USER_CONFIG_SCHEMA_COMPATIBILITY_REQUIRED")
+    if (migrationsRequired && manifest?.userConfigSchema === undefined)
+      throw Error("MODS_USER_CONFIG_SCHEMA_DECLARATION_REQUIRED")
+  }
   const actions = parseClawActionExports(
     packageManifest?.claw !== undefined ? packageManifest.claw : native?.claw
   )
@@ -430,6 +447,7 @@ export async function compileFunctionPlugin(
     },
     options,
     ...(userConfig === undefined ? {} : { userConfig }),
+    ...(userConfigSchema === undefined ? {} : { userConfigSchema }),
     sources: [...captured.keys()].sort(),
     ...(authorTypes ? { authorTypes } : {}),
     ...(tooling?.captureSources

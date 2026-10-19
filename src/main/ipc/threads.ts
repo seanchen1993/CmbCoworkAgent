@@ -256,6 +256,7 @@ import {
   isSubagentTranscriptBlobRef
 } from "../../shared/subagent-transcript-storage"
 import { createThreadService } from "../services/thread-service"
+import { validateRendererThreadCreateMetadata } from "../services/thread-create-metadata"
 import { collectReferencedTranscriptHashesFromPages } from "./thread-transcript-gc-scan"
 import { getCapturedRawApiCall } from "../services/llm-api-request-capture"
 
@@ -3399,6 +3400,7 @@ export function registerThreadHandlers(ipcMain: IpcMain): void {
 
   // Create a new thread
   ipcMain.handle("threads:create", async (_event, metadata?: Record<string, unknown>) => {
+    validateRendererThreadCreateMetadata(metadata)
     return createThreadService(metadata)
   })
 

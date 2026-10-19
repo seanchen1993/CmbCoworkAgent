@@ -19,6 +19,7 @@
 
 import { readFileSync } from "fs"
 import { join, resolve } from "path"
+import ts from "typescript"
 
 const PROJECT_ROOT = resolve(__dirname, "..")
 
@@ -692,12 +693,38 @@ function testClearOnEveryRunExit(): void {
     "createCurrentRunMessageQueueMiddleware(currentRunMessageQueueOwnerToken)",
     "each middleware closure is bound to its physical run token"
   )
-  assertOccurrences(
-    agentIpc,
-    "currentRunMessageQueueOwnerToken: runToken",
-    3,
-    "invoke, resume, and interrupt factories pass the owner token to every failover runtime"
-  )
+  // Hook accounting also binds the same physical owner before runtime creation.
+  // Check the three actual runtime factories rather than unrelated whole-file text.
+  const factoryNames = new Set([
+    "invokeRuntimeFactory", "resumeRuntimeFactory", "interruptRuntimeFactory"
+  ])
+  const checkedFactories: string[] = []
+  const source = ts.createSourceFile("agent.ts", agentIpc, ts.ScriptTarget.Latest, true)
+  const visit = (node: ts.Node): void => {
+    if (ts.isVariableDeclaration(node) && ts.isIdentifier(node.name) &&
+      factoryNames.has(node.name.text)) {
+      const initializer = node.initializer
+      assert(initializer && ts.isCallExpression(initializer) &&
+        ts.isIdentifier(initializer.expression) &&
+        initializer.expression.text === "prepareStandardThreadRuntimeFactory",
+      `${node.name.text} must use the original standard runtime factory`)
+      const owners: ts.PropertyAssignment[] = []
+      const collect = (child: ts.Node): void => {
+        if (ts.isPropertyAssignment(child) && ts.isIdentifier(child.name) &&
+          child.name.text === "currentRunMessageQueueOwnerToken") owners.push(child)
+        ts.forEachChild(child, collect)
+      }
+      ts.forEachChild(initializer!, collect)
+      assert(owners.length === 1 && ts.isIdentifier(owners[0].initializer) &&
+        owners[0].initializer.text === "runToken",
+      `${node.name.text} must pass exactly its physical owner token to every failover runtime`)
+      checkedFactories.push(node.name.text)
+    }
+    ts.forEachChild(node, visit)
+  }
+  visit(source)
+  assert(checkedFactories.length === 3 && new Set(checkedFactories).size === 3,
+    "invoke, resume, and interrupt runtime factories must all retain their owner tokens")
 }
 
 function testInvokeWiresBoundedCheckpointRecoveryThroughSettlementFence(): void {

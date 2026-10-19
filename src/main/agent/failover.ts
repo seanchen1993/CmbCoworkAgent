@@ -1,4 +1,5 @@
 import { getModelConfigByRef, getModelConfigs, toModelRef } from "../models/registry"
+import { isCreatorBudgetError } from "../mods/devtools/creator-model-accounting"
 
 // ─── PR-12 / PR-17 — minimal API error classifier ─────────────────────────────
 // Reuses the status-code + message-pattern primitives already powering
@@ -300,6 +301,7 @@ function hasRetryableStatusInMessage(message: string): boolean {
  * models equally (auth, bad request, user cancellation).
  */
 export function isRetryableApiError(error: unknown): boolean {
+  if (isCreatorBudgetError(error)) return false
   const chain: unknown[] = []
   const seen = new Set<unknown>()
   let current = error

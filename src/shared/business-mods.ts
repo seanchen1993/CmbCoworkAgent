@@ -1,6 +1,8 @@
 /** Portable business implementations. These declarations confer no execution permission. */
 import type { ClawActionExport } from "./mods/claw-actions"
 import type { CapabilityUsage } from "./mods/capability-usage"
+import type { FunctionUserConfig } from "./mods/v2/user-config"
+import type { ModObject } from "./mods/types"
 export const BUSINESS_MOD_MANIFEST = "mods/business/manifest.json"
 export const BUSINESS_MOD_ASSEMBLY = "devclaw.business-assembly.json"
 
@@ -13,6 +15,8 @@ export interface BusinessModDefinition {
   dependencies: { required: string[]; advisory: string[] }
   checks: { validators: string[]; guards: string[] }
   insertAfter?: string
+  /** Required schema only; installed user values and credentials never enter the catalog. */
+  userConfig?: FunctionUserConfig
 }
 /** Optional functions accompany a workflow; they are never sequential business stages. */
 export interface BusinessModExtensionDefinition {
@@ -24,6 +28,16 @@ export interface BusinessModExtensionDefinition {
   dependencies: { required: string[]; advisory: string[] }
   usage?: CapabilityUsage
   actions?: ClawActionExport[]
+  configSchema?: ModObject
+  userConfig?: FunctionUserConfig
+  contextProvider?: {
+    entry: string
+    operations: Array<"session-context" | "sync-knowledge">
+    knowledgeBinding?: string
+    required: boolean
+  }
+  /** Auxiliary native Skills exposed through the plugin's ordinary search roots. */
+  skills?: string[]
 }
 export interface BusinessModCatalog {
   apiVersion: "devclaw.business-mods/v1"
@@ -62,6 +76,8 @@ export interface BusinessModAssemblyRequest {
   version: string
   order?: string[]
   acceptFixedWorkflow?: boolean
+  /** Opt-in checked output IDs; export uses the original fixed verified-context bundle. */
+  verifiedArtifactIds?: string[]
 }
 export interface BusinessModPreview {
   previewId: string
@@ -84,6 +100,8 @@ export interface BusinessModCopy {
   status: "created" | "checked" | "installed"
   fileCount: number
   pluginId?: string
+  /** Host materialization intent; installation must use the original native ZIP update. */
+  exportOnly?: boolean
 }
 export interface BusinessModExport {
   output: string

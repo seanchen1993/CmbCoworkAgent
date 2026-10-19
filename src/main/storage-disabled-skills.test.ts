@@ -40,6 +40,20 @@ describe("atomic disabled-skill persistence", () => {
     await writeFile(join(skillDir, "SKILL.md"), `---\nname: ${name}\n---\n`)
   }
 
+  it("requires a readable complete plugin registry before detaching Claw bindings", async () => {
+    const storage = await import("./storage")
+    expect(() => storage.getInstalledPluginIds()).toThrow()
+    await writeFile(join(isolatedHome, "plugins.json"), "[]")
+    expect([...storage.getInstalledPluginIds()]).toEqual([])
+    const disabled = { id: "disabled", name: "Disabled", path: join(tempRoot, "missing"), enabled: false }
+    await writeFile(join(isolatedHome, "plugins.json"), JSON.stringify([disabled]))
+    expect([...storage.getInstalledPluginIds()]).toEqual(["disabled"])
+    for (const raw of ["broken", "{}", "[null]", JSON.stringify([disabled, disabled])]) {
+      await writeFile(join(isolatedHome, "plugins.json"), raw)
+      expect(() => storage.getInstalledPluginIds()).toThrow()
+    }
+  })
+
   async function createSameNameStandaloneAndPluginHooks(): Promise<void> {
     await createStandaloneSkill("shared", "shared")
     await writeFile(
@@ -215,24 +229,51 @@ describe("atomic disabled-skill persistence", () => {
     expect(coldStorage.getDisabledSkillRuntimePolicy().denyAllStandaloneSkills).toBe(true)
   })
 
-  it("keeps plugin hooks and same-name required skill while cold-invalid standalone skills stay denied", async () => {
-    await createSameNameStandaloneAndPluginHooks()
-    await writeInvalidDisabledStore("malformed")
-    const storage = await import("./storage")
-    const hooks = storage.getEnabledSkillHookMetadata()
-    expect(hooks.some((hook) => hook.pluginId === "plugin-a")).toBe(true)
-    expect(hooks.some((hook) => !hook.pluginId)).toBe(false)
+  describe("cold-invalid required skill resolution", () => {
+    let storage: typeof import("./storage")
+    let requiredSkill: typeof import("./hooks/required-skill")
+    let disabledStoreReads: number
 
-    const { enrichHookResultWithRequiredSkill } = await import("./hooks/required-skill")
-    const enriched = await enrichHookResultWithRequiredSkill({
-      exitCode: 1,
-      stdout: "",
-      stderr: "",
-      blocked: true,
-      requiredSkill: "shared"
+    beforeEach(async () => {
+      await createSameNameStandaloneAndPluginHooks()
+      await writeInvalidDisabledStore("malformed")
+      disabledStoreReads = 0
+      const storePath = join(isolatedHome, "disabled-skills.json")
+      vi.doMock("fs", async () => {
+        const actual = await vi.importActual<typeof import("fs")>("fs")
+        return {
+          ...actual,
+          readFileSync: (...args: unknown[]) => {
+            if (String(args[0]) === storePath) disabledStoreReads++
+            return Reflect.apply(actual.readFileSync, actual, args)
+          }
+        }
+      })
+      // Loading the native Hook dependency graph is fixture setup, without reading policy.
+      storage = await import("./storage")
+      requiredSkill = await import("./hooks/required-skill")
     })
-    expect(enriched?.additionalContext).toContain("PLUGIN_GUIDANCE")
-    expect(enriched?.additionalContext).not.toContain("STANDALONE_GUIDANCE")
+
+    it("keeps plugin hooks and same-name required skill while cold-invalid standalone skills stay denied", async () => {
+      expect(disabledStoreReads).toBe(0)
+      expect(await readFile(join(isolatedHome, "disabled-skills.json"), "utf-8")).toBe(
+        '["canonical-review"'
+      )
+      const hooks = storage.getEnabledSkillHookMetadata()
+      expect(disabledStoreReads).toBeGreaterThan(0)
+      expect(hooks.some((hook) => hook.pluginId === "plugin-a")).toBe(true)
+      expect(hooks.some((hook) => !hook.pluginId)).toBe(false)
+
+      const enriched = await requiredSkill.enrichHookResultWithRequiredSkill({
+        exitCode: 1,
+        stdout: "",
+        stderr: "",
+        blocked: true,
+        requiredSkill: "shared"
+      })
+      expect(enriched?.additionalContext).toContain("PLUGIN_GUIDANCE")
+      expect(enriched?.additionalContext).not.toContain("STANDALONE_GUIDANCE")
+    })
   })
 
   it("cleans managed Claude copies and bypasses warmed standalone hook caches while busy", async () => {

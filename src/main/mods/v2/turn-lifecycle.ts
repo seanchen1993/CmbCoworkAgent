@@ -47,6 +47,14 @@ interface TurnEntry {
   observation: FunctionTurnObservation
   anchorMessageId?: string
   suspended?: boolean
+  settlement: ReturnType<typeof createTurnSettlement>
+}
+
+function createTurnSettlement() {
+  const settlement = Promise.withResolvers<void>()
+  // Most callers only observe logical facts; a physical owner may capture this exact run.
+  void settlement.promise.catch(() => {})
+  return settlement
 }
 
 export interface FunctionTurnLifecycleHost {
@@ -84,6 +92,37 @@ export class FunctionTurnLifecycle {
 
   hasUnsettled(threadId: string): boolean {
     return [...this.entries.values()].some((entry) => entry.binding.threadId === threadId)
+  }
+
+  /** Capture before finish/release; never waits for a later run registered on this thread. */
+  captureSettlement(threadId: string, runId: string): Promise<void> | undefined {
+    return this.captureSettlementOwner(threadId, runId)?.settlement
+  }
+
+  captureSettlementOwner(
+    threadId: string,
+    runId: string
+  ):
+    | {
+        settlement: Promise<void>
+        invalidate(): void
+      }
+    | undefined {
+    const key = this.key(threadId, runId),
+      entry = this.entries.get(key)
+    if (!entry) return undefined
+    return {
+      settlement: entry.settlement.promise,
+      invalidate: () => {
+        if (this.entries.get(key) !== entry) return
+        const error = new ModFunctionError("MODS_CALL_SCOPE_CHANGED")
+        entry.controller.abort(error)
+        entry.settlement.reject(error)
+        this.entries.delete(key)
+        this.clearActive(entry)
+        this.notifySettled(threadId)
+      }
+    }
   }
 
   onSettled(listener: (threadId: string) => void): () => void {
@@ -133,15 +172,18 @@ export class FunctionTurnLifecycle {
       starting: Promise.resolve(),
       dispatching: false,
       controller: new AbortController(),
-      observation: new FunctionTurnObservation()
+      observation: new FunctionTurnObservation(),
+      settlement: createTurnSettlement()
     }
     this.entries.set(key, entry)
     this.running.set(binding.threadId, entry)
-    try { binding.onStarted?.() }
-    catch (error) {
+    try {
+      binding.onStarted?.()
+    } catch (error) {
       if (this.entries.get(key) === entry) this.entries.delete(key)
       if (this.running.get(binding.threadId) === entry) this.running.delete(binding.threadId)
       entry.controller.abort(error)
+      entry.settlement.reject(error)
       this.notifySettled(binding.threadId)
       return Promise.reject(error)
     }
@@ -174,7 +216,8 @@ export class FunctionTurnLifecycle {
       starting: Promise.resolve(),
       dispatching: false,
       controller: new AbortController(),
-      observation: new FunctionTurnObservation()
+      observation: new FunctionTurnObservation(),
+      settlement: createTurnSettlement()
     }
     this.entries.set(key, entry)
     this.children.set(this.key(binding.threadId, binding.agentId), entry)
@@ -274,6 +317,7 @@ export class FunctionTurnLifecycle {
       this.entries.delete(this.key(threadId, runId))
       this.clearActive(entry)
       entry.controller.abort(error)
+      entry.settlement.reject(error)
       try {
         this.host.error(error)
       } finally {
@@ -333,8 +377,10 @@ export class FunctionTurnLifecycle {
         )
         if (this.entries.get(this.key(threadId, entry.binding.runId)) === entry)
           this.entries.delete(this.key(threadId, entry.binding.runId))
+        entry.settlement.resolve()
       })
       .catch((error) => {
+        entry.settlement.reject(error)
         if (this.entries.get(this.key(threadId, entry.binding.runId)) === entry)
           this.entries.delete(this.key(threadId, entry.binding.runId))
         if (!entry.controller.signal.aborted) this.host.error(error)
@@ -351,6 +397,7 @@ export class FunctionTurnLifecycle {
       if (workspace && entry.binding.workspace !== workspace) continue
       if (threadId && entry.binding.threadId !== threadId) continue
       entry.controller.abort(new ModFunctionError("MODS_TURN_SCOPE_CHANGED"))
+      entry.settlement.reject(entry.controller.signal.reason)
       this.entries.delete(key)
       this.clearActive(entry)
       this.notifySettled(entry.binding.threadId)

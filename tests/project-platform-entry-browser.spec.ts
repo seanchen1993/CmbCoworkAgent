@@ -119,7 +119,7 @@ async function details(browser: Browser) {
     import{ProjectRunDetails}from'./src/renderer/src/components/chat/ProjectRunDetails';
     const pending=[];window.api={mods:{builtinAdvisor:async(id,workspace,kind)=>{calls.push(['advisor',id,kind]);return{enabled:false,running:false,nextAllowedAt:0,dailyLimit:10,outputTokenLimit:512}},
       builtinOverview:(id,workspace)=>new Promise(resolve=>{calls.push(['overview',id]);pending.push(()=>resolve({threadId:id,workspace,capturedAt:1,
-        instructions:{status:'unknown',message:'真实范围 '+id},policy:{required:false,blockedTools:[],recordedBlocks:0,explanation:'原审批'},
+        instructions:{status:'observed',message:'规范说明',snapshot:{origin:'host',entries:[{path:'真实范围 '+id,delivery:'unknown',layer:'project',scope:id,reason:'待核对'}],limitations:[]}},policy:{required:false,blockedTools:[],recordedBlocks:0,explanation:'原审批'},
         metrics:{sampled:0,succeeded:0,failed:0,running:0,unknown:0,inputTokens:null,outputTokens:null,limited:false,explanation:'保留记录'},suggestions:[]}))})}};
     window.show=id=>root.render(<React.StrictMode><ProjectRunDetails key={id} threadId={id} workspace={'C:/'+id}/></React.StrictMode>);
     window.finish=()=>pending.splice(0).forEach(done=>done());window.show('A');
@@ -136,7 +136,7 @@ async function details(browser: Browser) {
   await page.getByRole("button", { name: "运行过程", exact: true }).click()
   await page.evaluate(() => (window as any).finish())
   await page.getByText("真实范围 B", { exact: true }).waitFor({ state: "attached" })
-  await page.getByText("项目规范 · 查看本次加载来源", { exact: true }).click()
+  await page.getByText("项目规范 · 本次来源", { exact: true }).click()
   await page.screenshot({ path: resolve(output, "readonly-project-dialog.png"), fullPage: true })
   await page.keyboard.press("Escape")
   await page.getByRole("dialog").waitFor({ state: "detached" })

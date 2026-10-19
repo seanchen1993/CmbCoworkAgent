@@ -12,7 +12,14 @@ import type { ModControlStore } from "../control-store"
 import { FunctionUserConfigSecrets, type FunctionSecretProtector } from "./user-config-secrets"
 import type { SensitiveFunctionUserConfigAction } from "../../../shared/mods/v2/user-config-view"
 
-type ConfigRecord = { revision: number; values: ModObject; sealed?: Record<string, string> }
+import type { FunctionUserConfigSchema } from "../../../shared/mods/v2/user-config-schema"
+import {
+  assertUserConfigSchemaCurrent,
+  prepareUserConfigMigration,
+  userConfigSchemaDigest,
+  userConfigRecordDigest,
+  type UserConfigRecord as ConfigRecord
+} from "./user-config-migration"
 
 /** Ordinary values and opaque OS-encrypted fields share one durable revision. */
 export class FunctionUserConfigValues {
@@ -42,7 +49,16 @@ export class FunctionUserConfigValues {
       !Number.isSafeInteger(parsed.revision) ||
       Number(parsed.revision) < 0 ||
       !isModObject(parsed.values) ||
-      Object.keys(parsed).some((key) => !["revision", "values", "sealed"].includes(key)) ||
+      Object.keys(parsed).some(
+        (key) => !["revision", "values", "sealed", "schemaVersion", "schemaDigest"].includes(key)
+      ) ||
+      (parsed.schemaVersion === undefined) !== (parsed.schemaDigest === undefined) ||
+      (parsed.schemaVersion !== undefined &&
+        (!Number.isSafeInteger(parsed.schemaVersion) ||
+          Number(parsed.schemaVersion) < 1 ||
+          Number(parsed.schemaVersion) > 65535 ||
+          typeof parsed.schemaDigest !== "string" ||
+          !/^[a-f0-9]{64}$/.test(parsed.schemaDigest))) ||
       (parsed.sealed !== undefined &&
         (!isModObject(parsed.sealed) ||
           Object.keys(parsed.sealed).length > 64 ||
@@ -56,12 +72,24 @@ export class FunctionUserConfigValues {
     return {
       revision: Number(parsed.revision),
       values: parsed.values,
-      ...(parsed.sealed === undefined ? {} : { sealed: parsed.sealed as Record<string, string> })
+      ...(parsed.sealed === undefined ? {} : { sealed: parsed.sealed as Record<string, string> }),
+      ...(parsed.schemaVersion === undefined
+        ? {}
+        : {
+            schemaVersion: Number(parsed.schemaVersion),
+            schemaDigest: String(parsed.schemaDigest)
+          })
     }
   }
 
-  resolve(workspace: string, plugin: string, schema: FunctionUserConfig): ModObject {
+  resolve(
+    workspace: string,
+    plugin: string,
+    schema: FunctionUserConfig,
+    declaration?: FunctionUserConfigSchema
+  ): ModObject {
     const current = this.read(workspace, plugin)
+    assertUserConfigSchemaCurrent(current, schema, declaration)
     const values: ModObject = {}
     for (const [key, field] of Object.entries(schema)) {
       if (field.sensitive) {
@@ -134,7 +162,8 @@ export class FunctionUserConfigValues {
     values: ModObject,
     sealed: Record<string, string>,
     expectedRevision: number,
-    assertLive: () => void
+    assertLive: () => void,
+    metadata?: Pick<ConfigRecord, "schemaVersion" | "schemaDigest">
   ) {
     assertLive()
     if (
@@ -145,12 +174,24 @@ export class FunctionUserConfigValues {
     const protectedFields = Object.keys(sealed).length ? { sealed } : {}
     if (
       encodeModJson(current.values) === encodeModJson(values) &&
-      encodeModJson(current.sealed ?? {}) === encodeModJson(sealed)
+      encodeModJson(current.sealed ?? {}) === encodeModJson(sealed) &&
+      current.schemaVersion === (metadata?.schemaVersion ?? current.schemaVersion) &&
+      current.schemaDigest === (metadata?.schemaDigest ?? current.schemaDigest)
     )
       return { revision: current.revision, values: structuredClone(values), changed: false }
     if (current.revision === Number.MAX_SAFE_INTEGER)
       throw new ModFunctionError("MODS_USER_CONFIG_STORE")
-    const next = { revision: current.revision + 1, values, ...protectedFields }
+    const next = {
+      revision: current.revision + 1,
+      values,
+      ...protectedFields,
+      ...((metadata?.schemaVersion ?? current.schemaVersion) === undefined
+        ? {}
+        : {
+            schemaVersion: metadata?.schemaVersion ?? current.schemaVersion,
+            schemaDigest: metadata?.schemaDigest ?? current.schemaDigest
+          })
+    }
     const encoded = encodeModJson(next)
     if (
       Buffer.byteLength(encodeModJson({ revision: next.revision, values })) > 256 * 1024 ||
@@ -174,7 +215,8 @@ export class FunctionUserConfigValues {
     key: string,
     action: SensitiveFunctionUserConfigAction,
     expectedRevision: number,
-    assertLive: () => void
+    assertLive: () => void,
+    declaration?: FunctionUserConfigSchema
   ) {
     const field = Object.hasOwn(schema, key) ? schema[key] : undefined
     if (!field?.sensitive) throw new ModFunctionError("MODS_USER_CONFIG_DIALOG_REQUIRED")
@@ -183,6 +225,7 @@ export class FunctionUserConfigValues {
     const current = this.read(workspace, plugin)
     if (current.revision !== expectedRevision)
       throw new ModFunctionError("MODS_CONFIG_VALUE_CHANGED")
+    assertUserConfigSchemaCurrent(current, schema, declaration)
     const { values, sealed } = this.clean(current, schema)
     if (action.operation === "clear") delete sealed[key]
     else {
@@ -190,7 +233,18 @@ export class FunctionUserConfigValues {
       const encrypted = this.secrets.seal(workspace, plugin, key, field, action.value)
       Object.defineProperty(sealed, key, { value: encrypted, enumerable: true, configurable: true })
     }
-    return this.commit(workspace, plugin, current, values, sealed, expectedRevision, assertLive)
+    return this.commit(
+      workspace,
+      plugin,
+      current,
+      values,
+      sealed,
+      expectedRevision,
+      assertLive,
+      declaration
+        ? { schemaVersion: declaration.version, schemaDigest: userConfigSchemaDigest(schema) }
+        : undefined
+    )
   }
 
   private validateKind(
@@ -209,6 +263,39 @@ export class FunctionUserConfigValues {
     validateFunctionUserConfigValue(key, field, value)
   }
 
+  /** Removing an override restores the current schema default, including an unset required field. */
+  reset(
+    workspace: string,
+    plugin: string,
+    schema: FunctionUserConfig,
+    key: string,
+    expectedRevision: number,
+    assertLive: () => void,
+    declaration?: FunctionUserConfigSchema
+  ) {
+    const field = Object.hasOwn(schema, key) ? schema[key] : undefined
+    if (!field || !writableFunctionUserConfig(field))
+      throw new ModFunctionError("MODS_USER_CONFIG_DIALOG_REQUIRED")
+    assertLive()
+    const current = this.read(workspace, plugin)
+    assertUserConfigSchemaCurrent(current, schema, declaration)
+    const { values, sealed } = this.clean(current, schema)
+    delete values[key]
+    delete sealed[key]
+    return this.commit(
+      workspace,
+      plugin,
+      current,
+      values,
+      sealed,
+      expectedRevision,
+      assertLive,
+      declaration
+        ? { schemaVersion: declaration.version, schemaDigest: userConfigSchemaDigest(schema) }
+        : undefined
+    )
+  }
+
   save(
     workspace: string,
     plugin: string,
@@ -216,7 +303,8 @@ export class FunctionUserConfigValues {
     key: string,
     value: FunctionConfigValue,
     expectedRevision: number,
-    assertLive: () => void
+    assertLive: () => void,
+    declaration?: FunctionUserConfigSchema
   ) {
     const field = Object.hasOwn(schema, key) ? schema[key] : undefined
     if (!field || !writableFunctionUserConfig(field))
@@ -226,6 +314,7 @@ export class FunctionUserConfigValues {
     const current = this.read(workspace, plugin)
     if (current.revision !== expectedRevision)
       throw new ModFunctionError("MODS_CONFIG_VALUE_CHANGED")
+    assertUserConfigSchemaCurrent(current, schema, declaration)
     const { values, sealed } = this.clean(current, schema)
     delete sealed[key]
     return this.commit(
@@ -235,7 +324,64 @@ export class FunctionUserConfigValues {
       { ...values, [key]: structuredClone(value) },
       sealed,
       expectedRevision,
-      assertLive
+      assertLive,
+      declaration
+        ? { schemaVersion: declaration.version, schemaDigest: userConfigSchemaDigest(schema) }
+        : undefined
+    )
+  }
+  identity(workspace: string, plugin: string) {
+    const current = this.read(workspace, plugin)
+    return {
+      savedRevision: current.revision,
+      storedRecordDigest: userConfigRecordDigest(current),
+      schemaVersion: current.schemaVersion ?? 0
+    }
+  }
+  migration(
+    workspace: string,
+    plugin: string,
+    schema: FunctionUserConfig,
+    declaration?: FunctionUserConfigSchema
+  ) {
+    return prepareUserConfigMigration(
+      workspace,
+      plugin,
+      this.read(workspace, plugin),
+      schema,
+      declaration,
+      (from, to, sealed) => this.secrets.rename(workspace, plugin, from, to, sealed),
+      (key, sealed) => {
+        this.secrets.open(workspace, plugin, key, schema[key], sealed)
+      }
+    )
+  }
+  migrate(
+    workspace: string,
+    plugin: string,
+    schema: FunctionUserConfig,
+    declaration: FunctionUserConfigSchema | undefined,
+    expectedRevision: number,
+    expectedDigest: string,
+    assertLive: () => void
+  ) {
+    assertLive()
+    const current = this.read(workspace, plugin)
+    if (current.revision !== expectedRevision)
+      throw new ModFunctionError("MODS_CONFIG_VALUE_CHANGED")
+    const migration = this.migration(workspace, plugin, schema, declaration)
+    if (!migration || migration.view.digest !== expectedDigest)
+      throw new ModFunctionError("MODS_USER_CONFIG_MIGRATION_CHANGED")
+    if (!migration.view.canApply) throw new ModFunctionError("MODS_USER_CONFIG_MIGRATION_BLOCKED")
+    return this.commit(
+      workspace,
+      plugin,
+      current,
+      migration.values,
+      migration.sealed,
+      expectedRevision,
+      assertLive,
+      { schemaVersion: migration.schemaVersion, schemaDigest: migration.schemaDigest }
     )
   }
 }

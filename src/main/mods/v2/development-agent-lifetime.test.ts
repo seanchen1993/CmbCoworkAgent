@@ -8,6 +8,8 @@ import { FunctionDevelopmentSessions, type DevelopmentActivation } from "./devel
 import { withDevelopmentNativeAuthority } from "./development-native-authority"
 import { withFunctionAgentExecution } from "./host-call"
 import type { FunctionTurnComplete } from "../../../shared/mods/v2/turn"
+import { bindCreatorModelAccounting, issueCreatorModelAccounting,
+  type CreatorModelAccounting } from "../devtools/creator-model-accounting"
 
 const hooks = vi.hoisted(() => ({ run: vi.fn() }))
 vi.mock("./agent-spawn-host", () => ({
@@ -50,6 +52,10 @@ it.each(["stop", "source", "narrowing"] as const)(
     const sourceGuard = () => {
       if (!sourceCurrent) throw Error("MODS_DEVELOPMENT_SOURCE_CHANGED")
     }
+    const parentAccounting = issueCreatorModelAccounting({ assertCurrent: sourceGuard,
+      claim: () => ({ settle: () => {} }) }, undefined, undefined,
+      { workspace, threadId: "parent" })
+    bindCreatorModelAccounting(instance.authority, parentAccounting)
     const scope = {
       workspace,
       threadId: "parent",
@@ -95,10 +101,12 @@ it.each(["stop", "source", "narrowing"] as const)(
           context: {
             agentId: string
             signal: AbortSignal
+            creatorAccounting?: CreatorModelAccounting
             started(id: string): void
             assertLive(): void
           }
         ) => {
+          expect(context.creatorAccounting).toBe(parentAccounting)
           const physical = `physical:${context.agentId}`
           const child = host.createRuntimeAuthority({
             workspace: plan.workspace,

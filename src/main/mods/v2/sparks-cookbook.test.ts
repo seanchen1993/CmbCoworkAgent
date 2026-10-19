@@ -3,6 +3,9 @@ import { resolve } from "node:path"
 import { expect, it } from "vitest"
 import { compileFunctionPlugin } from "./loader"
 import { FunctionGuestRuntime } from "./guest-runtime"
+import { checkFunctionPlugin } from "../devtools/check"
+import { checkFunctionAuthorTypes } from "../devtools/authoring-check"
+import { functionCheckExitCode } from "../devtools/cli-options"
 import { parseProjectCapabilityManifest } from "../../../shared/project-capability"
 
 const read = (path: string) => readFileSync(resolve(path), "utf8").replace(/\r\n/g, "\n").trim()
@@ -16,6 +19,16 @@ it("keeps copyable tutorial files identical to the installable example", () => {
     read("examples/sparks-hello/mods/hello.ts")
   )
   expect(parseProjectCapabilityManifest(JSON.parse(json[1])).stages[0].nodeId).toBe("dev.code")
+})
+
+it("passes the published strict compatibility and author type checks", async () => {
+  const directory = resolve("examples/sparks-hello")
+  const report = await checkFunctionPlugin(directory)
+  const types = await checkFunctionAuthorTypes(directory)
+  expect(types.digest).toBe(report.digest)
+  expect(types.diagnostics).toEqual([])
+  expect(types.valid).toBe(true)
+  expect(functionCheckExitCode(report, true)).toBe(0)
 })
 
 it("compiles and runs the beginner command in the production guest without model or file access", async () => {

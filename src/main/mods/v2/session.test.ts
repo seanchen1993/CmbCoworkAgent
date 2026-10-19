@@ -13,6 +13,16 @@ import { withFunctionExecution, recordFunctionCancellationReceipt } from "./exec
 
 const sessions: FunctionSession[] = []
 
+it("lets an owned turn cancel through the real guest after business content becomes invalid", async () => {
+  let cancelled = false
+  const value = await session('on("turn.start",async($,e,next)=>{await $.turn.abort({turnId:"turn"});return next(e)})', {
+    assertContent: () => { throw Error("PROJECT_CONTENT_CHANGED") },
+    abortTurn: async (_plugin, turnId) => { expect(turnId).toBe("turn"); cancelled = true }
+  })
+  await value.turnStart({ turnId: "turn", text: "cancel current work" })
+  expect(cancelled).toBe(true)
+})
+
 it("uses the new end budget after the native quit drain has expired", async () => {
   let calls = 0
   const s = await session('on("session.end",async($,e,next)=>{await $.session.messages();return next(e)})', {

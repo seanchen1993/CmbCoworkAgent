@@ -11,6 +11,8 @@ export interface NativePluginCapability {
   projectMode: boolean
   installedSkillCount: number
   hasFunctionCapabilities: boolean
+  businessModCount: number
+  businessExtensionCount: number
   skills: Array<{ id: string; name: string }>
 }
 
@@ -43,6 +45,8 @@ export function nativePluginCapabilities(
           plugin.hasProjectMode === true || owned.some((skill) => skill.isProjectModePlugin),
         installedSkillCount: plugin.skillCount,
         hasFunctionCapabilities: functions.has(plugin.id),
+        businessModCount: plugin.businessModCount ?? 0,
+        businessExtensionCount: plugin.businessExtensionCount ?? 0,
         skills: plugin.enabled
           ? owned.map((skill) => ({ id: skill.id ?? skill.path, name: skill.name }))
           : []

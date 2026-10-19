@@ -111,6 +111,24 @@ async function makeCatalog(size: number): Promise<{ projects: string; plugins: s
 }
 
 describe("Harness catalog reader", () => {
+  it("rejects changed extension requirements at the original board entry even when board bytes are cached", async () => {
+    const paths = await makeCatalog(1)
+    const plugin = JSON.parse(readFileSync(paths.plugins, "utf8"))[0]
+    const read = () => readHarnessCatalogPage(paths.projects, paths.plugins, {
+      projectLimit: 1, registryLimit: 1
+    })
+    expect(read().projects[0].boardCompatibility.compatible).toBe(true)
+    const file = join(plugin.path, "devclaw.project-runtime.json")
+    writeFileSync(file, JSON.stringify({ apiVersion: "devclaw.project-runtime/v2", runtime: {
+      apiVersion: "devclaw.project-runtime/v1"
+    }, extensionContract: { apiVersion: "devclaw.extension-contract/v1", requires: ["unknown.protocol/v9"] } }))
+    const blocked = read()
+    expect(blocked.projects[0].boardCompatibility).toMatchObject({ compatible: false,
+      message: expect.stringContaining("PROTOCOL_UNSUPPORTED") })
+    expect(blocked.registry[0].boardCompatibility.compatible).toBe(false)
+    rmSync(file)
+    expect(read().projects[0].boardCompatibility.compatible).toBe(true)
+  })
   it("keeps a near-limit project/plugin response paged and below the IPC byte cap", async () => {
     const paths = await makeCatalog(1_000)
     const first = readHarnessCatalogPage(paths.projects, paths.plugins, {

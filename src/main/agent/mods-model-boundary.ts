@@ -12,7 +12,15 @@ import type { ModHookStream, FunctionStreamOptions } from "../mods/v2/stream-dis
 import { currentCompletionBudget, reserveCompletionModelUsage } from "../mods/v2/completion-budget"
 import { composeModPrompt } from "./mods-prompt-composition"
 import { assertRequiredPromptContext, promptContributionsFor } from "./mods-prompt-sources"
-import type { FunctionPromptCore, FunctionPromptEvent } from "../../shared/mods/v2/prompt-composition"
+import type {
+  FunctionPromptCore,
+  FunctionPromptEvent
+} from "../../shared/mods/v2/prompt-composition"
+import {
+  assertCreatorModelAccounting,
+  isCreatorBudgetError,
+  type CreatorModelAccounting
+} from "../mods/devtools/creator-model-accounting"
 
 export interface CompletionRuntimeCancellation {
   signal: AbortSignal
@@ -66,25 +74,39 @@ export function createCompletionToolBudgetMiddleware(cancellation: CompletionRun
 }
 
 /** Applies only inside the original completion-repair scope, at each real HTTP attempt. */
-export function withCompletionModelBudget(delegate: typeof fetch): typeof fetch {
+export function withCompletionModelBudget(
+  delegate: typeof fetch,
+  accounting?: CreatorModelAccounting,
+  useCompletionBudget = true
+): typeof fetch {
+  if (accounting) assertCreatorModelAccounting(accounting)
   return async (input, init) => {
-    const budget = currentCompletionBudget()
+    const budget = useCompletionBudget ? currentCompletionBudget() : undefined
     // No body parsing, counting, timers or stream wrappers for ordinary/off calls.
-    if (!budget) return delegate(input, init)
-    budget.assert()
+    if (!budget && !accounting) return delegate(input, init)
+    budget?.assert()
     const originalSignal = init?.signal ?? (input instanceof Request ? input.signal : undefined)
     originalSignal?.throwIfAborted()
-    if (typeof init?.body !== "string" || Buffer.byteLength(init.body) > 8 * 1024 * 1024)
+    if (
+      budget &&
+      (typeof init?.body !== "string" || Buffer.byteLength(init.body) > 8 * 1024 * 1024)
+    )
       throw Error("MODS_COMPLETION_MODEL_INPUT_UNSUPPORTED")
-    const request = JSON.parse(init.body) as Record<string, unknown>
-    if (!Array.isArray(request.messages)) throw Error("MODS_COMPLETION_MODEL_INPUT_UNSUPPORTED")
+    const request = budget
+      ? (JSON.parse(init!.body as string) as Record<string, unknown>)
+      : undefined
+    if (request && !Array.isArray(request.messages))
+      throw Error("MODS_COMPLETION_MODEL_INPUT_UNSUPPORTED")
     // Count the actual serialized request, including tool schemas, plus a
     // conservative framing allowance. Actual provider usage remains authoritative.
-    const inputUpperBound = Buffer.byteLength(init.body) + 128 * (request.messages.length + 1)
-    const field = Object.hasOwn(request, "max_completion_tokens")
-      ? "max_completion_tokens"
-      : "max_tokens"
-    const configuredOutput = request[field]
+    const inputUpperBound = request
+      ? Buffer.byteLength(init!.body as string) + 128 * ((request.messages as unknown[]).length + 1)
+      : 0
+    const field =
+      request && Object.hasOwn(request, "max_completion_tokens")
+        ? "max_completion_tokens"
+        : "max_tokens"
+    const configuredOutput = request?.[field]
     if (
       configuredOutput !== undefined &&
       (!Number.isSafeInteger(configuredOutput) || Number(configuredOutput) < 1)
@@ -94,36 +116,47 @@ export function withCompletionModelBudget(delegate: typeof fetch): typeof fetch 
       1,
       Math.min(
         Number(configuredOutput ?? Number.MAX_SAFE_INTEGER),
-        budget.availableTokens() - inputUpperBound
+        (budget?.availableTokens() ?? Number.MAX_SAFE_INTEGER) - inputUpperBound
       )
     )
-    const reservation = reserveCompletionModelUsage(inputUpperBound, outputMax)!
-    request[field] = outputMax
-    if (request.stream === true)
+    const reservation = budget
+      ? reserveCompletionModelUsage(inputUpperBound, outputMax)!
+      : undefined
+    if (request) request[field] = outputMax
+    if (request?.stream === true)
       request.stream_options = {
         ...(request.stream_options as object | undefined),
         include_usage: true
       }
     const signal = AbortSignal.any([
       ...(originalSignal ? [originalSignal] : []),
-      AbortSignal.timeout(Math.min(2147483647, budget.remainingMs()))
+      ...(budget ? [AbortSignal.timeout(Math.min(2147483647, budget.remainingMs()))] : [])
     ])
+    // Claim after input/cancellation validation, immediately before this actual provider attempt.
+    const charge = accounting?.claim()
     let settled = false
     let lastUsage: { input: number; output: number } | undefined
     let pending = ""
     let dataLines: string[] = []
     let eventBytes = 0
     let terminal = false
+    let observing = true
     const decoder = new TextDecoder()
     const unknown = (): void => {
       if (settled) return
       settled = true
-      reservation.settle()
+      charge?.settle()
+      reservation?.settle()
     }
-    const finish = (): void => {
+    const finish = (complete = true): void => {
       if (settled) return
       settled = true
-      reservation.settle(lastUsage?.input, lastUsage?.output)
+      charge?.settle(
+        complete && lastUsage
+          ? { inputTokens: lastUsage.input, outputTokens: lastUsage.output }
+          : undefined
+      )
+      reservation?.settle(lastUsage?.input, lastUsage?.output)
     }
     const observeUsage = (value: unknown): void => {
       if (!value || typeof value !== "object") return
@@ -163,26 +196,33 @@ export function withCompletionModelBudget(delegate: typeof fetch): typeof fetch 
       }
       if (terminal) {
         // Settlement cannot be silently rewritten by a later usage event.
-        budget.charge(undefined, undefined)
+        charge?.settle()
+        budget?.charge(undefined, undefined)
         throw Error("MODS_COMPLETION_USAGE_UNAVAILABLE")
       }
       observeUsage(JSON.parse(text))
     }
     let response: Response
     try {
-      response = await delegate(input, { ...init, body: JSON.stringify(request), signal })
+      response = await delegate(input, {
+        ...init,
+        ...(request ? { body: JSON.stringify(request) } : {}),
+        signal
+      })
       signal.throwIfAborted()
     } catch (error) {
       try {
         unknown()
-      } catch {
+      } catch (failure) {
+        if (isCreatorBudgetError(failure)) throw failure
         /* Preserve the transport error, latch the unknown charge. */
       }
       throw error
     }
     if (!response.body) {
       unknown()
-      throw Error("MODS_COMPLETION_USAGE_UNAVAILABLE")
+      if (budget) throw Error("MODS_COMPLETION_USAGE_UNAVAILABLE")
+      return response
     }
     const reader = response.body.getReader()
     const sse = response.headers.get("content-type")?.includes("text/event-stream") ?? false
@@ -209,38 +249,55 @@ export function withCompletionModelBudget(delegate: typeof fetch): typeof fetch 
         try {
           signal.throwIfAborted()
           const item = await reader.read()
-          pending += decoder.decode(item.value, { stream: !item.done })
-          if (Buffer.byteLength(pending) > 1024 * 1024) throw Error("MODS_COMPLETION_USAGE_LIMIT")
-          if (sse) {
-            let newline: number
-            while ((newline = pending.indexOf("\n")) >= 0) {
-              const line = pending.slice(0, newline).replace(/\r$/, "")
-              pending = pending.slice(newline + 1)
-              if (!line) event()
-              else if (line.startsWith("data:")) {
-                eventBytes += Buffer.byteLength(line)
-                if (eventBytes > 1024 * 1024 || dataLines.length >= 8192)
-                  throw Error("MODS_COMPLETION_USAGE_LIMIT")
-                dataLines.push(line.slice(5).trimStart())
+          try {
+            if (observing) {
+              pending += decoder.decode(item.value, { stream: !item.done })
+              if (Buffer.byteLength(pending) > 1024 * 1024)
+                throw Error("MODS_COMPLETION_USAGE_LIMIT")
+              if (sse) {
+                let newline: number
+                while ((newline = pending.indexOf("\n")) >= 0) {
+                  const line = pending.slice(0, newline).replace(/\r$/, "")
+                  pending = pending.slice(newline + 1)
+                  if (!line) event()
+                  else if (line.startsWith("data:")) {
+                    eventBytes += Buffer.byteLength(line)
+                    if (eventBytes > 1024 * 1024 || dataLines.length >= 8192)
+                      throw Error("MODS_COMPLETION_USAGE_LIMIT")
+                    dataLines.push(line.slice(5).trimStart())
+                  }
+                }
+              }
+              if (item.done) {
+                if (sse) event()
+                else observeUsage(JSON.parse(pending))
+                finish(!sse || terminal)
               }
             }
+          } catch (error) {
+            if (budget || isCreatorBudgetError(error)) throw error
+            // Accounting alone must not impose the completion protocol/size gate on normal chat.
+            // Mark unsupported/truncated usage unknown and preserve the original provider bytes.
+            unknown()
+            observing = false
+            pending = ""
+            dataLines = []
           }
           if (item.done) {
-            if (sse) event()
-            else observeUsage(JSON.parse(pending))
-            finish()
             cleanup()
             controller.close()
           } else controller.enqueue(item.value)
         } catch (error) {
+          let failure = error
           try {
             unknown()
-          } catch {
+          } catch (accountingError) {
+            if (isCreatorBudgetError(accountingError)) failure = accountingError
             /* The original parse/transport failure remains visible. */
           }
           cleanup()
           await reader.cancel(error).catch(() => undefined)
-          controller.error(error)
+          controller.error(failure)
         }
       },
       async cancel(reason) {
@@ -266,12 +323,19 @@ export function withCompletionModelBudget(delegate: typeof fetch): typeof fetch 
 export interface FunctionModelStreamHost {
   observeFunctionModelStream?(authority: ModRuntimeAuthority, message: BaseMessage): void
   promptComposition?(
-    workspace: string, threadId: string, event: FunctionPromptEvent,
-    input: ModObject, signal: AbortSignal, core: FunctionPromptCore
+    workspace: string,
+    threadId: string,
+    event: FunctionPromptEvent,
+    input: ModObject,
+    signal: AbortSignal,
+    core: FunctionPromptCore
   ): Promise<ModObject>
   presentationEvent?(
-    workspace: string, threadId: string, event: "tool.describe",
-    input: ModObject, signal: AbortSignal
+    workspace: string,
+    threadId: string,
+    event: "tool.describe",
+    input: ModObject,
+    signal: AbortSignal
   ): Promise<ModObject>
   functionModelStream(
     authority: ModRuntimeAuthority,
@@ -514,9 +578,18 @@ class ModAwareChatModel extends BaseChatModel {
         }
         if (boundTools && presentation) {
           const { describeModTools } = await import("./mods-tool-descriptions")
-          const tools = await describeModTools(boundTools.tools, (input) =>
-            presentation(authority.workspace, authority.threadId, "tool.describe", input, context.signal),
-            assertActive)
+          const tools = await describeModTools(
+            boundTools.tools,
+            (input) =>
+              presentation(
+                authority.workspace,
+                authority.threadId,
+                "tool.describe",
+                input,
+                context.signal
+              ),
+            assertActive
+          )
           providerTools = tools
           const base = stepModel ? provider : toolBindingBase
           if (!base.bindTools) throw new Error("MODS_MODEL_TOOLS_UNSUPPORTED")
@@ -541,7 +614,14 @@ class ModAwareChatModel extends BaseChatModel {
             },
             context.signal,
             (event, facts, signal, core) =>
-              promptComposition(authority.workspace, authority.threadId, event, facts, signal, core),
+              promptComposition(
+                authority.workspace,
+                authority.threadId,
+                event,
+                facts,
+                signal,
+                core
+              ),
             assertActive,
             promptContributionsFor(messages, authority)
           )
@@ -553,8 +633,12 @@ class ModAwareChatModel extends BaseChatModel {
         // Budget the actual composed text and described tools, not the pre-Hook snapshot.
         if (selection) {
           const inputTokens = countTokensApproximately(providerMessages, providerTools)
-          if (!Number.isFinite(inputTokens) || !Number.isFinite(selection.inputBudget) ||
-            selection.inputBudget <= 0 || inputTokens > selection.inputBudget)
+          if (
+            !Number.isFinite(inputTokens) ||
+            !Number.isFinite(selection.inputBudget) ||
+            selection.inputBudget <= 0 ||
+            inputTokens > selection.inputBudget
+          )
             throw new Error("MODS_MODEL_INPUT_BUDGET")
           release = stepModel?.activate?.(selection)
         }

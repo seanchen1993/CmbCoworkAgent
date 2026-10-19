@@ -1,0 +1,20 @@
+{
+  "apiVersion": "devclaw.capabilities/v1",
+  "capabilities": [
+    {
+      "id": "delivery-review",
+      "title": "交付检查与报告",
+      "kind": "flow",
+      "usage": "project",
+      "entry": "devclaw.project-runtime.json",
+      "inputs": [
+        {
+          "id": "verified-context",
+          "title": "AutoBiz 已核验资料与源码",
+          "path": "incoming/verified-context.json",
+          "required": true
+        }
+      ]
+    }
+  ]
+}

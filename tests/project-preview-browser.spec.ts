@@ -10,6 +10,7 @@ interface FixtureWindow {
     update(): void
     show(thread: string): void
     finish(): void
+    request(): void
     creates: Array<{ threadId: string; revision: number }>
   }
 }
@@ -50,12 +51,12 @@ async function main() {
       const root=createRoot(document.getElementById('root')), listeners=new Set(), creates=[];
       let revision=1, finish;
       window.api={mods:{development:{onChanged:fn=>{listeners.add(fn);return()=>listeners.delete(fn)}}},harnessBoard:{localProjects:{preview:{
-        list:async threadId=>({threadId,workspace:'C:/fixture/'+threadId,drafts:[{id:'docs',name:'文档模板 '+threadId,revision,development:{devId:'dev-'+threadId,workspace:'C:/isolated/'+threadId,currentRevision:revision,currentDigest:'digest-'+revision,pendingRevision:null,activeRuns:0,updateState:'current'}}]}),
+        list:async threadId=>({threadId,workspace:'C:/fixture/'+threadId,drafts:[{id:'docs',name:'文档模板 '+threadId,revision,digest:String(revision).repeat(64),development:{devId:'dev-'+threadId,workspace:'C:/isolated/'+threadId,currentRevision:revision,currentDigest:'digest-'+revision,pendingRevision:null,activeRuns:0,updateState:'current'}}]}),
         create:async input=>{creates.push(input);return new Promise(resolve=>finish=()=>resolve('project-'+input.threadId))},
         finish:async()=>{}
       }}}};
       const show=thread=>root.render(<React.StrictMode><ProjectDevelopmentPreviewPanel threadId={thread} workspace={'C:/fixture/'+thread}/></React.StrictMode>);
-      window.fixture={creates,show,finish:()=>finish(),update:()=>{revision++;for(const fn of listeners)fn({threadId:'A'})}};
+      window.fixture={creates,show,finish:()=>finish(),request:()=>root.render(<ProjectDevelopmentPreviewPanel key="request" threadId="A" workspace="C:/fixture/A" request={{id:"requested",draftId:"docs",name:"文档",revision,digest:String(revision).repeat(64),goal:"对话预填的文档验收目标"}}/>),update:()=>{revision++;for(const fn of listeners)fn({threadId:'A'})}};
       show('A');
     `
     }
@@ -72,13 +73,13 @@ async function main() {
     page.on("pageerror", (error) => errors.push(error.message))
     await page.setContent('<html><body><div id="root"></div></body></html>')
     await page.addScriptTag({ content: bundled.outputFiles[0].text })
-    await page.getByText("文档模板 A · 源码版本 1", { exact: true }).waitFor()
+    await page.getByText("文档模板 A · 版本 1", { exact: true }).waitFor()
     await page.getByRole("textbox").fill("生成试用文档")
     await page.getByRole("checkbox").check()
-    const create = page.getByRole("button", { name: "创建隔离试用（不开始）", exact: true })
+    const create = page.getByRole("button", { name: "创建试用项目（稍后开始任务）", exact: true })
     assert.equal(await create.isEnabled(), true)
     await page.evaluate(() => (window as unknown as FixtureWindow).fixture.update())
-    await page.getByText("文档模板 A · 源码版本 2", { exact: true }).waitFor()
+    await page.getByText("文档模板 A · 版本 2", { exact: true }).waitFor()
     assert.equal(await page.getByRole("checkbox").isChecked(), false)
     assert.equal(await create.isEnabled(), false)
     await page.getByRole("checkbox").check()
@@ -91,11 +92,23 @@ async function main() {
       1
     )
     await page.evaluate(() => (window as unknown as FixtureWindow).fixture.show("B"))
-    await page.getByText("文档模板 B · 源码版本 2", { exact: true }).waitFor()
+    await page.getByText("文档模板 B · 版本 2", { exact: true }).waitFor()
     await page.evaluate(() => (window as unknown as FixtureWindow).fixture.finish())
     await page.waitForTimeout(70)
     assert.equal(await page.getByText("打开项目 project-A", { exact: true }).count(), 0)
     assert.equal(await page.getByRole("checkbox").isChecked(), false)
+    await page.evaluate(() => (window as unknown as FixtureWindow).fixture.request())
+    await page.getByText("文档模板 A · 版本 2", { exact: true }).waitFor()
+    assert.equal(await page.getByRole("textbox").inputValue(), "对话预填的文档验收目标")
+    assert.equal(await create.isEnabled(), false)
+    await page.getByRole("checkbox").check()
+    await create.click()
+    await page.evaluate(() => (window as unknown as FixtureWindow).fixture.finish())
+    await page.getByText("打开项目 project-A", { exact: true }).waitFor()
+    assert.equal(await page.evaluate("window.fixture.creates.at(-1).expectedDigest"), "2".repeat(64))
+    await page.evaluate(() => (window as unknown as FixtureWindow).fixture.update())
+    await page.getByText("文档模板 A · 版本 2", { exact: true }).waitFor({ state: "detached" })
+    assert.equal(await create.count(), 0)
     assert.deepEqual(errors, [])
     await page.screenshot({ path: resolve(artifacts, "project-preview-scope.png"), fullPage: true })
     console.log(

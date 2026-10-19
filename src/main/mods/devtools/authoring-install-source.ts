@@ -38,7 +38,7 @@ export function readPureFunctionSource(input: unknown) {
     definition.apiVersion !== "cmb.mods/v2" ||
     Object.keys(definition).some(
       (key) =>
-        !["apiVersion", "id", "claw", "entry", "userConfig", "options", "modelProtocol"].includes(
+        !["apiVersion", "id", "claw", "entry", "userConfig", "userConfigSchema", "cmbCompatibility", "options", "modelProtocol"].includes(
           key
         )
     )

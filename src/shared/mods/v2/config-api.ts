@@ -10,6 +10,7 @@ export interface FunctionConfigApi {
     value: FunctionConfigValue
   ): Promise<FunctionConfigSetResult>
   userConfig(threadId: string, pluginId: string, expectedWorkspace?: string): Promise<FunctionUserConfigView>
+  migrateUserConfig(threadId: string, view: FunctionUserConfigView): Promise<FunctionUserConfigView>
   saveSensitiveUserConfig(
     threadId: string,
     view: FunctionUserConfigView,

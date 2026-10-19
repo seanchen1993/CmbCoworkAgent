@@ -98,6 +98,9 @@ export function registerPluginDerivationHandlers(ipc: IpcMain, window: () => Bro
   ipc.handle("plugins:derivation:prepare-node-composition", (event, input) =>
     proposals.prepareNodeComposition(access(event, input), input)
   )
+  ipc.handle("plugins:derivation:prepare-flow-composition", (event, input) =>
+    proposals.prepareFlowComposition(access(event, input), input)
+  )
   ipc.handle("plugins:derivation:apply-proposal", (event, input) =>
     proposals.apply(access(event, input), input.proposalId)
   )

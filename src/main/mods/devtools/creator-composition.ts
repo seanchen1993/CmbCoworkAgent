@@ -30,6 +30,7 @@ import {
   CreatorCompositionHistory,
   type CompositionHistoryToken
 } from "./creator-composition-history"
+import { CreatorCompositionSave, type CompositionSavePorts } from "./creator-composition-save"
 
 export interface CompositionSelectionCatalog {
   models: Array<{ id: string; name: string }>
@@ -87,10 +88,12 @@ export class CreatorCompositionService {
   private readonly stopSettlement: () => void
   private readonly stopIdle: () => void
   private closed = false
+  private readonly saves?: CreatorCompositionSave
   constructor(
     private readonly deps: {
       store: ClawStore
       history: CreatorCompositionHistory
+      saveReuse?: CompositionSavePorts
       context(threadId: string): DevelopmentContext
       readContext?(threadId: string): DevelopmentContext
       assertScope(scope: DevelopmentScope): void
@@ -113,6 +116,7 @@ export class CreatorCompositionService {
       changed(threadId: string): void
     }
   ) {
+    if (deps.saveReuse) this.saves = new CreatorCompositionSave(deps.history, deps.saveReuse)
     this.stopSettlement = observeDevelopmentTurnSettlement((event) => {
       const entry = this.entries.get(event.threadId)
       if (
@@ -417,6 +421,7 @@ export class CreatorCompositionService {
       })),
       status: this.status(threadId),
       saved: this.deps.history.list(current.scope.workspace),
+      ...(this.saves ? { save: this.saves.status(current.scope) } : {}),
       ...(snapshot.resources
         ? {
             selections: {
@@ -779,6 +784,11 @@ export class CreatorCompositionService {
     if (expectedWorkspace !== undefined && context.scope.workspace !== expectedWorkspace)
       throw Error("COMPOSITION_SCOPE_CHANGED")
     const entry = this.entries.get(threadId)
+    if (this.saves?.cancel(context.scope)) {
+      this.deps.changed(threadId)
+      if (!entry || entry.applying || entry.receipt.phase !== "queued")
+        return { phase: "cancelled", name: "保存组合", pluginNames: [] }
+    }
     if (!entry || entry.applying || entry.receipt.phase !== "queued")
       throw Error("COMPOSITION_NOT_QUEUED")
     if (JSON.stringify(entry.context.scope) !== JSON.stringify(context.scope))
@@ -823,13 +833,30 @@ export class CreatorCompositionService {
     name: string,
     revision: number,
     catalogToken: string,
-    assertTurn: () => void
+    assertTurn: () => void,
+    turn?: { turnId: string; signal?: AbortSignal }
   ) {
     assertTurn()
     const context = this.deps.context(threadId),
       snapshot = await this.snapshot(context)
     if (catalogToken !== snapshot.catalogToken) throw Error("COMPOSITION_SOURCE_CHANGED")
     const pending = this.entries.get(threadId)
+    if (pending?.receipt.phase === "applying") throw Error("COMPOSITION_APPLYING")
+    if (this.saves) {
+      if (pending?.receipt.phase === "queued" && this.deps.saveReuse?.trials(context.scope)
+        .some(item => item.phase !== "stopped" && item.phase !== "failed"))
+        throw Error("COMPOSITION_SAVE_WAIT_FOR_SELECTION")
+      const result = await this.saves.start({
+        scope: context.scope, identity: snapshot.identity, name, revision,
+        profile: snapshot.active, turnId: turn?.turnId,
+        signal: turn?.signal ?? new AbortController().signal, assertTurn
+      })
+      assertTurn()
+      if (result) {
+        this.deps.changed(threadId)
+        return result
+      }
+    }
     const chosen =
       pending?.receipt.phase === "queued" &&
       JSON.stringify(pending.context.scope) === JSON.stringify(context.scope)
@@ -871,6 +898,7 @@ export class CreatorCompositionService {
     this.validateResources(profile, snapshot.resources, snapshot.active)
     assertTurn()
     const saved = this.deps.history.save(context.scope.workspace, name, revision, profile)
+    this.saves?.recordSaved(context.scope, snapshot.identity, name, revision, profile)
     this.deps.history.attachSavedName(
       context.scope,
       snapshot.identity,
@@ -884,6 +912,29 @@ export class CreatorCompositionService {
     }
     this.deps.changed(threadId)
     return saved
+  }
+  async reconcileSavedReuse(threadId: string): Promise<void> {
+    if (!this.saves || this.closed) return
+    const context = (this.deps.readContext ?? this.deps.context)(threadId)
+    const identity = this.deps.identity(threadId)
+    await this.saves.reconcile({
+      scope: context.scope, identity,
+      current: () => this.deps.store.selection(context.scope.workspace, identity).profile,
+      assertCurrent: () => this.assertScope(context),
+      validate: async profile => {
+        const snapshot = await this.snapshot(context)
+        this.validate(context, profile, snapshot.available)
+        this.validateResources(profile, snapshot.resources, snapshot.active)
+        this.deps.assertAuthorized(context.scope, profile)
+      }
+    })
+    this.deps.changed(threadId)
+  }
+  saveStatus(threadId: string) {
+    if (!this.saves || this.closed) return undefined
+    const context = (this.deps.readContext ?? this.deps.context)(threadId)
+    this.assertScope(context)
+    return this.saves.status(context.scope)
   }
   async applySaved(
     threadId: string,
@@ -1052,6 +1103,7 @@ export class CreatorCompositionService {
   }
   close(): void {
     this.closed = true
+    this.saves?.close()
     this.catalogs.clear()
     this.stopSettlement()
     this.stopIdle()

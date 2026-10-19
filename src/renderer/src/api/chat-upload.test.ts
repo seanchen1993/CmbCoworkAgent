@@ -1,9 +1,15 @@
-import { afterEach, describe, expect, it, vi } from "vitest"
+import { afterAll, afterEach, describe, expect, it, vi } from "vitest"
 import {
   UPLOAD_ERROR_RESPONSE_MAX_BYTES,
   UPLOAD_REQUEST_TIMEOUT_MS,
   uploadChatData
 } from "./index"
+
+vi.hoisted(() => {
+  vi.stubEnv("VITE_API_BASE_URL", "https://uploads.invalid")
+})
+
+afterAll(() => vi.unstubAllEnvs())
 
 afterEach(() => {
   vi.useRealTimers()

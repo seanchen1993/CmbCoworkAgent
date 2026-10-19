@@ -31,6 +31,7 @@ async function main() {
       host.render(<ClawPanel threadId='a'/>);
     `
     )
+    await page.getByText("高级编辑与已保存组合", { exact: true }).click()
     await page.getByLabel("选择能力 Demo", { exact: true }).check()
     await page.getByLabel("组件范围 Demo").selectOption("selected")
     await page.getByLabel("选择组件 Demo · 改写").uncheck()
@@ -75,7 +76,7 @@ async function main() {
     await page.getByLabel("选择能力 Legacy", { exact: true }).check()
     await page.getByText("使用全部功能 · 此灵件不支持单独选择功能。", { exact: true }).waitFor()
     await page.getByRole("button", { name: "保存组合", exact: true }).click()
-    await page.getByRole("button", { name: "应用到当前对话", exact: true }).click()
+    await page.getByRole("button", { name: "应用到所选聊天", exact: true }).click()
   await page.getByRole("button", { name: "确认应用", exact: true }).click()
     const profile = await page.evaluate(
       "window.fixture.calls.find(c=>c[0]==='claw'&&c[1].kind==='save')[1].profile"

@@ -2,6 +2,7 @@ import { openClawSidebar } from "./claw-sidebar"
 import { isOrdinaryFlowMetadata } from "../../../shared/mods/flows/scope"
 import { useEffect, useSyncExternalStore } from "react"
 import { useAppStore } from "./store"
+import { goToConfigurationThread, isConfigurationScopeCurrent } from "./configuration-target"
 import type { BuiltinNavigationTarget } from "../features/slash-commands/builtin-commands"
 
 export type BuiltinNavigationScope = { threadId: string; workspace: string | null }
@@ -22,12 +23,12 @@ export function openBuiltinNavigation(
   scope: BuiltinNavigationScope
 ) {
   const store = useAppStore.getState()
-  if (store.currentThreadId !== scope.threadId) return
+  if (!isConfigurationScopeCurrent(scope)) return
   if (target === "create") {
     store.setShowCustomizeView(true, "mods", "create")
     return
   }
-  store.setShowCustomizeView(false)
+  if (!goToConfigurationThread(scope)) return
   if (
     target === "runs" &&
     isOrdinaryFlowMetadata(store.threads.find((row) => row.thread_id === scope.threadId)?.metadata)

@@ -49,6 +49,8 @@ import {
 } from "../../../../shared/chat-scroll-controller"
 
 interface CapturedVirtuosoProps {
+  followOutput: boolean | ((atBottom: boolean) => boolean)
+  skipAnimationFrameInResizeObserver?: boolean
   data: readonly number[]
   initialTopMostItemIndex?: {
     index: number | "LAST"
@@ -188,6 +190,19 @@ describe("chat scroll render/runtime harness", () => {
   beforeEach(() => {
     virtuosoProbe.latestProps = null
     virtuosoProbe.renderCount = 0
+  })
+
+  it("disables every internal virtual-list follow producer while the host owns scrolling", () => {
+    const runtime = new ChatScrollRuntimeHarness()
+    const virtuoso = renderVirtualList(500, runtime)
+    // A false-returning callback still enables the dependency's resize-follow subscriptions.
+    expect(virtuoso?.followOutput).toBe(false)
+  })
+
+  it("reports item resizes before the next host follow frame", () => {
+    const runtime = new ChatScrollRuntimeHarness()
+    const virtuoso = renderVirtualList(500, runtime)
+    expect(virtuoso?.skipAnimationFrameInResizeObserver).toBe(true)
   })
 
   it("hydrates 0 to 500 rows at LAST and survives out-of-order layout callbacks", async () => {

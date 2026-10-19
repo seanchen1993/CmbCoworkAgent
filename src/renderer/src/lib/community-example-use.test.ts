@@ -353,3 +353,35 @@ it("reloads installed usage from the current chat and reports conflicts without 
   f.invalidate()
   await expect(readExampleUsage(f.api, f.context, examples)).rejects.toThrow("SCOPE_CHANGED")
 })
+
+it("previews only applicable example components and invalidates a mode change before writes", async () => {
+  const f = fixture(true)
+  f.status.functionMods![1].components = [
+    {
+      id: "chat",
+      name: "Chat",
+      kind: "module",
+      entry: "chat.ts",
+      dependsOn: [],
+      actionIds: [],
+      usage: "chat"
+    },
+    {
+      id: "project",
+      name: "Project",
+      kind: "module",
+      entry: "project.ts",
+      dependsOn: [],
+      actionIds: [],
+      usage: "project"
+    }
+  ]
+  const plan = await prepareExampleUse(f.api, f.context, f.installation)
+  expect(
+    plan.selection.profile.capabilities.find((item) => item.pluginId === "replay")?.components
+  ).toEqual({ mode: "selected", ids: ["chat"], config: {} })
+  expect(f.calls).toEqual([])
+  f.claw.usageContext = "project"
+  await expect(applyExampleUse(f.api, f.context, plan, () => {})).rejects.toThrow("已变化")
+  expect(f.calls).toEqual([])
+})

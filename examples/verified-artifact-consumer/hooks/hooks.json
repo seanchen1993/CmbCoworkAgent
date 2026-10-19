@@ -1,0 +1,9 @@
+{
+  "hooks": {
+    "Stop": [{ "hooks": [{
+      "id": "verify-consumed-report", "type": "command",
+      "command": "python -I -B -X utf8 hooks/verify-report.py",
+      "timeout": 15
+    }] }]
+  }
+}

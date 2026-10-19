@@ -327,6 +327,36 @@ it("a real physical or logical task returns pending without restarting or steali
   expect(f.load).toHaveBeenCalledTimes(1)
 })
 
+it("an optional schema upgrade migrates the original save revision while the actual run keeps its guest until native reload is idle", async () => {
+  const f = await fixture()
+  await f.manager.commands(f.root, f.threadId)
+  f.save("formal")
+  const oldGrant = f.store.getGrant(f.root, "function:reload-demo")!
+  await writeFile(join(f.path, "plugin.json"), JSON.stringify({ name: "reload-demo", version: "2.0.0",
+    userConfig: f.compiled.userConfig,
+    cmbCompatibility: { modelProtocol: "result-v1", userConfigMigrations: "v1" },
+    userConfigSchema: { version: 1, migrations: [{ fromVersion: 0, toVersion: 1, changes: [] }] } }))
+  const view = await f.view()
+  claimLocalThreadRunLease({ threadId: f.threadId, owner: "desktop", runId: "schema-upgrade-running" })
+  try {
+    const migrated = await f.manager.migrateUserConfig(f.root, f.threadId, "p", view.digest,
+      view.savedRevision, view.migration!.digest, f.signal, () => {})
+    expect(migrated.savedRevision).toBe(2)
+    expect(migrated.migration).toBeUndefined()
+    expect(f.store.getGrant(f.root, "function:reload-demo")).toEqual(oldGrant)
+    expect(await f.reload()).not.toMatchObject({ state: "applied" })
+    expect(f.load).toHaveBeenCalledTimes(1)
+    expect(getLocalThreadRunLease(f.threadId)?.runId).toBe("schema-upgrade-running")
+  } finally { releaseLocalThreadRunLease(f.threadId, "desktop", "schema-upgrade-running") }
+  // Independent native code approval remains necessary after the source/schema digest changed.
+  f.store.grant(f.root, "function:reload-demo", view.digest, true)
+  expect((await f.reload()).state).toBe("applied")
+  // A changed source uses the original registration preflight and then the active worker.
+  expect(f.load).toHaveBeenCalledTimes(3)
+  expect(f.load.mock.calls.slice(1).map(call => call[1].tone)).toEqual(["formal", "formal"])
+  expect((await f.manager.commands(f.root, f.threadId)).map(row => row.name)).toEqual(["formal"])
+})
+
 it("readonly source preflight failure retains the old guest and produces zero new startup effects", async () => {
   const f = await fixture()
   await f.manager.commands(f.root, f.threadId)

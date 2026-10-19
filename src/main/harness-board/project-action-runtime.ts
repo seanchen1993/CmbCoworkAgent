@@ -1,11 +1,31 @@
 import type { ClawActionDescriptor } from "../../shared/mods/claw-actions"
 import type { FlowManager } from "../mods/flows/manager"
 import type { ProjectActionBinding } from "../../shared/project-runtime/action-bindings"
+import type { HostProjectState } from "../../shared/project-runtime/host-types"
 import type { FlowRun } from "../../shared/mods/flows/types"
+
+import type { FlowActionExecutionFacts } from "../mods/flows/action-execution-facts"
+
+export type ProjectRuntimeInputScope = Pick<
+  HostProjectState,
+  "workspace" | "installedPluginId" | "packageId" | "pluginDigest" | "manifest"
+>
 
 interface ProjectActionRuntime {
   /** Pure ledger read: unlike FlowManager.runs this must not reconcile or write history. */
   readRuns?(workspace: string, threadId: string): FlowRun[]
+  /** Main-only original result custody; public Flow result rewrites are not business evidence. */
+  readActionResult?(
+    workspace: string,
+    threadId: string,
+    runId: string,
+    executionId: string
+  ): FlowActionExecutionFacts | undefined
+  prepareInputIdentity?(project: ProjectRuntimeInputScope, snapshotRoot: string): Promise<void>
+  inputIdentity?(project: ProjectRuntimeInputScope, snapshotRoot: string): string
+  /** Preloaded schema/source names + original config/rules revisions; no package/knowledge reads. */
+  captureInputAuthorityIdentity?(project: ProjectRuntimeInputScope, snapshotRoot: string): () => string
+  publishRequiredContext?(workspace: string, text: string, signal: AbortSignal): Promise<string>
   flows: Pick<FlowManager, "startSaved" | "waitForSettlement" | "run" | "cancel">
   catalog(workspace: string, threadId: string): Promise<ClawActionDescriptor[]>
   prepareSelection(
@@ -24,6 +44,37 @@ export function normalizeProjectActionRuntime(
       ? {
           readRuns: (workspace: string, threadId: string) =>
             value.readRuns!(workspaceKey(workspace), threadId)
+        }
+      : {}),
+    ...(value.readActionResult
+      ? {
+          readActionResult: (workspace: string, ...args: [string, string, string]) =>
+            value.readActionResult!(workspaceKey(workspace), ...args)
+        }
+      : {}),
+    ...(value.prepareInputIdentity
+      ? {
+          prepareInputIdentity: (project: ProjectRuntimeInputScope, root: string) =>
+            value.prepareInputIdentity!(
+              { ...project, workspace: workspaceKey(project.workspace) },
+              root
+            )
+        }
+      : {}),
+    ...(value.inputIdentity
+      ? {
+          inputIdentity: (project: ProjectRuntimeInputScope, root: string) =>
+            value.inputIdentity!({ ...project, workspace: workspaceKey(project.workspace) }, root)
+        }
+      : {}),
+    ...(value.captureInputAuthorityIdentity ? {
+      captureInputAuthorityIdentity: (project: ProjectRuntimeInputScope, root: string) =>
+        value.captureInputAuthorityIdentity!({ ...project, workspace: workspaceKey(project.workspace) }, root)
+    } : {}),
+    ...(value.publishRequiredContext
+      ? {
+          publishRequiredContext: (workspace: string, text: string, signal: AbortSignal) =>
+            value.publishRequiredContext!(workspaceKey(workspace), text, signal)
         }
       : {}),
     catalog: (workspace, threadId) => value.catalog(workspaceKey(workspace), threadId),
@@ -57,4 +108,21 @@ export function getProjectActionRuntime(): ProjectActionRuntime {
 }
 export function getProjectActionCatalog(workspace: string, threadId: string) {
   return getProjectActionRuntime().catalog(workspace, threadId)
+}
+
+/** Host operation preparation can precede a conversation/token; these remain original main-only readers. */
+export async function prepareProjectRuntimeInputIdentity(
+  project: ProjectRuntimeInputScope,
+  root: string
+) {
+  await runtime?.prepareInputIdentity?.(project, root)
+}
+export function projectRuntimeInputIdentity(
+  project: ProjectRuntimeInputScope,
+  root: string
+): string | undefined {
+  return runtime?.inputIdentity?.(project, root)
+}
+export function captureProjectRuntimeInputAuthorityIdentity(project: ProjectRuntimeInputScope, root: string) {
+  return runtime?.captureInputAuthorityIdentity?.(project, root)
 }

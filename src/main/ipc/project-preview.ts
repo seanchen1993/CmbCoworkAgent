@@ -10,6 +10,7 @@ import type {
   ProjectPreviewApi,
   ProjectPreviewDraft
 } from "../../shared/project-runtime/development-preview"
+import { runtimeDirectory } from "../harness-board/project-runtime/safe-files"
 
 export function registerProjectPreviewHandlers(
   ipc: IpcMain,
@@ -17,6 +18,7 @@ export function registerProjectPreviewHandlers(
   platform: () => HostProjectService,
   retainedRoot: (project: HostProjectState) => string
 ) {
+  const recovering = new Set<string>()
   function context(event: IpcMainInvokeEvent, threadId: string) {
     trusted(event)
     if (typeof threadId !== "string" || !threadId || threadId.length > 256)
@@ -36,25 +38,58 @@ export function registerProjectPreviewHandlers(
   }
   ipc.handle("project-preview:list", (event, threadId: string) => {
     const { scope } = context(event, threadId)
-    const drafts: ProjectPreviewDraft[] = projectAuthoringSessions.list(scope).map((draft) => ({
-      id: draft.id,
-      name: draft.name,
-      revision: draft.revision,
-      projectId: projectPreviewRegistry.projectFor(scope, draft.id),
-      ...(draft.development
-        ? {
-            development: {
-              devId: draft.development.devId,
-              workspace: draft.development.workspace,
-              currentRevision: draft.development.currentRevision,
-              currentDigest: draft.development.currentDigest,
-              pendingRevision: draft.development.pendingRevision,
-              activeRuns: draft.development.activeRuns,
-              updateState: draft.development.updateState
+    const drafts: ProjectPreviewDraft[] = projectAuthoringSessions.list(scope).map((draft) => {
+      const projectId = projectPreviewRegistry.projectFor(scope, draft.id)
+      const saved = projectId ? undefined : projectPreviewRegistry.retained(scope, draft.id)
+      const project = saved ? platform().get(saved.projectId) : undefined
+      return {
+        id: draft.id,
+        name: draft.name,
+        revision: draft.revision,
+        digest: draft.source.digest,
+        projectId,
+        ...(saved
+          ? {
+              recovery: {
+                projectId: saved.projectId,
+                revision: saved.snapshot.revision,
+                digest: saved.snapshot.digest,
+                workspace: saved.snapshot.workspace,
+                goal: project?.goal ?? "",
+                projectVersion: project?.version ?? null,
+                status: !project
+                  ? ("missing" as const)
+                  : project.status === "completed"
+                    ? ("completed" as const)
+                    : draft.revision !== saved.snapshot.revision ||
+                        draft.source.digest !== saved.snapshot.digest
+                      ? ("draft-changed" as const)
+                      : ("needs-confirmation" as const),
+                hasUnconfirmedEffects:
+                  !!project &&
+                  platform()
+                    .operations(project.projectId, 100)
+                    .some((operation) =>
+                      ["started", "cancel_requested", "unknown"].includes(operation.status)
+                    )
+              }
             }
-          }
-        : {})
-    }))
+          : {}),
+        ...(draft.development
+          ? {
+              development: {
+                devId: draft.development.devId,
+                workspace: draft.development.workspace,
+                currentRevision: draft.development.currentRevision,
+                currentDigest: draft.development.currentDigest,
+                pendingRevision: draft.development.pendingRevision,
+                activeRuns: draft.development.activeRuns,
+                updateState: draft.development.updateState
+              }
+            }
+          : {})
+      }
+    })
     return { threadId, workspace: scope.workspace, drafts }
   })
   ipc.handle(
@@ -64,8 +99,12 @@ export function registerProjectPreviewHandlers(
       const { scope, guard } = context(event, input.threadId)
       if (projectPreviewRegistry.projectFor(scope, input.draftId))
         throw Error("PROJECT_DEV_RUNNING")
+      if (projectPreviewRegistry.retained(scope, input.draftId))
+        throw Error("PROJECT_PREVIEW_RECOVERY_REQUIRED")
       const draft = projectAuthoringSessions.read(scope, input.draftId)
       if (draft.revision !== input.revision) throw Error("PROJECT_DRAFT_REVISION_CHANGED")
+      if (input.expectedDigest !== undefined && input.expectedDigest !== draft.source.digest)
+        throw Error("PROJECT_SOURCE_CHANGED")
       const actions = draft.source.files.some(
         (file) => file.path === "devclaw.project-actions.lock.json"
       )
@@ -91,6 +130,7 @@ export function registerProjectPreviewHandlers(
       const projectId = randomUUID()
       let registeredId: string | undefined
       let bound = false
+      let created = false
       try {
         const plugin = await projectPreviewRegistry.register({
           projectId,
@@ -109,16 +149,96 @@ export function registerProjectPreviewHandlers(
           installedPluginId: plugin.id,
           goal: input.goal
         })
+        created = true
         guard()
         await projectPreviewRegistry.bind(project, retainedRoot(project))
         bound = true
         return projectId
       } catch (error) {
         if (!bound) {
-          if (registeredId) projectPreviewRegistry.abandon(registeredId)
-          else lease.release()
+          if (registeredId) {
+            if (created) projectPreviewRegistry.detach(registeredId)
+            else projectPreviewRegistry.abandon(registeredId)
+          } else lease.release()
         }
         throw error
+      }
+    }
+  )
+  ipc.handle(
+    "project-preview:recover",
+    async (event, input: Parameters<ProjectPreviewApi["recover"]>[0]) => {
+      if (!input || typeof input !== "object") throw Error("PROJECT_INVALID_INPUT")
+      const { scope, guard } = context(event, input.threadId)
+      const saved = projectPreviewRegistry.retained(scope, input.draftId)
+      const api = platform()
+      const project = saved && api.get(saved.projectId)
+      if (
+        !saved ||
+        !project ||
+        saved.projectId !== input.projectId ||
+        saved.snapshot.revision !== input.revision ||
+        saved.snapshot.digest !== input.expectedDigest ||
+        project.version !== input.expectedProjectVersion
+      )
+        throw Error("PROJECT_PREVIEW_SCOPE_CHANGED")
+      if (recovering.has(saved.id)) throw Error("PROJECT_DEV_BUSY")
+      recovering.add(saved.id)
+      let release: (() => void) | undefined
+      try {
+        const expected = JSON.stringify(project)
+        const current = () => {
+          guard()
+          if (JSON.stringify(api.get(project.projectId)) !== expected)
+            throw Error("PROJECT_PREVIEW_SCOPE_CHANGED")
+        }
+        current()
+        runtimeDirectory(project.workspace)
+        const draft = projectAuthoringSessions.read(scope, input.draftId)
+        if (draft.revision !== input.revision || draft.source.digest !== input.expectedDigest)
+          throw Error("PROJECT_DRAFT_REVISION_CHANGED")
+        const actions = draft.source.files.some(
+          (file) => file.path === "devclaw.project-actions.lock.json"
+        )
+          ? await getProjectActionCatalog(scope.workspace, scope.threadId)
+          : []
+        current()
+        if (!draft.development)
+          await projectAuthoringSessions.inspect(
+            scope,
+            draft.id,
+            draft.revision,
+            "dev",
+            current,
+            actions
+          )
+        current()
+        const lease = projectAuthoringSessions.acquireDevelopment(
+          scope,
+          draft.id,
+          draft.revision,
+          guard,
+          project.workspace
+        )
+        release = lease.release
+        await projectPreviewRegistry.recover({
+          scope,
+          draftId: draft.id,
+          project,
+          snapshot: lease.snapshot,
+          retainedRoot: retainedRoot(project),
+          actions,
+          operations: api.operations(project.projectId, 100),
+          guard,
+          assertProjectCurrent: current,
+          release: lease.release,
+          cancelPrepared: (id) => api.cancel(id)
+        })
+        release = undefined
+        return project.projectId
+      } finally {
+        release?.()
+        recovering.delete(saved.id)
       }
     }
   )
@@ -126,9 +246,23 @@ export function registerProjectPreviewHandlers(
     "project-preview:finish",
     (event, input: Parameters<ProjectPreviewApi["finish"]>[0]) => {
       if (!input || typeof input !== "object") throw Error("PROJECT_INVALID_INPUT")
-      const { scope } = context(event, input.threadId)
+      const { scope, guard } = context(event, input.threadId)
       const api = platform()
       const project = api.get(input.projectId)
+      if (input.draftId && !projectPreviewRegistry.projectFor(scope, input.draftId)) {
+        const saved = projectPreviewRegistry.retained(scope, input.draftId)
+        if (!saved || saved.projectId !== input.projectId || recovering.has(saved.id))
+          throw Error("PROJECT_PREVIEW_SCOPE_CHANGED")
+        guard()
+        projectPreviewRegistry.finishRetained(
+          scope,
+          input.draftId,
+          project,
+          project ? api.operations(project.projectId, 100) : [],
+          (id) => api.cancel(id)
+        )
+        return
+      }
       if (!project) throw Error("PROJECT_NOT_FOUND")
       projectPreviewRegistry.finish(
         project,

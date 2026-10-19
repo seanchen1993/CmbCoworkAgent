@@ -188,7 +188,9 @@ interface OwnerCurrentExecution {
   readonly store: FunctionConversationStore
   readonly database: ReturnType<typeof getDb>
   readonly current: () => void
+  readonly independentCurrent: () => void
   assertDataCurrent(): void
+  assertIndependentDataCurrent(): void
 }
 interface OwnerFullDispatch {
   key(context: FunctionConversationOwnerContext): string
@@ -237,6 +239,7 @@ interface ParentCurrentExecution {
 export interface FunctionConversationNativeParentCurrent {
   readonly current: () => void
   assertDataCurrent(): void
+  captureIndependentCurrent(): () => void
 }
 const parentCurrentExecutions = new WeakMap<() => void, ParentCurrentExecution>()
 
@@ -502,10 +505,10 @@ export class FunctionConversationCoordinator implements FunctionConversationMana
     const originalSource = source.value as () => void, originalScope = base.scope
     const database = getDb(), store = this.store
     const key = JSON.stringify([original.context.workspace, original.context.threadId])
-    let reading = false, failed = false
-    const assertDataCurrent = () => {
+    let reading = false, failed = false, independentReading = false, independentFailed = false
+    const checkDataCurrent = (independent: boolean) => {
       try {
-        if (failed || !leaseCurrent() || getDb() !== database ||
+        if ((independent ? independentFailed : failed || !leaseCurrent()) || getDb() !== database ||
           Reflect.apply(weakGet, ownerCurrentExecutions, [current]) !== execution ||
           Reflect.apply(weakGet, ownerExecutions, [owner]) !== execution ||
           Reflect.apply(weakGet, originalCoordinatorData, [this]) !== coordinator ||
@@ -528,26 +531,46 @@ export class FunctionConversationCoordinator implements FunctionConversationMana
           throw new ModFunctionError("MODS_CONVERSATION_SESSION_CLOSED")
         Reflect.apply(signalThrowIfAborted, original.context.signal, [])
         Reflect.apply(signalThrowIfAborted, original.controllerSignal, [])
-      } catch (error) { failed = true; throw error }
+      } catch (error) {
+        if (independent) independentFailed = true
+        else failed = true
+        throw error
+      }
     }
-    const current = () => {
-      if (reading || failed) { failed = true; throw new ModFunctionError("MODS_CONVERSATION_TARGET_CHANGED") }
-      reading = true
+    const assertDataCurrent = () => checkDataCurrent(false)
+    const assertIndependentDataCurrent = () => checkDataCurrent(true)
+    const runCurrent = (independent: boolean) => {
+      if (independent ? independentReading || independentFailed : reading || failed) {
+        if (independent) independentFailed = true
+        else failed = true
+        throw new ModFunctionError("MODS_CONVERSATION_TARGET_CHANGED")
+      }
+      if (independent) independentReading = true
+      else reading = true
+      const check = independent ? assertIndependentDataCurrent : assertDataCurrent
       try {
-        assertDataCurrent()
+        check()
         assertOwnerFull(owner, { key: () => key,
           current: value => Reflect.apply(mapGet, coordinator.current, [value]) as Owner | undefined,
           signal: signal => { Reflect.apply(signalThrowIfAborted, signal, []) },
           controller: () => original.controllerSignal,
-          source: () => { Reflect.apply(originalSource, original.context, []); assertDataCurrent() },
-          scope: () => { Reflect.apply(originalScope, base.host, [original.context]); assertDataCurrent() },
+          source: () => { Reflect.apply(originalSource, original.context, []); check() },
+          scope: () => { Reflect.apply(originalScope, base.host, [original.context]); check() },
           child: () => { throw new ModFunctionError("MODS_CONVERSATION_TARGET_CHANGED") } })
-        assertDataCurrent()
-      } catch (error) { failed = true; throw error }
-      finally { reading = false }
+        check()
+      } catch (error) {
+        if (independent) independentFailed = true
+        else failed = true
+        throw error
+      } finally {
+        if (independent) independentReading = false
+        else reading = false
+      }
     }
+    const current = () => runCurrent(false)
+    const independentCurrent = () => runCurrent(true)
     const execution: OwnerCurrentExecution = Object.freeze({ coordinator: this, owner,
-      database, store, current, assertDataCurrent })
+      database, store, current, assertDataCurrent, independentCurrent, assertIndependentDataCurrent })
     Reflect.apply(weakSet, ownerCurrentExecutions, [current, execution])
     Reflect.apply(weakSet, ownerExecutions, [owner, execution])
     if (!beforeActivation) assertDataCurrent()
@@ -693,7 +716,32 @@ export class FunctionConversationCoordinator implements FunctionConversationMana
     }
     const input: FunctionConversationChildParentCapture<Owner> = { owner, target: target.ref,
       physicalParentThreadId, signal: target.signal, assertCurrent: current, assertFactory }
-    const view: FunctionConversationNativeParentCurrent = Object.freeze({ current, assertDataCurrent })
+    const view: FunctionConversationNativeParentCurrent = Object.freeze({ current, assertDataCurrent,
+      captureIndependentCurrent: () => {
+        // Mint only while the original parent factory and physical execution are still current.
+        current()
+        const targetCurrent = targetExecution.captureIndependentCurrent()
+        let reading = false, failed = false
+        const checkPure = () => {
+          if (Reflect.apply(weakGet, parentCurrentExecutions, [current]) !== record)
+            throw new ModFunctionError("MODS_CONVERSATION_TARGET_CHANGED")
+          assertPureFields(record.input, record.inputFields)
+          assertPureFields(record.owner.owner, record.ownerFields)
+          assertPureFields(record.target, record.targetFields)
+          assertPureFields(record.target.ref, record.refFields)
+          assertPureFields(record.target.ref.incarnation, record.incarnationFields)
+        }
+        return () => {
+          if (reading || failed) { failed = true; throw new ModFunctionError("MODS_CONVERSATION_TARGET_CHANGED") }
+          reading = true
+          try {
+            checkPure()
+            targetCurrent()
+            checkPure()
+          } catch (error) { failed = true; throw error }
+          finally { reading = false }
+        }
+      } })
     const record: ParentCurrentExecution = { input,
       inputFields: capturePureFields(input,
         ["owner", "target", "physicalParentThreadId", "signal", "assertCurrent", "assertFactory"]),

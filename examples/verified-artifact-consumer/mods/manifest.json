@@ -1,0 +1,1 @@
+{ "apiVersion": "cmb.mods/v2", "id": "verified-artifact-consumer", "entry": "register.ts" }

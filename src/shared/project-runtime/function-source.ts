@@ -1,0 +1,30 @@
+import type { FunctionConfigApi } from "../mods/v2/config-api"
+export interface ProjectFunctionSourceReview {
+  projectId: string
+  projectVersion: number
+  packageDigest: string
+  workspace: string
+  workspaceEnabled?: boolean
+  globallyEnabled?: boolean
+  source?: {
+    pluginId?: string
+    name: string
+    digest: string
+    state: "ready" | "needs-approval" | "disabled"
+    capabilities: string[]
+    scannedMethods: string[]
+    scanIncomplete: boolean
+    hasConfiguration?: boolean
+    configurationReady?: boolean
+  }
+}
+export interface ProjectFunctionSourceApi {
+  config: FunctionConfigApi
+  read(projectId: string): Promise<ProjectFunctionSourceReview>
+  approve(input: {
+    projectId: string
+    projectVersion: number
+    packageDigest: string
+    compiledDigest: string
+  }): Promise<ProjectFunctionSourceReview>
+}

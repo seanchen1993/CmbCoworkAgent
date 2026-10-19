@@ -111,6 +111,7 @@ export async function executeRemoteStandardTurnOnDesktopRunBody(
     // The IM runner owns the lease for its whole delivery, including the reply
     // it sends after the run settles, so the run body must not release it.
     localRunLease: { owner: input.runOwner, runId: input.runId, managedExternally: true },
+    ...(input.onSourceSettlement ? { deferSourceSettlement: true } : {}),
     signal: input.signal,
     allowTrustedTransportSkillMarker: true,
     extraSystemPrompt: IM_UNTRUSTED_INPUT_SYSTEM_PROMPT,
@@ -135,6 +136,8 @@ export async function executeRemoteStandardTurnOnDesktopRunBody(
     getDelivery(),
     context
   )
+  if (handle.sourceSettlement)
+    input.onSourceSettlement?.(handle.sourceSettlement, handle.invalidateSourceSettlement)
   await handle.completion
 
   // A tool-only turn legitimately produces no assistant text; the runner this

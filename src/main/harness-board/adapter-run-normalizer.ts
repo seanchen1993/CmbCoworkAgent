@@ -247,6 +247,10 @@ function normalizeArtifact(
     ...(Array.isArray(value.paths) ? { paths } : {}),
     required: definition?.required ?? false,
     artifactStatus,
+    ...(typeof value.exists === "boolean" ? { exists: value.exists } : {}),
+    ...(isRecord(value.validation) && ["valid", "invalid", "unknown"].includes(String(value.validation.status)) ? {
+      validation: { status: value.validation.status as "valid" | "invalid" | "unknown", message: text(value.validation.message, MAX_TEXT) }
+    } : {}),
     ...(artifactStatusLabel ? { artifactStatusLabel } : {}),
     status: {
       label: artifactStatusLabel || ARTIFACT_LABELS[artifactStatus],

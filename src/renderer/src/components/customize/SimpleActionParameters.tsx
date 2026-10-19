@@ -1,5 +1,6 @@
 import { parameterFields, parameterNumber, type ParameterDraft } from "@/lib/flow-parameter-form"
 import type { ModJson, ModObject } from "../../../../shared/mods/types"
+import { StringArrayParameter } from "./StringArrayParameter"
 
 /** Simple forms keep required fields editable and never require a JSON detour. */
 export function SimpleActionParameters({
@@ -7,6 +8,7 @@ export function SimpleActionParameters({
   value,
   schema,
   draft,
+  allowMissing = false,
   onChange,
   onDraftChange
 }: {
@@ -14,10 +16,12 @@ export function SimpleActionParameters({
   value: ModObject
   schema?: ModObject
   draft?: ParameterDraft
+  allowMissing?: boolean
   onChange(value: ModObject): void
   onDraftChange(value: ParameterDraft): void
 }) {
   const fields = parameterFields(schema)
+  const other = Object.keys(value).filter((key) => !fields.some((field) => field.key === key))
   const update = (key: string, next: ModJson | undefined) => {
     const result = { ...value }
     if (next === undefined) delete result[key]
@@ -34,19 +38,19 @@ export function SimpleActionParameters({
       {fields.length === 0 && <p className="text-xs text-muted-foreground">无需填写参数。</p>}
       {fields.map((field) => {
         const set = Object.hasOwn(value, field.key)
-        const enabled = set || field.required
+        const required = field.required && !allowMissing
+        const enabled = set || required
         const actual = value[field.key]
         const label = `${title} · ${field.title}`
-        const inputClass =
-          "w-full min-w-0 rounded-lg border bg-background p-2 text-sm disabled:opacity-50"
+        const inputClass = "devclaw-input w-full min-w-0 text-sm"
         return (
           <div key={field.key} className="grid min-w-0 gap-1">
             <div className="flex flex-wrap items-center justify-between gap-2 text-sm">
               <span>
                 {field.title}
-                {field.required ? "（必填）" : "（可选）"}
+                {required ? "（必填）" : "（可选）"}
               </span>
-              {!field.required && (
+              {!required && (
                 <label className="flex items-center gap-1 text-xs">
                   <input
                     type="checkbox"
@@ -57,7 +61,7 @@ export function SimpleActionParameters({
                         field.key,
                         event.target.checked
                           ? (field.enum?.[0] ??
-                              (field.type === "string" ? "" : field.type === "boolean" ? false : 0))
+                              (field.type === "array" ? [] : field.type === "string" ? "" : field.type === "boolean" ? false : 0))
                           : undefined
                       )
                     }
@@ -66,10 +70,11 @@ export function SimpleActionParameters({
                 </label>
               )}
             </div>
-            {field.enum ? (
+            {field.type === "array" ? <StringArrayParameter label={label} value={actual}
+              schema={field.schema} disabled={!enabled} onChange={(next) => update(field.key, next)} /> : field.enum ? (
               <select
                 aria-label={label}
-                className={inputClass}
+                className="devclaw-select w-full min-w-0 text-sm"
                 disabled={!enabled}
                 value={set ? String(field.enum.findIndex((item) => item === actual)) : ""}
                 onChange={(event) => update(field.key, field.enum![Number(event.target.value)])}
@@ -84,7 +89,7 @@ export function SimpleActionParameters({
             ) : field.type === "boolean" ? (
               <select
                 aria-label={label}
-                className={inputClass}
+                className="devclaw-select w-full min-w-0 text-sm"
                 disabled={!enabled}
                 value={set ? String(actual) : ""}
                 onChange={(event) => update(field.key, event.target.value === "true")}
@@ -126,6 +131,17 @@ export function SimpleActionParameters({
           </div>
         )
       })}
+      {!!other.length && (
+        <details className="text-sm">
+          <summary className="cursor-pointer">其他保留字段（只读，{other.length} 项）</summary>
+          <pre className="mt-2 max-h-48 overflow-auto whitespace-pre-wrap break-all rounded-lg border p-2 text-xs">
+            {JSON.stringify(Object.fromEntries(other.map((key) => [key, value[key]])), null, 2)}
+          </pre>
+          <p className="mt-1 text-xs text-muted-foreground">
+            这些字段完整保留，也会作为固定输入。请在高级编辑中修改。
+          </p>
+        </details>
+      )}
     </section>
   )
 }

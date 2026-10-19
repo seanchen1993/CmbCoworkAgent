@@ -66,4 +66,12 @@ describe("native plugin inventory", () => {
     expect(rows[1].projectMode).toBe(true)
     expect(rows[2].projectMode).toBe(false)
   })
+  it("reports business modules separately from function selections without inventing chat actions", () => {
+    const rows = nativePluginCapabilities([
+      plugin("business", { businessModCount: 8, businessExtensionCount: 1 }),
+      plugin("legacy")
+    ], [], [])
+    expect(rows[0]).toMatchObject({ businessModCount: 8, businessExtensionCount: 1, hasFunctionCapabilities: false })
+    expect(rows[1]).toMatchObject({ businessModCount: 0, businessExtensionCount: 0 })
+  })
 })

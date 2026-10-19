@@ -10,7 +10,8 @@ export function planClawUpgrade(
   original: ClawProfile,
   available: FunctionPluginStatus[],
   actions: ClawActionDescriptor[],
-  validate: (value: ModObject, schema?: ModObject, providedFields?: string[]) => string | undefined
+  validate: (value: ModObject, schema?: ModObject, providedFields?: string[]) => string | undefined,
+  pendingDefinition?: FlowDefinition | null
 ): { profile: ClawProfile; flow?: FlowDefinition; issues: string[]; changes: string[] } {
   const profile = structuredClone(original)
   const issues: string[] = []
@@ -39,8 +40,9 @@ export function planClawUpgrade(
     }
   }
   let flow: FlowDefinition | undefined
-  if (original.flow) {
-    const candidate = structuredClone(original.flow.definition)
+  const definition = pendingDefinition === undefined ? original.flow?.definition : pendingDefinition
+  if (definition) {
+    const candidate = structuredClone(definition)
     for (const step of candidate.steps) {
       if (step.kind !== "plugin-action") continue
       const capability = profile.capabilities.find(

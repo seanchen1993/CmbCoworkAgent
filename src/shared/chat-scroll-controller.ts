@@ -106,7 +106,7 @@ type GenerationScopedEvent = { generation?: number }
 export type ChatScrollEvent =
   | { type: "THREAD_RESET"; threadId: string | null }
   | (GenerationScopedEvent & { type: "DATA_READY"; messageCount: number })
-  | (GenerationScopedEvent & { type: "BOTTOM_CONFIRMED" })
+  | (GenerationScopedEvent & { type: "BOTTOM_CONFIRMED"; distanceToBottom?: number })
   | (GenerationScopedEvent & {
       type: "USER_DETACH"
       source: "user-input" | "scroll-event" | "layout"
@@ -240,14 +240,21 @@ export function transitionChatScroll(
       return noEffects({ ...nextState, mode: "following" })
     }
 
-    case "BOTTOM_CONFIRMED":
+    case "BOTTOM_CONFIRMED": {
       if (state.mode === "restoring") return noEffects(state)
       if (state.mode === "initializing" && !state.dataReady) return noEffects(state)
-      return noEffects({
+      const confirmed: ChatScrollState = {
         ...clearUnread(state),
         mode: "following",
         programmaticScrollGuard: false
-      })
+      }
+      // A user may reattach inside the interaction threshold after a late row measurement.
+      // Settle that remaining gap now, even if no subsequent resize arrives to request it.
+      const distance = event.distanceToBottom ?? 0
+      return Number.isFinite(distance) && distance > 1
+        ? requestBottom(confirmed, "content-grown")
+        : noEffects(confirmed)
+    }
 
     case "USER_DETACH": {
       if (event.source === "layout") return noEffects(state)

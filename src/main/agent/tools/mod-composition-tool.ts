@@ -68,7 +68,8 @@ export function createModCompositionTool(input: {
               args.savedName,
               args.savedRevision ?? 0,
               args.catalogToken ?? "",
-              assertTurn
+              assertTurn,
+              { turnId: lease!.runId, signal }
             )
             break
           case "apply_saved":
@@ -124,7 +125,7 @@ export function createModCompositionTool(input: {
     {
       name: "mod_composition",
       description:
-        "Compose authorized current-chat capabilities. list(query?,cursor?,refresh?) returns concise real identities/component summaries, selection resources and saved template names/revisions; directory pages reuse a short metadata snapshot. details(pluginId,catalogToken?) returns only that Mod's full config schemas; existing setting values remain hidden. stage always revalidates live sources and accumulates same-turn changes; default preserves choices and deep-merges objects, arrays replace entirely, null is literal. removeConfigPaths deletes explicit JSON Pointer fields within a named component config; array indices cannot be deleted. models/skills/mcp/builtins/flow change only when explicitly supplied; null clears a selection. flow accepts only a listed saved id/revision/digest and never executes it. save(savedName,savedRevision=0,catalogToken) stores the queued/current selection; existing names need exact revision. apply_saved uses savedName+savedRevision with fresh authority checks. undo queues the exact previous selection without replaying actions; cancel discards queued work. Application waits for successful turn end and idle. Never approve, install, guess identities, retry unconfirmed effects, or claim queued is active.",
+        "Compose authorized current-chat capabilities. list(query?,cursor?,refresh?) returns concise real identities/component summaries, selection resources and saved template names/revisions; directory pages reuse a short metadata snapshot. details(pluginId,catalogToken?) returns only that Mod's full config schemas; existing setting values remain hidden. stage always revalidates live sources and accumulates same-turn changes; default preserves choices and deep-merges objects, arrays replace entirely, null is literal. removeConfigPaths deletes explicit JSON Pointer fields within a named component config; array indices cannot be deleted. models/skills/mcp/builtins/flow change only when explicitly supplied; null clears a selection. flow accepts only a listed saved id/revision/digest and never executes it. save(savedName,savedRevision=0,catalogToken) stores the queued/current selection; existing names need exact revision. If current features include trials, save returns saved:false and prepares the original trusted reuse approval; it saves automatically only after exact confirmed dependencies become active. Explain that confirmation is required; never claim saved from needs-approval. list.save reports the pending save; restart needs-review and failed/unknown must not be replayed automatically. cancel cancels the pending named save without undoing an already confirmed installation. apply_saved uses savedName+savedRevision with fresh authority checks. undo queues the exact previous selection without replaying actions; cancel discards queued work. Application waits for successful turn end and idle. Never approve, install, guess identities, retry unconfirmed effects, or claim queued is active.",
       schema: z
         .object({
           action: z.enum([

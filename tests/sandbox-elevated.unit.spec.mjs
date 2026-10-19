@@ -1265,7 +1265,7 @@ test("sandbox execute helpers do not create visible console windows", () => {
   )
   const executeOnceSection = sectionBetween(
     localSandboxSource,
-    "private executeOnce(",
+    "private async executeOnce(",
     "  private formatOutput"
   )
   const aclSection = sectionBetween(
@@ -1334,7 +1334,7 @@ test("sandbox execute helpers do not create visible console windows", () => {
 test("unsandboxed git network commands allow Git Credential Manager UI prompts", () => {
   const executeOnceSection = sectionBetween(
     localSandboxSource,
-    "private executeOnce(",
+    "private async executeOnce(",
     "  private formatOutput"
   )
 
@@ -1423,7 +1423,7 @@ test("Windows sandbox keeps workspace root separate from command cwd", () => {
   const executeWindowsSection = sectionBetween(
     localSandboxSource,
     "private async executeInWindowsSandbox(",
-    "  private executeOnce("
+    "  private async executeOnce("
   )
 
   assert.match(
@@ -2160,10 +2160,27 @@ test("workflow settle reports + retries a failed final persist (no stale notific
     /if \(!finalPersisted\)[\s\S]*?could NOT be persisted/,
     "settle logs loudly when the final persist fails"
   )
-  const fallbackPublishedAt = workflowRunManagerSource.indexOf("this.captureFlushFailedRun(request")
-  const lifecycleRemovedAt = workflowRunManagerSource.indexOf(
-    "this.active.delete(request.threadId)"
+  // Retirement now drains the source owner through a local helper. Compare its
+  // invocation in the settled body, rather than the helper's definition order.
+  const retirementHelper = workflowRunManagerSource.match(
+    /const retireSourceOwner = async \(\) => \{([\s\S]*?)\r?\n {4}\}\r?\n {4}entry\.settled/
+  )?.[1]
+  assert(retirementHelper, "the original source-owner retirement helper is present")
+  assert.match(
+    retirementHelper,
+    /finally \{\s*this\.active\.delete\(request\.threadId\)/,
+    "the retirement helper removes the active entry after draining its owner"
   )
+  assert.equal(
+    workflowRunManagerSource.match(/this\.active\.delete\(request\.threadId\)/g)?.length,
+    1,
+    "the settled body cannot remove the active entry outside the retirement helper"
+  )
+  const settledBodyAt = workflowRunManagerSource.indexOf("entry.settled = (async () => {")
+  assert(settledBodyAt >= 0, "the original settled lifecycle is present")
+  const settledBody = workflowRunManagerSource.slice(settledBodyAt)
+  const fallbackPublishedAt = settledBody.indexOf("this.captureFlushFailedRun(request")
+  const lifecycleRemovedAt = settledBody.indexOf("await retireSourceOwner()")
   assert(
     fallbackPublishedAt >= 0 && lifecycleRemovedAt >= 0 && fallbackPublishedAt < lifecycleRemovedAt,
     "terminal fallback is published before the active lifecycle entry is removed"

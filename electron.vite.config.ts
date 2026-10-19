@@ -29,6 +29,22 @@ function copyResources(): { name: string; closeBundle: () => void } {
       const destSkills = resolve("out/skills")
       mirrorRequiredDirectorySync(srcSkills, destSkills)
       mirrorRequiredDirectorySync(resolve("resources/mods"), resolve("out/resources/mods"))
+      for (const [source, name] of [
+        ["sparks-task-workbench/provider", "task-workbench-provider"],
+        ["sparks-task-workbench/consumer", "task-workbench-consumer"],
+        ["sparks-task-workbench/behavior-prefix", "task-behavior-prefix"],
+        ["sparks-task-workbench/behavior-compact", "task-behavior-compact"],
+        ["sparks-edit-reminder", "edit-reminder"]
+      ]) {
+        mirrorRequiredDirectorySync(
+          resolve("examples", source),
+          resolve("out/resources/mods/platform-examples", name)
+        )
+      }
+      mirrorRequiredDirectorySync(
+        resolve("examples/autobiz-stage-checks"),
+        resolve("out/resources/project-composition/autobiz")
+      )
       copyFileSync(resolve("resources/mods-policy.json"), resolve("out/resources/mods-policy.json"))
       // Authoring checks use a fixed ES-only library set even in packaged builds without dev deps.
       const authoringLibs = resolve("out/resources/mods-authoring/typescript")

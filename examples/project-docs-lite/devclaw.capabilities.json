@@ -1,0 +1,27 @@
+{
+  "apiVersion": "devclaw.capabilities/v1",
+  "capabilities": [
+    {
+      "id": "summarize",
+      "title": "整理项目需求",
+      "kind": "skill",
+      "usage": "project",
+      "entry": "skills/summarize/SKILL.md"
+    },
+    {
+      "id": "document-flow",
+      "title": "起草并审核需求文档",
+      "kind": "flow",
+      "usage": "project",
+      "entry": "devclaw.project-runtime.json",
+      "inputs": [
+        {
+          "id": "context",
+          "title": "前序已检查资料与源码变更",
+          "path": "inputs/verified-context.json",
+          "required": false
+        }
+      ]
+    }
+  ]
+}

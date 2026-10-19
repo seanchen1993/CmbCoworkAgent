@@ -226,6 +226,8 @@ export type WorkflowWorktreeStatus =
  * independently of the model result, so a restart can distinguish user work from
  * disposable checkout residue even when the workflow returns unrelated data. */
 export interface WorkflowWorktreeRecord {
+  /** Native association stamped at provisioning; absent in historical records, never guessed. */
+  agentIndex?: number
   id: string
   runId: string
   /** Owning thread. Required so recovery never guesses manifest ownership. */

@@ -1,7 +1,10 @@
 import { clearOnceStateForSession, runHooks, type HookResultCallback } from "./runner"
 import type { HookContext } from "./runner"
-import { captureRuntimePluginSourceToken, withRuntimePluginSource,
+import type { HookAccountingBinder } from "./model-accounting"
+import { isCreatorBudgetError } from "../mods/devtools/creator-model-accounting"
+import { captureRuntimePluginSourceToken, retainRuntimePluginSourceToken, withRuntimePluginSource,
   type RuntimePluginSourceToken } from "../plugins/runtime-source-scope"
+import type { SnapshotLease } from "../harness-board/project-runtime/snapshot-retention"
 import { derivationFamilyFor } from "../plugins/derivation-scope"
 import {
   resolveEnabledHooksForRun,
@@ -20,6 +23,7 @@ import {
 interface StartedSession {
   derivationBinding?: boolean
   pluginSourceSnapshot?: RuntimePluginSourceToken
+  snapshotLease?: SnapshotLease
   workspacePath?: string
   pluginOutputDir?: string
   systemId?: string
@@ -65,7 +69,8 @@ export async function fireSessionStartOnce(
     | "harnessNodeStatus"
     | "projectCode"
     | "projectDir"
-  >
+  >,
+  bindHookAccounting?: HookAccountingBinder
 ): Promise<void> {
   const existing = startedSessions.get(threadId)
   if (existing) {
@@ -83,9 +88,15 @@ export async function fireSessionStartOnce(
       existing.projectCode !== (harnessContext?.projectCode ?? existing.projectCode) ||
       existing.featureId !== (harnessContext?.featureId ?? existing.featureId)
     )) throw Error("插件谱系会话绑定或目录已变化，请在新会话中开始项目")
+    const pluginSourceSnapshot = captureRuntimePluginSourceToken() ?? existing.pluginSourceSnapshot
+    const snapshotLease = pluginSourceSnapshot === existing.pluginSourceSnapshot
+      ? existing.snapshotLease
+      : retainRuntimePluginSourceToken(pluginSourceSnapshot, "deferred-session-end", true)
+    if (snapshotLease !== existing.snapshotLease) existing.snapshotLease?.release()
     startedSessions.set(threadId, {
       derivationBinding,
-      pluginSourceSnapshot: captureRuntimePluginSourceToken() ?? existing.pluginSourceSnapshot,
+      pluginSourceSnapshot,
+      snapshotLease,
       workspacePath: workspacePath ?? existing.workspacePath,
       pluginOutputDir: pluginOutputDir ?? existing.pluginOutputDir,
       systemId: systemId ?? existing.systemId,
@@ -104,9 +115,11 @@ export async function fireSessionStartOnce(
     })
     return
   }
+  const pluginSourceSnapshot = captureRuntimePluginSourceToken()
   startedSessions.set(threadId, {
     derivationBinding: Boolean(derivationFamilyFor(harnessContext?.harnessAdapterId ?? "")),
-    pluginSourceSnapshot: captureRuntimePluginSourceToken(),
+    pluginSourceSnapshot,
+    snapshotLease: retainRuntimePluginSourceToken(pluginSourceSnapshot, "deferred-session-end", true),
     workspacePath,
     pluginOutputDir,
     systemId,
@@ -142,6 +155,7 @@ export async function fireSessionStartOnce(
       ...harnessContext,
       setupTrigger: "init"
     }
+    bindHookAccounting?.(setupContext)
     try {
       const result = await runHooks(
         resolveEnabledHooksForRun(workspacePath, "Setup", setupContext, hookScope, onHookSkipped),
@@ -161,6 +175,7 @@ export async function fireSessionStartOnce(
         )
       }
     } catch (e) {
+      if (isCreatorBudgetError(e)) throw e
       console.warn("[Hooks] Setup(init) hook error:", e)
     }
   }
@@ -177,12 +192,17 @@ export async function fireSessionStartOnce(
     // fresh launch, so the value is hard-coded "startup" here.
     sessionStartSource: "startup"
   }
-  runHooks(
+  bindHookAccounting?.(context)
+  void runHooks(
     resolveEnabledHooksForRun(workspacePath, "SessionStart", context, hookScope, onHookSkipped),
     "SessionStart",
     context,
     onHookResult
-  ).catch((e) => console.warn("[Hooks] SessionStart hook error:", e))
+  ).catch((e) => {
+    console.warn("[Hooks] SessionStart hook error:", e)
+  })
+  // SessionStart remains observational; the runner records a budget denial without
+  // changing its original scheduling. Never retain billing in startedSessions.
 }
 
 /**
@@ -252,6 +272,7 @@ export async function fireSessionEnd(
     context,
     onHookResult
   ))).catch((e) => console.warn("[Hooks] SessionEnd hook error:", e))
+    .finally(() => started.snapshotLease?.release())
   // Drop this thread's `once` fired-state so a future thread with the same id
   // (re-import / re-create) starts fresh. Bounded — runs after SessionEnd hooks
   // complete so `once` SessionEnd hooks themselves still fire correctly.
@@ -296,7 +317,10 @@ export async function fireSessionEndAll(
         "SessionEnd",
         context,
         getOnHookResult?.(id)
-      ))).finally(() => clearOnceStateForSession(id))
+      ))).finally(() => {
+        session.snapshotLease?.release()
+        clearOnceStateForSession(id)
+      })
     })
   )
   const timeout = new Promise<void>((resolve) => setTimeout(resolve, timeoutMs))

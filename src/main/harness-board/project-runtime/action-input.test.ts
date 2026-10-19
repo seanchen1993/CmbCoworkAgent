@@ -14,6 +14,7 @@ import {
   assertProjectActionProviders,
   captureProjectActionInputs,
   createProjectActionBinding,
+  projectActionContractDigest,
   readProjectActionLock
 } from "./action-input"
 import { createProjectActionFlow } from "./action-flow"
@@ -76,6 +77,42 @@ function fixture() {
   return { root, state, lock }
 }
 describe("host project public action mapping", () => {
+  it("binds a validator to the actual current text artifact and preserves its bytes", () => {
+    const { state, lock, root } = fixture()
+    const check = createProjectActionBinding("review-check", {
+      ...descriptor, inputSchema: { type: "object", properties: { content: { type: "string" } },
+        required: ["content"], additionalProperties: false }
+    }, {}, {}, { kind: "artifact", artifactId: "document", pointer: "", format: "text" })
+    state.manifest.actions.push({ id: check.id, ref: check.ref })
+    lock.bindings.push(check)
+    state.manifest.checks = [{ id: "review-check", kind: "action", actionId: check.id,
+      artifactId: "document", sideEffect: "read" }]
+    state.manifest.stages[1].checkIds = ["review-check"]
+    writeFileSync(join(root, "input.json"), "# Actual reviewed content\n")
+    const phase = { actionIds: [check.id], allowCheckArtifacts: true }
+    const captured = captureProjectActionInputs(state, lock, phase)
+    expect(captured.bindings[0].input).toEqual({ content: "# Actual reviewed content\n" })
+    expect(() => captured.assertCurrent()).not.toThrow()
+    writeFileSync(join(root, "input.json"), "Changed after capture")
+    expect(() => captured.assertCurrent()).toThrow("INPUT_CHANGED")
+    lock.bindings.at(-1)!.input = { content: "invented" }
+    expect(() => captureProjectActionInputs(state, lock, phase)).toThrow("ARTIFACT_INPUT_OVERRIDE")
+  })
+
+  it("rejects malformed or oversized text and unsupported artifact formats", () => {
+    const { state, lock, root } = fixture()
+    const binding = lock.bindings[0]
+    binding.inputFrom = { kind: "artifact", artifactId: "document", pointer: "", format: "text" }
+    binding.inputSchema = { type: "object", required: ["content"], properties: { content: { type: "string" } } }
+    state.manifest.stages[1].actionIds = [binding.id]
+    writeFileSync(join(root, "input.json"), Buffer.from([0xff]))
+    expect(() => captureProjectActionInputs(state, lock)).toThrow()
+    writeFileSync(join(root, "input.json"), "x".repeat(28001))
+    expect(() => captureProjectActionInputs(state, lock)).toThrow("FILE_LIMIT")
+    const raw = structuredClone(lock) as unknown as { bindings: Array<{ inputFrom: unknown }> }
+    raw.bindings[0].inputFrom = { kind: "artifact", artifactId: "document", pointer: "", format: "binary" }
+    expect(() => parseProjectActionLock(raw)).toThrow("SOURCE_INVALID")
+  })
   it("reads pinned lock and actual artifact object, preserving output mapping for native Flow", () => {
     const { root, state } = fixture()
     const lock = readProjectActionLock(root, state.manifest)
@@ -104,6 +141,55 @@ describe("host project public action mapping", () => {
       )
     expect(() => assertProjectActionProviders(lock, [])).toThrow("PROJECT_ACTION_PROVIDER_CHANGED")
   })
+  it("pins a public platform action without inventing a command and retains native output order", () => {
+    const { state } = fixture()
+    const platform = { id: "autobiz.delivery-report", version: "1.0.0", action: "collect" }
+    const exported: ClawActionDescriptor = {
+      pluginId: descriptor.pluginId, plugin: descriptor.plugin, digest: descriptor.digest,
+      actionId: descriptor.actionId, name: descriptor.name,
+      inputSchema: descriptor.inputSchema, outputSchema: descriptor.outputSchema, platform
+    }
+    const first = createProjectActionBinding("collect", exported, { text: "verified input" })
+    const second = createProjectActionBinding(
+      "report",
+      { ...exported, actionId: "generate", platform: { ...platform, action: "generate" } },
+      {},
+      {},
+      { kind: "action", actionId: "collect", pointer: "" }
+    )
+    const lock: ProjectActionLock = {
+      apiVersion: "devclaw.project-actions-lock/v1",
+      bindings: [first, second]
+    }
+    expect(first).not.toHaveProperty("command")
+    expect(first.platform).toEqual(platform)
+    state.manifest.actions = lock.bindings.map(({ id, ref }) => ({ id, ref }))
+    state.manifest.stages[1].actionIds = ["collect", "report"]
+    const actions = [exported, { ...exported, actionId: "generate", platform: second.platform! }]
+    expect(() => assertProjectActionProviders(lock, actions)).not.toThrow()
+    const flow = createProjectActionFlow(state, "actual-operation", captureProjectActionInputs(state, lock))
+    expect(flow.steps.map((step) => step.id)).toEqual(["collect", "report"])
+    expect(flow.steps[1]).toMatchObject({ inputFrom: { stepId: "collect", path: "" } })
+    for (const changed of [
+      { ...exported, platform: { ...platform, id: "other" } },
+      { ...exported, platform: { ...platform, version: "1.0.1" } },
+      { ...exported, platform: { ...platform, action: "generate" } },
+      descriptor
+    ]) {
+      expect(() => assertProjectActionProviders({ ...lock, bindings: [first] }, [changed]))
+        .toThrow("PROJECT_ACTION_PROVIDER_CHANGED")
+      expect(projectActionContractDigest(changed)).not.toBe(projectActionContractDigest(exported))
+    }
+    expect(() => parseProjectActionLock({
+      ...lock, bindings: [{ ...first, command: "pretend" }]
+    })).toThrow("CLAW_ACTION_BINDING_INVALID")
+    expect(() => parseProjectActionLock({
+      ...lock, bindings: [{ ...first, platform: { ...platform, provider: "peer" } }]
+    })).toThrow("CLAW_ACTION_PLATFORM_INVALID")
+    expect(() => parseProjectActionLock({
+      ...lock, bindings: [{ ...first, platform: { ...platform, version: "^1.0.0" } }]
+    })).toThrow("CLAW_ACTION_PLATFORM_INVALID")
+  })
   it("rejects changed approved input and cross-project reuse before Flow construction", () => {
     const { root, state, lock } = fixture()
     const captured = captureProjectActionInputs(state, lock)
@@ -112,6 +198,13 @@ describe("host project public action mapping", () => {
     )
     writeFileSync(join(root, "input.json"), JSON.stringify({ payload: { text: "changed" } }))
     expect(() => captured.assertCurrent()).toThrow("PROJECT_ACTION_INPUT_CHANGED")
+  })
+  it("keeps the separate bounded input and config budgets for command locks", () => {
+    const binding = createProjectActionBinding("large", descriptor, { text: "x".repeat(20_000) },
+      { label: "y".repeat(10_000) })
+    const lock: ProjectActionLock = { apiVersion: "devclaw.project-actions-lock/v1", bindings: [binding] }
+    expect(() => assertProjectActionProviders(lock, [descriptor])).not.toThrow()
+    expect(parseProjectActionLock(lock).bindings[0]).toEqual(binding)
   })
   it("uses constants as explicit overrides and validates final object against provider schema", () => {
     const { root, state, lock } = fixture()

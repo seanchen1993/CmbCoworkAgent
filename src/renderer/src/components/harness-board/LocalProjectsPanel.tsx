@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react"
 import { ProjectActionResults } from "./ProjectActionResults"
 import { ProjectLibraryPanel } from "./ProjectLibraryPanel"
+import { ProjectFunctionConsent } from "./ProjectFunctionConsent"
 import { navigateProjectThread } from "./project-thread-navigation"
 import { SparksDocumentationLink } from "../customize/SparksDocumentationLink"
 import { projectRuntimeRecoveryMessage } from "./project-runtime-message"
@@ -24,6 +25,8 @@ const operationNames = {
 }
 function message(error: unknown) {
   const text = error instanceof Error ? error.message : String(error)
+  if (/PROJECT_MODS_APPROVAL_REQUIRED/.test(text))
+    return "请先在“本包功能权限”中核对源码和能力范围，并确认授权后再开始当前阶段。"
   const recovery = projectRuntimeRecoveryMessage(text)
   if (recovery) return recovery
   if (/VERSION_CONFLICT|INPUT_CHANGED|ARTIFACT_CHANGED|SCOPE_CHANGED/.test(text))
@@ -333,6 +336,7 @@ function CreateLocalProject({
 }
 
 export function LocalProjectRun({ projectId, onChanged }: { projectId: string; onChanged: () => void }) {
+  const [packageFunctionsReady, setPackageFunctionsReady] = useState(false)
   const [versions, setVersions] =
     useState<import("../../../../shared/project-runtime/version-report").ProjectVersionReport>()
   const [view, setView] = useState<LocalProjectView>()
@@ -505,6 +509,10 @@ export function LocalProjectRun({ projectId, onChanged }: { projectId: string; o
         ))}
       </ol>
       {!!error && <ProjectError error={error} />}
+      {project.status === "active" && view.preview?.state !== "expired" &&
+        !["started", "cancel_requested", "unknown"].includes(operation?.status ?? "") &&
+        <ProjectFunctionConsent key={project.version} projectId={projectId}
+          version={project.version} onReady={setPackageFunctionsReady} />}
       {operation && (
         <p role="status" className="text-sm">
           {busy ? "正在处理当前阶段，可在会话中查看助手工作。" : operationNames[operation.status]}
@@ -520,7 +528,7 @@ export function LocalProjectRun({ projectId, onChanged }: { projectId: string; o
           <>
             <button
               type="button"
-              disabled={busy}
+              disabled={busy || !packageFunctionsReady}
               className="rounded border px-3 py-2 disabled:opacity-50"
               onClick={() => void act(() => prepareAnd("start"))}
             >
@@ -548,7 +556,7 @@ export function LocalProjectRun({ projectId, onChanged }: { projectId: string; o
             </p>
             <button
               type="button"
-              disabled={busy}
+              disabled={busy || !packageFunctionsReady}
               className="rounded border px-3 py-2"
               onClick={() =>
                 void act(async () => {
@@ -611,7 +619,7 @@ export function LocalProjectRun({ projectId, onChanged }: { projectId: string; o
             <>
               <button
                 type="button"
-                disabled={busy}
+                disabled={busy || !packageFunctionsReady}
                 onClick={() =>
                   void act(() => command({ kind: "start", operationId: operation.operationId }))
                 }

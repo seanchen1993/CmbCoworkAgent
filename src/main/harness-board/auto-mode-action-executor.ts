@@ -1,5 +1,9 @@
+import { readInternalHarnessProject } from "./internal-project-context"
+import { getPluginSkillSearchSources, readPluginManifest } from "../plugins/manifest"
+import { withLegacyProjectSkillSource, type LegacyBoundSkillSource } from "./project-runtime/legacy-entry-gate"
 import { v4 as uuid } from "uuid"
-import { getThread, upsertThreadMessages } from "../db"
+import { getThread, getThreadCore, upsertThreadMessages } from "../db"
+import { captureThreadIncarnation, matchesThreadIncarnation } from "../services/thread-incarnation"
 import { startAgentRun, type AgentRunDelivery } from "../agent/agent-run-service"
 import { emitAppAttention } from "../app-attention-events"
 import { listAllSkills, listPluginSkills } from "../ipc/skills"
@@ -35,6 +39,25 @@ interface PreparedManagedAgentRun {
   request: AgentInvokeParams & { streamRequestId: string }
   message: PreparedHarnessMessage
   delivery: AgentRunDelivery
+}
+
+// References to original native handles only, never a second managed-run state or scheduler.
+const managedRunHandles = new Map<string, {
+  incarnation: ReturnType<typeof captureThreadIncarnation>
+  completion: Promise<void>
+  settled: boolean
+}>()
+
+export function captureManagedAgentRunTail(threadId: string) {
+  const captured = managedRunHandles.get(threadId)
+  if (!captured) return undefined
+  return { completion: captured.completion, assertCurrent: () => {
+    if (managedRunHandles.get(threadId) !== captured ||
+      !matchesThreadIncarnation(getThreadCore(threadId), captured.incarnation))
+      throw Error("MANAGED_SESSION_RETIREMENT_SCOPE_CHANGED")
+  }, release: () => {
+    if (managedRunHandles.get(threadId) === captured) managedRunHandles.delete(threadId)
+  } }
 }
 
 export class ManagedActionValidationError extends Error {
@@ -91,14 +114,46 @@ function isLocalSkillDisabled(
 
 async function resolveHarnessSkill(
   projectId: string,
-  slashSkill: string
+  slashSkill: string,
+  workspace: string
 ): Promise<SkillMetadata | null> {
+  return withLegacyProjectSkillSource(projectId, workspace, bound =>
+    resolveHarnessSkillFromSource(projectId, slashSkill, bound))
+}
+
+async function resolveHarnessSkillFromSource(projectId: string, slashSkill: string,
+  bound: LegacyBoundSkillSource | undefined): Promise<SkillMetadata | null> {
   const normalizedSlashSkill = normalizeSkillId(slashSkill)
   if (!normalizedSlashSkill) return null
 
-  const [localSkills, pluginSkills] = await Promise.all([listAllSkills(), listPluginSkills()])
+  const internal = readInternalHarnessProject(projectId)
+  const retainedPlugin = internal?.context.plugin ?? bound?.plugin
+  const preferredPlugin = retainedPlugin ?? (await getHarnessProjectAdapterSnapshot(projectId))
+  if (internal && !retainedPlugin) throw Error("COMPOSITION_INTERNAL_SOURCE_REQUIRED")
+  const admittedSources =
+    retainedPlugin
+      ? getPluginSkillSearchSources(
+          retainedPlugin.path,
+          readPluginManifest(retainedPlugin.path)?.manifest ?? null
+        ).map((source) => ({
+          ...source,
+          pluginId: retainedPlugin.id,
+          pluginName: retainedPlugin.name,
+          pluginRoot: retainedPlugin.path,
+          isProjectModePlugin: true
+        }))
+      : undefined
+  const [localSkills, pluginSkills] = await Promise.all([
+    retainedPlugin ? Promise.resolve([]) : listAllSkills(),
+    admittedSources ? listPluginSkills(admittedSources) : listPluginSkills()
+  ])
+  await bound?.assertCurrent()
+  if (
+    internal &&
+    readInternalHarnessProject(projectId)?.context.plugin?.path !== retainedPlugin?.path
+  )
+    throw Error("COMPOSITION_INTERNAL_SOURCE_CHANGED")
   const disabledSkillIds = new Set(getDisabledSkills().map(normalizeSkillId))
-  const preferredPlugin = await getHarnessProjectAdapterSnapshot(projectId)
   const visibilityScope: ProjectModeSkillScope = {
     projectMode: true,
     boundPluginId: preferredPlugin?.id,
@@ -116,7 +171,8 @@ async function resolveHarnessSkill(
 
 async function prepareHarnessMessage(
   projectId: string,
-  nextAction: ManagedRunSessionAction
+  nextAction: ManagedRunSessionAction,
+  workspace: string
 ): Promise<PreparedHarnessMessage> {
   const userMessage = nextAction.userMessage.trim()
   const slashSkill = nextAction.slashSkill.trim()
@@ -133,7 +189,7 @@ async function prepareHarnessMessage(
     )
   }
   let skillBlock = ""
-  const skill = await resolveHarnessSkill(projectId, slashSkill)
+  const skill = await resolveHarnessSkill(projectId, slashSkill, workspace)
   if (!skill) {
     throw new ManagedActionValidationError(
       "next_action_skill_unavailable",
@@ -204,6 +260,16 @@ function prepareManagedAgentRun(
 export async function startPreparedManagedAgentRun(input: PreparedManagedAgentRun): Promise<void> {
   const { request, message: prepared, delivery: resolvedDelivery } = input
   const threadId = request.threadId
+  const originalThread = getThreadCore(threadId)
+  if (!originalThread) throw Error("MANAGED_SESSION_RETIREMENT_SCOPE_CHANGED")
+  const incarnation = captureThreadIncarnation(originalThread)
+  if (managedRunHandles.size >= 128) {
+    for (const [id, entry] of managedRunHandles) {
+      if (entry.settled) managedRunHandles.delete(id)
+      if (managedRunHandles.size < 128) break
+    }
+    if (managedRunHandles.size >= 128) throw Error("MANAGED_SESSION_RETIREMENT_UNCONFIRMED")
+  }
   const persistedCount = upsertThreadMessages(threadId, [
     {
       id: prepared.userMessageId,
@@ -246,6 +312,16 @@ export async function startPreparedManagedAgentRun(input: PreparedManagedAgentRu
       key: `managed-mode-run:${prepared.userMessageId}`
     })
   })
+  const reference = { incarnation, completion: Promise.resolve(), settled: false }
+  reference.completion = Promise.allSettled([
+    handle.completion, ...(handle.sourceSettlement ? [handle.sourceSettlement] : [])
+  ]).then(results => {
+    reference.settled = true
+    const failure = results.find(result => result.status === "rejected")
+    if (failure?.status === "rejected") throw failure.reason
+  })
+  void reference.completion.catch(() => {})
+  managedRunHandles.set(threadId, reference)
 }
 
 export async function sendManagedProviderRetry(
@@ -293,7 +369,7 @@ export async function createAndStartManagedHarnessSession(
 export async function prepareManagedHarnessSession(
   input: CreateManagedHarnessSessionInput
 ): Promise<PreparedHarnessMessage> {
-  const prepared = await prepareHarnessMessage(input.projectId, input.nextAction)
+  const prepared = await prepareHarnessMessage(input.projectId, input.nextAction, input.workspacePath)
   // Fail before creating a thread; startup checks availability again after async grant creation.
   requireAvailableDelivery(input.delivery)
   return prepared
@@ -325,10 +401,12 @@ export async function startManagedHarnessSession(
 export async function createManagedHarnessSession(
   input: CreateManagedHarnessSessionInput
 ): Promise<{ threadId: string; thread: Thread }> {
+  const internal = readInternalHarnessProject(input.projectId)
   const titleSource = input.nextAction.userMessage?.trim() ?? ""
   const thread = await createThreadService(
     {
       workspacePath: input.workspacePath,
+      ...(internal ? { isInternalFlowRuntime: true } : {}),
       ...(titleSource ? { title: generateTitle(titleSource) } : {}),
       harnessFeature: {
         projectId: input.projectId,

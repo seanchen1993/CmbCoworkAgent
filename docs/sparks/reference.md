@@ -44,6 +44,42 @@ v2 的作者代码运行在受隔离环境中，通过宿主 SDK 使用能力；
 历史 v1 的 `on.command`、`on.ui` 和 `turn.summary` 写法不属于本教程的 v2 注册接口。
 迁移时按现有包协议分别处理，不能只修改版本字段。
 
+## 用户配置与升级迁移
+
+在灵件清单的 `userConfig` 中声明参数类型、标题、说明和必填条件。用户通过原生参数表单填写，
+`register(on, options)` 接收当前作用域的有效配置。项目试用也使用该表单；创建草稿或打开表单
+不要求先填完参数，批准代码和实际执行前则必须满足必填条件。
+
+需要迁移旧参数时，可在同一份声明中使用 DevClaw 的可选迁移扩展：
+
+```json
+{
+  "apiVersion": "cmb.mods/v2",
+  "id": "document-helper",
+  "entry": "main.ts",
+  "userConfig": {
+    "label": { "type": "string", "title": "标签", "description": "成果标签" }
+  },
+  "cmbCompatibility": { "modelProtocol": "result-v1", "userConfigMigrations": "v1" },
+  "userConfigSchema": {
+    "version": 1,
+    "migrations": [
+      { "fromVersion": 0, "toVersion": 1,
+        "changes": [{ "kind": "rename", "from": "oldLabel", "to": "label" }] }
+    ]
+  }
+}
+```
+
+未声明迁移版本的旧配置按版本 0 处理；后续版本需逐版本声明连续路径。当前只支持字段
+`rename` 和 `remove`，不执行迁移脚本。`cmbCompatibility.userConfigMigrations` 与
+`userConfigSchema` 必须同时声明，不能把本扩展当作 Claude Code 的通用清单协议。
+旧平台无法理解必需迁移时应拒绝该声明，不向未经验证的旧版本分发。
+
+迁移经过原生确认、当前版本和配置修订核对；取消、冲突、缺少路径或加密存储不可用时保留
+原配置。敏感参数由主进程使用系统加密存储处理；迁移不向模型或日志返回明文。
+导出插件只携带参数定义、默认值和迁移声明，不携带本机保存值、原目录授权及执行权。
+
 ## 导入 Claude 社区灵件
 
 在“自定义助手 → 灵件 → 我已添加”上传单个插件的 ZIP，或选择插件根文件夹。

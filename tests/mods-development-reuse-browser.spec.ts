@@ -1,5 +1,5 @@
 import assert from "node:assert/strict"
-import { existsSync, mkdirSync, writeFileSync } from "node:fs"
+import { existsSync, mkdirSync, readdirSync, writeFileSync } from "node:fs"
 import { join, resolve } from "node:path"
 import { build } from "esbuild"
 import { chromium } from "playwright"
@@ -19,7 +19,7 @@ async function main() {
     function reset(){calls=[];targetClaw=null;deferInstall=false;finishInstall=undefined;failOpen=false;ready=false;outcome="settled";stopUnknown=false,failNew=false,failStatus=false,failApply=false,failGrantRead=false,failAfterApply=false,failDevelopment=false;doc={id:"formal"+key,name:"Counter",workspace:"c:/owned",revision:1,currentRevision:1,updatedAt:1,source:{schemaVersion:1,digest:"a".repeat(64),files:[]},versions:[]};state={threadId:"thread",workspace:doc.workspace,enabled:true,drafts:[{id:"draft",name:"Counter",revision:2,digest:doc.source.digest}],trials:[{componentId:"component",draftId:"draft",phase:"active"}]};claw={workspace:doc.workspace,revision:1,bindingRevision:1,enabled:true,applicable:true,issues:[],capabilities:[],profiles:[],active:{id:"old",name:"Existing",capabilities:[{pluginId:"other",name:"Other",digest:"d".repeat(64)}],skills:{mode:"selected",items:[]},mcp:{mode:"selected",items:[]},models:{roles:{review:"model"}}}};}
     window.api={mods:{development:{status:async()=>{if(failDevelopment){failDevelopment=false;throw Error("FAILED")};return structuredClone(state)},onChanged:fn=>{listeners.add(fn);return()=>listeners.delete(fn)},stop:async input=>{calls.push(["stop",input]);state.trials[0].phase=stopUnknown?"unknown":"stopped";return structuredClone(state)}},authoring:{read:async()=>structuredClone(doc)},authoringInstall:{resolveInstalled:async()=>({ok:true,value:calls.some(row=>row[0]==="install")&&outcome==="settled"?candidate:null}),prepare:async input=>{calls.push(["prepare",input]);return {ok:true,value:candidate}},apply:async input=>{calls.push(["install",input]);const result={ok:true,value:{operationId:"op",installationId:"install",versionId:"version",state:outcome}};return deferInstall?await new Promise(r=>finishInstall=()=>r(result)):result},cancel:async()=>({ok:true}),list:async()=>({ok:true,value:{workspace:doc.workspace,installations:[]}})},status:async()=>{if(failStatus){failStatus=false,failApply=false,failGrantRead=false,failAfterApply=false,failDevelopment=false;throw Error("FAILED")};return ({workspace:doc.workspace,functionMods:[{pluginId:"install",name:"counter",digest:candidate.compiledDigest,state:ready?"ready":"needs-approval",capabilities:[]}]})},approveFunction:async(...args)=>{calls.push(["grant",args]);ready=true;if(failGrantRead){failGrantRead=false,failAfterApply=false,failDevelopment=false;failStatus=true}},clawView:async id=>structuredClone(id==="new-thread"?{...claw,active:targetClaw.active,bindingRevision:targetClaw.bindingRevision}:claw),clawChange:async(id,input)=>{if(id==="new-thread"){calls.push(["claw",id,input]);if(failNew){failNew=false;throw Error("FAILED")};if(input.bindingRevision!==targetClaw.bindingRevision)throw Error("STALE");targetClaw.active=claw.profiles.find(p=>p.id===input.id);targetClaw.bindingRevision++;return structuredClone({...claw,...targetClaw})};calls.push(["claw",id,input]);if(id==="thread"&&input.kind==="apply"&&failApply){failApply=false;throw Error("FAILED")};if(id==="new-thread"&&failNew){failNew=false;throw Error("FAILED")};if(input.revision!==claw.revision||input.workspace!==claw.workspace)throw Error("STALE");if(input.kind==="save"){claw.profiles.push(input.profile);claw.revision++}else{if(input.bindingRevision!==claw.bindingRevision)throw Error("STALE");claw.active=claw.profiles.find(p=>p.id===input.id);claw.bindingRevision++;if(failAfterApply){failAfterApply=false;failDevelopment=true}}return structuredClone(claw)}},threads:{create:async metadata=>{calls.push(["create",metadata]);targetClaw={active:null,bindingRevision:0};return {thread_id:"new-thread"}}}};
     const mount=()=>root.render(<DevelopmentReusePanel key={++key} threadId="thread" document={doc} origin={{id:"draft",revision:2,digest:doc.source.digest}} onReturnToChat={()=>calls.push(["return"])} onOpenThread={async id=>{if(failOpen){failOpen=false;throw Error("FAILED")};calls.push(["open",id])}}/>);
-    window.fixture={deferInstall:()=>deferInstall=true,finishInstall:()=>finishInstall(),fillCapacity:()=>{for(let i=0;i<16;i++){const r=getReuseReceipt("held-"+i);if(!r)break;r.set("busy",true);held.push(r)};doc={...doc,id:"capacity"+key};mount()},releaseCapacity:()=>held.forEach(r=>r.set("busy",false)),remount:()=>mount(),reset:()=>{reset();mount()},get:()=>({calls,claw}),partial:()=>outcome="partial",unknown:()=>stopUnknown=true,stale:()=>{state.drafts[0].revision++;listeners.forEach(fn=>fn({threadId:"thread"}))},failAfterApply:()=>failAfterApply=true,failApply:()=>failApply=true,failGrantRead:()=>failGrantRead=true,failStatus:()=>failStatus=true,defaultAll:()=>{claw.active=null;claw.capabilities=[{pluginId:"other",name:"Other",digest:"d".repeat(64),state:"ready"}]},failOpen:()=>failOpen=true,targetRace:()=>{targetClaw.active={id:"someone-else"};targetClaw.bindingRevision++},failNew:()=>failNew=true,race:()=>claw.revision++};reset();mount();
+    window.fixture={holdRemainingCapacity:()=>{for(let i=0;i<16;i++){const r=getReuseReceipt("held-"+i);if(!r)break;r.set("busy",true);if(!held.includes(r))held.push(r)}},deferInstall:()=>deferInstall=true,finishInstall:()=>finishInstall(),fillCapacity:()=>{for(let i=0;i<16;i++){const r=getReuseReceipt("held-"+i);if(!r)break;r.set("busy",true);held.push(r)};doc={...doc,id:"capacity"+key};mount()},releaseCapacity:()=>held.forEach(r=>r.set("busy",false)),remount:()=>mount(),reset:()=>{reset();mount()},get:()=>({calls,claw}),partial:()=>outcome="partial",unknown:()=>stopUnknown=true,stale:()=>{state.drafts[0].revision++;listeners.forEach(fn=>fn({threadId:"thread"}))},failAfterApply:()=>failAfterApply=true,failApply:()=>failApply=true,failGrantRead:()=>failGrantRead=true,failStatus:()=>failStatus=true,defaultAll:()=>{claw.active=null;claw.capabilities=[{pluginId:"other",name:"Other",digest:"d".repeat(64),state:"ready"}]},failOpen:()=>failOpen=true,targetRace:()=>{targetClaw.active={id:"someone-else"};targetClaw.bindingRevision++},failNew:()=>failNew=true,race:()=>claw.revision++};reset();mount();
   `
     },
     bundle: true,
@@ -43,18 +43,29 @@ async function main() {
     )
     await page.goto("http://localhost/reuse-test")
     await page.addScriptTag({ content: bundle.outputFiles[0].text })
-    const call = (name: string) =>
-      page.evaluate(
+    for (const file of readdirSync("out/renderer/assets").filter(name => name.endsWith(".css")))
+      await page.addStyleTag({path: resolve("out/renderer/assets", file)})
+    const call = async (name: string) => {
+      const result = await page.evaluate(
         (name) => (window as unknown as { fixture: Record<string, () => unknown> }).fixture[name](),
         name
       )
-    const click = (name: string) => page.getByRole("button", { name, exact: true }).click()
+      if (["reset", "remount", "fillCapacity"].includes(name)) {
+        await page.getByLabel("跨聊天复用", { exact: true }).waitFor()
+        if (name === "fillCapacity") await page.evaluate(() =>
+          (window as unknown as { fixture: { holdRemainingCapacity(): void } }).fixture.holdRemainingCapacity())
+        await page.getByText("高级：分步安装与复用", { exact: true }).click()
+      }
+      return result
+    }
+    const click = (name: string | RegExp) => page.getByRole("button", { name, exact: true }).click()
     const install = async () => {
       await click("停止此试用并继续正式复用")
       await click("准备安装当前版本")
       await click("确认安装此版本")
     }
-    await page.getByRole("heading", { name: /保存并正式复用/ }).waitFor()
+    await page.getByText("高级：分步安装与复用", { exact: true }).click()
+    await page.getByRole("heading", { name: /保存并在其他聊天使用/ }).waitFor()
     assert.equal(await page.getByRole("button", { name: "准备安装当前版本" }).count(), 0)
     await install()
     await page.getByText(/正式版本已安装/).waitFor()
@@ -65,12 +76,14 @@ async function main() {
     assert(await page.getByRole("button", { name: "授权此正式版本" }).isDisabled())
     await page.getByRole("checkbox", { name: /我已核对这个正式版本/ }).check()
     await click("授权此正式版本")
-    await click("核对当前 Claw 组合")
-    await click("保留其他选择并应用此组合")
-    await page.getByRole("button", { name: "继续当前聊天", exact: true }).waitFor()
+    await click(/^(加入当前聊天|重新核对当前选择)$/)
+    assert.equal(((await call("get")) as {calls: unknown[][]}).calls.filter(row => row[0] === "claw").length, 0)
+    await click("确认加入并保留其他选择")
+    assert.equal(await page.getByRole("button", {name:"打开灵件设置"}).count(), 0)
+    await page.getByRole("button", { name: "去这段聊天使用", exact: true }).waitFor()
     assert.equal(await page.getByRole("checkbox", { name: /我已核对这个正式版本/ }).count(), 0)
-    assert.equal(await page.getByRole("button", { name: "核对当前 Claw 组合" }).count(), 0)
-    await click("继续当前聊天")
+    assert.equal(await page.getByRole("button", { name: /^(加入当前聊天|重新核对当前选择)$/ }).count(), 0)
+    await click("去这段聊天使用")
     const continued = (await call("get")) as { calls: unknown[][] }
     assert.equal(continued.calls.filter((row) => row[0] === "return").length, 1)
     assert.equal(continued.calls.filter((row) => row[0] === "create").length, 0)
@@ -92,7 +105,7 @@ async function main() {
     await call("reset")
     await call("partial")
     await install()
-    await page.getByText(/安装部分完成/).waitFor()
+    await page.getByText(/安装尚未全部完成/).waitFor()
     assert.equal(await page.getByRole("button", { name: "授权此正式版本" }).count(), 0)
 
     await call("reset")
@@ -110,9 +123,9 @@ async function main() {
     await install()
     await page.getByRole("checkbox", { name: /我已核对这个正式版本/ }).check()
     await click("授权此正式版本")
-    await click("核对当前 Claw 组合")
+    await click(/^(加入当前聊天|重新核对当前选择)$/)
     await call("race")
-    await click("保留其他选择并应用此组合")
+    await click("确认加入并保留其他选择")
     await page.getByText(/此复用计划已过期/).waitFor()
     const raced = (await call("get")) as { calls: unknown[][] }
     assert.equal(raced.calls.filter((row) => row[0] === "claw").length, 0)
@@ -121,8 +134,8 @@ async function main() {
     await install()
     await page.getByRole("checkbox", { name: /我已核对这个正式版本/ }).check()
     await click("授权此正式版本")
-    await click("核对当前 Claw 组合")
-    await click("保留其他选择并应用此组合")
+    await click(/^(加入当前聊天|重新核对当前选择)$/)
+    await click("确认加入并保留其他选择")
     await call("failNew")
     await click("新聊天使用此助手")
     await page.getByRole("alert").waitFor()
@@ -153,11 +166,11 @@ async function main() {
     await click("授权此正式版本")
     await page.getByText(/正式授权结果待核对/).waitFor()
     await click("只读核对正式授权状态")
-    await click("核对当前 Claw 组合")
+    await click(/^(加入当前聊天|重新核对当前选择)$/)
     await call("failApply")
-    await click("保留其他选择并应用此组合")
+    await click("确认加入并保留其他选择")
     await page.getByText(/应用结果尚未确认/).waitFor()
-    await click("保留其他选择并应用此组合")
+    await click("确认加入并保留其他选择")
     await page.getByRole("button", { name: "新聊天使用此助手" }).waitFor()
     const partialClaw = (await call("get")) as { calls: unknown[][] }
     assert.equal(partialClaw.calls.filter((row) => row[0] === "grant").length, 1)
@@ -171,11 +184,11 @@ async function main() {
     await install()
     await page.getByRole("checkbox", { name: /我已核对这个正式版本/ }).check()
     await click("授权此正式版本")
-    await click("核对当前 Claw 组合")
+    await click(/^(加入当前聊天|重新核对当前选择)$/)
     await call("failAfterApply")
-    await click("保留其他选择并应用此组合")
+    await click("确认加入并保留其他选择")
     await page.getByRole("alert").waitFor()
-    await click("核对当前 Claw 组合")
+    await click(/^(加入当前聊天|重新核对当前选择)$/)
     await page.getByRole("button", { name: "新聊天使用此助手" }).waitFor()
     const appliedRecovery = (await call("get")) as { calls: unknown[][] }
     assert.equal(
@@ -202,9 +215,9 @@ async function main() {
     )
     await call("remount")
     await page.getByRole("button", { name: "新聊天使用此助手" }).waitFor()
-    await page.getByText("4. 已加入当前助手 · 回看组合", { exact: true }).click()
-    await click("核对当前 Claw 组合")
-    assert(await page.getByRole("button", { name: "保留其他选择并应用此组合" }).isDisabled())
+    await page.getByText("4. 已加入当前聊天 · 回看选择", { exact: true }).click()
+    await click(/^(加入当前聊天|重新核对当前选择)$/)
+    assert(await page.getByRole("button", { name: "确认加入并保留其他选择" }).isDisabled())
     await click("新聊天使用此助手")
     const remounted = (await call("get")) as { calls: unknown[][] }
     assert.equal(remounted.calls.filter((row) => row[0] === "create").length, 1)
@@ -229,7 +242,7 @@ async function main() {
     await page.getByRole("button", { name: "重新检查复用位置" }).waitFor()
     await call("releaseCapacity")
     await click("重新检查复用位置")
-    await page.getByRole("heading", { name: /保存并正式复用/ }).waitFor()
+    await page.getByRole("heading", { name: /保存并在其他聊天使用/ }).waitFor()
     assert.deepEqual(errors, [])
     writeFileSync(
       join(output, "report.json"),

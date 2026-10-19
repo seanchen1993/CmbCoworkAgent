@@ -3,6 +3,7 @@ import type { ModIdentity, ModObject } from "../../../shared/mods/types"
 import { ModFunctionError, type ModOrigin } from "../../../shared/mods/v2/contracts"
 import { ModError } from "../errors"
 import { assertFunctionGrant, functionCallIdentity, runFunctionHostCall } from "./host-call"
+import { withRegisteredFunctionAction } from "./execution-context"
 
 interface RegisteredToolHost {
   assertScope(workspace: string, threadId: string): void
@@ -52,7 +53,9 @@ export class FunctionRegisteredTools {
         assertLive,
         admit: () => this.host.admit(identity, target, input, signal, caller),
         claim: () => this.store.claim(identity.callId, target, input, identity),
-        invoke: run,
+        invoke: () => origin === "model"
+          ? withRegisteredFunctionAction(workspace, threadId, run)
+          : run(),
         status: (result) =>
           typeof result.deny === "string" || result.isError === true ? "failed" : "succeeded",
         publish: (result) => this.host.publish(identity, result, signal)

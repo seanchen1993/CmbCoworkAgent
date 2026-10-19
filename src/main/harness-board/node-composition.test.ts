@@ -75,6 +75,55 @@ const input = {
 } as HarnessFeatureCreateInput
 
 describe("native project node composition", () => {
+  it("expands admitted business required dependencies even when optional inclusion is off", async () => {
+    const f = fixture()
+    f.context.config.templates[0].requiredNodes = []
+    f.context.strictBusinessSelection = { templateId: "custom", nodes: [
+      { id: "prepare", requires: [], missingInputs: [] },
+      { id: "build", requires: ["prepare"], missingInputs: [] },
+      { id: "finish", requires: ["build"], missingInputs: [] }
+    ] }
+    const plan = await f.service.preview("owner", "work", "p", "custom", ["finish"], () => {}, false)
+    expect(plan.ordered).toEqual(["prepare", "build", "finish"])
+    expect(plan.added).toEqual(["prepare", "build"])
+    expect(f.run.mock.calls[0][0].invocation.args).toContain("prepare,build,finish")
+    expect(f.run.mock.calls[0][0].invocation.args).not.toContain("--auto-include")
+  })
+  it("rejects a required input drop despite legacy entry guidance on an admitted business workflow", () => {
+    const f = fixture()
+    f.context.strictBusinessSelection = { templateId: "custom", nodes: [
+      { id: "prepare", requires: [], missingInputs: [] },
+      { id: "build", requires: ["prepare"], missingInputs: [] },
+      { id: "finish", requires: ["build"], missingInputs: [] }
+    ] }
+    f.context.nodes = f.context.config.nodes.map((node) => ({ ...node, outputs: [],
+      inputs: node.id === "build" ? ["plan.json"] : [], optionalInputs: [],
+      entryInputs: [{ path: "plan.json", guidance: "Existing fallback is not permission to drop" }]
+    }))
+    expect(() => validateNativeClosure(f.context, "custom", ["finish"], {
+      ok: true, mode: "closure", closure: { nodes: ["prepare", "build", "finish"],
+        dropped: { build: ["plan.json"] } }
+    })).toThrow("必需输入")
+  })
+  it("honors optional input producers in main and keeps Python from adding a different closure", async () => {
+    for (const includeOptional of [false, true]) {
+      const f = fixture()
+      f.context.config.templates[0].requiredNodes = []
+      f.context.strictBusinessSelection = { templateId: "custom", nodes: [
+        { id: "prepare", requires: [], missingInputs: [] },
+        { id: "build", requires: [], missingInputs: [] },
+        { id: "finish", requires: ["build"], optional: ["prepare"], missingInputs: [] }
+      ] }
+      f.run.mockImplementation(async (invocation) => ({ ok: true, mode: "closure", closure: {
+        nodes: invocation.invocation.args[invocation.invocation.args.indexOf("--nodes") + 1].split(","),
+        dropped: {}
+      } }))
+      const plan = await f.service.preview("owner", "work", "p", "custom", ["finish"], () => {}, includeOptional)
+      expect(plan.ordered).toEqual(includeOptional ? ["prepare", "build", "finish"] : ["build", "finish"])
+      expect(plan.includeOptionalDependencies).toBe(includeOptional)
+      expect(f.run.mock.calls[0][0].invocation.args).not.toContain("--auto-include")
+    }
+  })
   it("rechecks source identity after queued preparation and before the real adapter spawn", async () => {
     const f = fixture()
     const plan = await f.service.preview("owner", "work", "p", "custom", ["build"], () => {})
@@ -148,8 +197,40 @@ describe("native project node composition", () => {
     expect(nativeClosureInvocation(context, "custom", ["build"]).invocation.args.slice(-7)).toEqual(
       ["--mode", "closure", "--template", "custom", "--nodes", "build", "--auto-include"]
     )
+    expect(
+      nativeClosureInvocation(context, "custom", ["build"], false).invocation.args.slice(-6)
+    ).toEqual(["--mode", "closure", "--template", "custom", "--nodes", "build"])
+    expect(() => nativeClosureInvocation(context, "custom", ["build"], "false" as never)).toThrow(
+      "上游步骤选择无效"
+    )
     context.invocation.invocation.args.push("--execute", "business")
     expect(() => nativeClosureInvocation(context, "custom", ["build"])).toThrow()
+  })
+  it("freezes optional-upstream choice and creates only the reviewed subset with declared omissions", async () => {
+    const f = fixture()
+    f.context.nodes = f.context.config.nodes.map((node) => ({
+      ...node,
+      inputs: ["optional.md"],
+      optionalInputs: ["optional.md"],
+      outputs: []
+    }))
+    f.run.mockResolvedValueOnce({
+      ok: true,
+      mode: "closure",
+      closure: { nodes: ["build", "finish"], dropped: { build: ["optional.md"] } }
+    })
+    const plan = await f.service.preview("owner", "work", "p", "custom", ["build"], () => {}, false)
+    expect(plan.includeOptionalDependencies).toBe(false)
+    expect(f.run.mock.calls[0][0].invocation.args).not.toContain("--auto-include")
+    expect(plan.ordered).toEqual(["build", "finish"])
+    expect(plan.optionalOmissions).toEqual([{ nodeId: "build", path: "optional.md" }])
+    await f.service.create("owner", "work", plan.planId, input, () => {})
+    expect(f.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        workflowNodes: ["build", "finish"]
+      }),
+      expect.any(Function)
+    )
   })
   it("allows only explicitly optional original inputs and reports them for review", () => {
     const f = fixture()
@@ -171,6 +252,52 @@ describe("native project node composition", () => {
     expect(() => validateNativeClosure(f.context, "custom", ["build"], response)).toThrow(
       "必需输入"
     )
+  })
+  it("keeps explicit required-input entry guidance distinct and requires plan confirmation before create", async () => {
+    const f = fixture()
+    f.context.nodes = f.context.config.nodes.map((node) => ({
+      ...node,
+      inputs: node.id === "build" ? ["plan.json", "optional.md"] : [],
+      optionalInputs: node.id === "build" ? ["optional.md"] : [],
+      outputs: [],
+      entryInputs:
+        node.id === "build"
+          ? [{ path: "plan.json", guidance: "先回到原计划步骤补齐实际计划。" }]
+          : []
+    }))
+    f.run.mockResolvedValueOnce({
+      ok: true,
+      mode: "closure",
+      closure: {
+        nodes: ["build", "finish"],
+        dropped: { build: ["plan.json", "optional.md"] }
+      }
+    })
+    const plan = await f.service.preview("owner", "work", "p", "custom", ["build"], () => {}, false)
+    expect(plan.optionalOmissions).toEqual([{ nodeId: "build", path: "optional.md" }])
+    expect(plan.entryInputFallbacks).toEqual([
+      { nodeId: "build", path: "plan.json", guidance: "先回到原计划步骤补齐实际计划。" }
+    ])
+    await expect(f.service.create("owner", "work", plan.planId, input, () => {})).rejects.toThrow(
+      "入口输入要求"
+    )
+    expect(f.create).not.toHaveBeenCalled()
+    await f.service.create("owner", "work", plan.planId, input, () => {}, true)
+    expect(f.create).toHaveBeenCalledTimes(1)
+    for (const entryInputs of [
+      [],
+      [{ path: "plan.json", guidance: " " }],
+      [{ path: "invented", guidance: "Cannot declare a path absent from original inputs" }]
+    ]) {
+      f.context.nodes[1].entryInputs = entryInputs
+      expect(() =>
+        validateNativeClosure(f.context, "custom", ["build"], {
+          ok: true,
+          mode: "closure",
+          closure: { nodes: ["build", "finish"], dropped: { build: ["plan.json"] } }
+        })
+      ).toThrow("必需输入")
+    }
   })
   it("rejects optional omissions from a node outside the reviewed closure", () => {
     const f = fixture()

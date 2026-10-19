@@ -1,4 +1,5 @@
-import { getGlobalMcpCapabilityService } from "../../mcp/capability-service"
+import { getGlobalMcpCapabilityService, getProjectMcpCapabilityService } from "../../mcp/capability-service"
+import { currentRuntimePluginSource } from "../../plugins/runtime-source-scope"
 import { createHookScope, resolveEnabledHooksForRun } from "../../hooks/scope"
 import { withFunctionCommandBinding } from "./command-binding"
 import { getModsManager } from "../manager"
@@ -35,7 +36,8 @@ async function bindFunctionMcpCommand(
   let release = () => {}
   createScopedMcpCapabilityService(
     restrictClawMcpService(
-      getGlobalMcpCapabilityService(),
+      currentRuntimePluginSource()
+        ? getProjectMcpCapabilityService() : getGlobalMcpCapabilityService(),
       getModsManager()?.clawProfile(workspace, threadId)?.mcp
     ),
     scope,

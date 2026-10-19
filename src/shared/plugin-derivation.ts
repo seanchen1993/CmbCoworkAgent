@@ -51,6 +51,13 @@ export interface PluginDerivationProposal {
 
 /** All paths, source ownership and family identity remain in the main process. */
 export interface PluginDerivationApi {
+  prepareFlowComposition(
+    input: PluginDerivationScope & {
+      copyId: string
+      expectedDigest: string
+      requestId: string
+    }
+  ): Promise<PluginDerivationProposal>
   revise(
     input: PluginDerivationScope & { copyId: string; requestId: string }
   ): Promise<PluginDerivationCopy>

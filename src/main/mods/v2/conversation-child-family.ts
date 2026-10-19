@@ -82,7 +82,9 @@ interface SharedChild<T extends object> {
   retire?: () => void
 }
 
-type Parent<T extends object> = FunctionConversationChildParentCapture<T>
+type Parent<T extends object> = FunctionConversationChildParentCapture<T> & {
+  readonly captureIndependentCurrent?: () => () => void
+}
 interface Child<T extends object> {
   readonly parent: Parent<T>
   readonly input: FunctionConversationIndependentChildInput
@@ -218,7 +220,8 @@ export class FunctionConversationChildFamilies<T extends object> {
       target: Object.freeze({ ...input.target,
         incarnation: Object.freeze({ ...input.target.incarnation }) }),
       assertCurrent: native ? Reflect.apply(familyBind, native.current, [input]) as () => void :
-        input.assertCurrent.bind(input), assertFactory: input.assertFactory.bind(input) })
+        input.assertCurrent.bind(input), assertFactory: input.assertFactory.bind(input),
+      captureIndependentCurrent: native?.captureIndependentCurrent })
     parent.assertFactory()
     parent.assertCurrent()
     parent.signal.throwIfAborted()
@@ -263,12 +266,17 @@ export class FunctionConversationChildFamilies<T extends object> {
     const key = this.key(parent.target.workspace, input.physicalThreadId)
     if (this.current.has(key) || this.current.size + this.liveShared.size >= 32)
       fail("MODS_CONVERSATION_REGISTRATION_CONFLICT")
+    // The original factory is live above, and this physical child owns its exact lease below.
+    // Only the native parent receipt can supply this source/branch guard; never a Guest callback.
+    const independentCurrent = parent.captureIndependentCurrent?.()
+    const ownedParent = independentCurrent
+      ? Object.freeze({ ...parent, assertCurrent: independentCurrent }) : parent
     const proof = Object.freeze({ [childBrand]: true as const })
     const captured = Object.freeze({ ...input,
       checkpointIncarnation: Object.freeze(captureThreadIncarnation(row)),
       assertCurrent: input.assertCurrent.bind(input) })
     const controller = new AbortController()
-    const child: Child<T> = { parent, input: captured, controller,
+    const child: Child<T> = { parent: ownedParent, input: captured, controller,
       signal: AbortSignal.any([parent.signal, captured.signal, controller.signal]),
       leaseCurrent, proof, live: true }
     this.children.set(proof, child)

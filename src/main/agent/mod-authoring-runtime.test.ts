@@ -29,7 +29,7 @@ afterEach(() => {
 it("admits the real creator tool and its built-in guidance without personal skills or a source checkout", async () => {
   fixture()
   const tools = createModAuthoringRuntimeTools(scope)
-  expect(tools.map((tool) => tool.name)).toEqual(["mod_authoring", "mod_composition"])
+  expect(tools.map((tool) => tool.name)).toEqual(["mod_authoring", "mod_composition", "mod_configuration", "mod_business"])
   expect(modAuthoringRuntimePrompt(tools)).not.toBeNull()
   const overview = JSON.parse(await tools[0].invoke({ action: "catalog" }))
   expect(overview).toMatchObject({ ok: true, result: { contract: "cmb-desktop-authoring-v2" } })
@@ -80,4 +80,25 @@ it("describes only the creator tools retained by the actual runtime allowlist", 
   expect(composition).toContain("无法为缺失能力生成源码")
   expect(composition).not.toContain("catalogSection")
   expect(composition).toContain("不自动重放副作用")
+  expect(composition).not.toContain("request_input")
+  const configuration = modAuthoringRuntimePrompt([{ name: "mod_configuration" }])
+  expect(configuration).toContain("request_input")
+  expect(configuration).toContain("当前未提供源码制作和组合工具")
+  const two = modAuthoringRuntimePrompt([{ name: "mod_authoring" }, { name: "mod_composition" }])
+  expect(two).not.toContain("request_input")
+  expect(two).toContain("本轮未提供插件用户配置工具")
+})
+
+it("guides business candidates through an uninstalled native trial before separate delivery", () => {
+  const business = modAuthoringRuntimePrompt([{ name: "mod_business" }])
+  expect(business).toContain("request_trial(previewId,goal)")
+  expect(business).toContain("不先安装候选")
+  expect(business).toContain("选择实际业务上下文")
+  expect(business).toContain("创建新的隔离试用，不复用旧目录或批准")
+  expect(business).toContain("停止和物理收尾结果分开核对")
+  expect(business).toContain("阶段回退调试仍不提供")
+  expect(business).not.toContain("后续通过原项目入口运行")
+  expect(modAuthoringRuntimePrompt([{ name: "mod_authoring" }])).not.toContain(
+    "request_trial(previewId,goal)"
+  )
 })

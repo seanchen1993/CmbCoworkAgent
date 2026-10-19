@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto"
 import { isDeepStrictEqual } from "node:util"
 import { prepareNodeCompositionFiles } from "./derivation-node-composition"
+import { prepareFlowCompositionFiles } from "./derivation-flow-composition"
 import { mkdir, mkdtemp, rename, rm, writeFile, readFile } from "node:fs/promises"
 import {
   existsSync,
@@ -307,7 +308,7 @@ export class PluginDerivationService {
     owner: string,
     proposal: PluginDerivationProposal,
     guard: () => void,
-    kind: "skill" | "node-composition" = "skill"
+    kind: "skill" | "node-composition" | "flow-composition" = "skill"
   ) {
     return this.locked(async () => {
       const snapshot = await this.proposalSnapshot(
@@ -322,6 +323,11 @@ export class PluginDerivationService {
         !isDeepStrictEqual(proposal.files, prepareNodeCompositionFiles(snapshot).files)
       )
         throw Error("节点组合候选不符合宿主确定性配置协议")
+      if (
+        kind === "flow-composition" &&
+        !isDeepStrictEqual(proposal.files, prepareFlowCompositionFiles(snapshot).files)
+      )
+        throw Error("流程组合候选不符合宿主确定性配置协议")
       const beforeRecord = structuredClone(record)
       const transactionId = randomUUID()
       const staging = join(this.root, proposal.copyId, `proposal-${transactionId}`)
@@ -343,6 +349,19 @@ export class PluginDerivationService {
           changes.delete(file.path)
           return { ...file, bytes: Buffer.from(changed.after, "utf8") }
         })
+        if (kind === "flow-composition") {
+          // The exact deterministic file set was regenerated above; no caller-chosen writes.
+          for (const changed of changes.values()) {
+            if (changed.before !== "") throw Error("新增配置不能覆盖已有文件")
+            files.push({
+              path: changed.path,
+              bytes: Buffer.from(changed.after, "utf8"),
+              mode: 0o644,
+              digest: ""
+            })
+          }
+          changes.clear()
+        }
         if (changes.size) throw Error("修改建议包含未知文件")
         await writeDerivationFiles(staging, files)
         const staged = await snapshotDerivationSource(staging)
@@ -364,10 +383,10 @@ export class PluginDerivationService {
               record.status = "changed"
               record.changes.push(
                 ...staged.files.flatMap((file) => {
-                  const previous = snapshot.files.find((item) => item.path === file.path)!
-                  return previous.digest === file.digest
+                  const previous = snapshot.files.find((item) => item.path === file.path)
+                  return previous?.digest === file.digest
                     ? []
-                    : [{ path: file.path, before: previous.digest, after: file.digest }]
+                    : [{ path: file.path, before: previous?.digest ?? "", after: file.digest }]
                 })
               )
               try {

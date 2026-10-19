@@ -101,8 +101,10 @@ it("rejects foreign frames and stale workspace before source or file reads", () 
   const f = fixture()
   f.frame.url = "http://untrusted.invalid"
   expect(() => f.call("sources")).toThrow("来源窗口")
+  expect(() => f.call("prepare-flow-composition")).toThrow("来源窗口")
   f.frame.url = "http://localhost:5173/"
   state.workspace = "C:/other"
+  expect(() => f.call("prepare-flow-composition")).toThrow("工作区")
   expect(() => f.call("read-file", { ...f.scope, copyId: "id", path: "anything" })).toThrow(
     "工作区"
   )

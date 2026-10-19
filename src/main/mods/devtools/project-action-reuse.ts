@@ -1,5 +1,8 @@
 import { clawActionObject, type ClawActionDescriptor } from "../../../shared/mods/claw-actions"
-import { parseProjectRuntimeManifest } from "../../../shared/project-runtime"
+import {
+  parseProjectRuntimeManifest,
+  preserveProjectRuntimeEnvelope
+} from "../../../shared/project-runtime"
 import {
   PROJECT_ACTION_LOCK_PATH,
   type ProjectActionBinding
@@ -53,7 +56,14 @@ export function bindProjectPublicAction(input: {
       .filter((file) => file.path !== PROJECT_ACTION_LOCK_PATH)
       .map((file) =>
         file.path === sourceFile!.path
-          ? { path: file.path, text: `${JSON.stringify(manifest, null, 2)}\n` }
+          ? {
+              path: file.path,
+              text: `${JSON.stringify(
+                preserveProjectRuntimeEnvelope(JSON.parse(sourceFile!.text), manifest),
+                null,
+                2
+              )}\n`
+            }
           : file
       ),
     { path: PROJECT_ACTION_LOCK_PATH, text: `${JSON.stringify(lock, null, 2)}\n` }

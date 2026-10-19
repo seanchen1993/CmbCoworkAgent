@@ -1,12 +1,17 @@
 import { randomUUID } from "node:crypto"
 import { basename, join, resolve } from "node:path"
 import type { NativeNodeCatalog, NativeNodePlan } from "../../shared/node-composition"
+import {
+  closeBusinessModSelection,
+  type BusinessModSelectionPolicy
+} from "../plugins/business-mod-selection"
 import type {
   HarnessFeatureCreateInput,
   HarnessFeatureCreateResult
 } from "../../shared/harness-board-types"
 
 export interface NativeNodeContext extends NativeNodeCatalog {
+  strictBusinessSelection?: BusinessModSelectionPolicy
   fingerprint: string
   sourceIdentity: string
   invocation: { cwd: string; invocation: { executable: string; args: string[] } }
@@ -16,8 +21,10 @@ export interface NativeNodeContext extends NativeNodeCatalog {
 export function nativeClosureInvocation(
   context: NativeNodeContext,
   template: string,
-  ids: string[]
+  ids: string[],
+  includeOptionalDependencies = true
 ) {
+  if (typeof includeOptionalDependencies !== "boolean") throw Error("可选输入的上游步骤选择无效。")
   const { cwd, invocation } = context.invocation
   const expected = resolve(cwd, "hooks/inspect_workflow_templates.py")
   const scriptIndex = invocation.args.findIndex((arg) => resolve(cwd, arg) === expected)
@@ -43,17 +50,18 @@ export function nativeClosureInvocation(
         template,
         "--nodes",
         ids.join(","),
-        "--auto-include"
+        ...(includeOptionalDependencies && context.strictBusinessSelection?.templateId !== template
+          ? ["--auto-include"] : [])
       ]
     }
   }
 }
 
-export function validateNativeClosure(
+export function nativeClosureSelectedNodes(
   context: NativeNodeContext,
   templateId: string,
   selected: string[],
-  response: unknown
+  includeOptionalDependencies = true
 ) {
   const template = context.config.templates.find(
     (item) => item.id === templateId && item.templateType === "custom"
@@ -70,6 +78,23 @@ export function validateNativeClosure(
     new Set(selected).size !== selected.length
   )
     throw Error("节点选择无效，请重新选择。")
+  return context.strictBusinessSelection?.templateId === templateId
+    ? closeBusinessModSelection(context.strictBusinessSelection, selected, includeOptionalDependencies)
+    : selected
+}
+
+export function validateNativeClosure(
+  context: NativeNodeContext,
+  templateId: string,
+  selected: string[],
+  response: unknown,
+  includeOptionalDependencies = true
+) {
+  const requiredSelection = nativeClosureSelectedNodes(context, templateId, selected, includeOptionalDependencies)
+  const template = context.config.templates.find((item) => item.id === templateId)!
+  const known = new Set(context.config.nodes.map((node) => node.id))
+  const validId = (id: unknown): id is string => typeof id === "string" && known.has(id)
+  const strict = context.strictBusinessSelection?.templateId === templateId
   const value = response as {
     ok?: unknown
     mode?: unknown
@@ -90,6 +115,7 @@ export function validateNativeClosure(
   )
     throw Error("节点依赖检查未通过，不能省略原有输入或检查。")
   const optionalOmissions: Array<{ nodeId: string; path: string }> = []
+  const entryInputFallbacks: Array<{ nodeId: string; path: string; guidance: string }> = []
   for (const [nodeId, paths] of Object.entries(closure.dropped)) {
     const node = context.nodes.find((item) => item.id === nodeId)
     if (
@@ -97,18 +123,44 @@ export function validateNativeClosure(
       !closure.nodes.includes(nodeId) ||
       !Array.isArray(paths) ||
       paths.length > 64 ||
-      !paths.every((path) => typeof path === "string" && node.optionalInputs.includes(path))
+      !paths.every(
+        (path) =>
+          typeof path === "string" &&
+          node.inputs.includes(path) &&
+          (node.optionalInputs.includes(path) ||
+            (!strict &&
+            node.entryInputs?.some(
+              (entry) =>
+                entry.path === path &&
+                typeof entry.guidance === "string" &&
+                entry.guidance.trim() &&
+                entry.guidance.length <= 4000
+            )))
+      )
     )
       throw Error("节点依赖检查未通过，不能省略原有必需输入或检查。")
-    for (const path of paths) optionalOmissions.push({ nodeId, path })
+    for (const path of paths) {
+      if (node.optionalInputs.includes(path)) optionalOmissions.push({ nodeId, path })
+      else {
+        const entry = node.entryInputs!.find((item) => item.path === path)!
+        entryInputFallbacks.push({ nodeId, path, guidance: entry.guidance })
+      }
+    }
   }
   const result = new Set(closure.nodes as string[])
-  if (![...selected, ...template.requiredNodes].every((id) => result.has(id)))
+  if (![...requiredSelection, ...template.requiredNodes].every((id) => result.has(id)))
     throw Error("节点检查遗漏了已选步骤或必选步骤，请重新检查。")
+  if (strict && JSON.stringify(closure.nodes) !== JSON.stringify(requiredSelection))
+    throw Error("业务步骤闭包与已核验的来源不一致，请重新检查。")
   const ordered = context.config.nodes.filter((node) => result.has(node.id)).map((node) => node.id)
   if (JSON.stringify(ordered) !== JSON.stringify(closure.nodes))
     throw Error("节点顺序与原项目流程不一致。")
-  return { ordered, added: ordered.filter((id) => !selected.includes(id)), optionalOmissions }
+  return {
+    ordered,
+    added: ordered.filter((id) => !selected.includes(id)),
+    optionalOmissions,
+    entryInputFallbacks
+  }
 }
 
 interface Dependencies {
@@ -143,7 +195,8 @@ export class NativeNodeComposition {
     projectId: string,
     templateId: string,
     selected: string[],
-    guard: () => void
+    guard: () => void,
+    includeOptionalDependencies = true
   ) {
     guard()
     if (this.busy.has(owner) || this.busy.size >= 4) throw Error("正在检查节点，请稍候。")
@@ -154,18 +207,17 @@ export class NativeNodeComposition {
       if (this.plans.size >= 64) throw Error("节点预览过多，请稍后重试。")
       const context = await this.deps.context(projectId, workspace)
       // Validate user inputs before any adapter execution.
-      validateNativeClosure(context, templateId, selected, {
-        ok: true,
-        mode: "closure",
-        closure: { nodes: context.config.nodes.map((node) => node.id), dropped: {} }
-      })
+      const requiredSelection = nativeClosureSelectedNodes(context, templateId, selected, includeOptionalDependencies)
       guard()
-      const response = await this.deps.run(nativeClosureInvocation(context, templateId, selected))
-      const { ordered, added, optionalOmissions } = validateNativeClosure(
+      const response = await this.deps.run(
+        nativeClosureInvocation(context, templateId, requiredSelection, includeOptionalDependencies)
+      )
+      const { ordered, added, optionalOmissions, entryInputFallbacks } = validateNativeClosure(
         context,
         templateId,
         selected,
-        response
+        response,
+        includeOptionalDependencies
       )
       const latest = await this.deps.context(projectId, workspace)
       if (latest.fingerprint !== context.fingerprint)
@@ -178,9 +230,11 @@ export class NativeNodeComposition {
         planId: randomUUID(),
         templateId,
         selected,
+        includeOptionalDependencies,
         ordered,
         added,
         optionalOmissions,
+        entryInputFallbacks,
         expiresAt: Date.now() + 30 * 60_000
       }
       this.plans.set(plan.planId, { owner, fingerprint: context.fingerprint, plan, state: "ready" })
@@ -195,7 +249,8 @@ export class NativeNodeComposition {
     workspace: string,
     planId: string,
     input: HarnessFeatureCreateInput,
-    guard: () => void
+    guard: () => void,
+    acknowledgeEntryRequirements = false
   ) {
     guard()
     const record = this.plans.get(planId)
@@ -206,6 +261,8 @@ export class NativeNodeComposition {
     if (record.state === "done" && record.feature === signature)
       return structuredClone(record.result!)
     if (record.state !== "ready") throw Error("这次创建已提交，请先在项目中检查结果。")
+    if (record.plan.entryInputFallbacks.length && acknowledgeEntryRequirements !== true)
+      throw Error("请先确认入口输入要求，进入原项目后按要求补充资料。")
     record.state = "creating"
     try {
       const context = await this.deps.context(input.projectId, workspace)

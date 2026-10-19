@@ -1,3 +1,4 @@
+import { resolveBackendEndpoint } from "./backend-endpoint"
 import type { DownloadedItemFile, MarketApiResponse, MarketItem } from "./market"
 
 interface OrgSkillVersion {
@@ -434,11 +435,21 @@ const ORG_SKILL_ENDPOINTS = {
     const queryParts = [`pageNum=${pageNum}`, `pageSize=${pageSize}`, `queryAll=true`, 'queryType=null']
     if (labelIdsParam) queryParts.push(`labelIds=${labelIdsParam}`)
     if (normalizedKeyword) queryParts.push(`keyword=${encodeURIComponent(normalizedKeyword)}`)
-    return `${ORG_SKILL_GATEWAY_URL}/gw/mgr/open-api/skill/page?${queryParts.join("&")}`
+    return resolveBackendEndpoint(
+      ORG_SKILL_GATEWAY_URL,
+      `/gw/mgr/open-api/skill/page?${queryParts.join("&")}`,
+      "组织技能服务"
+    )
   },
-  labels: `${ORG_SKILL_GATEWAY_URL}/gw/mgr/open-api/skill/labels`,
+  labels: () => resolveBackendEndpoint(
+    ORG_SKILL_GATEWAY_URL, "/gw/mgr/open-api/skill/labels", "组织技能服务"
+  ),
   download: (skillId: number, versionId: number) =>
-    `${ORG_SKILL_GATEWAY_URL}/gw/mgr/open-api/skill/document/download?skillId=${skillId}&versionId=${versionId}`
+    resolveBackendEndpoint(
+      ORG_SKILL_GATEWAY_URL,
+      `/gw/mgr/open-api/skill/document/download?skillId=${skillId}&versionId=${versionId}`,
+      "组织技能服务"
+    )
 }
 
 function normalizeOrgSkillVersionName(version?: string): string {
@@ -758,7 +769,7 @@ export const orgSkillMarketApi = {
 
   async getOrgSkillLabels(): Promise<OrgSkillLabel[]> {
     return withOrgSkillLoginRefresh(async () => {
-      const response = await fetch(ORG_SKILL_ENDPOINTS.labels, {
+      const response = await fetch(ORG_SKILL_ENDPOINTS.labels(), {
         method: "GET",
         headers: {
           "Content-Type": "application/json",

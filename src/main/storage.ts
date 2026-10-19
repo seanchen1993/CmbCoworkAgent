@@ -1,4 +1,4 @@
-import { basename, isAbsolute, join, relative, resolve } from "path"
+import { basename, dirname, isAbsolute, join, relative, resolve } from "path"
 import { createHash } from "crypto"
 import { v4 as uuid } from "uuid"
 import {
@@ -105,7 +105,7 @@ import { getHookDateKey } from "../shared/hook-time"
 import { isProjectModePluginRoot } from "./harness-board/plugin-mode"
 import { derivationVisibility } from "./plugins/derivation-scope"
 import { isDerivationVisibleForProjectMode } from "../shared/skill-visibility"
-import { currentRuntimePluginSource, projectRuntimePluginSources } from "./plugins/runtime-source-scope"
+import { currentRuntimePluginSource, projectRuntimePluginSources, runtimeCapabilityAllowsMcp, currentRuntimeCapabilitySources, type RuntimePluginSourceBinding } from "./plugins/runtime-source-scope"
 
 const OPENWORK_DIR = getCmbCoworkAgentDataRoot()
 const ENV_FILE = join(OPENWORK_DIR, ".env")
@@ -3232,6 +3232,7 @@ export function getPluginsDir(): string {
   return PLUGINS_DIR
 }
 
+/** Reconciliation may remove live bindings, so unreadable inventory must not mean uninstall. */
 export function getInstalledPluginIds(): ReadonlySet<string> {
   getOpenworkDir()
   const parsed: unknown = JSON.parse(readFileSync(PLUGINS_FILE, "utf-8"))
@@ -3244,9 +3245,9 @@ export function getInstalledPluginIds(): ReadonlySet<string> {
 }
 
 export function getPlugins(): PluginMetadata[] {
-  getOpenworkDir()
-  if (!existsSync(PLUGINS_FILE)) return []
   try {
+    // Authority readers need current bytes on every call. A successful read already proves
+    // existence; do not add two filesystem probes to every native source/owner check.
     const content = readFileSync(PLUGINS_FILE, "utf-8")
     const parsed = JSON.parse(content) as unknown
     if (!Array.isArray(parsed)) return []
@@ -3259,6 +3260,8 @@ export function getPlugins(): PluginMetadata[] {
         typeof (item as Record<string, unknown>).path === "string"
     )
   } catch {
+    // Preserve first-use home creation and its original errors, without inventing a registry.
+    getOpenworkDir()
     return []
   }
 }
@@ -3334,7 +3337,8 @@ export function setPluginOriginsBatch(
 }
 
 export function getEnabledPluginSkillsSources(): string[] {
-  if (currentRuntimePluginSource()) return getEnabledPluginSkillSourceMetadata().map(source => source.sourceDir)
+  const binding = currentRuntimePluginSource()
+  if (binding) return readEnabledPluginSkillSourceMetadata(binding).map(source => source.sourceDir)
   if (_pluginSkillsCache) return _pluginSkillsCache
   _pluginSkillsCache = getEnabledPluginSkillSourceMetadata().map((source) => source.sourceDir)
   return _pluginSkillsCache
@@ -3364,7 +3368,32 @@ export interface PluginSkillSourceMetadata {
 }
 
 export function getEnabledPluginSkillSourceMetadata(): PluginSkillSourceMetadata[] {
-  const scoped = Boolean(currentRuntimePluginSource())
+  return readEnabledPluginSkillSourceMetadata(currentRuntimePluginSource())
+}
+
+/** Reuse one fresh lexical observation only within this synchronous metadata projection. */
+function readEnabledPluginSkillSourceMetadata(
+  bound: Readonly<RuntimePluginSourceBinding> | undefined
+): PluginSkillSourceMetadata[] {
+  if (bound?.capabilitySources) {
+    const selected: PluginSkillSourceMetadata[] = bound.capabilitySources.map(item => ({
+      sourceDir: dirname(join(item.plugin.path, item.capability.entry)),
+      pluginId: item.plugin.id,
+      pluginName: item.plugin.name,
+      pluginRoot: item.plugin.path,
+      isProjectModePlugin: true,
+      maxDepth: 0
+    }))
+    if (bound.mode !== "capabilities" || bound.preserveParentContext) {
+      const plugin = bound.plugin
+      const manifest = readPluginManifest(plugin.path)?.manifest ?? null
+      for (const source of getPluginSkillSearchSources(plugin.path, manifest))
+        selected.push({ sourceDir: source.sourceDir, pluginId: plugin.id, pluginName: plugin.name,
+          pluginRoot: plugin.path, isProjectModePlugin: true, maxDepth: source.maxDepth ?? 16 })
+    }
+    return selected
+  }
+  const scoped = Boolean(bound)
   if (!scoped && _pluginSkillSourcesCache) return _pluginSkillSourcesCache
   // Don't gate on the stored `skillCount` — that value is computed once at
   // install time and stays stale if the in-tree layout shifts (or was wrong
@@ -3406,13 +3435,14 @@ export function getEnabledPluginMcpConfigs(): Record<string, PluginMcpServerConf
   const configs: Record<string, PluginMcpServerConfig> = {}
   for (const plugin of plugins) {
     const bound = currentRuntimePluginSource()?.plugin.id
-    if (!isDerivationVisibleForProjectMode({ pluginId: plugin.id,
+    if (!currentRuntimeCapabilitySources() && !isDerivationVisibleForProjectMode({ pluginId: plugin.id,
       ...derivationVisibility(plugin.id) }, { projectMode: Boolean(bound), boundPluginId: bound }))
       continue
     const mcpJsonPath = join(plugin.path, ".mcp.json")
     const servers = parseMcpJsonFile(mcpJsonPath)
     if (!servers) continue
     for (const [name, cfg] of Object.entries(servers)) {
+      if (runtimeCapabilityAllowsMcp(plugin.id, name) === false) continue
       configs[`plugin:${plugin.id}/${name}`] = cfg
     }
   }
@@ -4285,7 +4315,7 @@ function buildPluginHookId(pluginId: string, rawId: unknown, index: number): str
   return `plugin:${pluginId}/${typeof rawId === "string" ? rawId : String(index)}`
 }
 
-function parsePluginHooks(plugin: PluginMetadata): PluginHookMetadata[] {
+export function parsePluginHooks(plugin: PluginMetadata): PluginHookMetadata[] {
   const hooksRelPath = plugin.hookPath ?? DEFAULT_PLUGIN_HOOKS_PATH
   const hooksFilePath = join(plugin.path, hooksRelPath)
   if (!existsSync(hooksFilePath)) return []
@@ -4386,7 +4416,7 @@ export function invalidatePluginHooksCache(): void {
 
 export function getEnabledPluginHooks(): HookConfig[] {
   if (currentRuntimePluginSource()) return projectRuntimePluginSources(getPlugins())
-    .filter(plugin => plugin.enabled && (plugin.hookCount ?? 0) > 0)
+    .filter(plugin => plugin.enabled)
     .flatMap(plugin => parsePluginHooks(plugin))
   if (_pluginHooksCache) return _pluginHooksCache
   const plugins = getPlugins().filter((p) => p.enabled && (p.hookCount ?? 0) > 0)

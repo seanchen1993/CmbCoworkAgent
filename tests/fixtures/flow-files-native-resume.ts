@@ -139,7 +139,10 @@ async function child(mode: string, directory: string, baseUrl: string) {
     }
   })
   const flow = new FlowManager(store, host)
-  const timeout = setTimeout(() => rejectFinished(Error("NATIVE_FLOW_FIXTURE_TIMEOUT")), 40000)
+  const timeout = setTimeout(() => {
+    console.error("Native flow timeout state", JSON.stringify(store.runs(workspace, threadId)))
+    rejectFinished(Error("NATIVE_FLOW_FIXTURE_TIMEOUT"))
+  }, 40000)
   try {
     if (mode === "start") {
       const definition = flow.save(

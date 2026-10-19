@@ -101,10 +101,10 @@ const fixtureBody = `
 `
 async function setup(page: Page) {
   await mount(page, fixtureBody)
-  await page.getByRole("button", { name: "表单演练 · v1", exact: true }).click()
+  await page.getByRole("button", { name: "表单演练", exact: true }).click()
 }
 const save = (page: Page) => page.getByRole("button", { name: "保存流程", exact: true })
-const run = (page: Page) => page.getByRole("button", { name: "运行已保存版本", exact: true })
+const run = (page: Page) => page.getByRole("button", { name: "去这段聊天使用", exact: true })
 const field = (page: Page, name: string) => page.getByLabel(`动作输入 · ${name}`, { exact: true })
 const setting = (page: Page, name: string) =>
   page.getByLabel(`设置 动作输入 · ${name}`, { exact: true })
@@ -134,7 +134,7 @@ async function typedForms(page: Page) {
   await page.getByLabel("设置 动作配置 · 严格模式", { exact: true }).check()
   await page.getByLabel("动作配置 · 严格模式", { exact: true }).selectOption("false")
   await save(page).click()
-  await page.getByRole("button", { name: "表单演练 · v2", exact: true }).waitFor()
+  await page.getByText("已保存修订 2，可开始运行。", { exact: true }).waitFor()
   const value = await saved(page)
   assert.deepEqual(value.steps[0].input, {
     path: "src/order.ts",
@@ -154,7 +154,7 @@ async function typedForms(page: Page) {
   await page.getByRole("button", { name: "动作输入：表单", exact: true }).click()
   await setting(page, "启用标志").uncheck()
   await save(page).click()
-  await page.getByRole("button", { name: "表单演练 · v3", exact: true }).waitFor()
+  await page.getByText("已保存修订 3，可开始运行。", { exact: true }).waitFor()
   assert.equal(Object.hasOwn((await saved(page)).steps[0].input, "enabled"), false)
   pass(
     "typed fields preserve false, zero, empty string, absent values and unknown nested data; save never executes"
@@ -169,19 +169,20 @@ async function draftGuards(page: Page) {
   await page.getByLabel("动作输入", { exact: true }).fill("{")
   assert.equal(await save(page).isDisabled(), true)
   assert.equal(await run(page).isDisabled(), true)
-  assert.equal(
-    await page.getByRole("button", { name: "到聊天启动此流程", exact: true }).isDisabled(),
-    true
-  )
+  assert.equal(await run(page).count(), 1, "One native entry owns use in chat")
+  await run(page).evaluate(element => element.click())
+  assert.deepEqual(await page.evaluate("window.fixture.navigation()"), [],
+    "Invalid input cannot navigate or select a task through the consolidated entry")
+  assert.equal(await page.evaluate("window.fixture.calls.some(c=>c[0]==='start'||c[0]==='save')"), false)
   await page.getByRole("button", { name: "配置步骤：独立检视", exact: true }).click()
   assert.equal(await save(page).isDisabled(), true)
   await page.getByRole("button", { name: "配置步骤：准备文件", exact: true }).click()
   assert.equal(await page.getByLabel("动作输入", { exact: true }).inputValue(), "{")
   page.once("dialog", (dialog) => dialog.dismiss())
-  await page.getByRole("button", { name: "表单演练 · v1", exact: true }).click()
+  await page.getByRole("button", { name: "表单演练", exact: true }).click()
   assert.equal(await page.getByLabel("动作输入", { exact: true }).inputValue(), "{")
   page.once("dialog", (dialog) => dialog.accept())
-  await page.getByRole("button", { name: "表单演练 · v1", exact: true }).click()
+  await page.getByRole("button", { name: "表单演练", exact: true }).click()
   await field(page, "文件路径").waitFor()
   assert.equal(await field(page, "文件路径").inputValue(), "before.ts")
   assert.equal(await run(page).isEnabled(), true)
@@ -190,7 +191,7 @@ async function draftGuards(page: Page) {
     false
   )
   pass(
-    "invalid-only JSON edits block saved-version execution and chat, survive step switches, reset only after explicit discard"
+    "invalid-only JSON edits block the saved-step chat entry, survive step switches, reset only after explicit discard"
   )
 
   await setting(page, "数量").check()
@@ -202,7 +203,7 @@ async function draftGuards(page: Page) {
   assert.equal(await field(page, "数量").inputValue(), "-")
   await field(page, "数量").fill("2")
   await save(page).click()
-  await page.getByRole("button", { name: "表单演练 · v2", exact: true }).waitFor()
+  await page.getByText("已保存修订 2，可开始运行。", { exact: true }).waitFor()
   assert.equal((await saved(page)).steps[0].input.limit, 2)
   pass("unfinished numeric drafts cannot save previous values when changing editor modes")
 }
@@ -217,7 +218,7 @@ async function sources(page: Page) {
   await choices.selectOption("/payload")
   await page.getByLabel("任务目标", { exact: true }).fill("检视本次真实文件")
   await save(page).click()
-  await page.getByRole("button", { name: "表单演练 · v2", exact: true }).waitFor()
+  await page.getByText("已保存修订 2，可开始运行。", { exact: true }).waitFor()
   const value = await saved(page)
   assert.deepEqual(value.steps[1].input, {})
   assert.deepEqual(value.steps[1].inputFrom, { stepId: "prepare", path: "/payload" })
@@ -266,7 +267,7 @@ async function disabledSteps(page: Page) {
     host.render(<FlowsPanel threadId='a'/>);
   `
   )
-  await page.getByRole("button", { name: "表单演练 · v1", exact: true }).click()
+  await page.getByRole("button", { name: "表单演练", exact: true }).click()
   assert.equal(
     await run(page).isEnabled(),
     true,
@@ -279,7 +280,7 @@ async function disabledSteps(page: Page) {
   assert.equal(await save(page).isDisabled(), true)
   await page.getByLabel("动作输入", { exact: true }).fill("{}")
   await save(page).click()
-  await page.getByRole("button", { name: "表单演练 · v2", exact: true }).waitFor()
+  await page.getByText("已保存修订 2，可开始运行。", { exact: true }).waitFor()
   assert.equal((await saved(page)).steps[0].enabled, false)
   assert.deepEqual((await saved(page)).steps[0].input, {})
   pass(

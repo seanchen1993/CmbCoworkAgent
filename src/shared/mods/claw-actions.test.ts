@@ -2,6 +2,8 @@ import { describe, expect, it } from "vitest"
 import {
   clawActionObject,
   parseClawActionExports,
+  parseClawActionBinding,
+  parseClawPlatformActionResult,
   parseClawOutputPointer,
   resolveClawActionInput
 } from "./claw-actions"
@@ -32,6 +34,36 @@ const definition = {
 }
 
 describe("explicit Claw action contract", () => {
+  it("accepts an explicit same-package platform binding without inventing a command", () => {
+    const platform = { id: "autobiz.delivery-report", version: "1.0.0", action: "generate" }
+    const [exported] = parseClawActionExports({ actions: [
+      { id: "report", name: "Report", platform, inputSchema: { type: "object" } }
+    ] })
+    expect(exported.platform).toEqual(platform)
+    expect(exported.platform).not.toBe(platform)
+    expect(exported).not.toHaveProperty("command")
+  })
+
+  it.each([
+    {},
+    { command: "run", platform: { id: "tasks", version: "1.0.0", action: "run" } },
+    { platform: { provider: "other", id: "tasks", version: "1.0.0", action: "run" } },
+    { platform: { id: "tasks", version: "^1.0.0", action: "run" } },
+    { platform: { id: "../tasks", version: "1.0.0", action: "run" } }
+  ])("rejects missing, ambiguous or unpinned action binding %j", (binding) => {
+    expect(() => parseClawActionBinding(binding)).toThrow()
+  })
+
+  it("requires a business terminal result and retains structured failure output", () => {
+    expect(parseClawPlatformActionResult({
+      status: "failed", text: "Missing files", output: { missing: 2 }
+    })).toEqual({ status: "failed", text: "Missing files", output: { missing: 2 } })
+    for (const status of ["running", "unknown"])
+      expect(() => parseClawPlatformActionResult({ status })).toThrow("CLAW_ACTION_NOT_TERMINAL")
+    for (const result of [{ text: "accepted" }, { status: "succeeded", output: [] },
+      { status: "succeeded", private: "unrecognized" }])
+      expect(() => parseClawPlatformActionResult(result)).toThrow()
+  })
   it("accepts exported actions and keeps provider identities and forward data flow", () => {
     expect(
       parseClawActionExports({

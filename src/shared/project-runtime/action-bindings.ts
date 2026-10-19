@@ -1,7 +1,9 @@
 import {
   clawActionObject,
+  parseClawActionBinding,
   parseClawActionIdentity,
   parseClawOutputPointer,
+  type ClawActionBinding,
   type ClawActionIdentity
 } from "../mods/claw-actions"
 import { encodeModJson } from "../mods/validation"
@@ -9,14 +11,13 @@ import type { ModObject } from "../mods/types"
 
 export const PROJECT_ACTION_LOCK_PATH = "devclaw.project-actions.lock.json"
 export const PROJECT_ACTION_LOCK_MAX_BYTES = 128 * 1024
-export interface ProjectActionBinding {
+export type ProjectActionBinding = ClawActionBinding & {
   id: string
   ref: ClawActionIdentity
-  command: string
   input: ModObject
   config: ModObject
   inputFrom?:
-    | { kind: "artifact"; artifactId: string; pointer: string }
+    | { kind: "artifact"; artifactId: string; pointer: string; format?: "json" | "text" }
     | { kind: "action"; actionId: string; pointer: string }
   inputSchema: ModObject
   configSchema: ModObject | null
@@ -42,6 +43,13 @@ function id(value: unknown): string {
     throw Error("PROJECT_ACTION_ID_INVALID")
   return value
 }
+/** Validate only the target so independent input/config size budgets remain unchanged. */
+export function projectActionTarget(value: { command?: unknown; platform?: unknown }): ClawActionBinding {
+  return parseClawActionBinding({
+    ...(value.command === undefined ? {} : { command: value.command }),
+    ...(value.platform === undefined ? {} : { platform: value.platform })
+  })
+}
 /** A lock is data, not a grant. The main process must match it against a live public catalogue. */
 export function parseProjectActionLock(value: unknown): ProjectActionLock {
   if (new TextEncoder().encode(encodeModJson(value)).byteLength > PROJECT_ACTION_LOCK_MAX_BYTES)
@@ -56,19 +64,22 @@ export function parseProjectActionLock(value: unknown): ProjectActionLock {
   const bindings = raw.bindings.map((value) => {
     const item = record(
       value,
-      ["id", "ref", "command", "input", "inputSchema", "outputSchema"],
-      ["config", "configSchema", "inputFrom"]
+      ["id", "ref", "input", "inputSchema", "outputSchema"],
+      ["command", "platform", "config", "configSchema", "inputFrom"]
     )
     record(item.ref, ["pluginId", "plugin", "digest", "actionId"])
-    if (typeof item.command !== "string" || !/^[a-zA-Z0-9][\w:-]{0,99}$/.test(item.command))
-      throw Error("PROJECT_ACTION_COMMAND_INVALID")
+    const target = projectActionTarget({ command: item.command, platform: item.platform })
     let inputFrom: ProjectActionBinding["inputFrom"]
     if (item.inputFrom !== undefined) {
-      const source = record(item.inputFrom, ["kind", "pointer"], ["artifactId", "actionId"])
+      const source = record(item.inputFrom, ["kind", "pointer"], ["artifactId", "actionId", "format"])
       const pointer = parseClawOutputPointer(source.pointer)
-      if (source.kind === "artifact" && source.actionId === undefined)
-        inputFrom = { kind: "artifact", artifactId: id(source.artifactId), pointer }
-      else if (source.kind === "action" && source.artifactId === undefined)
+      if (source.kind === "artifact" && source.actionId === undefined) {
+        if (source.format !== undefined && source.format !== "json" && source.format !== "text")
+          throw Error("PROJECT_ACTION_SOURCE_INVALID")
+        if (source.format === "text" && pointer !== "") throw Error("PROJECT_ACTION_SOURCE_INVALID")
+        inputFrom = { kind: "artifact", artifactId: id(source.artifactId), pointer,
+          ...(source.format ? { format: source.format as "json" | "text" } : {}) }
+      } else if (source.kind === "action" && source.artifactId === undefined && source.format === undefined)
         inputFrom = { kind: "action", actionId: id(source.actionId), pointer }
       else throw Error("PROJECT_ACTION_SOURCE_INVALID")
     }
@@ -77,7 +88,7 @@ export function parseProjectActionLock(value: unknown): ProjectActionLock {
     return {
       id: bindingId,
       ref: parseClawActionIdentity(item.ref),
-      command: item.command,
+      ...target,
       input: clawActionObject(item.input),
       config: clawActionObject(item.config ?? {}),
       ...(inputFrom ? { inputFrom } : {}),

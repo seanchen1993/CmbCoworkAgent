@@ -49,6 +49,9 @@ const ClaudeCodePanel = lazy(() =>
 const CustomizeView = lazy(() =>
   import("@/components/customize/CustomizeView").then((m) => ({ default: m.CustomizeView }))
 )
+const PlatformWorkspace = lazy(() =>
+  import("@/components/platform/PlatformWorkspace").then((m) => ({ default: m.PlatformWorkspace }))
+)
 const ScheduledPanel = lazy(() =>
   import("@/components/customize/ScheduledPanel").then((m) => ({ default: m.ScheduledPanel }))
 )
@@ -1362,6 +1365,14 @@ function App(): React.JSX.Element {
                             <div className="flex flex-1 items-center justify-center text-muted-foreground">
                               选择或创建一个任务开始
                             </div>
+                          )}
+                          {renderedMainView === "thread" && renderedThreadId && (
+                            <Suspense fallback={null}>
+                              <PlatformWorkspace
+                                threadId={renderedThreadId}
+                                active={!showCustomizeView && !renderRoutePending && !browserFullscreen}
+                              />
+                            </Suspense>
                           )}
                         </main>
                       )

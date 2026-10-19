@@ -1,7 +1,10 @@
 import { resolve } from "node:path"
 import { currentRuntimePluginSource, captureRuntimePluginSourceThreadGuard } from "../plugins/runtime-source-scope"
 import { assertLegacyProjectEntry } from "../harness-board/project-runtime/legacy-entry-gate"
+import { isInternalHarnessProjectId } from "../harness-board/internal-project-context"
 import { createClawSkillPolicy } from "../mods/claw-skills"
+import { readNativeSkillUsagePolicy } from "../plugins/native-skill-usage"
+import { captureNativeCapabilityContext } from "../mods/project-capability-context"
 import type {
   HarnessAgentmdLoadStatusItem,
   HarnessDeployUnitMapping,
@@ -19,7 +22,8 @@ import {
   getDisabledSkillDirs,
   getEnabledPluginSkillSourceMetadata,
   getEnabledSkillsSources,
-  getGlobalRoutingMode
+  getGlobalRoutingMode,
+  getPlugins
 } from "../storage"
 import {
   type ProjectModeSkillScope
@@ -27,6 +31,7 @@ import {
 import { isSkillVisibleForProjectMode } from "../plugins/derivation-skill-visibility"
 import { runHooksEnriched } from "../hooks/required-skill"
 import type { HookContext, HookResultCallback } from "../hooks/runner"
+import type { HookAccountingBinder } from "../hooks/model-accounting"
 import {
   normalizePathKey,
   resolveEnabledHooksForRun,
@@ -214,6 +219,15 @@ export async function getHarnessAgentContext(
   } = {}
 ): Promise<HarnessAgentContext> {
   const source = currentRuntimePluginSource()
+  if (source?.mode === "capabilities") {
+    const session = metadata.harnessProjectSession as Record<string, unknown> | undefined
+    const feature = metadata.harnessFeature as Record<string, unknown> | undefined
+    if ((session?.projectId ?? feature?.projectId) !== source.projectId || metadata.hostProjectRuntime !== undefined ||
+      resolve(options.workspacePath ?? String(metadata.workspacePath ?? "")) !== resolve(source.workspace))
+      throw Error("PROJECT_CAPABILITY_PARENT_SCOPE_CHANGED")
+    if (!source.preserveParentContext)
+      return { isHarnessProjectSession: true, harnessProjectId: source.projectId, pluginWorkspace: source.workspace }
+  }
   const legacyFeature = readHarnessFeatureMetadata(metadata)
   if (legacyFeature) assertLegacyProjectEntry(legacyFeature.projectId, legacyFeature.slug,
     resolve(options.workspacePath ?? String(metadata.workspacePath ?? "")), source)
@@ -223,7 +237,7 @@ export async function getHarnessAgentContext(
       resolve(options.workspacePath ?? String(metadata.workspacePath ?? "")), source)
   if (!source && metadata.hostProjectRuntime !== undefined)
     throw new Error("PROJECT_HOST_RUN_ENTRY_REQUIRED: 请从项目操作入口继续此阶段。")
-  if (source && source.mode !== "legacy") {
+  if (source && source.mode !== "legacy" && source.mode !== "capabilities") {
     const binding = metadata.hostProjectRuntime as Record<string, unknown> | undefined
     if (!binding || binding.projectId !== source.projectId || binding.operationId !== source.operationId ||
         resolve(options.workspacePath ?? String(metadata.workspacePath ?? "")) !== source.workspace)
@@ -235,6 +249,7 @@ export async function getHarnessAgentContext(
       pluginRoot: source.plugin.path,
       pluginWorkspace: source.workspace,
       pluginPromptInject: source.stagePrompt,
+      ...(source.requiredContextText ? { harnessAgentsPrompt: source.requiredContextText } : {}),
       harnessProjectId: source.projectId,
       harnessAdapterName: source.plugin.name,
       harnessAdapterVersion: source.plugin.version,
@@ -329,7 +344,9 @@ export async function getHarnessAgentContext(
   }
 
   return {
-    pluginPromptInject: featureContext.systemPromptInject,
+    pluginPromptInject: source?.mode === "legacy" && isInternalHarnessProjectId(source.projectId) && source.stagePrompt
+      ? [featureContext.systemPromptInject, source.stagePrompt].filter(Boolean).join("\n\n")
+      : featureContext.systemPromptInject,
     enableAgentsPrompt: featureContext.enableAgentsPrompt,
     subagentConfig: featureContext.agentConfig?.subagentConfig,
     ...(featureContext.agentConfig?.toolConfig?.task?.enabled === false
@@ -480,12 +497,14 @@ async function activateExplicitSkillFromMessage({
   onHookSkippedFactory,
   originalPrompt,
   isPreparationCurrent,
-  skillVisibility
+  skillVisibility,
+  bindHookAccounting = context => context
 }: {
   signal?: AbortSignal
   agentId?: string
   originalPrompt: string
   isPreparationCurrent?: () => boolean
+  bindHookAccounting?: HookAccountingBinder
   message: string
   workspacePath: string
   pluginOutputDir?: string
@@ -529,7 +548,18 @@ async function activateExplicitSkillFromMessage({
   // The message can contain a stale or forged path even when the slash menu is cached.
   // Resolve the trusted thread binding before any expansion or lifecycle Hook executes.
   let clawSkillPolicy: Awaited<ReturnType<typeof createClawSkillPolicy>>
+  let nativeSkillUsage: Awaited<ReturnType<typeof readNativeSkillUsagePolicy>>
   try {
+    nativeSkillUsage = currentRuntimePluginSource()
+      ? undefined
+      : await readNativeSkillUsagePolicy(
+          getPlugins(),
+          () => captureNativeCapabilityContext(sessionId, workspacePath),
+          signal
+        )
+    if (nativeSkillUsage?.allowsSkill(parsed.skillPath) === false)
+      throw Error(`CLAW_SKILL_USAGE_UNAVAILABLE: ${parsed.skillName}`)
+    nativeSkillUsage?.assertCurrent()
     const { getModsManager } = await import("../mods/manager")
     const profile = getModsManager()?.clawProfile?.(workspacePath, sessionId)
     clawSkillPolicy = await createClawSkillPolicy(
@@ -546,7 +576,7 @@ async function activateExplicitSkillFromMessage({
 
   if (isPreparationCurrent && !isPreparationCurrent())
     return { parsed, blocked: true, reason: "当前运行已结束或被替换" }
-  const expansionContext: HookContext = {
+  const expansionContext: HookContext = bindHookAccounting({
     signal,
     agentId,
     workspacePath,
@@ -571,7 +601,7 @@ async function activateExplicitSkillFromMessage({
       command_args: parsed.rest,
       command_source: skill.pluginId ? "plugin" : "local"
     }
-  }
+  })
   const expansion = await runHooksEnriched(
     resolveEnabledHooksForRun(
       workspacePath,
@@ -601,6 +631,7 @@ async function activateExplicitSkillFromMessage({
   }
 
   try {
+    nativeSkillUsage?.assertCurrent()
     clawSkillPolicy?.assertSkillReference({ name: parsed.skillName, path: parsed.skillPath })
   } catch (error) {
     return { parsed, blocked: true, reason: error instanceof Error ? error.message : String(error) }
@@ -643,7 +674,7 @@ async function activateExplicitSkillFromMessage({
       resolveEnabledHooksForRun(
         workspacePath,
         event,
-        context,
+        bindHookAccounting(context),
         hookScope,
         onHookSkippedFactory?.(event)
       ),
@@ -678,11 +709,13 @@ export async function prepareStandardUserPrompt({
   onHookSkippedFactory,
   onExplicitSkillActivated,
   onSystemMessage,
-  isPreparationCurrent
+  isPreparationCurrent,
+  bindHookAccounting = context => context
 }: {
   signal?: AbortSignal
   agentId?: string
   rawMessage: string
+  bindHookAccounting?: HookAccountingBinder
   initialModelInput: string
   /**
    * Host-resolved explicit skill. Remote transports use this instead of
@@ -722,6 +755,7 @@ export async function prepareStandardUserPrompt({
   const explicitSkillActivation = await activateExplicitSkillFromMessage({
     signal,
     agentId,
+    bindHookAccounting,
     message: explicitSkillActivationMessage,
     originalPrompt: rawMessage,
     isPreparationCurrent,
@@ -757,7 +791,7 @@ export async function prepareStandardUserPrompt({
     initialModelInput.startsWith("[Starting active goal]") ||
     initialModelInput.startsWith("[Continuing active goal]")
   const hookVisibleMessage = isInternalGoalModelInput ? initialModelInput : rawMessage
-  const promptSubmitContext: HookContext = {
+  const promptSubmitContext: HookContext = bindHookAccounting({
     signal,
     agentId,
     toolArgs: { message: hookVisibleMessage, rawMessage },
@@ -768,7 +802,7 @@ export async function prepareStandardUserPrompt({
     pluginOutputDir: harnessAgentContext.pluginOutputDir,
     systemId: harnessAgentContext.systemId,
     ...getHarnessHookContext(harnessAgentContext)
-  }
+  })
   const promptSubmitResult = await runHooksEnriched(
     resolveEnabledHooksForRun(
       workspacePath,

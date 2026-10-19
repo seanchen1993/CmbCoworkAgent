@@ -2,7 +2,7 @@ import { getPlugins } from "../storage"
 import { readCommunityExampleInstallations } from "../mods/community-example-installations"
 import type { IpcMain, IpcMainInvokeEvent } from "electron"
 import {
-  COMMUNITY_EXAMPLES,
+  BUNDLED_EXAMPLES,
   communityExampleId,
   verifyCommunityExample
 } from "../mods/community-examples"
@@ -17,7 +17,7 @@ export function registerCommunityExampleHandlers(
     trusted(event)
     return {
       examples: await readCommunityExampleInstallations(
-        COMMUNITY_EXAMPLES,
+        BUNDLED_EXAMPLES,
         getPlugins(),
         (id, directory) => verifyCommunityExample(root, id, directory)
       )
@@ -34,6 +34,7 @@ export function registerCommunityExampleHandlers(
     )
       throw Error("MODS_COMMUNITY_EXAMPLE_INVALID")
     const id = communityExampleId((input as { exampleId: unknown }).exampleId)
+    const example = BUNDLED_EXAMPLES.find((row) => row.id === id)!
     const frame = event.sender.mainFrame
     const assertCurrent = () => {
       trusted(event)
@@ -43,7 +44,7 @@ export function registerCommunityExampleHandlers(
     assertCurrent()
     return installBundledCommunityPlugin(
       directory,
-      id,
+      example.pluginName,
       (target) => verifyCommunityExample(root, id, target),
       assertCurrent
     )

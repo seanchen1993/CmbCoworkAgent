@@ -1,4 +1,4 @@
-import { useState } from "react"
+import { useRef, useState } from "react"
 import { Loader2, MessageSquare, MessageSquarePlus, PauseCircle } from "lucide-react"
 import { toast } from "sonner"
 import { Button } from "@/components/ui/button"
@@ -46,14 +46,22 @@ export function BizRetryDecisionCard({
   message,
   onViewThread,
   humanGatePending,
-  className
+  className,
+  onDecide,
+  disabled = false
 }: {
   notificationId: string
   message: string
   onViewThread?: () => void
   humanGatePending: boolean
   className?: string
+  disabled?: boolean
+  onDecide?: (input: {
+    action: "stop" | "continue" | "new_thread"
+    message?: string
+  }) => Promise<{ applied: boolean; message: string }>
 }): React.JSX.Element {
+  const decisionLock = useRef(false)
   const [input, setInput] = useState("")
   const [messageOpen, setMessageOpen] = useState(false)
   const [busy, setBusy] = useState(false)
@@ -62,15 +70,15 @@ export function BizRetryDecisionCard({
     action: "stop" | "continue" | "new_thread",
     continueMessage = ""
   ): Promise<void> => {
-    if (busy) return
+    if (decisionLock.current || disabled) return
+    decisionLock.current = true
     setBusy(true)
     setError(null)
     try {
-      const result = await window.api.appNotifications.decide({
-        notificationId,
-        action,
-        message: action === "continue" ? continueMessage : undefined
-      })
+      const input = { action, message: action === "continue" ? continueMessage : undefined }
+      const result = onDecide
+        ? await onDecide(input)
+        : await window.api.appNotifications.decide({ notificationId, ...input })
       if (!result.applied) {
         setError(result.message)
         toast.error(result.message)
@@ -78,10 +86,11 @@ export function BizRetryDecisionCard({
         setMessageOpen(false)
         toast.success(result.message)
       }
-      await refreshAppNotifications()
+      if (!onDecide) await refreshAppNotifications()
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause))
     } finally {
+      decisionLock.current = false
       setBusy(false)
     }
   }
@@ -119,13 +128,18 @@ export function BizRetryDecisionCard({
         </p>
       )}
       <div className="flex flex-wrap justify-end gap-2">
-        <Button size="sm" variant="destructive" disabled={busy} onClick={() => void decide("stop")}>
+        <Button
+          size="sm"
+          variant="destructive"
+          disabled={busy || disabled}
+          onClick={() => void decide("stop")}
+        >
           终止运行
         </Button>
         <Button
           size="sm"
           variant="outline"
-          disabled={busy || humanGatePending}
+          disabled={busy || disabled || humanGatePending}
           onClick={() => void decide("new_thread")}
         >
           开启新会话
@@ -135,7 +149,7 @@ export function BizRetryDecisionCard({
             <Button
               size="sm"
               className="rounded-r-none"
-              disabled={busy || humanGatePending}
+              disabled={busy || disabled || humanGatePending}
               onClick={() => void decide("continue")}
             >
               在当前会话继续
@@ -144,7 +158,7 @@ export function BizRetryDecisionCard({
               <Button
                 size="sm"
                 className="rounded-l-none border-l border-button-foreground/20 px-2.5 data-[state=open]:bg-button/80"
-                disabled={busy || humanGatePending}
+                disabled={busy || disabled || humanGatePending}
                 aria-label="输入自定义消息后继续当前会话"
                 aria-expanded={messageOpen}
                 title="输入自定义消息后继续"
@@ -161,7 +175,7 @@ export function BizRetryDecisionCard({
               className="min-h-16 w-full resize-none rounded-md border border-input bg-background px-3 py-2 text-sm outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50"
               value={input}
               onChange={(event) => setInput(event.target.value)}
-              disabled={busy}
+              disabled={busy || disabled}
               maxLength={10000}
               placeholder="输入补充消息"
               aria-label="继续当前会话的补充消息"
@@ -170,14 +184,14 @@ export function BizRetryDecisionCard({
               <Button
                 size="sm"
                 variant="ghost"
-                disabled={busy}
+                disabled={busy || disabled}
                 onClick={() => setMessageOpen(false)}
               >
                 取消
               </Button>
               <Button
                 size="sm"
-                disabled={busy || input.trim().length === 0}
+                disabled={busy || disabled || input.trim().length === 0}
                 onClick={() => void decide("continue", input)}
               >
                 发送并继续

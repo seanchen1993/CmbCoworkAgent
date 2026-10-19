@@ -13,6 +13,7 @@ import { FunctionSession, SESSION_CAPABILITIES } from "./session"
 import { functionSdkToolInput } from "./tool-sdk"
 import { withFunctionExecution } from "./execution-context"
 import { queryFunctionToolPermission } from "./tool-permission-host"
+import { ProjectFunctionFiles } from "./file-access"
 import type { HookResult } from "../../hooks/types"
 import type { ModObject } from "../../../shared/mods/types"
 import { claimLocalThreadRunLease, releaseLocalThreadRunLease } from "../../agent/thread-run-lease"
@@ -33,7 +34,8 @@ async function fixture(
   blockedToolNames = new Set<string>(),
   managedExecution = false,
   approved = true,
-  beforeApproval?: () => void
+  beforeApproval?: () => void | Promise<void>,
+  consumer = false
 ) {
   const root = mkdtempSync(join(tmpdir(), "mods-tool-sdk-"))
   const workspace = join(root, "project")
@@ -42,11 +44,15 @@ async function fixture(
     join(workspace, "job.cjs"),
     'console.log("real process started"); setTimeout(() => console.log("real background output"), 1500)\n'
   )
+  const confirmations: Array<{ threadId: string; modId: string; toolId: string;
+    args: Record<string, unknown> }> =
+    []
   const manager = new ModsManager(
     join(root, "control.sqlite"),
     () => [],
-    async () => {
-      beforeApproval?.()
+    async (threadId, modId, toolId, args) => {
+      confirmations.push({ threadId, modId, toolId, args: structuredClone(args) })
+      await beforeApproval?.()
       return approved
     },
     () => {}
@@ -86,7 +92,20 @@ async function fixture(
     }
   })
   const guest = await FunctionGuestRuntime.create(`var __cmbFunctionMod={register(on){
-    on("session.start",async($,e,next)=>{await $.command.register({name:"tools",description:"Native tools"});return next(e)});
+    on("session.start",async($,e,next)=>{
+      await $.command.register({name:"tools",description:"Native tools"});
+      if(${consumer}) await $.tool.register({name:"inspect",isDeferred:false,description:"Read actual input and write its report",
+        inputSchema:{type:"object",additionalProperties:false,properties:{}}});
+      return next(e)
+    });
+    if(${consumer}) on("tool.call",{tool:"mcp__demo__inspect"},async($)=>{
+      const report={input:JSON.parse(await $.fs.read("inputs/verified-context.json"))};
+      const text=JSON.stringify(report,null,2)+"\\n";
+      if(await $.fs.exists("consumed-report.json")){
+        if(await $.fs.read("consumed-report.json")!==text)throw Error("VERIFIED_REPORT_CONFLICT")
+      }else await $.fs.write("consumed-report.json",text);
+      return {result:report}
+    });
     on("command.run",{command:"tools"},async($,e)=>{
       const input=JSON.parse(e.args); const check=input.check; delete input.check;
       if(input.sdkWrite) {
@@ -111,6 +130,22 @@ async function fixture(
       threadId,
       assertLive: () => manager.store.assertGrant(grant),
       publish: async (value) => value,
+      ...(consumer
+        ? {
+            files: () => {
+              const scope = manager.functionRuntimeScope(workspace, threadId)
+              return new ProjectFunctionFiles(
+                scope.workspace,
+                () => {
+                  scope.assertLive()
+                  manager.store.assertGrant(grant)
+                },
+                async (value) => value,
+                scope.queryTool
+              )
+            }
+          }
+        : {}),
       callTool: async (_plugin, input, signal) => {
         const { target, args } = functionSdkToolInput(input)
         return manager.invokeFunctionTool(
@@ -153,6 +188,25 @@ async function fixture(
         return JSON.parse(String(answer.text)) as ModObject
       }
     )
+  const inspect = () =>
+    withFunctionExecution(
+      {
+        workspace: manager.workspaceKey(workspace),
+        threadId,
+        turnId: "turn",
+        leased: true,
+        immediate: false,
+        userInitiated: true
+      },
+      () =>
+        session.interceptTool(
+          { tool: "mcp__demo__inspect", tool_use_id: "actual-inspect" },
+          commandController.signal,
+          async () => {
+            throw Error("Registered tool must handle the call")
+          }
+        )
+    )
   cleanup.push(async () => {
     controller.abort()
     await session.close()
@@ -180,7 +234,9 @@ async function fixture(
     authority: authority.authority,
     grant,
     session,
-    threadId
+    threadId,
+    confirmations,
+    inspect
   }
 }
 
@@ -763,6 +819,85 @@ it("writes an actual file through fs.write, the original native approval and dur
   })
   expect(writes[0].finalArgsHash).toBeTruthy()
 })
+
+it.each(["approve", "deny", "revoke"] as const)(
+  "holds registered-tool SDK read/exists/write at the original native confirmation until %s",
+  async (outcome) => {
+    const entered = Promise.withResolvers<void>(),
+      decision = Promise.withResolvers<void>()
+    const f = await fixture(
+      new Set(),
+      false,
+      outcome !== "deny",
+      async () => {
+        entered.resolve()
+        await decision.promise
+      },
+      true
+    )
+    const input = { artifacts: [{ id: "real-json", value: 17 }], marker: "ACTUAL_FILE_INPUT" }
+    mkdirSync(join(f.workspace, "inputs"))
+    writeFileSync(join(f.workspace, "inputs/verified-context.json"), JSON.stringify(input))
+    const report = join(f.workspace, "consumed-report.json")
+    const write = vi.spyOn(f.sandbox, "write")
+    let settled = false
+    const pending = f.inspect()
+    void pending.then(
+      () => {
+        settled = true
+      },
+      () => {
+        settled = true
+      }
+    )
+    try {
+      await entered.promise
+      // The actual Guest has read the file, observed a missing report and entered native
+      // write authorization. No harness writes the report or manufactures its result.
+      expect(f.confirmations).toEqual([
+        {
+          threadId: f.threadId,
+          modId: f.grant.modId,
+          toolId: "host:write_file",
+          args: {
+            filePath: expect.any(String),
+            content: JSON.stringify({ input }, null, 2) + "\n"
+          }
+        }
+      ])
+      expect(isSameWorkspacePath(String(f.confirmations[0].args.filePath), report)).toBe(true)
+      expect(settled).toBe(false)
+      expect(existsSync(report)).toBe(false)
+      if (outcome === "revoke") f.manager.revoke(f.workspace, f.grant.modId)
+      decision.resolve()
+      if (outcome === "approve") {
+        await expect(pending).resolves.toMatchObject({ result: { input } })
+        expect(readFileSync(report, "utf8")).toBe(JSON.stringify({ input }, null, 2) + "\n")
+        expect(write).toHaveBeenCalledTimes(1)
+        const writes = f.manager.store
+          .audit(f.grant.workspace)
+          .filter((row) => row.toolId === "host:write_file")
+        expect(writes).toHaveLength(1)
+        expect(writes[0]).toMatchObject({ status: "succeeded" })
+        expect(writes[0].finalArgsHash).toBeTruthy()
+      } else {
+        await expect(pending).rejects.toThrow(
+          outcome === "deny" ? "MODS_USER_REJECTED" : "MODS_GRANT_REVOKED"
+        )
+        expect(existsSync(report)).toBe(false)
+        expect(
+          f.manager.store
+            .audit(f.grant.workspace)
+            .some((row) => row.toolId === "host:write_file" && row.status === "succeeded")
+        ).toBe(false)
+      }
+      expect(f.confirmations).toHaveLength(1)
+    } finally {
+      decision.resolve()
+      await pending.catch(() => {})
+    }
+  }
+)
 
 it.each(["approval", "write_file", "lease", "revoke", "read-only"])(
   "does not write through fs.write when the original %s boundary rejects it",

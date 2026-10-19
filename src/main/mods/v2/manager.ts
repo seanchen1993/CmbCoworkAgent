@@ -1,7 +1,14 @@
-import { developmentRegistrationCapabilities } from "./development-registration-capabilities"
+import { currentNativeConfigurationScope } from "./native-configuration-scope"
+import { captureProjectActionContentGuard } from "../../harness-board/project-action-scope"
+import { retainOriginalActionText } from "./action-result-text"
+import { assertUserConfigSchemaCurrent } from "./user-config-migration"
 import { FunctionDevelopmentSessions, DEVELOPMENT_CAPABILITIES, developmentCapabilities, type DevelopmentScope, type DevelopmentRevision, type DevelopmentStatus, type DevelopmentActivation, type DevelopmentCandidate } from "./development-session"
 import { developmentUiOnly } from "./development-conversation-owner"
+import { PlatformCapabilityHub } from "./platform-capabilities-hub"
 import { withDevelopmentNativeAuthority } from "./development-native-authority"
+import { platformRegistrationCapabilities } from "./platform-capabilities-validation"
+import type { NativeHostFileEdit } from "./platform-capabilities-types"
+import type { PlatformSurfaceAddress } from "../../../shared/mods/v2/platform-surfaces"
 import { DevelopmentHistory } from "./development-history"
 import { guardPluginCatalogOperations, pluginCatalogGate } from "../../plugins/catalog-gate"
 import type { FunctionModelResult, FunctionForkResult } from "../../../shared/mods/v2/model-protocol"
@@ -39,11 +46,18 @@ import { ClawStore, withoutUninstalledClawPlugins } from "../claw-store"
 import {
   CLAW_ACTION_MAX_BYTES,
   clawActionObject,
+  parseClawActionBinding,
   parseClawActionIdentity,
+  parseClawPlatformActionResult,
   type ClawActionDescriptor,
   type ClawActionEnvelope,
   type ClawActionIdentity
 } from "../../../shared/mods/claw-actions"
+import type {
+  PlatformCapabilityAction,
+  PlatformCapabilityRef,
+  PlatformCapabilitySource
+} from "../../../shared/mods/v2/platform-capabilities"
 import { encodeModJson } from "../../../shared/mods/validation"
 import { validateRegisteredToolInput } from "./tool-schema"
 import { validateClawActionConfig } from "./action-config"
@@ -92,6 +106,8 @@ import {
   type FunctionGuest
 } from "../../../shared/mods/v2/contracts"
 import { FunctionRuntimeClient } from "./runtime-client"
+import { invokeCreatorPlanningGuest } from "../devtools/creator-planning-guest"
+import type { CreatorPlanningReference } from "../../../shared/mods/creator-planning"
 import {
   compileFunctionPlugin,
   projectFunctionComponents,
@@ -158,8 +174,30 @@ import { analyzeFunctionSdk } from "../devtools/sdk-usage"
 import type { McpConnectOwner } from "../../mcp/capability-types"
 import { mcpConnectRefusal } from "../../mcp/capability-types"
 import type { FunctionMcpConnectRun } from "./mcp-sdk"
+import {
+  assertCurrentRuntimePluginSourceContent,
+  captureRuntimePluginSourceContentGuard,
+  captureRuntimePluginSourceAuthorityGuard,
+  captureRuntimePluginSourceToken,
+  currentRuntimePluginSource,
+  projectRuntimePluginSources,
+  withRuntimePluginSource,
+  type RuntimePluginSourceToken
+} from "../../plugins/runtime-source-scope"
+
+/** Main-process compiler facts only; this is neither a grant nor a configuration value. */
+export interface RuntimeFunctionSourceFacts {
+  name: string
+  digest: string
+  userConfig?: CompiledFunctionPlugin["userConfig"]
+  userConfigSchema?: CompiledFunctionPlugin["userConfigSchema"]
+}
+export interface RuntimeFunctionGrantScope { projectId: string; packageDigest: string }
 
 interface Snapshot {
+  /** Captured under the original opaque source token, retained for deferred native UI calls. */
+  assertRuntimeSource?: () => void
+  assertRuntimeSourceContent?: () => void
   sourceId?: string
   sourcePath?: string
   configuredRevision?: number
@@ -194,6 +232,9 @@ interface FunctionConnection {
   stopAndDrain?(): Promise<void>
 }
 interface SessionEntry {
+  runtimeSourceToken?: RuntimePluginSourceToken
+  assertRuntimeSourceContent?: () => void
+  hostSourceBound?: boolean
   catalogInvalidated?: boolean
   execution: FunctionGuestExecutionFacts
   registrationProbe: boolean
@@ -247,6 +288,9 @@ interface FunctionEndingRequest {
   stage?: FunctionClassicEndStage
 }
 interface FunctionManagerHost extends FunctionConversationManagerHost {
+  platformNativeProviders?(workspace: string, threadId: string): readonly
+    import("./platform-capabilities-types").NativePlatformCapabilityProvider[]
+  platformChanged?(threadId: string): void
   threadIncarnationKey?(workspace: string, threadId: string): string | undefined
   capabilityContext?(workspace: string, threadId: string):
     import("../capability-context").CapabilityContext
@@ -346,6 +390,8 @@ interface FunctionManagerHost extends FunctionConversationManagerHost {
     timeoutMs: number
   ): Promise<ProjectCheckResult>
   plugins(): ModPluginSource[]
+  /** Owned storage reader only; custom hosts retain per-source authority reads. */
+  freshClassicPluginSources?(): ModPluginSource[]
   installedPluginIds?(): ReadonlySet<string>
   enabled(workspace: string): boolean
   publish(workspace: string, value: ModJson, signal: AbortSignal): Promise<ModJson>
@@ -460,9 +506,25 @@ interface FunctionManagerHost extends FunctionConversationManagerHost {
   ): ReturnType<NonNullable<FunctionSessionHost["scheduleCommand"]>>
 }
 
+/** Grants bind a complete source snapshot; a live session never rereads mutable plugin source. */
+export type PreparedClawAction =
+  | { route: "command"; action: ClawActionDescriptor; command: ModCommandDescriptor }
+  | {
+      route: "platform"
+      action: ClawActionDescriptor
+      platform: {
+        ref: PlatformCapabilityRef
+        source: PlatformCapabilitySource
+        action: PlatformCapabilityAction
+        grantEpoch: number
+        workspaceEpoch: number
+      }
+    }
+
 export class FunctionModsManager {
   private readonly userConfigValues: FunctionUserConfigValues
-  private readonly configurationSourceCache = new FunctionConfigurationSourceCache()
+  private readonly configurationSourceCache = new FunctionConfigurationSourceCache(16,
+    path => compileFunctionPlugin(path, { captureSources: true }))
   private readonly statusSourceCache = new FunctionConfigurationSourceCache(64)
   private readonly clawSelections = new Map<string, { epoch: number; active: ClawProfile | null }>()
   private readonly preparingSelection = new AsyncLocalStorage<{
@@ -477,6 +539,7 @@ export class FunctionModsManager {
   // Plugin catalog retirement is independent from native thread/policy authority.
   private readonly nativeEpochs = new Map<string, number>()
   private readonly sessions = new Map<string, SessionEntry>()
+  private readonly platformHub: PlatformCapabilityHub
   private readonly runtimeReservations = new Map<string, object>()
   private readonly pendingSessionBuilds = new Map<string, Promise<SessionEntry>>()
   private readonly probeRetirements = new Map<string, Promise<void>>()
@@ -552,7 +615,7 @@ export class FunctionModsManager {
         if (!entry?.session || ![...entry.developmentPlugins.values()].some(value =>
           value.id === activationId && value.scope.incarnation.token === scope.incarnation.token &&
           value.scope.incarnation.legacyCreatedAt === scope.incarnation.legacyCreatedAt)) return undefined
-        return { ...{},
+        return { ...entry.session.platform.diagnostics(),
           backgroundResources: entry.session.ownedResourceCount }
       },
       run: (_scope, work) => this.operations.exit(() => this.startupModels.fresh(() =>
@@ -768,6 +831,7 @@ export class FunctionModsManager {
     private readonly createClient: () => FunctionConnection = () =>
       new FunctionRuntimeClient(join(__dirname, "function-mod-host.js"))
   ) {
+    this.platformHub = new PlatformCapabilityHub(store.functionState)
     try {
       for (const receipt of readRuntimeStopReceipts(store)) {
         this.releasedSessions.set(JSON.stringify([receipt.workspace, receipt.threadId]), receipt)
@@ -807,6 +871,7 @@ export class FunctionModsManager {
       "userConfig",
       "saveUserConfig",
       "saveSensitiveUserConfig",
+      "migrateUserConfig",
       "pickUserConfigPath",
       "applyUserConfig",
       "reloadUserConfig",
@@ -918,7 +983,7 @@ export class FunctionModsManager {
     const hasSavedSecret = Object.entries(compiled.userConfig).some(([key, field]) =>
       field.sensitive && !Object.hasOwn(saved.values, key) && Object.hasOwn(saved.sealed ?? {}, key))
     const grant = hasSavedSecret && !explicitApproval
-      ? this.store.getGrant(workspace, `function:${compiled.name}`) : undefined
+      ? this.functionSourceGrant(workspace, compiled.name) : undefined
     const assertAuthorized = () => {
       if (!hasSavedSecret) return
       if (explicitApproval) return explicitApproval()
@@ -929,7 +994,7 @@ export class FunctionModsManager {
     }
     assertAuthorized()
     const options = { ...structuredClone(base),
-      ...this.userConfigValues.resolve(workspace, compiled.name, compiled.userConfig) }
+      ...this.userConfigValues.resolve(workspace, compiled.name, compiled.userConfig, compiled.userConfigSchema) }
     assertAuthorized()
     this.assertConfiguredOptions(workspace, compiled, saved.revision)
     return { options, revision: saved.revision }
@@ -943,7 +1008,7 @@ export class FunctionModsManager {
       "prepareAction", "runAction", "runCommand"
     ])
     const native: Array<keyof FunctionModsManager> = [
-      ...applyBefore, "configList", "configSet", "userConfig", "saveUserConfig", "saveSensitiveUserConfig", "runtimeReady",
+      ...applyBefore, "configList", "configSet", "userConfig", "saveUserConfig", "saveSensitiveUserConfig", "migrateUserConfig", "runtimeReady",
       "effectiveStatus", "inspectCheckpointRecovery", "advanceAutobizCheckpoint", "completionGate",
       "measure", "turnComplete", "turnNotices", "interceptToolCheck", "hasEventHandler", "logs",
       "feedback", "feedbackPresentation", "panes", "focusAck", "scrollAck", "act", "siteMount", "siteMountOutcome", "siteRender", "siteUnmount",
@@ -969,6 +1034,65 @@ export class FunctionModsManager {
     }
   }
 
+  /** A completed provider's ordinary VM cannot stand in for an admitted Host package. */
+  private async admitHostSourceSession(workspace: string, threadId: string): Promise<void> {
+    const binding = currentRuntimePluginSource()
+    if (binding?.mode !== "host") return
+    if (!isSameWorkspacePath(binding.workspace, workspace))
+      throw new ModFunctionError("MODS_RUNTIME_SOURCE_CHANGED")
+    const token = captureRuntimePluginSourceToken()!
+    const key = JSON.stringify([workspace, threadId])
+    if (this.sessions.get(key)?.runtimeSourceToken === token) return
+    const pending = this.applying.get(key)
+    if (pending) await pending
+    const entry = this.sessions.get(key)
+    if (!entry || entry.runtimeSourceToken === token) return
+    if (entry.runtimeSourceToken || entry.hostSourceBound)
+      throw new ModFunctionError("MODS_RUNTIME_SOURCE_CHANGED")
+    if (entry.probeRetirementError)
+      throw new ModFunctionError("MODS_RUNTIME_SOURCE_CLEANUP_UNCONFIRMED", entry.probeRetirementError)
+    if (!entry.loaded || !entry.client.stopAndDrain || entry.completionChecks.size || entry.developmentPlugins.size ||
+      this.endingEntries.has(key) || this.pendingSessionBuilds.has(key) ||
+      this.probeRetirements.has(key) || this.runtimeReservations.has(key) ||
+      !entry.activity.pauseIfIdle())
+      throw new ModFunctionError("MODS_RUNTIME_SOURCE_BUSY")
+    const assertSource = captureRuntimePluginSourceContentGuard()!
+    const epoch = this.epoch(workspace)
+    const assertCurrent = () => {
+      assertSource()
+      this.host.assertThread?.(workspace, threadId)
+      if (this.closed || !this.host.enabled(workspace) || this.epoch(workspace) !== epoch ||
+        this.sessions.get(key) !== entry || this.endingEntries.has(key))
+        throw new ModFunctionError("MODS_RUNTIME_SOURCE_CHANGED")
+    }
+    // Recheck the original exact project grant; an ordinary provider grant grants nothing here.
+    try {
+      assertCurrent()
+      this.assertRuntimeSourceReady({ workspace, plugin: binding.plugin, scope: binding })
+    } catch (error) { entry.activity.resume(); throw error }
+    const task = Promise.resolve().then(async () => {
+      try {
+        assertCurrent()
+        entry.freshness.close("host-source-handoff")
+        this.closePromptSessions(entry)
+        entry.activity.close()
+        // Keep the exact old entry and its capacity slot until physical cleanup is confirmed.
+        await entry.activity.cleanup(() => this.retireRemovedEntry(entry, false, true))
+        assertCurrent()
+        this.assertRuntimeSourceReady({ workspace, plugin: binding.plugin, scope: binding })
+        if (this.retiringEntries.has(entry))
+          throw new ModFunctionError("MODS_RUNTIME_SOURCE_CLEANUP_UNCONFIRMED")
+        this.sessions.delete(key)
+      } catch (error) {
+        entry.probeRetirementError = "MODS_RUNTIME_SOURCE_CLEANUP_UNCONFIRMED"
+        throw error
+      }
+    })
+    this.applying.set(key, task)
+    try { await task }
+    finally { if (this.applying.get(key) === task) this.applying.delete(key) }
+  }
+
   private async withOperation(workspace: string, threadId: string, method: PropertyKey,
     applyBefore: boolean, run: () => Promise<unknown>): Promise<unknown> {
     this.assertClassicEndStage(threadId)
@@ -986,6 +1110,7 @@ export class FunctionModsManager {
       candidate.workspace === workspace && candidate.threadId === threadId)
       throw new ModFunctionError("MODS_CONFIG_RELOAD_REENTRANT",
         "组件启动期间不能再次进入自己的任务处理链；请将此操作放到启动完成后。", true)
+    await this.admitHostSourceSession(workspace, threadId)
     const parent = this.operations.getStore()
     if (parent?.workspace === workspace && parent.threadId === threadId) {
       if (!parent.active && !parent.entry?.activity.withinEntry)
@@ -1197,7 +1322,13 @@ export class FunctionModsManager {
             write: (value) => {
               const saved = this.userConfigValues.read(workspace, plugin)
               const result = this.userConfigValues.save(workspace, plugin, schema, key, value,
-                saved.revision, () => this.store.assertGrant(snapshot.grant))
+                saved.revision, () => this.store.assertGrant(snapshot.grant), snapshot.compiled.userConfigSchema)
+              if (result.changed) this.configurationChanged(workspace)
+            },
+            reset: () => {
+              const saved = this.userConfigValues.read(workspace, plugin)
+              const result = this.userConfigValues.reset(workspace, plugin, schema, key,
+                saved.revision, () => this.store.assertGrant(snapshot.grant), snapshot.compiled.userConfigSchema)
               if (result.changed) this.configurationChanged(workspace)
             }
           }
@@ -1251,16 +1382,239 @@ export class FunctionModsManager {
     return config.set(key, value, origin, signal)
   }
 
+  /** Host-only directory binding uses the exact immutable schema/name and store as native UI. */
+  async readDirectoryUserConfig(workspace: string, sourceRoot: string, key: string):
+    Promise<string | undefined> {
+    const epoch = this.epoch(workspace)
+    const token = captureRuntimePluginSourceToken()
+    const assertAuthority = token ? captureRuntimePluginSourceAuthorityGuard() : undefined
+    const source = this.sources().find(item => item.path === sourceRoot)
+    if (!source) throw new ModFunctionError("MODS_CONFIG_PLUGIN_MISSING")
+    const check = (content = false) => {
+      assertAuthority?.()
+      const current = token
+        ? this.sources().find(item => item.id === source.id)
+        : this.host.plugins().find(item => item.id === source.id)
+      if (this.closed || this.epoch(workspace) !== epoch ||
+        captureRuntimePluginSourceToken() !== token || current?.path !== source.path)
+        throw new ModFunctionError("MODS_CONFIG_SOURCE_CHANGED")
+      if (content && token) assertCurrentRuntimePluginSourceContent()
+      assertAuthority?.()
+    }
+    return this.directoryUserConfigValue(workspace, source.path, key, () => check(true))
+  }
+
+  /** Main-only pre-admission context read. The caller supplies fresh original project ownership. */
+  async readRetainedDirectoryUserConfig(
+    input: { workspace: string; plugin: ModPluginSource; scope: RuntimeFunctionGrantScope },
+    key: string,
+    assertProjectCurrent: () => void
+  ): Promise<string | undefined> {
+    const epoch = this.epoch(input.workspace)
+    const token = captureRuntimePluginSourceToken()
+    const authority = token ? captureRuntimePluginSourceAuthorityGuard() : undefined
+    const check = () => {
+      assertProjectCurrent()
+      authority?.()
+      if (this.closed || this.epoch(input.workspace) !== epoch || !input.plugin.enabled ||
+          captureRuntimePluginSourceToken() !== token)
+        throw new ModFunctionError("MODS_CONFIG_SOURCE_CHANGED")
+      if (token) {
+        const current = currentRuntimePluginSource()
+        if (!current || current.plugin.id !== input.plugin.id ||
+            current.plugin.path !== input.plugin.path ||
+            current.projectId !== input.scope.projectId || current.packageDigest !== input.scope.packageDigest ||
+            !isSameWorkspacePath(current.workspace, input.workspace))
+          throw new ModFunctionError("MODS_CONFIG_SOURCE_CHANGED")
+        assertCurrentRuntimePluginSourceContent()
+      }
+      assertProjectCurrent()
+    }
+    return this.directoryUserConfigValue(input.workspace, input.plugin.path, key, check)
+  }
+
+  private async directoryUserConfigValue(
+    workspace: string,
+    sourceRoot: string,
+    key: string,
+    check: () => void
+  ): Promise<string | undefined> {
+    check()
+    const compiled = await this.configurationSourceCache.read(sourceRoot)
+    check()
+    assertConfigurationSourcesCurrent(sourceRoot, compiled)
+    const field = compiled.userConfig && Object.hasOwn(compiled.userConfig, key)
+      ? compiled.userConfig[key] : undefined
+    if (!field || field.type !== "directory" || field.sensitive || field.multiple)
+      throw new ModFunctionError("MODS_USER_CONFIG_INVALID")
+    const saved = this.userConfigValues.read(workspace, compiled.name)
+    assertUserConfigSchemaCurrent(saved, compiled.userConfig!, compiled.userConfigSchema)
+    const value = Object.hasOwn(saved.values, key) ? saved.values[key] : field.default
+    check()
+    assertConfigurationSourcesCurrent(sourceRoot, compiled)
+    // No binding selects the host cache. Required knowledge remains an actual-load contract.
+    if (value === undefined || value === "") return undefined
+    validateFunctionUserConfigValue(key, field, value)
+    if (typeof value !== "string") throw new ModFunctionError("MODS_USER_CONFIG_INVALID")
+    return value
+  }
+
+  /** Host-only raw invalidation identity; no schema validation or plaintext is implied. */
+  readUserConfigIdentity(workspace: string, pluginName: string) {
+    if (this.closed || !pluginName || pluginName.length > 256) throw new ModFunctionError("MODS_CONFIG_SOURCE_CHANGED")
+    return this.userConfigValues.identity(workspace, pluginName)
+  }
+
+  /** Read-only host package admission. Calling this never executes or authorizes a Mod. */
+  async prepareRuntimeSourceFacts(input: { workspace: string; plugin: ModPluginSource }):
+    Promise<RuntimeFunctionSourceFacts | undefined> {
+    if (this.closed || !input.workspace || !input.plugin.enabled)
+      throw new ModFunctionError("MODS_CONFIG_SOURCE_CHANGED")
+    if (!this.isSource(input.plugin)) return undefined
+    await this.configurationSourceCache.read(input.plugin.path)
+    return this.getRuntimeSourceFacts(input)
+  }
+
+  /** Synchronous consumers must preload first and recheck the same package byte proof. */
+  getRuntimeSourceFacts(input: { workspace: string; plugin: ModPluginSource }):
+    RuntimeFunctionSourceFacts | undefined {
+    const compiled = this.retainedRuntimeCompilation(input)
+    if (!compiled) return undefined
+    return structuredClone({ name: compiled.name, digest: compiled.digest,
+      ...(compiled.userConfig ? { userConfig: compiled.userConfig } : {}),
+      ...(compiled.userConfigSchema ? { userConfigSchema: compiled.userConfigSchema } : {}) })
+  }
+
+  private retainedRuntimeCompilation(input: {workspace:string;plugin:ModPluginSource}): CompiledFunctionPlugin | undefined {
+    if (this.closed || !input.workspace || !input.plugin.enabled)
+      throw new ModFunctionError("MODS_CONFIG_SOURCE_CHANGED")
+    const compiled = this.configurationSourceCache.peek(input.plugin.path) ??
+      [...this.sessions.values(), ...this.candidates]
+        .filter(entry => entry.workspace === input.workspace)
+        .flatMap(entry => [...entry.snapshots.values()])
+        .find(snapshot => snapshot.sourcePath &&
+          isSameWorkspacePath(snapshot.sourcePath, input.plugin.path))?.compiled
+    if (!compiled) return undefined
+    assertConfigurationSourcesCurrent(input.plugin.path, compiled)
+    return compiled
+  }
+
+  /** Main-only execution gate after schema preload; values never cross this boundary. */
+  assertRuntimeSourceConfiguration(input: { workspace: string; plugin: ModPluginSource }): void {
+    if (this.closed || !input.workspace || !input.plugin.enabled)
+      throw new ModFunctionError("MODS_CONFIG_SOURCE_CHANGED")
+    if (!this.isSource(input.plugin)) return
+    const compiled = this.retainedRuntimeCompilation(input)
+    if (!compiled) throw new ModFunctionError("MODS_CONFIG_SOURCE_CHANGED")
+    assertConfigurationSourcesCurrent(input.plugin.path, compiled)
+    if (compiled.userConfig)
+      this.userConfigValues.resolve(input.workspace, compiled.name, compiled.userConfig, compiled.userConfigSchema)
+    assertConfigurationSourcesCurrent(input.plugin.path, compiled)
+  }
+
+  /** Original native Mod grant workflow for an exact host-owned retained package. */
+  async runtimeSourceReview(input: { workspace: string; plugin: ModPluginSource; scope: RuntimeFunctionGrantScope }) {
+    const facts = await this.prepareRuntimeSourceFacts(input)
+    if (!facts) return undefined
+    const compiled = this.configurationSourceCache.peek(input.plugin.path)!
+    const sdk = await analyzeFunctionSdk(compiled)
+    assertConfigurationSourcesCurrent(input.plugin.path, compiled)
+    const grant = this.functionSourceGrant(input.workspace, facts.name, input.scope)
+    let configurationReady = true
+    if (compiled.userConfig) {
+      try { this.userConfigValues.resolve(input.workspace, compiled.name, compiled.userConfig, compiled.userConfigSchema) }
+      catch (error) {
+        if (!(error instanceof ModFunctionError) || !/^(MODS_USER_CONFIG_|MODS_SECRET_)/.test(error.code)) throw error
+        configurationReady = false
+      }
+    }
+    return { ...facts, configurationReady, capabilities: [...SESSION_CAPABILITIES],
+      scannedMethods: [...new Set(sdk.usages.map(item => item.method))].slice(0, 64),
+      scanIncomplete: sdk.truncated || !sdk.registrationEventsVerified,
+      state: !this.host.enabled(input.workspace) ? "disabled" as const
+        : grant?.enabled && grant.digest === facts.digest ? "ready" as const : "needs-approval" as const }
+  }
+
+  /** Main-only final configuration/source consent fence; never creates a grant or a runtime. */
+  assertRuntimeSourceReady(input: { workspace: string; plugin: ModPluginSource; scope: RuntimeFunctionGrantScope }): void {
+    this.assertRuntimeSourceConfiguration(input)
+    const compiled = this.retainedRuntimeCompilation(input)
+    if (!compiled) return
+    const grant = this.functionSourceGrant(input.workspace, compiled.name, input.scope)
+    if (!this.host.enabled(input.workspace) || !grant?.enabled || grant.digest !== compiled.digest)
+      throw new ModFunctionError("PROJECT_MODS_APPROVAL_REQUIRED")
+  }
+
+  /** Only a trusted native project controller may supply this source and authority guard. */
+  async approveRuntimeSource(input: { workspace: string; plugin: ModPluginSource; digest: string; scope: RuntimeFunctionGrantScope },
+    assertCallerCurrent: () => void): Promise<void> {
+    assertCallerCurrent()
+    if (!input.plugin.enabled || !this.isSource(input.plugin))
+      throw new ModFunctionError("MODS_APPROVAL_STALE")
+    const compiled = await this.configurationSourceCache.read(input.plugin.path)
+    await this.approveCompiledSource(input.workspace, compiled, input.digest, assertCallerCurrent, input.scope)
+  }
+  /** Host-only saved binding. Caller must first validate this key against its captured directory schema. */
+  readUserConfigDirectoryIdentity(workspace: string, pluginName: string, key: string): string | undefined {
+    this.readUserConfigIdentity(workspace, pluginName)
+    const record = this.userConfigValues.read(workspace, pluginName)
+    if (!/^[A-Za-z_]\w{0,127}$/.test(key) || Object.hasOwn(record.sealed ?? {}, key))
+      throw new ModFunctionError("MODS_USER_CONFIG_INVALID")
+    if (!Object.hasOwn(record.values, key)) return undefined
+    const value = record.values[key]
+    if (typeof value !== "string") throw new ModFunctionError("MODS_USER_CONFIG_INVALID")
+    return value || undefined
+  }
+  /** Validated source identity and current effective configuration, without returning values. */
+  async readDirectoryUserConfigSnapshot(workspace: string, sourceRoot: string) {
+    const epoch = this.epoch(workspace)
+    const guard = () => {
+      if (this.closed || this.epoch(workspace) !== epoch)
+        throw new ModFunctionError("MODS_CONFIG_SOURCE_CHANGED")
+    }
+    guard()
+    const compiled = await this.configurationSourceCache.read(sourceRoot)
+    guard()
+    assertConfigurationSourcesCurrent(sourceRoot, compiled)
+    if (!compiled.userConfig) return undefined
+    this.userConfigValues.resolve(workspace, compiled.name, compiled.userConfig, compiled.userConfigSchema)
+    assertConfigurationSourcesCurrent(sourceRoot, compiled)
+    guard()
+    return { plugin: compiled.name, sourceDigest: compiled.digest,
+      ...this.userConfigValues.identity(workspace, compiled.name) }
+  }
+
+  private configurationSource(pluginId: string) {
+    const native = currentNativeConfigurationScope()
+    if (native) return native.plugin.id === pluginId ? native.plugin : undefined
+    return this.sources().find(item => item.id === pluginId)
+  }
+  private assertConfigurationThread(workspace: string, threadId: string) {
+    const native = currentNativeConfigurationScope()
+    if (native) {
+      if (native.workspace !== workspace || native.projectId !== threadId)
+        throw new ModFunctionError("MODS_CONFIG_SCOPE_CHANGED")
+      return
+    }
+    this.host.assertThread?.(workspace, threadId)
+  }
+  private configurationSourceCurrent(pluginId: string, path: string) {
+    const native = currentNativeConfigurationScope()
+    return native ? native.plugin.id === pluginId && native.plugin.path === path
+      : this.host.plugins().find(item => item.id === pluginId)?.path === path
+  }
+
   /** Native author configuration is available before approval, without running guest code. */
   async userConfig(workspace: string, threadId: string, pluginId: string,
     signal: AbortSignal, assertOwner: () => void): Promise<FunctionUserConfigView> {
+    const nativeContent = currentNativeConfigurationScope()?.assertContentCurrent
     const epoch = this.epoch(workspace)
-    const source = this.sources().find(item => item.id === pluginId)
+    const source = this.configurationSource(pluginId)
     if (!source) throw new ModFunctionError("MODS_CONFIG_PLUGIN_MISSING")
     const check = () => {
-      assertOwner(); signal.throwIfAborted(); this.host.assertThread?.(workspace, threadId)
+      assertOwner(); signal.throwIfAborted(); this.assertConfigurationThread(workspace, threadId)
       if (this.closed || this.epoch(workspace) !== epoch ||
-        this.host.plugins().find(item => item.id === pluginId)?.path !== source.path)
+        !this.configurationSourceCurrent(pluginId, source.path))
         throw new ModFunctionError("MODS_CONFIG_SOURCE_CHANGED")
     }
     check()
@@ -1268,7 +1622,13 @@ export class FunctionModsManager {
     check()
     assertConfigurationSourcePath(source.path, compiled)
     if (compiled.userConfig && Object.keys(compiled.userConfig).length) assertConfigurationSourcesCurrent(source.path, compiled)
+    nativeContent?.()
     const saved = this.userConfigValues.read(workspace, compiled.name)
+    const migration = compiled.userConfig ? this.userConfigValues.migration(workspace, compiled.name, compiled.userConfig, compiled.userConfigSchema)?.view : undefined
+    if (migration && (this.host.configRows?.() ?? []).some(row => row.key.startsWith(`${compiled.name}.`))) {
+      migration.canApply = false
+      migration.diagnostics.push("Native configuration authority cannot be replaced by a plugin migration")
+    }
     const runtime = this.sessions.get(JSON.stringify([workspace, threadId]))
     if (runtime?.session?.plugins.some(plugin => plugin.guest.stats.disposed))
       this.stopLostEntry(runtime)
@@ -1277,6 +1637,7 @@ export class FunctionModsManager {
     const view: FunctionUserConfigView = {
       pluginId, plugin: compiled.name, digest: compiled.digest, workspace,
       savedRevision: saved.revision,
+      ...(migration ? { migration } : {}),
       ...(effective ? { effectiveRevision: effective.configuredRevision ?? 0 } : {}),
       state: this.reloadControl.error(workspace, threadId) ? "stopped"
         : !effective ? "inactive" : effective.configuredRevision === saved.revision ? "applied"
@@ -1312,10 +1673,13 @@ export class FunctionModsManager {
       ...(value === undefined ? {} : { value }),
       ...(effectiveValue === undefined ? {} : { effectiveValue })
     }))
+    check()
+    nativeContent?.()
     const safe = await this.host.publish(workspace, {
       fields: content, ...(view.error === undefined ? {} : { error: view.error })
     }, signal)
     check()
+    nativeContent?.()
     assertConfigurationSourcePath(source.path, compiled)
     if (compiled.userConfig && Object.keys(compiled.userConfig).length) assertConfigurationSourcesCurrent(source.path, compiled)
     // Identity/version facts are host-owned, regardless of content filtering.
@@ -1350,19 +1714,23 @@ export class FunctionModsManager {
   async saveUserConfig(workspace: string, threadId: string, pluginId: string, digest: string,
     key: string, value: FunctionConfigValue, expectedRevision: number,
     signal: AbortSignal, assertOwner: () => void) {
-    const source = this.sources().find(item => item.id === pluginId)
+    const source = this.configurationSource(pluginId)
+    const nativeContent = currentNativeConfigurationScope()?.assertContentCurrent
     const epoch = this.epoch(workspace)
     if (!source) throw new ModFunctionError("MODS_CONFIG_PLUGIN_MISSING")
     const check = () => {
-      assertOwner(); signal.throwIfAborted(); this.host.assertThread?.(workspace, threadId)
+      assertOwner(); signal.throwIfAborted(); this.assertConfigurationThread(workspace, threadId)
       if (this.closed || this.epoch(workspace) !== epoch ||
-        this.host.plugins().find(item => item.id === pluginId)?.path !== source.path)
+        !this.configurationSourceCurrent(pluginId, source.path))
         throw new ModFunctionError("MODS_CONFIG_SOURCE_CHANGED")
     }
     check()
     const compiled = await this.configurationSourceCache.read(source.path)
     check()
-    const sourceFence = () => assertConfigurationSourcesCurrent(source.path, compiled)
+    const sourceFence = () => {
+      nativeContent?.()
+      assertConfigurationSourcesCurrent(source.path, compiled)
+    }
     sourceFence()
     if (compiled.digest !== digest || !compiled.userConfig)
       throw new ModFunctionError("MODS_CONFIG_SOURCE_CHANGED")
@@ -1380,30 +1748,99 @@ export class FunctionModsManager {
       return this.userConfig(workspace, threadId, pluginId, signal, () => { check(); sourceFence() })
     }
     const result = this.userConfigValues.save(workspace, compiled.name, compiled.userConfig,
-      key, value, expectedRevision, () => { check(); sourceFence() })
+      key, value, expectedRevision, () => { check(); sourceFence() }, compiled.userConfigSchema)
     if (result.changed) this.configurationChanged(workspace)
     return this.userConfig(workspace, threadId, pluginId, signal, () => { check(); sourceFence() })
+  }
+
+  /** Native-confirmed schema migration changes the original store, never a guest Hook. */
+  async migrateUserConfig(workspace: string, threadId: string, pluginId: string, digest: string,
+    expectedRevision: number, migrationDigest: string, signal: AbortSignal, assertOwner: () => void) {
+    const nativeContent = currentNativeConfigurationScope()?.assertContentCurrent
+    const epoch = this.epoch(workspace), source = this.configurationSource(pluginId)
+    if (!source) throw new ModFunctionError("MODS_CONFIG_PLUGIN_MISSING")
+    const guard = () => {
+      assertOwner(); signal.throwIfAborted(); this.assertConfigurationThread(workspace, threadId)
+      if (this.closed || this.epoch(workspace) !== epoch ||
+        !this.configurationSourceCurrent(pluginId, source.path))
+        throw new ModFunctionError("MODS_CONFIG_SOURCE_CHANGED")
+    }
+    guard()
+    const compiled = await this.configurationSourceCache.read(source.path)
+    const check = () => {
+      guard(); nativeContent?.(); assertConfigurationSourcesCurrent(source.path, compiled)
+      // A plugin's declarative migration cannot replace a native/core configuration handle.
+      if ((this.host.configRows?.() ?? []).some(row => row.key.startsWith(`${compiled.name}.`)))
+        throw new ModFunctionError("MODS_USER_CONFIG_MIGRATION_POLICY_LOCKED")
+    }
+    check()
+    if (compiled.digest !== digest || !compiled.userConfig) throw new ModFunctionError("MODS_CONFIG_SOURCE_CHANGED")
+    const result = this.userConfigValues.migrate(workspace, compiled.name, compiled.userConfig,
+      compiled.userConfigSchema, expectedRevision, migrationDigest, check)
+    if (result.changed) this.configurationChanged(workspace)
+    return this.userConfig(workspace, threadId, pluginId, signal, check)
+  }
+
+  /** Native deletion removes an override from the same revisioned user-config store. */
+  async resetUserConfig(workspace: string, threadId: string, pluginId: string, digest: string,
+    key: string, expectedRevision: number, signal: AbortSignal, assertOwner: () => void) {
+    const nativeContent = currentNativeConfigurationScope()?.assertContentCurrent
+    const source = this.configurationSource(pluginId), epoch = this.epoch(workspace)
+    if (!source) throw new ModFunctionError("MODS_CONFIG_PLUGIN_MISSING")
+    const guard = () => {
+      assertOwner(); signal.throwIfAborted(); this.assertConfigurationThread(workspace, threadId)
+      if (this.closed || this.epoch(workspace) !== epoch ||
+        !this.configurationSourceCurrent(pluginId, source.path))
+        throw new ModFunctionError("MODS_CONFIG_SOURCE_CHANGED")
+    }
+    guard()
+    const compiled = await this.configurationSourceCache.read(source.path)
+    const check = () => { guard(); nativeContent?.(); assertConfigurationSourcesCurrent(source.path, compiled) }
+    check()
+    if (compiled.digest !== digest || !compiled.userConfig)
+      throw new ModFunctionError("MODS_CONFIG_SOURCE_CHANGED")
+    if (this.userConfigValues.read(workspace, compiled.name).revision !== expectedRevision)
+      throw new ModFunctionError("MODS_CONFIG_VALUE_CHANGED")
+    const field = Object.hasOwn(compiled.userConfig, key) ? compiled.userConfig[key] : undefined
+    if (!field || !writableFunctionUserConfig(field))
+      throw new ModFunctionError("MODS_USER_CONFIG_DIALOG_REQUIRED")
+    const entry = this.sessions.get(JSON.stringify([workspace, threadId]))
+    const snapshot = entry?.snapshots.get(compiled.name)
+    if (ordinaryFunctionUserConfig(field) && entry?.session &&
+      snapshot?.compiled.digest === compiled.digest) {
+      const defaultValue = resolveFunctionUserConfig({ [key]: field }, {})[key] as FunctionConfigValue
+      const result = await entry.session.withConfigurationGuard(check, () =>
+        entry.session!.configuration.set(`${compiled.name}.${key}`, defaultValue,
+          { kind: "composer" }, signal, undefined, true), check)
+      if ("deny" in result) throw new ModFunctionError("MODS_CONFIG_DENIED", result.deny)
+      return this.userConfig(workspace, threadId, pluginId, signal, check)
+    }
+    const result = this.userConfigValues.reset(workspace, compiled.name, compiled.userConfig,
+      key, expectedRevision, check, compiled.userConfigSchema)
+    if (result.changed) this.configurationChanged(workspace)
+    return this.userConfig(workspace, threadId, pluginId, signal, check)
   }
 
   /** Sensitive values are native control input, never config.set Hook payloads. */
   async saveSensitiveUserConfig(workspace: string, threadId: string, pluginId: string, digest: string,
     key: string, action: import("../../../shared/mods/v2/user-config-view").SensitiveFunctionUserConfigAction,
     expectedRevision: number, signal: AbortSignal, assertOwner: () => void) {
-    const source = this.sources().find(item => item.id === pluginId), epoch = this.epoch(workspace)
+    const nativeContent = currentNativeConfigurationScope()?.assertContentCurrent
+    const source = this.configurationSource(pluginId), epoch = this.epoch(workspace)
     if (!source) throw new ModFunctionError("MODS_CONFIG_PLUGIN_MISSING")
     const guard = () => {
-      assertOwner(); signal.throwIfAborted(); this.host.assertThread?.(workspace, threadId)
+      assertOwner(); signal.throwIfAborted(); this.assertConfigurationThread(workspace, threadId)
       if (this.closed || this.epoch(workspace) !== epoch ||
-        this.host.plugins().find(item => item.id === pluginId)?.path !== source.path)
+        !this.configurationSourceCurrent(pluginId, source.path))
         throw new ModFunctionError("MODS_CONFIG_SOURCE_CHANGED")
     }
     guard()
     const compiled = await this.configurationSourceCache.read(source.path)
-    const check = () => { guard(); assertConfigurationSourcesCurrent(source.path, compiled) }
+    const check = () => { guard(); nativeContent?.(); assertConfigurationSourcesCurrent(source.path, compiled) }
     check()
     if (compiled.digest !== digest || !compiled.userConfig) throw new ModFunctionError("MODS_CONFIG_SOURCE_CHANGED")
     const result = this.userConfigValues.saveSensitive(workspace, compiled.name, compiled.userConfig,
-      key, action, expectedRevision, check)
+      key, action, expectedRevision, check, compiled.userConfigSchema)
     if (result.changed) this.configurationChanged(workspace)
     return this.userConfig(workspace, threadId, pluginId, signal, check)
   }
@@ -1412,12 +1849,13 @@ export class FunctionModsManager {
   async pickUserConfigPath(workspace: string, threadId: string, pluginId: string, digest: string,
     key: string, expectedRevision: number, signal: AbortSignal, assertOwner: () => void,
     choose: (kind: FunctionUserConfigPathKind) => Promise<string | undefined>) {
-    const epoch = this.epoch(workspace), source = this.sources().find(item => item.id === pluginId)
+    const nativeContent = currentNativeConfigurationScope()?.assertContentCurrent
+    const epoch = this.epoch(workspace), source = this.configurationSource(pluginId)
     const proof: { compiled?: CompiledFunctionPlugin } = {}
     const guard = () => {
-      assertOwner(); signal.throwIfAborted(); this.host.assertThread?.(workspace, threadId)
+      assertOwner(); signal.throwIfAborted(); this.assertConfigurationThread(workspace, threadId)
       if (this.closed || epoch !== this.epoch(workspace) || !source ||
-        this.host.plugins().find(item => item.id === pluginId)?.path !== source.path)
+        !this.configurationSourceCurrent(pluginId, source.path))
         throw new ModFunctionError("MODS_CONFIG_SOURCE_CHANGED")
       if (proof.compiled) assertConfigurationSourcesCurrent(source!.path, proof.compiled)
     }
@@ -1427,8 +1865,19 @@ export class FunctionModsManager {
     if (proof.compiled.digest !== digest) throw new ModFunctionError("MODS_CONFIG_SOURCE_CHANGED")
     return pickFunctionUserConfigPath({ workspace, pluginId, digest, revision: expectedRevision, key }, {
       read: () => this.userConfig(workspace, threadId, pluginId, signal, guard),
-      assertLive: guard, choose,
-      publish: value => this.host.publish(workspace, value, signal)
+      assertLive: guard,
+      choose: async kind => {
+        guard(); nativeContent?.()
+        const selected = await choose(kind)
+        guard(); nativeContent?.()
+        return selected
+      },
+      publish: async value => {
+        guard(); nativeContent?.()
+        const safe = await this.host.publish(workspace, value, signal)
+        guard(); nativeContent?.()
+        return safe
+      }
     })
   }
 
@@ -1438,7 +1887,8 @@ export class FunctionModsManager {
     const view = await this.userConfig(workspace, threadId, pluginId, signal, assertOwner)
     if (view.workspace !== workspace || view.digest !== digest || view.savedRevision !== expectedRevision)
       throw new ModFunctionError("MODS_CONFIG_VALUE_CHANGED")
-    assertOwner(); signal.throwIfAborted(); this.host.assertThread?.(workspace, threadId)
+    assertOwner(); signal.throwIfAborted(); this.assertConfigurationThread(workspace, threadId)
+    if (currentNativeConfigurationScope()) return view
     const entry = this.sessions.get(JSON.stringify([workspace, threadId]))
     if (entry) await this.applyConfigurationIfIdle(entry, true)
     return this.userConfig(workspace, threadId, pluginId, signal, assertOwner)
@@ -1571,6 +2021,7 @@ export class FunctionModsManager {
       request.threadId === undefined || request.threadId === entry.threadId)) return "聊天正在结束"
     if (this.host.configurationBusy?.(entry.threadId) || entry.completionChecks.size ||
       entry.activity.releaseBlockingSize) return "聊天或组件仍有操作进行中"
+    if (entry.session?.nativeBehaviorSelectionHeld) return "请先停用当前已应用的平台行为"
     if (entry.session?.hasReleaseResources) return "组件仍有后台资源或定时任务"
     try {
       if (this.hasMandatoryRuntimePolicy(entry.workspace, entry.threadId, [...entry.snapshots.keys()]))
@@ -1615,7 +2066,7 @@ export class FunctionModsManager {
         state: entry.probeRetirementError ? "failed" : stopped?.state ?? (!entry.loaded ? "loading" : entry.session?.hasStarted ? "resident" : "discovery"),
         autoReclaimable: !this.pureProbeBlocker(entry), guestEntered: entry.execution.guestEntered,
         mountedSites: [...this.siteOwners.values()].filter(owner => owner.entry === entry).length,
-        ...(entry.session && entry.loaded ? { diagnostics: { ...{},
+        ...(entry.session && entry.loaded ? { diagnostics: { ...entry.session.platform.diagnostics(),
           backgroundResources: entry.session.ownedResourceCount } } : {}),
         ...(blocker ? { blocker } : {}), ...(stopped?.error ? { error: stopped.error } : {}),
         canRelease: !blocker, canResume: false })
@@ -1795,6 +2246,7 @@ export class FunctionModsManager {
     const view = await this.userConfig(workspace, threadId, pluginId, signal, assertOwner)
     if (view.digest !== digest || view.savedRevision !== expectedRevision)
       throw new ModFunctionError("MODS_CONFIG_VALUE_CHANGED")
+    if (currentNativeConfigurationScope()) return view
     const key = JSON.stringify([workspace, threadId]), epoch = this.epoch(workspace)
     const previous = this.sessions.get(key)
     if (previous?.developmentPlugins.size)
@@ -2036,11 +2488,22 @@ export class FunctionModsManager {
     }
   }
 
-  private assertSnapshotSource(snapshot: Snapshot): void {
-    if (!snapshot.sourceId || !snapshot.sourcePath || !this.host.plugins().some((source) =>
+  private assertSnapshotSource(snapshot: Snapshot, sources?: readonly ModPluginSource[]): void {
+    if (snapshot.assertRuntimeSource) {
+      snapshot.assertRuntimeSource()
+      return
+    }
+    if (!snapshot.sourceId || !snapshot.sourcePath || !(sources ?? this.host.plugins()).some((source) =>
       source.id === snapshot.sourceId && source.enabled &&
       isSameWorkspacePath(source.path, snapshot.sourcePath)))
       throw new ModFunctionError("MODS_PLUGIN_CHANGED", "插件已停用或更新，本次插件调用已停止；可继续制作。已开始的外部操作请先核对结果，不会自动重试。")
+  }
+
+  private assertSnapshotContent(snapshot: Snapshot): void {
+    this.assertSnapshotSource(snapshot)
+    snapshot.assertRuntimeSourceContent?.()
+    if (snapshot.assertRuntimeSourceContent)
+      assertConfigurationSourcesCurrent(snapshot.sourcePath!, snapshot.compiled)
   }
 
   private sessionHasHandler(entry: SessionEntry, event: string): boolean {
@@ -2124,11 +2587,19 @@ export class FunctionModsManager {
     }
   }
 
-  private sources(selection?: ClawProfile | null): ModPluginSource[] {
-    const sources = this.host
-      .plugins()
-      .filter((plugin) => this.isSource(plugin))
-      .sort((a, b) => a.id.localeCompare(b.id))
+  private sources(selection?: ClawProfile | null, presenceOnly = false): ModPluginSource[] {
+    const binding = currentRuntimePluginSource()
+    const installed = this.host.plugins()
+    const plugins = binding?.capabilitySources || binding?.mode === "host"
+      ? projectRuntimePluginSources([])
+      : binding ? [...installed.filter(plugin => plugin.id !== binding.plugin.id), binding.plugin]
+        : installed
+    let candidates: ModPluginSource[]
+    if (presenceOnly) {
+      const first = plugins.find((plugin) => this.isSource(plugin))
+      candidates = first ? [first] : []
+    } else candidates = plugins.filter((plugin) => this.isSource(plugin))
+    const sources = candidates.sort((a, b) => a.id.localeCompare(b.id))
     return selection
       ? selection.capabilities.flatMap((capability) =>
           sources.filter((source) => source.id === capability.pluginId)
@@ -2139,10 +2610,11 @@ export class FunctionModsManager {
   private hasSources(workspace: string, threadId: string): boolean {
     if (this.runtimeReceiptError) return false
     if (this.development?.activeFor(workspace, threadId)) return true
+    if (this.sessions.get(JSON.stringify([workspace, threadId]))?.hostSourceBound) return true
     if (this.reloadControl.error(workspace, threadId)) return false
     const selection = this.clawSelection(workspace, threadId)
     if (selection?.capabilities.length || selection?.builtins?.contextMeter) return true
-    return this.host.plugins().some((plugin) => this.isSource(plugin))
+    return this.sources(undefined, true).length > 0
   }
 
   private readonly runtimeReadiness = new Set<{
@@ -2295,6 +2767,8 @@ export class FunctionModsManager {
   }
 
   clawSelection(workspace: string, threadId: string): ClawProfile | null {
+    if (currentRuntimePluginSource()?.mode === "host" ||
+      this.sessions.get(JSON.stringify([workspace, threadId]))?.hostSourceBound) return null
     if (!this.host.clawApplicable?.(threadId)) return null
     const scope = this.host.clawScope?.(threadId)
     if (this.host.clawScope && !scope) return null
@@ -2438,7 +2912,15 @@ export class FunctionModsManager {
 
   private async compileStatusSource(path: string): Promise<CompiledFunctionPlugin> {
     // Byte proofs are rechecked for each read. Authorization is read below, never cached.
-    return this.statusSourceCache.read(path)
+    return (currentRuntimePluginSource() ? this.configurationSourceCache : this.statusSourceCache).read(path)
+  }
+
+  private functionSourceGrant(workspace: string, name: string, explicit?: RuntimeFunctionGrantScope): ModGrant | null {
+    const binding = currentRuntimePluginSource()
+    const scope = explicit ?? (binding?.mode === "host" ||
+      (binding?.mode === "legacy" && binding.capabilitySources?.length === 0) ? binding : undefined)
+    return scope ? this.store.getProjectFunctionGrant(workspace, scope.projectId, scope.packageDigest, name)
+      : this.store.getGrant(workspace, `function:${name}`)
   }
 
   async status(workspace: string): Promise<FunctionPluginStatus[]> {
@@ -2448,7 +2930,7 @@ export class FunctionModsManager {
         const compiled = await this.compileStatusSource(source.path)
         if (compiled.name === CONTEXT_METER_NAME)
           throw new ModFunctionError("MODS_RESERVED_BUILTIN_NAME")
-        const grant = this.store.getGrant(workspace, `function:${compiled.name}`)
+        const grant = this.functionSourceGrant(workspace, compiled.name)
         result.push({
           pluginId: source.id,
           name: compiled.name,
@@ -2479,6 +2961,49 @@ export class FunctionModsManager {
         item.error = "MODS_DUPLICATE_MOD_ID"
       }
     return result
+  }
+
+  private readonly creatorPlanningClients = new Set<FunctionConnection>()
+  /** One pure section from one explicitly selected, exact installed Mod. No session or tools. */
+  async creatorPlanningPrompt(workspace: string, selected: CreatorPlanningReference,
+    signal: AbortSignal, assertCaller: () => void): Promise<string> {
+    if (this.creatorPlanningClients.size >= 2) throw Error("CREATOR_PLANNING_BUSY")
+    const epoch = this.epoch(workspace)
+    const source = this.sources().find(item => item.id === selected.pluginId)
+    if (!source?.enabled) throw Error("CREATOR_PLANNING_SOURCE_UNAVAILABLE")
+    const compiled = await compileFunctionPlugin(source.path, { captureSources: true })
+    const grant = this.store.getGrant(workspace, `function:${selected.name}`)
+    if (!grant?.enabled || compiled.digest !== selected.digest || compiled.name !== selected.name ||
+      grant.digest !== selected.digest) throw Error("CREATOR_PLANNING_SOURCE_UNAVAILABLE")
+    const assertCurrent = () => {
+      assertCaller()
+      signal.throwIfAborted()
+      if (this.closed || !this.host.enabled(workspace) || this.epoch(workspace) !== epoch ||
+        !this.sources().some(item => item.id === source.id && item.path === source.path && item.enabled))
+        throw Error("CREATOR_PLANNING_SOURCE_UNAVAILABLE")
+      this.store.assertGrant(grant)
+      assertFunctionSourcesCurrent(compiled)
+    }
+    assertCurrent()
+    if (this.creatorPlanningClients.size >= 2) throw Error("CREATOR_PLANNING_BUSY")
+    const client = this.createClient()
+    this.creatorPlanningClients.add(client)
+    const controller = new AbortController()
+    const stop = () => { controller.abort(Error("CREATOR_PLANNING_CANCELLED")); client.stop() }
+    const timer = setTimeout(stop, 5000)
+    signal.addEventListener("abort", stop, { once: true })
+    try {
+      const guest = await client.load(compiled.code, compiled.options)
+      assertCurrent()
+      const result = await invokeCreatorPlanningGuest({ guest, name: compiled.name, root: compiled.root,
+        signal: controller.signal, assertCurrent })
+      assertCurrent()
+      return result
+    } finally {
+      clearTimeout(timer)
+      signal.removeEventListener("abort", stop)
+      try { client.stop() } finally { this.creatorPlanningClients.delete(client) }
+    }
   }
 
   /** Explicit, isolated registration probe. Never grants access or invokes a hook. */
@@ -2547,6 +3072,18 @@ export class FunctionModsManager {
         throw new ModFunctionError("MODS_APPROVAL_STALE")
       assertConfigurationSourcesCurrent(source.path, compiled)
     }
+    await this.approveCompiledSource(workspace, compiled, digest, assertApproval)
+  }
+
+  private async approveCompiledSource(workspace: string, compiled: CompiledFunctionPlugin,
+    digest: string, assertCallerCurrent: () => void, scope?: RuntimeFunctionGrantScope): Promise<void> {
+    const epoch = this.epoch(workspace)
+    const assertApproval = () => {
+      assertCallerCurrent()
+      if (this.closed || epoch !== this.epoch(workspace) || compiled.digest !== digest)
+        throw new ModFunctionError("MODS_APPROVAL_STALE")
+      assertConfigurationSourcesCurrent(compiled.root, compiled)
+    }
     assertApproval()
     const configured = this.configuredOptions(workspace, compiled, compiled.options, assertApproval)
     const client = this.createClient()
@@ -2561,8 +3098,12 @@ export class FunctionModsManager {
       throw new ModFunctionError("MODS_APPROVAL_STALE")
     this.assertConfiguredOptions(workspace, compiled, configured.revision)
     assertApproval()
-    this.store.grant(workspace, `function:${compiled.name}`, digest, true)
-    this.pluginsChanged(workspace)
+    if (scope) this.store.grantProjectFunction(workspace, scope.projectId, scope.packageDigest,
+      compiled.name, digest, true)
+    else {
+      this.store.grant(workspace, `function:${compiled.name}`, digest, true)
+      this.pluginsChanged(workspace)
+    }
   }
 
   revoke(workspace: string, name: string): void {
@@ -2998,6 +3539,7 @@ export class FunctionModsManager {
           this.activateConversationOwner(candidate)
           control.applied()
           try {
+            this.host.platformChanged?.(threadId)
             this.host.changed(threadId, `source-replaced:${candidate.generation}`)
           } catch { /* A display notification cannot undo the completed native transaction. */ }
         } catch (error) {
@@ -3043,6 +3585,10 @@ export class FunctionModsManager {
   }
 
   closeThread(threadId: string): void {
+    this.closeThreadEntries(threadId, false)
+  }
+
+  private closeThreadEntries(threadId: string, strictCleanup: boolean): void {
     // This entry point also closes a configuration on a still-existing thread. Retired physical
     // children keep sharing its pool with a later reopen until their true exit and host finally.
     this.reloadControl.cancel(undefined, threadId)
@@ -3064,9 +3610,57 @@ export class FunctionModsManager {
       entry.activity.close()
       this.sessions.delete(key)
       this.closePromptSessions(entry)
-      void this.retireRemovedEntry(entry)
+      void this.retireRemovedEntry(entry, true, strictCleanup)
       this.host.changed(threadId)
     }
+  }
+
+  /** One-shot native owners must retire their exact VMs before admitting another child.
+   * Ordinary conversation closure keeps its existing nonblocking behavior above.
+   */
+  captureThreadRetirement(threadId: string) {
+    const entries = [...this.sessions].filter(([, entry]) => entry.threadId === threadId)
+    let retirement: Promise<void> | undefined
+    const assertCurrent = () => {
+      if (entries.some(([key, entry]) => this.sessions.get(key) !== entry))
+        throw new ModFunctionError("MODS_SCOPE_CHANGED")
+      if ([...this.sessions].some(([key, entry]) => entry.threadId === threadId &&
+        !entries.some(([captured, actual]) => key === captured && entry === actual)))
+        throw new ModFunctionError("MODS_SCOPE_CHANGED")
+    }
+    return { resident: entries.length > 0, assertCurrent,
+      retire: () => {
+        if (retirement) return retirement
+        assertCurrent()
+        return retirement = this.retireCapturedThread(threadId, entries)
+      } }
+  }
+
+  closeThreadAndWait(threadId: string): Promise<void> {
+    return this.captureThreadRetirement(threadId).retire()
+  }
+
+  private async retireCapturedThread(threadId: string,
+    entries: Array<[string, SessionEntry]>): Promise<void> {
+    const reservations = entries.map(([key, entry]) => ({
+      key,
+      entry,
+      reservation: this.runtimeReservations.get(key) ?? this.reserveRuntimeSlot(key)
+    }))
+    // No await between capturing these instances, holding their capacity and closing them.
+    this.closeThreadEntries(threadId, true)
+    const results = await Promise.allSettled(reservations.map(async ({ key, entry, reservation }) => {
+      const drain = this.entryDrains.get(entry)
+      if (!drain) throw new ModFunctionError("MODS_RESOURCE_CLEANUP_PENDING")
+      await drain
+      await entry.activity.whenSettled()
+      if (this.retiringEntries.has(entry))
+        throw new ModFunctionError("MODS_RESOURCE_CLEANUP_PENDING")
+      this.releaseRuntimeSlot(key, reservation, entry)
+    }))
+    const failures = results.flatMap(result => result.status === "rejected" ? [result.reason] : [])
+    if (failures.length === 1) throw failures[0]
+    if (failures.length) throw new AggregateError(failures, "MODS_RESOURCE_CLEANUP_PENDING")
   }
 
   private async session(workspace: string, threadId: string, registrationOnly = false): Promise<SessionEntry> {
@@ -3084,6 +3678,9 @@ export class FunctionModsManager {
       return entry
     }
     if (entry) {
+      const token = captureRuntimePluginSourceToken()
+      if (currentRuntimePluginSource()?.mode === "host" && entry.runtimeSourceToken !== token)
+        throw new ModFunctionError("MODS_RUNTIME_SOURCE_CHANGED")
       if (entry.probeRetirementError) throw new ModFunctionError("MODS_RUNTIME_SESSION_BUSY", entry.probeRetirementError)
       await entry.loading
       if (entry.session!.plugins.every((plugin) => !plugin.guest.stats.disposed)) {
@@ -3112,6 +3709,9 @@ export class FunctionModsManager {
     }
     try {
       const created = await pending
+      if (currentRuntimePluginSource()?.mode === "host" &&
+        created.runtimeSourceToken !== captureRuntimePluginSourceToken())
+        throw new ModFunctionError("MODS_RUNTIME_SOURCE_CHANGED")
       this.captureOperation(created)
       if (!registrationOnly) await this.startEntry(created)
       return created
@@ -3216,6 +3816,15 @@ export class FunctionModsManager {
     development?: DevelopmentActivation, selectionCandidate = false): Promise<SessionEntry> {
     if (this.runtimeReceiptError) throw new ModFunctionError("MODS_RUNTIME_RECEIPTS_UNAVAILABLE")
     const key = JSON.stringify([workspace, threadId])
+    const runtimeSource = currentRuntimePluginSource()
+    const runtimeSourceToken = captureRuntimePluginSourceToken()
+    const runtimeSourcePaths = new Set(runtimeSource ? projectRuntimePluginSources([])
+      .map(plugin => JSON.stringify([plugin.id, plugin.path])) : [])
+    const withSource = <T>(run: () => Promise<T>): Promise<T> => runtimeSourceToken
+      ? withRuntimePluginSource(runtimeSourceToken, run) : run()
+    const assertRuntimeSource = runtimeSource ? captureRuntimePluginSourceAuthorityGuard() : undefined
+    const assertRuntimeSourceContent = runtimeSource ? captureRuntimePluginSourceContentGuard() : undefined
+    assertRuntimeSourceContent?.()
     const usage = this.capabilityContext(workspace, threadId)
     const admissionEpoch = this.epoch(workspace)
     const admissionSources = this.configurationSources(workspace, threadId)
@@ -3240,6 +3849,9 @@ export class FunctionModsManager {
         (!privateBuild && this.reloadControl.error(workspace, threadId)))
         throw new ModFunctionError("MODS_SCOPE_CHANGED")
       const entry: SessionEntry = {
+        ...(runtimeSourceToken ? { runtimeSourceToken } : {}),
+        ...(assertRuntimeSourceContent ? { assertRuntimeSourceContent } : {}),
+        ...(runtimeSource?.mode === "host" ? { hostSourceBound: true } : {}),
         execution: new FunctionGuestExecutionFacts(),
         registrationProbe: registrationOnly && !privateBuild,
         activity: new FunctionSessionActivity(() => {
@@ -3284,6 +3896,7 @@ export class FunctionModsManager {
         this.sessions.set(key, current)
       }
       const assertLive = (plugin?: FunctionPlugin): void => {
+        assertRuntimeSource?.()
         if (current.catalogInvalidated) throw new ModFunctionError("MODS_PLUGIN_CHANGED", "插件已停用或更新，本次插件调用已停止；可继续制作。已开始的外部操作请先核对结果，不会自动重试。")
         this.assertClassicEndStage(threadId)
         if (current.initializer.strict) prepared?.assertLive()
@@ -3301,26 +3914,58 @@ export class FunctionModsManager {
         if (plugin) {
           const development = current.developmentPlugins.get(plugin)
           development?.assertCapabilities(
-            developmentRegistrationCapabilities(plugin.guest.registrations))
+            platformRegistrationCapabilities(plugin.guest.registrations))
           const snapshot = current.snapshots.get(plugin.name)
           if (snapshot) {
             this.assertSnapshotSource(snapshot)
+            if (snapshot.assertRuntimeSource)
+              this.assertConfiguredOptions(workspace, snapshot.compiled, snapshot.configuredRevision ?? 0)
             this.store.assertGrant(snapshot.grant)
           }
           else if (!development && current.trustedBuiltins.get(plugin.name) !== plugin)
             throw new ModFunctionError("MODS_GRANT_MISSING")
         } else {
+          const readClassicSources = this.host.freshClassicPluginSources
+          const eligibleSnapshots = readClassicSources && !runtimeSource && !assertRuntimeSource &&
+            !assertRuntimeSourceContent && current.developmentPlugins.size === 0 &&
+            current.snapshots.size > 2 ? [...current.snapshots.values()] : undefined
+          const classicSnapshots = eligibleSnapshots?.every(snapshot =>
+            !snapshot.assertRuntimeSource && !snapshot.assertRuntimeSourceContent &&
+            snapshot.sourceId && snapshot.sourcePath &&
+            snapshot.grant.modId.startsWith("function:") && snapshot.grant.sourceScope === undefined)
+            ? eligibleSnapshots : undefined
+          // One synchronous native boundary may share only this owned fresh registry read.
+          // Keep source/grant rejection order, then fence persistent registry changes after SQL.
+          const classicSources = classicSnapshots ? readClassicSources!() : undefined
           for (const snapshot of current.snapshots.values()) {
-            this.assertSnapshotSource(snapshot)
+            this.assertSnapshotSource(snapshot, classicSources)
+            if (snapshot.assertRuntimeSource)
+              this.assertConfiguredOptions(workspace, snapshot.compiled, snapshot.configuredRevision ?? 0)
             this.store.assertGrant(snapshot.grant)
+          }
+          if (classicSnapshots) {
+            const finalSources = readClassicSources!()
+            for (const snapshot of classicSnapshots) this.assertSnapshotSource(snapshot, finalSources)
           }
           for (const [plugin, development] of current.developmentPlugins) {
             development.assertCapabilities(
-              developmentRegistrationCapabilities(plugin.guest.registrations))
+              platformRegistrationCapabilities(plugin.guest.registrations))
           }
         }
         if (current.session?.plugins.some((loaded) => loaded.guest.stats.disposed))
           throw new ModFunctionError("MODS_RUNTIME_LOST")
+      }
+      const assertContent = (plugin?: FunctionPlugin): void => {
+        assertLive(plugin)
+        assertRuntimeSourceContent?.()
+        captureProjectActionContentGuard(threadId)?.()
+        const snapshots = plugin ? [current.snapshots.get(plugin.name)] : current.snapshots.values()
+        for (const snapshot of snapshots) {
+          if (!snapshot) continue
+          // The shared token callback has already verified this package for this boundary.
+          if (snapshot.assertRuntimeSourceContent)
+            assertConfigurationSourcesCurrent(snapshot.sourcePath!, snapshot.compiled)
+        }
       }
       current.loading = this.candidateConstruction.run(privateBuild ? current : undefined, async () => {
         try {
@@ -3337,7 +3982,9 @@ export class FunctionModsManager {
             if (!source.enabled) continue
             current.sourceDirectories.add(source.path)
             const original = prepared?.sourcePlugins.get(source.id)
-            const compiled = original ? original.compiled : await compileFunctionPlugin(source.path)
+            const compiled = original ? original.compiled : runtimeSource
+              ? await this.configurationSourceCache.read(source.path)
+              : await compileFunctionPlugin(source.path)
             if (compiled.name === CONTEXT_METER_NAME)
               throw new ModFunctionError("MODS_RESERVED_BUILTIN_NAME")
             if (
@@ -3350,7 +3997,7 @@ export class FunctionModsManager {
               )
             )
               throw new ModFunctionError("CLAW_CAPABILITY_CHANGED")
-            const grant = this.store.getGrant(workspace, `function:${compiled.name}`)
+            const grant = this.functionSourceGrant(workspace, compiled.name)
             if (!grant?.enabled || grant.digest !== compiled.digest) continue
             const componentSelection = selected?.capabilities.find(
               (capability) => capability.pluginId === source.id
@@ -3365,14 +4012,18 @@ export class FunctionModsManager {
             const configured = original
               ? { options: structuredClone(original.configuredOptions!), revision: original.configuredRevision ?? 0 }
               : this.configuredOptions(workspace, compiled, projection.options)
+            assertRuntimeSourceContent?.()
             const guest = trackFunctionGuest(
               await current.client.load(projection.code, configured.options),
               current.activity, current.initializer, (run) => this.startupModels.fresh(() => this.operations.exit(run)), current.execution
             )
             assertLive()
+            assertRuntimeSourceContent?.()
             this.assertConfiguredOptions(workspace, compiled, configured.revision)
             current.snapshots.set(compiled.name, {
               compiled, projection, grant, sourceId: source.id, sourcePath: source.path,
+              ...(assertRuntimeSource && runtimeSourcePaths.has(JSON.stringify([source.id, source.path]))
+                ? { assertRuntimeSource, assertRuntimeSourceContent } : {}),
               configuredRevision: configured.revision,
               configuredOptions: structuredClone(configured.options)
             })
@@ -3412,7 +4063,7 @@ export class FunctionModsManager {
               run => this.startupModels.fresh(() => this.operations.exit(run)), current.execution)
             assertLive()
             localDevelopment.assertCapabilities(
-              developmentRegistrationCapabilities(guest.registrations))
+              platformRegistrationCapabilities(guest.registrations))
             const plugin: FunctionPlugin = { name: compiled.name, root: compiled.root, tier: "user",
               modelProtocol: compiled.modelProtocol,
               guest, capabilities: localDevelopment.revision.capabilities.filter(value => !value.startsWith("event:")) }
@@ -3498,9 +4149,17 @@ export class FunctionModsManager {
                 development, method, run)
             const grant = current.snapshots.get(plugin.name)?.grant
             if (!grant) throw new ModFunctionError("MODS_GRANT_MISSING")
-            return run(grant)
+            return withSource(() => this.store.withProjectFunctionGrant(grant, () => run(grant)))
           }
           current.session = new FunctionSession(plugins, {
+            platformNativeProviders: this.host.platformNativeProviders?.(workspace, threadId),
+            platformHub: this.platformHub,
+            platformChanged: () => this.host.platformChanged?.(threadId),
+            platformIncarnation: this.host.threadIncarnationKey?.(workspace, threadId) ?? String(current.generation),
+            platformSource: plugin => ({ provider: plugin.name,
+              digest: current.snapshots.get(plugin.name)?.compiled.digest ??
+                current.developmentPlugins.get(plugin)?.revision.compiledDigest ?? `builtin:${plugin.name}`,
+              generation: String(current.generation) }),
             debugLog: this.host.debugLog
               ? (plugin, text) => this.host.debugLog!(plugin, text)
               : undefined,
@@ -3658,6 +4317,7 @@ export class FunctionModsManager {
             },
             dialogs: this.host.dialogs?.(workspace, threadId),
             assertLive,
+            assertContent,
             assertCapability: (plugin, method) => current.developmentPlugins.get(plugin)?.assertCapability(method),
             prepareAgent: async (plugin, args, signal) => {
               assertLive(plugin)
@@ -3713,7 +4373,7 @@ export class FunctionModsManager {
                 signal
               ))
               signal.throwIfAborted()
-              assertLive(plugin)
+              assertContent(plugin)
             },
             runEffect: async (plugin, method, input, signal, run) => {
               assertLive(plugin)
@@ -3725,7 +4385,12 @@ export class FunctionModsManager {
                 method,
                 input,
                 signal,
-                run
+                async () => {
+                  assertContent(plugin)
+                  const value = await run()
+                  assertContent(plugin)
+                  return value
+                }
               ))
             },
             authorizeHttp: async (plugin, request, signal) => {
@@ -3739,7 +4404,7 @@ export class FunctionModsManager {
                 signal
               ))
               signal.throwIfAborted()
-              assertLive(plugin)
+              assertContent(plugin)
             },
             abortTurn: async (plugin, turnId, signal) => {
               assertLive(plugin)
@@ -3870,7 +4535,8 @@ export class FunctionModsManager {
               if (!this.host.callTool) throw new ModFunctionError("MODS_TOOL_UNAVAILABLE")
               const grant = current.snapshots.get(plugin.name)?.grant
               if (!grant) throw new ModFunctionError("MODS_GRANT_MISSING")
-              const result = await this.host.callTool(workspace, threadId, grant, input, signal)
+              const result = await withSource(() => this.store.withProjectFunctionGrant(grant,
+                () => this.host.callTool!(workspace, threadId, grant, input, signal)))
               assertLive(plugin)
               return result
             },
@@ -3897,22 +4563,22 @@ export class FunctionModsManager {
                   assertCurrent: () => { assertLive(plugin); signal.throwIfAborted() }
                 }))
               if (!this.host.connectMcp) throw new ModFunctionError("MODS_MCP_UNAVAILABLE")
+              const sourceId = snapshot.sourceId, sourcePath = snapshot.sourcePath
               const check = () => {
                 signal.throwIfAborted()
                 assertLive(plugin)
                 if (current.snapshots.get(plugin.name) !== snapshot)
                   throw new ModFunctionError("MODS_SCOPE_CHANGED")
-                const source = this.sources().find(entry => entry.id === snapshot.sourceId)
-                if (!source?.enabled || source.path !== snapshot.sourcePath)
-                  throw new ModFunctionError("MODS_SCOPE_CHANGED")
+                this.assertSnapshotContent(snapshot)
                 this.assertConfiguredOptions(workspace, snapshot.compiled,
                   snapshot.configuredRevision ?? 0)
                 assertFunctionSourcesCurrent(snapshot.compiled)
                 this.store.assertGrant(snapshot.grant)
               }
               check()
-              const result = await this.host.connectMcp(workspace, threadId, snapshot.grant,
-                { pluginId: snapshot.sourceId, sourcePath: snapshot.sourcePath,
+              const result = await withSource(() => this.store.withProjectFunctionGrant(snapshot.grant,
+                () => this.host.connectMcp!(workspace, threadId, snapshot.grant,
+                { pluginId: sourceId, sourcePath,
                   root: snapshot.compiled.root }, signal, connect => run(async (input, active) => {
                   check()
                   const admission = await connect(input, active)
@@ -3923,7 +4589,7 @@ export class FunctionModsManager {
                     active.throwIfAborted()
                     admission.assertCurrent()
                   } }
-                }))
+                }))))
               check()
               return result
             },
@@ -3985,7 +4651,8 @@ export class FunctionModsManager {
                   scope?.assertLive()
                 },
                 (value, signal) => this.host.publish(workspace, value, signal),
-                scope?.queryTool
+                scope?.queryTool,
+                () => assertContent(plugin)
               )
             },
             state: (plugin) => {
@@ -4065,6 +4732,15 @@ export class FunctionModsManager {
             this.assertConfiguredOptions(workspace, snapshot.compiled, snapshot.configuredRevision ?? 0)
           assertLive()
           current.loaded = true
+          if (!privateBuild && runtimeSourceToken && plugins.length) {
+            // A native-only drawing predates this source admission. It cannot be upgraded
+            // in place: invalidate its publication guard and let the renderer mount a new
+            // drawing under the exact, now-loaded source owner.
+            assertRuntimeSourceContent?.()
+            this.hostOnlySites.closeThread(threadId)
+            this.host.changed(threadId, `source-replaced:${current.generation}`)
+          }
+          if (!prepared && !development) this.host.platformChanged?.(threadId)
           return current.session
         } catch (error) {
           current.activity.close()
@@ -4935,7 +5611,8 @@ export class FunctionModsManager {
       withOwnerGrant: async <T>(run: (grant: ModGrant) => Promise<T>): Promise<T> => {
         assertLive()
         if (plugin === undefined) throw new ModFunctionError("FLOW_PLUGIN_OWNER_REQUIRED")
-        const result = await run(entry.snapshots.get(plugin)!.grant)
+        const grant = entry.snapshots.get(plugin)!.grant
+        const result = await this.store.withProjectFunctionGrant(grant, () => run(grant))
         assertLive()
         return result
       },
@@ -5718,13 +6395,102 @@ export class FunctionModsManager {
     const nativeLive = binding.assertLive
     return { ...binding, assertLive: () => { assertCurrent(); nativeLive() } }
   }
+
   async panes(workspace: string, threadId: string): Promise<FunctionPaneSnapshot[]> {
     // Merely mounting the renderer must not allocate or restart a plugin session.
     if (!this.host.enabled(workspace)) return []
     const entry = this.sessions.get(JSON.stringify([workspace, threadId]))
     if (!entry) return []
     await entry.loading
-    return entry.session!.panes.snapshot()
+    return (
+      await entry.session!.panes.snapshot(
+        (plugin, id) => !entry.session!.platformSurfaces.ownsPane(plugin, id)
+      )
+    ).filter((pane) => !entry.session!.platformSurfaces.ownsPane(pane.plugin, pane.id))
+  }
+
+  private platformResident(workspace: string, threadId: string): FunctionSession | undefined {
+    this.host.assertThread?.(workspace, threadId)
+    if (this.closed || !this.host.enabled(workspace)) return undefined
+    const entry = this.sessions.get(JSON.stringify([workspace, threadId]))
+    if (!entry?.session || !entry.loaded || this.entryDrains.has(entry)) return undefined
+    return entry.session
+  }
+  platformCapabilities(workspace: string, threadId: string) {
+    const session = this.platformResident(workspace, threadId)
+    return { status: session ? "ready" as const : "unknown" as const,
+      capabilities: session?.platform.list() ?? [] }
+  }
+  platformSurfaceList(workspace: string, threadId: string) {
+    return this.platformResident(workspace, threadId)?.platformSurfaces.list() ??
+      { revision: 0, entries: [], errors: ["能力尚未登记；仅打开扩展列表不会启动组件。"] }
+  }
+  platformBehaviorList(workspace: string, threadId: string) {
+    return this.platformResident(workspace, threadId)?.platformBehaviors.list() ??
+      { revision: 0, bindings: [], active: [], errors: ["能力尚未登记；仅打开扩展列表不会启动组件。"] }
+  }
+  private async platformOperation<T>(workspace: string, threadId: string, method: string,
+    signal: AbortSignal | undefined, sender: (() => void) | undefined,
+    run: (session: FunctionSession, signal: AbortSignal) => Promise<T>): Promise<T> {
+    return this.withOperation(workspace, threadId, method, false, async () => {
+      const session = this.platformResident(workspace, threadId)
+      if (!session) throw new ModFunctionError("MODS_PLATFORM_CAPABILITY_UNKNOWN")
+      const guard = () => {
+        sender?.(); signal?.throwIfAborted()
+        if (this.platformResident(workspace, threadId) !== session) throw new ModFunctionError("MODS_SCOPE_CHANGED")
+        session.assertTransportLive()
+      }
+      guard()
+      const result = await run(session, signal ?? new AbortController().signal)
+      guard(); return result
+    }) as Promise<T>
+  }
+  platformSurfaceOpen(workspace: string, threadId: string, address: PlatformSurfaceAddress,
+    intentId: string, signal?: AbortSignal, assertCurrent?: () => void) {
+    return this.platformOperation(workspace, threadId, "platformSurfaceOpen", signal, assertCurrent,
+      (session, active) => session.platformSurfaces.open(address, active, intentId))
+  }
+  platformSurfaceRead(workspace: string, threadId: string, address: PlatformSurfaceAddress) {
+    return this.platformOperation(workspace, threadId, "platformSurfaceRead", undefined, undefined,
+      session => session.platformSurfaces.read(address))
+  }
+  platformSurfaceAct(workspace: string, threadId: string, address: PlatformSurfaceAddress,
+    action: import("../../../shared/mods/v2/ui").FunctionUiAction,
+    signal?: AbortSignal, assertCurrent?: () => void) {
+    return this.platformOperation(workspace, threadId, "platformSurfaceAct", signal, assertCurrent,
+      (session, active) => session.platformSurfaces.act(address, action, active))
+  }
+  platformSurfaceClose(workspace: string, threadId: string, address: PlatformSurfaceAddress) {
+    return this.platformOperation(workspace, threadId, "platformSurfaceClose", undefined, undefined,
+      session => session.platformSurfaces.closePage(address))
+  }
+  platformSurfaceDisable(workspace: string, threadId: string, address: PlatformSurfaceAddress) {
+    return this.platformOperation(workspace, threadId, "platformSurfaceDisable", undefined, undefined,
+      session => session.platformSurfaces.disable(address))
+  }
+  platformSurfaceEnable(workspace: string, threadId: string, address: PlatformSurfaceAddress) {
+    return this.platformOperation(workspace, threadId, "platformSurfaceEnable", undefined, undefined,
+      async session => session.platformSurfaces.enable(address))
+  }
+  platformBehaviorPreview(workspace: string, threadId: string, selected: string[]) {
+    const session = this.platformResident(workspace, threadId)
+    if (!session) throw new ModFunctionError("MODS_PLATFORM_CAPABILITY_UNKNOWN")
+    return session.platformBehaviors.preview(selected)
+  }
+  platformBehaviorApply(workspace: string, threadId: string, previewId: string, revision: number) {
+    const session = this.platformResident(workspace, threadId)
+    if (!session) throw new ModFunctionError("MODS_PLATFORM_CAPABILITY_UNKNOWN")
+    session.platformBehaviors.apply(previewId, revision)
+    session.holdNativeBehaviorSelection(session.platformBehaviors.list().active.length > 0)
+  }
+  platformBehaviorDisable(workspace: string, threadId: string) {
+    const session = this.platformResident(workspace, threadId)
+    session?.platformBehaviors.disable()
+    session?.holdNativeBehaviorSelection(false)
+  }
+  publishHostFileEdit(facts: NativeHostFileEdit): void {
+    // Native success notifications never allocate, resume or start a component.
+    this.platformResident(facts.workspace, facts.threadId)?.platform.publishHostFileEdit(facts)
   }
 
   async markdownLink(
@@ -5839,9 +6605,54 @@ export class FunctionModsManager {
     component: FunctionUiSite,
     messageId?: string,
     expectedRequestId?: string,
-    legacyProtection = false
+    legacyProtection = false,
+    retained?: SessionEntry
   ): Promise<FunctionSiteMountOutcome> {
     if (this.closed) return { state: "retired" }
+    const key = JSON.stringify([workspace, threadId])
+    const resident = this.sessions.get(key)
+    if (!retained && resident?.loaded && resident.runtimeSourceToken &&
+      resident.session?.plugins.length) {
+      const token = resident.runtimeSourceToken
+      const ambient = captureRuntimePluginSourceToken()
+      if (ambient && ambient !== token) throw new ModFunctionError("MODS_RUNTIME_SOURCE_CHANGED")
+      // This is only a drawing entry point. The token was captured by the real runtime
+      // admission; no renderer path, ID, ordinary grant or retired VM can mint one.
+      return withRuntimePluginSource(token, async () => {
+        const assertRetained = () => {
+          this.host.assertThread?.(workspace, threadId)
+          this.assertEndAdmission(workspace, threadId)
+          if (this.sessions.get(key) !== resident || this.entryDrains.has(resident) ||
+            this.endingEntries.has(key) || resident.epoch !== this.epoch(workspace) ||
+            !this.host.enabled(workspace) || this.reloadControl.error(workspace, threadId))
+            throw new ModFunctionError("MODS_RUNTIME_SOURCE_CHANGED")
+          resident.session!.assertTransportLive()
+          resident.assertRuntimeSourceContent?.()
+          const binding = currentRuntimePluginSource()!
+          if (!isSameWorkspacePath(binding.workspace, workspace))
+            throw new ModFunctionError("MODS_RUNTIME_SOURCE_CHANGED")
+          for (const snapshot of resident.snapshots.values()) {
+            // Check the original captured grants, including selected capabilities. Looking
+            // up the parent by name would incorrectly authorize an unselected parent.
+            this.store.assertGrant(snapshot.grant)
+            this.assertConfiguredOptions(workspace, snapshot.compiled, snapshot.configuredRevision ?? 0)
+            assertConfigurationSourcesCurrent(snapshot.sourcePath ?? snapshot.compiled.root, snapshot.compiled)
+          }
+        }
+        assertRetained()
+        const result = await this.mountSite(workspace, threadId, component, messageId,
+          expectedRequestId, legacyProtection, resident)
+        try { assertRetained() }
+        catch (error) {
+          if (result.state === "mounted") {
+            this.siteOwners.delete(result.owner)
+            resident.session!.sites.retire(result.owner)
+          }
+          throw error
+        }
+        return result
+      })
+    }
     functionUiSite(component)
     this.host.assertThread?.(workspace, threadId)
     const readProtection = () => {
@@ -5868,6 +6679,13 @@ export class FunctionModsManager {
       if (!request.valid || this.closed || this.epoch(workspace) !== epoch ||
         this.host.enabled(workspace) !== enabled || readProtection() !== protects)
         throw new ModFunctionError("MODS_SCOPE_CHANGED")
+      if (retained) {
+        const ambient = captureRuntimePluginSourceToken()
+        if (this.sessions.get(key) !== retained || this.entryDrains.has(retained) ||
+          (ambient && ambient !== retained.runtimeSourceToken))
+          throw new ModFunctionError("MODS_RUNTIME_SOURCE_CHANGED")
+        retained.session!.assertTransportLive()
+      }
     }
     this.pendingSiteMounts.add(request)
     let allocatedOwner: string | undefined
@@ -5875,10 +6693,9 @@ export class FunctionModsManager {
     let delivered = false
     try {
       assertCurrent()
-      const key = JSON.stringify([workspace, threadId])
       // A visible site is an entry point: approved modules must start without a command warmup.
       // Inspect grants before allocating a runtime, and retain cancellation during discovery.
-      let hasFunctions = enabled && this.hasSources(workspace, threadId)
+      let hasFunctions = enabled && (!!retained || this.hasSources(workspace, threadId))
       // turn.step can retain a native-only session while installed functions await approval.
       // Its presence alone must not turn every ordinary transcript slot into a retired site.
       // Recheck current authority unless this exact resident has actual loaded functions.
@@ -6015,6 +6832,8 @@ export class FunctionModsManager {
     await entry.loading
     await entry.session!.clients.act(action)
   }
+
+  /** Discovery parses approved snapshots but never allocates or starts a guest. */
   async actionCatalog(
     workspace: string,
     threadId: string,
@@ -6037,7 +6856,7 @@ export class FunctionModsManager {
             digest: item.digest!,
             actionId: action.id,
             name: action.name,
-            command: action.command,
+            ...parseClawActionBinding(action),
             inputSchema: structuredClone(action.inputSchema),
             ...(action.configSchema === undefined
               ? {}
@@ -6049,12 +6868,13 @@ export class FunctionModsManager {
           }))
     )
   }
+
   async prepareAction(
     workspace: string,
     threadId: string,
     identity: ClawActionIdentity,
     signal: AbortSignal
-  ): Promise<{ action: ClawActionDescriptor; command: ModCommandDescriptor }> {
+  ): Promise<PreparedClawAction> {
     signal.throwIfAborted()
     const pinned = parseClawActionIdentity(identity)
     const entry = await this.session(workspace, threadId)
@@ -6070,6 +6890,47 @@ export class FunctionModsManager {
     this.store.assertGrant(snapshot.grant)
     const exported = snapshot.projection.actions?.find((item) => item.id === pinned.actionId)
     if (!exported) throw new ModFunctionError("CLAW_ACTION_NOT_EXPORTED")
+    const action: ClawActionDescriptor = {
+      ...pinned,
+      name: exported.name,
+      ...parseClawActionBinding(exported),
+      inputSchema: structuredClone(exported.inputSchema),
+      ...(exported.configSchema === undefined
+        ? {}
+        : { configSchema: structuredClone(exported.configSchema) }),
+      ...(exported.description === undefined ? {} : { description: exported.description }),
+      ...(exported.outputSchema === undefined
+        ? {}
+        : { outputSchema: structuredClone(exported.outputSchema) })
+    }
+    if (exported.platform) {
+      signal.throwIfAborted()
+      this.host.assertThread?.(workspace, threadId)
+      if (this.sessions.get(JSON.stringify([workspace, threadId])) !== entry)
+        throw new ModFunctionError("MODS_SCOPE_CHANGED")
+      const binding = exported.platform
+      const ref = {
+        provider: pinned.plugin,
+        id: binding.id,
+        version: binding.version
+      }
+      const provider = entry.session!.platform.assertInfo(ref)
+      const target = provider.descriptor.actions.find((item) => item.id === binding.action)
+      if (!target || provider.source.digest !== pinned.digest)
+        throw new ModFunctionError("CLAW_ACTION_PLATFORM_OWNER")
+      this.store.assertGrant(snapshot.grant)
+      return {
+        route: "platform",
+        action,
+        platform: {
+          ref,
+          source: structuredClone(provider.source),
+          action: structuredClone(target),
+          grantEpoch: snapshot.grant.epoch,
+          workspaceEpoch: entry.generation
+        }
+      }
+    }
     const commands = await this.commands(workspace, threadId)
     signal.throwIfAborted()
     this.host.assertThread?.(workspace, threadId)
@@ -6084,29 +6945,19 @@ export class FunctionModsManager {
     )
       throw new ModFunctionError("CLAW_ACTION_COMMAND_OWNER")
     return {
-      action: {
-        ...pinned,
-        name: exported.name,
-        command: exported.command,
-        inputSchema: structuredClone(exported.inputSchema),
-        ...(exported.configSchema === undefined
-          ? {}
-          : { configSchema: structuredClone(exported.configSchema) }),
-        ...(exported.description === undefined ? {} : { description: exported.description }),
-        ...(exported.outputSchema === undefined
-          ? {}
-          : { outputSchema: structuredClone(exported.outputSchema) })
-      },
+      route: "command",
+      action,
       command
     }
   }
+
   async runAction(
     workspace: string,
     threadId: string,
     prepared: Awaited<ReturnType<FunctionModsManager["prepareAction"]>>,
     envelope: ClawActionEnvelope,
     signal: AbortSignal
-  ): Promise<{ text: string; output?: ModObject }> {
+  ): Promise<{ text: string; output?: ModObject; passed?: boolean }> {
     if (
       envelope.version !== 1 ||
       [envelope.task, envelope.runId, envelope.stepId, envelope.executionId].some(
@@ -6117,10 +6968,14 @@ export class FunctionModsManager {
     const current = await this.prepareAction(workspace, threadId, prepared.action, signal)
     if (
       encodeModJson(current.action) !== encodeModJson(prepared.action) ||
-      current.command.modId !== prepared.command.modId ||
-      current.command.digest !== prepared.command.digest ||
-      current.command.grantEpoch !== prepared.command.grantEpoch ||
-      current.command.workspaceEpoch !== prepared.command.workspaceEpoch
+      current.route !== prepared.route ||
+      (current.route === "command" && prepared.route === "command" && (
+        current.command.modId !== prepared.command.modId ||
+        current.command.digest !== prepared.command.digest ||
+        current.command.grantEpoch !== prepared.command.grantEpoch ||
+        current.command.workspaceEpoch !== prepared.command.workspaceEpoch)) ||
+      (current.route === "platform" && prepared.route === "platform" &&
+        encodeModJson(current.platform) !== encodeModJson(prepared.platform))
     )
       throw new ModFunctionError("CLAW_ACTION_CHANGED")
     const input = clawActionObject(envelope.input)
@@ -6130,12 +6985,36 @@ export class FunctionModsManager {
     if (new TextEncoder().encode(args).byteLength > CLAW_ACTION_MAX_BYTES)
       throw new ModFunctionError("CLAW_ACTION_INPUT_LIMIT")
     const entry = await this.session(workspace, threadId)
-    const result = await entry.session!.runAction(
-      current.command.command,
-      args,
-      current.action.plugin,
-      signal
-    )
+    let platformPassed: boolean | undefined
+    let result: ModObject
+    if (current.route === "platform") {
+      entry.session!.platform.assertInfo(current.platform.ref, current.platform.source)
+      const requestKey = "flow:" + createHash("sha256")
+        .update(JSON.stringify([current.action.pluginId, envelope.runId,
+          envelope.stepId, envelope.executionId])).digest("hex")
+      const receipt = await entry.session!.runPlatformFlowAction(
+        current.platform.ref,
+        current.platform.action.id,
+        JSON.parse(args) as ModObject,
+        requestKey,
+        signal
+      )
+      signal.throwIfAborted()
+      entry.session!.platform.assertInfo(current.platform.ref, current.platform.source)
+      if (receipt.status !== "succeeded")
+        throw new ModFunctionError("CLAW_ACTION_PLATFORM_UNSETTLED", receipt.error)
+      const terminal = parseClawPlatformActionResult(receipt.value)
+      if (terminal.status === "cancelled") throw new ModFunctionError("CLAW_ACTION_CANCELLED")
+      platformPassed = terminal.status === "succeeded"
+      result = {
+        ...(terminal.text === undefined ? {} : { text: terminal.text }),
+        ...(terminal.output === undefined ? {} : { output: terminal.output })
+      }
+    } else {
+      result = await entry.session!.runAction(
+        current.command.command, args, current.action.plugin, signal
+      )
+    }
     signal.throwIfAborted()
     this.host.assertThread?.(workspace, threadId)
     if (this.sessions.get(JSON.stringify([workspace, threadId])) !== entry)
@@ -6147,14 +7026,15 @@ export class FunctionModsManager {
     if (answer.text !== undefined && (typeof answer.text !== "string" || answer.text.length > 8000))
       throw new ModFunctionError("CLAW_ACTION_RESULT_INVALID")
     const output = answer.output === undefined ? undefined : clawActionObject(answer.output)
-    if (current.action.outputSchema) {
+    if (current.action.outputSchema && (platformPassed !== false || output !== undefined)) {
       if (!output) throw new ModFunctionError("CLAW_ACTION_OUTPUT_REQUIRED")
       validateRegisteredToolInput(current.action.outputSchema, output)
     }
-    return {
+    return retainOriginalActionText({
       text: typeof answer.text === "string" ? answer.text : current.action.name,
-      ...(output === undefined ? {} : { output })
-    }
+      ...(output === undefined ? {} : { output }),
+      ...(platformPassed === undefined ? {} : { passed: platformPassed })
+    }, answer.text)
   }
 
   async runCommand(
@@ -6195,6 +7075,8 @@ export class FunctionModsManager {
   }
 
   close(): void {
+    for (const client of this.creatorPlanningClients) client.stop()
+    this.creatorPlanningClients.clear()
     this.development?.close()
     for (const quota of this.uiResolveQuotas.values()) quota.close()
     this.uiResolveQuotas.clear()

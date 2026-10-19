@@ -13,6 +13,7 @@ vi.mock("../storage", async (original) => ({
   ...(await original<typeof import("../storage")>()),
   getEnabledSkillsSources: async () => mocks.roots,
   getSkillsSources: () => mocks.roots,
+  getPlugins: () => [],
   getEnabledPluginSkillSourceMetadata: () => [],
   getDisabledSkillDirs: () => []
 }))

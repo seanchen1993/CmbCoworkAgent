@@ -56,6 +56,6 @@ describe("chat message virtual list initial location", () => {
     expect(source).toMatch(/context=\{\{ header: historyHeader, footer: footerContent \}\}/)
     expect(source).toMatch(/return message \? `\$\{message\.role\}:\$\{message\.id\}`/)
     expect(source).toMatch(/totalListHeightChanged=\{onContentHeightChanged\}/)
-    expect(source).toMatch(/followOutput=\{\(\) => false\}/)
+    expect(source).toMatch(/followOutput=\{false\}/)
   })
 })

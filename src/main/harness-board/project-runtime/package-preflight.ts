@@ -4,6 +4,8 @@ import { hostStateError } from "./host-state-protocol"
 import { readRuntimeScopedFile, runtimeRelativePath } from "./safe-files"
 import { assertHostRuntimeSupported } from "./host-validators"
 import { readProjectActionLock } from "./action-input"
+import { assertProjectPackageExtensions } from "../../mods/devtools/project-package-extensions"
+import { assertProjectAgentResourceClosure } from "../../plugins/project-agent-resources"
 
 /** Mirrors shared Mods discovery, including implicit native and hooks.modules declarations. */
 export function packageUsesSharedMods(
@@ -33,6 +35,10 @@ export function packageUsesSharedMods(
 /** Bounded, read-only preflight; also used by the catalog to expose an explicit diagnostic. */
 export function assertHostPackageSupported(root: string, runtime: ProjectRuntimeManifest) {
   assertHostRuntimeSupported(runtime)
+  const board = readRuntimeScopedFile(root, "board_core/board_config.json", 1024 * 1024)
+  if (board.bytes) assertProjectAgentResourceClosure(JSON.parse(
+    new TextDecoder("utf-8", { fatal: true }).decode(board.bytes)),
+    path => readRuntimeScopedFile(root, path, 256 * 1024).bytes)
   readProjectActionLock(root, runtime)
   let raw: Record<string, unknown> | undefined
   for (const path of [".codex-plugin/plugin.json", ".claude-plugin/plugin.json", "plugin.json"]) {
@@ -52,10 +58,12 @@ export function assertHostPackageSupported(root: string, runtime: ProjectRuntime
     metadata.version !== runtime.plugin.version
   )
     hostStateError("PACKAGE_IDENTITY_MISMATCH")
-  if (raw?.mods !== undefined || packageUsesSharedMods(root, metadata))
-    hostStateError("PINNED_MODS_UNSUPPORTED")
-  if (raw?.mcpServers !== undefined || readRuntimeScopedFile(root, ".mcp.json").present)
-    hostStateError("PINNED_MCP_UNSUPPORTED")
+  // Coexisting extensions must form a complete bounded package. Execution still requires the
+  // original compiler, exact native grant and opaque source-scoped runtime; no live fallback.
+  assertProjectPackageExtensions(raw!, path => {
+    const file = readRuntimeScopedFile(root, runtimeRelativePath(path), 256 * 1024)
+    return file.bytes ? new TextDecoder("utf-8", { fatal: true }).decode(file.bytes) : undefined
+  })
   if (metadata.hooks) runtimeRelativePath(metadata.hooks)
   for (const stage of runtime.stages)
     if (!readRuntimeScopedFile(root, stage.skill!, 256 * 1024).present)

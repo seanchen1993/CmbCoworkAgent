@@ -41,7 +41,7 @@ export async function verifyAgentSpawn(
   zip.addFile(
     "hooks/register.ts",
     Buffer.from(`export function register(on){
-    let child,limited;
+    let child,limited,readSequence=0;
     on("session.start",async($,e,next)=>{
       await $.tool.register({name:"launch",description:"Start an independent review agent"});
       await $.agent.register({name:"reviewer",description:"Read-only review",prompt:"REGISTERED_REVIEW_ROLE",tools:["Read"],maxTurns:3,omitClaudeMd:true});
@@ -55,10 +55,18 @@ export async function verifyAgentSpawn(
       const result=await $.agent.spawn({prompt:"[mods-spawn-child] Read notes.txt then finish.",description:"Independent E2E reviewer",subagentType:"spawn-e2e:reviewer"});
       child=result.agentId;await $.store.set("child",child);return {result:{started:child}}
     });
+    on("tool.call",{tool:"Read"},async($,e,next)=>{
+      const sequence=++readSequence;
+      const result=await next(e);
+      await $.store.set("read-event:"+e.agentId+":"+sequence,{agentId:e.agentId,tool:e.tool,
+        toolUseId:e.tool_use_id,nextReturned:true,isError:result.isError===true,text:result.text});
+      return result
+    });
     on("turn.complete",async($,e,next)=>{if(e.agentId===limited){await $.store.set("limited",e)}else if(e.agentId===child){await $.store.set("completed",e);$.ui.log("SPAWN_COMPLETED "+e.answer)}return next(e)});
     on("command.run",{command:"spawn-inspect"},async($,e)=>{
       if(e.args==="send")return {text:JSON.stringify(await $.session.send({to:{agentId:child},text:"PEER_BACKGROUND_REVIEW"}))};
-      return {text:JSON.stringify({child:await $.store.get("child"),agents:await $.agent.list(),completed:await $.store.get("completed"),limited:await $.store.get("limited")})}
+      const readEvents=await Promise.all((await $.store.keys()).filter(key=>key.startsWith("read-event:")).map(key=>$.store.get(key)));
+      return {text:JSON.stringify({child:await $.store.get("child"),agents:await $.agent.list(),completed:await $.store.get("completed"),limited:await $.store.get("limited"),readEvents})}
     });
     on("command.run",{command:"spawn-cold"},async($)=>{try{const result=await $.agent.spawn({prompt:"[mods-spawn-cold] Review this supplied diff.",subagentType:"spawn-e2e:summary"});child=result.agentId;return {text:JSON.stringify(result)}}catch(error){return {text:JSON.stringify({failure:String(error)})}}})
   }`)
@@ -88,7 +96,24 @@ export async function verifyAgentSpawn(
       (await page.getByRole("button", { name: "停止生成", exact: true }).count()) === 0,
     "parent finishes independently"
   )
-  const command = async (text = "") => {
+  const parentRequests = requests.filter((value) => {
+    const body = value as { messages?: Array<{ role?: string; content?: unknown }> }
+    return body.messages?.some(
+      (message) =>
+        message.role === "user" &&
+        (message.content ===
+          "[mods-spawn-parent] Launch one independent review agent, then finish immediately." ||
+          (Array.isArray(message.content) &&
+            message.content.map((part) => (part?.type === "text" ? part.text : "")).join("") ===
+              "[mods-spawn-parent] Launch one independent review agent, then finish immediately."))
+    )
+  })
+  writeFileSync(
+    join(artifacts, "agent-spawn-parent-protocol.json"),
+    JSON.stringify({ parentThreadId: id, requests: parentRequests }, null, 2)
+  )
+  assert.equal(parentRequests.length, 3, "Actual parent search, launch and answer requests")
+  const command = async (text = "", targetId = id) => {
     const jobId = await page.evaluate(
       async ({ id, text }) => {
         const descriptor = (await window.api.mods.commands(id)).find(
@@ -96,11 +121,11 @@ export async function verifyAgentSpawn(
         )!
         return (await window.api.mods.enqueue(id, descriptor, { text })).id
       },
-      { id, text }
+      { id: targetId, text }
     )
     let result = ""
     await until(async () => {
-      const job = (await page.evaluate((id) => window.api.mods.jobs(id), id)).find(
+      const job = (await page.evaluate((id) => window.api.mods.jobs(id), targetId)).find(
         (item) => item.id === jobId
       )
       if (job?.state === "failed") throw Error(job.error)
@@ -190,7 +215,7 @@ export async function verifyAgentSpawn(
   pass(
     "registered roles enforce real tool allowlists and maxTurns; child consumes peer context and publishes completion without a new user turn"
   )
-  const coldId = await page.evaluate(async (project) => {
+  const coldStartIdentity = await page.evaluate(async (project) => {
     const row = await window.api.threads.create({
       title: "Cold review command",
       workspacePath: project,
@@ -202,9 +227,10 @@ export async function verifyAgentSpawn(
     const descriptor = (await window.api.mods.commands(id)).find(
       (entry) => entry.command === "spawn-cold"
     )!
-    await window.api.mods.enqueue(id, descriptor, { text: "cold" })
-    return id
+    const job = await window.api.mods.enqueue(id, descriptor, { text: "cold" })
+    return { threadId: id, jobId: job.id }
   }, project)
+  const coldId = coldStartIdentity.threadId
   await until(async () => {
     const jobs = await page.evaluate((id) => window.api.mods.jobs(id), coldId)
     const failed = jobs.find((job) => job.state === "failed")
@@ -241,5 +267,163 @@ export async function verifyAgentSpawn(
   )
   pass(
     "a new conversation can run the registered no-tool review from a command before any model turn"
+  )
+  const cold = await command("", coldId)
+  const coldJobs = await page.evaluate((id) => window.api.mods.jobs(id), coldId)
+  const coldStart = coldJobs.find(
+    (job) => job.id === coldStartIdentity.jobId && job.state === "succeeded"
+  )
+  assert(coldStart?.result?.text, "Original cold startup result must identify its actual agent")
+  const coldAgent = JSON.parse(coldStart.result.text).agentId
+  assert.equal(cold.completed.agentId, coldAgent)
+  const completionRows = [
+    {
+      role: "reviewer",
+      event: completed.completed,
+      prompt: "[mods-spawn-child] Read notes.txt then finish.",
+      requested: 2,
+      http: 3,
+      outcome: "success",
+      reads: 1
+    },
+    {
+      role: "limited",
+      event: completed.limited,
+      prompt: "[mods-spawn-limit] Read notes.txt repeatedly.",
+      requested: 1,
+      http: 1,
+      outcome: "error",
+      reads: 1
+    },
+    {
+      role: "cold",
+      event: cold.completed,
+      prompt: "[mods-spawn-cold] Review this supplied diff.",
+      requested: 0,
+      http: 1,
+      outcome: "success",
+      reads: 0
+    }
+  ]
+  const traceEvidence: unknown[] = []
+  await until(async () => {
+    const parentTraces = await page.evaluate(
+      (id) => window.api.optimizer.getTraces({ threadId: id }),
+      id
+    )
+    const parent = parentTraces.find(
+      (trace) =>
+        trace.traceKind === "root" &&
+        trace.userMessage ===
+          "[mods-spawn-parent] Launch one independent review agent, then finish immediately."
+    )
+    if (!parent) return false
+    const summaries = await page.evaluate(() => window.api.optimizer.getTraces({ limit: 16 }))
+    traceEvidence.length = 0
+    for (const row of completionRows) {
+      assert.equal(typeof row.event.turnId, "string")
+      const summary = summaries.find((trace) => trace.subagentRunId === row.event.turnId)
+      if (!summary) return false
+      const trace = await page.evaluate(
+        (id) => window.api.optimizer.getTraceDetail(id),
+        summary.traceId
+      )
+      if (!trace) return false
+      assert.equal(trace.traceKind, "subagent")
+      assert.equal(trace.executionMode, "normal")
+      assert.equal(trace.subagentKind, undefined)
+      assert.equal(trace.threadId, trace.subagentThreadId)
+      assert.equal(trace.outcome, row.outcome)
+      assert.equal(trace.totalToolCalls, row.requested)
+      const scopedHttp = requests.filter((value) => {
+        const body = value as { messages?: Array<{ role?: string; content?: unknown }> }
+        return body.messages?.some(
+          (message) =>
+            message.role === "user" &&
+            (message.content === row.prompt ||
+              (Array.isArray(message.content) &&
+                message.content.map((part) => (part?.type === "text" ? part.text : "")).join("") ===
+                  row.prompt))
+        )
+      })
+      assert.equal(scopedHttp.length, row.http, `${row.role} actual provider requests`)
+      assert.equal(
+        trace.modelCalls?.length,
+        scopedHttp.length,
+        `${row.role} separate logical calls`
+      )
+      if (row.role === "cold") {
+        assert.equal(trace.parentTraceId, undefined)
+        assert.equal(trace.rootTraceId, trace.traceId)
+        assert.equal(trace.rootThreadId, trace.threadId)
+      } else {
+        assert.equal(trace.parentTraceId, parent.traceId)
+        assert.equal(trace.parentThreadId, id)
+        assert.equal(trace.rootTraceId, parent.rootTraceId)
+      }
+      const observed = cold.readEvents.filter(
+        (event: { agentId: string }) => event.agentId === row.event.agentId
+      )
+      assert.equal(observed.length, row.reads, `${row.role} public Read event observations`)
+      for (const event of observed) {
+        assert.equal(event.tool, "Read")
+        assert.equal(event.nextReturned, true)
+        assert.equal(event.isError, false)
+        assert.equal(typeof event.text, "string")
+        assert(event.text.includes("Native child read fixture"))
+        const call = trace.nodes?.find(
+          (node) => node.type === "tool" && node.metadata?.toolCallId === event.toolUseId
+        )
+        assert(call, "Actual public Read event must match original trace tool call")
+        const result = trace.nodes?.find(
+          (node) => node.type === "tool_result" && node.parentId === call.id
+        )
+        assert.equal(result?.status, "success")
+        assert(JSON.stringify(result?.output).includes("Native child read fixture"))
+      }
+      const denied =
+        trace.nodes?.filter(
+          (node) =>
+            node.type === "tool_result" &&
+            node.status === "error" &&
+            JSON.stringify(node.output).includes("MODS_RUNTIME_TOOL_DENIED")
+        ) ?? []
+      assert.equal(denied.length, row.role === "reviewer" ? 1 : 0)
+      traceEvidence.push({
+        role: row.role,
+        agentId: row.event.agentId,
+        turnId: row.event.turnId,
+        traceId: trace.traceId,
+        threadId: trace.threadId,
+        parentTraceId: trace.parentTraceId,
+        rootTraceId: trace.rootTraceId,
+        outcome: trace.outcome,
+        requestedToolCalls: trace.totalToolCalls,
+        observedReadEvents: observed.length,
+        confirmedReadSuccesses: observed.length,
+        deniedWriteResults: denied.length,
+        actualHttpRequests: scopedHttp.length,
+        logicalModelCalls: trace.modelCalls?.length,
+        events: observed
+      })
+    }
+    return true
+  }, "SDK child native traces and public tool observations")
+  writeFileSync(
+    join(artifacts, "agent-spawn-trace.json"),
+    JSON.stringify(
+      {
+        complete: true,
+        parentThreadId: id,
+        coldParentThreadId: coldId,
+        reader: "original optimizer IPC; OS-protected native storage; no DB or plaintext override",
+        children: traceEvidence
+      },
+      null,
+      2
+    )
+  )
+  pass(
+    "each actual SDK child has an original native trace; requested tools, observed Read events, results and provider requests remain distinct"
   )
 }

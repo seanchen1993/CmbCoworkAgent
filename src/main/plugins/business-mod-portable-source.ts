@@ -14,7 +14,11 @@ export function portableBusinessModFiles(snapshot: DerivationSnapshot): Derivati
       ...mod.skill.resources,
       ...mod.resources
     ]),
-    ...(catalog.extensions ?? []).flatMap((extension) => [extension.entry, ...extension.resources])
+    ...(catalog.extensions ?? []).flatMap((extension) => [
+      extension.entry,
+      ...extension.resources,
+      ...(extension.skills ?? [])
+    ])
   ]
   // A function source remains independently installable. The assembler still regenerates its own
   // native manifest instead of copying a source package's registration/bootstrap into a new plugin.

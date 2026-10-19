@@ -43,7 +43,7 @@ import React from 'react';import{createRoot}from'react-dom/client';
 import{ModsPanel}from'./src/renderer/src/components/customize/ModsPanel';
 const calls=[];let failExamples=false,active=true;const status={workspace:'C:/demo',enabled:false,outputPolicy:true,mods:[],functionMods:[],diagnostics:[]};
 const examples=${JSON.stringify(COMMUNITY_EXAMPLES)};
-window.api={plugins:{list:async()=>[{id:'test',name:'测试灵件',modCount:1}]},mods:{
+window.api={featureGates:{isEnabled:async()=>({enabled:true})},plugins:{list:async()=>[{id:'test',name:'测试灵件',modCount:1}]},mods:{
 communityExamples:{list:async()=>{if(failExamples)throw Error('MODS_EXAMPLE_UNAVAILABLE');return{examples}}},status:async()=>status,globalEnabled:async()=>false,onConfigurationChanged:()=>()=>{},
 development:{status:async()=>({workspace:'C:/demo',enabled:false,drafts:[],trials:[]}),onChanged:()=>()=>{}},
 authoring:{list:async()=>{calls.push('list');return{workspace:'C:/demo',drafts:[]}}},audit:async()=>({rows:[],nextCursor:null})}};
@@ -68,7 +68,10 @@ window.fixture={calls,active:value=>{active=value;mount()},fail:()=>{failExample
   try {
     const page = await browser.newPage({ viewport: { width: 1200, height: 950 } })
     const errors: string[] = []
-    page.on("pageerror", (error) => errors.push(String(error)))
+    page.on("pageerror", (error) => {
+      errors.push(String(error))
+      console.error(error)
+    })
     await page.route("http://localhost/workspace", (route) =>
       route.fulfill({
         contentType: "text/html",
@@ -79,6 +82,7 @@ window.fixture={calls,active:value=>{active=value;mount()},fail:()=>{failExample
     await page.addStyleTag({ content: compiler.build(candidates) })
     await page.addScriptTag({ content: bundle.outputFiles[0].text })
     const click = (name: string) => page.getByRole("button", { name, exact: true }).click()
+    await click("挑选使用")
     await page.getByRole("heading", { name: "挑一个小帮手" }).waitFor()
     assert.equal(await page.getByRole("article").count(), 3)
     assert.equal(await page.getByRole("button", { name: "打开草稿库" }).count(), 0)
@@ -99,7 +103,8 @@ window.fixture={calls,active:value=>{active=value;mount()},fail:()=>{failExample
     assert.notEqual(style.background, "rgba(0, 0, 0, 0)")
     assert.equal(style.columns.split(" ").length, 3)
     await page.screenshot({ path: resolve(output, "desktop.png"), fullPage: true })
-    await click("自己制作")
+    await click("对话创作")
+    await click("高级：手动组装、源码与历史版本")
     await click("高级：编辑源码与历史版本")
     await click("打开草稿库")
     await click("新建草稿")
@@ -113,7 +118,7 @@ window.fixture={calls,active:value=>{active=value;mount()},fail:()=>{failExample
         .evaluate((node) => Boolean(node.closest("[inert]")))
     )
     await click("我已添加")
-    await page.getByText("添加后还需项目授权", { exact: false }).waitFor()
+    await page.getByRole("article", { name: "测试灵件", exact: true }).waitFor()
     await click("卸载")
     await page.getByRole("dialog").waitFor()
     await page.evaluate(() => (window as SparksWorkspaceFixtureWindow).fixture.active(false))
@@ -122,7 +127,7 @@ window.fixture={calls,active:value=>{active=value;mount()},fail:()=>{failExample
     await page.evaluate(() => (window as SparksWorkspaceFixtureWindow).fixture.active(true))
     await page.locator('[data-active="true"]').waitFor({ state: "attached" })
     assert.equal(await page.getByRole("dialog").count(), 0)
-    await click("自己制作")
+    await click("对话创作")
     assert.equal(await page.getByLabel("草稿名称", { exact: true }).inputValue(), "我的草稿")
     assert.equal(
       await page.getByLabel("用途说明", { exact: true }).inputValue(),
@@ -145,6 +150,7 @@ window.fixture={calls,active:value=>{active=value;mount()},fail:()=>{failExample
     assert(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth))
     await page.screenshot({ path: resolve(output, "narrow.png"), fullPage: true })
     await page.evaluate(() => (window as SparksWorkspaceFixtureWindow).fixture.fail())
+    await click("挑选使用")
     await page.getByRole("alert").waitFor()
     assert.equal(
       await page.getByText("MODS_EXAMPLE_UNAVAILABLE", { exact: true }).isVisible(),

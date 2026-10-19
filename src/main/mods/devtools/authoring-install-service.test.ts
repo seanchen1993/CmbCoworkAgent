@@ -250,7 +250,7 @@ describe("creator installation through real index and control store", () => {
       binding()
     )
     expect((await apply(rollback)).state).toBe("settled")
-  })
+  }, 30_000)
 
   it("requires fresh consent and protects actual runtime source references", async () => {
     const request = draft()

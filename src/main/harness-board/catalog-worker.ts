@@ -6,6 +6,7 @@ import {
   readHarnessProjectContexts
 } from "./catalog-reader"
 import type { HarnessCatalogWorkerRequest, HarnessCatalogWorkerResponse } from "./catalog-protocol"
+import { acquireSnapshotPathLeases, type SnapshotLease } from "./project-runtime/snapshot-retention"
 
 const workerPort = parentPort
 if (!workerPort) throw new Error("Harness catalog worker requires a parent port")
@@ -15,7 +16,10 @@ workerPort.on("message", (request: HarnessCatalogWorkerRequest) => {
     workerPort.postMessage({ type: "shutdown-complete" } satisfies HarnessCatalogWorkerResponse)
     return
   }
+  let snapshotLease: SnapshotLease | undefined
   try {
+    const source = "runtimeSource" in request ? request.runtimeSource : undefined
+    snapshotLease = acquireSnapshotPathLeases(source ? [source.root] : [], "catalog-worker-read")
     if (request.type === "read-dialog-tips") {
       const result = readHarnessDialogTips(
         request.projectStorePath,
@@ -106,5 +110,5 @@ workerPort.on("message", (request: HarnessCatalogWorkerRequest) => {
         ...(typeof code === "string" ? { code } : {})
       }
     } satisfies HarnessCatalogWorkerResponse)
-  }
+  } finally { snapshotLease?.release() }
 })

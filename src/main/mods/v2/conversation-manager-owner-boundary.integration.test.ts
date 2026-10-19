@@ -313,10 +313,66 @@ async function fixture() {
     saved,
     trace,
     threadId,
+    runId,
+    workspace,
+    source,
+    coordinator,
     writerCalls: () => writerCalls,
     globalChecks: () => globalChecks
   }
 }
+
+it.each(["grant", "source", "workspace", "cancelled"] as const)(
+  "keeps admitted independent children fenced by real manager %s after parent release",
+  async mode => {
+    const f = await fixture()
+    const parent = f.manager.createRuntimeAuthority({ workspace: f.workspace,
+      threadId: f.threadId, turnId: f.runId })
+    const proof = f.coordinator.captureChildParent(f.workspace, f.threadId, {
+      target: f.prepared.target.ref, checkpointThreadId: f.threadId, runtimeCheckpointNamespace: "",
+      signal: f.owner.signal, initialState: f.prepared.state,
+      assertCurrent: () => parent.authority.assertLive()
+    }, () => parent.authority.assertLive())
+    if (!proof) throw Error("ACTUAL_PARENT_REQUIRED")
+    const childId = randomUUID(), runId = randomUUID(), agentId = `mods-agent:${randomUUID()}`
+    const signal = new AbortController().signal
+    const row = appDb.createThread(childId, { workspacePath: f.workspace,
+      parentThreadId: f.threadId, isInternalFlowRuntime: true, modsAgentRunId: runId })
+    claimLocalThreadRunLease({ threadId: childId, owner: "mods", runId })
+    const child = f.manager.createRuntimeAuthority({ workspace: f.workspace,
+      threadId: childId, agentId, turnId: runId, signal })
+    const close = f.coordinator.registerIndependentChild(proof, { invocation: {},
+      physicalThreadId: childId, runId, agentId, checkpointIncarnation: captureThreadIncarnation(row),
+      signal, assertCurrent: () => child.authority.assertLive() })
+    try {
+      const graph = f.coordinator.prepareIndependentRuntime(child.authority, signal,
+        () => child.authority.assertLive())
+      if (!graph) throw Error("ACTUAL_CHILD_GRAPH_REQUIRED")
+      releaseLocalThreadRunLease(f.threadId, "desktop", f.runId)
+      parent.release()
+      expect(() => f.prepared.target.assertCurrent()).toThrow()
+      expect(() => graph.assertCurrent()).not.toThrow()
+      if (mode === "grant") await f.functions.revoke(f.workspace, f.source.id)
+      else if (mode === "source") {
+        const replacement = join(f.source.path, "updated-package")
+        mkdirSync(replacement)
+        f.source.path = replacement
+      } else if (mode === "cancelled") f.functions.closeThread(f.threadId)
+      else {
+        const original = appDb.getThreadCore(f.threadId)!
+        appDb.getDb().run("UPDATE threads SET metadata=? WHERE thread_id=?", [
+          JSON.stringify({ ...JSON.parse(original.metadata!), workspacePath: "foreign" }), f.threadId
+        ])
+      }
+      expect(() => graph.assertCurrent()).toThrow()
+    } finally {
+      close()
+      child.release()
+      parent.release()
+      releaseLocalThreadRunLease(childId, "mods", runId)
+    }
+  }
+)
 
 it("checks real manager source and host scope once each for a prepared target", async () => {
   const f = await fixture()

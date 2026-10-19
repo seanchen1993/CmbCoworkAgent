@@ -1,3 +1,4 @@
+import { readInternalHarnessProject } from "./internal-project-context"
 import { assertHarnessConfigAvailable, FEATURE_V2_FILE } from "./config-v2"
 import { join } from "node:path"
 import type { Worker } from "node:worker_threads"
@@ -328,12 +329,18 @@ export function cancelHarnessCatalogScope(scope: string): void {
   defaultClient?.cancelScope(scope)
 }
 
-export function readHarnessProjectContextsInWorker(
+export async function readHarnessProjectContextsInWorker(
   projectIds: string[],
   scope: string,
   options: HarnessProjectContextReadOptions = {}
 ): Promise<HarnessProjectContextResult> {
-  return getDefaultClient().readProjectContexts(projectIds, scope, options)
+  const internal = projectIds.map(id => [id, readInternalHarnessProject(id)] as const).filter(([, value]) => value)
+  if (!internal.length) return getDefaultClient().readProjectContexts(projectIds, scope, options)
+  const externalIds = projectIds.filter(id => !internal.some(([internalId]) => id === internalId))
+  const result = externalIds.length ? await getDefaultClient().readProjectContexts(externalIds, scope, options) :
+    { projects: {}, stats: { durationMs: 0, responseBytes: 0, projectRows: 0, cancelled: false } } as HarnessProjectContextResult
+  for (const [id, value] of internal) result.projects[id] = value!.context
+  return result
 }
 
 export function readHarnessDialogTipsInWorker(

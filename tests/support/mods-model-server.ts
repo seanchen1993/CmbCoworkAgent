@@ -1,4 +1,5 @@
 import { createServer } from "node:http"
+import assert from "node:assert/strict"
 import { COMPACTION_SUMMARY, isCompactionSummaryRequest } from "./mods-compaction-fixture"
 
 /** Local protocol fixture; the application still uses production model settings and client. */
@@ -84,8 +85,64 @@ export async function startModsModelServer() {
       return
     }
     if (userPrompt.includes("[mods-spawn-parent]")) {
-      const tool = body.messages?.at(-1)?.role !== "tool"
-      event([{ index: 0, delta: tool ? { role: "assistant", tool_calls: [{ index: 0, id: "spawn-launch", type: "function", function: { name: "mcp__spawn-e2e__launch", arguments: "{}" } }] } : { role: "assistant", content: "SPAWN_PARENT_DONE" }, finish_reason: tool ? "tool_calls" : "stop" }])
+      const launch = "mcp__spawn-e2e__launch"
+      const names =
+        body.tools?.map((tool: { function?: { name?: string } }) => tool.function?.name) ?? []
+      const previous = body.messages?.at(-1)
+      let call: { id: string; name: string; arguments: string } | undefined
+      try {
+        if (previous?.role !== "tool") {
+          assert(names.includes("mods_tool_search"), "Actual deferred search must be published")
+          assert(!names.includes(launch), "This fixture must exercise original deferred loading")
+          const search = body.tools.find(
+            (tool: { function?: { name?: string } }) => tool.function?.name === "mods_tool_search"
+          )
+          assert.equal(search.function.parameters.properties.query.type, "string")
+          assert(search.function.parameters.required.includes("query"))
+          call = {
+            id: "spawn-search",
+            name: "mods_tool_search",
+            arguments: JSON.stringify({ query: launch })
+          }
+        } else if (previous.tool_call_id === "spawn-search") {
+          const result = JSON.parse(previous.content)
+          assert.deepEqual(result.loaded, [launch])
+          assert.equal(result.nextStep, true)
+          assert(names.includes(launch), "Real search result must publish the actual launch schema")
+          call = { id: "spawn-launch", name: launch, arguments: "{}" }
+        } else {
+          assert.equal(previous.tool_call_id, "spawn-launch")
+          const result = JSON.parse(previous.content)
+          assert.equal(typeof result.started, "string")
+          assert(result.started.length > 0, "Original native launch must really start a child")
+        }
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error)
+        console.error("SDK_PARENT_FIXTURE_PROTOCOL", message)
+        response.end(
+          `data: ${JSON.stringify({ error: { message: "SDK_PARENT_FIXTURE_PROTOCOL: " + message } })}\n\n`
+        )
+        return
+      }
+      event([
+        {
+          index: 0,
+          delta: call
+            ? {
+                role: "assistant",
+                tool_calls: [
+                  {
+                    index: 0,
+                    id: call.id,
+                    type: "function",
+                    function: { name: call.name, arguments: call.arguments }
+                  }
+                ]
+              }
+            : { role: "assistant", content: "SPAWN_PARENT_DONE" },
+          finish_reason: call ? "tool_calls" : "stop"
+        }
+      ])
       event([], { prompt_tokens: 20, completion_tokens: 5, total_tokens: 25 })
       response.end("data: [DONE]\n\n")
       return

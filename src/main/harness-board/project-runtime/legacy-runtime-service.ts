@@ -12,7 +12,10 @@ import {
   issueRuntimePluginSourceToken,
   withRuntimePluginSource
 } from "../../plugins/runtime-source-scope"
-import { registerFlowRuntimeAdmission, type FlowRuntimeAdmission } from "../../mods/flows/runtime-admission"
+import {
+  registerFlowRuntimeAdmission,
+  type FlowRuntimeAdmission
+} from "../../mods/flows/runtime-admission"
 import { DEFAULT_PLUGIN_HOOKS_PATH, readPluginManifest } from "../../plugins/manifest"
 import { LegacyOperationStore } from "./legacy-operation-store"
 import { HostPackageSnapshots } from "./package-snapshots"
@@ -23,9 +26,19 @@ import {
   runtimeRelativePath
 } from "./safe-files"
 import { hostStateError } from "./host-state-protocol"
-import { registerLegacyProjectEntryGate, LEGACY_PROJECT_SESSION_SCOPE } from "./legacy-entry-gate"
+import { registerLegacyProjectEntryGate, LEGACY_PROJECT_SESSION_SCOPE,
+  type LegacyBoundSkillSource } from "./legacy-entry-gate"
 import { captureLegacyMods } from "./legacy-mods-runtime"
+import { readRuntimeRequiredHooks } from "../../plugins/runtime-required-hooks"
 import { packageUsesSharedMods } from "./package-preflight"
+import { assertProjectPackageExtensions } from "../../mods/devtools/project-package-extensions"
+import { closeProjectCapabilityMcpService } from "../../mcp/capability-service"
+import { withSnapshotRetention } from "./snapshot-retention"
+import { readPackageExtensionContract } from "../../plugins/extension-contract"
+import {
+  prepareProjectRuntimeInputIdentity,
+  projectRuntimeInputIdentity
+} from "../project-action-runtime"
 
 export interface LegacyResolvedThread {
   projectId: string
@@ -40,6 +53,26 @@ export interface LegacyRuntimeDependencies {
   resolvePlugin(projectId: string, workspace: string): Promise<PluginMetadata>
   /** Synchronous final fence: include original agent and Flow leases, not just this ledger. */
   assertProjectIdle(projectId: string, workspace: string): void
+  /** Original main-process project/installed UUID authority. Snapshot bytes remain independently pinned. */
+  assertInstalledSourceCurrent?(
+    projectId: string,
+    workspace: string,
+    installedPluginId: string
+  ): void
+  /** Full execution boundary: re-read the existing durable project-to-adapter binding. */
+  assertProjectBindingCurrent?(
+    projectId: string,
+    workspace: string,
+    installedPluginId: string
+  ): void
+}
+
+function assertExtensions(root: string, metadata: Record<string, unknown>): boolean {
+  assertProjectPackageExtensions(metadata, (path) => {
+    const file = readRuntimeScopedFile(root, runtimeRelativePath(path), 256 * 1024)
+    return file.bytes ? new TextDecoder("utf-8", { fatal: true }).decode(file.bytes) : undefined
+  })
+  return metadata.mcpServers !== undefined || readRuntimeScopedFile(root, ".mcp.json").present
 }
 
 /** Explicit opt-in only. Original Python/Hooks own all business state and human decisions. */
@@ -51,46 +84,99 @@ export class LegacyProjectRuntimeService {
   ) {}
 
   async enable(projectId: string, workspaceInput: string) {
-    const workspace = runtimeDirectory(workspaceInput)
-    const plugin = await this.deps.resolvePlugin(projectId, workspace)
-    if (!plugin.enabled) hostStateError("PLUGIN_UNAVAILABLE")
-    const snapshot = this.snapshots.capture(plugin.path)
-    if (snapshot.manifest.mode !== "legacy" || snapshot.manifest.stateOwner !== "plugin")
-      hostStateError("OWNER_MISMATCH")
-    const metadata = readPluginManifest(snapshot.root)?.manifest
-    if (
-      !metadata ||
-      metadata.name !== snapshot.manifest.plugin.id ||
-      metadata.version !== snapshot.manifest.plugin.version
-    )
-      hostStateError("PACKAGE_IDENTITY_MISMATCH")
-    if (metadata.mcpServers || readRuntimeScopedFile(snapshot.root, ".mcp.json").present)
-      hostStateError("LEGACY_MCP_RUNTIME_UNSUPPORTED")
-    const mods = packageUsesSharedMods(snapshot.root, metadata)
-      ? await captureLegacyMods(plugin, snapshot.root, workspace)
-      : undefined
-    const latest = await this.deps.resolvePlugin(projectId, workspace)
-    if (
-      !latest.enabled ||
-      latest.id !== plugin.id ||
-      latest.path !== plugin.path ||
-      latest.version !== plugin.version
-    )
-      hostStateError("PACKAGE_IDENTITY_MISMATCH")
-    this.deps.assertProjectIdle(projectId, workspace)
-    mods?.assertCurrent()
-    return this.store.enable({
-      projectId,
-      workspace,
-      installedPluginId: plugin.id,
-      packageId: metadata.name,
-      packageVersion: metadata.version!,
-      packageDigest: snapshot.digest,
-      mods: mods?.identity ?? null
+    return withSnapshotRetention([this.snapshots.root], async () => {
+      const workspace = runtimeDirectory(workspaceInput)
+      const plugin = await this.deps.resolvePlugin(projectId, workspace)
+      if (!plugin.enabled) hostStateError("PLUGIN_UNAVAILABLE")
+      const snapshot = this.snapshots.capture(plugin.path)
+      if (snapshot.manifest.mode !== "legacy" || snapshot.manifest.stateOwner !== "plugin")
+        hostStateError("OWNER_MISMATCH")
+      const metadata = readPluginManifest(snapshot.root)?.manifest
+      if (
+        !metadata ||
+        metadata.name !== snapshot.manifest.plugin.id ||
+        metadata.version !== snapshot.manifest.plugin.version
+      )
+        hostStateError("PACKAGE_IDENTITY_MISMATCH")
+      const hasMcp = assertExtensions(snapshot.root, { ...metadata })
+      if (
+        hasMcp &&
+        (!this.deps.assertInstalledSourceCurrent || !this.deps.assertProjectBindingCurrent)
+      )
+        hostStateError("LEGACY_MCP_SOURCE_AUTHORITY_REQUIRED")
+      this.deps.assertInstalledSourceCurrent?.(projectId, workspace, plugin.id)
+      const mods = packageUsesSharedMods(snapshot.root, metadata)
+        ? await captureLegacyMods(plugin, snapshot.root, workspace)
+        : undefined
+      const latest = await this.deps.resolvePlugin(projectId, workspace)
+      if (
+        !latest.enabled ||
+        latest.id !== plugin.id ||
+        latest.path !== plugin.path ||
+        latest.version !== plugin.version
+      )
+        hostStateError("PACKAGE_IDENTITY_MISMATCH")
+      this.deps.assertProjectIdle(projectId, workspace)
+      this.deps.assertInstalledSourceCurrent?.(projectId, workspace, plugin.id)
+      this.deps.assertProjectBindingCurrent?.(projectId, workspace, plugin.id)
+      mods?.assertCurrent()
+      return this.store.enable({
+        projectId,
+        workspace,
+        installedPluginId: plugin.id,
+        packageId: metadata.name,
+        packageVersion: metadata.version!,
+        packageDigest: snapshot.digest,
+        mods: mods?.identity ?? null
+      })
     })
   }
   get(projectId: string) {
     return this.store.getBinding(projectId)
+  }
+  /** Prepare exact native Skill paths before an Agent exists, without admitting a run. */
+  async withBoundSkillSource<T>(projectId: string, workspaceInput: string,
+    work: (source: LegacyBoundSkillSource | undefined) => Promise<T>): Promise<T> {
+    const binding = this.store.getBinding(projectId)
+    if (!binding) return work(undefined)
+    const workspace = runtimeDirectory(workspaceInput)
+    if (workspace !== binding.workspace) hostStateError("LEGACY_WORKSPACE_CHANGED")
+    return withSnapshotRetention([this.snapshots.root], async () => {
+      const assertBinding = () => {
+        if (JSON.stringify(this.store.getBinding(projectId)) !== JSON.stringify(binding))
+          hostStateError("LEGACY_RUN_SCOPE_CHANGED")
+        this.deps.assertInstalledSourceCurrent?.(projectId, workspace, binding.installedPluginId)
+        this.deps.assertProjectBindingCurrent?.(projectId, workspace, binding.installedPluginId)
+      }
+      assertBinding()
+      const installed = await this.deps.resolvePlugin(projectId, workspace)
+      assertBinding()
+      if (!installed.enabled || installed.id !== binding.installedPluginId)
+        hostStateError("PLUGIN_UNAVAILABLE")
+      const installedIdentity = JSON.stringify([installed.id, installed.path, installed.name,
+        installed.version, installed.enabled])
+      const readSnapshot = () => {
+        const snapshot = this.snapshots.read(binding.packageDigest)
+        const manifest = readPluginManifest(snapshot.root)?.manifest
+        if (manifest?.name !== binding.packageId || manifest?.version !== binding.packageVersion)
+          hostStateError("PACKAGE_IDENTITY_MISMATCH")
+        return snapshot
+      }
+      const snapshot = readSnapshot()
+      const assertCurrent = async () => {
+        assertBinding()
+        const latest = await this.deps.resolvePlugin(projectId, workspace)
+        assertBinding()
+        if (JSON.stringify([latest.id, latest.path, latest.name, latest.version, latest.enabled]) !== installedIdentity)
+          hostStateError("PACKAGE_IDENTITY_MISMATCH")
+        readSnapshot()
+      }
+      await assertCurrent()
+      const result = await work({ plugin: Object.freeze({ ...installed, path: snapshot.root,
+        name: binding.packageId, version: binding.packageVersion, enabled: true }), assertCurrent })
+      await assertCurrent()
+      return result
+    })
   }
   disable(projectId: string): void {
     const binding = this.store.getBinding(projectId)
@@ -179,7 +265,7 @@ export class LegacyProjectRuntimeService {
           operation.threadIncarnation !== source.incarnationKey
         )
           hostStateError("LEGACY_RUN_SCOPE_CHANGED")
-      })
+      }, (projectId, workspace, work) => this.withBoundSkillSource(projectId, workspace, work))
     } catch (error) {
       stopAdmission()
       stopFlow()
@@ -215,9 +301,23 @@ export class LegacyProjectRuntimeService {
       metadata.version !== binding.packageVersion
     )
       hostStateError("PACKAGE_IDENTITY_MISMATCH")
+    const hasMcp = assertExtensions(snapshot.root, { ...metadata })
+    if (
+      hasMcp &&
+      (!this.deps.assertInstalledSourceCurrent || !this.deps.assertProjectBindingCurrent)
+    )
+      hostStateError("LEGACY_MCP_SOURCE_AUTHORITY_REQUIRED")
     const assertThread = () => {
+      incoming.signal?.throwIfAborted()
       if (JSON.stringify(this.deps.resolveThread(request.threadId)) !== JSON.stringify(thread))
         hostStateError("LEGACY_THREAD_CHANGED")
+      this.deps.assertInstalledSourceCurrent?.(
+        binding.projectId,
+        binding.workspace,
+        binding.installedPluginId
+      )
+      if (JSON.stringify(this.store.getBinding(binding.projectId)) !== JSON.stringify(binding))
+        hostStateError("LEGACY_RUN_SCOPE_CHANGED")
     }
     const mods = packageUsesSharedMods(snapshot.root, metadata)
       ? await captureLegacyMods(installed, snapshot.root, binding.workspace)
@@ -226,6 +326,29 @@ export class LegacyProjectRuntimeService {
       hostStateError("LEGACY_MODS_BINDING_CHANGED")
     assertThread()
     incoming.signal?.throwIfAborted()
+    const declaredContext = readPackageExtensionContract(snapshot.root)?.context
+    if (declaredContext && !declaredContext.provider?.entry)
+      hostStateError("LEGACY_CONTEXT_PROVIDER_REQUIRED")
+    const contextInput = declaredContext
+      ? {
+          workspace: binding.workspace,
+          installedPluginId: binding.installedPluginId,
+          packageId: binding.packageId,
+          pluginDigest: binding.packageDigest,
+          manifest: snapshot.manifest
+        }
+      : undefined
+    if (contextInput) await prepareProjectRuntimeInputIdentity(contextInput, snapshot.root)
+    const contextIdentity = contextInput && projectRuntimeInputIdentity(contextInput, snapshot.root)
+    if (contextInput && contextIdentity === undefined) hostStateError("INPUT_IDENTITY_UNAVAILABLE")
+    const assertContextCurrent = () => {
+      if (
+        contextInput &&
+        projectRuntimeInputIdentity(contextInput, snapshot.root) !== contextIdentity
+      )
+        hostStateError("LEGACY_CONTEXT_INPUT_CHANGED")
+    }
+    assertContextCurrent()
     const hookPath = runtimeRelativePath(metadata.hooks ?? DEFAULT_PLUGIN_HOOKS_PATH)
     const admitted = this.store.admit({
       projectId: binding.projectId,
@@ -241,7 +364,8 @@ export class LegacyProjectRuntimeService {
           message: request.message,
           modelId: request.modelId ?? null,
           agentMode: request.agentMode ?? null,
-          managedExecution: request.managedExecution ?? false
+          managedExecution: request.managedExecution ?? false,
+          ...(contextIdentity === undefined ? {} : { contextIdentity })
         })
       )
     })
@@ -256,6 +380,10 @@ export class LegacyProjectRuntimeService {
         workspace: binding.workspace,
         packageDigest: binding.packageDigest,
         stageId: "legacy-owned",
+        requiredHooks: readRuntimeRequiredHooks(
+          { ...installed, path: snapshot.root, hookPath },
+          { legacy: true }
+        ),
         plugin: {
           ...installed,
           path: snapshot.root,
@@ -268,11 +396,68 @@ export class LegacyProjectRuntimeService {
       },
       () => {
         this.snapshots.read(binding.packageDigest)
+        mods?.assertCurrent()
+        this.deps.assertProjectBindingCurrent?.(
+          binding.projectId,
+          binding.workspace,
+          binding.installedPluginId
+        )
+        assertContextCurrent()
       },
-      mods?.assertCurrent
+      () => {
+        assertThread()
+        mods?.assertAuthorityCurrent()
+        if (hasMcp) {
+          const operation = this.store.get(admitted.operation.operationId)
+          if (
+            !operation ||
+            operation.status !== "started" ||
+            operation.threadId !== request.threadId ||
+            operation.threadIncarnation !== thread.incarnation
+          )
+            hostStateError("LEGACY_RUN_SCOPE_CHANGED")
+        }
+      }
     )
     let terminal: AgentRunTerminal | undefined
     let cancelled = false
+    const finalize = async (workflowFailure?: unknown) => {
+      try {
+        await closeProjectCapabilityMcpService(token)
+      } catch {
+        this.store.settle(admitted.ticket, "unknown", "legacy_mcp_cleanup_unconfirmed")
+        return
+      }
+      if (workflowFailure) {
+        this.store.settle(admitted.ticket, "unknown", "legacy_workflow_cleanup_unconfirmed")
+        return
+      }
+      try {
+        assertThread()
+        this.deps.assertProjectBindingCurrent?.(
+          binding.projectId,
+          binding.workspace,
+          binding.installedPluginId
+        )
+        mods?.assertCurrent()
+        assertContextCurrent()
+      } catch {
+        this.store.settle(admitted.ticket, "unknown", "legacy_runtime_inputs_changed")
+        return
+      }
+      const outcome = terminal?.outcome
+      this.store.settle(
+        admitted.ticket,
+        outcome === "unknown" || !terminal
+          ? "unknown"
+          : cancelled
+            ? "cancelled"
+            : outcome === "success"
+              ? "succeeded"
+              : "failed",
+        terminal?.code ?? "original_terminal_missing"
+      )
+    }
     return {
       context: {
         ...incoming,
@@ -287,6 +472,7 @@ export class LegacyProjectRuntimeService {
               return "LEGACY_WORKSPACE_CHANGED"
             this.snapshots.read(binding.packageDigest)
             mods?.assertCurrent()
+            assertContextCurrent()
             return incoming.verifyResolvedThread?.(resolved) ?? null
           } catch {
             return "LEGACY_RUN_SCOPE_CHANGED"
@@ -297,29 +483,19 @@ export class LegacyProjectRuntimeService {
           incoming.onRunCancelled?.()
         },
         onRunTerminated: (value) => {
-          terminal ??= value
+          if (!terminal || value.outcome === "unknown") terminal = value
           incoming.onRunTerminated?.(value)
         }
       },
-      settle: () => {
-        try {
-          mods?.assertCurrent()
-        } catch {
-          this.store.settle(admitted.ticket, "unknown", "legacy_mods_fence_changed")
+      settle: async () => {
+        if (hasMcp) {
+          const { deferOwnedRuntimeWorkflowSettlement } = await import("../../agent/workflow/run-manager")
+          const owned = deferOwnedRuntimeWorkflowSettlement(token, finalize)
+          if (owned.deferred) return
+          await finalize(owned.failure)
           return
         }
-        const outcome = terminal?.outcome
-        this.store.settle(
-          admitted.ticket,
-          outcome === "unknown" || !terminal
-            ? "unknown"
-            : cancelled
-              ? "cancelled"
-              : outcome === "success"
-                ? "succeeded"
-                : "failed",
-          terminal?.code ?? "original_terminal_missing"
-        )
+        await finalize()
       }
     }
   }

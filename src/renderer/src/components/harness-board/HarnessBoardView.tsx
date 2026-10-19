@@ -2,7 +2,9 @@ import { useNativeNodeIntent, dismissNativeNodePlan, type NativeNodeIntent } fro
 import { isSameWorkspacePath } from "../../../../shared/workspace-path"
 import type { NativeNodePlan } from "../../../../shared/node-composition"
 import type { HarnessFeatureCreateInput } from "../../../../shared/harness-board-types"
+import type { HarnessKnowledgeTarget } from "../../../../shared/harness-board-types"
 import { useDerivedProjectIntent, dismissDerivedProject } from "@/lib/derived-project-intent"
+import { configurationTargetValid } from "@/lib/configuration-target"
 import type { PluginDerivationScope } from "../../../../shared/plugin-derivation"
 import { NativeNodeComposer } from "../customize/NativeNodeComposer"
 import { RepositoryBranchHint, RepositoryPathsField } from "./RepositoryPathField"
@@ -16,6 +18,7 @@ import { useHarnessNotifications } from "@/lib/harness-notifications"
 import { BizRetryNotice } from "./BizRetryNotice"
 import { ProjectWorkspaceField } from "./ProjectWorkspaceField"
 import { ProjectCapabilityPanel } from "./ProjectCapabilityPanel"
+import { ProjectCompositionEntry } from "./ProjectCompositionEntry"
 import { LocalProjectsPanel } from "./LocalProjectsPanel"
 import { ProjectPlatformEntry } from "./ProjectPlatformEntry"
 import { prepareProjectCapabilitySession } from "./project-capability-session"
@@ -205,6 +208,13 @@ import {
   takeHarnessProjectDetailBatch
 } from "./harness-board-cache"
 import { getHarnessViewportWindow, windowHarnessProjectGroups } from "./harness-board-render-window"
+import {
+  groupStageNodes,
+  harnessStageOverview,
+  type StageNodeGroup,
+  type StageGroupFilter
+} from "./harness-stage-overview"
+import { findExistingPluginProject } from "./harness-existing-project-intent"
 
 const harnessActionButtonClassName =
   "cursor-pointer group relative overflow-hidden rounded-md shadow-sm transition-all duration-200 hover:-translate-y-px hover:shadow-md"
@@ -1351,47 +1361,6 @@ function groupProgressIndex(
   const coveredNodeCount = Math.max(0, Math.min(progressIndex, workflowNodes.length))
   const completedNodeIds = new Set(workflowNodes.slice(0, coveredNodeCount).map((node) => node.id))
   return group.nodes.filter((node) => completedNodeIds.has(node.id)).length
-}
-
-interface StageNodeGroup {
-  key: string
-  label: string
-  nodes: HarnessRunNode[]
-}
-
-function stageNodeGroupLabel(node: HarnessRunNode): string {
-  return (node.group ?? "").trim()
-}
-
-function groupStageNodes(nodes: HarnessRunNode[]): StageNodeGroup[] {
-  const groups: StageNodeGroup[] = []
-  const groupsByKey = new Map<string, StageNodeGroup>()
-  const ungroupedNodes: HarnessRunNode[] = []
-
-  for (const node of nodes) {
-    const label = stageNodeGroupLabel(node)
-    if (!label) {
-      ungroupedNodes.push(node)
-      continue
-    }
-
-    const key = `group:${label}`
-    const existing = groupsByKey.get(key)
-    if (existing) {
-      existing.nodes.push(node)
-      continue
-    }
-
-    const group = { key, label, nodes: [node] }
-    groupsByKey.set(key, group)
-    groups.push(group)
-  }
-
-  if (groups.length > 0 && ungroupedNodes.length > 0) {
-    groups.push({ key: "ungrouped", label: "未分组", nodes: ungroupedNodes })
-  }
-
-  return groups
 }
 
 function ReleaseUnitIdTip(): React.JSX.Element {
@@ -3590,8 +3559,9 @@ function FeatureCreateDialog({
   onDeployUnitToggle: (deployUnitIdMapping: string, checked: boolean) => void
   onOpenDeployUnitSettings: () => void
   onSyncPublicConstraints: () => void
-  onSubmit: () => void
+  onSubmit: (acknowledgeEntryRequirements?: boolean) => void
 }): React.JSX.Element {
+  const [acknowledgedNodePlan, setAcknowledgedNodePlan] = useState<string | null>(null)
   const [pathPickerId, setPathPickerId] = useState<string | null>(null)
   const [dialogContentElement, setDialogContentElement] = useState<HTMLDivElement | null>(null)
   const workspaceInputRef = useRef<HTMLInputElement>(null)
@@ -3652,7 +3622,7 @@ function FeatureCreateDialog({
     <div className="space-y-3">
     {nodePlan && <Button variant="outline" disabled={creating} onClick={onRecheckNodes}>重新检查节点（保留当前输入）</Button>}
     <fieldset disabled={Boolean(nodePlan)} className="grid gap-3 rounded-md border border-border bg-muted/30 p-3">
-      {nodePlan && <p className="text-sm">已带入检查通过的项目步骤，前置步骤已补齐。填写需求名称和工作目录后创建；创建后仍需按原流程开始执行。</p>}
+      {nodePlan && <p className="text-sm">已带入检查通过的项目步骤。填写需求名称和工作目录后创建；创建仅新建特性，后续仍须按原流程补充需求、执行和验收。</p>}
       <div className="grid gap-2 sm:grid-cols-3" role="radiogroup" aria-label="选择要使用的工作流">
         {workflowConfig.templates.map((template) => (
           <WorkflowTemplateCard
@@ -3681,6 +3651,16 @@ function FeatureCreateDialog({
         />
       )}
     </fieldset>
+    {nodePlan && nodePlan.entryInputFallbacks?.length > 0 && <section className="space-y-2 rounded-md border p-3 text-sm">
+      <p>以下输入不再由上游步骤产生，进入原项目后须按要求补充资料：</p>
+      <ul className="list-inside list-disc space-y-2">{nodePlan.entryInputFallbacks.map((item) =>
+        <li key={`${item.nodeId}:${item.path}`} className="break-words">{item.nodeId}：{item.path}<p className="text-muted-foreground">{item.guidance}</p></li>)}</ul>
+      <label className="flex items-start gap-2"><input type="checkbox" disabled={creating}
+        checked={acknowledgedNodePlan === nodePlan.planId}
+        onChange={(event) => setAcknowledgedNodePlan(event.target.checked ? nodePlan.planId : null)} />
+        已了解入口输入要求，进入原项目后按要求补充资料
+      </label>
+    </section>}
     </div>
   ) : (
     <div className="rounded-md border border-dashed border-border bg-background px-3 py-4 text-sm text-muted-foreground">
@@ -3926,8 +3906,9 @@ function FeatureCreateDialog({
           className="grid min-h-0 min-w-0 gap-4 overflow-x-hidden overflow-y-auto py-1"
           onSubmit={(event) => {
             event.preventDefault()
-            if (syncingPublicConstraints || !workspacePath.trim()) return
-            onSubmit()
+            if (syncingPublicConstraints || !workspacePath.trim() ||
+              (nodePlan?.entryInputFallbacks?.length && acknowledgedNodePlan !== nodePlan.planId)) return
+            onSubmit(nodePlan?.planId === acknowledgedNodePlan)
           }}
         >
           <label className="grid gap-1.5 text-xs font-medium text-muted-foreground">
@@ -4042,6 +4023,7 @@ function FeatureCreateDialog({
                 (!editing && workflowLoading) ||
                 !featureName.trim() ||
                 !workspacePath.trim() ||
+                Boolean(nodePlan?.entryInputFallbacks?.length && acknowledgedNodePlan !== nodePlan.planId) ||
                 featureNameError !== null
               }
               className="gap-2"
@@ -6405,6 +6387,16 @@ function ProjectSessionPage({
             </div>
             <div className="truncate text-xs text-muted-foreground">{project.name}</div>
           </div>
+          {!deleted && thread && typeof thread.metadata?.workspacePath === "string" && (
+            <ProjectCompositionEntry
+              key={thread.thread_id}
+              scope={{
+                projectId: project.projectId,
+                threadId: thread.thread_id,
+                expectedWorkspace: thread.metadata.workspacePath
+              }}
+            />
+          )}
         </div>
       </div>
 
@@ -6602,6 +6594,10 @@ function FeatureDetailPage({
   }, [detail])
   const detailKey = detail ? `${detail.project.projectId}:${detail.run.slug}` : ""
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null)
+  const [stageGroupFilter, setStageGroupFilter] = useState<StageGroupFilter>({
+    detailKey: "",
+    groupKey: null
+  })
   const capabilityHumanGateRef = useRef<HTMLElement | null>(null)
   const capabilityThreadContext = useThreadContext()
   const groupButtonRefs = useRef<Record<string, HTMLButtonElement | null>>({})
@@ -6644,14 +6640,10 @@ function FeatureDetailPage({
   const managedRunSessionThreadId = managedRun?.currentSession?.threadId
   const managedRunStatus = managedRun ? managedRunStatusToHarnessStatus(managedRun.status) : null
   const nodeGroups = useMemo(() => groupStageNodes(detail?.run.nodes ?? []), [detail])
-  const selectedGroup =
-    nodeGroups.length > 0
-      ? (nodeGroups.find(
-          (group) => selectedNode && group.nodes.some((node) => node.id === selectedNode.id)
-        ) ??
-        nodeGroups.find((group) => group.nodes.some((node) => node.id === defaultNodeId)) ??
-        nodeGroups[0])
-      : null
+  const stageOverview = harnessStageOverview(
+    detail?.run.nodes ?? [], nodeGroups, detailKey, stageGroupFilter
+  )
+  const selectedGroup = stageOverview.group
   const selectedGroupKey = selectedGroup?.key ?? null
 
   useEffect(() => {
@@ -7167,9 +7159,10 @@ function FeatureDetailPage({
       return (
         <div
           key={node.id}
+          data-stage-node={node.id}
           title={node.label}
           className={cn(
-            "group/node flex h-[104px] min-w-0  flex-col rounded-xl border bg-background/75  transition-all duration-200",
+            "group/node flex min-h-[116px] min-w-0 flex-col rounded-xl border bg-background/75 transition-all duration-200",
             selected
               ? "border-status-info/35 shadow-md ring-1 ring-status-info/10"
               : "border-border/80 hover:-translate-y-0.5 hover:border-primary/35 hover:bg-background/85 hover:shadow-md"
@@ -7190,6 +7183,10 @@ function FeatureDetailPage({
                 {statusIcon(node.status, shouldAnimateStageNode(node))}
               </span>
               <span className="min-w-0 flex-1">
+                <span className="mb-0.5 block text-[10px] text-muted-foreground">
+                  {detail.run.nodes.findIndex((item) => item.id === node.id) + 1}
+                  {node.group?.trim() ? ` · ${node.group.trim()}` : ""}
+                </span>
                 <span className="block line-clamp-2 text-[12px] font-semibold leading-[1.35]">
                   {node.label}
                 </span>
@@ -7198,7 +7195,8 @@ function FeatureDetailPage({
                 </span>
               </span>
             </span>
-            <div className="flex items-center justify-between">
+          </button>
+            <div className="flex items-center justify-between gap-1 px-2.5 pb-2.5">
               <span className="flex flex-wrap items-center gap-1 text-[10px] text-muted-foreground">
                 <span className="rounded-full border border-border/70 bg-muted/40 px-1.5 py-0.5">
                   {node.artifacts.length} 产物
@@ -7244,17 +7242,16 @@ function FeatureDetailPage({
                 )}
               </div>
             </div>
-          </button>
         </div>
       )
     }
 
-    if (nodeGroups.length > 0 && selectedGroup) {
+    if (nodeGroups.length > 0) {
       return (
         <div className="space-y-2.5">
           <div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-3">
             {nodeGroups.map((group) => {
-              const selected = selectedGroup.key === group.key
+              const selected = selectedGroup?.key === group.key
               const currentNode =
                 group.nodes.find((node) => node.id === defaultNodeId) ?? group.nodes[0]
               const groupProgress = groupProgressIndex(
@@ -7272,10 +7269,12 @@ function FeatureDetailPage({
                   }}
                   type="button"
                   onClick={() => {
+                    setStageGroupFilter({ detailKey, groupKey: group.key })
                     if (currentNode) setSelectedNodeId(currentNode.id)
                   }}
                   aria-pressed={selected}
-                  title={group.label}
+                  title={`只查看 ${group.label} 阶段`}
+                  aria-label={`筛选阶段：${group.label}`}
                   className={cn(
                     "group/stage flex min-w-0 min-h-[96px] cursor-pointer flex-col gap-2 rounded-xl border px-3 py-3 text-left  transition-all duration-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
                     selected
@@ -7310,18 +7309,25 @@ function FeatureDetailPage({
             })}
           </div>
 
-          <section className={cn(harnessSurfaceClassName, "p-3")}>
+          <section aria-label="流程节点概览" className={cn(harnessSurfaceClassName, "p-3")}>
             <div className="flex min-w-0 flex-wrap items-center justify-between gap-2.5">
               <div className="min-w-0">
-                <div className={harnessKickerClassName}>Selected stage</div>
-                <div className="mt-1 truncate text-sm font-semibold">{selectedGroup.label}</div>
+                <div className={harnessKickerClassName}>Workflow overview</div>
+                <div className="mt-1 truncate text-sm font-semibold">
+                  {selectedGroup ? `${selectedGroup.label} 阶段` : "全流程"}
+                </div>
               </div>
-              <div className="rounded-full border border-border/70 bg-background/70 px-2.5 py-1 text-[11px] text-muted-foreground">
-                {selectedGroup.nodes.length} 个节点
+              <div className="flex items-center gap-2 text-[11px] text-muted-foreground">
+                <span>{stageOverview.nodes.length}/{detail.run.nodes.length} 个节点</span>
+                <Button type="button" variant={selectedGroup ? "outline" : "secondary"}
+                  size="sm" className="h-7 px-2 text-xs" aria-pressed={!selectedGroup}
+                  onClick={() => setStageGroupFilter({ detailKey, groupKey: null })}>
+                  全流程
+                </Button>
               </div>
             </div>
-            <div className="mt-2.5 grid grid-cols-3 gap-4">
-              {selectedGroup.nodes.map((node) => renderStageNodeButton(node))}
+            <div className="mt-2.5 grid grid-cols-2 gap-2.5 sm:grid-cols-3">
+              {stageOverview.nodes.map((node) => renderStageNodeButton(node))}
             </div>
           </section>
         </div>
@@ -7329,7 +7335,7 @@ function FeatureDetailPage({
     }
 
     return (
-      <div className="grid grid-cols-3 gap-4">
+      <div aria-label="流程节点概览" className="grid grid-cols-2 gap-2.5 sm:grid-cols-3">
         {detail.run.nodes.map((node) => renderStageNodeButton(node))}
       </div>
     )
@@ -7372,6 +7378,20 @@ function FeatureDetailPage({
               }
             />
           </div>
+          {!projectDeleted &&
+            detail &&
+            activeSessionThreadIdForView &&
+            typeof threadsById.get(activeSessionThreadIdForView)?.metadata?.workspacePath === "string" && (
+              <ProjectCompositionEntry
+                key={activeSessionThreadIdForView}
+                scope={{
+                  projectId: detail.project.projectId,
+                  threadId: activeSessionThreadIdForView,
+                  expectedWorkspace: threadsById.get(activeSessionThreadIdForView)!.metadata!
+                    .workspacePath as string
+                }}
+              />
+            )}
           {effectiveActiveDetailTab === "feature" && (
             <div className={cn(harnessPageHeaderActionsClassName, "pt-0")}>
               <TooltipProvider delayDuration={150}>
@@ -7720,7 +7740,7 @@ function FeatureDetailPage({
                   onOpenThread={handleHookSessionSelect}
                 />
                 <section className={cn(harnessSurfaceClassName, "p-3")}>
-                  <div className={harnessKickerClassName}>Current stage</div>
+                      <div className={harnessKickerClassName}>所选步骤</div>
                   <div className="mt-2.5 flex min-w-0 items-start gap-2.5">
                     <div className="mt-0.5 flex size-9 shrink-0 items-center justify-center rounded-lg border border-status-info/20 bg-status-info/10">
                       {selectedNode ? (
@@ -8717,6 +8737,7 @@ function EnterpriseHarnessBoardView({
   const [loadingRun, setLoadingRun] = useState(false)
   const [dialogOpen, setDialogOpen] = useState(false)
   const derivedProjectIntent = useDerivedProjectIntent()
+  const openedExistingProjectIntentRef = useRef<string | null>(null)
   const [derivedCreationSource, setDerivedCreationSource] = useState<{
     pluginId: string
     scope: PluginDerivationScope
@@ -8857,6 +8878,22 @@ function EnterpriseHarnessBoardView({
     }))
   )
   const { cleanupThread } = useThreadContext()
+  const knowledgeTarget = useMemo<HarnessKnowledgeTarget | undefined>(() =>
+    selectedFeature ? { projectId: selectedFeature.projectId, featureId: selectedFeature.slug }
+      : selectedProjectId ? { projectId: selectedProjectId }
+        : currentThreadId ? { threadId: currentThreadId } : undefined,
+  [selectedFeature, selectedProjectId, currentThreadId])
+  const knowledgeTargetKey = JSON.stringify(knowledgeTarget ?? null)
+  const knowledgeTargetKeyRef = useRef(knowledgeTargetKey)
+  knowledgeTargetKeyRef.current = knowledgeTargetKey
+  useEffect(() => {
+    setKnowledgePreviewsByAdapterId({})
+    setSyncedProjectConstraintPaths({})
+    setSelectedKnowledgePreviewPaths({})
+    setExpandedKnowledgePreviewAdapterIds(new Set())
+    setLoadingKnowledgePreviewAdapterIds(new Set())
+    void window.api.harnessBoard.cancelKnowledgePreviewRequests?.().catch(() => {})
+  }, [knowledgeTargetKey])
   const allThreadStates = useThreadStateSummaries()
   const allStreamLoadingStates = useAllStreamLoadingStates()
   const [collapsedFeatureKeys, setCollapsedFeatureKeys] = useState<Set<string>>(new Set())
@@ -9300,19 +9337,20 @@ function EnterpriseHarnessBoardView({
 
       setLoadingKnowledgePreviewAdapterIds((current) => new Set(current).add(adapter.id))
       try {
-        const preview = await window.api.harnessBoard.getKnowledgePreview(adapter.id)
-        if (!boardMountedRef.current) return
+        const preview = await window.api.harnessBoard.getKnowledgePreview(adapter.id, knowledgeTarget)
+        if (!boardMountedRef.current || knowledgeTargetKeyRef.current !== knowledgeTargetKey) return
         setKnowledgePreviewsByAdapterId((current) => ({
           ...current,
           [adapter.id]: preview
         }))
       } catch (error) {
         const message = cleanIpcError(error)
-        if (boardMountedRef.current && !/superseded|cancelled|aborted/i.test(message)) {
+        if (boardMountedRef.current && knowledgeTargetKeyRef.current === knowledgeTargetKey &&
+          !/superseded|cancelled|aborted/i.test(message)) {
           toast.error(message)
         }
       } finally {
-        if (boardMountedRef.current) {
+        if (boardMountedRef.current && knowledgeTargetKeyRef.current === knowledgeTargetKey) {
           setLoadingKnowledgePreviewAdapterIds((current) => {
             const next = new Set(current)
             next.delete(adapter.id)
@@ -9321,7 +9359,7 @@ function EnterpriseHarnessBoardView({
         }
       }
     },
-    [loadingKnowledgePreviewAdapterIds]
+    [loadingKnowledgePreviewAdapterIds, knowledgeTarget, knowledgeTargetKey]
   )
 
   const handleToggleKnowledgePreview = useCallback(
@@ -9355,15 +9393,16 @@ function EnterpriseHarnessBoardView({
   )
 
   const syncProjectConstraints = useCallback(
-    async (adapter: HarnessAdapterRegistryItem): Promise<boolean> => {
+    async (adapter: HarnessAdapterRegistryItem, target = knowledgeTarget): Promise<boolean> => {
       if (!adapter.pullKnowledgeAvailable) return false
       if (syncingProjectConstraintAdapterIds.has(adapter.id)) return false
 
       setSyncingProjectConstraintAdapterIds((current) => new Set(current).add(adapter.id))
       try {
-        const result = await window.api.harnessBoard.syncProjectConstraints(adapter.id)
+        const result = await window.api.harnessBoard.syncProjectConstraints(adapter.id, target)
         const syncedPath = result.path
-        if (syncedPath) {
+        if (syncedPath && boardMountedRef.current &&
+          knowledgeTargetKeyRef.current === knowledgeTargetKey) {
           setSyncedProjectConstraintPaths((current) => ({
             ...current,
             [adapter.id]: syncedPath
@@ -9382,7 +9421,7 @@ function EnterpriseHarnessBoardView({
         })
       }
     },
-    [syncingProjectConstraintAdapterIds]
+    [syncingProjectConstraintAdapterIds, knowledgeTarget, knowledgeTargetKey]
   )
 
   const handleSyncProjectConstraints = useCallback(
@@ -9397,10 +9436,10 @@ function EnterpriseHarnessBoardView({
   )
 
   const refreshFeaturePublicConstraints = useCallback(
-    async (projectId: string, requestId: number): Promise<void> => {
+    async (projectId: string, requestId: number, featureId?: string): Promise<void> => {
       try {
         const publicAgentmdDeployUnits =
-          await window.api.harnessBoard.getPublicAgentmdDeployUnits(projectId)
+          await window.api.harnessBoard.getPublicAgentmdDeployUnits(projectId, featureId)
         if (requestId !== featureWorkflowRequestIdRef.current) return
         setFeatureAgentsReadyDeployUnits(publicAgentmdDeployUnits)
       } catch {
@@ -9431,15 +9470,21 @@ function EnterpriseHarnessBoardView({
       toast.error("当前插件不支持同步公共约束")
       return
     }
-    const synced = await syncProjectConstraints(adapter)
+    const synced = await syncProjectConstraints(adapter, { projectId: project.projectId,
+      ...(featureDialogMode === "edit" && selectedFeature?.projectId === project.projectId
+        ? { featureId: selectedFeature.slug } : {}) })
     if (synced) {
-      await refreshFeaturePublicConstraints(project.projectId, featureWorkflowRequestIdRef.current)
+      await refreshFeaturePublicConstraints(project.projectId, featureWorkflowRequestIdRef.current,
+        featureDialogMode === "edit" && selectedFeature?.projectId === project.projectId
+          ? selectedFeature.slug : undefined)
     }
   }, [
     featureDialogProject,
     findAdapterForProject,
     refreshFeaturePublicConstraints,
-    syncProjectConstraints
+    syncProjectConstraints,
+    featureDialogMode,
+    selectedFeature
   ])
 
   const loadProjectDetail = useCallback(
@@ -10541,7 +10586,8 @@ function EnterpriseHarnessBoardView({
     setFeatureError(null)
     void window.api.nodeComposition.preview({ ...current.scope,
       projectId: current.plan.project.projectId, templateId: current.plan.templateId,
-      selected: current.plan.selected }).then((plan) => {
+      selected: current.plan.selected,
+      includeOptionalDependencies: current.plan.includeOptionalDependencies }).then((plan) => {
         if (request !== featureWorkflowRequestIdRef.current) return
         setFeatureNativePlan({ ...current, plan })
         setFeatureWorkflowConfig(plan.config)
@@ -10684,7 +10730,7 @@ function EnterpriseHarnessBoardView({
     [featureMappings, featureWorkspace, handleSelectFeaturePath]
   )
 
-  const handleSubmitFeature = useCallback(async (): Promise<void> => {
+  const handleSubmitFeature = useCallback(async (acknowledgeEntryRequirements = false): Promise<void> => {
     if (!featureDialogProject || creatingFeatureRef.current) return
     const feature = sanitizeHarnessNameInput(featureName).trim()
     if (!feature) {
@@ -10760,7 +10806,7 @@ function EnterpriseHarnessBoardView({
           throw Error("会话已切换，请回到原聊天后创建需求。")
       }
       const result = featureNativePlan
-        ? await window.api.nodeComposition.create({ ...featureNativePlan.scope, planId: featureNativePlan.plan.planId, feature: featureInput })
+        ? await window.api.nodeComposition.create({ ...featureNativePlan.scope, planId: featureNativePlan.plan.planId, feature: featureInput, acknowledgeEntryRequirements })
         : await window.api.harnessBoard.createFeature(featureInput)
       setFeatureNativePlan(null)
       setFeatureDialogProject(null)
@@ -11150,12 +11196,12 @@ function EnterpriseHarnessBoardView({
   ])
   const featureDialogSubmitting =
     featureDialogMode === "edit" ? updatingFeatureDeployUnits : creatingFeatureProjectId !== null
-  const handleSubmitFeatureDialog = useCallback((): void => {
+  const handleSubmitFeatureDialog = useCallback((acknowledgeEntryRequirements = false): void => {
     if (featureDialogMode === "edit") {
       void handleSubmitFeatureDeployUnits()
       return
     }
-    void handleSubmitFeature()
+    void handleSubmitFeature(acknowledgeEntryRequirements)
   }, [featureDialogMode, handleSubmitFeature, handleSubmitFeatureDeployUnits])
   const selectedProjectSessionThread = selectedProjectSession
     ? (threadsById.get(selectedProjectSession.threadId) ?? null)
@@ -11294,6 +11340,23 @@ function EnterpriseHarnessBoardView({
     },
     [detailsByProjectId, loadProjectDetail, loadingDetailIds]
   )
+
+  useEffect(() => {
+    if (!derivedProjectIntent?.projectId || loadingProjects || dialogOpen || editingProject) return
+    const intent = derivedProjectIntent
+    if (openedExistingProjectIntentRef.current === intent.id) return
+    openedExistingProjectIntentRef.current = intent.id
+    const project = findExistingPluginProject(projects, intent)
+    if (!project || !intent.scope || !configurationTargetValid({
+      threadId: intent.scope.threadId, workspace: intent.scope.expectedWorkspace
+    }, useAppStore.getState().threads)) {
+      toast.error("原项目、插件或来源工作区已变化，请返回原入口重新选择。")
+      dismissDerivedProject(intent.id)
+      return
+    }
+    openProjectDetail(project.projectId)
+    dismissDerivedProject(intent.id)
+  }, [derivedProjectIntent, projects, loadingProjects, dialogOpen, editingProject, openProjectDetail])
 
   const handleUpdateProjectPlugin = useCallback(
     async (project: HarnessProjectListItem, updateInfo: MarketPluginUpdateInfo): Promise<void> => {
@@ -12627,7 +12690,7 @@ function EnterpriseHarnessBoardView({
           </Dialog>
         </>
       )}
-      {derivedProjectIntent && <div role="region" aria-label="为新插件创建项目"
+      {derivedProjectIntent && !derivedProjectIntent.projectId && <div role="region" aria-label="为新插件创建项目"
         className="fixed bottom-6 right-6 z-40 max-w-sm space-y-2 rounded-xl border bg-background p-4 shadow-lg">
         <p className="text-sm">为 {derivedProjectIntent.name} 新建项目，使用独立的项目目录。</p>
         {(dialogOpen || editingProject) && <p className="text-xs text-muted-foreground">请先完成或取消当前项目表单，现有输入不会被覆盖。</p>}

@@ -17,6 +17,10 @@ export const AUTHORING_BUNDLE_LIMITS = Object.freeze({
   pathLength: 160
 })
 
+/** Text may be preserved in a package without granting permission to execute it. */
+export const hasAuthoringTextExtension = (path: string): boolean =>
+  /\.(?:[cm]?[jt]sx?|json|md|css|txt|py|sh|ps1)$/.test(path)
+
 function dataRecord(value: unknown): Record<string, unknown> {
   if (!value || typeof value !== "object" || types.isProxy(value))
     throw Error("AUTHORING_SOURCE_INVALID")
@@ -50,7 +54,7 @@ function sourcePath(value: unknown): string {
         [".git", "node_modules", ".env"].includes(part.toLowerCase()) ||
         part.toLowerCase().startsWith(".env.")
     ) ||
-    !/\.(?:ts|tsx|js|jsx|json|md|css)$/.test(value)
+    !hasAuthoringTextExtension(value)
   )
     throw Error("AUTHORING_SOURCE_PATH")
   return value

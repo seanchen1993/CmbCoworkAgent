@@ -1,3 +1,4 @@
+import { runtimeCapabilityAllowsPlugin } from "./runtime-source-scope"
 import {
   isSkillVisibleForProjectMode as visible,
   type SkillPluginVisibilityMetadata,
@@ -10,5 +11,7 @@ export function isSkillVisibleForProjectMode(
   source: SkillPluginVisibilityMetadata,
   scope: ProjectModeSkillScope
 ): boolean {
+  const admitted = runtimeCapabilityAllowsPlugin(source.pluginId)
+  if (admitted !== undefined && source.pluginId) return admitted
   return visible({ ...source, ...derivationVisibility(source.pluginId ?? "") }, scope)
 }

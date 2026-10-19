@@ -1,3 +1,4 @@
+import { currentRuntimePluginSource, runtimeCapabilityAllowsPlugin } from "../plugins/runtime-source-scope"
 import {
   getEnabledPluginHookMetadata,
   getEnabledSkillHookMetadata,
@@ -332,7 +333,11 @@ export function filterScopedHooks(
   event?: HookEvent
 ): HookConfig[] {
   const { baseHooks, pluginHooks, skillHooks } = candidates
-  if (!scope) return baseHooks
+  const binding = currentRuntimePluginSource()
+  if (!scope) {
+    if (!binding) return baseHooks
+    scope = createHookScope()
+  }
   const currentVisibilityScope: ProjectModeSkillScope = {
     projectMode: Boolean(context.featureId || context.harnessProjectId),
     boundPluginId: context.harnessAdapterId,
@@ -344,6 +349,11 @@ export function filterScopedHooks(
   const visibilityScope = frozenDerivationBindings.get(scope) ?? currentVisibilityScope
 
   const allowedPluginIds = new Set(scope.activePluginIds)
+  // Initial project lifecycle hooks precede Skill activation. The already admitted
+  // retained parent is an explicit source, independently of that later activation.
+  if (binding && (binding.mode !== "capabilities" || binding.preserveParentContext))
+    allowedPluginIds.add(normalizePluginId(binding.plugin.id))
+  for (const item of binding?.capabilitySources ?? []) allowedPluginIds.add(normalizePluginId(item.plugin.id))
   const currentPluginId = normalizePluginId(context.pluginId)
   if (currentPluginId) allowedPluginIds.add(currentPluginId)
 
@@ -378,7 +388,7 @@ export function filterScopedHooks(
 
   const filteredPluginHooks: typeof pluginHooks = []
   for (const hook of pluginHooks) {
-    if (!isDerivationVisibleForProjectMode({ ...hook,
+    if (runtimeCapabilityAllowsPlugin(hook.pluginId) !== true && !isDerivationVisibleForProjectMode({ ...hook,
       ...derivationVisibility(hook.pluginId ?? "") }, visibilityScope)) {
       notifySkipped(hook, "plugin-not-active")
       continue
@@ -398,12 +408,12 @@ export function filterScopedHooks(
 
   const filteredSkillHooks: typeof skillHooks = []
   for (const hook of skillHooks) {
-    if (!isDerivationVisibleForProjectMode({ ...hook,
+    if (runtimeCapabilityAllowsPlugin(hook.pluginId) !== true && !isDerivationVisibleForProjectMode({ ...hook,
       ...derivationVisibility(hook.pluginId ?? "") }, visibilityScope)) {
       notifySkipped(hook, "skill-not-in-scope")
       continue
     }
-    if (!isSkillVisibleForProjectMode(hook, visibilityScope)) {
+    if (runtimeCapabilityAllowsPlugin(hook.pluginId) !== true && !isSkillVisibleForProjectMode(hook, visibilityScope)) {
       notifySkipped(hook, "skill-not-in-scope")
       continue
     }

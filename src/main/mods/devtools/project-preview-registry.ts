@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto"
+import { createHash, randomUUID } from "node:crypto"
 import type {
   HostProjectOperation,
   HostProjectState
@@ -10,6 +10,7 @@ import { readProjectSource } from "./project-source"
 import { inspectProjectSource } from "./project-doctor"
 import type { ClawActionDescriptor } from "../../../shared/mods/claw-actions"
 import { isSameWorkspacePath } from "../../../shared/workspace-path"
+import type { AuthoringAtomicSettings } from "./authoring-config-snapshot"
 
 export const isProjectPreviewId = (id: string) => id.startsWith("dev-project-preview:")
 interface Registration {
@@ -21,9 +22,98 @@ interface Registration {
   guard(): void
   release(): void
 }
-/** Process-local explicit preview authority, never visible to the global installed-plugin catalog. */
+interface RetainedPreview {
+  schemaVersion: 1
+  id: string
+  projectId: string
+  scope: DevelopmentScope
+  snapshot: ProjectDevelopmentSnapshot
+  packageId: string
+  packageVersion: string
+  pluginDigest?: string
+}
+const same = (left: unknown, right: unknown) => JSON.stringify(left) === JSON.stringify(right)
+const receiptKey = (scope: DevelopmentScope, draftId: string) =>
+  `project-authoring-preview-v1:${createHash("sha256")
+    .update(JSON.stringify([scope.threadId, scope.workspace, scope.incarnation, draftId]))
+    .digest("hex")}`
+const absent = "\0project-preview-absent"
+
+/** Live authority is process-local. Durable receipts permit a new native review, never replay. */
 export class ProjectPreviewRegistry {
   private entries = new Map<string, Registration>()
+  private persistence?: AuthoringAtomicSettings
+
+  configurePersistence(settings: AuthoringAtomicSettings): void {
+    if (this.entries.size) throw Error("PROJECT_PREVIEW_PERSISTENCE_BUSY")
+    this.persistence = settings
+  }
+
+  retained(scope: DevelopmentScope, draftId: string): RetainedPreview | undefined {
+    const raw = this.persistence?.getSetting(receiptKey(scope, draftId), "")
+    if (!raw) return undefined
+    if (Buffer.byteLength(raw) > 32768) throw Error("PROJECT_PREVIEW_RECEIPT_INVALID")
+    const value = JSON.parse(raw) as RetainedPreview
+    if (
+      value?.schemaVersion !== 1 ||
+      !same(value.scope, scope) ||
+      typeof value.id !== "string" ||
+      !/^dev-project-preview:[a-f0-9-]{36}$/.test(value.id) ||
+      typeof value.projectId !== "string" ||
+      !/^[a-f0-9-]{36}$/.test(value.projectId) ||
+      !value.snapshot ||
+      value.snapshot.draftId !== draftId ||
+      typeof value.snapshot.devId !== "string" ||
+      !/^[a-f0-9-]{36}$/.test(value.snapshot.devId) ||
+      !Number.isSafeInteger(value.snapshot.revision) ||
+      value.snapshot.revision < 1 ||
+      !/^[a-f0-9]{64}$/.test(value.snapshot.digest) ||
+      typeof value.snapshot.packagePath !== "string" ||
+      !value.snapshot.packagePath ||
+      typeof value.snapshot.workspace !== "string" ||
+      !value.snapshot.workspace ||
+      typeof value.packageId !== "string" ||
+      !value.packageId ||
+      value.packageId.length > 200 ||
+      typeof value.packageVersion !== "string" ||
+      !value.packageVersion ||
+      value.packageVersion.length > 100 ||
+      (value.pluginDigest !== undefined && !/^[a-f0-9]{64}$/.test(value.pluginDigest))
+    )
+      throw Error("PROJECT_PREVIEW_RECEIPT_INVALID")
+    return structuredClone(value)
+  }
+
+  private persist(value: RetainedPreview, guard: () => void): void {
+    if (!this.persistence) return
+    guard()
+    const key = receiptKey(value.scope, value.snapshot.draftId)
+    const before = this.persistence.getSetting(key, absent)
+    const previous = this.retained(value.scope, value.snapshot.draftId)
+    if (previous && (previous.id !== value.id || previous.projectId !== value.projectId))
+      throw Error("PROJECT_PREVIEW_RECOVERY_REQUIRED")
+    if (
+      !this.persistence.compareAndSetSetting(
+        key,
+        before === absent ? undefined : before,
+        JSON.stringify(value)
+      )
+    )
+      throw Error("PROJECT_PREVIEW_RECEIPT_CHANGED")
+  }
+
+  private clear(scope: DevelopmentScope, draftId: string, id: string): void {
+    if (!this.persistence) return
+    const key = receiptKey(scope, draftId)
+    const before = this.persistence.getSetting(key, absent)
+    const previous = this.retained(scope, draftId)
+    if (!previous) return
+    if (
+      previous.id !== id ||
+      !this.persistence.compareAndSetSetting(key, before === absent ? undefined : before, "")
+    )
+      throw Error("PROJECT_PREVIEW_RECEIPT_CHANGED")
+  }
 
   async register(input: {
     projectId: string
@@ -55,6 +145,18 @@ export class ProjectPreviewRegistry {
       createdAt: now,
       updatedAt: now
     }
+    this.persist(
+      {
+        schemaVersion: 1,
+        id,
+        projectId: input.projectId,
+        scope: input.scope,
+        snapshot: input.snapshot,
+        packageId: manifest.plugin.id,
+        packageVersion: manifest.plugin.version
+      },
+      input.guard
+    )
     this.entries.set(id, {
       ...input,
       scope: structuredClone(input.scope),
@@ -87,7 +189,110 @@ export class ProjectPreviewRegistry {
     const retained = await readProjectSource(retainedRoot)
     entry.guard()
     if (retained.bundle.digest !== entry.snapshot.digest) throw Error("PROJECT_SOURCE_CHANGED")
+    this.persist(
+      {
+        schemaVersion: 1,
+        id: entry.plugin.id,
+        projectId: entry.projectId,
+        scope: entry.scope,
+        snapshot: entry.snapshot,
+        packageId: entry.plugin.name,
+        packageVersion: entry.plugin.version,
+        pluginDigest: project.pluginDigest
+      },
+      entry.guard
+    )
     entry.project = structuredClone(project)
+  }
+
+  /** Native confirmation rebinds the same retained project after checking its current source.
+   * No Skill runs here. Old prepared approvals are cancelled through the original state owner;
+   * uncertain effects keep their original unknown state and require result reconciliation.
+   */
+  async recover(input: {
+    scope: DevelopmentScope
+    draftId: string
+    project: HostProjectState
+    snapshot: ProjectDevelopmentSnapshot
+    retainedRoot: string
+    actions: readonly ClawActionDescriptor[]
+    operations: readonly HostProjectOperation[]
+    guard(): void
+    assertProjectCurrent?(): void
+    release(): void
+    cancelPrepared(operationId: string): HostProjectOperation
+  }): Promise<void> {
+    input.guard()
+    input.assertProjectCurrent?.()
+    const saved = this.retained(input.scope, input.draftId)
+    const project = input.project
+    if (
+      !saved ||
+      this.entries.has(saved.id) ||
+      this.entries.size >= 64 ||
+      saved.projectId !== project.projectId ||
+      saved.id !== project.installedPluginId ||
+      saved.packageId !== project.packageId ||
+      saved.packageVersion !== project.packageVersion ||
+      (saved.pluginDigest && saved.pluginDigest !== project.pluginDigest) ||
+      input.snapshot.revision !== saved.snapshot.revision ||
+      input.snapshot.digest !== saved.snapshot.digest ||
+      input.snapshot.draftId !== saved.snapshot.draftId ||
+      !isSameWorkspacePath(saved.snapshot.workspace, project.workspace) ||
+      !isSameWorkspacePath(input.snapshot.workspace, project.workspace)
+    )
+      throw Error("PROJECT_PREVIEW_SCOPE_CHANGED")
+    const source = await readProjectSource(input.retainedRoot)
+    input.guard()
+    input.assertProjectCurrent?.()
+    const { report, manifest } = inspectProjectSource(source.bundle, [], input.actions)
+    if (
+      source.bundle.digest !== saved.snapshot.digest ||
+      !report.valid ||
+      !manifest ||
+      !same(manifest, project.manifest)
+    )
+      throw Error("PROJECT_SOURCE_CHANGED")
+    if (!same(this.retained(input.scope, input.draftId), saved))
+      throw Error("PROJECT_PREVIEW_RECEIPT_CHANGED")
+    for (const operation of input.operations) {
+      if (
+        operation.projectId !== project.projectId ||
+        operation.pluginDigest !== project.pluginDigest
+      )
+        throw Error("PROJECT_PREVIEW_SCOPE_CHANGED")
+      if (operation.status === "prepared") {
+        input.guard()
+        if (input.cancelPrepared(operation.operationId).status !== "cancelled")
+          throw Error("PROJECT_PREVIEW_UNSETTLED")
+      }
+    }
+    input.guard()
+    input.assertProjectCurrent?.()
+    const snapshot = { ...saved.snapshot, packagePath: source.root }
+    this.persist({ ...saved, snapshot, pluginDigest: project.pluginDigest }, input.guard)
+    const now = new Date().toISOString()
+    this.entries.set(saved.id, {
+      projectId: project.projectId,
+      scope: structuredClone(input.scope),
+      snapshot,
+      project: structuredClone(project),
+      guard: input.guard,
+      release: input.release,
+      plugin: {
+        id: saved.id,
+        name: saved.packageId,
+        version: saved.packageVersion,
+        description: "用户重新确认的隔离项目试用",
+        author: "Project preview",
+        path: source.root,
+        enabled: true,
+        skillCount: 1,
+        mcpServerCount: 0,
+        createdAt: now,
+        updatedAt: now
+      }
+    })
   }
 
   assertProject(project: HostProjectState): PluginMetadata {
@@ -156,11 +361,21 @@ export class ProjectPreviewRegistry {
           throw Error("PROJECT_PREVIEW_UNSETTLED")
       }
     }
+    this.clear(entry.scope, entry.snapshot.draftId, entry.plugin.id)
     this.entries.delete(project.installedPluginId)
     entry.release()
   }
 
   abandon(id: string) {
+    const entry = this.entries.get(id)
+    if (!entry || entry.project) throw Error("PROJECT_PREVIEW_SCOPE_CHANGED")
+    this.clear(entry.scope, entry.snapshot.draftId, id)
+    this.entries.delete(id)
+    entry.release()
+  }
+
+  /** A created host project remains durable even when binding its live authority failed. */
+  detach(id: string) {
     const entry = this.entries.get(id)
     if (!entry || entry.project) throw Error("PROJECT_PREVIEW_SCOPE_CHANGED")
     this.entries.delete(id)
@@ -170,6 +385,48 @@ export class ProjectPreviewRegistry {
   complete(project: HostProjectState, operations: HostProjectOperation[]) {
     const entry = this.entries.get(project.installedPluginId)
     if (project.status === "completed" && entry) this.finish(project, entry.scope, operations)
+  }
+
+  /** Explicitly end a durable, inactive preview without admitting any code or deleting artifacts. */
+  finishRetained(
+    scope: DevelopmentScope,
+    draftId: string,
+    project: HostProjectState | undefined,
+    operations: HostProjectOperation[],
+    cancel: (id: string) => HostProjectOperation
+  ) {
+    const saved = this.retained(scope, draftId)
+    if (!saved || this.entries.has(saved.id)) throw Error("PROJECT_PREVIEW_SCOPE_CHANGED")
+    if (project) {
+      if (
+        project.projectId !== saved.projectId ||
+        project.installedPluginId !== saved.id ||
+        project.packageId !== saved.packageId ||
+        project.packageVersion !== saved.packageVersion ||
+        (saved.pluginDigest && project.pluginDigest !== saved.pluginDigest) ||
+        !isSameWorkspacePath(saved.snapshot.workspace, project.workspace)
+      )
+        throw Error("PROJECT_PREVIEW_SCOPE_CHANGED")
+      if (
+        operations.some((operation) =>
+          ["started", "cancel_requested", "unknown"].includes(operation.status)
+        )
+      )
+        throw Error("PROJECT_PREVIEW_UNSETTLED")
+      for (const operation of operations) {
+        if (
+          operation.projectId !== project.projectId ||
+          operation.pluginDigest !== project.pluginDigest
+        )
+          throw Error("PROJECT_PREVIEW_SCOPE_CHANGED")
+        if (
+          ["prepared", "succeeded"].includes(operation.status) &&
+          cancel(operation.operationId).status !== "cancelled"
+        )
+          throw Error("PROJECT_PREVIEW_UNSETTLED")
+      }
+    } else if (operations.length) throw Error("PROJECT_PREVIEW_SCOPE_CHANGED")
+    this.clear(scope, draftId, saved.id)
   }
 }
 export const projectPreviewRegistry = new ProjectPreviewRegistry()

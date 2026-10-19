@@ -20,10 +20,59 @@ import type {
 } from "../../../shared/mods/development"
 import type { AuthoringAtomicSettings } from "./authoring-config-snapshot"
 import type { CreatorReuseService } from "./creator-reuse"
+import { CreatorPlanningService } from "./creator-planning"
 
 afterEach(() => vi.restoreAllMocks())
 
-function fixture() {
+it("normalizes the real Windows runtime path before reading an optional planner, including no selection", async () => {
+  const raw = "C:\\owned\\creator-workspace"
+  const f = fixture((value) => (value === raw ? "workspace" : value))
+  const invoke = vi.fn()
+  const planner = new CreatorPlanningService({
+    settings: f.storage,
+    current: (threadId, workspace) => {
+      const context = f.service.reuseContext(threadId)
+      if (workspace !== context.scope.workspace) throw Error("DEVELOPMENT_SCOPE_CHANGED")
+      return context
+    },
+    catalog: async () => [],
+    invoke,
+    changed: () => {}
+  })
+  f.service.configurePlanning(planner)
+  const prompt = vi.spyOn(planner, "prompt")
+  await f.service.setMode("one", "workspace", "creator")
+  const signal = new AbortController().signal
+  await expect(f.service.planningPrompt("one", raw, signal)).resolves.toBeNull()
+  expect(prompt).toHaveBeenCalledWith("one", "workspace", signal)
+  expect(invoke).not.toHaveBeenCalled()
+  prompt.mockClear()
+  await expect(f.service.planningPrompt("one", "C:\\different", signal)).resolves.toBeNull()
+  expect(prompt).not.toHaveBeenCalled()
+})
+
+it("still stops on a genuine scope change rather than swallowing it as optional planner fallback", async () => {
+  const f = fixture((value) => (value === "raw-workspace" ? "workspace" : value))
+  await f.service.setMode("one", "workspace", "creator")
+  const captured = f.service.reuseContext("one")
+  const planner = new CreatorPlanningService({
+    settings: f.storage,
+    current: () => {
+      f.changeIdentity()
+      captured.assertCurrent()
+      return captured
+    },
+    catalog: async () => [],
+    invoke: vi.fn(),
+    changed: () => {}
+  })
+  f.service.configurePlanning(planner)
+  await expect(
+    f.service.planningPrompt("one", "raw-workspace", new AbortController().signal)
+  ).rejects.toThrow("DEVELOPMENT_SCOPE_CHANGED")
+})
+
+function fixture(normalizeWorkspace?: (workspace: string) => string) {
   const settings = new Map<string, string>()
   const storage: AuthoringAtomicSettings = {
     getSetting: (key, fallback) => settings.get(key) ?? fallback ?? "",
@@ -62,6 +111,7 @@ function fixture() {
     analyze,
     canRun: () => canRun,
     requestGroup: () => requestGroup,
+    normalizeWorkspace,
     context: (threadId) => {
       const captured = token
       return {
@@ -92,12 +142,15 @@ function fixture() {
     })
   return {
     service,
+    storage,
     runtime,
     drafts,
     save,
     analyze,
     recreate: () => new ModDevelopmentService(deps),
-    setRequestGroup: (value: string | undefined) => { requestGroup = value },
+    setRequestGroup: (value: string | undefined) => {
+      requestGroup = value
+    },
     changeIdentity: () => {
       token = "second"
     },

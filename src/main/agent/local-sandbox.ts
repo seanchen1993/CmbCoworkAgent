@@ -1,4 +1,10 @@
-import { assertCurrentRuntimePluginSourceContent } from "../plugins/runtime-source-scope"
+import { suppressCompositionPythonCache } from "../harness-board/composition-python-cache"
+import { captureProjectActionContentGuard } from "../harness-board/project-action-scope"
+import {
+  assertCurrentRuntimePluginSourceContent,
+  captureRuntimePluginSourceContentGuard,
+  currentRuntimePluginSource
+} from "../plugins/runtime-source-scope"
 import type { ModObject } from "../../shared/mods/types"
 import { beforeModToolExecution } from "../mods/execution-error"
 import { ModPermissionError } from "../mods/errors"
@@ -10,6 +16,7 @@ import { authorizeCurrentModInput, getModsManager } from "../mods/manager"
 import { getModCallContext, modCallContext } from "../mods/context"
 import type { ModRuntimeAuthority } from "../mods/runtime-instance"
 import { currentFunctionExecution } from "../mods/v2/execution-context"
+import { capturePlatformFileEdits } from "../mods/v2/platform-native-file-edits"
 /**
  * LocalSandbox: Execute shell commands locally on the host machine.
  *
@@ -83,6 +90,7 @@ import { homedir, userInfo } from "node:os"
 import type { HookConfig, HookEvent, HookResult } from "../hooks/types"
 import type { HookContext, HookResultCallback } from "../hooks/runner"
 import { runHooksEnriched } from "../hooks/required-skill"
+import { bindHookExecutionResult } from "../hooks/execution-result"
 import { detectToolFailure, hasFailureFired, markFailureFired } from "../hooks/tool-failure"
 import { HookHaltError, isHookHaltError, throwIfHookHalt } from "../hooks/halt"
 import { mergeUpdatedInput } from "../hooks/updated-input"
@@ -747,6 +755,9 @@ export class LocalSandbox
   private readonly _sandboxCacheRootPromise: Promise<string>
   /** Shared download/artifact cache root reused across workspaces. */
   private readonly _sharedSandboxCacheRoot: string
+  /** Captured before approval waits; rechecked before file commits and actual process spawns. */
+  private readonly retainedSourceGuard?: () => void
+
   /** Optional orchestrator for fine-grained approval + sandbox retry */
   private orchestrator?: ToolOrchestrator
   /** When true, block direct git add/commit/push and force git_workflow usage. */
@@ -773,6 +784,7 @@ export class LocalSandbox
   /** mtime recorded after each successful read/write, for external-modification detection */
   private readonly _fileReadTimes = new Map<string, number>()
   private readonly _onFileMutation?: (filePath: string, kind: AgentFileMutationKind) => void
+  private readonly platformFileEdits?: ReturnType<typeof capturePlatformFileEdits>
   private readonly _shellFileTelemetry: boolean
   private _skillLifecycleRegistry?: SkillLifecycleRegistry
   private readonly skillPromptSnapshots = new SkillPromptSnapshots()
@@ -2010,10 +2022,20 @@ export class LocalSandbox
 
     this.id = `local-sandbox-${randomUUID().slice(0, 8)}`
     this.runId = options.runId ?? this.id
+    const sourceGuard = captureRuntimePluginSourceContentGuard()
+    const projectGuard = captureProjectActionContentGuard(this.runId)
+    if (sourceGuard || projectGuard)
+      this.retainedSourceGuard = () => {
+        sourceGuard?.()
+        projectGuard?.()
+      }
     this.aclOwnerId = options.aclOwnerId ?? this.runId
     this.timeout = options.timeout ?? 60_000 // 1 minute default
     this.maxOutputBytes = options.maxOutputBytes ?? 100_000 // ~100KB default
-    const inheritedEnv = options.env ?? ({ ...process.env } as Record<string, string>)
+    const inheritedEnv = { ...(options.env ?? process.env) } as Record<string, string>
+    // Original Python imports must not mutate the retained legacy package.
+    if (currentRuntimePluginSource()?.mode === "legacy")
+      inheritedEnv.PYTHONDONTWRITEBYTECODE = "1"
     const baseEnv = options.worktreeIsolation
       ? withoutGitRepositoryOverrides(inheritedEnv)
       : inheritedEnv
@@ -2134,6 +2156,8 @@ export class LocalSandbox
     this._sharedSandboxCacheRoot = LocalSandbox.buildSharedSandboxCacheRoot(baseEnv)
     this.abortSignal = options.abortSignal
     this.skillPromptWorkspace = options.modWorkspace ?? this.workingDir
+    if (mode !== permissionProbe)
+      this.platformFileEdits = capturePlatformFileEdits(this.skillPromptWorkspace, this.runId)
     this.skillPromptAuthority = options.modRuntimeAuthority
 
     // Prewarm sandbox state during construction so command execution avoids
@@ -3080,6 +3104,7 @@ export class LocalSandbox
   }
 
   private async runHooks(event: HookEvent, context: HookContext): Promise<HookResult | null> {
+    const executionResult = context.toolResult
     if (event !== "PreToolUse" && context.toolResult !== undefined) {
       context = { ...context, toolResult: await publishCurrentModResult(context.toolResult) }
     }
@@ -3122,6 +3147,7 @@ export class LocalSandbox
       turnId: context.turnId ?? this._hookTurnId
     }
 
+    if (executionResult !== undefined) bindHookExecutionResult(hookContext, executionResult)
     const hooks = this.resolveHooks(event, hookContext)
     let result = await runHooksEnriched(hooks, event, hookContext, this._onHookResult)
     const hasHarnessOwnedHook = hooks.some(
@@ -4725,6 +4751,7 @@ export class LocalSandbox
     encoding: string
   ): Promise<void> {
     const encoded = iconv.encode(content, encoding)
+    this.retainedSourceGuard?.()
     if (LocalSandbox.SUPPORTS_NOFOLLOW) {
       const flags = fsConstants.O_WRONLY | fsConstants.O_TRUNC | fsConstants.O_NOFOLLOW
       const fd = await fs.open(resolvedPath, flags)
@@ -4774,6 +4801,7 @@ export class LocalSandbox
   ): Promise<void> {
     const encoded = iconv.encode(content, encoding)
     await capability.assertPathIdentity()
+    this.retainedSourceGuard?.()
     await capability.handle.truncate(0)
     let offset = 0
     while (offset < encoded.length) {
@@ -5101,6 +5129,7 @@ export class LocalSandbox
     // file ⇒ prior content is empty and deletedLineCount = 0. We skip the
     // old pre-read entirely (it was wasted I/O on success and would also
     // bypass isCodeFile / size guards on failure).
+    const publishPlatformEdit = this.platformFileEdits?.prepare("write_file", resolvedPath)
     let harnessStage: HarnessStageAttribution | undefined
     const result = await this.withFileLock(resolvedPath, async () => {
       if (this.isAborted) {
@@ -5116,6 +5145,7 @@ export class LocalSandbox
         return { error: "文件写入已取消。" }
       }
       getModCallContext()?.assertLive?.()
+      this.retainedSourceGuard?.()
       const r = await super.write(effectiveFilePath, effectiveContent)
       if (!r.error) {
         await this.recordReadTime(resolvedPath)
@@ -5124,6 +5154,7 @@ export class LocalSandbox
       return r
     })
     if (!result.error) {
+      publishPlatformEdit?.()
       recordTrustedToolFilePreviewSource(resolvedPath, "write")
       this._onFileMutation?.(effectiveFilePath, "write")
       if (!isCodeFile(effectiveFilePath)) this.markHarnessStageAttributionDirty()
@@ -5181,6 +5212,7 @@ export class LocalSandbox
       const allowed = indexed.filter(
         (entry) => !entry.sandboxBlocked && !entry.memoryBlocked && !entry.writeBlocked
       )
+      if (allowed.length > 0) this.retainedSourceGuard?.()
       const allowedResults =
         allowed.length > 0
           ? await super.uploadFiles(
@@ -5228,6 +5260,7 @@ export class LocalSandbox
           ) {
             return { path: filePath, error: denied }
           }
+          this.retainedSourceGuard?.()
           const [result] = await super.uploadFiles([[filePath, content]])
           const response = result ?? { path: filePath, error: denied }
           if (!response.error) this._onFileMutation?.(filePath, "upload")
@@ -5435,6 +5468,7 @@ export class LocalSandbox
         }
       })
       if (!result.error) {
+        this.platformFileEdits?.prepare("edit_file", resolvedPath)()
         recordTrustedToolFilePreviewSource(resolvedPath, "edit")
         // The host-issued workflow script is orchestration state, not a project
         // deliverable: keep normal approval/Hooks, but do not enqueue it for Git
@@ -7193,13 +7227,18 @@ export class LocalSandbox
     await authorizeCurrentModInput("host:execute", { command: effectiveCommand, cwd: effectiveCwd })
     const modContext = getModCallContext()
     const sessionOwner = currentFunctionBackgroundOwner()
-    const backgroundOwner = modContext?.identity.modId?.startsWith("function:")
+    const functionBackgroundOwner = modContext?.identity.modId?.startsWith("function:")
       ? (() => {
           const manager = getModsManager()
           if (!manager || !sessionOwner) throw new Error("MODS_BACKGROUND_OWNER_REQUIRED")
           return manager.registerFunctionBackground(sessionOwner)
         })()
       : undefined
+    const nativeBackgroundOwner = !functionBackgroundOwner && modContext
+      ? await getModsManager()?.registerNativeBackground(
+          { command: effectiveCommand, cwd: effectiveCwd }, taskAbortController.signal)
+      : undefined
+    const backgroundOwner = functionBackgroundOwner ?? nativeBackgroundOwner
     const taskId = randomUUID().slice(0, 8)
     const task = {
       id: taskId,
@@ -7270,7 +7309,15 @@ export class LocalSandbox
       backgroundOwner && modContext
         ? modCallContext.run(
             {
-              ...modContext,
+              ...(nativeBackgroundOwner ? {
+                identity: modContext.identity,
+                toolId: modContext.toolId,
+                routeClaimed: false,
+                protectedOutput: modContext.protectedOutput,
+                readOnly: modContext.readOnly,
+                protectData: modContext.protectData,
+                userInitiated: false
+              } : modContext),
               signal: backgroundOwner.signal,
               assertLive: backgroundOwner.assertLive
             },
@@ -8444,6 +8491,8 @@ export class LocalSandbox
         return LocalSandbox.createAbortedExecuteResponse()
       }
       const sandboxEnv = await LocalSandbox.buildSandboxEnv(this.env)
+      if (this.pluginRoot && (await suppressCompositionPythonCache(this.pluginRoot)))
+        sandboxEnv.PYTHONDONTWRITEBYTECODE = "1"
       const result = await new Promise<LocalExecuteResponse>((resolve) => {
         const stdoutChunks: Buffer[] = []
         const stderrChunks: Buffer[] = []
@@ -8467,6 +8516,7 @@ export class LocalSandbox
         console.log(`[LocalSandbox] sandbox cwd: ${sandboxWorkspaceRoot}`)
         console.log(`[LocalSandbox] command cwd: ${executionCwd}`)
 
+        this.retainedSourceGuard?.()
         const proc = spawn(this.codexExePath, sandboxArgs, {
           cwd: sandboxWorkspaceRoot,
           env: sandboxEnv,
@@ -8756,7 +8806,7 @@ export class LocalSandbox
     }
   }
 
-  private executeOnce(
+  private async executeOnce(
     command: string,
     shell: string,
     isWindows: boolean,
@@ -8767,6 +8817,9 @@ export class LocalSandbox
   ): Promise<LocalExecuteResponse> {
     const onceStartMs = Date.now()
     const effectiveCwd = this.resolveExecutionCwd(cwd)
+    const suppressPythonCache = this.pluginRoot
+      ? await suppressCompositionPythonCache(this.pluginRoot)
+      : false
     return new Promise<LocalExecuteResponse>((resolve) => {
       const stdoutChunks: Buffer[] = []
       const stderrChunks: Buffer[] = []
@@ -8808,7 +8861,8 @@ export class LocalSandbox
       const allowInteractiveGitAuth = isWindows && LocalSandbox.isGitInteractiveAuthCommand(command)
       const spawnEnv = allowInteractiveGitAuth
         ? LocalSandbox.buildInteractiveGitEnv(this.env)
-        : this.env
+        : { ...this.env }
+      if (suppressPythonCache) spawnEnv.PYTHONDONTWRITEBYTECODE = "1"
 
       const useWindowsBackgroundJob =
         isWindows && (options?.background === true || options?.containProcessTree === true)
@@ -8819,6 +8873,7 @@ export class LocalSandbox
           : shellBase === "cmd"
             ? "cmd"
             : "stdin"
+      this.retainedSourceGuard?.()
       const proc = useWindowsBackgroundJob
         ? spawn(resolveWindowsBackgroundJobControllerPath(), [shell, windowsBackgroundShellKind], {
             cwd: effectiveCwd,

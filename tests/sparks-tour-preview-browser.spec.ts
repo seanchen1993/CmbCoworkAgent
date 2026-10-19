@@ -77,6 +77,11 @@ async function main() {
           await tour.getByLabel("示例界面预览").getAttribute("data-tour-preview-stage"),
           "2"
         )
+        if (task === 1) {
+          assert.equal(await tour.getByRole("checkbox").count(), 0)
+          await tour.getByText("示例：组合已应用 · 尚未开始任务", { exact: true }).waitFor()
+          assert.match(await tour.innerText(), /不会自动运行已保存的任务方案/)
+        }
         assert.equal(
           await page.evaluate(() => document.documentElement.scrollWidth > innerWidth),
           false
@@ -93,7 +98,7 @@ async function main() {
     await tour.locator("button.bg-primary").click()
     await tour.getByLabel("新插件名称").fill("我的订单助手")
     await tour.locator("button.bg-primary").click()
-    await tour.getByRole("button", { name: "去创建我的插件", exact: true }).focus()
+    await tour.getByRole("button", { name: "去描述我的功能", exact: true }).focus()
     await page.keyboard.press("Enter")
     await tour.waitFor({ state: "detached" })
     assert.deepEqual(await page.evaluate(() => (window as unknown as { calls: unknown[] }).calls), [

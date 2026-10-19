@@ -10,13 +10,67 @@ import type {
   FunctionUiNode
 } from "../../../shared/mods/v2/ui"
 import type { ModJson, ModObject } from "../../../shared/mods/types"
-import type { FunctionUiSite } from "../../../shared/mods/v2/sites"
+import { FUNCTION_UI_SITES, type FunctionUiSite } from "../../../shared/mods/v2/sites"
 import { compileFunctionPlugin } from "./loader"
 import type { UserInputRequest } from "../../types"
 
 const sessions: FunctionSession[] = []
 afterEach(async () => {
   await Promise.all(sessions.splice(0).map((session) => session.close()))
+})
+
+it.each(["UserMessage", "AssistantMessage", "CommandOutput"])(
+  "invalidates retained %s presentations even while virtual rows have no mounted owner",
+  async (component) => {
+    const changes: unknown[] = []
+    const { session } = await fixture(
+      "",
+      undefined,
+      async (value) => value,
+      (...args) => {
+        changes.push(...args)
+      }
+    )
+    session.sites.invalidate(new Set([component]), true)
+    expect(changes).toEqual([`site-presentations:${component}`])
+    changes.length = 0
+    session.sites.invalidate()
+    expect(changes).toEqual(["site-presentations:*"])
+  }
+)
+
+it.each([
+  "Pane",
+  ...FUNCTION_UI_SITES.filter(
+    (component) => !["UserMessage", "AssistantMessage", "CommandOutput"].includes(component)
+  )
+])("adds no retained-message notification for non-cacheable %s redraws", async (component) => {
+  const changes: unknown[] = []
+  const { session } = await fixture(
+    "",
+    undefined,
+    async (value) => value,
+    (...args) => {
+      changes.push(...args)
+    }
+  )
+  session.sites.invalidate(new Set([component]), true)
+  session.sites.invalidate(new Set([component]))
+  expect(changes).toEqual([])
+})
+
+it("invalidates only cacheable presentations when a redraw also includes panels and decorations", async () => {
+  const changes: unknown[] = []
+  const { session } = await fixture(
+    "",
+    undefined,
+    async (value) => value,
+    (...args) => {
+      changes.push(...args)
+    }
+  )
+  session.sites.invalidate(new Set(["Pane", "AssistantMessage", "AbovePrompt"]), true)
+  expect(changes).toEqual(["site-presentations:AssistantMessage"])
 })
 async function fixture(
   hooks: string,

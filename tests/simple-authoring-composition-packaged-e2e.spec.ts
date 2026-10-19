@@ -26,6 +26,7 @@ const launch = createModsCoreLauncher(root, isolated, env, artifacts)
 const names = ["composition-a", "composition-b"] as const
 const goal = "检查这个文件是否存在问题，并说明依据。"
 const title = "简单组合真实界面验收"
+const historyCount = 80
 const checks: string[] = []
 const errors: string[] = []
 const evidence: Record<string, unknown> = { packageDir, packageHash, isolated, workspace }
@@ -88,7 +89,7 @@ async function main() {
     await page.waitForFunction(() => Boolean(window.api?.mods?.clawView))
     // Initialization only. All feature mutations below use the actual page controls.
     threadId = await page.evaluate(
-      async ({ workspace, title, url }) => {
+      async ({ workspace, title, url, historyCount }) => {
         await window.api.models.setCustomConfig({
           id: "simple-local",
           name: "simple-local",
@@ -106,9 +107,17 @@ async function main() {
         })
         const id = (row as unknown as { thread_id: string }).thread_id
         await window.api.workspace.set(id, workspace)
+        const historical = Array.from({ length: historyCount }, (_, index) => ({
+          id: `composition-history-${index}`,
+          role: index % 2 ? "assistant" as const : "user" as const,
+          content: `Historical message ${index}\n\n` +
+            "Actual persisted **history** for the packaged virtual list.\n\n".repeat(6)
+        }))
+        const appended = await window.api.threads.appendMessages(id, historical)
+        if (appended.count !== historyCount) throw Error("COMPOSITION_HISTORY_SETUP_FAILED")
         return id
       },
-      { workspace, title, url: model.url }
+      { workspace, title, url: model.url, historyCount }
     )
     await page.reload({ waitUntil: "domcontentloaded" })
     await page.getByText(title, { exact: true }).first().click()
@@ -121,12 +130,12 @@ async function main() {
     const mods = page.locator("[data-mods-settings]")
     for (const name of names) {
       await until(
-        () => mods.getByLabel("选择 灵件 ZIP 文件", { exact: true }).isEnabled(),
+        () => mods.getByLabel("选择插件 ZIP 文件", { exact: true }).isEnabled(),
         Boolean,
         "upload ready"
       )
       await mods
-        .getByLabel("选择 灵件 ZIP 文件", { exact: true })
+        .getByLabel("选择插件 ZIP 文件", { exact: true })
         .setInputFiles(join(artifacts, `${name}.zip`))
       await until(
         () => page!.evaluate(() => window.api.plugins.list()),
@@ -157,19 +166,23 @@ async function main() {
       )
     }
     pass("Both independent guests installed and authorized through UI")
-    await page.getByRole("button", { name: "助手组合", exact: true }).click()
+    await page.getByRole("button", { name: "常用搭配", exact: true }).click()
     const simple = page.getByRole("region", { name: "简单组合", exact: true })
     await simple.getByLabel("组合名称", { exact: true }).fill("两个插件先后处理")
     for (const name of names) await simple.getByRole("checkbox", { name, exact: true }).check()
     await simple.getByRole("button", { name: /先后执行/ }).click()
     const catalog = await page.evaluate((id) => window.api.mods.flowCatalog(id), threadId)
     for (const [index, name] of names.entries()) {
+      if (index > 0) await simple.getByRole("button", { name: "添加步骤", exact: true }).click()
       const action = catalog.actions?.find((item) => item.plugin === name)
       assert(action)
       await simple
         .getByLabel(`步骤${index + 1}动作`, { exact: true })
         .selectOption(`${action.pluginId}:${action.actionId}`)
     }
+    await simple
+      .getByLabel("步骤2输入来源", { exact: true })
+      .selectOption(JSON.stringify(["step-1", ""]))
     await simple.getByLabel("步骤1输入 · nonce", { exact: true }).fill(goal)
     await screenshot("01-two-actions")
     await simple.getByRole("button", { name: "保存并核对应用", exact: true }).click()
@@ -185,17 +198,17 @@ async function main() {
     assert.equal(model.requests.length, 0)
     await screenshot("02-applied")
     pass("Save and apply preserve zero executions and zero provider requests")
-    await simple.getByRole("button", { name: "准备首次任务", exact: true }).click()
-    const handoff = page.locator('section[aria-label="准备首次任务"]')
-    await handoff.getByRole("button", { name: "填入首次任务", exact: true }).click()
-    await until(
-      () => page!.locator("textarea.composer-textarea").inputValue(),
-      (text) => text === goal,
-      "first task prepared after scope validation"
-    )
+    await simple.getByRole("button", { name: "去这段聊天使用", exact: true }).click()
+    await page.getByRole("button", { name: "按此步骤执行", exact: true }).waitFor()
+    await page.locator("[data-virtuoso-scroller]").waitFor()
+    const scroller = await page.locator("[data-virtuoso-scroller]").elementHandle()
+    assert(scroller)
+    assert.equal(await page.locator("textarea.composer-textarea").count(), 1)
+    assert.equal(await page.locator("textarea.composer-textarea").inputValue(), "")
+    await page.locator("textarea.composer-textarea").fill(goal)
     assert.equal((await runs()).length, 0)
     await screenshot("03-first-task")
-    await page.getByRole("button", { name: "发送并执行流程", exact: true }).click()
+    await page.getByRole("button", { name: "按此步骤执行", exact: true }).click()
     const finished = await until(
       runs,
       (items) => items.some((run) => ["complete", "failed", "cancelled"].includes(run.status)),
@@ -225,9 +238,17 @@ async function main() {
         .every((attempt) => attempt.stepId === "__final" && attempt.result?.source === "host")
     )
     assert.equal(model.requests.length, 0)
+    const task = page.locator(`[data-chat-task-id="${run.id}"]`)
+    await task.waitFor()
+    assert(await task.evaluate((node) => !!node.closest("[data-virtuoso-scroller]")))
+    assert(await scroller.evaluate((node) => node === document.querySelector("[data-virtuoso-scroller]")))
+    const messages = await page.evaluate((id) => window.api.threads.getMessages(id), threadId)
+    assert.equal(messages.length, historyCount, "Task state must not append synthetic messages")
+    evidence.history = { count: messages.length, taskInsideVirtuoso: true, scrollerRetained: true }
     assert.deepEqual(errors, [])
     await screenshot("04-ordered-results")
     pass("Explicit send executes two real guest actions in order with upstream output")
+    pass("Actual Virtuoso retains its scroller and renders the native run card without appending messages")
     completed = true
   } catch (error) {
     errors.push(error instanceof Error ? (error.stack ?? error.message) : String(error))

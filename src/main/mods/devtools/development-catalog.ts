@@ -49,6 +49,7 @@ export function developmentCatalog() {
       "创造者模式按自然语言需求选择复用、组合或编写；不要让用户先配置添加功能、常用搭配或执行步骤。连续修改先 list/read 更新当前开发组件，保留已有功能。",
       "使用闭合的 SDK 路径和 literal 事件；SDK 对象或方法不能传给辅助函数、动态索引或外部代码。纯辅助函数只接收普通数据；SDK 调用直接写在有明确 $ 参数的事件处理器中，否则检查会报告 MODS_SDK_UNVERIFIED，保留草稿后按诊断修复。",
       "组合用 mod_composition list 搜索摘要，details 按需读取配置 schema；stage 同轮累积并深合并配置，可引用真实模型、技能、MCP 和已保存步骤。save/apply_saved 保存套用命名组合，undo/cancel 撤销选择或取消排队。提交后结束本轮，再核对真实回执。",
+      "用户参数在灵件清单 userConfig 声明，由原生参数表单绑定；缺必填项不批准执行。升级重命名或删除字段可在同份声明加入 userConfigSchema:{version:1,migrations:[{fromVersion:0,toVersion:1,changes:[{kind:'rename',from:'oldLabel',to:'label'}]}]}，并声明 cmbCompatibility:{modelProtocol:'result-v1',userConfigMigrations:'v1'}；后续版本逐一连续迁移，删除用 {kind:'remove',key:'字段名'}，不运行迁移脚本。迁移须原生确认，失败保留旧配置；导出不携带本机保存值、凭据或授权。",
       "公共快捷指令应采用灵件专属名称，避免与已启用灵件重名。出现 MODS_COMMAND_CONFLICT 时修改本草稿的指令名称及使用说明，再重新请求试用；不要替用户关闭其他插件来绕开冲突。",
       "后续询问当前试用状态时先调用 list，依据 trials 最新 phase/error 回答。request_trial 的 needs-approval 只是当时快照；后续 failed 表示加载失败，不是仍待授权。不要循环轮询或自动重试；读取失败原因、修复后再请求用户试用。",
       "先实现最小完整效果，优先 submit 合并保存、检查和请求试用；诊断失败再修复。结束本轮，不循环等待授权。当前聊天恢复用 resume_trial，明确跨聊天复用才 request_reuse，由用户在一张原生卡确认后宿主完成原安装事务。",
@@ -58,6 +59,7 @@ export function developmentCatalog() {
       "需要文件、网络、模型、进程或业务能力时，可直接请求授权后的真实试用，无需先正式安装。确认绑定当前源码与目标，实际动作仍走宿主原权限；静态检查、隔离预览或批准都不是实际结果。",
       "session.start 只登记指令和无副作用界面。真实文件、网络、模型及长期任务放到生效后用户触发的动作中；候选阶段禁止外部效果，失败时旧可用版保留。",
       "真实动作后用读取或 platform.read/status 核对结果，不凭模型说明标完成。未知结果先读取核对，不自动重放；新权限更新须再次确认。",
+      "工作流进度通过 platform.list 发现当前宿主的 native.workflow/runs@1.0.0，再用 platform.read/subscribe/poll/unsubscribe 读取和观察原运行器；target 仅为 {kind:'current'}。状态不含提示词或完整日志，截断时用 inspect 动作的页偏移补读。工作树 agentIndex 为空表示原记录没有明确关联，不能按名称猜测。cancel 动作仍需原生确认并等待实际清理，不能把请求成功当作已清理。",
       "result-v1 的 tool.call 返回包含 result 的对象；保留 next 返回的 ref 会保留原工具结果。追加说明用 context 字符串数组；通知须 await $.ui.toast(text)。",
       "制作轮中断后可在新的制作轮对未修改的草稿重新 request_trial；仍须等待新轮完成，不能报告已经生效。"
     ],
@@ -71,8 +73,7 @@ export function developmentCatalog() {
       "mods/manifest.json": {
         apiVersion: "cmb.mods/v2",
         id: "my-component",
-        entry: "main.ts",
-        modelProtocol: "result-v1"
+        entry: "main.ts"
       },
       "mods/main.ts": DEVELOPMENT_COUNTER_EXAMPLE
     },

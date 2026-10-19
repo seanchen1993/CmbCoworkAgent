@@ -63,13 +63,15 @@ import { verifyInstructionsLoaded } from "./support/mods-instructions-loaded-e2e
  * Native confirmation is answered by the test; no external model/API is used.
  */
 import assert from "node:assert/strict"
+import { createHash } from "node:crypto"
 import {
   mkdtempSync,
   mkdirSync,
   writeFileSync,
   readFileSync,
   existsSync,
-  renameSync
+  renameSync,
+  appendFileSync
 } from "node:fs"
 import { tmpdir } from "node:os"
 import { join, resolve } from "node:path"
@@ -109,7 +111,7 @@ const binary = packagedDir
   : (localRequire("electron") as string)
 const isolated = mkdtempSync(join(tmpdir(), "cmb-mods-e2e-"))
 const requestedFocus = process.env.CMB_MODS_E2E_FOCUS ?? ""
-const packagedFocuses = new Set(["session-append-shared", "ui-ask", "continuity", "task-model-288"])
+const packagedFocuses = new Set(["session-append-shared", "ui-ask", "continuity", "task-model-288", "agent-spawn"])
 const focus = [
   "config",
   "sensitive-config",
@@ -198,6 +200,21 @@ const artifacts = process.env.CMB_MODS_E2E_ARTIFACTS ?? join(
   packagedDir ? "packaged-e2e" : focus ? `e2e-${focus}` : "e2e"
 )
 mkdirSync(artifacts, { recursive: true })
+const sdkAsar = focus === "agent-spawn" && packagedDir
+  ? join(resolve(packagedDir), "resources/app.asar") : undefined
+const sdkExpectedSha = process.env.CREATOR_E2E_EXPECTED_SHA256
+const sdkHashProof: Array<{ stage: string; sha256: string; naturalClose?: boolean }> = []
+function verifySdkAsar(stage: string, naturalClose?: boolean): void {
+  if (!sdkAsar) return
+  assert(sdkExpectedSha && /^[a-f0-9]{64}$/i.test(sdkExpectedSha), "SDK expected ASAR SHA required")
+  const sha256 = createHash("sha256").update(readFileSync(sdkAsar)).digest("hex")
+  sdkHashProof.push({ stage, sha256, ...(naturalClose === undefined ? {} : { naturalClose }) })
+  writeFileSync(join(artifacts, "agent-spawn-asar-proof.json"), JSON.stringify({
+    asar: sdkAsar, expectedSha256: sdkExpectedSha.toLowerCase(), checks: sdkHashProof
+  }, null, 2))
+  assert.equal(sha256, sdkExpectedSha.toLowerCase(), "Exact SDK ASAR bytes must stay pinned")
+}
+verifySdkAsar("before-launch")
 const workspace = join(isolated, "workspace")
 mkdirSync(workspace)
 writeFileSync(
@@ -239,6 +256,8 @@ Object.assign(env, {
   HTTPS_PROXY: "http://127.0.0.1:9",
   NO_PROXY: "127.0.0.1,localhost"
 })
+if (focus === "agent-spawn" && process.env.GIT_BASH_PATH)
+  env.GIT_BASH_PATH = process.env.GIT_BASH_PATH
 const launchPackaged =
   packagedDir === undefined
     ? undefined
@@ -290,6 +309,10 @@ async function runMain(failures: unknown[]): Promise<void> {
           env,
           timeout: 60_000
         })
+    if (focus === "agent-spawn") {
+      app.process().stdout?.on("data", chunk => appendFileSync(join(artifacts, "main.stdout.log"), chunk))
+      app.process().stderr?.on("data", chunk => appendFileSync(join(artifacts, "main.stderr.log"), chunk))
+    }
     // Match existing Electron suites: prevent corporate SSO navigation in an
     // isolated offline test profile. Mods IPC and runtime remain production code.
     // Production registers its IPC handlers before creating the main window.
@@ -3577,6 +3600,7 @@ async function runMain(failures: unknown[]): Promise<void> {
     let shutdownFailed = false
     if (!(await attemptModsE2eCleanup(failures, () => app?.close()))) shutdownFailed = true
     if (!(await attemptModsE2eCleanup(failures, () => modelServer?.close()))) shutdownFailed = true
+    await attemptModsE2eCleanup(failures, () => verifySdkAsar("after-close", !!app && !shutdownFailed))
     await attemptModsE2eCleanup(failures, async () => {
       const evidenceFile = focus === "native-append"
         ? "native-append-results.json"

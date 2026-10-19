@@ -39,6 +39,16 @@ const schema: ModObject = {
 }
 
 describe("lossless parameter forms", () => {
+  it("supports string lists with count, item and uniqueness validation", () => {
+    const arraySchema = { type: "object", properties: { paths: { type: "array", minItems: 1,
+      maxItems: 2, uniqueItems: true, items: { type: "string", minLength: 1, maxLength: 20 } } } }
+    expect(parameterFields(arraySchema)[0]?.type).toBe("array")
+    expect(parameterError({ paths: ["src/app.ts"] }, arraySchema, undefined)).toBeUndefined()
+    for (const paths of [[], [""], ["a", "a"], ["a", "b", "c"], [2]])
+      expect(parameterError({ paths }, arraySchema, undefined)).toBeDefined()
+    expect(parameterFields({ type: "object", properties: { paths: {
+      type: "array", items: { type: "object" } } } })).toEqual([])
+  })
   it("preserves false, zero, empty text, nested and unknown fields without filling defaults", () => {
     const value = { feature: "x", strict: false, retries: 0, note: "", extra: { list: [null, 1] } }
     expect(parseParameterObject(JSON.stringify(value))).toEqual(value)

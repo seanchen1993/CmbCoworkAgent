@@ -95,7 +95,8 @@ export class LegacyOperationStore {
   constructor(
     path: string,
     private readonly now = () => Date.now(),
-    private readonly workspaceModeGuard?: ProjectWorkspaceModeGuard
+    private readonly workspaceModeGuard?: ProjectWorkspaceModeGuard,
+    private readonly compositionGuard?: <T>(workspace: string, work: () => T) => T
   ) {
     this.db = new DatabaseSync(path)
     this.db.exec(`PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA busy_timeout=5000;
@@ -108,6 +109,12 @@ export class LegacyOperationStore {
     this.db.close()
   }
   private transaction<T>(work: () => T, workspace?: string): T {
+    if (workspace && this.compositionGuard)
+      return this.compositionGuard(workspace, () =>
+        this.workspaceModeGuard
+          ? this.workspaceModeGuard.run("legacy", workspace, () => this.transaction(work))
+          : this.transaction(work)
+      )
     if (workspace && this.workspaceModeGuard)
       return this.workspaceModeGuard.run("legacy", workspace, () => this.transaction(work))
     this.db.exec("BEGIN IMMEDIATE")

@@ -4,13 +4,18 @@ import type {
   ProjectPreviewDraft
 } from "../../../../shared/project-runtime/development-preview"
 import { isSameWorkspacePath } from "../../../../shared/workspace-path"
+import type { DevelopmentProjectTrialRequest } from "../../../../shared/mods/development"
 const LocalProjectRun = lazy(() =>
   import("../harness-board/LocalProjectsPanel").then((module) => ({
     default: module.LocalProjectRun
   }))
 )
 
-export function ProjectDevelopmentPreviewPanel(props: { threadId: string; workspace: string }) {
+export function ProjectDevelopmentPreviewPanel(props: {
+  threadId: string
+  workspace: string
+  request?: DevelopmentProjectTrialRequest
+}) {
   const api = window.api.harnessBoard?.localProjects?.preview
   if (!api) return null
   return <ScopedPreview key={JSON.stringify(props)} {...props} api={api} />
@@ -18,18 +23,23 @@ export function ProjectDevelopmentPreviewPanel(props: { threadId: string; worksp
 function ScopedPreview({
   threadId,
   workspace,
-  api
+  api,
+  request
 }: {
   threadId: string
   workspace: string
   api: ProjectPreviewApi
+  request?: DevelopmentProjectTrialRequest
 }) {
   const [drafts, setDrafts] = useState<ProjectPreviewDraft[]>([])
   const [error, setError] = useState("")
   const [busy, setBusy] = useState(false)
-  const [goal, setGoal] = useState("")
+  const [goal, setGoal] = useState(request?.goal ?? "")
   const [confirmed, setConfirmed] = useState(false)
   const [selected, setSelected] = useState<string>()
+  const requestDraftId = request?.draftId
+  const requestRevision = request?.revision
+  const requestDigest = request?.digest
   const facts = useRef("")
   const live = useRef(false),
     sequence = useRef(0),
@@ -41,11 +51,19 @@ function ScopedPreview({
     if (!live.current || token !== sequence.current) return
     if (next.threadId !== threadId || !isSameWorkspacePath(next.workspace, workspace))
       throw Error("PROJECT_PREVIEW_SCOPE_CHANGED")
-    const identity = JSON.stringify(next.drafts)
+    const matching = requestDraftId
+      ? next.drafts.filter(
+          (draft) =>
+            draft.id === requestDraftId &&
+            ((draft.revision === requestRevision && draft.digest === requestDigest) ||
+              !!draft.recovery)
+        )
+      : next.drafts
+    const identity = JSON.stringify(matching)
     if (identity !== facts.current) setConfirmed(false)
     facts.current = identity
-    setDrafts(next.drafts)
-  }, [api, threadId, workspace])
+    setDrafts(matching)
+  }, [api, threadId, workspace, requestDraftId, requestRevision, requestDigest])
   const act = useCallback(async (work: () => Promise<void>) => {
     if (pending.current) return
     const token = ++operation.current
@@ -100,7 +118,7 @@ function ScopedPreview({
         </button>
       </div>
       <p className="text-xs text-muted-foreground">
-        每次试用使用创建时的版本。修改并保存后，请先结束本次试用，再用新版本创建试用项目。
+        新试用使用独立空文件夹，保留以往产物。重启后可重新核对并恢复原项目，恢复本身不执行阶段。
       </p>
       {!drafts.length && (
         <p className="text-sm">
@@ -132,7 +150,7 @@ function ScopedPreview({
               checked={confirmed}
               onChange={(event) => setConfirmed(event.target.checked)}
             />
-            我确认使用下面的版本创建独立试用项目。创建后由我开始任务，文件操作和插件功能仍需按原规则授权。
+            我已核对下面的版本与目标。创建或恢复后由我开始任务，文件操作和插件功能仍需按原规则授权。
           </label>
         </>
       )}
@@ -184,6 +202,76 @@ function ScopedPreview({
                   结束本次试用
                 </button>
               </>
+            ) : draft.recovery ? (
+              <div className="space-y-2">
+                <p>保留的试用 · 版本 {draft.recovery.revision}</p>
+                <p className="whitespace-pre-wrap">
+                  原目标：{draft.recovery.goal || "项目尚未创建"}
+                </p>
+                <p className="break-all text-xs text-muted-foreground">
+                  原试用文件夹：{draft.recovery.workspace}
+                </p>
+                <p className="text-xs text-muted-foreground">
+                  {draft.recovery.status === "draft-changed"
+                    ? "草稿已改变，不能将新代码替换进原试用。可保留文件并结束旧试用，再创建新版本。"
+                    : draft.recovery.status === "missing"
+                      ? "未找到已创建项目，可清除未完成的创建记录；文件仍保留。"
+                      : draft.recovery.status === "completed"
+                        ? "原项目已完成，可结束试用并保留项目记录与产物。"
+                        : "尚未恢复执行权限。重新核对会检查原项目、源码版本和当前授权；原来尚未执行的任务须重新准备与确认。"}
+                  {draft.recovery.hasUnconfirmedEffects
+                    ? " 原任务结果尚未确认。恢复后请在原执行记录中核对结果，不能直接重跑或结束试用。"
+                    : ""}
+                </p>
+                {draft.recovery.status === "needs-confirmation" && (
+                  <button
+                    type="button"
+                    className="rounded border px-3 py-2 disabled:opacity-50"
+                    disabled={busy || !confirmed || !api.recover}
+                    onClick={() =>
+                      void act(async () => {
+                        const saved = draft.recovery!
+                        const projectId = await api.recover({
+                          threadId,
+                          draftId: draft.id,
+                          projectId: saved.projectId,
+                          revision: saved.revision,
+                          expectedDigest: saved.digest,
+                          expectedProjectVersion: saved.projectVersion!
+                        })
+                        if (!live.current) return
+                        setSelected(projectId)
+                        setConfirmed(false)
+                        await read()
+                      })
+                    }
+                  >
+                    核对并恢复原试用
+                  </button>
+                )}
+                <button
+                  type="button"
+                  className="underline"
+                  disabled={busy || draft.recovery.hasUnconfirmedEffects}
+                  onClick={() =>
+                    void act(async () => {
+                      await api.finish({
+                        threadId,
+                        projectId: draft.recovery!.projectId,
+                        draftId: draft.id
+                      })
+                      if (!live.current) return
+                      setSelected(undefined)
+                      setConfirmed(false)
+                      await read()
+                    })
+                  }
+                >
+                  {draft.recovery.status === "missing"
+                    ? "清除未创建记录（保留文件）"
+                    : "结束保留的试用（保留文件）"}
+                </button>
+              </div>
             ) : (
               <button
                 type="button"
@@ -201,6 +289,7 @@ function ScopedPreview({
                       threadId,
                       draftId: draft.id,
                       revision: draft.revision,
+                      expectedDigest: draft.digest,
                       goal
                     })
                     if (!live.current) return

@@ -3,6 +3,7 @@ import { ToolCallRenderer } from "./ToolCallRenderer"
 import { ModCards } from "./ModCards"
 import { StreamingMarkdown } from "./StreamingMarkdown"
 import { useReasoningExpansion } from "./reasoning-expansion-context"
+import { useUserMessageExpansion } from "./user-message-expansion-context"
 import { getCollapsedToolCallSummary } from "../../../../shared/tool-call-summary"
 import { parseGoalNoticeText } from "../../../../shared/goal-notice-presentation"
 import { stripThinkBlocksForDisplay } from "../../../../shared/think-block-display"
@@ -15,7 +16,7 @@ import {
   beginOpenResourcePreviewIntent,
   emitOpenResourcePreview
 } from "@/lib/resource-preview-events"
-import React, { useEffect, useMemo, useRef, useState } from "react"
+import React, { useLayoutEffect, useMemo, useRef, useState } from "react"
 import {
   ChevronDown,
   ChevronRight,
@@ -442,9 +443,9 @@ function MessageBubbleImpl({
   const [dislikedMessageId, setDislikedMessageId] = useState<string | null>(null)
   const [feedbackSubmitting, setFeedbackSubmitting] = useState(false)
   // 超长用户消息折叠:默认收起,测量到内容超过阈值才显示"显示更多/收起"。
-  const [userContentExpanded, setUserContentExpanded] = useState(false)
   const [userContentOverflow, setUserContentOverflow] = useState(false)
   const userContentRef = useRef<HTMLDivElement>(null)
+  const userContentLayoutRef = useRef<HTMLDivElement>(null)
   const isUser = message.role === "user"
   const pluginOrigin = isUser && isFunctionPluginPromptOrigin(message.prompt_origin)
     ? message.prompt_origin : undefined
@@ -488,6 +489,13 @@ function MessageBubbleImpl({
   }, [displayMessageContent, isUser])
   const hasVisibleAssistantContent = visibleAssistantContentText.trim().length > 0
   const hasToolCalls = Boolean(message.tool_calls?.length)
+  const [userContentExpanded, toggleUserContentExpansion] = useUserMessageExpansion(
+    threadId,
+    message.id,
+    isUser ? displayMessageContent : null,
+    messageGeneration,
+    messageRevision
+  )
   // Resolve this before the first paint: mounting a collapsed row and opening it in an effect
   // makes Virtuoso briefly measure the wrong height, especially for long reasoning messages.
   const [reasoningOpen, toggleReasoning] = useReasoningExpansion(
@@ -499,21 +507,24 @@ function MessageBubbleImpl({
     messageRevision
   )
 
-  // 测量用户消息内容高度,超过阈值才启用折叠。气泡宽度是 max-w-[80%],会随窗口/
-  // 侧栏开合变化,因此除内容变化外还用 ResizeObserver 在宽度变化时重测——否则窄时
-  // 测得溢出、变宽后内容已放得下,遮罩/按钮仍会残留。scrollHeight 始终是完整内容高度
-  // (不受 maxHeight 截断影响),且 setState 幂等,不会造成观察循环。
-  useEffect(() => {
+  // Measure the rendered, authorized content before paint. Observe the uncapped inner layout so
+  // late protected content and width changes are detected even while the outer height stays 260px.
+  useLayoutEffect(() => {
     if (message.role !== "user") return
     const el = userContentRef.current
-    if (!el) return
+    const layout = userContentLayoutRef.current
+    if (!el || !layout) return
     const measure = (): void => {
+      if (layout.querySelector("[data-function-site-pending]")) {
+        setUserContentOverflow(false)
+        return
+      }
       setUserContentOverflow(el.scrollHeight > USER_MESSAGE_COLLAPSED_MAX_PX + 8)
     }
     measure()
     if (typeof ResizeObserver === "undefined") return
     const observer = new ResizeObserver(() => measure())
-    observer.observe(el)
+    observer.observe(layout)
     return () => observer.disconnect()
   }, [message.role, message.content])
 
@@ -662,6 +673,7 @@ function MessageBubbleImpl({
         key={`text:${threadId}:${message.id}:${messageGeneration}:${index}`}
         threadId={threadId}
         messageId={message.id}
+        presentationId={JSON.stringify([message.id, index])}
         role={message.role}
         text={text}
         isExpanded={userContentExpanded}
@@ -929,19 +941,15 @@ function MessageBubbleImpl({
                   !userContentExpanded &&
                   "[mask-image:linear-gradient(to_bottom,black_60%,transparent)]"
               )}
-              style={
-                userContentOverflow && !userContentExpanded
-                  ? { maxHeight: USER_MESSAGE_COLLAPSED_MAX_PX }
-                  : undefined
-              }
+              style={!userContentExpanded ? { maxHeight: USER_MESSAGE_COLLAPSED_MAX_PX } : undefined}
             >
-              {content}
+              <div ref={userContentLayoutRef}>{content}</div>
             </div>
             {userContentOverflow && (
               <button
                 type="button"
                 data-chat-search-expand-user-content
-                onClick={() => setUserContentExpanded((prev) => !prev)}
+                onClick={toggleUserContentExpansion}
                 className="mt-1.5 inline-flex items-center gap-1 text-xs text-muted-foreground/80 transition-colors hover:text-foreground"
                 aria-expanded={userContentExpanded}
               >

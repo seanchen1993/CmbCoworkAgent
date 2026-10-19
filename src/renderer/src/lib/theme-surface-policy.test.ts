@@ -2,7 +2,7 @@ import { readdirSync, readFileSync } from "node:fs"
 import { join, relative } from "node:path"
 import { createElement } from "react"
 import { renderToStaticMarkup } from "react-dom/server"
-import { describe, expect, it } from "vitest"
+import { beforeAll, describe, expect, it } from "vitest"
 import { MarkdownPreview } from "@/components/ui/MarkdownPreview/MarkdownPreview"
 
 const RENDERER_ROOT = join(process.cwd(), "src/renderer/src")
@@ -57,11 +57,20 @@ function isBrightSurfaceColor(red: number, green: number, blue: number, alpha = 
 }
 
 describe("theme surface policy", () => {
+  let rendererSources: Array<{ file: string; source: string }>
+
+  beforeAll(() => {
+    rendererSources = rendererSourceFiles(RENDERER_ROOT).map((file) => ({
+      file,
+      source: readFileSync(file, "utf8")
+    }))
+  })
+
   it("pairs legacy light status surfaces with a dark override", () => {
     const lightSurface =
       /bg-(?:slate|gray|zinc|stone|neutral|red|orange|amber|yellow|green|emerald|teal|cyan|sky|blue|indigo|violet|purple|fuchsia|pink|rose)-(?:50|100|200)(?!\d)(?:\/[0-9]+)?/
-    const violations = rendererSourceFiles(RENDERER_ROOT).flatMap((file) =>
-      readFileSync(file, "utf8")
+    const violations = rendererSources.flatMap(({ file, source }) =>
+      source
         .split("\n")
         .map((line, index) => ({ file, line, lineNumber: index + 1 }))
         .filter(

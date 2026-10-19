@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto"
+import { AsyncLocalStorage } from "node:async_hooks"
 import { mkdirSync } from "node:fs"
 import { dirname } from "node:path"
 import { DatabaseSync } from "node:sqlite"
@@ -18,6 +19,8 @@ import { developmentNativeGrant, assertDevelopmentNativeGrant } from "./v2/devel
 import type { CompletionEvidenceRecord } from "./v2/completion-evidence"
 
 export interface ModGrant {
+  /** Main-only marker; authority also requires this exact object in the store's WeakMap. */
+  sourceScope?: string
   workspace: string
   modId: string
   digest: string
@@ -26,6 +29,8 @@ export interface ModGrant {
 }
 
 export class ModControlStore {
+  private readonly projectGrants = new WeakMap<ModGrant, string>()
+  private readonly projectGrantCalls = new AsyncLocalStorage<{ grant: ModGrant; active: boolean }>()
   private readonly db: DatabaseSync
   private grantQuery?: ReturnType<DatabaseSync["prepare"]>
   readonly functionState: FunctionStateStore
@@ -445,6 +450,12 @@ export class ModControlStore {
   }
 
   getGrant(workspace: string, modId: string): ModGrant | null {
+    const scoped = this.projectGrantCalls.getStore()
+    if (scoped && scoped.grant.workspace === workspace && scoped.grant.modId === modId) {
+      if (!scoped.active) throw new ModError("MODS_GRANT_REVOKED")
+      this.assertGrant(scoped.grant)
+      return scoped.grant
+    }
     if (modId.startsWith("development:"))
       return developmentNativeGrant(this, workspace, modId) ?? null
     // Reuse the compiled query, never an authorization result. Each get sees
@@ -467,10 +478,44 @@ export class ModControlStore {
       assertDevelopmentNativeGrant(this, expected)
       return
     }
-    const actual = this.getGrant(expected.workspace, expected.modId)
+    const scopedKey = expected.sourceScope === undefined ? undefined : this.projectGrants.get(expected)
+    if (expected.sourceScope !== undefined && !scopedKey) throw new ModError("MODS_GRANT_REVOKED")
+    const actual = this.getGrant(expected.workspace, scopedKey ?? expected.modId)
     if (!actual?.enabled || actual.digest !== expected.digest || actual.epoch !== expected.epoch) {
       throw new ModError("MODS_GRANT_REVOKED")
     }
+  }
+
+  private projectGrantKey(projectId: string, packageDigest: string, name: string): string {
+    if (!projectId || projectId.length > 256 || !/^[a-f0-9]{64}$/.test(packageDigest) ||
+      !/^[a-zA-Z0-9][\w.-]{0,99}$/.test(name)) throw new ModError("MODS_GRANT_REVOKED")
+    return "project-function:" + createHash("sha256").update(JSON.stringify([projectId, packageDigest, name])).digest("hex")
+  }
+
+  getProjectFunctionGrant(workspace: string, projectId: string, packageDigest: string, name: string): ModGrant | null {
+    const key = this.projectGrantKey(projectId, packageDigest, name)
+    const saved = this.getGrant(workspace, key)
+    if (!saved) return null
+    const grant = Object.freeze({ ...saved, modId: `function:${name}`, sourceScope: key })
+    this.projectGrants.set(grant, key)
+    return grant
+  }
+
+  grantProjectFunction(workspace: string, projectId: string, packageDigest: string, name: string,
+    digest: string, enabled: boolean): ModGrant {
+    this.grant(workspace, this.projectGrantKey(projectId, packageDigest, name), digest, enabled)
+    return this.getProjectFunctionGrant(workspace, projectId, packageDigest, name)!
+  }
+
+  /** Original native helpers sometimes look up the current function name again. Keep the exact
+   * opaque project grant in that physical call; do not rewrite ordinary workspace authorization. */
+  async withProjectFunctionGrant<T>(grant: ModGrant, run: () => Promise<T>): Promise<T> {
+    if (grant.sourceScope === undefined) return run()
+    this.assertGrant(grant)
+    const call = { grant, active: true }
+    return this.projectGrantCalls.run(call, async () => {
+      try { return await run() } finally { call.active = false }
+    })
   }
 
   claim(

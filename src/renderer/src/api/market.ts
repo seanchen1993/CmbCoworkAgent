@@ -2,6 +2,7 @@ import { MOCK_MARKET_DATA } from "../components/customize/MarketPanel/MarketMock
 import { toast } from "sonner"
 import { getMockOrgSkillMarketResponse, orgSkillMarketApi } from "./org-skill-market"
 import { USE_MARKET_MOCK_ON_ERROR } from "./market-flags"
+import { isBackendNotConfiguredError, resolveBackendEndpoint } from "./backend-endpoint"
 
 export type MarketItemType = "skill" | "orgSkill" | "mcp" | "plugin"
 
@@ -23,6 +24,7 @@ export interface MarketDeleteResponse {
 
 export interface MarketApiResponse {
   success: boolean
+  errorCode?: "BACKEND_NOT_CONFIGURED"
   data?: MarketItem[]
   error?: string
   pageNum?: number
@@ -117,14 +119,19 @@ export function isAutoOptimizedMarketItem(item: MarketItem): boolean {
 }
 
 // Updated API endpoints to match exact specification
-const API_BASE_URL = import.meta.env.VITE_API_BASE_URL + "/api/trajectories/marketplace" // Replace with actual API URL
+const marketEndpoint = (suffix: string): string =>
+  resolveBackendEndpoint(
+    import.meta.env.VITE_API_BASE_URL,
+    "/api/trajectories/marketplace" + suffix,
+    "应用市场服务"
+  )
 const ENDPOINTS = {
-  list: (resourceType: string) => `${API_BASE_URL}/list/${resourceType}`,
-  upload: `${API_BASE_URL}/upload`,
-  update: (resourceType: string, name: string) => `${API_BASE_URL}/${resourceType}/${name}`,
+  list: (resourceType: string) => marketEndpoint(`/list/${resourceType}`),
+  upload: () => marketEndpoint("/upload"),
+  update: (resourceType: string, name: string) => marketEndpoint(`/${resourceType}/${name}`),
   download: (resourceType: string, name: string) =>
-    `${API_BASE_URL}/download/${resourceType}/${name}`,
-  delete: (resourceType: string, name: string) => `${API_BASE_URL}/${resourceType}/${name}`
+    marketEndpoint(`/download/${resourceType}/${name}`),
+  delete: (resourceType: string, name: string) => marketEndpoint(`/${resourceType}/${name}`)
 }
 
 function getErrorMessageFromBody(body: unknown): string | null {
@@ -462,6 +469,9 @@ export const marketApi = {
 
       return result
     } catch (error) {
+      if (isBackendNotConfiguredError(error)) {
+        return { success: false, error: error.message, errorCode: error.code }
+      }
       console.error("Error fetching skills:", error)
       if (options?.signal?.aborted) throw error
       if (USE_MARKET_MOCK_ON_ERROR) {
@@ -515,6 +525,9 @@ export const marketApi = {
 
       return result
     } catch (error) {
+      if (isBackendNotConfiguredError(error)) {
+        return { success: false, error: error.message, errorCode: error.code }
+      }
       console.error("Error fetching MCPs:", error)
       if (USE_MARKET_MOCK_ON_ERROR) {
         return getMockMarketResponse("mcp", error)
@@ -571,6 +584,9 @@ export const marketApi = {
 
       return result
     } catch (error) {
+      if (isBackendNotConfiguredError(error)) {
+        return { success: false, error: error.message, errorCode: error.code }
+      }
       console.error("Error fetching plugins:", error)
       if (allowMockOnError) {
         return getMockMarketResponse("plugin", error)
@@ -592,6 +608,9 @@ export const marketApi = {
     try {
       return await orgSkillMarketApi.getOrgSkills(pageNum, pageSize, labelIds, keyword)
     } catch (error) {
+      if (isBackendNotConfiguredError(error)) {
+        return { success: false, error: error.message, errorCode: error.code }
+      }
       console.error("Error fetching organization skills:", error)
       if (USE_MARKET_MOCK_ON_ERROR) {
         const reason = error instanceof Error ? error.message : String(error ?? "unknown error")
@@ -829,7 +848,7 @@ export const marketApi = {
     const ip = localStorage.getItem("localIp")
     formData.append("ip", ip || "")
 
-    const response = await fetch(ENDPOINTS.upload, {
+    const response = await fetch(ENDPOINTS.upload(), {
       method: "POST",
       headers: {
         Authorization: "Bearer your-api-token"

@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto"
+import * as fs from "node:fs"
 import {
   closeSync,
   constants,
@@ -11,6 +12,31 @@ import {
 } from "node:fs"
 import { isAbsolute, join, resolve } from "node:path"
 import { hostStateError } from "./host-state-protocol"
+
+const builtinFs = process.getBuiltinModule?.("node:fs")
+const observedMethods = [
+  "lstatSync",
+  "statSync",
+  "realpathSync",
+  "openSync",
+  "readSync",
+  "fstatSync",
+  "closeSync",
+  "readdirSync"
+] as const
+const originalMethods = observedMethods.map((key) => builtinFs?.[key])
+const originalNativeRealpath = builtinFs?.realpathSync.native
+function canCombineRootObservation(): boolean {
+  return Boolean(
+    builtinFs &&
+    observedMethods.every(
+      (key, index) =>
+        fs[key] === originalMethods[index] && builtinFs[key] === originalMethods[index]
+    ) &&
+    fs.realpathSync.native === originalNativeRealpath &&
+    builtinFs.realpathSync.native === originalNativeRealpath
+  )
+}
 
 export function runtimeDigest(value: Buffer | string): string {
   return createHash("sha256").update(value).digest("hex")
@@ -72,10 +98,30 @@ export function readRuntimeScopedFile(
   relative: string,
   maxBytes = 4 * 1024 * 1024
 ): ScopedFileObservation {
-  const directory = runtimeDirectory(root)
-  const scopeIdentity = runtimeDirectoryIdentity(directory)
-  runtimeRelativePath(relative)
   const parents: Array<{ path: string; identity: string }> = []
+  let directory: string
+  let scopeIdentity: string
+  if (canCombineRootObservation()) {
+    if (!isAbsolute(root)) hostStateError("DIRECTORY_INVALID")
+    directory = resolve(root)
+    const observed = lstatSync(directory, { bigint: true })
+    if (
+      !observed.isDirectory() ||
+      observed.isSymbolicLink() ||
+      realpathSync(directory) !== directory
+    )
+      hostStateError("DIRECTORY_INVALID")
+    const identity = `${observed.dev}:${observed.ino}`
+    scopeIdentity = `${directory}:${identity}`
+    // One synchronous root observation serves the original directory/identity/parent checks.
+    // checkParents() still freshly rechecks this exact original inode after every read/absence.
+    parents.push({ path: directory, identity })
+  } else {
+    // Keep the original observable sequence for FS wrappers and injected race regressions.
+    directory = runtimeDirectory(root)
+    scopeIdentity = runtimeDirectoryIdentity(directory)
+  }
+  runtimeRelativePath(relative)
   let parent = directory
   const parts = relative.split("/")
   const remember = (path: string) => {
@@ -84,7 +130,7 @@ export function readRuntimeScopedFile(
       hostStateError("FILE_SCOPE_CHANGED")
     parents.push({ path, identity: `${stat.dev}:${stat.ino}` })
   }
-  remember(parent)
+  if (!parents.length) remember(parent)
   let missingParent = false
   for (const part of parts.slice(0, -1)) {
     parent = join(parent, part)

@@ -5,6 +5,18 @@ const manifest = { path: "plugin.json", text: '{"name":"example"}' }
 const source = { path: "hooks/main.ts", text: "export function register() {}\n" }
 
 describe("authoring source snapshots", () => {
+  it.each(["mjs", "cjs", "mts", "cts", "py", "sh", "ps1", "txt"])(
+    "preserves bounded %s text bytes and revalidates their saved digest without executing them",
+    (suffix) => {
+      const resource = { path: `mods/resource.${suffix}`, text: "throw NEVER_EXECUTE_SOURCE\n" }
+      const saved = createAuthoringSourceBundle([manifest, resource])
+      expect(readAuthoringSourceBundle(JSON.parse(JSON.stringify(saved)))).toEqual(saved)
+      expect(() =>
+        readAuthoringSourceBundle({ ...saved, files: [manifest, { ...resource, text: "changed" }] })
+      ).toThrow("AUTHORING_SOURCE_DIGEST_CHANGED")
+    }
+  )
+
   it("canonicalizes file order and detaches both caller and readback objects", () => {
     const files = [{ ...source }, { ...manifest }]
     const first = createAuthoringSourceBundle(files)
@@ -46,6 +58,9 @@ describe("authoring source snapshots", () => {
     "node_modules/library.ts",
     ".env/config.json",
     ".env.local/config.json",
+    "mods/.env.py",
+    "mods/.env.local.sh",
+    "mods/../outside.py",
     "binary.exe",
     "file.ts\0",
     "é.ts"

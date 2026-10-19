@@ -10,6 +10,8 @@ import {
 import { getModelConfigs } from "../../models/registry"
 import type { GoalJudgeDecision, GoalLedger, ThreadGoal } from "./types"
 import { samplingFields } from "../../models/sampling-params"
+import { getModDevelopmentService } from "../../mods/devtools/development-service"
+import { withCompletionModelBudget } from "../mods-model-boundary"
 
 const GOAL_EVALUATOR_CONTEXT_RATIO = 0.25
 const GOAL_EVALUATOR_MIN_BUDGET_TOKENS = 1_000
@@ -585,10 +587,12 @@ export async function evaluateGoalWithModel(
     }
   }
 
+  const accounting = getModDevelopmentService()?.captureGoalModelAccounting(input.goal.threadId, input.goal.goalId)
   const model = new ChatOpenAI({
     model: config.model,
     apiKey: config.apiKey,
-    configuration: { baseURL: config.baseUrl },
+    configuration: { baseURL: config.baseUrl,
+      ...(accounting ? { fetch: withCompletionModelBudget(fetch, accounting, false) } : {}) },
     maxTokens: Math.min(config.maxOutputTokens ?? DEFAULT_MAX_OUTPUT_TOKENS, 1200),
     ...samplingFields(config.model, {
       temperature: Math.min(config.temperature ?? DEFAULT_TEMPERATURE, 0.1)

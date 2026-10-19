@@ -1,0 +1,64 @@
+{
+  "apiVersion": "devclaw.project-runtime/v1",
+  "plugin": { "id": "autobiz-delivery-project", "version": "1.0.0" },
+  "mode": "host",
+  "stateOwner": "host",
+  "stages": [
+    {
+      "id": "delivery",
+      "title": "收集真实交付资料并生成报告",
+      "skill": "skills/input-check/SKILL.md",
+      "actionIds": [],
+      "artifactIds": ["input-check", "report-receipt"],
+      "checkIds": ["input-check-exists", "report-receipt-schema"],
+      "approval": "none"
+    },
+    {
+      "id": "review",
+      "title": "人工核对交付报告",
+      "skill": "skills/review/SKILL.md",
+      "actionIds": [],
+      "artifactIds": ["input-check", "report-receipt"],
+      "checkIds": ["input-check-exists", "report-receipt-schema"],
+      "approval": "human"
+    }
+  ],
+  "actions": [],
+  "artifacts": [
+    { "id": "input-check", "path": "input-check.md", "required": true },
+    { "id": "report-receipt", "path": "delivery-report.json", "required": true }
+  ],
+  "checks": [
+    {
+      "id": "input-check-exists",
+      "kind": "file-exists",
+      "artifactId": "input-check",
+      "sideEffect": "read"
+    },
+    {
+      "id": "report-receipt-schema",
+      "kind": "json-schema",
+      "artifactId": "report-receipt",
+      "sideEffect": "read",
+      "schema": {
+        "type": "object",
+        "required": ["feature", "reportPath", "jsonPath", "evidenceDigest", "qualityStatus"],
+        "properties": {
+          "feature": { "type": "string", "minLength": 1 },
+          "reportPath": { "type": "string", "minLength": 1 },
+          "jsonPath": { "type": "string", "minLength": 1 },
+          "evidenceDigest": { "type": "string", "minLength": 64, "maxLength": 64 },
+          "qualityStatus": { "const": "needs_review" }
+        }
+      }
+    }
+  ],
+  "environment": [],
+  "capabilities": {
+    "execution": true,
+    "conditionalTransition": true,
+    "idempotency": true,
+    "reconciliation": true,
+    "cancellation": true
+  }
+}

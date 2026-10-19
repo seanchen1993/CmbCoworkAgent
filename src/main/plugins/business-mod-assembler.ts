@@ -12,10 +12,28 @@ import { derivationDigest, type DerivationFile, type DerivationSnapshot } from "
 import { parseClawComponentExports } from "../../shared/mods/claw-components"
 import { parseClawActionExports } from "../../shared/mods/claw-actions"
 import { businessModIntegrityDiagnostics } from "./business-mod-integrity"
+import { assertPortableBusinessBoard, mergeBusinessModUserConfig } from "./business-mod-user-config"
+import { projectBusinessModWorkflow } from "./business-mod-workflow-projection"
+import { parseSkillNameFromFrontmatterYaml } from "../skills/frontmatter"
+import { assertProjectNodeAgentResources } from "./project-agent-resources"
+import { BusinessModDuplicateIdError } from "./business-mod-diagnostics"
+import {
+  isReviewedAutobizKernelIdentity,
+  reviewedAutobizRequiredHookIds
+} from "./autobiz-required-hooks"
+import {
+  wrapProjectRuntimeManifest,
+  EXTENSION_CONTRACT_API_VERSION,
+  REQUIRED_BUSINESS_CHECKS_PROTOCOL,
+  CONTEXT_HANDOFF_PROTOCOL,
+  VERIFIED_ARTIFACTS_PROTOCOL,
+  EXTENSION_BOARD_API_VERSION,
+  type ExtensionContract
+} from "../../shared/project-runtime"
+import { AUTOBIZ_CONTEXT_OUTPUT } from "../../shared/project-runtime/autobiz-handoff"
 import {
   businessModCheckpoints as checkpoints,
-  projectBusinessModNodes,
-  projectBusinessModWorkflowRouting
+  projectBusinessModNodes
 } from "./business-mod-workflow"
 
 export interface BusinessModAssemblySource {
@@ -76,7 +94,7 @@ export function assembleBusinessMods(
     for (const item of items) {
       const { mod } = item
       if ([...known.keys()].some((id) => id.toLowerCase() === mod.id.toLowerCase()))
-        throw Error(`来源包含重复业务 Mod 标识：${mod.id}`)
+        throw new BusinessModDuplicateIdError(mod.id)
       known.set(mod.id, item)
     }
   }
@@ -181,16 +199,71 @@ export function assembleBusinessMods(
   const extensions = ordered
     .map((id) => known.get(id)!)
     .filter((item): item is FunctionSelection => item.kind === "function")
+  const userConfig = mergeBusinessModUserConfig([
+    kernel.pluginFields?.userConfig,
+    ...selected.map(({ mod }) => mod.userConfig),
+    ...extensions.map(({ mod }) => mod.userConfig)
+  ])
+  const providers = extensions.filter(({ mod }) => mod.contextProvider)
+  if (providers.length > 1) throw Error("所选业务 Mods 包含多个上下文提供器，请保留一个")
+  const contextProvider = providers[0]?.mod.contextProvider
+  const verifiedArtifactIds = request.verifiedArtifactIds
+  if (verifiedArtifactIds !== undefined) {
+    if (!isReviewedAutobizKernelIdentity(kernel))
+      throw Error("VERIFIED_ARTIFACTS_ADAPTER_UNSUPPORTED")
+    if (!Array.isArray(verifiedArtifactIds) || !verifiedArtifactIds.length ||
+      verifiedArtifactIds.length > 64 || new Set(verifiedArtifactIds).size !== verifiedArtifactIds.length ||
+      !verifiedArtifactIds.every(id => typeof id === "string" && /^[a-zA-Z0-9][\w.-]{0,79}$/.test(id)))
+      throw Error("VERIFIED_ARTIFACTS_SELECTION_INVALID")
+    const outputs = selected.flatMap(({ mod }) => {
+      const artifacts = businessModObject(mod.node.artifacts ?? {})
+      return Array.isArray(artifacts.outputs) ? artifacts.outputs.map(output => businessModObject(output)) : []
+    })
+    for (const id of verifiedArtifactIds)
+      if (outputs.filter(output => output.id === id).length !== 1)
+        throw Error("VERIFIED_ARTIFACTS_OUTPUT_UNDECLARED_OR_AMBIGUOUS")
+  }
+  const extensionContract: ExtensionContract = {
+    apiVersion: EXTENSION_CONTRACT_API_VERSION,
+    requires: [
+      REQUIRED_BUSINESS_CHECKS_PROTOCOL,
+      ...(contextProvider ? [CONTEXT_HANDOFF_PROTOCOL] : []),
+      ...(verifiedArtifactIds ? [VERIFIED_ARTIFACTS_PROTOCOL] : [])
+    ],
+    ...(verifiedArtifactIds ? { verifiedArtifacts: { artifactIds: [...verifiedArtifactIds] } } : {}),
+    ...(contextProvider
+      ? {
+          context: {
+            sourceAccess: "read-only",
+            mutableData: "host",
+            configuration: "host-resolved",
+            knowledge: {
+              required: contextProvider.required,
+              ...(contextProvider.knowledgeBinding
+                ? { binding: contextProvider.knowledgeBinding }
+                : {})
+            },
+            provider: { entry: contextProvider.entry, operations: contextProvider.operations }
+          }
+        }
+      : {})
+  }
   if (!selected.length || selected.length > 32 || extensions.length > 32)
     throw Error("请保留1至32个业务步骤，常驻扩展最多32个")
   if (extensions.length && !/^[a-zA-Z0-9][\w.-]{0,99}$/.test(request.name))
     throw Error("含常驻扩展的插件名称仅支持英文、数字、点、下划线和短横线")
   for (const { source, mod } of extensions) {
-    for (const file of businessModResources(source.snapshot, [mod.entry, ...mod.resources])) {
+    for (const file of businessModResources(source.snapshot, [
+      mod.entry,
+      ...mod.resources,
+      ...(mod.skills ?? [])
+    ])) {
       if (!file.path.startsWith(`mods/business/${mod.id}/`))
         throw Error(`常驻扩展资源必须位于自己的命名空间：${file.path}`)
       add(file)
     }
+    if (mod.contextProvider && !files.has(mod.contextProvider.entry))
+      throw Error(`上下文提供器实现未包含在 Mod 资源闭包中：${mod.id}`)
     for (const id of mod.dependencies.advisory)
       if (!chosen.has(id)) diagnostics.push(`${mod.title}：未选择建议搭配 ${id}`)
   }
@@ -209,10 +282,13 @@ export function assembleBusinessMods(
     if (seenSkills.has(skillName.toLowerCase())) throw Error("业务 Mods 技能名称冲突")
     seenSkills.add(skillName.toLowerCase())
     const skillRoot = mod.skill.entry.slice(0, -"/SKILL.md".length)
+    const agentResources = assertProjectNodeAgentResources(mod.node,
+      path => source.snapshot.files.find(file => file.path === path)?.bytes)
     const resources = businessModResources(source.snapshot, [
       mod.skill.entry,
       ...mod.skill.resources,
-      ...mod.resources
+      ...mod.resources,
+      ...agentResources
     ])
     for (const file of resources) {
       const shared = kernelFiles.some(
@@ -244,9 +320,30 @@ export function assembleBusinessMods(
   const boardFile = main.snapshot.files.find((file) => file.path === kernel.boardConfigPath)
   if (!boardFile) throw Error("共享内核流程配置缺失")
   const board = businessModObject(JSON.parse(boardFile.bytes.toString("utf8")))
+  assertPortableBusinessBoard(board)
   const workflow = businessModObject(board.workflow)
-  const integrity = businessModIntegrityDiagnostics(board, [...files.values()])
-  diagnostics.push(...integrity.diagnostics)
+  const projection = projectBusinessModWorkflow(
+    selected.map(({ mod }) => mod),
+    workflow
+  )
+  const auxiliarySkillRoots: string[] = []
+  for (const { mod } of extensions) {
+    for (const entry of mod.skills ?? []) {
+      const file = files.get(entry)
+      if (!file) throw Error(`辅助技能实现缺失：${entry}`)
+      const root = entry.slice(0, -"/SKILL.md".length)
+      const name =
+        parseSkillNameFromFrontmatterYaml(file.bytes.toString("utf8")) ?? root.split("/").at(-1)!
+      businessModId(name)
+      if (seenSkills.has(name.toLowerCase()))
+        throw Error(`辅助技能名称与已选步骤或扩展冲突：${name}`)
+      seenSkills.add(name.toLowerCase())
+      auxiliarySkillRoots.push(root)
+    }
+  }
+  const skillSearchRoots = ["skills", ...auxiliarySkillRoots]
+  const integrity = businessModIntegrityDiagnostics(board, [...files.values()], skillSearchRoots)
+  diagnostics.push(...integrity.diagnostics, ...projection.diagnostics)
   const skipPolicy = workflow.skipPolicy === undefined ? {} : businessModObject(workflow.skipPolicy)
   const locked = skipPolicy.lockedNodes ?? []
   if (!Array.isArray(locked) || locked.length > 64) throw Error("共享内核跳过规则无效")
@@ -269,12 +366,13 @@ export function assembleBusinessMods(
     for (const output of Array.isArray(contract.outputs) ? contract.outputs : [])
       artifacts.add(String(businessModObject(output).path))
   }
-  const routing = projectBusinessModWorkflowRouting(selected.map(({ mod }) => mod))
+  const routing = projection.routing
   const composedBoard = {
     ...board,
+    apiVersion: EXTENSION_BOARD_API_VERSION,
     workflow: {
       ...workflow,
-      nodes,
+      nodes: projection.nodes,
       templates: routing.templates,
       profiles: routing.profiles,
       dynamicStages: routing.dynamicStages,
@@ -282,6 +380,16 @@ export function assembleBusinessMods(
       checkpoints: routing.checkpoints,
       transitions: routing.transitions
     }
+  }
+  let requiredHooks: string[] | undefined
+  if (isReviewedAutobizKernelIdentity(kernel)) {
+    const hooksPath =
+      typeof kernel.pluginFields?.hooks === "string"
+        ? kernel.pluginFields.hooks
+        : "hooks/hooks.json"
+    const hookFile = files.get(hooksPath)
+    if (!hookFile) throw Error("AUTOBIZ_REQUIRED_HOOKS_SOURCE_MISSING")
+    requiredHooks = reviewedAutobizRequiredHookIds(JSON.parse(hookFile.bytes.toString("utf8")))
   }
   // Output identity, runtime and catalog are generated together; no source install UUID is retained.
   files.delete(kernel.boardConfigPath)
@@ -292,36 +400,43 @@ export function assembleBusinessMods(
       name: request.name,
       version: request.version,
       description: `由业务 Mods 组装：${selected.map(({ mod }) => mod.title).join("、")}`,
-      skills: "skills",
+      skills: auxiliarySkillRoots.length ? skillSearchRoots : "skills",
+      ...(userConfig ? { userConfig } : {}),
       ...(extensions.length ? { mods: "mods/manifest.json" } : {})
     })
   )
   add(
-    generated("devclaw.project-runtime.json", {
-      apiVersion: "devclaw.project-runtime/v1",
-      plugin: { id: request.name, version: request.version },
-      mode: "legacy",
-      stateOwner: "plugin",
-      stages: selected.map(({ mod }) => ({
-        id: mod.id,
-        title: mod.title,
-        actionIds: [],
-        artifactIds: [],
-        checkIds: [],
-        approval: "none"
-      })),
-      actions: [],
-      artifacts: [],
-      checks: [],
-      environment: [],
-      capabilities: {
-        execution: true,
-        conditionalTransition: false,
-        idempotency: false,
-        reconciliation: false,
-        cancellation: true
-      }
-    })
+    generated(
+      "devclaw.project-runtime.json",
+      wrapProjectRuntimeManifest(
+        {
+          apiVersion: "devclaw.project-runtime/v1",
+          plugin: { id: request.name, version: request.version },
+          mode: "legacy",
+          stateOwner: "plugin",
+          stages: selected.map(({ mod }) => ({
+            id: mod.id,
+            title: mod.title,
+            actionIds: [],
+            artifactIds: [],
+            checkIds: [],
+            approval: "none"
+          })),
+          actions: [],
+          artifacts: verifiedArtifactIds ? [{ ...AUTOBIZ_CONTEXT_OUTPUT, required: true }] : [],
+          checks: [],
+          environment: [],
+          capabilities: {
+            execution: true,
+            conditionalTransition: false,
+            idempotency: false,
+            reconciliation: false,
+            cancellation: true
+          }
+        },
+        extensionContract
+      )
+    )
   )
   add(
     generated("devclaw.capabilities.json", {
@@ -333,6 +448,7 @@ export function assembleBusinessMods(
           kind: "flow",
           usage: "project",
           entry: "devclaw.project-runtime.json",
+          ...(requiredHooks ? { requiredHooks } : {}),
           dependsOn: []
         }
       ]
@@ -356,6 +472,7 @@ export function assembleBusinessMods(
         entry: mod.entry.slice("mods/".length),
         dependsOn: mod.dependencies.required.filter((id) => known.get(id)?.kind === "function"),
         actionIds: (mod.actions ?? []).map((action) => action.id),
+        ...(mod.configSchema ? { configSchema: mod.configSchema } : {}),
         usage: mod.usage ?? "project"
       }))
     }
@@ -363,6 +480,22 @@ export function assembleBusinessMods(
     parseClawActionExports(claw)
     add(generated("mods/manifest.json", { apiVersion: "cmb.mods/v2", id: request.name, claw }))
   }
+  add(
+    generated("devclaw.portability.json", {
+      apiVersion: "devclaw.portability/v1",
+      runtimeApiVersion: "devclaw.project-runtime/v2",
+      boardApiVersion: EXTENSION_BOARD_API_VERSION,
+      requiredProtocols: extensionContract.requires,
+      configurationKeys: Object.keys(userConfig ?? {}).sort(),
+      userValuesIncluded: false,
+      grantsIncluded: false,
+      runtimeStateIncluded: false,
+      installation:
+        "Use the normal ZIP installation entry in a host that supports the declared runtime and required protocols. Bind local knowledge paths and credentials again, then authorize the installed version.",
+      compatibility:
+        "Requires the v2 runtime and board API 2. Hosts supporting only board API 1 reject this package through their existing version check. This report grants no authority; never remove or downgrade either manifest to bypass admission."
+    })
+  )
   add(
     generated(BUSINESS_MOD_MANIFEST, {
       apiVersion: "devclaw.business-mods/v1",
@@ -409,7 +542,7 @@ export function assembleBusinessMods(
     files: result,
     digest: derivationDigest(result, []),
     diagnostics,
-    requiresFixedWorkflowAcknowledgement: integrity.requiresFixedWorkflowAcknowledgement,
+    requiresFixedWorkflowAcknowledgement: projection.requiresFixedWorkflowAcknowledgement,
     missingProviders: integrity.missingProviders,
     steps: selected.map(({ source, mod }) => ({
       id: mod.id,

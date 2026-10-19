@@ -22,7 +22,7 @@ const bundle = await build({
     contents: `import React from 'react';import{createRoot}from'react-dom/client';
 import{CustomizeView}from${JSON.stringify(join(renderer, "components/customize/CustomizeView.tsx"))};
 import{rememberReuseSelection}from${receipts};window.saveReuse=(thread='one',workspace='C:/fixture')=>rememberReuseSelection(JSON.stringify([thread,workspace]),{document:{name:'聊天保存的灵件',workspace},origin:{id:'draft',revision:1,digest:'a'}});
-window.calls=[];window.api={featureGates:{isEnabled:async()=>({enabled:false})},plugins:{list:async()=>[]},mods:{globalEnabled:async()=>false,status:async()=>({workspace:'C:/fixture',mods:[],functionMods:[],diagnostics:[]}),onConfigurationChanged:()=>()=>{}}};
+window.calls=[];window.creatorCalls=[];let global=false,enabled=false;window.api={featureGates:{isEnabled:async()=>({enabled:false})},plugins:{list:async()=>[]},mods:{globalEnabled:async()=>{if(window.holdCreator)await new Promise(resolve=>window.finishCreator=resolve);return global},configureGlobal:async value=>{window.creatorCalls.push(['global',value]);global=value;return value},configure:async(...args)=>{window.creatorCalls.push(['configure',...args]);enabled=args[1]},status:async()=>({workspace:'C:/fixture',enabled,outputPolicy:true,mods:[],functionMods:[],diagnostics:[]}),development:{setMode:async input=>{window.creatorCalls.push(['mode',input]);return{threadId:input.threadId,workspace:window.wrongCreatorWorkspace?'C:/wrong':input.expectedWorkspace,enabled:true,mode:'creator',drafts:[],trials:[]}}},onConfigurationChanged:()=>()=>{}}};
 createRoot(document.getElementById('root')).render(<CustomizeView/>);`
   },
   bundle: true,
@@ -49,15 +49,17 @@ createRoot(document.getElementById('root')).render(<CustomizeView/>);`
         b.onLoad({ filter: /^store$/, namespace: "fixture" }, () => ({
           loader: "js",
           resolveDir: root,
-          contents: `import{useSyncExternalStore}from'react';const subscribers=new Set();let state={showCustomizeView:true,currentThreadId:'one',customizeInitialTab:window.initialTab||'assistant',customizeInitialSection:window.initialSection,threads:[{thread_id:'one',metadata:{workspacePath:'C:/fixture'}}],loadThreads:()=>new Promise(resolve=>window.finishLoad=resolve),selectThread:async id=>{window.calls.push(['select',id]);state={...state,currentThreadId:id,showCustomizeView:false};subscribers.forEach(fn=>fn())},setShowCustomizeView:(_show,tab)=>{window.calls.push(['navigate',tab])}};window.changeScope=()=>{state={...state,currentThreadId:'two',threads:[{thread_id:'two',metadata:{workspacePath:'C:/other'}}]};subscribers.forEach(fn=>fn())};export const useAppStore=(select)=>{const value=useSyncExternalStore(fn=>{subscribers.add(fn);return()=>subscribers.delete(fn)},()=>state);return select?select(value):value};useAppStore.getState=()=>state;`
+          contents: `import{useSyncExternalStore}from'react';const subscribers=new Set();let state={showCustomizeView:true,currentThreadId:'one',customizeInitialTab:window.initialTab||'assistant',customizeInitialSection:window.initialSection,threads:[{thread_id:'one',metadata:window.noCreatorWorkspace?{}:{workspacePath:'C:/fixture'}}],loadThreads:()=>new Promise(resolve=>window.finishLoad=()=>{state={...state,threads:[...state.threads.filter(row=>row.thread_id!=='new-reuse-thread'),{thread_id:'new-reuse-thread',title:'复用聊天',metadata:{workspacePath:'C:/other'}}]};subscribers.forEach(fn=>fn());resolve()}),selectThread:async id=>{window.calls.push(['select',id]);state={...state,currentThreadId:id,showCustomizeView:false};subscribers.forEach(fn=>fn())},setShowCustomizeView:(_show,tab)=>{window.calls.push(['navigate',tab])}};window.changeScope=()=>{state={...state,currentThreadId:'two',threads:[{thread_id:'two',title:'另一个配置目标',metadata:{workspacePath:'C:/other'}}]};subscribers.forEach(fn=>fn())};export const useAppStore=(select)=>{const value=useSyncExternalStore(fn=>{subscribers.add(fn);return()=>subscribers.delete(fn)},()=>state);return select?select(value):value};useAppStore.getState=()=>state;`
         }))
         b.onResolve({ filter: /^\.\// }, (a) => {
           if (
             a.importer.endsWith("CustomizeView.tsx") &&
             ![
               "./AssistantWorkbench",
+              "./creator-mode-entry",
               "./SparksTour",
               "./ModsPanel",
+              "./ConfigurationTargetPicker",
               "./settings-return-focus"
             ].includes(a.path)
           )
@@ -114,21 +116,37 @@ try {
     onDependency: () => undefined
   })
   const candidates = new Scanner({}).scanFiles(
-    ["CustomizeView", "AssistantWorkbench", "SparksTour", "SparksTourExamples", "ModsPanel"].map(
-      (name) => ({
-        content: readFileSync(join(renderer, `components/customize/${name}.tsx`), "utf8"),
-        extension: "tsx"
-      })
-    )
+    [
+      "CustomizeView",
+      "AssistantWorkbench",
+      "SparksTour",
+      "SparksTourExamples",
+      "ModsPanel",
+      "ConfigurationTargetPicker"
+    ].map((name) => ({
+      content: readFileSync(join(renderer, `components/customize/${name}.tsx`), "utf8"),
+      extension: "tsx"
+    }))
   )
   const css = compiler.build(candidates)
   await page.addStyleTag({ content: css })
   await page.addScriptTag({ content: bundle.outputFiles[0].text })
   await page.getByRole("button", { name: "返回应用", exact: true }).waitFor()
   const tour = page.getByRole("region", { name: "新功能导览", exact: true })
-  await tour.getByRole("heading", { name: "先选一件想做的事，跟着示例看一遍" }).waitFor()
+  assert.equal(await tour.count(), 0, "Creator landing must not be blocked by a tour")
+  await page.getByRole("button", { name: "进入创造者模式", exact: true }).waitFor()
+  assert.equal(
+    await page
+      .getByRole("button", { name: "高级自定义", exact: true })
+      .getAttribute("aria-expanded"),
+    "false"
+  )
+  assert.equal(await page.getByRole("button", { name: "管理常用搭配", exact: true }).count(), 0)
   await page.setViewportSize({ width: 375, height: 740 })
-  await page.screenshot({ path: join(output, "tour-first-375.png") })
+  assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth), false)
+  await page.screenshot({ path: join(output, "creator-first-375.png") })
+  await page.getByRole("button", { name: "浏览灵件示例", exact: true }).click()
+  await tour.getByRole("heading", { name: "先选一件想做的事，跟着示例看一遍" }).waitFor()
   for (const task of ["0", "1", "2"]) {
     await tour.getByLabel("选择任务", { exact: true }).selectOption(task)
     await tour.locator("button.bg-primary").click()
@@ -149,8 +167,9 @@ try {
   await page.getByRole("button", { name: "返回应用", exact: true }).waitFor()
   assert.equal(await tour.count(), 0, "Completed or skipped tour must not reopen after reload")
   await page.setViewportSize({ width: 1180, height: 850 })
-  assert.equal(await page.getByRole("button", { name: "创作者模式", exact: true }).count(), 0)
-  assert.equal(await page.getByRole("button", { name: "管理助手组合", exact: true }).count(), 1)
+  assert.equal(await page.getByRole("button", { name: "进入创造者模式", exact: true }).count(), 1)
+  for (const name of ["用一句话定制助手", "想让助手怎么做，直接说", "找一点灵感"])
+    assert.equal(await page.getByRole("heading", { name, exact: true }).count(), 1)
   for (const name of ["基础功能", "高级特性"]) {
     assert.equal(
       await page.getByRole("button", { name, exact: true }).getAttribute("aria-expanded"),
@@ -160,7 +179,7 @@ try {
   await page.getByRole("button", { name: "基础功能", exact: true }).click()
   await page.getByRole("button", { name: "通用", exact: true }).click()
   await page.getByText("GeneralPanel", { exact: true }).waitFor()
-  await page.getByRole("button", { name: "总览", exact: true }).click()
+  await page.getByRole("button", { name: "对话创作", exact: true }).first().click()
   await page.getByRole("button", { name: "基础功能", exact: true }).click()
   await page.screenshot({ path: join(output, "overview.png") })
   await page.setViewportSize({ width: 600, height: 900 })
@@ -170,23 +189,31 @@ try {
   assert(nav.height <= 315)
   await page.screenshot({ path: join(output, "overview-600.png") })
   await page.setViewportSize({ width: 1100, height: 900 })
-  const createTab = () => page.getByRole("button", { name: "自己制作", exact: true }).click()
+  const createTab = () => page.getByRole("button", { name: "对话创作", exact: true }).last().click()
+  const manual = async () => {
+    const open = page.getByRole("button", { name: "高级：手动组装、源码与历史版本", exact: true })
+    if (await open.count()) await open.click()
+  }
   const advanced = async () => {
     await createTab()
+    await manual()
     const open = page.getByRole("button", { name: "高级：编辑源码与历史版本", exact: true })
     if (await open.count()) await open.click()
   }
   const creation = async () => {
     await createTab()
+    await manual()
     const back = page.getByRole("button", { name: "返回需求制作", exact: true })
     if (await back.count()) await back.click()
   }
-  await page.getByRole("button", { name: "挑选灵件", exact: true }).click()
+  await page.getByRole("button", { name: "浏览灵件示例", exact: true }).click()
   assert.equal(
     await page.getByRole("button", { name: "挑选使用", exact: true }).getAttribute("aria-pressed"),
     "true"
   )
   await createTab()
+  assert.equal(await page.getByRole("button", { name: "从 Mods 组装", exact: true }).count(), 0)
+  await manual()
   await page.getByText("创建试用区域", { exact: true }).waitFor()
   await advanced()
   await page.getByLabel("未保存源码").fill("preserve my unsaved source")
@@ -202,20 +229,21 @@ try {
   await page.getByRole("button", { name: "我已添加", exact: true }).click()
   assert.equal(await page.getByLabel("未保存源码").isVisible(), false)
   assert.equal(await page.getByLabel("未保存源码").evaluate((el) => !!el.closest("[inert]")), true)
-  await page.getByRole("button", { name: "总览", exact: true }).click()
-  await page.getByRole("button", { name: "挑选灵件", exact: true }).click()
+  await page.getByRole("button", { name: "对话创作", exact: true }).first().click()
+  await page.getByRole("button", { name: "浏览灵件示例", exact: true }).click()
   await advanced()
   assert.equal(await page.getByLabel("未保存源码").inputValue(), "preserve my unsaved source")
   for (const section of ["advanced", "installed"]) {
     if (section === "advanced") await advanced()
     else await page.getByRole("button", { name: "我已添加", exact: true }).click()
-    await page.getByRole("button", { name: "总览", exact: true }).click()
+    await page.getByRole("button", { name: "对话创作", exact: true }).first().click()
     await page.evaluate(() => window.saveReuse())
-    await page.getByRole("button", { name: "添加功能", exact: true }).click()
+    await page.getByRole("button", { name: "灵件管理", exact: true }).click()
     await page.getByText("聊天保存的灵件", { exact: true }).waitFor()
     assert.equal(
       await page
-        .getByRole("button", { name: "自己制作", exact: true })
+        .getByRole("button", { name: "对话创作", exact: true })
+        .last()
         .getAttribute("aria-pressed"),
       "true"
     )
@@ -234,6 +262,8 @@ try {
   await page.waitForFunction(() => typeof window.finishLoad === "function")
   await page.evaluate(() => window.changeScope())
   await page.evaluate(() => window.finishLoad())
+  await page.getByRole("combobox", { name: "配置目标聊天", exact: true }).click()
+  await page.getByRole("option", { name: /另一个配置目标.*C:\/other/ }).click()
   await advanced()
   assert.equal(await page.getByLabel("未保存源码").inputValue(), "")
   assert.deepEqual(await page.evaluate(() => window.calls), [])
@@ -255,7 +285,7 @@ try {
     window.initialTab = "lsp"
   })
   await linkedPage.addScriptTag({ content: bundle.outputFiles[0].text })
-  await linkedPage.getByRole("button", { name: "Java LSP", exact: true }).waitFor()
+  await linkedPage.getByRole("button", { name: "Java 代码诊断", exact: true }).waitFor()
   assert.equal(
     await linkedPage
       .getByRole("button", { name: "高级特性", exact: true })
@@ -276,7 +306,7 @@ try {
   await createPage.waitForFunction(() =>
     [...document.querySelectorAll("button")].some(
       (button) =>
-        button.textContent === "自己制作" && button.getAttribute("aria-pressed") === "true"
+        button.textContent === "对话创作" && button.getAttribute("aria-pressed") === "true"
     )
   )
   assert.equal(await createPage.getByRole("region", { name: "新功能导览", exact: true }).count(), 0)
@@ -290,6 +320,61 @@ try {
     "Consumed create intent must not replay into a different scope"
   )
   await createPage.close()
+  for (const scenario of ["enter", "scope-changed", "wrong-result", "no-workspace"]) {
+    const creatorPage = await browser.newPage({ viewport: { width: 1100, height: 900 } })
+    const creatorErrors = []
+    creatorPage.on("pageerror", (error) => creatorErrors.push(error.message))
+    await creatorPage.route("http://127.0.0.1/fixture", (route) =>
+      route.fulfill({
+        contentType: "text/html",
+        body: '<div id="root" style="height:100vh"></div>'
+      })
+    )
+    await creatorPage.goto("http://127.0.0.1/fixture")
+    await creatorPage.evaluate((scenario) => {
+      window.holdCreator = scenario === "scope-changed"
+      window.wrongCreatorWorkspace = scenario === "wrong-result"
+      window.noCreatorWorkspace = scenario === "no-workspace"
+    }, scenario)
+    await creatorPage.addStyleTag({ content: css })
+    await creatorPage.addScriptTag({ content: bundle.outputFiles[0].text })
+    const entry = creatorPage.getByRole("button", { name: "进入创造者模式", exact: true })
+    await entry.waitFor()
+    assert.equal(await creatorPage.getByRole("region", { name: "新功能导览" }).count(), 0)
+    if (scenario === "no-workspace") {
+      assert.equal(await entry.isDisabled(), true)
+      await creatorPage
+        .getByText("请先在上方选择一段具有本地项目目录的聊天。", { exact: true })
+        .waitFor()
+      assert.deepEqual(await creatorPage.evaluate(() => window.creatorCalls), [])
+    } else {
+      await entry.click()
+      if (scenario === "scope-changed") {
+        await creatorPage.waitForFunction(() => typeof window.finishCreator === "function")
+        await creatorPage.evaluate(() => {
+          window.changeScope()
+          window.finishCreator()
+        })
+      }
+      if (scenario === "enter") {
+        await creatorPage.waitForFunction(() => window.calls.length === 1)
+        assert.deepEqual(await creatorPage.evaluate(() => window.creatorCalls), [
+          ["global", true],
+          ["configure", "one", true, true, "C:/fixture"],
+          ["mode", { threadId: "one", expectedWorkspace: "C:/fixture", mode: "creator" }]
+        ])
+        assert.deepEqual(await creatorPage.evaluate(() => window.calls), [["navigate", undefined]])
+        await creatorPage.screenshot({ path: join(output, "creator-entered.png") })
+      } else {
+        await creatorPage.getByRole("alert").filter({ hasText: "聊天或项目已变化" }).waitFor()
+        assert.deepEqual(await creatorPage.evaluate(() => window.calls), [])
+        if (scenario === "scope-changed")
+          assert.deepEqual(await creatorPage.evaluate(() => window.creatorCalls), [])
+      }
+    }
+    assert.deepEqual(creatorErrors, [])
+    await creatorPage.close()
+  }
   const focusBundle = await build({
     stdin: {
       resolveDir: root,
@@ -323,7 +408,7 @@ createRoot(document.getElementById('root')).render(<App/>);`
   }
   await focusPage.close()
   console.log(
-    "PASS three task journeys, no example mutations, skip/reload, mobile layout, retained authoring drafts, reuse and scope isolation"
+    "PASS conversation-first creator entry, setup/mode scope guards, no-workspace fallback, optional tours, mobile layout, advanced drafts, reuse and deep links"
   )
 } catch (error) {
   writeFileSync(join(output, `failure-${Date.now()}.txt`), String(error.stack ?? error))

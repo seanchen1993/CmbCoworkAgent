@@ -1,5 +1,6 @@
 import { isSameWorkspacePath } from "../../shared/workspace-path"
 import type { CapabilityUsageContext } from "../../shared/mods/capability-usage"
+import { isInternalHarnessProjectId } from "../harness-board/internal-project-context"
 
 export interface CapabilityContext {
   usage: CapabilityUsageContext
@@ -67,8 +68,8 @@ export function resolveCapabilityContext(
     const internalLegacy =
       metadata.isInternalFlowRuntime === true &&
       typeof feature?.projectId === "string" &&
-      feature.projectId.startsWith("composition-legacy:")
-    // Legacy composition sessions own an isolated original project, not a parent chat selection.
+      isInternalHarnessProjectId(feature.projectId)
+    // Isolated Legacy sessions own an original project, not a parent chat selection.
     // Their project and exact feature workspace still need the host index proof below.
     if (metadata.isInternalFlowRuntime === true && !internalLegacy) {
       if (typeof metadata.parentThreadId !== "string" || !metadata.parentThreadId)

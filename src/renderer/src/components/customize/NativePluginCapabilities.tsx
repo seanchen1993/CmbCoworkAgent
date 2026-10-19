@@ -1,21 +1,25 @@
 import { useCallback, useEffect, useRef, useState } from "react"
 import { Button } from "@/components/ui/button"
 import { openPluginSettings } from "@/lib/plugin-settings-intent"
+import { openDerivedProject } from "@/lib/derived-project-intent"
 import { useAppStore } from "@/lib/store"
 import {
   nativePluginCapabilities,
   type NativePluginCapability
 } from "@/lib/native-plugin-capabilities"
 import { NativeNodeComposer } from "./NativeNodeComposer"
+import { NativePluginCompatibility } from "./NativePluginCompatibility"
 
 export function NativePluginCapabilities({
   threadId,
   workspace,
-  functionPluginIds
+  functionPluginIds,
+  onAssemble
 }: {
   threadId: string
   workspace: string
   functionPluginIds: string[]
+  onAssemble?: (pluginId: string) => void
 }) {
   const pluginVersion = useAppStore((state) => state.pluginVersion)
   const [rows, setRows] = useState<NativePluginCapability[]>([])
@@ -65,7 +69,7 @@ export function NativePluginCapabilities({
         </Button>
       </div>
       <p className="text-sm text-muted-foreground">
-        AutoBiz 和你创建的版本在这里选择项目步骤。下方的双插件组合用于可独立搭配的小功能。
+        项目流程用于一次需求；业务 Mods 用于制作新插件。聊天搭配的功能和工具在下方选择，项目步骤不会作为聊天动作显示。
       </p>
       {busy && (
         <p role="status" className="text-sm">
@@ -95,7 +99,12 @@ export function NativePluginCapabilities({
               版本 {row.version}
             </p>
             {row.hasFunctionCapabilities && (
-              <p className="text-muted-foreground">此插件还提供可搭配的小功能，请在下方选择。</p>
+              <p className="text-muted-foreground">此插件另有功能扩展，可在下方核对适用范围和权限。</p>
+            )}
+            {(row.businessModCount > 0 || row.businessExtensionCount > 0) && (
+              <p className="text-muted-foreground">
+                可供组装：{row.businessModCount} 个业务 Mod · {row.businessExtensionCount} 个常驻扩展
+              </p>
             )}
             <p>
               {row.enabled
@@ -114,7 +123,20 @@ export function NativePluginCapabilities({
                   disabled={busy || !row.enabled}
                   onClick={() => setSelected(row.pluginId)}
                 >
-                  选择项目步骤
+                  查看项目流程
+                </Button>
+              )}
+              {row.projectMode && (
+                <Button size="sm" variant="outline" disabled={busy || !row.enabled}
+                  onClick={() => openDerivedProject(row.pluginId, row.name,
+                    { threadId, expectedWorkspace: workspace })}>
+                  新建此插件项目
+                </Button>
+              )}
+              {onAssemble && (row.businessModCount > 0 || row.businessExtensionCount > 0) && (
+                <Button size="sm" variant="outline" disabled={busy}
+                  onClick={() => onAssemble(row.pluginId)}>
+                  用这些 Mods 组装新插件
                 </Button>
               )}
               <Button
@@ -145,6 +167,9 @@ export function NativePluginCapabilities({
                 )}
               </div>
             </details>
+            <NativePluginCompatibility threadId={threadId} workspace={workspace}
+              pluginId={row.pluginId} version={row.version} enabled={row.enabled}
+              revision={pluginVersion} active={!busy} />
           </article>
         ))}
       </div>

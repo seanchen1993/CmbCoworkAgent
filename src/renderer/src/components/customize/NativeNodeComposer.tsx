@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react"
 import { Button } from "@/components/ui/button"
 import { openNativeNodePlan } from "@/lib/node-composition-intent"
+import { openExistingPluginProject } from "@/lib/derived-project-intent"
 import { useFeatureGate } from "@/lib/feature-gates"
 import { FEATURE_GATES } from "../../../../shared/feature-gates"
 import type { NativeNodeCatalog, NativeNodePlan } from "../../../../shared/node-composition"
@@ -25,15 +26,16 @@ export function NativeNodeComposer({
   const [open, setOpen] = useState(initialOpen)
   return (
     <section className="rounded-xl border p-4">
-      <h3 className="font-medium">组合项目步骤</h3>
+      <h3 className="font-medium">已安装插件的项目流程</h3>
       <p className="my-2 text-sm text-muted-foreground">
-        从 AutoBiz 等项目插件中选择要做的步骤。自动补齐前置步骤，保留原检查和人工确认。
+        查看所选项目实际使用的步骤。插件提供自选模板时，可为本次需求调整步骤；固定模板沿原项目入口使用。
+        这里不会生成新插件。需要组合业务 Mods 和界面扩展，请使用“从 Mods 组装新插件”。
       </p>
       {!available.enabled ? (
         <p className="text-sm">当前应用尚未开放项目模式，开放后可在这里选择项目步骤。</p>
       ) : (
         <Button variant="outline" onClick={() => setOpen(!open)}>
-          {open ? "收起项目步骤" : "选择项目步骤"}
+          {open ? "收起项目步骤" : "查看项目流程"}
         </Button>
       )}
       {open && available.enabled && (
@@ -68,6 +70,7 @@ function NativeNodeSelection({
   const [projectId, setProjectId] = useState(initialProjectId ?? "")
   const [catalog, setCatalog] = useState<NativeNodeCatalog | null>(null)
   const [selected, setSelected] = useState<string[]>([])
+  const [includeOptionalDependencies, setIncludeOptionalDependencies] = useState(true)
   const [templateId, setTemplateId] = useState("")
   const [plan, setPlan] = useState<NativeNodePlan | null>(null)
   const [error, setError] = useState("")
@@ -115,11 +118,11 @@ function NativeNodeSelection({
     try {
       const value = await window.api.nodeComposition.catalog({ ...scope, projectId })
       if (request !== sequence.current) return
-      const custom = value.config.templates.find((item) => item.templateType === "custom")
-      if (!custom) throw Error("这个插件不支持自选步骤，请从原项目入口使用。")
+      const template = value.config.templates.find((item) => item.templateType === "custom") ??
+        value.config.templates[0]
       setCatalog(value)
-      setTemplateId(custom.id)
-      setSelected(custom.requiredNodes)
+      setTemplateId(template?.id ?? "")
+      setSelected(template?.templateType === "custom" ? template.requiredNodes : template?.nodes ?? [])
     } catch (cause) {
       if (request === sequence.current)
         setError(cause instanceof Error ? cause.message : String(cause))
@@ -128,7 +131,7 @@ function NativeNodeSelection({
     }
   }
   async function preview() {
-    if (!catalog || busy) return
+    if (!catalog || busy || !custom) return
     const request = ++sequence.current
     setBusy(true)
     setError("")
@@ -138,7 +141,8 @@ function NativeNodeSelection({
         ...scope,
         projectId: catalog.project.projectId,
         templateId,
-        selected
+        selected,
+        includeOptionalDependencies
       })
       if (request === sequence.current) setPlan(value)
     } catch (cause) {
@@ -148,9 +152,13 @@ function NativeNodeSelection({
       if (request === sequence.current) setBusy(false)
     }
   }
-  const required = new Set(
-    catalog?.config.templates.find((item) => item.id === templateId)?.requiredNodes ?? []
-  )
+  const template = catalog?.config.templates.find((item) => item.id === templateId)
+  const custom = template?.templateType === "custom"
+  const required = new Set(template?.requiredNodes ?? [])
+  const selectedProject = projects.find((item) => item.projectId === projectId)
+  const visibleNodes = custom || !template
+    ? catalog?.nodes ?? []
+    : (template.nodes ?? []).flatMap((id) => catalog?.nodes.find((node) => node.id === id) ?? [])
   return (
     <div className="mt-4 space-y-4" aria-label="项目节点组合">
       <label className="block text-sm">
@@ -188,14 +196,40 @@ function NativeNodeSelection({
       )}
       {catalog && (
         <>
+          {catalog.config.templates.length > 1 && (
+            <label className="block text-sm">
+              项目提供的流程模板
+              <select aria-label="项目流程模板" value={templateId} disabled={busy}
+                className="mt-1 block w-full rounded border bg-background p-2"
+                onChange={(event) => {
+                  const next = catalog.config.templates.find((item) => item.id === event.target.value)
+                  setTemplateId(event.target.value)
+                  setSelected(next?.templateType === "custom" ? next.requiredNodes : next?.nodes ?? [])
+                  setPlan(null)
+                }}>
+                {catalog.config.templates.map((item) => (
+                  <option key={item.id} value={item.id}>
+                    {item.label || item.id} · {item.templateType === "custom" ? "支持自选" : "固定流程"}
+                  </option>
+                ))}
+              </select>
+            </label>
+          )}
           <p className="text-sm text-muted-foreground">
-            此处只选择当前项目的步骤，前置检查和人工确认会保留。
+            {custom
+              ? "此版本支持为本次需求自选步骤，前置检查和人工确认会保留。"
+              : template
+                ? `当前模板“${template.label || template.id}”使用固定流程，以下为此模板的步骤。可进入原项目创建需求，原检查和人工确认会保留。`
+                : "此插件未提供可读取的流程模板。以下为可用步骤，可进入原项目核对本次需求的流程。"}
           </p>
+          {!custom && template && visibleNodes.length === 0 && (
+            <p className="text-sm text-muted-foreground">此模板未声明可读取的步骤，请进入原项目核对实际流程。</p>
+          )}
           <div className="grid gap-2 sm:grid-cols-2">
-            {catalog.nodes.map((node) => (
+            {visibleNodes.map((node, index) => (
               <label key={node.id} className="min-w-0 space-y-1 rounded-lg border p-3 text-sm">
                 <span className="flex gap-2">
-                  <input
+                  {custom ? <input
                     type="checkbox"
                     disabled={busy || required.has(node.id)}
                     checked={selected.includes(node.id)}
@@ -207,9 +241,9 @@ function NativeNodeSelection({
                           : old.filter((id) => id !== node.id)
                       )
                     }}
-                  />
+                  /> : <span className="text-muted-foreground">{index + 1}.</span>}
                   <strong>{node.label}</strong>
-                  {required.has(node.id) && <span>（必选）</span>}
+                  {custom && required.has(node.id) && <span>（必选）</span>}
                 </span>
                 <p className="text-muted-foreground">{node.description}</p>
                 {(node.inputs.length > 0 || node.outputs.length > 0) && (
@@ -222,10 +256,40 @@ function NativeNodeSelection({
               </label>
             ))}
           </div>
-          <Button disabled={busy || !selected.length} onClick={() => void preview()}>
+          {custom && <label className="flex items-start gap-2 text-sm">
+            <input
+              type="checkbox"
+              aria-label="自动加入可选输入的上游步骤"
+              disabled={busy}
+              checked={includeOptionalDependencies}
+              onChange={(event) => {
+                setPlan(null)
+                setIncludeOptionalDependencies(event.target.checked)
+              }}
+            />
+            <span>
+              自动加入可选输入的上游步骤
+              <span className="block text-muted-foreground">
+                关闭后，省略可选输入；原插件明确支持降级的输入会逐项提示。必选步骤和原检查继续保留。
+              </span>
+            </span>
+          </label>}
+          {custom && <Button disabled={busy || !selected.length} onClick={() => void preview()}>
             检查并预览步骤
-          </Button>
+          </Button>}
         </>
+      )}
+      {selectedProject && (
+        <Button variant="outline" disabled={busy} onClick={() => {
+          try {
+            openExistingPluginProject(selectedProject, scope)
+            onContinue?.()
+          } catch (cause) {
+            setError(cause instanceof Error ? cause.message : String(cause))
+          }
+        }}>
+          在原项目中使用
+        </Button>
       )}
       {plan && (
         <section aria-label="节点组合预览" className="space-y-3 rounded-lg border p-3 text-sm">
@@ -246,6 +310,19 @@ function NativeNodeSelection({
                 {plan.optionalOmissions.map((item) => (
                   <li key={`${item.nodeId}:${item.path}`} className="break-all">
                     {plan.nodes.find((node) => node.id === item.nodeId)?.label}：{item.path}
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
+          {plan.entryInputFallbacks?.length > 0 && (
+            <div>
+              <p>以下输入不再从上游步骤取得，须按原插件要求使用用户上下文或补齐资料：</p>
+              <ul className="list-inside list-disc space-y-2">
+                {plan.entryInputFallbacks.map((item) => (
+                  <li key={`${item.nodeId}:${item.path}`} className="break-words">
+                    {plan.nodes.find((node) => node.id === item.nodeId)?.label}：{item.path}
+                    <p className="text-muted-foreground">{item.guidance}</p>
                   </li>
                 ))}
               </ul>

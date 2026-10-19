@@ -28,6 +28,7 @@ export type LocalProjectCommand =
   | { kind: "start" | "validate" | "advance" | "cancel" | "reconcile"; operationId: string }
 
 export interface LocalProjectApi {
+  mods: import("./function-source").ProjectFunctionSourceApi
   library: import("./project-library").ProjectLibraryApi
   preview: import("./development-preview").ProjectPreviewApi
   actionResults(

@@ -11,6 +11,7 @@ export function createPluginDerivationBridge(
     revise: call("revise", "revise"),
     inspectUpstream: call("inspectUpstream", "inspect-upstream"),
     prepareNodeComposition: call("prepareNodeComposition", "prepare-node-composition"),
+    prepareFlowComposition: call("prepareFlowComposition", "prepare-flow-composition"),
     propose: call("propose", "propose"),
     applyProposal: call("applyProposal", "apply-proposal"),
     cancelProposal: call("cancelProposal", "cancel-proposal"),

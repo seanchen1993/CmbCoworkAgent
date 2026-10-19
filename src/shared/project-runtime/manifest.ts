@@ -1,5 +1,10 @@
 import { parseClawActionIdentity } from "../mods/claw-actions"
 import {
+  PROJECT_RUNTIME_V2_API_VERSION,
+  projectRuntimeExtensionContract,
+  type ExtensionContract
+} from "./extension-contract"
+import {
   PROJECT_RUNTIME_API_VERSION,
   PROJECT_RUNTIME_MAX_BYTES,
   type ProjectRuntimeManifest
@@ -107,7 +112,7 @@ function refs(value: unknown): string[] {
 }
 
 /** Separate from project/v1: unknown executable fields and dangling references fail closed. */
-export function parseProjectRuntimeManifest(value: unknown): ProjectRuntimeManifest {
+export function parseProjectRuntimeManifestV1(value: unknown): ProjectRuntimeManifest {
   try {
     assertJson(value)
     if (new TextEncoder().encode(JSON.stringify(value)).byteLength > PROJECT_RUNTIME_MAX_BYTES)
@@ -259,4 +264,49 @@ export function parseProjectRuntimeManifest(value: unknown): ProjectRuntimeManif
   } catch {
     return invalid()
   }
+}
+
+/** V2 negotiates host guarantees, then reuses the unchanged v1 execution model. */
+export function parseProjectRuntimeManifest(value: unknown): ProjectRuntimeManifest {
+  if (
+    value &&
+    typeof value === "object" &&
+    !Array.isArray(value) &&
+    (value as Record<string, unknown>).apiVersion === PROJECT_RUNTIME_V2_API_VERSION
+  ) {
+    assertJson(value)
+    if (new TextEncoder().encode(JSON.stringify(value)).byteLength > PROJECT_RUNTIME_MAX_BYTES)
+      return invalid()
+    projectRuntimeExtensionContract(value)
+    return parseProjectRuntimeManifestV1((value as Record<string, unknown>).runtime)
+  }
+  return parseProjectRuntimeManifestV1(value)
+}
+
+export function wrapProjectRuntimeManifest(
+  runtime: ProjectRuntimeManifest,
+  extensionContract: ExtensionContract
+): {
+  apiVersion: typeof PROJECT_RUNTIME_V2_API_VERSION
+  runtime: ProjectRuntimeManifest
+  extensionContract: ExtensionContract
+} {
+  const envelope = {
+    apiVersion: PROJECT_RUNTIME_V2_API_VERSION,
+    runtime: parseProjectRuntimeManifestV1(runtime),
+    extensionContract
+  }
+  parseProjectRuntimeManifest(envelope)
+  return structuredClone(envelope)
+}
+
+/** Authoring transforms must retain negotiated guarantees when rewriting a v2 source. */
+export function preserveProjectRuntimeEnvelope(
+  original: unknown,
+  runtime: ProjectRuntimeManifest
+): unknown {
+  const contract = projectRuntimeExtensionContract(original)
+  return contract
+    ? wrapProjectRuntimeManifest(runtime, contract)
+    : parseProjectRuntimeManifestV1(runtime)
 }

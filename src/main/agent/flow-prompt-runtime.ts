@@ -70,7 +70,7 @@ export async function createFlowPromptRuntime(options: CreateAgentRuntimeOptions
     }
   }
   assertCurrent()
-  const model = getModelInstance(config, undefined, undefined, "agent", options.threadId)
+  const model = getModelInstance(config, undefined, undefined, "agent", options.threadId, options.creatorAccounting)
   const checkpointer = await getCheckpointer(options.threadId)
   assertCurrent()
   const admission = createPromptCallAdmission({

@@ -62,7 +62,8 @@ export class ProjectFunctionFiles implements FunctionFileAccess {
     private readonly workspace: string,
     private readonly assertLive: () => void,
     private readonly publish: (value: ModJson, signal: AbortSignal) => Promise<ModJson>,
-    private readonly queryTool?: FunctionFileScope["queryTool"]
+    private readonly queryTool?: FunctionFileScope["queryTool"],
+    private readonly assertContent?: () => void
   ) {}
 
   async ancestors(request: FunctionAncestorsRequest, signal: AbortSignal): Promise<ModJson> {
@@ -172,6 +173,7 @@ export class ProjectFunctionFiles implements FunctionFileAccess {
       if (!(await this.allowed(method, target.path)))
         throw new ModFunctionError("MODS_FS_ACCESS_DENIED")
       check()
+      this.assertContent?.()
       if (method === "fs.read") {
         const opened = await openStableFileHandle(target.root, target.path)
         try {
@@ -292,6 +294,7 @@ export class ProjectFunctionFiles implements FunctionFileAccess {
         throw new ModFunctionError("MODS_FS_ACCESS_DENIED")
     } catch (error) {
       check()
+      this.assertContent?.()
       if (method !== "fs.exists") {
         if (error instanceof ModFunctionError) throw error
         if (error instanceof StableBoundedReadError)
@@ -310,12 +313,14 @@ export class ProjectFunctionFiles implements FunctionFileAccess {
       result = false
     }
     check()
+    this.assertContent?.()
     // No optional hook receives the raw host result before mandatory publication.
     const expectedBytes = method === "fs.read" && options?.as === "bytes" &&
       typeof result === "object" && result !== null && !Array.isArray(result)
       ? result.base64 : undefined
     const published = await this.publish(result, signal)
     check()
+    this.assertContent?.()
     // Encoded data must cross the same mandatory publisher as text. A policy that
     // suppresses binary output must fail explicitly, never return corrupt bytes.
     if (method === "fs.read" && options?.as === "bytes" &&

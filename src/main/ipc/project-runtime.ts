@@ -21,8 +21,14 @@ import { readProjectActionLock } from "../harness-board/project-runtime/action-i
 import { isSameWorkspacePath } from "../../shared/workspace-path"
 import { isProjectPreviewId, projectPreviewRegistry } from "../mods/devtools/project-preview-registry"
 import { registerProjectPreviewHandlers } from "./project-preview"
+import { registerProjectRuntimeModsHandlers } from "./project-runtime-mods"
 import { projectAuthoringSessions } from "../mods/devtools/project-authoring-session"
 import { ProjectLibrary } from "../harness-board/project-runtime/project-library"
+import { registerProjectCompositionHandlers } from "./project-composition"
+import { createLegacyCompositionDependencies } from "../harness-board/project-runtime/composition-legacy-production"
+import { createBrowserWindowAgentRunDelivery } from "../agent/agent-run-service"
+import { assertOriginalProjectWorkspaceIdle } from "../harness-board/project-runtime/composition-workspace-busy"
+import { listLocalThreadRunLeases, registerLocalThreadRunAdmissionGuard } from "../agent/thread-run-lease"
 import type { ProjectLibraryApi } from "../../shared/project-runtime/project-library"
 import type {
   LocalProjectCommand,
@@ -39,6 +45,39 @@ export function registerProjectRuntimeHandlers(
   let snapshots: HostPackageSnapshots | undefined
   let library: ProjectLibrary | undefined
   const runOwners = new Map<string, BrowserWindow>()
+  const compositions = registerProjectCompositionHandlers(ipc, {
+    trusted, host: platform,
+    legacy: input => createLegacyCompositionDependencies({ ...input,
+      delivery: context => createBrowserWindowAgentRunDelivery(input.owner(context)) }),
+    bindOwner: (operation, owner) => { runOwners.set(operation.operationId, owner) },
+    assertWorkspaceIdle: (workspace) => {
+      for (const lease of listLocalThreadRunLeases()) {
+        const raw = getThreadCore(lease.threadId)?.metadata
+        const metadata = typeof raw === "string" ? JSON.parse(raw) : raw
+        if (typeof metadata?.workspacePath === "string" &&
+          isSameWorkspacePath(metadata.workspacePath, workspace)) throw Error("COMPOSITION_WORKSPACE_BUSY")
+      }
+      assertOriginalProjectWorkspaceIdle(workspace,
+        join(getOpenworkDir(), "local-projects", "state.sqlite"),
+        join(getOpenworkDir(), "legacy-project-runtime", "operations.sqlite"))
+    }
+  })
+  function compositionGuard<T>(workspace: string, work: () => T): T {
+    // No database or runtime initialization on the unchanged, non-composition path.
+    if (!existsSync(join(getOpenworkDir(), "project-compositions", "state.sqlite"))) return work()
+    return compositions().guardWorkspaceMutation(workspace, work)
+  }
+  function internalCompositionProject(projectId: string): boolean {
+    return projectId.startsWith("composition:") &&
+      existsSync(join(getOpenworkDir(), "project-compositions", "state.sqlite")) &&
+      Boolean(compositions().parentForHostUnit(projectId))
+  }
+  registerLocalThreadRunAdmissionGuard((threadId, work) => {
+    const raw = getThreadCore(threadId)?.metadata
+    const metadata = typeof raw === "string" ? JSON.parse(raw) : raw
+    return typeof metadata?.workspacePath === "string"
+      ? compositionGuard(metadata.workspacePath, work) : work()
+  })
   projectAuthoringSessions.setChanged((threadId) => {
     const owner = mainWindow()
     if (owner && !owner.isDestroyed() && !owner.webContents.isDestroyed())
@@ -79,7 +118,8 @@ export function registerProjectRuntimeHandlers(
           join(root, "state.sqlite"),
           join(getOpenworkDir(), "legacy-project-runtime", "operations.sqlite"),
           join(getOpenworkDir(), "project-workspace-mode.sqlite")
-        )
+        ),
+        compositionGuard
       )
       snapshots = new HostPackageSnapshots(join(root, "packages"))
       service = new HostProjectService(store, snapshots, {
@@ -110,6 +150,7 @@ export function registerProjectRuntimeHandlers(
         },
         inspectOperation: inspectHostProjectExecution,
         executeSkill: async (context) => {
+          context.internalCompositionUnit = internalCompositionProject(context.project.projectId)
           const libraryPath = join(getOpenworkDir(), "local-projects", "library.sqlite")
           if (existsSync(libraryPath)) {
             library ??= new ProjectLibrary(libraryPath)
@@ -119,7 +160,7 @@ export function registerProjectRuntimeHandlers(
           if (!owner || owner.isDestroyed()) throw Error("PROJECT_EXECUTION_WINDOW_UNAVAILABLE")
           const { executeHostProjectStage } =
             await import("../harness-board/project-action-executor")
-          return executeHostProjectStage(context, owner, () => {
+          try { return await executeHostProjectStage(context, owner, () => {
             const current = store.get(context.project.projectId)
             const operation = store.getOperation(context.operation.operationId)
             if (
@@ -130,16 +171,17 @@ export function registerProjectRuntimeHandlers(
               operation.cancelRequestedAt !== null
             )
               throw Error("PROJECT_ACTION_OPERATION_CHANGED")
-          })
+          }) } finally { runOwners.delete(context.operation.operationId) }
         }
       })
       service.recoverInterrupted()
     }
     return service
   }
-  registerLegacyProjectRuntimeHandlers(ipc, trusted)
+  registerLegacyProjectRuntimeHandlers(ipc, trusted, compositionGuard)
   function libraryScope(event: IpcMainInvokeEvent, projectId: string) {
     trusted(event)
+    if (internalCompositionProject(projectId)) throw Error("COMPOSITION_USE_PARENT_PROJECT")
     if (typeof projectId !== "string" || !projectId || projectId.length > 256)
       throw Error("PROJECT_INVALID_INPUT")
     const project = platform().get(projectId)
@@ -180,7 +222,10 @@ export function registerProjectRuntimeHandlers(
     })
   })
   registerProjectPreviewHandlers(ipc, trusted, platform, (project) => snapshots!.read(project.pluginDigest).root)
+  registerProjectRuntimeModsHandlers(ipc, trusted, platform,
+    project => snapshots!.read(project.pluginDigest).root, internalCompositionProject)
   function view(projectId: string) {
+    if (internalCompositionProject(projectId)) throw Error("COMPOSITION_USE_PARENT_PROJECT")
     const api = platform()
     const project = api.get(projectId)
     if (!project) throw Error("PROJECT_NOT_FOUND")
@@ -218,8 +263,19 @@ export function registerProjectRuntimeHandlers(
     trusted(event)
     if (typeof afterProjectId !== "string" || afterProjectId.length > 256)
       throw Error("PROJECT_INVALID_CURSOR")
-    return platform()
-      .list(20, afterProjectId)
+    const visible: ReturnType<HostProjectService["list"]> = []
+    let cursor = afterProjectId
+    while (visible.length < 20) {
+      const page = platform().list(100, cursor)
+      if (!page.length) break
+      for (const project of page) {
+        if (!internalCompositionProject(project.projectId)) visible.push(project)
+        if (visible.length === 20) break
+      }
+      cursor = page[page.length - 1].projectId
+      if (page.length < 100) break
+    }
+    return visible
       .map((project) => ({
         projectId: project.projectId,
         name: project.name,
@@ -247,6 +303,7 @@ export function registerProjectRuntimeHandlers(
         operationId.length > 256
       )
         throw Error("PROJECT_INVALID_INPUT")
+      if (internalCompositionProject(projectId)) throw Error("COMPOSITION_USE_PARENT_PROJECT")
       // Opening a result never initializes/reconciles a runtime or creates a ledger.
       if (!service || !snapshots) throw Error("PROJECT_ACTION_RESULTS_UNAVAILABLE")
       const project = service.get(projectId)
@@ -346,6 +403,8 @@ export function registerProjectRuntimeHandlers(
       if (isProjectPreviewId(current.project.installedPluginId) &&
         command.kind !== "cancel" && command.kind !== "reconcile")
         projectPreviewRegistry.assertProject(current.project)
+      // Native cancellation never depends on an invalid configuration or unavailable knowledge.
+      if (command.kind !== "cancel") await api.prepareRuntimeInputs(projectId)
       if (command.kind === "prepare") {
         api.prepare({
           projectId,

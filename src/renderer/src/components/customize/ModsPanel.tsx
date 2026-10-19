@@ -27,6 +27,8 @@ import { ModsImportGuide } from "./ModsImportGuide"
 import { SparksDocumentationLink } from "./SparksDocumentationLink"
 import { OfficialSparksExamples } from "./OfficialSparksExamples"
 import { SparksOperationError } from "./SparksOperationError"
+import { RuntimeSessions } from "./RuntimeSessions"
+import { SnapshotMaintenance } from "./SnapshotMaintenance"
 import { readReuseSelection, subscribeReuseSelection } from "./development-reuse-receipts"
 import {
   Dialog,
@@ -81,6 +83,7 @@ export function ModsPanel({
   const [section, setSection] = useState<"examples" | "create" | "installed">("create")
   const [advanced, setAdvanced] = useState(false)
   const [manualOpen, setManualOpen] = useState(false)
+  const [maintenanceOpen, setMaintenanceOpen] = useState(false)
   const [createKind, setCreateKind] = useState<"new" | "derive" | "assemble">("new")
   const [sourceRequest, setSourceRequest] = useState<{
     id: string
@@ -306,7 +309,17 @@ export function ModsPanel({
           />
         )}
       </div>
-      
+      <details
+        className="rounded-xl border p-4"
+        open={maintenanceOpen}
+        onToggle={(event) => setMaintenanceOpen(event.currentTarget.open)}
+      >
+        <summary className="cursor-pointer text-sm font-medium">高级：运行管理与恢复</summary>
+        <div className="space-y-4 pt-4">
+          <RuntimeSessions active={active && maintenanceOpen} threadId={threadId} />
+          <SnapshotMaintenance active={active && maintenanceOpen} scopeKey={selectionScope} />
+        </div>
+      </details>
       {section === "create" && (
         <details className="rounded-xl border p-4">
           <summary className="cursor-pointer text-sm font-medium">灵件使用指南</summary>

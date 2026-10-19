@@ -12,6 +12,11 @@ import type { ClawProfile } from "../../../../shared/mods/claw"
 import type { FunctionPluginStatus } from "../../../../shared/mods/v2/commands"
 import { AuthoringInstallPanel } from "./AuthoringInstallPanel"
 import { AuthoringPreviewPanel } from "./AuthoringPreviewPanel"
+import { hasUsableClawComponents, newClawCapability } from "@/lib/claw-capability-usage"
+import { openClawSidebar } from "@/lib/claw-sidebar"
+import type { DevelopmentStatus } from "../../../../shared/mods/development"
+import { DevelopmentReusePlanCard } from "./DevelopmentReusePlanCard"
+import { normalizeWorkspacePathKey } from "../../../../shared/workspace-path"
 
 export interface DevelopmentReuseOrigin {
   id: string
@@ -25,12 +30,19 @@ interface Props {
   onOpenThread: (threadId: string) => Promise<void>
   onReturnToChat?: () => void
 }
-const button = "rounded border px-3 py-2 text-sm disabled:opacity-50"
+const button = "rounded border px-3 py-2 text-sm hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50"
+const primaryButton = `${button} bg-primary text-primary-foreground hover:bg-primary/90`
 
-/** Coordinates existing trusted APIs; each effect remains a separate visible user action. */
+/** Native preparation is read-only; only the explicit plan confirmation authorizes reuse. */
 export function DevelopmentReusePanel(props: Props): React.JSX.Element {
+  const [advanced, setAdvanced] = useState(false)
   return (
-    <ReceiptOwner
+    <div className="space-y-4">
+      {!advanced && <NativeReuseEntry key={JSON.stringify([props.threadId, props.document.workspace, props.origin])} {...props} />}
+      <details className="rounded border p-3 text-sm"
+        onToggle={(event) => setAdvanced(event.currentTarget.open)}>
+        <summary className="cursor-pointer">高级：分步安装与复用</summary>
+        {advanced && <ReceiptOwner
       key={JSON.stringify([
         props.threadId,
         props.document.workspace,
@@ -40,7 +52,89 @@ export function DevelopmentReusePanel(props: Props): React.JSX.Element {
         props.origin
       ])}
       {...props}
-    />
+        />}
+      </details>
+    </div>
+  )
+}
+
+function NativeReuseEntry({ threadId, document, origin, onReturnToChat }: Props) {
+  const [status, setStatus] = useState<DevelopmentStatus | null>(null)
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState("")
+  const live = useRef(true)
+  const pending = useRef(false)
+  const api = window.api.mods.development
+  const accept = useCallback((next: DevelopmentStatus) => {
+    if (next.threadId !== threadId ||
+      normalizeWorkspacePathKey(next.workspace) !== normalizeWorkspacePathKey(document.workspace)) {
+      setStatus(null)
+      throw Error("DEVELOPMENT_SCOPE_CHANGED")
+    }
+    setStatus(next)
+  }, [threadId, document.workspace])
+  useEffect(() => {
+    live.current = true
+    const read = async () => {
+      if (pending.current) return
+      try {
+        const next = await api.status({ threadId })
+        if (live.current) accept(next)
+      } catch {
+        if (live.current) setError("暂时无法核对当前版本，请重新读取状态。")
+      }
+    }
+    void read()
+    const unsubscribe = api.onChanged((event) => { if (event.threadId === threadId) void read() })
+    return () => { live.current = false; unsubscribe() }
+  }, [api, threadId, accept])
+  const act = async (call: () => Promise<DevelopmentStatus>) => {
+    if (pending.current) return
+    pending.current = true
+    setBusy(true)
+    setError("")
+    try {
+      const next = await call()
+      if (live.current) accept(next)
+    } catch {
+      if (live.current) setError("操作结果待核对，请先重新读取状态；已完成的步骤会保留。")
+    } finally {
+      pending.current = false
+      if (live.current) setBusy(false)
+    }
+  }
+  const draft = status?.drafts.find((row) => row.id === origin.id)
+  const current = !!draft && draft.revision === origin.revision && draft.digest === origin.digest
+  const plan = status?.reuse?.draftId === origin.id ? status.reuse : undefined
+  const prepare = () => {
+    if (!current) return
+    void act(() => api.requestReuse({ threadId, expectedWorkspace: document.workspace,
+      id: origin.id, revision: origin.revision }))
+  }
+  const read = () => void act(() => api.status({ threadId }))
+  return (
+    <section aria-label="跨聊天复用" className="space-y-3 rounded border p-4 text-sm">
+      {plan ? <DevelopmentReusePlanCard plan={plan} save={status?.save}
+        current={current && plan.revision === origin.revision && plan.sourceDigest === origin.digest}
+        busy={busy} onPrepare={current ? prepare : undefined} onRead={read}
+        onApprove={() => {
+          if (!current || plan.revision !== origin.revision || plan.sourceDigest !== origin.digest ||
+            !plan.planId || !plan.compiledDigest || !plan.targetProfileDigest) return
+          void act(() => api.approveReuse({ threadId, expectedWorkspace: document.workspace,
+            planId: plan.planId!, sourceDigest: plan.sourceDigest,
+            compiledDigest: plan.compiledDigest!, targetProfileDigest: plan.targetProfileDigest! }))
+        }} /> : <>
+        <h3 className="font-medium">保存并在其他聊天复用 · {document.name}</h3>
+        <p className="text-xs text-muted-foreground">先核对正式版本和权限，再一次确认完成安装、授权与组合保存。当前聊天的源码不需要正式安装即可继续修改和恢复。</p>
+        <button type="button" className={primaryButton} disabled={busy || !current} onClick={prepare}>
+          准备跨聊天复用
+        </button>
+      </>}
+      {status && !current && <p role="status" className="text-xs">这份草稿已经更新，请回到聊天选择最新版本。</p>}
+      {error && <p role="status" className="text-xs text-destructive">{error}</p>}
+      {error && <button type="button" className={button} disabled={busy} onClick={read}>重新读取状态</button>}
+      {onReturnToChat && <button type="button" className={button} disabled={busy} onClick={onReturnToChat}>回到聊天继续使用</button>}
+    </section>
   )
 }
 
@@ -390,21 +484,23 @@ function Reuse({
     if (
       current.state !== "ready" ||
       latest.workspace !== claw.workspace ||
+      (latest.usageContext ?? "chat") !== (claw.usageContext ?? "chat") ||
       latest.revision !== (savedProfile?.revision ?? claw.revision) ||
       latest.bindingRevision !== (savedProfile?.bindingRevision ?? claw.bindingRevision)
     )
       throw Error("STALE")
     if (applied && JSON.stringify(latest.active) === JSON.stringify(applied)) return
+    const usageContext = latest.usageContext ?? "chat"
+    if (!hasUsableClawComponents(current, usageContext))
+      throw Error("此插件没有适用于当前场景的功能，请到对应场景使用。")
     const base = latest.active
     const preserved: ClawProfile["capabilities"] =
       base?.capabilities ??
       latest.capabilities
-        .filter((row) => row.state === "ready" && row.digest)
-        .map((row) => ({
-          pluginId: row.pluginId,
-          name: row.name,
-          digest: row.digest!
-        }))
+        .filter(
+          (row) => row.state === "ready" && row.digest && hasUsableClawComponents(row, usageContext)
+        )
+        .map((row) => newClawCapability(row, usageContext))
     const existing = preserved.find((row) => row.pluginId === current.pluginId)
     const profile: ClawProfile = savedProfile?.profile ?? {
       ...base,
@@ -413,9 +509,7 @@ function Reuse({
       capabilities: [
         ...preserved.filter((row) => row.pluginId !== current.pluginId),
         {
-          pluginId: current.pluginId,
-          name: current.name,
-          digest: current.digest!,
+          ...newClawCapability(current, usageContext),
           ...(existing?.components ? { components: existing.components } : {})
         }
       ]
@@ -511,7 +605,7 @@ function Reuse({
   }
   return (
     <section aria-label="保存并正式复用" className="space-y-4 rounded border p-4">
-      <h3 className="font-medium">保存并正式复用 · {document.name}</h3>
+      <h3 className="font-medium">保存并在其他聊天使用 · {document.name}</h3>
       <p className="text-sm">
         开发源码 v{origin.revision}{" "}
         已保存。按下面的步骤安装、授权并加入助手。已完成的步骤可以展开回看。
@@ -538,14 +632,12 @@ function Reuse({
       {invalid && <p role="alert">此复用计划已过期，请重新选择当前开发版本。</p>}
       {error && <p role="alert">{error} 展开“版本详情与进度恢复”可只读核对。</p>}
       {restoring && <p role="status">正在只读核对已完成的复用步骤…</p>}
-      <p className="text-sm font-medium">
-        {stopped ? "1. 本会话试用已停止" : "1. 停止试用"}
-      </p>
+      <p className="text-sm font-medium">{stopped ? "1. 本会话试用已停止" : "1. 停止试用"}</p>
       {!stopped && (
         <div className="space-y-2">
           <p className="text-sm">正式安装前先停止此试用，避免同时运行两个版本。</p>
           <button
-            className={button}
+            className={primaryButton}
             disabled={busy || restoring || invalid}
             onClick={() =>
               void perform(async () => {
@@ -554,7 +646,9 @@ function Reuse({
                 if (trial && trial.phase !== "stopped")
                   await window.api.mods.development.stop({ ...scope, id: trial.componentId })
                 const after = await verify()
-                if (after.trials.some((row) => row.draftId === origin.id && row.phase !== "stopped"))
+                if (
+                  after.trials.some((row) => row.draftId === origin.id && row.phase !== "stopped")
+                )
                   throw Error("STOP_UNCONFIRMED")
                 if (alive.current) setStopped(true)
                 if (alive.current) setRestoring(true)
@@ -570,9 +664,11 @@ function Reuse({
           <summary className="cursor-pointer text-sm font-medium">
             {installed ? "2. 正式版本已安装 · 回看预览与安装" : "2. 预览并安装正式版本"}
           </summary>
-          {installed && <p className="text-xs text-muted-foreground">
-            安装事实已确认；不表示运行预览已经通过，后续失败也不会自动卸载。
-          </p>}
+          {installed && (
+            <p className="text-xs text-muted-foreground">
+              安装事实已确认；不表示运行预览已经通过，后续失败也不会自动卸载。
+            </p>
+          )}
           <AuthoringPreviewPanel
             threadId={threadId}
             workspace={document.workspace}
@@ -606,17 +702,24 @@ function Reuse({
         </button>
       )}
       {installed && mod && !invalid && (
-        <details open={!authorized || authorizationPending} className="space-y-2 rounded border p-3">
+        <details
+          open={!authorized || authorizationPending}
+          className="space-y-2 rounded border p-3"
+        >
           <summary className="cursor-pointer text-sm font-medium">
             {authorized ? "3. 正式权限已确认 · 回看权限" : "3. 确认正式权限"}
           </summary>
           <p className="text-sm">
-            正式授权比本会话试用范围更广：可读取项目和会话、注册命令和工具、保存偏好、扩展界面、调用或拦截工具及调用已配置模型。模型调用产生实际用量，每插件每项目每分钟最多
-            30 次、32768 个预留输出 Token。写文件与执行命令仍需批准最终参数。
+            正式版可读取项目和会话、提供命令和工具、保存偏好、扩展界面，并调用或拦截工具。
+            调用已配置模型会消耗用量；写文件和执行命令仍需你确认。
           </p>
-          <p className="break-all text-xs">
-            正式版本：{installed.versionId} · {mod.digest}
-          </p>
+          <details className="text-xs">
+            <summary className="cursor-pointer">正式版本详情</summary>
+            <p className="break-all">
+              {installed.versionId} · {mod.digest}
+            </p>
+            <p>每插件每项目每分钟最多 30 次模型调用、32768 个预留输出 Token。</p>
+          </details>
           <label className="flex gap-2 text-sm">
             <input
               type="checkbox"
@@ -627,7 +730,7 @@ function Reuse({
             我已核对这个正式版本及以上权限
           </label>
           <button
-            className={button}
+            className={primaryButton}
             disabled={busy || !consent || authorizationPending || authorized}
             onClick={() =>
               void perform(async () => {
@@ -679,20 +782,19 @@ function Reuse({
       {authorized && !invalid && (
         <details open={!applied || !!error} className="space-y-2 rounded border p-3">
           <summary className="cursor-pointer text-sm font-medium">
-            {applied ? "4. 已加入当前助手 · 回看组合" : "4. 加入当前助手"}
+            {applied ? "4. 已加入当前聊天 · 回看选择" : "4. 加入当前聊天"}
           </summary>
           <button
             className={button}
             disabled={busy || restoring}
             onClick={() => void perform(readClaw)}
           >
-            核对当前 Claw 组合
+            {claw ? "重新核对当前选择" : "加入当前聊天"}
           </button>
           {claw && (
             <>
               <p className="text-sm">
-                保留当前组合“{claw.active?.name ?? "默认启用的所有已授权组件"}
-                ”的其他组件、Skill、MCP、模型和流程，加入本版本。已有本组件的选择范围保持不变；首次加入包含它的全部声明组件。
+                将“{document.name}”加入当前聊天，保留你已选的其他功能、模型和流程。
               </p>
               {savedProfile && (
                 <p className="text-sm">
@@ -701,11 +803,11 @@ function Reuse({
                 </p>
               )}
               <button
-                className={button}
+                className={primaryButton}
                 disabled={busy || restoring || !!applied}
                 onClick={() => void perform(applyClaw)}
               >
-                保留其他选择并应用此组合
+                确认加入并保留其他选择
               </button>
             </>
           )}
@@ -713,10 +815,31 @@ function Reuse({
       )}
       {applied && !invalid && !restoring && (
         <div className="space-y-3 rounded border border-primary/30 bg-primary/5 p-3">
-          <p role="status" className="text-sm font-medium">已保存并应用到当前聊天，可以继续使用。</p>
+          <p role="status" className="text-sm font-medium">
+            已保存并应用到当前聊天，可以继续使用。
+          </p>
+          <p className="text-xs">
+            回到聊天直接描述需求并发送；需要使用插件命令{mod?.userConfigFieldCount ? "或设置" : ""}时，可在“任务进展 → 高级设置”查看。结果在聊天或“结果”中核对。
+          </p>
           <div className="flex flex-wrap gap-2">
-            {onReturnToChat && <button type="button" className={button} disabled={busy}
-              onClick={onReturnToChat}>继续当前聊天</button>}
+            {!!mod?.userConfigFieldCount && (
+              <button
+                type="button"
+                className={button}
+                disabled={busy}
+                onClick={() => {
+                  onReturnToChat?.()
+                  openClawSidebar("configuration")
+                }}
+              >
+                打开灵件设置
+              </button>
+            )}
+            {onReturnToChat && (
+              <button type="button" className={primaryButton} disabled={busy} onClick={onReturnToChat}>
+                去这段聊天使用
+              </button>
+            )}
             <button
               className={button}
               disabled={busy || restoring}

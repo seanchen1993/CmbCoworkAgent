@@ -1,5 +1,11 @@
 import { describe, expect, it, vi } from "vitest"
-import { bindLiveToolEvidence, traceCodeExecCalls } from "./live-tool-evidence"
+import {
+  bindLiveToolEvidence,
+  traceCodeExecCalls,
+  bindRuntimeTraceContext,
+  captureRuntimeTraceParent
+} from "./live-tool-evidence"
+import { ModRuntimeAuthorities } from "../../mods/runtime-instance"
 import type { McpCapabilityService } from "../../mcp/capability-types"
 import type { TraceContext } from "./types"
 
@@ -53,6 +59,70 @@ function fixture() {
     }
   }
 }
+describe("native runtime trace lineage", () => {
+  it("captures immutable native lineage before an await and never writes to the ended parent", () => {
+    const f = fixture(),
+      registry = new ModRuntimeAuthorities()
+    const owner = registry.create({ workspace: "workspace", threadId: "thread", turnId: "turn" })
+    bindRuntimeTraceContext(owner.authority, f.context)
+    const captured = captureRuntimeTraceParent(owner.authority)!
+    f.context.traceId = "mutated"
+    expect(captured.traceId).toBe("trace")
+    expect(Object.isFrozen(captured)).toBe(true)
+    f.close()
+    expect(captured.traceId).toBe("trace")
+    expect(captureRuntimeTraceParent(owner.authority)).toBeUndefined()
+    expect(f.collector.addToolNode).not.toHaveBeenCalled()
+    registry.close()
+  })
+  it("does not accept copied contexts, foreign threads or a forged runtime authority", () => {
+    const f = fixture(),
+      registry = new ModRuntimeAuthorities()
+    const owner = registry.create({ workspace: "workspace", threadId: "thread", turnId: "turn" })
+    bindRuntimeTraceContext(owner.authority, { ...f.context })
+    expect(captureRuntimeTraceParent(owner.authority)).toBeUndefined()
+    const foreign = registry.create({ workspace: "workspace", threadId: "foreign", turnId: "turn" })
+    bindRuntimeTraceContext(foreign.authority, f.context)
+    expect(captureRuntimeTraceParent(foreign.authority)).toBeUndefined()
+    const forged = {
+      ...owner.authority,
+      assertLive() {
+        /* A copied method cannot mint native identity. */
+      }
+    }
+    bindRuntimeTraceContext(forged, f.context)
+    expect(captureRuntimeTraceParent(forged)).toBeUndefined()
+    registry.close()
+  })
+  it("does not lend old lineage to a replacement owner or an aborted source", () => {
+    const f = fixture(),
+      registry = new ModRuntimeAuthorities(),
+      abort = new AbortController()
+    const scope = { workspace: "workspace", threadId: "thread", turnId: "turn" }
+    const first = registry.create(scope, abort.signal)
+    bindRuntimeTraceContext(first.authority, f.context)
+    abort.abort()
+    expect(captureRuntimeTraceParent(first.authority)).toBeUndefined()
+    const next = registry.create(scope)
+    expect(captureRuntimeTraceParent(next.authority)).toBeUndefined()
+    bindRuntimeTraceContext(next.authority, f.context)
+    expect(captureRuntimeTraceParent(next.authority)?.traceId).toBe("trace")
+    registry.close()
+    expect(captureRuntimeTraceParent(next.authority)).toBeUndefined()
+  })
+  it("keeps missing or failing telemetry outside runtime admission", () => {
+    const f = fixture(),
+      registry = new ModRuntimeAuthorities()
+    const owner = registry.create({ workspace: "workspace", threadId: "thread", turnId: "turn" })
+    bindLiveToolEvidence(f.context, f.collector, () => {
+      throw Error("observer unavailable")
+    })
+    expect(() => bindRuntimeTraceContext(owner.authority, f.context)).not.toThrow()
+    expect(captureRuntimeTraceParent(owner.authority)).toBeUndefined()
+    expect(() => owner.authority.assertLive()).not.toThrow()
+    registry.close()
+  })
+})
 describe("native CodeExec linked observations", () => {
   it("delegates the original call exactly once and records only bounded host metadata", async () => {
     const f = fixture(),

@@ -1,4 +1,4 @@
-import { linkSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
+import { statSync, utimesSync, linkSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterEach, describe, expect, it } from "vitest"
@@ -48,3 +48,34 @@ describe("retained complete package snapshots", () => {
     expect(() => snapshots.capture(source)).toThrow()
   })
 })
+
+it("detects modified bytes even when mtime is restored, and newly added paths", () => {
+  const { source, snapshots } = fixture()
+  writeFileSync(join(source, "resource.txt"), "original")
+  const snapshot = snapshots.capture(source)
+  const guard = snapshots.captureGuard(snapshot.digest)
+  const file = join(snapshot.root, "resource.txt")
+  const before = statSync(file)
+  guard()
+  writeFileSync(file, "modified")
+  utimesSync(file, before.atime, before.mtime)
+  expect(() => guard()).toThrow("PACKAGE_CHANGED")
+  const other = fixture()
+  const second = other.snapshots.capture(other.source)
+  const secondGuard = other.snapshots.captureGuard(second.digest)
+  writeFileSync(join(second.root, "extra.txt"), "new")
+  expect(() => secondGuard()).toThrow("PACKAGE_CHANGED")
+})
+it.runIf(process.env.COMPOSITION_SNAPSHOT_BENCHMARK === "1")("measures bounded two-package admission and repeated guards", () => {
+  const started = performance.now()
+  const guards: Array<() => void> = []
+  for (let index = 0; index < 2; index++) {
+    const { source, snapshots } = fixture()
+    for (let file = 0; file < 100; file++) writeFileSync(join(source, `asset-${file}.txt`), "x".repeat(4096))
+    guards.push(snapshots.captureGuard(snapshots.capture(source).digest))
+  }
+  const admission = performance.now() - started
+  const checks = performance.now()
+  for (let iteration = 0; iteration < 20; iteration++) for (const guard of guards) guard()
+  console.info("[retained-package-benchmark]", { packages: 2, filesPerPackage: 102, admissionMs: Math.round(admission), twentyBoundariesMs: Math.round(performance.now() - checks) })
+}, 60000)

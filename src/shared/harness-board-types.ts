@@ -94,6 +94,22 @@ export interface HarnessAdapterRegistryItem extends HarnessAdapterSnapshot {
   boardCompatibility: HarnessBoardCompatibility
 }
 
+/** Native identities only; knowledge/workspace paths are resolved from the original host stores. */
+export interface HarnessKnowledgeTarget {
+  projectId?: string
+  featureId?: string
+  threadId?: string
+}
+
+/** Native identities only. The main process resolves saved workspaces and directory bindings. */
+export interface HarnessKnowledgeApi {
+  syncProjectConstraints(adapterId: string, target?: HarnessKnowledgeTarget):
+    Promise<HarnessProjectConstraintSyncResult>
+  getKnowledgePreview(adapterId: string, target?: HarnessKnowledgeTarget):
+    Promise<HarnessKnowledgePreviewResult>
+  getPublicAgentmdDeployUnits(projectId: string, featureId?: string): Promise<string[]>
+}
+
 export interface HarnessProjectConstraintSyncResult {
   adapterId: string
   adapterName: string

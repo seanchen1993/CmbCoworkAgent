@@ -20,6 +20,7 @@ import type { ImPreparedSkillMessage } from "./skill-command"
 type PreparedSkillTurn = Extract<ImPreparedSkillMessage, { kind: "ordinary" }>
 
 export interface ImGoalAgentRunInput {
+  onSourceSettlement?: (settlement: Promise<void>, invalidate?: () => void) => void
   threadId: string
   target: ImTargetSnapshot
   metadata: Record<string, unknown>
@@ -93,6 +94,7 @@ export class ImGoalRunBridge {
       context: {
         source: "im",
         localRunLease: { owner: "im", runId: input.runId, managedExternally: true },
+        ...(input.onSourceSettlement ? { deferSourceSettlement: true } : {}),
         signal: input.signal,
         trustedExplicitSkill: input.prepared.explicitSkill?.use,
         allowTrustedTransportSkillMarker: true,
@@ -103,7 +105,8 @@ export class ImGoalRunBridge {
         onFinalAssistant: input.onFinalAssistant,
         onDetachedResultAvailable: input.onDetachedResultAvailable,
         ...(input.verifyResolvedThread ? { verifyResolvedThread: input.verifyResolvedThread } : {})
-      }
+      },
+      onSourceSettlement: input.onSourceSettlement
     })
   }
 
@@ -130,6 +133,7 @@ export class ImGoalRunBridge {
   }
 
   private async runAgent(input: {
+    onSourceSettlement?: (settlement: Promise<void>, invalidate?: () => void) => void
     threadId: string
     message: string
     userMessageId: string
@@ -173,6 +177,8 @@ export class ImGoalRunBridge {
       delivery,
       context
     )
+    if (handle.sourceSettlement)
+      input.onSourceSettlement?.(handle.sourceSettlement, handle.invalidateSourceSettlement)
     await handle.completion
 
     // A Goal turn that says nothing has nothing to report back to IM, unlike an

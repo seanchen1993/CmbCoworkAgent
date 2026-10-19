@@ -14,7 +14,7 @@ export function sparksFlowRecoveryStages(scenario: string): SparksTourExample["s
     ...sparksTourExamples[3].stages.slice(0, 2),
     {
       title: "失败",
-      instruction: "打开“运行过程”，先看停在哪一步，以及后续步骤是否执行。",
+      instruction: "打开“任务进展”，先看失败提示；需要完整记录时展开排查详情。",
       screen: "读取未完成 → 后续检视未执行",
       detail: denied
         ? "第 1 轮示例原因：文件读取未获授权。没有得到文件内容，不能继续检视。"
@@ -52,7 +52,7 @@ export function sparksFlowRecoveryStages(scenario: string): SparksTourExample["s
 /** Teaching fixtures only. Never pass these values to installation, execution or project APIs. */
 export const sparksTourExamples: SparksTourExample[] = [
   {
-    name: "先走完一次：给代码检视加帮手",
+    name: "高级示例概览：给代码检视加帮手",
     goal: "跟着购物车示例，看看怎样读取文件、检查代码并查看结果。",
     stages: [
       {
@@ -81,7 +81,8 @@ export const sparksTourExamples: SparksTourExample[] = [
       }
     ],
     prepare: "先看演示即可，不需要安装插件或配置模型。",
-    realSteps: "从“添加功能”挑选功能，再到“助手组合”保存搭配；需要固定顺序时，才添加流程。"
+    realSteps:
+      "日常任务直接在普通聊天描述并发送。本章是高级手工配置示例：管理插件、保存组合，并明确选用任务方案后发送；不会自动执行已保存方案。"
   },
   {
     name: "添加功能：看清文件改了什么",
@@ -110,7 +111,7 @@ export const sparksTourExamples: SparksTourExample[] = [
         instruction: "任务完成后点回放，查看差异，再关闭面板。",
         screen: "− 提交\n+ 保存",
         detail:
-          "到“当前助手 → 运行过程”查看实际改动。回放记录只保留在本次插件运行期间，重载后需重新产生改动。"
+          "到“任务进展 → 结果”查看回放面板。回放记录只保留在本次插件运行期间，重载后需重新产生改动。"
       }
     ],
     prepare: "真实试用需要一个带项目目录的本地聊天；建议使用练习文件。",
@@ -122,7 +123,7 @@ export const sparksTourExamples: SparksTourExample[] = [
     }
   },
   {
-    name: "搭配：先读文件，再检查代码",
+    name: "高级：手动搭配读取与检查功能",
     goal: "让 AutoBiz 提供文件，让 Review 插件给出代码检查意见。",
     stages: [
       {
@@ -142,7 +143,8 @@ export const sparksTourExamples: SparksTourExample[] = [
         title: "应用",
         instruction: "点“应用到当前对话”，看变化预览，再点“确认应用”。",
         screen: "当前聊天：购物车检视助手（演示）",
-        detail: "正在执行任务时，先等任务结束再切换。应用后，下次任务会使用这套搭配。"
+        detail:
+          "正在执行任务时，先等任务结束再切换。应用改变功能选择，不会自动开始任务或执行已保存方案。"
       },
       {
         title: "效果",
@@ -154,10 +156,10 @@ export const sparksTourExamples: SparksTourExample[] = [
     prepare:
       "需要支持文件读取动作的 AutoBiz 插件，以及代码检查插件。以实际动作列表为准；原 AutoBiz 的项目步骤从项目节点入口选择。",
     realSteps:
-      "助手组合 → 新建 → 选择 Autobiz 来源及“跨插件检视输入”组件 → 选择 Review 来源 → 绑定已保存流程（可稍后补）→ 保存组合 → 应用到当前对话 → 确认应用。"
+      "常用搭配 → 新建 → 选择 Autobiz 来源及“跨插件检视输入”组件 → 选择 Review 来源 → 绑定已保存步骤（可稍后补）→ 保存组合 → 应用到当前对话 → 确认应用。"
   },
   {
-    name: "按步骤执行：先读文件，再检视",
+    name: "高级：手动保存并选用任务方案",
     goal: "演示两个插件如何传递资料，以及第一步失败时会发生什么。",
     stages: [
       {
@@ -175,21 +177,21 @@ export const sparksTourExamples: SparksTourExample[] = [
       },
       {
         title: "启动",
-        instruction: "保存流程并绑定到组合、应用后，在聊天选择“按步骤执行”再发送目标。",
+        instruction:
+          "保存方案，回到聊天的“任务进展 → 高级设置”，展开高级预设选项并选用；填写目标后点击“发送消息”。",
         screen: "已模拟启动两步检视",
-        detail:
-          "流程页面提供“运行已保存版本”且满足运行条件时，也可从那里启动。模拟不会调用模型；真实执行可能产生模型用量。"
+        detail: "选择和保存不会启动任务。模拟不会调用模型；真实执行可能产生模型用量。"
       },
       {
         title: "结果",
-        instruction: "到“运行过程”核对每一步，再阅读检视意见。",
+        instruction: "在原任务卡或“任务进展”阅读结果；完整步骤可展开“排查详情：执行记录”。",
         screen: "示例意见：空数组访问第一项前应先判断长度",
         detail: "这个例子只检查一个文件。要完成项目阶段，还需修复问题、运行原项目检查并按要求确认。"
       }
     ],
     prepare: "已安装两个插件、批准当前版本、配置可用模型，并选定真实 Autobiz 需求。",
     realSteps:
-      "按步骤执行 → 新建代码检视流程 → 删除草稿中的模板步骤，只保留新加的两张“插件动作”卡 → 分别选择读取和检视动作 → 第二步接前置结果“完整输出对象”→ 保存流程 → 绑定组合并应用 → 启动后到“运行过程”查看结果；失败时先排查并修复，再明确启动新一轮验证。"
+      "高级任务方案编辑器 → 配置读取与检视动作及结果连接 → 保存 → 任务进展 → 高级设置 → 高级：为下一条消息使用预设任务 → 明确选用 → 聊天中填写目标 → 发送消息 → 查看任务结果。"
   },
   {
     name: "自己制作：第一个问候灵件",
@@ -203,16 +205,17 @@ export const sparksTourExamples: SparksTourExample[] = [
       },
       {
         title: "创建",
-        instruction: "在“自己制作”点击“开启灵件并开始制作”，返回聊天描述需求，再核对试用能力。",
+        instruction: "在聊天输入框切到创造者模式，描述需求并发送；需要项目目录时先按提示选择。",
         screen: "示例结构：命令 hello-spark → 一句问候",
         detail:
           "此处展示做好的样子。想直接试用，可导入源码目录里的 examples/sparks-hello 示例插件。"
       },
       {
         title: "应用",
-        instruction: "核对试用结果和权限，安装到项目，再放入当前助手组合并应用。",
+        instruction: "核对用途、权限和实际版本，点击“确认并应用到这段聊天”，再实际使用。",
         screen: "演示输入：/hello-spark 小林",
-        detail: "制作时会用到模型；问候命令本身不需要模型。保存后还需安装、授权并应用到聊天。"
+        detail:
+          "源码保存在这段聊天，重启后需确认恢复运行。想在其他聊天复用时，再提出保存复用需求并确认保存卡片。"
       },
       {
         title: "效果",
@@ -222,16 +225,16 @@ export const sparksTourExamples: SparksTourExample[] = [
           "要做自己的检视插件，可从 examples/mods-review-agent 复用公开动作；独立发布需更换插件标识与命令名，重新检查授权。"
       }
     ],
-    prepare: "真实制作需先选本地项目；开启创作、安装和试用都在原页面核对。",
+    prepare: "真实制作需本地项目。助手准备修改，页面显示真实版本和权限后由你确认。",
     realSteps:
-      "添加功能 → 自己制作 → 开启灵件并开始制作 → 返回当前聊天继续描述 → 发送制作需求 → 核对能力后确认能力并排队试用 → 满意后保存并复用 → 安装并授权 → 组合中选择并应用 → 发送命令。已有示例也可通过“我已添加”的文件夹安装入口导入。",
+      "聊天 → 创造者模式 → 描述制作需求并发送 → 核对用途、版本与权限 → 确认并应用到这段聊天 → 实际使用并检查结果。需跨聊天复用时，再说明“保存并在其他聊天复用”，核对后确认保存；手动安装保留在高级入口。",
     copy: {
       label: "复制制作需求",
       text: "请制作一个名为“我的问候”的灵件，注册即时命令 hello-spark。命令接收一个名字，返回“你好，名字！第一个灵件已运行。”；未输入名字时使用“新朋友”。命令本身不要调用模型或读写项目文件。请先检查，在试用区验证，再让我决定是否安装。"
     }
   },
   {
-    name: "效果测试：改过的流程真的更好吗",
+    name: "高级：比较两份任务方案的效果",
     goal: "用同一份任务比较原流程和新流程，先看证据，再决定是否采用。",
     stages: [
       {
@@ -265,24 +268,24 @@ export const sparksTourExamples: SparksTourExample[] = [
   },
   {
     name: "回到聊天：知道去哪里找结果",
-    goal: "用一句目标启动搭配，再分清面板、执行记录和项目阶段。",
+    goal: "直接发送任务，再找到当前进展、结果和下一步提示。",
     stages: [
       {
-        title: "看设置",
-        instruction: "点输入框旁的助手名称，确认当前聊天应用了哪个组合。",
-        screen: "当前助手 → 设置",
-        detail: "想改搭配，点“管理助手组合”；改完保存并重新应用。"
+        title: "说需求",
+        instruction: "在普通聊天中写下要完成的事，无需先配置步骤或组合。",
+        screen: "普通模式 · 描述要完成的任务",
+        detail: "想调整助手功能时，再切到创造者模式说明；手动设置保留在高级入口。"
       },
       {
         title: "发任务",
-        instruction: "直接问问题用普通聊天；想严格走两步检视，选择“按步骤执行”。",
+        instruction: "在聊天输入框填写目标，点击“发送消息”。",
         screen: "演示目标：检查购物车文件的空列表处理",
-        detail: "选好流程、需求与文件，再发送。保存组合和查看导览都不会自动开始。"
+        detail: "普通发送不会自动运行已保存的固定任务方案。高级方案需明确选用；查看导览不会执行。"
       },
       {
         title: "找结果",
-        instruction: "进度、结果、失败原因和下一步都到“运行过程”查看，插件面板也在这里。",
-        screen: "运行过程：读取 → 检视 → 查看结果\n查看插件面板：回放、看板等",
+        instruction: "先看聊天回复和原任务卡，再到“任务进展”查看当前任务、待确认事项与结果。",
+        screen: "任务进展：当前任务 / 结果\n排查详情：需要时再展开",
         detail: "并非所有插件都会开面板。没有面板时，应去命令回复或运行记录查看结果。"
       },
       {
@@ -292,8 +295,7 @@ export const sparksTourExamples: SparksTourExample[] = [
         detail: "代码检查意见不能代替项目验收。回到原项目，完成原有检查和人工确认。"
       }
     ],
-    prepare: "先应用需要的组合；查看设置本身不启动任务。",
-    realSteps:
-      "关闭自定义助手 → 回聊天确认助手名称 → 选择聊天或按步骤执行 → 发送目标 → 查看真实结果。"
+    prepare: "普通聊天可以直接描述并发送；查看任务进展不会开始新任务。",
+    realSteps: "回到普通聊天 → 描述需求 → 发送消息 → 聊天回复或任务进展 → 核对结果和下一步。"
   }
 ]

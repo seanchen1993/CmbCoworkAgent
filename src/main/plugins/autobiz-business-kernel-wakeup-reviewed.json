@@ -1,0 +1,640 @@
+{
+  "id": "autobiz.python-kernel",
+  "version": "1.0.2",
+  "files": [
+    {
+      "path": ".mcp.json",
+      "digest": "351c70befbb289f7cba92c49c50df09c90bbf9c0d7a12de744047153623ed937"
+    },
+    {
+      "path": "board_core/__init__.py",
+      "digest": "c054882f961674b330ffc75ed42f0baaac696c114e230211fe6be75757c39956"
+    },
+    {
+      "path": "board_core/artifact_paths.py",
+      "digest": "23e9c9e13755eb0342046ad3e8fbd5d8991da3302f2e436a698b0a352a63b759"
+    },
+    {
+      "path": "board_core/artifacts.py",
+      "digest": "30b42497dee6da33570621935c276c80852ba8c07a64284a804f7a7714717646"
+    },
+    {
+      "path": "board_core/contracts.py",
+      "digest": "8c91b3a2f6d107b246a86c733c14212e6cf0297644b64c92ee3ec4efd963dc23"
+    },
+    {
+      "path": "board_core/state.py",
+      "digest": "1310c311574348d5c684d18e531dae0ad6c8ccd016a52b5ca44327204582dece"
+    },
+    {
+      "path": "board_core/state_store.py",
+      "digest": "bfc48197b1218083742834e0cd46a95b6e8b42e5eca4a762c37a87e431f78a46"
+    },
+    {
+      "path": "board_core/workflow.py",
+      "digest": "96621eb29e0a1790a6c86c222e380cbadf8f584ea2c3d9f10280f0f5e2590d13"
+    },
+    {
+      "path": "board_core/workflow_closure.py",
+      "digest": "a6b13f7ff03813aa880e6b57f4c4a727aa1b288c1a784c137acf828e88be0142"
+    },
+    {
+      "path": "board_core/workflow_compiler.py",
+      "digest": "868be6d1945433b7f74dde700363fe846c7f1a9c3bf05530e4fbd9fe23feef24"
+    },
+    {
+      "path": "hooks/agents_repo.py",
+      "digest": "655b18d6395c2fd7c3cee8d0696e9f80f2d86e5111a4bfc563b4ea8843c1cce0"
+    },
+    {
+      "path": "hooks/artifact_ref_validator.py",
+      "digest": "54d74198d15282f64cf61b63af0d8d02c2c1848854ec2c1a4ec2cadd0d877d9f"
+    },
+    {
+      "path": "hooks/artifact_sync.py",
+      "digest": "def46bc2aedea59a147bff7d6d05741853c887bfdce8348aa625c7a9d98cd1ed"
+    },
+    {
+      "path": "hooks/artifact_sync_execute_hook.py",
+      "digest": "fb723692046ac1a835745fedabbde1fca754205fff9677ff3a1627e5025f8ec6"
+    },
+    {
+      "path": "hooks/augment_explore_task_prompt.py",
+      "digest": "263b0ad99c1a98fa2c616efaa02af41ec56b0a0c5104853c4570f145b855a1d0"
+    },
+    {
+      "path": "hooks/augment_test_engineer_task_prompt.py",
+      "digest": "483be49a2ad837e1fb24797ffbbf8e53b47bdcbd017ffa6029d1cbfa926c2d3a"
+    },
+    {
+      "path": "hooks/batch_lease_manager.py",
+      "digest": "dbec3b839c8bcdc9fd5a479876ea5c436efff4851b38de65d629d43af31a8841"
+    },
+    {
+      "path": "hooks/batch_merger.py",
+      "digest": "2af49edd8e8ffcd88940ec88dddd4fcaf9a1aca570b834a9c0c5198b7807aa48"
+    },
+    {
+      "path": "hooks/blocker_registry.py",
+      "digest": "9f4a8754625fe352ba2f45685fde5b662bb4cb4f12dd779ed541cf6a05bf8681"
+    },
+    {
+      "path": "hooks/business_mod_checks.py",
+      "digest": "8798a0586272520127dda15bbc865f27155b4638a851e42aa44442aee9dc7175"
+    },
+    {
+      "path": "hooks/candidate_digest.py",
+      "digest": "7f7fd6b4b5fdf496a1eb9d8d88c8cea48d53f75023b1295bb971ae221691e767"
+    },
+    {
+      "path": "hooks/candidate_manager.py",
+      "digest": "f96aaf306442e849c310602d37f6800080e706c80f5488af4bde774947e81a81"
+    },
+    {
+      "path": "hooks/check-secrets-new.py",
+      "digest": "4ec88c66fef3b033971293c5385e98de46cc40dbfcfe5e3e3a14b6a12810637e"
+    },
+    {
+      "path": "hooks/check_plugin_read.py",
+      "digest": "0e59000e3113a61ac6d3e6bf99eb6f31223f544ea9b08877eafcccf71bae70ee"
+    },
+    {
+      "path": "hooks/check_skill_artifact_drift.py",
+      "digest": "823701dffa4bac93f967cb61e0cdb0f0ba8527da52e79f97fefbc1a147795ddc"
+    },
+    {
+      "path": "hooks/check_state_read.py",
+      "digest": "9a9064db033c8141c57a399d4c76550d5f203276e1868994984cd91febbbffd3"
+    },
+    {
+      "path": "hooks/code_execution_guard.py",
+      "digest": "3c80d0ee39184f004c72b6405c77c6b49031d2001369d3e1ff1d0d6eb3949658"
+    },
+    {
+      "path": "hooks/code_task_context.py",
+      "digest": "e32bccb7dda4025c985f395338076b5ee52c5a06361e3220e8960f313a831e55"
+    },
+    {
+      "path": "hooks/collect-knowledge.js",
+      "digest": "1bbb57a820fd895f713fd0f1c501b94de0c338468653efd44ff6f34b07ce3ba8"
+    },
+    {
+      "path": "hooks/commit_message.py",
+      "digest": "f9f9108010d0aa0985ba3c894b587bdaab663da44a2f092ab056623af7f870f5"
+    },
+    {
+      "path": "hooks/conflict_resolution_agent.py",
+      "digest": "40a90fc3096ca758140e9f990cab0377438f25b8769a2b7fc4aa2a3649437672"
+    },
+    {
+      "path": "hooks/conflict_types.py",
+      "digest": "2203fae7b7943199fc0babbfe675444bfe621c5dedff9c7b505877b3fe0e8454"
+    },
+    {
+      "path": "hooks/critic_review_log_writer.py",
+      "digest": "4f2663967f5322b32f81705b3132316b1ee4cb9d705b7675774a91225431b65f"
+    },
+    {
+      "path": "hooks/design_contract_lock.py",
+      "digest": "c38acba9faeaefedcb4832e84d1138dfaaaf144adff2d2eefd63bf513ed1db6e"
+    },
+    {
+      "path": "hooks/e2e_quality_check.py",
+      "digest": "41fda8936583bd9db95446f51a451bc2250b5002208d7a4f06390856205902a4"
+    },
+    {
+      "path": "hooks/e2e_result_writer.py",
+      "digest": "c52b57afb689a60b8e5a4f36fd5859b3604c6e413adea4d34b921b99d3a21f8c"
+    },
+    {
+      "path": "hooks/e2e_trust_common.py",
+      "digest": "31d66a1cd2a850d81d4054cdb4a7b816a5e5ffb5a64191b88d1e6d2f392d8d01"
+    },
+    {
+      "path": "hooks/evidence_audit.py",
+      "digest": "de9478d52424aeb3c58ef971cbd709c512a80b1931106fc79052d0390b143225"
+    },
+    {
+      "path": "hooks/evidence_integrity_gate.py",
+      "digest": "7e76dd34ca2f8f4dad0e5ddd95ba5f9c2c8bbdc7123ec5127ad3d2bc2661bfc5"
+    },
+    {
+      "path": "hooks/evidence_kernel.py",
+      "digest": "d77db279a1626d290e7f8c33271c65ef9d573352579ad4e2949c4bcf53f7de7f"
+    },
+    {
+      "path": "hooks/evidence_store.py",
+      "digest": "867f2125fae93f83be5ec233f44b44e98b807fa99e6166da43e1261ead072bb3"
+    },
+    {
+      "path": "hooks/frontend_route_write_guard.py",
+      "digest": "70f80260727e30aaa6b9221409d21e75b888518281767b4bc0aecdb7b1caec7e"
+    },
+    {
+      "path": "hooks/hooks.json",
+      "digest": "347ed08d35df6b673e663573626694c5ac523ecf2ba8baa6ef513ab5a376d0cd"
+    },
+    {
+      "path": "hooks/human_gate_design_done.py",
+      "digest": "87591a2c8685e2836b9a90d809b0d2d55fb75f3cd0915c3f3f1ab6627a0f1e2f"
+    },
+    {
+      "path": "hooks/implementation_scope.py",
+      "digest": "e21c5dfb00fd963969624988b7d5c261d84291043008e3b4b12dce69b8b6eba6"
+    },
+    {
+      "path": "hooks/init_validate.py",
+      "digest": "da6ff1b0db1c686f618556328167a926fd4af827a55a4b4f2161cd7024eb7d71"
+    },
+    {
+      "path": "hooks/init_workspace.py",
+      "digest": "5042d76b4c402a7b4d9eb33cccb0e367eb52e562697c1fc282f659c594c74c30"
+    },
+    {
+      "path": "hooks/inspect_skill_contract.py",
+      "digest": "c03a5b1152e5c2ca7aa4e286dd01509cbb958524696a37f4681a0b1075a6721e"
+    },
+    {
+      "path": "hooks/inspect_test_environment.py",
+      "digest": "d54361dc9cba91def030861806e44ae88d47ea38c6b5c513dfd6e150c42a04d9"
+    },
+    {
+      "path": "hooks/inspect_workflow_templates.py",
+      "digest": "b9e47bfaffa986b1cf89f536021ad254d88534812c8565b7f7a1dc5c9d54c8a9"
+    },
+    {
+      "path": "hooks/json_writer_common.py",
+      "digest": "0a09b267dba66ebd7f6de8bf294d98500c3e689e1aa167ba3518428f2a89f5ef"
+    },
+    {
+      "path": "hooks/mods_delivery_report.py",
+      "digest": "1b7107ae12d390983ea9f4e253fd017aaf8598f57b9b7935396b93732e569cad"
+    },
+    {
+      "path": "hooks/package.json",
+      "digest": "3c7e03ede49b223c070c4b0a184ec63bd0adbd8b072aae68318e5eedd91347f1"
+    },
+    {
+      "path": "hooks/parallel_batch_dag.py",
+      "digest": "d56601a36b29b5c593a942260fe297e3ddb66f12757768f3bcafa7b46701270a"
+    },
+    {
+      "path": "hooks/parallel_batch_lifecycle.py",
+      "digest": "be94c55168f5ae5bfd1ebe8ad56f378a2bec4ca38f4fa063a869cdc266da0c43"
+    },
+    {
+      "path": "hooks/parallel_batch_scheduler.py",
+      "digest": "e5ae8b4ca95acf67bfb999e22e44c6cacf25036ce95cd67a35b6fa38e19dc1b9"
+    },
+    {
+      "path": "hooks/parallel_batch_stage.py",
+      "digest": "43dfab25e968c4ff14906e751292a04fb54a36863169ee99c1847a69b40692e1"
+    },
+    {
+      "path": "hooks/parallel_evidence_aggregate.py",
+      "digest": "f3e3cba9675fd04f4991f3b841cd03e2296fe5ce0e9c6dedaf8e938b24ed242d"
+    },
+    {
+      "path": "hooks/parallel_failure_classifier.py",
+      "digest": "3f0b42f5a8253d28785b71b9f755b26cc7a8ec2137f0867e1dbbcf731057a126"
+    },
+    {
+      "path": "hooks/parallel_final_verify.py",
+      "digest": "7153c023c49b7d2b48ab9201e8ab26b9743d4d44bfa81a19aabda0a6b155389e"
+    },
+    {
+      "path": "hooks/parallel_merge_train.py",
+      "digest": "b0d76e4848af93d33e5060d1f9fd4eead70716c8b7f5382a053b3ebcf5ad5046"
+    },
+    {
+      "path": "hooks/parallel_repair.py",
+      "digest": "8662f7841acd30a18263cb81505748af894b711616b09f149668e9db663c6c7f"
+    },
+    {
+      "path": "hooks/parallel_runtime.py",
+      "digest": "708d193bfdced1d956db135c588daf89df436fe195dee871f41a127138863e28"
+    },
+    {
+      "path": "hooks/parallel_validation_ownership.py",
+      "digest": "64c6a35df35f32f89655131b98dd367cda97bded4a00ee63374cb540a284e7b8"
+    },
+    {
+      "path": "hooks/paths.py",
+      "digest": "686fd21e4ec1d460d21de11dd9a33435250b6749ba55b6303585d533024cf503"
+    },
+    {
+      "path": "hooks/performance_checker.py",
+      "digest": "5eed0a7f24f9ffde958d67f9f8d12ce820aa37753f8b38412dac5d529da192f8"
+    },
+    {
+      "path": "hooks/plan_granularity.py",
+      "digest": "d9e9dd74265345430652b5f51ddecbaaf9c5694dc53b3b799edfcf17dc057ee5"
+    },
+    {
+      "path": "hooks/plan_json.py",
+      "digest": "b0f6153c1d699a68a4ddcc34845b6df9fc1c1438f375c90625e8c68c0b80dd1a"
+    },
+    {
+      "path": "hooks/plan_scope.py",
+      "digest": "a59534479774f70464948db64e4da26e56e5bdb7669e6f8ff833866f29bebcac"
+    },
+    {
+      "path": "hooks/plan_write_ownership.py",
+      "digest": "dce38cc745f3a2cac22475f8b26d8c58795edea016309b43f272878e4d497e4d"
+    },
+    {
+      "path": "hooks/plan_writer.py",
+      "digest": "be568b7e790a21539c7906f4657bf563337a9c8937ae7b09cfbf0198404971e6"
+    },
+    {
+      "path": "hooks/query_json_fields.py",
+      "digest": "97a70ae5cbb324d6945c9b96f10c530dcd0d8bb414596ddeea21218996ea93c1"
+    },
+    {
+      "path": "hooks/render_collected_session_context.py",
+      "digest": "44c3aaee5c90e76289de25110198557a77da09ffbd9e4204e9be526caced6e05"
+    },
+    {
+      "path": "hooks/render_frontend_test_reference.py",
+      "digest": "5e5b3e916dc0c9c3d1665e36134523ae549c2e6903f963fd8564b12d093dc1bd"
+    },
+    {
+      "path": "hooks/render_session_context.py",
+      "digest": "f8deafdc727c503f96fd4f0cb95c212849a6d04f62f63f149f527c29f86ba16c"
+    },
+    {
+      "path": "hooks/render_spring_test_reference.py",
+      "digest": "c9e8fb9192e8286f4639503aee155c1f9b03cfe5bd5570219ca0d37a5a0c710f"
+    },
+    {
+      "path": "hooks/repository_snapshot.py",
+      "digest": "01c24910c5bcdd5e46e6f5f728884e2d78e0569abb006eed969cb4b0c0302505"
+    },
+    {
+      "path": "hooks/resolve_frontend_html_route.py",
+      "digest": "feea518ed850e251e8b948502463d2cc3cffcd260eb726394aba1403467cab2b"
+    },
+    {
+      "path": "hooks/resolve_next_skill.py",
+      "digest": "1fca83a83e0dff183e0046ca508fd9ee894e60b87c4be67cb291e674c666d557"
+    },
+    {
+      "path": "hooks/result_writer_common.py",
+      "digest": "67b8bf621cabfb249399b62b2afb8d3ca6ccb1d339d8dd4fca7c8875a9d5b7a5"
+    },
+    {
+      "path": "hooks/rollback_stage.py",
+      "digest": "f596bc8b8c7b6bc726ce0c0bd6137d9e7ecae33970130246472e1f2a4469da2e"
+    },
+    {
+      "path": "hooks/route_checkpoint.py",
+      "digest": "5c6ecc81e7abbff8b7b970220742b9028d6524d6af0d5e0281d90aa6d9984d94"
+    },
+    {
+      "path": "hooks/run_advisory_smoke.py",
+      "digest": "f9a073932e1cebe979ee5cc27c6679115069f2bb9061b7717751a9304f0d51bc"
+    },
+    {
+      "path": "hooks/run_e2e_command.py",
+      "digest": "c9cb2dcabd9407ea19170ee76bbb6171a891b2915f3c52af87258dae53ab117b"
+    },
+    {
+      "path": "hooks/run_utest_command.py",
+      "digest": "a312cc9bec3730f97e0176012c876cbc0c90cd1d82d86c4c41936808891c95b2"
+    },
+    {
+      "path": "hooks/runtime_artifact_guard.py",
+      "digest": "7cdc8a7b587279c7cd78725d98d9acf0157c68835eae75b2e822b5a32b271e25"
+    },
+    {
+      "path": "hooks/skip_node.py",
+      "digest": "03d8a03e3b8c42a9149e72bedd7b75241978ac6aaa95b9698b49fedd2f9d9888"
+    },
+    {
+      "path": "hooks/smoke_plan_writer.py",
+      "digest": "fc4a8cf11cc518e190e4150aa6def5bcd4587e66a31555aad54a484900f9ba12"
+    },
+    {
+      "path": "hooks/source_context.py",
+      "digest": "23418a8fa74d056b02619056544f088420286356605c83c46b1151775fdeb0a2"
+    },
+    {
+      "path": "hooks/source_references.py",
+      "digest": "7c6d5733fe6789bc0b7dd7d2eff0438e346a6e039ce8587d18d3f5ec19b9fd73"
+    },
+    {
+      "path": "hooks/spec_contract.py",
+      "digest": "d4149fcca07b319f2b3a1644130dea05b2e9a2fbef8fb6bf3dcbe7526463d6fd"
+    },
+    {
+      "path": "hooks/specs_hook_context.py",
+      "digest": "031f196d11b9b6e5e01db21d77f2352f0514e8421d681e18219a24c7f73a3e23"
+    },
+    {
+      "path": "hooks/stage_gate.py",
+      "digest": "677717a70c253b16542ee18d53b9e6d99258f0e317ed7244eb23cf265046a05f"
+    },
+    {
+      "path": "hooks/state_checkpoint.py",
+      "digest": "f6d6622fb8ecee9ea983b1deaf5cdb01330580b80ed87915a3cb0ab0c8dbd45c"
+    },
+    {
+      "path": "hooks/sync_agents.py",
+      "digest": "a69d4d5ecbb456f9be5bdc9653381a25bbd53cf48fcb183dc477ed5f86d5ea28"
+    },
+    {
+      "path": "hooks/sync_artifacts.py",
+      "digest": "150891ad490ac21ac10f6a6012a16a235df222a20c04ac97c346c9894044222a"
+    },
+    {
+      "path": "hooks/task_run_integrity.py",
+      "digest": "d6868fe57a3e66c7cb30dccbfaebf1892629e5555cc40fc2950c428c9df9e27e"
+    },
+    {
+      "path": "hooks/task_runner.py",
+      "digest": "70a412257d50e5bf291f7e3a90e96b9ff37e417d1cb979e27f2b12378aab00a0"
+    },
+    {
+      "path": "hooks/ui_context.py",
+      "digest": "8d6c379f3ef37b86f763711dd108d6c7d79a02af5b027829ba6f461d9a2c2632"
+    },
+    {
+      "path": "hooks/ui_context_writer.py",
+      "digest": "90c3070ca2329d95b329acb792c9ff2baebd5eec2cfd42c4836df99056bb09bd"
+    },
+    {
+      "path": "hooks/unit_test_result_writer.py",
+      "digest": "7e599c6b62ce6d817bc713700cbfb1b8d2d4ff73016d97dbf3db828ab4f08959"
+    },
+    {
+      "path": "hooks/update_checkpoint.py",
+      "digest": "702d953f0852c56f2f64b358483ed7a509cc79c8b6ee6b457bb96814554dbd36"
+    },
+    {
+      "path": "hooks/utest_assignment_router.py",
+      "digest": "1511028de3b76485050a5776f6a7b3b9a786cec3bcb918be5c1571a75c29cf19"
+    },
+    {
+      "path": "hooks/utest_blocked_writer.py",
+      "digest": "24d6025acd1eac77f74bce11a991cafdbafcb5fc17bc2e6fdfc316eb30e6d796"
+    },
+    {
+      "path": "hooks/utest_plan_contract.py",
+      "digest": "fd11c93b4e209304439c0082da276838506b58d0dcb966de1a5a50883b71c7db"
+    },
+    {
+      "path": "hooks/utest_workspace_binding.py",
+      "digest": "005a3b829860eaab796cb3a6f56e61f5a44cc3393fe22dfde666ed3de3fde837"
+    },
+    {
+      "path": "hooks/validate_utest_source_bug.py",
+      "digest": "09805d34eec3ba8ec3b2105debc83b1a9f9aae9bef6aa57a197d436ce51062b6"
+    },
+    {
+      "path": "hooks/validation_policy.py",
+      "digest": "07f48fd60f76a5f36925747b02ca33640933179840d56e2edf38548703fde10e"
+    },
+    {
+      "path": "hooks/verified_digest_guard.py",
+      "digest": "6cde399febbf7ffd82ec2ea943153cc50400917639e132b97f9e7e5878f5bb09"
+    },
+    {
+      "path": "hooks/verify_decision_writer.py",
+      "digest": "fcafa2c486503c31907e5821f548ad690f9385d0c33b900f484b7fb13969c137"
+    },
+    {
+      "path": "hooks/workflow_launcher.py",
+      "digest": "fe380b9bb8347691c8a1179baf02211d409130968a3361cb2636e76ea92ee3c0"
+    },
+    {
+      "path": "hooks/worktree_manager.py",
+      "digest": "f2ff5184b54dd9c7bb82c461bc92cc9caa8fb367bee34e65a1911628fd52681d"
+    },
+    {
+      "path": "inspect_state.py",
+      "digest": "7325629820479c8bdeb6c0169b6fad959c4b15e217d0507371c5ec7f15bb0d98"
+    },
+    {
+      "path": "read_state_json.py",
+      "digest": "449a4c81a94dfc84589d1b61e3634d0600ebed33c97d588ead5a137b4c389a69"
+    },
+    {
+      "path": "skills/autobiz/hooks/biz_validate.py",
+      "digest": "9d6c0bb29f7051b614954043c7d63632d476cfb3c133de5e3d8569babb08e2e3"
+    },
+    {
+      "path": "skills/autobiz/hooks/prd_rules.py",
+      "digest": "595093f8820319bf6b31a73d79e8fe5270bb9a7ab75b364e491d7bd3bf493f72"
+    },
+    {
+      "path": "skills/autobiz/references/ui-context.md",
+      "digest": "21b896614a546fdaa480c7bafa0e6ddc12ebba83910e32b008b8a85bce41f270"
+    },
+    {
+      "path": "skills/autodev/hooks/artifact_check.py",
+      "digest": "58d2fa79f02894959eea1474e32dceeed71d7765406e78d1162fe75f6aa1d2a0"
+    },
+    {
+      "path": "skills/autodev/hooks/common.py",
+      "digest": "3cdfd8d13a5963eb6a9604bb43596e014568093eb0c6972c68a5f085a5698f8e"
+    },
+    {
+      "path": "skills/autodev/hooks/password-encrypt/SKILL.md",
+      "digest": "2304cef3d30ff1fdbcf3c2af62201745cbd9c63877b42431c577a5bba1c91b01"
+    },
+    {
+      "path": "skills/autodev/hooks/password-encrypt/scripts/password-encrypt.py",
+      "digest": "6d366c77559b3fe31e88cb7e9b1e9816fcc773c5d5ab3fb9583e184e92c01911"
+    },
+    {
+      "path": "skills/autodev/hooks/password-encrypt/scripts/password-encrypt.sh",
+      "digest": "6a05be8c6b00e490b471242db1a777dab40d2893afcbe44e61393e778d8ae32d"
+    },
+    {
+      "path": "skills/autodev/hooks/repair_registry.py",
+      "digest": "ceca25afc88cbea321904eb3704b3e0dbd98a69d59a76fbf5787ece8d704a826"
+    },
+    {
+      "path": "skills/references/ask-user-question.md",
+      "digest": "51807b4ff1902c66097397db74b456c1a0c394f2e96b7121fc48a855a5e8b20b"
+    },
+    {
+      "path": "skills/references/domain-context.md",
+      "digest": "46ed8f7210ebeb3500ee2ee7d7c58653b2bfdaa4364d6faf70b794febd702db1"
+    },
+    {
+      "path": "skills/references/review-protocol-design.md",
+      "digest": "349f65accb582b8deae6019b423a153bb5ed81ad3497ba21a1a070a39734acfa"
+    },
+    {
+      "path": "skills/references/review-protocol-plan.md",
+      "digest": "885130f5d74d2a67a05ead2a4cd3eb61fc7e662b718a41bc4739c6b965a474f5"
+    },
+    {
+      "path": "skills/references/review-protocol-specs.md",
+      "digest": "c3b210e6cbf3fe9e9686594ee6e8d375eecba0f157dd734af076512bc13202a4"
+    },
+    {
+      "path": "skills/references/test-quality.md",
+      "digest": "98e8bfe20323d170be1251ceb65a2254a53df76366e28d0df180ce7c6c5da938"
+    },
+    {
+      "path": "skills/references/ui-continuation-guide.md",
+      "digest": "62f4f3009239174b50f4beca152c0aad36dab9601a1dcf658b69999792e3b111"
+    }
+  ],
+  "modules": {
+    "biz.prd": {
+      "definitionDigest": "3089062ad778b512862846ce8b7fcb1bc205609bb91a5a1954b1fe89726043bc",
+      "files": {
+        "skills/autobiz/autobiz-requirement-discuss/references/prd-formatter.md": "54d17c88023e22c231df0247d8eab6c6753421ccf5d8c1f4a05d4fd844be29e7",
+        "skills/autobiz/autobiz-requirement-discuss/references/source-context.md": "07934bbe5a4d41585aea5fd350abb0fbc0f78ef59caa958ea80744bf4bc5181a",
+        "skills/autobiz/autobiz-requirement-discuss/references/analysis-guide.md": "265d522b4185981c47ada02834db0b0937919a9c81b5c13fb21a2ca53d8b4e3e",
+        "skills/autobiz/autobiz-requirement-discuss/SKILL.md": "99f1d6f38e36ae5cd5663ce7f8614de60e72e805240f34073d41c4500f42b2e0",
+        "skills/autobiz/autobiz-requirement-discuss/references/prd_module.md": "89bc7570101be93502c866aa10cb8553b2ca233954e4d203e68dc23838ae5f17",
+        "skills/autobiz/autobiz-requirement-discuss/references/default-rules.md": "15d1a17405dab37c2e8bf3f502c9f78867d4d45c538aa985ebf2d0275461ae1e"
+      }
+    },
+    "dev.specs": {
+      "definitionDigest": "000d6d911f4e050a037bac3cadce89dda358f2bdf224a4d1679a8130e58e78e7",
+      "files": {
+        "skills/autodev/autodev-specs/templates/proposal.md": "b2a87b6c20a0adf3377163183abb348d449dfed713ecd746062d709705f5534b",
+        "skills/autodev/autodev-specs/templates/spec.md": "7a82e6ecce90ffd172b6ef55d900200c62711726d1807aa1be1bfa16102cc1be",
+        "skills/autodev/autodev-specs/SKILL.md": "1918004b9d5d72d504ba565665eda5dd056d593d476b166e6cf894ab303ac430"
+      }
+    },
+    "dev.design": {
+      "definitionDigest": "d899d91608dede1f9d290cb31b497a58fb664eee0bdefffaaa8ee6d58f65f158",
+      "files": {
+        "skills/autodev/autodev-design/templates/design.md": "0fd8545e033999e1c4c24f849f9fc67ae850c0b9a26b468e5e9ec1242f3ff823",
+        "skills/autodev/autodev-design/SKILL.md": "a289c2c7b242db1dfa8d5594e7f1a4f3234048507a7a25a576bbb564cadacfca"
+      }
+    },
+    "dev.plan": {
+      "definitionDigest": "5de464d1241a7f5786178bb7d9afa30b7932cca967eeb3585daaf74cec18195c",
+      "files": {
+        "skills/autodev/autodev-plan/SKILL.md": "8baf4b8b2cb01550f9f53a3aae1d0c217889b3bc8617536b851e06630ad9dd82",
+        "skills/autodev/autodev-plan/templates/task-groups.json": "20698ed80bfe309414461770ed02ffaed332b9cd782dfc3b9c0e2711fda0b0d3",
+        "skills/autodev/autodev-plan/references/task-planning.md": "4c2ed088a56eed2eeb3ef0a1cd85cd140c8ff34398e217c3fe9ef88d2784dcbc",
+        "skills/autodev/autodev-plan/templates/plan.md": "dd37a1ec3359488f29a99bb6d3b27957c69c476a1614da9f710d4dd21ee06433"
+      }
+    },
+    "dev.detail_design": {
+      "definitionDigest": "c401880ef4c289176a61a49873e89b5eb7d8b62811906e302720d96cd9d4ad03",
+      "files": {
+        "skills/autodev/autodev-detail-design/SKILL.md": "fca1bbd2082d704e0c6cd8a5290b55dc34b7aa8e11cb2a9746aaeabf42f92507",
+        "skills/autodev/autodev-detail-design/reference/template.md": "79de7d74d679caf1a513823667040f9ce0c2c63d594fca83184fb3ea67f60375"
+      }
+    },
+    "dev.code": {
+      "definitionDigest": "5be3eaaa22d89e715ea622e71688aa8351f64542a28e55d8971c4d3bb1c27c41",
+      "files": {
+        "skills/autodev/autodev-code/references/frontend-html/with-absolute-html/scripts/analyze_absolute_html.py": "67bfe9e04d6d935686c8a8fedc35430d8bc35a75d0c4c127178d0f6a91fc9323",
+        "skills/autodev/autodev-e2e/templates/smoke_test_plan.json": "90a64758c354b4ad7aaa62bdb376d9f705db92819c46d9bd5afdd08a3304382d",
+        "skills/autodev/autodev-frontend/route/with-absolute-html/SKILL.md": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "skills/autodev/autodev-code/references/frontend-html/with-standard-html/references/ant-design-conversion.md": "dfcf434fc1e4c1a0aeb0115102263c56beab520791f8e53c1efab058b1174c83",
+        "skills/autodev/autodev-code/references/frontend-html/with-standard-html/SKILL.md": "a6e864b5187c568dd336ca29daf1dc4f7b4695e27a04f2df84da8e57ac42acdc",
+        "skills/autodev/autodev-e2e/reference/e2e-quality-gate.md": "85cb693f694577e9ba207a6375dd523f89ea0021701b131e27e2b8e37ecf414a",
+        "skills/autodev/autodev-e2e/reference/testcase-generation.md": "b61de717ce511b1ca4c4a27a3ed2adec9e62795b6fb58345b7462c8e2688fff0",
+        "workflows/code-batched-execution.workflow.js": "7a49595b62bc1b8498ab3413be9304eed4de8ada37a8e43f906e43be51874667",
+        "agents/analyst.md": "fbf2dfb4bc0744c47fa3e119c9e73f3b862dd0d3cd511a19dd2e6e43e361c104",
+        "skills/autodev/autodev-code/references/frontend-html/scripts/html_static_checker.py": "d7cced9093e8c987615a376dc35d1311a9fbce591258f8385f2f39f9164b273c",
+        "skills/autodev/autodev-e2e/SKILL.md": "02439be5bdf69738048308eac3024257cad3c6ceb6e93435cf6ba27440169443",
+        "agents/explore_spec.md": "90e1609a40b403f07cba18d3254aa3c0bb0b4360e55ee70129763476fca757dc",
+        "skills/autodev/autodev-code/references/frontend-html/references/assets-processing-guide.md": "c770d3b479a2219503db9e1611f11a4502402fe7fba6e7b423cd60c4ab7562d7",
+        "skills/autodev/autodev-code/references/frontend-html/with-absolute-html/SKILL.md": "7d5bd4123f1fe33121fda0179856b28883af5d880a9d34b7cd883677202e2d43",
+        "skills/autodev/autodev-code/references/frontend-html/references/html-post-review.md": "74e40ed4a57344034bcc6aa3ece36abeca56c1112662009e8f9fc9c950963192",
+        "skills/autodev/autodev-code/references/frontend-html/with-absolute-html/scripts/render_react_antd_preview.py": "69f32398780727ecf3002472175be5217a35f46713311b6f0d3e24c6270586d4",
+        "skills/autodev/autodev-utest/reference/test-environment-profiles.md": "64c6b0cfd20a7033adecee68a406a0f0b6ad1db8060a6140bbc283fd80464e69",
+        "skills/autodev/autodev-e2e/reference/test-playwright-script.md": "9b1605d4c0f84e6deb57061aeb43bec3c3c2f3f6f40e2f3a9c3f299a3e382569",
+        "skills/autodev/autodev-code/references/frontend-html/with-absolute-html/scripts/prepare_html_analysis.py": "c0f657929fde6ea4933c39aa1510772abf4138e11410528b94ee6cd7d966093a",
+        "skills/autodev/autodev-utest/reference/frontend-test-patterns.md": "1caee6af6f045d88ddb4b72ce7b57c1d576ef492c99cb121f9cb42fe98cd20b3",
+        "agents/test-engineer.md": "bb741d48144eb893b0571a7533d702bd32f7e8f490932d9bd08bbdeedf6a9ead",
+        "skills/autodev/autodev-code/references/frontend-html/with-absolute-html/references/interaction-contracts.md": "005290316f35a1dc024c53c70976e99db24a652d57653822a9254552452d6e9e",
+        "skills/autodev/autodev-utest/reference/spring-test-patterns.md": "1507de3ba87ef3a1ff7c13957feef1cdd0f62e29cbb0e3dc7231eb62e27498e0",
+        "skills/autodev/autodev-code/references/frontend-html/with-absolute-html/references/component-slot-map.md": "e614d47800c7a15c27d7d7225af721520333da773e0d1bf7ab688af5d0f71d52",
+        "skills/autodev/autodev-code/references/frontend-html/with-absolute-html/references/html-parser.md": "6c331ed48cbdc5e49a8bbc1c008ec7d93f91679c8f8d5c77386904a657e3ed08",
+        "skills/autodev/autodev-code/references/frontend-html/with-standard-html/scripts/audit_antd_coverage.py": "b2542e186bd95c8216147f00b21c257a862d834bf5abea88de9a1503c4f6e853",
+        "skills/autodev/autodev-code/references/frontend-html/scripts/review_runner.py": "acf796cfea92b7d7436cd0b56e9a0abb557d2bf254eff7e728ab6753f524f995",
+        "skills/autodev/autodev-utest/reference/test-engineer-task-protocol.md": "ece97eed3f56f4645bb1fb42cf9a5dd485de2147b4f43de3b1a007ebb20b1a75",
+        "agents/critic.md": "27028fcd1781cb3ef8f193d89ccaa4bd5b9ad842be3bf9ba437615fc9524a4bf",
+        "skills/autodev/autodev-reviewer/SKILL.md": "54eb3e3c5dbb8ca68d87a299eb51ffd8d44481a5cdd8ebf9f1182a87214911fd",
+        "agents/verification.md": "d232001977d83a885d0519d07199875388083477a0fdb3c524c283bbbd82ea4c",
+        "skills/autodev/autodev-code/references/frontend-html/with-absolute-html/references/page-archetypes.md": "e00642c66cf7174e631da55329aae037519f2c45188a74157d434495efd910b3",
+        "skills/autodev/autodev-code/references/frontend-html/with-absolute-html/references/html-templates/pure-div-core.md": "6ec538b16cf8933eeb255953260823fa50053b97644440be6086f30bd7bd528f",
+        "skills/autodev/autodev-code/references/batch-workflow-guide.md": "4a45eb5ee3182cc433bd514b9f159862f933eaa070258f69233f70f56e71ac48",
+        "skills/autodev/autodev-code/references/frontend-html/with-standard-html/references/standard-html-parser.md": "782c7ff97ec077ffd919d5c13a1c5046ddbe9cd5a93616bd360b9cf7821aeb3f",
+        "agents/critic_autodev_design_zh.md": "f1d58c9c210ec51848e5e4e40acf6a943219bd83a03b1d946196f600536af4a2",
+        "agents/critic_autodev_zh.md": "e73b8a5af159207599c24721e5f2019ad62a03c7e43ca1f06c692dd8edf526db",
+        "agents/critic_autodev_plan_zh.md": "35d05c3d1966f26759ebd2c5b29671894d5ff671aed4827e9a2c1dcda2351312",
+        "skills/autodev/autodev-code/references/frontend-html/with-absolute-html/references/html-templates/pure-div-converter.md": "037e49f1b3211cee9d27777d62eb13999fd805e5f03e944c33329e54afde5177",
+        "skills/autodev/autodev-reviewer/references/schemas.md": "c0fdc2c2186956bd1d15f8a4b6c8eec27ba22b55cb77f8719acd4563593785be",
+        "skills/autodev/autodev-utest/SKILL.md": "57b70580427228d89147f07527162899948e7e0bc553d556a8417b9f2fc3adba",
+        "agents/reviewer.md": "cc75b512a64512701f2fecb4f989d09b6987f4fa1f4c11b54d1751d0ad1d2b31",
+        "agents/explore.md": "033edb75bcf1129d95c0b73b12f7e73d5cf90a68f0e7db2df2c0232586f2e622",
+        "skills/autodev/autodev-utest/reference/LICENSE.spring-testing-skills-Apache-2.0.txt": "f4a75bd891bc774880cafdd0327f45515eabd82ceca030b9944013c995f152e4",
+        "skills/autodev/autodev-utest/reference/LICENSE.vuejs-ai-MIT.txt": "afcf147bfbd0647145d6b4b2b71ff37deb1a1a3f66a1316d8e3b8237b5277481",
+        "skills/autodev/autodev-code/SKILL.md": "af016fec7cc9172f6fa0261c0365430a4fda0d3a28fcb26683cdcd34c968587f",
+        "skills/autodev/autodev-code/references/frontend-html/with-absolute-html/references/html-templates/llm-prompt-template.md": "fdc705003da426f09caa1192da008c1f031907cfe2364fd5cecc230d6b38b739",
+        "skills/autodev/autodev-verify/SKILL.md": "dead16b36fbf2c3ee18436187e831b5cb36e0fbd07c753e13bb6f079d878f8d1",
+        "skills/autodev/autodev-code/references/frontend-html/with-absolute-html/scripts/process_assets.py": "278c0f759d244177d4968728f0252406bb98b242c3cfc467867ba9d0e6aece80",
+        "skills/autodev/autodev-code/references/frontend-html/with-absolute-html/references/components-match-rules.md": "588995e748e8e21a2a7c220d801c6b716b209ef34236a266ad664c27f1db06a2",
+        "skills/autodev/autodev-frontend/SKILL.md": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      }
+    },
+    "ops.cicd": {
+      "definitionDigest": "83aa1812e2b8893df055cafbbcd39196c4fbfdd4bfe1283f204a2c2cac8ae9c0",
+      "files": {
+        "skills/autoops/autoops-cicd/SKILL.md": "3fe13899edc13283cfbf3469bc1bd6e7070b03304f68320ce05ade766b6493f5",
+        "skills/autoops/autoops-cicd/hooks/poll_pipeline_status.py": "161b94bd312351aca712606087fa1604df326b06a6e3e54c290dd74998b41a6a"
+      }
+    },
+    "ops.archive": {
+      "definitionDigest": "97274dea8122cf60e99a892654795d64c248221df29de20b3739f000b759f6b3",
+      "files": {
+        "skills/autoops/autoops-archive/SKILL.md": "48b7f04454b244aa21027d308183c4d8e1562e6580df5a986f0cb167f0292cf2"
+      }
+    }
+  },
+  "inspectCommandsDigest": "e79a717662a8e46abd6febd954495c62ecc7839f443fa141448d9f0cf43d790d"
+}

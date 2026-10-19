@@ -1,4 +1,4 @@
-import { captureLocalThreadRunLease } from "../../agent/thread-run-lease"
+import { captureLocalThreadRunLease, getLocalThreadRunLease } from "../../agent/thread-run-lease"
 import { AsyncLocalStorage, AsyncResource } from "node:async_hooks"
 import type { ModCommandQueue } from "../command-queue"
 import { classifyModTool } from "../engine"
@@ -21,6 +21,7 @@ interface FunctionExecution {
 const context = new AsyncLocalStorage<FunctionExecution>()
 // Host-entry snapshots, never supplied by a plugin or refreshed by a nested continuation.
 const physicalLeases = new WeakMap<FunctionExecution, (() => boolean) | undefined>()
+const registeredActionGuards = new WeakMap<FunctionExecution, () => void>()
 const writeLease = new AsyncLocalStorage<{
   workspace: string
   threadId: string
@@ -81,8 +82,10 @@ export function captureFunctionExecutionGuard(workspace: string, threadId: strin
   const scope = functionExecutionScope(workspace, threadId)
   if (!scope) throw new ModFunctionError("MODS_CALL_SCOPE_REQUIRED")
   const lease = physicalLeases.get(scope as FunctionExecution)
+  const registeredAction = registeredActionGuards.get(scope)
   return () => {
     if (!scope.active) throw new ModFunctionError("MODS_CALL_SCOPE_EXPIRED")
+    registeredAction?.()
     if (scope.runtimeAuthority) assertModRuntimeAuthority(scope.runtimeAuthority, {
       workspace, threadId, agentId: scope.agentId,
       turnId: scope.turnId ?? scope.runtimeAuthority.turnId })
@@ -140,6 +143,7 @@ export function functionExecutionScope(
   if (scope && !scope.active) throw new ModFunctionError("MODS_CALL_SCOPE_EXPIRED")
   if (scope && (scope.workspace !== workspace || scope.threadId !== threadId))
     throw new ModFunctionError("MODS_CALL_SCOPE_CHANGED")
+  if (scope) registeredActionGuards.get(scope)?.()
   if (scope?.runtimeAuthority)
     assertModRuntimeAuthority(scope.runtimeAuthority, {
       ...scope,
@@ -190,6 +194,14 @@ export async function withFunctionExecution<T>(
       scope,
       inherited?.leased ? physicalLeases.get(inherited) : captureLocalThreadRunLease(scope.threadId)
     )
+  const inheritedAction = inherited && registeredActionGuards.get(inherited)
+  if (inherited && inheritedAction && sameLiveScope &&
+      (inherited.agentId ?? "main") === (scope.agentId ?? "main") &&
+      inherited.turnId === scope.turnId && inherited.runtimeAuthority === scope.runtimeAuthority)
+    registeredActionGuards.set(scope, () => {
+      if (!inherited.active) throw new ModFunctionError("MODS_CALL_SCOPE_EXPIRED")
+      inheritedAction()
+    })
   try {
     return await context.run(scope, () => {
       functionExecutionScope(input.workspace, input.threadId)
@@ -198,6 +210,33 @@ export async function withFunctionExecution<T>(
   } finally {
     scope.active = false
   }
+}
+
+/** Only an admitted model-registered action may borrow its current native user-task lease. */
+export async function withRegisteredFunctionAction<T>(
+  workspace: string,
+  threadId: string,
+  run: () => Promise<T>
+): Promise<T> {
+  const scope = functionExecutionScope(workspace, threadId)
+  const lease = scope && physicalLeases.get(scope)
+  const owner = getLocalThreadRunLease(threadId)?.owner
+  // A model label alone proves nothing. Ordinary hooks, children, timers and scheduled
+  // work retain their original execution scope, including its existing write restriction.
+  if (!scope || scope.userInitiated || scope.immediate || !scope.leased ||
+      !scope.runtimeAuthority || scope.runtimeAuthority.agentId !== "main" ||
+      (owner !== "desktop" && owner !== "im") || !lease?.())
+    return run()
+  return withFunctionExecution({ ...scope, userInitiated: true }, () => {
+    const action = context.getStore()!
+    registeredActionGuards.set(action, () => {
+      if (!scope.active) throw new ModFunctionError("MODS_CALL_SCOPE_EXPIRED")
+      if (!lease()) throw new ModFunctionError("MODS_CALL_SCOPE_CHANGED")
+      registeredActionGuards.get(scope)?.()
+    })
+    functionExecutionScope(workspace, threadId)
+    return run()
+  })
 }
 
 export async function scheduleFunctionTool(

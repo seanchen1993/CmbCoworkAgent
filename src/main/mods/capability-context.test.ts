@@ -14,42 +14,44 @@ const readers = (rows: Record<string, ReturnType<typeof thread>>) => ({
 })
 
 describe("host capability usage context", () => {
-  it("requires the real isolated project and exact feature binding for hidden legacy sessions", () => {
-    const projectId = "composition-legacy:run:unit"
-    const rows = {
-      t: thread({ isInternalFlowRuntime: true, harnessFeature: { projectId, slug: "feature" } })
+  it.each(["composition-legacy:run:unit", "creator-business-trial:trial"])(
+    "requires the real isolated project and exact feature binding for %s",
+    (projectId) => {
+      const rows = {
+        t: thread({ isInternalFlowRuntime: true, harnessFeature: { projectId, slug: "feature" } })
+      }
+      const read = {
+        ...readers(rows),
+        projectWorkspaces: (id: string) => (id === projectId ? [workspace] : undefined),
+        featureWorkspace: (id: string, feature: string) =>
+          id === projectId && feature === "feature" ? workspace : undefined
+      }
+      expect(resolveCapabilityContext(workspace, "t", read)).toMatchObject({
+        usage: "project",
+        projectId
+      })
+      expect(() =>
+        resolveCapabilityContext(workspace, "t", { ...read, projectWorkspaces: () => undefined })
+      ).toThrow("CAPABILITY_PROJECT_UNAVAILABLE")
+      expect(() =>
+        resolveCapabilityContext(workspace, "t", { ...read, featureWorkspace: () => undefined })
+      ).toThrow("CAPABILITY_PROJECT_UNAVAILABLE")
+      rows.t = thread({
+        isInternalFlowRuntime: true,
+        harnessFeature: { projectId: "composition-legacy:forged:unit", slug: "feature" }
+      })
+      expect(() => resolveCapabilityContext(workspace, "t", read)).toThrow(
+        "CAPABILITY_PROJECT_UNAVAILABLE"
+      )
+      rows.t = thread({
+        isInternalFlowRuntime: true,
+        harnessFeature: { projectId: "project", slug: "feature" }
+      })
+      expect(() => resolveCapabilityContext(workspace, "t", read)).toThrow(
+        "CAPABILITY_CONTEXT_INVALID"
+      )
     }
-    const read = {
-      ...readers(rows),
-      projectWorkspaces: (id: string) => (id === projectId ? [workspace] : undefined),
-      featureWorkspace: (id: string, feature: string) =>
-        id === projectId && feature === "feature" ? workspace : undefined
-    }
-    expect(resolveCapabilityContext(workspace, "t", read)).toMatchObject({
-      usage: "project",
-      projectId
-    })
-    expect(() =>
-      resolveCapabilityContext(workspace, "t", { ...read, projectWorkspaces: () => undefined })
-    ).toThrow("CAPABILITY_PROJECT_UNAVAILABLE")
-    expect(() =>
-      resolveCapabilityContext(workspace, "t", { ...read, featureWorkspace: () => undefined })
-    ).toThrow("CAPABILITY_PROJECT_UNAVAILABLE")
-    rows.t = thread({
-      isInternalFlowRuntime: true,
-      harnessFeature: { projectId: "composition-legacy:forged:unit", slug: "feature" }
-    })
-    expect(() => resolveCapabilityContext(workspace, "t", read)).toThrow(
-      "CAPABILITY_PROJECT_UNAVAILABLE"
-    )
-    rows.t = thread({
-      isInternalFlowRuntime: true,
-      harnessFeature: { projectId: "project", slug: "feature" }
-    })
-    expect(() => resolveCapabilityContext(workspace, "t", read)).toThrow(
-      "CAPABILITY_CONTEXT_INVALID"
-    )
-  })
+  )
   it("accepts only the host-bound feature workspace outside the main project directory", () => {
     const featureRoot = resolve("feature-worktree")
     const rows = {

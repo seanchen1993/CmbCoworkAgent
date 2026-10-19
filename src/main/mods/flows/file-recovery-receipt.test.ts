@@ -121,6 +121,25 @@ function fixture() {
 }
 
 describe("prompt recovery receipt data binding, not runtime authority", () => {
+  it("keeps receipt bytes stable across progress changes and removal, but rejects changed results", () => {
+    const f = fixture()
+    const original = f.bind()
+    f.attempt.progress = { phase: "model", text: "observed", updatedAt: 1 }
+    expect(f.bind()).toEqual(original)
+    f.attempt.fileRecoveryEvidence = f.bind()
+    f.attempt.progress = { phase: "tool", toolName: "read_file", updatedAt: 2 }
+    expect(readFlowFileReceiptData(f.run, f.attempt, "inc")).toEqual(original)
+    delete f.attempt.progress
+    expect(readFlowFileReceiptData(f.run, f.attempt, "inc")).toEqual(original)
+    f.attempt.result!.summary = "changed actual result"
+    expect(() => readFlowFileReceiptData(f.run, f.attempt, "inc")).toThrow("FLOW_FILE_RECEIPT_INVALID")
+  })
+  it("never repairs an already mismatched historical receipt digest", () => {
+    const f = fixture()
+    f.attempt.fileRecoveryEvidence = f.bind()
+    f.attempt.fileRecoveryEvidence.receiptDigest.digest = "f".repeat(64)
+    expect(() => readFlowFileReceiptData(f.run, f.attempt, "inc")).toThrow("FLOW_FILE_RECEIPT_INVALID")
+  })
   it("roundtrips the settled data while preserving historical fingerprints and unknown usage", () => {
     const f = fixture()
     const evidence = f.bind()

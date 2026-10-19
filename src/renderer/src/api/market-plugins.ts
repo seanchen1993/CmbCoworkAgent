@@ -1,3 +1,5 @@
+import { resolveBackendEndpoint } from "./backend-endpoint"
+
 export interface MarketPluginItem {
   name?: string
   description?: string
@@ -15,11 +17,13 @@ export interface MarketPluginListResult {
   error?: string
 }
 
-const API_BASE_URL = import.meta.env.VITE_API_BASE_URL + "/api/trajectories/marketplace"
-
 export async function getMarketPlugins(): Promise<MarketPluginListResult> {
   try {
-    const response = await fetch(`${API_BASE_URL}/list/plugin`, {
+    const response = await fetch(resolveBackendEndpoint(
+      import.meta.env.VITE_API_BASE_URL,
+      "/api/trajectories/marketplace/list/plugin",
+      "应用市场服务"
+    ), {
       method: "GET",
       headers: {
         "Content-Type": "application/json"

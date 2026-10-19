@@ -169,6 +169,81 @@
 }
 
 @layer components {
+  /* Interactive controls have their own outline; decorative dividers keep --border. */
+  .devclaw-input,
+  .devclaw-select,
+  .devclaw-control-shell,
+  .devclaw-options {
+    --control-background: var(--background-elevated);
+    --control-border: color-mix(in srgb, var(--foreground) 48%, var(--background) 52%);
+    --control-hover: color-mix(in srgb, var(--foreground) 6%, var(--background-elevated) 94%);
+    --control-focus: color-mix(in srgb, var(--ring) 65%, var(--foreground) 35%);
+    border: 1px solid var(--control-border);
+    border-radius: var(--radius);
+    background-color: var(--control-background);
+    color: var(--foreground);
+  }
+  .devclaw-input,
+  .devclaw-select,
+  .devclaw-control-shell {
+    min-height: 36px;
+    transition:
+      border-color 120ms,
+      box-shadow 120ms;
+  }
+  .devclaw-input,
+  .devclaw-select {
+    padding: 7px 12px;
+  }
+  .devclaw-input::placeholder {
+    color: var(--muted-foreground);
+  }
+  .devclaw-select {
+    appearance: none;
+    padding-right: 36px;
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='16' height='16' viewBox='0 0 24 24' fill='none' stroke='%23737373' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E");
+    background-repeat: no-repeat;
+    background-position: right 12px center;
+    cursor: pointer;
+  }
+  .devclaw-input:hover:not(:disabled):not(:read-only),
+  .devclaw-select:hover:not(:disabled),
+  .devclaw-control-shell:hover:not(:disabled):not(:has(input:disabled)) {
+    background-color: var(--control-hover);
+  }
+  .devclaw-input:focus-visible,
+  .devclaw-select:focus-visible,
+  .devclaw-control-shell:focus-visible,
+  .devclaw-control-shell:focus-within {
+    outline: 2px solid var(--control-focus);
+    outline-offset: 2px;
+    box-shadow: 0 0 0 1px var(--background);
+  }
+  .devclaw-input[aria-invalid="true"],
+  .devclaw-select[aria-invalid="true"],
+  .devclaw-control-shell[aria-invalid="true"] {
+    border-color: var(--destructive);
+  }
+  .devclaw-input[readonly] {
+    border-style: dashed;
+    background-color: var(--background-secondary);
+  }
+  .devclaw-input:disabled,
+  .devclaw-select:disabled,
+  .devclaw-control-shell:disabled,
+  .devclaw-control-shell:has(input:disabled) {
+    cursor: not-allowed;
+    opacity: 0.6;
+    background-color: var(--background-secondary);
+  }
+  .devclaw-option:hover,
+  .devclaw-option[data-highlighted="true"],
+  .devclaw-option:focus-visible {
+    background-color: var(--background-interactive);
+    outline: 2px solid var(--ring);
+    outline-offset: -2px;
+  }
+
   .liquid-glass-notice {
     --liquid-tint: 59 130 246;
     position: relative;
@@ -1267,7 +1342,18 @@ button {
 }
 
 /* Frame authored content without remounting it or reserving space for an empty slot. */
-.sparks-inline-surface:has(span:not(:empty), p:not(:empty), button, input, select, textarea, svg, canvas, pre, img) {
+.sparks-inline-surface:has(
+  span:not(:empty),
+  p:not(:empty),
+  button,
+  input,
+  select,
+  textarea,
+  svg,
+  canvas,
+  pre,
+  img
+) {
   margin-bottom: 0.5rem;
   padding: 0.625rem;
   border: 1px solid var(--border);

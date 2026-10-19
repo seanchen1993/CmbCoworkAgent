@@ -1,0 +1,39 @@
+{
+  "apiVersion": "devclaw.project-contract/v1",
+  "cases": [
+    { "id": "missing-input-and-report", "stageId": "delivery", "files": [], "expected": "failed" },
+    {
+      "id": "skill-cannot-substitute-report",
+      "stageId": "delivery",
+      "files": [{ "path": "input-check.md", "text": "隔离校验样例，未运行 Mods。" }],
+      "expected": "failed"
+    },
+    {
+      "id": "reject-false-quality-pass",
+      "stageId": "delivery",
+      "files": [
+        { "path": "input-check.md", "text": "隔离校验样例，未运行 Mods。" },
+        { "path": "delivery-report.json", "text": "{\"feature\":\"fixture\",\"reportPath\":\"fixture.md\",\"jsonPath\":\"fixture.json\",\"evidenceDigest\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"qualityStatus\":\"passed\"}" }
+      ],
+      "expected": "failed"
+    },
+    {
+      "id": "delivery-structure-only",
+      "stageId": "delivery",
+      "files": [
+        { "path": "input-check.md", "text": "隔离校验样例，未运行 Mods。" },
+        { "path": "delivery-report.json", "text": "{\"feature\":\"fixture\",\"reportPath\":\"fixture.md\",\"jsonPath\":\"fixture.json\",\"evidenceDigest\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"qualityStatus\":\"needs_review\"}" }
+      ],
+      "expected": "passed"
+    },
+    {
+      "id": "review-structure-only",
+      "stageId": "review",
+      "files": [
+        { "path": "input-check.md", "text": "隔离校验样例，未运行 Mods。" },
+        { "path": "delivery-report.json", "text": "{\"feature\":\"fixture\",\"reportPath\":\"fixture.md\",\"jsonPath\":\"fixture.json\",\"evidenceDigest\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"qualityStatus\":\"needs_review\"}" }
+      ],
+      "expected": "passed"
+    }
+  ]
+}

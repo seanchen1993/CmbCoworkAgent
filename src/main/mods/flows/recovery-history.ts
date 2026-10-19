@@ -148,6 +148,8 @@ function receipt(attempt: RecoveryHistoryAttempt) {
   delete value.reusedFrom
   // Expiration is local to each run; immutable execution/result evidence remains exact.
   delete value.invalidated
+  // Progress is a bounded live observation and may be cleared by subsequent steps.
+  delete value.progress
   return value
 }
 function isDisabledNoEffect(run: RecoveryHistoryRun, attempt: RecoveryHistoryAttempt): boolean {

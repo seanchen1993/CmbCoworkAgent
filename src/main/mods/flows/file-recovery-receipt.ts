@@ -229,6 +229,8 @@ export function flowFileReceiptDigest(attempt: FlowAttempt): string {
   delete row.fileRecoveryEvidence
   delete row.invalidated
   delete row.reusedFrom
+  // Public progress is mutable presentation data, never execution provenance.
+  delete row.progress
   return digestValue(row)
 }
 

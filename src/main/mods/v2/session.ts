@@ -1,3 +1,4 @@
+import { isFunctionContentBoundary } from "./content-boundary"
 import { validateFunctionModelResult, type FunctionModelProtocol, type FunctionModelResult, type FunctionForkResult } from "../../../shared/mods/v2/model-protocol"
 import {
   validateFunctionAgentList,
@@ -10,6 +11,11 @@ import {
   assertFunctionFileWriteResult
 } from "./file-write"
 import { functionScrollInput } from "../../../shared/mods/v2/ui-scroll"
+import { PlatformCapabilities } from "./platform-capabilities"
+import { PlatformCapabilityHub } from "./platform-capabilities-hub"
+import type { PlatformCapabilitySource, PlatformCapabilityRef, PlatformCapabilityActionResult } from "../../../shared/mods/v2/platform-capabilities"
+import { PlatformSurfaces } from "./platform-surfaces"
+import { PlatformBehaviors } from "./platform-behaviors"
 import type { FunctionSessionActivity } from "./session-activity"
 import type { FunctionCapabilitySource } from "./capability-source"
 import type { FunctionSessionAppendTicket } from "./session-append-ticket"
@@ -120,6 +126,8 @@ import {
   type FunctionNamedStateScope
 } from "./named-state"
 export const SESSION_CAPABILITIES = [
+  "platform.list", "platform.read", "platform.subscribe", "platform.poll", "platform.unsubscribe",
+  "platform.publish", "platform.act", "platform.cancel", "platform.status",
   "prompt.read",
   "prompt.fill",
   "prompt.suggest",
@@ -246,6 +254,11 @@ import {
 } from "../../../shared/mods/v2/ui-feedback"
 
 export interface FunctionSessionHost {
+  platformHub?: PlatformCapabilityHub
+  platformNativeProviders?: readonly import("./platform-capabilities-types").NativePlatformCapabilityProvider[]
+  platformSource?(plugin: FunctionPlugin): PlatformCapabilitySource
+  platformIncarnation?: string
+  platformChanged?(): void
   appendSession?(plugin: FunctionPlugin, args: FunctionSessionAppendArgs,
     source: FunctionSessionAppendSource, run: FunctionConversationAppendRun):
       Promise<FunctionSessionAppendResult>
@@ -323,6 +336,8 @@ export interface FunctionSessionHost {
   compactSession?(instructions: string, signal: AbortSignal): Promise<ModJson>
   abortTurn?(plugin: FunctionPlugin, turnId: string, signal: AbortSignal): Promise<void>
   assertLive(plugin?: FunctionPlugin): void
+  /** Full retained source/input check at actual execution or external data/effect boundaries. */
+  assertContent?(plugin?: FunctionPlugin): void
   assertCapability?(plugin: FunctionPlugin, method: string): void
   uiChanged?(scope?: ModUiChangeScope): void
   markdownPreviewInvalidated?(receipt: string): void
@@ -422,11 +437,28 @@ export class FunctionSession {
   private readonly feedback: FunctionUiFeedback
   private readonly logs: FunctionUiLog
   readonly panes: FunctionPanes
+  readonly platform: PlatformCapabilities
+  readonly platformSurfaces: PlatformSurfaces
+  readonly platformBehaviors: PlatformBehaviors
   readonly sites: FunctionUiSites
   readonly clients: FunctionClients
   readonly markdownLinks = new FunctionMarkdownLinkRegistry()
   readonly markdownPreviews: FunctionMarkdownFilePreviews
   private readonly controller = new AbortController()
+  private nativeBehaviorSelection = false
+  private readonly platformResourceOwners = new AsyncLocalStorage<{
+    signal: AbortSignal
+    children: Set<import("./module-resources").FunctionModuleResource>
+    calls?: Set<Promise<unknown>>
+    failure?: unknown
+  }>()
+  private readonly platformViewOwners = new Map<string, {
+    controller: AbortController
+    signal: AbortSignal
+    children: Set<import("./module-resources").FunctionModuleResource>
+    failure?: unknown
+    ref: PlatformCapabilityRef
+  }>()
   private readonly measurements = new FunctionSessionMeasurements()
   readonly configuration: FunctionConfiguration
   private readonly configScopes = new AsyncLocalStorage<{
@@ -546,6 +578,91 @@ export class FunctionSession {
     readonly plugins: readonly FunctionPlugin[],
     private readonly host: FunctionSessionHost
   ) {
+    const memory = new Map<string, ModJson>()
+    const fallbackHub = () => new PlatformCapabilityHub({
+      get: (ns, key) => memory.get(JSON.stringify([ns, key])),
+      set: (ns, key, value) => { memory.set(JSON.stringify([ns, key]), value) },
+      keys: ns => [...memory.keys()].map(key => JSON.parse(key) as string[])
+        .filter(parts => parts[0] === ns).map(parts => parts[1])
+    })
+    const localGeneration = randomUUID()
+    this.platform = new PlatformCapabilities(plugins, {
+      nativeProviders: host.platformNativeProviders,
+      hub: host.platformHub ?? fallbackHub(), workspace: host.workspace, threadId: host.threadId,
+      incarnation: host.platformIncarnation ?? localGeneration, lifetime: this.controller.signal,
+      source: plugin => host.platformSource?.(plugin) ?? { provider: plugin.name,
+        digest: "session-local", generation: localGeneration },
+      assertCurrent: (plugin, method) => {
+        this.assertLive(plugin)
+        if (method) {
+          host.initializer?.assertMethod(method)
+          host.assertCapability?.(plugin, method)
+          this.nouns.assertAccess(plugin, method)
+        }
+      },
+      invoke: async (plugin, registration, event, signal, delegate, mode) => {
+        this.assertLive(plugin)
+        const result = await plugin.guest.invoke(registration.id, event, async (method, raw, nestedSignal) => {
+          if (method === "next" || method === "next.to") {
+            if (method !== "next" || !delegate || !isModObject(raw) ||
+              Object.keys(raw).some(key => key !== "input") || !isModObject(raw.input))
+              throw new ModFunctionError("MODS_PLATFORM_DELEGATE_UNAVAILABLE")
+            return { value: await delegate(raw.input) }
+          }
+          const pending = this.capability(plugin, method, raw, nestedSignal,
+            { event: "platform.action", registration: registration.id,
+              identity: this.actualRegistration(plugin, registration.id) })
+          const calls = this.platformResourceOwners.getStore()?.calls
+          calls?.add(pending)
+          try {
+            const value = await pending
+            return value === undefined ? {} : { value }
+          } finally { calls?.delete(pending) }
+        }, { event: "platform.action", origin: { plugin: plugin.name, tier: plugin.tier },
+          plugin: { name: plugin.name, root: plugin.root }, capabilities: this.nouns.capabilities(plugin),
+          signal, timeoutMs: 120000, modelProtocol: plugin.modelProtocol ?? "result-v1",
+          ...(mode === "cleanup" ? { platformCleanup: true } : {}),
+          ...(mode === "open" ? { platformUiOpen: true } : {}), ...this.endInvocationOptions() })
+        this.assertLive(plugin)
+        if (result.value === undefined) throw new ModFunctionError("MODS_PLATFORM_OUTPUT")
+        return result.value
+      },
+      changed: () => host.platformChanged?.(),
+      runAction: (signal, owner, run) => this.runPlatformAction(signal, owner, run),
+      publish: (value, signal) => host.publish(value, signal)
+    })
+    this.platformSurfaces = new PlatformSurfaces({
+      capabilities: () => this.platform.list(),
+      assertCurrent: entry => { this.platform.assertInfo(entry.ref, entry.source) },
+      paneOwner: entry => entry.ref.provider,
+      invoke: (ref, action, input, key, signal) => this.openPlatformView(ref, action, input, key, signal),
+      cleanup: (ref, action, input, key, signal) => this.platform.nativeCleanupAct(ref, action, input, key, signal,
+        this.platformViewOwners.get(this.platformViewKey(ref))),
+      retire: entry => this.retirePlatformView(`${entry.ref.provider}:${entry.paneId}`, entry.ref),
+      panes: {
+        snapshot: (select) => this.panes.snapshot(select),
+        act: (action) => this.panes.act(action),
+        closePane: (plugin, id) => this.panes.closePane(plugin, id)
+      },
+      changed: () => host.platformChanged?.()
+    })
+    this.platformBehaviors = new PlatformBehaviors({
+      capabilities: () => this.platform.list(),
+      assertCurrent: binding => { this.platform.assertInfo(binding.ref, binding.source) },
+      invoke: async (binding, input, delegate, signal) => {
+        const result = await this.platform.nativeAct(binding.ref, binding.action, input,
+          `behavior:${randomUUID()}`, signal, delegate)
+        if (result.status !== "succeeded") throw new ModFunctionError("MODS_PLATFORM_BEHAVIOR_FAILED")
+        return result.value!
+      },
+      validateInput: (point, input, original) => {
+        if (JSON.stringify(input.origin) !== JSON.stringify(original.origin))
+          throw new ModFunctionError("MODS_PLATFORM_BEHAVIOR_ORIGIN")
+        if (point === "prompt.suggest") validatePromptSuggestInput(input)
+        else validateFunctionFeedback("ui.toast", input)
+      },
+      changed: () => host.platformChanged?.()
+    })
     this.markdownPreviews = new FunctionMarkdownFilePreviews(receipt =>
       this.host.markdownPreviewInvalidated?.(receipt))
     if (host.initializationSignal)
@@ -753,6 +870,7 @@ export class FunctionSession {
     for (const plugin of plugins)
       plugin.guest.bindModuleHost?.(
         (method, args, signal, context) => {
+          this.platform.assertResourceMethod(method)
           const deadline = context ? this.endDeadline : undefined
           if (context && (!deadline || context.dispatchCutNs !== deadline.sharedCutNs))
             return Promise.reject(new ModFunctionError("MODS_DISPATCH_CUT_INVALID", "MODS_DISPATCH_CUT_INVALID", true))
@@ -830,6 +948,7 @@ export class FunctionSession {
               }
             }
             if (method === "resource.pull") {
+              this.host.assertContent?.(plugin)
               const stream = this.processStreams.get(args.id)
               if (!stream || stream.busy) throw new ModFunctionError("MODS_RESOURCE_PULL_BUSY")
               stream.busy = true
@@ -837,6 +956,7 @@ export class FunctionSession {
                 const pending = stream.first ?? stream.stream.stream.next()
                 stream.first = undefined
                 const item = await pending
+                this.host.assertContent?.(plugin)
                 signal.throwIfAborted()
                 this.resources.assert(plugin, args.id)
                 if (item.done) {
@@ -905,6 +1025,7 @@ export class FunctionSession {
       }
     )
   }
+
   private async openProcess(
     plugin: FunctionPlugin,
     input: ModObject,
@@ -927,7 +1048,7 @@ export class FunctionSession {
     const taskCompletion: { pending?: Promise<ModJson> } = {}
     let resource: import("./module-resources").FunctionModuleResource
     try {
-      resource = this.resources.create(plugin, ownerSignal, async () => {
+      resource = this.createModuleResource(plugin, ownerSignal, async () => {
         processActivity?.closing()
         try {
           await stream?.close()
@@ -1080,11 +1201,22 @@ export class FunctionSession {
   }
 
   private openTimer(plugin: FunctionPlugin, method: string, ms: number, handle: number): ModObject {
+    const platformOwned = this.platform.withinInvocation
+    const platformMode = this.platform.nativeMode
+    const children = new Set<import("./module-resources").FunctionModuleResource>()
+    const ticks = new Set<Promise<void>>()
+    const calls = new Set<Promise<unknown>>()
     const every = method === "clock.every"
     const parent = currentFunctionBackgroundOwner()
     const signal = parent ? AbortSignal.any([parent, this.lifecycleSignal]) : this.lifecycleSignal
-    const resource = this.resources.create(plugin, signal, async () => {
+    const resource = this.createModuleResource(plugin, signal, async () => {
       if (!plugin.guest.stats.disposed) await plugin.guest.releaseResource?.(handle)
+      if (platformOwned) {
+        const closed = await Promise.allSettled([...children].map(child => child.close()))
+        await Promise.allSettled([...ticks, ...calls])
+        const failed = closed.find(result => result.status === "rejected")
+        if (failed?.status === "rejected") throw failed.reason
+      }
     })
     const reportFailure = (code: string) => {
       if (this.lifecycleSignal.aborted) return
@@ -1099,24 +1231,30 @@ export class FunctionSession {
         // A diagnostic sink cannot stop a live interval or create an unhandled rejection.
       }
     }
+    const platformBackground = this.platform.captureBackground()
     const tick = async () => {
       this.resources.assert(plugin, resource.id)
       if ((this.activeCallbacks.get(plugin) ?? 0) >= 8)
         throw new ModFunctionError("MODS_TIMER_CALLBACK_LIMIT")
       this.activeCallbacks.set(plugin, (this.activeCallbacks.get(plugin) ?? 0) + 1)
       try {
-        await this.background(async () => {
+        const run = () => platformBackground(() => this.background(async () => {
           this.resources.assert(plugin, resource.id)
           try {
             await plugin.guest.invoke(
               "resource",
               {},
               async (capability, args, callSignal) => {
-                const value = await this.capability(plugin, capability, args, callSignal, {
+                if (platformOwned) this.resources.assert(plugin, resource.id)
+                const pending = this.capability(plugin, capability, args, callSignal, {
                   event: method,
                   registration: "resource", identity: resource
                 })
-                return value === undefined ? {} : { value }
+                calls.add(pending)
+                try {
+                  const value = await pending
+                  return value === undefined ? {} : { value }
+                } finally { calls.delete(pending) }
               },
               {
                 event: method,
@@ -1124,9 +1262,11 @@ export class FunctionSession {
                 plugin: { name: plugin.name, root: plugin.root },
                 modelProtocol: plugin.modelProtocol ?? "result-v1",
                 capabilities: this.nouns.capabilities(plugin),
-                signal,
+                signal: platformOwned ? resource.signal : signal,
                 timeoutMs: 120000,
                 resourceCallback: { handle, release: !every },
+                ...(platformMode === "open" ? { platformUiOpen: true } : {}),
+                ...(platformMode === "cleanup" ? { platformCleanup: true } : {}),
                 ...this.endInvocationOptions()
               }
             )
@@ -1137,7 +1277,10 @@ export class FunctionSession {
             this.resources.assert(plugin, resource.id)
             reportFailure("MODS_TIMER_FAILED")
           }
-        })
+        }))
+        if (platformOwned) await this.platformResourceOwners.run({ signal: resource.signal, children },
+          () => withFunctionBackgroundOwner(resource.signal, run))
+        else await run()
       } finally {
         const count = (this.activeCallbacks.get(plugin) ?? 1) - 1
         if (count) this.activeCallbacks.set(plugin, count)
@@ -1147,6 +1290,12 @@ export class FunctionSession {
     const fail = async (error: unknown) => {
       await resource.close()
       reportFailure(error instanceof ModFunctionError ? error.code : "MODS_TIMER_FAILED")
+    }
+    const enterTick = (): Promise<void> => {
+      const pending = tick()
+      ticks.add(pending)
+      void pending.finally(() => ticks.delete(pending)).catch(() => {})
+      return pending
     }
     // A fresh host entry discards the creator's physical run lease and async call receipt.
     void this.background(async () => {
@@ -1167,14 +1316,98 @@ export class FunctionSession {
         const answer = await this.freshStartup(() => this.host.activity ? this.host.activity.fresh(dispatch) : dispatch())
         if (!isModObject(answer) || typeof answer.deny === "string")
           throw new ModFunctionError("MODS_TIMER_DENIED")
-        if (every) void tick().catch(fail).catch(() => {})
+        if (every) void enterTick().catch(fail).catch(() => {})
         else {
-          await tick()
+          await enterTick()
           await resource.close()
         }
       } while (every && !resource.signal.aborted)
     }, true).catch(fail).catch(() => {})
     return { id: resource.id }
+  }
+  private createModuleResource(plugin: FunctionPlugin, signal: AbortSignal,
+    cleanup: () => void | Promise<void>): import("./module-resources").FunctionModuleResource {
+    const owner = this.platformResourceOwners.getStore()
+    const parent = owner ? AbortSignal.any([signal, owner.signal]) : signal
+    const resource = this.resources.create(plugin, parent, async () => {
+      try { await cleanup() }
+      catch (error) { if (owner) owner.failure ??= error; throw error }
+      finally { owner?.children.delete(resource) }
+    })
+    owner?.children.add(resource)
+    return resource
+  }
+  private platformViewKey(ref: PlatformCapabilityRef): string {
+    const presentation = this.platform.assertInfo(ref).descriptor.presentation
+    if (presentation?.type !== "surface" || typeof presentation.paneId !== "string")
+      throw new ModFunctionError("MODS_PLATFORM_SURFACE_STALE")
+    return `${ref.provider}:${presentation.paneId}`
+  }
+  private async runPlatformAction(signal: AbortSignal, observerOwner: object,
+    run: () => Promise<PlatformCapabilityActionResult>, settleResources = false): Promise<PlatformCapabilityActionResult> {
+    const parent = this.platformResourceOwners.getStore()
+    const controller = new AbortController()
+    const owner: { signal: AbortSignal; children: Set<import("./module-resources").FunctionModuleResource>;
+      calls: Set<Promise<unknown>>; failure?: unknown } = {
+      signal: AbortSignal.any([this.lifecycleSignal, controller.signal, ...(parent ? [parent.signal] : [])]),
+      children: new Set(), calls: new Set()
+    }
+    const cancel = () => controller.abort(new ModFunctionError("MODS_CANCELLED"))
+    const drain = async () => {
+      cancel()
+      this.platform.closeNativeOwner(observerOwner)
+      const closed = await Promise.allSettled([...owner.children].map(child => child.close()))
+      await Promise.allSettled([...owner.calls])
+      const failed = closed.find(result => result.status === "rejected")
+      if (failed?.status === "rejected") owner.failure ??= failed.reason
+      if (owner.failure) throw owner.failure
+    }
+    let closing: Promise<void> | undefined
+    const child = { id: randomUUID(), signal: owner.signal,
+      close: () => closing ??= drain().finally(() => parent?.children.delete(child)) }
+    parent?.children.add(child)
+    signal.addEventListener("abort", cancel, { once: true })
+    if (signal.aborted) cancel()
+    try {
+      const result = await this.platformResourceOwners.run(owner, run)
+      if (settleResources || result.status !== "succeeded" || controller.signal.aborted || owner.signal.aborted) await child.close()
+      return result
+    } catch (error) { await child.close(); throw error }
+    finally { signal.removeEventListener("abort", cancel) }
+  }
+  private async openPlatformView(ref: PlatformCapabilityRef, action: string, input: ModObject,
+    key: string, signal: AbortSignal) {
+    const paneKey = this.platformViewKey(ref)
+    let owner = this.platformViewOwners.get(paneKey)
+    if (!owner) {
+      const controller = new AbortController()
+      owner = { controller, signal: AbortSignal.any([this.lifecycleSignal, controller.signal]),
+        children: new Set(), ref }
+      this.platformViewOwners.set(paneKey, owner)
+    }
+    if (owner.failure || owner.signal.aborted || JSON.stringify(owner.ref) !== JSON.stringify(ref))
+      throw new ModFunctionError("MODS_PLATFORM_SURFACE_CLEANUP_UNCONFIRMED")
+    try {
+      const result = await this.platformResourceOwners.run(owner, () =>
+        this.platform.nativeUiOpenAct(ref, action, input, key, AbortSignal.any([signal, owner!.signal]), owner!))
+      if (result.status !== "succeeded") await this.retirePlatformView(paneKey, ref)
+      return result
+    } catch (error) {
+      await this.retirePlatformView(paneKey, ref)
+      throw error
+    }
+  }
+  private async retirePlatformView(key: string, ref: PlatformCapabilityRef): Promise<void> {
+    const owner = this.platformViewOwners.get(key)
+    if (!owner) return
+    if (JSON.stringify(owner.ref) !== JSON.stringify(ref)) throw new ModFunctionError("MODS_SCOPE_CHANGED")
+    owner.controller.abort(new ModFunctionError("MODS_UI_PANE_CLOSED"))
+    const settled = await Promise.allSettled([...owner.children].map(child => child.close()))
+    const failed = settled.find(result => result.status === "rejected")
+    if (failed?.status === "rejected") owner.failure ??= failed.reason
+    if (owner.failure) throw owner.failure
+    this.platform.closeNativeOwner(owner)
+    if (this.platformViewOwners.get(key) === owner) this.platformViewOwners.delete(key)
   }
 
   get hasStarted(): boolean {
@@ -1183,10 +1416,13 @@ export class FunctionSession {
 
   get hasCompletedStartup(): boolean { return this.started }
 
-  private endInvocationOptions(): { dispatchCutNs?: string } {
+  private endInvocationOptions(): { dispatchCutNs?: string; platformUiOpen?: boolean; platformCleanup?: boolean } {
     const deadline = this.endScopes.getStore()
     deadline?.assertLive()
-    return deadline ? { dispatchCutNs: deadline.sharedCutNs } : {}
+    const mode = this.platform.nativeMode
+    return { ...(deadline ? { dispatchCutNs: deadline.sharedCutNs } : {}),
+      ...(mode === "open" ? { platformUiOpen: true } : {}),
+      ...(mode === "cleanup" ? { platformCleanup: true } : {}) }
   }
 
   /** Already-started observer only. Retirement/reload/revoke never call this method. */
@@ -1653,6 +1889,23 @@ export class FunctionSession {
   }
 
   /** Explicit component execution retains middleware but requires the declared provider to run. */
+  async runPlatformFlowAction(
+    ref: PlatformCapabilityRef,
+    action: string,
+    envelope: ModObject,
+    requestKey: string,
+    signal: AbortSignal
+  ): Promise<PlatformCapabilityActionResult> {
+    await this.start()
+    this.assertLive()
+    signal.throwIfAborted()
+    // The extra owner closes and physically settles all children before a flow can advance.
+    // A platform action's successful submission alone cannot leave a background process behind.
+    return withFunctionBackgroundOwner(signal, () =>
+      this.runPlatformAction(signal, {}, () =>
+        this.platform.nativeAct(ref, action, envelope, requestKey, signal), true))
+  }
+
   async runAction(
     command: string,
     args: string,
@@ -2108,6 +2361,8 @@ export class FunctionSession {
     if (depth > 16) throw new ModFunctionError("MODS_DISPATCH_DEPTH")
     const parseToolResult = event === "tool.check" ? createToolCheckResultParser(input) : undefined
     this.assertLive()
+    const contentBoundary = isFunctionContentBoundary(event)
+    if (contentBoundary) this.host.assertContent?.(operation?.plugin)
     const turnHeld = held ?? (event === "command.run" ? "command.run" : undefined)
     const isOperation = !!operation || presentation?.operation === true
     const drawingSignal = this.clientDrawingScopes.getStore()?.signal
@@ -2123,6 +2378,7 @@ export class FunctionSession {
     // The callback belongs to this dispatch, even if its async guest branch outlives activation.
     const initializationAdmission = this.host.initializer?.captureAdmission()
     const result = await this.dispatcher.dispatch(event, input, {
+      ...this.endInvocationOptions(),
       ...(this.host.activity ? { retainHost: <T>(run: () => Promise<T>): Promise<T> =>
         this.host.activity!.run(run) } : {}),
       ...(event === "tool.call" || event === "prompt.attachment" ? {
@@ -2461,24 +2717,42 @@ export class FunctionSession {
       core: async (_, e, context): Promise<ModJson> => {
         this.assertLive(operation?.plugin)
         operation?.assertLive?.()
-        if (presentation?.core) return presentation.core(e, context.signal ?? scopedSignal)
-        if (operation) {
-          const value = await operation.core(e, context.signal ?? scopedSignal)
-          // Only the wire omits the undefined field; the guest restores { value: undefined }.
-          return value === undefined ? {} : { value }
-        }
-        if (event === "session.start") return {
-          cwd: this.host.directory?.() ?? this.host.cwd?.() ?? this.host.workspace
-        }
-        if (event === "command.run") return {}
-        if (event === "session.end") return { sessionId: this.host.threadId }
-        if (event === "command.describe")
-          return {
-            description: e.description,
-            isHidden: e.isHidden,
-            ...(e.argumentHint === undefined ? {} : { argumentHint: e.argumentHint })
+        const run = async (): Promise<ModJson> => {
+          if ((event === "prompt.suggest" || event === "ui.toast") && (presentation?.core || operation)) {
+            const signal = context.signal ?? scopedSignal
+            const original = async (value: ModObject): Promise<ModJson> => {
+              this.assertLive(operation?.plugin)
+              operation?.assertLive?.()
+              if (presentation?.core) return presentation.core(value, signal)
+              const result = await operation!.core(value, signal)
+              return result === undefined ? {} : { value: result }
+            }
+            return this.platform.withCaller(operation?.plugin ?? this.plugins.find(plugin => plugin.name === skip?.plugin),
+              () => this.platformBehaviors.run(event, e, original, signal))
           }
-        throw new ModFunctionError("MODS_EVENT_UNAVAILABLE")
+          if (presentation?.core) return presentation.core(e, context.signal ?? scopedSignal)
+          if (operation) {
+            const value = await operation.core(e, context.signal ?? scopedSignal)
+            // Only the wire omits the undefined field; the guest restores { value: undefined }.
+            return value === undefined ? {} : { value }
+          }
+          if (event === "session.start") return {
+            cwd: this.host.directory?.() ?? this.host.cwd?.() ?? this.host.workspace
+          }
+          if (event === "command.run") return {}
+          if (event === "session.end") return { sessionId: this.host.threadId }
+          if (event === "command.describe")
+            return {
+              description: e.description,
+              isHidden: e.isHidden,
+              ...(e.argumentHint === undefined ? {} : { argumentHint: e.argumentHint })
+            }
+          throw new ModFunctionError("MODS_EVENT_UNAVAILABLE")
+        }
+        if (contentBoundary) this.host.assertContent?.(operation?.plugin)
+        const value = await run()
+        if (contentBoundary) this.host.assertContent?.(operation?.plugin)
+        return value
       },
       capability: (plugin, method, raw, callSignal, source) => {
         return this.capability(
@@ -2504,6 +2778,7 @@ export class FunctionSession {
     )
       throw new ModFunctionError("CLAW_ACTION_PROVIDER_NOT_EXECUTED")
     this.assertLive(undefined, true)
+    if (contentBoundary) this.host.assertContent?.(operation?.plugin)
     if (event === "prompt.compose" || event === "prompt.section") {
       for (const entry of result.trace) {
         if (entry.outcome !== "skipped" && entry.outcome !== "kept") continue
@@ -2527,6 +2802,7 @@ export class FunctionSession {
       ? publishPromptMentionResult(mentionPublication, payload => this.host.publish(payload, scopedSignal))
       : this.host.publish(result.value, scopedSignal))
     this.assertLive(undefined, true)
+    if (contentBoundary) this.host.assertContent?.(operation?.plugin)
     operation?.assertLive?.()
     if (event === "fs.read" && input.as === "bytes" && isOperation) {
       if (!isModObject(published)) throw new ModFunctionError("MODS_FS_BYTES_POLICY")
@@ -2559,8 +2835,13 @@ export class FunctionSession {
     scope?: FunctionNamedStateScope,
     candidateInvalidation = false
   ): Promise<ModJson | undefined> {
-    return retainComposerPreparationWork(() =>
-      this.capabilityWithin(plugin, method, raw, callSignal, source, depth, turnHeld, logSignal, scope, candidateInvalidation), method)
+    return retainComposerPreparationWork(async () => {
+      const boundary = isFunctionContentBoundary(method)
+      if (boundary) this.host.assertContent?.(plugin)
+      const value = await this.capabilityWithin(plugin, method, raw, callSignal, source, depth, turnHeld, logSignal, scope, candidateInvalidation)
+      if (boundary) this.host.assertContent?.(plugin)
+      return value
+    }, method)
   }
 
   private capabilityWithin(
@@ -2580,6 +2861,7 @@ export class FunctionSession {
       this.scopedCapability(plugin, method, raw, callSignal, source, depth, turnHeld, logSignal, candidateInvalidation)
     )
   }
+
   private async scopedCapability(
     plugin: FunctionPlugin,
     method: string,
@@ -2595,9 +2877,11 @@ export class FunctionSession {
     this.uiConstructorScopes.getStore()?.admission?.assertMethod(method)
     this.host.initializer?.assertMethod(method)
     this.host.assertCapability?.(plugin, method)
+    this.platform.assertDelegates(method)
     this.nouns.assertAccess(plugin, method)
     if (!Array.isArray(raw)) throw new ModFunctionError("MODS_SDK_ARGUMENTS")
     const args = raw
+    if (method.startsWith("platform.")) return this.platform.call(plugin, method, args, callSignal)
     if (method === "session.append") {
       if (args.length !== 1) throw new ModFunctionError("MODS_SESSION_APPEND_INVALID")
       validateFunctionSessionAppendArgs(args[0])
@@ -2631,7 +2915,7 @@ export class FunctionSession {
       if (this.starting && !this.started) ticket.deferUntil(this.starting)
       let resource: ReturnType<FunctionModuleResources<FunctionPlugin>["create"]>
       try {
-        resource = this.resources.create(plugin, this.lifecycleSignal, () => {
+        resource = this.createModuleResource(plugin, this.lifecycleSignal, () => {
           this.promptSubmissions.delete(resource.id)
           ticket.close()
         })
@@ -2957,7 +3241,7 @@ export class FunctionSession {
                 : this.lifecycleSignal
               let completion: Promise<FunctionTurnComplete> | undefined
               let rejectReady!: (error: unknown) => void
-              const resource = this.resources.create(plugin, lifetime, async () => {
+              const resource = this.createModuleResource(plugin, lifetime, async () => {
                 this.agentReadiness.delete(resource.id)
                 rejectReady?.(new ModFunctionError("MODS_RESOURCE_CLOSED"))
                 try {
@@ -4162,11 +4446,15 @@ export class FunctionSession {
     this.resources.assertCleanupHealthy()
   }
 
-  /** Native resource observations; no automatic restart or business state. */
+  /** Readonly host facts; a timer may own a resource between entered callbacks. */
   get hasReleaseResources(): boolean {
-    return this.resources.size > 0 || this.processOpenings.size > 0
+    const platform = this.platform.diagnostics()
+    return this.nativeBehaviorSelection || this.resources.size > 0 || this.processOpenings.size > 0 ||
+      platform.inFlight > 0 || platform.subscriptions > 0
   }
   get ownedResourceCount(): number { return this.resources.size }
+  holdNativeBehaviorSelection(active: boolean): void { this.nativeBehaviorSelection = active }
+  get nativeBehaviorSelectionHeld(): boolean { return this.nativeBehaviorSelection }
 
   async close(strict = false): Promise<void> {
     this.closing ??= this.retire()
@@ -4186,6 +4474,11 @@ export class FunctionSession {
     this.measurements.close()
     this.stopStateListener()
     this.controller.abort(new ModFunctionError("MODS_SESSION_CLOSED"))
+    this.platformSurfaces.close()
+    this.platformBehaviors.close()
+    await Promise.allSettled([...this.platformViewOwners].map(([key, owner]) => this.retirePlatformView(key, owner.ref)))
+    try { await this.platform.close() }
+    catch (error) { this.disposalFailure ??= error }
     this.markdownLinks.close()
     this.markdownPreviews.close()
     this.uiResolve?.close()

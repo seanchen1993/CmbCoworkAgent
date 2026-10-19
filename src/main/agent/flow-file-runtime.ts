@@ -224,7 +224,7 @@ export async function createFlowFileRuntime(
     }
   }
   assertCurrent()
-  const model = getModelInstance(config, undefined, undefined, "agent", threadId)
+  const model = getModelInstance(config, undefined, undefined, "agent", threadId, options.creatorAccounting)
   const checkpointer = await getCheckpointer(threadId)
   assertCurrent()
   const admission = createFileRuntimeCallAdmission({

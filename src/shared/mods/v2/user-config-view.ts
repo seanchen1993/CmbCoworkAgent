@@ -1,4 +1,5 @@
 import type { FunctionConfigValue } from "./config"
+import type { FunctionUserConfigMigrationView } from "./user-config-schema"
 
 export type SensitiveFunctionUserConfigAction =
   | { operation: "set"; value: FunctionConfigValue }
@@ -13,6 +14,7 @@ export interface FunctionUserConfigView {
   effectiveRevision?: number
   state: "inactive" | "applied" | "pending" | "failed" | "stopped"
   error?: string
+  migration?: FunctionUserConfigMigrationView
   fields: Array<{
     key: string
     label: string

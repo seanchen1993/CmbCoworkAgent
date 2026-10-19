@@ -19,6 +19,9 @@ import { tmpdir } from "os"
 import { join } from "path"
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest"
 
+const modsChanges = vi.hoisted(() => vi.fn())
+vi.mock("../mods/manager", () => ({ getModsManager: () => ({ pluginsChanged: modsChanges }) }))
+
 vi.mock("electron", () => ({
   app: {
     getPath: () => tmpdir(),
@@ -37,7 +40,6 @@ const fakeIpcMain = { handle: (channel: string, fn: Handler) => handlers.set(cha
 const PLUGIN_NAME = `e2e-market-sim-${Date.now()}`
 const MARKET_VERSION = "v2.0.0"
 const NORMALIZED_MARKET_VERSION = "2.0.0"
-let tmpHome: string
 const prevUserProfile = process.env.USERPROFILE
 const prevHome = process.env.HOME
 
@@ -83,14 +85,15 @@ function buildMarketPluginZip(): ArrayBuffer {
   return buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength) as ArrayBuffer
 }
 
-// Lazily imported after HOME is redirected so storage computes its dir there.
-let plugins: typeof import("./plugins")
+// Collect the cold module graph only after storage is isolated. A beforeAll timeout
+// could otherwise restore the real home while that import is still evaluating.
+// Test timeouts continue to cover the actual inspect/install/detail/delete operations.
+const tmpHome = mkdtempSync(join(tmpdir(), "cmb-e2e-home-"))
+process.env.USERPROFILE = tmpHome // Windows: os.homedir() reads this
+process.env.HOME = tmpHome // POSIX
+const plugins = await import("./plugins")
 
-beforeAll(async () => {
-  tmpHome = mkdtempSync(join(tmpdir(), "cmb-e2e-home-"))
-  process.env.USERPROFILE = tmpHome // Windows: os.homedir() reads this
-  process.env.HOME = tmpHome // POSIX
-  plugins = await import("./plugins")
+beforeAll(() => {
   plugins.registerPluginHandlers(fakeIpcMain as never)
 })
 
@@ -183,6 +186,7 @@ describe("market download → install → detail (e2e)", () => {
     }
     expect(res.success, res.error).toBe(true)
     expect(existsSync(pluginPath)).toBe(false)
+    expect(modsChanges).toHaveBeenLastCalledWith([installed.id])
 
     const after = (await handlers.get("plugins:list")!(null)) as Array<{ name: string }>
     expect(after.find((p) => p.name === PLUGIN_NAME)).toBeUndefined()

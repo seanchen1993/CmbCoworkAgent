@@ -791,13 +791,11 @@
         "src/main/mods/v2/prompt-context.test.ts",
         "src/main/agent/mods-prompt-composition.test.ts",
         "tests/support/mods-prompt-context-e2e.ts",
+        "output/mods-context-attachment-electron-final.log",
         "src/main/mods/v2/prompt-cache.test.ts",
         "src/main/mods/v2/prompt-cache-session.test.ts",
         "src/main/mods/manager-child-model-stream.test.ts",
-        "src/main/agent/mods-prompt-attachment.test.ts"
-      ],
-      "historicalEvidence": [
-        "output/mods-context-attachment-electron-final.log",
+        "src/main/agent/mods-prompt-attachment.test.ts",
         "output/mods-prompt-cache-electron-verified.log"
       ]
     },
@@ -1231,12 +1229,10 @@
         "src/main/mods/v2/prompt-context.test.ts",
         "tests/runtime-final-system-prompt.spec.ts",
         "tests/support/mods-prompt-context-e2e.ts",
+        "output/mods-context-attachment-electron-final.log",
         "src/main/mods/v2/prompt-cache.test.ts",
         "src/main/mods/v2/prompt-cache-session.test.ts",
-        "src/main/mods/manager-child-model-stream.test.ts"
-      ],
-      "historicalEvidence": [
-        "output/mods-context-attachment-electron-final.log",
+        "src/main/mods/manager-child-model-stream.test.ts",
         "output/mods-prompt-cache-electron-verified.log"
       ]
     },
@@ -1970,7 +1966,8 @@
         "src/main/mods/v2/prompt-cache-session.test.ts",
         "src/main/mods/manager-child-model-stream.test.ts",
         "src/main/agent/mods-prompt-attachment.test.ts",
-        "tests/support/mods-prompt-context-e2e.ts"
+        "tests/support/mods-prompt-context-e2e.ts",
+        "output/mods-prompt-cache-electron-verified.log"
       ],
       "availability": "bounded",
       "implementation": [
@@ -1978,9 +1975,6 @@
         "src/main/mods/v2/panes.ts",
         "src/main/mods/v2/sites.ts",
         "src/main/mods/v2/prompt-cache.ts"
-      ],
-      "historicalEvidence": [
-        "output/mods-prompt-cache-electron-verified.log"
       ]
     },
     {
@@ -3466,9 +3460,7 @@
             "src/main/mods/v2/prompt-cache-session.test.ts",
             "src/main/mods/manager-child-model-stream.test.ts",
             "src/main/agent/mods-prompt-attachment.test.ts",
-            "tests/support/mods-prompt-context-e2e.ts"
-          ],
-          "historicalEvidence": [
+            "tests/support/mods-prompt-context-e2e.ts",
             "output/mods-prompt-cache-electron-verified.log"
           ]
         },
@@ -4362,9 +4354,7 @@
             "src/main/mods/v2/prompt-cache-session.test.ts",
             "src/main/mods/manager-child-model-stream.test.ts",
             "src/main/agent/mods-prompt-attachment.test.ts",
-            "tests/support/mods-prompt-context-e2e.ts"
-          ],
-          "historicalEvidence": [
+            "tests/support/mods-prompt-context-e2e.ts",
             "output/mods-prompt-cache-electron-verified.log"
           ]
         },
@@ -4382,9 +4372,7 @@
             "src/main/mods/v2/prompt-cache-session.test.ts",
             "src/main/mods/manager-child-model-stream.test.ts",
             "src/main/agent/mods-prompt-attachment.test.ts",
-            "tests/support/mods-prompt-context-e2e.ts"
-          ],
-          "historicalEvidence": [
+            "tests/support/mods-prompt-context-e2e.ts",
             "output/mods-prompt-cache-electron-verified.log"
           ]
         }
@@ -6802,9 +6790,7 @@
       "src/main/mods/v2/prompt-cache-session.test.ts",
       "src/main/mods/manager-child-model-stream.test.ts",
       "src/main/agent/mods-prompt-attachment.test.ts",
-      "tests/support/mods-prompt-context-e2e.ts"
-    ],
-    "historicalEvidence": [
+      "tests/support/mods-prompt-context-e2e.ts",
       "output/mods-prompt-cache-electron-verified.log"
     ]
   },
@@ -6852,16 +6838,14 @@
     "evidence": [
       "src/main/mods/v2/configuration-reload.integration.test.ts",
       "src/main/mods/v2/session-activity.test.ts",
-      "tests/support/mods-config-reload-e2e.ts"
+      "tests/support/mods-config-reload-e2e.ts",
+      "output/mods-config-reload-electron-final.log"
     ],
     "limits": [
       "Explicit native reload covers the entire current composition and requires actual foreground and task idle.",
       "Startup reentry into its own manager chain currently refuses immediately; a dedicated model route is still feasible follow-up.",
       "Sensitive, multiple, directory and file form inputs continue in the next stage; not full configuration parity.",
       "No OS-wide exclusion of external changes is promised by final source fences."
-    ],
-    "historicalEvidence": [
-      "output/mods-config-reload-electron-final.log"
     ]
   },
   "configurationAdaptation": {

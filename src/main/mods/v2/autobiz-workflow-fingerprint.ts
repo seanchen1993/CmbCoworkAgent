@@ -20,7 +20,7 @@ export async function fingerprintAutobizWorkflow(
   const parent = join(root, ".autobizdevops")
   const overlay = join(parent, "workflow.d")
   const files: string[] = []
-  const directories = new Map<string, BigIntStats>()
+  const directories = new Map<string, { identity: BigIntStats; names: string[] }>()
   let entries = 0
   const stat = async (path: string) => {
     check()
@@ -44,9 +44,14 @@ export async function fingerprintAutobizWorkflow(
       return
     }
     if (!before.isDirectory()) throw Error("AUTOBIZ_WORKFLOW_FILE_TYPE")
-    directories.set(path, before)
+    const names: string[] = []
+    directories.set(path, { identity: before, names })
     const directory = await opendir(path)
-    for await (const entry of directory) await visit(join(path, entry.name), depth + 1)
+    for await (const entry of directory) {
+      names.push(entry.name)
+      await visit(join(path, entry.name), depth + 1)
+    }
+    names.sort()
     const after = await stat(path)
     if (
       !after ||
@@ -99,15 +104,44 @@ export async function fingerprintAutobizWorkflow(
   }
   // Recheck directory membership after reading files: adding/removing an overlay
   // during those reads must not produce a fingerprint of an incomplete tree.
-  for (const [path, before] of directories) {
+  let verifiedEntries = 0
+  for (const [path, { identity: before, names }] of directories) {
     const after = await stat(path)
     if (after && relative(path, await realpath(path)) !== "") throw Error("AUTOBIZ_WORKFLOW_LINK")
     if (
       !after ||
+      !after.isDirectory() ||
       after.ino !== before.ino ||
       after.dev !== before.dev ||
       after.mtimeNs !== before.mtimeNs ||
       after.ctimeNs !== before.ctimeNs
+    )
+      throw Error("AUTOBIZ_WORKFLOW_CHANGED")
+    // Directory timestamps can remain equal across mutations on Windows. Verify
+    // actual names as well, rather than accepting a partial tree in the same clock tick.
+    const currentNames: string[] = []
+    const directory = await opendir(path)
+    for await (const entry of directory) {
+      check()
+      if (++verifiedEntries > 2048) throw Error("AUTOBIZ_WORKFLOW_LIMIT")
+      currentNames.push(entry.name)
+    }
+    currentNames.sort()
+    if (
+      names.length !== currentNames.length ||
+      names.some((name, index) => name !== currentNames[index])
+    )
+      throw Error("AUTOBIZ_WORKFLOW_CHANGED")
+    const verified = await stat(path)
+    if (verified && relative(path, await realpath(path)) !== "")
+      throw Error("AUTOBIZ_WORKFLOW_LINK")
+    if (
+      !verified ||
+      !verified.isDirectory() ||
+      verified.ino !== before.ino ||
+      verified.dev !== before.dev ||
+      verified.mtimeNs !== before.mtimeNs ||
+      verified.ctimeNs !== before.ctimeNs
     )
       throw Error("AUTOBIZ_WORKFLOW_CHANGED")
   }

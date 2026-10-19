@@ -19,6 +19,8 @@ import { FunctionClient } from "./FunctionClient"
 import { FunctionCode } from "./FunctionCode"
 import { functionCodeDrawing } from "../../lib/function-code-drawing"
 import { FunctionSvg } from "./FunctionSvg"
+import { isPlatformWidget } from "../../../../shared/mods/v2/platform-surfaces-widgets"
+import { PlatformWidget } from "../platform/PlatformWidget"
 import { FunctionMarkdown, type FunctionMarkdownContext } from "./FunctionMarkdown"
 import {
   desktopAllowsPaneFocus,
@@ -140,6 +142,7 @@ export function Element({
   act,
   renderClient,
   renderEngine,
+  keepFormDraftEditable,
   retainFocusWhileBusy,
   markdown,
   nodePath = [],
@@ -151,6 +154,7 @@ export function Element({
   renderClient?(node: FunctionUiNode): React.ReactNode
   renderEngine?(ref: number): React.ReactNode
   retainFocusWhileBusy?: boolean
+  keepFormDraftEditable?: boolean
   markdown?: FunctionMarkdownContext
   nodePath?: readonly number[]
   codeDrawing?: ReadonlyMap<string, string>
@@ -170,6 +174,7 @@ export function Element({
             act={act}
             renderClient={renderClient}
             renderEngine={renderEngine}
+            keepFormDraftEditable={keepFormDraftEditable}
             retainFocusWhileBusy={retainFocusWhileBusy}
             markdown={markdown}
             nodePath={[...nodePath, index]}
@@ -181,6 +186,16 @@ export function Element({
   if (node.type === "Markdown") return <FunctionMarkdown props={node.props}
     context={markdown} nodePath={nodePath} busy={busy} />
   const p = node.props
+  if (isPlatformWidget(node.type))
+    return (
+      <PlatformWidget
+        key={node.type === "Form" ? JSON.stringify([node.press?.plugin ?? null, p.key]) : undefined}
+        node={node}
+        busy={busy}
+        keepFormDraftEditable={keepFormDraftEditable}
+        submit={(value) => act(node, "submit", value)}
+      />
+    )
   if (node.type === "Svg") return <FunctionSvg props={p} />
   if (node.type === "Box" || node.type === "Text") {
     const Tag = node.type === "Box" ? "div" : "span"
@@ -192,6 +207,7 @@ export function Element({
         act={act}
         renderClient={renderClient}
         renderEngine={renderEngine}
+        keepFormDraftEditable={keepFormDraftEditable}
         retainFocusWhileBusy={retainFocusWhileBusy}
         markdown={markdown}
         nodePath={[...nodePath, index]}
@@ -250,6 +266,7 @@ export function Element({
             act={act}
             renderClient={renderClient}
             renderEngine={renderEngine}
+            keepFormDraftEditable={keepFormDraftEditable}
             retainFocusWhileBusy={retainFocusWhileBusy}
             markdown={markdown}
             nodePath={[...nodePath, index]}

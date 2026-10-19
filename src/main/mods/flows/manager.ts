@@ -1,4 +1,6 @@
 import { bindEvaluationSnapshotRun } from "../evaluation/snapshot-lease"
+import { flowProgressReporter } from "./progress"
+import { originalFlowActionResult, requiresNativeFlowActionFacts } from "./action-execution-facts"
 import type {
   FlowFileReview,
   FlowFilePublicationOutcome,
@@ -41,6 +43,7 @@ interface ActiveFlow {
   approved: Map<string, FlowApproval>
   done: Promise<void>
   recoverySourceId?: string
+  captureActionFacts?: boolean
 }
 const activeStatus = (run: FlowRun) => ["queued", "running", "waiting"].includes(run.status)
 const clone = <T>(value: T): T => structuredClone(value)
@@ -56,6 +59,11 @@ const resumable = (run: FlowRun) => promptOnly(run) || filesOnly(run)
 /** Business sequencing only. Models, tools, permissions and checkpoint commits remain native. */
 export class FlowManager {
   private readonly active = new Map<string, ActiveFlow>()
+  private readonly admissionSettlements = new Map<string, {
+    workspace: string
+    threadId: string
+    done: Promise<void>
+  }>()
   constructor(
     private readonly store: FlowPersistence,
     private readonly host: FlowHost
@@ -138,6 +146,12 @@ export class FlowManager {
           if (["running", "waiting"].includes(attempt.status)) attempt.status = "unknown"
         this.store.put(run)
       }
+      const live = this.active.get(threadId)
+      const observed = live?.run.id === run.id ? live.run.attempts.findLast((row) => row.progress) : undefined
+      if (observed?.progress)
+        for (const attempt of run.attempts) {
+          if (attempt.executionId === observed.executionId) attempt.progress = clone(observed.progress)
+        }
       return run
     })
   }
@@ -246,6 +260,12 @@ export class FlowManager {
         throw error
       }
     )
+    const settlement = { workspace, threadId, done: settled }
+    this.admissionSettlements.set(run.id, settlement)
+    void settled.then(() => {
+      if (this.admissionSettlements.get(run.id) === settlement)
+        this.admissionSettlements.delete(run.id)
+    }, () => { /* Preserve a failed native settlement as an explicit recovery barrier. */ })
     if (active?.run.id === run.id) active.done = settled
     else await settled
     return run
@@ -303,6 +323,7 @@ export class FlowManager {
       leaseCurrent: captureLocalThreadRunLease(threadId)!,
       approved: new Map(),
       assertOwnerCurrent,
+      captureActionFacts: requiresNativeFlowActionFacts(saved),
       done: Promise.resolve()
     }
     this.active.set(threadId, active)
@@ -313,6 +334,11 @@ export class FlowManager {
 
   /** Host orchestration waits for disposal and final persistence, not a terminal label. */
   async waitForSettlement(workspace: string, threadId: string, runId: string): Promise<void> {
+    const admission = this.admissionSettlements.get(runId)
+    if (admission?.workspace === workspace && admission.threadId === threadId) {
+      await admission.done
+      return
+    }
     const active = this.active.get(threadId)
     if (active?.run.id === runId && active.run.workspace === workspace) {
       await active.done
@@ -608,6 +634,8 @@ export class FlowManager {
   }
   private addAttempt(active: ActiveFlow, stepId: string, skipped?: string): FlowAttempt {
     const run = active.run
+    // Only the current step retains this small display observation; settled results remain authoritative.
+    for (const previous of run.attempts) delete previous.progress
     // Basic host flows add an internal finalization receipt after their declared steps.
     // It is not another provider invocation. Keep explicit native stages and the separately
     // budgeted recovery profiles unchanged; final checks and approvals still consume budget.
@@ -837,13 +865,24 @@ export class FlowManager {
           attempt.inputFingerprint = before!
           this.assertLive(active)
           let result: FlowStepResult
+          const progress = flowProgressReporter(
+            () => {
+              active.assertOwnerCurrent?.()
+              return this.active.get(run.threadId) === active && !controller.signal.aborted &&
+                run.currentStepId === attempt.stepId && attempt.status === "running"
+            },
+            (value) => { attempt.progress = value },
+            () => this.notify(run.threadId)
+          )
           try {
             result = await active.execution.execute(step, {
               run: clone(run),
               executionId: attempt.executionId,
-              signal: controller.signal
+              signal: controller.signal,
+              onProgress: progress.report
             })
           } finally {
+            progress.close()
             try {
               const observed = active.execution.executionTelemetry?.(attempt.executionId)
               if (
@@ -877,6 +916,8 @@ export class FlowManager {
               active.approved.delete(old.stepId)
             }
           }
+          const originalAction = originalFlowActionResult(result)
+          if (active.captureActionFacts && originalAction) this.store.recordActionResult?.(run, attempt, originalAction)
           attempt.result = {
             ...result,
             summary: result.summary.slice(0, 8000),

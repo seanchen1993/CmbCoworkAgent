@@ -46,13 +46,13 @@ afterAll(async () => {
   rmSync(directory, { recursive: true, force: true })
 })
 
-function fixture() {
+function fixture(workspace = directory, metadataWorkspace = workspace) {
   const database = appDb.getDb(), threadId = randomUUID()
-  appDb.createThread(threadId, { workspacePath: directory })
+  appDb.createThread(threadId, { workspacePath: metadataWorkspace })
   const actual = appDb.getThreadCore(threadId)
   if (!actual) throw Error("ACTUAL_THREAD_MISSING")
   const incarnation = captureThreadIncarnation(actual), store = new FunctionConversationStore(database)
-  const parent = store.ensureMain({ threadId, workspace: directory, incarnation,
+  const parent = store.ensureMain({ threadId, workspace, incarnation,
     checkpointNamespace: "" }, () => undefined)
   const input = { threadId, incarnation, assertCurrent: () => {
     if (appDb.getDb() !== database ||
@@ -127,7 +127,7 @@ function child(f: ReturnType<typeof fixture>, physicalParent = f.threadId) {
   const target = f.store.createChild(f.parent, { invocationId: runId,
     checkpointNamespace: `actual-child:${runId}` }, () => undefined)
   appDb.createThread(threadId, { isInternalFlowRuntime: true, parentThreadId: physicalParent,
-    modsAgentRunId: runId, workspacePath: directory })
+    modsAgentRunId: runId, workspacePath: f.parent.workspace })
   const actual = appDb.getThreadCore(threadId)
   if (!actual) throw Error("ACTUAL_CHILD_MISSING")
   const incarnation = captureThreadIncarnation(actual)
@@ -142,7 +142,7 @@ function child(f: ReturnType<typeof fixture>, physicalParent = f.threadId) {
 function ordinaryChild(f: ReturnType<typeof fixture>, physicalParent = f.threadId) {
   const threadId = randomUUID(), runId = randomUUID()
   appDb.createThread(threadId, { isInternalFlowRuntime: true, parentThreadId: physicalParent,
-    modsAgentRunId: runId, workspacePath: directory })
+    modsAgentRunId: runId, workspacePath: f.parent.workspace })
   const actual = appDb.getThreadCore(threadId)
   if (!actual) throw Error("ACTUAL_ORDINARY_CHILD_MISSING")
   const incarnation = captureThreadIncarnation(actual)
@@ -178,6 +178,46 @@ function journal(f: ReturnType<typeof fixture>, targetThreadId: string, incarnat
 }
 
 describe("actual conversation data cleanup joins the original AppSQLite transaction", () => {
+  it.skipIf(process.platform !== "win32")("deletes an actual canonical child under its raw-case Windows parent workspace", () => {
+    const canonical = directory.toLowerCase()
+    expect(canonical).not.toBe(directory)
+    const f = fixture(canonical, directory), a = child(f), b = child(f)
+    const parent = keep(f), sibling = keep(f, b.target, b.threadId)
+    expect(JSON.parse(appDb.getThreadCore(f.threadId)!.metadata!).workspacePath).toBe(directory)
+    expect(JSON.parse(appDb.getThreadCore(a.threadId)!.metadata!).workspacePath).toBe(canonical)
+    appDb.deleteThread(a.threadId)
+    expect(appDb.getThreadCore(a.threadId)).toBeNull()
+    expect(appDb.getThreadCore(f.threadId)).toBeDefined()
+    expect(appDb.getThreadCore(b.threadId)).toBeDefined()
+    expect(count(f, "function_conversations", "conversation_id", a.target.conversationId)).toBe(0)
+    expect(count(f, "function_conversation_rows", "uuid", parent.row.uuid)).toBe(1)
+    expect(count(f, "function_conversation_rows", "uuid", sibling.row.uuid)).toBe(1)
+  })
+
+  it.skipIf(process.platform !== "win32")("cleans a nested Windows child across raw-case metadata aliases only", () => {
+    const f = fixture(directory.toLowerCase(), directory), a = child(f), nested = child(f, a.threadId)
+    const row = appDb.getThreadCore(a.threadId)!
+    appDb.getDb().run("UPDATE threads SET metadata=? WHERE thread_id=?", [
+      JSON.stringify({ ...JSON.parse(row.metadata!), workspacePath: directory }), a.threadId
+    ])
+    appDb.deleteThread(nested.threadId)
+    expect(appDb.getThreadCore(nested.threadId)).toBeNull()
+    expect(appDb.getThreadCore(a.threadId)).not.toBeNull()
+    expect(count(f, "function_conversations", "conversation_id", a.target.conversationId)).toBe(1)
+  })
+
+  it("rejects distinct-case parent workspace metadata under the original POSIX path rule", () => {
+    // Exercise the shared OS rule without claiming this Windows process uses a POSIX filesystem.
+    vi.stubGlobal("window", { electron: { process: { platform: "linux" } } })
+    try {
+      const f = fixture(`${directory}/ScopeCase`, `${directory}/scopecase`), a = child(f), b = child(f)
+      expect(() => appDb.deleteThread(a.threadId)).toThrow("MODS_CONVERSATION_CLEANUP_CONFLICT")
+      expect(appDb.getThreadCore(a.threadId)).not.toBeNull()
+      expect(count(f, "function_conversations", "conversation_id", a.target.conversationId)).toBe(1)
+      expect(count(f, "function_conversations", "conversation_id", b.target.conversationId)).toBe(1)
+    } finally { vi.unstubAllGlobals() }
+  })
+
   it("deletes an actual unadmitted internal child without selecting its canonical parent", () => {
     const f = fixture(), parent = keepPrompt(f, "blank"), leaf = ordinaryChild(f)
     appDb.upsertThreadMessages(leaf.threadId, [{ id: randomUUID(), role: "assistant",

@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react"
 import type { BuiltinRunOverview as Overview } from "../../../../shared/mods/builtins"
+import { BuiltinInstructionsView } from "./BuiltinInstructionsView"
 import { BuiltinChangeReview } from "./BuiltinChangeReview"
 import { BuiltinProjectAdvisor } from "./BuiltinProjectAdvisor"
 import { BuiltinPolicyDecisions, BuiltinOriginalProjectMetrics } from "./BuiltinPolicyMetrics"
@@ -123,53 +124,7 @@ function ScopedBuiltinRunOverview({
               </p>
             </div>
           )}
-          <details data-builtin-target="instructions" open={focusTarget === "instructions" || undefined}>
-            <summary className="cursor-pointer font-medium">项目规范 · 查看本次加载来源</summary>
-            <p className="mt-2 leading-5 text-muted-foreground">{data.instructions.message}</p>
-            <p className="mt-2 text-muted-foreground">
-              以下按宿主加载顺序列出。顺序用于核对来源，不代表已经自动解决互相矛盾的规范。
-              自然语言冲突需要核对：请打开所列来源，按原项目规则确认；此处不替你裁定或修改规范。
-            </p>
-            {data.instructions.snapshot?.origin === "disabled" && (
-              <p className="mt-2">本次未启用宿主规范加载。</p>
-            )}
-            <ul className="mt-2 space-y-2">
-              {data.instructions.snapshot?.entries.map((entry, index) => (
-                <li key={`${entry.path}:${index}`} className="rounded-md bg-muted/30 p-2 leading-5">
-                  <p className="break-all font-medium">{entry.path}</p>
-                  <p>
-                    {deliveryNames[entry.delivery]} ·{" "}
-                    {entry.layer === "user"
-                      ? "用户规范"
-                      : entry.layer === "local"
-                        ? "本地补充"
-                        : entry.layer === "plugin"
-                          ? "项目插件"
-                          : "项目规范"}
-                  </p>
-                  <p className="break-all text-muted-foreground">范围：{entry.scope}</p>
-                  <p className="text-muted-foreground">{entry.reason}</p>
-                </li>
-              ))}
-            </ul>
-            {data.instructions.snapshot && !data.instructions.snapshot.entries.length && (
-              <p className="mt-2 text-muted-foreground">本次没有可逐文件展示的规范来源。</p>
-            )}
-            <details className="mt-2 text-muted-foreground">
-              <summary className="cursor-pointer">模型请求时的核对</summary>
-              {data.instructions.snapshot?.finalRequests?.length ? (
-                <ul className="mt-2 space-y-1">
-                  {data.instructions.snapshot.finalRequests.map((item) => (
-                    <li key={item.requestId}>
-                      {new Date(item.observedAt).toLocaleTimeString()} · {item.reason}
-                    </li>
-                  ))}
-                </ul>
-              ) : (
-                <p className="mt-2">暂无模型请求边界记录；不能据此认定规范已发送给模型。</p>
-              )}
-            </details>
-          </details>
+          <BuiltinInstructionsView value={data.instructions} open={focusTarget === "instructions"} />
           {!!data.instructions.snapshot?.children?.length && (
             <details>
               <summary>子任务规范 · 独立观测</summary>

@@ -26,19 +26,15 @@ export function FlowNativeApprovalHint({
   }, [])
   // Initialize the existing thread approval listener before the user can start a flow.
   // Rendering the hint only after start could miss the first fast permission request.
-  if (!active) return null
+  if (!active || !waiting) return null
   return (
     <aside
       className={`space-y-2 rounded border p-3 text-sm ${waiting ? "border-amber-500/50 bg-amber-500/5" : "bg-muted/20"}`}
       aria-label="原生权限与工具提问"
     >
-      <p>
-        {waiting
-          ? "当前任务有原生权限审批或工具提问等待处理。流程会等待你的决定。"
-          : "执行工具或修改文件时，可能需要在任务中处理原生权限审批或工具提问。"}
-      </p>
+      <p>流程正在等你确认操作或补充信息。</p>
       <p className="text-xs text-muted-foreground">
-        处理后，从聊天中的「按步骤执行 · 管理步骤与记录」返回。此入口不会批准任何操作。
+        在聊天中处理提示后，回到这里查看进度。
       </p>
       <Button
         size="sm"

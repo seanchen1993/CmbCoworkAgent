@@ -15,21 +15,31 @@ const dependencies = vi.hoisted(() => ({
   getLatestRun: vi.fn(),
   appendEvent: vi.fn(),
   updateSnapshot: vi.fn(),
-  emitAttention: vi.fn()
+  emitAttention: vi.fn(),
+  captureTail: vi.fn(),
+  captureRetirement: vi.fn(),
+  threadCurrent: vi.fn(),
+  isAgentBusy: vi.fn()
 }))
 
 vi.mock("electron", () => ({ BrowserWindow: { getAllWindows: () => [] } }))
 vi.mock("../db", () => ({
   getThread: () => ({ metadata: "{}" }),
+  getThreadCore: dependencies.threadCurrent,
   getAllThreadSummaries: () => []
 }))
-vi.mock("../agent/agent-run-service", () => ({ hasActiveTopLevelAgentRun: () => false }))
+vi.mock("../agent/agent-run-service", () => ({ hasActiveTopLevelAgentRun: () => false,
+  isAgentRunBusy: dependencies.isAgentBusy }))
+vi.mock("../mods/manager", () => ({ getModsManager: () => ({
+  captureFunctionThreadRetirement: dependencies.captureRetirement
+}) }))
 vi.mock("../agent/workflow/run-manager", () => ({
   workflowRunManager: { isBusyForThreadAsync: dependencies.isWorkflowBusy }
 }))
 vi.mock("../app-attention-events", () => ({ emitAppAttention: dependencies.emitAttention }))
 vi.mock("./service", () => ({
-  readHarnessFeatureMetadata: () => ({ projectId: "project", slug: "feature", runId: "mr_test" })
+  readHarnessFeatureMetadata: () => ({ projectId: "project", slug: "feature", runId: "mr_test",
+    nodeId: "dev.code" })
 }))
 vi.mock("./managed-feature-status", () => ({
   inspectHarnessManagedFeatureStatus: dependencies.inspectFeature
@@ -47,7 +57,8 @@ vi.mock("./human-gate-service", () => ({
 }))
 vi.mock("./auto-mode-action-executor", () => ({
   ManagedActionValidationError: class extends Error {},
-  createAndStartManagedHarnessSession: dependencies.createSession
+  createAndStartManagedHarnessSession: dependencies.createSession,
+  captureManagedAgentRunTail: dependencies.captureTail
 }))
 vi.mock("./managed-run-store", () => ({
   managedRunStore: {
@@ -126,6 +137,11 @@ beforeEach(() => {
     return next
   })
   dependencies.isWorkflowBusy.mockResolvedValue(false)
+  dependencies.isAgentBusy.mockReturnValue(false)
+  dependencies.captureTail.mockReturnValue(undefined)
+  dependencies.captureRetirement.mockReturnValue({ resident: false, retire: vi.fn(async () => {}) })
+  dependencies.threadCurrent.mockImplementation(() => ({ created_at: 123456,
+    metadata: JSON.stringify({ workspacePath: run.workspacePath }) }))
   dependencies.inspectFeature.mockResolvedValue(feature)
   dependencies.requestBizRetry.mockReturnValue(true)
 })
@@ -225,6 +241,47 @@ describe("managed turn-end decisions with background workflows", () => {
       "run_completed"
     ])
     expect(dependencies.requestBizRetry).not.toHaveBeenCalled()
+  })
+
+  it.each([
+    { boundary: "source-tail", reject: false },
+    { boundary: "source-tail", reject: true },
+    { boundary: "VM-drain", reject: false },
+    { boundary: "VM-drain", reject: true }
+  ])("honors Stop during completion $boundary even if retirement rejects=$reject", async ({ boundary, reject }) => {
+    dependencies.inspectFeature.mockResolvedValue({ ...feature, featureStatus: "done",
+      currentNodeStatus: "done", isFinalNode: true })
+    const entered = Promise.withResolvers<void>(), held = Promise.withResolvers<void>()
+    const releaseTail = vi.fn(), retire = vi.fn(async () => {
+      if (boundary === "VM-drain") { entered.resolve(); await held.promise }
+    })
+    dependencies.captureTail.mockImplementation(() => {
+      if (boundary === "source-tail") entered.resolve()
+      return { completion: boundary === "source-tail" ? held.promise : Promise.resolve(),
+        assertCurrent: () => {}, release: releaseTail }
+    })
+    dependencies.captureRetirement.mockReturnValue({ resident: true, retire })
+    const completing = handleAutoModeAgentTurnEnd(turnEnd())
+    await entered.promise
+    const stopping = stopManagedRun(run)
+    try {
+      // Stop must finish while the original business/source/VM remains physically held.
+      await completing
+      expect(await stopping).toBe(true)
+      expect(run.status).toBe("cancelled")
+      expect(retire).toHaveBeenCalledTimes(boundary === "VM-drain" ? 1 : 0)
+      expect(releaseTail).not.toHaveBeenCalled()
+    } finally {
+      if (reject) held.reject(Error("EXIT_UNCONFIRMED"))
+      else held.resolve()
+    }
+    await Promise.resolve()
+    await Promise.resolve()
+    expect(run.status).toBe("cancelled")
+    expect(dependencies.appendEvent.mock.calls.some(([, event]) =>
+      event.type === "run_completed" || event.type === "run_failed")).toBe(false)
+    expect(dependencies.createSession).not.toHaveBeenCalled()
+    expect(releaseTail).not.toHaveBeenCalled()
   })
 
   it.each([

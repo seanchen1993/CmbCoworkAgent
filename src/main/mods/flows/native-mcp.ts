@@ -10,7 +10,8 @@ import type { ModObject } from "../../../shared/mods/types"
 import { clawActionObject } from "../../../shared/mods/claw-actions"
 import { encodeModJson } from "../../../shared/mods/validation"
 import type { McpCapabilityService, McpCapabilityTool } from "../../mcp/capability-types"
-import { getGlobalMcpCapabilityService } from "../../mcp/capability-service"
+import { getGlobalMcpCapabilityService, getProjectMcpCapabilityService } from "../../mcp/capability-service"
+import { currentRuntimePluginSource } from "../../plugins/runtime-source-scope"
 import { createHookScope, resolveEnabledHooksForRun } from "../../hooks/scope"
 import type { ModGrant } from "../control-store"
 import type { ModsManager } from "../manager"
@@ -91,7 +92,8 @@ export async function listNativeMcpTools(
       )
         throw new ModError("CLAW_MCP_SOURCE_CHANGED")
   const service = restrictClawMcpService(
-    dependencies.service ?? getGlobalMcpCapabilityService(),
+    dependencies.service ?? (currentRuntimePluginSource()
+      ? getProjectMcpCapabilityService() : getGlobalMcpCapabilityService()),
     selection,
     readSources
   )
@@ -128,7 +130,8 @@ export async function prepareNativeMcpStep(options: NativeMcpStepOptions) {
     throw new ModError("FLOW_EXECUTION_PRINCIPAL_REQUIRED")
   const provider = structuredClone(options.provider)
   const readSources = options.readSources ?? readClawMcpSources
-  const raw = options.service ?? getGlobalMcpCapabilityService()
+  const raw = options.service ?? (currentRuntimePluginSource()
+    ? getProjectMcpCapabilityService() : getGlobalMcpCapabilityService())
   const service = restrictClawMcpService(raw, options.selection, readSources)
   const assertSource = () => {
     options.signal.throwIfAborted()

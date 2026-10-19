@@ -2,6 +2,9 @@ import { createHash } from "node:crypto"
 import { parseFlowDefinition } from "../../../shared/mods/flows/schema"
 import type { FlowRun, SavedFlow } from "../../../shared/mods/flows/types"
 import type { FlowPersistence } from "./contracts"
+import { attachFlowActionExecutionFacts, bindFlowActionExecutionFacts, publicFlowActionRun,
+  readFlowActionExecutionFacts, retainFlowActionExecutionFacts } from "./action-execution-facts"
+import type { FlowAttempt, FlowStepResult } from "../../../shared/mods/flows/types"
 import {
   planFlowRecoveryReservation,
   planRecoveryHistoryRetention,
@@ -58,7 +61,7 @@ export class FlowStore implements FlowPersistence {
     this.settings.setSetting(this.key("definitions", workspace), JSON.stringify(next))
     return structuredClone(saved)
   }
-  runs(workspace: string, threadId: string): FlowRun[] {
+  private rawRuns(workspace: string, threadId: string): FlowRun[] {
     const rows: FlowRun[] = JSON.parse(
       this.settings.getSetting(this.key("runs", workspace, threadId), "[]")
     )
@@ -73,6 +76,32 @@ export class FlowStore implements FlowPersistence {
         throw Error("FLOW_RUN_STORAGE_INVALID")
     }
     return rows
+  }
+  runs(workspace: string, threadId: string): FlowRun[] {
+    return this.rawRuns(workspace, threadId).map(publicFlowActionRun)
+  }
+  actionResult(workspace: string, threadId: string, runId: string, executionId: string) {
+    const run = this.rawRuns(workspace, threadId).find(item => item.id === runId)
+    return run && readFlowActionExecutionFacts(run, executionId)
+  }
+  recordActionResult(run: FlowRun, attempt: FlowAttempt, result: FlowStepResult): void {
+    const facts = bindFlowActionExecutionFacts(run, attempt, result)
+    const key = this.key("runs", run.workspace, run.threadId)
+    const raw = this.settings.getSetting(key, "[]")
+    const rows = this.rawRuns(run.workspace, run.threadId)
+    const saved = rows.find(item => item.id === run.id)
+    if (!saved) throw Error("FLOW_ACTION_FACTS_SCOPE_CHANGED")
+    const previous = readFlowActionExecutionFacts(saved, attempt.executionId)
+    if (previous) {
+      if (JSON.stringify(previous) !== JSON.stringify(facts)) throw Error("FLOW_ACTION_FACTS_CHANGED")
+      return
+    }
+    attachFlowActionExecutionFacts(saved, attempt.executionId, facts)
+    const encoded = JSON.stringify(rows)
+    if (Buffer.byteLength(encoded) > 4 * 1024 * 1024) throw Error("FLOW_HISTORY_LIMIT")
+    if (this.settings.compareAndSetSetting) {
+      if (!this.settings.compareAndSetSetting(key, raw, encoded)) throw Error("FLOW_ACTION_FACTS_CHANGED")
+    } else this.settings.setSetting(key, encoded)
   }
   run(workspace: string, threadId: string, id: string): FlowRun | undefined {
     return this.runs(workspace, threadId).find((row) => row.id === id)
@@ -127,6 +156,7 @@ export class FlowStore implements FlowPersistence {
     }
     if (prior?.recovery && !(run as RecoveryHistoryRun).recovery)
       throw Error("FLOW_RECOVERY_LINEAGE_INVALID")
+    run = retainFlowActionExecutionFacts(prior, run)
     const rows = existing.filter((row) => row.id !== run.id)
     const complete = [run, ...rows] as RecoveryHistoryRun[]
     if (

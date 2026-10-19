@@ -18,7 +18,7 @@ export interface FunctionPluginPromptScope {
 
 export interface FunctionPluginPromptLease {
   assertCurrent(): void
-  release(): void
+  release(): void | Promise<void>
 }
 
 export interface FunctionPluginPromptQueueHost {
@@ -299,7 +299,7 @@ export class FunctionPluginPromptQueue {
           entry.reject(error)
         } finally {
           try {
-            lease.release()
+            await lease.release()
           } catch (error) {
             entry.reject(error)
             try {

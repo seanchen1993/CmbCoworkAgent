@@ -49,11 +49,39 @@ declare module "claude-code" {
     Button(props:{label:string;onPress:()=>unknown;key?:string;hotkey?:string;[key:string]:unknown}):UiTree
     TextInput(props:{value:string;onChange:(value:string)=>unknown;key?:string;[key:string]:unknown}):UiTree
     Markdown(props:{text:string;[key:string]:unknown}):UiTree
+    List(props:JsonObject):UiTree
+    Table(props:JsonObject):UiTree
+    Tree(props:JsonObject):UiTree
+    Chart(props:JsonObject):UiTree
+    Log(props:JsonObject):UiTree
+    Form(props:{key:string;fields:JsonObject[];values?:JsonObject;onSubmit:(json:string)=>unknown;[key:string]:unknown}):UiTree
   }
   export interface PromptSection {id:string;text:string;scope:"session"|"shared"}
   export interface PromptComposition {sections:PromptSection[]}
   export interface ToolEvent extends JsonObject {tool:string}
+  export interface PlatformRef {provider:string;id:string;version:string}
+  export interface PlatformQuery {ref:PlatformRef;target:{kind:"current"}}
+  export interface PlatformAction {id:string;title:string;inputSchema:JsonObject;outputSchema:JsonObject;
+    requiredPermissions:string[];cancellable:boolean;idempotency:"keyed"}
+  export interface PlatformDescriptor {apiVersion:"devclaw.capability/v1";id:string;version:string;
+    title:string;scope:"conversation"|"workspace";stateSchema:JsonObject;actions:PlatformAction[];presentation?:JsonObject}
+  export interface PlatformState {status:"ready"|"unknown";revision:number;
+    source:{provider:string;digest:string;generation:string};value?:Json;reason?:string}
+  export interface PlatformActionResult {requestKey:string;status:"running"|"succeeded"|"failed"|"cancelled"|"unknown";value?:Json;error?:string}
+  export interface PlatformActionInput extends PlatformQuery {action:string;input:JsonObject;requestKey:string}
+  export interface PlatformSdk {
+    list():Promise<{status:"ready"|"unknown";capabilities:Array<{ref:PlatformRef;descriptor:PlatformDescriptor;available:boolean}>}>
+    read(input:PlatformQuery):Promise<PlatformState>
+    subscribe(input:PlatformQuery):Promise<{subscriptionId:string;revision:number}>
+    poll(input:{subscriptionId:string;afterRevision:number}):Promise<{subscriptionId:string;revision:number;events:Array<{revision:number;value:Json}>;resync:boolean}>
+    unsubscribe(input:{subscriptionId:string}):Promise<void>
+    publish(input:{id:string;version:string;target:{kind:"current"};value:JsonObject;expectedRevision?:number}):Promise<PlatformState>
+    act(input:PlatformActionInput,options?:{signal?:AbortSignal}):Promise<PlatformActionResult>
+    cancel(input:PlatformQuery&{requestKey:string}):Promise<PlatformActionResult>
+    status(input:PlatformQuery&{requestKey:string}):Promise<PlatformActionResult>
+  }
   export interface SDKBase<Owner extends string=string> {
+    platform:PlatformSdk
     fs:{write(path:string,text:string):Promise<void>;read(path:string):Promise<string>;
       list(path?:string):Promise<(Omit<FileStat,"mtimeMs"> & {name:string;mtimeMs?:number})[]>;
       exists(path:string):Promise<boolean>;stat(path:string,options?:{resolve?:boolean}):Promise<FileStat>}
@@ -64,7 +92,7 @@ declare module "claude-code" {
     agent:{register(spec:AgentSpec):Promise<{agent:string}>;spawn(input:AgentSpawnInput):Promise<AgentSpawnResult>}
     clock:{now():Promise<number>;sleep(ms:number,options?:{signal?:AbortSignal}):Promise<void>;
       /** Maximum supported interval is 60000 ms. */
-      after(ms:number,callback:()=>void|Promise<void>):{cancel():void};every(ms:number,callback:()=>void|Promise<void>):{cancel():void}}
+      after(ms:number,callback:()=>void|Promise<void>):{cancel():Promise<void>};every(ms:number,callback:()=>void|Promise<void>):{cancel():Promise<void>}}
     state:{get<P extends keyof PluginState,K extends keyof PluginState[P]>(ref:StateRef<P,K>):Promise<{value:PluginState[P][K]|undefined;version:number}>;
       set<P extends Extract<keyof PluginState,Owner>,K extends keyof PluginState[P]>(ref:StateRef<P,K>,value:PluginState[P][K],options?:{ifVersion?:number}):Promise<{isSet:boolean;version:number}>}
     env:{get(name:string):Promise<string|undefined>}
@@ -88,11 +116,15 @@ declare module "claude-code" {
   export interface CommandResult {text?:string;kind?:"complete"|"turn"}
   export interface ProcessEvent {argv:string[];cwd?:string;env?:Record<string,string>;input?:string}
   export interface On<Owner extends string=string> {
+    capability(descriptor:PlatformDescriptor,handlers:{act:($:SDK<Owner>,event:{action:string;input:JsonObject;
+      target:{kind:"current"};requestKey:string;capability:PlatformRef},next:Next<JsonObject,Json>)=>JsonObject|Promise<JsonObject>}):void
     (event:"ui.render",filter:{component:string;requestId?:string},handler:($:SDK<Owner>,event:UiEvent,next:Next<UiEvent,UiTree>)=>UiTree|Promise<UiTree>):void
     (event:"tool.call",handler:($:SDK<Owner>,event:ToolEvent,next:Next<ToolEvent,Json>)=>Json|Promise<Json>):void
     (event:"tool.call",filter:{tool:string},handler:($:SDK<Owner>,event:ToolEvent,next:Next<ToolEvent,Json>)=>Json|Promise<Json>):void
     (event:"prompt.submit",handler:($:SDK<Owner>,event:{text:string},next:Next<{text:string},Json>)=>Json|Promise<Json>):void
     (event:"prompt.compose",handler:($:SDK<Owner>,event:JsonObject,next:Next<JsonObject,PromptComposition>)=>PromptComposition|Promise<PromptComposition>):void
+    (event:"prompt.section",handler:($:SDK<Owner>,event:{name:string;text:string},next:Next<{name:string;text:string},{text:string}>)=>{text:string}|Promise<{text:string}>):void
+    (event:"prompt.section",filter:{name:string},handler:($:SDK<Owner>,event:{name:string;text:string},next:Next<{name:string;text:string},{text:string}>)=>{text:string}|Promise<{text:string}>):void
     // __MODEL_PROTOCOL_HOOKS__
     (event:"command.run",handler:($:SDK<Owner>,event:CommandEvent,next:Next<CommandEvent,CommandResult>)=>CommandResult|Promise<CommandResult>):{catch(handler:($:SDK<Owner>,event:CommandEvent,next:Next<CommandEvent,CommandResult>)=>CommandResult|Promise<CommandResult>):void}
     (event:"command.run",matcher:{command:string},handler:($:SDK<Owner>,event:CommandEvent,next:Next<CommandEvent,CommandResult>)=>CommandResult|Promise<CommandResult>):void

@@ -62,7 +62,81 @@ function fixture(initiallyVisible = true) {
   }
 }
 
+function samplingFixture(siteCount: number, nativeCount: number, depth: number) {
+  const hidden = new Set<HTMLElement>()
+  const displayNone = new Set<HTMLElement>()
+  const getComputedStyle = vi.fn((element: HTMLElement) => ({
+    visibility: hidden.has(element) ? "hidden" : "visible",
+    display: displayNone.has(element) ? "none" : "block"
+  }))
+  const viewport = {
+    scrollTop: 0,
+    scrollHeight: 800,
+    clientHeight: 400,
+    getBoundingClientRect: () => ({ top: 0, bottom: 400 })
+  } as unknown as HTMLElement
+  const ancestors: HTMLElement[] = []
+  for (let index = 0; index < depth; index++)
+    ancestors.push({ parentElement: ancestors.at(-1) ?? viewport } as HTMLElement)
+  const row = (isSite: boolean) =>
+    ({
+      parentElement: ancestors.at(-1) ?? viewport,
+      textContent: isSite ? "Message" : "System notice",
+      dataset: { functionSite: isSite ? "AssistantMessage" : undefined },
+      querySelector: () => null,
+      getBoundingClientRect: () => ({ x: 0, y: 10, top: 10, bottom: 50, width: 400, height: 40 })
+    }) as unknown as HTMLElement
+  const sites = Array.from({ length: siteCount }, () => row(true))
+  const nativeRows = Array.from({ length: nativeCount }, () => row(false))
+  const root = {
+    ownerDocument: { defaultView: { getComputedStyle } },
+    querySelectorAll: (selector: string) => (selector === "[data-item-index]" ? nativeRows : sites)
+  } as unknown as HTMLElement
+  return {
+    sites,
+    nativeRows,
+    ancestors,
+    hidden,
+    displayNone,
+    getComputedStyle,
+    sample: () => sampleInitialChatPresentation(root, viewport)
+  }
+}
+
 describe("initial chat presentation barrier", () => {
+  it("reads shared ancestor styles once per sample across site and native rows", () => {
+    const f = samplingFixture(12, 4, 5)
+    expect(f.sample().ready).toBe(true)
+    // Sixteen rows previously traversed six elements each (96 reads); only 21 are distinct.
+    expect(f.getComputedStyle).toHaveBeenCalledTimes(21)
+    expect(new Set(f.getComputedStyle.mock.calls.map(([element]) => element)).size).toBe(21)
+  })
+  it("rechecks changed ancestor visibility on every frame", () => {
+    const f = samplingFixture(2, 1, 2)
+    const parent = f.ancestors[0]
+    expect(f.sample().ready).toBe(true)
+    f.hidden.add(parent)
+    expect(f.sample().ready).toBe(false)
+    f.hidden.delete(parent)
+    f.displayNone.add(parent)
+    expect(f.sample().ready).toBe(false)
+    f.displayNone.delete(parent)
+    expect(f.sample().ready).toBe(true)
+  })
+  it("keeps hidden children blocked despite a cached visible parent and visible siblings", () => {
+    const f = samplingFixture(2, 1, 2)
+    f.hidden.add(f.sites[1])
+    expect(f.sample().ready).toBe(false)
+    f.hidden.clear()
+    f.displayNone.add(f.nativeRows[0])
+    expect(f.sample().ready).toBe(false)
+    f.displayNone.clear()
+    // A child reporting visible still cannot bypass its hidden shared ancestor.
+    f.hidden.add(f.ancestors[1])
+    expect(f.sample().ready).toBe(false)
+    f.hidden.clear()
+    expect(f.sample().ready).toBe(true)
+  })
   it("does not publish from a background timer before a restored paint opportunity", () => {
     const f = fixture()
     f.set(true, "before minimize")

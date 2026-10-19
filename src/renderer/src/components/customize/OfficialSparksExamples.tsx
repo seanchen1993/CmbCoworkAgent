@@ -201,7 +201,10 @@ export function OfficialSparksExamples({
       <div>
         <h2 className="font-semibold">挑一个小帮手</h2>
         <p className="mt-1 text-sm text-muted-foreground">
-          官方示例已内置。选择后核对权限，再应用到当前聊天。
+          本工程与 Anthropic 官方示例均已内置。选择后核对权限，再应用到当前聊天。
+        </p>
+        <p className="mt-2 text-sm text-muted-foreground">
+          体验跨插件组合：先使用“任务能力提供方”，再使用“个人任务工作台”。两项都要在同一聊天核对并确认。
         </p>
       </div>
       {loading && <p role="status">正在读取内置示例…</p>}
@@ -224,20 +227,30 @@ export function OfficialSparksExamples({
             <details className="text-xs text-muted-foreground">
               <summary className="cursor-pointer">使用方法与来源</summary>
               <p className="mt-2 leading-relaxed">{example.usage}</p>
-              <p className="mt-2">来源：Anthropic 官方示例 · {example.id}</p>
-              <p className="mt-2">
-                官方原始界面保留英文。固定版本 {example.commit.slice(0, 8)} · Apache-2.0
-              </p>
-              <button
-                className="mt-2 underline"
-                onClick={() =>
-                  void run(async () => {
-                    await window.electron.openExternal(example.upstreamUrl)
-                  })
-                }
-              >
-                查看官方源码
-              </button>
+              {example.origin === "devclaw" ? (
+                <>
+                  <p className="mt-2">来源：CMBDevClaw 本工程示例 · {example.version}</p>
+                  <p className="mt-2 break-all">源码目录：{example.sourcePath}</p>
+                  <p className="mt-2">随应用打包并核对源文件；安装不会自动批准权限或启动任务。</p>
+                </>
+              ) : (
+                <>
+                  <p className="mt-2">来源：Anthropic 官方示例 · {example.id}</p>
+                  <p className="mt-2">
+                    官方原始界面保留英文。固定版本 {example.commit.slice(0, 8)} · Apache-2.0
+                  </p>
+                  <button
+                    className="mt-2 underline"
+                    onClick={() =>
+                      void run(async () => {
+                        await window.electron.openExternal(example.upstreamUrl)
+                      })
+                    }
+                  >
+                    查看官方源码
+                  </button>
+                </>
+              )}
             </details>
             <Button
               className="mt-auto"
@@ -308,7 +321,10 @@ export function OfficialSparksExamples({
                 <p role="alert" className="rounded border border-amber-500/50 bg-amber-500/10 p-3">
                   两个示例会占用同一界面区域。确认后将从当前聊天组合移除 「
                   {review.plan.selection.removed
-                    .map((row) => (row.name === "token-weather" ? "用量天气" : "修改回放"))
+                    .map(
+                      (row) =>
+                        examples.find((item) => item.pluginName === row.name)?.title ?? row.name
+                    )
                     .join("、")}
                   」 ，换成「{review.example.title}」。原插件保留安装，其他助手配置保留。
                 </p>

@@ -1,0 +1,5 @@
+{
+  "apiVersion": "cmb.mods/v2",
+  "id": "creator-review-first",
+  "entry": "main.ts"
+}

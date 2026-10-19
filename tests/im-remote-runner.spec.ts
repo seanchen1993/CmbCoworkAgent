@@ -330,6 +330,117 @@ async function testForeignOwnerDefersWithoutRuntime(): Promise<void> {
   }
 }
 
+async function testLateSourceSettlementDoesNotRewriteDeliveredTransport(
+  reclaim = false
+): Promise<void> {
+  const context = await createContext(),
+    gateway = new TestGateway()
+  const source = Promise.withResolvers<void>()
+  const delivered = Promise.withResolvers<void>()
+  const originalSubmit = gateway.submitReply.bind(gateway)
+  const originalAck = gateway.sendAcknowledgement.bind(gateway)
+  gateway.sendAcknowledgement = async (ack) => {
+    await originalAck(ack)
+    if (reclaim && ack.type === "completed") {
+      assert.equal(releaseLocalThreadRunLease(target.threadId, "im", "late-source-owner"), true)
+      assert.equal(
+        claimLocalThreadRunLease({
+          threadId: target.threadId,
+          owner: "im",
+          runId: "late-source-owner"
+        }).acquired,
+        true
+      )
+    }
+  }
+  gateway.submitReply = async (reply) => {
+    assert.equal(
+      getLocalThreadRunLease(target.threadId)?.owner,
+      "im",
+      "the original external lease remains held during durable delivery"
+    )
+    const result = await originalSubmit(reply)
+    delivered.resolve()
+    return result
+  }
+  let calls = 0
+  const errors: unknown[][] = [],
+    originalError = console.error
+  console.error = (...args) => {
+    errors.push(args)
+  }
+  const runner = new ImRemoteRunner({
+    gateway,
+    eventStore: context.events,
+    capabilityGuard: capabilityGuard(context),
+    replyClient: new ImReplyClient(gateway, context.events),
+    setThreadLifecycle: async () => undefined,
+    createRunId: () => "late-source-owner",
+    executeTurn: async (input) => {
+      calls++
+      assert.equal(typeof input.onSourceSettlement, "function")
+      input.onSourceSettlement!(source.promise, () =>
+        source.reject(new Error("exact source owner lost"))
+      )
+      return "already delivered reply"
+    }
+  })
+  try {
+    const queued = await queueEvent(context, 20)
+    let settled = false
+    const pending = runner.invoke(queued, new AbortController().signal)
+    void pending.then(() => {
+      settled = true
+    })
+    await delivered.promise
+    for (
+      let step = 0;
+      step < 100 && !gateway.acknowledgements.some((ack) => ack.type === "completed");
+      step++
+    )
+      await new Promise((resolve) => setTimeout(resolve, 0))
+    if (!reclaim) {
+      for (let step = 0; step < 100 && getLocalThreadRunLease(target.threadId); step++)
+        await new Promise((resolve) => setTimeout(resolve, 0))
+      assert.equal(getLocalThreadRunLease(target.threadId), undefined)
+      assert.equal(
+        settled,
+        false,
+        "original finally awaits source cleanup after releasing its lease"
+      )
+    }
+    assert.equal(context.events.getEvent(queued.eventId)?.state, "completed")
+    assert.equal(context.events.listOutbox("sent").length, 1)
+    source.reject(new Error("actual late source finalization rejected"))
+    assert.equal(
+      await pending,
+      "completed",
+      "a delivered reply is not retransmitted or reclassified"
+    )
+    assert.equal(context.events.getEvent(queued.eventId)?.state, "completed")
+    assert.equal(gateway.replies.length, 1)
+    assert.equal(calls, 1)
+    assert(
+      errors.some(
+        (args) =>
+          args[0] ===
+          "[IM] Source settlement failed after durable delivery; transport is not retried:"
+      )
+    )
+    if (reclaim)
+      assert.equal(
+        getLocalThreadRunLease(target.threadId)?.runId,
+        "late-source-owner",
+        "a late original finally must not release the replacement lease with an identical runId"
+      )
+  } finally {
+    source.resolve()
+    if (reclaim) releaseLocalThreadRunLease(target.threadId, "im", "late-source-owner")
+    console.error = originalError
+    context.database.close()
+  }
+}
+
 async function runForeignOwnerReleaseWakeScenario(
   owner: Extract<LocalThreadRunOwner, "desktop" | "scheduler">
 ): Promise<void> {
@@ -711,6 +822,14 @@ function testInboxSchedulerDeliveryContextIsExplicitAndStrict(): void {
 const tests: Array<[string, () => void | Promise<void>]> = [
   ["testSuccessfulRunAndDurableOutbox", testSuccessfulRunAndDurableOutbox],
   ["testForeignOwnerDefersWithoutRuntime", testForeignOwnerDefersWithoutRuntime],
+  [
+    "testLateSourceSettlementDoesNotRewriteDeliveredTransport",
+    testLateSourceSettlementDoesNotRewriteDeliveredTransport
+  ],
+  [
+    "testReclaimedOwnerCannotReleaseReplacement",
+    () => testLateSourceSettlementDoesNotRewriteDeliveredTransport(true)
+  ],
   [
     "testDesktopAndSchedulerReleaseWakeDeferredEvents",
     testDesktopAndSchedulerReleaseWakeDeferredEvents

@@ -1,11 +1,20 @@
 import AdmZip from "adm-zip"
 import { createHash } from "node:crypto"
-import { cpSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
+import {
+  cpSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  readdirSync,
+  rmSync,
+  writeFileSync
+} from "node:fs"
 import { tmpdir } from "node:os"
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path"
 import { afterAll, beforeAll, expect, it, vi } from "vitest"
 import type { PluginDetail, PluginMetadata } from "../types"
-import { verifyCommunityExample } from "../mods/community-examples"
+import { PLATFORM_EXAMPLES, verifyCommunityExample } from "../mods/community-examples"
 
 vi.mock("electron", () => ({
   app: { getPath: () => tmpdir(), getName: () => "upstream-test", getVersion: () => "0.0.0" },
@@ -206,5 +215,212 @@ it("reuses a disabled exact original without enabling it or changing catalog met
     const removed = await handlers.get("plugins:delete")!(null,
       installed.pluginId) as { success: boolean }
     expect(removed.success).toBe(true)
+  }
+}, 30000)
+
+it.each(PLATFORM_EXAMPLES)(
+  "installs local $title without approval or overwriting user changes",
+  async (example) => {
+    if (example.origin !== "devclaw") throw Error("unexpected provenance")
+    const root = join(home, "builtin-resources/community-originals")
+    mkdirSync(root, { recursive: true })
+    const directory = join(root, "../platform-examples", example.id)
+    cpSync(resolve(example.sourcePath), directory, { recursive: true })
+    const verifyLocal = (target: string) => verifyCommunityExample(root, example.id, target)
+    const installed = await plugins.installBundledCommunityPlugin(
+      directory,
+      example.pluginName,
+      verifyLocal,
+      () => {}
+    )
+    const row = (await list()).find((plugin) => plugin.id === installed.pluginId)!
+    try {
+      expect(installed).toMatchObject({
+        pluginName: example.pluginName,
+        alreadyInstalled: false,
+        requiresApproval: true
+      })
+      await verifyLocal(row.path)
+      const report = await checkFunctionPlugin(row.path)
+      expect(report.packageValid).toBe(true)
+      expect(report.authorized).toBe(false)
+      expect(report.valid, JSON.stringify(report.diagnostics)).toBe(true)
+      expect(report.compatibility.strictCompatible, JSON.stringify(report.diagnostics)).toBe(true)
+      expect(report.registrations.length).toBeGreaterThan(0)
+      expect(
+        await plugins.installBundledCommunityPlugin(
+          directory,
+          example.pluginName,
+          verifyLocal,
+          () => {}
+        )
+      ).toEqual({ ...installed, alreadyInstalled: true })
+      const register = join(row.path, "hooks/register.ts")
+      const customized = `${readFileSync(register, "utf8")}\n// local customization\n`
+      writeFileSync(register, customized)
+      await expect(
+        plugins.installBundledCommunityPlugin(directory, example.pluginName, verifyLocal, () => {})
+      ).rejects.toThrow("MODS_COMMUNITY_EXISTING_CONFLICT")
+      expect(readFileSync(register, "utf8")).toBe(customized)
+      expect((await list()).filter((plugin) => plugin.name === example.pluginName)).toHaveLength(1)
+    } finally {
+      expect(await handlers.get("plugins:delete")!(null, row.id)).toEqual({ success: true })
+    }
+  },
+  30000
+)
+
+function guardedProviderFixture() {
+  const name = "task-workbench-provider" as const
+  const fixture = mkdtempSync(join(home, "bundled-copy-guard-"))
+  const root = join(fixture, "community-originals")
+  const source = join(fixture, "platform-examples", name)
+  mkdirSync(root)
+  cpSync(resolve("examples/sparks-task-workbench/provider"), source, { recursive: true })
+  return {
+    name,
+    source,
+    verify: (target: string) => verifyCommunityExample(root, name, target)
+  }
+}
+
+it("rejects executable changes between parsing and copying and removes only its new directory", async () => {
+  const fixture = guardedProviderFixture()
+  const storage = await import("../storage")
+  const before = await list()
+  const directories = readdirSync(storage.getPluginsDir()).sort()
+  let checks = 0
+  await expect(
+    plugins.installBundledCommunityPlugin(fixture.source, fixture.name, fixture.verify, () => {
+      if (++checks !== 3) return
+      const module = join(fixture.source, "hooks/register.ts")
+      writeFileSync(module, `${readFileSync(module, "utf8")}\n// changed after validation\n`)
+    })
+  ).rejects.toThrow("MODS_COMMUNITY_INTEGRITY")
+  expect(checks).toBe(3)
+  expect(await list()).toEqual(before)
+  expect(readdirSync(storage.getPluginsDir()).sort()).toEqual(directories)
+}, 30000)
+
+it("rejects a changed bundled manifest name before it can update an existing user's plugin", async () => {
+  const fixture = guardedProviderFixture()
+  const userSource = join(home, "protected-user-provider")
+  cpSync(resolve("examples/sparks-task-workbench/provider"), userSource, { recursive: true })
+  const manifestPath = join(userSource, "plugin.json")
+  const manifest = JSON.parse(readFileSync(manifestPath, "utf8"))
+  manifest.name = "personal-guarded-provider"
+  manifest.version = "9.9.9"
+  writeFileSync(manifestPath, JSON.stringify(manifest))
+  const userModule = join(userSource, "hooks/register.ts")
+  writeFileSync(userModule, `${readFileSync(userModule, "utf8")}\n// personal version\n`)
+  expect(
+    (await plugins.installPluginFromDir(userSource, undefined, "local", undefined, true)).success
+  ).toBe(true)
+  const row = (await list()).find((plugin) => plugin.name === manifest.name)!
+  const retainedManifest = readFileSync(join(row.path, "plugin.json"))
+  const retainedModule = readFileSync(join(row.path, "hooks/register.ts"))
+  const before = await list()
+  try {
+    await expect(
+      plugins.installBundledCommunityPlugin(
+        fixture.source,
+        fixture.name,
+        async (target) => {
+          await fixture.verify(target)
+          if (target === fixture.source) {
+            const changed = JSON.parse(readFileSync(join(target, "plugin.json"), "utf8"))
+            changed.name = manifest.name
+            writeFileSync(join(target, "plugin.json"), JSON.stringify(changed))
+          }
+        },
+        () => {}
+      )
+    ).rejects.toThrow("独立插件名称已存在")
+    expect(await list()).toEqual(before)
+    expect(readFileSync(join(row.path, "plugin.json"))).toEqual(retainedManifest)
+    expect(readFileSync(join(row.path, "hooks/register.ts"))).toEqual(retainedModule)
+  } finally {
+    expect(await handlers.get("plugins:delete")!(null, row.id)).toEqual({ success: true })
+  }
+}, 30000)
+
+it("rechecks the native caller after copied-byte verification before catalog publication", async () => {
+  const fixture = guardedProviderFixture()
+  const storage = await import("../storage")
+  const before = await list()
+  const directories = readdirSync(storage.getPluginsDir()).sort()
+  let allowed = true
+  let copiedChecked = false
+  await expect(
+    plugins.installBundledCommunityPlugin(
+      fixture.source,
+      fixture.name,
+      async (target) => {
+        await fixture.verify(target)
+        if (target !== fixture.source) {
+          copiedChecked = true
+          allowed = false
+        }
+      },
+      () => {
+        if (!allowed) throw Error("CALLER_STALE_AFTER_COPY")
+      }
+    )
+  ).rejects.toThrow("CALLER_STALE_AFTER_COPY")
+  expect(copiedChecked).toBe(true)
+  expect(await list()).toEqual(before)
+  expect(readdirSync(storage.getPluginsDir()).sort()).toEqual(directories)
+}, 30000)
+
+it("derives installed metadata from verified copied bytes after temporary source metadata drift", async () => {
+  const fixture = guardedProviderFixture()
+  const manifestPath = join(fixture.source, "plugin.json")
+  const canonicalBytes = readFileSync(manifestPath)
+  const canonical = JSON.parse(canonicalBytes.toString("utf8"))
+  let checks = 0
+  const installed = await plugins.installBundledCommunityPlugin(
+    fixture.source,
+    fixture.name,
+    async (target) => {
+      await fixture.verify(target)
+      if (target === fixture.source) {
+        writeFileSync(
+          manifestPath,
+          JSON.stringify({
+            ...canonical,
+            version: "9.9.9",
+            author: { name: "Temporary source author" },
+            description: "Temporary source description",
+            useScenario: "Temporary source scenario"
+          })
+        )
+      }
+    },
+    () => {
+      if (++checks === 3) writeFileSync(manifestPath, canonicalBytes)
+    }
+  )
+  try {
+    expect(checks).toBe(4)
+    const row = (await list()).find((plugin) => plugin.id === installed.pluginId)!
+    expect(row).toMatchObject({
+      name: canonical.name,
+      version: canonical.version,
+      author: "",
+      description: canonical.description,
+      skillCount: 0,
+      mcpServerCount: 0,
+      hookCount: 0,
+      hookPath: "hooks/hooks.json",
+      modCount: 1,
+      enabled: true
+    })
+    expect(row).not.toHaveProperty("useScenario")
+    expect(readFileSync(join(row.path, "plugin.json"))).toEqual(canonicalBytes)
+    await fixture.verify(row.path)
+  } finally {
+    expect(await handlers.get("plugins:delete")!(null, installed.pluginId)).toEqual({
+      success: true
+    })
   }
 }, 30000)

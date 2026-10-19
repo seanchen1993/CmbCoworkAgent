@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from "node:crypto"
 import { parseClawProfile, type ClawProfile } from "../../../shared/mods/claw"
 import type { DevelopmentScope } from "../v2/development-session"
+import type { CompositionSaveIntent } from "./creator-composition-save"
 
 type Profile = ClawProfile | null
 interface Settings {
@@ -28,6 +29,7 @@ interface State {
   revision: number
   receipts: Receipt[]
   saved: Saved[]
+  saveIntents?: CompositionSaveIntent[]
 }
 export interface CompositionHistoryToken {
   workspace: string
@@ -84,6 +86,54 @@ export class CreatorCompositionHistory {
       )
         throw Error("COMPOSITION_HISTORY_INVALID")
       saved.profile = parseClawProfile(saved.profile)
+    }
+    if (state.saveIntents !== undefined) {
+      if (!Array.isArray(state.saveIntents) || state.saveIntents.length > 64)
+        throw Error("COMPOSITION_HISTORY_INVALID")
+      for (const intent of state.saveIntents) {
+        this.name(intent.name)
+        // Old records used compiledDigest for the trial identity. They carry no resumable
+        // native approval; normalize only that observation, never manufacture a formal hash.
+        if (Array.isArray(intent.dependencies))
+          for (const dependency of intent.dependencies) {
+            const legacy = dependency as typeof dependency & { compiledDigest?: unknown }
+            if (
+              legacy.activeTrialCompiledDigest === undefined &&
+              typeof legacy.compiledDigest === "string"
+            )
+              legacy.activeTrialCompiledDigest = legacy.compiledDigest
+            delete legacy.compiledDigest
+          }
+        if (
+          !intent.id ||
+          !intent.identity ||
+          !intent.scope?.threadId ||
+          intent.scope.workspace !== workspace ||
+          !intent.scope.incarnation ||
+          !Number.isSafeInteger(intent.revision) ||
+          intent.revision < 0 ||
+          !["needs-reuse", "needs-approval", "saved", "failed", "unknown", "cancelled"].includes(
+            intent.phase
+          ) ||
+          !Array.isArray(intent.dependencies) ||
+          (!intent.dependencies.length && intent.phase !== "saved") ||
+          intent.dependencies.length > 32 ||
+          !Array.isArray(intent.completed) ||
+          intent.completed.some((id) => typeof id !== "string") ||
+          intent.dependencies.some(
+            (item) =>
+              !item.draftId ||
+              !Number.isSafeInteger(item.revision) ||
+              item.revision < 1 ||
+              !/^[a-f0-9]{64}$/.test(item.bundleDigest) ||
+              !/^[a-f0-9]{64}$/.test(item.activeTrialCompiledDigest)
+          ) ||
+          (intent.nativeReuseCompiledDigest !== undefined &&
+            !/^[a-f0-9]{64}$/.test(intent.nativeReuseCompiledDigest))
+        )
+          throw Error("COMPOSITION_HISTORY_INVALID")
+        intent.expected = intent.expected === null ? null : parseClawProfile(intent.expected)
+      }
     }
     return { raw: value, state }
   }
@@ -205,6 +255,31 @@ export class CreatorCompositionHistory {
     const saved = this.read(workspace).state.saved.find((item) => item.name === name)
     if (!saved || saved.revision !== revision) throw Error("COMPOSITION_SAVED_CHANGED")
     return structuredClone(saved.profile)
+  }
+  assertSaveAvailable(workspace: string, name: string, revision: number) {
+    this.name(name)
+    const saved = this.read(workspace).state.saved
+    const old = saved.find((item) => item.name === name)
+    if (!Number.isSafeInteger(revision) || revision < 0 || (old?.revision ?? 0) !== revision)
+      throw Error("COMPOSITION_SAVED_CHANGED")
+    if (!old && saved.length >= 24) throw Error("COMPOSITION_SAVED_CAPACITY")
+  }
+  saveIntent(scope: DevelopmentScope): CompositionSaveIntent | undefined {
+    const intent = this.read(scope.workspace).state.saveIntents?.find(
+      (item) => scopeKey(item.scope) === scopeKey(scope)
+    )
+    return intent ? structuredClone(intent) : undefined
+  }
+  putSaveIntent(intent: CompositionSaveIntent) {
+    this.name(intent.name)
+    this.write(intent.scope.workspace, (state) => {
+      state.saveIntents = [
+        ...(state.saveIntents ?? []).filter(
+          (item) => scopeKey(item.scope) !== scopeKey(intent.scope)
+        ),
+        structuredClone(intent)
+      ].slice(-64)
+    })
   }
   save(workspace: string, name: string, revision: number, profile: ClawProfile) {
     this.name(name)

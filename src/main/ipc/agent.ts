@@ -2,6 +2,7 @@ import { publishDevelopmentTurnSettlement } from "../mods/v2/development-turn-se
 import { observeStopFailure } from "../hooks/stop-failure-observer"
 import { foregroundToolPolicy } from "../agent/foreground-tool-policy"
 import { managedBizRetryService } from "../harness-board/biz-retry-service"
+import { classifyManagedAgentFailure } from "../agent/managed-agent-failure"
 import { IpcMain, BrowserWindow, dialog } from "electron"
 import { getModsManager } from "../mods/manager"
 import { isPlainComposerSubmission } from "../../shared/mods/v2/prompt-submission"
@@ -77,6 +78,7 @@ import { getDurableRuntimeTail } from "./thread-runtime-tail"
 import { Command } from "@langchain/langgraph"
 import {
   getCapturedSystemPromptPreview,
+  captureAgentCreatorAccounting,
   getSkillEvolutionThreshold,
   withCheckpointer,
   pendingApprovals,
@@ -326,6 +328,7 @@ import {
 import { createPersistentThreadHookScope } from "../hooks/thread-scope-persistence"
 import type { HookConfig, HookEvent, HookResult } from "../hooks/types"
 import { fireSessionStartOnce } from "../hooks/session-lifecycle"
+import { createHookAccountingBinder, type HookAccountingBinder } from "../hooks/model-accounting"
 import { runHooksEnriched } from "../hooks/required-skill"
 import {
   buildSubagentStartHookContext,
@@ -407,6 +410,7 @@ import {
   isActiveManagedRunSession
 } from "../harness-board/auto-mode-controller"
 import { reportProjectSnapshotNow } from "../services/harness-status-reporter"
+import { dispatchManagedTurnObservation } from "../harness-board/managed-turn-dispatch"
 import { isMemoryAllowedForProjectMode } from "../project-mode-memory"
 import type { AgentAutoCommitResult } from "../types"
 import { formatAutoCommitLines } from "../../shared/auto-commit-format"
@@ -460,6 +464,7 @@ import {
   registerAgentGoalControlImplementation,
   registerAgentRunImplementation,
   startAgentRun,
+  settleAgentFunctionTurn,
   type AgentRunDelivery,
   type AgentRunExecutionContext
 } from "../agent/agent-run-service"
@@ -657,18 +662,20 @@ async function queueAutoModeAgentTurnEnd(input: {
   }
   if (turnId) reportedAutoModeTerminalTurnByThread.set(input.threadId, turnId)
 
-  setImmediate(() => {
-    void handleAutoModeAgentTurnEnd({
-      threadId: input.threadId,
-      outcome: input.terminal.outcome,
-      endReason: input.terminal.endReason,
-      ...(input.contextUsage ? { contextUsage: input.contextUsage } : {}),
-      ...(input.executionFacts ? { executionFacts: input.executionFacts } : {}),
-      delivery: input.delivery
-    }).catch((error) => {
+  dispatchManagedTurnObservation(
+    () =>
+      handleAutoModeAgentTurnEnd({
+        threadId: input.threadId,
+        outcome: input.terminal.outcome,
+        endReason: input.terminal.endReason,
+        ...(input.contextUsage ? { contextUsage: input.contextUsage } : {}),
+        ...(input.executionFacts ? { executionFacts: input.executionFacts } : {}),
+        delivery: input.delivery
+      }),
+    (error) => {
       console.error(`[AutoMode] Failed to handle terminal run for ${input.threadId}:`, error)
-    })
-  })
+    }
+  )
 }
 
 async function markLatestForkBoundary(input: {
@@ -2011,6 +2018,16 @@ async function settlePhysicalAgentRun({
   runOwner = "desktop",
   releaseRunLease = true
 }: PhysicalAgentRunSettlementOptions): Promise<void> {
+  const functionTurnOwner =
+    functionTurnReason || controller.signal.aborted || turnStateShouldDispose
+      ? getModsManager()?.functionTurns.captureSettlementOwner(threadId, runToken)
+      : undefined
+  const functionTurnSettlement = functionTurnOwner?.settlement
+  if (!releaseRunLease && functionTurnOwner)
+    agentRunExecutionContextStorage.getStore()?.onFunctionTurnSettlement?.(
+      functionTurnOwner.settlement,
+      functionTurnOwner.invalidate
+    )
   let transcriptFlushSucceeded = false
   let developmentSettlementFailed = false
   const developmentOriginalThread = getThreadCore(threadId)
@@ -2126,6 +2143,15 @@ async function settlePhysicalAgentRun({
     onPhaseError: reportSettlementError
   })
 
+  // Admission still owns the original source while the exact logical completion publishes.
+  // External transports release their own lease after completion and must never wait here.
+  let functionTurnFailure: { error: unknown } | undefined
+  try { await settleAgentFunctionTurn(releaseRunLease ? functionTurnSettlement : undefined) }
+  catch (error) {
+    developmentSettlementFailed = true
+    functionTurnFailure = { error }
+  }
+
   if (releaseRunLease && developmentIncarnation &&
     matchesThreadIncarnation(getThreadCore(threadId), developmentIncarnation)) {
     publishDevelopmentTurnSettlement({ threadId, incarnation: developmentIncarnation,
@@ -2151,6 +2177,7 @@ async function settlePhysicalAgentRun({
       onPhaseError: reportSettlementError
     })
   )
+  if (functionTurnFailure) throw functionTurnFailure.error
 }
 
 /**
@@ -2186,6 +2213,7 @@ async function maybeRunSubagentStopHooksFromStreamPayload(params: {
   hookScope: HookScopeController
   firedToolCallIds: Set<string>
   onHookResult?: HookResultCallback
+  bindHookAccounting?: HookAccountingBinder
   /** Diagnostic-only callback for "matched event but filtered out by scope". */
   onHookSkipped?: ScopeSkipCallback
 }): Promise<void> {
@@ -2227,6 +2255,7 @@ async function maybeRunSubagentStopHooksFromStreamPayload(params: {
     toolCallId,
     failed: isErr
   })
+  params.bindHookAccounting?.(subagentStopContext)
   const result = await runHooksEnriched(
     resolveEnabledHooksForRun(
       params.workspacePath,
@@ -2263,6 +2292,7 @@ function maybeRunSubagentStartHooksFromToolCalls(params: {
   hookScope: HookScopeController
   firedStartIds: Set<string>
   onHookResult?: HookResultCallback
+  bindHookAccounting?: HookAccountingBinder
   onHookSkipped?: ScopeSkipCallback
 }): void {
   if (!params.toolCalls || params.toolCalls.length === 0) return
@@ -2282,6 +2312,7 @@ function maybeRunSubagentStartHooksFromToolCalls(params: {
       subagentType,
       taskDescription
     })
+    params.bindHookAccounting?.(context)
     context.featureId = params.featureId
     context.harnessProjectId = params.harnessProjectId
     context.harnessAdapterId = params.harnessAdapterId
@@ -2328,6 +2359,7 @@ async function maybeRunSubagentLifecycleHooksFromStreamPayload(params: {
   firedStartIds: Set<string>
   firedStopIds: Set<string>
   onHookResult?: HookResultCallback
+  bindHookAccounting?: HookAccountingBinder
   onStartHookSkipped?: ScopeSkipCallback
   onStopHookSkipped?: ScopeSkipCallback
 }): Promise<void> {
@@ -2343,6 +2375,7 @@ async function maybeRunSubagentLifecycleHooksFromStreamPayload(params: {
     hookScope: params.hookScope,
     firedStartIds: params.firedStartIds,
     onHookResult: params.onHookResult,
+    bindHookAccounting: params.bindHookAccounting,
     onHookSkipped: params.onStartHookSkipped
   })
 
@@ -2366,6 +2399,7 @@ async function maybeRunSubagentLifecycleHooksFromStreamPayload(params: {
     hookScope: params.hookScope,
     firedToolCallIds: params.firedStopIds,
     onHookResult: params.onHookResult,
+    bindHookAccounting: params.bindHookAccounting,
     onHookSkipped: params.onStopHookSkipped
   })
 }
@@ -2452,7 +2486,8 @@ function registerCurrentRunMessagePreparer({
   signal,
   onHookResult,
   onHookSkippedFactory,
-  onExplicitSkillActivated
+  onExplicitSkillActivated,
+  bindHookAccounting
 }: {
   threadId: string
   runToken: string
@@ -2465,6 +2500,7 @@ function registerCurrentRunMessagePreparer({
   onHookResult: HookResultCallback
   onHookSkippedFactory: (event: HookEvent) => ScopeSkipCallback
   onExplicitSkillActivated?: (skill: SkillLifecycleMatch) => void
+  bindHookAccounting?: HookAccountingBinder
 }): void {
   // A new invoke resets TurnState in place. Capture this run's hook objects so
   // an async steer preparation can never mutate the replacement run's scope.
@@ -2481,6 +2517,8 @@ function registerCurrentRunMessagePreparer({
     prepare: async (queuedMessage) => {
       const initialQueuedModelInput = neutralizeWorkflowPlumbingUserText(queuedMessage.content)
       const prepared = await prepareStandardUserPrompt({
+        bindHookAccounting,
+        signal,
         rawMessage: queuedMessage.content,
         initialModelInput: initialQueuedModelInput,
         allowExplicitSkillFromMessage: queuedMessage.allowExplicitSkillFromMessage ?? true,
@@ -7554,6 +7592,17 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             return
           }
 
+          // Goal set/resume and native run admission already fixed this request's owner.
+          // Prompt/Setup hooks run before runtime construction, so bind once here and reuse.
+          const creatorAccounting = captureAgentCreatorAccounting({
+            threadId, workspacePath, currentRunMessageQueueOwnerToken: runToken,
+            abortSignal: abortController.signal
+          })
+          const bindHookAccounting = creatorAccounting ? createHookAccountingBinder(
+            creatorAccounting, { workspace: workspacePath, threadId }, abortController.signal,
+            () => throwIfPhysicalStreamRunIsInactive(threadId, runToken, abortController.signal)
+          ) : undefined
+
           // Fire SessionStart once per thread lifetime (not per turn). SessionEnd fires when the
           // thread is deleted (threads:delete) or the app is quitting.
           await fireSessionStartOnce(
@@ -7565,7 +7614,8 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             turnState.turnId,
             harnessAgentContext.pluginOutputDir,
             harnessAgentContext.systemId,
-            getHarnessHookContext(harnessAgentContext)
+            getHarnessHookContext(harnessAgentContext),
+            bindHookAccounting
           )
           throwIfInvokeAborted()
           sendActiveHookNotice(window, channel, workspacePath)
@@ -7575,6 +7625,8 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             initialModelInput: string
           ): Promise<PreparedUserPrompt> =>
             prepareStandardUserPrompt({
+              bindHookAccounting,
+              signal: abortController.signal,
               rawMessage,
               initialModelInput,
               trustedExplicitSkill: runExecutionContext.trustedExplicitSkill,
@@ -7664,6 +7716,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           // preparation to this run's hook scope/turn id so it receives the same
           // explicit-skill activation and UserPromptSubmit policy as a normal turn.
           registerCurrentRunMessagePreparer({
+            bindHookAccounting,
             threadId,
             runToken,
             workspacePath,
@@ -8355,6 +8408,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               runId: runToken
             },
             baseOptions: () => ({
+              creatorAccounting,
               threadId,
               outputStyle: getRequestedOutputStyle(metadata),
               currentRunMessageQueueOwnerToken: runToken,
@@ -8588,6 +8642,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             // the parent turn), so keep them outside the best-effort metrics/
             // tracing catch below. A HookHaltError must reach the stream owner.
             await maybeRunSubagentLifecycleHooksFromStreamPayload({
+              bindHookAccounting,
               payload,
               workspacePath: sessionWorkspacePath,
               threadId,
@@ -9222,6 +9277,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           if (!abortController.signal.aborted) {
             while (!abortController.signal.aborted) {
               const completionOutcome = await runCompletionHooksWithRevision({
+                bindHookAccounting,
                 enableModsCompletionGate: !isWorkflowNotificationTurn,
                 hasTerminalModelRefusal: () =>
                   !!readTurnCompletionGateReport(threadId, runToken)?.refusal,
@@ -9567,7 +9623,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               if (!agent) throw new Error("Cannot continue goal: agent runtime is unavailable")
 
               let continuationPrompt = outcome.continuationPrompt
-              const promptSubmitContext: HookContext = {
+              const promptSubmitContext: HookContext = (bindHookAccounting ?? (context => context))({
                 toolArgs: { message: continuationPrompt },
                 userPrompt: continuationPrompt,
                 workspacePath: workspacePath ?? undefined,
@@ -9576,7 +9632,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
                 pluginOutputDir: harnessAgentContext.pluginOutputDir,
                 systemId: harnessAgentContext.systemId,
                 ...getHarnessHookContext(harnessAgentContext)
-              }
+              })
               const promptSubmitResult = await runHooksEnriched(
                 resolveEnabledHooksForRun(
                   workspacePath ?? undefined,
@@ -10289,7 +10345,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
                 lastInputTokens: highWaterInputTokens > 0 ? highWaterInputTokens : undefined
               })
             }
-            markAutoModeTerminal("error", "provider_error", errMsg, error)
+            markAutoModeTerminal("error", classifyManagedAgentFailure(error), errMsg, error)
             turnStateShouldDispose = true
           } else {
             cancellationTerminalPending = cancelledRequestEligible && !isInternalNotificationTurn &&
@@ -11226,8 +11282,17 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           removeWindowClosedSubscription()
         })
         sendActiveHookNotice(window, channel, workspacePath)
+        const creatorAccounting = captureAgentCreatorAccounting({
+          threadId, workspacePath, currentRunMessageQueueOwnerToken: runToken,
+          abortSignal: abortController.signal
+        })
+        const bindHookAccounting = creatorAccounting ? createHookAccountingBinder(
+          creatorAccounting, { workspace: workspacePath, threadId }, abortController.signal,
+          () => throwIfPhysicalStreamRunIsInactive(threadId, runToken, abortController.signal)
+        ) : undefined
 
         registerCurrentRunMessagePreparer({
+            bindHookAccounting,
           threadId,
           runToken,
           workspacePath,
@@ -11296,6 +11361,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             source: "desktop",
             runLease: { owner: "desktop", runId: runToken },
             baseOptions: () => ({
+              creatorAccounting,
               threadId,
               currentRunMessageQueueOwnerToken: runToken,
               onNativeConversationTranscriptFlush: captureNativeConversationTranscriptFlush(
@@ -11457,6 +11523,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             const commitPendingResumeMessageSideEffects = async (): Promise<void> => {
               for (const payload of pendingResumeMessagePayloads.drain()) {
                 await maybeRunSubagentLifecycleHooksFromStreamPayload({
+              bindHookAccounting,
                   payload,
                   workspacePath,
                   threadId,
@@ -11611,6 +11678,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
 
           if (!abortController.signal.aborted) {
             const completionOutcome = await runCompletionHooksWithRevision({
+                bindHookAccounting,
               enableModsCompletionGate: true,
               hasTerminalModelRefusal: () =>
                 !!readTurnCompletionGateReport(threadId, runToken)?.refusal,
@@ -12418,8 +12486,17 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
         removeWindowClosedSubscription()
       })
       sendActiveHookNotice(window, channel, workspacePath)
+      const creatorAccounting = captureAgentCreatorAccounting({
+        threadId, workspacePath, currentRunMessageQueueOwnerToken: runToken,
+        abortSignal: abortController.signal
+      })
+      const bindHookAccounting = creatorAccounting ? createHookAccountingBinder(
+        creatorAccounting, { workspace: workspacePath, threadId }, abortController.signal,
+        () => throwIfPhysicalStreamRunIsInactive(threadId, runToken, abortController.signal)
+      ) : undefined
 
       registerCurrentRunMessagePreparer({
+            bindHookAccounting,
         threadId,
         runToken,
         workspacePath,
@@ -12470,6 +12547,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             source: "desktop",
             runLease: { owner: "desktop", runId: runToken },
             baseOptions: () => ({
+              creatorAccounting,
               threadId,
               outputStyle: getRequestedOutputStyle(metadata),
               currentRunMessageQueueOwnerToken: runToken,
@@ -12625,6 +12703,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             const commitPendingInterruptMessageSideEffects = async (): Promise<void> => {
               for (const payload of pendingIntMessagePayloads.drain()) {
                 await maybeRunSubagentLifecycleHooksFromStreamPayload({
+              bindHookAccounting,
                   payload,
                   workspacePath,
                   threadId,
@@ -12772,6 +12851,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
 
           if (!abortController.signal.aborted) {
             const completionOutcome = await runCompletionHooksWithRevision({
+                bindHookAccounting,
               enableModsCompletionGate: true,
               hasTerminalModelRefusal: () =>
                 !!readTurnCompletionGateReport(threadId, runToken)?.refusal,
@@ -13165,6 +13245,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               )
             })
         }
+        let cancelledBackground = false
         if (controller && !cancelWorkers) {
           // Foreground cancellation should stop the active run and any thread-scoped
           // background tasks it launched. "Stop background workers" uses the same IPC
@@ -13177,9 +13258,15 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           // for checkpoint/sandbox cleanup before opening a replacement stream.
           console.log(`[Agent] cancel: aborted controller for thread ${threadId}`)
         } else if (!controller && !cancelWorkers) {
-          console.warn(`[Agent] cancel: no active run found for thread ${threadId}`)
+          if (LocalSandbox.hasActiveBackgroundTasks(threadId)) {
+            await LocalSandbox.cancelBackgroundTasksAndWait(threadId)
+            cancelledBackground = true
+            console.log(`[Agent] cancel: stopped idle background tasks for thread ${threadId}`)
+          } else {
+            console.warn(`[Agent] cancel: no active run found for thread ${threadId}`)
+          }
         }
-        const cancelled = Boolean(controller && !cancelWorkers)
+        const cancelled = Boolean(controller && !cancelWorkers) || cancelledBackground
         if (cancelled) handleAutoModeAgentCancelled(threadId)
         return cancelled
       })

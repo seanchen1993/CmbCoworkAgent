@@ -1,3 +1,10 @@
+import { createAuthoringSourceBundle } from "../devtools/authoring-bundle"
+import { execFileSync } from "node:child_process"
+import { runInNewContext } from "node:vm"
+import ts from "typescript"
+import { isModObject, ModFunctionError } from "../../../shared/mods/v2/contracts"
+import { parseFunctionModelProtocol } from "../../../shared/mods/v2/model-protocol"
+import { readPureFunctionSource } from "../devtools/authoring-install-source"
 import { createHash } from "node:crypto"
 import { modCompiler } from "../loader"
 import { FUNCTION_HOST_REVISION } from "../../../shared/mods/v2/contracts"
@@ -111,6 +118,23 @@ describe("function plugin snapshot loader", () => {
       })
     )
     await expect(compileFunctionPlugin(root)).rejects.toThrow("MODS_TOOL_SCHEMA_REF")
+  })
+
+  it("pins explicit platform action bindings without running registration or exposing every capability", async () => {
+    const root = await plugin('export function register(){throw Error("must not execute") }')
+    const manifest = {
+      name: "loader-probe",
+      claw: { actions: [{ id: "report", name: "Report", inputSchema: { type: "object" },
+        platform: { id: "delivery", version: "1.0.0", action: "generate" } }] }
+    }
+    const save = () => writeFile(join(root, ".claude-plugin/plugin.json"), JSON.stringify(manifest))
+    await save()
+    const first = await compileFunctionPlugin(root)
+    expect(first.actions).toEqual(manifest.claw.actions)
+    expect(first.actions![0]).not.toHaveProperty("command")
+    manifest.claw.actions[0].platform.version = "1.1.0"
+    await save()
+    expect((await compileFunctionPlugin(root)).digest).not.toBe(first.digest)
   })
 
   it("preserves legacy digest shape and pins the full optional configuration declaration", async () => {
@@ -365,15 +389,17 @@ it.each(["legacy-v1", "result-v1"])("requires fresh approval for an unchanged ex
     name: "loader-probe", cmbCompatibility: { modelProtocol }
   }))
   const current = await compileFunctionPlugin(root, { captureSources: true })
-  const oldHostDigest = createHash("sha256").update(JSON.stringify({
-    name: current.name, profile: current.profile,
-    ...(modelProtocol === "result-v1" ? { modelProtocol } : {}),
-    hostRevision: "module-resources-v89", version: modCompiler().version,
-    code: current.code, clients: current.clients, environment: current.environment,
-    sources: Object.entries(current.authoringSources!).sort(([a], [b]) => a.localeCompare(b))
-  })).digest("hex")
-  expect(FUNCTION_HOST_REVISION).toBe("claude-295-tools-v90")
-  expect(current.digest).not.toBe(oldHostDigest)
+  expect(FUNCTION_HOST_REVISION).toBe("claude-295-tools-v91")
+  for (const hostRevision of ["module-resources-v89", "claude-295-tools-v90"]) {
+    const oldHostDigest = createHash("sha256").update(JSON.stringify({
+      name: current.name, profile: current.profile,
+      ...(modelProtocol === "result-v1" ? { modelProtocol } : {}),
+      hostRevision, version: modCompiler().version,
+      code: current.code, clients: current.clients, environment: current.environment,
+      sources: Object.entries(current.authoringSources!).sort(([a], [b]) => a.localeCompare(b))
+    })).digest("hex")
+    expect(current.digest).not.toBe(oldHostDigest)
+  }
 })
 
 it("defaults Claude packages to result objects and pins explicit legacy opt-in in the source digest", async () => {
@@ -429,4 +455,64 @@ it("does not silently ignore a null or invalid userConfig declaration", async ()
     bad: { type: "number", title: "Count", description: "Help", default: "not a number" }
   } }))
   await expect(compileFunctionPlugin(root)).rejects.toThrow("Invalid plugin configuration field: bad")
+})
+
+it("pins optional engineering schema migrations next to the original fields without executing code", async () => {
+  const root = await plugin('export function register(){throw Error("never execute") }')
+  const userConfig = { label: { type: "string", title: "Label", description: "Help", default: "new" } }
+  const userConfigSchema = { version: 1, migrations: [{ fromVersion: 0, toVersion: 1,
+    changes: [{ kind: "rename", from: "oldLabel", to: "label" }] }] }
+  await writeFile(join(root, ".claude-plugin/plugin.json"), JSON.stringify({ name: "loader-probe", userConfig, userConfigSchema, cmbCompatibility: { modelProtocol: "result-v1", userConfigMigrations: "v1" } }))
+  const first = await compileFunctionPlugin(root)
+  expect(first.userConfigSchema).toEqual(userConfigSchema)
+  await mkdir(join(root, "mods"))
+  await writeFile(join(root, "mods/manifest.json"), JSON.stringify({ apiVersion: "cmb.mods/v2",
+    id: "native-not-display", entry: "register.ts", userConfigSchema }))
+  await expect(compileFunctionPlugin(root)).rejects.toThrow("DECLARATION_CONFLICT")
+  await writeFile(join(root, ".claude-plugin/plugin.json"), JSON.stringify({ name: "loader-probe", userConfig }))
+  await expect(compileFunctionPlugin(root)).rejects.toThrow("SCHEMA_SOURCE_CONFLICT")
+  await writeFile(join(root, "mods/register.ts"), 'export function register(){}')
+  await writeFile(join(root, "mods/manifest.json"), JSON.stringify({ apiVersion: "cmb.mods/v2",
+    id: "native-not-display", entry: "register.ts", userConfig, userConfigSchema, cmbCompatibility: { modelProtocol: "result-v1", userConfigMigrations: "v1" } }))
+  await writeFile(join(root, ".claude-plugin/plugin.json"), JSON.stringify({ name: "loader-probe" }))
+  const native = await compileFunctionPlugin(root)
+  expect(native.name).toBe("native-not-display")
+  expect(native.userConfigSchema).toEqual(userConfigSchema)
+  expect(native.digest).not.toBe(first.digest)
+  await writeFile(join(root, "mods/manifest.json"), JSON.stringify({ apiVersion: "cmb.mods/v2",
+    id: "native-not-display", entry: "register.ts", userConfig,
+    userConfigSchema: { ...userConfigSchema, tier: "builtin" } }))
+  await expect(compileFunctionPlugin(root)).rejects.toThrow("MIGRATION_INVALID")
+})
+
+it("requires the migration marker and executes the actual HEAD parser to prove older clients reject it", async () => {
+  const root = await plugin("export function register(){}")
+  const userConfig = { label: { type: "string", title: "Label", description: "Help" } }
+  const userConfigSchema = { version: 1, migrations: [{ fromVersion: 0, toVersion: 1, changes: [] }] }
+  const cmbCompatibility = { modelProtocol: "result-v1", userConfigMigrations: "v1" }
+  const file = join(root, ".claude-plugin/plugin.json")
+  await writeFile(file, JSON.stringify({ name: "loader-probe", userConfig, userConfigSchema }))
+  await expect(compileFunctionPlugin(root)).rejects.toThrow("MODS_USER_CONFIG_SCHEMA_COMPATIBILITY_REQUIRED")
+  await writeFile(file, JSON.stringify({ name: "loader-probe", userConfig, cmbCompatibility }))
+  await expect(compileFunctionPlugin(root)).rejects.toThrow("MODS_USER_CONFIG_SCHEMA_DECLARATION_REQUIRED")
+  await writeFile(file, JSON.stringify({ name: "loader-probe", userConfig, userConfigSchema, cmbCompatibility }))
+  expect((await compileFunctionPlugin(root)).userConfigSchema).toEqual(userConfigSchema)
+  const original = execFileSync("git", ["show", "HEAD:src/shared/mods/v2/model-protocol.ts"], { encoding: "utf8" })
+  const exports: { parseFunctionModelProtocol?: (value: unknown) => unknown } = {}
+  runInNewContext(ts.transpileModule(original, { compilerOptions: { module: ts.ModuleKind.CommonJS } }).outputText,
+    { exports, require(id: string) {
+      if (id !== "./contracts") throw Error("UNEXPECTED_OLD_PARSER_IMPORT")
+      return { isModObject, ModFunctionError }
+    } })
+  expect(exports.parseFunctionModelProtocol!({ modelProtocol: "result-v1" })).toBe("result-v1")
+  expect(() => exports.parseFunctionModelProtocol!(cmbCompatibility)).toThrow("MODS_MODEL_PROTOCOL_MANIFEST")
+  expect(parseFunctionModelProtocol(cmbCompatibility)).toBe("result-v1")
+  expect(() => parseFunctionModelProtocol({ ...cmbCompatibility, userConfigMigrations: "unknown" })).toThrow("MODS_MODEL_PROTOCOL_MANIFEST")
+  expect(() => parseFunctionModelProtocol({ ...cmbCompatibility, arbitraryAuthority: true })).toThrow("MODS_MODEL_PROTOCOL_MANIFEST")
+  const nativeManifest = { apiVersion: "cmb.mods/v2", id: "native-config", entry: "register.ts", userConfig, userConfigSchema, cmbCompatibility }
+  expect(readPureFunctionSource(createAuthoringSourceBundle([
+    { path: "plugin.json", text: JSON.stringify({ name: "native-config", version: "1.0.0", mods: "mods/manifest.json" }) },
+    { path: "mods/manifest.json", text: JSON.stringify(nativeManifest) },
+    { path: "mods/register.ts", text: "export function register(){}" }
+  ])).files).toHaveLength(3)
 })

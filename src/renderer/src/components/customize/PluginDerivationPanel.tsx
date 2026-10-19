@@ -10,6 +10,7 @@ import { DerivedPluginProposal } from "./DerivedPluginProposal"
 import { useEffect, useRef, useState } from "react"
 import { Button } from "@/components/ui/button"
 import { useAppStore } from "@/lib/store"
+import { useConfigurationDraft } from "@/lib/configuration-target"
 import type {
   PluginDerivationCopy,
   PluginDerivationInspection,
@@ -88,6 +89,8 @@ function ScopedDerivation({
   const revisionRequest = useRef(crypto.randomUUID())
   const upstreamRequest = useRef(crypto.randomUUID())
   const dirty = proposalPending
+  useConfigurationDraft({ threadId, workspace }, dirty || fileDirty ||
+    (!!inspection && name !== (practiceName ?? inspection.suggestedName)), busy)
   useEffect(() => {
     setUpstream(null)
     revisionRequest.current = crypto.randomUUID()
@@ -478,7 +481,11 @@ function ScopedDerivation({
           </div>
           {copy.status === "installed" && (
             <div className="space-y-2 rounded-lg bg-muted/30 p-3 text-sm">
-              <p>安装完成。先启用新插件，再为它新建一个独立项目；原项目继续使用原插件。</p>
+              <p>
+                安装完成。先启用新插件，再为它新建独立项目。
+                已准备完整流程组合的副本，也可到目标项目的“项目能力”查看可用流程。
+                原项目继续使用原插件。
+              </p>
               <Button
                 variant="outline"
                 disabled={busy || !copy.pluginId || enabledPluginId === copy.pluginId}

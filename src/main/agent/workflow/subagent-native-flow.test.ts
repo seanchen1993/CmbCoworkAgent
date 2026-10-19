@@ -24,6 +24,26 @@ function deps() {
     defaultModelId: "custom:default"
   } satisfies WorkflowSubagentDeps
 }
+
+it.each([false, true])("strict native cleanup failure cannot become success or an API retry (cancelled=%s)", async cancelled => {
+  const d: WorkflowSubagentDeps = { ...deps(), strictRuntimeCleanup: true }
+  const signal = new AbortController()
+  const create = vi.fn<WorkflowSubagentDeps["createRuntime"]>(async () => ({
+    stream: async () => (async function* () {
+      if (cancelled) signal.abort()
+      yield ["values", { messages: [new AIMessage("done")] }]
+    })()
+  }))
+  d.createRuntime = create
+  const cleanup = vi.fn().mockResolvedValueOnce(undefined)
+    .mockRejectedValue(Error("Timeout waiting for physical VM exit"))
+  d.cleanupThread = cleanup
+  await expect(runWorkflowSubagent(d, { prompt: "actual native owner", agentIndex: 0,
+    label: "cleanup", runId: "native-run", signal: signal.signal }))
+    .rejects.toThrow("WORKFLOW_RUNTIME_CLEANUP_UNCONFIRMED")
+  expect(create).toHaveBeenCalledOnce()
+  expect(cleanup).toHaveBeenCalledTimes(2)
+})
 it("strict model choice never retries using the session default", async () => {
   const d = deps()
   await expect(

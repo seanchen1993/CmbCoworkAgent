@@ -1,9 +1,15 @@
 import { mkdir, mkdtemp, open, rename, rm, symlink, writeFile } from "node:fs/promises"
+import * as fsPromises from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterEach, expect, it, vi } from "vitest"
 import * as stableFiles from "../../services/stable-file-handle"
 import { fingerprintAutobizWorkflow } from "./autobiz-validation"
+
+vi.mock("node:fs/promises", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("node:fs/promises")>()
+  return { ...actual, lstat: vi.fn(actual.lstat) }
+})
 
 const roots: string[] = []
 afterEach(async () => {
@@ -97,6 +103,37 @@ it("rejects a file added after enumeration instead of accepting a partial tree h
   })
   await expect(fingerprintAutobizWorkflow(f.root)).rejects.toThrow("AUTOBIZ_WORKFLOW_CHANGED")
 })
+
+it.each(["root", "nested"])(
+  "rejects an added %s member even when directory mtime and ctime remain unchanged",
+  async (kind) => {
+    const f = await fixture()
+    const directory = kind === "root" ? f.overlay : join(f.overlay, "nested")
+    await mkdir(directory, { recursive: true })
+    await writeFile(join(directory, "workflow.json"), "{}")
+    const before = await fsPromises.lstat(directory, { bigint: true })
+    const originalLstat = fsPromises.lstat
+    const lstat = vi
+      .spyOn(fsPromises, "lstat")
+      .mockImplementation((path, options) =>
+        path === directory ? Promise.resolve(before) : originalLstat(path, options)
+      )
+    const originalOpen = stableFiles.openStableFileHandle
+    let inserted = false
+    vi.spyOn(stableFiles, "openStableFileHandle").mockImplementationOnce(async (root, path) => {
+      await writeFile(join(directory, "new.json"), "{}")
+      inserted = true
+      return originalOpen(root, path)
+    })
+    await expect(fingerprintAutobizWorkflow(f.root)).rejects.toThrow("AUTOBIZ_WORKFLOW_CHANGED")
+    expect(inserted).toBe(true)
+    const observations = lstat.mock.calls.flatMap((args, index) =>
+      args[0] === directory ? [lstat.mock.results[index]] : []
+    )
+    expect(observations.length).toBeGreaterThanOrEqual(3)
+    for (const observation of observations) expect(await observation.value).toBe(before)
+  }
+)
 
 it("closes the opened handle when cancellation arrives during a bounded read", async () => {
   const f = await fixture()

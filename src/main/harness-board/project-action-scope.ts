@@ -4,6 +4,7 @@ const scope = new AsyncLocalStorage<{
   threadId: string
   binding: string
   assertCurrent: () => void
+  assertContentCurrent?: () => void
   active: boolean
 }>()
 
@@ -12,14 +13,26 @@ export async function withProjectActionScope<T>(
   threadId: string,
   binding: unknown,
   assertCurrent: () => void,
-  run: () => Promise<T>
+  run: () => Promise<T>,
+  assertContentCurrent?: () => void
 ): Promise<T> {
   assertCurrent()
-  const entry = { threadId, binding: JSON.stringify(binding), assertCurrent, active: true }
+  const entry = { threadId, binding: JSON.stringify(binding), assertCurrent, assertContentCurrent, active: true }
   try {
     return await scope.run(entry, run)
   } finally {
     entry.active = false
+  }
+}
+
+/** Capture once at original executor preparation, retain the real owner after ALS exits. */
+export function captureProjectActionContentGuard(threadId?: string): (() => void) | undefined {
+  const current = scope.getStore()
+  if (!current || (threadId !== undefined && current.threadId !== threadId)) return undefined
+  return () => {
+    if (!current.active) throw Error("PROJECT_ACTION_SCOPE_CHANGED")
+    current.assertCurrent()
+    current.assertContentCurrent?.()
   }
 }
 

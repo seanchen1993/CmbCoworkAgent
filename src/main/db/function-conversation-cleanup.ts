@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto"
 import type { ModObject } from "../../shared/mods/types"
 import { ModFunctionError } from "../../shared/mods/v2/contracts"
+import { isSameWorkspacePath } from "../../shared/workspace-path"
 import {
   sameFunctionConversationTranscriptStamp,
   validateFunctionConversationTranscriptStamp
@@ -137,7 +138,9 @@ function childOwner(db: NativeSqliteAdapter, threadId: string, original: Thread)
     if (seen.has(id)) fail()
     seen.add(id)
     const metadata = object(parse(row.metadata ?? "{}"))
-    if (metadata.isInternalFlowRuntime !== true || metadata.workspacePath !== workspace) fail()
+    if (metadata.isInternalFlowRuntime !== true ||
+      typeof metadata.workspacePath !== "string" ||
+      !isSameWorkspacePath(metadata.workspacePath, workspace)) fail()
     runs.push(text(metadata.modsAgentRunId))
     const parentId = text(metadata.parentThreadId)
     const parent = thread(db, parentId)
@@ -148,7 +151,8 @@ function childOwner(db: NativeSqliteAdapter, threadId: string, original: Thread)
       functionConversationProjectionIncarnation(captureThreadIncarnation(parent))])
     if (candidates.length > 1) fail()
     if (candidates.length) {
-      if (parentMetadata.workspacePath !== workspace) fail()
+      if (typeof parentMetadata.workspacePath !== "string" ||
+        !isSameWorkspacePath(parentMetadata.workspacePath, workspace)) fail()
       const owner = session(candidates[0]), family = conversations(db, owner)
       if (family.filter(value => value.kind === "main" && value.invocation === "").length !== 1)
         fail()
@@ -164,7 +168,8 @@ function childOwner(db: NativeSqliteAdapter, threadId: string, original: Thread)
     // An ordinary internal flow with no canonical ancestor remains the original delete path.
     // A persisted projection, if present, must still join an actual selected owner below.
     if (parentMetadata.isInternalFlowRuntime !== true) return undefined
-    if (parentMetadata.workspacePath !== workspace) fail()
+    if (typeof parentMetadata.workspacePath !== "string" ||
+      !isSameWorkspacePath(parentMetadata.workspacePath, workspace)) fail()
     id = parentId
     row = parent
   }

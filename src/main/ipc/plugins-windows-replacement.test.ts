@@ -8,7 +8,7 @@ import { derivationFamilyFor, setDerivationInstallationObserver } from "../plugi
 
 vi.mock("fs/promises", async (importOriginal) => {
   const actual = await importOriginal<typeof import("fs/promises")>()
-  return { ...actual, rename: vi.fn(actual.rename), copyFile: vi.fn(actual.copyFile) }
+  return { ...actual, rename: vi.fn(actual.rename), copyFile: vi.fn(actual.copyFile), mkdir: vi.fn(actual.mkdir) }
 })
 vi.mock("electron", () => ({
   app: { getPath: () => tmpdir(), getName: () => "replacement-test", getVersion: () => "0.0.0" },
@@ -38,6 +38,7 @@ beforeEach(() => {
   setDerivationInstallationObserver(async () => {})
   vi.mocked(fs.rename).mockClear()
   vi.mocked(fs.copyFile).mockClear()
+  vi.mocked(fs.mkdir).mockClear()
   vi.mocked(notifications.notifyHooksChanged).mockClear()
 })
 afterAll(() => {
@@ -122,6 +123,27 @@ it("derivation verification failure removes only its new destination without pub
   expect(result).toMatchObject({ success: false, error: "snapshot changed" })
   expect(storage.getPlugins().some(plugin => plugin.id === "rejected-id")).toBe(false)
   expect(readdirSync(storage.getPluginsDir())).not.toContain("derived-rejected")
+})
+
+it("leaves a raced-in directory untouched when independent destination creation fails", async () => {
+  const input = source("derived-raced-directory", "1.0.0")
+  const destination = join(storage.getPluginsDir(), "derived-raced-directory")
+  const verified = vi.fn(async () => {})
+  vi.mocked(fs.mkdir).mockImplementationOnce(async (directory) => {
+    expect(directory).toBe(destination)
+    mkdirSync(destination)
+    writeFileSync(join(destination, "personal.txt"), "retain existing directory")
+    throw Object.assign(Error("directory appeared before exclusive creation"), { code: "EEXIST" })
+  })
+  const result = await plugins.installDerivedPluginDirectory(
+    input, "derived-raced-directory", "raced-directory-id", () => {}, verified
+  )
+  expect(result).toMatchObject({ success: false, error: "directory appeared before exclusive creation" })
+  expect(readFileSync(join(destination, "personal.txt"), "utf8")).toBe("retain existing directory")
+  expect(verified).not.toHaveBeenCalled()
+  expect(fs.copyFile).not.toHaveBeenCalled()
+  expect(storage.getPlugins().some((plugin) => plugin.id === "raced-directory-id")).toBe(false)
+  expect(notifications.notifyHooksChanged).not.toHaveBeenCalled()
 })
 
 it.runIf(process.platform === "win32")(

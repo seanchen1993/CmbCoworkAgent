@@ -99,6 +99,7 @@ const bounded = new Set([
   "ui.panes",
   "ui.open",
   "ui.close",
+  "platform.action",
   "fs.read",
   "fs.write",
   "fs.list",
@@ -170,6 +171,11 @@ export const FUNCTION_COMPATIBILITY_EVENT_NAMES = [...bounded, ...metadata, ...u
 export function getFunctionEventSupport(
   name: string
 ): { availability: "bounded" | "metadata" | "unavailable"; note: string } | undefined {
+  if (name === "platform.action")
+    return {
+      availability: "bounded",
+      note: "通过 on.capability 登记的版本化能力动作；宿主验证声明、来源、当前目标、输入及双方权限后执行。发现和登记不会启动任务，普通事件名称不能替代有效能力声明。"
+    }
   if (["config.list", "config.set", "config.describe"].includes(name))
     return {
       availability: "bounded",

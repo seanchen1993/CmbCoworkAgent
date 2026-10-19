@@ -978,6 +978,8 @@ function isWorkflowWorktreeRecord(value: unknown): value is WorkflowWorktreeReco
   ])
   return (
     typeof record.id === "string" &&
+    (record.agentIndex === undefined ||
+      (Number.isSafeInteger(record.agentIndex) && (record.agentIndex as number) >= 0)) &&
     typeof record.runId === "string" &&
     typeof record.threadId === "string" &&
     typeof record.branch === "string" &&

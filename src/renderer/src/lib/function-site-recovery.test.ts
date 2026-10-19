@@ -36,3 +36,17 @@ it("bounds autonomous retry credit and throttles notifications until validated s
   expect(recovery.failed(true)).toBe(150)
   expect(recovery.failed(false)).toBeUndefined()
 })
+
+it("new reads and permanent failures cannot refill retirement retry credit", () => {
+  const recovery = new FunctionSiteRecovery()
+  for (const [index, delay] of [150, 400, 1000, 2000].entries()) {
+    recovery.started(index * 1000)
+    recovery.notificationDelay(index * 1000 + 500)
+    expect(recovery.failed(false)).toBeUndefined()
+    expect(recovery.failed(true)).toBe(delay)
+  }
+  recovery.started(10000)
+  expect(recovery.failed(true)).toBeUndefined()
+  expect(recovery.failed(false)).toBeUndefined()
+  expect(recovery.failed(true)).toBeUndefined()
+})

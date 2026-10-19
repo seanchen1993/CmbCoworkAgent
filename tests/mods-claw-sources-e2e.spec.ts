@@ -632,6 +632,7 @@ async function main() {
     await page.getByText("Skill MCP selected", { exact: true }).first().click()
     await page.getByRole("button", { name: "当前助手", exact: true }).click()
     await page.getByRole("tab", { name: "设置", exact: true }).click()
+    await page.getByText("高级：手动管理组合", { exact: true }).click()
     await page.getByRole("button", { name: "管理助手组合", exact: true }).click()
     await page.locator("[data-claw-settings]").waitFor()
     await page.getByText("高级编辑与已保存组合", { exact: true }).click()

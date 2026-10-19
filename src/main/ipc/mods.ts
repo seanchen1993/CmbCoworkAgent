@@ -1,3 +1,6 @@
+import { setProjectRuntimeFunctions } from "../harness-board/project-runtime-function-source"
+import { ApplicationCompletionPolicies } from "../mods/v2/application-completion-policy"
+import { createHostProjectInputIdentity } from "../harness-board/project-runtime/package-input-identity"
 import { readModsChatDisplayCapability } from "./mods-display-capability"
 import { registerBuiltinAdvisorHandlers } from "./builtin-advisor"
 import { registerCommunityExampleHandlers } from "./mods-community-examples"
@@ -12,12 +15,13 @@ import { registerAuthoringRetentionHandlers } from "./mods-authoring-retention"
 import { createAuthoringInstallService } from "../mods/devtools/authoring-install-factory"
 import { FunctionPromptBroker } from "../mods/v2/prompt-broker"
 import { FunctionConversationCoordinator } from "../mods/v2/conversation-coordinator"
-import { readCoordinatorWorkerModsContext } from "../agent/coordinator-worker-mods-context"
+import { readNativeChildModsContext, readNativeChildModsThread } from "../agent/native-child-mods-context"
 import { FunctionConversationStore } from "../db/function-conversation-store"
 import { readCurrentFunctionConversationCheckpoint } from "../mods/v2/conversation-checkpoint-host"
 import { projectFunctionSessionApiMessages } from "../mods/v2/session-api-transcript"
 import { registerPromptComposerHandlers } from "./mods-prompt"
 import { FunctionDesktopBroker } from "../mods/v2/desktop-broker"
+import { nativePlatformProviders } from "../mods/v2/platform-native-providers"
 import { writeFunctionClipboard } from "../mods/v2/native-clipboard"
 import { registerDesktopHandlers } from "./mods-desktop"
 import { registerFunctionConfigHandlers } from "./mods-config"
@@ -119,6 +123,7 @@ import type { DevelopmentScope } from "../mods/v2/development-session"
 import { registerModsAuthoringHandlers } from "./mods-authoring"
 import { registerModsDevelopmentHandlers } from "./mods-development"
 import { ModDevelopmentService, setModDevelopmentService } from "../mods/devtools/development-service"
+import { CreatorPlanningService } from "../mods/devtools/creator-planning"
 import { goalManager } from "../agent/goals/runtime"
 import {
   CreatorCompositionService,
@@ -128,6 +133,18 @@ import {
 import { isDevelopmentThreadMetadata } from "../../shared/mods/development-scope"
 import { CreatorCompositionHistory } from "../mods/devtools/creator-composition-history"
 import { CreatorReuseService } from "../mods/devtools/creator-reuse"
+import { CreatorBusinessService, setCreatorBusinessService } from "../mods/devtools/creator-business"
+import { CreatorBusinessTrials } from "../mods/devtools/creator-business-trial"
+import { registerCreatorBusinessTrialHandlers } from "./creator-business-trial"
+import { isInternalHarnessProjectId } from "../harness-board/internal-project-context"
+import { BusinessModAssemblyService } from "../plugins/business-mod-assembly-service"
+import { inspectCompletePluginDirectory, installDerivedPluginDirectory } from "./plugins"
+import { invalidateEnabledSkillsCache, invalidatePluginHooksCache } from "../storage"
+import { CreatorUserConfigService, setCreatorUserConfigService } from "../mods/devtools/creator-user-config"
+import { projectAuthoringSessions } from "../mods/devtools/project-authoring-session"
+import { projectPreviewRegistry } from "../mods/devtools/project-preview-registry"
+import { configureExtensionContextDirectoryBinding } from "../harness-board/extension-context"
+import { readInternalHarnessDirectoryUserConfig, admitInternalHarnessContextSource } from "../harness-board/internal-project-user-config"
 import { CreatorTrialUndoScheduler } from "../mods/devtools/creator-trial-undo"
 import { claimConfigurationReload } from "../mods/v2/configuration-reload-lease"
 import { publishDevelopmentTurnSettlement } from "../mods/v2/development-turn-settlement"
@@ -135,6 +152,18 @@ import { registerModsAuthoringPreviewHandlers } from "./mods-authoring-preview"
 import { AuthoringDraftStore } from "../mods/devtools/authoring-store"
 import { getPendingUserInputForThread } from "../services/user-input"
 import { captureThreadIncarnation, matchesThreadIncarnation } from "../services/thread-incarnation"
+import { registerRuntimeSessionHandlers } from "./mods-runtime-sessions"
+import { registerSnapshotMaintenanceHandlers } from "./mods-snapshot-maintenance"
+import {
+  prepareSnapshotMaintenance,
+  inspectSnapshotGarbage,
+  collectSnapshotGarbage
+} from "../harness-board/project-runtime/snapshot-retention"
+import { auditProjectSnapshotReferences } from "../harness-board/project-runtime/snapshot-reference-audit"
+import { auditNativeSnapshotReferences } from "../harness-board/project-runtime/snapshot-native-references"
+import { registerPlatformFileEditSink } from "../mods/v2/platform-native-file-edits"
+import { registerPlatformHandlers } from "./mods-platform"
+import { runPlatformUserAction } from "../mods/v2/platform-user-action"
 import { builtinInstructionsStore } from "../mods/builtins/instructions"
 import { builtinChangeReviewService } from "../mods/builtins/change-review"
 import { projectBuiltinRunOverview } from "../mods/builtins/overview"
@@ -143,6 +172,19 @@ import { readBuiltinProjectFacts } from "../mods/builtins/project-facts"
 
 export function registerModsHandlers(ipcMain: IpcMain, window: () => BrowserWindow | null): void {
   let reconcileCreatorReuse: ((threadId?: string) => void) | undefined
+  const snapshotAudit = (root: string) =>
+    auditProjectSnapshotReferences(getOpenworkDir(), root, () => auditNativeSnapshotReferences(getDb()))
+  registerSnapshotMaintenanceHandlers(ipcMain, {
+    trusted,
+    base: getOpenworkDir,
+    prepare: prepareSnapshotMaintenance,
+    previewAudit: (roots) => snapshotAudit(roots[0]),
+    inspect: (root, previewReferences) => {
+      const view = inspectSnapshotGarbage(root, () => previewReferences ?? snapshotAudit(root))
+      return { ...view, published: view.publishedBefore }
+    },
+    collect: (root, expected) => collectSnapshotGarbage(root, () => snapshotAudit(root), expected)
+  })
   let manager: ModsManager
   try {
     manager = new ModsManager(
@@ -329,7 +371,21 @@ export function registerModsHandlers(ipcMain: IpcMain, window: () => BrowserWind
   const functions = new FunctionModsManager(
     manager.store,
     {
+      platformNativeProviders: () => nativePlatformProviders(async (context, runId) => {
+        context.assertCurrent()
+        const owner = window()
+        if (!owner || owner.isDestroyed()) return false
+        const result = await dialog.showMessageBox(owner, {
+          signal: context.signal, type: "question", title: "取消工作流",
+          message: `插件 ${context.caller.name} 请求取消当前会话的工作流`,
+          detail: `运行：${runId}\n取消后会等待原执行器完成资源清理，已产生的文件将按原规则保留。`,
+          buttons: ["取消工作流", "保留运行"], defaultId: 1, cancelId: 1
+        })
+        context.assertCurrent()
+        return result.response === 0
+      }),
       plugins: getPlugins,
+      freshClassicPluginSources: getPlugins,
       installedPluginIds: getInstalledPluginIds,
       threadIncarnationKey: (_workspace, threadId) => {
         const thread = getThreadCore(threadId)
@@ -337,14 +393,14 @@ export function registerModsHandlers(ipcMain: IpcMain, window: () => BrowserWind
       },
       debugLog: writeFunctionModDebugLog,
       openConversationOwner: (context) => {
-        if (readCoordinatorWorkerModsContext(context.threadId)) {
+        if (readNativeChildModsContext(context.threadId)) {
           assertFunctionDataScope(context.workspace, context.threadId)
           return () => undefined
         }
         return conversations.openConversationOwner(context)
       },
       activateConversationOwner: (context) => {
-        if (readCoordinatorWorkerModsContext(context.threadId)) {
+        if (readNativeChildModsContext(context.threadId)) {
           assertFunctionDataScope(context.workspace, context.threadId)
           return
         }
@@ -546,7 +602,7 @@ export function registerModsHandlers(ipcMain: IpcMain, window: () => BrowserWind
         recordFunctionCancellationReceipt()
       },
       prepareSessionTitle: (workspace, threadId, signal, assertCurrent) => {
-        if (readCoordinatorWorkerModsContext(threadId)) {
+        if (readNativeChildModsContext(threadId)) {
           signal.throwIfAborted()
           assertCurrent()
           assertFunctionDataScope(workspace, threadId)
@@ -665,7 +721,7 @@ export function registerModsHandlers(ipcMain: IpcMain, window: () => BrowserWind
       protects: (workspace) => manager.protects(workspace),
       pendingQuestion: (threadId) => getPendingUserInputForThread(threadId),
       captureSiteGuard: (workspace, threadId) => {
-        const worker = readCoordinatorWorkerModsContext(threadId)
+        const worker = readNativeChildModsContext(threadId)
         if (worker) {
           assertFunctionDataScope(workspace, threadId)
           return () => {
@@ -763,6 +819,7 @@ export function registerModsHandlers(ipcMain: IpcMain, window: () => BrowserWind
         scheduleFunctionCommand(queue, workspace, threadId, command, signal, run),
       markdownPreviewInvalidated: (threadId, receipt) =>
         window()?.webContents.send("mods:markdown-preview-invalidated", { threadId, receipt }),
+      platformChanged: (threadId) => window()?.webContents.send("mods:platform-changed", { threadId }),
       changed: (threadId, scope) => {
         getCreatorCompositionService()?.reconcile(threadId)
         reconcileCreatorReuse?.(threadId)
@@ -1063,6 +1120,57 @@ export function registerModsHandlers(ipcMain: IpcMain, window: () => BrowserWind
     }
   })
   setModDevelopmentService(development)
+  development.configurePlanning(new CreatorPlanningService({
+    settings: manager.store,
+    current: (threadId, workspace) => {
+      const context = development.reuseContext(threadId)
+      if (workspace !== undefined && context.scope.workspace !== workspace)
+        throw Error("DEVELOPMENT_SCOPE_CHANGED")
+      return context
+    },
+    catalog: workspace => functions.status(workspace),
+    invoke: (workspace, selected, signal, guard) =>
+      functions.creatorPlanningPrompt(workspace, selected, signal, guard),
+    changed: threadId => window()?.webContents.send("mods:development-changed", { threadId })
+  }))
+  projectAuthoringSessions.configurePersistence(manager.store,
+    join(app.getPath("userData"), "mods", "project-authoring"))
+  projectPreviewRegistry.configurePersistence(manager.store)
+  development.configureProjectTrialStatus(threadId => {
+    try { return projectAuthoringSessions.trialRequest(development.projectAuthoringContext(threadId).scope) }
+    catch { return undefined }
+  })
+  configureExtensionContextDirectoryBinding((sourceRoot, workspace, _name, key, projectId) =>
+    projectId && isInternalHarnessProjectId(projectId)
+      ? readInternalHarnessDirectoryUserConfig(functions, value => manager.workspaceKey(value), {
+          projectId, sourceRoot, workspace, key
+        })
+      : functions.readDirectoryUserConfig(manager.workspaceKey(workspace), sourceRoot, key),
+    (sourceRoot, workspace, projectId) => admitInternalHarnessContextSource(functions,
+      value => manager.workspaceKey(value), { sourceRoot, workspace, projectId }))
+  const creatorUserConfig = new CreatorUserConfigService({
+    settings: manager.store,
+    context: threadId => development.projectAuthoringContext(threadId),
+    normalizeWorkspace: workspace => manager.workspaceKey(workspace),
+    read: ({ scope }, pluginId, signal, guard) =>
+      functions.userConfig(scope.workspace, scope.threadId, pluginId, signal, guard),
+    save: ({ scope }, binding, key, value, signal, guard) => functions.saveUserConfig(
+      scope.workspace, scope.threadId, binding.pluginId, binding.digest, key, value,
+      binding.revision, signal, guard),
+    reset: ({ scope }, binding, key, signal, guard) => functions.resetUserConfig(
+      scope.workspace, scope.threadId, binding.pluginId, binding.digest, key,
+      binding.revision, signal, guard),
+    apply: ({ scope }, binding, signal, guard) => functions.applyUserConfig(
+      scope.workspace, scope.threadId, binding.pluginId, binding.digest,
+      binding.revision, signal, guard),
+    changed: threadId => {
+      const owner = window()
+      if (owner && !owner.isDestroyed() && !owner.webContents.isDestroyed())
+        owner.webContents.send("mods:development-changed", { threadId })
+    }
+  })
+  setCreatorUserConfigService(creatorUserConfig)
+  development.configureConfigurationStatus(threadId => creatorUserConfig.status(threadId))
   const assertCreatorAuthorized = (scope: DevelopmentScope, profile: ClawProfile | null) => {
     if (!manager.isEnabled(scope.workspace)) throw Error("COMPOSITION_MODS_DISABLED")
     const runtime = functions.runtimeSessions(scope.threadId)
@@ -1078,6 +1186,16 @@ export function registerModsHandlers(ipcMain: IpcMain, window: () => BrowserWind
     }
   }
   const creatorComposition = new CreatorCompositionService({
+    saveReuse: {
+      trials: scope => functions.developmentStatus(scope),
+      prepareReuse: async (threadId, dependency, input) => {
+        const status = await development.requestReuse(threadId, dependency.draftId,
+          dependency.revision, input.turnId, input.signal, input.assertTurn)
+        if (!status.reuse) throw Error("COMPOSITION_REUSE_UNAVAILABLE")
+        return status.reuse
+      },
+      reuseFacts: scope => creatorReuse.compositionFacts(scope)
+    },
     store: new ClawStore(manager.store),
     history: new CreatorCompositionHistory(manager.store),
     context: threadId => development.projectAuthoringContext(threadId),
@@ -1126,6 +1244,7 @@ export function registerModsHandlers(ipcMain: IpcMain, window: () => BrowserWind
     }
   })
   development.configureCompositionStatus(threadId => creatorComposition.status(threadId))
+  development.configureCompositionSaveStatus(threadId => creatorComposition.saveStatus(threadId))
   setCreatorCompositionService(creatorComposition)
   const reuseThreads = new Set<string>()
   const creatorReuse = new CreatorReuseService({
@@ -1177,6 +1296,11 @@ export function registerModsHandlers(ipcMain: IpcMain, window: () => BrowserWind
       return () => { physical(); logical(); guest() }
     },
     changed: threadId => {
+      queueMicrotask(() => {
+        void creatorComposition.reconcileSavedReuse(threadId).catch(() => {
+          console.warn("[Mods] Named combination save needs reconciliation")
+        })
+      })
       const owner = window()
       if (owner && !owner.isDestroyed() && !owner.webContents.isDestroyed()) {
         owner.webContents.send("mods:development-changed", { threadId })
@@ -1201,7 +1325,73 @@ export function registerModsHandlers(ipcMain: IpcMain, window: () => BrowserWind
   })
   development.configureTrialUndoStop((scope, id, turnId, guard) => trialUndo.request(scope, id, turnId, guard))
   development.configureTrialUndoStatus(threadId => trialUndo.status(threadId))
+  const creatorBusiness = new CreatorBusinessService({
+    root: join(getOpenworkDir(), "creator-business"), settings: manager.store,
+    assembly: new BusinessModAssemblyService(join(getOpenworkDir(), "creator-business-assemblies"), {
+      plugins: getPlugins, validatePackage: inspectCompletePluginDirectory,
+      install: installDerivedPluginDirectory,
+      invalidate: () => { invalidateEnabledSkillsCache(); invalidatePluginHooksCache() }
+    }),
+    plugins: getPlugins,
+    context: threadId => development.projectAuthoringContext(threadId),
+    readContext: threadId => development.reuseContext(threadId),
+    busy: threadId => !!getLocalThreadRunLease(threadId) ||
+      manager.functionTurns.hasUnsettled(threadId) || functions.configurationBusy(threadId),
+    onIdle: listener => {
+      const physical = onLocalThreadRunLeaseReleased(lease => listener(lease.threadId))
+      const logical = manager.functionTurns.onSettled(listener)
+      const guest = functions.onConfigurationIdle(listener)
+      return () => { physical(); logical(); guest() }
+    },
+    changed: threadId => {
+      const owner = window()
+      if (owner && !owner.isDestroyed() && !owner.webContents.isDestroyed())
+        owner.webContents.send("mods:development-changed", { threadId })
+    }
+  })
+  creatorBusiness.configureTrials(new CreatorBusinessTrials({
+    root: join(getOpenworkDir(), "creator-business", "trials"),
+    settings: manager.store,
+    context: threadId => development.reuseContext(threadId),
+    busy: threadId => !!getLocalThreadRunLease(threadId) ||
+      manager.functionTurns.hasUnsettled(threadId) || functions.configurationBusy(threadId),
+    changed: threadId => {
+      const owner = window()
+      if (owner && !owner.isDestroyed() && !owner.webContents.isDestroyed())
+        owner.webContents.send("mods:development-changed", { threadId })
+    },
+    candidate: (scope, candidate, guard) => creatorBusiness.trialCandidate(scope, candidate, guard),
+    assertSources: sources => creatorBusiness.assertTrialSources(sources)
+  }))
+  registerCreatorBusinessTrialHandlers(ipcMain, creatorBusiness, development, trusted, window)
+  setCreatorBusinessService(creatorBusiness)
+  development.configureBusinessStatus(threadId => {
+    try { return creatorBusiness.status(threadId) } catch { return undefined }
+  })
   registerModsDevelopmentHandlers(ipcMain, development, trusted, {
+    reconcileBusiness: async input => {
+      await creatorBusiness.reconcile(input.threadId, input.expectedWorkspace, input)
+      return development.status(input.threadId)
+    },
+    approveBusiness: async input => {
+      await creatorBusiness.approve(input.threadId, input.expectedWorkspace, input)
+      return development.status(input.threadId)
+    },
+    exportBusiness: async input => {
+      const context = development.reuseContext(input.threadId)
+      if (context.scope.workspace !== input.expectedWorkspace) throw Error("DEVELOPMENT_SCOPE_CHANGED")
+      const owner = window()
+      if (!owner || owner.isDestroyed()) throw Error("DEVELOPMENT_WINDOW_CHANGED")
+      const result = await dialog.showSaveDialog(owner, {
+        title: "导出独立业务插件", defaultPath: "my-business-plugin.zip",
+        filters: [{ name: "插件 ZIP", extensions: ["zip"] }]
+      })
+      context.assertCurrent()
+      if (owner !== window() || owner.isDestroyed()) throw Error("DEVELOPMENT_WINDOW_CHANGED")
+      if (!result.canceled && result.filePath)
+        await creatorBusiness.exportTrusted(input.threadId, input.expectedWorkspace, input, result.filePath)
+      return development.status(input.threadId)
+    },
     undoComposition: async input => {
       await creatorComposition.undo(input.threadId, input.expectedWorkspace)
       return development.status(input.threadId)
@@ -1242,8 +1432,24 @@ export function registerModsHandlers(ipcMain: IpcMain, window: () => BrowserWind
         owner.webContents.send("mods:flow-changed", { threadId })
     }
   })
+  setProjectRuntimeFunctions(functions, workspace => manager.workspaceKey(workspace), {
+    settingsStamp: workspace => JSON.stringify(["enabled", "policy", "epoch"].map(key =>
+      manager.store.getSetting(`${key}:${workspace}`, ""))),
+    globallyEnabled: () => manager.isGloballyEnabled(),
+    enabled: workspace => manager.isEnabled(workspace),
+    enable: workspace => manager.configure(workspace, true, manager.protects(workspace))
+  })
+  const projectInputs = createHostProjectInputIdentity(functions, {
+    contextDataRoot: join(getOpenworkDir(), "plugin-data"),
+    rules: (workspace, names) => ({ managed: manager.policy.digest,
+      completion: names.map(name => [name, new ApplicationCompletionPolicies(manager.store).value(workspace, name) ?? null]) })
+  })
   setProjectActionRuntime(normalizeProjectActionRuntime({ flows: evaluationFlows,
+    ...projectInputs,
+    publishRequiredContext: (workspace, text, signal) => manager.publish(workspace, text, undefined, signal),
     readRuns: (workspace, threadId) => new FlowStore(manager.store).runs(workspace, threadId),
+    readActionResult: (workspace, threadId, runId, executionId) =>
+      new FlowStore(manager.store).actionResult(workspace, threadId, runId, executionId),
     catalog: (workspace, threadId) => functions.actionCatalog(workspace, threadId),
     prepareSelection: (workspace, threadId, bindings) => prepareProjectActionSelection(
       workspace, threadId, bindings, {
@@ -1284,6 +1490,22 @@ export function registerModsHandlers(ipcMain: IpcMain, window: () => BrowserWind
       if (!owner.isDestroyed() && !owner.webContents.isDestroyed()) owner.webContents.send("skills:changed")
     }
   }), evaluationAccess)
+  const stopPlatformFileEdits = registerPlatformFileEditSink({
+    capture: (workspace, threadId) => {
+      const currentWorkspace = writableThreadScope(threadId)
+      if (manager.workspaceKey(workspace) !== currentWorkspace) return undefined
+      const incarnation = captureThreadIncarnation(getThreadCore(threadId)!)
+      return {
+        workspace: currentWorkspace, threadId, incarnation: JSON.stringify(incarnation),
+        assertCurrent: () => {
+          if (writableThreadScope(threadId) !== currentWorkspace ||
+            !matchesThreadIncarnation(getThreadCore(threadId), incarnation))
+            throw new ModFunctionError("MODS_PLATFORM_TARGET_CHANGED")
+        }
+      }
+    },
+    publish: (facts) => functions.publishHostFileEdit(facts)
+  })
   manager.attachFunctions({
     appendConversation: (...args) => functions.appendConversation(...args),
     independentModelPrompt: (...args) => functions.independentModelPrompt(...args),
@@ -1337,12 +1559,30 @@ export function registerModsHandlers(ipcMain: IpcMain, window: () => BrowserWind
       functions.closeThread(threadId)
       queue.closeThread(threadId)
     },
+    closeThreadAndWait: async (threadId) => {
+      if (!getThreadCore(threadId)) functions.forgetReleasedThread(threadId)
+      queue.closeThread(threadId)
+      await functions.closeThreadAndWait(threadId)
+    },
+    captureThreadRetirement: (threadId) => {
+      const captured = functions.captureThreadRetirement(threadId)
+      return { ...captured, retire: async () => {
+        captured.assertCurrent()
+        queue.closeThread(threadId)
+        await captured.retire()
+      } }
+    },
     close: () => { functions.close(); desktopBroker.close(); promptBroker.close() }
   })
   app.once("will-quit", () => {
+    stopPlatformFileEdits()
     stopPolicyObservations()
     setModDevelopmentService(undefined)
     creatorComposition.close()
+    creatorBusiness.close()
+    setCreatorBusinessService(undefined)
+    setCreatorUserConfigService(undefined)
+    configureExtensionContextDirectoryBinding(undefined)
     creatorReuse.close()
     reconcileCreatorReuse = undefined
     trialUndo.close()
@@ -1416,7 +1656,7 @@ export function registerModsHandlers(ipcMain: IpcMain, window: () => BrowserWind
   function readThreadWorkspacePath(threadId: string): string {
     if (typeof threadId !== "string" || threadId.length > 200)
       throw new ModError("MODS_THREAD_INVALID")
-    const thread = getThreadCore(threadId)
+    const { thread } = readNativeChildModsThread(threadId)
     if (!thread) throw new ModError("MODS_THREAD_MISSING")
     const metadata =
       typeof thread.metadata === "string" ? JSON.parse(thread.metadata) : thread.metadata
@@ -1466,7 +1706,8 @@ export function registerModsHandlers(ipcMain: IpcMain, window: () => BrowserWind
   }
   function writableThreadScope(threadId: string): string {
     const workspace = threadScope(threadId)
-    const thread = getThreadCore(threadId)!
+    const { thread } = readNativeChildModsThread(threadId)
+    if (!thread) throw new ModError("MODS_THREAD_MISSING")
     const metadata =
       typeof thread.metadata === "string" ? JSON.parse(thread.metadata) : thread.metadata
     if (
@@ -1478,7 +1719,7 @@ export function registerModsHandlers(ipcMain: IpcMain, window: () => BrowserWind
   }
   // A native worker association supplies data identity, never parent execution permission.
   function assertFunctionDataScope(workspace: string, threadId: string): void {
-    const worker = readCoordinatorWorkerModsContext(threadId)
+    const worker = readNativeChildModsContext(threadId)
     const current = writableThreadScope(worker?.parentThreadId ?? threadId)
     if (current !== workspace ||
       (worker && manager.workspaceKey(worker.workspace) !== current))
@@ -1486,14 +1727,14 @@ export function registerModsHandlers(ipcMain: IpcMain, window: () => BrowserWind
     worker?.assertCurrent()
   }
   function functionClawScope(threadId: string): { threadId: string; identity: string } | null {
-    const worker = readCoordinatorWorkerModsContext(threadId)
+    const worker = readNativeChildModsContext(threadId)
     if (worker) assertFunctionDataScope(manager.workspaceKey(worker.workspace), threadId)
     const selected = resolveClawThread(worker?.parentThreadId ?? threadId,
       getThreadCore, (workspace) => manager.workspaceKey(workspace))
     return worker && selected ? { threadId, identity: selected.identity } : selected
   }
   function functionCapabilityContext(workspace: string, threadId: string) {
-    const worker = readCoordinatorWorkerModsContext(threadId)
+    const worker = readNativeChildModsContext(threadId)
     if (worker) assertFunctionDataScope(manager.workspaceKey(worker.workspace), threadId)
     return resolveCapabilityContext(workspace, worker?.parentThreadId ?? threadId, {
       thread: getThreadCore,
@@ -1578,6 +1819,40 @@ export function registerModsHandlers(ipcMain: IpcMain, window: () => BrowserWind
   ipcMain.handle("mods:function-turn-notices", (event, threadId: string) =>
     functions.turnNotices(scope(event, threadId), threadId)
   )
+  registerPlatformHandlers(ipcMain, functions, {
+    capture: (event, threadId, writable) => {
+      const read = () => writable ? writableScope(event, threadId) : scope(event, threadId)
+      const workspace = read(), frame = event.sender.mainFrame
+      const incarnation = captureThreadIncarnation(getThreadCore(threadId)!)
+      return {
+        workspace,
+        assertCurrent: () => {
+          if (read() !== workspace || event.sender.mainFrame !== frame ||
+            !matchesThreadIncarnation(getThreadCore(threadId), incarnation))
+            throw new ModFunctionError("MODS_PLATFORM_SCOPE_CHANGED")
+        }
+      }
+    },
+    view: (workspace, threadId, work) => withFunctionExecution({
+      ...manager.functionUserScope(workspace, threadId), workspace, threadId,
+      leased: false, immediate: false, userInitiated: true
+    }, work),
+    userAction: (workspace, threadId, signal, guard, work) =>
+      runPlatformUserAction(queue, manager, workspace, threadId, signal, guard, work)
+  })
+  registerRuntimeSessionHandlers(ipcMain, functions, trusted, (event, threadId, writable) => {
+    const read = () => writable ? writableScope(event, threadId) : scope(event, threadId)
+    const workspace = read(), frame = event.sender.mainFrame
+    const thread = getThreadCore(threadId)!
+    const incarnation = captureThreadIncarnation(thread)
+    return { workspace, incarnationKey: JSON.stringify(incarnation),
+      ...(typeof thread.title === "string" ? { title: thread.title.trim().slice(0, 200) } : {}),
+      assertCurrent: () => {
+      if (read() !== workspace || event.sender.mainFrame !== frame ||
+        !matchesThreadIncarnation(getThreadCore(threadId), incarnation))
+        throw new ModFunctionError("MODS_RUNTIME_SESSION_STALE")
+    } }
+  })
   registerFunctionConfigHandlers(ipcMain, functions, writableScope, async (event, kind) => {
     const window = BrowserWindow.fromWebContents(event.sender)
     if (!window || window.isDestroyed()) throw new ModFunctionError("MODS_CONFIG_SCOPE_CHANGED")
@@ -1586,7 +1861,21 @@ export function registerModsHandlers(ipcMain: IpcMain, window: () => BrowserWind
       properties: [kind === "directory" ? "openDirectory" : "openFile"]
     })
     return result.canceled ? undefined : result.filePaths[0]
-  })
+  }, async (event, view) => {
+    const owner = BrowserWindow.fromWebContents(event.sender)
+    if (!owner || owner.isDestroyed() || !view.migration?.canApply)
+      throw new ModFunctionError("MODS_CONFIG_SCOPE_CHANGED")
+    const result = await dialog.showMessageBox(owner, {
+      type: "warning", title: "确认迁移插件配置",
+      message: `将 ${view.plugin} 的配置从版本 ${view.migration.fromVersion} 迁移到 ${view.migration.toVersion}`,
+      detail: "字段删除可能移除敏感配置。重命名的密钥只在本机重新加密，不会向助手或插件包公开。失败时保留原配置。\n\n" +
+        (view.migration.changes.map(change => change.kind === "rename"
+          ? `重命名：${change.from} → ${change.to}` : `删除保存值：${change.key}`).join("\n") || "保留兼容的已有保存值，采用新版字段约束和默认值。"),
+      buttons: ["取消", "确认迁移配置"], defaultId: 0, cancelId: 0, noLink: true
+    })
+    return result.response === 1
+  }, (event, threadId) =>
+    settingsScope(event, threadId, writableScope(event, threadId), true).assertCurrent)
   ipcMain.handle("mods:function-completion-evidence", (event, threadId: string) =>
     functions.completionEvidence(scope(event, threadId), threadId)
   )

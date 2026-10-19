@@ -34,6 +34,7 @@ import {
 } from "../../agent/coordinator-mode"
 import {
   claimLocalThreadRunLease,
+  captureLocalThreadRunLease,
   getLocalThreadRunLease,
   releaseLocalThreadRunLease,
   type LocalThreadRunOwner
@@ -144,6 +145,8 @@ export interface ImRemoteTurnExecutionInput {
   capability: Extract<ImRemoteCapabilityDecision, { allowed: true }>
   interactionWaitHooks?: RuntimeInteractionWaitHooks
   onDetachedResultAvailable?: (signal: ImDetachedResultSignal) => void
+  /** Main-only original owner: observed and awaited after durable delivery and lease release. */
+  onSourceSettlement?: (settlement: Promise<void>, invalidate?: () => void) => void
 }
 
 export interface ImDetachedResultSignal {
@@ -159,6 +162,7 @@ export interface ImDetachedResultNotice extends ImDetachedResultSignal {
 }
 
 export interface PreparedRemoteStandardTurnInput {
+  onSourceSettlement?: (settlement: Promise<void>, invalidate?: () => void) => void
   rawMessage: string
   userMessageId: string
   threadId: string
@@ -685,8 +689,10 @@ async function executePreparedImStandardTurn(
   input: ImRemoteTurnExecutionInput,
   goalRuns: ImGoalRunBridge
 ): Promise<string> {
-  const { event, capability, runId, signal, interactionWaitHooks, onDetachedResultAvailable } =
-    input
+  const {
+    event, capability, runId, signal, interactionWaitHooks, onDetachedResultAvailable,
+    onSourceSettlement
+  } = input
   const { target, metadata, workspacePath } = capability
   const escapedSlashCommand = event.messageText.trimStart().startsWith("//")
   const directGoalCommand =
@@ -742,6 +748,7 @@ async function executePreparedImStandardTurn(
       remotePolicy,
       interactionWaitHooks,
       onDetachedResultAvailable,
+      onSourceSettlement,
       verifyResolvedThread
     })
   }
@@ -762,6 +769,7 @@ async function executePreparedImStandardTurn(
     remotePolicy,
     interactionWaitHooks,
     onDetachedResultAvailable,
+    onSourceSettlement,
     verifyResolvedThread
   }
   // The run body derives its own runtime options and knows nothing about
@@ -856,6 +864,7 @@ export class ImRemoteRunner {
     if (!claim.acquired) {
       return this.defer(event, "deferred_thread_busy", "Thread went busy after permit acquisition")
     }
+    const ownsLease = captureLocalThreadRunLease(target.threadId)
     const unregisterInteractionRoute = this.dependencies.interactionRoutes.register({
       eventId: event.eventId,
       principalId: event.principalId,
@@ -1086,6 +1095,7 @@ export class ImRemoteRunner {
         })
     }, this.dependencies.permitRenewIntervalMs)
 
+    const sourceSettlements = new Map<Promise<void>, (() => void) | undefined>()
     try {
       // Re-read every mutable local state only after both execution permits are
       // owned and immediately before creating/pinning a Runtime.
@@ -1108,6 +1118,10 @@ export class ImRemoteRunner {
         signal: executionAbort.signal,
         capability: decision,
         interactionWaitHooks,
+        onSourceSettlement: (settlement, invalidate) => {
+          void settlement.catch(() => {})
+          sourceSettlements.set(settlement, invalidate)
+        },
         onDetachedResultAvailable: this.dependencies.onDetachedResultAvailable
           ? (signal) => {
               this.dependencies.onDetachedResultAvailable?.({
@@ -1235,7 +1249,17 @@ export class ImRemoteRunner {
       clearInterval(renewTimer)
       queueSignal.removeEventListener("abort", abortFromQueue)
       unregisterInteractionRoute()
-      releaseLocalThreadRunLease(target.threadId, "im", runId)
+      if (ownsLease?.()) releaseLocalThreadRunLease(target.threadId, "im", runId)
+      else {
+        for (const invalidate of sourceSettlements.values()) invalidate?.()
+        console.error("[IM] Original physical lease changed before source settlement; replacement lease retained")
+      }
+      const sources = await Promise.allSettled([...sourceSettlements.keys()])
+      for (const result of sources) if (result.status === "rejected")
+        console.error(
+          "[IM] Source settlement failed after durable delivery; transport is not retried:",
+          result.reason
+        )
     }
   }
 

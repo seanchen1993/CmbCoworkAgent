@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react"
+import { useId, useMemo, useState } from "react"
 import { Search } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import type { ClawSourceEntry, ClawSourceSelection } from "../../../../shared/mods/claw"
@@ -22,6 +22,7 @@ export function ClawSourceSelector({
   onChange(value: ClawSourceSelection): void
 }) {
   const [search, setSearch] = useState("")
+  const radioName = useId()
   const [visibleCount, setVisibleCount] = useState(100)
   const mode = value?.mode ?? "all"
   const selected = mode === "selected" ? (value?.items ?? []) : []
@@ -41,27 +42,33 @@ export function ClawSourceSelector({
         <h3 className="text-sm font-medium">{title}</h3>
         <p className="mt-1 text-xs leading-5 text-muted-foreground">{description}</p>
       </div>
-      <div className="grid gap-2 sm:grid-cols-2" role="group" aria-label={`${title}选择方式`}>
+      <div className="grid gap-2 sm:grid-cols-2" role="radiogroup" aria-label={`${title}选择方式`}>
         {(
           [
             ["all", "使用全部已开启项", "跟随原来的设置；以后开启的选项也会加入"],
             ["selected", "仅使用所选", "固定当前名单；可以一项也不选"]
           ] as const
         ).map(([id, label, hint]) => (
-          <button
+          <label
             key={id}
-            type="button"
-            aria-label={label}
-            aria-pressed={mode === id}
-            disabled={disabled}
-            className={`rounded-lg border p-3 text-left disabled:opacity-50 ${mode === id ? "border-primary/40 bg-primary/5" : "bg-background hover:bg-muted/50"}`}
-            onClick={() => {
-              if (mode !== id) onChange({ mode: id, items: [] })
-            }}
+            className={`devclaw-control-shell flex items-start gap-2 p-3 text-left ${disabled ? "opacity-60" : "cursor-pointer"} ${mode === id ? "bg-primary/5" : ""}`}
           >
-            <span className="block text-xs font-medium">{label}</span>
-            <span className="mt-1 block text-[11px] leading-4 text-muted-foreground">{hint}</span>
-          </button>
+            <input
+              type="radio"
+              name={radioName}
+              aria-label={label}
+              checked={mode === id}
+              disabled={disabled}
+              className="mt-0.5 size-4 shrink-0 accent-primary"
+              onChange={() => {
+                if (mode !== id) onChange({ mode: id, items: [] })
+              }}
+            />
+            <span>
+              <span className="block text-xs font-medium">{label}</span>
+              <span className="mt-1 block text-[11px] leading-4 text-muted-foreground">{hint}</span>
+            </span>
+          </label>
         ))}
       </div>
       <p role="status" className="text-xs text-muted-foreground">
@@ -71,10 +78,11 @@ export function ClawSourceSelector({
       {mode === "selected" && (
         <>
           <div className="flex flex-wrap items-center gap-2">
-            <label className="flex min-w-0 flex-1 items-center gap-2 rounded-lg border bg-background px-2.5">
+            <label className="devclaw-control-shell flex min-w-0 flex-1 items-center gap-2 px-2.5">
               <Search aria-hidden className="size-3.5 shrink-0 text-muted-foreground" />
               <input
                 aria-label={`搜索${title}`}
+                disabled={disabled}
                 className="min-w-0 flex-1 bg-transparent py-2 text-xs outline-none"
                 value={search}
                 onChange={(event) => {

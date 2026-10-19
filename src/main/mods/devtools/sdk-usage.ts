@@ -27,7 +27,7 @@ interface Snapshot {
   digest: string
   modelProtocol: FunctionModelProtocol
 }
-type FunctionNode = TS.FunctionDeclaration | TS.FunctionExpression | TS.ArrowFunction
+type FunctionNode = TS.FunctionDeclaration | TS.FunctionExpression | TS.ArrowFunction | TS.MethodDeclaration
 
 /** Bounded syntax analysis only. Never loads a plugin module or probes its hooks. */
 export async function analyzeFunctionSdk(snapshot: Snapshot) {
@@ -342,9 +342,14 @@ async function analyzeSnapshot(snapshot: Snapshot) {
       }
       if (!ts.isCallExpression(node)) continue
       const value = path(node.expression)
-      if (value !== "@on" && value !== "@registration.catch") continue
+      if (value !== "@on" && value !== "@registration.catch" && value !== "@on.capability") continue
       const handler = node.arguments.at(-1)
-      const fn = handler && functionValue(handler)
+      const act = value === "@on.capability" && handler && ts.isObjectLiteralExpression(unwrap(handler))
+        ? (unwrap(handler) as TS.ObjectLiteralExpression).properties.find(part =>
+          part.name && property(part.name) === "act") : undefined
+      const fn = act && ts.isMethodDeclaration(act) ? act
+        : act && ts.isPropertyAssignment(act) ? functionValue(act.initializer)
+        : value === "@on.capability" ? undefined : handler && functionValue(handler)
       if (!fn) {
         unknown(node, "无法静态解析 Hook 回调。")
         continue
@@ -380,6 +385,56 @@ async function analyzeSnapshot(snapshot: Snapshot) {
     if (pass === 31) {
       truncated = true
       unknown(undefined, "SDK 别名超过静态分析深度。")
+    }
+  }
+  function immutableValue(node: TS.Node, seen = new Set<TS.Symbol>()): TS.Node {
+    budget(seen.size)
+    const value = unwrap(node)
+    if (!ts.isIdentifier(value)) return value
+    const symbol = symbols(value)
+    if (!symbol || written.has(symbol) || seen.has(symbol)) return value
+    seen.add(symbol)
+    const declaration = symbol.valueDeclaration
+    return declaration && ts.isVariableDeclaration(declaration) && declaration.initializer &&
+      ts.getCombinedNodeFlags(declaration) & ts.NodeFlags.Const
+      ? immutableValue(declaration.initializer, seen) : value
+  }
+  // Declaration permissions are part of trial consent even when an action has not run.
+  // This is a bounded AST read, never register evaluation or imported descriptor execution.
+  for (const node of nodes) {
+    if (!ts.isCallExpression(node) || path(node.expression) !== "@on.capability") continue
+    usages.push({ ...location(node), method: "platform.act", support: "bounded" })
+    const descriptor = node.arguments[0] && immutableValue(node.arguments[0])
+    if (!descriptor || !ts.isObjectLiteralExpression(descriptor)) {
+      unknown(node, "能力声明必须为可静态核对的常量对象；未执行登记来猜测权限。")
+      continue
+    }
+    const actionsProperty = descriptor.properties.find(part => part.name && property(part.name) === "actions")
+    const actions = actionsProperty && ts.isPropertyAssignment(actionsProperty)
+      ? immutableValue(actionsProperty.initializer) : undefined
+    if (!actions || !ts.isArrayLiteralExpression(actions)) {
+      unknown(node, "能力动作及所需权限无法静态核对。")
+      continue
+    }
+    for (const actionNode of actions.elements) {
+      const action = immutableValue(actionNode)
+      const permissionsProperty = ts.isObjectLiteralExpression(action) && action.properties.find(part =>
+        part.name && property(part.name) === "requiredPermissions")
+      const permissions = permissionsProperty && ts.isPropertyAssignment(permissionsProperty)
+        ? immutableValue(permissionsProperty.initializer) : undefined
+      if (!permissions || !ts.isArrayLiteralExpression(permissions)) {
+        unknown(actionNode, "能力所需权限必须为可核对的字面量列表。")
+        continue
+      }
+      for (const permissionNode of permissions.elements) {
+        const permission = immutableValue(permissionNode)
+        if (!ts.isStringLiteralLike(permission) || !supported.has(permission.text)) {
+          unknown(permissionNode, "能力声明包含未知或动态权限。")
+          continue
+        }
+        if (usages.length >= 2048) { truncated = true; break }
+        usages.push({ ...location(permissionNode), method: permission.text, support: "bounded" })
+      }
     }
   }
   function literalOptions(node: TS.Expression | undefined): TS.ObjectLiteralExpression | undefined {
@@ -564,7 +619,7 @@ async function analyzeSnapshot(snapshot: Snapshot) {
     }
     const called = ts.isCallExpression(parent) && parent.expression === node
     if (value.startsWith("@")) {
-      if (!called || !["@on", "@registration.catch"].includes(value))
+      if (!called || !["@on", "@registration.catch", "@on.capability"].includes(value))
         unknown(node, "注册函数发生传递或动态访问，后续 SDK 使用未验证。")
       continue
     }

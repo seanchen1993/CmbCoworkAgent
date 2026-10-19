@@ -3,7 +3,7 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterEach, expect, it, vi } from "vitest"
 import type { ClawComponentSelection } from "../../../shared/mods/claw-components"
-import type { ModIdentity } from "../../../shared/mods/types"
+import type { ModIdentity, ModJson, ModObject } from "../../../shared/mods/types"
 import { DEFAULT_COMPLETION_POLICY } from "../../../shared/mods/v2/completion-policy"
 import { ClawStore } from "../claw-store"
 import { ModControlStore, type ModGrant } from "../control-store"
@@ -22,7 +22,7 @@ const selected = (ids: string[], label = "review"): ClawComponentSelection => ({
   config: ids.includes("review") ? { review: { label } } : {}
 })
 
-async function fixture(explosive = false) {
+async function fixture(explosive = false, scoped = false, middleware?: "tool.call" | "turn.*" | "agent.list") {
   const root = await mkdtemp(join(tmpdir(), "component-manager-"))
   const source = join(root, "plugin")
   await mkdir(join(source, "mods"), { recursive: true })
@@ -36,6 +36,7 @@ async function fixture(explosive = false) {
         components: [
           {
             id: "review",
+            ...(scoped ? { usage: "project" } : {}),
             name: "Review",
             kind: "module",
             entry: "./review.ts",
@@ -57,6 +58,7 @@ async function fixture(explosive = false) {
           },
           {
             id: "rewrite",
+            ...(scoped ? { usage: "chat" } : {}),
             name: "Rewrite",
             kind: "module",
             entry: "./rewrite.ts",
@@ -71,12 +73,16 @@ async function fixture(explosive = false) {
   await writeFile(
     join(source, "mods/core.ts"),
     `export function register(on) {
+    ${middleware === "tool.call" ? 'on("tool.call",async($,e,next)=>next(e))' : ""}
+    ${middleware === "turn.*" ? 'on("turn.*",async function*($,e,next){return yield* next(e)})' : ""}
     on("session.start", {}, async ($, e, next) => {
       await $.store.set("core-count", ((await $.store.get("core-count")) || 0) + 1)
       await $.command.register({name:"core",description:"core"})
       return next(e)
     })
-    on("command.run", {command:"core"}, async ($) => ({text:String(await $.store.get("core-count"))}))
+    on("command.run", {command:"core"}, async ($) => (${middleware === "agent.list"
+      ? '{output:{agents:await $.agent.list()}}'
+      : '{text:String(await $.store.get("core-count"))}'}))
   }`
   )
   for (const id of ["review", "rewrite"])
@@ -101,6 +107,11 @@ async function fixture(explosive = false) {
   let loads = 0
   let beforeLoad = async (): Promise<void> => {}
   let scopeFailure: string | undefined
+  let usage: "chat" | "project" = "chat"
+  const plugins = [{ id: "source", name: "components", path: source, enabled: true }]
+  const installedPluginIds = vi.fn(() => new Set(plugins.map(plugin => plugin.id)))
+  const publish = vi.fn(async (_workspace: string, value: ModJson) => value)
+  const listAgents = vi.fn(async () => [{ id: "worker", description: "agent", type: "task", status: "idle" }])
   const completeModel = vi.fn(async (workspace: string, threadId: string, grant: ModGrant) => {
     const identity = functionCallIdentity(workspace, threadId, grant, {
       origin: "mod",
@@ -124,15 +135,20 @@ async function fixture(explosive = false) {
   const manager = new FunctionModsManager(
     store,
     {
-      plugins: () => [{ id: "source", name: "components", path: source, enabled: true }],
+      plugins: () => plugins,
+      installedPluginIds,
       enabled: () => true,
+      protects: () => true,
+      captureSiteGuard: () => () => {},
+      capabilityContext: () => ({ usage, identity: usage }),
       clawApplicable: (thread) => thread !== "harness",
       clawScope: (threadId) => {
         if (threadId === scopeFailure) throw Error("THREAD_SCOPE_UNREADABLE")
         return { threadId, identity: JSON.stringify([threadId, "incarnation"]) }
       },
       changed: () => {},
-      publish: async (_, value) => value,
+      publish,
+      listAgents,
       completeModelResult: completeModel
     },
     () => {
@@ -218,6 +234,11 @@ async function fixture(explosive = false) {
     identities,
     grants,
     completeModel,
+    publish,
+    listAgents,
+    plugins,
+    installedPluginIds,
+    setUsage: (next: typeof usage) => { usage = next },
     loads: () => loads,
     setLoadBarrier: (run: typeof beforeLoad) => {
       beforeLoad = run
@@ -227,6 +248,271 @@ async function fixture(explosive = false) {
     }
   }
 }
+
+it.each(["disable", "uninstall"])("keeps an unrelated selected guest after %s of another plugin", async (change) => {
+  const f = await fixture()
+  f.bind("a", selected(["core"]))
+  const scope = await f.manager.prepareFlowScope(f.root, "a", undefined, "run", "digest", signal())
+  const loads = f.loads()
+  if (change === "disable")
+    f.plugins.push({ id: "neighbor", name: "unused", path: join(f.root, "unused"), enabled: false })
+  f.manager.pluginsChanged(f.root, ["neighbor"])
+  expect(() => scope.assertLive()).not.toThrow()
+  const command = (await f.manager.commands(f.root, "a")).find((item) => item.command === "core")!
+  expect(await f.manager.runCommand(f.root, "a", command, "", signal())).toMatchObject({ text: "1" })
+  expect(f.loads()).toBe(loads)
+  scope.dispose()
+})
+
+it("repairs a cold cached binding after uninstall without requiring a previously mounted guest", async () => {
+  const f = await fixture()
+  f.bind("cold", selected(["core"]))
+  expect(f.manager.clawSelection(f.root, "cold")?.capabilities).toHaveLength(1)
+  f.plugins.splice(0)
+  f.manager.pluginsChanged(f.root, ["source"])
+  expect(f.manager.clawSelection(f.root, "cold")?.capabilities).toEqual([])
+  expect(await f.manager.effectiveStatus(f.root, "cold")).toEqual([])
+  expect(f.loads()).toBe(0)
+})
+
+it("does not reread the registry for every native chunk and refreshes it after uninstall", async () => {
+  const f = await fixture()
+  f.bind("a", selected(["core"]))
+  await f.manager.commands(f.root, "a")
+  const reads = f.installedPluginIds.mock.calls.length
+  const stream = await f.manager.turnStep(f.root, "a", {
+    turnId: "turn", index: 0, messageCount: 1, model: "native"
+  }, async function* () {
+    for (let i = 0; i < 5; i++) yield { kind: "text", text: String(i) }
+    return { answer: "01234" }
+  }, signal())
+  await stream.next()
+  await stream.next()
+  expect(f.installedPluginIds).toHaveBeenCalledTimes(reads)
+  f.plugins.splice(0)
+  f.manager.pluginsChanged(f.root, ["source"])
+  const remaining: ModJson[] = []
+  for await (const chunk of stream) remaining.push(chunk)
+  expect(remaining).toEqual([2, 3, 4].map(i => ({ kind: "text", text: String(i) })))
+  expect(await stream.result).toEqual({ answer: "01234" })
+  expect(f.installedPluginIds).toHaveBeenCalledTimes(reads + 1)
+})
+
+it("does not erase a live binding when the host registry cannot be read", async () => {
+  const f = await fixture()
+  f.bind("a", selected(["core"]))
+  const before = f.claws.selection(f.root, '["a","incarnation"]')
+  f.installedPluginIds.mockImplementation(() => { throw Error("PLUGIN_REGISTRY_INVALID") })
+  expect(() => f.manager.clawSelection(f.root, "a")).toThrow("PLUGIN_REGISTRY_INVALID")
+  expect(f.claws.selection(f.root, '["a","incarnation"]')).toEqual(before)
+})
+
+it.each([false, true])("keeps history and the next native turn usable after uninstall (bound=%s)", async (bound) => {
+  const f = await fixture()
+  if (bound) f.bind("a", selected(["core"]))
+  const command = (await f.manager.commands(f.root, "a")).find(item => item.command === "core")!
+  const old = await f.manager.siteMountOutcome(f.root, "a", "AssistantMessage")
+  expect(old.state).toBe("mounted")
+  f.plugins.splice(0)
+  await rm(f.source, { recursive: true, force: true })
+  f.manager.pluginsChanged(f.root, ["source"])
+  await expect(f.manager.runCommand(f.root, "a", command, "", signal())).rejects.toThrow()
+  for (const component of ["UserMessage", "AssistantMessage"] as const) {
+    const mount = await f.manager.siteMountOutcome(f.root, "a", component)
+    expect(mount.state).toBe("mounted")
+    if (mount.state !== "mounted") throw Error("history must retain protected native presentation")
+    const props: ModObject = component === "UserMessage"
+      ? { text: "retained-history", isExpanded: false }
+      : { text: "retained-history", isFirstOfReply: true }
+    expect(JSON.stringify(await f.manager.siteRender(f.root, "a", mount.owner, props)))
+      .toContain("retained-history")
+  }
+  const core = vi.fn(async () => ({ text: "next-tool" }))
+  await expect(f.manager.interceptTool(f.root, "a", { tool: "read_file", tool_use_id: "next" }, signal(), core))
+    .resolves.toEqual({ text: "next-tool" })
+  expect(core).toHaveBeenCalledOnce()
+  const stream = await f.manager.turnStep(f.root, "a", {
+    turnId: "next-turn", index: 0, messageCount: 2, model: "native"
+  }, async function* () { yield { kind: "text", text: "next-answer" }; return { answer: "next-answer" } }, signal())
+  const chunks: ModJson[] = []
+  for await (const chunk of stream) chunks.push(chunk)
+  expect(chunks).toEqual([{ kind: "text", text: "next-answer" }])
+  expect(await stream.result).toEqual({ answer: "next-answer" })
+})
+
+it.each(["disable", "uninstall"])("retires the actual source on %s while a host native tool completes once", async (change) => {
+  const f = await fixture()
+  f.bind("a", selected(["core"]))
+  const scope = await f.manager.prepareFlowScope(f.root, "a", undefined, "run", "digest", signal())
+  const entered = Promise.withResolvers<void>(), finish = Promise.withResolvers<void>()
+  const core = vi.fn(async () => { entered.resolve(); await finish.promise; return { text: "NATIVE_RESULT" } })
+  const pending = f.manager.interceptTool(f.root, "a", { tool: "mod_authoring", tool_use_id: "native" }, signal(), core)
+  await entered.promise
+  if (change === "disable") f.plugins[0].enabled = false
+  else f.plugins.splice(0)
+  f.manager.pluginsChanged(f.root, ["source"])
+  expect(() => scope.assertLive()).toThrow()
+  finish.resolve()
+  await expect(pending).resolves.toEqual({ text: "NATIVE_RESULT" })
+  expect(core).toHaveBeenCalledOnce()
+  scope.dispose()
+})
+
+it.each(["approve", "revoke"] as const)("retires old guest authority after %s without cancelling a source-free native tool", async (change) => {
+  const f = await fixture()
+  f.bind("a", selected(["core"]))
+  const scope = await f.manager.prepareFlowScope(f.root, "a", undefined, "run", "digest", signal())
+  const command = (await f.manager.commands(f.root, "a")).find((item) => item.command === "core")!
+  const entered = Promise.withResolvers<void>(), finish = Promise.withResolvers<void>()
+  const core = vi.fn(async () => { entered.resolve(); await finish.promise; return { text: "NATIVE_RESULT" } })
+  const pending = f.manager.interceptTool(f.root, "a", { tool: "mod_authoring", tool_use_id: "native" }, signal(), core)
+  await entered.promise
+  if (change === "approve") await f.manager.approve(f.root, "source", f.status.digest!)
+  else f.manager.revoke(f.root, "components")
+  expect(() => scope.assertLive()).toThrow()
+  if (change === "revoke")
+    await expect(f.manager.runCommand(f.root, "a", command, "", signal())).rejects.toThrow()
+  finish.resolve()
+  await expect(pending).resolves.toEqual({ text: "NATIVE_RESULT" })
+  expect(core).toHaveBeenCalledOnce()
+  expect(f.store.getGrant(f.root, "function:components")?.enabled).toBe(change === "approve")
+  scope.dispose()
+})
+
+it("keeps the native model stream independent from a retired guest with no turn.step registration", async () => {
+  const f = await fixture()
+  f.bind("a", selected(["core"]))
+  await f.manager.commands(f.root, "a")
+  const finish = Promise.withResolvers<void>()
+  const stream = await f.manager.turnStep(f.root, "a", { turnId: "turn", index: 0, messageCount: 1, model: "native" },
+    async function* () { yield { kind: "text", text: "one" }; await finish.promise; yield { kind: "text", text: "two" }; return { answer: "onetwo" } }, signal())
+  expect((await stream.next()).value).toEqual({ kind: "text", text: "one" })
+  f.plugins[0].enabled = false
+  f.manager.pluginsChanged(f.root, ["source"])
+  finish.resolve()
+  expect((await stream.next()).value).toEqual({ kind: "text", text: "two" })
+  await stream.next()
+  expect(await stream.result).toEqual({ answer: "onetwo" })
+})
+
+it.each(["disable", "uninstall"])("does not replay a real tool.call chain after %s", async (change) => {
+  const f = await fixture(false, false, "tool.call")
+  f.bind("a", selected(["core"]))
+  const entered = Promise.withResolvers<void>(), finish = Promise.withResolvers<void>()
+  const core = vi.fn(async () => { entered.resolve(); await finish.promise; return { text: "OLD_RESULT" } })
+  const pending = f.manager.interceptTool(f.root, "a", { tool: "mod_authoring", tool_use_id: "native", args: {} }, signal(), core)
+  const rejected = expect(pending).rejects.toThrow()
+  await entered.promise
+  if (change === "disable") f.plugins[0].enabled = false
+  else f.plugins.splice(0)
+  f.manager.pluginsChanged(f.root, ["source"])
+  finish.resolve()
+  await rejected
+  expect(core).toHaveBeenCalledOnce()
+})
+
+it("keeps a captured wildcard turn handler participating after its source is retired", async () => {
+  const f = await fixture(false, false, "turn.*")
+  f.bind("a", selected(["core"]))
+  const stream = await f.manager.turnStep(f.root, "a", { turnId: "turn", index: 0, messageCount: 1, model: "native" },
+    async function* () { yield { kind: "text", text: "one" }; yield { kind: "text", text: "two" }; return { answer: "onetwo" } }, signal())
+  expect((await stream.next()).value).toEqual({ kind: "text", text: "one" })
+  f.plugins[0].enabled = false
+  f.manager.pluginsChanged(f.root, ["source"])
+  await expect(stream.next()).rejects.toThrow()
+})
+
+it("tracks a pure native workspace through application invalidation without any guest session", async () => {
+  const f = await fixture()
+  f.plugins.splice(0)
+  const stream = await f.manager.turnStep(f.root, "a", { turnId: "turn", index: 0, messageCount: 1, model: "native" },
+    async function* () { yield { kind: "text", text: "one" }; yield { kind: "text", text: "two" }; return { answer: "onetwo" } }, signal())
+  expect((await stream.next()).value).toEqual({ kind: "text", text: "one" })
+  f.manager.invalidateAll()
+  await expect(stream.next()).rejects.toThrow("MODS_SCOPE_CHANGED")
+})
+
+it("fences a disabled source during guest load before its first snapshot or startup effect", async () => {
+  const f = await fixture()
+  f.bind("a", selected(["core"]))
+  const entered = Promise.withResolvers<void>(), finish = Promise.withResolvers<void>()
+  f.setLoadBarrier(async () => { entered.resolve(); await finish.promise })
+  const pending = f.manager.commands(f.root, "a")
+  const rejected = expect(pending).rejects.toThrow()
+  await entered.promise
+  f.plugins[0].enabled = false
+  f.manager.pluginsChanged(f.root, ["source"])
+  finish.resolve()
+  await rejected
+  expect(f.store.functionState.get(JSON.stringify([f.root, "components"]), "core-count")).toBeUndefined()
+})
+
+it("still rejects a native core after a real workspace policy invalidation", async () => {
+  const f = await fixture()
+  f.bind("a", selected(["core"]))
+  const entered = Promise.withResolvers<void>(), finish = Promise.withResolvers<void>()
+  const pending = f.manager.interceptTool(f.root, "a", { tool: "mod_authoring", tool_use_id: "native" }, signal(), async () => {
+    entered.resolve(); await finish.promise; return { text: "POLICY_CHANGED" }
+  })
+  const rejected = expect(pending).rejects.toThrow("MODS_SCOPE_CHANGED")
+  await entered.promise
+  f.manager.invalidate(f.root)
+  finish.resolve()
+  await rejected
+})
+
+it.each(["disable", "revoke"] as const)("does not publish delayed agent rows after %s during the real guest SDK call", async (change) => {
+  const f = await fixture(false, false, "agent.list")
+  f.bind("a", selected(["core"]))
+  const entered = Promise.withResolvers<void>(), finish = Promise.withResolvers<void>(), settled = Promise.withResolvers<void>()
+  f.listAgents.mockImplementationOnce(async () => {
+    entered.resolve()
+    await finish.promise
+    settled.resolve()
+    return [{ id: "OLD_AGENT_ROWS", description: "old source", type: "task", status: "idle" }]
+  })
+  const command = (await f.manager.commands(f.root, "a")).find((item) => item.command === "core")!
+  const pending = f.manager.runCommand(f.root, "a", command, "", signal())
+  const rejected = expect(pending).rejects.toThrow()
+  await entered.promise
+  if (change === "disable") {
+    f.plugins[0].enabled = false
+    f.manager.pluginsChanged(f.root, ["source"])
+  } else f.manager.revoke(f.root, "components")
+  finish.resolve()
+  await Promise.all([rejected, settled.promise])
+  await Promise.resolve()
+  expect(JSON.stringify(f.publish.mock.calls)).not.toContain("OLD_AGENT_ROWS")
+})
+
+it("projects mixed-mode defaults before guest initialization and preserves legacy components", async () => {
+  const f = await fixture(true, true)
+  expect((await f.manager.commands(f.root, "chat")).map((item) => item.command).sort())
+    .toEqual(["core", "rewrite"])
+  f.manager.closeThread("chat")
+  f.setUsage("project")
+  expect((await f.manager.commands(f.root, "project")).map((item) => item.command).sort())
+    .toEqual(["core", "review"])
+  expect((await f.invoke("project", "review")).value.output)
+    .toMatchObject({ unselected: false })
+})
+
+it("rejects an explicit all selection or an other-mode component before loading", async () => {
+  const f = await fixture(false, true)
+  f.bind("chat")
+  await expect(f.manager.commands(f.root, "chat")).rejects.toThrow("当前模式")
+  expect(f.loads()).toBe(0)
+  f.bind("chat", selected(["core", "review"]))
+  await expect(f.manager.commands(f.root, "chat")).rejects.toThrow("当前模式")
+  expect(f.loads()).toBe(0)
+})
+
+it("rejects a context change during asynchronous guest loading", async () => {
+  const f = await fixture(false, true)
+  f.setLoadBarrier(async () => { f.setUsage("project") })
+  await expect(f.manager.commands(f.root, "chat")).rejects.toThrow("MODS_SCOPE_CHANGED")
+  expect(f.completeModel).not.toHaveBeenCalled()
+})
 
 it("loads only selected entries and explicit dependencies, never an unselected top level", async () => {
   const f = await fixture(true)

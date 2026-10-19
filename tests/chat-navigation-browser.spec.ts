@@ -125,7 +125,7 @@ async function main(): Promise<void> {
   writeFileSync(
     entry,
     `const {app,BrowserWindow}=require("electron");
-    app.whenReady().then(()=>{const w=new BrowserWindow({show:true,width:1000,height:800,
+    app.whenReady().then(()=>{const w=new BrowserWindow({show:${process.env.CMB_E2E_HEADLESS !== "1"},width:1000,height:800,
       webPreferences:{backgroundThrottling:false}});w.loadFile(${JSON.stringify(html)})});`
   )
   const env = { ...process.env, CMB_E2E_ELECTRON_BIN: binary, CMB_E2E_DISABLE_GPU: "1" }

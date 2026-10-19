@@ -69,6 +69,15 @@ it.each(["off", "no-source"])("does no compilation for %s", async (mode) => {
   expect(f.createClient).not.toHaveBeenCalled()
 })
 
+it("keeps an already closed readiness query quiet without allocating a VM", async () => {
+  const f = await fixture()
+  const status = vi.spyOn(f.manager, "status")
+  f.manager.close()
+  expect(await f.manager.runtimeReady(f.root, "thread")).toBe(false)
+  expect(status).not.toHaveBeenCalled()
+  expect(f.createClient).not.toHaveBeenCalled()
+})
+
 it.each(["invalidate", "invalidateAll", "closeThread", "close", "thread-changed", "cancel"])(
   "rejects stale readiness after %s during asynchronous discovery",
   async (action) => {
@@ -78,12 +87,20 @@ it.each(["invalidate", "invalidateAll", "closeThread", "close", "thread-changed"
     const wait = new Promise<void>((resolve) => {
       release = resolve
     })
+    let markEntered!: () => void
+    const entered = new Promise<void>((resolve) => {
+      markEntered = resolve
+    })
     vi.spyOn(f.manager, "status").mockImplementationOnce(async () => {
+      markEntered()
       await wait
       return [{ pluginId: "reader", name: "reader", capabilities: [], state: "ready" }]
     })
     const pending = f.manager.runtimeReady(f.root, "thread", controller.signal)
     const rejection = expect(pending).rejects.toThrow()
+    // Native admission may await before discovery. Revoke the actual pending query,
+    // rather than changing the manager before its readiness request has been registered.
+    await entered
     if (action === "invalidate") f.manager.invalidate(f.root)
     else if (action === "invalidateAll") f.manager.invalidateAll()
     else if (action === "closeThread") f.manager.closeThread("thread")

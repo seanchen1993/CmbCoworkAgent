@@ -53,6 +53,40 @@ it("checks the shipped typed-counter starter without a generated editor declarat
   expect(result.diagnostics).toEqual([])
 })
 
+it("reports a missing startup return at its source line and accepts the continuation", async () => {
+  const source = [
+    'import type { Register } from "claude-code"',
+    "export const register: Register = (on) => {",
+    '  on("session.start", async ($) => {',
+    '    await $.store.get("weather-bar.city")',
+    "  })",
+    '  on("turn.complete", async ($) => {',
+    '    await $.store.get("weather-bar.city")',
+    "  })",
+    "}"
+  ].join("\n")
+  const root = await fixture(source)
+  const rejected = await checkFunctionAuthorTypes(root)
+  expect(rejected.valid).toBe(false)
+  expect(rejected.diagnostics).toEqual(
+    expect.arrayContaining([expect.objectContaining({ file: "hooks/register.ts", line: 3 })])
+  )
+
+  const repaired = source
+    .replace(
+      'on("session.start", async ($) => {',
+      'on("session.start", async ($, event, next) => {'
+    )
+    .replace(
+      '    await $.store.get("weather-bar.city")',
+      '    await $.store.get("weather-bar.city")\n    return next(event)'
+    )
+  await writeFile(join(root, "hooks/register.ts"), repaired)
+  const accepted = await checkFunctionAuthorTypes(root)
+  expect(accepted.valid).toBe(true)
+  expect(accepted.diagnostics).toEqual([])
+})
+
 it.each(["cjs", "cts"])("checks .%s ESM source and does not skip its type errors", async (extension) => {
   const root = await fixture("export function register() {}")
   await writeFile(join(root, "hooks/hooks.json"), JSON.stringify({ modules: [`./main.${extension}`] }))

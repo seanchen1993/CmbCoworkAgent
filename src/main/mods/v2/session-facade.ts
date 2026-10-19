@@ -13,6 +13,7 @@ const asynchronous = new Set<keyof FunctionSession>([
   "run",
   "interceptTool",
   "runAction",
+  "runPlatformFlowAction",
   "offerAgent",
   "presentationEvent",
   "promptComposition",

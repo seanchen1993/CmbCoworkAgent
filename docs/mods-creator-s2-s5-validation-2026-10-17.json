@@ -1,0 +1,183 @@
+{
+  "schemaVersion": 1,
+  "status": "accepted-with-recorded-test-boundaries",
+  "date": "2026-10-17",
+  "scope": {
+    "workspace": "C:/ai/CmbCoworkAgent-mods-v2",
+    "branch": "codex/mods-v2",
+    "head": "d3edb4a10366a52ab6282783ab2bc22c000278e6",
+    "stages": ["S2", "S3", "S4", "S5"],
+    "deferred": ["S6 阶段快照、恢复到中间阶段和分支重跑"],
+    "sourceOfPlan": "docs/mods-creator-platform-plugin-hooks-transformation-plan-2026-10-16.md",
+    "otherBranchesModified": false,
+    "commitPushMergePerformed": false,
+    "userApplicationReplaced": false,
+    "externalAutoBizSource": "C:/ai/autobiz_kanban",
+    "externalAutoBizReadOnly": true
+  },
+  "implemented": [
+    {
+      "area": "必需业务校验",
+      "result": "必需检查独立于普通 Mod 拦截，使用最终实际参数和原执行结果；普通变换不能取消拒绝或签发成功凭据。缺失、异常和未知必需语义拒绝执行。",
+      "implementation": "src/main/hooks/required-business-checks.ts"
+    },
+    {
+      "area": "保存与复用",
+      "result": "未安装试用可直接请求保存，经原生正式安装确认后自动完成命名保存；区分试用摘要和正式复用摘要。跨聊天应用和重启恢复沿用原服务，不重放未知操作或恢复旧授权。",
+      "implementation": "src/main/mods/devtools/creator-composition-save.ts"
+    },
+    {
+      "area": "用户配置",
+      "result": "组合保留参数定义、默认值、既有配置和来源身份；本机目录经原生选择器绑定，密钥与目录不由模型任意写入。升级保留安装身份和配置，导出不携带旧机配置、凭据或批准。",
+      "implementation": "src/main/agent/tools/mod-configuration-tool.ts"
+    },
+    {
+      "area": "公共扩展契约",
+      "result": "以小型版本化 devclaw.project-runtime/v2 包装原 v1 运行器，声明必要协议并在安装和执行边界检查；保留原运行器、人工确认和状态持有者。无 AutoBiz 文档场景使用同一公开能力。",
+      "implementation": "src/shared/project-runtime/extension-contract.ts"
+    },
+    {
+      "area": "知识和上下文",
+      "result": "保留真实知识同步、收集、渲染和部署单元规则；缓存绑定来源、版本、配置与业务内核。必需知识进入父任务及子任务实际模型请求，丢失时阻断。外部知识目录只读，知识草稿仍需人工审阅。",
+      "implementation": "src/main/harness-board/extension-context.ts"
+    },
+    {
+      "area": "完整项目与发布",
+      "result": "原生项目入口支持从起点执行隔离样本；创造者读取来源、制作 Mod、组合检查、生成安装及导出包，并可对话修改后重新检查。保留原审批和运行事实。",
+      "implementation": "src/main/mods/devtools/creator-business.ts"
+    },
+    {
+      "area": "Hook 变换冲突",
+      "result": "顺序执行并诊断同字段覆盖，保留必要顺序与来源，不输出敏感字段值；诊断有界，单次执行共享结果与各调用诊断隔离。",
+      "implementation": "src/main/hooks/updated-input-diagnostics.ts"
+    },
+    {
+      "area": "创造者策略 Mod",
+      "result": "通过已有 prompt.section 扩展提供有界规划建议，按用户选定的安装身份和摘要运行。策略不具有 SDK 执行权限；停用、损坏、卸载、撤回或超时回退原生创造者，原工具、权限、预算和确认保留。",
+      "implementation": "src/main/mods/devtools/creator-planning.ts"
+    }
+  ],
+  "autoBizCompatibilityRepair": {
+    "upstreamVersion": "1.0.0",
+    "newReviewedVersion": "1.0.1",
+    "originalReviewedProfileSha256": "cfa60099de35bd8901c8a251e9747cab0e71fa868cfd13cec84d07067e156a27",
+    "originalProfileRewritten": false,
+    "newProfile": "src/main/plugins/autobiz-business-kernel-merge-reviewed.json",
+    "generator": "scripts/prepare-autobiz-plan-merge-source.ts",
+    "changes": [
+      "plan_writer.py 原实现未将已完成合并反映到计划状态。新版本只在任务、运行、四阶段证据、批次合并凭据与真实 Git HEAD 一致时投影完成状态。",
+      "parallel_evidence_aggregate.py 原汇总与原 Code gate 的字段未衔接。新版本仅将严格通过且无 deferred 的真实汇总原子投影到原 gate 读取的字段；失败或 deferred 清除旧投影。"
+    ],
+    "originalCodeGateChanged": false,
+    "admission": "仅编入两个逐文件精确摘要的已审查版本；拒绝任意新版本、自报摘要、篡改脚本及改写模板。",
+    "rawOriginalControl": "原 1.0.0 完成真实并行任务与合并后，原 Code gate 仍因计划状态未完成拒绝，记录为已复现上游缺陷，未将其记为原版全链通过。",
+    "correctedComposition": "新 1.0.1 成品经原 workflow、两个真实工作树、实际测试、合并、原 Code 检查、CI 和 Archive 完整通过。",
+    "fullJourneyEvidence": "output/mods-s2-s5-20261017/autobiz-full-journey/run-62004e3b-d836-4a0b-9cb6-57be7a24dd49/evidence.json",
+    "fullJourneyTest": "src/main/harness-board/project-runtime/autobiz-creator-composed-journey.integration.test.ts",
+    "negativePaths": "缺失阶段产物、不合格测试、错误或过期合并凭据仍拒绝；无手写通过状态或放宽原 Code 校验。"
+  },
+  "candidate": {
+    "directory": "output/mods-v2-validation/20261017-s2-s5-accepted-scopefix-merge",
+    "execution": "packaged-asar",
+    "asarSha256": "4c112416ff235975e073fcb444f907bb971a4bd802a94c896e9ede8505de9dfd",
+    "installer": "output/mods-v2-validation/20261017-s2-s5-accepted-scopefix-merge/CMBDevClaw-Mods-v2-1.5.9-preview-setup.exe",
+    "installerSha256": "bf07b9196fecfdacd0e85b0f219a109ce79751c08394c3b30d9209e66e55a1bc",
+    "buildEvidence": "output/mods-v2-validation/20261017-s2-s5-accepted-scopefix-merge/build-evidence.json",
+    "node": "22.22.2",
+    "productionFreeze": "2026-10-17T06:08:13.611Z",
+    "postFreezeSourceChanges": "仅新增源生成器测试断言，不包含生产实现。"
+  },
+  "deliverables": {
+    "library": "output/deliveries/mods-creator-accepted-20261017",
+    "sourceZips": 5,
+    "readyPlugins": 4,
+    "kernelVersion": "1.0.1",
+    "pluginVersion": "1.0.1",
+    "instructions": "output/deliveries/mods-creator-accepted-20261017/安装与演示说明.txt",
+    "recommendedAutoBiz": "10-完整AutoBiz+并行进度+知识版.zip",
+    "recommendedWarehouse": "11-数仓开发+进度+知识版.zip",
+    "libraryTopFilesDigest": "57642d375240b4c895789b0e300a93e57a872b802e7a5bdea8aa147f1122f424",
+    "generationVerification": "output/mods-s2-s5-20261017/package-accepted-library-verification.json",
+    "strategyMod": "output/deliveries/creator-planning-mod-20261017/creator-review-first-1.0.0.zip",
+    "strategyModSha256": "7a83fc7883a2065791ecffa1914ae763632beeb2b53485ae0d1c768642093e7a",
+    "noOverwriteVerified": true
+  },
+  "verification": {
+    "typecheck": {"passed": true, "log": "output/mods-s2-s5-20261017/typecheck-scopefix-merge.log"},
+    "build": {"passed": true, "log": "output/mods-s2-s5-20261017/build-scopefix-merge.log"},
+    "packaging": {"passed": true, "log": "output/mods-s2-s5-20261017/package-scopefix-merge.log"},
+    "jointRegression": {
+      "files": 53,
+      "passed": 467,
+      "failed": 0,
+      "skipped": 21,
+      "skipReason": "已有 Windows 环境下的 shell 平台条件用例，逐项列在摘要中。",
+      "summary": "output/mods-s2-s5-20261017/final-complete-joint.summary.json",
+      "snapshotBoundary": "此联合组早于最终 Windows workspace 规范化和新内核版本，后续改变另行运行对应回归及最终 ASAR 验收。"
+    },
+    "postJointRegressions": [
+      {"passed": 50, "failed": 0, "log": "output/mods-s2-s5-20261017/creator-planning-workspace-regression.log"},
+      {"passed": 30, "failed": 0, "log": "output/mods-s2-s5-20261017/merge-reviewed-two-file-profile-regression.log"},
+      {"passed": 5, "failed": 0, "log": "output/mods-s2-s5-20261017/plan-merge-source-regression-final.log"},
+      {"passed": 1, "failed": 0, "log": "output/mods-s2-s5-20261017/vitest-current-autobiz-journey-accepted.log"}
+    ],
+    "standalone": {
+      "initialAll16ExitZero": true,
+      "initialSummary": "output/mods-s2-s5-20261017/standalone-summary.json",
+      "finalRelatedSixExitZero": true,
+      "finalSummary": "output/mods-s2-s5-20261017/final-related-standalone.summary.json",
+      "finalGroups": ["hooks", "plugins", "workflow", "desktop-agent-baseline", "mods:authoring:runtime", "mods:authoring:install-runtime"],
+      "workflow": "包含原 66 个真实 Git 工作树测试。",
+      "environmentObservation": "原 thread-messages-db.spec.ts 的 HOME 隔离未覆盖静态导入缓存的默认路径，日志仍指向本机用户数据库；用例使用并自清理测试 thread。未改该既有 fixture，未将本轮包测试复用到该用户目录。"
+    },
+    "packagedJourneys": {
+      "business": {"passed": true, "evidence": "output/mods-s2-s5-20261017/final-packaged-business/run-Frtus5/validation.json"},
+      "planning": {"passed": true, "evidence": "output/mods-s2-s5-20261017/final-packaged-planning/run-xE43i2/evidence.json"},
+      "document": {
+        "passed": true,
+        "evidence": "output/mods-s2-s5-20261017/final-packaged-document/run-9KNJqU/document-evidence.json",
+        "visibleMs": 10273,
+        "visibleLimitMs": 45000,
+        "displayPatchMs": 22149,
+        "displayPatchLimitMs": 30000,
+        "submitClicks": 1,
+        "trialConfirmations": 1,
+        "technicalPageVisits": 0,
+        "unrelatedBusinessReruns": 0,
+        "restart": "保留草稿和命名组合，清除试用授权；未知复用运行态要求重新确认，不自动重放。"
+      },
+      "weather": {
+        "passed": true,
+        "evidence": "output/mods-s2-s5-20261017/final-packaged-weather/run-wAER3C/creator-evidence.json",
+        "visibleMs": 14925,
+        "visibleLimitMs": 60000,
+        "authoringCandidates": 3,
+        "submitClicks": 1,
+        "trialConfirmations": 1,
+        "nativeHttpConfirmations": 1,
+        "technicalPageVisits": 0,
+        "formalReuse": "原生确认、编辑、命令、停止与恢复、正式安装复用及重启恢复通过；request_reuse 仅一次。"
+      },
+      "fourV101Plugins": {
+        "passed": true,
+        "receipt": "output/mods-s2-s5-20261017/final-v101-library-smoke/final-receipt.json",
+        "evidence": "output/mods-s2-s5-20261017/final-v101-library-smoke/run-cCEW9q/evidence.json",
+        "installedAndInitialized": 4,
+        "catalogIssues": 0,
+        "modelProviderCallsWithMissingKnowledge": 0,
+        "afterUiAvailable": 4,
+        "pythonCachePresent": false,
+        "libraryUnchanged": true,
+        "scope": "真实安装、初始化、Feature 状态、缺知识阻断、依赖验证、原生 UI 手工组合及操作后能力重扫；完整 Code 到 Archive 执行另见 AutoBiz 贯穿样本，未将四包烟测记为四条完整业务验收。"
+      }
+    },
+    "method": "保留初次失败与重跑材料，分组核对原测试范围和后续改变，不声称一次 npm test 命令全部通过。"
+  },
+  "boundaries": [
+    "模型回复、样本内容和外部应用元数据为受控输入；原生 IPC、Guest、编译器、安装器、原 Hooks、实际文件、Git、测试及模型请求边界真实执行。",
+    "从起点运行样本验证流程完整性，不代表企业实际业务认可、远端模型创作成功率或任意插件自动适配。",
+    "使用新用户目录验证可移植配置与重新授权，未在另一台物理电脑执行，也未运行安装向导或替换现有用户应用。",
+    "没有承诺 Token、费用或时延下降比例；天气与文档保留既定可见效果和确认次数阈值。",
+    "S6 阶段回退、检查点恢复及从中间阶段重跑未开发。"
+  ]
+}

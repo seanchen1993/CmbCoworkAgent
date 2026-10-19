@@ -1,6 +1,11 @@
 import { afterEach, expect, it, vi } from "vitest"
 import type { McpCapabilityService, McpCapabilityTool } from "../mcp/capability-types"
 import { createHookScope } from "../hooks/scope"
+import {
+  issueRuntimePluginSourceToken,
+  withRuntimePluginSource
+} from "../plugins/runtime-source-scope"
+import type { PluginMetadata } from "../types"
 
 const binding = vi.hoisted(() => vi.fn(() => () => {}))
 vi.mock("../hooks/required-skill", () => ({ runHooksEnriched: async () => null }))
@@ -22,7 +27,7 @@ afterEach(() => {
   vi.clearAllMocks()
 })
 
-function fixture(includeB = false) {
+function fixture(includeB = false, invokeOverride?: McpCapabilityService["invoke"]) {
   const tools: McpCapabilityTool[] = ["a", "b"].map((id) => ({
     capabilityId: `${id}:echo`,
     providerKey: id,
@@ -36,12 +41,15 @@ function fixture(includeB = false) {
     inputSchema: { type: "object" },
     ...(id === "a" ? { fallback: { enabled: true, to: "global", safeToRetry: true } as const } : {})
   }))
-  const invoke = vi.fn(async (id: string) => ({
-    capabilityId: id,
-    raw: {},
-    text: id,
-    isError: false
-  }))
+  const invoke = vi.fn<McpCapabilityService["invoke"]>(
+    invokeOverride ??
+      (async (id: string) => ({
+        capabilityId: id,
+        raw: {},
+        text: id,
+        isError: false
+      }))
+  )
   const service: McpCapabilityService = {
     listTools: async () => tools,
     getTool: async (id) =>
@@ -152,3 +160,55 @@ it("rejects an unselected provider even when invoked by the real browser tab hel
   ).rejects.toThrow("CLAW_MCP_TOOL_NOT_SELECTED")
   expect(f.invoke).not.toHaveBeenCalled()
 })
+
+it.each(["authorization", "fallback"])(
+  "retains the source fence through delayed MCP %s",
+  async (scenario) => {
+    let changed = false
+    const token = issueRuntimePluginSourceToken(
+      {
+        mode: "legacy",
+        threadId: "thread",
+        incarnationKey: "incarnation",
+        projectId: "composition-legacy:run:unit",
+        operationId: "run",
+        workspace: process.cwd(),
+        packageDigest: "c".repeat(64),
+        stageId: "stage",
+        plugin: { id: "plugin", path: process.cwd() } as PluginMetadata
+      },
+      () => {
+        if (changed) throw Error("SOURCE_CHANGED_BEFORE_MCP")
+      }
+    )
+    let entered!: () => void, release!: () => void
+    const authorizationEntered = new Promise<void>((done) => {
+      entered = done
+    })
+    const authorization = new Promise<void>((done) => {
+      release = done
+    })
+    const callTool = vi.fn()
+    const f = withRuntimePluginSource(token, () =>
+      fixture(true, async (id, _args, assertCurrent) => {
+        if (id === "a:echo") {
+          entered()
+          await authorization
+          if (scenario === "fallback") throw Error("ECONNRESET")
+        }
+        assertCurrent?.()
+        callTool()
+        return { capabilityId: id, raw: {}, text: id, isError: false }
+      })
+    )
+    const pending = withRuntimePluginSource(undefined, () => f.scoped.invoke("a:echo", {}))
+    const rejected = expect(pending).rejects.toThrow("SOURCE_CHANGED_BEFORE_MCP")
+    await authorizationEntered
+    changed = true
+    release()
+    await rejected
+    expect(callTool).not.toHaveBeenCalled()
+    // The forwarded fence may reject fallback before even reaching the lower service.
+    expect(f.invoke.mock.calls.map(([id]) => id)).toEqual(["a:echo"])
+  }
+)

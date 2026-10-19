@@ -2,6 +2,8 @@ import { ModError } from "../errors"
 import { AIMessage, HumanMessage, SystemMessage, type BaseMessage } from "@langchain/core/messages"
 import { AsyncLocalStorageProviderSingleton } from "@langchain/core/singletons"
 import type { ResolvedModelConfig } from "../../models/registry"
+import { currentFunctionExecution } from "./execution-context"
+import { readCreatorBudgetErrorCode, readCreatorModelAccounting } from "../devtools/creator-model-accounting"
 import { ModFunctionError } from "../../../shared/mods/v2/contracts"
 import {
   validateFunctionModelText,
@@ -86,7 +88,9 @@ async function invokeFunctionMessages(
     },
     undefined,
     1,
-    "function-completion"
+    "function-completion",
+    undefined,
+    readCreatorModelAccounting(currentFunctionExecution()?.runtimeAuthority)
   )
   // A nested completion must not inherit the agent's stream callbacks, graph writer or trace
   // configuration. Keep the entire iterator in this scope, not just stream construction.
@@ -150,6 +154,12 @@ async function invokeFunctionMessages(
       )
     )
   } catch (error) {
+    const budgetCode = readCreatorBudgetErrorCode(error)
+    if (budgetCode) {
+      const failure = new ModFunctionError(budgetCode, budgetCode, true)
+      Object.defineProperty(failure, "cause", { value: error })
+      throw failure
+    }
     if (parentSignal.aborted) throw error
     if (timeout.signal.aborted) throw new FunctionModelProviderFailure({ reason: "aborted" })
     if (error instanceof ModFunctionError || error instanceof ModError) throw error

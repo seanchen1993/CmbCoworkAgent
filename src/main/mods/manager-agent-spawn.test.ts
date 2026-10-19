@@ -9,6 +9,8 @@ import type { FunctionAgentPlan } from "./v2/agent-spawn-host"
 import type { ModObject } from "../../shared/mods/types"
 import type { RegisteredFunctionAgent } from "./v2/agent-registry"
 import type { ModDispatchRequest } from "./engine"
+import { bindLiveToolEvidence, bindRuntimeTraceContext } from "../agent/trace/live-tool-evidence"
+import type { TraceContext } from "../agent/trace/types"
 
 const hooks = vi.hoisted(() => ({ run: vi.fn() }))
 vi.mock("./v2/agent-spawn-host", () => ({
@@ -147,6 +149,37 @@ function fixture(approve = vi.fn(async () => true)) {
 }
 
 describe("owned agent spawn lifecycle", () => {
+  it("captures only the original native lineage before approval, independent of parent trace ending", async () => {
+    const decision = Promise.withResolvers<boolean>()
+    const f = fixture(vi.fn(() => decision.promise))
+    let active = true
+    const context: TraceContext = {
+      observabilitySchemaVersion: 1,
+      traceKind: "root",
+      executionMode: "normal",
+      traceId: "actual-parent-trace",
+      threadId: "parent",
+      rootTraceId: "actual-parent-trace",
+      rootThreadId: "parent"
+    }
+    bindLiveToolEvidence(
+      context,
+      { addToolNode: () => "node", addToolResultNode: () => "result" },
+      () => active
+    )
+    bindRuntimeTraceContext(f.instance.authority, context)
+    const pending = f.spawn()
+    await vi.waitFor(() => expect(f.approve).toHaveBeenCalled())
+    active = false
+    context.traceId = "mutated-after-approval"
+    decision.resolve(true)
+    await pending
+    expect(hooks.run.mock.calls[0][2].parentTrace).toMatchObject({
+      traceId: "actual-parent-trace",
+      threadId: "parent"
+    })
+    expect(Object.isFrozen(hooks.run.mock.calls[0][2].parentTrace)).toBe(true)
+  })
   it("rechecks the creator binding after approval before starting a native child", async () => {
     const decision = Promise.withResolvers<boolean>()
     const f = fixture(vi.fn(() => decision.promise))

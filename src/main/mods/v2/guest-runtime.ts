@@ -1,4 +1,7 @@
 import { installFunctionBase64Host } from "./guest-base64"
+import { wireError } from "./wire"
+import { platformDescriptor } from "./platform-capabilities-validation"
+import { PLATFORM_VIEW_OPEN_METHODS, PLATFORM_VIEW_CLEANUP_METHODS } from "../../../shared/mods/v2/platform-capabilities"
 import { encodeFunctionNextReply } from "./next-reply-wire"
 import { randomUUID } from "node:crypto"
 import { AsyncResource } from "node:async_hooks"
@@ -57,6 +60,8 @@ interface InvocationFrame {
   sharedCut?: FunctionSharedWallCut
   msAllowance?: number
   cleanupOnly?: boolean
+  platformCleanup?: boolean
+  platformUiOpen?: boolean
   enteredVm?: boolean
   uiDrawing?: Readonly<{
     drawing: Readonly<FunctionUiResolveWireDrawing>
@@ -161,6 +166,9 @@ export class FunctionGuestRuntime implements FunctionUiConstructorGuest {
       if (!frame || frame.controller.signal.aborted) throw Error("MODS_STALE_INVOCATION")
       if (guest.rpcSize >= 128) throw Error("MODS_RPC_LIMIT")
       const op = context.getString(method)
+      if ((frame.platformCleanup && !PLATFORM_VIEW_CLEANUP_METHODS.includes(op)) ||
+        (frame.platformUiOpen && !PLATFORM_VIEW_OPEN_METHODS.includes(op)))
+        throw Error("MODS_PLATFORM_CLEANUP_ONLY")
       guest.assertFrame(frame, op === "stream.close")
       const input = parseModJson(context.getString(json)) as ModJson
       if (performance.now() >= frame.expiresAt) throw Error("MODS_BUDGET_EXCEEDED")
@@ -168,7 +176,7 @@ export class FunctionGuestRuntime implements FunctionUiConstructorGuest {
       let callController: AbortController | undefined
       let callKey: string | undefined
       if (cancelId && context.typeof(cancelId) !== "undefined") {
-        if (!["clock.sleep", "model.complete"].includes(op) || context.typeof(cancelId) !== "string")
+        if (!["clock.sleep", "model.complete", "platform.act"].includes(op) || context.typeof(cancelId) !== "string")
           throw Error("MODS_INVALID_CALL_CANCEL")
         const id = context.getString(cancelId)
         if (!/^[0-9]{1,20}$/.test(id)) throw Error("MODS_INVALID_CALL_CANCEL")
@@ -207,11 +215,7 @@ export class FunctionGuestRuntime implements FunctionUiConstructorGuest {
           (reply) => guest.reply(pending, reply, op === "next"),
           (error) =>
             guest.reply(pending, {
-              error: {
-                code: error instanceof ModFunctionError ? error.code : "MODS_HOST_ERROR",
-                message: error instanceof Error ? error.message.slice(0, 2048) : "MODS_HOST_ERROR",
-                downstream: error instanceof ModFunctionError && error.downstream
-              }
+              error: wireError(error)
             })
         ).finally(() => initial?.hostFinally()).catch(() => undefined)
       return pending.handle
@@ -278,6 +282,7 @@ export class FunctionGuestRuntime implements FunctionUiConstructorGuest {
       if (token && guest.closedCuts.has(token) && !cleanup)
         throw Error("MODS_STALE_INVOCATION")
       const frame = token ? guest.frames.get(token) : undefined
+      if ((frame?.platformCleanup || frame?.platformUiOpen) && !cleanup) throw Error("MODS_PLATFORM_CLEANUP_ONLY")
       let receipt: (() => void) | undefined
       if (frame && !frame.controller.signal.aborted) {
         if (!cleanup) guest.assertFrame(frame)
@@ -305,11 +310,7 @@ export class FunctionGuestRuntime implements FunctionUiConstructorGuest {
           (reply) => guest.reply(pending, reply),
           (error) =>
             guest.reply(pending, {
-              error: {
-                code: error instanceof ModFunctionError ? error.code : "MODS_HOST_ERROR",
-                message: error instanceof Error ? error.message.slice(0, 2048) : "MODS_HOST_ERROR",
-                downstream: error instanceof ModFunctionError && error.downstream
-              }
+              error: wireError(error)
             })
         ).finally(() => initial?.hostFinally()).catch(() => undefined)
       return pending.handle
@@ -374,7 +375,9 @@ export class FunctionGuestRuntime implements FunctionUiConstructorGuest {
             id: row.id,
             pattern: row.pattern,
             hasCatch: row.hasCatch,
-            hasMatcher: row.hasMatcher
+            hasMatcher: row.hasMatcher,
+            ...(row.platformCapability !== undefined
+              ? { platformCapability: platformDescriptor(row.platformCapability) } : {})
           })
         }
       } finally {
@@ -973,6 +976,8 @@ export class FunctionGuestRuntime implements FunctionUiConstructorGuest {
         ...(ownBudgetMs === undefined ? {} : { budget: new FunctionHookBudget(ownBudgetMs) }),
         ...(dispatchCutNs === undefined ? {} : { sharedCut: new FunctionSharedWallCut(dispatchCutNs) }),
         ...(dispatchCutNs && options.streamCursor?.action === "return" ? { cleanupOnly: true } : {}),
+        ...(options.platformCleanup ? { platformCleanup: true } : {}),
+        ...(options.platformUiOpen ? { platformUiOpen: true } : {}),
         resolve,
         reject,
         detach: () => signal?.removeEventListener("abort", cancel)

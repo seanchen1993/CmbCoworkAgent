@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto"
 import type { PluginDerivationCopy, PluginDerivationProposal } from "../../shared/plugin-derivation"
 import type { DerivationSnapshot } from "./derivation-source"
 import { prepareNodeCompositionFiles } from "./derivation-node-composition"
+import { prepareFlowCompositionFiles } from "./derivation-flow-composition"
 
 export interface DerivationProposalContext {
   owner: string
@@ -14,7 +15,7 @@ export interface DerivationProposalModelInput {
   files: Array<{ path: string; text: string }>
 }
 interface ProposalEntry {
-  kind: "skill" | "node-composition"
+  kind: "skill" | "node-composition" | "flow-composition"
   context: DerivationProposalContext
   requestId: string
   value: PluginDerivationProposal
@@ -133,7 +134,7 @@ export class DerivationProposalService {
         owner: string,
         proposal: PluginDerivationProposal,
         guard: () => void,
-        kind?: "skill" | "node-composition"
+        kind?: "skill" | "node-composition" | "flow-composition"
       ): Promise<PluginDerivationCopy>
       timeoutMs?: number
     }
@@ -146,6 +147,13 @@ export class DerivationProposalService {
     return this.propose(context, { ...input, instruction: "启用原生节点组合" }, "node-composition")
   }
 
+  prepareFlowComposition(
+    context: DerivationProposalContext,
+    input: { copyId: string; expectedDigest: string; requestId: string }
+  ) {
+    return this.propose(context, { ...input, instruction: "用于完整流程组合" }, "flow-composition")
+  }
+
   async propose(
     context: DerivationProposalContext,
     input: {
@@ -154,7 +162,7 @@ export class DerivationProposalService {
       instruction: string
       requestId: string
     },
-    kind: "skill" | "node-composition" = "skill"
+    kind: "skill" | "node-composition" | "flow-composition" = "skill"
   ): Promise<PluginDerivationProposal> {
     context.guard()
     if (
@@ -201,6 +209,8 @@ export class DerivationProposalService {
       let parsed: Pick<PluginDerivationProposal, "summary" | "files">
       if (kind === "node-composition") {
         parsed = prepareNodeCompositionFiles(snapshot)
+      } else if (kind === "flow-composition") {
+        parsed = prepareFlowCompositionFiles(snapshot)
       } else {
         const files = proposalFiles(snapshot)
         const modelInput = {

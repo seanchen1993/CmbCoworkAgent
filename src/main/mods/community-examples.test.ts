@@ -1,9 +1,11 @@
 import { afterEach, expect, it } from "vitest"
-import { cp, mkdtemp, readFile, rm, writeFile } from "node:fs/promises"
+import { cp, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join, resolve } from "node:path"
 import {
   COMMUNITY_EXAMPLES,
+  PLATFORM_EXAMPLES,
+  BUNDLED_EXAMPLES,
   bundledCommunityExamplesRoot,
   communityExampleId,
   verifyCommunityExample
@@ -71,5 +73,67 @@ it("rejects unlisted extra executable files in an installed same-name package", 
   await writeFile(join(directory, "token-weather/hooks/extra.mjs"), "export const x=1")
   await expect(
     verifyCommunityExample(root, "token-weather", join(directory, "token-weather"))
+  ).rejects.toThrow("MODS_COMMUNITY_INTEGRITY")
+})
+
+async function platformResources() {
+  const destination = await mkdtemp(join(tmpdir(), "platform-examples-"))
+  temporary.push(destination)
+  await mkdir(join(destination, "community-originals"))
+  for (const example of PLATFORM_EXAMPLES) {
+    if (example.origin !== "devclaw") throw Error("wrong provenance")
+    mirrorRequiredDirectorySync(
+      resolve(example.sourcePath),
+      join(destination, "platform-examples", example.id)
+    )
+  }
+  return { root: join(destination, "community-originals"), destination }
+}
+
+it("ships all five local packages with distinct provenance and exact canonical bytes", async () => {
+  const { root: bundledRoot, destination } = await platformResources()
+  expect(PLATFORM_EXAMPLES).toHaveLength(5)
+  expect(new Set(BUNDLED_EXAMPLES.map((example) => example.id)).size).toBe(8)
+  for (const example of PLATFORM_EXAMPLES) {
+    expect(communityExampleId(example.id)).toBe(example.id)
+    const directory = join(destination, "platform-examples", example.id)
+    await expect(verifyCommunityExample(bundledRoot, example.id)).resolves.toBe(directory)
+    expect(JSON.parse(await readFile(join(directory, "plugin.json"), "utf8"))).toMatchObject({
+      name: example.pluginName,
+      version: "1.0.0"
+    })
+    expect(example).not.toHaveProperty("upstreamUrl")
+    expect(example).not.toHaveProperty("commit")
+    expect(example.origin).toBe("devclaw")
+  }
+})
+
+it.each(["plugin.json", "hooks/hooks.json", "hooks/register.ts"])(
+  "rejects tampered local executable packages before installation: %s",
+  async (file) => {
+    const { root: bundledRoot, destination } = await platformResources()
+    await writeFile(
+      join(destination, "platform-examples/task-workbench-consumer", file),
+      "tampered"
+    )
+    await expect(verifyCommunityExample(bundledRoot, "task-workbench-consumer")).rejects.toThrow(
+      "MODS_COMMUNITY_INTEGRITY"
+    )
+  }
+)
+
+it("rejects an installed local package with extra code and directory links", async () => {
+  const { root: bundledRoot, destination } = await platformResources()
+  const original = join(destination, "platform-examples/task-workbench-provider")
+  const installed = join(destination, "installed")
+  await cp(original, installed, { recursive: true })
+  await writeFile(join(installed, "hooks/extra.ts"), "export const extra = true")
+  await expect(
+    verifyCommunityExample(bundledRoot, "task-workbench-provider", installed)
+  ).rejects.toThrow("MODS_COMMUNITY_INTEGRITY")
+  const linked = join(destination, "linked")
+  await symlink(original, linked, process.platform === "win32" ? "junction" : "dir")
+  await expect(
+    verifyCommunityExample(bundledRoot, "task-workbench-provider", linked)
   ).rejects.toThrow("MODS_COMMUNITY_INTEGRITY")
 })

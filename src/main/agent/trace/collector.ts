@@ -17,6 +17,7 @@ import { bindLiveToolEvidence } from "./live-tool-evidence"
 
 import { createHash } from "crypto"
 import { TraceToolUsageCounter } from "./tool-usage"
+import type { CreatorTraceUsage } from "../../mods/devtools/creator-model-accounting"
 import { TraceStageUsageCounter } from "./stage-usage"
 import { TraceStageDuration } from "./stage-duration"
 import {
@@ -757,6 +758,8 @@ export class TraceCollector {
   private readonly stopObservingStage: (() => void) | undefined
   private stageDurationEndedAt: number | undefined
   private observedModelCallCount = 0
+  private observedUsageReportedCalls = 0
+  private creatorUsageObserver?: (usage: CreatorTraceUsage) => void
   private observedInputTokens = 0
   private observedOutputTokens = 0
   private observedTotalTokens = 0
@@ -869,6 +872,23 @@ export class TraceCollector {
 
   getTraceId(): string {
     return this.traceId
+  }
+
+  /** Read-only projection of this original collector's independent counters. */
+  bindCreatorUsageObserver(observe: (usage: CreatorTraceUsage) => void): void {
+    this.creatorUsageObserver = observe
+    this.publishCreatorUsage()
+  }
+  private publishCreatorUsage(): void {
+    if (!this.creatorUsageObserver) return
+    try {
+      this.creatorUsageObserver({ traceId: this.traceId, modelCalls: this.observedModelCallCount,
+        toolCalls: this.getTotalToolCalls(), inputTokens: this.observedInputTokens,
+        outputTokens: this.observedOutputTokens, usageReportedCalls: this.observedUsageReportedCalls })
+    } catch {
+      // A retired creator scope cannot alter trace recording or acquire execution authority.
+      console.warn("[Trace] Creator usage projection unconfirmed")
+    }
   }
 
   private toolEvidenceClosed = false
@@ -1230,6 +1250,8 @@ export class TraceCollector {
     this.observedModelCallCount += 1
     const usage = call.tokenUsage
     if (usage) {
+      if (Number.isSafeInteger(usage.inputTokens) && usage.inputTokens! >= 0 &&
+        Number.isSafeInteger(usage.outputTokens) && usage.outputTokens! >= 0) this.observedUsageReportedCalls++
       const input = usage.inputTokens ?? 0
       const output = usage.outputTokens ?? 0
       this.observedInputTokens += input
@@ -1238,6 +1260,7 @@ export class TraceCollector {
       const cacheRead = usage.cacheReadTokens ?? 0
       if (Number.isFinite(cacheRead) && cacheRead > 0) this.observedCacheReadTokens += cacheRead
     }
+    this.publishCreatorUsage()
     if (this.modelCalls.length >= TRACE_MAX_MODEL_CALL_SKELETONS) return
     // Per-call usage is worth keeping alongside the independent totals.
     // Neither a spent budget nor the full-entry cap should cost the entry:
@@ -1602,6 +1625,8 @@ export class TraceCollector {
       new Date(this.startedAt).getTime() + durationMs
     )
     const totalToolCalls = this.getTotalToolCalls()
+    this.publishCreatorUsage()
+    this.creatorUsageObserver = undefined
     const toolUsage = this.toolUsageCounter.snapshot(totalToolCalls)
     const stageUsage = this.harnessFeature
       ? this.stageUsageCounter.snapshot({

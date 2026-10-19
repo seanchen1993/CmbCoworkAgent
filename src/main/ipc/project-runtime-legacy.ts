@@ -13,7 +13,8 @@ import { captureThreadIncarnation } from "../services/thread-incarnation"
 import { listLocalThreadRunLeases } from "../agent/thread-run-lease"
 import {
   getHarnessProjectAdapterSnapshot,
-  getHarnessProjectRootPath
+  getHarnessProjectRootPath,
+  assertHarnessProjectAdapterCurrent
 } from "../harness-board/service"
 import { LegacyOperationStore } from "../harness-board/project-runtime/legacy-operation-store"
 import { LegacyProjectRuntimeService } from "../harness-board/project-runtime/legacy-runtime-service"
@@ -25,7 +26,8 @@ import { ProjectWorkspaceModeGuard } from "../harness-board/project-runtime/work
 /** Register at startup so persisted opt-in bindings fence the very first original entry. */
 export function registerLegacyProjectRuntimeHandlers(
   ipc: IpcMain,
-  trusted: (event: IpcMainInvokeEvent) => unknown
+  trusted: (event: IpcMainInvokeEvent) => unknown,
+  compositionGuard?: <T>(workspace: string, work: () => T) => T
 ) {
   const root = join(getOpenworkDir(), "legacy-project-runtime")
   function readThread(threadId: string) {
@@ -58,7 +60,8 @@ export function registerLegacyProjectRuntimeHandlers(
           join(getOpenworkDir(), "local-projects", "state.sqlite"),
           join(root, "operations.sqlite"),
           join(getOpenworkDir(), "project-workspace-mode.sqlite")
-        )
+        ),
+        compositionGuard
       ),
       new HostPackageSnapshots(join(root, "packages")),
       {
@@ -75,6 +78,14 @@ export function registerLegacyProjectRuntimeHandlers(
           if (!plugin) throw Error("PROJECT_PLUGIN_UNAVAILABLE")
           return plugin
         },
+        assertInstalledSourceCurrent: (projectId, workspace, installedPluginId) => {
+          if (
+            !getPlugins().some((plugin) => plugin.id === installedPluginId && plugin.enabled) ||
+            !isSameWorkspacePath(getHarnessProjectRootPath(projectId), workspace)
+          )
+            throw Error("PROJECT_PLUGIN_UNAVAILABLE")
+        },
+        assertProjectBindingCurrent: assertHarnessProjectAdapterCurrent,
         assertProjectIdle: (projectId, workspace) => {
           for (const lease of listLocalThreadRunLeases()) {
             const current = readThread(lease.threadId)

@@ -4,10 +4,13 @@ import type { FunctionModsManager } from "../mods/v2/manager"
 import { registerFunctionConfigHandlers } from "./mods-config"
 import { EventEmitter } from "node:events"
 
-function fixture() {
+function fixture(
+  confirmMigration?: (event: IpcMainInvokeEvent, view: unknown) => Promise<boolean>
+) {
   let workspace = "original"
   let allowed = true
-  const sender = new EventEmitter()
+  let incarnation = "original-thread"
+  const sender = Object.assign(new EventEmitter(), { mainFrame: {}, isDestroyed: () => false })
   const handlers = new Map<string, (event: IpcMainInvokeEvent, input: unknown) => unknown>()
   const scope = vi.fn((event: IpcMainInvokeEvent) => {
     if (event.sender !== sender || !allowed) throw Error("not writable")
@@ -19,6 +22,7 @@ function fixture() {
     userConfig: vi.fn(),
     saveUserConfig: vi.fn(),
     saveSensitiveUserConfig: vi.fn(),
+    migrateUserConfig: vi.fn(),
     applyUserConfig: vi.fn(),
     reloadUserConfig: vi.fn(),
     pickUserConfigPath: vi.fn()
@@ -27,7 +31,14 @@ function fixture() {
     { handle: (name, fn) => handlers.set(name, fn) } as unknown as IpcMain,
     manager as unknown as FunctionModsManager,
     scope,
-    async (_event, kind) => (kind === "file" ? "chosen-file" : "chosen-directory")
+    async (_event, kind) => (kind === "file" ? "chosen-file" : "chosen-directory"),
+    confirmMigration,
+    () => {
+      const captured = incarnation
+      return () => {
+        if (incarnation !== captured) throw Error("MODS_CONFIG_SCOPE_CHANGED")
+      }
+    }
   )
   const call = (name: string, input: unknown, from: unknown = sender) =>
     handlers.get("mods:" + name)!({ sender: from } as IpcMainInvokeEvent, input)
@@ -45,6 +56,9 @@ function fixture() {
     call,
     saved,
     sender,
+    replaceThread: () => {
+      incarnation = "replacement-thread"
+    },
     switchProject: () => {
       workspace = "other"
     },
@@ -105,8 +119,9 @@ it("binds parameter reads to the workspace displayed by the settings panel", asy
   f.switchProject()
   await expect(f.call("user-config", input)).rejects.toThrow("MODS_CONFIG_SCOPE_CHANGED")
   expect(f.manager.userConfig).toHaveBeenCalledOnce()
-  await expect(f.call("user-config", { ...input, expectedWorkspace: 1 }))
-    .rejects.toThrow("MODS_CONFIG_ARGUMENTS")
+  await expect(f.call("user-config", { ...input, expectedWorkspace: 1 })).rejects.toThrow(
+    "MODS_CONFIG_ARGUMENTS"
+  )
 })
 
 it("explicit reload fixes the native scope and cancels on the original renderer loss", async () => {
@@ -212,3 +227,81 @@ it("retries application with the original owner and exact observed saved version
   await expect(f.call("user-config-apply", input)).rejects.toThrow("MODS_CONFIG_SCOPE_CHANGED")
   expect(f.manager.applyUserConfig).toHaveBeenCalledOnce()
 })
+
+it("migration requires the actual native confirmation and binds exact schema, revision and owner", async () => {
+  const input = {
+    threadId: "thread",
+    pluginId: "p",
+    digest: "a".repeat(64),
+    workspace: "original",
+    revision: 3,
+    migrationDigest: "b".repeat(64)
+  }
+  const view = {
+    digest: input.digest,
+    savedRevision: 3,
+    migration: { digest: input.migrationDigest, canApply: true }
+  }
+  const missing = fixture()
+  missing.manager.userConfig.mockResolvedValue(view)
+  await expect(missing.call("user-config-migrate", input)).rejects.toThrow("CONFIRMATION_REQUIRED")
+  expect(missing.manager.migrateUserConfig).not.toHaveBeenCalled()
+  const decline = fixture(async () => false)
+  decline.manager.userConfig.mockResolvedValue(view)
+  await expect(decline.call("user-config-migrate", input)).resolves.toEqual(view)
+  expect(decline.manager.migrateUserConfig).not.toHaveBeenCalled()
+  const confirm = vi.fn(async () => true),
+    f = fixture(confirm)
+  f.manager.userConfig.mockResolvedValue(view)
+  f.manager.migrateUserConfig.mockResolvedValue("migrated")
+  await expect(f.call("user-config-migrate", input)).resolves.toBe("migrated")
+  expect(confirm).toHaveBeenCalledOnce()
+  expect(f.manager.migrateUserConfig.mock.calls[0].slice(0, 6)).toEqual([
+    "original",
+    "thread",
+    "p",
+    input.digest,
+    3,
+    input.migrationDigest
+  ])
+  await expect(f.call("user-config-migrate", { ...input, approved: true })).rejects.toThrow(
+    "MODS_CONFIG_ARGUMENTS"
+  )
+  f.manager.userConfig.mockResolvedValue({ ...view, savedRevision: 4 })
+  await expect(f.call("user-config-migrate", input)).rejects.toThrow("MIGRATION_CHANGED")
+  expect(confirm).toHaveBeenCalledOnce()
+})
+it.each(["workspace", "frame", "permission", "incarnation"])(
+  "refuses late migration native approval after %s changes",
+  async (kind) => {
+    let approve!: (value: boolean) => void
+    const f = fixture(
+      () =>
+        new Promise((resolve) => {
+          approve = resolve
+        })
+    )
+    const input = {
+      threadId: "thread",
+      pluginId: "p",
+      digest: "a".repeat(64),
+      workspace: "original",
+      revision: 3,
+      migrationDigest: "b".repeat(64)
+    }
+    f.manager.userConfig.mockResolvedValue({
+      digest: input.digest,
+      savedRevision: 3,
+      migration: { digest: input.migrationDigest, canApply: true }
+    })
+    const pending = f.call("user-config-migrate", input)
+    await Promise.resolve()
+    if (kind === "workspace") f.switchProject()
+    if (kind === "frame") f.sender.mainFrame = {}
+    if (kind === "permission") f.revoke()
+    if (kind === "incarnation") f.replaceThread()
+    approve(true)
+    await expect(pending).rejects.toThrow()
+    expect(f.manager.migrateUserConfig).not.toHaveBeenCalled()
+  }
+)

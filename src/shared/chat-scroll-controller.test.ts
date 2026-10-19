@@ -20,6 +20,50 @@ function readyAtBottom(threadId = "thread-1"): ChatScrollState {
 }
 
 describe("chat scroll controller", () => {
+  it("settles an intentional near-bottom confirmation without waiting for another resize", () => {
+    let state = readyAtBottom()
+    state = apply(state, { type: "USER_DETACH", source: "user-input" })
+    const confirmed = transitionChatScroll(state, {
+      type: "BOTTOM_CONFIRMED",
+      generation: state.generation,
+      distanceToBottom: 27
+    })
+    expect(confirmed.state).toMatchObject({ mode: "following", programmaticScrollGuard: true })
+    expect(confirmed.effects).toEqual([
+      { type: "scroll-to-bottom", reason: "content-grown", generation: state.generation }
+    ])
+    const settled = transitionChatScroll(confirmed.state, { type: "BOTTOM_CONFIRMED" })
+    expect(settled.state.programmaticScrollGuard).toBe(false)
+    expect(settled.effects).toEqual([])
+  })
+
+  it.each([0, 1, Number.NaN, Number.POSITIVE_INFINITY])(
+    "does not add a settle for an exact or invalid bottom distance %s",
+    distanceToBottom => {
+      const confirmed = transitionChatScroll(readyAtBottom(), {
+        type: "BOTTOM_CONFIRMED", distanceToBottom
+      })
+      expect(confirmed.effects).toEqual([])
+      expect(confirmed.state.mode).toBe("following")
+    }
+  )
+
+  it("rejects stale or restoring near-bottom confirmations before scheduling a settle", () => {
+    const state = readyAtBottom()
+    const stale = transitionChatScroll(state, {
+      type: "BOTTOM_CONFIRMED", generation: state.generation - 1, distanceToBottom: 27
+    })
+    expect(stale.state).toBe(state)
+    expect(stale.effects).toEqual([])
+    const restoring = apply(state, { type: "RESTORE_BEGIN" })
+    const confirmed = transitionChatScroll(restoring, {
+      type: "BOTTOM_CONFIRMED", generation: restoring.generation, distanceToBottom: 27
+    })
+    expect(confirmed.state).toBe(restoring)
+    expect(confirmed.effects).toEqual([])
+  })
+
+
   it("keeps a strong bottom-settle intent when a weak stream update arrives in the same frame", () => {
     const returnToBottom = {
       type: "scroll-to-bottom",

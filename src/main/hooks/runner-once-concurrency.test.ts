@@ -49,6 +49,32 @@ beforeEach(() => {
 })
 
 describe("classic once hook execution ownership", () => {
+  it("does not leak one chain's input overwrite diagnostics into another shared once outcome", async () => {
+    const pending = deferred<HookResult>(),
+      firstObserved = deferred<void>()
+    vi.mocked(executeHttpHook).mockImplementation(async (config) =>
+      config.id === "first-transform"
+        ? { ...success, stdout: '{"updatedInput":{"path":"private-A"}}' }
+        : pending.promise
+    )
+    const first = runHooks(
+      [hook({ id: "first-transform", once: false }), hook()],
+      "PreToolUse",
+      context,
+      (_event, config) => {
+        if (config.id === "first-transform") firstObserved.resolve()
+      }
+    )
+    const second = runHooks([hook()], "PreToolUse", context)
+    await firstObserved.promise
+    pending.resolve({ ...success, stdout: '{"updatedInput":{"path":"private-B"}}' })
+    const [changed, unchanged] = await Promise.all([first, second])
+    expect(changed?.updatedInputMerge?.conflicts).toHaveLength(1)
+    expect(changed?.systemMessage).toContain("first-transform")
+    expect(unchanged?.updatedInputMerge?.conflicts).toEqual([])
+    expect(unchanged?.systemMessage).toBeUndefined()
+    expect(executeHttpHook).toHaveBeenCalledTimes(2)
+  })
   it("shares the pending check and its blocking outcome between concurrent invocations", async () => {
     const pending = deferred<HookResult>()
     vi.mocked(executeHttpHook).mockReturnValue(pending.promise)

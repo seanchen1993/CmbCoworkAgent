@@ -1,6 +1,3 @@
-import { BUSINESS_MOD_MANIFEST } from "../../shared/business-mods"
-import { parseBusinessModCatalog } from "../plugins/business-mod-manifest"
-import { openStableFileHandle, readStableFileHandleBounded } from "../services/stable-file-handle"
 import { isCreatorVersionSource } from "../plugins/creator-path"
 import { isProjectModePluginRoot } from "../harness-board/plugin-mode"
 import { isPluginInstallMode, type PluginInstallMode, type PluginInstallResult } from "../../shared/plugin-install"
@@ -41,6 +38,10 @@ import { discoverSkills } from "../skills/discovery"
 import { parseModManifest } from "../../shared/mods/validation"
 import { resolveModFile } from "../mods/loader"
 import { compileFunctionPlugin } from "../mods/v2/loader"
+import { BUSINESS_MOD_MANIFEST } from "../../shared/business-mods"
+import { parseBusinessModCatalog } from "../plugins/business-mod-manifest"
+import { assertPackageExtensionCompatibility } from "../plugins/extension-contract"
+import { openStableFileHandle, readStableFileHandleBounded } from "../services/stable-file-handle"
 import { decodeArchiveEntryName } from "../skills/archive"
 import {
   DEFAULT_PLUGIN_HOOKS_PATH,
@@ -183,6 +184,7 @@ async function addDirToZip(zip: AdmZip, dirPath: string, rootDir: string): Promi
 }
 
 async function parsePluginDir(dirPath: string, fallbackName?: string): Promise<ParsedPlugin> {
+  assertPackageExtensionCompatibility(dirPath)
   let manifest: PluginManifest | null = null
   const skillNames: string[] = []
   let mcpConfigs: Record<string, PluginMcpServerConfig> = {}
@@ -368,10 +370,26 @@ export function installBundledCommunityPlugin(
         alreadyInstalled: true, requiresApproval: true }
     }
     assertCurrent()
-    const result = await installPluginFromDirLocked(directory, name, "local", undefined, true,
-      assertCurrent)
+    const pluginId = uuid()
+    const result = await installPluginFromDirLocked(
+      directory,
+      name,
+      "local",
+      undefined,
+      true,
+      assertCurrent,
+      {
+        name,
+        pluginId,
+        // Catalog enablement preserves the existing example flow; source approval is separate.
+        enabled: true,
+        verifyCopied: async (target) => {
+          await verify(target)
+        }
+      }
+    )
     if (!result.success) throw Error(result.error ?? "MODS_COMMUNITY_INSTALL_FAILED")
-    const installed = getPlugins().find(plugin => plugin.name === name)
+    const installed = getPlugins().find(plugin => plugin.id === pluginId && plugin.name === name)
     if (!installed) throw Error("MODS_COMMUNITY_INSTALL_FAILED")
     return { pluginId: installed.id, pluginName: name,
       alreadyInstalled: false, requiresApproval: true }
@@ -402,12 +420,17 @@ async function installPluginFromDirLocked(
   versionOverride?: string,
   requireMods: PluginInstallMode = false,
   beforeWrite?: () => void,
-  createOnly?: { name: string; pluginId: string; verifyCopied: (directory: string) => Promise<void> }
+  createOnly?: {
+    name: string
+    pluginId: string
+    enabled?: true
+    verifyCopied: (directory: string) => Promise<void>
+  }
 ): Promise<PluginInstallResult> {
   try {
     if (!isPluginInstallMode(requireMods))
       return { success: false, error: "无效的插件安装方式" }
-    const parsed = await parsePluginDir(dirPath, fallbackName)
+    let parsed = await parsePluginDir(dirPath, fallbackName)
     if (createOnly && (parsed.name !== createOnly.name || getPlugins().some(plugin =>
       plugin.name.trim().toLowerCase() === parsed.name.trim().toLowerCase() ||
       plugin.id === createOnly.pluginId))) throw Error("独立插件名称已存在，请修改名称后重新创建")
@@ -461,7 +484,7 @@ async function installPluginFromDirLocked(
       const { observeDerivationInstallation } = await import("../plugins/derivation-scope")
       await observeDerivationInstallation(installedPluginId, destDir, parsed.name)
     }
-    const resolvedVersion = resolvePluginInstallVersion(parsed.manifest?.version, versionOverride)
+    let resolvedVersion = resolvePluginInstallVersion(parsed.manifest?.version, versionOverride)
     const shouldSyncManifestVersion = Boolean(normalizePluginVersion(versionOverride))
     const syncCopiedManifestVersion = async (): Promise<void> => {
       if (!shouldSyncManifestVersion) return
@@ -500,11 +523,21 @@ async function installPluginFromDirLocked(
       }
     } else {
       // Fresh install
+      // An independent install owns only a directory it created exclusively. A raced-in
+      // directory must neither be copied over nor removed by the failure cleanup below.
+      if (createOnly) await fs.mkdir(destDir)
       try {
         await copyDirRecursive(dirPath, destDir)
         await syncCopiedManifestVersion()
-        if (createOnly) { await createOnly.verifyCopied(destDir); beforeWrite?.() }
-        await associateCopiedSource()
+        if (createOnly) {
+          // Catalog metadata must describe the verified destination, including when the live
+          // source changed temporarily during its initial parse and was restored before copy.
+          parsed = await parsePluginDir(destDir, createOnly.name)
+          if (parsed.name !== createOnly.name) throw Error("独立插件来源名称已变化，未安装")
+          resolvedVersion = resolvePluginInstallVersion(parsed.manifest?.version, versionOverride)
+          await createOnly.verifyCopied(destDir)
+          beforeWrite?.()
+        } else await associateCopiedSource()
       } catch (copyErr) {
         if (existsSync(destDir)) {
           rmSync(destDir, { recursive: true, force: true })
@@ -526,7 +559,7 @@ async function installPluginFromDirLocked(
       ...(parsed.manifest?.useScenario ? { useScenario: parsed.manifest.useScenario } : {}),
       author: formatAuthor(parsed.manifest?.author),
       path: destDir,
-      enabled: createOnly ? false : requireMods === "capabilities"
+      enabled: createOnly ? createOnly.enabled === true : requireMods === "capabilities"
         ? existing?.enabled ?? parsed.modCount > 0
         : true,
       skillCount: parsed.skillNames.length,
@@ -959,7 +992,7 @@ export function registerPluginHandlers(ipcMain: IpcMain): void {
             rmSync(plugin.path, { recursive: true, force: true })
           }
           deletePluginStorage(id)
-          getModsManager()?.pluginsChanged()
+          getModsManager()?.pluginsChanged([id])
           invalidateEnabledSkillsCache()
           await invalidateGlobalMcpCapabilityService("plugin:delete")
           notifyHooksChanged("plugin-deleted")
@@ -983,7 +1016,7 @@ export function registerPluginHandlers(ipcMain: IpcMain): void {
       try {
         const { id, enabled } = payload
         setPluginEnabled(id, enabled)
-        getModsManager()?.pluginsChanged()
+        getModsManager()?.pluginsChanged([id])
         invalidateEnabledSkillsCache()
         await invalidateGlobalMcpCapabilityService("plugin:setEnabled")
         notifyHooksChanged("plugin-enabled-changed")

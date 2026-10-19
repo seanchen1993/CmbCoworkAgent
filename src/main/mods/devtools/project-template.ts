@@ -1,8 +1,19 @@
 import { createAuthoringSourceBundle, type AuthoringSourceBundle } from "./authoring-bundle"
-import { parseProjectRuntimeManifest, type ProjectRuntimeManifest } from "../../../shared/project-runtime"
-import { compileProjectHarness, HARNESS_SOURCE_PATH, type HarnessDefinition } from "./project-harness"
+import {
+  parseProjectRuntimeManifest,
+  type ProjectRuntimeManifest
+} from "../../../shared/project-runtime"
+import {
+  compileProjectHarness,
+  HARNESS_SOURCE_PATH,
+  type HarnessDefinition
+} from "./project-harness"
 
-export type ProjectTemplateKind = "project-lite" | "harness-lite" | "harness-fullstack" | "harness-data"
+export type ProjectTemplateKind =
+  | "project-lite"
+  | "harness-lite"
+  | "harness-fullstack"
+  | "harness-data"
 
 export interface ProjectTemplateInput {
   packageId: string
@@ -13,40 +24,98 @@ export interface ProjectTemplateInput {
 
 export function createProjectTemplate(input: ProjectTemplateInput): AuthoringSourceBundle {
   const version = input.version ?? "0.1.0"
-  if (!/^[a-z][a-z0-9-]{0,47}$/.test(input.packageId) ||
+  if (
+    !/^[a-z][a-z0-9-]{0,47}$/.test(input.packageId) ||
     /^(?:con|prn|aux|nul|com[0-9]|lpt[0-9])$/.test(input.packageId) ||
-    !input.name.trim() || input.name.length > 100 || !/^\d+\.\d+\.\d+$/.test(version)) {
+    !input.name.trim() ||
+    input.name.length > 100 ||
+    !/^\d+\.\d+\.\d+$/.test(version)
+  ) {
     throw Error("PROJECT_TEMPLATE_INPUT")
   }
   if (input.template && input.template !== "project-lite") return createHarnessTemplate(input)
   const manifest: ProjectRuntimeManifest = parseProjectRuntimeManifest({
     apiVersion: "devclaw.project-runtime/v1",
     plugin: { id: input.packageId, version },
-    mode: "host", stateOwner: "host",
+    mode: "host",
+    stateOwner: "host",
     stages: [
-      { id: "draft", title: "起草", skill: "skills/draft/SKILL.md", actionIds: [],
-        artifactIds: ["draft"], checkIds: ["draft-exists"], approval: "none" },
-      { id: "review", title: "检查与确认", skill: "skills/draft/SKILL.md", actionIds: [],
-        artifactIds: ["draft", "review"], checkIds: ["draft-exists", "review-schema"], approval: "human" }
+      {
+        id: "draft",
+        title: "起草",
+        skill: "skills/draft/SKILL.md",
+        actionIds: [],
+        artifactIds: ["draft"],
+        checkIds: ["draft-exists"],
+        approval: "none"
+      },
+      {
+        id: "review",
+        title: "检查与确认",
+        skill: "skills/draft/SKILL.md",
+        actionIds: [],
+        artifactIds: ["draft", "review"],
+        checkIds: ["draft-exists", "review-schema"],
+        approval: "human"
+      }
     ],
     actions: [],
-    artifacts: [{ id: "draft", path: "draft.md", required: true },
-      { id: "review", path: "review.json", required: true }],
+    artifacts: [
+      { id: "draft", path: "draft.md", required: true },
+      { id: "review", path: "review.json", required: true }
+    ],
     checks: [
       { id: "draft-exists", kind: "file-exists", artifactId: "draft", sideEffect: "read" },
-      { id: "review-schema", kind: "json-schema", artifactId: "review", sideEffect: "read",
-        schema: { type: "object", required: ["summary", "checked"], additionalProperties: false,
-          properties: { summary: { type: "string", minLength: 1, maxLength: 4000 }, checked: { const: true } } } }
+      {
+        id: "review-schema",
+        kind: "json-schema",
+        artifactId: "review",
+        sideEffect: "read",
+        schema: {
+          type: "object",
+          required: ["summary", "checked"],
+          additionalProperties: false,
+          properties: {
+            summary: { type: "string", minLength: 1, maxLength: 4000 },
+            checked: { const: true }
+          }
+        }
+      }
     ],
     environment: [],
-    capabilities: { execution: true, conditionalTransition: true, idempotency: true,
-      reconciliation: false, cancellation: true }
+    capabilities: {
+      execution: true,
+      conditionalTransition: true,
+      idempotency: true,
+      reconciliation: false,
+      cancellation: true
+    }
   })
   const json = (value: unknown) => `${JSON.stringify(value, null, 2)}\n`
   return createAuthoringSourceBundle([
-    { path: "plugin.json", text: json({ name: input.packageId, version, description: input.name }) },
+    {
+      path: "plugin.json",
+      text: json({ name: input.packageId, version, description: input.name })
+    },
     { path: "devclaw.project-runtime.json", text: json(manifest) },
-    { path: "skills/draft/SKILL.md", text: `---
+    {
+      path: "devclaw.capabilities.json",
+      text: json({
+        apiVersion: "devclaw.capabilities/v1",
+        capabilities: [
+          {
+            id: "project-flow",
+            title: input.name,
+            kind: "flow",
+            usage: "project",
+            entry: "devclaw.project-runtime.json"
+          }
+        ]
+      })
+    },
+    {
+      path: "skills/draft/SKILL.md",
+      text: `---
 name: ${input.packageId}-draft
 description: 起草或复核当前轻量文档项目，在项目工作区生成 draft.md 和 review.json。
 ---
@@ -60,22 +129,41 @@ description: 起草或复核当前轻量文档项目，在项目工作区生成 
 只报告真实执行的工作。文件存在或 JSON 结构检查通过，不代表内容质量通过。
 阶段推进、验收证据和人工确认由宿主处理；不要编辑宿主数据库、伪造审批或自行宣告项目已完成。
 用户拒绝确认时保留产物，按照反馈修复后再请求原确认入口。
-` },
-    { path: "tests/project-contract.json", text: json({
-      apiVersion: "devclaw.project-contract/v1",
-      cases: [
-        { id: "missing-draft", stageId: "draft", files: [], expected: "failed" },
-        { id: "draft-present", stageId: "draft", files: [{ path: "draft.md", text: "# 示例草稿\n" }], expected: "passed" },
-        { id: "invalid-review", stageId: "review", files: [
-          { path: "draft.md", text: "# 示例草稿\n" },
-          { path: "review.json", text: "{\"checked\":false}" }
-        ], expected: "failed" },
-        { id: "review-present", stageId: "review", files: [
-          { path: "draft.md", text: "# 示例草稿\n" },
-          { path: "review.json", text: "{\"summary\":\"仅验证测试数据结构\",\"checked\":true}" }
-        ], expected: "passed" }
-      ]
-    }) }
+`
+    },
+    {
+      path: "tests/project-contract.json",
+      text: json({
+        apiVersion: "devclaw.project-contract/v1",
+        cases: [
+          { id: "missing-draft", stageId: "draft", files: [], expected: "failed" },
+          {
+            id: "draft-present",
+            stageId: "draft",
+            files: [{ path: "draft.md", text: "# 示例草稿\n" }],
+            expected: "passed"
+          },
+          {
+            id: "invalid-review",
+            stageId: "review",
+            files: [
+              { path: "draft.md", text: "# 示例草稿\n" },
+              { path: "review.json", text: '{"checked":false}' }
+            ],
+            expected: "failed"
+          },
+          {
+            id: "review-present",
+            stageId: "review",
+            files: [
+              { path: "draft.md", text: "# 示例草稿\n" },
+              { path: "review.json", text: '{"summary":"仅验证测试数据结构","checked":true}' }
+            ],
+            expected: "passed"
+          }
+        ]
+      })
+    }
   ])
 }
 

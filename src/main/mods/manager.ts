@@ -2,6 +2,10 @@ import { guardPluginCatalogOperations } from "../plugins/catalog-gate"
 import { FunctionAgentInstances } from "./v2/agent-instances"
 import type { FunctionConversationCoordinator } from "./v2/conversation-coordinator"
 import { readCoordinatorWorkerModsContext } from "../agent/coordinator-worker-mods-context"
+import { readNativeChildModsContext } from "../agent/native-child-mods-context"
+import { getThreadCore } from "../db"
+import { captureThreadIncarnation, matchesThreadIncarnation } from "../services/thread-incarnation"
+import { captureRuntimePluginSourceAuthorityGuard } from "../plugins/runtime-source-scope"
 import type { FunctionConversationGraphBinding } from "../agent/mods-conversation"
 import type { FunctionSessionAppendTicket } from "./v2/session-append-ticket"
 import type { FunctionSessionAppendResult } from "../../shared/mods/v2/session-append"
@@ -47,10 +51,12 @@ import type {
   FunctionPeerSend
 } from "../../shared/mods/v2/peer"
 import { prepareFunctionAgentPlan, runFunctionAgentChild } from "./v2/agent-spawn-host"
+import { bindCreatorModelAccounting, readCreatorModelAccounting } from "./devtools/creator-model-accounting"
+import { captureRuntimeTraceParent } from "../agent/trace/live-tool-evidence"
 import { functionAgentToolName, type RegisteredFunctionAgent } from "./v2/agent-registry"
 import type { FunctionAgentInfo } from "../../shared/mods/v2/agent-list"
 import { createHash, randomUUID } from "node:crypto"
-import { existsSync, realpathSync, writeFileSync } from "node:fs"
+import { existsSync, realpathSync, statSync, writeFileSync } from "node:fs"
 import {
   validateWorkspaceDirectory,
   WorkspaceValidationError
@@ -506,6 +512,9 @@ export class ModsManager {
     const callerBinding = this.bindings.get(`${threadId}:${caller.agentId}`)
     if (!callerBinding || callerBinding.runtimeAuthority !== caller)
       throw new ModError("MODS_THREAD_CONTEXT_REQUIRED")
+    // Capture the original opaque caller before approval/preparation awaits change execution scope.
+    const creatorAccounting = readCreatorModelAccounting(caller)
+    const parentTrace = captureRuntimeTraceParent(caller)
     if (
       callerBinding.executionWorkspace &&
       this.workspaceKey(callerBinding.executionWorkspace) !== workspace
@@ -657,6 +666,8 @@ export class ModsManager {
         parentThreadId: threadId,
         agentId,
         creator,
+        creatorAccounting,
+        parentTrace,
         conversationParent,
         signal: ownedSignal,
         assertLive: assertOwned,
@@ -1640,6 +1651,12 @@ export class ModsManager {
     pluginsChanged?(workspace: string, changedPluginIds?: readonly string[]): void
     invalidateAll?(): void
     closeThread(threadId: string): void
+    closeThreadAndWait?(threadId: string): Promise<void>
+    captureThreadRetirement?(threadId: string): {
+      resident: boolean
+      assertCurrent(): void
+      retire(): Promise<void>
+    }
     prepareEnd?(reason: import("./v2/session-end").FunctionSessionEndReason,
       threadId?: string): import("./v2/session-end").FunctionSessionEndReceipt
     close(): void
@@ -1788,6 +1805,34 @@ export class ModsManager {
   }
 
   closeFunctionThread(threadId: string): void {
+    this.invalidateFunctionThreadOwner(threadId)
+    this.functionLifecycle?.closeThread(threadId)
+  }
+
+  /** Native one-shot runtime cleanup, never an automatic eviction of a user conversation. */
+  async closeFunctionThreadAndWait(threadId: string): Promise<void> {
+    this.invalidateFunctionThreadOwner(threadId)
+    if (!this.functionLifecycle) return
+    if (!this.functionLifecycle.closeThreadAndWait)
+      throw new ModError("MODS_RESOURCE_CLEANUP_PENDING")
+    await this.functionLifecycle.closeThreadAndWait(threadId)
+  }
+
+  captureFunctionThreadRetirement(threadId: string) {
+    const lifecycle = this.functionLifecycle
+    const captured = lifecycle?.captureThreadRetirement?.(threadId)
+    if (lifecycle && !captured) throw new ModError("MODS_RESOURCE_CLEANUP_PENDING")
+    let retirement: Promise<void> | undefined
+    return { resident: captured?.resident ?? false, retire: () => {
+      if (retirement) return retirement
+      if (this.functionLifecycle !== lifecycle) throw new ModError("MODS_SCOPE_CHANGED")
+      captured?.assertCurrent()
+      this.invalidateFunctionThreadOwner(threadId)
+      return retirement = captured?.retire() ?? Promise.resolve()
+    } }
+  }
+
+  private invalidateFunctionThreadOwner(threadId: string): void {
     for (const [controller, owner] of this.spawningAgents)
       if (owner.threadId === threadId) controller.abort()
     this.peerInbox.close(undefined, threadId)
@@ -1795,7 +1840,6 @@ export class ModsManager {
     this.functionTurns.invalidate(undefined, threadId)
     this.invalidateFunctionReads(threadId)
     this.runtimeAuthorities.closeThread(threadId)
-    this.functionLifecycle?.closeThread(threadId)
     for (const [key, binding] of this.bindings)
       if (binding.threadId === threadId) this.bindings.delete(key)
     for (const [key, entry] of this.mcpBindings)
@@ -2763,8 +2807,8 @@ export class ModsManager {
   }
 
   /** Prime without blocking Electron, and reject stale canonical grants before a new runtime. */
-  async prepareWorkspace(workspace: string): Promise<void> {
-    const real = await validateWorkspaceDirectory(workspace)
+  async prepareWorkspace(workspace: string, signal?: AbortSignal): Promise<void> {
+    const real = await validateWorkspaceDirectory(workspace, signal)
     const key = process.platform === "win32" ? real.toLowerCase() : real
     const cached = this.canonical.get(workspace)
     if (cached && cached !== key) {
@@ -3384,6 +3428,84 @@ export class ModsManager {
     return this.registerFunctionProcess(identity, authority, sessionSignal)
   }
 
+  /** Transfers only an already admitted native command to its existing background task. */
+  registerNativeBackground(
+    input: { command: string; cwd: string },
+    taskSignal: AbortSignal
+  ) {
+    const context = getModCallContext()
+    // SDK/Flow and real child jobs retain their original, shorter owner lifecycle.
+    if (!context || context.identity.modId || context.identity.flow ||
+        context.identity.agentId !== "main" || context.identity.origin !== "model") return
+    context.assertLive?.()
+    const authority = context.runtimeAuthority
+    if (!authority) return
+    if (context.toolId !== "host:execute" ||
+        context.effectiveArgs?.command !== input.command || context.effectiveArgs?.cwd !== input.cwd)
+      throw new ModError("MODS_BACKGROUND_OWNER_REQUIRED")
+    const assertAdmission = () => {
+      context.assertLive?.()
+      assertModRuntimeAuthority(authority, context.identity)
+      const binding = this.bindings.get(`${context.identity.threadId}:main`)
+      if (!binding || binding.runtimeAuthority !== authority)
+        throw new ModError("MODS_BACKGROUND_OWNER_REQUIRED")
+      this.assertRuntimeBinding(binding)
+    }
+    assertAdmission()
+    taskSignal.throwIfAborted()
+    if (readNativeChildModsContext(context.identity.threadId)) return
+    const identity = { ...context.identity }
+    const row = getThreadCore(identity.threadId)
+    if (!row) throw new ModError("MODS_BACKGROUND_OWNER_REQUIRED")
+    const incarnation = captureThreadIncarnation(row)
+    const workspace = this.workspaceKey(identity.workspace)
+    const readWorkspace = () => {
+      const current = getThreadCore(identity.threadId)
+      if (!matchesThreadIncarnation(current, incarnation))
+        throw new ModError("MODS_CALL_SCOPE_CHANGED")
+      const metadata = JSON.parse(current!.metadata ?? "{}")
+      if (typeof metadata.workspacePath !== "string" ||
+          this.workspaceKey(metadata.workspacePath) !== workspace ||
+          metadata.remoteState === "historical" || metadata.remoteReadOnly === true)
+        throw new ModError("MODS_CALL_SCOPE_CHANGED")
+    }
+    const directoryIdentity = (path: string) => {
+      const root = realpathSync.native(path)
+      const stat = statSync(root)
+      if (!stat.isDirectory()) throw new ModError("MODS_CALL_SCOPE_CHANGED")
+      return JSON.stringify([process.platform === "win32" ? root.toLowerCase() : root,
+        stat.dev, stat.ino, stat.birthtimeMs])
+    }
+    const roots = [workspace, input.cwd].map(path => [path, directoryIdentity(path)] as const)
+    const epoch = this.config(workspace).epoch
+    const globallyEnabled = this.globalEnabled()
+    const assertSource = captureRuntimePluginSourceAuthorityGuard()
+    const controller = new AbortController()
+    const signal = AbortSignal.any([taskSignal, controller.signal])
+    const assertLive = () => {
+      signal.throwIfAborted()
+      readWorkspace()
+      assertSource?.()
+      if (this.config(workspace).epoch !== epoch || this.globalEnabled() !== globallyEnabled ||
+          roots.some(([path, expected]) => directoryIdentity(path) !== expected))
+        throw new ModError("MODS_CALL_SCOPE_CHANGED")
+    }
+    if (this.activeActions.size >= 100) throw new ModError("MODS_RUNTIME_CAPACITY")
+    assertLive()
+    this.activeActions.set(controller, workspace)
+    const watchdog = setInterval(() => {
+      try { assertLive() } catch { controller.abort() }
+    }, 100)
+    watchdog.unref()
+    let released = false
+    return { signal, assertLive, release: () => {
+      if (released) return
+      released = true
+      clearInterval(watchdog)
+      this.activeActions.delete(controller)
+    } }
+  }
+
   private registerFunctionProcess(
     identity: Pick<ModIdentity, "workspace" | "threadId" | "agentId" | "modId" | "grantEpoch">,
     authority: ModRuntimeAuthority,
@@ -3540,6 +3662,7 @@ export class ModsManager {
       throw new ModError("MODS_THREAD_CONTEXT_REQUIRED")
     this.assertRuntimeBinding(parentBinding)
     parentBinding.assertLive?.()
+    const creatorAccounting = readCreatorModelAccounting(parent)
     const conversationParent = access && nativeTask
       ? this.captureFunctionConversationChildParent(parent) : undefined
     const conversationBinding = conversationParent ? this.functionConversationRuntimes.get(parent)
@@ -3592,6 +3715,9 @@ export class ModsManager {
     try {
       releases.push(this.bindThread(binding))
       this.sharedAgentOwners.set(instance.authority, { parent, role: metadata?.type, epoch })
+      if (creatorAccounting)
+        bindCreatorModelAccounting(instance.authority, creatorAccounting.forChild(
+          parent.threadId, identity.threadId, parent.workspace, undefined, binding.signal))
       if (nativeTask && conversationParent && conversationBinding && this.functionConversations) {
         const { createFunctionConversationSharedNativeHost } =
           await import("./v2/conversation-shared-native-host")

@@ -176,9 +176,11 @@ function getDefaultClient(): HarnessKnowledgePreviewClient {
 
 export function readHarnessKnowledgePreviewInWorker(
   adapterId: string,
-  scope: string
+  scope: string,
+  authorizedKnowledge?: HarnessKnowledgePreviewSource["authorizedKnowledge"]
 ): Promise<HarnessKnowledgePreviewResult> {
-  return getDefaultClient().read(adapterId, scope)
+  return getDefaultClient().read(adapterId, scope, { ...defaultSource(),
+    ...(authorizedKnowledge ? { authorizedKnowledge } : {}) })
 }
 
 export function cancelHarnessKnowledgePreviewScope(scope: string): void {

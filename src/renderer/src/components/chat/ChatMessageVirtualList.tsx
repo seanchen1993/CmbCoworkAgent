@@ -1,4 +1,5 @@
 import { windowPresentation } from "@/lib/window-presentation"
+import { claimVirtualizedChatScrollAnchor } from "@/lib/chat-scroll-anchor-owner"
 import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react"
 import { startInitialChatPresentation, sampleInitialChatPresentation, isFirstLiveChatUserRow } from "@/lib/chat-initial-presentation"
 import { Loader2 } from "lucide-react"
@@ -22,6 +23,10 @@ import type { FunctionTurnNotice } from "../../../../shared/mods/v2/turn"
 import { placeFunctionTurnNotices } from "../../../../shared/mods/v2/turn-notice-placement"
 import { ChatSearchContext } from "./ChatSearchContext"
 import { ReasoningExpansionContext, ReasoningExpansionStore } from "./reasoning-expansion-context"
+import {
+  UserMessageExpansionContext,
+  UserMessageExpansionStore
+} from "./user-message-expansion-context"
 import { subscribeToMessageDiscard, type MessageAttempts } from "@/lib/message-discard-events"
 import type { ChatSearchLocation, ChatSearchReveal } from "../../../../shared/chat-search-types"
 import type {
@@ -408,6 +413,10 @@ export const ChatMessageVirtualList = React.memo(function ChatMessageVirtualList
     [messages, visibleMessageIndexes, functionTurnNotices, historyGapBeforeMessageId]
   )
   const shouldVirtualize = shouldVirtualizeChatMessageList(visibleMessageIndexes.length)
+  useLayoutEffect(() => {
+    if (!shouldVirtualize || !customScrollParent) return
+    return claimVirtualizedChatScrollAnchor(customScrollParent)
+  }, [customScrollParent, shouldVirtualize])
   const presentationRoot = useRef<HTMLDivElement>(null)
   const [presentedThread, setPresentedThread] = useState<string | null>(null)
   // Only a first live user row bypasses history settling. A running history still needs the barrier.
@@ -453,12 +462,17 @@ export const ChatMessageVirtualList = React.memo(function ChatMessageVirtualList
     threadId: string
     choices: NonNullable<React.ContextType<typeof ReasoningExpansionContext>>
   }>(() => ({ threadId, choices: new ReasoningExpansionStore() }), [threadId])
+  const userMessageExpansion = useMemo(
+    () => ({ threadId, choices: new UserMessageExpansionStore() }),
+    [threadId]
+  )
   useLayoutEffect(
     () =>
-      subscribeToMessageDiscard(threadId, (messageIds, revision) =>
+      subscribeToMessageDiscard(threadId, (messageIds, revision) => {
         reasoningExpansion.choices.discardMessages(threadId, messageIds, revision)
-      ),
-    [reasoningExpansion, threadId]
+        userMessageExpansion.choices.discardMessages(threadId, messageIds, revision)
+      }),
+    [reasoningExpansion, threadId, userMessageExpansion]
   )
   const initialVirtualItemsRenderedThreadRef = useRef<string | null>(null)
   const [detachedHookLogOffsetFromTail, setDetachedHookLogOffsetFromTail] = useState(0)
@@ -711,6 +725,7 @@ export const ChatMessageVirtualList = React.memo(function ChatMessageVirtualList
 
   return (
     <ReasoningExpansionContext.Provider value={reasoningExpansion.choices}>
+    <UserMessageExpansionContext.Provider value={userMessageExpansion.choices}>
       <div ref={presentationRoot} className="relative" data-chat-initial-presentation={presentationReady ? "ready" : "pending"}>
       <Virtuoso<number, ChatVirtualListContext>
         key={threadId}
@@ -724,7 +739,8 @@ export const ChatMessageVirtualList = React.memo(function ChatMessageVirtualList
         initialTopMostItemIndex={resolvedInitialTopMostItemIndex}
         alignToBottom
         atBottomThreshold={32}
-        followOutput={() => false}
+        followOutput={false}
+        skipAnimationFrameInResizeObserver
         atBottomStateChange={onAtBottomStateChange}
         defaultItemHeight={112}
         increaseViewportBy={{ top: 600, bottom: 900 }}
@@ -744,6 +760,7 @@ export const ChatMessageVirtualList = React.memo(function ChatMessageVirtualList
         <div className="h-3 w-1/3 rounded bg-muted" />
       </div>}
       </div>
+    </UserMessageExpansionContext.Provider>
     </ReasoningExpansionContext.Provider>
   )
 })

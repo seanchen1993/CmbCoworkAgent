@@ -1,6 +1,6 @@
 /** Actual React/Radix reader with bundled Markdown, no model, network, or business IPC. */
 import assert from "node:assert/strict"
-import { existsSync, mkdirSync, readdirSync, writeFileSync } from "node:fs"
+import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs"
 import { join, resolve } from "node:path"
 import { build } from "esbuild"
 import { chromium } from "playwright"
@@ -48,13 +48,26 @@ async function main() {
     assert.equal(await page.getByRole("navigation", { name: "说明章节" }).getByRole("button").count(), 11)
     assert.deepEqual(await page.evaluate("window.calls"), [])
     checks.push("All eleven bundled chapters open without network or business IPC")
-    const overviewImage = page.getByRole("img", { name: /当前助手的运行过程页/ })
+    const overview = await page.getByRole("article").innerText()
+    assert.match(overview, /聊天中的唯一输入框/)
+    assert.match(overview, /普通模式/)
+    assert.match(overview, /发送消息/)
+    assert.match(overview, /无需先配置模块或任务方案/)
+    assert.match(overview, /确认并应用到这段聊天/)
+    assert.match(overview, /已保存或绑定的 Flow 不会自动启动/)
+    assert.match(overview, /成功启动后恢复普通发送/)
+    assert.match(overview, /预检失败会保留输入和选择/)
+    assert.match(overview, /任务进展/)
+    assert.match(overview, /高级：为下一条消息使用预设任务/)
+    assert.doesNotMatch(overview, /开始流程|准备首次任务|其他记录|任务详情|命令与日志|按此步骤执行/)
+    checks.push("Offline guidance starts with ordinary send and creator approval; saved plans remain advanced and explicit, with real task-card results")
+    const overviewImage = page.getByRole("img", { name: "聊天任务卡中的进度与确认", exact: true })
     await overviewImage.scrollIntoViewIfNeeded()
     await overviewImage.evaluate((image: HTMLImageElement) => image.decode())
-    assert.ok(await overviewImage.evaluate((image: HTMLImageElement) => image.naturalWidth > 1000))
+    assert.ok(await overviewImage.evaluate((image: HTMLImageElement) => image.naturalWidth >= 300))
     await page.screenshot({ path: join(output, "offline-overview-image.png") })
     await overviewImage.dispatchEvent("error")
-    await page.getByRole("img", { name: /当前助手的运行过程页.*图片无法显示/ }).waitFor()
+    await page.getByRole("img", { name: /聊天任务卡中的进度与确认.*图片无法显示/ }).waitFor()
     assert.equal(await page.getByRole("article").locator("img").count(), 0)
     await page.getByRole("navigation").getByRole("button", { name: "排障与限制", exact: true }).click()
     const troubleshootingImage = page.getByRole("img", { name: /本阶段运行过程：显示/ })
@@ -65,8 +78,17 @@ async function main() {
     await overviewImage.scrollIntoViewIfNeeded()
     await overviewImage.evaluate((image: HTMLImageElement) => image.decode())
     checks.push("Both reviewed screenshots render offline with alt text; failed images show a readable placeholder and can reload after navigation")
-    await page.getByRole("article").getByRole("link", { name: "内置功能与项目任务", exact: true }).click()
+    await page.getByRole("article").getByRole("link", { name: "项目能力", exact: true }).click()
     await page.getByRole("heading", { name: "内置功能与本地项目任务", exact: true }).waitFor()
+    for (const name of ["项目会话标题栏的项目能力入口", "窄屏下的项目能力选择面板"]) {
+      const image = page.getByRole("img", { name, exact: true })
+      await image.scrollIntoViewIfNeeded()
+      await image.evaluate((element: HTMLImageElement) => element.decode())
+      assert.ok(await image.evaluate((element: HTMLImageElement) => element.naturalWidth > 300))
+    }
+    assert.equal(await page.getByRole("article").getByRole("img", { name: /图片无法显示/ }).count(), 0)
+    await page.screenshot({ path: join(output, "project-composition-guide-images.png") })
+    checks.push("Both project composition guide images load from bundled assets without fallback")
     const libraryImage = page.getByRole("img", { name: /成果与经验的交付详情/ })
     await libraryImage.scrollIntoViewIfNeeded()
     await libraryImage.evaluate((image: HTMLImageElement) => image.decode())
@@ -76,14 +98,14 @@ async function main() {
     await page.getByRole("heading", { name: "只写技能和节点，制作自己的项目插件", exact: true }).waitFor()
     await page.getByRole("article").getByRole("link", { name: "返回概览", exact: true }).click()
     checks.push("Project platform and authoring chapters are linked offline with honest version and recovery boundaries")
-    await page.getByRole("article").getByRole("link", { name: "插件开发入门", exact: true }).click()
-    await page.getByRole("heading", { name: "插件开发一步一步做", exact: true }).waitFor()
-    assert.equal(await page.getByRole("article").locator("pre").count(), 4)
-    await page.getByRole("heading", { name: "练习四：复用旧插件的一个业务阶段", exact: true }).waitFor()
-    await page.getByRole("textbox", { name: "搜索说明章节" }).fill("唯一状态接口")
+    await page.getByRole("article").getByRole("link", { name: "查看完整操作示例", exact: true }).click()
+    await page.getByRole("heading", { name: "从已有插件创建与组合", exact: true }).waitFor()
+    assert.equal(await page.getByRole("article").locator("pre").count(), 3)
+    await page.getByRole("heading", { name: "例四：选择 AutoBiz 原流程节点", exact: true }).waitFor()
+    await page.getByRole("textbox", { name: "搜索说明章节" }).fill("hello-spark")
     await page.getByRole("navigation").getByRole("button", { name: "插件开发入门", exact: true }).waitFor()
     await page.getByRole("textbox", { name: "搜索说明章节" }).fill("")
-    await page.getByRole("article").getByRole("link", { name: "返回概览", exact: true }).click()
+    await page.getByRole("navigation").getByRole("button", { name: "概览", exact: true }).click()
     checks.push("Beginner cookbook includes copyable examples, Hook reuse guidance, search and return navigation")
     await page.getByRole("article", { name: "说明正文" }).getByRole("link", { name: "创建与修改", exact: true }).click()
     await page.getByRole("heading", { name: "创建与修改灵件", exact: true }).waitFor()
@@ -126,6 +148,24 @@ async function main() {
     await page.getByRole("link", { name: /官方说明/ }).click()
     await page.getByRole("heading", { name: "DevClaw Sparks 官方说明", exact: true }).first().waitFor()
     checks.push("Escape closes the reader, preserves the editor draft, and allows reopening")
+    const docs = resolve("docs/sparks")
+    const expectedImages = readdirSync(docs).filter((name) => name.endsWith(".md"))
+      .reduce((count, name) => count + [...readFileSync(join(docs, name), "utf8").matchAll(/!\[[^\]]*\]\([^)]+\)/g)].length, 0)
+    const chapters = await page.getByRole("navigation", { name: "说明章节" }).getByRole("button").allTextContents()
+    let loadedImages = 0
+    for (const chapter of chapters) {
+      await page.getByRole("navigation").getByRole("button", { name: chapter, exact: true }).click()
+      const article = page.getByRole("article")
+      assert.equal(await article.getByRole("img", { name: /图片无法显示/ }).count(), 0, chapter)
+      for (const image of await article.locator("img").all()) {
+        await image.scrollIntoViewIfNeeded()
+        await image.evaluate((element: HTMLImageElement) => element.decode())
+        assert.ok(await image.evaluate((element: HTMLImageElement) => element.naturalWidth > 0), chapter)
+        loadedImages++
+      }
+    }
+    assert.equal(loadedImages, expectedImages, "Every documentation image reference must render offline")
+    checks.push(`All ${loadedImages} Markdown image references render across all bundled chapters`)
     await page.evaluate("window.renderImageChecks()")
     await page.getByRole("img", { name: "说明配图", exact: true }).waitFor()
     assert.equal(await page.getByRole("img", { name: "被阻止的图片（图片无法显示）", exact: true }).count(), 10)

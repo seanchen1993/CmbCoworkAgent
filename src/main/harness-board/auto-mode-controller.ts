@@ -3,10 +3,13 @@ import type { ManagedBizRetryDecisionInput, ManagedHumanGateDecisionInput, Manag
 import { harnessNotifications } from "./notifications"
 import { BrowserWindow } from "electron"
 import { existsSync, statSync } from "fs"
-import { getAllThreadSummaries, getThread } from "../db"
+import { getAllThreadSummaries, getThread, getThreadCore } from "../db"
+import { captureThreadIncarnation, matchesThreadIncarnation } from "../services/thread-incarnation"
+import { isSameWorkspacePath } from "../../shared/workspace-path"
+import { getModsManager } from "../mods/manager"
 import type { AgentRunDelivery } from "../agent/agent-run-service"
 import type { AppDecisionResult } from "../../shared/app-notifications"
-import { hasActiveTopLevelAgentRun } from "../agent/agent-run-service"
+import { hasActiveTopLevelAgentRun, isAgentRunBusy } from "../agent/agent-run-service"
 import { workflowRunManager } from "../agent/workflow/run-manager"
 import { emitAppAttention } from "../app-attention-events"
 import { AsyncKeyedLock } from "../ipc/async-keyed-lock"
@@ -17,6 +20,7 @@ import { inspectHarnessManagedFeatureStatus } from "./managed-feature-status"
 import {
   createAndStartManagedHarnessSession,
   createManagedHarnessSession,
+  captureManagedAgentRunTail,
   ManagedActionValidationError,
   prepareManagedBizRetryRun,
   prepareManagedHarnessSession,
@@ -77,6 +81,7 @@ interface HarnessFeatureContext {
 const featureLocks = new AsyncKeyedLock()
 const providerRetryTimers = new Map<string, ReturnType<typeof setTimeout>>()
 const stopRequestedRunIds = new Set<string>()
+const managedRetirementStopWaiters = new Map<string, Set<() => void>>()
 const MANAGED_RUN_REASON_MAX_LENGTH = 1024
 
 function featureKey(projectId: string, featureId: string): string {
@@ -577,6 +582,76 @@ async function markTerminal(
   publishManagedRunChanged(lastRunSummary(persisted))
 }
 
+/** Stop cancels only this controller wait; physical retirement keeps its original owner. */
+async function awaitManagedRetirement<T>(run: Pick<ManagedRunSnapshot, "runId">,
+  work: () => Promise<T>): Promise<{ stopped: true } | { stopped: false; value: T }> {
+  const stopped = Promise.withResolvers<{ stopped: true }>()
+  const wake = () => stopped.resolve({ stopped: true })
+  const waiters = managedRetirementStopWaiters.get(run.runId) ?? new Set<() => void>()
+  managedRetirementStopWaiters.set(run.runId, waiters)
+  waiters.add(wake)
+  try {
+    // Register before checking: Stop cannot be lost between the check and the await.
+    if (isManagedRunStopRequested(run)) return { stopped: true }
+    const pending = work().then(value => ({ stopped: false as const, value }))
+    // This also observes late rejection. It never releases or replaces the work's owner.
+    return await Promise.race([pending, stopped.promise])
+  } finally {
+    waiters.delete(wake)
+    if (!waiters.size && managedRetirementStopWaiters.get(run.runId) === waiters)
+      managedRetirementStopWaiters.delete(run.runId)
+  }
+}
+
+/** Retires only the generated predecessor owned by this exact managed run, never chat LRU. */
+async function retireManagedPredecessor(run: ManagedRunSnapshot): Promise<void> {
+  const threadId = run.currentSession?.threadId
+  if (!threadId) return
+  const original = getThreadCore(threadId)
+  if (!original) throw Error("MANAGED_SESSION_RETIREMENT_SCOPE_CHANGED")
+  const incarnation = captureThreadIncarnation(original)
+  const retirement = getModsManager()?.captureFunctionThreadRetirement(threadId)
+  const tail = captureManagedAgentRunTail(threadId)
+  const assertOwner = () => {
+    const current = getThreadCore(threadId)
+    if (!current || !matchesThreadIncarnation(current, incarnation))
+      throw Error("MANAGED_SESSION_RETIREMENT_SCOPE_CHANGED")
+    let metadata: Record<string, unknown>
+    try { metadata = JSON.parse(current.metadata ?? "{}") }
+    catch { throw Error("MANAGED_SESSION_RETIREMENT_SCOPE_CHANGED") }
+    const feature = readHarnessFeatureMetadata(metadata)
+    const record = managedRunStore.getRun({ projectId: run.projectId,
+      featureId: run.featureId, runId: run.runId })
+    if (!feature || feature.projectId !== run.projectId || feature.slug !== run.featureId ||
+      feature.runId !== run.runId || !run.decisionBaseline?.nodeId ||
+      feature.nodeId !== run.decisionBaseline.nodeId ||
+      typeof metadata.workspacePath !== "string" ||
+      !isSameWorkspacePath(metadata.workspacePath, run.workspacePath ?? "") ||
+      record.corrupt || record.snapshot?.currentSession?.threadId !== threadId ||
+      record.snapshot.decisionBaseline?.nodeId !== run.decisionBaseline.nodeId)
+      throw Error("MANAGED_SESSION_RETIREMENT_SCOPE_CHANGED")
+    tail?.assertCurrent()
+  }
+  assertOwner()
+  // Restart has no live VMs. A live instance without its original handle is not proof of idle.
+  if (!tail && retirement?.resident) throw Error("MANAGED_SESSION_RETIREMENT_UNCONFIRMED")
+  if ((await awaitManagedRetirement(run, () => tail?.completion ?? Promise.resolve())).stopped)
+    return
+  assertOwner()
+  if (isAgentRunBusy(threadId))
+    throw Error("MANAGED_SESSION_RETIREMENT_UNCONFIRMED")
+  const workflow = await awaitManagedRetirement(run, () =>
+    workflowRunManager.isBusyForThreadAsync(threadId, run.workspacePath))
+  if (workflow.stopped) return
+  if (workflow.value) throw Error("MANAGED_SESSION_RETIREMENT_UNCONFIRMED")
+  assertOwner()
+  if ((await awaitManagedRetirement(run, () => retirement?.retire() ?? Promise.resolve())).stopped)
+    return
+  assertOwner()
+  if (isAgentRunBusy(threadId)) throw Error("MANAGED_SESSION_RETIREMENT_SCOPE_CHANGED")
+  tail?.release()
+}
+
 async function inspectAndLaunch(
   run: ManagedRunSnapshot,
   delivery: AgentRunDelivery,
@@ -640,6 +715,15 @@ async function inspectAndLaunch(
   const decidedRun = decision.run
 
   if (policyResult.proposedAction === "complete_managed_run") {
+    try { await retireManagedPredecessor(decidedRun) }
+    catch (error) {
+      if (isManagedRunStopRequested(decidedRun)) return
+      await markTerminal(decidedRun, "failed",
+        error instanceof Error ? error.message : String(error), "run_failed",
+        decision.event.eventId, "managed_session_retirement_unconfirmed")
+      return
+    }
+    if (isManagedRunStopRequested(decidedRun)) return
     await markTerminal(
       decidedRun,
       "completed",
@@ -714,6 +798,8 @@ async function inspectAndLaunch(
   }
   if (isManagedRunStopRequested(decidedRun)) return
   try {
+    await retireManagedPredecessor(decidedRun)
+    if (isManagedRunStopRequested(decidedRun)) return
     const created = await createAndStartManagedHarnessSession(sessionInput)
     const advancesStage = policyResult.type === "biz_progress"
     const persisted = managedRunStore.updateSnapshot(
@@ -760,6 +846,7 @@ async function inspectAndLaunch(
     })
     publishManagedRunChanged(lastRunSummary(persisted))
   } catch (error) {
+    if (isManagedRunStopRequested(decidedRun)) return
     await markTerminal(
       decidedRun,
       "failed",
@@ -841,6 +928,7 @@ export async function stopManagedRun(input: ManagedRunStopInput): Promise<boolea
     return false
   }
   stopRequestedRunIds.add(input.runId)
+  for (const wake of managedRetirementStopWaiters.get(input.runId) ?? []) wake()
   cancelProviderRetry(input.projectId, input.featureId)
 
   return featureLocks.withKey(featureKey(input.projectId, input.featureId), async () => {

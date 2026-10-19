@@ -109,6 +109,7 @@ async function fixture(observeOwners = false) {
     core,
     owners,
     loadedGuests,
+    sources,
     setEnabled(value: boolean) {
       enabled = value
     },
@@ -143,6 +144,25 @@ it("keeps off source-free and respects disappearance of every source without a c
   f.setEnabled(true)
   f.removeSources()
   await expect(f.call()).resolves.toEqual({ result: 0 })
+})
+
+it("skips non-Mod candidates before stopping discovery without omitting either active guest", async () => {
+  const f = await fixture()
+  f.sources.unshift({ id: "ordinary-skill", name: "ordinary-skill", enabled: true,
+    path: join(f.root, "ordinary-skill-without-function-entry") })
+  const discovery = vi.spyOn(f.manager as unknown as {
+    isSource(source: ModPluginSource): boolean
+  }, "isSource")
+  try {
+    await expect(f.call()).resolves.toEqual({ result: 2 })
+    const inspected = discovery.mock.calls.map(([source]) => source.id)
+    expect(inspected).toContain("ordinary-skill")
+    expect(inspected).toContain("source-0")
+    expect(inspected).not.toContain("source-1")
+    expect(f.reads[0]).toBeGreaterThan(0)
+    expect(f.reads[1]).toBeGreaterThan(0)
+    expect(f.core).toHaveBeenCalledOnce()
+  } finally { discovery.mockRestore() }
 })
 
 it("does not skip later guest grant checks when only the first source is inspected", async () => {

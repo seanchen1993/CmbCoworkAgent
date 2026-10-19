@@ -1,0 +1,5 @@
+{
+  "name": "autobiz-delivery-project",
+  "version": "1.0.0",
+  "description": "在原 AutoBiz 流程完成后，通过其已授权 Mods 动作检查真实资料并生成交付报告。"
+}

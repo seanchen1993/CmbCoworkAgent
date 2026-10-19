@@ -8,6 +8,9 @@ import type { AuthoringDocument } from "../../../shared/mods/authoring"
 import type { AuthoringInstalledReceipt } from "../../../shared/mods/authoring-install"
 import type { DevelopmentScope } from "../v2/development-session"
 import type { ClawProfile } from "../../../shared/mods/claw"
+import { CreatorCompositionSave } from "./creator-composition-save"
+import { CreatorCompositionHistory } from "./creator-composition-history"
+import type { DevelopmentTrialStatus } from "../../../shared/mods/development"
 
 const services: CreatorReuseService[] = []
 afterEach(() => {
@@ -249,6 +252,38 @@ function fixture() {
 }
 
 describe("one-review formal creator reuse", () => {
+  it("completes a named save through the real reuse approval without a second installer", async () => {
+    const f = fixture()
+    const history = new CreatorCompositionHistory(f.deps.settings)
+    let trials: DevelopmentTrialStatus[] = [{ componentId: "trial", draftId: "demo", revision: 1,
+      bundleDigest: f.prepared.sourceDigest, compiledDigest: f.prepared.compiledDigest,
+      phase: "active", capabilities: [] }]
+    f.stopTrial.mockImplementation(async (_scope, _id, guard) => { guard(); trials = [] })
+    const save = new CreatorCompositionSave(history, {
+      trials: () => trials,
+      prepareReuse: async (_threadId, _dependency, input) => {
+        await f.service.request(f.context, f.deps.readDraft(), input)
+        return f.service.status(f.scope)!
+      },
+      reuseFacts: scope => f.service.compositionFacts(scope)
+    })
+    const current = () => f.claws.selection(f.scope.workspace, f.identity).profile
+    const reconcile = () => save.reconcile({ scope: f.scope, identity: f.identity, current,
+      assertCurrent: f.context.assertCurrent, validate: async () => {} })
+    f.deps.changed.mockImplementation(() => { queueMicrotask(() => { void reconcile() }) })
+    expect(await save.start({ scope: f.scope, identity: f.identity, name: "Daily", revision: 0,
+      profile: current(), signal: new AbortController().signal, assertTurn: () => {} }))
+      .toMatchObject({ saved: false, phase: "needs-approval" })
+    expect(history.list(f.scope.workspace)).toEqual([])
+    expect(f.install.apply).not.toHaveBeenCalled()
+    await f.service.approve(f.context, f.approval())
+    await vi.waitFor(() => expect(save.status(f.scope)).toMatchObject({ saved: true }))
+    expect(history.load(f.scope.workspace, "Daily", 1)).toEqual(current())
+    expect(f.install.apply).toHaveBeenCalledTimes(1)
+    expect(f.approveInstalled).toHaveBeenCalledTimes(1)
+    expect(f.applySelection).toHaveBeenCalledTimes(1)
+    save.close()
+  })
   it("prepares without effects and commits only the exact user-approved source and target", async () => {
     const f = fixture()
     await f.request()

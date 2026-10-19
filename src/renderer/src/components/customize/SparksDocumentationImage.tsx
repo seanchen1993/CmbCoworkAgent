@@ -2,12 +2,16 @@ import { useState } from "react"
 import currentAssistantRun from "../../../../../docs/sparks/assets/current-assistant-run.png?url"
 import projectStageRun from "../../../../../docs/sparks/assets/project-stage-run.png?url"
 import projectLibrary from "../../../../../docs/sparks/assets/project-library.png?url"
+import projectCompositionSession from "../../../../../docs/sparks/assets/project-composition-session.png?url"
+import projectCompositionCapabilities from "../../../../../docs/sparks/assets/project-composition-capabilities.png?url"
 
 // Only reviewed, bundled assets can become an image URL. Markdown cannot load remote files.
 const images: Readonly<Record<string, string>> = {
   "assets/current-assistant-run.png": currentAssistantRun,
   "assets/project-stage-run.png": projectStageRun,
-  "assets/project-library.png": projectLibrary
+  "assets/project-library.png": projectLibrary,
+  "assets/project-composition-session.png": projectCompositionSession,
+  "assets/project-composition-capabilities.png": projectCompositionCapabilities
 }
 
 export function SparksDocumentationImage({

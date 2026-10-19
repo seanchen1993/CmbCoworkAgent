@@ -132,7 +132,7 @@ it("finishes unstarted approval through the original cancellation before releasi
   expect(sessions.developmentStatus(scope, "preview")?.activeRuns).toBe(0)
   expect(() => registry.assertProject(first)).toThrow("PROJECT_PREVIEW_EXPIRED")
   const second = await create()
-  expect(second.workspace).toBe(first.workspace)
+  expect(second.workspace).not.toBe(first.workspace)
   const next = service.prepare({
     projectId: second.projectId,
     expectedVersion: 1,

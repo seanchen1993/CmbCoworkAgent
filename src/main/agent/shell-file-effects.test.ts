@@ -114,7 +114,10 @@ describe("shell file effects against real Git repositories", () => {
     expect(change?.after?.toString()).toBe("new model\n")
   })
 
-  it.each(["git restore a.ts", "cp b.ts a.ts"])(
+  it.skipIf(process.platform === "win32" && !process.env.GIT_BASH_PATH).each([
+    "git restore a.ts",
+    "cp b.ts a.ts"
+  ])(
     "retains the preimage of a model peer joining during a C observation: %s",
     async (command) => {
       const root = await repo(),

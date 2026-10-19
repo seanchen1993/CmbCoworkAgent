@@ -34,7 +34,8 @@ export function parseFunctionModelProtocol(value: unknown): FunctionModelProtoco
   if (value === undefined) return "result-v1"
   if (
     !isModObject(value) ||
-    Object.keys(value).length !== 1 ||
+    Object.keys(value).some((key) => !["modelProtocol", "userConfigMigrations"].includes(key)) ||
+    (value.userConfigMigrations !== undefined && value.userConfigMigrations !== "v1") ||
     (value.modelProtocol !== "legacy-v1" && value.modelProtocol !== "result-v1")
   )
     throw new ModFunctionError("MODS_MODEL_PROTOCOL_MANIFEST")

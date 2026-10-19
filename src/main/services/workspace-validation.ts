@@ -1,5 +1,6 @@
-import { realpath, stat } from "node:fs/promises"
 import { isAbsolute } from "node:path"
+import { probeWorkspaceDirectory } from "./workspace-probe-client"
+import { WorkspaceProbeError } from "./workspace-probe-protocol"
 
 export class WorkspaceValidationError extends Error {
   readonly code = "invalid_workspace_path"
@@ -12,29 +13,21 @@ export class WorkspaceValidationError extends Error {
 }
 
 /** Recheck on every run: persisted paths and previously valid directories can go stale. */
-export async function validateWorkspaceDirectory(workspace: unknown): Promise<string> {
+export async function validateWorkspaceDirectory(
+  workspace: unknown,
+  signal?: AbortSignal
+): Promise<string> {
   if (typeof workspace !== "string" || !workspace.trim() || !isAbsolute(workspace)) {
     throw new WorkspaceValidationError(workspace, "路径无效")
   }
-  let timer: ReturnType<typeof setTimeout> | undefined
   try {
-    return await Promise.race([
-      (async () => {
-        const canonical = await realpath(workspace)
-        if (!(await stat(canonical)).isDirectory()) {
-          throw new WorkspaceValidationError(workspace, "不是目录")
-        }
-        return canonical
-      })(),
-      new Promise<never>((_, reject) => {
-        timer = setTimeout(() => reject(new WorkspaceValidationError(workspace, "访问超时")), 3_000)
-        timer.unref?.()
-      })
-    ])
+    return await probeWorkspaceDirectory(workspace, signal)
   } catch (error) {
-    if (error instanceof WorkspaceValidationError) throw error
+    if (signal?.aborted) throw signal.reason ?? error
+    if (error instanceof WorkspaceProbeError && error.reason === "timeout")
+      throw new WorkspaceValidationError(workspace, "访问超时")
+    if (error instanceof WorkspaceProbeError && error.reason === "not-directory")
+      throw new WorkspaceValidationError(workspace, "不是目录")
     throw new WorkspaceValidationError(workspace, "不存在或不可访问")
-  } finally {
-    if (timer) clearTimeout(timer)
   }
 }

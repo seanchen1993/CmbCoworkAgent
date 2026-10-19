@@ -130,10 +130,16 @@
     "files": [
       "out/",
       "node_modules/",
-      "package.json"
+      "package.json",
+      {
+        "from": "out/resources/mods-authoring/typescript",
+        "to": "out/resources/mods-authoring/typescript",
+        "filter": ["**/*"]
+      }
     ],
     "asarUnpack": [
       "out/resources/mods/**",
+      "out/resources/project-composition/**",
       "node_modules/@jitl/**/*.wasm",
       "node_modules/@esbuild/**",
       "node_modules/esbuild/**",

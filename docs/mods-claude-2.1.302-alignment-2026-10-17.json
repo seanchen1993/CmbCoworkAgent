@@ -1,0 +1,96 @@
+{
+  "schemaVersion": 1,
+  "date": "2026-10-17",
+  "status": "reference-audit-complete-implementation-in-progress",
+  "scope": {
+    "branch": "codex/mods-v2",
+    "workspace": "C:/ai/CmbCoworkAgent-mods-v2",
+    "s6": "用户本轮再次明确暂缓，不开发阶段快照与中间阶段重跑。",
+    "objective": "先对照最新 Claude Code 实际构建，补齐既定底座及未完成迭代，功能闭环后由独立性能 agent 测量和优化，再交付试用。",
+    "globalClaudeUpdated": false,
+    "otherBranchesModified": false
+  },
+  "reference": {
+    "registry": "https://registry.npmjs.org/@anthropic-ai/claude-code",
+    "latestAtAcquisition": "2.1.302",
+    "stableAtAcquisition": "2.1.292",
+    "localPreviouslyInstalled": "2.1.295",
+    "packageDirectory": "output/claude-code-2.1.302-alignment-20261017",
+    "mainAndNativeSriVerified": true,
+    "integrityEvidence": "output/claude-code-2.1.302-alignment-20261017/package-integrity.json",
+    "binarySha256": "3ab075f78998efef8b87f491c2e4a39c309dddf44e51d0103eba4f3713d2a0ae",
+    "binaryBytes": 290211488,
+    "nativeVersionCommand": "2.1.302 (Claude Code)",
+    "extractedModules": 2683,
+    "modulesWithBytecode": 2430,
+    "sourceMaps": 0,
+    "manifest": "output/claude-code-2.1.302-alignment-20261017/manifest.json",
+    "declarationsSha256": "8afa71883ecfa52901eb7a04cf31fef700d8ba565eaad244f4884cc620f8d56e",
+    "declarationsBytes": 651852,
+    "extractionBoundary": "只读 PE/Bun 模块表、可读 JavaScript 和压缩资源提取，不声称还原全部原始 TypeScript 源码；未运行提取出的模块。",
+    "executionBoundary": "仅执行完整性校验过的官方原生程序 --version、plugin validate、plugin test；私有配置目录、禁用自动更新和非必要遥测，无远端模型请求。"
+  },
+  "publicReferences": [
+    "https://code.claude.com/docs/en/plugins/mods",
+    "https://code.claude.com/docs/en/plugins/mods/reference",
+    "https://code.claude.com/docs/en/plugins/components",
+    "https://code.claude.com/docs/en/hooks"
+  ],
+  "evidence": {
+    "creatorLifecycle": "output/claude-code-2.1.302-alignment-20261017/creator-readonly-alignment-evidence.json",
+    "configurationAndUpgrade": "output/claude-code-2.1.302-alignment-20261017/user-config-alignment-evidence.json",
+    "hooksAndExecution": "output/claude-code-2.1.302-alignment-20261017/hooks-context-execution-alignment-evidence.json",
+    "declarationsDiff": "output/claude-code-2.1.302-alignment-20261017/declarations-diff.json",
+    "nativeValidation": "output/claude-code-2.1.302-alignment-20261017/contract-probe-validation.log",
+    "nativeTests": "output/claude-code-2.1.302-alignment-20261017/contract-probe-test.log",
+    "initialProbeFailure": "output/claude-code-2.1.302-alignment-20261017/contract-probe-test-initial.log"
+  },
+  "nativeProbes": {
+    "passed": 7,
+    "failed": 0,
+    "checks": [
+      "清单默认配置传入 register",
+      "合法用户配置传入 register",
+      "已移除枚举配置先视为 unset 再填默认值",
+      "next 委托原处理并保留后序变换",
+      "普通 Hook 失败时继续原处理",
+      "显式 catch 在失败时接管，不执行下游",
+      "next 已完成后 catch 复用原结果，不重放副作用"
+    ],
+    "fixtureCorrection": "初轮两个失败由测试底部 Hook 错把第一个参数 $ 当事件、以及未显式提供测试引擎所需 args 造成；保留原日志，修正探针后七项全部通过，未修改官方程序。",
+    "notClaimed": "探针证明该固定版本原引擎的这些契约，不替代本工程产品或完整业务验收。"
+  },
+  "implementationDecisions": [
+    {
+      "area": "事件及扩展",
+      "decision": "复用现有 dispatcher、next、engine.create、Guest 和原 SDK；业务适配不得引入平行 Agent 循环或任意计划执行器。",
+      "distinction": "本工程 platform 能力目录是可选的项目业务适配，不能冒称 Claude Code 同名公共协议。"
+    },
+    {
+      "area": "Hook 与执行事实",
+      "decision": "保留普通 Hook 可接管、可变换与失败回退语义；只有明确声明的项目必需检查才在原宿主边界执行。普通展示结果可重写，业务凭据读取原执行事实。",
+      "distinction": "项目 requiredHooks、产物收据和 Flow 原始事实绑定是工程增强，不把普通 Hook 全部提升为不可短路 Guard。"
+    },
+    {
+      "area": "上下文",
+      "decision": "按实际角色及原请求路径提供上下文，不默认复制父任务全部 prompt；项目必需知识在最终模型边界核对，普通 prompt 仍可按原协议变换。",
+      "distinction": "必需项目知识保护是工程增强，不声称 Claude Code 的所有 prompt.section 都不可删除。"
+    },
+    {
+      "area": "同包组件",
+      "decision": "Skills、Mods、MCP 复用原统一加载链，绑定宿主签发的精确来源快照、原授权和真实清理；不通过修改全局安装表或删除 PINNED 拒绝绕过隔离。",
+      "remaining": "来源限定混合包加载及真实试用已实现并通过普通构建验收；仍需在最终冻结安装包上复验，不计为最终放行。"
+    },
+    {
+      "area": "配置与升级",
+      "decision": "保留既有 userConfig、默认值及枚举语义，敏感值通过原受保护存储。可选声明式 schema 迁移和未知结果核对沿原安装、配置与审批服务完成。",
+      "distinction": "userConfigSchema、CAS 迁移及 UUID/摘要核对属于本工程增强；不引入明文秘密降级，也不将用户参数与组织强制策略混为覆盖层。"
+    },
+    {
+      "area": "开发恢复",
+      "decision": "保持会话目录归属、原生确认、回合边界重载、构建后切换和旧环境退役；普通 Mod 恢复与项目事务恢复分层。",
+      "distinction": "项目 UUID、不可变快照、独立试用工作区和项目恢复重新确认属于工程增强，不向稳定 Mod 普遍添加永久 unknown 或重复安装流程。"
+    }
+  ],
+  "implementationStatus": "配置迁移、未知结果核对、通用上下文和动作校验、来源限定混合包加载及原生提供器接线已有实现和对应回归。当前仍未功能放行：完整 AutoBiz 与数仓产物消费链的真实应用验收、冻结全量回归和最终安装包复验尚未全部通过。进度和失败证据见 output/mods-s2-s5-20261017/foundation-progress.json；S6 明确暂缓，最终独立性能优化阶段尚未开始。"
+}

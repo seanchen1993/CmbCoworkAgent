@@ -177,6 +177,14 @@ export class CreatorReuseService {
     }
     return status
   }
+  /** Exact original transaction facts for completing a separately requested named save. */
+  compositionFacts(scope: DevelopmentScope) {
+    const plan = this.read(scope)
+    const status = this.status(scope)
+    if (!plan?.target || !status) return undefined
+    return { status, before: structuredClone(plan.target.before),
+      profile: structuredClone(plan.target.profile) }
+  }
   private currentStatus(scope: DevelopmentScope): DevelopmentReuseStatus | undefined {
     const plan = this.read(scope)
     if (!plan) return undefined

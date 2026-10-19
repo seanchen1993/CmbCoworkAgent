@@ -3,6 +3,8 @@ import { mkdir, stat, writeFile } from "fs/promises"
 import { join, resolve } from "path"
 import { canonicalizeWorkspacePath } from "../context-history-path"
 import { serializeWorkflowAgentSnapshotMessages } from "./agent-snapshot"
+import { observeWorkflowRun, type WorkflowRunObservation } from "./observation"
+import { emitWorkflowObservationChange } from "./observation-events"
 import { runWorkflowEngine, toJsonSafe } from "./engine"
 import { isPathInside } from "./paths"
 import {
@@ -41,6 +43,10 @@ import {
 } from "../../services/git-worktree"
 import { emitAppAttention } from "../../app-attention-events"
 import type { AgentProfile } from "../agent-registry"
+import {
+  captureRuntimePluginSourceToken,
+  type RuntimePluginSourceToken
+} from "../../plugins/runtime-source-scope"
 
 /**
  * Background workflow run manager — the Claude Code execution model: the
@@ -95,6 +101,10 @@ export interface WorkflowLaunchResult {
 }
 
 interface ActiveWorkflowRun {
+  readonly sourceToken: RuntimePluginSourceToken | undefined
+  readonly sourceSettlementFailure: () => Error | undefined
+  readonly sourceFinalizers: Set<() => Promise<void>>
+  observe(page?: Parameters<typeof observeWorkflowRun>[1]): WorkflowRunObservation
   threadId: string
   workspacePath: string
   /** Canonical identity prepared asynchronously before production launch. */
@@ -108,6 +118,10 @@ interface ActiveWorkflowRun {
    * settles or is cancelled; kept deliverables survive both. */
   worktrees: WorkflowWorktreeLedger
 }
+
+export type OwnedRuntimeWorkflowSettlement =
+  | { deferred: true }
+  | { deferred: false; failure?: Error }
 
 /** Renderer-facing envelope on the durable channel. */
 export interface WorkflowChannelPayload {
@@ -143,6 +157,8 @@ export function onWorkflowNotificationBroadcast(
 }
 
 function broadcast(threadId: string, payload: WorkflowChannelPayload): void {
+  const observedRunId = payload.workflowEvent?.runId ?? payload.runId
+  if (observedRunId) emitWorkflowObservationChange(threadId, observedRunId)
   // Main-process listeners first: they are what acts on a completed run now, so
   // they must not be skipped by anything that goes wrong on the way to a window.
   if (payload.type === "workflow_notification") {
@@ -501,6 +517,8 @@ function workspaceKey(p: string): string {
 
 class WorkflowRunManager {
   private readonly active = new Map<string, ActiveWorkflowRun>()
+  /** One bounded failure fact from the original physical owner, never a second run state. */
+  private readonly retiredSourceFailures = new WeakMap<RuntimePluginSourceToken, Error>()
   private readonly threadTransitionTails = new Map<string, Promise<void>>()
   private readonly pendingThreadTransitions = new Map<string, number>()
   private readonly workspaceIntegrationLeases = new Map<
@@ -535,6 +553,7 @@ class WorkflowRunManager {
    * point the disk is still stale (disk full) and there's nothing better to report.
    */
   private readonly flushFailedRuns = new Map<string, PersistedWorkflowRun>()
+  private readonly flushFailedWorkspaceKeys = new Map<string, string>()
   private readonly flushFailedJournalSources = new Map<
     string,
     WorkflowFlushFailureSnapshot["journalSource"]
@@ -552,6 +571,7 @@ class WorkflowRunManager {
 
   private dropFlushFailedRun(runId: string): void {
     this.flushFailedRuns.delete(runId)
+    this.flushFailedWorkspaceKeys.delete(runId)
     this.flushFailedJournalSources.delete(runId)
     this.flushFailedReservedBytes.delete(runId)
     this.flushFailedEpochs.delete(runId)
@@ -601,10 +621,11 @@ class WorkflowRunManager {
   }
 
   private captureFlushFailedRun(
-    request: Pick<WorkflowLaunchRequest, "runId" | "threadId">,
+    request: Pick<WorkflowLaunchRequest, "runId" | "threadId" | "workspacePath">,
     snapshot: WorkflowFlushFailureSnapshot
   ): void {
     this.flushFailedRuns.set(request.runId, snapshot.run)
+    this.flushFailedWorkspaceKeys.set(request.runId, workspaceKey(request.workspacePath))
     this.flushFailedJournalSources.set(request.runId, snapshot.journalSource)
     this.flushFailedReservedBytes.set(request.runId, snapshot.reservedBytes)
     this.flushFailedEpochs.set(request.runId, workflowThreadDisposalEpoch(request.threadId))
@@ -661,12 +682,61 @@ class WorkflowRunManager {
     return this.active.get(threadId)?.runId
   }
 
+  /** Only the requested thread's exact workspace may read the original live store. */
+  async observeActiveRun(workspacePath: string, threadId: string,
+    page?: Parameters<typeof observeWorkflowRun>[1]) {
+    const expected = await prepareWorkspaceKey(workspacePath)
+    const entry = this.active.get(threadId)
+    if (!entry) return null
+    if (entry.workspaceKey !== expected) throw new Error("WORKFLOW_OBSERVATION_SCOPE_CHANGED")
+    return entry.observe(page)
+  }
+
+  /** Reuse terminal persistence fallbacks only in their original workspace and thread. */
+  async observationFallbacks(workspacePath: string, threadId: string) {
+    const expected = await prepareWorkspaceKey(workspacePath)
+    return this.listFlushFailedRuns(threadId).filter(run =>
+      this.flushFailedWorkspaceKeys.get(run.runId) === expected
+    )
+  }
+
   /** A renderer can observe the engine's terminal event while manager-owned
    * worktree reclaim/final persistence is still finishing. Let a matching UI
    * action wait for that short lifecycle tail instead of failing as "active". */
   async waitForRunLifecycle(threadId: string, runId: string): Promise<void> {
     const entry = this.active.get(threadId)
     if (entry?.runId === runId) await entry.settled
+  }
+
+  /** Transfer only this admission's resources to its already-running physical children.
+   * The foreground turn returns immediately; a later notification is a different owner.
+   */
+  deferOwnedRuntimeWorkflowSettlement(
+    token: RuntimePluginSourceToken,
+    finalize: (failure?: unknown) => Promise<void>
+  ): OwnedRuntimeWorkflowSettlement {
+    const entries = [...this.active.values()].filter(entry => entry.sourceToken === token)
+    if (!entries.length) return { deferred: false, failure: this.retiredSourceFailures.get(token) }
+    const pending = new Set(entries)
+    let resolve!: () => void
+    let reject!: (error: unknown) => void
+    const finalization = new Promise<void>((done, failed) => { resolve = done; reject = failed })
+    // Each existing physical owner reaches this only after its original cleanup.
+    // No callback waits on entry.settled (which includes this callback).
+    for (const entry of entries) entry.sourceFinalizers.add(async () => {
+      const failure = entry.sourceSettlementFailure()
+      if (failure && !this.retiredSourceFailures.has(token)) this.retiredSourceFailures.set(token, failure)
+      pending.delete(entry)
+      if (!pending.size) {
+        const failure = this.retiredSourceFailures.get(token)
+        void Promise.resolve().then(() => finalize(failure
+          ? new AggregateError([failure], "WORKFLOW_CLEANUP_UNCONFIRMED") : undefined))
+          .then(resolve, reject)
+      }
+      await finalization
+    })
+    void finalization.catch(() => console.error("[Workflow] Owned source cleanup unconfirmed"))
+    return { deferred: true }
   }
 
   broadcastWorktreeRecord(threadId: string, runId: string, record: WorkflowWorktreeRecord): void {
@@ -1134,7 +1204,19 @@ class WorkflowRunManager {
     let launchInitializationFailed = false
 
     const controller = new AbortController()
+    let physicalCleanupFailure: unknown
     const entry: ActiveWorkflowRun = {
+      sourceToken: captureRuntimePluginSourceToken(),
+      sourceFinalizers: new Set(),
+      sourceSettlementFailure: () => {
+        if (physicalCleanupFailure) return Error("WORKFLOW_PHYSICAL_CLEANUP_UNCONFIRMED")
+        const state = runStore.state
+        if (state.status !== "completed" || state.stats.agentsFailed > 0 ||
+            state.worktrees?.some(tree => tree.cleanupPending))
+          return Error("WORKFLOW_SOURCE_OWNER_NOT_SUCCEEDED")
+        return undefined
+      },
+      observe: (page) => observeWorkflowRun(runStore.state, page),
       threadId: request.threadId,
       workspacePath: request.workspacePath,
       workspaceKey: workspaceKey(request.workspacePath),
@@ -1179,6 +1261,27 @@ class WorkflowRunManager {
     }
     this.notificationOwners.set(request.runId, request.notificationOwner ?? "desktop")
     this.active.set(request.threadId, entry)
+    const retireSourceOwner = async () => {
+      const failure = entry.sourceSettlementFailure()
+      if (entry.sourceToken && failure && !this.retiredSourceFailures.has(entry.sourceToken))
+        this.retiredSourceFailures.set(entry.sourceToken, failure)
+      try {
+        while (entry.sourceFinalizers.size) {
+          const callbacks = [...entry.sourceFinalizers]
+          entry.sourceFinalizers.clear()
+          const results = await Promise.allSettled(callbacks.map(callback => callback()))
+          const failures = results.flatMap(result => result.status === "rejected" ? [result.reason] : [])
+          if (failures.length) {
+            if (entry.sourceToken && !this.retiredSourceFailures.has(entry.sourceToken))
+              this.retiredSourceFailures.set(entry.sourceToken, Error("WORKFLOW_SOURCE_CLEANUP_UNCONFIRMED"))
+            throw new AggregateError(failures, "WORKFLOW_SOURCE_CLEANUP_UNCONFIRMED")
+          }
+        }
+      } finally {
+        this.active.delete(request.threadId)
+        emitWorkflowObservationChange(request.threadId, request.runId)
+      }
+    }
     entry.settled = (async () => {
       try {
         try {
@@ -1290,7 +1393,7 @@ class WorkflowRunManager {
               )
             }
             const worktree = await entry.worktrees.acquire(
-              `a${subRequest.agentIndex}-${subRequest.label}`
+              `a${subRequest.agentIndex}-${subRequest.label}`, subRequest.agentIndex
             )
             try {
               const worktreeIsolation = await resolveWorkflowWorktreeIsolationBoundary(worktree)
@@ -1338,76 +1441,83 @@ class WorkflowRunManager {
         })
         await runStore.flush()
       } finally {
-        // Reclaim any worktree the run still owns. In the normal case every
-        // isolated agent already settled its own (kept or removed) and this is a
-        // no-op; it matters when the run was aborted mid-flight, when an agent
-        // died in a way that skipped its settle, or when acquire raced the cancel.
-        // Kept deliverables are untouched. Awaited (with the ledger's per-worktree
-        // timeout) so a completed run never reports finished while checkouts it
-        // created are still on disk.
-        await entry.worktrees.reclaimAll()
-        // Final persist. If it fails (disk full / permissions) the in-memory run is
-        // complete but disk is stale, so the notification (read from disk) and a
-        // later resume/reload could be incomplete. Retry once for a transient fault;
-        // log loudly either way. We still broadcast below so the user isn't left
-        // hanging — the live panel is correct from the event stream.
-        const finalPersisted = (await runStore.flush()) || (await runStore.flush())
-        if (!finalPersisted) {
-          console.error(
-            `[Workflow] Run ${request.runId} completed but its final state could NOT be persisted (disk full / permissions?) — keeping an in-memory snapshot so its notification still reports the real result.`
-          )
-        }
-        // Publish the terminal fallback BEFORE removing the active lifecycle
-        // entry. Readers either wait on the active run or see this snapshot;
-        // there must be no gap where only a stale running run.json is visible.
-        if (!entry.userCancelled && !finalPersisted) {
-          this.captureFlushFailedRun(request, runStore.captureFlushFailureSnapshot())
-        }
-        // Keep the run active until its last live-store writer, manifest
-        // finalization, and async history prune have settled. Besides preventing
-        // UI integration from racing the final flush, this closes the new async
-        // prune window: a resume that reuses this runId cannot launch while old
-        // artifacts are still being selected/deleted.
         try {
-          let protectedRunIds: string[] | undefined
-          let pruneAllowed = true
-          const repository = await identifyRepository(request.workspacePath)
-          if (repository) {
-            const manifestState = await listWorkflowWorktreeRecordsForPrune(repository.commonDir)
-            if (!manifestState.reliable) {
-              pruneAllowed = false
-            } else {
-              protectedRunIds = manifestState.records.map((record) => record.runId)
+          // Reclaim any worktree the run still owns. In the normal case every
+          // isolated agent already settled its own (kept or removed) and this is a
+          // no-op; it matters when the run was aborted mid-flight, when an agent
+          // died in a way that skipped its settle, or when acquire raced the cancel.
+          // Kept deliverables are untouched. Awaited (with the ledger's per-worktree
+          // timeout) so a completed run never reports finished while checkouts it
+          // created are still on disk.
+          await entry.worktrees.reclaimAll()
+          // Final persist. If it fails (disk full / permissions) the in-memory run is
+          // complete but disk is stale, so the notification (read from disk) and a
+          // later resume/reload could be incomplete. Retry once for a transient fault;
+          // log loudly either way. We still broadcast below so the user isn't left
+          // hanging — the live panel is correct from the event stream.
+          const finalPersisted = (await runStore.flush()) || (await runStore.flush())
+          if (!finalPersisted) {
+            physicalCleanupFailure = Error("WORKFLOW_FINAL_PERSIST_UNCONFIRMED")
+            console.error(
+              `[Workflow] Run ${request.runId} completed but its final state could NOT be persisted (disk full / permissions?) — keeping an in-memory snapshot so its notification still reports the real result.`
+            )
+          }
+          // Publish the terminal fallback BEFORE removing the active lifecycle
+          // entry. Readers either wait on the active run or see this snapshot;
+          // there must be no gap where only a stale running run.json is visible.
+          if (!entry.userCancelled && !finalPersisted) {
+            this.captureFlushFailedRun(request, runStore.captureFlushFailureSnapshot())
+          }
+          // Keep the run active until its last live-store writer, manifest
+          // finalization, and async history prune have settled. Besides preventing
+          // UI integration from racing the final flush, this closes the new async
+          // prune window: a resume that reuses this runId cannot launch while old
+          // artifacts are still being selected/deleted.
+          {
+            let protectedRunIds: string[] | undefined
+            let pruneAllowed = true
+            const repository = await identifyRepository(request.workspacePath)
+            if (repository) {
+              const manifestState = await listWorkflowWorktreeRecordsForPrune(repository.commonDir)
+              if (!manifestState.reliable) {
+                pruneAllowed = false
+              } else {
+                protectedRunIds = manifestState.records.map((record) => record.runId)
+              }
+            }
+            if (pruneAllowed) {
+              await pruneWorkflowRuns(request.workspacePath, request.threadId, 30, protectedRunIds)
             }
           }
-          if (pruneAllowed) {
-            await pruneWorkflowRuns(request.workspacePath, request.threadId, 30, protectedRunIds)
+          await retireSourceOwner()
+          // A user-initiated cancel needs no model turn — the user was present.
+          if (!entry.userCancelled && !launchInitializationFailed) {
+            // Never evict an undelivered or resume-capable result here. Capturing
+            // the first failed terminal persist opens the launch circuit breaker,
+            // so persistent disk failure cannot keep growing the backlog.
+            emitAppAttention({
+              kind: runStore.state.status === "completed" ? "task-complete" : "task-error",
+              threadId: request.threadId,
+              key: `workflow:${request.runId}`
+            })
+            broadcast(request.threadId, {
+              type: "workflow_notification",
+              runId: request.runId,
+              notificationOwner: runStore.state.notificationOwner ?? "desktop"
+            })
+          } else if (entry.userCancelled) {
+            // Mark the cancelled run delivered too: otherwise a later hydrate's
+            // findUndeliveredTerminalRun would resurface this aborted run as a
+            // pending notification and fire a model turn the user never asked for
+            // (engine finalize("aborted") leaves delivered=false). markNotified
+            // swallows IO errors, so it's safe in finally.
+            await markWorkflowRunNotified(request.workspacePath, request.threadId, request.runId)
           }
-        } finally {
-          this.active.delete(request.threadId)
-        }
-        // A user-initiated cancel needs no model turn — the user was present.
-        if (!entry.userCancelled && !launchInitializationFailed) {
-          // Never evict an undelivered or resume-capable result here. Capturing
-          // the first failed terminal persist opens the launch circuit breaker,
-          // so persistent disk failure cannot keep growing the backlog.
-          emitAppAttention({
-            kind: runStore.state.status === "completed" ? "task-complete" : "task-error",
-            threadId: request.threadId,
-            key: `workflow:${request.runId}`
-          })
-          broadcast(request.threadId, {
-            type: "workflow_notification",
-            runId: request.runId,
-            notificationOwner: runStore.state.notificationOwner ?? "desktop"
-          })
-        } else if (entry.userCancelled) {
-          // Mark the cancelled run delivered too: otherwise a later hydrate's
-          // findUndeliveredTerminalRun would resurface this aborted run as a
-          // pending notification and fire a model turn the user never asked for
-          // (engine finalize("aborted") leaves delivered=false). markNotified
-          // swallows IO errors, so it's safe in finally.
-          await markWorkflowRunNotified(request.workspacePath, request.threadId, request.runId)
+        } catch (error) {
+          physicalCleanupFailure = error
+          // Early reclaim/flush faults must not strand an admitted source owner.
+          if (this.active.get(request.threadId) === entry) await retireSourceOwner()
+          await Promise.reject(error)
         }
       }
     })()
@@ -1881,6 +1991,13 @@ class WorkflowRunManager {
 }
 
 export const workflowRunManager = new WorkflowRunManager()
+
+export function deferOwnedRuntimeWorkflowSettlement(
+  token: RuntimePluginSourceToken,
+  finalize: (failure?: unknown) => Promise<void>
+): OwnedRuntimeWorkflowSettlement {
+  return workflowRunManager.deferOwnedRuntimeWorkflowSettlement(token, finalize)
+}
 
 async function persistScriptFile(dir: string, path: string, script: string): Promise<void> {
   try {

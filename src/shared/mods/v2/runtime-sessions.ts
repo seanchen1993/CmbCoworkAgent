@@ -9,7 +9,7 @@ export interface FunctionRuntimeSession {
   /** Drawing owners only; zero does not imply the guest VM can be discarded. */
   mountedSites?: number
   /** Read-only native counters for this resident combination, never inferred from author status. */
-  diagnostics?: import("../development").DevelopmentRuntimeDiagnostics & {
+  diagnostics?: import("./platform-capabilities").PlatformCapabilityDiagnostics & {
     backgroundResources: number
   }
   /** Added by the trusted IPC boundary; no authority is inferred from renderer values. */

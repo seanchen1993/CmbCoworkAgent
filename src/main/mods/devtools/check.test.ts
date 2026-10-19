@@ -74,3 +74,24 @@ it("keeps known supported examples strict-compatible", async () => {
   expect(report.sdkCompatibility.diagnostics).toEqual([])
   expect(functionCheckExitCode(report, true)).toBe(0)
 })
+
+it.each([
+  "examples/sparks-task-workbench/provider",
+  "examples/sparks-task-workbench/consumer",
+  "examples/sparks-task-workbench/behavior-prefix",
+  "examples/sparks-task-workbench/behavior-compact",
+  "examples/sparks-edit-reminder"
+])(
+  "recognizes actual capability registrations in %s without authorizing execution",
+  async (path) => {
+    const report = await checkFunctionPlugin(resolve(path))
+    expect(report.valid).toBe(true)
+    expect(report.authorized).toBe(false)
+    expect(report.compatibility).toMatchObject({ strictCompatible: true, diagnostics: [] })
+    expect(report.registrations.some((entry) => entry.pattern === "platform.action")).toBe(true)
+    expect(report.sdkCompatibility.runtimeVerified).toBe(false)
+    expect(
+      report.sdkCompatibility.diagnostics.some((entry) => entry.code === "MODS_SDK_UNSUPPORTED")
+    ).toBe(false)
+  }
+)

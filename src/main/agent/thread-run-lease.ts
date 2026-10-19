@@ -35,6 +35,16 @@ export interface ClaimLocalThreadRunLeaseInput {
 const activeLeases = new Map<string, LocalThreadRunLease>()
 const capturedLeaseGet = Map.prototype.get
 const releaseListeners = new Set<LocalThreadRunLeaseReleasedListener>()
+let admissionGuard: (<T>(threadId: string, work: () => T) => T) | undefined
+
+/** Main-only composition fence. Existing ownership and releases keep their original semantics. */
+export function registerLocalThreadRunAdmissionGuard(
+  guard: <T>(threadId: string, work: () => T) => T
+): () => void {
+  if (admissionGuard) throw Error("THREAD_RUN_ADMISSION_GUARD_REGISTERED")
+  admissionGuard = guard
+  return () => { if (admissionGuard === guard) admissionGuard = undefined }
+}
 
 function requireIdentifier(value: string, label: string): string {
   const normalized = value.trim()
@@ -113,12 +123,15 @@ export function claimLocalThreadRunLease(
     runId,
     acquiredAt: input.acquiredAt ?? new Date().toISOString()
   }
-  activeLeases.set(threadId, lease)
-  return {
-    acquired: true,
-    lease: copyLease(lease),
-    disposition: current ? "handoff" : "new"
+  const commit = (): LocalThreadRunLeaseClaim => {
+    activeLeases.set(threadId, lease)
+    return {
+      acquired: true,
+      lease: copyLease(lease),
+      disposition: current ? "handoff" : "new"
+    }
   }
+  return admissionGuard ? admissionGuard(threadId, commit) : commit()
 }
 
 export function releaseLocalThreadRunLease(

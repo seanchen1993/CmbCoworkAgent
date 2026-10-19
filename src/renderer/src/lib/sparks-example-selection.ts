@@ -1,6 +1,7 @@
 import type { ClawCapability, ClawProfile, ClawView } from "../../../shared/mods/claw"
+import { hasUsableClawComponents, newClawCapability } from "./claw-capability-usage"
 
-type View = Pick<ClawView, "active" | "capabilities">
+type View = Pick<ClawView, "active" | "capabilities" | "usageContext">
 type Identity = Pick<ClawProfile, "id" | "name">
 
 /** Snapshot the current selection; callers own consent, freshness and all writes. */
@@ -11,8 +12,13 @@ export function sparksExampleBaseline(view: View, identity: Identity): ClawProfi
     capabilities: structuredClone(
       view.active?.capabilities ??
         view.capabilities
-          .filter((item) => item.state === "ready" && item.digest)
-          .map((item) => ({ pluginId: item.pluginId, name: item.name, digest: item.digest! }))
+          .filter(
+            (item) =>
+              item.state === "ready" &&
+              item.digest &&
+              hasUsableClawComponents(item, view.usageContext ?? "chat")
+          )
+          .map((item) => newClawCapability(item, view.usageContext ?? "chat"))
     )
   }
   if (profile.capabilities.length > 8)

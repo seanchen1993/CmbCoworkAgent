@@ -1,0 +1,23 @@
+{
+  "name": "verified-artifact-consumer",
+  "version": "1.0.0",
+  "description": "通过原生动作接收交付文件，校验内容哈希并生成确定性摘要；不替代生产者业务校验。",
+  "mods": "mods/manifest.json",
+  "skills": "skills",
+  "claw": {
+    "actions": [{
+      "id": "inspect",
+      "name": "核对并消费已校验产物",
+      "platform": { "id": "verified-artifacts", "version": "1.0.0", "action": "inspect" },
+      "inputSchema": {
+        "type": "object", "required": ["content", "requiredIds"], "additionalProperties": false,
+        "properties": {
+          "content": { "type": "string", "maxLength": 262144 },
+          "requiredIds": { "type": "array", "minItems": 1, "maxItems": 64,
+            "items": { "type": "string", "maxLength": 80 } }
+        }
+      },
+      "outputSchema": { "type": "object", "required": ["bundleDigest", "producer", "artifacts"], "additionalProperties": true }
+    }]
+  }
+}

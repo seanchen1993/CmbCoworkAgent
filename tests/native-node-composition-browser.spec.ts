@@ -27,21 +27,22 @@ async function main() {
         import React from 'react'; import {createRoot} from 'react-dom/client';
         import {NativeNodeComposer} from './src/renderer/src/components/customize/NativeNodeComposer';
         import {useNativeNodeIntent,dismissNativeNodePlan} from './src/renderer/src/lib/node-composition-intent';
+        import {useDerivedProjectIntent,dismissDerivedProject} from './src/renderer/src/lib/derived-project-intent';
         window.calls=[];
-        const project={projectId:'project',name:'我的 AutoBiz',rootPath:'C:/fixture'};
+        const project={projectId:'project',name:'我的 AutoBiz',rootPath:'C:/fixture',harnessAdapter:{type:'plugin',id:'autobiz'}};
         const nodes=[{id:'init',label:'准备',description:'读取需求',inputs:[],outputs:['requirements.md']},
           {id:'build',label:'开发',description:'完成实现',inputs:['requirements.md'],outputs:['changes']},
           {id:'review',label:'检查',description:'验证结果',inputs:['changes'],outputs:['report']}].map(n=>({...n,optionalInputs:n.id==='review'?['DETAIL_DESIGN.md']:[]}));
         const config={nodes:nodes.map(n=>({id:n.id,label:n.label,description:n.description})),templates:[{id:'custom',templateType:'custom',requiredNodes:['init'],nodes:[],name:'自选'}]};
         const catalog={project,config,nodes};
         window.api={nodeComposition:{
-          projects:async(scope)=>{window.calls.push(['projects',scope]);return [project,{...project,projectId:'unsupported',name:'不支持的项目'}]},
-          catalog:async(input)=>{window.calls.push(['catalog',input]);if(input.projectId==='unsupported')throw Error('这个插件未提供自选节点');return catalog},
+          projects:async(scope)=>{window.calls.push(['projects',scope]);return [project,{...project,projectId:'unsupported',name:'不可读的项目'},{...project,projectId:'fixed',name:'固定模板项目'}]},
+          catalog:async(input)=>{window.calls.push(['catalog',input]);if(input.projectId==='unsupported')throw Error('目录读取失败');if(input.projectId==='fixed')return{...catalog,project:{...project,projectId:'fixed'},config:{...config,templates:[{id:'docs',label:'文档交付',templateType:'standard',nodes:['init','review'],requiredNodes:['init','review']},{id:'full',label:'完整开发',templateType:'classical',nodes:['init','build','review'],requiredNodes:[]}]}};return catalog},
           preview:async(input)=>{window.calls.push(['preview',input]);if(window.fail)throw Error('必需资料缺失');
-            const plan={...catalog,planId:'plan',templateId:'custom',selected:input.selected,added:['build'],ordered:['init','build','review'],optionalOmissions:[{nodeId:'review',path:'DETAIL_DESIGN.md'}],expiresAt:Date.now()+100000};
+            const plan={...catalog,planId:'plan',templateId:'custom',selected:input.selected,includeOptionalDependencies:input.includeOptionalDependencies,added:input.includeOptionalDependencies?['build']:[],ordered:input.includeOptionalDependencies?['init','build','review']:['init','review'],optionalOmissions:[{nodeId:'review',path:'DETAIL_DESIGN.md'}],expiresAt:Date.now()+100000};
             if(window.defer)return new Promise(resolve=>window.finish=()=>resolve(plan));return plan;},
           create:async()=>{throw Error('Preview must never create a feature')}}};
-        function Intent(){const value=useNativeNodeIntent();return value?<div aria-label='收到节点交接'><pre>{JSON.stringify(value)}</pre><button onClick={()=>dismissNativeNodePlan(value.id)}>接收交接</button></div>:null}
+        function Intent(){const value=useNativeNodeIntent();const existing=useDerivedProjectIntent();return <>{value?<div aria-label='收到节点交接'><pre>{JSON.stringify(value)}</pre><button onClick={()=>dismissNativeNodePlan(value.id)}>接收交接</button></div>:null}{existing?<div aria-label='收到项目定位'><pre>{JSON.stringify(existing)}</pre><button onClick={()=>dismissDerivedProject(existing.id)}>接收项目定位</button></div>:null}</>}
         const root=createRoot(document.getElementById('root'));
         window.renderScope=(threadId='thread',workspace='C:/fixture',initial=false)=>root.render(<><NativeNodeComposer key={threadId+initial} threadId={threadId} workspace={workspace} initialOpen={initial} initialProjectId={initial?'project':undefined}/><Intent/></>);
         window.renderScope();
@@ -113,9 +114,9 @@ async function main() {
     await page.evaluate(() => {
       ;(window as unknown as FixtureWindow).renderScope()
     })
-    await page.getByRole("button", { name: "选择项目步骤", exact: true }).click()
+    await page.getByRole("button", { name: "查看项目流程", exact: true }).click()
     await page.getByLabel("选择节点所属项目").selectOption("unsupported")
-    await page.getByRole("alert").filter({ hasText: "未提供自选节点" }).waitFor()
+    await page.getByRole("alert").filter({ hasText: "目录读取失败" }).waitFor()
     await page.getByLabel("选择节点所属项目").selectOption("project")
     assert(await page.getByRole("checkbox", { name: /准备/ }).isDisabled())
     await page.getByRole("checkbox", { name: /检查/ }).check()
@@ -134,6 +135,20 @@ async function main() {
     await preview.waitFor()
     assert((await preview.innerText()).includes("开发（为保留输入和检查自动补齐）"))
     assert((await preview.innerText()).includes("DETAIL_DESIGN.md"))
+    const optionalUpstream = page.getByRole("checkbox", { name: /自动加入可选输入的上游步骤/ })
+    assert(await optionalUpstream.isChecked())
+    await optionalUpstream.uncheck()
+    assert.equal(await preview.count(), 0)
+    await page.getByRole("button", { name: "检查并预览步骤", exact: true }).click()
+    await preview.waitFor()
+    assert(!(await preview.innerText()).includes("开发（为保留输入和检查自动补齐）"))
+    assert((await preview.innerText()).includes("DETAIL_DESIGN.md"))
+    const subsetRequest = await page.evaluate(() => (window as unknown as FixtureWindow).calls
+      .findLast(([kind]) => kind === "preview")?.[1])
+    assert.equal((subsetRequest as { includeOptionalDependencies: boolean }).includeOptionalDependencies, false)
+    await optionalUpstream.check()
+    await page.getByRole("button", { name: "检查并预览步骤", exact: true }).click()
+    await preview.waitFor()
     assert.equal(
       await page.evaluate(() => document.documentElement.scrollWidth > innerWidth),
       false
@@ -181,7 +196,7 @@ async function main() {
       ;(window as unknown as FixtureWindow).finish()
       ;(window as unknown as FixtureWindow).defer = false
     })
-    await page.getByRole("button", { name: "选择项目步骤", exact: true }).click()
+    await page.getByRole("button", { name: "查看项目流程", exact: true }).click()
     assert.equal(await preview.count(), 0)
     await page.evaluate(() =>
       (window as unknown as FixtureWindow).renderScope("other", "C:/other", true)
@@ -198,6 +213,23 @@ async function main() {
       calls.find(([kind]) => kind === "board"),
       ["board", true]
     )
+    await page.getByLabel("选择节点所属项目").selectOption("fixed")
+    await page.getByLabel("项目流程模板").waitFor()
+    assert.equal(await page.getByRole("alert").count(), 0)
+    assert.equal(await page.getByRole("checkbox").count(), 0)
+    assert.equal(await page.getByRole("button", { name: "检查并预览步骤", exact: true }).count(), 0)
+    assert.equal(await page.getByText("开发", { exact: true }).count(), 0)
+    await page.getByLabel("项目流程模板").selectOption("full")
+    await page.getByText("开发", { exact: true }).waitFor()
+    await page.screenshot({ path: resolve(output, "fixed-template-mobile.png"), fullPage: true })
+    const previewCalls = await page.evaluate(() => (window as unknown as FixtureWindow).calls.filter(([kind]) => kind === "preview").length)
+    await page.evaluate(() => { (window as unknown as FixtureWindow).selectedThread = "other" })
+    await page.getByRole("button", { name: "在原项目中使用", exact: true }).click()
+    const located = JSON.parse(await page.getByLabel("收到项目定位").locator("pre").innerText())
+    assert.equal(located.projectId, "fixed")
+    assert.equal(located.pluginId, "autobiz")
+    assert.deepEqual(located.scope, { threadId: "other", expectedWorkspace: "C:/other" })
+    assert.equal(await page.evaluate(() => (window as unknown as FixtureWindow).calls.filter(([kind]) => kind === "preview").length), previewCalls)
     assert.deepEqual(errors, [])
     writeFileSync(
       resolve(output, "evidence.json"),

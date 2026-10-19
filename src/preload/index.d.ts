@@ -109,8 +109,7 @@ import type {
   HarnessPipelineQueryInput,
   HarnessPipelineQueryResult,
   HarnessProjectCreateInput,
-  HarnessProjectConstraintSyncResult,
-  HarnessKnowledgePreviewResult,
+  HarnessKnowledgeApi,
   HarnessProjectReviewInput,
   HarnessProjectReviewResult,
   HarnessFeatureCreateInput,
@@ -1021,7 +1020,9 @@ interface DashboardPluginAggregate {
 }
 
 interface CustomAPI {
+  projectComposition: import("../shared/project-runtime/composition-api").ProjectCompositionApi
   pluginDerivation: import("../shared/plugin-derivation").PluginDerivationApi
+  businessModAssembly: import("../shared/business-mod-assembly-api").BusinessModAssemblyApi
   nodeComposition: import("../shared/node-composition").NodeCompositionApi
   uiGuides: {
     getState(config: UiGuideConfig): Promise<UiGuideState>
@@ -1029,7 +1030,13 @@ interface CustomAPI {
     acknowledge(config: UiGuideConfig): Promise<void>
   }
   // Presentation receipts are native renderer-only and cannot be called through the Mods SDK.
-  mods: {
+  mods: import("../shared/mods/v2/platform-ui-api").PlatformUiApi & {
+    onPlatformChanged: (callback: (event: { threadId: string }) => void) => () => void
+    runtimeSessions: import("../shared/mods/v2/runtime-sessions").FunctionRuntimeSessionsApi["runtimeSessions"]
+    previewSnapshotMaintenance: import("../shared/project-runtime/snapshot-maintenance").SnapshotMaintenanceApi["previewSnapshotMaintenance"]
+    collectSnapshotGarbage: import("../shared/project-runtime/snapshot-maintenance").SnapshotMaintenanceApi["collectSnapshotGarbage"]
+    releaseRuntimeSession: import("../shared/mods/v2/runtime-sessions").FunctionRuntimeSessionsApi["releaseRuntimeSession"]
+    resumeRuntimeSession: import("../shared/mods/v2/runtime-sessions").FunctionRuntimeSessionsApi["resumeRuntimeSession"]
     development: import("../shared/mods/development").DevelopmentApi
     skillEvaluation: import("../shared/mods/skill-evaluation").SkillEvaluationApi
     evaluation: import("../shared/mods/evaluation-api").EvaluationApi
@@ -3080,8 +3087,8 @@ interface CustomAPI {
       mappings: HarnessDeployUnitConfig[]
     ) => Promise<HarnessDeployUnitConfig[]>
     saveLeanTokenConfig: (input: HarnessLeanTokenConfig) => Promise<HarnessLeanTokenConfig>
-    syncProjectConstraints: (adapterId: string) => Promise<HarnessProjectConstraintSyncResult>
-    getKnowledgePreview: (adapterId: string) => Promise<HarnessKnowledgePreviewResult>
+    syncProjectConstraints: HarnessKnowledgeApi["syncProjectConstraints"]
+    getKnowledgePreview: HarnessKnowledgeApi["getKnowledgePreview"]
     cancelKnowledgePreviewRequests: () => Promise<void>
     createProject: (input: HarnessProjectCreateInput) => Promise<HarnessProjectMetadata>
     searchEnterpriseProjects: (
@@ -3116,7 +3123,7 @@ interface CustomAPI {
     startManagedRun: (input: ManagedRunStartInput) => Promise<ManagedRunSummary>
     stopManagedRun: (input: ManagedRunStopInput) => Promise<boolean>
     getDynamicWorkflowConfig: (projectId: string) => Promise<HarnessDynamicWorkflowConfig | null>
-    getPublicAgentmdDeployUnits: (projectId: string) => Promise<string[]>
+    getPublicAgentmdDeployUnits: HarnessKnowledgeApi["getPublicAgentmdDeployUnits"]
     getLocalAgentmdDeployUnitMappings: (mappings: HarnessDeployUnitMapping[]) => Promise<string[]>
     updateProject: (
       projectId: string,
@@ -3150,7 +3157,6 @@ interface CustomAPI {
       callback: (event: ManagedRunThreadCreatedEvent) => void
     ) => () => void
   }
-  businessModAssembly: import("../shared/business-mod-assembly-api").BusinessModAssemblyApi
   app: {
     restart: () => Promise<void>
   }

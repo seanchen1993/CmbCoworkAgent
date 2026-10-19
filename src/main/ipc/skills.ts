@@ -7,6 +7,7 @@ import { existsSync, mkdirSync, rmSync } from "fs"
 import * as chardet from "jschardet"
 import * as iconv from "iconv-lite"
 import {
+  type PluginSkillSourceMetadata,
   getCustomSkillsDir,
   getEnabledPluginSkillSourceMetadata,
   getOpenworkDir,
@@ -730,8 +731,12 @@ export async function listAllSkills(): Promise<SkillMetadata[]> {
  * enum {project, user} — pragmatically the closest fit, since plugin skills
  * are user-installed rather than project-bundled.
  */
-export async function listPluginSkills(): Promise<SkillMetadata[]> {
-  const sources = getEnabledPluginSkillSourceMetadata()
+export async function listPluginSkills(
+  admittedSources?: readonly PluginSkillSourceMetadata[]
+): Promise<SkillMetadata[]> {
+  // An internal original engine may already own a retained package before agent admission.
+  // This optional list is main-only; the renderer endpoint never accepts it.
+  const sources = admittedSources ?? getEnabledPluginSkillSourceMetadata()
   const byPluginSkill = new Map<string, SkillMetadata>()
   for (const source of sources) {
     const dir = source.sourceDir

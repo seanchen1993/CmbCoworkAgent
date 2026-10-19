@@ -183,6 +183,7 @@ import { AgentGitCommitDialog, type AgentCommitOutcome } from "./AgentGitCommitD
 import { ContextReminderController, isContextReminderPending } from "./ContextReminderController"
 import { YoloEnableConfirmDialog } from "@/components/YoloEnableConfirmDialog"
 import { uploadChatData } from "@/api"
+import { isBackendNotConfiguredError } from "@/api/backend-endpoint"
 import { insertLog } from "../../../js/mmjUtils"
 import { toast } from "sonner"
 import { SlashCommandPopover } from "@/features/slash-commands/SlashCommandPopover"
@@ -3015,6 +3016,7 @@ export function ChatContainer({
         if (
           !controller.signal.aborted &&
           !chatReportDisposedRef.current &&
+          !isBackendNotConfiguredError(error) &&
           attempt < CHAT_REPORT_MAX_RETRY_ATTEMPTS
         ) {
           chatReportRetryBatchesRef.current[targetThreadId] = {
@@ -4126,12 +4128,26 @@ export function ChatContainer({
   }, [threadId])
 
   const scheduleBottomScrollEffect = useCallback(
-    (effect: ChatScrollEffect): void => {
+    (
+      effect: ChatScrollEffect,
+      confirmation?: { state: ChatScrollState; viewport: HTMLElement }
+    ): void => {
       pendingBottomScrollEffectRef.current = mergeChatScrollEffects(
         pendingBottomScrollEffectRef.current,
         effect
       )
-      if (bottomScrollFrameRef.current !== null) return
+      const runImmediately =
+        confirmation?.state === chatScrollStateRef.current &&
+        confirmation?.state.mode === "following" &&
+        pendingBottomScrollEffectRef.current.reason === "content-grown" &&
+        pendingBottomScrollEffectRef.current.generation === confirmation.state.generation &&
+        getViewport() === confirmation.viewport &&
+        confirmation.viewport.isConnected
+      if (bottomScrollFrameRef.current !== null) {
+        if (!runImmediately) return
+        window.cancelAnimationFrame(bottomScrollFrameRef.current)
+        bottomScrollFrameRef.current = null
+      }
 
       const run = (): void => {
         bottomScrollFrameRef.current = null
@@ -4141,6 +4157,15 @@ export function ChatContainer({
         if (!pending || !state || pending.generation !== state.generation) return
 
         const viewport = getViewport()
+        if (
+          runImmediately &&
+          (state !== confirmation?.state ||
+            state.mode !== "following" ||
+            viewport !== confirmation.viewport ||
+            !viewport?.isConnected)
+        ) {
+          return
+        }
         const lastVisibleIndex = lastVisibleMessageIndexRef.current
         if (!viewport || lastVisibleIndex < 0) {
           applyChatScrollEvent({
@@ -4219,7 +4244,8 @@ export function ChatContainer({
         })
       }
 
-      bottomScrollFrameRef.current = window.requestAnimationFrame(run)
+      if (runImmediately) run()
+      else bottomScrollFrameRef.current = window.requestAnimationFrame(run)
     },
     [applyChatScrollEvent, getViewport]
   )
@@ -4418,7 +4444,19 @@ export function ChatContainer({
           scrollbarPointerActive: scrollbarUserIntentActiveRef.current
         })
       ) {
-        dispatchChatScrollEvent({ type: "BOTTOM_CONFIRMED" })
+        const confirmed = dispatchChatScrollEvent({
+          type: "BOTTOM_CONFIRMED",
+          generation: state.generation,
+          distanceToBottom
+        })
+        if (isChatScrollDetached(state) && confirmed.mode === "following" && distanceToBottom > 1) {
+          // This user reattachment already owns the current viewport. Consume only its measured
+          // content correction before the next paint; initial/restore effects retain their phases.
+          scheduleBottomScrollEffect(
+            { type: "scroll-to-bottom", reason: "content-grown", generation: confirmed.generation },
+            { state: confirmed, viewport: scrollParent }
+          )
+        }
       }
     }
     const cancelPendingHistoryAnchorFromUserGesture = (): void => {
@@ -4469,8 +4507,13 @@ export function ChatContainer({
       lastObservedScrollTopRef.current = scrollParent.scrollTop
       const distanceToBottom =
         scrollParent.scrollHeight - scrollParent.scrollTop - scrollParent.clientHeight
-      if (distanceToBottom <= CHAT_AT_BOTTOM_THRESHOLD_PX) {
-        dispatchChatScrollEvent({ type: "BOTTOM_CONFIRMED" })
+      const state = chatScrollStateRef.current
+      if (state && distanceToBottom <= CHAT_AT_BOTTOM_THRESHOLD_PX) {
+        dispatchChatScrollEvent({
+          type: "BOTTOM_CONFIRMED",
+          generation: state.generation,
+          distanceToBottom
+        })
       }
     }
     let lastTouchY: number | null = null
@@ -4556,7 +4599,12 @@ export function ChatContainer({
       window.removeEventListener("pointercancel", cancelScrollbarPointerIntent, true)
       window.removeEventListener("blur", cancelScrollbarPointerIntent)
     }
-  }, [dispatchChatScrollEvent, invalidateDurableMessageReveal, scrollParent])
+  }, [
+    dispatchChatScrollEvent,
+    invalidateDurableMessageReveal,
+    scheduleBottomScrollEffect,
+    scrollParent
+  ])
 
   const scrollToMessageById = useCallback(
     (messageId: string): void => {

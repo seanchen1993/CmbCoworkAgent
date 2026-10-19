@@ -25,6 +25,7 @@ import { Badge } from "@/components/ui/badge"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { SkillsByCategorySection } from "./SkillsByCategorySection"
 import { marketApi, type MarketItem } from "../../api/market"
+import { BackendNotConfiguredError, isBackendNotConfiguredError } from "../../api/backend-endpoint"
 import {
   buildMarketInstalledFlags,
   isMarketVersionDifferent,
@@ -96,6 +97,12 @@ async function loadMarketSkillsSnapshot(signal: AbortSignal): Promise<MarketSkil
     const promise = marketApi
       .getSkills({ signal: controller.signal })
       .then((res) => {
+        if (!res.success || !res.data) {
+          if (res.errorCode === "BACKEND_NOT_CONFIGURED") {
+            throw new BackendNotConfiguredError("应用市场服务")
+          }
+          throw new Error(res.error || "应用市场加载失败")
+        }
         const allSkills = res?.data || []
         const snapshot = {
           allSkills,
@@ -678,6 +685,7 @@ export function WelcomeSkills({
 
   const [marketSkillsData, setMarketSkillsData] = useState<MarketItem[]>([])
   const [goodSkillsData, setGoodSkillsData] = useState<MarketItem[]>([])
+  const [marketError, setMarketError] = useState<string | null>(null)
   const [showAllProgrammingSkills, setShowAllProgrammingSkills] = useState(false)
   const [showAllCustomSkills, setShowAllCustomSkills] = useState(false)
   const instructionUrl = import.meta.env.VITE_INTRUCTION_URL
@@ -720,9 +728,13 @@ export function WelcomeSkills({
       if (signal.aborted) return
       setMarketSkillsData(allSkills)
       setGoodSkillsData(goodSkills)
+      setMarketError(null)
     } catch (error) {
       if (signal.aborted) return
-      console.error("Failed to query remote skills:", error)
+      setMarketError(error instanceof Error ? error.message : "应用市场加载失败")
+      if (!isBackendNotConfiguredError(error)) {
+        console.error("Failed to query remote skills:", error)
+      }
     }
   }, [])
 
@@ -901,6 +913,9 @@ export function WelcomeSkills({
 
   return (
     <div className="pb-8">
+      {marketError && <p role="status" className="pb-3 text-xs text-muted-foreground">
+        {marketError}
+      </p>}
       {skillsLoading ? (
         <div className="py-10 text-center text-sm text-muted-foreground">正在加载技能列表...</div>
       ) : skills.length === 0 ? null : (

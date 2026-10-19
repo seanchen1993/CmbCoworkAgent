@@ -72,7 +72,7 @@ async function main() {
     await page.waitForFunction(() => window.api.mods.globalEnabled())
     await page.getByRole("checkbox", { name: "在此项目使用灵件", exact: true }).click()
     await page.waitForFunction(async (id) => (await window.api.mods.status(id)).enabled, threadId)
-    await page.getByRole("button", { name: "助手组合", exact: true }).click()
+    await page.getByRole("button", { name: "常用搭配", exact: true }).click()
     const simple = page.getByRole("region", { name: "简单组合", exact: true })
     await simple.getByLabel("组合名称", { exact: true }).fill(profileDraft)
     await page.getByRole("button", { name: "新功能导览", exact: true }).click()
@@ -137,7 +137,7 @@ async function main() {
       BrowserWindow.getAllWindows()[0].setContentSize(1366, 900)
     )
     for (const [task, item] of simpleTourTasks.entries()) {
-      if (task === 2) await page.getByRole("button", { name: "助手组合", exact: true }).click()
+      if (task === 2) await page.getByRole("button", { name: "常用搭配", exact: true }).click()
       await page.getByRole("button", { name: "新功能导览", exact: true }).click()
       await tour.getByLabel("选择任务", { exact: true }).selectOption(String(task))
       for (const [step, screen] of item.steps.entries()) {
@@ -145,9 +145,14 @@ async function main() {
         await tour.getByRole("button", { name: screen.action, exact: true }).click()
       }
       if (task === 0) {
-        const create = page.getByRole("region", { name: "从已有插件创建", exact: true })
-        await create.getByRole("button", { name: "按演练要求新建插件", exact: true }).waitFor()
-        assert((await create.innerText()).includes("我的导览副本"))
+        await page.getByRole("heading", { name: "说说你想让助手做什么", exact: true }).waitFor()
+        const create = page.getByRole("region", { name: "灵件对话创作", exact: true })
+        await create.getByRole("heading", { name: "在所选聊天制作灵件", exact: true }).waitFor()
+        await create.getByRole("button", { name: "开启灵件并开始制作", exact: true }).waitFor()
+        assert.equal(
+          await page.getByRole("region", { name: "从已有插件创建", exact: true }).isVisible(),
+          false
+        )
       } else if (task === 1) {
         await simple.getByRole("button", { name: "另建演练中的组合", exact: true }).waitFor()
         assert.equal(
@@ -164,7 +169,7 @@ async function main() {
     assert.equal((await page.evaluate((id) => window.api.mods.flowRuns(id), threadId)).length, 0)
     assert.equal(await page.evaluate(() => localStorage.getItem("devclaw.sparks-tour.v1")), "seen")
     checks.push(
-      "Real create/combine/diff destinations reached; suggested name handed off; chat draft intact; no runs"
+      "Standalone requirement-based create, combine and diff destinations reached; existing combination and chat drafts intact; no runs"
     )
     assert.deepEqual(errors, [])
     completed = true

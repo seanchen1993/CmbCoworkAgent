@@ -245,6 +245,12 @@ export interface HookResult {
   /** Optional skill to load as remediation guidance when the hook fires. */
   requiredSkill?: string
   updatedInput?: Record<string, unknown> // PreToolUse: modify tool args
+  /** Host-owned observations; values and Hook commands are never included. */
+  updatedInputMerge?: {
+    order: import("./updated-input-diagnostics").HookInputMergeSource[]
+    conflicts: import("./updated-input-diagnostics").HookInputMergeDiagnostic[]
+    truncated: boolean
+  }
   /** Function Mods PostToolUse presentation effects; never execution or checkpoint facts. */
   updatedToolOutput?: unknown
   updatedMCPToolOutput?: unknown

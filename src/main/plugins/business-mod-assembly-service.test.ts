@@ -11,6 +11,8 @@ import { snapshotDerivationSource } from "./derivation-source"
 import { compileFunctionPlugin } from "../mods/v2/loader"
 import { FunctionGuestRuntime } from "../mods/v2/guest-runtime"
 import { portableBusinessModFiles } from "./business-mod-portable-source"
+import { resolveFunctionUserConfig } from "../../shared/mods/v2/user-config"
+import { getPluginSkillSearchSources, readPluginManifest } from "./manifest"
 
 const roots: string[] = []
 afterEach(async () => {
@@ -62,7 +64,7 @@ async function fixture() {
     apiVersion: "devclaw.business-mods/v1",
     kind: "catalog",
     kernel: {
-      id: "autobiz.python-kernel",
+      id: "fixture.python-kernel",
       version: "1.0.0",
       boardConfigPath: "board_core/board_config.json",
       resources: ["hooks/check.py", "hooks/hooks.json"],
@@ -102,12 +104,12 @@ async function fixture() {
   await write(user, BUSINESS_MOD_MANIFEST, {
     apiVersion: "devclaw.business-mods/v1",
     kind: "catalog",
-    kernelRef: { id: "autobiz.python-kernel", version: "1.0.0" },
+    kernelRef: { id: "fixture.python-kernel", version: "1.0.0" },
     modules: [quality]
   })
   await write(user, quality.skill.entry, "# My real quality implementation")
   await write(user, quality.resources[0], "def validate(context):\n    return context\n")
-  const plugins: Array<{ id: string; name: string }> = []
+  const plugins: Array<{ id: string; name: string; path: string }> = []
   const invalidate = vi.fn()
   const validatePackage = vi.fn(async () => {})
   const install = vi.fn(
@@ -122,7 +124,7 @@ async function fixture() {
       await cp(directory, destination, { recursive: true })
       await verify(destination)
       assertCurrent()
-      plugins.push({ id: pluginId, name })
+      plugins.push({ id: pluginId, name, path: destination })
       return { success: true }
     }
   )
@@ -156,33 +158,152 @@ async function fixture() {
     catalog,
     validatePackage,
     install,
-    invalidate
+    invalidate,
+    plugins
   }
 }
+
+it("blocks portable packages with literal board credentials while retaining original business rules", async () => {
+  const f = await fixture()
+  const path = join(f.source, "board_core/board_config.json")
+  const board = JSON.parse(await readFile(path, "utf8"))
+  board.knowledge_config = {
+    leanToken: "private-token-never-export",
+    nextAction: { slashSkill: "source" }
+  }
+  await write(f.source, "board_core/board_config.json", board)
+  const inspected = await f.service.inspect(f.source, "owner", guard)
+  await expect(
+    f.service.preview(
+      "owner",
+      {
+        ...f.request,
+        sources: [
+          { inspectionId: inspected.id, modIds: ["specs"] },
+          { inspectionId: f.custom.id, modIds: ["user.quality"] }
+        ]
+      },
+      guard
+    )
+  ).rejects.toThrow("不可发布的凭据声明")
+  expect(JSON.parse(await readFile(path, "utf8"))).toEqual(board)
+  expect(f.install).not.toHaveBeenCalled()
+})
+
+it("restores original journaled UUID/ZIP intent after a cold service restart and never replays effects", async () => {
+  const f = await fixture(),
+    preview = await f.service.preview("owner", f.request, guard)
+  const copy = await f.service.create("owner", preview.previewId, randomUUID(), guard)
+  await f.service.check("owner", copy.copyId, copy.digest, guard)
+  await f.service.install("owner", copy.copyId, copy.digest, guard)
+  const output = join(f.root, "artifact.zip")
+  await f.service.export("owner", copy.copyId, copy.digest, output, guard)
+  const receiptPath = join(f.root, "work", copy.copyId, "receipt.json")
+  const receipt = JSON.parse(await readFile(receiptPath, "utf8"))
+  expect(receipt.installation.pluginId).toBe(f.plugins[0].id)
+  expect(receipt.exportIntent.output).toBe(output)
+  receipt.status = "checked"
+  delete receipt.pluginId
+  delete receipt.exportIntent.completed
+  await writeFile(receiptPath, JSON.stringify(receipt))
+  const neverInstall = vi.fn(async () => {
+    throw Error("observation must not install")
+  })
+  const restarted = new BusinessModAssemblyService(join(f.root, "work"), {
+    plugins: () => f.plugins as never,
+    install: neverInstall,
+    invalidate: vi.fn()
+  })
+  await expect(restarted.install("owner", copy.copyId, copy.digest, guard)).rejects.toThrow(
+    "INSTALL_UNCONFIRMED"
+  )
+  expect(
+    await restarted.observe("owner", copy.copyId, copy.digest, { kind: "install" }, guard)
+  ).toEqual({ outcome: "installed", pluginId: f.plugins[0].id })
+  expect(
+    await restarted.observe("owner", copy.copyId, copy.digest, { kind: "export", output }, guard)
+  ).toEqual({ outcome: "exported", output })
+  expect(neverInstall).not.toHaveBeenCalled()
+  expect(f.install).toHaveBeenCalledOnce()
+  const finalReceipt = JSON.parse(await readFile(receiptPath, "utf8"))
+  expect(finalReceipt).toMatchObject({
+    status: "installed",
+    pluginId: f.plugins[0].id,
+    exportIntent: { completed: true }
+  })
+  await expect(
+    restarted.observe("other-owner", copy.copyId, copy.digest, { kind: "install" }, guard)
+  ).rejects.toThrow("不属于当前会话")
+  expect(
+    await restarted.observe(
+      "owner",
+      copy.copyId,
+      copy.digest,
+      { kind: "export", output: join(f.root, "another.zip") },
+      guard
+    )
+  ).toMatchObject({ outcome: "unknown" })
+})
+
+it("refuses an oversized export intent before touching the original receipt or chosen destination", async () => {
+  const f = await fixture(),
+    preview = await f.service.preview("owner", f.request, guard)
+  const copy = await f.service.create("owner", preview.previewId, randomUUID(), guard)
+  await f.service.check("owner", copy.copyId, copy.digest, guard)
+  const path = join(f.root, "work", copy.copyId, "receipt.json"),
+    before = await readFile(path, "utf8")
+  await expect(
+    f.service.export(
+      "owner",
+      copy.copyId,
+      copy.digest,
+      join(f.root, "a".repeat(9000) + ".zip"),
+      guard
+    )
+  ).rejects.toThrow("生成记录超限")
+  expect(await readFile(path, "utf8")).toBe(before)
+  const restored = new BusinessModAssemblyService(join(f.root, "work"), {
+    plugins: () => [],
+    install: f.install,
+    invalidate: f.invalidate
+  })
+  expect(restored.list("owner")).toHaveLength(1)
+})
 
 it("reports dynamic behavior changes and missing knowledge bindings instead of claiming complete equivalence", async () => {
   const f = await fixture()
   const path = join(f.source, "board_core/board_config.json")
   const board = JSON.parse(await readFile(path, "utf8"))
-  board.workflow.dynamicStages = [{ id: "conditional-detail", nodes: [] }]
+  board.workflow.dynamicStages = [{ id: "conditional-detail", nodes: ["invalid-node"] }]
   board.knowledge_config = { nextAction: { slashSkill: "knowledge-sync" } }
   board.inspectCommands = { [process.platform]: { knowledge_path: "${pluginPath}/sys" } }
   await write(f.source, "board_core/board_config.json", board)
   const inspected = await f.service.inspect(f.source, "owner", guard)
-  const request = { ...f.request, sources: [
-    { inspectionId: inspected.id, modIds: ["specs"] },
-    { inspectionId: f.custom.id, modIds: ["user.quality"] }
-  ] }
+  const request = {
+    ...f.request,
+    sources: [
+      { inspectionId: inspected.id, modIds: ["specs"] },
+      { inspectionId: f.custom.id, modIds: ["user.quality"] }
+    ]
+  }
   const preview = await f.service.preview("owner", request, guard)
-  expect(preview.diagnostics).toEqual(expect.arrayContaining([
-    expect.stringContaining("行为差异"), expect.stringContaining("knowledge-sync"),
-    expect.stringContaining("外部知识待绑定")
-  ]))
+  expect(preview.diagnostics).toEqual(
+    expect.arrayContaining([
+      expect.stringContaining("行为差异"),
+      expect.stringContaining("knowledge-sync"),
+      expect.stringContaining("外部知识待绑定")
+    ])
+  )
   expect(JSON.parse(await readFile(path, "utf8"))).toEqual(board)
   expect(preview.valid).toBe(false)
-  await expect(f.service.create("owner", preview.previewId, randomUUID(), guard))
-    .rejects.toThrow("未解决的依赖或行为差异")
-  const accepted = await f.service.preview("owner", { ...request, acceptFixedWorkflow: true }, guard)
+  await expect(f.service.create("owner", preview.previewId, randomUUID(), guard)).rejects.toThrow(
+    "未解决的依赖或行为差异"
+  )
+  const accepted = await f.service.preview(
+    "owner",
+    { ...request, acceptFixedWorkflow: true },
+    guard
+  )
   expect(accepted.valid).toBe(false) // Acknowledging fixed steps cannot provide the missing Skill.
 })
 
@@ -193,16 +314,24 @@ it("requires an explicit fixed-workflow choice bound to the inspected source bef
   board.workflow.dynamicStages = [{ id: "conditional", nodes: ["code"] }]
   await write(f.source, "board_core/board_config.json", board)
   const inspected = await f.service.inspect(f.source, "owner", guard)
-  const request = { ...f.request, sources: [
-    { inspectionId: inspected.id, modIds: ["specs"] }, f.request.sources[1]
-  ] }
+  const request = {
+    ...f.request,
+    sources: [{ inspectionId: inspected.id, modIds: ["specs"] }, f.request.sources[1]]
+  }
   const blocked = await f.service.preview("owner", request, guard)
   expect(blocked).toMatchObject({ valid: false, requiresFixedWorkflowAcknowledgement: true })
-  await expect(f.service.create("owner", blocked.previewId, randomUUID(), guard)).rejects.toThrow("行为差异")
-  const accepted = await f.service.preview("owner", { ...request, acceptFixedWorkflow: true }, guard)
+  await expect(f.service.create("owner", blocked.previewId, randomUUID(), guard)).rejects.toThrow(
+    "行为差异"
+  )
+  const accepted = await f.service.preview(
+    "owner",
+    { ...request, acceptFixedWorkflow: true },
+    guard
+  )
   expect(accepted.valid).toBe(true)
-  expect(await f.service.create("owner", accepted.previewId, randomUUID(), guard))
-    .toMatchObject({ status: "created" })
+  expect(await f.service.create("owner", accepted.previewId, randomUUID(), guard)).toMatchObject({
+    status: "created"
+  })
   expect(JSON.parse(await readFile(path, "utf8"))).toEqual(board)
 })
 
@@ -450,7 +579,7 @@ async function observerSource(root: string) {
   await write(source, BUSINESS_MOD_MANIFEST, {
     apiVersion: "devclaw.business-mods/v1",
     kind: "catalog",
-    kernelRef: { id: "autobiz.python-kernel", version: "1.0.0" },
+    kernelRef: { id: "fixture.python-kernel", version: "1.0.0" },
     modules: [],
     extensions: [extension]
   })
@@ -554,6 +683,219 @@ it("adds a real compiled function beside business stages and preserves it throug
   await expect(
     f.service.preview("owner", { ...request, order: ["prd", "specs", "worktree.progress"] }, guard)
   ).rejects.toThrow("顺序无效")
+})
+
+it("exports selected configuration schemas and rebinds a real compiled plugin in a fresh environment", async () => {
+  const f = await fixture()
+  const observer = await observerSource(f.root)
+  const schema = {
+    knowledgeRoot: {
+      type: "directory",
+      title: "Knowledge root",
+      description: "Choose the knowledge root on this computer",
+      required: true
+    },
+    tone: { type: "string", title: "Tone", description: "Report style", default: "formal" }
+  }
+  f.catalog.kernel!.pluginFields!.userConfig = { tone: schema.tone }
+  await write(f.source, BUSINESS_MOD_MANIFEST, f.catalog)
+  const observerCatalog = JSON.parse(await readFile(join(observer, BUSINESS_MOD_MANIFEST), "utf8"))
+  observerCatalog.extensions[0].userConfig = { knowledgeRoot: schema.knowledgeRoot }
+  observerCatalog.extensions[0].contextProvider = {
+    entry: "mods/business/worktree.progress/inspect.py",
+    operations: ["session-context", "sync-knowledge"],
+    knowledgeBinding: "knowledgeRoot",
+    required: true
+  }
+  observerCatalog.extensions[0].configSchema = {
+    type: "object",
+    properties: { compact: { type: "boolean" } },
+    additionalProperties: false
+  }
+  await write(observer, BUSINESS_MOD_MANIFEST, observerCatalog)
+  // Local runtime files are excluded; neither their values nor a source-machine identity travel.
+  await write(observer, "settings.local.json", {
+    knowledgeRoot: "C:/author/private",
+    token: "secret"
+  })
+  const base = await f.service.inspect(f.source, "owner", guard)
+  const extension = await f.service.inspect(observer, "owner", guard)
+  const preview = await f.service.preview(
+    "owner",
+    {
+      name: "portable-observer",
+      version: "1.0.0",
+      sources: [
+        { inspectionId: base.id, modIds: ["prd", "specs"] },
+        { inspectionId: extension.id, modIds: ["worktree.progress"] }
+      ]
+    },
+    guard
+  )
+  const copy = await f.service.create("owner", preview.previewId, randomUUID(), guard)
+  await f.service.check("owner", copy.copyId, copy.digest, guard)
+  const first = await f.service.install("owner", copy.copyId, copy.digest, guard)
+  const output = join(f.root, "portable-observer.zip")
+  await f.service.export("owner", copy.copyId, copy.digest, output, guard)
+  const zip = new AdmZip(await readFile(output))
+  expect(zip.getEntries().some((entry) => /settings|grant|credentials/.test(entry.entryName))).toBe(
+    false
+  )
+  expect(zip.readAsText("plugin.json")).not.toContain("C:/author/private")
+  const target = join(f.root, "second-computer")
+  zip.extractAllTo(target)
+  const compiled = await compileFunctionPlugin(target)
+  expect(JSON.parse(zip.readAsText("devclaw.portability.json"))).toMatchObject({
+    runtimeApiVersion: "devclaw.project-runtime/v2",
+    requiredProtocols: ["devclaw.required-business-checks/v1", "devclaw.context-handoff/v1"],
+    userValuesIncluded: false,
+    grantsIncluded: false,
+    runtimeStateIncluded: false,
+    configurationKeys: ["knowledgeRoot", "tone"]
+  })
+  expect(JSON.parse(zip.readAsText("devclaw.project-runtime.json"))).toMatchObject({
+    apiVersion: "devclaw.project-runtime/v2",
+    extensionContract: {
+      context: {
+        sourceAccess: "read-only",
+        mutableData: "host",
+        configuration: "host-resolved",
+        knowledge: { required: true, binding: "knowledgeRoot" },
+        provider: {
+          entry: "mods/business/worktree.progress/inspect.py",
+          operations: ["session-context", "sync-knowledge"]
+        }
+      }
+    }
+  })
+  expect(compiled.userConfig).toEqual(schema)
+  expect(compiled.components?.[0].configSchema).toEqual(observerCatalog.extensions[0].configSchema)
+  expect(() => resolveFunctionUserConfig(compiled.userConfig!, {})).toThrow(
+    "Invalid plugin configuration field: knowledgeRoot"
+  )
+  expect(
+    resolveFunctionUserConfig(compiled.userConfig!, { knowledgeRoot: "D:/team/knowledge" })
+  ).toEqual({ tone: "formal", knowledgeRoot: "D:/team/knowledge" })
+  const imported = await f.service.inspect(target, "fresh-owner", guard)
+  const next = await f.service.preview(
+    "fresh-owner",
+    {
+      name: "portable-observer-team",
+      version: "1.0.0",
+      sources: [{ inspectionId: imported.id, modIds: ["prd", "specs", "worktree.progress"] }]
+    },
+    guard
+  )
+  const secondCopy = await f.service.create("fresh-owner", next.previewId, randomUUID(), guard)
+  await f.service.check("fresh-owner", secondCopy.copyId, secondCopy.digest, guard)
+  const second = await f.service.install("fresh-owner", secondCopy.copyId, secondCopy.digest, guard)
+  expect(second.pluginId).not.toBe(first.pluginId)
+  expect(second.status).toBe("installed")
+})
+
+it("rejects context providers outside the selected resource closure or multiple selected providers", async () => {
+  const f = await fixture()
+  const observer = await observerSource(f.root)
+  const catalog = JSON.parse(await readFile(join(observer, BUSINESS_MOD_MANIFEST), "utf8"))
+  catalog.extensions[0].contextProvider = {
+    entry: "mods/business/worktree.progress/missing.py",
+    operations: ["session-context"],
+    required: true
+  }
+  await write(observer, BUSINESS_MOD_MANIFEST, catalog)
+  const missing = await f.service.inspect(observer, "owner", guard)
+  await expect(
+    f.service.preview(
+      "owner",
+      {
+        name: "missing-provider",
+        version: "1.0.0",
+        sources: [f.request.sources[0], { inspectionId: missing.id, modIds: ["worktree.progress"] }]
+      },
+      guard
+    )
+  ).rejects.toThrow("未包含在 Mod 资源闭包")
+  catalog.extensions[0].contextProvider.entry = "mods/business/worktree.progress/inspect.py"
+  catalog.extensions.push({
+    ...catalog.extensions[0],
+    id: "second.provider",
+    title: "Second provider",
+    entry: "mods/business/second.provider/register.ts",
+    resources: ["mods/business/second.provider/inspect.py"],
+    contextProvider: {
+      entry: "mods/business/second.provider/inspect.py",
+      operations: ["session-context"],
+      required: false
+    }
+  })
+  await write(
+    observer,
+    "mods/business/second.provider/register.ts",
+    "export function register(on) {}"
+  )
+  await write(observer, "mods/business/second.provider/inspect.py", "# second author provider")
+  await write(observer, BUSINESS_MOD_MANIFEST, catalog)
+  const duplicate = await f.service.inspect(observer, "owner", guard)
+  await expect(
+    f.service.preview(
+      "owner",
+      {
+        name: "duplicate-provider",
+        version: "1.0.0",
+        sources: [
+          f.request.sources[0],
+          { inspectionId: duplicate.id, modIds: ["worktree.progress", "second.provider"] }
+        ]
+      },
+      guard
+    )
+  ).rejects.toThrow("多个上下文提供器")
+})
+
+it("registers a selected extension's auxiliary Skill through real native search roots", async () => {
+  const f = await fixture(),
+    observer = await observerSource(f.root)
+  const skill = "mods/business/worktree.progress/skills/knowledge-sync/SKILL.md"
+  const catalog = JSON.parse(await readFile(join(observer, BUSINESS_MOD_MANIFEST), "utf8"))
+  catalog.extensions[0].skills = [skill]
+  await write(
+    observer,
+    skill,
+    "---\nname: knowledge-sync\ndescription: Draft reviewed knowledge from actual evidence.\n---\nRead evidence and prepare a draft for human approval."
+  )
+  await write(observer, BUSINESS_MOD_MANIFEST, catalog)
+  const board = JSON.parse(await readFile(join(f.source, "board_core/board_config.json"), "utf8"))
+  board.knowledge_config = { nextAction: { slashSkill: "knowledge-sync" } }
+  await write(f.source, "board_core/board_config.json", board)
+  const base = await f.service.inspect(f.source, "owner", guard)
+  const extension = await f.service.inspect(observer, "owner", guard)
+  const preview = await f.service.preview(
+    "owner",
+    {
+      name: "with-knowledge-skill",
+      version: "1.0.0",
+      sources: [
+        { inspectionId: base.id, modIds: ["prd", "specs"] },
+        { inspectionId: extension.id, modIds: ["worktree.progress"] }
+      ]
+    },
+    guard
+  )
+  expect(preview.valid).toBe(true)
+  expect(preview.diagnostics.some((item) => item.includes("依赖未提供"))).toBe(false)
+  const copy = await f.service.create("owner", preview.previewId, randomUUID(), guard)
+  const directory = join(f.root, "work", copy.copyId, "source")
+  expect(readPluginManifest(directory)?.manifest.skills).toEqual([
+    "skills",
+    "mods/business/worktree.progress/skills/knowledge-sync"
+  ])
+  const sources = getPluginSkillSearchSources(directory, readPluginManifest(directory)?.manifest)
+  expect(
+    sources.some(
+      (source) => source.relPath === "mods/business/worktree.progress/skills/knowledge-sync"
+    )
+  ).toBe(true)
+  expect(await readFile(join(directory, skill), "utf8")).toContain("name: knowledge-sync")
 })
 
 it("keeps observer resources portable without copying output or unselected checkout files", async () => {

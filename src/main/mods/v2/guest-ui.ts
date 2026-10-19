@@ -73,7 +73,7 @@ export const FUNCTION_UI_BOOTSTRAP = String.raw`
         asyncScope.component !== input.component)
       throw Error("MODS_UI_SURFACE_UNAVAILABLE");
     const table = Object.create(null);
-    for (const name of ["Box", "Text", "Button", "Input", "Select", "Link", "Code", "Svg", "Markdown", "Client"]) {
+    for (const name of ["Box", "Text", "Button", "Input", "Select", "Link", "Code", "Svg", "Markdown", "Client", "List", "Table", "Tree", "Chart", "Log", "Form"]) {
       table[name] = raw => {
         const scope = asyncScope;
         if (!scope || scope.event !== "ui.render" || !scope.uiGeneration ||
@@ -120,8 +120,8 @@ export const FUNCTION_UI_BOOTSTRAP = String.raw`
         }
         if (name === "Client") tree.client = { plugin: scope.plugin };
         if (name === "Box" || name === "Text" || name === "Link") tree.children = children;
-        if (["Button", "Input", "Select"].includes(name)) {
-          const primary = name === "Button" ? "onPress" : name === "Select" ? "onSelect" : "onInput";
+        if (["Button", "Input", "Select", "Form"].includes(name)) {
+          const primary = name === "Button" ? "onPress" : name === "Select" ? "onSelect" : name === "Form" ? "onSubmit" : "onInput";
           if (name === "Input" ? !callbacks.onSubmit : !callbacks[primary])
             throw Error("MODS_UI_CALLBACK");
           if (uiCallbacks.size >= 1024) throw Error("MODS_UI_CALLBACK_LIMIT");
@@ -178,7 +178,7 @@ export const FUNCTION_UI_BOOTSTRAP = String.raw`
       }
       return;
     }
-    if (!["Box", "Text", "Button", "Input", "Select", "Link", "Code", "Svg", "Client"]
+    if (!["Box", "Text", "Button", "Input", "Select", "Link", "Code", "Svg", "Client", "List", "Table", "Tree", "Chart", "Log", "Form"]
         .includes(tree.type)) throw Error("MODS_UI_TREE_INVALID");
     if (tree.press) visit(tree.press);
     if (tree.client) visit({ client: tree.client.plugin, module: tree.props?.module, key: tree.props?.key });

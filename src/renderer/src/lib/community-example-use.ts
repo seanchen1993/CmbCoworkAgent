@@ -3,6 +3,7 @@ import type { CommunityExampleInstallation } from "../../../shared/mods/communit
 import type { ModWorkspaceStatus } from "../../../shared/mods/types"
 import { normalizeWorkspacePathKey } from "../../../shared/workspace-path"
 import { proposeSparksExampleSelection, sparksExampleBaseline } from "./sparks-example-selection"
+import { newClawCapability } from "./claw-capability-usage"
 
 export interface ExampleUseApi extends Pick<ClawApi, "clawView" | "clawChange"> {
   status(threadId: string): Promise<ModWorkspaceStatus>
@@ -81,6 +82,7 @@ function signature(snapshot: Snapshot, grantedId?: string): string {
     }))
   return stable({
     workspace: snapshot.status.workspace,
+    usageContext: snapshot.claw.usageContext ?? "chat",
     global: snapshot.global,
     enabled: snapshot.status.enabled,
     outputPolicy: snapshot.status.outputPolicy,
@@ -108,7 +110,7 @@ export async function prepareExampleUse(
     (mod.state !== "ready" && mod.state !== "needs-approval")
   )
     throw Error("示例未就绪或已在插件管理中禁用，请先到已安装列表核对状态。")
-  const target = { pluginId: mod.pluginId, name: mod.name, digest: mod.digest }
+  const target = newClawCapability(mod, snapshot.claw.usageContext ?? "chat")
   const selection = proposeSparksExampleSelection(snapshot.claw, target, {
     id: `example-${crypto.randomUUID()}`,
     name: `官方示例 · ${displayTitle}`
@@ -284,7 +286,7 @@ export async function readExampleUsage(
         try {
           const selection = proposeSparksExampleSelection(
             snapshot.claw,
-            { pluginId: mod.pluginId, name: mod.name, digest: mod.digest },
+            newClawCapability(mod, snapshot.claw.usageContext ?? "chat"),
             { id: "display-only", name: "display-only" }
           )
           if (selection.removed.length) return [example.id, "conflict"]

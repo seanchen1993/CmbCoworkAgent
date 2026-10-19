@@ -81,7 +81,7 @@ async function main() {
     for (let attempt = 0; attempt < 3; attempt++) {
       await page.getByRole("button", { name: "管理原版插件", exact: true }).click()
       await page.getByText("原版插件管理页", { exact: true }).waitFor()
-      await page.getByRole("button", { name: "助手组合", exact: true }).click()
+      await page.getByRole("button", { name: "常用搭配", exact: true }).click()
       await page.getByRole("button", { name: "管理原版插件", exact: true }).waitFor()
       assert.equal(await page.getByText("原版插件管理页", { exact: true }).count(), 0)
     }

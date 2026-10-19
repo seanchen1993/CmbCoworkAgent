@@ -1,4 +1,5 @@
 import { insertLog } from "../../js/mmjUtils"
+import { resolveBackendEndpoint } from "./backend-endpoint"
 
 const BASE_URL = import.meta.env.VITE_API_BASE_URL
 export const UPLOAD_REQUEST_TIMEOUT_MS = 15_000
@@ -52,6 +53,8 @@ async function readBoundedErrorText(response: Response): Promise<string> {
 }
 
 async function request<T>(path: string, init: RequestInit): Promise<T> {
+  if (init.signal?.aborted) throw init.signal.reason ?? new DOMException("Aborted", "AbortError")
+  const endpoint = resolveBackendEndpoint(BASE_URL, path, "上报服务")
   const controller = new AbortController()
   const callerSignal = init.signal
   const relayAbort = (): void => controller.abort(callerSignal?.reason)
@@ -62,7 +65,7 @@ async function request<T>(path: string, init: RequestInit): Promise<T> {
     UPLOAD_REQUEST_TIMEOUT_MS
   )
   try {
-    const response = await fetch(`${BASE_URL}${path}`, { ...init, signal: controller.signal })
+    const response = await fetch(endpoint, { ...init, signal: controller.signal })
     if (!response.ok) {
       const errorText = await readBoundedErrorText(response)
       throw new Error(`[${response.status}] ${response.statusText}: ${errorText}`)

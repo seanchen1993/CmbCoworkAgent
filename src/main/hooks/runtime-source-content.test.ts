@@ -1,5 +1,6 @@
 import { afterEach, expect, it, vi } from "vitest"
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs"
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync, readdirSync } from "node:fs"
+import { withPinnedAutobiz } from "../mods/v2/autobiz-source"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import type { PluginMetadata } from "../types"
@@ -23,9 +24,96 @@ vi.mock("../services/event-reporter", () => ({ trackEvent: vi.fn() }))
 import { runHooks } from "./runner"
 
 const roots: string[] = []
+function declareComposition(root: string) {
+  writeFileSync(
+    join(root, "devclaw.stage-checks.json"),
+    JSON.stringify({ apiVersion: "devclaw.stage-check-adapter/v1", adapter: "autobiz-v1" })
+  )
+  writeFileSync(
+    join(root, "devclaw.project-runtime.json"),
+    JSON.stringify({
+      apiVersion: "devclaw.project-runtime/v1",
+      mode: "legacy",
+      stateOwner: "plugin"
+    })
+  )
+}
 afterEach(() => {
   for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true })
   vi.clearAllMocks()
+})
+it("runs the original public AutoBiz write hook without mutating its installed Python package", async () => {
+  await withPinnedAutobiz(undefined, async (source) => {
+    declareComposition(source)
+    const root = mkdtempSync(join(tmpdir(), "public-hook-workspace-"))
+    roots.push(root)
+    const observed = vi.fn()
+    const result = await runHooks(
+      [
+        {
+          id: "original-state-done",
+          event: "PreToolUse",
+          type: "command",
+          command: "python hooks/state_checkpoint.py state-done",
+          enabled: true,
+          createdAt: "",
+          updatedAt: "",
+          pluginRoot: source
+        }
+      ],
+      "PreToolUse",
+      {
+        sessionId: "ordinary-public",
+        workspacePath: root,
+        hookSourceType: "plugin",
+        hookSourceRoot: source,
+        pluginRoot: source,
+        toolName: "write_file",
+        toolArgs: { file_path: join(root, "report.md"), content: "local" }
+      },
+      observed
+    )
+    expect(result?.exitCode).toBe(0)
+    expect(observed.mock.calls[0]?.[2].exitCode).toBe(0)
+    expect(
+      readdirSync(source, { recursive: true }).some((file) => String(file).includes("__pycache__"))
+    ).toBe(false)
+  })
+}, 30000)
+it("does not infer a cache preference from the user's workspace or change undeclared hook env", async () => {
+  const workspace = mkdtempSync(join(tmpdir(), "declared-user-workspace-"))
+  const plugin = mkdtempSync(join(tmpdir(), "undeclared-hook-plugin-"))
+  roots.push(workspace, plugin)
+  declareComposition(workspace)
+  const observed = vi.fn()
+  const result = await runHooks(
+    [
+      {
+        id: "ordinary-env",
+        event: "PreToolUse",
+        type: "command",
+        enabled: true,
+        command: `python -c "import os; print('VALUE=' + os.environ.get('PYTHONDONTWRITEBYTECODE', ''))"`,
+        createdAt: "",
+        updatedAt: "",
+        pluginRoot: plugin
+      }
+    ],
+    "PreToolUse",
+    {
+      sessionId: "ordinary-env",
+      workspacePath: workspace,
+      hookSourceType: "plugin",
+      hookSourceRoot: plugin,
+      pluginRoot: plugin,
+      toolName: "write_file"
+    },
+    observed
+  )
+  expect(result?.exitCode).toBe(0)
+  expect(observed.mock.calls[0]?.[2].stdout.trim()).toBe(
+    `VALUE=${process.env.PYTHONDONTWRITEBYTECODE ?? ""}`
+  )
 })
 it("revalidates retained bytes immediately before each original hook while catalog getters stay cheap", async () => {
   const root = mkdtempSync(join(tmpdir(), "runtime-hook-content-"))

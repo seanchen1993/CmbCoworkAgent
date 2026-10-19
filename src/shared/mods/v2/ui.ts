@@ -5,6 +5,7 @@ import { isModObject, ModFunctionError } from "./contracts"
 import { functionCodeRows } from "./code"
 import { validateFunctionMarkdownProps, type FunctionMarkdownLeafProps } from "./markdown"
 import type { FunctionMarkdownLinkSidecar } from "./markdown-links"
+import { isPlatformWidget, validatePlatformWidget, type PlatformWidget } from "./platform-surfaces-widgets"
 
 export const FUNCTION_UI_CAPABILITIES = [
   "ui.open",
@@ -45,7 +46,7 @@ export interface FunctionUiEngine {
   ref: number
 }
 export interface FunctionUiNode {
-  type: "Box" | "Text" | "Button" | "Input" | "Select" | "Link" | "Code" | "Svg" | "Client"
+  type: "Box" | "Text" | "Button" | "Input" | "Select" | "Link" | "Code" | "Svg" | "Client" | PlatformWidget
   props: ModObject
   children?: (FunctionUiElement | string)[]
   press?: { plugin: string; handle: number }
@@ -220,6 +221,12 @@ export function validateFunctionUiActionLink(
 }
 
 const props: Record<FunctionUiNode["type"], readonly string[]> = {
+  List: ["label", "items"],
+  Table: ["label", "columns", "rows"],
+  Tree: ["label", "items"],
+  Chart: ["label", "series"],
+  Log: ["label", "entries"],
+  Form: ["key", "label", "fields", "values", "submitLabel"],
   Box: [
     "key",
     "flexDirection",
@@ -339,6 +346,18 @@ export function validateFunctionTree(value: unknown): asserts value is FunctionU
       fail()
     const item = node as unknown as FunctionUiNode
     const p = item.props
+    if (isPlatformWidget(item.type)) {
+      validatePlatformWidget(item.type, p)
+      if (item.children !== undefined || item.client !== undefined) fail()
+      if (item.type === "Form") {
+        if (!isModObject(item.press) || Object.keys(item.press).some(key => !["plugin", "handle"].includes(key)) ||
+          !text(item.press.plugin, 100) || !item.press.plugin || !Number.isSafeInteger(item.press.handle) || item.press.handle <= 0) fail()
+        const address = JSON.stringify([item.press!.plugin, p.key])
+        if (keys.has(address)) fail()
+        keys.add(address)
+      } else if (item.press !== undefined) fail()
+      return
+    }
     if (
       item.type === "Svg" &&
       (!text(p.source, 131072) ||

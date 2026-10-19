@@ -14,6 +14,14 @@ import { readProjectSource } from "./project-source"
 import { inspectProjectSource } from "./project-doctor"
 import { testProjectSource } from "./project-contract"
 import type { ClawActionDescriptor } from "../../../shared/mods/claw-actions"
+import { compileFunctionPlugin } from "../v2/loader"
+import { readPluginManifest } from "../../plugins/manifest"
+import { packageUsesSharedMods } from "../../harness-board/project-runtime/package-preflight"
+
+async function checkProjectExtensions(directory: string) {
+  const metadata = readPluginManifest(directory)?.manifest
+  if (metadata && packageUsesSharedMods(directory, metadata)) await compileFunctionPlugin(directory)
+}
 
 async function writeNewBundle(directory: string, bundle: AuthoringSourceBundle, guard = () => {}) {
   guard()
@@ -83,6 +91,7 @@ export async function testProjectPlugin(
     availableActions
   )
   if (!report.valid || !manifest) return { valid: false, doctor: report }
+  await checkProjectExtensions(source.root)
   return testProjectSource(source.bundle, manifest)
 }
 
@@ -105,6 +114,8 @@ export async function packProjectPlugin(
     availableActions
   )
   if (!report.valid || !manifest) throw Error("PROJECT_PACK_DOCTOR_FAILED")
+  await checkProjectExtensions(source.root)
+  guard()
   const tests = await testProjectSource(source.bundle, manifest)
   guard()
   if (!tests.valid) throw Error("PROJECT_PACK_CONTRACT_FAILED")
@@ -151,6 +162,8 @@ export async function prepareProjectDevelopment(
   await mkdir(output, { recursive: false })
   const packagePath = join(output, `package-${source.bundle.digest.slice(0, 12)}`)
   await writeNewBundle(packagePath, source.bundle, guard)
+  await checkProjectExtensions(packagePath)
+  guard()
   const workspace = join(output, "workspace")
   guard()
   await mkdir(workspace)

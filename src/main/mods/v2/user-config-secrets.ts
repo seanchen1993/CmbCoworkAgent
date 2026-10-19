@@ -107,4 +107,29 @@ export class FunctionUserConfigSecrets {
       throw new ModFunctionError("MODS_SECRET_STORAGE_FAILED")
     }
   }
+
+  /** Rebind an existing confidential value to a renamed key, entirely in main process. */
+  rename(workspace: string, plugin: string, from: string, to: string, sealed: string): string {
+    if (!this.available()) throw new ModFunctionError("MODS_SECRET_STORAGE_UNAVAILABLE")
+    try {
+      const envelope = parseModJson(this.protector!.decryptString(Buffer.from(sealed, "base64")))
+      if (
+        !isModObject(envelope) ||
+        !["string", "number", "boolean", "directory", "file"].includes(String(envelope.type)) ||
+        typeof envelope.multiple !== "boolean"
+      )
+        throw Error()
+      const field = {
+        type: envelope.type,
+        multiple: envelope.multiple,
+        title: "Sensitive field",
+        description: "",
+        sensitive: true
+      } as FunctionUserConfigField
+      const value = this.open(workspace, plugin, from, field, sealed)
+      return this.seal(workspace, plugin, to, field, value)
+    } catch {
+      throw new ModFunctionError("MODS_SECRET_STORAGE_INVALID")
+    }
+  }
 }

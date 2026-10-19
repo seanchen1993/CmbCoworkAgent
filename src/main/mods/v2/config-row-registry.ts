@@ -11,6 +11,8 @@ export interface FunctionConfigCell {
   read(): { value: FunctionConfigValue; revision: string }
   /** A synchronous host commit; no Hook or await can split compare from writing. */
   write(value: FunctionConfigValue): void
+  /** Host-only reset of an override, after the ordinary config.set middleware accepts it. */
+  reset?(): void
 }
 export interface FunctionConfigHandle extends Omit<FunctionConfigRow, "value" | "isLocked"> {
   storageKey: string
@@ -51,10 +53,13 @@ export class FunctionConfigRows {
     key: string,
     origin: FunctionConfigOrigin,
     value: FunctionConfigValue,
-    assertLive: () => void
+    assertLive: () => void,
+    nativeReset = false
   ) {
     const handle = this.rows.get(key)
     if (!handle) throw new ModFunctionError("MODS_CONFIG_UNKNOWN_KEY")
+    if (nativeReset && !handle.cell.reset)
+      throw new ModFunctionError("MODS_CONFIG_RESET_UNSUPPORTED")
     assertLive()
     const before = handle.cell.read()
     const raw = encodeModJson(before.value)
@@ -81,7 +86,8 @@ export class FunctionConfigRows {
             ? typeof received === "number" && Number.isFinite(received)
             : typeof received === "string" &&
               (handle.kind !== "choice" || handle.options?.includes(received) === true)
-      if (!fitsKind || !handle.validate(received))
+      if ((nativeReset ? encodeModJson(received) !== encodeModJson(value) : !fitsKind) ||
+        !handle.validate(received))
         return { deny: "The value does not fit this setting" }
       const current = handle.cell.read()
       if (current.revision !== before.revision || encodeModJson(current.value) !== raw)
@@ -90,7 +96,8 @@ export class FunctionConfigRows {
       // An uncertain write/read failure must not be retried by another next() on this receipt.
       attempted = true
       const changed = encodeModJson(received) !== raw
-      if (changed) handle.cell.write(structuredClone(received))
+      if (nativeReset) handle.cell.reset!()
+      else if (changed) handle.cell.write(structuredClone(received))
       const actual = handle.cell.read()
       if (
         encodeModJson(actual.value) !== encodeModJson(received) ||

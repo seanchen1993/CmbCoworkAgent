@@ -1,5 +1,5 @@
 import { registerFlowRuntimeAdmission } from "./runtime-admission"
-import { describe, expect, it } from "vitest"
+import { describe, expect, it, vi } from "vitest"
 import type {
   FlowDefinition,
   FlowRun,
@@ -25,6 +25,31 @@ const check = (id = "test"): FlowStep => ({
   check: "unit-test"
 })
 let number = 0
+it("waits for native admission settlement after the completed Flow releases its active owner", async () => {
+  const gate = Promise.withResolvers<void>()
+  const entered = Promise.withResolvers<void>()
+  const unregister = registerFlowRuntimeAdmission(async () => ({
+    run: (work) => work(),
+    settle: async () => { entered.resolve(); await gate.promise }
+  }))
+  try {
+    const f = fixture([check()])
+    const run = await f.start()
+    await entered.promise
+    expect(f.state.disposed).toBe(true)
+    expect(getLocalThreadRunLease(f.thread)).toBeUndefined()
+    let settled = false
+    const pending = f.manager.waitForSettlement(f.workspace, f.thread, run.id)
+      .then(() => { settled = true })
+    await Promise.resolve()
+    await Promise.resolve()
+    expect(settled).toBe(false)
+    gate.resolve()
+    await pending
+    expect(settled).toBe(true)
+  } finally { gate.resolve(); unregister() }
+})
+
 function fixture(steps: FlowStep[], overrides: Partial<FlowExecution> = {},
   options: { host?: boolean; maxExecutions?: number } = {}) {
   const settings = new Map<string, string>()
@@ -112,6 +137,58 @@ it("executes a bound saved copy after its project template changes and rejects a
 })
 const terminal = (run: FlowRun) =>
   ["complete", "failed", "cancelled", "interrupted"].includes(run.status)
+
+it("reads bounded live progress without writing every update and rejects late observations", async () => {
+  let report: NonNullable<Parameters<FlowExecution["execute"]>[1]["onProgress"]> | undefined
+  let finish!: () => void
+  const f = fixture([agent("live")], {
+    execute: async (_step, context) => {
+      report = context.onProgress
+      await new Promise<void>((resolve) => { finish = resolve })
+      return pass("real settled result")
+    }
+  }, { host: true })
+  const started = await f.start()
+  await vi.waitFor(() => expect(report).toBeDefined())
+  const durable = JSON.stringify([...f.settings])
+  for (let i = 0; i < 100; i++) report!({ phase: "model", text: "x".repeat(4000) + i })
+  expect(JSON.stringify([...f.settings])).toBe(durable)
+  const live = f.manager.run(f.workspace, f.thread, started.id)!
+  expect(live.attempts[0].progress?.text?.length).toBe(2000)
+  expect(live.attempts[0].result).toBeUndefined()
+  finish()
+  const settled = await wait(f, started.id, terminal)
+  expect(settled.status).toBe("complete")
+  expect(settled.attempts[0].result?.summary).toBe("real settled result")
+  const previous = JSON.stringify(f.manager.run(f.workspace, f.thread, started.id))
+  report!({ phase: "tool", toolName: "late" })
+  expect(JSON.stringify(f.manager.run(f.workspace, f.thread, started.id))).toBe(previous)
+})
+
+it("notifies again after physical cleanup releases the active workspace", async () => {
+  let release!: () => void
+  let disposing = false
+  const f = fixture([agent("work")], {
+    dispose: async () => {
+      disposing = true
+      await new Promise<void>((resolve) => { release = resolve })
+    }
+  }, { host: true })
+  const observations: boolean[] = []
+  f.host.changed = () => {
+    observations.push(f.manager.activeSummary(f.workspace, f.thread) !== null)
+  }
+  const started = await f.start()
+  await vi.waitFor(() => expect(disposing).toBe(true))
+  expect(f.manager.activeSummary(f.workspace, f.thread)?.status).toBe("running")
+  expect(getLocalThreadRunLease(f.thread)?.owner).toBe("mods")
+  expect(terminal(f.manager.run(f.workspace, f.thread, started.id)!)).toBe(false)
+  release()
+  expect((await wait(f, started.id, terminal)).status).toBe("complete")
+  expect(f.manager.activeSummary(f.workspace, f.thread)).toBeNull()
+  expect(getLocalThreadRunLease(f.thread)).toBeUndefined()
+  expect(observations.at(-1)).toBe(false)
+})
 
 it("completes two host steps at their exact execution budget without charging the summary receipt", async () => {
   const f = fixture([agent("first"), agent("second")], {}, { host: true, maxExecutions: 2 })

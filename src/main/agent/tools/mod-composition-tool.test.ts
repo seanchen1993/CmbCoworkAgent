@@ -84,7 +84,8 @@ describe("creator native composition tool", () => {
       "Review",
       0,
       "a".repeat(64),
-      expect.any(Function)
+      expect.any(Function),
+      { turnId: "run", signal: undefined }
     )
     expect(f.service.applySaved).toHaveBeenCalledWith(
       threadId,

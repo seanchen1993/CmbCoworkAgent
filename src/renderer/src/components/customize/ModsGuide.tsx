@@ -52,23 +52,26 @@ export function ModsGuide() {
           </p>
           <h2 className="text-xl font-semibold tracking-tight">给助手添加你需要的功能</h2>
           <p className="max-w-2xl text-sm leading-relaxed text-muted-foreground">
-            可以添加现成插件，也可以描述你想要的小功能。先核对并试用，满意后再保存使用。
+            日常任务直接在普通聊天中描述并发送。想改变助手功能时，切到创造者模式说明需求，核对后确认应用。
           </p>
         </div>
       </div>
       <div className="flex flex-wrap items-center justify-between gap-3 border-t pt-4">
         <p className="text-xs leading-relaxed text-muted-foreground">
-          想增加功能，在这里挑选；想搭配几个插件，去“助手组合”；想固定做事顺序，去“按步骤执行”。
+          创建、修改或组合功能，可以先用创造者模式描述；安装现成插件和手动配置保留在高级入口。
         </p>
-        <Button
-          size="sm"
-          variant="outline"
-          onClick={() => useAppStore.getState().setShowCustomizeView(true, "flows")}
-        >
-          <GitBranch className="mr-2 size-3.5" aria-hidden="true" />
-          管理执行步骤
-          <ArrowRight className="ml-2 size-3.5" aria-hidden="true" />
-        </Button>
+        <details className="text-xs">
+          <summary className="cursor-pointer text-muted-foreground">高级：手动管理任务方案</summary>
+          <Button
+            size="sm"
+            variant="outline"
+            onClick={() => useAppStore.getState().setShowCustomizeView(true, "flows")}
+          >
+            <GitBranch className="mr-2 size-3.5" aria-hidden="true" />
+            打开任务方案编辑器
+            <ArrowRight className="ml-2 size-3.5" aria-hidden="true" />
+          </Button>
+        </details>
       </div>
       <details className="group rounded-xl border bg-muted/20">
         <summary className="cursor-pointer rounded-xl px-4 py-3 text-sm font-medium focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">
@@ -78,7 +81,7 @@ export function ModsGuide() {
           />
           使用指南
           <span className="ml-2 text-xs font-normal text-muted-foreground">
-            安装、启用和查看结果
+            描述需求、确认应用和查看结果
           </span>
         </summary>
         <div className="border-t p-4">
@@ -90,40 +93,63 @@ export function ModsGuide() {
             </TabsList>
             <TabsContent value="start" className="space-y-4 text-sm">
               <p className="leading-relaxed text-muted-foreground">
-                想让助手按固定顺序做事：先为聊天选择项目目录，打开本应用和当前项目的功能开关，
-                再到“按步骤执行”选择现成流程、保存并运行。这个用法无需先安装插件。
+                在普通聊天里描述要完成什么，点击“发送消息”，再看聊天回复和“任务进展”。
+                想制作或调整功能时，在输入框切到创造者模式，直接说明想增加、修改或组合什么。
               </p>
-              <h3 className="font-medium">安装后怎么用？</h3>
               <ol className="list-decimal space-y-2 pl-5 text-muted-foreground marker:text-foreground">
-                <li>选择一个示例插件，或导入完整的 ZIP 压缩包、插件文件夹。</li>
-                <li>打开本应用的功能开关，为聊天选择项目目录，再打开当前项目的功能开关。</li>
+                <li>进入创造者模式；尚未选择本地项目时，先按提示选择目录。</li>
+                <li>用一句话说明需求并发送，助手会准备对应修改或组合。</li>
+                <li>需要新增权限时，核对页面显示的用途、权限和版本，再确认应用到这段聊天。</li>
                 <li>
-                  在插件卡片查看它要读取什么、执行什么，再点“授权以上能力”。更新插件后需重新核对。
+                  在聊天里实际使用并核对结果；要在其他聊天复用时，再说明“保存并在其他聊天复用”，确认对应保存卡片。
                 </li>
-                <li>回到聊天框，输入插件命令；按提示批准本次操作，然后查看返回结果。</li>
               </ol>
-              <div className="grid gap-3 sm:grid-cols-2">
-                <CommandExample command="/claw-info">
-                  安装并授权内置示例后，用这个命令查看正在使用的项目目录和聊天。
-                </CommandExample>
-                <CommandExample command="/claw-files">
-                  安装并授权内置示例后，用这个命令列出项目文件。
-                </CommandExample>
-              </div>
-              <p className="text-xs leading-relaxed text-muted-foreground">
-                粘贴命令并发送后才开始执行。需要读取文件或运行命令时，按页面提示确认。
-              </p>
+              <details className="rounded-xl border p-3">
+                <summary className="cursor-pointer font-medium">
+                  高级：安装现成插件并使用命令
+                </summary>
+                <div className="mt-3 space-y-4">
+                  <h3 className="font-medium">安装后怎么用？</h3>
+                  <ol className="list-decimal space-y-2 pl-5 text-muted-foreground marker:text-foreground">
+                    <li>选择一个示例插件，或导入完整的 ZIP 压缩包、插件文件夹。</li>
+                    <li>打开本应用的功能开关，为聊天选择项目目录，再打开当前项目的功能开关。</li>
+                    <li>
+                      在插件卡片查看它要读取什么、执行什么，再点“授权以上能力”。更新插件后需重新核对。
+                    </li>
+                    <li>回到聊天框，输入插件命令；按提示批准本次操作，然后查看返回结果。</li>
+                  </ol>
+                  <div className="grid gap-3 sm:grid-cols-2">
+                    <CommandExample command="/claw-info">
+                      安装并授权内置示例后，用这个命令查看正在使用的项目目录和聊天。
+                    </CommandExample>
+                    <CommandExample command="/claw-files">
+                      安装并授权内置示例后，用这个命令列出项目文件。
+                    </CommandExample>
+                  </div>
+                  <p className="text-xs leading-relaxed text-muted-foreground">
+                    粘贴命令并发送后才开始执行。需要读取文件或运行命令时，按页面提示确认。
+                  </p>
+                </div>
+              </details>
             </TabsContent>
             <TabsContent value="autobiz" className="space-y-4 text-sm">
               <div className="space-y-2">
                 <h3 className="font-medium">让助手先检查，再交给你确认</h3>
                 <p className="leading-relaxed text-muted-foreground">
-                  先打开带项目目录的聊天，再进入“按步骤执行”。从模板创建流程，写清每一步要做什么，保存后运行；执行记录会显示进度和结果。
+                  在普通聊天中说明要检查的文件、关注的问题和是否允许修改，再点击“发送消息”。在聊天或“任务进展”核对意见；涉及实际操作时，按原有提示确认。
                 </p>
                 <div className="rounded-xl border bg-background p-3 text-xs leading-relaxed">
-                  例如：完成修改 → 运行测试 → 检查代码 →
-                  人工确认。测试不通过时可回到修复步骤，通过检查后再继续。
+                  例如：“检查购物车文件的空列表处理，先给出发现和修改建议，暂不修改文件。”检查意见不等于测试通过。
                 </div>
+                <details className="rounded-xl border p-3 text-xs text-muted-foreground">
+                  <summary className="cursor-pointer font-medium">
+                    高级：手动选用固定任务方案
+                  </summary>
+                  <p className="mt-2 leading-relaxed">
+                    先在任务方案编辑器保存安排，再到“任务进展 → 高级设置 →
+                    高级：为下一条消息使用预设任务”明确选用，填写目标后点击“发送消息”。仅保存方案不会执行，普通发送不会自动运行已保存方案。
+                  </p>
+                </details>
               </div>
               <div className="space-y-3 border-t pt-4">
                 <h3 className="font-medium">需要更严格的代码检查？</h3>
@@ -163,7 +189,7 @@ export function ModsGuide() {
                 ],
                 [
                   "任务完成后，在哪里看结果？",
-                  "先看聊天回复，再到“当前助手 → 运行过程”查看步骤进度和结果。代码检查示例也可发送 /claw-review-status 查询。"
+                  "先看聊天回复和原任务卡，也可打开“任务进展”查看当前任务与结果。技术记录在排查详情中展开；代码检查示例也可发送 /claw-review-status 查询。"
                 ]
               ].map(([question, answer]) => (
                 <details key={question} className="rounded-lg border bg-background px-3 py-2.5">
@@ -200,7 +226,7 @@ export function ModsSetupProgress({
     : !globalLoaded
       ? "正在读取配置…"
       : !installed
-        ? "先选择要添加的插件。只想体验固定步骤时，无需安装插件：打开本应用和项目的功能开关，再去“按步骤执行”。"
+        ? "日常任务可直接回到普通聊天描述并发送；想添加功能可先进入创造者模式。需要安装现成插件时，再从这里选择。"
         : !globalEnabled
           ? "打开下方本应用的功能开关，再设置当前项目。"
           : !workspace
@@ -209,7 +235,7 @@ export function ModsSetupProgress({
               ? "打开下方项目开关，让灵件在这个项目中生效。"
               : !authorized
                 ? "在下方插件卡片查看所需权限，确认后授权，再回到聊天使用。"
-                : "设置已完成。按插件说明回到聊天使用；需要固定顺序时，打开“按步骤执行”。"
+                : "设置已完成。按插件说明回到聊天使用，在“任务进展”核对状态和结果；手动任务方案位于高级设置。"
   return (
     <div className="rounded-xl border bg-muted/20 p-4" data-mods-setup>
       <ol className="grid grid-cols-2 gap-3 sm:grid-cols-4" aria-label="插件设置进度">

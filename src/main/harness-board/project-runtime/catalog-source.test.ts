@@ -46,3 +46,20 @@ it("verifies a worker source independently and rejects tamper, scope drift and d
     rmSync(root, { recursive: true, force: true })
   }
 })
+import { RetainedPackageSnapshots } from "./package-snapshots"
+it("keeps an unopted original parent board context pinned without inventing a flow manifest", () => {
+  const root = mkdtempSync(join(tmpdir(), "parent-worker-source-"))
+  try {
+    const installed = join(root, "installed")
+    mkdirSync(join(installed, "board_core"), { recursive: true })
+    writeFileSync(join(installed, "plugin.json"), '{"name":"original","version":"1"}')
+    writeFileSync(join(installed, "board_core/board_config.json"), '{"source":"retained"}')
+    const snapshot = new RetainedPackageSnapshots(join(root, "snapshots")).capture(installed)
+    const plugin = { id: "original", name: "original", version: "1", enabled: true, path: installed } as PluginMetadata
+    writeFileSync(join(installed, "board_core/board_config.json"), '{"source":"changed"}')
+    expect(fixedCatalogPlugin("parent", plugin, { mode: "capabilities", projectId: "parent",
+      installedPluginId: "original", root: snapshot.root, packageDigest: snapshot.digest })?.path).toBe(snapshot.root)
+    expect(() => fixedCatalogPlugin("parent", { ...plugin, version: "2" }, { mode: "capabilities", projectId: "parent",
+      installedPluginId: "original", root: snapshot.root, packageDigest: snapshot.digest })).toThrow("SOURCE_CHANGED")
+  } finally { rmSync(root, { recursive: true, force: true }) }
+})

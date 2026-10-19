@@ -14,7 +14,7 @@ export interface ParameterField {
   key: string
   title: string
   description?: string
-  type: "string" | "number" | "integer" | "boolean"
+  type: "string" | "number" | "integer" | "boolean" | "array"
   required: boolean
   enum?: (string | number | boolean)[]
   schema: ModObject
@@ -52,11 +52,15 @@ export function parameterFields(schema?: ModObject): ParameterField[] {
   return Object.entries(schema.properties).flatMap(([key, child]) => {
     if (
       !object(child) ||
-      !["string", "number", "integer", "boolean"].includes(String(child.type)) ||
+      !["string", "number", "integer", "boolean", "array"].includes(String(child.type)) ||
       ["$ref", "allOf", "anyOf", "oneOf", "not", "const"].some((name) => child[name] !== undefined)
     )
       return []
     const type = child.type as ParameterField["type"]
+    const items = child.items
+    if (type === "array" && (!object(items) || items.type !== "string" ||
+      ["$ref", "allOf", "anyOf", "oneOf", "not", "const"].some((name) => items[name] !== undefined) ||
+      child.enum !== undefined)) return []
     const values = child.enum
     if (
       values !== undefined &&
@@ -122,11 +126,23 @@ export function parameterError(
     }
     const actual = value[field.key]
     if (
-      field.type === "integer"
+      field.type === "array" ? !Array.isArray(actual) || actual.some((item) => typeof item !== "string") : field.type === "integer"
         ? typeof actual !== "number" || !Number.isSafeInteger(actual)
         : typeof actual !== field.type
     )
       return `${field.title}：原值类型与声明不符，请修改或在 JSON 中修正。`
+    if (Array.isArray(actual)) {
+      if (typeof field.schema.minItems === "number" && actual.length < field.schema.minItems)
+        return `${field.title}：至少 ${field.schema.minItems} 项。`
+      if (typeof field.schema.maxItems === "number" && actual.length > field.schema.maxItems)
+        return `${field.title}：最多 ${field.schema.maxItems} 项。`
+      if (field.schema.uniqueItems === true && new Set(actual).size !== actual.length)
+        return `${field.title}：不能包含重复项。`
+      for (const item of actual) {
+        const error = parameterError({ item }, { type: "object", properties: { item: field.schema.items! } }, undefined)
+        if (error) return `${field.title}：${error}`
+      }
+    }
     if (field.enum && !field.enum.some((item) => item === actual))
       return `${field.title}：请选择声明中的值。`
     if (typeof actual === "string") {

@@ -218,10 +218,39 @@ it.each(["invalidate", "configuration"] as const)(
     const held = await f.configure(owner, "held", { held: true })
     const result = f.connect(owner)
     await waitFor(() => records().some(row => row.event === "boot" && row.revision === "held"))
-    if (change === "invalidate") await f.service.invalidate("fixture-held-initialize")
-    else await f.configure(owner, "replacement")
+    const heldPid = records().find((row) => row.event === "boot" && row.revision === "held")!.pid
+    let invalidated = false
+    const invalidating =
+      change === "invalidate"
+        ? track(
+            f.service.invalidate("fixture-held-initialize").then(() => {
+              invalidated = true
+            })
+          )
+        : undefined
+    if (invalidating) {
+      // Invalidation must fence publication immediately, but its cleanup ACK waits for the
+      // held initialization to settle. Release our gate before awaiting that ACK.
+      await Promise.resolve()
+      expect(invalidated).toBe(false)
+      expect(f.service.peekTools?.()).toBeNull()
+      expect(() => process.kill(heldPid, 0)).not.toThrow()
+    } else await f.configure(owner, "replacement")
     await writeFile(held.gate, "release")
     await expect(result).rejects.toThrow("MODS_MCP_CONTEXT_EXPIRED")
+    await invalidating
+    // This fixture owns a single stdio process, so check its physical exit as well as
+    // the empty cache before allowing a replacement connection to start.
+    await waitFor(() => {
+      try {
+        process.kill(heldPid, 0)
+        return false
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === "ESRCH") return true
+        throw error
+      }
+    })
+    if (invalidating) expect(invalidated).toBe(true)
     expect(f.service.peekTools?.()).toBeNull()
     expect(records().filter(row => row.event === "call")).toEqual([])
     const next = await f.connect(owner)

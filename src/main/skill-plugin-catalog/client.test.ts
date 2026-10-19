@@ -1,6 +1,7 @@
 import { execFile } from "node:child_process"
 import { EventEmitter } from "node:events"
 import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs"
+import { mkdir, rm, writeFile } from "node:fs/promises"
 import { createRequire } from "node:module"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
@@ -52,7 +53,7 @@ beforeAll(async () => {
 afterAll(async () => {
   await Promise.all(clients.map((client) => client.close()))
   for (const directory of temporaryDirectories) {
-    rmSync(directory, { recursive: true, force: true })
+    await rm(directory, { recursive: true, force: true })
   }
   rmSync(workerBuildDirectory, { recursive: true, force: true })
 }, 60_000)
@@ -387,6 +388,7 @@ worker.postMessage({
   }, 30_000)
 
   it("parses 20k skills plus a 2 MiB file off-main while pages stay bounded", async () => {
+    const started = performance.now()
     const root = mkdtempSync(join(tmpdir(), "cmb-skill-plugin-catalog-large-"))
     temporaryDirectories.push(root)
     const source = makeSource(root)
@@ -398,14 +400,19 @@ worker.postMessage({
       join(source.builtinSkillsDir, "SKILL.md"),
       `---\nname: oversized-root\ndescription: bounded\n---\n${"x".repeat(2 * 1024 * 1024)}`
     )
-    for (let index = 0; index < SKILL_PLUGIN_CATALOG_MAX_SKILLS - 1; index += 1) {
-      const directory = join(
-        source.builtinSkillsDir,
-        `skill-${String(index).padStart(5, "0")}`
-      )
-      mkdirSync(directory)
-      writeFileSync(join(directory, "SKILL.md"), `---\nname: skill-${index}\n---\n`)
-    }
+    let next = 0
+    await Promise.all(Array.from({ length: 8 }, async () => {
+      while (next < SKILL_PLUGIN_CATALOG_MAX_SKILLS - 1) {
+        const index = next++
+        const directory = join(
+          source.builtinSkillsDir,
+          `skill-${String(index).padStart(5, "0")}`
+        )
+        await mkdir(directory)
+        await writeFile(join(directory, "SKILL.md"), `---\nname: skill-${index}\n---\n`)
+      }
+    }))
+    const prepared = performance.now()
 
     const client = trackClient(
       new SkillPluginCatalogClient(
@@ -422,6 +429,7 @@ worker.postMessage({
       "renderer:large"
     )
     clearInterval(ticker)
+    const scanned = performance.now()
 
     expect(ticks).toBeGreaterThan(10)
     expect(page.skills).toHaveLength(128)
@@ -448,6 +456,7 @@ worker.postMessage({
       description: "bounded"
     })
     expect(reusedByOtherWindow.stats).toEqual(page.stats)
+    const cached = performance.now()
 
     await expect(
       client.resolvePreview(
@@ -463,6 +472,13 @@ worker.postMessage({
         "renderer:oversized-preview"
       )
     ).resolves.toEqual({ filePath: join(source.builtinSkillsDir, "SKILL.md") })
+    console.info("[SkillPluginCatalogPerf]", JSON.stringify({
+      skills: SKILL_PLUGIN_CATALOG_MAX_SKILLS,
+      preparationMs: Math.round(prepared - started),
+      coldReadMs: Math.round(scanned - prepared),
+      cachedReadMs: Math.round(cached - scanned),
+      previewMs: Math.round(performance.now() - cached)
+    }))
   }, 180_000)
 })
 

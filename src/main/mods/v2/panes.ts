@@ -31,6 +31,7 @@ import { FunctionUiResolveDrawing } from "./ui-resolve-drawing"
 import { nativeMarkdownLeaves, type FunctionMarkdownLinkRegistry,
   type FunctionMarkdownPublicationPlan } from "./markdown-link-registry"
 import { captureFunctionMarkdownDisplay } from "./markdown-display-scope"
+import { platformFormValues } from "../../../shared/mods/v2/platform-surfaces-widgets"
 
 export interface FunctionUiDispatch {
   onlyPlugin?: string
@@ -70,6 +71,8 @@ export interface PaneHost {
   assertLive(): void
   changed(scope?: ModUiChangeScope): void
   publish(value: ModJson): Promise<ModJson>
+  /** Native slot identity after this caller's complete synchronous lifecycle fence. */
+  assertSiteCurrent?(pane: FunctionPaneSnapshot): void
   site?(pane: FunctionPaneSnapshot): { component: string; props: ModObject; requestId?: string }
   renderCore?(input: ModObject): Promise<ModJson>
   validateTree?(tree: unknown): void
@@ -410,7 +413,15 @@ export class FunctionPanes {
         this.focus.cancel(key)
         this.scroll.cancel(key)
         this.changed(0, "panes")
-        await this.snapshot()
+        await this.snapshot(
+          (plugin, id) =>
+            this.panes.get(key) === pane &&
+            pane.generation === generation &&
+            pane.faultEpoch === epoch &&
+            !controller.signal.aborted &&
+            plugin === pane.plugin &&
+            id === pane.id
+        )
       }
     }
   }
@@ -448,7 +459,8 @@ export class FunctionPanes {
     return task
   }
 
-  snapshot(): Promise<FunctionPaneSnapshot[]> {
+  /** Each native read freezes its starting inventory before drawing or retiring any callback. */
+  snapshot(select?: (plugin: string, id: string) => boolean): Promise<FunctionPaneSnapshot[]> {
     return this.enqueue(async () => {
       type Candidate = {
         pane: Pane
@@ -477,7 +489,8 @@ export class FunctionPanes {
             candidate.pane.generation !== candidate.generation))
           throw new ModFunctionError("MODS_UI_DRAWING_STALE")
         // Native request identity is checked by the slot registry on every async boundary.
-        this.host.site?.(candidate.pane)
+        if (this.host.assertSiteCurrent) this.host.assertSiteCurrent(candidate.pane)
+        else this.host.site?.(candidate.pane)
       }
       const checkedTree = (tree: unknown, component: string, legacy = false): FunctionUiElement => {
         validateFunctionTree(tree)
@@ -491,7 +504,10 @@ export class FunctionPanes {
         return normalized
       }
       try {
-        for (const pane of this.panes.values()) {
+        const selected = [...this.panes.values()].filter(
+          (pane) => !select || select(pane.plugin, pane.id)
+        )
+        for (const pane of selected) {
           const fresh = pane.dirty || pane.retryDrawing === true || !pane.nativeDrawing
           const candidate = {
             pane, epoch: pane.faultEpoch,
@@ -932,7 +948,7 @@ export class FunctionPanes {
               ? "onSubmit"
               : "onInput"
       if (
-        node.type !== "Markdown" && node.type !==
+        node.type !== "Markdown" && !(node.type === "Form" && action.kind === "submit") && node.type !==
         (action.kind === "press" ? "Button" : action.kind === "select" ? "Select" : "Input")
       )
         throw new ModFunctionError("MODS_UI_ACTION_INVALID")
@@ -959,6 +975,7 @@ export class FunctionPanes {
           signal: controller.signal,
           core: async (input, signal): Promise<ModJson> => {
             signal.throwIfAborted()
+            if (node.type === "Form") platformFormValues(node.props, String(input.value ?? ""))
             if (
               node.type === "Select" &&
               !(node.props.options as ModObject[]).some((option) => option.value === input.value)

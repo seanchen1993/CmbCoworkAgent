@@ -1,8 +1,10 @@
 import { createHash, randomUUID } from "crypto"
 import {
   existsSync,
+  lstatSync,
   readdirSync,
   readFileSync,
+  realpathSync,
   statSync,
   writeFileSync
 } from "fs"
@@ -1949,6 +1951,8 @@ export interface WorkflowRunListOptions {
   cursor?: string | null
   limit?: number
   overlays?: readonly WorkflowRunSummary[]
+  /** Observation must report an unavailable newest row instead of an empty/older result. */
+  requireCompletePage?: boolean
 }
 
 const workflowRunIndexCaches = new Map<string, WorkflowRunIndexCache>()
@@ -2824,6 +2828,8 @@ export async function listWorkflowRunsPage(
     }
   )
   const runs = loaded.filter((summary): summary is WorkflowRunSummary => summary !== null)
+  if (options.requireCompletePage && runs.length !== selected.length)
+    throw new Error("WORKFLOW_RUN_SUMMARY_UNAVAILABLE")
   return {
     runs,
     nextCursor: selectedPage.nextCursor
@@ -4427,6 +4433,25 @@ export function createWorkflowRunStore(options: {
         if (disposedRunDirs.has(runDir)) await sweepRacedRunDir(runDir)
         return true
       }
+      // Bind this write to the directory we actually opened for publication.
+      // A retry must not follow a same-path replacement into another owner's run.
+      const parent = lstatSync(runDir, { bigint: true })
+      const canonicalParent = realpathSync(runDir)
+      const assertPublishOwner = (): void => {
+        if (isStaleWriter()) throw new Error("WORKFLOW_RUN_WRITE_OWNER_CHANGED")
+        const current = lstatSync(runDir, { bigint: true })
+        if (
+          !parent.isDirectory() ||
+          parent.isSymbolicLink() ||
+          !current.isDirectory() ||
+          current.isSymbolicLink() ||
+          current.dev !== parent.dev ||
+          current.ino !== parent.ino ||
+          realpathSync(runDir) !== canonicalParent
+        ) {
+          throw new Error("WORKFLOW_RUN_WRITE_OWNER_CHANGED")
+        }
+      }
       // Journal lives in a SEPARATE sidecar so run.json stays small: get-run /
       // hydrate / history scan / mark-delivered parse run.json without paying for a
       // (potentially tens-of-MB) journal they never use. Only resume reads it back
@@ -4467,7 +4492,22 @@ export function createWorkflowRunStore(options: {
         lastWrittenJournalVersion = journalVersionAtWrite
       }
       await writeFile(`${path}.tmp`, json)
-      await rename(`${path}.tmp`, path)
+      for (let attempt = 0; ; attempt += 1) {
+        assertPublishOwner()
+        try {
+          await rename(`${path}.tmp`, path)
+          break
+        } catch (error) {
+          const code = (error as NodeJS.ErrnoException).code
+          if (attempt >= 5 || !["EACCES", "EBUSY", "EPERM"].includes(code ?? "")) {
+            throw error
+          }
+          assertPublishOwner()
+          await new Promise<void>((resolve) => setTimeout(resolve, 5 * 2 ** attempt))
+          assertPublishOwner()
+        }
+      }
+      assertPublishOwner()
       if (withBak) {
         // .bak is only written on the final flush — mid-run the atomic
         // tmp+rename already protects the primary file, and skipping the

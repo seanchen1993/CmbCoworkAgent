@@ -111,6 +111,7 @@ const parentTargetExecutions = new WeakMap<FunctionConversationTarget, ParentTar
 export interface FunctionConversationNativeParentTargetExecution {
   assertCurrent(): void
   assertDataCurrent(): void
+  captureIndependentCurrent(): () => void
 }
 
 function captureParentBackendExecution(backend: FunctionConversationBackend,
@@ -196,8 +197,8 @@ function assertEntryFull(entry: RecordEntry, archived: boolean, dispatch: EntryF
     fail("MODS_CONVERSATION_AUTHORITY_CHANGED")
 }
 
-function assertParentTargetData(record: ParentTargetExecution): void {
-  if (record.failed || Reflect.apply(weakGet, parentTargetExecutions, [record.target]) !== record)
+function assertParentTargetData(record: ParentTargetExecution, independent = false): void {
+  if ((!independent && record.failed) || Reflect.apply(weakGet, parentTargetExecutions, [record.target]) !== record)
     fail("MODS_CONVERSATION_TARGET_CHANGED")
   const original = Reflect.apply(weakGet, actualRegistryInstances, [record.registry]) as
     ReturnType<typeof actualRegistryInstances.get>
@@ -232,7 +233,8 @@ function assertParentTargetData(record: ParentTargetExecution): void {
     Reflect.apply(weakGet, original.records, [entry.backend.identity]) !== record.entry ||
     Reflect.apply(weakGet, parentBackendExecutions, [entry.backend]) !== record.backend)
     fail("MODS_CONVERSATION_TARGET_CHANGED")
-  record.backend.owner.assertDataCurrent()
+  if (independent) record.backend.owner.assertIndependentDataCurrent()
+  else record.backend.owner.assertDataCurrent()
   record.storeExecution.assertDataCurrent()
   Reflect.apply(signalThrowIfAborted, entry.backend.signal, [])
   Reflect.apply(signalThrowIfAborted, entry.controllerSignal, [])
@@ -271,6 +273,21 @@ export function readFunctionConversationNativeParentTargetExecution(registry: Fu
     catch (error) { record.failed = true; throw error }
   }
   const view: FunctionConversationNativeParentTargetExecution = Object.freeze({ assertDataCurrent,
+    captureIndependentCurrent() {
+      view.assertCurrent()
+      let reading = false, failed = false
+      return () => {
+        if (reading || failed) { failed = true; fail("MODS_CONVERSATION_TARGET_CHANGED") }
+        reading = true
+        try {
+          assertParentTargetData(record, true)
+          backend.owner.independentCurrent()
+          storeExecution.assertCurrent(actualBackend.ref)
+          assertParentTargetData(record, true)
+        } catch (error) { failed = true; throw error }
+        finally { reading = false }
+      }
+    },
     assertCurrent() {
       if (record.reading || record.failed) { record.failed = true; fail("MODS_CONVERSATION_TARGET_CHANGED") }
       record.reading = true

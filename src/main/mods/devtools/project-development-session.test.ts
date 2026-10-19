@@ -1,4 +1,4 @@
-import { readFile, rm, writeFile } from "node:fs/promises"
+import { readFile, readdir, rm, writeFile } from "node:fs/promises"
 import { basename, dirname, join, resolve } from "node:path"
 import { tmpdir } from "node:os"
 import { afterEach, expect, it, vi } from "vitest"
@@ -46,20 +46,20 @@ async function fixture() {
   return { sessions, draft, save }
 }
 
-it("updates the same idle preview while keeping previous package bytes and workspace", async () => {
+it("updates the same idle preview while retaining previous package bytes and separating its workspace", async () => {
   const { sessions, save } = await fixture()
   const first = sessions.developmentStatus(scope, "preview")!
   const previousBytes = await readFile(join(first.packagePath, "skills/draft/SKILL.md"), "utf8")
   const next = await save(1, "\nNew version instructions.\n")
   expect(next.development).toMatchObject({
     devId: first.devId,
-    workspace: first.workspace,
     currentRevision: 2,
     activeRuns: 0,
     pendingRevision: null,
     updateState: "current"
   })
   expect(next.development!.packagePath).not.toBe(first.packagePath)
+  expect(next.development!.workspace).not.toBe(first.workspace)
   expect(await readFile(join(first.packagePath, "skills/draft/SKILL.md"), "utf8")).toBe(
     previousBytes
   )
@@ -67,6 +67,28 @@ it("updates the same idle preview while keeping previous package bytes and works
     valid: true
   })
   expect(sessions.list(scope)[0].development?.currentRevision).toBe(2)
+})
+
+it("allocates an empty private workspace for every native trial and retains earlier artifacts", async () => {
+  const { sessions, save } = await fixture()
+  const first = sessions.acquireDevelopment(scope, "preview", 1, () => undefined)
+  await writeFile(join(first.snapshot.workspace, "draft.md"), "Earlier goal output")
+  first.release()
+  const second = sessions.acquireDevelopment(scope, "preview", 1, () => undefined)
+  expect(second.snapshot.workspace).not.toBe(first.snapshot.workspace)
+  expect(second.snapshot.packagePath).toBe(first.snapshot.packagePath)
+  expect(await readdir(second.snapshot.workspace)).toEqual([])
+  expect(await readFile(join(first.snapshot.workspace, "draft.md"), "utf8")).toBe(
+    "Earlier goal output"
+  )
+  expect(sessions.developmentStatus(scope, "preview")?.workspace).toBe(second.snapshot.workspace)
+  second.release()
+  await save(1, "\nA new version.\n")
+  const third = sessions.acquireDevelopment(scope, "preview", 2, () => undefined)
+  expect(third.snapshot.workspace).not.toBe(second.snapshot.workspace)
+  expect(third.snapshot.packagePath).not.toBe(second.snapshot.packagePath)
+  expect(await readdir(third.snapshot.workspace)).toEqual([])
+  third.release()
 })
 
 it("pins an active preview and promotes only the newest queued revision after settlement", async () => {

@@ -3,6 +3,7 @@ import { existsSync, mkdirSync, writeFileSync } from "node:fs"
 import { resolve } from "node:path"
 import { build } from "esbuild"
 import { chromium } from "playwright"
+import { PLATFORM_EXAMPLES } from "../src/main/mods/community-examples"
 
 interface CommunityExamplesFixtureWindow extends Window {
   fixture: {
@@ -31,7 +32,7 @@ import{OfficialSparksExamples}from${JSON.stringify(entry)};
 import{parseClawProfile}from"./src/shared/mods/claw";
 const root=createRoot(document.getElementById("root"));let active=true,key=0,calls=[],claw,status,globalOn,failGrant=false,hold=false,release,holdList=false,releaseList,thread="thread",workspace="c:/owned";
 const cap=name=>({pluginId:name+"-uuid",name,digest:"a".repeat(64)});
-const examples=[['token-weather','用量天气'],['replay-theater','修改回放'],['blast-radius','危险命令确认']].map(([id,title])=>({id,title,pluginName:id,description:title+'的中文说明',usage:'在当前聊天中使用'+title,commit:'a'.repeat(40),upstreamUrl:'https://example.invalid/'+id,...(id==='blast-radius'?{}:{conflictNote:'天气与回放占用同一区域，请分开应用。'})}));
+const examples=[...${JSON.stringify(PLATFORM_EXAMPLES)},...([['token-weather','用量天气'],['replay-theater','修改回放'],['blast-radius','危险命令确认']].map(([id,title])=>({id,title,pluginName:id,description:title+'的中文说明',usage:'在当前聊天中使用'+title,commit:'a'.repeat(40),upstreamUrl:'https://example.invalid/'+id,...(id==='blast-radius'?{}:{conflictNote:'天气与回放占用同一区域，请分开应用。'})})))];
 const mount=(replace=true)=>root.render(<div data-active={active}><OfficialSparksExamples active={active} key={replace?++key:key} threadId={thread} workspaceHint={workspace} onReturnToChat={()=>calls.push(['return'])}/></div>);
 const reset=(mode='normal')=>{active=true;holdList=mode==='held-list';releaseList=undefined;calls=[];failGrant=false;hold=false;thread='thread';workspace='c:/owned';globalOn=mode!=='disabled';
 status={workspace,enabled:globalOn,outputPolicy:true,mods:[],diagnostics:[],functionMods:[{...cap('other'),state:'ready',capabilities:[]},{...cap('token-weather'),state:'ready',capabilities:['ui.resolve']}]};
@@ -104,7 +105,7 @@ window.fixture={remount:()=>mount(),reset,deferList:()=>reset('held-list'),listP
       await click("确认并使用")
     }
     await page.getByRole("heading", { name: "挑一个小帮手" }).waitFor()
-    assert.equal(await page.getByRole("article").count(), 3)
+    assert.equal(await page.getByRole("article").count(), 8)
     assert.deepEqual((await get()).calls, [])
     await card("用量天气").locator("summary").click()
     await card("用量天气").getByRole("button", { name: "查看官方源码", exact: true }).click()
@@ -149,6 +150,54 @@ window.fixture={remount:()=>mount(),reset,deferList:()=>reset('held-list'),listP
     await card("修改回放").getByRole("button", { name: "正在使用" }).click()
     await page.getByText(/已在当前聊天使用/).waitFor()
     assert.equal((await get()).calls.filter((row) => row[0] !== "install").length, writes)
+
+    await call("reset")
+    await card("任务能力提供方").locator("summary").click()
+    assert(
+      await card("任务能力提供方")
+        .getByText(/来源：CMBDevClaw 本工程示例/)
+        .isVisible()
+    )
+    assert.equal(
+      await card("任务能力提供方")
+        .getByText(/Anthropic/)
+        .count(),
+      0
+    )
+    assert.equal(
+      await card("任务能力提供方").getByRole("button", { name: "查看官方源码" }).count(),
+      0
+    )
+    await start("任务能力提供方")
+    assert.deepEqual(
+      (await get()).calls.map((row) => row[0]),
+      ["install"]
+    )
+    await confirm()
+    await card("任务能力提供方").getByRole("button", { name: "正在使用" }).waitFor()
+    await start("个人任务工作台")
+    assert.equal((await get()).calls.filter((row) => row[0] === "grant").length, 1)
+    await confirm()
+    await card("个人任务工作台").getByRole("button", { name: "正在使用" }).waitFor()
+    state = await get()
+    assert.deepEqual(
+      state.claw.active.capabilities.map((row) => row.name),
+      ["other", "token-weather", "task-workbench-provider", "task-workbench-consumer"]
+    )
+    assert.equal(state.calls.filter((row) => row[0] === "grant").length, 2)
+    assert.deepEqual(state.claw.active.models, { default: "chosen", roles: { Explore: "fast" } })
+    await card("前缀提醒").locator("summary").click()
+    assert(
+      await card("前缀提醒")
+        .getByText(/每个处理点选择一个替代实现并确认应用/)
+        .isVisible()
+    )
+    await card("编辑提醒").locator("summary").click()
+    assert(
+      await card("编辑提醒")
+        .getByText(/默认文件 edit-reminder.txt 只创建一次/)
+        .isVisible()
+    )
 
     await call("disabled")
     await start("危险命令确认")
@@ -259,7 +308,7 @@ window.fixture={remount:()=>mount(),reset,deferList:()=>reset('held-list'),listP
         await page.locator('[data-active="true"]').waitFor()
       }
       await page.getByRole("article", { name: "用量天气", exact: true }).waitFor()
-      assert.equal(await page.getByRole("article").count(), 3)
+      assert.equal(await page.getByRole("article").count(), 8)
       assert.equal(await page.getByRole("alert").count(), 0)
       assert.equal(await page.getByRole("dialog").count(), 0)
       assert.deepEqual((await get()).calls, [])
@@ -272,7 +321,9 @@ window.fixture={remount:()=>mount(),reset,deferList:()=>reset('held-list'),listP
         {
           passed: true,
           checks: [
-            "three Chinese cards; no initial writes",
+            "eight Chinese cards with honest upstream and local provenance; no initial writes",
+            "provider and consumer need separate explicit consent and preserve current profile",
+            "behavior preview and repeatable file demo guidance",
             "exact consent and conflict cancellation",
             "preserved profile; same-version no-op",
             "pin then grant then apply then enable",
@@ -290,7 +341,7 @@ window.fixture={remount:()=>mount(),reset,deferList:()=>reset('held-list'),listP
         2
       )
     )
-    console.log(`PASS official examples browser: 12 scenarios; ${output}`)
+    console.log(`PASS official examples browser: 14 scenarios; ${output}`)
   } finally {
     await browser.close()
   }

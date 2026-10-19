@@ -15,6 +15,8 @@ import {
 } from "../../harness-board/project-runtime/action-input"
 import { PROJECT_ACTION_LOCK_PATH } from "../../../shared/project-runtime/action-bindings"
 import { compileProjectHarness, HARNESS_SOURCE_PATH } from "./project-harness"
+import { parsePluginCapabilities } from "../../../shared/plugin-capabilities"
+import { assertProjectPackageExtensions } from "./project-package-extensions"
 
 export interface ProjectDoctorReport {
   valid: boolean
@@ -46,6 +48,26 @@ export function inspectProjectSource(
     report.diagnostics.push({ code, message, ...(path ? { path } : {}) })
   }
   const get = (path: string) => bundle.files.find((file) => file.path === path)?.text
+  const capabilityText = get("devclaw.capabilities.json")
+  if (capabilityText !== undefined) {
+    try {
+      const capabilities = parsePluginCapabilities(JSON.parse(capabilityText))!
+      for (const capability of capabilities.capabilities) {
+        if (!get(capability.entry))
+          issue(
+            "PROJECT_CAPABILITY_ENTRY_MISSING",
+            "能力引用的技能或流程文件不存在。",
+            capability.entry
+          )
+      }
+    } catch {
+      issue(
+        "PROJECT_CAPABILITIES_INVALID",
+        "能力声明格式不正确，请检查使用范围和依赖。",
+        "devclaw.capabilities.json"
+      )
+    }
+  }
   let manifest: ProjectRuntimeManifest
   try {
     manifest = parseProjectRuntimeManifest(
@@ -88,7 +110,8 @@ export function inspectProjectSource(
       typeof plugin !== "object" ||
       Array.isArray(plugin) ||
       Object.keys(plugin).some(
-        (key) => !["name", "version", "description", "author"].includes(key)
+        (key) => !["name", "version", "description", "author", "mods", "hooks", "mcpServers",
+          "userConfig", "userConfigSchema", "skills", "cmbCompatibility"].includes(key)
       ) ||
       !("name" in plugin) ||
       plugin.name !== manifest.plugin.id ||
@@ -101,6 +124,8 @@ export function inspectProjectSource(
         "plugin.json"
       )
     }
+    if (plugin && typeof plugin === "object" && !Array.isArray(plugin))
+      assertProjectPackageExtensions(plugin as Record<string, unknown>, get)
   } catch {
     issue("PROJECT_PLUGIN_INVALID", "插件元数据无效。", "plugin.json")
   }

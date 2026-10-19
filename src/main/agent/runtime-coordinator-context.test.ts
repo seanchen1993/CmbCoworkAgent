@@ -1,6 +1,6 @@
 import { readFileSync } from "node:fs"
 import ts from "typescript"
-import { expect, it } from "vitest"
+import { expect, it, vi } from "vitest"
 
 const source = ts.createSourceFile(
   "runtime.ts",
@@ -94,6 +94,10 @@ it.each(["initial", "failover", "handoff"])(
     }
     visit(source)
     expect(calls).toHaveLength(3)
+    const workerAccounting = evaluate(initializer("workerAccounting"), {
+      creatorAccounting: undefined, threadId: "parent", workerInput, workspacePath: "/worker-worktree"
+    })
+    expect(workerAccounting).toBeUndefined()
     const options = evaluate(calls[["initial", "failover", "handoff"].indexOf(stage)], {
       workerInput,
       workerHarnessContext: inherited,
@@ -115,6 +119,8 @@ it.each(["initial", "failover", "handoff"])(
       clawSources: undefined,
       workerHookScope: undefined,
       workerRuntimeTraceContext: undefined,
+      creatorAccounting: undefined,
+      workerAccounting,
       workerOnHookResult: undefined,
       onFailureFuseNotice: undefined
     })
@@ -125,9 +131,39 @@ it.each(["initial", "failover", "handoff"])(
     expect(options.approvalThreadId).toBe("parent")
     expect(options.enableAgentsPrompt).toBe(false)
     expect(options.disableSubagents).toBe(true)
+    expect(options.creatorAccounting).toBe(workerAccounting)
     expect(options.filesystemAccess.workload).toBe(stage === "handoff" ? "read_only" : "verify")
   }
 )
+
+it("captures one worker billing parent before initial/failover/handoff and reuses that exact receipt", () => {
+  const workerInput = { workerThreadId: "actual-worker", abortSignal: new AbortController().signal }
+  const receipt = Object.freeze({ billingOnly: true })
+  const forChild = vi.fn(() => receipt)
+  const workerAccounting = evaluate(initializer("workerAccounting"), {
+    creatorAccounting: { forChild }, threadId: "parent", workerInput, workspacePath: "/owned-root"
+  })
+  expect(workerAccounting).toBe(receipt)
+  expect(forChild).toHaveBeenCalledExactlyOnceWith("parent", "actual-worker", "/owned-root", undefined, workerInput.abortSignal)
+  const bindings: ts.PropertyAssignment[] = []
+  const visit = (node: ts.Node): void => {
+    if (ts.isCallExpression(node) && node.expression.getText(source) === "createAgentRuntime") {
+      const options = node.arguments[0]
+      if (options && ts.isObjectLiteralExpression(options) && options.properties.some(property =>
+        ts.isSpreadAssignment(property) && property.expression.getText(source) === "workerHarnessContext")) {
+        const binding = options.properties.find((property): property is ts.PropertyAssignment =>
+          ts.isPropertyAssignment(property) && property.name.getText(source) === "creatorAccounting")
+        if (!binding) throw Error("Missing actual worker accounting binding")
+        bindings.push(binding)
+      }
+    }
+    ts.forEachChild(node, visit)
+  }
+  visit(source)
+  expect(bindings).toHaveLength(3)
+  for (const binding of bindings) expect(evaluate(binding.initializer, { workerAccounting })).toBe(receipt)
+  expect(forChild).toHaveBeenCalledOnce()
+})
 
 it.each([true, false])(
   "does not duplicate resolved plugin knowledge in coordinator roles (project=%s)",

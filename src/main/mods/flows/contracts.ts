@@ -16,6 +16,7 @@ export interface FlowStepContext {
   run: FlowRun
   executionId: string
   signal: AbortSignal
+  onProgress?(progress: Omit<NonNullable<FlowAttempt["progress"]>, "updatedAt">): void
 }
 
 /** Host adapters retain real runtime authority; the engine never constructs one. */
@@ -70,6 +71,8 @@ export interface FlowHost {
   changed(threadId: string): void
 }
 export interface FlowPersistence {
+  /** Host-only original execution facts; never a serialized guest result or UI API. */
+  recordActionResult?(run: FlowRun, attempt: FlowAttempt, result: FlowStepResult): void
   reserveRecovery?(
     workspace: string,
     threadId: string,

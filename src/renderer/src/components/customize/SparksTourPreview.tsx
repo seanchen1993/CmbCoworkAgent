@@ -189,7 +189,7 @@ export function SparksTourPreview({
           </div>
           {stage === 3 && (
             <div className="mt-2 rounded border border-dashed p-2 text-xs">
-              下一步：安排两个步骤，再发送任务
+              高级用法：手动保存并明确选用任务方案后，再发送任务
             </div>
           )}
         </Card>
@@ -197,7 +197,7 @@ export function SparksTourPreview({
       break
     case 3:
       content = (
-        <Card title="运行过程 · 两步检视">
+        <Card title="高级方案演示 · 两步检视">
           <ol className="space-y-2" aria-label="演示流程节点">
             <Node number={1} title="Autobiz · 读取当前文件" state={readingState} />
             <li className="pl-7 text-[11px] text-muted-foreground">
@@ -297,22 +297,24 @@ export function SparksTourPreview({
       break
     default:
       content = (
-        <Card title="当前助手 · 购物车检视助手">
+        <Card title="任务进展 · 购物车检查">
           <div className="mb-2 flex flex-wrap gap-2 text-xs">
-            <span className={stage < 2 ? "rounded bg-primary/10 px-2 py-1" : badgeClass}>设置</span>
+            <span className={stage < 2 ? "rounded bg-primary/10 px-2 py-1" : badgeClass}>
+              当前任务
+            </span>
             <span className={stage >= 2 ? "rounded bg-primary/10 px-2 py-1" : badgeClass}>
-              运行过程
+              结果
             </span>
           </div>
           {stage === 0 ? (
             <div className="grid grid-cols-2 gap-2 text-xs">
-              <div className="rounded border p-2">资料：Autobiz</div>
-              <div className="rounded border p-2">检视：Review</div>
+              <div className="rounded border p-2">普通聊天：直接描述需求</div>
+              <div className="rounded border p-2">创造者模式：调整助手功能</div>
             </div>
           ) : stage === 1 ? (
             <div className="space-y-2">
               <Bubble who="你">检查购物车文件的空列表处理</Bubble>
-              <div className={badgeClass}>发送方式：按步骤执行 · 尚未发送</div>
+              <div className={badgeClass}>描述需求 → 发送消息</div>
             </div>
           ) : (
             <ol className="space-y-2">
@@ -323,7 +325,7 @@ export function SparksTourPreview({
           )}
           {stage === 2 && (
             <div className="mt-2 rounded border border-dashed p-2 text-xs">
-              插件面板入口：回放 · 看板（仅有面板的插件显示）
+              原任务卡保留进度和结果；插件面板可在“任务进展 → 结果”查看
             </div>
           )}
           {stage === 3 && (

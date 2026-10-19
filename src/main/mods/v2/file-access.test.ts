@@ -1,9 +1,12 @@
 import { mkdir, mkdtemp, realpath, rename, rm, symlink, writeFile } from "node:fs/promises"
+import { readFileSync } from "node:fs"
 import { join } from "node:path"
 import { tmpdir } from "node:os"
 import { afterEach, expect, it, vi } from "vitest"
 import { FUNCTION_READ_LIMIT, ProjectFunctionFiles } from "./file-access"
 import { filterModData } from "../publication"
+import { ModFunctionError } from "../../../shared/mods/v2/contracts"
+import type { ModJson } from "../../../shared/mods/types"
 
 const roots: string[] = []
 afterEach(async () => {
@@ -34,6 +37,68 @@ async function fixture() {
   }
 }
 
+it("rejects real source/knowledge changes during native read authorization before reading or publishing", async () => {
+  const f = await fixture()
+  await writeFile(join(f.project, "private.txt"), "not-published")
+  for (const changed of ["PROJECT_KNOWLEDGE_CHANGED", "PROJECT_SOURCE_CHANGED"]) {
+    const guarded = join(
+      f.root,
+      changed === "PROJECT_KNOWLEDGE_CHANGED" ? "knowledge.md" : "source.ts"
+    )
+    await writeFile(guarded, "original")
+    const publish = vi.fn(async (value: ModJson) => value)
+    const full = vi.fn(() => {
+      if (readFileSync(guarded, "utf8") !== "original") throw new ModFunctionError(changed)
+    })
+    const files = new ProjectFunctionFiles(
+      f.project,
+      () => {},
+      publish,
+      async () => {
+        await writeFile(guarded, "changed-during-approval")
+        return { decision: "allow" }
+      },
+      full
+    )
+    await expect(files.run("fs.read", "private.txt", f.signal)).rejects.toMatchObject({
+      code: changed
+    })
+    expect(full).toHaveBeenCalled()
+    expect(publish).not.toHaveBeenCalled()
+  }
+})
+
+it("checks full content again after mandatory publication without scanning every directory entry", async () => {
+  const f = await fixture()
+  await writeFile(join(f.project, "value.txt"), "original")
+  const full = vi.fn()
+  const files = new ProjectFunctionFiles(
+    f.project,
+    () => {},
+    async (value) => value,
+    undefined,
+    full
+  )
+  await files.run("fs.list", ".", f.signal)
+  expect(full).toHaveBeenCalledTimes(3)
+  let current = true
+  const revoked = new ProjectFunctionFiles(
+    f.project,
+    () => {},
+    async (value) => {
+      current = false
+      return value
+    },
+    undefined,
+    () => {
+      if (!current) throw new ModFunctionError("PROJECT_CONTENT_CHANGED")
+    }
+  )
+  await expect(revoked.run("fs.read", "value.txt", f.signal)).rejects.toMatchObject({
+    code: "PROJECT_CONTENT_CHANGED"
+  })
+})
+
 it("reads UTF-8 files, sorts directory entries and returns real metadata", async () => {
   const f = await fixture()
   await writeFile(join(f.project, "b.txt"), "你好")
@@ -58,12 +123,17 @@ it("publishes exact binary bytes and explicitly refuses policy suppression", asy
   const f = await fixture()
   const bytes = Buffer.from([0, 255, 192, 128, 10])
   await writeFile(join(f.project, "data.bin"), bytes)
-  expect(await f.files.run("fs.read", "data.bin", f.signal, { as: "bytes" }))
-    .toEqual({ base64: bytes.toString("base64") })
-  const protectedFiles = new ProjectFunctionFiles(f.project, () => {},
-    async value => filterModData(value, true))
-  await expect(protectedFiles.run("fs.read", "data.bin", f.signal, { as: "bytes" }))
-    .rejects.toThrow("MODS_FS_BYTES_POLICY")
+  expect(await f.files.run("fs.read", "data.bin", f.signal, { as: "bytes" })).toEqual({
+    base64: bytes.toString("base64")
+  })
+  const protectedFiles = new ProjectFunctionFiles(
+    f.project,
+    () => {},
+    async (value) => filterModData(value, true)
+  )
+  await expect(
+    protectedFiles.run("fs.read", "data.bin", f.signal, { as: "bytes" })
+  ).rejects.toThrow("MODS_FS_BYTES_POLICY")
 })
 
 it("keeps byte reads behind path, size, cancellation and publication revocation checks", async () => {
@@ -71,19 +141,27 @@ it("keeps byte reads behind path, size, cancellation and publication revocation 
   const options = { as: "bytes" as const }
   await writeFile(join(f.project, "data.bin"), Buffer.from([0, 255]))
   await writeFile(join(f.project, "large"), Buffer.alloc(FUNCTION_READ_LIMIT + 1))
-  await expect(f.files.run("fs.read", "../outside", f.signal, options))
-    .rejects.toThrow("MODS_FS_OUTSIDE_PROJECT")
-  await expect(f.files.run("fs.read", "large", f.signal, options))
-    .rejects.toThrow("MODS_FS_READ_LIMIT")
+  await expect(f.files.run("fs.read", "../outside", f.signal, options)).rejects.toThrow(
+    "MODS_FS_OUTSIDE_PROJECT"
+  )
+  await expect(f.files.run("fs.read", "large", f.signal, options)).rejects.toThrow(
+    "MODS_FS_READ_LIMIT"
+  )
   const controller = new AbortController()
-  const files = new ProjectFunctionFiles(f.project, () => {}, async value => {
-    controller.abort(Error("revoked during bytes publication"))
-    return value
-  })
-  await expect(files.run("fs.read", "data.bin", controller.signal, options))
-    .rejects.toThrow("revoked during bytes publication")
-  await expect(files.run("fs.read", "data.bin", controller.signal, options))
-    .rejects.toThrow("revoked during bytes publication")
+  const files = new ProjectFunctionFiles(
+    f.project,
+    () => {},
+    async (value) => {
+      controller.abort(Error("revoked during bytes publication"))
+      return value
+    }
+  )
+  await expect(files.run("fs.read", "data.bin", controller.signal, options)).rejects.toThrow(
+    "revoked during bytes publication"
+  )
+  await expect(files.run("fs.read", "data.bin", controller.signal, options)).rejects.toThrow(
+    "revoked during bytes publication"
+  )
 })
 
 it("refuses traversal, outside junctions, ADS and device paths", async () => {

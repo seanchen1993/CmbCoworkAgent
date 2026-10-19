@@ -8,6 +8,7 @@ import type {
 } from "../../shared/mods/claw"
 import type { SkillLifecycleSource } from "../agent/skill-lifecycle/registry"
 import { discoverSkills, MAX_SKILL_DISCOVERY_DEPTH } from "../skills/discovery"
+import type { NativeSkillUsagePolicy } from "../plugins/native-skill-usage"
 
 /** Injectable host sources; renderer values never supply filesystem roots. */
 export interface ClawSkillCatalogAccess {
@@ -134,7 +135,8 @@ export class ClawSkillPolicy {
     private readonly registered: RegisteredSkill[],
     selection: ClawSourceSelection,
     private readonly access: ClawSkillCatalogAccess,
-    private readonly sourceVisible?: (source: SkillLifecycleSource) => boolean
+    private readonly sourceVisible?: (source: SkillLifecycleSource) => boolean,
+    private readonly usagePolicy?: NativeSkillUsagePolicy
   ) {
     this.selected = new Set(selection.items.map(({ id }) => id))
     const allowed = selection.items.map((reference) => {
@@ -157,10 +159,13 @@ export class ClawSkillPolicy {
 
   /** Model boundaries validate selected identities without rescanning the whole registry per file. */
   assertAllCurrent(): void {
+    this.usagePolicy?.assertCurrent()
     for (const skill of this.allowed) this.assertCurrent(skill)
   }
 
   private assertCurrent(skill: RegisteredSkill): void {
+    if (this.usagePolicy?.allowsSkill(skill.document) === false)
+      throw Error(`CLAW_SKILL_USAGE_UNAVAILABLE: ${skill.entry.name}`)
     if (!this.selected.has(skill.entry.id))
       throw Error(`CLAW_SKILL_NOT_SELECTED: ${skill.entry.name}`)
     if (disabled(skill, this.access)) throw Error(`CLAW_SKILL_DISABLED: ${skill.entry.name}`)
@@ -257,11 +262,27 @@ export class ClawSkillPolicy {
 export async function createClawSkillPolicy(
   selection?: ClawSourceSelection,
   access?: ClawSkillCatalogAccess,
-  sourceVisible?: (source: SkillLifecycleSource) => boolean
+  sourceVisible?: (source: SkillLifecycleSource) => boolean,
+  usagePolicy?: NativeSkillUsagePolicy
 ): Promise<ClawSkillPolicy | undefined> {
-  if (!selection || selection.mode === "all") return undefined
+  if ((!selection || selection.mode === "all") && !usagePolicy) return undefined
   const host = access ?? (await hostAccess())
-  return new ClawSkillPolicy(await catalog(host), selection, host, sourceVisible)
+  const registered = await catalog(host)
+  const effective =
+    selection?.mode === "selected"
+      ? selection
+      : {
+          mode: "selected" as const,
+          items: registered
+            .filter(
+              (skill) =>
+                !disabled(skill, host) &&
+                usagePolicy?.allowsSkill(skill.document) !== false &&
+                sourceVisible?.(skill.source) !== false
+            )
+            .map((skill) => skill.entry)
+        }
+  return new ClawSkillPolicy(registered, effective, host, sourceVisible, usagePolicy)
 }
 
 /** Host-only resolution: persisted flow nodes carry identity, never filesystem paths. */

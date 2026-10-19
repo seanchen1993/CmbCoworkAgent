@@ -32,7 +32,8 @@ export class HostProjectStore {
   constructor(
     path: string,
     private readonly now = () => Date.now(),
-    private readonly workspaceModeGuard?: ProjectWorkspaceModeGuard
+    private readonly workspaceModeGuard?: ProjectWorkspaceModeGuard,
+    private readonly compositionGuard?: <T>(workspace: string, work: () => T) => T
   ) {
     if (!isAbsolute(path)) hostStateError("DATABASE_PATH_INVALID")
     mkdirSync(dirname(path), { recursive: true })
@@ -72,6 +73,12 @@ export class HostProjectStore {
   }
 
   private transaction<T>(work: () => T, workspace?: string): T {
+    if (workspace && this.compositionGuard)
+      return this.compositionGuard(workspace, () =>
+        this.workspaceModeGuard
+          ? this.workspaceModeGuard.run("host", workspace, () => this.transaction(work))
+          : this.transaction(work)
+      )
     if (workspace && this.workspaceModeGuard)
       return this.workspaceModeGuard.run("host", workspace, () => this.transaction(work))
     this.db.exec("BEGIN IMMEDIATE")

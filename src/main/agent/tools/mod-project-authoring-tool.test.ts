@@ -56,7 +56,7 @@ describe("natural language project authoring actions", () => {
       expect(result).toMatchObject({ ok: false, error: "PROJECT_DRAFT_LIMIT", limit: reason })
       expect(result.hint).toContain("project_read")
       expect(result.hint).toContain(reason === "revision" ? "revision:0" : "project_pack")
-      expect(result.hint).toContain(reason === "revision" ? "公开动作锁" : "不会自动恢复草稿")
+      expect(result.hint).toContain(reason === "revision" ? "公开动作锁" : "运行、权限与未核对试用不会自动恢复")
     }
   )
   it("lists live authorized actions, binds exact contracts and packages without executing providers", async () => {
@@ -252,6 +252,14 @@ describe("natural language project authoring actions", () => {
     )
     expect(packed.ok).toBe(true)
     expect(packed.result.output).toMatch(/\.zip$/)
+    expect(JSON.parse(await author.invoke({ action: "project_list" })).result)
+      .toContainEqual(expect.objectContaining({ id: "docs-test", revision: 3 }))
+    const trial = JSON.parse(await author.invoke({ action: "project_request_trial",
+      id: "docs-test", revision: 3, goal: "实际生成并复核文档" }))
+    expect(trial).toMatchObject({ ok: true, result: { phase: "needs-approval", executed: false,
+      request: { draftId: "docs-test", revision: 3, goal: "实际生成并复核文档" } } })
+    expect(projectAuthoringSessions.developmentStatus(scope, "docs-test"))
+      .toMatchObject({ status: "prepared", executed: false, activeRuns: 0 })
     expect(service.requestTrial).not.toHaveBeenCalled()
     expect(author.schema.safeParse({ action: "project_install" }).success).toBe(false)
     expect(author.schema.safeParse({ action: "project_approve" }).success).toBe(false)

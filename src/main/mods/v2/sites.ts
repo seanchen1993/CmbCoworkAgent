@@ -59,6 +59,7 @@ export class FunctionUiSites {
           if (this.native(owner) !== site) throw new ModFunctionError("MODS_UI_SITE_CLOSED")
         }
       },
+      assertSiteCurrent: (pane) => { this.native(pane.id) },
       site: (pane) => {
         const site = this.get(pane.id)
         return { component: site.component, props: site.props!,
@@ -135,7 +136,8 @@ export class FunctionUiSites {
 
   render(owner: string, props: ModObject): Promise<FunctionPaneSnapshot> {
     return this.enqueue(async () => {
-      const site = this.get(owner)
+      // enqueue has just checked the full lifecycle at execution, without an intervening await.
+      const site = this.native(owner)
       // Only the mounted, immutable message ID can select a main-process durable source.
       if (site.nativeRequest)
         functionQuestionPresentation(site.nativeRequest.questions, props.questions)
@@ -210,6 +212,12 @@ export class FunctionUiSites {
   }
 
   invalidate(components?: ReadonlySet<string>, sdkRedraw = false): void {
+    // Virtualized messages may have no mounted owner. Revoke their read-only cached
+    // presentation as well, before any pending renderer read can publish it again.
+    if (!components) this.host.changed("site-presentations:*")
+    else for (const component of components)
+      if (["UserMessage", "AssistantMessage", "CommandOutput"].includes(component))
+        this.host.changed(`site-presentations:${component}`)
     // SDK redraw retains no action authority, but is distinct from source/permission revocation.
     // Notify every affected owner, including global dependency sets, without clearing unrelated UI.
     for (const site of this.slots.values()) {

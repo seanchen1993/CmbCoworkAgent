@@ -1,7 +1,7 @@
 import { useEffect, useSyncExternalStore } from "react"
 import type { SavedFlow } from "../../../shared/mods/flows/types"
-import { useAppStore } from "./store"
 import { sameSimpleAuthoringScope } from "./simple-authoring-intent"
+import { goToConfigurationThread } from "./configuration-target"
 
 export interface SimpleAuthoringTaskIntent {
   id: string
@@ -20,11 +20,10 @@ const subscribe = (listener: () => void) => {
   }
 }
 export function prepareSimpleAuthoringTask(intent: SimpleAuthoringTaskIntent): void {
-  const store = useAppStore.getState()
-  if (store.currentThreadId !== intent.scope.threadId) return
-  pending = structuredClone(intent)
-  store.setShowCustomizeView(false)
-  for (const listener of listeners) listener()
+  goToConfigurationThread(intent.scope, () => {
+    pending = structuredClone(intent)
+    for (const listener of listeners) listener()
+  })
 }
 export function dismissSimpleAuthoringTask(id: string): void {
   if (pending?.id !== id) return

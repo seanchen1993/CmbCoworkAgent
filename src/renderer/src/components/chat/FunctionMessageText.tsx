@@ -5,6 +5,7 @@ import { FunctionSite } from "./FunctionSite"
 export function FunctionMessageText({
   threadId,
   messageId,
+  presentationId = messageId,
   role,
   text,
   isExpanded,
@@ -14,6 +15,7 @@ export function FunctionMessageText({
 }: {
   threadId: string
   messageId: string
+  presentationId?: string
   role: "user" | "assistant"
   text: string
   isExpanded: boolean
@@ -27,6 +29,7 @@ export function FunctionMessageText({
     <FunctionSite
       threadId={threadId}
       component={role === "user" ? "UserMessage" : "AssistantMessage"}
+      presentationId={presentationId}
       messageId={role === "user" ? messageId : undefined}
       className="contents"
       facts={

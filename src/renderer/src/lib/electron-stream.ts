@@ -7,6 +7,7 @@ import {
   type EventStreamEvent
 } from "@langchain/langgraph-sdk/ui"
 import type { ModelSelectionIntent } from "./model-selection-intent"
+import { StreamUiNotifications } from "./stream-ui-notifications"
 import {
   functionConversationTranscriptFields,
   sameFunctionConversationTranscriptStamp
@@ -22,6 +23,10 @@ type AssistantSnapshot = Omit<Extract<Message, { type: "ai" }>, "content"> & {
   id: string
   content?: Extract<Message, { type: "ai" }>["content"]
 }
+type SnapshotIdentity = {
+  type: Message["type"]
+  fields: ReturnType<typeof functionConversationTranscriptFields> & Record<string, unknown>
+}
 
 export interface ElectronStreamOptions {
   transport: UseStreamTransport
@@ -32,6 +37,24 @@ export interface ElectronStreamOptions {
 }
 
 const EMPTY_MESSAGES: Message[] = []
+
+function isTextDelta(
+  event: { event: string; data: unknown },
+  hasMessage: (id: string) => boolean
+): boolean {
+  if (event.event !== "messages" && !event.event.startsWith("messages|")) return false
+  if (!Array.isArray(event.data)) return false
+  const message = event.data[0] as Record<string, unknown> | undefined
+  return (
+    !!message &&
+    message.type === "ai" &&
+    typeof message.content === "string" &&
+    typeof message.id === "string" &&
+    hasMessage(message.id) &&
+    !(Array.isArray(message.tool_calls) && message.tool_calls.length) &&
+    !(Array.isArray(message.tool_call_chunks) && message.tool_call_chunks.length)
+  )
+}
 
 function sanitizeSnapshotMessages(messages: unknown[]): Message[] {
   const isMessage = (message: unknown): message is Message =>
@@ -55,18 +78,25 @@ function sanitizeSnapshotMessages(messages: unknown[]): Message[] {
  * values can be partial/lagging. Only an explicit retry or new run resets them.
  */
 class SnapshotMessageTupleManager extends MessageTupleManager {
-  private identities = new Map<string, { type: Message["type"]; fields: Record<string, unknown> }>()
+  private identities = new Map<string, SnapshotIdentity>()
+  private identityRevision = 0
   private frame: Message[] = EMPTY_MESSAGES
   private indexes: Map<string, number> | null = null
   private writtenId: string | null = null
   private authoritativeContentIds = new Set<string>()
+
+  hasMessage = (id: string): boolean => super.get(id) != null
+
+  get protectionVersion(): number {
+    return this.identityRevision
+  }
 
   private rememberIdentity(message: Message): void {
     if (!message.id) return
     const incoming = message as Message & Record<string, unknown>
     const prior = this.identities.get(message.id)
     const native = functionConversationTranscriptFields(message, message.id, message.type)
-    const fields: Record<string, unknown> = { ...native }
+    const fields: SnapshotIdentity["fields"] = { ...native }
     for (const key of ["provider_source_id", "provider_occurrence"] as const) {
       if (Object.hasOwn(incoming, key)) fields[key] = incoming[key]
     }
@@ -101,6 +131,21 @@ class SnapshotMessageTupleManager extends MessageTupleManager {
       }
     }
     if (fields.function_row_invalid) delete fields.function_row
+    const previous = prior?.fields
+    const sameStamp =
+      previous?.function_row === fields.function_row ||
+      (previous?.function_row &&
+        fields.function_row &&
+        sameFunctionConversationTranscriptStamp(previous.function_row, fields.function_row))
+    if (
+      !prior ||
+      prior.type !== message.type ||
+      !sameStamp ||
+      previous?.function_row_invalid !== fields.function_row_invalid ||
+      previous?.provider_source_id !== fields.provider_source_id ||
+      previous?.provider_occurrence !== fields.provider_occurrence
+    )
+      this.identityRevision++
     this.identities.set(message.id, { type: message.type, fields })
   }
 
@@ -212,6 +257,7 @@ class SnapshotMessageTupleManager extends MessageTupleManager {
 
   override clear(): void {
     super.clear()
+    this.identityRevision++
     this.identities.clear()
     this.frame = EMPTY_MESSAGES
     this.indexes = null
@@ -228,6 +274,33 @@ export function createElectronStream(options: ElectronStreamOptions) {
   let callbacks: Pick<ElectronStreamOptions, "onCustomEvent" | "onError"> = options
   const tuples = new SnapshotMessageTupleManager()
   const manager = new StreamManager<StreamValues>(tuples, { throttle: false })
+  const notifications = new StreamUiNotifications()
+  let textDelta = false
+  let textProtectionVersion = 0
+  let unsubscribeManager: (() => void) | undefined
+  const subscribe = (listener: () => void): (() => void) => {
+    const unsubscribe = notifications.subscribe(listener)
+    if (!unsubscribeManager) {
+      let previous = manager.getSnapshot()
+      unsubscribeManager = manager.subscribe(() => {
+        const snapshot = manager.getSnapshot()
+        const immediate =
+          !textDelta ||
+          tuples.protectionVersion !== textProtectionVersion ||
+          snapshot.isLoading !== previous.isLoading ||
+          snapshot.error !== previous.error
+        previous = snapshot
+        notifications.notify(immediate)
+      })
+    }
+    return () => {
+      unsubscribe()
+      if (!notifications.size) {
+        unsubscribeManager?.()
+        unsubscribeManager = undefined
+      }
+    }
+  }
   const readMessages = (values: StreamValues | null): Message[] =>
     Array.isArray(values?.messages) ? values.messages : EMPTY_MESSAGES
 
@@ -262,6 +335,21 @@ export function createElectronStream(options: ElectronStreamOptions) {
               Partial<StreamValues>,
               unknown
             >
+            if (isTextDelta(event, tuples.hasMessage)) {
+              // The SDK reduces every delta before requesting the next event. Only its UI
+              // notification is coalesced; getters already expose the current complete state.
+              textDelta = true
+              textProtectionVersion = tuples.protectionVersion
+              try {
+                yield event
+              } finally {
+                textDelta = false
+              }
+              continue
+            }
+            // Preserve observation order before a clear, authority change, queue injection,
+            // approval or other control event can update a different presentation baseline.
+            notifications.flush()
             if (event.event === "values" && event.data && typeof event.data === "object") {
               // IPC also emits todos/workspace-only values; absence of messages
               // means no message update, whereas messages: [] is an explicit reset.
@@ -295,7 +383,8 @@ export function createElectronStream(options: ElectronStreamOptions) {
                   snapshot?.type === "ai" &&
                   typeof snapshot.id === "string" &&
                   snapshot.id &&
-                  (typeof snapshot.content === "string" || Array.isArray(snapshot.content) ||
+                  (typeof snapshot.content === "string" ||
+                    Array.isArray(snapshot.content) ||
                     (snapshot.content === undefined && Array.isArray(snapshot.tool_calls)))
                 ) {
                   manager.setStreamValues({
@@ -319,7 +408,15 @@ export function createElectronStream(options: ElectronStreamOptions) {
           tuples.commitFrame(messages)
           return { ...values, messages }
         },
-        callbacks: { onCustomEvent: (data) => callbacks.onCustomEvent?.(data, receipt) },
+        callbacks: {
+          onCustomEvent: (data) => {
+            try {
+              callbacks.onCustomEvent?.(data, receipt)
+            } finally {
+              notifications.flush()
+            }
+          }
+        },
         onSuccess: () => undefined,
         onError: (error) => callbacks.onError?.(error)
       }
@@ -327,7 +424,7 @@ export function createElectronStream(options: ElectronStreamOptions) {
   }
 
   return {
-    subscribe: manager.subscribe,
+    subscribe,
     setCallbacks(next: Pick<ElectronStreamOptions, "onCustomEvent" | "onError">) {
       callbacks = next
     },
@@ -345,7 +442,10 @@ export function createElectronStream(options: ElectronStreamOptions) {
       return manager.error
     },
     submit,
-    stop: () => manager.stop({}, {}),
+    stop: () => {
+      notifications.flush()
+      return manager.stop({}, {})
+    },
     clear: manager.clear
   }
 }

@@ -56,9 +56,11 @@ function FilePreview({ file }: { file: PluginDerivationProposal["files"][number]
           )}
           {addition && (
             <div>
-              <p className="mb-1 font-medium">本次新增的业务要求</p>
+              <p className="mb-1 font-medium">
+                {file.before ? "本次新增的业务要求" : "新增文件内容"}
+              </p>
               <pre
-                aria-label="本次新增的业务要求"
+                aria-label={file.before ? "本次新增的业务要求" : "新增文件内容"}
                 className="max-h-80 overflow-auto whitespace-pre-wrap break-words rounded bg-muted/40 p-2 text-xs"
               >
                 {addition}
@@ -106,7 +108,7 @@ export function DerivedPluginProposal({
 }) {
   const draftKey = JSON.stringify([scope.threadId, scope.expectedWorkspace, copy.copyId])
   const [instruction, setInstruction] = useState(() => drafts.get(draftKey) ?? "")
-  const [proposalKind, setProposalKind] = useState<"business" | "nodes">("business")
+  const [proposalKind, setProposalKind] = useState<"business" | "nodes" | "flow">("business")
   const [proposal, setProposal] = useState<PluginDerivationProposal | null>(null)
   const [busy, setBusy] = useState<"generating" | "saving" | null>(null)
   const [error, setError] = useState("")
@@ -155,7 +157,7 @@ export function DerivedPluginProposal({
   }, [active])
   const stale = !!proposal && proposal.baseDigest !== copy.digest
 
-  async function generate(kind: "business" | "nodes" = "business") {
+  async function generate(kind: "business" | "nodes" | "flow" = "business") {
     if (running.current || disabled || (kind === "business" && !instruction.trim())) return
     setProposalKind(kind)
     cancelHost()
@@ -171,9 +173,14 @@ export function DerivedPluginProposal({
     try {
       const input = { ...scope, copyId: copy.copyId, expectedDigest: copy.digest, requestId }
       const value =
-        kind === "nodes"
-          ? await window.api.pluginDerivation.prepareNodeComposition(input)
-          : await window.api.pluginDerivation.propose({ ...input, instruction: instruction.trim() })
+        kind === "flow"
+          ? await window.api.pluginDerivation.prepareFlowComposition(input)
+          : kind === "nodes"
+            ? await window.api.pluginDerivation.prepareNodeComposition(input)
+            : await window.api.pluginDerivation.propose({
+                ...input,
+                instruction: instruction.trim()
+              })
       if (!live.current || sequence.current !== token) {
         void window.api.pluginDerivation
           .cancelProposal({ ...scope, proposalId: value.proposalId })
@@ -211,9 +218,11 @@ export function DerivedPluginProposal({
       onPending(false)
       onSaved(value)
       setNotice(
-        proposalKind === "nodes"
-          ? "“自选项目步骤”已保存。接下来检查能否安装。"
-          : "业务要求已保存到技能文件。接下来检查能否安装。"
+        proposalKind === "flow"
+          ? "完整流程组合配置已保存。请检查并安装此副本，再到项目会话的“项目能力”选择完整流程。"
+          : proposalKind === "nodes"
+            ? "“自选项目步骤”已保存。接下来检查能否安装。"
+            : "业务要求已保存到技能文件。接下来检查能否安装。"
       )
     } catch (cause) {
       if (live.current && sequence.current === token)
@@ -282,13 +291,31 @@ export function DerivedPluginProposal({
           </p>
         )}
       </div>
+      <div className="space-y-2 rounded border p-3" aria-label="安装前准备完整流程组合">
+        <p className="font-medium">需要把完整流程接到其他流程后面？</p>
+        <p className="text-xs text-muted-foreground">
+          为支持的插件副本准备完整流程组合配置，保留原有技能、检查和人工确认。
+          先核对新增文件并保存，再检查和安装此副本。安装后，在项目会话的“项目能力”中选择完整流程并安排顺序。
+          保存后查看可用状态；暂不支持时，按页面提示使用原项目入口。
+        </p>
+        <Button
+          variant="outline"
+          disabled={disabled || !!busy || !!proposal || copy.status === "installed"}
+          onClick={() => void generate("flow")}
+        >
+          用于完整流程组合
+        </Button>
+        {copy.status === "installed" && (
+          <p className="text-xs text-muted-foreground">请先创建新副本，再准备完整流程组合。</p>
+        )}
+      </div>
       {busy === "generating" && <p role="status">正在准备修改建议。确认保存前不会改动文件。</p>}
       {proposal && (
         <div className="min-w-0 space-y-3" aria-label="修改建议预览">
           <p className="break-words font-medium">{proposal.summary}</p>
           <p className="text-xs text-muted-foreground">
-            请核对 · {proposal.files.length} 个{proposalKind === "nodes" ? "配置" : "技能"}
-            文件将被修改。展开查看修改前后的内容。
+            请核对 · {proposal.files.length} 个{proposalKind === "business" ? "技能" : "配置"}
+            文件将被{proposalKind === "flow" ? "新增" : "修改"}。展开查看修改前后的内容。
           </p>
           {proposal.files.map((file) => (
             <FilePreview key={`${proposal.proposalId}:${file.path}`} file={file} />
@@ -297,9 +324,11 @@ export function DerivedPluginProposal({
           <Button disabled={disabled || !!busy || stale} onClick={() => void apply()}>
             {busy === "saving"
               ? "正在保存修改…"
-              : proposalKind === "nodes"
-                ? "确认添加自选步骤选项"
-                : "确认保存修改"}
+              : proposalKind === "flow"
+                ? "确认保存完整流程配置"
+                : proposalKind === "nodes"
+                  ? "确认添加自选步骤选项"
+                  : "确认保存修改"}
           </Button>
         </div>
       )}

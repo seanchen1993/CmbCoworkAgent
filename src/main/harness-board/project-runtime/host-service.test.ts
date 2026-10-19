@@ -90,6 +90,145 @@ async function prepareReview(setup: Awaited<ReturnType<typeof fixture>>) {
 }
 
 describe("production host project adapter", () => {
+  it("keeps routine authority free of package and knowledge reads while rechecking full inputs at execution settlement", async () => {
+    let revision = 1, contentRevision = 1
+    const inputIdentity = vi.fn(() => `content:${contentRevision}`)
+    const inputAuthorityIdentity = vi.fn(() => `configuration:${revision}`)
+    const setup = await fixture({ inputIdentity, captureInputAuthorityIdentity: () => inputAuthorityIdentity, executeSkill: async context => {
+      const fullReads = inputIdentity.mock.calls.length
+      for (let i = 0; i < 50; i++) context.assertAuthorityCurrent!()
+      expect(inputIdentity).toHaveBeenCalledTimes(fullReads)
+      revision = 2
+      expect(() => context.assertAuthorityCurrent!()).toThrow("INPUT_CHANGED")
+      revision = 1
+      contentRevision = 2
+      expect(() => context.assertAuthorityCurrent!()).not.toThrow()
+      expect(() => context.assertInputsCurrent!()).toThrow("INPUT_CHANGED")
+      return "succeeded"
+    } })
+    const operation = setup.service.prepare({ projectId: "local-docs", expectedVersion: 1, idempotencyKey: "authority-content" })
+    expect((await setup.service.start(operation.operationId)).status).toBe("unknown")
+    expect(setup.service.operations("local-docs")[0].receipts).toEqual([])
+  })
+  it.each(["configuration", "rules", "knowledge"])("binds %s versions through approval, execution and transition", async (kind) => {
+    let revision = 1
+    let captured: (() => void) | undefined
+    const prepareInputIdentity=vi.fn(async()=>{})
+    const setup=await fixture({prepareInputIdentity,inputIdentity:()=>`${kind}:${revision}`,
+      executeSkill:async(context)=>{
+        captured=context.assertInputsCurrent
+        captured!()
+        writeFileSync(join(context.project.workspace,"document.md"),"actual document")
+        return "succeeded"
+      }})
+    const prepare=(id:string)=>setup.service.prepare({projectId:"local-docs",expectedVersion:1,idempotencyKey:id})
+    const stale=prepare("stale")
+    revision++
+    expect(()=>setup.service.approve(stale.operationId,{expectedVersion:1,inputFingerprint:stale.inputFingerprint,
+      decision:"approved",actorId:"user"})).toThrow("INPUT_CHANGED")
+    await expect(setup.service.start(stale.operationId)).rejects.toThrow("INPUT_CHANGED")
+    expect(setup.store.getOperation(stale.operationId)?.status).toBe("failed")
+    const current=prepare("current")
+    const completed=await setup.service.start(current.operationId)
+    expect(completed.status).toBe("succeeded")
+    expect(()=>captured!()).toThrow("OPERATION_SCOPE_CHANGED")
+    revision++
+    expect(()=>setup.service.transition(current.operationId)).toThrow("EVIDENCE_STALE")
+    expect(setup.service.get("local-docs")?.stageIndex).toBe(0)
+    expect(prepareInputIdentity).toHaveBeenCalledTimes(3)
+  })
+  it("does not publish a receipt when a captured configuration changes during the original Skill",async()=>{
+    let revision=1
+    const setup=await fixture({inputIdentity:()=>`configuration:${revision}`,executeSkill:async(context)=>{
+      context.assertInputsCurrent!()
+      writeFileSync(join(context.project.workspace,"document.md"),"actual write")
+      revision++
+      expect(()=>context.assertInputsCurrent!()).toThrow("INPUT_CHANGED")
+      return "succeeded"
+    }})
+    const operation=setup.service.prepare({projectId:"local-docs",expectedVersion:1,idempotencyKey:"config-race"})
+    const result=await setup.service.start(operation.operationId)
+    expect(result).toMatchObject({status:"unknown",receipts:[]})
+  })
+
+  it("revokes a main-only input fence after the physical stage has settled", async () => {
+    let captured: (() => void) | undefined
+    let authority: (() => void) | undefined
+    const fence = vi.fn()
+    const setup = await fixture({ executeSkill: async (context) => {
+      captured = context.assertInputsCurrent
+      authority = context.assertAuthorityCurrent
+      captured!()
+      writeFileSync(join(context.project.workspace, "document.md"), "actual stage output")
+      return "succeeded"
+    } })
+    const operation = setup.service.prepare({ projectId: "local-docs", expectedVersion: 1,
+      idempotencyKey: "native-fence" })
+    await expect(setup.service.start(operation.operationId, { assertInputsCurrent: fence }))
+      .resolves.toMatchObject({ status: "succeeded" })
+    expect(fence).toHaveBeenCalled()
+    expect(() => captured!()).toThrow("PROJECT_HOST_OPERATION_SCOPE_CHANGED")
+    expect(() => authority!()).toThrow("PROJECT_HOST_OPERATION_SCOPE_CHANGED")
+  })
+  it.each(["unchanged", "configuration", "knowledge", "explicit-input"])(
+    "checks %s at cancellation settlement without restoring ordinary authority",
+    async (change) => {
+      let configuration = 1
+      let knowledge = 1
+      let explicitInput = true
+      let settledGuard: (() => void) | undefined
+      const entered = Promise.withResolvers<void>()
+      const released = Promise.withResolvers<void>()
+      const setup = await fixture({
+        inputIdentity: () => `knowledge:${knowledge}`,
+        captureInputAuthorityIdentity: () => () => `configuration:${configuration}`,
+        executeSkill: async (context) => {
+          settledGuard = context.assertSettlementCurrent
+          entered.resolve()
+          await released.promise
+          expect(context.signal.aborted).toBe(true)
+          expect(() => context.assertAuthorityCurrent!()).toThrow("OPERATION_SCOPE_CHANGED")
+          expect(() => context.assertInputsCurrent!()).toThrow("OPERATION_SCOPE_CHANGED")
+          if (change === "unchanged") expect(() => settledGuard!()).not.toThrow()
+          else expect(() => settledGuard!()).toThrow()
+          return "cancelled"
+        }
+      })
+      const operation = setup.service.prepare({
+        projectId: "local-docs", expectedVersion: 1, idempotencyKey: `cancel-${change}`
+      })
+      const completion = setup.service.start(operation.operationId, { assertInputsCurrent: () => {
+        if (!explicitInput) throw Error("COMPOSITION_INPUTS_CHANGED")
+      } })
+      await entered.promise
+      expect(setup.service.cancel(operation.operationId).status).toBe("cancel_requested")
+      if (change === "configuration") configuration++
+      if (change === "knowledge") knowledge++
+      if (change === "explicit-input") explicitInput = false
+      released.resolve()
+      const result = await completion
+      expect(result.status).toBe(change === "unchanged" ? "cancelled" : "unknown")
+      expect(result.receipts).toEqual([])
+      expect(setup.service.get("local-docs")?.version).toBe(1)
+      expect(() => settledGuard!()).toThrow("OPERATION_SCOPE_CHANGED")
+    }
+  )
+  it("retains an uncertain stage when explicit input changes during execution", async () => {
+    let current = true
+    const setup = await fixture({ executeSkill: async (context) => {
+      writeFileSync(join(context.project.workspace, "document.md"), "effect already happened")
+      current = false
+      return "succeeded"
+    } })
+    const operation = setup.service.prepare({ projectId: "local-docs", expectedVersion: 1,
+      idempotencyKey: "changed-native-input" })
+    const settled = await setup.service.start(operation.operationId, { assertInputsCurrent: () => {
+      if (!current) throw Error("COMPOSITION_INPUTS_CHANGED")
+    } })
+    expect(settled.status).toBe("unknown")
+    expect(settled.receipts).toEqual([])
+    expect(() => setup.service.transition(operation.operationId)).toThrow()
+  })
   it.each([false, true])(
     "safely releases a retained old prepared fingerprint (approved=%s)",
     async (approved) => {

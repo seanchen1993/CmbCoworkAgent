@@ -23,15 +23,24 @@ const text = (message: Message) =>
         .join("\n")
 
 /** Scripts only model tool choices; source and receipts always come from the production tools. */
-export async function startProjectHarnessModel() {
+export async function startProjectHarnessModel(
+  options: {
+    requestTrial?: boolean
+    packageExtensions?: {
+      files: Array<{ path: string; text: string }>
+      metadata: Record<string, unknown>
+    }
+  } = {}
+) {
   const observations: Array<{ action: string; packet: Packet }> = []
-  const requests: Array<{ mode: string; stage?: string; tools: string[] }> = []
+  const requests: Array<{ at: number; mode: string; stage?: string; tools: string[] }> = []
   const errors: string[] = []
   const issued = new Map<string, { name: string; action?: string; path?: string }>()
   const seen = new Set<string>()
   let draft: ProjectDraft | undefined
   let mode = "author"
   let workspace = ""
+  let packed: string | undefined
   let sequence = 0
   function call(name: string, args: Record<string, unknown>, index = 0) {
     const id = `harness-tool-${++sequence}`
@@ -63,8 +72,31 @@ export async function startProjectHarnessModel() {
       const tools = (body.tools ?? []).map((tool) => tool.function.name)
       let calls: ReturnType<typeof call>[] = []
       let answer = ""
-      if (mode === "author") {
-        requests.push({ mode, tools })
+      if (mode === "pack") {
+        requests.push({ at: Date.now(), mode, tools })
+        assert(tools.includes("mod_authoring"))
+        const result = body.messages.findLast(
+          (message) =>
+            message.role === "tool" &&
+            issued.get(message.tool_call_id ?? "")?.action === "project_pack"
+        )
+        if (!result)
+          calls = [
+            call("mod_authoring", {
+              action: "project_pack",
+              id: HARNESS_PACKAGE_ID,
+              revision: draft!.revision
+            })
+          ]
+        else {
+          const packet: Packet = JSON.parse(text(result))
+          assert.equal(packet.ok, true, JSON.stringify(packet))
+          assert.equal(typeof packet.result?.output, "string")
+          packed = packet.result!.output as string
+          answer = "HARNESS_PACKAGE_EXPORTED"
+        }
+      } else if (mode === "author") {
+        requests.push({ at: Date.now(), mode, tools })
         assert(tools.includes("mod_authoring"))
         for (const message of body.messages) {
           const id = message.tool_call_id
@@ -109,6 +141,14 @@ export async function startProjectHarnessModel() {
             nodeFile.text = JSON.stringify(nodes)
             for (const file of files.filter((file) => file.path.endsWith("/SKILL.md")))
               file.text += `\n${HARNESS_SKILL_MARKER}\n`
+            if (options.packageExtensions) {
+              const metadata = files.find((file) => file.path === "plugin.json")!
+              metadata.text = JSON.stringify({
+                ...JSON.parse(metadata.text),
+                ...options.packageExtensions.metadata
+              })
+              files.push(...options.packageExtensions.files)
+            }
             // Never write the generated runtime/contract: production project_compile must do it.
             args = { action: "project_save", ...base, revision, files }
             break
@@ -126,6 +166,16 @@ export async function startProjectHarnessModel() {
           case 6:
             args = { action: "project_dev", id: base.id, revision }
             break
+          case 7:
+            if (options.requestTrial)
+              args = {
+                action: "project_request_trial",
+                id: base.id,
+                revision,
+                goal: "保留原稿，生成独立复核版本和真实检查记录"
+              }
+            else answer = "HARNESS_AUTHOR_READY：节点已编译检查，隔离试用已准备；未安装、未运行。"
+            break
           default:
             answer = "HARNESS_AUTHOR_READY：节点已编译检查，隔离试用已准备；未安装、未运行。"
         }
@@ -138,7 +188,7 @@ export async function startProjectHarnessModel() {
             ? "draft"
             : "unknown"
         assert.notEqual(stage, "unknown")
-        requests.push({ mode, stage, tools })
+        requests.push({ at: Date.now(), mode, stage, tools })
         const block = input.match(
           /<CMBDEVCLAW-SKILL-USE-V1>[\s\S]*?<\/CMBDEVCLAW-SKILL-USE-V1>/
         )?.[0]
@@ -152,7 +202,18 @@ export async function startProjectHarnessModel() {
             const source = issued.get(message.tool_call_id ?? "")
             assert(source)
             const result = text(message)
-            if (source.name === "write_file") assert.match(result, /^Successfully wrote to '.+'$/s)
+            if (source.name === "mcp__harness-package-observer__stamp")
+              assert(
+                result.includes("HARNESS_PINNED_MOD"),
+                "A real package Mod must service the native tool"
+              )
+            else if (source.name.endsWith("echo"))
+              assert(
+                result.includes(`pinned:${stage}`),
+                "The retained package MCP must actually answer"
+              )
+            else if (source.name === "write_file")
+              assert.match(result, /^Successfully wrote to '.+'$/s)
             else if (source.path === skillPath) assert(result.includes(HARNESS_SKILL_MARKER))
             else
               assert(
@@ -163,7 +224,19 @@ export async function startProjectHarnessModel() {
           })
         const has = (name: string, path: string) =>
           results.some((result) => result.name === name && result.path === path)
-        if (!has("read_file", skillPath)) calls = [call("read_file", { file_path: skillPath })]
+        const stamp = "mcp__harness-package-observer__stamp"
+        const echo = options.packageExtensions
+          ? tools.find((name) => name.endsWith("echo"))
+          : undefined
+        if (options.packageExtensions) {
+          assert(tools.includes(stamp), "Real package Mod must register its tool")
+          assert(echo, "Same-package MCP must appear in the original model tools")
+        }
+        if (options.packageExtensions && !results.some((result) => result.name === stamp))
+          calls = [call(stamp, {})]
+        else if (echo && !results.some((result) => result.name === echo))
+          calls = [call(echo, { text: stage })]
+        else if (!has("read_file", skillPath)) calls = [call("read_file", { file_path: skillPath })]
         else if (stage === "review" && !has("read_file", join(workspace, "draft.md")))
           calls = [call("read_file", { file_path: join(workspace, "draft.md") })]
         else if (stage === "draft" && !has("write_file", join(workspace, "draft.md")))
@@ -220,6 +293,13 @@ export async function startProjectHarnessModel() {
     get draft() {
       assert(draft)
       return draft
+    },
+    pack() {
+      mode = "pack"
+    },
+    get packed() {
+      assert(packed)
+      return packed
     },
     stage(path: string) {
       mode = "stage"

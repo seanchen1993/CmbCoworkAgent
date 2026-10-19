@@ -1,6 +1,7 @@
 import { z } from "zod"
 import {
   parseProjectRuntimeManifest,
+  preserveProjectRuntimeEnvelope,
   type ProjectRuntimeManifest
 } from "../../../shared/project-runtime"
 import { createAuthoringSourceBundle, type AuthoringSourceBundle } from "./authoring-bundle"
@@ -147,7 +148,31 @@ export function compileProjectHarness(source: AuthoringSourceBundle): AuthoringS
     ...source.files.filter(
       (file) => !["devclaw.project-runtime.json", "tests/project-contract.json"].includes(file.path)
     ),
-    { path: "devclaw.project-runtime.json", text: json(manifest) },
+    {
+      path: "devclaw.project-runtime.json",
+      text: json(
+        preserveProjectRuntimeEnvelope(previous ? JSON.parse(previous) : undefined, manifest)
+      )
+    },
+    ...(!get("devclaw.capabilities.json")
+      ? [
+          {
+            path: "devclaw.capabilities.json",
+            text: json({
+              apiVersion: "devclaw.capabilities/v1",
+              capabilities: [
+                {
+                  id: "project-flow",
+                  title: String(plugin.name).slice(0, 128),
+                  kind: "flow",
+                  usage: "project",
+                  entry: "devclaw.project-runtime.json"
+                }
+              ]
+            })
+          }
+        ]
+      : []),
     {
       path: "tests/project-contract.json",
       text: json({ apiVersion: "devclaw.project-contract/v1", cases })

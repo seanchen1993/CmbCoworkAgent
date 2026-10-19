@@ -12,9 +12,11 @@ import { AuthoringVersionRepository } from "./authoring-version-repository"
 import { analyzeDevelopmentSource } from "./development-analysis"
 import { AuthoringCompileError } from "./authoring-compile-diagnostics"
 import { DevelopmentCandidateError } from "./development-candidate-diagnostics"
-import { CreatorRequestBudgets } from "./creator-request-budget"
+import { CreatorRequestBudgets, creatorModelSummary, type CreatorModelObservation } from "./creator-request-budget"
+import { issueCreatorModelAccounting } from "./creator-model-accounting"
 import type { CreatorReuseService, CreatorReuseApproval } from "./creator-reuse"
 import type { AuthoringAtomicSettings } from "./authoring-config-snapshot"
+import type { CreatorPlanningService } from "./creator-planning"
 
 export interface DevelopmentRuntime {
   preflightDevelopment?(
@@ -105,6 +107,22 @@ export function developmentTrialEnvelope(review: {
 
 /** Model tools manage drafts only. Trusted renderer controls own enable, consent and promotion. */
 export class ModDevelopmentService {
+  private planning?: CreatorPlanningService
+  configurePlanning(service: CreatorPlanningService): void { this.planning = service }
+  planningCatalog(threadId: string, workspace: string) {
+    if (!this.planning) throw Error("CREATOR_PLANNING_UNAVAILABLE")
+    return this.planning.catalog(threadId, workspace)
+  }
+  selectPlanning(threadId: string, workspace: string, expectedRevision: number,
+    selected: import("../../../shared/mods/creator-planning").CreatorPlanningReference | null) {
+    if (!this.planning) throw Error("CREATOR_PLANNING_UNAVAILABLE")
+    return this.planning.select(threadId, workspace, expectedRevision, selected)
+  }
+  async planningPrompt(threadId: string, workspace: string, signal: AbortSignal) {
+    if (!this.isCreatorMode(threadId, workspace)) return null
+    const canonicalWorkspace = this.deps.normalizeWorkspace?.(workspace) ?? workspace
+    return this.planning?.prompt(threadId, canonicalWorkspace, signal) ?? null
+  }
   private readonly requests: CreatorRequestBudgets
   private reuse?: CreatorReuseService
   private undoStop?: (
@@ -129,6 +147,22 @@ export class ModDevelopmentService {
     return this.current(threadId, false)
   }
   private compositionStatus?: (threadId: string) => DevelopmentStatus["composition"]
+  private compositionSaveStatus?: (threadId: string) => DevelopmentStatus["save"]
+  configureCompositionSaveStatus(read: (threadId: string) => DevelopmentStatus["save"]): void {
+    this.compositionSaveStatus = read
+  }
+  private configurationStatus?: (threadId: string) => DevelopmentStatus["configuration"]
+  private projectTrialStatus?: (threadId: string) => DevelopmentStatus["projectTrial"]
+  private businessStatus?: (threadId: string) => DevelopmentStatus["business"]
+  configureBusinessStatus(read: NonNullable<ModDevelopmentService["businessStatus"]>): void {
+    this.businessStatus = read
+  }
+  configureProjectTrialStatus(read: NonNullable<ModDevelopmentService["projectTrialStatus"]>): void {
+    this.projectTrialStatus = read
+  }
+  configureConfigurationStatus(read: NonNullable<ModDevelopmentService["configurationStatus"]>): void {
+    this.configurationStatus = read
+  }
   configureCompositionStatus(read: (threadId: string) => DevelopmentStatus["composition"]): void {
     this.compositionStatus = read
   }
@@ -177,6 +211,8 @@ export class ModDevelopmentService {
       historySettings?: AuthoringAtomicSettings
       /** Original host goal identity only. Models cannot choose or reset the accounting group. */
       requestGroup?(threadId: string): string | undefined
+      /** Trusted host policy only; an unsupported hard currency promise blocks before HTTP. */
+      modelBudget?: { modelAttemptLimit?: number; hardMoneyLimit?: CreatorModelObservation["hardMoneyLimit"] }
     }
   ) {
     this.requests = new CreatorRequestBudgets(deps.historySettings)
@@ -186,6 +222,71 @@ export class ModDevelopmentService {
     const context = this.projectAuthoringContext(threadId)
     context.assertCurrent()
     return this.requests.claim(identity(context.scope), runId, kind, this.deps.requestGroup?.(threadId))
+  }
+
+  captureModelAccounting(threadId: string, workspace: string, runId: string, expectedGoalId?: string) {
+    if (!this.isCreatorMode(threadId, workspace)) return undefined
+    const context = this.projectAuthoringContext(threadId)
+    const groupId = expectedGoalId ? `goal:${expectedGoalId}` : this.deps.requestGroup?.(threadId)
+    if (expectedGoalId && this.deps.requestGroup?.(threadId) !== groupId)
+      throw Error("DEVELOPMENT_MODEL_ACCOUNTING_SCOPE")
+    const key = identity(context.scope)
+    const bound = this.requests.bindModel(key, runId, groupId, this.deps.modelBudget)
+    const assertOwner = () => this.assertScope(context.scope)
+    return issueCreatorModelAccounting({
+      assertCurrent: assertOwner,
+      claim: traceId => {
+        assertOwner()
+        const attempt = this.requests.claimModel(key, bound.runId, traceId)
+        return { settle: usage => {
+          // Accounting is not execution authority. A late receipt cannot target a rebuilt thread.
+          this.assertScope(context.scope)
+          this.requests.settleModel(key, bound.runId, attempt, usage)
+        } }
+      },
+      recordTrace: usage => {
+        this.assertScope(context.scope)
+        this.requests.recordModelTrace(key, bound.runId, usage)
+      }
+    }, undefined, undefined, { workspace, threadId })
+  }
+
+  captureGoalModelAccounting(threadId: string, goalId: string) {
+    let context: DevelopmentContext
+    try { context = this.current(threadId, false) }
+    catch (error) {
+      if ([...this.enabled.values()].some(session => session.scope.threadId === threadId)) throw error
+      return undefined
+    }
+    if (!this.creators.has(identity(context.scope))) return undefined
+    return this.captureModelAccounting(threadId, context.scope.workspace, `goal-judge:${goalId}`, goalId)
+  }
+
+  trialAccountingReference(scope: DevelopmentScope, nativeRunId: string | undefined) {
+    this.assertScope(scope)
+    return nativeRunId ? this.requests.modelReference(identity(scope), nativeRunId) : undefined
+  }
+
+  captureOwnedTrialAccounting(scope: DevelopmentScope, boundRunId: string,
+    target: { workspace: string; threadId: string }) {
+    this.assertScope(scope)
+    if (this.requests.modelReference(identity(scope), boundRunId) !== boundRunId)
+      throw Error("DEVELOPMENT_MODEL_ACCOUNTING_SCOPE")
+    return issueCreatorModelAccounting({
+      assertCurrent: () => this.assertScope(scope),
+      claim: traceId => {
+        this.assertScope(scope)
+        const attemptId = this.requests.claimModel(identity(scope), boundRunId, traceId)
+        return { settle: usage => {
+          this.assertScope(scope)
+          this.requests.settleModel(identity(scope), boundRunId, attemptId, usage)
+        } }
+      },
+      recordTrace: usage => {
+        this.assertScope(scope)
+        this.requests.recordModelTrace(identity(scope), boundRunId, usage)
+      }
+    }, undefined, undefined, target)
   }
 
   private key(scope: DevelopmentScope): string {
@@ -297,11 +398,15 @@ export class ModDevelopmentService {
       const latest = this.requests.latest(identity(scope))
       if (latest) {
         const { runId, startedAt, operations, candidates, groupId } = latest
-        request = { runId, startedAt, operations, candidates, ...(groupId ? { groupId } : {}) }
+        request = { runId, startedAt, operations, candidates, ...(groupId ? { groupId } : {}), model: creatorModelSummary(latest.model) }
       }
     }
     catch { request = { error: "DEVELOPMENT_BUDGET_UNCONFIRMED" } }
     const composition = this.compositionStatus?.(threadId)
+    const save = this.compositionSaveStatus?.(threadId)
+    const configuration = this.configurationStatus?.(threadId)
+    const projectTrial = this.projectTrialStatus?.(threadId)
+    const business = this.businessStatus?.(threadId)
     const reuse = this.reuse?.status(scope)
     const undo = this.undoStatus?.(threadId)
     return {
@@ -309,8 +414,13 @@ export class ModDevelopmentService {
       threadId,
       enabled: this.enabled.has(identity(scope)),
       mode: this.creators.has(identity(scope)) ? "creator" : "normal",
+      ...(this.planning ? { planning: this.planning.observed(this.current(threadId, false)) } : {}),
       ...(request ? { request } : {}),
       ...(composition ? { composition } : {}),
+      ...(save ? { save } : {}),
+      ...(configuration ? { configuration } : {}),
+      ...(projectTrial ? { projectTrial } : {}),
+      ...(business ? { business } : {}),
       ...(reuse ? { reuse } : {}),
       ...(undo ? { undo } : {}),
       drafts: this.deps.drafts.list(this.key(scope)).map((draft) => ({

@@ -10,6 +10,8 @@ import type { SkillUseTracker } from "./tracker"
 import { markHarnessStageAttributionDirty } from "../../services/harness-stage-attribution"
 import { parseCompletionGateDecision, type CompletionGate } from "./completion-gate"
 import { completionGateBudget, withCompletionBudget } from "../../mods/v2/completion-budget"
+import type { HookAccountingBinder } from "../../hooks/model-accounting"
+import { isCreatorBudgetError } from "../../mods/devtools/creator-model-accounting"
 
 export type StopHookContext = NonNullable<HookContext["stopContext"]>
 
@@ -169,7 +171,8 @@ export async function runPostSkillUseHooksForActivatedSkills({
   onHookResult,
   onHookSkippedFactory,
   executeHooks = runHooksEnriched,
-  resolveHooks
+  resolveHooks,
+  bindHookAccounting = context => context
 }: {
   signal?: AbortSignal
   agentId?: string
@@ -195,13 +198,14 @@ export async function runPostSkillUseHooksForActivatedSkills({
   onHookSkippedFactory?: (event: HookEvent) => ScopeSkipCallback | undefined
   executeHooks?: HookExecutor
   resolveHooks?: (event: HookEvent, context: HookContext) => HookConfig[]
+  bindHookAccounting?: HookAccountingBinder
 }): Promise<HookResult | null> {
   const pending = skillUseTracker?.getPendingPostSkillUses() ?? []
   if (pending.length === 0) return null
 
   const results: HookResult[] = []
   for (const skill of pending) {
-    const context: HookContext = {
+    const context: HookContext = bindHookAccounting({
       signal,
       agentId,
       toolName: skill.triggerToolName,
@@ -233,7 +237,7 @@ export async function runPostSkillUseHooksForActivatedSkills({
       pluginRoot: skill.pluginRoot,
       skillTriggerToolName: skill.triggerToolName,
       stopContext: getStopContext()
-    }
+    })
 
     try {
       const hooks = resolveHooks
@@ -248,6 +252,7 @@ export async function runPostSkillUseHooksForActivatedSkills({
       const result = await executeHooks(hooks, "PostSkillUse", context, onHookResult)
       if (result) results.push(result)
     } catch (e) {
+      if (isCreatorBudgetError(e)) throw e
       console.warn(`[Hooks] PostSkillUse hook error for skill "${skill.name}":`, e)
     } finally {
       skillUseTracker?.markPostSkillUseFired(skill.key)
@@ -290,7 +295,8 @@ export async function runCompletionHooksWithRevision({
   onStopHooksFired,
   completionGate,
   enableModsCompletionGate = false,
-  hasTerminalModelRefusal
+  hasTerminalModelRefusal,
+  bindHookAccounting = context => context
 }: {
   threadId: string
   workspacePath?: string
@@ -325,6 +331,7 @@ export async function runCompletionHooksWithRevision({
   completionGate?: CompletionGate
   enableModsCompletionGate?: boolean
   hasTerminalModelRefusal?: () => boolean
+  bindHookAccounting?: HookAccountingBinder
 }): Promise<CompletionHookOutcome> {
   let postSkillRevisionCount = 0
   let stopRevisionCount = 0
@@ -366,6 +373,7 @@ export async function runCompletionHooksWithRevision({
       const postSkillResult = await (runPostSkillUseHooks
         ? runPostSkillUseHooks()
         : runPostSkillUseHooksForActivatedSkills({
+            bindHookAccounting,
             signal: abortSignal,
             threadId,
             workspacePath,
@@ -464,7 +472,7 @@ export async function runCompletionHooksWithRevision({
               onHookSkippedFactory?.("Stop")
             ),
             "Stop",
-            {
+            bindHookAccounting({
               signal: abortSignal,
               workspacePath,
               pluginOutputDir,
@@ -483,9 +491,10 @@ export async function runCompletionHooksWithRevision({
               turnId,
               stopHookActive,
               stopContext: getStopContext()
-            },
+            }),
             onHookResult
           ).catch((e) => {
+            if (isCreatorBudgetError(e)) throw e
             console.warn("[Hooks] Stop hook error:", e)
             return null
           }))

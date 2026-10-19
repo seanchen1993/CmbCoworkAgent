@@ -11,6 +11,8 @@ export interface HarnessKnowledgePreviewSource {
   openworkDir: string
   pluginStorePath: string
   leanTokenStorePath: string
+  /** Main-only original configuration/host-cache authority; never accepted from renderer IPC. */
+  authorizedKnowledge?: { pluginId: string; pluginPath: string; root: string }
 }
 
 export interface HarnessKnowledgePreviewReadRequest {

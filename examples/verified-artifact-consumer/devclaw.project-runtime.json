@@ -1,0 +1,26 @@
+{
+  "apiVersion": "devclaw.project-runtime/v2",
+  "extensionContract": { "apiVersion": "devclaw.extension-contract/v1",
+    "requires": ["devclaw.required-business-checks/v1"] },
+  "runtime": {
+  "apiVersion": "devclaw.project-runtime/v1",
+  "plugin": { "id": "verified-artifact-consumer", "version": "1.0.0" },
+  "mode": "host", "stateOwner": "host",
+  "stages": [{ "id": "consume", "title": "核对并消费绑定产物", "skill": "skills/consume/SKILL.md",
+    "actionIds": [], "artifactIds": ["report"], "checkIds": ["report-schema"], "approval": "none" }],
+  "actions": [],
+  "artifacts": [{ "id": "report", "path": "consumed-report.json", "required": true }],
+  "checks": [{ "id": "report-schema", "kind": "json-schema", "artifactId": "report", "sideEffect": "read",
+    "schema": { "type": "object", "required": ["bundleDigest", "producer", "requiredIds", "artifacts", "acceptance"],
+      "additionalProperties": false, "properties": {
+        "bundleDigest": { "type": "string", "minLength": 64, "maxLength": 64 },
+        "producer": { "type": "object" },
+        "requiredIds": { "type": "array", "minItems": 1, "maxItems": 64, "items": { "type": "string" } },
+        "artifacts": { "type": "array", "minItems": 1, "maxItems": 128, "items": { "type": "object" } },
+        "acceptance": { "const": "producer-checked-content; consumer consistency only; business acceptance remains unchanged" }
+      } } }],
+  "environment": [{ "id": "python3", "description": "Python 3 for the required read-only Stop verifier; python must be available in the application process PATH", "required": true }],
+  "capabilities": { "execution": true, "conditionalTransition": false,
+    "idempotency": false, "reconciliation": false, "cancellation": true }
+  }
+}

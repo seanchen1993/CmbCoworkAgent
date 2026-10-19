@@ -17,6 +17,15 @@ function assess(...patterns: string[]) {
 }
 
 describe("production event compatibility", () => {
+  it("recognizes declared platform actions without treating discovery as execution", () => {
+    const report = assess("platform.action")
+    expect(report).toMatchObject({ status: "bounded", strictCompatible: true, diagnostics: [] })
+    expect(report.registrations[0].supportedEvents).toEqual(["platform.action"])
+    const support = getFunctionEventSupport("platform.action")!
+    for (const boundary of ["on.capability", "来源", "当前目标", "双方权限", "不会启动任务"])
+      expect(support.note).toContain(boundary)
+    expect(assess("platform.unknown").strictCompatible).toBe(false)
+  })
   it("recognizes current project text mentions without granting arbitrary file access", () => {
     const support = getFunctionEventSupport("prompt.mention")!
     expect(support.availability).toBe("bounded")

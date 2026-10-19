@@ -9,7 +9,13 @@ import { withFunctionAgentExecution } from "./host-call"
 import { ModelRefusalError, readModelRefusal, type ModelRefusal } from "../../agent/model-refusal"
 import { withTaskModelOutcome } from "../../agent/task-model-outcome"
 import { captureThreadIncarnation } from "../../services/thread-incarnation"
+import {
+  assertCreatorModelAccounting,
+  type CreatorModelAccounting
+} from "../devtools/creator-model-accounting"
 import type { FunctionConversationChildParent } from "./conversation-child-family"
+import type { TraceCollector } from "../../agent/trace/collector"
+import type { TraceContext } from "../../agent/trace/types"
 import {
   functionAgentSpec,
   functionAgentToolName,
@@ -113,17 +119,27 @@ export async function runFunctionAgentChild(
     parentThreadId: string
     agentId: string
     creator?: import("./dispatcher").FunctionHookSource
+    creatorAccounting?: CreatorModelAccounting
+    parentTrace?: Readonly<TraceContext>
     conversationParent?: FunctionConversationChildParent
     signal: AbortSignal
     assertLive(): void
     started(physicalThreadId: string): void
   }
 ): Promise<FunctionTurnComplete> {
+  if (context.creatorAccounting)
+    assertCreatorModelAccounting(context.creatorAccounting, {
+      workspace: plan.workspace,
+      threadId: context.parentThreadId
+    })
   const { createThread, deleteThread, getThreadCore } = await import("../../db")
   const { captureLocalThreadRunLease, claimLocalThreadRunLease, releaseLocalThreadRunLease } =
     await import("../../agent/thread-run-lease")
   const { getModelConfigByRef } = await import("../../models/registry")
   const { createAgentRuntime, closeCheckpointer } = await import("../../agent/runtime")
+  const { createTraceCollectorSafely, finishTraceInBackground, runTraceSideEffect } =
+    await import("../../agent/trace/collector")
+  const { TurnTraceRecorder } = await import("../../agent/trace/turn-trace-recorder")
   const { LocalSandbox } = await import("../../agent/local-sandbox")
   const { deleteThreadCheckpoint } = await import("../../storage")
   const { clearActionStationarityTurn } = await import("../../agent/action-stationarity")
@@ -145,6 +161,7 @@ export async function runFunctionAgentChild(
   let cleanupFailure: AggregateError | undefined
   let closePeer: (() => void) | undefined
   let closeConversation: (() => void) | undefined
+  let tracer: TraceCollector | undefined
   const assertChild = () => {
     if (!currentLease()) throw new ModFunctionError("MODS_AGENT_LEASE_CHANGED")
     const row = getThreadCore(threadId)
@@ -169,11 +186,56 @@ export async function runFunctionAgentChild(
     })
     incarnation = JSON.parse(row.metadata ?? "{}").cmb_thread_incarnation
     created = true
+    const parentTrace = context.parentTrace
+    tracer = createTraceCollectorSafely(
+      threadId,
+      plan.prompt,
+      plan.model,
+      {
+        traceKind: "subagent",
+        executionMode: "normal",
+        includeSkillEval: false,
+        subagentRunId: runId,
+        subagentThreadId: threadId,
+        handoffTargetAgent: plan.type,
+        ...(parentTrace
+          ? {
+              rootTraceId: parentTrace.rootTraceId,
+              rootThreadId: parentTrace.rootThreadId,
+              parentTraceId: parentTrace.traceId,
+              parentThreadId: parentTrace.threadId,
+              parentSpanId: parentTrace.rootNodeId,
+              linkType: "async_span_link",
+              harnessFeature: parentTrace.harnessFeature
+            }
+          : {})
+      },
+      "Mods SDK agent"
+    )
+    let traceContext: TraceContext | undefined
+    runTraceSideEffect("Mods SDK agent context", () => {
+      traceContext = tracer?.getTraceContext()
+    })
+    const promptMessage = new HumanMessage({ content: plan.prompt, id: randomUUID() })
+    const traceRecorder = tracer
+      ? new TurnTraceRecorder({
+          tracer,
+          userMessageId: promptMessage.id,
+          requireUserMessageAnchor: true
+        })
+      : undefined
     if (context.conversationParent) {
       closeConversation = manager.registerFunctionConversationChild(context.conversationParent, {
-        invocation: {}, physicalThreadId: threadId, agentId: context.agentId, runId,
-        checkpointIncarnation: captureThreadIncarnation(row), signal: context.signal,
-        assertCurrent: () => { context.assertLive(); assertChild() }
+        invocation: {},
+        physicalThreadId: threadId,
+        agentId: context.agentId,
+        runId,
+        checkpointIncarnation: captureThreadIncarnation(row),
+        signal: context.signal,
+        assertCurrent: () => {
+          context.assertLive()
+          assertChild()
+        }
       })
     }
     const restricted =
@@ -189,6 +251,14 @@ export async function runFunctionAgentChild(
     }
     const runtime = await withFunctionAgentExecution(execution, () =>
       createAgentRuntime({
+        creatorAccounting: context.creatorAccounting?.forChild(
+          context.parentThreadId,
+          threadId,
+          plan.workspace,
+          traceContext?.traceId,
+          context.signal
+        ),
+        traceContext,
         threadId,
         agentId: context.agentId,
         hookTurnId: runId,
@@ -247,7 +317,7 @@ export async function runFunctionAgentChild(
       () =>
         withFunctionAgentExecution({ ...execution, runtimeAuthority: authority }, async () => {
           const stream = await runtime.stream(
-            { messages: [new HumanMessage(plan.prompt)] },
+            { messages: [promptMessage] },
             {
               configurable: { thread_id: threadId },
               signal: context.signal,
@@ -259,6 +329,7 @@ export async function runFunctionAgentChild(
             context.assertLive()
             assertChild()
             if (!Array.isArray(item) || item[0] !== "values") continue
+            traceRecorder?.onRawValues(item[1])
             const state = item[1] as {
               messages?: { content?: unknown; _getType?: () => string; tool_calls?: unknown[] }[]
             }
@@ -305,7 +376,11 @@ export async function runFunctionAgentChild(
     else {
       const errors: unknown[] = []
       // Retire conversation selection before releasing any native runtime, row or physical lease.
-      try { closeConversation?.() } catch (error) { errors.push(error) }
+      try {
+        closeConversation?.()
+      } catch (error) {
+        errors.push(error)
+      }
       try {
         closePeer?.()
       } catch (error) {
@@ -339,6 +414,23 @@ export async function runFunctionAgentChild(
       if (currentLease()) releaseLocalThreadRunLease(threadId, "mods", runId)
       if (errors.length) cleanupFailure = new AggregateError(errors, "MODS_AGENT_CLEANUP_FAILED")
     }
+    if (tracer)
+      finishTraceInBackground(
+        tracer,
+        cleanupFailure
+          ? "unknown"
+          : reason === "answer"
+            ? "success"
+            : reason === "aborted"
+              ? "cancelled"
+              : "error",
+        cleanupFailure
+          ? "MODS_AGENT_CLEANUP_FAILED"
+          : reason === "error"
+            ? "MODS_AGENT_EXECUTION_FAILED"
+            : undefined,
+        "Mods SDK agent"
+      )
   }
   if (cleanupFailure) throw cleanupFailure
   const completion = {

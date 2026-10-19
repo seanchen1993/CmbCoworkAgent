@@ -135,11 +135,6 @@ const server = createServer(async (request, response) => {
         args = { action: "undo_trial" }
         mutation++
       } else text = "DOC_UNDO_READY"
-    } else if (prompt.includes("PERSIST_DOC")) {
-      if (!results.length) {
-        tool = "mod_authoring"
-        args = { action: "request_reuse", id: "doc-review", revision: mutation }
-      } else text = "DOC_REUSE_READY"
     } else if (prompt.includes("SAVE_DOC_COMBO")) {
       tool = "mod_composition"
       const replies = results.map((row) => JSON.parse(String(row.content)))
@@ -150,21 +145,31 @@ const server = createServer(async (request, response) => {
         args = { action: "list", refresh: true }
       else if (latest.result?.catalogToken) {
         const catalog = latest.result
-        args = {
-          action: "stage",
-          catalogToken: catalog.catalogToken,
-          capabilities: [],
-          builtins: { contextMeter: true },
-          name: "日常文档审查"
-        }
-      } else if (latest.result?.phase === "queued") {
-        const catalog = replies.findLast((reply) => reply.result?.catalogToken).result
+        assert.equal(
+          catalog.saved.some((saved: { name: string }) => saved.name === "日常文档审查"),
+          false,
+          "The pending save must not already exist as a partial or empty named combination"
+        )
         args = { action: "save", savedName: "日常文档审查", catalogToken: catalog.catalogToken }
       } else {
         assert.equal(latest.ok, true, JSON.stringify(latest))
-        assert.equal(latest.result?.revision, 1)
+        assert.equal(
+          latest.result?.saved,
+          false,
+          "An uninstalled active trial cannot already be a saved combination"
+        )
+        assert.equal(latest.result?.phase, "needs-approval")
+        assert.deepEqual(
+          latest.result?.dependencies.map((dependency: { draftId: string }) => dependency.draftId),
+          ["doc-review"]
+        )
+        assert.equal(
+          latest.result?.revision,
+          0,
+          "Pending intent retains expected prior saved revision until native confirmation"
+        )
         tool = undefined
-        text = "DOC_COMBO_SAVED"
+        text = "DOC_COMBO_NEEDS_APPROVAL"
       }
     } else if (prompt.includes("APPLY_DOC_COMBO")) {
       if (!results.length) {
@@ -257,7 +262,9 @@ async function main() {
   assert(address && typeof address !== "string")
   const watchdog = setTimeout(() => void app?.close(), 300_000)
   try {
-    const launch = createHeadlessProjectCompositionLaunch(root, fixture)
+    const launch = createHeadlessProjectCompositionLaunch(root, fixture, {
+      unobtrusivePresentation: true
+    })
     app = await launch()
     app
       .process()
@@ -370,35 +377,55 @@ async function main() {
         "supported source restored"
       )
     }
-    await send("PERSIST_DOC 保存文档审查灵件以便其它聊天复用。")
+    const trialBeforeSave = await status()
+    assert.equal(trialBeforeSave.trials[0]?.phase, "active")
+    assert.equal(
+      trialBeforeSave.reuse,
+      undefined,
+      "The fixture must not formalize the trial before requesting save"
+    )
+    assert.equal(trialBeforeSave.save, undefined)
+    await page.keyboard.press("Escape")
+    await send(
+      "SAVE_DOC_COMBO 直接把当前文档审查组合保存为日常文档审查，保留已有功能并用于其它聊天。"
+    )
+    await page.getByText("DOC_COMBO_NEEDS_APPROVAL", { exact: true }).waitFor({ timeout: 60_000 })
+    const pendingSave = await until(
+      status,
+      (value) => value.save?.phase === "needs-approval",
+      "pending combination save through original reuse"
+    )
+    assert.equal(pendingSave.save?.saved, false)
+    assert.equal(pendingSave.reuse?.phase, "needs-approval")
+    assert.deepEqual(
+      pendingSave.save?.dependencies.map((item) => item.draftId),
+      ["doc-review"]
+    )
+    writeFileSync(
+      join(fixture.isolated, "pending-save-receipt.json"),
+      JSON.stringify(pendingSave, null, 2)
+    )
     await page.getByRole("button", { name: "确认保存并复用", exact: true }).click()
     const formal = await until(
       status,
-      (value) => value.reuse?.phase === "active",
-      "formal document reuse"
+      (value) => value.reuse?.phase === "active" && value.save?.saved === true,
+      "native reuse completes exact pending combination save"
     )
     assert(formal.reuse?.installationId)
+    assert.equal(formal.save?.phase, "saved")
+    assert.equal(formal.save?.name, "日常文档审查")
+    assert.equal(formal.save?.revision, 1)
     await until(
       async () => reviews.length,
       (count) => count === 2,
       "formal source's own review store"
     )
     await page.getByText("审查：缺少负责人 · 次数：1", { exact: true }).waitFor()
-    const reviewsBeforeComposition = reviews.length
-    await page.keyboard.press("Escape")
-    await send(
-      "SAVE_DOC_COMBO 把文档审查和已有上下文用量显示组合为日常文档审查，保留其它功能并保存。"
-    )
-    await page.getByText("DOC_COMBO_SAVED", { exact: true }).waitFor({ timeout: 60_000 })
-    const composed = await until(
-      status,
-      (value) => value.composition?.phase === "active",
-      "saved combination active"
-    )
+    const composed = formal
     assert.equal(
-      reviews.length,
-      reviewsBeforeComposition,
-      "Composing the existing display must not re-run a review"
+      requests.some((row) => JSON.stringify(row).includes('"action":"request_reuse"')),
+      false,
+      "Only save may organize native reuse; the fixture must not issue a preceding model request_reuse"
     )
     const next = await page.evaluate(async (workspace) => {
       const thread = await window.api.threads.create({
@@ -416,7 +443,7 @@ async function main() {
     await page.reload()
     await page.getByText("Document reuse target", { exact: true }).first().click()
     await send("APPLY_DOC_COMBO 套用已保存的日常文档审查，核对这段聊天的真实权限和来源。")
-    await until(
+    const applied = await until(
       () =>
         page!.evaluate((input) => window.api.mods.development.status(input), {
           threadId: next.threadId
@@ -424,6 +451,11 @@ async function main() {
       (value) => value.composition?.phase === "active",
       "saved combination applied in another chat"
     )
+    assert(applied.composition?.pluginNames.includes("creator-doc-review"))
+    await page
+      .locator('[data-function-site="AbovePrompt"] > div:not([data-function-site-cached])')
+      .getByText("审查：缺少负责人 · 次数：1", { exact: true })
+      .waitFor({ timeout: 60_000 })
     const reviewsBefore = reviews.length
     writeFileSync(document, "# Release plan\nOwner: Alice\nDeadline: Friday\n")
     // A trailing space closes the slash picker; this is a complete command with no arguments.

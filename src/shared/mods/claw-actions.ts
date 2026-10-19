@@ -2,15 +2,25 @@ import type { ModObject } from "./types"
 import { encodeModJson } from "./validation"
 import { isModObject } from "./v2/contracts"
 
-export interface ClawActionExport {
+export interface ClawActionPlatformBinding {
   id: string
+  version: string
+  action: string
+}
+
+export type ClawActionBinding =
+  | { command: string; platform?: never }
+  | { command?: never; platform: ClawActionPlatformBinding }
+
+interface ClawActionDetails {
   name: string
   description?: string
-  command: string
   inputSchema: ModObject
   configSchema?: ModObject
   outputSchema?: ModObject
 }
+
+export type ClawActionExport = ClawActionDetails & { id: string } & ClawActionBinding
 
 export interface ClawActionIdentity {
   pluginId: string
@@ -19,14 +29,7 @@ export interface ClawActionIdentity {
   actionId: string
 }
 
-export interface ClawActionDescriptor extends ClawActionIdentity {
-  name: string
-  description?: string
-  command: string
-  inputSchema: ModObject
-  configSchema?: ModObject
-  outputSchema?: ModObject
-}
+export type ClawActionDescriptor = ClawActionDetails & ClawActionIdentity & ClawActionBinding
 
 export interface ClawActionEnvelope {
   version: 1
@@ -36,6 +39,29 @@ export interface ClawActionEnvelope {
   runId: string
   stepId: string
   executionId: string
+}
+
+/** Exported platform actions acknowledge completed work, never just background submission. */
+export interface ClawPlatformActionResult {
+  status: "succeeded" | "failed" | "cancelled"
+  text?: string
+  output?: ModObject
+}
+
+export function parseClawPlatformActionResult(value: unknown): ClawPlatformActionResult {
+  const raw = clawActionObject(value)
+  if (raw.status === "running" || raw.status === "unknown") throw Error("CLAW_ACTION_NOT_TERMINAL")
+  if (
+    !["succeeded", "failed", "cancelled"].includes(String(raw.status)) ||
+    Object.keys(raw).some((key) => !["status", "text", "output"].includes(key)) ||
+    (raw.text !== undefined && (typeof raw.text !== "string" || raw.text.length > 8000))
+  )
+    throw Error("CLAW_ACTION_PLATFORM_RESULT_INVALID")
+  return {
+    status: raw.status as ClawPlatformActionResult["status"],
+    ...(raw.text === undefined ? {} : { text: raw.text as string }),
+    ...(raw.output === undefined ? {} : { output: clawActionObject(raw.output) })
+  }
 }
 
 export const CLAW_ACTION_MAX_BYTES = 28_000
@@ -66,6 +92,32 @@ export function parseClawActionIdentity(value: unknown): ClawActionIdentity {
   return { pluginId: raw.pluginId, plugin: raw.plugin, digest: raw.digest, actionId: raw.actionId }
 }
 
+/** A platform binding always refers to this exported package, never a renderer-selected peer. */
+export function parseClawActionPlatform(value: unknown): ClawActionPlatformBinding {
+  const raw = clawActionObject(value)
+  if (
+    Object.keys(raw).some((key) => !["id", "version", "action"].includes(key)) ||
+    typeof raw.id !== "string" ||
+    !/^[a-zA-Z][a-zA-Z0-9_.:-]{0,127}$/.test(raw.id) ||
+    typeof raw.action !== "string" ||
+    !/^[a-zA-Z][a-zA-Z0-9_.:-]{0,127}$/.test(raw.action) ||
+    typeof raw.version !== "string" ||
+    !/^(0|[1-9]\d{0,5})\.(0|[1-9]\d{0,5})\.(0|[1-9]\d{0,5})$/.test(raw.version)
+  )
+    throw Error("CLAW_ACTION_PLATFORM_INVALID")
+  return { id: raw.id, version: raw.version, action: raw.action }
+}
+
+export function parseClawActionBinding(value: unknown): ClawActionBinding {
+  const raw = clawActionObject(value)
+  if ((raw.command !== undefined) === (raw.platform !== undefined))
+    throw Error("CLAW_ACTION_BINDING_INVALID")
+  if (raw.platform !== undefined) return { platform: parseClawActionPlatform(raw.platform) }
+  if (typeof raw.command !== "string" || !/^[a-zA-Z0-9][\w:-]{0,99}$/.test(raw.command))
+    throw Error("CLAW_ACTION_BINDING_INVALID")
+  return { command: raw.command }
+}
+
 /** Declarations describe callable commands; they never execute source during discovery. */
 export function parseClawActionExports(value: unknown): ClawActionExport[] {
   if (value === undefined) return []
@@ -84,8 +136,6 @@ export function parseClawActionExports(value: unknown): ClawActionExport[] {
       typeof entry.name !== "string" ||
       !entry.name.trim() ||
       entry.name.length > 128 ||
-      typeof entry.command !== "string" ||
-      !/^[a-zA-Z0-9][\w:-]{0,99}$/.test(entry.command) ||
       (entry.description !== undefined &&
         (typeof entry.description !== "string" || entry.description.length > 2000))
     )
@@ -94,7 +144,7 @@ export function parseClawActionExports(value: unknown): ClawActionExport[] {
     return {
       id: entry.id,
       name: entry.name,
-      command: entry.command,
+      ...parseClawActionBinding(entry),
       ...(entry.description === undefined ? {} : { description: entry.description }),
       inputSchema: clawActionObject(entry.inputSchema),
       ...(entry.configSchema === undefined

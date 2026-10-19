@@ -1,0 +1,5 @@
+{
+  "name": "task-workbench-consumer",
+  "version": "1.0.0",
+  "description": "通过公开能力协议组合独立任务提供方，登记页面、导航、侧栏、操作入口及设置表单"
+}

@@ -119,6 +119,8 @@ export interface WorkflowSubagentDeps {
   }) => Promise<WorkflowSubagentRuntime>
   /** Tears down per-thread resources (checkpointer, sandbox ACLs). */
   cleanupThread: (threadId: string) => Promise<void>
+  /** The original runtime producer owns physical Function VMs, not just checkpoint files. */
+  strictRuntimeCleanup?: boolean
   isRetryableApiError: (error: unknown) => boolean
   parentThreadId: string
   defaultModelId?: string
@@ -241,6 +243,7 @@ async function runWorkflowSubagentAttempts(
     try {
       return await runOnce(deps, request, attempt, timeoutMs)
     } catch (error) {
+      if (error instanceof WorkflowRuntimeCleanupError) throw error
       if (request.signal.aborted || isWorkflowAbortError(error)) throw new WorkflowAbortError()
       lastError = error
       const retryable = deps.isRetryableApiError(error)
@@ -263,6 +266,21 @@ async function runWorkflowSubagentAttempts(
     }
   }
   throw lastError instanceof Error ? lastError : new Error(String(lastError))
+}
+
+class WorkflowRuntimeCleanupError extends Error {
+  constructor(cause: unknown) {
+    super("WORKFLOW_RUNTIME_CLEANUP_UNCONFIRMED", { cause })
+  }
+}
+
+async function cleanupWorkflowRuntime(deps: WorkflowSubagentDeps, threadId: string,
+  strict: boolean, reportFailure = true): Promise<void> {
+  try { await deps.cleanupThread(threadId) }
+  catch (error) {
+    if (strict) throw deps.strictRuntimeCleanup ? new WorkflowRuntimeCleanupError(error) : error
+    if (reportFailure) console.warn(`[Workflow] Subagent cleanup failed for ${threadId}:`, error)
+  }
 }
 
 /**
@@ -420,8 +438,7 @@ async function runOnce(
     // collide with a dead run's leftover checkpoint — continuing on that
     // transcript poisons the subagent (or 400s on a dangling tool_call).
     // Purge any stale per-thread state before creating the runtime.
-    if (request.flowPromptOnly) await deps.cleanupThread(threadId)
-    else await deps.cleanupThread(threadId).catch(() => undefined)
+    await cleanupWorkflowRuntime(deps, threadId, !!(request.flowPromptOnly || deps.strictRuntimeCleanup), false)
     tracer = createWorkflowSubagentTrace(deps, request, threadId)
     if (tracer)
       traceRecorder = new TurnTraceRecorder({
@@ -744,11 +761,7 @@ async function runOnce(
     // completion) so any child process the subagent left tied to this signal
     // is torn down — mirrors the coordinator worker's background-task cancel.
     controller.abort()
-    if (request.flowPromptOnly) await deps.cleanupThread(threadId)
-    else
-      await deps.cleanupThread(threadId).catch((cleanupError) => {
-        console.warn(`[Workflow] Subagent cleanup failed for ${threadId}:`, cleanupError)
-      })
+    await cleanupWorkflowRuntime(deps, threadId, !!(request.flowPromptOnly || deps.strictRuntimeCleanup))
   }
 }
 

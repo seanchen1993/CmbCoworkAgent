@@ -8,6 +8,7 @@ import {
   type ParameterDraft
 } from "@/lib/flow-parameter-form"
 import type { ModObject, ModJson } from "../../../../shared/mods/types"
+import { StringArrayParameter } from "./StringArrayParameter"
 
 const fieldClass =
   "w-full min-w-0 rounded-lg border bg-background px-3 py-2 text-sm text-foreground outline-none focus-visible:ring-2 focus-visible:ring-ring/20"
@@ -133,7 +134,7 @@ export function FlowParameterEditor({
               const label = `${title} · ${field.title}`
               const mismatch =
                 present &&
-                (field.type === "integer"
+                (field.type === "array" ? !Array.isArray(actual) || actual.some((item) => typeof item !== "string") : field.type === "integer"
                   ? typeof actual !== "number" || !Number.isSafeInteger(actual)
                   : typeof actual !== field.type)
               const inputClass = `${fieldClass} disabled:opacity-50`
@@ -156,7 +157,7 @@ export function FlowParameterEditor({
                             field.key,
                             event.target.checked
                               ? (field.enum?.[0] ??
-                                  (field.type === "string"
+                                  (field.type === "array" ? [] : field.type === "string"
                                     ? ""
                                     : field.type === "boolean"
                                       ? false
@@ -173,7 +174,8 @@ export function FlowParameterEditor({
                       原值 {JSON.stringify(actual)} 与类型不符，已保留。请用高级 JSON
                       修正，或取消后重新设置。
                     </p>
-                  ) : field.enum ? (
+                  ) : field.type === "array" ? <StringArrayParameter label={label} value={actual}
+                    schema={field.schema} disabled={!present} onChange={(next) => update(field.key, next)} /> : field.enum ? (
                     <select
                       className={inputClass}
                       aria-label={label}

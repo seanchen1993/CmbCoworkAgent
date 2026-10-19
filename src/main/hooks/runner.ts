@@ -1,6 +1,17 @@
+import { prepareStageCheckReceipts } from "./stage-check-receipts"
+import { hookExecutionResult } from "./execution-result"
+import {
+  partitionRequiredBusinessHooks,
+  requiredBusinessCheckFailure
+} from "./required-business-checks"
+import { suppressCompositionPythonCache } from "../harness-board/composition-python-cache"
 import { observeBuiltinPolicyDecision } from "../mods/builtins/policy-decisions"
-import { assertCurrentRuntimePluginSourceContent } from "../plugins/runtime-source-scope"
-import { spawn } from "node:child_process"
+import {
+  assertCurrentRuntimePluginSourceContent,
+  currentRuntimePluginSource
+} from "../plugins/runtime-source-scope"
+import { startOwnedHookCommand } from "./owned-command"
+import { findHookProcessCleanupError } from "./owned-process-error"
 import { randomUUID } from "node:crypto"
 import { ChatOpenAI } from "@langchain/openai"
 import { HumanMessage, SystemMessage } from "@langchain/core/messages"
@@ -12,6 +23,7 @@ import { executeHttpHook } from "./http-runner"
 import type { PluginHookMetadata, SkillHookMetadata } from "../types"
 import { joinHookText } from "./text"
 import { mergeUpdatedInput } from "./updated-input"
+import { HookInputMergeTracker, hookInputMergeNotice } from "./updated-input-diagnostics"
 import { getHookLoggingConfig, getUserInfo } from "../storage"
 import { getAvailableModelConfigOrDefault, getModelConfigByRef } from "../models/registry"
 import { persistHookResultRecord } from "./log-record"
@@ -24,6 +36,9 @@ import { isModObject, ModFunctionError } from "../../shared/mods/v2/contracts"
 import { trackEvent } from "../services/event-reporter"
 import { getCurrentHookAgentId } from "./execution-context"
 import { samplingFields, topKModelKwargs } from "../models/sampling-params"
+import { withCompletionModelBudget } from "../agent/mods-model-boundary"
+import { isCreatorBudgetError, readCreatorBudgetErrorCode } from "../mods/devtools/creator-model-accounting"
+import { readHookModelAccounting, type HookModelAccounting } from "./model-accounting"
 
 /**
  * Resolve the effective timeout (ms) for a hook by consulting the handler-type
@@ -473,6 +488,7 @@ function buildHookEnv(
   // Remove inherited values first so a parent process cannot leak stale context
   // into a hook whose invocation does not provide the corresponding field.
   clearInheritedInvocationContextEnv(env)
+  if (currentRuntimePluginSource()?.mode === "legacy") env.PYTHONDONTWRITEBYTECODE = "1"
   env.HOOK_EVENT = event
   if (context.toolName) env.TOOL_NAME = context.toolName
   if (context.hookSourceType) env.HOOK_SOURCE_TYPE = context.hookSourceType
@@ -755,148 +771,80 @@ function decodeHookOutput(
 /**
  * Execute a single hook command and return its result.
  */
-function executeCommandHook(
+async function executeCommandHook(
   hook: HookConfig,
   env: Record<string, string>,
   stdinPayload: string,
-  cwd: string
+  cwd: string,
+  signal?: AbortSignal
 ): Promise<HookResult> {
-  return new Promise((resolve) => {
-    const command = hook.command ?? ""
-    if (!command.trim()) {
-      resolve({ exitCode: 0, stdout: "", stderr: "Hook command is empty", blocked: false })
-      return
-    }
-
-    const timeout = getEffectiveTimeout(hook)
-    const isWindows = process.platform === "win32"
-
-    // PR-13b — honour explicit hook.shell when set, else fall back to the
-    // legacy platform-based pick. When `hook.shell` names a non-default
-    // interpreter the runner relies on it being resolvable from PATH (e.g.
-    // Git Bash / WSL / pwsh installed). spawn will surface a missing-binary
-    // error through the existing error path; the hook surfaces as failed
-    // (non-blocking, since exit-2 semantics only apply to clean runs).
-    let cmd: string
-    let args: string[]
-    let useShell: boolean
-    if (hook.shell === "bash") {
-      cmd = "bash"
-      args = ["-c", command]
-      useShell = false
-    } else if (hook.shell === "powershell") {
-      cmd = "pwsh"
-      args = ["-NoProfile", "-NonInteractive", "-Command", command]
-      useShell = false
-    } else if (hook.shell === "sh") {
-      cmd = "sh"
-      args = ["-c", command]
-      useShell = false
-    } else {
-      cmd = isWindows ? command : "/bin/sh"
-      args = isWindows ? [] : ["-c", command]
-      useShell = isWindows
-    }
-
-    const child = spawn(cmd, args, {
-      env,
-      shell: useShell,
-      stdio: ["pipe", "pipe", "pipe"],
-      timeout,
-      cwd
-    })
-
-    // Write the Claude Code JSON payload to stdin so hooks can parse structured input.
-    // Wrapped in try/catch — child may already be dead if spawn failed.
-    try {
-      child.stdin?.end(stdinPayload)
-    } catch {
-      /* ignore — error event will fire */
-    }
-
-    const stdoutChunks: Buffer[] = []
-    const stderrChunks: Buffer[] = []
-    let outputBytes = 0
-    let outputTruncated = false
-
-    const stopForOutputLimit = (): void => {
-      if (outputTruncated) return
+  signal?.throwIfAborted()
+  const command = hook.command ?? ""
+  if (!command.trim())
+    return { exitCode: 0, stdout: "", stderr: "Hook command is empty", blocked: false }
+  const timeout = getEffectiveTimeout(hook)
+  const windows = process.platform === "win32"
+  let cmd: string
+  let args: string[]
+  let windowsShellCommand: string | undefined
+  if (hook.shell === "bash") {
+    cmd = "bash"
+    args = ["-c", command]
+  } else if (hook.shell === "powershell") {
+    cmd = "pwsh"
+    args = ["-NoProfile", "-NonInteractive", "-Command", command]
+  } else if (hook.shell === "sh") {
+    cmd = "sh"
+    args = ["-c", command]
+  } else if (windows) {
+    cmd = process.env.ComSpec || "cmd.exe"
+    args = []
+    windowsShellCommand = command
+  } else {
+    cmd = "/bin/sh"
+    args = ["-c", command]
+  }
+  const stdout: Buffer[] = [], stderr: Buffer[] = []
+  let outputBytes = 0, outputTruncated = false, timedOut = false
+  const collect = (target: Buffer[], chunk: Buffer): void => {
+    if (outputTruncated) return
+    outputBytes += chunk.length
+    if (outputBytes > MAX_OUTPUT_BYTES) {
       outputTruncated = true
-      try {
-        child.kill("SIGKILL")
-      } catch {
-        /* ignore */
-      }
+      owned.stop()
+    } else target.push(chunk)
+  }
+  let owned: ReturnType<typeof startOwnedHookCommand>
+  try {
+    owned = startOwnedHookCommand({
+      executable: cmd, args, windowsShellCommand, cwd, env, stdin: stdinPayload, signal,
+      stdout: chunk => collect(stdout, chunk), stderr: chunk => collect(stderr, chunk)
+    })
+  } catch (error) {
+    signal?.throwIfAborted()
+    // Preserve ordinary missing-interpreter failure semantics; uncertain physical cleanup
+    // after a real spawn is deliberately not caught here.
+    return { exitCode: 1, stdout: "", blocked: false,
+      stderr: `Hook execution error: ${error instanceof Error ? error.message : String(error)}` }
+  }
+  const timer = setTimeout(() => { timedOut = true; owned.stop() }, timeout)
+  try {
+    // A deadline requests cleanup; it cannot manufacture a settled execution before close.
+    const result = await owned.completion
+    signal?.throwIfAborted()
+    const decoded = decodeHookOutput(Buffer.concat(stdout), Buffer.concat(stderr))
+    return {
+      exitCode: timedOut ? null : outputTruncated || result.error ? 1 : result.code,
+      stdout: timedOut || outputTruncated || result.error ? "" : decoded.stdout.trim(),
+      stderr: timedOut ? `Hook timed out after ${timeout}ms`
+        : result.error ? `Hook execution error: ${result.error.message}`
+        : decoded.stderr.trim() + (outputTruncated
+          ? `\n[output truncated at ${MAX_OUTPUT_BYTES} bytes]` : ""),
+      blocked: !timedOut && !outputTruncated && !result.error && result.code === 2
     }
-
-    // Guard against double-resolve from concurrent timer + close/error events
-    let resolved = false
-    const settle = (result: HookResult): void => {
-      if (resolved) return
-      resolved = true
-      clearTimeout(timer)
-      resolve(result)
-    }
-
-    child.stdout?.on("data", (chunk: Buffer) => {
-      if (outputTruncated) return
-      outputBytes += chunk.length
-      if (outputBytes > MAX_OUTPUT_BYTES) {
-        stopForOutputLimit()
-      } else {
-        stdoutChunks.push(chunk)
-      }
-    })
-
-    child.stderr?.on("data", (chunk: Buffer) => {
-      if (outputTruncated) return
-      outputBytes += chunk.length
-      if (outputBytes > MAX_OUTPUT_BYTES) {
-        stopForOutputLimit()
-      } else {
-        stderrChunks.push(chunk)
-      }
-    })
-
-    const timer = setTimeout(() => {
-      try {
-        child.kill("SIGKILL")
-      } catch {
-        /* ignore */
-      }
-      settle({
-        exitCode: null,
-        stdout: "",
-        stderr: `Hook timed out after ${timeout}ms`,
-        blocked: false
-      })
-    }, timeout + 500)
-
-    child.on("close", (exitCode) => {
-      const stdoutBuf = Buffer.concat(stdoutChunks)
-      const stderrBuf = Buffer.concat(stderrChunks)
-      const decoded = decodeHookOutput(stdoutBuf, stderrBuf)
-      const extraNote = outputTruncated ? `\n[output truncated at ${MAX_OUTPUT_BYTES} bytes]` : ""
-      settle({
-        // Never expose a partial stdout as ordinary Hook output: a truncated
-        // protocol envelope must be an explicit execution failure, not silently
-        // downgraded to text or a partial decision.
-        exitCode: outputTruncated ? 1 : exitCode,
-        stdout: outputTruncated ? "" : decoded.stdout.trim(),
-        stderr: decoded.stderr.trim() + extraNote,
-        blocked: exitCode === 2
-      })
-    })
-
-    child.on("error", (err) => {
-      settle({
-        exitCode: 1,
-        stdout: "",
-        stderr: `Hook execution error: ${err.message}`,
-        blocked: false
-      })
-    })
-  })
+  } finally {
+    clearTimeout(timer)
+  }
 }
 
 // ── Prompt Hook ───────────────────────────────────────────────────────────────
@@ -948,7 +896,11 @@ function extractFirstJson(text: string): string | null {
  * Get a lightweight ChatOpenAI instance for prompt-hook evaluation.
  * Prefers the modelId specified on the hook; falls back to the saved/default available model.
  */
-function getPromptHookModel(modelId: string | undefined, timeout: number): ChatOpenAI | null {
+function getPromptHookModel(
+  modelId: string | undefined,
+  timeout: number,
+  accounting?: HookModelAccounting
+): ChatOpenAI | null {
   const config = modelId
     ? (getModelConfigByRef(modelId) ?? getAvailableModelConfigOrDefault())
     : getAvailableModelConfigOrDefault()
@@ -965,7 +917,13 @@ function getPromptHookModel(modelId: string | undefined, timeout: number): ChatO
     modelKwargs: {
       ...topKModelKwargs(config.model, config.topK)
     },
-    configuration: { baseURL: config.baseUrl }
+    configuration: {
+      baseURL: config.baseUrl,
+      ...(accounting ? { fetch: async (input: Parameters<typeof fetch>[0], init?: Parameters<typeof fetch>[1]) => {
+        accounting.assertCurrent()
+        return withCompletionModelBudget(fetch, accounting.receipt, false)(input, init)
+      } } : {})
+    }
   })
 }
 
@@ -1027,7 +985,8 @@ function buildPromptHookUserMessage(
 async function executePromptHook(
   hook: HookConfig,
   context: HookContext,
-  event: HookEvent
+  event: HookEvent,
+  accounting?: HookModelAccounting
 ): Promise<HookResult> {
   const fallback = hook.fallback ?? "allow"
   const fallbackResult = (reason: string): HookResult => ({
@@ -1045,7 +1004,7 @@ async function executePromptHook(
   }
 
   const timeout = getEffectiveTimeout(hook)
-  const model = getPromptHookModel(getHookModelRef(hook), timeout)
+  const model = getPromptHookModel(getHookModelRef(hook), timeout, accounting)
   if (!model) {
     return fallbackResult("[PromptHook] No model configured — cannot evaluate prompt hook")
   }
@@ -1055,6 +1014,8 @@ async function executePromptHook(
   let timeoutId: ReturnType<typeof setTimeout> | undefined
   try {
     const abortController = new AbortController()
+    const signals = [abortController.signal, context.signal, accounting?.signal,
+      getModCallContext()?.signal].filter((signal): signal is AbortSignal => !!signal)
     const timeoutPromise = new Promise<never>((_, reject) => {
       timeoutId = setTimeout(() => {
         abortController.abort()
@@ -1064,7 +1025,7 @@ async function executePromptHook(
 
     const invokePromise = model.invoke(
       [new SystemMessage(PROMPT_HOOK_SYSTEM), new HumanMessage(userMsg)],
-      { signal: abortController.signal }
+      { signal: AbortSignal.any(signals) }
     )
 
     const response = await Promise.race([invokePromise, timeoutPromise])
@@ -1072,6 +1033,7 @@ async function executePromptHook(
       clearTimeout(timeoutId)
       timeoutId = undefined
     }
+    accounting?.assertCurrent()
 
     let raw =
       typeof response.content === "string" ? response.content : JSON.stringify(response.content)
@@ -1105,6 +1067,8 @@ async function executePromptHook(
     }
   } catch (err) {
     if (timeoutId) clearTimeout(timeoutId)
+    if (isCreatorBudgetError(err) || accounting?.signal?.aborted ||
+      (accounting && err instanceof Error && err.name === "AbortError")) throw err
     const msg = err instanceof Error ? err.message : String(err)
     console.warn("[PromptHook] Evaluation error:", msg)
     return fallbackResult(`[PromptHook] Evaluation failed: ${msg}`)
@@ -1292,6 +1256,13 @@ function applyConfiguredOnBlock(result: HookResult, hook: HookConfig): HookResul
 
 // ── Dispatcher ────────────────────────────────────────────────────────────────
 
+function accountingObserverFailure(error: unknown): HookResult | undefined {
+  const code = readCreatorBudgetErrorCode(error)
+  return code ? {
+    exitCode: 1, stdout: "", stderr: code, blocked: true, decision: "block", reason: code
+  } : undefined
+}
+
 /**
  * Execute a single hook (command or prompt type).
  *
@@ -1305,7 +1276,8 @@ async function executeHook(
   env: Record<string, string>,
   context: HookContext,
   event: HookEvent,
-  onLateHookResult?: HookResultCallback
+  onLateHookResult?: HookResultCallback,
+  accounting?: HookModelAccounting
 ): Promise<HookResult> {
   // Compaction cannot begin until its gate settles. Imported async settings
   // are adapted to an awaited gate, including once/in-flight deduplication.
@@ -1348,7 +1320,7 @@ async function executeHook(
       oncePending.add(onceKey)
       oncePendingTokens.set(onceKey, pendingToken!)
     }
-    void executeSyncHook(hook, env, context, event)
+    void executeSyncHook(hook, env, context, event, undefined, undefined, accounting)
       .then((late) => {
         clearPending()
         const finalLate: HookResult = tagOnceResult(
@@ -1366,13 +1338,15 @@ async function executeHook(
       .catch((err) => {
         clearPending()
         const errStr = err instanceof Error ? err.message : String(err)
+        const budgetFailure = accountingObserverFailure(err)
         const finalLate: HookResult = tagOnceResult(
           {
             exitCode: null,
             stdout: "",
             stderr: errStr,
             blocked: false,
-            asyncStatus: "timeout",
+            ...(budgetFailure ?? {}),
+            asyncStatus: budgetFailure ? "completed" : "timeout",
             lateCompletedAt: new Date().toISOString()
           },
           getOnceSessionId(context),
@@ -1392,7 +1366,7 @@ async function executeHook(
     oncePending.add(onceKey)
     oncePendingTokens.set(onceKey, pendingToken!)
   }
-  const execution = executeSyncHook(hook, env, context, event).then((result) =>
+  const execution = executeSyncHook(hook, env, context, event, undefined, undefined, accounting).then((result) =>
     onceKey ? tagOnceResult(result, getOnceSessionId(context), onceGeneration) : result
   )
   if (!onceKey) return execution
@@ -1410,12 +1384,18 @@ async function executeSyncHook(
   hook: HookConfig,
   env: Record<string, string>,
   context: HookContext,
-  event: HookEvent
+  event: HookEvent,
+  requiredBusinessCheck?: () => void,
+  requiredAuthorityCheck?: () => void,
+  accounting?: HookModelAccounting
 ): Promise<HookResult> {
-  assertCurrentRuntimePluginSourceContent()
+  const hookType = hook.type ?? "command"
+  // Command preparation only derives bounded metadata. Its complete source fence stays
+  // below, after the preference await and immediately before the actual process starts.
+  if (hookType === "prompt" || hookType === "http") assertCurrentRuntimePluginSourceContent()
+  else currentRuntimePluginSource()
   const startedAt = Date.now()
   const diagnostic = getHookLoggingConfig().diagnostic
-  const hookType = hook.type ?? "command"
   let result: HookResult
   let stdinPayload: string | undefined
   if (hookType === "prompt") {
@@ -1423,7 +1403,7 @@ async function executeSyncHook(
       const policy = hook.prompt?.trim()
       if (policy) stdinPayload = buildPromptHookUserMessage(event, policy, context, hook)
     }
-    result = await executePromptHook(hook, context, event)
+    result = await executePromptHook(hook, context, event, accounting)
   } else if (hookType === "http") {
     const builtPayload = buildHookStdinPayload(event, context, hook)
     if (diagnostic) stdinPayload = builtPayload
@@ -1431,12 +1411,42 @@ async function executeSyncHook(
   } else {
     const builtPayload = buildHookStdinPayload(event, context, hook)
     if (diagnostic) stdinPayload = builtPayload
-    result = await executeCommandHook(hook, env, builtPayload, getCommandCwd(context))
+    const pluginRoot = (hook as ScopedHook).pluginRoot ?? context.pluginRoot
+    if (pluginRoot && (await suppressCompositionPythonCache(pluginRoot)))
+      env = { ...env, PYTHONDONTWRITEBYTECODE: "1" }
+    assertCurrentRuntimePluginSourceContent()
+    const signals = [context.signal, getModCallContext()?.signal].filter(
+      (signal): signal is AbortSignal => signal !== undefined
+    )
+    result = await executeCommandHook(hook, env, builtPayload, getCommandCwd(context),
+      signals.length ? AbortSignal.any(signals) : undefined)
   }
+  // Required callbacks already fence the original checked result. Ordinary Hook results
+  // need the same source fence after their real async IO, before parsing/publishing/once.
+  if (!requiredBusinessCheck) assertCurrentRuntimePluginSourceContent()
+  requiredBusinessCheck?.()
+  if (requiredBusinessCheck && result.exitCode !== 0)
+    return applyConfiguredOnBlock(requiredBusinessCheckFailure(hook,
+      result.stderr || result.stdout || `exit ${result.exitCode}`), hook)
+  const commitReceipts = hookType === "command" ? prepareStageCheckReceipts(hook, context, result) : undefined
+  const parsed = parseHookJsonOutput(result)
+  if (requiredBusinessCheck && parsed.decision === "human_gate" &&
+    (event !== "PreToolUse" || context.toolName !== "execute" || !parsed.systemMessage?.trim()))
+    return requiredBusinessCheckFailure(hook, "human gates require PreToolUse(execute) and a nonempty message")
   const finalized = applyConfiguredOnBlock(
-    normalizeHumanGateDecisionForEvent(parseHookJsonOutput(result), hook, event),
+    normalizeHumanGateDecisionForEvent(parsed, hook, event),
     hook
   )
+  if (requiredBusinessCheck && finalized.updatedInput !== undefined)
+    return requiredBusinessCheckFailure(hook, "checks cannot transform the validated input")
+  if (commitReceipts && finalized.exitCode === 0 && !finalized.blocked && finalized.decision !== "block" && finalized.decision !== "human_gate" && finalized.continue !== false && !hook.forcedOutcome) {
+    // The original receipt closure performs its own full check before invoking its sink.
+    // Keep the current signal/call/generation fence without hashing twice in this stack.
+    if (requiredAuthorityCheck) requiredAuthorityCheck()
+    else requiredBusinessCheck?.()
+    await commitReceipts()
+    requiredBusinessCheck?.()
+  }
   finalized.durationMs = Date.now() - startedAt
   if (stdinPayload !== undefined) finalized.stdinPayload = stdinPayload
   if (diagnostic) finalized.cwd = getCommandCwd(context)
@@ -1697,6 +1707,8 @@ async function runClassicFunctionHook(
     }
     return projected
   } catch (error) {
+    const cleanupFailure = findHookProcessCleanupError(error)
+    if (cleanupFailure) throw cleanupFailure
     signal.throwIfAborted()
     assertCurrent()
     // Optional guest failures are recovered inside the dispatcher. Errors that
@@ -1947,12 +1959,13 @@ function recordHookResult(
   onHookResult?.(event, hook, result)
 }
 
-export function runHooks(
+export async function runHooks(
   hooks: HookConfig[],
   event: HookEvent,
   context: HookContext,
   onHookResult?: HookResultCallback
 ): Promise<HookResult | null> {
+  const accounting = readHookModelAccounting(context)
   const generation = currentOnceGeneration(getOnceSessionId(context))
   const callContext = getModCallContext()
   const assertCurrent = () => {
@@ -1962,7 +1975,8 @@ export function runHooks(
     if (generation !== currentOnceGeneration(getOnceSessionId(context)))
       throw Error("HOOK_SESSION_CHANGED")
   }
-  return runClassicFunctionHook(event, context, (input) => {
+  const { ordinary, required } = partitionRequiredBusinessHooks(hooks)
+  const result = await runClassicFunctionHook(event, context, (input) => {
     assertCurrent()
     if (event === "PreToolUse" && input) {
       const toolArgs: Record<string, unknown> = { ...input }
@@ -1971,10 +1985,81 @@ export function runHooks(
           toolArgs[key] = context.toolArgs[key]
         else delete toolArgs[key]
       }
-      return runLegacyHooks(hooks, event, { ...context, toolArgs }, onHookResult)
+      return runLegacyHooks(ordinary, event, { ...context, toolArgs }, onHookResult, null, accounting)
     }
-    return runLegacyHooks(hooks, event, context, onHookResult)
+    return runLegacyHooks(ordinary, event, context, onHookResult, null, accounting)
   }, assertCurrent)
+  if (!required.length) return result
+  assertCurrent()
+  // Final validation is outside the guest fold. A guest cannot omit next(),
+  // replace a denial, or rewrite arguments after these checks have run.
+  let finalContext = event === "PreToolUse"
+    ? { ...context, toolArgs: mergeUpdatedInput(context.toolArgs ?? {}, result?.updatedInput) }
+    : context
+  if (event === "UserPromptSubmit") {
+    const prompt = result?.updatedInput?.message ?? result?.updatedInput?.prompt ??
+      result?.updatedInput?.userPrompt
+    if (typeof prompt === "string" && prompt.length > 0)
+      finalContext = { ...context, userPrompt: prompt }
+  }
+  if (event === "PostToolUse") {
+    const originalResult = hookExecutionResult(context)
+    if (originalResult !== undefined) finalContext = { ...finalContext, toolResult: originalResult }
+  }
+  let combined = result
+  for (const hook of required) {
+    if (!hookMatchesRunCriteria(hook, event, finalContext)) continue
+    const source = hook as Partial<PluginHookMetadata>
+    const hookContext = enrichContextFromHook(hook, {
+      ...finalContext, pluginId: source.pluginId, pluginName: source.pluginName,
+      pluginRoot: hook.pluginRoot ?? hook.hookSourceRoot,
+      hookSourceType: hook.hookSourceType, hookSourceRoot: hook.hookSourceRoot,
+      hookSourcePath: hook.hookSourcePath
+    })
+    let checked: HookResult
+    try {
+      checked = await executeSyncHook(
+        { ...hook, fallback: "block" },
+        { ...buildHookEnv(event, hookContext, hook), PYTHONDONTWRITEBYTECODE: "1" },
+        hookContext, event, () => {
+          assertCurrent()
+          assertCurrentRuntimePluginSourceContent()
+        }, assertCurrent, accounting
+      )
+    } catch (error) {
+      // A checker whose physical process has not settled is not a completed denial.
+      // Preserve uncertainty for the original execution owner; never mint a receipt.
+      const cleanupFailure = findHookProcessCleanupError(error)
+      if (cleanupFailure) throw cleanupFailure
+      if (isCreatorBudgetError(error)) throw error
+      assertCurrent()
+      checked = applyConfiguredOnBlock(requiredBusinessCheckFailure(hook,
+        error instanceof Error ? error.message : String(error)), hook)
+    }
+    assertCurrent()
+    if (checked.decision === "human_gate") checked = {
+      ...checked, decisionSource: { hookId: hook.id, pluginId: source.pluginId }
+    }
+    recordHookResult(event, hook, checked, hookContext, onHookResult)
+    if (isBlockingResult(checked)) return {
+      ...combined, ...checked, blocked: true,
+      updatedInput: combined?.updatedInput,
+      additionalContext: joinHookText(combined?.additionalContext, checked.additionalContext)
+    }
+    if (checked.decision === "human_gate") {
+      if (combined?.decision === "human_gate")
+        return requiredBusinessCheckFailure(hook, "multiple human gate sources cannot authorize one execution")
+      combined = { ...(combined ?? checked), decision: "human_gate",
+        decisionSource: checked.decisionSource, systemMessage: checked.systemMessage }
+      continue
+    }
+    combined = {
+      ...(combined ?? checked),
+      additionalContext: joinHookText(combined?.additionalContext, checked.additionalContext),
+      systemMessage: joinHookText(combined?.systemMessage, checked.systemMessage)
+    }
+  }
+  return combined
 }
 
 async function runLegacyHooks(
@@ -1982,7 +2067,8 @@ async function runLegacyHooks(
   event: HookEvent,
   context: HookContext,
   onHookResult?: HookResultCallback,
-  classicResult: HookResult | null = null
+  classicResult: HookResult | null = null,
+  accounting?: HookModelAccounting
 ): Promise<HookResult | null> {
   // Keep the legacy no-context path synchronous up to its first hook await.
   // Session teardown can clear once state immediately after calling runHooks;
@@ -2001,6 +2087,7 @@ async function runLegacyHooks(
     event === "PostToolBatch"
   ) {
     let mergedUpdatedInput: Record<string, unknown> | undefined
+    const inputMerge = new HookInputMergeTracker()
     let mergedAdditionalContext = classicResult?.additionalContext
     let mergedSystemMessage = classicResult?.systemMessage
     let mergedSuppressOutput = false
@@ -2013,19 +2100,52 @@ async function runLegacyHooks(
       // chain. Re-check after each completion so a successful first execution
       // consumes the duplicate before it reaches its executor.
       if (shouldSkipOnceHook(hook, event, hookContext)) continue
-      const result = applyForcedOutcome(
+      let result = applyForcedOutcome(
         await executeHook(
           hook,
           buildHookEnv(event, hookContext, hook),
           hookContext,
           event,
-          onHookResult
+          onHookResult, accounting
         ),
         hook
       )
       console.log(
         `[Hooks] ${event} hook (${hook.type ?? "command"}) "${(hook.command ?? hook.prompt ?? "").slice(0, 60)}" → exit=${result.exitCode}, blocked=${result.blocked}`
       )
+      // Explain destructive overlap without changing compatible ordered transformations.
+      // Do not attribute patches that will be discarded by a blocking/invalid gate.
+      const validHumanGate =
+        result.decision !== "human_gate" ||
+        (context.toolName === "execute" && !!result.systemMessage?.trim() && !humanGateDecision)
+      if (
+        result.updatedInput &&
+        !result.blocked &&
+        result.continue !== false &&
+        result.decision !== "block" &&
+        validHumanGate
+      ) {
+        const wasTruncated = inputMerge.truncated
+        const conflicts = inputMerge.observe(
+          hook.id,
+          result.updatedInput,
+          (hook as Partial<PluginHookMetadata>).pluginId
+        )
+        // A once executor can share its result object between concurrent chains. Keep these
+        // invocation-specific observations outside that cached native outcome.
+        result = {
+          ...result,
+          updatedInputMerge: {
+            order: [...inputMerge.order],
+            conflicts,
+            truncated: inputMerge.truncated
+          },
+          systemMessage: joinHookText(
+            result.systemMessage,
+            hookInputMergeNotice(conflicts, inputMerge.truncated && !wasTruncated)
+          )
+        }
+      }
       recordHookResult(event, hook, result, hookContext, onHookResult)
       markOnceHookIfNeeded(hook, event, hookContext, result)
       // continue=false halts the entire agent turn, overrides everything else
@@ -2115,6 +2235,15 @@ async function runLegacyHooks(
       stderr: "",
       blocked: false,
       updatedInput: mergedUpdatedInput,
+      ...(inputMerge.order.length
+        ? {
+            updatedInputMerge: {
+              order: inputMerge.order,
+              conflicts: inputMerge.diagnostics,
+              truncated: inputMerge.truncated
+            }
+          }
+        : {}),
       additionalContext: mergedAdditionalContext,
       systemMessage: humanGateDecision?.systemMessage ?? mergedSystemMessage,
       suppressOutput: mergedSuppressOutput || undefined,
@@ -2140,7 +2269,7 @@ async function runLegacyHooks(
           buildHookEnv(event, hookContext, hook),
           hookContext,
           event,
-          onHookResult
+          onHookResult, accounting
         ),
         hook
       )
@@ -2188,7 +2317,7 @@ async function runLegacyHooks(
           buildHookEnv(event, hookContext, hook),
           hookContext,
           event,
-          onHookResult
+          onHookResult, accounting
         ),
         hook
       )
@@ -2260,7 +2389,7 @@ async function runLegacyHooks(
           buildHookEnv(event, hookContext, hook),
           hookContext,
           event,
-          onHookResult
+          onHookResult, accounting
         ),
         hook
       )
@@ -2333,7 +2462,7 @@ async function runLegacyHooks(
           buildHookEnv(event, hookContext, hook),
           hookContext,
           event,
-          onHookResult
+          onHookResult, accounting
         ),
         hook
       )
@@ -2403,7 +2532,7 @@ async function runLegacyHooks(
           buildHookEnv(event, hookContext, hook),
           hookContext,
           event,
-          onHookResult
+          onHookResult, accounting
         )
         const result = applyForcedOutcome(rawResult, hook)
         console.log(
@@ -2416,6 +2545,7 @@ async function runLegacyHooks(
         }
         return result
       } catch (err) {
+        if (isCreatorBudgetError(err)) throw err
         // PR-11 follow-up — surface unexpected executor throws as a synthetic
         // exitCode: 1 result. The Setup branch downstream treats anyFailed via
         // `exitCode !== 0`; previously returning undefined here would let a
@@ -2443,6 +2573,12 @@ async function runLegacyHooks(
         }, TOTAL_TIMEOUT_MS)
       )
     ])
+    if (Array.isArray(settled)) {
+      const budgetFailure = settled.find(
+        item => item.status === "rejected" && isCreatorBudgetError(item.reason)
+      )
+      if (budgetFailure?.status === "rejected") throw budgetFailure.reason
+    }
     // For Setup we surface a synthetic blocking result on timeout so the
     // caller (session-lifecycle) does NOT mark the workspace initialised.
     if (event === "Setup") {
@@ -2487,7 +2623,7 @@ async function runLegacyHooks(
   for (const hook of matched) {
     const hookContext = enrichContextFromHook(hook, context)
     if (shouldSkipOnceHook(hook, event, hookContext)) continue
-    executeHook(hook, buildHookEnv(event, hookContext, hook), hookContext, event, onHookResult)
+    void executeHook(hook, buildHookEnv(event, hookContext, hook), hookContext, event, onHookResult, accounting)
       .then((rawResult) => {
         const result = applyForcedOutcome(rawResult, hook)
         console.log(
@@ -2500,6 +2636,8 @@ async function runLegacyHooks(
         }
       })
       .catch((err) => {
+        const failure = accountingObserverFailure(err)
+        if (failure) recordHookResult(event, hook, failure, hookContext, onHookResult)
         console.warn(`[Hooks] ${event} hook error:`, err)
       })
   }

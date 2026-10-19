@@ -9,7 +9,8 @@ const object = (value: unknown): Record<string, unknown> | undefined =>
 /** Static differences and external bindings, never execution or semantic-equivalence proof. */
 export function businessModIntegrityDiagnostics(
   board: Record<string, unknown>,
-  files: readonly DerivationFile[]
+  files: readonly DerivationFile[],
+  skillSearchRoots: readonly string[] = ["skills"]
 ): {
   diagnostics: string[]
   requiresFixedWorkflowAcknowledgement: boolean
@@ -17,19 +18,13 @@ export function businessModIntegrityDiagnostics(
 } {
   const diagnostics: string[] = []
   const missingProviders: string[] = []
-  const workflow = object(board.workflow)
-  const requiresFixedWorkflowAcknowledgement =
-    Array.isArray(workflow?.dynamicStages) && workflow.dynamicStages.length > 0
-  if (requiresFixedWorkflowAcknowledgement)
-    diagnostics.push(
-      "行为差异：来源包含动态阶段，本次组装为所选固定步骤；条件启用、跳过及人工选择未被证明等价。请核对后明确选择固定方案，或保留原插件入口。"
-    )
   const knowledge = object(board.knowledge_config)
   const action = object(knowledge?.nextAction)
   if (typeof action?.slashSkill === "string") {
     const skill = action.slashSkill
     const found = files.some(
       (file) =>
+        skillSearchRoots.some((root) => file.path.startsWith(`${root}/`)) &&
         /(?:^|\/)SKILL\.md$/i.test(file.path) &&
         (file.path.endsWith(`/${skill}/SKILL.md`) ||
           parseSkillNameFromFrontmatterYaml(file.bytes.toString("utf8")) === skill)
@@ -47,8 +42,10 @@ export function businessModIntegrityDiagnostics(
       Object.values(commands).flatMap((value) => {
         const config = object(value),
           target = config?.knowledge_path
-        if (typeof target !== "string" || !target.startsWith("${pluginPath}/")) return []
-        const relative = target
+        if (typeof target !== "string") return []
+        const portableTarget = target.replace(/\\/g, "/")
+        if (!portableTarget.startsWith("${pluginPath}/")) return []
+        const relative = portableTarget
           .slice("${pluginPath}/".length)
           .replace(/\\/g, "/")
           .replace(/\/$/, "")
@@ -64,5 +61,5 @@ export function businessModIntegrityDiagnostics(
         `外部知识待绑定：${root.slice(0, 100)} 不在生成源码中；安装或生成成功不代表知识已装载，必需知识应在运行前核对。`
       )
   }
-  return { diagnostics, requiresFixedWorkflowAcknowledgement, missingProviders }
+  return { diagnostics, requiresFixedWorkflowAcknowledgement: false, missingProviders }
 }

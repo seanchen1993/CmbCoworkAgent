@@ -1,0 +1,5 @@
+{
+  "name": "task-behavior-compact",
+  "version": "1.0.0",
+  "description": "与前缀扩展竞争同一真实处理点，选择后才应用的精简替代实现"
+}

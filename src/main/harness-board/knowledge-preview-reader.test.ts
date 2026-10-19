@@ -5,6 +5,8 @@ import { serialize } from "node:v8"
 import { afterEach, describe, expect, it } from "vitest"
 import { readHarnessKnowledgePreview } from "./knowledge-preview-reader"
 import { HARNESS_KNOWLEDGE_PREVIEW_MAX_RESPONSE_BYTES } from "./knowledge-preview-protocol"
+import { createProjectTemplate } from "../mods/devtools/project-template"
+import { CONTEXT_HANDOFF_PROTOCOL, parseProjectRuntimeManifest, wrapProjectRuntimeManifest } from "../../shared/project-runtime"
 
 const roots: string[] = []
 
@@ -13,6 +15,41 @@ afterEach(async () => {
 })
 
 describe("Harness knowledge preview reader", () => {
+  it("reads a v2 provider cache only with the exact main-process plugin and canonical root grant", async () => {
+    const root = await mkdtemp(join(tmpdir(), "harness-knowledge-v2-preview-"))
+    roots.push(root)
+    const pluginPath = join(root, "plugin")
+    const knowledge = join(root, "host-cache")
+    await mkdir(join(pluginPath, "board_core"), { recursive: true })
+    await mkdir(knowledge)
+    await writeFile(join(knowledge, "governed.md"), "knowledge")
+    const template = createProjectTemplate({ packageId: "preview-v2", name: "Preview" })
+    const runtime = parseProjectRuntimeManifest(JSON.parse(template.files.find(file =>
+      file.path === "devclaw.project-runtime.json")!.text))
+    await writeFile(join(pluginPath, "provider.py"), "print('context')")
+    await writeFile(join(pluginPath, "devclaw.project-runtime.json"), JSON.stringify(
+      wrapProjectRuntimeManifest(runtime, { apiVersion: "devclaw.extension-contract/v1",
+        requires: [CONTEXT_HANDOFF_PROTOCOL], context: { sourceAccess: "read-only",
+          mutableData: "host", configuration: "host-resolved", knowledge: { required: true },
+          provider: { entry: "provider.py", operations: ["session-context"] } } })))
+    await writeFile(join(pluginPath, "board_core/board_config.json"), JSON.stringify({
+      apiVersion: 2, inspectCommands: { [process.platform]: { knowledge_path: knowledge } } }))
+    await writeFile(join(root, "plugins.json"), JSON.stringify([{ id: "v2", name: "Preview", path: pluginPath }]))
+    const source = { openworkDir: root, pluginStorePath: join(root, "plugins.json"),
+      leanTokenStorePath: join(root, "leanstar-config.json") }
+    const grant = { pluginId: "v2", pluginPath, root: knowledge }
+    const approved = readHarnessKnowledgePreview("v2", { ...source, authorizedKnowledge: grant },
+      HARNESS_KNOWLEDGE_PREVIEW_MAX_RESPONSE_BYTES)
+    expect(approved).toMatchObject({ configured: true, exists: true, path: knowledge })
+    expect(approved.files).toContainEqual(expect.objectContaining({ path: "/governed.md" }))
+    for (const invalid of [{ ...grant, pluginId: "another" },
+      { ...grant, pluginPath: join(root, "another-plugin") }]) {
+      expect(readHarnessKnowledgePreview("v2", { ...source, authorizedKnowledge: invalid },
+        HARNESS_KNOWLEDGE_PREVIEW_MAX_RESPONSE_BYTES))
+        .toMatchObject({ exists: false, files: [], error: expect.stringContaining("未经用户授权") })
+    }
+  })
+
   it("resolves plugin placeholders and returns a bounded file projection", async () => {
     const openworkDir = await mkdtemp(join(tmpdir(), "harness-knowledge-preview-"))
     roots.push(openworkDir)

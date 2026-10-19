@@ -9,6 +9,8 @@ import type { FlowRun, FlowStep } from "../../../shared/mods/flows/types"
 import { claimLocalThreadRunLease, releaseLocalThreadRunLease } from "../../agent/thread-run-lease"
 import { currentFunctionExecution } from "../v2/execution-context"
 import { NativeFlowHost } from "./native-host"
+import { originalFlowActionResult } from "./action-execution-facts"
+import { withProjectActionScope } from "../../harness-board/project-action-scope"
 import { ModRuntimeAuthorities } from "../runtime-instance"
 import { issueRuntimePluginSourceToken, withRuntimePluginSource, captureRuntimePluginSourceThreadGuard } from "../../plugins/runtime-source-scope"
 import type { PluginMetadata } from "../../types"
@@ -31,7 +33,11 @@ const mocks = vi.hoisted(() => ({
   deleteCheckpoint: vi.fn(),
   modelOverrides: new Map<string, Record<string, unknown>>(),
   defaultRef: "custom:default" as string | null,
-  threads: new Map<string, { metadata: string }>()
+  threads: new Map<string, { metadata: string }>(),
+  childWorkflows: vi.fn()
+}))
+vi.mock("./native-child-workflows", () => ({
+  captureNativeChildWorkflows: mocks.childWorkflows
 }))
 vi.mock("../../harness-board/service", () => ({
   buildHarnessFeatureAgentContext: mocks.harnessContext,
@@ -116,6 +122,7 @@ beforeEach(() => {
   mocks.promptProof.mockReset()
   mocks.skillSource = ""
   mocks.threads.clear()
+  mocks.childWorkflows.mockReset().mockResolvedValue({ settle: vi.fn(async () => {}) })
   mocks.modelOverrides.clear()
   mocks.defaultRef = "custom:default"
   mocks.mcpChanged = false
@@ -203,6 +210,7 @@ function fixture(steps: FlowStep[]) {
   const functions = {
     clawSelection: vi.fn(() => null),
     prepareAction: vi.fn(async (_workspace, _thread, action) => ({
+      route: "command",
       action: {
         ...action,
         command: action.actionId,
@@ -304,6 +312,39 @@ function fixture(steps: FlowStep[]) {
   }
 }
 
+it.each(["before", "during", "publication", "revoked"])("retains lexical project content checks around actual action effects (%s)", async timing => {
+  const step: Extract<FlowStep, { kind: "plugin-action" }> = {
+    id: "check", name: "Check", kind: "plugin-action", enabled: true,
+    pluginId: "checks", plugin: "checks", digest: "a".repeat(64), actionId: "check", input: {}
+  }
+  const f = fixture([step])
+  let revision = 1, current = true
+  const content = vi.fn(() => { if (revision !== 1) throw Error("PROJECT_CONTENT_CHANGED") })
+  await withProjectActionScope("thread", { projectId: "p" }, () => {
+    if (!current) throw Error("PROJECT_OWNER_REVOKED")
+  }, async () => {
+    const execution = await f.host.prepare("workspace", "thread", f.run, f.context.signal)
+    try {
+      for (let i = 0; i < 30; i++) await execution.fingerprint(f.context.signal)
+      expect(content).not.toHaveBeenCalled()
+      if (timing === "before") revision = 2
+      if (timing === "revoked") current = false
+      vi.mocked(f.functions.runAction).mockImplementation(async () => {
+        await Promise.resolve()
+        if (timing === "during") revision = 2
+        return { text: "action response", output: { passed: true } }
+      })
+      vi.mocked(f.manager.publish).mockImplementation(async (_workspace, value) => {
+        if (timing === "publication") revision = 2
+        return value
+      })
+      await expect(execution.execute(step, f.context)).rejects.toThrow(
+        timing === "revoked" ? "PROJECT_OWNER_REVOKED" : "PROJECT_CONTENT_CHANGED")
+      expect(f.functions.runAction).toHaveBeenCalledTimes(timing === "before" || timing === "revoked" ? 0 : 1)
+    } finally { await execution.dispose() }
+  }, content)
+})
+
 it("observes legacy recovery without preparing runtime, MCP, authority or child threads", async () => {
   const f = fixture([])
   releaseLocalThreadRunLease("thread", "mods", "flow_test")
@@ -377,6 +418,28 @@ const nativeMcpStep: FlowStep = {
   schemaDigest: "b".repeat(64),
   input: { value: "request" }
 }
+
+it.each(["before", "during", "publication"])("checks original project inputs around a real native MCP invocation seam (%s)", async timing => {
+  const f = fixture([nativeMcpStep])
+  let revision = 1
+  await withProjectActionScope("thread", { projectId: "p" }, () => {}, async () => {
+    const execution = await f.host.prepare("workspace", "thread", f.run, f.context.signal)
+    try {
+      if (timing === "before") revision = 2
+      mocks.invokeMcp.mockImplementation(async () => {
+        await Promise.resolve()
+        if (timing === "during") revision = 2
+        return { content: [], text: "actual result", isError: false }
+      })
+      vi.mocked(f.manager.publish).mockImplementation(async (_workspace, value) => {
+        if (timing === "publication") revision = 2
+        return value
+      })
+      await expect(execution.execute(nativeMcpStep, f.context)).rejects.toThrow("PROJECT_CONTENT_CHANGED")
+      expect(mocks.invokeMcp).toHaveBeenCalledTimes(timing === "before" ? 0 : 1)
+    } finally { await execution.dispose() }
+  }, () => { if (revision !== 1) throw Error("PROJECT_CONTENT_CHANGED") })
+})
 
 it("passes protected MCP structured output to a later action and prevents repeated invocation", async () => {
   const action: FlowStep = {
@@ -572,6 +635,61 @@ it("passes frozen role limits and strict single attempt model choice to real run
   })
   await execution.dispose()
   expect(mocks.threads.has("child")).toBe(false)
+})
+
+it("retains the native child identity until its own background workflow physically settles", async () => {
+  const step: FlowStep = {
+    id: "agent", name: "Agent", kind: "agent", enabled: true, prompt: "work"
+  }
+  const f = fixture([step])
+  let entered!: () => void, release!: () => void
+  const ready = new Promise<void>(done => { entered = done })
+  const completed = new Promise<void>(done => { release = done })
+  const settle = vi.fn(async (cancel = false) => {
+    if (!cancel) { entered(); await completed }
+  })
+  mocks.childWorkflows.mockResolvedValue({ settle })
+  mocks.runner.mockImplementation(async (deps, request) => {
+    const runtime = await deps.createRuntime({
+      threadId: "child", agentId: "physical-child", modelId: request.model,
+      extraSystemPrompt: "", abortSignal: request.signal
+    })
+    const result = { structured: { passed: true, summary: "done" } }
+    await runtime.preparePrompt("work")
+    await runtime.completeTurn(result)
+    await deps.cleanupThread("child")
+    return result
+  })
+  const execution = await f.host.prepare("workspace", "thread", f.run, f.context.signal)
+  const running = execution.execute(step, f.context)
+  await ready
+  expect(mocks.threads.has("child")).toBe(true)
+  expect(f.manager.closeFunctionThread).not.toHaveBeenCalledWith("child")
+  expect(f.released).not.toHaveBeenCalled()
+  release()
+  await expect(running).resolves.toMatchObject({ passed: true })
+  expect(settle.mock.calls.map(call => call[0])).toEqual([undefined, true])
+  expect(mocks.threads.has("child")).toBe(false)
+  await execution.dispose()
+})
+
+it("keeps parent authority and child identity when original background cleanup is unconfirmed", async () => {
+  const step: FlowStep = {
+    id: "agent", name: "Agent", kind: "agent", enabled: true, prompt: "work"
+  }
+  const f = fixture([step])
+  const settle = vi.fn().mockRejectedValueOnce(Error("FLOW_CHILD_WORKFLOW_CLEANUP_UNCONFIRMED"))
+    .mockResolvedValue(undefined)
+  mocks.childWorkflows.mockResolvedValue({ settle })
+  const execution = await f.host.prepare("workspace", "thread", f.run, f.context.signal)
+  await execution.execute(step, f.context)
+  await expect(execution.dispose()).rejects.toThrow("FLOW_CLEANUP_FAILED")
+  expect(mocks.threads.has("child")).toBe(true)
+  expect(f.released).not.toHaveBeenCalled()
+  expect(f.manager.closeFunctionThread).not.toHaveBeenCalledWith("child")
+  await execution.dispose()
+  expect(mocks.threads.has("child")).toBe(false)
+  expect(f.released).toHaveBeenCalledOnce()
 })
 
 it.each([{ agentType: "unknown" }, { modelId: "missing" }])(
@@ -974,6 +1092,44 @@ it("executes pinned independent actions under native authority and passes only v
   await execution.dispose()
 })
 
+it("retains a platform action's terminal business failure without inventing a command", async () => {
+  const step: Extract<FlowStep, { kind: "plugin-action" }> = {
+    id: "report", name: "Generate report", kind: "plugin-action", enabled: true,
+    pluginId: "reports", plugin: "reports", digest: "a".repeat(64), actionId: "generate", input: {}
+  }
+  const f = fixture([step])
+  const platform = { id: "delivery", version: "1.0.0", action: "generate" }
+  vi.mocked(f.functions.prepareAction).mockResolvedValue({
+    route: "platform",
+    action: { pluginId: step.pluginId, plugin: step.plugin, digest: step.digest,
+      actionId: step.actionId, name: step.name, platform, inputSchema: {} },
+    platform: { ref: { provider: "reports", id: "delivery", version: "1.0.0" },
+      source: { provider: "reports", digest: step.digest, generation: "1" },
+      grantEpoch: 1, workspaceEpoch: 1,
+      action: { id: "generate", title: "Generate", inputSchema: {}, outputSchema: {},
+        requiredPermissions: [], cancellable: true, idempotency: "keyed" } }
+  })
+  vi.mocked(f.functions.runAction).mockImplementation(async () => {
+    expect(currentFunctionExecution()?.runtimeAuthority).toBe(f.authority)
+    return { text: "Declared artifacts are missing", passed: false, output: { missing: 2 } }
+  })
+  const execution = await f.host.prepare("workspace", "thread", f.run, f.context.signal)
+  try {
+    const result = await execution.execute(step, f.context)
+    expect(result).toMatchObject({
+      passed: false, summary: "Declared artifacts are missing", source: "plugin-action",
+      output: { missing: 2 }
+    })
+    expect(originalFlowActionResult(result)).toMatchObject({
+      passed: false, summary: "Declared artifacts are missing", provider: { actionId: "generate" },
+      output: { missing: 2 }
+    })
+    const prepared = vi.mocked(f.functions.runAction).mock.calls[0][2]
+    expect(prepared.route).toBe("platform")
+    expect(prepared).not.toHaveProperty("command")
+  } finally { await execution.dispose() }
+})
+
 it("passes host-projected review and test results to an independent reporting action", async () => {
   const review: FlowStep = {
     id: "review",
@@ -1054,6 +1210,7 @@ it.each([false, true])(
     }
     const f = fixture([step])
     vi.mocked(f.functions.prepareAction).mockResolvedValue({
+      route: "command",
       action: {
         ...step,
         command: "run",
@@ -1090,6 +1247,7 @@ it("defers inherited input requirements while accepting fully valid static confi
   }
   const f = fixture([step])
   vi.mocked(f.functions.prepareAction).mockResolvedValue({
+    route: "command",
     action: {
       ...step,
       command: "run",

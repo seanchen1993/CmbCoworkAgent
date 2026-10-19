@@ -25,7 +25,12 @@ export async function suppressCompositionPythonCache(adapterDirectory: string): 
   const checks = await declaration(adapterDirectory, "devclaw.stage-checks.json", 4096)
   if (checks?.apiVersion !== "devclaw.stage-check-adapter/v1" || checks.adapter !== "autobiz-v1")
     return false
-  const runtime = await declaration(adapterDirectory, "devclaw.project-runtime.json", 65536)
+  const value = await declaration(adapterDirectory, "devclaw.project-runtime.json", 65536)
+  // v2 retains the same runtime inside an inline contract wrapper. This preference only
+  // prevents source writes; the original protocol/contract validators still own admission.
+  const runtime = value?.apiVersion === "devclaw.project-runtime/v2" &&
+    value.runtime && typeof value.runtime === "object" && !Array.isArray(value.runtime)
+    ? value.runtime as Record<string, unknown> : value
   return (
     runtime?.apiVersion === "devclaw.project-runtime/v1" &&
     runtime.mode === "legacy" &&

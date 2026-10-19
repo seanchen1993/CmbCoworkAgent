@@ -461,6 +461,19 @@ describe("pure Flow recovery history reservation", () => {
     expect(() => planRecoveryHistoryRetention(reserved.rows)).toThrow("FLOW_RECOVERY_REUSE_INVALID")
   })
 
+  it("allows changed or cleared progress without allowing a forged reused result", () => {
+    const source = fixture()
+    source.attempts[0].progress = { phase: "model", text: "Working", updatedAt: 1001 }
+    const reserved = reserve([source])
+    const child = reserved.rows.find((run) => run.id === "child")!
+    child.attempts[0].progress = { phase: "tool", toolName: "read_file", updatedAt: 2001 }
+    expect(planRecoveryHistoryRetention(reserved.rows)).toEqual(reserved.rows)
+    delete child.attempts[0].progress
+    expect(planRecoveryHistoryRetention(reserved.rows)).toEqual(reserved.rows)
+    child.attempts[0].result!.summary = "forged"
+    expect(() => planRecoveryHistoryRetention(reserved.rows)).toThrow("FLOW_RECOVERY_REUSE_INVALID")
+  })
+
   it("retains a copied receipt invalidated by later work but refuses to reuse it again", () => {
     const reserved = reserve([fixture()])
     const child = reserved.rows.find((run) => run.id === "child")!

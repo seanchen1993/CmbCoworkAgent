@@ -3,7 +3,7 @@ import assert from "node:assert/strict"
 import { existsSync, mkdirSync, readdirSync, writeFileSync } from "node:fs"
 import { join, resolve } from "node:path"
 import { chromium } from "playwright"
-import { mount } from "./mods-flow-browser.spec"
+import { mount, chooseSteps, startFromEditor } from "./mods-flow-browser.spec"
 
 const root = resolve(__dirname, "..")
 const output = join(root, "output/mods-host-flow-browser")
@@ -42,7 +42,7 @@ async function main() {
       await page.getByRole("button", { name: "添加Autobiz 阶段推进", exact: true }).count(),
       0
     )
-    await page.getByRole("button", { name: "添加真实检查", exact: true }).click()
+    await page.getByRole("button", { name: "添加运行检查", exact: true }).click()
     assert.deepEqual(
       await page.getByLabel("检查内容", { exact: true }).locator("option").allTextContents(),
       ["单元测试", "E2E"]
@@ -53,25 +53,26 @@ async function main() {
       .getByRole("button", { name: "删除步骤", exact: true })
       .click()
     await page.getByRole("button", { name: "保存流程", exact: true }).click()
-    await page.getByText("已保存版本 v1，可开始运行。", { exact: true }).waitFor()
+    await page.getByText("已保存修订 1，可开始运行。", { exact: true }).waitFor()
     const definition = await page.evaluate("window.fixture.calls.find(c=>c[0]==='save')[2]")
     assert.equal(definition.schemaVersion, 2)
     assert.deepEqual(definition.execution, { kind: "host" })
     assert.equal(Object.hasOwn(definition, "plugin"), false)
     assert.equal(await page.evaluate("window.fixture.calls.filter(c=>c[0]==='start').length"), 0)
-    await page.getByRole("button", { name: "运行已保存版本", exact: true }).click()
+    await startFromEditor(page)
     await page.getByRole("region", { name: "人工成果确认" }).waitFor()
     await page.getByRole("button", { name: "同意并继续", exact: true }).click()
     pass(
-      "zero plugins: default v2 saves without owner; only supported nodes; save does not execute; explicit direct run starts"
+      "zero plugins: default v2 saves without owner; only supported nodes; save does not execute; explicit composer task starts"
     )
 
     await page.evaluate("window.fixture.profile()")
+    await page.getByText("高级编辑与已保存组合", { exact: true }).click()
     await page.getByLabel("助手组合名称").fill("零插件流程 Claw")
     await page.getByText("更多设置：技能、工具、模型与步骤", { exact: true }).click()
     await page.getByLabel("组合使用的流程").selectOption(`${definition.id}:1`)
     await page.getByRole("button", { name: "保存组合", exact: true }).click()
-    await page.getByRole("button", { name: "应用到当前对话", exact: true }).click()
+    await page.getByRole("button", { name: "应用到所选聊天", exact: true }).click()
   await page.getByRole("button", { name: "确认应用", exact: true }).click()
     await page.getByText("当前组合：零插件流程 Claw", { exact: true }).waitFor()
     const profile = await page.evaluate(
@@ -84,12 +85,12 @@ async function main() {
       0
     )
     await page.evaluate("window.fixture.chat('a',true)")
-    await page.waitForFunction("window.chat.choice?.bindingRevision===1")
+    await page.waitForFunction("window.chat.binding?.bindingRevision===1")
+    assert.equal(await page.evaluate("window.chat.choice"), null)
     await page.getByRole("button", { name: "发送聊天", exact: true }).waitFor()
-    await page.getByRole("button", { name: "选择发送方式", exact: true }).click()
-    await page.getByRole("button", { name: "按步骤执行", exact: true }).click()
+    await chooseSteps(page, "claw:1")
     await page.getByLabel("聊天消息").fill("实际检视当前改动")
-    await page.getByRole("button", { name: "发送并执行流程", exact: true }).click()
+    await page.getByRole("button", { name: "按此步骤执行", exact: true }).click()
     await page.waitForFunction("window.fixture.calls.some(c=>c[0]==='clawStart')")
     assert.equal(
       await page.evaluate("window.fixture.calls.filter(c=>c[0]==='clawStart').length"),
@@ -107,21 +108,17 @@ async function main() {
       window.hostFlow={off:()=>catalog.hostAvailable=false,wrongVersion:()=>definitions.get('a')[0].revision++};
       host.render(<ChatFixture id='a'/>);`
     )
-    await page.getByRole("button", { name: "打开当前助手", exact: true }).click()
-    await page.getByRole("tab", { name: "按步骤执行", exact: true }).click()
-  await page.getByLabel("本次使用的步骤").selectOption("flow_host:1")
-    await page.getByRole("button", { name: "选择发送方式", exact: true }).click()
-    await page.getByRole("button", { name: "按步骤执行", exact: true }).click()
+    await chooseSteps(page, "flow_host:1")
     await page.evaluate("window.hostFlow.off()")
     await page.getByLabel("聊天消息").fill("保留输入")
-    await page.getByRole("button", { name: "发送并执行流程", exact: true }).click()
+    await page.getByRole("button", { name: "按此步骤执行", exact: true }).click()
     await page
       .getByText("应用流程暂不可运行，请确认 Mods 开关与当前项目。", { exact: true })
       .waitFor()
     assert.equal(await page.getByLabel("聊天消息").inputValue(), "保留输入")
     assert.equal(await page.evaluate("window.fixture.calls.filter(c=>c[0]==='start').length"), 0)
     await page.evaluate("window.hostFlow.wrongVersion()")
-    await page.getByRole("button", { name: "发送并执行流程", exact: true }).click()
+    await page.getByRole("button", { name: "按此步骤执行", exact: true }).click()
     await page.getByText(/流程已更新或移除/).waitFor()
     assert.equal(await page.evaluate("window.fixture.calls.filter(c=>c[0]==='start').length"), 0)
     pass(
@@ -129,11 +126,11 @@ async function main() {
     )
 
     await mount(page)
-    await page.getByRole("button", { name: "Flow a · v1", exact: true }).click()
+    await page.getByRole("button", { name: "Flow a", exact: true }).click()
     assert.equal(await page.getByLabel("所属插件", { exact: true }).inputValue(), "demo")
     await page.getByLabel("流程名称", { exact: true }).fill("Legacy renamed")
     await page.getByRole("button", { name: "保存流程", exact: true }).click()
-    await page.getByText("已保存版本 v2，可开始运行。", { exact: true }).waitFor()
+    await page.getByText("已保存修订 2，可开始运行。", { exact: true }).waitFor()
     const old = await page.evaluate("window.fixture.calls.find(c=>c[0]==='save')[2]")
     assert.equal(old.schemaVersion, 1)
     assert.equal(old.plugin, "demo")
@@ -141,7 +138,7 @@ async function main() {
     await page.evaluate("window.fixture.revoke()")
     await page.getByRole("button", { name: "刷新项目状态", exact: true }).click()
     await page.waitForFunction("document.querySelector('[aria-label=\"所属插件\"]')!==null")
-    assert(await page.getByRole("button", { name: "运行已保存版本", exact: true }).isDisabled())
+    assert(await page.getByRole("button", { name: "去这段聊天使用", exact: true }).isDisabled())
     pass(
       "legacy editing keeps schema and owner; revocation never converts old flow into host execution"
     )

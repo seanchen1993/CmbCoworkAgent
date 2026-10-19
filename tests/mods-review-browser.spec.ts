@@ -632,7 +632,7 @@ async function verifyUsageGuide(page: Page) {
   assert(await page.getByRole("heading", { name: "已安装插件", exact: true }).isVisible())
   assert.equal(await page.locator('input[type="password"]').count(), 0)
   assert(await page.getByRole("button", { name: "上传插件（ZIP）" }).isEnabled())
-  await page.getByRole("button", { name: "自己制作", exact: true }).click()
+  await page.getByRole("button", { name: "对话创作", exact: true }).click()
   await page.getByText("灵件使用指南", { exact: true }).click()
   const guideSummary = page.locator("summary").filter({
     hasText: "安装、启用和查看结果"
@@ -715,5 +715,3 @@ void main().catch((error) => {
   console.error(error)
   process.exitCode = 1
 })
-
-

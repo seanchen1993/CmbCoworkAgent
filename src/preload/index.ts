@@ -1,10 +1,13 @@
-import { createBusinessModAssemblyBridge } from "./business-mod-assembly"
+import { createNativeProjectSourceBridge } from "./native-project-source"
 import type { PluginInstallMode, PluginInstallResult } from "../shared/plugin-install"
 import { WINDOW_PRESENTATION_CHANGED, WINDOW_PRESENTATION_READ, type WindowPresentationSnapshot } from "../shared/window-presentation"
 import { createCommunityExamplesBridge } from "./community-examples"
 import { createPluginDerivationBridge } from "./plugin-derivation"
+import { createBusinessModAssemblyBridge } from "./business-mod-assembly"
 import { createNodeCompositionBridge } from "./node-composition"
 import { createDevelopmentBridge } from "./development"
+import { createHarnessKnowledgeApi } from "./harness-knowledge"
+import { createPlatformBridge } from "./mods-platform"
 import { createSkillEvaluationBridge } from "./skill-evaluation"
 import { createEvaluationBridge } from "./evaluation"
 import { createAuthoringInstallBridge } from "./authoring-install"
@@ -153,8 +156,6 @@ import type {
   HarnessPipelineQueryInput,
   HarnessPipelineQueryResult,
   HarnessProjectCreateInput,
-  HarnessProjectConstraintSyncResult,
-  HarnessKnowledgePreviewResult,
   HarnessProjectReviewInput,
   HarnessProjectReviewResult,
   HarnessFeatureCreateInput,
@@ -673,6 +674,31 @@ ipcRenderer.on(
 
 // Custom APIs for renderer
 const api = {
+  projectComposition: {
+    prepare: (input: Parameters<import("../shared/project-runtime/composition-api").ProjectCompositionApi["prepare"]>[0]) => ipcRenderer.invoke("project-composition:prepare", input),
+    startPrepared: (input: Parameters<import("../shared/project-runtime/composition-api").ProjectCompositionApi["startPrepared"]>[0]) => ipcRenderer.invoke("project-composition:startPrepared", input),
+    unitMods: createNativeProjectSourceBridge((channel, input) => ipcRenderer.invoke(channel, input), "project-composition-unit"),
+    readUnitContext: (input: Parameters<import("../shared/project-runtime/composition-api").ProjectCompositionApi["readUnitContext"]>[0]) => ipcRenderer.invoke("project-composition:readUnitContext", input),
+    saveUnitContext: (input: Parameters<import("../shared/project-runtime/composition-api").ProjectCompositionApi["saveUnitContext"]>[0]) => ipcRenderer.invoke("project-composition:saveUnitContext", input),
+    readLegacyDecision: (input: Parameters<import("../shared/project-runtime/composition-api").ProjectCompositionApi["readLegacyDecision"]>[0]) => ipcRenderer.invoke("project-composition:readLegacyDecision", input),
+    decideLegacyDecision: (input: Parameters<import("../shared/project-runtime/composition-api").ProjectCompositionApi["decideLegacyDecision"]>[0]) => ipcRenderer.invoke("project-composition:decideLegacyDecision", input),
+    readToolApprovals: (input: Parameters<import("../shared/project-runtime/composition-api").ProjectCompositionApi["readToolApprovals"]>[0]) => ipcRenderer.invoke("project-composition:readToolApprovals", input),
+    respondToolApproval: (input: Parameters<import("../shared/project-runtime/composition-api").ProjectCompositionApi["respondToolApproval"]>[0]) => ipcRenderer.invoke("project-composition:respondToolApproval", input),
+    openWorkspace: (input: Parameters<import("../shared/project-runtime/composition-api").ProjectCompositionApi["openWorkspace"]>[0]) => ipcRenderer.invoke("project-composition:openWorkspace", input),
+    readArtifact: (input: Parameters<import("../shared/project-runtime/composition-api").ProjectCompositionApi["readArtifact"]>[0]) => ipcRenderer.invoke("project-composition:readArtifact", input),
+    readCapabilities: (input: Parameters<import("../shared/project-runtime/composition-api").ProjectCompositionApi["readCapabilities"]>[0]) => ipcRenderer.invoke("project-composition:readCapabilities", input),
+    previewCapabilities: (input: Parameters<import("../shared/project-runtime/composition-api").ProjectCompositionApi["previewCapabilities"]>[0]) => ipcRenderer.invoke("project-composition:previewCapabilities", input),
+    applyCapabilities: (input: Parameters<import("../shared/project-runtime/composition-api").ProjectCompositionApi["applyCapabilities"]>[0]) => ipcRenderer.invoke("project-composition:applyCapabilities", input),
+    catalog: (scope: Parameters<import("../shared/project-runtime/composition-api").ProjectCompositionApi["catalog"]>[0]) => ipcRenderer.invoke("project-composition:catalog", scope),
+    preview: (input: Parameters<import("../shared/project-runtime/composition-api").ProjectCompositionApi["preview"]>[0]) => ipcRenderer.invoke("project-composition:preview", input),
+    start: (input: Parameters<import("../shared/project-runtime/composition-api").ProjectCompositionApi["start"]>[0]) => ipcRenderer.invoke("project-composition:start", input),
+    read: (input: Parameters<import("../shared/project-runtime/composition-api").ProjectCompositionApi["read"]>[0]) => ipcRenderer.invoke("project-composition:read", input),
+    resume: (input: Parameters<import("../shared/project-runtime/composition-api").ProjectCompositionApi["resume"]>[0]) => ipcRenderer.invoke("project-composition:resume", input),
+    cancel: (input: Parameters<import("../shared/project-runtime/composition-api").ProjectCompositionApi["cancel"]>[0]) => ipcRenderer.invoke("project-composition:cancel", input),
+    waitingApproval: (input: Parameters<import("../shared/project-runtime/composition-api").ProjectCompositionApi["waitingApproval"]>[0]) => ipcRenderer.invoke("project-composition:waitingApproval", input),
+    approve: (input: Parameters<import("../shared/project-runtime/composition-api").ProjectCompositionApi["approve"]>[0]) => ipcRenderer.invoke("project-composition:approve", input)
+  },
+  businessModAssembly: createBusinessModAssemblyBridge((channel, input) => ipcRenderer.invoke(channel, input)),
   pluginDerivation: createPluginDerivationBridge((channel, input) => ipcRenderer.invoke(channel, input)),
   nodeComposition: createNodeCompositionBridge((channel, input) => ipcRenderer.invoke(channel, input)),
   windowPresentation: {
@@ -3103,6 +3129,16 @@ const api = {
     }
   },
   mods: {
+    ...createPlatformBridge((channel, input) => ipcRenderer.invoke(channel, input)),
+    onPlatformChanged: (callback: (event: { threadId: string }) => void) => {
+      const handler = (_event: unknown, value: unknown) => {
+        if (value && typeof value === "object" && "threadId" in value &&
+          typeof value.threadId === "string" && value.threadId.length <= 200)
+          callback({ threadId: value.threadId })
+      }
+      ipcRenderer.on("mods:platform-changed", handler)
+      return () => ipcRenderer.removeListener("mods:platform-changed", handler)
+    },
     development: createDevelopmentBridge(
       (channel, input) => ipcRenderer.invoke(channel, input),
       (channel, callback) => {
@@ -3124,7 +3160,19 @@ const api = {
     configList: (threadId: string) => ipcRenderer.invoke("mods:config-list", threadId),
     configSet: (threadId: string, key: string, value: import("../shared/mods/v2/config").FunctionConfigValue) =>
       ipcRenderer.invoke("mods:config-set", { threadId, key, value }),
+    runtimeSessions: (currentThreadId?: string) => ipcRenderer.invoke("mods:runtime-sessions", currentThreadId),
+    previewSnapshotMaintenance: () => ipcRenderer.invoke("mods:snapshot-maintenance-preview"),
+    collectSnapshotGarbage: (previewId: string) => ipcRenderer.invoke("mods:snapshot-maintenance-collect", previewId),
+    releaseRuntimeSession: (session: import("../shared/mods/v2/runtime-sessions").FunctionRuntimeSession) =>
+      ipcRenderer.invoke("mods:runtime-session-release", { threadId: session.threadId,
+        workspace: session.workspace, generation: session.generation, incarnationKey: session.incarnationKey }),
+    resumeRuntimeSession: (session: import("../shared/mods/v2/runtime-sessions").FunctionRuntimeSession) =>
+      ipcRenderer.invoke("mods:runtime-session-resume", { threadId: session.threadId,
+        workspace: session.workspace, generation: session.generation, incarnationKey: session.incarnationKey }),
     userConfig: (threadId: string, pluginId: string, expectedWorkspace?: string) => ipcRenderer.invoke("mods:user-config", { threadId, pluginId, ...(expectedWorkspace !== undefined ? { expectedWorkspace } : {}) }),
+    migrateUserConfig: (threadId: string, view: import("../shared/mods/v2/user-config-view").FunctionUserConfigView) =>
+      ipcRenderer.invoke("mods:user-config-migrate", { threadId, pluginId: view.pluginId,
+        digest: view.digest, migrationDigest: view.migration?.digest, revision: view.savedRevision, workspace: view.workspace }),
     saveSensitiveUserConfig: (threadId: string, view: import("../shared/mods/v2/user-config-view").FunctionUserConfigView,
       key: string, action: import("../shared/mods/v2/user-config-view").SensitiveFunctionUserConfigAction) =>
       ipcRenderer.invoke("mods:user-config-secret-save", { threadId, pluginId: view.pluginId,
@@ -4637,6 +4685,9 @@ const api = {
   },
   harnessBoard: {
     localProjects: {
+      mods: {
+        ...createNativeProjectSourceBridge((channel, input) => ipcRenderer.invoke(channel, input), "project-runtime")
+      },
       library: {
         reuse: (sourceProjectId: string, id: string, targetProjectId: string) => ipcRenderer.invoke("project-runtime:library-reuse", sourceProjectId, id, targetProjectId),
         list: (projectId: string) => ipcRenderer.invoke("project-runtime:library-list", projectId),
@@ -4648,6 +4699,7 @@ const api = {
       preview: {
         list: (threadId: string) => ipcRenderer.invoke("project-preview:list", threadId),
         create: (input: Parameters<import("../shared/project-runtime/development-preview").ProjectPreviewApi["create"]>[0]) => ipcRenderer.invoke("project-preview:create", input),
+        recover: (input: Parameters<import("../shared/project-runtime/development-preview").ProjectPreviewApi["recover"]>[0]) => ipcRenderer.invoke("project-preview:recover", input),
         finish: (input: Parameters<import("../shared/project-runtime/development-preview").ProjectPreviewApi["finish"]>[0]) => ipcRenderer.invoke("project-preview:finish", input)
       },
       actionResults: (projectId: string, operationId: string) => ipcRenderer.invoke("project-runtime:action-results", projectId, operationId),
@@ -4698,16 +4750,7 @@ const api = {
         "harnessBoard:saveLeanTokenConfig",
         input
       ) as Promise<HarnessLeanTokenConfig>,
-    syncProjectConstraints: (adapterId: string): Promise<HarnessProjectConstraintSyncResult> =>
-      ipcRenderer.invoke(
-        "harnessBoard:syncProjectConstraints",
-        adapterId
-      ) as Promise<HarnessProjectConstraintSyncResult>,
-    getKnowledgePreview: (adapterId: string): Promise<HarnessKnowledgePreviewResult> =>
-      ipcRenderer.invoke(
-        "harnessBoard:getKnowledgePreview",
-        adapterId
-      ) as Promise<HarnessKnowledgePreviewResult>,
+    ...createHarnessKnowledgeApi((channel, ...args) => ipcRenderer.invoke(channel, ...args)),
     cancelKnowledgePreviewRequests: (): Promise<void> =>
       ipcRenderer.invoke("harnessBoard:cancelKnowledgePreviewRequests") as Promise<void>,
     createProject: (input: HarnessProjectCreateInput): Promise<HarnessProjectMetadata> =>
@@ -4796,10 +4839,6 @@ const api = {
         "harnessBoard:getDynamicWorkflowConfig",
         projectId
       ) as Promise<HarnessDynamicWorkflowConfig | null>,
-    getPublicAgentmdDeployUnits: (projectId: string): Promise<string[]> =>
-      ipcRenderer.invoke("harnessBoard:getPublicAgentmdDeployUnits", projectId) as Promise<
-        string[]
-      >,
     getLocalAgentmdDeployUnitMappings: (mappings: HarnessDeployUnitMapping[]): Promise<string[]> =>
       ipcRenderer.invoke("harnessBoard:getLocalAgentmdDeployUnitMappings", mappings) as Promise<
         string[]
@@ -4901,7 +4940,6 @@ const api = {
       return () => ipcRenderer.removeListener("harnessBoard:managedRunThreadCreated", handler)
     }
   },
-  businessModAssembly: createBusinessModAssemblyBridge((channel, input) => ipcRenderer.invoke(channel, input)),
   app: {
     restart: (): Promise<void> => ipcRenderer.invoke("app:restart") as Promise<void>
   },

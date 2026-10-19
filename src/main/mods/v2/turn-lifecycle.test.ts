@@ -113,6 +113,76 @@ describe("function turn lifecycle", () => {
     stop()
     f.lifecycle.close()
   })
+  it("captures only the original run publication and does not wait for a new leased turn", async () => {
+    const f = fixture()
+    const entered = Promise.withResolvers<void>(),
+      publish = Promise.withResolvers<void>()
+    const original = f.lifecycle["host"].complete
+    f.lifecycle["host"].complete = async (...args) => {
+      entered.resolve()
+      await publish.promise
+      return original(...args)
+    }
+    await f.lifecycle.start(f.binding())
+    const first = f.lifecycle.captureSettlement("thread", "run")!
+    expect(f.lifecycle.captureSettlement("thread", "foreign")).toBeUndefined()
+    f.lifecycle.finish("thread", "run", { reason: "answer" })
+    await entered.promise
+    f.busy.add("thread")
+    await f.lifecycle.start(f.binding("next", "next-turn"))
+    const next = f.lifecycle.captureSettlement("thread", "next")!
+    let nextSettled = false
+    void next.then(
+      () => {
+        nextSettled = true
+      },
+      () => {
+        nextSettled = true
+      }
+    )
+    publish.resolve()
+    await first
+    expect(nextSettled).toBe(false)
+    expect(f.ends.map((end) => end.turnId)).toEqual(["turn"])
+    expect(f.lifecycle.hasUnsettled("thread")).toBe(true)
+    f.lifecycle.finish("thread", "next", { reason: "answer" })
+    f.busy.delete("thread")
+    f.idle()
+    await next
+    f.lifecycle.close()
+  })
+  it("rejects a captured run when its original entry is invalidated", async () => {
+    const f = fixture()
+    f.busy.add("thread")
+    await f.lifecycle.start(f.binding())
+    const settlement = f.lifecycle.captureSettlement("thread", "run")!
+    f.lifecycle.finish("thread", "run", { reason: "answer" })
+    f.lifecycle.invalidate("/workspace", "thread")
+    await expect(settlement).rejects.toThrow("MODS_TURN_SCOPE_CHANGED")
+    f.busy.delete("thread")
+    f.idle()
+    await tick()
+    expect(f.ends).toEqual([])
+    f.lifecycle.close()
+  })
+  it("an expired exact settlement owner cannot invalidate a new entry with the same run id", async () => {
+    const f = fixture()
+    f.busy.add("thread")
+    await f.lifecycle.start(f.binding())
+    const old = f.lifecycle.captureSettlementOwner("thread", "run")!
+    old.invalidate()
+    await expect(old.settlement).rejects.toThrow("MODS_CALL_SCOPE_CHANGED")
+    await f.lifecycle.start(f.binding("run", "new-turn"))
+    const next = f.lifecycle.captureSettlementOwner("thread", "run")!
+    old.invalidate()
+    expect(f.lifecycle.stats).toEqual({ entries: 1, running: 1 })
+    f.lifecycle.finish("thread", "run", { reason: "answer" })
+    f.busy.delete("thread")
+    f.idle()
+    await next.settlement
+    expect(f.ends.map((end) => end.turnId)).toEqual(["new-turn"])
+    f.lifecycle.close()
+  })
   it("dispatches a host message anchor separately from the public hook event", async () => {
     const f = fixture()
     await f.lifecycle.start(f.binding())

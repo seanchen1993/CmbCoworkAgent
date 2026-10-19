@@ -20,6 +20,7 @@ import {
   getHarnessProjectDetails,
   getHarnessLocalAgentmdDeployUnitMappings,
   getHarnessProjectPublicAgentmdDeployUnits,
+  getHarnessKnowledgePreviewBinding,
   getHarnessProjectRootPath,
   getHarnessRunDetail,
   listHarnessDeployUnitMappings,
@@ -85,6 +86,7 @@ import type {
   HarnessPipelineQueryResult,
   HarnessProjectCreateInput,
   HarnessProjectConstraintSyncResult,
+  HarnessKnowledgeTarget,
   HarnessProjectDetailViewModel,
   HarnessProjectListItem,
   HarnessProjectMetadata,
@@ -334,20 +336,21 @@ export function registerHarnessBoardHandlers(ipcMain: IpcMain): void {
 
   ipcMain.handle(
     "harnessBoard:syncProjectConstraints",
-    async (_event, adapterId: string): Promise<HarnessProjectConstraintSyncResult> => {
-      return syncHarnessProjectConstraints(adapterId)
+    async (_event, adapterId: string, target?: HarnessKnowledgeTarget): Promise<HarnessProjectConstraintSyncResult> => {
+      return syncHarnessProjectConstraints(adapterId, target)
     }
   )
 
   ipcMain.handle(
     "harnessBoard:getKnowledgePreview",
-    async (event, adapterId: string): Promise<HarnessKnowledgePreviewResult> => {
+    async (event, adapterId: string, target?: HarnessKnowledgeTarget): Promise<HarnessKnowledgePreviewResult> => {
       ensureEnterpriseSenderCleanup(event)
       const normalizedAdapterId =
         typeof adapterId === "string" ? adapterId.trim().slice(0, 512) : ""
       if (!normalizedAdapterId) throw new Error("Harness adapter id is required")
       const scope = `harness-knowledge:${event.sender.id}:${normalizedAdapterId}`
-      const preview = await readHarnessKnowledgePreviewInWorker(normalizedAdapterId, scope)
+      const authorizedKnowledge = await getHarnessKnowledgePreviewBinding(normalizedAdapterId, target)
+      const preview = await readHarnessKnowledgePreviewInWorker(normalizedAdapterId, scope, authorizedKnowledge)
       if (!preview.exists || !preview.path) return preview
       const previewablePaths = preview.files.filter((file) => !file.is_dir).map((file) => file.path)
       if (previewablePaths.length === 0) return preview
@@ -535,8 +538,8 @@ export function registerHarnessBoardHandlers(ipcMain: IpcMain): void {
 
   ipcMain.handle(
     "harnessBoard:getPublicAgentmdDeployUnits",
-    async (_event, projectId: string): Promise<string[]> => {
-      return getHarnessProjectPublicAgentmdDeployUnits(projectId)
+    async (_event, projectId: string, featureId?: string): Promise<string[]> => {
+      return getHarnessProjectPublicAgentmdDeployUnits(projectId, featureId)
     }
   )
 

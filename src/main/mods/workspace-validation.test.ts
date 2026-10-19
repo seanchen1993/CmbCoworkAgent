@@ -1,8 +1,18 @@
 import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, unlinkSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { basename, dirname, join, resolve } from "node:path"
-import { afterEach, describe, expect, it } from "vitest"
+import { afterAll, afterEach, describe, expect, it, vi } from "vitest"
 import { ModsManager } from "./manager"
+import { closeWorkspaceProbeWorker } from "../services/workspace-probe-client"
+import { removeWorkspaceProbeTestWorker } from "../services/workspace-probe.test-helper"
+
+vi.mock("../services/workspace-probe-worker?nodeWorker", async () => ({
+  default: (await import("../services/workspace-probe.test-helper")).createWorkspaceProbeTestWorker
+}))
+afterAll(async () => {
+  await closeWorkspaceProbeWorker()
+  removeWorkspaceProbeTestWorker()
+})
 
 const cleanup: Array<() => void> = []
 afterEach(() => {

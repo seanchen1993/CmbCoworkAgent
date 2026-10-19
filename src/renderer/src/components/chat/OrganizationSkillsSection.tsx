@@ -12,7 +12,8 @@ import {
 } from "@/components/ui/dialog"
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip"
 import type { MarketItem } from "../../api/market"
-import { getMockOrgSkillMarketResponse, orgSkillMarketApi } from "../../api/org-skill-market"
+import { orgSkillMarketApi } from "../../api/org-skill-market"
+import { isBackendNotConfiguredError } from "../../api/backend-endpoint"
 import type { SkillsByCategoryItem } from "./SkillsByCategorySection"
 
 interface OrganizationSkillsSnapshot {
@@ -46,14 +47,6 @@ async function loadOrganizationSkillsOnce(): Promise<OrganizationSkillsSnapshot>
         total: response.total ?? items.length
       }
       return cachedOrganizationSkillsData
-    } catch (error) {
-      console.error("[OrganizationSkillsSection] Failed to load organization skills:", error)
-      const mockResponse = getMockOrgSkillMarketResponse(1, 4)
-      const items = mockResponse.data?.slice(0, 4) ?? []
-      return {
-        items,
-        total: mockResponse.total ?? items.length
-      }
     } finally {
       organizationSkillsRequestPromise = null
     }
@@ -70,16 +63,26 @@ export function OrganizationSkillsSection({
 }: OrganizationSkillsSectionProps): React.JSX.Element | null {
   const [organizationSkillsData, setOrganizationSkillsData] = useState<MarketItem[]>([])
   const [organizationSkillsTotal, setOrganizationSkillsTotal] = useState(0)
+  const [loadError, setLoadError] = useState<string | null>(null)
   const [installPromptItem, setInstallPromptItem] = useState<SkillsByCategoryItem | null>(null)
 
   useEffect(() => {
     let canceled = false
 
     const loadOrganizationSkills = async (): Promise<void> => {
-      const orgSkills = await loadOrganizationSkillsOnce()
-      if (canceled) return
-      setOrganizationSkillsData(orgSkills.items)
-      setOrganizationSkillsTotal(orgSkills.total)
+      try {
+        const orgSkills = await loadOrganizationSkillsOnce()
+        if (canceled) return
+        setOrganizationSkillsData(orgSkills.items)
+        setOrganizationSkillsTotal(orgSkills.total)
+        setLoadError(null)
+      } catch (error) {
+        if (canceled) return
+        setLoadError(error instanceof Error ? error.message : "组织级技能加载失败")
+        if (!isBackendNotConfiguredError(error)) {
+          console.error("[OrganizationSkillsSection] Failed to load organization skills:", error)
+        }
+      }
     }
 
     void loadOrganizationSkills()
@@ -113,6 +116,9 @@ export function OrganizationSkillsSection({
     })
   }, [organizationSkillsData, skills])
 
+  if (loadError) {
+    return <p role="status" className="py-3 text-xs text-muted-foreground">{loadError}</p>
+  }
   if (organizationItems.length === 0) return null
 
   const moreCount = Math.max(0, organizationSkillsTotal - organizationItems.length)

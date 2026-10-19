@@ -43,6 +43,7 @@ describe("getHarnessAgentContext", () => {
       threadId: "thread", incarnationKey: "incarnation", projectId: "local", operationId: "op",
       workspace, packageDigest: "a".repeat(64), stageId: "review",
       stagePrompt: "Execute only the review stage; write review.json.",
+      requiredContextText: "Exact required generic provider context.",
       plugin: { id: "installed", name: "docs", version: "1.0.0", path: workspace } as PluginMetadata
     })
     const context = await withRuntimePluginSource(token, () => getHarnessAgentContext({
@@ -50,8 +51,34 @@ describe("getHarnessAgentContext", () => {
     }))
     expect(context.pluginPromptInject).toBe("Execute only the review stage; write review.json.")
     expect(context.harnessNodeName).toBe("review")
+    expect(context.harnessAgentsPrompt).toBe("Exact required generic provider context.")
     expect(harnessServiceMocks.buildHarnessFeatureAgentContext).not.toHaveBeenCalled()
   })
+
+  it.each(["composition-legacy:run:unit", "creator-business-trial:trial"])(
+    "preserves original knowledge and host-owned stage guidance for %s", async projectId => {
+      const workspace = resolve("isolated-original-stage")
+      harnessServiceMocks.buildHarnessFeatureAgentContext.mockResolvedValue({
+        harnessProjectId: projectId, featureId: "feature-1",
+        systemPromptInject: "Original project constraints.",
+        harnessAgentsPrompt: "Original selected knowledge.", enableAgentsPrompt: true
+      })
+      const token = issueRuntimePluginSourceToken({
+        mode: "legacy", threadId: "thread", incarnationKey: "incarnation", projectId,
+        featureId: "feature-1", operationId: "trial", workspace,
+        packageDigest: "a".repeat(64), stageId: "original-managed-stage",
+        stagePrompt: "Host-owned isolated sample guidance.",
+        plugin: { id: "candidate", name: "sample", version: "1.0.0", path: workspace } as PluginMetadata
+      })
+      const context = await withRuntimePluginSource(token, () => getHarnessAgentContext({
+        harnessFeature: { projectId, slug: "feature-1" }, workspacePath: workspace
+      }, { featureBinding: { projectId, slug: "feature-1" } }))
+      expect(context.pluginPromptInject).toBe(
+        "Original project constraints.\n\nHost-owned isolated sample guidance.")
+      expect(context.harnessAgentsPrompt).toBe("Original selected knowledge.")
+      expect(context.harnessProjectId).toBe(projectId)
+    }
+  )
   beforeEach(() => {
     vi.clearAllMocks()
     harnessServiceMocks.readHarnessFeatureMetadata.mockReturnValue({

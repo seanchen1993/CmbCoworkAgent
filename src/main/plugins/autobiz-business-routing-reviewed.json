@@ -1,0 +1,262 @@
+{
+  "nodes": [
+    {
+      "id": "biz.prd",
+      "label": "需求澄清与 PRD",
+      "checkpoints": ["prd_in_progress", "prd_done"]
+    },
+    {
+      "id": "dev.specs",
+      "label": "行为规格",
+      "checkpoints": ["specs_in_progress", "specs_done"]
+    },
+    {
+      "id": "dev.design",
+      "label": "技术设计",
+      "checkpoints": ["design_in_progress", "design_done"]
+    },
+    {
+      "id": "dev.plan",
+      "label": "执行计划",
+      "checkpoints": ["plan_in_progress", "plan_done"]
+    },
+    {
+      "id": "dev.code",
+      "label": "代码实现",
+      "checkpoints": ["code_in_progress", "code_done"]
+    },
+    {
+      "id": "ops.cicd",
+      "label": "CI/CD",
+      "checkpoints": ["cicd_in_progress", "cicd_done"]
+    },
+    {
+      "id": "ops.archive",
+      "label": "归档",
+      "checkpoints": ["archived"]
+    }
+  ],
+  "templates": {
+    "standard": {
+      "kind": "profile",
+      "label": "标准",
+      "description": "完整主干流程（Biz→Dev→Ops），不含可选动态节点；动态节点可在流程中按需开启。"
+    },
+    "lean": {
+      "kind": "nodeSubset",
+      "label": "精简路线",
+      "description": "修接口 / 小需求：specs（轻量）→ code → 归档；契约不含 design/PLAN，code 直接从 proposal 与 specs 推导任务。",
+      "nodes": ["dev.specs", "dev.code", "ops.archive"]
+    },
+    "custom": {
+      "kind": "custom",
+      "label": "自选步骤",
+      "description": "选择原流程节点并预览依赖与输入缺口；保留所选节点的原检查和人工确认，不跳过实现与归档。",
+      "requiredNodes": ["dev.code", "ops.archive"]
+    }
+  },
+  "profiles": {
+    "standard": {
+      "label": "不需要，进入 autodev-specs",
+      "description": "不先转换 HTML 设计稿，直接进入 autodev-specs。"
+    }
+  },
+  "dynamicStages": [
+    {
+      "id": "detail_design_before_code",
+      "phase": "Dev",
+      "label": "详细设计",
+      "description": "在进入代码实现前生成更细的文件级详细设计。",
+      "order": 100,
+      "choiceCheckpoint": "plan_done",
+      "defaultDecision": "pending",
+      "insertAfter": "dev.plan",
+      "enableTargetCheckpoint": "detail_design_in_progress",
+      "skipTargetCheckpoint": "code_in_progress",
+      "enableLabel": "需要，生成详细设计",
+      "skipLabel": "不需要，直接编码",
+      "enableDescription": "先进入 autodev-detail-design，生成 DETAIL_DESIGN.md 后再进入代码实现。",
+      "skipDescription": "不生成 DETAIL_DESIGN.md，直接进入 autodev-code。",
+      "nodes": [
+        {
+          "id": "dev.detail_design",
+          "phase": "Dev",
+          "label": "详细设计",
+          "skill": "autodev-detail-design",
+          "checkpointPrefix": "detail_design",
+          "description": "生成代码实现前的文件级详细设计 \n 产物：DETAIL_DESIGN.md（文件级详细设计：到文件的修改方案）",
+          "artifacts": {
+            "inputs": [
+              {
+                "id": "proposal",
+                "label": "变更提案",
+                "artifactType": "file",
+                "path": "proposal.md",
+                "required": true,
+                "extract": {
+                  "degrade": "无 proposal 时以 specs 与 design 界定范围"
+                }
+              },
+              {
+                "id": "specs",
+                "label": "行为规格",
+                "artifactType": "file",
+                "path": "specs/**/*.md",
+                "required": true,
+                "extract": {
+                  "degrade": "无 specs 时与用户确认行为预期"
+                }
+              },
+              {
+                "id": "design",
+                "label": "技术设计",
+                "artifactType": "file",
+                "path": "design.md",
+                "required": true,
+                "extract": {
+                  "degrade": "无 design 时基于现有代码模式细化方案，并记录设计基准缺失"
+                }
+              },
+              {
+                "id": "plan_json",
+                "label": "计划机器事实源",
+                "artifactType": "json",
+                "path": "plan.json",
+                "required": true,
+                "extract": {
+                  "degrade": "无 plan.json 时回到 /autodev-plan 重新生成，不能只依赖 PLAN.md 推进详细设计"
+                }
+              }
+            ],
+            "outputs": [
+              {
+                "id": "detail_design",
+                "label": "详细设计",
+                "artifactType": "file",
+                "path": "DETAIL_DESIGN.md",
+                "required": true
+              }
+            ]
+          },
+          "validators": []
+        }
+      ]
+    }
+  ],
+  "checkpoints": {
+    "initial": [
+      "prd_in_progress",
+      "specs_in_progress",
+      "design_in_progress",
+      "plan_in_progress",
+      "cicd_in_progress"
+    ],
+    "transitions": {
+      "prd_in_progress": ["prd_done"],
+      "prd_done": ["specs_in_progress"],
+      "specs_in_progress": ["specs_done"],
+      "specs_done": ["design_in_progress"],
+      "design_in_progress": ["design_done"],
+      "design_done": ["plan_in_progress"],
+      "plan_in_progress": ["plan_done"],
+      "plan_done": ["code_in_progress"],
+      "code_in_progress": ["code_done"],
+      "code_done": ["cicd_in_progress"],
+      "cicd_in_progress": ["cicd_done"],
+      "cicd_done": ["archived"],
+      "needs_fix": [
+        "prd_in_progress",
+        "specs_in_progress",
+        "design_in_progress",
+        "plan_in_progress",
+        "code_in_progress",
+        "cicd_in_progress"
+      ],
+      "archived": []
+    },
+    "stageLabels": {
+      "prd_in_progress": "Biz / 需求澄清与 PRD",
+      "prd_done": "Biz / PRD",
+      "specs_in_progress": "Specs",
+      "specs_done": "Specs 完成",
+      "design_in_progress": "技术设计",
+      "design_done": "技术设计完成",
+      "plan_in_progress": "Plan",
+      "plan_done": "Plan 完成",
+      "code_in_progress": "Code",
+      "code_done": "Code 完成",
+      "cicd_in_progress": "CI/CD",
+      "cicd_done": "CI/CD 完成",
+      "needs_fix": "需要修复",
+      "archived": "已归档"
+    }
+  },
+  "transitions": [
+    {
+      "id": "prd-to-specs",
+      "from": {
+        "nodeId": "biz.prd",
+        "state": "done"
+      },
+      "to": {
+        "nodeId": "dev.specs",
+        "state": "in_progress"
+      }
+    },
+    {
+      "id": "specs-to-design",
+      "from": {
+        "nodeId": "dev.specs",
+        "state": "done"
+      },
+      "to": {
+        "nodeId": "dev.design",
+        "state": "in_progress"
+      }
+    },
+    {
+      "id": "design-to-plan",
+      "from": {
+        "nodeId": "dev.design",
+        "state": "done"
+      },
+      "to": {
+        "nodeId": "dev.plan",
+        "state": "in_progress"
+      }
+    },
+    {
+      "id": "plan-to-code",
+      "from": {
+        "nodeId": "dev.plan",
+        "state": "done"
+      },
+      "to": {
+        "nodeId": "dev.code",
+        "state": "in_progress"
+      }
+    },
+    {
+      "id": "code-to-cicd",
+      "from": {
+        "nodeId": "dev.code",
+        "state": "done"
+      },
+      "to": {
+        "nodeId": "ops.cicd",
+        "state": "in_progress"
+      }
+    },
+    {
+      "id": "cicd-to-archive",
+      "from": {
+        "nodeId": "ops.cicd",
+        "state": "done"
+      },
+      "to": {
+        "nodeId": "ops.archive",
+        "state": "archived"
+      }
+    }
+  ]
+}
