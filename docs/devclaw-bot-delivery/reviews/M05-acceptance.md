@@ -25,6 +25,10 @@ root 已完整阅读原实施者 `edbcc351` 检查点（十五项 beta 能力保
 
 ## 事实与资源
 
+### 实施中检查点（尚未验收）
+
+原实施者保存 WIP `358eaf689`，30 文件含 8 新文件，并继续实施；不是冻结候选，不集成。实施者报告核心/IPC/Runtime 25 文件、346/346 检查通过（`/tmp/m05-work-read-tests.log`），Node/Web 类型通过（`/tmp/m05-node-read-scope.log`、`/tmp/m05-web-read-scope.log`）。包括主/工作精确已读和批量确认的迟到版本边界。root 已做来源/目标/并发/后台边界早审，但尚未对该检查点独立复验或实际 App 验收。动态 workflow/coordinator 完成门禁、真实 UI、mock 与旧路径清理仍在后续工作中。
+
 ### root 改动前基线（2026-10-19）
 
 integration 产品 `b479d51d`（后续仅文档提交 `3852c709`），Node 22 运行 `vitest run src/main/bots src/main/ipc/bots.test.ts`：21 文件、317 测试通过，exit 0，日志 `/tmp/m05-root-beta-baseline.log`。这是既有功能单元/组件边界基线，不代替新增任务、实际 UI 或最终能力矩阵验收；未调用真实模型/网关。
