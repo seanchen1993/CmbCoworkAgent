@@ -786,7 +786,8 @@ function parseLocatorExpression(expression: string): BrowserLocatorMetadata {
   const metadata: BrowserLocatorMetadata = {
     framePath: framePath.length > 0 ? framePath : undefined,
     nth: nthMatch ? Number(nthMatch[1]) : undefined,
-    matchCount: hasFirstHint ? 2 : undefined
+    matchCount: hasFirstHint ? 2 : undefined,
+    playwrightLocator: locatorExpression.replace(/^page\./u, "")
   }
 
   const roleQuotedMatch =
@@ -837,7 +838,6 @@ function parseLocatorExpression(expression: string): BrowserLocatorMetadata {
   )
   const selectorMatch = selectorMatches.at(-1)
   if (selectorMatch) metadata.selector = parseLocatorExpressionValue(selectorMatch[1])
-  if (!selectorMatch) metadata.playwrightLocator = locatorExpression
   return metadata
 }
 
@@ -1083,6 +1083,22 @@ function buildVariableizedClickLocator(
   variableIdentifier: string
 ): string {
   const source = toLocatorSource(action)
+  const originalLocator = source.playwrightLocator?.trim()
+  if (originalLocator) {
+    const locatorExpression = originalLocator.startsWith("page.")
+      ? originalLocator
+      : `page.${originalLocator}`
+    const variableizedLocator = locatorExpression
+      .replace(
+        /(getByRole\(\s*(['"])(?:\\.|.)*?\2\s*,\s*\{\s*name\s*:\s*)((?:['"])(?:\\.|.)*?['"]|变量_[\p{L}\p{N}_]+)/u,
+        `$1${variableIdentifier}`
+      )
+      .replace(
+        /(getByText\(\s*)((?:['"])(?:\\.|.)*?['"]|变量_[\p{L}\p{N}_]+)/u,
+        `$1${variableIdentifier}`
+      )
+    if (variableizedLocator !== locatorExpression) return variableizedLocator
+  }
   const root = buildFrameRoot(source.framePath)
   const derivedTarget = deriveTargetName(source.target)
   const role = source.role ?? derivedTarget.inferredRole

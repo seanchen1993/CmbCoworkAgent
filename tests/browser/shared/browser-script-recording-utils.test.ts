@@ -8,6 +8,26 @@ import {
 } from "../../../src/shared/browser-script-recording"
 
 describe("browser script recording", () => {
+  it("preserves a contentFrame locator when its text target becomes a variable", () => {
+    const script = `import { test } from "@playwright/test";
+
+test("recorded script flow", async ({ page }) => {
+  await page.locator('iframe[name="iframeName"]').contentFrame().getByText('我的模板', { exact: true }).click();
+});
+`
+    const parsed = parseScriptRecordingScript(script, "script")
+    const actionId = parsed.actions[0]!.id
+    const regenerated = generateScriptRecording(parsed.actions, {
+      source: "script",
+      variableActionIds: [actionId],
+      variableActionNames: { [actionId]: "模板类型" }
+    })
+
+    expect(regenerated).toContain(
+      `await page.locator('iframe[name="iframeName"]').contentFrame().getByText(变量_模板类型, { exact: true }).click();`
+    )
+  })
+
   it("preserves codegen contentFrame chains when round-tripping a recorded script draft", () => {
     const script = `import { test } from "@playwright/test";
 
