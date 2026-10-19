@@ -4,11 +4,11 @@
 
 设计 `reviews/M05-beta-local-unification-design.md`，任务清单 `tasks/M05-beta-local-unification.md`，验收 `reviews/M05-acceptance.md`。root 设计/审查/验收，原 `/root/service_conversation_sol`（gpt-6.1-sol/xhigh）唯一实施。M05-01 接口 edbcc351 已审，按设计第 10 节实施 M05-02/03。原 M04 五文件 dirty 已保全为 9e83c3048，不 reset；M04 未通过新融合目标验收。
 
-最新实施 WIP 358eaf689，30 文件含 8 新文件；尚未冻结，不应集成。实施者报告本地核心/IPC/Runtime 25 文件 346 检查及 Node/Web 类型通过；root 尚未独立复验此 WIP。已接入本地工作、原 ChatContainer、右侧入口、独立草稿、主/工作精确已读；继续补 beta workflow/coordinator 完成门禁、迟到通知和实际 UI。root 改动前 557 项既有基线通过，不替代新产品验收。后续仍有 mock 渠道与旧 App 双链路清理，不能将当前部分实现称为 M05 完成。
+M05-02/03候选3af3c2e9已由root独立复验并正常合入cbfa8239；产品与候选一致。核心27文件375项、视图/shared32文件231项（有重叠）、Node/Web、隔离完整build、真实App12次localhost模型文件/修改/完成继续/主工作并发/目标资源隔离、45项目录UI通过，日志`/tmp/m05-root-local-*.log`。最后审查收紧sendWork：仅当前直接用户指令可转达，notification/schedule/peer reply不产生新工作指令。已读最终明暗主题与文件预览，旧专家并列入口尚待05移除；当前只是本地切片通过，不是整个M05完成。下一步同一sol/xhigh按设计第11节实施M05-04模拟渠道，随后05清理/升级/完整回归。
 
 实际网关 `/Users/heyirui/Downloads/LF39_devclaw_im_gateway_0821`，HEAD e744c6d7，原有 Dockerfile/README.md/pom.xml 修改不动。已只读核对身份/WSS/permit/ACK/outbox，现 ingress 明确忽略群消息。当前只实现开发 mock 边界与真实 App 本地闭环，不写网关、不宣称真实招乎已打通。
 
-integration 产品起点 b479d51d，目前仅 root 设计文档提交；实施树仍为 beta-merge-review/agent-channel-integration-research-7ff0d6，分支 codex/beta-local-unification-m05。用户预览保留，所有旧 PID/端口只是历史，更新前实际重查。Java/DB 构建本轮无需启动，scheduler 保持 PAUSED，不 push/deploy、不读写用户凭据。下方均为历史检查点，不据其恢复旧服务方案。
+integration 产品起点 b479d51d，现已含上述本地切片；实施树仍为 beta-merge-review/agent-channel-integration-research-7ff0d6，分支 codex/beta-local-unification-m05。用户预览尚未升级，所有旧 PID/端口只是历史，更新前实际重查。Java/DB 构建本轮无需启动，scheduler 保持 PAUSED，不 push/deploy、不读写用户凭据。下方均为历史检查点，不据其恢复旧服务方案。
 
 # 2026-10-19 M04 已授权实施：主对话与独立任务会话，UI融入beta
 

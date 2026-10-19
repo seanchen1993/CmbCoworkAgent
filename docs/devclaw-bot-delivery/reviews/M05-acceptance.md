@@ -27,6 +27,17 @@ root 已完整阅读原实施者 `edbcc351` 检查点（十五项 beta 能力保
 
 ## 事实与资源
 
+### root 本地切片独立验收（整体 M05 尚未完成）
+
+冻结候选 `3af3c2e993a0c6391e5f73066014887a8f365743`，正常合并 `cbfa823900f70f047dbc4a8351c49c5118bd0b1e`。合并后的 src/tests/package 与候选无差异；没有推送。源码审查发现并修复的最后问题为新增 work 转达未限制当前用户来源，现通知/例行/协作结果无法追加工作指令；既有协作能力保留。
+
+- Node22核心27文件375/375，`/tmp/m05-root-local-core.log`；renderer/shared32文件231/231，`/tmp/m05-root-local-view.log`。两组少数文件重叠，不累加宣称独立数量。
+- Node/Web类型与空envDir完整build通过，`/tmp/m05-root-local-node.log`、`web.log`、`build.log`。
+- root自行运行真实App/preload/IPC/SQLite/Runtime/ChatContainer夹具通过，`/tmp/m05-root-local-app.log`。12次localhost固定provider调用；实际工具创建、真实文件审批/交付/预览/修改、等待期间主对话响应、完成/继续同thread、草稿和错误/迟到资源目标隔离。未调用付费模型，不是生产IM验证。
+- 真实hook/右Panel目录夹具通过，`/tmp/m05-root-local-directory.log`：45项9次摘要list、最大补批5（硬上限40）、同时list1；另含7项无cursor展开与迟到/失败选择。无逐任务正文读取、无ES改动，不宣称生产实测耗时。
+- 最终明/暗主题与文件预览已目视，新增区域沿用beta tokens。完整窄窗/迁移旧数据/真实模型演示与旧默认worker移除仍待M05-05；不得用当前截图中尚存旧Service入口宣称UI全部统一。
+- 测试自有Electron、localhost provider及临时profile均退出/回收；Java/MySQL未启动、用户预览未升级。M05-04已放行，同一写者继续mock，M06真实后端仍延后。
+
 ### 实施中检查点（尚未验收）
 
 原实施者保存 WIP `358eaf689`，30 文件含 8 新文件，并继续实施；不是冻结候选，不集成。实施者报告核心/IPC/Runtime 25 文件、346/346 检查通过（`/tmp/m05-work-read-tests.log`），Node/Web 类型通过（`/tmp/m05-node-read-scope.log`、`/tmp/m05-web-read-scope.log`）。包括主/工作精确已读和批量确认的迟到版本边界。root 已做来源/目标/并发/后台边界早审，但尚未对该检查点独立复验或实际 App 验收。动态 workflow/coordinator 完成门禁、真实 UI、mock 与旧路径清理仍在后续工作中。

@@ -274,14 +274,14 @@
   "complex_effort": "xhigh",
   "simple_effort": "high",
   "active": true,
-  "status": "M05_02_03_implementing",
-  "candidate_commit": null,
+  "status": "M05_04_implementing",
+  "candidate_commit": "3af3c2e993a0c6391e5f73066014887a8f365743",
   "agent": "/root/service_conversation_sol",
   "worktree": "/Users/heyirui/.codex/worktrees/beta-merge-review/agent-channel-integration-research-7ff0d6",
   "branch": "codex/beta-local-unification-m05",
   "preserved_wip_commit": "9e83c3048",
-  "worktree_checkpoint": "358eaf689",
-  "worktree_checkpoint_status": "WIP_only_not_frozen_or_accepted",
+  "worktree_checkpoint": "3af3c2e993a0c6391e5f73066014887a8f365743",
+  "worktree_checkpoint_status": "M05_02_03_accepted_merged_cbfa8239; overall_M05_incomplete",
   "interface_checkpoint": "edbcc351684f9c794185c30f0c3e4e407711f09c",
   "design_checkpoint": "9675f8b43a83f2b060c22e22cee82bb65a37b9f0"
 },
@@ -329,22 +329,22 @@
         },
         {
           "id": "M05-02",
-          "status": "implementing"
+          "status": "accepted_slice"
         },
         {
           "id": "M05-03",
-        "status": "implementing"
+        "status": "accepted_slice"
         },
         {
           "id": "M05-04",
-          "status": "pending"
+          "status": "implementing"
         },
         {
           "id": "M05-05",
           "status": "pending"
         }
       ],
-      "checkpoint": "Same sol/xhigh implementing M05-02/03; WIP358eaf689 not frozen or accepted. Writer reports 346 local checks and Node/Web pass. Root early review covered routing, work-family scheduling/completion, bounded priority summaries and exact conversation read state. Workflow/coordinator completion and actual UI remain, followed by mock and redundant App cleanup. Real backend deferred.",
+      "checkpoint": "M05-02/03 candidate3af3c2e9 root-reviewed and merged cbfa8239. Root core375, view/shared231 (overlap), Node/Web/build, real App local-provider12 calls/file/edit/lifecycle/main responsiveness/resource isolation and45-item metadata UI passed; /tmp/m05-root-local-*.log. Same sol/xhigh proceeds M05-04 mock per design11, then05 redundant App cleanup/history/narrow UI/final regression. Overall incomplete; real backend deferred; user preview untouched.",
       "prior_historical_tasks_sha256": "a0944681efa620df834ba591318694ed0a085014984e77da8441808271691827"
     },
     {
