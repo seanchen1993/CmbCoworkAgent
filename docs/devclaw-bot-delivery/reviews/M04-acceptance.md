@@ -38,3 +38,20 @@ root只读preview status返回running/database healthy/App running，Java27495�
 - UI需展示全BotsWorkspace，保留明确新任务入口、按会话草稿和稳定请求ID，验证协议失败可继续；当前首版接线尚未获截图或交互通过证据。
 
 root早期执行：`expert-conversation.spec.ts`的6条SQLite/fake-client闭环与丢回执重开测试通过，日志`/tmp/m04-root-early-conversation-tests.log`；9份原有service-conversation/runtime、text-delivery、executor、worker/prompt/controller/config/client共105条通过，日志`/tmp/m04-root-early-regression.log`。早期`check-contracts.mjs`为15通过/10失败：新增`x-internal-lifecycles`未注册strict Ajv关键字；已交回修正，不能记为契约通过。实施者报告Node/Web类型与隔离全App构建checkpoint通过，root已读取日志；这些均在实现继续变化时完成，最终仍以冻结候选复验为准。
+
+后续检查点`9054edf0f`已保存（WIP，非候选）。strict关键字修复并撤回公共普通图的终态边后，root契约复验25/25通过（`/tmp/m04-root-contracts-fixed.log`）。root看过全Workspace明暗截图，左侧专家/任务组、居中页头与轻完成状态方向合理；fixture隔离私人Thread/ChatContainer，不能记作原beta聊天行为通过。
+
+用户最新明确“已解锁”，root通过CUA读取实际旧版App成功，取到beta本地Bot视觉基线。发现服务消息仍缺少`data-message-bubble="assistant"`外层、每条重复头像与原助手气泡不同；输入区默认高度也明显超过原紧凑胶囊。已交回对齐原agent-bubble/宽度与单行自动增长输入，模型入口收在会话设置。原生新版验收仍待候选集成。
+
+DB联调准备：root已用守卫helper启动原B00 MySQL精确容器`693a1c3f…`，保留卷并在`/tmp/m04-root-db-support.json`记录由本轮启动；此刻health为starting，待healthy后才能交接。用户Partner库和App未动。测试结束必须按该记录恢复此容器的原停止状态。
+
+
+## 真实服务独立复验检查点
+
+root独立构建（`/tmp/m04-root-java.log`）通过73条JUnit与1884项Java/契约parity；jar SHA-256为`335dfd4cfb49ec68770d8fb8b692d7fa97a14f43203d6e651d92800a989d5a26`。随后在冻结的170份后端相关源码上执行`expert-conversation-http-journey.ts`（`/tmp/m04-root-http.log`），退出0，复验前后文件哈希完全相同。包含真实Java、MySQL和原生SQLite，模型端为隔离fake model：9次推理、0工具、0旧执行器；普通主聊、额外字段协议失败后继续、交办丢回执恢复、SQLite物理重开、修改带上文、向同Task转达、完成/继续及服务换端口历史恢复均通过。数据库探针7项拒绝、41任务摘要4451字节/单批上限40、源Run单次消费、配置变化与冻结损坏拒绝、旧V8保留及新V9安装通过。两套自有测试资源精确移除，用户Partner与原B00身份保持healthy。后端锁已交还实施者完成非BMP用户正文和100消息SQL固定探针；这些结果尚非最终候选验收。
+
+UI隔离检查点已由root看过完整BotsWorkspace明暗图：助手气泡及44px自动增长输入与实际beta基线一致，左侧专家主对话/任务组默认有界展开。原生新版尚未更新。实施者已补充分页/滚动、IME、迟到回包、发送丢回包重挂同request、搜索不影响已选任务生命周期、网络失败恢复轮询证据，root仍待冻结候选复核。
+
+root旧beta独立回归：`/tmp/m04-root-beta-vitest.log` 3文件21/21（local-service、request-receipts、IPC bots），`/tmp/m04-root-beta-recovery.log`真实隔离子进程SIGKILL/重启验证身份/队列/群结果/例行任务和回复去重，退出0，模型为fixture。首次误用Node test runner跑Vitest文件失败，已改正确Vitest入口通过，非产品修复。
+
+末审发现UI默认显示5项但“更多任务”仅检查后端cursor，6～40条已全部读入时剩余项不可达；已要求先展开本地已有数据、必要时再读取下一页，并补6条/cursor=null回归。
