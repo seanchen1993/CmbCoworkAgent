@@ -1,5 +1,9 @@
 import { partnerId, partnerObject, PartnerLocalFault } from "./partner-local-boundary"
 export type ServiceOperation =
+  | "chatTasks"
+  | "chat"
+  | "taskLifecycle"
+  | "retryChat"
   | "selectModel"
   | "tasks"
   | "read"
@@ -12,6 +16,10 @@ export type ServiceOperation =
   | "review"
   | "retryRevision"
 const keys: Record<ServiceOperation, string[]> = {
+  chatTasks: ["conversationId", "cursor", "query"],
+  chat: ["conversationId", "taskRef", "role", "requestId", "text"],
+  taskLifecycle: ["conversationId", "taskRef", "operationId", "action"],
+  retryChat: ["conversationId", "taskRef", "requestId", "operationId"],
   delivery: ["conversationId", "taskRef", "before"],
   deliveryVersion: ["conversationId", "taskRef", "versionId"],
   publish: ["conversationId", "requestId"],
@@ -29,9 +37,28 @@ export function serviceConversationInput(
   operation: ServiceOperation,
   raw: unknown
 ): Record<string, unknown> {
-  const v = partnerObject(raw, keys[operation])
+  const optionalSelection =
+    operation === "chatTasks" &&
+    !!raw &&
+    typeof raw === "object" &&
+    Object.hasOwn(raw, "selectedRef")
+  const v = partnerObject(raw, [...keys[operation], ...(optionalSelection ? ["selectedRef"] : [])])
+  if (optionalSelection && v.selectedRef !== null) partnerId(v.selectedRef)
   partnerId(v.conversationId)
-  if ("taskRef" in v && !(operation === "send" && v.taskRef === null)) partnerId(v.taskRef)
+  if ("taskRef" in v && !(["send", "chat"].includes(operation) && v.taskRef === null))
+    partnerId(v.taskRef)
+  if (
+    operation === "chat" &&
+    (!["main", "task"].includes(String(v.role)) || (v.role === "main" && v.taskRef !== null))
+  )
+    throw new PartnerLocalFault("INVALID_PAYLOAD")
+  if (operation === "taskLifecycle" && !["complete", "reopen"].includes(String(v.action)))
+    throw new PartnerLocalFault("INVALID_PAYLOAD")
+  if (
+    operation === "chatTasks" &&
+    (typeof v.query !== "string" || v.query.length > 160 || v.query.includes("\u0000"))
+  )
+    throw new PartnerLocalFault("INVALID_PAYLOAD")
   for (const key of ["versionId", "operationId", "actionId"]) if (key in v) partnerId(v[key])
   if (
     "before" in v &&

@@ -50,11 +50,11 @@ public final class TextDeliveryApplication {
         for(int i=0;i<task.stages.size();i++)task.stages.get(i).status=i==0?(task.status==TaskStatus.ACTIVE?StageStatus.ACTIVE:task.status==TaskStatus.AWAITING_BUSINESS?StageStatus.WAITING_CONFIRMATION:StageStatus.COMPLETED):(task.status==TaskStatus.COMPLETED?StageStatus.CANCELLED:StageStatus.PENDING);
     }
     private static ObjectNode head(JdbcTextDeliveryStore store,Task task)throws SQLException{
-        ObjectNode h=store.head(task.id);if(h==null){if(task.status!=TaskStatus.ACTIVE)throw JdbcApplicationStore.corrupt();return null;}
+        ObjectNode h=store.head(task.id);if(h==null){if(task.status!=TaskStatus.ACTIVE&&!store.expert(task.id))throw JdbcApplicationStore.corrupt();return null;}
         if(!task.spaceId.equals(h.path("spaceId").textValue())||!task.groupId.equals(h.path("groupId").textValue())||!task.id.equals(h.path("taskId").textValue())||h.path("revision").longValue()<1||h.path("revision").longValue()>JdbcTaskStore.MAX||h.path("number").longValue()<1||!Arrays.asList("pending","changes_requested","invalidated","completed").contains(h.path("status").textValue()))throw JdbcApplicationStore.corrupt();
         try{id(h.path("botId").textValue());id(h.path("versionId").textValue());id(h.path("reviewerPrincipalId").textValue());if(!h.path("feedbackMessageId").isNull())id(h.path("feedbackMessageId").textValue());}catch(ApplicationFault failure){throw JdbcApplicationStore.corrupt();}
         ObjectNode metadata=store.metadata(task.id,h.path("versionId").textValue());
-        if(metadata==null||!task.spaceId.equals(metadata.path("spaceId").textValue())||!task.groupId.equals(metadata.path("groupId").textValue())||!h.path("botId").equals(metadata.path("botId"))||!h.path("reviewerPrincipalId").equals(metadata.path("createdBy"))||h.path("number").longValue()!=metadata.path("number").longValue()||task.status==TaskStatus.AWAITING_BUSINESS&&!"pending".equals(h.path("status").textValue())||task.status==TaskStatus.COMPLETED&&!"completed".equals(h.path("status").textValue())||task.status==TaskStatus.ACTIVE&&!Arrays.asList("invalidated","changes_requested").contains(h.path("status").textValue()))throw JdbcApplicationStore.corrupt();return h;
+        if(metadata==null||!task.spaceId.equals(metadata.path("spaceId").textValue())||!task.groupId.equals(metadata.path("groupId").textValue())||!h.path("botId").equals(metadata.path("botId"))||!h.path("reviewerPrincipalId").equals(metadata.path("createdBy"))||h.path("number").longValue()!=metadata.path("number").longValue()||!store.expert(task.id)&&(task.status==TaskStatus.AWAITING_BUSINESS&&!"pending".equals(h.path("status").textValue())||task.status==TaskStatus.COMPLETED&&!"completed".equals(h.path("status").textValue())||task.status==TaskStatus.ACTIVE&&!Arrays.asList("invalidated","changes_requested").contains(h.path("status").textValue())))throw JdbcApplicationStore.corrupt();return h;
     }
     private static ObjectNode delivery(JdbcTextDeliveryStore store,Task task,String version)throws SQLException{
         ObjectNode v=store.version(task.id,version);if(v==null)throw fault(ErrorCode.NOT_FOUND);
@@ -63,7 +63,7 @@ public final class TextDeliveryApplication {
     }
     private static ObjectNode summary(TrustedContext actor,Task task,ObjectNode h,JdbcTextDeliveryStore store)throws SQLException{
         ObjectNode result=object().put("taskId",task.id).put("taskVersion",task.version).put("taskStatus",task.status.wire());result.set("head",h==null?NullNode.instance:h);
-        result.put("canReview",h!=null&&"pending".equals(h.path("status").textValue())&&actor.principalId.equals(h.path("reviewerPrincipalId").textValue())&&task.status==TaskStatus.AWAITING_BUSINESS&&!store.active(task.id,null));return result;
+        result.put("canReview",h!=null&&"pending".equals(h.path("status").textValue())&&actor.principalId.equals(h.path("reviewerPrincipalId").textValue())&&!store.expert(task.id)&&task.status==TaskStatus.AWAITING_BUSINESS&&!store.active(task.id,null));return result;
     }
     public ObjectNode summaries(TrustedContext actor,List<String> ids){actor(actor);if(ids==null||ids.isEmpty()||ids.size()>40||new HashSet<String>(ids).size()!=ids.size())throw fault(ErrorCode.INVALID_PAYLOAD);for(String id:ids)id(id);
         return transaction(actor,false,(c,db,tasks,store,eventHead)->{ArrayNode values=JSON.createArrayNode();List<String> sorted=new ArrayList<String>(ids);Collections.sort(sorted);for(String id:sorted){Task task=task(db,tasks,actor,id);values.add(summary(actor,task,head(store,task),store));}ObjectNode result=object();result.set("items",values);return result;});
@@ -86,7 +86,7 @@ public final class TextDeliveryApplication {
         return transaction(actor,true,(c,db,tasks,store,eventHead)->{
             JdbcTextDeliveryStore.Command previous=store.command(actor.principalId,command);
             if(previous!=null){task(db,tasks,actor,previous.task);if(!MessageDigest.isEqual(hash,previous.fingerprint))throw fault(ErrorCode.COMMAND_CONFLICT);return previous.receipt;}
-            Task task=task(db,tasks,actor,taskId);ObjectNode h=head(store,task);long revision=h==null?0:h.path("revision").longValue();
+            Task task=task(db,tasks,actor,taskId);if(store.expert(task.id))throw fault(ErrorCode.INPUT_CHANGED);ObjectNode h=head(store,task);long revision=h==null?0:h.path("revision").longValue();
             if(task.version!=expectedTask)throw new ApplicationFault(ErrorCode.VERSION_CONFLICT,task.version);
             if(revision!=expectedReview)throw fault(ErrorCode.VERSION_CONFLICT);if(revision>=JdbcTaskStore.MAX)throw fault(ErrorCode.PAYLOAD_TOO_LARGE);
             ObjectNode receipt=object();long oldTaskVersion=task.version;String date=now(db);

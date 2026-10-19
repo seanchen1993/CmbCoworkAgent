@@ -1,4 +1,6 @@
 import { randomUUID } from "node:crypto"
+import { parseCoordination } from "./expert-conversation-validation"
+import type { ExpertAction } from "./service-expert-store"
 import type { ServiceDeliveryView, TextDeliverySummary } from "../../../shared/bot/text-delivery"
 import type { ServiceDeliveryAction } from "./service-delivery-store"
 import { serviceConversationInput } from "./service-conversation-boundary"
@@ -48,6 +50,47 @@ const uncertain = new Set([
   "OUTCOME_UNKNOWN"
 ])
 function view(r: ServiceRequestRecord, store: ServiceConversationStore): ServiceRequestView {
+  if (r.profile) {
+    let result = r.coordinationCancelled ? null : r.result
+    let coordination: ServiceRequestView["coordination"]
+    if (r.profile === "expert_main_v1" && result?.outcome === "succeeded") {
+      const action = store.expert.get(r.scopeKey, "coordinate:" + r.requestId)
+      try {
+        const input = store.expert.input(r.scopeKey, r.requestId)
+        if (!input) throw new Error()
+        const envelope = parseCoordination(result.text, input)
+        if (envelope.intent) {
+          const delivered = action?.phase === "done"
+          coordination = {
+            taskRef: delivered ? action.targetRef : null,
+            title:
+              action?.receipt?.task.title ??
+              (envelope.intent.kind === "create_task" ? envelope.intent.title : null),
+            state: delivered ? "delivered" : action?.phase === "blocked" ? "blocked" : "waiting"
+          }
+          result = {
+            ...result,
+            text: delivered ? "已交办到任务会话。" : "已保存交办意图，等待转入任务会话。"
+          }
+        } else result = { ...result, text: envelope.reply }
+      } catch {
+        result = null
+      }
+    }
+    return {
+      requestId: r.requestId,
+      taskRef: r.taskRef,
+      text: r.text,
+      status: r.coordinationCancelled ? "cancelled" : r.protocolFailure ? "failed" : r.status,
+      notice: r.protocolFailure ? "回复格式无法识别，未交办；可以重新说明。" : r.notice,
+      runId: r.runId,
+      result,
+      createdAt: r.createdAt,
+      ...(r.supersededBy ? { supersededBy: r.supersededBy } : {}),
+      ...(r.origin ? { origin: r.origin } : {}),
+      ...(coordination ? { coordination } : {})
+    }
+  }
   const publication = store.deliveries.get(r.scopeKey, "publish:" + r.requestId)
   return {
     requestId: r.requestId,
@@ -120,6 +163,7 @@ export class ServiceConversationService {
   private stopped = false
   private afterSeq = 0
   private deliveryAfter = 0
+  private expertAfter = 0
   constructor(private readonly deps: ServiceConversationDependencies) {}
   async open(): Promise<ServiceConversationOverview> {
     const overview = await this.deps.overview()
@@ -153,6 +197,224 @@ export class ServiceConversationService {
       selectedModel,
       models: await this.deps.models()
     }
+  }
+  async openChats() {
+    const overview = await this.open()
+    if (!overview.conversationId) return { ...overview, mainTaskRef: null }
+    const { c, conversation } = await this.authorized(overview.conversationId)
+    return { ...overview, mainTaskRef: this.deps.store.mainTask(c.scope, conversation.id).ref }
+  }
+  private async expertSummaries(c: ServiceConversationContext, refs: string[]) {
+    const store = this.deps.store,
+      key = serviceScopeKey(c.scope)
+    const tasks = refs.map((ref) => store.task(key, ref)).filter((t) => t.task)
+    if (!tasks.length) return
+    const values = await c.client.expertConversationSummaries(
+      c.scope.groupId,
+      c.scope.botId,
+      tasks.map((t) => t.task!.id)
+    )
+    await this.assertCurrent(key)
+    for (const value of values)
+      store.expert.saveSummary(key, tasks.find((t) => t.task!.id === value.taskId)!.ref, value)
+  }
+  async chatTasks(raw: unknown): Promise<ServicePage<ServiceTaskView>> {
+    const v = serviceConversationInput("chatTasks", raw),
+      { c, key, conversation } = await this.authorized(v.conversationId)
+    const kind = "chatTasks:" + v.query,
+      records = this.deps.store.chatTaskPage(
+        key,
+        conversation.id,
+        after(v.cursor, key, kind),
+        String(v.query)
+      ),
+      page = records.slice(0, SERVICE_PAGE_SIZE)
+    const focus = v.selectedRef ? this.deps.store.task(key, partnerId(v.selectedRef)) : null
+    if (focus && focus.conversationId !== conversation.id) throw new PartnerLocalFault("FORBIDDEN")
+    const refs = [...new Set([...page.map((t) => t.task.ref), ...(focus ? [focus.ref] : [])])]
+    for (let i = 0; i < refs.length; i += 40) await this.expertSummaries(c, refs.slice(i, i + 40))
+    await this.assertCurrent(key)
+    const item = (task: (typeof page)[number]["task"]): ServiceTaskView => {
+      const summary = this.deps.store.expert.summary(key, task.ref)
+      return {
+        taskRef: task.ref,
+        taskNumber: task.task?.taskNumber ?? null,
+        title: task.title,
+        status: this.deps.store.latest(key, task.ref)?.status ?? "saved",
+        role: "task",
+        taskStatus: summary?.status ?? (task.task?.status === "completed" ? "completed" : "active"),
+        busy: summary?.busy ?? false
+      }
+    }
+    return {
+      pending: this.deps.store.hasPending(key) || this.deps.store.expert.hasPending(key),
+      ...(focus ? { selectedTask: item(focus) } : {}),
+      items: page.map(({ task }) => item(task)),
+      nextCursor: records.length > SERVICE_PAGE_SIZE ? cursor(key, kind, page.at(-1)!.seq) : null
+    }
+  }
+  async chat(raw: unknown): Promise<ServiceRequestView> {
+    const v = serviceConversationInput("chat", raw),
+      { c, key, conversation } = await this.authorized(v.conversationId)
+    const profile = v.role === "main" ? "expert_main_v1" : "expert_task_v1"
+    const ref =
+      v.role === "main"
+        ? this.deps.store.mainTask(c.scope, conversation.id).ref
+        : v.taskRef === null
+          ? null
+          : partnerId(v.taskRef)
+    const id = partnerId(v.requestId),
+      text = textInput(v.text),
+      old = this.deps.store.findRequest(key, id)
+    if (old) {
+      this.deps.store.accept(c.scope, conversation.id, ref, id, text, null, undefined, profile)
+      if (old.runId) await this.inspect(c, old)
+      await this.assertCurrent(key)
+      this.wake()
+      return view(this.deps.store.request(key, id), this.deps.store)
+    }
+    const revision = ref ? this.deps.store.expert.lifecycleRevision(key, ref) : 0
+    if (ref) {
+      const task = this.deps.store.task(key, ref)
+      if (task.conversationId !== conversation.id || (task.role === "main") !== (v.role === "main"))
+        throw new PartnerLocalFault("FORBIDDEN")
+      await this.expertSummaries(c, [ref])
+      if (this.deps.store.expert.summary(key, ref)?.status === "completed")
+        throw new PartnerLocalFault("INPUT_CHANGED")
+    }
+    if (!conversation.model) throw new PartnerLocalFault("MODEL_UNAVAILABLE")
+    const model = await this.deps.model(conversation.model.ref)
+    if (model.hash !== conversation.model.hash) throw new PartnerLocalFault("MODEL_CHANGED")
+    await this.assertCurrent(key)
+    // The last check and SQLite admission are synchronous: completion wins or
+    // the message wins, even when a model lookup was delayed in another IPC.
+    if (
+      ref &&
+      (revision !== this.deps.store.expert.lifecycleRevision(key, ref) ||
+        this.deps.store.expert.summary(key, ref)?.status === "completed" ||
+        (this.deps.store.expert.hasPending(key, ref) && v.role === "task"))
+    )
+      throw new PartnerLocalFault("INPUT_CHANGED")
+    const accepted = this.deps.store.accept(
+      c.scope,
+      conversation.id,
+      ref,
+      id,
+      text,
+      model,
+      undefined,
+      profile
+    )
+    this.wake()
+    return view(accepted, this.deps.store)
+  }
+  private expertAction(
+    key: string,
+    conversationId: string,
+    id: string,
+    kind: ExpertAction["kind"],
+    ref: string | null
+  ): ExpertAction {
+    return {
+      scopeKey: key,
+      id,
+      conversationId,
+      kind,
+      commandId: "ec:" + randomUUID(),
+      targetRef: ref,
+      sourceRequestId: null,
+      sourceRunId: null,
+      intent: null,
+      expectedVersion: null,
+      phase: "remote",
+      receipt: null,
+      childRequestId: null,
+      notice: null
+    }
+  }
+  async taskLifecycle(raw: unknown): Promise<void> {
+    const v = serviceConversationInput("taskLifecycle", raw),
+      { c, key, conversation } = await this.authorized(v.conversationId),
+      ref = partnerId(v.taskRef),
+      store = this.deps.store
+    const task = store.task(key, ref)
+    if (task.conversationId !== conversation.id || task.role === "main" || !task.task)
+      throw new PartnerLocalFault("FORBIDDEN")
+    const action = this.expertAction(
+      key,
+      conversation.id,
+      partnerId(v.operationId),
+      v.action as "complete" | "reopen",
+      ref
+    )
+    const prior = store.expert.get(key, action.id)
+    if (prior) {
+      store.expert.accept(action)
+      await this.expertSummaries(c, [ref])
+      this.wake()
+      return
+    }
+    await this.expertSummaries(c, [ref])
+    const summary = store.expert.summary(key, ref)!
+    if (
+      (action.kind === "complete" && summary.status === "completed") ||
+      (action.kind === "reopen" && summary.status !== "completed") ||
+      summary.busy
+    )
+      throw new PartnerLocalFault("INPUT_CHANGED")
+    action.expectedVersion = summary.taskVersion
+    await this.assertCurrent(key)
+    if (
+      store.expert.hasPending(key, ref) ||
+      (action.kind === "complete" &&
+        (store.hasTaskPending(key, ref) ||
+          store.hasPendingMain(key) ||
+          store.deliveries.hasPending(key, ref)))
+    )
+      throw new PartnerLocalFault("INPUT_CHANGED")
+    store.expert.accept(action)
+    this.wake()
+  }
+  async retryChat(raw: unknown): Promise<void> {
+    const v = serviceConversationInput("retryChat", raw),
+      { c, key, conversation } = await this.authorized(v.conversationId),
+      store = this.deps.store,
+      ref = partnerId(v.taskRef),
+      source = store.request(key, partnerId(v.requestId))
+    if (source.taskRef !== ref || source.conversationId !== conversation.id || !source.profile)
+      throw new PartnerLocalFault("FORBIDDEN")
+    const a = this.expertAction(key, conversation.id, partnerId(v.operationId), "retry", ref)
+    a.sourceRequestId = source.requestId
+    if (store.expert.get(key, a.id)) {
+      store.expert.accept(a)
+      await this.expertSummaries(c, [ref])
+      this.wake()
+      return
+    }
+    if (source.runId) await this.inspect(c, source)
+    const known = store.request(key, source.requestId)
+    if (!known.protocolFailure && !["failed", "cancelled", "blocked"].includes(known.status))
+      throw new PartnerLocalFault("INPUT_CHANGED")
+    await this.expertSummaries(c, [ref])
+    const summary = store.expert.summary(key, ref)
+    if (summary?.status === "completed" || summary?.busy)
+      throw new PartnerLocalFault("INPUT_CHANGED")
+    if (!conversation.model) throw new PartnerLocalFault("MODEL_UNAVAILABLE")
+    const model = await this.deps.model(conversation.model.ref)
+    if (model.hash !== conversation.model.hash) throw new PartnerLocalFault("MODEL_CHANGED")
+    a.model = model
+    a.expectedVersion = summary?.taskVersion ?? known.taskVersion
+    a.childRequestId = "ec-retry:" + randomUUID()
+    await this.assertCurrent(key)
+    if (
+      store.expert.hasPending(key, ref) ||
+      store.hasTaskPending(key, ref, known.requestId) ||
+      store.request(key, known.requestId).supersededBy ||
+      store.expert.summary(key, ref)?.status === "completed"
+    )
+      throw new PartnerLocalFault("INPUT_CHANGED")
+    store.expert.accept(a)
+    this.wake()
   }
   async selectModel(raw: unknown): Promise<ServiceConversationOverview> {
     const v = serviceConversationInput("selectModel", raw)
@@ -210,17 +472,37 @@ export class ServiceConversationService {
       throw new PartnerLocalFault("FORBIDDEN")
     const records = this.deps.store.requestPage(key, ref, after(v.cursor, key, ref)),
       page = records.slice(0, SERVICE_PAGE_SIZE)
-    // Never disclose cached results solely on local possession. Inspect every
-    // displayed Run with the current business credential, in bounded pairs.
+    // One current task authorization covers the bounded local history page.
+    // Pending Runs still inspect execution state; terminal results are immutable.
+    if (typeof c.client.expertConversationSummaries === "function")
+      await this.expertSummaries(c, [ref])
     for (let i = 0; i < page.length; i += 2)
       await Promise.all(
         page.slice(i, i + 2).map(async (r) => {
-          if (r.runId) await this.inspect(c, r)
+          if (
+            r.runId &&
+            (typeof c.client.expertConversationSummaries !== "function" || !terminal.has(r.status))
+          )
+            await this.inspect(c, r)
         })
       )
     await this.assertCurrent(key)
     this.wake()
     return {
+      task: (() => {
+        const task = this.deps.store.task(key, ref),
+          summary = this.deps.store.expert.summary(key, ref)
+        return {
+          taskRef: ref,
+          title: task.title,
+          taskNumber: task.task?.taskNumber ?? null,
+          role: task.role ?? "task",
+          status: this.deps.store.latest(key, ref)?.status ?? "saved",
+          taskStatus:
+            summary?.status ?? (task.task?.status === "completed" ? "completed" : "active"),
+          busy: summary?.busy ?? false
+        }
+      })(),
       items: [...page]
         .reverse()
         .map((r) => view(this.deps.store.request(key, r.requestId), this.deps.store)),
@@ -236,10 +518,16 @@ export class ServiceConversationService {
     const records = (v.requestIds as string[]).map((id) => this.deps.store.request(key, id))
     if (records.some((r) => r.taskRef !== ref || r.conversationId !== conversation.id))
       throw new PartnerLocalFault("FORBIDDEN")
+    if (typeof c.client.expertConversationSummaries === "function")
+      await this.expertSummaries(c, [ref])
     for (let i = 0; i < records.length; i += 2)
       await Promise.all(
         records.slice(i, i + 2).map(async (r) => {
-          if (r.runId) await this.inspect(c, r)
+          if (
+            r.runId &&
+            (typeof c.client.expertConversationSummaries !== "function" || !terminal.has(r.status))
+          )
+            await this.inspect(c, r)
         })
       )
     await this.assertCurrent(key)
@@ -600,13 +888,207 @@ export class ServiceConversationService {
       actions.save(a)
     }
   }
+  private async advanceExpert(
+    c: ServiceConversationContext,
+    original: ExpertAction
+  ): Promise<void> {
+    const store = this.deps.store,
+      key = original.scopeKey
+    let a = store.expert.get(key, original.id)!
+    if (a.phase === "remote" && a.kind === "coordinate") {
+      if (store.request(key, a.sourceRequestId!).cancelRequested && !a.remoteStarted) {
+        a.phase = "done"
+        a.notice = "交办已停止，未转入任务。"
+        store.expert.save(a)
+        store.update(key, a.sourceRequestId!, (value) => {
+          value.coordinationDone = true
+          value.coordinationCancelled = true
+        })
+        return
+      }
+      if (a.intent?.kind === "append_task") {
+        const target = store.taskByServer(key, a.intent.targetTaskRef)
+        if (!target) throw new PartnerLocalFault("FORBIDDEN")
+        await this.expertSummaries(c, [target.ref])
+        const summary = store.expert.summary(key, target.ref)!
+        // Preserve the original source/action/command while the exact target is
+        // busy, unknown or closed. Reopen remains an explicit user operation.
+        if (
+          summary.busy ||
+          summary.status === "completed" ||
+          store.hasTaskPending(key, target.ref) ||
+          store.deliveries.hasPending(key, target.ref)
+        )
+          return
+      }
+      if (store.request(key, a.sourceRequestId!).cancelRequested && !a.remoteStarted) {
+        a.phase = "done"
+        a.notice = "交办已停止，未转入任务。"
+        store.expert.save(a)
+        store.update(key, a.sourceRequestId!, (value) => {
+          value.coordinationDone = true
+          value.coordinationCancelled = true
+        })
+        return
+      }
+      // Persist this uncertainty boundary before HTTP. A later stop can no
+      // longer claim cancellation; it must recover this exact receipt.
+      a.remoteStarted = true
+      store.expert.save(a)
+      const receipt = await c.client.coordinateExpertTask(a.commandId, a.sourceRunId!)
+      if (
+        receipt.botId !== c.scope.botId ||
+        receipt.principalId !== c.scope.businessPrincipalId ||
+        receipt.task.groupId !== c.scope.groupId ||
+        receipt.sourceRunId !== a.sourceRunId ||
+        (a.intent?.kind === "append_task" && receipt.task.id !== a.intent.targetTaskRef)
+      )
+        throw new PartnerLocalFault("EXECUTION_BINDING_MISMATCH")
+      a.receipt = receipt
+      a.phase = "child"
+      store.expert.save(a)
+    }
+    if (a.phase === "remote" && (a.kind === "complete" || a.kind === "reopen")) {
+      const task = store.task(key, a.targetRef!)
+      if (!task.role) {
+        const receipt = await c.client.ensureExpertConversation({
+          commandId: a.commandId + ":adopt",
+          groupId: c.scope.groupId,
+          botId: c.scope.botId,
+          role: "task",
+          taskId: task.task!.id,
+          title: task.title,
+          goal: task.task!.goal
+        })
+        store.saveTask(key, { ...task, task: receipt.task, role: "task" })
+      }
+      const receipt = await c.client.expertTaskLifecycle({
+        commandId: a.commandId,
+        taskId: task.task!.id,
+        expectedVersion: a.expectedVersion!,
+        action: a.kind
+      })
+      a.receipt = receipt
+      a.phase = "done"
+      store.expert.save(a)
+      // Current authorization and a monotonic summary, never a historical
+      // mutation receipt, determine what can be sent next.
+      await this.expertSummaries(c, [task.ref])
+      if (receipt.task.version >= (store.task(key, task.ref).task?.version ?? 0))
+        store.saveTask(key, { ...task, task: receipt.task, role: "task" })
+      return
+    }
+    if (a.kind === "retry" && a.phase === "remote") {
+      const old = store.request(key, a.sourceRequestId!)
+      if (!old.protocolFailure && !["failed", "cancelled", "blocked"].includes(old.status))
+        throw new PartnerLocalFault("INPUT_CHANGED")
+      if (old.supersededBy && old.supersededBy !== a.childRequestId)
+        throw new PartnerLocalFault("INPUT_CHANGED")
+      // Both crash windows recover from this persisted action: supersession can
+      // be repeated, and accept always uses the same child request identifier.
+      store.update(key, old.requestId, (value) => {
+        value.supersededBy = a.childRequestId!
+      })
+      store.accept(
+        c.scope,
+        a.conversationId,
+        a.targetRef!,
+        a.childRequestId!,
+        old.text,
+        a.model!,
+        a.expectedVersion ?? undefined,
+        old.profile
+      )
+      a.phase = "done"
+      store.expert.save(a)
+      return
+    }
+    if (a.phase === "child") {
+      const record = store.attachExpertTask(c.scope, a.conversationId, a.receipt!.task)
+      const source = store.request(key, a.sourceRequestId!)
+      const child = store.accept(
+        c.scope,
+        a.conversationId,
+        record.ref,
+        a.childRequestId!,
+        source.text,
+        source.model,
+        a.receipt!.task.version,
+        "expert_task_v1"
+      )
+      store.update(key, child.requestId, (value) => {
+        value.origin = { mainRequestId: source.requestId }
+      })
+      a.targetRef = record.ref
+      a.phase = "done"
+      store.expert.save(a)
+    }
+    if (a.kind === "coordinate" && a.phase === "done")
+      store.update(key, a.sourceRequestId!, (value) => {
+        value.coordinationDone = true
+      })
+  }
+  private coordinateResult(r: ServiceRequestRecord): void {
+    if (r.profile !== "expert_main_v1" || r.status !== "succeeded" || r.coordinationDone) return
+    const store = this.deps.store,
+      input = store.expert.input(r.scopeKey, r.requestId)
+    if (
+      r.cancelRequested &&
+      !store.expert.get(r.scopeKey, "coordinate:" + r.requestId)?.remoteStarted
+    ) {
+      store.update(r.scopeKey, r.requestId, (value) => {
+        value.coordinationDone = true
+        value.coordinationCancelled = true
+      })
+      return
+    }
+    try {
+      if (!input || !r.result) throw new PartnerLocalFault("COORDINATION_INVALID_OUTPUT")
+      const envelope = parseCoordination(r.result.text, input)
+      if (!envelope.intent) {
+        store.update(r.scopeKey, r.requestId, (value) => {
+          value.coordinationDone = true
+        })
+        return
+      }
+      const a = this.expertAction(
+        r.scopeKey,
+        r.conversationId,
+        "coordinate:" + r.requestId,
+        "coordinate",
+        envelope.intent.kind === "append_task"
+          ? (store.taskByServer(r.scopeKey, envelope.intent.targetTaskRef)?.ref ?? null)
+          : null
+      )
+      a.intent = envelope.intent
+      a.sourceRequestId = r.requestId
+      a.sourceRunId = r.runId
+      a.childRequestId = "ec-child:" + r.runId
+      const accepted = store.expert.accept(a)
+      if (accepted.phase === "done")
+        store.update(r.scopeKey, r.requestId, (value) => {
+          value.coordinationDone = true
+        })
+    } catch (error) {
+      if (safeCode(error) !== "COORDINATION_INVALID_OUTPUT") throw error
+      store.update(r.scopeKey, r.requestId, (value) => {
+        value.coordinationDone = true
+        value.protocolFailure = true
+        value.notice = "COORDINATION_INVALID_OUTPUT"
+      })
+    }
+  }
   async cancel(raw: unknown): Promise<void> {
     const v = serviceConversationInput("cancel", raw),
       { key, conversation } = await this.authorized(v.conversationId),
       requestId = partnerId(v.requestId)
     const r = this.deps.store.request(key, requestId)
     if (r.conversationId !== conversation.id) throw new PartnerLocalFault("FORBIDDEN")
-    if (r.phase === "terminal") return
+    if (
+      r.phase === "terminal" &&
+      !(r.profile === "expert_main_v1" && r.status === "succeeded" && !r.coordinationDone)
+    )
+      return
     this.deps.store.update(key, requestId, (value) => {
       value.cancelRequested = true
     })
@@ -625,6 +1107,16 @@ export class ServiceConversationService {
       value.phase = "run"
       value.status = run.status as "starting" | "running"
     })
+  }
+  markProtocolFailure(scope: ServiceScope, run: PartnerRequirementRun): void {
+    const key = serviceScopeKey(scope),
+      r = this.deps.store.requestByCommand(key, run.commandId ?? "")
+    if (r)
+      this.deps.store.update(key, r.requestId, (value) => {
+        value.protocolFailure = true
+        value.coordinationDone = true
+        value.notice = "COORDINATION_INVALID_OUTPUT"
+      })
   }
   markRefused(scope: ServiceScope, run: PartnerRequirementRun, code: string): void {
     const key = serviceScopeKey(scope),
@@ -697,6 +1189,7 @@ export class ServiceConversationService {
           await this.advance(current, original)
         } catch (error) {
           const code = safeCode(error)
+          if (original.profile && code === "RATE_LIMITED") continue
           if (
             !uncertain.has(code) ||
             (original.deadline !== null && Date.now() >= Date.parse(original.deadline))
@@ -728,7 +1221,31 @@ export class ServiceConversationService {
           this.deps.store.deliveries.save(latest)
         }
       }
-      pending = this.deps.store.hasPending(key) || this.deps.store.deliveries.hasPending(key)
+      let expert = this.deps.store.expert.pending(key, this.expertAfter)
+      if (!expert.length) {
+        this.expertAfter = 0
+        expert = this.deps.store.expert.pending(key)
+      }
+      for (const a of expert) {
+        this.expertAfter = a.seq!
+        if (this.stopped) break
+        const current = await this.deps.context()
+        if (serviceScopeKey(current.scope) !== key) break
+        try {
+          await this.advanceExpert(current, a)
+        } catch (error) {
+          const latest = this.deps.store.expert.get(key, a.id)!,
+            code = safeCode(error)
+          latest.notice = code
+          if (!uncertain.has(code) && !["RATE_LIMITED", "INPUT_CHANGED"].includes(code))
+            latest.phase = "blocked"
+          this.deps.store.expert.save(latest)
+        }
+      }
+      pending =
+        this.deps.store.hasPending(key) ||
+        this.deps.store.deliveries.hasPending(key) ||
+        this.deps.store.expert.hasPending(key)
     } catch {
       /* No cached disclosure/replay when current authorization fails. */
     }
@@ -752,6 +1269,8 @@ export class ServiceConversationService {
     const binding = this.deps.store.binding(r.scopeKey, r.enqueueCommand)
     if (
       !binding ||
+      binding.executionProfile !== run.executionProfile ||
+      binding.contextDigest !== run.contextDigest ||
       ![
         "taskId",
         "taskVersion",
@@ -813,6 +1332,7 @@ export class ServiceConversationService {
       id = original.requestId
     let r = store.request(key, id)
     if (r.phase === "terminal") {
+      this.coordinateResult(r)
       if (r.autoDelivery && r.status === "succeeded" && !r.publicationScheduled)
         this.schedulePublication(r)
       return
@@ -820,6 +1340,7 @@ export class ServiceConversationService {
     if (r.runId) {
       await this.inspect(c, r)
       r = store.request(key, id)
+      this.coordinateResult(r)
       if (r.autoDelivery && r.status === "succeeded" && !r.publicationScheduled)
         this.schedulePublication(r)
       if (r.cancelRequested && r.phase !== "terminal") {
@@ -877,8 +1398,21 @@ export class ServiceConversationService {
           v.status = "submitting"
         })
       else {
-        const task = await c.client.lookupTask(c.scope.groupId, record.task.taskNumber)
-        if (task.id !== record.task.id || task.currentStageId !== record.task.currentStageId)
+        if (r.profile && !record.role) {
+          const adopted = await c.client.ensureExpertConversation({
+            commandId: r.createCommand,
+            groupId: c.scope.groupId,
+            botId: c.scope.botId,
+            role: "task",
+            taskId: record.task.id,
+            title: record.title,
+            goal: record.task.goal
+          })
+          store.saveTask(key, { ...record, role: "task", task: adopted.task })
+          record = store.task(key, r.taskRef)
+        }
+        const task = await c.client.lookupTask(c.scope.groupId, record.task!.taskNumber)
+        if (task.id !== record.task!.id || task.currentStageId !== record.task!.currentStageId)
           throw new PartnerLocalFault("INPUT_CHANGED")
         r = store.update(key, id, (v) => {
           v.phase = "message"
@@ -888,7 +1422,19 @@ export class ServiceConversationService {
       }
     }
     if (r.phase === "create") {
-      const task = await c.client.createTask(c.scope.groupId, r.text, r.createCommand)
+      const task = r.profile
+        ? (
+            await c.client.ensureExpertConversation({
+              commandId: r.createCommand,
+              groupId: c.scope.groupId,
+              botId: c.scope.botId,
+              role: r.profile === "expert_main_v1" ? "main" : "task",
+              taskId: null,
+              title: r.profile === "expert_main_v1" ? "专家主对话" : record.title,
+              goal: r.text
+            })
+          ).task
+        : await c.client.createTask(c.scope.groupId, r.text, r.createCommand)
       if (task.spaceId !== c.scope.spaceId || task.groupId !== c.scope.groupId)
         throw new PartnerLocalFault("FORBIDDEN")
       store.saveTask(key, { ...record, task })
@@ -926,6 +1472,23 @@ export class ServiceConversationService {
       return
     }
     if (r.phase === "bind") {
+      if (r.profile && !store.expert.input(key, id)) {
+        if (!r.allowedTaskIds)
+          r = store.update(key, id, (value) => {
+            value.allowedTaskIds =
+              value.profile === "expert_main_v1"
+                ? store.allowedTargets(key, r.conversationId, r.text).map((t) => t.task!.id)
+                : []
+          })
+        const input = await c.client.freezeExpertInput({
+          commandId: r.enqueueCommand,
+          taskId: record.task!.id,
+          expectedTaskVersion: r.taskVersion!,
+          sourceRequestId: r.requestId,
+          allowedTaskIds: r.allowedTaskIds!
+        })
+        store.expert.saveInput(key, id, input)
+      }
       if (!r.deadline)
         r = store.update(key, id, (v) => {
           v.deadline = new Date(Date.now() + 600000).toISOString()
@@ -933,6 +1496,9 @@ export class ServiceConversationService {
       const task = record.task!
       store.bind(key, {
         ...c.scope,
+        ...(r.profile
+          ? { executionProfile: r.profile, contextDigest: store.expert.input(key, id)!.digest }
+          : {}),
         commandId: r.enqueueCommand,
         taskId: task.id,
         taskVersion: r.taskVersion!,
@@ -960,6 +1526,11 @@ export class ServiceConversationService {
         r.enqueueCommand,
         r.deadline!
       )
+      if (
+        receipt.executionProfile !== b.executionProfile ||
+        receipt.contextDigest !== b.contextDigest
+      )
+        throw new PartnerLocalFault("EXECUTION_BINDING_MISMATCH")
       store.update(key, id, (v) => {
         if (v.runId && v.runId !== receipt.runId)
           throw new PartnerLocalFault("EXECUTION_BINDING_MISMATCH")

@@ -234,7 +234,7 @@ public final class DatabaseIntegrationProbe {
         for (int index = 0; index < edits.length; index++) try (Connection c = source.getConnection()) {
             DatabaseReadiness.requireReady(source);
             List<List<String>> original = historyFacts(c);
-            check(original.size() == 8);
+            check(original.size() == 9);
             List<String> row = original.get(0);
             check("1".equals(row.get(0)) && "1".equals(row.get(1)) && "SQL".equals(row.get(3)) && MigrationRunner.SCRIPT.equals(row.get(4)) && row.get(5) != null && "1".equals(row.get(9)));
             List<List<String>> expected = new ArrayList<List<String>>();
@@ -245,7 +245,7 @@ public final class DatabaseIntegrationProbe {
                 else changed.set(9, "0");
                 expected.add(changed);
             }
-            // The fixed fixture changes only V1. V2..V8 must remain byte-for-byte
+            // The fixed fixture changes only V1. V2..V9 must remain byte-for-byte
             // represented in both the rejected history and explicit restore.
             expected.add(original.get(1));
             expected.add(original.get(2));

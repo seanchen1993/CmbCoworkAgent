@@ -35,7 +35,12 @@ const allowed = new Set([
   "maxItems",
   "uniqueItems"
 ])
-const rootExtensions = new Set(["x-state-transitions", "x-reconciliation", "x-mode-capabilities"])
+const rootExtensions = new Set([
+  "x-state-transitions",
+  "x-reconciliation",
+  "x-mode-capabilities",
+  "x-internal-lifecycles"
+])
 const formats = new Set(["date-time", "binary"])
 
 export function generate(documents) {

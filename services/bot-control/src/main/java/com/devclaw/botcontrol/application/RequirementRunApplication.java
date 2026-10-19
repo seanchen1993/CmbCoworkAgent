@@ -63,9 +63,11 @@ public final class RequirementRunApplication {
     }
     public static final class Enqueued {
         public final String runId; public final Status status; public final long taskVersion;
+        @com.fasterxml.jackson.annotation.JsonInclude(com.fasterxml.jackson.annotation.JsonInclude.Include.NON_NULL)
+        public final String executionProfile,contextDigest;
         @com.fasterxml.jackson.databind.annotation.JsonSerialize(using=com.devclaw.botcontrol.application.RequirementInstantSerializer.class)
         public final Instant createdAt;
-        private Enqueued(Run run) { runId = run.id; status = run.initialStatus; taskVersion = run.taskVersion; createdAt = run.createdAt; }
+        private Enqueued(Run run) { runId = run.id; status = run.initialStatus; taskVersion = run.taskVersion; createdAt = run.createdAt; executionProfile=run.executionProfile;contextDigest=run.contextDigest; }
     }
     private Group group(JdbcApplicationStore db, TrustedContext actor, String groupId) throws SQLException { return nodes.readGroupInTransaction(db, actor, groupId); }
     private Run run(JdbcApplicationStore db, JdbcRequirementRunStore runs, TrustedContext actor, String runId) throws SQLException {
@@ -99,7 +101,7 @@ public final class RequirementRunApplication {
                 JdbcTextDeliveryStore deliveries=new JdbcTextDeliveryStore(c,requester.spaceId);
                 if(deliveries.head(taskId)!=null&&deliveries.active(taskId,null))throw new ApplicationFault(ErrorCode.INPUT_CHANGED);
                 Run created=runs.enqueue(commandId, hash, d, deadline, d.status == DispatchStatus.READY ? Status.QUEUED : Status.WAITING_NODE);
-                TextDeliveryApplication.freeze(c,created);return new Enqueued(created);
+                if(!ExpertConversationApplication.attach(c,created))TextDeliveryApplication.freeze(c,created);return new Enqueued(runs.run(created.id));
             });
         });
     }
@@ -137,12 +139,14 @@ public final class RequirementRunApplication {
         public final java.util.List<TaskMessageResult> messages;
         public final GroupMemoryValues.Snapshot memorySnapshot;
         public final com.fasterxml.jackson.databind.JsonNode deliveryInput;
+        public final com.fasterxml.jackson.databind.JsonNode conversationInput;
         private Input(Connection c, JdbcApplicationStore db, Run run) throws SQLException {
             bot=db.bot(run.botId);botVersion=db.version(run.botVersionId);group=db.group(run.groupId);task=new JdbcTaskStore(c,run.spaceId).task(run.taskId);
             if(bot==null||botVersion==null||group==null||task==null)throw JdbcApplicationStore.corrupt();
             if(task.version!=run.taskVersion)throw new ApplicationFault(ErrorCode.INPUT_CHANGED);
-            messages=new JdbcTaskStore(c,run.spaceId).requirementMessages(task,run.botId);
-            deliveryInput=TextDeliveryApplication.input(c,run);
+            conversationInput=ExpertConversationApplication.input(c,run);
+            messages=conversationInput==null?new JdbcTaskStore(c,run.spaceId).requirementMessages(task,run.botId):java.util.Collections.emptyList();
+            deliveryInput=conversationInput==null?TextDeliveryApplication.input(c,run):null;
             memorySnapshot=new JdbcGroupMemoryStore(c,run.spaceId).freeze(run,botVersion.config.memoryPolicy.wire());
         }
     }

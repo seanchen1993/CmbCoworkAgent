@@ -44,6 +44,7 @@ export class PartnerDevController {
   private worker?: PartnerLocalWorker
   private error: string | null = null
   private defaultInitialized = false
+  private serviceScopePrepared = false
   private expertData?: ExpertLocalData
   private expertName: string | null = null
   private expertAdopted = false
@@ -61,6 +62,10 @@ export class PartnerDevController {
         task: Task,
         command: string,
         deadline: string
+      ) => Promise<void>
+      prepareServiceScope?: (
+        config: PartnerLocalConfig,
+        client: PartnerLocalClient
       ) => Promise<void>
       onWorkerChange?: () => void
       clientFactory?: (d: PartnerConnectionDescriptor) => PartnerLocalClient
@@ -178,8 +183,10 @@ export class PartnerDevController {
         !group.members.some((m) => m.principalId === c.descriptor.businessPrincipalId)
       )
         throw new PartnerLocalFault("FORBIDDEN")
+      await this.prepareServiceScope(c, client)
       return {
         scope: {
+          ...(c.serviceInstanceId ? { serviceInstanceId: c.serviceInstanceId } : {}),
           url: c.descriptor.url,
           spaceId: c.descriptor.spaceId,
           businessPrincipalId: c.descriptor.businessPrincipalId,
@@ -211,6 +218,7 @@ export class PartnerDevController {
     this.worker = undefined
     this.client?.close()
     this.client = undefined
+    this.serviceScopePrepared = false
   }
   importDescriptor(value: unknown): Promise<PartnerDevStatus> {
     return this.exclusive(() => this.applyDescriptor(parsePartnerDescriptor(value)))
@@ -293,10 +301,22 @@ export class PartnerDevController {
   enableNode(): Promise<PartnerDevStatus> {
     return this.exclusive(() => this.enableConfigured())
   }
+  private async prepareServiceScope(
+    config: PartnerLocalConfig,
+    client: PartnerLocalClient
+  ): Promise<void> {
+    if (this.serviceScopePrepared || !this.deps.prepareServiceScope) return
+    const identity = await client.expertServiceIdentity()
+    config.serviceInstanceId = identity
+    await this.deps.prepareServiceScope(config, client)
+    await this.persist()
+    this.serviceScopePrepared = true
+  }
   private async enableConfigured(): Promise<PartnerDevStatus> {
     const c = this.requireConfig(),
       client = this.requireClient()
     if (!c.workspacePath) throw new PartnerLocalFault("NOT_CONFIGURED")
+    await this.prepareServiceScope(c, client)
     await this.worker?.stop()
     const worker = new PartnerLocalWorker({
       client,

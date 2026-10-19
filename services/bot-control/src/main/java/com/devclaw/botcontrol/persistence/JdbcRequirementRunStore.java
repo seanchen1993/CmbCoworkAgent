@@ -51,7 +51,7 @@ public final class JdbcRequirementRunStore {
         @com.fasterxml.jackson.databind.annotation.JsonSerialize(using=com.devclaw.botcontrol.application.RequirementInstantSerializer.class)
         public final Instant deadline, createdAt, updatedAt, leaseExpiresAt;
         public final String attemptId, leaseId;
-        public final String memoryScope,deliveryVersionId;
+        public final String memoryScope,deliveryVersionId,executionProfile,contextDigest;
         public final Long fence;
         public final boolean readOnly = true;
         private final byte[] fingerprint;
@@ -62,6 +62,8 @@ public final class JdbcRequirementRunStore {
             version = version(r.getLong("version")); taskVersion = version(r.getLong("task_version")); groupVersion = version(r.getLong("group_version")); nodeVersion = version(r.getLong("node_version")); grantVersion = version(r.getLong("grant_version"));
             status = status(r.getString("status")); initialStatus = status(r.getString("initial_status"));
             deliveryVersionId=r.getString("delivery_version_id");if(deliveryVersionId!=null)id(deliveryVersionId);
+            executionProfile=r.getString("execution_profile");contextDigest=r.getString("context_digest");
+            if(executionProfile==null?contextDigest!=null:!Arrays.asList("expert_main_v1","expert_task_v1").contains(executionProfile)||contextDigest==null||!contextDigest.matches("sha256:[a-f0-9]{64}"))throw JdbcApplicationStore.corrupt();
             memoryScope=r.getString("memory_scope");if(!Arrays.asList("group","bot").contains(memoryScope))throw JdbcApplicationStore.corrupt();
             if (initialStatus != Status.QUEUED && initialStatus != Status.WAITING_NODE) throw JdbcApplicationStore.corrupt();
             deadline = instant(r, "deadline"); createdAt = instant(r, "created_at"); updatedAt = instant(r, "updated_at");
@@ -154,6 +156,21 @@ public final class JdbcRequirementRunStore {
         try(PreparedStatement p=prepare("SELECT * FROM requirement_run_results WHERE space_id=? AND run_id=?",space,runId);ResultSet r=p.executeQuery()) {
             if(!r.next())return null;Result value=new Result(r);if(r.next())throw JdbcApplicationStore.corrupt();return value;
         }
+    }
+    public static final class HistoryResult {
+        public final Run run;public final Result result;public final byte[] coordinationReceipt;
+        HistoryResult(ResultSet r)throws SQLException {
+            run=new Run(r.getString("space_id"),r);result=new Result(r);coordinationReceipt=r.getBytes("coordination_receipt");
+            if(!run.id.equals(result.runId)||!run.attemptId.equals(r.getString("result_attempt_id")))throw JdbcApplicationStore.corrupt();
+        }
+    }
+    /** One bounded joined read. The caller validates the immutable Result/Run pair. */
+    public List<HistoryResult> history(String task,long taskVersion,String bot)throws SQLException {
+        List<HistoryResult> values=new ArrayList<HistoryResult>();
+        try(PreparedStatement p=prepare("SELECT q.*,r.run_id,r.attempt_id AS result_attempt_id,r.outcome,r.result_text,r.settled_at,c.receipt_bytes AS coordination_receipt FROM requirement_run_queue q JOIN requirement_run_results r ON r.space_id=q.space_id AND r.run_id=q.id LEFT JOIN expert_conversation_commands c ON c.space_id=q.space_id AND c.source_run_id=q.id WHERE q.space_id=? AND q.task_id=? AND q.bot_id=? AND q.task_version<=? AND q.status='succeeded' ORDER BY q.task_version,q.created_at,q.id LIMIT 201",space,task,bot,taskVersion);ResultSet r=p.executeQuery()){
+            while(r.next())values.add(new HistoryResult(r));
+        }
+        if(values.size()>200)throw new com.devclaw.botcontrol.domain.ApplicationFault(com.devclaw.botcontrol.contracts.BotContracts.ErrorCode.PAYLOAD_TOO_LARGE);return values;
     }
     public Result settle(Run old, Instant now, String outcome, String text) throws SQLException {
         change("INSERT INTO requirement_run_results(space_id,run_id,attempt_id,outcome,result_text,settled_at) VALUES(?,?,?,?,?,?)",space,old.id,old.attemptId,outcome,text,now);

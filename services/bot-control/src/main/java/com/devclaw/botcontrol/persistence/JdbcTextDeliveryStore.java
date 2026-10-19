@@ -11,6 +11,7 @@ public final class JdbcTextDeliveryStore {
     private static final ObjectMapper JSON=CompatibilityProbe.strictMapper();
     private final Connection c; private final String space;
     public JdbcTextDeliveryStore(Connection c,String space){this.c=c;this.space=space;}
+    public boolean expert(String task)throws SQLException{return new JdbcExpertConversationStore(c,space).conversation(task)!=null;}
     private PreparedStatement prepare(String sql,Object... args)throws SQLException {
         PreparedStatement p=c.prepareStatement(sql);p.setQueryTimeout(2);
         try{for(int i=0;i<args.length;i++)if(args[i] instanceof byte[])p.setBytes(i+1,(byte[])args[i]);else p.setObject(i+1,args[i]);return p;}

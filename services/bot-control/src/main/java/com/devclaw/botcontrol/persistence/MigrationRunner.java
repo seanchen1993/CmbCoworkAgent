@@ -16,6 +16,7 @@ public final class MigrationRunner {
     static final String MEMORY_SCRIPT = "V6__group_explicit_memory.sql";
     static final String EXPERT_MEMORY_SCRIPT = "V7__expert_memory.sql";
     static final String DELIVERY_SCRIPT = "V8__text_delivery_review.sql";
+    static final String CONVERSATION_SCRIPT = "V9__expert_task_conversations.sql";
     private final Flyway flyway;
     public MigrationRunner(DataSource source) { flyway = configuration(source).load(); }
     static FluentConfiguration configuration(DataSource source) {
@@ -24,7 +25,7 @@ public final class MigrationRunner {
             .cleanDisabled(true).cleanOnValidationError(false).baselineOnMigrate(false).createSchemas(false)
             .validateOnMigrate(true).validateMigrationNaming(true).failOnMissingLocations(true)
             // Pending source migrations are legitimate for explicit migrate;
-            // readiness additionally requires all eight applied successes.
+            // readiness additionally requires all nine applied successes.
             .ignorePendingMigrations(true).ignoreFutureMigrations(false)
             .ignoreMissingMigrations(false).ignoreIgnoredMigrations(false)
             .outOfOrder(false).placeholderReplacement(false)
@@ -38,8 +39,8 @@ public final class MigrationRunner {
         try {
             flyway.validate();
             MigrationInfo[] all = flyway.info().all();
-            if (all.length != 8) throw new IllegalStateException();
-            String[] scripts = {SCRIPT, TASK_SCRIPT, NODE_SCRIPT, RUN_SCRIPT, RESULT_SCRIPT, MEMORY_SCRIPT, EXPERT_MEMORY_SCRIPT, DELIVERY_SCRIPT};
+            if (all.length != 9) throw new IllegalStateException();
+            String[] scripts = {SCRIPT, TASK_SCRIPT, NODE_SCRIPT, RUN_SCRIPT, RESULT_SCRIPT, MEMORY_SCRIPT, EXPERT_MEMORY_SCRIPT, DELIVERY_SCRIPT, CONVERSATION_SCRIPT};
             for (int i = 0; i < scripts.length; i++) if (all[i].getVersion() == null || !String.valueOf(i + 1).equals(all[i].getVersion().getVersion()) ||
                 !scripts[i].equals(all[i].getScript()) || all[i].getChecksum() == null || all[i].getState() != MigrationState.SUCCESS) throw new IllegalStateException();
         } catch (RuntimeException e) { throw new DatabaseFailure(DatabaseFailure.Category.MIGRATION_INVALID); }

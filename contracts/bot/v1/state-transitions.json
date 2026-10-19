@@ -155,5 +155,29 @@
     "assessment": ["repository.read"],
     "prototype": ["prototype.generate", "workspace.write"],
     "project": ["repository.read", "workspace.write", "command.execute"]
+  },
+  "x-internal-lifecycles": {
+    "expert_task": {
+      "guards": [
+        "explicit_complete_or_reopen",
+        "current_group_bot_membership",
+        "conversation_owner",
+        "expected_task_version",
+        "no_pending_or_unknown_run",
+        "local_pending_coordination_gate"
+      ],
+      "complete": {
+        "task": ["active|awaiting_business", "completed"],
+        "firstStage": ["active|waiting_confirmation", "completed"],
+        "otherStages": ["pending", "cancelled"]
+      },
+      "reopen": {
+        "task": ["completed", "active"],
+        "firstStage": ["completed", "active"],
+        "otherStages": ["cancelled", "pending"]
+      },
+      "ordinaryEnqueueMayReopen": false,
+      "publicStageTerminalTransitionsUnchanged": true
+    }
   }
 }

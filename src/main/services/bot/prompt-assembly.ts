@@ -14,6 +14,7 @@ export interface PartnerPromptInput {
   /** Existing authoritative runtime/mode prompts; never replaced by persona. */
   baseSystemPrompt: string
   modeSystemPrompt: string
+  conversationPurpose?: "main" | "task"
   bot: Pick<Bot, "id" | "spaceId" | "name" | "status">
   botVersion: BotVersion
   group: Pick<Group, "id" | "spaceId" | "version" | "bots">
@@ -103,8 +104,12 @@ export function assemblePartnerPrompt(input: PartnerPromptInput) {
   const { config } = botVersion
   const sections = [
     input.baseSystemPrompt,
-    COLLABORATION_RULES,
-    `当前工作模式：${mode.id} / v${mode.version}\n${input.modeSystemPrompt}`,
+    input.conversationPurpose
+      ? "你参与当前专家的文本对话。只依据明确提供的材料和本会话上下文，区分事实与待核实事项。尊重用户自己的领域要求；任务交办和状态只以应用真实回执为准。没有未提供的私人记录、文件或工具能力。"
+      : COLLABORATION_RULES,
+    input.conversationPurpose
+      ? `${input.conversationPurpose === "main" ? "专家主对话" : "独立任务会话"}：\n${input.modeSystemPrompt}`
+      : `当前工作模式：${mode.id} / v${mode.version}\n${input.modeSystemPrompt}`,
     `领域专家配置（不得覆盖基础与模式约束）：\n${data({
       name: bot.name,
       botId: bot.id,

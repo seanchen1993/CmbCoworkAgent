@@ -9,6 +9,7 @@ public final class DatabaseReadiness {
      * requires EXPERT_TABLES below. Do not use this legacy set as the full catalog. */
     public static final List<String> TABLES = Collections.unmodifiableList(Arrays.asList("bots", "bot_versions", "bot_maintainers", "groups", "group_members", "group_bots", "command_scope", "command_receipts", "mutation_outbox", "tasks", "task_messages", "task_space_head", "task_event_cursors", "desktop_runtime_nodes", "group_runtime_grants", "requirement_run_queue", "requirement_run_results", "group_memory_revisions", "group_memories", "group_memory_commands", "requirement_run_memory_snapshots", "bot_schema_history"));
     public static final List<String> DELIVERY_TABLES = Collections.unmodifiableList(Arrays.asList("task_delivery_heads","task_delivery_versions","task_delivery_decisions","task_delivery_commands","requirement_run_delivery_inputs"));
+    public static final List<String> CONVERSATION_TABLES = Collections.unmodifiableList(Arrays.asList("expert_service_identity","expert_task_conversations","expert_conversation_inputs","expert_conversation_commands"));
     private DatabaseReadiness() {}
     public static final List<String> EXPERT_TABLES = Collections.unmodifiableList(Arrays.asList("bot_memory_revisions", "bot_memories", "bot_memory_commands", "group_expert_memory_modes"));
     public static void requireConnection(DataSource source) {
@@ -45,11 +46,11 @@ public final class DatabaseReadiness {
             s.setQueryTimeout(3); Set<String> found = new HashSet<String>();
             try (ResultSet r = s.executeQuery("SELECT table_name,engine,table_collation FROM information_schema.tables WHERE table_schema='devclaw'")) {
                 while (r.next()) {
-                    if ((!TABLES.contains(r.getString(1)) && !EXPERT_TABLES.contains(r.getString(1)) && !DELIVERY_TABLES.contains(r.getString(1))) || !"InnoDB".equals(r.getString(2)) || !"utf8mb4_unicode_ci".equals(r.getString(3))) throw new DatabaseFailure(DatabaseFailure.Category.MIGRATION_INVALID);
+                    if ((!TABLES.contains(r.getString(1)) && !EXPERT_TABLES.contains(r.getString(1)) && !DELIVERY_TABLES.contains(r.getString(1)) && !CONVERSATION_TABLES.contains(r.getString(1))) || !"InnoDB".equals(r.getString(2)) || !"utf8mb4_unicode_ci".equals(r.getString(3))) throw new DatabaseFailure(DatabaseFailure.Category.MIGRATION_INVALID);
                     found.add(r.getString(1));
                 }
             }
-            Set<String> required = new HashSet<String>(TABLES); required.addAll(EXPERT_TABLES); required.addAll(DELIVERY_TABLES);
+            Set<String> required = new HashSet<String>(TABLES); required.addAll(EXPERT_TABLES); required.addAll(DELIVERY_TABLES); required.addAll(CONVERSATION_TABLES);
             if (!found.equals(required)) throw new DatabaseFailure(DatabaseFailure.Category.MIGRATION_INVALID);
             try (ResultSet r = s.executeQuery("SELECT COUNT(*) FROM information_schema.referential_constraints WHERE constraint_schema='devclaw'")) {
                 if (!r.next() || r.getInt(1) != 0) throw new DatabaseFailure(DatabaseFailure.Category.MIGRATION_INVALID);
