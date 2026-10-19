@@ -103,6 +103,12 @@ import { BotWorkspaceMenu } from "./BotWorkspaceMenu"
 import { BotPanelDivider } from "./BotPanelDivider"
 import { useBotViewStore, DEFAULT_BOT_VIEW, clampBotPanelWidth } from "./view-store"
 import { ServiceExpertConversation, SERVICE_EXPERT_SELECTION } from "./ServiceExpertConversation"
+import {
+  SERVICE_NEW_TASK,
+  serviceSelection,
+  serviceTaskRef,
+  useServiceExpertChats
+} from "./useServiceExpertChats"
 import "./bots.css"
 
 const COLORS = ["#ed2040", "#168bea", "#ffb800", "#9a65ee", "#37b897", "#f07e4a"]
@@ -559,19 +565,6 @@ function GroupFiles({
 
 export function BotsWorkspace({ client = localBotClient() }: { client?: BotClient }) {
   const { snapshot, error, retry } = useBots(client)
-  const [serviceName, setServiceName] = useState<string | null>(null);
-  useEffect(() => {
-    let live = true;
-    void window.api.serviceConversation
-      ?.open()
-      .then((info) => {
-        if (live) setServiceName(info.expertName);
-      })
-      .catch(() => undefined);
-    return () => {
-      live = false;
-    };
-  }, []);
   useEffect(() => {
     if (snapshot) {
       useBotGroupDrafts.getState().prune(
@@ -1161,6 +1154,19 @@ export function BotsWorkspace({ client = localBotClient() }: { client?: BotClien
       </BotRowMenu>
     )
   }
+  const [serviceTaskLimit, setServiceTaskLimit] = useState(5)
+  const serviceActive = !!selectedId?.startsWith(SERVICE_EXPERT_SELECTION) && !groupId && !newChat
+  const selectService = (ref: string | null) => {
+    setNewChat(false)
+    updateView({ selectedId: serviceSelection(ref), groupId: null })
+  }
+  const service = useServiceExpertChats(
+    window.api.serviceConversation,
+    serviceTaskRef(selectedId),
+    serviceActive,
+    query,
+    selectService
+  )
   const renderConversations = (bots: BotDefinition[], groups: BotGroup[]) =>
     orderBotConversations(bots, groups, activityByConversation).map((item) =>
       item.kind === "bot" ? renderBotRow(item.value) : renderGroupRow(item.value)
@@ -1299,27 +1305,62 @@ export function BotsWorkspace({ client = localBotClient() }: { client?: BotClien
           )}
           <BotConversationList label={showArchived ? "已归档 Bot" : "Bot 会话"}>
             {!showArchived && window.api.serviceConversation && (
-              <button
-                className="service-expert-sidebar"
-                data-selected={
-                  selectedId === SERVICE_EXPERT_SELECTION &&
-                  !groupId &&
-                  !newChat
-                }
-                onClick={() => {
-                  setNewChat(false);
-                  updateView({
-                    selectedId: SERVICE_EXPERT_SELECTION,
-                    groupId: null,
-                  });
-                }}
-              >
-                <BotAvatar color="#168bea" shape="circle" size={32} />
-                <span>
-                  {serviceName ?? "服务专家"}
-                  <small>服务管理 · 文本分析</small>
-                </span>
-              </button>
+              <section className="service-chat-list" aria-label="服务专家会话">
+                <button
+                  className="bot-list-item"
+                  data-selected={serviceActive && !serviceTaskRef(selectedId)}
+                  onClick={() => selectService(null)}
+                >
+                  <BotAvatar color="#168bea" shape="circle" size={32} />
+                  <span className="bot-list-copy">
+                    <strong>{service.overview?.expertName ?? "服务专家"}</strong>
+                    <small>主对话</small>
+                  </span>
+                </button>
+                <button
+                  className="service-chat-list-more"
+                  onClick={() => selectService(SERVICE_NEW_TASK)}
+                >
+                  新任务
+                </button>
+                {service.tasks.slice(0, serviceTaskLimit).map((task) => (
+                  <button
+                    key={task.taskRef}
+                    className="bot-list-item service-chat-task-row"
+                    data-selected={serviceActive && serviceTaskRef(selectedId) === task.taskRef}
+                    title={task.title}
+                    onClick={() => selectService(task.taskRef)}
+                  >
+                    <span
+                      className="service-chat-task-dot"
+                      data-completed={task.taskStatus === "completed"}
+                    />
+                    <span className="bot-list-copy">
+                      <strong>{task.title}</strong>
+                      <small>
+                        {task.taskStatus === "completed"
+                          ? "已完成"
+                          : task.status === "succeeded"
+                            ? "已回复"
+                            : task.busy
+                              ? "正在处理"
+                              : "任务会话"}
+                      </small>
+                    </span>
+                  </button>
+                ))}
+                {(service.tasks.length > serviceTaskLimit || service.taskCursor) && (
+                  <button
+                    className="service-chat-list-more"
+                    onClick={() => {
+                      setServiceTaskLimit((value) => value + 40)
+                      if (service.tasks.length <= serviceTaskLimit) void service.moreTasks()
+                    }}
+                  >
+                    更多任务
+                  </button>
+                )}
+              </section>
             )}
             {(pinnedBots.length > 0 ||
               visibleGroups.some((group) => pinnedGroupIds.includes(group.id))) && (
@@ -1514,17 +1555,20 @@ export function BotsWorkspace({ client = localBotClient() }: { client?: BotClien
               )
             )}
             {!snapshot && !error && <Loader2 className="mx-auto mt-12 size-5 animate-spin" />}
-            {snapshot && !visible.length && !visibleGroups.length && (
-              <p className="px-4 py-8 text-center text-sm text-muted-foreground">
-                {query
-                  ? "没有匹配的会话"
-                  : showArchived
-                    ? "没有已归档的 Bot"
-                    : showHidden
-                      ? "没有隐藏的会话"
-                      : "创建你的第一个 Bot"}
-              </p>
-            )}
+            {snapshot &&
+              !visible.length &&
+              !visibleGroups.length &&
+              !service.overview?.conversationId && (
+                <p className="px-4 py-8 text-center text-sm text-muted-foreground">
+                  {query
+                    ? "没有匹配的会话"
+                    : showArchived
+                      ? "没有已归档的 Bot"
+                      : showHidden
+                        ? "没有隐藏的会话"
+                        : "创建你的第一个 Bot"}
+                </p>
+              )}
           </BotConversationList>
           <footer className="bots-sidebar-footer">
             {sidebarCollapsed ? [footerActions[1], footerActions[0]] : footerActions}
@@ -1542,8 +1586,12 @@ export function BotsWorkspace({ client = localBotClient() }: { client?: BotClien
               {error}
             </div>
           )}
-          {selectedId === SERVICE_EXPERT_SELECTION && !groupId && !newChat ? (
-            <ServiceExpertConversation onName={setServiceName} />
+          {serviceActive ? (
+            <ServiceExpertConversation
+              controller={service}
+              taskRef={serviceTaskRef(selectedId)}
+              onSelect={selectService}
+            />
           ) : !snapshot ? (
             <div className="bot-empty" role="status">
               {error ? (

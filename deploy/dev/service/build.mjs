@@ -81,12 +81,14 @@ export async function audit() {
     const runMigration = "BOOT-INF/classes/db/bot-migration/V4__requirement_run_queue.sql"
     const resultMigration = "BOOT-INF/classes/db/bot-migration/V5__requirement_run_results.sql"
     const memoryMigration = "BOOT-INF/classes/db/bot-migration/V6__group_explicit_memory.sql"
+    const conversationMigration = "BOOT-INF/classes/db/bot-migration/V9__expert_task_conversations.sql"
     const deliveryMigration = "BOOT-INF/classes/db/bot-migration/V8__text_delivery_review.sql"
     const expertMigration = "BOOT-INF/classes/db/bot-migration/V7__expert_memory.sql"
-    if (contents.filter(name => name.startsWith("BOOT-INF/classes/db/bot-migration/") && name.endsWith(".sql")).sort().join() !== [migrationResource, taskMigration, nodeMigration, runMigration, resultMigration, memoryMigration, expertMigration, deliveryMigration].sort().join()) throw new Error("B01_PACKAGED_MIGRATIONS")
-    await run(join(jdk, "bin/jar"), ["xf", jar, ...classes, ...resources, migrationResource, taskMigration, nodeMigration, runMigration, resultMigration, memoryMigration, expertMigration, deliveryMigration, "BOOT-INF/classes/log4j2.xml"], { env, cwd: temp })
+    if (contents.filter(name => name.startsWith("BOOT-INF/classes/db/bot-migration/") && name.endsWith(".sql")).sort().join() !== [migrationResource, taskMigration, nodeMigration, runMigration, resultMigration, memoryMigration, expertMigration, deliveryMigration, conversationMigration].sort().join()) throw new Error("B01_PACKAGED_MIGRATIONS")
+    await run(join(jdk, "bin/jar"), ["xf", jar, ...classes, ...resources, migrationResource, taskMigration, nodeMigration, runMigration, resultMigration, memoryMigration, expertMigration, deliveryMigration, conversationMigration, "BOOT-INF/classes/log4j2.xml"], { env, cwd: temp })
     if (!(await readFile(join(temp, expertMigration))).equals(await readFile(join(project, "src/main/resources/db/bot-migration/V7__expert_memory.sql")))) throw new Error("B01_PACKAGED_MIGRATIONS")
     if (!(await readFile(join(temp, deliveryMigration))).equals(await readFile(join(project, "src/main/resources/db/bot-migration/V8__text_delivery_review.sql")))) throw new Error("M03_PACKAGED_MIGRATIONS")
+    if (!(await readFile(join(temp, conversationMigration))).equals(await readFile(join(project, "src/main/resources/db/bot-migration/V9__expert_task_conversations.sql")))) throw new Error("M04_PACKAGED_MIGRATIONS")
     const memoryMigrationBytes = await readFile(join(temp, memoryMigration))
     if (!memoryMigrationBytes.equals(await readFile(join(project, "src/main/resources/db/bot-migration/V6__group_explicit_memory.sql")))) throw new Error("B01_PACKAGED_MIGRATIONS")
     if (!(await readFile(join(temp, resultMigration))).equals(await readFile(join(project, "src/main/resources/db/bot-migration/V5__requirement_run_results.sql")))) throw new Error("B01_PACKAGED_MIGRATIONS")
@@ -120,6 +122,7 @@ export async function audit() {
     suites["adapters.local.PartnerConfigUnitTest"] = 4
     suites["application.GroupMemoryUnitTest"] = 7
     suites["application.TextDeliveryUnitTest"] = 2
+    suites["application.ExpertConversationUnitTest"] = 3
     let tests = 0
     for (const [name, count] of Object.entries(suites)) {
       const xml = await readFile(join(project, `target/surefire-reports/TEST-com.devclaw.botcontrol.${name}.xml`), "utf8")

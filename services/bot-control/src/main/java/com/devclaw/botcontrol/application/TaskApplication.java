@@ -100,7 +100,7 @@ public final class TaskApplication {
                         TaskMessageResult message = new TaskMessageResult(); message.taskVersion = current.version; message.message = new TaskMessage();
                         TaskMessage m = message.message; m.id = newId(); m.spaceId = actor.spaceId; m.taskId = current.id; m.authorPrincipalId = actor.principalId;
                         m.text = r.text; m.artifactVersions = Collections.emptyList(); m.createdAt = JdbcApplicationStore.text(now);
-                        TextDeliveryApplication.message(c,current,message); tasks.advance(current, previous); observer.reached(TransactionObserver.Stage.VERSION_WRITTEN); tasks.message(message, r.targetBotId);
+                        if(!ExpertConversationApplication.message(c,current,message,r.targetBotId))TextDeliveryApplication.message(c,current,message); tasks.advance(current, previous); observer.reached(TransactionObserver.Stage.VERSION_WRITTEN); tasks.message(message, r.targetBotId);
                         observer.reached(TransactionObserver.Stage.MEMBER_WRITTEN); result = message; receiptTarget = m.id; break;
                     }
                     case GET_EVENTS: {

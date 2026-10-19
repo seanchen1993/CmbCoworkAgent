@@ -107,3 +107,18 @@ test("actual generator CLI --check detects drift and never overwrites it", () =>
   assert.deepEqual(table.completed, [])
   assert.equal(table.active.includes("completed"), false)
 })
+
+
+test("expert task lifecycle is guarded separately from ordinary terminal transitions", () => {
+  const lifecycle = states["x-internal-lifecycles"].expert_task
+  assert.equal(lifecycle.ordinaryEnqueueMayReopen, false)
+  assert.equal(lifecycle.publicStageTerminalTransitionsUnchanged, true)
+  for (const guard of ["explicit_complete_or_reopen", "current_group_bot_membership", "conversation_owner", "expected_task_version", "no_pending_or_unknown_run", "local_pending_coordination_gate"])
+    assert.ok(lifecycle.guards.includes(guard))
+  assert.deepEqual(lifecycle.reopen.firstStage, ["completed", "active"])
+  assert.deepEqual(lifecycle.reopen.otherStages, ["cancelled", "pending"])
+  assert.equal(states["x-state-transitions"].TaskStatus.active.includes("completed"), false)
+  assert.deepEqual(states["x-state-transitions"].TaskStatus.completed, [])
+  assert.deepEqual(states["x-state-transitions"].StageStatus.completed, [])
+  assert.deepEqual(states["x-state-transitions"].StageStatus.cancelled, [])
+})

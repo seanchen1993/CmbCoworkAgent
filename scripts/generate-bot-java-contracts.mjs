@@ -28,7 +28,7 @@ export function generate(documents, digest = "in-memory-fixture") {
   for (const file of ["schemas.json", "state-transitions.json"])
     if (documents[file]?.$schema !== "https://json-schema.org/draft/2020-12/schema") fail(file, "unsupported dialect")
   keys(documents["schemas.json"], ["$schema", "$id", "$defs"], "schemas.json")
-  keys(documents["state-transitions.json"], ["$schema", "$id", "$defs", "x-state-transitions", "x-reconciliation", "x-mode-capabilities"], "state-transitions.json")
+  keys(documents["state-transitions.json"], ["$schema", "$id", "$defs", "x-state-transitions", "x-reconciliation", "x-mode-capabilities", "x-internal-lifecycles"], "state-transitions.json")
   const reachable = new Map(), declarations = new Map(), processing = new Set()
   const declare = (name, text) => {
     javaName(name)

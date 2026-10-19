@@ -25,11 +25,12 @@ final class PartnerHttpHandler {
     static final String CONTROL="/api/bot/local/v1/control",NODE="/api/bot/local/v1/node";
     private final PartnerLaunchConfig config;private final RequirementRunApplication runs;private final RuntimeNodeApplication nodes;private final LocalAuthenticatedNodeAdapter adapter;private final GroupMemoryApplication memories;
     private final Semaphore admission=new Semaphore(4);private final ObjectMapper json=CompatibilityProbe.strictMapper();private final ContractBoundary boundary=new ContractBoundary();
-    private final ExpertMemoryApplication expertMemories;private final TextDeliveryApplication deliveries;
+    private final ExpertMemoryApplication expertMemories;private final TextDeliveryApplication deliveries;private final ExpertConversationApplication conversations;
     PartnerHttpHandler(PartnerLaunchConfig config,DataSource source){
         this.config=config;nodes=new RuntimeNodeApplication(source,config.legacy.identity,config.access,TransactionObserver.NONE);runs=new RequirementRunApplication(source,config.legacy.identity,config.access,TransactionObserver.NONE);adapter=new LocalAuthenticatedNodeAdapter(config.credentials,nodes,runs);
         memories=new GroupMemoryApplication(source,config.legacy.identity,TransactionObserver.NONE);
         expertMemories=new ExpertMemoryApplication(source,config.legacy.identity);deliveries=new TextDeliveryApplication(source,config.legacy.identity,TransactionObserver.NONE);
+        conversations=new ExpertConversationApplication(source,config.legacy.identity,TransactionObserver.NONE);
         json.getFactory().setStreamReadConstraints(StreamReadConstraints.builder().maxNestingDepth(16).maxStringLength(65536).maxNumberLength(128).build());
     }
     boolean accepts(String path){return path!=null&&path.startsWith("/api/bot/local/");}
@@ -55,6 +56,12 @@ final class PartnerHttpHandler {
     }
     private Object control(JsonNode body,TrustedContext actor){
         String op=text(body,"operation");switch(op){
+            case "expertServiceIdentity":exact(body,"operation");return conversations.identity(actor);
+            case "ensureExpertConversation":exact(body,"operation","commandId","groupId","botId","role","taskId","title","goal");if(!body.path("taskId").isNull()&&!body.path("taskId").isTextual())throw fault(ErrorCode.INVALID_PAYLOAD);return conversations.ensure(actor,id(body,"commandId"),id(body,"groupId"),id(body,"botId"),text(body,"role"),body.path("taskId").isNull()?null:id(body,"taskId"),text(body,"title"),text(body,"goal"));
+            case "expertConversationSummaries":exact(body,"operation","groupId","botId","taskIds");return conversations.summaries(actor,id(body,"groupId"),id(body,"botId"),ids(body.get("taskIds")));
+            case "freezeExpertInput":exact(body,"operation","commandId","taskId","expectedTaskVersion","expectedGroupVersion","expectedBotVersionId","sourceRequestId","allowedTaskIds");return conversations.freeze(actor,id(body,"commandId"),id(body,"taskId"),number(body,"expectedTaskVersion",1),number(body,"expectedGroupVersion",1),id(body,"expectedBotVersionId"),id(body,"sourceRequestId"),ids(body.get("allowedTaskIds")));
+            case "coordinateExpertTask":exact(body,"operation","commandId","sourceRunId");return conversations.coordinate(actor,id(body,"commandId"),id(body,"sourceRunId"));
+            case "expertTaskLifecycle":exact(body,"operation","commandId","taskId","expectedVersion","action");return conversations.lifecycle(actor,id(body,"commandId"),id(body,"taskId"),number(body,"expectedVersion",1),text(body,"action"));
             case "identity":exact(body,"operation");return json.createObjectNode().put("spaceId",actor.spaceId).put("principalId",actor.principalId);
             case "deliverySummaries":exact(body,"operation","taskIds");JsonNode taskIds=body.get("taskIds");if(!taskIds.isArray()||taskIds.size()>40)throw fault(ErrorCode.INVALID_PAYLOAD);List<String> ids=new ArrayList<String>();for(JsonNode value:taskIds){if(!value.isTextual())throw fault(ErrorCode.INVALID_PAYLOAD);ids.add(value.textValue());}return deliveries.summaries(actor,ids);
             case "deliveryVersions":exact(body,"operation","taskId","before");return deliveries.versions(actor,id(body,"taskId"),number(body,"before",1));
@@ -82,6 +89,7 @@ final class PartnerHttpHandler {
             default:throw fault(ErrorCode.INVALID_PAYLOAD);
         }
     }
+    private List<String> ids(JsonNode values){if(values==null||!values.isArray()||values.size()>40)throw fault(ErrorCode.INVALID_PAYLOAD);List<String> result=new ArrayList<String>();for(JsonNode value:values){if(!value.isTextual())throw fault(ErrorCode.INVALID_PAYLOAD);result.add(GroupMemoryValues.id(value.textValue()));}return result;}
     void handle(HttpServletRequest request,HttpServletResponse response)throws IOException{
         if(!admission.tryAcquire()){writeError(response,ErrorCode.RATE_LIMITED);return;}
         try{

@@ -30,11 +30,18 @@ export interface PartnerRequirementRun {
   deadline: string
   memoryScope?: "group" | "bot"
   deliveryVersionId?: string | null
+  executionProfile?:
+    | import("../../../shared/bot/expert-conversation").ExpertConversationProfile
+    | null
+  contextDigest?: string | null
   /** Authenticated service routing envelope, excluded from legacy attempt fingerprints. */
   commandId?: string
   requesterPrincipalId?: string
 }
 export interface PartnerRequirementInput {
+  conversationInput?:
+    | import("../../../shared/bot/expert-conversation").ExpertConversationInput
+    | null
   deliveryInput?: import("../../../shared/bot/text-delivery").TextDeliveryInput | null
   bot: Bot
   botVersion: BotVersion
@@ -94,6 +101,11 @@ export function validatePartnerRun(run: PartnerRequirementRun): PartnerRequireme
       )) ||
     (run.deliveryVersionId != null &&
       (typeof run.deliveryVersionId !== "string" || !ID.test(run.deliveryVersionId))) ||
+    (run.executionProfile == null
+      ? run.contextDigest != null
+      : !["expert_main_v1", "expert_task_v1"].includes(run.executionProfile) ||
+        typeof run.contextDigest !== "string" ||
+        !/^sha256:[a-f0-9]{64}$/.test(run.contextDigest)) ||
     run.fence !== 1 ||
     ![run.taskVersion, run.groupVersion].every((v) => Number.isSafeInteger(v) && v > 0) ||
     !STATUSES.includes(run.status) ||
@@ -119,6 +131,7 @@ export function validatePartnerRun(run: PartnerRequirementRun): PartnerRequireme
         "deadline",
         ...(run.memoryScope !== undefined ? ["memoryScope"] : []),
         ...(run.deliveryVersionId != null ? ["deliveryVersionId"] : []),
+        ...(run.executionProfile != null ? ["executionProfile", "contextDigest"] : []),
         ...(run.commandId !== undefined ? ["commandId", "requesterPrincipalId"] : [])
       ].map((k) => [k, run[k]])
     )
@@ -126,6 +139,8 @@ export function validatePartnerRun(run: PartnerRequirementRun): PartnerRequireme
 }
 export function samePartnerAttempt(a: PartnerRequirementRun, b: PartnerRequirementRun): boolean {
   return (
+    (a.executionProfile ?? null) === (b.executionProfile ?? null) &&
+    (a.contextDigest ?? null) === (b.contextDigest ?? null) &&
     a.deliveryVersionId === b.deliveryVersionId &&
     a.commandId === b.commandId &&
     a.requesterPrincipalId === b.requesterPrincipalId &&

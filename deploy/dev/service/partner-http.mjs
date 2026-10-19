@@ -1,3 +1,4 @@
+import { expertConversationProbe, stopExpertConversationChildren } from "./expert-conversation-java.mjs"
 import { textDeliveryProbe, stopTextDeliveryChildren } from "./text-delivery-java.mjs"
 import http from "node:http"
 import { randomBytes } from "node:crypto"
@@ -124,9 +125,9 @@ export async function partnerRequest(handle, path, body, { principal = "owner", 
     request.on("error", () => finish(Error("PARTNER_REQUEST"))); request.end(bytes)
   })
 }
-export async function withPartnerHttpFixture(callback, { signal, upgradeV5 = false, upgradeV6 = false, upgradeV7 = false } = {}) {
+export async function withPartnerHttpFixture(callback, { signal, upgradeV5 = false, upgradeV6 = false, upgradeV7 = false, upgradeV8 = false } = {}) {
   if (typeof callback !== "function") throw Error("PARTNER_CALLBACK")
-  if (typeof upgradeV5 !== "boolean" || typeof upgradeV6 !== "boolean" || typeof upgradeV7 !== "boolean" || [upgradeV5, upgradeV6, upgradeV7].filter(Boolean).length > 1) throw Error("PARTNER_SELECTION")
+  if (typeof upgradeV5 !== "boolean" || typeof upgradeV6 !== "boolean" || typeof upgradeV7 !== "boolean" || typeof upgradeV8 !== "boolean" || [upgradeV5, upgradeV6, upgradeV7, upgradeV8].filter(Boolean).length > 1) throw Error("PARTNER_SELECTION")
   active(signal)
   const original = await httpDevProof(), runtime = await packagedDatabaseRuntime()
   let entry, fixture, server, descriptorDirectory
@@ -134,9 +135,10 @@ export async function withPartnerHttpFixture(callback, { signal, upgradeV5 = fal
     console.log(JSON.stringify(await httpCapacity(signal))); entry = await createTestDatabase()
     console.log(JSON.stringify({ stage: "partner-registered", project: entry.project }))
     console.log(JSON.stringify({ stage: "partner-database-ready", ...(await startTestDatabase(entry, signal)) }))
-    const upgrade = upgradeV7 ? await textDeliveryProbe(runtime, entry, "seed-v7", {}, signal) : upgradeV5 || upgradeV6 ? await groupMemoryProbe(runtime, entry, upgradeV5 ? "seed-v5" : "seed-v6", {}, signal) : null
-    const migrated = await javaDatabase(runtime, entry, "migrate", { signal }); check(migrated.exitCode === 0 && migrated.proof.migrations === (upgradeV7 ? 1 : upgradeV5 ? 3 : upgradeV6 ? 2 : 8))
+    const upgrade = upgradeV8 ? await expertConversationProbe(runtime, entry, "seed-v8", {}, signal) : upgradeV7 ? await textDeliveryProbe(runtime, entry, "seed-v7", {}, signal) : upgradeV5 || upgradeV6 ? await groupMemoryProbe(runtime, entry, upgradeV5 ? "seed-v5" : "seed-v6", {}, signal) : null
+    const migrated = await javaDatabase(runtime, entry, "migrate", { signal }); check(migrated.exitCode === 0 && migrated.proof.migrations === (upgradeV8 ? 1 : upgradeV7 ? 2 : upgradeV5 ? 4 : upgradeV6 ? 3 : 9))
     const noop = await javaDatabase(runtime, entry, "migrate", { signal }); check(noop.exitCode === 0 && noop.proof.migrations === 0)
+    if (upgradeV8) { const proof = await expertConversationProbe(runtime, entry, "verify-v8", upgrade, signal); check(proof.oldResultsPreserved && proof.oldCompletedAndAwaitingPreserved && proof.noAutomaticAdoption) }
     if (upgradeV7) { const proof = await textDeliveryProbe(runtime, entry, "verify-v7", upgrade, signal); check(proof.oldFactsUnchanged && proof.oldResultReadable && proof.noAutomaticPublication) }
     if (upgradeV5) { const proof = await groupMemoryProbe(runtime, entry, "verify-v5", { v5Facts: upgrade.v5Facts, runId: upgrade.running.id, terminalId: upgrade.terminal.id }, signal); check(proof.v5FactsPreserved && proof.historicalRunningNull && proof.oldResultPreserved) }
     if (upgradeV6) { const proof = await groupMemoryProbe(runtime, entry, "verify-v6", upgrade, signal); check(proof.v6ScopeAndDataPreserved && proof.noExpertPromotion) }
@@ -146,6 +148,7 @@ export async function withPartnerHttpFixture(callback, { signal, upgradeV5 = fal
     await writeFile(connectionFile, JSON.stringify(server.descriptor) + "\n", { mode: 0o600, flag: "wx" })
     const stat = await lstat(connectionFile); check(stat.isFile() && !stat.isSymbolicLink() && stat.uid === process.getuid() && stat.nlink === 1 && (stat.mode & 0o777) === 0o600)
     return await callback({ descriptor: { ...server.descriptor }, connectionFile, upgrade,
+      expertProbe: (action, fixture = {}) => expertConversationProbe(runtime, entry, action, fixture, signal),
       deliveryProbe: (action, fixture = {}) => textDeliveryProbe(runtime, entry, action, fixture, signal),
       probe: (action, fixture = {}) => groupMemoryProbe(runtime, entry, action, fixture, signal),
       reopen: async () => { await server.stop(); server = await startPartnerJava(runtime, entry, fixture, signal); await partnerWrite(connectionFile, JSON.stringify(server.descriptor) + "\n"); console.log(JSON.stringify({ stage: "partner-reopened", pid: server.pid, port: server.port, project: entry.project })); return { ...server.descriptor } },
@@ -155,7 +158,7 @@ export async function withPartnerHttpFixture(callback, { signal, upgradeV5 = fal
       request: (path, body, options = {}) => partnerRequest(server, path, body, { ...options, signal }) })
   } finally {
     let failed = false
-    for (const finish of [stopPartnerChildren, stopGroupMemoryChildren, stopTextDeliveryChildren, ...(descriptorDirectory ? [() => removePrivateTemp(descriptorDirectory)] : []), ...(fixture ? [() => closeHttpFixture(fixture)] : []), ...(entry ? [async () => { console.log(JSON.stringify({ stage: "partner-cleanup", ...(await cleanupTestDatabase(entry)) })) }, () => httpAbsent(entry.project)] : []), () => closeDatabaseRuntime(runtime), async () => { check(isDeepStrictEqual(original, await httpDevProof())); console.log(JSON.stringify({ stage: "partner-original-dev", sameIdentityHealthy: true, credentialsRead: false })) }]) {
+    for (const finish of [stopPartnerChildren, stopGroupMemoryChildren, stopTextDeliveryChildren, stopExpertConversationChildren, ...(descriptorDirectory ? [() => removePrivateTemp(descriptorDirectory)] : []), ...(fixture ? [() => closeHttpFixture(fixture)] : []), ...(entry ? [async () => { console.log(JSON.stringify({ stage: "partner-cleanup", ...(await cleanupTestDatabase(entry)) })) }, () => httpAbsent(entry.project)] : []), () => closeDatabaseRuntime(runtime), async () => { check(isDeepStrictEqual(original, await httpDevProof())); console.log(JSON.stringify({ stage: "partner-original-dev", sameIdentityHealthy: true, credentialsRead: false })) }]) {
       try { await finish() } catch { failed = true }
     }
     if (failed) throw Error("PARTNER_CLEANUP")

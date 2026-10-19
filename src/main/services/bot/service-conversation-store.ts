@@ -1,4 +1,5 @@
 import { ServiceDeliveryStore } from "./service-delivery-store"
+import { ServiceExpertStore } from "./service-expert-store"
 import { createHash, randomUUID } from "node:crypto"
 import type { NativeSqliteAdapter } from "../../db/native-sqlite-adapter"
 import type { Task } from "../../../shared/bot/contracts.generated"
@@ -9,6 +10,7 @@ import type { ServiceRequestStatus } from "../../../shared/bot/service-conversat
 
 export interface ServiceScope {
   url: string
+  serviceInstanceId?: string
   spaceId: string
   businessPrincipalId: string
   ownerPrincipalId: string
@@ -22,7 +24,7 @@ export function serviceScopeKey(scope: ServiceScope): string {
   return createHash("sha256")
     .update(
       JSON.stringify([
-        scope.url,
+        scope.serviceInstanceId ? "instance:" + scope.serviceInstanceId : scope.url,
         scope.spaceId,
         scope.businessPrincipalId,
         scope.ownerPrincipalId,
@@ -39,14 +41,18 @@ export interface ConversationRecord {
   id: string
   scope: ServiceScope
   model: ServiceModelBinding | null
+  mainTaskRef?: string
 }
 export interface ServiceTaskRecord {
+  role?: "main" | "task"
   ref: string
   conversationId: string
   title: string
   task: Task | null
 }
 export interface ExecutionBinding extends ServiceScope {
+  executionProfile?: import("../../../shared/bot/expert-conversation").ExpertConversationProfile
+  contextDigest?: string
   commandId: string
   taskId: string
   taskVersion: number
@@ -60,6 +66,14 @@ export interface ExecutionBinding extends ServiceScope {
   attemptId: string | null
 }
 export interface ServiceRequestRecord {
+  profile?: import("../../../shared/bot/expert-conversation").ExpertConversationProfile
+  allowedTaskIds?: string[]
+  freezeGroupVersion?: number
+  freezeBotVersionId?: string
+  coordinationDone?: boolean
+  coordinationCancelled?: boolean
+  protocolFailure?: boolean
+  origin?: { mainRequestId: string }
   seq: number
   revision: number
   scopeKey: string
@@ -94,8 +108,10 @@ function hash(value: unknown): string {
  * Indexed keyset pages bound both UI history reads and the recovery pump. */
 export class ServiceConversationStore {
   readonly deliveries: ServiceDeliveryStore
+  readonly expert: ServiceExpertStore
   constructor(private readonly db: NativeSqliteAdapter) {
     this.deliveries = new ServiceDeliveryStore(db)
+    this.expert = new ServiceExpertStore(db)
     db.run(`CREATE TABLE IF NOT EXISTS service_conversations (
       scope_key TEXT PRIMARY KEY, id TEXT NOT NULL UNIQUE, body TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS service_conversation_tasks (
@@ -103,6 +119,8 @@ export class ServiceConversationStore {
       ref TEXT NOT NULL UNIQUE, server_task_id TEXT, body TEXT NOT NULL);
       CREATE INDEX IF NOT EXISTS service_tasks_server ON service_conversation_tasks(scope_key,server_task_id);
       CREATE INDEX IF NOT EXISTS service_tasks_scope ON service_conversation_tasks(scope_key,conversation_id,seq);
+      CREATE INDEX IF NOT EXISTS service_tasks_number ON service_conversation_tasks(scope_key,conversation_id,json_extract(body,'$.task.taskNumber'));
+      CREATE INDEX IF NOT EXISTS service_tasks_title ON service_conversation_tasks(scope_key,conversation_id,json_extract(body,'$.title'));
       CREATE TABLE IF NOT EXISTS service_conversation_requests (
       seq INTEGER PRIMARY KEY AUTOINCREMENT, scope_key TEXT NOT NULL, conversation_id TEXT NOT NULL,
       task_ref TEXT NOT NULL, request_id TEXT NOT NULL, fingerprint TEXT NOT NULL, revision INTEGER NOT NULL,
@@ -150,6 +168,105 @@ export class ServiceConversationStore {
     ])
     return value
   }
+  /** Legacy URL scopes are candidates, never authorization. The caller must
+   * authenticate the service and verify every stored task/run before migration. */
+  legacyScopes(scope: ServiceScope): Array<{
+    key: string
+    conversation: ConversationRecord
+    hasLocalIntent: boolean
+    tasks: Array<{ id: string; number: string; runId: string | null }>
+  }> {
+    const match = (candidate: ServiceScope) =>
+      [
+        "spaceId",
+        "businessPrincipalId",
+        "ownerPrincipalId",
+        "nodeId",
+        "workspaceRef",
+        "workspaceHash",
+        "groupId",
+        "botId"
+      ].every((k) => candidate[k] === scope[k])
+    return this.rows("SELECT scope_key,body FROM service_conversations WHERE scope_key<>?", [
+      serviceScopeKey(scope)
+    ]).flatMap((row) => {
+      const conversation = JSON.parse(String(row.body)) as ConversationRecord
+      if (conversation.scope.serviceInstanceId || !match(conversation.scope)) return []
+      const key = String(row.scope_key)
+      const tasks = this.rows(
+        "SELECT ref,server_task_id,json_extract(body,'$.task.taskNumber') AS number FROM service_conversation_tasks WHERE scope_key=? AND server_task_id IS NOT NULL ORDER BY seq",
+        [key]
+      ).map((task) => ({
+        id: String(task.server_task_id),
+        number: String(task.number),
+        runId: (() => {
+          const row = this.rows(
+            "SELECT json_extract(body,'$.runId') AS run_id FROM service_conversation_requests WHERE scope_key=? AND task_ref=? AND json_extract(body,'$.runId') IS NOT NULL ORDER BY seq DESC LIMIT 1",
+            [key, task.ref]
+          )[0]
+          return row ? String(row.run_id) : null
+        })()
+      }))
+      return [
+        {
+          key,
+          conversation,
+          tasks,
+          hasLocalIntent: !!this.rows(
+            "SELECT seq FROM service_conversation_requests WHERE scope_key=? LIMIT 1",
+            [key]
+          )[0]
+        }
+      ]
+    })
+  }
+  migrateScope(from: string, scope: ServiceScope): void {
+    const to = serviceScopeKey(scope)
+    if (from === to) return
+    this.transaction(() => {
+      const source = this.rows("SELECT body FROM service_conversations WHERE scope_key=?", [
+        from
+      ])[0]
+      if (!source) throw new PartnerLocalFault("INPUT_CHANGED")
+      const existing = this.rows("SELECT id FROM service_conversations WHERE scope_key=?", [to])[0]
+      if (existing) throw new PartnerLocalFault("SCOPE_MIGRATION_CONFLICT")
+      const conversation = JSON.parse(String(source.body)) as ConversationRecord
+      conversation.scope = scope
+      // Identity and all public references remain unchanged; only transport
+      // location changes. No new model/run/command/receipt is manufactured.
+      for (const table of [
+        "service_conversation_tasks",
+        "service_conversation_requests",
+        "service_execution_bindings",
+        "service_delivery_actions",
+        "service_delivery_summaries",
+        "service_expert_inputs",
+        "service_expert_summaries",
+        "service_expert_actions"
+      ]) {
+        const rows = this.rows(
+          "SELECT rowid AS migration_row_id,body FROM " + table + " WHERE scope_key=?",
+          [from]
+        )
+        for (const row of rows) {
+          const body = JSON.parse(String(row.body))
+          if (Object.hasOwn(body, "scopeKey")) body.scopeKey = to
+          if (table === "service_execution_bindings") Object.assign(body, scope)
+          this.db.run("UPDATE " + table + " SET scope_key=?,body=? WHERE rowid=?", [
+            to,
+            JSON.stringify(body),
+            row.migration_row_id
+          ])
+          if (this.db.getRowsModified() !== 1) throw new PartnerLocalFault("STORAGE_FAILURE")
+        }
+      }
+      this.db.run("UPDATE service_conversations SET scope_key=?,body=? WHERE scope_key=?", [
+        to,
+        JSON.stringify(conversation),
+        from
+      ])
+    })
+  }
   requireConversation(scope: ServiceScope, id: string): ConversationRecord {
     const row = this.rows("SELECT body FROM service_conversations WHERE scope_key=? AND id=?", [
       serviceScopeKey(scope),
@@ -182,6 +299,126 @@ export class ServiceConversationStore {
     )
     if (this.db.getRowsModified() !== 1) throw new PartnerLocalFault("STORAGE_FAILURE")
   }
+  mainTask(scope: ServiceScope, conversationId: string): ServiceTaskRecord {
+    return this.transaction(() => {
+      const conversation = this.requireConversation(scope, conversationId),
+        key = serviceScopeKey(scope)
+      if (conversation.mainTaskRef) return this.task(key, conversation.mainTaskRef)
+      const record: ServiceTaskRecord = {
+        ref: randomUUID(),
+        conversationId,
+        title: "主对话",
+        task: null,
+        role: "main"
+      }
+      conversation.mainTaskRef = record.ref
+      this.db.run(
+        "INSERT INTO service_conversation_tasks(scope_key,conversation_id,ref,body) VALUES(?,?,?,?)",
+        [key, conversationId, record.ref, JSON.stringify(record)]
+      )
+      this.db.run("UPDATE service_conversations SET body=? WHERE scope_key=? AND id=?", [
+        JSON.stringify(conversation),
+        key,
+        conversationId
+      ])
+      return record
+    })
+  }
+  taskByServer(scope: string, id: string): ServiceTaskRecord | null {
+    const rows = this.rows(
+      "SELECT body FROM service_conversation_tasks WHERE scope_key=? AND server_task_id=? LIMIT 2",
+      [scope, id]
+    )
+    if (rows.length > 1) throw new PartnerLocalFault("INPUT_CHANGED")
+    return rows[0] ? JSON.parse(String(rows[0].body)) : null
+  }
+  attachExpertTask(scope: ServiceScope, conversationId: string, task: Task): ServiceTaskRecord {
+    const key = serviceScopeKey(scope)
+    return this.transaction(() => {
+      this.requireConversation(scope, conversationId)
+      const previous = this.taskByServer(key, task.id)
+      if (previous) return previous
+      const record: ServiceTaskRecord = {
+        ref: randomUUID(),
+        conversationId,
+        title: task.title,
+        task,
+        role: "task"
+      }
+      this.db.run(
+        "INSERT INTO service_conversation_tasks(scope_key,conversation_id,ref,server_task_id,body) VALUES(?,?,?,?,?)",
+        [key, conversationId, record.ref, task.id, JSON.stringify(record)]
+      )
+      return record
+    })
+  }
+  allowedTargets(
+    scope: string,
+    conversationId: string,
+    text: string
+  ): Array<{ ref: string; task: { id: string }; title: string }> {
+    type Target = { ref: string; task: { id: string }; title: string }
+    const decode = (row: Record<string, unknown>): Target => ({
+      ref: String(row.ref),
+      task: { id: String(row.server_task_id) },
+      title: String(row.title)
+    })
+    const projection = "ref,server_task_id,json_extract(body,'$.title') AS title"
+    const explicit: Target[] = [],
+      numbers = [...new Set(text.match(/\bTASK-[1-9][0-9]*\b/g) ?? [])],
+      names = [...new Set([...text.matchAll(/[“「"]([^”」"\r\n]{1,160})[”」"]/g)].map((m) => m[1]))]
+    if (numbers.length + names.length > 40) throw new PartnerLocalFault("TOO_MANY_TARGETS")
+    for (const [field, values] of [
+      ["$.task.taskNumber", numbers],
+      ["$.title", names]
+    ] as const) {
+      if (!values.length) continue
+      const expression =
+        field === "$.task.taskNumber"
+          ? "json_extract(body,'$.task.taskNumber')"
+          : "json_extract(body,'$.title')"
+      const found = this.rows(
+        "SELECT " +
+          projection +
+          "," +
+          expression +
+          " AS match_value FROM service_conversation_tasks WHERE scope_key=? AND conversation_id=? AND " +
+          expression +
+          " IN (" +
+          values.map(() => "?").join(",") +
+          ") AND COALESCE(json_extract(body,'$.role'),'task')='task' AND server_task_id IS NOT NULL",
+        [scope, conversationId, ...values]
+      )
+      const grouped = new Map<string, Target[]>()
+      for (const row of found) {
+        const key = String(row.match_value)
+        grouped.set(key, [...(grouped.get(key) ?? []), decode(row)])
+      }
+      for (const records of grouped.values()) if (records.length === 1) explicit.push(records[0])
+    }
+    const recent = this.rows(
+      "SELECT " +
+        projection +
+        " FROM service_conversation_tasks WHERE scope_key=? AND conversation_id=? AND COALESCE(json_extract(body,'$.role'),'task')='task' AND server_task_id IS NOT NULL ORDER BY seq DESC LIMIT 40",
+      [scope, conversationId]
+    ).map(decode)
+    return [...new Map([...explicit, ...recent].map((t) => [t.ref, t])).values()].slice(0, 40)
+  }
+  chatTaskPage(scope: string, conversationId: string, before: number, query: string) {
+    return this.rows(
+      "SELECT seq,body FROM service_conversation_tasks WHERE scope_key=? AND conversation_id=? AND seq<? AND COALESCE(json_extract(body,'$.role'),'task')<>'main' AND (?='' OR instr(lower(json_extract(body,'$.title')),lower(?))>0) ORDER BY seq DESC LIMIT 41",
+      [scope, conversationId, before || Number.MAX_SAFE_INTEGER, query, query]
+    ).map((row) => ({
+      seq: Number(row.seq),
+      task: JSON.parse(String(row.body)) as ServiceTaskRecord
+    }))
+  }
+  hasPendingMain(scope: string): boolean {
+    return !!this.rows(
+      "SELECT seq FROM service_conversation_requests WHERE scope_key=? AND pending=1 AND json_extract(body,'$.profile')='expert_main_v1' LIMIT 1",
+      [scope]
+    )[0]
+  }
   accept(
     scope: ServiceScope,
     conversationId: string,
@@ -189,10 +426,13 @@ export class ServiceConversationStore {
     requestId: string,
     text: string,
     model: ServiceModelBinding | null = null,
-    revisionTaskVersion?: number
+    revisionTaskVersion?: number,
+    profile?: import("../../../shared/bot/expert-conversation").ExpertConversationProfile
   ): ServiceRequestRecord {
     const key = serviceScopeKey(scope),
-      fingerprint = hash([conversationId, taskRef, text])
+      fingerprint = hash(
+        profile ? [conversationId, taskRef, text, profile] : [conversationId, taskRef, text]
+      )
     return this.transaction(() => {
       const old = this.rows(
         "SELECT * FROM service_conversation_requests WHERE scope_key=? AND request_id=?",
@@ -213,7 +453,8 @@ export class ServiceConversationStore {
           ref,
           conversationId,
           title: text.slice(0, 80),
-          task: null
+          task: null,
+          ...(profile ? { role: "task" as const } : {})
         }
         this.db.run(
           "INSERT INTO service_conversation_tasks(scope_key,conversation_id,ref,body) VALUES(?,?,?,?)",
@@ -241,7 +482,8 @@ export class ServiceConversationStore {
         runVersion: null,
         cancelRequested: false,
         model,
-        autoDelivery: true,
+        autoDelivery: !profile,
+        ...(profile ? { profile } : {}),
         result: null
       }
       this.db.run(
@@ -304,7 +546,12 @@ export class ServiceConversationStore {
         [
           value.revision,
           value.phase === "terminal" &&
-          !(value.autoDelivery && value.status === "succeeded" && !value.publicationScheduled)
+          !(value.autoDelivery && value.status === "succeeded" && !value.publicationScheduled) &&
+          !(
+            value.profile === "expert_main_v1" &&
+            value.status === "succeeded" &&
+            !value.coordinationDone
+          )
             ? 0
             : 1,
           JSON.stringify(value),
@@ -344,7 +591,7 @@ export class ServiceConversationStore {
   }
   taskPage(scopeKey: string, conversationId: string, after: number) {
     return this.rows(
-      "SELECT seq,body FROM service_conversation_tasks WHERE scope_key=? AND conversation_id=? AND seq<? ORDER BY seq DESC LIMIT ?",
+      "SELECT seq,body FROM service_conversation_tasks WHERE scope_key=? AND conversation_id=? AND seq<? AND COALESCE(json_extract(body,'$.role'),'task')<>'main' ORDER BY seq DESC LIMIT ?",
       [scopeKey, conversationId, after || Number.MAX_SAFE_INTEGER, PAGE + 1]
     ).map((row) => ({
       seq: Number(row.seq),
@@ -403,6 +650,8 @@ export class ServiceConversationStore {
           "nodeId",
           "ownerPrincipalId",
           "workspaceRef",
+          "executionProfile",
+          "contextDigest",
           "groupId",
           "botId",
           "botVersionId",

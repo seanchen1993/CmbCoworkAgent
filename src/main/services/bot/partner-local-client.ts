@@ -49,6 +49,11 @@ import type {
   ExpertMemoryReceipt,
   ExpertMemoryUpdate
 } from "../../../shared/bot/expert-memory"
+import { parseExpertInput, parseExpertReceipt } from "./expert-conversation-validation"
+import type {
+  ExpertConversationInput,
+  ExpertTaskReceipt
+} from "../../../shared/bot/expert-conversation"
 import {
   parseExpertMemoryList,
   parseExpertMemoryReceipt,
@@ -112,7 +117,12 @@ export function parsePartnerDescriptor(value: unknown): PartnerConnectionDescrip
 const ajv = new Ajv({ strict: true, allErrors: false })
 addFormats(ajv)
 ajv.addFormat("binary", { type: "string", validate: () => true })
-for (const keyword of ["x-state-transitions", "x-reconciliation", "x-mode-capabilities"])
+for (const keyword of [
+  "x-state-transitions",
+  "x-reconciliation",
+  "x-mode-capabilities",
+  "x-internal-lifecycles"
+])
   ajv.addKeyword({ keyword, valid: true })
 ajv.addSchema(states)
 ajv.addSchema(schemas)
@@ -337,13 +347,19 @@ export class PartnerLocalClient {
         "task",
         "messages",
         "memorySnapshot",
-        ...(Object.hasOwn(v.input as object, "deliveryInput") ? ["deliveryInput"] : [])
+        ...(Object.hasOwn(v.input as object, "deliveryInput") ? ["deliveryInput"] : []),
+        ...(Object.hasOwn(v.input as object, "conversationInput") ? ["conversationInput"] : [])
       ])
     if (!Array.isArray(raw.messages) || raw.messages.length > 50)
       throw new PartnerLocalFault("INVALID_PAYLOAD")
     return {
       run: validatePartnerRun(v.run as PartnerRequirementRun),
       input: {
+        conversationInput: parseExpertInput(
+          raw.conversationInput,
+          (raw.task as Task).id,
+          run.taskVersion
+        ),
         bot: partnerSchema("Bot", raw.bot),
         botVersion: partnerSchema("BotVersion", raw.botVersion),
         group: partnerSchema("Group", raw.group),
@@ -615,18 +631,180 @@ export class PartnerLocalClient {
     botId: string,
     commandId: string,
     deadline: string
-  ): Promise<{ runId: string; status: string }> {
-    const v = partnerObject(
-      await this.control("business", "enqueue", {
-        commandId: partnerId(commandId),
-        taskId: task.id,
-        botId: partnerId(botId),
-        expectedTaskVersion: task.version,
-        deadline
-      }),
-      ["runId", "status", "taskVersion", "createdAt"]
+  ): Promise<{ runId: string; status: string; executionProfile?: string; contextDigest?: string }> {
+    const raw = await this.control("business", "enqueue", {
+      commandId: partnerId(commandId),
+      taskId: task.id,
+      botId: partnerId(botId),
+      expectedTaskVersion: task.version,
+      deadline
+    })
+    const v = partnerObject(raw, [
+      "runId",
+      "status",
+      "taskVersion",
+      "createdAt",
+      ...(Object.hasOwn(raw as object, "executionProfile")
+        ? ["executionProfile", "contextDigest"]
+        : [])
+    ])
+    if (
+      v.taskVersion !== task.version ||
+      !["queued", "waiting_node"].includes(String(v.status)) ||
+      (v.executionProfile !== undefined &&
+        (!["expert_main_v1", "expert_task_v1"].includes(String(v.executionProfile)) ||
+          typeof v.contextDigest !== "string" ||
+          !/^sha256:[a-f0-9]{64}$/.test(v.contextDigest)))
     )
-    return { runId: partnerId(v.runId), status: String(v.status) }
+      throw new PartnerLocalFault("INVALID_PAYLOAD")
+    return {
+      runId: partnerId(v.runId),
+      status: String(v.status),
+      ...(v.executionProfile !== undefined
+        ? { executionProfile: String(v.executionProfile), contextDigest: String(v.contextDigest) }
+        : {})
+    }
+  }
+  async expertServiceIdentity(): Promise<string> {
+    const value = partnerObject(await this.control("business", "expertServiceIdentity"), [
+      "instanceId",
+      "spaceId",
+      "principalId"
+    ])
+    if (
+      value.spaceId !== this.descriptor.spaceId ||
+      value.principalId !== this.descriptor.businessPrincipalId
+    )
+      throw new PartnerLocalFault("FORBIDDEN")
+    return partnerId(value.instanceId)
+  }
+  private expertReceipt(raw: unknown, botId?: string): ExpertTaskReceipt {
+    const value = parseExpertReceipt(raw, this.descriptor.spaceId, (raw) =>
+      partnerSchema<Task>("Task", raw)
+    )
+    if (
+      value.principalId !== this.descriptor.businessPrincipalId ||
+      (botId !== undefined && value.botId !== botId)
+    )
+      throw new PartnerLocalFault("FORBIDDEN")
+    return value
+  }
+  async ensureExpertConversation(input: {
+    commandId: string
+    groupId: string
+    botId: string
+    role: "main" | "task"
+    taskId: string | null
+    title: string
+    goal: string
+  }): Promise<ExpertTaskReceipt> {
+    const value = this.expertReceipt(
+      await this.control("business", "ensureExpertConversation", input),
+      input.botId
+    )
+    if (
+      value.task.groupId !== input.groupId ||
+      value.role !== input.role ||
+      (input.taskId !== null && value.task.id !== input.taskId) ||
+      value.sourceRunId !== null ||
+      value.messageId !== null
+    )
+      throw new PartnerLocalFault("INVALID_PAYLOAD")
+    return value
+  }
+  async expertConversationSummaries(
+    groupId: string,
+    botId: string,
+    taskIds: string[]
+  ): Promise<
+    Array<{
+      taskId: string
+      taskVersion: number
+      status: "active" | "awaiting_business" | "completed"
+      role: "main" | "task"
+      busy: boolean
+    }>
+  > {
+    if (!taskIds.length || taskIds.length > 40 || new Set(taskIds).size !== taskIds.length)
+      throw new PartnerLocalFault("INVALID_PAYLOAD")
+    const value = partnerObject(
+      await this.control("business", "expertConversationSummaries", { groupId, botId, taskIds }),
+      ["items"]
+    )
+    if (!Array.isArray(value.items) || value.items.length !== taskIds.length)
+      throw new PartnerLocalFault("INVALID_PAYLOAD")
+    const seen = new Set<string>()
+    return value.items.map((raw) => {
+      const item = partnerObject(raw, ["taskId", "taskVersion", "status", "role", "busy"]),
+        id = partnerId(item.taskId)
+      if (
+        !taskIds.includes(id) ||
+        seen.has(id) ||
+        !Number.isSafeInteger(item.taskVersion) ||
+        Number(item.taskVersion) < 1 ||
+        !["active", "awaiting_business", "completed"].includes(String(item.status)) ||
+        !["main", "task"].includes(String(item.role)) ||
+        typeof item.busy !== "boolean"
+      )
+        throw new PartnerLocalFault("INVALID_PAYLOAD")
+      seen.add(id)
+      return item as unknown as {
+        taskId: string
+        taskVersion: number
+        status: "active" | "awaiting_business" | "completed"
+        role: "main" | "task"
+        busy: boolean
+      }
+    })
+  }
+  async freezeExpertInput(input: {
+    commandId: string
+    taskId: string
+    expectedTaskVersion: number
+    sourceRequestId: string
+    allowedTaskIds: string[]
+    expectedGroupVersion: number
+    expectedBotVersionId: string
+  }): Promise<ExpertConversationInput> {
+    const value = parseExpertInput(
+      await this.control("business", "freezeExpertInput", input),
+      input.taskId,
+      input.expectedTaskVersion
+    )
+    if (
+      !value ||
+      value.sourceRequestId !== input.sourceRequestId ||
+      value.targets.length !== input.allowedTaskIds.length ||
+      value.targets.some((t) => !input.allowedTaskIds.includes(t.taskId))
+    )
+      throw new PartnerLocalFault("INVALID_PAYLOAD")
+    return value
+  }
+  async coordinateExpertTask(commandId: string, sourceRunId: string): Promise<ExpertTaskReceipt> {
+    const value = this.expertReceipt(
+      await this.control("business", "coordinateExpertTask", { commandId, sourceRunId })
+    )
+    if (value.sourceRunId !== sourceRunId || value.role !== "task")
+      throw new PartnerLocalFault("INVALID_PAYLOAD")
+    return value
+  }
+  async expertTaskLifecycle(input: {
+    commandId: string
+    taskId: string
+    expectedVersion: number
+    action: "complete" | "reopen"
+  }): Promise<ExpertTaskReceipt> {
+    const value = this.expertReceipt(await this.control("business", "expertTaskLifecycle", input))
+    if (
+      value.task.id !== input.taskId ||
+      value.task.version !== input.expectedVersion + 1 ||
+      value.task.status !== (input.action === "complete" ? "completed" : "active") ||
+      value.role !== "task" ||
+      value.sourceRunId !== null ||
+      value.messageId !== null
+    )
+      throw new PartnerLocalFault("INVALID_PAYLOAD")
+    return value
   }
   async createBot(body: CreateBotRequest): Promise<BotResult> {
     return partnerSchema(

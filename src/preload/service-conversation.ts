@@ -2,6 +2,11 @@ import { ipcRenderer } from "electron"
 import type { ServiceConversationApi } from "../shared/bot/service-conversation"
 /** Named calls only; the main process resolves all identity and execution scope. */
 export const serviceConversationApi: ServiceConversationApi = {
+  openChats: () => ipcRenderer.invoke("serviceConversation:openChats"),
+  chatTasks: (input) => ipcRenderer.invoke("serviceConversation:chatTasks", input),
+  chat: (input) => ipcRenderer.invoke("serviceConversation:chat", input),
+  taskLifecycle: (input) => ipcRenderer.invoke("serviceConversation:taskLifecycle", input),
+  retryChat: (input) => ipcRenderer.invoke("serviceConversation:retryChat", input),
   subscribeInvalidation(listener) {
     const handler = (_event: unknown, busy: unknown) => {
       if (typeof busy === "boolean") listener(busy)

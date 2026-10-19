@@ -13,7 +13,7 @@ const check = value => { if (!value) throw Error("PARTNER_DEV") }, hash = bytes 
 const cfgPath = entry => join(entry.dir, "partner.json"), processPath = entry => join(entry.dir, "process.json"), connectionPath = entry => join(entry.dir, "connection.json")
 const token = () => randomBytes(32).toString("hex")
 const stoppedProcesses = new WeakMap()
-export function partnerMigrationCountAccepted(count) { return Number.isInteger(count) && [0, 1, 2, 3, 8].includes(count) }
+export function partnerMigrationCountAccepted(count) { return Number.isInteger(count) && [0, 1, 2, 3, 4, 9].includes(count) }
 export function partnerBootstrapConfig() {
   const scope = { spaceId: "A", member: true, canCreateBot: true, canCreateGroup: true, knowledgeRefs: [], repositoryRefs: [], skillAllowlist: [], capabilityCeiling: ["requirements.analyze"] }
   return { identity: { principals: ["owner", "business"].map(principalId => ({ principalId, active: true, spaces: [{ ...scope }] })), bearers: ["owner", "business"].map(principalId => ({ principalId, token: token() })) },

@@ -22,6 +22,9 @@ export interface ServiceConversationOverview {
   models: Array<{ ref: string; name: string }>
 }
 export interface ServiceTaskView {
+  role?: "main" | "task"
+  taskStatus?: "active" | "awaiting_business" | "completed"
+  busy?: boolean
   taskRef: string
   taskNumber: string | null
   title: string
@@ -29,6 +32,12 @@ export interface ServiceTaskView {
   delivery?: TextDeliverySummary | null
 }
 export interface ServiceRequestView {
+  origin?: { mainRequestId: string }
+  coordination?: {
+    taskRef: string | null
+    title: string | null
+    state: "waiting" | "delivered" | "blocked"
+  }
   requestId: string
   taskRef: string
   text: string
@@ -47,10 +56,39 @@ export interface ServiceRequestView {
   createdAt: string
 }
 export interface ServicePage<T> {
+  pending?: boolean
+  task?: ServiceTaskView
+  selectedTask?: ServiceTaskView
   items: T[]
   nextCursor: string | null
 }
 export interface ServiceConversationApi {
+  openChats(): Promise<ServiceConversationOverview & { mainTaskRef: string | null }>
+  chatTasks(input: {
+    conversationId: string
+    cursor: string | null
+    query: string
+    selectedRef?: string | null
+  }): Promise<ServicePage<ServiceTaskView>>
+  chat(input: {
+    conversationId: string
+    taskRef: string | null
+    role: "main" | "task"
+    requestId: string
+    text: string
+  }): Promise<ServiceRequestView>
+  taskLifecycle(input: {
+    conversationId: string
+    taskRef: string
+    operationId: string
+    action: "complete" | "reopen"
+  }): Promise<void>
+  retryChat(input: {
+    conversationId: string
+    taskRef: string
+    requestId: string
+    operationId: string
+  }): Promise<void>
   subscribeInvalidation?(listener: (busy: boolean) => void): () => void
   open(): Promise<ServiceConversationOverview>
   selectModel(input: {

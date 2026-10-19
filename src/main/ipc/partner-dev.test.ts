@@ -79,8 +79,8 @@ beforeEach(() => {
 })
 const call = (name: string, ...args: unknown[]) =>
   handlers.get("partnerDev:" + name)!(event, ...args)
-it("registration alone does not read config, connect, or execute; 17 expert and 7 fixed service conversation handlers", async () => {
-  expect(handlers.size).toBe(29)
+it("registration alone does not read config, connect, or execute; 17 expert and 17 fixed service conversation handlers", async () => {
+  expect(handlers.size).toBe(34)
   expect(mock.getStatus).not.toHaveBeenCalled()
   expect(await call("getStatus")).toEqual({ configured: false })
   expect(mock.getStatus).toHaveBeenCalledTimes(1)
@@ -312,4 +312,45 @@ it("text delivery inputs reject authority/content injection, invalid decisions a
     { decision: "publish" }
   ])
     await expect(handler(event, { ...base, ...patch })).rejects.toThrow("INVALID_PAYLOAD")
+})
+
+it("expert chat IPC accepts only text, opaque local selection and fixed lifecycle intent", async () => {
+  const input = {
+    conversationId: "conversation",
+    taskRef: null,
+    role: "main",
+    requestId: "request",
+    text: "请讨论"
+  }
+  for (const extra of [
+    { intent: { kind: "create_task" } },
+    { actor: "owner" },
+    { sourceRunId: "run" },
+    { modelRef: "custom:private" },
+    { systemPrompt: "bypass" },
+    { credentials: "secret" }
+  ])
+    await expect(
+      handlers.get("serviceConversation:chat")!(event, { ...input, ...extra })
+    ).rejects.toThrow("INVALID_PAYLOAD")
+  for (const action of ["approve", "cancel", "enqueue"])
+    await expect(
+      handlers.get("serviceConversation:taskLifecycle")!(event, {
+        conversationId: "conversation",
+        taskRef: "task",
+        operationId: "operation",
+        action
+      })
+    ).rejects.toThrow("INVALID_PAYLOAD")
+  await expect(
+    handlers.get("serviceConversation:chat")!(event, { ...input, taskRef: "other" })
+  ).rejects.toThrow("INVALID_PAYLOAD")
+  const subframe = {
+    ...event,
+    senderFrame: { parent: event.senderFrame, url: "http://localhost:5173/" }
+  } as unknown as IpcMainInvokeEvent
+  for (const operation of ["openChats", "chatTasks", "chat", "taskLifecycle", "retryChat"])
+    await expect(
+      handlers.get("serviceConversation:" + operation)!(subframe, input)
+    ).rejects.toThrow("FORBIDDEN")
 })

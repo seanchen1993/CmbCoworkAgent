@@ -1,4 +1,10 @@
 import { parseDeliveryInput } from "./text-delivery-validation"
+import {
+  parseExpertInput,
+  parseCoordination,
+  EXPERT_MAIN_TEXT_PROMPT,
+  EXPERT_TASK_TEXT_PROMPT
+} from "./expert-conversation-validation"
 import { createHash } from "node:crypto"
 import {
   startAgentRun,
@@ -39,6 +45,7 @@ export interface PartnerRequirementExecutorDependencies {
   delivery: AgentRunDelivery
   startRun?: typeof startAgentRun
   /** Trusted local test clock cadence only, never a remote request parameter. */
+  onProtocolFailure?: (run: PartnerRequirementRun) => void
   refusalCode?: "MODEL_CHANGED" | "MODEL_UNAVAILABLE"
   cancelBeforeStart?: (run: PartnerRequirementRun) => boolean
   renewalIntervalMs?: number
@@ -97,10 +104,28 @@ function prepared(run: PartnerRequirementRun, raw: PartnerRequirementInput) {
   )
   if ((botVersion.config.memoryPolicy === "disabled") !== (snapshot === null))
     throw new Error("PARTNER_EXECUTION_INPUT_CHANGED")
+  const conversation = parseExpertInput(input.conversationInput, run.taskId, run.taskVersion)
+  if (
+    (run.executionProfile ?? null) !== (conversation?.profile ?? null) ||
+    (run.contextDigest ?? null) !== (conversation?.digest ?? null)
+  )
+    throw new Error("PARTNER_EXECUTION_INPUT_CHANGED")
   const prompt = assemblePartnerPrompt({
     ...input,
-    baseSystemPrompt: "你是DevClaw编程伙伴。只使用本次明确提供的材料，不执行工具或扩大权限。",
-    modeSystemPrompt: REQUIREMENT_INPUT_ONLY_PROMPT,
+    baseSystemPrompt: conversation
+      ? "你是当前用户配置的领域专家，只使用明确提供的会话材料，不执行工具或扩大权限。"
+      : "你是DevClaw编程伙伴。只使用本次明确提供的材料，不执行工具或扩大权限。",
+    ...(conversation
+      ? {
+          conversationPurpose:
+            conversation.profile === "expert_main_v1" ? ("main" as const) : ("task" as const)
+        }
+      : {}),
+    modeSystemPrompt: conversation
+      ? conversation.profile === "expert_main_v1"
+        ? EXPERT_MAIN_TEXT_PROMPT
+        : EXPERT_TASK_TEXT_PROMPT
+      : REQUIREMENT_INPUT_ONLY_PROMPT,
     mode: { id: "requirement", version: 1 },
     delivery: "app",
     memories:
@@ -132,27 +157,34 @@ function prepared(run: PartnerRequirementRun, raw: PartnerRequirementInput) {
     )
   )
     throw new Error("PARTNER_EXECUTION_INPUT_CHANGED")
-  const message = JSON.stringify({
-    ...(deliveryInput
-      ? {
-          revision: {
-            ...deliveryInput,
-            instruction:
-              "基于明确给出的上一版全文和修改意见，输出完整的新版本草稿。保留符合原要求的内容，应用本次意见。"
-          }
-        }
-      : {}),
-    taskNumber: task.taskNumber,
-    title: task.title,
-    goal: task.goal,
-    clarifications: input.messages.map(({ message, taskVersion }) => ({
-      authorPrincipalId: message.authorPrincipalId,
-      text: message.text,
-      taskVersion
-    }))
-  })
+  const message = conversation
+    ? JSON.stringify(conversation)
+    : JSON.stringify({
+        ...(deliveryInput
+          ? {
+              revision: {
+                ...deliveryInput,
+                instruction:
+                  "基于明确给出的上一版全文和修改意见，输出完整的新版本草稿。保留符合原要求的内容，应用本次意见。"
+              }
+            }
+          : {}),
+        taskNumber: task.taskNumber,
+        title: task.title,
+        goal: task.goal,
+        clarifications: input.messages.map(({ message, taskVersion }) => ({
+          authorPrincipalId: message.authorPrincipalId,
+          text: message.text,
+          taskVersion
+        }))
+      })
   if (message.length > 60_000) throw new Error("PARTNER_EXECUTION_INPUT_TOO_LARGE")
-  return { systemPrompt: prompt.systemPrompt, message, memoryRevision: snapshot?.revision ?? null }
+  return {
+    systemPrompt: prompt.systemPrompt,
+    message,
+    memoryRevision: snapshot?.revision ?? null,
+    ...(conversation ? { conversation } : {})
+  }
 }
 
 /** Manually supplied authenticated control seam. Not polling, IPC registration
@@ -359,6 +391,14 @@ export class PartnerRequirementExecutor {
             },
             onFinalAssistant: (result) => {
               if (finalText !== undefined) throw Error("PARTNER_DUPLICATE_FINAL")
+              if (prompt.conversation?.profile === "expert_main_v1") {
+                try {
+                  parseCoordination(result.finalText, prompt.conversation)
+                } catch (error) {
+                  this.deps.onProtocolFailure?.(run)
+                  throw error
+                }
+              }
               finalText = result.finalText
             },
             onRunTerminated: (value) => {

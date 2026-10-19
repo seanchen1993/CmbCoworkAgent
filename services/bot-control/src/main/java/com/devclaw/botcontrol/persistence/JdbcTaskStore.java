@@ -60,21 +60,35 @@ public final class JdbcTaskStore {
             if (!r.next()) throw JdbcApplicationStore.corrupt(); String task = r.getString(1); if (task == null || r.next()) throw JdbcApplicationStore.corrupt(); return task;
         }
     }
+    private Task storedTask(ResultSet r,String id) throws SQLException {
+        try {
+            Task value=BOUNDARY.readResponse("createTask",201,r.getBytes("body_bytes"),TaskResult.class).task;
+            if(!space.equals(value.spaceId)||!id.equals(value.id)||!r.getString("group_id").equals(value.groupId)||r.getLong("version")!=value.version||!r.getString("task_number").equals(value.taskNumber))throw JdbcApplicationStore.corrupt();
+            if(!Arrays.asList(TaskStatus.ACTIVE,TaskStatus.AWAITING_BUSINESS,TaskStatus.COMPLETED).contains(value.status)||!value.inputArtifactVersions.isEmpty()||value.stages.size()!=StageKind.values().length||!value.currentStageId.equals(value.stages.get(0).id))throw JdbcApplicationStore.corrupt();
+            Set<String> stageIds=new HashSet<String>();
+            for(int i=0;i<value.stages.size();i++){
+                Stage stage=value.stages.get(i);
+                StageStatus expected=i==0?(value.status==TaskStatus.ACTIVE?StageStatus.ACTIVE:value.status==TaskStatus.AWAITING_BUSINESS?StageStatus.WAITING_CONFIRMATION:StageStatus.COMPLETED):(value.status==TaskStatus.COMPLETED?StageStatus.CANCELLED:StageStatus.PENDING);
+                if(!stageIds.add(stage.id)||stage.kind!=StageKind.values()[i]||stage.status!=expected||!stage.inputArtifactVersions.isEmpty()||!stage.outputArtifactVersions.isEmpty())throw JdbcApplicationStore.corrupt();
+            }return value;
+        }catch(ContractBoundary.Failure failure){throw JdbcApplicationStore.corrupt();}
+    }
     public Task task(String id) throws SQLException {
-        try (PreparedStatement p = prepare("SELECT group_id,version,task_number,body_bytes FROM tasks WHERE space_id=? AND id=? FOR UPDATE", space, id); ResultSet r = p.executeQuery()) {
-            if (!r.next()) return null;
-            try {
-                Task value = BOUNDARY.readResponse("createTask", 201, r.getBytes(4), TaskResult.class).task;
-                if (!space.equals(value.spaceId) || !id.equals(value.id) || !r.getString(1).equals(value.groupId) || r.getLong(2) != value.version || !r.getString(3).equals(value.taskNumber) || r.next()) throw JdbcApplicationStore.corrupt();
-                if (!Arrays.asList(TaskStatus.ACTIVE,TaskStatus.AWAITING_BUSINESS,TaskStatus.COMPLETED).contains(value.status) || !value.inputArtifactVersions.isEmpty() || value.stages.size() != StageKind.values().length || !value.currentStageId.equals(value.stages.get(0).id)) throw JdbcApplicationStore.corrupt();
-                Set<String> stageIds = new HashSet<String>();
-                for (int i = 0; i < value.stages.size(); i++) {
-                    Stage stage = value.stages.get(i);
-                    if (!stageIds.add(stage.id) || stage.kind != StageKind.values()[i] || stage.status != (i == 0 ? (value.status==TaskStatus.ACTIVE?StageStatus.ACTIVE:value.status==TaskStatus.AWAITING_BUSINESS?StageStatus.WAITING_CONFIRMATION:StageStatus.COMPLETED) : (value.status==TaskStatus.COMPLETED?StageStatus.CANCELLED:StageStatus.PENDING)) || !stage.inputArtifactVersions.isEmpty() || !stage.outputArtifactVersions.isEmpty()) throw JdbcApplicationStore.corrupt();
-                }
-                return value;
-            } catch (ContractBoundary.Failure failure) { throw JdbcApplicationStore.corrupt(); }
+        try(PreparedStatement p=prepare("SELECT * FROM tasks WHERE space_id=? AND id=? FOR UPDATE",space,id);ResultSet r=p.executeQuery()){
+            if(!r.next())return null;Task value=storedTask(r,id);if(r.next())throw JdbcApplicationStore.corrupt();return value;
         }
+    }
+    public static final class Summary {
+        public final String id,groupId,title,status,taskNumber;public final long version;
+        Summary(ResultSet r)throws SQLException {id=r.getString("id");groupId=r.getString("group_id");title=r.getString("title_summary");status=r.getString("status_summary");taskNumber=r.getString("task_number");version=r.getLong("version");if(!"STRING".equals(r.getString("title_type"))||!"STRING".equals(r.getString("status_type"))||title==null||title.trim().isEmpty()||title.codePointCount(0,title.length())>160||!id.equals(r.getString("body_id"))||!groupId.equals(r.getString("body_group"))||!r.getString("space_id").equals(r.getString("body_space"))||!Long.toString(version).equals(r.getString("body_version"))||!taskNumber.equals(r.getString("body_number"))||version<1||version>MAX||!Arrays.asList("active","awaiting_business","completed").contains(status))throw JdbcApplicationStore.corrupt();}
+    }
+    /** Metadata-only, bounded and sorted. Never loads task goal/body for a list. */
+    public Map<String,Summary> summaries(String group,List<String> ids)throws SQLException {
+        Map<String,Summary> values=new LinkedHashMap<String,Summary>();if(ids.isEmpty())return values;if(ids.size()>40||new HashSet<String>(ids).size()!=ids.size())throw new ApplicationFault(ErrorCode.INVALID_PAYLOAD);
+        List<String> sorted=new ArrayList<String>(ids);Collections.sort(sorted);List<Object> args=new ArrayList<Object>();args.add(space);args.add(group);args.addAll(sorted);
+        String marks=String.join(",",Collections.nCopies(sorted.size(),"?"));
+        try(PreparedStatement p=prepare("SELECT id,space_id,group_id,version,task_number,JSON_UNQUOTE(JSON_EXTRACT(CONVERT(body_bytes USING utf8mb4),'$.task.id')) AS body_id,JSON_UNQUOTE(JSON_EXTRACT(CONVERT(body_bytes USING utf8mb4),'$.task.spaceId')) AS body_space,JSON_UNQUOTE(JSON_EXTRACT(CONVERT(body_bytes USING utf8mb4),'$.task.groupId')) AS body_group,JSON_UNQUOTE(JSON_EXTRACT(CONVERT(body_bytes USING utf8mb4),'$.task.version')) AS body_version,JSON_UNQUOTE(JSON_EXTRACT(CONVERT(body_bytes USING utf8mb4),'$.task.taskNumber')) AS body_number,JSON_UNQUOTE(JSON_EXTRACT(CONVERT(body_bytes USING utf8mb4),'$.task.title')) AS title_summary,JSON_UNQUOTE(JSON_EXTRACT(CONVERT(body_bytes USING utf8mb4),'$.task.status')) AS status_summary,JSON_TYPE(JSON_EXTRACT(CONVERT(body_bytes USING utf8mb4),'$.task.title')) AS title_type,JSON_TYPE(JSON_EXTRACT(CONVERT(body_bytes USING utf8mb4),'$.task.status')) AS status_type FROM tasks WHERE space_id=? AND group_id=? AND id IN ("+marks+") ORDER BY id FOR UPDATE",args.toArray());ResultSet r=p.executeQuery()){while(r.next()){Summary value=new Summary(r);if(!sorted.contains(value.id)||values.put(value.id,value)!=null)throw JdbcApplicationStore.corrupt();}}
+        if(values.size()!=ids.size())throw new ApplicationFault(ErrorCode.NOT_FOUND);return values;
     }
     private static byte[] taskBytes(Task task) { TaskResult result = new TaskResult(); result.task = task; return BOUNDARY.writeResponse("createTask", 201, result); }
     public void create(Task task) throws SQLException {

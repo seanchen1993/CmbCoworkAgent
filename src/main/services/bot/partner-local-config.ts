@@ -71,6 +71,7 @@ export interface PartnerPendingAction {
   plan?: PartnerMemoryEnablePlan
 }
 export interface PartnerLocalConfig {
+  serviceInstanceId?: string
   descriptor: PartnerConnectionDescriptor
   workspacePath: string | null
   groupId: string | null
@@ -123,6 +124,7 @@ export async function readPartnerPrivateJson(path: string, maximum = 32768): Pro
   }
 }
 export function parsePartnerLocalConfig(raw: unknown): PartnerLocalConfig {
+  const instance = !!raw && typeof raw === "object" && Object.hasOwn(raw, "serviceInstanceId")
   const v = partnerObject(raw, [
     "descriptor",
     "workspacePath",
@@ -131,8 +133,10 @@ export function parsePartnerLocalConfig(raw: unknown): PartnerLocalConfig {
     "botVersionId",
     "pending",
     "lastRunId",
-    "lastTaskNumber"
+    "lastTaskNumber",
+    ...(instance ? ["serviceInstanceId"] : [])
   ])
+  if (instance) partnerId(v.serviceInstanceId)
   if (
     v.workspacePath !== null &&
     (typeof v.workspacePath !== "string" ||
