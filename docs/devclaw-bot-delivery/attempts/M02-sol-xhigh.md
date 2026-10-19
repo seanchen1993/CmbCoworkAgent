@@ -1,6 +1,8 @@
 # M02 / sol-xhigh 实施记录
 
-**当前最终状态：review_pending，候选冻结，等待root独立审查与集成。** 最终79/79核心、32/32 IPC+Bot、530/530本地Bot、desktop/IM26入口、契约24、Java69/1884parity、实际服务UI/伙伴UI、main/Web类型与m02-isolated完整构建均通过；日志/命令见后文“最终候选”。真实HTTP最终命令7809已确认退出0，测试project `devclaw-bot-test-748763931d357b2f`精确removed，相关测试进程为空；root持有原B00 MySQL最终原状恢复责任。截图 `/tmp/m02-service-conversation.png` 已用构建theme/Tailwind重拍，结果时间本地化。准确候选SHA以包含本记录的Git提交及交付消息为准。
+**当前状态：迟到enqueue回执小修已通过，review_pending，重新冻结候选。** 原候选`6bfabefc`已通过root核心/IPC/SQLite/UI/真实HTTP。最终源码复核发现迟到回执会覆盖poll/claim先建立的unknown或已inspect状态；用setEarly六场景修复前复现1过/5失败，现仅允许仍处于enqueue阶段的请求被回执推进，保留已建立的运行/终态、原因、版本和结果。最终核心85/85、main/Web类型均0；详细日志见末尾“小修”。范围仅应用服务、针对性测试与本记录，不再跑DB/全Bot，不操作root持有的恢复环境。准确小修SHA见包含本记录的Git提交及交付消息。
+
+**前轮候选状态（6bfabefc，历史证据）：review_pending。** 最终79/79核心、32/32 IPC+Bot、530/530本地Bot、desktop/IM26入口、契约24、Java69/1884parity、实际服务UI/伙伴UI、main/Web类型与m02-isolated完整构建均通过；日志/命令见后文“最终候选”。真实HTTP最终命令7809已确认退出0，测试project `devclaw-bot-test-748763931d357b2f`精确removed，相关测试进程为空；root持有原B00 MySQL最终原状恢复责任。截图 `/tmp/m02-service-conversation.png` 已用构建theme/Tailwind重拍，结果时间本地化。准确候选SHA以包含本记录的Git提交及交付消息为准。
 
 下方最初进度和“HTTP执行中”等段落是带顺序的历史检查点，不能覆盖上述最终状态。
 
@@ -93,3 +95,19 @@ root 早审指出 send replay catch(FORBIDDEN) 范围过大，已拆为显式 nu
 本片仅当前注册单专家、本机journal历史、文本分析；没有专家目录/换机同步、正式成果文件版本/确认审批、群收束或自动知识采纳。真实配置模型能力已接线，验证全部fake，付费模型调用0；不声称已做真实provider推理实测。
 
 本片没有ES查询新增/修改。journal按scope/conversation/task复合索引、稳定向前游标每页40（多取1判定下一页）；pending恢复批8、单泵串行；结果inspect同时最多2，HTTP client总在途上限8，单node worker/单graph。终态停UI轮询，自动更新只查询可见非终态request，手动刷新保持已展开历史范围；不通过丢历史/重置命令/新deadline换速度。以上为结构与fixture验证，不是生产耗时承诺。
+
+
+## 小修：迟到enqueue回执不能倒退已建立的执行状态
+
+root在原候选独立核心79/IPC17/105条SQLite/实际UI/实际Java HTTP均通过、资源已精确回收后指出具体异步竞态。实施先在未修产品代码上用既有setEarly钩子覆盖claim/本地unknown以及inspect的waiting_node/running/succeeded/failed/cancelled先于enqueue回包，六场景只有原本受保护的running通过，其他五项失败：`/tmp/m02-late-enqueue-before.log`，命令退出1，属于预期缺陷复现。
+
+修复仅`service-conversation.ts`入队回执更新：保留同runId的严格核对，回执只能把当前仍在`enqueue`阶段的请求推进到`run`及初始排队状态。已经由claim/inspect建立的`run`或`terminal`不被迟到初始回执覆盖；原先的notice、runVersion、result同样保留。新增unknown回归还验证后续补充仍blocked，message0、enqueue1，不会因为回执倒退重新派发。
+
+实际验证（Node仍为前文固定Node22绝对路径）：
+
+- `node --import tsx --test --test-name-pattern='late enqueue receipt' tests/bot/service-conversation.spec.ts`：修复前6测1过5失败，上述复现日志。
+- `node --import tsx --test tests/bot/service-conversation.spec.ts tests/bot/service-conversation-runtime.spec.ts tests/bot/expert-controller.spec.ts tests/bot/partner-local-client.spec.ts tests/bot/partner-local-worker.spec.ts tests/bot/partner-dev-controller.spec.ts tests/bot/requirement-executor.spec.ts tests/bot/task-thread-store.spec.ts`：最终85/85、退出0，`/tmp/m02-late-enqueue-core-final.log`；前一轮85/85为`/tmp/m02-late-enqueue-core.log`。
+- `node node_modules/typescript/bin/tsc --noEmit -p tsconfig.node.json --composite false`与Web同参数：均退出0，`/tmp/m02-late-enqueue-main.log`、`/tmp/m02-late-enqueue-web.log`。
+- 两个产品/测试文件已Prettier，`git diff --check`通过。小修不改Java/公共契约/ES/UI，不重复DB/全Bot/全构建；环境恢复继续由root管理，无外部副作用。
+
+本小修仅3文件，原产品候选和原验收证据保留。完成提交后停写并等待root独立复验/集成。

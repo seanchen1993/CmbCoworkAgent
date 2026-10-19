@@ -590,3 +590,68 @@ test("message VERSION_CONFLICT is visible and later supplements cannot silently 
       await f.app.stop()
     }
   }))
+
+for (const state of [
+  "outcome_unknown",
+  "waiting_node",
+  "running",
+  "succeeded",
+  "failed",
+  "cancelled"
+] as const)
+  test(`late enqueue receipt preserves earlier ${state} projection`, () =>
+    withSqlite(async (db) => {
+      const f = setup(db)
+      try {
+        const conversationId = await initialize(f),
+          key = serviceScopeKey(f.scope),
+          requestId = "late-receipt"
+        const projections: ReturnType<typeof f.journal.request>[] = []
+        f.setEarly(async (runId) => {
+          const remote = f.runs.get(runId)!,
+            run = { ...remote.run, status: "starting" } as unknown as PartnerRequirementRun
+          f.journal.claim(key, run)
+          f.app.claimed(f.scope, run)
+          if (state === "outcome_unknown") {
+            remote.run.status = "running"
+            f.app.markUnknown(f.scope, run)
+          } else {
+            remote.run.status = state
+            remote.run.version = 3
+            if (state === "succeeded" || state === "failed")
+              remote.result = {
+                runId,
+                attemptId: run.attemptId,
+                outcome: state,
+                text: state === "succeeded" ? "已完成的分析" : "EXECUTION_FAILED",
+                settledAt: new Date().toISOString()
+              }
+            const record = f.journal.request(key, requestId)
+            await f.app.read({ conversationId, taskRef: record.taskRef, cursor: null })
+          }
+          projections.push(f.journal.request(key, requestId))
+        })
+        const first = await send(f, conversationId, requestId)
+        await f.app.drain()
+        assert.equal(projections.length, 1)
+        const { revision: _beforeRevision, ...before } = projections[0]
+        const { revision: _afterRevision, ...after } = f.journal.request(key, requestId)
+        assert.deepEqual(
+          after,
+          before,
+          "an enqueue acknowledgement cannot overwrite newer execution state, notice or result"
+        )
+        assert.equal(f.stats.creates, 1)
+        assert.equal(f.stats.enqueues, 1)
+        if (state === "outcome_unknown") {
+          f.setEarly(null)
+          await send(f, conversationId, "later-supplement", first.taskRef, "先核对上一轮")
+          await f.app.drain()
+          assert.equal(f.journal.request(key, "later-supplement").status, "blocked")
+          assert.equal(f.stats.messages, 0)
+          assert.equal(f.stats.enqueues, 1)
+        }
+      } finally {
+        await f.app.stop()
+      }
+    }))

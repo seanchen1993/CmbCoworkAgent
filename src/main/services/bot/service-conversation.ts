@@ -575,9 +575,12 @@ export class ServiceConversationService {
         if (v.runId && v.runId !== receipt.runId)
           throw new PartnerLocalFault("EXECUTION_BINDING_MISMATCH")
         v.runId = receipt.runId
-        v.phase = "run"
-        if (!["starting", "running"].includes(v.status))
+        // This receipt only acknowledges admission. Claim/inspection may have
+        // already advanced the request while the enqueue response was delayed.
+        if (v.phase === "enqueue") {
+          v.phase = "run"
           v.status = receipt.status as "queued" | "waiting_node"
+        }
       })
     }
   }
