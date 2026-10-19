@@ -7,8 +7,8 @@
 root在候选交叉审查中发现 `sendWork` 尚未与 create/lifecycle 一样核对直接用户指令。本次仅在 Host live lease 校验后、Store同步事务接纳前补 `hasDirectUserRequest`，通知/例行/协作回包不能自发转达新工作指令；不改变beta原collaboration，也不将未来模拟渠道仅凭origin=user提升为桌面来源。
 
 - 新增实际Tool→Host→Store测试：正常main直接用户转达成功；同requestKey/不同可信callId重放仍同一BotTask；改payload冲突；workflow通知、schedule、peer reply在Host和Store均拒绝，零新增转达BotTask。
-- `node node_modules/vitest/vitest.mjs run src/main/bots/work.test.ts src/main/bots/work-tools.test.ts src/main/bots/host.test.ts` → **3文件94/94 exit0**，`/tmp/m05-send-authority-tests.log`。
-- `node node_modules/typescript/bin/tsc --noEmit -p tsconfig.node.json --composite false` → **exit0**，`/tmp/m05-send-authority-node.log`。
+- `node node_modules/vitest/vitest.mjs run src/main/bots/work.test.ts src/main/bots/work-tools.test.ts src/main/bots/host.test.ts` → **3文件94/94 exit0**，最终 `/tmp/m05-send-authority-tests-final.log`（初轮同样94/94，`/tmp/m05-send-authority-tests.log`）。
+- `node node_modules/typescript/bin/tsc --noEmit -p tsconfig.node.json --composite false` → 首轮 **exit2**，`/tmp/m05-send-authority-node.log`：新增测试Bot origin漏depth、it.each泛型错误；第二轮仍漏depth（`/tmp/m05-send-authority-node-second.log`），产品无类型诊断。修正测试后最终 **exit0**，`/tmp/m05-send-authority-node-final.log`。a82e6711检查点曾提前记录Node exit0，已在本追加提交明确纠正，不能将该过早记录作为证据。
 - 下方371/231、完整构建/App/明暗截图为父候选 `3511dbe19c790e19b654432680e35f26f87e4485` 的完整证据。按root明确要求，本窄权限修复只补相关核心/工具/Node类型，不重复整个App或无关全套。界面/运行资源未改变，仍在本追加提交后停写。
 
 ## M05-02/03 候选范围与真实验证
