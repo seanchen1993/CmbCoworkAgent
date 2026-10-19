@@ -41,6 +41,7 @@ resources/lsp-vsix/*.vsix
 # Claude Code local session artifacts
 .cmbdevclaw/
 AGENTS.md
+REGRESSION_FIXES.md
 claude-code-source-code-main/
 EnsoAI-main/
 .github/

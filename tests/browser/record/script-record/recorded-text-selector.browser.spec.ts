@@ -22,6 +22,13 @@ async function main(): Promise<void> {
       </div>
       <span>编辑流水线配置</span>
       <button>保存</button>
+      <table><tbody><tr><td>首面进企</td></tr></tbody></table>
+      <div class="ant-radio-group">
+        <label class="ant-radio-button-wrapper">
+          <span><input name="leaveBankType" type="radio" value="LB_01_01"><span></span></span>
+          <span class="ant-radio-button-label">首面进企</span>
+        </label>
+      </div>
       <iframe srcdoc="<span>编辑</span>"></iframe>
     `)
     await page.evaluate(buildPlaywrightScriptRecorderInjectionScript())
@@ -66,6 +73,13 @@ async function main(): Promise<void> {
       await record('internal:role=button[name="保存"i]'),
       'internal:role=button[name="保存"i]'
     )
+    const radioLabel = await record('internal:text="首面进企"s >> nth=1')
+    assert.equal(
+      radioLabel,
+      'label:has(input[type="radio"][name="leaveBankType"][value="LB_01_01"])'
+    )
+    await page.locator(radioLabel).click()
+    assert.equal(await page.locator('input[value="LB_01_01"]').isChecked(), true)
     await page
       .locator(".ant-tooltip-open")
       .evaluate((node) => node.classList.remove("ant-tooltip-open"))
