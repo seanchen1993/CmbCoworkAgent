@@ -38,6 +38,11 @@ import {
   type DashboardToolUsageCoverage
 } from "../../shared/dashboard-tool-usage"
 import type { DashboardThreadTraceScope } from "../../shared/dashboard-thread-trace-scope"
+import {
+  summarizeThreadSkills,
+  type DashboardThreadSkill
+} from "../../shared/dashboard-thread-skills"
+import { fetchThreadSkillUsage } from "./dashboard-thread-skills"
 /**
  * Dashboard IPC Handlers
  *
@@ -545,6 +550,9 @@ interface DashboardAllUserItem {
 
 interface DashboardTraceDetail {
   traceId: string
+  /** App-only enrichment of an opened thread, never part of the ES document. */
+  threadSkillUsage?: DashboardThreadSkill[]
+  threadSkillUsageError?: string
   threadId: string
   startedAt: string
   endedAt?: string
@@ -6734,24 +6742,40 @@ async function fetchThreadTraces(
   )
   // 分批拉取：这条通路回带完整 `_raw`，一次 200 条就可能顶穿 6 MiB。分页与去重
   // 是纯逻辑，见 collectPagedThreadTraces（含 from/size 的取舍与边界说明）。
-  return collectPagedThreadTraces({
-    maxTraces: MAX_THREAD_TRACES,
-    chunkSize: THREAD_TRACES_FETCH_CHUNK,
-    fetchPage: async (from, size) => {
-      const body = {
-        track_total_hits: false,
-        from,
-        size,
-        sort: [{ startedAt: { order: "asc" } }],
-        query: { bool: { filter: filters } },
-        _source: { includes: dashboardTraceSourceIncludes() }
-      }
-      const raw = (await esQuery(getEsIndex("trace"), body)) as EsSearchResponse
-      return raw.hits?.hits ?? []
-    },
-    normalize: (hit) => normalizeTraceDetail(hit),
-    dedupeKey: (trace) => trace.traceId || `${trace.threadId}:${trace.startedAt}`
-  })
+  const [traces, usage] = await Promise.all([
+    collectPagedThreadTraces({
+      maxTraces: MAX_THREAD_TRACES,
+      chunkSize: THREAD_TRACES_FETCH_CHUNK,
+      fetchPage: async (from, size) => {
+        const body = {
+          track_total_hits: false,
+          from,
+          size,
+          sort: [{ startedAt: { order: "asc" } }],
+          query: { bool: { filter: filters } },
+          _source: { includes: dashboardTraceSourceIncludes() }
+        }
+        const raw = (await esQuery(getEsIndex("trace"), body)) as EsSearchResponse
+        return raw.hits?.hits ?? []
+      },
+      normalize: (hit) => normalizeTraceDetail(hit),
+      dedupeKey: (trace) => trace.traceId || `${trace.threadId}:${trace.startedAt}`
+    }),
+    fetchThreadSkillUsage(filters, (body) => esQuery(getEsIndex("trace"), body))
+      .then((skills) => ({ skills, error: undefined }))
+      .catch((error: unknown) => ({
+        skills: undefined,
+        error: error instanceof Error ? error.message : "会话技能汇总加载失败"
+      }))
+  ])
+  if (traces.length > 0) {
+    traces[0] = {
+      ...traces[0],
+      threadSkillUsage: usage.skills,
+      threadSkillUsageError: usage.error
+    }
+  }
+  return traces
 }
 
 async function fetchSkillCodeStats(skill: string, range: TimeRange): Promise<DashboardCodeStats> {
@@ -16520,8 +16544,11 @@ export function registerDashboardHandlers(_ipcMain: typeof ipcMain): void {
   _ipcMain.handle(
     "dashboard:threadTraces",
     async (_, threadId: string, options?: ThreadTracesOptions) => {
-      if (import.meta.env.DEV)
-        return { success: true, data: makeMockThreadTraces(threadId, options) }
+      if (import.meta.env.DEV) {
+        const traces = makeMockThreadTraces(threadId, options)
+        if (traces.length > 0) traces[0].threadSkillUsage = summarizeThreadSkills(traces)
+        return { success: true, data: traces }
+      }
       try {
         return { success: true, data: await fetchThreadTraces(threadId, options) }
       } catch (e) {

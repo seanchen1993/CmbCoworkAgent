@@ -34,7 +34,7 @@ vi.mock("../skill-eval/window", () => ({
 }))
 
 import { classifyHarnessStageBucket } from "../../../shared/harness-stage-bucket"
-import { setThreadActiveSkills } from "../skill-evolution/proposal-window"
+import { getThreadActiveSkills, setThreadActiveSkills } from "../skill-evolution/proposal-window"
 import {
   flushPendingTraceReports,
   flushTraceWriteQueue,
@@ -71,7 +71,7 @@ beforeEach(() => {
 afterEach(async () => {
   await flushPendingTraceReports(1_000)
   await flushTraceWriteQueue()
-  setTraceReporter({ async report() {} })
+  setTraceReporter({ report: async () => undefined })
   if (previousTracesDir === undefined) delete process.env.CMB_COWORK_TRACES_DIR
   else process.env.CMB_COWORK_TRACES_DIR = previousTracesDir
   if (previousStorageMode === undefined) delete process.env.CMB_COWORK_TRACE_STORAGE_MODE
@@ -79,7 +79,11 @@ afterEach(async () => {
   rmSync(tracesDir, { recursive: true, force: true })
 })
 
-async function runChild(options: { withTrace: boolean; readOwnSkill?: boolean }) {
+async function runChild(options: {
+  withTrace: boolean
+  readOwnSkill?: boolean
+  beforeFirstWrite?: () => void
+}) {
   const parent = options.withTrace
     ? new TraceCollector(parentThreadId, "delegate", "test", {
         includeSkillEval: false,
@@ -102,6 +106,7 @@ async function runChild(options: { withTrace: boolean; readOwnSkill?: boolean })
     createRuntime: async ({ threadId }) => ({
       stream: async () =>
         (async function* () {
+          options.beforeFirstWrite?.()
           // The first tool can write before the stream observes any Skill read.
           firstWriteContext = structuredClone(contexts.get(threadId))
           const messages: AIMessage[] = []
@@ -186,6 +191,18 @@ describe("Workflow child code attribution at startup", () => {
     expect(laterWriteContext?.usedSkills).toEqual(["own-skill-v2.0.0"])
     expect(laterWriteContext?.skillSource).toEqual([])
     expect(childTrace.usedSkills).toEqual(["own-skill-v2.0.0"])
+    expect(getThreadActiveSkills(parentThreadId)).toEqual([...parentSkills, "own-skill-v2.0.0"])
+    expect(traces.find((trace) => trace.threadId === parentThreadId)?.usedSkills).toEqual([])
+  })
+
+  it("keeps an empty startup snapshot when a parallel agent contributes a Skill later", async () => {
+    const { firstWriteContext, childTrace } = await runChild({
+      withTrace: true,
+      beforeFirstWrite: () => setThreadActiveSkills(parentThreadId, parentSkills, parentSources)
+    })
+    expect(firstWriteContext?.usedSkills).toEqual([])
+    expect(childTrace.usedSkills).toEqual([])
+    expect(getThreadActiveSkills(parentThreadId)).toEqual(parentSkills)
   })
 
   it("keeps genuinely Skill-less code in VibeCoding", async () => {

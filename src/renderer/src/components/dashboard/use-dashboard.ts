@@ -144,6 +144,8 @@ export interface DashboardTraceNode {
 }
 
 export interface DashboardTraceDetail {
+  threadSkillUsage?: import("../../../../shared/dashboard-thread-skills").DashboardThreadSkill[]
+  threadSkillUsageError?: string
   traceId: string
   threadId: string
   startedAt: string
