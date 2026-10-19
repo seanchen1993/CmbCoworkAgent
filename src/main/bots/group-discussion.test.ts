@@ -185,6 +185,74 @@ describe("bounded group discussion on the existing Bot queue", () => {
     expect(f.db.exec("SELECT * FROM bot_group_discussions")[0].values).toEqual([])
   })
 
+  it.each(["running", "waiting_user"] as const)(
+    "publishes one interruption result when recovering a %s group review without replaying it",
+    (state) => {
+      const f = fixture()
+      const root = f.send()[0]
+      f.finish(root, "Draft ready")
+      f.store.advanceGroupDiscussions()
+      const review = f.reviews()[0]
+      f.store.transition(review.id, "running")
+      if (state === "waiting_user") f.store.transition(review.id, state)
+      const reopened = new BotStore(f.db)
+      reopened.recover()
+      reopened.advanceGroupDiscussions()
+      const messages = reopened.groupMessages(f.group.id)
+      expect(reopened.getTask(review.id).state).toBe("interrupted")
+      expect(messages.at(-1)).toMatchObject({
+        id: `result-${review.id}`,
+        authorBotId: review.botId,
+        text: expect.stringContaining("应用已重启")
+      })
+      expect(reopened.activities().find((item) => item.id === f.group.id)).toMatchObject({
+        preview: expect.stringContaining("应用已重启"),
+        unread: true
+      })
+      reopened.recover()
+      reopened.advanceGroupDiscussions()
+      expect(reopened.groupMessages(f.group.id)).toEqual(messages)
+      expect(f.reviews()).toHaveLength(1)
+      expect(f.db.exec("SELECT * FROM bot_group_discussions")[0].values).toEqual([])
+    }
+  )
+
+  it("reports interrupted initial group work only to its room and preserves queued work", () => {
+    const f = fixture()
+    const root = f.send()[0]
+    f.store.transition(root.id, "running")
+    const other = f.store.saveGroup({ name: "Other room", memberIds: f.group.memberIds })
+    f.store.sendGroup({
+      groupId: other.id,
+      requestId: "other-request",
+      text: "Unrelated queued work",
+      targetBotIds: [f.members[1].id]
+    })
+    const queued = f.store
+      .recentTasks()
+      .find((task) => task.origin.kind === "group" && task.origin.groupId === other.id)!
+    const privateTask = f.store.enqueue({
+      botId: f.members[1].id,
+      requestId: "private",
+      message: "PRIVATE_NOT_ROOM_DATA"
+    })
+    f.store.transition(privateTask.id, "running")
+    const otherMessages = f.store.groupMessages(other.id)
+    f.store.recover()
+    f.store.recover()
+    expect(f.store.groupMessages(f.group.id).at(-1)).toMatchObject({
+      id: `result-${root.id}`,
+      text: expect.stringContaining("应用已重启")
+    })
+    expect(f.store.groupMessages(other.id)).toEqual(otherMessages)
+    expect(f.store.getTask(queued.id).state).toBe("queued")
+    expect(
+      f.store
+        .groupMessages(f.group.id)
+        .some((message) => message.text.includes("PRIVATE_NOT_ROOM_DATA"))
+    ).toBe(false)
+  })
+
   it("uses stable member IDs despite duplicate names, caps all selected/review calls at ten, and bounds rounds", () => {
     const f = fixture(8)
     f.send(

@@ -763,6 +763,7 @@ Bots 工作区（复用消息、文件、审批等组件）
 
 ### P05 — 收件箱与协作
 
+- [ ] 1019EF 同一对 Bot 参与两群的任务隔离。源码先核对原 Host 的 Bot 级串行租约、每群独立讨论游标和 group/member 线程、群工作目录；参考 Grok 的 room/member session 及 Hermes 的 persistent per-group session，不增加调度机制。用既有 MiniMax、DeepSeek 及仅含这两位的合成群：一群真实等待用户选择期间，另一模型在另一群读写并交付唯一标记的文件；交换角色复验。同 Bot 的其他群任务保持排队，未等待的 Bot 可继续；各群结果、文件、问题和私聊不串线，不代替 Windows、任意多群压力或全部群体验验收。用户原草稿、身份外观及原文件保持，完成后记录实际范围再划掉。
 
 - [x] ~~1017AU Mac新聊天附件在取消群创建后的衔接。1013AN已覆盖正常建群，本轮只补此前未实测的取消再建群路径，并验证现有DeepSeek／MiniMax两成员分别交付同题文件：在选定收件人前添加合成CSV和文字，取消群创建时不得创建群、导入文件或丢失草稿；重新选择并创建后只把附件导入该群，切换原群不串稿，实际发送只产生两个成员任务。继续使用现有BotNewChat／BotDraftFileTransfer／carryGroupDraft及原CMB附件解析与Runtime；沿用Grok先暂存、后按收件人提交的行为，不新增草稿或传输系统。独立核对附件副本、两份报告的计算／字段／交付入口、实际任务与工具回执；保留原群@草稿与既有数据，不把本项计为拖拽、真实输入法、失败网络或Windows验收。~~
   - 已验证取消时无数据变化、草稿和附件保留；再建群仅导入一份92B原件，SHA与源CSV相同。两成员各read_file／write_file／bot_deliver_files一次，恰好2条completed任务、零工具错误；两份原件均在群内打开，独立Decimal核对5笔／48.70／草稿多计1.00正确。DS1102B报告使用无依据的“虚报”判断，单列交付质量差异；MM935B报告无此判断。证据quality-review/1017AU-new-chat-cancel/{cancel-review,handoff-review,delivery-review}.json；不以这些局部结果宣布本项完成。
@@ -854,7 +855,7 @@ Bots 工作区（复用消息、文件、审批等组件）
       - 原版Grok同题先由REFERENCE真实提及MIXED，后者在群中纠正17+8=25；本地首轮MM用原bot_delegate成功、DS仅写@后停住，均保留。首次实现另暴露MM把旧同题答复当作本轮结果；只收紧Bot当前任务提示与群增量边界，未改公共Harness。最终构建E重复题取得本轮真实同伴答复；F-MM实际沿原交办链取得47，F-DS只在群中写提及，自动讨论中的MM实际纠正27+8=35，DS随后pass。两种模型均无额外文件／命令／记忆／例行操作；不是用人工补发指令代替接力。
       - 最终包实际request_user_input进入waiting_user后，原“停止群聊工作”使任务cancelled且游标清空，没有后续讨论或代选答案；随后新消息只回复43，不恢复旧选择卡。正常Quit确认进程全退出，再以原配置重启，任务终态、原有消息头及全部文件不变，无新调用或重复消息。42/42限定验收通过：原1204任务、59Bot、17群、15例行、54命令、325文件及6266消息头保持；最终1234任务、107线程、6334消息头，0活跃／0讨论游标。原mask39字符与另一份未发送草稿均精确保留；恢复观察到的Continuation-1018DB3-MM会话，官方恢复原“1”的未答问题。最初草稿核验误把原生Placeholder属性算进值，原失败与修正后的哈希证据同时保留，不为验收器误判修改产品。
       - 391项Bot／共享契约测试、node/web类型检查、改动模块lint及正常构建通过。完整host.test.ts有4项与修改前索引完全相同的存量lint错误，未宣称全库lint通过；其中两份调度桩仅为新增可选讨论返回pass，原调度断言保持。来源及精确构建SHA、原生实屏、任务／工具窗口、重启及保全记录见quality-review/1019DW-group-discussion/{verification,final-results,tested-build}.json与verify.py。未commit／push。
-      - [ ] 仍待续验：文件／浏览器成果后的自动检查、多群并行、queued讨论与活动讨论的真实重启（本轮仅单元覆盖）、Windows；Bot发言中的提及身份点击及整体UI／动画继续按D04等原项处理。本子项不关闭整个群协作、交付质量或Grok全功能验收。
+      - [ ] 仍待续验：浏览器成果后的自动检查（文件接力已由1019DZ补验）、多群并行、活动讨论的强制中止／真实重启（queued讨论正常退出后的恢复已由1019DX补验）、Windows；Bot发言中的精确全名身份入口已由1019EA补验，整体UI／动画继续按D04等原项处理。本子项不关闭整个群协作、交付质量或Grok全功能验收。
 - [ ] P05.4 验证群消息来源、私聊范围、成员退出与删除；协作内容不能成为新的授权。
   - [x] ~~1017AZ Mac群内浏览器人工等待与同事文件任务。~~初次复核时userInputWithoutToolLock仅豁免request_user_input，原生接管仍独占群文件锁。先经真实123291ms阻塞复现，再完成AZ原生接管、BA下载原子发布、BB所属页面控制和BC普通观察／上传文件阶段的闭环；双模型正反向等待与实际上传均通过，原失败保留。普通工作台／未知工具及文件写互斥不变，没有加锁超时或另建执行链；仅可信Bot群将浏览器上传的文件阶段交给原同一锁。此项不代表整个P05、原生用户关窗或Windows已验收，详见以下各子项。
     - 1017AZ已真实复现：DeepSeek b93f5c59…的本群接管工具进入waiting_user且无终态回执；MiniMax e3e7f623…发出准确原路径read_file但无ToolMessage。原文件本机直接读取92B耗时0.162ms。成员执行记录正常归还后，MM立即返回5行／48.70；原Runtime日志精确记录同一call_d82608…shared-lock等待123291ms。两条随后均completed，DS重新观察并关闭原精确页。证据before-release-proof.json、runtime-lock-evidence.log、after-release.json；原失败不抹除。沿用原isRecord和可信群开关，只新增原生接管两种调用的等待豁免；先扩展实际中间件红／绿回归，默认关闭与未知工具／浏览器文件操作继续独占。其他浏览器操作在人工控制期间等待的影响需单独核对，不能因本例修复就宣称群浏览器并发全项通过。
@@ -1301,6 +1302,13 @@ Bots 工作区（复用消息、文件、审批等组件）
   - 1016P2 修正复验通过：真实根任务 `b582a995-a26c-46f1-835a-210d06f80f35` completed，子任务 `70907e62-5bff-494d-b844-85fd96965108` 真实等待选择；SIGKILL 原主进程 45747（exit 137），同配置新版本恢复为 interrupted，唯一回执 `3ddfae2a-5504-4624-85d0-ca69e01a6d37` 自动进入原发起线程并 completed。MiniMax 实际报告“任务已被中断，应用已重启……未能完成”，没有重新交办，也未给出伪造计算结果。1016P3 明确给出新选择／新交办授权后，根／同事／回传任务 `d0bd726c-e598-4061-9f89-4451ae155fbf`／`1e5f6ce8-654c-43e3-89c9-f1b4d65153f1`／`4d9a4647-0a2a-4c62-8a16-0e62ddb449ed` 均 completed，实际合计 36.55、来源正确；一次新交办、一次新回传。随后正常退出 0、同配置第二次重启，控制库仍 247 条任务、中断回执仍一条、0 活动任务，最近 6 条任务字节字段一致，21 Bot／7 群／记忆哈希不变，quick_check=ok。新恢复断言在修正前 2 失败／2 通过，修正后相关 92 项通过；node 类型检查及构建通过。证据 `quality-review/1016P-collaboration-restart/{before-kill-fixed-sample,after-fixed-restart,before-second-restart,after-second-restart}.json`。P3 模型仍把真实用户选择转述为“非用户直接确认”的多余提醒，记为交付表述差异，未改共享 harness，也未将本项通过等同于完整质量对齐。实屏仍需原生缩放恢复冷启动绘制；Windows／其余恢复场景不由本项代验。
 
 - [ ] P10.1 实际强制终止／重启主进程，验证排队、执行、审批、协作和定时状态对账。
+  - [x] ~~1019ED 等待选择的群复核跨主进程强制终止及部分成果交付（Mac，双模型）。~~沿用现有群轮次／Store.recover／Runtime：首成员只交接任务，同伴在群工作区写一份合成部分成果后实际等待选择；确认只有本轮任务活动后，强制终止隔离预览主进程。同配置重启应保留原文件、把原复核标记interrupted、不回答旧问题或重放写入；新的明确只读请求才能核验并交付部分文件。真实MiniMax／DeepSeek交换复核角色，按origin.messageId及工具调用ID取证，保留已有草稿／用户头像和其他任务。参考原CMB恢复与Grok／Hermes未知动作不盲目续做的边界；本机崩溃不等同于官方云服务重启，不新增自动重放或新恢复框架。
+    - 首轮发现真实缺口：MM根787f7379…零工具交接，DS复核fe024fea…write_file一次后request_user_input实际waiting_user；只该任务活动时SIGKILL预览33721，所有所属进程退出，同配置39611恢复为interrupted、部分文件保留、0活跃／0游标。群里却没有对应中断结果，执行入口随活动状态消失，用户看不到同伴为何停止。Store.recover批量中断所有任务，但只为特定协作／checkpoint群任务走settle，普通群／discussion被遗漏。首次强退前另有2条无关任务已终态，保留且不计本轮执行；没有把总任务增量全部归给本测试。
+    - 修复复用原recover事务、settle及noteActivity：先统一中断父任务，再对仍有有效成员的原群发布唯一终态和列表提示；不续跑、代选、转私聊或回填旧历史。新增真实SQLite恢复反例3例修复前失败／14通过，修复后群／Host／提及114项及完整Bot相关398项通过，node／web、原messages、定向lint／格式、正常构建通过。首版第三个夹具错误地让同Bot同时有两条running，原互斥正确拒绝；改为不同Bot后才取得3个目标反例，旧日志保留。升级前39611经原生Quit退出0且所属进程0，才构建；此阶段仅完成自动回归，尚不能算真实双模型强退／交付通过，最终复验见下。证据quality-review/1019ED-running-group-restart的首轮快照、模型／原生等待卡、red-first-fixture／red／green／bots日志及fixed-build.json。无commit／push。
+    - 修正版已完成上述Mac等待态范围：DS根2e106a0d…→MM复核9d66bdd2…，MM根e8e10a0e…→DS复核6f9b3138…；两位均恰好write_file一次后request_user_input实际waiting_user，原生卡片可见且未选。分别SIGKILL精确隔离主进程43981／48189，exec均137、所属进程0后同配置启动；原复核ID保持interrupted，群里各有唯一明确中断提示，列表预览同步，无自动续跑／游标。两份部分文件字节及mtime均与强退前一致。
+    - 新的只读群请求实际只派发MM75308af0…／DS998bcf4c…，各read_file及bot_deliver_files一次，准确说明先前复核中断而非完成；两份原文件从正式成果入口打开，分别显示ED_MM_PARTIAL_1019／ED_DS2_PARTIAL_1019，没有写入、重新提问或代选。随后正常Quit退出0、所属进程0，再启动后任务／定义／群／例行／命令／文件及核心消息头与退出前逐项相同，中断提示不重复；最后1274任务、60Bot／17群／15例行／54命令、339文件、6516消息头，0活跃／0游标。原1260任务、336旧文件及6465旧消息头保持，两份保护草稿哈希保持。
+    - 期间另有5条非本轮任务完成，均保留、未计入9条本轮群任务；另一Bot的名称sean→陈强/version2也按实际现状保留，本轮工具均无资料修改调用，未自行归因于某位操作者。最终恢复原稳定Bot ID在当前名称下的空输入。一次手抄任务ID错误被强退保护检查拦住，未发送信号；后续从持久origin.messageId关联真实任务，不猜ID。原生paste未更新最终草稿且一次坐标操作返回noWindowsAvailable时没有发送，改用正式AX setValue逐字核对后才发送，持久收件人确认为原两成员；没有加入产品输入兜底或诊断代码。
+    - 44项限定证据核对通过，证据`quality-review/1019ED-running-group-restart/{verification,final-results,final,fixed-build}.json`、真实选择／中断／成果预览、各阶段进程及回归日志。只覆盖Mac实际waiting_user复核；一般running恢复有SQLite回归，不冒充真实写入中断或任意外部副作用恢复。旧选择点击拒绝的实屏、Windows、多群并行及完整UI／动画仍未验，P10父项继续不勾选。无commit／push。
   - [x] ~~1017BN 新消息接续后的后台命令崩溃恢复。~~沿用原LocalSandbox、Store.recover和已验superseded接续，不新增生产恢复代码。真实MiniMax a90d695b…／DeepSeek0159351c…各执行一次180秒后台Node，真实选择开始分析后接收新问题，旧任务均superseded，新任务e8e31c16…／8ba12674…均零工具回答77，原命令继续。确认两命令accepted和原主进程身份后SIGKILL隔离主进程45365，实际exit137；旧界面子进程退出，仅原Node PID55635／55681继续，未重启或重新接管它们。
     - 同配置恢复将两命令分别41e5f56e…／3d5a2e0d…标为outcome_unknown，各仅一条canonical通知ae11d10f…／ff8fc386…；MM仅read_file一次，DS读取结果与启动日志各一次，均明确报告未知、未调用资料工具或重跑命令。原结果文件当时尚不存在，该预期读取按原Runtime返回文本保存，未冒充全部读取成功。两命令在原截止后各写出JSON并退出，原PID一致、启动日志各恰好一行；随后新的真实用户只读交办c5a5135f…／969c9516…均read／read／deliver，准确核对并交付两份原件。晚到文件证据不改写原outcome_unknown，也不恢复原命令控制权。
     - 正常退出58011及全部所属进程、同配置第二次重启后，任务／命令／定义／例行／文件／4250消息头逐项不变，无重复通知或续跑；四份原件均从正式界面重开。原695任务、36Bot、10群、9例行、24命令、239工作区／记忆文件及4211旧消息头全部保持；最终703任务、26命令、243文件、0活动／0已接受命令、quick_check=ok。原mask39字符草稿、80px头像栏、会话和窗口恢复；原恢复／命令／资料边界18项测试通过（其余111项按名称过滤跳过，不称129项全跑）。独立复核按实际任务时间窗与ToolCall ID归属，避免把无用户消息的通知工具误归旧用户轮次；验收器原误用path字段已按真实filePath契约修正。证据quality-review/1017BN-superseded-restart/{before-kill,recovered,original-results,before-second-restart,after-second-restart,final,task-windows,review}.json及review.py；本轮生产源码／构建与BM相同，未commit／push。Mac原生崩溃后孤儿进程继续、启动BV仍需Zoom的限制保留，不冒充Windows、任意进程隔离或完整P10通过。
@@ -1928,8 +1936,53 @@ Bots 工作区（复用消息、文件、审批等组件）
 - 当前补跑 Bot／工具并发／界面派生／共享文件契约回归：53 文件、460 项通过；原 `test:messages` 与 `typecheck:node` 退出 0。最新 1017AI 的 web 类型检查、定向 lint／格式及构建也已通过。日志 `/tmp/cmb-prepush-{bots,node,messages}-1017.log`。
 - 这次提交保存已完成的代码及验收记录；未完成项继续按原清单推进，包括完整 Grok 使用体验／动画、其余真实模型场景和 Windows 实机验收，不将阶段推送记为一期交付完成。
 
+### 2026-10-19 排队群讨论恢复续验（1019DX）
+
+- [x] ~~1019DX2 Mac真实排队讨论在正常退出后恢复且不重复。~~ 同一已测构建、原两Bot／模型；MiniMax私聊c1cb12c3…真实等待未答卡，DeepSeek群任务0c3d9bef…零工具发布合成草稿，MiniMax讨论7b01f4f2…确实queued且尚无Runtime消息。原生Quit后全部预览进程为0，私聊interrupted、讨论保留原ID；同配置重启后该任务只执行一次并实际在群中更正84+17=101，DeepSeek零工具pass，游标清空。没有续跑未答私聊、代选或把私聊nonce放入群。37项有界证据核对通过；原1234任务、59Bot／17群／15例行／54命令、325文件及6334消息头保留，最终1242任务／0活跃／0游标；mask39字符及另一份506字符草稿哈希不变，恢复最新用户所选MM私聊且空输入。全程无生产代码、配置或模型更改；原已测源码／产物SHA保持。证据quality-review/1019DX-group-queued-restart/{verification,second-before-quit,second-after-quit,final-results}.json、原生AX／截图与verify.py。首轮真实用户Go、首版诊断误计自身shell及验收器误用不存在task_id字段的记录均保留，后两者只修验收脚本。活动任务强杀／断电和Windows仍未覆盖，不关闭父项；本轮未commit／push。
+
+- DX首轮确实观察到私聊waiting_user、同伴discussion任务a6a947f3…queued及同一群游标。排查用户报告的源码缺失期间，私聊卡在01:45:40 UTC收到真实Go选择后正常结束，同一排队任务随后仅执行一次并更正73+18=91，末位pass；因此该轮只证明队列正常释放与私聊隔离，尚未执行退出／重启，不计重启恢复通过。最初题目要求的长标题触发原工具12字符schema校验，模型改短后重新提问，此错误回执保留。证据quality-review/1019DX-group-queued-restart/{before-quit,latest-before-quit}.json。
+
 ### 2026-10-19 阶段保存（用户要求先 push）
 
 - 保存当前 Bot 核心行为、创建与收件人流程、问题卡片及群协作改进；本轮群讨论继续使用原任务队列与 Agent Runtime，未新增独立执行链。
 - 最新群协作交付构建：Bot／共享契约 25 文件、391 项测试通过；node／web 类型检查、定向 lint 和构建通过。真实 MiniMax／DeepSeek 的群交接、停止后新任务和正常重启证据检查 42/42 通过，证据位于隔离预览 `quality-review/1019DW-group-discussion`。该结果仅覆盖所列场景；全量 lint 的既有失败未记为通过。
 - 推送后继续高优先级项：真实排队讨论的重启恢复、文件／浏览器任务的群内复核，以及剩余核心使用流程和 UI／动画对照；Windows 实机、完整交付质量和未完成父项继续保留未勾选。隔离配置、模型密钥、任务数据及截图不进入提交。
+
+### 2026-10-19 非预期本地文件缺失（1019DY）
+
+- 用户截图出现源码／测试夹具删除，暂缓界面续验并核查；本轮未执行清理命令、未运行源码测试，预览新增任务只有私聊选择卡与零工具群任务，原命令总数仍为54；当前无协作子Agent运行。这些事实不能替代全系统逐进程审计。
+- 系统File Provider日志能够关联 `worker-message-window.ts`：父目录fileID68391537、脱敏名w{19}w.ts、原544B及docID9563635一致；09:15发生eviction/dataless，09:37:49出现create-item actual:nil与`delete … why:item rejected`。对应v1目录File Provider状态也明确报iCloud额度不足。确认同步链路异常，但尚未证明其余文件逐一由同一进程删除，也不能把额度不足单独当作删除原因。
+- [x] ~~恢复当前14份非预期缺失的HEAD跟踪文件并校验。~~恢复前保存清单、索引差异与原件；仅对不存在的路径用O_EXCL创建，已有文件不覆盖。14份均与当前HEAD逐字节一致，删除清单归零；恢复索引时现有post-checkout钩子返回缺失错误，索引结果已独立核对，未新建或修改钩子。剩余差异仅plan更新，无commit／push。证据`quality-review/1019DY-unexpected-deletions/{report,recovery,deletions-before-recovery}.json`及系统目标日志。
+- [ ] 环境层原因仍需继续观察；未修改iCloud配置或移动仓库，不将一次恢复说成已消除系统同步问题。
+- 后续4份带“ 2”的未跟踪副本已逐一核对：两份remote-reply JSON、examples及resources各一份hooks JSON，全部与原件逐字节相同，原件均匹配HEAD。系统日志分别在10:25:49、10:26:04、10:29:29、10:34:06记录fileproviderd PID749／iCloudDriveFileProvider的create-item，原因为itemChangedRemotely；日志中的4个inode与副本实测一致，确认本地落盘来自iCloud远端同步。云端最初的命名者、为何产生编号副本及与早前删除的完整因果链仍未证实；没有删除／提交副本、改同步设置或迁移仓库。证据`quality-review/1019DY-unexpected-deletions/{latest-duplicate-audit,duplicate-actor-proof}.json`及对应系统日志。
+- 又观测到`worker-message-window 2.ts`（544B，与原件及HEAD一致）；inode262591404对应10:39:56同一fileproviderd的远端create-item记录，已保全`later-worker-duplicate.json`和对应系统日志。当前5份编号副本均留存，Git索引也出现新增条目；本轮未执行git add，尚无足够证据归因索引写入者，后续提交必须逐文件审阅，不把同步副本混入功能提交。
+
+### 2026-10-19 群文件自动复核与验收判据复核（1019DZ）
+
+- DV判据复核纠正：原题只要求“Read the attached CSV original”，并未指定read_file；实际模型输入的附件XML完整包含原63B CSV且没有truncated标记，下载原件与该63B逐字节一致。此前仅凭没有额外read_file便认定未读原件，是验收器加入的额外假设，不能据此判Bot缺陷或修改公共Harness。历史41/42报告与模型动作不改写；重新打开变更／截断文件的能力、整体验收仍须另证。检查见quality-review/1019DZ-group-file-review/dv-read-criterion-reassessment.json；上文DV的原判断以本条更正为准。
+- [x] ~~1019DZ 原群轮次的真实共享文件草稿—同伴复核—双文件交付（Mac，交换模型角色）。~~ MiniMax初始d4a8d086…仅写／读／交付草稿，DeepSeek讨论c7b45a10…实际read_file原CSV及草稿，写／读最终报告并交付报告与原件；反向DeepSeek初始b68eba95…仅写／交付草稿，MiniMax讨论6b54f512…实际重新读取CSV、写／读／交付最终两文件。两题均只定向首成员，不用bot_delegate、命令、记忆、例行或私聊；无需第二条用户消息。两份最终报告从聊天预览实际打开，并与两份CSV分别经原生保存窗口下载；报告逐字节等于工作区产物，CSV均63B、SHA67851b77…e6833b7，三条ID／金额、合计11.33 CNY与差额0.03正确，原件与两份草稿保留。
+  - 官方同类题由REFERENCE交草稿、真实提及MIXED后由MIXED交最终报告及原CSV；两份原生下载的内容／SHA与本地数值及原件一致。官方成员自述用了命令写文件，违反本题“无命令”约束；其云端工具不可独立查看，未把自述当实际工具证明。本地实际工具仅write_file／read_file／bot_deliver_files。
+  - 43项限定证据核对通过，原1242任务、59Bot／17群／15例行／54命令、325文件及6354消息头保持；新增6个群任务全部completed，4份新报告文件，最终0活跃／0游标。MiniMax发起题末尾多一条零工具汇总后结束，DeepSeek发起题末尾pass；没有说成两题都静默或无限追问。两份原草稿哈希保持，恢复用户所选MM空输入及官方MIXED原未答问题。证据quality-review/1019DZ-group-file-review/{verification,final-results,final}.json、原生预览／保存截图、downloads与verify.py；沿用已测构建，无生产代码或配置改动，无commit／push。浏览器自动复核、多群并行、运行中强制重启、完整UI／动画与Windows仍待验，不关闭P05父项。
+
+### 2026-10-19 Bot群发言的成员入口（1019EA）
+
+- [x] ~~1019EA 新Bot群发言的精确全名身份入口及Mac双模型点击／重启。~~ 官方DZ接力消息中的同伴提及可点击；本地此前Bot发言强制mentions=[]。参考Grok／Hermes当前群成员匹配，复用既有mentions_json、UTF-16范围、BotInlineMentionsContext、BotMentionLabel及Markdown过滤；生产只增加30行纯绑定函数并接入原Store及群渲染，普通Runtime／IPC／新状态表均未改。新结果落库时绑定群内唯一完整名称，重名不猜、旧历史不回填、用户普通@粘贴规则保持；targets仍为空，不由展示注释改变派发／授权。
+  - 404项Bot／共享契约／提及回归、node/web类型检查、原test:messages及构建通过；新增测试覆盖Unicode位置、重名长短名、邮箱／未知长handle、128上限、重开Store／改名后的原ID、重试与无额外入队；既有Markdown测试覆盖代码与链接排除。定向lint无错误，群组件第148行现有ref清理warning与HEAD一致，未修改该取消逻辑或抑制警告。
+  - 真实MiniMax d2bf1c5e…与DeepSeek23ca17ea…分别输出对方@全名，数据库保存准确对方ID／范围，实际点击均进入正确私聊。正常Quit、所有预览进程为0后以同构建重启，历史身份入口仍可点击，原任务／消息头／文件未新增或重跑。39项限定证据核对通过；原1248任务、17群／15例行／54命令、329文件及6393消息头保持，新增5个零工具群任务均completed，0活跃／0游标；两份原草稿摘要保持，恢复MM空输入。59个Bot中MM头像在验收期间变为绿色#00c972／版本4，用户随后明确确认“是我改的”，保留该主动修改；其他档案字段一致，原严格全档案不变的失败报告、精确差异与用户确认记录同时保留，未回滚用户外观。
+  - 原DeepSeek发起题后，MM可选讨论多发一次无工具确认，再由DS pass；该回复不由提及注释触发，当前只关闭身份展示／点击子项，不声称群回复节奏、完整UI／动画或Windows已对齐。证据quality-review/1019EA-bot-member-links/{verification,verification-first-profile-change,profile-diff,tested-build}.json、模型实际任务、原生点击／重启AX、404项日志及verify.py。无commit／push。
+
+### 2026-10-19 群浏览器结果自动复核（1019EB）
+
+- 验收方案先于任务记录：使用原群轮次、原Runtime和群成员独立浏览器，真实MiniMax／DeepSeek交换角色验证“首成员读取网页并交付待核草稿→同伴在自己的页面重新读取原网页→纠正金额并交付文件”；初始只定向首成员，不用私聊委派或新增用户催办。以本机合成HTTP页面及请求日志核对真实浏览器读取、精确页面归属、没有额外表单提交、结果／文件和有限讨论；保留用户新建Bot、现有头像与两份既有草稿。官方Grok的云端不能访问localhost，需单列环境差异，不以本机服务成功冒充云端同题通过。源码参考原CMB群浏览器工具接线、Grok有界轮次及Hermes群消息资料规则，不新增浏览器或调度体系；实测发现明确缺口后才改生产代码。
+- [x] ~~Mac双模型交换角色的网页独立复核及最终报告／原始CSV交付。~~ MM初始606e467f…→DS讨论838e9dd0…、DS初始b0e63f3f…→MM讨论764d592d…均只需一条定向用户消息；两位实际导航同一原网页、使用不同pageId，复核者点击页面下载链接、生成并读回报告，交付报告与63B原CSV，精确关闭各自页面。两份最终报告从正式成果入口打开并原生保存，下载报告与工作区一致、两份CSV与服务端原件SHA e17d977b…8546cea一致；各行31.40／-2.10／0.07、合计29.37 CNY及相对29.30的+0.07正确。服务端仅4次页面GET和2次CSV GET，无POST。原1254任务、60Bot／17群／15例行／54命令、330旧文件及6406旧消息头保持；新增6条completed群任务、6文件，0活跃／0游标。两份既有草稿仅哈希复核保持，恢复本地sean和官方陈星越的原空输入；合成服务SIGTERM退出143。沿用EA已测构建，源码／产物哈希保持，无生产代码改动或commit／push。
+  - 官方0.71.2在自身云端准备等价页面及同组接力，实际最终报告554B、原CSV63B已从界面下载，数字／版本及原CSV字节一致；只允许其云端合成环境准备命令，未让本轮操作连接的Mac。官方首次声称无法附文件，后经同伴提醒补齐正式附件；这是官方本题的中间失败，不能说本地也漏附。其远端工具轨迹无法独立核查，云端页面准备与本机预建服务的差异单列，不推断整体优劣。
+- [ ] 本题全部行为约束／完整群回复节奏：本地MM发起题末尾多发一句无工具完成确认，DS发起题后DS pass；额外确认仍不符合任务要求，未用过滤器掩盖、未宣称完全对齐。40项限定交付／证据检查通过，fullTaskConstraintsPassed仍为false。首版验收器用task.message子串划分任务，误把新群任务携带的旧背景算入；已改为真实用户消息及origin.messageId，原39/40失败报告保留，未改产品或历史记录。证据`quality-review/1019EB-group-browser-review/{verification,verification-first-oracle,final-results,final,server-stop}.json`、下载原件及界面记录。多群并行、运行中强制恢复、Windows、全UI／动画与完整长程质量仍待验，P05父项不勾选。
+
+- 1019DY后续观察：跟踪删除清单继续为空；目录另出现3份带“ 2”的未跟踪同名副本，逐字节等于已恢复原件。已记录大小／SHA和创建时间，原样保留且不纳入本轮源码改动，未用清理命令删除。该现象支持继续排查同步命名冲突，仍不据此将全部文件逐一归因；见1019DY/later-conflict-copies.json。
+
+### 2026-10-19 用户要求清理后提交推送（1019EG）
+
+- 提交前逐一核对8份带“ 2”的副本：全部与不带编号的原文件及HEAD逐字节一致。按本轮用户授权，先完整备份到非同步的quality-review/1019EG-push-cleanup/removed-copies，再仅移除这8份副本及其新增暂存项；原文件保持，无跟踪文件删除。清理清单保存大小、SHA、原路径及备份路径，不按文件名批量清理其他内容。已有5份的File Provider事件与inode对应；其余副本虽然同样无关，不据相同内容推定全部创建来源。
+- 后续开发尚未迁移目录、未修改iCloud设置。原目录过去正常不排除当前发生同步变化；此前日志只能证明具体本地物化事件，尚未确定远端起因或保证以后不会再次生成。提交严格限定已审阅的6份Bot代码／测试／plan文件，不把清理副本加入生产改动；下一项1019EF在本次push完成前暂停，尚未新建群或发送验收任务。
+- 清理后重新运行26文件／398项Bot回归、node／web类型检查及原test:messages，全部通过；改动文件Prettier通过、ESLint零错误，群组件第148行原有ref清理warning与前次一致，未抑制或顺带改动。EA及ED的真实MiniMax／DeepSeek任务、正常重启和强制中断证据继续沿用已测构建，本次清理没有改生产源码或重新覆盖运行中的out目录；相关日志保存在同一1019EG目录。
+- 官方恢复行为边界补充：1019ED的中断提示是本机进程崩溃后的反馈修复，不能称为官方同款恢复策略。Grok 0.18重建源码group-chat-glue.ts将单成员运行失败当作pass，群级异常进入trayErrors；私聊抢占后的有界redrive不是进程崩溃恢复。当前官方0.71.2云端运行时未进行崩溃验收，关闭其客户端与终止本地Bot Host不等价，未据重建旧码推断当前云端行为一致。

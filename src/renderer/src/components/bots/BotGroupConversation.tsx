@@ -452,9 +452,11 @@ export function BotGroupConversation({
                     const displayText = item.authorBotId
                       ? splitBotInlineReasoning(item.text).body
                       : cleanUserAttachmentContentForDisplay(item.text)
-                    const mentions = item.authorBotId
-                      ? []
-                      : displayedGroupMentions(item.text, displayText, item.mentions ?? [])
+                    const mentions = displayedGroupMentions(
+                      item.text,
+                      displayText,
+                      item.mentions ?? []
+                    )
                     const author = item.authorBotId
                       ? bots.find((bot) => bot.id === item.authorBotId)
                       : null

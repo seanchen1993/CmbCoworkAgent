@@ -16,6 +16,7 @@ import { projectVisibleChatSearchContent } from "../../shared/chat-search-visibl
 import { projectMarkdownVisibleText } from "../../shared/markdown-visible-text"
 import { isBotRoutineSilent } from "../../shared/bots/routine-silence"
 import { isBotGroupPass } from "../../shared/bots/group-discussion"
+import { bindBotGroupMentions } from "./group-mentions"
 import {
   buildGroupDiscussionMessage,
   groupDiscussionSchema,
@@ -1348,11 +1349,11 @@ export class BotStore {
 
   recover(): void {
     this.transaction(() => {
-      const awaitingReplies = this.rows(
+      const awaitingOutcomes = this.rows(
         `SELECT id FROM bot_tasks
          WHERE (state IN (?, ?) OR (state='queued' AND continuation_checkpoint_id IS NOT NULL))
          AND ((json_extract(origin_json,'$.kind')='bot' AND json_extract(origin_json,'$.expectsReply')=1)
-           OR (json_extract(origin_json,'$.groupId') IS NOT NULL AND continuation_checkpoint_id IS NOT NULL))`,
+           OR json_extract(origin_json,'$.groupId') IS NOT NULL)`,
         [...ACTIVE_STATES]
       )
       const reason = "应用已重启。请检查已有结果，再决定是否继续，避免重复执行外部操作。"
@@ -1362,11 +1363,16 @@ export class BotStore {
         [reason, this.now(), ...ACTIVE_STATES]
       )
       if (this.db.getRowsModified()) this.changed()
-      // Fence every interrupted parent first. Reuse the normal terminal/outbox
-      // transaction only for receipts, never for replaying the delegated work.
-      for (const row of awaitingReplies) {
+      // Fence every interrupted parent first. Reuse normal terminal results/outbox,
+      // never replaying the interrupted work.
+      for (const row of awaitingOutcomes) {
         const task = this.getTask(String(row.id))
-        if (task.origin.kind !== "group" && task.origin.kind !== "bot") continue
+        if (
+          task.origin.kind !== "group" &&
+          task.origin.kind !== "discussion" &&
+          task.origin.kind !== "bot"
+        )
+          continue
         const groupId = botTaskGroupId(task)
         if (groupId) {
           const group = this.groups().find((item) => item.id === groupId)
@@ -1379,6 +1385,8 @@ export class BotStore {
             continue
         }
         this.settle(task.id, "interrupted", reason)
+        // The bulk fence above already changed the state; publish the new room outcome once.
+        if (groupId) this.noteActivity("group", groupId, reason, true, this.getBot(task.botId).name)
       }
       // Acceptance was committed before spawn. After a crash neither absence nor success is provable.
       // Retain that uncertainty and wake a verification turn; never restart the external command.
@@ -1723,21 +1731,29 @@ export class BotStore {
       if (groupId && !silentDiscussion) {
         const group = this.getGroup(groupId)
         if (!group.memberIds.includes(task.botId)) return
+        const text = (
+          visibleResult ||
+          error ||
+          (state === "cancelled"
+            ? botTaskStateLabel(state)
+            : `${botTaskStateLabel(state)}；没有可确认的结果。`)
+        ).slice(0, 60_000)
+        const mentions = visibleResult
+          ? bindBotGroupMentions(
+              text,
+              group.memberIds.map((id) => this.getBot(id)).filter((bot) => !bot.deleting)
+            )
+          : []
         this.db.run(
-          "INSERT OR IGNORE INTO bot_group_messages (id,group_id,author_bot_id,text,targets_json,created_at) VALUES (?,?,?,?,?,?)",
+          "INSERT OR IGNORE INTO bot_group_messages (id,group_id,author_bot_id,text,targets_json,created_at,mentions_json) VALUES (?,?,?,?,?,?,?)",
           [
             `result-${task.id}`,
             group.id,
             task.botId,
-            (
-              visibleResult ||
-              error ||
-              (state === "cancelled"
-                ? botTaskStateLabel(state)
-                : `${botTaskStateLabel(state)}；没有可确认的结果。`)
-            ).slice(0, 60_000),
+            text,
             "[]",
-            this.now()
+            this.now(),
+            mentions.length ? JSON.stringify(mentions) : null
           ]
         )
         this.changed()
