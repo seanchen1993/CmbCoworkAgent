@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto"
+import { createHash, randomUUID } from "node:crypto"
 import { WORKFLOW_NOTIFICATION_TURN_PROMPT } from "../../shared/checkpoint-transcript"
 import { COORDINATOR_NOTIFICATION_PROMPT } from "../../shared/internal-notification-turn"
 import {
@@ -21,6 +21,7 @@ import {
   onCoordinatorNotificationEnqueued
 } from "./coordinator-worker-manager"
 import { onWorkflowNotificationBroadcast, workflowRunManager } from "./workflow/run-manager"
+import { hasBotWorkflowCapability } from "./workflow/bot-capability"
 
 /**
  * The single place that decides whether a completed background task gets its
@@ -85,6 +86,7 @@ export type PendingNotificationSkipReason =
   | "thread-busy"
   | "suppressed-after-stop"
   | "summary-attempts-exhausted"
+  | "managed-queue"
 
 export interface PendingNotificationOutcome {
   started: boolean
@@ -115,7 +117,38 @@ const defaultDependencies: SchedulerDependencies = {
   log: (message, detail) => console.log(`[PendingNotification] ${message}`, detail)
 }
 
+export interface ManagedNotificationDispatch {
+  threadId: string
+  kind: "workflow" | "coordinator"
+  key: string
+}
+
 export class PendingNotificationScheduler {
+  private managedDispatcher?: (notice: ManagedNotificationDispatch) => Promise<boolean>
+
+  /** Optional durable queue owner. False preserves ordinary desktop/IM behavior. */
+  setManagedDispatcher(
+    dispatcher: (notice: ManagedNotificationDispatch) => Promise<boolean>
+  ): void {
+    this.managedDispatcher = dispatcher
+  }
+
+  private async dispatchManaged(notice: ManagedNotificationDispatch): Promise<boolean> {
+    if (!this.managedDispatcher) return false
+    try {
+      return await this.managedDispatcher(notice)
+    } catch (error) {
+      this.dependencies.log("managed queue unavailable", {
+        threadId: notice.threadId,
+        kind: notice.kind,
+        reason: String(error)
+      })
+      this.noteFailure(notice.threadId, notice.kind)
+      // Never fall through to an unscoped desktop run when a queue owner failed.
+      return true
+    }
+  }
+
   private readonly dependencies: SchedulerDependencies
   /** Threads with a check in flight, so concurrent asks collapse into one. */
   private readonly checking = new Set<string>()
@@ -374,6 +407,17 @@ export class PendingNotificationScheduler {
       return { started: false, reason: "no-pending-notification" }
     }
 
+    if (
+      await this.dispatchManaged({
+        threadId,
+        kind: "coordinator",
+        key: createHash("sha256")
+          .update(JSON.stringify(coordinatorWorkerManager.peekNotifications(threadId)))
+          .digest("hex")
+      })
+    )
+      return { started: false, reason: "managed-queue" }
+
     const existingLease = getLocalThreadRunLease(threadId)
     if (existingLease) {
       this.waitingForIdle.add(threadId)
@@ -551,7 +595,10 @@ export class PendingNotificationScheduler {
     if (this.isCoordinatorThread(metadata.metadata)) {
       return await this.checkCoordinator(threadId)
     }
-    if (metadata.agentMode !== "workflow" || !workspacePath) {
+    if (
+      (metadata.agentMode !== "workflow" && !hasBotWorkflowCapability(metadata.metadata)) ||
+      !workspacePath
+    ) {
       return { started: false, reason: "not-a-background-mode" }
     }
 
@@ -569,6 +616,9 @@ export class PendingNotificationScheduler {
       // desktop one used to hide it for good.
       return { started: false, reason: "no-pending-notification" }
     }
+
+    if (await this.dispatchManaged({ threadId, kind: "workflow", key: run.runId }))
+      return { started: false, reason: "managed-queue" }
 
     const existingLease = getLocalThreadRunLease(threadId)
     if (existingLease) {

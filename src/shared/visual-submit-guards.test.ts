@@ -2,7 +2,8 @@ import { describe, expect, it } from "vitest"
 import {
   getSubmittableVisualAnnotations,
   getVisualEditSubmitBlock,
-  getVisualEditSubmitDisabledReason
+  getVisualEditSubmitDisabledReason,
+  getVisualEditThreadSubmitDisabledReason
 } from "../renderer/src/components/visual-edit/visual-submit-guards"
 import type { ClawVisualAnnotation } from "../renderer/src/components/visual-edit/visual-edit-types"
 
@@ -97,5 +98,35 @@ describe("visual-submit-guards", () => {
         workspacePath: "/tmp/workspace"
       })
     ).toBe("当前模型不可用，请先在模型配置中设置 API 密钥。")
+  })
+})
+
+describe("visual edit ordinary submit ownership", () => {
+  it("rejects missing, idle Bot and Partner task threads", () => {
+    expect(getVisualEditThreadSubmitDisabledReason(undefined)).toBeTruthy()
+    expect(
+      getVisualEditThreadSubmitDisabledReason({
+        metadata: { botId: "bot", botHostId: "local" }
+      })
+    ).toBeTruthy()
+    expect(
+      getVisualEditThreadSubmitDisabledReason({
+        metadata: { cmb_devclaw_partner_task: { taskId: "task" } }
+      })
+    ).toBeTruthy()
+    // A malformed marker is not permission to fall through to personal execution.
+    expect(
+      getVisualEditThreadSubmitDisabledReason({
+        metadata: { cmb_devclaw_partner_task: null }
+      })
+    ).toBeTruthy()
+  })
+  it("retains ordinary and requirement session submission", () => {
+    expect(getVisualEditThreadSubmitDisabledReason({ metadata: {} })).toBeNull()
+    expect(
+      getVisualEditThreadSubmitDisabledReason({
+        metadata: { requirementSession: true, allowedSkills: [] }
+      })
+    ).toBeNull()
   })
 })

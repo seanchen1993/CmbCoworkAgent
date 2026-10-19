@@ -33,6 +33,7 @@ afterEach(() => {
 
 describe("workspace file loading", () => {
   it("clears A files atomically while B is still waiting to hydrate", () => {
+    installWorkspaceApi({}, "win32")
     const filesFromA = [{ path: "/same.md", is_dir: false }]
 
     expect(

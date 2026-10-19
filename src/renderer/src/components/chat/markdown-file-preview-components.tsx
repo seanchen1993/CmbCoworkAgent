@@ -1,4 +1,4 @@
-import { isValidElement, useEffect, useMemo, useState, type ReactNode } from "react"
+import { isValidElement, useContext, useEffect, useMemo, useState, type ReactNode } from "react"
 import type { Components } from "react-markdown"
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip"
 import { openResourcePanelOverlay } from "@/lib/resource-panel-overlay-events"
@@ -6,6 +6,11 @@ import { isLocalFileLikeHref, normalizePreviewFileHref } from "@/lib/markdown-fi
 import { emitOpenResourcePreview } from "@/lib/resource-preview-events"
 import { useThreadStateSelector } from "@/lib/thread-context"
 import type { FileInfo } from "@/types"
+import {
+  ChatFilePresentationContext,
+  ChatPresentationContext,
+  ChatMessageIdentityContext
+} from "./chat-presentation-context"
 
 type CodeRenderer = (args: {
   rawCode: string
@@ -17,7 +22,8 @@ type CodeRenderer = (args: {
 export function getMarkdownNodeText(node: ReactNode): string {
   if (typeof node === "string" || typeof node === "number") return String(node)
   if (Array.isArray(node)) return node.map(getMarkdownNodeText).join("")
-  if (isValidElement<{ children?: ReactNode }>(node)) return getMarkdownNodeText(node.props.children)
+  if (isValidElement<{ children?: ReactNode }>(node))
+    return getMarkdownNodeText(node.props.children)
   return ""
 }
 
@@ -34,10 +40,7 @@ function normalizePathForCompare(value: string): string {
   return stripLineSuffix(value).replace(/\\/g, "/").replace(/\/+$/, "")
 }
 
-function isWorkspaceFilePath(
-  filePath: string,
-  workspacePath: string | null | undefined
-): boolean {
+function isWorkspaceFilePath(filePath: string, workspacePath: string | null | undefined): boolean {
   if (!workspacePath) return false
   const normalizedFilePath = normalizePathForCompare(filePath)
   const normalizedWorkspacePath = normalizePathForCompare(workspacePath)
@@ -223,19 +226,20 @@ export function useMarkdownFilePreviewComponents({
   text: string
   renderCodeBlock: CodeRenderer
 }): Components {
-  const shouldResolveInlineFiles = Boolean(threadId && text.includes("`"))
-  const workspacePath = useThreadStateSelector(
-    threadId ?? null,
-    (state) => state.workspacePath
+  const botPresentation = useContext(ChatPresentationContext) === "bot"
+  const presentFile = useContext(ChatFilePresentationContext)
+  const messageId = useContext(ChatMessageIdentityContext)
+  const shouldResolveInlineFiles = Boolean(
+    threadId && (text.includes("`") || (botPresentation && text.includes("](")))
   )
+  const workspacePath = useThreadStateSelector(threadId ?? null, (state) => state.workspacePath)
   const workspaceFiles =
     useThreadStateSelector(
       shouldResolveInlineFiles ? (threadId ?? null) : null,
       (state) => state.workspaceFiles
     ) ?? []
-  const [filePreviewIndex, setFilePreviewIndex] = useState<Map<string, string>>(
-    EMPTY_FILE_PREVIEW_INDEX
-  )
+  const [filePreviewIndex, setFilePreviewIndex] =
+    useState<Map<string, string>>(EMPTY_FILE_PREVIEW_INDEX)
 
   useEffect(() => {
     if (!shouldResolveInlineFiles) {
@@ -267,16 +271,19 @@ export function useMarkdownFilePreviewComponents({
   return useMemo<Components>(
     () => ({
       ...baseComponents,
-      a({ node: _node, href, children, ...props }) {
+      a({ node, href, children, ...props }) {
         // [文件](D:\...) 这类 Windows 本地路径会被 react-markdown 默认 URL 安全规则
         // 清空 href。与其渲染成看似可用、点击无反应的 <a href="">，不如退化为普通文本。
         if (!href) {
           return <span>{children}</span>
         }
 
-        const previewPath = normalizePreviewFileHref(href, workspacePath)
+        const relativeBotFile = botPresentation && !/^(?:[a-z][a-z0-9+.-]*:|#|\/\/)/i.test(href)
+        const previewPath =
+          normalizePreviewFileHref(href, workspacePath) ??
+          (relativeBotFile ? resolveInlinePreviewPath(href, filePreviewIndex, workspacePath) : null)
         if (!threadId || !previewPath) {
-          if (isLocalFileLikeHref(href)) {
+          if (isLocalFileLikeHref(href) || relativeBotFile) {
             return (
               <span title="文件路径暂不可预览" {...props}>
                 {children}
@@ -290,6 +297,15 @@ export function useMarkdownFilePreviewComponents({
           )
         }
 
+        if (botPresentation && presentFile && node?.properties["data-bot-file-card"] === "true") {
+          const card = presentFile({
+            filePath: previewPath,
+            threadId,
+            label: children,
+            messageId: messageId ?? undefined
+          })
+          if (card != null) return <>{card}</>
+        }
         return (
           <MarkdownFilePreviewLink
             href={href ?? previewPath}
@@ -314,7 +330,11 @@ export function useMarkdownFilePreviewComponents({
           : null
         if (threadId && previewPath) {
           return (
-            <MarkdownFilePreviewLink href={previewPath} previewPath={previewPath} threadId={threadId}>
+            <MarkdownFilePreviewLink
+              href={previewPath}
+              previewPath={previewPath}
+              threadId={threadId}
+            >
               <span {...props}>{children}</span>
             </MarkdownFilePreviewLink>
           )
@@ -327,6 +347,15 @@ export function useMarkdownFilePreviewComponents({
         )
       }
     }),
-    [baseComponents, filePreviewIndex, renderCodeBlock, threadId, workspacePath]
+    [
+      baseComponents,
+      botPresentation,
+      presentFile,
+      messageId,
+      filePreviewIndex,
+      renderCodeBlock,
+      threadId,
+      workspacePath
+    ]
   )
 }

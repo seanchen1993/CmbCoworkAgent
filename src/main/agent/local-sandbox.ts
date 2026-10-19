@@ -102,8 +102,15 @@ import { isMemoryStoragePath } from "../memory/paths"
 import {
   isCodeFile,
   recordGen as recordAdoptionGen,
+  recordShellEdit as recordAdoptionShellEdit,
   recordShellFileOps as recordAdoptionShellFileOps
 } from "../services/adoption-tracker"
+import {
+  beginShellFileCapture,
+  noteFileToolWrite,
+  type ShellFileCapture
+} from "./shell-file-effects"
+import { extractShellCommandReadPaths, profileShellCommand } from "./shell-command-profile"
 import {
   openStableWritableFileHandle,
   type StableWritableFileHandle
@@ -346,6 +353,7 @@ function gitConfigEnvironmentPreamble(
  * Options for LocalSandbox configuration.
  */
 export interface LocalSandboxOptions {
+  backgroundCommandLifecycle?: import("./background-command-lifecycle").BackgroundCommandLifecycle
   /** Host grant/policy realm; file operations still use rootDir. */
   modWorkspace?: string
   /** Runtime capabilities must also constrain SDK calls that bypass model middleware. */
@@ -426,6 +434,8 @@ export interface LocalSandboxOptions {
   internalArtifactRoots?: string[]
   /** Records successful agent-owned file mutations for post-run automation. */
   onFileMutation?: (filePath: string, kind: AgentFileMutationKind) => void
+  /** Bash First file telemetry only; never changes execution permissions. */
+  shellFileTelemetry?: boolean
   /** Detects reads of skill files so skill lifecycle hooks can wrap the load. */
   skillLifecycleRegistry?: SkillLifecycleRegistry
   /** Shared run-scoped set used to avoid firing skill lifecycle hooks twice. */
@@ -665,6 +675,17 @@ export const readOnlyShellExecutionContext = new AsyncLocalStorage<boolean>()
  * logical /large_tool_results directory.
  */
 export const agentFileWriteContext = new AsyncLocalStorage<boolean>()
+const shellFileCaptureContext = new AsyncLocalStorage<boolean>()
+/** A single approved foreground call may transfer its existing process to the background owner. */
+const foregroundCommandContext = new AsyncLocalStorage<{
+  sandbox: LocalSandbox
+  signal: AbortSignal
+  onData(text: string): void
+  onTermination(termination: Promise<void>): void
+  detached(): boolean
+  enter(command: string, cwd: string): () => void
+}>()
+export const executeTraceContext = new AsyncLocalStorage<TraceContext>()
 
 export class LocalSandbox
   extends FilesystemBackend
@@ -733,6 +754,7 @@ export class LocalSandbox
   private readOnlyShellEnforced = false
   /** AbortSignal: when signalled, in-flight child processes are killed immediately. */
   private abortSignal?: AbortSignal
+  private backgroundCommandLifecycle?: import("./background-command-lifecycle").BackgroundCommandLifecycle
   /** Whether the conversation-level abort signal has been triggered. */
   get isAborted(): boolean {
     return this.abortSignal?.aborted ?? false
@@ -747,6 +769,7 @@ export class LocalSandbox
   /** mtime recorded after each successful read/write, for external-modification detection */
   private readonly _fileReadTimes = new Map<string, number>()
   private readonly _onFileMutation?: (filePath: string, kind: AgentFileMutationKind) => void
+  private readonly _shellFileTelemetry: boolean
   private _skillLifecycleRegistry?: SkillLifecycleRegistry
   private readonly _skillHooksFired: Set<string>
   private readonly _skillUseTracker?: SkillUseTracker
@@ -2081,6 +2104,7 @@ export class LocalSandbox
     this._humanGateThreadId = options.humanGateThreadId?.trim() || this.runId
     this._hookTurnId = options.hookTurnId
     this._onFileMutation = options.onFileMutation
+    this._shellFileTelemetry = options.shellFileTelemetry === true
     this._skillLifecycleRegistry = options.skillLifecycleRegistry
     this._skillHooksFired = options.skillHookKeys ?? new Set<string>()
     this._skillUseTracker = options.skillUseTracker
@@ -2097,6 +2121,7 @@ export class LocalSandbox
           })
     this._sharedSandboxCacheRoot = LocalSandbox.buildSharedSandboxCacheRoot(baseEnv)
     this.abortSignal = options.abortSignal
+    this.backgroundCommandLifecycle = options.backgroundCommandLifecycle
 
     // Prewarm sandbox state during construction so command execution avoids
     // kicking off expensive setup work on the hot path.
@@ -5002,7 +5027,10 @@ export class LocalSandbox
       }
       getModCallContext()?.assertLive?.()
       const r = await super.write(effectiveFilePath, effectiveContent)
-      if (!r.error) await this.recordReadTime(resolvedPath)
+      if (!r.error) {
+        await this.recordReadTime(resolvedPath)
+        await noteFileToolWrite(resolvedPath, effectiveContent)
+      }
       return r
     })
     if (!result.error) {
@@ -5310,6 +5338,7 @@ export class LocalSandbox
             await this.writeFileEncoded(resolvedPath, expectedContent, encoding)
             await this.recordReadTime(resolvedPath)
           }
+          await noteFileToolWrite(resolvedPath, () => iconv.encode(expectedContent, encoding))
           return { path: effectiveFilePath, filesUpdate: null, occurrences }
         } finally {
           await managedCapability?.handle.close().catch(() => undefined)
@@ -6922,6 +6951,7 @@ export class LocalSandbox
    * Use `getTaskOutput(taskId)` to retrieve the result or check progress.
    */
   async executeBackground(command: string, cwd?: string): Promise<string> {
+    if (this.backgroundCommandLifecycle) this.abortSignal?.throwIfAborted()
     const pendingStart = LocalSandbox.beginBackgroundTaskStart()
     if (!pendingStart) return LocalSandbox.backgroundStartCancelledMessage()
     try {
@@ -7000,6 +7030,9 @@ export class LocalSandbox
         )
       : null
     if (worktreeViolation) return `Command forbidden: ${worktreeViolation}`
+    if (this.backgroundCommandLifecycle &&
+        (await profileShellCommand(effectiveCommand, effectiveCwd, shellSyntax)).background)
+      return "Command was not started: the effective command detaches its shell. Remove shell detachment and use run_in_background for host-owned execution."
     const safety = assessCommandSafety(effectiveCommand, effectiveCwd, {
       windowsShell:
         process.platform === "win32" && this.windowsSandbox !== "none" ? "powershell" : "unknown",
@@ -7039,12 +7072,14 @@ export class LocalSandbox
       (isGitCommitCommand(effectiveCommand, shellSyntax) ||
         isGitPushCommand(effectiveCommand, shellSyntax))
     ) {
-      const result = await this.orchestrator.execute(
-        effectiveCommand,
-        effectiveCwd,
-        this.windowsSandbox,
-        shellSyntax,
-        outsideShellSyntax
+      const result = await shellFileCaptureContext.run(true, () =>
+        this.orchestrator!.execute(
+          effectiveCommand,
+          effectiveCwd,
+          this.windowsSandbox,
+          shellSyntax,
+          outsideShellSyntax
+        )
       )
       if (this.commandMayMutateHarnessState(effectiveCommand, effectiveCwd)) {
         this.markHarnessStageAttributionDirty()
@@ -7070,7 +7105,10 @@ export class LocalSandbox
       return LocalSandbox.backgroundStartCancelledMessage()
     }
     await authorizeCurrentModInput("host:execute", { command: effectiveCommand, cwd: effectiveCwd })
-    const taskId = randomUUID().slice(0, 8)
+    // The parent owns acceptance only. Once accepted, this process survives normal turn completion.
+    if (this.backgroundCommandLifecycle) this.abortSignal?.throwIfAborted()
+    if (taskAbortController.signal.aborted) return LocalSandbox.backgroundStartCancelledMessage()
+    const taskId = this.backgroundCommandLifecycle ? randomUUID() : randomUUID().slice(0, 8)
     const task = {
       id: taskId,
       threadId: this.runId,
@@ -7089,6 +7127,10 @@ export class LocalSandbox
       completion: undefined as Promise<void> | undefined,
       termination: undefined as Promise<void> | undefined
     }
+    this.backgroundCommandLifecycle?.accepted({
+      id: taskId, threadId: this.runId, command: effectiveCommand,
+      cwd: effectiveCwd, startedAt: task.startedAt
+    })
     LocalSandbox.backgroundTasks.set(taskId, task)
     if (this.commandMayMutateHarnessState(effectiveCommand, effectiveCwd)) {
       this.markHarnessStageAttributionDirty()
@@ -7097,6 +7139,9 @@ export class LocalSandbox
     // Fire and forget — don't await. Uses extended timeout for background execution.
     // Background tasks use their own AbortController (not the conversation's abortSignal)
     // so they survive conversation switches but can still be cancelled explicitly.
+    // A fast command must not publish success before a rejecting PostToolUse hook has settled.
+    let releaseLaunchReceipt!: () => void
+    const launchReceipt = new Promise<void>((resolve) => { releaseLaunchReceipt = resolve })
     const completion = this.executeRaw(
       effectiveCommand,
       undefined,
@@ -7187,11 +7232,26 @@ export class LocalSandbox
         console.log(`[LocalSandbox] background task ${taskId} errored: ${err}`)
       })
       .finally(async () => {
+        if (this.backgroundCommandLifecycle) await launchReceipt
         // executeRaw can resolve before a platform-specific process-tree kill
         // promise settles. Keep destructive-operation guards closed until both
         // ownership signals have reached a terminal state.
         await task.termination?.catch(() => undefined)
         task.settled = true
+        try {
+          this.backgroundCommandLifecycle?.settled({
+            id: taskId, threadId: this.runId,
+            output: task.result?.truncated && getModCallContext()?.protectedOutput
+              ? "[Truncated output suppressed]"
+              : protectCurrentModData(task.result?.output) ?? "Command ended without an execution result.",
+            exitCode: task.result?.exitCode ?? null,
+            truncated: task.result?.truncated ?? false,
+            cancelled: taskAbortController.signal.aborted
+          })
+        } catch (error) {
+          // The durable acceptance remains unresolved. Recovery must report unknown, never replay.
+          console.error("[LocalSandbox] Background result receipt could not be saved", { taskId, error })
+        }
 
         // Keep the result available for task_output, but never expire the only
         // ownership record before the command is deletion-safe. Checking object
@@ -7211,7 +7271,9 @@ export class LocalSandbox
     // also need a deletion-safe ownership fence after cancellation.
     task.completion = completion
 
-    const startedMessage = `Background task started (id: ${taskId}). Use task_output tool with this id to check results later.`
+    const startedMessage = this.backgroundCommandLifecycle
+      ? `Background task accepted (id: ${taskId}). Its completion will be delivered automatically to this conversation. This ID is not a process PID. Report what is pending and end this turn; do not poll or restart the command.`
+      : `Background task started (id: ${taskId}). Use task_output tool with this id to check results later.`
     try {
       return await this.applyPostToolUseHookToText(
         "execute",
@@ -7232,6 +7294,8 @@ export class LocalSandbox
         }
       }
       throw error
+    } finally {
+      releaseLaunchReceipt()
     }
   }
 
@@ -7310,6 +7374,200 @@ export class LocalSandbox
     await Promise.allSettled(completions)
   }
 
+  // Keyed by the actual Runtime signal, so a stale run cannot move a newer run's command.
+  private static readonly foregroundHandoffs = new WeakMap<AbortSignal, Set<() => boolean>>()
+
+  static yieldForegroundCommands(signal: AbortSignal): number {
+    if (signal.aborted) return 0
+    let transferred = 0
+    for (const handoff of [...(LocalSandbox.foregroundHandoffs.get(signal) ?? [])]) {
+      if (handoff()) transferred++
+    }
+    return transferred
+  }
+
+  /**
+   * Keep the full original approval/execute/PostToolUse chain. Only the wait is released;
+   * the existing process, hooks, output limits and physical termination fence remain owned.
+   */
+  private async executeWithForegroundHandoff(
+    execute: () => Promise<ExecuteResponse>,
+    releaseHumanGate?: () => void
+  ): Promise<ExecuteResponse> {
+    const ownerSignal = this.abortSignal!,
+      lifecycle = this.backgroundCommandLifecycle!
+    const task = {
+      id: randomUUID(),
+      threadId: this.runId,
+      modAgentId: getModCallContext()?.identity.agentId,
+      command: "",
+      cwd: this.workingDir,
+      startedAt: Date.now(),
+      completed: false,
+      settled: false,
+      outputChunks: [] as string[],
+      partialOutput: "",
+      partialTruncated: false,
+      lastOutputAt: Date.now(),
+      abortController: new AbortController(),
+      result: undefined as LocalExecuteResponse | undefined,
+      completion: undefined as Promise<void> | undefined,
+      termination: undefined as Promise<void> | undefined
+    }
+    let transferred = false,
+      rawActive = false
+    let resolveHandoff!: (value: ExecuteResponse) => void
+    const handoffResult = new Promise<ExecuteResponse>((resolve) => {
+      resolveHandoff = resolve
+    })
+    const abortWithOwner = () => task.abortController.abort(ownerSignal.reason)
+    ownerSignal.addEventListener("abort", abortWithOwner, { once: true })
+    if (ownerSignal.aborted) abortWithOwner()
+    const handoff = (): boolean => {
+      if (
+        !rawActive ||
+        transferred ||
+        task.completed ||
+        ownerSignal.aborted ||
+        task.abortController.signal.aborted ||
+        LocalSandbox.applicationShutdownStarted
+      )
+        return false
+      try {
+        // Do not release the caller unless ownership has been saved successfully.
+        lifecycle.accepted({
+          id: task.id,
+          threadId: task.threadId,
+          command: task.command,
+          cwd: task.cwd,
+          startedAt: task.startedAt
+        })
+      } catch (error) {
+        console.error(
+          "[LocalSandbox] Foreground command remains attached: receipt unavailable",
+          error
+        )
+        return false
+      }
+      transferred = true
+      LocalSandbox.backgroundTasks.set(task.id, task)
+      ownerSignal.removeEventListener("abort", abortWithOwner)
+      LocalSandbox.foregroundHandoffs.get(ownerSignal)?.delete(handoff)
+      resolveHandoff({
+        output: `The user sent a new message. The existing command continues in the background (id: ${task.id}); it was not restarted. Read and respond to the new message now. Completion will be delivered automatically; do not poll or repeat the command. This ID is not a process PID.`,
+        exitCode: null,
+        truncated: false
+      })
+      return true
+    }
+    const unregister = () => {
+      ownerSignal.removeEventListener("abort", abortWithOwner)
+      const handoffs = LocalSandbox.foregroundHandoffs.get(ownerSignal)
+      handoffs?.delete(handoff)
+      if (!handoffs?.size) LocalSandbox.foregroundHandoffs.delete(ownerSignal)
+    }
+    const execution = foregroundCommandContext.run(
+      {
+        sandbox: this,
+        signal: task.abortController.signal,
+        detached: () => transferred,
+        onData: (text) => {
+          task.lastOutputAt = Date.now()
+          const remaining = Math.max(0, this.maxOutputBytes - task.partialOutput.length)
+          task.partialOutput += text.slice(0, remaining)
+          if (text.length > remaining) task.partialTruncated = true
+        },
+        onTermination: (termination) => {
+          task.termination = termination
+        },
+        enter: (command, cwd) => {
+          task.startedAt = Date.now()
+          task.command = command
+          task.cwd = cwd
+          rawActive = true
+          if (!transferred) {
+            const handoffs = LocalSandbox.foregroundHandoffs.get(ownerSignal) ?? new Set()
+            handoffs.add(handoff)
+            LocalSandbox.foregroundHandoffs.set(ownerSignal, handoffs)
+          }
+          return () => {
+            rawActive = false
+          }
+        }
+      },
+      execute
+    )
+    // Observe both outcomes immediately, including failures after the original caller returned.
+    task.completion = execution
+      .then(
+        (result) => {
+          if (!task.completed) task.result = result
+        },
+        (error) => {
+          if (!task.completed)
+            task.result = {
+              output: `Command execution failed: ${error instanceof Error ? error.message : String(error)}`,
+              exitCode: 1,
+              truncated: false
+            }
+        }
+      )
+      .then(async () => {
+        task.completed = true
+        unregister()
+        await task.termination?.catch(() => undefined)
+        task.settled = true
+        try {
+          releaseHumanGate?.()
+        } catch (error) {
+          // A lease cleanup failure must not strand an already terminated command's receipt.
+          console.error("[LocalSandbox] Foreground command gate release failed", {
+            taskId: task.id,
+            error
+          })
+        }
+        if (!transferred) return
+        try {
+          lifecycle.settled({
+            id: task.id,
+            threadId: task.threadId,
+            output:
+              task.result?.truncated && getModCallContext()?.protectedOutput
+                ? "[Truncated output suppressed]"
+                : (protectCurrentModData(task.result?.output) ??
+                  "Command ended without an execution result."),
+            exitCode: task.result?.exitCode ?? null,
+            truncated: task.result?.truncated ?? false,
+            cancelled: task.abortController.signal.aborted
+          })
+        } catch (error) {
+          console.error("[LocalSandbox] Transferred command receipt could not be saved", {
+            taskId: task.id,
+            error
+          })
+        }
+        const expiry = setTimeout(
+          () => {
+            if (LocalSandbox.backgroundTasks.get(task.id) === task)
+              LocalSandbox.backgroundTasks.delete(task.id)
+          },
+          10 * 60 * 1000
+        )
+        expiry.unref?.()
+      })
+    const foregroundResult = execution.then(
+      async (result) => {
+        await task.completion
+        return result
+      },
+      async (error) => {
+        await task.completion
+        throw error
+      }
+    )
+    return Promise.race([foregroundResult, handoffResult])
+  }
+
   /** Prevent late background starts, cancel every detached task, and wait bounded. */
   static async cancelAllBackgroundTasksAndWait(timeoutMs = 5_000): Promise<boolean> {
     LocalSandbox.beginApplicationShutdown()
@@ -7379,6 +7637,14 @@ export class LocalSandbox
       }
     }
     const humanGateLease = await this.requestHumanGateForExecute(preResult)
+    if (this.backgroundCommandLifecycle && this.abortSignal && !this.worktreeIsolation &&
+        readOnlyShellExecutionContext.getStore() !== true &&
+        (!getModCallContext() || getModCallContext()?.identity.agentId === "main")) {
+      return this.executeWithForegroundHandoff(
+        () => this.executeAfterPreToolUse(command, requestedCwd, requestedArgs, preResult),
+        humanGateLease?.release
+      )
+    }
     try {
       return await this.executeAfterPreToolUse(command, requestedCwd, requestedArgs, preResult)
     } finally {
@@ -7428,6 +7694,9 @@ export class LocalSandbox
     }
 
     // Always check forbidden commands, even without orchestrator (YOLO mode safety net)
+    if (this.backgroundCommandLifecycle &&
+        (await profileShellCommand(effectiveCommand, effectiveCwd, shellSyntax)).background)
+      return { output: "Command was not started: the effective command detaches its shell. Remove shell detachment and use run_in_background for host-owned execution.", exitCode: 1, truncated: false }
     const outsideShellSyntax = await LocalSandbox.resolveCommandShellSyntax("none")
     const safety = assessCommandSafety(effectiveCommand, effectiveCwd, {
       windowsShell:
@@ -7481,19 +7750,23 @@ export class LocalSandbox
     // The orchestrator calls back into executeRaw() for actual execution.
     await authorizeCurrentModInput("host:execute", { command: effectiveCommand, cwd: effectiveCwd })
     if (this.orchestrator) {
-      const result = await this.orchestrator.execute(
-        effectiveCommand,
-        effectiveCwd,
-        this.windowsSandbox,
-        shellSyntax,
-        outsideShellSyntax
+      const result = await shellFileCaptureContext.run(true, () =>
+        this.orchestrator!.execute(
+          effectiveCommand,
+          effectiveCwd,
+          this.windowsSandbox,
+          shellSyntax,
+          outsideShellSyntax,
+          () => !foregroundCommandContext.getStore()?.detached()
+        )
       )
       if (this.commandMayMutateHarnessState(effectiveCommand, effectiveCwd)) {
         this.markHarnessStageAttributionDirty()
       }
       // Adoption tracking: react to agent rm/mv of generated files (side-effect
       // only, never throws). Only successful commands act (exitCode === 0).
-      recordAdoptionShellFileOps(effectiveCommand, this.workingDir, result.exitCode)
+      recordAdoptionShellFileOps(effectiveCommand, effectiveCwd, result.exitCode)
+      this.recordShellReadTelemetry(effectiveCommand, effectiveCwd, result, shellSyntax)
       const postResult = await this.runHooks("PostToolUse", {
         toolName: "execute",
         toolArgs: { command: effectiveCommand, cwd: effectiveCwd },
@@ -7504,13 +7777,16 @@ export class LocalSandbox
       return LocalSandbox.applyPostHookToExecResult(result, postResult)
     }
 
-    const result = await this.executeRaw(effectiveCommand, undefined, undefined, undefined, {
-      cwd: effectiveCwd
-    })
+    const result = await shellFileCaptureContext.run(true, () =>
+      this.executeRaw(effectiveCommand, undefined, undefined, undefined, {
+        cwd: effectiveCwd
+      })
+    )
     if (this.commandMayMutateHarnessState(effectiveCommand, effectiveCwd)) {
       this.markHarnessStageAttributionDirty()
     }
-    recordAdoptionShellFileOps(effectiveCommand, this.workingDir, result.exitCode)
+    recordAdoptionShellFileOps(effectiveCommand, effectiveCwd, result.exitCode)
+    this.recordShellReadTelemetry(effectiveCommand, effectiveCwd, result, shellSyntax)
     const postResult = await this.runHooks("PostToolUse", {
       toolName: "execute",
       toolArgs: { command: effectiveCommand, cwd: effectiveCwd },
@@ -7791,19 +8067,40 @@ export class LocalSandbox
         truncated: false
       }
     }
+    // Read the request flag here, in the caller's async context; the capture
+    // window itself starts after any Windows sandbox queue wait, right before
+    // the process starts.
+    const captureFileEffects =
+      this._shellFileTelemetry &&
+      !backgroundExecution &&
+      shellFileCaptureContext.getStore() === true
+    const runUnserialized = (): Promise<LocalExecuteResponse> => {
+      const foreground = foregroundCommandContext.getStore()
+      const adoptable = foreground?.sandbox === this && !backgroundExecution ? foreground : undefined
+      const leave = adoptable?.enter(command, effectiveCwd)
+      return this.runWithShellFileCapture(command, effectiveCwd, captureFileEffects, shellSyntax, () =>
+        this.executeRawUnserialized(
+          command,
+          sandboxModeOverride,
+          timeoutMs,
+          adoptable
+            ? overrideAbortSignal ? AbortSignal.any([adoptable.signal, overrideAbortSignal]) : adoptable.signal
+            : overrideAbortSignal,
+          effectiveCwd,
+          adoptable ? {
+            ...options, waitForProcessTree: true,
+            onData: (text) => { adoptable.onData(text); options?.onData?.(text) },
+            onTermination: (termination) => { adoptable.onTermination(termination); options?.onTermination?.(termination) }
+          } : options
+        )
+      ).finally(leave)
+    }
     if (
       process.platform !== "win32" ||
       effectiveSandboxMode === "none" ||
       (backgroundExecution && !this.worktreeIsolation)
     ) {
-      return this.executeRawUnserialized(
-        command,
-        sandboxModeOverride,
-        timeoutMs,
-        overrideAbortSignal,
-        effectiveCwd,
-        options
-      )
+      return runUnserialized()
     }
 
     const sandboxWorkspaceRoot = path.resolve(this.workingDir)
@@ -7814,27 +8111,119 @@ export class LocalSandbox
     )
     const commandConcurrency = classifyCommandConcurrency(command)
     if (commandConcurrency === "parallel_safe") {
-      return LocalSandbox.runParallelSafeExecution(queueKey, () =>
-        this.executeRawUnserialized(
-          command,
-          sandboxModeOverride,
-          timeoutMs,
-          overrideAbortSignal,
-          effectiveCwd,
-          options
-        )
-      )
+      return LocalSandbox.runParallelSafeExecution(queueKey, runUnserialized)
     }
 
-    return LocalSandbox.runSerializedExecution(queueKey, () =>
-      this.executeRawUnserialized(
+    return LocalSandbox.runSerializedExecution(queueKey, runUnserialized)
+  }
+
+  /**
+   * Bash First telemetry: compare the workspace around a foreground agent
+   * command and report the file effects the way write_file/edit_file report
+   * theirs. Commands that cannot write are not captured; capture failures never
+   * reach the command result.
+   */
+  private async runWithShellFileCapture(
+    command: string,
+    cwd: string,
+    captureFileEffects: boolean,
+    shellSyntax: CommandShellSyntax,
+    run: () => Promise<LocalExecuteResponse>
+  ): Promise<LocalExecuteResponse> {
+    if (!captureFileEffects) return run()
+    let capture: ShellFileCapture | null = null
+    try {
+      capture = await beginShellFileCapture({
+        workspaceRoot: this.workingDir,
         command,
-        sandboxModeOverride,
-        timeoutMs,
-        overrideAbortSignal,
-        effectiveCwd,
-        options
-      )
+        cwd,
+        shellSyntax,
+        isCodeFile
+      })
+    } catch (error) {
+      console.warn("[LocalSandbox] shell file capture unavailable:", error)
+    }
+    if (!capture) return run()
+    // Stage at command start, like write/edit capture it right before mutating.
+    const harnessStage = this.captureHarnessStageForShellEdit()
+    try {
+      return await run()
+    } finally {
+      await this.applyShellFileCapture(capture, harnessStage)
+    }
+  }
+
+  private captureHarnessStageForShellEdit(): Promise<HarnessStageAttribution | undefined> {
+    if (!this.harnessProjectId || !this.featureId) return Promise.resolve(undefined)
+    return getHarnessStageAttributionForCodeGeneration(this.harnessProjectId, this.featureId).catch(
+      () => undefined
+    )
+  }
+
+  private async applyShellFileCapture(
+    capture: ShellFileCapture,
+    harnessStagePromise: Promise<HarnessStageAttribution | undefined>
+  ): Promise<void> {
+    try {
+      const { changes } = await capture.finish()
+      for (const change of changes) {
+        if (change.decision !== "unattributed") this._onFileMutation?.(change.absPath, "shell")
+      }
+      const counted = changes.filter((change) => change.decision === "counted")
+      if (changes.length) {
+        console.info("[LocalSandbox] Shell file capture completed", {
+          threadId: executeTraceContext.getStore()?.threadId || this.runId,
+          counted: counted.length,
+          attributed: changes.filter((change) => change.decision === "attributed").length,
+          unattributed: changes.filter((change) => change.decision === "unattributed").length
+        })
+      }
+      if (counted.length > 0) {
+        const threadId = executeTraceContext.getStore()?.threadId || this.runId
+        for (const change of counted) {
+          void recordAdoptionShellEdit({
+            threadId,
+            filePath: change.absPath,
+            beforeContent: change.before ?? "",
+            afterContent: change.after ?? "",
+            workspacePath: this.workingDir,
+            harnessStagePromise
+          })
+        }
+      }
+    } catch (error) {
+      console.warn("[LocalSandbox] shell file capture failed:", error)
+    }
+  }
+
+  /**
+   * read_file reports constraint-file reads itself; a Bash First `cat` of the
+   * same file reports here once the command succeeded with output.
+   */
+  private recordShellReadTelemetry(
+    command: string,
+    cwd: string,
+    result: ExecuteResponse,
+    shellSyntax: CommandShellSyntax
+  ): void {
+    if (!this._shellFileTelemetry || !this.pluginRoot || result.exitCode !== 0) return
+    if (!LocalSandbox.hasStdoutContent(result.output)) return
+    const traceContext = executeTraceContext.getStore()
+    for (const readPath of extractShellCommandReadPaths(command, cwd, shellSyntax)) {
+      void this.recordPluginSystemConstraintRead(readPath, traceContext)
+    }
+  }
+
+  /** True when an execute result carries real stdout, not only markers or stderr. */
+  private static hasStdoutContent(output: string | undefined): boolean {
+    if (!output) return false
+    return (
+      output
+        .replace(/<execute_metadata>[\s\S]*?<\/execute_metadata>/g, "")
+        .split("\n")
+        .filter((line) => !line.startsWith("[stderr] ") && line.trim() !== "<no output>")
+        .join("\n")
+        .trim().length > 0
     )
   }
 

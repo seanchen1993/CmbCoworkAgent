@@ -1,4 +1,5 @@
 import { ensureAppNotificationsSchema } from "./app-notifications-schema"
+import { ensureUiGuideSchema } from "./ui-guide-store"
 import {
   getDbPath,
   getMemorySessionOptInMigrationState,
@@ -950,6 +951,7 @@ export async function initializeDatabase(): Promise<NativeSqliteAdapter> {
   )
 
   ensureAppNotificationsSchema(db)
+  ensureUiGuideSchema(db)
   ensureImServiceSchema(db)
 
   migrateLegacyMemorySessionOptIn(db)
@@ -3950,6 +3952,24 @@ export function getThreadMessageProviderOccurrencesBeforeUser(
   } finally {
     boundary.free()
   }
+  return getThreadMessageProviderOccurrencesBeforeOrdinal(threadId, ordinal, providerSourceIds)
+}
+
+/** Internal notification prompts are deliberately absent from the visible transcript.
+ * Capture their boundary before streaming so each final snapshot sees the same history.
+ */
+export function captureThreadMessageProviderOccurrenceBoundary(threadId: string) {
+  const ordinal = getOrRepairThreadMessageBucket(getDb(), threadId).bucket.next_ordinal
+  return (providerSourceIds: readonly string[]) =>
+    getThreadMessageProviderOccurrencesBeforeOrdinal(threadId, ordinal, providerSourceIds)
+}
+
+function getThreadMessageProviderOccurrencesBeforeOrdinal(
+  threadId: string,
+  ordinal: number,
+  providerSourceIds: readonly string[]
+): Array<{ provider_source_id: string; role: Message["role"]; provider_occurrence: number }> {
+  const database = getDb()
   const results = new Map<string, { provider_source_id: string; role: Message["role"]; provider_occurrence: number }>()
   const remember = (source: string, role: Message["role"], occurrence: number): void => {
     if (!Number.isInteger(occurrence) || occurrence < 1) return

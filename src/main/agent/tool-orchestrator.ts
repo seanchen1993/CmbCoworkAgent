@@ -337,7 +337,8 @@ export class ToolOrchestrator {
     cwd: string,
     sandboxMode: string,
     shellSyntax: CommandShellSyntax = process.platform === "win32" ? "powershell" : "posix",
-    outsideShellSyntax: CommandShellSyntax = shellSyntax
+    outsideShellSyntax: CommandShellSyntax = shellSyntax,
+    canRetry: () => boolean = () => true
   ): Promise<ExecuteResponse> {
     {
       const modApproved = hasModOperationApproval("host:execute", { command, cwd })
@@ -480,14 +481,14 @@ export class ToolOrchestrator {
       // commands, but still require explicit approval before escaping the sandbox.
       if (yoloMode) {
         const result = await this.rawExecute(command, sandboxMode, cwd)
-        return this.maybeRetryOutsideSandbox(command, cwd, sandboxMode, result, outsideShellSyntax)
+        return canRetry() ? this.maybeRetryOutsideSandbox(command, cwd, sandboxMode, result, outsideShellSyntax) : result
       }
 
       // 4. Safe commands → execute directly
       if (safety.level === "safe") {
         console.log("[Orchestrator] safe → rawExecute")
         const result = await this.rawExecute(command, sandboxMode, cwd)
-        return this.maybeRetryOutsideSandbox(command, cwd, sandboxMode, result, outsideShellSyntax)
+        return canRetry() ? this.maybeRetryOutsideSandbox(command, cwd, sandboxMode, result, outsideShellSyntax) : result
       }
 
       // 5. Needs approval → check cache, then ask user
@@ -538,6 +539,9 @@ export class ToolOrchestrator {
       // looks sandbox-induced.
       try {
         const result = await this.rawExecute(command, sandboxMode, cwd)
+        // A transferred command reports failure through its durable completion notice.
+        // A new approval/retry must belong to that live follow-up, not the ended caller.
+        if (!canRetry()) return result
         return await this.maybeRetryOutsideSandbox(
           command,
           cwd,
@@ -547,7 +551,7 @@ export class ToolOrchestrator {
         )
       } catch (err) {
         // 7. Sandbox denial → block and inform user
-        if (sandboxMode !== "none" && this.isSandboxDenialError(err)) {
+        if (canRetry() && sandboxMode !== "none" && this.isSandboxDenialError(err)) {
           return this.handleSandboxRetry(
             command,
             cwd,

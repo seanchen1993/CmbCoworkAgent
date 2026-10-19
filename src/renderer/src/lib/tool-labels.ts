@@ -1,3 +1,5 @@
+import { BOT_TOOL_LABELS } from "../../../shared/tool-call-summary"
+
 export const IN_APP_BROWSER_TOOL_LABELS: Record<string, string> = {
   mcp__inAppBrowser__browser_close: "内置浏览器-关闭",
   mcp__inAppBrowser__browser_resize: "内置浏览器-调整窗口大小",
@@ -56,6 +58,7 @@ const TOOL_LABELS: Record<string, string> = {
   invoke_deferred_tool: "调用延迟加载的工具",
   inspect_tool: "查看工具定义",
   search_tool: "搜索工具",
+  ...BOT_TOOL_LABELS,
   ...IN_APP_BROWSER_TOOL_LABELS
 }
 

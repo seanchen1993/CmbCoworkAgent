@@ -24,3 +24,13 @@ export interface AttachmentBytesParseRequest {
   bytes: ArrayBuffer
   maxLength?: number
 }
+
+/** Text extraction plus the retained original file's identity. */
+export interface FileAttachment {
+  filename: string
+  filePath: string
+  content: string
+  mimeType: string
+  size: number
+  truncated: boolean
+}

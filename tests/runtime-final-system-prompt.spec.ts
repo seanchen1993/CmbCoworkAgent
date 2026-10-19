@@ -23,7 +23,14 @@ import { convertMessagesToCompletionsMessageParams } from "@langchain/openai"
 
 import { loadAgentsPromptForWorkspace } from "../src/main/agent/agents-md.ts"
 import { buildCoordinatorSystemPrompt } from "../src/main/agent/coordinator-mode.ts"
-import { WORKFLOW_MODE_SYSTEM_PROMPT } from "../src/main/agent/workflow/prompts.ts"
+import {
+  WORKFLOW_MODE_SYSTEM_PROMPT,
+  AUTOMATIC_WORKFLOW_SYSTEM_PROMPT,
+  WORKFLOW_TOOL_DESCRIPTION,
+  AUTOMATIC_WORKFLOW_TOOL_DESCRIPTION
+} from "../src/main/agent/workflow/prompts.ts"
+import { createWorkflowTool } from "../src/main/agent/workflow/tool.ts"
+import { validateWorkflowScript } from "../src/main/agent/workflow/script.ts"
 import {
   createConciseOutputStyleTurnReminderMiddleware,
   createDeepAgent,
@@ -948,6 +955,92 @@ function testDefaultCompletionAndRepetitionContract(workspacePath: string): void
     "workflow main agent should distinguish asynchronous turn boundaries from completion"
   )
 
+  const finalBotWorkflowPrompt = captureFinalSystemPrompt(
+    `${getSystemPrompt(workspacePath, "none", {
+      managedForegroundExec: true,
+      notifiedBackgroundCommands: true
+    })}${AUTOMATIC_WORKFLOW_SYSTEM_PROMPT}`
+  )
+  assertCompletionAndRepetitionContract(finalBotWorkflowPrompt, "automatic Bot workflow")
+  assert(
+    finalBotWorkflowPrompt.includes("the host persists completion and wakes this conversation automatically") &&
+      !finalBotWorkflowPrompt.includes("项目编译、依赖安装、测试套件、代码生成和 Docker 构建均可直接调用 execute") &&
+      getSystemPrompt(workspacePath, "none", { managedForegroundExec: true }).includes(
+        "项目编译、依赖安装、测试套件、代码生成和 Docker 构建均可直接调用 execute"
+      ),
+    "Bot root command guidance must match native background receipts without changing managed executors"
+  )
+  assert(
+    finalBotWorkflowPrompt.includes("for small or conversational requests answer directly") &&
+      finalBotWorkflowPrompt.includes("don't poll or relaunch") &&
+      finalBotWorkflowPrompt.includes("Continue when the task notification arrives"),
+    "Bot orchestration must preserve direct answers and asynchronous completion"
+  )
+  assert(
+    !finalBotWorkflowPrompt.includes("The user selected Dynamic Workflows") &&
+      !finalBotWorkflowPrompt.includes("In this mode several global directives don't apply"),
+    "Bot orchestration must not claim user-selected modes or override normal completion/output rules"
+  )
+  assert(
+    finalBotWorkflowPrompt.includes("ordinary long-running command") &&
+      finalBotWorkflowPrompt.includes("Do not manufacture extra agents") &&
+      AUTOMATIC_WORKFLOW_TOOL_DESCRIPTION.includes(
+        "Launch approval and command approvals still apply"
+      ) &&
+      AUTOMATIC_WORKFLOW_TOOL_DESCRIPTION.includes("do not detach a shell process yourself") &&
+      AUTOMATIC_WORKFLOW_TOOL_DESCRIPTION.includes("single focused agent()") &&
+      AUTOMATIC_WORKFLOW_TOOL_DESCRIPTION.includes("execute with run_in_background"),
+    "Bot background work must release the conversation through the existing approved engine"
+  )
+  assert(
+    !AUTOMATIC_WORKFLOW_TOOL_DESCRIPTION.includes("user selected Dynamic Workflows") &&
+      !AUTOMATIC_WORKFLOW_TOOL_DESCRIPTION.includes("do NOT force a workflow") &&
+      WORKFLOW_TOOL_DESCRIPTION.includes("do NOT force a workflow") &&
+      !WORKFLOW_TOOL_DESCRIPTION.includes("one long-running task") &&
+      !finalWorkflowPrompt.includes("one long-running task"),
+    "single background work is a trusted host opt-in, not a change to ordinary workflow mode"
+  )
+  const handoffExample = AUTOMATIC_WORKFLOW_TOOL_DESCRIPTION.match(
+    /  export const meta = \{ name: "Background task"[^\n]+\n  return await agent\(args\.task[^\n]+/
+  )?.[0]
+  assert(handoffExample, "the automatic tool must provide a complete single-agent script")
+  validateWorkflowScript(handoffExample!)
+  assert(
+    AUTOMATIC_WORKFLOW_TOOL_DESCRIPTION.includes("no exec(), execute(), shell or process API") &&
+      !WORKFLOW_TOOL_DESCRIPTION.includes("name: \"Background task\""),
+    "the Bot handoff example must use supported tools without changing explicit-mode guidance"
+  )
+  for (const description of [WORKFLOW_TOOL_DESCRIPTION, AUTOMATIC_WORKFLOW_TOOL_DESCRIPTION]) {
+    assert(
+      description.includes("export const meta") &&
+        description.includes("opts.agentType") &&
+        description.includes("opts.isolation") &&
+        description.includes("resumeFromRunId") &&
+        description.includes("writes serialized"),
+      "both workflow usage policies must retain the same script, scope and resume protocol"
+    )
+  }
+  for (const automaticUse of [false, true]) {
+    const workflowTool = createWorkflowTool({
+      threadId: "workflow-description-contract",
+      workspacePath,
+      agentProfiles: [],
+      automaticUse,
+      subagentDeps: {
+        createRuntime: async () => {
+          throw new Error("Description inspection must not execute")
+        },
+        cleanupThread: async () => {},
+        isRetryableApiError: () => false
+      }
+    })
+    assert(
+      workflowTool.description ===
+        (automaticUse ? AUTOMATIC_WORKFLOW_TOOL_DESCRIPTION : WORKFLOW_TOOL_DESCRIPTION),
+      "the actual workflow tool must expose the matching usage policy, without changing its protocol"
+    )
+  }
+
   const taskSubagentPrompts = captureTaskSubagentPrompts({ projectMode: false })
   for (const [name, prompt] of taskSubagentPrompts) {
     assertCompletionAndRepetitionContract(prompt, `task subagent ${name}`)
@@ -996,6 +1089,125 @@ const requestText = (messages: BaseMessage[]): string =>
   messages
     .map((m) => (typeof m.content === "string" ? m.content : JSON.stringify(m.content)))
     .join("\n")
+
+async function testManagedForegroundCommands(workspacePath: string): Promise<void> {
+  for (const managedExecution of [false, true]) {
+    let foreground = 0,
+      background = 0
+    const backend = {
+      id: "managed-command-contract",
+      execute: async () => {
+        foreground++
+        return { output: "verified fixture", exitCode: 0 }
+      },
+      executeBackground: async () => {
+        background++
+        return "task_id: fixture-background"
+      }
+    }
+    const calls: ToolStrategyRequest[] = []
+    const model = new ToolStrategyContractModel(calls, (messages) =>
+      messages.at(-1)?._getType() === "tool"
+        ? finishedStrategyMessage()
+        : new AIMessage({
+            content: "",
+            tool_calls: [
+              {
+                id: "command",
+                name: "execute",
+                args: { command: "fixture", run_in_background: true },
+                type: "tool_call"
+              }
+            ]
+          })
+    )
+    const agent = createDeepAgent({
+      model,
+      backend,
+      managedExecution,
+      mainSubagentsEnabled: false,
+      mainTodosEnabled: false,
+      includeGeneralPurposeSubagent: false,
+      systemPrompt: buildBaseRuntimePrompt(workspacePath)
+    })
+    await agent.invoke({ messages: [new HumanMessage("Inspect the fixture")] })
+    assert(
+      foreground === (managedExecution ? 1 : 0) && background === (managedExecution ? 0 : 1),
+      "managed commands must await their actual result; ordinary background execution must stay unchanged"
+    )
+    assert(calls.length === 2, "command routing must not introduce extra model turns")
+  }
+}
+
+async function testBotBackgroundCommandHandoff(workspacePath: string): Promise<void> {
+  const cases = [
+    { command: "node long-task.js", run_in_background: true, blocked: false },
+    { command: "node long-task.js & sleep 2", blocked: true },
+    { command: "bash -c 'node long-task.js &'", blocked: true },
+    { command: "printf '%s' 'a & b'", blocked: false },
+    { command: "cat <<'EOF'\na & b\nEOF", blocked: false },
+    { command: "node check.js && node report.js", blocked: false },
+    // The PowerShell call operator launches synchronously; it is not POSIX &.
+    { command: "& node check.js", syntax: "powershell", blocked: false },
+    { command: "node check.js && node report.js", syntax: "cmd", blocked: false }
+  ]
+  for (const fixture of cases) {
+    let foreground = 0,
+      background = 0
+    const calls: ToolStrategyRequest[] = []
+    const backend = {
+      id: "bot-background-handoff",
+      cwd: workspacePath,
+      execute: async () => {
+        foreground++
+        return { output: "verified fixture", exitCode: 0 }
+      },
+      executeBackground: async () => {
+        background++
+        return "task_id: fixture-background"
+      }
+    }
+    const model = new ToolStrategyContractModel(calls, (messages) =>
+      messages.at(-1)?._getType() === "tool"
+        ? finishedStrategyMessage()
+        : new AIMessage({
+            content: "",
+            tool_calls: [{
+              id: "command", name: "execute", type: "tool_call",
+              args: {
+                command: fixture.command,
+                run_in_background: fixture.run_in_background
+              }
+            }]
+          })
+    )
+    const agent = createDeepAgent({
+      model,
+      backend,
+      managedExecution: true,
+      notifiedBackgroundCommands: true,
+      backgroundCommandCwd: workspacePath,
+      backgroundCommandShellSyntax: fixture.syntax ?? "posix",
+      mainSubagentsEnabled: false,
+      mainTodosEnabled: false,
+      includeGeneralPurposeSubagent: false,
+      systemPrompt: buildBaseRuntimePrompt(workspacePath)
+    })
+    await agent.invoke({ messages: [new HumanMessage("Inspect the fixture")] })
+    assert(
+      foreground === (fixture.blocked || fixture.run_in_background ? 0 : 1) &&
+        background === (!fixture.blocked && fixture.run_in_background ? 1 : 0),
+      `Bot root command handoff must act before execution: ${fixture.command}`
+    )
+    const feedback = requestText(calls.at(-1)!.messages)
+    assert(
+      feedback.includes("Command was not started") === fixture.blocked &&
+        (!fixture.blocked || feedback.includes("completion automatically")),
+      "a refused command must provide truthful launch status and approved recovery"
+    )
+    assert(calls.length === 2, "the guard must not launch another model or command itself")
+  }
+}
 
 async function testToolStrategyFinalRequests(workspacePath: string): Promise<void> {
   let executeCount = 0
@@ -1432,6 +1644,10 @@ async function run(): Promise<void> {
     console.log("PASS additional output style contracts")
     await testToolStrategyFinalRequests(workspacePath)
     console.log("PASS tool strategy final requests, tool schemas, and output-style matrix")
+    await testManagedForegroundCommands(workspacePath)
+    console.log("PASS managed foreground and ordinary background command routing")
+    await testBotBackgroundCommandHandoff(workspacePath)
+    console.log("PASS Bot background handoff before spawn and shell-syntax boundaries")
     await testWorkflowToolStrategyRequests(workspacePath)
     console.log("PASS workflow tool strategy approval-mode matrix")
     await testRestrictedRuntimeToolStrategyRequests(workspacePath)

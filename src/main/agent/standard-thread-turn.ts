@@ -51,7 +51,7 @@ import {
   type SkillUseBlockMetadata
 } from "../../shared/skill-use-block"
 
-export type StandardTurnSource = "desktop" | "im" | "scheduler" | "heartbeat"
+export type StandardTurnSource = "desktop" | "im" | "scheduler" | "heartbeat" | "bot"
 
 export interface StandardThreadMetadata {
   metadata: Record<string, unknown>

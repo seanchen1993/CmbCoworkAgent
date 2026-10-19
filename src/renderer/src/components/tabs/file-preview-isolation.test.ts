@@ -235,3 +235,14 @@ describe("persisted active file preview isolation", () => {
     expect(previewIpc).not.toContain('svg: "image/svg+xml"')
   })
 })
+
+describe("file preview visual submission capability", () => {
+  it("requires explicit ordinary-thread capability and keeps Bot transport preview disabled", () => {
+    const botPreview = readFileSync(new URL("../bots/BotMessageFilePreview.tsx", import.meta.url), "utf8")
+    expect(botPreview).toContain('visualEditPolicy="disabled"')
+    expect(fileViewer).toContain('visualEditPolicy = "disabled"')
+    expect(fileViewer).toContain('!threadId || visualEditPolicy !== "thread-submit"')
+    expect(tabbedPanel).toContain('visualEditPolicy="thread-submit"')
+    expect(rightPanel).toContain('visualEditPolicy="thread-submit"')
+  })
+})

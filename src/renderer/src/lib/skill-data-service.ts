@@ -192,7 +192,7 @@ export function normalizeSkillMetricKey(rawName?: string): string {
   const base = String(rawName || "").trim().replace(/^\$/, "")
   if (!base) return ""
   // Trace 中 usedSkills 可能是 `${name}-${version}`，统一还原成 skill name。
-  return base.replace(/-v?\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$/i, "").trim().toLowerCase()
+  return base.replace(/-v?\d+(?:\.\d+){0,3}(?:[-+][0-9A-Za-z.-]+)?$/i, "").trim().toLowerCase()
 }
 
 /**

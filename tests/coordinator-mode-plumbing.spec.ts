@@ -1727,8 +1727,8 @@ async function testMainResolvesAndPersistsMode(): Promise<void> {
   )
   assertIncludes(
     agentIpc,
-    "isTrustedCoordinatorNotificationInvoke ? undefined : message",
-    "agent Stop hook context does not seed internal coordinator notification turns as user messages"
+    "isTrustedCoordinatorNotificationInvoke || isBotInternalTurnInvoke ? undefined : message",
+    "agent Stop hook context does not seed trusted coordinator or command receipts as user messages"
   )
   assertIncludes(
     agentIpc,
@@ -3487,6 +3487,16 @@ async function testHookAgentIdentityPlumbing(): Promise<void> {
     runtime,
     "agentId: subagentOptions.agentId",
     "workflow leaf runtime receives the stable agent id"
+  )
+  assertIncludes(
+    runtime,
+    "onFileMutation: worktreeIsolation ? undefined : onFileMutation",
+    "shared workflow leaves report file mutations without polluting parent scope with isolated worktree paths"
+  )
+  assertIncludes(
+    runtime,
+    "agentId: workerInput.workerId,\n      onFileMutation,",
+    "coordinator runtime rebuilds retain the parent file mutation sink"
   )
   assertIncludes(
     agentIpc,

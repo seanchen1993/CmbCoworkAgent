@@ -21,6 +21,8 @@ import {
   type FallbackIndexBaselineCache
 } from "./stream-fallback-baselines"
 import { isSerializedSummarizationMessage } from "../../../shared/context-compaction-messages"
+import type { BotMessageReply } from "../../../shared/bots/contracts"
+import { isBotMessageReply } from "../../../shared/bots/message-reply"
 import {
   CONTEXT_COMPACTION_EVENT_TYPE,
   parseContextCompactionLifecycleEvent,
@@ -28,7 +30,11 @@ import {
 } from "../../../shared/context-compaction-events"
 import { resolveHydratedThreadModel } from "../../../shared/thread-model-selection"
 import { LatestRequestGate } from "../../../shared/latest-request-gate"
-import { isExplicitNormalModeMetadata, isWorkflowModeMetadata } from "./coordinator-mode-helpers"
+import type { FileAttachment } from "../../../shared/file-attachment"
+import {
+  isExplicitNormalModeMetadata,
+  hasWorkflowPanelCapability
+} from "./coordinator-mode-helpers"
 import {
   applyWorkflowProgressEvent,
   type WorkflowProgressEventView,
@@ -681,6 +687,9 @@ export interface ThreadState {
   contextReminder: ContextReminderState
   harnessAgentmdLoadStatus: HarnessAgentmdLoadStatusState | null
   draftInput: string
+  draftBotReplyTo?: BotMessageReply | null
+  /** Managed Bot composer attachments survive navigation; no binary data is retained here. */
+  draftAttachments: FileAttachment[]
   harnessNextActionDialogTips: string | null
   /**
    * Skill chip the user has selected for the next send. Kept alongside
@@ -738,9 +747,11 @@ function summarizeThreadState(
     scheduledTaskLoading: state.scheduledTaskLoading,
     workflowRunning: state.workflowRun?.status === "running",
     hasDraft:
-      previousSummary && previous?.draftInput === state.draftInput
+      previousSummary &&
+      previous?.draftInput === state.draftInput &&
+      previous?.draftAttachments === state.draftAttachments
         ? previousSummary.hasDraft
-        : Boolean(state.draftInput.trim()),
+        : Boolean(state.draftInput.trim() || state.draftAttachments?.length),
     hasPendingApproval: state.pendingApproval !== null,
     hasPendingUserInput: state.pendingUserInput !== null,
     hasContextReminder: state.contextReminder.pending,
@@ -871,11 +882,15 @@ export interface ThreadActions {
   loadReleasedMessageWindow: () => Promise<boolean>
   restoreLatestMessageWindow: () => Promise<boolean>
   cancelMessageWindowLoad: () => void
-  addQueuedMessage: (message: QueuedMessage) => void
+  addQueuedMessage: (message: QueuedMessage, onPersist?: (error: string | null) => void) => void
   prependQueuedMessage: (message: QueuedMessage) => void
   getQueuedMessage: (messageId: string) => QueuedMessage | undefined
-  updateQueuedMessage: (messageId: string, updates: Partial<QueuedMessage>) => void
-  deleteQueuedMessage: (messageId: string) => void
+  updateQueuedMessage: (
+    messageId: string,
+    updates: Partial<QueuedMessage>,
+    onPersist?: (error: string | null) => void
+  ) => void
+  deleteQueuedMessage: (messageId: string, onPersist?: (error: string | null) => void) => void
   reorderQueuedMessages: (orderedIds: string[]) => void
   promoteQueuedMessage: (messageId: string) => void
   setQueueAutoDrainSuppressed: (suppressed: boolean) => void
@@ -909,6 +924,10 @@ export interface ThreadActions {
     update: ContextReminderState | ((prev: ContextReminderState) => ContextReminderState)
   ) => void
   setDraftInput: (input: string) => void
+  setDraftBotReplyTo: (reply: BotMessageReply | null) => void
+  setDraftAttachments: (
+    update: FileAttachment[] | ((previous: FileAttachment[]) => FileAttachment[])
+  ) => void
   setHarnessNextActionDialogTips: (tips: string | null) => void
   setDraftSkill: (skill: SkillMetadata | null) => void
   setDraftBuiltinBrowser: (selected: boolean) => void
@@ -961,6 +980,7 @@ function normalizeQueuedMessage(raw: unknown): QueuedMessage | null {
     id: item.id,
     text: item.text,
     contextLabel: item.contextLabel === "requirement-workbench" ? item.contextLabel : undefined,
+    ...(isBotMessageReply(item.botReplyTo) ? { botReplyTo: item.botReplyTo } : {}),
     attachmentModelBlocks:
       typeof item.attachmentModelBlocks === "string" ? item.attachmentModelBlocks : undefined,
     attachmentDisplayPrefix:
@@ -989,15 +1009,17 @@ function loadQueuedMessages(threadId: string): QueuedMessage[] {
   }
 }
 
-function persistQueuedMessages(threadId: string, messages: QueuedMessage[]): void {
+function persistQueuedMessages(threadId: string, messages: QueuedMessage[]): string | null {
   try {
     if (messages.length === 0) {
       window.localStorage.removeItem(queueStorageKey(threadId))
-      return
+      return null
     }
     window.localStorage.setItem(queueStorageKey(threadId), JSON.stringify(messages))
+    return null
   } catch {
     // Queue persistence is best-effort; the in-memory queue remains authoritative.
+    return "消息未能保存到本机，请保留当前窗口并重试。"
   }
 }
 
@@ -1046,6 +1068,7 @@ const createDefaultThreadState = (): ThreadState => ({
   contextReminder: createDefaultContextReminderState(),
   harnessAgentmdLoadStatus: null,
   draftInput: "",
+  draftAttachments: [],
   harnessNextActionDialogTips: null,
   draftSkill: null,
   draftBuiltinBrowser: false,
@@ -1268,6 +1291,7 @@ function normalizeThreadState(state: ThreadState): ThreadState {
       (state.messages.some(isVisibleCheckpointTranscriptMessage) ? "nonempty" : "unknown"),
     historyLoadedMessageCount: state.historyLoadedMessageCount ?? state.messages.length,
     draftBuiltinBrowser: state.draftBuiltinBrowser ?? false,
+    draftAttachments: state.draftAttachments ?? [],
     toolCallStates: state.toolCallStates || {},
     contextCompaction: state.contextCompaction ?? null,
     ...buildPendingApprovalState(pendingQueue)
@@ -4192,7 +4216,10 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
           }
 
           const current = streamDataRef.current[threadId] ?? defaultStreamData
-          const messageAttempts = advanceMessageAttempts(current.messageAttempts, discardedMessageIds)
+          const messageAttempts = advanceMessageAttempts(
+            current.messageAttempts,
+            discardedMessageIds
+          )
           streamDataRef.current[threadId] = {
             ...current,
             messages: stableMessages as StreamData["messages"],
@@ -5448,12 +5475,14 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
           if (!messageWindowIntentCoordinator.cancel(threadId)) return
           updateThreadState(threadId, () => ({ historyPageLoading: false }))
         },
-        addQueuedMessage: (message: QueuedMessage) => {
+        addQueuedMessage: (message: QueuedMessage, onPersist) => {
+          let error: string | null = "会话已关闭，消息未发送。"
           updateThreadState(threadId, (state) => {
             const next = [...state.queuedMessages, message]
-            persistQueuedMessages(threadId, next)
+            error = persistQueuedMessages(threadId, next)
             return { queuedMessages: next }
           })
+          onPersist?.(error)
         },
         prependQueuedMessage: (message: QueuedMessage) => {
           updateThreadState(threadId, (state) => {
@@ -5470,23 +5499,27 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
             (message) => message.id === messageId
           )
         },
-        updateQueuedMessage: (messageId: string, updates: Partial<QueuedMessage>) => {
+        updateQueuedMessage: (messageId: string, updates: Partial<QueuedMessage>, onPersist) => {
+          let error: string | null = "会话已关闭，消息未发送。"
           updateThreadState(threadId, (state) => {
             const next = state.queuedMessages.map((message) =>
               message.id === messageId
                 ? { ...message, ...updates, id: message.id, updated_at: new Date() }
                 : message
             )
-            persistQueuedMessages(threadId, next)
+            error = persistQueuedMessages(threadId, next)
             return { queuedMessages: next }
           })
+          onPersist?.(error)
         },
-        deleteQueuedMessage: (messageId: string) => {
+        deleteQueuedMessage: (messageId: string, onPersist) => {
+          let error: string | null = "会话已关闭。"
           updateThreadState(threadId, (state) => {
             const next = state.queuedMessages.filter((message) => message.id !== messageId)
-            persistQueuedMessages(threadId, next)
+            error = persistQueuedMessages(threadId, next)
             return { queuedMessages: next }
           })
+          onPersist?.(error)
         },
         reorderQueuedMessages: (orderedIds: string[]) => {
           updateThreadState(threadId, (state) => {
@@ -5686,6 +5719,15 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
         },
         setDraftInput: (input: string) => {
           updateThreadState(threadId, () => ({ draftInput: input }))
+        },
+        setDraftBotReplyTo: (draftBotReplyTo) => {
+          updateThreadState(threadId, () => ({ draftBotReplyTo }))
+        },
+        setDraftAttachments: (update) => {
+          updateThreadState(threadId, (state) => ({
+            draftAttachments:
+              typeof update === "function" ? update(state.draftAttachments ?? []) : update
+          }))
         },
         setHarnessNextActionDialogTips: (tips: string | null) => {
           const normalizedTips = tips?.trim() || null
@@ -7219,14 +7261,14 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
 
       // Hydrate the panel from disk (renderer reload / app restart) and pick up
       // a completion that finished while no renderer was listening — ONLY for
-      // workflow-mode threads, so normal/coordinator/goal threads pay no IPC.
+      // workflow-mode threads and local Bots; ordinary normal/coordinator/goal threads pay no IPC.
       // (The durable listener above is cheap to keep registered for all
       // threads, matching the coordinator-hook subscription pattern, so a
       // thread switched INTO workflow mode still receives live events.)
       const hydrateThread = useAppStore
         .getState()
         .threads.find((thread) => thread.thread_id === threadId)
-      if (isWorkflowModeMetadata(hydrateThread?.metadata)) {
+      if (hasWorkflowPanelCapability(hydrateThread?.metadata)) {
         void window.api.workflows
           .hydrate(threadId)
           .then((raw) => {

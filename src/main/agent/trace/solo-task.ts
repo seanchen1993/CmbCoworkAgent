@@ -1,3 +1,4 @@
+import { settleTraceCallStage, startTraceCallStage } from "./stage-usage-registry"
 import { createMiddleware } from "langchain"
 import type { TraceCollectorOptions } from "./collector"
 import {
@@ -7,6 +8,7 @@ import {
   type TraceCollector
 } from "./collector"
 import { SkillUsageDetector } from "../skill-evolution/usage-detector"
+import { readPathsForToolCall } from "../tool-call-read-paths"
 import { syncTaskSubagentSkillAttribution } from "../turn-attribution"
 import type { TraceChatMessage, TraceContext, TraceOutcome, TraceTokenUsage } from "./types"
 import { normalizeTraceTokenUsage } from "./token-usage"
@@ -402,6 +404,7 @@ export class SoloTaskTraceManager {
     const entry = this.active.get(ownerId)
     if (!entry) return handler(request)
 
+    const pendingStage = startTraceCallStage(this.getTraceContextForOwner(ownerId))
     let llmNodeId: string | undefined
     const startedAt = nowIsoLocal()
     this.runSideEffect("SoloTask model start", () => {
@@ -417,6 +420,7 @@ export class SoloTaskTraceManager {
 
     try {
       const response = await handler(request)
+      const stageAttribution = await settleTraceCallStage(pendingStage)
       const modelRecorded = this.runSideEffect("SoloTask model result", () => {
         const responseRecord = asRecord(response) ?? {}
         const inputMessages = Array.isArray(request.messages)
@@ -442,6 +446,7 @@ export class SoloTaskTraceManager {
         const tokenUsage = responseTokenUsage(responseRecord)
 
         entry.tracer.recordModelCall({
+          stageAttribution,
           ...(messageId ? { messageId } : {}),
           startedAt,
           inputMessages,
@@ -490,20 +495,20 @@ export class SoloTaskTraceManager {
     const entry = this.active.get(ownerId)
     if (!entry) return handler(request)
 
+    const pendingStage = startTraceCallStage(this.getTraceContextForOwner(ownerId))
     const toolCall = asRecord(request.toolCall) ?? {}
     const toolCallId = typeof toolCall.id === "string" ? toolCall.id : undefined
     const toolName = typeof toolCall.name === "string" && toolCall.name ? toolCall.name : "unknown"
     const toolArgs = asRecord(toolCall.args) ?? {}
     let toolNodeId: string | undefined
     this.runSideEffect("SoloTask tool start", () => {
-      if (toolName === "read_file") {
-        const readPath =
-          (typeof toolArgs.path === "string" && toolArgs.path) ||
-          (typeof toolArgs.file_path === "string" && toolArgs.file_path) ||
-          ""
-        if (readPath && entry.skillUsageDetector.onReadFilePath(readPath)) this.syncSkills(entry)
+      let skillHit = false
+      for (const readPath of readPathsForToolCall(toolName, toolArgs)) {
+        if (entry.skillUsageDetector.onReadFilePath(readPath)) skillHit = true
       }
+      if (skillHit) this.syncSkills(entry)
       toolNodeId = entry.tracer.addToolNode({
+        stageAttribution: pendingStage,
         name: toolName,
         input: toolArgs,
         toolCallId,

@@ -77,6 +77,20 @@ export function isDashboardEsResponseTooLarge(error: unknown): boolean {
   return false
 }
 
+/** HTTP errors may arrive through several Error / serialized-cause wrappers. */
+export function getDashboardEsHttpErrorStatus(error: unknown): number | null {
+  let current: unknown = error
+  for (let depth = 0; current && typeof current === "object" && depth < 6; depth += 1) {
+    const record = current as { code?: unknown; message?: unknown; cause?: unknown }
+    if (record.code === "DASHBOARD_ES_HTTP_ERROR" && typeof record.message === "string") {
+      const match = record.message.match(/^ES (\d{3})\b/)
+      if (match) return Number(match[1])
+    }
+    current = record.cause
+  }
+  return null
+}
+
 export function isDashboardEsRequestCancelled(error: unknown): boolean {
   return (
     error instanceof DashboardEsRequestCancelledError ||

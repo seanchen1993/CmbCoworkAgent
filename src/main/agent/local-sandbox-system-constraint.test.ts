@@ -8,7 +8,7 @@ vi.mock("../services/system-constraint-read-reporter", () => ({
 }))
 
 import { recordSystemConstraintRead } from "../services/system-constraint-read-reporter"
-import { LocalSandbox, type LocalSandboxOptions } from "./local-sandbox"
+import { LocalSandbox, executeTraceContext, type LocalSandboxOptions } from "./local-sandbox"
 import type { TraceContext } from "./trace/types"
 
 const temporaryRoots: string[] = []
@@ -90,6 +90,81 @@ describe("LocalSandbox system-constraint telemetry", () => {
     await expect(sandbox.read(constraintPath, 99, 1)).resolves.toContain("exceeds file length")
     await expect(sandbox.read(outsidePath)).resolves.toContain("plugin documentation")
     expect(recordSystemConstraintRead).toHaveBeenCalledTimes(1)
+  })
+
+  it("ignores shell reads while shell file telemetry is off", async () => {
+    const { sandbox, constraintPath } = await createSandboxFixture({ windowsSandbox: "none" })
+
+    const result = await sandbox.execute(`cat "${constraintPath}"`)
+
+    expect(result.output).toContain("first constraint")
+    expect(recordSystemConstraintRead).not.toHaveBeenCalled()
+  })
+
+  it("records a constraint file read through the shell once the command succeeds", async () => {
+    const { sandbox, constraintPath, emptyConstraintPath } = await createSandboxFixture({
+      windowsSandbox: "none",
+      shellFileTelemetry: true
+    })
+
+    await sandbox.execute(`cat "${emptyConstraintPath}"`)
+    await sandbox.execute(`cat "${constraintPath}.missing"`)
+    expect(recordSystemConstraintRead).not.toHaveBeenCalled()
+
+    const result = await sandbox.execute(`cat "${constraintPath}" | head -1`)
+    expect(result.output).toContain("first constraint")
+    await vi.waitFor(() => expect(recordSystemConstraintRead).toHaveBeenCalledTimes(1))
+    expect(recordSystemConstraintRead).toHaveBeenCalledWith(
+      expect.objectContaining({
+        traceId: "trace-1",
+        harnessProjectId: "project-1",
+        harnessFeatureSlug: "feature-1",
+        constraintFile: "sys/project.md"
+      })
+    )
+  })
+
+  it("reports a task subagent's shell read to the subagent's own trace", async () => {
+    const { sandbox, constraintPath } = await createSandboxFixture({
+      windowsSandbox: "none",
+      shellFileTelemetry: true
+    })
+    const childTraceContext: TraceContext = {
+      traceId: "child-trace-shell",
+      threadId: "thread-1__task_owner-shell",
+      rootNodeId: "trace:child-trace-shell",
+      observabilitySchemaVersion: 1,
+      traceKind: "subagent",
+      executionMode: "normal",
+      rootTraceId: "root-trace-1",
+      rootThreadId: "root-thread-1",
+      parentTraceId: "trace-1",
+      parentThreadId: "thread-1",
+      linkType: "parent_child",
+      subagentKind: "task",
+      subagentRunId: "owner-shell",
+      harnessFeature: {
+        projectId: "project-1",
+        slug: "feature-1",
+        nodeName: "Dev-代码实现",
+        nodeStatus: "进行中"
+      }
+    }
+
+    await executeTraceContext.run(childTraceContext, () =>
+      sandbox.execute(`cat "${constraintPath}"`)
+    )
+
+    await vi.waitFor(() =>
+      expect(recordSystemConstraintRead).toHaveBeenCalledWith(
+        expect.objectContaining({
+          traceId: "child-trace-shell",
+          threadId: "thread-1__task_owner-shell",
+          agentId: "owner-shell",
+          constraintFile: "sys/project.md"
+        })
+      )
+    )
   })
 
   it("attributes shared-sandbox task reads to the active child trace", async () => {

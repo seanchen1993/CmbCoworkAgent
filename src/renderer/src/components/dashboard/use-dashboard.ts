@@ -1,3 +1,7 @@
+import {
+  parseToolUsageAggs,
+  type DashboardToolUsageCoverage
+} from "../../../../shared/dashboard-tool-usage"
 /**
  * Dashboard data fetching hook
  */
@@ -25,6 +29,7 @@ export interface TimeRange {
 }
 
 export interface OverviewData {
+  toolUsageCoverage?: DashboardToolUsageCoverage
   totalCalls: number
   activeUsers: number
   avgDurationMs: number
@@ -178,6 +183,7 @@ export interface DashboardTraceDetail {
   totalToolCalls: number
   modelCallCount: number
   userInputRequestCount: number
+  userInputRequestCountComplete?: boolean
   totalInputTokens: number
   totalOutputTokens: number
   totalTokens: number
@@ -557,10 +563,11 @@ export interface DashboardProjectModeStageMetrics {
   totalDurationMs: number
   avgDurationMs: number
   p95DurationMs: number
+  p95Available?: boolean
   runCost: {
     toolCalls: number
     modelCalls: number
-    /** 总量，含缓存读取与创建，所以不等于 inputTokens + outputTokens。 */
+    /** 模型上报的总量；缓存子集不重复相加。 */
     totalTokens: number
     inputTokens: number
     outputTokens: number
@@ -579,6 +586,14 @@ export interface DashboardProjectModeStageRow {
 }
 
 export interface DashboardProjectModeStageAnalysis {
+  durationAttribution?: { splitTurnCount: number; legacyTurnCount: number; truncated: boolean }
+  costAttribution?: {
+    callStartTraceCount: number
+    turnStartTraceCount: number
+    tokenUsageReportedCalls: number
+    modelCalls: number
+    truncated: boolean
+  }
   projectId: string
   total: DashboardProjectModeStageMetrics
   stages: DashboardProjectModeStageRow[]
@@ -623,6 +638,7 @@ export interface DashboardProjectModeSkillCount {
 }
 
 export interface DashboardProjectModeToolUsage {
+  toolUsageCoverage?: DashboardToolUsageCoverage
   byTool: Array<{ tool: string; count: number }>
   byToolAll: Array<{ tool: string; count: number }>
   byToolFilteredAll: Array<{ tool: string; count: number }>
@@ -703,7 +719,7 @@ export interface DashboardProjectModeProject {
   runCost?: {
     toolCalls: number
     modelCalls: number
-    /** 总量，含缓存读取与创建，所以不等于 inputTokens + outputTokens。 */
+    /** 模型上报的总量；缓存子集不重复相加。 */
     totalTokens: number
     inputTokens: number
     outputTokens: number
@@ -1482,9 +1498,7 @@ function parseOverview(raw: any, granularity: Granularity): OverviewData {
       : null
   const codeAdoptionRate = codeMeasuredAdoptionRate
   const totalSkills = aggs.total_skills?.value ?? 0
-  const totalTools = aggs.total_tools?.value ?? 0
   const totalSkillCalls = aggs.total_skill_calls?.value ?? 0
-  const totalToolCalls = aggs.total_tool_calls?.value ?? 0
   const combinedSkillItems = combineSkillUsageBuckets(
     aggs.by_skill_all?.buckets ?? aggs.by_skill?.buckets ?? [],
     aggs.skill_source?.buckets
@@ -1534,33 +1548,7 @@ function parseOverview(raw: any, granularity: Granularity): OverviewData {
     }
   })
 
-  const byTool: OverviewData["byTool"] = (aggs.by_tool?.buckets ?? []).map((b: any) => ({
-    tool: b.key || "unknown",
-    count: b.doc_count
-  }))
-
-  const byToolAll: OverviewData["byToolAll"] = (aggs.by_tool_all?.buckets ?? []).map((b: any) => ({
-    tool: b.key || "unknown",
-    count: b.doc_count
-  }))
-
-  const byToolFilteredAll: OverviewData["byToolFilteredAll"] = (
-    aggs.by_tool_filtered_all?.buckets ??
-    aggs.by_tool?.buckets ??
-    []
-  ).map((b: any) => ({
-    tool: b.key || "unknown",
-    count: b.doc_count
-  }))
-
-  const byToolAllFull: OverviewData["byToolAllFull"] = (
-    aggs.by_tool_all_full?.buckets ??
-    aggs.by_tool_all?.buckets ??
-    []
-  ).map((b: any) => ({
-    tool: b.key || "unknown",
-    count: b.doc_count
-  }))
+  const toolUsage = parseToolUsageAggs(aggs)
 
   return {
     totalCalls,
@@ -1585,17 +1573,12 @@ function parseOverview(raw: any, granularity: Granularity): OverviewData {
     codePushedAdoptionRate,
     codeAdoptionRate,
     totalSkills,
-    totalTools,
     totalSkillCalls,
-    totalToolCalls,
     trend,
     bySkill,
     bySkillAll,
     bySkillAdoption,
-    byTool,
-    byToolAll,
-    byToolFilteredAll,
-    byToolAllFull
+    ...toolUsage
   }
 }
 

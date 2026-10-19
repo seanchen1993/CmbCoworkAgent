@@ -60,6 +60,25 @@ const COMMON_TOOL_STRATEGY_REMINDER = `This is a tool-selection preference, not 
 Use the actual operating system and shell described in the environment. Do not assume rg, Python, GNU utilities, or Bash are installed, and do not install dependencies just to follow this preference. Keep output bounded, read only relevant ranges of large files, preserve user changes and file encoding/line endings, and verify edits.
 Use dedicated tools for their special semantics: load SKILL.md with read_file so Skill activation, placeholders, and hooks still run; use dedicated tools for managed/virtual resources, specialized file formats, and workflows requiring file-tool hooks or previews. Shell operations do not reproduce those file-tool lifecycle events. Refresh the file with read_file before falling back to edit_file.`
 
+/** Follow the same effective strategies as prompts, including shared Task backends. */
+export function resolveShellFileTelemetry(
+  requested: AgentToolStrategy,
+  options: {
+    filesystemAccess?: CoordinatorWorkerFilesystemAccess
+    blockedToolNames?: Iterable<string>
+    filesystemEnabled?: boolean
+    taskSubagentsEnabled: boolean
+  }
+): boolean {
+  if (requested === "standard") return false
+  if (resolveFilesystemToolStrategy(requested, options) !== "standard") return true
+  return (
+    options.taskSubagentsEnabled &&
+    resolveFilesystemToolStrategy(requested, { filesystemAccess: options.filesystemAccess }) !==
+      "standard"
+  )
+}
+
 export function getToolStrategyReminder(strategy: AgentToolStrategy): string {
   if (strategy === "standard") return ""
   const preference =

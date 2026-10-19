@@ -55,6 +55,7 @@ function assertSourceOrder(value: string, before: string, after: string, label: 
   assert(b < a, `${label}: expected ${JSON.stringify(before)} before ${JSON.stringify(after)}`)
 }
 
+const queueMiddlewareCall = "createCurrentRunMessageQueueMiddleware(\n        currentRunMessageQueueOwnerToken,\n        onPrimaryModelRequestState\n      )"
 const runtime = read("src/main/agent/runtime.ts")
 const queueModule = read("src/main/agent/current-run-message-queue.ts")
 const standardTurn = read("src/main/agent/standard-thread-turn.ts")
@@ -82,7 +83,7 @@ function testMiddlewareOnlyOnMainStack(): void {
   // can't leak into a background subagent's loop.
   assertOccurrences(
     runtime,
-    "createCurrentRunMessageQueueMiddleware(currentRunMessageQueueOwnerToken)",
+    queueMiddlewareCall,
     1,
     "middleware invoked once (main stack only)"
   )
@@ -92,7 +93,7 @@ function testMiddlewareBeforeSummarizationAndHITL(): void {
   // Slice from the (single) main-stack invocation — summarization also appears in
   // the subagent stack earlier in the file, so a whole-file order check is wrong.
   const idx = runtime.indexOf(
-    "createCurrentRunMessageQueueMiddleware(currentRunMessageQueueOwnerToken)"
+    queueMiddlewareCall
   )
   assert(idx >= 0, "queue middleware present on the main stack")
   const after = runtime.slice(idx)
@@ -100,14 +101,19 @@ function testMiddlewareBeforeSummarizationAndHITL(): void {
   // context management): the queue middleware immediately precedes it in the array.
   assertMatches(
     after,
-    /createCurrentRunMessageQueueMiddleware\(currentRunMessageQueueOwnerToken\),\s*\n\s*createCmbSummarizationMiddleware\(mainSummarizationOptions\)/,
+    /createCurrentRunMessageQueueMiddleware\(\s*currentRunMessageQueueOwnerToken,\s*onPrimaryModelRequestState\s*\),\s*\n\s*mainSummarizationController\.middleware/,
     "queue middleware immediately precedes summarization on the main stack"
+  )
+  assertIncludes(
+    runtime,
+    "const mainSummarizationController = createCmbContextController(mainSummarizationOptions)",
+    "the shared context controller owns the main-agent summarization policy"
   )
   // afterModel must sit before HITL in the array so an approval interrupt preempts
   // injection.
   assertSourceOrder(
     after,
-    "createCurrentRunMessageQueueMiddleware(currentRunMessageQueueOwnerToken)",
+    queueMiddlewareCall,
     "humanInTheLoopMiddleware",
     "queue middleware before HITL on the main stack"
   )
@@ -142,9 +148,9 @@ function testAfterModelSkipsOnToolCalls(): void {
 function testQueueIpcRequiresActiveRun(): void {
   assertIncludes(agentIpc, '"agent:queueCurrentRunMessage"', "queue IPC handler registered")
   assertIncludes(agentIpc, '"agent:deleteCurrentRunQueuedMessage"', "delete IPC handler registered")
-  // Background workflow/worker/scheduler runs don't populate activeRuns, so the
-  // controller lookup is what prevents steering into them and also fences an
-  // async hook preparation against run replacement.
+  // A physical top-level run (desktop or managed Bot) must exist. Derived
+  // worker graphs have separate thread IDs. The shared entrypoint also checks
+  // the caller's exact lease, and fences async preparation against replacement.
   assertMatches(
     agentIpc,
     /const activeController = activeRuns\.get\(threadId\)[\s\S]{0,500}if \(!activeController \|\| activeController\.signal\.aborted\)[\s\S]{0,500}no_active_run/,
@@ -153,7 +159,7 @@ function testQueueIpcRequiresActiveRun(): void {
 }
 
 function testGuideRespectsActiveGoal(): void {
-  const ipcStart = agentIpc.indexOf('"agent:queueCurrentRunMessage"')
+  const ipcStart = agentIpc.indexOf("const queueIntoOwnedRun = async")
   const ipcBody = agentIpc.slice(ipcStart, ipcStart + 6500)
   assertIncludes(
     ipcBody,
@@ -261,9 +267,9 @@ function testGuideUsesCurrentRunPromptPipeline(): void {
     "!signal.aborted && currentRunMessagePreparers.get(threadId)?.runToken === runToken",
     "aborted runs invalidate async prompt preparation before side effects commit"
   )
-  assertIncludes(
+  assertMatches(
     agentIpc,
-    "activeController.signal.aborted ||\n            currentRunMessagePreparers.get(threadId)?.runToken !== preparer.runToken",
+    /activeController\.signal\.aborted \|\|\s*currentRunMessagePreparers\.get\(threadId\)\?\.runToken !== preparer\.runToken/,
     "queue commit rechecks abort state after asynchronous hooks"
   )
   assertIncludes(
@@ -511,8 +517,8 @@ function testClearOnEveryRunExit(): void {
   assertOccurrences(
     agentIpc,
     "resolveAgentStreamRequestChannel(",
-    3,
-    "invoke, resume, and interrupt isolate terminal events on request-scoped channels"
+    4,
+    "invoke, resume, interrupt and early human-decision rejection isolate terminal events on request-scoped channels"
   )
   assert(
     !agentIpc.includes("abort: () => {\n      LocalSandbox.cancelBackgroundTasks(threadId)"),
@@ -648,7 +654,7 @@ function testClearOnEveryRunExit(): void {
   )
   assertIncludes(
     runtime,
-    "createCurrentRunMessageQueueMiddleware(currentRunMessageQueueOwnerToken)",
+    queueMiddlewareCall,
     "each middleware closure is bound to its physical run token"
   )
   assertOccurrences(
@@ -1456,7 +1462,13 @@ function testStreamTranscriptBuffersArePhysicalRunScoped(): void {
     `invoke, resume, and interrupt each have one completion hook: got ${completionHookIndexes.length}`
   )
   for (const [index, label] of ["invoke", "resume", "interrupt"].entries()) {
-    const body = agentIpc.slice(completionHookIndexes[index], completionHookIndexes[index] + 2600)
+    const failedOutcomeMarker = 'if (completionOutcome === "failed")'
+    const failedOutcomeIndex = agentIpc.indexOf(failedOutcomeMarker, completionHookIndexes[index])
+    assert(failedOutcomeIndex >= 0, `${label} handles the completion hook failure outcome`)
+    const body = agentIpc.slice(
+      completionHookIndexes[index],
+      failedOutcomeIndex + failedOutcomeMarker.length
+    )
     const fence =
       label === "invoke"
         ? "throwIfInvokeAborted()"
@@ -1637,7 +1649,7 @@ function testStreamTranscriptBuffersArePhysicalRunScoped(): void {
 }
 
 function testPreparingGuidesParticipateInReconciliation(): void {
-  const queueStart = agentIpc.indexOf('"agent:queueCurrentRunMessage"')
+  const queueStart = agentIpc.indexOf("const queueIntoOwnedRun = async")
   const queueBody = agentIpc.slice(queueStart, queueStart + 7500)
   assertSourceOrder(
     queueBody,
@@ -1792,8 +1804,8 @@ function testEnqueueExcludesGoalInputs(): void {
   // completely untouched by the queue.
   assertMatches(
     chat,
-    /willEnqueueWhileBusy\s*=\s*\n?\s*!isGoalSlashInput\s*&&\s*\(isLoading/,
-    "enqueue-while-busy excludes /goal inputs"
+    /willEnqueueWhileBusy\s*=\s*!managedTurn\s*&&\s*!isGoalSlashInput\s*&&\s*\(isLoading/,
+    "the workbench enqueue-while-busy excludes managed Bot turns and /goal inputs"
   )
 }
 
@@ -1916,8 +1928,8 @@ function testPumpGatedOnHistoryLoadingReadOnlyContextReminder(): void {
   // never accept one. Mirrors handleSubmit's own early-return guards.
   assertIncludes(
     chat,
-    "if (historyLoading || readOnly || contextReminderPending) return",
-    "auto-drain gated on historyLoading/readOnly/contextReminderPending"
+    "if (historyLoading || readOnly || contextReminderPending || bizRetryPending) return",
+    "auto-drain waits for authoritative history, write access, context and human-decision readiness"
   )
 }
 

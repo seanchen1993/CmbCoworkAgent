@@ -251,7 +251,8 @@ function testRoutingRuntimeCheckpointAndAutoCommit(): void {
     "skillHookKeys",
     "skillUseTracker",
     "harnessContext: harnessAgentContext",
-    "onFileMutation: autoCommit.onFileMutation"
+    "onFileMutation: (filePath, kind) =>",
+    "autoCommit.onFileMutation?.(filePath)"
   ]) {
     assertIncludes(invoke, expected, `desktop Runtime option ${expected}`)
   }

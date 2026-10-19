@@ -1,3 +1,11 @@
+import { parseBotMessageReply } from "../../../../shared/bots/message-reply"
+import { cleanUserAttachmentContentForDisplay } from "../../../../shared/user-attachment-display"
+import {
+  ContextMenu,
+  ContextMenuTrigger,
+  ContextMenuContent,
+  ContextMenuItem
+} from "@/components/ui/context-menu"
 import type { Message, HITLRequest, ToolCallState, ToolCallStatus } from "@/types"
 import { ToolCallRenderer } from "./ToolCallRenderer"
 import { ModCards } from "./ModCards"
@@ -10,8 +18,23 @@ import {
   beginOpenResourcePreviewIntent,
   emitOpenResourcePreview
 } from "@/lib/resource-preview-events"
-import React, { useEffect, useMemo, useRef, useState } from "react"
+import React, { useContext, useEffect, useMemo, useRef, useState } from "react"
 import {
+  ChatReplyActionsContext,
+  ChatPresentationContext,
+  ChatActivityPresentationContext,
+  ChatMessageIdentityContext,
+  ChatExecutionDetailsContext,
+  ChatExecutionCardCallIdsContext,
+  ChatFoldedToolCallsContext,
+  ChatToolPresentationContext,
+  ChatMessagePresentationContext
+} from "./chat-presentation-context"
+import { splitBotInlineReasoning } from "@/lib/bot-inline-reasoning"
+import { botToolResultStatus } from "@/lib/bot-tool-result-status"
+import { isBotExecutionTool } from "@/lib/bot-execution-visibility"
+import {
+  Reply,
   ChevronDown,
   ChevronRight,
   ChevronUp,
@@ -210,6 +233,16 @@ function hydrateToolCall(
   }
 }
 
+const BOT_TOOL_STATUS_LABELS: Record<ToolCallStatus, string> = {
+  queued: "等待执行",
+  awaiting_approval: "等待确认",
+  running: "处理中",
+  completed: "已返回",
+  failed: "工具失败",
+  interrupted: "已中断",
+  rejected: "已拒绝"
+}
+
 function getToolStatusMeta(status: ToolCallStatus): { label: string; className: string } {
   switch (status) {
     case "completed":
@@ -305,7 +338,13 @@ function getSystemNoticePresentation(text: string): {
   }
 }
 
-function GoalNoticeBody({ text, threadId }: { text: string; threadId?: string }): React.JSX.Element {
+function GoalNoticeBody({
+  text,
+  threadId
+}: {
+  text: string
+  threadId?: string
+}): React.JSX.Element {
   const parsed = parseGoalNoticeText(text)
   if (!parsed) {
     return (
@@ -419,6 +458,15 @@ function MessageBubbleImpl({
   userSendTimeLabel = null,
   searchLocation
 }: MessageBubbleProps): React.JSX.Element | null {
+  const replyActions = useContext(ChatReplyActionsContext)
+  const quotedReply = useMemo(() => replyActions?.quoteFor(message), [replyActions, message])
+  const presentation = useContext(ChatPresentationContext)
+  const showExecutionDetails = useContext(ChatExecutionDetailsContext)
+  const executionCardCallIds = useContext(ChatExecutionCardCallIdsContext)
+  const activityPresentation = useContext(ChatActivityPresentationContext)
+  const foldedToolCalls = useContext(ChatFoldedToolCallsContext)
+  const presentTool = useContext(ChatToolPresentationContext)
+  const presentMessage = useContext(ChatMessagePresentationContext)
   const [collapsedTools, setCollapsedTools] = useState<Set<string>>(new Set())
   const [collapsedHtmlTools, setCollapsedHtmlTools] = useState<Set<string>>(new Set())
   const [copySuccess, setCopySuccess] = useState(false)
@@ -442,10 +490,20 @@ function MessageBubbleImpl({
   const canForkFromMessage = message.role === "assistant" && Boolean(onForkFromMessage)
   const forkFromMessageDisabled = isLoading || Boolean(forkingMessageId)
   const reasoningText = useMemo(
-    () => (!isUser ? normalizeVisibleReasoningText(message.reasoning) : ""),
-    [isUser, message.reasoning]
+    () =>
+      !isUser
+        ? normalizeVisibleReasoningText(message.reasoning) ||
+          (presentation === "bot" && typeof message.content === "string"
+            ? splitBotInlineReasoning(message.content).reasoning
+            : "")
+        : "",
+    [isUser, message.reasoning, message.content, presentation]
   )
   const displayMessageContent = useMemo<Message["content"]>(() => {
+    if (isUser && quotedReply && typeof message.content === "string") {
+      const parsed = parseBotMessageReply(message.content)
+      if (parsed?.reply.id === quotedReply.id) return parsed.message
+    }
     if (isUser || !reasoningText) return message.content
     if (typeof message.content === "string") {
       return stripThinkBlocksForDisplay(message.content)
@@ -460,7 +518,7 @@ function MessageBubbleImpl({
       return { ...block, text }
     })
     return changed ? projected : message.content
-  }, [isUser, message.content, reasoningText])
+  }, [isUser, message.content, reasoningText, quotedReply])
   const visibleAssistantContentText = useMemo(() => {
     if (isUser) return ""
     if (typeof displayMessageContent === "string") {
@@ -586,7 +644,7 @@ function MessageBubbleImpl({
 
   // Only strip the skill-use tail from OUR user messages; assistant text that
   // happens to quote the tag (e.g. while discussing the protocol) copies verbatim.
-  const plainTextForCopy = extractMessagePlainText(message.content, {
+  const plainTextForCopy = extractMessagePlainText(displayMessageContent, {
     stripSkillUse: isUser,
     stripBuiltinBrowser: isUser
   })
@@ -660,7 +718,7 @@ function MessageBubbleImpl({
         const skillContent = parseUserVisibleSkillContent(displayContent)
         const browserContent = parseUserVisibleBuiltinBrowserContent(skillContent.visibleText)
         return (
-          <div className="whitespace-pre-wrap break-words text-[15px] leading-7 text-foreground/95 [overflow-wrap:anywhere]">
+          <div data-user-message-text className="whitespace-pre-wrap break-words text-[15px] leading-7 text-foreground/95 [overflow-wrap:anywhere]">
             {isRequirementWorkbenchMessage && (
               <span className="mr-1.5 inline-flex items-center gap-1 align-middle font-bold mb-1 text-emerald-600 dark:text-emerald-400">
                 <span className="inline-flex size-5 items-center justify-center rounded-md bg-lime-200/80 text-emerald-700 dark:bg-lime-300/20 dark:text-lime-300">
@@ -708,6 +766,7 @@ function MessageBubbleImpl({
             return (
               <div
                 key={index}
+                data-user-message-text
                 className="whitespace-pre-wrap break-words text-[15px] leading-7 text-foreground/95 [overflow-wrap:anywhere]"
               >
                 {isRequirementWorkbenchMessage && (
@@ -831,15 +890,50 @@ function MessageBubbleImpl({
   }
 
   // Don't render if there's no content and no tool calls
+  const presentedMessage = presentMessage?.(message)
+  if (presentedMessage) return <>{presentedMessage}</>
+
   if (!content && !hasToolCalls && !reasoningText) {
     return null
   }
 
+  const replyButton =
+    replyActions && (isUser || !isStreaming) && plainTextForCopy.trim() ? (
+      <button
+        type="button"
+        className="inline-flex items-center justify-center rounded p-1 text-muted-foreground hover:text-foreground hover:bg-background-interactive transition-colors"
+        aria-label="回复消息"
+        title="回复"
+        onClick={() => replyActions.reply(message.id)}
+      >
+        <Reply className="size-3" />
+      </button>
+    ) : null
+  const withReplyMenu = (bubble: React.ReactElement) =>
+    replyButton ? (
+      <ContextMenu>
+        <ContextMenuTrigger asChild>{bubble}</ContextMenuTrigger>
+        <ContextMenuContent data-bot-popup>
+          <ContextMenuItem onSelect={() => replyActions!.reply(message.id)}>
+            <Reply size={15} />
+            回复
+          </ContextMenuItem>
+          <ContextMenuItem onSelect={() => void handleCopyMessage()}>
+            <Copy size={15} />
+            复制
+          </ContextMenuItem>
+        </ContextMenuContent>
+      </ContextMenu>
+    ) : (
+      bubble
+    )
+
   if (isUser) {
-    return (
-      <div className="group flex justify-end overflow-hidden py-4">
+    return withReplyMenu(
+      <div data-message-bubble="user" className="group flex justify-end overflow-hidden py-4">
         <div className="flex min-w-0 max-w-[80%] flex-col items-end gap-1">
           <div
+            data-message-body
             className={cn(
               "min-w-0 max-w-full overflow-hidden rounded-lg p-3",
               goalUserSetMessage || goalUserControlMessage
@@ -847,6 +941,17 @@ function MessageBubbleImpl({
                 : "bg-primary/10"
             )}
           >
+            {quotedReply && replyActions && (
+              <button
+                type="button"
+                className="bot-group-reply-preview"
+                aria-label="跳转到被回复的消息"
+                onClick={() => replyActions.jump(quotedReply)}
+              >
+                <Reply size={14} />
+                <span>“{cleanUserAttachmentContentForDisplay(quotedReply.text)}”</span>
+              </button>
+            )}
             <div
               ref={userContentRef}
               data-chat-search-user-content-collapse-threshold={USER_MESSAGE_COLLAPSED_MAX_PX}
@@ -886,7 +991,10 @@ function MessageBubbleImpl({
               </button>
             )}
           </div>
-          <div className="flex max-w-full flex-wrap items-center justify-end gap-1">
+          <div
+            data-message-actions
+            className="flex max-w-full flex-wrap items-center justify-end gap-1"
+          >
             {userSendTimeLabel && (
               <time
                 dateTime={userSendTimeLabel}
@@ -897,6 +1005,7 @@ function MessageBubbleImpl({
               </time>
             )}
             <div className="flex items-center gap-1 opacity-0 transition-opacity group-hover:opacity-100 group-focus-within:opacity-100">
+              {replyButton}
               <button
                 type="button"
                 onClick={handleCopyMessage}
@@ -912,7 +1021,12 @@ function MessageBubbleImpl({
               </button>
               <button
                 type="button"
-                onClick={() => onEditUserMessage?.(message)}
+                onClick={() => {
+                  replyActions?.setDraftReply(quotedReply ?? null)
+                  onEditUserMessage?.(
+                    replyActions ? { ...message, content: displayMessageContent } : message
+                  )
+                }}
                 className="inline-flex items-center justify-center rounded p-1 text-muted-foreground hover:text-foreground hover:bg-background-interactive transition-colors"
                 title="编辑后重新发送"
                 aria-label="编辑后重新发送"
@@ -938,10 +1052,10 @@ function MessageBubbleImpl({
     )
   }
 
-  return (
-    <div className="group overflow-hidden space-y-1.5">
+  return withReplyMenu(
+    <div data-message-bubble="assistant" className="group overflow-hidden space-y-1.5">
       {shouldShowMessageHead && (
-        <div className="flex flex-wrap items-center gap-x-2 gap-y-1 mb-4">
+        <div data-message-meta className="flex flex-wrap items-center gap-x-2 gap-y-1 mb-4">
           <CmbDevClawLogo className="size-5 shrink-0 object-contain" />
           <span className="text-xs font-medium text-muted-foreground">CMBDevClaw</span>
           {assistantStartTimeLabel && (
@@ -957,7 +1071,7 @@ function MessageBubbleImpl({
         </div>
       )}
       <div className="flex-1 min-w-0 space-y-2 overflow-hidden">
-        {reasoningText && (
+        {reasoningText && showExecutionDetails && (
           <div className="px-3">
             <button
               type="button"
@@ -984,9 +1098,24 @@ function MessageBubbleImpl({
             )}
           </div>
         )}
+        {reasoningText &&
+          !showExecutionDetails &&
+          activityPresentation == null &&
+          isStreaming &&
+          !content &&
+          !hasToolCalls && (
+            <div className="px-3 text-xs text-muted-foreground" role="status">
+              正在思考…
+            </div>
+          )}
         {content && (
-          <div className="min-w-0 max-w-full overflow-hidden break-words rounded-lg px-3 [overflow-wrap:anywhere]">
-            {content}
+          <div
+            data-message-body
+            className="min-w-0 max-w-full overflow-hidden break-words rounded-lg px-3 [overflow-wrap:anywhere]"
+          >
+            <ChatMessageIdentityContext.Provider value={message.id}>
+              {content}
+            </ChatMessageIdentityContext.Provider>
           </div>
         )}
         {hasToolCalls && (
@@ -1006,7 +1135,9 @@ function MessageBubbleImpl({
                           pendingApproval.tool_call.id === toolCall.id
                   )
               const inferredStatus: ToolCallStatus =
-                toolState?.status ||
+                (presentation === "bot"
+                  ? (botToolResultStatus(resolvedToolCall, result) ?? toolState?.status)
+                  : toolState?.status) ||
                 (needsApproval
                   ? "awaiting_approval"
                   : result !== undefined
@@ -1023,7 +1154,10 @@ function MessageBubbleImpl({
                 : collapsedTools.has(toolId)
               const summary = getCollapsedToolCallSummary(resolvedToolCall)
               const previewPath = getToolPreviewPath(resolvedToolCall)
-              const isOk = result !== undefined && !result?.is_error
+              const isOk =
+                result !== undefined &&
+                !result?.is_error &&
+                (presentation !== "bot" || inferredStatus === "completed")
 
               // 如果工具需要审批，使用原来的ToolCallRenderer（批量时隐藏按钮）
               if (needsApproval) {
@@ -1065,6 +1199,74 @@ function MessageBubbleImpl({
                   />
                 )
               }
+
+              const presented =
+                presentation === "bot" &&
+                !showExecutionDetails &&
+                resolvedToolCall.name === "request_user_input" &&
+                inferredStatus === "interrupted" &&
+                !executionCardCallIds.has(resolvedToolCall.id)
+                  ? presentTool?.(resolvedToolCall, result)
+                  : result && !result.is_error && inferredStatus === "completed"
+                    ? presentTool?.(resolvedToolCall, result)
+                    : !result && inferredStatus === "running"
+                      ? presentTool?.(resolvedToolCall)
+                      : null
+              if (presented)
+                return (
+                  <React.Fragment key={toolId}>
+                    {presented}
+                    <ModCards threadId={threadId} callId={resolvedToolCall.id ?? ""} />
+                  </React.Fragment>
+                )
+
+              if (
+                presentation === "bot" &&
+                !showExecutionDetails &&
+                (isBotExecutionTool(resolvedToolCall, result) ||
+                  resolvedToolCall.name === "bot_deliver_files") &&
+                (inferredStatus === "failed" || inferredStatus === "interrupted")
+              )
+                return (
+                  <div key={toolId} className="bot-execution-issue">
+                    <button
+                      type="button"
+                      className="bot-execution-issue-toggle"
+                      aria-expanded={isExpanded}
+                      onClick={() => toggleToolExpansion(toolId, isHtmlTool)}
+                    >
+                      <Info size={14} aria-hidden="true" />
+                      <span>{inferredStatus === "failed" ? "执行遇到问题" : "执行已中断"}</span>
+                      {isExpanded ? <ChevronDown size={13} /> : <ChevronRight size={13} />}
+                      <span className="sr-only">查看执行详情</span>
+                    </button>
+                    {isExpanded && (
+                      <ToolCallRenderer
+                        toolCall={resolvedToolCall}
+                        result={result?.content}
+                        isError={result?.is_error}
+                        status={inferredStatus}
+                        needsApproval={false}
+                        threadId={threadId}
+                      />
+                    )}
+                    <ModCards threadId={threadId} callId={resolvedToolCall.id ?? ""} />
+                  </div>
+                )
+
+              if (
+                presentation === "bot" &&
+                !showExecutionDetails &&
+                ((isBotExecutionTool(resolvedToolCall, result) &&
+                  (inferredStatus === "running" ||
+                    inferredStatus === "completed" ||
+                    inferredStatus === "queued" ||
+                    inferredStatus === "awaiting_approval")) ||
+                  (foldedToolCalls.has(toolId) && result && inferredStatus === "completed"))
+              )
+                return (
+                  <ModCards key={toolId} threadId={threadId} callId={resolvedToolCall.id ?? ""} />
+                )
 
               // 工具执行完成后，显示折叠的标题
               return (
@@ -1152,9 +1354,15 @@ function MessageBubbleImpl({
 
                       {/* 状态指示器 */}
                       <div
-                        className={`shrink-0 px-2 py-0.5 text-[10px] font-medium rounded ${statusMeta.className}`}
+                        className={`shrink-0 px-2 py-0.5 text-[10px] font-medium rounded ${
+                          presentation === "bot" && inferredStatus === "completed"
+                            ? "text-muted-foreground"
+                            : statusMeta.className
+                        }`}
                       >
-                        {statusMeta.label}
+                        {presentation === "bot"
+                          ? BOT_TOOL_STATUS_LABELS[inferredStatus]
+                          : statusMeta.label}
                       </div>
                     </div>
                   </div>
@@ -1222,7 +1430,11 @@ function MessageBubbleImpl({
           </div>
         )}
         {shouldShowAssistantActions && (
-          <div className="flex items-center gap-1 px-3 opacity-0 transition-opacity group-hover:opacity-100">
+          <div
+            data-message-actions
+            className="flex items-center gap-1 px-3 opacity-0 transition-opacity group-hover:opacity-100 group-focus-within:opacity-100"
+          >
+            {replyButton}
             <button
               type="button"
               onClick={handleCopyMessage}

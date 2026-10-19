@@ -18,8 +18,23 @@ const {
   syncTurnSkillAttribution
 } = await import("./turn-attribution")
 
+const { configureAgentToolStrategy } = await import("../../shared/agent-runtime-limits")
+
 const SKILL_DOC = "/ws/skills/demo/SKILL.md"
 const SKILL_METADATA = [{ name: "demo-skill", path: SKILL_DOC }]
+
+/** Shell reads count for Skill detection only under a shell-first strategy. */
+function withToolStrategy<T>(
+  strategy: Parameters<typeof configureAgentToolStrategy>[0],
+  run: () => T
+): T {
+  configureAgentToolStrategy(strategy)
+  try {
+    return run()
+  } finally {
+    configureAgentToolStrategy("standard")
+  }
+}
 
 function createTracer(): {
   usedSkills: string[]
@@ -85,6 +100,53 @@ describe("attribution rules", () => {
     })
     expect(observed.skillHit).toBe(true)
     expect(detector.getUsedSkillNames().length).toBe(1)
+  })
+
+  it("marks a skill used when a shell command reads its files under Bash First", () => {
+    withToolStrategy("shell-first", () => {
+      const detector = loadedDetector()
+      const observed = observeToolCallForAttribution(detector, {
+        name: "execute",
+        args: { command: `cat ${SKILL_DOC} | head -40` }
+      })
+      expect(observed.skillHit).toBe(true)
+      expect(observed.writePath).toBeUndefined()
+      expect(detector.getUsedSkillNames().length).toBe(1)
+    })
+  })
+
+  it("resolves shell reads against execute.cwd and ignores unrelated commands", () => {
+    withToolStrategy("shell-first-relaxed", () => {
+      expect(
+        observeToolCallForAttribution(loadedDetector(), {
+          name: "execute",
+          args: { command: "sed -n '1,80p' SKILL.md", cwd: "/ws/skills/demo" }
+        }).skillHit
+      ).toBe(true)
+      expect(
+        observeToolCallForAttribution(loadedDetector(), {
+          name: "execute",
+          args: { command: "npm test" }
+        }).skillHit
+      ).toBe(false)
+      // A heredoc body that merely mentions the SKILL.md path is file content, not a read.
+      expect(
+        observeToolCallForAttribution(loadedDetector(), {
+          name: "execute",
+          args: { command: `cat > /ws/src/a.ts <<'EOF'\n${SKILL_DOC}\nEOF` }
+        }).skillHit
+      ).toBe(false)
+    })
+  })
+
+  it("keeps Skill detection read_file-only under the standard strategy", () => {
+    const detector = loadedDetector()
+    const observed = observeToolCallForAttribution(detector, {
+      name: "execute",
+      args: { command: `cat ${SKILL_DOC}` }
+    })
+    expect(observed.skillHit).toBe(false)
+    expect(detector.getUsedSkillNames()).toEqual([])
   })
 
   it("reports no hit for a read that touches no skill", () => {

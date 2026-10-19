@@ -77,7 +77,23 @@ assert(!allSource.includes("请先在招乎中向内置机器人发送一条消�
 assert(!panel.includes("inbox-and-features"), "global Feature access toggle is retired")
 assert(panel.includes("同一用户只保留一个活动桌面连接"))
 assert(!allSource.includes("deviceEpoch"), "device routing epochs must stay retired")
-assert(!allSource.toLowerCase().includes("takeover"), "device takeover must stay retired")
+// Bot browser handover is a supported feature. Retired IM device routing must
+// remain absent in IM code and in transport-boundary protocol names elsewhere.
+function containsLegacyImTakeover(path: string, source: string): boolean {
+  const isImSource =
+    /(?:^|\/)im(?:\/|-)/i.test(path) ||
+    /(?:BuiltinRobotPanel|builtin-robot)/i.test(path)
+  return /device[_.:-]?takeover|takeover[_.:-]?device/i.test(source) ||
+    (isImSource && /takeover/i.test(source))
+}
+assert(containsLegacyImTakeover("main/services/im/manager.ts", 'type: "takeover"'))
+assert(containsLegacyImTakeover("preload/index.ts", "deviceTakeover: () => invoke()"))
+assert(containsLegacyImTakeover("shared/im-gateway-contract.ts", "device_takeover"))
+assert(!containsLegacyImTakeover("main/bots/browser.ts", "async takeOver(botId: string) {}"))
+for (const path of sourceFiles) {
+  assert(!containsLegacyImTakeover(path, read(join("src", path))),
+    `legacy IM device takeover must stay retired: ${path}`)
+}
 
 const preload = read("src/preload/index.ts")
 assert(preload.includes("builtinRobot:"))
@@ -87,7 +103,13 @@ assert(main.includes("builtinRobotManager.start(app.getVersion())"))
 assert(main.includes("builtinRobotManager.stop()"))
 const robotManager = read("src/main/services/im/manager.ts")
 assert(
-  /listGrantableFeatures\(\)[\s\S]*Promise\.all\([\s\S]*listRemoteFeatures/u.test(robotManager),
+  /listGrantableFeatures\(\)[\s\S]*listRemoteFeatureCatalog/u.test(robotManager),
+  "Robot management and IM selections should use the same current Feature catalog"
+)
+assert(
+  /listRemoteFeatureCatalog\([\s\S]*Promise\.all\(/u.test(
+    read("src/main/services/im/feature-binding-service.ts")
+  ),
   "Feature details should load concurrently after the first robot paint"
 )
 

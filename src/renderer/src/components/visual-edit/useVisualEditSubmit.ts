@@ -12,7 +12,8 @@ import {
 import { buildVisualEditPrompt } from "./visual-context-builder"
 import {
   getSubmittableVisualAnnotations,
-  getVisualEditSubmitDisabledReason
+  getVisualEditSubmitDisabledReason,
+  getVisualEditThreadSubmitDisabledReason
 } from "./visual-submit-guards"
 import type { ClawVisualFeedbackContext } from "./visual-edit-types"
 
@@ -56,26 +57,34 @@ export function useVisualEditSubmit(threadId: string): {
   } = useCurrentThread(threadId)
   const streamData = useThreadStream(threadId)
   const selectedModel = currentModel ? models.find((model) => model.id === currentModel) : null
-  const submitDisabledReason = getVisualEditSubmitDisabledReason({
-    historyLoading,
-    scheduledTaskLoading,
-    streamLoading: streamData.isLoading,
-    hasStream: Boolean(streamData.stream),
-    hasPendingApproval: Boolean(pendingApproval) || approvalQueue.length > 0,
-    currentModel,
-    selectedModelExists: Boolean(selectedModel),
-    selectedModelAvailable: selectedModel?.available === true,
-    workspacePath
-  })
+  const submitDisabledReason =
+    getVisualEditThreadSubmitDisabledReason(
+      threads.find((thread) => thread.thread_id === threadId)
+    ) ??
+    getVisualEditSubmitDisabledReason({
+      historyLoading,
+      scheduledTaskLoading,
+      streamLoading: streamData.isLoading,
+      hasStream: Boolean(streamData.stream),
+      hasPendingApproval: Boolean(pendingApproval) || approvalQueue.length > 0,
+      currentModel,
+      selectedModelExists: Boolean(selectedModel),
+      selectedModelAvailable: selectedModel?.available === true,
+      workspacePath
+    })
 
   const canSubmitVisualFeedback = !submitDisabledReason
 
   const submitVisualFeedback = useCallback(
     async (context: ClawVisualFeedbackContext): Promise<boolean> => {
-      if (submitDisabledReason || !streamData.stream || !currentModel) {
-        if (submitDisabledReason) {
-          toast.warning(submitDisabledReason)
-          setError(submitDisabledReason)
+      const disabledReason =
+        getVisualEditThreadSubmitDisabledReason(
+          useAppStore.getState().threads.find((thread) => thread.thread_id === threadId)
+        ) ?? submitDisabledReason
+      if (disabledReason || !streamData.stream || !currentModel) {
+        if (disabledReason) {
+          toast.warning(disabledReason)
+          setError(disabledReason)
         }
         setActiveTab("agent")
         return false

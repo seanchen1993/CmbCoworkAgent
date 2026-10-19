@@ -2,9 +2,23 @@ import type { BrowserWindow } from "electron"
 import type { BackgroundNotificationOwner } from "../../shared/internal-notification-turn"
 import type { SkillUseBlockMetadata } from "../../shared/skill-use-block"
 import type { AgentInvokeParams } from "../types"
-import type { RuntimeInteractionWaitHooks } from "./runtime"
+import type { CreateAgentRuntimeOptions, RuntimeInteractionWaitHooks } from "./runtime"
 import type { RemoteTurnPolicy, StandardTurnSource } from "./standard-thread-turn"
 import type { LocalThreadRunOwner } from "./thread-run-lease"
+import type { CurrentRunQueuedMessage } from "./current-run-message-queue"
+
+export interface AgentRunSteerRequest {
+  threadId: string
+  owner: LocalThreadRunOwner
+  runId: string
+  message: CurrentRunQueuedMessage
+}
+
+export interface AgentRunSteerResult {
+  queued: boolean
+  reason?: string
+  message?: string
+}
 
 export type AgentRunRequest = AgentInvokeParams
 
@@ -134,10 +148,32 @@ export interface AgentRunExecutionContext {
   allowTrustedTransportSkillMarker?: boolean
   remotePolicy?: RemoteTurnPolicy
   interactionWaitHooks?: RuntimeInteractionWaitHooks
+  /** Trusted background callers may wait for the renderer to reopen for user input. */
+  allowDeferredUserInputRenderer?: boolean
+  /** Trusted host opt-in; never read from renderer input or inherited by leaf agents. */
+  workflowEnabled?: boolean
+  backgroundCommandLifecycle?: CreateAgentRuntimeOptions["backgroundCommandLifecycle"]
+  /** Only a host-owned durable workflow receipt may invoke the internal summary turn. */
+  workflowInternalNotification?: boolean
+  /** Bot-host receipt only; cannot be supplied through a renderer request. */
+  commandInternalNotification?: boolean
+  /** First conversation cue issued only by the Bot host; never a renderer-authored message. */
+  botIntroduction?: boolean
   extraSystemPrompt?: string
+  /** Trusted host adapters can add identity-bound tools; never populated from renderer input. */
+  additionalTools?: CreateAgentRuntimeOptions["additionalTools"]
+  toolConcurrencyQueueId?: string
+  userInputWithoutToolLock?: CreateAgentRuntimeOptions["userInputWithoutToolLock"]
+  botBrowserToolsOwnFileLock?: CreateAgentRuntimeOptions["botBrowserToolsOwnFileLock"]
+  capabilityService?: CreateAgentRuntimeOptions["capabilityService"]
   onGoalNotice?: (notice: AgentRunGoalNotice) => void
   onFinalAssistant?: (result: AgentRunFinalAssistant) => void | Promise<void>
   onRunCancelled?: () => void
+  /** The original user-prompt/steer pipeline is ready; trusted inboxes can offer saved messages. */
+  onSteeringReady?: () => void
+  /** Trusted Bot inbox only: the exact active main-model round can be superseded.
+   * Undefined ends that opportunity; tools, compaction and leaf models do not expose it. */
+  onModelRequestState?: (interrupt: (() => boolean) | undefined) => void
   /**
    * Fires exactly once per run, before its completion promise settles.
    *
@@ -178,6 +214,20 @@ let partnerInputOnlyImplementation: AgentRunImplementation | null = null
 let agentGoalControlImplementation: AgentGoalControlImplementation | null = null
 let activeAgentRunInspector: ActiveAgentRunInspector = () => false
 let activeAgentRunCanceller: ActiveAgentRunCanceller = () => false
+let agentRunSteerer: (request: AgentRunSteerRequest) => Promise<AgentRunSteerResult> = async () => ({
+  queued: false, reason: "run_not_ready"
+})
+
+export function registerAgentRunSteerer(
+  steer: (request: AgentRunSteerRequest) => Promise<AgentRunSteerResult>
+): void {
+  agentRunSteerer = steer
+}
+
+/** Main-process callers must supply the exact lease they own; never accepts a renderer owner. */
+export function steerAgentRun(request: AgentRunSteerRequest): Promise<AgentRunSteerResult> {
+  return agentRunSteerer(request)
+}
 
 export function registerAgentRunImplementation(implementation: AgentRunImplementation): void {
   agentRunImplementation = implementation
