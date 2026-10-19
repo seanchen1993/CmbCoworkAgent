@@ -1,3 +1,4 @@
+import { prepareMarketCommand } from "../services/market-content"
 import { markHarnessStageAttributionDirty } from "../services/harness-stage-attribution"
 import {
   assertHarnessConfigAvailable,
@@ -1247,8 +1248,11 @@ async function runHarnessInvocationAsync(
     const { cwd, invocation } = configured
     if (logOptions) logHarnessInvocationStart(configured, logOptions)
     const stdoutBuffer = await new Promise<Buffer>((resolvePromise, rejectPromise) => {
-      const child = spawn(invocation.executable, invocation.args, {
-        cwd,
+      const roots = [cwd]
+      const executable = prepareMarketCommand(invocation.executable, cwd, roots)
+      const args = invocation.args.map((arg) => prepareMarketCommand(arg, cwd, roots).command)
+      const child = spawn(executable.command, args, {
+        cwd: executable.cwd,
         env: {
           ...process.env,
           PYTHONIOENCODING: "utf-8",

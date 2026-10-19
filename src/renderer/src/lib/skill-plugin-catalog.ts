@@ -39,6 +39,7 @@ export async function loadSkillCatalogSummary(
   isCurrent?: () => boolean
 ): Promise<SkillCatalogSummary> {
   if (isCurrent && !isCurrent()) throw new Error("Catalog request superseded")
+  await migrateMarketContent()
   const page = await window.api.skills.catalog.read(
     { kind: "skills", limit: 1, revision },
     `${scope}:skills`
@@ -143,6 +144,39 @@ async function drainCatalogKind(
   }
 }
 
+let marketMigration: Promise<void> | undefined
+
+async function migrateMarketContent(): Promise<void> {
+  if (typeof window.api.skills.protectMarketInstalls !== "function") return
+  marketMigration ??= (async () => {
+    const names = new Set<string>()
+    for (const key of [
+      "marketplace_installed_source_records",
+      "marketplace_installed_version_records"
+    ]) {
+      const raw = localStorage.getItem(key)
+      if (!raw) continue
+      try {
+        const records = JSON.parse(raw)
+        for (const kind of ["skill", "orgSkill"]) {
+          if (records?.[kind] && typeof records[kind] === "object") {
+            for (const name of Object.keys(records[kind])) names.add(name)
+          }
+        }
+      } catch {
+        /* Ignore malformed legacy UI caches. */
+      }
+    }
+    if (names.size === 0) return
+    const result = await window.api.skills.protectMarketInstalls([...names])
+    if (!result.success) throw new Error(result.error || "迁移市场技能失败")
+  })().catch((error) => {
+    marketMigration = undefined
+    throw error
+  })
+  return marketMigration
+}
+
 export async function loadSkillCatalogPages(
   revision: string,
   scope = "app-skill-catalog",
@@ -156,6 +190,7 @@ export async function loadSkillCatalogPages(
   truncated: boolean
   truncatedReasons: string[]
 }> {
+  await migrateMarketContent()
   const [skillResult, disabledResult] = await Promise.all([
     drainCatalogKind("skills", { revision, scope, isCurrent }),
     drainCatalogKind("disabled", { revision, scope, isCurrent })

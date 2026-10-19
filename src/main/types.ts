@@ -1234,6 +1234,7 @@ export interface HookLoggingConfig {
 
 // Skills types
 export interface SkillMetadata {
+  contentOrigin?: "local" | "market" | "builtin"
   id?: string
   name: string
   description: string

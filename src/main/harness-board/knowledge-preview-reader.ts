@@ -1,11 +1,5 @@
-import {
-  existsSync,
-  opendirSync,
-  readFileSync,
-  realpathSync,
-  statSync,
-  type Dirent
-} from "node:fs"
+import { readContentFileSync } from "../services/market-content"
+import { existsSync, opendirSync, realpathSync, statSync, type Dirent } from "node:fs"
 import { basename, isAbsolute, join, relative, resolve } from "node:path"
 import { serialize } from "node:v8"
 import type { HarnessKnowledgePreviewResult } from "../../shared/harness-board-types"
@@ -56,7 +50,7 @@ function readBoundedJson(path: string, maxBytes: number, label: string): unknown
   const stats = statSync(path)
   if (!stats.isFile()) return null
   if (stats.size > maxBytes) throw new Error(`${label} exceeded ${maxBytes} bytes`)
-  return JSON.parse(readFileSync(path, "utf8")) as unknown
+  return JSON.parse(readContentFileSync(path, "utf8")) as unknown
 }
 
 function readPlugins(path: string): PluginMetadata[] {

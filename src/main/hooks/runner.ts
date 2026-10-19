@@ -1,3 +1,4 @@
+import { prepareMarketCommand, resolveMarketRuntimePath } from "../services/market-content"
 import { spawn } from "node:child_process"
 import { ChatOpenAI } from "@langchain/openai"
 import { HumanMessage, SystemMessage } from "@langchain/core/messages"
@@ -650,8 +651,26 @@ function executeCommandHook(
   stdinPayload: string,
   cwd: string
 ): Promise<HookResult> {
+  const prepared = prepareMarketCommand(
+    hook.command ?? "",
+    cwd,
+    [env.PLUGIN_ROOT, env.SKILL_ROOT].filter((value): value is string => Boolean(value))
+  )
+  const originalRoots = [env.PLUGIN_ROOT, env.SKILL_ROOT].filter((value): value is string =>
+    Boolean(value)
+  )
+  env = Object.fromEntries(
+    Object.entries(env).map(([key, value]) => [
+      key,
+      ["PLUGIN_ROOT", "SKILL_ROOT", "SKILL_PATH"].includes(key)
+        ? resolveMarketRuntimePath(value)
+        : value
+    ])
+  )
+  stdinPayload = prepareMarketCommand(stdinPayload, cwd, originalRoots).command
+  cwd = prepared.cwd
   return new Promise((resolve) => {
-    const command = hook.command ?? ""
+    const command = prepared.command
     if (!command.trim()) {
       resolve({ exitCode: 0, stdout: "", stderr: "Hook command is empty", blocked: false })
       return

@@ -1,3 +1,4 @@
+import { readContentFileSync } from "../services/market-content"
 /**
  * Shared agent-type registry.
  *
@@ -17,7 +18,7 @@
  * `tools`/`disallowedTools` frontmatter (CC tool names are auto-mapped) or the
  * coarse `workload` shortcut.
  */
-import { existsSync, readdirSync, readFileSync, realpathSync, statSync } from "fs"
+import { existsSync, readdirSync, realpathSync, statSync } from "fs"
 import {
   opendir,
   realpath as realpathAsync
@@ -573,7 +574,7 @@ function parseAgentFile(filePath: string, fallbackName: string): AgentProfile | 
       )
       return null
     }
-    const content = readFileSync(filePath, "utf-8")
+    const content = readContentFileSync(filePath, "utf-8")
     return parseAgentContent(filePath, fallbackName, content)
   } catch (error) {
     console.warn(`[AgentRegistry] Failed to parse agent file ${filePath}:`, error)

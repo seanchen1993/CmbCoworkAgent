@@ -166,25 +166,6 @@ interface LocalUploadedSkillPathRecord {
   uploadedAt?: string
 }
 
-function parseMarkdownFrontmatterMetadata(content: string | null): Record<string, string> | undefined {
-  if (typeof content !== "string") return undefined
-
-  const match = content.match(/^---\r?\n([\s\S]*?)\r?\n---(?:\r?\n|$)/)
-  if (!match) return undefined
-
-  const metadata: Record<string, string> = {}
-  for (const line of match[1].split(/\r?\n/)) {
-    const colonIndex = line.indexOf(":")
-    if (colonIndex <= 0) continue
-    const key = line.slice(0, colonIndex).trim()
-    const rawValue = line.slice(colonIndex + 1).trim()
-    const value = rawValue.replace(/^['"]|['"]$/g, "")
-    if (key && value) metadata[key] = value
-  }
-
-  return Object.keys(metadata).length > 0 ? metadata : undefined
-}
-
 function formatMarketVersionLabel(version?: string | null): string {
   const normalized = normalizeMarketVersion(version)
   return normalized ? `v${normalized}` : "未知版本"
@@ -1120,53 +1101,6 @@ export const MarketPanel = React.memo(function MarketPanel(): React.JSX.Element 
     setSkillTraceDialogOpen(false)
   }
 
-  const applySkillDetailMarkdown = useCallback(
-    (baseSkill: SkillMetadata, filePath: string, markdownContent: string) => {
-      const metadata = parseMarkdownFrontmatterMetadata(markdownContent)
-      setSkillDetailSelectedFile(filePath)
-      setSkillDetailContent(markdownContent)
-      setSkillDetailSkill({
-        ...baseSkill,
-        path: filePath,
-        version: metadata?.version?.trim() || baseSkill.version,
-        metadata
-      })
-    },
-    []
-  )
-
-  const loadSkillPreviewFromInstallFile = async (
-    baseSkill: SkillMetadata,
-    filename: string,
-    blob: Blob
-  ) => {
-    setSkillDetailSelectedFile(filename)
-    setSkillDetailContent(null)
-    setSkillDetailBinaryBase64(null)
-    setSkillDetailBinaryMimeType(null)
-
-    const ext = getFileExt(filename)
-    if (ext === "md") {
-      setSkillDetailPreviewKind("text")
-      const text = await blob.text()
-      applySkillDetailMarkdown(baseSkill, filename, text)
-      return
-    }
-    if (ext === "zip") {
-      setSkillDetailPreviewKind("text")
-      const arrayBuffer = await blob.arrayBuffer()
-      const extracted = await window.api.skills.extractMarkdownFromZip(arrayBuffer, filename)
-      if (extracted.success && extracted.content) {
-        applySkillDetailMarkdown(baseSkill, extracted.filePath || "SKILL.md", extracted.content)
-      } else {
-        setSkillDetailContent(extracted.error || "Zip 中未找到可预览的 markdown 文件。")
-      }
-      return
-    }
-    setSkillDetailPreviewKind("text")
-    setSkillDetailContent(`文件类型 .${ext || "未知"} 已通过安装接口获取，当前不支持直接内容预览。`)
-  }
-
   const triggerReload = () => {
     setReloadToken((prev) => prev + 1)
   }
@@ -1986,33 +1920,27 @@ export const MarketPanel = React.memo(function MarketPanel(): React.JSX.Element 
     setDetailLoading(true)
     resetDetailState()
     try {
-      const installFile =
-        activeTab === "orgSkill"
-          ? await marketApi.fetchOrgSkillInstallFile(item)
-          : await marketApi.fetchInstallFile(item.name, activeTab)
+      if (activeTab === "skill" || activeTab === "orgSkill") {
+        setSkillDetailSkill({
+          name: item.name,
+          description: item.description || "",
+          path: "",
+          source: "user",
+          contentOrigin: "market",
+          version: item.version || "v1.0.0"
+        })
+        return
+      }
+      const installFile = await marketApi.fetchInstallFile(item.name, activeTab)
       const installFilename = installFile.filename || item.filename || `${item.name}`
 
       if (!isAllowedDetailFile(activeTab, installFilename)) {
         throw new Error(
-          activeTab === "skill"
-            ? "Skill 详情文件仅支持 .zip 或 .md"
-            : activeTab === "plugin"
-              ? "Plugin 详情文件仅支持 .zip"
-              : "MCP 详情文件仅支持 .json"
+          activeTab === "plugin" ? "Plugin 详情文件仅支持 .zip" : "MCP 详情文件仅支持 .json"
         )
       }
 
-      if (activeTab === "skill" || activeTab === "orgSkill") {
-        const baseSkill: SkillMetadata = {
-          name: item.name,
-          description: item.description || "Market skill",
-          path: installFilename,
-          source: "user",
-          version: item.version ? formatMarketVersionLabel(item.version) : "v1.0.0"
-        }
-        setSkillDetailSkill(baseSkill)
-        await loadSkillPreviewFromInstallFile(baseSkill, installFilename, installFile.blob)
-      } else if (activeTab === "mcp") {
+      if (activeTab === "mcp") {
         const text = await installFile.blob.text()
         const parsed = JSON.parse(text)
         const mcpServerConfig = parsed?.mcpServers
@@ -2632,7 +2560,7 @@ export const MarketPanel = React.memo(function MarketPanel(): React.JSX.Element 
       if (activeTab === "skill" && selectedItem.featured === "精品") {
         return (
           <div className="rounded-xl border border-status-warning/30 bg-status-warning/10 p-6 text-sm text-status-warning">
-            精品技能暂不支持查看详情文件内容，请直接安装后使用。
+            市场技能内容受保护，请直接安装后使用。
           </div>
         )
       }
@@ -2656,6 +2584,7 @@ export const MarketPanel = React.memo(function MarketPanel(): React.JSX.Element 
             onToggleEnabled={() => undefined}
             contentOnly={activeTab === "skill"}
             hideActions
+            hideContentPreview
           />
         </div>
       )

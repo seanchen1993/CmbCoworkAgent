@@ -202,7 +202,9 @@ async function installFeaturedSkills(
 
       const response =
         typeof window.api?.skills?.upload === "function"
-          ? await window.api.skills.upload(installFile.buffer, installFile.filename)
+          ? await window.api.skills.upload(installFile.buffer, installFile.filename, {
+              origin: "market"
+            })
           : { success: false, error: "Skill upload API is not available" }
 
       if (response.success) {
