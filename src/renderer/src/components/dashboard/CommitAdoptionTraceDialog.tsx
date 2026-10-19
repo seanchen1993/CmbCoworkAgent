@@ -17,6 +17,7 @@ import type {
   DashboardLocalGeneratedLineStatus
 } from "./use-dashboard"
 import { shouldShowSupersededFallback } from "./commit-adoption-trace-logic"
+import { DrilldownArrow } from "./DrilldownArrow"
 
 const TRACE_COLSPAN = 7
 
@@ -463,6 +464,7 @@ function TracePairRow({
               >
                 <MessagesSquare className="size-3 shrink-0" />
                 <span className="truncate">会话 {threadId}</span>
+                <DrilldownArrow />
               </button>
             ) : (
               <div className="mt-0.5 truncate font-mono" title={threadId}>

@@ -239,6 +239,10 @@ function ReadRow({
       >
         <Users className="size-3.5" />
         {expanded ? "收起读取人" : "查看读取人"}
+        <ChevronRight
+          aria-hidden="true"
+          className={`size-3.5 shrink-0 text-muted-foreground transition-transform ${expanded ? "rotate-90" : ""}`}
+        />
       </button>
       {expanded && <KnowledgeReadReaders file={row} rooms={rooms} />}
     </>

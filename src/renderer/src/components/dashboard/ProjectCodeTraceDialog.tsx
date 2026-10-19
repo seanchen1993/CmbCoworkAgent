@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react"
 import { ChevronDown, ChevronRight, Info, Loader2 } from "lucide-react"
+import { DrilldownArrow } from "./DrilldownArrow"
 import {
   Dialog,
   DialogContent,
@@ -197,6 +198,7 @@ function CodeTraceRow({
             onClick={() => item.threadId && onViewThread(item.threadId, item.traceId)}
           >
             产码会话
+            {item.threadId ? <DrilldownArrow className="ml-1" /> : null}
           </button>
           {item.rootThreadId && item.rootThreadId !== item.threadId ? (
             <div>
@@ -207,6 +209,7 @@ function CodeTraceRow({
                 onClick={() => onViewThread(item.rootThreadId!, null)}
               >
                 主 Agent 会话
+                <DrilldownArrow className="ml-1" />
               </button>
             </div>
           ) : null}
@@ -269,6 +272,7 @@ function CodeTraceRow({
                 className="text-xs"
               >
                 查看本机逐行代码
+                <DrilldownArrow className="ml-1" />
               </Button>
             ) : null}
             {localRequested ? (
