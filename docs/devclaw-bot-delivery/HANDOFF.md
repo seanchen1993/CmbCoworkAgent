@@ -1,3 +1,11 @@
+# 2026-10-19 M03 成果确认与退回修改已授权
+
+用户明确继续当前下一步，root设计/验收，gpt-6.1-sol/xhigh实施。复用唯一 `/root/service_conversation_sol`，原附属树已从96e6e142 ff-only到f1afeefa，新分支 `codex/bot-delivery-review-m03`，开始前clean。任务 `tasks/M03-delivery-review.md` ready；root独占目标/state/HANDOFF/README/tasks/reviews，代理写本树和attempts/M03-sol-xhigh.md，不再派子代理。
+
+目标：当前单专家文本成果不可变版本v1、绑定旧版的意见、同Task修改Run生成v2、确认v2关闭Task。采用服务端内部文本Delivery head/version/decision/receipt和V8迁移；publish从服务Result复制，当前权限+真实业务发起人+CAS。Task真状态/事件、历史回执、在途竞争、SQLite持久步骤、受限模型旧版输入、真实成果卡都要接通。公共文件上传/通用审批/多Bot/自动记忆不扩；状态图允许awaiting_business→completed，不虚构handoff。
+
+M02已验收代码保留。现原B00 MySQL693a1c3停止、ES/S3 healthy、用户Partner MySQL bdf4f0d停止；真实DB测试前代理报告，root负责核对和临时启动原B00守卫、最后恢复。隔离DB harness串行且精确回收，所有模型fake，无用户profile/密钥/内网/推送部署/自动任务恢复。重要进展及时更新attempt；自测后候选冻结，root独立复验再集成。下方M02 accepted是上片历史，不表示M03已完成。
+
 # 2026-10-19 M02 服务专家私聊已验收
 
 用户固定后续开发方式：root设计、拆分与质量验收，gpt-6.1-sol实施，复杂xhigh、简单high。唯一产品写者 `/root/service_conversation_sol` 已停止写入，最终候选 `96e6e1429def5bb47ea838704b4f46bd76291787`（父 `6bfabefc`）。root独立复验后正常合并到 `codex/devclaw-bot-integration`，提交 `1007a11bc21a0803b19b7ee8e6b41471eb821924`。目标 `/Users/heyirui/.codex/worktrees/devclaw-bot-integration/cmbCowork`，产品树与候选一致，beta祖先保留；未推送。root验收文档提交以包含本交接段的Git记录为准。
