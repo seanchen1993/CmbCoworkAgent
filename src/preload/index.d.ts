@@ -702,6 +702,8 @@ interface DashboardUserDetailOptions {
 }
 
 interface DashboardProjectModeFeature {
+  totalDurationMs?: number | null
+  lastExecutedAt?: string | null
   slug: string
   title: string
   location?: string
@@ -764,6 +766,7 @@ interface DashboardProjectModeAnalytics {
 }
 
 interface DashboardProjectModeProject {
+  lastExecutedAt?: string | null
   projectId: string
   name: string
   description?: string
@@ -2817,7 +2820,7 @@ interface CustomAPI {
     projectModeStageAnalysis: (
       projectId: string,
       range: { from: string; to: string } | null,
-      opts?: { upperOrgLv1?: string | string[] | null }
+      opts?: { upperOrgLv1?: string | string[] | null; featureSlug?: string }
     ) => Promise<{
       success: boolean
       data?: DashboardProjectModeStageAnalysis

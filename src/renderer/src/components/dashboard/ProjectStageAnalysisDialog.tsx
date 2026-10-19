@@ -1,5 +1,5 @@
-import React from "react"
-import { Info, Loader2 } from "lucide-react"
+import React, { useEffect, useMemo, useState } from "react"
+import { Check, ChevronDown, Info, Loader2 } from "lucide-react"
 import {
   Dialog,
   DialogContent,
@@ -8,10 +8,14 @@ import {
   DialogTitle
 } from "@/components/ui/dialog"
 import type {
+  DashboardProjectModeFeature,
   DashboardProjectModeStageAnalysis,
+  DashboardProjectModeStageAnalysisLoader,
   DashboardProjectModeStageMetrics,
   DashboardProjectModeStageRow
 } from "./use-dashboard"
+import { Input } from "@/components/ui/input"
+import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover"
 import {
   formatStageDuration as fmtDuration,
   resolveSlowestAvgStage,
@@ -139,21 +143,79 @@ function StageRow({
   )
 }
 
+/** Cache is local to one open dialog and loader (including room scope). */
+function useStageAnalysis(
+  projectId: string,
+  featureSlug: string,
+  load: DashboardProjectModeStageAnalysisLoader
+) {
+  const source = useMemo(
+    () => ({
+      load,
+      cache: new Map<string, { data: DashboardProjectModeStageAnalysis; expires: number }>()
+    }),
+    [load]
+  )
+  const [result, setResult] = useState<{
+    key: string
+    source: typeof source
+    data?: DashboardProjectModeStageAnalysis
+    error?: string
+  } | null>(null)
+  const key = JSON.stringify([projectId, featureSlug])
+  useEffect(() => {
+    let current = true
+    const cached = source.cache.get(key)
+    const valid = cached && cached.expires > Date.now()
+    const request = valid
+      ? Promise.resolve(cached.data)
+      : source.load(projectId, featureSlug || undefined)
+    void request
+      .then((data) => {
+        if (!valid) {
+          source.cache.delete(key)
+          source.cache.set(key, { data, expires: Date.now() + 30_000 })
+          while (source.cache.size > 20) source.cache.delete(source.cache.keys().next().value!)
+        }
+        if (current) setResult({ key, source, data })
+      })
+      .catch((error: unknown) => {
+        if (current)
+          setResult({ key, source, error: error instanceof Error ? error.message : String(error) })
+      })
+    return () => {
+      current = false
+    }
+  }, [source, key, projectId, featureSlug])
+  const selected = result?.key === key && result.source === source ? result : null
+  return { analysis: selected?.data ?? null, error: selected?.error ?? null, loading: !selected }
+}
+
 export function ProjectStageAnalysisDialog({
   open,
   onOpenChange,
+  projectId,
   projectName,
-  analysis,
-  loading,
-  error
+  features,
+  loadAnalysis
 }: {
   open: boolean
   onOpenChange: (open: boolean) => void
+  projectId: string
   projectName: string
-  analysis: DashboardProjectModeStageAnalysis | null
-  loading: boolean
-  error: string | null
+  features: DashboardProjectModeFeature[]
+  loadAnalysis: DashboardProjectModeStageAnalysisLoader
 }): React.JSX.Element {
+  const [featureSlug, setFeatureSlug] = useState("")
+  const [selectOpen, setSelectOpen] = useState(false)
+  const [search, setSearch] = useState("")
+  const { analysis, loading, error } = useStageAnalysis(projectId, featureSlug, loadAnalysis)
+  const options = features.filter(
+    (feature) =>
+      feature.slug &&
+      `${feature.title} ${feature.slug}`.toLowerCase().includes(search.trim().toLowerCase())
+  )
+  const selectedFeature = features.find((feature) => feature.slug === featureSlug)
   const total: DashboardProjectModeStageMetrics | null = analysis?.total ?? null
   const stages = analysis?.stages ?? []
   const slowestAvgNodeName = resolveSlowestAvgStage(stages)
@@ -195,6 +257,63 @@ export function ProjectStageAnalysisDialog({
           <DialogDescription className="truncate">{projectName}</DialogDescription>
         </DialogHeader>
 
+        <div className="flex items-center gap-2 text-xs">
+          <span className="shrink-0 text-muted-foreground">特性</span>
+          <Popover
+            open={selectOpen}
+            onOpenChange={(next) => {
+              setSelectOpen(next)
+              if (!next) setSearch("")
+            }}
+          >
+            <PopoverTrigger asChild>
+              <button
+                type="button"
+                role="combobox"
+                aria-expanded={selectOpen}
+                aria-label="筛选阶段耗时特性"
+                className="flex w-[340px] max-w-full items-center justify-between gap-2 rounded-md border border-border px-3 py-2 text-left"
+              >
+                <span className="truncate">
+                  {selectedFeature?.title || selectedFeature?.slug || "全部特性"}
+                </span>
+                <ChevronDown className="size-3.5 shrink-0 text-muted-foreground" />
+              </button>
+            </PopoverTrigger>
+            <PopoverContent align="start" className="w-[min(420px,85vw)] p-2">
+              <Input
+                aria-label="搜索特性"
+                placeholder="搜索特性名称或标识"
+                value={search}
+                onChange={(event) => setSearch(event.target.value)}
+                className="mb-2 h-8 text-xs"
+              />
+              <div className="max-h-64 space-y-0.5 overflow-y-auto" aria-label="特性选项">
+                {[{ slug: "", title: "全部特性" }, ...options].map((feature) => (
+                  <button
+                    key={feature.slug}
+                    type="button"
+                    aria-pressed={featureSlug === feature.slug}
+                    onClick={() => {
+                      setFeatureSlug(feature.slug)
+                      setSelectOpen(false)
+                      setSearch("")
+                    }}
+                    className="flex w-full items-center justify-between gap-2 rounded px-2 py-1.5 text-left text-xs hover:bg-muted focus-visible:bg-muted"
+                    title={feature.title}
+                  >
+                    <span className="min-w-0 truncate">{feature.title || feature.slug}</span>
+                    {featureSlug === feature.slug && <Check className="size-3.5 shrink-0" />}
+                  </button>
+                ))}
+                {search && options.length === 0 && (
+                  <div className="px-2 py-2 text-xs text-muted-foreground">未找到匹配特性</div>
+                )}
+              </div>
+            </PopoverContent>
+          </Popover>
+        </div>
+
         {loading && !analysis ? (
           <div className="flex flex-1 items-center justify-center gap-2 py-16 text-sm text-muted-foreground">
             <Loader2 className="size-4 animate-spin" />
@@ -206,7 +325,7 @@ export function ProjectStageAnalysisDialog({
           </div>
         ) : !total || stages.length === 0 ? (
           <div className="flex flex-1 items-center justify-center py-16 text-sm text-muted-foreground">
-            当前时间范围内该项目没有阶段统计数据
+            {featureSlug ? "该特性暂无阶段统计数据" : "该项目暂无阶段统计数据"}
           </div>
         ) : (
           <>

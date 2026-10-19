@@ -8,6 +8,7 @@ import * as operational from "./project-mode-operational-metrics"
 import * as costs from "./project-mode-run-cost-metrics"
 import * as dev from "./project-mode-metrics"
 import * as scope from "./project-mode-query-scope"
+import * as execution from "./project-mode-execution-metrics"
 import * as snapshots from "./project-mode-snapshot-filters"
 import { fetchCompleteProjectDevMetrics } from "./project-mode-dev-metrics"
 import { ProjectModePageCache } from "./project-mode-page-cache"
@@ -98,10 +99,16 @@ function fixture(featureCount = 1) {
                   key: "p",
                   main_agent_conversations: {
                     doc_count: 2,
+                    last_execution: { value: 1700000000000 },
                     by_node: { buckets: [{ key: "Dev-实现", doc_count: 1 }] },
                     by_feature: {
                       buckets: [
-                        { key: "f", by_node: { buckets: [{ key: "Dev-实现", doc_count: 1 }] } }
+                        {
+                          key: "f",
+                          execution_duration: { count: 1, sum: 1234 },
+                          last_execution: { value: 1700000000000 },
+                          by_node: { buckets: [{ key: "Dev-实现", doc_count: 1 }] }
+                        }
                       ]
                     }
                   },
@@ -171,6 +178,7 @@ function fixture(featureCount = 1) {
     ...dev,
     ...scope,
     ...snapshots,
+    ...execution,
     fetchCompleteProjectDevMetrics,
     mapAwardBatches,
     compareProjectAttentionValues,
@@ -259,6 +267,21 @@ describe("project list lifetime IPC flow", () => {
         string,
         { composite?: { sources: Record<string, unknown>[]; after?: unknown } }
       >
+      if (aggs.features?.composite) {
+        return {
+          aggregations: {
+            features: {
+              buckets: [
+                {
+                  key: { project: "p", feature: "f" },
+                  execution_duration: { count: 1, sum: 4567 },
+                  last_execution: { value: 1700000000000 }
+                }
+              ]
+            }
+          }
+        }
+      }
       const composite = aggs.dev_metrics?.composite
       if (composite) {
         expect(body.size).toBe(0)
@@ -303,7 +326,51 @@ describe("project list lifetime IPC flow", () => {
       devAssociatedFeatureCount: 1,
       codeStats: { generatedLines: 100, adoptedLines: 40 }
     })
-    expect(esQuery).toHaveBeenCalledTimes(6)
+    expect(esQuery).toHaveBeenCalledTimes(7)
+  })
+
+  it("completes execution stats on shard-count errors even when no feature bucket is omitted", async () => {
+    const { api, esQuery } = fixture()
+    const original = esQuery.getMockImplementation()!
+    esQuery.mockImplementation(async (index, body) => {
+      const aggs = body.aggs as Record<string, unknown>
+      if (aggs.features) {
+        expect(JSON.stringify(body.query)).toContain('"harnessFeatureSlug":["f"]')
+        expect(JSON.stringify(body.query)).not.toContain('"range"')
+        return {
+          aggregations: {
+            features: {
+              buckets: [
+                {
+                  key: { project: "p", feature: "f" },
+                  execution_duration: { count: 3, sum: 9999 },
+                  last_execution: { value: 1700000001000 }
+                }
+              ]
+            }
+          }
+        }
+      }
+      const raw = await original(index, body)
+      if (index === "traces") {
+        const aggregate = raw.aggregations as {
+          by_project: {
+            buckets: Array<{
+              main_agent_conversations: { by_feature: { doc_count_error_upper_bound?: number } }
+            }>
+          }
+        }
+        aggregate.by_project.buckets[0].main_agent_conversations.by_feature.doc_count_error_upper_bound = 2
+      }
+      return raw
+    })
+    const result = await api.fetchProjectModeProjectPage(range, { createdInRangeOnly: false })
+    expect(result.projects[0]).toMatchObject({
+      lastExecutedAt: "2023-11-14T22:13:20.000Z",
+      features: [{ totalDurationMs: 9999, lastExecutedAt: "2023-11-14T22:13:21.000Z" }]
+    })
+    // One compact trace query + one code query + one scalar fallback, not one per feature.
+    expect(esQuery).toHaveBeenCalledTimes(3)
   })
 
   it("globally orders projects before paging and reuses metrics for paging, reversals and unfiltered date changes", async () => {
@@ -404,12 +471,20 @@ describe("project list lifetime IPC flow", () => {
     }
     expect(page.projects[0]).toMatchObject({
       conversationCount: 2,
+      lastExecutedAt: "2023-11-14T22:13:20.000Z",
       devStageConversationCount: 1,
       devAssociatedFeatureCount: 1,
       runCost: { toolCalls: 100, modelCalls: 20, totalTokens: 3000, traceDocs: 3 },
       userInputRequestCountComplete: false,
       codeStats: { generatedLines: 100, adoptedLines: 40 },
-      features: [{ slug: "f", codeStats: { generatedLines: 30 } }]
+      features: [
+        {
+          slug: "f",
+          codeStats: { generatedLines: 30 },
+          totalDurationMs: 1234,
+          lastExecutedAt: "2023-11-14T22:13:20.000Z"
+        }
+      ]
     })
   })
 

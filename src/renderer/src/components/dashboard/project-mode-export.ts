@@ -60,7 +60,8 @@ export const PROJECT_MODE_PROJECT_EXPORT_HEADER = [
   "创建人 SAP ID",
   "创建人 YST ID",
   "部门",
-  "创建时间"
+  "创建时间",
+  "最新执行时间"
 ]
 
 function formatPercent(value: number | null | undefined): string {
@@ -100,7 +101,7 @@ function lifecycleLabel(status?: string): string {
   }
 }
 
-function formatDateTime(value?: string): string {
+function formatDateTime(value?: string | null): string {
   if (!value) return "—"
   const date = new Date(value)
   return Number.isNaN(date.getTime()) ? value : date.toLocaleString("zh-CN")
@@ -241,7 +242,8 @@ export function buildProjectModeProjectExportRows(
         project.creatorSapId || "",
         project.creatorYstId || "",
         creatorDepartment(project),
-        formatDateTime(project.lifecycleCreatedAt)
+        formatDateTime(project.lifecycleCreatedAt),
+        formatDateTime(project.lastExecutedAt)
       ]
     })
 }

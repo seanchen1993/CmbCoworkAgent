@@ -3911,9 +3911,10 @@ export function DashboardView(): React.JSX.Element {
 
   // 单项目的阶段耗时分析，按项目累计，并应用室筛选。
   const loadProjectStageAnalysis = useCallback(
-    async (projectId: string): Promise<DashboardProjectModeStageAnalysis> => {
+    async (projectId: string, featureSlug?: string): Promise<DashboardProjectModeStageAnalysis> => {
       const res = await window.api.dashboard.projectModeStageAnalysis(projectId, null, {
-        upperOrgLv1: selectedOrgLv1List
+        upperOrgLv1: selectedOrgLv1List,
+        featureSlug
       })
       if (!res.success || !res.data) {
         throw new Error(res.error ?? "获取阶段耗时分析失败")
