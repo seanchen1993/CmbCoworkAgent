@@ -1,6 +1,6 @@
 # M03：服务成果确认与退回修改闭环
 
-状态：ready。2026-10-19 用户明确继续，把成果确认和退回修改闭环做完；root 设计/质量验收，gpt-6.1-sol/xhigh 唯一实施者 `/root/service_conversation_sol`，不得派生子代理。
+状态：accepted。2026-10-19；root设计/独立验收，gpt-6.1-sol/xhigh实施。最终候选 `ae702957`，正常合并 `5beb5c60`，验证及局限见 `../reviews/M03-acceptance.md`，实施证据见 `../attempts/M03-sol-xhigh.md`。本任务以下为已完成设计和验收要求，未推送部署。
 
 ## 基准、目录与交付
 

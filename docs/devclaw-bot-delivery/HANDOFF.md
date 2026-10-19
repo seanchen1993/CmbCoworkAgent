@@ -1,10 +1,16 @@
-# 2026-10-19 M03 成果确认与退回修改已授权
+# 2026-10-19 M03 成果确认与退回修改已验收
 
-用户明确继续当前下一步，root设计/验收，gpt-6.1-sol/xhigh实施。复用唯一 `/root/service_conversation_sol`，原附属树已从96e6e142 ff-only到f1afeefa，新分支 `codex/bot-delivery-review-m03`，开始前clean。任务 `tasks/M03-delivery-review.md` ready；root独占目标/state/HANDOFF/README/tasks/reviews，代理写本树和attempts/M03-sol-xhigh.md，不再派子代理。
+root设计与独立验收，唯一实施者 `/root/service_conversation_sol`（gpt-6.1-sol/xhigh）已提交停写，工作树clean。候选 `ae7029571ee7741cc52fbcf9de49a93113f9d93e`，正常合并 `5beb5c604779593a6d818a2ac30c0cd2316c3d49` 到 `codex/devclaw-bot-integration`；目标产品与候选完全一致，M01 beta91554cbc及M02祖先保留。没有推送；验收文档提交以包含本段的Git记录为准。
 
-目标：当前单专家文本成果不可变版本v1、绑定旧版的意见、同Task修改Run生成v2、确认v2关闭Task。采用服务端内部文本Delivery head/version/decision/receipt和V8迁移；publish从服务Result复制，当前权限+真实业务发起人+CAS。Task真状态/事件、历史回执、在途竞争、SQLite持久步骤、受限模型旧版输入、真实成果卡都要接通。公共文件上传/通用审批/多Bot/自动记忆不扩；状态图允许awaiting_business→completed，不虚构handoff。
+已闭合：服务端不可变文本v1→针对旧版的意见→同Task修订v2→确认v2并真正完成Task；历史可看、当前权限/CAS/并发控制、原命令持久恢复、失败显式继续、未知不重跑、受限模型输入包含旧正文与意见、实际成果卡。V8五张内部表/总31表，无物理FK；不扩文件上传、通用审批、多专家、多设备同步、自动记忆或网关合并。
 
-M02已验收代码保留。现原B00 MySQL693a1c3停止、ES/S3 healthy、用户Partner MySQL bdf4f0d停止；真实DB测试前代理报告，root负责核对和临时启动原B00守卫、最后恢复。隔离DB harness串行且精确回收，所有模型fake，无用户profile/密钥/内网/推送部署/自动任务恢复。重要进展及时更新attempt；自测后候选冻结，root独立复验再集成。下方M02 accepted是上片历史，不表示M03已完成。
+root独立92core/18IPC/25契约、105条SQLite游标和原生写失败恢复、实际Electron成果/M02会话、真实Java/MySQL/SQLite/worker/DeepAgent fake完整旅程、目标主/Web类型与禁用远程配置完整构建均通过。模型3次（业务2+legacy1）、工具0；数据库含V7旧事实保留、新V8、17拒绝、回滚/失回包、并发单赢家、事件1..5及41版摘要25014bytes。实施者另71Java/1884parity及103core/27runtime等通过。报告 `reviews/M03-acceptance.md` 和 `attempts/M03-sol-xhigh.md`。
+
+保留局限：早先同fixture附加41版DB探针有一次DEPENDENCY_UNAVAILABLE，旧日志不足以归因；补轮次/操作/安全位置诊断后两轮实施者及一轮root整体验证均通过，未放宽限时，不宣称根因已修。全部模型测试fake，未证明真实provider质量/耗时或生产性能；无ES改动。
+
+资源终末核查：测试容器/卷/网络/runtime目录0，HTTP/UI/Java进程0；原B00 MySQL693a1c3由root恢复exited且保留卷，用户Partner MySQLbdf4f0d仍exited，原ES/S3同IDhealthy。记录 `/tmp/m03-root-resource-audit.log`、`/tmp/m03-root-db-restore.log`；原启动凭证startedByM03=false，勿重复stop/start。实际自动任务TOML仍PAUSED，无用户profile/密钥/内网/付费/部署操作。
+
+本轮无剩余实施项。后续等待用户安排，继续root设计/验收、6.1-sol实施（复杂xhigh、简单high）；不恢复定时或把历史待办当新授权。下方为已接受历史，不重播已闭合测试。
 
 # 2026-10-19 M02 服务专家私聊已验收
 
