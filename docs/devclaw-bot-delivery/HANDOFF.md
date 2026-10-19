@@ -1,3 +1,11 @@
+# 2026-10-19 beta 合并接续
+
+用户明确把 beta 合入 integration，由 root 设计/质量把控、gpt-6.1-sol 执行。任务 tasks/M01-beta-merge.md，功能设计 reviews/beta-integration-functional-design.md。目标 integration=d76f3020，已 fetch 的 beta=91554cbc；两个主分支在检查时干净。已创建独立工作树 /Users/heyirui/.codex/worktrees/beta-merge-review/agent-channel-integration-research-7ff0d6，已派发唯一 sol/high 写者 /root/beta_merge_sol，旧活动子代理列表为空。
+
+保留 beta 客户端与 integration Java/权限/Run/专家知识，重点语义合并共同执行入口和 IPC/生命周期；先交付合并兼容基础，成果确认等后续闭环另行实施与验收。root 管理 state/HANDOFF/目标分支，实施代理只写独立树及 attempts/M01-sol.md。自动任务仍暂停，不调用真实模型/内网/部署或自动推送，不动既有数据与运行中的用户 App。
+
+以下为历史交接，不覆盖本次最新用户授权及真实 Git 状态。
+
 # DevClaw Bot 当前交接点
 
 **2026-10-15 本地代码检查点提交。** 用户要求确认分支并提交改动，当前为codex/devclaw-bot-integration（非d12a），起点2f0d6c3f。本提交保存专家记忆/默认目录、无Group界面、本地默认连接/预览脚本和测试文档；源码43路径清单仍36336f77，无夹带运行时凭据/构建产物。预览脚本Ctrl+C/相对路径/监督进程遗失的限制仍是明确WIP，不因提交变成正式验收；不推送、不改用户App/库、不恢复定时。具体commit以包含本段的git log为准，下方“代码未提交”是本检查点之前的历史。
