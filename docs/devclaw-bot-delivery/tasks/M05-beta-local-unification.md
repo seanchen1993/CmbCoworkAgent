@@ -7,7 +7,7 @@
 - root 独占设计、任务单、state/HANDOFF/reviews、集成与最终验收。
 - 原 `/root/service_conversation_sol`，gpt-6.1-sol/xhigh，唯一产品写者，不派生子代理。
 - integration：`/Users/heyirui/.codex/worktrees/devclaw-bot-integration/cmbCowork`，`codex/devclaw-bot-integration`，起点 `b479d51d700b81871a4c22feaa751484f2488827`。
-- 实施：`/Users/heyirui/.codex/worktrees/beta-merge-review/agent-channel-integration-research-7ff0d6`。当前 HEAD `d9efa226`，有五个未提交 M04 修复文件，先准确核对/保存 WIP，不重放旧任务。再正常合入本轮文档基线，使用 `codex/beta-local-unification-m05` 分支；不 reset/rebase 覆盖既有工作。
+- 实施：`/Users/heyirui/.codex/worktrees/beta-merge-review/agent-channel-integration-research-7ff0d6`，分支 `codex/beta-local-unification-m05`。原五个未提交 M04 修复已保全为 `9e83c3048`；正常合入文档后提交接口检查点 `edbcc351`，现正实施 M05-02/03。不重放旧任务，不 reset/rebase 覆盖既有工作。
 - 实施者只改产品、必要测试、窄 package scripts 及本人 `attempts/M05-sol-xhigh.md`。不修改 root 的设计/state/HANDOFF，不写 LF39 工程，不操作用户预览/profile/凭据/真实模型或数据库。
 
 ## 任务清单与交付顺序
@@ -16,7 +16,7 @@
 | --- | --- | --- | --- |
 | M05-01 | beta 能力保留矩阵、旧服务依赖清单、增量工作/thread/执行接口 | reviewed | edbcc351 十五项保留矩阵与接口已审，设计第 10 节冻结；不代表产品已实现 |
 | M05-02 | 本地独立工作及统一 UI | implementing | 普通 Bot 直接使用；任务只在右侧；同一 ChatContainer/详情/附件/工具；无需 Java/MySQL |
-| M05-03 | 主对话协调工具、继续/完成、并发与持久恢复 | pending | 真实创建/转达、同任务多轮、不串上下文、主对话不被独立任务堵塞、故障不重跑 |
+| M05-03 | 主对话协调工具、继续/完成、并发与持久恢复 | implementing | 真实创建/转达、同任务多轮、不串上下文、主对话不被独立任务堵塞、故障不重跑 |
 | M05-04 | 可演示的 mock 个人/群渠道接入 | pending | 真实本地链路，来源隔离、明确绑定/@触发/关联回复、重复投递和离线状态；模拟标识 |
 | M05-05 | App 冗余清理、旧数据保留、beta 全能力回归与演示 | pending | 去第二套服务 UI/默认 worker，保留所有 beta 功能、实际 UI/重启/文件闭环，root 验收 |
 | M06-IM | LF39 真实群/个人协议、Java 精简合仓、真实招乎联调 | deferred_by_user | 本轮只记录接口与待办，不实施、不作为 MVP 阻塞 |
