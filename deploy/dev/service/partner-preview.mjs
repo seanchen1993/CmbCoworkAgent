@@ -184,6 +184,15 @@ export function retainSignalHandlers(previous, target = process) {
     for (const handler of target.listeners(signal))
       if (!handlers.includes(handler)) target.removeListener(signal, handler)
 }
+export function retainManualPreviewDialogs(page) {
+  // Playwright dismisses unobserved dialogs. This foreground preview belongs to
+  // the human: leave the native dialog open, without accepting or dismissing it.
+  const observe = () => {}
+  page.on("dialog", observe)
+  // Keep the subscription throughout App shutdown; removing it earlier can
+  // dismiss a pending confirmation. Release only our listener after page close.
+  page.once("close", () => page.removeListener("dialog", observe))
+}
 async function start(entry) {
   phase = "claim"
   const owned = await claim(entry)
@@ -282,6 +291,7 @@ async function start(entry) {
     check(!controller.signal.aborted)
     phase = "open-partner-page"
     const page = await app.firstWindow()
+    retainManualPreviewDialogs(page)
     page.setDefaultTimeout(15000)
     await page.getByRole("button", { name: "自定义设置", exact: true }).click()
     await page.getByRole("button", { name: "DevClaw 伙伴", exact: true }).click()

@@ -1,6 +1,7 @@
 import assert from "node:assert/strict"
 import { test } from "node:test"
-import { join } from "node:path"
+import { dirname, join } from "node:path"
+import { createRequire } from "node:module"
 import { mkdtemp, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { EventEmitter } from "node:events"
@@ -11,7 +12,8 @@ import {
   previewRecord,
   validatePreviewRecord,
   waitForPreviewExit,
-  retainSignalHandlers
+  retainSignalHandlers,
+  retainManualPreviewDialogs
 } from "../../../deploy/dev/service/partner-preview.mjs"
 
 test("preview isolates only App stores; no personal credentials, endpoints, or inherited proxy", () => {
@@ -169,4 +171,73 @@ test("preview retains original signal listeners; helper auto-exit cannot bypass 
   retainSignalHandlers(previous, target)
   assert.deepEqual(target.listeners("SIGINT"), [own])
   assert.deepEqual(target.listeners("SIGTERM"), [unrelated])
+})
+
+test("installed Playwright auto-closes unobserved dialogs; manual preview subscription leaves them untouched", () => {
+  const require = createRequire(import.meta.url)
+  const { DialogManager } = require(
+    join(dirname(require.resolve("playwright-core/package.json")), "lib/server/dialog.js")
+  )
+  const page = new EventEmitter()
+  page.frameManager = { frames: () => [] }
+  const manager = new DialogManager({ onDialog() {} })
+  manager.addDialogHandler((dialog) => dialog.page().emit("dialog", dialog))
+  const actions = []
+  const dialog = (type) => ({
+    page: () => page,
+    type: () => type,
+    async close() {
+      actions.push("close")
+    },
+    async accept() {
+      actions.push("accept")
+    },
+    async dismiss() {
+      actions.push("dismiss")
+    }
+  })
+  const unobserved = dialog("confirm")
+  manager.dialogDidOpen(unobserved)
+  assert.deepEqual(actions, ["close"])
+  manager.dialogWillClose(unobserved)
+  actions.length = 0
+
+  retainManualPreviewDialogs(page)
+  for (const type of ["confirm", "alert", "prompt", "beforeunload"]) {
+    const observed = dialog(type)
+    manager.dialogDidOpen(observed)
+    assert.deepEqual(actions, [])
+    manager.dialogWillClose(observed)
+  }
+  page.emit("close")
+  assert.equal(page.listenerCount("dialog"), 0)
+})
+
+test("manual dialog subscription stays until page close and cleanup retains unrelated listeners", async () => {
+  const page = new EventEmitter(),
+    otherPage = new EventEmitter(),
+    events = []
+  const unrelated = () => {}
+  page.on("dialog", unrelated)
+  retainManualPreviewDialogs(page)
+  retainManualPreviewDialogs(otherPage)
+  await closePreview(
+    {
+      close: async () => {
+        assert.equal(page.listenerCount("dialog"), 2)
+        assert.equal(otherPage.listenerCount("dialog"), 1)
+        events.push("app")
+        page.emit("close")
+        assert.deepEqual(page.listeners("dialog"), [unrelated])
+        assert.equal(page.listenerCount("close"), 0)
+        assert.equal(otherPage.listenerCount("dialog"), 1)
+      }
+    },
+    async () => {
+      events.push("service")
+    }
+  )
+  assert.deepEqual(events, ["app", "service"])
+  otherPage.emit("close")
+  assert.equal(otherPage.listenerCount("dialog"), 0)
 })
