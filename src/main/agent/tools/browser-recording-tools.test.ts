@@ -104,6 +104,35 @@ describe("browser recording agent tools", () => {
     })
   })
   it.each([
+    `  ${input.fileName}  `,
+    `/tmp/recordings/${input.fileName}`,
+    `C:\\recordings\\${input.fileName}`,
+    "市场系统查询企业管户信息"
+  ])("resolves a listed recording from a stable reference: %s", async (fileName) => {
+    const executeTool = (await createBrowserRecordingTools(capabilities, context))[1]
+
+    await executeTool.invoke({ ...input, fileName })
+
+    expect(mocks.read).toHaveBeenCalledWith({ fileName: input.fileName })
+    expect(mocks.execute).toHaveBeenCalledWith(
+      expect.objectContaining({ ...context, ...input, fileName: input.fileName })
+    )
+  })
+  it("does not resolve an ambiguous display name", async () => {
+    mocks.list.mockResolvedValue([
+      { fileName: input.fileName, displayName: "重复名称" },
+      { fileName: "other.spec.ts", displayName: "重复名称" }
+    ])
+
+    await expect(
+      (await createBrowserRecordingTools(capabilities, context))[1].invoke({
+        ...input,
+        fileName: "重复名称"
+      })
+    ).rejects.toThrow("录制脚本不存在")
+    expect(mocks.execute).not.toHaveBeenCalled()
+  })
+  it.each([
     { variableValues: {} },
     { variableValues: { 企业: "华为" } },
     { variableValues: { 变量_企业: ["华为"] } },

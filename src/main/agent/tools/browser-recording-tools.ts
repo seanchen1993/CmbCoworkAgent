@@ -15,6 +15,32 @@ import {
 } from "../../browser/record/common/browser-script-execution-service"
 import { extractScriptRecordingVariables } from "../../../shared/browser-script-recording"
 
+type BrowserScriptLibraryEntry = Awaited<
+  ReturnType<typeof listBrowserScriptLibraryEntries>
+>[number]
+
+function resolveRecordingEntry(
+  entries: BrowserScriptLibraryEntry[],
+  requestedReference: string
+): BrowserScriptLibraryEntry | undefined {
+  const normalizedReference = requestedReference.trim()
+  if (!normalizedReference) return undefined
+
+  const exactFileName = entries.find((entry) => entry.fileName === normalizedReference)
+  if (exactFileName) return exactFileName
+
+  const pathFileName = normalizedReference.split(/[\\/]/u).at(-1)
+  if (pathFileName && pathFileName !== normalizedReference) {
+    const pathMatch = entries.find((entry) => entry.fileName === pathFileName)
+    if (pathMatch) return pathMatch
+  }
+
+  const displayNameMatches = entries.filter(
+    (entry) => entry.displayName.trim() === normalizedReference
+  )
+  return displayNameMatches.length === 1 ? displayNameMatches[0] : undefined
+}
+
 async function isInAppBrowserEnabled(): Promise<boolean> {
   return (await getBrowserCdpConfigAsync()).enabled === true && getCurrentBrowserCdpPort() !== null
 }
@@ -66,11 +92,11 @@ export async function createBrowserRecordingTools(
       async ({ fileName, variableValues }) => {
         if (!(await isInAppBrowserEnabled())) throw new Error("请先开启内置浏览器控制并重启应用")
         context.abortSignal?.throwIfAborted()
-        const entry = (await listBrowserScriptLibraryEntries({ includeVariableInfo: false })).find(
-          (item) => item.fileName === fileName
-        )
+        const entries = await listBrowserScriptLibraryEntries({ includeVariableInfo: false })
+        const entry = resolveRecordingEntry(entries, fileName)
         if (!entry) throw new Error("录制脚本不存在，请重新调用 inAppBrowser_list_recordings")
-        const script = await readBrowserScriptLibraryScript({ fileName })
+        const resolvedFileName = entry.fileName
+        const script = await readBrowserScriptLibraryScript({ fileName: resolvedFileName })
         const variables = extractScriptRecordingVariables(script)
         for (const key of Object.keys(variableValues)) {
           if (!variables.some((variable) => variable.identifier === key)) {
@@ -93,7 +119,7 @@ export async function createBrowserRecordingTools(
         }
         const execution = executeRecordingScriptInBuiltinBrowser({
           script,
-          fileName,
+          fileName: resolvedFileName,
           label: entry.displayName,
           variableValues,
           workspacePath: context.workspacePath,
@@ -108,7 +134,7 @@ export async function createBrowserRecordingTools(
           context.abortSignal?.throwIfAborted()
           return JSON.stringify({
             status: "completed",
-            fileName,
+            fileName: resolvedFileName,
             nextStep:
               "必须调用 In-app-browser 的 browser_snapshot 读取当前页面，确认查询对象和结果后再回答用户。回放成功不代表业务成功；若页面仍在加载，等待后重新读取。不要凭脚本名称或参数编造结果。"
           })
@@ -121,7 +147,7 @@ export async function createBrowserRecordingTools(
         description:
           "执行 inAppBrowser_list_recordings 返回的已保存脚本并等待回放完成。只传实际 identifier 对应的变量，必须明确提供全部变量，不能沿用录制时的旧值。执行后必须调用 In-app-browser 的 browser_snapshot，依据页面内容总结业务结果。脚本匹配和参数提取由模型根据用户意图完成。",
         schema: z.object({
-          fileName: z.string().describe("列表返回的完整 fileName，不是显示名称或路径"),
+          fileName: z.string().describe("优先传列表返回的完整 fileName；也兼容唯一显示名称或含该文件名的路径"),
           variableValues: z
             .record(z.string(), z.union([z.string(), z.array(z.string())]))
             .describe("从用户请求提取的参数，键为变量 identifier；无变量时传 {}")
