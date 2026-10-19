@@ -1,0 +1,12 @@
+{
+  "kind": "historical-project-client-parser",
+  "description": "Exact source from this project's pre-user-config-migration client. This fixture is not part of the Anthropic community packages in the parent directory's provenance.json.",
+  "sourceCommit": "d3edb4a10366a52ab6282783ab2bc22c000278e6",
+  "sourcePath": "src/shared/mods/v2/model-protocol.ts",
+  "gitBlob": "4f1b6b166d5e1805aa9c6302879eff0ba4e7f7b3",
+  "fixturePath": "model-protocol-before-user-config-migrations.ts.txt",
+  "bytes": 3097,
+  "sha256": "8c9e299e95a0780a24c097f3fedee715aba28a6193c1b8ac3ba58289e58f20cf",
+  "preservation": "Original Git blob bytes, without newline or source normalization; parent .gitattributes marks this fixture tree -text.",
+  "purpose": "Execute the real historical parser in the existing VM harness to prove clients without migration support reject the explicit userConfigMigrations/v1 marker. No Git, network or movable HEAD is used by the test."
+}

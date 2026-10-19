@@ -11,6 +11,7 @@ import { inspectProjectSource } from "./project-doctor"
 import type { ClawActionDescriptor } from "../../../shared/mods/claw-actions"
 import { isSameWorkspacePath } from "../../../shared/workspace-path"
 import type { AuthoringAtomicSettings } from "./authoring-config-snapshot"
+import { normalizeProjectResourcePaths } from "./project-resource-paths"
 
 export const isProjectPreviewId = (id: string) => id.startsWith("dev-project-preview:")
 interface Registration {
@@ -81,6 +82,7 @@ export class ProjectPreviewRegistry {
       (value.pluginDigest !== undefined && !/^[a-f0-9]{64}$/.test(value.pluginDigest))
     )
       throw Error("PROJECT_PREVIEW_RECEIPT_INVALID")
+    normalizeProjectResourcePaths(value.snapshot.resourcePaths ?? [])
     return structuredClone(value)
   }
 
@@ -125,7 +127,7 @@ export class ProjectPreviewRegistry {
   }) {
     input.guard()
     if (this.entries.size >= 64) throw Error("PROJECT_PREVIEW_LIMIT")
-    const source = await readProjectSource(input.snapshot.packagePath)
+    const source = await readProjectSource(input.snapshot.packagePath, input.snapshot.resourcePaths)
     input.guard()
     if (source.bundle.digest !== input.snapshot.digest) throw Error("PROJECT_SOURCE_CHANGED")
     const { report, manifest } = inspectProjectSource(source.bundle, [], input.actions)
@@ -186,7 +188,7 @@ export class ProjectPreviewRegistry {
     )
       throw Error("PROJECT_PREVIEW_SCOPE_CHANGED")
     entry.guard()
-    const retained = await readProjectSource(retainedRoot)
+    const retained = await readProjectSource(retainedRoot, entry.snapshot.resourcePaths)
     entry.guard()
     if (retained.bundle.digest !== entry.snapshot.digest) throw Error("PROJECT_SOURCE_CHANGED")
     this.persist(
@@ -238,11 +240,15 @@ export class ProjectPreviewRegistry {
       input.snapshot.revision !== saved.snapshot.revision ||
       input.snapshot.digest !== saved.snapshot.digest ||
       input.snapshot.draftId !== saved.snapshot.draftId ||
+      !same(
+        normalizeProjectResourcePaths(input.snapshot.resourcePaths ?? []),
+        normalizeProjectResourcePaths(saved.snapshot.resourcePaths ?? [])
+      ) ||
       !isSameWorkspacePath(saved.snapshot.workspace, project.workspace) ||
       !isSameWorkspacePath(input.snapshot.workspace, project.workspace)
     )
       throw Error("PROJECT_PREVIEW_SCOPE_CHANGED")
-    const source = await readProjectSource(input.retainedRoot)
+    const source = await readProjectSource(input.retainedRoot, saved.snapshot.resourcePaths)
     input.guard()
     input.assertProjectCurrent?.()
     const { report, manifest } = inspectProjectSource(source.bundle, [], input.actions)

@@ -52,6 +52,12 @@ function object(value: unknown): Record<string, unknown> {
 function fields(value: Record<string, unknown>, allowed: string[]) {
   if (Object.keys(value).some((key) => !allowed.includes(key))) throw Error("ASSEMBLY_FIELD")
 }
+function assertAutobizRuntime(value: unknown): void {
+  if (value === undefined) return
+  const runtime = object(value)
+  fields(runtime, ["adapter"])
+  if (runtime.adapter !== "autobiz-v1") throw Error("ASSEMBLY_RUNTIME")
+}
 function rows(value: unknown): Array<{ path: string; digest: string }> {
   if (!Array.isArray(value) || value.length > 4096) throw Error("ASSEMBLY_FILES")
   const seen = new Set<string>()
@@ -104,7 +110,8 @@ export function verifyReviewedBusinessAssembly(
     const identity = object(json(files, "plugin.json"))
     if (identity.name !== lock.name || identity.version !== lock.version) return false
     const declaredKernel = object(lock.kernel)
-    fields(declaredKernel, ["id", "version", "files"])
+    fields(declaredKernel, ["id", "version", "files", "runtime"])
+    assertAutobizRuntime(declaredKernel.runtime)
     if (declaredKernel.id !== kernel.id || declaredKernel.version !== kernel.version) return false
     const expected = rows(kernel.files),
       actual = rows(declaredKernel.files)
@@ -121,6 +128,7 @@ export function verifyReviewedBusinessAssembly(
       if (row.path === BUSINESS_MOD_ASSEMBLY || !bytes || digest(bytes) !== row.digest) return false
     }
     const catalog = parseBusinessModCatalog(json(files, BUSINESS_MOD_MANIFEST))
+    assertAutobizRuntime(catalog.kernel?.runtime)
     if (
       !catalog.kernel ||
       catalog.kernel.id !== kernel.id ||

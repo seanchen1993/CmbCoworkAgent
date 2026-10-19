@@ -2,7 +2,12 @@ import { afterEach, describe, expect, it, vi } from "vitest"
 import * as fs from "node:fs"
 import { join } from "node:path"
 import { tmpdir } from "node:os"
-import { readRuntimeScopedFile, runtimeDirectory, runtimeDirectoryIdentity } from "./safe-files"
+import {
+  probeRuntimeScopedFile,
+  readRuntimeScopedFile,
+  runtimeDirectory,
+  runtimeDirectoryIdentity
+} from "./safe-files"
 
 vi.mock("node:fs", async (importOriginal) => ({
   ...(await importOriginal<typeof import("node:fs")>())
@@ -54,6 +59,54 @@ describe("canonical scoped file safety", () => {
     expect(readRuntimeScopedFile(f.root, "missing/entry.txt").present).toBe(false)
     expect(() => readRuntimeScopedFile(f.root, "inputs/entry.txt", 16)).toThrow("FILE_LIMIT")
     expect(() => readRuntimeScopedFile(f.root, "../entry.txt")).toThrow("FILE_PATH_INVALID")
+  })
+
+  it("probes presence without reading or allocating resource content and preserves path checks", () => {
+    const f = fixture()
+    const read = vi.spyOn(fs, "readSync")
+    const close = vi.spyOn(fs, "closeSync")
+    const observed = probeRuntimeScopedFile(f.root, "inputs/entry.txt")
+    expect(observed.present).toBe(true)
+    expect(observed.bytes).toBeUndefined()
+    expect(read).not.toHaveBeenCalled()
+    expect(close).toHaveBeenCalledOnce()
+    expect(probeRuntimeScopedFile(f.root, "missing/entry.txt").present).toBe(false)
+    expect(() => probeRuntimeScopedFile(f.root, "../entry.txt")).toThrow("FILE_PATH_INVALID")
+  })
+
+  it("refuses hard links and junction parents when probing resource presence", () => {
+    const f = fixture()
+    fs.linkSync(f.file, join(f.root, "hard.txt"))
+    expect(() => probeRuntimeScopedFile(f.root, "inputs/entry.txt")).toThrow("FILE_UNSAFE")
+    fs.unlinkSync(join(f.root, "hard.txt"))
+    fs.symlinkSync(join(f.root, "inputs"), join(f.root, "alias"),
+      process.platform === "win32" ? "junction" : "dir")
+    expect(() => probeRuntimeScopedFile(f.root, "alias/entry.txt")).toThrow("FILE_SCOPE_CHANGED")
+  })
+
+  it("refuses file replacement during a metadata-only probe and closes its descriptor", () => {
+    const f = fixture()
+    const open = fs.openSync
+    const close = vi.spyOn(fs, "closeSync")
+    let changed = false
+    vi.spyOn(fs, "openSync").mockImplementation(((...args: Parameters<typeof fs.openSync>) => {
+      if (!changed && args[0] === f.file) {
+        changed = true
+        fs.renameSync(f.file, join(f.root, "original.txt"))
+        fs.writeFileSync(f.file, f.bytes)
+      }
+      return Reflect.apply(open, fs, args)
+    }) as typeof fs.openSync)
+    expect(() => probeRuntimeScopedFile(f.root, "inputs/entry.txt")).toThrow("FILE_CHANGED")
+    expect(close).toHaveBeenCalledOnce()
+  })
+
+  it("does not turn probe access errors into missing-file observations", () => {
+    const f = fixture()
+    vi.spyOn(fs, "openSync").mockImplementation(() => {
+      throw Object.assign(Error("access denied"), { code: "EACCES" })
+    })
+    expect(() => probeRuntimeScopedFile(f.root, "inputs/entry.txt")).toThrow("access denied")
   })
 
   it("binds a fresh root inode on every unwrapped read, even for same bytes at the same path", () => {

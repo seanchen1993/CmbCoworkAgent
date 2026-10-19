@@ -22,6 +22,7 @@ import type { ClawActionDescriptor } from "../../../shared/mods/claw-actions"
 import type { ProjectActionBinding } from "../../../shared/project-runtime/action-bindings"
 import type { AuthoringAtomicSettings } from "./authoring-config-snapshot"
 import type { DevelopmentProjectTrialRequest } from "../../../shared/mods/development"
+import { normalizeProjectResourcePaths } from "./project-resource-paths"
 
 export interface ProjectDraft {
   id: string
@@ -29,6 +30,7 @@ export interface ProjectDraft {
   revision: number
   directory: string
   source: AuthoringSourceBundle
+  resourcePaths?: string[]
   development?: ProjectDevelopmentView
 }
 interface Session {
@@ -85,10 +87,12 @@ export class ProjectAuthoringSessions {
         !Number.isSafeInteger(row.revision) || row.revision < 1 || row.revision > 8)
         throw Error("PROJECT_DRAFT_STORAGE_INVALID")
       const source = createAuthoringSourceBundle(row.source?.files)
+      const resourcePaths = normalizeProjectResourcePaths(row.resourcePaths ?? [])
       if (source.digest !== row.source?.digest ||
-        source.files.some(file => !isProjectSourcePath(file.path)))
+        source.files.some(file => !isProjectSourcePath(file.path, resourcePaths)))
         throw Error("PROJECT_DRAFT_STORAGE_INVALID")
       session.drafts.set(row.id, { id: row.id, name: row.name, revision: row.revision, source,
+        ...(resourcePaths.length ? { resourcePaths } : {}),
         directory: join(session.root, `${row.id}-r${row.revision}-${source.digest}`) })
     }
     this.sessions.set(key, session)
@@ -100,7 +104,8 @@ export class ProjectAuthoringSessions {
     const drafts = new Map(session.drafts)
     drafts.set(next.id, next)
     const text = JSON.stringify({ schemaVersion: 1,
-      drafts: [...drafts.values()].map(({ id, name, revision, source }) => ({ id, name, revision, source })) })
+      drafts: [...drafts.values()].map(({ id, name, revision, source, resourcePaths }) =>
+        ({ id, name, revision, source, ...(resourcePaths?.length ? { resourcePaths } : {}) })) })
     if (Buffer.byteLength(text) > 2 * 1024 * 1024) throw Error("PROJECT_DRAFT_STORAGE_INVALID")
     guard()
     if (!this.persistence.settings.compareAndSetSetting(`project-authoring-source:${this.key(scope)}`,
@@ -125,14 +130,23 @@ export class ProjectAuthoringSessions {
     const draft = this.session(scope)?.drafts.get(request.draftId)
     if (!draft || draft.revision !== request.revision || draft.source.digest !== request.digest)
       return undefined
+    if (request.origin && (request.origin.kind !== "business-assembly" ||
+      !/^[a-f0-9-]{36}$/.test(request.origin.planId) ||
+      !/^[a-f0-9-]{36}$/.test(request.origin.copyId) ||
+      !/^[a-f0-9]{64}$/.test(request.origin.digest))) return undefined
     return { id: request.id, draftId: request.draftId, name: draft.name,
-      revision: request.revision, digest: request.digest, goal: request.goal }
+      revision: request.revision, digest: request.digest, goal: request.goal,
+      ...(request.origin ? { origin: structuredClone(request.origin) } : {}) }
   }
 
   /** Only prepares a trusted UI request; actual project creation/start remains a native action. */
   async requestTrial(scope: DevelopmentScope, id: string, revision: number,
-    goal: string, guard: () => void, actions: readonly ClawActionDescriptor[] = []) {
+    goal: string, guard: () => void, actions: readonly ClawActionDescriptor[] = [],
+    origin?: DevelopmentProjectTrialRequest["origin"]) {
     guard()
+    if (origin && (origin.kind !== "business-assembly" ||
+      !/^[a-f0-9-]{36}$/.test(origin.planId) || !/^[a-f0-9-]{36}$/.test(origin.copyId) ||
+      !/^[a-f0-9]{64}$/.test(origin.digest))) throw Error("PROJECT_TRIAL_ORIGIN_INVALID")
     if (!goal.trim() || goal.length > 8000) throw Error("PROJECT_TRIAL_GOAL_REQUIRED")
     const draft = this.read(scope, id)
     if (draft.revision !== revision) throw Error("PROJECT_DRAFT_REVISION_CHANGED")
@@ -141,7 +155,8 @@ export class ProjectAuthoringSessions {
       throw Error("PROJECT_DEV_DOCTOR_FAILED")
     guard()
     const request: DevelopmentProjectTrialRequest = { id: randomUUID(), draftId: id,
-      name: draft.name, revision, digest: draft.source.digest, goal: goal.trim() }
+      name: draft.name, revision, digest: draft.source.digest, goal: goal.trim(),
+      ...(origin ? { origin: structuredClone(origin) } : {}) }
     if (this.persistence) {
       const settingKey = `project-authoring-trial-request:${this.key(scope)}`
       const absent = "\0project-trial-absent"
@@ -160,7 +175,7 @@ export class ProjectAuthoringSessions {
   private async materialize(draft: ProjectDraft, guard: () => void) {
     guard()
     try {
-      const source = await readProjectSource(draft.directory)
+      const source = await readProjectSource(draft.directory, draft.resourcePaths)
       guard()
       if (source.bundle.digest !== draft.source.digest) throw Error("PROJECT_SOURCE_CHANGED")
       return
@@ -176,7 +191,7 @@ export class ProjectAuthoringSessions {
       await writeFile(path, file.text, { flag: "wx", encoding: "utf8" })
     }
     guard()
-    if ((await readProjectSource(draft.directory)).bundle.digest !== draft.source.digest)
+    if ((await readProjectSource(draft.directory, draft.resourcePaths)).bundle.digest !== draft.source.digest)
       throw Error("PROJECT_SOURCE_CHANGED")
   }
 
@@ -285,7 +300,8 @@ export class ProjectAuthoringSessions {
       revision: number
       files: unknown
     },
-    guard: () => void
+    guard: () => void,
+    checkedResourcePaths?: readonly string[]
   ): Promise<ProjectDraft> {
     guard()
     if (!/^[a-z][a-z0-9-]{0,47}$/.test(input.id) || !input.name.trim() || input.name.length > 100)
@@ -295,7 +311,9 @@ export class ProjectAuthoringSessions {
     this.busy.add(key)
     try {
       const source = createAuthoringSourceBundle(input.files)
-      if (source.files.some((file) => !isProjectSourcePath(file.path)))
+      const resourcePaths = normalizeProjectResourcePaths(checkedResourcePaths ??
+        this.session(scope)?.drafts.get(input.id)?.resourcePaths ?? [])
+      if (source.files.some((file) => !isProjectSourcePath(file.path, resourcePaths)))
         throw Error("PROJECT_DRAFT_FILE_UNSUPPORTED")
       let session = this.session(scope)
       if (!session) {
@@ -326,7 +344,8 @@ export class ProjectAuthoringSessions {
         await writeFile(path, file.text, { encoding: "utf8", flag: "wx" })
       }
       guard()
-      const draft: ProjectDraft = { id: input.id, name: input.name, revision, directory, source }
+      const draft: ProjectDraft = { id: input.id, name: input.name, revision, directory, source,
+        ...(resourcePaths.length ? { resourcePaths } : {}) }
       this.persist(scope, session, draft, guard)
       session.drafts.set(input.id, draft)
       if (this.development.read(scope, input.id)) {
@@ -373,7 +392,7 @@ export class ProjectAuthoringSessions {
       else {
         const lease = this.development.acquire(scope, id, revision, guard)
         try {
-          const source = await readProjectSource(lease.snapshot.packagePath)
+          const source = await readProjectSource(lease.snapshot.packagePath, draft.resourcePaths)
           guard()
           if (source.bundle.digest !== lease.snapshot.digest) throw Error("PROJECT_SOURCE_CHANGED")
           result = await testProjectSource(source.bundle, manifest)
@@ -407,7 +426,8 @@ export class ProjectAuthoringSessions {
         output,
         draft.source.digest,
         guard,
-        availableActions
+        availableActions,
+        draft.resourcePaths
       )
     }
     guard()

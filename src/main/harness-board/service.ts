@@ -1,3 +1,8 @@
+import { makeAutobizWatchRefs as makeWatchRefs } from "./adapters/autobiz-watch-refs"
+import {
+  hasAutobizBoardContext,
+  isAutobizLegacyProjectRoot
+} from "../plugins/business-adapters/autobiz-package-admission"
 import { isInternalHarnessProjectId, readInternalHarnessProject, readInternalHarnessProjectWorkspaceIndex } from "./internal-project-context"
 import { readRuntimeScopedFile } from "./project-runtime/safe-files"
 import {
@@ -578,13 +583,13 @@ function findPluginForAdapterSnapshot(adapter: HarnessAdapterSnapshot): PluginMe
   const adapterId = normalizeText(adapter.id).trim()
   if (adapterId) {
     const plugin = plugins.find((item) => pluginAdapterId(item) === adapterId)
-    if (plugin) return plugin
+    if (plugin) return isAutobizLegacyProjectRoot(plugin.path) ? plugin : null
   }
 
   const adapterName = normalizeText(adapter.name).trim()
   if (adapterName) {
     const plugin = plugins.find((item) => item.name === adapterName)
-    if (plugin) return plugin
+    if (plugin) return isAutobizLegacyProjectRoot(plugin.path) ? plugin : null
   }
 
   return null
@@ -690,7 +695,7 @@ async function resolveHarnessAdapter(
     throw new Error(`Unsupported harness adapter type: ${adapterType}`)
   }
   const plugin = projectRuntimePluginSources(getPlugins()).find((item) => pluginMatchesAdapterId(item, adapterId))
-  if (!plugin) {
+  if (!plugin || !isAutobizLegacyProjectRoot(plugin.path)) {
     throw new Error(
       "Selected plugin is not installed or does not provide board_core/board_config.json"
     )
@@ -1062,6 +1067,7 @@ function parseInspectCommand(
 }
 
 async function readBoardConfig(cwd: string): Promise<Record<string, unknown> | null> {
+  if (!isAutobizLegacyProjectRoot(cwd) && !hasAutobizBoardContext(cwd)) return null
   assertPackageExtensionCompatibility(cwd)
   const configPath = join(cwd, BOARD_CONFIG_REL_PATH)
   try {
@@ -2556,16 +2562,6 @@ function okStatus(_id: string, label: string): HarnessStatus {
   return { label, uiKind: "ok" }
 }
 
-function makeWatchRefs(slug?: string): HarnessWatchRef[] {
-  const base = ".autobizdevops"
-  return slug
-    ? [
-        { path: `${base}/STATE.md`, purpose: "run-state" },
-        { path: `${base}/features/${slug}`, purpose: "artifacts" },
-        { path: `${base}/features/${slug}/hooks.ndjson`, purpose: "hook-log" }
-      ]
-    : [{ path: `${base}/STATE.md`, purpose: "run-list" }]
-}
 
 function resolveProjectKnowledgePath(
   project: HarnessProjectMetadata,
@@ -3886,7 +3882,7 @@ async function findCompatibleKnowledgePlugin(adapterId: string): Promise<{
 }> {
   const normalizedAdapterId = normalizeText(adapterId).trim()
   const plugin = getPlugins().find((item) => pluginMatchesAdapterId(item, normalizedAdapterId))
-  if (!plugin) {
+  if (!plugin || (!isAutobizLegacyProjectRoot(plugin.path) && !hasAutobizBoardContext(plugin.path))) {
     throw new Error("插件未安装或不支持项目模式")
   }
 

@@ -1,0 +1,5 @@
+{
+  "name": "vendor-onboarding-mods",
+  "version": "1.0.0",
+  "description": "供应商准入业务 Mods 来源；通过通用 Host 线性适配器组装，不含 AutoBiz 内核。"
+}

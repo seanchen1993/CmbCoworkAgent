@@ -116,6 +116,43 @@ function fixture() {
   return { module, files, kernel, lock, snapshot }
 }
 
+it("accepts omitted and explicit AutoBiz runtime metadata without admitting adapter hijacks", () => {
+  const legacy = fixture()
+  expect(verifyReviewedBusinessAssembly(legacy.snapshot(), legacy.kernel)).toBe(true)
+  for (const target of ["lock", "catalog", "both"] as const) {
+    const f = fixture()
+    const catalog = JSON.parse(f.files.get("mods/business/manifest.json")!.toString("utf8"))
+    if (target !== "catalog") Object.assign(f.lock.kernel, { runtime: { adapter: "autobiz-v1" } })
+    if (target !== "lock") {
+      catalog.kernel.runtime = { adapter: "autobiz-v1" }
+      f.files.set("mods/business/manifest.json", json(catalog))
+    }
+    expect(verifyReviewedBusinessAssembly(f.snapshot(), f.kernel), target).toBe(true)
+  }
+  for (const runtime of [
+    { adapter: "host-linear-v1" },
+    { adapter: "author-runtime" },
+    { adapter: "autobiz-v1", execute: "author.js" },
+    {},
+    null,
+    "autobiz-v1"
+  ]) {
+    for (const target of ["lock", "catalog"] as const) {
+      const f = fixture()
+      if (target === "lock") Object.assign(f.lock.kernel, { runtime })
+      else {
+        const catalog = JSON.parse(f.files.get("mods/business/manifest.json")!.toString("utf8"))
+        catalog.kernel.runtime = runtime
+        f.files.set("mods/business/manifest.json", json(catalog))
+      }
+      expect(
+        verifyReviewedBusinessAssembly(f.snapshot(), f.kernel),
+        `${target}:${JSON.stringify(runtime)}`
+      ).toBe(false)
+    }
+  }
+})
+
 it("accepts reviewed portable assembly, then rejects source identity, inventory and kernel replacement", () => {
   const f = fixture()
   expect(verifyReviewedBusinessAssembly(f.snapshot(), f.kernel)).toBe(true)

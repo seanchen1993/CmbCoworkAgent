@@ -117,6 +117,7 @@ export function NativePluginCapabilities({
               </p>
             )}
             <div className="flex flex-wrap gap-2">
+              {/* Native entry eligibility is separate from project Skill isolation. */}
               {row.projectMode && (
                 <Button
                   size="sm"

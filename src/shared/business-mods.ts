@@ -3,8 +3,32 @@ import type { ClawActionExport } from "./mods/claw-actions"
 import type { CapabilityUsage } from "./mods/capability-usage"
 import type { FunctionUserConfig } from "./mods/v2/user-config"
 import type { ModObject } from "./mods/types"
+import type { ProjectRuntimeManifest } from "./project-runtime"
 export const BUSINESS_MOD_MANIFEST = "mods/business/manifest.json"
 export const BUSINESS_MOD_ASSEMBLY = "devclaw.business-assembly.json"
+
+/** A platform-reviewed static projection, never a path to author code. */
+export type BusinessModAssemblyAdapterId = "autobiz-v1" | "host-linear-v1"
+export interface BusinessModKernel {
+  id: string
+  version: string
+  resources: string[]
+  /** Omitted only for pre-adapter catalogs using the legacy compatibility projection. */
+  runtime?: { adapter: BusinessModAssemblyAdapterId }
+  boardConfigPath?: string
+  pluginFields?: Record<string, unknown>
+}
+/** Reuses the existing Host linear executor and its admission/check semantics. */
+export interface BusinessModHostDeclaration {
+  stage: Pick<
+    ProjectRuntimeManifest["stages"][number],
+    "actionIds" | "artifactIds" | "checkIds" | "approval"
+  >
+  actions: ProjectRuntimeManifest["actions"]
+  artifacts: ProjectRuntimeManifest["artifacts"]
+  checks: ProjectRuntimeManifest["checks"]
+  environment: ProjectRuntimeManifest["environment"]
+}
 
 export interface BusinessModDefinition {
   id: string
@@ -14,6 +38,7 @@ export interface BusinessModDefinition {
   resources: string[]
   dependencies: { required: string[]; advisory: string[] }
   checks: { validators: string[]; guards: string[] }
+  host?: BusinessModHostDeclaration
   insertAfter?: string
   /** Required schema only; installed user values and credentials never enter the catalog. */
   userConfig?: FunctionUserConfig
@@ -42,13 +67,7 @@ export interface BusinessModExtensionDefinition {
 export interface BusinessModCatalog {
   apiVersion: "devclaw.business-mods/v1"
   kind: "catalog"
-  kernel?: {
-    id: string
-    version: string
-    resources: string[]
-    boardConfigPath: string
-    pluginFields?: Record<string, unknown>
-  }
+  kernel?: BusinessModKernel
   kernelRef?: { id: string; version: string }
   modules: BusinessModDefinition[]
   extensions?: BusinessModExtensionDefinition[]
@@ -57,7 +76,7 @@ export interface BusinessModInspection {
   id: string
   sourceName: string
   sourceDigest: string
-  kernel?: { id: string; version: string }
+  kernel?: { id: string; version: string; runtimeAdapter?: BusinessModAssemblyAdapterId }
   mods: Array<{
     id: string
     title: string
@@ -90,6 +109,11 @@ export interface BusinessModPreview {
   sources: Array<{ name: string; digest: string }>
   diagnostics: string[]
   valid: boolean
+  runtime?: {
+    adapter: BusinessModAssemblyAdapterId
+    mode: "host" | "legacy"
+    stateOwner: "host" | "plugin"
+  }
   requiresFixedWorkflowAcknowledgement?: boolean
 }
 export interface BusinessModCopy {
@@ -112,7 +136,12 @@ export interface BusinessModAssemblyLock {
   apiVersion: "devclaw.business-assembly/v1"
   name: string
   version: string
-  kernel: { id: string; version: string; files: Array<{ path: string; digest: string }> }
+  kernel: {
+    id: string
+    version: string
+    runtime?: { adapter: BusinessModAssemblyAdapterId }
+    files: Array<{ path: string; digest: string }>
+  }
   sources: Array<{ name: string; digest: string; mods: string[] }>
   mods: Array<{ id: string; nodeId: string; sourceDigest: string }>
   extensions?: Array<{ id: string; sourceDigest: string }>

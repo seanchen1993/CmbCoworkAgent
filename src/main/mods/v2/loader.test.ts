@@ -1,5 +1,4 @@
 import { createAuthoringSourceBundle } from "../devtools/authoring-bundle"
-import { execFileSync } from "node:child_process"
 import { runInNewContext } from "node:vm"
 import ts from "typescript"
 import { isModObject, ModFunctionError } from "../../../shared/mods/v2/contracts"
@@ -9,7 +8,7 @@ import { createHash } from "node:crypto"
 import { modCompiler } from "../loader"
 import { FUNCTION_HOST_REVISION } from "../../../shared/mods/v2/contracts"
 import type { ModObject } from "../../../shared/mods/types"
-import { mkdtemp, mkdir, writeFile, rm } from "node:fs/promises"
+import { mkdtemp, mkdir, readFile, writeFile, rm } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join, resolve } from "node:path"
 import { afterEach, describe, expect, it } from "vitest"
@@ -485,7 +484,7 @@ it("pins optional engineering schema migrations next to the original fields with
   await expect(compileFunctionPlugin(root)).rejects.toThrow("MIGRATION_INVALID")
 })
 
-it("requires the migration marker and executes the actual HEAD parser to prove older clients reject it", async () => {
+it("requires the migration marker and executes the pinned historical parser to prove older clients reject it", async () => {
   const root = await plugin("export function register(){}")
   const userConfig = { label: { type: "string", title: "Label", description: "Help" } }
   const userConfigSchema = { version: 1, migrations: [{ fromVersion: 0, toVersion: 1, changes: [] }] }
@@ -497,13 +496,27 @@ it("requires the migration marker and executes the actual HEAD parser to prove o
   await expect(compileFunctionPlugin(root)).rejects.toThrow("MODS_USER_CONFIG_SCHEMA_DECLARATION_REQUIRED")
   await writeFile(file, JSON.stringify({ name: "loader-probe", userConfig, userConfigSchema, cmbCompatibility }))
   expect((await compileFunctionPlugin(root)).userConfigSchema).toEqual(userConfigSchema)
-  const original = execFileSync("git", ["show", "HEAD:src/shared/mods/v2/model-protocol.ts"], { encoding: "utf8" })
+  // Exact pre-migration source, not mutable HEAD or a rewritten parser. Provenance is
+  // alongside the fixture: commit d3edb4a10366a52ab6282783ab2bc22c000278e6,
+  // Git blob 4f1b6b166d5e1805aa9c6302879eff0ba4e7f7b3. No Git history is needed at test time.
+  const original = await readFile(
+    resolve("tests/fixtures/mods-upstream/client-compatibility/model-protocol-before-user-config-migrations.ts.txt")
+  )
+  expect(original.byteLength).toBe(3097)
+  expect(createHash("sha256").update(original).digest("hex")).toBe(
+    "8c9e299e95a0780a24c097f3fedee715aba28a6193c1b8ac3ba58289e58f20cf"
+  )
   const exports: { parseFunctionModelProtocol?: (value: unknown) => unknown } = {}
-  runInNewContext(ts.transpileModule(original, { compilerOptions: { module: ts.ModuleKind.CommonJS } }).outputText,
-    { exports, require(id: string) {
+  const compiled = ts.transpileModule(original.toString("utf8"), {
+    compilerOptions: { module: ts.ModuleKind.CommonJS }
+  }).outputText
+  runInNewContext(compiled, {
+    exports,
+    require(id: string) {
       if (id !== "./contracts") throw Error("UNEXPECTED_OLD_PARSER_IMPORT")
       return { isModObject, ModFunctionError }
-    } })
+    }
+  })
   expect(exports.parseFunctionModelProtocol!({ modelProtocol: "result-v1" })).toBe("result-v1")
   expect(() => exports.parseFunctionModelProtocol!(cmbCompatibility)).toThrow("MODS_MODEL_PROTOCOL_MANIFEST")
   expect(parseFunctionModelProtocol(cmbCompatibility)).toBe("result-v1")

@@ -23,6 +23,7 @@ import {
   HARNESS_DIALOG_TIPS_MAX_RESPONSE_BYTES
 } from "./catalog-protocol"
 import { HARNESS_WORKER_RESOURCE_LIMITS, harnessWorkerOptions } from "./worker-limits"
+import { createProjectTemplate } from "../mods/devtools/project-template"
 import { HARNESS_PROJECT_TEXT_MAX_CHARS } from "./store-limits"
 import {
   HARNESS_DEPLOY_UNIT_MAPPING_MAX_ENTRIES,
@@ -111,6 +112,19 @@ async function makeCatalog(size: number): Promise<{ projects: string; plugins: s
 }
 
 describe("Harness catalog reader", () => {
+  it("excludes a native Host package with same-named ordinary board data from the legacy registry", async () => {
+    const paths = await makeCatalog(1)
+    const plugin = JSON.parse(readFileSync(paths.plugins, "utf8"))[0]
+    const source = createProjectTemplate({ packageId: "host-only", name: "Host" })
+    writeFileSync(join(plugin.path, "devclaw.project-runtime.json"),
+      source.files.find((file) => file.path === "devclaw.project-runtime.json")!.text)
+    writeFileSync(join(plugin.path, "board_core/board_config.json"), "ordinary text")
+    const result = readHarnessCatalogPage(paths.projects, paths.plugins, { registryLimit: 1 })
+    expect(result.registry).toEqual([])
+    expect(result.summary.totalRegistry).toBe(0)
+    expect(result.projects[0].boardCompatibility.compatible).toBe(false)
+  })
+
   it("rejects changed extension requirements at the original board entry even when board bytes are cached", async () => {
     const paths = await makeCatalog(1)
     const plugin = JSON.parse(readFileSync(paths.plugins, "utf8"))[0]

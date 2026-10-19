@@ -1,0 +1,226 @@
+{
+  "apiVersion": "devclaw.business-mods/v1",
+  "kind": "catalog",
+  "kernel": {
+    "id": "vendor.onboarding",
+    "version": "1.0.0",
+    "runtime": {
+      "adapter": "host-linear-v1"
+    },
+    "resources": [
+      "board_core/board_config.json",
+      "knowledge/admission-policy.md",
+      "tests/project-contract.json"
+    ],
+    "pluginFields": {
+      "description": "供应商准入组合项目，由公共 Host 维护阶段和检查回执。"
+    }
+  },
+  "modules": [
+    {
+      "id": "vendor.dossier",
+      "title": "主体资料",
+      "node": {
+        "id": "vendor.dossier",
+        "skill": "vendor-dossier",
+        "order": 10
+      },
+      "skill": {
+        "entry": "skills/vendor-dossier/SKILL.md",
+        "resources": []
+      },
+      "resources": [],
+      "dependencies": {
+        "required": [
+          "vendor.settings"
+        ],
+        "advisory": []
+      },
+      "checks": {
+        "validators": [],
+        "guards": []
+      },
+      "host": {
+        "stage": {
+          "actionIds": [],
+          "artifactIds": [
+            "dossier"
+          ],
+          "checkIds": [
+            "vendor.dossier.schema"
+          ],
+          "approval": "none"
+        },
+        "actions": [],
+        "artifacts": [
+          {
+            "id": "dossier",
+            "path": "dossier.json",
+            "required": true
+          }
+        ],
+        "checks": [
+          {
+            "id": "vendor.dossier.schema",
+            "kind": "json-schema",
+            "artifactId": "dossier",
+            "sideEffect": "read",
+            "schema": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "vendorName": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "registrationId": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "source": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "policyTier": {
+                  "enum": [
+                    "standard",
+                    "enhanced"
+                  ],
+                  "type": "string"
+                }
+              },
+              "required": [
+                "vendorName",
+                "registrationId",
+                "source",
+                "policyTier"
+              ]
+            }
+          }
+        ],
+        "environment": []
+      }
+    },
+    {
+      "id": "vendor.decision",
+      "title": "准入报告",
+      "node": {
+        "id": "vendor.decision",
+        "skill": "vendor-decision",
+        "order": 30
+      },
+      "skill": {
+        "entry": "skills/vendor-decision/SKILL.md",
+        "resources": []
+      },
+      "resources": [],
+      "dependencies": {
+        "required": [
+          "vendor.dossier"
+        ],
+        "advisory": []
+      },
+      "checks": {
+        "validators": [],
+        "guards": []
+      },
+      "host": {
+        "stage": {
+          "actionIds": [],
+          "artifactIds": [
+            "vendor-report"
+          ],
+          "checkIds": [
+            "vendor.decision.schema"
+          ],
+          "approval": "none"
+        },
+        "actions": [],
+        "artifacts": [
+          {
+            "id": "vendor-report",
+            "path": "vendor-report.json",
+            "required": true
+          }
+        ],
+        "checks": [
+          {
+            "id": "vendor.decision.schema",
+            "kind": "json-schema",
+            "artifactId": "vendor-report",
+            "sideEffect": "read",
+            "schema": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "vendorName": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "policyTier": {
+                  "enum": [
+                    "standard",
+                    "enhanced"
+                  ],
+                  "type": "string"
+                },
+                "decision": {
+                  "const": "needs-human-review"
+                },
+                "qualificationStatus": {
+                  "enum": [
+                    "not-requested",
+                    "needs-human-review"
+                  ],
+                  "type": "string"
+                },
+                "sources": {
+                  "type": "array",
+                  "minItems": 1,
+                  "items": {
+                    "type": "string"
+                  }
+                }
+              },
+              "required": [
+                "vendorName",
+                "policyTier",
+                "decision",
+                "qualificationStatus",
+                "sources"
+              ]
+            }
+          }
+        ],
+        "environment": []
+      }
+    }
+  ],
+  "extensions": [
+    {
+      "id": "vendor.settings",
+      "title": "准入策略配置",
+      "kind": "function",
+      "entry": "mods/business/vendor.settings/register.ts",
+      "resources": [],
+      "dependencies": {
+        "required": [],
+        "advisory": []
+      },
+      "usage": "project",
+      "userConfig": {
+        "policyTier": {
+          "type": "string",
+          "title": "准入策略",
+          "description": "standard 为基础资料核对；enhanced 需人工复核。",
+          "required": true,
+          "default": "standard",
+          "options": [
+            "standard",
+            "enhanced"
+          ]
+        }
+      }
+    }
+  ]
+}

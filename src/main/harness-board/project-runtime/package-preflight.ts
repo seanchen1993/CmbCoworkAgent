@@ -5,7 +5,7 @@ import { readRuntimeScopedFile, runtimeRelativePath } from "./safe-files"
 import { assertHostRuntimeSupported } from "./host-validators"
 import { readProjectActionLock } from "./action-input"
 import { assertProjectPackageExtensions } from "../../mods/devtools/project-package-extensions"
-import { assertProjectAgentResourceClosure } from "../../plugins/project-agent-resources"
+import { assertAutobizPackageAgentResourcesFromRoot } from "../../plugins/business-adapters/autobiz-package-admission"
 
 /** Mirrors shared Mods discovery, including implicit native and hooks.modules declarations. */
 export function packageUsesSharedMods(
@@ -35,10 +35,7 @@ export function packageUsesSharedMods(
 /** Bounded, read-only preflight; also used by the catalog to expose an explicit diagnostic. */
 export function assertHostPackageSupported(root: string, runtime: ProjectRuntimeManifest) {
   assertHostRuntimeSupported(runtime)
-  const board = readRuntimeScopedFile(root, "board_core/board_config.json", 1024 * 1024)
-  if (board.bytes) assertProjectAgentResourceClosure(JSON.parse(
-    new TextDecoder("utf-8", { fatal: true }).decode(board.bytes)),
-    path => readRuntimeScopedFile(root, path, 256 * 1024).bytes)
+  assertAutobizPackageAgentResourcesFromRoot(root)
   readProjectActionLock(root, runtime)
   let raw: Record<string, unknown> | undefined
   for (const path of [".codex-plugin/plugin.json", ".claude-plugin/plugin.json", "plugin.json"]) {
@@ -60,7 +57,7 @@ export function assertHostPackageSupported(root: string, runtime: ProjectRuntime
     hostStateError("PACKAGE_IDENTITY_MISMATCH")
   // Coexisting extensions must form a complete bounded package. Execution still requires the
   // original compiler, exact native grant and opaque source-scoped runtime; no live fallback.
-  assertProjectPackageExtensions(raw!, path => {
+  assertProjectPackageExtensions(raw!, (path) => {
     const file = readRuntimeScopedFile(root, runtimeRelativePath(path), 256 * 1024)
     return file.bytes ? new TextDecoder("utf-8", { fatal: true }).decode(file.bytes) : undefined
   })

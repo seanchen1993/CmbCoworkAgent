@@ -1,0 +1,26 @@
+{
+  "apiVersion": "devclaw.project-contract/v1",
+  "cases": [
+    {
+      "id": "missing-dossier",
+      "stageId": "vendor.dossier",
+      "files": [],
+      "expected": "failed"
+    },
+    {
+      "id": "invalid-dossier",
+      "stageId": "vendor.dossier",
+      "files": [{ "path": "dossier.json", "text": "{}" }],
+      "expected": "failed"
+    },
+    {
+      "id": "fixture-dossier-structure",
+      "stageId": "vendor.dossier",
+      "files": [{
+        "path": "dossier.json",
+        "text": "{\"vendorName\":\"仅供结构检查的隔离样例\",\"registrationId\":\"fixture-only\",\"source\":\"isolated authoring fixture\",\"policyTier\":\"standard\"}"
+      }],
+      "expected": "passed"
+    }
+  ]
+}

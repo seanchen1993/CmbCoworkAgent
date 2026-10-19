@@ -1,5 +1,5 @@
 import { isCreatorVersionSource } from "../plugins/creator-path"
-import { isProjectModePluginRoot } from "../harness-board/plugin-mode"
+import { isLegacyProjectModePluginRoot } from "../harness-board/plugin-mode"
 import { isPluginInstallMode, type PluginInstallMode, type PluginInstallResult } from "../../shared/plugin-install"
 import AdmZip from "adm-zip"
 import { IpcMain, dialog } from "electron"
@@ -868,7 +868,7 @@ export function registerPluginHandlers(ipcMain: IpcMain): void {
 
   ipcMain.handle("plugins:list", async (): Promise<PluginMetadata[]> => {
     return getPlugins().map(plugin => ({
-      ...plugin, hasProjectMode: isProjectModePluginRoot(plugin.path)
+      ...plugin, hasProjectMode: isLegacyProjectModePluginRoot(plugin.path)
     }))
   })
 

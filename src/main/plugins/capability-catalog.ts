@@ -20,11 +20,14 @@ import {
   runtimeDirectoryIdentityAsync
 } from "../harness-board/project-runtime/safe-files-async"
 import type { PluginMetadata } from "../types"
-import { isReviewedAutobizProtocol } from "./autobiz-composition-protocol"
+import {
+  assertAutobizPackageAgentResources,
+  readReviewedAutobizStageAdapter,
+  supportsAutobizVerifiedArtifacts
+} from "./business-adapters/autobiz-package-admission"
 import { projectRuntimeExtensionContract } from "../../shared/project-runtime"
 import { assertProjectActionLock } from "../harness-board/project-runtime/action-input"
 import { PROJECT_ACTION_LOCK_PATH } from "../../shared/project-runtime/action-bindings"
-import { assertProjectAgentResourceClosure } from "./project-agent-resources"
 
 export interface NativeCapabilityCatalogItem extends PluginCapability {
   source: { pluginId: string; name: string; version: string; packageDigest: string }
@@ -188,9 +191,7 @@ export async function readNativeCapabilityCatalog(
     const snapshot = await inspectPackage(plugin.path, signal)
     if (!snapshot.files.get(declaration)?.equals(observed.bytes))
       throw Error("CAPABILITY_PACKAGE_CHANGED")
-    const board = snapshot.files.get("board_core/board_config.json")
-    if (board) assertProjectAgentResourceClosure(JSON.parse(decode(board)),
-      path => snapshot.files.get(path))
+    assertAutobizPackageAgentResources(snapshot.files)
     const manifests = [
       ".codex-plugin/plugin.json",
       ".claude-plugin/plugin.json",
@@ -204,24 +205,8 @@ export async function readNativeCapabilityCatalog(
         throw Error("CAPABILITY_PLUGIN_IDENTITY_CHANGED")
     }
     result.packageDigest = snapshot.digest
-    const stageChecks = snapshot.files.get("devclaw.stage-checks.json")
-    if (stageChecks && stageChecks.length <= 1024) {
-      try {
-        const declaration = JSON.parse(decode(stageChecks))
-        if (
-          declaration &&
-          Object.keys(declaration).length === 2 &&
-          declaration.apiVersion === "devclaw.stage-check-adapter/v1" &&
-          declaration.adapter === "autobiz-v1" &&
-          isReviewedAutobizProtocol({
-            files: [...snapshot.files].map(([path, bytes]) => ({ path, bytes }))
-          })
-        )
-          result.legacyAdapter = "autobiz-v1"
-      } catch {
-        /* Malformed adapter declarations never grant compatibility. */
-      }
-    }
+    const legacyAdapter = readReviewedAutobizStageAdapter(snapshot.files)
+    if (legacyAdapter) result.legacyAdapter = legacyAdapter
     const runtimeByPath = new Map<string, ProjectRuntimeManifest>()
     const runtimeErrors = new Set<string>()
     const runtimeDiagnostics = new Map<string, string>()
@@ -237,17 +222,26 @@ export async function readNativeCapabilityCatalog(
         const rawRuntime = JSON.parse(decode(bytes))
         const runtime = parseProjectRuntimeManifest(rawRuntime)
         const extension = projectRuntimeExtensionContract(rawRuntime)
-        if (extension?.verifiedArtifacts && (runtime.mode !== "legacy" ||
-          result.legacyAdapter !== "autobiz-v1"))
+        if (
+          extension?.verifiedArtifacts &&
+          !supportsAutobizVerifiedArtifacts(runtime.mode, result.legacyAdapter)
+        )
           throw Error("EXTENSION_CONTRACT_VERIFIED_ARTIFACTS_ADAPTER_UNSUPPORTED")
-        if (extension?.context?.provider?.entry &&
-          !snapshot.files.get(extension.context.provider.entry)?.length)
+        if (
+          extension?.context?.provider?.entry &&
+          !snapshot.files.get(extension.context.provider.entry)?.length
+        )
           throw Error("EXTENSION_CONTRACT_PROVIDER_MISSING")
         if (extension?.context?.provider?.actionId) {
           const bytes = snapshot.files.get(PROJECT_ACTION_LOCK_PATH)
-          if (runtime.mode !== "host" || !bytes || !assertProjectActionLock(runtime,
-            JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes))).bindings.some(
-              binding => binding.id === extension.context!.provider!.actionId))
+          if (
+            runtime.mode !== "host" ||
+            !bytes ||
+            !assertProjectActionLock(
+              runtime,
+              JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes))
+            ).bindings.some((binding) => binding.id === extension.context!.provider!.actionId)
+          )
             throw Error("EXTENSION_CONTRACT_ACTION_PROVIDER_MISSING")
         }
         if (runtime.plugin.id !== plugin.name || runtime.plugin.version !== plugin.version)

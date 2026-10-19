@@ -1,0 +1,8 @@
+{
+  "apiVersion": "vendor.reference-data/v1",
+  "workflow": {
+    "nodes": "supplier-document-labels-only"
+  },
+  "policyFile": "knowledge/admission-policy.md",
+  "description": "普通业务资料索引；不是 AutoBiz workflow、执行适配器或权限声明。"
+}

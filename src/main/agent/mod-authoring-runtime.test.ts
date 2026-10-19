@@ -97,6 +97,9 @@ it("guides business candidates through an uninstalled native trial before separa
   expect(business).toContain("创建新的隔离试用，不复用旧目录或批准")
   expect(business).toContain("停止和物理收尾结果分开核对")
   expect(business).toContain("阶段回退调试仍不提供")
+  expect(business).toContain("host-linear-v1")
+  expect(business).toContain("不能改成 Host 声明绕过原规则")
+  expect(business).toContain("完整保留所声明资源")
   expect(business).not.toContain("后续通过原项目入口运行")
   expect(modAuthoringRuntimePrompt([{ name: "mod_authoring" }])).not.toContain(
     "request_trial(previewId,goal)"

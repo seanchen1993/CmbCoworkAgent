@@ -1,0 +1,93 @@
+{
+  "apiVersion": "devclaw.business-mods/v1",
+  "kind": "catalog",
+  "kernelRef": {
+    "id": "vendor.onboarding",
+    "version": "1.0.0"
+  },
+  "modules": [
+    {
+      "id": "vendor.qualification",
+      "title": "资质审查",
+      "node": {
+        "id": "vendor.qualification",
+        "skill": "vendor-qualification",
+        "order": 20
+      },
+      "skill": {
+        "entry": "skills/vendor-qualification/SKILL.md",
+        "resources": []
+      },
+      "resources": [],
+      "dependencies": {
+        "required": [
+          "vendor.dossier"
+        ],
+        "advisory": []
+      },
+      "checks": {
+        "validators": [],
+        "guards": []
+      },
+      "host": {
+        "stage": {
+          "actionIds": [],
+          "artifactIds": [
+            "qualification"
+          ],
+          "checkIds": [
+            "vendor.qualification.schema"
+          ],
+          "approval": "none"
+        },
+        "actions": [],
+        "artifacts": [
+          {
+            "id": "qualification",
+            "path": "qualification.json",
+            "required": true
+          }
+        ],
+        "checks": [
+          {
+            "id": "vendor.qualification.schema",
+            "kind": "json-schema",
+            "artifactId": "qualification",
+            "sideEffect": "read",
+            "schema": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "vendorName": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "status": {
+                  "const": "needs-human-review"
+                },
+                "source": {
+                  "const": "dossier.json"
+                },
+                "policyTier": {
+                  "enum": [
+                    "standard",
+                    "enhanced"
+                  ],
+                  "type": "string"
+                }
+              },
+              "required": [
+                "vendorName",
+                "status",
+                "source",
+                "policyTier"
+              ]
+            }
+          }
+        ],
+        "environment": []
+      },
+      "insertAfter": "vendor.dossier"
+    }
+  ]
+}

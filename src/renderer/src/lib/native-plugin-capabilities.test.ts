@@ -57,7 +57,11 @@ describe("native plugin inventory", () => {
   })
   it("does not claim disabled cached skills are currently usable and respects project metadata", () => {
     const rows = nativePluginCapabilities(
-      [plugin("off", { enabled: false }), plugin("project"), plugin("plain")],
+      [
+        plugin("off", { enabled: false }),
+        plugin("project", { hasProjectMode: true }),
+        plugin("plain")
+      ],
       [skill("off"), skill("project", { isProjectModePlugin: true })],
       []
     )
@@ -66,12 +70,37 @@ describe("native plugin inventory", () => {
     expect(rows[1].projectMode).toBe(true)
     expect(rows[2].projectMode).toBe(false)
   })
+  it("does not infer an old board entry from Host stage Skill isolation metadata", () => {
+    const hostSkill = skill("host", { isProjectModePlugin: true })
+    const rows = nativePluginCapabilities(
+      [
+        plugin("host", { hasProjectMode: false }),
+        plugin("unclassified"),
+        plugin("legacy", { hasProjectMode: true })
+      ],
+      [hostSkill, skill("unclassified", { isProjectModePlugin: true })],
+      ["host"]
+    )
+    expect(rows.map((row) => [row.pluginId, row.projectMode])).toEqual([
+      ["host", false],
+      ["unclassified", false],
+      ["legacy", true]
+    ])
+    expect(rows[0].skills).toEqual([{ id: hostSkill.path, name: hostSkill.name }])
+    expect(rows[0].hasFunctionCapabilities).toBe(true)
+    expect(hostSkill.isProjectModePlugin).toBe(true)
+  })
   it("reports business modules separately from function selections without inventing chat actions", () => {
-    const rows = nativePluginCapabilities([
-      plugin("business", { businessModCount: 8, businessExtensionCount: 1 }),
-      plugin("legacy")
-    ], [], [])
-    expect(rows[0]).toMatchObject({ businessModCount: 8, businessExtensionCount: 1, hasFunctionCapabilities: false })
+    const rows = nativePluginCapabilities(
+      [plugin("business", { businessModCount: 8, businessExtensionCount: 1 }), plugin("legacy")],
+      [],
+      []
+    )
+    expect(rows[0]).toMatchObject({
+      businessModCount: 8,
+      businessExtensionCount: 1,
+      hasFunctionCapabilities: false
+    })
     expect(rows[1]).toMatchObject({ businessModCount: 0, businessExtensionCount: 0 })
   })
 })

@@ -15,7 +15,25 @@ afterEach(async () => {
 })
 
 describe("Harness knowledge preview reader", () => {
-  it("reads a v2 provider cache only with the exact main-process plugin and canonical root grant", async () => {
+  it("rejects a plain native Host target before interpreting ordinary same-named board data", async () => {
+    const root = await mkdtemp(join(tmpdir(), "harness-knowledge-host-boundary-"))
+    roots.push(root)
+    const pluginPath = join(root, "plugin")
+    await mkdir(join(pluginPath, "board_core"), { recursive: true })
+    const source = createProjectTemplate({ packageId: "host-only", name: "Host" })
+    await writeFile(join(pluginPath, "devclaw.project-runtime.json"),
+      source.files.find((file) => file.path === "devclaw.project-runtime.json")!.text)
+    await writeFile(join(pluginPath, "board_core/board_config.json"), "ordinary text")
+    await writeFile(join(root, "plugins.json"), JSON.stringify([
+      { id: "host", name: "Host", path: pluginPath }
+    ]))
+    expect(() => readHarnessKnowledgePreview("host", {
+      openworkDir: root, pluginStorePath: join(root, "plugins.json"),
+      leanTokenStorePath: join(root, "lean.json")
+    }, HARNESS_KNOWLEDGE_PREVIEW_MAX_RESPONSE_BYTES)).toThrow("插件未安装或不支持项目模式")
+  })
+
+  it.each([0, 300 * 1024])("reads a v2 provider cache with %s extra board bytes only under the exact grant", async (padding) => {
     const root = await mkdtemp(join(tmpdir(), "harness-knowledge-v2-preview-"))
     roots.push(root)
     const pluginPath = join(root, "plugin")
@@ -33,7 +51,8 @@ describe("Harness knowledge preview reader", () => {
           mutableData: "host", configuration: "host-resolved", knowledge: { required: true },
           provider: { entry: "provider.py", operations: ["session-context"] } } })))
     await writeFile(join(pluginPath, "board_core/board_config.json"), JSON.stringify({
-      apiVersion: 2, inspectCommands: { [process.platform]: { knowledge_path: knowledge } } }))
+      apiVersion: 2, padding: "x".repeat(padding),
+      inspectCommands: { [process.platform]: { knowledge_path: knowledge } } }))
     await writeFile(join(root, "plugins.json"), JSON.stringify([{ id: "v2", name: "Preview", path: pluginPath }]))
     const source = { openworkDir: root, pluginStorePath: join(root, "plugins.json"),
       leanTokenStorePath: join(root, "leanstar-config.json") }

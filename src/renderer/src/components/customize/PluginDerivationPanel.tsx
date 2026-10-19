@@ -2,9 +2,7 @@ import {
   sameSimpleAuthoringScope,
   type SimpleAuthoringPracticeIntent
 } from "@/lib/simple-authoring-intent"
-import { openDerivedProject } from "@/lib/derived-project-intent"
-import { useFeatureGate } from "@/lib/feature-gates"
-import { FEATURE_GATES } from "../../../../shared/feature-gates"
+import { InstalledPluginProjectEntry } from "./InstalledPluginProjectEntry"
 import { DerivedPluginEditor } from "./DerivedPluginEditor"
 import { DerivedPluginProposal } from "./DerivedPluginProposal"
 import { useEffect, useRef, useState } from "react"
@@ -58,7 +56,6 @@ function ScopedDerivation({
   sourceRequest?: { id: string; pluginId: string; name: string } | null
 }) {
   const scope = { threadId, expectedWorkspace: workspace }
-  const projectMode = useFeatureGate(FEATURE_GATES.projectMode)
   const [enabledPluginId, setEnabledPluginId] = useState<string | null>(null)
   const [acceptedSourceRequest, setAcceptedSourceRequest] = useState<string | null>(null)
   const [acceptedPractice, setAcceptedPractice] = useState<string | null>(null)
@@ -503,20 +500,9 @@ function ScopedDerivation({
               >
                 {enabledPluginId === copy.pluginId ? "新插件已启用" : "启用新插件"}
               </Button>
-              <Button
-                className="ml-2"
-                disabled={
-                  enabledPluginId !== copy.pluginId || !copy.pluginId || !projectMode.enabled
-                }
-                onClick={() => {
-                  if (copy.pluginId) openDerivedProject(copy.pluginId, copy.name, scope)
-                }}
-              >
-                新建项目
-              </Button>
-              {!projectMode.loading && !projectMode.enabled && (
-                <p>插件已保存。当前应用暂未开放项目模式，开放后可继续新建项目。</p>
-              )}
+              {copy.pluginId && <InstalledPluginProjectEntry key={copy.pluginId}
+                pluginId={copy.pluginId} scope={scope} active={active} disabled={busy}
+                refreshKey={enabledPluginId === copy.pluginId} />}
             </div>
           )}
           <details className="text-xs">

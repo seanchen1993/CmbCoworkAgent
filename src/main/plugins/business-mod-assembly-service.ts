@@ -29,6 +29,7 @@ import {
 } from "./derivation-source"
 import { businessModCatalog } from "./business-mod-manifest"
 import { assembleBusinessMods } from "./business-mod-assembler"
+import { describeBusinessModAssemblyRuntime } from "./business-mod-assembly-adapter"
 
 interface InspectionRecord {
   owner: string
@@ -182,7 +183,13 @@ export class BusinessModAssemblyService {
       sourceName: snapshot.name,
       sourceDigest: snapshot.digest,
       ...(catalog.kernel
-        ? { kernel: { id: catalog.kernel.id, version: catalog.kernel.version } }
+        ? {
+            kernel: {
+              id: catalog.kernel.id,
+              version: catalog.kernel.version,
+              runtimeAdapter: describeBusinessModAssemblyRuntime(catalog.kernel).adapter
+            }
+          }
         : {}),
       mods: [
         ...catalog.modules.map((mod) => ({
@@ -250,6 +257,7 @@ export class BusinessModAssemblyService {
       name: request.name,
       version: request.version,
       steps: assembled.steps,
+      runtime: assembled.runtime,
       ...(assembled.extensions?.length ? { extensions: assembled.extensions } : {}),
       files: assembled.files.map(({ path, digest, bytes }) => ({
         path,

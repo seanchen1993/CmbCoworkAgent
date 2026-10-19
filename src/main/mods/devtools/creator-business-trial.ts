@@ -29,7 +29,7 @@ import {
 import { parseProjectRuntimeManifest } from "../../../shared/project-runtime"
 import { readRuntimeScopedFile } from "../../harness-board/project-runtime/safe-files"
 import { readPluginManifest } from "../../plugins/manifest"
-import { preflightLegacyCompositionSource } from "../../harness-board/project-runtime/composition-legacy-preflight"
+import { prepareAutobizBusinessTrial } from "./adapters/autobiz-business-trial"
 import { projectRuntimeFunctionSource } from "../../harness-board/project-runtime-function-source"
 import {
   readCompositionUnitContext,
@@ -78,7 +78,7 @@ export class CreatorBusinessTrials {
   private readonly proofs = new Map<
     string,
     CreatorBusinessTrialProofBinding & {
-      board: Record<string, unknown>
+      adapterContext: Record<string, unknown>
       assertCurrent(): void
     }
   >()
@@ -471,8 +471,6 @@ export class CreatorBusinessTrials {
       )
       if (!manifestFile.bytes) throw Error("BUSINESS_TRIAL_RUNTIME_REQUIRED")
       const manifest = parseProjectRuntimeManifest(JSON.parse(manifestFile.bytes.toString("utf8")))
-      if (manifest.mode !== "legacy" || manifest.stateOwner !== "plugin")
-        throw Error("BUSINESS_TRIAL_LEGACY_REQUIRED")
       const metadata = readPluginManifest(snapshot.root)?.manifest
       if (!metadata) throw Error("BUSINESS_TRIAL_SOURCE_INVALID")
       record.packageDigest = snapshot.digest
@@ -490,19 +488,13 @@ export class CreatorBusinessTrials {
         hookCount: 0,
         mcpServerCount: 0
       }
-      await preflightLegacyCompositionSource(record.plugin)
+      const adapterContext = await prepareAutobizBusinessTrial(record.plugin, manifest)
       // Immutable input is not yet published in the durable row; caller authority and stop
       // intent still bracket preflight. No candidate program has executed in this phase.
       cancellation.signal.throwIfAborted()
       this.authority(record)
       if (this.read(record.id)?.stopRequested) throw Error("BUSINESS_TRIAL_CANCEL_REQUESTED")
       const proof = await this.snapshots.captureGuardAsync(snapshot.digest)
-      const boardFile = readRuntimeScopedFile(
-        snapshot.root,
-        "board_core/board_config.json",
-        2 * 1024 * 1024
-      )
-      if (!boardFile.bytes) throw Error("BUSINESS_TRIAL_BOARD_REQUIRED")
       cancellation.signal.throwIfAborted()
       if (this.read(record.id)?.stopRequested) throw Error("BUSINESS_TRIAL_CANCEL_REQUESTED")
       this.proofs.set(record.id, {
@@ -517,7 +509,7 @@ export class CreatorBusinessTrials {
         planId: record.planId,
         goal: record.goal,
         accountingRunId: record.accountingRunId,
-        board: JSON.parse(boardFile.bytes.toString("utf8")),
+        adapterContext,
         assertCurrent: proof
       })
       record.phase = "needs-configuration"
@@ -706,7 +698,7 @@ export class CreatorBusinessTrials {
       context: {
         project: record.project,
         plugin: record.plugin,
-        configSnapshot: { value: structuredClone(proof.board), error: null },
+        configSnapshot: { value: structuredClone(proof.adapterContext), error: null },
         projectDirectoryExists: true,
         selectedDeployUnits: this.mappings(record),
         sessionContextInjectionSource: "plugin",

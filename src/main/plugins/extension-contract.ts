@@ -4,7 +4,10 @@ import {
   EXTENSION_BOARD_API_VERSION,
   type ExtensionContract
 } from "../../shared/project-runtime"
-import { readRuntimeScopedFile } from "../harness-board/project-runtime/safe-files"
+import {
+  probeRuntimeScopedFile,
+  readRuntimeScopedFile
+} from "../harness-board/project-runtime/safe-files"
 import { parsePluginCapabilities } from "../../shared/plugin-capabilities"
 import { readProjectActionLock } from "../harness-board/project-runtime/action-input"
 import { AUTOBIZ_CONTEXT_OUTPUT } from "../../shared/project-runtime/autobiz-handoff"
@@ -17,6 +20,7 @@ import { withSnapshotPathRetention } from "../harness-board/project-runtime/snap
 import { hostStateError } from "../harness-board/project-runtime/host-state-protocol"
 import { isReviewedAutobizProtocol } from "./autobiz-composition-protocol"
 import { assertProjectAgentResourceClosure } from "./project-agent-resources"
+import { readAutobizPackageSemantics } from "./business-adapters/autobiz-package-admission"
 
 type PackageReader = (path: string, limit: number) => { present: boolean; bytes?: Buffer }
 type ProtocolFiles = Array<{ path: string; bytes: Buffer }>
@@ -74,7 +78,7 @@ function readExtensionContract(
 /** Validate every declared execution entrance; a secondary flow cannot evade the install/board gate. */
 export function assertPackageExtensionCompatibility(root: string): void {
   assertCompatibility(root, (path, limit) => readRuntimeScopedFile(root, path, limit),
-    () => readPackageProtocolFiles(root))
+    () => readPackageProtocolFiles(root), (path) => probeRuntimeScopedFile(root, path).present)
 }
 
 function entries(read: PackageReader): Set<string> {
@@ -116,24 +120,44 @@ export async function assertPackageExtensionCompatibilityAsync(
     guard()
     // Every declaration, provider, action lock and reviewed protocol is validated from the
     // same newly read source. No path fallback can mix these bytes with an older result.
-    assertCompatibility(root, readObserved, () => files)
+    assertCompatibility(root, readObserved, () => files, (path) => observed.has(path))
     guard()
   })
 }
 
-function assertCompatibility(root: string, read: PackageReader, protocolFiles: () => ProtocolFiles): void {
-  const boardFile = read("board_core/board_config.json", 1024 * 1024)
+function assertCompatibility(
+  root: string,
+  read: PackageReader,
+  protocolFiles: () => ProtocolFiles,
+  present: (path: string) => boolean
+): void {
+  const entrances = entries(read)
+  let rootContract: ExtensionContract | undefined
+  const contracts: ExtensionContract[] = []
+  for (const entry of entrances) {
+    const contract = readExtensionContract(root, read, entry)
+    if (contract) contracts.push(contract)
+    if (entry === "devclaw.project-runtime.json") rootContract = contract
+  }
+  const boardPath = "board_core/board_config.json"
+  const semantics = readAutobizPackageSemantics(
+    (path, limit) => read(path, limit).bytes,
+    present(boardPath),
+    entrances
+  )
+  const boardFile: ReturnType<PackageReader> = semantics.boardContext
+    ? read(boardPath, 1024 * 1024)
+    : { present: false }
   const board = boardFile.present
     ? JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(boardFile.bytes)) : undefined
   if (board !== undefined) assertProjectAgentResourceClosure(board,
     path => read(path, 256 * 1024).bytes)
-  let rootContract: ExtensionContract | undefined
-  for (const entry of entries(read)) {
-    const contract = readExtensionContract(root, read, entry)
-    if (contract?.verifiedArtifacts && !isReviewedAutobizProtocol({
+  // All entrances have already negotiated their original protocol. Preserve the original
+  // missing-resource diagnostic before whole-inventory rejection; neither check grants admission.
+  for (const contract of contracts) {
+    if (contract.verifiedArtifacts && !isReviewedAutobizProtocol({
       files: protocolFiles()
     })) throw Error("EXTENSION_CONTRACT_VERIFIED_ARTIFACTS_ADAPTER_UNSUPPORTED")
-    if (entry === "devclaw.project-runtime.json") rootContract = contract
   }
   if (boardFile.present) {
     if (Number(board?.apiVersion) === EXTENSION_BOARD_API_VERSION && !rootContract)

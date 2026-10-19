@@ -13,6 +13,7 @@ export interface ProjectDevelopmentDraft {
   revision: number
   directory: string
   source: AuthoringSourceBundle
+  resourcePaths?: readonly string[]
 }
 export interface ProjectDevelopmentSnapshot {
   devId: string
@@ -21,6 +22,7 @@ export interface ProjectDevelopmentSnapshot {
   digest: string
   packagePath: string
   workspace: string
+  resourcePaths?: readonly string[]
 }
 export interface ProjectDevelopmentView extends ProjectDevelopmentSnapshot {
   currentRevision: number
@@ -116,7 +118,8 @@ export class ProjectDevelopmentSessions {
         join(root, `revision-${draft.revision}-${randomUUID()}`),
         draft.source.digest,
         guard,
-        actions
+        actions,
+        draft.resourcePaths
       )
       guard()
       assertCurrentRevision()
@@ -126,7 +129,8 @@ export class ProjectDevelopmentSessions {
         revision: draft.revision,
         digest: prepared.digest,
         packagePath: prepared.packagePath,
-        workspace: prepared.workspace
+        workspace: prepared.workspace,
+        ...(draft.resourcePaths?.length ? { resourcePaths: [...draft.resourcePaths] } : {})
       }
       if (!existing) {
         this.entries.set(key, {

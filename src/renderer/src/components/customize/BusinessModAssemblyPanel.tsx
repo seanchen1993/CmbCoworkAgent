@@ -2,9 +2,7 @@ import { useEffect, useRef, useState } from "react"
 import { Button } from "@/components/ui/button"
 import { useConfigurationDraft } from "@/lib/configuration-target"
 import { useAppStore } from "@/lib/store"
-import { openDerivedProject } from "@/lib/derived-project-intent"
-import { useFeatureGate } from "@/lib/feature-gates"
-import { FEATURE_GATES } from "../../../../shared/feature-gates"
+import { InstalledPluginProjectEntry } from "./InstalledPluginProjectEntry"
 import type { BusinessModSource } from "../../../../shared/business-mod-assembly-api"
 import type {
   BusinessModAssemblyRequest,
@@ -47,12 +45,11 @@ function ScopedAssembly({
 }) {
   const scope = { threadId, expectedWorkspace: workspace }
   const api = window.api.businessModAssembly
-  const projectMode = useFeatureGate(FEATURE_GATES.projectMode)
   const [available, setAvailable] = useState<BusinessModSource[]>([])
   const [sourceId, setSourceId] = useState(initialPluginId ?? "")
   const [sources, setSources] = useState<BusinessModInspection[]>([])
   const [selected, setSelected] = useState<string[]>([])
-  const [name, setName] = useState("my-autobiz")
+  const [name, setName] = useState("my-business-plugin")
   const [version, setVersion] = useState("1.0.0")
   const [preview, setPreview] = useState<BusinessModPreview | null>(null)
   const [copies, setCopies] = useState<BusinessModCopy[]>([])
@@ -150,7 +147,7 @@ function ScopedAssembly({
       <div>
         <h2 className="font-semibold">从业务 Mods 组装新插件</h2>
         <p className="mt-1 text-sm text-muted-foreground">
-          添加 AutoBiz 或自己的 Mods 来源，挑选业务步骤和界面扩展，生成带独立名称、技能和检查的新插件。
+          添加业务 Mods 来源，挑选业务步骤和界面扩展，生成带独立名称、技能和检查的新插件。
         </p>
         <p className="mt-1 text-sm text-muted-foreground">
           这里制作可安装、可分享的插件。安装后再创建项目，项目中的每次需求使用插件提供的流程；聊天搭配只配置聊天功能和工具。
@@ -190,7 +187,7 @@ function ScopedAssembly({
           </Button>
         </div>
         <p className="text-xs text-muted-foreground">
-          自己的 Mod 也使用“导入 Mods 源码目录”，可与 AutoBiz 一起组合。
+          自己的 Mod 也使用“导入 Mods 源码目录”。组合来源须引用同一个流程内核及版本。
         </p>
         {sources.map((source) => (
           <div key={source.id} className="space-y-2 rounded border p-3">
@@ -210,6 +207,13 @@ function ScopedAssembly({
                 移除来源
               </Button>
             </div>
+            {source.kernel && (
+              <p className="text-xs text-muted-foreground">
+                {source.kernel.runtimeAdapter === "host-linear-v1"
+                  ? "平台阶段流程：阶段执行、检查与进度由平台统一管理。"
+                  : "插件原有流程：保留原插件的执行、检查与进度管理。"}
+              </p>
+            )}
             {source.mods.map((mod) => (
               <label key={mod.id} className="flex items-start gap-2 text-sm">
                 <input
@@ -324,15 +328,15 @@ function ScopedAssembly({
           onClick={() =>
             void run(async () => {
               const request: BusinessModAssemblyRequest = {
-                  name: name.trim(),
-                  version: version.trim(),
-                  order: businessSteps.map((mod) => mod.id),
-                  sources: sources.map((source) => ({
-                    inspectionId: source.id,
-                    modIds: source.mods
-                      .filter((mod) => selected.includes(key(source, mod.id)))
-                      .map((mod) => mod.id)
-                  }))
+                name: name.trim(),
+                version: version.trim(),
+                order: businessSteps.map((mod) => mod.id),
+                sources: sources.map((source) => ({
+                  inspectionId: source.id,
+                  modIds: source.mods
+                    .filter((mod) => selected.includes(key(source, mod.id)))
+                    .map((mod) => mod.id)
+                }))
               }
               previewRequest.current = request
               const result = await api.preview({ ...scope, request })
@@ -348,6 +352,13 @@ function ScopedAssembly({
           <h3 className="font-medium">
             3. 核对并生成：{preview.name} · {preview.version}
           </h3>
+          {preview.runtime && (
+            <p aria-label="组装流程执行方式" className="text-sm text-muted-foreground">
+              {preview.runtime.mode === "host"
+                ? "平台阶段流程：使用统一的阶段执行、产物检查和审批。"
+                : "插件原有流程：通过已支持的适配保留原执行器与业务检查。"}
+            </p>
+          )}
           <ol className="list-inside list-decimal space-y-1 text-sm">
             {preview.steps.map((step) => (
               <li key={step.id}>
@@ -489,12 +500,9 @@ function ScopedAssembly({
               </Button>
             )}
             {copy.pluginId && (
-              <Button
-                disabled={busy || enabled !== copy.pluginId || !projectMode.enabled}
-                onClick={() => openDerivedProject(copy.pluginId!, copy.name, scope)}
-              >
-                新建项目
-              </Button>
+              <InstalledPluginProjectEntry key={copy.pluginId} pluginId={copy.pluginId}
+                scope={scope} active={active} disabled={busy}
+                refreshKey={enabled === copy.pluginId} />
             )}
           </div>
           <p className="text-xs text-muted-foreground">

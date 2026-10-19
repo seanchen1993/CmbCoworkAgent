@@ -35,6 +35,9 @@ import {
   readBundledBusinessModExample
 } from "../../plugins/business-mod-examples"
 import type { CreatorBusinessTrials, BusinessTrialCandidate } from "./creator-business-trial"
+import { parseProjectRuntimeManifest } from "../../../shared/project-runtime"
+import { readRuntimeScopedFile } from "../../harness-board/project-runtime/safe-files"
+import { requestCreatorHostBusinessTrial } from "./creator-host-business-trial"
 
 type Review = NonNullable<DevelopmentBusinessStatus["review"]>
 type Source = { pluginId: string; directory: string; identity: string; digest: string }
@@ -190,6 +193,56 @@ export class CreatorBusinessService {
     else if (!record.settled || this.deps.busy(threadId)) throw Error("BUSINESS_CREATOR_BUSY")
     await this.assertInputs(context, record)
     turn?.assertCurrent()
+    const guard = () => {
+      context.assertCurrent()
+      turn?.assertCurrent()
+      this.assertTrialSources(record.sources)
+      const current = this.record(context.scope)
+      if (
+        !current ||
+        current.review.planId !== input.planId ||
+        current.review.digest !== input.digest
+      )
+        throw Error("BUSINESS_CREATOR_REVIEW_CHANGED")
+    }
+    const candidate = await this.deps.assembly.readCheckedSource(
+      this.owner(context.scope),
+      record.review.copyId,
+      input.digest,
+      guard
+    )
+    guard()
+    const runtimeFile = readRuntimeScopedFile(
+      candidate.root,
+      "devclaw.project-runtime.json",
+      256 * 1024
+    )
+    if (!runtimeFile.bytes) throw Error("BUSINESS_TRIAL_RUNTIME_REQUIRED")
+    const runtime = parseProjectRuntimeManifest(JSON.parse(runtimeFile.bytes.toString("utf8")))
+    if (runtime.mode === "host" && runtime.stateOwner === "host") {
+      const prepared = await requestCreatorHostBusinessTrial({
+        root: candidate.root,
+        scope: context.scope,
+        name: record.review.name,
+        goal: input.goal,
+        guard,
+        expectedFiles: candidate.files,
+        origin: {
+          kind: "business-assembly",
+          planId: input.planId,
+          copyId: record.review.copyId,
+          digest: input.digest
+        }
+      })
+      guard()
+      this.deps.changed(threadId)
+      return {
+        ...this.status(threadId),
+        projectTrial: prepared.request,
+        trialRoute: "host" as const,
+        executed: false as const
+      }
+    }
     await this.trialService().request(
       context.scope,
       input.planId,
@@ -214,7 +267,7 @@ export class CreatorBusinessService {
     assertTurn: () => void
   ) {
     const before = this.context(threadId)
-    const previous = this.trialService().status(before.scope)
+    const previous = this.trials?.status(before.scope)
     if (previous && !["completed", "failed", "cancelled"].includes(previous.phase))
       throw Error("BUSINESS_TRIAL_OUTCOME_UNCONFIRMED")
     await this.requestReview(threadId, previewId, turnId, assertTurn)
@@ -425,7 +478,12 @@ export class CreatorBusinessService {
     const catalog = inspected.catalog
     const allowed = [
       BUSINESS_MOD_MANIFEST,
-      ...(catalog.kernel ? [...catalog.kernel.resources, catalog.kernel.boardConfigPath] : []),
+      ...(catalog.kernel
+        ? [
+            ...catalog.kernel.resources,
+            ...(catalog.kernel.boardConfigPath ? [catalog.kernel.boardConfigPath] : [])
+          ]
+        : []),
       ...catalog.modules.flatMap((mod) => [
         mod.skill.entry,
         ...mod.skill.resources,
@@ -461,7 +519,12 @@ export class CreatorBusinessService {
     const catalog = inspected.catalog
     const roots = [
       BUSINESS_MOD_MANIFEST,
-      ...(catalog.kernel ? [...catalog.kernel.resources, catalog.kernel.boardConfigPath] : []),
+      ...(catalog.kernel
+        ? [
+            ...catalog.kernel.resources,
+            ...(catalog.kernel.boardConfigPath ? [catalog.kernel.boardConfigPath] : [])
+          ]
+        : []),
       ...catalog.modules.flatMap((mod) => [
         mod.skill.entry,
         ...mod.skill.resources,

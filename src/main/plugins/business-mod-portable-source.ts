@@ -8,7 +8,12 @@ export function portableBusinessModFiles(snapshot: DerivationSnapshot): Derivati
   const paths = [
     BUSINESS_MOD_MANIFEST,
     ...snapshot.manifests,
-    ...(catalog.kernel ? [...catalog.kernel.resources, catalog.kernel.boardConfigPath] : []),
+    ...(catalog.kernel
+      ? [
+          ...catalog.kernel.resources,
+          ...(catalog.kernel.boardConfigPath ? [catalog.kernel.boardConfigPath] : [])
+        ]
+      : []),
     ...catalog.modules.flatMap((mod) => [
       mod.skill.entry,
       ...mod.skill.resources,

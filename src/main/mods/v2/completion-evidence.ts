@@ -101,9 +101,37 @@ export interface CompletionCaptureInput {
   runtimeGeneration: number
   config?: ModJson
   paths?: string[]
+  /** Trusted caller declarations only; no adapter-specific layout is inferred by capture. */
+  references?: CompletionEvidenceReferences
   excludePaths?: string[]
   signal?: AbortSignal
   assertLive?(): void
+}
+
+export interface CompletionEvidenceReferences {
+  paths?: readonly string[]
+  statePaths?: readonly string[]
+  requirementPaths?: readonly string[]
+}
+
+function evidencePaths(value: readonly string[] | undefined): string[] {
+  if (value === undefined) return []
+  if (!Array.isArray(value) || value.length > 64) throw Error("COMPLETION_EVIDENCE_REFERENCE")
+  const paths: string[] = []
+  for (const path of value) {
+    if (
+      typeof path !== "string" ||
+      !path ||
+      path.length > 512 ||
+      /[\\:]/u.test(path) ||
+      [...path].some((character) => character.charCodeAt(0) < 32) ||
+      path.startsWith("/") ||
+      path.split("/").some((part) => !part || part === "." || part === "..")
+    )
+      throw Error("COMPLETION_EVIDENCE_REFERENCE")
+    paths.push(path)
+  }
+  return [...new Set(paths)].sort()
 }
 
 function sha256(value: string | Buffer): string {
@@ -189,9 +217,34 @@ export async function captureCompletionBinding(
     throw Error("COMPLETION_EVIDENCE_ROOT_CHANGED")
   const candidates = new Set<string>()
   const budget = { entries: new Set<string>(), visited: new Set<string>() }
-  for (const path of input.paths ?? []) {
+  if (
+    input.references !== undefined &&
+    (!input.references ||
+      typeof input.references !== "object" ||
+      Array.isArray(input.references) ||
+      ![Object.prototype, null].includes(Object.getPrototypeOf(input.references)) ||
+      Object.keys(input.references).some(
+        (key) => !["paths", "statePaths", "requirementPaths"].includes(key)
+      ))
+  )
+    throw Error("COMPLETION_EVIDENCE_REFERENCE")
+  const references = {
+    paths: evidencePaths(input.references?.paths),
+    statePaths: evidencePaths(input.references?.statePaths),
+    requirementPaths: evidencePaths(input.references?.requirementPaths)
+  }
+  for (const path of [
+    ...(input.paths ?? []),
+    ...references.paths,
+    ...references.statePaths,
+    ...references.requirementPaths
+  ]) {
     await collectFiles(input, path === "." ? "" : path, candidates, budget)
   }
+  if (
+    [...references.statePaths, ...references.requirementPaths].some((path) => !candidates.has(path))
+  )
+    throw Error("COMPLETION_EVIDENCE_REFERENCE_FILE_REQUIRED")
   let diff = "non-git"
   let diffFiles: string[] | undefined
   let repository = false
@@ -217,8 +270,6 @@ export async function captureCompletionBinding(
     diff = JSON.stringify([head, unstaged, staged, diffFiles])
     for (const path of diffFiles) candidates.add(path)
   } else await collectFiles(input, "", candidates, budget)
-  if (await lstat(join(input.workspace, ".autobizdevops")).catch(() => undefined))
-    await collectFiles(input, ".autobizdevops", candidates, budget)
   if (candidates.size > MAX_FILES) throw Error("COMPLETION_EVIDENCE_FILE_LIMIT")
   let total = 0
   const files: CompletionFileFingerprint[] = []
@@ -264,22 +315,30 @@ export async function captureCompletionBinding(
     diffFingerprint: sha256(diff),
     ...(diffFiles ? { diffFiles } : {}),
     stateFingerprint:
-      files.find((file) => file.path === ".autobizdevops/state.json")?.sha256 ?? "missing",
+      references.statePaths.length === 1
+        ? (files.find((file) => file.path === references.statePaths[0])?.sha256 ?? "missing")
+        : references.statePaths.length
+          ? sha256(
+              JSON.stringify(files.filter((file) => references.statePaths.includes(file.path)))
+            )
+          : "missing",
     requirementVersion: sha256(
       JSON.stringify(
-        files.filter((file) =>
-          /(^|\/)(requirements?|proposal|spec|prd|design|plan|state|workflow\.d)([^/]*)/i.test(
-            file.path
-          )
+        files.filter(
+          (file) =>
+            references.requirementPaths.includes(file.path) ||
+            /(^|\/)(requirements?|proposal|spec|prd|design|plan|state|workflow\.d)([^/]*)/i.test(
+              file.path
+            )
         )
       )
     ),
     configFingerprint: sha256(
-      JSON.stringify(
-        projectChecks.digest === "missing"
-          ? input.config ?? null
-          : { policy: input.config ?? null, projectChecks: projectChecks.digest }
-      )
+      JSON.stringify({
+        policy: input.config ?? null,
+        references,
+        ...(projectChecks.digest === "missing" ? {} : { projectChecks: projectChecks.digest })
+      })
     ),
     files
   }

@@ -163,12 +163,32 @@ describe("project composition execution catalog", () => {
     const result = await readProjectCompositionCatalog([f.plugin])
     expect(result.sources.map((source) => source.entry.available)).toEqual([true, true])
     expect(readNativeCapabilityCatalog).toHaveBeenCalledTimes(1)
+    // Legacy dynamic context must still be retained; an explicit Host's same-named
+    // ordinary resource no longer opts it into this compatibility protocol.
+    f.put(f.flow.entry, { ...f.runtime, mode: "legacy", stateOwner: "plugin" })
     f.put("board_core/board_config.json", {})
     expect(
       (await readProjectCompositionCatalog([f.plugin])).sources.every(
         (source) => !source.entry.available
       )
     ).toBe(true)
+  })
+  it("retains standalone Host skill dependency closures with an unrelated board resource", async () => {
+    const f = fixture()
+    const skills = ["base", "summary"].map((id) => ({
+      id,
+      title: id,
+      kind: "skill",
+      usage: "project",
+      entry: `skills/${id}/SKILL.md`,
+      dependsOn: id === "summary" ? ["base"] : []
+    }))
+    for (const skill of skills) f.put(skill.entry, "Standalone instructions")
+    f.declare(skills)
+    f.put("board_core/board_config.json", { workflow: "Unrelated business data" })
+    const result = await readProjectCompositionCatalog([f.plugin])
+    expect(result.sources.map((source) => source.entry.available)).toEqual([true, true])
+    expect(readNativeCapabilityCatalog).toHaveBeenCalledTimes(1)
   })
   it("rejects a standalone skill when its dependency requires a flow or unavailable MCP", async () => {
     const f = fixture()

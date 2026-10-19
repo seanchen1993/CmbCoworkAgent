@@ -176,6 +176,8 @@ export interface FlowCatalog {
   models: { id: string; name: string }[]
   actions?: ClawActionDescriptor[]
   skills?: ClawSourceEntry[]
+  /** Optional discovery failures do not confer or revoke execution authority. */
+  diagnostics?: { source: string; code: string; message: string }[]
   features: { id: string; checkpoint: string }[]
 }
 export interface FlowActiveSummary {

@@ -8,6 +8,7 @@ export interface NativePluginCapability {
   version: string
   description: string
   enabled: boolean
+  /** Only the native legacy-board entry flag; Skill isolation metadata grants no UI route. */
   projectMode: boolean
   installedSkillCount: number
   hasFunctionCapabilities: boolean
@@ -41,8 +42,7 @@ export function nativePluginCapabilities(
         version: plugin.version,
         description: plugin.description,
         enabled: plugin.enabled,
-        projectMode:
-          plugin.hasProjectMode === true || owned.some((skill) => skill.isProjectModePlugin),
+        projectMode: plugin.hasProjectMode === true,
         installedSkillCount: plugin.skillCount,
         hasFunctionCapabilities: functions.has(plugin.id),
         businessModCount: plugin.businessModCount ?? 0,

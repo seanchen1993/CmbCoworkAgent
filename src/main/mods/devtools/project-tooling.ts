@@ -101,10 +101,11 @@ export async function packProjectPlugin(
   outputFile: string,
   expectedDigest?: string,
   guard = () => {},
-  availableActions: readonly ClawActionDescriptor[] = []
+  availableActions: readonly ClawActionDescriptor[] = [],
+  resourcePaths?: readonly string[]
 ) {
   guard()
-  const source = await readProjectSource(directory)
+  const source = await readProjectSource(directory, resourcePaths)
   guard()
   if (expectedDigest !== undefined && source.bundle.digest !== expectedDigest)
     throw Error("PROJECT_SOURCE_CHANGED")
@@ -149,10 +150,11 @@ export async function prepareProjectDevelopment(
   outputDirectory: string,
   expectedDigest?: string,
   guard = () => {},
-  availableActions: readonly ClawActionDescriptor[] = []
+  availableActions: readonly ClawActionDescriptor[] = [],
+  resourcePaths?: readonly string[]
 ) {
   guard()
-  const source = await readProjectSource(directory)
+  const source = await readProjectSource(directory, resourcePaths)
   guard()
   if (expectedDigest !== undefined && source.bundle.digest !== expectedDigest)
     throw Error("PROJECT_SOURCE_CHANGED")

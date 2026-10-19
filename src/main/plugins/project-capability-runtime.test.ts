@@ -16,6 +16,7 @@ import {
   captureRuntimePluginSourceThreadGuard
 } from "./runtime-source-scope"
 import type { PluginMetadata } from "../types"
+import { hostProjectFixture } from "../harness-board/project-runtime/host-fixtures.test-helper"
 
 const roots: string[] = []
 afterEach(() => {
@@ -186,5 +187,24 @@ describe("native capability admission and retained runtime scope", () => {
       await readNativeCapabilityCatalog(legacy.plugins[0], "project")
     ).packageDigest!
     await expect(legacy.service.validate(legacy.refs)).rejects.toThrow("LEGACY_CONTEXT_REQUIRED")
+  })
+  it("does not mistake an explicit Host's unrelated board resource for legacy standalone context", async () => {
+    const f = await fixture()
+    const plugin = f.plugins[0]
+    const manifest = hostProjectFixture(f.root).manifest
+    manifest.plugin = { id: plugin.name, version: plugin.version }
+    // This standalone Skill is not a phase Skill of the separately declared Host project.
+    manifest.stages = manifest.stages.filter((stage) => stage.id === "draft")
+    mkdirSync(join(plugin.path, "skills/draft"), { recursive: true })
+    writeFileSync(join(plugin.path, "skills/draft/SKILL.md"), "Independent Host phase")
+    writeFileSync(join(plugin.path, "devclaw.project-runtime.json"), JSON.stringify(manifest))
+    mkdirSync(join(plugin.path, "board_core"))
+    writeFileSync(join(plugin.path, "board_core/board_config.json"), JSON.stringify({
+      workflow: "Unrelated business data, not an AutoBiz workflow"
+    }))
+    const catalog = await readNativeCapabilityCatalog(plugin, "project")
+    expect(catalog.status).toBe("declared")
+    f.refs[0].packageDigest = catalog.packageDigest!
+    await expect(f.service.validate(f.refs)).resolves.toHaveLength(2)
   })
 })

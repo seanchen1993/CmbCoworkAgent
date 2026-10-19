@@ -9,6 +9,7 @@ import {
 } from "../harness-board/project-runtime/safe-files"
 import { parseMcpJsonFile, parsePluginHooks } from "../storage"
 import { readPluginManifest } from "./manifest"
+import { hasAutobizBoardContext } from "./business-adapters/autobiz-package-admission"
 import {
   issueRuntimePluginSourceToken,
   extendRuntimePluginSourceToken,
@@ -86,7 +87,7 @@ export class ProjectCapabilityRuntimeService {
       )
         throw Error("PROJECT_CAPABILITY_STAGE_CONTEXT_REQUIRED")
       // Legacy stage routing is computed by its original scripts; no static claim can strip it.
-      if (readRuntimeScopedFile(installed.path, "board_core/board_config.json", 256 * 1024).present)
+      if (hasAutobizBoardContext(installed.path))
         throw Error("PROJECT_CAPABILITY_LEGACY_CONTEXT_REQUIRED")
       const manifest = readPluginManifest(installed.path)?.manifest
       const hookPath = manifest?.hooks ?? installed.hookPath ?? "hooks/hooks.json"

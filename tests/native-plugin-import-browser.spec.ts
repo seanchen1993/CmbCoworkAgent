@@ -82,7 +82,7 @@ async function main() {
                   ? "export const openPluginSettings=(...a)=>window.calls.push(['settings',...a])"
                   : a.path.endsWith("claw-sidebar")
                     ? "export const openClawSidebar=()=>{}"
-                    : "export const openDerivedProject=(...a)=>window.calls.push(['project',...a])"
+                    : "export const openDerivedProject=(...a)=>window.calls.push(['project',...a]);export const useDerivedProjectIntent=()=>null;export const dismissDerivedProject=()=>{}"
           }))
         }
       }

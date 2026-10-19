@@ -539,6 +539,13 @@ function ScopedFlowsPanel({
         <FlowUsageGuide onOpenMods={openMods} />
         {catalog?.available && (
           <>
+            {catalog.diagnostics?.length ? (
+              <div role="status" aria-label="可选目录读取提示" className="rounded border p-3 text-sm">
+                {catalog.diagnostics.map((diagnostic) => (
+                  <p key={`${diagnostic.source}:${diagnostic.code}`}>{diagnostic.message}</p>
+                ))}
+              </div>
+            ) : null}
             {catalog.reason && (
               <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border bg-muted/30 p-4 text-sm">
                 <div>

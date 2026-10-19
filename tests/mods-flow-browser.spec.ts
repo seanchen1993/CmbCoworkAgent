@@ -335,7 +335,10 @@ async function editAndRun(page: Page) {
   await page.locator("[data-chat-flow-tasks]").getByText("人工拒绝", { exact: true }).waitFor()
   await startFromEditor(page)
   await page.locator("[data-chat-flow-tasks]").getByRole("button", { name: "停止任务", exact: true }).click()
-  await page.getByRole("heading", { name: "Flow a · 已停止", exact: true }).waitFor()
+  await page.locator("[data-chat-flow-tasks]")
+    .getByRole("heading", { name: "当前任务 · 已停止", exact: true }).waitFor()
+  assert.equal(await page.evaluate("window.chat.run?.status"), "cancelled")
+  assert.equal(await page.evaluate("window.fixture.calls.filter(c=>c[0]==='cancel').length"), 1)
   assert.equal(await page.getByRole("region", { name: "人工成果确认" }).count(), 0)
   pass(
     "edits reach revisioned save; dirty draft cannot run; nonce approval/rejection/cancellation use real UI actions"
@@ -716,7 +719,11 @@ async function chatBridge(page: Page) {
   assert.equal(await page.evaluate("window.fixture.calls.filter(c=>c[0]==='start').length"), 0)
   await page.getByLabel("聊天消息").fill("检查订单导出")
   const execute = page.getByRole("button", { name: "按此步骤执行", exact: true })
-  await execute.evaluate(element => { element.click(); element.click() })
+  await execute.evaluate(element => {
+    if (!(element instanceof HTMLButtonElement)) throw Error("Expected an execution button")
+    element.click()
+    element.click()
+  })
   await page.getByRole("region", { name: "人工成果确认" }).waitFor()
   const starts = await page.evaluate<FlowStartCall[]>("window.fixture.calls.filter(c=>c[0]==='start')")
   assert.equal(starts.length, 1)
@@ -1349,7 +1356,7 @@ async function scopeReloadAfterLockedOperation(page: Page) {
   assert.equal(await page.evaluate("window.chat.binding?.workspace"), "a")
   assert.equal(await page.evaluate("window.chat.recentRuns.length"), 1)
   assert.equal(await page.locator("[data-chat-task-id='run1']").count(), 1)
-  assert(await page.evaluate("window.fixture.listeners()") > 0,
+  assert(await page.evaluate<number>("window.fixture.listeners()") > 0,
     "The restored run must regain progress observers")
   assert.equal(await page.evaluate("window.fixture.calls.filter(c=>c[0]==='cancel').length"), 1)
   assert.equal(await page.evaluate("window.fixture.calls.filter(c=>c[0]==='start').length"), 1)
@@ -1372,6 +1379,19 @@ async function flowWorkspaceSeparation(page: Page) {
   assert.equal(await goal.inputValue(), "还没有保存的新流程名称")
   assert.equal(await page.evaluate(() => (window as unknown as FlowBrowserWindow).fixture.calls.filter((call:unknown[]) => ["start", "save", "decide", "cancel"].includes(String(call[0]))).length), 0)
   pass("Flow configuration and execution records are separate; switching preserves unsaved edits and starts no work")
+}
+
+async function optionalCatalogIsolation(page: Page) {
+  await mount(page, "catalog.diagnostics=[{source:'optional-provider',code:'UNAVAILABLE',message:'部分可选目录不可用，其他流程仍可配置。'}];host.render(<FlowsPanel threadId='a'/>);")
+  await page.getByRole("status", { name: "可选目录读取提示" }).getByText(
+    "部分可选目录不可用，其他流程仍可配置。", { exact: true }
+  ).waitFor()
+  await page.getByRole("button", { name: "新建通用开发流程", exact: true }).click()
+  await page.getByLabel("流程名称", { exact: true }).fill("独立业务流程")
+  assert.equal(await page.getByLabel("流程名称", { exact: true }).inputValue(), "独立业务流程")
+  await page.screenshot({ path: join(outputFolder("optional-provider"), "configuration.png"), fullPage: true })
+  assert.equal(await page.evaluate(() => (window as unknown as FlowBrowserWindow).fixture.calls.filter((call: unknown[]) => ["start", "save", "decide", "cancel"].includes(String(call[0]))).length), 0)
+  pass("Optional provider diagnostics preserve ordinary flow configuration without starting work")
 }
 
 async function main() {
@@ -1405,7 +1425,10 @@ async function main() {
       await run(page!)
       completedGroups.push(name)
     }
-    if (process.argv.includes("--scope-lock-only")) {
+    if (process.argv.includes("--optional-catalog-only")) {
+      await group("optionalCatalogIsolation", optionalCatalogIsolation)
+      assert.deepEqual(errors, [])
+    } else if (process.argv.includes("--scope-lock-only")) {
       await group("scopeReloadAfterLockedOperation", scopeReloadAfterLockedOperation)
       assert.deepEqual(errors, [])
     } else if (process.argv.includes("--selection-only")) {
@@ -1440,6 +1463,7 @@ async function main() {
       await group("sourceComposition", sourceComposition)
       assert.deepEqual(errors, [])
     } else {
+      await group("optionalCatalogIsolation", optionalCatalogIsolation)
       await group("sessionSelectionDisplay", sessionSelectionDisplay)
       await group("crossThreadBusy", crossThreadBusy)
       await group("commandSettings", commandSettings)

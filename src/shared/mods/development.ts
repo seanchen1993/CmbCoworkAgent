@@ -29,6 +29,8 @@ export interface DevelopmentProjectTrialRequest {
   revision: number
   digest: string
   goal: string
+  /** Immutable authoring provenance only. It never grants installation or execution. */
+  origin?: { kind: "business-assembly"; planId: string; copyId: string; digest: string }
 }
 /** Read-only native journal membership, not a source grant or runtime authority. */
 export interface DevelopmentBusinessTrialSession {

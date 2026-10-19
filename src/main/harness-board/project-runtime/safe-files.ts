@@ -98,6 +98,20 @@ export function readRuntimeScopedFile(
   relative: string,
   maxBytes = 4 * 1024 * 1024
 ): ScopedFileObservation {
+  return observeRuntimeScopedFile(root, relative, maxBytes, false)
+}
+
+/** Safe presence only: identical scope/link/identity checks, without interpreting resource bytes. */
+export function probeRuntimeScopedFile(root: string, relative: string): ScopedFileObservation {
+  return observeRuntimeScopedFile(root, relative, 0, true)
+}
+
+function observeRuntimeScopedFile(
+  root: string,
+  relative: string,
+  maxBytes: number,
+  presenceOnly: boolean
+): ScopedFileObservation {
   const parents: Array<{ path: string; identity: string }> = []
   let directory: string
   let scopeIdentity: string
@@ -178,12 +192,12 @@ export function readRuntimeScopedFile(
     realpathSync(path) !== path
   )
     hostStateError("FILE_UNSAFE")
-  if (before.size > BigInt(maxBytes)) hostStateError("FILE_LIMIT")
+  if (!presenceOnly && before.size > BigInt(maxBytes)) hostStateError("FILE_LIMIT")
   const fd = openSync(path, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0))
   try {
     const initial = fstatSync(fd, { bigint: true })
     if (!initial.isFile() || identity(initial) !== identity(before)) hostStateError("FILE_CHANGED")
-    const bytes = Buffer.alloc(Number(initial.size))
+    const bytes = Buffer.alloc(presenceOnly ? 0 : Number(initial.size))
     let offset = 0
     while (offset < bytes.length) {
       const count = readSync(fd, bytes, offset, bytes.length - offset, offset)
@@ -199,6 +213,12 @@ export function readRuntimeScopedFile(
     )
       hostStateError("FILE_CHANGED")
     checkParents()
+    if (presenceOnly)
+      return {
+        path: relative,
+        present: true,
+        fingerprint: runtimeDigest(JSON.stringify([scopeIdentity, relative, identity(initial)]))
+      }
     return {
       path: relative,
       present: true,

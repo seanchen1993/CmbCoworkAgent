@@ -9,6 +9,7 @@ import {
   captureCompletionBinding,
   sameCompletionBinding
 } from "./completion-evidence"
+import { AUTOBIZ_COMPLETION_EVIDENCE } from "../adapters/autobiz-completion-evidence"
 
 const roots: string[] = []
 const execute = promisify(execFile)
@@ -162,4 +163,102 @@ it("binds staged, unstaged, deleted and untracked paths to the actual current di
     "staged.ts",
     "untracked.ts"
   ])
+})
+
+it("does not infer an AutoBiz layout, while its explicit adapter still binds ignored legacy state", async () => {
+  const root = await mkdtemp(join(tmpdir(), "mods-declared-evidence-"))
+  roots.push(root)
+  await execute("git", ["-C", root, "init"], { windowsHide: true })
+  await writeFile(join(root, ".gitignore"), ".autobizdevops/\n")
+  await mkdir(join(root, ".autobizdevops"))
+  await writeFile(join(root, ".autobizdevops", "state.json"), "legacy state")
+  const input = {
+    workspace: root,
+    threadId: "thread",
+    turnId: "turn",
+    pluginDigests: {},
+    runtimeGeneration: 1
+  }
+  const generic = await captureCompletionBinding(input)
+  expect(generic.stateFingerprint).toBe("missing")
+  expect(generic.files.some((file) => file.path.startsWith(".autobizdevops/"))).toBe(false)
+  const legacy = await captureCompletionBinding({
+    ...input,
+    references: AUTOBIZ_COMPLETION_EVIDENCE
+  })
+  expect(legacy.files).toContainEqual(
+    expect.objectContaining({ path: ".autobizdevops/state.json" })
+  )
+  expect(legacy.stateFingerprint).toBe(
+    legacy.files.find((file) => file.path === ".autobizdevops/state.json")!.sha256
+  )
+})
+
+it("binds independent business state and requirement references without a platform business branch", async () => {
+  const root = await mkdtemp(join(tmpdir(), "mods-independent-evidence-"))
+  roots.push(root)
+  await mkdir(join(root, ".review"))
+  await writeFile(join(root, ".review", "status.json"), "initial")
+  await writeFile(join(root, "acceptance.txt"), "must be verified")
+  const input = {
+    workspace: root,
+    threadId: "thread",
+    turnId: "turn",
+    pluginDigests: {},
+    runtimeGeneration: 1,
+    references: { statePaths: [".review/status.json"], requirementPaths: ["acceptance.txt"] }
+  }
+  const before = await captureCompletionBinding(input)
+  await writeFile(join(root, ".review", "status.json"), "reviewed")
+  const after = await captureCompletionBinding(input)
+  expect(before.stateFingerprint).not.toBe(after.stateFingerprint)
+  expect(before.requirementVersion).toBe(after.requirementVersion)
+  const noDeclaredRequirement = await captureCompletionBinding({
+    ...input,
+    references: { statePaths: [".review/status.json"] }
+  })
+  expect(noDeclaredRequirement.requirementVersion).not.toBe(after.requirementVersion)
+  expect(noDeclaredRequirement.configFingerprint).not.toBe(after.configFingerprint)
+})
+
+it.each(["../outside", "C:/outside", "/outside", "nested/../outside", "nested\\outside"])(
+  "rejects an unscoped evidence reference before reading files: %s",
+  async (path) => {
+    const root = await mkdtemp(join(tmpdir(), "mods-reference-guard-"))
+    roots.push(root)
+    await expect(
+      captureCompletionBinding({
+        workspace: root,
+        threadId: "thread",
+        turnId: "turn",
+        pluginDigests: {},
+        runtimeGeneration: 1,
+        references: { statePaths: [path] }
+      })
+    ).rejects.toThrow("COMPLETION_EVIDENCE_REFERENCE")
+  }
+)
+
+it("requires declared state references to identify files and preserves evidence exclusions", async () => {
+  const root = await mkdtemp(join(tmpdir(), "mods-reference-files-"))
+  roots.push(root)
+  await mkdir(join(root, "records"))
+  await writeFile(join(root, "records", "status.json"), "{}")
+  const input = {
+    workspace: root,
+    threadId: "thread",
+    turnId: "turn",
+    pluginDigests: {},
+    runtimeGeneration: 1
+  }
+  await expect(
+    captureCompletionBinding({ ...input, references: { statePaths: ["records"] } })
+  ).rejects.toThrow("COMPLETION_EVIDENCE_REFERENCE_FILE_REQUIRED")
+  await expect(
+    captureCompletionBinding({
+      ...input,
+      references: { statePaths: ["records/status.json"] },
+      excludePaths: [join(root, "records", "status.json")]
+    })
+  ).rejects.toThrow("COMPLETION_EVIDENCE_REFERENCE_FILE_REQUIRED")
 })

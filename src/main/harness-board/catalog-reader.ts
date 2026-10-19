@@ -1,8 +1,21 @@
-import { existsSync, readFileSync, statSync } from "node:fs"
+import { existsSync, lstatSync, opendirSync, readFileSync, statSync } from "node:fs"
 import { basename, isAbsolute, join, relative, resolve } from "node:path"
 import { serialize } from "node:v8"
 import type { PluginMetadata } from "../types"
 import { assertPackageExtensionCompatibility } from "../plugins/extension-contract"
+import {
+  hasAutobizBoardContext,
+  isAutobizLegacyProjectRoot,
+  readAutobizPackageSemantics,
+  type AutobizPackageSemantics
+} from "../plugins/business-adapters/autobiz-package-admission"
+import {
+  probeRuntimeScopedFile,
+  readRuntimeScopedFile,
+  runtimeDirectoryIdentity,
+  runtimeRelativePath
+} from "./project-runtime/safe-files"
+import { HOST_PACKAGE_LIMITS } from "./project-runtime/package-snapshots"
 import { EXTENSION_BOARD_API_VERSION } from "../../shared/project-runtime"
 import type {
   HarnessAdapterRegistryItem,
@@ -304,6 +317,61 @@ interface BoardConfigSnapshot {
   exists: boolean
 }
 
+type BoardConfigReader = (path: string) => BoardConfigSnapshot
+interface CatalogPackageObservation {
+  semantics: AutobizPackageSemantics
+  assertCurrent(): void
+}
+
+/** One page's namespace observation shares only proven root-entry absence. Existing files
+ * still use the original scoped reader, and every page observes all protocols again. */
+function observeCatalogPackage(root: string, boardPresent: boolean): CatalogPackageObservation {
+  const rootIdentity = runtimeDirectoryIdentity(root)
+  const before = lstatSync(root, { bigint: true })
+  let rootEntries: Set<string> | undefined = new Set()
+  const directory = opendirSync(root)
+  try {
+    let count = 0
+    for (let entry = directory.readSync(); entry; entry = directory.readSync()) {
+      if (++count > HOST_PACKAGE_LIMITS.files + HOST_PACKAGE_LIMITS.directories) {
+        // Older installed packages need not meet snapshot capacity just to be listed.
+        // If enumeration is not complete, infer no absence and use each original safe read.
+        rootEntries = undefined
+        break
+      }
+      rootEntries.add(entry.name.toLowerCase())
+    }
+  } finally {
+    directory.closeSync()
+  }
+  const observed = new Map<string, Buffer | undefined>()
+  const read = (path: string, limit: number): Buffer | undefined => {
+    runtimeRelativePath(path)
+    if (rootEntries && !rootEntries.has(path.split("/")[0].toLowerCase())) return undefined
+    if (!observed.has(path))
+      observed.set(path, readRuntimeScopedFile(root, path, limit).bytes)
+    const bytes = observed.get(path)
+    if (bytes && bytes.length > limit) throw Error("AUTOBIZ_PACKAGE_RUNTIME_LIMIT")
+    return bytes
+  }
+  const assertCurrent = () => {
+    const current = lstatSync(root, { bigint: true })
+    if (
+      runtimeDirectoryIdentity(root) !== rootIdentity ||
+      current.dev !== before.dev || current.ino !== before.ino ||
+      current.mode !== before.mode || current.nlink !== before.nlink ||
+      current.size !== before.size || current.mtimeNs !== before.mtimeNs ||
+      current.ctimeNs !== before.ctimeNs
+    )
+      throw Error("HARNESS_CATALOG_SOURCE_CHANGED")
+  }
+  // The catalog's existing presence filter selects candidates only. It grants no source
+  // authority; an actual projected board is safely probed before any content/cache use.
+  const semantics = readAutobizPackageSemantics(read, boardPresent)
+  assertCurrent()
+  return { semantics, assertCurrent }
+}
+
 function setConfigCache(path: string, signature: string, value: BoardConfigSnapshot): void {
   const previous = configCache.get(path)
   if (previous) configCacheBytes -= previous.bytes
@@ -326,10 +394,19 @@ function setConfigCache(path: string, signature: string, value: BoardConfigSnaps
   }
 }
 
-function readBoardConfig(pluginPath: string): BoardConfigSnapshot {
+function readBoardConfig(
+  pluginPath: string,
+  semantics?: AutobizPackageSemantics
+): BoardConfigSnapshot {
   // The board may be unchanged while its required host protocol changes.
   // Check before the board cache so the old project entrance cannot bypass it.
   try {
+    if (semantics) {
+      if (!semantics.boardContext ||
+        !probeRuntimeScopedFile(pluginPath, "board_core/board_config.json").present)
+        return { value: null, exists: false, error: null }
+    } else if (!isAutobizLegacyProjectRoot(pluginPath) && !hasAutobizBoardContext(pluginPath))
+      return { value: null, exists: false, error: null }
     if (existsSync(join(pluginPath, "devclaw.project-runtime.json")) ||
       existsSync(join(pluginPath, "devclaw.capabilities.json")))
       assertPackageExtensionCompatibility(pluginPath)
@@ -380,7 +457,8 @@ function readBoardConfig(pluginPath: string): BoardConfigSnapshot {
 
 function compatibility(
   plugin: PluginMetadata | null,
-  storedName: string
+  storedName: string,
+  readConfig: BoardConfigReader = readBoardConfig
 ): HarnessBoardCompatibility {
   if (!plugin) {
     return {
@@ -391,7 +469,7 @@ function compatibility(
       message: `项目使用的插件未安装：${storedName || "插件"}`
     }
   }
-  const config = readBoardConfig(plugin.path)
+  const config = readConfig(plugin.path)
   if (!config.exists) {
     return {
       status: "missing-board-config",
@@ -456,9 +534,12 @@ function compatibility(
   }
 }
 
-function supportsSessionContext(plugin: PluginMetadata | null): boolean {
+function supportsSessionContext(
+  plugin: PluginMetadata | null,
+  readConfig: BoardConfigReader = readBoardConfig
+): boolean {
   if (!plugin) return false
-  const config = readBoardConfig(plugin.path)
+  const config = readConfig(plugin.path)
   if (config.error || !config.value) return false
   const commands = config.value.inspectCommands
   if (!isRecord(commands)) return false
@@ -1003,7 +1084,8 @@ function projectMatches(
 function toProjectListItem(
   value: unknown,
   pluginById: ReadonlyMap<string, PluginMetadata>,
-  pluginByName: ReadonlyMap<string, PluginMetadata>
+  pluginByName: ReadonlyMap<string, PluginMetadata>,
+  readConfig: BoardConfigReader = readBoardConfig
 ): HarnessProjectListItem | null {
   const project = toProjectMetadata(value)
   if (!project) return null
@@ -1011,7 +1093,7 @@ function toProjectListItem(
   const adapterId = stored.id.trim()
   const adapterName = stored.name.trim()
   const plugin = pluginById.get(adapterId) ?? pluginByName.get(adapterName) ?? null
-  const boardCompatibility = compatibility(plugin, adapterName)
+  const boardCompatibility = compatibility(plugin, adapterName, readConfig)
   return {
     projectId: project.projectId,
     name: project.name,
@@ -1037,14 +1119,17 @@ function toProjectListItem(
     boardCompatibility,
     supportsDeployUnits: boardCompatibility.compatible,
     supportsSessionContextInjection:
-      boardCompatibility.compatible && supportsSessionContext(plugin),
+      boardCompatibility.compatible && supportsSessionContext(plugin, readConfig),
     lifecycle: project.lifecycle
   }
 }
 
-function toRegistryItem(plugin: PluginMetadata): HarnessAdapterRegistryItem {
-  const boardCompatibility = compatibility(plugin, plugin.name)
-  const config = readBoardConfig(plugin.path)
+function toRegistryItem(
+  plugin: PluginMetadata,
+  readConfig: BoardConfigReader = readBoardConfig
+): HarnessAdapterRegistryItem {
+  const boardCompatibility = compatibility(plugin, plugin.name, readConfig)
+  const config = readConfig(plugin.path)
   const commands = isRecord(config.value?.inspectCommands)
     ? config.value?.inspectCommands[process.platform]
     : null
@@ -1078,9 +1163,37 @@ export function readHarnessCatalogPage(
 ): HarnessBoardCatalogPageResult {
   const startedAt = performance.now()
   const rawProjects = readProjects(projectStorePath)
-  const plugins = readPlugins(pluginStorePath).filter((plugin) =>
-    existsSync(join(plugin.path, BOARD_CONFIG_REL_PATH))
-  )
+  const observations = new Map<string, CatalogPackageObservation>()
+  const observationErrors = new Map<string, string>()
+  const pageConfigs = new Map<string, BoardConfigSnapshot>()
+  const plugins = readPlugins(pluginStorePath).filter((plugin) => {
+    if (!existsSync(join(plugin.path, BOARD_CONFIG_REL_PATH))) return false
+    const cached = observations.get(plugin.path)
+    if (cached) return cached.semantics.legacyProject
+    if (observationErrors.has(plugin.path)) return true
+    try {
+      const observed = observeCatalogPackage(plugin.path, true)
+      observations.set(plugin.path, observed)
+      return observed.semantics.legacyProject
+    } catch (error) {
+      // Keep a diagnostic row; readBoardConfig records the classification failure before
+      // reading board bytes. A malformed declared protocol must not appear compatible.
+      observationErrors.set(plugin.path, error instanceof Error ? error.message : String(error))
+      return true
+    }
+  })
+  const readConfig: BoardConfigReader = (path) => {
+    const cached = pageConfigs.get(path)
+    if (cached) return cached
+    const error = observationErrors.get(path)
+    const observation = observations.get(path)
+    observation?.assertCurrent()
+    const config = error
+      ? { value: null, exists: true, error }
+      : readBoardConfig(path, observation?.semantics)
+    pageConfigs.set(path, config)
+    return config
+  }
   const pluginById = new Map(plugins.map((plugin) => [plugin.id, plugin]))
   const pluginByName = new Map(plugins.map((plugin) => [plugin.name, plugin]))
   const query = text(input.query).trim().toLocaleLowerCase()
@@ -1120,7 +1233,7 @@ export function readHarnessCatalogPage(
         seen += 1
         continue
       }
-      const projected = toProjectListItem(row, pluginById, pluginByName)
+      const projected = toProjectListItem(row, pluginById, pluginByName, readConfig)
       if (!projected) {
         seen += 1
         nextProjectOffset = seen
@@ -1148,13 +1261,14 @@ export function readHarnessCatalogPage(
       index += 1
     ) {
       if ((index & 15) === 0 && isCancelled(cancelFlag)) break
-      const projected = toRegistryItem(boardPlugins[index])
+      const projected = toRegistryItem(boardPlugins[index], readConfig)
       const candidate = { projects, registry: [...registry, projected] }
       if (Buffer.byteLength(JSON.stringify(candidate), "utf8") > maxResponseBytes) break
       registry.push(projected)
     }
   }
 
+  for (const observation of observations.values()) observation.assertCurrent()
   const cancelled = isCancelled(cancelFlag)
   const result: HarnessBoardCatalogPageResult = {
     projects,

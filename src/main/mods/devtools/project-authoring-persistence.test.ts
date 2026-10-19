@@ -98,6 +98,61 @@ it("restores immutable source and trial requests after restart without restoring
   running.release()
 })
 
+it("retains checked business origin as provenance across restart without restoring Host execution", async () => {
+  const f = await fixture()
+  const first = await f.sessions.scaffold(scope, "independent", "独立业务", () => {})
+  const resource = { path: "arbitrary-business/policy.md", text: "既有声明资源，不丢失\r\n" }
+  const draft = await f.sessions.save(
+    scope,
+    {
+      id: first.id,
+      name: first.name,
+      revision: first.revision,
+      files: [...first.source.files, resource]
+    },
+    () => {},
+    [resource.path]
+  )
+  const origin = {
+    kind: "business-assembly" as const,
+    planId: "12345678-1234-1234-1234-123456789abc",
+    copyId: "23456789-1234-1234-1234-123456789abc",
+    digest: "b".repeat(64)
+  }
+  await f.sessions.requestTrial(
+    scope,
+    draft.id,
+    draft.revision,
+    "核对声明产物",
+    () => {},
+    [],
+    origin
+  )
+  const restored = f.make()
+  expect(restored.read(scope, draft.id).resourcePaths).toEqual([resource.path])
+  expect(restored.trialRequest(scope)?.origin).toEqual(origin)
+  expect(restored.developmentStatus(scope, draft.id)).toBeUndefined()
+  expect(() => restored.acquireDevelopment(scope, draft.id, draft.revision, () => {})).toThrow(
+    "PROJECT_DEV_MISSING"
+  )
+  await expect(
+    restored.requestTrial(scope, draft.id, draft.revision, "invalid", () => {}, [], {
+      ...origin,
+      digest: "unverified"
+    })
+  ).rejects.toThrow("PROJECT_TRIAL_ORIGIN_INVALID")
+  expect(restored.trialRequest(scope)?.origin).toEqual(origin)
+  await restored.requestTrial(scope, draft.id, draft.revision, "重新明确确认", () => {}, [], origin)
+  const lease = restored.acquireDevelopment(scope, draft.id, draft.revision, () => {})
+  try {
+    expect(await readFile(join(lease.snapshot.packagePath, resource.path), "utf8")).toBe(
+      resource.text
+    )
+  } finally {
+    lease.release()
+  }
+})
+
 it("can recover missing materialized directories and rejects concurrent stale source commits", async () => {
   const f = await fixture()
   const draft = await f.sessions.scaffold(scope, "docs", "文档", () => {})

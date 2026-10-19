@@ -1,7 +1,6 @@
 import { registerFlowFilePublicationHandlers } from "./mods-flow-files"
 import { captureThreadIncarnation, matchesThreadIncarnation } from "../services/thread-incarnation"
 import type { IpcMain, IpcMainInvokeEvent } from "electron"
-import { join } from "node:path"
 import { getThreadCore } from "../db"
 import { isOrdinaryFlowMetadata } from "../../shared/mods/flows/scope"
 import { projectActionFlowMetadata } from "../harness-board/project-action-scope"
@@ -16,8 +15,8 @@ import { ClawStore } from "../mods/claw-store"
 import { resolveClawThread } from "../mods/claw-scope"
 import { loadAgentProfilesAsync } from "../agent/agent-registry"
 import { getModelConfigs } from "../models/registry"
-import { openStableFileHandle, readStableFileHandleBounded } from "../services/stable-file-handle"
 import { listClawSkillSources } from "../mods/claw-skills"
+import { discoverAutobizFlowFeatures } from "../mods/adapters/autobiz-flow-catalog"
 
 export function assertOrdinaryFlowMetadata(metadata: Record<string, unknown>): void {
   if (!isOrdinaryFlowMetadata(metadata)) throw Error("DIY 流程当前只支持普通本地项目会话")
@@ -26,37 +25,6 @@ export function assertOrdinaryFlowMetadata(metadata: Record<string, unknown>): v
 function boundedId(value: unknown): string {
   if (typeof value !== "string" || !value || value.length > 200) throw Error("FLOW_ID_INVALID")
   return value
-}
-
-async function featureCatalog(workspace: string): Promise<FlowCatalog["features"]> {
-  let handle: Awaited<ReturnType<typeof openStableFileHandle>>
-  try {
-    handle = await openStableFileHandle(workspace, join(workspace, ".autobizdevops/state.json"))
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") return []
-    throw error
-  }
-  try {
-    const state = JSON.parse(
-      (await readStableFileHandleBounded(handle, 2 * 1024 * 1024)).toString("utf8")
-    )
-    if (!state.features || typeof state.features !== "object" || Array.isArray(state.features))
-      throw Error("AUTOBIZ_FEATURE_RECORD_INVALID")
-    const entries = Object.entries(state.features)
-    if (entries.length > 256) throw Error("AUTOBIZ_FEATURE_LIMIT")
-    return entries.map(([id, item]) => {
-      const checkpoint = (item as { checkpoint?: unknown })?.checkpoint
-      if (
-        !/^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$/.test(id) ||
-        typeof checkpoint !== "string" ||
-        !/^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$/.test(checkpoint)
-      )
-        throw Error("AUTOBIZ_FEATURE_RECORD_INVALID")
-      return { id, checkpoint }
-    })
-  } finally {
-    await handle.handle.close()
-  }
 }
 
 export function registerModsFlowHandlers(
@@ -137,10 +105,10 @@ export function registerModsFlowHandlers(
   ipcMain.handle("mods:flow-catalog", async (event, threadId: string): Promise<FlowCatalog> => {
     const fence = catalogFence(event, threadId)
     const { workspace } = fence
-    const [plugins, profiles, features, skills] = await Promise.all([
+    const [plugins, profiles, legacyDiscovery, skills] = await Promise.all([
       functions.status(workspace),
       loadAgentProfilesAsync(workspace),
-      featureCatalog(workspace),
+      discoverAutobizFlowFeatures(workspace),
       listClawSkillSources()
     ])
     fence.assertCurrent()
@@ -168,7 +136,7 @@ export function registerModsFlowHandlers(
       models: getModelConfigs()
         .filter((model) => model.apiKey)
         .map((model) => ({ id: model.ref, name: model.name })),
-      features,
+      ...legacyDiscovery,
       skills: skills.filter(
         (skill) =>
           fence.selection?.skills?.mode !== "selected" ||

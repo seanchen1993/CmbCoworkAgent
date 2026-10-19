@@ -66,6 +66,10 @@ import { mergeClawCompletionPolicy, parseClawCompletionRules } from "../../../sh
 import type { FunctionAgentInfo } from "../../../shared/mods/v2/agent-list"
 import { ApplicationCompletionPolicies } from "./application-completion-policy"
 import { inspectAutobizRecovery } from "./autobiz-recovery"
+import {
+  AUTOBIZ_COMPLETION_EVIDENCE,
+  autobizFeatureEvidencePaths
+} from "../adapters/autobiz-completion-evidence"
 import type { FunctionSessionTitleUpdate } from "./session-title"
 import type { FunctionSessionReadMethod } from "../../../shared/mods/v2/session"
 import type { FunctionSessionAppendTicket } from "./session-append-ticket"
@@ -5552,6 +5556,11 @@ export class FunctionModsManager {
         ? [{ plugin: name, feature: app.feature, start: app.autobizStartCheckpoint }]
         : []
     })
+    const usesAutobizEvidence = stages.length > 0 || [...entry.snapshots.keys()].some((name) => {
+      const app = this.applicationPolicies.hostValue(workspace, name)
+      return isModObject(app) && app.mode !== "off" && Array.isArray(app.checks) &&
+        app.checks.includes("autobiz-validator")
+    })
     const captureBinding = async (
       operationSignal: AbortSignal
     ): Promise<CompletionEvidenceBinding> => {
@@ -5573,6 +5582,7 @@ export class FunctionModsManager {
         pluginDigests,
         runtimeGeneration: entry.generation,
         config: { saved: configuration(), definitionDigest },
+        ...(usesAutobizEvidence ? { references: AUTOBIZ_COMPLETION_EVIDENCE } : {}),
         signal: scoped,
         excludePaths: this.store.evidenceExcludedPaths,
         assertLive
@@ -5784,7 +5794,7 @@ export class FunctionModsManager {
         if (policy.scope === "file") return policy.target ? [policy.target] : []
         if (policy.scope === "feature")
           return [
-            ...(policy.feature ? [`.autobizdevops/features/${policy.feature}`] : []),
+            ...(policy.feature ? autobizFeatureEvidencePaths(policy.feature) : []),
             ...(policy.target ? [policy.target] : [])
           ]
         if (policy.scope === "project") return ["."]
@@ -5799,6 +5809,8 @@ export class FunctionModsManager {
         runtimeGeneration: entry.generation,
         config,
         paths,
+        ...(policies.some((policy) => policy.checks.includes("autobiz-validator")) || automaticStage
+          ? { references: AUTOBIZ_COMPLETION_EVIDENCE } : {}),
         signal,
         excludePaths: this.store.evidenceExcludedPaths,
         assertLive: () => {

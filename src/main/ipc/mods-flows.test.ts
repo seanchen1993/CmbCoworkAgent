@@ -11,7 +11,10 @@ const state = vi.hoisted(() => ({
   metadata: {} as Record<string, unknown>,
   present: true,
   mcp: vi.fn(async () => []),
-  skills: vi.fn(async () => [])
+  skills: vi.fn(async () => []),
+  featureOpen: vi.fn(),
+  featureRead: vi.fn(),
+  featureClose: vi.fn(async () => undefined)
 }))
 vi.mock("../mods/claw-skills", () => ({ listClawSkillSources: state.skills }))
 vi.mock("../mods/flows/native-mcp", () => ({ listNativeMcpTools: state.mcp }))
@@ -38,10 +41,8 @@ vi.mock("../mods/flows/native-host", () => ({
 vi.mock("../agent/agent-registry", () => ({ loadAgentProfilesAsync: async () => [] }))
 vi.mock("../models/registry", () => ({ getModelConfigs: () => [] }))
 vi.mock("../services/stable-file-handle", () => ({
-  openStableFileHandle: async () => {
-    throw Object.assign(Error("missing"), { code: "ENOENT" })
-  },
-  readStableFileHandleBounded: vi.fn()
+  openStableFileHandle: state.featureOpen,
+  readStableFileHandleBounded: state.featureRead
 }))
 
 beforeEach(() => {
@@ -50,6 +51,9 @@ beforeEach(() => {
   state.present = true
   state.mcp.mockReset().mockResolvedValue([])
   state.skills.mockReset().mockResolvedValue([])
+  state.featureOpen.mockReset().mockRejectedValue(Object.assign(Error("missing"), { code: "ENOENT" }))
+  state.featureRead.mockReset()
+  state.featureClose.mockClear()
 })
 it("requires a trusted exact resume payload and a lowercase SHA256 source digest", async () => {
   const f = fixture()
@@ -339,6 +343,36 @@ it("discovers workspace candidates once without restricting discovery to the cur
   expect(f.functions.effectiveStatus).not.toHaveBeenCalled()
   expect(f.functions.actionCatalog).toHaveBeenCalledExactlyOnceWith("project", "thread", [])
   expect(state.mcp).not.toHaveBeenCalled()
+})
+
+it("keeps ordinary flow discovery available when optional business state is invalid", async () => {
+  const f = fixture()
+  vi.mocked(f.manager.isEnabled).mockReturnValue(true)
+  state.featureOpen.mockResolvedValue({ handle: { close: state.featureClose } })
+  state.featureRead.mockResolvedValue(Buffer.from("PRIVATE_INVALID_STATE"))
+  const catalog = await f.call("catalog", "thread")
+  expect(catalog).toMatchObject({
+    available: true,
+    hostAvailable: true,
+    features: [],
+    diagnostics: [{ code: "OPTIONAL_FLOW_CATALOG_UNAVAILABLE" }]
+  })
+  expect(f.functions.actionCatalog).toHaveBeenCalledExactlyOnceWith("project", "thread", [])
+  expect(state.featureClose).toHaveBeenCalledOnce()
+  expect(JSON.stringify(catalog)).not.toContain("PRIVATE_INVALID_STATE")
+  expect(f.store.grant).not.toHaveBeenCalled()
+})
+
+it("does not hide a changed catalog scope behind optional discovery recovery", async () => {
+  const f = fixture()
+  state.featureOpen.mockResolvedValue({ handle: { close: state.featureClose } })
+  state.featureRead.mockImplementation(async () => {
+    state.metadata.workspacePath = "other"
+    throw Error("optional read failed")
+  })
+  await expect(f.call("catalog", "thread")).rejects.toThrow("FLOW_SCOPE_CHANGED")
+  expect(f.functions.actionCatalog).not.toHaveBeenCalled()
+  expect(f.store.grant).not.toHaveBeenCalled()
 })
 
 it("requires explicit enabled and trusted MCP discovery", async () => {

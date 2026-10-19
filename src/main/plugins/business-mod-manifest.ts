@@ -1,7 +1,8 @@
 import type {
   BusinessModCatalog,
   BusinessModDefinition,
-  BusinessModExtensionDefinition
+  BusinessModExtensionDefinition,
+  BusinessModHostDeclaration
 } from "../../shared/business-mods"
 import { BUSINESS_MOD_MANIFEST } from "../../shared/business-mods"
 import { parseClawActionExports } from "../../shared/mods/claw-actions"
@@ -10,6 +11,8 @@ import type { DerivationFile, DerivationSnapshot } from "./derivation-source"
 import { parsePortableBusinessModUserConfig } from "./business-mod-user-config"
 import { validateToolSchema } from "../mods/v2/tool-schema"
 import type { ModObject } from "../../shared/mods/types"
+import { parseProjectRuntimeManifestV1 } from "../../shared/project-runtime"
+import { assertHostRuntimeSupported } from "../harness-board/project-runtime/host-validators"
 
 const identifier = /^[a-zA-Z0-9][\w.-]{0,79}$/
 const version = /^\d+\.\d+\.\d+(?:-[\w.-]+)?$/
@@ -63,6 +66,46 @@ function kernelIdentity(value: unknown) {
   return { id, version: declaredVersion }
 }
 
+/** Validate through the original executor parser; authoring adds no executable schema. */
+function hostDeclaration(
+  value: unknown,
+  id: string,
+  title: string,
+  skill: string
+): BusinessModHostDeclaration {
+  const raw = businessModObject(value)
+  fields(raw, ["stage", "actions", "artifacts", "checks", "environment"])
+  const stage = businessModObject(raw.stage)
+  fields(stage, ["actionIds", "artifactIds", "checkIds", "approval"])
+  const runtime = parseProjectRuntimeManifestV1({
+    apiVersion: "devclaw.project-runtime/v1",
+    plugin: { id: "business-mod-validation", version: "1.0.0" },
+    mode: "host",
+    stateOwner: "host",
+    stages: [{ ...stage, id, title, skill }],
+    actions: raw.actions,
+    artifacts: raw.artifacts,
+    checks: raw.checks,
+    environment: raw.environment,
+    capabilities: {
+      execution: true,
+      conditionalTransition: false,
+      idempotency: false,
+      reconciliation: false,
+      cancellation: true
+    }
+  })
+  assertHostRuntimeSupported(runtime)
+  const { actionIds, artifactIds, checkIds, approval } = runtime.stages[0]
+  return {
+    stage: { actionIds, artifactIds, checkIds, approval },
+    actions: runtime.actions,
+    artifacts: runtime.artifacts,
+    checks: runtime.checks,
+    environment: runtime.environment
+  }
+}
+
 /** Static, bounded manifest parsing. No author module or Python code is evaluated. */
 export function parseBusinessModCatalog(value: unknown): BusinessModCatalog {
   if (Buffer.byteLength(JSON.stringify(value)) > 256 * 1024) throw Error("业务 Mods 配置过大")
@@ -77,7 +120,21 @@ export function parseBusinessModCatalog(value: unknown): BusinessModCatalog {
   let kernel: BusinessModCatalog["kernel"]
   if (raw.kernel) {
     const data = businessModObject(raw.kernel)
-    fields(data, ["id", "version", "resources", "boardConfigPath", "pluginFields"])
+    fields(data, ["id", "version", "resources", "boardConfigPath", "pluginFields", "runtime"])
+    let runtime: NonNullable<BusinessModCatalog["kernel"]>["runtime"]
+    if (data.runtime !== undefined) {
+      const declaration = businessModObject(data.runtime)
+      fields(declaration, ["adapter"])
+      if (declaration.adapter !== "autobiz-v1" && declaration.adapter !== "host-linear-v1")
+        throw Error("BUSINESS_MOD_ASSEMBLY_ADAPTER_UNSUPPORTED")
+      runtime = { adapter: declaration.adapter }
+    }
+    if (
+      runtime?.adapter === "host-linear-v1"
+        ? data.boardConfigPath !== undefined
+        : data.boardConfigPath === undefined
+    )
+      throw Error("BUSINESS_MOD_KERNEL_RUNTIME_CONFLICT")
     const pluginFields =
       data.pluginFields === undefined ? undefined : businessModObject(data.pluginFields)
     if (pluginFields)
@@ -95,7 +152,12 @@ export function parseBusinessModCatalog(value: unknown): BusinessModCatalog {
     kernel = {
       ...kernelIdentity(data),
       resources: strings(data.resources, businessModPath, 4096),
-      boardConfigPath: businessModPath(data.boardConfigPath),
+      ...(data.boardConfigPath === undefined
+        ? {}
+        : {
+            boardConfigPath: businessModPath(data.boardConfigPath)
+          }),
+      ...(runtime ? { runtime } : {}),
       ...(pluginFields ? { pluginFields: structuredClone(pluginFields) } : {})
     }
   }
@@ -111,6 +173,7 @@ export function parseBusinessModCatalog(value: unknown): BusinessModCatalog {
       "resources",
       "dependencies",
       "checks",
+      "host",
       "insertAfter",
       "userConfig"
     ])
@@ -173,6 +236,11 @@ export function parseBusinessModCatalog(value: unknown): BusinessModCatalog {
         advisory: strings(dependencies.advisory, businessModId, 64)
       },
       checks: { validators, guards },
+      ...(item.host === undefined
+        ? {}
+        : {
+            host: hostDeclaration(item.host, id, text(item.title), entry)
+          }),
       ...(item.userConfig === undefined
         ? {}
         : {

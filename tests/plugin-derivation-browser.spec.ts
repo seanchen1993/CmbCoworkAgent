@@ -16,6 +16,8 @@ interface FixtureWindow extends Window {
   failGenerate: boolean
   deferGenerate: boolean
   finishGenerate(): void
+  projectEntryMode: string
+  refreshPluginEntry(): void
   renderScope(threadId?: string, workspace?: string, active?: boolean): void
 }
 
@@ -33,7 +35,7 @@ async function main() {
       contents: `
     import React from 'react'; import {createRoot} from 'react-dom/client';
     import {PluginDerivationPanel} from './src/renderer/src/components/customize/PluginDerivationPanel';
-    window.calls=[]; let copy=null, text='# Original skill\\nKeep original stage checks.';
+    window.calls=[];window.scopeVersion=0;window.projectEntryMode='legacy';let installedEnabled=false; let copy=null, text='# Original skill\\nKeep original stage checks.';
     const update=(values)=>{copy={...copy,...values}; return {...copy}};
     window.api={pluginDerivation:{sources:async()=>[{pluginId:'original',name:'AutoBiz',description:''}],list:async()=>copy?[copy]:[],
       revise:async(input)=>{window.calls.push(['revise',input]);return update({copyId:'revision-'+window.calls.length,parentCopyId:input.copyId,name:copy.name+'-v2',status:'created',pluginId:undefined})},
@@ -60,9 +62,10 @@ async function main() {
       saveFile:async(input)=>{window.calls.push(['saveFile',input]);if(input.expectedDigest!==copy.digest)throw Error('changed');text=input.text;return update({digest:'two',status:'changed'})},
       saveNotes:async(input)=>update({businessNotes:input.businessNotes,digest:'notes',status:'changed'}),
       check:async()=>update({status:'checked'}),install:async(input)=>{window.calls.push(['install',input]);return update({status:'installed',pluginId:'derived-id'})},
-      openSource:async()=>window.calls.push(['source'])},plugins:{setEnabled:async(...args)=>window.calls.push(['enable',...args])}};
+      openSource:async()=>window.calls.push(['source'])},plugins:{list:async()=>copy?.pluginId?[{id:copy.pluginId,name:copy.name,version:'1.0.0',enabled:installedEnabled,hasProjectMode:window.projectEntryMode==='legacy'}]:[],setEnabled:async(...args)=>{installedEnabled=true;window.calls.push(['enable',...args])}},
+      harnessBoard:{localProjects:{templates:async()=>window.projectEntryMode==='host'&&copy?.pluginId?[{installedPluginId:copy.pluginId,name:'actual-derived-host-package',version:'1.0.0',stages:['draft']}]:[]}}};
     const root=createRoot(document.getElementById('root'));
-    window.renderScope=(threadId='thread',workspace='C:/fixture',active=true)=>root.render(<PluginDerivationPanel threadId={threadId} workspace={workspace} active={active}/>);
+    window.renderScope=(threadId='thread',workspace='C:/fixture',active=true)=>{window.scopeVersion++;root.render(<PluginDerivationPanel threadId={threadId} workspace={workspace} active={active}/>)};
     window.renderScope();
   `
     },
@@ -77,16 +80,21 @@ async function main() {
         name: "host-boundary",
         setup(builder) {
           builder.onResolve(
-            { filter: /^@\/lib\/(store|feature-gates|derived-project-intent)$/ },
+            { filter: /^(?:@\/lib\/(store|configuration-target|feature-gates|derived-project-intent)|sonner)$/ },
             (args) => ({ path: args.path, namespace: "fixture" })
           )
           builder.onLoad({ filter: /.*/, namespace: "fixture" }, (args) => ({
             loader: "js",
-            contents: args.path.endsWith("store")
-              ? "export const useAppStore={getState:()=>({bumpPluginVersion(){}})}"
+            resolveDir: process.cwd(),
+            contents: args.path === "sonner"
+              ? "export const toast={info:(text)=>window.calls.push(['notice',text])}"
+              : args.path.endsWith("store")
+              ? "import{useSyncExternalStore}from'react';const listeners=new Set();const state={pluginVersion:0,bumpPluginVersion(){state.pluginVersion++;for(const cb of listeners)cb()},setShowCustomizeView(value){window.calls.push(['customize',value])},setShowHarnessBoardView(value){window.calls.push(['host-projects',value])}};window.refreshPluginEntry=()=>state.bumpPluginVersion();export function useAppStore(selector){return useSyncExternalStore(cb=>{listeners.add(cb);return()=>listeners.delete(cb)},()=>selector(state))};useAppStore.getState=()=>state;"
+              : args.path.endsWith("configuration-target")
+                ? "export const useConfigurationDraft=()=>{};export const captureConfigurationScope=()=>{const version=window.scopeVersion;return()=>version===window.scopeVersion}"
               : args.path.endsWith("feature-gates")
                 ? "export const useFeatureGate=()=>({enabled:true,loading:false})"
-                : "export const openDerivedProject=(...args)=>window.calls.push(['project',...args])"
+                : "export const openDerivedProject=(...args)=>window.calls.push(['project',...args]);export const useDerivedProjectIntent=()=>null;export const dismissDerivedProject=(id)=>window.calls.push(['dismiss-project',id])"
           }))
         }
       }
@@ -101,7 +109,7 @@ async function main() {
     }
   })
   const candidates = new Scanner({}).scanFiles(
-    ["PluginDerivationPanel", "DerivedPluginEditor", "DerivedPluginProposal"].map((name) => ({
+    ["PluginDerivationPanel", "DerivedPluginEditor", "DerivedPluginProposal", "InstalledPluginProjectEntry"].map((name) => ({
       content: readFileSync(resolve(`src/renderer/src/components/customize/${name}.tsx`), "utf8"),
       extension: "tsx"
     }))
@@ -262,9 +270,11 @@ async function main() {
       await page.getByRole("button", { name: "添加自选步骤选项", exact: true }).count(),
       0
     )
-    assert(await page.getByRole("button", { name: "新建项目", exact: true }).isDisabled())
+    await page.getByText("先启用这个插件，再打开项目入口。", { exact: true }).waitFor()
+    assert.equal(await page.getByRole("button", { name: "新建项目", exact: true }).count(), 0)
     await page.getByRole("button", { name: "启用新插件", exact: true }).click()
     await page.getByRole("button", { name: "新建项目", exact: true }).click()
+    await page.waitForFunction(() => (window as unknown as FixtureWindow).calls.some(([name]) => name === "project"))
     const calls = await page.evaluate(() => (window as unknown as FixtureWindow).calls)
     assert.equal(calls.filter((call) => call[0] === "create").length, 1)
     assert.deepEqual(
@@ -290,6 +300,29 @@ async function main() {
         path: resolve(output, "created-installed-next-project.png"),
         fullPage: true
       })
+    // The installed runtime, rather than the copy's original mode or display name, owns navigation.
+    await page.evaluate(() => {
+      const fixture = window as unknown as FixtureWindow
+      fixture.projectEntryMode = "host"
+      fixture.refreshPluginEntry()
+    })
+    await page.getByRole("button", { name: "打开本地项目任务", exact: true }).waitFor()
+    await page.getByText("进入后点击“新建本地任务”，选择“actual-derived-host-package”。", { exact: true }).waitFor()
+    assert.equal(await page.getByRole("button", { name: "新建项目", exact: true }).count(), 0)
+    await page.getByRole("button", { name: "打开本地项目任务", exact: true }).click()
+    await page.waitForFunction(() => (window as unknown as FixtureWindow).calls.some(([name]) => name === "host-projects"))
+    const routed = await page.evaluate(() => (window as unknown as FixtureWindow).calls)
+    assert.equal(routed.filter(([name]) => name === "project").length, 1)
+    assert.deepEqual(routed.filter(([name]) => name === "customize"), [["customize", false]])
+    assert.deepEqual(routed.filter(([name]) => name === "host-projects"), [["host-projects", true]])
+    assert(routed.some(([name, text]) => name === "notice" && String(text).includes("actual-derived-host-package")))
+    if (!skipArtifacts)
+      await page.screenshot({ path: resolve(output, "installed-host-project-entry.png"), fullPage: true })
+    await page.evaluate(() => {
+      const fixture = window as unknown as FixtureWindow
+      fixture.projectEntryMode = "legacy"
+      fixture.refreshPluginEntry()
+    })
     await page.getByRole("button", { name: "修改这个插件（创建新版本草稿）", exact: true }).click()
     await page.getByLabel("告诉我你想怎么改").waitFor()
     await page.getByText("my-data-autobiz-v2 已创建", { exact: true }).waitFor()

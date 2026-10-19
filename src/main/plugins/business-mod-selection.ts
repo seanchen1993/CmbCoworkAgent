@@ -1,7 +1,10 @@
 import { BUSINESS_MOD_ASSEMBLY, BUSINESS_MOD_MANIFEST } from "../../shared/business-mods"
 import type { BusinessModCatalog } from "../../shared/business-mods"
-import { isReviewedAutobizBusinessAssembly } from "./autobiz-business-assembly-protocol"
 import { businessModObject, parseBusinessModCatalog } from "./business-mod-manifest"
+import { describeBusinessModAssemblyRuntime } from "./business-mod-assembly-adapter"
+import { readAutobizSelectableCatalog } from "./business-adapters/autobiz-selection"
+import { parseProjectRuntimeManifest } from "../../shared/project-runtime"
+import { assertHostRuntimeSupported } from "../harness-board/project-runtime/host-validators"
 
 /** Main-only policy from an admitted package, never a renderer's workflow snapshot. */
 export interface BusinessModSelectionPolicy {
@@ -87,29 +90,31 @@ export function assertClosedBusinessModSelection(
     throw Error("业务步骤尚未补齐必需依赖，请重新检查步骤后创建。")
 }
 
-/** Both old and new packages are checked against the same exact reviewed kernel inventory. */
+/** Host routes stay in the Host state owner; legacy subsets retain their reviewed adapter. */
 export function readBusinessModSelectionPolicy(snapshot: {
   files: readonly { path: string; bytes: Buffer }[]
 }): BusinessModSelectionPolicy | undefined {
   if (!snapshot.files.some((file) => file.path === BUSINESS_MOD_ASSEMBLY)) return undefined
-  if (!isReviewedAutobizBusinessAssembly(snapshot))
-    throw Error("业务组装插件校验未通过，请重新检查来源。")
-  const board = snapshot.files.find((file) => file.path === "board_core/board_config.json")!
-  const workflow = businessModObject(
-    businessModObject(JSON.parse(board.bytes.toString("utf8"))).workflow
-  )
-  if (!businessModObject(workflow.templates).custom) return undefined
-  const manifest = snapshot.files.find((file) => file.path === BUSINESS_MOD_MANIFEST)!
+  const manifest = snapshot.files.find((file) => file.path === BUSINESS_MOD_MANIFEST)
+  if (!manifest) throw Error("业务组装插件校验未通过，请重新检查来源。")
   const catalog = parseBusinessModCatalog(JSON.parse(manifest.bytes.toString("utf8")))
-  const baseIds = new Set(
-    (Array.isArray(workflow.nodes) ? workflow.nodes : []).map((node) =>
-      String(businessModObject(node).id)
+  if (catalog.kernel && describeBusinessModAssemblyRuntime(catalog.kernel).mode === "host") {
+    const file = snapshot.files.find((file) => file.path === "devclaw.project-runtime.json")
+    if (!file) throw Error("BUSINESS_MOD_HOST_RUNTIME_REQUIRED")
+    const runtime = parseProjectRuntimeManifest(JSON.parse(file.bytes.toString("utf8")))
+    assertHostRuntimeSupported(runtime)
+    if (
+      runtime.stages.length !== catalog.modules.length ||
+      runtime.stages.some(
+        (stage, index) =>
+          stage.id !== catalog.modules[index].id ||
+          stage.skill !== catalog.modules[index].skill.entry
+      )
     )
-  )
-  // Optional dynamic stages are absent from a custom template in the original compiler.
-  // They cannot become required producers (or selectable main-chain steps) in its policy.
-  return businessModSelectionPolicy({
-    ...catalog,
-    modules: catalog.modules.filter((mod) => baseIds.has(String(mod.node.id)))
-  })
+      throw Error("BUSINESS_MOD_HOST_RUNTIME_CONFLICT")
+    // Subset selection happens before assembly; legacy custom checkpoints must not be created.
+    return undefined
+  }
+  const selectable = readAutobizSelectableCatalog(snapshot)
+  return selectable ? businessModSelectionPolicy(selectable) : undefined
 }

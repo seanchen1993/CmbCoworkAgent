@@ -10,6 +10,10 @@ import { basename, isAbsolute, join, relative, resolve } from "node:path"
 import { serialize } from "node:v8"
 import { EXTENSION_BOARD_API_VERSION } from "../../shared/project-runtime"
 import { readPackageExtensionContract } from "../plugins/extension-contract"
+import {
+  hasAutobizBoardContext,
+  isAutobizLegacyProjectRoot
+} from "../plugins/business-adapters/autobiz-package-admission"
 import { isSameWorkspacePath } from "../../shared/workspace-path"
 import type { HarnessKnowledgePreviewResult } from "../../shared/harness-board-types"
 import type { PluginMetadata } from "../types"
@@ -304,7 +308,8 @@ export function readHarnessKnowledgePreview(
   const plugin = readPlugins(source.pluginStorePath).find(
     (candidate) => adapterMatches(candidate, normalizedAdapterId)
   )
-  if (!plugin) throw new Error("插件未安装或不支持项目模式")
+  if (!plugin || (!isAutobizLegacyProjectRoot(plugin.path) && !hasAutobizBoardContext(plugin.path)))
+    throw new Error("插件未安装或不支持项目模式")
 
   throwIfCancelled(cancelFlag)
   const config = readBoardConfig(plugin.path)
