@@ -273,12 +273,14 @@
   "spawn_descendants": false,
   "complex_effort": "xhigh",
   "simple_effort": "high",
-  "active": false,
-  "status": "ready_for_design_checkpoint",
+  "active": true,
+  "status": "M05_01_interface_review_in_progress",
   "candidate_commit": null,
   "agent": "/root/service_conversation_sol",
   "worktree": "/Users/heyirui/.codex/worktrees/beta-merge-review/agent-channel-integration-research-7ff0d6",
-  "branch": "codex/beta-local-unification-m05"
+  "branch": "codex/beta-local-unification-m05",
+  "preserved_wip_commit": "9e83c3048",
+  "worktree_checkpoint": "8545a4ea"
 },
   "scheduler": {
     "kind": "heartbeat",
